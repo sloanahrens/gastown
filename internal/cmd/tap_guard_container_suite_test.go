@@ -623,6 +623,53 @@ func TestShellFedScriptBehindARedirectionWordIsJudged(t *testing.T) {
 	}
 }
 
+// A redirection shape the walk does not name is read for what it does to the
+// shell's stdin instead of passing as a script operand, which stopped the walk
+// and judged nothing: a here-string on fd 0 is the script, one on another fd
+// feeds that fd, and a process substitution is the script the shell runs
+// (gt-hizij).
+func TestShellFedScriptBehindOtherRedirectionShapesIsJudged(t *testing.T) {
+	t.Parallel()
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"fd-qualified here-string into bash", `bash 0<<< "make test"`, true},
+		{"fd-qualified here-string glued to its text", `bash 0<<<'make test'`, true},
+		{"fd-qualified here-string after another redirection", `bash 2>&1 0<<<'make test'`, true},
+		{"harmless fd-qualified here-string", `bash 0<<<'make lint'`, false},
+		{"here-string on fd 3 leaves the pipe as the script", `echo 'make test' | bash 3<<<'echo hi'`, true},
+		{"here-string on fd 3 is not the script", `echo 'make lint' | bash 3<<<'make test'`, false},
+		{"here-string on a named fd is not the script", `bash {fd}<<<'make test'`, false},
+		{"heredoc on fd 3 leaves the pipe as the script", "echo 'make test' | bash 3<<EOF\ntrue\nEOF", true},
+		{"heredoc on stdin replaces the pipe", "echo 'make test' | bash <<EOF\ntrue\nEOF", false},
+		{"heredoc on fd 0 replaces the pipe", "echo 'make test' | bash 0<<EOF\ntrue\nEOF", false},
+
+		{"process substitution as the script file", `bash <(echo 'make test')`, true},
+		{"process substitution as the script file, printf", `bash <(printf 'make test')`, true},
+		{"process substitution on stdin", `bash < <(echo 'make test')`, true},
+		{"process substitution on fd 0", `bash 0< <(echo 'make test')`, true},
+		{"process substitution after a redirection word", `bash 2>&1 <(echo 'make test')`, true},
+		{"process substitution that never closes", `bash <(echo 'make test'`, true},
+		{"harmless process substitution", `bash <(echo 'make lint')`, false},
+		{"process substitution of a file the guards cannot read", `bash <(cat ./run.sh)`, false},
+		{"process substitution replaces the pipe", `echo 'make test' | bash <(echo true)`, false},
+		{"process substitution on stdin replaces the pipe", `echo 'make test' | bash < <(echo true)`, false},
+		{"process substitution is an argument of a script file", `bash ./run.sh <(echo 'make test')`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc := fakeGuardProcess(nil, goRoot)
+			reason, matched := evaluateContainerSuiteCommand(proc, tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
 // The whole-suite goals other than test and build read the same run directory:
 // a bare -i before the -C must not hide it (gt-i6jw6).
 func TestMakeBareIgnoreErrorsFlagKeepsTheDirectory(t *testing.T) {

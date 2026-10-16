@@ -261,54 +261,111 @@ func segmentPayloads(tokens []string, start int, segment []string) []string {
 // upstream echo, printf or yes. Every producer counts whatever filters sit
 // between it and the shell, since a filter can rewrite the text and reading it
 // as the script is the stricter reading (gt-1daus).
+//
+// A process substitution word on the shell ("sh <(echo 'make gate')", "sh <
+// <(echo 'make gate')") is the script itself, whether the shell opens it as its
+// script file or reads it on stdin, so it is read like a pipe producer and the
+// pipe upstream, which the shell never reads, is not (gt-hizij).
 func stdinShellPayloads(tokens []string, start int, segment []string) []string {
 	word, args := segmentCommandWord(trimShellKeywords(segment))
 	if !shellInvokers[filepath.Base(strings.ToLower(word))] {
 		return nil
 	}
 	args, payloads := splitHereStrings(args)
+	args, scripts := splitProcessSubstitutions(args)
 	if !shellReadsStdin(toLowerTokens(args)) {
 		return nil
+	}
+	for _, script := range scripts {
+		payloads = append(payloads, producerPayloads(script)...)
+	}
+	if len(scripts) > 0 {
+		return payloads
 	}
 	for end := start - 1; end > 0 && tokens[end] == "|"; {
 		begin := end
 		for begin > 0 && !shellCommandSeparators[tokens[begin-1]] {
 			begin--
 		}
-		producer, printed := segmentCommandWord(trimShellKeywords(tokens[begin:end]))
-		printed, fed := splitHereStrings(printed)
-		payloads = append(payloads, fed...)
-		switch filepath.Base(strings.ToLower(producer)) {
-		case "echo", "printf", "yes":
-			for len(printed) > 0 && strings.HasPrefix(printed[0], "-") && len(printed[0]) > 1 {
-				printed = printed[1:]
-			}
-			text := strings.ReplaceAll(strings.Join(printed, " "), `\n`, "\n")
-			payloads = append(payloads, text)
-			for _, arg := range printed {
-				payloads = append(payloads, strings.ReplaceAll(arg, `\n`, "\n"))
-			}
-		}
+		payloads = append(payloads, producerPayloads(tokens[begin:end])...)
 		end = begin - 1
 	}
 	return payloads
 }
 
+// producerPayloads returns the script text a producer command line prints, and
+// the text of any here-string it is fed: what a shell reading its output runs.
+// Only echo, printf and yes print text nothing here can read past; any other
+// producer (a file, a download) yields none.
+func producerPayloads(segment []string) []string {
+	producer, printed := segmentCommandWord(trimShellKeywords(segment))
+	printed, payloads := splitHereStrings(printed)
+	switch filepath.Base(strings.ToLower(producer)) {
+	case "echo", "printf", "yes":
+		for len(printed) > 0 && strings.HasPrefix(printed[0], "-") && len(printed[0]) > 1 {
+			printed = printed[1:]
+		}
+		text := strings.ReplaceAll(strings.Join(printed, " "), `\n`, "\n")
+		payloads = append(payloads, text)
+		for _, arg := range printed {
+			payloads = append(payloads, strings.ReplaceAll(arg, `\n`, "\n"))
+		}
+	}
+	return payloads
+}
+
 // splitHereStrings returns args without their "<<<" here-string redirections,
-// and the text each one feeds its command.
+// and the text each one feeds its command's stdin. A here-string on another
+// descriptor ("3<<<text", "{fd}<<<text") feeds that descriptor, not the
+// script, so it is dropped without its text (gt-hizij).
 func splitHereStrings(args []string) (rest, texts []string) {
 	for i := 0; i < len(args); i++ {
-		switch {
-		case args[i] == "<<<" && i+1 < len(args):
-			texts = append(texts, args[i+1])
-			i++
-		case strings.HasPrefix(args[i], "<<<") && len(args[i]) > len("<<<"):
-			texts = append(texts, strings.TrimPrefix(args[i], "<<<"))
-		default:
+		fd, tail, ok := redirectionFD(args[i])
+		if !ok || !strings.HasPrefix(tail, "<<<") {
 			rest = append(rest, args[i])
+			continue
+		}
+		text := strings.TrimPrefix(tail, "<<<")
+		if text == "" && i+1 < len(args) {
+			text = args[i+1]
+			i++
+		}
+		if fd == "" || fd == "0" {
+			texts = append(texts, text)
 		}
 	}
 	return rest, texts
+}
+
+// splitProcessSubstitutions returns args without their "<(...)" words, and the
+// words inside each one. A bare "<" or "0<" ahead of one is dropped with it:
+// "sh < <(cmd)" reads the substitution on stdin. The substitution closes at the
+// first word ending in ")"; one that never closes runs to the last word, so a
+// line the shell would reject is still judged (gt-hizij).
+func splitProcessSubstitutions(args []string) (rest []string, bodies [][]string) {
+	for i := 0; i < len(args); i++ {
+		if !strings.HasPrefix(args[i], "<(") {
+			rest = append(rest, args[i])
+			continue
+		}
+		if n := len(rest); n > 0 && (rest[n-1] == "<" || rest[n-1] == "0<") {
+			rest = rest[:n-1]
+		}
+		var body []string
+		for ; i < len(args); i++ {
+			word := strings.TrimPrefix(args[i], "<(")
+			closed := strings.HasSuffix(word, ")")
+			word = strings.TrimSuffix(word, ")")
+			if word != "" {
+				body = append(body, word)
+			}
+			if closed {
+				break
+			}
+		}
+		bodies = append(bodies, body)
+	}
+	return rest, bodies
 }
 
 // shellReadsStdin reports whether a shell invoked with args (lowercased, the
@@ -352,19 +409,26 @@ func shellReadsStdin(args []string) bool {
 // shell reading its script from stdin, so shellReadsStdin walks past it; one
 // that replaces stdin ("< run.sh", "<&3", "0<in") feeds the shell a file the
 // guards cannot read, so the producer upstream is not its script. A heredoc
-// ("<<EOF") is judged where its body is scanned, not here (gt-sveq8).
+// ("<<EOF") replaces stdin the same way and is judged where its body is
+// scanned, not here (gt-sveq8); a heredoc or here-string on another descriptor
+// ("3<<EOF", "3<<<text") leaves stdin alone (gt-hizij). A word no shape here
+// matches is an operand.
 func shellRedirection(word string) (redirected bool, skip int, replacesStdin bool) {
-	rest := word
-	fd := ""
-	if strings.HasPrefix(rest, "{") {
-		end := strings.IndexByte(rest, '}')
-		if end < 2 {
-			return false, 0, false
+	fd, rest, ok := redirectionFD(word)
+	if !ok {
+		return false, 0, false
+	}
+	if strings.HasPrefix(rest, "<<") {
+		op := "<<"
+		for _, candidate := range []string{"<<<", "<<-"} {
+			if strings.HasPrefix(rest, candidate) {
+				op = candidate
+			}
 		}
-		fd, rest = "{}", rest[end+1:]
-	} else {
-		digits := len(rest) - len(strings.TrimLeft(rest, "0123456789"))
-		fd, rest = rest[:digits], rest[digits:]
+		if rest[len(op):] == "" {
+			skip = 1
+		}
+		return true, skip, fd == "" || fd == "0"
 	}
 	var op string
 	for _, candidate := range []string{"&>>", "&>", ">>", ">&", ">|", ">", "<>", "<&", "<"} {
@@ -373,7 +437,7 @@ func shellRedirection(word string) (redirected bool, skip int, replacesStdin boo
 			break
 		}
 	}
-	if op == "" || (fd != "" && strings.HasPrefix(op, "&")) || strings.HasPrefix(rest, "<<") {
+	if op == "" || (fd != "" && strings.HasPrefix(op, "&")) {
 		return false, 0, false
 	}
 	if rest[len(op):] == "" {
@@ -381,6 +445,22 @@ func shellRedirection(word string) (redirected bool, skip int, replacesStdin boo
 	}
 	replacesStdin = (fd == "" || fd == "0") && strings.HasPrefix(op, "<")
 	return true, skip, replacesStdin
+}
+
+// redirectionFD splits the file descriptor a redirection word names off its
+// front: digits ("2>&1"), a variable in braces ("{fd}>log") or nothing. ok is
+// false for a "{" that closes nowhere or holds no name, which is no
+// descriptor.
+func redirectionFD(word string) (fd, rest string, ok bool) {
+	if strings.HasPrefix(word, "{") {
+		end := strings.IndexByte(word, '}')
+		if end < 2 {
+			return "", word, false
+		}
+		return "{}", word[end+1:], true
+	}
+	digits := len(word) - len(strings.TrimLeft(word, "0123456789"))
+	return word[:digits], word[digits:], true
 }
 
 // nestedScript is a command line a shell runs inside the command being judged,
