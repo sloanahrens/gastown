@@ -25,9 +25,6 @@ func TestTheStripDrawsEachFactOnce(t *testing.T) {
 		`const rr = readOf(s, "ready");`,
 		`fact(box, q == null ? "–" : String(q), "waiting to land",`,
 		`oldest == null ? null : "oldest " + fmtDur(oldest)`,
-		// What needs the operator, off the two panes that own those rows.
-		`const esc = paneCount(s.escalations), ask = paneCount(s.questions);`,
-		`fact(box, String(esc + ask), "needs you",`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderStrip has no %q", want)
@@ -244,29 +241,18 @@ func TestTheStripColoursItsAlarmsFromDefinedClasses(t *testing.T) {
 	}
 }
 
-// A reading nobody has made is never drawn as a zero: the landings, the queue
-// and the two panes behind "needs you" each say they could not be read, and a
-// failed queue read is never a drained one. The count a failed read left behind
-// is still drawn — the tile showed it — with the alarm naming the read
-// (gt-ywlei, gt-q6h8e).
+// A reading nobody has made is never drawn as a zero: the landings and the
+// queue each say they could not be read, and a failed queue read is never a
+// drained one (gt-ywlei, gt-q6h8e). What the strip draws behind "needs you" is
+// the merged list's own reads, which
+// attention_page_test.go runs the page over (gt-bi6w0).
 func TestTheStripNeverDrawsAReadingNobodyMade(t *testing.T) {
 	t.Parallel()
 
-	count := pageFunc(t, "paneCount")
-	for _, want := range []string{"if (!pane) return null;", `if (pane.unavailable) return "unavailable";`, "(pane.rows || []).length + (pane.more || 0)"} {
-		if !strings.Contains(count, want) {
-			t.Errorf("paneCount has no %q", want)
-		}
-	}
 	strip := pageFunc(t, "renderStrip")
 	for _, want := range []string{
 		`const landed = ((t && t.hours) || []).reduce((n, h) => n + h.landed, 0);`,
 		`if (q == null && why) fact(box, "unavailable", "waiting to land"`,
-		`if (failed.length) fact(box, "unavailable", "needs you"`,
-		`failed.join(" and ") + " could not be read"`,
-		// A reading that has not come back is not a failed one: it reads as no
-		// value yet, in the strip's own dim.
-		`else if (pending.length) fact(box, "–", "needs you", {cls: a.needs_you || "",`,
 		`"the read that lists them has not come back"`,
 	} {
 		if !strings.Contains(strip, want) {

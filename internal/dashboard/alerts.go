@@ -19,9 +19,9 @@ const (
 	LevelCrit = "crit"
 )
 
-// Alert is one thing the operator should look at. The page shows it only when
-// the operator has switched alerts on, but State.Alerts keeps the recent ones
-// for display either way.
+// Alert is one thing the operator should look at. The page shows it as a toast
+// and a browser notification while the operator has alerts switched on, and
+// State.Alerts keeps the recent ones.
 type Alert struct {
 	ID    string    `json:"id"`
 	At    time.Time `json:"at"`
@@ -29,6 +29,11 @@ type Alert struct {
 	Key   string    `json:"key"`
 	Title string    `json:"title"`
 	Text  string    `json:"text"`
+	// Rule is the attention rule an alert raised from the attention queue
+	// carries, which is what the Attention panel tags and orders the row by. The
+	// Alerter's own rules leave it empty: they are the page's toasts, and the
+	// conditions behind them are either a queue item already or a feed line.
+	Rule string `json:"rule,omitempty"`
 }
 
 const (
@@ -496,7 +501,7 @@ func (a *Alerter) ObserveAttention(evs []attention.Event, acks attention.Acks) (
 				title = string(e.Class)
 			}
 			a.seq++
-			al := Alert{ID: fmt.Sprintf("alert-%d", a.seq), At: e.TS, Level: attentionLevel(e.Severity), Key: e.Key, Title: title, Text: e.Text}
+			al := Alert{ID: fmt.Sprintf("alert-%d", a.seq), At: e.TS, Level: attentionLevel(e.Severity), Key: e.Key, Title: title, Text: e.Text, Rule: e.Rule}
 			if al.At.IsZero() {
 				al.At = now
 			}
@@ -519,6 +524,23 @@ func (a *Alerter) ObserveAttention(evs []attention.Event, acks attention.Acks) (
 		}
 	}
 	return raised, removed
+}
+
+// Standing returns the attention items that stand now, sorted by key, for the
+// Attention panel: a wake line the queue has not cleared and nobody has acked
+// is a condition that still holds, whatever the recent-alerts list has since
+// pushed to the top (gt-bi6w0).
+func (a *Alerter) Standing() []Alert {
+	keys := make([]string, 0, len(a.standing))
+	for k := range a.standing {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]Alert, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, a.standing[k].alert)
+	}
+	return out
 }
 
 // AttentionFollower reads the attention queue's events.jsonl for the hub. The

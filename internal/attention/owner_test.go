@@ -2,13 +2,27 @@ package attention
 
 import "testing"
 
-// The owner table is the one place that decides whether an item is the human's
-// or an agent's, so every rule has to be accounted for: a new rule that falls
-// through to the default is the human quietly never being told about it
-// (gt-71714).
+// The owner table is one row per rule: a reader that draws the human and the
+// overseer the same list filters it by this, so a rule with no row is a row
+// nobody owns, and a rule the table holds but the flags table does not is a row
+// that can never be reached (gt-71714).
 func TestEveryRuleHasAnOwner(t *testing.T) {
 	t.Parallel()
-	// The human's rules: a decision or an action only the person can take.
+
+	for _, rule := range Rules() {
+		if _, ok := ruleOwners[rule]; !ok {
+			t.Errorf("the owner table has no row for %q, so nothing owns it", rule)
+		}
+	}
+	for rule := range ruleOwners {
+		if !contains(Rules(), rule) {
+			t.Errorf("the owner table names rule %q, which no longer exists", rule)
+		}
+	}
+
+	// The human's rules: a decision or an action only the person can take. Every
+	// other row is the overseer's, which the loop below pins so a rule moving
+	// between the two is a test failure rather than a quiet retag.
 	sloan := map[string]bool{
 		RuleQuestionNew:    true,
 		RuleQuestionStale:  true,
@@ -29,23 +43,32 @@ func TestEveryRuleHasAnOwner(t *testing.T) {
 			t.Errorf("RuleOwner(%q) = %q, want %q", rule, got, want)
 		}
 	}
-	for rule := range sloan {
-		if !contains(Rules(), rule) {
-			t.Errorf("the owner table names rule %q, which no longer exists", rule)
-		}
-	}
 }
 
-// The rows the table cannot decide are the overseer's: an escalation.open row
-// carries nothing about who raised the escalation, and EscalationOwner is what
-// reads that off the escalation itself, so the family row must not claim the
-// human. An unknown rule reads the same way, as a line written before the table
-// existed (gt-71714).
-func TestRuleOwnerFallsBackToTheOverseer(t *testing.T) {
+// A rule the table has no row for — one a newer daemon wrote — reads by its
+// family: a host reading and an escalation belong to the human, and everything
+// else to the overseer, as a line written before the table existed reads. The
+// rows the table cannot decide stay the overseer's own: an escalation.open row
+// carries nothing about who raised the escalation, and EscalationOwner reads
+// that off the escalation itself, so the family's own row must not claim the
+// human and the families below must not overrule it (gt-71714, gt-bi6w0).
+func TestRuleOwnerReadsAnUnknownRuleByItsFamily(t *testing.T) {
 	t.Parallel()
-	for _, rule := range []string{RuleEscalation, "something.new", ""} {
-		if got := RuleOwner(rule); got != OwnerOverseer {
-			t.Errorf("RuleOwner(%q) = %q, want the overseer default", rule, got)
+
+	for _, tc := range []struct {
+		rule string
+		want Owner
+	}{
+		{RuleEscalation, OwnerOverseer}, // the family's row, corrected per escalation
+		{"escalation.unhandled_hours", OwnerSloan},
+		{"host.disk_full", OwnerSloan},
+		{"landing.new_rule", OwnerOverseer}, // landing.* is the town's own
+		{"question.expired", OwnerOverseer}, // a question's owner is its state, which only a row states
+		{"something.new", OwnerOverseer},
+		{"", OwnerOverseer},
+	} {
+		if got := RuleOwner(tc.rule); got != tc.want {
+			t.Errorf("RuleOwner(%q) = %q, want %q", tc.rule, got, tc.want)
 		}
 	}
 }

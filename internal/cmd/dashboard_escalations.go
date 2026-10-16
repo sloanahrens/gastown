@@ -9,14 +9,14 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
-// The Escalations panel: the town's open escalation beads, the same set the
-// escalations tile counts (beads.ListEscalationsAcrossRigs). An alert is
-// something the dashboard noticed from its own snapshots; an escalation is a
-// bead somebody raised, with a severity and a raiser, that stays open until it
-// is closed — so the pane lists them instead of only counting them.
+// The escalation rows of the dashboard's Attention panel: the town's open
+// escalation beads (beads.ListEscalationsAcrossRigs). An alert is something the
+// dashboard noticed from its own snapshots; an escalation is a bead somebody
+// raised, with a severity and a raiser, that stays open until it is closed — so
+// the panel lists them instead of only counting them.
 
-// escalationRows is how many escalations the pane lists, newest first. The rest
-// are counted in More rather than dropped silently.
+// escalationRows is how many escalation rows the panel lists, newest first. The
+// rest are counted in More rather than dropped silently.
 const escalationRows = 6
 
 // dashEscalationReader reads the town's open escalations. list is injectable so
@@ -31,8 +31,8 @@ func newDashEscalationReader(townRoot string) *dashEscalationReader {
 	}}
 }
 
-// read is the pane's whole reading. A read that fails says so; a town with none
-// open is an empty list, which is a different thing.
+// read is the panel's whole escalation reading. A read that fails says so; a
+// town with none open is an empty list, which is a different thing.
 func (r *dashEscalationReader) read(now time.Time) *dashboard.Escalations {
 	issues, err := r.list()
 	if err != nil {
@@ -51,7 +51,7 @@ func (r *dashEscalationReader) read(now time.Time) *dashboard.Escalations {
 	return out
 }
 
-// dashEscalationRow is one escalation bead as a pane row. Its severity and
+// dashEscalationRow is one escalation bead as a panel row. Its severity and
 // raiser are the escalation's own description fields, which is where gt
 // escalate writes them.
 func dashEscalationRow(now time.Time, issue *beads.Issue) dashboard.EscalationRow {

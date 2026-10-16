@@ -110,32 +110,37 @@ func TestStripAlarmsTurnWithTheReadingsTheStripHolds(t *testing.T) {
 			state: State{Now: now, Polecats: polecats(StateQueued, StateSpawning, StateGating, StateIdle)},
 		},
 		{
-			name:  "escalations nobody could read are red",
-			state: State{Now: now, Escalations: &Escalations{Unavailable: true}, Questions: &Questions{}},
+			name:  "a list nobody could read is red",
+			state: State{Now: now, Attention: &Attention{Failed: []string{"escalations"}}},
 			want:  StripAlarms{NeedsYou: alarmBad},
 		},
 		{
-			name:  "questions nobody could read are red",
-			state: State{Now: now, Escalations: &Escalations{}, Questions: &Questions{Unavailable: true}},
+			name:  "a decision waiting on the human is red",
+			state: State{Now: now, Attention: &Attention{Rows: []AttentionRow{{Owner: "sloan"}}, Mine: 1}},
 			want:  StripAlarms{NeedsYou: alarmBad},
 		},
 		{
-			name:  "a decision waiting on the operator is red",
-			state: State{Now: now, Escalations: &Escalations{Rows: []EscalationRow{{}}, More: 2}, Questions: &Questions{}},
-			want:  StripAlarms{NeedsYou: alarmBad},
+			name:  "rows only the overseer has to move are not the human's alarm",
+			state: State{Now: now, Attention: &Attention{Rows: []AttentionRow{{Owner: "overseer"}}}},
 		},
 		{
-			name:  "a question waiting on the operator is red on its own",
-			state: State{Now: now, Escalations: &Escalations{}, Questions: &Questions{More: 1}},
-			want:  StripAlarms{NeedsYou: alarmBad},
+			name: "a cap with no human row read is a count nobody made",
+			state: State{Now: now, Attention: &Attention{
+				Rows: []AttentionRow{{Owner: "overseer"}}, More: 3,
+			}},
+			want: StripAlarms{NeedsYou: alarmWarn},
 		},
 		{
-			name:  "a town with nothing waiting on the operator is nothing to act on",
+			name:  "a list with nothing waiting is nothing to act on",
+			state: State{Now: now, Attention: &Attention{}},
+		},
+		{
+			name:  "a reader that has not reported yet is not an alarm",
+			state: State{Now: now, Attention: &Attention{Pending: []string{"questions"}}},
+		},
+		{
+			name:  "a list that has not been built yet is not an alarm",
 			state: State{Now: now, Escalations: &Escalations{}, Questions: &Questions{}},
-		},
-		{
-			name:  "a pane that has not reported yet is not an alarm",
-			state: State{Now: now, Escalations: &Escalations{}, Questions: nil},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

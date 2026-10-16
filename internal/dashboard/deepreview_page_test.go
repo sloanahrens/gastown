@@ -47,10 +47,11 @@ func TestDeepReviewPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 	if !strings.Contains(string(indexHTML), `<section><h2>Deep review <span class="r" id="deepreviewnote"></span></h2><div class="body" id="deepreview"></div></section>`) {
 		t.Error("the Deep review section is not the markup its neighbours are")
 	}
-	// After Questions, before Escalations.
+	// After the Attention panel, which is what waits on a decision, and before
+	// the Report it feeds.
 	html := string(indexHTML)
-	if q, d, e := strings.Index(html, `id="questions"`), strings.Index(html, `id="deepreview"`), strings.Index(html, `id="escalations"`); !(q < d && d < e) {
-		t.Errorf("the Deep review section is not between Questions and Escalations (%d, %d, %d)", q, d, e)
+	if a, d, r := strings.Index(html, `id="attention"`), strings.Index(html, `id="deepreview"`), strings.Index(html, `id="report"`); !(a < d && d < r) {
+		t.Errorf("the Deep review section is not between Attention and Report (%d, %d, %d)", a, d, r)
 	}
 }
 
