@@ -113,6 +113,21 @@ func (f *Fake) InitBare(t testing.TB, dir string) {
 // files written over it, and it becomes the branch's tip. It returns the
 // commit's id. A worktree checked out on the branch is not updated.
 func (f *Fake) Commit(t testing.TB, dir, branch, message string, files map[string]string) string {
+	return f.commit(t, dir, branch, message, files, nil)
+}
+
+// CommitRemoving makes a commit like Commit, with the named paths taken out of
+// the parent's tree: a path can leave only this way, since Commit writes files
+// over the parent's tree and can add or change one but never drop it. It is
+// how a move looks to a diff with rename detection off — the source removed,
+// the destination added.
+func (f *Fake) CommitRemoving(t testing.TB, dir, branch, message string, files map[string]string, remove ...string) string {
+	return f.commit(t, dir, branch, message, files, remove)
+}
+
+// commit is the shared body of Commit and CommitRemoving: the parent's tree,
+// files written over it, remove dropped from it.
+func (f *Fake) commit(t testing.TB, dir, branch, message string, files map[string]string, remove []string) string {
 	t.Helper()
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -131,6 +146,9 @@ func (f *Fake) Commit(t testing.TB, dir, branch, message string, files map[strin
 	}
 	for p, c := range files {
 		tree[p] = c
+	}
+	for _, p := range remove {
+		delete(tree, p)
 	}
 	id := f.newCommit(parents, tree, message)
 	r.has[id] = true

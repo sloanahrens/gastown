@@ -392,3 +392,34 @@ func TestRiskPathsMatchesNonASCIIPath(t *testing.T) {
 		t.Errorf("RiskPaths = %q, want the non-ASCII path", got)
 	}
 }
+
+// A file that leaves a risk glob is still a risk path: it is the path that
+// was moved out of the rule's reach that the landing has to review. git names
+// a move by its destination alone when it pairs the two, so the diff has to
+// carry the source as well — here as the delete and add gitfake's tree
+// comparison reports, the name-only output with rename detection off (the
+// real-git half is in riskpaths_integration_test.go).
+func TestRiskPathsRenameOutOfRiskDir(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	world := gitfake.New()
+	origin := filepath.Join(root, "origin.git")
+	world.InitBare(t, origin)
+	base := world.Commit(t, origin, "main", "main: seed", map[string]string{
+		"a.txt":                "one\n",
+		RiskPathsFile:          "internal/daemon/**\n",
+		"internal/daemon/x.go": "package daemon\n",
+	})
+	world.SetRef(t, origin, "refs/heads/"+fixtureBranch, base)
+	head := world.CommitRemoving(t, origin, fixtureBranch, "feat: move x.go", map[string]string{
+		"internal/misc/x.go": "package daemon\n",
+	}, "internal/daemon/x.go")
+
+	got, err := RiskPaths(world.Open(origin), base, head)
+	if err != nil {
+		t.Fatalf("RiskPaths: %v", err)
+	}
+	if !slices.Equal(got, []string{"internal/daemon/x.go"}) {
+		t.Errorf("RiskPaths = %q, want the moved file's source path", got)
+	}
+}
