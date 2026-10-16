@@ -7,8 +7,6 @@
 #   seen    whether a finding fingerprint is already in the ledger
 #   queued  confirmed findings an earlier run recorded but never filed
 #   batches unfiled P3 findings grouped per package, ready to file as one bead
-#   om-queued  the queued: lines an approved landing's om findings left on its
-#           work bead, ready to append to the run's ledger
 #   gate    whether the risky-landings job has anything to do (no LLM)
 #   docs-audit  which living docs look out of date, scored without an LLM
 #
@@ -56,19 +54,6 @@
 # package directory (the dirname of the file in the fingerprint), and lists a
 # package once it holds enough of them or its oldest has waited long enough.
 #
-# A second source of queued: lines: a landing whose om review raised a critical
-# or major finding had it recorded on the work bead, which takes the label
-# om-findings, and om-queued collects the recent ones (--days, default 14) so a
-# run can append them to --prev-notes. The queue that wrote them is gone — a
-# landing carrying such a finding is refused back to its author whatever it
-# scored (gt-oi4je), and the queue went with it (gt-50k2e) — and what it left on
-# work beads are records rather than state, so this reads them until they age
-# out of the window and nothing after that. The lines have the queued: shape
-# below and carry an om fingerprint, so the finding: rule, queued and seen apply
-# to them unchanged and the run's verifier refutes them like any other finding.
-# om-queued fails closed (exit 3) on anything bd hands back that it cannot read;
-# --repo is where bd runs.
-#
 # A rig other than gastown runs this same script from the gastown checkout: the
 # caller names that rig's landings file, run label and repo, and the script reads
 # nothing else of the rig. A rig with no tier sweep gates on --green-from-landings
@@ -93,8 +78,6 @@ DOC_PAIR_MAX=6
 DOC_STALE_TOP=3
 DOC_CMD_CHECKS=20
 DOC_MAX=8
-DEFAULT_OM_QUEUE_DAYS=14
-OM_QUEUE_LIMIT=200
 
 usage() {
   cat >&2 <<'EOF'
@@ -111,7 +94,6 @@ usage:
   deep-review.sh queued --prev-notes FILE
   deep-review.sh batches --prev-notes FILE [--now RFC3339] [--min N]
                          [--max-age-days D] [--max-per-batch M]
-  deep-review.sh om-queued [--days N] [--repo DIR]
 EOF
   exit 2
 }
@@ -246,56 +228,6 @@ cmd_batches() {
     { cnt++; kept[cnt] = $0; sub(/^[^\t]*\t[^\t]*\t[^\t]*\t/, "", kept[cnt]) }
     END { flush() }
   '
-}
-
-# om-queued: the queued: ledger lines om's reviews of earlier landings left on
-# their work beads, one per line and de-duplicated, ready to append to
-# the run's --prev-notes. bd runs in --repo (default .) and is asked for the
-# om-findings label's whole history; only a bead updated within --days (default
-# 14) counts, and only a note line that starts exactly with "queued: " is
-# printed, so no other note of the work bead reaches the ledger. Every way of
-# reading that history badly — bd failing, an envelope holding no document, a
-# bead with no readable updated_at — is exit 3: this is a ledger source, and a
-# source the script cannot read is never "nothing queued".
-cmd_om_queued() {
-  local days="$DEFAULT_OM_QUEUE_DAYS" repo="."
-  while [ $# -gt 0 ]; do
-    case "$1" in
-      --days) days="${2:-}"; shift 2 || usage ;;
-      --repo) repo="${2:-}"; shift 2 || usage ;;
-      *) usage ;;
-    esac
-  done
-  case "$days" in ''|*[!0-9]*) usage ;; esac
-  [ "$days" -gt 0 ] || usage
-  [ -d "$repo" ] || usage
-
-  # global, not local: the EXIT trap runs after this function has returned
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "$tmp"' EXIT
-  (cd "$repo" && bd list -l om-findings --all --limit "$OM_QUEUE_LIMIT" --json) > "$tmp/beads.json" \
-    || die "bd list -l om-findings failed in $repo"
-
-  local cutoff
-  cutoff="$(jq -n --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$JQ_TS"'(($now | ts)[0] - '"$days"' * 86400)')" \
-    || die "cannot read the current time"
-
-  # slurped, so an empty output is an error and not a bead list with none in it
-  jq -r -s --argjson cutoff "$cutoff" "$JQ_TS"'
-    (if length == 1 then .[0] else error("expected one JSON document") end)
-    | (if type == "object" then .data else . end)
-    | if type == "array" then . else error("the bead list is not a list") end
-    | .[]
-    | if type == "object" then . else error("a bead is not an object") end
-    | (if (.updated_at | type) == "string" then .updated_at
-       else error("a bead carries no updated_at string") end) as $u
-    | (if ($u | tsok) == null then error("updated_at is not RFC3339: \($u)") else ($u | ts) end) as $t
-    | select($t[0] >= $cutoff)
-    | (if (.notes // "" | type) == "string" then (.notes // "") else error("notes is not a string") end)
-    | split("\n")[]
-  ' "$tmp/beads.json" > "$tmp/queued.txt" || die "unreadable bead list from bd list -l om-findings"
-  # de-duplicated across beads: two landings can queue the same finding once each
-  awk 'index($0, "queued: ") == 1 && !seen[$0]++' "$tmp/queued.txt"
 }
 
 # newest cursor line in the notes: prints "<timestamp>\t<path>", or nothing.
@@ -937,7 +869,6 @@ case "$sub" in
   seen) cmd_seen "$@" ;;
   queued) cmd_queued "$@" ;;
   batches) cmd_batches "$@" ;;
-  om-queued) cmd_om_queued "$@" ;;
   gate) cmd_gate "$@" ;;
   docs-audit) cmd_docs_audit "$@" ;;
   *) usage ;;
