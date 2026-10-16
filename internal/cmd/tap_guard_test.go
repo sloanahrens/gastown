@@ -96,7 +96,7 @@ func fakeGuardProcess(env map[string]string, wd string) guardProcess {
 			return "/tmp"
 		},
 		originURL: func() (string, error) { return "", errors.New("no origin remote") },
-		load1:     func() (float64, bool) { return 0, true },
+		cpuIdle:   func() (float64, bool) { return 100, true },
 	}
 }
 

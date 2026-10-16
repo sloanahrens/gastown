@@ -43,6 +43,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/hoststat"
 	"github.com/steveyegge/gastown/internal/testpolicy"
 )
 
@@ -86,10 +87,10 @@ func run() int {
 	if err != nil {
 		return fail(err)
 	}
-	// The load is read before go test adds its own, so it measures what
-	// the run competes with.
-	load1, loadErr := hostLoad1()
-	enforce, why := testpolicy.EnforceBudget(load1, loadErr == nil, runtime.NumCPU(), os.Getenv(testpolicy.StrictBudgetEnv) == "1")
+	// The host is sampled before go test adds its own load, so the idle share
+	// it reads is what this run competes with.
+	cpuIdle := hoststat.Sample(context.Background()).CPUIdle
+	enforce, why := testpolicy.EnforceBudget(cpuIdle, runtime.NumCPU(), os.Getenv(testpolicy.StrictBudgetEnv) == "1")
 	if enforce {
 		fmt.Fprintf(os.Stderr, "budget: user-CPU budget enforced (%s)\n", why)
 	} else {

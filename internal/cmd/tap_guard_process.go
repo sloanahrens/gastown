@@ -8,9 +8,9 @@ import (
 
 // guardProcess is the process state the tap guards read: the environment,
 // the working directory, the home and temp directories, the host's
-// well-known temp dirs, the origin remote and the load average. The cobra
-// RunE functions pass realGuardProcess(); tests pass their own, so they need
-// no t.Setenv, t.Chdir or package-variable swaps and can run in parallel.
+// well-known temp dirs, the origin remote and the host's CPU idle share. The
+// cobra RunE functions pass realGuardProcess(); tests pass their own, so they
+// need no t.Setenv, t.Chdir or package-variable swaps and can run in parallel.
 type guardProcess struct {
 	getenv    func(string) string
 	lookupEnv func(string) (string, bool)
@@ -22,8 +22,8 @@ type guardProcess struct {
 	hostTemp []string
 	// originURL is `git remote get-url origin` for the process's cwd.
 	originURL func() (string, error)
-	// load1 samples the host's 1-minute load average.
-	load1 func() (float64, bool)
+	// cpuIdle samples the percent of the host's CPU that is idle.
+	cpuIdle func() (float64, bool)
 }
 
 // realGuardProcess is the running process's state.
@@ -36,7 +36,7 @@ func realGuardProcess() guardProcess {
 		tempDir:   os.TempDir,
 		hostTemp:  hostTempScratchDirs,
 		originURL: gitOriginURL,
-		load1:     actualHostLoad1,
+		cpuIdle:   actualHostCPUIdle,
 	}
 }
 
