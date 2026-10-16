@@ -589,6 +589,29 @@ func TestNestedShellCommands(t *testing.T) {
 		{"eval wrapped git clean -fd", `eval "git clean -fd"`, true},
 		{"bash -c safe command", `bash -c "echo hello"`, false},
 		{"nested but safe", `sh -c "ls -la"`, false},
+		// A -o cluster owns the next word as its value, so the -c payload
+		// behind it is still the payload.
+		{"bash -euo pipefail -c payload", `bash -euo pipefail -c 'git reset --hard origin/main'`, true},
+		{"bash -eo pipefail -c payload", `bash -eo pipefail -c "git clean -fd"`, true},
+		{"bash -o pipefail -c payload", `bash -o pipefail -c 'git reset --hard origin/main'`, true},
+		{"bash +o noglob -c payload", `bash +o noglob -c 'git reset --hard origin/main'`, true},
+		{"bash -euo pipefail -c safe command", `bash -euo pipefail -c 'echo hello'`, false},
+		{"bash -euo pipefail script file", `bash -euo pipefail ./run.sh -c 'git reset --hard origin/main'`, false},
+		// A quoted script fed to a shell on stdin runs, whether a pipe or a
+		// here-string carries it (the test guards read the same shapes).
+		{"quoted reset piped into bash", `echo 'git reset --hard origin/main' | bash`, true},
+		{"quoted reset piped into sh -s", `echo 'git reset --hard origin/main' | sh -s`, true},
+		{"quoted reset printf piped into a path-qualified shell", `printf '%s\n' 'git reset --hard origin/main' | /bin/bash`, true},
+		{"quoted reset piped through cat into bash", `echo 'git reset --hard origin/main' | cat | bash`, true},
+		{"quoted reset piped into bash -eo pipefail", `echo 'git reset --hard origin/main' | bash -eo pipefail`, true},
+		{"quoted reset here-string into bash", `bash <<< 'git reset --hard origin/main'`, true},
+		{"quoted reset here-string glued", `sh <<<"git clean -fd"`, true},
+		{"quoted reset here-string into bash -euo pipefail", `bash -euo pipefail <<< 'git reset --hard origin/main'`, true},
+		{"quoted reset piped into bash after a chain", `cd /tmp && echo 'git reset --hard origin/main' | bash`, true},
+		{"quoted reset piped into grep", `echo 'git reset --hard origin/main' | grep reset`, false},
+		{"quoted reset piped into a script file", `echo 'git reset --hard origin/main' | bash ./run.sh`, false},
+		{"quoted reset here-string into grep", `grep reset <<< 'git reset --hard origin/main'`, false},
+		{"harmless script piped into bash", `echo 'ls -la' | bash`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -31,7 +31,10 @@ func TestMatchesPRWorkflowCommand(t *testing.T) {
 		{"compound command, blocked shape first", "gh pr create --title foo && echo done", true},
 		{"compound command with pipe", "echo x | gh pr create --title foo", true},
 		{"compound command, no blocked segment", "cd foo && git status", false},
-		{"different flag not mistaken for -b", "git checkout -branch feature/x", false},
+		// git bundles short flags and glues a value to its flag, so -branch is
+		// -b with the name "ranch", the same creation as -bfeature/x.
+		{"-b glued to a name that spells branch", "git checkout -branch feature/x", true},
+		{"a long flag is not mistaken for -b", "git checkout --branch feature/x", false},
 
 		// An unquoted newline separates commands exactly like ';' does, so a
 		// multi-line Bash tool call must be judged line by line — before
@@ -179,6 +182,26 @@ func TestEvaluatePRWorkflowGuard_PolecatBranchCreationStillBlocked(t *testing.T)
 			cwd:     town.rigRoot,
 			command: "git switch -c " + branch,
 		},
+		// The extra-flag and long spellings are the same creation; the polecat's
+		// own worktree exempts them (see the allowed table), a sibling's does not.
+		{
+			name:    "checkout -b with an extra flag in a sibling polecat's worktree",
+			env:     []string{"GT_ROLE", "gastown/polecats/" + town.name},
+			cwd:     town.sibling,
+			command: "git checkout -q -b feature/x",
+		},
+		{
+			name:    "switch --create at the rig root",
+			env:     []string{"GT_ROLE", "gastown/polecats/" + town.name},
+			cwd:     town.rigRoot,
+			command: "git switch --create feature/x",
+		},
+		{
+			name:    "checkout -b glued to its name in a sibling polecat's worktree",
+			env:     []string{"GT_ROLE", "gastown/polecats/" + town.name},
+			cwd:     town.sibling,
+			command: "git checkout -bfeature/x",
+		},
 		{
 			name:    "gh pr create in the polecat's own worktree",
 			env:     []string{"GT_ROLE", "gastown/polecats/" + town.name},
@@ -307,6 +330,20 @@ func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
 		{"git switch -c behind -c k=v", "git -c user.name=x switch -c feature/x", true},
 		{"git checkout -b in bash -c", `bash -c "git checkout -b feature/x"`, true},
 		{"git switch -c in sh -lc", `sh -lc 'git switch -c feature/x'`, true},
+		{"git checkout -b behind another flag", "git checkout -q -b feature/x", true},
+		{"git checkout -b glued to its name", "git checkout -bfeature/x", true},
+		{"git checkout -b clustered with -q", "git checkout -qb feature/x", true},
+		{"git checkout -b after the start point", "git checkout --track -b feature/x origin/main", true},
+		{"git switch --create", "git switch --create feature/x", true},
+		{"git switch --create=", "git switch --create=feature/x", true},
+		{"git switch -c behind another flag", "git switch -q -c feature/x", true},
+		{"git switch -c glued to its name", "git switch -cfeature/x", true},
+		{"git checkout -b behind -C and another flag", "git -C /tmp/repo checkout -q -b feature/x", true},
+		{"git checkout of a branch named like a flag after --", "git checkout -q -- -b", false},
+		{"git switch of a path after --", "git switch -q -- -c", false},
+		{"git checkout of a branch", "git checkout -q main", false},
+		{"git switch of a branch", "git switch --detach main", false},
+		{"git checkout --orphan stays allowed", "git checkout --orphan feature/x", false},
 
 		{"env with a flag value", "env -u FOO gh pr create", true},
 		{"env -S carries the command", `env -S "gh pr create --title x"`, true},
@@ -394,7 +431,7 @@ func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
 		{"gh api mentioning pr create", "gh api repos/o/r/pulls -f title='pr create'", false},
 		{"git checkout without -b behind env", "env X=1 git checkout main", false},
 		{"git -C status", "git -C /tmp/repo status", false},
-		{"git checkout -branch behind env", "env X=1 git checkout -branch x", false},
+		{"git checkout -b glued to a name behind env", "env X=1 git checkout -branch x", true},
 		{"bash -c of an unrelated command", `bash -c "git status"`, false},
 		{"echo of a bash -c payload", `echo bash -c 'gh pr create'`, false},
 		{"echo of eval", `echo eval "gh pr create"`, false},

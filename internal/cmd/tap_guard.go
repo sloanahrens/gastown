@@ -440,24 +440,45 @@ func isGhPRCreate(argv []string) bool {
 }
 
 // isBranchCreation reports whether argv, a command from its command word on,
-// is git checkout -b or git switch -c. git may be a path and may carry global
-// options (-C dir, -c k=v) in front of the subcommand.
+// is git checkout -b or git switch -c/--create, with other flags before or
+// after the creation flag ("checkout -q -b x", "checkout -bx", "switch --create
+// x"). git may be a path and may carry global options (-C dir, -c k=v) in front
+// of the subcommand. Words after "--" are paths, not flags.
 func isBranchCreation(argv []string) bool {
 	if len(argv) == 0 || filepath.Base(argv[0]) != "git" {
 		return false
 	}
 	rest := argv[1:]
 	at := gitSubcommandIndex(rest)
-	if at < 0 || at+1 >= len(rest) {
+	if at < 0 {
 		return false
 	}
+	var creates func(flag string) bool
 	switch rest[at] {
 	case "checkout":
-		return rest[at+1] == "-b"
+		creates = func(flag string) bool { return shortFlagCluster(flag, 'b') }
 	case "switch":
-		return rest[at+1] == "-c"
+		creates = func(flag string) bool {
+			return shortFlagCluster(flag, 'c') || flag == "--create" || strings.HasPrefix(flag, "--create=")
+		}
+	default:
+		return false
+	}
+	for _, flag := range rest[at+1:] {
+		if flag == "--" {
+			break
+		}
+		if creates(flag) {
+			return true
+		}
 	}
 	return false
+}
+
+// shortFlagCluster reports whether word is a short-option cluster ("-q", "-qb",
+// "-bx") that spells letter, the way git's option parser reads bundled flags.
+func shortFlagCluster(word string, letter byte) bool {
+	return len(word) > 1 && word[0] == '-' && word[1] != '-' && strings.IndexByte(word[1:], letter) >= 0
 }
 
 func runTapGuardPRWorkflow(cmd *cobra.Command, args []string) error {

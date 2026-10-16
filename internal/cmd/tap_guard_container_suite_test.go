@@ -513,6 +513,66 @@ func TestMakeTestOutsideGoTree(t *testing.T) {
 	}
 }
 
+// -O (--output-sync) takes only an attached value, unlike the -o that takes the
+// next word: lowercasing it swallowed the -C behind it, and the suite was judged
+// in the cwd instead of the Go tree it ran in.
+func TestMakeOutputSyncFlagKeepsTheDirectory(t *testing.T) {
+	t.Parallel()
+	npmRoot := nonGoTree(t)
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		cwd     string
+		command string
+		blocked bool
+	}{
+		{"make -O -C into the Go tree", npmRoot, "make -O -C " + goRoot + " test", true},
+		{"make -sO -C into the Go tree", npmRoot, "make -sO -C " + goRoot + " test", true},
+		{"make -Oline -C into the Go tree", npmRoot, "make -Oline -C " + goRoot + " test", true},
+		{"make -O -C out of the Go tree", goRoot, "make -O -C " + npmRoot + " test", false},
+		{"make -sO -C out of the Go tree", goRoot, "make -sO -C " + npmRoot + " test", false},
+		{"make -o still takes the next token as its value", npmRoot, "make -o -C " + goRoot + " test", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assertBothGuardsJudge(t, tt.command, tt.cwd, tt.blocked)
+		})
+	}
+}
+
+// A shell option cluster ending in o ("-eo", "-euo") takes the next word as its
+// value, so the script fed to the shell is still the script: the walk used to
+// stop at the value ("pipefail") and judge nothing.
+func TestShellFedScriptBehindAnOptionValueIsJudged(t *testing.T) {
+	t.Parallel()
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"script piped into bash -eo pipefail", `echo 'make test' | bash -eo pipefail`, true},
+		{"script piped into bash -euo pipefail", `echo 'make test' | bash -euo pipefail`, true},
+		{"script piped into sh -o pipefail", `echo 'make test' | sh -o pipefail`, true},
+		{"script piped into sh +o noglob", `echo 'make test' | sh +o noglob`, true},
+		{"here-string into bash -eo pipefail", `bash -eo pipefail <<< 'make test'`, true},
+		{"here-string into bash -euo pipefail", `bash -euo pipefail <<<'make test'`, true},
+		{"script piped into bash -eo pipefail -s", `echo 'make test' | bash -eo pipefail -s`, true},
+		{"harmless script piped into bash -eo pipefail", `echo 'make lint' | bash -eo pipefail`, false},
+		{"script file after the option value", `echo 'make test' | bash -eo pipefail ./run.sh`, false},
+		{"-c payload after the option value", `bash -eo pipefail -c 'make test'`, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc := fakeGuardProcess(nil, goRoot)
+			reason, matched := evaluateContainerSuiteCommand(proc, tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
 // The whole-suite goals other than test and build read the same run directory:
 // a bare -i before the -C must not hide it (gt-i6jw6).
 func TestMakeBareIgnoreErrorsFlagKeepsTheDirectory(t *testing.T) {

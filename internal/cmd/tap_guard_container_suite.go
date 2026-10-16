@@ -306,10 +306,17 @@ func shellReadsStdin(args []string) bool {
 		switch {
 		case a == "--" || a == "-":
 			return true
-		case a == "-o" || a == "+o" || a == "--rcfile" || a == "--init-file":
+		case a == "--rcfile" || a == "--init-file":
 			i++
-		case strings.HasPrefix(a, "--"), len(a) > 1 && a[0] == '+':
+		case strings.HasPrefix(a, "--"):
+		case len(a) > 1 && a[0] == '+':
+			if shellClusterTakesValue(a) {
+				i++
+			}
 		case len(a) > 1 && a[0] == '-':
+			if shellClusterTakesValue(a) {
+				i++
+			}
 			if strings.Contains(a[1:], "c") {
 				return false
 			}
@@ -824,9 +831,10 @@ func containsSubsequence(tokens, want []string) bool {
 // lowercased, so the lowercase entries match either case. -W and -I are listed
 // in their own case because the lowercase -w (print directory) and -i (ignore
 // errors) take no value: a lowercased lookup swallowed the -C behind a bare -w
-// or -i (gt-i6jw6). -j and -l take an OPTIONAL value, so the next token is a
-// value only when it looks like one (all digits). No branch ever swallows
-// the target "test" itself.
+// or -i (gt-i6jw6). -O (output-sync) takes no separate value either, so
+// makeRunDir keeps it out of the lowercased lookup. -j and -l take an OPTIONAL
+// value, so the next token is a value only when it looks like one (all
+// digits). No branch ever swallows the target "test" itself.
 var makeValueFlags = map[string]bool{
 	"-c": true, "-f": true, "-o": true, "-W": true, "-I": true,
 	"--directory": true, "--file": true, "--makefile": true, "--old-file": true, "--assume-old": true,
@@ -1616,7 +1624,9 @@ func makeRunDir(args []string, cwd string) (dir string, known bool) {
 		if hasValue {
 			continue
 		}
-		if makeValueFlags[flag] || makeValueFlags[lower] || (makeOptionalNumberFlags[lower] && i+1 < len(args) && isAllDigits(args[i+1])) {
+		// -O (--output-sync) takes only an attached value, so the lowercase
+		// lookup must not read it as the -o that takes the next word.
+		if makeValueFlags[flag] || (flag != "-O" && makeValueFlags[lower]) || (makeOptionalNumberFlags[lower] && i+1 < len(args) && isAllDigits(args[i+1])) {
 			// Another option's value; step over it so a value that looks like
 			// a flag ("-o -C dir" names the file "-C") is not read as one.
 			if i+1 >= len(args) {
