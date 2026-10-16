@@ -2136,26 +2136,50 @@ function costSpend(box, d, r) {
   const rw = d.runway_days_at_24h_pace;
   add(rw == null ? "–" : rw.toFixed(1) + "d", "runway", rw != null && rw < 3 ? "badc" : rw != null && rw < 7 ? "warnc" : "");
   box.append(kv);
-  // Cash vs credit under the balance, so granted credit is not read as money
-  // paid in. Both fields are needed; a report without them gets no line.
+  // Cash and credit under the balance, how long the credit alone covers the 24h
+  // rate on the same line: granted credit is not money paid in, and the two are
+  // read together or not at all. Both fields are needed; a report without them
+  // gets no line.
   if (d.cash != null && d.credit != null) {
-    box.append(el("div", "title", money(d.cash) + " cash + " + money(d.credit) + " credit"));
     const cr = d.credit_runway_days_at_24h_pace;
-    if (d.credit > 0 && cr != null) box.append(el("div", "title", "credit lasts ~" + cr.toFixed(1) + "d, then cash"));
+    const left = d.credit > 0 && cr != null ? "credit lasts ~" + cr.toFixed(1) + "d, then cash" : null;
+    box.append(el("div", "title", money(d.cash) + " cash + " + money(d.credit) + " credit" + (left ? " · " + left : "")));
   }
-  // One dim line of the last few days instead of a table, to keep the panel short.
-  // A negative day is a balance rise; the credits line below says of what kind.
-  const days = Object.entries(d.per_day || {}).slice(-4).reverse();
-  if (days.length) {
-    box.append(el("div", "title", days.map(([day, v]) => day.slice(5) + " " + (v.spent < 0 ? "+" + money(-v.spent) + " added" : money(v.spent))).join(" · ")));
+  // One dim line of the recent days instead of a table, to keep the panel short:
+  // today and yesterday beside the mean of the complete days behind them, which
+  // is the rate the panel is read for rather than one heavy day. A negative day
+  // is a balance rise; the credits line below says of what kind. The report's
+  // per_day is unordered, so the days are sorted before today is read off the
+  // last of them.
+  const history = Object.entries(d.per_day || {}).sort((a, b) => (a[0] < b[0] ? -1 : 1));
+  if (history.length) {
+    const dayText = v => v.spent < 0 ? "+" + money(-v.spent) + " added" : money(v.spent);
+    const fig = v => (v && v.spent != null) ? dayText(v) : "–";
+    // A day with no figure is left out of the mean rather than counted as zero,
+    // and a history shorter than a week says how many days the mean covers.
+    const complete = history.slice(0, -1).filter(([, v]) => v && v.spent != null).slice(-7);
+    const mean = complete.length ? complete.reduce((sum, [, v]) => sum + v.spent, 0) / complete.length : null;
+    const line = el("div", "title", "today " + fig(history[history.length - 1][1]) +
+      " · yesterday " + fig(history.length > 1 ? history[history.length - 2][1] : null) +
+      " · 7-day avg " + (mean == null ? "–" : money(mean)) + "/day" +
+      (mean != null && complete.length < 7 ? " (" + complete.length + (complete.length === 1 ? " day" : " days") + ")" : ""));
+    line.title = history.slice().reverse().map(([day, v]) => day.slice(5) + " " + fig(v)).join(" · ");
+    box.append(line);
   }
-  // The last balance rises, each with what the report made of it.
+  // The last balance rises, each with what the report made of it: the two newest
+  // on the line, the older ones in its hover, since the line is read for the
+  // recent grants and the ledger only grows.
   const creditText = c => {
     const kind = { "credit": " credit", "top-up": " top-up", "credit+top-up": " credit + top-up" }[c.kind];
     return String(c.at || "").slice(5, 16).replace("T", " ") + " +" + money(c.amount) + (kind || " added");
   };
   const credits = Array.isArray(d.credits) ? d.credits.slice().reverse() : [];
-  if (credits.length) box.append(el("div", "title", credits.map(creditText).join(" · ")));
+  if (credits.length) {
+    const rises = credits.map(creditText);
+    const line = el("div", "title", rises.slice(0, 2).join(" · "));
+    if (rises.length > 2) line.title = "older rises · " + rises.slice(2).join(" · ");
+    box.append(line);
+  }
   const alerts = d.alerts || [];
   if (live.ok === false) box.append(el("div", "badc", "live balance unreachable; showing the ledger"));
   if (d.watcher_pid == null || d.watcher_pid === "") box.append(el("div", "badc", "spend watcher is not running"));
