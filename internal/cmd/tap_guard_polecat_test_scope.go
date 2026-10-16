@@ -98,6 +98,14 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth
 	return "", nil
 }
 
+// evaluatePolecatTestScopeSegment judges one shell segment in cwd, the
+// directory the walk placed it in (cwdKnown says whether it could). The go case
+// is located through findGoSubcommand rather than by the `go` token's adjacency
+// to `test`, so Go's global -C dir flag between the two ("go -C /tmp test
+// ./...") does not hide the run (gt-zn7ma). That flag is also where the run
+// happens: a '.', './' or bare target names a package under the -C directory,
+// not under the shell's cwd, so it is judged there (goTestRunDir, gt-tzdpe);
+// an explicit package argument keeps the reading it has always had.
 func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool) (reason string, matched []string) {
 	lower := make([]string, len(tokens))
 	for i, t := range tokens {
@@ -115,11 +123,12 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool)
 		}
 		return "polecat 'make test' runs the whole suite", nil
 	}
-	i := findTestInvocation(lower, "go")
+	i := findGoSubcommand(lower, "test")
 	if i < 0 {
 		return "", nil
 	}
-	rest := tokens[i+2:]
+	rest := tokens[i+1:]
+	runCwd, runCwdKnown := goTestRunDir(tokens, lower, i, cwd, cwdKnown)
 	// A filter may come as -run before the packages, or as -test.run after
 	// "--" (passed straight to the test binary); either bounds the run.
 	hasRun := false
@@ -129,10 +138,10 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool)
 		}
 	}
 	pkgArgs := goTestPackageArgs(rest)
-	if cwdTargetsUnplacedDir(pkgArgs, cwdKnown) {
+	if cwdTargetsUnplacedDir(pkgArgs, runCwdKnown) {
 		return "polecat 'go test' names a directory the guard cannot place", nil
 	}
-	wholeRepo, heavy := polecatHeavyTarget(pkgArgs, cwd)
+	wholeRepo, heavy := polecatHeavyTarget(pkgArgs, runCwd)
 	if wholeRepo {
 		return "polecat 'go test' of the whole repo", nil
 	}
