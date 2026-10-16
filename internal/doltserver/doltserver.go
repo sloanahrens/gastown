@@ -5040,10 +5040,10 @@ func buildServerSQLCmd(ctx context.Context, config *Config, args ...string) *exe
 	setProcessGroup(cmd)
 
 	// The password goes through DOLT_CLI_PASSWORD, never argv: argv is world
-	// readable through ps. An empty password sets nothing (gt-qf0bn).
-	if config.Password != "" {
-		cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD="+config.Password)
-	}
+	// readable through ps. Set it even when empty: dolt then skips the stdin
+	// prompt, which fails with "inappropriate ioctl" in non-TTY environments,
+	// and the appended entry wins over an inherited DOLT_CLI_PASSWORD.
+	cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD="+config.Password)
 
 	return cmd
 }

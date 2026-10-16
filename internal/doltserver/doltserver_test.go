@@ -5918,19 +5918,22 @@ func TestProbeDSNsCarryPassword(t *testing.T) {
 }
 
 func TestBuildServerSQLCmdPasswordNotInArgv(t *testing.T) {
-	t.Parallel()
-
+	// Not parallel: the inherited cases set a process environment variable.
 	tests := []struct {
-		name     string
-		password string
-		wantEnv  bool
+		name      string
+		password  string
+		inherited string
 	}{
-		{"password set", "secret", true},
-		{"password empty", "", false},
+		{"password set", "secret", ""},
+		{"empty password still sets the variable to suppress the stdin prompt", "", ""},
+		{"configured password overrides an inherited one", "secret", "stale"},
+		{"empty password overrides an inherited one", "", "stale"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
+			if tt.inherited != "" {
+				t.Setenv("DOLT_CLI_PASSWORD", tt.inherited)
+			}
 			config := &Config{Host: "127.0.0.1", Port: 3307, User: "root", Password: tt.password, DataDir: "/tmp/dolt-data"}
 			cmd := buildServerSQLCmd(context.Background(), config, "-q", "SELECT 1")
 
@@ -5939,17 +5942,19 @@ func TestBuildServerSQLCmdPasswordNotInArgv(t *testing.T) {
 					t.Errorf("argv leaks the password: %q", cmd.Args)
 				}
 			}
-			var gotEnv bool
+			// The child sees the last entry for a duplicated key.
+			var got string
+			var found bool
 			for _, env := range cmd.Env {
-				if env == "DOLT_CLI_PASSWORD="+tt.password && tt.wantEnv {
-					gotEnv = true
-				}
-				if strings.HasPrefix(env, "DOLT_CLI_PASSWORD=") && !tt.wantEnv {
-					t.Errorf("empty password must not set DOLT_CLI_PASSWORD, got %q", env)
+				if v, ok := strings.CutPrefix(env, "DOLT_CLI_PASSWORD="); ok {
+					got, found = v, true
 				}
 			}
-			if tt.wantEnv && !gotEnv {
-				t.Errorf("env lacks DOLT_CLI_PASSWORD=%s", tt.password)
+			if !found {
+				t.Fatal("env lacks DOLT_CLI_PASSWORD; dolt would prompt on stdin")
+			}
+			if got != tt.password {
+				t.Errorf("effective DOLT_CLI_PASSWORD = %q, want %q", got, tt.password)
 			}
 		})
 	}
