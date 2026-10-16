@@ -2841,6 +2841,8 @@ func TestStdinShellPayloadsMultiCommandProcessSubstitution(t *testing.T) {
 		{"on stdin", `bash < <(echo 'echo a'; echo 'make test')`, true},
 		{"multi-command body that never closes", `bash <(echo 'echo a'; echo 'make test'`, true},
 		{"nested substitution then the script", `bash <(echo $(date); echo 'make test')`, true},
+		{"quoted close paren ahead of the script", `bash <(echo ')'; echo 'make test')`, true},
+		{"quoted open paren ahead of the script", `bash <(echo '('; echo 'make test')`, true},
 		{"harmless commands", `bash <(echo 'echo a'; echo 'make lint')`, false},
 		{"commands behind the substitution are not its body", `bash <(echo 'echo a'); echo 'make lint'`, false},
 		{"script file operand takes the substitution as an argument", `bash ./run.sh <(echo a; echo 'make test')`, false},

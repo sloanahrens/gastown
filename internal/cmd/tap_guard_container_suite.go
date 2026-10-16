@@ -387,7 +387,9 @@ func segmentEnd(tokens []string, start int) int {
 // The substitution closes at the first word that ends in ")" with the body's
 // parentheses back to level. A word that holds a pair of its own ("echo
 // $(date)") does not close it; the quote marks are gone by now, so the balance
-// is all that is left to read. One that never closes runs to the end of the
+// is all that is left to read; a quoted parenthesis ("echo ')'") skews it, and
+// TestStdinShellPayloadsMultiCommandProcessSubstitution pins that such a body
+// is still judged. One that never closes runs to the end of the
 // line, so a line the shell would reject is still judged (gt-hizij, gt-n2gt8).
 func splitProcessSubstitutions(args, after []string) (rest []string, subs []processSubstitution) {
 	for i := 0; i < len(args); i++ {

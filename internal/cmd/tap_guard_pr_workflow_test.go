@@ -712,7 +712,8 @@ func TestPRWorkflowGuard_SwitchAbbreviatedCreatePolecat(t *testing.T) {
 // A command substitution that expands to gh or git, or sits where an argument
 // goes, is judged as the command it may expand to (gt-n2gt8). An empty
 // expansion vanishes ("gh pr $(echo) create" is gh pr create); one that names
-// gh or git leaves the words behind it as that command's arguments.
+// gh or git leaves the words behind it as that command's arguments; one in a
+// subcommand slot may be the subcommand ("gh pr $(echo create)").
 func TestPRWorkflowSubstitutionInArgumentSlot(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -734,7 +735,14 @@ func TestPRWorkflowSubstitutionInArgumentSlot(t *testing.T) {
 		{"expansion as the value of gh -R keeps the subcommand", "gh -R $(echo o/r) pr create", true},
 		{"expansion as the value of git -C, no creation", "git -C $(pwd) checkout main", false},
 		{"expansion as a gh argument, no creation", "gh pr view $(echo 12)", false},
-		{"expansion as the pull request number", "gh pr $(echo view) 12", false},
+		{"expansion naming the gh subcommand", "gh pr $(echo create) --fill", true},
+		{"expansion naming the gh subcommand, backticks", "gh pr `echo create`", true},
+		{"expansion naming the gh group", "gh $(echo pr) create", true},
+		{"expansion naming git's subcommand", "git $(echo checkout) -b x", true},
+		{"expansion naming git's subcommand, switch", "git -C d $(echo) $(echo switch) -c x", true},
+		{"expansion naming git's subcommand, no creation", "git $(echo checkout) main", false},
+		{"expansion in the pull request number slot", "gh pr view $(echo 12)", false},
+		{"expansion after a gh subcommand that is not create", "gh pr list $(echo create)", false},
 		{"expansion as a git argument, no creation", "git checkout $(git rev-parse HEAD)", false},
 		{"expansion before an unrelated subcommand", "$(echo gh) pr view 12", false},
 		{"expansion before an unrelated command", "$(echo hi) ls -la", false},

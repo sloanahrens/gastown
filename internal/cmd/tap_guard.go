@@ -448,12 +448,13 @@ var prWorkflowNamesGhOrGit = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_.-])(gh|git)
 // word.
 var ghOptionsWithValue = map[string]bool{"-R": true, "--repo": true}
 
-// ghPositionals returns the first two non-flag words after gh. Flags are
-// skipped wherever they sit, as cobra reads them: gh -R o/r pr create and
-// gh pr create -R o/r are the same command.
+// ghPositionals returns the non-flag words after gh, command-substitution
+// stand-ins included. Flags are skipped wherever they sit, as cobra reads them:
+// gh -R o/r pr create and gh pr create -R o/r are the same command. A stand-in
+// that is the value of a flag in ghOptionsWithValue is that value, not a word.
 func ghPositionals(args []string) []string {
 	var words []string
-	for i := 0; i < len(args) && len(words) < 2; i++ {
+	for i := 0; i < len(args); i++ {
 		switch word := args[i]; {
 		case ghOptionsWithValue[word]:
 			i++
@@ -465,25 +466,24 @@ func ghPositionals(args []string) []string {
 	return words
 }
 
-// withoutSubstitutionWords returns args less the stand-ins for a command
-// substitution that sit where a subcommand or flag would. The shell drops an
-// expansion that is empty, so "gh pr $(echo) create" is gh pr create and "git
-// $(echo) checkout -b x" is git checkout -b x (gt-n2gt8). A stand-in that is
-// the value of an option in valueOptions is that value and stays, or the walk
-// would hand the option the word behind it: "git -C $(pwd) checkout -b x".
-func withoutSubstitutionWords(args []string, valueOptions map[string]bool) []string {
-	kept := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		if args[i] == prWorkflowSubstitutionWord {
-			continue
-		}
-		kept = append(kept, args[i])
-		if valueOptions[args[i]] && i+1 < len(args) {
-			i++
-			kept = append(kept, args[i])
-		}
+// startsWithSubcommands reports whether words open with the subcommands want,
+// reading a command-substitution stand-in as nothing or as one word, whichever
+// lets the rest match: "gh pr $(echo) create" is gh pr create, and so is "gh pr
+// $(echo create)" (gt-n2gt8). The shell splits an expansion into as many words
+// as it holds, and a stand-in is read as at most one: the guard reads the text,
+// not what a command prints, as it does not resolve a variable either ("g=gh;
+// $g pr create" is not judged).
+func startsWithSubcommands(words, want []string) bool {
+	if len(want) == 0 {
+		return true
 	}
-	return kept
+	if len(words) == 0 {
+		return false
+	}
+	if words[0] == prWorkflowSubstitutionWord {
+		return startsWithSubcommands(words[1:], want) || startsWithSubcommands(words[1:], want[1:])
+	}
+	return strings.EqualFold(words[0], want[0]) && startsWithSubcommands(words[1:], want[1:])
 }
 
 // isGhPRCreate reports whether argv, a command from its command word on, is
@@ -492,8 +492,7 @@ func isGhPRCreate(argv []string) bool {
 	if len(argv) == 0 || !strings.EqualFold(filepath.Base(argv[0]), "gh") {
 		return false
 	}
-	words := ghPositionals(withoutSubstitutionWords(argv[1:], ghOptionsWithValue))
-	return len(words) == 2 && strings.EqualFold(words[0], "pr") && strings.EqualFold(words[1], "create")
+	return startsWithSubcommands(ghPositionals(argv[1:]), []string{"pr", "create"})
 }
 
 // isBranchCreation reports whether argv, a command from its command word on,
@@ -508,16 +507,39 @@ func isBranchCreation(argv []string) bool {
 	if len(argv) == 0 || filepath.Base(argv[0]) != "git" {
 		return false
 	}
-	rest := withoutSubstitutionWords(argv[1:], gitOptionsWithValue)
-	at := gitSubcommandIndex(rest)
-	if at < 0 || !branchCreatingSubcommand(rest[at]) {
+	rest := argv[1:]
+	for {
+		at := gitSubcommandIndex(rest)
+		if at < 0 {
+			return false
+		}
+		if rest[at] != prWorkflowSubstitutionWord {
+			return createsBranch(rest[at], rest[at+1:])
+		}
+		// A substitution in the subcommand's place expands to nothing ("git
+		// $(echo) checkout -b x") or to the subcommand ("git $(echo checkout)
+		// -b x"), so both are judged (gt-n2gt8). One that is the value of a
+		// global option never gets here: gitSubcommandIndex skips it.
+		for _, subcommand := range []string{"checkout", "switch"} {
+			if createsBranch(subcommand, rest[at+1:]) {
+				return true
+			}
+		}
+		rest = append(append([]string(nil), rest[:at]...), rest[at+1:]...)
+	}
+}
+
+// createsBranch reports whether flags, the words behind git's subcommand, hold
+// that subcommand's branch-creation flag. Words after "--" are paths.
+func createsBranch(subcommand string, flags []string) bool {
+	if !branchCreatingSubcommand(subcommand) {
 		return false
 	}
-	for _, flag := range rest[at+1:] {
+	for _, flag := range flags {
 		if flag == "--" {
 			break
 		}
-		if branchCreationFlag(rest[at], flag) {
+		if branchCreationFlag(subcommand, flag) {
 			return true
 		}
 	}
