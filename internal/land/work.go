@@ -216,11 +216,11 @@ func OverseerReviewed(issue *beads.Issue, head string) bool {
 }
 
 // overseerReviewLine matches "OVERSEER REVIEW <sha> PASS|FAIL" or
-// "OVERSEER REVIEW <sha> WAIVED|AUDITED: <reason>", the note that answers a
-// risk-path item, a FAIL excepted: it keeps the item open. The trailing \b keeps a word from extending a verdict
-// ("PASSED" is not PASS), WAIVED and AUDITED answer only with a reason after
-// the colon, and the sha is compared whole, so a review of another head does
-// not answer. It deliberately does not match
+// "OVERSEER REVIEW <sha> WAIVED|AUDITED: <reason>", the note lines that record
+// a review of a risk-path item's head. The trailing \b keeps a word from
+// extending a verdict ("PASSED" is not PASS), WAIVED and AUDITED answer only
+// with a reason after the colon, and the sha is compared whole, so a review of
+// another head does not answer. It deliberately does not match
 // "OVERSEER REVIEWED ...": that marker says om was bypassed, not that a human
 // reviewed this head (gt-vsct7.4).
 var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (?:(PASS|FAIL)\b|(WAIVED|AUDITED): +\S)`)
@@ -241,7 +241,8 @@ func HasOverseerReviewNote(notes, head string) bool {
 
 // OverseerReviewVerdict returns the verdict (PASS, FAIL, WAIVED or AUDITED)
 // of the latest review line in notes that names exactly head, and whether there
-// is one. The latest line stands, so a PASS written after a FAIL supersedes it.
+// is one. Every reader of a head's verdict takes the latest line, not the
+// first, so a PASS written after a FAIL supersedes it (gt-pe01w).
 func OverseerReviewVerdict(notes, head string) (string, bool) {
 	if head == "" {
 		return "", false
