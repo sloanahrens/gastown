@@ -233,16 +233,15 @@ type OverseerThresholds struct {
 	// info event.
 	SilentPush string `json:"silent_push,omitempty"`
 
-	// ReviewBacklogThreshold is the count of open landing.risk_path items past
-	// which the daemon raises review.backlog (default 15). The rule clears
-	// once the count falls under half of it. Zero or negative reads as the
-	// default.
+	// The review.backlog rule's two knobs, both in open landing.risk_path
+	// items. Before changing them, read operational.go for their defaults and
+	// the zero fallback, and docs/reference.md (Review Backlog Rule) for what
+	// the rule does with them.
+	//
+	// ReviewBacklogThreshold is the open count the rule wakes past.
 	ReviewBacklogThreshold int `json:"review_backlog_threshold,omitempty"`
-
-	// ReviewBacklogRise is how many more open landing.risk_path items than the
-	// lowest count of the last hour raise review.backlog while the total is
-	// still under the threshold (default 10). Zero or negative reads as the
-	// default.
+	// ReviewBacklogRise is the one-hour rise that wakes the rule under that
+	// count.
 	ReviewBacklogRise int `json:"review_backlog_rise,omitempty"`
 }
 
