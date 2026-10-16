@@ -676,12 +676,16 @@ func jsonlShardPaths(dir, table string) ([]string, error) {
 type jsonlShardOps struct {
 	rename func(oldpath, newpath string) error
 	remove func(path string) error
-	verify func(dir, table string, wantRows int, maxFileBytes int64) error
+	// removeAll takes a temp whatever shape it is in. Remove refuses a
+	// directory, and a write that failed on a path a directory sits at is one
+	// of the ways a temp survives (gt-1911b).
+	removeAll func(path string) error
+	verify    func(dir, table string, wantRows int, maxFileBytes int64) error
 }
 
 // osShardOps is the swap's real filesystem work.
 func osShardOps() jsonlShardOps {
-	return jsonlShardOps{rename: os.Rename, remove: os.Remove, verify: verifyJsonlShards}
+	return jsonlShardOps{rename: os.Rename, remove: os.Remove, removeAll: os.RemoveAll, verify: verifyJsonlShards}
 }
 
 // writeTableShards writes rows as the table's JSONL export in dir, cut into
@@ -730,25 +734,24 @@ func writeTableShardsWith(ops jsonlShardOps, dir, table string, rows []json.RawM
 	}
 
 	tmpPaths := make([]string, len(shards))
-	// Best effort: a temp file that will not go is a .tmp nothing else reads,
-	// and the failure being reported is the one to report.
+	// Best effort: a temp that will not go is a .tmp nothing else reads, and
+	// the failure being reported is the one to report.
 	removeTmps := func() {
 		for _, p := range tmpPaths {
 			if p != "" {
-				_ = ops.remove(p)
+				_ = ops.removeAll(p)
 			}
 		}
 	}
 	for i, shard := range shards {
 		tmpPath := filepath.Join(dir, jsonlShardName(table, i+1)+".tmp")
+		// Registered before the write, so a write that fails part way leaves
+		// the temp it made to removeTmps.
+		tmpPaths[i] = tmpPath
 		if err := os.WriteFile(tmpPath, shard.Bytes(), 0644); err != nil {
-			// The file the write failed on is half written and is not in
-			// tmpPaths yet, so name it too.
-			_ = ops.remove(tmpPath)
 			removeTmps()
 			return 0, fmt.Errorf("writing %s: %w", tmpPath, err)
 		}
-		tmpPaths[i] = tmpPath
 	}
 
 	// The export is rewritten whole every cycle, so a .bak here outlived the
@@ -831,6 +834,13 @@ func writeTableShardsWith(ops jsonlShardOps, dir, table string, rows []json.RawM
 		errs := append([]error{fmt.Errorf("removing the stale %s shards", table)}, residue...)
 		return 0, errors.Join(append(errs, withdraw())...)
 	}
+	// A temp an earlier cycle left is named after a shard this export may no
+	// longer write, so the swap stepped over it. It is the same stale tail as
+	// the set-aside shards above, and `git add -A` over the directory commits
+	// it (gt-1911b).
+	if err := removeShardTemps(dir, table); err != nil {
+		return 0, fmt.Errorf("clearing %s temp files: %w", table, err)
+	}
 	return len(rows), nil
 }
 
@@ -861,6 +871,29 @@ func removeShardBackups(dir, table string) error {
 			continue
 		}
 		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// removeShardTemps deletes the {table}.jsonl.tmp and {table}.N.jsonl.tmp files
+// in dir. A write that failed and a cycle killed part way through one both
+// leave them, and jsonlShardPaths does not read a .tmp as a shard, so the next
+// export's swap steps over them and `git add -A` commits them with it
+// (gt-1911b). The path goes whatever sits at it, since nothing else writes
+// under a temp's name.
+func removeShardTemps(dir, table string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".jsonl.tmp") || !strings.HasPrefix(name, table+".") {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
 			return err
 		}
 	}

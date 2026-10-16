@@ -5,10 +5,14 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -463,4 +467,111 @@ func TestAutoCloseDBDryRunCycleCountsARefusalAsNothing(t *testing.T) {
 	if !strings.Contains(buf.String(), reaper.FloorNotice(time.Hour, 1)) {
 		t.Errorf("cycle log = %q, want the below-floor notice", buf.String())
 	}
+}
+
+// TestDoltUserInfoFeedsEveryReaperOpenDB covers the daemon half of the Dolt
+// credential rule: every connection the reaper opens carries the town's
+// configured user[:password], so a call site that dropped the password for a
+// bare root user cannot pass as a town that authenticates (gt-1911b).
+//
+// The value is read at runtime and its use read off the call sites, because a
+// connection to a live server is what would show the difference. The scan that
+// reads them is pinned on a planted bare-user call.
+func TestDoltUserInfoFeedsEveryReaperOpenDB(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeTownDoltSettings(t, townRoot, `{"user":"sweep","password":"s3cret"}`)
+	d := &Daemon{config: &Config{TownRoot: townRoot}}
+	const userInfo = "sweep:s3cret"
+	if got := d.doltUserInfo(); got != userInfo {
+		t.Fatalf("doltUserInfo() = %q, want %q from the town's operational.dolt user and password", got, userInfo)
+	}
+
+	users := scanReaperConnectionUsers(t, reaperSourcePath(t))
+	if len(users) == 0 {
+		t.Fatalf("no reaper.OpenDB or reaper.DiscoverDatabases call in wisp_reaper.go — the scan would pass vacuously")
+	}
+	for i, got := range users {
+		if !carriesDoltUserInfo(got) {
+			t.Errorf("reaper connection %d is opened with %s, want d.doltUserInfo(): a bare user drops the town's password", i+1, got)
+		}
+	}
+
+	// The scan is the assertion above, so pin it on the call it exists to
+	// catch. A walk that stopped matching this shape would read a clean file.
+	planted := filepath.Join(t.TempDir(), "planted_reaper.go")
+	src := `package daemon
+
+func planted(d *Daemon, host string, port int, name string, to time.Duration) {
+	_, _ = reaper.OpenDB("root", host, port, name, to, to)
+	_ = reaper.DiscoverDatabases(d.doltUserInfo(), host, port)
+}
+`
+	if err := os.WriteFile(planted, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got := scanReaperConnectionUsers(t, planted)
+	if len(got) != 2 || got[0] != `"root"` || got[1] != "d.doltUserInfo()" {
+		t.Fatalf("scan of a planted bare root user = %q, want the bare user then d.doltUserInfo()", got)
+	}
+	if carriesDoltUserInfo(got[0]) {
+		t.Error("a connection opened with a bare root user passed the check: a regressed call site would read as clean")
+	}
+}
+
+// carriesDoltUserInfo reports whether a reaper connection made with the
+// argument arg carries the town's Dolt user and password.
+func carriesDoltUserInfo(arg string) bool { return arg == "d.doltUserInfo()" }
+
+// reaperSourcePath is the path of the reaper's sweep source in this package.
+func reaperSourcePath(t *testing.T) string {
+	t.Helper()
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller failed")
+	}
+	return filepath.Join(filepath.Dir(thisFile), "wisp_reaper.go")
+}
+
+// scanReaperConnectionUsers returns the source text of the argument each
+// reaper.OpenDB and reaper.DiscoverDatabases call in path connects with, in the
+// order the calls appear. It matches on the AST, so a comment quoting the call
+// is not a call site.
+func scanReaperConnectionUsers(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, data, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	var users []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || pkg.Name != "reaper" {
+			return true
+		}
+		if sel.Sel.Name != "OpenDB" && sel.Sel.Name != "DiscoverDatabases" {
+			return true
+		}
+		if len(call.Args) == 0 {
+			users = append(users, "(no arguments)")
+			return true
+		}
+		arg := call.Args[0]
+		users = append(users, string(data[fset.Position(arg.Pos()).Offset:fset.Position(arg.End()).Offset]))
+		return true
+	})
+	return users
 }

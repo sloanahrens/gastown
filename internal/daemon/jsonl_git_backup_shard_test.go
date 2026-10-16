@@ -8,6 +8,8 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 
@@ -483,6 +485,63 @@ func TestWriteTableShards_WriteFailureClearsTheTempsItWrote(t *testing.T) {
 			t.Errorf("temp file %s left behind by a failed write", e.Name())
 		}
 	}
+}
+
+// A shard write that fails part way leaves no .jsonl.tmp in the export
+// directory, and a re-export that needs fewer shards takes the temps a longer
+// one left behind with it. The swap only knows the files jsonlShardPaths reads
+// as shards, so a temp it steps over is what the cycle's `git add -A` commits
+// (gt-1911b).
+func TestWriteTableShards_FailedWriteLeavesNoTempFile(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// A directory where the second shard's temp belongs: the write cannot
+	// replace it, and a cleanup that only removes files leaves it behind.
+	blocked := filepath.Join(dir, "events.2.jsonl.tmp")
+	if err := os.MkdirAll(blocked, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked, "half-written"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := writeTableShards(dir, "events", syntheticRows(12, 200), 1000); err == nil {
+		t.Fatal("a write that failed reported success")
+	}
+	if left := shardTemps(t, dir); len(left) != 0 {
+		t.Errorf("temps after the failed write = %v, want none", left)
+	}
+
+	// A longer export a crash cut short leaves temps past the last shard the
+	// new export writes.
+	for _, name := range []string{"events.7.jsonl.tmp", "issues.7.jsonl.tmp"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := writeTableShards(dir, "events", syntheticRows(3, 200), 1000); err != nil {
+		t.Fatalf("the shorter re-export: %v", err)
+	}
+	if left := shardTemps(t, dir); !slices.Equal(left, []string{"issues.7.jsonl.tmp"}) {
+		t.Errorf("temps after the shorter re-export = %v, want the other table's temp alone", left)
+	}
+}
+
+// shardTemps lists the .tmp files in dir, in name order.
+func shardTemps(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	var names []string
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") {
+			names = append(names, e.Name())
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // The size screen runs while the shards are still only in memory: refused after
