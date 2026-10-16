@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -36,13 +37,13 @@ func TestCostPanelReplacesTheDeepSeekAndUsagePanels(t *testing.T) {
 		`costUsage(box, u, s)`,
 		// Neither a spend report nor usage records is one line.
 		`if (!d && !u) {`,
-		`"no spend or usage report"`,
+		`"no spend report"`,
 	} {
 		if !strings.Contains(cost, want) {
 			t.Errorf("renderCost has no %q", want)
 		}
 	}
-	if spend, gcp, usage := strings.Index(cost, "costSpend("), strings.Index(cost, "costGCP("), strings.Index(cost, "costUsage("); !(spend < gcp && gcp < usage) {
+	if spend, gcp, usage := strings.Index(cost, "costSpend("), strings.LastIndex(cost, "costGCP("), strings.Index(cost, "costUsage("); !(spend < gcp && gcp < usage) {
 		t.Error("renderCost does not draw DeepSeek, then the GCP line, then Usage")
 	}
 	// The one-line case returns before any part is drawn.
@@ -53,7 +54,7 @@ func TestCostPanelReplacesTheDeepSeekAndUsagePanels(t *testing.T) {
 	// The caption carries the usage glance and the spend report's own words,
 	// and the caption is the span.r the watch reads.
 	for _, want := range []string{
-		`note.textContent = readCaption(r, [usage.text].concat(spendWords));`,
+		`note.textContent = readCaption(r, [usage.text || null].concat(spendWords));`,
 		`note.className === "r" && (usage.bad || usage.warn)`,
 	} {
 		if !strings.Contains(cost, want) {
@@ -79,7 +80,7 @@ func TestCostPanelDrawsTheGCPBudgetLine(t *testing.T) {
 	body := pageFunc(t, "costGCP")
 	for _, want := range []string{
 		// The same findings the Cloud panel lists, picked by kind.
-		`((c && c.findings) || []).filter(f => f.kind === "budget_alert")`,
+		`(c.findings || []).filter(f => f.kind === "budget_alert")`,
 		// Project, spent of budget and percent, read back from the sentence.
 		`spent[1] + " of " + spent[3] + " " + spent[2] + " · " + pct[1] + "%"`,
 		`"GCP budget · " + (f.project ? f.project + " · " : "") + what`,
@@ -112,9 +113,120 @@ func TestCostPanelDrawsTheGCPBudgetLine(t *testing.T) {
 		}
 	}
 
-	// No finding, no line: the function appends only inside its loop.
-	if strings.Count(body, "box.append(") != 1 || !strings.Contains(body[strings.Index(body, "for (const f of rows)"):], "box.append(line);") {
-		t.Error("costGCP draws something when there is no budget_alert finding")
+}
+
+// costLine is one top-level child of the Cost panel as drawn.
+type costLine struct {
+	Class string `json:"class"`
+	Text  string `json:"text"`
+}
+
+// drawCost runs renderCost over s and reads back the panel's lines and caption.
+func drawCost(t *testing.T, s map[string]any) (lines []costLine, note drawn) {
+	t.Helper()
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", s)
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.map(c => ({class: c.className, text: c.textContent})))`)
+	if err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	if err := json.Unmarshal([]byte(v.String()), &lines); err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	return lines, dom.element(t, "costnote")
+}
+
+func budgetFinding(severity string) map[string]any {
+	return map[string]any{
+		"kind": "budget_alert", "severity": severity, "project": "proj-a",
+		"detail": "project proj-a has spent 4.57 USD of its 5.00 USD budget this month, 91% of the budget",
+	}
+}
+
+// The budget line says what the patrol says when it can, and says it cannot see
+// when it cannot: silence after a failed read would read as "under budget".
+func TestCostPanelGCPLineByCloudState(t *testing.T) {
+	t.Parallel()
+
+	spend := map[string]any{"balance": 12.5, "live": map[string]any{"ok": true}}
+	cases := []struct {
+		name      string
+		cloud     map[string]any
+		wantClass string // class of the GCP line; "" means none is drawn
+		wantText  string
+	}{
+		{"alert", map[string]any{"state": "fresh", "findings": []any{budgetFinding("urgent")}},
+			"sev-critical", "GCP budget · proj-a · 4.57 of 5.00 USD · 91%"},
+		{"normal alert takes the amber", map[string]any{"state": "fresh", "findings": []any{budgetFinding("normal")}},
+			"sev-medium", "GCP budget · proj-a · 4.57 of 5.00 USD · 91%"},
+		{"alert from an overdue patrol", map[string]any{"state": "overdue", "findings": []any{budgetFinding("urgent")}},
+			"sev-critical", "91% · patrol overdue"},
+		{"other findings are not a budget line", map[string]any{"state": "fresh", "findings": []any{map[string]any{"kind": "idle_vm", "severity": "low"}}},
+			"", ""},
+		{"fresh and under the threshold", map[string]any{"state": "fresh"}, "", ""},
+		{"read failed", map[string]any{"state": "error", "note": "reports unreadable"},
+			"badc", "GCP budget · cloud read failed · reports unreadable"},
+		{"overdue with no alert", map[string]any{"state": "overdue"},
+			"warnc", "patrol overdue, no alert on its last report"},
+		{"report missing", map[string]any{"state": "missing", "note": "no report"},
+			"empty", "GCP budget · no patrol report"},
+		{"no patrol on this machine", map[string]any{"state": "missing", "no_patrol": true}, "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lines, _ := drawCost(t, map[string]any{"spend": spend, "cloud": tc.cloud})
+			var gcp []costLine
+			for _, l := range lines {
+				if strings.HasPrefix(l.Text, "GCP budget") {
+					gcp = append(gcp, l)
+				}
+			}
+			if tc.wantClass == "" {
+				if len(gcp) != 0 {
+					t.Fatalf("drew a GCP line %+v, want none", gcp)
+				}
+				return
+			}
+			if len(gcp) != 1 || gcp[0].Class != tc.wantClass || !strings.Contains(gcp[0].Text, tc.wantText) {
+				t.Fatalf("GCP lines = %+v, want one of class %q containing %q", gcp, tc.wantClass, tc.wantText)
+			}
+		})
+	}
+}
+
+// With neither a spend report nor usage there is one line, the cloud's budget
+// alert still shows, and the caption never says "undefined".
+func TestCostPanelEmptyStateAndCaption(t *testing.T) {
+	t.Parallel()
+
+	// No spend command configured, usage not scanned yet: one honest line.
+	lines, note := drawCost(t, map[string]any{})
+	if len(lines) != 1 || !strings.Contains(lines[0].Text, "no spend report") || !strings.Contains(lines[0].Text, "usage still reading") {
+		t.Errorf("empty panel = %+v, want one line naming the spend report and the usage read", lines)
+	}
+	if note.Text != "" {
+		t.Errorf("empty panel caption = %q, want none", note.Text)
+	}
+
+	// The same panel with a budget alert keeps the alert.
+	lines, _ = drawCost(t, map[string]any{"cloud": map[string]any{"state": "fresh", "findings": []any{budgetFinding("urgent")}}})
+	if len(lines) != 2 || !strings.HasPrefix(lines[1].Text, "GCP budget") {
+		t.Errorf("empty panel with an alert = %+v, want the line and the alert", lines)
+	}
+
+	// Usage not yet answered beside a spend report: the caption is the report's
+	// own words, with no undefined in it.
+	spend := map[string]any{"balance": 12.5, "last_sample": "2026-10-15T10:00:00", "live": map[string]any{"ok": true}}
+	_, note = drawCost(t, map[string]any{"spend": spend})
+	if strings.Contains(note.Text, "undefined") || strings.Contains(note.Text, "null") || !strings.Contains(note.Text, "ledger 2026-10-15 10:00:00") {
+		t.Errorf("caption with usage absent = %q", note.Text)
+	}
+
+	// Unreadable usage reaches the caption in the page's failure colour.
+	_, note = drawCost(t, map[string]any{"spend": spend, "usage": map[string]any{"unavailable": true}})
+	if !strings.Contains(note.Text, "usage unreadable") || !strings.Contains(note.Class, "badc") {
+		t.Errorf("caption with unreadable usage = %q (%s)", note.Text, note.Class)
 	}
 }
 

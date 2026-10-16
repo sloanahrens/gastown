@@ -2768,20 +2768,28 @@ function costUsage(box, u, s) {
 // severity. The patrol writes the figures into the finding's Detail sentence
 // ("project P has spent 4.57 USD of its 5.00 USD budget ..., 91% of the
 // budget ..."), so the line reads them back out of it; a sentence that does not
-// match is shown whole rather than dropped. No finding, no line: a project
-// under its alert threshold has nothing to say here.
+// match is shown whole rather than dropped. A healthy patrol with no finding
+// draws no line: a project under its alert threshold has nothing to say here.
+// An unhealthy source does draw one, because a line that exists to alarm must
+// not go quiet when it cannot see: after a failed read, a missing report or an
+// overdue patrol, no alert means "unknown", not "under budget". A machine with
+// no patrol at all has no budget to watch and draws nothing.
 const BUDGET_SPENT = /spent ([\d.,]+) ([A-Za-z]{3}) of its ([\d.,]+) [A-Za-z]{3} budget/;
 const BUDGET_PCT = /(\d+(?:\.\d+)?)% of the budget/;
 function costGCP(box, c) {
-  const rows = ((c && c.findings) || []).filter(f => f.kind === "budget_alert");
+  if (!c) return;
+  if (c.state === "error") { box.append(el("div", "badc", "GCP budget · cloud read failed" + (c.note ? " · " + c.note : ""))); return; }
+  if (c.state === "missing") { if (!c.no_patrol) box.append(el("div", "empty", "GCP budget · no patrol report")); return; }
+  const rows = (c.findings || []).filter(f => f.kind === "budget_alert");
+  const late = c.state === "overdue" ? " · patrol overdue" : "";
   for (const f of rows) {
     const detail = f.detail || "", spent = BUDGET_SPENT.exec(detail), pct = BUDGET_PCT.exec(detail);
     const what = spent && pct ? spent[1] + " of " + spent[3] + " " + spent[2] + " · " + pct[1] + "%" : detail || "alert";
-    const late = c.state === "overdue" ? " · patrol overdue" : "";
     const line = el("div", CLOUD_SEV[f.severity] || "sev-low", "GCP budget · " + (f.project ? f.project + " · " : "") + what + late);
     line.title = detail;
     box.append(line);
   }
+  if (!rows.length && late) box.append(el("div", "warnc", "GCP budget · patrol overdue, no alert on its last report"));
 }
 
 // The Cost panel: what the town is spending, in one place. DeepSeek's balance,
@@ -2798,13 +2806,16 @@ function renderCost(s) {
   box.append(spendBox);
   paintsRead(spendBox, note, r);
   if (!d && !u) {
-    spendBox.append(el("div", "empty", r ? "unavailable — the spend read failed" : "no spend or usage report"));
+    // The usage scan has not answered yet, which is reading, not missing; the
+    // budget line still draws, since an alert needs no spend report.
+    spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + "; usage still reading…"));
+    costGCP(box, s.cloud);
     return;
   }
   const spendWords = costSpend(spendBox, d, r);
   costGCP(box, s.cloud);
   const usage = costUsage(box, u, s);
-  note.textContent = readCaption(r, [usage.text].concat(spendWords));
+  note.textContent = readCaption(r, [usage.text || null].concat(spendWords));
   note.title = usage.title || "";
   // A stale or failed spend read has already coloured the caption; the usage
   // part only colours one that is otherwise plain.
