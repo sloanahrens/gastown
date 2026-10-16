@@ -419,7 +419,7 @@ func (d *DaemonThresholds) RecoveryHeartbeatIntervalD() time.Duration {
 	return DefaultRecoveryHeartbeatInterval
 }
 
-// PressureCPUThresholdV returns the configured or default CPU pressure threshold (load per core).
+// PressureCPUThresholdV returns the configured or default CPU pressure threshold (busy share of the host's cores).
 func (d *DaemonThresholds) PressureCPUThresholdV() float64 {
 	if d != nil && d.PressureCPUThreshold != nil {
 		return *d.PressureCPUThreshold

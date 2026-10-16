@@ -93,6 +93,15 @@ type Daemon struct {
 	// runCmd); nil runs them for real. Tests set it to a fakeCLI.
 	execCmd cmdRunFunc
 
+	// cpuIdleFn replaces the production read of the host's CPU idle percent
+	// in checkPressure (pressure.go); nil runs top. It returns an error for a
+	// reading that could not be taken.
+	cpuIdleFn func() (float64, error)
+
+	// pressureScaleWarn makes checkPressure warn once that the configured
+	// CPU threshold is past the 1.0 a busy share can reach.
+	pressureScaleWarn sync.Once
+
 	// openWorkBeads opens the beads client the daemon's work-bead reads go
 	// through, given bd's whole environment (see workBeads) and the deadline
 	// for one read; nil is bd at bdPath run from the town root. Tests answer
@@ -914,6 +923,8 @@ func (d *Daemon) Run() (err error) {
 	if err := d.checkAllRigsDolt(); err != nil {
 		return err
 	}
+
+	d.warnPressureScale(d.loadOperationalConfig().GetDaemonConfig().PressureCPUThresholdV())
 
 	// Repair metadata.json for all rigs on startup.
 	// This ensures all rigs have proper Dolt server configuration.
