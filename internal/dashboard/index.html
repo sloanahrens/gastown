@@ -624,10 +624,11 @@ const STATE_HELP = {
   idle: "holds nothing"
 };
 // The Work panel's folds (idle seats, parked-rig seats, the queue list) last for
-// the session and are not stored.
+// the session and are not stored. The queue list starts open, so the operator
+// reads the beads without a click; closing it holds across the polls.
 let openIdle = false;
 let openParkedRig = false;
-let openQueueList = false;
+let openQueueList = true;
 // The om panel's Stats and Scores sections start closed and keep the viewer's
 // choice across the periodic redraw and a reload, keyed by section name. Storage
 // that throws — a locked-down browser, private mode — leaves them closed and

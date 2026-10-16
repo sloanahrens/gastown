@@ -231,7 +231,7 @@ func TestTheWorkPanelSummarisesTheQueueAndSplitsTheBlockedList(t *testing.T) {
 
 // TestTheWorkPanelFoldsTheWholeQueueList drives the panel over a queue with
 // blocked rows and reads the list back: it is one disclosure inside the panel,
-// closed by default, and the beads the server marked as step wisps are the
+// open on a fresh page load (gt-u9o36), and the beads the server marked as step wisps are the
 // rows it hides — the same verdict the blocked line above it counted
 // (gt-vcr3z).
 func TestTheWorkPanelFoldsTheWholeQueueList(t *testing.T) {
@@ -250,11 +250,73 @@ func TestTheWorkPanelFoldsTheWholeQueueList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reading the list's fold: %v", err)
 	}
-	if open.String() != "false" {
-		t.Errorf("the queue list starts open, want it folded")
+	if open.String() != "true" {
+		t.Errorf("the queue list starts folded, want it open on the first render")
 	}
 	if !strings.Contains(list.Text, "the full queue list") {
-		t.Errorf("the folded list's summary reads %q", list.Text)
+		t.Errorf("the list's summary reads %q", list.Text)
+	}
+}
+
+// queueListOpen reads whether the Work panel's queue list is drawn open.
+func queueListOpen(t *testing.T, dom *pageDOM) string {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`String(__byId["work"].children.find(c => String(c.className).indexOf("wqueue") >= 0).open)`)
+	if err != nil {
+		t.Fatalf("reading the list's fold: %v", err)
+	}
+	return v.String()
+}
+
+// TestTheWorkPanelKeepsTheQueueListClosedOnceAnOperatorClosesIt closes the
+// list the way a click does and polls again: a poll that changed nothing
+// leaves the element alone, and one that redraws the panel brings the list back
+// closed, as the operator left it (gt-u9o36).
+func TestTheWorkPanelKeepsTheQueueListClosedOnceAnOperatorClosesIt(t *testing.T) {
+	t.Parallel()
+
+	seats := func() []any {
+		return []any{seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute)}
+	}
+	st := workState(seats(), workQueueReading(57, 1, 2, 3))
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderWork", st)
+	if got := queueListOpen(t, dom); got != "true" {
+		t.Fatalf("the list reads open = %s on the first render, want true", got)
+	}
+
+	// A click on the summary flips open and fires the toggle handler.
+	if _, err := dom.vm.RunString(`(() => {
+		const d = __byId["work"].children.find(c => String(c.className).indexOf("wqueue") >= 0);
+		d.open = false;
+		d.ontoggle();
+		globalThis.__queueList = d;
+	})()`); err != nil {
+		t.Fatal(err)
+	}
+
+	dom.call(t, "renderWork", st)
+	same, err := dom.vm.RunString(`String(__byId["work"].children.find(c => String(c.className).indexOf("wqueue") >= 0) === globalThis.__queueList)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if same.String() != "true" {
+		t.Error("an unchanged poll rebuilt the queue list")
+	}
+
+	next := workState(seats(), workQueueReading(58, 1, 2, 3))
+	dom.call(t, "renderWork", next)
+	redrawn, err := dom.vm.RunString(`String(__byId["work"].children.find(c => String(c.className).indexOf("wqueue") >= 0) !== globalThis.__queueList)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if redrawn.String() != "true" {
+		t.Fatal("a changed reading did not redraw the list, so the test says nothing about the next poll")
+	}
+	if got := queueListOpen(t, dom); got != "false" {
+		t.Errorf("the list reads open = %s after the operator closed it and a poll redrew it, want false", got)
 	}
 }
 
