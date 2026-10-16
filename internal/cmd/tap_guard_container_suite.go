@@ -186,6 +186,45 @@ var containerSuiteSlotRunTokens = []string{"gt", "slot", "run"}
 // recursion in matchesPRWorkflowCommand.
 const maxTestGuardNestDepth = 3
 
+// shellCPayloads returns the command strings the shell invokers in segment run
+// with -c. A segment judge reads a quoted payload as one opaque word, so
+// "bash -c 'make gate'" showed it a bash call and nothing else; the callers
+// judge each payload as the command line it is, in the segment's directory
+// (gt-y1zks).
+func shellCPayloads(segment []string) []string {
+	lower := toLowerTokens(segment)
+	var payloads []string
+	for i, word := range lower {
+		if !shellInvokers[filepath.Base(word)] {
+			continue
+		}
+		if idx := shellCPayloadIndex(lower[i+1:]); idx >= 0 {
+			payloads = append(payloads, segment[i+1+idx])
+		}
+	}
+	return payloads
+}
+
+func toLowerTokens(tokens []string) []string {
+	lower := make([]string, len(tokens))
+	for i, t := range tokens {
+		lower[i] = strings.ToLower(t)
+	}
+	return lower
+}
+
+// commandSegment cuts a segment at the ")" that closes the subshell it sits
+// in. A ")" left in the argument list reads as a package argument, which hid
+// "(cd internal/cmd && go test)" from the rule for a bare go test (gt-y1zks).
+func commandSegment(segment []string) []string {
+	for i, tok := range segment {
+		if tok == ")" {
+			return segment[:i]
+		}
+	}
+	return segment
+}
+
 // evaluateContainerSuiteCommand splits command into shell segments (on
 // ;/&&/||/|, same as matchesPRWorkflowCommand) and evaluates each
 // independently, so a "gt slot run -- go test ./..." wrapper and an
@@ -228,12 +267,40 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 	dockerOn := commandEnablesDockerTests(tokens) || envOptIn == "1"
 	vars := shellVarAssignments(tokens)
 
+	// judge covers one segment and the -c payloads of the shells it starts. A
+	// payload runs in the segment's directory (the base when the walk cannot
+	// place it, as for a heredoc body) and inherits the segment's container
+	// opt-in; a slot-run wrapper exempts its payload with the rest of the
+	// segment.
+	judge := func(segment []string, start int) (string, []string) {
+		segment = commandSegment(segment)
+		dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
+		if r, m := evaluateContainerSuiteSegment(segment, dockerOn, dir, known); r != "" {
+			return r, m
+		}
+		if depth >= maxTestGuardNestDepth || containsSubsequence(toLowerTokens(segment), containerSuiteSlotRunTokens) {
+			return "", nil
+		}
+		if !known {
+			dir = cwd
+		}
+		payloadOptIn := envOptIn
+		if dockerOn {
+			payloadOptIn = "1"
+		}
+		for _, payload := range shellCPayloads(segment) {
+			if r, m := evaluateContainerSuiteCommandDepth(proc, payload, dir, payloadOptIn, depth+1); r != "" {
+				return r, m
+			}
+		}
+		return "", nil
+	}
+
 	var segment []string
 	start := 0
 	for i, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
-			if r, m := evaluateContainerSuiteSegment(segment, dockerOn, dir, known); r != "" {
+			if r, m := judge(segment, start); r != "" {
 				return r, m
 			}
 			segment = nil
@@ -242,8 +309,7 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 		}
 		segment = append(segment, tok)
 	}
-	dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
-	if r, m := evaluateContainerSuiteSegment(segment, dockerOn, dir, known); r != "" {
+	if r, m := judge(segment, start); r != "" {
 		return r, m
 	}
 
@@ -420,7 +486,7 @@ func findTestInvocation(tokens []string, tool string) int {
 // dir flag.
 func findInvocation(tokens []string, tool, target string) int {
 	for i := 0; i+1 < len(tokens); i++ {
-		if tokens[i] != tool {
+		if !isInvocationWord(tokens[i], tool) {
 			continue
 		}
 		if tool == "make" {
@@ -440,6 +506,19 @@ func findInvocation(tokens []string, tool, target string) int {
 		}
 	}
 	return -1
+}
+
+// isInvocationWord reports whether tok names tool. make is also reached by
+// path ("/usr/bin/make") and as gmake, GNU make's name on macOS, so its goals
+// are read as they are after a bare make (gt-y1zks). Other tools keep the
+// exact word: go reaches the guards through findGoSubcommand, which has its
+// own binary-name rule.
+func isInvocationWord(tok, tool string) bool {
+	if tool != "make" {
+		return tok == tool
+	}
+	base := filepath.Base(tok)
+	return base == "make" || base == "gmake"
 }
 
 func isAllDigits(s string) bool {

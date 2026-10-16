@@ -71,12 +71,34 @@ func evaluatePolecatTestScope(proc guardProcess, command string) (reason string,
 func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth int) (reason string, matched []string) {
 	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
 	vars := shellVarAssignments(tokens)
+	// judge covers one segment and the -c payloads of the shells it starts. A
+	// payload runs in the segment's directory, or in the base when the walk
+	// cannot place it, as a heredoc body does (gt-y1zks).
+	judge := func(segment []string, start int) (string, []string) {
+		segment = commandSegment(segment)
+		dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
+		if r, m := evaluatePolecatTestScopeSegment(segment, dir, known); r != "" {
+			return r, m
+		}
+		if depth >= maxTestGuardNestDepth {
+			return "", nil
+		}
+		if !known {
+			dir = cwd
+		}
+		for _, payload := range shellCPayloads(segment) {
+			if r, m := evaluatePolecatTestScopeDepth(proc, payload, dir, depth+1); r != "" {
+				return r, m
+			}
+		}
+		return "", nil
+	}
+
 	var segment []string
 	start := 0
 	for i, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
-			if r, m := evaluatePolecatTestScopeSegment(segment, dir, known); r != "" {
+			if r, m := judge(segment, start); r != "" {
 				return r, m
 			}
 			segment = nil
@@ -85,8 +107,7 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth
 		}
 		segment = append(segment, tok)
 	}
-	dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
-	if r, m := evaluatePolecatTestScopeSegment(segment, dir, known); r != "" {
+	if r, m := judge(segment, start); r != "" {
 		return r, m
 	}
 

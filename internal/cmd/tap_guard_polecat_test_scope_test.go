@@ -601,3 +601,79 @@ func TestIsPolecatContext(t *testing.T) {
 		t.Error("isPolecatContext() = false from a polecats/ cwd, want true")
 	}
 }
+
+// A bash -c or sh -c payload is a command line of its own. The segment judge
+// saw it as one quoted word, so a polecat ran the whole suite through a
+// shell it started (gt-y1zks). The payload is judged in the segment's
+// directory, and one that runs no go or make test stays allowed.
+func TestPolecatTestScopeBlocksShellCPayload(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/dag")
+	tests := []struct {
+		name    string
+		command string
+		cwd     string
+		blocked bool
+	}{
+		{"make gate", "bash -c 'make gate'", root, true},
+		{"whole repo go test", "bash -c 'go test ./...'", root, true},
+		{"double quoted heavy package", `sh -c "go test ./internal/cmd"`, root, true},
+		{"path-qualified shell", "/bin/bash -c 'make gate'", root, true},
+		{"login shell flag cluster", "bash -lc 'make gate'", root, true},
+		{"env prefix on the shell", "GOFLAGS=-p=8 bash -c 'make gate'", root, true},
+		{"after another segment", "gofmt -l . && bash -c 'make gate'", root, true},
+		{"nested shell", `bash -c "sh -c 'make gate'"`, root, true},
+		{"payload cds into a heavy package", `bash -c "cd internal/cmd && go test"`, root, true},
+		{"shell started in a heavy package", "bash -c 'go test .'", filepath.Join(root, "internal", "cmd"), true},
+		{"shell started after a cd into a heavy package", "cd internal/cmd && bash -c 'go test'", root, true},
+		{"slot-wrapped shell", "gt slot run --role gastown/flint -- bash -c 'make gate'", root, true},
+
+		{"echo", "bash -c 'echo hi'", root, false},
+		{"filtered heavy package", `bash -c "go test ./internal/cmd -run TestOne"`, root, false},
+		{"light package", "bash -c 'go test ./internal/style'", root, false},
+		{"make lint", "bash -c 'make lint'", root, false},
+		{"script file, not a payload", "bash ./run.sh -c 'make gate'", root, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, tt.cwd), tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
+// A cd inside "(" … ")" moves the command that follows it in the same group,
+// as it does without the parentheses; a group already closed leaves the
+// directory alone (gt-y1zks).
+func TestPolecatTestScopePlacesCdInsideParens(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/dag")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"unparenthesized", "cd internal/cmd && go test", true},
+		{"parenthesized bare go test", "(cd internal/cmd && go test)", true},
+		{"parenthesized dot target", "(cd internal/cmd && go test .)", true},
+		{"parenthesized with spaces", "( cd internal/cmd && go test . )", true},
+		{"parenthesized make gate", "(cd internal/cmd && make gate)", true},
+		{"after an outer cd", "cd internal && (cd cmd && go test)", true},
+		{"nested group closed before the test", "(cd internal/style && (cd ../cmd) && go test)", false},
+		{"group closed before the test", "(cd internal/cmd); go test", false},
+		{"light package", "(cd internal/style && go test .)", false},
+		{"filtered heavy package", "(cd internal/cmd && go test -run TestOne)", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, root), tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
