@@ -596,6 +596,11 @@ func TestNestedShellCommands(t *testing.T) {
 		{"bash -o pipefail -c payload", `bash -o pipefail -c 'git reset --hard origin/main'`, true},
 		{"bash +o noglob -c payload", `bash +o noglob -c 'git reset --hard origin/main'`, true},
 		{"bash -euo pipefail -c safe command", `bash -euo pipefail -c 'echo hello'`, false},
+		{"bash -oe pipefail -c payload", `bash -oe pipefail -c 'git reset --hard origin/main'`, true},
+		{"bash -co pipefail payload", `bash -co pipefail 'git reset --hard origin/main'`, true},
+		{"bash -O extglob -c payload", `bash -O extglob -c 'git reset --hard origin/main'`, true},
+		{"bash -oo with two values -c payload", `bash -oo pipefail errexit -c 'git reset --hard origin/main'`, true},
+		{"script file piped into bash", `cat ./run.sh | bash`, false},
 		{"bash -euo pipefail script file", `bash -euo pipefail ./run.sh -c 'git reset --hard origin/main'`, false},
 		// A quoted script fed to a shell on stdin runs, whether a pipe or a
 		// here-string carries it (the test guards read the same shapes).

@@ -279,8 +279,8 @@ var shellInvokers = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash
 // the invoker may be a path ("/bin/bash"). The first operand is a script file:
 // a "-c" after it belongs to that script, not to the shell (gt-kocid).
 //
-// A cluster ending in o ("-eo", "-euo") owns the next word as the value of its
-// -o, so the payload is the word after that value.
+// Each o or O in a cluster ("-eo", "-euo", "-oc", "-O") owns the next word as
+// its value, so the payload is the word after the values.
 func shellCPayloadIndex(args []string) int {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -293,15 +293,11 @@ func shellCPayloadIndex(args []string) int {
 			// a long option such as --norc or --login
 		case len(a) > 1 && a[0] == '+':
 			// +x style option negation
-			if shellClusterTakesValue(a) {
-				i++
-			}
+			i += shellClusterValues(a)
 		case len(a) > 1 && a[0] == '-':
-			payload := i + 1
-			if shellClusterTakesValue(a) {
-				payload++
-				i++
-			}
+			values := shellClusterValues(a)
+			payload := i + 1 + values
+			i += values
 			if strings.Contains(a[1:], "c") {
 				if payload < len(args) {
 					return payload
@@ -315,12 +311,16 @@ func shellCPayloadIndex(args []string) int {
 	return -1
 }
 
-// shellClusterTakesValue reports whether the shell option word a ("-o", "+o",
-// "-eo", "-euo") ends in o, the letter that takes the next word as its value
-// (-o pipefail). The words a shell reads before its script or -c payload are
-// walked past it by shellCPayloadIndex and shellReadsStdin.
-func shellClusterTakesValue(a string) bool {
-	return len(a) > 1 && (a[0] == '-' || a[0] == '+') && a[1] != '-' && a[len(a)-1] == 'o'
+// shellClusterValues returns how many of the words after the shell option word
+// a ("-o", "+o", "-eo", "-oc", "-O") it owns as values: one for each o (-o
+// pipefail) and O (-O extglob) letter, wherever it sits in the cluster, since
+// the shell reads the letters in order. shellCPayloadIndex and shellReadsStdin
+// walk the words before a script or -c payload past them.
+func shellClusterValues(a string) int {
+	if len(a) < 2 || (a[0] != '-' && a[0] != '+') || a[1] == '-' {
+		return 0
+	}
+	return strings.Count(a[1:], "o") + strings.Count(a[1:], "O")
 }
 
 // nestedCommands extracts shell command strings embedded as arguments to

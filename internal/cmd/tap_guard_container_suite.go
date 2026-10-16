@@ -310,13 +310,9 @@ func shellReadsStdin(args []string) bool {
 			i++
 		case strings.HasPrefix(a, "--"):
 		case len(a) > 1 && a[0] == '+':
-			if shellClusterTakesValue(a) {
-				i++
-			}
+			i += shellClusterValues(a)
 		case len(a) > 1 && a[0] == '-':
-			if shellClusterTakesValue(a) {
-				i++
-			}
+			i += shellClusterValues(a)
 			if strings.Contains(a[1:], "c") {
 				return false
 			}

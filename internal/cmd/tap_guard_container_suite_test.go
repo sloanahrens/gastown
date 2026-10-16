@@ -540,9 +540,9 @@ func TestMakeOutputSyncFlagKeepsTheDirectory(t *testing.T) {
 	}
 }
 
-// A shell option cluster ending in o ("-eo", "-euo") takes the next word as its
-// value, so the script fed to the shell is still the script: the walk used to
-// stop at the value ("pipefail") and judge nothing.
+// A shell option cluster holding o or O ("-eo", "-euo", "-oe", "-O") takes the
+// next word as its value, so the script fed to the shell is still the script:
+// the walk used to stop at the value ("pipefail") and judge nothing.
 func TestShellFedScriptBehindAnOptionValueIsJudged(t *testing.T) {
 	t.Parallel()
 	goRoot := fakeModule(t, "gastown/refinery/rig")
@@ -561,6 +561,15 @@ func TestShellFedScriptBehindAnOptionValueIsJudged(t *testing.T) {
 		{"harmless script piped into bash -eo pipefail", `echo 'make lint' | bash -eo pipefail`, false},
 		{"script file after the option value", `echo 'make test' | bash -eo pipefail ./run.sh`, false},
 		{"-c payload after the option value", `bash -eo pipefail -c 'make test'`, true},
+		{"script piped into bash -oe pipefail", `echo 'make test' | bash -oe pipefail`, true},
+		{"script piped into bash -O extglob", `echo 'make test' | bash -O extglob`, true},
+		{"script piped into bash -oo with two values", `echo 'make test' | bash -oo pipefail errexit`, true},
+		{"script file after two option values", `echo 'make test' | bash -oo pipefail errexit ./run.sh`, false},
+		{"-c payload after a -co cluster's value", `bash -co pipefail 'make test'`, true},
+		{"-c payload after a -O value", `bash -O extglob -c 'make test'`, true},
+		// A producer that is not echo, printf or yes (a file or a download)
+		// feeds a script nothing here can read, so it is not judged.
+		{"script file piped into bash", `cat ./run.sh | bash`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

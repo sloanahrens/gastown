@@ -482,10 +482,10 @@ func shortFlagCluster(word string, letter byte) bool {
 }
 
 func runTapGuardPRWorkflow(cmd *cobra.Command, args []string) error {
-	// All three "if"-matched hook patterns (gh pr create*, git checkout -b*,
-	// git switch -c*) invoke this same command with no argument telling us
-	// which one fired, so the actual command must be read back off stdin
-	// (Claude Code hook protocol).
+	// The hook carries no "if" pattern (gt-3mp1): it fires for every shell
+	// command and gets no argument saying whether gh pr create, git checkout
+	// -b or git switch -c ran, so the command is read back off stdin (Claude
+	// Code hook protocol) and judged in full.
 	return tapGuardPRWorkflow(os.Stdin, os.Stderr, realGuardProcess())
 }
 
