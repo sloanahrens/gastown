@@ -334,7 +334,7 @@ func TestFollowupFeedFoldsAcceptancePastTheLintMaximum(t *testing.T) {
 	if got := specdispatch.CountAcceptance(acceptance); got != specdispatch.MaxAcceptance {
 		t.Errorf("acceptance items = %d, want the max %d:\n%s", got, specdispatch.MaxAcceptance, acceptance)
 	}
-	if !strings.Contains(acceptance, "- [ ] No longer true: the remaining 3 findings under Goal") {
+	if !strings.Contains(acceptance, "- [ ] Finding resolved: the remaining 3 findings under Goal") {
 		t.Errorf("the folded item does not name what it covers:\n%s", acceptance)
 	}
 	// The folded bead still lints as shaped.
@@ -366,9 +366,9 @@ func TestFollowupAcceptanceStatesTheFix(t *testing.T) {
 		t.Fatalf("filed %d beads, want one", len(f.fake.created))
 	}
 	acceptance := specdispatch.Sections(f.fake.created[0].Body)["acceptance"]
-	want := "- [ ] No longer true: swap the nil check (internal/land/note.go:230)\n" +
-		"- [ ] No longer true: name the error (internal/land/note.go)\n" +
-		"- [ ] No longer true: document the hook (internal/land/hook.go)\n"
+	want := "- [ ] Finding resolved: swap the nil check (internal/land/note.go:230)\n" +
+		"- [ ] Finding resolved: name the error (internal/land/note.go)\n" +
+		"- [ ] Finding resolved: document the hook (internal/land/hook.go)\n"
 	if strings.TrimSpace(acceptance) != strings.TrimSpace(want) {
 		t.Errorf("acceptance =\n%s\nwant\n%s", acceptance, want)
 	}
@@ -376,22 +376,36 @@ func TestFollowupAcceptanceStatesTheFix(t *testing.T) {
 
 // TestFollowupFingerprintIsUnchangedByTheAcceptanceWording: the om-fp label
 // comes from the finding's path and raw title, not from the acceptance box, so
-// a bead filed before the "No longer true:" wording and one filed after it are
-// the same finding. The literal is the fingerprint the feed computed before the
-// wording changed (gt-twr9x).
+// a bead filed before the "Finding resolved:" wording and one filed after it are
+// the same finding. The first half pins the label to the raw title; the second
+// hands the feed a bead filed with the older, bare box and shows it is matched
+// instead of filed again (gt-twr9x).
 func TestFollowupFingerprintIsUnchangedByTheAcceptanceWording(t *testing.T) {
 	t.Parallel()
-	const before = "om-fp:0ed2fad2f59e"
-	f := newFollowupFixture(t, 0.8, []Finding{minorAt("internal/land/note.go", 230, "swap the nil check")})
-	f.run()
-	if len(f.fake.created) != 1 {
-		t.Fatalf("filed %d beads, want one", len(f.fake.created))
+	const path, title = "internal/land/note.go", "swap the nil check"
+
+	filed := newFollowupFixture(t, 0.8, []Finding{minorAt(path, 230, title)})
+	filed.run()
+	if len(filed.fake.created) != 1 {
+		t.Fatalf("filed %d beads, want one", len(filed.fake.created))
 	}
-	if got := Fingerprint("internal/land/note.go", "swap the nil check"); got != before {
-		t.Errorf("Fingerprint = %q, want the pre-change %q", got, before)
+	labels := filed.fake.created[0].Labels
+	if !slices.Contains(labels, Fingerprint(path, title)) {
+		t.Errorf("filed labels = %v, want them to carry the raw-title fingerprint %q", labels, Fingerprint(path, title))
 	}
-	if labels := f.fake.created[0].Labels; !slices.Contains(labels, before) {
-		t.Errorf("filed labels = %v, want them to carry %q", labels, before)
+	if box := findingResolved + title; slices.Contains(labels, Fingerprint(path, box)) {
+		t.Errorf("filed labels = %v carry the fingerprint of the acceptance box %q", labels, box)
+	}
+
+	repeat := newFollowupFixture(t, 0.8, []Finding{minorAt(path, 230, title)})
+	repeat.fake.existing = []ExistingFollowup{{
+		ID: "gt-old", Title: "Found: " + title, Status: "open",
+		Description: "## Acceptance\n- [ ] " + title + " (" + path + ":230)\n",
+		Labels:      []string{FollowUpLabel, Fingerprint(path, title)},
+	}}
+	repeat.run()
+	if len(repeat.fake.created) != 0 {
+		t.Errorf("filed %d beads for a finding a bead with the older acceptance wording already carries", len(repeat.fake.created))
 	}
 }
 
