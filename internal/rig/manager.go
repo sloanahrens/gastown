@@ -1175,8 +1175,8 @@ func RepoForgejoIgnoredWarned(path string) bool {
 // ResolveMergeQueueConfig resolves a rig's merge-queue gate commands using
 // the same three-tier precedence `gt sling` uses to populate formula gate
 // vars: rig root config.json merge_queue (floor, gt-me9t) -> repo-committed
-// mayor/rig/.gastown/settings.json (wins over the floor) -> rig-local
-// settings/config.json (operator override, final say).
+// .gastown/settings.json, as the rig repo's main has it (wins over the floor,
+// gt-yj6g1) -> rig-local settings/config.json (operator override, final say).
 //
 // Every gate-command resolution site (loadRigCommandVars, buildRefineryPatrolVars,
 // resolveSetupCommand, mq_submit, done's --pre-verified guard) calls this one
@@ -1190,6 +1190,12 @@ func RepoForgejoIgnoredWarned(path string) bool {
 //
 // Returns nil if no merge-queue config exists at any tier.
 func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig {
+	return ResolveMergeQueueConfigIn(openRepoFile, townRoot, rigName)
+}
+
+// ResolveMergeQueueConfigIn is ResolveMergeQueueConfig over open, the seam its
+// repo-tier read takes (docs/testing.md, "Seams for external tools").
+func ResolveMergeQueueConfigIn(open RepoFileOpener, townRoot, rigName string) *config.MergeQueueConfig {
 	if townRoot == "" || rigName == "" {
 		return nil
 	}
@@ -1205,15 +1211,20 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 	}
 
 	var repoMQ *config.MergeQueueConfig
-	repoRoot := filepath.Join(townRoot, rigName, "mayor", "rig")
-	if repoSettings, _ := config.LoadRepoSettings(repoRoot); repoSettings != nil {
+	repoSettings, repoSource, err := repoTierSettings(open, townRoot, rigName)
+	if err != nil {
+		// Fail closed: a repo tier this run cannot read is dropped, never
+		// resolved from the stale mayor/rig copy it exists to stop trusting
+		// (gt-yj6g1). The floor and the rig-local override still resolve.
+		WarnRepoFileUnreadable(rigName, err)
+	} else if repoSettings != nil {
 		// Strip the Forgejo block: a landed commit must not choose where a
 		// bot token is sent or which login the landing creator check trusts
 		// (gt-fn9e6.14). Every other merge_queue field keeps its precedence.
 		var repoForgejo bool
 		repoMQ, repoForgejo = config.StripRepoForgejo(repoSettings.MergeQueue)
 		if repoForgejo {
-			WarnRepoForgejoIgnored(filepath.Join(repoRoot, config.RepoSettingsPath))
+			WarnRepoForgejoIgnored(repoSource)
 		}
 	}
 
@@ -1225,6 +1236,22 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 
 	mq := config.MergeSettingsCommand(rigRootMQ, repoMQ)
 	return config.MergeSettingsCommand(mq, localMQ)
+}
+
+// repoTierSettings is the repo-committed .gastown/settings.json tier: the
+// tracked file as the rig repo's main has it, the mayor/rig clone's copy when
+// main has none, and nil when the rig has neither. source names the copy that
+// answered, for the warnings a resolved tier raises.
+func repoTierSettings(open RepoFileOpener, townRoot, rigName string) (settings *config.RigSettings, source string, err error) {
+	f, err := ReadRepoFile(open, townRoot, rigName, config.RepoSettingsPath)
+	if err != nil || !f.Found {
+		return nil, "", err
+	}
+	var parsed config.RigSettings
+	if err := json.Unmarshal(f.Data, &parsed); err != nil {
+		return nil, "", fmt.Errorf("rig %s: parsing %s: %w", rigName, f.Source, err)
+	}
+	return &parsed, f.Source, nil
 }
 
 // ResolveForgejoConfig resolves a rig's Forgejo landing settings

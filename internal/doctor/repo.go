@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // Repo is the part of *git.Git doctor's checks work through (docs/testing.md,
@@ -47,6 +48,7 @@ type Repo interface {
 	PathChanged(path string) (bool, error)
 	UntrackedPaths(pathspec string) ([]string, error)
 	DisableSparseCheckout() error
+	ShowFileAtRev(ref, path string) (string, error)
 
 	CloneBareWithBranch(url, dest, branch string) error
 	WorktreeAddExistingForce(path, branch string) error
@@ -69,4 +71,11 @@ func (ctx *CheckContext) gitWithDir(gitDir, workDir string) Repo {
 		return ctx.openGit(gitDir, workDir)
 	}
 	return git.NewGitWithDir(gitDir, workDir)
+}
+
+// rigRepoOpener is rig.ReadRepoFile's opener over ctx's git seam: the checks
+// that read the rig repository's main see the same repositories every other
+// check does.
+func (ctx *CheckContext) rigRepoOpener() rig.RepoFileOpener {
+	return func(repoPath string) rig.RepoFileReader { return ctx.git(repoPath) }
 }

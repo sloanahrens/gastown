@@ -3,7 +3,10 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
 func setupRigWithRubric(t *testing.T, tmpDir, rigName string, editorialConfig string) string {
@@ -84,5 +87,63 @@ func TestEditorialRequiredCheck_NoRubric(t *testing.T) {
 	result := check.Run(ctx)
 	if result.Status != StatusOK {
 		t.Fatalf("expected StatusOK when no rubric present, got %v: %s", result.Status, result.Message)
+	}
+}
+
+// rigRepoWithRubric makes <tmpDir>/<rigName>/.repo.git through gitfake with
+// files committed on main and origin/main set to that commit, and returns the
+// fake world the check reads the repo through.
+func rigRepoWithRubric(t *testing.T, tmpDir, rigName string, files map[string]string) *gitfake.Fake {
+	t.Helper()
+	f := gitfake.New()
+	repo := filepath.Join(tmpDir, rigName, ".repo.git")
+	f.InitBare(t, repo)
+	f.SetRef(t, repo, "refs/remotes/origin/main", f.Commit(t, repo, "main", "main's tip", files))
+	return f
+}
+
+// TestEditorialRequiredCheck_RubricOnMainCloneBehind is the gt-yj6g1 case for
+// this check: the rubric landed on main and the clone has not caught up. Read
+// from the clone alone the rig would report no rubric, and the missing
+// enforcement would go unnoticed.
+func TestEditorialRequiredCheck_RubricOnMainCloneBehind(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	rigName := "testrig"
+	f := rigRepoWithRubric(t, tmpDir, rigName, map[string]string{".om.json": `{"rubric":[]}`})
+	if err := os.MkdirAll(filepath.Join(tmpDir, rigName, "mayor", "rig"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewEditorialRequiredCheck()
+	result := check.Run(withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, f))
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning for main's rubric with editorial.required unset, got %v: %s", result.Status, result.Message)
+	}
+	if len(result.Details) == 0 || !strings.Contains(result.Details[0], "origin/main") {
+		t.Errorf("details = %v, want the rubric's source named as main's copy", result.Details)
+	}
+}
+
+// TestEditorialRequiredCheck_UnreadableRepoWarnsNamingRig: a rig repo the run
+// cannot read is unknown, not a rig without a rubric (gt-yj6g1).
+func TestEditorialRequiredCheck_UnreadableRepoWarnsNamingRig(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	rigName := "testrig"
+	// A .repo.git directory no repository stands behind: every git call on it
+	// fails the way a corrupt repository's does.
+	if err := os.MkdirAll(filepath.Join(tmpDir, rigName, ".repo.git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewEditorialRequiredCheck()
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gitfake.New())
+	result := check.Run(ctx)
+	if result.Status == StatusOK {
+		t.Fatalf("expected a non-OK result when the repo cannot be read, got %v: %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, rigName) {
+		t.Errorf("message %q does not name the rig", result.Message)
 	}
 }
