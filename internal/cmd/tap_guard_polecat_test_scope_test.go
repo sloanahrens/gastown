@@ -414,6 +414,39 @@ func TestPolecatTestScopeMatchAllRunFilter(t *testing.T) {
 	}
 }
 
+// A -run that selects every Test function runs essentially the whole package
+// even though it misses the Example, Benchmark and Fuzz probes, so it bounds
+// nothing; a pattern that names one test, or a prefix of some, still does.
+func TestRunPatternBoundsRunPrefixMatchAll(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		pattern string
+		bounded bool
+	}{
+		{"Test", false},
+		{"^Test", false},
+		{"^Test.*", false},
+		{"Test|Example", false},
+		{"T", false},
+		{"^Test[A-Z]", false},
+		{"Test.*/sub", false},
+
+		{"^TestSpecific$", true},
+		{"TestSpecific", true},
+		{"^TestApply", true},
+		{"TestA|TestB", true},
+		{"TestSpecific/case", true},
+		{"(", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.pattern, func(t *testing.T) {
+			if got := runPatternBoundsRun(tt.pattern); got != tt.bounded {
+				t.Errorf("runPatternBoundsRun(%q) = %v, want %v", tt.pattern, got, tt.bounded)
+			}
+		})
+	}
+}
+
 // runContainerSuiteGuard runs the container-suite guard on input as proc's
 // session and returns its verdict and stderr.
 func runContainerSuiteGuard(input string, proc guardProcess) (string, error) {
