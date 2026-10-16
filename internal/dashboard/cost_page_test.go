@@ -2,8 +2,10 @@ package dashboard
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The Cost panel is one section where DeepSeek and Usage were two, with the GCP
@@ -119,6 +121,7 @@ func TestCostPanelDrawsTheGCPBudgetLine(t *testing.T) {
 type costLine struct {
 	Class string `json:"class"`
 	Text  string `json:"text"`
+	Title string `json:"title"`
 }
 
 // drawCost runs renderCost over s and reads back the panel's lines and caption.
@@ -126,7 +129,7 @@ func drawCost(t *testing.T, s map[string]any) (lines []costLine, note drawn) {
 	t.Helper()
 	dom := newPageDOM(t)
 	dom.call(t, "renderCost", s)
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.map(c => ({class: c.className, text: c.textContent})))`)
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
 	if err != nil {
 		t.Fatalf("reading the Cost panel: %v", err)
 	}
@@ -289,5 +292,292 @@ func TestCostPanelKeepsEveryDeepSeekField(t *testing.T) {
 		if !strings.Contains(spend, want) {
 			t.Errorf("costSpend lost a DeepSeek field: no %q", want)
 		}
+	}
+}
+
+// claudePlan is a Claude plan block as the reader answers it, with the fields in
+// over replacing or (on a nil value) dropping the reader's own: one week at 38%
+// that resets in two days and is projected past its limit at the day's pace, the
+// reading the panel draws a bad-coloured line from.
+func claudePlan(now time.Time, over map[string]any) map[string]any {
+	p := map[string]any{
+		"weekly_pct":             38.0,
+		"five_hour_pct":          9.0,
+		"weekly_resets_at":       now.Add(52 * time.Hour).Unix(),
+		"five_hour_resets_at":    now.Add(3 * time.Hour).Unix(),
+		"pace_per_day_1h":        3.1,
+		"pace_per_day_24h":       9.2,
+		"projected_pct_at_reset": 104.0,
+		"hits_limit_in_days":     6.1,
+		"plan_usd_month":         200.0,
+		"weekly_value_usd":       46.05,
+		"used_value_usd":         17.5,
+		"sampled_at":             now.Unix(),
+		"stale":                  false,
+	}
+	for k, v := range over {
+		if v == nil {
+			delete(p, k)
+			continue
+		}
+		p[k] = v
+	}
+	return p
+}
+
+// resetText is how the page words a rollover: the local weekday and clock time.
+// A page test reads it back from the same instant rather than pinning a weekday
+// that moves with the day the suite runs.
+func resetText(at time.Time) string { return at.Local().Format("Mon 15:04") }
+
+// The plan line is the panel's second line: the DeepSeek part, the Claude plan
+// line directly under it, then the GCP alert and the usage fold, so the two
+// spend meters are read side by side (gt-qn3j4).
+func TestCostPanelDrawsTheClaudePlanLineUnderTheDeepSeekLines(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	reset := now.Add(52 * time.Hour)
+	lines, _ := drawCost(t, map[string]any{
+		"spend":       map[string]any{"balance": 12.5, "live": map[string]any{"ok": true}},
+		"claude_plan": claudePlan(now, nil),
+		"cloud":       map[string]any{"state": "fresh", "findings": []any{budgetFinding("urgent")}},
+		"usage":       map[string]any{},
+	})
+	if len(lines) < 3 {
+		t.Fatalf("the panel drew %d lines: %+v", len(lines), lines)
+	}
+	if !strings.Contains(lines[0].Text, "balance") {
+		t.Errorf("the first line is not the DeepSeek part: %+v", lines[0])
+	}
+	want := "Claude Max · $200/mo · 38% of this week's limit · resets " + resetText(reset) +
+		" · +9.2%/day (24h) · projected 104% at reset · limit in 6.1d"
+	if lines[1].Text != want {
+		t.Errorf("the line under the DeepSeek part = %q, want %q", lines[1].Text, want)
+	}
+	// The panel's own colours, and the badge it carries where it is not plain.
+	if lines[1].Class != "badc" {
+		t.Errorf("a week projected past its limit wears %q, want badc", lines[1].Class)
+	}
+	if !strings.HasPrefix(lines[2].Text, "GCP budget") {
+		t.Errorf("the line after the plan line = %q, want the GCP alert", lines[2].Text)
+	}
+
+	// The panel's redraw draws it in this order, on both paths it can take: a
+	// panel with neither a spend report nor usage still owes the plan line.
+	cost := pageFunc(t, "renderCost")
+	spend := strings.Index(cost, "const spendWords = costSpend(")
+	plan := strings.Index(cost[spend:], "costClaudePlan(")
+	gcp := strings.Index(cost[spend:], "costGCP(")
+	if spend < 0 || !(0 <= plan && plan < gcp) {
+		t.Error("the drawn panel does not go DeepSeek, then the Claude plan line, then the GCP line")
+	}
+	if n := strings.Count(cost, "costClaudePlan("); n != 2 {
+		t.Errorf("renderCost draws the plan line on %d paths, want the drawn panel and its one-line empty state", n)
+	}
+}
+
+// The plan line is drawn from its own reader: with no spend report at all it is
+// still drawn, on its own line, under the line that says the panel has nothing
+// else.
+func TestCostPanelClaudePlanLineDrawsWithoutASpendReport(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	lines, _ := drawCost(t, map[string]any{"claude_plan": claudePlan(now, nil)})
+	if len(lines) != 2 {
+		t.Fatalf("the panel drew %d lines: %+v", len(lines), lines)
+	}
+	if !strings.Contains(lines[0].Text, "no spend report") {
+		t.Errorf("the empty panel's first line = %q, want the missing spend report", lines[0].Text)
+	}
+	if !strings.HasPrefix(lines[1].Text, "Claude Max · ") {
+		t.Errorf("the empty panel's second line = %q, want the plan", lines[1].Text)
+	}
+}
+
+// The line's colour is the panel's verdict on the week: bad at the ceiling the
+// month rollup counts (90% of the limit) or projected past it, a warning past
+// 90%, plain with room left.
+func TestCostPanelClaudePlanLineColours(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	cases := []struct {
+		name string
+		over map[string]any
+		want string
+	}{
+		{"projected past the limit", map[string]any{"projected_pct_at_reset": 104.0}, "badc"},
+		{"a week at the ceiling", map[string]any{"weekly_pct": 90.0, "projected_pct_at_reset": 95.0}, "badc"},
+		{"projected past 90%", map[string]any{"weekly_pct": 40.0, "projected_pct_at_reset": 95.0}, "warnc"},
+		{"reaching the limit is not passing it", map[string]any{"weekly_pct": 40.0, "projected_pct_at_reset": 100.0}, "warnc"},
+		{"projected at 90%", map[string]any{"weekly_pct": 40.0, "projected_pct_at_reset": 90.0}, ""},
+		{"a week with room", map[string]any{"weekly_pct": 40.0, "projected_pct_at_reset": 80.0, "hits_limit_in_days": nil}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lines, _ := drawCost(t, map[string]any{
+				"spend":       map[string]any{"balance": 12.5},
+				"claude_plan": claudePlan(now, tc.over),
+			})
+			if len(lines) < 2 {
+				t.Fatalf("the panel drew %d lines: %+v", len(lines), lines)
+			}
+			if lines[1].Class != tc.want {
+				t.Errorf("the plan line wears %q, want %q (%s)", lines[1].Class, tc.want, lines[1].Text)
+			}
+		})
+	}
+}
+
+// A week the reader could not place is a grey line that says which state it is
+// in, never a week at 0%: the numbers a stale series would carry are the ones
+// that read as an untouched limit.
+func TestCostPanelClaudePlanLineNeverDrawsAWeekItCouldNotRead(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	cases := []struct {
+		name string
+		over map[string]any
+		want string
+	}{
+		{"the samples could not be read", map[string]any{"unavailable": true, "weekly_pct": 0.0, "used_value_usd": 0.0},
+			"Claude plan · unavailable — the status line's samples could not be read"},
+		{"no samples yet", map[string]any{"stale": true, "sampled_at": nil, "weekly_pct": 0.0},
+			"Claude plan · unavailable — the status line has written no samples yet"},
+		{"a sample from a week that has reset", map[string]any{"stale": true, "weekly_resets_at": now.Add(-time.Hour).Unix()},
+			"Claude plan · unavailable — the week the newest sample measures has already reset"},
+		{"an old sample", map[string]any{"stale": true, "sampled_at": now.Add(-45 * time.Minute).Unix()},
+			"Claude plan · unavailable — the newest sample is 45m old"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lines, _ := drawCost(t, map[string]any{
+				"spend":       map[string]any{"balance": 12.5},
+				"claude_plan": claudePlan(now, tc.over),
+			})
+			if len(lines) < 2 {
+				t.Fatalf("the panel drew %d lines: %+v", len(lines), lines)
+			}
+			if lines[1].Class != "empty" {
+				t.Errorf("the plan line wears %q, want the panel's grey (empty)", lines[1].Class)
+			}
+			if lines[1].Text != tc.want {
+				t.Errorf("the plan line = %q, want %q", lines[1].Text, tc.want)
+			}
+			// No percentage and no dollar at all, so no zero of a week nobody read.
+			if strings.ContainsAny(lines[1].Text, "%$") {
+				t.Errorf("a week the reader could not place draws a number: %q", lines[1].Text)
+			}
+			if lines[1].Title != "" {
+				t.Errorf("the plan line carries a hover (%q) over a week it does not draw", lines[1].Title)
+			}
+		})
+	}
+}
+
+// The line's hover carries what it has no room for: the five-hour limit and its
+// reset, the hour's pace, and the share of the plan the week has used, labelled
+// approximate because it is the plan's arithmetic and not a bill (gt-qn3j4).
+func TestCostPanelClaudePlanHoverCarriesTheFiveHourLimitAndThePace(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	lines, _ := drawCost(t, map[string]any{
+		"spend":       map[string]any{"balance": 12.5},
+		"claude_plan": claudePlan(now, nil),
+	})
+	if len(lines) < 2 {
+		t.Fatalf("the panel drew %d lines: %+v", len(lines), lines)
+	}
+	for _, want := range []string{
+		"5-hour limit 9% used, resets " + resetText(now.Add(3*time.Hour)),
+		"1-hour pace +3.1%/day",
+		"about $17.50 of this week's $46.05, approximate",
+	} {
+		if !strings.Contains(lines[1].Title, want) {
+			t.Errorf("the plan line's hover has no %q: %q", want, lines[1].Title)
+		}
+	}
+
+	// A five-hour reading with no reset instant beside it says so rather than
+	// dropping the limit from the hover.
+	lines, _ = drawCost(t, map[string]any{
+		"spend":       map[string]any{"balance": 12.5},
+		"claude_plan": claudePlan(now, map[string]any{"five_hour_resets_at": nil}),
+	})
+	if !strings.Contains(lines[1].Title, "5-hour limit 9% used, no reset instant") {
+		t.Errorf("the hover of a reading with no reset instant = %q", lines[1].Title)
+	}
+}
+
+// The page names the plan from its price, off a constant that mirrors the
+// reader's default (ClaudePlanDefaultUSD): a change to the default that left the
+// page behind would call a $100 plan Max.
+func TestCostPanelClaudePlanNameTracksTheReaderDefaultPrice(t *testing.T) {
+	t.Parallel()
+
+	want := "const CLAUDE_PLAN_MAX_USD = " + strconv.Itoa(int(ClaudePlanDefaultUSD)) + ";"
+	if !strings.Contains(string(indexHTML), want) {
+		t.Errorf("the page does not carry %q, so its plan name has drifted from the reader's default price", want)
+	}
+
+	now := time.Now()
+	lines, _ := drawCost(t, map[string]any{
+		"spend":       map[string]any{"balance": 12.5},
+		"claude_plan": claudePlan(now, map[string]any{"plan_usd_month": 100.0}),
+	})
+	if len(lines) < 2 || !strings.HasPrefix(lines[1].Text, "Claude plan · $100/mo · ") {
+		t.Errorf("a plan at another price = %q, want it named for what it is", lines[1].Text)
+	}
+}
+
+// The line's own words for the week: the day count when the limit is coming,
+// "at the limit" for a week already spent (the reader sends 0 rather than a day
+// count there), nothing when the limit outlives the window, and a signed pace
+// that reads as falling when the week falls.
+func TestCostPanelClaudePlanLineWordsTheWeek(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	cases := []struct {
+		name string
+		over map[string]any
+		want []string
+		gone []string
+	}{
+		{"a limit inside the week", nil, []string{"· limit in 6.1d"}, nil},
+		{"a week already at the limit", map[string]any{"weekly_pct": 107.0, "hits_limit_in_days": 0.0},
+			[]string{"107% of this week's limit", "· at the limit"}, []string{"limit in"}},
+		{"a limit beyond the window", map[string]any{"hits_limit_in_days": nil, "projected_pct_at_reset": 80.0},
+			[]string{"projected 80% at reset"}, []string{"limit in", "at the limit"}},
+		{"a falling week", map[string]any{"pace_per_day_24h": -1.2, "projected_pct_at_reset": 30.0, "hits_limit_in_days": nil},
+			[]string{"-1.2%/day (24h)"}, []string{"limit in", "at the limit"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lines, _ := drawCost(t, map[string]any{
+				"spend":       map[string]any{"balance": 12.5},
+				"claude_plan": claudePlan(now, tc.over),
+			})
+			if len(lines) < 2 {
+				t.Fatalf("the panel drew %d lines: %+v", len(lines), lines)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(lines[1].Text, want) {
+					t.Errorf("the plan line has no %q: %q", want, lines[1].Text)
+				}
+			}
+			for _, gone := range tc.gone {
+				if strings.Contains(lines[1].Text, gone) {
+					t.Errorf("the plan line still carries %q: %q", gone, lines[1].Text)
+				}
+			}
+		})
 	}
 }

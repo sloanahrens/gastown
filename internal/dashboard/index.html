@@ -2821,12 +2821,89 @@ function costGCP(box, c) {
   if (!rows.length && late) box.append(el("div", "warnc", "GCP budget · patrol overdue, no alert on its last report"));
 }
 
+// The Claude plan line of the Cost panel: the second summary line of the panel,
+// drawn from State.ClaudePlan (gt-9drev's reader) directly under the DeepSeek
+// part, so the two spend meters are read side by side. Its reader answers a week
+// or a named failure and never a week it could not place: a series too old to
+// measure drawn as 0% would say the limit is untouched (gt-qn3j4).
+
+// The series carries limits and percentages, not the plan's name, so the line
+// names the subscription its price buys: the reader's default price
+// (ClaudePlanDefaultUSD) is the Max plan's, and any other price buys a plan this
+// page cannot name.
+const CLAUDE_PLAN_MAX_USD = 200;
+const planName = usd => Math.round(usd) === CLAUDE_PLAN_MAX_USD ? "Claude Max" : "Claude plan";
+
+// planReset is a rollover as the operator reads it: the local weekday and clock
+// time. The weekday comes from the page's own table because a browser's locale
+// short name is not what a page test can read back.
+const WEEKDAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const planReset = secs => {
+  const d = new Date(secs * 1000);
+  return WEEKDAY[d.getDay()] + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
+};
+
+// A percentage of a limit reads whole, as the status line samples it — a tenth
+// of a percent of a week is not a decision. A pace keeps its tenth, since it is
+// the number that says how fast the week is going.
+const planPct = v => Math.round(v) + "%";
+const planPace = v => (v > 0 ? "+" : "") + Number(v).toFixed(1) + "%/day";
+
+// planClass is the line's colour: a week at the ceiling the month rollup counts
+// (90% of the limit) or projected past the limit is bad, one projected past 90%
+// warns, and a week with room left is plain.
+function planClass(c) {
+  if (c.weekly_pct >= 90 || c.projected_pct_at_reset > 100) return "badc";
+  return c.projected_pct_at_reset > 90 ? "warnc" : "";
+}
+
+// planUnread is why the line carries no week at all: each state the reader can
+// leave it in that holds no number, named as itself.
+function planUnread(c) {
+  if (c.unavailable) return "the status line's samples could not be read";
+  if (!c.sampled_at) return "the status line has written no samples yet";
+  if (c.weekly_resets_at && c.weekly_resets_at * 1000 <= Date.now()) return "the week the newest sample measures has already reset";
+  return "the newest sample is " + fmtDur((Date.now() - c.sampled_at * 1000) / 1000) + " old";
+}
+
+// costClaudePlan draws the line into box. No block at all is the reader's first
+// poll not answered yet — the start-up silence the GCP line keeps too — and
+// every answer after it is a week or a named failure.
+function costClaudePlan(box, c) {
+  if (!c) return;
+  if (c.unavailable || c.stale) { box.append(el("div", "empty", "Claude plan · unavailable — " + planUnread(c))); return; }
+  const line = el("div", planClass(c), [
+    planName(c.plan_usd_month),
+    // The plan's price, not a bill: the line reads "$200/mo" whole, since cents
+    // on a monthly price are noise.
+    "$" + Math.round(c.plan_usd_month) + "/mo",
+    planPct(c.weekly_pct) + " of this week's limit",
+    c.weekly_resets_at ? "resets " + planReset(c.weekly_resets_at) : "no reset instant in the newest sample",
+    planPace(c.pace_per_day_24h) + " (24h)",
+    "projected " + planPct(c.projected_pct_at_reset) + " at reset",
+    // A week already at its limit is reached at no pace, so the reader sends 0
+    // for it rather than a day count.
+    c.hits_limit_in_days == null ? null : c.hits_limit_in_days > 0 ? "limit in " + c.hits_limit_in_days.toFixed(1) + "d" : "at the limit",
+  ].filter(Boolean).join(" · "));
+  // The hover has what the line has no room for: the five-hour limit, the hour's
+  // pace, and what the week's share of the plan comes to. Those dollars are the
+  // plan's own share of the month rather than a bill, so they are labelled
+  // approximate.
+  line.title = [
+    "5-hour limit " + planPct(c.five_hour_pct) + " used" + (c.five_hour_resets_at ? ", resets " + planReset(c.five_hour_resets_at) : ", no reset instant in the newest sample"),
+    "1-hour pace " + planPace(c.pace_per_day_1h),
+    "about " + money(c.used_value_usd) + " of this week's " + money(c.weekly_value_usd) + ", approximate (the plan's share of the month, not a bill)",
+    c.sampled_at ? "newest sample " + fmtDur((Date.now() - c.sampled_at * 1000) / 1000) + " ago" : null,
+  ].filter(Boolean).join(" · ");
+  box.append(line);
+}
+
 // The Cost panel: what the town is spending, in one place. DeepSeek's balance,
-// pace and credit, the usage scan's estimate and slow runs, the GCP budget
-// alert, and what each om review bar costs in rework. The panel greys with the
-// spend read it is mostly drawn from; a part whose own read has not answered
-// says so on its own line. With neither a spend report nor usage records there
-// is one line and nothing else.
+// pace and credit, the Claude plan line under them, the usage scan's estimate
+// and slow runs, the GCP budget alert, and what each om review bar costs in
+// rework. The panel greys with the spend read it is mostly drawn from; a part
+// whose own read has not answered says so on its own line. With neither a spend
+// report nor usage records there is one line and nothing else.
 function renderCost(s) {
   const box = $("cost"), note = $("costnote");
   box.replaceChildren();
@@ -2837,12 +2914,15 @@ function renderCost(s) {
   paintsRead(spendBox, note, r);
   if (!d && !u) {
     // The usage scan has not answered yet, which is reading, not missing; the
-    // budget line still draws, since an alert needs no spend report.
+    // budget line still draws, since an alert needs no spend report, and the
+    // plan line with it, since its own reader owes the panel nothing.
     spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + "; usage still reading…"));
+    costClaudePlan(box, s.claude_plan);
     costGCP(box, s.cloud);
     return;
   }
   const spendWords = costSpend(spendBox, d, r);
+  costClaudePlan(box, s.claude_plan);
   costGCP(box, s.cloud);
   const usage = costUsage(box, u, s);
   costRework(box, s.rework);
