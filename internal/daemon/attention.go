@@ -1316,6 +1316,9 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 				}
 				beadsFor[cacheKey] = issue
 			}
+			if issue == nil {
+				continue
+			}
 			notes := issue.Notes
 			if land.HasOverseerReviewNote(notes, rec.Head) {
 				continue
