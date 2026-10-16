@@ -221,9 +221,9 @@ var runFilterProbes = []string{"TestA", "ExampleB", "BenchmarkC", "FuzzD", "x"}
 // -run filter that bounds the run. A filter may come as -run before the
 // packages, or as -test.run after "--" (passed straight to the test binary),
 // in the "-run X" or "-run=X" form with one or two dashes. The last one wins,
-// as it does in go. A pattern that selects every test ("-run .", "-run ”",
-// "-run '.*'") bounds nothing, so it does not count: matching only the
-// part before a "/" is go's rule for the first level of subtests (gt-ff2l8). A
+// as it does in go. A pattern that selects every test (-run . or -run .* or an
+// empty one) bounds nothing, so it does not count; go matches only the part
+// before a "/" against the test name, the first level of subtests (gt-ff2l8). A
 // pattern go cannot compile fails the run before any test starts, and a
 // -run with no value is go's own usage error, so neither leaves anything to
 // run. The probes are a heuristic for "matches everything"; a pattern that
