@@ -40,12 +40,17 @@ const (
 	DefaultRecoveryHeartbeatInterval = 3 * time.Minute
 
 	// Pressure check defaults — fully opt-in. All zero = disabled.
-	// Configure in settings/config.json under operational.daemon to enable.
-	// Example: {"pressure_cpu_threshold": 0.9, "pressure_mem_threshold_gb": 0.5}
+	// Configure in settings/config.json under operational.daemon to enable;
+	// PressureThresholdsExample is a working setting.
 	// pressure_cpu_threshold is the busy share per core, in (0, 1]: 0.9 is 90% busy.
 	DefaultPressureCPUThreshold   = 0.0
 	DefaultPressureMemThresholdGB = 0.0
 	DefaultPressureMaxSessions    = 0
+
+	// PressureThresholdsExample is the operational.daemon setting that turns
+	// the pressure check on; a test decodes it, so it cannot drift from the
+	// DaemonThresholds keys or leave the busy-share range.
+	PressureThresholdsExample = `{"pressure_cpu_threshold": 0.9, "pressure_mem_threshold_gb": 0.5}`
 )
 
 // Mail defaults.
