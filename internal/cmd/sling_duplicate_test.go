@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1350,7 +1351,7 @@ func TestSpecHoldKnobsFromReadsTheTown(t *testing.T) {
 
 	t.Run("a town that set nothing gets the dispatcher's defaults", func(t *testing.T) {
 		t.Parallel()
-		knobs, ok := specHoldKnobsFrom(duplicateTown(t))
+		knobs, ok := specHoldKnobsFrom(duplicateTown(t), io.Discard)
 		if !ok {
 			t.Fatal("a town with no settings file still answers the knobs")
 		}
@@ -1366,7 +1367,7 @@ func TestSpecHoldKnobsFromReadsTheTown(t *testing.T) {
 		t.Parallel()
 		townRoot := duplicateTown(t)
 		writeModelsSettings(t, townRoot, `{"polecat_pool":{"max_priority":1,"shape_gate":"off"}}`)
-		knobs, ok := specHoldKnobsFrom(townRoot)
+		knobs, ok := specHoldKnobsFrom(townRoot, io.Discard)
 		if !ok {
 			t.Fatal("a readable settings file answers the knobs")
 		}

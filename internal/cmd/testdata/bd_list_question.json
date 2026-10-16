@@ -1,0 +1,21 @@
+[
+  {
+    "id": "hq-q7x2k",
+    "title": "retry policy for a rejected merge",
+    "description": "## Question\nShould the landing worker retry a rejected merge?\n\n## Recommended answer\nYes: retry twice, then raise an escalation.\n\n## Held work\ngt-wisp-590yk, hq-cv-abc",
+    "status": "open",
+    "priority": 2,
+    "issue_type": "task",
+    "owner": "owner@example.invalid",
+    "created_at": "2026-10-08T13:00:00Z",
+    "created_by": "gastown/overseer",
+    "updated_at": "2026-10-08T13:00:00Z",
+    "labels": [
+      "overseer-question",
+      "effort:session"
+    ],
+    "dependency_count": 0,
+    "dependent_count": 2,
+    "comment_count": 0
+  }
+]

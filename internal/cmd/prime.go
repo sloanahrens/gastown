@@ -52,7 +52,7 @@ var primeHookSource string
 var primeHookSessionID string
 
 // primeHandoffReason stores the reason from the handoff marker (e.g., "compaction").
-// Set by checkHandoffMarker when a marker with a reason field is found.
+// Set by handlePrimeHandoffMarker when a marker with a reason field is found.
 var primeHandoffReason string
 
 // Role represents a detected agent role. The vocabulary itself lives in
@@ -182,13 +182,8 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
-	// Check for handoff marker (prevents handoff loop bug)
-	if primeDryRun {
-		if reason := checkHandoffMarkerDryRun(os.Stdout, primeExplain, cwd); reason != "" {
-			primeHandoffReason = reason
-		}
-	} else {
-		checkHandoffMarker(cwd)
+	if reason := handlePrimeHandoffMarker(os.Stdout, cwd, primeState, primeDryRun, primeExplain); reason != "" {
+		primeHandoffReason = reason
 	}
 
 	warnRoleMismatch(roleInfo, cwd)
@@ -425,6 +420,23 @@ func primeCompactResume(w io.Writer, ctx RoleContext, hookSource, handoffReason 
 	return nil
 }
 
+// handlePrimeHandoffMarker checks for a handoff marker (prevents the handoff
+// loop bug). A real prime consumes the marker; --dry-run and --state only
+// report. --state must not consume it: detectSessionState reads the marker
+// itself, so consuming it first would report "normal" and leave the next real
+// prime without its post-handoff warning. It returns the handoff reason the
+// marker carried, "" when it carried none or was left alone.
+func handlePrimeHandoffMarker(w io.Writer, cwd string, state, dryRun, explainOn bool) (reason string) {
+	switch {
+	case state:
+		return ""
+	case dryRun:
+		return checkHandoffMarkerDryRun(w, explainOn, cwd)
+	default:
+		return checkHandoffMarkerTo(w, cwd)
+	}
+}
+
 // validatePrimeFlags checks that CLI flag combinations are valid.
 func validatePrimeFlags() error {
 	if primeState && (primeHookMode || primeDryRun || primeExplain) {
@@ -471,19 +483,8 @@ func resolvePrimeWorkspace() (cwd, townRoot string, err error) {
 // Called when --hook flag is set for LLM runtime hook integration.
 func handlePrimeHookMode(townRoot, cwd string) {
 	sessionID, source := readHookSessionID()
-	if !primeDryRun {
-		persistSessionID(townRoot, sessionID)
-		if cwd != townRoot {
-			persistSessionID(cwd, sessionID)
-		}
-	}
+	startPrimeHookSession(townRoot, cwd, sessionID, primeDryRun, signalAgentReady)
 	primeHookSessionID = sessionID
-
-	// ZFC: Signal agent readiness via tmux env var (gt-sk5u).
-	// WaitForCommand polls for this instead of probing the process tree.
-	// This handles agents wrapped in shell scripts where pane_current_command
-	// remains "bash" even though the agent is running as a descendant.
-	signalAgentReady()
 
 	// Store source for compact/resume detection in runPrime
 	primeHookSource = source
@@ -492,6 +493,26 @@ func handlePrimeHookMode(townRoot, cwd string) {
 	for _, line := range hookSessionBeaconLines(sessionID, source) {
 		fmt.Println(line)
 	}
+}
+
+// startPrimeHookSession is the part of hook mode that changes the machine: it
+// persists the session ID and signals the agent ready. A dry run is a preview
+// and does neither, so --hook --dry-run leaves the live tmux session's
+// environment alone. signal is signalAgentReady in production.
+func startPrimeHookSession(townRoot, cwd, sessionID string, dryRun bool, signal func()) {
+	if dryRun {
+		return
+	}
+	persistSessionID(townRoot, sessionID)
+	if cwd != townRoot {
+		persistSessionID(cwd, sessionID)
+	}
+
+	// ZFC: Signal agent readiness via tmux env var (gt-sk5u).
+	// WaitForCommand polls for this instead of probing the process tree.
+	// This handles agents wrapped in shell scripts where pane_current_command
+	// remains "bash" even though the agent is running as a descendant.
+	signal()
 }
 
 // hookSessionBeaconLines returns the bracketed session/source markers used by
@@ -1018,11 +1039,17 @@ var firePolecatHookUnresolvableEscalation = func(agentID, detail string) {
 // Returns (nil, ErrHookUnresolvable) when the agent bead points at a hook bead
 // that cannot be resolved — the polecat must fail fast rather than pontificate.
 func findAgentWorkOnce(ctx RoleContext, agentID string) (*beads.Issue, error) {
+	return findAgentWorkVia(ctx, agentID, func(dir string) beads.Client { return beads.New(dir) })
+}
+
+// findAgentWorkVia is findAgentWorkOnce reading each database through open,
+// so a test can answer for a bd that fails.
+func findAgentWorkVia(ctx RoleContext, agentID string, open func(dir string) beads.Client) (*beads.Issue, error) {
 	// Use rig root for beads queries instead of ctx.WorkDir. Polecat worktrees
 	// rely on .beads/redirect which can fail to resolve in edge cases, causing
 	// polecats to miss hooked work and exit immediately. The rig root directory
 	// always has the authoritative .beads/ database. (GH#2503)
-	b := beads.New(rigBeadsRoot(ctx))
+	b := open(rigBeadsRoot(ctx))
 
 	// Agent bead's hook_bead field. NOTE: updateAgentHookBead was made a no-op
 	// (see sling_helpers.go), so HookBead is typically empty. Kept for backward
@@ -1031,10 +1058,10 @@ func findAgentWorkOnce(ctx RoleContext, agentID string) (*beads.Issue, error) {
 	var staleHookErr error
 	if agentBeadID != "" {
 		agentBeadDir := beads.ResolveHookDir(ctx.TownRoot, agentBeadID, ctx.WorkDir)
-		ab := beads.New(agentBeadDir)
+		ab := open(agentBeadDir)
 		if agentBead, err := ab.Show(agentBeadID); err == nil && agentBead != nil && agentBead.HookBead != "" {
 			hookBeadDir := beads.ResolveHookDir(ctx.TownRoot, agentBead.HookBead, ctx.WorkDir)
-			hb := beads.New(hookBeadDir)
+			hb := open(hookBeadDir)
 			hookBead, showErr := hb.Show(agentBead.HookBead)
 			if showErr == nil && hookBead != nil &&
 				(hookBead.Status == beads.StatusHooked || hookBead.Status == "in_progress") {
@@ -1044,8 +1071,11 @@ func findAgentWorkOnce(ctx RoleContext, agentID string) (*beads.Issue, error) {
 			// This is the cross-rig dispatch failure mode (gt-el4): an `hq-`
 			// bead was handed to a polecat whose DB only resolves `gt-`. Fail
 			// fast — never pontificate. The escalation above puts the bead in
-			// front of the operator, who decides whether to re-issue.
-			if hookBead == nil || isBeadNotFound(showErr) {
+			// front of the operator, who decides whether to re-issue. Any other
+			// Show error (a bd that timed out, a dropped connection) says nothing
+			// about the bead, so it escalates nothing and the assignee query
+			// below decides.
+			if hookBead == nil && (showErr == nil || isBeadNotFound(showErr)) {
 				staleHookErr = fmt.Errorf("%w: agent=%s hook_bead=%s cwd=%s: %v",
 					ErrHookUnresolvable, agentID, agentBead.HookBead, ctx.WorkDir, showErr)
 			}
@@ -1062,11 +1092,20 @@ func findAgentWorkOnce(ctx RoleContext, agentID string) (*beads.Issue, error) {
 	// HQ beads (hq-* prefix) stored in townRoot/.beads, not the rig's database.
 	// Matches the fallback in molecule_status.go and unsling.go. (gt-dtq7)
 	if len(hookedBeads) == 0 && ctx.TownRoot != "" {
-		townB := beads.New(filepath.Join(ctx.TownRoot, ".beads"))
-		if townWork, err := listAssignedActiveWork(townB, agentID); err == nil && len(townWork) > 0 {
-			hookedBeads = townWork
+		townB := open(filepath.Join(ctx.TownRoot, ".beads"))
+		townWork, err := listAssignedActiveWork(townB, agentID)
+		if err != nil {
+			// A bead that cannot be resolved is the more specific failure and
+			// the caller fails fast on it; the town error would only mask it.
+			if staleHookErr != nil {
+				return nil, staleHookErr
+			}
+			// The rig query found nothing, so this answer is the only one left:
+			// an hq- hook behind a failing town query must read as a database
+			// error, not as "no work assigned" (GH#2638).
+			return nil, fmt.Errorf("querying town active work: %w", err)
 		}
-		// Town-level fallback errors are non-fatal — rig-level query succeeded
+		hookedBeads = townWork
 	}
 
 	if len(hookedBeads) == 0 {

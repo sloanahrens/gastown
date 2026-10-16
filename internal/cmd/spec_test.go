@@ -2095,3 +2095,77 @@ func TestSpecLintHelpNamesTheDaemonSection(t *testing.T) {
 		}
 	}
 }
+
+// childrenFailBD is a store whose child read fails.
+type childrenFailBD struct {
+	beads.Client
+	err error
+}
+
+func (b childrenFailBD) Children(string) ([]*beads.Issue, error) { return nil, b.err }
+
+// TestOnceWriterDropsRepeats: the same settings failure, seen once per peer,
+// reaches stderr once; a different warning still gets through.
+func TestOnceWriterDropsRepeats(t *testing.T) {
+	t.Parallel()
+	var sink bytes.Buffer
+	w := &onceWriter{w: &sink}
+	for _, line := range []string{"settings bad\n", "settings bad\n", "children of gt-a\n", "settings bad\n"} {
+		fmt.Fprint(w, line)
+	}
+	if got, want := sink.String(), "settings bad\nchildren of gt-a\n"; got != want {
+		t.Errorf("wrote %q, want %q", got, want)
+	}
+}
+
+// TestSpecPeerHeldFromWarnsOnReadFailure: a peer-hold question whose inputs will
+// not read answers "not held" — the guard keeps refusing rather than guessing —
+// but says so on stderr. A corrupt settings file used to disable every peer hold
+// without a word.
+func TestSpecPeerHeldFromWarnsOnReadFailure(t *testing.T) {
+	t.Parallel()
+
+	peer := sling.Duplicate{ID: "gt-peer", Title: "Fix TestFoo", Status: "open", Priority: 1, IssueType: "task",
+		Ready: sling.Readiness{Description: specTestDescription, Acceptance: specTestAcceptance}}
+
+	t.Run("corrupt town settings", func(t *testing.T) {
+		t.Parallel()
+		var warned bytes.Buffer
+		townRoot := duplicateTown(t)
+		writeModelsSettings(t, townRoot, "{not json")
+
+		if got := specPeerHeldPinnedTo(&warned, townRoot, filepath.Join(townRoot, "gastown", "mayor", "rig"), peer); got != "" {
+			t.Errorf("unreadable settings held the peer: %q, want not held", got)
+		}
+		if out := warned.String(); !strings.Contains(out, "config.json") || !strings.Contains(out, "not held") {
+			t.Errorf("warning = %q, want one naming the settings file and the not-held answer", out)
+		}
+	})
+
+	t.Run("unreadable child set", func(t *testing.T) {
+		t.Parallel()
+		var warned bytes.Buffer
+		knobs := specHoldKnobs{MaxPriority: 2, ShapeGate: specdispatch.ShapeGateOff, Warn: &warned}
+
+		store := childrenFailBD{err: errors.New("dial tcp 127.0.0.1:3307: connection refused")}
+		if got := specPeerHeldFrom(store, knobs, peer); got != "" {
+			t.Errorf("an unreadable child set held the peer: %q, want not held", got)
+		}
+		if out := warned.String(); !strings.Contains(out, "gt-peer") || !strings.Contains(out, "connection refused") {
+			t.Errorf("warning = %q, want one naming the peer and the read error", out)
+		}
+	})
+
+	t.Run("readable inputs stay silent", func(t *testing.T) {
+		t.Parallel()
+		var warned bytes.Buffer
+		knobs := specHoldKnobs{MaxPriority: 2, ShapeGate: specdispatch.ShapeGateOff, Warn: &warned}
+
+		if got := specPeerHeldFrom(beadsfake.New(), knobs, peer); got != "" {
+			t.Errorf("a clean peer was held: %q", got)
+		}
+		if warned.Len() != 0 {
+			t.Errorf("a clean read warned: %q", warned.String())
+		}
+	})
+}

@@ -1,7 +1,10 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -75,6 +78,35 @@ func questionIDs(rows []dashboard.QuestionRow) []string {
 		out = append(out, r.ID)
 	}
 	return out
+}
+
+// TestHeldCountFromBdListJSON: the held count is read off `bd list --json`'s
+// dependent_count (omitempty on the Issue field, so a renamed key decodes to
+// zero without an error). Every other test hands the reader a beads.Issue with
+// the field already set, so none would notice bd dropping or renaming it. This
+// one starts from the JSON, in the shape bd prints (testdata/bd_list_question.json:
+// the fields of a `bd list --json` row, with the text and owner replaced; one
+// question holding two beads), through the same decode beads.List runs.
+func TestHeldCountFromBdListJSON(t *testing.T) {
+	t.Parallel()
+
+	data, err := os.ReadFile(filepath.Join("testdata", "bd_list_question.json"))
+	if err != nil {
+		t.Fatalf("bd list payload fixture: %v", err)
+	}
+	var issues []*beads.Issue
+	if err := json.Unmarshal(data, &issues); err != nil {
+		t.Fatalf("decode the bd list payload: %v", err)
+	}
+
+	f := &fakeQuestions{issues: issues}
+	q := f.reader().read(questionsNow)
+	if q.Unavailable || len(q.Rows) != 1 {
+		t.Fatalf("the payload's one question reads as %+v, want one row", q)
+	}
+	if got := q.Rows[0].HeldCount; got != 2 {
+		t.Errorf("HeldCount = %d, want the payload's dependent_count of 2", got)
+	}
 }
 
 // The panel's query names the label and the open statuses, and carries no
