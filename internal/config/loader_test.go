@@ -425,6 +425,25 @@ func TestRigSettingsValidation(t *testing.T) {
 	}
 }
 
+// TestValidateMergeQueueConfigRejectsNegativeFollowupBackpressure: zero is the
+// documented "use the default" value and a negative is read as that default
+// too, so a typo'd -1 must be refused rather than silently become 40.
+func TestValidateMergeQueueConfigRejectsNegativeFollowupBackpressure(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		value   int
+		wantErr bool
+	}{{-1, true}, {-40, true}, {0, false}, {1, false}, {40, false}} {
+		err := validateMergeQueueConfig(&MergeQueueConfig{FollowupBackpressure: tc.value})
+		if (err != nil) != tc.wantErr {
+			t.Errorf("followup_backpressure %d: error = %v, wantErr %v", tc.value, err, tc.wantErr)
+		}
+		if tc.wantErr && err != nil && !strings.Contains(err.Error(), "followup_backpressure") {
+			t.Errorf("followup_backpressure %d: error %q does not name the key", tc.value, err)
+		}
+	}
+}
+
 func TestDefaultMergeQueueConfig(t *testing.T) {
 	t.Parallel()
 	cfg := DefaultMergeQueueConfig()
@@ -2484,7 +2503,7 @@ func TestDaemonPatrolConfigValidation(t *testing.T) {
 	}
 }
 
-func TestLoadDaemonPatrolConfigBadScheduledStopAfterKeepsConfig(t *testing.T) {
+func TestLoadDaemonPatrolConfigKeepsBadScheduledStopAfterForWriteback(t *testing.T) {
 	t.Parallel()
 	for _, bad := range []string{"90min", "1h30", "-5m"} {
 		t.Run(bad, func(t *testing.T) {
@@ -2504,31 +2523,46 @@ func TestLoadDaemonPatrolConfigBadScheduledStopAfterKeepsConfig(t *testing.T) {
 			if og == nil || !og.Enabled {
 				t.Fatalf("overrun_guard = %+v, want enabled", og)
 			}
-			if og.ScheduledStopAfter != "" {
-				t.Errorf("ScheduledStopAfter = %q, want cleared so the default applies", og.ScheduledStopAfter)
+			if og.ScheduledStopAfter != bad {
+				t.Errorf("ScheduledStopAfter = %q, want the operator's %q kept", og.ScheduledStopAfter, bad)
 			}
 			if cd := cfg.Patrols.CheckpointDog; cd == nil || !cd.Enabled || cd.IntervalStr != "7m" {
 				t.Errorf("checkpoint_dog = %+v, want enabled with interval 7m", cd)
+			}
+
+			// The read-modify-write callers (gt config set, the lifecycle
+			// defaults) load, change something else and save: the bad value
+			// must still be in the file afterwards.
+			cfg.Patrols.CheckpointDog.IntervalStr = "9m"
+			if err := WriteConfigJSON(path, cfg, 0o644); err != nil {
+				t.Fatalf("WriteConfigJSON: %v", err)
+			}
+			saved, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(saved), `"scheduled_stop_after": "`+bad+`"`) {
+				t.Errorf("saved file lost scheduled_stop_after %q:\n%s", bad, saved)
 			}
 		})
 	}
 }
 
-func TestDropBadScheduledStopAfterWarns(t *testing.T) {
+func TestWarnBadScheduledStopAfterWarns(t *testing.T) {
 	t.Parallel()
 	cfg := overrunScheduledLimit("90min")
 	var buf strings.Builder
-	dropBadScheduledStopAfter(&buf, cfg)
+	warnBadScheduledStopAfter(&buf, cfg)
 	if got := buf.String(); !strings.Contains(got, `"90min"`) || !strings.Contains(got, "scheduled_stop_after") {
 		t.Errorf("warning = %q, want it to name scheduled_stop_after and the bad value", got)
 	}
-	if got := cfg.Patrols.OverrunGuard.ScheduledStopAfter; got != "" {
-		t.Errorf("ScheduledStopAfter = %q, want cleared", got)
+	if got := cfg.Patrols.OverrunGuard.ScheduledStopAfter; got != "90min" {
+		t.Errorf("ScheduledStopAfter = %q, want the value left as written", got)
 	}
 
 	good := overrunScheduledLimit("90m")
 	buf.Reset()
-	dropBadScheduledStopAfter(&buf, good)
+	warnBadScheduledStopAfter(&buf, good)
 	if buf.Len() != 0 || good.Patrols.OverrunGuard.ScheduledStopAfter != "90m" {
 		t.Errorf("a valid value was touched: warning %q, value %q", buf.String(), good.Patrols.OverrunGuard.ScheduledStopAfter)
 	}

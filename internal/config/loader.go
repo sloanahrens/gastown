@@ -232,6 +232,11 @@ func validateMergeQueueConfig(c *MergeQueueConfig) error {
 	if c.MaxReadyForDispatch < 0 {
 		return fmt.Errorf("%w: max_ready_for_dispatch must be non-negative", ErrMissingField)
 	}
+	// Zero means the default of 40 and so would a negative, so a typo'd -1
+	// would silently set a bound the operator did not mean.
+	if c.FollowupBackpressure < 0 {
+		return fmt.Errorf("%w: followup_backpressure must be non-negative", ErrMissingField)
+	}
 
 	return nil
 }
@@ -535,8 +540,8 @@ func LoadDaemonPatrolConfig(path string) (*DaemonPatrolConfig, error) {
 		return nil, err
 	}
 
-	dropBadScheduledStopAfter(os.Stderr, &config)
-	if err := validateDaemonPatrolConfig(&config); err != nil {
+	warnBadScheduledStopAfter(os.Stderr, &config)
+	if err := validateDaemonPatrolConfigIdentity(&config); err != nil {
 		return nil, err
 	}
 
@@ -552,12 +557,21 @@ func SaveDaemonPatrolConfig(path string, config *DaemonPatrolConfig) error {
 	return WriteConfigJSON(path, config, 0644)
 }
 
-func validateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
+// validateDaemonPatrolConfigIdentity checks the type and version: all a load
+// requires, since a bad scheduled_stop_after loads with a warning.
+func validateDaemonPatrolConfigIdentity(c *DaemonPatrolConfig) error {
 	if c.Type != "daemon-patrol-config" && c.Type != "" {
 		return fmt.Errorf("%w: expected type 'daemon-patrol-config', got '%s'", ErrInvalidType, c.Type)
 	}
 	if c.Version > CurrentDaemonPatrolConfigVersion {
 		return fmt.Errorf("%w: got %d, max supported %d", ErrInvalidVersion, c.Version, CurrentDaemonPatrolConfigVersion)
+	}
+	return nil
+}
+
+func validateDaemonPatrolConfig(c *DaemonPatrolConfig) error {
+	if err := validateDaemonPatrolConfigIdentity(c); err != nil {
+		return err
 	}
 	if s := badScheduledStopAfter(c); s != "" {
 		return fmt.Errorf("daemon.patrols.overrun_guard.scheduled_stop_after %q: want a duration of zero or more, such as \"60m\"", s)
@@ -583,13 +597,14 @@ func badScheduledStopAfter(c *DaemonPatrolConfig) string {
 	return ""
 }
 
-// dropBadScheduledStopAfter clears a bad scheduled_stop_after and says so on
-// warn, so the overrun guard uses its default limit and the rest of the config
-// still loads. Save still refuses the value (validateDaemonPatrolConfig).
-func dropBadScheduledStopAfter(warn io.Writer, c *DaemonPatrolConfig) {
+// warnBadScheduledStopAfter says on warn that scheduled_stop_after is not a
+// usable duration and leaves the value in place: the overrun guard falls back
+// to its default limit on one it cannot use (overrunScheduledStopAfter), and a
+// caller that reads the config and saves it back must not erase what the
+// operator wrote. Save still refuses the value (validateDaemonPatrolConfig).
+func warnBadScheduledStopAfter(warn io.Writer, c *DaemonPatrolConfig) {
 	if s := badScheduledStopAfter(c); s != "" {
 		fmt.Fprintf(warn, "warning: daemon.patrols.overrun_guard.scheduled_stop_after %q is not a duration of zero or more, using the default\n", s)
-		c.Patrols.OverrunGuard.ScheduledStopAfter = ""
 	}
 }
 
