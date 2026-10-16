@@ -2049,6 +2049,12 @@ func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars m
 			continue
 		}
 		if tokens[i] == "(" && shellCommandStart(tokens, i) {
+			// A group still open at end holds the command the walk is placing,
+			// so its cds are that command's: `(cd A && make test)` runs make
+			// in A (gt-y1zks).
+			if !subshellClosesBefore(tokens, i, end) {
+				continue
+			}
 			subshells++
 			continue
 		}
@@ -2122,6 +2128,25 @@ func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars m
 		}
 	}
 	return root, lost
+}
+
+// subshellClosesBefore reports whether the "(" at open has its ")" before end.
+// Groups opened inside it are matched first, so the ")" of an inner one is not
+// taken for the outer's.
+func subshellClosesBefore(tokens []string, open, end int) bool {
+	depth := 0
+	for i := open + 1; i < end; i++ {
+		switch {
+		case tokens[i] == "(" && shellCommandStart(tokens, i):
+			depth++
+		case tokens[i] == ")":
+			if depth == 0 {
+				return true
+			}
+			depth--
+		}
+	}
+	return false
 }
 
 // cdWalkListEnd returns the index of the ";" that ends the "&&" list a cd

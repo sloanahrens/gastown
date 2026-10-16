@@ -1832,3 +1832,67 @@ func TestFindInvocation(t *testing.T) {
 		})
 	}
 }
+
+// make is found by path and as gmake, with its goals read as they are after a
+// bare make, while other words that merely end in make stay unmatched
+// (gt-y1zks).
+func TestFindInvocationPathQualifiedMake(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		tokens []string
+		want   int
+	}{
+		{"bare make", []string{"make", "test"}, 0},
+		{"usr bin make", []string{"/usr/bin/make", "test"}, 0},
+		{"homebrew make", []string{"/opt/homebrew/bin/make", "-j4", "test"}, 0},
+		{"gmake", []string{"gmake", "test"}, 0},
+		{"path-qualified gmake", []string{"/usr/local/bin/gmake", "clean", "test"}, 0},
+		{"after an env prefix", []string{"env", "/usr/bin/make", "test"}, 1},
+		{"path-qualified make without the goal", []string{"/usr/bin/make", "build"}, -1},
+		{"word ending in make", []string{"cmake", "test"}, -1},
+		{"word starting with make", []string{"makefile", "test"}, -1},
+		{"directory named make", []string{"/opt/make/bin/tool", "test"}, -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := findInvocation(tt.tokens, "make", "test"); got != tt.want {
+				t.Errorf("findInvocation(%q, make, test) = %d, want %d", tt.tokens, got, tt.want)
+			}
+		})
+	}
+}
+
+// The container rule reads a -c payload and a parenthesized cd as the scope
+// rule does, and a slot-run wrapper still exempts the shell it starts
+// (gt-y1zks).
+func TestContainerSuiteShellCPayloadAndParens(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/dag")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"make test in a shell", "bash -c 'make test'", true},
+		{"gmake test", "gmake test", true},
+		{"path-qualified make test", "/usr/bin/make test", true},
+		{"container package in a shell, opt-in in the payload", `sh -c "GT_TEST_DOCKER=1 go test ./internal/beads"`, true},
+		{"container package in a shell, opt-in on the shell", `GT_TEST_DOCKER=1 sh -c "go test ./internal/beads"`, true},
+		{"container package in a parenthesized cd", "(cd internal/beads && GT_TEST_DOCKER=1 go test)", true},
+		{"slot-wrapped shell", `gt slot run --role gastown/flint -- bash -c "GT_TEST_DOCKER=1 go test ./internal/beads"`, false},
+		{"no opt-in, no container", "bash -c 'go test ./internal/beads'", false},
+		{"echo", "bash -c 'echo hi'", false},
+		{"light package in a parenthesized cd", "(cd internal/style && GT_TEST_DOCKER=1 go test .)", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, matched := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
