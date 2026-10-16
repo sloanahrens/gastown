@@ -28,7 +28,7 @@ func TestDeepReviewBeadsCarryARegressionTest(t *testing.T) {
 	}{
 		{
 			"a code finding's acceptance item names the test that fails before the fix",
-			"naming the test that fails before the fix and passes after (file, test name, assertion) that `## Gate` runs",
+			"naming the test that fails before the fix and passes after (file, test name, assertion), which `## Gate` runs",
 		},
 		{
 			"a batch bead takes one such acceptance item per finding",
@@ -87,19 +87,19 @@ func TestDeepReviewFailsALandingOnlyOnItsOwnLines(t *testing.T) {
 	}{
 		{
 			"the FAIL carries the finding beads it broke, one --finding each",
-			"`FAIL --finding <finding bead>`",
+			"`FAIL --finding <bead>`",
 		},
 		{
 			"the FAIL is for a finding on a line the landing's own diff added or changed",
-			"when a CONFIRMED finding sits on a line that landing's own diff added or changed",
+			"when a CONFIRMED finding sits on a line its diff added or changed",
 		},
 		{
-			"a file the landing merely touched is a PASS, so the item is not failed for it",
-			"otherwise `PASS`, since a file it merely touched is not its doing",
+			"any other finding, a file merely touched included, is a PASS",
+			"or changed; else PASS.",
 		},
 		{
 			"the open item names the findings and clears on a later PASS",
-			"A FAIL keeps the item open, naming its findings, until a later PASS",
+			"A FAIL stays open, naming findings, until a later PASS",
 		},
 	} {
 		if !strings.Contains(step, want.text) {
