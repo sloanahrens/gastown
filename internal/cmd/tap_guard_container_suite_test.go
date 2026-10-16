@@ -2738,4 +2738,48 @@ func TestTapGuardDeepReviewP3Batch(t *testing.T) {
 			t.Errorf("evaluatePolecatTestScope(%q) reason = %q, want %q", command, reason, want)
 		}
 	})
+
+	// The shell turns \$ into $ inside a backtick body too, so a "\$(...)" there
+	// is a live substitution the body's own parse runs (gt-tder1).
+	t.Run("escaped_dollar_in_backticks", func(t *testing.T) {
+		command := "echo `echo \\$(make test)`"
+		if reason, _ := evaluatePolecatTestScope(fakeGuardProcess(nil, root), command); reason == "" {
+			t.Errorf("evaluatePolecatTestScope(%q) allowed, want blocked", command)
+		}
+	})
+}
+
+// substitutionBody drops the backslash of each \\, \` and \$ pair in a backtick
+// body, the three the shell unescapes there, in one left-to-right pass: "\$("
+// becomes the live "$(", while "\\$(" becomes "\$(", a literal "$(" behind a
+// backslash. Any other backslash stays, and a "$(...)" or process-substitution
+// body is returned as written (gt-tder1).
+func TestSubstitutionBody(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain backticks", "x=`pwd`", "pwd"},
+		{"escaped nested backtick", "x=`echo \\`pwd\\``", "echo `pwd`"},
+		{"escaped dollar substitution", "echo `echo \\$(git reset --hard)`", "echo $(git reset --hard)"},
+		{"escaped backslash", "x=`echo \\\\ hi`", "echo \\ hi"},
+		{"doubled backslash then dollar", "x=`echo \\\\$(make test)`", "echo \\$(make test)"},
+		{"other escape stays", "x=`echo \\n`", "echo \\n"},
+		{"dollar paren body as written", `x=$(echo \$(pwd))`, `echo \$(pwd)`},
+		{"process substitution body as written", `cat <(echo \$(pwd))`, `echo \$(pwd)`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			spans := commandSubstitutionSpans(tt.in)
+			if len(spans) != 1 {
+				t.Fatalf("commandSubstitutionSpans(%q) = %d spans, want 1", tt.in, len(spans))
+			}
+			if got := substitutionBody(tt.in, spans[0]); got != tt.want {
+				t.Errorf("substitutionBody(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
 }
