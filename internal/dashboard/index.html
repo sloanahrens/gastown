@@ -916,7 +916,7 @@ function workQueue(box, s, q, r) {
 // a comma inside a title or description cannot make two seats read as one key.
 function workKey(s) {
   const q = s.queue;
-  const seats = (s.polecats || []).map(p => JSON.stringify([p.rig, p.name, p.state, p.agent, p.bead, p.title, p.description, p.reason, p.slung || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h])).join(";");
+  const seats = (s.polecats || []).map(p => JSON.stringify([p.rig, p.name, p.state, p.rig_parked, p.agent, p.bead, p.title, p.description, p.reason, p.slung || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h])).join(";");
   // The dispatcher's skips share a poll with the queue neither of them rides:
   // its own reader ticks six times as often, and it is what tags a row unshaped.
   const named = ((s.dispatch && s.dispatch.named) || []).map(n => n.bead + ":" + (n.reason || "")).join(",");
