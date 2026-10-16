@@ -1175,8 +1175,8 @@ func RepoForgejoIgnoredWarned(path string) bool {
 // ResolveMergeQueueConfig resolves a rig's merge-queue gate commands using
 // the same three-tier precedence `gt sling` uses to populate formula gate
 // vars: rig root config.json merge_queue (floor, gt-me9t) -> repo-committed
-// mayor/rig/.gastown/settings.json (wins over the floor) -> rig-local
-// settings/config.json (operator override, final say).
+// .gastown/settings.json, as the rig repo's main has it (wins over the floor,
+// gt-yj6g1) -> rig-local settings/config.json (operator override, final say).
 //
 // Every gate-command resolution site (loadRigCommandVars, buildRefineryPatrolVars,
 // resolveSetupCommand, mq_submit, done's --pre-verified guard) calls this one
@@ -1190,8 +1190,25 @@ func RepoForgejoIgnoredWarned(path string) bool {
 //
 // Returns nil if no merge-queue config exists at any tier.
 func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig {
+	return ResolveMergeQueueConfigIn(openRepoFile, townRoot, rigName)
+}
+
+// ResolveMergeQueueConfigIn is ResolveMergeQueueConfig over open, the seam its
+// repo-tier read takes (docs/testing.md, "Seams for external tools"). A repo
+// tier it cannot read is dropped and reported (WarnRepoFileUnreadable); the
+// floor and the rig-local override still resolve.
+func ResolveMergeQueueConfigIn(open RepoFileOpener, townRoot, rigName string) *config.MergeQueueConfig {
+	mq, _ := resolveMergeQueueConfigIn(open, townRoot, rigName)
+	return mq
+}
+
+// resolveMergeQueueConfigIn is ResolveMergeQueueConfigIn plus the error of a
+// repo-committed tier the run could not read, which the resolution does not
+// carry: a caller that must not act on a resolution missing a tier — the
+// landing remote, gt-yj6g1 — reads it and fails closed.
+func resolveMergeQueueConfigIn(open RepoFileOpener, townRoot, rigName string) (*config.MergeQueueConfig, error) {
 	if townRoot == "" || rigName == "" {
-		return nil
+		return nil, nil
 	}
 
 	var rigRootMQ *config.MergeQueueConfig
@@ -1205,15 +1222,23 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 	}
 
 	var repoMQ *config.MergeQueueConfig
-	repoRoot := filepath.Join(townRoot, rigName, "mayor", "rig")
-	if repoSettings, _ := config.LoadRepoSettings(repoRoot); repoSettings != nil {
+	var repoErr error
+	repoSettings, repoSource, err := repoTierSettings(open, townRoot, rigName)
+	if err != nil {
+		// Fail closed: a repo tier this run cannot read is dropped, never
+		// resolved from the stale mayor/rig copy it exists to stop trusting
+		// (gt-yj6g1). The floor and the rig-local override still resolve, and
+		// the error goes to the caller with them rather than replacing them.
+		WarnRepoFileUnreadable(rigName, err)
+		repoErr = err
+	} else if repoSettings != nil {
 		// Strip the Forgejo block: a landed commit must not choose where a
 		// bot token is sent or which login the landing creator check trusts
 		// (gt-fn9e6.14). Every other merge_queue field keeps its precedence.
 		var repoForgejo bool
 		repoMQ, repoForgejo = config.StripRepoForgejo(repoSettings.MergeQueue)
 		if repoForgejo {
-			WarnRepoForgejoIgnored(filepath.Join(repoRoot, config.RepoSettingsPath))
+			WarnRepoForgejoIgnored(repoSource)
 		}
 	}
 
@@ -1224,27 +1249,63 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 	}
 
 	mq := config.MergeSettingsCommand(rigRootMQ, repoMQ)
-	return config.MergeSettingsCommand(mq, localMQ)
+	return config.MergeSettingsCommand(mq, localMQ), repoErr
+}
+
+// repoTierSettings is the repo-committed .gastown/settings.json tier: the
+// tracked file as the rig repo's main has it, the mayor/rig clone's copy when
+// main has none, and nil when the rig has neither. source names the copy that
+// answered, for the warnings a resolved tier raises.
+func repoTierSettings(open RepoFileOpener, townRoot, rigName string) (settings *config.RigSettings, source string, err error) {
+	f, err := ReadRepoFile(open, townRoot, rigName, config.RepoSettingsPath)
+	if err != nil || !f.Found {
+		return nil, "", err
+	}
+	var parsed config.RigSettings
+	if err := json.Unmarshal(f.Data, &parsed); err != nil {
+		return nil, "", fmt.Errorf("rig %s: parsing %s: %w", rigName, f.Source, err)
+	}
+	return &parsed, f.Source, nil
 }
 
 // ResolveForgejoConfig resolves a rig's Forgejo landing settings
-// (merge_queue.forgejo) from the operator-owned tiers ResolveMergeQueueConfig
-// reads: the rig root config.json floor, then the rig-local
-// settings/config.json override. The block is operator-only, so a repo-committed
-// .gastown/settings.json never chooses it (gt-fn9e6.14).
+// (merge_queue.forgejo) from the tiers ResolveMergeQueueConfig reads — the rig
+// root config.json floor, the repo-committed .gastown/settings.json, and the
+// rig-local settings/config.json override — with the block itself
+// operator-only: a repo-committed .gastown/settings.json never chooses it
+// (gt-fn9e6.14).
 //
 // It is a reader beside ResolveMergeQueueConfig, not a second precedence: it
 // delegates, so the merge stays in config.MergeSettingsCommand and the two
-// resolvers can never disagree about which tier won (gt-fn9e6.3).
+// resolvers can never disagree about which tier won (gt-fn9e6.3). The repo
+// tier is read even though it cannot carry the block, so a landed one is
+// reported rather than passed over in silence (WarnRepoForgejoIgnored).
 //
 // Returns nil when no tier sets a forgejo block, which is every rig until a
 // cutover slice adds one.
 func ResolveForgejoConfig(townRoot, rigName string) *config.ForgejoConfig {
-	mq := ResolveMergeQueueConfig(townRoot, rigName)
+	return ResolveForgejoConfigIn(openRepoFile, townRoot, rigName)
+}
+
+// ResolveForgejoConfigIn is ResolveForgejoConfig over open, the seam its
+// repo-tier read takes (docs/testing.md, "Seams for external tools"): the
+// daemon resolves through ResolveForgejoConfigIn with its own git seam, so its
+// git-free unit tier starts no git (internal/testpolicy/gitfree.txt).
+func ResolveForgejoConfigIn(open RepoFileOpener, townRoot, rigName string) *config.ForgejoConfig {
+	fc, _ := resolveForgejoConfigIn(open, townRoot, rigName)
+	return fc
+}
+
+// resolveForgejoConfigIn is ResolveForgejoConfigIn plus the error of a
+// repo-committed tier the run could not read: no block at any tier and a block
+// missing because its tier was unreadable both return nil, and only the caller
+// that is choosing a host can act on the difference (gt-yj6g1).
+func resolveForgejoConfigIn(open RepoFileOpener, townRoot, rigName string) (*config.ForgejoConfig, error) {
+	mq, err := resolveMergeQueueConfigIn(open, townRoot, rigName)
 	if mq == nil {
-		return nil
+		return nil, err
 	}
-	return mq.Forgejo
+	return mq.Forgejo, err
 }
 
 // LandingRemoteOrigin is the remote a rig lands through when its settings name
@@ -1280,7 +1341,24 @@ func ResolveLandingRemote(townRoot, rigName string) (string, error) {
 // a verdict that never comes, so the rig lands through its Forgejo remote or not
 // at all (gt-fn9e6.18).
 func ResolveLandingRemoteIn(repo LandingRemotes, townRoot, rigName string) (string, error) {
-	fc := ResolveForgejoConfig(townRoot, rigName)
+	return ResolveLandingRemoteWith(openRepoFile, repo, townRoot, rigName)
+}
+
+// ResolveLandingRemoteWith is ResolveLandingRemoteIn over open, the seam the
+// Forgejo block's repo-tier read takes, so a caller whose unit tier runs no
+// git reads the block through its own git seam rather than this process's
+// (docs/testing.md, "Seams for external tools"). A repo tier this run cannot
+// read is an error naming the rig, never origin.
+func ResolveLandingRemoteWith(open RepoFileOpener, repo LandingRemotes, townRoot, rigName string) (string, error) {
+	fc, err := resolveForgejoConfigIn(open, townRoot, rigName)
+	if err != nil {
+		// A repo-committed block this run cannot read may name another host, so
+		// origin is not the answer either: landing through it would push
+		// candidates where the block said not to and wait on a verdict that
+		// never comes. The rig lands through its Forgejo remote or not at all
+		// (gt-fn9e6.18, gt-yj6g1).
+		return "", fmt.Errorf("rig %s: %w", rigName, err)
+	}
 	if fc == nil || strings.TrimSpace(fc.RemoteURL) == "" {
 		return LandingRemoteOrigin, nil
 	}

@@ -22,7 +22,9 @@ import (
 
 // newTierSweepDaemon is a daemon over a temp town whose rigs.json lists rigs,
 // with the log, the feed and the outside effects faked. Each rig gets the
-// .repo.git directory the cycle looks for.
+// .repo.git directory the cycle looks for, and the daemon's git seam reads a
+// fake world rather than starting git (the cycle resolves each rig's
+// repo-committed settings tier, gt-yj6g1).
 func newTierSweepDaemon(t *testing.T, now time.Time, rigs ...string) (*Daemon, *tierSweepRunRecorder, *tierSweepFakeBeads, *bytes.Buffer) {
 	t.Helper()
 	town := t.TempDir()
@@ -51,6 +53,7 @@ func newTierSweepDaemon(t *testing.T, now time.Time, rigs ...string) (*Daemon, *
 		dogFeedFn:      (&feedCapture{}).record,
 		tierSweepSeams: tierSweepSeams{run: rec.run, beads: func(string) tierSweepBeadStore { return bd }},
 	}
+	useGitfake(t, d)
 	return d, rec, bd, &logs
 }
 

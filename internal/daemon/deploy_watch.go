@@ -1191,7 +1191,7 @@ func (d *Daemon) deployRepos() []deployRepo {
 	townRoot := d.config.TownRoot
 	var out []deployRepo
 	for _, name := range landingWorkerRigs(d.patrolConfig, d.getKnownRigs()) {
-		fc := rig.ResolveForgejoConfig(townRoot, name)
+		fc := rig.ResolveForgejoConfigIn(d.repoFileOpener(), townRoot, name)
 		if fc == nil || fc.RemoteURL == "" {
 			continue
 		}

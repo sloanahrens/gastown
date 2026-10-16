@@ -2,8 +2,6 @@ package doctor
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -29,6 +27,11 @@ func NewEditorialRequiredCheck() *EditorialRequiredCheck {
 
 // Run checks whether the rig repo's .om.json rubric is backed by
 // merge_queue.editorial.required.
+//
+// The rubric is read as the rig repo's main has it, so a clone that has not
+// pulled since the rubric landed does not read as a rig with no rubric
+// (gt-yj6g1); a repo this run cannot read, and a rubric only the clone carries,
+// each warn rather than reporting none.
 func (c *EditorialRequiredCheck) Run(ctx *CheckContext) *CheckResult {
 	rigPath := ctx.RigPath()
 	if rigPath == "" {
@@ -39,16 +42,36 @@ func (c *EditorialRequiredCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	rubricPath := filepath.Join(rigPath, "mayor", "rig", ".om.json")
-	if _, err := os.Stat(rubricPath); err != nil {
+	rubric, err := rig.ReadRepoFile(ctx.rigRepoOpener(), ctx.TownRoot, ctx.RigName, ".om.json")
+	if err != nil {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("cannot read the rig's .om.json rubric: %v", err),
+			FixHint: "Verify the rig repo is readable; until then this check cannot tell whether the rig has a rubric",
+		}
+	}
+	if !rubric.Found {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
 			Message: "No .om.json rubric in rig repo",
 		}
 	}
+	// A rubric main does not carry — deleted on main while the clone still
+	// holds it, or never landed at all — is not the landed rubric this check
+	// exists to see enforced (gt-yj6g1).
+	if rubric.Fallback != "" {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("the rig's .om.json is the mayor/rig clone's copy, not the repo's main (%s)", rubric.Fallback),
+			Details: []string{fmt.Sprintf("rubric: %s", rubric.Source)},
+			FixHint: "Land the rubric on the rig repo's main, or drop the clone's copy if editorial review is not intended for this rig",
+		}
+	}
 
-	mq := rig.ResolveMergeQueueConfig(ctx.TownRoot, ctx.RigName)
+	mq := rig.ResolveMergeQueueConfigIn(ctx.rigRepoOpener(), ctx.TownRoot, ctx.RigName)
 	required := mq != nil && mq.Editorial != nil && mq.Editorial.Required
 	if required {
 		return &CheckResult{
@@ -62,7 +85,7 @@ func (c *EditorialRequiredCheck) Run(ctx *CheckContext) *CheckResult {
 		Name:    c.Name(),
 		Status:  StatusWarning,
 		Message: "rig has .om.json but merge_queue.editorial.required is false",
-		Details: []string{fmt.Sprintf("rubric: %s", rubricPath)},
+		Details: []string{fmt.Sprintf("rubric: %s", rubric.Source)},
 		FixHint: "Set merge_queue.editorial.required=true in config.json, or remove .om.json if editorial review is not intended for this rig",
 	}
 }

@@ -121,6 +121,13 @@ func TestNewRigLandingWorker_RefusesARigWhoseConfigDoesNotDecode(t *testing.T) {
 
 	rec := notifyfake.New()
 	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: rec}
+	// The worker resolves the rig's settings and landing remote through the
+	// daemon's git seam, so the unit tier reads a fake world rather than
+	// starting git.
+	f := useGitfake(t, d)
+	// The rig repo has to answer for the rig to reach the config this test is
+	// about: one that does not fails closed earlier, on the repo (gt-yj6g1).
+	f.InitBare(t, filepath.Join(rigPath, ".repo.git"))
 
 	if _, err := d.newRigLandingWorker(rigName); err == nil {
 		t.Fatal("newRigLandingWorker() = nil error for a config.json that does not decode; want the rig refused")
@@ -1066,6 +1073,15 @@ func TestNewRigLandingWorker_NoForgejoConfigFailsClosed(t *testing.T) {
 
 	rec := notifyfake.New()
 	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: rec}
+	// The worker resolves the rig's settings and landing remote through the
+	// daemon's git seam, so the unit tier reads a fake world rather than
+	// starting git.
+	f := useGitfake(t, d)
+	// The rig repo has to answer for the rig to reach the missing block this
+	// test is about: one that does not fails closed earlier, on the repo
+	// (gt-yj6g1).
+	f.InitBare(t, filepath.Join(rigPath, ".repo.git"))
+
 	_, err := d.newRigLandingWorker(rigName)
 	if err == nil {
 		t.Fatal("newRigLandingWorker() = nil error for a rig with no merge_queue.forgejo block; want the rig refused")
@@ -1083,6 +1099,32 @@ func TestNewRigLandingWorker_NoForgejoConfigFailsClosed(t *testing.T) {
 	}
 	if want := filepath.Join(rigPath, "settings", "config.json"); !strings.Contains(esc[0].Escalation.Reason, want) {
 		t.Errorf("escalation reason %q does not name the file to add the block to (%s)", esc[0].Escalation.Reason, want)
+	}
+}
+
+// TestNewRigLandingWorker_UnreadableRigRepoFailsClosed: a rig repository this
+// run cannot read is a landing remote that cannot be resolved — the block it
+// could not read may name another host, so neither that block's remote nor
+// origin is an answer (gt-fn9e6.18, gt-yj6g1).
+func TestNewRigLandingWorker_UnreadableRigRepoFailsClosed(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	forgejoRigConfig(t, townRoot, rigName)
+
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+			Forgejo: &config.ForgejoWorkerConfig{TokenDir: t.TempDir()}}}}}
+	// A fake world with no repository behind the rig's .repo.git: the read a
+	// corrupt, half-cloned or unreadable rig repository fails with.
+	useGitfake(t, d)
+
+	_, err := d.newRigLandingWorker(rigName)
+	if err == nil {
+		t.Fatal("newRigLandingWorker() = nil error for a rig repo this run cannot read; want the rig refused, not landed through origin")
+	}
+	if want := filepath.Join(townRoot, rigName, ".repo.git"); !strings.Contains(err.Error(), want) {
+		t.Errorf("error %q does not name the rig repository %s", err, want)
 	}
 }
 

@@ -523,7 +523,7 @@ func (s *healthSources) Mains() ([]townhealth.RigMain, error) {
 func (s *healthSources) Promotions() ([]townhealth.RigPromotion, error) {
 	var out []townhealth.RigPromotion
 	for _, rigName := range s.landingRigs() {
-		cfg := rig.ResolveForgejoConfig(s.townRoot(), rigName)
+		cfg := rig.ResolveForgejoConfigIn(s.d.repoFileOpener(), s.townRoot(), rigName)
 		if cfg == nil || cfg.PromoteTarget == "" {
 			continue
 		}

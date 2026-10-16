@@ -410,7 +410,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// token: CI is that rig's only landing path, so a fallback to origin would
 	// push candidates to GitHub and wait on a verdict that never comes
 	// (gt-fn9e6.18).
-	landingRemote, err := rig.ResolveLandingRemoteIn(d.gitAt(repo), townRoot, rigName)
+	landingRemote, err := rig.ResolveLandingRemoteWith(d.repoFileOpener(), d.gitAt(repo), townRoot, rigName)
 	if err != nil {
 		return nil, err
 	}
@@ -503,7 +503,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	// a landing path and fails closed here rather than falling back silently.
 	// The same block decides the landing's deadline below, so it is read once,
 	// here (gt-fn9e6.26).
-	forgejoCfg := rig.ResolveForgejoConfig(townRoot, rigName)
+	forgejoCfg := rig.ResolveForgejoConfigIn(d.repoFileOpener(), townRoot, rigName)
 	if forgejoCfg == nil {
 		// Keyed per rig so the manager's retries upsert onto one escalation.
 		d.escalateAlert("landing-rig-config:"+rigName, "landing_worker", fmt.Sprintf(
@@ -1233,7 +1233,7 @@ func (d *Daemon) newPromoter(rigName, repo string, fj *config.ForgejoConfig) *pr
 // rig's green verdict, one push path, one lock and one record promote it
 // (gt-fn9e6.38).
 func (d *Daemon) tierSweepPromoter(rigName, repo string) *promote.Promoter {
-	return d.newPromoter(rigName, repo, rig.ResolveForgejoConfig(d.config.TownRoot, rigName))
+	return d.newPromoter(rigName, repo, rig.ResolveForgejoConfigIn(d.repoFileOpener(), d.config.TownRoot, rigName))
 }
 
 // RedMainStatePath is the file holding a rig's last green and last tested
