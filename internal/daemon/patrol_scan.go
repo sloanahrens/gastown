@@ -189,11 +189,12 @@ func (d *Daemon) patrolScanGHGates(h *patrolScanHost, rigs []string) {
 		return
 	}
 	// The check runs on its own slow cadence, so recording the run is what
-	// spends the hour. A tick whose every bd gate check failed evaluated
-	// nothing, and recording it would hold the gh gates unevaluated until the
-	// interval elapsed again (gt-oyrav).
+	// spends the hour. A tick where any bd gate check failed left that
+	// database's gh gates unevaluated, and recording it would hold them until
+	// the interval elapsed again (gt-oyrav, gt-kp9fo). The next tick re-checks
+	// the databases that did answer too, which is harmless.
 	if !d.patrolScanGateCheck(h, rigs, "gh") {
-		d.logger.Printf("patrol_scan: gh gates: every gate check failed; not recording the run")
+		d.logger.Printf("patrol_scan: gh gates: a gate check failed; not recording the run")
 		return
 	}
 	if err := savePatrolLastRun(d.config.TownRoot, "patrol_scan_gh_gates", now); err != nil {
@@ -203,11 +204,10 @@ func (d *Daemon) patrolScanGHGates(h *patrolScanHost, rigs []string) {
 
 // patrolScanGateCheck runs `bd gate check --type=<gateType>` over the town
 // database and each scanned rig's, logging what bd resolved. It reports whether
-// at least one check answered: bd reads one database per call, so a single
-// failure says nothing about the others, and only a tick where every call
-// failed has evaluated nothing at all.
+// every check answered: bd reads one database per call, so a database whose
+// call failed has had none of its gates evaluated, whatever the others did.
 func (d *Daemon) patrolScanGateCheck(h *patrolScanHost, rigs []string, gateType string) bool {
-	answered := false
+	allAnswered := true
 	for _, rigName := range append([]string{""}, rigs...) {
 		where := rigName
 		if where == "" {
@@ -216,9 +216,9 @@ func (d *Daemon) patrolScanGateCheck(h *patrolScanHost, rigs []string, gateType 
 		out, err := h.bdMutating(rigName, "gate", "check", "--type="+gateType)
 		if err != nil {
 			d.logger.Printf("patrol_scan: %s: %s gate check failed: %v", where, gateType, err)
+			allAnswered = false
 			continue
 		}
-		answered = true
 		// bd prints a JSON null before its no-gates notice ("nullNo open gates of
 		// type 'timer' found."); a tick that resolved nothing is not worth a line.
 		line := strings.TrimPrefix(lastLine(string(out)), "null")
@@ -227,7 +227,7 @@ func (d *Daemon) patrolScanGateCheck(h *patrolScanHost, rigs []string, gateType 
 		}
 		d.logger.Printf("patrol_scan: %s: %s gates: %s", where, gateType, line)
 	}
-	return answered
+	return allAnswered
 }
 
 // rogueBDInterval is how often the rogue bd walk runs: rare event, bounded
@@ -659,10 +659,18 @@ func (h *patrolScanHost) SessionExists(rig, name string) (bool, error) {
 	return h.d.tmux.HasSession(h.sessionName(rig, name))
 }
 
+// MoleculeStatus reads a molecule root's status. A root bd says is not found
+// was reaped, which the patrolscan.Env contract reports as "" with no error.
 func (h *patrolScanHost) MoleculeStatus(id string) (string, error) {
 	issue, err := h.readBeads("").Show(id)
+	if errors.Is(err, beads.ErrNotFound) {
+		return "", nil
+	}
 	if err != nil {
 		return "", err
+	}
+	if issue == nil {
+		return "", nil
 	}
 	return issue.Status, nil
 }

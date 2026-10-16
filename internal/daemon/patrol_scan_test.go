@@ -534,24 +534,77 @@ func TestPatrolScanGHGatesDoesNotRecordAFailedCheck(t *testing.T) {
 	}
 }
 
-// One database answering is a run: bd reads one database per call, so a rig
-// whose check failed says nothing about the town's.
+// Every database answering is a run.
 func TestPatrolScanGHGatesRecordsARunThatAnswered(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
-	h := &patrolScanHost{d: d, bdGateCheck: func(rig string, _ ...string) ([]byte, error) {
-		if rig == "" {
-			return nil, errors.New("bd gate check: connection refused")
-		}
+	h := &patrolScanHost{d: d, bdGateCheck: func(string, ...string) ([]byte, error) {
 		return []byte("No open gates of type 'gh' found.\n"), nil
 	}}
 
 	d.patrolScanGHGates(h, []string{"myr"})
 
 	if evaluatePatrolDue(townRoot, "patrol_scan_gh_gates", time.Time{}, time.Now(), ghGateInterval).due {
-		t.Fatal("a tick whose rig check answered did not record the run")
+		t.Fatal("a tick whose every check answered did not record the run")
 	}
+}
+
+// bd reads one database per call, so a database whose gate check failed has
+// had no gh gate evaluated even when the others answered. Recording the run
+// would hold that database's gates for the hour (gt-kp9fo).
+func TestPatrolScanGHGates_PartialFailure(t *testing.T) {
+	t.Parallel()
+	for _, failing := range []string{"", "myr"} {
+		t.Run("fails="+failing, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
+			h := &patrolScanHost{d: d, bdGateCheck: func(rig string, _ ...string) ([]byte, error) {
+				if rig == failing {
+					return nil, errors.New("bd gate check: connection refused")
+				}
+				return []byte("No open gates of type 'gh' found.\n"), nil
+			}}
+
+			d.patrolScanGHGates(h, []string{"myr"})
+
+			if !evaluatePatrolDue(townRoot, "patrol_scan_gh_gates", time.Time{}, time.Now(), ghGateInterval).due {
+				t.Fatal("a tick where one database's gate check failed recorded the run; its gh gates wait the hour")
+			}
+		})
+	}
+}
+
+// The patrolscan.Env contract reads "" with no error as a molecule root that
+// is gone; a root bd says is not found, or a null show, is that case and not
+// an unreadable status (gt-kp9fo).
+func TestPatrolScanMoleculeStatus_NotFound(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		r    *wispReader
+		want string
+	}{
+		{"not found", &wispReader{showErr: beads.ErrNotFound}, ""},
+		{"null issue", &wispReader{show: map[string]*beads.Issue{"gt-wisp-x": nil}}, ""},
+		{"live", &wispReader{show: map[string]*beads.Issue{"gt-wisp-x": {ID: "gt-wisp-x", Status: "hooked"}}}, "hooked"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := wispHost(t, tc.r).MoleculeStatus("gt-wisp-x")
+			if err != nil || got != tc.want {
+				t.Fatalf("MoleculeStatus = %q, %v; want %q, nil", got, err, tc.want)
+			}
+		})
+	}
+	t.Run("other error stays unknown", func(t *testing.T) {
+		t.Parallel()
+		if _, err := wispHost(t, &wispReader{showErr: errors.New("dolt down")}).MoleculeStatus("gt-wisp-x"); err == nil {
+			t.Fatal("an unreadable root reported no error")
+		}
+	})
 }
 
 // A bead bd says does not exist is gone, not unknown: the seat's submitted
