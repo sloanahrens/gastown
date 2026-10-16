@@ -90,6 +90,20 @@ func patrolScanOptions(config *DaemonPatrolConfig, now func() time.Time) patrols
 	return o
 }
 
+// patrolScanRunOptions is the tick's options: the config-derived ones plus
+// the readings that need the host.
+func (d *Daemon) patrolScanRunOptions(env *patrolScanHost) patrolscan.Options {
+	opts := patrolScanOptions(d.patrolConfig, d.clk().Now)
+	// The pool's cap, read here rather than in patrolScanOptions: it needs the
+	// host's tmux reading, and it is the same cap a sling answers to
+	// (gt-02tcp).
+	opts.SeatCap = env.seatCap
+	// The crash detector's own read of a seat's last done, so the tick and the
+	// detector agree on a turn whose bead has not closed yet (gt-iwgbd).
+	opts.DoneAge = env.doneAge
+	return opts
+}
+
 // patrolScanActiveForRig reports whether the tick owns polecat recovery in
 // rigName: the patrol is on and the rig is in its rigs list (or the list is
 // empty).
@@ -133,15 +147,7 @@ func (d *Daemon) runPatrolScan() {
 	}
 	env := &patrolScanHost{d: d}
 	ledger := patrolscan.NewFileLedger(patrolscan.LedgerPath(d.config.TownRoot), 7*24*time.Hour)
-	opts := patrolScanOptions(d.patrolConfig, d.clk().Now)
-	// The pool's cap, read here rather than in patrolScanOptions: it needs the
-	// host's tmux reading, and it is the same cap a sling answers to
-	// (gt-02tcp).
-	opts.SeatCap = env.seatCap
-	// The crash detector's own read of a seat's last done, so the tick and the
-	// detector agree on a turn whose bead has not closed yet (gt-iwgbd).
-	opts.DoneAge = env.doneAge
-	scanner := patrolscan.New(env, ledger, opts)
+	scanner := patrolscan.New(env, ledger, d.patrolScanRunOptions(env))
 	rigs := d.getPatrolRigs("patrol_scan")
 	for _, rigName := range rigs {
 		if d.ctx != nil && d.ctx.Err() != nil {
@@ -616,14 +622,14 @@ func (h *patrolScanHost) MarkIdle(rig, name string) (bool, error) {
 // work bead carries, for a gt done whose record write was lost: the seat is
 // mid-landing, and a record that still says run reports it dead for the whole
 // of the landing (gt-2z8k1).
+func (h *patrolScanHost) MarkSubmitted(rig, name, workBead string) error {
+	return intent.MarkSubmitted(h.town(), supervisor.IntentSeat(h.seat(rig, name)), workBead, patrolscan.Actor, h.d.clk().Now())
+}
+
 // doneAge answers patrolscan.Options.DoneAge from the event log, through the
 // read the daemon's crash detector uses.
 func (h *patrolScanHost) doneAge(rig, name, workBead string, now time.Time) (time.Duration, bool) {
 	return h.d.seatLastDoneAge(rig, name, workBead, now)
-}
-
-func (h *patrolScanHost) MarkSubmitted(rig, name, workBead string) error {
-	return intent.MarkSubmitted(h.town(), supervisor.IntentSeat(h.seat(rig, name)), workBead, patrolscan.Actor, h.d.clk().Now())
 }
 
 func (h *patrolScanHost) ActiveWork(rig string) ([]patrolscan.Work, error) {
