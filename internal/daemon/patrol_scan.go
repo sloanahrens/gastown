@@ -711,9 +711,8 @@ func (h *patrolScanHost) WispStatus(id string) (string, error) {
 
 // RootWork reads the work beads a molecule root's blocks edges point at,
 // from the dependencies bd show reports for the root, each with the status bd
-// reports for that bead. An edge to a wisp is not a work bead (a root can wait
-// on another wisp), so it is left out. A root bd says does not exist has none:
-// it was reaped between the listing and this read.
+// reports for that bead. A root bd says does not exist has none: it was
+// reaped between the listing and this read.
 func (h *patrolScanHost) RootWork(root string) ([]patrolscan.WorkRef, error) {
 	issue, err := h.readBeads("").Show(root)
 	if errors.Is(err, beads.ErrNotFound) {
@@ -727,7 +726,7 @@ func (h *patrolScanHost) RootWork(root string) ([]patrolscan.WorkRef, error) {
 	}
 	var out []patrolscan.WorkRef
 	for _, dep := range issue.Dependencies {
-		if dep.DependencyType == "blocks" && !strings.Contains(dep.ID, "-wisp-") {
+		if dep.DependencyType == "blocks" {
 			out = append(out, patrolscan.WorkRef{ID: dep.ID, Status: dep.Status})
 		}
 	}
