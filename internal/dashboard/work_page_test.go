@@ -166,13 +166,76 @@ func TestTheWorkPanelDrawsARowPerSeat(t *testing.T) {
 		t.Errorf("the row does not age the bead on the seat: %v", busy)
 	}
 	// The idle seat is drawn in the same row shape, folded under the seats that
-	// hold something rather than left out.
+	// hold something rather than left out. It holds no bead, so it names no
+	// agent and names its rig in the Bead column instead (gt-hnztc).
 	idle := rows[2]
-	if len(idle) != 5 || idle[1] != "furiosa" || idle[3] != "idle" || idle[4] != "" {
+	if len(idle) != 5 || idle[0] != "" || idle[1] != "furiosa" || idle[2] != "gastown" || idle[3] != "idle" || idle[4] != "" {
 		t.Errorf("the idle seat's row reads %v", idle)
 	}
-	if !strings.Contains(workText(t, dom), "1 idle (free to take work)") {
+	if !strings.Contains(workText(t, dom), "1 idle (free to take work; the model is chosen when work is dispatched)") {
 		t.Error("the idle seat is not folded under a summary that says what it is")
+	}
+}
+
+// TestTheWorkPanelGivesASeatHoldingNoBeadItsRig drives the panel over the
+// seats an idle pool holds — one whose agent bead still records the model of
+// the last job it ran, one with nothing recorded, and a seat in a parked rig
+// holding nothing — beside two seats that do hold a bead, one of them in a
+// parked rig. A seat holding nothing draws an empty Agent cell and names its
+// rig where the bead would go, so the row says where the seat is rather than
+// which model its last job ran; a seat holding a bead reads as it always did
+// (gt-hnztc).
+func TestTheWorkPanelGivesASeatHoldingNoBeadItsRig(t *testing.T) {
+	t.Parallel()
+
+	recorded := seat("devops", "capstan", "idle", "", "", "deepseek-flash", 0)
+	blank := seat("devops", "halyard", "idle", "", "", "", 0)
+	parkedIdle := seat("devops", "anchor", "idle", "", "", "claude-sonnet", 0)
+	parkedIdle["rig_parked"] = true
+	parkedBusy := seat("devops", "windlass", "working", "dv-parked", "work in a parked rig", "claude-sonnet", time.Minute)
+	parkedBusy["rig_parked"] = true
+	working := seat("gastown", "dementus", "working", "gt-hnztc", "an idle seat names its rig", "deepseek-flash", time.Minute)
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderWork", workState([]any{working, recorded, blank, parkedIdle, parkedBusy}, workQueueReading(1, 0, 0, 0)))
+
+	// The rows come back in the panel's own order: the seats holding a bead,
+	// the parked fold (the working seat of it first), then the idle seats.
+	agents := workCells(t, dom, "wagent")
+	if len(agents) != 5 {
+		t.Fatalf("the panel drew %d agent cells, want 5", len(agents))
+	}
+	if agents[0].Text != "deepseek-flash" || agents[1].Text != "claude-sonnet" {
+		t.Errorf("a seat holding a bead no longer names the agent its session runs: %q, %q", agents[0].Text, agents[1].Text)
+	}
+	for i, who := range []string{"the parked rig's seat", "the idle seat with a recorded agent", "the idle seat with none"} {
+		if got := agents[i+2]; got.Text != "" {
+			t.Errorf("%s names a model: %q", who, got.Text)
+		}
+	}
+	if want := "the model is chosen when work is dispatched"; !strings.Contains(agents[2].Title, want) {
+		t.Errorf("an idle row does not say its model comes with the work: %q", agents[2].Title)
+	}
+
+	// The rig stands in the Bead column, where the bead would have been.
+	beads := workCells(t, dom, "wbead")
+	if len(beads) != 5 {
+		t.Fatalf("the panel drew %d bead cells, want 5", len(beads))
+	}
+	if !strings.Contains(beads[1].Text, "dv-parked") || !strings.Contains(beads[1].Text, "work in a parked rig") {
+		t.Errorf("a parked rig's seat holding a bead no longer carries it: %q", beads[1].Text)
+	}
+	for i := 2; i < 5; i++ {
+		if beads[i].Text != "devops" {
+			t.Errorf("a seat holding no bead does not name its rig: %q", beads[i].Text)
+		}
+	}
+	if !strings.Contains(beads[3].Title, "devops") {
+		t.Errorf("the rig the seat names does not carry its rig on hover: %q", beads[3].Title)
+	}
+
+	if text := workText(t, dom); !strings.Contains(text, "2 idle (free to take work; the model is chosen when work is dispatched)") {
+		t.Errorf("the idle fold does not say when a seat's model is chosen: %q", text)
 	}
 }
 
