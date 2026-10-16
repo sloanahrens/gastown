@@ -741,7 +741,8 @@ func TestRunTierSweep_FilesOneBeadPerFailingUnitAndClosesOnGreen(t *testing.T) {
 
 // A polecat that claims a red-tier bead moves it to in_progress or hooked; the
 // next red sweep still comments on it instead of filing a second P1 bead, and
-// a green sweep closes it (gt-9hzs5).
+// a green sweep closes an open bead but leaves a claimed one to its polecat
+// (gt-9hzs5, gt-2h3eo).
 func TestTierSweepFileRed_ClaimedBead(t *testing.T) {
 	t.Parallel()
 	title := tierSweepBeadPrefix("gastown", "integration") + "./internal/x"
@@ -767,8 +768,12 @@ func TestTierSweepFileRed_ClaimedBead(t *testing.T) {
 
 			green := map[string]tierSweepTierResult{"integration": {Verdict: tierSweepGreen, Passed: 1}}
 			d.tierSweepRecordBeads("gastown", "def456", green)
-			if len(bd.closed) != 1 || !strings.HasPrefix(bd.closed[0], "gt-claimed ") {
-				t.Errorf("closed = %v, want the %s bead closed on green", bd.closed, status)
+			if status == "open" {
+				if len(bd.closed) != 1 || !strings.HasPrefix(bd.closed[0], "gt-claimed ") {
+					t.Errorf("closed = %v, want the open bead closed on green", bd.closed)
+				}
+			} else if len(bd.closed) != 0 {
+				t.Errorf("closed = %v, want the %s bead left to its polecat on green", bd.closed, status)
 			}
 		})
 	}
@@ -793,27 +798,35 @@ func (b *failingStatusBeads) List(opts beads.ListOptions) ([]*beads.Issue, error
 // did find is not duplicated (gt-7useh).
 func TestTierSweepOpenBeads_ListErrorFilesNoDuplicate(t *testing.T) {
 	t.Parallel()
-	d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
-	bd := &failingStatusBeads{
-		byStatusBeads: byStatusBeads{byStatus: map[string][]*beads.Issue{
-			"open": {{ID: "gt-open", Title: tierSweepBeadPrefix("gastown", "integration") + "./internal/x"}},
-		}},
-		failStatus: beads.StatusHooked,
-	}
-	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+	for _, failStatus := range []string{"open", string(beads.StatusInProgress), beads.StatusHooked} {
+		t.Run(failStatus, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+			byStatus := map[string][]*beads.Issue{}
+			for _, status := range []string{"open", string(beads.StatusInProgress), beads.StatusHooked} {
+				byStatus[status] = []*beads.Issue{{ID: "gt-" + status, Title: tierSweepBeadPrefix("gastown", "integration") + "./internal/" + status}}
+			}
+			bd := &failingStatusBeads{byStatusBeads: byStatusBeads{byStatus: byStatus}, failStatus: failStatus}
+			d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
 
-	red := map[string]tierSweepTierResult{
-		"integration": {Verdict: tierSweepRed, Failed: 2, FailedNames: []string{"./internal/x", "./internal/y"}},
-	}
-	d.tierSweepRecordBeads("gastown", "abc123", red)
-	if len(bd.created) != 0 {
-		t.Errorf("created = %+v, want nothing filed from an unknown state", bd.created)
-	}
+			if _, err := tierSweepOpenBeads(bd, "gastown", "integration"); err == nil {
+				t.Fatalf("tierSweepOpenBeads returned no error when the %s list failed", failStatus)
+			}
 
-	green := map[string]tierSweepTierResult{"integration": {Verdict: tierSweepGreen, Passed: 1}}
-	d.tierSweepRecordBeads("gastown", "def456", green)
-	if len(bd.closed) != 0 {
-		t.Errorf("closed = %v, want nothing closed from a partial listing", bd.closed)
+			red := map[string]tierSweepTierResult{
+				"integration": {Verdict: tierSweepRed, Failed: 2, FailedNames: []string{"./internal/x", "./internal/y"}},
+			}
+			d.tierSweepRecordBeads("gastown", "abc123", red)
+			if len(bd.created) != 0 || len(bd.comments) != 0 {
+				t.Errorf("created = %+v, comments = %v, want nothing filed or commented from an unknown state", bd.created, bd.comments)
+			}
+
+			green := map[string]tierSweepTierResult{"integration": {Verdict: tierSweepGreen, Passed: 1}}
+			d.tierSweepRecordBeads("gastown", "def456", green)
+			if len(bd.closed) != 0 {
+				t.Errorf("closed = %v, want nothing closed from a partial listing", bd.closed)
+			}
+		})
 	}
 }
 

@@ -1458,7 +1458,7 @@ func (d *Daemon) tierSweepBeads(rig string) tierSweepBeadStore {
 }
 
 // tierSweepBeads files one bead per failing unit of a RED tier, and closes a
-// GREEN tier's open beads. A bead-store error is logged and the sweep
+// GREEN tier's open beads, never one a polecat has claimed. A bead-store error is logged and the sweep
 // continues: the verdict is already recorded. A tier whose open beads cannot
 // be listed is left alone, since filing without knowing which units already
 // have a bead would open a duplicate P1 for each of them.
@@ -1482,19 +1482,28 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 			names = []string{tierSweepNoName}
 		}
 		for _, name := range names {
-			tierSweepFileRed(d, bd, rig, tier, name, sha, ts, existing[name])
+			tierSweepFileRed(d, bd, rig, tier, name, sha, ts, existing[name].id)
 		}
 	}
 }
 
+// tierSweepUnitBead is the sweep bead standing for one failing unit.
+type tierSweepUnitBead struct {
+	id string
+	// claimed is true when a polecat holds the bead (in progress or hooked).
+	claimed bool
+}
+
 // tierSweepOpenBeads maps the failing unit each unlanded sweep bead for rig and
-// tier was filed for to its bead id. A bead a polecat has claimed is in
-// progress or hooked, not open, and still stands for the same failure
+// tier was filed for to its bead. A bead a polecat has claimed is in progress
+// or hooked, not open, and still stands for the same failure
 // (tierSweepRedBeadsOpen counts the same three statuses). When one unit has
-// beads under several statuses the open one wins.
-func tierSweepOpenBeads(bd tierSweepBeadStore, rig, tier string) (map[string]string, error) {
+// beads under several statuses the open one wins. A status list that fails
+// fails the whole lookup: with one status unread the sweep cannot tell which
+// units already have a bead.
+func tierSweepOpenBeads(bd tierSweepBeadStore, rig, tier string) (map[string]tierSweepUnitBead, error) {
 	prefix := tierSweepBeadPrefix(rig, tier)
-	out := map[string]string{}
+	out := map[string]tierSweepUnitBead{}
 	for _, status := range []string{"open", string(beads.StatusInProgress), beads.StatusHooked} {
 		issues, err := bd.List(beads.ListOptions{Status: status, Label: tierSweepRedLabel, Priority: -1, Limit: 0})
 		if err != nil {
@@ -1506,7 +1515,7 @@ func tierSweepOpenBeads(bd tierSweepBeadStore, rig, tier string) (map[string]str
 			}
 			if name, ok := strings.CutPrefix(is.Title, prefix); ok && name != "" {
 				if _, seen := out[name]; !seen {
-					out[name] = is.ID
+					out[name] = tierSweepUnitBead{id: is.ID, claimed: status != "open"}
 				}
 			}
 		}
@@ -1535,12 +1544,17 @@ func tierSweepFileRed(d *Daemon, bd tierSweepBeadStore, rig, tier, name, sha str
 	}
 }
 
-// tierSweepCloseGreen closes the open beads a GREEN tier no longer needs.
-func tierSweepCloseGreen(d *Daemon, bd tierSweepBeadStore, rig, tier, sha string, open map[string]string) {
-	for name, id := range open {
+// tierSweepCloseGreen closes the open beads a GREEN tier no longer needs. A
+// bead a polecat has claimed is left to its owner: closing it would pull the
+// bead out from under the polecat working it.
+func tierSweepCloseGreen(d *Daemon, bd tierSweepBeadStore, rig, tier, sha string, byUnit map[string]tierSweepUnitBead) {
+	for name, b := range byUnit {
+		if b.claimed {
+			continue
+		}
 		reason := fmt.Sprintf("%s tier green on main at %s (tier sweep)", tier, shortSHA(sha))
-		if err := bd.CloseWithReason(reason, id); err != nil {
-			d.logger.Printf("tier_sweep: %s: closing %s (%s %s): %v", rig, id, tier, name, err)
+		if err := bd.CloseWithReason(reason, b.id); err != nil {
+			d.logger.Printf("tier_sweep: %s: closing %s (%s %s): %v", rig, b.id, tier, name, err)
 		}
 	}
 }
