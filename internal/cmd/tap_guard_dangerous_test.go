@@ -1419,6 +1419,31 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 			wantBlock: true,
 		},
 		{
+			name:      "shift in an arithmetic command glued to time",
+			command:   "time((1<<x))\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an arithmetic command glued to a negation",
+			command:   "!((1<<x))\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an arithmetic command glued to a brace group",
+			command:   "{((1<<x));}\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an arithmetic command glued to a case pattern",
+			command:   "case y in y)((1<<x));; esac\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an arithmetic command after time and a space",
+			command:   "time ((1<<x))\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
 			name:      "shift in an array subscript",
 			command:   "a[1<<x]=3\nsudo rm -rf /\nx",
 			wantBlock: true,
@@ -2866,6 +2891,24 @@ func TestANSICQuotedStringKeepsTheCommandsBehindIt(t *testing.T) {
 	}
 }
 
+// A "((" glued to time, "!", "{" or a case pattern's ")" is an arithmetic
+// command, so the "<<" in it is a shift and the sudo line after it is judged,
+// not stripped as the body of a heredoc (gt-4jcks).
+func TestGluedArithmeticCommandKeepsPayloadVisible(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"time((1<<x))\nsudo rm -rf /\nx",
+		"!((1<<x))\nsudo rm -rf /\nx",
+		"{((1<<x));}\nsudo rm -rf /\nx",
+		"case y in y)((1<<x));; esac\nsudo rm -rf /\nx",
+	} {
+		reason, _ := evaluateDangerousCommand(command, 0, noTownSession)
+		if !strings.Contains(reason, "sudo") {
+			t.Errorf("evaluateDangerousCommand(%q) reason = %q, want the sudo block", command, reason)
+		}
+	}
+}
+
 // endsCommandReservedWord decides whether a "((" glued to a word opens an
 // arithmetic command. A word that merely ends in a reserved word, or sits
 // inside a larger word, is not one (gt-he2fi).
@@ -2881,6 +2924,16 @@ func TestEndsCommandReservedWord(t *testing.T) {
 		{"do after a semicolon", "a; do", false, true},
 		{"else after a newline", "x\nelse", false, true},
 		{"for glued to the header", "for", false, true},
+		{"time after a newline", "x\ntime", false, true},
+		{"negation at the start", "!", false, true},
+		{"negation after a semicolon", "a; !", false, true},
+		{"brace group opener after a semicolon", "a; {", false, true},
+		{"case pattern close", "y)", false, true},
+		{"negation inside a longer word", "a!", false, false},
+		{"brace inside a longer word", "a{", false, false},
+		{"time inside a longer word", "runtime", false, false},
+		{"escaped negation", `\!`, false, false},
+		{"escaped close paren", ")", true, false},
 		{"reserved word after an open paren", "(do", false, true},
 		{"word ending in a reserved word", "undo", false, false},
 		{"reserved word inside a longer one", "dothen", false, false},
