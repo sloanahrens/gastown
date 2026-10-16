@@ -638,7 +638,10 @@ func TestHeldBeadsFromSkipsEpics(t *testing.T) {
 
 	child := cleanSpec("gt-child", 1, "2026-09-29T10:00:00Z")
 	child.Description += "\nThe fix lands in a.go.\n"
-	env := specDispatchEnv{Held: func(string) ([]specdispatch.HeldBead, error) { return got, nil }}
+	dir := t.TempDir()
+	env := specDispatchEnv{Held: func(string) ([]specdispatch.HeldBead, error) {
+		return heldBeadsFrom(db, func(string, error) {}, dir)
+	}}
 	why, err := specHeldHold(env, "gastown", child, map[string]heldRead{})
 	if err != nil || why != "" {
 		t.Fatalf("specHeldHold = %q, %v; want no hold for a child naming the epic's file", why, err)
