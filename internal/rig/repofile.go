@@ -71,8 +71,6 @@ func ReadRepoFile(open RepoFileOpener, townRoot, rigName, relPath string) (RepoF
 		if err != nil {
 			return unreadable(err)
 		}
-		// A ref read that answered is a repo this run can read.
-		repoFileReadable(rigName)
 		switch {
 		case !exists:
 			fallback = fmt.Sprintf("the repo has no origin/%s ref", branch)
@@ -80,7 +78,6 @@ func ReadRepoFile(open RepoFileOpener, townRoot, rigName, relPath string) (RepoF
 			data, err := repo.ShowFileAtRev(ref, relPath)
 			switch {
 			case err == nil:
-				repoFileReadable(rigName)
 				return RepoFile{
 					Data:   []byte(data),
 					Source: "origin/" + branch + " in " + repoDir,
@@ -129,11 +126,22 @@ func defaultBranch(rigPath string) string {
 // per polecat.
 var repoFileWarnedRigs sync.Map
 
+// repoFileWarnPrints counts the lines WarnRepoFileUnreadable has printed per
+// rig. Nothing clears it, which is what tells a test that a tier dropped twice
+// was reported once from a tier reported on every resolution (gt-mvbbe).
+var repoFileWarnPrints sync.Map
+
 // WarnRepoFileUnreadable reports that a repo-committed tier was dropped rather
 // than resolved: a rig repo this run cannot read has no main to follow, and the
-// stale clone copy is what gt-yj6g1 exists to stop trusting. repoFileReadable
-// clears the report once the repo answers again, so a failure that follows a
-// good read is news rather than a repeat of one already printed.
+// stale clone copy is what gt-yj6g1 exists to stop trusting. A repo-committed
+// file that reads fine but does not parse drops the tier the same way, and is
+// reported here too (gt-mvbbe); the two differ only downstream, in the landing
+// remote, where the unreadable repo keeps failing closed.
+//
+// repoFileReadable clears the report, and the resolution that calls it is one
+// that no longer drops a tier. A read that answers is not that: a malformed
+// file answers every read, so clearing on reads reports it once per resolution
+// — once per daemon patrol per rig — rather than once (gt-mvbbe).
 func WarnRepoFileUnreadable(rigName string, err error) {
 	if err == nil {
 		return
@@ -141,6 +149,7 @@ func WarnRepoFileUnreadable(rigName string, err error) {
 	if _, dup := repoFileWarnedRigs.LoadOrStore(rigName, struct{}{}); dup {
 		return
 	}
+	repoFileWarnPrints.Store(rigName, RepoFileUnreadableWarnCount(rigName)+1)
 	fmt.Fprintf(os.Stderr, "WARNING: rig %s: ignoring an unreadable repo-committed tier: %v\n", rigName, err)
 }
 
@@ -152,8 +161,17 @@ func RepoFileUnreadableWarned(rigName string) bool {
 	return ok
 }
 
-// repoFileReadable forgets rigName's report of an unreadable repo, which a read
-// that answered proves is readable again.
+// RepoFileUnreadableWarnCount is the number of lines WarnRepoFileUnreadable has
+// printed for rigName, so tests can assert a tier dropped twice is reported
+// once rather than on every resolution.
+func RepoFileUnreadableWarnCount(rigName string) int {
+	n, _ := repoFileWarnPrints.Load(rigName)
+	count, _ := n.(int)
+	return count
+}
+
+// repoFileReadable forgets rigName's report of an unreadable repo, which a
+// resolution that no longer drops the tier proves is readable again.
 func repoFileReadable(rigName string) {
 	repoFileWarnedRigs.Delete(rigName)
 }

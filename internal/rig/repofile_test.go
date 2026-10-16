@@ -357,6 +357,53 @@ func TestResolveMergeQueueConfig_RepoReadingAgainReportsTheNextDrop(t *testing.T
 	}
 }
 
+// TestResolveLandingRemoteWith_MalformedRepoSettingsFallsBack: a repo-committed
+// settings file that is there and readable but does not parse drops the tier
+// and still resolves to origin. Failing closed on it instead stops the rig's
+// landing worker and every gt done on the rig, and the commit that repairs the
+// file is one of them (gt-mvbbe).
+func TestResolveLandingRemoteWith_MalformedRepoSettingsFallsBack(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigName := "mango-malformed-landing"
+	rigRepoDir(t, townRoot, rigName)
+	repo := &landingRemotesFake{remotes: []string{"origin"}, urls: map[string]string{"origin": "https://github.com/acme/mango.git"}}
+	malformed := stubOpener(stubRepo{refExists: true, data: `{"type":"rig-settings","merge_queue":{`})
+
+	got, err := ResolveLandingRemoteWith(malformed, repo, townRoot, rigName)
+	if err != nil {
+		t.Fatalf("ResolveLandingRemoteWith() = %q, %v; want origin and no error", got, err)
+	}
+	if got != LandingRemoteOrigin {
+		t.Errorf("ResolveLandingRemoteWith() = %q, want %q", got, LandingRemoteOrigin)
+	}
+	if !RepoFileUnreadableWarned(rigName) {
+		t.Error("the dropped repo tier was not reported")
+	}
+}
+
+// TestResolveMergeQueueConfig_MalformedRepoTierIsReportedOnce: a malformed file
+// answers every read, so the tier stays dropped between resolutions — the
+// daemon resolves once per patrol per rig, and the warning is news once per
+// failure rather than once per resolution (gt-mvbbe).
+func TestResolveMergeQueueConfig_MalformedRepoTierIsReportedOnce(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigName := "mango-malformed-once"
+	rigRepoDir(t, townRoot, rigName)
+	malformed := stubOpener(stubRepo{refExists: true, data: `{"type":"rig-settings","merge_queue":{`})
+
+	ResolveMergeQueueConfigIn(malformed, townRoot, rigName)
+	if !RepoFileUnreadableWarned(rigName) {
+		t.Fatal("the dropped repo tier was not reported")
+	}
+	ResolveMergeQueueConfigIn(malformed, townRoot, rigName)
+
+	if got := RepoFileUnreadableWarnCount(rigName); got != 1 {
+		t.Errorf("the dropped repo tier was reported %d time(s) over two resolutions, want once", got)
+	}
+}
+
 // TestResolveLandingRemoteWith_UnreadableRepoFailsClosed: a repo-committed
 // block this run cannot read may name another host, so the landing remote is
 // not origin either — the rig lands through its Forgejo remote or not at all

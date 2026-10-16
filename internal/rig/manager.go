@@ -1195,8 +1195,8 @@ func ResolveMergeQueueConfig(townRoot, rigName string) *config.MergeQueueConfig 
 
 // ResolveMergeQueueConfigIn is ResolveMergeQueueConfig over open, the seam its
 // repo-tier read takes (docs/testing.md, "Seams for external tools"). A repo
-// tier it cannot read is dropped and reported (WarnRepoFileUnreadable); the
-// floor and the rig-local override still resolve.
+// tier it cannot read, or cannot parse, is dropped and reported
+// (WarnRepoFileUnreadable); the floor and the rig-local override still resolve.
 func ResolveMergeQueueConfigIn(open RepoFileOpener, townRoot, rigName string) *config.MergeQueueConfig {
 	mq, _ := resolveMergeQueueConfigIn(open, townRoot, rigName)
 	return mq
@@ -1205,7 +1205,9 @@ func ResolveMergeQueueConfigIn(open RepoFileOpener, townRoot, rigName string) *c
 // resolveMergeQueueConfigIn is ResolveMergeQueueConfigIn plus the error of a
 // repo-committed tier the run could not read, which the resolution does not
 // carry: a caller that must not act on a resolution missing a tier — the
-// landing remote, gt-yj6g1 — reads it and fails closed.
+// landing remote, gt-yj6g1 — reads it and fails closed. A tier that read and
+// did not parse carries no error, being the one dropped tier whose failure buys
+// no safety (gt-mvbbe).
 func resolveMergeQueueConfigIn(open RepoFileOpener, townRoot, rigName string) (*config.MergeQueueConfig, error) {
 	if townRoot == "" || rigName == "" {
 		return nil, nil
@@ -1224,21 +1226,35 @@ func resolveMergeQueueConfigIn(open RepoFileOpener, townRoot, rigName string) (*
 	var repoMQ *config.MergeQueueConfig
 	var repoErr error
 	repoSettings, repoSource, err := repoTierSettings(open, townRoot, rigName)
-	if err != nil {
-		// Fail closed: a repo tier this run cannot read is dropped, never
-		// resolved from the stale mayor/rig copy it exists to stop trusting
-		// (gt-yj6g1). The floor and the rig-local override still resolve, and
-		// the error goes to the caller with them rather than replacing them.
+	switch {
+	case err == nil:
+		// A tier this run resolved, or a rig with no repo tier at all, is a
+		// resolution that drops nothing, which is what retires an earlier
+		// report of a dropped one.
+		repoFileReadable(rigName)
+		if repoSettings != nil {
+			// Strip the Forgejo block: a landed commit must not choose where a
+			// bot token is sent or which login the landing creator check trusts
+			// (gt-fn9e6.14). Every other merge_queue field keeps its precedence.
+			var repoForgejo bool
+			repoMQ, repoForgejo = config.StripRepoForgejo(repoSettings.MergeQueue)
+			if repoForgejo {
+				WarnRepoForgejoIgnored(repoSource)
+			}
+		}
+	default:
+		// Either failure drops the tier and is reported, never resolved from
+		// the stale mayor/rig copy it exists to stop trusting. Only the tier
+		// this run cannot read goes to the caller: it may name another landing
+		// host, so the landing remote fails closed on it (gt-yj6g1). A file
+		// that read fine and did not parse cannot, the Forgejo block being
+		// stripped from the repo tier (gt-fn9e6.14) — failing closed there buys
+		// no safety and strands the rig, the commit that repairs the file
+		// having to land through the worker it stopped (gt-mvbbe).
 		WarnRepoFileUnreadable(rigName, err)
-		repoErr = err
-	} else if repoSettings != nil {
-		// Strip the Forgejo block: a landed commit must not choose where a
-		// bot token is sent or which login the landing creator check trusts
-		// (gt-fn9e6.14). Every other merge_queue field keeps its precedence.
-		var repoForgejo bool
-		repoMQ, repoForgejo = config.StripRepoForgejo(repoSettings.MergeQueue)
-		if repoForgejo {
-			WarnRepoForgejoIgnored(repoSource)
+		var malformed *malformedRepoSettingsError
+		if !errors.As(err, &malformed) {
+			repoErr = err
 		}
 	}
 
@@ -1252,10 +1268,27 @@ func resolveMergeQueueConfigIn(open RepoFileOpener, townRoot, rigName string) (*
 	return config.MergeSettingsCommand(mq, localMQ), repoErr
 }
 
+// malformedRepoSettingsError is a repo-committed .gastown/settings.json the
+// run read but could not parse as JSON. It is the read that fails closed, not
+// the parse: the caller of resolveMergeQueueConfigIn tells the two apart to
+// keep the landing remote resolving on this one (gt-mvbbe).
+type malformedRepoSettingsError struct {
+	rigName string
+	source  string
+	err     error
+}
+
+func (e *malformedRepoSettingsError) Error() string {
+	return fmt.Sprintf("rig %s: parsing %s: %v", e.rigName, e.source, e.err)
+}
+
+func (e *malformedRepoSettingsError) Unwrap() error { return e.err }
+
 // repoTierSettings is the repo-committed .gastown/settings.json tier: the
 // tracked file as the rig repo's main has it, the mayor/rig clone's copy when
 // main has none, and nil when the rig has neither. source names the copy that
-// answered, for the warnings a resolved tier raises.
+// answered, for the warnings a resolved tier raises. A copy that does not parse
+// is a malformedRepoSettingsError, which the caller drops the tier on.
 func repoTierSettings(open RepoFileOpener, townRoot, rigName string) (settings *config.RigSettings, source string, err error) {
 	f, err := ReadRepoFile(open, townRoot, rigName, config.RepoSettingsPath)
 	if err != nil || !f.Found {
@@ -1263,7 +1296,7 @@ func repoTierSettings(open RepoFileOpener, townRoot, rigName string) (settings *
 	}
 	var parsed config.RigSettings
 	if err := json.Unmarshal(f.Data, &parsed); err != nil {
-		return nil, "", fmt.Errorf("rig %s: parsing %s: %w", rigName, f.Source, err)
+		return nil, "", &malformedRepoSettingsError{rigName: rigName, source: f.Source, err: err}
 	}
 	return &parsed, f.Source, nil
 }
@@ -1299,7 +1332,9 @@ func ResolveForgejoConfigIn(open RepoFileOpener, townRoot, rigName string) *conf
 // resolveForgejoConfigIn is ResolveForgejoConfigIn plus the error of a
 // repo-committed tier the run could not read: no block at any tier and a block
 // missing because its tier was unreadable both return nil, and only the caller
-// that is choosing a host can act on the difference (gt-yj6g1).
+// that is choosing a host can act on the difference (gt-yj6g1). The tier
+// dropped for a parse error is the readable-and-unusable case, which returns
+// nil with no error (gt-mvbbe).
 func resolveForgejoConfigIn(open RepoFileOpener, townRoot, rigName string) (*config.ForgejoConfig, error) {
 	mq, err := resolveMergeQueueConfigIn(open, townRoot, rigName)
 	if mq == nil {
@@ -1348,7 +1383,9 @@ func ResolveLandingRemoteIn(repo LandingRemotes, townRoot, rigName string) (stri
 // Forgejo block's repo-tier read takes, so a caller whose unit tier runs no
 // git reads the block through its own git seam rather than this process's
 // (docs/testing.md, "Seams for external tools"). A repo tier this run cannot
-// read is an error naming the rig, never origin.
+// read is an error naming the rig, never origin; a tier that read and did not
+// parse resolves to origin like any other tier that names no other remote
+// (gt-mvbbe).
 func ResolveLandingRemoteWith(open RepoFileOpener, repo LandingRemotes, townRoot, rigName string) (string, error) {
 	fc, err := resolveForgejoConfigIn(open, townRoot, rigName)
 	if err != nil {
