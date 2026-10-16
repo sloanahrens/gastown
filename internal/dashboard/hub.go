@@ -138,6 +138,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Usage != nil {
 		start(h.cfg.UsageEvery, h.pollUsage)
 	}
+	if h.cfg.ClaudePlan != nil {
+		start(h.cfg.ClaudePlanEvery, h.pollClaudePlan)
+	}
 	if h.cfg.Rework != nil {
 		start(h.cfg.ReworkEvery, h.pollRework)
 	}
@@ -641,6 +644,20 @@ func (h *Hub) pollUsage() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Usage = u
+	h.publishLocked()
+}
+
+// pollClaudePlan reads the Claude plan meter from the status line's samples. The
+// status line appends one at most every ten minutes, so it keeps the minute
+// clock the other slow readers use.
+func (h *Hub) pollClaudePlan() {
+	c := h.cfg.ClaudePlan()
+	if c == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.ClaudePlan = c
 	h.publishLocked()
 }
 

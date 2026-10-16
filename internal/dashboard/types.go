@@ -603,6 +603,10 @@ type State struct {
 	// usage scan writes under the town root. It is nil until the reader first
 	// reports.
 	Usage *Usage `json:"usage,omitempty"`
+	// ClaudePlan is the Claude subscription's limit meters, folded from the
+	// samples the status line appends under the town root. It is nil until the
+	// reader first reports.
+	ClaudePlan *ClaudePlan `json:"claude_plan,omitempty"`
 	// Rework is what each om review bar costs in rework, from the landing
 	// worker's review log. It is nil until the reader first reports.
 	Rework    *Rework         `json:"rework,omitempty"`
@@ -676,6 +680,8 @@ type Config struct {
 	// Usage reads the town's spend over the last day from the usage scan's
 	// records.
 	Usage func() *Usage
+	// ClaudePlan reads the Claude plan meter from the status line's samples.
+	ClaudePlan func() *ClaudePlan
 	// Rework reads the om rework table from the landing worker's review log.
 	Rework func() *Rework
 	// Escalation reads the town's open escalation beads.
@@ -718,6 +724,7 @@ type Config struct {
 	OverseerEvery   time.Duration
 	DeepReviewEvery time.Duration
 	UsageEvery      time.Duration
+	ClaudePlanEvery time.Duration
 	ReworkEvery     time.Duration
 	EscalationEvery time.Duration
 	DispatchEvery   time.Duration
@@ -769,6 +776,9 @@ func (c *Config) defaults() {
 	// hour at its fastest, and the reader re-decodes only the files whose mtime
 	// moved: a poll is little more than a directory listing.
 	def(&c.UsageEvery, 60*time.Second)
+	// The status line appends a sample at most every ten minutes, and a read is
+	// the tail of one small file.
+	def(&c.ClaudePlanEvery, 60*time.Second)
 	// The log gains a line per om verdict, a few an hour; a read is one small
 	// file.
 	def(&c.ReworkEvery, 60*time.Second)

@@ -1,0 +1,275 @@
+package dashboard
+
+import (
+	"bufio"
+	"encoding/json"
+	"io"
+	"math"
+	"os"
+	"sort"
+	"time"
+)
+
+// The Claude plan block: what the Claude subscription's weekly and five-hour
+// limits stand at, folded from the samples the status line appends to
+// <town>/.runtime/claude-plan/samples.jsonl. It is the Claude twin of the
+// DeepSeek spend numbers on the Cost panel, so the operator reads both limits
+// side by side (gt-9drev).
+//
+// The series is written by ~/.claude/statusline-command.sh, one JSON line per
+// change: t, five_hour, five_hour_resets_at, seven_day, seven_day_resets_at,
+// percentages 0-100 and resets as epoch seconds. The file only ever grows, so a
+// poll reads its tail rather than all of it, and a line it cannot parse is
+// skipped: a series with one garbled append still measures the week.
+
+const (
+	// claudePlanStale is how long after its newest sample the series reads as
+	// stale. The status line appends a sample when a reading moves or ten
+	// minutes after the last one, so half an hour is several missed appends and
+	// the meter is no longer what the page can call current.
+	claudePlanStale = 30 * time.Minute
+
+	// claudePlanTailBytes bounds what one poll reads. At most one sample
+	// arrives every ten minutes, so this covers days of series, and the math
+	// reaches back no further than the current weekly window; that bound is also
+	// why no mtime cache sits in front of the read.
+	claudePlanTailBytes = 256 << 10
+
+	// claudePlanMaxLineBytes is the cap on one sample line. A real line is under
+	// two hundred bytes, so a longer one is not this series.
+	claudePlanMaxLineBytes = 64 << 10
+
+	// ClaudePlanDefaultUSD is the monthly price the meter draws against when no
+	// price is configured.
+	ClaudePlanDefaultUSD = 200
+
+	// claudePlanMonthDays is the mean month: the plan price buys a share of the
+	// limit per day, so the week the meter reports is a week of that division.
+	claudePlanMonthDays = 30.4
+
+	// claudePlanWeekDays is the span the weekly limit covers, and
+	// claudePlanLimitPct the percentage at which it is spent.
+	claudePlanWeekDays = 7
+	claudePlanLimitPct = 100.0
+
+	// claudePlanDaySecs is a day, the unit both paces are per.
+	claudePlanDaySecs = 86400
+)
+
+// ClaudePlanSample is one line of the status line's series, written with the
+// field names the status line uses so a line decodes straight into it.
+type ClaudePlanSample struct {
+	// T is when the reading was taken, in epoch seconds.
+	T int64 `json:"t"`
+	// FiveHour and SevenDay are the percentages of each limit in use.
+	FiveHour float64 `json:"five_hour"`
+	SevenDay float64 `json:"seven_day"`
+	// FiveHourResetsAt and SevenDayResetsAt are when each limit rolls over, in
+	// epoch seconds; zero is a reading that carried none.
+	FiveHourResetsAt int64 `json:"five_hour_resets_at"`
+	SevenDayResetsAt int64 `json:"seven_day_resets_at"`
+}
+
+// ClaudePlan is the block's payload, drawn as the DeepSeek spend line's twin.
+type ClaudePlan struct {
+	// WeeklyPct and FiveHourPct are the newest reading's percentages of each
+	// limit.
+	WeeklyPct   float64 `json:"weekly_pct"`
+	FiveHourPct float64 `json:"five_hour_pct"`
+	// WeeklyResetsAt and FiveHourResetsAt are when each limit rolls over, in
+	// epoch seconds; zero when the newest sample carried none.
+	WeeklyResetsAt   int64 `json:"weekly_resets_at"`
+	FiveHourResetsAt int64 `json:"five_hour_resets_at"`
+	// PacePerDay1h and PacePerDay24h are the weekly limit's percentage points
+	// per day over the last hour and the last day, measured across the current
+	// window's samples only: a rollover drops the percentage, and a pace drawn
+	// across one would read as a fall.
+	PacePerDay1h  float64 `json:"pace_per_day_1h"`
+	PacePerDay24h float64 `json:"pace_per_day_24h"`
+	// ProjectedPctAtReset is where the weekly percentage lands when the limit
+	// rolls over, at the day's pace. It passes claudePlanLimitPct for a week
+	// that will run out before it resets.
+	ProjectedPctAtReset float64 `json:"projected_pct_at_reset"`
+	// HitsLimitInDays is how long the weekly limit lasts at the day's pace, and
+	// null when the pace is flat or falling, or when the limit outlives the
+	// window and so is never hit.
+	HitsLimitInDays *float64 `json:"hits_limit_in_days"`
+	// PlanUSDMonth is the monthly price the percentages are drawn against,
+	// WeeklyValueUSD the share of it one week of the limit is worth, and
+	// UsedValueUSD the approximate dollars of that week already spent.
+	PlanUSDMonth   float64 `json:"plan_usd_month"`
+	WeeklyValueUSD float64 `json:"weekly_value_usd"`
+	UsedValueUSD   float64 `json:"used_value_usd"`
+	// SampledAt is the newest sample's instant, in epoch seconds.
+	SampledAt int64 `json:"sampled_at"`
+	// Stale says the newest sample is older than claudePlanStale, or that the
+	// series has none.
+	Stale bool `json:"stale"`
+	// Unavailable says the series could not be read, which the page draws as
+	// itself and never as a week at 0%.
+	Unavailable bool `json:"unavailable,omitempty"`
+}
+
+// ClaudePlanReader reads a status line series from the path it was given.
+type ClaudePlanReader struct {
+	path         string
+	planUSDMonth float64
+}
+
+// NewClaudePlanReader returns a reader of the series at path, pricing its
+// percentages against planUSDMonth, which falls back to ClaudePlanDefaultUSD
+// when it is not a price.
+func NewClaudePlanReader(path string, planUSDMonth float64) *ClaudePlanReader {
+	return &ClaudePlanReader{path: path, planUSDMonth: planUSDMonth}
+}
+
+// Read returns the block's payload from the series as it stands at now: a file
+// that is missing or unreadable is an unavailable block, never an empty week.
+func (r *ClaudePlanReader) Read(now time.Time) *ClaudePlan {
+	samples, err := readClaudePlanSamples(r.path)
+	if err != nil {
+		return &ClaudePlan{PlanUSDMonth: planUSD(r.planUSDMonth), Stale: true, Unavailable: true}
+	}
+	p := ComputeClaudePlan(samples, now, r.planUSDMonth)
+	return &p
+}
+
+// ComputeClaudePlan folds the samples into the payload the page draws.
+//
+// Only two things hang off now: how old the newest sample is, and how long the
+// window has left to run. The pace is measured between samples, so a series an
+// hour behind still reports the rate it saw rather than one diluted by the
+// silence.
+func ComputeClaudePlan(samples []ClaudePlanSample, now time.Time, planUSDMonth float64) ClaudePlan {
+	p := ClaudePlan{PlanUSDMonth: planUSD(planUSDMonth)}
+	// The week's dollars follow the price rather than the series, so they are
+	// there for a page that draws a plan nobody has measured yet.
+	p.WeeklyValueUSD = roundTo2(p.PlanUSDMonth * claudePlanWeekDays / claudePlanMonthDays)
+	if len(samples) == 0 {
+		p.Stale = true
+		return p
+	}
+
+	newest := samples[0]
+	for _, s := range samples {
+		if s.T > newest.T {
+			newest = s
+		}
+	}
+	p.WeeklyPct, p.FiveHourPct = newest.SevenDay, newest.FiveHour
+	p.WeeklyResetsAt, p.FiveHourResetsAt = newest.SevenDayResetsAt, newest.FiveHourResetsAt
+	p.SampledAt = newest.T
+	p.Stale = now.Sub(time.Unix(newest.T, 0)) > claudePlanStale
+	p.UsedValueUSD = roundTo2(newest.SevenDay / claudePlanLimitPct * p.WeeklyValueUSD)
+
+	window := claudePlanWindow(samples, newest.SevenDayResetsAt)
+	pace1h := claudePlanPace(window, time.Hour)
+	pace24h := claudePlanPace(window, 24*time.Hour)
+	p.PacePerDay1h, p.PacePerDay24h = roundTo2(pace1h), roundTo2(pace24h)
+
+	daysLeft := float64(newest.SevenDayResetsAt-now.Unix()) / claudePlanDaySecs
+	if daysLeft < 0 {
+		daysLeft = 0
+	}
+	p.ProjectedPctAtReset = roundTo2(newest.SevenDay + pace24h*daysLeft)
+	if pace24h > 0 {
+		if d := (claudePlanLimitPct - newest.SevenDay) / pace24h; d <= daysLeft {
+			hits := roundTo2(d)
+			p.HitsLimitInDays = &hits
+		}
+	}
+	return p
+}
+
+// claudePlanWindow is the samples of the newest reading's own window, in time
+// order: the limit's resets_at identifies a run of the limit, and a sample from
+// a run that has ended belongs to a week nobody is spending against now.
+func claudePlanWindow(samples []ClaudePlanSample, resetsAt int64) []ClaudePlanSample {
+	window := make([]ClaudePlanSample, 0, len(samples))
+	for _, s := range samples {
+		if s.SevenDayResetsAt == resetsAt {
+			window = append(window, s)
+		}
+	}
+	sort.Slice(window, func(i, j int) bool { return window[i].T < window[j].T })
+	return window
+}
+
+// claudePlanPace is the weekly percentage's rise per day over span, measured
+// from the window's newest sample back to the newest sample at least span old.
+// A window younger than span is measured from its oldest sample instead, the
+// longest span the window can offer, and a window of one sample is no span at
+// all: a flat pace of zero.
+func claudePlanPace(window []ClaudePlanSample, span time.Duration) float64 {
+	if len(window) < 2 {
+		return 0
+	}
+	newest, base := window[len(window)-1], window[0]
+	cutoff := newest.T - int64(span/time.Second)
+	for _, s := range window {
+		if s.T <= cutoff {
+			base = s
+		}
+	}
+	elapsed := float64(newest.T - base.T)
+	if elapsed <= 0 {
+		return 0
+	}
+	return (newest.SevenDay - base.SevenDay) / (elapsed / claudePlanDaySecs)
+}
+
+// readClaudePlanSamples decodes the series from the tail of the file. A line
+// that will not parse is skipped rather than failing the read: the seek to the
+// tail cuts the first line it lands in, and an append cut short leaves one bad
+// line behind.
+func readClaudePlanSamples(path string) ([]ClaudePlanSample, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if info.Size() > claudePlanTailBytes {
+		if _, err := f.Seek(info.Size()-claudePlanTailBytes, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 4096), claudePlanMaxLineBytes)
+	var samples []ClaudePlanSample
+	for sc.Scan() {
+		var s ClaudePlanSample
+		// A sample with no instant cannot be placed against any other, so a line
+		// without one is as useless as a line that will not parse.
+		if err := json.Unmarshal(sc.Bytes(), &s); err != nil || s.T <= 0 {
+			continue
+		}
+		samples = append(samples, s)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return samples, nil
+}
+
+// planUSD is the price the meter draws against: the configured one, or the
+// default when the operator set none.
+func planUSD(planUSDMonth float64) float64 {
+	if planUSDMonth <= 0 {
+		return ClaudePlanDefaultUSD
+	}
+	return planUSDMonth
+}
+
+// roundTo2 is the payload's precision: the page draws one decimal place, and
+// two keep float noise out of the JSON.
+func roundTo2(v float64) float64 {
+	r := math.Round(v*100) / 100
+	if r == 0 {
+		return 0
+	}
+	return r
+}

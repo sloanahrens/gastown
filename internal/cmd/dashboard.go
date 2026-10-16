@@ -32,12 +32,13 @@ import (
 )
 
 var (
-	dashboardPort         int
-	dashboardBind         string
-	dashboardSince        string
-	dashboardSpendCmd     string
-	dashboardForgejoRepos []string
-	dashboardOpen         bool
+	dashboardPort          int
+	dashboardBind          string
+	dashboardSince         string
+	dashboardSpendCmd      string
+	dashboardForgejoRepos  []string
+	dashboardClaudePlanUSD float64
+	dashboardOpen          bool
 )
 
 var dashboardCmd = &cobra.Command{
@@ -64,6 +65,11 @@ Host is not a loopback name.
 (default: ~/.claude/tools/deepseek-spend.py --json when that file exists). It
 runs every five minutes while a page is open; with none, the spend panel is
 left out.
+
+--claude-plan-usd prices the plan meter beside it: the Claude weekly and
+five-hour limits, read every minute from the samples the status line appends to
+.runtime/claude-plan/samples.jsonl, with the pace, the projection to the reset
+and the week's dollars drawn against that monthly price.
 
 The Forgejo panel reads the viewer role's token file
 (~/.config/gt/forgejo-viewer.env) and lists the recent activity of every rig
@@ -151,6 +157,7 @@ func init() {
 	dashboardCmd.Flags().StringVar(&dashboardSpendCmd, "spend-cmd", "", "Command that prints the DeepSeek spend report as JSON (default: the ~/.claude tool when present)")
 	dashboardCmd.Flags().StringArrayVar(&dashboardForgejoRepos, "forgejo-repo", nil, "Repo (owner/name) the Forgejo panel reads; repeatable (default: every rig cut over to Forgejo)")
 	dashboardCmd.Flags().BoolVar(&dashboardOpen, "open", false, "Open the page in the default browser")
+	dashboardCmd.Flags().Float64Var(&dashboardClaudePlanUSD, "claude-plan-usd", dashboard.ClaudePlanDefaultUSD, "Monthly price of the Claude plan the plan meter's percentages are drawn against")
 	rootCmd.AddCommand(dashboardCmd)
 }
 
@@ -168,7 +175,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd)
+	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, dashboardClaudePlanUSD)
 	if err != nil {
 		return err
 	}
@@ -237,10 +244,17 @@ func dashboardCloudChecksPath(townRoot string) string {
 	return filepath.Join(townRoot, ".runtime", "cloud-check", "status.json")
 }
 
+// dashboardClaudePlanPath is where the status line appends its Claude plan
+// samples inside the town: one JSON line per reading, appended and never
+// rewritten. The sampler is ~/.claude/statusline-command.sh, outside the repo.
+func dashboardClaudePlanPath(townRoot string) string {
+	return filepath.Join(townRoot, ".runtime", "claude-plan", "samples.jsonl")
+}
+
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
 // when the server stops.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string) (*dashboard.Hub, func(), error) {
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, claudePlanUSD float64) (*dashboard.Hub, func(), error) {
 	beadReads := openTailBeads(townRoot)
 	rigOfBead := landingRig(townRoot)
 	// The deploy block reads the same repos through the same viewer client as
@@ -307,6 +321,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	})
 	deepReview := newDashDeepReviewReader(townRoot)
 	usage := newDashUsageReader(townRoot)
+	claudePlan := dashboard.NewClaudePlanReader(dashboardClaudePlanPath(townRoot), claudePlanUSD)
 	rework := newDashReworkReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
 	return dashboard.NewHub(dashboard.Config{
@@ -326,6 +341,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Overseer:   func() *dashboard.Overseer { return overseerPane.read(time.Now()) },
 		DeepReview: func() *dashboard.DeepReview { return deepReview.read(time.Now()) },
 		Usage:      func() *dashboard.Usage { return usage.read(time.Now()) },
+		ClaudePlan: func() *dashboard.ClaudePlan { return claudePlan.Read(time.Now()) },
 		Rework:     func() *dashboard.Rework { return rework.read(time.Now()) },
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:   om.dispatch,
