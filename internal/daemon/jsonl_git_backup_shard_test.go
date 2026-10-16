@@ -1,8 +1,11 @@
 package daemon
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,6 +39,54 @@ func shardNames(t *testing.T, dir, table string) []string {
 		names[i] = filepath.Base(p)
 	}
 	return names
+}
+
+// shardContents reads a table's export out of dir, keyed by file name, so a
+// test can hold an export and compare it with the one a later swap leaves.
+func shardContents(t *testing.T, dir, table string) map[string]string {
+	t.Helper()
+	files := make(map[string]string)
+	for _, name := range shardNames(t, dir, table) {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		files[name] = string(data)
+	}
+	return files
+}
+
+// assertNoShardLitter fails on a .tmp or .bak left in dir: whatever path the
+// swap took out, the directory holds the table's shards and nothing else.
+func assertNoShardLitter(t *testing.T, dir string) {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("reading %s: %v", dir, err)
+	}
+	for _, e := range entries {
+		switch {
+		case strings.HasSuffix(e.Name(), ".tmp"), strings.HasSuffix(e.Name(), ".bak"):
+			t.Errorf("the swap left %s behind", e.Name())
+		}
+	}
+}
+
+// shardOpsWith is the swap's real filesystem work with the calls a test passes
+// replaced (nil keeps the real one), for driving a swap through a failure no
+// real directory can be made to produce.
+func shardOpsWith(rename func(oldpath, newpath string) error, remove func(path string) error, verify func(dir, table string, wantRows int, maxFileBytes int64) error) jsonlShardOps {
+	ops := osShardOps()
+	if rename != nil {
+		ops.rename = rename
+	}
+	if remove != nil {
+		ops.remove = remove
+	}
+	if verify != nil {
+		ops.verify = verify
+	}
+	return ops
 }
 
 func TestWriteTableShards_CutsLargeTableIntoFilesUnderTheLimit(t *testing.T) {
@@ -188,6 +239,269 @@ func TestWriteTableShards_LeavesNoTempFiles(t *testing.T) {
 		if strings.HasSuffix(e.Name(), ".tmp") {
 			t.Errorf("temp file %s left behind", e.Name())
 		}
+		// The shards the swap moves aside are gone once the new export is in
+		// place; a .bak that outlives its swap rides into the commit.
+		if strings.HasSuffix(e.Name(), ".bak") {
+			t.Errorf("shard backup %s left behind", e.Name())
+		}
+	}
+}
+
+// A swap a crash cut short leaves .bak files behind. The next export rewrites
+// the table whole, so they go before anything new is published (gt-fhcwe).
+func TestWriteTableShards_ClearsBackupsFromAnInterruptedSwap(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := writeTableShards(dir, "events", syntheticRows(20, 200), 1000); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	otherTable := "issues.2.jsonl.bak"
+	for _, name := range []string{"events.jsonl.bak", "events.7.jsonl.bak", otherTable} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("{}\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := writeTableShards(dir, "events", syntheticRows(20, 200), 1000); err != nil {
+		t.Fatalf("second export: %v", err)
+	}
+	for _, name := range []string{"events.jsonl.bak", "events.7.jsonl.bak"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Errorf("%s survived the next export (stat err %v)", name, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, otherTable)); err != nil {
+		t.Errorf("%s belongs to another table and was removed: %v", otherTable, err)
+	}
+	if err := verifyJsonlShards(dir, "events", 20, jsonlShardHardLimit); err != nil {
+		t.Errorf("verify after the cleanup: %v", err)
+	}
+}
+
+// A swap whose publish fails part way through puts the export that was there
+// back: the directory never keeps a shard from each generation (gt-fhcwe).
+func TestWriteTableShards_PublishFailurePutsTheOldExportBack(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := writeTableShards(dir, "events", syntheticRows(20, 200), 1000); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	before := shardContents(t, dir, "events")
+	if len(before) < 2 {
+		t.Fatalf("the first export wrote %d shard(s), want several for the swap to publish", len(before))
+	}
+
+	// The second shard's publish fails, after the first one is in place.
+	ops := shardOpsWith(func(oldpath, newpath string) error {
+		if filepath.Base(newpath) == "events.2.jsonl" && strings.HasSuffix(oldpath, ".tmp") {
+			return errors.New("rename refused")
+		}
+		return os.Rename(oldpath, newpath)
+	}, nil, nil)
+
+	if _, err := writeTableShardsWith(ops, dir, "events", syntheticRows(12, 200), 1000); err == nil {
+		t.Fatal("a swap whose publish failed reported success")
+	}
+	if after := shardContents(t, dir, "events"); !maps.Equal(before, after) {
+		t.Errorf("the failed swap left %v, want the export that was there: %v", after, before)
+	}
+	assertNoShardLitter(t, dir)
+}
+
+// A swap that fails while moving the old export aside puts back what it already
+// moved, so the failure leaves the export whole (gt-fhcwe).
+func TestWriteTableShards_SetAsideFailurePutsBackWhatItMoved(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := writeTableShards(dir, "events", syntheticRows(20, 200), 1000); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	before := shardContents(t, dir, "events")
+	if len(before) < 2 {
+		t.Fatalf("the first export wrote %d shard(s), want several for the swap to move", len(before))
+	}
+
+	// The second shard cannot be set aside, after the first one was.
+	ops := shardOpsWith(func(oldpath, newpath string) error {
+		if filepath.Base(oldpath) == "events.2.jsonl" && strings.HasSuffix(newpath, ".bak") {
+			return errors.New("rename refused")
+		}
+		return os.Rename(oldpath, newpath)
+	}, nil, nil)
+
+	if _, err := writeTableShardsWith(ops, dir, "events", syntheticRows(12, 200), 1000); err == nil {
+		t.Fatal("a swap that failed while setting the old export aside reported success")
+	}
+	if after := shardContents(t, dir, "events"); !maps.Equal(before, after) {
+		t.Errorf("the failed swap left %v, want the export that was there: %v", after, before)
+	}
+	assertNoShardLitter(t, dir)
+}
+
+// A set-aside file that will not go leaves the directory holding two
+// generations of the export, so the new one is withdrawn rather than published
+// beside it (gt-fhcwe).
+func TestWriteTableShards_UnremovableBackupWithdrawsTheNewExport(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := writeTableShards(dir, "events", syntheticRows(20, 200), 1000); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	before := shardContents(t, dir, "events")
+
+	ops := shardOpsWith(nil, func(path string) error {
+		if strings.HasSuffix(path, ".bak") {
+			return errors.New("remove refused")
+		}
+		return os.Remove(path)
+	}, nil)
+
+	_, err := writeTableShardsWith(ops, dir, "events", syntheticRows(12, 200), 1000)
+	if err == nil || !strings.Contains(err.Error(), "removing the stale events shards") {
+		t.Fatalf("err = %v, want a failed swap naming the stale shards", err)
+	}
+	if after := shardContents(t, dir, "events"); !maps.Equal(before, after) {
+		t.Errorf("the failed swap left %v, want the export that was there: %v", after, before)
+	}
+	assertNoShardLitter(t, dir)
+}
+
+// An export that fails verification does not replace the last one that
+// verified; with none to put back it leaves nothing at all (gt-fhcwe).
+func TestWriteTableShards_VerifyFailureLeavesTheLastExportInPlace(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := writeTableShards(dir, "events", syntheticRows(20, 200), 1000); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	before := shardContents(t, dir, "events")
+
+	ops := shardOpsWith(nil, nil, func(string, string, int, int64) error {
+		return errors.New("verify refused")
+	})
+
+	if _, err := writeTableShardsWith(ops, dir, "events", syntheticRows(12, 200), 1000); err == nil {
+		t.Fatal("an export that failed verification reported success")
+	}
+	if after := shardContents(t, dir, "events"); !maps.Equal(before, after) {
+		t.Errorf("the failed export left %v, want the export that was there: %v", after, before)
+	}
+	assertNoShardLitter(t, dir)
+
+	fresh := t.TempDir()
+	if _, err := writeTableShardsWith(ops, fresh, "events", syntheticRows(12, 200), 1000); err == nil {
+		t.Fatal("an export that failed verification reported success")
+	}
+	if names := shardNames(t, fresh, "events"); len(names) != 0 {
+		t.Errorf("shards = %v, want an unverified export to leave none", names)
+	}
+	assertNoShardLitter(t, fresh)
+}
+
+// A rollback that fails as well leaves the export with a gap in it, and the
+// error carries both failures rather than the first one alone (gt-fhcwe).
+func TestWriteTableShards_AFailedRollbackReportsBothFailures(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := writeTableShards(dir, "events", syntheticRows(20, 200), 1000); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+
+	// Publishing a shard fails, and so does the rename that would put the old
+	// one back.
+	ops := shardOpsWith(func(oldpath, newpath string) error {
+		if strings.HasSuffix(oldpath, ".tmp") || strings.HasSuffix(oldpath, ".bak") {
+			return errors.New("rename refused")
+		}
+		return os.Rename(oldpath, newpath)
+	}, nil, nil)
+
+	_, err := writeTableShardsWith(ops, dir, "events", syntheticRows(12, 200), 1000)
+	if err == nil {
+		t.Fatal("a swap whose rollback failed reported success")
+	}
+	for _, want := range []string{"renaming", "restoring"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("err = %v, want it to carry the %q failure too", err, want)
+		}
+	}
+}
+
+// A backup the cleanup cannot remove stops the swap before anything new reaches
+// the directory, so the export is left as it was (gt-fhcwe).
+func TestWriteTableShards_StuckBackupStopsTheSwap(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := writeTableShards(dir, "events", syntheticRows(20, 200), 1000); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	before := shardContents(t, dir, "events")
+
+	// A non-empty directory where the backup belongs: the cleanup cannot remove
+	// it and neither can the next swap.
+	stuck := filepath.Join(dir, "events.jsonl.bak")
+	if err := os.MkdirAll(stuck, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stuck, "keep"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := writeTableShards(dir, "events", syntheticRows(12, 200), 1000)
+	if err == nil || !strings.Contains(err.Error(), "clearing events shard backups") {
+		t.Fatalf("err = %v, want the cleanup failure named", err)
+	}
+	if after := shardContents(t, dir, "events"); !maps.Equal(before, after) {
+		t.Errorf("the refused swap left %v, want the export that was there: %v", after, before)
+	}
+}
+
+// A temp file a write failed on does not stay behind: the swap takes the temps
+// it already wrote with it (gt-fhcwe).
+func TestWriteTableShards_WriteFailureClearsTheTempsItWrote(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	// A directory where the second shard's temp belongs: the write cannot
+	// replace it.
+	blocked := filepath.Join(dir, "events.2.jsonl.tmp")
+	if err := os.MkdirAll(blocked, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(blocked, "keep"), []byte("x"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := writeTableShards(dir, "events", syntheticRows(12, 200), 1000); err == nil {
+		t.Fatal("a write that failed reported success")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".tmp") && !e.IsDir() {
+			t.Errorf("temp file %s left behind by a failed write", e.Name())
+		}
+	}
+}
+
+// The size screen runs while the shards are still only in memory: refused after
+// the write, an oversized shard is already in the tree the cycle commits.
+func TestCheckShardSizes_RefusesAShardOverTheLimit(t *testing.T) {
+	t.Parallel()
+	fits, over := &bytes.Buffer{}, &bytes.Buffer{}
+	fits.WriteString("1234567890")
+	over.WriteString(strings.Repeat("x", 11))
+
+	if err := checkShardSizes("events", []*bytes.Buffer{fits}, 10); err != nil {
+		t.Errorf("a shard at the limit was refused: %v", err)
+	}
+	err := checkShardSizes("events", []*bytes.Buffer{fits, over}, 10)
+	if err == nil {
+		t.Fatal("a shard over the limit was written anyway")
+	}
+	if !strings.Contains(err.Error(), "shard 2 is 11 bytes") {
+		t.Errorf("err = %v, want it to name the shard over the limit", err)
 	}
 }
 
@@ -236,15 +550,15 @@ func TestPollutionFilterAndVerifyCoverEveryIssuesShard(t *testing.T) {
 	write("issues.jsonl", good, polluted)
 	write("issues.2.jsonl", polluted, good, polluted)
 
-	if got := d.verifyNoPollution(gitRepo, []string{"hq"}); got != 3 {
-		t.Errorf("verifyNoPollution = %d, want 3 across both shards", got)
+	if got, err := d.verifyNoPollution(gitRepo, []string{"hq"}); err != nil || got != 3 {
+		t.Errorf("verifyNoPollution = (%d, %v), want (3, nil) across both shards", got, err)
 	}
 	removed := d.applyPollutionFilter(gitRepo, []string{"hq"})
 	if removed["hq"] != 3 {
 		t.Errorf("removed = %v, want 3 for hq across both shards", removed)
 	}
-	if got := d.verifyNoPollution(gitRepo, []string{"hq"}); got != 0 {
-		t.Errorf("verifyNoPollution after the filter = %d, want 0", got)
+	if got, err := d.verifyNoPollution(gitRepo, []string{"hq"}); err != nil || got != 0 {
+		t.Errorf("verifyNoPollution after the filter = (%d, %v), want (0, nil)", got, err)
 	}
 	for _, name := range []string{"issues.jsonl", "issues.2.jsonl"} {
 		data, err := os.ReadFile(filepath.Join(dbDir, name))
@@ -315,5 +629,54 @@ func TestSyncJsonlGitBackupCountsAndCommitsEveryShard(t *testing.T) {
 	}
 	if shards < 2 {
 		t.Errorf("commit holds %d events file(s), want the shards", shards)
+	}
+}
+
+// TestSyncJsonlGitBackupHaltsWhenAShardCannotBeRead drives a cycle whose export
+// cannot be read back by the post-scrub check: the cycle halts before the
+// commit and raises the scrub alert, because the export it would push was never
+// checked for test pollution (gt-fhcwe).
+func TestSyncJsonlGitBackupHaltsWhenAShardCannotBeRead(t *testing.T) {
+	t.Parallel()
+	d, f := backupTestDaemon(t)
+	root := t.TempDir()
+	townRoot := filepath.Join(root, "town")
+	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(root, "origin.git")
+	f.InitBare(t, remote)
+	f.Commit(t, remote, "main", fmt.Sprintf("%shq=3", seedSubjectPrefix), map[string]string{"README": "init\n"})
+	gitRepo := filepath.Join(root, "repo")
+	f.Clone(t, remote, gitRepo)
+
+	rec := notifyfake.New()
+	d.config = &Config{TownRoot: townRoot}
+	d.notifier = rec
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, GitRepo: gitRepo, Databases: []string{"hq"}},
+	}}
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string) (int, error) {
+		writeNLines(t, filepath.Join(dir, table+".jsonl"), 1)
+		return 1, nil
+	}
+	// An issues shard that is a directory: the check opens it and the read
+	// fails, which is the read error it must report rather than read past.
+	if err := os.MkdirAll(filepath.Join(gitRepo, "hq", "issues.2.jsonl"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	before := f.Ref(gitRepo, "refs/heads/main")
+	d.syncJsonlGitBackup()
+
+	if after := f.Ref(gitRepo, "refs/heads/main"); after != before {
+		t.Error("the cycle committed an export the post-scrub check could not read")
+	}
+	open := rec.OpenEscalations(alertKeyJSONLScrub)
+	if len(open) != 1 {
+		t.Fatalf("open scrub escalations = %+v, want one", open)
+	}
+	if !strings.Contains(open[0].Title, "issues.2.jsonl") {
+		t.Errorf("escalation title = %q, want it to name the shard it could not read", open[0].Title)
 	}
 }
