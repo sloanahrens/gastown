@@ -332,6 +332,9 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string, c
 		if cwdTargetsUnplacedDir(pkgArgs, runCwdKnown && runCwd != "") {
 			return "bare 'go test' names a directory the guard cannot place", nil
 		}
+		if goDirFlagShellExpanded(tokens, lower, i) && runDirTargetsUnknownDir(pkgArgs) {
+			return "bare 'go test' runs in a -C directory the shell expands, which the guard cannot place", nil
+		}
 		for _, arg := range pkgArgs {
 			if packageArgWildcard(arg) && packageWildcardMayReachContainerSuite(arg, runCwd) {
 				return fmt.Sprintf("bare 'go test' package argument %q has a wildcard inside a path element that can reach a testcontainers-backed package", arg), nil
@@ -497,17 +500,7 @@ func goTestRunDir(tokens, lower []string, sub int, cwd string, cwdKnown bool) (d
 		cwd = "" // the walk's spelling for a directory it cannot place
 	}
 	dir, known = cwd, cwdKnown
-	for i := bin + 1; i < sub; i++ {
-		arg := ""
-		switch {
-		case isGoDirFlagValue(lower[i]):
-			_, arg, _ = strings.Cut(tokens[i], "=")
-		case isGoDirFlag(lower[i]) && i+1 < sub:
-			i++ // the next token is the directory this -C names
-			arg = tokens[i]
-		default:
-			continue
-		}
+	for _, arg := range goDirFlagArgs(tokens, lower, bin, sub) {
 		resolved, ok := resolveMakeDir(dir, arg)
 		if !ok {
 			return "", false
@@ -515,6 +508,62 @@ func goTestRunDir(tokens, lower []string, sub int, cwd string, cwdKnown bool) (d
 		dir, known = resolved, true
 	}
 	return dir, known
+}
+
+// goDirFlagArgs returns the directory each -C flag between the go binary
+// (index bin) and the subcommand (index sub) names, in the order go applies
+// them. tokens and lower are as in goTestRunDir.
+func goDirFlagArgs(tokens, lower []string, bin, sub int) []string {
+	var dirs []string
+	for i := bin + 1; i < sub; i++ {
+		switch {
+		case isGoDirFlagValue(lower[i]):
+			_, arg, _ := strings.Cut(tokens[i], "=")
+			dirs = append(dirs, arg)
+		case isGoDirFlag(lower[i]) && i+1 < sub:
+			i++ // the next token is the directory this -C names
+			dirs = append(dirs, tokens[i])
+		}
+	}
+	return dirs
+}
+
+// goDirFlagShellExpanded reports whether a -C dir flag of the go invocation
+// names a directory the shell expands before go sees it ("$PWD/internal",
+// "~/rig", "$(pwd)"). goTestRunDir leaves the run directory unplaced for it,
+// which is enough for a bare or "." target, but a package argument spelled as a
+// path under that directory ("./beads") still reads as the module-root package
+// "beads" that go never starts, so the container rule refuses it too
+// (runDirTargetsUnknownDir, gt-8a1pa).
+func goDirFlagShellExpanded(tokens, lower []string, sub int) bool {
+	bin := goBinaryBefore(lower, sub)
+	if bin < 0 {
+		return false
+	}
+	for _, arg := range goDirFlagArgs(tokens, lower, bin, sub) {
+		if shellExpandedPackageArg(arg) {
+			return true
+		}
+	}
+	return false
+}
+
+// runDirTargetsUnknownDir reports whether a go test package-argument list names
+// something under the run directory: a bare "go test", "." and every other
+// spelling go resolves against the directory it runs in
+// (isCwdRelativeGoPackageArg). It is the question to ask once the run
+// directory is one the shell expands (goDirFlagShellExpanded), where each such
+// argument could be any package in any tree.
+func runDirTargetsUnknownDir(pkgArgs []string) bool {
+	if len(pkgArgs) == 0 {
+		return true
+	}
+	for _, arg := range pkgArgs {
+		if isCwdRelativeGoPackageArg(arg) {
+			return true
+		}
+	}
+	return false
 }
 
 // goTestPackageArgs extracts the package-path arguments from the tokens
@@ -610,7 +659,8 @@ func packageArgWildcard(arg string) bool {
 // backtick substitution, or a leading "~" (the home directory, or another
 // user's). The hook cannot tell what such an argument becomes, so it is read as
 // a set it cannot see into rather than as the literal text, which names no
-// package on the list (gt-e40zb).
+// package on the list (gt-e40zb). A -C directory is read by the same test
+// (resolveMakeDir, gt-8a1pa).
 func shellExpandedPackageArg(arg string) bool {
 	return strings.ContainsAny(arg, "$`") || strings.HasPrefix(arg, "~")
 }
@@ -1049,8 +1099,14 @@ func makeRunDir(args []string, cwd string) (dir string, known bool) {
 // The directory returned is the one the argument really names, symlinks
 // resolved, so "-C <link to a Go tree>" is walked as that tree rather than
 // under the link's lexical parents (gt-ofj05).
+//
+// An argument the shell expands (shellExpandedPackageArg: "$PWD/internal",
+// "$(pwd)", a backtick, a leading "~") names a directory the hook cannot see:
+// joined onto base as written it would be a path that does not exist, which
+// resolveDirSymlinks hands back as placed. It is unplaced instead, the way
+// `cd $DIR` is cdUnknown (gt-8a1pa).
 func resolveMakeDir(base, arg string) (dir string, ok bool) {
-	if arg == "" {
+	if arg == "" || shellExpandedPackageArg(arg) {
 		return base, false
 	}
 	switch {

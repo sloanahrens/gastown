@@ -1006,6 +1006,46 @@ func TestContainerSuiteGoTestTargetFollowsTheCDirFlag(t *testing.T) {
 	}
 }
 
+// A -C directory the shell expands ("$PWD/internal", "~/rig", "$(pwd)") is a
+// run directory the hook cannot place, the way `cd $DIR` is: it was joined onto
+// the cwd as a literal and read as a placed, nonexistent directory, so
+// 'go -C "$PWD/internal" test ./beads' passed although go runs internal/beads
+// (gt-8a1pa). A literal -C keeps the verdicts above.
+func TestContainerSuiteGuardShellExpandedCDir(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"variable, package under the directory", `GT_TEST_DOCKER=1 go -C "$PWD/internal" test ./beads`, true},
+		{"variable, -C= spelling", `GT_TEST_DOCKER=1 go -C="$PWD/internal" test ./beads`, true},
+		{"variable, bare target", `GT_TEST_DOCKER=1 go -C "$PWD/internal/beads" test`, true},
+		{"variable, dot target", `GT_TEST_DOCKER=1 go -C "$PWD/internal/beads" test .`, true},
+		{"leading tilde", "GT_TEST_DOCKER=1 go -C ~/gt/x/internal test ./beads", true},
+		{"command substitution", `GT_TEST_DOCKER=1 go -C "$(pwd)/internal" test ./beads`, true},
+		{"command substitution, -C= spelling", `GT_TEST_DOCKER=1 go -C="$(pwd)/internal" test ./beads`, true},
+		{"backtick substitution", "GT_TEST_DOCKER=1 go -C `pwd`/internal test ./beads", true},
+		{"expanded directory after a literal one", `GT_TEST_DOCKER=1 go -C internal -C "$SUB" test ./beads`, true},
+		{"literal directory, same package", "GT_TEST_DOCKER=1 go -C internal test ./beads", true},
+
+		// The switch decides first, and an argument that is an import path
+		// carries its own location whatever the directory is.
+		{"switch off", `go -C "$PWD/internal" test ./beads`, false},
+		{"module-prefixed light package", `GT_TEST_DOCKER=1 go -C "$PWD/internal" test github.com/steveyegge/gastown/internal/style`, false},
+		{"literal directory, light package", "GT_TEST_DOCKER=1 go -C internal test ./style", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.blocked)
+			}
+		})
+	}
+}
+
 // cwdHeavyPackages is the polecat scope rule's cwd form: the same set a "go
 // test ./<that dir>" names, so cd-ing into the package is not a way around
 // the rule.

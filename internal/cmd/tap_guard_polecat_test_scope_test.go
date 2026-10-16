@@ -154,6 +154,41 @@ func TestEvaluatePolecatTestScope_RelativeCDirUnderUnplacedCwd(t *testing.T) {
 	}
 }
 
+// A -C directory the shell expands is unplaced, not a literal path under the
+// cwd: 'go -C "$PWD/internal/cmd" test .' runs the heavy package whatever the
+// text joins to, so it is refused like any other directory the guard cannot
+// place, while a literal -C keeps its verdicts (gt-8a1pa).
+func TestPolecatTestScopeShellExpandedCDir(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"variable, dot target", `go -C "$PWD/internal/cmd" test .`, true},
+		{"variable, -C= spelling", `go -C="$PWD/internal/cmd" test .`, true},
+		{"variable, bare target", `go -C "$PWD/internal/cmd" test`, true},
+		{"leading tilde", "go -C ~/gt/x/internal/cmd test .", true},
+		{"command substitution", `go -C "$(pwd)/internal/cmd" test .`, true},
+		{"command substitution, -C= spelling", `go -C="$(pwd)/internal/cmd" test .`, true},
+		{"backtick substitution", "go -C `pwd`/internal/cmd test .", true},
+		{"expanded after a literal directory", `go -C internal -C "$SUB" test .`, true},
+
+		{"literal directory with -run", "go -C internal/cmd test . -run X", false},
+		{"literal directory, light package", "go -C internal/style test .", false},
+		{"literal directory, heavy package", "go -C internal/cmd test .", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, root), tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
 // runContainerSuiteGuard runs the container-suite guard on input as proc's
 // session and returns its verdict and stderr.
 func runContainerSuiteGuard(input string, proc guardProcess) (string, error) {
