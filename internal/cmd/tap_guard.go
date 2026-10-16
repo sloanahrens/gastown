@@ -196,8 +196,10 @@ var prWorkflowLaunchers = map[string]prWorkflowLauncher{
 // (trimShellKeywords), leading NAME=value assignments, a command substitution
 // standing where the command word goes, and launchers with their flags.
 // payloads holds the command line a launcher itself carries, as in
-// env -S 'gh pr create'. argv is empty when nothing runs.
-func prWorkflowCommand(segment []string) (argv, payloads []string) {
+// env -S 'gh pr create'. argv is empty when nothing runs. standIn is set when
+// a substitution stood in the command word's place, so argv's first word may be
+// an argument of the command the substitution expanded to.
+func prWorkflowCommand(segment []string) (argv, payloads []string, standIn bool) {
 	seg := trimShellKeywords(segment)
 	for len(seg) > 0 {
 		word := seg[0]
@@ -208,16 +210,22 @@ func prWorkflowCommand(segment []string) (argv, payloads []string) {
 		// A substitution in the command word's place expands to the command,
 		// and the shell runs the words behind it as that command's own when
 		// the expansion is empty ("$(echo) gh pr create" runs gh), so those
-		// words are judged as a command line (gt-qgya2). The expansion itself
-		// is unreadable, and prWorkflowSubstitutions judges its body.
+		// words are judged as a command line (gt-qgya2). When it expands to
+		// gh or git instead ("$(echo gh) pr create"), the words behind it are
+		// that command's arguments; standIn lets the caller judge them so too
+		// (gt-n2gt8). The expansion itself is unreadable, and
+		// prWorkflowSubstitutions judges its body. A command named through a
+		// variable ("g=gh; $g pr create") is not resolved: the guard reads
+		// the text, not the shell's variables.
 		if word == prWorkflowSubstitutionWord {
 			seg = seg[1:]
+			standIn = true
 			continue
 		}
 		name := strings.ToLower(filepath.Base(word))
 		launcher, ok := prWorkflowLaunchers[name]
 		if !ok {
-			return seg, payloads
+			return seg, payloads, standIn
 		}
 		var payload string
 		seg, payload = skipLauncherArgs(name, launcher, seg[1:])
@@ -225,7 +233,7 @@ func prWorkflowCommand(segment []string) (argv, payloads []string) {
 			payloads = append(payloads, payload)
 		}
 	}
-	return nil, payloads
+	return nil, payloads, standIn
 }
 
 // skipLauncherArgs drops the flags and operands a launcher takes ahead of the
@@ -289,12 +297,17 @@ func prWorkflowInvocations(command string, depth int) (invocations [][]string, t
 
 	var payloads []string
 	for _, segment := range splitShellSegments(tokens) {
-		argv, launched := prWorkflowCommand(segment)
+		argv, launched, standIn := prWorkflowCommand(segment)
 		payloads = append(payloads, launched...)
 		if len(argv) == 0 {
 			continue
 		}
 		invocations = append(invocations, argv)
+		if standIn {
+			// The substitution may have expanded to gh or git, so the words
+			// behind it are read as the arguments of each (gt-n2gt8).
+			invocations = append(invocations, append([]string{"gh"}, argv...), append([]string{"git"}, argv...))
+		}
 		name := strings.ToLower(filepath.Base(argv[0]))
 		switch {
 		case shellInvokers[name]:
@@ -435,12 +448,13 @@ var prWorkflowNamesGhOrGit = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_.-])(gh|git)
 // word.
 var ghOptionsWithValue = map[string]bool{"-R": true, "--repo": true}
 
-// ghPositionals returns the first two non-flag words after gh. Flags are
-// skipped wherever they sit, as cobra reads them: gh -R o/r pr create and
-// gh pr create -R o/r are the same command.
+// ghPositionals returns the non-flag words after gh, command-substitution
+// stand-ins included. Flags are skipped wherever they sit, as cobra reads them:
+// gh -R o/r pr create and gh pr create -R o/r are the same command. A stand-in
+// that is the value of a flag in ghOptionsWithValue is that value, not a word.
 func ghPositionals(args []string) []string {
 	var words []string
-	for i := 0; i < len(args) && len(words) < 2; i++ {
+	for i := 0; i < len(args); i++ {
 		switch word := args[i]; {
 		case ghOptionsWithValue[word]:
 			i++
@@ -452,14 +466,33 @@ func ghPositionals(args []string) []string {
 	return words
 }
 
+// startsWithSubcommands reports whether words open with the subcommands want,
+// reading a command-substitution stand-in as nothing or as one word, whichever
+// lets the rest match: "gh pr $(echo) create" is gh pr create, and so is "gh pr
+// $(echo create)" (gt-n2gt8). The shell splits an expansion into as many words
+// as it holds, and a stand-in is read as at most one: the guard reads the text,
+// not what a command prints, as it does not resolve a variable either ("g=gh;
+// $g pr create" is not judged).
+func startsWithSubcommands(words, want []string) bool {
+	if len(want) == 0 {
+		return true
+	}
+	if len(words) == 0 {
+		return false
+	}
+	if words[0] == prWorkflowSubstitutionWord {
+		return startsWithSubcommands(words[1:], want) || startsWithSubcommands(words[1:], want[1:])
+	}
+	return strings.EqualFold(words[0], want[0]) && startsWithSubcommands(words[1:], want[1:])
+}
+
 // isGhPRCreate reports whether argv, a command from its command word on, is
 // gh pr create. gh may be a path.
 func isGhPRCreate(argv []string) bool {
 	if len(argv) == 0 || !strings.EqualFold(filepath.Base(argv[0]), "gh") {
 		return false
 	}
-	words := ghPositionals(argv[1:])
-	return len(words) == 2 && strings.EqualFold(words[0], "pr") && strings.EqualFold(words[1], "create")
+	return startsWithSubcommands(ghPositionals(argv[1:]), []string{"pr", "create"})
 }
 
 // isBranchCreation reports whether argv, a command from its command word on,
@@ -475,15 +508,38 @@ func isBranchCreation(argv []string) bool {
 		return false
 	}
 	rest := argv[1:]
-	at := gitSubcommandIndex(rest)
-	if at < 0 || !branchCreatingSubcommand(rest[at]) {
+	for {
+		at := gitSubcommandIndex(rest)
+		if at < 0 {
+			return false
+		}
+		if rest[at] != prWorkflowSubstitutionWord {
+			return createsBranch(rest[at], rest[at+1:])
+		}
+		// A substitution in the subcommand's place expands to nothing ("git
+		// $(echo) checkout -b x") or to the subcommand ("git $(echo checkout)
+		// -b x"), so both are judged (gt-n2gt8). One that is the value of a
+		// global option never gets here: gitSubcommandIndex skips it.
+		for _, subcommand := range []string{"checkout", "switch"} {
+			if createsBranch(subcommand, rest[at+1:]) {
+				return true
+			}
+		}
+		rest = append(append([]string(nil), rest[:at]...), rest[at+1:]...)
+	}
+}
+
+// createsBranch reports whether flags, the words behind git's subcommand, hold
+// that subcommand's branch-creation flag. Words after "--" are paths.
+func createsBranch(subcommand string, flags []string) bool {
+	if !branchCreatingSubcommand(subcommand) {
 		return false
 	}
-	for _, flag := range rest[at+1:] {
+	for _, flag := range flags {
 		if flag == "--" {
 			break
 		}
-		if branchCreationFlag(rest[at], flag) {
+		if branchCreationFlag(subcommand, flag) {
 			return true
 		}
 	}
@@ -824,7 +880,7 @@ func isLeadingBranchCreation(command string) bool {
 	// The leading command is the one the first segment runs, so an env
 	// assignment or launcher in front of git (the shapes the matcher now
 	// reads, gt-zf2vy) keeps the exemption it had when they hid the command.
-	seg, _ := prWorkflowCommand(segs[0])
+	seg, _, _ := prWorkflowCommand(segs[0])
 	if len(seg) < 2 || !strings.EqualFold(filepath.Base(seg[0]), "git") {
 		return false
 	}
