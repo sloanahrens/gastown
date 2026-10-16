@@ -1314,6 +1314,14 @@ func TestSpecPeerHeldFrom(t *testing.T) {
 			peer(func(p *duplicateCandidate) { p.IssueType = "chore" }), knobs, "type chore"},
 		{"an open blocking dependency is not on the ready board", beadsfake.New(),
 			peer(func(p *duplicateCandidate) { p.Ready.OpenBlockers = []string{"gt-x"} }), knobs, "blocked by gt-x"},
+		// The tick skips a bead whose formula declaration it cannot read, so the
+		// bead is never slung with it (gt-j5cr2). Read as slingable, such a head
+		// refused every lower-ranked bead sharing its test while it stayed
+		// broken and was itself never dispatched (gt-7cmjp).
+		{"a formula declaration the tick cannot read holds its bead", beadsfake.New(),
+			peer(func(p *duplicateCandidate) {
+				p.Ready.Labels = []string{specdispatch.FormulaLabelPrefix + "mol-a", specdispatch.FormulaLabelPrefix + "mol-b"}
+			}), knobs, "conflicting formula labels: mol-a, mol-b"},
 		{"a peer with many open blockers names the first few", beadsfake.New(),
 			peer(func(p *duplicateCandidate) { p.Ready.OpenBlockers = []string{"gt-a", "gt-b", "gt-c", "gt-d"} }), knobs,
 			"blocked by gt-a, gt-b, gt-c (+1 more)"},

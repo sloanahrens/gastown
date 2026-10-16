@@ -1845,6 +1845,13 @@ func TestMatchesGoCleanSharedCache(t *testing.T) {
 		{"path-qualified versioned toolchain binary", "/usr/local/go/bin/go1.22.0 clean -testcache", true},
 		{"gotip toolchain binary", "gotip clean -cache", true},
 		{"versioned toolchain binary behind -C dir", "go1.22.0 -C /tmp clean -modcache", true},
+		// golang.org/dl installs the pre-releases under their own names; the
+		// release form alone did not cover them, so the same cache wipe slipped
+		// through as `go1.22rc1 clean -modcache` (gt-7cmjp).
+		{"release-candidate toolchain binary", "go1.22rc1 clean -modcache", true},
+		{"beta toolchain binary", "go1.22beta1 clean -modcache", true},
+		{"alpha toolchain binary", "go1.23alpha1 clean -testcache", true},
+		{"path-qualified pre-release toolchain binary", "/usr/local/go/bin/go1.22rc1 clean -cache", true},
 
 		// Should allow.
 		{"safe flag on go clean, shared flag on a later unrelated command", "go clean -i; ls -la -cache", false},
@@ -2420,6 +2427,11 @@ func TestIdleGateHoldAdviceNamesTheHeldCommand(t *testing.T) {
 		{"go build ./...", "GOFLAGS=-p=8 go build ./...", "make test"},
 		{"go test ./...", "GOFLAGS=-p=8 go test ./...", "make build"},
 		{"go -C /tmp test ./...", "GOFLAGS=-p=8 go -C /tmp test ./...", "make test"},
+		// The -C directory is named `go`: spelled back from the directory
+		// rather than the binary, the advice named "/tmp/go test ./..." — no
+		// command at all. The held invocation is the one the operator typed
+		// (gt-7cmjp).
+		{"go -C /tmp/go test ./...", "GOFLAGS=-p=8 go -C /tmp/go test ./...", "make test"},
 	} {
 		t.Run(tt.command, func(t *testing.T) {
 			proc := fakeGuardProcess(map[string]string{

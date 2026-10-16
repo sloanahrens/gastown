@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"errors"
 	"reflect"
 	"sort"
+	"sync"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -131,6 +133,48 @@ func TestDoneDeferredExitLeavesOpenBeadsMoleculeAlone(t *testing.T) {
 
 	if got := rec.closed(); len(got) != 0 {
 		t.Fatalf("closed = %v; a DEFERRED exit leaves an open bead and its molecule open", got)
+	}
+}
+
+// TestDoneDeferredExitShowErrorKeepsMoleculeRecoverable: the DEFERRED branch
+// reads the hooked bead to learn whether a closed bead's molecule is its to
+// end, and a read that fails for any reason but absence leaves that unknown.
+// Warning and carrying on put gt-x1d8s's orphan back through the other door:
+// the hook was cleared over a molecule nothing left would close, because no
+// landing follows a DEFERRED exit and no reaper ends an attached workflow. The
+// branch refuses instead, exactly as the COMPLETED block does for the same
+// unknown, so the hook stays set and a retry still ends the molecule
+// (gt-7cmjp).
+func TestDoneDeferredExitShowErrorKeepsMoleculeRecoverable(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(doneAgentBead(),
+		beads.Issue{ID: "gt-base-123", Title: "Base bead", Status: string(beads.StatusClosed),
+			CloseReason: "no-changes: report-only deep review, digest posted",
+			Description: "attached_molecule: gt-wisp-xyz"})
+	db.Seed(beads.Issue{ID: "gt-wisp-xyz", Title: "mol-deep-review", Status: "open", Ephemeral: true})
+	seedChildren(t, db, "gt-wisp-xyz",
+		beads.Issue{ID: "gt-step-1", Title: "Step 1", Status: "open", Ephemeral: true})
+
+	rec := &doneRecorder{Client: db, mu: &sync.Mutex{}, closes: &[]string{},
+		showErrID: "gt-base-123", showErr: errors.New("database is locked")}
+	consumed, err := runDoneStateUpdateWithRecorder(t, rec, ExitDeferred)
+
+	if err == nil {
+		t.Fatalf("gt done answered no error for a DEFERRED exit whose hooked bead would not read: the hook is cleared and gt-wisp-xyz is left with no closer")
+	}
+	if consumed {
+		t.Error("consumed = true on a refused read; the agent-state write stays owed while the hook is still set")
+	}
+	if got := rec.closed(); len(got) != 0 {
+		t.Errorf("closed = %v, want none: what the bead holds is unknown, so nothing is closed on its word", got)
+	}
+	if got := mustShowBead(t, db, "gt-wisp-xyz").Status; got != "open" {
+		t.Errorf("molecule gt-wisp-xyz = %s, want open: a retry is what ends it", got)
+	}
+	agent := mustShowBead(t, db, "gt-gastown-polecat-nux")
+	if got := beads.ParseAgentFields(agent.Description).HookBead; got != "gt-base-123" {
+		t.Errorf("agent hook_bead = %q, want gt-base-123 still set for the retry", got)
 	}
 }
 

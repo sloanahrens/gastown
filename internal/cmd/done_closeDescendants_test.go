@@ -165,10 +165,14 @@ func seedChildren(t *testing.T, db *beadsfake.Fake, parent string, kids ...beads
 
 // doneRecorder is the store updateAgentStateOnDone sees: db, with every
 // closed ID recorded in order, Children failing with childrenErr when set,
-// and each purge counted.
+// Show failing for showErrID when showErr is set, and each purge counted.
 type doneRecorder struct {
 	beads.Client
 	childrenErr error
+	// showErrID is the one bead Show fails on when showErr is set, so a case
+	// can break the read a branch makes about the hooked bead alone.
+	showErrID string
+	showErr   error
 
 	mu     *sync.Mutex
 	closes *[]string
@@ -186,6 +190,13 @@ func (r doneRecorder) Children(id string) ([]*beads.Issue, error) {
 		return nil, r.childrenErr
 	}
 	return r.Client.Children(id)
+}
+
+func (r doneRecorder) Show(id string) (*beads.Issue, error) {
+	if r.showErr != nil && id == r.showErrID {
+		return nil, r.showErr
+	}
+	return r.Client.Show(id)
 }
 
 func (r doneRecorder) Close(ids ...string) error {
@@ -232,6 +243,27 @@ func runDoneStateUpdateWith(t *testing.T, db beads.Client, childrenErr error) *d
 // exit type.
 func runDoneStateUpdateForExit(t *testing.T, db beads.Client, childrenErr error, exitType string) *doneRecorder {
 	t.Helper()
+	rec, _, _ := runDoneStateUpdateForExitResult(t, db, childrenErr, exitType)
+	return rec
+}
+
+// runDoneStateUpdateForExitResult is runDoneStateUpdateForExit with what
+// updateAgentStateOnDoneIn answered: consumed, the agent-state write's
+// bookkeeping, and the error a close block refused the exit with. A test that
+// measures a refusal — the hook left set for a retry — reads them directly.
+func runDoneStateUpdateForExitResult(t *testing.T, db beads.Client, childrenErr error, exitType string) (*doneRecorder, bool, error) {
+	t.Helper()
+	rec := &doneRecorder{Client: db, childrenErr: childrenErr, mu: &sync.Mutex{}, closes: &[]string{}}
+	consumed, err := runDoneStateUpdateWithRecorder(t, rec, exitType)
+	return rec, consumed, err
+}
+
+// runDoneStateUpdateWithRecorder runs updateAgentStateOnDone as polecat
+// gastown/nux, from the rig directory of a fresh town whose routes send gt- to
+// the gastown rig, with rec as every store. No git repository holds the town,
+// so there is no HEAD for review evidence.
+func runDoneStateUpdateWithRecorder(t *testing.T, rec *doneRecorder, exitType string) (bool, error) {
+	t.Helper()
 	townRoot := t.TempDir()
 	for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
 		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
@@ -242,7 +274,6 @@ func runDoneStateUpdateForExit(t *testing.T, db beads.Client, childrenErr error,
 	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
 		t.Fatalf("write routes.jsonl: %v", err)
 	}
-	rec := &doneRecorder{Client: db, childrenErr: childrenErr, mu: &sync.Mutex{}, closes: &[]string{}}
 	env := doneStateEnv{
 		getenv: envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "nux"}),
 		routed: func(string) beads.Client { return rec },
@@ -252,8 +283,7 @@ func runDoneStateUpdateForExit(t *testing.T, db beads.Client, childrenErr error,
 			return "", errors.New("resolving HEAD: not a git repository")
 		},
 	}
-	_, _ = updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, exitType, "gt-base-123", beads.AgentFieldUpdates{})
-	return rec
+	return updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, exitType, "gt-base-123", beads.AgentFieldUpdates{})
 }
 
 // TestDoneStateEnvZeroValueIsTheRealProcess: updateAgentStateOnDone passes

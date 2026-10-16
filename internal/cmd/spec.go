@@ -378,14 +378,14 @@ func specHoldKnobsFrom(townRoot string) (specHoldKnobs, bool) {
 }
 
 // specPeerHeldFrom reports why the spec dispatcher would not sling peer, and
-// "" when the peer is a bead it would take. It asks the four questions the
+// "" when the peer is a bead it would take. It asks the five questions the
 // tick asks of a candidate before spending a seat: the candidate filter
 // (specdispatch.Eligible), readiness — the ready query lists only beads whose
 // blocking dependencies have all resolved, so a peer with one still open is
-// never reached at all — the shape gate's verdict, and the container rule. The
-// overlap guard reads the answer on an unstarted peer, so a cluster whose head
-// is held dispatches its next eligible bead instead of none (gt-00gee,
-// gt-mknmb).
+// never reached at all — the formula declaration, the shape gate's verdict,
+// and the container rule. The overlap guard reads the answer on an unstarted
+// peer, so a cluster whose head is held dispatches its next eligible bead
+// instead of none (gt-00gee, gt-mknmb).
 //
 // The questions read the peer's own pool row rather than the bead: the fields
 // they need are the ones a pool fetch already holds (sling.Readiness), so a
@@ -399,7 +399,11 @@ func specHoldKnobsFrom(townRoot string) (specHoldKnobs, bool) {
 // the peer they hold is one the cluster should still wait for. Nor is a hold
 // that holds every bead of a rig together, such as a parked or docked rig: the
 // comparison pool is the candidate's own rig, so such a hold can never tell a
-// peer apart from the bead being slung.
+// peer apart from the bead being slung. Nor is the tick's other formula skip, a
+// declaration the rig has no formula for (gt-j5cr2): answering that one needs
+// the formula-existence query the row cannot give, and asking it would spend a
+// bd read per weighed peer on a hold that is rare and self-clearing, since
+// whoever renamed the formula names the new one in the bead.
 //
 // Unknown is not held: a peer whose row a degraded pool fetch left unread, and
 // a child set that will not read, answer "" and the guard keeps refusing. That
@@ -412,6 +416,17 @@ func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, peer sling.Duplic
 	}
 	if why := specPeerBlocked(peer.Ready.OpenBlockers); why != "" {
 		return why
+	}
+	// A declaration the tick cannot read is a skip: the bead stays ready and is
+	// never slung with a declaration the dispatcher could not parse (gt-j5cr2).
+	// Left unasked here, a head in that state answered "the dispatcher would
+	// sling it" and so refused every lower-ranked bead sharing its test for as
+	// long as its declaration stayed broken, while it was itself never slung —
+	// the cluster's whole tail waiting on a bead the dispatcher cannot take
+	// (gt-7cmjp). The declaration is the row's own labels and vars section, so
+	// the question costs the guard no read.
+	if _, err := specdispatch.FormulaRunOf(spec); err != nil {
+		return err.Error()
 	}
 	if knobs.ShapeGate != specdispatch.ShapeGateOff && !spec.HasLabel(specdispatch.ShapeWaivedLabel) {
 		if verdict := specdispatch.Lint(spec, knobs.Template); !verdict.Clean() {
