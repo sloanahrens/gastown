@@ -1043,8 +1043,9 @@ func poolTestMigrate(t *testing.T, root string) {
 	}
 }
 
-// A block specDispatchOf makes writes "enabled": true, and it reads as enabled
-// after the JSON round trip the daemon.json write and the ticker's read make.
+// A block specDispatchOf makes writes "enabled": true, and it reads back as
+// enabled:true after the JSON round trip the daemon.json write and the ticker's
+// read make.
 func TestSpecDispatchOfKeepsEnabled(t *testing.T) {
 	t.Parallel()
 	pc := &config.DaemonPatrolConfig{}
@@ -1061,7 +1062,7 @@ func TestSpecDispatchOfKeepsEnabled(t *testing.T) {
 		t.Fatal(err)
 	}
 	sd := back.Patrols.SpecDispatch
-	if sd == nil || (sd.Enabled != nil && !*sd.Enabled) {
-		t.Errorf("spec_dispatch after the round trip = %+v, want enabled", sd)
+	if sd == nil || (sd.Enabled == nil || !*sd.Enabled) {
+		t.Errorf("spec_dispatch after the round trip = %+v, want enabled:true", sd)
 	}
 }
