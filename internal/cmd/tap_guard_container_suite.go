@@ -820,7 +820,7 @@ func packageWildcardMayReach(arg, cwd string, packages []string) bool {
 	if strings.Contains(arg, "{") || shellExpandedPackageArg(arg) {
 		return true
 	}
-	placed := moduleRelativePackageArgs([]string{arg})[0]
+	placed := moduleRelativePackageArg(arg)
 	if filepath.IsAbs(placed) {
 		return true
 	}
@@ -879,26 +879,32 @@ func packagePatternReaches(pattern, pkg string) bool {
 func moduleRelativePackageArgs(pkgArgs []string) []string {
 	out := make([]string, len(pkgArgs))
 	for i, arg := range pkgArgs {
-		out[i] = arg
-		if !filepath.IsAbs(arg) {
-			continue
-		}
-		dir := filepath.Clean(arg)
-		subtree := strings.HasSuffix(dir, "/...")
-		dir = strings.TrimSuffix(dir, "/...")
-		rel, ok := cwdPackagePath(dir)
-		switch {
-		case !ok:
-		case rel != "":
-			out[i] = rel
-			if subtree {
-				out[i] += "/..."
-			}
-		case subtree:
-			out[i] = wholeRepoPackageArg
-		}
+		out[i] = moduleRelativePackageArg(arg)
 	}
 	return out
+}
+
+// moduleRelativePackageArg is moduleRelativePackageArgs for one argument.
+func moduleRelativePackageArg(arg string) string {
+	if !filepath.IsAbs(arg) {
+		return arg
+	}
+	dir := filepath.Clean(arg)
+	subtree := strings.HasSuffix(dir, "/...")
+	dir = strings.TrimSuffix(dir, "/...")
+	rel, ok := cwdPackagePath(dir)
+	switch {
+	case !ok:
+		return arg
+	case rel != "":
+		if subtree {
+			return rel + "/..."
+		}
+		return rel
+	case subtree:
+		return wholeRepoPackageArg
+	}
+	return arg
 }
 
 // isWholeRepoPackageArg reports whether a normalized package argument (see
@@ -961,14 +967,11 @@ func isCwdRelativeGoPackageArg(arg string) bool {
 // an explicit argument has always carried its module-root reading (gt-saorq).
 // A match under either one refuses.
 //
-// Two spellings are read one way only. "./..." is the run directory's own
-// subtree and never the module's, so under "internal/style" it is
-// "internal/style" and the whole-repo reading is dropped: a light package's
-// './...' is not a whole-repo run. And a path that leaves the module and comes
-// back in ("../rig/internal/cmd" from the module root, whose directory is
-// "rig") joins to nothing the lexical readings can see, so the directory it
-// lands on is also read off the file system, the way an absolute argument is
-// (moduleRelativePackageArgs) (gt-xdcrl).
+// "./..." is the run directory's own subtree, so under "internal/style" it is
+// "internal/style" alone: a light package's './...' is not a whole-repo run.
+// A path that leaves the module and comes back in ("../rig/internal/cmd" from
+// the module root) joins to nothing the lexical readings can see, so the
+// directory it lands on is also read off the file system (gt-xdcrl).
 func packageArgsUnderRunDir(pkgArgs []string, cwd string) []string {
 	runPkg, placed := cwdPackagePath(cwd)
 	if !placed || len(pkgArgs) == 0 {
@@ -987,7 +990,7 @@ func packageArgsUnderRunDir(pkgArgs []string, cwd string) []string {
 		if runPkg != "" {
 			args = append(args, normalizeGoPackageArg(path.Join(runPkg, arg)))
 		}
-		if landed := moduleRelativePackageArgs([]string{filepath.Join(cwd, filepath.FromSlash(arg))})[0]; !filepath.IsAbs(landed) {
+		if landed := moduleRelativePackageArg(filepath.Join(cwd, filepath.FromSlash(arg))); !filepath.IsAbs(landed) {
 			args = append(args, normalizeGoPackageArg(landed))
 		}
 	}

@@ -2109,6 +2109,7 @@ func TestMatchesPolecatFullSuiteUncached(t *testing.T) {
 		{"full tree plus scoped pkg", "go test -count=1 ./internal/cmd ./...", true, true},
 		{"after a shell separator", "cd internal && go test -count=1 ./...", true, true},
 		{"other flags present", "go test -count=1 -timeout 10m -race ./...", true, true},
+		{"double-dash value flag before the wildcard", "go test -count=1 --run TestFoo ./...", true, true},
 
 		// Go's global -C dir flag sits between the binary and the subcommand
 		// in both of its spellings without hiding a full-tree run (gt-soohm).
@@ -2125,6 +2126,9 @@ func TestMatchesPolecatFullSuiteUncached(t *testing.T) {
 		{"scoped uncached", "go test -count=1 ./internal/cmd/...", true, false},
 		{"scoped package uncached", "go test -count=1 ./internal/cmd", true, false},
 		{"run-filtered uncached", "go test -count=1 -run TestFoo ./internal/cmd", true, false},
+		{"double-dash value is not a package", "go test -count=1 --run ./... ./internal/cmd", true, false},
+		{"double-dash value with = is not a package", "go test -count=1 --run=./... ./internal/cmd", true, false},
+		{"single-dash value is not a package", "go test -count=1 -run ./... ./internal/cmd", true, false},
 		{"presubmit", "make presubmit", true, false},
 		{"go build full tree", "go build ./...", true, false},
 		{"count not one", "go test -count=3 ./...", true, false},
