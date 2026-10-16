@@ -90,12 +90,11 @@ shows the last good feed marked stale.
 
 The News pane above the Machine panel lists the current top five Hacker News
 stories, one line each, with the story's points, comments and domain in the
-line's hover. The hub fetches them from the public Hacker News API every five
-minutes, holding what it read for that long, so the page never calls Hacker
-News itself. A refresh that fails keeps the last good five dimmed under a
-"stale" note; before any success the pane says it is unavailable. Neither
-raises an alert or moves the health pill. settings/config.json's
-dashboard.news.enabled (default true) switches the pane and its fetcher off.
+line's hover. The hub reads them from the public Hacker News API and holds what
+it read for five minutes, so the page never calls Hacker News itself. A refresh
+that fails keeps the last good five dimmed under a "stale" note; before any
+success the pane says it is unavailable. Neither raises an alert or moves the
+health pill.
 
 The Deploys block under the Cloud panel's findings reads those same repos'
 deploy.yml and staging.yml runs — every run of either workflow, whatever its

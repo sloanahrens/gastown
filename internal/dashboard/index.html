@@ -1250,12 +1250,14 @@ function renderNews(s) {
     cmt.target = "_blank";
     cmt.rel = "noopener noreferrer";
     row.append(cmt);
-    row.title = [st.title, st.points + " points", st.comments + " comments", age(st.at) + " ago", st.domain || null].filter(Boolean).join(" · ");
+    row.title = [st.title, st.points + " points", st.comments + " comments", st.at ? age(st.at) + " ago" : null, st.domain || null].filter(Boolean).join(" · ");
     box.append(row);
   }
   // The note ages the snapshot, which is what the pane's staleness turns on: a
   // story's own age is in its hover and says nothing about the read behind it.
-  const read = f.at ? age(f.at) : null;
+  // age() answers for an instant the server left out, so the note spells no
+  // null where an age belongs.
+  const read = age(f.at);
   note.textContent = stale ? "stale " + read + " · " + f.error : "read " + read + " ago";
   note.className = "r" + (stale ? " badc" : "");
 }

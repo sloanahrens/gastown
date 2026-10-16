@@ -22,6 +22,11 @@ const (
 	// produced, failure included. It is the pane's whole clock: Hacker News
 	// sees at most one refresh every five minutes however many pages are open.
 	newsRefresh = 5 * time.Minute
+	// newsPoll is how often the hub asks the reader, a fraction of the
+	// snapshot's life rather than a length of its own: a poll landing on the
+	// snapshot's edge serves the held copy and leaves the refresh it should
+	// have carried to the poll after it, halving the pane's rate (gt-9ktrr).
+	newsPoll = newsRefresh / 5
 	// newsTimeout bounds one whole refresh — the story list and every item read
 	// share it — so a slow Hacker News cannot hold the hub's other pollers.
 	newsTimeout = 10 * time.Second
@@ -37,9 +42,10 @@ const (
 	newsItemURL = "https://news.ycombinator.com/item?id="
 )
 
-// errNewsUnreadable is a response the pane cannot read: one over the size cap,
-// or one that is not the JSON the API serves. It is a class of its own because
-// it is not the network that failed.
+// errNewsUnreadable is a response the pane cannot read as a front page: one
+// over the size cap, one that is not the JSON the API serves, or one with no
+// story on it. It is a class of its own because it is not the network that
+// failed.
 var errNewsUnreadable = errors.New("unreadable response")
 
 // newsItem is the part of one Hacker News item the pane reads. An Ask HN or
@@ -144,7 +150,12 @@ func (r *NewsReader) fetch(now time.Time) *NewsFeed {
 // topStories reads the first ids of the front-page list and the item behind
 // each. An id whose item has no title is not a story the pane can show — Hacker
 // News answers null for one that has gone — and is left out, so the list holds
-// what can be drawn rather than a blank line.
+// what can be drawn rather than a blank line. An item the pane cannot read
+// costs that one line the same way rather than the whole refresh: failing the
+// refresh over it would throw away the four the read did get. What is left is
+// an error when it is nothing at all, which is what a refresh the pane read no
+// stories from is, so a read that produced nothing keeps the last good stories
+// instead of replacing them with an empty front page.
 func (r *NewsReader) topStories(ctx context.Context) ([]NewsStory, error) {
 	var ids []int64
 	if err := r.get(ctx, "/topstories.json", &ids); err != nil {
@@ -154,15 +165,25 @@ func (r *NewsReader) topStories(ctx context.Context) ([]NewsStory, error) {
 		ids = ids[:newsStories]
 	}
 	out := make([]NewsStory, 0, len(ids))
+	var firstErr error
 	for _, id := range ids {
 		var it newsItem
 		if err := r.get(ctx, "/item/"+strconv.FormatInt(id, 10)+".json", &it); err != nil {
-			return nil, err
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
 		}
 		if it.Title == "" {
 			continue
 		}
 		out = append(out, it.story(len(out)+1))
+	}
+	if len(out) == 0 {
+		if firstErr != nil {
+			return nil, firstErr
+		}
+		return nil, fmt.Errorf("%w: no story on the front page", errNewsUnreadable)
 	}
 	return out, nil
 }

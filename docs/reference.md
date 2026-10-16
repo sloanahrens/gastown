@@ -133,7 +133,7 @@ path named for the retired mayor role) under:
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `news.enabled` | `*bool` | `true` | The Hacker News pane above the dashboard's Machine panel. The hub reads the top five stories from the public Hacker News API every five minutes and holds them for that long, so the page never calls Hacker News and a refresh that fails shows what it last read, dimmed. `false` leaves out both the pane and the fetcher. `gt dashboard` reads the key when it starts, so a change needs a restart. |
+| `news.enabled` | `*bool` | `true` | The Hacker News pane above the dashboard's Machine panel. The hub reads the top five stories from the public Hacker News API into a snapshot it holds for five minutes, so Hacker News is read about that often and the page never calls it; a refresh that fails shows what it last read, dimmed. `false` leaves out both the pane and the fetcher. `gt dashboard` reads the key when it starts, so a change needs a restart. |
 
 **Landing and gate fields:**
 

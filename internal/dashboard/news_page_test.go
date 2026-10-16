@@ -191,6 +191,32 @@ func TestNewsPaneSaysUnavailableBeforeAnySuccess(t *testing.T) {
 	}
 }
 
+// A reading the server left an instant out of still has to read as English: the
+// page's own age() answers for a missing one, so a stale note says how the
+// refresh failed rather than spelling out what is not there (gt-9ktrr).
+func TestNewsPaneNotesAReadingWithNoSnapshotTime(t *testing.T) {
+	t.Parallel()
+
+	story := newsStoryMap(1, 11, "Postgres 18", "https://example.com/pg", "example.com", 412, 96, time.Now())
+	delete(story, "at")
+	dom := newPageDOM(t)
+	dom.call(t, "renderNews", map[string]any{"news": map[string]any{
+		"stories": []any{story},
+		"error":   "timeout",
+	}})
+
+	note := dom.element(t, "newsnote")
+	if !strings.HasPrefix(note.Text, "stale ") || !strings.Contains(note.Text, "timeout") {
+		t.Errorf("the note reads %q, want a stale reading that says why", note.Text)
+	}
+	if strings.Contains(note.Text, "null") || strings.Contains(note.Text, "undefined") {
+		t.Errorf("the note reads %q, want an absent instant left to age() rather than spelled out", note.Text)
+	}
+	if hover := dom.descend(t, "news", 0).Title; strings.Contains(hover, "null") || strings.Contains(hover, "undefined") {
+		t.Errorf("the line's hover reads %q, want the parts it has rather than the ones it has not", hover)
+	}
+}
+
 // The pane is drawn only when the server sends one: with the pane switched off
 // there is no news key, and the section is hidden rather than left as an empty
 // box. A reconnect that has not heard from the poller yet is the same picture.

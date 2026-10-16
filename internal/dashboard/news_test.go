@@ -21,13 +21,14 @@ import (
 // the in-process transport the Forgejo tests use — the unit tier opens no
 // socket (testpolicy rule no-network).
 type newsStub struct {
-	mu    sync.Mutex
-	ids   []int64
-	items map[int64]string
-	fail  int    // the status every request answers once set
-	moved string // the host every request is redirected to once set
-	body  string // what every request answers with, when set
-	asked []string
+	mu        sync.Mutex
+	ids       []int64
+	items     map[int64]string
+	fail      int            // the status every request answers once set
+	failItems map[int64]bool // the item ids whose own reads answer 500 once set
+	moved     string         // the host every request is redirected to once set
+	body      string         // what every request answers with, when set
+	asked     []string
 }
 
 func (s *newsStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -57,6 +58,10 @@ func (s *newsStub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		if s.failItems[id] {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
 		body, ok := s.items[id]
 		if !ok {
 			_, _ = io.WriteString(w, "null")
@@ -78,6 +83,17 @@ func (s *newsStub) setMoved(host string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.moved = host
+}
+
+// setFailItems is the item ids the stub answers 500 for, so a test can break
+// one line of the front page without breaking the list it is on.
+func (s *newsStub) setFailItems(ids ...int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failItems = make(map[int64]bool, len(ids))
+	for _, id := range ids {
+		s.failItems[id] = true
+	}
 }
 
 // newsAsked is every path the stub was asked for, in order.
@@ -267,6 +283,57 @@ func TestNewsReaderLeavesOutAnItemWithNoTitle(t *testing.T) {
 	}
 }
 
+// One item the pane cannot read costs that one line, not the refresh: failing
+// the read over it would throw away the four lines it did read, and the pane
+// would go stale for five minutes over one item (gt-9ktrr).
+func TestNewsReaderKeepsTheLinesItCouldRead(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	stub := newsTestStub(at)
+	stub.setFailItems(13)
+
+	feed := newsTestReader(t, stub, at).Read()
+	require.Empty(t, feed.Error, "a read that got four of five stories is not a failed refresh")
+	require.Len(t, feed.Stories, newsStories-1)
+	assert.Equal(t, []int64{11, 12, 14, 15}, []int64{feed.Stories[0].ID, feed.Stories[1].ID, feed.Stories[2].ID, feed.Stories[3].ID})
+	assert.Equal(t, at, feed.At, "the snapshot is the read that just happened, not a kept one")
+}
+
+// A refresh that read no story at all is the failure it is, so it keeps the
+// last good stories: five item reads Hacker News answered for with nothing are
+// not a front page with no stories on it, and publishing the empty list over
+// the last good five would blank the pane for five minutes (gt-9ktrr).
+func TestNewsReaderKeepsTheLastGoodStoriesWhenItReadsNone(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	stub := newsTestStub(at)
+	reader, advance := newsTestClock(t, stub, at)
+
+	good := reader.Read()
+	require.Len(t, good.Stories, newsStories)
+
+	advance(newsRefresh)
+	stub.setFailItems(11, 12, 13, 14, 15)
+	stale := reader.Read()
+	assert.Equal(t, "http 500", stale.Error)
+	assert.Equal(t, good.Stories, stale.Stories, "the pane keeps the last good five rather than an empty front page")
+	assert.Equal(t, good.At, stale.At, "and their own read time, so the pane can age them")
+}
+
+// An empty front page is a read the pane could not make rather than a front
+// page with nothing on it: Hacker News serves stories whenever it answers at
+// all, so the pane says it is unavailable instead of drawing a page it read as
+// empty (gt-9ktrr).
+func TestNewsReaderReadsAnEmptyStoryListAsAFailure(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+
+	feed := newsTestReader(t, &newsStub{}, at).Read()
+	assert.Equal(t, "unreadable", feed.Error)
+	assert.Empty(t, feed.Stories)
+	assert.True(t, feed.At.IsZero())
+}
+
 // A story whose url is not one a browser can be sent to links to its discussion
 // instead: the pane's links open in a new tab, and a url that runs code would
 // run it in the dashboard's own origin (gt-9ktrr).
@@ -390,4 +457,19 @@ func TestNewsPollPublishesWithoutAlerting(t *testing.T) {
 	assert.Equal(t, feed.Stories, st.News.Stories)
 	assert.Empty(t, st.Alerts, "a failed news read raises no alert")
 	assert.Empty(t, st.Reads, "and leaves no reading behind for the health pill to carry")
+}
+
+// The hub's poll has to fall inside the five minutes the reader holds its
+// snapshot for. The two at the same length is the defect this pins: a poll
+// landing a moment before the snapshot came due serves the held copy, and the
+// refresh that belonged to it waits for the poll after, so the pane refreshes
+// about every ten minutes while reading as though it refreshed every five
+// (gt-9ktrr).
+func TestNewsPollFallsInsideTheSnapshotItReads(t *testing.T) {
+	t.Parallel()
+
+	var c Config
+	c.defaults()
+	require.NotZero(t, c.NewsEvery, "the pane needs a poll of its own")
+	assert.Less(t, c.NewsEvery, newsRefresh, "a poll on the snapshot's own edge can serve it and lose the refresh")
 }
