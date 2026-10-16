@@ -46,7 +46,7 @@ td.n,th.n{text-align:right}
 .rbead:hover{background:#19212b}
 .rbeadrow{margin-top:6px}
 .empty{color:var(--dim);padding:6px 0}
-.body.stale{opacity:.55}
+.body.stale,#cost .spendpart.stale{opacity:.55}
 .spark{width:100%;height:56px;display:block}
 .chart{width:100%;height:64px;display:block}
 .hbars{display:flex;align-items:stretch;gap:2px;height:64px;margin:4px 0 2px}
@@ -56,7 +56,7 @@ td.n,th.n{text-align:right}
 .hrej{background:var(--red);border-radius:2px 2px 0 0}
 .legend{display:flex;gap:12px;flex-wrap:wrap;color:var(--dim);font-size:11px;margin-top:3px}
 .sw{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:4px;vertical-align:-1px}
-.kv{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:6px}#spend .kv{margin-bottom:2px}
+.kv{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:6px}#cost .kv{margin-bottom:2px}
 .kv b{font-size:16px}.kv span{color:var(--dim);font-size:11px;display:block}
 .chips{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
 .chip{cursor:pointer;border:1px solid var(--line);border-radius:999px;padding:1px 9px;font-size:11px;color:var(--dim);background:none;font:inherit;font-size:11px}
@@ -265,8 +265,7 @@ a.hrow:hover{background:#19212b}
   <div class="col">
     <section><h2>Attention <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>
     <section><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>
-    <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
-    <section><h2>Usage <span class="r" id="usagenote"></span></h2><div class="body" id="usage"></div></section>
+    <section><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>
     <section><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
     <section><h2>Work <span class="r" id="worknote"></span></h2><div class="body" id="work"></div></section>
@@ -2098,15 +2097,13 @@ function renderForgejo(s) {
   if (follow) box.scrollTop = box.scrollHeight;
 }
 
-function renderSpend(s) {
-  const box = $("spend");
-  box.replaceChildren();
-  const d = s.spend;
-  const r = readOf(s, "spend");
-  paintsRead(box, $("spendnote"), r);
+// The DeepSeek lines of the Cost panel, drawn into box from the spend report d
+// and the status r of the read that brought it. Returns the report's own words
+// for the panel's caption: the ledger's last sample and the read's age.
+function costSpend(box, d, r) {
   // No spend command is configured at all — no reader, so no status either —
   // which is not the same as one that failed or has not answered yet (gt-q6h8e).
-  if (!d) { box.append(el("div", "empty", r ? "unavailable — the spend read failed" : "no spend report")); $("spendnote").textContent = ""; return; }
+  if (!d) { box.append(el("div", "empty", r ? "unavailable — the spend read failed" : "no spend report")); return []; }
   const live = d.live || {};
   const kv = el("div", "kv");
   const add = (v, k, cls) => { const x = el("div"); x.append(el("b", cls || "", v), el("span", "", k)); kv.append(x); };
@@ -2145,7 +2142,7 @@ function renderSpend(s) {
   const alerts = d.alerts || [];
   if (live.ok === false) box.append(el("div", "badc", "live balance unreachable; showing the ledger"));
   if (d.watcher_pid == null || d.watcher_pid === "") box.append(el("div", "badc", "spend watcher is not running"));
-  $("spendnote").textContent = readCaption(r, [d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null]);
+  return [d.last_sample ? "ledger " + d.last_sample.replace("T", " ") : null, r && r.ageSec != null ? "read " + fmtDur(r.ageSec) + " ago" : null];
 }
 
 function sec(v) { return v == null ? "–" : fmtDur(v); }
@@ -2669,10 +2666,10 @@ function drawOverseerQueue(panel, s) {
   for (const r of rows) box.append(attentionRow(r));
 }
 
-// The Usage pane: what the town spent over the last day, from the records the
-// usage scan writes. Collapsed by default, with the two numbers an operator
-// wants without opening it in the header: the day's DeepSeek estimate and how
-// many beads ran over twenty minutes. Read-only.
+// The Usage part of the Cost panel: what the town spent over the last day, from
+// the records the usage scan writes. Collapsed by default, with the two numbers
+// an operator wants without opening it in the panel's header: the day's
+// DeepSeek estimate and how many beads ran over twenty minutes. Read-only.
 //
 // Claude rows show uncached tokens, since the scan estimates no cost for them;
 // DeepSeek rows show estimated dollars, labelled "est." because they are a rate
@@ -2688,22 +2685,22 @@ const fmtTokens = n => {
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
   return String(n);
 };
-function renderUsage(s) {
-  const box = $("usage"), note = $("usagenote");
-  box.replaceChildren();
-  const u = s.usage;
-  note.className = "r"; note.textContent = ""; note.title = "";
-  if (!u) { box.append(el("div", "empty", "reading…")); return; }
+// costUsage draws the part into box from the usage payload u and the whole
+// state s, and returns what the panel's caption says of it: text, the tooltip
+// that explains the text, and whether it is a warning (warn) or a failure (bad).
+function costUsage(box, u, s) {
+  if (!u) { box.append(el("div", "empty", "reading…")); return {}; }
   if (u.unavailable) {
     box.append(el("div", "badc", "usage records unreadable"));
-    note.className = "r badc"; note.textContent = "unreadable";
-    return;
+    return {text: "usage unreadable", bad: true};
   }
   const byClass = u.by_class_model || [], deep = u.deep_review_runs || [], top = u.top_beads || [], over = u.over20 || [];
   const est = byClass.filter(r => isDeepSeek(r.model)).reduce((sum, r) => sum + (r.est_cost_usd || 0), 0);
-  note.className = over.length ? "r warnc" : "r";
-  note.textContent = "est. " + money(est) + " · " + over.length + " over 20m";
-  note.title = "estimated DeepSeek spend over the last " + (u.window || "24h") + "; beads that ran over twenty minutes in the last 48 hours";
+  const caption = {
+    text: "est. " + money(est) + " · " + over.length + " over 20m",
+    title: "estimated DeepSeek spend over the last " + (u.window || "24h") + "; beads that ran over twenty minutes in the last 48 hours",
+    warn: over.length > 0,
+  };
 
   // How old the records are: the scan runs on a schedule, so an old AsOf means
   // the numbers below are a past day's, and the pane says so beside them.
@@ -2763,6 +2760,66 @@ function renderUsage(s) {
     : none("none in the last 48h"));
   d.append(el("div", "empty", (u.unmatched || 0) + " unmatched · " + (u.incomplete || 0) + " incomplete · " + (u.skipped || 0) + " skipped"));
   box.append(d);
+  return caption;
+}
+
+// The GCP budget line of the Cost panel: the budget_alert findings the Cloud
+// panel's reader already carries, one line each, coloured by the finding's
+// severity. The patrol writes the figures into the finding's Detail sentence
+// ("project P has spent 4.57 USD of its 5.00 USD budget ..., 91% of the
+// budget ..."), so the line reads them back out of it; a sentence that does not
+// match is shown whole rather than dropped. A healthy patrol with no finding
+// draws no line: a project under its alert threshold has nothing to say here.
+// An unhealthy source does draw one, because a line that exists to alarm must
+// not go quiet when it cannot see: after a failed read, a missing report or an
+// overdue patrol, no alert means "unknown", not "under budget". A machine with
+// no patrol at all has no budget to watch and draws nothing.
+const BUDGET_SPENT = /spent ([\d.,]+) ([A-Za-z]{3}) of its ([\d.,]+) [A-Za-z]{3} budget/;
+const BUDGET_PCT = /(\d+(?:\.\d+)?)% of the budget/;
+function costGCP(box, c) {
+  if (!c) return;
+  if (c.state === "error") { box.append(el("div", "badc", "GCP budget · cloud read failed" + (c.note ? " · " + c.note : ""))); return; }
+  if (c.state === "missing") { if (!c.no_patrol) box.append(el("div", "empty", "GCP budget · no patrol report")); return; }
+  const rows = (c.findings || []).filter(f => f.kind === "budget_alert");
+  const late = c.state === "overdue" ? " · patrol overdue" : "";
+  for (const f of rows) {
+    const detail = f.detail || "", spent = BUDGET_SPENT.exec(detail), pct = BUDGET_PCT.exec(detail);
+    const what = spent && pct ? spent[1] + " of " + spent[3] + " " + spent[2] + " · " + pct[1] + "%" : detail || "alert";
+    const line = el("div", CLOUD_SEV[f.severity] || "sev-low", "GCP budget · " + (f.project ? f.project + " · " : "") + what + late);
+    line.title = detail;
+    box.append(line);
+  }
+  if (!rows.length && late) box.append(el("div", "warnc", "GCP budget · patrol overdue, no alert on its last report"));
+}
+
+// The Cost panel: what the town is spending, in one place. DeepSeek's balance,
+// pace and credit, the usage scan's estimate and slow runs, and the GCP budget
+// alert. The panel greys with the spend read it is mostly drawn from; a part
+// whose own read has not answered says so on its own line. With neither a spend
+// report nor usage records there is one line and nothing else.
+function renderCost(s) {
+  const box = $("cost"), note = $("costnote");
+  box.replaceChildren();
+  note.className = "r"; note.textContent = ""; note.title = "";
+  const d = s.spend, u = s.usage, r = readOf(s, "spend");
+  const spendBox = el("div", "spendpart");
+  box.append(spendBox);
+  paintsRead(spendBox, note, r);
+  if (!d && !u) {
+    // The usage scan has not answered yet, which is reading, not missing; the
+    // budget line still draws, since an alert needs no spend report.
+    spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + "; usage still reading…"));
+    costGCP(box, s.cloud);
+    return;
+  }
+  const spendWords = costSpend(spendBox, d, r);
+  costGCP(box, s.cloud);
+  const usage = costUsage(box, u, s);
+  note.textContent = readCaption(r, [usage.text || null].concat(spendWords));
+  note.title = usage.title || "";
+  // A stale or failed spend read has already coloured the caption; the usage
+  // part only colours one that is otherwise plain.
+  if (note.className === "r" && (usage.bad || usage.warn)) note.className = "r " + (usage.bad ? "badc" : "warnc");
 }
 
 // An escalation's severity is why a row is where it is, so the panel colours
@@ -3007,7 +3064,7 @@ function drawQueueList(box, s) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderUsage(state); renderRigs(state); renderWork(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderCost(state); renderRigs(state); renderWork(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderOM(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

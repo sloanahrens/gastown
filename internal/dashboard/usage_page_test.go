@@ -12,13 +12,14 @@ import (
 func TestUsagePanelDrawsThePayload(t *testing.T) {
 	t.Parallel()
 
-	draw := pageFunc(t, "renderUsage")
+	draw := pageFunc(t, "costUsage")
 	for _, want := range []string{
-		`const u = s.usage;`,
-		// The header reads without opening the pane: the DeepSeek estimate and
-		// the count of beads over twenty minutes.
+		`function costUsage(box, u, s) {`,
+		// The panel's header reads without opening the part: the DeepSeek
+		// estimate and the count of beads over twenty minutes.
 		`byClass.filter(r => isDeepSeek(r.model))`,
-		`note.textContent = "est. " + money(est) + " · " + over.length + " over 20m"`,
+		`text: "est. " + money(est) + " · " + over.length + " over 20m"`,
+		`warn: over.length > 0,`,
 		// Claude rows are tokens, DeepSeek rows are dollars labelled est.
 		`isDeepSeek(r.model) ? "est. " + money(r.est_cost_usd) : fmtTokens(r.uncached) + " tokens"`,
 		// A bead over twenty minutes is flagged in the page's warning style.
@@ -28,15 +29,19 @@ func TestUsagePanelDrawsThePayload(t *testing.T) {
 		`(u.unmatched || 0) + " unmatched · " + (u.incomplete || 0) + " incomplete · " + (u.skipped || 0) + " skipped"`,
 	} {
 		if !strings.Contains(draw, want) {
-			t.Errorf("renderUsage has no %q", want)
+			t.Errorf("costUsage has no %q", want)
 		}
 	}
 
-	if all := pageFunc(t, "renderAll"); !strings.Contains(all, "renderUsage(state)") {
-		t.Error("renderAll does not draw the Usage panel")
+	// The usage part is drawn by the Cost panel, and no panel of its own is left.
+	if cost := pageFunc(t, "renderCost"); !strings.Contains(cost, "costUsage(box, u, s)") {
+		t.Error("the Cost panel does not draw the usage part")
 	}
-	if !strings.Contains(string(indexHTML), `<section><h2>Usage <span class="r" id="usagenote"></span></h2><div class="body" id="usage"></div></section>`) {
-		t.Error("the Usage section is not the markup its neighbours are")
+	if all := pageFunc(t, "renderAll"); !strings.Contains(all, "renderCost(state)") {
+		t.Error("renderAll does not draw the Cost panel")
+	}
+	if !strings.Contains(string(indexHTML), `<section><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>`) {
+		t.Error("the Cost section is not the markup its neighbours are")
 	}
 }
 
@@ -45,7 +50,7 @@ func TestUsagePanelDrawsThePayload(t *testing.T) {
 func TestUsagePanelNamesItsStates(t *testing.T) {
 	t.Parallel()
 
-	draw := pageFunc(t, "renderUsage")
+	draw := pageFunc(t, "costUsage")
 	for _, want := range []string{
 		`if (u.unavailable) {`,
 		`box.append(el("div", "badc", "usage records unreadable"))`,
@@ -58,13 +63,13 @@ func TestUsagePanelNamesItsStates(t *testing.T) {
 		`section("Over 20 minutes (48h)", over.length`,
 	} {
 		if !strings.Contains(draw, want) {
-			t.Errorf("renderUsage has no %q", want)
+			t.Errorf("costUsage has no %q", want)
 		}
 	}
 
 	// The unavailable branch returns before any list is drawn.
 	branch := draw[strings.Index(draw, `if (u.unavailable) {`):]
-	if ret, list := strings.Index(branch, "return;"), strings.Index(branch, "const byClass"); ret < 0 || list < 0 || ret > list {
+	if ret, list := strings.Index(branch, "return {text:"), strings.Index(branch, "const byClass"); ret < 0 || list < 0 || ret > list {
 		t.Error("an unreadable record set falls through to the lists")
 	}
 
@@ -73,7 +78,7 @@ func TestUsagePanelNamesItsStates(t *testing.T) {
 		t.Error("the stale threshold is not three hours")
 	}
 	if !strings.Contains(draw, `> USAGE_STALE_SEC`) {
-		t.Error("renderUsage does not compare the scan's age with the stale threshold")
+		t.Error("costUsage does not compare the scan's age with the stale threshold")
 	}
 }
 
@@ -85,14 +90,14 @@ func TestUsagePanelIsCollapsedByDefault(t *testing.T) {
 	if !strings.Contains(string(indexHTML), `let openUsage = false;`) {
 		t.Error("the Usage pane does not start collapsed")
 	}
-	draw := pageFunc(t, "renderUsage")
+	draw := pageFunc(t, "costUsage")
 	for _, want := range []string{
 		`document.createElement("details")`,
 		`d.open = openUsage;`,
 		`d.ontoggle = () => { openUsage = d.open; };`,
 	} {
 		if !strings.Contains(draw, want) {
-			t.Errorf("renderUsage has no %q", want)
+			t.Errorf("costUsage has no %q", want)
 		}
 	}
 }
@@ -102,15 +107,15 @@ func TestUsagePanelIsCollapsedByDefault(t *testing.T) {
 func TestUsagePanelSetsNoMarkup(t *testing.T) {
 	t.Parallel()
 
-	draw := pageFunc(t, "renderUsage")
+	draw := pageFunc(t, "costUsage")
 	for _, bad := range []string{"innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"} {
 		if strings.Contains(draw, bad) {
-			t.Errorf("renderUsage uses %s", bad)
+			t.Errorf("costUsage uses %s", bad)
 		}
 	}
 	// Every cell is built through el(), which writes textContent.
 	if !strings.Contains(draw, `tr.append(el("td", cls || "", text))`) {
-		t.Error("renderUsage does not draw its cells through el()")
+		t.Error("costUsage does not draw its cells through el()")
 	}
 }
 
@@ -121,7 +126,7 @@ func TestUsagePanelSetsNoMarkup(t *testing.T) {
 func TestUsagePanelJoinsDeepReviewFindings(t *testing.T) {
 	t.Parallel()
 
-	draw := pageFunc(t, "renderUsage")
+	draw := pageFunc(t, "costUsage")
 	for _, want := range []string{
 		// The join: the Deep review block's runs keyed by their id, read off the
 		// same state the Usage payload rides in.
@@ -135,7 +140,7 @@ func TestUsagePanelJoinsDeepReviewFindings(t *testing.T) {
 		`[f ? fmtTokens(Math.round(r.uncached / f)) : "-", "n"]`,
 	} {
 		if !strings.Contains(draw, want) {
-			t.Errorf("renderUsage has no %q", want)
+			t.Errorf("costUsage has no %q", want)
 		}
 	}
 }
@@ -147,11 +152,11 @@ func TestUsagePanelJoinsDeepReviewFindings(t *testing.T) {
 func TestUsagePanelDeepReviewColumnsHandleMissingAndZero(t *testing.T) {
 	t.Parallel()
 
-	draw := pageFunc(t, "renderUsage")
+	draw := pageFunc(t, "costUsage")
 	// No deep review in the state, or one that carried no rows, joins to an
 	// empty map: every run then draws "-" in both columns.
 	if !strings.Contains(draw, `(s.deepreview && s.deepreview.runs) || []`) {
-		t.Error("renderUsage joins without guarding a missing deepreview or runs")
+		t.Error("costUsage joins without guarding a missing deepreview or runs")
 	}
 	// Unknown findings (no entry) is told apart from zero findings (an entry of
 	// 0): the first draws "-", the second draws "0".
@@ -163,6 +168,6 @@ func TestUsagePanelDeepReviewColumnsHandleMissingAndZero(t *testing.T) {
 		t.Error("the Tokens per finding cell does not guard a zero or unknown count")
 	}
 	if strings.Count(draw, "r.uncached / ") != 1 {
-		t.Error("renderUsage divides uncached tokens somewhere other than the guarded cell")
+		t.Error("costUsage divides uncached tokens somewhere other than the guarded cell")
 	}
 }

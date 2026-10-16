@@ -14,7 +14,6 @@ func TestThePageMarksAFailedOrStaleReading(t *testing.T) {
 	for _, pane := range []struct{ fn, source, note string }{
 		{"renderWork", "seats", "worknote"}, // the Work panel is joined from the seats and queue reads
 		{"renderMachine", "machine", "machnote"},
-		{"renderSpend", "spend", "spendnote"},
 		{"renderOM", "om", "omnote"},
 		{"renderRigs", "queue", "rigsnote"}, // the Rigs rows are joined from the queue read
 	} {
@@ -24,6 +23,15 @@ func TestThePageMarksAFailedOrStaleReading(t *testing.T) {
 		}
 		if want := `paintsRead(box, $("` + pane.note + `"), `; !strings.Contains(body, want) {
 			t.Errorf("%s does not grey the pane and colour its caption: %s", pane.fn, want)
+		}
+	}
+
+	// The Cost panel greys its spend lines (not the usage and GCP lines drawn
+	// from other reads) and colours its caption with the spend read's status.
+	cost := pageFunc(t, "renderCost")
+	for _, want := range []string{`readOf(s, "spend")`, `paintsRead(spendBox, note, r);`} {
+		if !strings.Contains(cost, want) {
+			t.Errorf("renderCost does not grey the spend lines on a failed or aged read: no %q", want)
 		}
 	}
 
