@@ -295,6 +295,125 @@ func TestPolecatTestScopeRunDirRelativePackageArgs(t *testing.T) {
 	}
 }
 
+// A package argument with a wildcard in a path element, or one the shell
+// rewrites, names a set of packages the hook cannot see into: it used to read
+// as literal text that matches no heavy package, so an unfiltered run of
+// internal/cmd went through. A -run filter bounds it (gt-ff2l8).
+func TestPolecatTestScopeWildcardPackageArgs(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"glob in a heavy path element", "go test ./internal/c?d", true},
+		{"glob star", "go test ./internal/c*", true},
+		{"character class", "go test ./internal/[c]md", true},
+		{"dots inside a path element", "go test ./internal/c...", true},
+		{"brace expansion", "go test ./internal/{cmd,style}", true},
+		{"variable prefix", `go test "$PWD/internal/cmd"`, true},
+		{"command substitution", `go test "$(pwd)/internal/cmd"`, true},
+		{"leading tilde", "go test ~/gt/x/internal/cmd", true},
+		{"wrapped in slot run", `gt slot run --role gastown/flint -- go test "$PWD/internal/cmd"`, true},
+
+		{"glob, -run", "go test ./internal/c?d -run TestX", false},
+		{"variable prefix, -run", `go test "$PWD/internal/cmd" -run TestX`, false},
+		{"glob reaching no heavy package", "go test ./internal/s*", false},
+		{"glob under a light package", "go test ./internal/style/*", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, root), tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
+// A package argument spelled relative to a directory the walk cannot place
+// ("cd \"$(git rev-parse --show-toplevel)/internal\" && go test ./cmd") read as
+// the module-root package "cmd", which is not heavy, though go runs
+// internal/cmd. Without a -run filter it is refused; a cd the walk can place
+// keeps its own verdicts (gt-ff2l8).
+func TestPolecatTestScopeRelativeArgUnderUnplacedCwd(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"command substitution cd, heavy argument", `cd "$(git rev-parse --show-toplevel)/internal" && go test ./cmd`, true},
+		{"command substitution cd, heavy argument with dots", `cd "$(git rev-parse --show-toplevel)/internal" && go test ./cmd/...`, true},
+		{"unset variable cd, relative argument", `cd "$UNSET" && go test ./cmd`, true},
+		{"unset variable cd, argument that reaches no heavy package", `cd "$UNSET" && go test ./style`, false},
+		{"unset variable cd, parent-relative argument", `cd "$UNSET" && go test ../cmd`, true},
+
+		{"command substitution cd, -run", `cd "$(git rev-parse --show-toplevel)/internal" && go test ./cmd -run TestX`, false},
+		{"literal cd, -run", "cd internal && go test ./cmd -run TestX", false},
+		{"literal cd, light argument", "cd internal && go test ./style", false},
+		{"literal cd, heavy argument", "cd internal && go test ./cmd", true},
+		{"command substitution cd, import-path light package", `cd "$UNSET" && go test internal/style`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, root), tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
+// A -run whose pattern selects every test bounds nothing: the run costs what
+// the unfiltered one does. A pattern that leaves tests out still bounds it, and
+// the last -run on the line is the one go uses (gt-ff2l8).
+func TestPolecatTestScopeMatchAllRunFilter(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"dot", "go test ./internal/cmd -run .", true},
+		{"dot, = form", "go test ./internal/cmd -run=.", true},
+		{"dot star", "go test ./internal/cmd -run '.*'", true},
+		{"empty", "go test ./internal/cmd -run ''", true},
+		{"empty, = form", "go test ./internal/cmd -run=", true},
+		{"empty, double quoted", `go test ./internal/cmd -run ""`, true},
+		{"caret", "go test ./internal/cmd -run '^'", true},
+		{"case-insensitive flag only", "go test ./internal/cmd -run '(?i)'", true},
+		{"match-all alternation", "go test ./internal/cmd -run '.|TestX'", true},
+		{"match-all first element of a subtest path", "go test ./internal/cmd -run '.*/sub'", true},
+		{"empty before -run value", "go test -run '' ./internal/cmd", true},
+		{"test binary flag after --", "go test ./internal/cmd -- -test.run .", true},
+		{"double dash spelling", "go test ./internal/cmd --run .", true},
+		{"match-all after a narrow one", "go test ./internal/cmd -run TestX -run .", true},
+		{"slot-wrapped", "gt slot run --role gastown/flint -- go test ./internal/daemon -run '.*'", true},
+
+		{"name", "go test ./internal/cmd -run TestX", false},
+		{"name, = form", "go test ./internal/cmd -run=TestX", false},
+		{"anchored name", "go test ./internal/cmd -run '^TestX$'", false},
+		{"alternation of names", "go test ./internal/cmd -run 'TestA|TestB'", false},
+		{"prefix", "go test ./internal/cmd -run '^TestApply'", false},
+		{"subtest path", "go test ./internal/cmd -run 'TestX/case'", false},
+		{"test binary flag after --", "go test ./internal/cmd -- -test.run TestX", false},
+		{"narrow after a match-all one", "go test ./internal/cmd -run . -run TestX", false},
+		{"invalid pattern", "go test ./internal/cmd -run '('", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, root), tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
 // runContainerSuiteGuard runs the container-suite guard on input as proc's
 // session and returns its verdict and stderr.
 func runContainerSuiteGuard(input string, proc guardProcess) (string, error) {

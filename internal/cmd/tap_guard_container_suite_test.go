@@ -1039,6 +1039,43 @@ func TestContainerSuiteGoTestTargetFollowsTheCDirFlag(t *testing.T) {
 	}
 }
 
+// A directory the walk cannot place (cd "$UNSET", cd into a command
+// substitution) leaves a package argument spelled as a path under it
+// ("./beads/...") meaning any package in any tree, but it normalizes to the
+// module-root package "beads", which is on no list, so the run went through
+// unwrapped. Only a "." or bare target was refused (gt-ff2l8). An import path
+// is module-absolute and keeps its own reading.
+func TestContainerSuiteGuardRelativeArgUnderUnplacedCwd(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"relative container argument", `cd "$UNSET" && GT_TEST_DOCKER=1 go test ./beads/...`, true},
+		{"relative container argument, no dots", `cd "$UNSET" && GT_TEST_DOCKER=1 go test ./beads`, true},
+		{"parent-relative argument", `cd "$UNSET" && GT_TEST_DOCKER=1 go test ../beads`, true},
+		{"relative argument after a command substitution", `cd "$(git rev-parse --show-toplevel)/internal" && GT_TEST_DOCKER=1 go test ./beads`, true},
+		{"dot target", `cd "$UNSET" && GT_TEST_DOCKER=1 go test .`, true},
+
+		{"switch off", `cd "$UNSET" && go test ./beads/...`, false},
+		{"wrapped in slot run", `cd "$UNSET" && gt slot run --role gastown/refinery -- GT_TEST_DOCKER=1 go test ./beads/...`, false},
+		{"import-path light package", `cd "$UNSET" && GT_TEST_DOCKER=1 go test internal/style`, false},
+		{"relative argument that reaches no listed package", `cd "$UNSET" && GT_TEST_DOCKER=1 go test ./style`, false},
+		{"module-rooted relative light argument", `cd "$UNSET" && GT_TEST_DOCKER=1 go test ./internal/style`, false},
+		{"relative argument after a literal cd", `cd internal && GT_TEST_DOCKER=1 go test ./style`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, matched := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
 // A -C directory the shell expands ("$PWD/internal", "~/rig", "$(pwd)") is a
 // run directory the hook cannot place, the way `cd $DIR` is: it was joined onto
 // the cwd as a literal and read as a placed, nonexistent directory, so

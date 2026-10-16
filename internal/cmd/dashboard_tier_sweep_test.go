@@ -223,6 +223,22 @@ func TestTierSweepUnderLoadAnnotationIsNotAVerdict(t *testing.T) {
 	}
 }
 
+// A tier marked loaded whose run did not happen is logged as "integration  under
+// load" with no verdict between the name and the annotation. The panel must not
+// read "under" as the verdict: the stage was never run, so it is left out.
+func TestTierSweepUnderLoadWithoutVerdictIsNotAStage(t *testing.T) {
+	t.Parallel()
+	r, _ := tierSweepTestReader(t, "2026/10/04 16:00:19 tier_sweep: gastown: swept abcdef12 (shell GREEN, integration  under load) in 1m2s")
+	ts := r.read(time.Date(2026, 10, 4, 16, 5, 0, 0, time.Local))
+	if len(ts.Sweeps) != 1 {
+		t.Fatalf("sweeps = %+v", ts.Sweeps)
+	}
+	stages := ts.Sweeps[0].Stages
+	if len(stages) != 1 || stages[0].Tier != "shell" || stages[0].Verdict != "GREEN" {
+		t.Fatalf("stages = %+v, want only shell GREEN: integration never ran", stages)
+	}
+}
+
 func writeTierSweepRecord(t *testing.T, dir, rig, body string) {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
