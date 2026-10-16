@@ -282,6 +282,22 @@ func TestPolecatStopVerificationArgv(t *testing.T) {
 			expect: true,
 		},
 		{
+			name:   "a make test after && in an eval body is a live suite",
+			argv:   `eval 'make clean && make test'`,
+			want:   "make test",
+			expect: true,
+		},
+		{
+			name:   "a test that only follows && in an eval body is data",
+			argv:   `eval 'make clean && git add test'`,
+			expect: false,
+		},
+		{
+			name:   "a test after a semicolon in a shell -c body is data",
+			argv:   `sh -c 'make clean; git add test'`,
+			expect: false,
+		},
+		{
 			name:   "an unrelated background sleep is not a suite",
 			argv:   "sleep 60",
 			expect: false,

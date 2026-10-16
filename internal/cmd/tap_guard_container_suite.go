@@ -494,7 +494,14 @@ func findInvocation(tokens []string, tool, target string) int {
 			// options, NAME=value assignments and other goals. A flag's
 			// value never needs stepping over: the target is never read as
 			// one (see makeValueFlags), so "-C test" is judged as the goal.
+			// The goals end at the first shell separator: what follows "&&"
+			// or ";" is another command, so the "test" in "make build && git
+			// add test" is not a goal, while a second make after the
+			// separator is found by this loop's next pass (gt-xdcrl).
 			for _, tok := range tokens[i+1:] {
+				if shellCommandSeparators[tok] {
+					break
+				}
 				if tok == target {
 					return i
 				}
@@ -548,6 +555,17 @@ var goTestValueFlags = map[string]bool{
 	// "-skip 'Test*'" would read as a package argument with a wildcard
 	// (packageArgWildcard, gt-d1e8c).
 	"-skip": true, "-fuzz": true, "-exec": true, "-ldflags": true, "-gcflags": true, "-mod": true,
+}
+
+// isGoTestValueFlag reports whether flag (a token's text before any "=") is a
+// goTestValueFlags entry. The go command takes every flag with one dash or two
+// ("-run X" and "--run X" alike), so the table is read through the one-dash
+// spelling (gt-xdcrl).
+func isGoTestValueFlag(flag string) bool {
+	if strings.HasPrefix(flag, "--") {
+		flag = flag[1:]
+	}
+	return goTestValueFlags[flag]
 }
 
 // goTestRunDir returns the directory a "go … test" invocation runs in and
@@ -658,7 +676,7 @@ func goTestPackageArgs(rest []string) []string {
 		}
 		if strings.HasPrefix(tok, "-") {
 			flag := strings.SplitN(tok, "=", 2)[0]
-			if goTestValueFlags[flag] && !strings.Contains(tok, "=") && i+1 < len(rest) {
+			if isGoTestValueFlag(flag) && !strings.Contains(tok, "=") && i+1 < len(rest) {
 				i++
 			}
 			continue
@@ -910,19 +928,37 @@ func isCwdRelativeGoPackageArg(arg string) bool {
 // Both readings stand, because the guard cannot tell which of them a spelling
 // was written for: a run directory it cannot place joins nothing at all, and
 // an explicit argument has always carried its module-root reading (gt-saorq).
-// A match under either one refuses, so this rule only ever blocks more.
+// A match under either one refuses.
+//
+// Two spellings are read one way only. "./..." is the run directory's own
+// subtree and never the module's, so under "internal/style" it is
+// "internal/style" and the whole-repo reading is dropped: a light package's
+// './...' is not a whole-repo run. And a path that leaves the module and comes
+// back in ("../rig/internal/cmd" from the module root, whose directory is
+// "rig") joins to nothing the lexical readings can see, so the directory it
+// lands on is also read off the file system, the way an absolute argument is
+// (moduleRelativePackageArgs) (gt-xdcrl).
 func packageArgsUnderRunDir(pkgArgs []string, cwd string) []string {
-	args := normalizedPackageArgs(pkgArgs)
-	runPkg, _ := cwdPackagePath(cwd)
-	if runPkg == "" {
-		return args // the run dir is the module root: the readings coincide
+	runPkg, placed := cwdPackagePath(cwd)
+	if !placed || len(pkgArgs) == 0 {
+		return normalizedPackageArgs(pkgArgs) // nothing to join the arguments to
 	}
+	args := make([]string, 0, len(pkgArgs))
 	for _, arg := range pkgArgs {
 		norm := normalizeGoPackageArg(arg)
-		if !isCwdRelativeGoPackageArg(arg) || norm == cwdPackageArg || norm == wholeRepoPackageArg {
+		if !isCwdRelativeGoPackageArg(arg) || norm == cwdPackageArg {
+			args = append(args, norm)
 			continue
 		}
-		args = append(args, normalizeGoPackageArg(path.Join(runPkg, arg)))
+		if norm != wholeRepoPackageArg || runPkg == "" {
+			args = append(args, norm)
+		}
+		if runPkg != "" {
+			args = append(args, normalizeGoPackageArg(path.Join(runPkg, arg)))
+		}
+		if landed := moduleRelativePackageArgs([]string{filepath.Join(cwd, filepath.FromSlash(arg))})[0]; !filepath.IsAbs(landed) {
+			args = append(args, normalizeGoPackageArg(landed))
+		}
 	}
 	return args
 }

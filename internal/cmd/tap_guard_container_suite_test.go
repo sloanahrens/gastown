@@ -588,7 +588,13 @@ func TestContainerSuiteTargetFollowsTheRunDir(t *testing.T) {
 		{"relative path out of the module", "internal", []string{"../../elsewhere/..."}, false, nil},
 		{"bare import path does not move with the run dir", "internal", []string{"beads"}, false, nil},
 		{"module-root spelling keeps its reading beside the resolved one", "internal", []string{"./internal/beads/..."}, false, []string{"internal/beads"}},
-		{"whole-repo wildcard under a run dir", "internal", []string{"./..."}, true, nil},
+		{"whole-repo wildcard under a run dir", "internal", []string{"./..."}, false, containerSuitePackages},
+		{"whole-repo wildcard under a light run dir", "internal/style", []string{"./..."}, false, nil},
+		{"whole-repo wildcard under a container run dir", "internal/beads", []string{"./..."}, false, []string{"internal/beads"}},
+		{"module-prefixed wildcard under a light run dir is still the whole repo", "internal/style", []string{"github.com/steveyegge/gastown/..."}, true, nil},
+		{"bare wildcard under a light run dir is still the whole repo", "internal/style", []string{"..."}, true, nil},
+		{"wildcard up out of a light run dir", "internal/style", []string{"../..."}, false, containerSuitePackages},
+		{"wildcard up to the module root", "internal", []string{"../..."}, true, nil},
 		{"relative and bare arguments together", "internal", []string{"beads", "./daemon/..."}, false, []string{"internal/daemon"}},
 		{"relative path at the module root", ".", []string{"./internal/beads/..."}, false, []string{"internal/beads"}},
 	}
@@ -601,6 +607,38 @@ func TestContainerSuiteTargetFollowsTheRunDir(t *testing.T) {
 			}
 			if strings.Join(matched, ",") != strings.Join(tt.want, ",") {
 				t.Errorf("containerSuiteTarget(%v, %s) matched = %v, want %v", tt.pkgArgs, tt.relDir, matched, tt.want)
+			}
+		})
+	}
+}
+
+// './...' is the run directory's own subtree, so a run that starts in a light
+// package is not a whole-repo run, and one that starts in a container package
+// or above it still is refused.
+func TestEvaluateContainerSuiteCommand_WildcardFollowsTheRunDir(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/topaz/gastown")
+	light := filepath.Join(root, "internal", "style")
+	container := filepath.Join(root, "internal", "beads")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"cd into a light package", "cd " + light + " && GT_TEST_DOCKER=1 go test ./...", false},
+		{"-C into a light package", "GT_TEST_DOCKER=1 go -C " + light + " test ./...", false},
+		{"relative -C into a light package", "GT_TEST_DOCKER=1 go -C internal/style test ./...", false},
+		{"cd into a container package", "cd " + container + " && GT_TEST_DOCKER=1 go test ./...", true},
+		{"-C into a container package", "GT_TEST_DOCKER=1 go -C " + container + " test ./...", true},
+		{"cd into the internal directory", "cd " + filepath.Join(root, "internal") + " && GT_TEST_DOCKER=1 go test ./...", true},
+		{"cd into the module root", "cd " + root + " && GT_TEST_DOCKER=1 go test ./...", true},
+		{"module-prefixed wildcard from a light package", "cd " + light + " && GT_TEST_DOCKER=1 go test github.com/steveyegge/gastown/...", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), tt.command, root)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.blocked)
 			}
 		})
 	}
@@ -1818,7 +1856,11 @@ func TestFindInvocation(t *testing.T) {
 		{"make target as a substring of a goal", []string{"make", "test-slow"}, "make", "test", -1},
 		{"make target as a variable value", []string{"make", "deploy", "env=test"}, "make", "test", -1},
 		{"make target before the program", []string{"test", "make", "clean"}, "make", "test", -1},
-		{"second make carries the target", []string{"make", "clean", "&&", "make", "test"}, "make", "test", 0},
+		{"second make carries the target", []string{"make", "clean", "&&", "make", "test"}, "make", "test", 3},
+		{"second make after a semicolon", []string{"make", "clean", ";", "make", "test"}, "make", "test", 3},
+		{"target in a later command is not a goal", []string{"eval", "make", "build", "&&", "git", "add", "test"}, "make", "test", -1},
+		{"target after a pipe is not a goal", []string{"make", "build", "|", "tee", "test"}, "make", "test", -1},
+		{"target after a semicolon is not a goal", []string{"make", "build", ";", "git", "add", "test"}, "make", "test", -1},
 		{"go test is adjacent", []string{"go", "test", "./..."}, "go", "test", 0},
 		{"go with a flag between stays unmatched", []string{"go", "-v", "test"}, "go", "test", -1},
 		{"go build is not go test", []string{"go", "build", "./..."}, "go", "test", -1},
