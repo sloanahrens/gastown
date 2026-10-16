@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"bytes"
+	"errors"
 	"log"
 	"os"
 	"path/filepath"
@@ -112,10 +113,13 @@ func TestRunGitHygiene_CleansMergedAndOrphanedBranches(t *testing.T) {
 
 	repo := filepath.Join(d.config.TownRoot, "r1", "mayor", "rig")
 	f.Clone(t, origin, repo)
+	// polecat/old's work landed on origin's main as a different commit (a
+	// rebase or squash), so its patch is on origin though its SHA is not.
+	f.Commit(t, origin, "main", "landed", map[string]string{"x.txt": "x\n"})
 	f.SetRef(t, repo, "refs/heads/done", base)
 	f.SetRef(t, repo, "refs/heads/merge/held", base)
 	f.SetRef(t, repo, "refs/heads/polecat/old", base)
-	f.Commit(t, repo, "polecat/old", "unpushed", map[string]string{"x.txt": "x\n"})
+	f.Commit(t, repo, "polecat/old", "landed elsewhere", map[string]string{"x.txt": "x\n"})
 	f.SetRef(t, repo, "refs/heads/polecat/live", base)
 	f.Commit(t, repo, "polecat/live", "local live", map[string]string{"y.txt": "y\n"})
 	f.SetRef(t, repo, "refs/heads/notes", base)
@@ -192,6 +196,8 @@ func TestRunGitHygiene_CleansARigThatHasOnlyTheSharedBareRepo(t *testing.T) {
 	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
 	f.SetRef(t, origin, "refs/heads/polecat/merged", base)
 	f.Commit(t, origin, "polecat/live", "live work", map[string]string{"l.txt": "l\n"})
+	// polecat/old's work landed on origin's main as a different commit.
+	f.Commit(t, origin, "main", "landed", map[string]string{"x.txt": "x\n"})
 
 	bare := filepath.Join(d.config.TownRoot, "r1", ".repo.git")
 	f.InitBare(t, bare)
@@ -199,7 +205,7 @@ func TestRunGitHygiene_CleansARigThatHasOnlyTheSharedBareRepo(t *testing.T) {
 	f.SetRef(t, bare, "refs/heads/main", base)
 	f.SetRef(t, bare, "refs/heads/done", base)
 	f.SetRef(t, bare, "refs/heads/polecat/old", base)
-	f.Commit(t, bare, "polecat/old", "unpushed", map[string]string{"x.txt": "x\n"})
+	f.Commit(t, bare, "polecat/old", "landed elsewhere", map[string]string{"x.txt": "x\n"})
 	f.Commit(t, bare, "polecat/live", "local live", map[string]string{"y.txt": "y\n"})
 
 	d.runGitHygiene()
@@ -229,6 +235,80 @@ func TestRunGitHygiene_CleansARigThatHasOnlyTheSharedBareRepo(t *testing.T) {
 	if len(feed.payloads) != 0 {
 		t.Errorf("feed = %v, want no failed cycle", feed.payloads)
 	}
+}
+
+// A polecat that committed and never pushed leaves its branch ref in the shared
+// bare repo with no worktree; the patrol must not make those commits
+// unreachable (gt-a0jxl).
+func TestRunGitHygiene_KeepsOrphanPolecatBranchWithUnpushedCommits(t *testing.T) {
+	t.Parallel()
+	d, feed, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+
+	bare := filepath.Join(d.config.TownRoot, "r1", ".repo.git")
+	f.InitBare(t, bare)
+	f.AddRemote(t, bare, "origin", origin)
+	f.SetRef(t, bare, "refs/heads/main", base)
+	f.SetRef(t, bare, "refs/heads/polecat/crashed", base)
+	crashed := f.Commit(t, bare, "polecat/crashed", "never pushed", map[string]string{"x.txt": "x\n"})
+
+	d.runGitHygiene()
+
+	if tip := f.Ref(bare, "refs/heads/polecat/crashed"); tip != crashed {
+		t.Errorf("polecat/crashed = %q, want %s: the unpushed commit must survive the patrol", tip, crashed)
+	}
+	if !strings.Contains(logs.String(), "0 merged, 0 orphan, 0 remote") {
+		t.Errorf("log lacks a zero-orphan summary:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "keep orphan polecat/crashed") {
+		t.Errorf("log does not say why polecat/crashed was kept:\n%s", logs.String())
+	}
+	if len(feed.payloads) != 0 {
+		t.Errorf("feed = %v, want no failed cycle", feed.payloads)
+	}
+}
+
+// When the check cannot run, the branch stays.
+func TestRunGitHygiene_KeepsOrphanPolecatBranchWhenTheUnpushedCheckFails(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+
+	bare := filepath.Join(d.config.TownRoot, "r1", ".repo.git")
+	f.InitBare(t, bare)
+	f.AddRemote(t, bare, "origin", origin)
+	f.SetRef(t, bare, "refs/heads/main", base)
+	f.SetRef(t, bare, "refs/heads/polecat/crashed", base)
+	crashed := f.Commit(t, bare, "polecat/crashed", "never pushed", map[string]string{"x.txt": "x\n"})
+
+	openGit := d.openGitFn
+	d.openGitFn = func(dir string) daemonGit {
+		return cherryFails{openGit(dir)}
+	}
+
+	d.runGitHygiene()
+
+	if tip := f.Ref(bare, "refs/heads/polecat/crashed"); tip != crashed {
+		t.Errorf("polecat/crashed = %q, want %s: a failed check must keep the branch", tip, crashed)
+	}
+	if !strings.Contains(logs.String(), "cannot tell whether it holds unpushed commits") {
+		t.Errorf("log does not report the failed check:\n%s", logs.String())
+	}
+}
+
+// cherryFails is a daemonGit whose Cherry always errors.
+type cherryFails struct{ daemonGit }
+
+func (cherryFails) Cherry(upstream, head string) (string, error) {
+	return "", errors.New("cherry: boom")
 }
 
 // The working clone install-gt.sh merges into is left alone while the shared

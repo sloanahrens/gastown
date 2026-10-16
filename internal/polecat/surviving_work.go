@@ -211,9 +211,17 @@ func (w *WorkSurvival) LocalBranchHoldsUnpushedWork(branch string) (bool, error)
 // unmergedOnAllBases reports whether ref has a commit whose patch is on none of
 // bases: the intersection of the '+' sets of `git cherry <base> <ref>`.
 func (w *WorkSurvival) unmergedOnAllBases(bases []string, ref string) (bool, error) {
+	return UnmergedOnAllBases(w.g.Cherry, bases, ref)
+}
+
+// UnmergedOnAllBases is the patch-identity test behind LocalBranchHoldsUnpushedWork
+// for callers outside the package that hold their own git handle: cherry is
+// `git cherry <upstream> <head>` in the repository that has ref and every base.
+// An error from cherry means the answer is unknown.
+func UnmergedOnAllBases(cherry func(upstream, head string) (string, error), bases []string, ref string) (bool, error) {
 	var survivors map[string]bool
 	for _, base := range bases {
-		out, err := w.g.Cherry(base, ref)
+		out, err := cherry(base, ref)
 		if err != nil {
 			return false, fmt.Errorf("git cherry %s %s: %w", base, ref, err)
 		}

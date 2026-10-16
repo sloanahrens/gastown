@@ -71,6 +71,9 @@ type daemonGit interface {
 	ListBranches(pattern string) ([]string, error)
 	DeleteBranch(name string, force bool) error
 	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
+	// Cherry reads whether a branch's commits are on a base by patch identity,
+	// for the git_hygiene patrol's unpushed-work check.
+	Cherry(upstream, head string) (string, error)
 	DeleteRemoteBranchIfAt(remote, branch, expectedHash string) error
 	GC() error
 }
