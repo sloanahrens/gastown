@@ -707,6 +707,49 @@ func TestTierSweepFileRed_ClaimedBead(t *testing.T) {
 	}
 }
 
+// failingStatusBeads answers List from byStatus and fails for the statuses in
+// failStatus, so a lookup that reached one bead before the error is a partial one.
+type failingStatusBeads struct {
+	byStatusBeads
+	failStatus string
+}
+
+func (b *failingStatusBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	if opts.Status == b.failStatus {
+		return nil, fmt.Errorf("bd list --status=%s: boom", opts.Status)
+	}
+	return b.byStatusBeads.List(opts)
+}
+
+// A status list that fails leaves the sweep unable to tell which units already
+// have a bead, so the tier files, comments and closes nothing; the open bead it
+// did find is not duplicated (gt-7useh).
+func TestTierSweepOpenBeads_ListErrorFilesNoDuplicate(t *testing.T) {
+	t.Parallel()
+	d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	bd := &failingStatusBeads{
+		byStatusBeads: byStatusBeads{byStatus: map[string][]*beads.Issue{
+			"open": {{ID: "gt-open", Title: tierSweepBeadPrefix("gastown", "integration") + "./internal/x"}},
+		}},
+		failStatus: beads.StatusHooked,
+	}
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Failed: 2, FailedNames: []string{"./internal/x", "./internal/y"}},
+	}
+	d.tierSweepRecordBeads("gastown", "abc123", red)
+	if len(bd.created) != 0 {
+		t.Errorf("created = %+v, want nothing filed from an unknown state", bd.created)
+	}
+
+	green := map[string]tierSweepTierResult{"integration": {Verdict: tierSweepGreen, Passed: 1}}
+	d.tierSweepRecordBeads("gastown", "def456", green)
+	if len(bd.closed) != 0 {
+		t.Errorf("closed = %v, want nothing closed from a partial listing", bd.closed)
+	}
+}
+
 // TestTierSweepSlotRoleIsNotGateClass pins the reentrancy contract: the
 // sweep's role is not gate-class, so it takes a shared slot and the script's
 // own `gt slot run` calls inherit that role and ride the one hold instead of
