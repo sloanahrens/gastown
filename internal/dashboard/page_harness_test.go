@@ -192,10 +192,26 @@ function __advance(ms) {
   __clock = end;
 }
 var window = this;
+function __snapEl(e) {
+  return { text: e.textContent, class: e.className, title: e.title, hidden: !!e.hidden, href: e.href || "", target: e.target || "", rel: e.rel || "", kids: e.children.length };
+}
 function __snap(id) {
   var e = __byId[id];
   if (!e) return null;
-  return { id: id, text: e.textContent, class: e.className, title: e.title, hidden: !!e.hidden, kids: e.children.length };
+  var s = __snapEl(e);
+  s.id = id;
+  return s;
+}
+// __descend walks one element's subtree by child index, so a test reads back a
+// row a pane drew rather than only the container it went into. A path that does
+// not exist is null, which the test fails on.
+function __descend(id) {
+  var e = __byId[id];
+  for (var i = 1; i < arguments.length; i++) {
+    if (!e || !e.children[arguments[i]]) return null;
+    e = e.children[arguments[i]];
+  }
+  return __snapEl(e);
 }
 `
 
@@ -299,12 +315,16 @@ func (p *pageDOM) call(t *testing.T, fn string, arg any) {
 }
 
 // drawn is what one element holds after a render: the text it reads, the class
-// it wears, its title, whether it is hidden, and how many children it holds.
+// it wears, its title, whether it is hidden, where a link goes, and how many
+// children it holds.
 type drawn struct {
 	Text   string `json:"text"`
 	Class  string `json:"class"`
 	Title  string `json:"title"`
 	Hidden bool   `json:"hidden"`
+	Href   string `json:"href"`
+	Target string `json:"target"`
+	Rel    string `json:"rel"`
 	Kids   int    `json:"kids"`
 }
 
@@ -324,6 +344,32 @@ func (p *pageDOM) element(t *testing.T, id string) drawn {
 	var d drawn
 	if err := json.Unmarshal([]byte(js), &d); err != nil {
 		t.Fatalf("reading #%s: %v", id, err)
+	}
+	return d
+}
+
+// descend reads back one element of the page by walking child indices from an
+// id — the row a pane drew under its container, where element reads only the
+// container. A path the pane did not draw fails here rather than returning a
+// zero reading.
+func (p *pageDOM) descend(t *testing.T, id string, path ...int) drawn {
+	t.Helper()
+
+	args := []string{strconv.Quote(id)}
+	for _, i := range path {
+		args = append(args, strconv.Itoa(i))
+	}
+	v, err := p.vm.RunString("JSON.stringify(__descend(" + strings.Join(args, ",") + "))")
+	if err != nil {
+		t.Fatalf("reading #%s%v: %v", id, path, err)
+	}
+	js := v.String()
+	if js == "null" {
+		t.Fatalf("#%s has no element at %v", id, path)
+	}
+	var d drawn
+	if err := json.Unmarshal([]byte(js), &d); err != nil {
+		t.Fatalf("reading #%s%v: %v", id, path, err)
 	}
 	return d
 }

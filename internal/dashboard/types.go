@@ -620,6 +620,9 @@ type State struct {
 	// a town with no viewer token, and until the reader first reports.
 	Forgejo  *ForgejoFeed `json:"forgejo,omitempty"`
 	Dispatch *Dispatch    `json:"dispatch,omitempty"`
+	// News is the top Hacker News stories, read about every five minutes. It is
+	// nil while the pane is switched off and until the reader first reports.
+	News *NewsFeed `json:"news,omitempty"`
 	// Escalations is the town's open escalation beads, the same set the
 	// escalations tile counts. It is nil until the reader first reports.
 	Escalations *Escalations `json:"escalations,omitempty"`
@@ -664,6 +667,8 @@ type Config struct {
 	TierSweep func() *TierSweep
 	// Forgejo reads the viewer's Forgejo recent-activity feed.
 	Forgejo func() *ForgejoFeed
+	// News reads the top Hacker News stories for the News pane.
+	News func() *NewsFeed
 	// Deploys reads the deploy and staging workflows' runs from the same viewer.
 	Deploys func() *Deploys
 	// Reports reads the overseer's latest hourly report from the directory it
@@ -718,6 +723,7 @@ type Config struct {
 	OMEvery         time.Duration
 	TierSweepEvery  time.Duration
 	ForgejoEvery    time.Duration
+	NewsEvery       time.Duration
 	DeploysEvery    time.Duration
 	ReportsEvery    time.Duration
 	QuestionsEvery  time.Duration
@@ -754,6 +760,11 @@ func (c *Config) defaults() {
 	def(&c.OMEvery, 60*time.Second)
 	def(&c.TierSweepEvery, 60*time.Second)
 	def(&c.ForgejoEvery, 3*time.Minute)
+	// The front page turns over in hours and the reader holds what it read for
+	// five minutes, so the poll is a fraction of that: it only publishes a
+	// snapshot the moment it comes due, and the reader stays the pane's clock
+	// (gt-9ktrr).
+	def(&c.NewsEvery, newsPoll)
 	// The deploys block is read on its own clock rather than the feed's three
 	// minutes: a stage of a release that is running changes within seconds,
 	// and a run waiting on a runner is the one thing here worth catching

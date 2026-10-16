@@ -88,6 +88,14 @@ rather than left out, so a missing rig never reads as a quiet one.
 repeated. With no token file the panel is left out, and a refresh that fails
 shows the last good feed marked stale.
 
+The News pane above the Machine panel lists the current top five Hacker News
+stories, one line each, with the story's points, comments and domain in the
+line's hover. The hub reads them from the public Hacker News API and holds what
+it read for five minutes, so the page never calls Hacker News itself. A refresh
+that fails keeps the last good five dimmed under a "stale" note; before any
+success the pane says it is unavailable. Neither raises an alert or moves the
+health pill.
+
 The Deploys block under the Cloud panel's findings reads those same repos'
 deploy.yml and staging.yml runs — every run of either workflow, whatever its
 event — with a landing's staging run tagged as one, each run's stages in the
@@ -281,6 +289,10 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	// the Forgejo panel, so the two are wired together from one token read;
 	// the staging ship reader dates the app rigs' landings off the same runs.
 	forgejoFeed, forgejoDeploys, stagingShip := dashboardForgejoReaders(townRoot, dashboardForgejoRepos)
+	news, err := dashboardNewsReader(townRoot)
+	if err != nil {
+		return nil, nil, err
+	}
 	deploys := dashboardDeploys(townRoot, rigOfBead, cutoff, stagingShip)
 	sources, preface, err := buildTailSources(tailOptions{
 		townRoot: townRoot, kinds: allTailKinds(), cutoff: cutoff, loc: loc, now: time.Now,
@@ -355,6 +367,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		OM:         func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:  func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
 		Forgejo:    forgejoFeed,
+		News:       news,
 		Deploys:    forgejoDeploys,
 		Reports:    func() *dashboard.Reports { return reports.Read(time.Now()) },
 		ReportsDir: dashboardReportsDir(townRoot),
@@ -616,6 +629,33 @@ func dashboardForgejoReaders(townRoot string, repos []string) (func() *dashboard
 	}
 	staging := dashboard.NewStagingReader(client, rigShipRepos(townRoot))
 	return dashboard.NewForgejoReader(client, repos).Read, dashboard.NewDeployReader(client, repos).Read, staging.Ship
+}
+
+// dashboardNewsReader wires the News pane's reader, or none when
+// settings/config.json's dashboard.news.enabled is false. The pane reads the
+// public Hacker News API, so it needs no token and no flag.
+func dashboardNewsReader(townRoot string) (func() *dashboard.NewsFeed, error) {
+	on, err := dashboardNewsEnabled(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	if !on {
+		return nil, nil
+	}
+	return dashboard.NewNewsReader(nil).Read, nil
+}
+
+// dashboardNewsEnabled reads settings/config.json's dashboard.news.enabled: the
+// pane runs unless that key turns it off. A settings file the town cannot read
+// is an error rather than a default, so a mistyped config cannot quietly
+// reinstate a panel the operator switched off (gt-9ktrr).
+func dashboardNewsEnabled(townRoot string) (bool, error) {
+	path := config.TownSettingsPath(townRoot)
+	settings, err := config.LoadOrCreateTownSettings(path)
+	if err != nil {
+		return false, fmt.Errorf("reading %s for dashboard.news.enabled: %w", path, err)
+	}
+	return settings.Dashboard.NewsEnabled(), nil
 }
 
 // rigShipRepos is every rig's repository as rig name -> owner/name, for the
