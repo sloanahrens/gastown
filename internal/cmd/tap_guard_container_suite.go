@@ -179,7 +179,8 @@ func isPolecatOrRefineryContext(proc guardProcess) bool {
 // internal/slot and 'gt slot run --role <rig>/<name> -- <command>').
 var containerSuiteSlotRunTokens = []string{"gt", "slot", "run"}
 
-// maxTestGuardNestDepth bounds the shell-fed-heredoc recursion in
+// maxTestGuardNestDepth bounds the shell-fed-heredoc, -c payload, eval and
+// command-substitution recursion in
 // evaluateContainerSuiteCommand and evaluatePolecatTestScope, so a
 // pathological command nesting heredocs inside heredocs still terminates.
 // Same shape and value as maxPRWorkflowNestDepth, which bounds the identical
@@ -214,6 +215,95 @@ func shellCPayloads(segment []string) []string {
 		}
 	}
 	return payloads
+}
+
+// evalPayloads returns the command string the eval a segment opens runs. eval
+// joins its arguments with spaces and runs the result as one command line, so
+// `eval "go test ./..."` is a go test the segment judge saw as a quoted word
+// after eval. Only an eval at command position counts: a segment that merely
+// spells the word ("grep eval", "echo eval make test") runs nothing
+// (gt-t1pct).
+func evalPayloads(segment []string) []string {
+	word, rest := segmentCommandWord(trimShellKeywords(segment))
+	if strings.ToLower(word) != "eval" || len(rest) == 0 {
+		return nil
+	}
+	return []string{strings.Join(rest, " ")}
+}
+
+// nestedScript is a command line a shell runs inside the command being judged,
+// with the directory it runs in (the base when known is false).
+type nestedScript struct {
+	body  string
+	dir   string
+	known bool
+}
+
+// substitutionScripts returns the body of every $(...) and backtick command
+// substitution the shell expands in command, each with the directory it runs
+// in. The segment judges tokenize "out=$(go test ./internal/cmd)" as the words
+// "out=$(go", "test", ... and so never see a go test, and "echo $(make gate)"
+// as an echo, so the bodies are judged as command lines of their own the way
+// evaluateDangerousCommand does (gt-t1pct).
+//
+// A substitution runs in the directory the cds ahead of it on the same shell
+// line leave the shell in, found by the walk segmentWalkRoot gives a segment.
+// A "$(" the shell leaves literal is skipped: after a backslash, or inside
+// single quotes, where a bead note spelling "$(make gate)" is data. Heredoc
+// bodies are stripped first, as the segment judges do.
+func substitutionScripts(proc guardProcess, command, cwd string, cwdKnown bool) []nestedScript {
+	text := stripHeredocBodies(command)
+	var scripts []nestedScript
+	for _, m := range commandSubstitutionPattern.FindAllStringSubmatchIndex(text, -1) {
+		if backslashesBefore(text, m[0])%2 == 1 || insideSingleQuotes(text, m[0]) {
+			continue
+		}
+		start, end := m[2], m[3]
+		if start < 0 {
+			start, end = m[4], m[5]
+		}
+		if start < 0 || strings.TrimSpace(text[start:end]) == "" {
+			continue
+		}
+		tokens := shellTokenize(text[:m[0]])
+		segStart := 0
+		for i, tok := range tokens {
+			if shellCommandSeparators[tok] {
+				segStart = i + 1
+			}
+		}
+		dir, known := segmentWalkRoot(proc, tokens, segStart, cwd, shellVarAssignments(tokens))
+		if !known || !cwdKnown {
+			dir, known = cwd, false
+		}
+		scripts = append(scripts, nestedScript{body: text[start:end], dir: dir, known: known})
+	}
+	return scripts
+}
+
+// insideSingleQuotes reports whether the character at pos of s sits inside a
+// single-quoted string, where the shell expands nothing. A quote of either
+// kind inside the other is text.
+func insideSingleQuotes(s string, pos int) bool {
+	var quote byte
+	for i := 0; i < pos && i < len(s); i++ {
+		c := s[i]
+		switch {
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			}
+		case c == '\\':
+			i++
+		case quote == '"':
+			if c == '"' {
+				quote = 0
+			}
+		case c == '\'' || c == '"':
+			quote = c
+		}
+	}
+	return quote == '\''
 }
 
 func toLowerTokens(tokens []string) []string {
@@ -306,7 +396,7 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 		if containsSubsequence(toLowerTokens(segment), containerSuiteSlotRunTokens) {
 			return "", nil
 		}
-		payloads := shellCPayloads(segment)
+		payloads := append(shellCPayloads(segment), evalPayloads(segment)...)
 		if depth >= maxTestGuardNestDepth {
 			return nestedTooDeepRefusal(len(payloads) > 0)
 		}
@@ -343,8 +433,21 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 	}
 
 	spans := shellFedHeredocSpans(command)
+	subs := substitutionScripts(proc, command, cwd, true)
 	if depth >= maxTestGuardNestDepth {
-		return nestedTooDeepRefusal(len(spans) > 0)
+		return nestedTooDeepRefusal(len(spans) > 0 || len(subs) > 0)
+	}
+	// A command substitution runs outside any slot-run wrapper that precedes
+	// it on the line (`gt slot run -- echo $(go test ./...)`), so it is judged
+	// whatever its segment is, with the container opt-in the line carries.
+	subOptIn := envOptIn
+	if dockerOn {
+		subOptIn = "1"
+	}
+	for _, sub := range subs {
+		if r, m := evaluateContainerSuiteCommandDepth(proc, sub.body, sub.dir, subOptIn, depth+1); r != "" {
+			return r, m
+		}
 	}
 	// The bodies come off the untouched command: stripHeredocBodies removed
 	// them from the text above, so they are judged here once, as code, in the

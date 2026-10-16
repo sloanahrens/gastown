@@ -55,6 +55,11 @@ func isPolecatContext(proc guardProcess) bool {
 // A make goal that runs the whole suite (make test, gate, test-slow,
 // test-integration) is refused on the same ground (gt-gl3jb).
 //
+// A command substitution ($(...) or backticks) and an eval string are command
+// lines of their own, judged like a -c payload: "out=$(go test ./internal/cmd)"
+// and `eval "make gate"` run the suite though no segment word is a go binary
+// (gt-t1pct, substitutionScripts, evalPayloads).
+//
 // Heredoc bodies are stripped before tokenizing, so a body that merely spells
 // "make test" — a bead description, a doc, a formula — is data, not a live
 // invocation. A body fed to a shell invoker is the exception and is judged as
@@ -85,7 +90,7 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, cwdKn
 		if r, m := evaluatePolecatTestScopeSegment(segment, dir, known); r != "" {
 			return r, m
 		}
-		payloads := shellCPayloads(segment)
+		payloads := append(shellCPayloads(segment), evalPayloads(segment)...)
 		if depth >= maxTestGuardNestDepth {
 			return nestedTooDeepRefusal(len(payloads) > 0)
 		}
@@ -118,8 +123,14 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, cwdKn
 	}
 
 	spans := shellFedHeredocSpans(command)
+	subs := substitutionScripts(proc, command, cwd, cwdKnown)
 	if depth >= maxTestGuardNestDepth {
-		return nestedTooDeepRefusal(len(spans) > 0)
+		return nestedTooDeepRefusal(len(spans) > 0 || len(subs) > 0)
+	}
+	for _, sub := range subs {
+		if r, m := evaluatePolecatTestScopeDepth(proc, sub.body, sub.dir, sub.known, depth+1); r != "" {
+			return r, m
+		}
 	}
 	for _, span := range spans {
 		bodyCwd := heredocBodyDir(proc, command, span, cwd)
