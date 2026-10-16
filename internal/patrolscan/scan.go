@@ -1320,7 +1320,7 @@ func (s *Scanner) leakedWisps(rig string, r *Report) {
 			break
 		}
 	}
-	s.closedWorkRoots(rig, r, wisps, closed, &calls)
+	s.closedWorkRoots(r, wisps, closed, &calls)
 }
 
 // heldWisps is the holder half of the leaked-wisp pass, run only when some
@@ -1427,8 +1427,8 @@ func capFinding(id string) Finding {
 // A root is closed only when all of these hold:
 //   - it is a listed, open wisp with no parent, older than leakedWispMinAge,
 //     that the holder rules did not already close this tick;
-//   - no polecat of the rig that is still alive holds it: that polecat may be
-//     finishing its steps;
+//   - no polecat that is still alive holds it: that polecat may be finishing
+//     its steps;
 //   - it has at least one blocks edge to a work bead, and every such bead
 //     reads closed or tombstone. An edge to another wisp is not a work bead.
 //
@@ -1438,7 +1438,7 @@ func capFinding(id string) Finding {
 // Unknown and no write. The reads are one RootWork per candidate root and a
 // holder check for a candidate a polecat holds, so a tick with no candidate
 // makes none.
-func (s *Scanner) closedWorkRoots(rig string, r *Report, wisps []Wisp, closed map[string]bool, calls *int) {
+func (s *Scanner) closedWorkRoots(r *Report, wisps []Wisp, closed map[string]bool, calls *int) {
 	now := s.o.Now()
 	for _, w := range wisps {
 		if w.ID == "" || w.Parent != "" || closed[w.ID] || !strings.EqualFold(strings.TrimSpace(w.Status), "open") {
@@ -1454,7 +1454,7 @@ func (s *Scanner) closedWorkRoots(rig string, r *Report, wisps []Wisp, closed ma
 		if now.Sub(w.CreatedAt) <= leakedWispMinAge {
 			continue
 		}
-		if name, held := strings.CutPrefix(w.Assignee, rig+"/polecats/"); held {
+		if rig, name, held := strings.Cut(w.Assignee, "/polecats/"); held {
 			gone, why := s.holderGone(rig, name)
 			if why != "" {
 				unknown("holder " + name + ": " + why)
