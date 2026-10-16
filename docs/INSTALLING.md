@@ -189,9 +189,9 @@ CPU is free again. `gt status` names the reading it judged by — `overloaded
 Judge the host by CPU idle, not the load average. macOS counts running
 threads in the load average, so a machine with a Dolt server behind it reads
 load 30 on 24 cores with half its CPU idle. The `host` field `gt status`
-prints, and the dashboard's **Host CPU** tile, both carry the CPU idle share
-and the Dolt server's own CPU in cores beside the load average; the tile is
-amber below 20% idle and red below 5%.
+prints, and the dashboard's **idle** reading in the status strip, both carry
+the CPU idle share and the Dolt server's own CPU in cores beside the load
+average; the strip's reading is amber below 20% idle and red below 5%.
 
 Signing runs unattended, so an install never waits at a prompt: the installer
 unlocks its own keychain and gives `codesign` thirty seconds with stdin at

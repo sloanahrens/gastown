@@ -291,6 +291,7 @@ func (h *Hub) stateLocked() State {
 	st.Viewers = len(h.subs)
 	st.Polecats = h.polecatsLocked(st.Now)
 	st.Reads = h.readsLocked(st.Now)
+	st.Strip = stripAlarms(&st)
 	return st
 }
 

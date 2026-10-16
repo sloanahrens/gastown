@@ -6,43 +6,103 @@ import (
 	"time"
 )
 
-// The header strip sits in the header, where a glance at the page finds it
-// beside the verdict and the health line (gt-bj47s).
-func TestTheModelsStripIsInTheHeader(t *testing.T) {
+// The strip sits in the header, where a glance at the page finds it, and keeps
+// the elements the watcher reads by id: the verdict, the health line and the
+// connection state. The tiles grid it replaced is gone, numbers and all
+// (gt-ywlei).
+func TestTheStripIsInTheHeader(t *testing.T) {
 	t.Parallel()
 
 	page := string(indexHTML)
 	header := page[strings.Index(page, "<header>"):strings.Index(page, "</header>")]
-	if !strings.Contains(header, `id="models"`) {
-		t.Fatal("the header has no models strip (#models)")
+	for _, id := range []string{"verdict", "healthline", "conn", "strip", "models"} {
+		if !strings.Contains(header, `id="`+id+`"`) {
+			t.Errorf("the header has no #%s", id)
+		}
 	}
-	if strings.Index(header, `id="healthline"`) > strings.Index(header, `id="models"`) {
-		t.Error("the models strip is drawn above the health line it belongs beside")
+	if strings.Index(header, `id="healthline"`) > strings.Index(header, `id="strip"`) {
+		t.Error("the strip is drawn above the health line it belongs beside")
+	}
+	// One strip: a second container of the same facts is how the top of the
+	// page came to say each thing four times.
+	if n := strings.Count(page, `id="strip"`); n != 1 {
+		t.Errorf("the page has %d strips, want 1", n)
+	}
+	if strings.Contains(page, `id="tiles"`) {
+		t.Error("the page still draws the tiles grid")
+	}
+	for _, gone := range []string{"function renderTiles(s)", "function renderModels(s)", "function tile(k, v, sub, cls)"} {
+		if strings.Contains(page, gone) {
+			t.Errorf("the page still has %s, whose output the strip replaced", gone)
+		}
 	}
 }
 
-// The strip names a model, counts the seats and says om, and never leaves a
-// field it could not read looking like a value (gt-bj47s).
-func TestTheModelsStripReadsAsOneLine(t *testing.T) {
+// The models line folds the seat and role tables it carries into one line of
+// the strip. It is closed until the viewer opens it, and the choice persists
+// (gt-ywlei).
+func TestTheModelsLineFoldsTheTablesUnderIt(t *testing.T) {
 	t.Parallel()
 
-	body := pageFunc(t, "renderModels")
+	page := string(indexHTML)
+	if strings.Index(page, `id="modelspanel"`) < strings.Index(page, "</header>") {
+		t.Error("the models panel is not below the header")
+	}
+	if !strings.Contains(page, `<button id="models" type="button" aria-expanded="false" aria-controls="modelspanel" title="every seat, and the model each role runs">models ▸</button>`) {
+		t.Error("the models line is not a closed button in the header strip")
+	}
+	if !strings.Contains(page, `<div id="modelspanel" hidden></div>`) {
+		t.Error("the models panel is not closed by default")
+	}
+	head := pageFunc(t, "paintModelsLine")
 	for _, want := range []string{
-		`"polecats "`, `" · seats "`, `" · om "`,
-		`m.polecat || "unknown"`, `m.om || "unknown"`,
-		"m.seats.cap > 0 ? m.seats.live + " + `"/"` + " + m.seats.cap : String(m.seats.live)",
+		`b.textContent = "models " + (modelsOpen ? "▾" : "▸")`,
+		`b.setAttribute("aria-expanded", modelsOpen ? "true" : "false")`,
+		`$("modelspanel").hidden = !modelsOpen`,
 	} {
-		if !strings.Contains(body, want) {
-			t.Errorf("renderModels does not compose the strip's %s", want)
+		if !strings.Contains(head, want) {
+			t.Errorf("paintModelsLine has no %q", want)
 		}
 	}
-	// The seats are read before they are counted: a strip that has not read
-	// them is not a town with no polecats.
-	if !strings.Contains(body, "m.seats ?") {
-		t.Error("renderModels counts seats it has not read")
+	// The choice is the viewer's and survives the load, in a key of its own:
+	// the panes' folds sit in gt-collapsed keyed by their titles, where a
+	// stored true means collapsed, and a key of its own needs no reader to
+	// invert it (gt-ywlei).
+	for _, want := range []string{
+		`const MODELS_OPEN_KEY = "gt-models-open";`,
+		`modelsOpen = localStorage.getItem(MODELS_OPEN_KEY) === "1";`,
+		`localStorage.setItem(MODELS_OPEN_KEY, modelsOpen ? "1" : "0");`,
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the models fold does not remember the viewer's choice: no %q", want)
+		}
 	}
-	if !strings.Contains(string(indexHTML), "renderAll() { if (!state) return; renderHealth(state.health); renderModels(state);") {
-		t.Error("the page's redraw does not include the strip")
+	if strings.Contains(pageFunc(t, "toggleModels"), "gt-collapsed") {
+		t.Error("the models fold writes the panes' own store, where a stored true means collapsed")
+	}
+	if !strings.Contains(page, `$("models").addEventListener("click", toggleModels);`) {
+		t.Error("the models line has nothing to open it")
+	}
+	if !strings.Contains(pageFunc(t, "renderAll"), "renderStrip(state); renderModelsPanel(state);") {
+		t.Error("the page's redraw does not draw the strip and the panel it opens")
+	}
+
+	body := pageFunc(t, "renderModelsPanel")
+	for _, want := range []string{`"drift"`, `rr.model || "unknown"`, `"closed"`, "sr.key", "rr.key", "rr.drift",
+		// Every seat the panel draws is named as gt pool show names it
+		// (gt-u8usx): a pro row labelled "second seat" is a row an operator
+		// reads as the wrong seat.
+		`"pool seat", pro: "pro seat", second: "second seat"`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("renderModelsPanel does not draw %s", want)
+		}
+	}
+	// A closed line keeps no table in the DOM, and one with nothing to open
+	// says so in a line rather than showing an empty box (gt-ywlei).
+	for _, want := range []string{"if (!modelsOpen) { box.replaceChildren(); return; }", `el("div", "empty", "no seats and no roles have been read yet")`} {
+		if !strings.Contains(body, want) {
+			t.Errorf("renderModelsPanel has no %q", want)
+		}
 	}
 }
 
@@ -93,34 +153,6 @@ func TestTheHeaderStripCountsTheSeatsThePageCounts(t *testing.T) {
 	}
 	if st.Models.Polecat != "deepseek-flash" || st.Models.OM != "sonnet" {
 		t.Errorf("strip = %+v", st.Models)
-	}
-}
-
-// The models panel is a small table under the header strip, which stays as it
-// is (gt-lqa6p).
-func TestTheModelsPanelSitsUnderTheHeaderStrip(t *testing.T) {
-	t.Parallel()
-
-	page := string(indexHTML)
-	if strings.Index(page, `id="modelspanel"`) < strings.Index(page, "</header>") {
-		t.Error("the models panel is not below the header")
-	}
-	if !strings.Contains(page, "renderModels(state); renderModelsPanel(state);") {
-		t.Error("the page's redraw does not include the panel")
-	}
-	body := pageFunc(t, "renderModelsPanel")
-	for _, want := range []string{`"drift"`, `rr.model || "unknown"`, `"closed"`, "sr.key", "rr.key", "rr.drift",
-		// Every seat the panel draws is named as gt pool show names it
-		// (gt-u8usx): a pro row labelled "second seat" is a row an operator
-		// reads as the wrong seat.
-		`"pool seat", pro: "pro seat", second: "second seat"`} {
-		if !strings.Contains(body, want) {
-			t.Errorf("renderModelsPanel does not draw %s", want)
-		}
-	}
-	// The strip itself is untouched.
-	if !strings.Contains(pageFunc(t, "renderModels"), `"polecats " + (m.polecat || "unknown") + " · seats " + seats + " · om " + (m.om || "unknown")`) {
-		t.Error("the header strip's text changed")
 	}
 }
 

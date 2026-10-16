@@ -204,10 +204,10 @@ type Machine struct {
 	// Cores is the host's logical CPU count, the number the load average is
 	// read against. The browser's own count is another machine's.
 	Cores int `json:"cores,omitempty"`
-	// HostState is the host tile's color, decided here from CPUIdle so the
-	// page draws a verdict rather than comparing thresholds of its own.
-	// Absent for a host with CPU to spare and for one that reported no idle
-	// reading, which the tile shows as a dash.
+	// HostState is the color the strip's host reading wears, decided here
+	// from CPUIdle so the page draws a verdict rather than comparing
+	// thresholds of its own. Absent for a host with CPU to spare and for one
+	// that reported no idle reading, which the strip shows as a dash.
 	HostState string    `json:"host_state,omitempty"`
 	Top       []Proc    `json:"top"`
 	At        time.Time `json:"at"`
@@ -616,6 +616,9 @@ type State struct {
 	// source, so the page can tell a reading that failed or went old from one
 	// that is merely unchanged. A source missing from it has not reported.
 	Reads map[string]ReadStatus `json:"reads,omitempty"`
+	// Strip is the verdict on each of the status strip's alarming readings,
+	// decided from everything above (StripAlarms).
+	Strip *StripAlarms `json:"strip,omitempty"`
 }
 
 // Config wires the hub to its readers. Every reader is optional; a nil reader
