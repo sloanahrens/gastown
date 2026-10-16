@@ -164,6 +164,17 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"pattern value of -skip is not a package", "GT_TEST_DOCKER=1 go test -skip 'Test*' ./internal/style", false},
 		{"pattern value of -run is not a package", "GT_TEST_DOCKER=1 go test -run 'Foo.*' ./internal/style", false},
 
+		// Allowed: a "$" in a flag's value is not a package argument the shell
+		// rewrites (gt-yyw5e). goTestPackageArgs drops the value, so only
+		// shellExpandedPackageArg on a real package argument refuses.
+		{"variable as the value of -run", "GT_TEST_DOCKER=1 go test -run \"$PAT\" ./internal/style", false},
+		{"variable in an =-joined flag value", "GT_TEST_DOCKER=1 go test -count=$N ./internal/style", false},
+		{"command substitution as a flag value", "GT_TEST_DOCKER=1 go test -timeout $(echo 5m) ./internal/style", false},
+		{"variable as the value of -skip", "GT_TEST_DOCKER=1 go test -skip \"$PAT\" ./internal/style", false},
+		{"variable flag value beside a plain light package", "GT_TEST_DOCKER=1 go test -tags=$TAGS ./internal/version ./internal/style", false},
+		{"variable flag value, container package still blocked", "GT_TEST_DOCKER=1 go test -run \"$PAT\" ./internal/beads", true},
+		{"variable flag value, expanded package still blocked", "GT_TEST_DOCKER=1 go test -count=$N $PWD/internal/beads", true},
+
 		// Allowed: unrelated commands.
 		{"unrelated command", "ls -la", false},
 		{"empty command", "", false},
