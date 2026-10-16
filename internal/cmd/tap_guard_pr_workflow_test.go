@@ -338,8 +338,6 @@ func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
 		{"bash -c in a later segment", `cd /tmp && bash -c 'gh pr create'`, true},
 		{"bash -c with a heredoc body", "bash <<'EOF'\nGH_REPO=o/r gh pr create\nEOF", true},
 
-		// Past the nesting cap the payload is unread; one that still names gh
-		// or git is refused, one that does not is allowed.
 		// A command substitution runs its body, whatever word it hangs from.
 		{"assignment from a substitution", "PR_URL=$(gh pr create --fill)", true},
 		{"substitution as an echo argument", `echo "$(gh pr create)"`, true},
@@ -355,6 +353,28 @@ func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
 		{"escaped substitution is data", `echo "\$(gh pr create)"`, false},
 		{"substitution in a quoted heredoc body is data", "cat > f <<'EOF'\n$(gh pr create)\nEOF", false},
 
+		// A body holding parentheses of its own still runs to its balancing ")".
+		{"substitution holding a nested substitution", `x=$(gh pr create --title "$(date)")`, true},
+		{"substitution holding a parenthesis in a quote", `x=$(gh pr create --title "fix (x)")`, true},
+		{"substitution holding a lone quoted parenthesis", `x=$(gh pr create --title ")")`, true},
+		{"substitution holding a single-quoted parenthesis", `x=$(gh pr create --title 'a)b')`, true},
+		{"substitution holding an escaped parenthesis", `x=$(gh pr create --title a\)b)`, true},
+		{"substitution holding a subshell", `x=$( (gh pr create) )`, true},
+		{"substitution nested in a substitution", `echo "$(echo "$(gh pr create)")"`, true},
+		{"backtick substitution holding parentheses", "x=`gh pr create --title \"fix (x)\"`", true},
+		{"backtick body with an escaped backtick", "x=`echo \\`gh pr create\\``", true},
+		{"unterminated substitution", "x=$(gh pr create --fill", true},
+		{"unterminated backtick substitution", "x=`gh pr create --fill", true},
+		{"substitution after a quoted dollar-paren", `echo '$(date)' "$(gh pr create)"`, true},
+		{"substitution after an escaped dollar-paren", `echo \$(date) $(gh pr create)`, true},
+		{"empty substitution", "x=$()", false},
+		{"blank backtick substitution", "x=` `", false},
+		{"substitution holding a parenthesis around an unrelated command", `x=$(gh pr view --json "a (b)")`, false},
+		{"quoted parenthesis does not end a body before a later one", `x=$(echo ")") && echo $(gh pr create)`, true},
+		{"substitution past the nesting cap naming gh", `x=$(bash -c "bash -c \"bash -c \\\"x=\$(gh pr create)\\\"\"")`, true},
+
+		// Past the nesting cap the payload is unread; one that still names gh
+		// or git is refused, one that does not is allowed.
 		{"too deep and naming gh", `bash -c "bash -c \"bash -c \\\"bash -c 'gh pr create'\\\"\""`, true},
 		{"too deep and naming neither", `bash -c "bash -c \"bash -c \\\"bash -c 'ls -la'\\\"\""`, false},
 

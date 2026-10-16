@@ -307,23 +307,92 @@ func prWorkflowInvocations(command string, depth int) (invocations [][]string, t
 // body of an unquoted heredoc, which the shell expands while reading it. A
 // "$(" the shell leaves literal is skipped, after a backslash and inside single
 // quotes, so a note spelling '$(gh pr create)' stays data.
+//
+// A $(...) body runs to its balancing ")", so parentheses inside it, whether a
+// nested $(date) or a quoted "fix (x)", do not end it early. A substitution
+// nested in a body is not returned here: the recursion in prWorkflowInvocations
+// scans the body for its own. commandSubstitutionPattern cannot do this, since
+// it matches only bodies free of parentheses and would let
+// $(gh pr create --title "$(date)") through.
 func prWorkflowSubstitutions(command string) []string {
 	text := stripHeredocBodies(command)
 	var bodies []string
-	for _, m := range commandSubstitutionPattern.FindAllStringSubmatchIndex(text, -1) {
-		if backslashesBefore(text, m[0])%2 == 1 || insideSingleQuotes(text, m[0]) {
-			continue
+	add := func(body string) {
+		if strings.TrimSpace(body) != "" {
+			bodies = append(bodies, body)
 		}
-		start, end := m[2], m[3]
-		if start < 0 {
-			start, end = m[4], m[5]
+	}
+	var quote byte
+	for i := 0; i < len(text); i++ {
+		switch c := text[i]; {
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			}
+		case c == '\\':
+			i++
+		case c == '$' && i+1 < len(text) && text[i+1] == '(':
+			end := parenBodyEnd(text, i+2)
+			add(text[i+2 : end])
+			i = end
+		case c == '`':
+			end := backtickBodyEnd(text, i+1)
+			add(strings.ReplaceAll(text[i+1:end], "\\`", "`"))
+			i = end
+		case quote == 0 && (c == '\'' || c == '"'):
+			quote = c
+		case quote == '"' && c == '"':
+			quote = 0
 		}
-		if start < 0 || strings.TrimSpace(text[start:end]) == "" {
-			continue
-		}
-		bodies = append(bodies, text[start:end])
 	}
 	return append(bodies, heredocBodySubstitutions(command)...)
+}
+
+// parenBodyEnd returns the index of the ")" that closes the $( whose body
+// starts at start, or len(text) when none does, so an unterminated body is read
+// to its end rather than dropped. Parentheses inside quotes are text.
+func parenBodyEnd(text string, start int) int {
+	depth := 1
+	var quote byte
+	for i := start; i < len(text); i++ {
+		switch c := text[i]; {
+		case quote == '\'':
+			if c == '\'' {
+				quote = 0
+			}
+		case c == '\\':
+			i++
+		case quote == 0 && (c == '\'' || c == '"'):
+			quote = c
+		case quote == '"' && c == '"':
+			quote = 0
+		case quote != 0:
+		case c == '(':
+			depth++
+		case c == ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return len(text)
+}
+
+// backtickBodyEnd returns the index of the backtick that closes the one whose
+// body starts at start, or len(text) when none does. A backslash escapes the
+// next character, so an escaped backtick in the body does not end it; it opens
+// a substitution nested in the body, which prWorkflowSubstitutions unescapes.
+func backtickBodyEnd(text string, start int) int {
+	for i := start; i < len(text); i++ {
+		switch text[i] {
+		case '\\':
+			i++
+		case '`':
+			return i
+		}
+	}
+	return len(text)
 }
 
 // prWorkflowNamesGhOrGit finds gh or git as a word of its own, path-qualified
