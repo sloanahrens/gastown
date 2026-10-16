@@ -100,6 +100,38 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"cwd-relative go test with an unreadable cwd", "GT_TEST_DOCKER=1 go test .", true},
 		{"bare go test with an unreadable cwd", "GT_TEST_DOCKER=1 go test", true},
 
+		// Blocked: the spelling of a package argument is irrelevant. Go cleans
+		// the path, so "//", "/./" and "/x/../" reach the same package as the
+		// plain spelling, and a guard comparing the raw text matched none of
+		// them (gt-d1e8c).
+		{"double slash in a container path", "GT_TEST_DOCKER=1 go test ./internal//beads/...", true},
+		{"dot element in a container path", "GT_TEST_DOCKER=1 go test ./internal/./beads", true},
+		{"dot-dot element in a container path", "GT_TEST_DOCKER=1 go test ./internal/x/../beads", true},
+		{"unclean path with a trailing slash and dots", "GT_TEST_DOCKER=1 go test ./internal//beads/.../", true},
+		{"unclean path, module-prefixed", "GT_TEST_DOCKER=1 go test github.com/steveyegge/gastown//internal/./beads", true},
+		{"unclean path climbing to the whole repo", "GT_TEST_DOCKER=1 go test ./internal/../...", true},
+		{"unclean light path stays allowed", "GT_TEST_DOCKER=1 go test ./internal//style/./...", false},
+		{"dot-dot element between light paths", "GT_TEST_DOCKER=1 go test ./internal/style/../version", false},
+
+		// Blocked: a wildcard inside a path element reaches packages the guard
+		// cannot name without expanding it, so it is refused whatever it
+		// might reach; the shell globs are seen unexpanded (gt-d1e8c).
+		{"partial wildcard reaching internal/beads", "GT_TEST_DOCKER=1 go test ./internal/b...", true},
+		{"partial wildcard reaching internal/cmd", "GT_TEST_DOCKER=1 go test ./internal/c...", true},
+		{"wildcard element in the middle of a path", "GT_TEST_DOCKER=1 go test ./internal/.../beads", true},
+		{"wildcard element leading a path", "GT_TEST_DOCKER=1 go test ./.../beads", true},
+		{"star glob", "GT_TEST_DOCKER=1 go test ./internal/b*", true},
+		{"question-mark glob", "GT_TEST_DOCKER=1 go test ./internal/bead?", true},
+		{"bracket glob", "GT_TEST_DOCKER=1 go test ./internal/[b]eads", true},
+		{"brace expansion", "GT_TEST_DOCKER=1 go test ./internal/{beads,style}", true},
+		{"star glob hiding behind a dot-dot", "GT_TEST_DOCKER=1 go test ./internal/b*/../beads", true},
+		{"wildcard beside a plain container package", "GT_TEST_DOCKER=1 go test ./internal/b... ./internal/style", true},
+		{"wildcard even when it reaches only light packages", "GT_TEST_DOCKER=1 go test ./internal/st...", true},
+		{"wildcard, wrapped in gt slot run", "gt slot run --role gastown/refinery -- go test ./internal/b...", false},
+		{"wildcard, switch off", "go test ./internal/b...", false},
+		{"pattern value of -skip is not a package", "GT_TEST_DOCKER=1 go test -skip 'Test*' ./internal/style", false},
+		{"pattern value of -run is not a package", "GT_TEST_DOCKER=1 go test -run 'Foo.*' ./internal/style", false},
+
 		// Allowed: unrelated commands.
 		{"unrelated command", "ls -la", false},
 		{"empty command", "", false},
@@ -514,6 +546,138 @@ func TestContainerSuiteTargetFollowsTheRunDir(t *testing.T) {
 				t.Errorf("containerSuiteTarget(%v, %s) matched = %v, want %v", tt.pkgArgs, tt.relDir, matched, tt.want)
 			}
 		})
+	}
+}
+
+// An absolute directory argument names the package at the module-relative path
+// under the module it sits in, whichever worktree that is and whatever the run
+// directory: 'go test /work/rig/internal/beads' runs internal/beads, and the
+// guard matched nothing for it (gt-d1e8c).
+func TestContainerSuiteTargetResolvesAbsoluteDirectories(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/refinery/rig")
+	other := fakeModule(t, "clone")
+	outside := nonGoTree(t)
+	tests := []struct {
+		name      string
+		runDir    string
+		pkgArg    string
+		wantWhole bool
+		want      []string
+	}{
+		{"absolute container package", "", root + "/internal/beads", false, []string{"internal/beads"}},
+		{"absolute container package with a subtree wildcard", "", root + "/internal/beads/...", false, []string{"internal/beads"}},
+		{"absolute container package with a trailing slash", "", root + "/internal/beads/", false, []string{"internal/beads"}},
+		{"absolute subpackage of a container package", "", root + "/internal/beads/sub", false, []string{"internal/beads"}},
+		{"absolute unclean container path", "", root + "/internal//x/../beads", false, []string{"internal/beads"}},
+		{"absolute ancestor of every container package", "", root + "/internal/...", false, containerSuitePackages},
+		{"absolute module root subtree", "", root + "/...", true, nil},
+		{"absolute module root, repo-root package", "", root, false, nil},
+		{"absolute light package", "", root + "/internal/style", false, nil},
+		{"absolute light package, subtree", "", root + "/cmd/gt/...", false, nil},
+		{"absolute path into another worktree of the module", root, other + "/internal/beads", false, []string{"internal/beads"}},
+		{"absolute path from inside the container package", root + "/internal/beads", root + "/internal/cmd", false, []string{"internal/cmd"}},
+		{"absolute path outside any module", "", outside + "/internal/beads", false, nil},
+		{"absolute path that does not exist", "", root + "/internal/doltserver", false, []string{"internal/doltserver"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			wholeRepo, matched := containerSuiteTarget([]string{tt.pkgArg}, tt.runDir)
+			if wholeRepo != tt.wantWhole {
+				t.Errorf("containerSuiteTarget(%q) wholeRepo = %v, want %v", tt.pkgArg, wholeRepo, tt.wantWhole)
+			}
+			if strings.Join(matched, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("containerSuiteTarget(%q) matched = %v, want %v", tt.pkgArg, matched, tt.want)
+			}
+		})
+	}
+}
+
+// The same absolute directories, through the whole guard from the command line.
+func TestEvaluateContainerSuiteCommand_AbsoluteDirectory(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/topaz/gastown")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"absolute container package", "GT_TEST_DOCKER=1 go test " + root + "/internal/beads", true},
+		{"absolute container package under -C", "GT_TEST_DOCKER=1 go -C /tmp test " + root + "/internal/beads/...", true},
+		{"absolute whole-repo subtree", "GT_TEST_DOCKER=1 go test " + root + "/...", true},
+		{"absolute light package", "GT_TEST_DOCKER=1 go test " + root + "/internal/style/...", false},
+		{"absolute container package, switch off", "go test " + root + "/internal/beads", false},
+		{"absolute container package, wrapped", "gt slot run --role gastown/polecats/topaz -- go test " + root + "/internal/beads", false},
+		{"absolute wildcard element", "GT_TEST_DOCKER=1 go test " + root + "/internal/b...", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, ""), tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.blocked)
+			}
+		})
+	}
+}
+
+func TestNormalizeGoPackageArg(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ arg, want string }{
+		{"./internal/beads/...", "internal/beads"},
+		{"internal/beads/", "internal/beads"},
+		{"internal/beads", "internal/beads"},
+		{"github.com/steveyegge/gastown/internal/beads", "internal/beads"},
+		{"./internal//beads", "internal/beads"},
+		{"./internal/./beads", "internal/beads"},
+		{"./internal/x/../beads", "internal/beads"},
+		{"./internal//beads/.../", "internal/beads"},
+		{"github.com/steveyegge/gastown//internal/beads", "internal/beads"},
+		{"github.com/steveyegge/gastown/...", wholeRepoPackageArg},
+		{"./internal/../...", wholeRepoPackageArg},
+		{"./...", wholeRepoPackageArg},
+		{"...", wholeRepoPackageArg},
+		{"", cwdPackageArg},
+		{".", cwdPackageArg},
+		{"./", cwdPackageArg},
+		{"./internal/..", cwdPackageArg},
+		{"../beads", "../beads"},
+	}
+	for _, tt := range tests {
+		if got := normalizeGoPackageArg(tt.arg); got != tt.want {
+			t.Errorf("normalizeGoPackageArg(%q) = %q, want %q", tt.arg, got, tt.want)
+		}
+	}
+}
+
+func TestPackageArgWildcard(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		arg  string
+		want bool
+	}{
+		{"./...", false},
+		{"...", false},
+		{"./internal/beads/...", false},
+		{"./internal/beads/.../", false},
+		{"github.com/steveyegge/gastown/...", false},
+		{"../...", false},
+		{"/abs/internal/beads/...", false},
+		{"./internal/beads", false},
+		{"./internal/../beads", false},
+		{"./internal/b...", true},
+		{"./internal/.../beads", true},
+		{"./.../beads", true},
+		{"./internal/b.../...", true},
+		{"./internal/b*", true},
+		{"./internal/bead?", true},
+		{"./internal/[b]eads", true},
+		{"./internal/{beads,style}", true},
+		{"/abs/internal/b...", true},
+	}
+	for _, tt := range tests {
+		if got := packageArgWildcard(tt.arg); got != tt.want {
+			t.Errorf("packageArgWildcard(%q) = %v, want %v", tt.arg, got, tt.want)
+		}
 	}
 }
 

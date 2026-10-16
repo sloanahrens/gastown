@@ -332,6 +332,11 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string, c
 		if cwdTargetsUnplacedDir(pkgArgs, runCwdKnown && runCwd != "") {
 			return "bare 'go test' names a directory the guard cannot place", nil
 		}
+		for _, arg := range pkgArgs {
+			if packageArgWildcard(arg) {
+				return fmt.Sprintf("bare 'go test' package argument %q has a wildcard inside a path element, which the guard cannot expand", arg), nil
+			}
+		}
 		wholeRepo, pkgs := containerSuiteTarget(pkgArgs, runCwd)
 		if wholeRepo {
 			return "bare 'go test' with a whole-repo target touches every testcontainers-backed package", nil
@@ -458,6 +463,10 @@ var goTestValueFlags = map[string]bool{
 	"-benchtime": true, "-coverprofile": true, "-covermode": true,
 	"-coverpkg": true, "-cpuprofile": true, "-memprofile": true,
 	"-blockprofile": true, "-mutexprofile": true, "-outputdir": true,
+	// The value of these is a pattern or a flag list, not a package: left out,
+	// "-skip 'Test*'" would read as a package argument with a wildcard
+	// (packageArgWildcard, gt-d1e8c).
+	"-skip": true, "-fuzz": true, "-exec": true, "-ldflags": true, "-gcflags": true, "-mod": true,
 }
 
 // goTestRunDir returns the directory a "go … test" invocation runs in and
@@ -550,19 +559,20 @@ const wholeRepoPackageArg = "..."
 const cwdPackageArg = "."
 
 // normalizeGoPackageArg reduces a go test package argument to the form the
-// guards match on: the module prefix, a leading "./", and a trailing "/..."
-// or "/" are stripped, so "./internal/beads/...", "internal/beads/",
-// "internal/beads" and "github.com/steveyegge/gastown/internal/beads" all
-// normalize to "internal/beads". The two spellings that name no directory —
-// the whole-repo wildcard and the cwd itself — normalize to
+// guards match on: the path is cleaned, then the module prefix and a trailing
+// "/..." are stripped, so "./internal/beads/...", "internal/beads/",
+// "./internal//beads", "./internal/x/../beads" and
+// "github.com/steveyegge/gastown/internal/beads" all normalize to
+// "internal/beads". Cleaning is what makes the spelling irrelevant: go reads
+// "//", "/./" and "/x/../" the way path.Clean does, and a guard comparing the
+// raw text matched none of them (gt-d1e8c). The two spellings that name no
+// directory — the whole-repo wildcard and the cwd itself — normalize to
 // wholeRepoPackageArg and cwdPackageArg, which the callers must recognize
 // before matching.
 func normalizeGoPackageArg(arg string) string {
-	p := arg
+	p := path.Clean(arg)
 	p = strings.TrimPrefix(p, gastownModulePath+"/")
-	p = strings.TrimPrefix(p, "./")
 	p = strings.TrimSuffix(p, "/...")
-	p = strings.TrimSuffix(p, "/")
 	switch p {
 	case "", ".":
 		return cwdPackageArg
@@ -570,6 +580,61 @@ func normalizeGoPackageArg(arg string) string {
 		return wholeRepoPackageArg
 	}
 	return p
+}
+
+// packageArgWildcard reports whether a go test package argument carries a
+// wildcard inside a path element: a "..." that is not the argument's trailing
+// "/..." ("./internal/b...", "./internal/.../beads"), or a shell glob
+// character the hook sees unexpanded ("./internal/b*", "./internal/{beads,x}").
+// Such an argument reaches a set of packages the guard cannot name without
+// expanding it against the tree, so evaluateContainerSuiteSegment refuses it
+// rather than guessing (gt-d1e8c). The whole-repo spellings and the trailing
+// "/..." form of a directory are not wildcards in this sense:
+// normalizeGoPackageArg reads them.
+func packageArgWildcard(arg string) bool {
+	if strings.ContainsAny(arg, "*?[{") {
+		return true
+	}
+	p := strings.TrimRight(arg, "/")
+	if p == wholeRepoPackageArg {
+		return false
+	}
+	return strings.Contains(strings.TrimSuffix(p, "/..."), "...")
+}
+
+// moduleRelativePackageArgs maps each absolute directory argument that lies in
+// this module to the module-relative spelling the rest of the guard matches on
+// ("/work/rig/internal/beads/..." becomes "internal/beads/..."): go test takes
+// a directory path as a package argument, and an absolute one names the same
+// package as the relative spelling (gt-d1e8c). The module root is found from
+// the argument itself (cwdPackagePath), not from the run directory, so a path
+// into another worktree of the module is judged by the tree it names. An
+// absolute path outside this module names nothing on the list and is left as
+// written; so is the module root itself, the repo-root package that is on no
+// list, unless it carries the "/..." wildcard, which names every package.
+func moduleRelativePackageArgs(pkgArgs []string) []string {
+	out := make([]string, len(pkgArgs))
+	for i, arg := range pkgArgs {
+		out[i] = arg
+		if !filepath.IsAbs(arg) {
+			continue
+		}
+		dir := filepath.Clean(arg)
+		subtree := strings.HasSuffix(dir, "/...")
+		dir = strings.TrimSuffix(dir, "/...")
+		rel, ok := cwdPackagePath(dir)
+		switch {
+		case !ok:
+		case rel != "":
+			out[i] = rel
+			if subtree {
+				out[i] += "/..."
+			}
+		case subtree:
+			out[i] = wholeRepoPackageArg
+		}
+	}
+	return out
 }
 
 // isWholeRepoPackageArg reports whether a normalized package argument (see
@@ -695,10 +760,11 @@ func cwdContainerPackages(cwd string) []string {
 // spelling, so no caller can resolve the argument form and miss the cwd form
 // (gt-1lko). cwd is the directory the invocation runs in, so an argument
 // spelled as a path under it is judged there too (packageArgsUnderRunDir,
-// gt-g6yi7).
+// gt-g6yi7), and an absolute directory is judged by the module-relative path
+// it names (moduleRelativePackageArgs, gt-d1e8c).
 func containerSuiteTarget(pkgArgs []string, cwd string) (wholeRepo bool, matched []string) {
 	seen := map[string]bool{}
-	for _, p := range packageArgsUnderRunDir(pkgArgs, cwd) {
+	for _, p := range packageArgsUnderRunDir(moduleRelativePackageArgs(pkgArgs), cwd) {
 		if isWholeRepoPackageArg(p) {
 			return true, nil
 		}
