@@ -179,6 +179,21 @@ func isPolecatOrRefineryContext(proc guardProcess) bool {
 // internal/slot and 'gt slot run --role <rig>/<name> -- <command>').
 var containerSuiteSlotRunTokens = []string{"gt", "slot", "run"}
 
+// slotRunWrapped reports whether a segment runs through the gt slot run
+// wrapper: its own command — the words behind the leading NAME=value
+// assignments and launchers a shell looks through (prWorkflowCommand) — starts
+// with the three wrapper words. The match is anchored to that command, not a
+// subsequence found anywhere in the segment: a subsequence match exempted
+// "GT_TEST_DOCKER=1 go test ./internal/beads -args gt slot run", where the
+// three words are go's own test arguments and no slot is involved. It is the
+// reading idleGateSlotRunPrefix gives the same wrapper (gt-jj3or, and
+// gt-sveq8's "timeout 5 gt slot run -- ..." must stay wrapped, so the
+// launchers count).
+func slotRunWrapped(segment []string) bool {
+	argv, _ := prWorkflowCommand(segment)
+	return hasPrefix(toLowerTokens(argv), containerSuiteSlotRunTokens)
+}
+
 // maxTestGuardNestDepth bounds the shell-fed-heredoc, -c payload, eval and
 // command-substitution recursion in
 // evaluateContainerSuiteCommand and evaluatePolecatTestScope, so a
@@ -398,7 +413,7 @@ func substitutionScripts(proc guardProcess, command, cwd string, cwdKnown bool) 
 	text := stripHeredocBodies(command)
 	var scripts []nestedScript
 	for _, span := range commandSubstitutionSpans(text) {
-		body := text[span.bodyStart:span.bodyEnd]
+		body := substitutionBody(text, span)
 		if strings.TrimSpace(body) == "" {
 			continue
 		}
@@ -490,6 +505,17 @@ func heredocSubstitutionSpans(body string) []substitutionSpan {
 // adds spans. The ANSI-C read ends one later, so a "$(...)" after a "\'" inside
 // $'...' is now literal text and no longer a span, as the shell reads it
 // (gt-2yc0u).
+//
+// A process substitution ("<(...)" / ">(...)") is a span too: the shell runs
+// the command inside it and hands its output to the word, so "cat <(gh pr
+// create --fill)" creates the PR and "cat <(git reset --hard)" resets the tree
+// though the segment judge sees only a cat (gt-jj3or). It is read only where
+// the shell performs one — not inside double quotes, single quotes or a
+// comment, where the angle bracket is plain text, and not in a heredoc body
+// (quotes is false there), where the shell's expansion of the body does not
+// include process substitution: "cat > f <<EOF" holding "cat <(ls)" writes
+// that line as data. A heredoc body fed to a shell is a script, so the
+// recursion judges its process substitutions in the body's own reading.
 func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 	var spans []substitutionSpan
 	inDouble := false
@@ -518,6 +544,13 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 			inComment = true
 		case quotes && !inComment && c == '"':
 			inDouble = !inDouble
+		case quotes && !inComment && !inDouble && (c == '<' || c == '>') && i+1 < len(text) && text[i+1] == '(':
+			end := closingParen(text, i+2)
+			if end < 0 {
+				return append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: len(text)})
+			}
+			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: end})
+			i = end
 		case c == '$' && i+1 < len(text) && text[i+1] == '(':
 			end := closingParen(text, i+2)
 			if end < 0 {
@@ -535,6 +568,23 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 		}
 	}
 	return spans
+}
+
+// substitutionBody is the text of a command substitution as the shell runs it,
+// for a substitution written in a command line (not in a heredoc body, where an
+// escape suppresses the substitution instead and the body is data; see
+// heredocSubstitutionScripts). The body of a backtick span has the backslash
+// that escapes a nested backtick pair dropped, which is what the shell does when
+// it parses the body: a backslash-escaped backtick pair around "make gate" is
+// literal to the outer scan, yet the body the shell runs holds it as a live
+// substitution, so its own parse runs make (gt-jj3or). A "$(...)" and a process
+// substitution carry no such escaping; their bodies are returned as written.
+func substitutionBody(text string, span substitutionSpan) string {
+	body := text[span.bodyStart:span.bodyEnd]
+	if text[span.open] == '`' {
+		body = strings.ReplaceAll(body, "\\`", "`")
+	}
+	return body
 }
 
 // backtickBodyEnd returns the index of the backtick that closes the one whose
@@ -706,7 +756,7 @@ func commandSegment(segment []string) []string {
 // body that merely spells "make test" — a bead description, a doc, a formula
 // — is data, not a live invocation. A body fed to a shell invoker is the
 // exception and is judged as the nested script it is, in the directory the
-// shell had reached when it read the body (heredocBodyDir), the same
+// shell had reached when it read the body (heredocBodyCwd), the same
 // distinction matchesPRWorkflowCommand and evaluateDangerousCommand draw
 // (gt-ohe8n, gt-1cvqj, gt-v02wh).
 //
@@ -717,13 +767,17 @@ func commandSegment(segment []string) []string {
 // is a go or make binary (gt-t1pct, gt-6fkng, substitutionScripts).
 func evaluateContainerSuiteCommand(proc guardProcess, command, envOptIn string) (reason string, matched []string) {
 	cwd, _ := proc.getwd()
-	return evaluateContainerSuiteCommandDepth(proc, command, cwd, envOptIn, 0)
+	return evaluateContainerSuiteCommandDepth(proc, command, cwd, true, envOptIn, 0)
 }
 
 // evaluateContainerSuiteCommandDepth judges command as a shell starting in cwd
 // — the invocation's directory, or the directory a shell-fed heredoc's body
-// runs in, one level down.
-func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptIn string, depth int) (reason string, matched []string) {
+// runs in, one level down. cwdKnown is false when cwd is only standing in for
+// a directory the walk above could not place, as for the -c payload of a
+// segment whose cd the guard cannot read: nothing in command is then judged
+// against cwd, which is no evidence of where the shell is (gt-jj3or, the
+// reading evaluatePolecatTestScopeDepth gives the same handoff, gt-rws47).
+func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd string, cwdKnown bool, envOptIn string, depth int) (reason string, matched []string) {
 	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
 	// Container-backed tests are opt-in (testutil.DockerTestsEnv). A bare
 	// `go test` of a container-bearing package cannot start a container
@@ -751,14 +805,18 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 	// payload runs in the segment's directory (the base when the walk cannot
 	// place it, as for a heredoc body) and inherits the line's container
 	// opt-in; a slot-run wrapper exempts its payload with the rest of the
-	// segment.
+	// segment. A directory the walk cannot place is carried to the payload as
+	// unplaced rather than passed on as the base, so a payload that names it
+	// ("bash -c 'go test ./beads'") is refused instead of read as the base's
+	// own package (gt-jj3or).
 	judge := func(segment []string, start int) (string, []string) {
 		segment = commandSegment(segment)
 		dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
+		known = known && cwdKnown
 		if r, m := evaluateContainerSuiteSegment(segment, dockerOn, dir, known); r != "" {
 			return r, m
 		}
-		if containsSubsequence(toLowerTokens(segment), containerSuiteSlotRunTokens) {
+		if slotRunWrapped(segment) {
 			return "", nil
 		}
 		payloads := segmentPayloads(tokens, start, segment)
@@ -769,7 +827,7 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 			dir = cwd
 		}
 		for _, payload := range payloads {
-			if r, m := evaluateContainerSuiteCommandDepth(proc, payload, dir, nestedOptIn, depth+1); r != "" {
+			if r, m := evaluateContainerSuiteCommandDepth(proc, payload, dir, known, nestedOptIn, depth+1); r != "" {
 				return r, m
 			}
 		}
@@ -794,25 +852,33 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 	}
 
 	spans := shellFedHeredocSpans(command)
-	subs := substitutionScripts(proc, command, cwd, true)
+	subs := substitutionScripts(proc, command, cwd, cwdKnown)
 	if depth >= maxTestGuardNestDepth {
 		return nestedTooDeepRefusal(len(spans) > 0 || len(subs) > 0)
 	}
 	// A command substitution runs outside any slot-run wrapper that precedes
 	// it on the line (`gt slot run -- echo $(go test ./...)`), so it is judged
-	// whatever its segment is, with the container opt-in the line carries.
+	// whatever its segment is, with the container opt-in the line carries. A
+	// substitution whose directory the walk could not place is judged as
+	// unplaced, the handoff the payload above gets (gt-jj3or).
 	for _, sub := range subs {
-		if r, m := evaluateContainerSuiteCommandDepth(proc, sub.body, sub.dir, nestedOptIn, depth+1); r != "" {
+		if r, m := evaluateContainerSuiteCommandDepth(proc, sub.body, sub.dir, sub.known, nestedOptIn, depth+1); r != "" {
 			return r, m
 		}
 	}
 	// The bodies come off the untouched command: stripHeredocBodies removed
 	// them from the text above, so they are judged here once, as code, in the
 	// directory the shell had reached by the time it read them
-	// (heredocBodyDir, gt-1cvqj, gt-v02wh).
+	// (heredocBodyCwd, gt-1cvqj, gt-v02wh). A body whose directory the walk
+	// cannot place is judged as unplaced, as heredocSubstitutionScripts
+	// already judges the substitutions inside one (gt-jj3or).
 	for _, span := range spans {
-		bodyCwd := heredocBodyDir(proc, command, span, cwd)
-		if r, m := evaluateContainerSuiteCommandDepth(proc, span.body, bodyCwd, nestedOptIn, depth+1); r != "" {
+		bodyCwd, placed := heredocBodyCwd(proc, command, span, cwd)
+		known := placed && cwdKnown
+		if !known {
+			bodyCwd = cwd
+		}
+		if r, m := evaluateContainerSuiteCommandDepth(proc, span.body, bodyCwd, known, nestedOptIn, depth+1); r != "" {
 			return r, m
 		}
 	}
@@ -874,7 +940,7 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string, c
 		lower[i] = strings.ToLower(t)
 	}
 
-	if containsSubsequence(lower, containerSuiteSlotRunTokens) {
+	if slotRunWrapped(tokens) {
 		return "", nil // already wrapped by gt slot run
 	}
 

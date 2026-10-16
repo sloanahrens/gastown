@@ -970,25 +970,17 @@ func heredocBodySubstitutions(command string) []string {
 	return subs
 }
 
-// heredocBodyDir returns the directory a shell-fed heredoc's body runs in:
+// heredocBodyCwd returns the directory a shell-fed heredoc's body runs in:
 // base — the directory the invocation was in — moved by the cds the shell
-// runs before it hands the body over. "cd /go/tree && bash <<EOF" runs the
-// body in /go/tree, and judging it in the hook's own directory instead let
-// that cd step around the test guards (gt-1cvqj). A cd the walk cannot place
-// leaves the body where it already was, the reading scanWalkRoot gives an
-// unknown walk root: an unplaceable directory is not evidence that the body
-// runs in a guarded tree.
-func heredocBodyDir(proc guardProcess, command string, span heredocSpan, base string) string {
-	if dir, ok := heredocBodyCwd(proc, command, span, base); ok {
-		return dir
-	}
-	return base
-}
-
-// heredocBodyCwd is the resolution behind heredocBodyDir: the directory the
-// shell is in by the time the body is read, and whether the walk could place
-// it. The walk's two unnamed outcomes read the same here: a body whose
-// directory the walk cannot name keeps the one the invocation already had.
+// runs before it hands the body over, and whether the walk could place it.
+// "cd /go/tree && bash <<EOF" runs the body in /go/tree, and judging it in the
+// hook's own directory instead let that cd step around the test guards
+// (gt-1cvqj). A cd the walk cannot place leaves the body's directory unknown,
+// the reading scanWalkRoot gives an unknown walk root: an unplaceable directory
+// is neither evidence that the body runs in a guarded tree nor evidence that it
+// does not, so the callers judge the body as unplaced rather than against base
+// (gt-jj3or). The walk's two unnamed outcomes read the same here: the returned
+// directory is base in both, and the bool is what separates them.
 func heredocBodyCwd(proc guardProcess, command string, span heredocSpan, base string) (string, bool) {
 	tokens := heredocBodyWalkTokens(command, span)
 	dir, status := cdWalkRoot(proc, tokens, len(tokens), base, shellVarAssignments(tokens))

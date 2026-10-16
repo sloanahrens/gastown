@@ -64,10 +64,11 @@ func isPolecatContext(proc guardProcess) bool {
 // "make test" — a bead description, a doc, a formula — is data, not a live
 // invocation. A body fed to a shell invoker is the exception and is judged as
 // the nested script it is (gt-ohe8n), in the directory the shell had reached
-// when it read the body (heredocBodyDir, gt-1cvqj, gt-v02wh). The shell still
-// expands a $(...) or backtick written in an unquoted body, so those
-// substitutions are judged too, in that same directory; a quoted tag keeps its
-// body literal (gt-6fkng, heredocSubstitutionScripts).
+// when it read the body (heredocBodyCwd, gt-1cvqj, gt-v02wh); a directory the
+// walk cannot place is carried to the body as unplaced, as a -c payload's is
+// (gt-jj3or). The shell still expands a $(...) or backtick written in an
+// unquoted body, so those substitutions are judged too, in that same directory;
+// a quoted tag keeps its body literal (gt-6fkng, heredocSubstitutionScripts).
 func evaluatePolecatTestScope(proc guardProcess, command string) (reason string, matched []string) {
 	cwd, _ := proc.getwd()
 	return evaluatePolecatTestScopeDepth(proc, command, cwd, true, 0)
@@ -136,8 +137,12 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, cwdKn
 		}
 	}
 	for _, span := range spans {
-		bodyCwd := heredocBodyDir(proc, command, span, cwd)
-		if r, m := evaluatePolecatTestScopeDepth(proc, span.body, bodyCwd, true, depth+1); r != "" {
+		bodyCwd, placed := heredocBodyCwd(proc, command, span, cwd)
+		known := placed && cwdKnown
+		if !known {
+			bodyCwd = cwd
+		}
+		if r, m := evaluatePolecatTestScopeDepth(proc, span.body, bodyCwd, known, depth+1); r != "" {
 			return r, m
 		}
 	}

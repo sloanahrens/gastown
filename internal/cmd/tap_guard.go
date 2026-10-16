@@ -319,16 +319,14 @@ func prWorkflowInvocations(command string, depth int) (invocations [][]string, t
 // A substitution nested in a body is not returned here: the recursion in
 // prWorkflowInvocations scans the body for its own. A body is handed over as
 // the shell would run it: the backslash that makes a backtick literal, and
-// that the shell drops when it parses the body, is dropped here too, so the
-// "gh pr create" inside "echo \`gh pr create\`" is read as the command it is.
+// that the shell drops when it parses the body, is dropped too
+// (substitutionBody), so the "gh pr create" inside "echo \`gh pr create\`" is
+// read as the command it is.
 func prWorkflowSubstitutions(command string) []string {
 	text := stripHeredocBodies(command)
 	var bodies []string
 	for _, span := range substitutionSpansIn(text, true) {
-		body := text[span.bodyStart:span.bodyEnd]
-		if text[span.open] == '`' {
-			body = strings.ReplaceAll(body, "\\`", "`")
-		}
+		body := substitutionBody(text, span)
 		if strings.TrimSpace(body) != "" {
 			bodies = append(bodies, body)
 		}

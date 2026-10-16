@@ -1844,15 +1844,19 @@ func TestHeredocBodyIsJudgedInReaderLineCwd(t *testing.T) {
 			wantScopeOut: true,
 		},
 		{
-			// The fallback for a cd the walk cannot place: the body keeps the
-			// directory the invocation already had. An unplaceable directory
-			// is not evidence that the body runs in a guarded tree, the same
-			// reading scanWalkRoot gives an unknown walk root (gt-3e6wa).
-			name:         "a cd the guard cannot place leaves the body where it was",
+			// A cd the walk cannot place is carried into the body as an
+			// unplaced directory, so the body is judged as unplaced rather
+			// than read against the invocation's own — the handoff the -c
+			// payload and the substitutions inside an unquoted body already
+			// get (gt-jj3or, heredocSubstitutionScripts). An unplaceable
+			// directory is no more evidence that the body runs in a non-Go
+			// tree than that it runs in a Go one, the reading gt-ofj05 gives
+			// every other directory the walk cannot place.
+			name:         "a cd the guard cannot place leaves the body unplaced",
 			cwd:          nonGo,
 			command:      "cd \"$BUILD_DIR\" && bash <<'EOF'\nmake test\nEOF\n",
-			wantRefused:  false,
-			wantScopeOut: false,
+			wantRefused:  true,
+			wantScopeOut: true,
 		},
 	}
 	for _, tt := range tests {
@@ -1879,7 +1883,7 @@ func TestHeredocBodyIsJudgedInReaderLineCwd(t *testing.T) {
 // — a cd out of a Go tree on an earlier line — open in the other direction
 // (gt-v02wh). The preceding text is read with its heredoc bodies stripped, so
 // the neighbours below pin that a cd the shell never runs stays data and that
-// an earlier cd the walk cannot place leaves the body where it was.
+// an earlier cd the walk cannot place leaves the body unplaced (gt-jj3or).
 func TestHeredocBodyIsJudgedInDirectoryOfPrecedingLines(t *testing.T) {
 	t.Parallel()
 	goTree := fakeModule(t, "gastown/refinery/rig")
@@ -1947,13 +1951,14 @@ func TestHeredocBodyIsJudgedInDirectoryOfPrecedingLines(t *testing.T) {
 			wantScopeOut: true,
 		},
 		{
-			// The unknown-root fallback, reached through the preceding text: an
-			// unplaceable directory is not evidence the body runs in a Go tree.
-			name:         "an earlier cd the guard cannot place leaves the body where it was",
+			// The same handoff reached through the preceding text: an
+			// unplaceable directory is evidence of neither a Go tree nor a
+			// non-Go one, so the body is judged as unplaced (gt-jj3or).
+			name:         "an earlier cd the guard cannot place leaves the body unplaced",
 			cwd:          nonGo,
 			command:      "cd \"$BUILD_DIR\"\nbash <<'EOF'\nmake test\nEOF\n",
-			wantRefused:  false,
-			wantScopeOut: false,
+			wantRefused:  true,
+			wantScopeOut: true,
 		},
 		{
 			name:         "an earlier cd carries into a nested body",
@@ -2478,4 +2483,117 @@ func TestHeredocSubstitutionSpans(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTapGuardDeepReviewP3Batch pins the six command-text gaps the deep review
+// filed against the internal/cmd guards (gt-jj3or). Each subtest is a command
+// the shell runs — or a form the guard's own direct spelling already refuses —
+// that at least one guard allowed before this change. They share one test
+// because they came from one review, not because they share a scanner: the
+// subtests below touch the command-substitution scan, the heredoc and -c
+// handoffs, the slot-run exemption and the test-scope rule.
+func TestTapGuardDeepReviewP3Batch(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/dementus/gastown")
+
+	// The shell expands a $(...) written in an unquoted heredoc body while it
+	// reads the body, so the container guard judges the body's substitution as
+	// the command line it is, with the container opt-in the invocation carries
+	// (heredocSubstitutionScripts).
+	t.Run("unquoted_heredoc_substitution", func(t *testing.T) {
+		command := "GT_TEST_DOCKER=1 cat <<EOF\n$(go test ./internal/beads)\nEOF"
+		reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), command, "")
+		if reason == "" {
+			t.Errorf("evaluateContainerSuiteCommand(%q) allowed it, want the container-suite refusal", command)
+		}
+	})
+
+	// A process substitution runs the command inside it and hands the word the
+	// result, so "cat <(gh pr create --fill)" opens the PR and "cat <(git reset
+	// --hard)" resets the tree though the segment judge sees only a cat. Both
+	// angle forms are spans; a quoted one is plain text the shell never runs.
+	t.Run("process_substitution", func(t *testing.T) {
+		if !matchesPRWorkflowCommand("cat <(gh pr create --fill)") {
+			t.Errorf("matchesPRWorkflowCommand(%q) = false, want true", "cat <(gh pr create --fill)")
+		}
+		proc := fakeGuardProcess(nil, root)
+		sess := guardSession{proc: proc}
+		for _, command := range []string{"cat <(git reset --hard)", "cat >(git reset --hard)"} {
+			if reason, _ := evaluateDangerousCommand(command, 0, sess); reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed it, want a refusal", command)
+			}
+		}
+		if reason, _ := evaluateDangerousCommand(`echo "<(git reset --hard)"`, 0, sess); reason != "" {
+			t.Errorf("evaluateDangerousCommand(quoted process substitution) blocked (%q), want allowed", reason)
+		}
+		// A heredoc body the shell expands is still not a script: process
+		// substitution is not part of that expansion, so its "<(...)" is data
+		// until a shell is handed the body and parses it.
+		if reason, _ := evaluateDangerousCommand("cat > f <<EOF\ncat <(git reset --hard)\nEOF", 0, sess); reason != "" {
+			t.Errorf("evaluateDangerousCommand(process substitution in a data body) blocked (%q), want allowed", reason)
+		}
+		if reason, _ := evaluateDangerousCommand("bash <<EOF\ncat <(git reset --hard)\nEOF", 0, sess); reason == "" {
+			t.Errorf("evaluateDangerousCommand(process substitution in a script body) allowed it, want a refusal")
+		}
+	})
+
+	// A -c payload runs in the segment's directory. When the walk cannot place
+	// that directory, "./beads" resolves against nothing the guard knows, so it
+	// can be internal/beads — a testcontainers package — and the payload is
+	// refused rather than read against the invocation's own directory.
+	t.Run("payload_unplaced_dir", func(t *testing.T) {
+		command := `cd "$X" && GT_TEST_DOCKER=1 bash -c 'go test -run TestOne ./beads'`
+		reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), command, "")
+		if !strings.Contains(reason, "names a directory the guard cannot place") {
+			t.Errorf("evaluateContainerSuiteCommand(%q) reason = %q, want the unplaced-directory refusal", command, reason)
+		}
+	})
+
+	// The same handoff for a script fed to a shell: a body numbered "." is the
+	// directory the body runs in, which the walk could not place, so both rules
+	// refuse it with their own unplaced-directory refusal.
+	t.Run("heredoc_unplaced_dir", func(t *testing.T) {
+		command := "cd \"$X\" && GT_TEST_DOCKER=1 bash <<EOF\ngo test .\nEOF"
+		proc := fakeGuardProcess(nil, root)
+		want := "names a directory the guard cannot place"
+		if reason, _ := evaluateContainerSuiteCommand(proc, command, ""); !strings.Contains(reason, want) {
+			t.Errorf("evaluateContainerSuiteCommand(%q) reason = %q, want %q", command, reason, want)
+		}
+		if reason, _ := evaluatePolecatTestScope(proc, command); !strings.Contains(reason, want) {
+			t.Errorf("evaluatePolecatTestScope(%q) reason = %q, want %q", command, reason, want)
+		}
+	})
+
+	// The slot-run exemption is anchored to the segment's own command, not a
+	// subsequence of it: the three words after go's -args are go's argument,
+	// and no slot runs. A wrapper behind leading assignments and launchers is
+	// still the wrapper (idleGateSlotRunPrefix's reading).
+	t.Run("slot_run_anchored", func(t *testing.T) {
+		proc := fakeGuardProcess(nil, root)
+		blocked := "GT_TEST_DOCKER=1 go test ./internal/beads -args gt slot run"
+		if reason, _ := evaluateContainerSuiteCommand(proc, blocked, ""); reason == "" {
+			t.Errorf("evaluateContainerSuiteCommand(%q) allowed it, want the container-suite refusal", blocked)
+		}
+		allowed := []string{
+			"gt slot run -- go test ./internal/beads",
+			"env X=1 gt slot run -- go test ./internal/beads",
+			"timeout 5 gt slot run -- go test ./internal/beads",
+		}
+		for _, command := range allowed {
+			if reason, _ := evaluateContainerSuiteCommand(proc, command, ""); reason != "" {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked (%q), want allowed", command, reason)
+			}
+		}
+	})
+
+	// The backslash-escaped backtick pair is literal to the outer scan, yet the
+	// shell drops those backslashes when it parses the body, so the body it runs
+	// holds a live substitution around make gate (substitutionBody).
+	t.Run("nested_escaped_backtick", func(t *testing.T) {
+		command := "echo `echo \\`make gate\\``"
+		reason, _ := evaluatePolecatTestScope(fakeGuardProcess(nil, root), command)
+		if reason == "" {
+			t.Errorf("evaluatePolecatTestScope(%q) allowed it, want the test-scope refusal", command)
+		}
+	})
 }
