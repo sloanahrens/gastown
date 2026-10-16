@@ -85,7 +85,8 @@ func (t *dispatchIdleTracker) setInterval(d time.Duration) {
 // gap is how long the ticker may be quiet between two ticks and still have them
 // count as consecutive: attentionDispatchIdleGapIntervals of its own intervals.
 // A fixed five minutes would end the streak on every tick of a slower ticker,
-// and the idle alarm could never raise at all (gt-icmdq).
+// and the idle alarm could never raise at all (gt-icmdq). The caller holds t.mu
+// — taking it here would deadlock against Observe and Status.
 func (t *dispatchIdleTracker) gap() time.Duration {
 	interval := t.interval
 	if interval <= 0 {
@@ -97,7 +98,7 @@ func (t *dispatchIdleTracker) gap() time.Duration {
 // fresh is how old the newest tick may be and still describe now. The floor
 // holds a ticker at the default cadence to the same bound as before; a slower
 // one is held to its own gap, which is longer, or its last tick would read as
-// stale for most of every interval (gt-icmdq).
+// stale for most of every interval (gt-icmdq). The caller holds t.mu.
 func (t *dispatchIdleTracker) fresh() time.Duration {
 	if g := t.gap(); g > attentionDispatchIdleFresh {
 		return g

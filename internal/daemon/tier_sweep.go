@@ -115,6 +115,11 @@ const (
 
 // tierSweepState is one rig's sweep record, .runtime/tier-sweep/<rig>.json.
 // gt report --hour reads the same file (internal/cmd/report.go).
+//
+// Two writers own it, tierSweepStampOwed and tierSweepRigCycle, and both run on
+// the one tier_sweep goroutine triggerTierSweep single-flights with
+// tierSweepRunning: the record's read-modify-writes never interleave, and a
+// third writer needs that guard or a lock of its own (gt-o3hb4).
 type tierSweepState struct {
 	LastRun time.Time `json:"last_run"`
 	// LastSHA is the tip the last cycle saw: every tier that cycle ran was
@@ -649,11 +654,11 @@ func (d *Daemon) tierSweepDeferForRestart(now time.Time) bool {
 	if !d.upgradeRestartPending.Load() {
 		return false
 	}
-	age, swept, undated := d.tierSweepAge(now)
-	// The read above saw these rigs start owing a sweep, so it is here that the
-	// interval is dated: tierSweepAge only reads (gt-icmdq).
-	for _, rig := range undated {
-		d.tierSweepStampOwed(rig, now)
+	age, swept, owed := d.tierSweepAge(now)
+	// The read above resolved these starts, so the dating write happens here:
+	// tierSweepAge only reads (gt-icmdq).
+	for _, o := range owed {
+		d.tierSweepStampOwed(o.rig, o.since)
 	}
 	bound := tierSweepStaleAfter(d.patrolConfig)
 	switch {
@@ -677,16 +682,24 @@ func (d *Daemon) tierSweepDeferForRestart(now time.Time) bool {
 	}
 }
 
+// tierSweepOwed is a rig whose owed interval this read resolved a start for,
+// with that start: the caller writes it (tierSweepStampOwed). The read itself
+// writes nothing (gt-o3hb4).
+type tierSweepOwed struct {
+	rig   string
+	since time.Time
+}
+
 // tierSweepAge is how long the oldest rig that still owes a sweep has owed it,
-// and the rigs whose owed interval this read saw begin.
+// and the rigs whose owed interval this read had to date itself.
 //
-// The interval is dated from OwedSince, which the caller writes for the rigs
-// named in the third result (tierSweepStampOwed); this function only reads.
-// LastRun would date a quiet rig's interval from the tip it was already green
-// at, retiring the restart's deferral for a sweep that is minutes behind.
-// tierSweepRigCycle starts the clock for a record with no green sweep to
-// compare against. A record whose interval nothing can date — no green sweep,
-// no tip to read — ages from LastRun.
+// The interval is dated from OwedSince, which the caller writes. A record with
+// no stamp predates the field, and what this read can date it from depends on
+// what it can see: the tip that just moved past the record's green sweep, or —
+// with no green sweep to compare origin/main against — its own last run. A tip
+// this read cannot read dates nothing, and leaves the last run measuring, so
+// the next read that can read the tip dates the interval from the move it sees
+// then rather than freezing a guess for good (gt-o3hb4).
 //
 // A rig caught up with origin/main is left out: its LastRun goes stale while the
 // patrol runs hourly, and counting it would retire the restart's deferral for
@@ -694,15 +707,13 @@ func (d *Daemon) tierSweepDeferForRestart(now time.Time) bool {
 // up, since a sweep that may be starved must not be hidden.
 //
 // The second result is false when no remaining rig has a readable record yet —
-// nothing is known to have been swept, so nothing is starved.
-//
-// A rig with no record is skipped rather than counted as infinitely stale: a
-// rig that is configured but has no repository is skipped by every cycle and
-// would otherwise make every sweep measure as stale, which would retire the
-// restart's deferral for the whole town.
-func (d *Daemon) tierSweepAge(now time.Time) (time.Duration, bool, []string) {
+// nothing is known to have been swept, so nothing is starved. A rig with no
+// record is skipped rather than counted as infinitely stale: a rig that is
+// configured but has no repository is skipped by every cycle and would
+// otherwise make every sweep measure as stale.
+func (d *Daemon) tierSweepAge(now time.Time) (time.Duration, bool, []tierSweepOwed) {
 	var age time.Duration
-	var undated []string
+	var owed []tierSweepOwed
 	found := false
 	for _, rig := range tierSweepRigs(d.patrolConfig, d.getKnownRigs()) {
 		st, err := readTierSweepState(d.config.TownRoot, rig)
@@ -710,27 +721,36 @@ func (d *Daemon) tierSweepAge(now time.Time) (time.Duration, bool, []string) {
 			continue
 		}
 		since := st.OwedSince
-		// A green sweep is what a reading of origin/main can be compared
-		// against: with none, no read is asked for and the record's last run
-		// answers below.
-		if st.LastGreenSHA != "" {
-			if main, readErr := d.tierSweepLocalMain(rig); readErr == nil {
-				if main == st.LastGreenSHA {
-					// Caught up with the green sweep that covered it: nothing
-					// is owed.
-					continue
-				}
+		dated := false
+		switch {
+		case st.LastGreenSHA == "":
+			// No green sweep to compare origin/main against, so no read is
+			// asked for: the last run is the only start this record has.
+			if since.IsZero() {
+				since, dated = st.LastRun, true
+			}
+		default:
+			main, readErr := d.tierSweepLocalMain(rig)
+			switch {
+			case readErr != nil:
+				// The tip cannot be read, so this read cannot tell whether the
+				// rig owes a sweep at all, and the record keeps no start: the
+				// last run measures the age until a read can read the tip.
 				if since.IsZero() {
-					// Owed from now: the caller dates it.
-					since = now
-					undated = append(undated, rig)
+					since = st.LastRun
 				}
+			case main == st.LastGreenSHA:
+				// Caught up with the green sweep that covered it: nothing is
+				// owed.
+				continue
+			case since.IsZero():
+				// The tip moved past the green sweep, so the interval begins
+				// at this read.
+				since, dated = now, true
 			}
 		}
-		if since.IsZero() {
-			// Nothing here can date the interval: the record's last run
-			// answers for this rig, as it does for every rig without one.
-			since = st.LastRun
+		if dated {
+			owed = append(owed, tierSweepOwed{rig: rig, since: since})
 		}
 		rigAge := now.Sub(since)
 		if !found || rigAge > age {
@@ -738,7 +758,7 @@ func (d *Daemon) tierSweepAge(now time.Time) (time.Duration, bool, []string) {
 		}
 		found = true
 	}
-	return age, found, undated
+	return age, found, owed
 }
 
 // tierSweepLocalMain reads rig's origin/main as the repository last fetched it,
@@ -751,12 +771,10 @@ func (d *Daemon) tierSweepLocalMain(rig string) (string, error) {
 	return read(filepath.Join(d.config.TownRoot, rig, ".repo.git"))
 }
 
-// tierSweepStampOwed records when rig's owed interval began. The record is
-// re-read for the write, so a stamp never carries a stale copy of the cycle's
-// fields, and a record already carrying a stamp is left alone. This read and
-// the cycle are the record's only two writers, and both run on the one
-// tier_sweep goroutine (triggerTierSweep), so neither interleaves with the
-// other (gt-icmdq).
+// tierSweepStampOwed records when rig's owed interval began, leaving a record
+// that already carries a stamp alone. The record is re-read for the write, so a
+// stamp never carries a stale copy of the cycle's fields; the read-modify-write
+// is safe under the record's one-writer rule (tierSweepState, gt-o3hb4).
 func (d *Daemon) tierSweepStampOwed(rig string, since time.Time) {
 	st, err := readTierSweepState(d.config.TownRoot, rig)
 	if err != nil || !st.OwedSince.IsZero() {
