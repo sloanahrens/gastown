@@ -82,3 +82,22 @@ func TestDatabasesAdded(t *testing.T) {
 		t.Fatalf("databasesAdded on an untouched catalog = %q, want none", got)
 	}
 }
+
+// scratchEnv points bd and gt at the container and opts in to the databases a
+// test's bd init creates there; without the opt-in bd refuses the init on a
+// populated server (be-d4v).
+func TestScratchEnvPointsAtThePortAndOptsInToNewDatabases(t *testing.T) {
+	t.Parallel()
+	env := scratchEnv("4455")
+	for _, want := range []string{
+		"GT_DOLT_PORT=4455",
+		"BEADS_DOLT_PORT=4455",
+		"BEADS_DOLT_SERVER_PORT=4455",
+		"BEADS_TEST_SERVER=1",
+		"BD_ALLOW_NEW_DATABASE=1",
+	} {
+		if !slices.Contains(env, want) {
+			t.Errorf("scratchEnv(4455) = %v, missing %q", env, want)
+		}
+	}
+}
