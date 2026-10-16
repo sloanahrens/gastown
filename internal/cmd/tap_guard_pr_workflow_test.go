@@ -340,6 +340,21 @@ func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
 
 		// Past the nesting cap the payload is unread; one that still names gh
 		// or git is refused, one that does not is allowed.
+		// A command substitution runs its body, whatever word it hangs from.
+		{"assignment from a substitution", "PR_URL=$(gh pr create --fill)", true},
+		{"substitution as an echo argument", `echo "$(gh pr create)"`, true},
+		{"unquoted substitution argument", "echo $(gh pr create)", true},
+		{"backtick substitution", "PR_URL=`gh pr create --fill`", true},
+		{"branch creation in a substitution", `echo "$(git checkout -b x)"`, true},
+		{"wrapped gh in a substitution", `x=$(env GH_REPO=o/r gh pr create)`, true},
+		{"substitution after a separator", "cd /tmp && url=$(gh pr create)", true},
+		{"nested payload in a substitution", `x=$(bash -c 'gh pr create')`, true},
+		{"substitution in an unquoted heredoc body", "cat > f <<EOF\n$(gh pr create)\nEOF", true},
+		{"substitution of an unrelated command", "PR_URL=$(gh pr view 12 --json url)", false},
+		{"single-quoted substitution is data", `echo '$(gh pr create)'`, false},
+		{"escaped substitution is data", `echo "\$(gh pr create)"`, false},
+		{"substitution in a quoted heredoc body is data", "cat > f <<'EOF'\n$(gh pr create)\nEOF", false},
+
 		{"too deep and naming gh", `bash -c "bash -c \"bash -c \\\"bash -c 'gh pr create'\\\"\""`, true},
 		{"too deep and naming neither", `bash -c "bash -c \"bash -c \\\"bash -c 'ls -la'\\\"\""`, false},
 
@@ -392,6 +407,10 @@ func TestPRWorkflowGuard_WrappedBlockedInAgentContext(t *testing.T) {
 		{"session branch chained with an env-prefixed gh pr create", "git checkout -b " + branch + " && env X=1 gh pr create", prWorkflowBlockAgentContext},
 		{"session branch chained with a bash -c gh pr create", "git checkout -b " + branch + "; bash -c 'gh pr create'", prWorkflowBlockAgentContext},
 		{"session branch chained with a path-qualified gh pr create", "git switch -c " + branch + " && /usr/bin/gh pr create", prWorkflowBlockAgentContext},
+		{"gh pr create assigned from a substitution", "PR_URL=$(gh pr create --fill)", prWorkflowBlockAgentContext},
+		{"gh pr create in an echoed substitution", `echo "$(gh pr create)"`, prWorkflowBlockAgentContext},
+		{"session branch with a substituted gh pr create", "git checkout -b " + branch + ` "$(gh pr create)"`, prWorkflowBlockAgentContext},
+		{"gh pr view in a substitution", "url=$(gh pr view 12 --json url)", prWorkflowAllow},
 		{"session branch behind an env prefix keeps the exemption", "GIT_TRACE=1 git checkout -b " + branch, prWorkflowAllow},
 		{"session branch behind env keeps the exemption", "env GIT_TRACE=1 git switch -c " + branch, prWorkflowAllow},
 		{"gh pr view behind env", "GH_REPO=o/r gh pr view 12", prWorkflowAllow},

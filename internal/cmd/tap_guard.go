@@ -258,8 +258,10 @@ func skipLauncherArgs(name string, launcher prWorkflowLauncher, rest []string) (
 // prWorkflowInvocations returns the command every segment of command runs, as
 // argv from the command word on, plus the commands inside every payload a
 // shell runs: a shell invoker's -c string, an eval's joined arguments, an
-// env -S string, and the body of a heredoc fed to a shell. A payload is read
-// only where a shell runs it, so "echo bash -c 'gh pr create'" is an echo.
+// env -S string, the body of a heredoc fed to a shell, and the body of every
+// $(...) or backtick substitution the shell expands. A payload is read only
+// where a shell runs it, so "echo bash -c 'gh pr create'" is an echo, while
+// PR_URL=$(gh pr create --fill) runs the gh inside it (gt-z9asr).
 //
 // A payload past maxPRWorkflowNestDepth is not read; tooDeep is set when it
 // still names gh or git, since a script the guard cannot reach is not one that
@@ -286,6 +288,7 @@ func prWorkflowInvocations(command string, depth int) (invocations [][]string, t
 		}
 	}
 	payloads = append(payloads, shellFedHeredocBodies(command)...)
+	payloads = append(payloads, prWorkflowSubstitutions(command)...)
 
 	for _, payload := range payloads {
 		if depth >= maxPRWorkflowNestDepth {
@@ -297,6 +300,30 @@ func prWorkflowInvocations(command string, depth int) (invocations [][]string, t
 		tooDeep = tooDeep || deep
 	}
 	return invocations, tooDeep
+}
+
+// prWorkflowSubstitutions returns the body of every command substitution the
+// shell expands in command: the ones in the command text, and the ones in the
+// body of an unquoted heredoc, which the shell expands while reading it. A
+// "$(" the shell leaves literal is skipped, after a backslash and inside single
+// quotes, so a note spelling '$(gh pr create)' stays data.
+func prWorkflowSubstitutions(command string) []string {
+	text := stripHeredocBodies(command)
+	var bodies []string
+	for _, m := range commandSubstitutionPattern.FindAllStringSubmatchIndex(text, -1) {
+		if backslashesBefore(text, m[0])%2 == 1 || insideSingleQuotes(text, m[0]) {
+			continue
+		}
+		start, end := m[2], m[3]
+		if start < 0 {
+			start, end = m[4], m[5]
+		}
+		if start < 0 || strings.TrimSpace(text[start:end]) == "" {
+			continue
+		}
+		bodies = append(bodies, text[start:end])
+	}
+	return append(bodies, heredocBodySubstitutions(command)...)
 }
 
 // prWorkflowNamesGhOrGit finds gh or git as a word of its own, path-qualified
