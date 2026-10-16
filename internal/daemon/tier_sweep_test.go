@@ -1465,63 +1465,94 @@ func TestTierSweepAgeReadsWithoutDatingTheOwedClock(t *testing.T) {
 	}
 }
 
-// gt-o3hb4: a record written before the owed stamp existed carries none, so the
-// read falls back to its last run and leaves that fallback live for every read
-// that follows. The deferral check dates the record from the run that aged it,
-// so the interval is the record's own from then on and keeps aging past the
-// bound.
+// gt-o3hb4: a record written before the owed stamp existed carries none, and
+// what the deferral check dates it from is whatever the read could see. A
+// record with no green sweep has only its last run, and that start is the
+// record's own from then on; a record whose tip cannot be read is left undated,
+// because a tip that cannot be read says nothing about whether a sweep is owed.
 func TestTierSweepDeferForRestartDatesAPreStampRecord(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
-	d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
-	// No green tip: nothing but the last run can date this rig's interval.
-	withTierSweepLastRun(t, d, "gastown", now.Add(-2*time.Hour))
-	d.upgradeRestartPending.Store(true)
+	const lastRun = 2 * time.Hour
 
-	if d.tierSweepDeferForRestart(now) {
-		t.Fatal("a sweep owed past the stale bound must run rather than defer")
-	}
-	st := tierSweepTestState(t, d, "gastown")
-	if !st.OwedSince.Equal(now.Add(-2 * time.Hour)) {
-		t.Fatalf("OwedSince = %v, want the last run the age was measured from", st.OwedSince)
-	}
+	t.Run("no green sweep dates it from the last run", func(t *testing.T) {
+		t.Parallel()
+		d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+		withTierSweepLastRun(t, d, "gastown", now.Add(-lastRun))
+		d.upgradeRestartPending.Store(true)
 
-	// Dated: the age moves with the clock from that start, and there is nothing
-	// left for a later read to date.
-	if age, swept, owed := d.tierSweepAge(now.Add(30 * time.Minute)); !swept || age != 2*time.Hour+30*time.Minute || len(owed) != 0 {
-		t.Fatalf("age = %s (swept = %v, owed = %+v), want the dated interval and nothing left to date", age, swept, owed)
-	}
+		if d.tierSweepDeferForRestart(now) {
+			t.Fatal("a sweep owed past the stale bound must run rather than defer")
+		}
+		st := tierSweepTestState(t, d, "gastown")
+		if !st.OwedSince.Equal(now.Add(-lastRun)) {
+			t.Fatalf("OwedSince = %v, want the last run the age was measured from", st.OwedSince)
+		}
+
+		// Dated: the age moves with the clock from that start, and there is
+		// nothing left for a later read to date.
+		if age, swept, owed := d.tierSweepAge(now.Add(30 * time.Minute)); !swept || age != lastRun+30*time.Minute || len(owed) != 0 {
+			t.Fatalf("age = %s (swept = %v, owed = %+v), want the dated interval and nothing left to date", age, swept, owed)
+		}
+	})
+
+	t.Run("a tip that cannot be read dates nothing", func(t *testing.T) {
+		t.Parallel()
+		d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+		if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+			LastRun: now.Add(-lastRun), LastSHA: "green0", LastGreenSHA: "green0",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		d.tierSweepSeams.localMainSHA = func(string) (string, error) { return "", errors.New("no ref") }
+		d.upgradeRestartPending.Store(true)
+
+		// The last run measures the age, as it does for a record the read can
+		// date from nothing else.
+		if age, swept, owed := d.tierSweepAge(now); !swept || age != lastRun || len(owed) != 0 {
+			t.Fatalf("age = %s (swept = %v, owed = %+v), want the last run measuring and nothing dated", age, swept, owed)
+		}
+		d.tierSweepDeferForRestart(now)
+		if st := tierSweepTestState(t, d, "gastown"); !st.OwedSince.IsZero() {
+			t.Fatalf("OwedSince = %v, want the record undated: a tip that cannot be read says nothing about whether a sweep is owed", st.OwedSince)
+		}
+
+		// Readable again and moved past the green sweep: the interval begins
+		// now, and the next read dates the record from there.
+		d.tierSweepSeams.localMainSHA = func(string) (string, error) { return "new1", nil }
+		if age, swept, owed := d.tierSweepAge(now); !swept || age != 0 || len(owed) != 1 || !owed[0].since.Equal(now) {
+			t.Fatalf("age = %s (swept = %v, owed = %+v), want the interval beginning at this read", age, swept, owed)
+		}
+		d.tierSweepDeferForRestart(now)
+		if st := tierSweepTestState(t, d, "gastown"); !st.OwedSince.Equal(now) {
+			t.Fatalf("OwedSince = %v, want %v: the first read that can see the tip dates the interval from it", st.OwedSince, now)
+		}
+	})
 }
 
 // gt-o3hb4: the sweep record's read-modify-writes — the owed stamp and the
-// cycle's own write — are safe because one goroutine owns both. The
-// single-flight guard is what holds a second heartbeat out, so a cycle in
-// flight must turn the next trigger away rather than start a second one.
+// cycle's own write — are safe because one goroutine owns both, and the
+// single-flight guard is what keeps a second heartbeat out. A heartbeat
+// arriving while a cycle is in flight must be turned away rather than start a
+// cycle of its own.
 func TestTriggerTierSweepRunsOneCycleAtATime(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
 	d, rec, _, _ := newTierSweepDaemon(t, now, "gastown")
 	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
-	release := make(chan struct{})
-	started := make(chan struct{}, 1)
 	rec.result = func(st tierSweepStage) tierSweepStageResult {
-		if !st.slot {
-			select {
-			case started <- struct{}{}:
-			default:
-			}
-			<-release
+		if !d.tierSweepRunning.Load() {
+			t.Error("a cycle ran outside the guard")
 		}
+		// The heartbeat arrives on the cycle's own goroutine, with the guard
+		// held: nothing here waits on a second goroutine, so the guard is the
+		// only thing that can turn it away.
+		d.triggerTierSweep()
 		return tierSweepStageResult{ran: true}
 	}
 
 	d.triggerTierSweep()
-	<-started
-	// The patrol is still due — the cycle in flight has not recorded the hour —
-	// so only the single-flight guard can turn this one away.
-	d.triggerTierSweep()
-	close(release)
 	waitTierSweepIdle(t, d)
 
 	want := len(tierSweepStages("gastown"))
