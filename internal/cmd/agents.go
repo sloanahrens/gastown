@@ -98,7 +98,7 @@ Output shows:
   - Active tmux sessions with gt- prefix
   - Identity locks in worker directories
   - Collisions (multiple agents claiming same identity)
-  - Stale locks (dead PIDs)`,
+  - Stale locks (no process behind the lock's holder)`,
 	RunE: runAgentsCheck,
 }
 
@@ -668,7 +668,7 @@ func buildCollisionReport(reg *session.PrefixRegistry, townRoot string) (*Collis
 			report.Issues = append(report.Issues, CollisionIssue{
 				Type:      "stale",
 				WorkerDir: workerDir,
-				Message:   fmt.Sprintf("Stale lock (dead PID %d)", lockInfo.PID),
+				Message:   fmt.Sprintf("Stale lock (%s)", lockInfo.StaleReason()),
 				PID:       lockInfo.PID,
 				SessionID: lockInfo.SessionID,
 			})

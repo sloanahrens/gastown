@@ -92,9 +92,9 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 				healthyLocks++
 				continue
 			}
-			// Both PID dead AND session gone = truly stale
+			// Both the writer gone AND session gone = truly stale
 			staleLocks = append(staleLocks,
-				fmt.Sprintf("%s (dead PID %d)", workerDir, info.PID))
+				fmt.Sprintf("%s (%s)", workerDir, info.StaleReason()))
 			continue
 		}
 
@@ -126,7 +126,7 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(staleLocks) > 0 {
 		result.Status = StatusWarning
 		result.Message = fmt.Sprintf("%d stale lock(s) found", len(staleLocks))
-		result.Details = append(result.Details, "Stale locks (dead PIDs):")
+		result.Details = append(result.Details, "Stale locks (the writer is gone):")
 		for _, s := range staleLocks {
 			result.Details = append(result.Details, "  "+s)
 		}
