@@ -520,3 +520,30 @@ func TestStripAttachmentFields(t *testing.T) {
 		})
 	}
 }
+
+// TestAttachmentKeySpellings: every spelling of every attachment key is
+// stripped by both entry points, and a near-miss key is kept.
+func TestAttachmentKeySpellings(t *testing.T) {
+	var keys []string
+	for _, base := range []string{
+		"attached_molecule", "attached_formula", "attached_at", "attached_args",
+		"attached_vars", "dispatched_by", "no_merge", "review_only",
+		"merge_strategy", "formula_vars",
+	} {
+		keys = append(keys, base, strings.ReplaceAll(base, "_", "-"), strings.ReplaceAll(base, "_", ""))
+	}
+	keys = append(keys, "mode")
+	for _, key := range keys {
+		desc := strings.ToUpper(key) + ": x\nbody"
+		if got := StripAttachmentFields(desc); got != "body" {
+			t.Errorf("StripAttachmentFields(%q) = %q, want %q", desc, got, "body")
+		}
+		if got := SetAttachmentFields(&Issue{Description: desc}, nil); got != "body" {
+			t.Errorf("SetAttachmentFields(%q, nil) = %q, want %q", desc, got, "body")
+		}
+	}
+	const keep = "attached_other: x\nbody"
+	if got := StripAttachmentFields(keep); got != keep {
+		t.Errorf("StripAttachmentFields(%q) = %q, want it kept", keep, got)
+	}
+}
