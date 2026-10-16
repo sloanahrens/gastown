@@ -416,7 +416,7 @@ func findTestInvocation(tokens []string, tool string) int {
 // directly, the adjacency the interim host-hygiene hook's regex recognized
 // (idleGateReason, tap_guard_dangerous.go). A guard that judges a go
 // invocation reads it through findGoSubcommand instead, which walks the -C
-// dir flag; both go-test guards do (gt-saorq, gt-zn7ma).
+// dir flag.
 func findInvocation(tokens []string, tool, target string) int {
 	for i := 0; i+1 < len(tokens); i++ {
 		if tokens[i] != tool {
