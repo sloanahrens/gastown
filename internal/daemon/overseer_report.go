@@ -42,6 +42,13 @@ const (
 	// parses for the report's time: the UTC instant of its slot, then .md.
 	overseerReportLayout = "20060102T150405Z"
 	overseerReportExt    = ".md"
+
+	// overseerLatestName is the fixed name of the copy of the newest report, so
+	// a reader can take the newest one without sorting the directory by time
+	// (gt-y0xcl). It is not a report of its own: overseerReportNameRe rejects
+	// it, so the lister and the previous-report lookup never read it as a
+	// digest.
+	overseerLatestName = "latest.md"
 )
 
 // overseerReportNameRe is the whole name of a report file.
@@ -69,13 +76,18 @@ func overseerReportTickEvery(interval time.Duration) time.Duration {
 	return interval
 }
 
-// overseerReportSeams are the report's reads and its clock. A test sets all of
-// them; production fills them in (overseerReportProdSeams).
+// overseerReportSeams are the report's reads, its clock, and where it says what
+// it could not do. A test sets all of them; production fills them in
+// (overseerReportProdSeams).
 type overseerReportSeams struct {
 	now    func() time.Time
 	digest func(slot, since time.Time) townreport.Digest
 	// hour is the run behind the hour sections, ending at slot.
 	hour func(slot time.Time) townreport.HourRun
+	// logf is where the report says what it will not fail on: a latest.md copy
+	// it could not refresh. Always set: production takes the daemon's logger
+	// and the test world a no-op, so the report may call it on any failure.
+	logf func(format string, args ...any)
 }
 
 // triggerOverseerReport starts one report on its own goroutine unless one is
@@ -155,7 +167,7 @@ func writeOverseerReport(townRoot string, interval time.Duration, s *overseerRep
 	}
 	text = overseerReportClamp(text)
 
-	return writeOverseerReportFile(dir, slot, text)
+	return writeOverseerReportFile(dir, slot, text, s.logf)
 }
 
 // overseerReportPrevious reads the report files in dir: prev is the newest
@@ -200,38 +212,79 @@ func overseerReportClamp(text string) string {
 	return text[:cut+1] + "(report cut at the size the dashboard reads)\n"
 }
 
-// writeOverseerReportFile writes text as the slot's report without ever
-// replacing a file: it is written under a name the dashboard does not read,
-// then linked into place, which fails if the name is taken. A reader sees the
-// whole report or none of it.
-func writeOverseerReportFile(dir string, slot time.Time, text string) (string, error) {
+// writeOverseerReportFile writes text as the slot's report and refreshes
+// latest.md from the same text. Both names are published by a link or a rename
+// and never by a write in place, so a reader gets a whole report or none of it:
+// the report is linked into place, which fails if the name is taken, so a
+// report the patrol did not write is never replaced, where the copy is replaced
+// by every run that writes a report. A latest.md refresh that fails is logged
+// and leaves the report write alone: the copy is a convenience, the slot's
+// report is the record.
+func writeOverseerReportFile(dir string, slot time.Time, text string, logf func(string, ...any)) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating %s: %w", dir, err)
 	}
 	name := slot.UTC().Format(overseerReportLayout) + overseerReportExt
 	final := filepath.Join(dir, name)
-	tmp, err := os.CreateTemp(dir, ".tmp-"+name+"-*")
+	tmp, err := writeOverseerTemp(dir, name, text)
 	if err != nil {
-		return "", fmt.Errorf("creating a report file in %s: %w", dir, err)
+		return "", err
 	}
-	defer func() { _ = os.Remove(tmp.Name()) }()
-	if _, err := tmp.WriteString(text); err != nil {
-		_ = tmp.Close()
-		return "", fmt.Errorf("writing %s: %w", name, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return "", fmt.Errorf("writing %s: %w", name, err)
-	}
-	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
-		return "", fmt.Errorf("writing %s: %w", name, err)
-	}
-	if err := os.Link(tmp.Name(), final); err != nil {
+	defer func() { _ = os.Remove(tmp) }()
+	if err := os.Link(tmp, final); err != nil {
 		if os.IsExist(err) {
 			return "", nil
 		}
 		return "", fmt.Errorf("writing %s: %w", name, err)
 	}
+	if err := refreshOverseerLatest(dir, text); err != nil {
+		logf("overseer_report: %v", err)
+	}
 	return final, nil
+}
+
+// refreshOverseerLatest puts text at dir/latest.md by renaming a temp file onto
+// it, so the name holds a whole report: a reader opens the old copy or the new
+// one, never a half-written file. The copy is its own file and not a second
+// link to the report, since it is the one a human may annotate by hand and the
+// report is the record.
+func refreshOverseerLatest(dir, text string) error {
+	tmp, err := writeOverseerTemp(dir, overseerLatestName, text)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = os.Remove(tmp) }()
+	if err := os.Rename(tmp, filepath.Join(dir, overseerLatestName)); err != nil {
+		return fmt.Errorf("replacing %s: %w", overseerLatestName, err)
+	}
+	return nil
+}
+
+// writeOverseerTemp writes text to a fresh file in dir, named after hint, and
+// returns its path: a whole file the caller puts in place under the name a
+// reader uses. The caller owns it and removes it.
+func writeOverseerTemp(dir, hint, text string) (string, error) {
+	tmp, err := os.CreateTemp(dir, ".tmp-"+hint+"-*")
+	if err != nil {
+		return "", fmt.Errorf("creating a file in %s: %w", dir, err)
+	}
+	fail := func(err error) (string, error) {
+		_ = os.Remove(tmp.Name())
+		return "", fmt.Errorf("writing %s: %w", hint, err)
+	}
+	if _, err := tmp.WriteString(text); err != nil {
+		_ = tmp.Close()
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fail(err)
+	}
+	// CreateTemp makes the file 0600, and whoever runs the dashboard reads the
+	// reports.
+	if err := os.Chmod(tmp.Name(), 0o644); err != nil {
+		return fail(err)
+	}
+	return tmp.Name(), nil
 }
 
 // overseerReportProdSeams reads the town: bd pinned read-only for every
@@ -250,7 +303,8 @@ func (d *Daemon) overseerReportProdSeams() *overseerReportSeams {
 		return townreport.WrapStore(b), nil
 	}
 	return &overseerReportSeams{
-		now: time.Now,
+		now:  time.Now,
+		logf: d.logger.Printf,
 		digest: func(slot, since time.Time) townreport.Digest {
 			return townreport.Digest{
 				Now:    d.clk().Now(),
