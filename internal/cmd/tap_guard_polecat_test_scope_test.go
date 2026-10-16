@@ -102,6 +102,9 @@ func TestEvaluatePolecatTestScope_TargetFollowsTheCDirFlag(t *testing.T) {
 		{"versioned binary with a -C dir", light, "go1.22.0 -C " + heavy + " test .", true},
 		{"a relative -C composed onto an absolute one", light, "go -C " + root + " -C internal/cmd test .", true},
 		{"-C into a heavy package after a cd away", heavy, "cd " + light + " && go -C " + heavy + " test .", true},
+		{"-C into a heavy package after a cd to an unrelated dir", light, "cd /tmp && go -C " + heavy + " test .", true},
+		{"-C= into a heavy package after a cd to an unrelated dir", light, "cd /tmp && go -C=" + heavy + " test .", true},
+		{"-C= into a heavy package after a cd away", heavy, "cd " + light + " && go -C=" + heavy + " test .", true},
 		{"-C into a heavy package with -run", light, "go -C " + heavy + " test . -run TestOne", false},
 
 		// The reverse reading: a -C dir the hook is not in stops the hook's
