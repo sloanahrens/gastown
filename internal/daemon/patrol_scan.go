@@ -183,51 +183,74 @@ const ghGateInterval = time.Hour
 // before this no step in any patrol evaluated one (gt-4k3fj.6.2). It resolves
 // a gate whose run succeeded and leaves a failed one open; the tick sends no
 // mail, so escalation stays the operator's.
+//
+// Each database keeps its own last run. bd reads one database per call, so a
+// database whose check failed has had none of its gates evaluated and stays due
+// for the next tick, while one that answered spends its hour. A single record
+// for all of them either held the failed database's gates for the interval or,
+// to avoid that, re-ran every database's `gh` check on each tick for as long
+// as one stayed down (gt-oyrav, gt-kp9fo, gt-96bsu).
 func (d *Daemon) patrolScanGHGates(h *patrolScanHost, rigs []string) {
 	now := d.clk().Now()
-	if due := evaluatePatrolDue(d.config.TownRoot, "patrol_scan_gh_gates", time.Time{}, now, ghGateInterval); !due.due {
-		return
-	}
-	// The check runs on its own slow cadence, so recording the run is what
-	// spends the hour. A tick where any bd gate check failed left that
-	// database's gh gates unevaluated, and recording it would hold them until
-	// the interval elapsed again (gt-oyrav, gt-kp9fo). The next tick re-checks
-	// the databases that did answer too, which is harmless.
-	if !d.patrolScanGateCheck(h, rigs, "gh") {
-		d.logger.Printf("patrol_scan: gh gates: a gate check failed; not recording the run")
-		return
-	}
-	if err := savePatrolLastRun(d.config.TownRoot, "patrol_scan_gh_gates", now); err != nil {
-		d.logger.Printf("patrol_scan: gh gates: recording last run: %v", err)
+	for _, rigName := range append([]string{""}, rigs...) {
+		patrol := ghGatesPatrol(rigName)
+		if due := evaluatePatrolDue(d.config.TownRoot, patrol, time.Time{}, now, ghGateInterval); !due.due {
+			continue
+		}
+		if !d.patrolScanGateCheckDB(h, rigName, "gh") {
+			d.logger.Printf("patrol_scan: %s: gh gates: the gate check failed; not recording the run", gateCheckWhere(rigName))
+			continue
+		}
+		if err := savePatrolLastRun(d.config.TownRoot, patrol, now); err != nil {
+			d.logger.Printf("patrol_scan: %s: gh gates: recording last run: %v", gateCheckWhere(rigName), err)
+		}
 	}
 }
 
+// ghGatesPatrol is the last-run key for one database's gh gate check ("" is the
+// town's). The town keeps the key the check had when one record covered every
+// database, so an upgrade does not re-run an hour already spent.
+func ghGatesPatrol(rigName string) string {
+	if rigName == "" {
+		return "patrol_scan_gh_gates"
+	}
+	return "patrol_scan_gh_gates:" + rigName
+}
+
+// gateCheckWhere names a gate-check database in the log.
+func gateCheckWhere(rigName string) string {
+	if rigName == "" {
+		return "town"
+	}
+	return rigName
+}
+
 // patrolScanGateCheck runs `bd gate check --type=<gateType>` over the town
-// database and each scanned rig's, logging what bd resolved. It reports whether
-// every check answered: bd reads one database per call, so a database whose
-// call failed has had none of its gates evaluated, whatever the others did.
-func (d *Daemon) patrolScanGateCheck(h *patrolScanHost, rigs []string, gateType string) bool {
-	allAnswered := true
+// database and each scanned rig's. Every database is checked even when an
+// earlier one failed.
+func (d *Daemon) patrolScanGateCheck(h *patrolScanHost, rigs []string, gateType string) {
 	for _, rigName := range append([]string{""}, rigs...) {
-		where := rigName
-		if where == "" {
-			where = "town"
-		}
-		out, err := h.bdMutating(rigName, "gate", "check", "--type="+gateType)
-		if err != nil {
-			d.logger.Printf("patrol_scan: %s: %s gate check failed: %v", where, gateType, err)
-			allAnswered = false
-			continue
-		}
-		// bd prints a JSON null before its no-gates notice ("nullNo open gates of
-		// type 'timer' found."); a tick that resolved nothing is not worth a line.
-		line := strings.TrimPrefix(lastLine(string(out)), "null")
-		if line == "" || strings.HasPrefix(line, "No open gates") {
-			continue
-		}
+		d.patrolScanGateCheckDB(h, rigName, gateType)
+	}
+}
+
+// patrolScanGateCheckDB runs the gate check over one database ("" is the
+// town's), logging what bd resolved. It reports whether bd answered: a database
+// whose call failed has had none of its gates evaluated.
+func (d *Daemon) patrolScanGateCheckDB(h *patrolScanHost, rigName, gateType string) bool {
+	where := gateCheckWhere(rigName)
+	out, err := h.bdMutating(rigName, "gate", "check", "--type="+gateType)
+	if err != nil {
+		d.logger.Printf("patrol_scan: %s: %s gate check failed: %v", where, gateType, err)
+		return false
+	}
+	// bd prints a JSON null before its no-gates notice ("nullNo open gates of
+	// type 'timer' found."); a tick that resolved nothing is not worth a line.
+	line := strings.TrimPrefix(lastLine(string(out)), "null")
+	if line != "" && !strings.HasPrefix(line, "No open gates") {
 		d.logger.Printf("patrol_scan: %s: %s gates: %s", where, gateType, line)
 	}
-	return allAnswered
+	return true
 }
 
 // rogueBDInterval is how often the rogue bd walk runs: rare event, bounded
