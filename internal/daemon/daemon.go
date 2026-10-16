@@ -21,6 +21,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -220,6 +221,11 @@ type Daemon struct {
 	// cycle's own bookkeeping (counts, failures, alerts) can be driven without
 	// running dolt; nil is the real export.
 	jsonlExportFn func(db, gitRepo, dataDir string, scrub bool) (int, error)
+
+	// jsonlTableExportFn replaces exportTableToJsonl in tests, so
+	// exportDatabaseToJsonl's handling of a failing table can be driven without
+	// running dolt; nil is the real export.
+	jsonlTableExportFn func(table string, q beadsql.Query, dir, dataDir string) (int, error)
 
 	// dogFeedFn records a dog cycle's failed outcome in the town feed. Nil
 	// writes the real feed; tests capture the event instead.

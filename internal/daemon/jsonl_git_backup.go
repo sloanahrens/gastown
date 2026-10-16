@@ -410,7 +410,9 @@ var supplementalTables = []string{
 // Issues go to {db}/issues.jsonl (scrubbed). Other tables go to {db}/{table}.jsonl.
 // Also writes a legacy {db}.jsonl (symlink to {db}/issues.jsonl) for backward compat.
 //
-// Returns the total number of records exported across all tables.
+// Returns the total number of records exported across all tables. When a
+// supplemental table fails the others are still exported, but the call returns
+// an error: the database counts as failed for the cycle.
 func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) (int, error) {
 	if !validDBName.MatchString(db) {
 		return 0, fmt.Errorf("invalid database name: %q", db)
@@ -424,22 +426,36 @@ func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) 
 
 	total := 0
 
+	exportTable := d.exportTableToJsonl
+	if d.jsonlTableExportFn != nil {
+		exportTable = d.jsonlTableExportFn
+	}
+
 	// 1. Export issues table (with scrub filter).
-	n, err := d.exportTableToJsonl("issues", backupIssuesQuery(db, scrub), dbDir, dataDir)
+	n, err := exportTable("issues", backupIssuesQuery(db, scrub), dbDir, dataDir)
 	if err != nil {
 		return 0, fmt.Errorf("issues: %w", err)
 	}
 	total += n
 
-	// 2. Export supplemental tables (no scrub, full export).
+	// 2. Export supplemental tables (no scrub, full export). A failing table
+	// must not stop the others, or the issues table already written above, but
+	// it is a failed export: its file is the stale one already in the repo and
+	// its rows are missing from total. Returning (total, nil) would let the
+	// shrunken count reach the spike guard as "possible data loss" or become the
+	// new baseline.
+	var tableErrs []string
 	for _, table := range supplementalTables {
-		tn, err := d.exportTableToJsonl(table, beadsql.BackupTable(db, table), dbDir, dataDir)
+		tn, err := exportTable(table, beadsql.BackupTable(db, table), dbDir, dataDir)
 		if err != nil {
-			// Non-fatal for supplemental tables — log and continue.
-			d.logger.Printf("jsonl_git_backup: %s/%s: export failed (non-fatal): %v", db, table, err)
+			d.logger.Printf("jsonl_git_backup: %s/%s: export failed: %v", db, table, err)
+			tableErrs = append(tableErrs, fmt.Sprintf("%s: %v", table, err))
 			continue
 		}
 		total += tn
+	}
+	if len(tableErrs) > 0 {
+		return 0, fmt.Errorf("supplemental table export failed (stale file kept): %s", strings.Join(tableErrs, "; "))
 	}
 
 	d.logger.Printf("jsonl_git_backup: %s: exported %d records across %d tables", db, total, 1+len(supplementalTables))
