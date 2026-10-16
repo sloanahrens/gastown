@@ -1023,7 +1023,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			// The note is its own key: annotateSpecOnce skips a note whose key
 			// a comment already starts with, so a shorter key would hide a
 			// retry's different reason while the same one is still written
-			// once (gt-zkqtn).
+			// once (gt-zkqtn). A bead that already carries a note from before
+			// this key was widened holds the same text (prefix plus failLine),
+			// so the same reason is still written once; only a different
+			// reason adds a second note.
 			note := specDispatchNotePrefix + failLine
 			if err := env.Annotate(id, note, note); err != nil {
 				report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
