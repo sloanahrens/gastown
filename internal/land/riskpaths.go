@@ -28,6 +28,9 @@ var reviewGeneratedLabels = []string{reviewDeepLabel, FollowUpLabel}
 // reviewGenerated returns the label on issue that makes its landing review
 // machinery's own output, and whether issue wears one.
 func reviewGenerated(issue *beads.Issue) (string, bool) {
+	if issue == nil {
+		return "", false
+	}
 	for _, label := range reviewGeneratedLabels {
 		if beads.HasLabel(issue, label) {
 			return label, true
@@ -45,6 +48,11 @@ func reviewGenerated(issue *beads.Issue) (string, bool) {
 // the attention queue's landing.risk_path item nor the deep review's landings
 // mode picks it up, while om still gates it, the record's base and head still
 // name the change, and the bead's note says the review was skipped (gt-g349w).
+//
+// The labels are the whole signal: whoever can label a bead can turn the
+// overseer's look off for its landing, as they can already strip
+// gt:overseer-review-wanted from one. That is the trade for stopping review
+// output from feeding itself; om's gate and the periodic slice reviews stay.
 func RiskPathsRecorded(issue *beads.Issue, paths []string) (recorded []string, skippedBy string) {
 	if len(paths) == 0 {
 		return paths, ""

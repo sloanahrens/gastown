@@ -210,10 +210,7 @@ type Result struct {
 	// RiskPathsFile at Base. They label the work bead and are written to the
 	// landing record; they never reject or delay the landing (gt-vsct7.4).
 	RiskPaths []string
-	// RiskPathReviewSkipped says RiskPaths is empty because the review
-	// machinery filed the bead being landed (RiskPathsRecorded): the record
-	// carries no risk path and the bead takes no gt:overseer-review-wanted,
-	// while the note says the review was skipped.
+	// RiskPathReviewSkipped says RiskPaths is empty by RiskPathsRecorded's rule.
 	RiskPathReviewSkipped bool
 }
 
