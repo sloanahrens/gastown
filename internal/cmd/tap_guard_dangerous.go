@@ -559,6 +559,8 @@ type heredocQuoteWalk struct {
 	arith   []arithFrame // contexts open here where "<<" is no operator, innermost last
 	braces  int          // "${" expansions open here, the level a brace frame belongs to
 	substs  []substFrame // "$(..)" open inside a "${..}" word, where "#" comments again, innermost last
+	tick    bool         // inside backtick command text, which an unescaped backtick opens and closes
+	tickAt  int          // the "${" nesting depth the open backtick text sits at
 	prevIdx int          // the rune the shell read last, for startsShellWord
 	prevEsc bool         // that rune was backslash-escaped
 }
@@ -609,6 +611,11 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			// Literal text behind a backslash opens nothing.
 		case r == '\\' && w.quote != '\'':
 			w.escaped = true
+		case r == '`' && w.quote != '\'':
+			// Backtick text is command text like "$(..)": a "}" in it is that
+			// command's own, so only the "}" after the closing backtick ends
+			// an expansion it sits in (gt-9udxk).
+			w.tick, w.tickAt = !w.tick, w.braces
 		case w.quote == 0 && (r == '\'' || r == '"'):
 			w.quote = r
 		case w.quote != 0 && r == w.quote:
@@ -679,10 +686,11 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			// and not a "}" nesting inside its word, is what closes it.
 			w.braces++
 			w.arith = append(w.arith, arithFrame{kind: arithBrace, brace: w.braces})
-		case w.quote == 0 && r == '}' && w.braces > 0 && !w.inSubstText():
-			// A "}" in the command text of a "$(..)" nested in the word is
-			// that command's own text, as in "${v:-$(echo })}": only the "}"
-			// after the substitution closes the expansion (gt-nwd3k).
+		case w.quote == 0 && r == '}' && w.braces > 0 && !w.inSubstText() && !w.inTickText():
+			// A "}" in the command text of a "$(..)" or a backtick pair nested
+			// in the word is that command's own text, as in "${v:-$(echo })}":
+			// only the "}" after the substitution closes the expansion
+			// (gt-nwd3k, gt-9udxk).
 			w.braces--
 			w.closeArithBraces()
 		}
@@ -743,6 +751,10 @@ func (w *heredocQuoteWalk) inSubstText() bool {
 	return len(w.substs) > 0 && w.substs[len(w.substs)-1].brace == w.braces
 }
 
+// inTickText reports whether the innermost context is backtick text opened at
+// this "${" level, rather than a "${..}" expansion opened inside that text.
+func (w *heredocQuoteWalk) inTickText() bool { return w.tick && w.tickAt == w.braces }
+
 // followsUnescapedDollar reports whether the rune before the current one is a
 // "$" that no backslash escaped, which makes a "(" after it open "$(".
 func (w *heredocQuoteWalk) followsUnescapedDollar() bool {
@@ -782,7 +794,7 @@ func (w *heredocQuoteWalk) skipTo(to int) {
 		w.runeIdx++
 	}
 	w.quote, w.comment, w.escaped, w.prevIdx, w.prevEsc = 0, false, false, -1, false
-	w.arith, w.braces, w.substs = nil, 0, nil
+	w.arith, w.braces, w.substs, w.tick = nil, 0, nil, false
 }
 
 // heredocReaderLine returns the text of the line the heredoc operator at

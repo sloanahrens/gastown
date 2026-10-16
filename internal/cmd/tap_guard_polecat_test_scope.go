@@ -124,11 +124,14 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth
 }
 
 // polecatWholeSuiteMakeGoals are the Makefile goals that start the whole-repo
-// `go test` on the host: gate and its gate-test stage, the two slow tiers,
-// and test, which runs them all. gate-lint, lint, build and presubmit are not
-// here — they run no whole-suite test (presubmit tests the changed packages).
-// gt done runs its own gate, so no polecat flow needs these (gt-gl3jb).
-var polecatWholeSuiteMakeGoals = []string{"test", "gate", "gate-test", "test-slow", "test-integration"}
+// `go test` on the host: gate and its gate-test stage, the slow tiers,
+// and test, which runs them all. test-integration-wall runs `go test -tags
+// integration ./...`, tier-check is the budget runner over ./..., and
+// test-timing defaults to ./... too. gate-lint, lint, build and presubmit are
+// not here — they run no whole-suite test (presubmit tests the changed
+// packages). gt done runs its own gate, so no polecat flow needs these
+// (gt-gl3jb, gt-9udxk).
+var polecatWholeSuiteMakeGoals = []string{"test", "gate", "gate-test", "test-slow", "test-integration", "test-integration-wall", "tier-check", "test-timing"}
 
 // findPolecatWholeSuiteMakeGoal returns the index of the first make invocation
 // in tokens (already lowercased) that names a polecatWholeSuiteMakeGoals goal,
