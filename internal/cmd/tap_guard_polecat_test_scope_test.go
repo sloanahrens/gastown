@@ -178,8 +178,14 @@ func TestPolecatTestScopeShellExpandedCDir(t *testing.T) {
 		{"command substitution, -C= spelling", `go -C="$(pwd)/internal/cmd" test .`, true},
 		{"backtick substitution", "go -C `pwd`/internal/cmd test .", true},
 		{"expanded after a literal directory", `go -C internal -C "$SUB" test .`, true},
+		{"variable, relative heavy argument", `go -C "$PWD/internal" test ./cmd`, true},
+		{"variable, relative heavy argument with dots", `go -C "$PWD/internal" test ./cmd/...`, true},
+		{"variable, parent-relative heavy argument", `go -C "$PWD/internal" test ../internal/cmd`, true},
+		{"variable, relative heavy argument, -count", `go -C "$PWD/internal" test ./cmd -count=1`, true},
 
 		{"literal directory with -run", "go -C internal/cmd test . -run X", false},
+		{"variable, relative heavy argument, -run", `go -C "$PWD/internal" test ./cmd -run X`, false},
+		{"variable, relative heavy argument, -run before the argument", `go -C "$PWD/internal" test -run=X ./cmd`, false},
 		{"literal directory, light package", "go -C internal/style test .", false},
 		{"literal directory, heavy package", "go -C internal/cmd test .", true},
 	}
