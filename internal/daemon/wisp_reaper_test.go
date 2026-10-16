@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	_ "embed"
 	"fmt"
 	"go/ast"
 	"go/parser"
@@ -12,7 +13,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -487,7 +487,7 @@ func TestDoltUserInfoFeedsEveryReaperOpenDB(t *testing.T) {
 		t.Fatalf("doltUserInfo() = %q, want %q from the town's operational.dolt user and password", got, userInfo)
 	}
 
-	users := scanReaperConnectionUsers(t, reaperSourcePath(t))
+	users := scanReaperConnectionUsers(t, "wisp_reaper.go", []byte(wispReaperSource))
 	if len(users) == 0 {
 		t.Fatalf("no reaper.OpenDB or reaper.DiscoverDatabases call in wisp_reaper.go — the scan would pass vacuously")
 	}
@@ -499,18 +499,14 @@ func TestDoltUserInfoFeedsEveryReaperOpenDB(t *testing.T) {
 
 	// The scan is the assertion above, so pin it on the call it exists to
 	// catch. A walk that stopped matching this shape would read a clean file.
-	planted := filepath.Join(t.TempDir(), "planted_reaper.go")
-	src := `package daemon
+	const planted = `package daemon
 
 func planted(d *Daemon, host string, port int, name string, to time.Duration) {
 	_, _ = reaper.OpenDB("root", host, port, name, to, to)
 	_ = reaper.DiscoverDatabases(d.doltUserInfo(), host, port)
 }
 `
-	if err := os.WriteFile(planted, []byte(src), 0644); err != nil {
-		t.Fatal(err)
-	}
-	got := scanReaperConnectionUsers(t, planted)
+	got := scanReaperConnectionUsers(t, "planted_reaper.go", []byte(planted))
 	if len(got) != 2 || got[0] != `"root"` || got[1] != "d.doltUserInfo()" {
 		t.Fatalf("scan of a planted bare root user = %q, want the bare user then d.doltUserInfo()", got)
 	}
@@ -519,34 +515,29 @@ func planted(d *Daemon, host string, port int, name string, to time.Duration) {
 	}
 }
 
+// wispReaperSource is wisp_reaper.go as this test binary was built from it. A
+// path resolved at run time (runtime.Caller) need not name the source the test
+// was compiled against — a trimmed build moves the source, and `go test` can
+// run the binary from outside the tree — so the scan reads the copy the
+// assertions are about.
+//
+//go:embed wisp_reaper.go
+var wispReaperSource string
+
 // carriesDoltUserInfo reports whether a reaper connection made with the
 // argument arg carries the town's Dolt user and password.
 func carriesDoltUserInfo(arg string) bool { return arg == "d.doltUserInfo()" }
 
-// reaperSourcePath is the path of the reaper's sweep source in this package.
-func reaperSourcePath(t *testing.T) string {
-	t.Helper()
-	_, thisFile, _, ok := runtime.Caller(0)
-	if !ok {
-		t.Fatal("runtime.Caller failed")
-	}
-	return filepath.Join(filepath.Dir(thisFile), "wisp_reaper.go")
-}
-
 // scanReaperConnectionUsers returns the source text of the argument each
-// reaper.OpenDB and reaper.DiscoverDatabases call in path connects with, in the
-// order the calls appear. It matches on the AST, so a comment quoting the call
-// is not a call site.
-func scanReaperConnectionUsers(t *testing.T, path string) []string {
+// reaper.OpenDB and reaper.DiscoverDatabases call in the named source
+// connects with, in the order the calls appear. It matches on the AST, so a
+// comment quoting the call is not a call site.
+func scanReaperConnectionUsers(t *testing.T, name string, src []byte) []string {
 	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read %s: %v", path, err)
-	}
 	fset := token.NewFileSet()
-	file, err := parser.ParseFile(fset, path, data, 0)
+	file, err := parser.ParseFile(fset, name, src, 0)
 	if err != nil {
-		t.Fatalf("parse %s: %v", path, err)
+		t.Fatalf("parse %s: %v", name, err)
 	}
 	var users []string
 	ast.Inspect(file, func(n ast.Node) bool {
@@ -570,7 +561,7 @@ func scanReaperConnectionUsers(t *testing.T, path string) []string {
 			return true
 		}
 		arg := call.Args[0]
-		users = append(users, string(data[fset.Position(arg.Pos()).Offset:fset.Position(arg.End()).Offset]))
+		users = append(users, string(src[fset.Position(arg.Pos()).Offset:fset.Position(arg.End()).Offset]))
 		return true
 	})
 	return users

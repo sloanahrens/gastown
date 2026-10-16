@@ -890,15 +890,10 @@ func tierSweepTipJudged(state tierSweepState, sha string) bool {
 // rig's tip was written by a cycle that never judged every rig. The sweep's own
 // last-run clock advances only on a cycle that did, so a rig record newer than
 // that clock is an unfinished cycle's work and the run reading it is that
-// cycle's retry (gt-zq1pb).
-//
-// Two records newer than the clock are not that cycle's work, and the tip they
-// judged is re-derived. One an early re-run wrote: it ran inside the interval,
-// outside the town-wide cycle, and its tip is the cadence run's to judge. One
-// older than the sweep's staleness bound: a rig that defers on every heartbeat
-// never lets a cycle complete, so without the bound the siblings it judged
-// would hold their verdicts until main moved, and a red that recovered on its
-// own would never be re-read (gt-1911b).
+// cycle's retry (gt-zq1pb). A record an early re-run wrote, and one past the
+// sweep's staleness bound, are neither: their tips are the cadence run's to
+// judge, so a red that recovered is re-read rather than held until main moves
+// (gt-1911b).
 func (d *Daemon) tierSweepJudgedByADeferredCycle(state tierSweepState) bool {
 	if state.EarlyRun {
 		return false
