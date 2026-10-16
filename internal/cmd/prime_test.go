@@ -1024,6 +1024,7 @@ func TestErrHookUnresolvable_IsErrors(t *testing.T) {
 // and nothing else. Consuming the marker first made it report "normal" for a
 // post-handoff worktree and left the next real prime without the warning.
 func TestPrimeStateKeepsHandoffMarker(t *testing.T) {
+	t.Parallel()
 	workDir := t.TempDir()
 	runtimeDir := filepath.Join(workDir, constants.DirRuntime)
 	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
@@ -1034,12 +1035,10 @@ func TestPrimeStateKeepsHandoffMarker(t *testing.T) {
 		t.Fatalf("write handoff marker: %v", err)
 	}
 
-	oldState, oldReason := primeState, primeHandoffReason
-	t.Cleanup(func() { primeState, primeHandoffReason = oldState, oldReason })
-	primeState, primeHandoffReason = true, ""
-
 	var out bytes.Buffer
-	handlePrimeHandoffMarker(&out, workDir)
+	if reason := handlePrimeHandoffMarker(&out, workDir, true, false, false); reason != "" {
+		t.Errorf("--state took handoff reason %q from the marker", reason)
+	}
 	if out.Len() != 0 {
 		t.Errorf("--state printed the post-handoff warning ahead of its report: %q", out.String())
 	}
@@ -1055,9 +1054,8 @@ func TestPrimeStateKeepsHandoffMarker(t *testing.T) {
 	}
 
 	// The next real prime still finds the marker and consumes it.
-	primeState = false
 	out.Reset()
-	handlePrimeHandoffMarker(&out, workDir)
+	handlePrimeHandoffMarker(&out, workDir, false, false, false)
 	if out.Len() == 0 {
 		t.Error("the real prime after --state printed no post-handoff warning")
 	}
@@ -1150,26 +1148,26 @@ func TestFindAgentWorkShowErrorIsNotUnresolvable(t *testing.T) {
 }
 
 // TestPrimeHookDryRunDoesNotSignalReady: --hook --dry-run previews a prime; it
-// must not set GT_AGENT_READY in the live tmux session it runs inside.
+// must set no GT_AGENT_READY (a tmux SetEnvironment) in the live session it
+// runs inside, and a real --hook must.
 func TestPrimeHookDryRunDoesNotSignalReady(t *testing.T) {
-	t.Setenv("GT_SESSION_ID", "dry-run-test")
-	oldDry, oldSignal := primeDryRun, signalAgentReadyFn
-	t.Cleanup(func() { primeDryRun, signalAgentReadyFn = oldDry, oldSignal })
-
-	signals := 0
-	signalAgentReadyFn = func() { signals++ }
-	dir := t.TempDir()
-
-	primeDryRun = true
-	handlePrimeHookMode(dir, dir)
-	if signals != 0 {
-		t.Errorf("--hook --dry-run signalled agent readiness %d time(s), want none", signals)
-	}
-
-	primeDryRun = false
-	handlePrimeHookMode(dir, dir)
-	if signals != 1 {
-		t.Errorf("--hook signalled agent readiness %d time(s), want 1", signals)
+	t.Parallel()
+	for _, tc := range []struct {
+		name        string
+		dryRun      bool
+		wantSignals int
+	}{
+		{"--hook --dry-run", true, 0},
+		{"--hook", false, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			signals := 0
+			signalAgentReadyUnlessDryRun(tc.dryRun, func() { signals++ })
+			if signals != tc.wantSignals {
+				t.Errorf("signalled agent readiness %d time(s), want %d", signals, tc.wantSignals)
+			}
+		})
 	}
 }
 

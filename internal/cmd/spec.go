@@ -355,22 +355,26 @@ type specHoldKnobs struct {
 	Reserved    []string
 	ShapeGate   string
 	Template    specdispatch.Template
+	// Warn is where a question left unanswered because its inputs would not
+	// read says so; nil says nothing, for a caller that builds knobs by hand.
+	Warn io.Writer
 }
 
 // specHoldKnobsFrom reads the knobs from the town's settings — the same keys
 // runSpecDispatch reads them from. The second result is false when those
 // settings will not load, which leaves the hold question unanswered rather
-// than answered wrongly — and says so on stderr, since an unanswered question
-// disables every peer hold.
-func specHoldKnobsFrom(townRoot string) (specHoldKnobs, bool) {
+// than answered wrongly — and says so on warn, since an unanswered question
+// disables every peer hold. The knobs carry warn on for the reads that follow.
+func specHoldKnobsFrom(townRoot string, warn io.Writer) (specHoldKnobs, bool) {
 	path := config.TownSettingsPath(townRoot)
 	ts, err := config.LoadOrCreateTownSettings(path)
 	if err != nil {
-		warnSpecHoldUnread("town settings "+path, err)
+		warnSpecHoldUnread(warn, "town settings "+path, err)
 		return specHoldKnobs{}, false
 	}
 	sd := loadSpecDispatchConfig(townRoot)
 	knobs := specHoldKnobs{
+		Warn:        warn,
 		MaxPriority: ts.PolecatPool.GetMaxPriority(),
 		Reserved:    specBudgetFromConfig(ts, sd).ReservedLabels(),
 		ShapeGate:   ts.PolecatPool.GetShapeGate(),
@@ -442,22 +446,21 @@ func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, peer sling.Duplic
 	}
 	children, err := store.Children(peer.ID)
 	if err != nil {
-		warnSpecHoldUnread("children of "+peer.ID, err)
+		warnSpecHoldUnread(knobs.Warn, "children of "+peer.ID, err)
 		return ""
 	}
 	spec.Children = childSpecs(children)
 	return specdispatch.OpenChildHold(spec)
 }
 
-// specHoldWarnOut is where an unanswered peer-hold question says so; a test
-// swaps it to read the warning.
-var specHoldWarnOut io.Writer = os.Stderr
-
 // warnSpecHoldUnread tells the operator a peer-hold question went unanswered
-// because what it reads would not load, so the peer counts as not held. It
-// writes to stderr so it cannot corrupt a caller's stdout report.
-func warnSpecHoldUnread(what string, err error) {
-	fmt.Fprintf(specHoldWarnOut, "%s spec peer-hold check degraded: could not read %s, treating the peer as not held: %v\n",
+// because what it reads would not load, so the peer counts as not held. The
+// production caller passes stderr, so it cannot corrupt a stdout report.
+func warnSpecHoldUnread(w io.Writer, what string, err error) {
+	if w == nil {
+		return
+	}
+	fmt.Fprintf(w, "%s spec peer-hold check degraded: could not read %s, treating the peer as not held: %v\n",
 		style.Dim.Render("Warning:"), what, err)
 }
 
@@ -513,7 +516,12 @@ func specFromPeer(peer sling.Duplicate) specdispatch.Spec {
 // shape the overlap guard asks it in: the knobs come from the town, and the
 // peer's children from the database its comparison pool came from.
 func specPeerHeldPinned(townRoot, beadsDir string, peer sling.Duplicate) string {
-	knobs, ok := specHoldKnobsFrom(townRoot)
+	return specPeerHeldPinnedTo(os.Stderr, townRoot, beadsDir, peer)
+}
+
+// specPeerHeldPinnedTo is specPeerHeldPinned with the writer its warnings go to.
+func specPeerHeldPinnedTo(warn io.Writer, townRoot, beadsDir string, peer sling.Duplicate) string {
+	knobs, ok := specHoldKnobsFrom(townRoot, warn)
 	if !ok {
 		return ""
 	}

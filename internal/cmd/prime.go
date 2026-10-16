@@ -182,7 +182,9 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		}
 	}
 
-	handlePrimeHandoffMarker(os.Stdout, cwd)
+	if reason := handlePrimeHandoffMarker(os.Stdout, cwd, primeState, primeDryRun, primeExplain); reason != "" {
+		primeHandoffReason = reason
+	}
 
 	warnRoleMismatch(roleInfo, cwd)
 
@@ -422,18 +424,16 @@ func primeCompactResume(w io.Writer, ctx RoleContext, hookSource, handoffReason 
 // loop bug). A real prime consumes the marker; --dry-run and --state only
 // report. --state must not consume it: detectSessionState reads the marker
 // itself, so consuming it first would report "normal" and leave the next real
-// prime without its post-handoff warning.
-func handlePrimeHandoffMarker(w io.Writer, cwd string) {
+// prime without its post-handoff warning. It returns the handoff reason the
+// marker carried, "" when it carried none or was left alone.
+func handlePrimeHandoffMarker(w io.Writer, cwd string, state, dryRun, explainOn bool) (reason string) {
 	switch {
-	case primeState:
-	case primeDryRun:
-		if reason := checkHandoffMarkerDryRun(w, primeExplain, cwd); reason != "" {
-			primeHandoffReason = reason
-		}
+	case state:
+		return ""
+	case dryRun:
+		return checkHandoffMarkerDryRun(w, explainOn, cwd)
 	default:
-		if reason := checkHandoffMarkerTo(w, cwd); reason != "" {
-			primeHandoffReason = reason
-		}
+		return checkHandoffMarkerTo(w, cwd)
 	}
 }
 
@@ -495,10 +495,7 @@ func handlePrimeHookMode(townRoot, cwd string) {
 	// WaitForCommand polls for this instead of probing the process tree.
 	// This handles agents wrapped in shell scripts where pane_current_command
 	// remains "bash" even though the agent is running as a descendant.
-	// A dry run changes nothing in the live session, this included.
-	if !primeDryRun {
-		signalAgentReadyFn()
-	}
+	signalAgentReadyUnlessDryRun(primeDryRun, signalAgentReady)
 
 	// Store source for compact/resume detection in runPrime
 	primeHookSource = source
@@ -546,9 +543,13 @@ func signalAgentReady() {
 	_ = t.SetEnvironment(name, tmux.EnvAgentReady, "1")
 }
 
-// signalAgentReadyFn is signalAgentReady, replaceable so a test can count the
-// calls without a tmux server.
-var signalAgentReadyFn = signalAgentReady
+// signalAgentReadyUnlessDryRun calls signal unless this is a dry run: a
+// preview changes nothing in the live session, the readiness variable included.
+func signalAgentReadyUnlessDryRun(dryRun bool, signal func()) {
+	if !dryRun {
+		signal()
+	}
+}
 
 // isCompactResume returns true if the current prime is running after compaction or resume.
 // In these cases, the agent already has role context in compressed memory and only needs
