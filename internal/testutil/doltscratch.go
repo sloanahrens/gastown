@@ -119,6 +119,11 @@ func scratchEnv(port string) []string {
 		"BEADS_DOLT_PORT=" + port,
 		"BEADS_DOLT_SERVER_PORT=" + port,
 		"BEADS_TEST_SERVER=1",
+		// A scratch container exists so a test can create databases on it;
+		// bd refuses a new database on a populated server without the opt-in
+		// (be-d4v), and that refusal would fail every test that runs bd init
+		// here.
+		"BD_ALLOW_NEW_DATABASE=1",
 	}
 }
 
