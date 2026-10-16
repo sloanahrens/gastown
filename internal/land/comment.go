@@ -130,7 +130,10 @@ func verdictCommented(comments []beads.Comment, head, prefix string) bool {
 // commentReviewLogFailure writes on the work bead that its om verdict is not
 // in the reviews log, so the rework table's undercount traces to the verdict it
 // lacks rather than to a daemon log line alone. It is fail-soft and bounded
-// like commentVerdict: it never returns an error and never changes the landing.
+// like commentVerdict: it never returns an error and never changes the landing,
+// and a bead write that outlasts commentTimeout costs the landing that long at
+// most. The goroutine it leaves behind reports into a buffered channel, so it
+// ends when the write does and holds nothing meanwhile.
 func (l *Lander) commentReviewLogFailure(w Work, rec ReviewRecord, appendErr error) {
 	text := fmt.Sprintf("om %s %.2f (attempt %d) is not in the reviews log: %s",
 		rec.Verdict, rec.Score, rec.Attempt, elideMiddle(NoteField(appendErr.Error()), reviewErrorReasonMax))

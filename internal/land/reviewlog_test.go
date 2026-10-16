@@ -157,16 +157,26 @@ func TestLandLogsNothingForAReviewThatJudgedNothingAndSurvivesALogFailure(t *tes
 	if !strings.Contains(out.String(), "could not append to the reviews log") {
 		t.Errorf("the failed append is not in the landing log:\n%s", out.String())
 	}
+	appendErr := l.Reviews.Append(ReviewRecord{})
+	if appendErr == nil {
+		t.Fatal("the reviews log under a plain file accepted an append")
+	}
 	comments, err := broken.bd.Comments(broken.work.BeadID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var onBead bool
+	want := "om approve 0.90 (attempt 1) is not in the reviews log: " + elideMiddle(NoteField(appendErr.Error()), reviewErrorReasonMax)
+	var onBead []string
 	for _, c := range comments {
-		onBead = onBead || strings.HasPrefix(c.Text, "om approve 0.90 (attempt 1) is not in the reviews log")
+		if strings.Contains(c.Text, "is not in the reviews log") {
+			onBead = append(onBead, c.Text)
+		}
 	}
-	if !onBead {
-		t.Errorf("the failed append is not on the bead; comments = %+v", comments)
+	if len(onBead) != 1 || onBead[0] != want {
+		t.Errorf("failed-append comments on the bead = %q, want exactly [%q]", onBead, want)
+	}
+	if !strings.Contains(want, "not a directory") {
+		t.Errorf("the comment does not carry the append's reason: %q", want)
 	}
 }
 
