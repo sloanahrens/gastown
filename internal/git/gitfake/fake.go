@@ -464,7 +464,7 @@ func lineDiff(a, b string) (removed, added []string) {
 // diff with ctx lines of context lists them: each removed line as "-", each
 // added line as "+", and the unchanged lines within ctx of a change as " ", in
 // file order. A patch-id hashes the context lines along with the changed ones,
-// so the same edit with different neighbours has a different id.
+// so the same edit with different neighbors has a different id.
 func contextLines(a, b string, ctx int) []string {
 	al, bl := splitLines(a), splitLines(b)
 	n, m := len(al), len(bl)

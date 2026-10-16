@@ -396,7 +396,7 @@ func changedPaths(a, b map[string]string) []string {
 // PatchID hashes the change base..head the way patch-id --stable does over
 // git's default diff: the lines each file removes and adds and the three lines
 // of context around them, without line numbers or whitespace. The same change
-// on another base has the same id only while its neighbours are unchanged.
+// on another base has the same id only while its neighbors are unchanged.
 func (h *handle) PatchID(base, head string) (string, error) {
 	return h.patchID(base, head, 3)
 }
