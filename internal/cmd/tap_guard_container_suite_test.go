@@ -2782,4 +2782,13 @@ func TestSubstitutionBody(t *testing.T) {
 			}
 		})
 	}
+
+	// The unescaped body is what the guards scan next, so its own scan finds the
+	// command the "\$(...)" runs.
+	in := "echo `echo \\$(git reset --hard)`"
+	body := substitutionBody(in, commandSubstitutionSpans(in)[0])
+	nested := commandSubstitutionSpans(body)
+	if len(nested) != 1 || body[nested[0].bodyStart:nested[0].bodyEnd] != "git reset --hard" {
+		t.Errorf("commandSubstitutionSpans(%q) = %v, want one span holding %q", body, nested, "git reset --hard")
+	}
 }
