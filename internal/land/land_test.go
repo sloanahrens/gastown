@@ -1409,6 +1409,27 @@ func TestLandRecoversUnrecordedSquashLandingOverAConflictingLaterLanding(t *test
 	}
 }
 
+// TestLandDeclinesRecoveryOfAConflictWithNoLandMergeForTheHead: a squash of
+// the head conflicts with a landing that edited its lines, and the target holds
+// no land merge naming this head, so the conflict is the author's to resolve.
+// The recovery declines and the pass rejects with rework instead of recording a
+// landing (gt-01yt6).
+func TestLandDeclinesRecoveryOfAConflictWithNoLandMergeForTheHead(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.squashRange(t)
+	f.base = f.pushMain("b.txt", "main's b\n")
+
+	_, err := f.lander().Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectConflict, LabelRework)
+	if len(rej.Conflicting) != 1 || rej.Conflicting[0] != "b.txt" {
+		t.Errorf("conflicting = %v, want b.txt", rej.Conflicting)
+	}
+	if len(f.merger.calls) != 0 || len(f.gate.dirs) != 0 {
+		t.Errorf("a declined recovery merged or gated: %d merges, %d gate runs", len(f.merger.calls), len(f.gate.dirs))
+	}
+}
+
 // TestLandRecoversUnrecordedSquashLandingForkedBeforeItsBase: the branch
 // forked before the base the squash merged onto — another landing reached the
 // target in between — so the head's own change is not the diff between the two
