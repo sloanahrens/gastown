@@ -179,7 +179,16 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 			ready = append(ready, row)
 		}
 		for _, i := range bl {
-			blocked = append(blocked, dashQueueRow(name, i))
+			row := dashQueueRow(name, i)
+			// Split here, over the whole list, rather than off the capped rows
+			// the page is given: the totals must add up (gt-vcr3z).
+			row.Wisp = dashboard.IsLeakedStepWisp(i.ID, i.Type, i.Parent)
+			if row.Wisp {
+				q.BlockedWisps++
+			} else {
+				q.BlockedWork++
+			}
+			blocked = append(blocked, row)
 		}
 		for _, i := range ln {
 			if beads.HasLabel(i, land.LabelReadyToLand) && beads.IssueStatus(i.Status).IsActionable() {

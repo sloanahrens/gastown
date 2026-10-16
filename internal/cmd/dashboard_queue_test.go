@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -108,6 +109,50 @@ func TestQueueReadNamesAnUnreadableStore(t *testing.T) {
 	}
 	if len(q.Unreadable) != 1 || q.Unreadable[0] != "beads" {
 		t.Errorf("unreadable = %v, want [beads]", q.Unreadable)
+	}
+}
+
+// The blocked list is split into the beads waiting on another bead and the
+// leaked molecule step wisps sitting in the same list (gt-vcr3z): the town's
+// "121 blocked" was mostly wisps no patrol will ever advance, and counting
+// them as blocked work hid the handful the operator is actually blocked on.
+// Each row carries the verdict, so the Work panel's list hides exactly the
+// rows its blocked line counted apart.
+func TestQueueSplitsLeakedStepWispsFromBlockedWork(t *testing.T) {
+	t.Parallel()
+	st := &fakeQueueStore{blocked: []*beads.Issue{
+		{ID: "gt-real", Title: "waits on another bead", Type: "task", Priority: 2, BlockedBy: []string{"gt-x"}},
+		{ID: "gt-wisp-4bac0", Title: "Self-review changes", Type: "task", Priority: 2, BlockedBy: []string{"gt-wisp-eutau"}},
+		{ID: "gt-step-1", Title: "a step poured under a molecule", Type: "task", Parent: "gt-wisp-eutau", BlockedBy: []string{"gt-wisp-eutau"}},
+		{ID: "gt-wisp-e9i8w", Title: "mol-polecat-work", Type: "molecule", Priority: 2, BlockedBy: []string{"gt-x"}},
+	}}
+	q := queueReaderOver(map[string]dashQueueStore{"hq": st}, "hq").read(time.Now())
+	if q.BlockedTotal != 4 || q.BlockedWork != 1 || q.BlockedWisps != 3 {
+		t.Errorf("blocked = %d work + %d wisps of %d, want 1 work and 3 wisps of 4", q.BlockedWork, q.BlockedWisps, q.BlockedTotal)
+	}
+	for _, row := range q.Blocked {
+		if want := row.ID != "gt-real"; row.Wisp != want {
+			t.Errorf("%s: wisp = %v, want %v", row.ID, row.Wisp, want)
+		}
+	}
+}
+
+// The split is counted over the whole blocked list, not the capped rows the
+// page is handed: a store with more blocked beads than the list keeps still
+// reports work and wisps that add up to its total (gt-vcr3z).
+func TestQueueSplitsWispsPastTheRowCap(t *testing.T) {
+	t.Parallel()
+	var blocked []*beads.Issue
+	for i := 0; i < 44; i++ {
+		blocked = append(blocked, &beads.Issue{ID: fmt.Sprintf("gt-wisp-%02d", i), Title: "Self-review changes", Type: "task", Priority: 2})
+	}
+	blocked = append(blocked, &beads.Issue{ID: "gt-real", Title: "waits", Type: "task", Priority: 2, BlockedBy: []string{"gt-x"}})
+	q := queueReaderOver(map[string]dashQueueStore{"hq": &fakeQueueStore{blocked: blocked}}, "hq").read(time.Now())
+	if q.BlockedTotal != 45 || q.BlockedWork != 1 || q.BlockedWisps != 44 {
+		t.Errorf("blocked = %d work + %d wisps of %d, want 1 and 44 of 45", q.BlockedWork, q.BlockedWisps, q.BlockedTotal)
+	}
+	if len(q.Blocked) >= q.BlockedTotal {
+		t.Errorf("the rows were not capped (%d of %d), so the test proves nothing about counting past the cap", len(q.Blocked), q.BlockedTotal)
 	}
 }
 

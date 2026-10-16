@@ -12,11 +12,10 @@ func TestThePageMarksAFailedOrStaleReading(t *testing.T) {
 	t.Parallel()
 
 	for _, pane := range []struct{ fn, source, note string }{
-		{"renderSeats", "seats", "seatsnote"},
+		{"renderWork", "seats", "worknote"}, // the Work panel is joined from the seats and queue reads
 		{"renderMachine", "machine", "machnote"},
 		{"renderSpend", "spend", "spendnote"},
 		{"renderOM", "om", "omnote"},
-		{"renderQueue", "queue", "queuenote"},
 		{"renderRigs", "queue", "rigsnote"}, // the Rigs rows are joined from the queue read
 	} {
 		body := pageFunc(t, pane.fn)
@@ -28,9 +27,19 @@ func TestThePageMarksAFailedOrStaleReading(t *testing.T) {
 		}
 	}
 
+	// The Work panel draws the seats and the queue, so it reads both sources
+	// and wears the worse of the two.
+	work := pageFunc(t, "renderWork")
+	if !strings.Contains(work, `readOf(s, "queue")`) {
+		t.Error("renderWork does not read the queue's status, so half its pane is never greyed")
+	}
+	if !strings.Contains(work, "paintsRead(box, $(\"worknote\"), worseRead(rSeats, rQueue));") {
+		t.Error("renderWork does not wear the worse of the two readings it joined")
+	}
+
 	// A failed seats read is unavailable, never a town with no polecats.
-	if seats := pageFunc(t, "renderSeats"); !strings.Contains(seats, "unavailable — the seats read failed or went stale") {
-		t.Error("renderSeats reads a failed seats read as a town with no polecats")
+	if seats := pageFunc(t, "workSeats"); !strings.Contains(seats, "unavailable — the seats read failed or went stale") {
+		t.Error("workSeats reads a failed seats read as a town with no polecats")
 	}
 
 	// Machine and OM carried no age at all: the reading could not be told fresh
@@ -41,15 +50,15 @@ func TestThePageMarksAFailedOrStaleReading(t *testing.T) {
 		}
 	}
 
-	// The queue's age is written on every call, above the unchanged-key early
-	// return that used to freeze it between polls.
-	queue := pageFunc(t, "renderQueue")
-	note, skip := strings.Index(queue, `$("queuenote").textContent`), strings.Index(queue, "key === qKey) return;")
+	// The panel's ages are written on every call, above the unchanged-key early
+	// return, where the seat ages move in place.
+	workNote := pageFunc(t, "renderWork")
+	note, skip := strings.Index(workNote, `$("worknote").textContent`), strings.Index(workNote, "key === wKey)")
 	if note < 0 || skip < 0 || note > skip {
-		t.Errorf("renderQueue writes its age below the early return, so the age freezes (note=%d skip=%d)", note, skip)
+		t.Errorf("renderWork writes its ages below the early return, so they freeze (note=%d skip=%d)", note, skip)
 	}
-	if !strings.Contains(string(indexHTML), "renderTierSweep(state); renderForgejo(state); renderQueue(state);") {
-		t.Error("the 15s tick does not redraw the queue's note, so its age still freezes")
+	if !strings.Contains(string(indexHTML), "renderStrip(state); renderWork(state); renderTierSweep(state);") {
+		t.Error("the 15s tick does not redraw the Work panel's note, so its ages still freeze")
 	}
 
 	// The page writes text, never markup, wherever a reading is described.

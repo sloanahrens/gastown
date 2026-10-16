@@ -48,9 +48,9 @@ func TestPolecatNamesAreShortUnlessTwoRigsShareOne(t *testing.T) {
 		}
 	}
 
-	// The whole page names polecats through it: the seats pane, and the Landings
-	// pane, which hands the table its names.
-	for _, pane := range []string{"renderSeats", "renderTrend"} {
+	// The whole page names polecats through it: the Work panel's seat rows, and
+	// the Landings pane, which hands the table its names.
+	for _, pane := range []string{"workSeats", "renderTrend"} {
 		if body := pageFunc(t, pane); !strings.Contains(body, "polecatNames(") {
 			t.Errorf("%s does not name its polecats through the shared helper", pane)
 		}
@@ -63,8 +63,8 @@ func TestPolecatNamesAreShortUnlessTwoRigsShareOne(t *testing.T) {
 	}
 
 	// The short name is what shows; the rig the polecat is in stays on the cell.
-	seats := pageFunc(t, "renderSeats")
-	if want := `const nameCell = p => { const td = el("td", "", names.label(p.rig, p.name)); td.title = p.rig + "/" + p.name; return td; };`; !strings.Contains(seats, want) {
+	row := pageFunc(t, "workRow")
+	if want := `cell("wname", names.label(p.rig, p.name), p.rig + "/" + p.name + landed);`; !strings.Contains(row, want) {
 		t.Errorf("a polecat's cell does not carry the full rig/name: %s", want)
 	}
 

@@ -89,6 +89,18 @@ tr.live{background:#101a13}
 .cmd{display:inline-block;margin:2px 6px 0 0;padding:0 6px;border:1px solid var(--line);border-radius:4px;color:var(--dim);background:none;font:inherit;font-size:11px;cursor:pointer;text-align:left}
 .cmd:hover{color:var(--text);border-color:var(--dim)}.cmd.done{color:var(--green);border-color:var(--green)}
 .skip{padding:3px 0;border-top:1px solid var(--line)}.skip .why{color:var(--dim);display:block}
+/* The Work panel's seat rows. Only the bead takes what is left of the width, and
+   every track may shrink to nothing, so a long bead title cannot carry a row
+   past its panel. */
+.workrow{display:grid;grid-template-columns:minmax(0,max-content) minmax(0,max-content) minmax(0,1fr) minmax(0,max-content) minmax(0,8ch);gap:2px 8px;align-items:baseline;padding:4px 0;border-top:1px solid var(--line)}
+.workrow>*{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.workrow.whead{color:var(--dim);font-size:11px;border-top:0}
+.workrow .wagent,.workrow .wname{color:var(--dim)}
+.workrow .wnum{text-align:right;color:var(--dim)}
+.workrow .whints{grid-column:1 / -1;overflow:visible;white-space:normal}
+.wsum{margin-top:8px}
+.wblocked{padding:2px 0}
+.qlist{max-height:70vh;overflow:auto}
 .qtabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
 .qrow{border-top:1px solid var(--line)}
 .qhead{display:grid;grid-template-columns:auto auto 1fr auto;gap:4px 8px;align-items:baseline;width:100%;text-align:left;background:none;border:0;color:inherit;font:inherit;padding:5px 0;cursor:pointer}
@@ -105,7 +117,6 @@ section>h2:hover{color:var(--text)}
 section>h2 .caret{display:inline-block;width:10px;color:var(--dim)}
 section.collapsed>:not(h2){display:none}
 section.collapsed>h2{border-bottom:0}
-#queue{max-height:70vh;overflow:auto}
 #forgejo{max-height:240px;overflow:auto}
 #forgejo.folded{display:none}
 .feedhead{display:flex;align-items:center;gap:6px;width:100%;background:none;border:0;padding:2px 0 3px;color:var(--dim);font:inherit;font-size:11px;letter-spacing:.04em;text-align:left;cursor:pointer}
@@ -258,8 +269,7 @@ a.hrow:hover{background:#19212b}
     <section><h2>Usage <span class="r" id="usagenote"></span></h2><div class="body" id="usage"></div></section>
     <section><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
-    <section><h2>Polecats <span class="r" id="seatsnote"></span></h2><div class="body" id="seats"></div></section>
-    <section><h2>Work queue <span class="r" id="queuenote"></span></h2><div class="body" id="queue"></div></section>
+    <section><h2>Work <span class="r" id="worknote"></span></h2><div class="body" id="work"></div></section>
     <section>
       <h2>Feed <span class="chips" id="chips"></span></h2>
       <div id="feed"></div>
@@ -390,8 +400,8 @@ function renderHealth(h) {
 }
 
 // seatFacts is the strip's seats: what each open seat runs and how full it is,
-// off the seat rows the hub fills from the same polecats the Polecats pane
-// counts, so the two cannot disagree. A closed seat — nothing may fill it — is
+// off the seat rows the hub fills from the same polecats the Work panel's seat
+// rows draw, so the two cannot disagree. A closed seat — nothing may fill it — is
 // left to the models line, and a seat whose config nobody could read says
 // unknown rather than passing as a seat nobody runs. The pro seat is named the
 // reserved one, which is what the town keeps it for: work pinned to its agent
@@ -416,7 +426,7 @@ function seatFacts(m) {
 // renderStrip is the page's one status strip, and the whole of its top: the
 // day's shape and what needs the operator as one line of facts, each drawn once
 // from the reader that owns it — the landings off the Landings pane's own
-// window, the seats off the polecats the Polecats pane counts, the queue off
+// window, the seats off the polecats the Work panel's rows draw, the queue off
 // the ready read, the host and the install off the Machine pane's. A reading
 // nobody has made says so, in the strip's own dim: a strip that drew a zero it
 // had not read would answer the operator with a fact it invented.
@@ -457,7 +467,7 @@ function renderStrip(s) {
   const parked = pcs.length - live.length;
   const also = [sm.seats_cap ? "cap " + sm.seats_cap : null, parked ? parked + " in parked rigs" : null].concat(rest).filter(Boolean).join(" · ");
   fact(box, s.polecats ? String(active) : "–", "working",
-    {cls: worst, tip: "polecats holding work with a live session" + (also ? " · " + also : "") + (worst === "bad" ? " · the Polecats pane has the rows" : "")});
+    {cls: worst, tip: "polecats holding work with a live session" + (also ? " · " + also : "") + (worst === "bad" ? " · the Work panel has the rows" : "")});
 
   // Waiting to land: the ready reader's count, and how long the oldest has
   // waited. The count is drawn even when the read behind it failed or aged —
@@ -614,8 +624,11 @@ const STATE_HELP = {
   unknown: "tmux could not be read, so this polecat cannot be told apart from a working one",
   idle: "holds nothing"
 };
+// The Work panel's folds (idle seats, parked-rig seats, the queue list) last for
+// the session and are not stored.
 let openIdle = false;
 let openParkedRig = false;
+let openQueueList = false;
 // The om panel's Stats and Scores sections start closed and keep the viewer's
 // choice across the periodic redraw and a reload, keyed by section name. Storage
 // that throws — a locked-down browser, private mode — leaves them closed and
@@ -656,7 +669,7 @@ function renderRigs(s) {
   const box = $("rigs");
   box.replaceChildren();
   const rows = s.rigs || [];
-  // Every row is joined from the queue read the Work queue pane uses, so the two
+  // Every row is joined from the queue read the Work panel draws from, so the two
   // say the same thing about the same numbers (gt-q6h8e).
   const qr = readOf(s, "queue");
   paintsRead(box, $("rigsnote"), qr);
@@ -697,100 +710,204 @@ function renderRigs(s) {
   const at = s.queue && s.queue.at;
   $("rigsnote").textContent = readCaption(qr, [rows.length + " rigs" + (parked ? " · " + parked + " parked" : ""), at ? "read " + age(at) + " ago" : null]);
 }
-function renderSeats(s) {
-  const box = $("seats");
-  box.replaceChildren();
-  const pcs = s.polecats || [];
-  const r = readOf(s, "seats");
-  paintsRead(box, $("seatsnote"), r);
+// The Work panel: a row per seat holding something, the queue's
+// dispatchable/ready/landing summary, the blocked line, and the whole queue
+// list folded. Per-state seat counts are the strip's "working" fact, not drawn
+// here.
+
+// worseRead picks the reading a pane joined from two sources wears, and the
+// note names which of the two it was.
+function worseRead(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  if (a.stale !== b.stale) return a.stale ? a : b;
+  if (a.error !== b.error) return a.error ? a : b;
+  return (a.ageSec || 0) >= (b.ageSec || 0) ? a : b;
+}
+
+// workHead is a row of the same grid as the seats, so a column cannot drift
+// from its heading.
+function workHead() {
+  const tr = el("div", "workrow whead");
+  [["Agent", "the agent the seat's session was started with"], ["Polecat", "the polecat, with its rig and last-24-hour landings on hover"],
+   ["Bead", "the bead on the seat's hook, with its title"], ["State", "the state the town's inventory reads the seat into"],
+   ["Age", "how long the bead has been on the seat"]].forEach(([h, tip]) => { const c = el("span", "", h); c.title = tip; tr.append(c); });
+  return tr;
+}
+
+// The rows on screen, so the ages can move between redraws.
+let workSeatRows = [];
+
+// paintAges writes the two readings a seat's clock moves: the state badge's
+// tooltip carries how long its session has been silent, the age cell how long
+// the bead has been on the hook.
+function paintAges(r, now) {
+  const p = r.p;
+  const on = p.slung ? (now - new Date(p.slung).getTime()) / 1000 : null;
+  const quiet = p.has_session && p.last_active ? (now - new Date(p.last_active).getTime()) / 1000 : null;
+  const silent = quiet != null ? " · its session last printed " + fmtDur(quiet) + " ago" : "";
+  r.badge.title = (STATE_HELP[p.state] || "") + (p.reason && p.bead ? " — " + p.reason : "") + silent;
+  r.age.className = "wnum" + (p.bead && (on > 5400 || (quiet != null && quiet >= 600)) ? " warnc" : "");
+  r.age.textContent = p.bead ? (on == null ? "–" : fmtDur(on)) : "";
+  r.age.title = p.bead ? "on the hook" + (on == null ? "" : " for " + fmtDur(on)) + silent : "";
+}
+
+// workRow is one seat. Every cell clips with an ellipsis and carries its whole
+// text in the title attribute, so no bead title can widen a row past its panel
+// (TestTheWorkRowsCannotOverflowTheirPanel pins the style).
+function workRow(names, p, now) {
+  const tr = el("div", "workrow");
+  const cell = (cls, text, tip) => { const c = el("span", cls, text); if (tip) c.title = tip; tr.append(c); return c; };
+  cell("wagent", p.agent || (p.has_session ? "–" : ""),
+    p.agent ? "the agent this seat's session was started with" : p.has_session ? "its session recorded no agent" : "this seat has no session");
+  const landed = p.landed_24h
+    ? " · landed " + p.landed_24h + " in 24h, om approved " + Math.round(p.approved_24h / p.landed_24h * 100) + "%" +
+      (p.avg_score_24h != null ? ", average score " + p.avg_score_24h.toFixed(2) : "")
+    : "";
+  cell("wname", names.label(p.rig, p.name), p.rig + "/" + p.name + landed);
+  const bd = cell("wbead", "");
+  if (p.bead) {
+    bd.append(el("span", "bead", p.bead));
+    if (p.priority != null) bd.append(document.createTextNode(" "), el("span", "tag p" + Math.min(p.priority, 4), "P" + p.priority));
+    (p.labels || []).forEach(l => bd.append(document.createTextNode(" "), el("span", "tag warnc", l)));
+    if (p.title) bd.append(document.createTextNode(" "), el("span", "wtitle", p.title));
+    bd.title = [p.bead, p.title].filter(Boolean).join(" ");
+  } else {
+    bd.append(el("span", "wtitle", p.reason || "–"));
+    bd.title = p.reason || "";
+  }
+  const badge = el("span", "badge st-" + p.state, p.state);
+  cell("wstate", "").append(badge);
+  const r = {p: p, badge: badge, age: cell("wnum", "")};
+  paintAges(r, now);
+  workSeatRows.push(r);
+  if ((p.hints || []).length) {
+    const h = el("div", "whints");
+    p.hints.forEach(x => { const b = el("button", "cmd", x); b.title = "copy (the dashboard never runs it)"; b.onclick = () => copyText(x, b); h.append(b); });
+    tr.append(h);
+  }
+  return tr;
+}
+
+// workSeats draws the seats holding something, then the idle and parked-rig
+// seats folded.
+function workSeats(box, s, pcs, r) {
+  workSeatRows = [];
   if (!pcs.length) {
     // An empty list is a town with no polecats only when the seats actually
-    // read. A read that failed says unavailable, never "no polecats" (gt-q6h8e).
-    const why = r && r.stale ? "unavailable — the seats read failed or went stale" : s.summary ? "no polecats" : "reading…";
-    box.append(el("div", "empty", why));
-    $("seatsnote").textContent = "";
+    // read (gt-q6h8e).
+    box.append(el("div", "empty", r && r.stale ? "unavailable — the seats read failed or went stale" : s.summary ? "no polecats" : "reading…"));
     return;
   }
-
-  const by = {};
-  pcs.filter(p => !p.rig_parked).forEach(p => by[p.state] = (by[p.state] || 0) + 1);
-  const parkedCount = pcs.filter(p => p.rig_parked).length;
-  const sum = el("div", "kv");
-  ["needs-human", "unknown", "stalled", "review-needed", "recovery", "quiet", "working", "spawning", "gating", "queued", "parked", "idle"].forEach(k => {
-    if (!by[k]) return;
-    const x = el("div"); x.title = STATE_HELP[k];
-    x.append(el("b", "st-" + k, String(by[k])), el("span", "", k));
-    sum.append(x);
-  });
-  if (parkedCount) { const x = el("div"); x.title = "polecats in parked rigs: stood down on purpose, not counted above"; x.append(el("b", "st-parked", String(parkedCount)), el("span", "", "in parked rigs")); sum.append(x); }
-  box.append(sum);
-
-  const busy = pcs.filter(p => p.state !== "idle" && !p.rig_parked);
-  const parkedRigPcs = pcs.filter(p => p.rig_parked).sort((x, y) => (x.state === "idle") - (y.state === "idle") || (x.rig + x.name).localeCompare(y.rig + y.name));
-  const idle = pcs.filter(p => p.state === "idle" && !p.rig_parked).sort((x, y) => (y.landed_24h - x.landed_24h) || (x.rig + x.name).localeCompare(y.rig + y.name));
-  const now = Date.now();
   const names = polecatNames(pcs);
-  // The short name places the polecat; the full rig/name stays on the cell.
-  const nameCell = p => { const td = el("td", "", names.label(p.rig, p.name)); td.title = p.rig + "/" + p.name; return td; };
-  // The three right-hand columns are the polecat's last 24 hours of landings.
-  const R = [
-    ["Landed", "beads this polecat landed in the last 24 hours", p => p.landed_24h ? String(p.landed_24h) : "–"],
-    ["om ok", "share of those landings om approved (the rest landed without a review or after an error)", p => p.landed_24h ? Math.round(p.approved_24h / p.landed_24h * 100) + "%" : "–"],
-    ["Score", "average om score on its approved landings", p => p.avg_score_24h != null ? p.avg_score_24h.toFixed(2) : "–"],
-  ];
-  const head = cols => { const hr = el("tr"); cols.forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); }); return hr; };
-  const rightCells = (tr, p) => R.forEach(([, , f]) => tr.append(el("td", "n", f(p))));
-  const busyTable = list => {
-    const t = el("table");
-    t.append(head([["Polecat"], ["State"], ["Model", "the agent this polecat's session was started with"], ["Bead"], ["On it", "time since the bead was dispatched", 1], ["Quiet", "time since its session last printed anything", 1], ...R.map(r => [r[0], r[1], 1])]));
-    for (const p of list) {
-      const tr = el("tr");
-      tr.append(nameCell(p));
-      const st = el("td"); const badge = el("span", "badge st-" + p.state, p.state); badge.title = (STATE_HELP[p.state] || "") + (p.reason && p.bead ? " — " + p.reason : ""); st.append(badge); tr.append(st);
-      tr.append(el("td", p.agent ? "" : "title", p.agent || (p.has_session ? "–" : "")));
-      const bd = el("td");
-      if (p.bead) {
-        bd.append(el("span", "bead", p.bead));
-        if (p.priority != null) bd.append(document.createTextNode(" "), el("span", "tag p" + Math.min(p.priority, 4), "P" + p.priority));
-        (p.labels || []).forEach(l => bd.append(document.createTextNode(" "), el("span", "tag warnc", l)));
-        if (p.title) bd.append(document.createElement("br"), el("span", "title", p.title));
-      } else bd.append(el("span", "title", p.reason || "–"));
-      if ((p.hints || []).length) {
-        bd.append(document.createElement("br"));
-        p.hints.forEach(h => { const b = el("button", "cmd", h); b.title = "copy (the dashboard never runs it)"; b.onclick = () => copyText(h, b); bd.append(b); });
-      }
-      tr.append(bd);
-      const on = p.slung ? (now - new Date(p.slung).getTime()) / 1000 : null;
-      tr.append(el("td", "n" + (on > 5400 ? " warnc" : ""), p.bead ? (on == null ? "–" : fmtDur(on)) : ""));
-      const q = p.last_active ? (now - new Date(p.last_active).getTime()) / 1000 : null;
-      tr.append(el("td", "n" + (q != null && q >= 600 ? " warnc" : ""), p.bead ? (p.state === "unknown" ? "?" : p.has_session ? fmtDur(q) : "no session") : ""));
-      rightCells(tr, p);
-      t.append(tr);
-    }
-    return t;
-  };
-  const idleTable = list => {
-    const t = el("table");
-    t.append(head([["Polecat"], ...R.map(r => [r[0], r[1], 1])]));
-    for (const p of list) { const tr = el("tr"); tr.append(nameCell(p)); rightCells(tr, p); t.append(tr); }
-    return t;
-  };
-  if (busy.length) box.append(busyTable(busy));
-  if (parkedRigPcs.length) {
+  const now = Date.now();
+  const byName = (x, y) => (x.rig + x.name).localeCompare(y.rig + y.name);
+  const busy = pcs.filter(p => p.state !== "idle" && !p.rig_parked);
+  const parked = pcs.filter(p => p.rig_parked).sort((x, y) => (x.state === "idle") - (y.state === "idle") || byName(x, y));
+  const idle = pcs.filter(p => p.state === "idle" && !p.rig_parked).sort((x, y) => ((y.landed_24h || 0) - (x.landed_24h || 0)) || byName(x, y));
+  box.append(workHead());
+  busy.forEach(p => box.append(workRow(names, p, now)));
+  const fold = (label, list, open, set) => {
     const d = document.createElement("details");
-    d.open = openParkedRig;
-    d.ontoggle = () => { openParkedRig = d.open; };
-    d.append(el("summary", "title", parkedRigPcs.length + " in parked rigs (stood down on purpose; not alerts)"), busyTable(parkedRigPcs));
+    d.open = open;
+    d.ontoggle = () => set(d.open);
+    d.append(el("summary", "title", label));
+    list.forEach(p => d.append(workRow(names, p, now)));
     box.append(d);
+  };
+  if (parked.length) fold(parked.length + " in parked rigs (stood down on purpose; not alerts)", parked, openParkedRig, v => { openParkedRig = v; });
+  if (idle.length) fold(idle.length + " idle (free to take work)", idle, openIdle, v => { openIdle = v; });
+}
+
+// blockedLine counts the beads waiting on another bead apart from the leaked
+// molecule step wisps, and says so when the count is not a whole reading: the
+// queue read failed, the page was sent no split, or a store could not be read.
+function blockedLine(q, r) {
+  const line = el("div", "wblocked");
+  const gap = why => {
+    line.className = "wblocked warnc";
+    line.append(el("b", "", "blocked: unavailable"), el("span", "", " — " + why));
+    line.title = why;
+    return line;
+  };
+  if (r && r.error) return gap("the queue read failed");
+  if (typeof q.blocked_work !== "number" || typeof q.blocked_wisps !== "number") return gap("the server sent no blocked/wisp split");
+  const work = q.blocked_work, wisps = q.blocked_wisps, down = q.unreadable || [];
+  if (wisps > 0 || down.length) line.className = "wblocked warnc";
+  if (down.length) line.append(el("span", "", "at least "));
+  line.append(el("b", "", String(work)), el("span", "", work === 1 ? " bead blocked" : " beads blocked"));
+  if (wisps) line.append(document.createTextNode(" · "), el("b", "", String(wisps)), el("span", "", wisps === 1 ? " leaked step wisp" : " leaked step wisps"));
+  if (down.length) line.append(el("span", "", " · " + down.join(", ") + " unreadable"));
+  line.title = wisps
+    ? "a leaked step wisp is a molecule step nothing will run — a bead whose id carries -wisp-, or a step poured under a molecule. They are not blocked work; gt-x1d8s is the leak."
+    : "beads waiting on another bead to close";
+  if (down.length) line.title += " · the stores named could not be read, so their beads are not counted";
+  return line;
+}
+
+// workQueue draws what is waiting: the summary, the blocked line, and the whole
+// list folded below them.
+function workQueue(box, s, q, r) {
+  if (!q) {
+    box.append(el("div", "empty", r ? "unavailable — the work queue could not be read" : "reading the work queue…"));
+    return;
   }
-  if (idle.length) {
-    const d = document.createElement("details");
-    d.open = openIdle;
-    d.ontoggle = () => { openIdle = d.open; };
-    d.append(el("summary", "title", idle.length + " idle (free to take work) · last 24h landings on the right"), idleTable(idle));
-    box.append(d);
-  }
-  $("seatsnote").textContent = s.summary_at ? readCaption(r, ["read " + age(s.summary_at) + " ago"]) : "";
+  const ok = (q.ready || []).filter(b => b.shape === "ok").length;
+  const sum = el("div", "kv wsum");
+  const add = (v, k, tip) => { const x = el("div"); x.title = tip; x.append(el("b", "", String(v)), el("span", "", k)); sum.append(x); };
+  add(ok, "dispatchable", "ready beads the spec dispatcher would slot: shaped, unassigned and in a rig that is not parked");
+  add(q.ready_total || 0, "ready", "open beads with nothing blocking them");
+  add(q.landing_total || 0, "landing", "submitted and waiting for the landing worker");
+  box.append(sum);
+  box.append(blockedLine(q, r));
+
+  const d = document.createElement("details");
+  d.className = "wqueue";
+  d.open = openQueueList;
+  d.ontoggle = () => { openQueueList = d.open; };
+  const total = (q.ready_total || 0) + (q.landing_total || 0) + (q.blocked_total || 0);
+  d.append(el("summary", "title", "the full queue list · " + total + " beads"));
+  const list = el("div", "qlist");
+  drawQueueList(list, s);
+  d.append(list);
+  box.append(d);
+}
+
+// workKey is what the panel's rows are drawn from. The panel is left alone
+// while it is unchanged, so a redraw never fights the operator's own clicks in
+// the list; the ages move through paintAges instead.
+function workKey(s) {
+  const q = s.queue;
+  const seats = (s.polecats || []).map(p => [p.rig, p.name, p.state, p.agent, p.bead, p.title, p.reason, p.slung || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h].join(",")).join(";");
+  // The dispatcher's skips share a poll with the queue neither of them rides:
+  // its own reader ticks six times as often, and it is what tags a row unshaped.
+  const named = ((s.dispatch && s.dispatch.named) || []).map(n => n.bead + ":" + (n.reason || "")).join(",");
+  return [s.summary_at, q && q.at, q && q.ready_total, q && q.landing_total, q && q.blocked_total, q && q.blocked_work, q && q.blocked_wisps, q && (q.unreadable || []).join(","), seats, named,
+    qTab, qRig, qShape, qWisp, [...qOpen].join(","), Object.keys(qDetail).map(k => k + (qDetail[k].loading ? "L" : qDetail[k].error ? "E" : "D")).join(",")].join("|");
+}
+
+function renderWork(s, force) {
+  const box = $("work");
+  const pcs = s.polecats || [], q = s.queue;
+  const rSeats = readOf(s, "seats"), rQueue = readOf(s, "queue");
+  paintsRead(box, $("worknote"), worseRead(rSeats, rQueue));
+  // The note and the ages are written on every call, above the unchanged-key
+  // early return, so they keep moving between polls (gt-q6h8e).
+  const parts = [];
+  if (s.summary_at) parts.push("seats read " + age(s.summary_at) + " ago");
+  if (q) parts.push("queue read " + age(q.at) + " ago");
+  if (rSeats && rSeats.stale) parts.push(rSeats.error ? "the seats read failed" : "the seats read is old");
+  if (rQueue && rQueue.stale) parts.push(rQueue.error ? "the queue read failed" : "the queue read is old");
+  $("worknote").textContent = parts.join(" · ");
+
+  const key = workKey(s);
+  if (!force && key === wKey) { const now = Date.now(); workSeatRows.forEach(r => paintAges(r, now)); return; }
+  wKey = key;
+  box.replaceChildren();
+  // Nothing read yet: one line, not a line per reader that has not come back.
+  if (!pcs.length && !q && !s.summary) { workSeatRows = []; box.append(el("div", "empty", "waiting for the town…")); return; }
+  workSeats(box, s, pcs, rSeats);
+  workQueue(box, s, q, rQueue);
 }
 
 function spark(points, w, h, color) {
@@ -1040,7 +1157,7 @@ function landingTable(s, names, rows, waiting) {
     const total = (r.lint_secs || 0) + (r.gate_secs || 0) + (r.om_secs || 0);
     tr.title = [r.commit ? "commit " + r.commit : null, total ? "lint " + fmtDur(r.lint_secs || 0) + " + gate " + fmtDur(r.gate_secs || 0) + " + om " + fmtDur(r.om_secs || 0) + " = " + fmtDur(total) : null, r.route ? "route " + r.route : null].filter(Boolean).join(" · ");
     tr.append(main);
-    // By names the holder the way the seats pane does: the short name, and
+    // By names the holder the way the Work panel's seat rows do: the short name, and
     // its rig only where two rigs in view use that name. The row's own rig
     // is the holder's for a live run; for a finished one it is read back from
     // the polecat roster, so a shared short name still gets its rig.
@@ -2727,19 +2844,20 @@ const DEFAULT_QRIG = "all";
 const DEFAULT_QSHAPE = "ok";
 // The Blocked tab hides wisp rows unless the chip is on (gt-q6ed5): a retired
 // patrol or an old polecat run leaves dead step beads behind, and they outnumber
-// the real blocked work. A wisp is a row whose id carries "-wisp-".
+// the real blocked work. The server decides which rows those are (QueueBead.Wisp),
+// the same verdict the Work panel's blocked line counts.
 const DEFAULT_QWISP = false;
 let qRig = DEFAULT_QRIG;
 let qShape = DEFAULT_QSHAPE;
 let qWisp = DEFAULT_QWISP;
 const qOpen = new Set();
 const qDetail = {};
-let qKey = "";
+let wKey = "";
 const QTABS = [["ready", "Ready to build", "ready_total", "ready"], ["landing", "Waiting to land", "landing_total", "landing"], ["blocked", "Blocked", "blocked_total", "blocked"]];
-const isWisp = b => b.id.indexOf("-wisp-") >= 0;
+const isWisp = b => !!b.wisp;
 
 // beadDetailFor fetches one bead's text into store under "rig/id" and calls
-// done when it lands. The Work queue's rows and the Report pane's ids open a
+// done when it lands. The Work panel's rows and the Report pane's ids open a
 // bead through here, so both read the one route and draw the one detail. An
 // entry is {loading}, the detail, or {error}; a bead already in the store is
 // never fetched twice, and a failed read is remembered as the failure it was.
@@ -2755,10 +2873,10 @@ function beadDetailFor(rig, id, store, done) {
 
 function openBead(b) {
   const id = b.rig + "/" + b.id;
-  if (qOpen.has(id)) { qOpen.delete(id); renderQueue(state, true); return; }
+  if (qOpen.has(id)) { qOpen.delete(id); renderWork(state, true); return; }
   qOpen.add(id);
-  beadDetailFor(b.rig, b.id, qDetail, () => renderQueue(state, true));
-  renderQueue(state, true);
+  beadDetailFor(b.rig, b.id, qDetail, () => renderWork(state, true));
+  renderWork(state, true);
 }
 
 function detailBlock(d) {
@@ -2782,40 +2900,19 @@ function detailBlock(d) {
   return box;
 }
 
-function renderQueue(s, force) {
-  const box = $("queue");
+// drawQueueList draws the whole queue into box: the tabs, the store and shape
+// chips, and the rows that open a bead's text. It draws nothing without a queue.
+function drawQueueList(box, s) {
   const q = s.queue;
-  const r = readOf(s, "queue");
-  paintsRead(box, $("queuenote"), r);
-  // The note is written on every call, above the unchanged-key early return, so
-  // its age keeps moving between queue polls instead of freezing with the rows
-  // (gt-q6h8e).
-  if (q) {
-    const ok = (q.ready || []).filter(b => b.shape === "ok").length;
-    $("queuenote").textContent = readCaption(r, [(q.ready_total || 0) + " ready (" + ok + " dispatchable) · " + (q.landing_total || 0) + " landing · " + (q.blocked_total || 0) + " blocked · read " + age(q.at) + " ago"]);
-  } else {
-    $("queuenote").textContent = r ? "unavailable" : "";
-  }
-  if (!q) {
-    const msg = r ? "unavailable — the work queue could not be read" : "reading the work queue…";
-    if (box.dataset.empty !== msg) { box.replaceChildren(el("div", "empty", msg)); box.dataset.empty = msg; }
-    return;
-  }
+  if (!q) return;
   const unshaped = {};
   ((s.dispatch && s.dispatch.named) || []).forEach(n => { if (n.bead && /^unshaped/.test(n.reason)) unshaped[n.bead] = n.reason; });
-  const key = q.at + "|" + qTab + "|" + qRig + "|" + qShape + "|" + [...qOpen].join(",") + "|" + Object.keys(qDetail).map(k => k + (qDetail[k].loading ? "L" : qDetail[k].error ? "E" : "D")).join(",") + "|" + Object.keys(unshaped).join(",");
-  // A pane still holding the placeholder from a failed read is redrawn even
-  // when the queue's own reading is unchanged (gt-q6h8e).
-  if (!force && !box.dataset.empty && key === qKey) return;
-  qKey = key;
-  delete box.dataset.empty;
-  box.replaceChildren();
   if ((q.unreadable || []).length) box.append(el("div", "badc", "⚠ could not read: " + q.unreadable.join(", ") + " (its beads are missing below)"));
   const tabs = el("div", "qtabs");
   QTABS.forEach(([k, label, totalKey]) => {
     const b = el("button", "chip" + (qTab === k ? " on" : ""), label);
     b.append(el("b", "", String(q[totalKey] || 0)));
-    b.onclick = () => { qTab = k; renderQueue(state, true); };
+    b.onclick = () => { qTab = k; renderWork(state, true); };
     tabs.append(b);
   });
   box.append(tabs);
@@ -2835,20 +2932,20 @@ function renderQueue(s, force) {
     const f = el("div", "qtabs");
     const chip = (label, count, on, fn) => { const b = el("button", "chip" + (on ? " on" : ""), label); b.append(el("b", "", String(count))); b.onclick = fn; f.append(b); };
     if (rigNames.length > 1) {
-      chip("all stores", q[totalKey] || all.length, qRig === "all", () => { qRig = "all"; renderQueue(state, true); });
+      chip("all stores", q[totalKey] || all.length, qRig === "all", () => { qRig = "all"; renderWork(state, true); });
       const parkedRigs = q.parked_rigs || [];
-      rigNames.forEach(r => chip(r + (parkedRigs.indexOf(r) >= 0 ? " (parked)" : ""), rigs[r], qRig === r, () => { qRig = r; renderQueue(state, true); }));
+      rigNames.forEach(r => chip(r + (parkedRigs.indexOf(r) >= 0 ? " (parked)" : ""), rigs[r], qRig === r, () => { qRig = r; renderWork(state, true); }));
     }
     if (qTab === "ready") {
       const inRig = all.filter(b => qRig === "all" || b.rig === qRig);
       const ok = inRig.filter(b => b.shape === "ok").length;
-      chip("dispatchable", ok, qShape === "ok", () => { qShape = qShape === "ok" ? "all" : "ok"; renderQueue(state, true); });
-      chip("needs shaping", inRig.filter(b => b.shape === "fix").length, qShape === "fix", () => { qShape = qShape === "fix" ? "all" : "fix"; renderQueue(state, true); });
-      chip("held", inRig.filter(b => b.shape === "held").length, qShape === "held", () => { qShape = qShape === "held" ? "all" : "held"; renderQueue(state, true); });
+      chip("dispatchable", ok, qShape === "ok", () => { qShape = qShape === "ok" ? "all" : "ok"; renderWork(state, true); });
+      chip("needs shaping", inRig.filter(b => b.shape === "fix").length, qShape === "fix", () => { qShape = qShape === "fix" ? "all" : "fix"; renderWork(state, true); });
+      chip("held", inRig.filter(b => b.shape === "held").length, qShape === "held", () => { qShape = qShape === "held" ? "all" : "held"; renderWork(state, true); });
     }
     if (qTab === "blocked") {
       const inRig = all.filter(b => qRig === "all" || b.rig === qRig);
-      chip("wisps", inRig.filter(isWisp).length, qWisp, () => { qWisp = !qWisp; renderQueue(state, true); });
+      chip("wisps", inRig.filter(isWisp).length, qWisp, () => { qWisp = !qWisp; renderWork(state, true); });
     }
     box.append(f);
   }
@@ -2908,7 +3005,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderUsage(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderUsage(state); renderRigs(state); renderWork(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));
@@ -3024,7 +3121,7 @@ paintModelsLine();
 renderChips();
 connect();
 // Ages and elapsed times drift between pushes; redraw the cheap parts locally.
-setInterval(() => { if (state) { renderStrip(state); renderSeats(state); renderTierSweep(state); renderForgejo(state); renderQueue(state); } }, 15000);
+setInterval(() => { if (state) { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); } }, 15000);
 </script>
 </body>
 </html>
