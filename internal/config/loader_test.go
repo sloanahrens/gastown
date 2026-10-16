@@ -222,6 +222,47 @@ func TestRigSettingsWithCustomMergeQueue(t *testing.T) {
 	}
 }
 
+// TestRigSettingsToleratesTheRetiredOMQueueKey: landing.om_queue turned on the
+// om finding queue, which is gone (gt-50k2e). A rig settings file decodes
+// strictly, so the key stays declared or every rig whose file still sets it
+// stops loading. It loads here, and reaches no reader: the loader drops it, so
+// nothing writes it into a settings file either.
+func TestRigSettingsToleratesTheRetiredOMQueueKey(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"type":"rig-settings","version":1,"landing":{"followups":true,"om_queue":true}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadRigSettings(path)
+	if err != nil {
+		t.Fatalf("a settings file carrying the retired landing.om_queue does not load: %v", err)
+	}
+	if loaded.Landing == nil || !loaded.Landing.Followups {
+		t.Errorf("landing = %+v, want the followups setting beside the retired key", loaded.Landing)
+	}
+	if loaded.Landing != nil && loaded.Landing.DeprecatedOMQueue != nil {
+		t.Errorf("the retired landing.om_queue reached the loaded settings as %v", *loaded.Landing.DeprecatedOMQueue)
+	}
+	// A save of what the loader read carries the live key and not the retired
+	// one, so a settings file written from it never sets a dead setting.
+	fresh := filepath.Join(dir, "fresh.json")
+	if err := SaveRigSettings(fresh, loaded); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+	data, err := os.ReadFile(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"om_queue"`) {
+		t.Errorf("saved settings = %s, want the retired key gone", data)
+	}
+	if !strings.Contains(string(data), `"followups": true`) {
+		t.Errorf("saved settings = %s, want the live landing key kept", data)
+	}
+}
+
 // TestRigSettingsFollowupBackpressure pins the wire name of the follow-up
 // feed's backpressure bound: the landing worker reads it out of the rig's own
 // settings/config.json, so `merge_queue.followup_backpressure` is what an

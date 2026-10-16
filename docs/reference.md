@@ -173,6 +173,9 @@ the feed files beads, and merged repo content must not choose that — nor the
 `merge_queue.followup_backpressure` bound the
 feed stops at, which the daemon reads from the same file.
 
+A file that still sets the retired `landing.om_queue` loads: the key is declared
+so strict decoding does not refuse the file, and no reader reads it (gt-50k2e).
+
 **The `forgejo` block is mandatory for any rig that lands.** It is the rig's
 only landing path: the local gate and the force-with-lease push to the target
 were removed once every rig was cut over (gt-fn9e6.32). A rig with no block
