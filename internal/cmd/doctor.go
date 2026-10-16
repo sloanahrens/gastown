@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -104,6 +105,7 @@ Migration checks:
 
 Session hook checks:
   - session-hooks            Check settings.json use session-start.sh
+  - session-hooks-live       Check every live session started with the managed hooks
   - claude-settings          Check Claude settings.json match templates (fixable)
   - deprecated-merge-queue-keys  Detect stale deprecated keys in merge_queue config (fixable)
   - stale-task-dispatch      Detect stale task-dispatch guard in settings.json (fixable)
@@ -165,11 +167,8 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// as part of a default (unwrapped) 'gt doctor' invocation.
 		d.Register(doctor.NewHooksLiveFireCheck())
 	}
-	if len(doctorCheck) > 0 {
-		d.Only(doctorCheck)
-		if len(d.Checks()) == 0 {
-			return fmt.Errorf("no registered check matches --check %v", doctorCheck)
-		}
+	if err := selectDoctorChecks(d, doctorCheck); err != nil {
+		return err
 	}
 
 	// Parse slow threshold (0 = disabled)
@@ -194,6 +193,30 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("doctor found %d error(s)", report.Summary.Errors)
 	}
 
+	return nil
+}
+
+// selectDoctorChecks narrows d to the checks named by --check. Doctor.Only
+// drops a name nothing registers, so a typo beside a real name would run the
+// real one and exit 0; every unknown name is refused instead (gt-uh7hy).
+func selectDoctorChecks(d *doctor.Doctor, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(d.Checks()))
+	for _, c := range d.Checks() {
+		known[c.Name()] = true
+	}
+	var unknown []string
+	for _, n := range names {
+		if !known[n] {
+			unknown = append(unknown, n)
+		}
+	}
+	if len(unknown) > 0 {
+		return fmt.Errorf("no registered check matches --check %s (run 'gt doctor --help' to list checks)", strings.Join(unknown, ", "))
+	}
+	d.Only(names)
 	return nil
 }
 

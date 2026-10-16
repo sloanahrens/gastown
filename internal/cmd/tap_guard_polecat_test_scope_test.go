@@ -1134,3 +1134,30 @@ func TestPolecatTestScope_NestedShapes(t *testing.T) {
 		})
 	}
 }
+
+// Every leading-letter probe has one character after "Test", so a pattern
+// that needs two matched none of them and was judged bounded while it selects
+// every real test (gt-uh7hy).
+func TestRunPatternBoundsRun_TwoCharTestPattern(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		pattern string
+		bounded bool
+	}{
+		{"Test..", false},
+		{"^Test..", false},
+		{"Test.{2,}", false},
+		{"Test[A-Za-z]{2}", false},
+
+		{"^TestApply", true},
+		{"TestA|TestB", true},
+		{"^Test[A-C]..", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.pattern, func(t *testing.T) {
+			if got := runPatternBoundsRun(tt.pattern); got != tt.bounded {
+				t.Errorf("runPatternBoundsRun(%q) = %v, want %v", tt.pattern, got, tt.bounded)
+			}
+		})
+	}
+}

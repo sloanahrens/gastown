@@ -467,19 +467,28 @@ func runSlotReap(cmd *cobra.Command, _ []string) error {
 		OlderThan: slotReapOlderThan,
 		DryRun:    slotReapDryRun,
 	})
+	return finishSlotReap(cmd, report, reapErr)
+}
+
+// finishSlotReap prints the report and returns the error the command exits
+// with. The owner-file half runs before the container half, so a docker
+// failure still leaves real reaping behind it to report — which is why the
+// report prints first and the error second. A container whose removal failed
+// is in Failed with no error from Reap, so it becomes one here: left alone,
+// the run counts the container as removed and exits 0 (gt-uh7hy).
+func finishSlotReap(cmd *cobra.Command, report slot.ReapReport, reapErr error) error {
 	if slotReapJSON {
 		if err := printSlotReapJSON(cmd, report); err != nil {
 			return err
 		}
-		return reapErr
+	} else {
+		printSlotReapReport(cmd, report)
 	}
-	printSlotReapReport(cmd, report)
-
-	// The owner-file half runs before the container half, so a docker failure
-	// still leaves real reaping behind it to report — which is why the report
-	// prints first and the error second.
 	if reapErr != nil {
 		return reapErr
+	}
+	if len(report.Failed) > 0 {
+		return fmt.Errorf("%d gate container(s) could not be removed", len(report.Failed))
 	}
 	return nil
 }
@@ -498,7 +507,11 @@ func printSlotReapReport(cmd *cobra.Command, report slot.ReapReport) {
 			fmt.Fprintf(out, "No gate debris older than %s, and no container whose owning test process is gone.\n", report.OlderThan)
 		}
 	} else {
-		fmt.Fprintf(out, "%s %d gate container(s) that are debris (older than %s with no live reaper, or their owning test process is gone):\n", verb, len(report.Debris), report.OlderThan)
+		count := strconv.Itoa(len(report.Debris))
+		if !report.DryRun && len(report.Failed) > 0 {
+			count = fmt.Sprintf("%d of %d", len(report.Removed), len(report.Debris))
+		}
+		fmt.Fprintf(out, "%s %s gate container(s) that are debris (older than %s with no live reaper, or their owning test process is gone):\n", verb, count, report.OlderThan)
 		for _, v := range report.Debris {
 			fmt.Fprintf(out, "  %s — %s; labels: %s\n", v.Container.Display(), v.Reason, v.Container.LabelSummary())
 		}

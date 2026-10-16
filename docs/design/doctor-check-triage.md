@@ -67,6 +67,7 @@ Recommendation for the follow-up: wire the 35-check fast subset into a patrol (c
 | `hook-attachment-valid` | Hooks | cadence | Cheap Dolt lookup; a hook pointing at a closed molecule strands the agent immediately. |
 | `hook-singleton` | Hooks | cadence | Cheap Dolt lookup; more than one handoff bead per agent is an active routing hazard. |
 | `orphaned-attachments` | Hooks | cadence | Cheap Dolt lookup; a handoff bead for a nonexistent agent is dangling state worth catching promptly. |
+| `session-hooks-live` | Hooks | cadence | Reads the events log and the live tmux sessions; a session that started without the managed hooks runs unguarded until it restarts. |
 | `stale-task-dispatch` | Hooks | cadence | Cheap settings.json grep for a stale guard; the guard is safety-critical (blocks dangerous commands) so drift belongs in a fast loop, not just boot. |
 | `daemon` | Infrastructure | cadence | Is the daemon running -- foundational liveness, cheap process check. |
 | `daemon-liveness` | Infrastructure | cadence | Verifies heartbeat is fresh AND advancing; cheap file-mtime check, catches a wedged (not just dead) daemon. |
