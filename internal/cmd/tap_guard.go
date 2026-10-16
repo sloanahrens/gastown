@@ -94,11 +94,11 @@ func init() {
 
 // shellCommandSeparators are shell operators that start a new command
 // within a single line. Claude Code evaluates Bash permission rules
-// per sub-command, so its "if" glob can fire on a later segment of a
-// compound command (cd x && gh pr create ...) — this guard must inspect
-// each ;/&/&&/||/| segment independently rather than only the start of the
-// whole line, or a leading unrelated segment lets a real PR-workflow
-// command later on the line slip through (gt-wisp-52y4). An unquoted
+// per sub-command, but the hook is registered without an "if" glob and sees
+// the whole line, so this guard must inspect each ;/&/&&/||/| segment
+// independently rather than only the start of the whole line, or a leading
+// unrelated segment lets a real PR-workflow command later on the line slip
+// through (gt-wisp-52y4). An unquoted
 // newline separates commands the same way and arrives here as ";" — see
 // spaceOutShellOperators (gt-3j8u).
 //
@@ -166,7 +166,8 @@ type prWorkflowLauncher struct {
 }
 
 // prWorkflowLaunchers are the commands prWorkflowCommand looks through:
-// segmentCommandWord's launchers plus timeout.
+// segmentCommandWord's launchers plus timeout and the other wrappers that run
+// the command behind them (setsid, doas, ionice, caffeinate, xargs).
 var prWorkflowLaunchers = map[string]prWorkflowLauncher{
 	"env":     {valueFlags: map[string]bool{"-u": true, "--unset": true, "-C": true, "--chdir": true}},
 	"time":    {valueFlags: map[string]bool{"-f": true, "--format": true, "-o": true, "--output": true}},
@@ -179,6 +180,13 @@ var prWorkflowLaunchers = map[string]prWorkflowLauncher{
 	"sudo": {valueFlags: map[string]bool{
 		"-u": true, "-g": true, "-C": true, "-h": true, "-p": true, "-r": true,
 		"-t": true, "-T": true, "-U": true, "-D": true,
+	}},
+	"setsid":     {},
+	"doas":       {valueFlags: map[string]bool{"-u": true, "-C": true}},
+	"ionice":     {valueFlags: map[string]bool{"-c": true, "--class": true, "-n": true, "--classdata": true}},
+	"caffeinate": {valueFlags: map[string]bool{"-t": true, "-w": true}},
+	"xargs": {valueFlags: map[string]bool{
+		"-I": true, "-n": true, "-P": true, "-L": true, "-s": true, "-d": true, "-E": true, "-a": true,
 	}},
 	"timeout": {valueFlags: map[string]bool{"-s": true, "--signal": true, "-k": true, "--kill-after": true}, positionals: 1},
 }
@@ -720,9 +728,8 @@ func isPRCreateCommand(command string) bool {
 // The one exemption the pr-workflow guard grants is keyed on this shape: a
 // polecat's fresh session branch (gt-6hg7), scoped to its own worktree.
 //
-// Leading-command by design: the hook "if" globs that route a command here
-// (Bash(git checkout -b*), Bash(gh pr create*)) are anchored to the
-// command's first word, so the exemption must be too. Keying the old
+// Leading-command by design: the exemption covers the command the line starts
+// with and nothing glued behind it. Keying the old
 // isFeatureBranchCommand's line-wide containment here instead would let a
 // "gh pr create && git checkout -b" chain its PR create past the exemption
 // (gt-cyz8) — so a checkout glued after an && on the same line is NOT branch

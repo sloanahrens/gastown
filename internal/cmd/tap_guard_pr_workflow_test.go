@@ -320,6 +320,13 @@ func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
 		{"command builtin", "command gh pr create", true},
 		{"env after a double dash", "env -- gh pr create", true},
 		{"negation", "! gh pr create", true},
+		{"setsid", "setsid gh pr create", true},
+		{"doas with a user", "doas -u bob gh pr create", true},
+		{"ionice with a class", "ionice -c 3 gh pr create", true},
+		{"caffeinate with a duration", "caffeinate -t 60 gh pr create", true},
+		{"xargs with a flag value", "echo x | xargs -n 1 gh pr create", true},
+		{"git checkout -b behind setsid", "setsid git checkout -b feature/x", true},
+		{"setsid of an unrelated command", "setsid make build", false},
 
 		{"gh --repo separate", "gh --repo o/r pr create", true},
 		{"gh --repo glued", "gh --repo=o/r pr create", true},
@@ -416,6 +423,8 @@ func TestPRWorkflowGuard_WrappedBlockedInAgentContext(t *testing.T) {
 	town := newPolecatTestTown(t)
 	town = town.withEnv("GT_ROLE", "gastown/polecats/"+town.name)
 	branch := "polecat/ruby/gt-zf2vy+mvax487p"
+	tooDeepGh := `bash -c "bash -c \"bash -c \\\"bash -c 'gh pr create'\\\"\""`
+	tooDeepNeither := `bash -c "bash -c \"bash -c \\\"bash -c 'ls -la'\\\"\""`
 
 	tests := []struct {
 		name    string
@@ -435,6 +444,11 @@ func TestPRWorkflowGuard_WrappedBlockedInAgentContext(t *testing.T) {
 		{"session branch behind env keeps the exemption", "env GIT_TRACE=1 git switch -c " + branch, prWorkflowAllow},
 		{"gh pr view behind env", "GH_REPO=o/r gh pr view 12", prWorkflowAllow},
 		{"echo of a wrapped command", "echo env X=1 gh pr create", prWorkflowAllow},
+		// A payload past the nesting cap is unread, so one still naming gh is
+		// refused rather than allowed through the self-filter.
+		{"too deep and naming gh", tooDeepGh, prWorkflowBlockAgentContext},
+		{"session branch chained with a too-deep payload naming gh", "git checkout -b " + branch + " && " + tooDeepGh, prWorkflowBlockAgentContext},
+		{"too deep and naming neither", tooDeepNeither, prWorkflowAllow},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
