@@ -639,12 +639,29 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 // attentionRiskLandings reads the rig's landing records landed at or after
 // since: the risk-path collector's window over the landings file the landing
 // worker writes.
+//
+// Unparsable lines fail the read rather than being skipped: each record is a
+// risk-path item and part of the count the review-backlog rule reads, and a
+// count short by a landing can clear a standing backlog item (gt-8mm0g).
+// land.Since reports those lines through Logf instead of failing.
 func (d *Daemon) attentionRiskLandings(rig string, since time.Time) ([]land.LandingRecord, error) {
 	f, err := land.RigLandingsFile(d.config.TownRoot, rig)
 	if err != nil {
 		return nil, err
 	}
-	return f.Since(since)
+	var unreadable string
+	f.Logf = func(format string, args ...any) { unreadable = fmt.Sprintf(format, args...) }
+	recs, err := f.Since(since)
+	if err != nil {
+		return nil, err
+	}
+	if unreadable != "" {
+		// land's warning names the file, the count and a snippet of the first
+		// line; the error says what that costs the count's reader.
+		d.logger.Printf("attention: %s", unreadable)
+		return nil, errors.New("the landings file has lines this read could not parse, so its count of open reviews is short")
+	}
+	return recs, nil
 }
 
 // attentionReadyToLand reads the rig's actionable gt:ready-to-land beads: the
@@ -1325,6 +1342,9 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 			})
 		}
 	}
+	// Published only when every rig read: a failed rig returned above, and a
+	// read short by a landing is an error from attentionRiskLandings, not a
+	// count the backlog rule could clear a standing item on (gt-8mm0g).
 	s.riskOpen, s.riskCounted = len(out), true
 	return out, nil
 }
