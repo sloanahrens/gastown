@@ -695,11 +695,9 @@ func backtickBodyEnd(text string, start int) int {
 
 // startsWordAt reports whether text[i] begins a shell word, the only place a
 // "#" opens a comment: at the start of text or after a blank, newline or
-// command separator. A "#" inside a word (a#b, $#, ${#x}) or right after a
-// backslash-escaped character (escapedAt is that character's index) is literal.
-//
-// A ")" ends the word in front of it, so "(true)#c" is the subshell then a
-// comment, not one word (gt-5wtmz).
+// command separator. A "#" inside a word (a#b, $#, ${#x}), after a ")" that
+// closes one ("$(date)#x") or right after a backslash-escaped character
+// (escapedAt is that character's index) is literal.
 func startsWordAt(text string, i, escapedAt int) bool {
 	if i == 0 {
 		return true
@@ -708,10 +706,41 @@ func startsWordAt(text string, i, escapedAt int) bool {
 		return false
 	}
 	switch text[i-1] {
-	case ' ', '\t', '\n', ';', '&', '|', '(', ')':
+	case ' ', '\t', '\n', ';', '&', '|', '(':
 		return true
+	case ')':
+		return wordClosingParen(text, i-1)
 	}
 	return false
+}
+
+// wordClosingParen reports whether the ")" at close ends the shell word in
+// front of it, as the one in "(true)#c" does, rather than closing a "$(...)",
+// "$((...))" or process-substitution group, which is a word part: the shell
+// ends a word at the ")" it reads as an operator, so only there does a "#" open
+// a comment and "echo $(date)#tail" prints "date#tail" (gt-5wtmz). A ")" with
+// no "(" of its own reaches a case pattern's, which ends the word too.
+func wordClosingParen(text string, close int) bool {
+	depth := 0
+	for i := close - 1; i >= 0; i-- {
+		switch text[i] {
+		case ')':
+			depth++
+		case '(':
+			if depth > 0 {
+				depth--
+				continue
+			}
+			switch {
+			case i > 0 && (text[i-1] == '$' || text[i-1] == '<' || text[i-1] == '>'):
+				return false
+			case i > 1 && text[i-1] == '(' && text[i-2] == '$':
+				return false
+			}
+			return true
+		}
+	}
+	return true
 }
 
 // closingANSIQuote returns the index of the "'" that closes a $'...' string
@@ -734,12 +763,10 @@ func closingANSIQuote(text string, from int) int {
 // subshell, opens a level of its own; single-quoted, double-quoted and backtick
 // text is stepped over, so a parenthesis inside one counts for nothing.
 //
-// A "#" that starts a word opens a comment to the end of its line, as
-// startsWordAt and the scan in substitutionSpansIn read it: the shell parses a
-// substitution's body as a command list, so a ")" inside such a comment closes
-// nothing and the body runs on to the next ")" on the line after it
-// (gt-5wtmz). A comment that reaches the end of the text leaves nothing to
-// close the "(", so -1 is right there too.
+// A "#" that starts a word opens a comment to the end of its line, so a ")"
+// inside it closes nothing and the body runs on; a comment that reaches the end
+// of the text leaves nothing to close the "(", and -1 is right there too
+// (gt-5wtmz).
 func closingParen(text string, from int) int {
 	depth := 1
 	escapedAt := -1

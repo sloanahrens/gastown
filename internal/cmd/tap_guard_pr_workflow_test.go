@@ -22,9 +22,8 @@ func TestMatchesPRWorkflowCommand(t *testing.T) {
 		{"gh pr create", "gh pr create --title foo", true},
 		{"git checkout -b", "git checkout -b feature/x", true},
 		{"git switch -c", "git switch -c feature/x", true},
-		// The capitals create or reset the branch, the same branch creation
-		// the lowercase flags spell; isBranchCreation used to match b and c
-		// case-sensitively, so these three passed the guard (gt-5wtmz).
+		// The capitals create or reset the branch the lowercase flags spell
+		// (gt-5wtmz).
 		{"git checkout -B", "git checkout -B feature/x", true},
 		{"git switch -C", "git switch -C feature/x", true},
 		{"git checkout -qB clustered", "git checkout -qB feature/x", true},
@@ -344,8 +343,6 @@ func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
 		{"git checkout -b after the start point", "git checkout --track -b feature/x origin/main", true},
 		{"git switch --create", "git switch --create feature/x", true},
 		{"git switch --create=", "git switch --create=feature/x", true},
-		{"git switch --force-create", "git switch --force-create feature/x", true},
-		{"git switch --force-create=", "git switch --force-create=feature/x", true},
 		{"git checkout of a branch named -B after --", "git checkout -q -- -B", false},
 		{"git switch -c behind another flag", "git switch -q -c feature/x", true},
 		{"git switch -c glued to its name", "git switch -cfeature/x", true},

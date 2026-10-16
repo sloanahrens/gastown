@@ -2516,10 +2516,13 @@ func TestSubstitutionSpansCommentAndANSIQuote(t *testing.T) {
 		{"hash inside double quotes", "echo \"# don't\" $(git reset --hard)", []string{"git reset --hard"}},
 		{"hash in a parameter expansion", `echo ${#x} 'a $(git reset --hard)'`, nil},
 		{"apostrophe after the comment ended", "# note\necho 'a $(git reset --hard)'", nil},
-		// A ")" ends the word in front of it, so the "#" after "(true)" opens
-		// a comment and the apostrophe in its body hides nothing: the
-		// substitution on the next line is live (gt-5wtmz).
+		// A "#" opens a comment after the ")" that ends a word and not after
+		// the one that closes a "$(...)" or "<(...)" group, whose "#" is a
+		// word part: the apostrophe after "(true)" hides nothing, and the
+		// process substitution after "$(date)" still runs (gt-5wtmz).
 		{"hash after a subshell is a comment", "(true)#c 'a\n$(git reset --hard)", []string{"git reset --hard"}},
+		{"hash after a substitution close is a word part", "cat $(date)#<(git reset --hard)", []string{"date", "git reset --hard"}},
+		{"comment to the end of the text inside a body", "x=$(# )\n$(git reset --hard)", []string{"# )\n$(git reset --hard)"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
