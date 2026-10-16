@@ -369,8 +369,10 @@ func goTestRunFilterBounds(rest []string) bool {
 // -run=.", and the last one wins). A "$" that closes a pattern ("^TestX$",
 // "TestA$|TestB") is the regexp anchor.
 //
-// The value arrives with its quotes already removed, so a quoted "{1,2}" that
-// is a regexp repeat reads as a brace expansion and is refused with it.
+// The value arrives with its quotes already removed, so a quoted "{1,}" that
+// is a regexp repeat reads as a brace expansion and is refused with it. A
+// "{n,m}" with both bounds numeric is let through quoted or not: expanded, its
+// last word is the pattern with m written in, which still names a test.
 func runValueShellExpanded(value string) bool {
 	if strings.Contains(value, "`") || braceExpansion(value) {
 		return true
@@ -388,7 +390,8 @@ func runValueShellExpanded(value string) bool {
 }
 
 // braceExpansion reports whether value holds a "{" … "}" pair that carries a
-// comma or a ".." between the braces, the two forms bash expands.
+// comma or a ".." between the braces, the two forms bash expands, other than a
+// numeric regexp repeat "{n,m}".
 func braceExpansion(value string) bool {
 	for start := strings.IndexByte(value, '{'); start >= 0; {
 		end := strings.IndexByte(value[start:], '}')
@@ -396,7 +399,7 @@ func braceExpansion(value string) bool {
 			return false
 		}
 		body := value[start+1 : start+end]
-		if strings.Contains(body, ",") || strings.Contains(body, "..") {
+		if (strings.Contains(body, ",") || strings.Contains(body, "..")) && !numericRepeatBody(body) {
 			return true
 		}
 		next := strings.IndexByte(value[start+1:], '{')
@@ -406,6 +409,14 @@ func braceExpansion(value string) bool {
 		start += 1 + next
 	}
 	return false
+}
+
+// numericRepeatBody reports whether the text between braces is "n,m" with both
+// bounds decimal digits: a regexp repeat, and a brace expansion whose words all
+// carry a digit.
+func numericRepeatBody(body string) bool {
+	lo, hi, ok := strings.Cut(body, ",")
+	return ok && isAllDigits(lo) && isAllDigits(hi)
 }
 
 // runPatternBoundsRun reports whether a -run pattern leaves some test names
