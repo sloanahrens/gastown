@@ -707,12 +707,12 @@ func (m *Manager) exists(name string) bool {
 
 // AddOptions configures polecat creation.
 type AddOptions struct {
-	HookBead string // Bead ID to set as hook_bead at spawn time (atomic assignment)
+	HookBead   string // Bead ID to set as hook_bead at spawn time (atomic assignment)
+	BaseBranch string // Override base branch for worktree (e.g., "origin/integration/gt-epic")
 	// Agent is the agent the sling spawns the seat on. It is written to the
 	// agent bead in the same write as HookBead, so the dashboard can still name
 	// the seat's agent after its session has ended.
-	Agent      string
-	BaseBranch string // Override base branch for worktree (e.g., "origin/integration/gt-epic")
+	Agent string
 	// ResumeBranch reuses an existing branch (typically a PR head) for the polecat
 	// worktree instead of creating a fresh polecat/<name>/<bead>+<ts> branch (gh#3602).
 	// When set, the polecat's branch IS this branch — pushes go back to the same ref,
