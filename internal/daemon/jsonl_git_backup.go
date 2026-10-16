@@ -1079,19 +1079,18 @@ func (d *Daemon) pushJsonlBackup(gitRepo string, committed bool, msg string) err
 }
 
 // isOversizeFilePushError reports whether a git push error is the remote
-// refusing the push for a file over its per-file limit — GitHub's "remote:
-// error: GH001: Large files detected" and the "is N MB; this exceeds GitHub's
-// file size limit of 100.00 MB" line beside it. Like isPostBufferPushError it
-// is a string classifier (no exec), cheap enough for the error path and easy
-// to table-test.
+// refusing the push for a file over its per-file limit. A string classifier
+// (no exec), cheap enough for the error path. Each alternative is a size
+// refusal in full: a lone fragment of one must not arm recovery, which drops
+// commits.
 func isOversizeFilePushError(errMsg string) bool {
-	return strings.Contains(errMsg, "GH001") ||
-		strings.Contains(errMsg, "exceeds GitHub's file size limit") ||
-		strings.Contains(errMsg, "Large files detected")
+	return strings.Contains(errMsg, "exceeds GitHub's file size limit") ||
+		(strings.Contains(errMsg, "GH001") && strings.Contains(errMsg, "Large files detected"))
 }
 
-// pushFileLimitBytes is the per-file size this daemon's backup remote refuses:
-// GitHub's shipped limit, or the smaller one a test set (jsonlPushFileLimit).
+// pushFileLimitBytes is the per-file size this daemon's backup remote refuses a
+// push for — a file of exactly this many bytes is one it takes. GitHub's
+// shipped limit, or the smaller one a test set (jsonlPushFileLimit).
 func (d *Daemon) pushFileLimitBytes() int64 {
 	if d.jsonlPushFileLimit > 0 {
 		return d.jsonlPushFileLimit
@@ -1100,38 +1099,19 @@ func (d *Daemon) pushFileLimitBytes() int64 {
 }
 
 // recoverOversizeBackupPush replaces the backup repository's unpushed range
-// with a single commit on origin's tip and pushes that (gt-q30zx).
-//
-// A remote refuses a push for a file over its limit, and it weighs the objects
-// the push SENDS: every commit in origin/<branch>..HEAD. A commit made before
-// the export sharded its tables (gt-4btp4) therefore keeps its over-limit blob
-// on that path forever, and the push is refused on every tick no matter how
-// often the export is re-run — the tree being committed holds only shards, but
-// the history still carries the blob. Dropping the range is the only way out,
-// and until this recovery existed it took an operator moving the branch back
-// to origin's tip by hand.
-//
-// The range is REPLACED, not rewritten: origin's tip becomes the new commit's
-// parent, so the push that follows is a fast-forward and every commit origin
-// already has is untouched. Nor is anything dropped blindly. Recovery runs
-// only when
-//
-//   - the tree being committed weighs under the limit. A file still over it
-//     means the export is what needs fixing, and flattening the history would
-//     only fail the next push;
-//   - origin's tip is an ancestor of HEAD, so the commits being dropped are
-//     exactly the range origin does not have — a local commit origin lacks
-//     cannot have contributed content the new tree keeps (gt-63sz);
-//   - at least one commit is actually unpushed, which is the only state this
-//     refusal can describe.
-//
-// The commit subject is the one this tick built, counts and metric version
-// included, so the spike baseline's history keeps the level it read
-// (gt-26qqh). On any refusal HEAD is left where it was, and the caller reports
-// the original push failure.
+// with one commit parented on origin's tip and pushes it, so a push refused
+// for a blob an unpushed commit still carries can succeed (gt-q30zx). It
+// declines rather than drop a range this repository cannot account for,
+// leaving HEAD and the remote untouched for the caller to report.
 func (d *Daemon) recoverOversizeBackupPush(gitRepo, branch, msg string) error {
 	limit := d.pushFileLimitBytes()
 	g := d.backupGitAt(gitRepo, gitCmdTimeout)
+
+	// A remote weighs the objects a push SENDS, not the tree being committed,
+	// so a blob only an unpushed commit carries refuses every later push. The
+	// range is replaced, not rewritten: origin's tip becomes the new commit's
+	// parent, so the push that follows is a fast-forward and every commit
+	// origin already has stays untouched.
 
 	// The index is what the replacing commit will carry, and commitAndPush has
 	// just committed it (or found nothing staged), so it is HEAD's tree.
@@ -1159,7 +1139,7 @@ func (d *Daemon) recoverOversizeBackupPush(gitRepo, branch, msg string) error {
 		return fmt.Errorf("checking whether origin/%s's tip is an ancestor of HEAD: %w", branch, err)
 	}
 	if !contained {
-		return fmt.Errorf("origin/%s holds commits HEAD does not — refusing to replace a range this repository cannot account for", branch)
+		return fmt.Errorf("origin/%s holds commits HEAD does not (gt-63sz) — refusing to replace a range this repository cannot account for", branch)
 	}
 
 	var staged int
@@ -1177,6 +1157,9 @@ func (d *Daemon) recoverOversizeBackupPush(gitRepo, branch, msg string) error {
 			// already carries HEAD's content, so there is nothing to push.
 			return nil
 		}
+		// The replacing commit reuses this tick's subject, counts and metric
+		// version included: the spike baseline is read back out of those lines
+		// (gt-26qqh).
 		return g.CommitWithAuthor(msg, jsonlBackupAuthor)
 	}); err != nil {
 		return fmt.Errorf("replacing the unpushed range with a commit on %s: %w", originTip, err)
@@ -1193,13 +1176,14 @@ func (d *Daemon) recoverOversizeBackupPush(gitRepo, branch, msg string) error {
 	return nil
 }
 
-// overLimitFiles lists the files of a tree whose blob reaches limit bytes,
+// overLimitFiles lists the files of a tree whose blob is over limit bytes,
 // each with its size, in path order so a tick's diagnosis names the same files
-// the tick before it did.
+// the tick before it did. The boundary is the remote's own: a file of exactly
+// limit bytes is one a push carries.
 func overLimitFiles(sizes map[string]int64, limit int64) []string {
 	paths := make([]string, 0, len(sizes))
 	for path, size := range sizes {
-		if size >= limit {
+		if size > limit {
 			paths = append(paths, path)
 		}
 	}
