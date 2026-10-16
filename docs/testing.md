@@ -235,6 +235,24 @@ func WithClock(c clockwork.Clock) Option { return func(g *Gate) { g.clock = c } 
 
 Its tests hand `NewGate(WithRuntime(&fakeRuntime{...}), WithClock(clk))` a scripted `docker ps` listing (`internal/slot/helpers_test.go`).
 
+### The page
+
+Before writing a dashboard page test, read this. `internal/dashboard/page_harness_test.go` runs index.html's own script in a pure-Go JavaScript engine (`github.com/dop251/goja`, a test-only dependency) over a DOM stub, so a page test calls one of the page's functions and reads back the element it drew (gt-tq4ee):
+
+```go
+dom := newPageDOM(t)
+dom.call(t, "renderHealth", map[string]any{"verdict": "degraded", "causes": []any{...}})
+if pill := dom.element(t, "verdict"); pill.Class != "pill degraded" {
+	t.Errorf("#verdict wears %q", pill.Class)
+}
+```
+
+Reading index.html as a string — what every page test did before this harness — checks that a function mentions the right names, not that it draws anything. A renderHealth that painted every verdict grey, `pill unknown`, passed those tests and fails this one: each case runs the function over a reading and reads the page's own output. `dom.call` fails on a function the page no longer declares, so a test naming a dead function is a red test rather than a passing one that checks nothing.
+
+The stub is the browser the page runs in, and it is small on purpose: the render functions build elements, so `createElement`, `append`, `textContent`, `className`, `classList`, `hidden` and `title` carry them. Two limits keep it honest. `getElementById` answers only for the ids index.html's markup carries, read from the file, so a render into an id the markup dropped fails instead of passing against a stub that invents elements. And no timer ever fires: the test drives each redraw, and nothing renders behind it. A test that needs more DOM adds it to the stub in the same change.
+
+The engine is a library, not a tool: nothing here starts a process, sleeps, reads a clock or opens a socket, so the unit tier stays hermetic and no rule in [The rules](#the-rules) needs an exemption for a page test.
+
 ### The clock
 
 Every sleep, deadline and time read goes through `clockwork.Clock`:
