@@ -85,6 +85,21 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"go -C dir flag with a non-test subcommand", "GT_TEST_DOCKER=1 go -C /tmp build ./internal/beads/...", false},
 		{"go -C dir flag with no subcommand", "GT_TEST_DOCKER=1 go -C /tmp", false},
 
+		// A bare or "." target is judged in the directory -C names, not in
+		// the hook's own (unreadable here, which getwd's failure makes empty).
+		// A -C dir the guard can place answers for the target; one it cannot
+		// is refused, the reading an unplaceable make -C gets (gt-tzdpe).
+		{"go -C to a placed dir, bare target", "GT_TEST_DOCKER=1 go -C /tmp test .", false},
+		{"go -C to a relative dir under an unplaced cwd", "GT_TEST_DOCKER=1 go -C internal/beads test .", true},
+		{"go -C= to a relative dir under an unplaced cwd", "GT_TEST_DOCKER=1 go -C=internal/beads test .", true},
+		{"go -C to a relative dir under an unplaced cwd, no target", "GT_TEST_DOCKER=1 go -C internal/beads test", true},
+
+		// A hook cwd the guard cannot read (getwd failed, so the walk has "")
+		// is no directory to resolve a bare or "." target against either, so
+		// the target is refused rather than exempted for want of one.
+		{"cwd-relative go test with an unreadable cwd", "GT_TEST_DOCKER=1 go test .", true},
+		{"bare go test with an unreadable cwd", "GT_TEST_DOCKER=1 go test", true},
+
 		// Allowed: unrelated commands.
 		{"unrelated command", "ls -la", false},
 		{"empty command", "", false},
@@ -620,6 +635,52 @@ func TestEvaluateContainerSuiteCommand_CwdStyle(t *testing.T) {
 							tt.command, tt.relDir, got, reason, tt.blocked)
 					}
 				})
+			}
+		})
+	}
+}
+
+// A bare or "." target is judged in the directory the invocation's own -C dir
+// flag names, not in the one the hook runs in: Go chdirs on -C before it runs
+// the command, so the shell's cwd has no say in what the target tests
+// (gt-tzdpe). An explicit package argument carries its own path and keeps its
+// reading. The polecat scope rule's half of the same hole is gt-zn7ma, so
+// these rows pin the container rule alone.
+func TestContainerSuiteGoTestTargetFollowsTheCDirFlag(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/refinery/rig")
+	container := filepath.Join(root, "internal", "beads")
+	light := filepath.Join(root, "internal", "style")
+	containerLink := symlinkedTree(t, container)
+
+	tests := []struct {
+		name    string
+		cwd     string
+		command string
+		blocked bool
+	}{
+		{"-C into the container package", light, "GT_TEST_DOCKER=1 go -C " + container + " test .", true},
+		{"-C= into the container package", light, "GT_TEST_DOCKER=1 go -C=" + container + " test ./", true},
+		{"-C into the container package, bare target", light, "GT_TEST_DOCKER=1 go -C " + container + " test", true},
+		{"versioned binary with a -C dir", light, "GT_TEST_DOCKER=1 go1.22.0 -C " + container + " test .", true},
+		{"-C through a link into the container package", light, "GT_TEST_DOCKER=1 go -C " + containerLink + " test .", true},
+		{"a relative -C composed onto an absolute one", light, "GT_TEST_DOCKER=1 go -C " + root + " -C internal/beads test .", true},
+
+		// The reverse reading: a -C dir the hook is not in stops the hook's
+		// own directory from refusing the target, and the switch still
+		// decides whether any of it can reach Docker.
+		{"-C out of the container package", container, "GT_TEST_DOCKER=1 go -C " + light + " test .", false},
+		{"-C out of the container package, bare target", container, "GT_TEST_DOCKER=1 go -C " + light + " test", false},
+		{"-C to the module root", container, "GT_TEST_DOCKER=1 go -C " + root + " test .", false},
+		{"-C away with the switch off", light, "go -C " + container + " test .", false},
+		{"explicit container argument read whatever -C names", light, "GT_TEST_DOCKER=1 go -C " + light + " test ./internal/beads/...", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, tt.cwd), tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) from %s blocked = %v (reason %q), want %v",
+					tt.command, tt.cwd, got, reason, tt.blocked)
 			}
 		})
 	}

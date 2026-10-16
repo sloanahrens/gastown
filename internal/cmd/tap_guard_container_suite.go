@@ -34,11 +34,14 @@ This guard blocks, when running as a polecat or refinery:
   - go test <pkg...>   where <pkg...> intersects the testcontainers-backed
                         package list (containerSuitePackages) or is a
                         whole-repo wildcard (./..., ...). Go's global -C dir
-                        flag between the binary and "test" ("go -C <dir>
-                        test ...") does not hide the invocation (gt-saorq)
+                        flag between the binary and "test", in either
+                        spelling ("go -C <dir> test ..."), does not hide the
+                        invocation, and the toolchain's own binary names
+                        (go, go1.22.0, gotip) own it too (gt-saorq)
   - go test .          (or a bare "go test") when the directory it runs in
                         is one of those packages — the cwd is judged like
-                        any other target, not exempted
+                        any other target, not exempted, and a -C dir flag
+                        moves it (gt-tzdpe)
   - make test           in a Go tree, where it runs the module's whole
                         "go test ./..."; a non-Go rig's own make target is
                         left alone. The tree is the one make itself runs in,
@@ -297,6 +300,10 @@ func commandSetsDockerTests(tokens []string, value string) bool {
 // adjacency to "test", so Go's global -C dir flag between the two ("go -C
 // /tmp test ./internal/cmd") does not hide the invocation (gt-saorq); any
 // other flag between them still ends the walk, so it reads as no invocation.
+// That walk also accepts the toolchain's own binary names (go, go1.22.0,
+// gotip, isGoBinaryName), and the -C one is where the invocation runs: a bare
+// or "." target is judged in the directory that flag names, not in the
+// shell's (goTestRunDir, gt-tzdpe).
 func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string, cwdKnown bool) (reason string, matched []string) {
 	if len(tokens) == 0 {
 		return "", nil
@@ -311,11 +318,16 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string, c
 	}
 
 	if i := findGoSubcommand(lower, "test"); i >= 0 && dockerOn {
+		runCwd, runCwdKnown := goTestRunDir(tokens, lower, i, cwd, cwdKnown)
 		pkgArgs := goTestPackageArgs(tokens[i+1:])
-		if cwdTargetsUnplacedDir(pkgArgs, cwdKnown) {
+		// An empty runCwd is a directory nothing can be resolved against: the
+		// hook's own cwd when getwd failed. A cwd-relative target is refused
+		// there rather than exempted, the reading the make rule gives its ""
+		// tree (makeTreeDir, makeActsOnWholeGoModule).
+		if cwdTargetsUnplacedDir(pkgArgs, runCwdKnown && runCwd != "") {
 			return "bare 'go test' names a directory the guard cannot place", nil
 		}
-		wholeRepo, pkgs := containerSuiteTarget(pkgArgs, cwd)
+		wholeRepo, pkgs := containerSuiteTarget(pkgArgs, runCwd)
 		if wholeRepo {
 			return "bare 'go test' with a whole-repo target touches every testcontainers-backed package", nil
 		}
@@ -385,10 +397,14 @@ func findTestInvocation(tokens []string, tool string) int {
 // "make build" — or -1. For make, options may sit between the program and
 // the target ("make -j4 test", "make -e -w test", "make -C . test") and are
 // stepped over: the target is what decides what runs, not the flags in
-// front of it. For go, the target must immediately follow the tool with no
-// flags between them (mirrors the interim host-hygiene hook's regex, which
-// only recognized the exact "go test ./..."/"go build ./..." adjacency —
-// see idleGateReason in tap_guard_dangerous.go).
+// front of it.
+//
+// Its go row is the narrow reading — the target must follow the binary
+// directly, the adjacency the interim host-hygiene hook's regex recognized
+// (idleGateReason, tap_guard_dangerous.go). A guard that judges a go
+// invocation reads it through findGoSubcommand instead, which walks the -C
+// dir flag; the container-suite guard does (gt-saorq), and gt-zn7ma tracks
+// the same widening for the polecat scope rule, the caller still on this row.
 func findInvocation(tokens []string, tool, target string) int {
 	for i := 0; i+1 < len(tokens); i++ {
 		if tokens[i] != tool {
@@ -437,6 +453,55 @@ var goTestValueFlags = map[string]bool{
 	"-benchtime": true, "-coverprofile": true, "-covermode": true,
 	"-coverpkg": true, "-cpuprofile": true, "-memprofile": true,
 	"-blockprofile": true, "-mutexprofile": true, "-outputdir": true,
+}
+
+// goTestRunDir returns the directory a "go … test" invocation runs in and
+// whether the guard could place it: cwd, moved by each -C dir flag that sits
+// between the binary and the subcommand (sub, the index
+// findGoSubcommand returned). Go chdirs on -C before it runs anything, so a
+// bare or "." target names a package under that directory — judging it
+// against the shell's own cwd refuses 'cd /tmp && go -C <container pkg> test
+// .' and allows 'go -C /tmp test .' from inside the container package, the
+// opposite of what Go runs in each case (gt-tzdpe).
+//
+// tokens is the segment in original case — the directory argument is read
+// from it, because a lowercased path names a different file on a
+// case-sensitive filesystem — and lower is the same tokens lowercased, which
+// is what the flag and binary matching needs.
+//
+// The flags compose left to right, each resolved against the directory the
+// one before it named, the way make -C chains (makeRunDir). A -C that cannot
+// be placed leaves the directory unknown, which keeps the refusal an
+// unplaceable make -C gets: a relative -C under a cwd this guard could not
+// resolve names nothing it can read, so a bare or "." target is refused
+// rather than read as an argument of its own (cwdTargetsUnplacedDir).
+func goTestRunDir(tokens, lower []string, sub int, cwd string, cwdKnown bool) (dir string, known bool) {
+	bin := goBinaryBefore(lower, sub)
+	if bin < 0 {
+		return cwd, cwdKnown
+	}
+	if !cwdKnown {
+		cwd = "" // the walk's spelling for a directory it cannot place
+	}
+	dir, known = cwd, cwdKnown
+	for i := bin + 1; i < sub; i++ {
+		arg := ""
+		switch {
+		case isGoDirFlagValue(lower[i]):
+			_, arg, _ = strings.Cut(tokens[i], "=")
+		case isGoDirFlag(lower[i]) && i+1 < sub:
+			i++ // the next token is the directory this -C names
+			arg = tokens[i]
+		default:
+			continue
+		}
+		resolved, ok := resolveMakeDir(dir, arg)
+		if !ok {
+			return "", false
+		}
+		dir, known = resolved, true
+	}
+	return dir, known
 }
 
 // goTestPackageArgs extracts the package-path arguments from the tokens
