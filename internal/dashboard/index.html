@@ -3018,8 +3018,10 @@ function costGCP(box, c) {
 }
 
 // The Claude plan line of the Cost panel, drawn directly under the DeepSeek part
-// so the two spend meters are read side by side. A week its reader could not
-// place is never drawn as 0%, which would say the limit is untouched (gt-qn3j4).
+// so the two spend meters are read side by side, both paces an hour's worth and
+// a day's, as the DeepSeek line's own pace is hourly (gt-d2sy4). A week its
+// reader could not place is never drawn as 0%, which would say the limit is
+// untouched (gt-qn3j4).
 //
 // The series carries limits and a price, not a plan's name, so the line names
 // what it has and not a subscription.
@@ -3051,6 +3053,22 @@ const planDay = secs => {
 // not send is a dash, as money draws a dollar it was not sent.
 const planPct = v => v == null ? "–" : Math.round(v) + "%";
 const planPace = v => v == null ? "–" : (v > 0 ? "+" : "") + Number(v).toFixed(1) + "%/day";
+
+// planHourly is the same pace over an hour instead of a day, with what that hour
+// of plan use is worth beside it: a point of the weekly limit is a hundredth of
+// weekly_value_usd, so the hour's points price at that share of the plan's week,
+// and the tilde marks an estimate of plan value rather than a bill. A pace that
+// draws as no points an hour draws a dash instead of "+0.00%/h": the reader
+// sends zero both for a week flat to the tenth and for a window with no sample
+// an hour apart, the page cannot tell those apart, and of the two errors the
+// zero is the one that says the limit is untouched. The daily figure beside it
+// keeps the flat reading (gt-d2sy4).
+const planHourly = (perDay, weeklyValue, window) => {
+  const pct = perDay == null ? NaN : Number(perDay) / 24;
+  if (!(Math.abs(pct) >= 0.005)) return "– " + window;
+  const worth = weeklyValue == null ? "" : " (~" + money(pct / 100 * weeklyValue) + "/h)";
+  return (pct > 0 ? "+" : "") + pct.toFixed(2) + "%/h" + worth + " " + window;
+};
 
 // planPrice is the plan's monthly price, not a bill: the line reads "$200/mo"
 // whole, since cents on a monthly price are noise.
@@ -3116,6 +3134,10 @@ function costClaudePlan(box, c) {
     planPct(c.weekly_pct) + " of this week's limit",
     c.weekly_resets_at ? "resets " + planReset(c.weekly_resets_at) : "no reset instant in the newest sample",
     planPace(c.pace_per_day_24h) + " (24h)",
+    // The two paces again as an hour's worth, beside the DeepSeek line's own
+    // hourly pair, which is how the two meters are read against each other.
+    planHourly(c.pace_per_day_1h, c.weekly_value_usd, "last 1h"),
+    planHourly(c.pace_per_day_24h, c.weekly_value_usd, "last 24h"),
     "projected " + planPct(c.projected_pct_at_reset) + " at reset",
     // A week already at its limit is reached at no pace, so the reader sends 0
     // for it rather than a day count.
@@ -3128,6 +3150,10 @@ function costClaudePlan(box, c) {
     "5-hour limit " + planPct(c.five_hour_pct) + " used" + (c.five_hour_resets_at ? ", resets " + planReset(c.five_hour_resets_at) : ", no reset instant in the newest sample"),
     "1-hour pace " + planPace(c.pace_per_day_1h),
     "about " + money(c.used_value_usd) + " of this week's " + money(c.weekly_value_usd) + ", approximate (the plan's share of the month, not a bill)",
+    // The hourly figures' dollars are the plan's value and the line's colour is
+    // the projection's, neither of which the line has room to say (gt-d2sy4).
+    c.weekly_value_usd == null ? null : "the dollars beside each hourly pace are plan value at " + money(c.weekly_value_usd / 100) + " a point of the week, approximate and not a bill",
+    "the colour comes from the projection: " + planPct(c.projected_pct_at_reset) + " at reset, past the limit bad, past " + CLAUDE_PLAN_CEILING_PCT + "% a warning, as a week already at " + CLAUDE_PLAN_CEILING_PCT + "% of the limit is",
     planAPIEquivalent(c),
     c.sampled_at ? "newest sample " + fmtDur((Date.now() - c.sampled_at * 1000) / 1000) + " ago" : null,
     c.state_error ? "state not kept: " + c.state_error : null,
