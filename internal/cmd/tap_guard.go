@@ -193,14 +193,24 @@ var prWorkflowLaunchers = map[string]prWorkflowLauncher{
 
 // prWorkflowCommand returns the command a shell segment runs, from its command
 // word on. It looks through the group openers and control keywords in front
-// (trimShellKeywords), leading NAME=value assignments, and launchers with
-// their flags. payloads holds the command line a launcher itself carries, as
-// in env -S 'gh pr create'. argv is empty when nothing runs.
+// (trimShellKeywords), leading NAME=value assignments, a command substitution
+// standing where the command word goes, and launchers with their flags.
+// payloads holds the command line a launcher itself carries, as in
+// env -S 'gh pr create'. argv is empty when nothing runs.
 func prWorkflowCommand(segment []string) (argv, payloads []string) {
 	seg := trimShellKeywords(segment)
 	for len(seg) > 0 {
 		word := seg[0]
 		if isEnvAssignment(word) || word == "!" {
+			seg = seg[1:]
+			continue
+		}
+		// A substitution in the command word's place expands to the command,
+		// and the shell runs the words behind it as that command's own when
+		// the expansion is empty ("$(echo) gh pr create" runs gh), so those
+		// words are judged as a command line (gt-qgya2). The expansion itself
+		// is unreadable, and prWorkflowSubstitutions judges its body.
+		if word == prWorkflowSubstitutionWord {
 			seg = seg[1:]
 			continue
 		}
@@ -389,20 +399,31 @@ func prWorkflowSubstitutions(command string) []string {
 	return append(bodies, heredocBodySubstitutions(command)...)
 }
 
-// prWorkflowSplitBodyParen returns body with a space in front of a ")" it ends
-// on, so the word the ")" was glued to is judged whole.
+// prWorkflowSplitBodyParen returns body with a space in front of each ")" it
+// ends on, so every word they were glued to is judged whole.
 //
 // The body of a substitution the text leaves unterminated runs to the end of
 // the text, so a ")" there lands inside the body and hides the word it touches:
 // "x=$(echo `gh pr create)" hands "gh pr create)" over one level down, whose
 // last word is not the "create" the line would have run, and the gh inside it
-// went unjudged (gt-4t56h).
+// went unjudged (gt-4t56h). A run of them hides a word per ")", so the whole
+// run is split (gt-qgya2).
 func prWorkflowSplitBodyParen(body string) string {
 	last := len(body) - 1
 	if last < 1 || body[last] != ')' {
 		return body
 	}
-	return body[:last] + " )"
+	first := last
+	for first > 1 && body[first-1] == ')' {
+		first--
+	}
+	var b strings.Builder
+	b.Grow(len(body) + 2*(len(body)-first))
+	b.WriteString(body[:first])
+	for range last + 1 - first {
+		b.WriteString(" )")
+	}
+	return b.String()
 }
 
 // prWorkflowNamesGhOrGit finds gh or git as a word of its own, path-qualified
