@@ -383,6 +383,112 @@ func TestManagerAddSyncsRemotesFromRig(t *testing.T) {
 	}
 }
 
+// A rig with no mayor clone still provisions crew clones with the rig's
+// remotes: they come from the shared bare .repo.git, which carries what AddRig
+// configured on the clone it did not make (gt-jmqc5).
+func TestManagerAddSyncsRemotesFromBareRepoWithoutMayorClone(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
+	tmpDir := t.TempDir()
+
+	rigPath := filepath.Join(tmpDir, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("failed to create rig dir: %v", err)
+	}
+
+	// The rig's remotes: origin is the fork, plus an upstream remote.
+	forkRepoPath := filepath.Join(tmpDir, "fork.git")
+	upstreamRepoPath := filepath.Join(tmpDir, "upstream.git")
+	f.InitBare(t, forkRepoPath)
+	f.InitBare(t, upstreamRepoPath)
+	bareRepoPath := filepath.Join(rigPath, ".repo.git")
+	f.InitBare(t, bareRepoPath)
+	bare := f.Open(bareRepoPath).(gitfake.CrewRepo)
+	if _, err := bare.AddRemote("origin", forkRepoPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bare.AddRemote("upstream", upstreamRepoPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// The rig was cloned from upstream — the mismatch syncing remotes fixes.
+	r := &rig.Rig{
+		Name:   "test-rig",
+		Path:   rigPath,
+		GitURL: upstreamRepoPath,
+	}
+	mgr := fakeManager(t, f, r)
+
+	worker, err := mgr.Add("bareclone", false)
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	crewGit := f.Open(worker.ClonePath)
+	originURL, err := crewGit.RemoteURL("origin")
+	if err != nil {
+		t.Fatalf("failed to get crew origin URL: %v", err)
+	}
+	if originURL != forkRepoPath {
+		t.Errorf("crew origin = %q, want %q (the rig's fork, from .repo.git)", originURL, forkRepoPath)
+	}
+	upstreamURL, err := crewGit.RemoteURL("upstream")
+	if err != nil {
+		t.Fatalf("failed to get crew upstream URL: %v", err)
+	}
+	if upstreamURL != upstreamRepoPath {
+		t.Errorf("crew upstream = %q, want %q (from .repo.git)", upstreamURL, upstreamRepoPath)
+	}
+}
+
+// Where a rig has both, the mayor clone is still what crew clones copy from:
+// .repo.git is the fallback, not the new source of truth (gt-jmqc5).
+func TestManagerAddPrefersMayorCloneOverBareRepo(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
+	tmpDir := t.TempDir()
+
+	rigPath := filepath.Join(tmpDir, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("failed to create rig dir: %v", err)
+	}
+
+	forkRepoPath := filepath.Join(tmpDir, "fork.git")
+	staleRepoPath := filepath.Join(tmpDir, "stale.git")
+	f.InitBare(t, forkRepoPath)
+	f.InitBare(t, staleRepoPath)
+
+	// The clone holds the fork; the bare repo still points at where the rig was
+	// cloned from before the fork was configured.
+	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
+	f.Clone(t, forkRepoPath, mayorRigPath)
+	bareRepoPath := filepath.Join(rigPath, ".repo.git")
+	f.InitBare(t, bareRepoPath)
+	if _, err := f.Open(bareRepoPath).(gitfake.CrewRepo).AddRemote("origin", staleRepoPath); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &rig.Rig{
+		Name:   "test-rig",
+		Path:   rigPath,
+		GitURL: staleRepoPath,
+	}
+	mgr := fakeManager(t, f, r)
+
+	worker, err := mgr.Add("preferclone", false)
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	originURL, err := f.Open(worker.ClonePath).RemoteURL("origin")
+	if err != nil {
+		t.Fatalf("failed to get crew origin URL: %v", err)
+	}
+	if originURL != forkRepoPath {
+		t.Errorf("crew origin = %q, want %q (the mayor clone's fork)", originURL, forkRepoPath)
+	}
+}
+
 func TestManagerRenameValidatesNewName(t *testing.T) {
 	t.Parallel()
 	f := gitfake.New()

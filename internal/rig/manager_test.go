@@ -1780,6 +1780,160 @@ func TestAddRig_MayorCloneProtectsBeads(t *testing.T) {
 	}
 }
 
+// TestAddRig_FinishesWithoutAMayorClone is gt-jmqc5: the rig's repository is
+// the shared bare .repo.git, so a clone that cannot be created leaves a
+// complete rig rather than a failed add whose rollback takes .repo.git with it.
+func TestAddRig_FinishesWithoutAMayorClone(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+	gitURL := remoteRepo(t, f, filepath.Join(t.TempDir(), "source"), nil)
+	manager.git = mayorCloneRefused{manager.git}
+
+	if _, err := manager.AddRig(AddRigOptions{
+		Name:          "cloneless",
+		GitURL:        gitURL,
+		BeadsPrefix:   "cl",
+		SkipDoltCheck: true,
+	}); err != nil {
+		t.Fatalf("AddRig with a refused mayor clone: %v", err)
+	}
+
+	rigPath := filepath.Join(root, "cloneless")
+	if _, err := os.Stat(filepath.Join(rigPath, ".repo.git", "HEAD")); err != nil {
+		t.Errorf("rig has no shared bare repo: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, "mayor", "rig", ".git")); !os.IsNotExist(err) {
+		t.Errorf("mayor clone = %v, want the rig to have none", err)
+	}
+	// The rig is usable: registered, and with the beads directory the rest of
+	// the town resolves the prefix through.
+	if _, ok := rigsConfig.Rigs["cloneless"]; !ok {
+		t.Error("rig was not registered in rigs.json")
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, ".beads")); err != nil {
+		t.Errorf("rig has no beads directory: %v", err)
+	}
+}
+
+// A repo that tracks .beads/ adopts its database through the mayor clone
+// (InitBeads points the rig's .beads/redirect at mayor/rig/.beads), so a clone
+// git refuses there fails the add rather than leaving a rig that quietly runs
+// its own database beside the repo's (gt-jmqc5).
+func TestAddRig_RefusesATrackedBeadsRepoWithoutAMayorClone(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+
+	tracked := func(name, prefix string) string {
+		return remoteRepo(t, f, filepath.Join(t.TempDir(), name), map[string]string{
+			".beads/config.yaml":   "prefix: " + prefix + "\n",
+			".beads/metadata.json": `{"database":"beads_` + prefix + `"}`,
+		})
+	}
+	redirect := func(name string) string {
+		data, err := os.ReadFile(filepath.Join(root, name, ".beads", "redirect"))
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(data))
+	}
+
+	// The same repo adds with a clone: the refusal is what fails, not the rig.
+	if _, err := manager.AddRig(AddRigOptions{
+		Name:          "tracked",
+		GitURL:        tracked("withclone", "tk"),
+		BeadsPrefix:   "tk",
+		SkipDoltCheck: true,
+	}); err != nil {
+		t.Fatalf("AddRig with a mayor clone: %v", err)
+	}
+	if got := redirect("tracked"); got != "mayor/rig/.beads" {
+		t.Errorf("rig added with a clone: .beads/redirect = %q, want the clone's tracked beads", got)
+	}
+
+	manager.git = mayorCloneRefused{manager.git}
+	_, err := manager.AddRig(AddRigOptions{
+		Name:          "trackedless",
+		GitURL:        tracked("cloneless", "tl"),
+		BeadsPrefix:   "tl",
+		SkipDoltCheck: true,
+	})
+	if err == nil {
+		t.Fatal("AddRig succeeded, want a failure: this repo's tracked .beads/ is read through the clone")
+	}
+	for _, want := range []string{".beads/", "tracks", "refused the clone"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %q", err, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "trackedless")); !os.IsNotExist(err) {
+		t.Errorf("rig directory = %v, want the failed add rolled back", err)
+	}
+	if _, ok := rigsConfig.Rigs["trackedless"]; ok {
+		t.Error("rig was registered in rigs.json despite the failed add")
+	}
+}
+
+// --sparse-checkout configures the mayor clone's working tree, so a clone git
+// refuses fails that add too: the rig would otherwise drop an option the
+// operator asked for (gt-jmqc5).
+func TestAddRig_RefusesToDropASparseCheckoutWithTheClone(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+	gitURL := remoteRepo(t, f, filepath.Join(t.TempDir(), "source"), nil)
+	manager.git = mayorCloneRefused{manager.git}
+
+	_, err := manager.AddRig(AddRigOptions{
+		Name:           "sparse",
+		GitURL:         gitURL,
+		BeadsPrefix:    "sp",
+		SparseCheckout: []string{"docs"},
+		SkipDoltCheck:  true,
+	})
+	if err == nil {
+		t.Fatal("AddRig succeeded, want a failure: --sparse-checkout needs the clone it configures")
+	}
+	if !strings.Contains(err.Error(), "--sparse-checkout") {
+		t.Errorf("error = %q, want it to name --sparse-checkout", err)
+	}
+}
+
+// TestRepoFilesTrackBeads reads a bare repo's tree for the files a beads
+// database keeps in git: no working tree holds them, and they are what decides
+// whether a rig added without a clone would run its own database (gt-jmqc5).
+func TestRepoFilesTrackBeads(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+	withBeads := remoteRepo(t, f, filepath.Join(t.TempDir(), "withbeads"), map[string]string{
+		".beads/config.yaml": "prefix: wb\n",
+	})
+	withoutBeads := remoteRepo(t, f, filepath.Join(t.TempDir(), "withoutbeads"), nil)
+
+	for name, tc := range map[string]struct {
+		url  string
+		want bool
+	}{
+		"tracks .beads/": {withBeads, true},
+		"no .beads/":     {withoutBeads, false},
+	} {
+		bare := filepath.Join(t.TempDir(), ".repo.git")
+		if err := manager.git.CloneBareWithBranch(tc.url, bare, "main"); err != nil {
+			t.Fatalf("%s: CloneBareWithBranch: %v", name, err)
+		}
+		got, err := repoFilesTrackBeads(manager.openGitDir(bare, ""), "main")
+		if err != nil {
+			t.Errorf("%s: repoFilesTrackBeads: %v", name, err)
+			continue
+		}
+		if got != tc.want {
+			t.Errorf("repoFilesTrackBeads(%s) = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
 // TestAddRig_BranchFlag verifies that --branch is passed to the bare clone so
 // the bare repo's HEAD and origin tracking ref both point to the specified branch.
 func TestAddRig_BranchFlag(t *testing.T) {

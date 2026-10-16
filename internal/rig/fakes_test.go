@@ -1,6 +1,7 @@
 package rig
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -206,4 +207,39 @@ func (d *fakeDolt) SetIssuePrefix(_, database, prefix string) error {
 	defer d.mu.Unlock()
 	d.prefixes[database] = prefix
 	return nil
+}
+
+// errMayorCloneRefused is what mayorCloneRefused reports for every clone that
+// would land a working tree.
+var errMayorCloneRefused = errors.New("test: the remote refused the clone")
+
+// mayorCloneRefused is the town's git with the working-tree clones refused: the
+// bare clone lands, the mayor clone that follows it does not. It is how a rig
+// that has .repo.git and no mayor clone comes about (gt-jmqc5).
+type mayorCloneRefused struct{ Repo }
+
+// ShowFileAtRev is the ref read the tracked-beads probe makes. A Repo does not
+// carry it, so this wrapper forwards it from the repository it holds.
+func (m mayorCloneRefused) ShowFileAtRev(ref, path string) (string, error) {
+	reader, ok := m.Repo.(refFileReader)
+	if !ok {
+		return "", errors.New("test: this Repo cannot read a file at a ref")
+	}
+	return reader.ShowFileAtRev(ref, path)
+}
+
+func (mayorCloneRefused) CloneBranch(string, string, string) error {
+	return errMayorCloneRefused
+}
+
+func (mayorCloneRefused) CloneBranchWithReference(string, string, string, string) error {
+	return errMayorCloneRefused
+}
+
+func (mayorCloneRefused) CloneBranchPartial(string, string, string, string) error {
+	return errMayorCloneRefused
+}
+
+func (mayorCloneRefused) CloneBranchPartialWithReference(string, string, string, string, string) error {
+	return errMayorCloneRefused
 }

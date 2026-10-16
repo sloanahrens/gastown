@@ -103,15 +103,15 @@ func (r *Rig) DefaultBranch() string {
 //
 // The rig root is not usually a git worktree: `gt rig add` lays out the clones
 // at <rig>/mayor/rig and <rig>/refinery/rig, while the rig root holds only the
-// .beads/ redirect and the agent directories. Callers that need to run git in
-// the rig's repository (the daemon's git_hygiene patrol, and scripts that
-// enumerate rigs through `gt rig list --json`) need one of those clones — the
-// rig root would make `git -C` resolve to the enclosing town repo instead.
+// .beads/ redirect and the agent directories. A caller that needs to run git in
+// the rig's repository wants the shared .repo.git (BareRepoPath) where the rig
+// has one, or a clone from below; the rig root would make `git -C` resolve to
+// the enclosing town repo instead.
 //
 // Candidates are tried in the same order as Manager.detectGitURL: the rig root
 // first (legacy and adopted layouts check the repository out in place), then
 // the mayor and refinery clones. A candidate only counts when it is the root of
-// its own working tree; see isWorkTreeRoot for why that is stricter than
+// its own working tree; see IsWorkTreeRoot for why that is stricter than
 // `git rev-parse --git-dir`.
 func (r *Rig) RepoPath() string {
 	candidates := []string{
@@ -120,14 +120,28 @@ func (r *Rig) RepoPath() string {
 		filepath.Join(r.Path, "refinery", "rig"),
 	}
 	for _, candidate := range candidates {
-		if isWorkTreeRoot(candidate) {
+		if IsWorkTreeRoot(candidate) {
 			return candidate
 		}
 	}
 	return ""
 }
 
-// isWorkTreeRoot reports whether path is the root of a git working tree.
+// BareRepoPath returns <rig>/.repo.git when that directory is a git directory,
+// and "" when the rig has none: the shared repository the rig's agent worktrees
+// are added from, and the rig's repository where there is no working clone.
+//
+// HEAD is the test rather than the directory name, which a rig usually has with
+// nothing behind it.
+func (r *Rig) BareRepoPath() string {
+	dir := filepath.Join(r.Path, ".repo.git")
+	if _, err := os.Stat(filepath.Join(dir, "HEAD")); err != nil {
+		return ""
+	}
+	return dir
+}
+
+// IsWorkTreeRoot reports whether path is the root of a git working tree.
 //
 // Both regular clones (.git directory) and linked worktrees (.git file pointing
 // at the shared git directory) qualify, so a plain os.Stat is enough for both.
@@ -136,7 +150,7 @@ func (r *Rig) RepoPath() string {
 // is the case that matters here: the town root is itself git-tracked, so
 // `git -C <rig>` succeeds by upward search and reports the town repository,
 // not the rig's.
-func isWorkTreeRoot(path string) bool {
+func IsWorkTreeRoot(path string) bool {
 	_, err := os.Stat(filepath.Join(path, ".git"))
 	return err == nil
 }

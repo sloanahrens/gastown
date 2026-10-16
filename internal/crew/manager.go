@@ -299,8 +299,8 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 		}
 	}
 
-	// Sync remotes from mayor/rig so crew clone matches the rig's remote config.
-	// This prevents origin pointing to upstream instead of the fork.
+	// Sync remotes from the rig's repository so the crew clone matches the rig's
+	// remote config. This prevents origin pointing to upstream instead of the fork.
 	if err := m.syncRemotesFromRig(crewPath); err != nil {
 		if m.rig.PushURL != "" {
 			if rmErr := os.RemoveAll(crewPath); rmErr != nil {
@@ -407,16 +407,14 @@ func (m *Manager) addLocked(name string, createBranch bool) (*CrewWorker, error)
 	return crew, nil
 }
 
-// syncRemotesFromRig copies remote configuration from the mayor/rig repo to a crew clone.
-// This ensures crew clones have the same origin (fork) and upstream as the rig,
-// preventing repo ID mismatches and broken formula slinging.
+// syncRemotesFromRig copies remote configuration from the rig's repository to a
+// crew clone. This ensures crew clones have the same origin (fork) and upstream
+// as the rig, preventing repo ID mismatches and broken formula slinging.
 func (m *Manager) syncRemotesFromRig(crewPath string) error {
-	rigRepoPath := filepath.Join(m.rig.Path, "mayor", "rig")
-	if _, err := os.Stat(rigRepoPath); err != nil {
-		return fmt.Errorf("mayor/rig not found at %s", rigRepoPath)
+	rigGit, err := m.rigRepo()
+	if err != nil {
+		return err
 	}
-
-	rigGit := m.gitAt(rigRepoPath)
 	crewGit := m.gitAt(crewPath)
 
 	remotes, err := rigGit.Remotes()
@@ -497,6 +495,32 @@ func (m *Manager) syncRemotesFromRig(crewPath string) error {
 	}
 
 	return nil
+}
+
+// rigRepo opens the repository a crew clone copies its remote configuration
+// from: the mayor/rig clone while the rig has one — where the town has always
+// read them, so a rig that has one keeps the remotes it had — else the rig's
+// shared bare .repo.git, which carries the same ones. A rig whose mayor clone
+// is gone still provisions crew clones that point at the rig's fork (gt-jmqc5).
+func (m *Manager) rigRepo() (crewRepo, error) {
+	mayorRigPath := filepath.Join(m.rig.Path, "mayor", "rig")
+	if rig.IsWorkTreeRoot(mayorRigPath) {
+		return m.gitAt(mayorRigPath), nil
+	}
+	if bareRepoPath := m.rig.BareRepoPath(); bareRepoPath != "" {
+		return m.gitAtBare(bareRepoPath), nil
+	}
+	return nil, fmt.Errorf("rig %s has no repository to read remotes from: neither %s nor %s is a git repository", m.rig.Name, mayorRigPath, filepath.Join(m.rig.Path, ".repo.git"))
+}
+
+// gitAtBare opens the bare repository at dir through openGit, or as
+// git.NewGitWithDir(dir, ""): a bare repo has no working tree for gitAt's
+// git.NewGit to take.
+func (m *Manager) gitAtBare(dir string) crewRepo {
+	if m.openGit != nil {
+		return m.openGit(dir)
+	}
+	return git.NewGitWithDir(dir, "")
 }
 
 // Remove deletes a crew worker.
