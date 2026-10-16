@@ -46,7 +46,7 @@ No idle reuse in the happy path. Polecats move: IDLE -> WORKING -> DONE.
 - **Idle** = not yet assigned and safe to use.
 - **Done** = work done, session killed, waiting for the landing worker and cleanup.
 - **Stalled** = supposed to be working, but stopped. The daemon restarts it.
-- **Zombie** = a live tmux session with no worktree directory (the polecat was nuked incompletely); the same session with no agent bead is foreign, not a zombie.
+- **Zombie** = see the table above; a session with no agent bead is foreign, not a zombie.
 
 ## The Retired Completion Model
 
@@ -129,11 +129,11 @@ The Claude session is **ephemeral**. It cycles frequently:
 continues working—only the Claude context refreshes.
 
 ```
-Session 1: Steps 1-3 → context fills → handoff
-Session 2: Steps 4-5 → gt done
+Session 1: work → context fills → handoff
+Session 2: resume from the hook → gt done
 ```
 
-All three sessions are the **same polecat**. The sandbox persists throughout.
+Both sessions are the **same polecat**. The sandbox persists throughout.
 
 ### Sandbox Layer
 
