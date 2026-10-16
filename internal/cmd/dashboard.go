@@ -244,6 +244,17 @@ func dashboardCloudChecksPath(townRoot string) string {
 	return filepath.Join(townRoot, ".runtime", "cloud-check", "status.json")
 }
 
+// newDashboardClaudePlanReader builds the Cost panel's plan meter: the town's
+// own status line series, priced by the flag, with the usage scan's records
+// behind it so the plan line can lay what the town's Claude tokens would have
+// cost on the API beside the flat plan price (gt-d8sem). The records come
+// through the panel's own reader, whose cache the two share, so a month of
+// files is decoded once for both panels.
+func newDashboardClaudePlanReader(townRoot string, usage *dashUsageReader, planUSDMonth float64) *dashboard.ClaudePlanReader {
+	return dashboard.NewClaudePlanReader(dashboardClaudePlanPath(townRoot), planUSDMonth).
+		WithUsage(usage.monthRecords)
+}
+
 // dashboardClaudePlanPath is where the status line appends its Claude plan
 // samples inside the town: one JSON line per reading, appended and never
 // rewritten. The sampler is ~/.claude/statusline-command.sh, outside the repo.
@@ -321,7 +332,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	})
 	deepReview := newDashDeepReviewReader(townRoot)
 	usage := newDashUsageReader(townRoot)
-	claudePlan := dashboard.NewClaudePlanReader(dashboardClaudePlanPath(townRoot), claudePlanUSD)
+	claudePlan := newDashboardClaudePlanReader(townRoot, usage, claudePlanUSD)
 	rework := newDashReworkReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
 	return dashboard.NewHub(dashboard.Config{

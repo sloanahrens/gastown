@@ -107,6 +107,50 @@ func TestUsageReaderAggregatesTheRecordsDirectory(t *testing.T) {
 	}
 }
 
+// The plan's month reaches further back than any list the panel draws, so its
+// records come through the same cache: a file either reader decoded is served to
+// the other, and the panel's own day still leaves the month's older files out of
+// its folds.
+func TestUsageReaderSharesItsCacheWithThePlansMonth(t *testing.T) {
+	t.Parallel()
+
+	root, records := usageTestDir(t)
+	writeUsageRecord(t, records, "gt-recent.work.json",
+		usageRecordBody("gt-recent", "work", "polecat", usageReaderNow.Add(-time.Hour), 300), time.Hour)
+	writeUsageRecord(t, records, "gt-old.work.json",
+		usageRecordBody("gt-old", "work", "polecat", usageReaderNow.Add(-20*24*time.Hour), 300), 20*24*time.Hour)
+
+	r := newDashUsageReader(root)
+
+	// The month reaches the file the panel's own day leaves unopened.
+	if month := r.monthRecords(usageReaderNow); len(month) != 2 {
+		t.Fatalf("the plan's record set = %d records, want the day's and the month-old one: %+v", len(month), month)
+	}
+	// The panel still folds only its own window, and the month's file stays in
+	// the shared cache rather than leaving with the day's read.
+	u := r.read(usageReaderNow)
+	if len(u.TopBeads) != 1 || u.TopBeads[0].Bead != "gt-recent" {
+		t.Errorf("the panel's day = %+v, want only the recent record", u.TopBeads)
+	}
+	if len(r.cache) != 2 {
+		t.Errorf("the cache holds %d files, want both: the reader that drew the day dropped what the month had opened", len(r.cache))
+	}
+}
+
+// A records directory that cannot be listed is no record set at all, which the
+// plan reader draws as no figure rather than as a month of no spend.
+func TestUsageReaderTellsNoRecordsFromAnEmptyMonth(t *testing.T) {
+	t.Parallel()
+
+	if recs := newDashUsageReader(t.TempDir()).monthRecords(usageReaderNow); recs != nil {
+		t.Errorf("a missing records directory gave %d records, want nil", len(recs))
+	}
+	root, _ := usageTestDir(t)
+	if recs := newDashUsageReader(root).monthRecords(usageReaderNow); recs == nil || len(recs) != 0 {
+		t.Errorf("an empty records directory gave %v, want an empty set", recs)
+	}
+}
+
 // A file too old for any list the page draws is left unopened. The observable
 // is the skipped count: an unreadable file the reader opens is counted, so an
 // ancient one that is not counted was never opened.

@@ -301,19 +301,21 @@ func TestCostPanelKeepsEveryDeepSeekField(t *testing.T) {
 // reading the panel draws a bad-coloured line from.
 func claudePlan(now time.Time, over map[string]any) map[string]any {
 	p := map[string]any{
-		"weekly_pct":             38.0,
-		"five_hour_pct":          9.0,
-		"weekly_resets_at":       now.Add(52 * time.Hour).Unix(),
-		"five_hour_resets_at":    now.Add(3 * time.Hour).Unix(),
-		"pace_per_day_1h":        3.1,
-		"pace_per_day_24h":       9.2,
-		"projected_pct_at_reset": 104.0,
-		"hits_limit_in_days":     6.1,
-		"plan_usd_month":         200.0,
-		"weekly_value_usd":       46.05,
-		"used_value_usd":         17.5,
-		"sampled_at":             now.Unix(),
-		"stale":                  false,
+		"weekly_pct":               38.0,
+		"five_hour_pct":            9.0,
+		"weekly_resets_at":         now.Add(52 * time.Hour).Unix(),
+		"five_hour_resets_at":      now.Add(3 * time.Hour).Unix(),
+		"pace_per_day_1h":          3.1,
+		"pace_per_day_24h":         9.2,
+		"projected_pct_at_reset":   104.0,
+		"hits_limit_in_days":       6.1,
+		"plan_usd_month":           200.0,
+		"weekly_value_usd":         46.05,
+		"used_value_usd":           17.5,
+		"api_equivalent_week_usd":  31.4,
+		"api_equivalent_month_usd": 120.05,
+		"sampled_at":               now.Unix(),
+		"stale":                    false,
 	}
 	for k, v := range over {
 		if v == nil {
@@ -512,6 +514,51 @@ func TestCostPanelClaudePlanHoverCarriesTheFiveHourLimitAndThePace(t *testing.T)
 	})
 	if !strings.Contains(lines[1].Title, "5-hour limit 9% used, no reset instant") {
 		t.Errorf("the hover of a reading with no reset instant = %q", lines[1].Title)
+	}
+}
+
+// The hover also carries what the town's own Claude tokens would have cost on
+// the API, over the week and the billing month: drawn beside the flat plan price
+// the line shows, the saving is visible. Both are approximations - a plan
+// weights tokens differently from the meter - and the hover says so rather than
+// reading as a bill (gt-d8sem).
+func TestCostPanelClaudePlanHoverCarriesTheAPIEquivalentDollars(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	lines, _ := drawCost(t, map[string]any{
+		"spend":       map[string]any{"balance": 12.5},
+		"claude_plan": claudePlan(now, nil),
+	})
+	if len(lines) < 2 {
+		t.Fatalf("the panel drew %d lines: %+v", len(lines), lines)
+	}
+	want := "API-equivalent $31.40 this week, $120.05 this month, approximate: plans weight tokens differently from the API"
+	if !strings.Contains(lines[1].Title, want) {
+		t.Errorf("the plan line's hover has no %q: %q", want, lines[1].Title)
+	}
+
+	// A model the price file has no rates for leaves the figures a floor, and
+	// the hover names what it could not price.
+	lines, _ = drawCost(t, map[string]any{
+		"spend":       map[string]any{"balance": 12.5},
+		"claude_plan": claudePlan(now, map[string]any{"unpriced": []any{"claude-opus-9-9"}}),
+	})
+	if !strings.Contains(lines[1].Title, "counted at zero, no list price: claude-opus-9-9") {
+		t.Errorf("the hover of a payload with unpriced models = %q, want them named", lines[1].Title)
+	}
+
+	// A payload with no figures behind it - the usage records could not be read
+	// - draws no dollars at all: $0.00 there would read as a month that spent
+	// nothing.
+	lines, _ = drawCost(t, map[string]any{
+		"spend": map[string]any{"balance": 12.5},
+		"claude_plan": claudePlan(now, map[string]any{
+			"api_equivalent_week_usd": nil, "api_equivalent_month_usd": nil,
+		}),
+	})
+	if strings.Contains(lines[1].Title, "API-equivalent") {
+		t.Errorf("the hover prices a month the reader could not read: %q", lines[1].Title)
 	}
 }
 
