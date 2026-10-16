@@ -69,10 +69,10 @@ type fakeEnv struct {
 	rootWorkErr map[string]error
 	rootReads   []string
 	branches    map[string]string
-	branchErr     map[string]error
-	commentErr    error
-	notesErr      map[string]error
-	reopenErr     map[string]error
+	branchErr   map[string]error
+	commentErr  error
+	notesErr    map[string]error
+	reopenErr   map[string]error
 	// heldBeads names beads whose guarded release no longer holds: another
 	// actor reassigned them since the list read.
 	heldBeads map[string]bool
