@@ -489,6 +489,18 @@ func omSkewClone(t *testing.T, d *Daemon, changed []string, diffErr *cliReply) *
 	})
 }
 
+// omSkewDiffCalls returns the `git -C <clone> diff ...` calls the check made,
+// leaving out the git grep that reads the embed directives.
+func omSkewDiffCalls(cli *fakeCLI) [][]string {
+	var out [][]string
+	for _, args := range cli.argvs("-C") {
+		if slices.Contains(args, "diff") {
+			out = append(out, args)
+		}
+	}
+	return out
+}
+
 // TestOMSkewIgnoresCommitsThatCannotChangeTheBinary: a differing sha whose
 // files are all non-binary raises nothing, and one that touches anything that
 // can build into om, or that the clone cannot list, raises as before (gt-qozft).
@@ -532,13 +544,14 @@ func TestOMSkewIgnoresCommitsThatCannotChangeTheBinary(t *testing.T) {
 			if cli == nil {
 				return
 			}
-			diffs := cli.argvs("-C")
+			diffs := omSkewDiffCalls(cli)
 			if len(diffs) != 1 {
 				t.Fatalf("git calls = %q, want exactly one diff in the clone", diffs)
 			}
 			wantSrc := filepath.Join(d.config.TownRoot, rebuildOMSrcDir)
-			if diffs[0][1] != wantSrc || !slices.Contains(diffs[0], omSkewInstalledSHA) || !slices.Contains(diffs[0], omSkewRemoteSHA) {
-				t.Errorf("git %q does not diff the installed sha against origin/main in %s", diffs[0], wantSrc)
+			if diffs[0][1] != wantSrc || !slices.Contains(diffs[0], omSkewInstalledSHA) ||
+				!slices.Contains(diffs[0], omSkewRemoteSHA) || diffs[0][len(diffs[0])-1] != "--" {
+				t.Errorf("git %q does not diff the two commit ids in %s behind a --", diffs[0], wantSrc)
 			}
 		})
 	}
@@ -590,5 +603,207 @@ func TestOMSkewNonBinaryPath(t *testing.T) {
 		if got := omSkewNonBinaryPath(path); got != want {
 			t.Errorf("omSkewNonBinaryPath(%q) = %v, want %v", path, got, want)
 		}
+	}
+}
+
+// TestOMSkewCloneFailureLogsOnce: a clone that cannot list the range leaves the
+// alert raised — the check fails toward alarming — and writes one line per
+// distinct failure rather than the same line an hour (gt-8n9hj).
+func TestOMSkewCloneFailureLogsOnce(t *testing.T) {
+	t.Parallel()
+	d, rec := omSkewDaemon(t)
+	var logs lockedBuffer
+	d.logger = log.New(&logs, "", 0)
+	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+	failing := true
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		if !gitSub(c, "diff") {
+			return cliReply{}
+		}
+		if failing {
+			return cliReply{stderr: "fatal: bad object " + omSkewInstalledSHA, code: 128}
+		}
+		return cliReply{stdout: "docs/gate.md\x00"}
+	})
+
+	d.omSkewOnce()
+	d.omSkewOnce()
+	d.omSkewOnce()
+
+	if got := strings.Count(logs.String(), "cannot list the files between"); got != 1 {
+		t.Errorf("logged the unanswerable diff %d times, want once: %s", got, logs.String())
+	}
+	if esc := rec.Escalations(); len(esc) != 1 {
+		t.Errorf("escalations = %+v, want the one raise for a skew no diff could dismiss", esc)
+	}
+
+	// The clone answers, then fails again: the failure is news a second time.
+	failing = false
+	d.omSkewOnce()
+	failing = true
+	d.omSkewOnce()
+
+	if got := strings.Count(logs.String(), "cannot list the files between"); got != 2 {
+		t.Errorf("logged the diff failure %d times, want it logged again after the clone answered: %s", got, logs.String())
+	}
+}
+
+// TestOMSkewUnreadableEmbedsLogOnce: the embed directives are the last question
+// a reading asks, so a clone that answers the diff but not those logs the
+// failure once rather than the same line an hour (gt-8n9hj).
+func TestOMSkewUnreadableEmbedsLogOnce(t *testing.T) {
+	t.Parallel()
+	d, rec := omSkewDaemon(t)
+	var logs lockedBuffer
+	d.logger = log.New(&logs, "", 0)
+	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "diff"):
+			return cliReply{stdout: "docs/gate.md\x00"}
+		case gitSub(c, "grep"):
+			return cliReply{stderr: "fatal: bad object " + omSkewRemoteSHA, code: 128}
+		}
+		return cliReply{}
+	})
+
+	d.omSkewOnce()
+	d.omSkewOnce()
+	d.omSkewOnce()
+
+	if got := strings.Count(logs.String(), "cannot read the om source's embed directives"); got != 1 {
+		t.Errorf("logged the unreadable directives %d times, want once: %s", got, logs.String())
+	}
+	if esc := rec.Escalations(); len(esc) != 1 {
+		t.Errorf("escalations = %+v, want the one raise for a skew no probe could dismiss", esc)
+	}
+}
+
+// TestOMSkewAlertsWhenAnEmbedCarriesAnExemptPath: the allowlist is a shape rule
+// and a //go:embed directive is what makes it wrong, so a docs-only change a
+// directive reaches keeps the alert (gt-8n9hj).
+func TestOMSkewAlertsWhenAnEmbedCarriesAnExemptPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		changed string
+		grep    string
+		grepErr *cliReply
+		grepEC  int // exit status of an answer carrying no output
+		alert   bool
+	}{
+		{name: "the file a directive names", changed: "docs/gate.md", grep: "docs/doc.go:3://go:embed gate.md\n", alert: true},
+		{name: "a README named from the tree root", changed: "README.md", grep: "main.go:9://go:embed README.md\n", alert: true},
+		{name: "a directory a directive names", changed: "docs/templates/a.md", grep: "docs/doc.go:3://go:embed templates\n", alert: true},
+		{name: "a glob over the file's directory", changed: "docs/sub/a.md", grep: "docs/doc.go:3://go:embed sub/*.md\n", alert: true},
+		{name: "an all: pattern", changed: "docs/.hidden", grep: "docs/doc.go:3://go:embed all:.hidden\n", alert: true},
+		{name: "a quoted pattern", changed: "docs/a b.md", grep: "docs/doc.go:3://go:embed \"a b.md\"\n", alert: true},
+		{name: "a config file a root directive names", changed: ".om.json", grep: "main.go:7://go:embed .om.json\n", alert: true},
+		{name: "a directive in a test source", changed: "docs/gate.md", grep: "docs/doc_test.go:3://go:embed gate.md\n"},
+		{name: "a directive outside the file's tree", changed: "docs/gate.md", grep: "internal/x/x.go:3://go:embed docs/gate.md\n"},
+		{name: "a directive naming another file", changed: "docs/gate.md", grep: "docs/doc.go:3://go:embed other.md\n"},
+		{name: "a line that only starts like a directive", changed: "docs/gate.md", grep: "docs/doc.go:3://go:embedding gate.md\n"},
+		{name: "a tree with no directive", changed: "docs/gate.md", grepEC: 1},
+		{name: "directives that cannot be read", changed: "docs/gate.md", grepErr: &cliReply{stderr: "fatal: bad object", code: 128}, alert: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, rec := omSkewDaemon(t)
+			mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+			withRebuildGTCli(t, d, func(c cliCall) cliReply {
+				switch {
+				case gitSub(c, "diff"):
+					return cliReply{stdout: tc.changed + "\x00"}
+				case gitSub(c, "grep"):
+					if tc.grepErr != nil {
+						return *tc.grepErr
+					}
+					return cliReply{stdout: tc.grep, code: tc.grepEC}
+				}
+				return cliReply{}
+			})
+
+			d.omSkewOnce()
+
+			if got := len(rec.Escalations()); (got == 1) != tc.alert || got > 1 {
+				t.Errorf("escalations = %+v, want alert=%v", rec.Escalations(), tc.alert)
+			}
+		})
+	}
+}
+
+// TestOMSkewEmbedRuleCovers pins what a directive reaches. go:embed patterns
+// are relative to the naming package's directory and may not leave it.
+func TestOMSkewEmbedRuleCovers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		dir     string
+		pattern string
+		path    string
+		covers  bool
+	}{
+		{name: "an exact name", dir: "", pattern: "README.md", path: "README.md", covers: true},
+		{name: "the same name deeper", dir: "", pattern: "README.md", path: "docs/README.md"},
+		{name: "a name in another directory", dir: "internal/x", pattern: "gate.md", path: "docs/gate.md"},
+		{name: "a sibling directory is unreachable", dir: "internal/x", pattern: "gate.md", path: "internal/y/gate.md"},
+		{name: "a directory carries its subtree", dir: "docs", pattern: "templates", path: "docs/templates/a/b.md", covers: true},
+		{name: "a directory does not cover its parent", dir: "docs", pattern: "templates", path: "docs/a.md"},
+		{name: "a glob over one level", dir: "docs", pattern: "*/*.md", path: "docs/sub/a.md", covers: true},
+		{name: "a glob does not cross the directory", dir: "docs", pattern: "*/*.md", path: "docs/sub/deeper/a.md"},
+		{name: "a quoted pattern with a space", dir: "docs", pattern: "a b.md", path: "docs/a b.md", covers: true},
+		{name: "a pattern for a file the tree lacks", dir: "docs", pattern: "gone.md", path: "docs/gate.md"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			r := omSkewEmbedRule{dir: tc.dir, pattern: tc.pattern}
+			if got := omSkewEmbedRuleCovers(r, tc.path); got != tc.covers {
+				t.Errorf("omSkewEmbedRuleCovers(%+v, %q) = %v, want %v", r, tc.path, got, tc.covers)
+			}
+		})
+	}
+}
+
+// TestOMSkewEmbedPatterns pins the reading of one directive: the all: prefix
+// comes off, and a quoted pattern holding a space stays one pattern.
+func TestOMSkewEmbedPatterns(t *testing.T) {
+	t.Parallel()
+	tests := map[string][]string{
+		" a b":            {"a", "b"},
+		" all:docs/x.md":  {"docs/x.md"},
+		" \"a b.md\" c":   {"a b.md", "c"},
+		" `a b.md`":       {"a b.md"},
+		" all:a all:b":    {"a", "b"},
+		"":                nil,
+		" \"unterminated": nil,
+	}
+	for rest, want := range tests {
+		if got := omSkewEmbedPatterns(rest); !slices.Equal(got, want) {
+			t.Errorf("omSkewEmbedPatterns(%q) = %q, want %q", rest, got, want)
+		}
+	}
+}
+
+// TestOMSkewDiffRefusesRevisionsThatAreNotCommitIDs: both revisions reach git's
+// argv, so a value that looks like an option is refused before the call rather
+// than read as one (gt-8n9hj).
+func TestOMSkewDiffRefusesRevisionsThatAreNotCommitIDs(t *testing.T) {
+	t.Parallel()
+	d, _ := omSkewDaemon(t)
+	cli := omSkewClone(t, d, []string{".om.json"}, nil)
+
+	if _, err := d.omSkewChangedPaths(d.config.TownRoot, omSkewInstalledSHA, omSkewRemoteSHA); err != nil {
+		t.Fatalf("a diff of two commit ids failed: %v", err)
+	}
+	if _, err := d.omSkewChangedPaths(d.config.TownRoot, "--output=/tmp/om-skew", omSkewRemoteSHA); err == nil {
+		t.Error("an installed revision that is not a commit id was diffed")
+	}
+	if _, err := d.omSkewChangedPaths(d.config.TownRoot, omSkewInstalledSHA, "--no-index"); err == nil {
+		t.Error("a remote revision that is not a commit id was diffed")
+	}
+	if diffs := omSkewDiffCalls(cli); len(diffs) != 1 {
+		t.Errorf("git calls = %q, want only the one diff of two commit ids", diffs)
 	}
 }

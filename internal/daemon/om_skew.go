@@ -2,9 +2,11 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -51,12 +53,17 @@ const (
 	omSkewRemoteRef = "refs/heads/main"
 )
 
-// omSkewNonBinaryPaths are the paths that cannot change the installed om: a
-// commit that touches only these leaves the binary as it was, so the installed
-// sha differing from origin/main over them is not a skew. A path in none of
-// them (Go source, go.mod and go.sum, the build and install scripts, anything
-// unknown) can change the binary and keeps the alert. A name ending in "/" is
-// a directory prefix; any other is an exact path.
+// omSkewNonBinaryPaths are the paths whose shape says om's build does not read
+// them: a commit that touches only these leaves the binary as it was, so the
+// installed sha differing from origin/main over them is not a skew. A path in
+// none of them (Go source, go.mod and go.sum, the build and install scripts,
+// anything unknown) can change the binary and keeps the alert. A name ending in
+// "/" is a directory prefix; any other is an exact path.
+//
+// Shape is not the whole answer: a //go:embed directive carries a file listed
+// here into the binary whatever it looks like, so omSkewNoEmbedReaches checks
+// every name on this list against the om source's directives before the list
+// dismisses a skew (gt-8n9hj).
 var omSkewNonBinaryPaths = []string{".om.json", "docs/", "README.md", "CHANGELOG.md", "LICENSE", ".gitignore"}
 
 // omSkewMonitor is the check's state: the start guard, the open alert, and
@@ -77,6 +84,12 @@ type omSkewMonitor struct {
 	// lastReadErr is the error last logged, so an offline town logs once per
 	// change rather than once an hour.
 	lastReadErr string
+	// lastCloneErr is the message last logged about the clone failing to
+	// answer a question past the two shas (the diff, the embed directives). It
+	// is lastReadErr's suppression for those: a clone that cannot answer
+	// repeats the same line every hour otherwise, and the log stops being a
+	// record of what changed (gt-8n9hj).
+	lastCloneErr string
 }
 
 // startOMSkewMonitor starts the check, once per daemon, from the landing
@@ -153,18 +166,47 @@ func (d *Daemon) omSkewRead(townRoot string) omSkewReading {
 // in. When the clone cannot answer (missing, unreadable, or without either
 // sha) the answer is false, so the alert still fires.
 func (d *Daemon) omSkewBinaryUnchanged(townRoot, installed, remote string) bool {
+	unchanged, err := d.omSkewNoFileCanChangeTheBinary(townRoot, installed, remote)
+	d.omSkewNoteCloneErr(err)
+	return err == nil && unchanged
+}
+
+// omSkewNoFileCanChangeTheBinary answers the question in full: what the clone
+// reports differs, and whether an embed directive reaches an exempt path among
+// it. err is a question the clone could not answer, which leaves the caller
+// alarming.
+func (d *Daemon) omSkewNoFileCanChangeTheBinary(townRoot, installed, remote string) (bool, error) {
 	changed, err := d.omSkewChangedPaths(townRoot, installed, remote)
 	if err != nil {
-		d.logger.Printf("om_skew: cannot list the files between %s and %s (%v); treating the skew as real",
+		return false, fmt.Errorf("cannot list the files between %s and %s: %w",
 			shortOMSHA(installed), shortOMSHA(remote), err)
-		return false
 	}
 	for _, path := range changed {
 		if !omSkewNonBinaryPath(path) {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return d.omSkewNoEmbedReaches(townRoot, remote, changed)
+}
+
+// omSkewNoteCloneErr records the clone's answer to the questions a reading asks
+// of it. err nil is a clone that answered, which clears the suppression; an
+// error is logged once per distinct message, since an hourly check over a clone
+// that stays unreadable would otherwise write the same line an hour (gt-8n9hj).
+func (d *Daemon) omSkewNoteCloneErr(err error) {
+	m := &d.omSkew
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err == nil {
+		m.lastCloneErr = ""
+		return
+	}
+	msg := err.Error()
+	if msg == m.lastCloneErr {
+		return
+	}
+	m.lastCloneErr = msg
+	d.logger.Printf("om_skew: %s; treating the skew as real", msg)
 }
 
 // omSkewNonBinaryPath reports whether path is in omSkewNonBinaryPaths.
@@ -181,15 +223,161 @@ func omSkewNonBinaryPath(path string) bool {
 	return false
 }
 
+// omSkewEmbedRule is one //go:embed pattern and the directory of the Go file
+// naming it. A pattern is relative to that directory and may not leave it, so
+// only a file at or under the directory can be carried in.
+type omSkewEmbedRule struct {
+	dir     string // slash-separated, "" at the tree root
+	pattern string // as written, with any all: prefix removed
+}
+
+// omSkewNoEmbedReaches reports whether the om source at rev's //go:embed
+// directives leave every one of paths out of the binary, and a tree whose
+// directives cannot be read is an error rather than a yes: an allowlisted path
+// is only dismissed once the tree has been asked about it.
+func (d *Daemon) omSkewNoEmbedReaches(townRoot, rev string, paths []string) (bool, error) {
+	if len(paths) == 0 {
+		return true, nil
+	}
+	rules, err := d.omSkewEmbedRules(townRoot, rev)
+	if err != nil {
+		return false, fmt.Errorf("cannot read the om source's embed directives: %w", err)
+	}
+	for _, p := range paths {
+		for _, r := range rules {
+			if omSkewEmbedRuleCovers(r, p) {
+				return false, nil
+			}
+		}
+	}
+	return true, nil
+}
+
+// omSkewEmbedRules reads the //go:embed directives the om source at rev
+// carries. A test source is compiled into no om, so *_test.go names nothing;
+// every other directive counts, and a rule this reads too broadly makes the
+// alert fire rather than a skew be dismissed.
+func (d *Daemon) omSkewEmbedRules(townRoot, rev string) ([]omSkewEmbedRule, error) {
+	src, err := omSkewCloneDir(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	// -n prints "file:line:content", which is how a pattern learns the
+	// directory it is relative to. A tree carrying no directive is git grep's
+	// exit 1, an answer and not a failure.
+	out, err := d.omSkewGitNoMatch("-C", src, "grep", "-n", "-F", "-e", "//go:embed", rev, "--", "*.go")
+	if err != nil {
+		return nil, err
+	}
+	var rules []omSkewEmbedRule
+	for _, line := range strings.Split(out, "\n") {
+		file, rest, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		// The line number sits between the file and the directive.
+		_, content, ok := strings.Cut(rest, ":")
+		if !ok {
+			continue
+		}
+		patterns, ok := strings.CutPrefix(strings.TrimSpace(content), "//go:embed")
+		// A line the search matched but this prefix does not confirm (a comment
+		// about go:embed, or "//go:embedding") names no pattern.
+		if !ok || (patterns != "" && patterns[0] != ' ' && patterns[0] != '\t') || strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		dir := path.Dir(file)
+		if dir == "." {
+			dir = ""
+		}
+		for _, p := range omSkewEmbedPatterns(patterns) {
+			rules = append(rules, omSkewEmbedRule{dir: dir, pattern: p})
+		}
+	}
+	return rules, nil
+}
+
+// omSkewEmbedPatterns returns one directive's patterns with any all: prefix
+// removed. A pattern may be quoted and hold a space, so the split is not on
+// whitespace alone.
+func omSkewEmbedPatterns(rest string) []string {
+	var out []string
+	for rest = strings.TrimLeft(rest, " \t\r"); rest != ""; rest = strings.TrimLeft(rest, " \t\r") {
+		var p string
+		if q := rest[0]; q == '"' || q == '`' {
+			end := strings.IndexByte(rest[1:], q)
+			if end < 0 {
+				break // an unterminated quote names no pattern
+			}
+			p, rest = rest[1:1+end], rest[2+end:]
+		} else if i := strings.IndexAny(rest, " \t\r"); i < 0 {
+			p, rest = rest, ""
+		} else {
+			p, rest = rest[:i], rest[i:]
+		}
+		if p = strings.TrimPrefix(p, "all:"); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// omSkewEmbedRuleCovers reports whether r can carry p into the binary. go:embed
+// matches a pattern against the package's own tree and a pattern that names a
+// directory carries its whole subtree, so p is covered when the pattern matches
+// it or any directory above it. A directory pattern's own exclusions (a name
+// beginning with "." or "_", embedded only under all:) are not applied: they
+// cost an alert, never a dismissed skew.
+func omSkewEmbedRuleCovers(r omSkewEmbedRule, p string) bool {
+	rel := p
+	if r.dir != "" {
+		var ok bool
+		if rel, ok = strings.CutPrefix(p, r.dir+"/"); !ok {
+			return false
+		}
+	}
+	for dir := rel; dir != ""; {
+		if matched, err := path.Match(r.pattern, dir); err == nil && matched {
+			return true
+		}
+		i := strings.LastIndexByte(dir, '/')
+		if i < 0 {
+			break
+		}
+		dir = dir[:i]
+	}
+	return false
+}
+
+// omSkewCloneDir is the rebuild_om job's own clone, the only checkout this
+// check reads: an om build runs in the rig's worktree, which a probe must not
+// touch.
+func omSkewCloneDir(townRoot string) (string, error) {
+	src := filepath.Join(townRoot, filepath.FromSlash(rebuildOMSrcDir))
+	if _, err := os.Stat(src); err != nil {
+		return "", fmt.Errorf("the rebuild_om clone: %w", err)
+	}
+	return src, nil
+}
+
 // omSkewChangedPaths lists the files that differ between the installed om's
 // commit and origin/main's, from the rebuild_om clone. Renames are not
 // detected, so a file moved out of Go source is listed under both names.
 func (d *Daemon) omSkewChangedPaths(townRoot, installed, remote string) ([]string, error) {
-	src := filepath.Join(townRoot, filepath.FromSlash(rebuildOMSrcDir))
-	if _, err := os.Stat(src); err != nil {
-		return nil, fmt.Errorf("the rebuild_om clone: %w", err)
+	src, err := omSkewCloneDir(townRoot)
+	if err != nil {
+		return nil, err
 	}
-	out, err := d.omSkewGit("-C", src, "diff", "--name-only", "-z", "--no-renames", installed, remote)
+	// Both revisions reach git's argv, so each is held to a commit id: a value
+	// that looks like an option would otherwise be read as one, and the diff
+	// deciding the alert would be a diff of something else. The "--" marks the
+	// same boundary from git's side (gt-8n9hj).
+	for _, rev := range []string{installed, remote} {
+		if !isCommitSHA(rev) {
+			return nil, fmt.Errorf("%q is not a commit id to diff against", rev)
+		}
+	}
+	out, err := d.omSkewGit("-C", src, "diff", "--name-only", "-z", "--no-renames", installed, remote, "--")
 	if err != nil {
 		return nil, err
 	}
@@ -360,6 +548,18 @@ func (d *Daemon) omSkewGit(args ...string) (string, error) {
 		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+// omSkewGitNoMatch is omSkewGit for the calls whose exit 1 is an answer: git
+// grep found no line, which is a tree carrying no directive rather than a
+// question the clone could not answer.
+func (d *Daemon) omSkewGitNoMatch(args ...string) (string, error) {
+	out, err := d.omSkewGit(args...)
+	var coded interface{ ExitCode() int }
+	if err != nil && errors.As(err, &coded) && coded.ExitCode() == 1 {
+		return "", nil
+	}
+	return out, err
 }
 
 // parseLSRemoteMain returns the sha ls-remote printed for refs/heads/main,
