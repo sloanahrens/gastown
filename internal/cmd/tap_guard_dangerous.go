@@ -1374,7 +1374,7 @@ func startsShellWord(runes []rune, prevIdx int, prevEscaped bool) bool {
 // command, so a "((" glued to one opens an arithmetic command.
 var commandReservedWords = map[string]bool{
 	"then": true, "do": true, "else": true, "elif": true,
-	"if": true, "while": true, "until": true,
+	"if": true, "while": true, "until": true, "for": true,
 }
 
 // endsCommandReservedWord reports whether the word ending at runes[prevIdx] is

@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/daemon"
 )
 
 // tierSweepTestReader is a reader over fixture daemon-log lines, with no clock
@@ -170,12 +172,14 @@ func TestTierSweepRedNamesComeFromTheRecord(t *testing.T) {
 // that tier was last judged at, so the record can name more than one. The names
 // belong to the row for their own tip: attaching a red nobody re-ran to this
 // cycle's tip would date it to a commit it was never seen at (gt-euxf1). The
-// swept line is the one the daemon writes for such a cycle
-// (tierSweepVerdictSummary): the tier that did not run is named with no
-// verdict, so the row has no stage for it and its carried names go unread.
+// swept line is the one the daemon formats for such a cycle: the tier that did
+// not run is named with no verdict, so the row has no stage for it and its
+// carried names go unread.
 func TestTierSweepCarriedTierNamesStayWithTheirOwnTip(t *testing.T) {
 	t.Parallel()
-	r, _ := tierSweepTestReader(t, "2026/10/05 10:00:19 tier_sweep: gastown: swept tipb0001 (shell GREEN, integration , race RED) in 4m")
+	swept := daemon.TierSweepSweptLine("gastown", "tipb0001ffff", [][]string{{"shell"}, {"integration", "race"}},
+		map[string]string{"shell": "GREEN", "race": "RED"}, 4*time.Minute)
+	r, _ := tierSweepTestReader(t, "2026/10/05 10:00:19 "+swept)
 	writeTierSweepRecord(t, r.stateDir, "gastown", `{"last_sha":"tipb0001ffff","partial":true,"tiers":{`+
 		`"shell":{"verdict":"GREEN","sha":"tipb0001ffff"},`+
 		`"integration":{"verdict":"RED","failed_names":["./internal/daemon"],"sha":"tipa0002ffff"},`+
