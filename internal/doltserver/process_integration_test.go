@@ -6,6 +6,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -15,8 +16,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	configpkg "github.com/steveyegge/gastown/internal/config"
 )
 
 // The unit tier runs the adapter on a fakeHost, whose process table stands in
@@ -28,14 +27,6 @@ import (
 // portHolderHelperEnv is shared with testmain_integration_test.go, whose
 // TestMain runs the helper body before the harness starts.
 const portHolderHelperEnv = "DOLTSERVER_TEST_PORT_HOLDER"
-
-// realHostOnPort is the real machine with every town's Dolt endpoint at port
-// for this adapter alone.
-func realHostOnPort(port int) *host {
-	return &host{doltEndpoint: func(string) (configpkg.DoltEndpoint, bool) {
-		return configpkg.DoltEndpoint{Port: port}, true
-	}}
-}
 
 // started is a child the test started, reaped and killed at cleanup.
 type started struct {
@@ -117,6 +108,21 @@ func resolvedTempDir(t *testing.T) string {
 	return dir
 }
 
+// testTownRoot is a fresh temp town root carrying the routes file rig init
+// reads.
+func testTownRoot(t *testing.T) string {
+	t.Helper()
+	townRoot := resolvedTempDir(t)
+	beadsDir := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(`{"prefix":"tr-","path":"testrig/mayor/rig"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot
+}
+
 // ps and lsof (or /proc) read a real process's argv, cwd and listening port
 // the way the identity checks expect, and a non-dolt port holder is never
 // signaled (gt-p7zy0).
@@ -192,41 +198,94 @@ func freePort(t *testing.T) int {
 	return port
 }
 
+// freePorts is freePort as startOnFreePort's port supplier.
+func freePorts(t *testing.T) func() int {
+	return func() int { return freePort(t) }
+}
+
+// The retry against a port something really holds: the first start is refused
+// for the port it was handed, and the start comes back on a second one
+// (gt-8dbyw). The start here is the adapter's own preflight, which binds the
+// port — the refusal dolt's bind triggers, without a dolt server in the
+// middle.
+func TestIntegrationStartOnFreePortRetriesOnABoundPort(t *testing.T) {
+	held, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	heldPort := held.Addr().(*net.TCPAddr).Port
+
+	picks := 0
+	var refused error
+	h, err := startOnFreePort(t,
+		func() int {
+			picks++
+			if picks == 1 {
+				return heldPort
+			}
+			return freePort(t)
+		},
+		func(h *host) error {
+			err := h.checkPortAvailable(doltPort(t, h))
+			if err != nil && refused == nil {
+				refused = err
+			}
+			return err
+		})
+	if err != nil {
+		t.Fatalf("start on a fresh port: %v", err)
+	}
+	if refused == nil {
+		t.Fatalf("the first start on the bound port %d was not refused", heldPort)
+	}
+	if !portRaceErr(refused) {
+		t.Errorf("the first start refused the bound port with %q, want the port-in-use answer", refused)
+	}
+	if got := doltPort(t, h); got == heldPort {
+		t.Errorf("the start came back on the bound port %d", heldPort)
+	}
+}
+
 // A real dolt sql-server started, found running, and stopped by the adapter,
 // in a temporary town on its own port. InitRig on that stopped server makes
 // the database and seeds issue_prefix through a temporary server.
+//
+// Every start here is a startOnFreePort: the port it is handed was free when
+// it was picked and can be taken before dolt binds it (gt-8dbyw). A retried
+// rig init gets a fresh town, so the assertions run against one from-scratch
+// init either way.
 func TestIntegrationDoltServerLifecycle(t *testing.T) {
 	if _, err := exec.LookPath("dolt"); err != nil {
 		t.Skip("dolt is not installed")
 	}
-	port := freePort(t)
-	h := realHostOnPort(port)
-	townRoot := resolvedTempDir(t)
-	beadsDir := filepath.Join(townRoot, ".beads")
-	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(`{"prefix":"tr-","path":"testrig/mayor/rig"}`+"\n"), 0o644); err != nil {
-		t.Fatal(err)
+	var townRoot string
+	h, err := startOnFreePort(t, freePorts(t), func(h *host) error {
+		town := testTownRoot(t)
+		townRoot = town
+		t.Cleanup(func() { _, _ = h.ReapOwnedTestServers(town) })
+		// dolt init needs an identity; the harness's HOME is a fresh sandbox.
+		for _, kv := range [][2]string{{"user.name", "Test"}, {"user.email", "test@example.com"}} {
+			if _, err := h.doltConfigMissing(kv[0]); err != nil {
+				t.Fatalf("probing dolt %s: %v", kv[0], err)
+			}
+			if err := h.setDoltGlobalConfig(kv[0], kv[1]); err != nil {
+				t.Fatalf("setting dolt %s in the sandbox HOME: %v", kv[0], err)
+			}
+		}
+		_, created, err := h.InitRig(town, "testrig")
+		if err != nil {
+			return fmt.Errorf("InitRig: %w", err)
+		}
+		if !created {
+			t.Fatal("InitRig created = false, want true")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("initializing the test rig: %v", err)
 	}
 	t.Cleanup(func() { _, _ = h.ReapOwnedTestServers(townRoot) })
-	// dolt init needs an identity; the harness's HOME is a fresh sandbox.
-	for _, kv := range [][2]string{{"user.name", "Test"}, {"user.email", "test@example.com"}} {
-		if _, err := h.doltConfigMissing(kv[0]); err != nil {
-			t.Fatalf("probing dolt %s: %v", kv[0], err)
-		}
-		if err := h.setDoltGlobalConfig(kv[0], kv[1]); err != nil {
-			t.Fatalf("setting dolt %s in the sandbox HOME: %v", kv[0], err)
-		}
-	}
-
-	_, created, err := h.InitRig(townRoot, "testrig")
-	if err != nil {
-		t.Fatalf("InitRig: %v", err)
-	}
-	if !created {
-		t.Fatal("InitRig created = false, want true")
-	}
 	if running, _, _ := h.IsRunning(townRoot); running {
 		t.Fatal("InitRig left its temporary server running")
 	}
@@ -236,7 +295,8 @@ func TestIntegrationDoltServerLifecycle(t *testing.T) {
 		t.Errorf("issue_prefix after InitRig: %v\n%s", err, out)
 	}
 
-	if err := h.Start(townRoot); err != nil {
+	h, err = startOnFreePort(t, freePorts(t), func(h *host) error { return h.Start(townRoot) })
+	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	running, pid, err := h.IsRunning(townRoot)
