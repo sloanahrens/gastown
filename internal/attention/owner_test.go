@@ -27,7 +27,6 @@ func TestEveryRuleHasAnOwner(t *testing.T) {
 		RuleQuestionNew:    true,
 		RuleQuestionStale:  true,
 		RuleOverseerSilent: true,
-		RuleRejectedTwice:  true,
 		RuleHostDiskWarn:   true,
 		RuleHostDiskCrit:   true,
 		RuleHostMemLow:     true,
@@ -42,6 +41,21 @@ func TestEveryRuleHasAnOwner(t *testing.T) {
 		if got := RuleOwner(rule); got != want {
 			t.Errorf("RuleOwner(%q) = %q, want %q", rule, got, want)
 		}
+	}
+}
+
+// A second rejection is routine rework, so it is the overseer's item, and it
+// still wakes the overseer: moving the owner must not drop the wake or demote
+// the rule to a record (gt-few2w).
+func TestRejectedTwiceIsTheOverseersAndStillWakes(t *testing.T) {
+	t.Parallel()
+
+	if got := RuleOwner(RuleRejectedTwice); got != OwnerOverseer {
+		t.Errorf("RuleOwner(%q) = %q, want %q", RuleRejectedTwice, got, OwnerOverseer)
+	}
+	f, ok := Flags(RuleRejectedTwice)
+	if !ok || !f.Wake || f.Handled != HandledOperatorAction {
+		t.Errorf("Flags(%q) = %+v, want an operator_action that wakes", RuleRejectedTwice, f)
 	}
 }
 
