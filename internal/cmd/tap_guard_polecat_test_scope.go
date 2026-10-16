@@ -340,6 +340,20 @@ func leadingLetterProbes() []string {
 	return probes
 }
 
+// runLongNameProbes are the leading-letter probes with a long tail. Every name
+// above has one character after "Test", so a pattern that needs more
+// ("Test.." "Test.{2,}") matches none of them and would be judged bounded
+// while it selects every real test, whose names run longer (gt-uh7hy).
+var runLongNameProbes = longNameProbes()
+
+func longNameProbes() []string {
+	probes := make([]string, 0, 26)
+	for c := 'A'; c <= 'Z'; c++ {
+		probes = append(probes, "Test"+string(c)+"bcdefghijklmnopqrstuvwxyz")
+	}
+	return probes
+}
+
 // goTestRunFilterBounds reports whether the tokens after "go test" carry a
 // -run (or, after "--", -test.run) filter that bounds the run; the last one
 // wins, as in go. A pattern that selects every test bounds nothing. A -run with
@@ -434,7 +448,9 @@ func runPatternBoundsRun(pattern string) bool {
 		// split may differ from go's, so an unreadable pattern bounds nothing.
 		return false
 	}
-	return !matchesAllProbes(re, runFilterProbes) && !matchesMostProbes(re, runLeadingLetterProbes)
+	return !matchesAllProbes(re, runFilterProbes) &&
+		!matchesMostProbes(re, runLeadingLetterProbes) &&
+		!matchesMostProbes(re, runLongNameProbes)
 }
 
 // firstSubtestElement returns the part of a -run pattern that selects a test

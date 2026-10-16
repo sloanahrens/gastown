@@ -122,3 +122,44 @@ func TestDoctorCheckFlagFiltersToNamedCheck(t *testing.T) {
 		t.Fatalf("expected --check to filter to exactly [editorial-required], got %v", names)
 	}
 }
+
+// Doctor.Find returns the first check of a name and --check selects every
+// check of it, so two checks sharing a name made 'gt doctor fix session-hooks'
+// always target the config check (gt-uh7hy).
+func TestDoctorChecksHaveUniqueNames(t *testing.T) {
+	t.Parallel()
+	for _, rig := range []string{"", "testrig"} {
+		seen := make(map[string]bool)
+		for _, check := range newDoctorForCommand(rig).Checks() {
+			if seen[check.Name()] {
+				t.Errorf("rig %q: check name %q is registered twice", rig, check.Name())
+			}
+			seen[check.Name()] = true
+		}
+	}
+}
+
+// Doctor.Only drops a name nothing registers, so 'gt doctor --check daemon
+// --check dameon' ran daemon alone and exited 0 (gt-uh7hy).
+func TestRunDoctorUnknownCheckAmongKnown(t *testing.T) {
+	t.Parallel()
+	d := newDoctorForCommand("")
+	err := selectDoctorChecks(d, []string{"daemon", "dameon"})
+	if err == nil {
+		t.Fatal("selectDoctorChecks accepted a --check list holding an unknown name")
+	}
+	if !strings.Contains(err.Error(), "dameon") {
+		t.Errorf("error = %q, want the unknown name dameon", err)
+	}
+	if strings.Contains(err.Error(), "daemon") {
+		t.Errorf("error = %q, want only the unknown name, not the known one", err)
+	}
+
+	d = newDoctorForCommand("")
+	if err := selectDoctorChecks(d, []string{"daemon"}); err != nil {
+		t.Fatalf("selectDoctorChecks(daemon) = %v, want nil", err)
+	}
+	if got := d.Checks(); len(got) != 1 || got[0].Name() != "daemon" {
+		t.Errorf("checks after --check daemon = %d, want exactly daemon", len(got))
+	}
+}

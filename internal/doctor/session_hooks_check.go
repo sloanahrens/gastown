@@ -35,7 +35,7 @@ type SessionHooksCheck struct {
 func NewSessionHooksCheck() *SessionHooksCheck {
 	return &SessionHooksCheck{
 		BaseCheck: BaseCheck{
-			CheckName:        "session-hooks",
+			CheckName:        "session-hooks-live",
 			CheckDescription: "Check every live session started with the managed hooks (hooks:present)",
 			CheckCategory:    CategoryHooks,
 		},

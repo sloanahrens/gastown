@@ -146,3 +146,48 @@ func TestPrintSlotDebris(t *testing.T) {
 		t.Errorf("output = %q, want nothing printed when there is no debris", empty.String())
 	}
 }
+
+// A container whose removal errored sits in Debris and Failed with no error
+// from Reap, so the command must turn it into a non-zero exit and must not
+// count it as removed (gt-uh7hy).
+func TestReap_FailedRemovalIsReported(t *testing.T) {
+	t.Parallel()
+	stuck := slot.ContainerVerdict{
+		Container: slot.GateContainer{ID: "stuck-id", Image: "dolthub/dolt-sql-server:2.2.0", Name: "stuck_one"},
+		Verdict:   slot.VerdictDebris,
+		Reason:    "owning test process is gone",
+	}
+	gone := slot.ContainerVerdict{
+		Container: slot.GateContainer{ID: "gone-id", Image: "dolthub/dolt-sql-server:2.2.0", Name: "gone_one"},
+		Verdict:   slot.VerdictDebris,
+		Reason:    "owning test process is gone",
+	}
+	report := slot.ReapReport{
+		OlderThan: 30 * time.Minute,
+		Debris:    []slot.ContainerVerdict{stuck, gone},
+		Removed:   []string{gone.Container.Display()},
+		Failed:    []string{stuck.Container.Display() + ": removal in progress"},
+	}
+
+	out := &bytes.Buffer{}
+	err := finishSlotReap(slotTestCmd(out), report, nil)
+	if err == nil {
+		t.Fatal("finishSlotReap returned nil for a run with a failed removal, want a non-zero exit")
+	}
+	got := out.String()
+	if !strings.Contains(got, "Removed 1 of 2 gate container(s)") {
+		t.Errorf("output = %q, want the failed container left out of the removed count", got)
+	}
+	if !strings.Contains(got, "failed: ") || !strings.Contains(got, "stuck_one") {
+		t.Errorf("output = %q, want the failed container named", got)
+	}
+
+	report.Failed, report.Removed = nil, []string{stuck.Container.Display(), gone.Container.Display()}
+	out.Reset()
+	if err := finishSlotReap(slotTestCmd(out), report, nil); err != nil {
+		t.Errorf("finishSlotReap = %v for a run that removed everything, want nil", err)
+	}
+	if got := out.String(); !strings.Contains(got, "Removed 2 gate container(s)") {
+		t.Errorf("output = %q, want the plain count when nothing failed", got)
+	}
+}
