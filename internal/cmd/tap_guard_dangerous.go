@@ -2923,17 +2923,23 @@ func matchesGoCleanSharedCache(tokens []string) (reason, alternative string) {
 // isGoBinaryName, so a versioned toolchain (go1.22.0, gotip) owns its
 // subcommands too. tokens must be lowercased, shell-aware tokens (see
 // shellTokenize), which is why -C arrives as -c.
+//
+// What -C consumed is tested for being the binary only after it is known not
+// to be a -C argument: a directory named `go` — `go -C /tmp/go test ./...` —
+// has the binary's own basename, so testing the word first named the directory
+// as the binary and the held invocation was spelled back as "/tmp/go test
+// ./...", which is no command at all (gt-7cmjp).
 func goBinaryBefore(tokens []string, i int) int {
 	for j := i - 1; j >= 0; j-- {
-		if isGoBinaryName(filepath.Base(tokens[j])) {
-			return j
-		}
 		if isGoDirFlagValue(tokens[j]) {
 			continue
 		}
 		if j > 0 && isGoDirFlag(tokens[j-1]) {
 			j-- // tokens[j] is the directory a bare `-C` consumed
 			continue
+		}
+		if isGoBinaryName(filepath.Base(tokens[j])) {
+			return j
 		}
 		return -1
 	}
@@ -2964,13 +2970,16 @@ func findGoSubcommand(tokens []string, sub string) int {
 
 // goBinaryNamePattern matches every name the Go toolchain ships under: the
 // plain `go` binary, a versioned release (go1.22.0, go1.21 — the names the
-// download page and Homebrew install), and the development toolchain `gotip`.
-// tokens are lowercased, so the name arrives in lower case.
-var goBinaryNamePattern = regexp.MustCompile(`^go(tip|\d+(\.\d+)*)?$`)
+// download page and Homebrew install), a pre-release (go1.22rc1, go1.22beta1,
+// go1.22alpha1 — the names golang.org/dl installs, whose suffix the release
+// form alone did not cover), and the development toolchain `gotip`. tokens are
+// lowercased, so the name arrives in lower case.
+var goBinaryNamePattern = regexp.MustCompile(`^go(tip|\d+(\.\d+)*((alpha|beta|rc)\d+)?)?$`)
 
 // isGoBinaryName reports whether name is a Go toolchain binary. A `clean` run
-// through any of them wipes the same shared cache, so a versioned binary is
-// not a reason to miss the subcommand (gt-y6mhx).
+// through any of them wipes the same shared cache, so a versioned binary — a
+// pre-release no less than a release, and the same name golang.org/dl
+// installs — is not a reason to miss the subcommand (gt-y6mhx, gt-7cmjp).
 func isGoBinaryName(name string) bool {
 	return goBinaryNamePattern.MatchString(name)
 }

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"reflect"
 	"sort"
 	"strings"
@@ -299,5 +300,99 @@ func TestBeadCloseWithoutAttachmentLeavesMoleculesAlone(t *testing.T) {
 	}
 	if got := mustShowBead(t, fake, mol.ID); got.Status == "closed" {
 		t.Errorf("molecule %s was closed by a close of %s", mol.ID, plain.ID)
+	}
+}
+
+// beadCloseTestVerbs is testBeadVerbs with the store's own actor set to the
+// same actor, so the fake's close refuses an assignee that is not it — bd's
+// rule, and where a half-refused batch comes from in a test.
+func beadCloseTestVerbs(actor string) (*beadVerbs, *beadsfake.Fake, *bytes.Buffer) {
+	fake := beadsfake.New(beadsfake.WithActor(actor))
+	var out bytes.Buffer
+	return &beadVerbs{
+		client:       fake,
+		actor:        actor,
+		out:          &out,
+		closeRefusal: func(string, string) string { return "" },
+	}, fake, &out
+}
+
+// showFailingStore is a store whose Show fails for one bead and delegates the
+// rest, so a case can break the read endMoleculesOf makes of a bead it is
+// about to end without breaking every other read.
+type showFailingStore struct {
+	beads.Client
+	failID string
+	err    error
+}
+
+func (s showFailingStore) Show(id string) (*beads.Issue, error) {
+	if id == s.failID {
+		return nil, s.err
+	}
+	return s.Client.Show(id)
+}
+
+// TestBeadClosePartialEndsOnlyClosedMolecules covers the reading endMoleculesOf
+// makes of a batch close's result: beads.ClosedIDs names only the beads that
+// actually closed, and only those have a molecule the close can be said to have
+// ended. A bead bd refused is still open work — its molecule is what a later
+// close of that bead ends, and ending it here would strand a workflow whose
+// bead never closed. A bead whose own read fails while its molecule is being
+// ended is a warning, not a failed close: the close the caller asked for had
+// already happened (gt-7cmjp).
+func TestBeadClosePartialEndsOnlyClosedMolecules(t *testing.T) {
+	t.Parallel()
+	v, fake, _ := beadCloseTestVerbs("gastown/polecats/opal")
+	for _, suffix := range []string{"a", "b"} {
+		assignee := ""
+		if suffix == "b" {
+			// Another actor's bead: bd skips it in the batch and closes the rest.
+			assignee = "gastown/polecats/furiosa"
+		}
+		fake.Seed(beads.Issue{ID: "gt-work-" + suffix, Title: "Work " + suffix, Status: string(beads.StatusHooked),
+			Assignee: assignee, Description: "attached_molecule: gt-wisp-" + suffix})
+		fake.Seed(beads.Issue{ID: "gt-wisp-" + suffix, Title: "mol-polecat-work", Status: "open", Ephemeral: true})
+		seedChildren(t, fake, "gt-wisp-"+suffix,
+			beads.Issue{ID: "gt-step-" + suffix, Title: "Step", Status: "open", Ephemeral: true})
+	}
+
+	err := v.close("", "gt-work-a", "gt-work-b")
+	if err == nil {
+		t.Fatal("closing a batch bd half-refused reported success")
+	}
+	var pe *beads.PartialCloseError
+	if !errors.As(err, &pe) || !reflect.DeepEqual(pe.NotClosed, []string{"gt-work-b"}) {
+		t.Fatalf("close error = %v, want the batch's own partial-close error, naming gt-work-b", err)
+	}
+	for _, id := range []string{"gt-step-a", "gt-wisp-a"} {
+		if got := mustShowBead(t, fake, id); got.Status != "closed" {
+			t.Errorf("%s = %s, want closed: gt-work-a closed, so its workflow ended with it", id, got.Status)
+		}
+	}
+	for _, id := range []string{"gt-step-b", "gt-wisp-b"} {
+		if got := mustShowBead(t, fake, id); got.Status == "closed" {
+			t.Errorf("%s was closed by a close that left gt-work-b open", id)
+		}
+	}
+	if got := mustShowBead(t, fake, "gt-work-b"); got.Status == "closed" {
+		t.Errorf("gt-work-b = %s, want it still open: the refusal is what leaves its molecule for a later close", got.Status)
+	}
+
+	// The read endMoleculesOf makes of a closed bead can fail on its own. The
+	// close stands — it is reported to the caller as the success it was — and
+	// the molecule is left for whoever reaps closed wisps.
+	fake.Seed(beads.Issue{ID: "gt-work-c", Title: "Work c", Status: string(beads.StatusHooked),
+		Description: "attached_molecule: gt-wisp-c"})
+	fake.Seed(beads.Issue{ID: "gt-wisp-c", Title: "mol-polecat-work", Status: "open", Ephemeral: true})
+	v.client = showFailingStore{Client: fake, failID: "gt-work-c", err: errors.New("database is locked")}
+	if err := v.close("", "gt-work-c"); err != nil {
+		t.Errorf("close of gt-work-c = %v, want nil: its molecule's read failing is not the close's failure", err)
+	}
+	if got := mustShowBead(t, fake, "gt-work-c"); got.Status != "closed" {
+		t.Errorf("gt-work-c = %s, want closed", got.Status)
+	}
+	if got := mustShowBead(t, fake, "gt-wisp-c"); got.Status != "open" {
+		t.Errorf("gt-wisp-c = %s, want open: its bead's read failed, so nothing ended it", got.Status)
 	}
 }

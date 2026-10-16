@@ -272,7 +272,16 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 		switch {
 		case hookedErr != nil:
 			if !errors.Is(hookedErr, beads.ErrNotFound) {
+				// A read that failed for any reason but absence leaves it
+				// unknown whether the bead is terminal, and this block is the
+				// only place a report-only run's molecule can end: no landing
+				// follows a DEFERRED exit. Warning and carrying on cleared the
+				// hook over a molecule nothing left would close — the gt-x1d8s
+				// orphan, reached through the read instead of the exit type. Fail
+				// as the COMPLETED block below does, so the hook stays set and a
+				// retry still ends the molecule (gt-7cmjp).
 				style.PrintWarning("could not read hooked bead %s to close its molecule: %v", hookedBeadID, hookedErr)
+				return false, fmt.Errorf("resolving hooked bead %s: %w", hookedBeadID, hookedErr)
 			}
 		case beads.IssueStatus(hookedBead.Status).IsTerminal():
 			closeMoleculeOfClosedBead(hookBd, hookedBeadID, hookedBead, "done")
