@@ -1063,10 +1063,14 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// that already took (gt-064oh). mergeWork has aborted the merge, so
 		// the worktree is clean whether or not the recovery finds a landing,
 		// and the merge's own error is the one to report when it does not.
+		// A lookup that fails says nothing about whether the landing exists,
+		// so the pass ends as the infra error the worker retries; rejecting
+		// here would send the author to rework work that may have landed
+		// (gt-xqpmc).
 		if completed, cerr := l.completeUnrecordedLanding(g, w); completed != nil {
 			return *completed, cerr
 		} else if cerr != nil {
-			l.logf("%s: reading the target for an unrecorded landing of %s: %v", w.BeadID, shortSHA(w.Head), cerr)
+			return Result{}, cerr
 		}
 		// No land merge accounts for the head's content on the target, and
 		// merging it changes nothing: the work is already there by a route
