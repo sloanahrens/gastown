@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -205,7 +207,109 @@ func TestAttentionReviewBacklogLimitsAndReadFailure(t *testing.T) {
 	if st := f.tick(t, now.Add(4*time.Hour)); !hasItem(st, reviewBacklogKey) {
 		t.Errorf("a failed risk-path read cleared the standing backlog")
 	}
+	for _, e := range f.events(t) {
+		if e.Rule == attention.RuleReviewBacklog && e.State != attention.EventNew {
+			t.Errorf("event %+v, want a failed read to leave the raised line alone", e)
+		}
+	}
 	f.src.riskLandings = good
+
+	// The same failure on a queue with nothing standing raises nothing: an
+	// absent count is not a count of zero.
+	bare := newAttentionFixture(t, now)
+	bare.src.backlog = backlogLimits{threshold: 4, rise: 100}
+	bare.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) { return nil, fmt.Errorf("landings unreadable") }
+	if st := bare.tick(t, now); hasItem(st, reviewBacklogKey) {
+		t.Errorf("a failed risk-path read raised a backlog")
+	}
+	for _, e := range bare.events(t) {
+		if e.Rule == attention.RuleReviewBacklog {
+			t.Errorf("event %+v, want no review.backlog line from a failed read", e)
+		}
+	}
+}
+
+// writeRiskLandings writes n unreviewed risk-path landings into a rig's
+// landings file, one bead and head each.
+func writeRiskLandings(t *testing.T, lf *land.LandingsFile, n int, landed time.Time) {
+	t.Helper()
+	for i := 0; i < n; i++ {
+		if err := lf.Append(land.LandingRecord{
+			BeadID:    fmt.Sprintf("gt-b%02d", i),
+			Head:      strings.Repeat(fmt.Sprintf("%x", i%16), 40),
+			RiskPaths: []string{"internal/land/land.go"},
+			LandedAt:  landed,
+		}); err != nil {
+			t.Fatalf("appending a landing record: %v", err)
+		}
+	}
+}
+
+// writeTornRiskLandings rewrites a landings file as one whole record and eight
+// torn lines: the shape a read that cannot parse every line is handed.
+func writeTornRiskLandings(t *testing.T, lf *land.LandingsFile, landed time.Time) {
+	t.Helper()
+	rec, err := json.Marshal(land.LandingRecord{
+		BeadID:    "gt-b00",
+		Head:      strings.Repeat("0", 40),
+		RiskPaths: []string{"internal/land/land.go"},
+		LandedAt:  landed,
+	})
+	if err != nil {
+		t.Fatalf("encoding a landing record: %v", err)
+	}
+	var b strings.Builder
+	b.Write(append(rec, '\n'))
+	for i := 1; i <= 8; i++ {
+		fmt.Fprintf(&b, "{\"bead\":\"gt-b%02d\",\"head\":\"%s\"\n", i, strings.Repeat("f", 40))
+	}
+	if err := os.WriteFile(lf.Path, []byte(b.String()), 0o600); err != nil {
+		t.Fatalf("writing the landings file: %v", err)
+	}
+}
+
+// riskItems is the risk-path items a state holds.
+func riskItems(st attention.State) []attention.Item {
+	var out []attention.Item
+	for _, it := range st.Items {
+		if it.Kind == attention.KindRiskPath {
+			out = append(out, it)
+		}
+	}
+	return out
+}
+
+// A landings file with a line the read cannot parse is a partial risk-path
+// read, not a short one: the count under it would put 9 open at 1, under half
+// the threshold, so a read that reported it would clear the standing backlog
+// and drop the 8 items it did not read (gt-8mm0g).
+func TestAttentionReviewBacklogPartialReadHoldsTheStandingItem(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.backlog = backlogLimits{threshold: 4, rise: 100}
+	f.src.riskLandings = f.d.attentionRiskLandings
+
+	lf, err := land.RigLandingsFile(f.d.config.TownRoot, attentionRig)
+	if err != nil {
+		t.Fatalf("RigLandingsFile: %v", err)
+	}
+	writeRiskLandings(t, lf, 9, now.Add(-30*time.Minute))
+	if st := f.tick(t, now); !hasItem(st, reviewBacklogKey) {
+		t.Fatalf("9 open risk-path items at a threshold of 4 did not raise")
+	}
+
+	writeTornRiskLandings(t, lf, now.Add(-30*time.Minute))
+	st := f.tick(t, now.Add(time.Hour))
+	if !hasItem(st, reviewBacklogKey) {
+		t.Errorf("a partial risk-path read cleared the standing backlog")
+	}
+	if n := len(riskItems(st)); n != 9 {
+		t.Errorf("risk-path items held = %d, want the 9 a short read would drop", n)
+	}
+	if !strings.Contains(f.logs.String(), "unparsable") {
+		t.Errorf("logs = %q, want the partial read reported", f.logs.String())
+	}
 }
 
 func hasItem(st attention.State, key string) bool {
