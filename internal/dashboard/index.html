@@ -2821,9 +2821,10 @@ function costGCP(box, c) {
 
 // The Cost panel: what the town is spending, in one place. DeepSeek's balance,
 // pace and credit, the usage scan's estimate and slow runs, the GCP budget
-// alert, and what each om review bar costs in rework. The panel greys with the spend read it is mostly drawn from; a part
-// whose own read has not answered says so on its own line. With neither a spend
-// report nor usage records there is one line and nothing else.
+// alert, and what each om review bar costs in rework. The panel greys with the
+// spend read it is mostly drawn from; a part whose own read has not answered
+// says so on its own line. With neither a spend report nor usage records there
+// is one line and nothing else.
 function renderCost(s) {
   const box = $("cost"), note = $("costnote");
   box.replaceChildren();

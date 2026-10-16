@@ -1178,8 +1178,8 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// The review is over and this is its verdict, whatever the branches below
 	// do with the landing: the work bead gets the one line that ties it to the
 	// review, written before either the rejection or the merge (gt-uebmq).
-	l.commentVerdict(w, verdict, reviewStart, time.Now())
 	l.logReview(issue, w, dir, verdict)
+	l.commentVerdict(w, verdict, reviewStart, time.Now())
 	if verdict.Verdict == VerdictRequestChanges {
 		rej := &Rejection{Kind: RejectReview, Rework: true, Reason: fmt.Sprintf("om requested changes (score %.2f, %d finding(s))", verdict.Score, len(verdict.Findings))}
 		return Result{}, l.reject(issue, w, rej, &verdict)
