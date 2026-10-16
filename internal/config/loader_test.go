@@ -4445,6 +4445,68 @@ func TestBuildStartupCommandWithAgentOverride_SetsOverrideMarker(t *testing.T) {
 	}
 }
 
+// An override with extra args ("gemini --foo") is split by the resolver into
+// the name gemini plus args; GT_AGENT must carry the name only, since its
+// readers accept a preset or custom agent name and reject the raw string
+// (gt-71dgi).
+func TestBuildStartupCommandWithAgentOverride_ExportsResolvedNameNotArgs(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRoutingAgents(t, townRoot)
+	rigPath := filepath.Join(townRoot, "testrig")
+
+	if err := SaveTownSettings(TownSettingsPath(townRoot), NewTownSettings()); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+
+	cmd, err := BuildStartupCommandWithAgentOverride(
+		map[string]string{"GT_ROLE": "refinery"},
+		rigPath,
+		"",
+		"gemini --foo",
+	)
+	if err != nil {
+		t.Fatalf("BuildStartupCommandWithAgentOverride: %v", err)
+	}
+	if !strings.Contains(cmd, "GT_AGENT=gemini") {
+		t.Errorf("expected GT_AGENT=gemini in command, got: %q", cmd)
+	}
+	if strings.Contains(cmd, "GT_AGENT='gemini --foo'") || strings.Contains(cmd, "GT_AGENT=gemini --foo") {
+		t.Errorf("GT_AGENT carries the raw override with its args, got: %q", cmd)
+	}
+	if !strings.Contains(cmd, "GT_AGENT_OVERRIDE=1") {
+		t.Errorf("expected GT_AGENT_OVERRIDE=1 in command, got: %q", cmd)
+	}
+	if !strings.Contains(cmd, "--foo") {
+		t.Errorf("expected the override's extra arg --foo on the agent command line, got: %q", cmd)
+	}
+}
+
+// A rigs.json that exists but does not decode must not read as a registry that
+// names the gt prefix: ids and paths built from it would belong to another rig
+// (gt-71dgi). A town with no rigs.json at all keeps the gt fallback.
+func TestGetRigPrefixCorruptRigsJSON(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if got := GetRigPrefix(townRoot, "gastown"); got != "gt" {
+		t.Errorf("GetRigPrefix with no rigs.json = %q, want the gt fallback", got)
+	}
+
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatalf("mkdir mayor: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write corrupt rigs.json: %v", err)
+	}
+	if got := GetRigPrefix(townRoot, "gastown"); got != "" {
+		t.Errorf("GetRigPrefix with a corrupt rigs.json = %q, want empty (not the gt fallback)", got)
+	}
+}
+
 func TestBuildStartupCommandWithAgentOverride_SetsGTProcessNames(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()

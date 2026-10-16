@@ -551,6 +551,45 @@ func TestIsRigOperational_FailSafeOnDoltUnavailable(t *testing.T) {
 	}
 }
 
+// A rig with no config.json whose registry (rigs.json) exists but does not
+// decode has no known prefix: queryRigBead must report that instead of reading
+// a rig bead id built from the gt fallback, which belongs to another rig
+// (gt-71dgi).
+func TestQueryRigBead_CorruptRigsJSONReadsNoBead(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(tmpDir, "testrig"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(tmpDir, "mayor", "rigs.json"), []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	var asked []string
+	d := &Daemon{
+		config: &Config{TownRoot: tmpDir},
+		logger: log.New(io.Discard, "", 0),
+		rigBeadShowFn: func(_, id string) (*beads.Issue, error) {
+			asked = append(asked, id)
+			return &beads.Issue{ID: id}, nil
+		},
+	}
+
+	id, _, err := d.queryRigBead("testrig")
+	if err == nil {
+		t.Fatalf("queryRigBead with a corrupt rigs.json = (%q, nil error), want an error", id)
+	}
+	if !strings.Contains(err.Error(), "no beads prefix") {
+		t.Errorf("error = %q, want it to say the rig has no beads prefix", err)
+	}
+	if len(asked) != 0 {
+		t.Errorf("rig bead reads = %v, want none", asked)
+	}
+}
+
 // TestIsRigOperational_DockedRig verifies that docked rigs are correctly
 // identified as not operational.
 func TestIsRigOperational_DockedRig(t *testing.T) {

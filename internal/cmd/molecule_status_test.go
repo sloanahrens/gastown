@@ -3,6 +3,8 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -93,6 +95,33 @@ func TestMoleculeCurrentReportsUnknownOnAReadFailure(t *testing.T) {
 				t.Errorf("Error = %q, want it to carry %q", info.Error, readErr)
 			}
 		})
+	}
+}
+
+// A rigs.json that exists but does not decode gives the rig no prefix, so
+// buildAgentBeadID returns no id instead of one built from an empty prefix
+// (gt-71dgi).
+func TestBuildAgentBeadIDCorruptRigsJSONReturnsNoID(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "rigs.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		identity string
+		role     Role
+	}{
+		{"gastown/nux", RolePolecat},
+		{"gastown/crew/max", RoleCrew},
+		{"gastown/nux", RoleUnknown},
+	} {
+		if got := buildAgentBeadID(tc.identity, tc.role, townRoot); got != "" {
+			t.Errorf("buildAgentBeadID(%q, %v) = %q, want empty", tc.identity, tc.role, got)
+		}
 	}
 }
 

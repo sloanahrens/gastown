@@ -1820,6 +1820,14 @@ func (p *PolecatPool) Validate() error {
 			errs = append(errs, fmt.Errorf("polecat_pool.%s = %d: must be >= 0", k.key, *k.v))
 		}
 	}
+	if p.MaxSeats < 0 {
+		errs = append(errs, fmt.Errorf("polecat_pool.max_seats = %d: must be >= 0", p.MaxSeats))
+	}
+	if p.MinSpawnGap != "" {
+		if d, err := time.ParseDuration(p.MinSpawnGap); err != nil || d < 0 {
+			errs = append(errs, fmt.Errorf("polecat_pool.min_spawn_gap = %q: must be a non-negative duration such as 90s or 4m", p.MinSpawnGap))
+		}
+	}
 	if p.TopCandidates != nil && *p.TopCandidates < 1 {
 		errs = append(errs, fmt.Errorf("polecat_pool.top_candidates = %d: must be >= 1", *p.TopCandidates))
 	}

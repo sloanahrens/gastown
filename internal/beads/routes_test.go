@@ -82,6 +82,23 @@ func TestGetPrefixForRig_RigsConfigFallback(t *testing.T) {
 	}
 }
 
+// GetPrefixForRig keeps its "gt" default when rigs.json is unreadable: its
+// callers build ids from the result without an empty check (gt-71dgi).
+func TestGetPrefixForRig_CorruptRigsJSONKeepsDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	rigsPath := filepath.Join(tmpDir, "mayor", "rigs.json")
+	if err := os.MkdirAll(filepath.Dir(rigsPath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rigsPath, []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := GetPrefixForRig(tmpDir, "gastown"); got != "gt" {
+		t.Errorf("GetPrefixForRig with a corrupt rigs.json = %q, want the gt default", got)
+	}
+}
+
 func TestExtractPrefix(t *testing.T) {
 	tests := []struct {
 		beadID   string

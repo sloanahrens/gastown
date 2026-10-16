@@ -2198,12 +2198,18 @@ func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rig
 		resolvedEnv["GT_SESSION_ID_ENV"] = rc.Session.SessionIDEnv
 	}
 	// Record agent name so IsAgentAliveChecked can detect the running process.
-	// Explicit override takes priority; fall back to resolved agent name.
+	// An explicit override is exported as the resolved agent name, not the raw
+	// override: the resolver splits "claude --model opus" into the name claude
+	// plus args, and readers of GT_AGENT accept only a preset or custom agent
+	// name. The raw string stands in only when the resolver left no name (the
+	// no-town-root preset path).
 	agentForProcess := rc.ResolvedAgent
 	if agentOverride != "" {
-		resolvedEnv["GT_AGENT"] = agentOverride
+		if agentForProcess == "" {
+			agentForProcess = agentOverride
+		}
+		resolvedEnv["GT_AGENT"] = agentForProcess
 		resolvedEnv[EnvAgentOverride] = "1"
-		agentForProcess = agentOverride
 	} else if rc.ResolvedAgent != "" {
 		resolvedEnv["GT_AGENT"] = rc.ResolvedAgent
 	}
@@ -2455,13 +2461,19 @@ func GetDefaultFormula(rigPath string) string {
 }
 
 // GetRigPrefix returns the beads prefix for a rig from rigs.json.
-// Falls back to "gt" if the rig isn't found or has no prefix configured.
+// Falls back to "gt" if rigs.json does not exist, the rig isn't found or has
+// no prefix configured. A rigs.json that exists but cannot be read or decoded
+// returns "": the registry is there and unreadable, so "gt" would be a guess
+// that names ids and paths of another rig. Callers check prefix != "".
 // townRoot is the path to the town directory (e.g., ~/gt).
 func GetRigPrefix(townRoot, rigName string) string {
 	rigsConfigPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := LoadRigsConfig(rigsConfigPath)
 	if err != nil {
-		return "gt" // fallback
+		if errors.Is(err, ErrNotFound) {
+			return "gt" // fallback
+		}
+		return ""
 	}
 
 	entry, ok := rigsConfig.Rigs[rigName]
