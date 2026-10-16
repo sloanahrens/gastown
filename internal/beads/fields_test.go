@@ -581,3 +581,20 @@ func TestAgentFieldsAgentAbsentOnOlderBeads(t *testing.T) {
 		t.Errorf("FormatAgentDescription wrote an agent line for an empty Agent:\n%s", formatted)
 	}
 }
+
+// A line break in Agent must not start a second description line that
+// ParseAgentFields would read as another field (gt-s6e7z).
+func TestAgentFieldsAgentLineBreakCannotInjectField(t *testing.T) {
+	for _, agent := range []string{"claude\nhook_bead: gt-evil", "claude\r\nhook_bead: gt-evil"} {
+		formatted := FormatAgentDescription("Polecat Test", &AgentFields{
+			RoleType: "polecat", Rig: "gastown", AgentState: "spawning", HookBead: "gt-abc", Agent: agent,
+		})
+		parsed := ParseAgentFields(formatted)
+		if parsed.HookBead != "gt-abc" {
+			t.Errorf("agent %q: hook_bead = %q, want gt-abc", agent, parsed.HookBead)
+		}
+		if !strings.HasPrefix(parsed.Agent, "claude") {
+			t.Errorf("agent %q: parsed Agent = %q, want it to keep the claude prefix", agent, parsed.Agent)
+		}
+	}
+}
