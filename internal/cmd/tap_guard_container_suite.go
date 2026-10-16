@@ -232,40 +232,39 @@ func evalPayloads(segment []string) []string {
 }
 
 // segmentPayloads returns the command lines the segment starting at
-// tokens[start] runs through a shell: its -c payloads, its eval string and the
-// script a pipeline feeds it. Both test guards judge each one as a command line
-// of its own.
+// tokens[start] runs through a shell: -c payloads, an eval string and the
+// script fed to a stdin shell. Both test guards judge each as its own command.
 func segmentPayloads(tokens []string, start int, segment []string) []string {
 	payloads := append(shellCPayloads(segment), evalPayloads(segment)...)
-	return append(payloads, pipedShellPayloads(tokens, start, segment)...)
+	return append(payloads, stdinShellPayloads(tokens, start, segment)...)
 }
 
-// pipedShellPayloads returns the scripts a pipeline feeds to the shell that
-// the segment starting at tokens[start] opens. `echo 'make gate' | sh` runs the
-// suite through a shell whose only argument is none, so the segment judge sees
-// a bare sh and the echo as text. When that segment is a shell reading its
-// script from stdin (no -c payload, no script file operand), the text the
-// echo and printf segments upstream in the same pipeline print is judged as a
-// command line of its own. Every upstream echo or printf counts, whatever
-// filters sit between it and the shell: a filter can rewrite the text, so
-// reading it as the script is the stricter reading (gt-1daus).
-func pipedShellPayloads(tokens []string, start int, segment []string) []string {
-	if start == 0 || tokens[start-1] != "|" {
-		return nil
-	}
+// stdinShellPayloads returns the script text fed to a shell that reads stdin
+// (`echo 'make gate' | sh`, `sh <<< 'make gate'`), which the segment judge
+// otherwise sees as a bare sh. The text comes from a here-string on the shell
+// or on any producer upstream in its pipeline, and from the arguments of an
+// upstream echo, printf or yes. Every producer counts whatever filters sit
+// between it and the shell, since a filter can rewrite the text and reading it
+// as the script is the stricter reading (gt-1daus).
+func stdinShellPayloads(tokens []string, start int, segment []string) []string {
 	word, args := segmentCommandWord(trimShellKeywords(segment))
-	if !shellInvokers[filepath.Base(strings.ToLower(word))] || !shellReadsStdin(toLowerTokens(args)) {
+	if !shellInvokers[filepath.Base(strings.ToLower(word))] {
 		return nil
 	}
-	var payloads []string
+	args, payloads := splitHereStrings(args)
+	if !shellReadsStdin(toLowerTokens(args)) {
+		return nil
+	}
 	for end := start - 1; end > 0 && tokens[end] == "|"; {
 		begin := end
 		for begin > 0 && !shellCommandSeparators[tokens[begin-1]] {
 			begin--
 		}
 		producer, printed := segmentCommandWord(trimShellKeywords(tokens[begin:end]))
+		printed, fed := splitHereStrings(printed)
+		payloads = append(payloads, fed...)
 		switch filepath.Base(strings.ToLower(producer)) {
-		case "echo", "printf":
+		case "echo", "printf", "yes":
 			for len(printed) > 0 && strings.HasPrefix(printed[0], "-") && len(printed[0]) > 1 {
 				printed = printed[1:]
 			}
@@ -278,6 +277,23 @@ func pipedShellPayloads(tokens []string, start int, segment []string) []string {
 		end = begin - 1
 	}
 	return payloads
+}
+
+// splitHereStrings returns args without their "<<<" here-string redirections,
+// and the text each one feeds its command.
+func splitHereStrings(args []string) (rest, texts []string) {
+	for i := 0; i < len(args); i++ {
+		switch {
+		case args[i] == "<<<" && i+1 < len(args):
+			texts = append(texts, args[i+1])
+			i++
+		case strings.HasPrefix(args[i], "<<<") && len(args[i]) > len("<<<"):
+			texts = append(texts, strings.TrimPrefix(args[i], "<<<"))
+		default:
+			rest = append(rest, args[i])
+		}
+	}
+	return rest, texts
 }
 
 // shellReadsStdin reports whether a shell invoked with args (lowercased, the
