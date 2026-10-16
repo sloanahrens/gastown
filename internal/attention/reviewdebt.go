@@ -13,8 +13,7 @@ type RiskPathEvidence struct {
 	// defect. An item that reaches the queue is failed or unreviewed; a PASS,
 	// WAIVED or AUDITED review answers the head and clears it.
 	Failed bool
-	// Priority is the landing work bead's bd priority, 0 the loudest. A negative
-	// value says the bead's priority is not known, which is never the P1 lane.
+	// Priority is the landing work bead's bd priority, 0 the loudest.
 	Priority int
 }
 
@@ -31,7 +30,7 @@ type RiskPathEvidence struct {
 // machinery the town runs on (P1: the daemon, the guards, git, dolt), where it
 // can stop everything else.
 func RiskPathSeverity(ev RiskPathEvidence) Severity {
-	if ev.Failed && ev.Priority >= 0 && ev.Priority <= riskPathLoudPriority {
+	if ev.Failed && ev.Priority <= riskPathLoudPriority {
 		return SeverityHigh
 	}
 	return SeverityLow

@@ -4,8 +4,7 @@ import "testing"
 
 // The one rule that sets a risk-path item's severity (gt-zevjx): review debt is
 // low, and a failed review of a P1 landing — the lane the town's own machinery
-// lands in — is the one risk-path item that stays high. An unreadable bead is
-// never the P1 case.
+// lands in — is the one risk-path item that stays high.
 func TestRiskPathSeverity(t *testing.T) {
 	t.Parallel()
 
@@ -18,7 +17,6 @@ func TestRiskPathSeverity(t *testing.T) {
 		{"an unreviewed P1 landing is still review debt", RiskPathEvidence{Priority: 0}, SeverityLow},
 		{"a failed review of a P2 landing is review debt", RiskPathEvidence{Failed: true, Priority: 2}, SeverityLow},
 		{"a failed review of the slowest landing is review debt", RiskPathEvidence{Failed: true, Priority: 4}, SeverityLow},
-		{"a failed review of an unreadable bead is review debt", RiskPathEvidence{Failed: true, Priority: -1}, SeverityLow},
 		{"a failed review of a P1 landing is an incident", RiskPathEvidence{Failed: true, Priority: 1}, SeverityHigh},
 		{"a failed review of a P0 landing is an incident", RiskPathEvidence{Failed: true, Priority: 0}, SeverityHigh},
 	}
