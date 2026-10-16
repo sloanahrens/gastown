@@ -822,12 +822,11 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 		return fmt.Errorf("git add: %w", err)
 	}
 
-	// A failed database never reached the spike guard: it has no count, and
-	// verifyExportCounts skips a database without one. Its issues.jsonl may
-	// still be fresh (the issues table is written before a supplemental table
-	// fails), so staging it would commit an export nothing checked. Unstage the
-	// whole database; its committed files stay as the last verified copy, and
-	// the [FAILED: <db>] subject and export alert already name it.
+	// A failed database never reached the spike guard, and verifyExportCounts
+	// skips a database without a count, so its freshly written issues.jsonl
+	// (the issues table is written before a supplemental table fails) is
+	// unchecked and must not be committed. Unstage the whole database: its
+	// committed files stay as the last verified copy.
 	if len(failed) > 0 {
 		var paths []string
 		for _, db := range failed {
