@@ -254,3 +254,155 @@ func TestRunTapGuardPRWorkflow_PolecatBlockedShapeShowsBanner(t *testing.T) {
 		t.Errorf("expected the PR WORKFLOW BLOCKED banner on stderr, got:\n%s", stderr.String())
 	}
 }
+
+// TestPRWorkflowGuard_WrappedShapes: a launcher, assignment, group opener,
+// path-qualified binary or gh flag in front of the command does not hide it
+// from the guard (gt-zf2vy). The commands are only tokenized, never run.
+func TestPRWorkflowGuard_WrappedShapes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"env assignment prefix", "GH_REPO=o/r gh pr create --title x", true},
+		{"env launcher", "env X=1 gh pr create --title x", true},
+		{"bash -c payload", "bash -c 'gh pr create --title x'", true},
+		{"eval string", `eval "gh pr create"`, true},
+		{"subshell", "( gh pr create )", true},
+		{"brace group", "{ gh pr create; }", true},
+		{"if then", "if true; then gh pr create; fi", true},
+		{"time", "time gh pr create", true},
+		{"path-qualified binary", "/usr/bin/gh pr create", true},
+		{"gh -R global flag", "gh -R o/r pr create", true},
+
+		{"gh pr view stays allowed", "gh pr view 12", false},
+		{"gh pr list stays allowed", "gh pr list", false},
+		{"git checkout main stays allowed", "git checkout main", false},
+		{"echo of the command stays allowed", "echo gh pr create", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := matchesPRWorkflowCommand(tt.command); got != tt.want {
+				t.Errorf("matchesPRWorkflowCommand(%q) = %v, want %v", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPRWorkflowGuard_WrappedVariants covers the other spellings of the same
+// wrappers: the branch-creation commands behind them, launcher flags, nested
+// shells and the shapes that must stay allowed.
+func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"git checkout -b behind an assignment", "GIT_TRACE=1 git checkout -b feature/x", true},
+		{"git switch -c behind env", "env -i git switch -c feature/x", true},
+		{"git checkout -b path-qualified", "/usr/bin/git checkout -b feature/x", true},
+		{"git checkout -b behind -C", "git -C /tmp/repo checkout -b feature/x", true},
+		{"git switch -c behind -c k=v", "git -c user.name=x switch -c feature/x", true},
+		{"git checkout -b in bash -c", `bash -c "git checkout -b feature/x"`, true},
+		{"git switch -c in sh -lc", `sh -lc 'git switch -c feature/x'`, true},
+
+		{"env with a flag value", "env -u FOO gh pr create", true},
+		{"env -S carries the command", `env -S "gh pr create --title x"`, true},
+		{"env -S glued", `env -S'gh pr create'`, true},
+		{"env after assignments", "A=1 env B=2 gh pr create", true},
+		{"nice with a flag value", "nice -n 5 gh pr create", true},
+		{"timeout with an operand", "timeout 30 gh pr create", true},
+		{"timeout with a flag and operand", "timeout -s KILL 30 gh pr create", true},
+		{"sudo with a user", "sudo -u bob gh pr create", true},
+		{"exec", "exec gh pr create", true},
+		{"command builtin", "command gh pr create", true},
+		{"env after a double dash", "env -- gh pr create", true},
+		{"negation", "! gh pr create", true},
+
+		{"gh --repo separate", "gh --repo o/r pr create", true},
+		{"gh --repo glued", "gh --repo=o/r pr create", true},
+		{"gh -R glued", "gh -Ro/r pr create", true},
+		{"gh flag after pr", "gh pr -R o/r create", true},
+		{"path-qualified gh with -R", "/opt/homebrew/bin/gh -R o/r pr create", true},
+
+		{"while condition", "while ! gh pr create; do sleep 1; done", true},
+		{"for body", "for i in 1 2; do gh pr create; done", true},
+		{"glued subshell", "(gh pr create)", true},
+		{"after cd in a subshell", "(cd /tmp && gh pr create)", true},
+		{"nested bash -c", `bash -c "bash -c 'gh pr create'"`, true},
+		{"bash -c behind env", `env FOO=1 bash -c 'gh pr create'`, true},
+		{"eval with several words", "eval gh pr create --title x", true},
+		{"sudo bash -c", `sudo bash -c 'gh pr create'`, true},
+		{"bash -c in a later segment", `cd /tmp && bash -c 'gh pr create'`, true},
+		{"bash -c with a heredoc body", "bash <<'EOF'\nGH_REPO=o/r gh pr create\nEOF", true},
+
+		// Past the nesting cap the payload is unread; one that still names gh
+		// or git is refused, one that does not is allowed.
+		{"too deep and naming gh", `bash -c "bash -c \"bash -c \\\"bash -c 'gh pr create'\\\"\""`, true},
+		{"too deep and naming neither", `bash -c "bash -c \"bash -c \\\"bash -c 'ls -la'\\\"\""`, false},
+
+		{"env without a command", "env", false},
+		{"assignment alone", "GH_REPO=o/r", false},
+		{"gh pr view behind env", "GH_REPO=o/r gh pr view 12", false},
+		{"gh pr list with -R", "gh -R o/r pr list", false},
+		{"gh pr create-like subcommand", "gh pr created", false},
+		{"gh other command", "gh -R o/r issue create", false},
+		{"gh api mentioning pr create", "gh api repos/o/r/pulls -f title='pr create'", false},
+		{"git checkout without -b behind env", "env X=1 git checkout main", false},
+		{"git -C status", "git -C /tmp/repo status", false},
+		{"git checkout -branch behind env", "env X=1 git checkout -branch x", false},
+		{"bash -c of an unrelated command", `bash -c "git status"`, false},
+		{"echo of a bash -c payload", `echo bash -c 'gh pr create'`, false},
+		{"echo of eval", `echo eval "gh pr create"`, false},
+		{"printf of a wrapped command", `printf '%s\n' "GH_REPO=o/r gh pr create"`, false},
+		{"commit message naming the command", `git commit -m "env X=1 gh pr create"`, false},
+		{"script file named by bash", "bash gh-pr-create.sh", false},
+		{"a gh in a longer word", "github pr create", false},
+		{"time of an unrelated command", "time make build", false},
+		{"bash script then -c belongs to the script", "bash script.sh -c 'gh pr create'", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := matchesPRWorkflowCommand(tt.command); got != tt.want {
+				t.Errorf("matchesPRWorkflowCommand(%q) = %v, want %v", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestPRWorkflowGuard_WrappedBlockedInAgentContext runs the wrapped shapes
+// through the full decision: blocked for a polecat in its own worktree, where
+// the session-branch exemption must not carry a wrapped gh pr create along,
+// and still allowed when the command is not one of the three.
+func TestPRWorkflowGuard_WrappedBlockedInAgentContext(t *testing.T) {
+	t.Parallel()
+	town := newPolecatTestTown(t)
+	town = town.withEnv("GT_ROLE", "gastown/polecats/"+town.name)
+	branch := "polecat/ruby/gt-zf2vy+mvax487p"
+
+	tests := []struct {
+		name    string
+		command string
+		want    prWorkflowGuardDecision
+	}{
+		{"env-prefixed gh pr create", "GH_REPO=o/r gh pr create --title x", prWorkflowBlockAgentContext},
+		{"bash -c gh pr create", "bash -c 'gh pr create --title x'", prWorkflowBlockAgentContext},
+		{"session branch chained with an env-prefixed gh pr create", "git checkout -b " + branch + " && env X=1 gh pr create", prWorkflowBlockAgentContext},
+		{"session branch chained with a bash -c gh pr create", "git checkout -b " + branch + "; bash -c 'gh pr create'", prWorkflowBlockAgentContext},
+		{"session branch chained with a path-qualified gh pr create", "git switch -c " + branch + " && /usr/bin/gh pr create", prWorkflowBlockAgentContext},
+		{"session branch behind an env prefix keeps the exemption", "GIT_TRACE=1 git checkout -b " + branch, prWorkflowAllow},
+		{"session branch behind env keeps the exemption", "env GIT_TRACE=1 git switch -c " + branch, prWorkflowAllow},
+		{"gh pr view behind env", "GH_REPO=o/r gh pr view 12", prWorkflowAllow},
+		{"echo of a wrapped command", "echo env X=1 gh pr create", prWorkflowAllow},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := polecatBranchPayload(town.worktree, tt.command)
+			if got := evaluatePRWorkflowGuard([]byte(payload), town.proc()); got != tt.want {
+				t.Errorf("evaluatePRWorkflowGuard(%q) = %v, want %v", tt.command, got, tt.want)
+			}
+		})
+	}
+}
