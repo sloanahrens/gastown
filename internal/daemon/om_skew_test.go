@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -467,5 +468,127 @@ func TestParseLSRemoteMain(t *testing.T) {
 				t.Errorf("parseLSRemoteMain(%q) = %q, want %q", tc.out, got, tc.sha)
 			}
 		})
+	}
+}
+
+// omSkewClone gives the daemon the rebuild_om job's clone and answers its git
+// diff with changed (NUL-separated, as `git diff -z` prints it) or, when
+// diffErr is set, with that failure. It returns the fake so a test can read the
+// calls the check made.
+func omSkewClone(t *testing.T, d *Daemon, changed []string, diffErr *cliReply) *fakeCLI {
+	t.Helper()
+	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+	return withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		if c.name == "git" && slices.Contains(c.args, "diff") {
+			if diffErr != nil {
+				return *diffErr
+			}
+			return cliReply{stdout: strings.Join(changed, "\x00") + "\x00"}
+		}
+		return cliReply{}
+	})
+}
+
+// TestOMSkewIgnoresCommitsThatCannotChangeTheBinary: a differing sha whose
+// files are all non-binary raises nothing, and one that touches anything that
+// can build into om, or that the clone cannot list, raises as before (gt-qozft).
+func TestOMSkewIgnoresCommitsThatCannotChangeTheBinary(t *testing.T) {
+	t.Parallel()
+	failed := cliReply{stderr: "fatal: bad object " + omSkewInstalledSHA, code: 128}
+	tests := []struct {
+		name    string
+		changed []string
+		diffErr *cliReply
+		noClone bool
+		alert   bool
+	}{
+		{name: "only .om.json", changed: []string{".om.json"}},
+		{name: "docs and .om.json", changed: []string{".om.json", "docs/gate.md", "README.md"}},
+		{name: "no files differ", changed: nil},
+		{name: "a Go source file", changed: []string{"internal/review/review.go"}, alert: true},
+		{name: "a Go source file beside .om.json", changed: []string{".om.json", "cmd/om/main.go"}, alert: true},
+		{name: "go.mod", changed: []string{"go.mod"}, alert: true},
+		{name: "go.sum", changed: []string{"go.sum"}, alert: true},
+		{name: "the install script", changed: []string{"scripts/install-om.sh"}, alert: true},
+		{name: "the Makefile", changed: []string{"Makefile"}, alert: true},
+		{name: "a path no list names", changed: []string{"assets/prompt.txt"}, alert: true},
+		{name: "the clone lacks a sha", diffErr: &failed, alert: true},
+		{name: "the clone is missing", noClone: true, alert: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, rec := omSkewDaemon(t)
+			var cli *fakeCLI
+			if !tc.noClone {
+				cli = omSkewClone(t, d, tc.changed, tc.diffErr)
+			}
+
+			d.omSkewOnce()
+
+			if got := len(rec.Escalations()); (got == 1) != tc.alert || got > 1 {
+				t.Errorf("escalations = %+v, want alert=%v", rec.Escalations(), tc.alert)
+			}
+			if cli == nil {
+				return
+			}
+			diffs := cli.argvs("-C")
+			if len(diffs) != 1 {
+				t.Fatalf("git calls = %q, want exactly one diff in the clone", diffs)
+			}
+			wantSrc := filepath.Join(d.config.TownRoot, rebuildOMSrcDir)
+			if diffs[0][1] != wantSrc || !slices.Contains(diffs[0], omSkewInstalledSHA) || !slices.Contains(diffs[0], omSkewRemoteSHA) {
+				t.Errorf("git %q does not diff the installed sha against origin/main in %s", diffs[0], wantSrc)
+			}
+		})
+	}
+}
+
+// TestOMSkewClearsWhenTheSkewTurnsOutHarmless: an alert raised for a Go change
+// closes once the commits between the two shas are docs only.
+func TestOMSkewClearsWhenTheSkewTurnsOutHarmless(t *testing.T) {
+	t.Parallel()
+	d, rec := omSkewDaemon(t)
+	changed := []string{"internal/review/review.go"}
+	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
+	// omSkewOnce runs on this goroutine, so changed needs no lock.
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		return cliReply{stdout: strings.Join(changed, "\x00") + "\x00"}
+	})
+
+	d.omSkewOnce()
+	if esc := rec.Escalations(); len(esc) != 1 {
+		t.Fatalf("escalations = %+v, want the one raise for a Go change", esc)
+	}
+	changed = []string{".om.json"}
+	d.omSkewOnce()
+
+	if clears := rec.Clears(); len(clears) != 1 || !slices.Contains(clears[0].Fingerprints, omSkewAlertKey) {
+		t.Errorf("clears = %+v, want one under %s once only .om.json differs", clears, omSkewAlertKey)
+	}
+}
+
+// TestOMSkewNonBinaryPath pins the match rule: a directory entry is a prefix,
+// every other entry the whole path.
+func TestOMSkewNonBinaryPath(t *testing.T) {
+	t.Parallel()
+	tests := map[string]bool{
+		".om.json":           true,
+		"docs/gate.md":       true,
+		"docs/a/b.md":        true,
+		"README.md":          true,
+		"docs":               false,
+		"docsx/gate.md":      false,
+		"sub/.om.json":       false,
+		".om.json.bak":       false,
+		"main.go":            false,
+		"go.mod":             false,
+		"scripts/build.sh":   false,
+		"internal/docs/x.go": false,
+	}
+	for path, want := range tests {
+		if got := omSkewNonBinaryPath(path); got != want {
+			t.Errorf("omSkewNonBinaryPath(%q) = %v, want %v", path, got, want)
+		}
 	}
 }

@@ -51,6 +51,14 @@ const (
 	omSkewRemoteRef = "refs/heads/main"
 )
 
+// omSkewNonBinaryPaths are the paths that cannot change the installed om: a
+// commit that touches only these leaves the binary as it was, so the installed
+// sha differing from origin/main over them is not a skew. A path in none of
+// them (Go source, go.mod and go.sum, the build and install scripts, anything
+// unknown) can change the binary and keeps the alert. A name ending in "/" is
+// a directory prefix; any other is an exact path.
+var omSkewNonBinaryPaths = []string{".om.json", "docs/", "README.md", "CHANGELOG.md", "LICENSE", ".gitignore"}
+
 // omSkewMonitor is the check's state: the start guard, the open alert, and
 // the last unreadable reading logged.
 type omSkewMonitor struct {
@@ -112,7 +120,11 @@ func (d *Daemon) omSkewOnce() {
 type omSkewReading struct {
 	installed string
 	remote    string
-	err       error
+	// binaryUnchanged is true when the two shas differ but every file between
+	// them is in omSkewNonBinaryPaths. It is false whenever that could not be
+	// established: the alert fails toward alarming.
+	binaryUnchanged bool
+	err             error
 }
 
 // omSkewRead takes both readings, the installed side first: an om that cannot
@@ -128,12 +140,72 @@ func (d *Daemon) omSkewRead(townRoot string) omSkewReading {
 	if err != nil {
 		return omSkewReading{err: fmt.Errorf("the om rig's origin/main: %w", err)}
 	}
-	return omSkewReading{installed: installed, remote: remote}
+	r := omSkewReading{installed: installed, remote: remote}
+	if installed != remote {
+		r.binaryUnchanged = d.omSkewBinaryUnchanged(townRoot, installed, remote)
+	}
+	return r
+}
+
+// omSkewBinaryUnchanged reports whether no file between the installed om and
+// origin/main can change the binary. The diff runs in the rebuild_om job's own
+// clone, read-only: never in om's canonical worktree, which an om build runs
+// in. When the clone cannot answer (missing, unreadable, or without either
+// sha) the answer is false, so the alert still fires.
+func (d *Daemon) omSkewBinaryUnchanged(townRoot, installed, remote string) bool {
+	changed, err := d.omSkewChangedPaths(townRoot, installed, remote)
+	if err != nil {
+		d.logger.Printf("om_skew: cannot list the files between %s and %s (%v); treating the skew as real",
+			shortOMSHA(installed), shortOMSHA(remote), err)
+		return false
+	}
+	for _, path := range changed {
+		if !omSkewNonBinaryPath(path) {
+			return false
+		}
+	}
+	return true
+}
+
+// omSkewNonBinaryPath reports whether path is in omSkewNonBinaryPaths.
+func omSkewNonBinaryPath(path string) bool {
+	for _, p := range omSkewNonBinaryPaths {
+		if strings.HasSuffix(p, "/") {
+			if strings.HasPrefix(path, p) {
+				return true
+			}
+		} else if path == p {
+			return true
+		}
+	}
+	return false
+}
+
+// omSkewChangedPaths lists the files that differ between the installed om's
+// commit and origin/main's, from the rebuild_om clone. Renames are not
+// detected, so a file moved out of Go source is listed under both names.
+func (d *Daemon) omSkewChangedPaths(townRoot, installed, remote string) ([]string, error) {
+	src := filepath.Join(townRoot, filepath.FromSlash(rebuildOMSrcDir))
+	if _, err := os.Stat(src); err != nil {
+		return nil, fmt.Errorf("the rebuild_om clone: %w", err)
+	}
+	out, err := d.omSkewGit("-C", src, "diff", "--name-only", "-z", "--no-renames", installed, remote)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for _, p := range strings.Split(out, "\x00") {
+		if p != "" {
+			paths = append(paths, p)
+		}
+	}
+	return paths, nil
 }
 
 // omSkewJudge applies one reading to the alert state: a mismatch raises
-// om-skew once, an equal pair clears an open one (one a previous daemon
-// process left open too: this process's first equal pair clears once), and a reading that could not
+// om-skew once, an equal pair, or a differing one whose files cannot change
+// the binary, clears an open one (one a previous daemon process left open
+// too: this process's first such reading clears once), and a reading that could not
 // be taken does neither — an unreadable om or an unreachable remote is not
 // evidence that a skew ended.
 func (d *Daemon) omSkewJudge(r omSkewReading) {
@@ -152,11 +224,11 @@ func (d *Daemon) omSkewJudge(r omSkewReading) {
 	}
 	m.lastReadErr = ""
 
-	if r.installed == r.remote {
+	if r.installed == r.remote || r.binaryUnchanged {
 		if !m.raised && m.settled {
 			return
 		}
-		if err := d.clearAlertsErr("the installed om matches the om rig's origin/main", omSkewAlertKey); err != nil {
+		if err := d.clearAlertsErr("the installed om is current with the om rig's origin/main: nothing between them changes the binary", omSkewAlertKey); err != nil {
 			// The clear never reached the town: stay raised so the next check
 			// retries it, rather than leaving an alert nothing will close.
 			d.logger.Printf("om_skew: clearing the alert did not reach the town; retrying next check: %v", err)
