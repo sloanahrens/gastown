@@ -1686,9 +1686,10 @@ func TestContainerSuiteGuardsStripHeredocBodies(t *testing.T) {
 
 // A shell-fed heredoc body is a script the reader shell runs, so it inherits
 // the container opt-in the reading line carries, as a -c payload and a command
-// substitution do: a GT_TEST_DOCKER=1 before the reader word, bare or exported,
-// reaches the body (gt-zyccn). An opt-in inside the body counts too, and a body
-// naming no container-backed package stays allowed either way.
+// substitution do (gt-zyccn). The three cases whose opt-in sits ahead of the
+// body pass no hook-environment opt-in, so they reach it only through the
+// line's own GT_TEST_DOCKER=1, typed before the reader word or exported by a
+// segment ahead of it. A body naming no container-backed package stays allowed.
 func TestContainerSuiteHeredocBodyHonoursDockerOptIn(t *testing.T) {
 	t.Parallel()
 	root := fakeModule(t, "gastown/polecats/nux/gastown")
@@ -1706,6 +1707,11 @@ func TestContainerSuiteHeredocBodyHonoursDockerOptIn(t *testing.T) {
 		{
 			name:    "exported opt-in on the reader line reaches the body",
 			command: "export GT_TEST_DOCKER=1; bash <<'EOF'\ngo test ./internal/beads\nEOF\n",
+			blocked: true,
+		},
+		{
+			name:    "opt-in exported two segments before the reader reaches the body",
+			command: "export GT_TEST_DOCKER=1; echo ready; bash <<'EOF'\ngo test ./internal/beads\nEOF\n",
 			blocked: true,
 		},
 		{
