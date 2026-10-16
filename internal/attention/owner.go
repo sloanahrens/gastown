@@ -78,6 +78,8 @@ var ruleOwners = map[string]Owner{
 	// it or finds what stopped it, and the operator hears about it only if it
 	// stays failed (gt-hcbft).
 	RuleDeployFailed: OwnerOverseer,
+	// A review queue is the overseer's to work down.
+	RuleReviewBacklog: OwnerOverseer,
 }
 
 // humanFamilies are the rule families the table gives the human as a whole:

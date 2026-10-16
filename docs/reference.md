@@ -1017,6 +1017,29 @@ operator hold or when the newest tick is over 10 minutes old. The thresholds are
 `attentionDispatchIdleTicks`, `attentionDispatchIdleFresh` and
 `attentionDispatchIdleReasons` in `internal/daemon/attention_dispatch_idle.go`.
 
+### Review Backlog Rule
+
+`review.backlog` (operator_action, wakes) is raised once when the number of
+open `landing.risk_path` items passes `overseer.review_backlog_threshold`
+(default `15`), or rises by more than `overseer.review_backlog_rise` (default
+`10`) over the lowest count of the last hour. Its summary names the total and
+the change, as `16 open risk-path reviews, +3 in the last hour`. A risk-path
+item wakes on its own only after three hours unreviewed, so a rule on the total
+is what catches a pile.
+
+While it holds, more items change the summary and wake nothing. It clears,
+without a wake, when the count falls under half the threshold, and the next
+crossing raises it again. The count is the items the risk-path collector sees,
+acked or not, because an ack hides a row and does not review the landing. The
+one-hour history is kept in daemon memory, so a restart measures the rise from
+its first tick. Both keys sit under `overseer` in the operational settings:
+
+```json
+"overseer": {"review_backlog_threshold": 15, "review_backlog_rise": 10}
+```
+
+A zero or negative value reads as the default.
+
 ### Watch Feed
 
 Two files carry the town's own alerts in one schema, and `gt tail`'s watch

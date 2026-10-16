@@ -232,6 +232,18 @@ type OverseerThresholds struct {
 	// once per silent period. Unset pushes nothing; the rule still raises its
 	// info event.
 	SilentPush string `json:"silent_push,omitempty"`
+
+	// ReviewBacklogThreshold is the count of open landing.risk_path items past
+	// which the daemon raises review.backlog (default 15). The rule clears
+	// once the count falls under half of it. Zero or negative reads as the
+	// default.
+	ReviewBacklogThreshold int `json:"review_backlog_threshold,omitempty"`
+
+	// ReviewBacklogRise is how many more open landing.risk_path items than the
+	// lowest count of the last hour raise review.backlog while the total is
+	// still under the threshold (default 10). Zero or negative reads as the
+	// default.
+	ReviewBacklogRise int `json:"review_backlog_rise,omitempty"`
 }
 
 // DoltThresholds configures Dolt server thresholds.

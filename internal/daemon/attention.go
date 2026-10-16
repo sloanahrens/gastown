@@ -168,6 +168,8 @@ type attentionCache struct {
 	// repeatedAt is when each repeating item (attention.Repeats) was last
 	// said. It is memory only: after a restart an item's clock starts again.
 	repeatedAt map[string]time.Time
+	// backlogSamples is the review-backlog rule's one-hour count history.
+	backlogSamples []backlogSample
 }
 
 // reworkNote is one rework bead's cached rejection count, keyed by the
@@ -247,6 +249,17 @@ type attentionSources struct {
 	// outside reads (gt-vsct7.4).
 	riskLandings func(rig string, since time.Time) ([]land.LandingRecord, error)
 	riskNotes    func(ctx context.Context, rig, id string) (string, error)
+	// riskOpen is how many risk-path items collectRiskPaths observed this tick,
+	// and riskCounted whether it got as far as counting: the review-backlog
+	// collector, which runs after it, reads both.
+	riskOpen    int
+	riskCounted bool
+	// backlog is the review-backlog rule's limits, from the operational config.
+	backlog backlogLimits
+	// backlogSamples is the open risk-path count of each tick in the last hour,
+	// carried across ticks by the daemon. It is memory only, so after a restart
+	// the rise is measured from the first tick. collectReviewBacklog updates it.
+	backlogSamples []backlogSample
 
 	// reworkNotes is the rejection-count cache, carried across ticks by the
 	// daemon.
@@ -316,13 +329,14 @@ func (d *Daemon) writeAttention() {
 	src.diskWarnBeats = cache.diskWarnBeats
 	src.dockerProbeFails = cache.dockerProbeFails
 	src.repeatedAt = cache.repeatedAt
+	src.backlogSamples = cache.backlogSamples
 	tips, err := readDirectPushTips(d.config.TownRoot)
 	if err != nil {
 		d.logger.Printf("attention: reading %s: %v", tipsFileName, err)
 	}
 	src.tips = &tips
 	state := d.attentionTick(ctx, src, prev, acks, now)
-	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, repeatedAt: src.repeatedAt}
+	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, repeatedAt: src.repeatedAt, backlogSamples: src.backlogSamples}
 	if len(src.tips.Rigs) == 0 {
 		return
 	}
@@ -489,6 +503,8 @@ func (s *attentionSources) collectors() []attentionCollector {
 		{kind: attention.KindPolecatStall, collect: s.collectPolecatStall},
 		{kind: attention.KindDirectPush, collect: s.collectDirectPush},
 		{kind: attention.KindRiskPath, collect: s.collectRiskPaths},
+		// Reads the count collectRiskPaths just made, so it stays right after it.
+		{kind: attention.KindReviewBacklog, collect: s.collectReviewBacklog},
 		{kind: attention.KindTierSweepRed, collect: s.collectTierSweepRed},
 		{kind: attention.KindOverrunStopped, collect: s.collectOverrunStopped},
 		{kind: attention.KindScheduledGate, collect: s.collectScheduledGate},
@@ -515,6 +531,8 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		s.host = systemHostProbes{townRoot: d.config.TownRoot}
 	}
 	s.landingRigs = d.attentionLandingRigs
+	overseerCfg := d.loadOperationalConfig().GetOverseerConfig()
+	s.backlog = backlogLimits{threshold: overseerCfg.ReviewBacklogThresholdV(), rise: overseerCfg.ReviewBacklogRiseV()}
 	s.questions = d.productionQuestionReads()
 	s.overseer = d.productionOverseerReads()
 	s.dispatchIdle = d.dispatchIdle.Status
@@ -1238,6 +1256,7 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 // worker is on (attentionLandingRigs): a town with landings disabled has no
 // landing picture to report, and this item is part of that picture.
 func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.Item, error) {
+	s.riskOpen, s.riskCounted = 0, false
 	var out []attention.Item
 	notesFor := map[string]string{}
 	since := s.now.Add(-attentionRiskPathWindow)
@@ -1281,6 +1300,7 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 			})
 		}
 	}
+	s.riskOpen, s.riskCounted = len(out), true
 	return out, nil
 }
 
