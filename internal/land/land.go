@@ -1337,10 +1337,7 @@ func (l *Lander) finishedUnrecordedLanding(g Repo, w Work) (res Result, handled 
 	if completed != nil {
 		return *completed, true, err
 	}
-	if err != nil {
-		return Result{}, true, err
-	}
-	return Result{}, false, nil
+	return Result{}, err != nil, err
 }
 
 // completeUnrecordedLanding finishes a landing this lander merged but never
