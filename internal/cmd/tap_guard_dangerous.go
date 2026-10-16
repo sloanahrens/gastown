@@ -928,7 +928,7 @@ func heredocBodySubstitutions(command string) []string {
 		if span.bodyStart < 0 || span.quoted {
 			continue
 		}
-		subs = append(subs, commandSubstitutions(span.body)...)
+		subs = append(subs, heredocSubstitutions(span.body)...)
 	}
 	return subs
 }
@@ -1084,40 +1084,43 @@ func resolveShellVar(arg string, vars map[string]string) string {
 	return arg
 }
 
-// commandSubstitutionPattern matches shell command substitution: $(...) or
-// `...`. Scanned against the raw (untokenized) command text, since shlex
-// has no notion of substitution grouping and would otherwise split
-// "$(rm -rf /)" across unrelated tokens. Non-nested only (a $(...) or
-// `...` containing its own nested substitution won't fully match) — good
-// enough for a guard that only needs to catch realistic single-level
-// wrapping, not parse arbitrary shell.
-var commandSubstitutionPattern = regexp.MustCompile(`\$\(([^()]*)\)|` + "`" + `([^` + "`" + `]*)` + "`")
-
-// commandSubstitutions extracts the inner command text of every $(...) or
-// `...` command substitution in command, so evaluateDangerousCommand can
+// commandSubstitutions extracts the inner command text of every outermost $(...)
+// or `...` command substitution in command, so evaluateDangerousCommand can
 // recurse into it the same as a bash -c/eval payload (gt-5ihs attempt 2:
-// "recurse into ... command substitution").
+// "recurse into ... command substitution"). Scanned against the raw
+// (untokenized) command text, since shlex has no notion of substitution
+// grouping and would otherwise split "$(rm -rf /)" across unrelated tokens.
 //
-// A backslash before the opening "$(" or backtick escapes it: the shell passes
-// the text through literally and runs nothing, so "\$(git reset --hard)" is
-// data wherever it appears — most visibly in an unquoted heredoc body, which
-// heredocBodySubstitutions otherwise scans for the substitutions the shell DOES
-// expand (gt-y6mhx). An even run of backslashes escapes itself, leaving
-// \\$(cmd) live, so escaping is decided by counting the run.
+// The scan is commandSubstitutionSpans, shared with the container-suite guard.
+// It balances the parentheses of a body, so "$(grep -E '(a|b)' f; git reset
+// --hard)" is cut whole and judged, where a pattern ending the body at the first
+// parenthesis never saw the reset (gt-d1mlb). A substitution nested in a body is
+// judged when the body is, one nesting level deeper.
+//
+// A backslash before the opening "$(" or backtick escapes it, and single quotes
+// hide it: the shell passes the text through literally and runs nothing, so
+// "\$(git reset --hard)" is data wherever it appears, most visibly in an
+// unquoted heredoc body, which heredocBodySubstitutions otherwise scans for the
+// substitutions the shell DOES expand (gt-y6mhx). An even run of backslashes
+// escapes itself, leaving \\$(cmd) live.
 func commandSubstitutions(command string) []string {
+	return substitutionBodies(command, commandSubstitutionSpans(command))
+}
+
+// heredocSubstitutions is commandSubstitutions for the text of an unquoted
+// heredoc body, where a quote mark is an ordinary character
+// (heredocSubstitutionSpans).
+func heredocSubstitutions(body string) []string {
+	return substitutionBodies(body, heredocSubstitutionSpans(body))
+}
+
+// substitutionBodies returns the non-empty bodies of spans, cut from text.
+func substitutionBodies(text string, spans []substitutionSpan) []string {
 	var out []string
-	for _, m := range commandSubstitutionPattern.FindAllStringSubmatchIndex(command, -1) {
-		if backslashesBefore(command, m[0])%2 == 1 {
-			continue
+	for _, span := range spans {
+		if body := text[span.bodyStart:span.bodyEnd]; body != "" {
+			out = append(out, body)
 		}
-		start, end := m[2], m[3]
-		if start < 0 {
-			start, end = m[4], m[5]
-		}
-		if start < 0 || command[start:end] == "" {
-			continue
-		}
-		out = append(out, command[start:end])
 	}
 	return out
 }
