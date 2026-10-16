@@ -498,3 +498,43 @@ func TestForgejoConfigIgnoresAnUndeclaredKey(t *testing.T) {
 		t.Error("an undeclared key outside the forgejo block decoded; want a parse error")
 	}
 }
+
+// A min_spawn_gap the dispatcher cannot parse reads as no stagger
+// (MinSpawnGapD returns 0), so Validate refuses it at load instead (gt-71dgi).
+func TestPolecatPoolValidateRejectsBadMinSpawnGap(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		gap     string
+		wantErr bool
+	}{
+		{"4", true},
+		{"-4m", true},
+		{"soon", true},
+		{"90s", false},
+		{"4m", false},
+		{"0s", false},
+		{"", false},
+	} {
+		err := (&PolecatPool{MinSpawnGap: tc.gap}).Validate()
+		if tc.wantErr {
+			if err == nil || !strings.Contains(err.Error(), "polecat_pool.min_spawn_gap") {
+				t.Errorf("Validate(min_spawn_gap=%q) = %v, want an error naming polecat_pool.min_spawn_gap", tc.gap, err)
+			}
+		} else if err != nil {
+			t.Errorf("Validate(min_spawn_gap=%q) = %v, want nil", tc.gap, err)
+		}
+	}
+}
+
+// A negative max_seats reads as unset (SeatsCapped false), so Validate refuses
+// it rather than let a hand-edited file load silently (gt-71dgi).
+func TestPolecatPoolValidateRejectsNegativeMaxSeats(t *testing.T) {
+	t.Parallel()
+	err := (&PolecatPool{Agent: "deepseek-flash", MaxSeats: -1}).Validate()
+	if err == nil || !strings.Contains(err.Error(), "polecat_pool.max_seats") {
+		t.Fatalf("Validate(max_seats=-1) = %v, want an error naming polecat_pool.max_seats", err)
+	}
+	if err := (&PolecatPool{Agent: "deepseek-flash", MaxSeats: 0}).Validate(); err != nil {
+		t.Errorf("Validate(max_seats=0) = %v, want nil", err)
+	}
+}

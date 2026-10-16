@@ -1968,6 +1968,9 @@ func (d *Daemon) queryRigBead(rigName string) (string, rigBeadVerdict, error) {
 		prefix = agentconfig.GetRigPrefix(d.config.TownRoot, rigName)
 	}
 
+	if prefix == "" {
+		return "", rigBeadActive, fmt.Errorf("rig %s: no beads prefix (rigs.json unreadable)", rigName)
+	}
 	rigBeadID := fmt.Sprintf("%s-rig-%s", prefix, rigName)
 	issue, err := d.showRigBead(rigPath, rigBeadID)
 	if err != nil {
