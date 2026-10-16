@@ -5918,44 +5918,55 @@ func TestProbeDSNsCarryPassword(t *testing.T) {
 }
 
 func TestBuildServerSQLCmdPasswordNotInArgv(t *testing.T) {
-	// Not parallel: the inherited cases set a process environment variable.
+	t.Parallel()
+
+	for _, password := range []string{"secret", ""} {
+		config := &Config{Host: "127.0.0.1", Port: 3307, User: "root", Password: password, DataDir: "/tmp/dolt-data"}
+		cmd := buildServerSQLCmd(context.Background(), config, "-q", "SELECT 1")
+
+		for _, arg := range cmd.Args {
+			if arg == "--password" || (password != "" && strings.Contains(arg, password)) {
+				t.Errorf("password %q: argv leaks it: %q", password, cmd.Args)
+			}
+		}
+		if got, found := lastEnvValue(cmd.Env, "DOLT_CLI_PASSWORD"); !found || got != password {
+			t.Errorf("password %q: DOLT_CLI_PASSWORD = %q (set %v), want it set to the password", password, got, found)
+		}
+	}
+}
+
+// An empty password still sets the variable: without it dolt prompts on stdin,
+// which fails in non-TTY sessions. The appended entry wins over an inherited one.
+func TestServerSQLEnv(t *testing.T) {
+	t.Parallel()
+
 	tests := []struct {
-		name      string
-		password  string
-		inherited string
+		name     string
+		base     []string
+		password string
 	}{
-		{"password set", "secret", ""},
-		{"empty password still sets the variable to suppress the stdin prompt", "", ""},
-		{"configured password overrides an inherited one", "secret", "stale"},
-		{"empty password overrides an inherited one", "", "stale"},
+		{"password set", []string{"A=1"}, "secret"},
+		{"empty password", []string{"A=1"}, ""},
+		{"configured password overrides an inherited one", []string{"DOLT_CLI_PASSWORD=stale"}, "secret"},
+		{"empty password overrides an inherited one", []string{"DOLT_CLI_PASSWORD=stale"}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.inherited != "" {
-				t.Setenv("DOLT_CLI_PASSWORD", tt.inherited)
-			}
-			config := &Config{Host: "127.0.0.1", Port: 3307, User: "root", Password: tt.password, DataDir: "/tmp/dolt-data"}
-			cmd := buildServerSQLCmd(context.Background(), config, "-q", "SELECT 1")
-
-			for _, arg := range cmd.Args {
-				if arg == "--password" || (tt.password != "" && strings.Contains(arg, tt.password)) {
-					t.Errorf("argv leaks the password: %q", cmd.Args)
-				}
-			}
-			// The child sees the last entry for a duplicated key.
-			var got string
-			var found bool
-			for _, env := range cmd.Env {
-				if v, ok := strings.CutPrefix(env, "DOLT_CLI_PASSWORD="); ok {
-					got, found = v, true
-				}
-			}
-			if !found {
-				t.Fatal("env lacks DOLT_CLI_PASSWORD; dolt would prompt on stdin")
-			}
-			if got != tt.password {
-				t.Errorf("effective DOLT_CLI_PASSWORD = %q, want %q", got, tt.password)
+			t.Parallel()
+			env := serverSQLEnv(tt.base, tt.password)
+			if got, found := lastEnvValue(env, "DOLT_CLI_PASSWORD"); !found || got != tt.password {
+				t.Errorf("DOLT_CLI_PASSWORD = %q (set %v), want %q", got, found, tt.password)
 			}
 		})
 	}
+}
+
+// lastEnvValue is the value a child process sees: the last entry for key wins.
+func lastEnvValue(env []string, key string) (value string, found bool) {
+	for _, e := range env {
+		if v, ok := strings.CutPrefix(e, key+"="); ok {
+			value, found = v, true
+		}
+	}
+	return value, found
 }

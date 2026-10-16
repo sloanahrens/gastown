@@ -5039,13 +5039,18 @@ func buildServerSQLCmd(ctx context.Context, config *Config, args ...string) *exe
 	cmd.Dir = config.DataDir
 	setProcessGroup(cmd)
 
-	// The password goes through DOLT_CLI_PASSWORD, never argv: argv is world
-	// readable through ps. Set it even when empty: dolt then skips the stdin
-	// prompt, which fails with "inappropriate ioctl" in non-TTY environments,
-	// and the appended entry wins over an inherited DOLT_CLI_PASSWORD.
-	cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD="+config.Password)
+	cmd.Env = serverSQLEnv(os.Environ(), config.Password)
 
 	return cmd
+}
+
+// serverSQLEnv is base plus the Dolt password. The password goes through
+// DOLT_CLI_PASSWORD, never argv: argv is world readable through ps. It is set
+// even when empty: dolt then skips the stdin prompt, which fails with
+// "inappropriate ioctl" in non-TTY environments, and the appended entry wins
+// over a DOLT_CLI_PASSWORD already in base.
+func serverSQLEnv(base []string, password string) []string {
+	return append(base[:len(base):len(base)], "DOLT_CLI_PASSWORD="+password)
 }
 
 // waitForCatalog polls the Dolt server until the named database is visible in the
