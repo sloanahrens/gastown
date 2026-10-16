@@ -37,7 +37,7 @@ or worse, the human's name.
 attributed:
 
 ```
-Git commits:    gastown/polecats/toast <owner@example.com>
+Git commits:    gastown/polecats/toast <gastown.polecats.toast@gastown.local>
 Beads records:  created_by: gastown/crew/joe
 Event logs:     actor: gastown/polecats/nux
 ```
@@ -187,11 +187,14 @@ the route that landed it (`daemon`):
 ```
 LANDING RECORD
 landed_commit: a3c4ea9a5
-branch: polecat/nux/gt-xyz+mv8d7k47
+patch_id: <patch-id>
 target: main
+base: <base-sha>
+branch: polecat/nux/gt-xyz+mv8d7k47
+head: <head-sha>
 gate_result: pass (lint exit 0 12s, test exit 0 96s)
 om_verdict: approve
-om_score: 0.9
+om_score: 0.9000
 route: daemon
 landed_at: 2025-01-15T10:30:00Z
 ```
@@ -211,7 +214,7 @@ happening until it's done (or failed).
 **The solution:** Work state as a real-time stream:
 
 ```bash
-bd activity --follow
+bd events tail --follow
 
 [14:32:08] + patrol-x7k.arm-ace bonded (5 steps)
 [14:32:09] → patrol-x7k.arm-ace.capture in_progress
