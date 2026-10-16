@@ -661,7 +661,7 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 			parts = append(parts, fmt.Sprintf("%s=%d", db, n))
 		}
 	}
-	msg := fmt.Sprintf("backup %s: %s", timestamp, strings.Join(parts, " "))
+	msg := fmt.Sprintf("backup %s m%d: %s", timestamp, countMetricVersion, strings.Join(parts, " "))
 	if len(failed) > 0 {
 		sort.Strings(failed)
 		msg += fmt.Sprintf(" [FAILED: %s]", strings.Join(failed, ", "))
@@ -1290,10 +1290,14 @@ var errSpikeBaselineBootstrap = errors.New("no backup commit history yet")
 
 // recomputeSpikeBaseline derives the rolling spike baseline from the backup
 // repo's commit history (gt-tj-he). Each backup commit records its per-database
-// counts in the subject line ("backup <ts>: db1=N1 db2=N2"), so the last
+// counts in the subject line ("backup <ts> m<V>: db1=N1 db2=N2"), so the last
 // defaultSpikeBaselineWindow backup commits supply the window. This replaces
 // the old git show HEAD:<relPath> read, which misjudged spikes whenever the
 // committed file count diverged from what the detector expected.
+//
+// Only commits counted under countMetricVersion enter the window. History that
+// holds counts but none of the current version returns a *spikeVersionChange,
+// which the caller treats as a new baseline (gt-26qqh).
 //
 // Commit history is the sole authority for the window. The in-repo cache
 // (saveSpikeBaselineHistory) is consulted only when history yields no counts at
@@ -1334,6 +1338,10 @@ func (d *Daemon) recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) 
 		counts map[string]int
 	}
 	var commits []commitSubject
+	// otherVersion is the newest count-bearing commit's version when that is not
+	// the current metric; only same-version commits enter the window, since a
+	// count measured under another definition is not comparable (gt-26qqh).
+	otherVersion := 0
 	total := 0
 	seen := map[string]bool{}
 	for _, entry := range log {
@@ -1346,6 +1354,12 @@ func (d *Daemon) recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) 
 			continue
 		}
 		seen[entry.Hash] = true
+		if v := parseCommitVersion(entry.Subject); v != countMetricVersion {
+			if otherVersion == 0 {
+				otherVersion = v
+			}
+			continue
+		}
 		date := ""
 		if !entry.Time.IsZero() {
 			date = entry.Time.Format(time.RFC3339)
@@ -1373,18 +1387,25 @@ func (d *Daemon) recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) 
 			if window[db] == nil {
 				order = append(order, db)
 			}
-			window[db] = append(window[db], spikeCommit{Db: db, N: n, Age: i, Date: c.date, Source: spikeSourceCommit})
+			window[db] = append(window[db], spikeCommit{Db: db, N: n, Age: i, Date: c.date, Source: spikeSourceCommit, Version: countMetricVersion})
 		}
 	}
 	for db := range window {
 		sort.Slice(window[db], func(i, j int) bool { return window[db][i].Age < window[db][j].Age })
 	}
 
+	if len(window) == 0 && otherVersion != 0 {
+		// Counts exist, all under another metric: a new baseline, not a spike.
+		return nil, &spikeVersionChange{From: otherVersion, To: countMetricVersion}
+	}
 	if len(window) == 0 {
 		// No count-bearing history. The cache is the only remaining source of
 		// levels, and it may only be trusted here, where no committed level
 		// exists to outrank it.
 		if sb := cachedSpikeBaseline(gitRepo); sb != nil {
+			if v := cachedBaselineVersion(sb); v != countMetricVersion {
+				return nil, &spikeVersionChange{From: v, To: countMetricVersion}
+			}
 			return sb, nil
 		}
 		if total == 0 {
@@ -1565,6 +1586,10 @@ type spikeCommit struct {
 	// used only when history carries no counts). Reported so a spike's
 	// "previous" value can be traced to its origin (gt-tj-he).
 	Source string `json:"source"`
+	// Version is the count metric the level was measured under (see
+	// countMetricVersion). A cache written before versioning omits it, which
+	// reads as version 1, like a subject without the token.
+	Version int `json:"version,omitempty"`
 }
 
 const (
@@ -1599,9 +1624,76 @@ const (
 	spikeBaselineCacheFile = ".spike-baseline-cache.json"
 )
 
+// countMetricVersion names the count the backup commits per database: the line
+// total across the issue file and every supplemental table file, minus the
+// records the pollution filter removed. The commit subject carries it as an
+// "m<N>" token ("backup <ts> m2: hq=37562"), and the spike check only compares
+// counts of the same version. A change to what the count measures MUST bump this
+// number: a count measured under another definition reads as a spike against
+// the old history, which would halt the backup for good, since a halt commits
+// nothing and so never advances that history (gt-26qqh).
+//
+// Version 1 is the issue-file line count, and is also what a subject without the
+// token means, so history from before the token parses unchanged.
+const countMetricVersion = 2
+
+// legacyCountMetricVersion is the version of a subject (or cache entry) that
+// carries no token.
+const legacyCountMetricVersion = 1
+
+// parseCommitVersion reads the count-metric version from a backup commit
+// subject ("backup <ts> m2: db=N"). The token is the "m<N>:" field ahead of the
+// first count pair; a subject without one is version 1.
+func parseCommitVersion(subject string) int {
+	for _, field := range strings.Fields(subject) {
+		if strings.ContainsRune(field, '=') {
+			break
+		}
+		digits, ok := strings.CutPrefix(field, "m")
+		if !ok {
+			continue
+		}
+		digits, ok = strings.CutSuffix(digits, ":")
+		if !ok {
+			continue
+		}
+		if v, err := strconv.Atoi(digits); err == nil && v > 0 {
+			return v
+		}
+	}
+	return legacyCountMetricVersion
+}
+
+// spikeVersionChange is returned by recomputeSpikeBaseline when the history
+// holds counts but none measured under countMetricVersion. It is not a failure:
+// the caller commits this run's counts as the new baseline and logs the change
+// (gt-26qqh).
+type spikeVersionChange struct {
+	From, To int
+}
+
+func (e *spikeVersionChange) Error() string {
+	return fmt.Sprintf("backup history counts under count metric m%d, this run counts under m%d", e.From, e.To)
+}
+
+// cachedBaselineVersion returns the count-metric version of a cache-built
+// baseline: the highest version among its entries (version 1 when the cache
+// predates versioning).
+func cachedBaselineVersion(sb *spikeBaseline) int {
+	version := legacyCountMetricVersion
+	for _, entries := range sb.Counts {
+		for _, e := range entries {
+			if e.Version > version {
+				version = e.Version
+			}
+		}
+	}
+	return version
+}
+
 // parseCommitCounts extracts the "db=NNN" count pairs from a git commit's
 // subject line. Backup commits are always titled
-// "backup <timestamp>: db1=N1 db2=N2 [FAILED: ...]" (see commitAndPushJsonlBackup),
+// "backup <timestamp> m<V>: db1=N1 db2=N2 [FAILED: ...]" (see commitAndPushJsonlBackup),
 // so the subject is the only count record surviving an unpushed or halted
 // cycle. Returns nil when no pairs are present.
 func parseCommitCounts(subject string) map[string]int {
@@ -1692,6 +1784,16 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 		// derives its baseline from. Halting here would deadlock the patrol —
 		// no baseline means no commit means never a baseline (gt-tj-he).
 		d.logger.Printf("jsonl_git_backup: verify: no backup history yet (first run) — nothing to compare against, skipping spike check")
+		return nil, nil
+	}
+	var versionChange *spikeVersionChange
+	if errors.As(err, &versionChange) {
+		// The count metric changed since the last backup commit, so the history
+		// holds no count comparable to this run's. Committing this run's counts
+		// is what ends the mismatch; halting would commit nothing and stay
+		// mismatched for ever (gt-26qqh).
+		d.logger.Printf("jsonl_git_backup: verify: count metric changed from m%d to m%d — rebaselining: this run's counts become the new baseline, spike check skipped",
+			versionChange.From, versionChange.To)
 		return nil, nil
 	}
 	if err != nil {
