@@ -674,6 +674,48 @@ func TestDeployWatch_ABlindClearThatDidNotLandIsRetried(t *testing.T) {
 	}
 }
 
+// TestDeployWatch_ABlindAlertSurvivesARestart: the blind escalation outlives
+// the daemon that raised it. The read comes back while no watch remembers
+// raising it, so the bead it left open has to be closed by the watch that
+// reads the rig again — nothing else closes that key, and an open bead says
+// the rig's deploys go unseen (gt-snyd1).
+func TestDeployWatch_ABlindAlertSurvivesARestart(t *testing.T) {
+	t.Parallel()
+	wantKey := deployWatchBrokenKeyPrefix + "fractals"
+	api := &fakeDeployForgejo{listErr: &forgejo.APIError{Method: "GET", Path: "/repos", StatusCode: 404, Body: "not found"}}
+	w, rec := newTestDeployWatch(t, api)
+	w.Logf = func(string, ...any) {}
+
+	for range deployWatchBlindPolls {
+		w.poll(context.Background())
+	}
+	if raised := rec.raisedAlerts(); len(raised) != 1 || raised[0].Key != wantKey {
+		t.Fatalf("raised = %+v, want the blind escalation for %s first", raised, wantKey)
+	}
+
+	// The daemon restarts, and this time the repository answers.
+	api.listErr = nil
+	next, nextRec := newTestDeployWatch(t, api)
+	next.State = w.State
+	next.Logf = func(string, ...any) {}
+	next.poll(context.Background())
+
+	cleared := nextRec.clearedAlerts()
+	if len(cleared) != 1 {
+		t.Fatalf("cleared = %+v, want the escalation a previous daemon raised closed by the read that came back", cleared)
+	}
+	if cleared[0].Key != wantKey {
+		t.Errorf("cleared key = %q, want %q", cleared[0].Key, wantKey)
+	}
+
+	// And the key is done with: the next poll of the same rig finds nothing
+	// left to close.
+	next.poll(context.Background())
+	if again := nextRec.clearedAlerts(); len(again) != 1 {
+		t.Errorf("cleared = %+v, want the one clear, not one per poll", again)
+	}
+}
+
 // TestDeployWatch_TwoBlindRigsAreTwoLogLines: the log is deduplicated per key,
 // and the key is the rig: one remembered message let the rig that logged last
 // stand for every other one, so two repositories answering nothing, or one
