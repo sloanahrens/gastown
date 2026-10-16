@@ -1816,11 +1816,11 @@ func TestAddRig_FinishesWithoutAMayorClone(t *testing.T) {
 	}
 }
 
-// TestAddRig_TrackedBeadsWithoutAMayorCloneKeepTheirOwnDatabase is the outcome
-// warnTrackedBeadsWithoutClone names: the repo's .beads/ is read through the
-// clone's working tree, so a rig added without a clone runs its own database
-// instead of adopting the tracked one (gt-jmqc5).
-func TestAddRig_TrackedBeadsWithoutAMayorCloneKeepTheirOwnDatabase(t *testing.T) {
+// A repo that tracks .beads/ adopts its database through the mayor clone
+// (InitBeads points the rig's .beads/redirect at mayor/rig/.beads), so a clone
+// git refuses there fails the add rather than leaving a rig that quietly runs
+// its own database beside the repo's (gt-jmqc5).
+func TestAddRig_RefusesATrackedBeadsRepoWithoutAMayorClone(t *testing.T) {
 	t.Parallel()
 	root, rigsConfig := setupTestTown(t)
 	manager, f, _ := testManager(root, rigsConfig)
@@ -1831,28 +1831,6 @@ func TestAddRig_TrackedBeadsWithoutAMayorCloneKeepTheirOwnDatabase(t *testing.T)
 			".beads/metadata.json": `{"database":"beads_` + prefix + `"}`,
 		})
 	}
-
-	withClone := tracked("withclone", "tk")
-	if _, err := manager.AddRig(AddRigOptions{
-		Name:          "tracked",
-		GitURL:        withClone,
-		BeadsPrefix:   "tk",
-		SkipDoltCheck: true,
-	}); err != nil {
-		t.Fatalf("AddRig: %v", err)
-	}
-	// The same repo, with every working-tree clone refused.
-	cloneless := tracked("cloneless", "tl")
-	manager.git = mayorCloneRefused{manager.git}
-	if _, err := manager.AddRig(AddRigOptions{
-		Name:          "trackedless",
-		GitURL:        cloneless,
-		BeadsPrefix:   "tl",
-		SkipDoltCheck: true,
-	}); err != nil {
-		t.Fatalf("AddRig without a mayor clone: %v", err)
-	}
-
 	redirect := func(name string) string {
 		data, err := os.ReadFile(filepath.Join(root, name, ".beads", "redirect"))
 		if err != nil {
@@ -1860,17 +1838,71 @@ func TestAddRig_TrackedBeadsWithoutAMayorCloneKeepTheirOwnDatabase(t *testing.T)
 		}
 		return strings.TrimSpace(string(data))
 	}
+
+	// The same repo adds with a clone: the refusal is what fails, not the rig.
+	if _, err := manager.AddRig(AddRigOptions{
+		Name:          "tracked",
+		GitURL:        tracked("withclone", "tk"),
+		BeadsPrefix:   "tk",
+		SkipDoltCheck: true,
+	}); err != nil {
+		t.Fatalf("AddRig with a mayor clone: %v", err)
+	}
 	if got := redirect("tracked"); got != "mayor/rig/.beads" {
 		t.Errorf("rig added with a clone: .beads/redirect = %q, want the clone's tracked beads", got)
 	}
-	if got := redirect("trackedless"); got != "" {
-		t.Errorf("rig added without a clone: .beads/redirect = %q, want none: it keeps its own database", got)
+
+	manager.git = mayorCloneRefused{manager.git}
+	_, err := manager.AddRig(AddRigOptions{
+		Name:          "trackedless",
+		GitURL:        tracked("cloneless", "tl"),
+		BeadsPrefix:   "tl",
+		SkipDoltCheck: true,
+	})
+	if err == nil {
+		t.Fatal("AddRig succeeded, want a failure: this repo's tracked .beads/ is read through the clone")
+	}
+	for _, want := range []string{".beads/", "tracks", "refused the clone"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q, want it to name %q", err, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "trackedless")); !os.IsNotExist(err) {
+		t.Errorf("rig directory = %v, want the failed add rolled back", err)
+	}
+	if _, ok := rigsConfig.Rigs["trackedless"]; ok {
+		t.Error("rig was registered in rigs.json despite the failed add")
+	}
+}
+
+// --sparse-checkout configures the mayor clone's working tree, so a clone git
+// refuses fails that add too: the rig would otherwise drop an option the
+// operator asked for (gt-jmqc5).
+func TestAddRig_RefusesToDropASparseCheckoutWithTheClone(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+	gitURL := remoteRepo(t, f, filepath.Join(t.TempDir(), "source"), nil)
+	manager.git = mayorCloneRefused{manager.git}
+
+	_, err := manager.AddRig(AddRigOptions{
+		Name:           "sparse",
+		GitURL:         gitURL,
+		BeadsPrefix:    "sp",
+		SparseCheckout: []string{"docs"},
+		SkipDoltCheck:  true,
+	})
+	if err == nil {
+		t.Fatal("AddRig succeeded, want a failure: --sparse-checkout needs the clone it configures")
+	}
+	if !strings.Contains(err.Error(), "--sparse-checkout") {
+		t.Errorf("error = %q, want it to name --sparse-checkout", err)
 	}
 }
 
 // TestRepoFilesTrackBeads reads a bare repo's tree for the files a beads
-// database keeps in git: detection through a working tree cannot see them, and
-// they are what warnTrackedBeadsWithoutClone explains a rig's own database with.
+// database keeps in git: no working tree holds them, and they are what decides
+// whether a rig added without a clone would run its own database (gt-jmqc5).
 func TestRepoFilesTrackBeads(t *testing.T) {
 	t.Parallel()
 	root, rigsConfig := setupTestTown(t)
@@ -1891,7 +1923,12 @@ func TestRepoFilesTrackBeads(t *testing.T) {
 		if err := manager.git.CloneBareWithBranch(tc.url, bare, "main"); err != nil {
 			t.Fatalf("%s: CloneBareWithBranch: %v", name, err)
 		}
-		if got := repoFilesTrackBeads(manager.openGitDir(bare, ""), "main"); got != tc.want {
+		got, err := repoFilesTrackBeads(manager.openGitDir(bare, ""), "main")
+		if err != nil {
+			t.Errorf("%s: repoFilesTrackBeads: %v", name, err)
+			continue
+		}
+		if got != tc.want {
 			t.Errorf("repoFilesTrackBeads(%s) = %v, want %v", name, got, tc.want)
 		}
 	}

@@ -498,19 +498,19 @@ func (m *Manager) syncRemotesFromRig(crewPath string) error {
 }
 
 // rigRepo opens the repository a crew clone copies its remote configuration
-// from: the mayor/rig clone while the rig has one, else the rig's shared bare
-// .repo.git, which carries the same remotes. A rig whose mayor clone is gone
-// still provisions crew clones that point at the rig's fork (gt-jmqc5).
+// from: the mayor/rig clone while the rig has one — where the town has always
+// read them, so a rig that has one keeps the remotes it had — else the rig's
+// shared bare .repo.git, which carries the same ones. A rig whose mayor clone
+// is gone still provisions crew clones that point at the rig's fork (gt-jmqc5).
 func (m *Manager) rigRepo() (crewRepo, error) {
 	mayorRigPath := filepath.Join(m.rig.Path, "mayor", "rig")
-	if isRepoRoot(mayorRigPath) {
+	if rig.IsWorkTreeRoot(mayorRigPath) {
 		return m.gitAt(mayorRigPath), nil
 	}
-	bareRepoPath := filepath.Join(m.rig.Path, ".repo.git")
-	if isGitDir(bareRepoPath) {
+	if bareRepoPath := m.rig.BareRepoPath(); bareRepoPath != "" {
 		return m.gitAtBare(bareRepoPath), nil
 	}
-	return nil, fmt.Errorf("rig %s has no repository to read remotes from: neither %s nor %s is a git repository", m.rig.Name, mayorRigPath, bareRepoPath)
+	return nil, fmt.Errorf("rig %s has no repository to read remotes from: neither %s nor %s is a git repository", m.rig.Name, mayorRigPath, filepath.Join(m.rig.Path, ".repo.git"))
 }
 
 // gitAtBare opens the bare repository at dir through openGit, or as
@@ -521,22 +521,6 @@ func (m *Manager) gitAtBare(dir string) crewRepo {
 		return m.openGit(dir)
 	}
 	return git.NewGitWithDir(dir, "")
-}
-
-// isRepoRoot reports whether path is the root of a git working tree: a clone
-// has a .git directory, a linked worktree a .git file. It is the rule
-// rig.isWorkTreeRoot applies, repeated here because that one is unexported.
-func isRepoRoot(path string) bool {
-	_, err := os.Stat(filepath.Join(path, ".git"))
-	return err == nil
-}
-
-// isGitDir reports whether path is a git directory: a bare repository
-// (.repo.git) and a checkout's .git both hold HEAD. A directory that merely
-// has the bare repo's name is not one.
-func isGitDir(path string) bool {
-	_, err := os.Stat(filepath.Join(path, "HEAD"))
-	return err == nil
 }
 
 // Remove deletes a crew worker.

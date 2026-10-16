@@ -506,17 +506,23 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 	}
 
 	// Create the mayor clone: a regular clone, separate from the bare repo, on
-	// the default branch. A rig whose repository is the shared bare .repo.git is
-	// complete without one (gt-9gnar), so a clone that cannot be created warns
-	// and leaves the rig standing instead of failing the add and rolling
-	// .repo.git back with it (gt-jmqc5).
+	// the default branch. The rig's repository is the shared .repo.git, so a
+	// clone the remote refuses leaves the rig standing — the add no longer rolls
+	// the whole rig back over a directory nothing reads — unless the rig needs a
+	// working tree (mayorCloneNeeded), where the refusal stays fatal (gt-jmqc5).
 	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
 	mayorCloned, cloneErr := m.createMayorClone(mayorRigPath, bareRepoPath, defaultBranch, opts)
 	if cloneErr != nil {
-		fmt.Printf("  Warning: could not create the mayor clone: %v\n", cloneErr)
 		_ = os.RemoveAll(mayorRigPath) // whatever the failed clone left behind
-		fmt.Printf("  Continuing without a mayor clone: the rig's repository is %s\n", filepath.Join(opts.Name, ".repo.git"))
-		m.warnTrackedBeadsWithoutClone(bareGit, opts.GitURL, defaultBranch, opts.BeadsPrefix)
+		why, err := m.mayorCloneNeeded(bareGit, defaultBranch, opts)
+		if err != nil {
+			return nil, err
+		}
+		if why != "" {
+			return nil, fmt.Errorf("creating the rig's mayor clone: %s: %w", why, cloneErr)
+		}
+		fmt.Printf("  Warning: could not create the mayor clone: %v\n", cloneErr)
+		fmt.Printf("  Continuing without one: this rig's repository is %s\n", filepath.Join(opts.Name, ".repo.git"))
 	}
 
 	if mayorCloned {
@@ -556,15 +562,10 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		if err := ensureLocalExcludePatterns(mayorRigPath, m.openGit(mayorRigPath)); err != nil {
 			return nil, fmt.Errorf("protecting .beads/ in mayor clone: %w", err)
 		}
-	} else if len(opts.SparseCheckout) > 0 {
-		fmt.Printf("  Warning: --sparse-checkout configures the mayor clone, and this rig has none\n")
 	}
 
 	// Check if source repo has tracked .beads/ directory.
 	// If so, we need to initialize the database (it doesn't exist after clone since DB files are gitignored).
-	// A rig without a mayor clone has no working tree to read here: the branch
-	// is skipped, and warnTrackedBeadsWithoutClone has already named what the
-	// rig gets instead.
 	sourceBeadsDir := filepath.Join(mayorRigPath, ".beads")
 	if _, err := os.Stat(sourceBeadsDir); err == nil {
 		// Remove any redirect file that might have been accidentally tracked.
@@ -900,30 +901,56 @@ func (m *Manager) createMayorClone(mayorRigPath, bareRepoPath, defaultBranch str
 	return true, nil
 }
 
-// warnTrackedBeadsWithoutClone warns when the rig has no mayor clone but the
-// source repo tracks .beads/. The rig then initializes its own database instead
-// of adopting the repo's, because a tracked .beads/ is read through the clone's
-// working tree (the mayor/rig/.beads the rig's redirect names) and the bare repo
-// has no tree to check out. Nothing else says which of the two databases the new
-// rig will write to.
-func (m *Manager) warnTrackedBeadsWithoutClone(bareGit Repo, sourceURL, defaultBranch, prefix string) {
-	if !repoFilesTrackBeads(bareGit, defaultBranch) {
-		return
+// mayorCloneNeeded names why this rig cannot be added without its mayor clone,
+// or "" when the rig is complete without one.
+//
+// A source repo that tracks .beads/ is the case that needs the clone: InitBeads
+// points the rig's .beads/redirect at mayor/rig/.beads, so the rig runs the
+// repo's tracked database through that working tree, and a rig added without
+// one silently runs its own instead. --sparse-checkout configures the clone.
+// A probe that fails fails the add: an unreadable repository cannot be told
+// from a tracked one, and the two end in different databases.
+func (m *Manager) mayorCloneNeeded(bareGit Repo, branch string, opts AddRigOptions) (string, error) {
+	if len(opts.SparseCheckout) > 0 {
+		return "--sparse-checkout configures the mayor clone", nil
 	}
-	fmt.Printf("  Warning: %s tracks .beads/ on %s, and this rig has no clone to read it from\n", util.RedactURL(sourceURL), defaultBranch)
-	fmt.Printf("  This rig gets its own beads database (prefix %q) instead of the repo's tracked one\n", prefix)
+	tracks, err := repoFilesTrackBeads(bareGit, branch)
+	if err != nil {
+		return "", fmt.Errorf("checking whether the source repo tracks .beads/: %w", err)
+	}
+	if !tracks {
+		return "", nil
+	}
+	return fmt.Sprintf("%s tracks .beads/ on %s, and the rig adopts that database through the clone", util.RedactURL(opts.GitURL), branch), nil
 }
 
 // repoFilesTrackBeads reports whether the repository at bareGit tracks .beads/
-// on branch: a bare repo has no working tree to look in, so the files a beads
-// database keeps under version control are read at the ref.
-func repoFilesTrackBeads(bareGit Repo, branch string) bool {
+// on branch. A bare repo has no working tree to look in, so the files a beads
+// database keeps under version control are read at the ref, where git's
+// ErrNotAtRef is its answer for a path that is not there.
+func repoFilesTrackBeads(bareGit Repo, branch string) (bool, error) {
+	refFiles, ok := bareGit.(refFileReader)
+	if !ok {
+		return false, fmt.Errorf("reading .beads/ at %s: %T cannot read a file at a ref", branch, bareGit)
+	}
 	for _, path := range []string{".beads/metadata.json", ".beads/config.yaml"} {
-		if _, err := bareGit.ShowFileAtRev(branch, path); err == nil {
-			return true
+		_, err := refFiles.ShowFileAtRev(branch, path)
+		if err == nil {
+			return true, nil
+		}
+		if !errors.Is(err, git.ErrNotAtRef) {
+			return false, fmt.Errorf("reading %s at %s: %w", path, branch, err)
 		}
 	}
-	return false
+	return false, nil
+}
+
+// refFileReader reads one file out of a repository at a ref. It is what the
+// tracked-beads probe needs and no more, so rig.Repo — the surface every rig
+// works through — does not carry it for this one caller; internal/land declares
+// the same read itself.
+type refFileReader interface {
+	ShowFileAtRev(ref, path string) (string, error)
 }
 
 // addOwnershipStampFile marks which AddRig invocation currently owns the path.

@@ -61,15 +61,21 @@ func sourceRepo(t *testing.T, name string) string {
 
 // A mayor clone git refuses leaves a rig, not a rolled-back directory: the
 // rig's repository is the shared bare .repo.git, and git agrees that is a
-// repository without a working tree (gt-jmqc5).
+// repository without a working tree (gt-jmqc5). The fork and the upstream the
+// clone would have carried are on .repo.git, where AddRig configures them
+// before it makes any clone.
 func TestIntegrationAddRigWithoutAMayorClone(t *testing.T) {
 	m, root, _ := realGitManager(t)
 	m.git = mayorCloneRefused{m.git}
 	source := sourceRepo(t, "source")
+	fork := sourceRepo(t, "fork")
+	upstream := sourceRepo(t, "upstream")
 
 	if _, err := m.AddRig(AddRigOptions{
 		Name:          "cloneless",
 		GitURL:        source,
+		PushURL:       fork,
+		UpstreamURL:   upstream,
 		BeadsPrefix:   "cl",
 		SkipDoltCheck: true,
 	}); err != nil {
@@ -85,6 +91,59 @@ func TestIntegrationAddRigWithoutAMayorClone(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(rigPath, "mayor", "rig", ".git")); !os.IsNotExist(err) {
 		t.Errorf("mayor clone = %v, want the rig to have none", err)
 	}
+	if got := gitT(t, root, "--git-dir", bare, "remote", "get-url", "--push", "origin"); got != fork {
+		t.Errorf("bare origin push URL = %q, want the fork %q", got, fork)
+	}
+	if got := gitT(t, root, "--git-dir", bare, "remote", "get-url", "upstream"); got != upstream {
+		t.Errorf("bare upstream = %q, want %q", got, upstream)
+	}
+}
+
+// The mayor clone is not optional for a repo that tracks .beads/: the rig
+// adopts that database through the clone's working tree, so a clone real git
+// refuses fails the add instead of leaving a rig that runs its own beside it
+// (gt-jmqc5).
+func TestIntegrationAddRigRefusesATrackedBeadsRepoWithoutAMayorClone(t *testing.T) {
+	m, root, _ := realGitManager(t)
+	m.git = mayorCloneRefused{m.git}
+	source := sourceRepo(t, "tracked-source")
+	commitFiles(t, source, map[string]string{
+		".beads/config.yaml":   "prefix: tb\n",
+		".beads/metadata.json": `{"database":"beads_tb"}`,
+	})
+
+	_, err := m.AddRig(AddRigOptions{
+		Name:          "tracked",
+		GitURL:        source,
+		BeadsPrefix:   "tb",
+		SkipDoltCheck: true,
+	})
+	if err == nil {
+		t.Fatal("AddRig succeeded, want a failure: the tracked .beads/ is read through the clone")
+	}
+	if !strings.Contains(err.Error(), ".beads/") {
+		t.Errorf("error = %q, want it to name .beads/", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "tracked")); !os.IsNotExist(err) {
+		t.Errorf("rig directory = %v, want the failed add rolled back", err)
+	}
+}
+
+// commitFiles writes files under dir (paths may name directories) and commits
+// them on the checked-out branch.
+func commitFiles(t *testing.T, dir string, files map[string]string) {
+	t.Helper()
+	for name, content := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("creating %s: %v", filepath.Dir(path), err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatalf("writing %s: %v", path, err)
+		}
+	}
+	gitT(t, dir, "add", ".")
+	gitT(t, dir, "commit", "-q", "-m", "tracked beads")
 }
 
 func TestIntegrationAddRig(t *testing.T) {

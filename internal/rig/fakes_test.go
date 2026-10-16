@@ -218,6 +218,16 @@ var errMayorCloneRefused = errors.New("test: the remote refused the clone")
 // that has .repo.git and no mayor clone comes about (gt-jmqc5).
 type mayorCloneRefused struct{ Repo }
 
+// ShowFileAtRev is the ref read the tracked-beads probe makes. A Repo does not
+// carry it, so this wrapper forwards it from the repository it holds.
+func (m mayorCloneRefused) ShowFileAtRev(ref, path string) (string, error) {
+	reader, ok := m.Repo.(refFileReader)
+	if !ok {
+		return "", errors.New("test: this Repo cannot read a file at a ref")
+	}
+	return reader.ShowFileAtRev(ref, path)
+}
+
 func (mayorCloneRefused) CloneBranch(string, string, string) error {
 	return errMayorCloneRefused
 }

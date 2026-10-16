@@ -28,7 +28,6 @@ type Repo interface {
 	IsEmpty() (bool, error)
 	DefaultBranch() string
 	RefExists(ref string) (bool, error)
-	ShowFileAtRev(ref, path string) (string, error)
 	CommonDir() (string, error)
 }
 
