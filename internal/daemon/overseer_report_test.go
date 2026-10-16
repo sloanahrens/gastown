@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -48,6 +49,7 @@ type overseerWorld struct {
 	left   func() (townreport.DispatchLeft, error)
 	health func() (string, error)
 	rigs   func() ([]string, error)
+	logf   func(string, ...any)
 }
 
 func newOverseerWorld(t *testing.T, now string) *overseerWorld {
@@ -102,6 +104,9 @@ func newOverseerWorld(t *testing.T, now string) *overseerWorld {
 		},
 		health: func() (string, error) { return "GREEN tick 12s ago, 3 landed/24h", nil },
 		rigs:   func() ([]string, error) { return []string{"gastown"}, nil },
+		// The report's own log is only about the latest.md copy; a test that
+		// wants those lines sets its own.
+		logf: func(string, ...any) {},
 	}
 }
 
@@ -125,7 +130,8 @@ func (w *overseerWorld) store(name string) (townreport.BeadStore, error) {
 
 func (w *overseerWorld) seams() *overseerReportSeams {
 	return &overseerReportSeams{
-		now: func() time.Time { return w.now },
+		now:  func() time.Time { return w.now },
+		logf: w.logf,
 		digest: func(slot, since time.Time) townreport.Digest {
 			return townreport.Digest{
 				Now: w.now, Slot: slot, Since: since,
@@ -180,6 +186,22 @@ func checkOverseerGolden(t *testing.T, name, got string) {
 	if got != string(want) {
 		t.Fatalf("report differs from %s:\n--- got ---\n%s\n--- want ---\n%s", golden, got, want)
 	}
+}
+
+// overseerEntries names what a run left in the reports directory, sorted, so a
+// test says exactly that.
+func overseerEntries(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	slices.Sort(names)
+	return names
 }
 
 func readOverseerFile(t *testing.T, path string) string {
@@ -250,12 +272,8 @@ func TestOverseerReportSecondRunInASlotWritesNothing(t *testing.T) {
 	if second := w.run(t); second != "" {
 		t.Fatalf("a second run in the slot wrote %s", second)
 	}
-	entries, err := os.ReadDir(townreport.ReportsDir(w.town))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(entries) != 1 {
-		t.Errorf("reports dir holds %d entries (%v), want the one report and no leftover temp file", len(entries), entries)
+	if got := overseerEntries(t, townreport.ReportsDir(w.town)); !slices.Equal(got, []string{"20261014T201500Z.md", overseerLatestName}) {
+		t.Errorf("reports dir holds %q, want the one report, the latest.md copy and no leftover temp file", got)
 	}
 	if readOverseerFile(t, first) != body {
 		t.Error("the slot's report was rewritten")
@@ -376,6 +394,112 @@ func TestOverseerReportNameIsReadByTheDashboard(t *testing.T) {
 	}
 	if len(got.Times) != 2 {
 		t.Errorf("dashboard lists %d reports, want the seeded one and the new one", len(got.Times))
+	}
+}
+
+// A digest refreshes latest.md from the same text, so a reader that takes the
+// newest report by name gets the newest one and not whatever a human wrote
+// there last.
+func TestOverseerReportDigestRefreshesLatestCopy(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	w.seedReport(t, "20261014T200000Z")
+	dir := townreport.ReportsDir(w.town)
+	copyPath := filepath.Join(dir, overseerLatestName)
+	writeOverseerFile(t, copyPath, "the 10-15 copy\n")
+	held, err := os.Open(copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+
+	text := readOverseerFile(t, w.run(t))
+	if got := readOverseerFile(t, copyPath); got != text {
+		t.Errorf("latest.md holds\n%s\nwant the report it copies\n%s", got, text)
+	}
+	// The copy is replaced, not written through: a reader that opened the old
+	// one keeps it whole, which is what the temp file and the rename buy.
+	old, err := io.ReadAll(held)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(old) != "the 10-15 copy\n" {
+		t.Errorf("a reader holding the old copy now sees %q, want the text it opened", old)
+	}
+	before, err := held.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now, err := os.Stat(copyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(before, now) {
+		t.Error("latest.md was written in place, so a reader can catch it half-written")
+	}
+	if got := overseerEntries(t, dir); !slices.Equal(got, []string{"20261014T200000Z.md", "20261014T201500Z.md", overseerLatestName}) {
+		t.Errorf("reports dir holds %q, want the two reports, the copy and no leftover temp file", got)
+	}
+}
+
+// latest.md is a copy, not a report: a directory holding only it has no report,
+// so the run writes the slot's report with a first report's window, and the
+// previous-report lookup still reads the digests around it.
+func TestOverseerReportLatestCopyIsNotAReport(t *testing.T) {
+	t.Parallel()
+	if overseerReportNameRe.MatchString(overseerLatestName) {
+		t.Fatalf("overseerReportNameRe matches %s, so the lister reads the copy as a digest", overseerLatestName)
+	}
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	dir := townreport.ReportsDir(w.town)
+	writeOverseerFile(t, filepath.Join(dir, overseerLatestName), "the 10-15 copy\n")
+
+	if prev, newest, err := overseerReportPrevious(dir, overseerAt("2026-10-14T20:15:00Z")); err != nil || !prev.IsZero() || !newest.IsZero() {
+		t.Errorf("overseerReportPrevious over a directory holding only %s = %v, %v, %v; want no reports", overseerLatestName, prev, newest, err)
+	}
+	text := readOverseerFile(t, w.run(t))
+	if !strings.Contains(text, "covers 2026-10-14T20:00:00Z to 2026-10-14T20:15:00Z") {
+		t.Errorf("the copy stood in for a previous report:\n%s", text)
+	}
+
+	// The copy sits beside the new digest and bounds nothing: the next slot's
+	// previous report is the digest.
+	w.now = overseerAt("2026-10-14T20:32:00Z")
+	next := readOverseerFile(t, w.run(t))
+	if !strings.Contains(next, "covers 2026-10-14T20:15:00Z to 2026-10-14T20:30:00Z") {
+		t.Errorf("the copy was read as the previous report:\n%s", next)
+	}
+}
+
+// A latest.md the run cannot replace is logged, and the slot's report stands:
+// the copy is for a reader by hand, the report is the record.
+func TestOverseerReportLatestCopyFailureIsLogged(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	w.seedReport(t, "20261014T200000Z")
+	var logs []string
+	w.logf = func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+	dir := townreport.ReportsDir(w.town)
+	// A directory where the copy goes: the rename cannot replace it.
+	if err := os.MkdirAll(filepath.Join(dir, overseerLatestName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	path := w.run(t)
+	if path == "" {
+		t.Fatal("no report was written although only the copy failed")
+	}
+	if text := readOverseerFile(t, path); !strings.Contains(text, "overseer report 2026-10-14T20:15:00Z") {
+		t.Errorf("the report is not the slot's digest:\n%s", text)
+	}
+	if len(logs) != 1 || !strings.Contains(logs[0], overseerLatestName) {
+		t.Errorf("logged %q, want one line naming %s", logs, overseerLatestName)
+	}
+	if fi, err := os.Stat(filepath.Join(dir, overseerLatestName)); err != nil || !fi.IsDir() {
+		t.Errorf("stat of the copy = %v, %v; want the directory the run could not replace", fi, err)
+	}
+	if got := overseerEntries(t, dir); !slices.Equal(got, []string{"20261014T200000Z.md", "20261014T201500Z.md", overseerLatestName}) {
+		t.Errorf("reports dir holds %q, want the reports, the directory and no leftover temp file", got)
 	}
 }
 
