@@ -32,12 +32,14 @@ func sourceWithFiles(t *testing.T, name string, files map[string]string) string 
 	t.Helper()
 	dir := filepath.Join(t.TempDir(), name)
 	gitT(t, filepath.Dir(dir), "init", "-q", "-b", "main", dir)
-	commitFiles(t, dir, "v1", files)
+	commitFilesWithMessage(t, dir, "v1", files)
 	return dir
 }
 
-// commitFiles writes files into repo and commits them.
-func commitFiles(t *testing.T, repo, message string, files map[string]string) string {
+// commitFilesWithMessage writes files into repo and commits them, returning the
+// commit's hash. manager_integration_test.go's commitFiles is the same without
+// a message; two files in one package cannot share the name.
+func commitFilesWithMessage(t *testing.T, repo, message string, files map[string]string) string {
 	t.Helper()
 	for rel, content := range files {
 		path := filepath.Join(repo, rel)
@@ -66,7 +68,7 @@ func TestIntegrationReadRepoFilePrefersRigRepoMain(t *testing.T) {
 	})
 	bare, clone := rigWithRepoAndClone(t, townRoot, rigName, upstream)
 
-	commitFiles(t, upstream, "v2", map[string]string{
+	commitFilesWithMessage(t, upstream, "v2", map[string]string{
 		".om.json":               `{"rubric":["v2"]}`,
 		".gastown/settings.json": `{"type":"rig-settings","version":1,"merge_queue":{"test_command":"make test-v2"}}`,
 	})
@@ -103,7 +105,7 @@ func TestIntegrationReadRepoFileFallsBackToTheClone(t *testing.T) {
 	upstream := sourceWithFiles(t, "upstream", map[string]string{"README.md": "# upstream\n"})
 	_, clone := rigWithRepoAndClone(t, townRoot, rigName, upstream)
 	settings := `{"type":"rig-settings","version":1,"merge_queue":{"test_command":"make test-clone"}}`
-	commitFiles(t, clone, "clone-local settings", map[string]string{".gastown/settings.json": settings})
+	commitFilesWithMessage(t, clone, "clone-local settings", map[string]string{".gastown/settings.json": settings})
 
 	got, err := ReadRepoFile(openRepoFile, townRoot, rigName, ".gastown/settings.json")
 	if err != nil {
@@ -111,6 +113,41 @@ func TestIntegrationReadRepoFileFallsBackToTheClone(t *testing.T) {
 	}
 	if !got.Found || string(got.Data) != settings {
 		t.Errorf("read = %+v, want the clone's copy", got)
+	}
+}
+
+// TestIntegrationReadRepoFileReportsTheCloneWhenMainDroppedTheFile: a file main
+// no longer carries is not main's file. Real git answers "not at this ref", and
+// the clone's leftover copy is served as the clone's — a caller that means to
+// follow main reads Fallback rather than counting the leftover as main's
+// (gt-yj6g1).
+func TestIntegrationReadRepoFileReportsTheCloneWhenMainDroppedTheFile(t *testing.T) {
+	townRoot := t.TempDir()
+	rigName := "testrig"
+	upstream := sourceWithFiles(t, "upstream", map[string]string{
+		".om.json":  `{"rubric":["v1"]}`,
+		"README.md": "# upstream\n",
+	})
+	bare, clone := rigWithRepoAndClone(t, townRoot, rigName, upstream)
+
+	gitT(t, upstream, "rm", "-q", ".om.json")
+	gitT(t, upstream, "commit", "-q", "-m", "drop the rubric")
+	gitT(t, bare, "fetch", "-q", "origin", "+refs/heads/*:refs/remotes/origin/*")
+
+	cloneRubric := filepath.Join(clone, ".om.json")
+	if _, err := os.Stat(cloneRubric); err != nil {
+		t.Fatalf("fixture: the clone holds no .om.json to fall back to: %v", err)
+	}
+
+	got, err := ReadRepoFile(openRepoFile, townRoot, rigName, ".om.json")
+	if err != nil {
+		t.Fatalf("ReadRepoFile: %v", err)
+	}
+	if !got.Found || got.Source != cloneRubric {
+		t.Fatalf("read = %+v, want the clone's copy at %s", got, cloneRubric)
+	}
+	if !strings.Contains(got.Fallback, "origin/main does not carry it") {
+		t.Errorf("Fallback = %q, want main named as not carrying the file", got.Fallback)
 	}
 }
 

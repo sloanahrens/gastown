@@ -30,7 +30,8 @@ func NewEditorialRequiredCheck() *EditorialRequiredCheck {
 //
 // The rubric is read as the rig repo's main has it, so a clone that has not
 // pulled since the rubric landed does not read as a rig with no rubric
-// (gt-yj6g1); a repo this run cannot read warns rather than reporting none.
+// (gt-yj6g1); a repo this run cannot read, and a rubric only the clone carries,
+// each warn rather than reporting none.
 func (c *EditorialRequiredCheck) Run(ctx *CheckContext) *CheckResult {
 	rigPath := ctx.RigPath()
 	if rigPath == "" {
@@ -55,6 +56,18 @@ func (c *EditorialRequiredCheck) Run(ctx *CheckContext) *CheckResult {
 			Name:    c.Name(),
 			Status:  StatusOK,
 			Message: "No .om.json rubric in rig repo",
+		}
+	}
+	// A rubric main does not carry — deleted on main while the clone still
+	// holds it, or never landed at all — is not the landed rubric this check
+	// exists to see enforced (gt-yj6g1).
+	if rubric.Fallback != "" {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("the rig's .om.json is the mayor/rig clone's copy, not the repo's main (%s)", rubric.Fallback),
+			Details: []string{fmt.Sprintf("rubric: %s", rubric.Source)},
+			FixHint: "Land the rubric on the rig repo's main, or drop the clone's copy if editorial review is not intended for this rig",
 		}
 	}
 

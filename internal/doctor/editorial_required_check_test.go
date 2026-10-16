@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,25 +126,65 @@ func TestEditorialRequiredCheck_RubricOnMainCloneBehind(t *testing.T) {
 	}
 }
 
+// unreadableRefs is the repo seam a rig repo this run cannot read answers on:
+// the two reads ReadRepoFile makes report. Driving it through CheckContext's
+// own seam is what the test asserts the check does with a read failure, rather
+// than a fake world's accident of a .repo.git directory it has no repository
+// for (gt-yj6g1).
+type unreadableRefs struct{ Repo }
+
+var errRigRepoUnreadable = errors.New("fatal: not a git repository")
+
+func (unreadableRefs) RefExists(string) (bool, error) { return false, errRigRepoUnreadable }
+
+func (unreadableRefs) ShowFileAtRev(string, string) (string, error) {
+	return "", errRigRepoUnreadable
+}
+
 // TestEditorialRequiredCheck_UnreadableRepoWarnsNamingRig: a rig repo the run
 // cannot read is unknown, not a rig without a rubric (gt-yj6g1).
 func TestEditorialRequiredCheck_UnreadableRepoWarnsNamingRig(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigName := "testrig"
-	// A .repo.git directory no repository stands behind: every git call on it
-	// fails the way a corrupt repository's does.
+	// ReadRepoFile only opens the repo when the directory is there, so the
+	// unreadability has to be the repository's, not the path's.
 	if err := os.MkdirAll(filepath.Join(tmpDir, rigName, ".repo.git"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	ctx.openGit = func(string, string) Repo { return unreadableRefs{} }
 
 	check := NewEditorialRequiredCheck()
-	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gitfake.New())
 	result := check.Run(ctx)
 	if result.Status == StatusOK {
 		t.Fatalf("expected a non-OK result when the repo cannot be read, got %v: %s", result.Status, result.Message)
 	}
 	if !strings.Contains(result.Message, rigName) {
 		t.Errorf("message %q does not name the rig", result.Message)
+	}
+}
+
+// TestEditorialRequiredCheck_RubricOnlyInTheCloneWarns: the clone's copy is not
+// the rubric main carries, and a rubric deleted on main while the clone still
+// holds it must not read as one the rig has — even with editorial review on,
+// which is what would otherwise report the enforcement in place (gt-yj6g1).
+func TestEditorialRequiredCheck_RubricOnlyInTheCloneWarns(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	rigName := "testrig"
+	// The clone has the rubric and the rig requires editorial review; main
+	// carries no rubric at all.
+	setupRigWithRubric(t, tmpDir, rigName,
+		`{"type":"rig","version":1,"name":"testrig","merge_queue":{"editorial":{"required":true}}}`)
+	f := rigRepoWithRubric(t, tmpDir, rigName, map[string]string{"README.md": "# testrig\n"})
+
+	check := NewEditorialRequiredCheck()
+	result := check.Run(withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, f))
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning for a rubric only the clone carries, got %v: %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "main") {
+		t.Errorf("message %q does not name main as the copy without the rubric", result.Message)
 	}
 }

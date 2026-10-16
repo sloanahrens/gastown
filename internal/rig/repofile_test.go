@@ -1,17 +1,49 @@
 package rig
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
 // fakeRepoOpener is ReadRepoFile's opener over a gitfake world.
 func fakeRepoOpener(f *gitfake.Fake) RepoFileOpener {
 	return func(repoPath string) RepoFileReader { return f.Open(repoPath) }
+}
+
+// stubRepo answers ReadRepoFile's two reads with what a test set, so the
+// branches that need a repo failure are driven on purpose rather than by a
+// fake world's accident of a directory with no repository behind it.
+type stubRepo struct {
+	refExists bool
+	existsErr error
+	data      string
+	fileErr   error
+}
+
+func (s stubRepo) RefExists(string) (bool, error) { return s.refExists, s.existsErr }
+
+func (s stubRepo) ShowFileAtRev(string, string) (string, error) { return s.data, s.fileErr }
+
+// stubOpener is ReadRepoFile's opener over one stubRepo.
+func stubOpener(s RepoFileReader) RepoFileOpener {
+	return func(string) RepoFileReader { return s }
+}
+
+// rigRepoDir makes the .repo.git directory ReadRepoFile looks for, which is
+// what puts a read on the repo tier at all.
+func rigRepoDir(t *testing.T, townRoot, rigName string) string {
+	t.Helper()
+	dir := filepath.Join(townRoot, rigName, ".repo.git")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 // bareRigRepo makes <townRoot>/<rigName>/.repo.git through gitfake with files
@@ -127,17 +159,110 @@ func TestReadRepoFile_MainNotFetchedFallsBackToTheClone(t *testing.T) {
 func TestReadRepoFile_UnreadableRepoFailsClosed(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(townRoot, "mango", ".repo.git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	rigRepoDir(t, townRoot, "mango")
 	cloneFile(t, townRoot, "mango", ".om.json", `{"stale":true}`)
 
-	got, err := ReadRepoFile(fakeRepoOpener(gitfake.New()), townRoot, "mango", ".om.json")
+	refErr := errors.New("fatal: not a git repository")
+	got, err := ReadRepoFile(stubOpener(stubRepo{existsErr: refErr}), townRoot, "mango", ".om.json")
 	if err == nil {
 		t.Fatalf("ReadRepoFile = %+v, want an error for an unreadable repo", got)
 	}
 	if !strings.Contains(err.Error(), "mango") {
 		t.Errorf("error %q does not name the rig", err)
+	}
+	if !errors.Is(err, refErr) {
+		t.Errorf("error %q does not carry the read failure", err)
+	}
+}
+
+// TestReadRepoFile_UnreadableShowFailsClosed: a file read that fails for any
+// reason but "not at this ref" is the repo, not the file, and no fallback may
+// paper over it (gt-yj6g1).
+func TestReadRepoFile_UnreadableShowFailsClosed(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigRepoDir(t, townRoot, "mango")
+	cloneFile(t, townRoot, "mango", ".om.json", `{"stale":true}`)
+
+	showErr := errors.New("fatal: bad object refs/remotes/origin/main")
+	got, err := ReadRepoFile(
+		stubOpener(stubRepo{refExists: true, fileErr: showErr}), townRoot, "mango", ".om.json")
+	if err == nil {
+		t.Fatalf("ReadRepoFile = %+v, want an error for a repo that cannot read its own main", got)
+	}
+	if !errors.Is(err, showErr) {
+		t.Errorf("error %q does not carry the read failure", err)
+	}
+}
+
+// TestReadRepoFile_FileNotOnMainIsTheClone's: main answered for the path and
+// carries no such file, so what the clone still holds is the clone's copy — a
+// rubric main deleted must not read as one main carries (gt-yj6g1).
+func TestReadRepoFile_FileNotOnMainIsTheClone(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigRepoDir(t, townRoot, "mango-deleted-on-main")
+	path := cloneFile(t, townRoot, "mango-deleted-on-main", ".om.json", `{"deleted":true}`)
+
+	got, err := ReadRepoFile(
+		stubOpener(stubRepo{refExists: true, fileErr: git.ErrNotAtRef}), townRoot, "mango-deleted-on-main", ".om.json")
+	if err != nil {
+		t.Fatalf("ReadRepoFile: %v", err)
+	}
+	if !got.Found || got.Source != path {
+		t.Fatalf("read = %+v, want the clone's copy at %s", got, path)
+	}
+	if !strings.Contains(got.Fallback, "origin/main does not carry it") {
+		t.Errorf("Fallback = %q, want main named as not carrying the file", got.Fallback)
+	}
+	if !RepoFileCloneFallbackWarned("mango-deleted-on-main", ".om.json") {
+		t.Error("the clone-sourced answer was not reported")
+	}
+}
+
+// TestReadRepoFile_NoFetchedMainIsTheClone's: a repo with no origin/<branch>
+// ref has no main to prefer, so the clone's copy answers — reported as the
+// clone's, which is the answer a rig that never fetches its repo would
+// otherwise serve as main's (gt-yj6g1).
+func TestReadRepoFile_NoFetchedMainIsTheClone(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigRepoDir(t, townRoot, "mango-unfetched")
+	path := cloneFile(t, townRoot, "mango-unfetched", ".om.json", `{"unfetched":true}`)
+
+	got, err := ReadRepoFile(stubOpener(stubRepo{}), townRoot, "mango-unfetched", ".om.json")
+	if err != nil {
+		t.Fatalf("ReadRepoFile: %v", err)
+	}
+	if !got.Found || got.Source != path {
+		t.Fatalf("read = %+v, want the clone's copy at %s", got, path)
+	}
+	if !strings.Contains(got.Fallback, "no origin/main ref") {
+		t.Errorf("Fallback = %q, want the missing ref named", got.Fallback)
+	}
+	if !RepoFileCloneFallbackWarned("mango-unfetched", ".om.json") {
+		t.Error("the clone-sourced answer was not reported")
+	}
+}
+
+// TestReadRepoFile_MainAnswersWithoutAFallback: a read main answers carries no
+// fallback, which is what tells a caller that must follow main the two apart.
+func TestReadRepoFile_MainAnswersWithoutAFallback(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigRepoDir(t, townRoot, "mango-on-main")
+	cloneFile(t, townRoot, "mango-on-main", ".om.json", `{"stale":true}`)
+
+	got, err := ReadRepoFile(
+		stubOpener(stubRepo{refExists: true, data: `{"from":"main"}`}), townRoot, "mango-on-main", ".om.json")
+	if err != nil {
+		t.Fatalf("ReadRepoFile: %v", err)
+	}
+	if string(got.Data) != `{"from":"main"}` {
+		t.Errorf("Data = %q, want main's copy", got.Data)
+	}
+	if got.Fallback != "" {
+		t.Errorf("Fallback = %q, want empty for an answer main gave", got.Fallback)
 	}
 }
 
@@ -180,17 +305,16 @@ func TestResolveMergeQueueConfig_UnreadableRepoDropsRepoTier(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	rigName := "mango-unreadable-repo"
-	if err := os.MkdirAll(filepath.Join(townRoot, rigName, ".repo.git"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	rigRepoDir(t, townRoot, rigName)
 	cloneFile(t, townRoot, rigName, ".gastown/settings.json",
 		`{"type":"rig-settings","version":1,"merge_queue":{"test_command":"make test-stale"}}`)
 	rigConfig := `{"type":"rig","version":1,"name":"` + rigName + `","git_url":"x","merge_queue":{"lint_command":"make lint-floor"}}`
 	if err := os.WriteFile(filepath.Join(townRoot, rigName, "config.json"), []byte(rigConfig), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	unreadable := stubOpener(stubRepo{existsErr: errors.New("fatal: not a git repository")})
 
-	mq := ResolveMergeQueueConfigIn(fakeRepoOpener(gitfake.New()), townRoot, rigName)
+	mq := ResolveMergeQueueConfigIn(unreadable, townRoot, rigName)
 	if mq == nil {
 		t.Fatal("ResolveMergeQueueConfigIn() = nil, want the rig-root floor")
 	}
@@ -202,6 +326,64 @@ func TestResolveMergeQueueConfig_UnreadableRepoDropsRepoTier(t *testing.T) {
 	}
 	if !RepoFileUnreadableWarned(rigName) {
 		t.Error("the dropped repo tier was not reported")
+	}
+}
+
+// TestResolveMergeQueueConfig_RepoReadingAgainReportsTheNextDrop: the dropped
+// tier is reported once per run of failures, not once per process, so a repo
+// that fails again after reading fine is not silent (gt-yj6g1).
+func TestResolveMergeQueueConfig_RepoReadingAgainReportsTheNextDrop(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigName := "mango-repo-flaps"
+	rigRepoDir(t, townRoot, rigName)
+	unreadable := stubOpener(stubRepo{existsErr: errors.New("fatal: not a git repository")})
+
+	ResolveMergeQueueConfigIn(unreadable, townRoot, rigName)
+	if !RepoFileUnreadableWarned(rigName) {
+		t.Fatal("the first dropped repo tier was not reported")
+	}
+
+	// A read that answers proves the repo is readable again.
+	readable := stubOpener(stubRepo{refExists: true, fileErr: git.ErrNotAtRef})
+	ResolveMergeQueueConfigIn(readable, townRoot, rigName)
+	if RepoFileUnreadableWarned(rigName) {
+		t.Error("the rig is still reported unreadable after a read that answered")
+	}
+
+	ResolveMergeQueueConfigIn(unreadable, townRoot, rigName)
+	if !RepoFileUnreadableWarned(rigName) {
+		t.Error("the drop that followed a read that worked was not reported")
+	}
+}
+
+// TestResolveLandingRemoteWith_UnreadableRepoFailsClosed: a repo-committed
+// block this run cannot read may name another host, so the landing remote is
+// not origin either — the rig lands through its Forgejo remote or not at all
+// (gt-fn9e6.18, gt-yj6g1).
+func TestResolveLandingRemoteWith_UnreadableRepoFailsClosed(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigName := "mango-unreadable-landing"
+	rigRepoDir(t, townRoot, rigName)
+	repo := &landingRemotesFake{
+		remotes: []string{"origin", "forgejo"},
+		urls: map[string]string{
+			"origin":  "https://github.com/acme/mango.git",
+			"forgejo": "https://forgejo.example/acme/mango.git",
+		},
+	}
+	unreadable := stubOpener(stubRepo{existsErr: errors.New("fatal: not a git repository")})
+
+	got, err := ResolveLandingRemoteWith(unreadable, repo, townRoot, rigName)
+	if err == nil {
+		t.Fatalf("ResolveLandingRemoteWith() = %q, nil; want an error rather than a remote no read supports", got)
+	}
+	if !strings.Contains(err.Error(), rigName) {
+		t.Errorf("error %q does not name the rig", err)
+	}
+	if repo.calls != 0 {
+		t.Errorf("read the rig's remotes %d time(s) for a block that could not be resolved; want none", repo.calls)
 	}
 }
 
