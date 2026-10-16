@@ -13,6 +13,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/reaper"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -135,7 +136,7 @@ func autoCloseCandidatesWriter() io.Writer {
 
 func reaperDatabaseNames() []string {
 	if reaperDB == "" {
-		return reaper.DiscoverDatabases(reaperHost, reaperPort)
+		return reaper.DiscoverDatabases(reaperUserInfo(), reaperHost, reaperPort)
 	}
 	return parseReaperDatabaseList(reaperDB)
 }
@@ -156,6 +157,13 @@ func parseReaperDatabaseList(list string) []string {
 func defaultReaperEndpoint() (string, int) {
 	townRoot, _ := workspace.FindFromCwd()
 	return reaperEndpoint(townRoot)
+}
+
+// reaperUserInfo is the user[:password] the reaper connects to Dolt with, from
+// the town's Dolt config.
+func reaperUserInfo() string {
+	townRoot, _ := workspace.FindFromCwd()
+	return doltserver.DefaultConfig(townRoot).UserDSN()
 }
 
 // reaperEndpoint is the town's Dolt host and port (gt-y3pgh.3), with host
@@ -206,7 +214,7 @@ var reaperDatabasesCmd = &cobra.Command{
 	Use:   "databases",
 	Short: "List databases available for reaping",
 	RunE: func(cmd *cobra.Command, args []string) error {
-		dbs := reaper.DiscoverDatabases(reaperHost, reaperPort)
+		dbs := reaper.DiscoverDatabases(reaperUserInfo(), reaperHost, reaperPort)
 		if reaperJSON {
 			fmt.Println(reaper.FormatJSON(dbs))
 		} else {
@@ -258,7 +266,7 @@ Use this to understand the state before deciding what to reap.`,
 				continue
 			}
 
-			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
+			db, err := reaper.OpenDB(reaperUserInfo(), reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
 			if err != nil {
 				if errors.Is(err, beadsql.ErrNotBeads) {
 					continue
@@ -367,7 +375,7 @@ Returns the count of reaped wisps. Use --dry-run to preview.`,
 				continue
 			}
 
-			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
+			db, err := reaper.OpenDB(reaperUserInfo(), reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
 			if err != nil {
 				if errors.Is(err, beadsql.ErrNotBeads) {
 					continue
@@ -534,7 +542,7 @@ Returns counts of purged rows. Use --dry-run to preview.`,
 				continue
 			}
 
-			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 30*time.Second, 30*time.Second)
+			db, err := reaper.OpenDB(reaperUserInfo(), reaperHost, reaperPort, dbName, 30*time.Second, 30*time.Second)
 			if err != nil {
 				if errors.Is(err, beadsql.ErrNotBeads) {
 					continue
@@ -654,7 +662,7 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 				continue
 			}
 
-			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
+			db, err := reaper.OpenDB(reaperUserInfo(), reaperHost, reaperPort, dbName, 10*time.Second, 10*time.Second)
 			if err != nil {
 				if errors.Is(err, beadsql.ErrNotBeads) {
 					continue
@@ -790,7 +798,7 @@ it by hand.`,
 				continue
 			}
 
-			db, err := reaper.OpenDB(reaperHost, reaperPort, dbName, 30*time.Second, 30*time.Second)
+			db, err := reaper.OpenDB(reaperUserInfo(), reaperHost, reaperPort, dbName, 30*time.Second, 30*time.Second)
 			if err != nil {
 				if errors.Is(err, beadsql.ErrNotBeads) {
 					continue

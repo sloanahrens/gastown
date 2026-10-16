@@ -489,8 +489,8 @@ func (d *Daemon) doltGCFull(ctx context.Context, db string) error {
 // maintenanceDSN is the DSN for one maintenance call on db, whose read timeout
 // matches the call's own bound.
 func (d *Daemon) maintenanceDSN(db string, readTimeout time.Duration) string {
-	return fmt.Sprintf("root@tcp(%s)/%s?timeout=5s&readTimeout=%s&writeTimeout=30s",
-		net.JoinHostPort(d.doltServerHost(), strconv.Itoa(d.doltServerPort())), db, readTimeout)
+	return fmt.Sprintf("%s@tcp(%s)/%s?timeout=5s&readTimeout=%s&writeTimeout=30s",
+		d.doltUserInfo(), net.JoinHostPort(d.doltServerHost(), strconv.Itoa(d.doltServerPort())), db, readTimeout)
 }
 
 // --- the cycle ------------------------------------------------------------------------

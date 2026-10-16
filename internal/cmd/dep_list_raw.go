@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // depListRawIDs queries the raw dependencies table to get dependency target
@@ -70,7 +71,7 @@ func depListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, er
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	dsn := fmt.Sprintf("root@tcp(%s)/%s?parseTime=true", net.JoinHostPort(host, strconv.Itoa(cfg.Port)), url.PathEscape(cfg.Database))
+	dsn := depListRawDSN(depListRawUserInfo(dir), host, cfg.Port, cfg.Database)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -81,6 +82,21 @@ func depListRawIDsViaDolt(dir, issueID, direction, depType string) ([]string, er
 	defer db.Close()
 
 	return queryRawDepIDs(ctx, db, beadsql.RawDeps(issueID, direction, depType))
+}
+
+// depListRawUserInfo is the user[:password] for the town that owns dir, from
+// its Dolt config. A dir outside any town connects as the default user.
+func depListRawUserInfo(dir string) string {
+	townRoot, err := workspace.Find(dir)
+	if err != nil || townRoot == "" {
+		return doltserver.DefaultUser
+	}
+	return doltserver.DefaultConfig(townRoot).UserDSN()
+}
+
+// depListRawDSN is the DSN depListRawIDsViaDolt connects with.
+func depListRawDSN(userInfo, host string, port int, database string) string {
+	return fmt.Sprintf("%s@tcp(%s)/%s?parseTime=true", userInfo, net.JoinHostPort(host, strconv.Itoa(port)), url.PathEscape(database))
 }
 
 func queryRawDepIDs(ctx context.Context, db *beadsql.DB, query beadsql.Query) ([]string, error) {

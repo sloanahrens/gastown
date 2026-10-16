@@ -248,17 +248,24 @@ func ValidateDBName(dbName string) error {
 // beadsql.SchemaVersion, and one with no schema_migrations table
 // (beadsql.ErrNotBeads), which callers skip like a database without the
 // reaper schema.
-func OpenDB(host string, port int, dbName string, readTimeout, writeTimeout time.Duration) (*beadsql.DB, error) {
+//
+// userInfo is the user[:password] part of the DSN (doltserver.Config.UserDSN).
+func OpenDB(userInfo, host string, port int, dbName string, readTimeout, writeTimeout time.Duration) (*beadsql.DB, error) {
 	if err := ValidateDBName(dbName); err != nil {
 		return nil, err
 	}
-	dsn := fmt.Sprintf("root@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=%s&writeTimeout=%s",
-		host, port, dbName,
-		fmt.Sprintf("%ds", int(readTimeout.Seconds())),
-		fmt.Sprintf("%ds", int(writeTimeout.Seconds())))
+	dsn := openDSN(userInfo, host, port, dbName, readTimeout, writeTimeout)
 	ctx, cancel := context.WithTimeout(context.Background(), readTimeout+5*time.Second)
 	defer cancel()
 	return beadsql.Open(ctx, dsn, dbName)
+}
+
+// openDSN is the DSN OpenDB connects with.
+func openDSN(userInfo, host string, port int, dbName string, readTimeout, writeTimeout time.Duration) string {
+	return fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=%s&writeTimeout=%s",
+		userInfo, host, port, dbName,
+		fmt.Sprintf("%ds", int(readTimeout.Seconds())),
+		fmt.Sprintf("%ds", int(writeTimeout.Seconds())))
 }
 
 // parentExcludeJoin returns a LEFT JOIN clause and WHERE condition that restricts

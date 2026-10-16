@@ -217,3 +217,18 @@ func TestDoltSocketPathForPort(t *testing.T) {
 		}
 	}
 }
+
+// A configured Dolt password reaches the DSN on both transports; dropping it
+// made a password-protected server answer access denied (gt-napz3).
+func TestFormatDoltDSNCarriesPassword(t *testing.T) {
+	t.Parallel()
+	cfg := &doltserver.Config{User: "root", Password: "secret", Port: 3307}
+	tcp := buildDoltDSNFromConfigVia(noSocket, cfg, "hq", dsnOpts{})
+	if want := "root:secret@tcp(127.0.0.1:3307)/hq"; tcp != want {
+		t.Errorf("tcp DSN = %q, want %q", tcp, want)
+	}
+	unix := buildDoltDSNFromConfigVia(mockSocket("/tmp/mysql.3307.sock"), cfg, "hq", dsnOpts{})
+	if want := "root:secret@unix(/tmp/mysql.3307.sock)/hq"; unix != want {
+		t.Errorf("unix DSN = %q, want %q", unix, want)
+	}
+}

@@ -2171,3 +2171,18 @@ func TestMRProtectionTTLZeroLabelSetFallsBackToCreatedAt(t *testing.T) {
 		t.Fatalf("Scan ReapCandidates = %d, want 1 (only old-no-anchor is past maxAge and expired)", scan.ReapCandidates)
 	}
 }
+
+// OpenDB and DiscoverDatabases authenticate with the user[:password] they are
+// given; a DSN that drops it makes a password-protected Dolt answer access
+// denied (gt-napz3).
+func TestOpenDBAndDiscoverDatabasesCarryPassword(t *testing.T) {
+	t.Parallel()
+	open := openDSN("root:secret", "127.0.0.1", 3307, "hq", 10*time.Second, 10*time.Second)
+	if !strings.HasPrefix(open, "root:secret@tcp(127.0.0.1:3307)/hq?") {
+		t.Errorf("openDSN = %q, want it to start root:secret@tcp(127.0.0.1:3307)/hq?", open)
+	}
+	discover := discoverDSN("root:secret", "127.0.0.1", 3307)
+	if !strings.HasPrefix(discover, "root:secret@tcp(127.0.0.1:3307)/?") {
+		t.Errorf("discoverDSN = %q, want it to start root:secret@tcp(127.0.0.1:3307)/?", discover)
+	}
+}

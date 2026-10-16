@@ -114,12 +114,14 @@ func localDoltSocketPath(port int) string {
 	return probeDoltSocket(doltSocketPathForPort(port))
 }
 
-func formatDoltDSN(user, network, address, dbName string, opts dsnOpts) string {
-	if user == "" {
-		user = "root"
+// formatDoltDSN renders a DSN for the given transport. userInfo is the
+// user[:password] part (doltserver.Config.UserDSN); empty means root.
+func formatDoltDSN(userInfo, network, address, dbName string, opts dsnOpts) string {
+	if userInfo == "" {
+		userInfo = "root"
 	}
 	qs := opts.queryString()
-	dsn := fmt.Sprintf("%s@%s(%s)/%s", user, network, address, dbName)
+	dsn := fmt.Sprintf("%s@%s(%s)/%s", userInfo, network, address, dbName)
 	if qs == "" {
 		return dsn
 	}
@@ -173,8 +175,8 @@ func buildDoltDSNFromConfig(c *doltserver.Config, dbName string, opts dsnOpts) s
 func buildDoltDSNFromConfigVia(socketFor func(port int) string, c *doltserver.Config, dbName string, opts dsnOpts) string {
 	if !c.IsRemote() {
 		if sock := socketFor(c.Port); sock != "" {
-			return formatDoltDSN(c.User, "unix", sock, dbName, opts)
+			return formatDoltDSN(c.UserDSN(), "unix", sock, dbName, opts)
 		}
 	}
-	return formatDoltDSN(c.User, "tcp", c.HostPort(), dbName, opts)
+	return formatDoltDSN(c.UserDSN(), "tcp", c.HostPort(), dbName, opts)
 }
