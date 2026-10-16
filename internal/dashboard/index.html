@@ -877,10 +877,11 @@ function workQueue(box, s, q, r) {
 
 // workKey is what the panel's rows are drawn from. The panel is left alone
 // while it is unchanged, so a redraw never fights the operator's own clicks in
-// the list; the ages move through paintAges instead.
+// the list; the ages move through paintAges instead. A seat is keyed as JSON so
+// a comma inside a title or description cannot make two seats read as one key.
 function workKey(s) {
   const q = s.queue;
-  const seats = (s.polecats || []).map(p => [p.rig, p.name, p.state, p.agent, p.bead, p.title, p.description, p.reason, p.slung || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h].join(",")).join(";");
+  const seats = (s.polecats || []).map(p => JSON.stringify([p.rig, p.name, p.state, p.agent, p.bead, p.title, p.description, p.reason, p.slung || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h])).join(";");
   // The dispatcher's skips share a poll with the queue neither of them rides:
   // its own reader ticks six times as often, and it is what tags a row unshaped.
   const named = ((s.dispatch && s.dispatch.named) || []).map(n => n.bead + ":" + (n.reason || "")).join(",");
