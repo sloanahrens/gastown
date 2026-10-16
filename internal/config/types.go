@@ -1082,13 +1082,23 @@ type LandingConfig struct {
 	// nothing in it runs.
 	Followups bool `json:"followups,omitempty"`
 
-	// OMQueue enables the om finding queue: a landing om approved gets its
-	// major and critical findings written onto the work bead as the ledger
-	// lines the next deep-review run reads, where its verifiers try to refute
-	// each one before any bead is filed (gt-qtj72). False leaves the queue off,
-	// and off means nothing in it runs.
-	OMQueue bool `json:"om_queue,omitempty"`
+	// DeprecatedOMQueue is the retired landing.om_queue key (gt-50k2e). The om
+	// finding queue it turned on is gone: a landing om approved carries no major
+	// or critical finding for it to record (gt-oi4je). Nothing reads this field,
+	// and it stays declared only because a rig settings file decodes strictly —
+	// an undeclared key is a parse error — and a rig whose file still sets it
+	// must keep loading.
+	DeprecatedOMQueue retiredKeyFlag `json:"om_queue,omitempty"`
 }
+
+// retiredKeyFlag is a declared settings key that carries no setting: it decodes
+// and discards what the file held, so nothing reads the key and no write puts
+// it back. A retired key is declared this way while live settings files still
+// set it (gt-50k2e).
+type retiredKeyFlag bool
+
+// UnmarshalJSON drops the value: a retired key decides nothing.
+func (retiredKeyFlag) UnmarshalJSON([]byte) error { return nil }
 
 // MergeQueueConfig represents merge queue settings for a rig.
 type MergeQueueConfig struct {

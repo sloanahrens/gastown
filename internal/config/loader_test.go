@@ -222,51 +222,44 @@ func TestRigSettingsWithCustomMergeQueue(t *testing.T) {
 	}
 }
 
-// TestRigSettingsOMQueue pins the wire name of the om finding queue's setting:
-// the landing worker reads it out of the rig's own settings/config.json, so
-// `landing.om_queue` is what an operator writes and what the daemon must see
-// (gt-qtj72).
-func TestRigSettingsOMQueue(t *testing.T) {
+// TestRigSettingsToleratesTheRetiredOMQueueKey: landing.om_queue turned on the
+// om finding queue, which is gone (gt-50k2e). A rig settings file decodes
+// strictly, so the key stays declared or every rig whose file still sets it
+// stops loading. It loads here, and reaches no reader: the loader drops it, so
+// nothing writes it into a settings file either.
+func TestRigSettingsToleratesTheRetiredOMQueueKey(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	for _, tc := range []struct {
-		name string
-		body string
-		want bool
-	}{
-		{"absent", `{"type":"rig-settings","version":1,"landing":{}}`, false},
-		{"false", `{"type":"rig-settings","version":1,"landing":{"om_queue":false}}`, false},
-		{"true", `{"type":"rig-settings","version":1,"landing":{"om_queue":true}}`, true},
-		{"beside followups", `{"type":"rig-settings","version":1,"landing":{"followups":true,"om_queue":true}}`, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := os.WriteFile(path, []byte(tc.body), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			loaded, err := LoadRigSettings(path)
-			if err != nil {
-				t.Fatalf("LoadRigSettings: %v", err)
-			}
-			if loaded.Landing == nil {
-				t.Fatal("Landing is nil")
-			}
-			if loaded.Landing.OMQueue != tc.want {
-				t.Errorf("landing.om_queue = %v, want %v", loaded.Landing.OMQueue, tc.want)
-			}
-		})
+	body := `{"type":"rig-settings","version":1,"landing":{"followups":true,"om_queue":true}}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
 	}
-	// The setting round-trips through SaveRigSettings under the same key.
-	if err := SaveRigSettings(path, &RigSettings{Type: "rig-settings", Version: 1,
-		Landing: &LandingConfig{OMQueue: true}}); err != nil {
+	loaded, err := LoadRigSettings(path)
+	if err != nil {
+		t.Fatalf("a settings file carrying the retired landing.om_queue does not load: %v", err)
+	}
+	if loaded.Landing == nil || !loaded.Landing.Followups {
+		t.Errorf("landing = %+v, want the followups setting beside the retired key", loaded.Landing)
+	}
+	if loaded.Landing != nil && bool(loaded.Landing.DeprecatedOMQueue) {
+		t.Error("the retired landing.om_queue reached the loaded settings as a setting")
+	}
+	// A save of what the loader read carries the live key and not the retired
+	// one, so a settings file written from it never sets a dead setting.
+	fresh := filepath.Join(dir, "fresh.json")
+	if err := SaveRigSettings(fresh, loaded); err != nil {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(fresh)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), `"om_queue": true`) {
-		t.Errorf("saved settings = %s, want landing.om_queue written as om_queue", data)
+	if strings.Contains(string(data), `"om_queue"`) {
+		t.Errorf("saved settings = %s, want the retired key gone", data)
+	}
+	if !strings.Contains(string(data), `"followups": true`) {
+		t.Errorf("saved settings = %s, want the live landing key kept", data)
 	}
 }
 

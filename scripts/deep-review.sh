@@ -56,14 +56,18 @@
 # package directory (the dirname of the file in the fingerprint), and lists a
 # package once it holds enough of them or its oldest has waited long enough.
 #
-# A second writer puts queued: lines into the same ledger: the landing worker's
-# om finding queue records an approved landing's critical and major om findings
-# on the work bead, which takes the label om-findings, and om-queued collects
-# the recent ones (--days, default 14) so a run can append them to --prev-notes.
-# The lines have the queued: shape below and carry an om fingerprint, so the
-# finding: rule, queued and seen apply to them unchanged and the run's verifier
-# refutes them like any other finding. om-queued fails closed (exit 3) on
-# anything bd hands back that it cannot read; --repo is where bd runs.
+# A second source of queued: lines: a landing whose om review raised a critical
+# or major finding had it recorded on the work bead, which takes the label
+# om-findings, and om-queued collects the recent ones (--days, default 14) so a
+# run can append them to --prev-notes. The queue that wrote them is gone — a
+# landing carrying such a finding is refused back to its author whatever it
+# scored (gt-oi4je), and the queue went with it (gt-50k2e) — and what it left on
+# work beads are records rather than state, so this reads them until they age
+# out of the window and nothing after that. The lines have the queued: shape
+# below and carry an om fingerprint, so the finding: rule, queued and seen apply
+# to them unchanged and the run's verifier refutes them like any other finding.
+# om-queued fails closed (exit 3) on anything bd hands back that it cannot read;
+# --repo is where bd runs.
 #
 # A rig other than gastown runs this same script from the gastown checkout: the
 # caller names that rig's landings file, run label and repo, and the script reads
@@ -244,8 +248,8 @@ cmd_batches() {
   '
 }
 
-# om-queued: the queued: ledger lines the landing worker's om finding queue
-# wrote onto its work beads, one per line and de-duplicated, ready to append to
+# om-queued: the queued: ledger lines om's reviews of earlier landings left on
+# their work beads, one per line and de-duplicated, ready to append to
 # the run's --prev-notes. bd runs in --repo (default .) and is asked for the
 # om-findings label's whole history; only a bead updated within --days (default
 # 14) counts, and only a note line that starts exactly with "queued: " is

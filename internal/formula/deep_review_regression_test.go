@@ -49,51 +49,6 @@ func TestDeepReviewBeadsCarryARegressionTest(t *testing.T) {
 	}
 }
 
-// TestDeepReviewCollectsOMQueuedFindings guards gt-6m461: om's critical and
-// major findings on an approved landing must reach deep-review's verifier
-// instead of being filed straight from the landing, so the run reads the
-// queued: lines the landing worker wrote onto the work beads (scripts/
-// deep-review.sh om-queued) into the ledger the plan and step 3 read, before
-// either of them reads it, and says where those findings came from.
-func TestDeepReviewCollectsOMQueuedFindings(t *testing.T) {
-	t.Parallel()
-	raw, err := GetEmbeddedFormulaContent("deep-review-run")
-	if err != nil {
-		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
-	}
-	text := string(raw)
-	const collect = "bash /tmp/deep-review-{{issue}}/deep-review.sh om-queued --repo . >> /tmp/deep-review-{{issue}}/prev-notes.txt"
-	at := strings.Index(text, collect)
-	if at < 0 {
-		t.Fatalf("deep-review-run does not append om-queued to prev-notes.txt (%q)", collect)
-	}
-	for _, later := range []struct{ what, marker string }{
-		{"the plan that reads the ledger", "bash /tmp/deep-review-{{issue}}/deep-review.sh plan"},
-		{"step 3, which reads the queued findings", "bash /tmp/deep-review-{{issue}}/deep-review.sh queued"},
-	} {
-		i := strings.Index(text, later.marker)
-		if i < 0 {
-			t.Fatalf("deep-review-run lacks %s (%q)", later.what, later.marker)
-		}
-		if i < at {
-			t.Errorf("deep-review-run runs %s before it collects the om-queued findings", later.what)
-		}
-	}
-	// The append target is the literal path: the polecat-paths guard refuses a
-	// redirect built from $D.
-	for _, bad := range []string{">> $D/", ">> ../"} {
-		if strings.Contains(text, bad) {
-			t.Errorf("deep-review-run builds the append target from a variable (%q)", bad)
-		}
-	}
-	// One sentence carries the provenance and the route: step 3 names them as
-	// om's findings on approved landings and sends them to the verifier.
-	flat := strings.Join(strings.Fields(text), " ")
-	if !strings.Contains(flat, "plus the `om-queued` lines from om's reviews of approved landings. Step 5 refutes each one like any other finding") {
-		t.Error("deep-review-run does not say the om-queued findings go through the refute step")
-	}
-}
-
 // TestDeepReviewRunsOnAnyRig guards gt-23w8z: a rig other than gastown is
 // reviewed by naming its landings file and the gastown checkout's script, so
 // the run formula hardcodes neither, and a sling that sets neither var renders

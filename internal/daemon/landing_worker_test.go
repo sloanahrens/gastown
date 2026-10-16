@@ -392,69 +392,6 @@ func TestFollowupBackpressureAlertLogsADeliveryThatFailed(t *testing.T) {
 	}
 }
 
-// TestRigOMQueueEnabledReadsRigSettingsOnly: the finding queue writes to beads,
-// so it is off unless the rig's own settings/config.json turns it on (gt-qtj72).
-func TestRigOMQueueEnabledReadsRigSettingsOnly(t *testing.T) {
-	t.Parallel()
-	write := func(t *testing.T, rigPath, body string) {
-		t.Helper()
-		if err := os.MkdirAll(filepath.Join(rigPath, "settings"), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(rigPath, "settings", "config.json"), []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Run("no settings file", func(t *testing.T) {
-		t.Parallel()
-		if rigOMQueueEnabled(t.TempDir()) {
-			t.Fatal("the queue is on with no settings file")
-		}
-	})
-	t.Run("settings without a landing block", func(t *testing.T) {
-		t.Parallel()
-		rigPath := t.TempDir()
-		write(t, rigPath, `{"type":"rig-settings","version":1,"merge_queue":{"post_land_command":"make test-slow"}}`)
-		if rigOMQueueEnabled(rigPath) {
-			t.Fatal("the queue is on without a landing block")
-		}
-	})
-	t.Run("an empty landing block", func(t *testing.T) {
-		t.Parallel()
-		rigPath := t.TempDir()
-		write(t, rigPath, `{"type":"rig-settings","version":1,"landing":{}}`)
-		if rigOMQueueEnabled(rigPath) {
-			t.Fatal("the queue is on with landing.om_queue unset")
-		}
-	})
-	t.Run("landing.om_queue false", func(t *testing.T) {
-		t.Parallel()
-		rigPath := t.TempDir()
-		write(t, rigPath, `{"type":"rig-settings","version":1,"landing":{"om_queue":false}}`)
-		if rigOMQueueEnabled(rigPath) {
-			t.Fatal("the queue is on with landing.om_queue false")
-		}
-	})
-	t.Run("landing.om_queue true", func(t *testing.T) {
-		t.Parallel()
-		rigPath := t.TempDir()
-		write(t, rigPath, `{"type":"rig-settings","version":1,"landing":{"om_queue":true}}`)
-		if !rigOMQueueEnabled(rigPath) {
-			t.Fatal("the queue is off with landing.om_queue true")
-		}
-	})
-	// The two settings are separate switches: turning one on never turns the
-	// other on.
-	t.Run("landing.followups alone leaves the queue off", func(t *testing.T) {
-		t.Parallel()
-		rigPath := t.TempDir()
-		write(t, rigPath, `{"type":"rig-settings","version":1,"landing":{"followups":true}}`)
-		if rigOMQueueEnabled(rigPath) {
-			t.Fatal("the queue is on with only landing.followups set")
-		}
-	})
-}
-
 // TestFollowupBeadsFilesAndListsOverTheClient: the adapter is the whole bridge
 // between the feed's own types and bd's — a spec becomes one create, and the
 // list returns the labeled beads of every status, which is the set the next
