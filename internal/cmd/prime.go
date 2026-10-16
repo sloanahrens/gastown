@@ -552,7 +552,6 @@ func signalAgentReady() {
 	_ = t.SetEnvironment(name, tmux.EnvAgentReady, "1")
 }
 
-
 // isCompactResume returns true if the current prime is running after compaction or resume.
 // In these cases, the agent already has role context in compressed memory and only needs
 // a brief identity confirmation plus hook/work status.
