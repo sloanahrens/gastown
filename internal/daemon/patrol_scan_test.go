@@ -799,7 +799,7 @@ func TestPatrolScanWispStatus(t *testing.T) {
 }
 
 // RootWork reads a molecule root's blocks edges and the status bd reports for
-// each work bead; parent-child edges are not work, a reaped root has none, and
+// each work bead; parent-child edges and edges to wisps are not work, a reaped root has none, and
 // a failed read is an error rather than an empty answer.
 func TestPatrolScanRootWork(t *testing.T) {
 	t.Parallel()
@@ -807,6 +807,7 @@ func TestPatrolScanRootWork(t *testing.T) {
 		"gt-wisp-root": {ID: "gt-wisp-root", Status: "open", Dependencies: []beads.IssueDep{
 			{ID: "gt-work", Status: "closed", DependencyType: "blocks"},
 			{ID: "gt-parent", Status: "open", DependencyType: "parent-child"},
+			{ID: "gt-wisp-other", Status: "closed", DependencyType: "blocks"},
 		}},
 		"gt-wisp-patrol": {ID: "gt-wisp-patrol", Status: "pinned"},
 	}}

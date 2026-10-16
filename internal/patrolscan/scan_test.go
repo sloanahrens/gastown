@@ -2143,16 +2143,27 @@ func TestClosedWorkRootIsClosedWithItsSteps(t *testing.T) {
 	}
 }
 
-// A root a live polecat still holds goes too once its work bead is over.
-func TestClosedWorkRootClosesWhoeverHoldsIt(t *testing.T) {
+// A root a live polecat still holds is left alone even when its work bead is
+// over: the polecat may be finishing its steps. The work-bead rule does not
+// read its edge.
+func TestClosedWorkRootLeavesRootALivePolecatHolds(t *testing.T) {
 	t.Parallel()
-	env := newFake()
-	moleculeRoot(env, "gt-wisp-root", "closed", 48*time.Hour)
-	env.wisps[0].Assignee = "gastown/polecats/onyx"
-	env.sessions["onyx"] = true
-	r := scanner(env, nil).Tick("gastown")
-	if got := strings.Join(env.closed, ","); got != "gt-wisp-root" {
-		t.Fatalf("closed = %q; report %v", got, r.Lines())
+	for _, live := range []string{"session", "directory"} {
+		t.Run(live, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			moleculeRoot(env, "gt-wisp-root", "closed", 48*time.Hour)
+			env.wisps[0].Assignee = "gastown/polecats/onyx"
+			if live == "session" {
+				env.sessions["onyx"] = true
+			} else {
+				env.dirs["onyx"] = true
+			}
+			r := scanner(env, nil).Tick("gastown")
+			if len(env.closed) != 0 || len(env.rootReads) != 0 || r.Count(OutcomeUnknown) != 0 {
+				t.Fatalf("closed %v, root reads %v; report %v", env.closed, env.rootReads, r.Lines())
+			}
+		})
 	}
 }
 
