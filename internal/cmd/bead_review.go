@@ -20,6 +20,7 @@ import (
 // taken from the caller.
 
 var beadReviewSHA, beadReviewReason string
+var beadReviewFindings []string
 
 var beadReviewCmd = &cobra.Command{
 	Use:   "review <id> PASS|FAIL|WAIVED|AUDITED",
@@ -28,6 +29,14 @@ var beadReviewCmd = &cobra.Command{
 queue reads: "OVERSEER REVIEW <head> PASS|FAIL", appended to the bead's
 notes. A PASS clears the bead's risk-path item. A FAIL keeps it open, marked
 as failed, until a later PASS for the same head: the review found a defect.
+
+A FAIL also needs at least one --finding <bead-id>: a landing is failed for a
+finding its own diff introduced, so the line names the beads covering it, one
+--finding each (repeatable, or comma-joined). The note is
+"OVERSEER REVIEW <head> FAIL findings=<id>,<id>", which the risk-path item
+reads back to say which findings a failed landing introduced. A FAIL line
+written before the suffix existed names no findings and still parses as a
+FAIL. --finding is refused with PASS, WAIVED and AUDITED.
 
 WAIVED and AUDITED clear it for a landing that was reviewed another way (a
 file-level audit) or consciously not reviewed, and need --reason: the note is
@@ -47,12 +56,13 @@ a later PASS, WAIVED or AUDITED (the rework landed or the finding was refuted).
 
 Examples:
   gt bead review gt-abc PASS
-  gt bead review gt-abc FAIL --sha=<40-hex head of an earlier landing>
+  gt bead review gt-abc FAIL --finding gt-def
+  gt bead review gt-abc FAIL --sha=<40-hex head of an earlier landing> --finding gt-def,gt-ghi
   gt bead review gt-abc AUDITED --reason "file-level audit of the diff, no findings"
   gt bead review gt-abc WAIVED --reason "docs-only change under a risk path"`,
 	Args: cobra.ExactArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
-		return newBeadVerbs(cmd).review(args[0], args[1], beadReviewSHA, beadReviewReason)
+		return newBeadVerbs(cmd).review(args[0], args[1], beadReviewSHA, beadReviewReason, beadReviewFindings)
 	},
 }
 
@@ -60,11 +70,42 @@ Examples:
 // carry it: lowercase 40-hex.
 var fullHead = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
+// findingRef matches one --finding value: a bead id, and nothing that could
+// forge a second entry in the note's comma-joined findings list (a space, a
+// hash, a quote) or start a line of its own.
+var findingRef = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// reviewFindings normalizes the --finding values to the ids the note line
+// carries: trimmed, deduped, in the order given. A value that is not a bead id
+// is refused rather than written, because the note's reader splits the list on
+// commas.
+func reviewFindings(in []string) ([]string, error) {
+	var out []string
+	seen := map[string]bool{}
+	for _, f := range in {
+		f = strings.TrimSpace(f)
+		if f == "" {
+			continue
+		}
+		if !findingRef.MatchString(f) {
+			return nil, fmt.Errorf("--finding takes a bead id, not %q", f)
+		}
+		if seen[f] {
+			continue
+		}
+		seen[f] = true
+		out = append(out, f)
+	}
+	return out, nil
+}
+
 // review writes the overseer review line for the bead's landed head, reports
 // the bead as already reviewed, or refuses when the head's existing review
-// holds a different verdict. WAIVED and AUDITED carry reason into
-// the line; PASS and FAIL take none.
-func (v *beadVerbs) review(id, verdict, sha, reason string) error {
+// holds a different verdict. WAIVED and AUDITED carry reason into the line;
+// PASS and FAIL take none. FAIL carries the finding beads it covers, and is
+// refused without at least one: a failed landing names what its own diff
+// broke, so the item that stays open says which findings cover it (gt-86uzs).
+func (v *beadVerbs) review(id, verdict, sha, reason string, findings []string) error {
 	verdict = strings.ToUpper(strings.TrimSpace(verdict))
 	// NoteField folds newlines, so a reason cannot start a second note line.
 	reason = land.NoteField(reason)
@@ -80,6 +121,16 @@ func (v *beadVerbs) review(id, verdict, sha, reason string) error {
 	default:
 		return fmt.Errorf("review verdict must be PASS, FAIL, WAIVED or AUDITED, not %q", verdict)
 	}
+	if verdict != "FAIL" && len(findings) > 0 {
+		return fmt.Errorf("--finding applies to FAIL, not %s", verdict)
+	}
+	ids, err := reviewFindings(findings)
+	if err != nil {
+		return err
+	}
+	if verdict == "FAIL" && len(ids) == 0 {
+		return fmt.Errorf("a FAIL review needs --finding: name the finding bead(s) this landing's diff broke")
+	}
 	sha = strings.ToLower(strings.TrimSpace(sha))
 	if sha != "" && !fullHead.MatchString(sha) {
 		return fmt.Errorf("--sha must be a full 40-hex head, not %q", sha)
@@ -93,6 +144,9 @@ func (v *beadVerbs) review(id, verdict, sha, reason string) error {
 		return err
 	}
 	line := land.OverseerReviewMarker + " " + head + " " + verdict
+	if len(ids) > 0 {
+		line += " findings=" + strings.Join(ids, ",")
+	}
 	if reason != "" {
 		line += ": " + reason
 	}

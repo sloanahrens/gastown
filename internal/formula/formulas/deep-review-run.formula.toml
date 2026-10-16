@@ -33,7 +33,7 @@ non-zero is a failure, never a quiet day (exit 3 is an untrusted input): run
 
 The plan prints `quiet=`, `landings=`, `unparsed=`, the cursors, and writes
 `$D/landings.jsonl`, `$D/slice.txt`, `$D/docs.txt`, leaving empty what
-`{{mode}}` skips: the landings in `slice`, the slice and docs in `landings`.
+`{{mode}}` skips.
 Mode `slice` also skips step 8 and step 9's `cursor:` line: no landing cursor moves.
 
 **2. A quiet day ends here.** If `quiet=true`:
@@ -54,7 +54,7 @@ the tree on `origin/{{base_branch}}`, not the worktree, with
 `git show origin/{{base_branch}}:<path>`. Split by area:
 - each landing in `$D/landings.jsonl`: review `git diff <landed_commit>^1
   <landed_commit>` (land commits are merges; the first parent is main)
-  against the code on origin/{{base_branch}}. Group landings that touch one
+  against the code on origin/{{base_branch}}. Group landings touching one
   package under one reviewer.
 - the files in `$D/slice.txt`: read each whole. Open a test file only by
   grepping it (`git show origin/{{base_branch}}:<test path> | grep -n <symbol>`)
@@ -99,9 +99,8 @@ bash /tmp/deep-review-{{issue}}/deep-review.sh batches --prev-notes $D/prev-note
 ```
 `batches` prints `batch <package dir>` and its p3 lines. File one
 bead per block: label `review-deep`, priority 3, a title naming the
-package, `## Goal` listing each finding as file:line and claim, one
-`## Acceptance` checkbox per finding, `## Size` one worker. A block holding
-both kinds files two beads, `doc-drift` apart. A `doc-drift` bead's
+package, `## Goal` per finding as file:line and claim, `## Size` one worker.
+A block holding both kinds files two beads, `doc-drift` apart. A `doc-drift` bead's
 `## Goal` lists each doc, the claim, the file:line that contradicts it and the
 replacement text; `## Gate` says docs-only change; `## Constraints` forbid touching code.
 - A finding that cites a path in the repo's `internal/land/riskpaths.txt`
@@ -125,23 +124,23 @@ gt bead create "<one line>" --type bug -p <1|2|3> -l review-deep -q \\
   -d "$(cat $D/body.md)"
 gt spec lint <new id>          # must exit 0; fix the body until it does
 ```
-With `{{dry_run}}` `true`, file nothing: every confirmed finding is `queued`.
+With `{{dry_run}}` `true`, file no bead.
 
 **7. Record the findings, before any cursor.** A `finding:` line per finding a
 bead covers (a batch covers each finding), a `queued:` line per P1 or P2 finding
 past the cap, a `queued:` line per unverified finding (below), and a `reviewed:`
 note per line of
-`$D/reviewed-lines.txt` (already `reviewed: <date> <path>`) and per doc in
-`$D/docs.txt` (`reviewed: <date> <doc>`, dated likewise):
+`$D/reviewed-lines.txt` and per doc in `$D/docs.txt`
+(`reviewed: <date> <doc>`, dated likewise):
 ```bash
 gt bead note {{issue}} "finding: <fingerprint> <bead id | digest-only>"
 gt bead note {{issue}} "queued: <fingerprint> <P1|P2|P3> <file:line> <claim>"
 gt bead note {{issue}} "<one line of reviewed-lines.txt>"
 gt bead comment {{issue}} "$(cat $D/digest.md)"
 ```
-A filed bead takes a `finding:` line naming it; a P1 or P2 finding past the
-cap, and every one of a dry run, takes a `queued:` line, which a later run's
-step 3 picks up until a `finding:` line names it. A P3 finding takes its `p3:`
+A filed bead takes a `finding:` line naming it; a finding past the
+cap, and every one of a dry run, takes a `queued:` line a later run's
+step 3 picks up. A P3 finding takes its `p3:`
 line from step 6 and a `finding:` line once a batch covers it. An older
 run's `digest-only` line makes the fingerprint `seen`.
 
@@ -149,7 +148,7 @@ A finding the verifiers had no capacity for takes a `queued:` line with its own
 severity, whatever that is; the next run verifies it. Never leave a finding
 unrecorded because it is a P3 or looks cheap to find again: the 21-day file
 skip keeps later runs off its file. The digest has:
-landings reviewed (bead, commit), `unparsed=` from the plan, slice files and docs
+landings reviewed (bead, commit), `unparsed=`, slice files and docs
 read, reviewers and verifiers used, then numbered `filed`, `would file` and
 `queued` lists, `refuted=<n> of <total>` and `unverified=<n>` (findings past
 capacity, 0 when none). When total >= 5 and refuted = 0,
@@ -157,8 +156,11 @@ add the line `UNCHALLENGED: no finding was refuted`.
 
 **8. Record the reviews of the risk-path items you covered** (live runs only; skip when
 `{{dry_run}}` is `true` or the mode is `slice`). For each reviewed landing run
-`gt bead review <bead> PASS`, or `FAIL` when a CONFIRMED finding cites its paths.
-A PASS clears the item; a FAIL keeps it open, marked failed, until a later PASS.
+`gt bead review <bead> PASS`, or `FAIL --finding <finding bead>`, one flag per finding it
+broke, when a CONFIRMED finding sits on a line that landing's own diff added or changed
+(`git diff <landed_commit>^1 <landed_commit>`), and otherwise PASS: a file the landing
+merely touched is not its doing. The FAIL names its finding beads, so its item stays open
+saying why the landing failed (`gt bead review --help`).
 
 **9. Commit the cursor, last** (not in mode `slice`). It tells the next run those
 landings are covered, so it comes last:

@@ -215,15 +215,18 @@ func OverseerReviewed(issue *beads.Issue, head string) bool {
 	return false
 }
 
-// overseerReviewLine matches "OVERSEER REVIEW <sha> PASS|FAIL" or
-// "OVERSEER REVIEW <sha> WAIVED|AUDITED: <reason>", the note lines that record
-// a review of a risk-path item's head. The trailing \b keeps a word from
-// extending a verdict ("PASSED" is not PASS), WAIVED and AUDITED answer only
-// with a reason after the colon, and the sha is compared whole, so a review of
-// another head does not answer. It deliberately does not match
+// overseerReviewLine matches "OVERSEER REVIEW <sha> PASS", "OVERSEER REVIEW
+// <sha> FAIL" with an optional " findings=<bead>[,<bead>]" naming the finding
+// beads that failed the landing, or "OVERSEER REVIEW <sha> WAIVED|AUDITED:
+// <reason>", the note lines that record a review of a risk-path item's head.
+// The trailing \b keeps a word from extending a verdict ("PASSED" is not
+// PASS); WAIVED and AUDITED answer only with a reason after the colon, and the
+// sha is compared whole, so a review of another head does not answer. A FAIL
+// written before the suffix existed has no findings= and still parses, and a
+// malformed suffix reads as none (gt-86uzs). It deliberately does not match
 // "OVERSEER REVIEWED ...": that marker says om was bypassed, not that a human
 // reviewed this head (gt-vsct7.4).
-var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (?:(PASS|FAIL)\b|(WAIVED|AUDITED): +\S)`)
+var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (?:(PASS|FAIL)\b(?: findings=([A-Za-z0-9._,-]+))?|(WAIVED|AUDITED): +\S)`)
 
 // OverseerReviewFail is the verdict of a review that found a defect.
 const OverseerReviewFail = "FAIL"
@@ -250,8 +253,33 @@ func OverseerReviewVerdict(notes, head string) (string, bool) {
 	verdict, found := "", false
 	for _, line := range strings.Split(notes, "\n") {
 		if m := overseerReviewLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil && m[1] == head {
-			verdict, found = m[2]+m[3], true
+			verdict, found = m[2]+m[4], true
 		}
 	}
 	return verdict, found
+}
+
+// OverseerReviewFindings returns the finding beads the latest review line in
+// notes naming exactly head names, in the order the line carries them, and nil
+// when it names none: a FAIL written before the suffix existed, or a PASS
+// (gt-86uzs). Like OverseerReviewVerdict it reads the latest line, so a PASS
+// written over a FAIL leaves no findings.
+func OverseerReviewFindings(notes, head string) []string {
+	if head == "" {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(notes, "\n") {
+		m := overseerReviewLine.FindStringSubmatch(strings.TrimSpace(line))
+		if m == nil || m[1] != head {
+			continue
+		}
+		out = nil
+		for _, id := range strings.Split(m[3], ",") {
+			if id = strings.TrimSpace(id); id != "" {
+				out = append(out, id)
+			}
+		}
+	}
+	return out
 }

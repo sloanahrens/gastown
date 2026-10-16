@@ -1206,7 +1206,8 @@ func TestAttentionDirectPush(t *testing.T) {
 // until a review note names that head. Only an "OVERSEER REVIEW <head> PASS"
 // line clears it (gt-pe01w: a FAIL keeps it open until a later PASS): the
 // om-bypass marker "OVERSEER REVIEWED" and a review of another head both leave
-// it holding.
+// it holding. A FAIL names the finding beads it covers in its summary, and a
+// FAIL written before that suffix existed reads the same way (gt-86uzs).
 func TestAttentionRiskPath(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
@@ -1256,6 +1257,17 @@ func TestAttentionRiskPath(t *testing.T) {
 	if g := items[0]; g.Key != "risk:gt-abc:"+head[:12] || g.Bead != "gt-abc" || g.Severity != attention.SeverityHigh ||
 		!strings.Contains(g.Summary, "gt-abc") || !strings.Contains(g.Summary, "FAILED") {
 		t.Errorf("item = %+v, want the high risk item naming gt-abc and the failed review", g)
+	}
+	// A FAIL naming its findings holds the item and says which beads the
+	// landing broke, so the reader knows what the rework answers (gt-86uzs).
+	notes = land.OverseerReviewMarker + " " + head + " FAIL findings=gt-f1,gt-f2"
+	items = f.collect(t, f.src.collectRiskPaths)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want the item held for a FAIL naming its findings", items)
+	}
+	if g := items[0]; !strings.Contains(g.Summary, "FAILED") ||
+		!strings.Contains(g.Summary, "gt-f1") || !strings.Contains(g.Summary, "gt-f2") {
+		t.Errorf("item = %+v, want the summary to name the finding beads", g)
 	}
 	// A PASS written after the FAIL clears it.
 	notes += "\n" + land.OverseerReviewMarker + " " + head + " PASS"

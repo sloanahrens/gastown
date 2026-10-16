@@ -36,6 +36,8 @@ Read with 'gt show' or 'bd show'; write with these:
   gt bead reset <id> --reason=...      Return an orphaned claim to open
   gt bead comment <id> "text"          Add a comment
   gt bead review <id> PASS|FAIL        Record an overseer review of its landed head
+  gt bead review <id> FAIL --finding=<id>
+                                       Fail it, naming the finding bead it broke
   gt bead review <id> WAIVED|AUDITED --reason=...
                                        Clear its risk-path item without a PASS
   gt bead dep add <issue> <needs>      <issue> depends on <needs>
@@ -277,6 +279,7 @@ func init() {
 	beadCloseCmd.Flags().StringVarP(&beadCloseReason, "reason", "r", "", "Close reason")
 	beadReviewCmd.Flags().StringVar(&beadReviewSHA, "sha", "", "Review this landing of the bead instead of its newest")
 	beadReviewCmd.Flags().StringVar(&beadReviewReason, "reason", "", "Why the head is waived or audited (required for WAIVED and AUDITED)")
+	beadReviewCmd.Flags().StringSliceVar(&beadReviewFindings, "finding", nil, "Finding bead a FAIL covers (repeatable; required for FAIL)")
 
 	beadDepCmd.AddCommand(beadDepAddCmd, beadDepRemoveCmd)
 	beadCmd.AddCommand(beadCreateCmd, beadNoteCmd, beadUpdateCmd, beadClaimCmd, beadResetCmd,

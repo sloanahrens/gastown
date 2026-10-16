@@ -49,6 +49,48 @@ func TestDeepReviewBeadsCarryARegressionTest(t *testing.T) {
 	}
 }
 
+// TestDeepReviewFailsALandingOnlyOnItsOwnLines guards gt-86uzs: a FAIL says the
+// landing's own diff broke the code, so step 8 fails a landing only for a
+// finding on lines that diff added or changed, PASSes one the landing merely
+// touched, and has the FAIL name the finding beads covering it.
+func TestDeepReviewFailsALandingOnlyOnItsOwnLines(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	text := strings.Join(strings.Fields(string(raw)), " ")
+	for _, want := range []struct {
+		rule string
+		text string
+	}{
+		{
+			"a FAIL names the finding beads, one flag per finding the landing broke",
+			"`FAIL --finding <finding bead>`, one flag per finding it broke, when a CONFIRMED finding sits on a line that landing's own diff added or changed",
+		},
+		{
+			"a finding the landing only sits near is a PASS",
+			"and otherwise PASS: a file the landing merely touched is not its doing",
+		},
+		{
+			"the reader checks the finding's line against that diff",
+			"`git diff <landed_commit>^1 <landed_commit>`",
+		},
+		{
+			"a finding in a file the landing merely touched is not the landing's doing",
+			"a file the landing merely touched is not its doing",
+		},
+		{
+			"the FAIL names the finding beads, so the open item says what failed",
+			"The FAIL names its finding beads, so its item stays open saying why the landing failed",
+		},
+	} {
+		if !strings.Contains(text, want.text) {
+			t.Errorf("deep-review-run lacks the review rule %q", want.rule)
+		}
+	}
+}
+
 // TestDeepReviewRunsOnAnyRig guards gt-23w8z: a rig other than gastown is
 // reviewed by naming its landings file and the gastown checkout's script, so
 // the run formula hardcodes neither, and a sling that sets neither var renders

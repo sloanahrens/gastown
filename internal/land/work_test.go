@@ -142,6 +142,7 @@ func TestHasOverseerReviewNote(t *testing.T) {
 	}{
 		{"PASS of this head", "x\n" + OverseerReviewMarker + " " + head + " PASS\n", true},
 		{"FAIL of this head does not answer", OverseerReviewMarker + " " + head + " FAIL", false},
+		{"FAIL naming its findings does not answer", OverseerReviewMarker + " " + head + " FAIL findings=gt-a,gt-b", false},
 		{"PASS after a FAIL answers", OverseerReviewMarker + " " + head + " FAIL\n" + OverseerReviewMarker + " " + head + " PASS", true},
 		{"FAIL after a PASS does not answer", OverseerReviewMarker + " " + head + " PASS\n" + OverseerReviewMarker + " " + head + " FAIL", false},
 		{"PASS of another head after a FAIL does not answer", OverseerReviewMarker + " " + head + " FAIL\n" + OverseerReviewMarker + " " + other + " PASS", false},
@@ -184,6 +185,8 @@ func TestOverseerReviewVerdict(t *testing.T) {
 		{"WAIVED", OverseerReviewMarker + " " + head + " WAIVED: docs only", "WAIVED", true},
 		{"AUDITED", OverseerReviewMarker + " " + head + " AUDITED: file-level audit", "AUDITED", true},
 		{"PASS after FAIL", OverseerReviewMarker + " " + head + " FAIL\n" + OverseerReviewMarker + " " + other + " FAIL\n" + OverseerReviewMarker + " " + head + " PASS", "PASS", true},
+		{"FAIL naming its findings", OverseerReviewMarker + " " + head + " FAIL findings=gt-a,gt-b", "FAIL", true},
+		{"FAIL naming one finding", OverseerReviewMarker + " " + head + " FAIL findings=gt-a", "FAIL", true},
 		{"only another head", OverseerReviewMarker + " " + other + " PASS", "", false},
 		{"WAIVED without a reason", OverseerReviewMarker + " " + head + " WAIVED", "", false},
 	} {
@@ -194,5 +197,41 @@ func TestOverseerReviewVerdict(t *testing.T) {
 	}
 	if _, ok := OverseerReviewVerdict(OverseerReviewMarker+" "+head+" PASS", ""); ok {
 		t.Error("an empty head must not be answered")
+	}
+}
+
+// OverseerReviewFindings reads the finding beads off the latest review line
+// naming exactly head: what a FAIL's " findings=" suffix carries. A FAIL
+// written before the suffix existed, and a line that names no findings, both
+// read as none, so the note keeps its meaning (gt-86uzs).
+func TestOverseerReviewFindings(t *testing.T) {
+	t.Parallel()
+	head := "0123456789abcdef0123456789abcdef01234567"
+	other := "0123456789abcdef0123456789abcdef01234568"
+	for _, tc := range []struct {
+		name  string
+		notes string
+		want  []string
+	}{
+		{"no review line", "LANDING RECORD\nlanded_commit: abc", nil},
+		{"a PASS names none", OverseerReviewMarker + " " + head + " PASS", nil},
+		{"a FAIL with no suffix names none", OverseerReviewMarker + " " + head + " FAIL", nil},
+		{"a FAIL naming one finding", OverseerReviewMarker + " " + head + " FAIL findings=gt-a", []string{"gt-a"}},
+		{"a FAIL naming two findings", OverseerReviewMarker + " " + head + " FAIL findings=gt-a,gt-b", []string{"gt-a", "gt-b"}},
+		{"leading and trailing spaces", "x\n  " + OverseerReviewMarker + " " + head + " FAIL findings=gt-a  \n", []string{"gt-a"}},
+		{"an empty suffix names none", OverseerReviewMarker + " " + head + " FAIL findings=", nil},
+		{"another head's finding", OverseerReviewMarker + " " + other + " FAIL findings=gt-a", nil},
+		{"the ids a suffix opens with are read, junk after it is not", OverseerReviewMarker + " " + head + " FAIL findings=gt-a;rm -rf", []string{"gt-a"}},
+		{"an empty entry between commas is dropped", OverseerReviewMarker + " " + head + " FAIL findings=gt-a,,gt-b", []string{"gt-a", "gt-b"}},
+		{"the latest line wins", OverseerReviewMarker + " " + head + " FAIL findings=gt-a\n" + OverseerReviewMarker + " " + head + " PASS", nil},
+		{"another head's PASS does not close it", OverseerReviewMarker + " " + head + " FAIL findings=gt-a\n" + OverseerReviewMarker + " " + other + " PASS", []string{"gt-a"}},
+		{"a later FAIL replaces the findings", OverseerReviewMarker + " " + head + " FAIL findings=gt-a\n" + OverseerReviewMarker + " " + head + " FAIL findings=gt-b,gt-c", []string{"gt-b", "gt-c"}},
+	} {
+		if got := strings.Join(OverseerReviewFindings(tc.notes, head), ","); got != strings.Join(tc.want, ",") {
+			t.Errorf("%s: OverseerReviewFindings = %q, want %q", tc.name, got, strings.Join(tc.want, ","))
+		}
+	}
+	if got := OverseerReviewFindings(OverseerReviewMarker+" "+head+" FAIL findings=gt-a", ""); got != nil {
+		t.Errorf("an empty head must read as no findings, got %v", got)
 	}
 }
