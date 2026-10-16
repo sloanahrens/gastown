@@ -63,7 +63,12 @@ type fakeEnv struct {
 	wispStatus    map[string]string
 	wispStatusErr map[string]error
 	closeReasons  []string
-	branches      map[string]string
+	// rootWork answers RootWork per molecule root, rootWorkErr makes the read
+	// fail, and rootReads records every root asked about.
+	rootWork    map[string][]WorkRef
+	rootWorkErr map[string]error
+	rootReads   []string
+	branches    map[string]string
 	branchErr     map[string]error
 	commentErr    error
 	notesErr      map[string]error
@@ -279,6 +284,11 @@ func (f *fakeEnv) LeakedWisps(string) ([]Wisp, error) {
 
 func (f *fakeEnv) WispStatus(id string) (string, error) {
 	return f.wispStatus[id], f.wispStatusErr[id]
+}
+
+func (f *fakeEnv) RootWork(root string) ([]WorkRef, error) {
+	f.rootReads = append(f.rootReads, root)
+	return f.rootWork[root], f.rootWorkErr[root]
 }
 func (f *fakeEnv) SurvivingBranch(_, id string) (string, error) {
 	return f.branches[id], f.branchErr[id]
@@ -2001,5 +2011,180 @@ func TestLeakedWispsQuietWhenNoPolecatHoldsOne(t *testing.T) {
 	r := scanner(env, nil).Tick("gastown")
 	if len(env.closed) != 0 || r.Count(OutcomeUnknown) != 0 {
 		t.Fatalf("closed %v; report %v", env.closed, r.Lines())
+	}
+}
+
+// moleculeRoot is an open, unassigned molecule root created age ago, whose
+// blocks edge points at the work bead gt-work with the given status.
+func moleculeRoot(env *fakeEnv, id, workStatus string, age time.Duration) {
+	env.wisps = append(env.wisps, Wisp{ID: id, Status: "open", CreatedAt: now.Add(-age)})
+	if workStatus != "" {
+		env.rootWork = map[string][]WorkRef{id: {{ID: "gt-work", Status: workStatus}}}
+	}
+}
+
+func TestClosedWorkRootIsClosedWithItsSteps(t *testing.T) {
+	t.Parallel()
+	for _, status := range []string{"closed", "tombstone"} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			moleculeRoot(env, "gt-wisp-root", status, 48*time.Hour)
+			env.wisps = append(env.wisps,
+				Wisp{ID: "gt-wisp-s1", Status: "open", Parent: "gt-wisp-root", CreatedAt: now.Add(-48 * time.Hour)},
+				Wisp{ID: "gt-wisp-s2", Status: "in_progress", Parent: "gt-wisp-root", CreatedAt: now.Add(-1 * time.Hour)})
+			// No polecat holds any wisp of the rig.
+			env.activeErr = errors.New("would fail if read")
+			r := scanner(env, nil).Tick("gastown")
+			if got := strings.Join(env.closed, ","); got != "gt-wisp-root" {
+				t.Fatalf("closed = %q; report %v", got, r.Lines())
+			}
+			for _, id := range []string{"gt-wisp-root", "gt-wisp-s1", "gt-wisp-s2"} {
+				if !wispClosed(env, id) {
+					t.Errorf("%s is still not closed", id)
+				}
+			}
+			if r.Count(OutcomeClosed) != 1 || r.Count(OutcomeUnknown) != 0 {
+				t.Fatalf("report %v", r.Lines())
+			}
+			if want := "Leaked wisp tree: work bead gt-work is " + status + " (patrol scan)"; env.closeReasons[0] != want {
+				t.Errorf("reason = %q, want %q", env.closeReasons[0], want)
+			}
+		})
+	}
+}
+
+// A root a live polecat still holds goes too once its work bead is over.
+func TestClosedWorkRootClosesWhoeverHoldsIt(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	moleculeRoot(env, "gt-wisp-root", "closed", 48*time.Hour)
+	env.wisps[0].Assignee = "gastown/polecats/onyx"
+	env.sessions["onyx"] = true
+	r := scanner(env, nil).Tick("gastown")
+	if got := strings.Join(env.closed, ","); got != "gt-wisp-root" {
+		t.Fatalf("closed = %q; report %v", got, r.Lines())
+	}
+}
+
+// The holder rules close a gone seat's tree from its unassigned root; the
+// work-bead rule does not read or close that root a second time.
+func TestClosedWorkRootSkipsRootTheHolderRulesClosed(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	moleculeRoot(env, "gt-root", "closed", 48*time.Hour)
+	env.wisps = append(env.wisps, stepUnderRoot("gt-wisp-a", "onyx", "open", 30*time.Hour))
+	r := scanner(env, nil).Tick("gastown")
+	if got := strings.Join(env.closed, ","); got != "gt-root" {
+		t.Fatalf("closed = %q; report %v", got, r.Lines())
+	}
+	if len(env.rootReads) != 0 {
+		t.Errorf("read edges of %v for a root the holder rules closed", env.rootReads)
+	}
+}
+
+func TestClosedWorkRootGuards(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		setup func(env *fakeEnv)
+	}{
+		{"work bead open", func(env *fakeEnv) { env.rootWork["gt-wisp-root"][0].Status = "open" }},
+		{"work bead hooked", func(env *fakeEnv) { env.rootWork["gt-wisp-root"][0].Status = "hooked" }},
+		{"work bead in_progress", func(env *fakeEnv) { env.rootWork["gt-wisp-root"][0].Status = "in_progress" }},
+		{"one of two work beads still open", func(env *fakeEnv) {
+			env.rootWork["gt-wisp-root"] = append(env.rootWork["gt-wisp-root"], WorkRef{ID: "gt-other", Status: "open"})
+		}},
+		{"pinned root with no work bead", func(env *fakeEnv) {
+			env.wisps[0].Status = "pinned"
+			delete(env.rootWork, "gt-wisp-root")
+		}},
+		{"open root with no work bead", func(env *fakeEnv) { delete(env.rootWork, "gt-wisp-root") }},
+		{"pinned root with a closed work bead", func(env *fakeEnv) { env.wisps[0].Status = "pinned" }},
+		{"young root", func(env *fakeEnv) { env.wisps[0].CreatedAt = now.Add(-23 * time.Hour) }},
+		{"24 hours old exactly", func(env *fakeEnv) { env.wisps[0].CreatedAt = now.Add(-24 * time.Hour) }},
+		{"a step, not a root", func(env *fakeEnv) { env.wisps[0].Parent = "gt-parent" }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			moleculeRoot(env, "gt-wisp-root", "closed", 48*time.Hour)
+			tc.setup(env)
+			r := scanner(env, nil).Tick("gastown")
+			if len(env.closed) != 0 || r.Count(OutcomeUnknown) != 0 || r.Count(OutcomeClosed) != 0 {
+				t.Fatalf("closed %v; report %v", env.closed, r.Lines())
+			}
+		})
+	}
+}
+
+func TestClosedWorkRootUnreadIsUnknown(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+	cases := []struct {
+		name  string
+		setup func(env *fakeEnv)
+	}{
+		{"edge unreadable", func(env *fakeEnv) { env.rootWorkErr = map[string]error{"gt-wisp-root": boom} }},
+		{"work bead status unreadable", func(env *fakeEnv) { env.rootWork["gt-wisp-root"][0].Status = "" }},
+		{"one of two work beads unreadable", func(env *fakeEnv) {
+			env.rootWork["gt-wisp-root"] = []WorkRef{{ID: "gt-a", Status: "closed"}, {ID: "gt-b"}}
+		}},
+		{"age unknown", func(env *fakeEnv) { env.wisps[0].CreatedAt = time.Time{} }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			moleculeRoot(env, "gt-wisp-root", "closed", 48*time.Hour)
+			tc.setup(env)
+			r := scanner(env, nil).Tick("gastown")
+			if len(env.closed) != 0 || r.Count(OutcomeUnknown) != 1 {
+				t.Fatalf("closed %v; report %v", env.closed, r.Lines())
+			}
+		})
+	}
+}
+
+func TestClosedWorkRootFailedCloseIsReported(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	moleculeRoot(env, "gt-wisp-root", "closed", 48*time.Hour)
+	env.closeErr = errors.New("bd: timeout")
+	r := scanner(env, nil).Tick("gastown")
+	if r.Count(OutcomeFailed) != 1 || r.Count(OutcomeClosed) != 0 {
+		t.Fatalf("report %v", r.Lines())
+	}
+}
+
+// The usual tick reads no edge: only an open root with no parent, older than
+// a day, is a candidate.
+func TestClosedWorkRootUsualTickReadsNothingExtra(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.wisps = []Wisp{
+		{ID: "gt-wisp-young", Status: "open", CreatedAt: now.Add(-2 * time.Hour)},
+		{ID: "gt-wisp-patrol", Status: "pinned", CreatedAt: now.Add(-90 * 24 * time.Hour)},
+		{ID: "gt-wisp-step", Status: "open", Parent: "gt-wisp-young", CreatedAt: now.Add(-90 * 24 * time.Hour)},
+	}
+	r := scanner(env, nil).Tick("gastown")
+	if len(env.rootReads) != 0 || len(env.closed) != 0 || r.Count(OutcomeUnknown) != 0 {
+		t.Fatalf("root reads %v, closed %v; report %v", env.rootReads, env.closed, r.Lines())
+	}
+}
+
+func TestClosedWorkRootsShareTheCloseCap(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.rootWork = map[string][]WorkRef{}
+	for i := 0; i < leakedWispMaxPerTick+3; i++ {
+		id := fmt.Sprintf("gt-wisp-r%02d", i)
+		env.wisps = append(env.wisps, Wisp{ID: id, Status: "open", CreatedAt: now.Add(-48 * time.Hour)})
+		env.rootWork[id] = []WorkRef{{ID: "gt-work", Status: "closed"}}
+	}
+	r := scanner(env, nil).Tick("gastown")
+	if len(env.closed) != leakedWispMaxPerTick || r.Count(OutcomeSkipped) != 1 {
+		t.Fatalf("closed %d, want %d; report %v", len(env.closed), leakedWispMaxPerTick, r.Lines())
 	}
 }

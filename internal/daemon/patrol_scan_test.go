@@ -796,3 +796,32 @@ func TestPatrolScanWispStatus(t *testing.T) {
 		t.Fatal("a failed read must be an error, not a gone parent")
 	}
 }
+
+// RootWork reads a molecule root's blocks edges and the status bd reports for
+// each work bead; parent-child edges are not work, a reaped root has none, and
+// a failed read is an error rather than an empty answer.
+func TestPatrolScanRootWork(t *testing.T) {
+	t.Parallel()
+	r := &wispReader{show: map[string]*beads.Issue{
+		"gt-wisp-root": {ID: "gt-wisp-root", Status: "open", Dependencies: []beads.IssueDep{
+			{ID: "gt-work", Status: "closed", DependencyType: "blocks"},
+			{ID: "gt-parent", Status: "open", DependencyType: "parent-child"},
+		}},
+		"gt-wisp-patrol": {ID: "gt-wisp-patrol", Status: "pinned"},
+	}}
+	h := wispHost(t, r)
+	got, err := h.RootWork("gt-wisp-root")
+	if err != nil || len(got) != 1 || got[0].ID != "gt-work" || got[0].Status != "closed" {
+		t.Fatalf("RootWork(root) = %+v, %v; want gt-work closed", got, err)
+	}
+	if got, err := h.RootWork("gt-wisp-patrol"); err != nil || len(got) != 0 {
+		t.Fatalf("RootWork(patrol) = %+v, %v; want none", got, err)
+	}
+	if got, err := h.RootWork("gt-wisp-gone"); err != nil || len(got) != 0 {
+		t.Fatalf("RootWork(gone) = %+v, %v; want none and no error", got, err)
+	}
+	r.showErr = errors.New("bd show: timeout")
+	if _, err := h.RootWork("gt-wisp-root"); err == nil {
+		t.Fatal("a failed read must be an error, not a root with no work")
+	}
+}

@@ -34,7 +34,9 @@
 //     (gt-4hduq); see SeatEscalationVerdict;
 //   - leaked wisps: a wisp a gone polecat still holds, whether it is pinned,
 //     open or in_progress, is closed once it is a day old and its root is
-//     gone or closed too; see leakedWisps.
+//     gone or closed too; see leakedWisps. An open molecule root a day old
+//     whose work bead is closed is closed with its steps, whoever holds it
+//     (closedWorkRoots).
 //
 // Every read that fails makes the answer Unknown, and Unknown is never acted
 // on: a failed bd read is not "no work", "not held" or "bead gone". The tick
@@ -407,6 +409,13 @@ type Wisp struct {
 // IsClosed reports whether the wisp is over for good: closed or tombstone.
 func (w Wisp) IsClosed() bool { return Work{Status: w.Status}.IsTerminal() }
 
+// WorkRef is the work bead a molecule root's blocks edge points at, with the
+// status the edge reports for it ("" when that could not be read).
+type WorkRef struct {
+	ID     string
+	Status string
+}
+
 // Heartbeat is a polecat's self-reported session heartbeat (heartbeat v2).
 type Heartbeat struct {
 	State string // working, idle, exiting, stuck
@@ -490,6 +499,12 @@ type Env interface {
 	// error means it is gone (reaped). It reads the parent a listed wisp
 	// names.
 	WispStatus(id string) (string, error)
+	// RootWork returns the work beads a molecule root's blocks edges point
+	// at, each with its status as the edge reads it. Empty with no error
+	// means the root has no such edge (a patrol root); a root that cannot be
+	// read, or an edge whose bead has no readable status, is an error or an
+	// empty Status, and the pass treats either as Unknown.
+	RootWork(root string) ([]WorkRef, error)
 	// SurvivingBranch returns the polecat branch for beadID that is present
 	// on the rig's origin remote, "" when none is; an error means unknown.
 	SurvivingBranch(rig, beadID string) (string, error)
@@ -1252,6 +1267,9 @@ const (
 // A wisp is also left open while any listed wisp under it fails the rule,
 // because CloseMolecule closes the whole tree under the wisp it is given.
 // Every read that fails yields Unknown and no write.
+//
+// Whether or not any polecat holds a wisp, the pass then closes the open
+// molecule roots whose work bead is over (closedWorkRoots).
 func (s *Scanner) leakedWisps(rig string, r *Report) {
 	unknown := func(subject, why string) {
 		r.Findings = append(r.Findings, Finding{Kind: "wisp", Subject: subject, Outcome: OutcomeUnknown, Detail: why})
@@ -1262,20 +1280,34 @@ func (s *Scanner) leakedWisps(rig string, r *Report) {
 		unknown(rig, "listing wisps: "+err.Error())
 		return
 	}
-	held := false
+	closed := map[string]bool{}
+	calls := 0 // failed closes count: a bd that errors is not retried 20 times a tick
 	for _, w := range wisps {
+		// The usual tick: no polecat holds a wisp, so the holder rules read
+		// nothing.
 		if strings.HasPrefix(w.Assignee, prefix) {
-			held = true
+			if !s.heldWisps(rig, r, wisps, closed, &calls) {
+				return
+			}
 			break
 		}
 	}
-	if !held {
-		return // the usual tick: no polecat holds a wisp, so read nothing else
+	s.closedWorkRoots(rig, r, wisps, closed, &calls)
+}
+
+// heldWisps is the holder half of the leaked-wisp pass, run only when some
+// polecat of the rig holds a wisp. It adds the molecules it closes to closed
+// and counts its close calls in calls. It reports false when the pass is over
+// for the tick: a failed read, or the cap on closes.
+func (s *Scanner) heldWisps(rig string, r *Report, wisps []Wisp, closed map[string]bool, calls *int) bool {
+	unknown := func(subject, why string) {
+		r.Findings = append(r.Findings, Finding{Kind: "wisp", Subject: subject, Outcome: OutcomeUnknown, Detail: why})
 	}
+	prefix := rig + "/polecats/"
 	active, err := s.env.ActiveWork(rig)
 	if err != nil {
 		unknown(rig, "listing active work: "+err.Error())
-		return
+		return false
 	}
 	p := &wispPass{
 		s: s, rig: rig, prefix: prefix, now: s.o.Now(), unknown: unknown,
@@ -1311,8 +1343,6 @@ func (s *Scanner) leakedWisps(rig string, r *Report) {
 		}
 		return ids[i] < ids[j]
 	})
-	closed := map[string]bool{}
-	calls := 0 // failed closes count: a bd that errors is not retried 20 times a tick
 	for _, id := range ids {
 		w := p.byID[id]
 		if !p.closable(id) || p.coveredBy(w, closed) {
@@ -1324,17 +1354,16 @@ func (s *Scanner) leakedWisps(rig string, r *Report) {
 		if p.unassignedAncestor(id) != "" {
 			continue
 		}
-		if calls >= leakedWispMaxPerTick {
-			r.Findings = append(r.Findings, Finding{Kind: "wisp", Subject: id, Outcome: OutcomeSkipped,
-				Detail: fmt.Sprintf("closed %d this tick; the rest wait for the next", leakedWispMaxPerTick)})
-			return
+		if *calls >= leakedWispMaxPerTick {
+			r.Findings = append(r.Findings, capFinding(id))
+			return false
 		}
 		name := strings.TrimPrefix(w.Assignee, prefix)
 		reason := fmt.Sprintf("Leaked wisp: holder %s no longer exists (patrol scan)", name)
 		if w.Assignee == "" {
 			reason = "Leaked wisp tree: molecule root has no holder (patrol scan)"
 		}
-		calls++
+		*calls++
 		n, err := s.env.CloseMolecule(id, reason)
 		f := Finding{Kind: "wisp", Subject: id}
 		if err != nil {
@@ -1348,6 +1377,87 @@ func (s *Scanner) leakedWisps(rig string, r *Report) {
 			detail = fmt.Sprintf("%d wisp(s) closed; %s molecule root, no holder", n, w.Status)
 		}
 		f.Outcome, f.Detail = OutcomeClosed, detail
+		r.Findings = append(r.Findings, f)
+	}
+	return true
+}
+
+// capFinding is the report line for a wisp left to the next tick because the
+// tick has made leakedWispMaxPerTick close calls.
+func capFinding(id string) Finding {
+	return Finding{Kind: "wisp", Subject: id, Outcome: OutcomeSkipped,
+		Detail: fmt.Sprintf("closed %d this tick; the rest wait for the next", leakedWispMaxPerTick)}
+}
+
+// closedWorkRoots closes open molecule roots whose work bead is over, whoever
+// holds them or whether anyone does. The holder rules reach only wisps a gone
+// polecat holds, so a root that leaked by some other path (a work bead closed
+// by hand, a landing that outlived its seat) stays open for good; the blocks
+// edge from the root to its work bead is the one record that does not depend
+// on the path.
+//
+// A root is closed only when all of these hold:
+//   - it is a listed, open wisp with no parent, older than leakedWispMinAge,
+//     that the holder rules did not already close this tick;
+//   - it has at least one blocks edge to a work bead, and every such bead
+//     reads closed or tombstone.
+//
+// A root with no blocks edge (a patrol root), a young root, and a root whose
+// work bead is anything but over are left alone. A root, an edge or a work
+// bead that cannot be read yields Unknown and no write. The only reads are
+// one RootWork per candidate root, so a tick with no candidate makes none.
+func (s *Scanner) closedWorkRoots(rig string, r *Report, wisps []Wisp, closed map[string]bool, calls *int) {
+	now := s.o.Now()
+	for _, w := range wisps {
+		if w.ID == "" || w.Parent != "" || closed[w.ID] || !strings.EqualFold(strings.TrimSpace(w.Status), "open") {
+			continue
+		}
+		unknown := func(why string) {
+			r.Findings = append(r.Findings, Finding{Kind: "wisp", Subject: w.ID, Outcome: OutcomeUnknown, Detail: why})
+		}
+		if w.CreatedAt.IsZero() {
+			unknown("created_at unreadable")
+			continue
+		}
+		if now.Sub(w.CreatedAt) <= leakedWispMinAge {
+			continue
+		}
+		work, err := s.env.RootWork(w.ID)
+		if err != nil {
+			unknown("work bead edge unreadable: " + err.Error())
+			continue
+		}
+		if len(work) == 0 {
+			continue
+		}
+		over := true
+		for _, ref := range work {
+			if strings.TrimSpace(ref.Status) == "" {
+				unknown("status of work bead " + ref.ID + " unreadable")
+				over = false
+				break
+			}
+			if !(Work{Status: ref.Status}).IsTerminal() {
+				over = false
+				break
+			}
+		}
+		if !over {
+			continue
+		}
+		if *calls >= leakedWispMaxPerTick {
+			r.Findings = append(r.Findings, capFinding(w.ID))
+			return
+		}
+		*calls++
+		n, err := s.env.CloseMolecule(w.ID, "Leaked wisp tree: work bead "+work[0].ID+" is "+strings.TrimSpace(work[0].Status)+" (patrol scan)")
+		f := Finding{Kind: "wisp", Subject: w.ID}
+		if err != nil {
+			f.Outcome, f.Detail = OutcomeFailed, fmt.Sprintf("closed %d, then: %v", n, err)
+		} else {
+			closed[w.ID] = true
+			f.Outcome, f.Detail = OutcomeClosed, fmt.Sprintf("%d wisp(s) closed; molecule root whose work bead %s is %s", n, work[0].ID, strings.TrimSpace(work[0].Status))
+		}
 		r.Findings = append(r.Findings, f)
 	}
 }

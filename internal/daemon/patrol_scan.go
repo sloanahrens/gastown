@@ -699,6 +699,30 @@ func (h *patrolScanHost) WispStatus(id string) (string, error) {
 	return issue.Status, nil
 }
 
+// RootWork reads the work beads a molecule root's blocks edges point at,
+// from the dependencies bd show reports for the root, each with the status bd
+// reports for that bead. A root bd says does not exist has none: it was
+// reaped between the listing and this read.
+func (h *patrolScanHost) RootWork(root string) ([]patrolscan.WorkRef, error) {
+	issue, err := h.readBeads("").Show(root)
+	if errors.Is(err, beads.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if issue == nil {
+		return nil, nil
+	}
+	var out []patrolscan.WorkRef
+	for _, dep := range issue.Dependencies {
+		if dep.DependencyType == "blocks" {
+			out = append(out, patrolscan.WorkRef{ID: dep.ID, Status: dep.Status})
+		}
+	}
+	return out, nil
+}
+
 // CloseMolecule force-closes the molecule root and every step wisp under it,
 // deepest first. The children are read with `bd show --children`, which sees
 // the parent-child edges of a bonded ephemeral molecule (gt-43t7,
