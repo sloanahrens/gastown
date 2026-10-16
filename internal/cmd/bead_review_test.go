@@ -391,6 +391,48 @@ func TestBeadReviewSupersedesAFail(t *testing.T) {
 	}
 }
 
+// Once a PASS, WAIVED or AUDITED has closed a FAIL, that closing verdict is the
+// one on record: a different closing verdict is refused and writes nothing.
+func TestBeadReviewRefusesADifferentClosingVerdictAfterAClosedFail(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, closing, closingReason, second, secondReason string
+	}{
+		{"AUDITED after FAIL then PASS", "PASS", "", "AUDITED", "audited later"},
+		{"PASS after FAIL then WAIVED", "WAIVED", "docs only", "PASS", ""},
+		{"WAIVED after FAIL then AUDITED", "AUDITED", "file-level audit", "WAIVED", "docs only"},
+	} {
+		town := reviewTestTown(t)
+		v, is := testReviewVerbs(t, town, "gt-pe01w")
+		landBead(t, town, is.ID, secondHead, time.Now())
+		for _, step := range []struct{ verdict, reason string }{{"FAIL", ""}, {tc.closing, tc.closingReason}} {
+			if err := v.review(is.ID, step.verdict, "", step.reason); err != nil {
+				t.Fatalf("%s: %s: %v", tc.name, step.verdict, err)
+			}
+		}
+		before := mustShowBead(t, v.client, is.ID).Notes
+		out := v.out.(*bytes.Buffer)
+		out.Reset()
+
+		err := v.review(is.ID, tc.second, "", tc.secondReason)
+		if err == nil {
+			t.Fatalf("%s: review succeeded", tc.name)
+		}
+		if code := exitCodeForError(err); code != 1 {
+			t.Errorf("%s: exit code %d, want 1", tc.name, code)
+		}
+		if !strings.Contains(err.Error(), tc.closing) || !strings.Contains(err.Error(), tc.second+" was not recorded") {
+			t.Errorf("%s: err = %q, want the closing verdict %q on record and %q not recorded", tc.name, err, tc.closing, tc.second)
+		}
+		if out.Len() != 0 {
+			t.Errorf("%s: printed %q on a refused review", tc.name, out.String())
+		}
+		if notes := mustShowBead(t, v.client, is.ID).Notes; notes != before {
+			t.Errorf("%s: notes = %q, want unchanged %q", tc.name, notes, before)
+		}
+	}
+}
+
 // A repeat of the recorded verdict is a no-op that says what the notes hold.
 func TestBeadReviewRepeatNamesTheRecordedVerdict(t *testing.T) {
 	t.Parallel()

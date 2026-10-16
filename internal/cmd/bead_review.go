@@ -14,8 +14,10 @@ import (
 // gt bead review records an overseer review in the one form the attention
 // queue reads (gt-eorhf). The queue answers a risk-path item by the exact head
 // the landing record names (land.HasOverseerReviewNote), so a review written
-// as a comment, or against the merge sha, leaves the item open. The head here
-// is read from that landing record and never taken from the caller.
+// as a comment, or against the merge sha, leaves the item open. A FAIL line
+// leaves it open too, marked failed, until a later PASS, WAIVED or AUDITED for
+// the same head. The head here is read from that landing record and never
+// taken from the caller.
 
 var beadReviewSHA, beadReviewReason string
 
