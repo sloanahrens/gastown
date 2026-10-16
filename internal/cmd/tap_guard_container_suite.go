@@ -453,14 +453,15 @@ func containsSubsequence(tokens, want []string) bool {
 
 // makeValueFlags are the make(1) short options whose value is mandatory and
 // may be the NEXT token ("-C dir", "-f file", "-o file", "-W file", "-I
-// dir"); tokens reach here lowercased, so -W and -I appear as -w and -i,
-// which is why the valueless -w/-i are absent from the map: a lowercased
-// token cannot tell them apart, and the safe reading is "the next token may
-// be a value". -j and -l take an OPTIONAL value, so the next token is a
+// dir"), and the long ones. makeRunDir looks a flag up as spelled and
+// lowercased, so the lowercase entries match either case. -W and -I are listed
+// in their own case because the lowercase -w (print directory) and -i (ignore
+// errors) take no value: a lowercased lookup swallowed the -C behind a bare -w
+// or -i (gt-i6jw6). -j and -l take an OPTIONAL value, so the next token is a
 // value only when it looks like one (all digits). No branch ever swallows
 // the target "test" itself.
 var makeValueFlags = map[string]bool{
-	"-c": true, "-f": true, "-o": true, "-w": true, "-i": true,
+	"-c": true, "-f": true, "-o": true, "-W": true, "-I": true,
 	"--directory": true, "--file": true, "--makefile": true, "--old-file": true, "--assume-old": true,
 	"--what-if": true, "--new-file": true, "--assume-new": true, "--include-dir": true,
 }
@@ -1245,7 +1246,7 @@ func makeRunDir(args []string, cwd string) (dir string, known bool) {
 		if hasValue {
 			continue
 		}
-		if makeValueFlags[lower] || (makeOptionalNumberFlags[lower] && i+1 < len(args) && isAllDigits(args[i+1])) {
+		if makeValueFlags[flag] || makeValueFlags[lower] || (makeOptionalNumberFlags[lower] && i+1 < len(args) && isAllDigits(args[i+1])) {
 			// Another option's value; step over it so a value that looks like
 			// a flag ("-o -C dir" names the file "-C") is not read as one.
 			if i+1 >= len(args) {
