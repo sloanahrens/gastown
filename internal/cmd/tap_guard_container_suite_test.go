@@ -582,6 +582,47 @@ func TestShellFedScriptBehindAnOptionValueIsJudged(t *testing.T) {
 	}
 }
 
+// A redirection word is not an operand: "bash 2>&1" still reads its script from
+// stdin, so the script fed to it is judged. A redirection that replaces stdin
+// with a file feeds the shell something the guards cannot read (gt-sveq8).
+func TestShellFedScriptBehindARedirectionWordIsJudged(t *testing.T) {
+	t.Parallel()
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"here-string into bash 2>&1", `bash 2>&1 <<< "make test"`, true},
+		{"script piped into bash 2>&1", `echo "make test" | bash 2>&1`, true},
+		{"script piped into bash >out", `echo 'make test' | bash >out`, true},
+		{"script piped into bash > out", `echo 'make test' | bash > out`, true},
+		{"script piped into bash 2> err", `echo 'make test' | bash 2> err`, true},
+		{"script piped into bash &>log", `echo 'make test' | bash &>log`, true},
+		{"script piped into bash >>log 2>&1", `echo 'make test' | bash >>log 2>&1`, true},
+		{"script piped into bash {fd}>log", `echo 'make test' | bash {fd}>log`, true},
+		{"script piped into bash 3<in", `echo 'make test' | bash 3<in`, true},
+		{"script piped into bash 2>&1 -s", `echo 'make test' | bash 2>&1 -s`, true},
+		{"script piped into bash -e 2>&1", `echo 'make test' | bash -e 2>&1`, true},
+		{"harmless script piped into bash 2>&1", `echo 'make lint' | bash 2>&1`, false},
+		{"script file after a redirection word", `echo 'make test' | bash 2>&1 ./run.sh`, false},
+		{"script file after a redirection with a separate target", `echo 'make test' | bash > out ./run.sh`, false},
+		{"stdin file replaces the pipe", `echo 'make test' | bash < ./run.sh`, false},
+		{"stdin file with 0< replaces the pipe", `echo 'make test' | bash 0<./run.sh`, false},
+		{"stdin dup replaces the pipe", `echo 'make test' | bash <&3`, false},
+		{"script file piped into bash 2>&1", `cat ./run.sh | bash 2>&1`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc := fakeGuardProcess(nil, goRoot)
+			reason, matched := evaluateContainerSuiteCommand(proc, tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
 // The whole-suite goals other than test and build read the same run directory:
 // a bare -i before the -C must not hide it (gt-i6jw6).
 func TestMakeBareIgnoreErrorsFlagKeepsTheDirectory(t *testing.T) {

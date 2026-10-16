@@ -617,6 +617,14 @@ func TestNestedShellCommands(t *testing.T) {
 		{"quoted reset piped into a script file", `echo 'git reset --hard origin/main' | bash ./run.sh`, false},
 		{"quoted reset here-string into grep", `grep reset <<< 'git reset --hard origin/main'`, false},
 		{"harmless script piped into bash", `echo 'ls -la' | bash`, false},
+		// A redirection word is not a script operand: the shell still reads
+		// its script from stdin (gt-sveq8).
+		{"quoted reset piped into bash 2>&1", `echo 'git reset --hard origin/main' | bash 2>&1`, true},
+		{"quoted reset here-string into bash 2>&1", `bash 2>&1 <<< 'git reset --hard origin/main'`, true},
+		{"quoted reset piped into bash > out", `echo 'git reset --hard origin/main' | bash > out`, true},
+		{"harmless script piped into bash 2>&1", `echo 'ls -la' | bash 2>&1`, false},
+		{"quoted reset piped into bash 2>&1 script file", `echo 'git reset --hard origin/main' | bash 2>&1 ./run.sh`, false},
+		{"quoted reset piped into bash < script file", `echo 'git reset --hard origin/main' | bash < ./run.sh`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

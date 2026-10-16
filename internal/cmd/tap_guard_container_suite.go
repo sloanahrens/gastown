@@ -320,10 +320,52 @@ func shellReadsStdin(args []string) bool {
 				return true
 			}
 		default:
-			return false
+			redirected, skip, replacesStdin := shellRedirection(a)
+			if !redirected || replacesStdin {
+				return false
+			}
+			i += skip
 		}
 	}
 	return true
+}
+
+// shellRedirection reports whether word is a redirection (2>&1, >out, &>log,
+// 2>, 3<in) rather than an operand, how many words after it are its target
+// (one when the target is a separate word: "> out", "2>"), and whether it
+// replaces the shell's stdin. A redirection other than stdin's leaves the
+// shell reading its script from stdin, so shellReadsStdin walks past it; one
+// that replaces stdin ("< run.sh", "<&3", "0<in") feeds the shell a file the
+// guards cannot read, so the producer upstream is not its script. A heredoc
+// ("<<EOF") is judged where its body is scanned, not here (gt-sveq8).
+func shellRedirection(word string) (redirected bool, skip int, replacesStdin bool) {
+	rest := word
+	fd := ""
+	if strings.HasPrefix(rest, "{") {
+		end := strings.IndexByte(rest, '}')
+		if end < 2 {
+			return false, 0, false
+		}
+		fd, rest = "{}", rest[end+1:]
+	} else {
+		digits := len(rest) - len(strings.TrimLeft(rest, "0123456789"))
+		fd, rest = rest[:digits], rest[digits:]
+	}
+	var op string
+	for _, candidate := range []string{"&>>", "&>", ">>", ">&", ">|", ">", "<>", "<&", "<"} {
+		if strings.HasPrefix(rest, candidate) {
+			op = candidate
+			break
+		}
+	}
+	if op == "" || (fd != "" && strings.HasPrefix(op, "&")) || strings.HasPrefix(rest, "<<") {
+		return false, 0, false
+	}
+	if rest[len(op):] == "" {
+		skip = 1
+	}
+	replacesStdin = (fd == "" || fd == "0") && strings.HasPrefix(op, "<")
+	return true, skip, replacesStdin
 }
 
 // nestedScript is a command line a shell runs inside the command being judged,
