@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/reaper"
 )
 
@@ -220,7 +221,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 	databases := config.Databases
 	host := d.doltServerHost()
 	if len(databases) == 0 {
-		databases = reaper.DiscoverDatabases(host, d.doltServerPort())
+		databases = reaper.DiscoverDatabases(d.doltUserInfo(), host, d.doltServerPort())
 	}
 	if len(databases) == 0 {
 		d.logger.Printf("wisp_reaper: no databases to reap")
@@ -243,7 +244,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
+		db, err := reaper.OpenDB(d.doltUserInfo(), host, port, dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
 			if errors.Is(err, beadsql.ErrNotBeads) {
 				continue
@@ -295,7 +296,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB(host, port, dbName, 30*time.Second, 30*time.Second)
+		db, err := reaper.OpenDB(d.doltUserInfo(), host, port, dbName, 30*time.Second, 30*time.Second)
 		if err != nil {
 			if errors.Is(err, beadsql.ErrNotBeads) {
 				continue
@@ -340,7 +341,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
+		db, err := reaper.OpenDB(d.doltUserInfo(), host, port, dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
 			if errors.Is(err, beadsql.ErrNotBeads) {
 				continue
@@ -377,7 +378,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 		if err := reaper.ValidateDBName(dbName); err != nil {
 			continue
 		}
-		db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
+		db, err := reaper.OpenDB(d.doltUserInfo(), host, port, dbName, 10*time.Second, 10*time.Second)
 		if err != nil {
 			if errors.Is(err, beadsql.ErrNotBeads) {
 				continue
@@ -420,7 +421,7 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge, st
 			if err := reaper.ValidateDBName(dbName); err != nil {
 				continue
 			}
-			db, err := reaper.OpenDB(host, port, dbName, 10*time.Second, 10*time.Second)
+			db, err := reaper.OpenDB(d.doltUserInfo(), host, port, dbName, 10*time.Second, 10*time.Second)
 			if err != nil {
 				if errors.Is(err, beadsql.ErrNotBeads) {
 					continue
@@ -558,6 +559,11 @@ func (d *Daemon) autoCloseDB(db *beadsql.DB, dbName string, staleIssueAge time.D
 // whatever listens on the default port (gt-y3pgh.9).
 func (d *Daemon) doltServerPort() int {
 	return agentconfig.ResolveDoltPort(d.config.TownRoot)
+}
+
+// doltUserInfo is the user[:password] the daemon connects to Dolt with.
+func (d *Daemon) doltUserInfo() string {
+	return doltserver.DefaultConfig(d.config.TownRoot).UserDSN()
 }
 
 // doltServerHost is the town's Dolt host, or the local machine.

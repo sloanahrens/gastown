@@ -833,3 +833,29 @@ func TestCompactorDogCycleSaysWhenSizesWereNotChecked(t *testing.T) {
 		t.Errorf("cycle did not report the unchecked sizes; log:\n%s", buf.String())
 	}
 }
+
+// compactorOpenDB authenticates with the town's configured Dolt password; a
+// DSN that drops it makes a password-protected server answer access denied
+// (gt-napz3).
+func TestCompactorOpenDBCarriesPassword(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		settings string
+		want     string
+	}{
+		{"password set", `{"password":"secret"}`, "root:secret@tcp("},
+		{"no password", `{}`, "root@tcp("},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			writeTownDoltSettings(t, townRoot, tc.settings)
+			d := compactorDogTestDaemon(townRoot, nil)
+			if got := d.compactorDSN("hq"); !strings.HasPrefix(got, tc.want) {
+				t.Errorf("compactorDSN = %q, want prefix %q", got, tc.want)
+			}
+		})
+	}
+}

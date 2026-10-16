@@ -696,7 +696,11 @@ func (d *Daemon) compactorCountCommits(dbName string) (int, error) {
 
 // compactorOpenDB opens a connection to the Dolt server for the given database.
 func (d *Daemon) compactorOpenDB(dbName string) (*sql.DB, error) {
-	dsn := fmt.Sprintf("root@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=30s&writeTimeout=30s",
-		d.doltServerHost(), d.doltServerPort(), dbName)
-	return sql.Open("mysql", dsn)
+	return sql.Open("mysql", d.compactorDSN(dbName))
+}
+
+// compactorDSN is the DSN compactorOpenDB connects with.
+func (d *Daemon) compactorDSN(dbName string) string {
+	return fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=30s&writeTimeout=30s",
+		d.doltUserInfo(), d.doltServerHost(), d.doltServerPort(), dbName)
 }

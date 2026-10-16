@@ -11,11 +11,17 @@ import (
 	"github.com/steveyegge/gastown/internal/testdb"
 )
 
+// discoverDSN is the DSN DiscoverDatabases connects with.
+func discoverDSN(userInfo, host string, port int) string {
+	return fmt.Sprintf("%s@tcp(%s:%d)/?parseTime=true&timeout=5s", userInfo, host, port)
+}
+
 // DiscoverDatabases queries SHOW DATABASES on the Dolt server and returns
 // all production databases, filtering out system databases and test pollution.
-// Falls back to DefaultDatabases on any error.
-func DiscoverDatabases(host string, port int) []string {
-	dsn := fmt.Sprintf("root@tcp(%s:%d)/?parseTime=true&timeout=5s", host, port)
+// Falls back to DefaultDatabases on any error. userInfo is the user[:password]
+// part of the DSN (doltserver.Config.UserDSN).
+func DiscoverDatabases(userInfo, host string, port int) []string {
+	dsn := discoverDSN(userInfo, host, port)
 	db, err := sql.Open("mysql", dsn)
 	if err != nil {
 		return DefaultDatabases

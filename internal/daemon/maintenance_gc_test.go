@@ -961,3 +961,15 @@ func TestDirSizeIgnoresDoltJournalFiles(t *testing.T) {
 		t.Errorf("dirSize(oldgen) = %d, want %d", got, want)
 	}
 }
+
+// maintenanceDSN, which the gc and backup calls share, authenticates with the
+// town's configured Dolt password (gt-napz3).
+func TestMaintenanceDSNCarriesPassword(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeTownDoltSettings(t, townRoot, `{"password":"secret"}`)
+	d := compactorDogTestDaemon(townRoot, nil)
+	if got := d.maintenanceDSN("hq", time.Minute); !strings.Contains(got, ":secret@") {
+		t.Errorf("maintenanceDSN = %q, want it to hold :secret@", got)
+	}
+}
