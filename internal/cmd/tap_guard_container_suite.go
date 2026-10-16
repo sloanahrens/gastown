@@ -231,6 +231,82 @@ func evalPayloads(segment []string) []string {
 	return []string{strings.Join(rest, " ")}
 }
 
+// segmentPayloads returns the command lines the segment starting at
+// tokens[start] runs through a shell: its -c payloads, its eval string and the
+// script a pipeline feeds it. Both test guards judge each one as a command line
+// of its own.
+func segmentPayloads(tokens []string, start int, segment []string) []string {
+	payloads := append(shellCPayloads(segment), evalPayloads(segment)...)
+	return append(payloads, pipedShellPayloads(tokens, start, segment)...)
+}
+
+// pipedShellPayloads returns the scripts a pipeline feeds to the shell that
+// the segment starting at tokens[start] opens. `echo 'make gate' | sh` runs the
+// suite through a shell whose only argument is none, so the segment judge sees
+// a bare sh and the echo as text. When that segment is a shell reading its
+// script from stdin (no -c payload, no script file operand), the text the
+// echo and printf segments upstream in the same pipeline print is judged as a
+// command line of its own. Every upstream echo or printf counts, whatever
+// filters sit between it and the shell: a filter can rewrite the text, so
+// reading it as the script is the stricter reading (gt-1daus).
+func pipedShellPayloads(tokens []string, start int, segment []string) []string {
+	if start == 0 || tokens[start-1] != "|" {
+		return nil
+	}
+	word, args := segmentCommandWord(trimShellKeywords(segment))
+	if !shellInvokers[filepath.Base(strings.ToLower(word))] || !shellReadsStdin(toLowerTokens(args)) {
+		return nil
+	}
+	var payloads []string
+	for end := start - 1; end > 0 && tokens[end] == "|"; {
+		begin := end
+		for begin > 0 && !shellCommandSeparators[tokens[begin-1]] {
+			begin--
+		}
+		producer, printed := segmentCommandWord(trimShellKeywords(tokens[begin:end]))
+		switch filepath.Base(strings.ToLower(producer)) {
+		case "echo", "printf":
+			for len(printed) > 0 && strings.HasPrefix(printed[0], "-") && len(printed[0]) > 1 {
+				printed = printed[1:]
+			}
+			text := strings.ReplaceAll(strings.Join(printed, " "), `\n`, "\n")
+			payloads = append(payloads, text)
+			for _, arg := range printed {
+				payloads = append(payloads, strings.ReplaceAll(arg, `\n`, "\n"))
+			}
+		}
+		end = begin - 1
+	}
+	return payloads
+}
+
+// shellReadsStdin reports whether a shell invoked with args (lowercased, the
+// words after the invoker) reads its script from stdin: it has no -c payload
+// and no script file operand, or -s asks for stdin outright. Options are
+// walked as shellCPayloadIndex walks them.
+func shellReadsStdin(args []string) bool {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		switch {
+		case a == "--" || a == "-":
+			return true
+		case a == "-o" || a == "+o" || a == "--rcfile" || a == "--init-file":
+			i++
+		case strings.HasPrefix(a, "--"), len(a) > 1 && a[0] == '+':
+		case len(a) > 1 && a[0] == '-':
+			if strings.Contains(a[1:], "c") {
+				return false
+			}
+			if strings.Contains(a[1:], "s") {
+				return true
+			}
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // nestedScript is a command line a shell runs inside the command being judged,
 // with the directory it runs in (the base when known is false).
 type nestedScript struct {
@@ -396,7 +472,7 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 		if containsSubsequence(toLowerTokens(segment), containerSuiteSlotRunTokens) {
 			return "", nil
 		}
-		payloads := append(shellCPayloads(segment), evalPayloads(segment)...)
+		payloads := segmentPayloads(tokens, start, segment)
 		if depth >= maxTestGuardNestDepth {
 			return nestedTooDeepRefusal(len(payloads) > 0)
 		}

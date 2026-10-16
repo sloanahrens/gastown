@@ -2081,7 +2081,12 @@ func cdWalkRoot(proc guardProcess, tokens []string, end int, base string, vars m
 	subshells := 0
 	for i := 0; i < end; i++ {
 		if subshells > 0 {
-			if tokens[i] == ")" {
+			// A "(" that opens a command nests one level deeper, so the ")"
+			// closing it leaves the walk inside the outer group: `cd A && (true;
+			// (true); cd B;) ; make test` runs make in A (gt-1daus).
+			if tokens[i] == "(" && shellCommandStart(tokens, i) {
+				subshells++
+			} else if tokens[i] == ")" {
 				subshells--
 			}
 			continue
