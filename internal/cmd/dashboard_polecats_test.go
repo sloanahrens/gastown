@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -80,6 +81,41 @@ func TestBuildDashPolecats(t *testing.T) {
 	}
 	if pcs[0].HasSession || pcs[2].Bead != "" || pcs[2].CountsTowardCapacity {
 		t.Errorf("stalled/free = %+v / %+v", pcs[0], pcs[2])
+	}
+}
+
+// TestBuildDashPolecatsCapsTheBeadDescription: a seat row carries the bead's
+// description cut at dashboard.DescriptionCap characters (counted as runes, so
+// a multibyte description is not cut mid-character), trimmed, and a bead with
+// none carries none (gt-kk6gb). The description comes off the issue the seat
+// already holds, so the row costs no read of its own.
+func TestBuildDashPolecatsCapsTheBeadDescription(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 15, 18, 0, 0, 0, time.UTC)
+	cap1 := polecat.WorkstateDisposition{CountsTowardCapacity: true}
+	seat := func(name, desc string) dashSeat {
+		return dashSeat{Rig: "gastown", Name: name, Item: dashItem(polecat.StateWorking, cap1), Issue: &beads.Issue{ID: "gt-" + name, Title: "t", Description: desc}}
+	}
+	long := strings.Repeat("é", dashboard.DescriptionCap+250)
+	pcs := buildDashPolecats(dashPolecatInputs{Now: now, SessionsKnown: true, Seats: []dashSeat{
+		seat("long", long), seat("exact", strings.Repeat("a", dashboard.DescriptionCap)),
+		seat("padded", "\n  short one \n"), seat("none", ""),
+	}})
+	got := map[string]string{}
+	for _, p := range pcs {
+		got[p.Name] = p.Description
+	}
+	if n := len([]rune(got["long"])); n != dashboard.DescriptionCap || !strings.HasSuffix(got["long"], "…") {
+		t.Errorf("a long description is %d characters ending %q, want exactly %d ending in an ellipsis", n, got["long"][len(got["long"])-3:], dashboard.DescriptionCap)
+	}
+	if got["exact"] != strings.Repeat("a", dashboard.DescriptionCap) {
+		t.Errorf("a description of exactly the cap must pass whole, got %d characters", len(got["exact"]))
+	}
+	if got["padded"] != "short one" {
+		t.Errorf("a padded description = %q, want it trimmed", got["padded"])
+	}
+	if got["none"] != "" {
+		t.Errorf("a bead with no description carries %q", got["none"])
 	}
 }
 

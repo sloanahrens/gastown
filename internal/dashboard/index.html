@@ -771,7 +771,9 @@ function workRow(names, p, now) {
     if (p.priority != null) bd.append(document.createTextNode(" "), el("span", "tag p" + Math.min(p.priority, 4), "P" + p.priority));
     (p.labels || []).forEach(l => bd.append(document.createTextNode(" "), el("span", "tag warnc", l)));
     if (p.title) bd.append(document.createTextNode(" "), el("span", "wtitle", p.title));
-    bd.title = [p.bead, p.title].filter(Boolean).join(" ");
+    // The hover reads the bead's description under its id and title; a bead
+    // with no description hovers as its title alone (gt-kk6gb).
+    bd.title = [p.bead, p.title].filter(Boolean).join(" ") + (p.description ? "\n\n" + p.description : "");
   } else {
     bd.append(el("span", "wtitle", p.reason || "–"));
     bd.title = p.reason || "";
@@ -878,7 +880,7 @@ function workQueue(box, s, q, r) {
 // the list; the ages move through paintAges instead.
 function workKey(s) {
   const q = s.queue;
-  const seats = (s.polecats || []).map(p => [p.rig, p.name, p.state, p.agent, p.bead, p.title, p.reason, p.slung || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h].join(",")).join(";");
+  const seats = (s.polecats || []).map(p => [p.rig, p.name, p.state, p.agent, p.bead, p.title, p.description, p.reason, p.slung || "", p.last_active || "", p.landed_24h, p.approved_24h, p.avg_score_24h].join(",")).join(";");
   // The dispatcher's skips share a poll with the queue neither of them rides:
   // its own reader ticks six times as often, and it is what tags a row unshaped.
   const named = ((s.dispatch && s.dispatch.named) || []).map(n => n.bead + ":" + (n.reason || "")).join(",");
