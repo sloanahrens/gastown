@@ -29,14 +29,14 @@ const (
 const reworkApproved = "approve"
 
 // ReworkReview is one om verdict from the landing worker's review log.
-// Rejected is the landing refusing the work on an approving verdict, for its
-// findings (gt-vu18r); such a review is not an approval.
 type ReworkReview struct {
-	Bead     string
-	Rig      string
-	Attempt  int
-	Score    float64
-	Verdict  string
+	Bead    string
+	Rig     string
+	Attempt int
+	Score   float64
+	Verdict string
+	// Rejected is the landing refusing the work on an approving verdict, for
+	// its findings (gt-vu18r); such a review is not an approval.
 	Rejected bool
 	Findings int
 	Bar      float64
@@ -44,9 +44,7 @@ type ReworkReview struct {
 }
 
 // approved is whether the review let the work land: an approving verdict the
-// landing did not turn back for its findings. Lines written before the log
-// carried Rejected read as the verdict alone, which reworkSpan corrects for an
-// approval the bead was reviewed again after.
+// landing did not turn back for its findings.
 func (r ReworkReview) approved() bool { return r.Verdict == reworkApproved && !r.Rejected }
 
 // ReworkBar is one review bar's share of a window. Bar is 0 when the reviewed
@@ -93,9 +91,9 @@ type Rework struct {
 // rework loop that crosses a bar change is not split across two bars. A bead's
 // attempts are its reviews in time order, and a verdict logged twice for the
 // same attempt (a landing retried after the verdict, before the merge) counts
-// once, as the later of the two. An approval followed by a later attempt of the
-// same bead is counted as a rejection: that is how a findings bounce reads in
-// the lines written before the log carried Rejected.
+// once, as the later of the two. An approval that carried findings and was
+// followed by a later attempt of the same bead counts as a rejection, whatever
+// its line says (see reworkSpan).
 func AggregateRework(reviews []ReworkReview, now time.Time) Rework {
 	recent, prior := now.Add(-reworkWindow), now.Add(-2*reworkWindow)
 	return Rework{Windows: []ReworkWindow{
@@ -151,10 +149,15 @@ func reworkSpan(name string, reviews []ReworkReview, from, to time.Time, closed 
 			bars[rs[0].Bar] = t
 		}
 		t.Beads++
-		// An approval the bead was reviewed again after did not land it, whatever
-		// its line says: a log written before Rejected existed carries every
-		// findings bounce as a plain approve, and the next attempt is what shows it.
-		stood := func(i int) bool { return rs[i].approved() && i == len(rs)-1 }
+		// The lines written before Rejected existed carry a findings bounce as a
+		// plain approve, and omitempty leaves a line that was not rejected
+		// looking the same, so the line cannot tell the two apart. The bead's
+		// next attempt can: attempts count the landing's rejections, so an
+		// approval with findings that a later attempt follows was refused, for
+		// its findings or, on a newer line, for what came after the review. An
+		// approval with no findings was never a findings bounce, and the bead's
+		// last review has no later attempt to show it was refused.
+		stood := func(i int) bool { return rs[i].approved() && (i == len(rs)-1 || rs[i].Findings == 0) }
 		if stood(0) {
 			t.FirstTry++
 		}
