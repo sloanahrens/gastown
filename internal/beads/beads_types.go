@@ -557,7 +557,9 @@ func ensureDatabaseInitialized(beadsDir string) error {
 	cmd.Dir = parentDir
 	util.SetDetachedProcessGroup(cmd)
 	initEnv := withDatabaseTarget(BuildMutationPinnedBDEnv(os.Environ(), beadsDir), dbName)
-	cmd.Env = initEnv
+	// This init builds its own argv, outside the wrapper's env paths, so the
+	// new-database opt-in is added here (be-d4v).
+	cmd.Env = applyNewDatabaseOptIn(initEnv, initArgs)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		// Handle "already initialized" gracefully, matching install.go behavior.
 		// This can happen due to race conditions or if detection heuristics miss

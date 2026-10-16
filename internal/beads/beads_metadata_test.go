@@ -245,6 +245,10 @@ func TestWithDatabaseTargetReplacesInheritedSelector(t *testing.T) {
 	}
 }
 
+// newDatabaseLogKey is the key mockBDInitEnvRecorder logs the new-database
+// opt-in under.
+const newDatabaseLogKey = "new_database"
+
 // mockBDInitEnvRecorder puts a bd on PATH that logs each call's argv and the
 // database the child was told to use, then succeeds. The argv-only recorder in
 // beads_types_test.go cannot show the env propagation this fix is about.
@@ -261,6 +265,7 @@ func mockBDInitEnvRecorder(t *testing.T, script string) (logPath string) {
 {
   printf 'argv %s\n' "$*"
   printf 'database %s\n' "${BEADS_DOLT_SERVER_DATABASE-<unset>}"
+  printf '` + newDatabaseLogKey + ` %s\n' "${` + allowNewDatabaseEnv + `-<unset>}"
 } >> "` + logPath + `"
 ` + script + "\n"
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(body), 0o755); err != nil {
