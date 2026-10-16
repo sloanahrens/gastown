@@ -1086,6 +1086,10 @@ var specHeldStatuses = []string{beads.StatusHooked, string(beads.StatusInProgres
 // (listDuplicateCandidates), so the dispatcher and the guard cannot disagree
 // about what a bead's text names (gt-z80p9).
 //
+// An epic is not held: its prose enumerates its children's files, so a claimed
+// epic or wayfinder map would otherwise hold every ready child that names one.
+// The sling-time guard skips epics for the same reason (findDuplicateMatches).
+//
 // The read is fresh, not the guard's cached pool: that cache can predate the
 // bead being hooked, and the burst path files a just-dispatched bead under its
 // pre-sling status (noteSlingCandidateDispatched), which is the one case this
@@ -1097,6 +1101,9 @@ func heldBeadsFrom(store beads.Client, warn func(beadsDir string, err error), be
 	}
 	out := make([]specdispatch.HeldBead, 0, len(cands))
 	for _, c := range cands {
+		if c.IsEpic() {
+			continue
+		}
 		out = append(out, specdispatch.HeldBead{ID: c.ID, Paths: c.Refs.Files})
 	}
 	return out, nil
