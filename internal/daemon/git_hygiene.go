@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -128,9 +130,11 @@ func (d *Daemon) runGitHygiene() {
 
 // cleanRigRepo cleans one repository. Every git failure is logged and the
 // rest of the cleanup goes on, as the script's `|| true` did — including the
-// branch delete git refuses for a branch a worktree still has checked out,
-// which is what keeps a live polecat's unpushed branch safe now that the
-// patrol lives in the bare repo every worktree shares (gt-ckoau).
+// branch delete git refuses for a branch a worktree still has checked out.
+// That refusal protects only a live polecat: a polecat whose session died
+// before gt done pushed leaves its branch ref in the shared bare repo with no
+// worktree, so an orphan polecat/* branch is kept while it holds commits
+// origin lacks (gt-a0jxl).
 func (d *Daemon) cleanRigRepo(repo string) gitHygieneResult {
 	var res gitHygieneResult
 	g := d.gitAt(repo)
@@ -179,6 +183,17 @@ func (d *Daemon) cleanRigRepo(repo string) gitHygieneResult {
 		if _, ok := onRemote[b]; !remoteOK || ok || !hasAnyPrefix(b, gitHygieneLocalOrphanPrefixes) {
 			continue
 		}
+		if strings.HasPrefix(b, "polecat/") {
+			holds, err := holdsUnpushedWork(g, def, b, onRemote)
+			if err != nil {
+				logf("keep orphan %s: cannot tell whether it holds unpushed commits: %v", b, err)
+				continue
+			}
+			if holds {
+				logf("keep orphan %s: it holds commits that are not on origin", b)
+				continue
+			}
+		}
 		if err := g.DeleteBranch(b, true); err != nil {
 			logf("delete orphan %s: %v", b, err)
 			continue
@@ -206,6 +221,23 @@ func (d *Daemon) cleanRigRepo(repo string) gitHygieneResult {
 		res.gc = true
 	}
 	return res
+}
+
+// holdsUnpushedWork reports whether local branch b has a commit whose patch is
+// on neither origin's default branch nor any of origin's integration branches,
+// the test polecat.Manager.PlanStaleBranches applies (gt-429ue). Patch identity
+// keeps a rebased or squash-landed branch from reading as unpushed work. An
+// error means the answer is unknown, and callers keep the branch.
+func holdsUnpushedWork(g daemonGit, def, b string, onRemote map[string]string) (bool, error) {
+	bases := []string{"origin/" + def}
+	var integration []string
+	for name := range onRemote {
+		if strings.HasPrefix(name, "integration/") {
+			integration = append(integration, "origin/"+name)
+		}
+	}
+	sort.Strings(integration)
+	return polecat.UnmergedOnAllBases(g.Cherry, append(bases, integration...), "refs/heads/"+b)
 }
 
 func hasAnyPrefix(s string, prefixes []string) bool {
