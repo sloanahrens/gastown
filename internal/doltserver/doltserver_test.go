@@ -2,6 +2,7 @@ package doltserver
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -5863,5 +5864,54 @@ func TestRemoveDatabase_RemovesWhenServerDoesNotKnowTheDatabase(t *testing.T) {
 	}
 	if _, statErr := os.Stat(dbPath); !os.IsNotExist(statErr) {
 		t.Error("an unreferenced empty database should be removed")
+	}
+}
+
+// The three SQL probes build their DSN from the town's configured user and
+// password. Dropping the password made a password-protected Dolt answer
+// access denied, which MeasureQueryLatency's callers read as an unreachable
+// server, GetHealthMetrics discarded, and Stop's connection drain read as
+// "nothing to drain" (gt-rtvyx).
+func TestProbeDSNsCarryPassword(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		password     bool
+		wantUserPart string
+	}{
+		{"password set", true, "root:secret"},
+		{"no password", false, "root"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			if tc.password {
+				writeTownDoltSettings(t, townRoot, `{"password":"${GT_DOLT_PASSWORD}"}`)
+				writeTownDaemonEnv(t, townRoot, "GT_DOLT_PASSWORD=secret")
+			}
+			probes := map[string]func(h *host, config *Config){
+				"MeasureQueryLatency": func(h *host, _ *Config) { _, _ = h.MeasureQueryLatency(townRoot) },
+				"GetLastCommitAge":    func(h *host, _ *Config) { _, _, _ = h.GetLastCommitAge(townRoot) },
+				"drainConnectionsBeforeStop": func(h *host, config *Config) {
+					h.drainConnectionsBeforeStop(config)
+				},
+			}
+			for name, probe := range probes {
+				f := newFakeHost()
+				h := f.host()
+				var got []string
+				h.openDB = func(dsn string) (*sql.DB, error) {
+					got = append(got, dsn)
+					return nil, errors.New("captured")
+				}
+				config := h.DefaultConfig(townRoot)
+				probe(h, config)
+				want := fmt.Sprintf("%s@tcp(127.0.0.1:%d)/", tc.wantUserPart, config.Port)
+				if len(got) != 1 || !strings.HasPrefix(got[0], want) {
+					t.Errorf("%s DSNs = %q, want one starting %q", name, got, want)
+				}
+			}
+		})
 	}
 }
