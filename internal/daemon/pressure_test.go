@@ -151,9 +151,6 @@ func TestCheckPressureCPUTierWarnsOnceOfAThresholdPastOne(t *testing.T) {
 // failure is an error that leaves the spawn free (gt-kc8v1).
 func TestHostCPUIdleProductionReadIsAPercentOrAnError(t *testing.T) {
 	t.Parallel()
-	if testing.Short() {
-		t.Skip("runs the host's top for two seconds")
-	}
 	d, _ := newTestDaemon(t.TempDir())
 	idle, err := d.hostCPUIdle()
 	if err != nil {
