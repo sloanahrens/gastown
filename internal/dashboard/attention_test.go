@@ -1,6 +1,7 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"regexp"
 	"strings"
 	"testing"
@@ -102,11 +103,16 @@ func TestBuildAttentionMergesTheReadersIntoOneTaggedList(t *testing.T) {
 func TestAttentionPanelSortsTheAlarmsAboveReviewDebt(t *testing.T) {
 	t.Parallel()
 
+	const debtText = "gt-abc landed deadbeef touching internal/daemon/attention.go; overseer review FAILED"
+
 	// The levels are the ones the daemon's severities map to, so the rows here
-	// are the rows its events raise.
+	// are the rows its events raise. The debt row's level comes from the rule
+	// that decides it rather than being written beside it, so a rule that goes
+	// back to raising every risk-path item loud has to fail this test (gt-i6j2n).
 	items := []Alert{
-		{ID: "alert-1", At: attentionNow.Add(-time.Hour), Level: attentionLevel(attention.SeverityLow), Key: "risk:gt-abc:deadbeef",
-			Title: attention.RuleRiskPath, Text: "gt-abc landed deadbeef touching internal/daemon/attention.go; overseer review FAILED",
+		{ID: "alert-1", At: attentionNow.Add(-time.Hour), Key: "risk:gt-abc:deadbeef",
+			Level: attentionLevel(attention.RiskPathSeverity(attention.RiskPathEvidence{Failed: true, Priority: 3})),
+			Title: attention.RuleRiskPath, Text: debtText,
 			Rule: attention.RuleRiskPath},
 		{ID: "alert-2", At: attentionNow.Add(-2 * time.Minute), Level: attentionLevel(attention.SeverityHigh), Key: "red-main:gastown:internal/cmd",
 			Title: attention.RuleRedMain, Text: "internal/cmd is red on main", Rule: attention.RuleRedMain},
@@ -138,10 +144,33 @@ func TestAttentionPanelSortsTheAlarmsAboveReviewDebt(t *testing.T) {
 	if debt.Level != LevelWarn {
 		t.Errorf("the review-debt row draws level %q, want the warn its low severity maps to", debt.Level)
 	}
-	// The page colours and ranks a queue row from its own level, so the level
-	// above is the style the operator sees.
-	if !strings.Contains(string(indexHTML), `el("span", "alvl " + (r.level || "info")`) {
-		t.Error("the page no longer draws an item row from its level")
+	// The page colours a queue row from the level the row carries, so the level
+	// above is the chip the operator reads: drawn through the page's own script
+	// rather than matched in its source (page_harness_test.go, gt-i6j2n).
+	raw, err := json.Marshal(at)
+	if err != nil {
+		t.Fatalf("marshalling the panel's rows: %v", err)
+	}
+	reading := map[string]any{}
+	if err := json.Unmarshal(raw, &reading); err != nil {
+		t.Fatalf("reading the panel's rows back: %v", err)
+	}
+	dom := newPageDOM(t)
+	dom.call(t, "renderAttention", attentionState(reading))
+	switchOwner(t, dom, string(attention.OwnerOverseer))
+	drawn := panelRows(t, dom)
+	found := false
+	for _, row := range drawn {
+		if !strings.Contains(row.Text, debtText) {
+			continue
+		}
+		found = true
+		if !panelCells(row, "span alvl "+LevelWarn) {
+			t.Errorf("the review-debt row wears %v, want the %s chip its level draws", row.Cells, LevelWarn)
+		}
+	}
+	if !found {
+		t.Errorf("the panel drew no row for the risk-path item: %+v", drawn)
 	}
 }
 
