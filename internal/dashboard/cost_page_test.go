@@ -296,6 +296,213 @@ func TestCostPanelKeepsEveryDeepSeekField(t *testing.T) {
 	}
 }
 
+// perDay is a spend report's per_day map, one entry per day from a fixed base.
+// The report hands the recent days and the panel reads the last key as today,
+// so a test builds the history it reads back rather than pinning a date.
+func perDay(days ...any) map[string]any {
+	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	m := map[string]any{}
+	for i, v := range days {
+		m[base.AddDate(0, 0, i).Format("2006-01-02")] = map[string]any{"spent": v}
+	}
+	return m
+}
+
+// dimLines reads back the spend part's dim lines in the order it draws them:
+// the cash and credit split, the day line, the credit events. The tiles above
+// them are the kv row and the warnings below wear their own colour, so a test
+// that reads one of these is not thrown by its neighbours.
+func dimLines(t *testing.T, spend map[string]any) []costLine {
+	t.Helper()
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", map[string]any{"spend": spend})
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children[0].children.filter(c => c.className === "title").map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
+	if err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	var lines []costLine
+	if err := json.Unmarshal([]byte(v.String()), &lines); err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	return lines
+}
+
+// spendReport is a spend report whose balance the two fields split, with the
+// rest of the report the panel needs to draw the lines it reads.
+func spendReport(cash, credit float64, runway any) map[string]any {
+	return map[string]any{
+		"balance": cash + credit, "live": map[string]any{"ok": true},
+		"cash": cash, "credit": credit, "credit_runway_days_at_24h_pace": runway,
+	}
+}
+
+// Cash, credit and the credit runway are one line under the balance: the split
+// says how much of the balance is not money paid in and the runway says when
+// the credit part runs out, which is one reading (gt-53s6m).
+func TestCostPanelPutsCashCreditAndTheRunwayOnOneLine(t *testing.T) {
+	t.Parallel()
+
+	lines := dimLines(t, spendReport(5.2, 17.98, 1.1))
+	if len(lines) != 1 {
+		t.Fatalf("the spend part drew %d dim lines: %+v, want the split alone", len(lines), lines)
+	}
+	want := "$5.20 cash + $17.98 credit · credit lasts ~1.1d, then cash"
+	if lines[0].Text != want {
+		t.Errorf("the line under the balance = %q, want %q", lines[0].Text, want)
+	}
+
+	// Credit spent down to nothing: the split stays and the runway goes, since
+	// there is no credit left to run out.
+	lines = dimLines(t, spendReport(5.2, 0, 0))
+	if len(lines) != 1 || lines[0].Text != "$5.20 cash + $0.00 credit" {
+		t.Errorf("a report with no credit = %+v, want the split with no runway", lines)
+	}
+
+	// The split is drawn under the tiles, which stay as they were.
+	panel, _ := drawCost(t, map[string]any{"spend": spendReport(5.2, 17.98, 1.1)})
+	if !strings.Contains(panel[0].Text, "balance") || !strings.Contains(panel[0].Text, "runway") {
+		t.Errorf("the balance, spend and rate tiles = %q, want them kept above the split", panel[0].Text)
+	}
+}
+
+// The day line reads today and yesterday off the per_day history and puts the
+// mean of the complete days behind them between, so one heavy day does not read
+// as the rate; the hover carries every day the report sent, the mean's own
+// window included (gt-53s6m).
+func TestCostPanelDayLineAveragesTheLastSevenCompleteDays(t *testing.T) {
+	t.Parallel()
+
+	// Nine days: today, yesterday and seven complete ones. The eighth day back
+	// is outside the mean and in the hover all the same.
+	lines := dimLines(t, map[string]any{
+		"balance": 1.0, "live": map[string]any{"ok": true},
+		"per_day": perDay(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0),
+	})
+	if len(lines) != 1 {
+		t.Fatalf("the spend part drew %d dim lines: %+v, want the day line alone", len(lines), lines)
+	}
+	want := "today $9.00 · yesterday $8.00 · 7-day avg $5.00/day"
+	if lines[0].Text != want {
+		t.Errorf("the day line = %q, want %q", lines[0].Text, want)
+	}
+	if strings.Contains(lines[0].Text, "day)") || strings.Contains(lines[0].Text, "days)") {
+		t.Errorf("a full week's mean wears a short-history note: %q", lines[0].Text)
+	}
+	if !strings.HasPrefix(lines[0].Title, "03-09 $9.00 · ") || !strings.Contains(lines[0].Title, "03-01 $1.00") {
+		t.Errorf("the day line's hover = %q, want every day, newest first", lines[0].Title)
+	}
+}
+
+// A history shorter than a week says how many days its mean covers, a day the
+// report listed without a figure reads as a dash rather than as nothing spent,
+// and a negative day reads as the balance rise it is (gt-53s6m).
+func TestCostPanelDayLineWordsAShortHistory(t *testing.T) {
+	t.Parallel()
+
+	day := func(days ...any) costLine {
+		t.Helper()
+		lines := dimLines(t, map[string]any{
+			"balance": 1.0, "live": map[string]any{"ok": true}, "per_day": perDay(days...),
+		})
+		if len(lines) != 1 {
+			t.Fatalf("the spend part drew %d dim lines: %+v, want the day line alone", len(lines), lines)
+		}
+		return lines[0]
+	}
+
+	// Four days: today, yesterday and two complete ones.
+	if got, want := day(1.0, 2.0, 4.0, 3.0).Text, "today $3.00 · yesterday $4.00 · 7-day avg $2.33/day (3 days)"; got != want {
+		t.Errorf("a four-day history = %q, want %q", got, want)
+	}
+	// Two days: yesterday is the one complete day the mean is over, worded in
+	// the singular.
+	if got, want := day(1.0, 2.0).Text, "today $2.00 · yesterday $1.00 · 7-day avg $1.00/day (1 day)"; got != want {
+		t.Errorf("a two-day history = %q, want %q", got, want)
+	}
+	// Today with no figure reads as a dash; the days behind it still average.
+	if got, want := day(1.0, 2.0, nil).Text, "today – · yesterday $2.00 · 7-day avg $1.50/day (2 days)"; got != want {
+		t.Errorf("a day with no figure = %q, want %q", got, want)
+	}
+	// Today alone: no yesterday and nothing to average, both dashes.
+	if got, want := day(3.0).Text, "today $3.00 · yesterday – · 7-day avg –/day"; got != want {
+		t.Errorf("a one-day history = %q, want %q", got, want)
+	}
+	// A negative day is a balance rise here, as on the credits line.
+	rise := day(1.0, 2.0, 3.0, -37.33)
+	if got, want := rise.Text, "today +$37.33 added · yesterday $3.00 · 7-day avg $2.00/day (3 days)"; got != want {
+		t.Errorf("a history with a rise today = %q, want %q", got, want)
+	}
+	if !strings.Contains(rise.Title, "03-04 +$37.33 added") {
+		t.Errorf("the day line's hover = %q, want the rise worded as one", rise.Title)
+	}
+}
+
+// No per_day at all draws no day line: a line of dashes would be a heading over
+// nothing, and the panel is read for the balance and the rate without it.
+func TestCostPanelDayLineNeedsAHistory(t *testing.T) {
+	t.Parallel()
+
+	for _, spend := range []map[string]any{
+		{"balance": 1.0, "live": map[string]any{"ok": true}},
+		{"balance": 1.0, "live": map[string]any{"ok": true}, "per_day": map[string]any{}},
+	} {
+		if lines := dimLines(t, spend); len(lines) != 0 {
+			t.Errorf("a report with no per_day drew a day line: %+v", lines)
+		}
+	}
+}
+
+// The credits line carries the two newest balance rises with the kind the
+// report gave them, and the hover the older ones, so the line does not grow
+// with the ledger (gt-53s6m).
+func TestCostPanelCreditsLineShowsTheTwoNewestRises(t *testing.T) {
+	t.Parallel()
+
+	rise := func(at string, amount float64, kind any) map[string]any {
+		e := map[string]any{"at": at, "amount": amount}
+		if kind != nil {
+			e["kind"] = kind
+		}
+		return e
+	}
+	// The report lists its rises oldest first; the line leads with the newest.
+	added := rise("2026-09-29T20:50:00", 99.98, nil)
+	topUp := rise("2026-10-05T11:02:00", 25.0, "top-up")
+	credit := rise("2026-10-15T04:04:00", 37.33, "credit")
+	line := func(rises ...map[string]any) costLine {
+		t.Helper()
+		list := make([]any, 0, len(rises))
+		for _, r := range rises {
+			list = append(list, r)
+		}
+		lines := dimLines(t, map[string]any{
+			"balance": 1.0, "live": map[string]any{"ok": true}, "credits": list,
+		})
+		if len(lines) != 1 {
+			t.Fatalf("the spend part drew %d dim lines: %+v, want the credits line alone", len(lines), lines)
+		}
+		return lines[0]
+	}
+
+	// Three rises: the two newest on the line, the oldest in its hover.
+	three := line(added, topUp, credit)
+	if want := "10-15 04:04 +$37.33 credit · 10-05 11:02 +$25.00 top-up"; three.Text != want {
+		t.Errorf("three rises = %q, want the two newest", three.Text)
+	}
+	if want := "older rises · 09-29 20:50 +$99.98 added"; three.Title != want {
+		t.Errorf("the rise that did not fit = %q, want it in the hover", three.Title)
+	}
+
+	// Two rises fit whole, so the hover holds nothing rather than repeating
+	// them; one rise with no kind at all reads as "added".
+	if two := line(topUp, credit); two.Text != "10-15 04:04 +$37.33 credit · 10-05 11:02 +$25.00 top-up" || two.Title != "" {
+		t.Errorf("two rises = %q (%q), want both on the line and no hover", two.Text, two.Title)
+	}
+	if one := line(added); one.Text != "09-29 20:50 +$99.98 added" || one.Title != "" {
+		t.Errorf("one rise = %q (%q), want it alone on the line", one.Text, one.Title)
+	}
+}
+
 // claudePlan is a Claude plan block as the reader answers it, with the fields in
 // over replacing or (on a nil value) dropping the reader's own: one week at 38%
 // that resets in two days and is projected past its limit at the day's pace, the
