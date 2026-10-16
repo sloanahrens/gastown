@@ -727,13 +727,20 @@ func deployRunNewer(a, b forgejo.ActionRun) bool {
 	return a.ID > b.ID
 }
 
+// workflowFileBase is the file name a run's workflow id carries, which the API
+// reports as the workflow's path in the repository: the base name answers for
+// ".forgejo/workflows/staging.yml" and "staging.yml" alike.
+func workflowFileBase(workflowID string) string {
+	if idx := strings.LastIndex(workflowID, "/"); idx >= 0 {
+		return workflowID[idx+1:]
+	}
+	return workflowID
+}
+
 // deployRunWorkflow names the workflow a run belongs to by the base name the
 // API reports for it, or "" for a workflow the watch does not follow.
 func deployRunWorkflow(workflowID string) string {
-	base := workflowID
-	if idx := strings.LastIndex(base, "/"); idx >= 0 {
-		base = base[idx+1:]
-	}
+	base := workflowFileBase(workflowID)
 	if slices.ContainsFunc(deployWorkflows, func(wf deployWorkflow) bool { return wf.File == base }) {
 		return base
 	}

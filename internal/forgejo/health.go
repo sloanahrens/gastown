@@ -34,6 +34,14 @@ const (
 	RunStatusBlocked = "blocked"
 )
 
+// RunStatusRunning is the status of a run a runner has picked up and not
+// finished, and JobStatusRunning the status of the job that runner is running:
+// the pair that says which run a queue is stalled behind (gt-koxwa).
+const (
+	RunStatusRunning = "running"
+	JobStatusRunning = "running"
+)
+
 // RunPickup is the oldest workflow run waiting to be picked up: the run queue
 // read that answers whether CI is taking work.
 //
@@ -84,6 +92,79 @@ func (c *Client) WaitingRun(ctx context.Context, owner, repo string) (RunPickup,
 		}
 	}
 	return oldest, nil
+}
+
+// RunHolder is the run a repository's queue is stalled behind and the job of
+// it a runner is running: the run an operator cancels to free the runner
+// (gt-koxwa).
+type RunHolder struct {
+	// Found is false when no run is in flight, so nothing holds the runner.
+	Found bool
+	// Run is the run that has occupied a runner longest.
+	Run ActionRun
+	// Job is that run's running job, zero when none of its jobs is running.
+	Job ActionRunJob
+}
+
+// holdRunPage bounds one run list request. A repository has few runs in flight
+// at once, so the one holding a runner is on the first page long before it has
+// held it for the minutes that raise the escalation.
+const holdRunPage = 50
+
+// HoldingRun reads the run holding owner/repo's runner: the run in flight
+// whose start is earliest, and the job of it that a runner is running
+// (gt-koxwa).
+func (c *Client) HoldingRun(ctx context.Context, owner, repo string) (RunHolder, error) {
+	list, err := c.ListRuns(ctx, owner, repo, RunFilter{
+		Status: []string{RunStatusRunning},
+		Limit:  holdRunPage,
+	})
+	if err != nil {
+		return RunHolder{}, err
+	}
+	run, ok := oldestRunningRun(list.Runs)
+	if !ok {
+		return RunHolder{}, nil
+	}
+	jobs, err := c.ListRunJobs(ctx, owner, repo, run.ID)
+	if err != nil {
+		return RunHolder{}, err
+	}
+	return RunHolder{Found: true, Run: run, Job: runningJob(jobs)}, nil
+}
+
+// oldestRunningRun is the run that has occupied a runner longest, which later
+// runs queue behind: the in-flight run whose start is earliest. A run with no
+// readable start is not in flight however the list reports its status, and the
+// status is checked here too so an instance that ignores the filter cannot
+// hand back a finished run.
+func oldestRunningRun(runs []ActionRun) (ActionRun, bool) {
+	var best ActionRun
+	var bestStart time.Time
+	for _, run := range runs {
+		if run.Status != RunStatusRunning {
+			continue
+		}
+		started, err := time.Parse(time.RFC3339, run.Started)
+		if err != nil || !started.After(time.Unix(0, 0)) {
+			continue
+		}
+		if bestStart.IsZero() || started.Before(bestStart) {
+			best, bestStart = run, started
+		}
+	}
+	return best, !bestStart.IsZero()
+}
+
+// runningJob is the job a runner is running in run, zero when none is: a run
+// whose jobs have all ended is not holding a runner.
+func runningJob(jobs []ActionRunJob) ActionRunJob {
+	for _, job := range jobs {
+		if job.Status == JobStatusRunning {
+			return job
+		}
+	}
+	return ActionRunJob{}
 }
 
 // waitingRun reports whether run is still in the queue. Forgejo sends the zero
