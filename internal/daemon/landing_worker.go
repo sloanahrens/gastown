@@ -482,6 +482,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		Reviewer:           reviewer,
 		Beads:              bd,
 		Landings:           landings,
+		Reviews:            land.TownReviewsFile(townRoot),
 		Out:                out,
 		RangeChecks:        []land.RangeCheck{land.AttributionCheck},
 		ReviewErrorRejects: true,

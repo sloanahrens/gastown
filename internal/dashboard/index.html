@@ -2685,6 +2685,20 @@ const fmtTokens = n => {
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
   return String(n);
 };
+// costTable is a table of heads ([text, numeric?]) over rows of [text, class]
+// cells, shared by the Usage and rework parts of the Cost panel.
+function costTable(heads, rows) {
+  const t = el("table");
+  const hr = el("tr");
+  heads.forEach(([h, num]) => hr.append(el("th", num ? "n" : "", h)));
+  t.append(hr);
+  for (const cells of rows) {
+    const tr = el("tr");
+    cells.forEach(([text, cls]) => tr.append(el("td", cls || "", text)));
+    t.append(tr);
+  }
+  return t;
+}
 // costUsage draws the part into box from the usage payload u and the whole
 // state s, and returns what the panel's caption says of it: text, the tooltip
 // that explains the text, and whether it is a warning (warn) or a failure (bad).
@@ -2715,18 +2729,7 @@ function costUsage(box, u, s) {
   d.open = openUsage;
   d.ontoggle = () => { openUsage = d.open; };
   d.append(el("summary", "title", "last " + (u.window || "24h") + " by class and model, deep reviews, top and slow beads"));
-  const table = (heads, rows) => {
-    const t = el("table");
-    const hr = el("tr");
-    heads.forEach(([h, num]) => hr.append(el("th", num ? "n" : "", h)));
-    t.append(hr);
-    for (const cells of rows) {
-      const tr = el("tr");
-      cells.forEach(([text, cls]) => tr.append(el("td", cls || "", text)));
-      t.append(tr);
-    }
-    return t;
-  };
+  const table = costTable;
   const section = (title, node) => { d.append(el("h3", "sub", title), node); };
   const none = text => el("div", "empty", text);
 
@@ -2763,6 +2766,30 @@ function costUsage(box, u, s) {
   return caption;
 }
 
+// The om rework part of the Cost panel: what each review bar costs in rework,
+// from the landing worker's review log, for the last seven days and the seven
+// before them. A bead counts under the bar in force at its first review in the
+// window. A bar of 0 is a tree that named none and reads "?". A read that
+// failed is a named state, never an empty week.
+function costRework(box, r) {
+  if (!r) { box.append(el("div", "empty", "om rework · reading…")); return; }
+  if (r.unavailable) { box.append(el("div", "badc", "om rework · review log unreadable")); return; }
+  const heads = [["Bar", 1], ["Reviews", 1], ["First try", 1], ["Rework", 1], ["Reviews per landed", 1], ["Loops out", 1], ["Mean score", 1]];
+  for (const w of r.windows || []) {
+    box.append(el("h3", "sub", "om rework · " + w.name));
+    const bars = w.bars || [];
+    if (!bars.length) { box.append(el("div", "empty", "no om reviews")); continue; }
+    box.append(costTable(heads, bars.map(b => [
+      [b.bar ? b.bar.toFixed(2) : "?", "n"],
+      [String(b.reviews), "n"],
+      [b.first_try + "/" + b.beads, "n"],
+      [Math.round(100 * b.rejected / b.reviews) + "%", "n"],
+      [b.landed ? b.reviews_per_landed.toFixed(2) : "–", "n"],
+      [String(b.loops_out), "n" + (b.loops_out ? " badc" : "")],
+      [b.mean_score.toFixed(2), "n"]])));
+  }
+}
+
 // The GCP budget line of the Cost panel: the budget_alert findings the Cloud
 // panel's reader already carries, one line each, coloured by the finding's
 // severity. The patrol writes the figures into the finding's Detail sentence
@@ -2793,8 +2820,8 @@ function costGCP(box, c) {
 }
 
 // The Cost panel: what the town is spending, in one place. DeepSeek's balance,
-// pace and credit, the usage scan's estimate and slow runs, and the GCP budget
-// alert. The panel greys with the spend read it is mostly drawn from; a part
+// pace and credit, the usage scan's estimate and slow runs, the GCP budget
+// alert, and what each om review bar costs in rework. The panel greys with the spend read it is mostly drawn from; a part
 // whose own read has not answered says so on its own line. With neither a spend
 // report nor usage records there is one line and nothing else.
 function renderCost(s) {
@@ -2815,6 +2842,7 @@ function renderCost(s) {
   const spendWords = costSpend(spendBox, d, r);
   costGCP(box, s.cloud);
   const usage = costUsage(box, u, s);
+  costRework(box, s.rework);
   note.textContent = readCaption(r, [usage.text || null].concat(spendWords));
   note.title = usage.title || "";
   // A stale or failed spend read has already coloured the caption; the usage

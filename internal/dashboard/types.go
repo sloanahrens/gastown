@@ -602,7 +602,10 @@ type State struct {
 	// Usage is the town's spend over the last day, folded from the records the
 	// usage scan writes under the town root. It is nil until the reader first
 	// reports.
-	Usage     *Usage          `json:"usage,omitempty"`
+	Usage *Usage `json:"usage,omitempty"`
+	// Rework is what each om review bar costs in rework, from the landing
+	// worker's review log. It is nil until the reader first reports.
+	Rework    *Rework         `json:"rework,omitempty"`
 	Spend     json.RawMessage `json:"spend,omitempty"`
 	OM        *OM             `json:"om,omitempty"`
 	TierSweep *TierSweep      `json:"tiersweep,omitempty"`
@@ -673,6 +676,8 @@ type Config struct {
 	// Usage reads the town's spend over the last day from the usage scan's
 	// records.
 	Usage func() *Usage
+	// Rework reads the om rework table from the landing worker's review log.
+	Rework func() *Rework
 	// Escalation reads the town's open escalation beads.
 	Escalation func() *Escalations
 	// Dispatch reads the spec dispatcher's last tick from the daemon log.
@@ -713,6 +718,7 @@ type Config struct {
 	OverseerEvery   time.Duration
 	DeepReviewEvery time.Duration
 	UsageEvery      time.Duration
+	ReworkEvery     time.Duration
 	EscalationEvery time.Duration
 	DispatchEvery   time.Duration
 	AttentionEvery  time.Duration
@@ -763,6 +769,9 @@ func (c *Config) defaults() {
 	// hour at its fastest, and the reader re-decodes only the files whose mtime
 	// moved: a poll is little more than a directory listing.
 	def(&c.UsageEvery, 60*time.Second)
+	// The log gains a line per om verdict, a few an hour; a read is one small
+	// file.
+	def(&c.ReworkEvery, 60*time.Second)
 	def(&c.EscalationEvery, 60*time.Second)
 	def(&c.DispatchEvery, 10*time.Second)
 	// The daemon appends to events.jsonl once a heartbeat; a read is a stat and

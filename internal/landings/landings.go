@@ -45,7 +45,8 @@ type Record struct {
 // Path is <town>/.runtime/landings/<rig>.jsonl, the file the landing worker
 // appends to. A rig name that could leave the directory is refused.
 func Path(townRoot, rig string) (string, error) {
-	if rig == "" || strings.ContainsAny(rig, `/\`) || rig == "." || rig == ".." {
+	// "reviews" is the om review log's name (land.ReviewsFileName), not a rig's.
+	if rig == "" || strings.ContainsAny(rig, `/\`) || rig == "." || rig == ".." || rig == "reviews" {
 		return "", fmt.Errorf("invalid rig name %q for a landings file", rig)
 	}
 	return filepath.Join(constants.TownRuntimePath(townRoot), "landings", rig+".jsonl"), nil

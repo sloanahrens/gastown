@@ -307,6 +307,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	})
 	deepReview := newDashDeepReviewReader(townRoot)
 	usage := newDashUsageReader(townRoot)
+	rework := newDashReworkReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:       feed,
@@ -325,6 +326,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Overseer:   func() *dashboard.Overseer { return overseerPane.read(time.Now()) },
 		DeepReview: func() *dashboard.DeepReview { return deepReview.read(time.Now()) },
 		Usage:      func() *dashboard.Usage { return usage.read(time.Now()) },
+		Rework:     func() *dashboard.Rework { return rework.read(time.Now()) },
 		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
 		Dispatch:   om.dispatch,
 		Attention:  dashboard.NewAttentionFollower(townRoot).Read,

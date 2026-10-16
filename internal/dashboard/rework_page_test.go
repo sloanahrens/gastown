@@ -1,0 +1,143 @@
+package dashboard
+
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+// The Cost panel draws the om rework table under its Usage part. These tests
+// run the page's own renderCost over a reading and read back what it drew
+// (gt-mctxx).
+
+// reworkChild is one top-level child of the Cost panel, with the cell text of
+// a table.
+type reworkChild struct {
+	Tag   string     `json:"tag"`
+	Class string     `json:"class"`
+	Text  string     `json:"text"`
+	Rows  [][]string `json:"rows"`
+}
+
+func drawCostChildren(t *testing.T, s map[string]any) (kids []reworkChild, note drawn) {
+	t.Helper()
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", s)
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.map(c => ({tag: c.tagName, class: c.className, text: c.textContent,
+		rows: c.tagName === "TABLE" ? c.children.map(r => r.children.map(x => x.textContent)) : null})))`)
+	if err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	if err := json.Unmarshal([]byte(v.String()), &kids); err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	return kids, dom.element(t, "costnote")
+}
+
+func reworkPayload() map[string]any {
+	return map[string]any{"windows": []any{
+		map[string]any{"name": "last 7 days", "bars": []any{
+			map[string]any{"bar": 0.7, "reviews": 2, "rejected": 1, "beads": 1, "first_try": 0, "landed": 1, "reviews_per_landed": 2.0, "loops_out": 0, "mean_score": 0.71},
+			map[string]any{"bar": 0.8, "reviews": 7, "rejected": 5, "beads": 3, "first_try": 1, "landed": 2, "reviews_per_landed": 2.0, "loops_out": 1, "mean_score": 0.5786},
+			map[string]any{"bar": 0, "reviews": 1, "rejected": 1, "beads": 1, "first_try": 0, "landed": 0, "reviews_per_landed": 0, "loops_out": 0, "mean_score": 0.4},
+		}},
+		map[string]any{"name": "the 7 days before", "bars": []any{}},
+	}}
+}
+
+func costSpendUsage() map[string]any {
+	return map[string]any{
+		"spend": map[string]any{"balance": 12.5, "live": map[string]any{"ok": true}},
+		"usage": map[string]any{"window": "24h"},
+	}
+}
+
+// The table has one row per bar with the columns the operator watches, a
+// window with no reviews says so, and the unknown bar reads "?".
+func TestCostPanelDrawsTheReworkTable(t *testing.T) {
+	t.Parallel()
+
+	s := costSpendUsage()
+	s["rework"] = reworkPayload()
+	kids, _ := drawCostChildren(t, s)
+
+	var heads []string
+	var tables [][][]string
+	var subs []string
+	for _, k := range kids {
+		switch {
+		case k.Tag == "H3" && strings.HasPrefix(k.Text, "om rework"):
+			subs = append(subs, k.Text)
+		case k.Tag == "TABLE" && len(k.Rows) > 0 && k.Rows[0][0] == "Bar":
+			heads, tables = k.Rows[0], append(tables, k.Rows)
+		}
+	}
+	if len(subs) != 2 || subs[0] != "om rework · last 7 days" || subs[1] != "om rework · the 7 days before" {
+		t.Fatalf("rework headings = %q, want one per window", subs)
+	}
+	if strings.Join(heads, "|") != "Bar|Reviews|First try|Rework|Reviews per landed|Loops out|Mean score" {
+		t.Errorf("columns = %q", heads)
+	}
+	if len(tables) != 1 {
+		t.Fatalf("drew %d rework tables, want one: the empty window has none", len(tables))
+	}
+	want := [][]string{
+		{"0.70", "2", "0/1", "50%", "2.00", "0", "0.71"},
+		{"0.80", "7", "1/3", "71%", "2.00", "1", "0.58"},
+		{"?", "1", "0/1", "100%", "–", "0", "0.40"},
+	}
+	rows := tables[0][1:]
+	if len(rows) != len(want) {
+		t.Fatalf("rows = %v, want %v", rows, want)
+	}
+	for i := range want {
+		if strings.Join(rows[i], "|") != strings.Join(want[i], "|") {
+			t.Errorf("row %d = %v, want %v", i, rows[i], want[i])
+		}
+	}
+	empty := false
+	for _, k := range kids {
+		empty = empty || (k.Class == "empty" && k.Text == "no om reviews")
+	}
+	if !empty {
+		t.Error("the window with no reviews does not say so")
+	}
+}
+
+// A read that failed is named, and a read still pending is reading; neither
+// draws a table, and the panel's section contract stays.
+func TestCostPanelNamesTheReworkStates(t *testing.T) {
+	t.Parallel()
+
+	s := costSpendUsage()
+	s["rework"] = map[string]any{"unavailable": true}
+	kids, _ := drawCostChildren(t, s)
+	last := kids[len(kids)-1]
+	if last.Class != "badc" || !strings.Contains(last.Text, "review log unreadable") {
+		t.Errorf("unreadable log drew %+v, want a badc line naming it", last)
+	}
+
+	kids, note := drawCostChildren(t, costSpendUsage())
+	last = kids[len(kids)-1]
+	if last.Class != "empty" || !strings.Contains(last.Text, "om rework") || !strings.Contains(last.Text, "reading") {
+		t.Errorf("pending read drew %+v, want a reading line", last)
+	}
+	if strings.Contains(note.Text, "undefined") {
+		t.Errorf("caption = %q", note.Text)
+	}
+
+	page := string(indexHTML)
+	if !strings.Contains(page, `<section><h2>Cost <span class="r" id="costnote"></span></h2><div class="body" id="cost"></div></section>`) {
+		t.Error("the Cost section is no longer a section whose h2 holds the title and a span.r")
+	}
+	cost := pageFunc(t, "renderCost")
+	if usage, rework := strings.Index(cost, "costUsage("), strings.Index(cost, "costRework(box, s.rework)"); rework < usage || rework < 0 {
+		t.Error("renderCost does not draw the rework table after the Usage part")
+	}
+	body := pageFunc(t, "costRework")
+	for _, bad := range []string{"innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"} {
+		if strings.Contains(body, bad) {
+			t.Errorf("costRework uses %s", bad)
+		}
+	}
+}

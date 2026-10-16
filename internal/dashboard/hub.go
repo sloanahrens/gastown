@@ -138,6 +138,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Usage != nil {
 		start(h.cfg.UsageEvery, h.pollUsage)
 	}
+	if h.cfg.Rework != nil {
+		start(h.cfg.ReworkEvery, h.pollRework)
+	}
 	if h.cfg.Escalation != nil {
 		start(h.cfg.EscalationEvery, h.pollEscalation)
 	}
@@ -638,6 +641,19 @@ func (h *Hub) pollUsage() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Usage = u
+	h.publishLocked()
+}
+
+// pollRework reads the om rework table from the landing worker's review log. It
+// reads one small file, so it keeps the minute clock the other slow readers use.
+func (h *Hub) pollRework() {
+	r := h.cfg.Rework()
+	if r == nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.state.Rework = r
 	h.publishLocked()
 }
 

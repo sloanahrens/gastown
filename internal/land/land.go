@@ -127,8 +127,11 @@ type Lander struct {
 	Reviewer Reviewer
 	Beads    Beads
 	Landings *LandingsFile
-	Out      io.Writer
-	Now      func() time.Time
+	// Reviews, when set, receives one line per om verdict that judged a tree,
+	// the log the dashboard's rework table reads. Nil means off (gt-mctxx).
+	Reviews *ReviewsFile
+	Out     io.Writer
+	Now     func() time.Time
 	// Followups, when set, is the beads surface the post-landing follow-up
 	// feed files through: a landing om approved at or above the rig's bar gets
 	// shaped beads for the minor findings that were not worth blocking on, or a
@@ -884,6 +887,26 @@ func (l *Lander) rescoreBorderline(ctx context.Context, v Verdict, in ReviewInpu
 	return stands
 }
 
+// logReview appends the verdict to the reviews log when it is an om decision,
+// approve or request_changes. The attempt is the one a rejection would be
+// recorded as, so a bead's lines count up with its MERGE REJECTION blocks. A
+// failed append is logged and nothing else: a statistic never holds a landing.
+func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict) {
+	if l.Reviews == nil || (v.Verdict != VerdictApprove && v.Verdict != VerdictRequestChanges) {
+		return
+	}
+	// An unreadable bar is logged as 0, which the table names unknown.
+	bar, err := OMThreshold(dir)
+	if err != nil {
+		l.logf("%s: could not read the review bar for the reviews log (%v); it is logged as 0", w.BeadID, err)
+	}
+	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: CountRejections(issue.Notes) + 1,
+		Score: v.Score, Verdict: v.Verdict, Findings: len(v.Findings), Bar: bar, At: l.now().UTC()}
+	if err := l.Reviews.Append(rec); err != nil {
+		l.logf("%s: could not append to the reviews log (%v); the landing is unaffected", w.BeadID, err)
+	}
+}
+
 func (l *Lander) now() time.Time {
 	if l.Now != nil {
 		return l.Now()
@@ -1156,6 +1179,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// do with the landing: the work bead gets the one line that ties it to the
 	// review, written before either the rejection or the merge (gt-uebmq).
 	l.commentVerdict(w, verdict, reviewStart, time.Now())
+	l.logReview(issue, w, dir, verdict)
 	if verdict.Verdict == VerdictRequestChanges {
 		rej := &Rejection{Kind: RejectReview, Rework: true, Reason: fmt.Sprintf("om requested changes (score %.2f, %d finding(s))", verdict.Score, len(verdict.Findings))}
 		return Result{}, l.reject(issue, w, rej, &verdict)
