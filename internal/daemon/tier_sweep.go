@@ -1485,21 +1485,28 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 	}
 }
 
-// tierSweepOpenBeads maps the failing unit each open sweep bead for rig and
-// tier was filed for to its bead id.
+// tierSweepOpenBeads maps the failing unit each unlanded sweep bead for rig and
+// tier was filed for to its bead id. A bead a polecat has claimed is in
+// progress or hooked, not open, and still stands for the same failure
+// (tierSweepRedBeadsOpen counts the same three statuses). When one unit has
+// beads under several statuses the open one wins.
 func tierSweepOpenBeads(bd tierSweepBeadStore, rig, tier string) (map[string]string, error) {
-	issues, err := bd.List(beads.ListOptions{Status: "open", Label: tierSweepRedLabel, Priority: -1, Limit: 0})
-	if err != nil {
-		return nil, err
-	}
 	prefix := tierSweepBeadPrefix(rig, tier)
 	out := map[string]string{}
-	for _, is := range issues {
-		if is == nil {
-			continue
+	for _, status := range []string{"open", string(beads.StatusInProgress), beads.StatusHooked} {
+		issues, err := bd.List(beads.ListOptions{Status: status, Label: tierSweepRedLabel, Priority: -1, Limit: 0})
+		if err != nil {
+			return nil, err
 		}
-		if name, ok := strings.CutPrefix(is.Title, prefix); ok && name != "" {
-			out[name] = is.ID
+		for _, is := range issues {
+			if is == nil {
+				continue
+			}
+			if name, ok := strings.CutPrefix(is.Title, prefix); ok && name != "" {
+				if _, seen := out[name]; !seen {
+					out[name] = is.ID
+				}
+			}
 		}
 	}
 	return out, nil
