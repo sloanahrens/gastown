@@ -99,15 +99,12 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth
 }
 
 // evaluatePolecatTestScopeSegment judges one shell segment in cwd, the
-// directory the walk placed it in (cwdKnown says whether it could). The go case
-// is located through findGoSubcommand rather than by the `go` token's adjacency
-// to `test`, so Go's global -C dir flag between the two ("go -C /tmp test
-// ./...") does not hide the run (gt-zn7ma). That flag is also where the run
-// happens: a '.', './' or bare target names a package under the -C directory,
-// not under the shell's cwd, so it is judged there (goTestRunDir, gt-tzdpe);
-// an explicit package argument keeps the reading it has always had. A -C
-// directory the shell expands cannot be placed, so an unfiltered run of a
-// package argument relative to it is refused outright (gt-tgwt7).
+// directory the walk placed it in (cwdKnown says whether it could). The go
+// case is located through findGoSubcommand, so a global -C flag between `go`
+// and `test` does not hide the run (gt-zn7ma). A '.', './' or bare target is
+// judged in the -C directory, where Go runs it (gt-tzdpe); an unfiltered
+// package argument relative to a shell-expanded -C is refused because that
+// directory cannot be placed (gt-tgwt7).
 func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool) (reason string, matched []string) {
 	lower := make([]string, len(tokens))
 	for i, t := range tokens {
