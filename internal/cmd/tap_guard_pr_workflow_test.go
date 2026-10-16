@@ -639,3 +639,72 @@ func TestPRWorkflowSubstitutionCommentAndANSIQuote(t *testing.T) {
 		})
 	}
 }
+
+// TestPRWorkflowGuard_SwitchAbbreviatedCreate pins the abbreviations of
+// switch's --create and --force-create (gt-osc72). git's option parser takes
+// any unambiguous prefix, so "git switch --cre x" creates a branch (verified on
+// git 2.42.0) and the guard blocks it for a non-polecat agent. The shortest
+// prefixes git accepts are "--cr" and "--force-"; "--c", "--f" and "--fo" are
+// ambiguous and git refuses them, "--force" is a different option, and
+// --orphan, --detach and --discard-changes are not creations.
+func TestPRWorkflowGuard_SwitchAbbreviatedCreate(t *testing.T) {
+	t.Parallel()
+	town := newPolecatTestTown(t)
+	town = town.withEnv("GT_ROLE", "gastown/crew/sloan")
+
+	tests := []struct {
+		name    string
+		command string
+		want    prWorkflowGuardDecision
+	}{
+		{"--cre", "git switch --cre feature/x", prWorkflowBlockAgentContext},
+		{"--force-cr", "git switch --force-cr feature/x", prWorkflowBlockAgentContext},
+		{"--cr", "git switch --cr feature/x", prWorkflowBlockAgentContext},
+		{"--crea=", "git switch --crea=feature/x", prWorkflowBlockAgentContext},
+		{"--force-", "git switch --force- feature/x", prWorkflowBlockAgentContext},
+		{"--force-c=", "git switch --force-c=feature/x", prWorkflowBlockAgentContext},
+		{"--force-creat behind another flag", "git switch -q --force-creat feature/x", prWorkflowBlockAgentContext},
+		{"--cre behind git -C", "git -C /tmp/repo switch --cre feature/x", prWorkflowBlockAgentContext},
+		{"--cre in bash -c", `bash -c "git switch --cre feature/x"`, prWorkflowBlockAgentContext},
+		{"--c is ambiguous", "git switch --c feature/x", prWorkflowAllow},
+		{"--f is ambiguous", "git switch --f feature/x", prWorkflowAllow},
+		{"--fo is ambiguous", "git switch --fo feature/x", prWorkflowAllow},
+		{"--force is its own option", "git switch --force feature/x", prWorkflowAllow},
+		{"--conflict", "git switch --conflict=merge feature/x", prWorkflowAllow},
+		{"--orphan", "git switch --orphan feature/x", prWorkflowAllow},
+		{"--or", "git switch --or feature/x", prWorkflowAllow},
+		{"--detach", "git switch --detach main", prWorkflowAllow},
+		{"--discard-changes", "git switch --discard-changes main", prWorkflowAllow},
+		{"a longer word that only starts like --create", "git switch --createx feature/x", prWorkflowAllow},
+		{"--cre after --", "git switch -q -- --cre", prWorkflowAllow},
+		{"--cre is not a checkout flag", "git checkout --cre feature/x", prWorkflowAllow},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			payload := polecatBranchPayload(town.worktree, tt.command)
+			if got := evaluatePRWorkflowGuard([]byte(payload), town.proc()); got != tt.want {
+				t.Errorf("evaluatePRWorkflowGuard(%q) = %v, want %v", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
+// A polecat's exemption reads the same abbreviations the judge does, so it can
+// open its own worktree's session branch with "git switch --cre" and is still
+// blocked at the rig root (gt-osc72).
+func TestPRWorkflowGuard_SwitchAbbreviatedCreatePolecat(t *testing.T) {
+	t.Parallel()
+	town := newPolecatTestTown(t)
+	town = town.withEnv("GT_ROLE", "gastown/polecats/"+town.name)
+	branch := "polecat/ruby/gt-osc72+mvbikfnl"
+
+	for _, flag := range []string{"--cre", "--force-cr"} {
+		command := "git switch " + flag + " " + branch
+		if got := evaluatePRWorkflowGuard([]byte(polecatBranchPayload(town.worktree, command)), town.proc()); got != prWorkflowAllow {
+			t.Errorf("own worktree %q = %v, want allow", command, got)
+		}
+		if got := evaluatePRWorkflowGuard([]byte(polecatBranchPayload(town.rigRoot, command)), town.proc()); got != prWorkflowBlockAgentContext {
+			t.Errorf("rig root %q = %v, want block", command, got)
+		}
+	}
+}

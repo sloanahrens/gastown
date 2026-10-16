@@ -500,8 +500,10 @@ func branchCreatingSubcommand(subcommand string) bool {
 // option in any spelling git's option parser accepts: the bare short flag
 // (-b/-B, -c/-C), a cluster of short flags ("-qB", "-qb"), a short flag glued
 // to its value ("-bx"), and the long spellings --create and --force-create,
-// bare or carrying their value after an "=" ("--create=feature/x"). checkout
-// has no long spelling for -b, and -C's long form is --force-create (gt-g27m7).
+// bare or carrying their value after an "=" ("--create=feature/x"), and the
+// abbreviations git resolves to them ("--cre", "--force-cr"; gt-osc72).
+// checkout has no long spelling for -b, and -C's long form is --force-create
+// (gt-g27m7).
 //
 // Both halves of the guard read through this one predicate — isBranchCreation
 // judges with it, isLeadingBranchCreation exempts with it — because an
@@ -513,10 +515,23 @@ func branchCreationFlag(subcommand, flag string) bool {
 		return shortFlagCluster(flag, 'b') || shortFlagCluster(flag, 'B')
 	case "switch":
 		return shortFlagCluster(flag, 'c') || shortFlagCluster(flag, 'C') ||
-			flag == "--create" || strings.HasPrefix(flag, "--create=") ||
-			flag == "--force-create" || strings.HasPrefix(flag, "--force-create=")
+			longFlagAbbrev(flag, "--create", len("--cr")) ||
+			longFlagAbbrev(flag, "--force-create", len("--force-"))
 	}
 	return false
+}
+
+// longFlagAbbrev reports whether flag, with any "=value" dropped, spells the
+// long option full: in whole, or as a prefix of at least minLen bytes, the
+// way git's option parser resolves an abbreviation (gt-osc72). minLen is the
+// shortest prefix git 2.42 reads as full alone: "--c" is ambiguous with
+// --conflict, "--f" and "--fo" with --force, and "--force" is --force itself,
+// so switch creates a branch on "--cr" and "--force-" and up and refuses the
+// shorter ones. A shorter prefix that a newer git resolves to full would read
+// as no creation here; a longer one never changes meaning.
+func longFlagAbbrev(flag, full string, minLen int) bool {
+	name, _, _ := strings.Cut(flag, "=")
+	return len(name) >= minLen && strings.HasPrefix(full, name)
 }
 
 // shortFlagCluster reports whether word is a short-option cluster ("-q", "-qb",
