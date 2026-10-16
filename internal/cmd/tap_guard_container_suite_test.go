@@ -1685,11 +1685,9 @@ func TestContainerSuiteGuardsStripHeredocBodies(t *testing.T) {
 }
 
 // A shell-fed heredoc body is a script the reader shell runs, so it inherits
-// the container opt-in the reading line carries, exactly as a -c payload and a
-// command substitution do. A GT_TEST_DOCKER=1 typed before the reader word
-// therefore reaches the body; dropping it let an opt-in line feed a
-// container-backed package to a shell and run it unwrapped on the shared
-// Docker VM (gt-zyccn). An opt-in inside the body already counted, and a body
+// the container opt-in the reading line carries, as a -c payload and a command
+// substitution do: a GT_TEST_DOCKER=1 before the reader word, bare or exported,
+// reaches the body (gt-zyccn). An opt-in inside the body counts too, and a body
 // naming no container-backed package stays allowed either way.
 func TestContainerSuiteHeredocBodyHonoursDockerOptIn(t *testing.T) {
 	t.Parallel()
