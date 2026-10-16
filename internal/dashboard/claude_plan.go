@@ -107,6 +107,18 @@ type ClaudePlan struct {
 	PlanUSDMonth   float64 `json:"plan_usd_month"`
 	WeeklyValueUSD float64 `json:"weekly_value_usd"`
 	UsedValueUSD   float64 `json:"used_value_usd"`
+	// APIEquivalentWeekUSD and APIEquivalentMonthUSD are what the Claude tokens
+	// the town spent over the plan's week and the billing month would cost at
+	// Anthropic's list prices (claude_prices.json), so the page can lay the
+	// metered bill beside the flat price the plan charges. Both are null when
+	// the usage records could not be read, which the page says nothing about
+	// rather than drawing a month of no spend as $0.00 (gt-d8sem).
+	APIEquivalentWeekUSD  *float64 `json:"api_equivalent_week_usd,omitempty"`
+	APIEquivalentMonthUSD *float64 `json:"api_equivalent_month_usd,omitempty"`
+	// Unpriced names the Claude models in those windows whose family the price
+	// table has no rates for; they count zero, so the figures beside this list
+	// are a floor.
+	Unpriced []string `json:"unpriced,omitempty"`
 	// SampledAt is the newest sample's instant, in epoch seconds.
 	SampledAt int64 `json:"sampled_at"`
 	// Stale says the newest sample is older than claudePlanStale, that the series
@@ -121,6 +133,10 @@ type ClaudePlan struct {
 type ClaudePlanReader struct {
 	path         string
 	planUSDMonth float64
+	// usage is where the API-equivalent figures' tokens come from: the usage
+	// scan's records, read at the same instant the week is measured at. A reader
+	// without one draws the plan line alone, as it did before gt-d8sem.
+	usage func(now time.Time) []UsageRecord
 }
 
 // NewClaudePlanReader returns a reader of the series at path, pricing its
@@ -128,6 +144,17 @@ type ClaudePlanReader struct {
 // when it is not a price.
 func NewClaudePlanReader(path string, planUSDMonth float64) *ClaudePlanReader {
 	return &ClaudePlanReader{path: path, planUSDMonth: planUSDMonth}
+}
+
+// WithUsage points the reader at the usage scan's records, so its payload also
+// carries what the town's Claude tokens would cost at API list prices. The
+// source is called with the same now the plan is measured at, so the two
+// windows cannot be drawn from different clocks. A source that answers nil is a
+// record set that could not be read, which leaves the figures unset; an empty
+// set is a town that spent nothing, which is a figure of zero.
+func (r *ClaudePlanReader) WithUsage(records func(now time.Time) []UsageRecord) *ClaudePlanReader {
+	r.usage = records
+	return r
 }
 
 // Read returns the block's payload from the series as it stands at now: a file
@@ -138,7 +165,30 @@ func (r *ClaudePlanReader) Read(now time.Time) *ClaudePlan {
 		return &ClaudePlan{PlanUSDMonth: planUSD(r.planUSDMonth), Stale: true, Unavailable: true}
 	}
 	p := ComputeClaudePlan(samples, now, r.planUSDMonth)
+	r.attachAPIEquivalent(&p, now)
 	return &p
+}
+
+// attachAPIEquivalent joins the API-equivalent figures to a payload the series
+// answered. It leaves them unset for a town whose records cannot be read: a
+// figure of zero there would be the page's own lie, since "nothing ran" and
+// "the records are gone" are different months (gt-xyzs8, gt-d8sem).
+func (r *ClaudePlanReader) attachAPIEquivalent(p *ClaudePlan, now time.Time) {
+	if r.usage == nil {
+		return
+	}
+	recs := r.usage(now)
+	if recs == nil {
+		return
+	}
+	prices, err := EmbeddedClaudePrices()
+	if err != nil {
+		return
+	}
+	eq := APIEquivalent(recs, prices, now, p.WeeklyResetsAt)
+	week, month := eq.WeekUSD, eq.MonthUSD
+	p.APIEquivalentWeekUSD, p.APIEquivalentMonthUSD = &week, &month
+	p.Unpriced = eq.Unpriced
 }
 
 // ComputeClaudePlan folds the samples into the payload the page draws.

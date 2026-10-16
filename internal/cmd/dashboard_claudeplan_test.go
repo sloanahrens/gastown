@@ -29,16 +29,8 @@ func TestDashboardClaudePlanWiring(t *testing.T) {
 		t.Errorf("the plan series is read from %q, want %q", path, want)
 	}
 
-	// One line, as the status line appends it.
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatal(err)
-	}
 	now := time.Now()
-	line := fmt.Sprintf(`{"t":%d,"five_hour":8,"five_hour_resets_at":%d,"seven_day":38,"seven_day_resets_at":%d}`,
-		now.Unix(), now.Add(time.Hour).Unix(), now.Add(48*time.Hour).Unix())
-	if err := os.WriteFile(path, []byte(line+"\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	path = writeClaudePlanSeries(t, root, now)
 
 	p := dashboard.NewClaudePlanReader(path, dashboardClaudePlanUSD).Read(now)
 
@@ -47,5 +39,96 @@ func TestDashboardClaudePlanWiring(t *testing.T) {
 	}
 	if p.UsedValueUSD <= 0 {
 		t.Errorf("the flag's price did not reach the reading: %+v", p)
+	}
+}
+
+// claudePlanSeriesResets is how far ahead of the reading the sample below says
+// the plan's weekly limit resets, which is what places the week the
+// API-equivalent figure covers.
+const claudePlanSeriesResets = 48 * time.Hour
+
+// writeClaudePlanSeries writes one status line sample into root's town, the way
+// the status line appends it, and returns the series path.
+func writeClaudePlanSeries(t *testing.T, root string, now time.Time) string {
+	t.Helper()
+	path := dashboardClaudePlanPath(root)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := fmt.Sprintf(`{"t":%d,"five_hour":8,"five_hour_resets_at":%d,"seven_day":38,"seven_day_resets_at":%d}`,
+		now.Unix(), now.Add(time.Hour).Unix(), now.Add(claudePlanSeriesResets).Unix())
+	if err := os.WriteFile(path, []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The plan line's API-equivalent dollars are what the town's own Claude tokens
+// would have cost on the API. They come off the usage scan's records, read by
+// the panel's own reader - so this exercises the reader the command builds, not
+// a second one assembled to match it (gt-d8sem).
+func TestDashboardClaudePlanReaderCarriesTheAPIEquivalentDollars(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	now := time.Now()
+	writeClaudePlanSeries(t, root, now)
+
+	// One complete record ending an hour ago, of a model the price file knows.
+	records := filepath.Join(root, ".runtime", "usage", usageRecordsSubdir)
+	if err := os.MkdirAll(records, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	end := now.Add(-time.Hour).UTC().Format(time.RFC3339)
+	body := fmt.Sprintf(`{"bead":"gt-a","kind":"work","class":"polecat","rig":"gastown","complete":true,`+
+		`"start":%q,"end":%q,"wall_s":300,`+
+		`"models":{"claude-sonnet-5-5":{"calls":1,"input":1000000,"output":1000000,"cache_creation":0,"cache_read":0,"est_cost_usd":0}}}`,
+		now.Add(-time.Hour-time.Minute).UTC().Format(time.RFC3339), end)
+	if err := os.WriteFile(filepath.Join(records, "gt-a.work.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	p := newDashboardClaudePlanReader(root, newDashUsageReader(root), dashboardClaudePlanUSD).Read(now)
+
+	prices, err := dashboard.EmbeddedClaudePrices()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := dashboard.APIEquivalent([]dashboard.UsageRecord{{
+		Complete: true, End: now.Add(-time.Hour),
+		Models: map[string]dashboard.UsageModel{"claude-sonnet-5-5": {Input: 1e6, Output: 1e6}},
+	}}, prices, now, now.Add(claudePlanSeriesResets).Unix()).WeekUSD
+	if p.APIEquivalentWeekUSD == nil || p.APIEquivalentMonthUSD == nil {
+		t.Fatalf("the reader the command builds carries no API-equivalent figures: %+v", p)
+	}
+	if want <= 0 {
+		t.Fatalf("the price file prices the town's own model at nothing: %v", want)
+	}
+	if *p.APIEquivalentWeekUSD != want || *p.APIEquivalentMonthUSD != want {
+		t.Errorf("week = $%v, month = $%v, want the records priced at $%v", *p.APIEquivalentWeekUSD, *p.APIEquivalentMonthUSD, want)
+	}
+	if len(p.Unpriced) != 0 {
+		t.Errorf("unpriced = %v, want none for a model the price file names", p.Unpriced)
+	}
+
+	// A town whose records directory is not there has no figures rather than a
+	// month at $0.00. Its series is there, so the plan line is still drawn.
+	noRecords := t.TempDir()
+	writeClaudePlanSeries(t, noRecords, now)
+	unread := newDashboardClaudePlanReader(noRecords, newDashUsageReader(noRecords), dashboardClaudePlanUSD).Read(now)
+	if unread.APIEquivalentWeekUSD != nil || unread.APIEquivalentMonthUSD != nil {
+		t.Errorf("records that could not be read gave %+v, want no figures", unread)
+	}
+
+	// A records directory that exists and is empty is a town that spent nothing:
+	// a figure of zero, which is a different reading from none at all.
+	emptyRoot := t.TempDir()
+	writeClaudePlanSeries(t, emptyRoot, now)
+	if err := os.MkdirAll(filepath.Join(emptyRoot, ".runtime", "usage", usageRecordsSubdir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	empty := newDashboardClaudePlanReader(emptyRoot, newDashUsageReader(emptyRoot), dashboardClaudePlanUSD).Read(now)
+	if empty.APIEquivalentWeekUSD == nil || *empty.APIEquivalentWeekUSD != 0 {
+		t.Errorf("an empty records directory gave %v, want a figure of zero", empty.APIEquivalentWeekUSD)
 	}
 }

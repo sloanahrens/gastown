@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
@@ -31,19 +32,30 @@ const (
 	usageUnmatchedFile = "unmatched.jsonl"
 	// usageRecordsExt is the only extension the reader opens.
 	usageRecordsExt = ".json"
-	// usageStaleRecord is how old a record file may be and still be read. The
-	// Over20 list reaches back seven days, so an older file cannot change one
-	// number the page draws, and leaving it unopened is most of what keeps a
-	// poll of a 1700-file directory cheap.
+	// usageStaleRecord is how old a record file may be and still be read for the
+	// panel's own lists. The Over20 list reaches back seven days, so an older
+	// file cannot change one number the page draws, and leaving it unopened is
+	// most of what keeps a poll of a 1700-file directory cheap.
 	usageStaleRecord = 8 * 24 * time.Hour
+	// usageMonthRecord is how old a record file may be and still be read for the
+	// Claude plan's API-equivalent figures, whose month reaches back to the
+	// first of the billing month: a calendar month is at most 31 days, and the
+	// extra day covers a record that ends on the boundary itself.
+	usageMonthRecord = 32 * 24 * time.Hour
 )
 
 // dashUsageReader reads the usage scan's records. dir is the usage root, so the
 // reading and its cache are testable against a temp directory; the cache holds
-// each file's last decode, keyed by path, and is swapped whole on every read so
-// a removed file leaves with it.
+// each file's last decode, keyed by path, and a file the directory no longer
+// holds leaves with it.
+//
+// Two of the hub's pollers read through it - the Usage panel's day and the plan
+// line's month - and each runs on its own goroutine, so the cache is guarded by
+// mu (gt-d8sem).
 type dashUsageReader struct {
-	dir   string
+	dir string
+	mu  sync.Mutex
+	// cache is guarded by mu.
 	cache map[string]usageCached
 }
 
@@ -68,9 +80,22 @@ func (r *dashUsageReader) read(now time.Time) *dashboard.Usage {
 	if err != nil {
 		return &dashboard.Usage{Unavailable: true}
 	}
-	u := dashboard.AggregateUsage(r.records(entries, now), now, r.unmatched())
+	u := dashboard.AggregateUsage(r.records(entries, now.Add(-usageStaleRecord)), now, r.unmatched())
 	u.AsOf = r.asOf()
 	return &u
+}
+
+// monthRecords is the record set the Claude plan's API-equivalent figures are
+// computed from: the same files the panel reads, reaching back far enough to
+// hold the whole billing month. A records directory that cannot be listed is
+// nil, which the plan reader draws as no figure at all rather than as a month
+// of no spend.
+func (r *dashUsageReader) monthRecords(now time.Time) []dashboard.UsageRecord {
+	entries, err := os.ReadDir(r.recordsDir())
+	if err != nil {
+		return nil
+	}
+	return r.records(entries, now.Add(-usageMonthRecord))
 }
 
 // recordsDir is where the scan writes one record per bead and kind.
@@ -78,36 +103,51 @@ func (r *dashUsageReader) recordsDir() string {
 	return filepath.Join(r.dir, usageRecordsSubdir)
 }
 
-// records decodes the directory's record files, leaving the ones too old for
-// any list unopened. A file the scan wrote badly becomes the zero record the
-// aggregate counts as Skipped, so it costs the panel a count and never its
-// page.
-func (r *dashUsageReader) records(entries []os.DirEntry, now time.Time) []dashboard.UsageRecord {
+// records decodes the directory's record files whose mtime is at or after since,
+// leaving older ones unopened. A file the scan wrote badly becomes the zero
+// record the aggregate counts as Skipped, so it costs the panel a count and
+// never its page.
+//
+// Two readers reach into this directory at once - the panel's day and the plan's
+// month - and they share the cache rather than each keeping their own: a file
+// either has decoded is served from the cache to the other even when it is out
+// of that one's reach, so the wider reader costs the narrower one no re-decodes.
+// The cache is dropped only for files the directory no longer holds.
+func (r *dashUsageReader) records(entries []os.DirEntry, since time.Time) []dashboard.UsageRecord {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	dir := r.recordsDir()
-	stale := now.Add(-usageStaleRecord)
 	recs := make([]dashboard.UsageRecord, 0, len(entries))
-	kept := make(map[string]usageCached, len(entries))
+	live := make(map[string]bool, len(entries))
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), usageRecordsExt) {
 			continue
 		}
+		path := filepath.Join(dir, e.Name())
+		live[path] = true
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
 		modTime := info.ModTime()
-		if modTime.Before(stale) {
-			continue
-		}
-		path := filepath.Join(dir, e.Name())
 		rec, ok := r.cached(path, modTime)
 		if !ok {
+			if modTime.Before(since) {
+				continue
+			}
 			rec = r.decode(path)
+			r.cache[path] = usageCached{modTime: modTime, rec: rec}
 		}
-		kept[path] = usageCached{modTime: modTime, rec: rec}
+		if modTime.Before(since) {
+			continue
+		}
 		recs = append(recs, rec)
 	}
-	r.cache = kept
+	for path := range r.cache {
+		if !live[path] {
+			delete(r.cache, path)
+		}
+	}
 	return recs
 }
 

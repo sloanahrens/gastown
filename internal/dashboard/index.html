@@ -2866,6 +2866,18 @@ function planUnread(c) {
   return "the newest sample is " + fmtDur((Date.now() - c.sampled_at * 1000) / 1000) + " old";
 }
 
+// planAPIEquivalent is the hover's words for what the town's Claude tokens would
+// have cost on the API: the week's and the billing month's, at the price table's
+// list rates. They are approximate twice over — the prices move, and a plan
+// weights tokens differently from the meter — so the hover says so rather than
+// reading as a bill. A payload without them has no usage records behind it, and
+// a payload with unpriced models is a floor that names what it could not price.
+function planAPIEquivalent(c) {
+  if (c.api_equivalent_week_usd == null || c.api_equivalent_month_usd == null) return null;
+  return "API-equivalent " + money(c.api_equivalent_week_usd) + " this week, " + money(c.api_equivalent_month_usd) + " this month, approximate: plans weight tokens differently from the API" +
+    (c.unpriced && c.unpriced.length ? " · counted at zero, no list price: " + c.unpriced.join(", ") : "");
+}
+
 // costClaudePlan draws the line into box. No block at all is the reader's first
 // poll not answered yet — the start-up silence the GCP line keeps too — and
 // every answer after it is a week or a named failure.
@@ -2893,6 +2905,7 @@ function costClaudePlan(box, c) {
     "5-hour limit " + planPct(c.five_hour_pct) + " used" + (c.five_hour_resets_at ? ", resets " + planReset(c.five_hour_resets_at) : ", no reset instant in the newest sample"),
     "1-hour pace " + planPace(c.pace_per_day_1h),
     "about " + money(c.used_value_usd) + " of this week's " + money(c.weekly_value_usd) + ", approximate (the plan's share of the month, not a bill)",
+    planAPIEquivalent(c),
     c.sampled_at ? "newest sample " + fmtDur((Date.now() - c.sampled_at * 1000) / 1000) + " ago" : null,
   ].filter(Boolean).join(" · ");
   box.append(line);
