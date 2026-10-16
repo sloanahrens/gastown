@@ -290,7 +290,18 @@ func (d *Daemon) syncJsonlGitBackup() {
 			strings.Join(failures, "\n")))
 		return
 	}
-	d.clearAlerts("database exports succeeded", alertKeyJSONLExport)
+	if len(failed) > 0 {
+		// A partial failure keeps the alert raised: the failed database's
+		// offsite copy is the stale file already in the repo, and the commit
+		// subject that names it exists only when a commit happens for another
+		// reason. Only a tick where every database exported clears it.
+		d.logger.Printf("jsonl_git_backup: %d/%d database export(s) failed: %s", len(failed), len(databases), strings.Join(failed, ", "))
+		d.escalateAlert(alertKeyJSONLExport, "jsonl_git_backup", fmt.Sprintf(
+			"%d of %d database export(s) failed — the offsite copy of %s is stale:\n%s",
+			len(failed), len(databases), strings.Join(failed, ", "), strings.Join(failures, "\n")))
+	} else {
+		d.clearAlerts("every database export succeeded", alertKeyJSONLExport)
+	}
 
 	cycle.closeStep("export")
 
