@@ -3238,3 +3238,29 @@ func TestIntegrationRuntimeArtifactPathspecsKeepsEditedCommittedReport(t *testin
 		t.Errorf("RuntimeArtifactPaths = %q, want %q", got, want)
 	}
 }
+
+// A repo before its first commit cannot answer what HEAD tracks — git ls-tree
+// HEAD fails — so the generated output under an artifact root counts as work
+// and is kept: the classification runs on real git, where the failure is real
+// rather than stubbed (gt-ji90i).
+func TestIntegrationRuntimeArtifactPathspecsUnbornHeadKeepsOutput(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := fixtureGit(dir, "init"); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(dir, "coverage", "coverage.out")
+	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(output, []byte("mode: set\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g := NewGit(dir)
+	if err := g.Add("-A"); err != nil {
+		t.Fatal(err)
+	}
+	if got := g.RuntimeArtifactPathspecs([]string{"coverage/coverage.out"}); got != nil {
+		t.Errorf("RuntimeArtifactPathspecs with an unborn HEAD = %q, want no pathspec", got)
+	}
+}

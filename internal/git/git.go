@@ -4581,14 +4581,9 @@ func (s *UncommittedWorkStatus) RuntimeArtifactPaths() []string {
 	return runtimeArtifactPathspecsBeside(append(append([]string{}, s.ModifiedFiles...), s.UntrackedFiles...), s.beside)
 }
 
-// RuntimeArtifactPathspecs is the package-level RuntimeArtifactPathspecs for
-// paths in this checkout: a file HEAD tracks under a coverage/ or .cache/
-// directory is content, so it is left out of the result (gt-42qp3), and one
-// under such a directory that holds tracked source is a fixture beside that
-// source (gt-za3u1), unless a source file under that directory is among paths,
-// HEAD does not track the file and it looks like generator output
-// (sourceBeside.spares). A failed listing counts as holding source
-// (besideSource).
+// RuntimeArtifactPathspecs is UncommittedWorkStatus.RuntimeArtifactPaths for
+// the given paths, read from this checkout's git listings; sourceBeside.spares
+// holds the rule.
 func (g *Git) RuntimeArtifactPathspecs(paths []string) []string {
 	return runtimeArtifactPathspecsBeside(paths, g.besideSource(paths))
 }
@@ -4602,8 +4597,8 @@ func RuntimeArtifactPathspecsListing(paths []string, list, head func(root string
 	return runtimeArtifactPathspecsBeside(paths, sourceBesideOf(paths, list, head))
 }
 
-// sourceBeside is the coverage/ and .cache/ roots of a set of paths that hold
-// tracked source, and the files HEAD tracks under them.
+// sourceBeside is the coverage/ and .cache/ roots a set of paths reaches, and
+// the files HEAD tracks under them.
 type sourceBeside struct {
 	// roots lists the roots that hold tracked source, plus any whose HEAD
 	// listing failed and so cannot be told from output.
@@ -4614,15 +4609,13 @@ type sourceBeside struct {
 }
 
 // spares reports whether path, an artifact candidate under root, is work
-// rather than output. A file HEAD tracks there is committed content, so an
-// edit to it is work whatever it is named (gt-42qp3). Beside tracked source a
-// fixture cannot be told from output, so the path is spared. Once source under
-// root is among the changed paths, that source already narrows each pathspec
-// away from itself, so a file is spared only when HEAD tracks it (a fixture,
-// or an edit that stays staged, gt-qdvp2) or when it does not look like
-// generator output: a new testdata/report.golden is hand-written work HEAD
-// cannot vouch for yet (gt-v90u4). The source need not be tracked: a new
-// collector.go beside a new fixture is the same case.
+// rather than output. HEAD decides first: a file it tracks under root is
+// committed content, and a root whose listing failed cannot be told from
+// output, so both are spared (gt-42qp3). Everything under a root that holds
+// tracked source is spared too, since a fixture there is indistinguishable
+// from output — unless source under that root is among the changed paths,
+// which already narrows the pathspec away from it, leaving only what
+// looksGenerated names to reset (gt-v90u4).
 func (b sourceBeside) spares(root, path string, changedSources []string) bool {
 	if slices.Contains(b.head[root], normalizeArtifactPath(path)) {
 		return true
@@ -4704,10 +4697,9 @@ func (s *UncommittedWorkStatus) changedSourceFiles() []string {
 	return s.changedSources
 }
 
-// isRuntimeArtifact is isGasTownRuntimePath for a path in this status: a file
-// under a coverage/ or .cache/ directory that holds tracked source, and one
-// HEAD tracks there, is kept under the rule RuntimeArtifactPaths resets by, so
-// what gt done ignores is what the checkpoint dog leaves out of its commit.
+// isRuntimeArtifact is isGasTownRuntimePath for a path in this status, by the
+// same rule RuntimeArtifactPaths resets by (sourceBeside.spares), so gt done
+// ignores what the checkpoint dog leaves out of its commit.
 func (s *UncommittedWorkStatus) isRuntimeArtifact(path string) bool {
 	root, ok := runtimeArtifactRoot(path)
 	return ok && !s.beside.spares(root, path, s.changedSourceFiles())
@@ -5099,9 +5091,11 @@ func sourceBesideOf(paths []string, list, head func(root string) ([]string, erro
 		tracked, err := list(root)
 		holdsSource := err != nil || slices.ContainsFunc(tracked, isSourceCodePath)
 		// HEAD answers for every root, not only a source-holding one: a file
-		// committed under coverage/ is content whose edit is work (gt-42qp3),
-		// and the index cannot say so — the checkpoint dog's git add -A lists
-		// generated output there too.
+		// committed under coverage/ is content whose edit is work, and the
+		// index cannot say so — the checkpoint dog's git add -A lists generated
+		// output there too (gt-42qp3). A listing that fails leaves the root's
+		// content unknown, which keeps its output: an unanswerable question
+		// costs a reset, a wrong "no" costs work (gt-ji90i).
 		files, headErr := head(root)
 		if holdsSource || headErr != nil {
 			beside.roots = append(beside.roots, root)
