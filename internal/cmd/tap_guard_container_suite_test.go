@@ -2067,3 +2067,45 @@ func TestCommandSegment(t *testing.T) {
 		})
 	}
 }
+
+// A container-bearing go test or make test inside a command substitution,
+// backticks or eval starts the same unwrapped containers as one on its own
+// line; the segment judge saw "out=$(go" and eval's quoted string as words that
+// are no go binary (gt-t1pct). A slot-run inside the substitution still
+// exempts its own go test, and a literal "$(" does not run anything.
+func TestEvaluateContainerSuiteCommand_NestedShapes(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/dag")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"substitution, container package", `GT_TEST_DOCKER=1 out=$(go test ./internal/beads/... 2>&1 | tail -5)`, true},
+		{"substitution, make test", `echo $(make test)`, true},
+		{"backticks, make test", "`make test`", true},
+		{"eval, container package", `GT_TEST_DOCKER=1 eval "go test ./internal/beads/..."`, true},
+		{"eval, make test", `eval "make test"`, true},
+		{"opt-in earlier on the line", `export GT_TEST_DOCKER=1; x=$(go test ./internal/beads/...)`, true},
+		{"substitution after a cd into a container package", `cd internal/beads && GT_TEST_DOCKER=1 x=$(go test .)`, true},
+		{"slot-wrapped substitution", `gt slot run --role gastown/flint -- echo $(make test)`, true},
+
+		{"slot run inside the substitution", `x=$(gt slot run --role gastown/flint -- make test)`, false},
+		{"slot run inside eval", `eval "gt slot run --role gastown/flint -- make test"`, false},
+		{"no opt-in, bare go test", `x=$(go test ./internal/beads/...)`, false},
+		{"pwd", `echo $(pwd)`, false},
+		{"single-quoted substitution", `echo '$(make test)'`, false},
+		{"escaped substitution", `echo \$(make test)`, false},
+		{"eval of echo", `eval "echo hi"`, false},
+		{"eval as an argument", `grep eval notes.txt`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, matched := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}

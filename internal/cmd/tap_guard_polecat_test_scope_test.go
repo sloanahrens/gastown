@@ -935,3 +935,81 @@ func TestPolecatTestScopeJudgesUnplacedShellCPayload(t *testing.T) {
 		})
 	}
 }
+
+// A go test or make goal inside a command substitution, backticks or eval is a
+// command line of its own: the segment judge read "out=$(go" as a word that is
+// no go binary, "$(make" as no make, and eval's quoted string as one opaque
+// token, so a whole-suite run started on the host unblocked (gt-t1pct). The
+// bodies are judged in the directory the cds ahead of them leave the shell in,
+// and a body that runs no suite, or a "$(" the shell leaves literal, stays
+// allowed.
+func TestPolecatTestScope_NestedShapes(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/dag")
+	tests := []struct {
+		name    string
+		command string
+		cwd     string
+		blocked bool
+	}{
+		{"assignment, heavy package in a pipeline", `out=$(go test ./internal/cmd 2>&1 | tail -20)`, root, true},
+		{"echo of make gate", `echo $(make gate)`, root, true},
+		{"backticks", "`make test`", root, true},
+		{"eval string", `eval "go test ./..."`, root, true},
+
+		{"quoted substitution", `echo "$(make gate)"`, root, true},
+		{"backticks in double quotes", "echo \"`make test`\"", root, true},
+		{"backticks after an echo", "echo `make gate`", root, true},
+		{"substitution in a later segment", `gofmt -l . && x=$(make gate)`, root, true},
+		{"substitution as an argument of go", `go vet $(go test ./...)`, root, true},
+		{"nested substitution", `echo $(echo $(make gate))`, root, true},
+		{"substitution inside bash -c", `bash -c 'x=$(make gate)'`, root, true},
+		{"substitution in a bash -c payload in double quotes", `bash -c "echo $(make gate)"`, root, true},
+		{"substitution with an env prefix", `x=$(GOFLAGS=-count=1 go test ./internal/daemon)`, root, true},
+		{"eval of make gate", `eval make gate`, root, true},
+		{"eval after an assignment", `X=1 eval "make gate"`, root, true},
+		{"eval inside a group", `(eval "go test ./...")`, root, true},
+		{"eval of a nested eval", `eval 'eval "make gate"'`, root, true},
+		{"eval with a substitution", `eval "x=$(make gate)"`, root, true},
+		{"eval in an if branch", `if true; then eval "make gate"; fi`, root, true},
+		{"slot-wrapped substitution", `gt slot run --role gastown/flint -- echo $(make gate)`, root, true},
+		{"substitution after a cd into a heavy package", `cd internal/cmd && x=$(go test)`, root, true},
+		{"substitution after a cd, dot target", `cd internal/cmd && x=$(go test .)`, root, true},
+		{"substitution run from a heavy package", `x=$(go test)`, filepath.Join(root, "internal", "cmd"), true},
+		{"substitution after an unplaced cd", `cd "$(git rev-parse --show-toplevel)/internal/cmd" && x=$(go test)`, root, true},
+		{"substitution past the nesting cap", `bash -c "bash -c 'bash -c \"echo $(pwd)\"'"`, root, true},
+
+		{"pwd", `echo $(pwd)`, root, false},
+		{"go env", `x=$(go env GOMODCACHE)`, root, false},
+		{"backtick pwd", "echo `pwd`", root, false},
+		{"git rev-parse", `cd "$(git rev-parse --show-toplevel)" && echo hi`, root, false},
+		{"filtered heavy package", `out=$(go test ./internal/cmd -run TestOne)`, root, false},
+		{"light package", `out=$(go test ./internal/style)`, root, false},
+		{"make lint", `x=$(make lint)`, root, false},
+		{"empty substitution", `echo $()`, root, false},
+		{"single-quoted substitution", `echo '$(make gate)'`, root, false},
+		{"single-quoted backticks", "gt bead note gt-x 'ran `make test` here'", root, false},
+		{"escaped substitution", `echo \$(make gate)`, root, false},
+		{"escaped backticks in double quotes", "echo \"\\`make gate\\`\"", root, false},
+		{"apostrophe inside double quotes", `echo "don't $(make gate)"`, root, true},
+		{"apostrophe inside double quotes, harmless body", `echo "don't $(pwd)"`, root, false},
+		{"quoted heredoc body", "cat <<'EOF'\n$(make gate)\nEOF", root, false},
+		{"eval of echo", `eval "echo hi"`, root, false},
+		{"eval as an argument", `grep eval notes.txt`, root, false},
+		{"eval named by echo", `echo eval hi`, root, false},
+		{"eval with no argument", `eval`, root, false},
+		{"eval of a filtered run", `eval "go test ./internal/cmd -run TestOne"`, root, false},
+		{"substitution after a cd into a light package", `cd internal/style && x=$(go test)`, root, false},
+		{"substitution run from a light package", `x=$(go test)`, filepath.Join(root, "internal", "style"), false},
+		{"substitution after a closed subshell cd", `(cd internal/cmd); x=$(go test ./internal/style)`, root, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, tt.cwd), tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
