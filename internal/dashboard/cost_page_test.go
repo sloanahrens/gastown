@@ -561,7 +561,8 @@ func TestCostPanelDrawsTheClaudePlanLineUnderTheDeepSeekLines(t *testing.T) {
 		t.Errorf("the first line is not the DeepSeek part: %+v", lines[0])
 	}
 	want := "Claude plan · $200/mo · 38% of this week's limit · resets " + resetText(reset) +
-		" · +9.2%/day (24h) · projected 104% at reset · limit in 6.1d"
+		" · +9.2%/day (24h) · +0.13%/h (~$0.06/h) last 1h · +0.38%/h (~$0.18/h) last 24h" +
+		" · projected 104% at reset · limit in 6.1d"
 	if lines[1].Text != want {
 		t.Errorf("the line under the DeepSeek part = %q, want %q", lines[1].Text, want)
 	}
@@ -835,6 +836,84 @@ func TestCostPanelClaudePlanLineWordsTheWeek(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Both paces again as an hour's worth, with what that hour of plan use is worth
+// beside it, so the Claude meter answers the DeepSeek line's own hourly pace. A
+// window with no sample of that age draws a dash rather than a zero that reads
+// as a limit nothing is being spent against, and neither figure moves the line's
+// colour, which stays the projection's (gt-d2sy4).
+func TestCostPanelClaudePlanLineGivesTheHourlyPace(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	plan := func(over map[string]any) costLine {
+		t.Helper()
+		lines, _ := drawCost(t, map[string]any{
+			"spend":       map[string]any{"balance": 12.5},
+			"claude_plan": claudePlan(now, over),
+		})
+		if len(lines) < 2 {
+			t.Fatalf("the panel drew %d lines: %+v", len(lines), lines)
+		}
+		return lines[1]
+	}
+
+	// 3.1% of the week a day is 0.13% an hour, worth a hundredth of the week's
+	// $46.05 for each point; 9.2% a day is 0.38% and $0.18 an hour.
+	line := plan(nil)
+	for _, want := range []string{"+0.13%/h (~$0.06/h) last 1h", "+0.38%/h (~$0.18/h) last 24h"} {
+		if !strings.Contains(line.Text, want) {
+			t.Errorf("the plan line has no %q: %q", want, line.Text)
+		}
+	}
+	// The hover prices those dollars and leaves the colour to the projection,
+	// which are the two things the line has no room to say.
+	for _, want := range []string{
+		"plan value at $0.46 a point of the week",
+		"the colour comes from the projection: 104% at reset",
+	} {
+		if !strings.Contains(line.Title, want) {
+			t.Errorf("the plan line's hover has no %q: %q", want, line.Title)
+		}
+	}
+
+	// A window with no 1h sample, one the reader measured flat to the tenth, and
+	// one whose pace rounds to no points an hour all draw the dash: the page
+	// cannot tell them apart, and a zero would read as a week nothing is being
+	// spent against.
+	for _, over := range []map[string]any{
+		{"pace_per_day_1h": nil},
+		{"pace_per_day_1h": 0.0},
+		{"pace_per_day_24h": 0.0},
+		{"pace_per_day_1h": 0.04},
+		{"pace_per_day_1h": -0.04},
+	} {
+		flat := plan(over)
+		if strings.Contains(flat.Text, "0.00%/h") {
+			t.Errorf("a plan with %v draws a zero: %q", over, flat.Text)
+		}
+	}
+	if missing := plan(map[string]any{"pace_per_day_1h": nil}); !strings.Contains(missing.Text, "– last 1h") {
+		t.Errorf("a plan with no 1h pace = %q, want the dash beside the hour", missing.Text)
+	}
+	// A payload without the week's price draws the percentages alone rather than
+	// a dollar the reader never sent.
+	if priceless := plan(map[string]any{"weekly_value_usd": nil}); !strings.Contains(priceless.Text, "+0.13%/h last 1h") {
+		t.Errorf("a plan with no week's value = %q, want the pace without dollars", priceless.Text)
+	}
+
+	// The colour is the projection's: a week projected past its limit is bad
+	// whatever its hourly figures say, and a heavy hour inside a week that is
+	// not projected past the ceiling leaves the line plain.
+	heavy := map[string]any{"pace_per_day_1h": 240.0, "pace_per_day_24h": 240.0}
+	if past := plan(heavy); past.Class != "badc" {
+		t.Errorf("a week projected past its limit wears %q, want badc: %q", past.Class, past.Text)
+	}
+	heavy["projected_pct_at_reset"] = 80.0
+	if plain := plan(heavy); plain.Class != "" {
+		t.Errorf("a plain week with a heavy hour wears %q, want no colour: %q", plain.Class, plain.Text)
 	}
 }
 
