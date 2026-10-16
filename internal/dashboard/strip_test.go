@@ -67,7 +67,7 @@ func TestStripAlarmsTurnWithTheReadingsTheStripHolds(t *testing.T) {
 			want: StripAlarms{Waiting: alarmBad},
 		},
 		{
-			name: "an install on the warning distance is nothing to act on",
+			name:  "an install on the warning distance is nothing to act on",
 			state: State{Now: now, Summary: behind(stripBehindWarn)},
 		},
 		{
@@ -76,7 +76,7 @@ func TestStripAlarmsTurnWithTheReadingsTheStripHolds(t *testing.T) {
 			want:  StripAlarms{Behind: alarmWarn},
 		},
 		{
-			name: "an install nobody has read is not a current one, and not an alarm either",
+			name:  "an install nobody has read is not a current one, and not an alarm either",
 			state: State{Now: now, Summary: &Summary{}},
 		},
 		{
