@@ -1323,7 +1323,7 @@ func (s *Scanner) leakedWisps(rig string, r *Report) {
 	if !held {
 		// The usual tick: no polecat holds a wisp, so the holder rules read
 		// nothing.
-		s.closedWorkRoots(rig, r, wisps, closed, &calls)
+		s.closedWorkRoots(r, wisps, closed, &calls)
 		return
 	}
 	active, err := s.env.ActiveWork(rig)
@@ -1401,7 +1401,7 @@ func (s *Scanner) leakedWisps(rig string, r *Report) {
 		f.Outcome, f.Detail = OutcomeClosed, detail
 		r.Findings = append(r.Findings, f)
 	}
-	s.closedWorkRoots(rig, r, wisps, closed, &calls)
+	s.closedWorkRoots(r, wisps, closed, &calls)
 }
 
 // capFinding is the report line for a wisp left to the next tick because the
@@ -1431,12 +1431,12 @@ func capFinding(id string) Finding {
 // root, an edge or a work bead that cannot be read yields Unknown and no
 // write. The only reads are one RootWork per candidate root, so a tick with
 // no candidate makes none.
-func (s *Scanner) closedWorkRoots(rig string, r *Report, wisps []Wisp, closed map[string]bool, calls *int) {
+func (s *Scanner) closedWorkRoots(r *Report, wisps []Wisp, closed map[string]bool, calls *int) {
 	now := s.o.Now()
-	prefix := rig + "/polecats/"
 	for _, w := range wisps {
+		// The listing is the rig's own, so a polecat assignee is one of its seats.
 		if w.ID == "" || w.Parent != "" || closed[w.ID] || !strings.EqualFold(strings.TrimSpace(w.Status), "open") ||
-			strings.HasPrefix(w.Assignee, prefix) {
+			strings.Contains(w.Assignee, "/polecats/") {
 			continue
 		}
 		unknown := func(why string) {
