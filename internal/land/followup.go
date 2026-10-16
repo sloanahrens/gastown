@@ -417,24 +417,31 @@ func followupBody(w Work, res Result, g followupGroup) string {
 	return b.String()
 }
 
+// noLongerTrue opens every acceptance item. A finding's title states the
+// defect in the present tense, so a box that restates it asks the worker to
+// leave the defect in place: om read a correct fix as contradicting such a box
+// and rejected it twice (gt-u4xrr). The box states the fix instead, which a
+// diff that resolves the finding satisfies (gt-twr9x).
+const noLongerTrue = "No longer true: "
+
 // acceptanceItems is the filed bead's acceptance list: one item per finding,
 // with the ones past specdispatch.MaxAcceptance folded into the last item,
 // which is the most one worker's landing can carry.
 func acceptanceItems(findings []FollowupCandidate) []string {
 	limit := specdispatch.MaxAcceptance
 	if len(findings) <= limit {
-		return findingTitles(findings)
+		return findingItems(findings)
 	}
-	out := findingTitles(findings[:limit-1])
-	return append(out, fmt.Sprintf("the remaining %d findings under Goal are fixed", len(findings)-limit+1))
+	out := findingItems(findings[:limit-1])
+	return append(out, fmt.Sprintf("%sthe remaining %d findings under Goal", noLongerTrue, len(findings)-limit+1))
 }
 
-// findingTitles is one acceptance item per finding: the title, and the location
-// when om named one.
-func findingTitles(findings []FollowupCandidate) []string {
+// findingItems is one acceptance item per finding: "No longer true: <title>",
+// and the location when om named one.
+func findingItems(findings []FollowupCandidate) []string {
 	out := make([]string, 0, len(findings))
 	for _, c := range findings {
-		item := NoteField(c.Title)
+		item := noLongerTrue + NoteField(c.Title)
 		if loc := location(c.Path, c.Line); loc != "" {
 			item += " (" + loc + ")"
 		}
