@@ -2276,3 +2276,81 @@ func TestTriggerJsonlGitBackup_SkipsWhenNotDue(t *testing.T) {
 		t.Errorf("expected a not-due log line, got: %q", buf.String())
 	}
 }
+
+// partialExportDaemon wires a daemon over a fake remote with a seeded baseline
+// and two databases, hq and gt. failHQ decides per call whether hq's export
+// fails; gt always exports.
+func partialExportDaemon(t *testing.T, failHQ *bool) (*Daemon, *notifyfake.Recorder) {
+	t.Helper()
+	d, f := backupTestDaemon(t)
+	root := t.TempDir()
+	townRoot := filepath.Join(root, "town")
+	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(root, "origin.git")
+	f.InitBare(t, remote)
+	f.Commit(t, remote, "main", "backup 2026-01-01 00:00: hq=10 gt=10", map[string]string{"README": "init\n"})
+	gitRepo := filepath.Join(root, "repo")
+	f.Clone(t, remote, gitRepo)
+
+	rec := notifyfake.New()
+	d.config = &Config{TownRoot: townRoot}
+	d.notifier = rec
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, GitRepo: gitRepo, Databases: []string{"hq", "gt"}},
+	}}
+	d.jsonlExportFn = func(db, repo, dataDir string, scrub bool) (int, error) {
+		if db == "hq" && *failHQ {
+			return 0, errors.New("context deadline exceeded")
+		}
+		dbDir := filepath.Join(repo, db)
+		if err := os.MkdirAll(dbDir, 0755); err != nil {
+			return 0, err
+		}
+		writeNLines(t, filepath.Join(dbDir, "issues.jsonl"), 10)
+		return 10, nil
+	}
+	return d, rec
+}
+
+// TestSyncJsonlGitBackupPartialFailureKeepsAlert: a database that fails every
+// tick while another exports must keep the export alert raised, not clear it
+// because exported > 0.
+func TestSyncJsonlGitBackupPartialFailureKeepsAlert(t *testing.T) {
+	t.Parallel()
+	failHQ := true
+	d, rec := partialExportDaemon(t, &failHQ)
+
+	d.syncJsonlGitBackup()
+	d.syncJsonlGitBackup()
+
+	open := rec.OpenEscalations(alertKeyJSONLExport)
+	if len(open) != 1 {
+		t.Fatalf("open %s escalations = %+v, want one", alertKeyJSONLExport, open)
+	}
+	if !strings.Contains(open[0].Reason, "hq") || !strings.Contains(open[0].Reason, "context deadline exceeded") {
+		t.Errorf("escalation reason = %q, want the failed database and its error", open[0].Reason)
+	}
+	if strings.Contains(open[0].Reason, "gt:") {
+		t.Errorf("escalation reason = %q, names the database that exported", open[0].Reason)
+	}
+}
+
+// TestSyncJsonlGitBackupAllExportedClearsAlert: an open export alert clears on
+// a tick where every database exports.
+func TestSyncJsonlGitBackupAllExportedClearsAlert(t *testing.T) {
+	t.Parallel()
+	failHQ := false
+	d, rec := partialExportDaemon(t, &failHQ)
+
+	d.escalateAlert(alertKeyJSONLExport, "jsonl_git_backup", "1 of 2 database export(s) failed")
+	if open := rec.OpenEscalations(alertKeyJSONLExport); len(open) != 1 {
+		t.Fatalf("seeded alert: open escalations = %+v, want one", open)
+	}
+
+	d.syncJsonlGitBackup()
+	if open := rec.OpenEscalations(alertKeyJSONLExport); len(open) != 0 {
+		t.Errorf("after an all-exported tick, open escalations = %+v, want none", open)
+	}
+}
