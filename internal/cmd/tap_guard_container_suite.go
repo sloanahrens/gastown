@@ -322,6 +322,11 @@ type nestedScript struct {
 // as an echo, so the bodies are judged as command lines of their own the way
 // evaluateDangerousCommand does (gt-t1pct).
 //
+// commandSubstitutionSpans cuts each body with the parentheses balanced and
+// the quotes respected, so "$(grep -E '(ok|FAIL)' out)" and "$(tail -n $(nproc))"
+// are judged whole (gt-wrr5c). A substitution nested in a body is judged when
+// the body is, one nesting level deeper.
+//
 // A substitution runs in the directory the cds ahead of it on the same shell
 // line leave the shell in, found by the walk segmentWalkRoot gives a segment.
 // A "$(" the shell leaves literal is skipped: after a backslash, or inside
@@ -330,18 +335,12 @@ type nestedScript struct {
 func substitutionScripts(proc guardProcess, command, cwd string, cwdKnown bool) []nestedScript {
 	text := stripHeredocBodies(command)
 	var scripts []nestedScript
-	for _, m := range commandSubstitutionPattern.FindAllStringSubmatchIndex(text, -1) {
-		if backslashesBefore(text, m[0])%2 == 1 || insideSingleQuotes(text, m[0]) {
+	for _, span := range commandSubstitutionSpans(text) {
+		body := text[span.bodyStart:span.bodyEnd]
+		if strings.TrimSpace(body) == "" {
 			continue
 		}
-		start, end := m[2], m[3]
-		if start < 0 {
-			start, end = m[4], m[5]
-		}
-		if start < 0 || strings.TrimSpace(text[start:end]) == "" {
-			continue
-		}
-		tokens := shellTokenize(text[:m[0]])
+		tokens := shellTokenize(text[:span.open])
 		segStart := 0
 		for i, tok := range tokens {
 			if shellCommandSeparators[tok] {
@@ -352,34 +351,126 @@ func substitutionScripts(proc guardProcess, command, cwd string, cwdKnown bool) 
 		if !known || !cwdKnown {
 			dir, known = cwd, false
 		}
-		scripts = append(scripts, nestedScript{body: text[start:end], dir: dir, known: known})
+		scripts = append(scripts, nestedScript{body: body, dir: dir, known: known})
 	}
 	return scripts
 }
 
-// insideSingleQuotes reports whether the character at pos of s sits inside a
-// single-quoted string, where the shell expands nothing. A quote of either
-// kind inside the other is text.
-func insideSingleQuotes(s string, pos int) bool {
-	var quote byte
-	for i := 0; i < pos && i < len(s); i++ {
-		c := s[i]
-		switch {
-		case quote == '\'':
-			if c == '\'' {
-				quote = 0
-			}
+// substitutionSpan locates one command substitution in a shell line: open is
+// where its "$(" or backtick starts and text[bodyStart:bodyEnd] is the command
+// line inside it.
+type substitutionSpan struct {
+	open, bodyStart, bodyEnd int
+}
+
+// commandSubstitutionSpans finds the outermost command substitutions the shell
+// expands in text, in order. Unlike commandSubstitutionPattern, whose [^()]*
+// body ends the match at the first parenthesis, it balances parentheses and
+// steps over quoted text, so a body holding "(ok|FAIL)", "$(NF)" or a nested
+// "$(nproc)" is cut whole (gt-wrr5c). A "$(" or backtick is live outside
+// quotes and inside double quotes; a backslash escapes the next character, and
+// single quotes hide everything until the closing quote. A substitution that
+// never closes yields no span, and the scan resumes after its opening.
+func commandSubstitutionSpans(text string) []substitutionSpan {
+	var spans []substitutionSpan
+	inDouble := false
+	for i := 0; i < len(text); i++ {
+		switch c := text[i]; {
 		case c == '\\':
 			i++
-		case quote == '"':
-			if c == '"' {
-				quote = 0
+		case c == '\'' && !inDouble:
+			end := strings.IndexByte(text[i+1:], '\'')
+			if end < 0 {
+				return spans
 			}
-		case c == '\'' || c == '"':
-			quote = c
+			i += end + 1
+		case c == '"':
+			inDouble = !inDouble
+		case c == '$' && i+1 < len(text) && text[i+1] == '(':
+			end := closingParen(text, i+2)
+			if end < 0 {
+				continue
+			}
+			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: end})
+			i = end
+		case c == '`':
+			end := strings.IndexByte(text[i+1:], '`')
+			if end < 0 {
+				continue
+			}
+			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 1, bodyEnd: i + 1 + end})
+			i += end + 1
 		}
 	}
-	return quote == '\''
+	return spans
+}
+
+// closingParen returns the index of the ")" that closes a "(" whose body starts
+// at from, or -1 when none does. Every "(" in the body, a nested "$(" or a
+// subshell, opens a level of its own; single-quoted, double-quoted and backtick
+// text is stepped over, so a parenthesis inside one counts for nothing.
+func closingParen(text string, from int) int {
+	depth := 1
+	for i := from; i < len(text); i++ {
+		switch text[i] {
+		case '\\':
+			i++
+		case '\'':
+			end := strings.IndexByte(text[i+1:], '\'')
+			if end < 0 {
+				return -1
+			}
+			i += end + 1
+		case '"':
+			end := closingDoubleQuote(text, i+1)
+			if end < 0 {
+				return -1
+			}
+			i = end
+		case '`':
+			end := strings.IndexByte(text[i+1:], '`')
+			if end < 0 {
+				return -1
+			}
+			i += end + 1
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				return i
+			}
+		}
+	}
+	return -1
+}
+
+// closingDoubleQuote returns the index of the unescaped double quote that ends
+// a string whose text starts at from, or -1 when none does. A "$(" inside the
+// string is a substitution with quoting of its own, so closingParen skips it
+// whole; a backtick pair is skipped as one.
+func closingDoubleQuote(text string, from int) int {
+	for i := from; i < len(text); i++ {
+		switch {
+		case text[i] == '\\':
+			i++
+		case text[i] == '"':
+			return i
+		case text[i] == '$' && i+1 < len(text) && text[i+1] == '(':
+			end := closingParen(text, i+2)
+			if end < 0 {
+				return -1
+			}
+			i = end
+		case text[i] == '`':
+			end := strings.IndexByte(text[i+1:], '`')
+			if end < 0 {
+				return -1
+			}
+			i += end + 1
+		}
+	}
+	return -1
 }
 
 func toLowerTokens(tokens []string) []string {

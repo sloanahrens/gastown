@@ -2108,6 +2108,11 @@ func TestEvaluateContainerSuiteCommand_NestedShapes(t *testing.T) {
 	}{
 		{"substitution, container package", `GT_TEST_DOCKER=1 out=$(go test ./internal/beads/... 2>&1 | tail -5)`, true},
 		{"substitution, make test", `echo $(make test)`, true},
+		{"substitution, pattern group in the -run filter", `GT_TEST_DOCKER=1 out=$(go test ./internal/beads -run 'Test(A|B)' 2>&1)`, true},
+		{"substitution, grep group after the run", `GT_TEST_DOCKER=1 out=$(go test ./internal/beads 2>&1 | grep -E '(ok|FAIL)')`, true},
+		{"substitution, awk field group after the run", `GT_TEST_DOCKER=1 out=$(go test ./internal/beads 2>&1 | awk '{print $(NF)}')`, true},
+		{"substitution, nested substitution after the run", `GT_TEST_DOCKER=1 out=$(go test ./internal/beads 2>&1 | tail -n $(nproc))`, true},
+		{"substitution, run nested in an echo", `GT_TEST_DOCKER=1 echo "$(echo $(go test ./internal/beads))"`, true},
 		{"backticks, make test", "`make test`", true},
 		{"eval, container package", `GT_TEST_DOCKER=1 eval "go test ./internal/beads/..."`, true},
 		{"eval, make test", `eval "make test"`, true},
@@ -2118,6 +2123,8 @@ func TestEvaluateContainerSuiteCommand_NestedShapes(t *testing.T) {
 		{"slot run inside the substitution", `x=$(gt slot run --role gastown/flint -- make test)`, false},
 		{"slot run inside eval", `eval "gt slot run --role gastown/flint -- make test"`, false},
 		{"no opt-in, bare go test", `x=$(go test ./internal/beads/...)`, false},
+		{"substitution with a group, no opt-in", `out=$(go test ./internal/beads -run 'Test(A|B)' 2>&1)`, false},
+		{"substitution with a group, opt-in off", `GT_TEST_DOCKER=0 out=$(go test ./internal/beads -run 'Test(A|B)' 2>&1)`, false},
 		{"pwd", `echo $(pwd)`, false},
 		{"single-quoted substitution", `echo '$(make test)'`, false},
 		{"escaped substitution", `echo \$(make test)`, false},
@@ -2130,6 +2137,46 @@ func TestEvaluateContainerSuiteCommand_NestedShapes(t *testing.T) {
 			reason, matched := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), tt.command, "")
 			if got := reason != ""; got != tt.blocked {
 				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
+// commandSubstitutionSpans cuts a body with the parentheses balanced and the
+// quotes respected; the [^()]* regex ended the match at the first parenthesis
+// and the guards never judged the rest (gt-wrr5c).
+func TestCommandSubstitutionSpans(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"plain", `x=$(go test .)`, []string{"go test ."}},
+		{"quoted group", `x=$(grep -E '(ok|FAIL)' f)`, []string{"grep -E '(ok|FAIL)' f"}},
+		{"awk field", `x=$(awk '{print $(NF)}' f)`, []string{"awk '{print $(NF)}' f"}},
+		{"nested", `x=$(tail -n $(nproc))`, []string{"tail -n $(nproc)"}},
+		{"nested in double quotes", `x=$(echo "$(pwd))")`, []string{`echo "$(pwd))"`}},
+		{"subshell", `x=$( (cd a && ls) )`, []string{` (cd a && ls) `}},
+		{"two", `a=$(one) b=$(two (x))`, []string{"one", "two (x)"}},
+		{"backticks", "x=`pwd`", []string{"pwd"}},
+		{"in double quotes", `echo "$(pwd)"`, []string{"pwd"}},
+		{"single quoted", `echo '$(pwd)'`, nil},
+		{"single quote hiding a paren", `echo '$(' "$(pwd)" ')'`, []string{"pwd"}},
+		{"escaped", `echo \$(pwd)`, nil},
+		{"escaped paren in the body", `x=$(echo \) ; pwd)`, []string{`echo \) ; pwd`}},
+		{"unterminated", `x=$(go test .`, nil},
+		{"unterminated then closed", `echo $(a "b) $(c)`, []string{"c"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got []string
+			for _, s := range commandSubstitutionSpans(tt.in) {
+				got = append(got, tt.in[s.bodyStart:s.bodyEnd])
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("commandSubstitutionSpans(%q) bodies = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
