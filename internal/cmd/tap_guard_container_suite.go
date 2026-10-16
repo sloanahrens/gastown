@@ -604,6 +604,7 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 	inDouble := false
 	inComment := false
 	escapedAt := -1
+	subClose := -1
 	for i := 0; i < len(text); i++ {
 		switch c := text[i]; {
 		case inComment && c == '\n':
@@ -623,7 +624,7 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 			if end := closingANSIQuote(text, i+2); end >= 0 {
 				i = end
 			}
-		case quotes && !inComment && !inDouble && c == '#' && startsWordAt(text, i, escapedAt):
+		case quotes && !inComment && !inDouble && c == '#' && startsWordAt(text, i, escapedAt, subClose):
 			inComment = true
 		case quotes && !inComment && c == '"':
 			inDouble = !inDouble
@@ -633,6 +634,7 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 				return append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: len(text)})
 			}
 			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: end})
+			subClose = end
 			i = end
 		case c == '$' && i+1 < len(text) && text[i+1] == '(':
 			end := closingParen(text, i+2)
@@ -640,6 +642,7 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 				return append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: len(text)})
 			}
 			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: end})
+			subClose = end
 			i = end
 		case c == '`':
 			end := backtickBodyEnd(text, i+1)
@@ -698,7 +701,13 @@ func backtickBodyEnd(text string, start int) int {
 // command separator. A "#" inside a word (a#b, $#, ${#x}), after a ")" that
 // closes one ("$(date)#x") or right after a backslash-escaped character
 // (escapedAt is that character's index) is literal.
-func startsWordAt(text string, i, escapedAt int) bool {
+//
+// subClose is the index of the ")" that closed a substitution the scan has
+// just stepped over, or -1. That ")" is a part of the word in front of it, so
+// a "#" right after it is literal: "echo $(date)#tail" prints "date#tail". Any
+// other ")" is an operator that ends a word, as the one in "(true)#c", and a
+// "#" after it opens a comment (gt-5wtmz).
+func startsWordAt(text string, i, escapedAt, subClose int) bool {
 	if i == 0 {
 		return true
 	}
@@ -709,38 +718,26 @@ func startsWordAt(text string, i, escapedAt int) bool {
 	case ' ', '\t', '\n', ';', '&', '|', '(':
 		return true
 	case ')':
-		return wordClosingParen(text, i-1)
+		return i-1 != subClose
 	}
 	return false
 }
 
-// wordClosingParen reports whether the ")" at close ends the shell word in
-// front of it, as the one in "(true)#c" does, rather than closing a "$(...)",
-// "$((...))" or process-substitution group, which is a word part: the shell
-// ends a word at the ")" it reads as an operator, so only there does a "#" open
-// a comment and "echo $(date)#tail" prints "date#tail" (gt-5wtmz). A ")" with
-// no "(" of its own reaches a case pattern's, which ends the word too.
-func wordClosingParen(text string, close int) bool {
-	depth := 0
-	for i := close - 1; i >= 0; i-- {
-		switch text[i] {
-		case ')':
-			depth++
-		case '(':
-			if depth > 0 {
-				depth--
-				continue
-			}
-			switch {
-			case i > 0 && (text[i-1] == '$' || text[i-1] == '<' || text[i-1] == '>'):
-				return false
-			case i > 1 && text[i-1] == '(' && text[i-2] == '$':
-				return false
-			}
-			return true
-		}
+// opensSubstitution reports whether the "(" at i opens a substitution — a
+// "$(...)", "$((...))" or "<(...)" / ">(...)" group — rather than a subshell.
+// The shell reads a substitution as a part of the word around it, so the ")"
+// that closes one ends no word (gt-5wtmz).
+func opensSubstitution(text string, i int) bool {
+	if i == 0 {
+		return false
 	}
-	return true
+	switch text[i-1] {
+	case '$', '<', '>':
+		return true
+	case '(':
+		return i > 1 && text[i-2] == '$'
+	}
+	return false
 }
 
 // closingANSIQuote returns the index of the "'" that closes a $'...' string
@@ -770,12 +767,17 @@ func closingANSIQuote(text string, from int) int {
 func closingParen(text string, from int) int {
 	depth := 1
 	escapedAt := -1
+	subClose := -1
+	// One entry per "(" the body has open, saying whether it opens a
+	// substitution: the ")" that closes one is a word part, so the "#" after
+	// it is literal (gt-5wtmz).
+	var subOpens []bool
 	for i := from; i < len(text); i++ {
 		switch c := text[i]; {
 		case c == '\\':
 			escapedAt = i + 1
 			i++
-		case c == '#' && startsWordAt(text, i, escapedAt):
+		case c == '#' && startsWordAt(text, i, escapedAt, subClose):
 			end := strings.IndexByte(text[i:], '\n')
 			if end < 0 {
 				return -1
@@ -800,12 +802,18 @@ func closingParen(text string, from int) int {
 			}
 			i += end + 1
 		case c == '(':
+			subOpens = append(subOpens, opensSubstitution(text, i))
 			depth++
 		case c == ')':
 			depth--
 			if depth == 0 {
 				return i
 			}
+			subClose = -1
+			if subOpens[len(subOpens)-1] {
+				subClose = i
+			}
+			subOpens = subOpens[:len(subOpens)-1]
 		}
 	}
 	return -1

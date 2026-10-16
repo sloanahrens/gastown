@@ -3166,6 +3166,7 @@ func TestDangerousGuardParenInCommentDoesNotEndSubstitution(t *testing.T) {
 		{"a force push whose flag is glued to the closing paren", "x=$(echo ok # )\ngit push --force)", true},
 		{"a process substitution after a substitution close", "cat $(date)#<(git reset --hard)", true},
 		{"a process substitution after an arithmetic close", "cat $((1))#<(git reset --hard)", true},
+		{"a process substitution after a quoted paren close", `cat $(")")#<(git reset --hard)`, true},
 		{"a substitution the quotes after a word part keep literal", "echo $(date)#'x $(git reset --hard)'", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

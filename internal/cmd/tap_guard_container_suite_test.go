@@ -2517,12 +2517,16 @@ func TestSubstitutionSpansCommentAndANSIQuote(t *testing.T) {
 		{"hash in a parameter expansion", `echo ${#x} 'a $(git reset --hard)'`, nil},
 		{"apostrophe after the comment ended", "# note\necho 'a $(git reset --hard)'", nil},
 		// A "#" opens a comment after the ")" that ends a word and not after
-		// the one that closes a "$(...)" or "<(...)" group, whose "#" is a
-		// word part: the apostrophe after "(true)" hides nothing, and the
-		// process substitution after "$(date)" still runs (gt-5wtmz).
+		// the one that closes a "$(...)", "$((...))" or "<(...)" group, whose
+		// "#" is a word part: the apostrophe after "(true)" hides nothing, and
+		// the process substitution after "$(date)" or after the quoted paren
+		// in '$(")")' still runs (gt-5wtmz).
 		{"hash after a subshell is a comment", "(true)#c 'a\n$(git reset --hard)", []string{"git reset --hard"}},
 		{"hash after a substitution close is a word part", "cat $(date)#<(git reset --hard)", []string{"date", "git reset --hard"}},
 		{"comment to the end of the text inside a body", "x=$(# )\n$(git reset --hard)", []string{"# )\n$(git reset --hard)"}},
+		{"quoted paren before the hash", `cat $(")")#<(git reset --hard)`, []string{`")"`, "git reset --hard"}},
+		{"quoted paren in a longer body", `cat $(echo ")")#<(git reset --hard)`, []string{`echo ")"`, "git reset --hard"}},
+		{"single-quoted paren before the hash", `cat $(')')#<(git reset --hard)`, []string{`')'`, "git reset --hard"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2542,6 +2546,7 @@ func TestSubstitutionSpansCommentAndANSIQuote(t *testing.T) {
 		`echo $'it\'s' $(git reset --hard)`,
 		`echo a#b $(git reset --hard)`,
 		"(true)#c 'a\n$(git reset --hard)",
+		`cat $(")")#<(git reset --hard)`,
 	} {
 		if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
 			t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked", command)
