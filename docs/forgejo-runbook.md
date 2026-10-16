@@ -8,6 +8,16 @@ procedures, and every class of landing failure. The why behind every rule the
 script sets is in [forgejo-primary-landing.md](design/forgejo-primary-landing.md);
 this page is the operations.
 
+Every `forgejo-*` script here runs through the auth broker's run act — `sudo -u
+gt-forge gt-approve run <script> -- <its own arguments>`, rule name the script's
+name without `.sh`. The broker shows the script, its hash, the account, the
+repositories and the scopes, asks for `yes` on the terminal, and mints a token
+scoped to that rule for the length of the run. Before running one by hand, read
+`docs/auth-broker.md` in the devops rig (section 4.5). A script the broker runs
+that calls another of these — a cutover's probe and provisioning step, or a
+resync's provisioning step — inherits the same token, so only the outer script
+needs a rule.
+
 ## What `scripts/forgejo-provision.sh` converges
 
 One run creates what is missing and leaves what already matches, so it is safe
@@ -49,9 +59,7 @@ Run it with `--help` for the flags.
 
 - Forgejo is up: `docker compose up -d` in `~/forgejo` (`~/forgejo/README.md`
   covers the stack, the runner and the registry).
-- An admin token exists in `~/forgejo/.env` as `FORGEJO_ADMIN_TOKEN`. The
-  script reads that file by default; `FORGEJO_ADMIN_TOKEN` in the environment
-  wins.
+- The broker is installed and its policy holds a `run` rule for the script.
 - `curl` is on PATH.
 
 ## Provisioning
@@ -60,8 +68,8 @@ Bots and tokens are instance-wide; collaborator access and the protection rules
 are per repository, so a fresh instance is two commands:
 
 ```bash
-bash scripts/forgejo-provision.sh                        # bots and tokens
-bash scripts/forgejo-provision.sh --repo OWNER/NAME      # one repo's access and rules
+sudo -u gt-forge gt-approve run forgejo-provision --                    # bots and tokens
+sudo -u gt-forge gt-approve run forgejo-provision -- --repo OWNER/NAME  # one repo's access and rules
 ```
 
 With `--repo`, each role's bot is granted the access it needs — `write` for
@@ -78,7 +86,7 @@ names that repo as one it cannot read rather than showing it as a rig with no
 landings. One run creates the bot and its token and grants the repo:
 
 ```bash
-bash scripts/forgejo-provision.sh --role viewer --repo OWNER/NAME
+sudo -u gt-forge gt-approve run forgejo-provision -- --role viewer --repo OWNER/NAME
 ```
 
 `--dry-run` reads the live state and prints what it would write without
@@ -171,7 +179,7 @@ The failures seen on the live rigs so far, each closed or ticketed:
 | A push to Forgejo has no git credentials | Operator | — | install the role-keyed credential helper (`~/forgejo/README.md`) |
 | The mirror prunes a GitHub-only ref | Operator | — | import every GitHub ref before the mirror exists (see "Cutting a rig over") |
 | A protected branch cannot be deleted | Operator | — | only `main` is protected (gt-fn9e6.21) |
-| The dashboard's Forgejo pane names a rig repo it cannot read | Operator | reads that repo's landings not at all, and says so in the panel instead of looking quiet (gt-faml5) | `bash scripts/forgejo-provision.sh --role viewer --repo OWNER/NAME` |
+| The dashboard's Forgejo pane names a rig repo it cannot read | Operator | reads that repo's landings not at all, and says so in the panel instead of looking quiet (gt-faml5) | `sudo -u gt-forge gt-approve run forgejo-provision -- --role viewer --repo OWNER/NAME` |
 | Provisioning a fresh repo never converges | Operator | — | the collaborator grant lands before the rule (gt-fn9e6.23) |
 | The startup context check alarms after a restart | Operator | raises `landing-forgejo-context:<rig>` | `gt escalate clear --fingerprint landing-forgejo-context:<rig>` once the landing is known good (gt-fn9e6.24) |
 | A rig's new Forgejo block is read only at daemon start | Operator | — | restart the daemon when no landing is in flight (see "Cutting a rig over") |
@@ -183,26 +191,27 @@ Before a rig's cutover its gate workflow is on the GitHub `main` — landed
 through the old path first, so Forgejo never falls back to
 `.github/workflows` — and its runner image can run that gate.
 
-`bash scripts/forgejo-probe.sh <rig> --repo OWNER/NAME` proves the last of
-those before anything changes: it clones the rig's GitHub `main`, pushes it to
-the rig's Forgejo copy as `land/probe-<rig>` from a throwaway worktree of the
-rig's own repository — the same push the landing worker makes, so the rig's
-pre-push hook runs and a hook that refuses `land/*` fails the probe rather than
-the first landing — then waits for the real gate status and requires green
-before deleting the branch and the worktree. `--town-root` says which town holds
-the rig; where that repository is absent the probe pushes from the clone
-instead and warns that the hooks were not exercised. The cutover runs the probe
-and refuses unless it is green, so a cutover that starts is one the real runner
-has already passed. A green probe records itself at
-`~/.config/gt/probe-<rig>.record`, mode 600: key=value lines naming the rig, the
-repository, the probed commit, the context, the verdict and the time, with
-`epoch:` as the age in seconds and each green run overwriting the last. A
-`--dry-run` writes no record, so it prints the probe instead of running it.
+`sudo -u gt-forge gt-approve run forgejo-probe -- <rig> --repo OWNER/NAME`
+proves the last of those before anything changes: it clones the rig's GitHub
+`main`, pushes it to the rig's Forgejo copy as `land/probe-<rig>` from a
+throwaway worktree of the rig's own repository — the same push the landing
+worker makes, so the rig's pre-push hook runs and a hook that refuses `land/*`
+fails the probe rather than the first landing — then waits for the real gate
+status and requires green before deleting the branch and the worktree.
+`--town-root` says which town holds the rig; where that repository is absent the
+probe pushes from the clone instead and warns that the hooks were not
+exercised. The cutover runs the probe and refuses unless it is green, so a
+cutover that starts is one the real runner has already passed. A green probe
+records itself at `~/.config/gt/probe-<rig>.record`, mode 600: key=value lines
+naming the rig, the repository, the probed commit, the context, the verdict and
+the time, with `epoch:` as the age in seconds and each green run overwriting the
+last. A `--dry-run` writes no record, so it prints the probe instead of running
+it.
 
-`bash scripts/forgejo-cutover.sh <rig> --repo OWNER/NAME` runs the procedure;
-`--help` lists the flags, and the script header gives the order and the reason
-for each step. It refuses while a `gt:ready-to-land` bead is queued.
-`--dry-run` prints every command and writes nothing.
+`sudo -u gt-forge gt-approve run forgejo-cutover -- <rig> --repo OWNER/NAME`
+runs the procedure; `--help` lists the flags, and the script header gives the
+order and the reason for each step. It refuses while a `gt:ready-to-land` bead
+is queued. `--dry-run` prints every command and writes nothing.
 
 When the rig's credential-helper hostname is not the admin base — the usual
 case, since it is the form every rig remote carries — pass `--forgejo-url` that
@@ -302,8 +311,8 @@ Two failures that used to be rollback triggers have their own moves:
 
 ## Resyncing and break-glass
 
-`bash scripts/forgejo-resync.sh OWNER/NAME` makes a Forgejo repository's refs
-match GitHub's and restores `main` protection. Two uses:
+`sudo -u gt-forge gt-approve run forgejo-resync -- OWNER/NAME` makes a Forgejo
+repository's refs match GitHub's and restores `main` protection. Two uses:
 
 - **GitHub moved while Forgejo was unreachable.** Forgejo can fall behind the
   promoted GitHub `main`, and a rig cannot land again until the two agree.
@@ -313,10 +322,10 @@ match GitHub's and restores `main` protection. Two uses:
 
 `main` refuses every push, admins included, so nothing is pushed to Forgejo
 directly. The script lifts the `main` rule (backing it up first), pushes every
-GitHub ref to Forgejo with `--prune`, and restores the rule by re-running
-`forgejo-provision.sh --repo OWNER/NAME`. The restore runs from an exit trap,
-so a push that fails still leaves `main` protected. `--dry-run` prints every
-step and writes nothing.
+GitHub ref to Forgejo with `--prune`, and restores the rule by re-running the
+provisioner for the repository inside the same broker run. The restore runs from
+an exit trap, so a push that fails still leaves `main` protected. `--dry-run`
+prints every step and writes nothing.
 
 gastown lands through Forgejo like every other rig, and its break-glass is the
 resync procedure above rather than a separate one. It has not been rehearsed on
@@ -329,7 +338,7 @@ A token's value is returned once, at creation. A lost or leaked token is
 replaced, never recovered:
 
 ```bash
-bash scripts/forgejo-provision.sh --rotate
+sudo -u gt-forge gt-approve run forgejo-provision -- --rotate
 ```
 
 Rotation revokes the previous token of the same name and mints a replacement
@@ -341,9 +350,9 @@ the revoked value until it restarts.
 
 | Symptom | Cause and fix |
 |---------|---------------|
-| `the admin token cannot mint a token for <bot>` | The token lacks site-admin rights. `POST /users/{name}/tokens` wants HttpBasic auth by design, so only a site-admin token on the `/admin/users/{name}/tokens` route can mint for another account. |
+| `the admin token cannot mint a token for <bot>` | The run rule's account lacks site-admin rights. `POST /users/{name}/tokens` wants HttpBasic auth by design, so only a site-admin token on the `/admin/users/{name}/tokens` route can mint for another account. |
 | `the rule exists but Forgejo did not resolve its name` | Forgejo resolves a rule name through the URL path, so a name holding `/` is sent encoded. Set the rule by hand under Settings → Branches, then re-run. |
-| `the repository is not on <api>` | The repo does not exist on this Forgejo, or the admin token cannot see it. Check `--api-url` and the repository owner. |
+| `the repository is not on <api>` | The repo does not exist on this Forgejo, or the run rule's token cannot see it. Check `--api-url`, the repository owner, and the repositories the rule names. |
 | `the write for main on <repo> did not take` | Forgejo accepted the request but its response omitted a field the run sent — commonly a `merge_whitelist_usernames` entry for a login that is not a collaborator with write access. The run exits non-zero and leaves the rule as Forgejo stored it. Grant the named login access (a normal `--repo` run does this for the roles it provisions) and re-run. |
 | A bot's push is refused | It is not a collaborator with write access, or the protection rule does not list it. Check both. |
 | `token file ... is mode ...; it must be 600`, from the client | The file lost its mode. The script restores 600 on the next run. |
