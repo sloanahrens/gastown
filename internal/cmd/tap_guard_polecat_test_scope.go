@@ -157,9 +157,13 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool)
 // other argument — one function judges every spelling, so no caller can
 // resolve the argument form and miss the cwd form, and a polecat cannot dodge
 // the rule by cd-ing into the package and running "go test ." (gt-1lko).
+// cwd is the directory the invocation runs in, so an argument spelled as a
+// path under it is judged there too (packageArgsUnderRunDir) and an absolute
+// directory by the module-relative path it names (moduleRelativePackageArgs),
+// the reading containerSuiteTarget gives the same arguments (gt-q82x1).
 func polecatHeavyTarget(pkgArgs []string, cwd string) (wholeRepo bool, matched []string) {
 	var heavy []string
-	for _, p := range normalizedPackageArgs(pkgArgs) {
+	for _, p := range packageArgsUnderRunDir(moduleRelativePackageArgs(pkgArgs), cwd) {
 		if isWholeRepoPackageArg(p) {
 			return true, nil
 		}
