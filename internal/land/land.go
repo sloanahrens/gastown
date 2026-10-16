@@ -1076,10 +1076,8 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// so the pass ends as the infra error the worker retries; rejecting
 		// here would send the author to rework work that may have landed
 		// (gt-xqpmc).
-		if completed, cerr := l.completeUnrecordedLanding(g, w); completed != nil {
-			return *completed, cerr
-		} else if cerr != nil {
-			return Result{}, cerr
+		if res, handled, cerr := l.finishedUnrecordedLanding(g, w); handled {
+			return res, cerr
 		}
 		// No land merge accounts for the head's content on the target, and
 		// merging it changes nothing: the work is already there by a route
@@ -1331,13 +1329,29 @@ func landMergeMarker(w Work) string {
 // end: handled reports that the pass is over, with res and err the values Land
 // returns — the landing it finished, its RecordError, or the recovery's own
 // InfraError. A lookup that fails is itself an answer, because without it the
-// pass cannot tell a lost record from a landing to make (gt-064oh).
+// pass cannot tell a lost record from a landing to make (gt-064oh). Both
+// dead ends and the post-merge failure consult it, so the guarantee that a
+// failed lookup comes back as an *InfraError lives here and not in each
+// caller (gt-z0qzo).
 func (l *Lander) finishedUnrecordedLanding(g Repo, w Work) (res Result, handled bool, err error) {
 	completed, err := l.completeUnrecordedLanding(g, w)
 	if completed != nil {
 		return *completed, true, err
 	}
-	return Result{}, err != nil, err
+	return Result{}, err != nil, asInfraError("recover the unrecorded landing", err)
+}
+
+// asInfraError returns err unchanged when it already is, or wraps, an
+// *InfraError, and wraps it at stage otherwise; nil stays nil. Land documents
+// that a pass with no verdict ends as an *InfraError, and the landing worker
+// reads the failing stage off that type, so a recovery that returns some other
+// error would be reported without one.
+func asInfraError(stage string, err error) error {
+	var infra *InfraError
+	if err == nil || errors.As(err, &infra) {
+		return err
+	}
+	return &InfraError{Stage: stage, Err: err}
 }
 
 // completeUnrecordedLanding finishes a landing this lander merged but never

@@ -1314,48 +1314,105 @@ func (lookupFailsRepo) FindCommitMatchingSubject(ref, prefix string) (string, er
 	return "", errors.New("git log: transient failure")
 }
 
-// TestLandUnrecordedSquashLookupFailureIsInfraNotEmptyRejection: a squash
-// landing whose record was lost is retried under a later landing, so the
-// re-merge stages nothing, and the search of the target for the landing fails
-// on a transient git error. The pass cannot tell a landing it already made
-// from a head that arrived by another route, so it ends as an InfraError the
-// worker retries, never as an empty-merge rejection that sends the author to
-// rework work that landed (gt-xqpmc).
-func TestLandUnrecordedSquashLookupFailureIsInfraNotEmptyRejection(t *testing.T) {
+// TestLandUnrecordedSquashLookupFailureIsInfraNotRejection: a squash landing
+// whose record was lost is retried, and the search of the target for the
+// landing fails on a transient git error. The pass cannot tell a landing it
+// already made from a head that arrived by another route, so it ends as an
+// InfraError the worker retries, never as a rejection that sends the author
+// to rework work that landed (gt-xqpmc). The recovery is consulted at three
+// dead ends, one per shape the retry's base can take after the lost record,
+// and each must end the same way (gt-z0qzo).
+func TestLandUnrecordedSquashLookupFailureIsInfraNotRejection(t *testing.T) {
 	t.Parallel()
-	f := newLandFixture(t)
-	f.squashRange(t)
-	first := f.lander()
-	f.merger.fn = func(req MergeRequest) error {
-		f.setMain(req.Head)
-		return errors.New("the pass ended after the merge, before the record")
-	}
-	if _, err := first.Land(context.Background(), f.work); err == nil {
-		t.Fatal("the first pass returned a landing it never recorded")
-	}
-	f.merger.fn = nil
-	f.base = f.pushMain("d.txt", "someone else landed\n")
-	before := f.bead()
-	labelsBefore := slices.Clone(before.Labels)
-	notesBefore := before.Notes
+	for _, tc := range []struct {
+		name string
+		// later is what another landing does to the target between the lost
+		// record and the retry; nil leaves the target at the squash.
+		later func(f *landFixture)
+	}{
+		{name: "identical trees before the merge"},
+		{name: "squash under a later landing stages nothing", later: func(f *landFixture) {
+			f.base = f.pushMain("d.txt", "someone else landed\n")
+		}},
+		{name: "squash conflicts with a later landing", later: func(f *landFixture) {
+			f.base = f.pushMain("b.txt", "a later landing's b\n")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			f.squashRange(t)
+			first := f.lander()
+			f.merger.fn = func(req MergeRequest) error {
+				f.setMain(req.Head)
+				return errors.New("the pass ended after the merge, before the record")
+			}
+			if _, err := first.Land(context.Background(), f.work); err == nil {
+				t.Fatal("the first pass returned a landing it never recorded")
+			}
+			f.merger.fn = nil
+			if tc.later != nil {
+				tc.later(f)
+			}
+			before := f.bead()
+			labelsBefore := slices.Clone(before.Labels)
+			notesBefore := before.Notes
 
-	l := f.lander()
-	l.openRepo = func(dir string) Repo { return lookupFailsRepo{Repo: f.git.Open(dir)} }
-	_, err := l.Land(context.Background(), f.work)
-	var rej *Rejection
-	if errors.As(err, &rej) {
-		t.Fatalf("Land rejected the retry as %s (rework=%v): %s", rej.Kind, rej.Rework, rej.Reason)
+			l := f.lander()
+			l.openRepo = func(dir string) Repo { return lookupFailsRepo{Repo: f.git.Open(dir)} }
+			_, err := l.Land(context.Background(), f.work)
+			var rej *Rejection
+			if errors.As(err, &rej) {
+				t.Fatalf("Land rejected the retry as %s (rework=%v): %s", rej.Kind, rej.Rework, rej.Reason)
+			}
+			var infra *InfraError
+			if !errors.As(err, &infra) || infra.Stage != "find the landing on the target" {
+				t.Fatalf("Land error = %T %v, want an *InfraError at the find-the-landing stage", err, err)
+			}
+			b := f.bead()
+			if beads.HasLabel(b, LabelRework) || !slices.Equal(b.Labels, labelsBefore) || b.Notes != notesBefore {
+				t.Errorf("the failed lookup changed the bead: labels %v -> %v, notes:\n%s", labelsBefore, b.Labels, b.Notes)
+			}
+			if b.Status == "closed" || len(f.landingLines()) != 0 {
+				t.Errorf("the failed lookup recorded a landing: status=%s lines=%v", b.Status, f.landingLines())
+			}
+		})
 	}
-	var infra *InfraError
-	if !errors.As(err, &infra) || infra.Stage != "find the landing on the target" {
-		t.Fatalf("Land error = %T %v, want an *InfraError at the find-the-landing stage", err, err)
+}
+
+// TestAsInfraError: an error that already is an *InfraError, at any depth of
+// wrapping, passes through untouched; any other is wrapped at the stage; nil
+// stays nil.
+func TestAsInfraError(t *testing.T) {
+	t.Parallel()
+	infra := &InfraError{Stage: "inner", Err: errors.New("boom")}
+	for _, tc := range []struct {
+		name      string
+		err       error
+		wantSame  bool
+		wantStage string
+	}{
+		{name: "infra", err: infra, wantSame: true, wantStage: "inner"},
+		{name: "wrapped infra", err: fmt.Errorf("context: %w", infra), wantSame: true, wantStage: "inner"},
+		{name: "plain", err: errors.New("plain"), wantStage: "outer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := asInfraError("outer", tc.err)
+			if tc.wantSame && got != tc.err {
+				t.Errorf("asInfraError changed %v to %v", tc.err, got)
+			}
+			var ie *InfraError
+			if !errors.As(got, &ie) || ie.Stage != tc.wantStage {
+				t.Fatalf("asInfraError(%v) = %T %v, want an *InfraError at %q", tc.err, got, got, tc.wantStage)
+			}
+			if !errors.Is(got, tc.err) {
+				t.Errorf("the result lost its cause: %v", got)
+			}
+		})
 	}
-	b := f.bead()
-	if beads.HasLabel(b, LabelRework) || !slices.Equal(b.Labels, labelsBefore) || b.Notes != notesBefore {
-		t.Errorf("the failed lookup changed the bead: labels %v -> %v, notes:\n%s", labelsBefore, b.Labels, b.Notes)
-	}
-	if b.Status == "closed" || len(f.landingLines()) != 0 {
-		t.Errorf("the failed lookup recorded a landing: status=%s lines=%v", b.Status, f.landingLines())
+	if got := asInfraError("outer", nil); got != nil {
+		t.Errorf("asInfraError(nil) = %v, want nil", got)
 	}
 }
 
