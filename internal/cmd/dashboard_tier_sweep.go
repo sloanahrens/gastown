@@ -285,7 +285,10 @@ func (r *tierSweepReader) running(now time.Time) *dashboard.TierSweepRun {
 
 // recent is the newest sweeps, newest first, each RED tier given the failing
 // units its rig's record still holds. The record keeps only the rig's last run,
-// so its names are used only for the row whose sha it carries.
+// so its names are used only for the row whose sha it carries. A tier a cycle
+// carried forward from an earlier tip is in the record but not in the row: the
+// swept line names a tier that did not run with no verdict and the parser drops
+// it, so no stage can pick up a red nobody re-ran (gt-euxf1).
 func (r *tierSweepReader) recent() []dashboard.TierSweepRow {
 	rows := append([]dashboard.TierSweepRow(nil), r.rows...)
 	sort.SliceStable(rows, func(i, j int) bool { return rows[i].At.After(rows[j].At) })
@@ -313,10 +316,6 @@ type tierSweepRecord struct {
 
 type tierSweepTier struct {
 	FailedNames []string `json:"failed_names"`
-	// SHA is the tip the tier's verdict was taken at. A cycle that stopped
-	// early carries a tier it never reached forward from an earlier tip, so one
-	// record can name more than one (gt-euxf1).
-	SHA string `json:"sha,omitempty"`
 }
 
 // recordFailed is one rig's failing units by tier. A record that cannot be
@@ -343,12 +342,6 @@ func (r *tierSweepReader) recordFailed(rig, sha string, known map[string]bool) m
 	out := map[string][]string{}
 	for tier, t := range rec.Tiers {
 		if len(t.FailedNames) == 0 {
-			continue
-		}
-		// A carried tier's failing units belong to the tip it names, not to
-		// this row's: attaching them here would date a red nobody re-ran to
-		// the tip this cycle saw (gt-euxf1).
-		if t.SHA != "" && !tierSweepSameSHA(t.SHA, sha) {
 			continue
 		}
 		out[tier] = t.FailedNames

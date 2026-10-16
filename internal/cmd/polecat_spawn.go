@@ -435,8 +435,8 @@ func reuseIdlePolecatForSlingWith(
 	// hook reads an open bead as active work, the reuse gate refuses a
 	// hook-still-set seat and FindIdlePolecat skips it, so a polecat left
 	// hooked here holds a pool seat no sling can take until an operator nukes
-	// it (gt-pa676). The fresh path needs no equivalent — it removes the
-	// sandbox it created, which resets the agent bead itself.
+	// it (gt-pa676). The fresh path does the same through Remove, which
+	// resets the agent bead (readBackCreatedPolecat).
 	polecatObj, err := polecatMgr.Get(polecatName)
 	if err != nil {
 		env.releaseReused(rigName, polecatName, opts.HookBead)
@@ -640,6 +640,32 @@ func allocatePolecatForSling(polecatMgr polecatAllocator, rigName, name string, 
 		return "", fmt.Errorf("creating named polecat %s/%s: %w", rigName, name, err)
 	}
 	return name, nil
+}
+
+// createdPolecatReader is the polecat-manager surface that reads back and, on
+// failure, removes a polecat the sling just created.
+type createdPolecatReader interface {
+	Get(name string) (*polecat.Polecat, error)
+	Remove(name string, force bool) error
+}
+
+// readBackCreatedPolecat reads the polecat a fresh sling just created and
+// checks its sandbox exists (fixes #1070: the identity bead may exist while
+// worktree creation failed silently). Creation has already written the agent
+// bead with the hook set, so either failure removes the polecat; Remove resets
+// that bead, and without it the bead stays hooked with no sandbox behind it.
+func readBackCreatedPolecat(polecatMgr createdPolecatReader, rigName, polecatName string, verify func(clonePath string) error) (*polecat.Polecat, error) {
+	polecatObj, err := polecatMgr.Get(polecatName)
+	if err != nil {
+		_ = polecatMgr.Remove(polecatName, true) // force=true to clean up partial state
+		return nil, fmt.Errorf("getting polecat after creation: %w", err)
+	}
+	if err := verify(polecatObj.ClonePath); err != nil {
+		_ = polecatMgr.Remove(polecatName, true)
+		return nil, fmt.Errorf("worktree verification failed for %s: %w\nHint: try 'gt polecat nuke %s/%s --force' to clean up",
+			polecatName, err, rigName, polecatName)
+	}
+	return polecatObj, nil
 }
 
 // SpawnPolecatForSling prepares a polecat for a sling, session start deferred.
@@ -924,19 +950,9 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	fmt.Printf("Created polecat: %s\n", polecatName)
 	opts.step("allocate")
 
-	// Get polecat object for path info
-	polecatObj, err := polecatMgr.Get(polecatName)
+	polecatObj, err := readBackCreatedPolecat(polecatMgr, rigName, polecatName, verifyWorktreeExists)
 	if err != nil {
-		return nil, fmt.Errorf("getting polecat after creation: %w", err)
-	}
-
-	// Verify worktree was actually created (fixes #1070)
-	// The identity bead may exist but worktree creation can fail silently
-	if err := verifyWorktreeExists(polecatObj.ClonePath); err != nil {
-		// Clean up the partial state before returning error
-		_ = polecatMgr.Remove(polecatName, true) // force=true to clean up partial state
-		return nil, fmt.Errorf("worktree verification failed for %s: %w\nHint: try 'gt polecat nuke %s/%s --force' to clean up",
-			polecatName, err, rigName, polecatName)
+		return nil, err
 	}
 
 	// Get session manager for session name (session start is deferred)

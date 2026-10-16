@@ -169,22 +169,27 @@ func TestTierSweepRedNamesComeFromTheRecord(t *testing.T) {
 // A cycle that stopped early left the tier it never reached at whatever tip
 // that tier was last judged at, so the record can name more than one. The names
 // belong to the row for their own tip: attaching a red nobody re-ran to this
-// cycle's tip would date it to a commit it was never seen at (gt-euxf1).
+// cycle's tip would date it to a commit it was never seen at (gt-euxf1). The
+// swept line is the one the daemon writes for such a cycle
+// (tierSweepVerdictSummary): the tier that did not run is named with no
+// verdict, so the row has no stage for it and its carried names go unread.
 func TestTierSweepCarriedTierNamesStayWithTheirOwnTip(t *testing.T) {
 	t.Parallel()
-	r, _ := tierSweepTestReader(t, "2026/10/05 10:00:19 tier_sweep: gastown: swept tipb0001 (shell GREEN, integration RED, race RED) in 4m")
+	r, _ := tierSweepTestReader(t, "2026/10/05 10:00:19 tier_sweep: gastown: swept tipb0001 (shell GREEN, integration , race RED) in 4m")
 	writeTierSweepRecord(t, r.stateDir, "gastown", `{"last_sha":"tipb0001ffff","partial":true,"tiers":{`+
 		`"shell":{"verdict":"GREEN","sha":"tipb0001ffff"},`+
 		`"integration":{"verdict":"RED","failed_names":["./internal/daemon"],"sha":"tipa0002ffff"},`+
 		`"race":{"verdict":"RED","failed_names":["./internal/cmd"],"sha":"tipb0001ffff"}}}`)
 	stages := r.read(time.Date(2026, 10, 5, 10, 5, 0, 0, time.Local)).Sweeps[0].Stages
-	if len(stages) != 3 {
-		t.Fatalf("stages = %+v", stages)
+	if len(stages) != 2 {
+		t.Fatalf("stages = %+v, want shell and race: integration did not run", stages)
 	}
-	if got := stages[1]; got.Verdict != "RED" || len(got.Failed) != 0 {
-		t.Errorf("carried integration = %+v, want a RED with no names: those failing units are tipa0002's", got)
+	for _, st := range stages {
+		if st.Tier == "integration" {
+			t.Errorf("carried integration shows as %+v: those failing units are tipa0002's", st)
+		}
 	}
-	if got := stages[2]; got.Verdict != "RED" || len(got.Failed) != 1 || got.Failed[0] != "./internal/cmd" {
+	if got := stages[1]; got.Tier != "race" || got.Verdict != "RED" || len(got.Failed) != 1 || got.Failed[0] != "./internal/cmd" {
 		t.Errorf("race = %+v, want this row's own RED with its names", got)
 	}
 }

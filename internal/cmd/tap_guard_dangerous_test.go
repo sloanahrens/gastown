@@ -1389,6 +1389,21 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 			wantBlock: true,
 		},
 		{
+			name:      "shift in an arithmetic command glued to then",
+			command:   "if true; then((1<<x))\nsudo rm -rf /\nx\nfi",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an arithmetic command glued to do",
+			command:   "while true; do((1<<x))\nsudo rm -rf /\nx\ndone",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an arithmetic command glued to else",
+			command:   "if false; then :; else((1<<x))\nsudo rm -rf /\nx\nfi",
+			wantBlock: true,
+		},
+		{
 			name:      "shift in an array subscript",
 			command:   "a[1<<x]=3\nsudo rm -rf /\nx",
 			wantBlock: true,
