@@ -86,6 +86,12 @@ function __el(tag) {
   };
   return e;
 }
+// __clickSummary is a click on a details element's summary: the browser flips
+// open and then fires toggle, which the page hears through ontoggle.
+function __clickSummary(d) {
+  d.open = !d.open;
+  if (typeof d.ontoggle === "function") d.ontoggle({ type: "toggle" });
+}
 function __textNode(t) { return { nodeType: 3, textContent: t == null ? "" : String(t) }; }
 var document = {
   createElement: function (t) { return __el(t); },
