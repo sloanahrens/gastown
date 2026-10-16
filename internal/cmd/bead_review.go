@@ -143,30 +143,14 @@ func (v *beadVerbs) review(id, verdict, sha, reason string, findings []string) e
 	if err != nil {
 		return err
 	}
-	line := land.OverseerReviewMarker + " " + head + " " + verdict
-	if len(ids) > 0 {
-		line += " findings=" + strings.Join(ids, ",")
-	}
-	if reason != "" {
-		line += ": " + reason
-	}
-	if recorded, ok := land.OverseerReviewVerdict(is.Notes, head); ok {
-		// A FAIL is an open finding, so the verdict that closes it is written
-		// after it; the latest line stands (land.OverseerReviewVerdict).
-		if recorded == land.OverseerReviewFail && verdict != recorded {
-			if err := v.client.AppendNotes(id, line); err != nil {
-				return err
-			}
-			_, err = fmt.Fprintf(v.out, "✓ Recorded %s on %s\n", line, id)
-			return err
-		}
-		if recorded != verdict {
-			return fmt.Errorf("%s already records %s %s %s; %s was not recorded", id, land.OverseerReviewMarker, head, recorded, verdict)
-		}
-		_, err := fmt.Fprintf(v.out, "✓ %s already records %s %s %s\n", id, land.OverseerReviewMarker, head, recorded)
+	// A FAIL is an open finding, so the verdict that closes it is written
+	// after it; the latest line stands (land.OverseerReviewVerdict).
+	line, written, err := land.RecordOverseerReview(v.client, id, is.Notes, head, verdict, ids, reason)
+	if err != nil {
 		return err
 	}
-	if err := v.client.AppendNotes(id, line); err != nil {
+	if !written {
+		_, err := fmt.Fprintf(v.out, "✓ %s already records %s %s %s\n", id, land.OverseerReviewMarker, head, verdict)
 		return err
 	}
 	_, err = fmt.Fprintf(v.out, "✓ Recorded %s on %s\n", line, id)
