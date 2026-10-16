@@ -2516,6 +2516,10 @@ func TestSubstitutionSpansCommentAndANSIQuote(t *testing.T) {
 		{"hash inside double quotes", "echo \"# don't\" $(git reset --hard)", []string{"git reset --hard"}},
 		{"hash in a parameter expansion", `echo ${#x} 'a $(git reset --hard)'`, nil},
 		{"apostrophe after the comment ended", "# note\necho 'a $(git reset --hard)'", nil},
+		// A ")" ends the word in front of it, so the "#" after "(true)" opens
+		// a comment and the apostrophe in its body hides nothing: the
+		// substitution on the next line is live (gt-5wtmz).
+		{"hash after a subshell is a comment", "(true)#c 'a\n$(git reset --hard)", []string{"git reset --hard"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2534,6 +2538,7 @@ func TestSubstitutionSpansCommentAndANSIQuote(t *testing.T) {
 		"# don't\nx=$(git reset --hard)",
 		`echo $'it\'s' $(git reset --hard)`,
 		`echo a#b $(git reset --hard)`,
+		"(true)#c 'a\n$(git reset --hard)",
 	} {
 		if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
 			t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked", command)

@@ -463,10 +463,14 @@ func isGhPRCreate(argv []string) bool {
 }
 
 // isBranchCreation reports whether argv, a command from its command word on,
-// is git checkout -b or git switch -c/--create, with other flags before or
-// after the creation flag ("checkout -q -b x", "checkout -bx", "switch --create
-// x"). git may be a path and may carry global options (-C dir, -c k=v) in front
-// of the subcommand. Words after "--" are paths, not flags.
+// is git checkout -b/-B or git switch -c/-C/--create, with other flags before
+// or after the creation flag ("checkout -q -b x", "checkout -bx", "switch
+// --create x"). git may be a path and may carry global options (-C dir, -c k=v)
+// in front of the subcommand. Words after "--" are paths, not flags.
+//
+// The capitals count: -B and -C create or reset the branch the lowercase flags
+// name, so the pr-workflow guard judges them the same (gt-5wtmz).
+// isLeadingBranchCreation lowercases its words and already read the pair alike.
 func isBranchCreation(argv []string) bool {
 	if len(argv) == 0 || filepath.Base(argv[0]) != "git" {
 		return false
@@ -479,10 +483,14 @@ func isBranchCreation(argv []string) bool {
 	var creates func(flag string) bool
 	switch rest[at] {
 	case "checkout":
-		creates = func(flag string) bool { return shortFlagCluster(flag, 'b') }
+		creates = func(flag string) bool {
+			return shortFlagCluster(flag, 'b') || shortFlagCluster(flag, 'B')
+		}
 	case "switch":
 		creates = func(flag string) bool {
-			return shortFlagCluster(flag, 'c') || flag == "--create" || strings.HasPrefix(flag, "--create=")
+			return shortFlagCluster(flag, 'c') || shortFlagCluster(flag, 'C') ||
+				flag == "--create" || strings.HasPrefix(flag, "--create=") ||
+				flag == "--force-create" || strings.HasPrefix(flag, "--force-create=")
 		}
 	default:
 		return false

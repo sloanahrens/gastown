@@ -3151,3 +3151,31 @@ func TestDangerousGuardJudgesEscapedNestedBacktick(t *testing.T) {
 		})
 	}
 }
+
+// gt-5wtmz: a ")" inside a "#" comment is comment text, so it does not close a
+// "$(" whose body the shell still parses. The scan that finds a substitution
+// (closingParen) used to count every ")" it met, including one the shell
+// dropped as comment, so the body ended at the ")" in the comment and the
+// command after it was never judged. The allowed rows pin the other side: a
+// body whose comment is the last thing in the text has no closing ")" to find,
+// and a hash inside a word opens no comment at all.
+func TestDangerousGuardParenInCommentDoesNotEndSubstitution(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"a reset after a comment holding a closing paren", "x=$(\n# a) b\ngit reset --hard)", true},
+		{"a nuke after a comment holding a closing paren", "out=$( # note )\nrm -rf /)", true},
+		{"a force push whose flag is glued to the closing paren", "x=$(echo ok # )\ngit push --force)", true},
+		{"a hash inside a word opens no comment, so the paren still closes", "x=$(echo a#b) git status", false},
+		{"a comment that runs to the end of the text closes nothing", "x=$(# )\ngit status", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); (reason != "") != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, reason != "", reason, tt.blocked)
+			}
+		})
+	}
+}

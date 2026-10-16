@@ -697,6 +697,9 @@ func backtickBodyEnd(text string, start int) int {
 // "#" opens a comment: at the start of text or after a blank, newline or
 // command separator. A "#" inside a word (a#b, $#, ${#x}) or right after a
 // backslash-escaped character (escapedAt is that character's index) is literal.
+//
+// A ")" ends the word in front of it, so "(true)#c" is the subshell then a
+// comment, not one word (gt-5wtmz).
 func startsWordAt(text string, i, escapedAt int) bool {
 	if i == 0 {
 		return true
@@ -705,7 +708,7 @@ func startsWordAt(text string, i, escapedAt int) bool {
 		return false
 	}
 	switch text[i-1] {
-	case ' ', '\t', '\n', ';', '&', '|', '(':
+	case ' ', '\t', '\n', ';', '&', '|', '(', ')':
 		return true
 	}
 	return false
@@ -730,33 +733,48 @@ func closingANSIQuote(text string, from int) int {
 // at from, or -1 when none does. Every "(" in the body, a nested "$(" or a
 // subshell, opens a level of its own; single-quoted, double-quoted and backtick
 // text is stepped over, so a parenthesis inside one counts for nothing.
+//
+// A "#" that starts a word opens a comment to the end of its line, as
+// startsWordAt and the scan in substitutionSpansIn read it: the shell parses a
+// substitution's body as a command list, so a ")" inside such a comment closes
+// nothing and the body runs on to the next ")" on the line after it
+// (gt-5wtmz). A comment that reaches the end of the text leaves nothing to
+// close the "(", so -1 is right there too.
 func closingParen(text string, from int) int {
 	depth := 1
+	escapedAt := -1
 	for i := from; i < len(text); i++ {
-		switch text[i] {
-		case '\\':
+		switch c := text[i]; {
+		case c == '\\':
+			escapedAt = i + 1
 			i++
-		case '\'':
+		case c == '#' && startsWordAt(text, i, escapedAt):
+			end := strings.IndexByte(text[i:], '\n')
+			if end < 0 {
+				return -1
+			}
+			i += end
+		case c == '\'':
 			end := strings.IndexByte(text[i+1:], '\'')
 			if end < 0 {
 				return -1
 			}
 			i += end + 1
-		case '"':
+		case c == '"':
 			end := closingDoubleQuote(text, i+1)
 			if end < 0 {
 				return -1
 			}
 			i = end
-		case '`':
+		case c == '`':
 			end := strings.IndexByte(text[i+1:], '`')
 			if end < 0 {
 				return -1
 			}
 			i += end + 1
-		case '(':
+		case c == '(':
 			depth++
-		case ')':
+		case c == ')':
 			depth--
 			if depth == 0 {
 				return i
