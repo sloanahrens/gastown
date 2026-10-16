@@ -12,73 +12,30 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/lock"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
-func TestParseOverrunPanes(t *testing.T) {
-	t.Parallel()
-	out := "gt-slit\t100\nother\t200\ngt-slit\t101\n\ngt-slit\tnotapid\ngt-slit\t0\n"
-	if got, want := parseOverrunPanes(out, "gt-slit"), []int{100, 101}; !slices.Equal(got, want) {
-		t.Errorf("parseOverrunPanes = %v, want %v", got, want)
-	}
-	if got := parseOverrunPanes(out, "absent"); len(got) != 0 {
-		t.Errorf("parseOverrunPanes for an absent session = %v, want none", got)
-	}
-}
-
-func TestParseOverrunProcessTable(t *testing.T) {
-	t.Parallel()
-	out := "  PID  PPID ARGS\n" +
-		"  1     0 /sbin/launchd\n" +
-		"100     1 claude --dangerously-skip-permissions\n" +
-		"101   100 make -j4 test\n" +
-		"junk line\n" +
-		"102   bad ps itself\n"
-	got := parseOverrunProcessTable(out)
-	want := []overrunGateProc{
-		{PID: 1, PPID: 0, Args: "/sbin/launchd"},
-		{PID: 100, PPID: 1, Args: "claude --dangerously-skip-permissions"},
-		{PID: 101, PPID: 100, Args: "make -j4 test"},
-	}
-	if !slices.Equal(got, want) {
-		t.Errorf("parseOverrunProcessTable =\n%v\nwant\n%v", got, want)
-	}
-}
-
-func TestOverrunDescendantArgvs(t *testing.T) {
-	t.Parallel()
-	procs := []overrunGateProc{
-		{PID: 100, PPID: 1, Args: "pane agent"},
-		{PID: 101, PPID: 100, Args: "bash -c make test"},
-		{PID: 102, PPID: 101, Args: "go test ./..."},
-		{PID: 103, PPID: 1, Args: "unrelated"},
-	}
-	got := overrunDescendantArgvs([]int{100}, procs)
-	want := []string{"bash -c make test", "go test ./..."}
-	if !slices.Equal(got, want) {
-		t.Errorf("overrunDescendantArgvs = %v, want %v (the root itself and other trees excluded)", got, want)
-	}
-	if got := overrunDescendantArgvs([]int{999}, procs); len(got) != 0 {
-		t.Errorf("overrunDescendantArgvs of an absent root = %v, want none", got)
-	}
-}
-
+// The parse, pane-listing and descendant-walk the pane scan reads are
+// polecat.ParsePanes, polecat.ParseProcessTable and polecat.DescendantArgvs,
+// tested where they live; what is local to this guard is which commands count,
+// which is what these two cover.
 func TestOverrunGateFromCommand(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
-		want    overrunGate
+		want    polecat.Invocation
 		wantOK  bool
 	}{
-		{"plain", "make test", overrunGate{Program: "make", Target: "test"}, true},
-		{"env prefix", "GOFLAGS=-p=8 make test", overrunGate{Program: "make", Target: "test"}, true},
-		{"flags before the target", "make -j4 test", overrunGate{Program: "make", Target: "test"}, true},
-		{"path and case", "/Library/Developer/CommandLineTools/usr/bin/MAKE BUILD", overrunGate{Program: "make", Target: "build"}, true},
-		{"program only", "make", overrunGate{}, false},
-		{"program and flags only", "make -j4", overrunGate{}, false},
-		{"nothing to run", "FOO=bar", overrunGate{}, false},
-		{"empty", "   ", overrunGate{}, false},
+		{"plain", "make test", polecat.Invocation{Program: "make", Target: "test"}, true},
+		{"env prefix", "GOFLAGS=-p=8 make test", polecat.Invocation{Program: "make", Target: "test"}, true},
+		{"flags before the target", "make -j4 test", polecat.Invocation{Program: "make", Target: "test"}, true},
+		{"path and case", "/Library/Developer/CommandLineTools/usr/bin/MAKE BUILD", polecat.Invocation{Program: "make", Target: "build"}, true},
+		{"program only", "make", polecat.Invocation{}, false},
+		{"program and flags only", "make -j4", polecat.Invocation{}, false},
+		{"nothing to run", "FOO=bar", polecat.Invocation{}, false},
+		{"empty", "   ", polecat.Invocation{}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -90,53 +47,13 @@ func TestOverrunGateFromCommand(t *testing.T) {
 	}
 }
 
-func TestOverrunGateArgv(t *testing.T) {
-	t.Parallel()
-	gates := slices.Concat(overrunBareGateInvocations,
-		[]overrunGate{{Program: "make", Target: "gate"}, {Program: "make", Target: "test"}})
-
-	tests := []struct {
-		name string
-		argv string
-		want string
-	}{
-		{"a bare gate", "make gate", "make gate"},
-		{"a make in the middle of a shell body", "/bin/sh -c make test", "make test"},
-		{"a background wrapper", "bash -c eval 'gt slot run --role gastown/slit -- make gate' < /dev/null", "gt slot run"},
-		{"a wrapper with no slot", "sh -c \"make -j4 test\"", "make test"},
-		{"the Go quality gate", "go test ./internal/daemon -run TestOverrun", "go test"},
-		{"go vet", "go vet ./...", "go vet"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, ok := overrunGateArgv(tt.argv, gates)
-			if !ok || got != tt.want {
-				t.Errorf("overrunGateArgv(%q) = %q, %v; want %q, true", tt.argv, got, ok, tt.want)
-			}
-		})
-	}
-
-	notGates := []string{
-		"claude --dangerously-skip-permissions",
-		"git status",
-		"go build ./...",
-		"make",
-		"",
-	}
-	for _, argv := range notGates {
-		if got, ok := overrunGateArgv(argv, gates); ok {
-			t.Errorf("overrunGateArgv(%q) = %q, want no gate", argv, got)
-		}
-	}
-}
-
 func TestOverrunGateInvocations(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	// A rig with no config still carries the bare invocations a polecat runs
 	// as its own gate, and every rig carries them once its config is read.
 	gates := overrunGateInvocations(town, "gastown")
-	if !slices.Contains(gates, overrunGate{Program: "go", Target: "test"}) {
+	if !slices.Contains(gates, polecat.Invocation{Program: "go", Target: "test"}) {
 		t.Errorf("overrunGateInvocations = %v, want the bare go test among them", gates)
 	}
 }

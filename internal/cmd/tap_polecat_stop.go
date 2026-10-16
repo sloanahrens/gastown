@@ -12,7 +12,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
-	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -127,14 +126,17 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 
 	// This Stop event may just mark a turn boundary, not a real session end
 	// (gt-couv): the polecat can still be legitimately waiting on a
-	// background verification step. Three independent turn-end signals veto
-	// the auto-run in that case; any one of them is enough to hold off.
-	if busy, busyReason := polecatStopVerificationRunning(townRoot, rigName, polecatName); busy {
-		fmt.Fprintf(os.Stderr, "polecat-stop-check: %s — deferring gt done\n", busyReason)
-		return nil
+	// background verification step. Two independent turn-end signals veto
+	// the auto-run in that case; either one is enough to hold off.
+	busy, busyReason, readErr := polecatStopVerificationRunning(townRoot, rigName, polecatName, sessionName)
+	if readErr != nil {
+		// An unreadable read does not hold the auto gt done back (see
+		// polecatStopSuite), so say so: silently it is indistinguishable from a
+		// seat that was read and found idle.
+		fmt.Fprintf(os.Stderr, "polecat-stop-check: could not read whether a verification suite is live (%v) — an unreadable read is not busy here\n", readErr)
 	}
-	if live, liveReason := polecatStopPaneChildRunning(townRoot, rigName, sessionName); live {
-		fmt.Fprintf(os.Stderr, "polecat-stop-check: %s — deferring gt done\n", liveReason)
+	if busy {
+		fmt.Fprintf(os.Stderr, "polecat-stop-check: %s — deferring gt done\n", busyReason)
 		return nil
 	}
 	if recent, commitErr := polecatStopCommittedWithinGrace(cloneDir); commitErr == nil && recent {
@@ -206,27 +208,86 @@ func polecatStopPendingWorkIn(g polecatStopGit, branch string) (bool, string, er
 	return false, "", nil
 }
 
-// polecatStopVerificationRunning reports whether this polecat currently
-// holds the town-level container-gate slot (see internal/slot) — i.e. its
-// own slot-wrapped build/test suite is still running in the background.
-// A held slot whose owner role doesn't match this polecat is some other
-// rig's suite and says nothing about this polecat's state, so it is not
-// treated as busy here.
+// polecatStopVerificationRunning reports whether this polecat's own
+// verification suite is still live — its own suite holding a container-gate
+// slot, or a suite invocation live under its own panes — and names it for the
+// deferral message. The error is a read that failed; the caller reports it and
+// carries on, since the reading stands on its own.
+func polecatStopVerificationRunning(townRoot, rigName, polecatName, sessionName string) (bool, string, error) {
+	return polecatStopSuite(stopCheckReads{townRoot: townRoot}, townRoot, rigName, polecatName, sessionName)
+}
+
+// polecatStopSuite is that decision over its reads.
 //
-// Reads only the flock picture (StatusPoolLocksOnly): this runs at every
-// turn boundary and nothing below looks at the container half, so the full
-// StatusPool's `docker ps` was a subprocess per turn whose output was never
-// read (gt-a8kx).
-func polecatStopVerificationRunning(townRoot, rigName, polecatName string) (bool, string) {
-	rep, err := slot.StatusPoolLocksOnly(townRoot, containerGatePool(townRoot))
-	if err != nil || !rep.Held {
-		return false, ""
+// It is the Stop guard's side of the one check the daemon's overrun guard also
+// asks (polecat.LiveSuite, gt-a1xhd). An unreadable read is "not busy" here,
+// the turn-boundary reading: the grace period and the next turn's reads both
+// still stand between this Stop event and an auto gt done, and a later Stop
+// re-runs them. The overrun guard maps the same error the other way, and the
+// error is returned rather than swallowed so the caller can say a read failed.
+//
+// A failed read only loses the answer that read would have given: the check
+// still reports a suite the other read found, so an unreadable slot state
+// cannot hide the suite running in this polecat's pane.
+func polecatStopSuite(reads polecat.SuiteReads, townRoot, rigName, polecatName, sessionName string) (bool, string, error) {
+	found, err := polecat.LiveSuite(reads, polecat.SuiteQuery{
+		Session: sessionName,
+		// `<rig>/<polecat>` is the role the formula's own gate wrap passes to
+		// `gt slot run --role`. A slot held under any other role is some other
+		// polecat's suite and says nothing about this one.
+		Roles:  []string{rigName + "/" + polecatName},
+		Suites: stopCheckSuites(townRoot, rigName),
+		Split:  stopCheckTokens,
+	})
+	switch {
+	case found.Slot.Held:
+		return true, fmt.Sprintf("container-gate slot %d held by %s (verification suite running)", found.Slot.Index, found.Slot.Owner.Role), err
+	case found.Invocation != "":
+		return true, fmt.Sprintf("%s is still running in this polecat's pane", found.Invocation), err
 	}
-	mine := rep.HeldBy(rigName + "/" + polecatName)
-	if len(mine) == 0 {
-		return false, ""
+	return false, "", err
+}
+
+// stopCheckReads reads one live-suite question's evidence straight from the
+// host. The overrun guard wraps the same reads in a per-cycle cache; this guard
+// runs once at a turn boundary, so there is nothing to carry between seats.
+//
+// Only the flock half of the pool is read (StatusPoolLocksOnly): this runs at
+// every turn boundary and the full StatusPool's `docker ps` was a subprocess per
+// turn whose output was never read (gt-a8kx).
+type stopCheckReads struct {
+	townRoot string
+}
+
+// PanePIDs lists the pane pids of every pane in the polecat's session.
+// Session-wide rather than just its first window (GetPanePID): a split session
+// can hold the suite in another pane, and a suite this misses reads as "not
+// working" — the direction that lets the auto gt done fire (gt-78n0).
+func (r stopCheckReads) PanePIDs(sessionName string) ([]int, error) {
+	out, err := tmux.BuildCommand("list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}").Output()
+	if err != nil {
+		return nil, err
 	}
-	return true, fmt.Sprintf("container-gate slot %d held by %s (verification suite running)", mine[0].Index, mine[0].Owner.Role)
+	return polecat.ParsePanes(string(out), sessionName), nil
+}
+
+// ProcessTable reads the whole process table in one call. One call serves every
+// pane's patterns, where a pgrep per pane would spawn one process per pane.
+//
+// -ww because the invocation being looked for sits at the end of a long
+// wrapper argv (see stopCheckTokens); a width-truncated line drops exactly the
+// part that carries it.
+func (r stopCheckReads) ProcessTable() ([]polecat.Proc, error) {
+	out, err := exec.Command("ps", "-ww", "-eo", "pid,ppid,args").Output() //nolint:gosec // G204: fixed command
+	if err != nil {
+		return nil, fmt.Errorf("listing processes: %w", err)
+	}
+	return polecat.ParseProcessTable(string(out)), nil
+}
+
+// Slots is the town's container-gate pool, flock picture only (gt-a8kx).
+func (r stopCheckReads) Slots() (slot.Report, error) {
+	return slot.StatusPoolLocksOnly(r.townRoot, containerGatePool(r.townRoot))
 }
 
 // polecatStopCommittedWithinGrace reports whether the branch's most recent
@@ -254,144 +315,6 @@ func commitWithinGrace(ct string, now time.Time) (bool, error) {
 	return now.Sub(time.Unix(unixSeconds, 0)) < pendingWorkGracePeriod, nil
 }
 
-// polecatStopPaneChildRunning reports whether the polecat's own tmux pane
-// still has a live verification child: a queued or holding `gt slot run`, a
-// `go test`, or one of the rig's configured test/lint/build gates.
-//
-// The slot check above sees only a suite that already holds the town gate.
-// This covers the wait before that gate: the polecat starts its own suite in
-// a background shell, the shell queues behind another rig's, the turn ends,
-// and Stop fires with no slot held and a commit too fresh to fall outside the
-// grace period — so nothing holds back an auto gt done that would re-run the
-// very suite already queued (gt-78n0). Claude Code keeps a background Bash
-// under the pane's agent process, so the pane's process tree is where that
-// suite shows up.
-//
-// A pane that cannot be located yields no verdict rather than a false "idle":
-// the grace period and the slot check still stand between this Stop event and
-// an auto gt done, and a later Stop event re-runs all three.
-func polecatStopPaneChildRunning(townRoot, rigName, sessionName string) (bool, string) {
-	panePIDs := polecatStopPanePIDs(sessionName)
-	if len(panePIDs) == 0 {
-		return false, ""
-	}
-	procs, err := polecatStopProcessTable()
-	if err != nil {
-		return false, ""
-	}
-	gates := polecatStopGateInvocations(townRoot, rigName)
-	for _, argv := range stopCheckDescendantArgvs(panePIDs, procs) {
-		if what, ok := polecatStopVerificationArgv(argv, gates); ok {
-			return true, fmt.Sprintf("%s is still running in this polecat's pane", what)
-		}
-	}
-	return false, ""
-}
-
-// polecatStopPanePIDs returns the pids of every pane in the polecat's session.
-// Session-wide rather than just its first window (GetPanePID): a split session
-// can hold the suite in another pane, and a suite this misses reads as "not
-// working" — the direction that lets the auto gt done fire (gt-78n0).
-func polecatStopPanePIDs(sessionName string) []int {
-	out, err := tmux.BuildCommand("list-panes", "-a", "-F", "#{session_name}\t#{pane_pid}").Output()
-	if err != nil {
-		return nil
-	}
-	return parsePolecatStopPanes(string(out), sessionName)
-}
-
-// parsePolecatStopPanes picks sessionName's pane pids out of
-// `list-panes -a -F "#{session_name}\t#{pane_pid}"` output.
-func parsePolecatStopPanes(out, sessionName string) []int {
-	var pids []int
-	for _, line := range strings.Split(out, "\n") {
-		name, pidStr, found := strings.Cut(line, "\t")
-		if !found || name != sessionName {
-			continue
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(pidStr))
-		if err != nil || pid <= 0 {
-			continue
-		}
-		pids = append(pids, pid)
-	}
-	return pids
-}
-
-// stopCheckProc is one process-table row: the pid, its parent, and the full
-// argv the suite patterns are matched against.
-type stopCheckProc struct {
-	PID  int
-	PPID int
-	Args string
-}
-
-// polecatStopProcessTable reads the whole process table in one call. One call
-// serves every pane's patterns, where a pgrep per pane would spawn one process
-// per pane.
-//
-// -ww because the invocation being looked for sits at the end of a long
-// wrapper argv (see stopCheckTokens); a width-truncated line drops exactly the
-// part that carries it.
-func polecatStopProcessTable() ([]stopCheckProc, error) {
-	out, err := exec.Command("ps", "-ww", "-eo", "pid,ppid,args").Output()
-	if err != nil {
-		return nil, fmt.Errorf("listing processes: %w", err)
-	}
-	return parseStopCheckProcessTable(string(out)), nil
-}
-
-// parseStopCheckProcessTable parses `ps -ww -eo pid,ppid,args` output. args
-// carries the rest of the line and contains whitespace, so only the first two
-// fields are fixed.
-func parseStopCheckProcessTable(out string) []stopCheckProc {
-	var procs []stopCheckProc
-	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) < 3 {
-			continue
-		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue // Header line
-		}
-		ppid, err := strconv.Atoi(fields[1])
-		if err != nil {
-			continue
-		}
-		procs = append(procs, stopCheckProc{PID: pid, PPID: ppid, Args: strings.Join(fields[2:], " ")})
-	}
-	return procs
-}
-
-// stopCheckDescendantArgvs returns the argv of every process descended from
-// one of roots, from a single process-table snapshot. The roots are excluded:
-// a pane's root is the polecat's own agent process, and the question is what
-// that agent has running, not whether the agent exists.
-func stopCheckDescendantArgvs(roots []int, procs []stopCheckProc) []string {
-	children := make(map[int][]stopCheckProc, len(procs))
-	for _, p := range procs {
-		children[p.PPID] = append(children[p.PPID], p)
-	}
-	seen := make(map[int]bool, len(procs))
-	var argvs []string
-	var walk func(pid int)
-	walk = func(pid int) {
-		for _, child := range children[pid] {
-			if seen[child.PID] {
-				continue // a pid reused within the snapshot would otherwise loop
-			}
-			seen[child.PID] = true
-			argvs = append(argvs, child.Args)
-			walk(child.PID)
-		}
-	}
-	for _, root := range roots {
-		walk(root)
-	}
-	return argvs
-}
-
 // stopCheckMaxNesting bounds recursive expansion of a command that arrives as
 // an argument to eval or a shell's -c. The wrappers in the wild nest one
 // level; deeper than this is not a shape they produce, and the cap stops a
@@ -412,6 +335,9 @@ var stopCheckShellNames = map[string]bool{
 // plain tokenization of the wrapper sees it as a single opaque token
 // (gt-78n0). Expansion is limited to arguments a shell would execute — eval's
 // body, a shell's -c — so a phrase that merely mentions a gate stays data.
+//
+// This is the Stop guard's own read of an argv; the overrun guard reads
+// through polecat.GateTokens instead (see its file comment).
 func stopCheckTokens(argv string) []string {
 	return stopCheckExpand(shellTokenize(argv), 0)
 }
@@ -456,24 +382,35 @@ func stopCheckExecutesArgument(tokens []string, i int) bool {
 	return stopCheckShellNames[name]
 }
 
-// stopCheckGate is one configured rig gate command reduced to the pair of
-// tokens that identify it in another process's argv.
-type stopCheckGate struct {
-	Program string // lowercased program basename, e.g. "make"
-	Target  string // lowercased basename of its first non-flag argument, e.g. "test"
+// stopCheckSuites are the invocations that mean this polecat is still
+// mid-workflow, in match order: a backgrounded gt done still running in the
+// pane (gt-h3zjo), then the rig's configured gates, then the bare verification
+// commands.
+func stopCheckSuites(townRoot, rigName string) []polecat.Invocation {
+	return stopCheckMatchingSuites(stopCheckGateInvocations(townRoot, rigName))
 }
 
-// polecatStopGateInvocations reduces the rig's configured test, lint and build
+// stopCheckMatchingSuites puts the polecat's own always-on signals in front of
+// the rig's configured gates.
+//
+// A backgrounded gt done clears the slot, pane-child, and grace-period checks
+// the moment its own gate finishes (GT_TEST_DOCKER=0 holds no slot) while the
+// process itself is still running — the next Stop event then races it with a
+// second gt done (gt-h3zjo). Its own submission is the pending work this check
+// would otherwise resubmit.
+func stopCheckMatchingSuites(gates []polecat.Invocation) []polecat.Invocation {
+	suites := []polecat.Invocation{{Program: "gt", Target: "done"}}
+	suites = append(suites, gates...)
+	return append(suites, commonBareVerificationInvocations...)
+}
+
+// stopCheckGateInvocations reduces the rig's configured test, lint and build
 // commands to the pairs the pane scan matches. Test, lint and build are the
 // gates the polecat formula runs itself, so a live one means the formula is
 // mid-step — setup and typecheck are the refinery's gates and run there.
-func polecatStopGateInvocations(townRoot, rigName string) []stopCheckGate {
-	mq := rig.ResolveMergeQueueConfig(townRoot, rigName)
-	if mq == nil {
-		return nil
-	}
-	var gates []stopCheckGate
-	for _, command := range []string{mq.TestCommand, mq.LintCommand, mq.BuildCommand} {
+func stopCheckGateInvocations(townRoot, rigName string) []polecat.Invocation {
+	var gates []polecat.Invocation
+	for _, command := range polecat.ConfiguredCommands(townRoot, rigName) {
 		if gate, ok := stopCheckGateFromCommand(command); ok {
 			gates = append(gates, gate)
 		}
@@ -486,96 +423,19 @@ func polecatStopGateInvocations(townRoot, rigName string) []stopCheckGate {
 // formula runs the test command in that shape ("GOFLAGS=-p=8 make test"), and
 // the target is the first argument that is not a flag, since only the target
 // decides what runs ("make -j4 test" is still make test).
-func stopCheckGateFromCommand(command string) (stopCheckGate, bool) {
-	_, args := slot.SplitEnvPrefix(stopCheckTokens(strings.TrimSpace(command)))
-	if len(args) == 0 {
-		return stopCheckGate{}, false
-	}
-	gate := stopCheckGate{Program: strings.ToLower(filepath.Base(args[0]))}
-	for _, arg := range args[1:] {
-		if strings.HasPrefix(arg, "-") {
-			continue
-		}
-		gate.Target = strings.ToLower(filepath.Base(arg))
-		break
-	}
-	return gate, true
-}
-
-// polecatStopVerificationArgv reports whether a process's argv is a live
-// verification or build suite, and names it for the deferral message.
-func polecatStopVerificationArgv(argv string, gates []stopCheckGate) (string, bool) {
-	tokens := stopCheckInvocationTokens(argv)
-	if len(tokens) == 0 {
-		return "", false
-	}
-	// gt slot run is the formula's wrapper around the rig's container-backed
-	// suite, and the one invocation that can be live while holding no slot —
-	// which is the queue wait this check exists for.
-	if i := findInvocation(tokens, "gt", "slot"); i >= 0 && i+2 < len(tokens) && tokens[i+2] == "run" {
-		return "gt slot run", true
-	}
-	// A backgrounded gt done clears the slot, pane-child, and grace-period
-	// checks the moment its own gate finishes (GT_TEST_DOCKER=0 holds no
-	// slot) while the process itself is still running — the next Stop event
-	// then races it with a second gt done (gt-h3zjo). Its own submission is
-	// the pending work this check would otherwise resubmit.
-	if findInvocation(tokens, "gt", "done") >= 0 {
-		return "gt done", true
-	}
-	for _, gate := range gates {
-		if stopCheckGateMatches(tokens, gate) {
-			return strings.TrimSpace(gate.Program + " " + gate.Target), true
-		}
-	}
-	// A rig whose config names no gate, or names its suite some other way,
-	// must not silence the check: these invocations are a live suite however
-	// the rig spells its own gate commands. "go vet" is the concrete gap
-	// this list closes — the polecat completion protocol runs "go test ./...
-	// && go vet ./..." as the Go quality gate, but only "go test" was
-	// recognized here, so a bare go vet in the pane read as an idle polecat
-	// mid-vet (gt-jn89).
-	for _, gate := range commonBareVerificationInvocations {
-		if stopCheckGateMatches(tokens, gate) {
-			return strings.TrimSpace(gate.Program + " " + gate.Target), true
-		}
-	}
-	return "", false
+//
+// A command that names a program and no target keeps its empty target here,
+// which matches that program anywhere in an argv. The overrun guard reads the
+// same command the other way and drops it (overrunGateFromCommand).
+func stopCheckGateFromCommand(command string) (polecat.Invocation, bool) {
+	return polecat.InvocationFromCommand(stopCheckTokens, command)
 }
 
 // commonBareVerificationInvocations are verification commands recognized in
 // a polecat's pane even when the rig's own gate config doesn't name them —
 // commands a polecat runs bare as part of its own quality-gate habits
 // regardless of what the rig configured for test/lint/build.
-var commonBareVerificationInvocations = []stopCheckGate{
+var commonBareVerificationInvocations = []polecat.Invocation{
 	{Program: "go", Target: "test"},
 	{Program: "go", Target: "vet"},
-}
-
-// stopCheckInvocationTokens reduces argv to the tokens the invocation
-// matchers compare: lowercased, each reduced to its basename.
-//
-// The basename is load-bearing. A program reaches the process table as the
-// path it was exec'd with — an observed suite child is
-// "/Library/Developer/CommandLineTools/usr/bin/make test" — so "make test"
-// from rig config matches only once both sides are basenames.
-func stopCheckInvocationTokens(argv string) []string {
-	tokens := stopCheckTokens(argv)
-	for i, tok := range tokens {
-		tokens[i] = strings.ToLower(filepath.Base(tok))
-	}
-	return tokens
-}
-
-// stopCheckGateMatches reports whether tokens contain the gate's invocation.
-func stopCheckGateMatches(tokens []string, gate stopCheckGate) bool {
-	if gate.Target == "" {
-		for _, tok := range tokens {
-			if tok == gate.Program {
-				return true
-			}
-		}
-		return false
-	}
-	return findInvocation(tokens, gate.Program, gate.Target) >= 0
 }
