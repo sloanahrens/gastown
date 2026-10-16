@@ -558,7 +558,7 @@ type heredocQuoteWalk struct {
 	escaped bool         // the rune at runeIdx is literal text behind a backslash
 	arith   []arithFrame // contexts open here where "<<" is no operator, innermost last
 	braces  int          // "${" expansions open here, the level a brace frame belongs to
-	subst   int          // "(" open in a "$(..)" nested in a "${..}" word, where "#" comments again
+	substs  []substFrame // "$(..)" open inside a "${..}" word, where "#" comments again, innermost last
 	prevIdx int          // the rune the shell read last, for startsShellWord
 	prevEsc bool         // that rune was backslash-escaped
 }
@@ -583,6 +583,15 @@ type arithFrame struct {
 	kind  arithKind
 	depth int
 	brace int
+}
+
+// substFrame is one "$(..)" the walk is reading inside a "${..}" word. brace is
+// the "${" nesting depth it sits at, so command text is the innermost context
+// only while no "${" has opened inside it. depth counts the "(" open in it, the
+// opener included, so the ")" that returns it to zero ends it (gt-p833d).
+type substFrame struct {
+	brace int
+	depth int
 }
 
 // advanceTo reads up to byte offset to and returns the quote open there.
@@ -630,14 +639,19 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			// ")" ends at the "(", which delimits it, so the "((" after it
 			// is in command position without a space (gt-4jcks).
 			w.arith = append(w.arith, arithFrame{kind: arithParen})
-		case w.quote == 0 && w.braces > 0 && r == '(' && (w.subst > 0 || w.followsUnescapedDollar()):
+		case w.quote == 0 && w.inSubstText() && r == '(':
+			// A "(" inside the command text of a "$(..)" nests.
+			w.substs[len(w.substs)-1].depth++
+		case w.quote == 0 && w.braces > 0 && r == '(' && w.followsUnescapedDollar():
 			// The "(" of a "$(..)" nested in a "${..}" word opens command
-			// text, and a "#" there starts a comment again. The "(" inside
-			// it nest, so the ")" that returns the count to zero ends it
-			// (gt-p833d).
-			w.subst++
-		case w.quote == 0 && w.subst > 0 && r == ')':
-			w.subst--
+			// text, and a "#" there starts a comment again (gt-p833d).
+			w.substs = append(w.substs, substFrame{brace: w.braces, depth: 1})
+		case w.quote == 0 && w.inSubstText() && r == ')':
+			top := &w.substs[len(w.substs)-1]
+			top.depth--
+			if top.depth <= 0 {
+				w.substs = w.substs[:len(w.substs)-1]
+			}
 		case w.quote == 0 && r == '[' && w.opensSubscript():
 			// A "[" after a word opens an array subscript, and a "$[" opens
 			// the deprecated arithmetic expansion: their text is an
@@ -665,11 +679,11 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			// and not a "}" nesting inside its word, is what closes it.
 			w.braces++
 			w.arith = append(w.arith, arithFrame{kind: arithBrace, brace: w.braces})
-		case w.quote == 0 && r == '}' && w.braces > 0:
+		case w.quote == 0 && r == '}' && w.braces > 0 && !w.inSubstText():
+			// A "}" in the command text of a "$(..)" nested in the word is
+			// that command's own text, as in "${v:-$(echo })}": only the "}"
+			// after the substitution closes the expansion (gt-nwd3k).
 			w.braces--
-			if w.braces == 0 {
-				w.subst = 0
-			}
 			w.closeArithBraces()
 		}
 		w.prevIdx, w.prevEsc = w.runeIdx, escaped
@@ -720,7 +734,14 @@ func (w *heredocQuoteWalk) bracketArith() bool {
 // the "#" as a comment skipped the "}" that closes the expansion and left the
 // frame open over every later "<<". Command text nested in the word, a
 // "$(..)", reads comments as anywhere (gt-p833d).
-func (w *heredocQuoteWalk) readsComment() bool { return w.braces == 0 || w.subst > 0 }
+func (w *heredocQuoteWalk) readsComment() bool { return w.braces == 0 || w.inSubstText() }
+
+// inSubstText reports whether the innermost context is the command text of a
+// "$(..)" nested in a "${..}" word, rather than a "${..}" expansion opened
+// inside that text.
+func (w *heredocQuoteWalk) inSubstText() bool {
+	return len(w.substs) > 0 && w.substs[len(w.substs)-1].brace == w.braces
+}
 
 // followsUnescapedDollar reports whether the rune before the current one is a
 // "$" that no backslash escaped, which makes a "(" after it open "$(".
@@ -761,7 +782,7 @@ func (w *heredocQuoteWalk) skipTo(to int) {
 		w.runeIdx++
 	}
 	w.quote, w.comment, w.escaped, w.prevIdx, w.prevEsc = 0, false, false, -1, false
-	w.arith, w.braces, w.subst = nil, 0, 0
+	w.arith, w.braces, w.substs = nil, 0, nil
 }
 
 // heredocReaderLine returns the text of the line the heredoc operator at

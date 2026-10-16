@@ -1504,8 +1504,25 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 			wantBlock: false,
 		},
 		{
-			name:      "a hash in a command substitution nested in an expansion is still a comment",
+			// The "# } <<EOF" is a comment in the substitution's command text,
+			// so no heredoc opens and the "sudo" line is a live command: blocked.
+			name:      "a hash in a command substitution nested in an expansion is a comment, so the sudo line after it is live",
 			command:   "echo ${v:-$(echo # } <<EOF\n)}\nsudo rm -rf /\nEOF",
+			wantBlock: true,
+		},
+		{
+			// The "}" in "$(echo })" is that command's argument. The expansion
+			// ends at the last "}", so the "<<x" before it is text in the word
+			// and the "sudo" line is a live command: blocked.
+			name:      "a brace in a nested command substitution does not close the expansion",
+			command:   "echo ${v:-$(echo }) <<x}\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			// The "${b}" opened inside the substitution closes itself, so the
+			// "}" before the final one still belongs to the outer expansion.
+			name:      "an expansion nested in a command substitution closes at its own brace",
+			command:   "echo ${v:-$(echo ${b}) <<x}\nsudo rm -rf /\nx",
 			wantBlock: true,
 		},
 		{
