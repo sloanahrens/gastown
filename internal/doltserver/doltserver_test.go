@@ -2,6 +2,7 @@ package doltserver
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -5911,6 +5912,44 @@ func TestProbeDSNsCarryPassword(t *testing.T) {
 				if len(got) != 1 || !strings.HasPrefix(got[0], want) {
 					t.Errorf("%s DSNs = %q, want one starting %q", name, got, want)
 				}
+			}
+		})
+	}
+}
+
+func TestBuildServerSQLCmdPasswordNotInArgv(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		password string
+		wantEnv  bool
+	}{
+		{"password set", "secret", true},
+		{"password empty", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			config := &Config{Host: "127.0.0.1", Port: 3307, User: "root", Password: tt.password, DataDir: "/tmp/dolt-data"}
+			cmd := buildServerSQLCmd(context.Background(), config, "-q", "SELECT 1")
+
+			for _, arg := range cmd.Args {
+				if arg == "--password" || (tt.password != "" && strings.Contains(arg, tt.password)) {
+					t.Errorf("argv leaks the password: %q", cmd.Args)
+				}
+			}
+			var gotEnv bool
+			for _, env := range cmd.Env {
+				if env == "DOLT_CLI_PASSWORD="+tt.password && tt.wantEnv {
+					gotEnv = true
+				}
+				if strings.HasPrefix(env, "DOLT_CLI_PASSWORD=") && !tt.wantEnv {
+					t.Errorf("empty password must not set DOLT_CLI_PASSWORD, got %q", env)
+				}
+			}
+			if tt.wantEnv && !gotEnv {
+				t.Errorf("env lacks DOLT_CLI_PASSWORD=%s", tt.password)
 			}
 		})
 	}

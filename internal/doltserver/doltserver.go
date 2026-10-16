@@ -5026,14 +5026,10 @@ func (h *host) serverExecSQL(townRoot, query string) error {
 //	dolt --host=H --port=P --user=U --no-tls sql -q "..."
 func buildServerSQLCmd(ctx context.Context, config *Config, args ...string) *exec.Cmd {
 	// Global connection flags must come before the "sql" subcommand.
-	// Always pass --password to prevent dolt from prompting on stdin
-	// (which fails with "inappropriate ioctl" in non-TTY environments).
-	password := config.Password
 	fullArgs := []string{
 		"--host", config.EffectiveHost(),
 		"--port", strconv.Itoa(config.Port),
 		"--user", config.User,
-		"--password", password,
 		"--no-tls",
 		"sql",
 	}
@@ -5042,6 +5038,12 @@ func buildServerSQLCmd(ctx context.Context, config *Config, args ...string) *exe
 	cmd := exec.CommandContext(ctx, "dolt", fullArgs...)
 	cmd.Dir = config.DataDir
 	setProcessGroup(cmd)
+
+	// The password goes through DOLT_CLI_PASSWORD, never argv: argv is world
+	// readable through ps. An empty password sets nothing (gt-qf0bn).
+	if config.Password != "" {
+		cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD="+config.Password)
+	}
 
 	return cmd
 }
