@@ -410,13 +410,13 @@ type substitutionSpan struct {
 }
 
 // commandSubstitutionSpans finds the outermost command substitutions the shell
-// expands in text, in order. Unlike the pattern commandSubstitutions once
-// used, whose [^()]* body ended the match at the first parenthesis, it balances parentheses and
-// steps over quoted text, so a body holding "(ok|FAIL)", "$(NF)" or a nested
-// "$(nproc)" is cut whole (gt-wrr5c). A "$(" or backtick is live outside
-// quotes and inside double quotes; a backslash escapes the next character, and
-// single quotes hide everything until the closing quote. A substitution that
-// never closes yields no span, and the scan resumes after its opening.
+// expands in text, in order. It balances parentheses and steps over quoted
+// text, so a body holding "(ok|FAIL)", "$(NF)" or a nested "$(nproc)" is cut
+// whole (gt-wrr5c). A "$(" or backtick is live outside quotes and inside double
+// quotes; a backslash escapes the next character, and single quotes hide
+// everything until the closing quote. A substitution that never closes runs to
+// the end of text, so a line the shell would reject is still judged rather than
+// passed unread (gt-6v07e).
 func commandSubstitutionSpans(text string) []substitutionSpan {
 	return substitutionSpansIn(text, true)
 }
@@ -450,14 +450,14 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 		case c == '$' && i+1 < len(text) && text[i+1] == '(':
 			end := closingParen(text, i+2)
 			if end < 0 {
-				continue
+				return append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: len(text)})
 			}
 			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: end})
 			i = end
 		case c == '`':
 			end := strings.IndexByte(text[i+1:], '`')
 			if end < 0 {
-				continue
+				return append(spans, substitutionSpan{open: i, bodyStart: i + 1, bodyEnd: len(text)})
 			}
 			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 1, bodyEnd: i + 1 + end})
 			i += end + 1
