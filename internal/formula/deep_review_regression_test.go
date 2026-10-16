@@ -28,7 +28,7 @@ func TestDeepReviewBeadsCarryARegressionTest(t *testing.T) {
 	}{
 		{
 			"a code finding's acceptance item names the test that fails before the fix",
-			"naming the test that fails before the fix and passes after (file, test name, assertion), which `## Gate` runs",
+			"naming the test that fails before the fix and passes after (file, test name, assertion) that `## Gate` runs",
 		},
 		{
 			"a batch bead takes one such acceptance item per finding",
@@ -49,44 +49,69 @@ func TestDeepReviewBeadsCarryARegressionTest(t *testing.T) {
 	}
 }
 
-// TestDeepReviewFailsALandingOnlyOnItsOwnLines guards gt-86uzs: a FAIL says the
-// landing's own diff broke the code, so step 8 fails a landing only for a
-// finding on lines that diff added or changed, PASSes one the landing merely
-// touched, and has the FAIL name the finding beads covering it.
+// deepReviewStep returns the folded text of one numbered step of the review
+// workflow, from its heading to the next step's. Scoping a rule to the step
+// that states it keeps a phrase from somewhere else in the formula from
+// answering for it.
+func deepReviewStep(t *testing.T, folded, heading string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(folded, heading)
+	if !ok {
+		t.Fatalf("deep-review-run lacks a step opening %q", heading)
+	}
+	step, _, ok := strings.Cut(rest, "**9. ")
+	if !ok {
+		t.Fatalf("the step opening %q does not run to step 9", heading)
+	}
+	return step
+}
+
+// TestDeepReviewFailsALandingOnlyOnItsOwnLines guards gt-86uzs: step 8 records
+// a FAIL only for a CONFIRMED finding on a line the landing's own diff added or
+// changed, PASSes one in a file the landing merely touched, and has the FAIL
+// name the finding beads covering it. The rule it replaced failed a landing for
+// any confirmed finding citing one of its paths, which failed 53 landings on
+// tap_guard*.go — many of them the fixes for those very findings.
 func TestDeepReviewFailsALandingOnlyOnItsOwnLines(t *testing.T) {
 	t.Parallel()
 	raw, err := GetEmbeddedFormulaContent("deep-review-run")
 	if err != nil {
 		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
 	}
-	text := strings.Join(strings.Fields(string(raw)), " ")
+	folded := strings.Join(strings.Fields(string(raw)), " ")
+	step := deepReviewStep(t, folded, "**8. Record the reviews of the risk-path items")
+
 	for _, want := range []struct {
 		rule string
 		text string
 	}{
 		{
-			"a FAIL names the finding beads, one flag per finding the landing broke",
-			"`FAIL --finding <finding bead>`, one flag per finding it broke, when a CONFIRMED finding sits on a line that landing's own diff added or changed",
+			"the FAIL carries the finding beads it broke, one --finding each",
+			"`FAIL --finding <finding bead>`",
 		},
 		{
-			"a finding the landing only sits near is a PASS",
-			"and otherwise PASS: a file the landing merely touched is not its doing",
+			"the FAIL is for a finding on a line the landing's own diff added or changed",
+			"when a CONFIRMED finding sits on a line that landing's own diff added or changed",
 		},
 		{
-			"the reader checks the finding's line against that diff",
-			"`git diff <landed_commit>^1 <landed_commit>`",
+			"a file the landing merely touched is a PASS, so the item is not failed for it",
+			"otherwise `PASS`, since a file it merely touched is not its doing",
 		},
 		{
-			"a finding in a file the landing merely touched is not the landing's doing",
-			"a file the landing merely touched is not its doing",
-		},
-		{
-			"the FAIL names the finding beads, so the open item says what failed",
-			"The FAIL names its finding beads, so its item stays open saying why the landing failed",
+			"the open item names the findings and clears on a later PASS",
+			"A FAIL keeps the item open, naming its findings, until a later PASS",
 		},
 	} {
-		if !strings.Contains(text, want.text) {
-			t.Errorf("deep-review-run lacks the review rule %q", want.rule)
+		if !strings.Contains(step, want.text) {
+			t.Errorf("step 8 lacks the review rule %q", want.rule)
+		}
+	}
+	// The rule must rest on the landing's own diff, not on a finding's cited
+	// paths: the wording that failed a landing for code it never wrote is what
+	// this bead removed.
+	for _, gone := range []string{"cites its paths", "cites a path in"} {
+		if strings.Contains(step, gone) {
+			t.Errorf("step 8 still triggers on the finding's paths alone: %q", gone)
 		}
 	}
 }

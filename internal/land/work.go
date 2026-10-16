@@ -223,10 +223,12 @@ func OverseerReviewed(issue *beads.Issue, head string) bool {
 // PASS); WAIVED and AUDITED answer only with a reason after the colon, and the
 // sha is compared whole, so a review of another head does not answer. A FAIL
 // written before the suffix existed has no findings= and still parses, and a
-// malformed suffix reads as none (gt-86uzs). It deliberately does not match
-// "OVERSEER REVIEWED ...": that marker says om was bypassed, not that a human
-// reviewed this head (gt-vsct7.4).
-var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (?:(PASS|FAIL)\b(?: findings=([A-Za-z0-9._,-]+))?|(WAIVED|AUDITED): +\S)`)
+// suffix that is not a clean comma-separated bead-id list reads as none: the
+// list must run to whitespace or the end of the line, so a malformed suffix is
+// never partly trusted (gt-86uzs). It deliberately does not match "OVERSEER
+// REVIEWED ...": that marker says om was bypassed, not that a human reviewed
+// this head (gt-vsct7.4).
+var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (?:(PASS|FAIL)\b(?: findings=([A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+)*)(?:\s|$))?|(WAIVED|AUDITED): +\S)`)
 
 // OverseerReviewFail is the verdict of a review that found a defect.
 const OverseerReviewFail = "FAIL"

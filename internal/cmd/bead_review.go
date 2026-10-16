@@ -129,7 +129,7 @@ func (v *beadVerbs) review(id, verdict, sha, reason string, findings []string) e
 		return err
 	}
 	if verdict == "FAIL" && len(ids) == 0 {
-		return fmt.Errorf("a FAIL review needs --finding: name the finding bead(s) this landing's diff broke")
+		return fmt.Errorf("a FAIL review needs --finding: name the finding bead(s) this landing's diff broke (gt bead review --help)")
 	}
 	sha = strings.ToLower(strings.TrimSpace(sha))
 	if sha != "" && !fullHead.MatchString(sha) {
