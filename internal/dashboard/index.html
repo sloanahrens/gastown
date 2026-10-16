@@ -159,7 +159,12 @@ section.collapsed>h2{border-bottom:0}
 .alvl{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid currentColor;margin-right:6px}
 .alvl.info{color:var(--blue)}.alvl.warn{color:var(--amber)}.alvl.crit{color:var(--red)}
 .arow{border-top:1px solid var(--line);padding:4px 0;overflow-wrap:anywhere}
+.arow-head{display:block;width:100%;text-align:left;color:inherit;font:inherit;padding:0}
+button.arow-head{background:none;border:0;cursor:pointer}
+button.arow-head:hover{background:#19212b}
+.arow .caret{color:var(--dim);width:10px;display:inline-block}
 .arow .by{color:var(--dim)}
+.arow .badc{display:block}
 .arow .qcmd,.arow .qrec{margin-top:3px}
 .own-sloan{color:var(--amber);border-color:var(--amber)}
 .own-overseer{color:var(--blue);border-color:var(--blue)}
@@ -208,8 +213,8 @@ h3.ohead .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:no
 .dname{color:var(--dim);font-size:11px;letter-spacing:.04em}
 .dbody{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:4px 8px}
 .dskip{color:var(--dim);font-size:11px;margin-top:3px}
-.qrec,.qheld{color:var(--dim);margin:2px 0}
-.qtext{margin:2px 0}
+.arow .qrec,.arow .qheld{color:var(--dim);display:block;margin:2px 0}
+.arow .qtext{display:block;margin:2px 0}
 .qage{color:var(--dim)}
 .qpri,.qeffort{color:var(--dim);font-size:11px;white-space:nowrap}
 .qpri.warnc{color:var(--amber)}
@@ -2400,6 +2405,72 @@ const QUESTION_OLDEST_SEC = 4 * 3600;
 const OWNERS = ["sloan", "overseer"];
 const PANEL_OPENS_ON = "sloan";
 
+// A row of the panel folds on its own, so one long question stops taking the
+// pane everything waiting shares (gt-1kaed). The choice is the reader's and
+// survives a reload in gt-attn-collapsed, a map of fold key to true.
+const ATTN_FOLD_KEY = "gt-attn-collapsed";
+function readAttnFolds() {
+  try { return JSON.parse(localStorage.getItem(ATTN_FOLD_KEY) || "{}") || {}; } catch (e) { return {}; }
+}
+let attnFolds = readAttnFolds();
+// attnWritten is what the store held at this page's last write, so the next
+// write carries only the difference this page made: a fold set in another tab
+// is not undone by the next click here (gt-1kaed).
+let attnWritten = Object.assign({}, attnFolds);
+
+// attnItemKey names the item a row is about, holding still while the row's
+// words change: the kind, then the id the readers gave it — a bead id, or a
+// queue rule's own item key.
+function attnItemKey(r) { return r.kind + ":" + (r.id || ""); }
+
+// attnStamp hashes what a row says, its header line as well as the words a fold
+// hides, so a new answer, a new severity or a renamed item comes back open
+// rather than hidden behind a fold set against the reading it replaced. The age
+// stays out: it moves with every publish, and a row that only aged is the row
+// the reader folded.
+function attnStamp(r) {
+  const said = [r.owner, r.severity, r.level, r.rule, r.priority, r.effort, r.state, r.title,
+    r.question, r.recommended, r.held_count, (r.held || []).join(","), r.malformed, r.escalated_by].join("\u0000");
+  let h = 2166136261;
+  for (let i = 0; i < said.length; i++) h = Math.imul(h ^ said.charCodeAt(i), 16777619);
+  return (h >>> 0).toString(36);
+}
+function attnFoldKey(r) { return attnItemKey(r) + ":" + attnStamp(r); }
+
+function saveAttnFolds() {
+  const next = readAttnFolds();
+  for (const k of Object.keys(attnFolds)) if (!attnWritten[k]) next[k] = true;
+  for (const k of Object.keys(attnWritten)) if (!attnFolds[k]) delete next[k];
+  try { localStorage.setItem(ATTN_FOLD_KEY, JSON.stringify(next)); } catch (e) {}
+  attnFolds = next;
+  attnWritten = Object.assign({}, next);
+}
+
+// keepAttnFolds drops the folds whose item has left the list, so a key waits
+// for nothing that is gone. A list short by a read that failed, has not
+// reported, or came back empty is not a list an item left: its folds are kept.
+function keepAttnFolds(rows, failed, pending) {
+  if (failed.length || pending.length || !rows.length) return;
+  const live = new Set(rows.map(attnFoldKey));
+  const gone = Object.keys(attnFolds).filter(k => !live.has(k));
+  if (!gone.length) return;
+  for (const k of gone) delete attnFolds[k];
+  saveAttnFolds();
+}
+
+// foldAttnRow folds the row where it stands rather than redrawing the panel, so
+// the button the reader pressed keeps the keyboard and the next Enter folds the
+// next row (gt-1kaed).
+function foldAttnRow(head, caret, body, r) {
+  const k = attnFoldKey(r);
+  const folded = !attnFolds[k];
+  if (folded) attnFolds[k] = true; else delete attnFolds[k];
+  saveAttnFolds();
+  head.setAttribute("aria-expanded", folded ? "false" : "true");
+  caret.textContent = folded ? "▸" : "▾";
+  body.replaceChildren(...(folded ? [] : attentionBody(r)));
+}
+
 // The Attention panel: the one list of what is waiting on a decision or an
 // action — the open escalations, the overseer's open questions and the
 // attention queue's standing items — every row tagged with the owner who has to
@@ -2445,6 +2516,9 @@ function drawAttention() {
   const at = attentionState ? attentionState.attention : null;
   if (!at) { box.append(el("div", "empty", "reading…")); return; }
   const failed = at.failed || [], pending = at.pending || [];
+  // The folds are swept against the whole list rather than the rows a chip is
+  // showing: an owner switched off is not an item that went away.
+  keepAttnFolds(at.rows || [], failed, pending);
   // A read that failed is a named state, never an empty panel: "nothing is
   // waiting" and "the list could not be read" must not look alike. The rows the
   // readers did return are still drawn beside the line.
@@ -2492,48 +2566,77 @@ function renderOwnerChips(rows) {
   }
 }
 
-// attentionRow is one row of the list. Every row carries its owner and its age;
-// a question adds its own words, the answer recommended to it, what answering
-// it holds up and the line that answers it, an escalation its severity and who
-// raised it, and a queue item the rule that raised it.
+// attentionRow is one row of the list: the header line a reader scans — the
+// owner, the id and title, what the row ranks, its age and a caret — and, under
+// it, the words attentionBody holds.
+//
+// The header is the fold's button, and only where there is something to fold: a
+// caret on a row that hides nothing promises a fold that never comes. The words
+// sit outside the button so the answer line can be dragged and copied whole,
+// and every cell goes through el(), which writes textContent and never markup
+// (gt-1kaed, gt-bi6w0).
 function attentionRow(r) {
+  const words = attentionBody(r);
+  const foldable = words.length > 0;
+  const folded = foldable && !!attnFolds[attnFoldKey(r)];
   const row = el("div", "arow");
   row.dataset.owner = r.owner;
-  row.append(el("span", "tag own-" + r.owner, r.owner || "?"));
+  const head = el(foldable ? "button" : "div", "arow-head");
+  const caret = foldable ? el("span", "caret", folded ? "▸" : "▾") : null;
+  if (caret) head.append(caret);
+  head.append(el("span", "tag own-" + r.owner, r.owner || "?"));
   if (r.kind === "escalation") {
-    row.append(el("span", "esc " + (SEV_CLASS[r.severity] || "sev-low"), r.severity || "–"));
-    row.append(el("span", "bead", r.id || ""));
-    if (r.escalated_by) row.append(el("span", "by", "raised by " + r.escalated_by));
+    head.append(el("span", "esc " + (SEV_CLASS[r.severity] || "sev-low"), r.severity || "–"));
+    head.append(el("span", "bead", r.id || ""));
+    if (r.escalated_by) head.append(el("span", "by", "raised by " + r.escalated_by));
   } else if (r.kind === "item") {
     // The rule is what the row is about and the level is how loud the queue
     // raised it, so both are drawn: an item nothing ranks is the reader's to
     // name, not the page's to guess at.
-    row.append(el("span", "alvl " + (r.level || "info"), r.level || "info"));
-    row.append(el("span", "tag rule", r.rule || ""));
+    head.append(el("span", "alvl " + (r.level || "info"), r.level || "info"));
+    head.append(el("span", "tag rule", r.rule || ""));
   } else {
-    row.append(el("span", "bead", r.id || ""));
+    head.append(el("span", "bead", r.id || ""));
   }
-  row.append(el("span", "title", r.title || ""));
+  head.append(el("span", "title", r.title || ""));
   if (r.kind === "question") {
     // The priority is why the row is where it is, so it is drawn, and P0 and P1
     // in the amber the page marks what wants attention with. The state is the
     // reader's own word.
-    row.append(el("span", r.priority <= 1 ? "qpri warnc" : "qpri", "P" + r.priority));
-    if (r.effort) row.append(el("span", "qeffort", r.effort));
-    row.append(el("span", "qstate", r.state === "answered" ? "answered, overseer acting" : "awaiting you"));
+    head.append(el("span", r.priority <= 1 ? "qpri warnc" : "qpri", "P" + r.priority));
+    if (r.effort) head.append(el("span", "qeffort", r.effort));
+    head.append(el("span", "qstate", r.state === "answered" ? "answered, overseer acting" : "awaiting you"));
   }
-  if (r.age_sec != null) row.append(el("span", "qage", fmtDur(r.age_sec)));
-  if (r.question) row.append(el("div", "qtext", r.question));
-  // The row carries the recommended answer's opening line: the answer is a
-  // paragraph, and the row is a line the human scans for what to decide.
-  if (r.recommended) row.append(el("div", "qrec", "Recommended: " + firstLine(r.recommended)));
+  if (r.age_sec != null) head.append(el("span", "qage", fmtDur(r.age_sec)));
+  row.append(head);
+  if (!foldable) return row;
+  // A folded row is drawn without its words rather than over them, so the page's
+  // find and its select-all do not read what the reader folded away. The box
+  // below is what the fold empties and fills, which is why no other row is
+  // redrawn with it (gt-1kaed).
+  const body = el("div", "arow-body");
+  if (!folded) body.append(...words);
+  head.setAttribute("aria-expanded", folded ? "false" : "true");
+  head.onclick = () => foldAttnRow(head, caret, body, r);
+  row.append(body);
+  return row;
+}
+
+// attentionBody is the words a row says under its header line, drawn by the row
+// and by the fold from the one function: a folded row cannot open onto cells a
+// redraw would not have drawn (gt-1kaed). The recommended answer is a paragraph
+// and the row is a line the human scans, so a row carries its opening line.
+function attentionBody(r) {
+  const body = [];
+  if (r.question) body.push(el("span", "qtext", r.question));
+  if (r.recommended) body.push(el("span", "qrec", "Recommended: " + firstLine(r.recommended)));
   const held = [];
   if (r.held_count) held.push("holds " + r.held_count + (r.held_count === 1 ? " bead" : " beads"));
   if ((r.held || []).length) held.push("Held: " + r.held.join(", "));
-  if (held.length) row.append(el("div", "qheld", held.join(" · ")));
-  if (r.malformed) row.append(el("div", "badc", "the bead's description has no question and recommended answer"));
-  if (r.kind === "question" && r.id) row.append(el("div", "qcmd", 'gt answer ' + r.id + ' "<answer>"'));
-  return row;
+  if (held.length) body.push(el("span", "qheld", held.join(" · ")));
+  if (r.malformed) body.push(el("span", "badc", "the bead's description has no question and recommended answer"));
+  if (r.kind === "question" && r.id) body.push(el("span", "qcmd", 'gt answer ' + r.id + ' "<answer>"'));
+  return body;
 }
 
 // The heartbeat block of the Overseer panel: whether the overseer session is

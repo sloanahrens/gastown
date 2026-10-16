@@ -26,8 +26,8 @@ import (
 // pageStubJS is the browser the page runs in: the DOM surface index.html's
 // script uses, and nothing more. A render function only builds elements, so
 // createElement, append, textContent, className, classList, hidden and title
-// carry it; anything a later test needs beyond that is added here with the
-// test that needs it.
+// carry it, and focus is where document.activeElement moves; anything a later
+// test needs beyond that is added here with the test that needs it.
 //
 // Two deliberate refusals keep the stub honest about the page. getElementById
 // answers only for the ids index.html's markup carries (__ids, read from the
@@ -65,6 +65,7 @@ function __el(tag) {
       for (var i = 0; i < arguments.length; i++) this.children.push(arguments[i]);
     },
     remove: function () {},
+    focus: function () { document.activeElement = this; },
     setAttribute: function (k, v) { this["attr_" + k] = v; },
     getAttribute: function (k) { return this["attr_" + k]; },
     addEventListener: function () {},
@@ -96,6 +97,12 @@ function __clickSummary(d) {
   if (typeof d.ontoggle === "function") d.ontoggle({ type: "toggle" });
 }
 function __textNode(t) { return { nodeType: 3, textContent: t == null ? "" : String(t) }; }
+// __click is the browser's click on an element: the element takes the keyboard
+// the way a button does, and its handler runs.
+function __click(e) {
+  if (typeof e.focus === "function") e.focus();
+  if (typeof e.onclick === "function") e.onclick({ type: "click", target: e });
+}
 var document = {
   createElement: function (t) { return __el(t); },
   createElementNS: function (ns, t) { return __el(t); },
@@ -104,7 +111,7 @@ var document = {
   querySelector: function () { return null; },
   querySelectorAll: function () { return []; },
   addEventListener: function () {},
-  title: "", hidden: false,
+  title: "", hidden: false, activeElement: null,
   body: __el("body"),
   hasFocus: function () { return true; },
   execCommand: function () { return true; }
@@ -224,11 +231,22 @@ type pageDOM struct {
 	vm *goja.Runtime
 }
 
-// newPageDOM loads index.html's script, failing the test if the page throws.
-// A page that cannot run is a page the harness does not describe, so a stub
-// missing what a new function uses stops the test rather than silently
-// checking less of the page.
+// newPageDOM loads index.html's script over an empty browser: no storage, so
+// the page reads none of the choices a previous load left behind.
 func newPageDOM(t *testing.T) *pageDOM {
+	t.Helper()
+
+	return newPageDOMStoring(t, nil)
+}
+
+// newPageDOMStoring loads index.html's script over a browser that already holds
+// storage — the page loaded a second time, which is the reload a choice kept in
+// localStorage has to survive. Every value is written before the page's script
+// reads it, so what the page gets back is what the browser would hold. A page
+// that cannot run is a page the harness does not describe, so a stub missing
+// what a new function uses stops the test rather than silently checking less of
+// the page.
+func newPageDOMStoring(t *testing.T, stored map[string]string) *pageDOM {
 	t.Helper()
 
 	vm := goja.New()
@@ -238,10 +256,31 @@ func newPageDOM(t *testing.T) *pageDOM {
 	if _, err := vm.RunString(pageStubJS); err != nil {
 		t.Fatalf("the DOM stub did not load: %v", err)
 	}
+	for k, v := range stored {
+		if _, err := vm.RunString("localStorage.setItem(" + strconv.Quote(k) + ", " + strconv.Quote(v) + ")"); err != nil {
+			t.Fatalf("handing the page its %s: %v", k, err)
+		}
+	}
 	if _, err := vm.RunString(pageScript(t)); err != nil {
 		t.Fatalf("index.html's script did not run: %v", err)
 	}
 	return &pageDOM{vm: vm}
+}
+
+// storage is everything the page has written, the way the browser would hand it
+// to the next load.
+func (p *pageDOM) storage(t *testing.T) map[string]string {
+	t.Helper()
+
+	v, err := p.vm.RunString("JSON.stringify(localStorage._v)")
+	if err != nil {
+		t.Fatalf("reading the page's storage: %v", err)
+	}
+	var out map[string]string
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the page's storage: %v", err)
+	}
+	return out
 }
 
 // call runs one of the page's own functions over a single reading, the state
