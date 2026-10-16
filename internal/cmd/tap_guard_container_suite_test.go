@@ -2119,6 +2119,15 @@ func TestEvaluateContainerSuiteCommand_NestedShapes(t *testing.T) {
 		{"opt-in earlier on the line", `export GT_TEST_DOCKER=1; x=$(go test ./internal/beads/...)`, true},
 		{"substitution after a cd into a container package", `cd internal/beads && GT_TEST_DOCKER=1 x=$(go test .)`, true},
 		{"slot-wrapped substitution", `gt slot run --role gastown/flint -- echo $(make test)`, true},
+		{"unquoted heredoc body, make test", "cat > note.md <<EOF\nrun $(make test)\nEOF", true},
+		{"unquoted heredoc body, container package", "GT_TEST_DOCKER=1 cat > note.md <<EOF\n$(go test ./internal/beads/...)\nEOF", true},
+		{"unquoted heredoc body, backticks", "cat <<EOF\n`make test`\nEOF", true},
+		{"unquoted heredoc body, <<- form", "cat <<-EOF\n\t$(make test)\n\tEOF", true},
+		{"unquoted heredoc body, after an apostrophe", "cat <<EOF\ndon't $(make test)\nEOF", true},
+		{"unquoted heredoc body, after a double quote", "cat <<EOF\nsay \"hi $(make test)\nEOF", true},
+		{"unquoted heredoc body, nested substitution", "cat <<EOF\n$(echo $(make test))\nEOF", true},
+		{"unquoted heredoc body, later command", "cat <<EOF\nplain\nEOF\necho $(make test)", true},
+		{"unquoted heredoc body, past the nesting cap", "bash -c \"bash -c 'bash -c \\\"cat <<EOF\n$(pwd)\nEOF\\\"'\"", true},
 
 		{"slot run inside the substitution", `x=$(gt slot run --role gastown/flint -- make test)`, false},
 		{"slot run inside eval", `eval "gt slot run --role gastown/flint -- make test"`, false},
@@ -2130,6 +2139,12 @@ func TestEvaluateContainerSuiteCommand_NestedShapes(t *testing.T) {
 		{"escaped substitution", `echo \$(make test)`, false},
 		{"eval of echo", `eval "echo hi"`, false},
 		{"eval as an argument", `grep eval notes.txt`, false},
+		{"quoted heredoc body", "cat > note.md <<'EOF'\nrun $(make test)\nEOF", false},
+		{"double-quoted heredoc tag", "cat > note.md <<\"EOF\"\nrun $(make test)\nEOF", false},
+		{"escaped substitution in an unquoted body", "cat <<EOF\nrun \\$(make test)\nEOF", false},
+		{"harmless substitution in an unquoted body", "cat <<EOF\nin $(pwd)\nEOF", false},
+		{"unquoted heredoc body, bare go test without the opt-in", "cat <<EOF\n$(go test ./internal/beads/...)\nEOF", false},
+		{"empty substitution in an unquoted body", "cat <<EOF\n$( )\nEOF", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2177,6 +2192,46 @@ func TestCommandSubstitutionSpans(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("commandSubstitutionSpans(%q) bodies = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// heredocSubstitutionSpans cuts the substitutions of an unquoted heredoc body.
+// The body is not shell text: a quote mark in it opens nothing, so an
+// apostrophe in prose does not hide a live "$(" the way commandSubstitutionSpans
+// reads it on a command line, and only a backslash keeps the next character
+// literal (gt-6fkng).
+func TestHeredocSubstitutionSpans(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"plain", "run $(make gate)\n", []string{"make gate"}},
+		{"after an apostrophe", "don't $(make gate)\n", []string{"make gate"}},
+		{"between single quotes", "'$(make gate)'\n", []string{"make gate"}},
+		{"inside double quotes", "\"$(make gate)\"\n", []string{"make gate"}},
+		{"after an unbalanced double quote", "say \"hi $(make gate)\n", []string{"make gate"}},
+		{"backticks", "run `make gate`\n", []string{"make gate"}},
+		{"nested", "$(echo $(pwd))\n", []string{"echo $(pwd)"}},
+		{"quoted group in the body", "$(grep -E '(ok|FAIL)' f)\n", []string{"grep -E '(ok|FAIL)' f"}},
+		{"two", "$(a) and `b`\n", []string{"a", "b"}},
+		{"escaped", "run \\$(make gate)\n", nil},
+		{"escaped backslash", "run \\\\$(make gate)\n", []string{"make gate"}},
+		{"unterminated", "run $(make gate\n", nil},
+		{"no substitution", "make gate\n", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got []string
+			for _, s := range heredocSubstitutionSpans(tt.in) {
+				got = append(got, tt.in[s.bodyStart:s.bodyEnd])
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("heredocSubstitutionSpans(%q) bodies = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}
