@@ -242,8 +242,8 @@ func TestRigSettingsToleratesTheRetiredOMQueueKey(t *testing.T) {
 	if loaded.Landing == nil || !loaded.Landing.Followups {
 		t.Errorf("landing = %+v, want the followups setting beside the retired key", loaded.Landing)
 	}
-	if loaded.Landing != nil && loaded.Landing.DeprecatedOMQueue != nil {
-		t.Errorf("the retired landing.om_queue reached the loaded settings as %v", *loaded.Landing.DeprecatedOMQueue)
+	if loaded.Landing != nil && bool(loaded.Landing.DeprecatedOMQueue) {
+		t.Error("the retired landing.om_queue reached the loaded settings as a setting")
 	}
 	// A save of what the loader read carries the live key and not the retired
 	// one, so a settings file written from it never sets a dead setting.

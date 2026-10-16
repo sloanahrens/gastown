@@ -1083,23 +1083,22 @@ type LandingConfig struct {
 	Followups bool `json:"followups,omitempty"`
 
 	// DeprecatedOMQueue is the retired landing.om_queue key (gt-50k2e). The om
-	// finding queue it turned on is gone: a landing om approved carries no
-	// major or critical finding for it to record (gt-oi4je). Nothing reads this
-	// field, and it is cleared on load so no writer puts the key back. It stays
-	// declared because a rig settings file decodes strictly — an undeclared key
-	// is a parse error — and a rig whose file still sets it must keep loading.
-	DeprecatedOMQueue *bool `json:"om_queue,omitempty"`
+	// finding queue it turned on is gone: a landing om approved carries no major
+	// or critical finding for it to record (gt-oi4je). Nothing reads this field,
+	// and it stays declared only because a rig settings file decodes strictly —
+	// an undeclared key is a parse error — and a rig whose file still sets it
+	// must keep loading.
+	DeprecatedOMQueue retiredKeyFlag `json:"om_queue,omitempty"`
 }
 
-// applyDeprecatedKeys drops the retired landing.om_queue key a rig settings
-// file carried, so a later save does not write it back (deprecatedKeyApplier).
-// The key has no replacement, so nothing folds and no reader sees it.
-func (s *RigSettings) applyDeprecatedKeys() []retiredSeatKey {
-	if s != nil && s.Landing != nil {
-		s.Landing.DeprecatedOMQueue = nil
-	}
-	return nil
-}
+// retiredKeyFlag is a declared settings key that carries no setting: it decodes
+// and discards what the file held, so nothing reads the key and no write puts
+// it back. A retired key is declared this way while live settings files still
+// set it (gt-50k2e).
+type retiredKeyFlag bool
+
+// UnmarshalJSON drops the value: a retired key decides nothing.
+func (retiredKeyFlag) UnmarshalJSON([]byte) error { return nil }
 
 // MergeQueueConfig represents merge queue settings for a rig.
 type MergeQueueConfig struct {
@@ -1901,12 +1900,11 @@ var retiredPoolSeatKeys = []retiredPoolSeatKey{
 	{parent: []string{"polecat_pool"}, old: "max_overflow", current: "max_seats"},
 }
 
-// deprecatedKeyApplier is the hook a config type uses to deal with retired key
-// spellings once the file decodes: it returns the retired keys it read so the
-// caller can warn about each, and folds what it read into the field that
-// replaced it — or drops it, for a spelling with no replacement.
-// DecodeJSONFile runs it after a successful decode, so old and new spellings
-// arrive at every reader as one set of values.
+// deprecatedKeyApplier is the hook a config type uses to fold retired key
+// spellings into the fields that replaced them: it returns the retired keys it
+// read so the caller can warn about each. DecodeJSONFile runs it after a
+// successful decode, so old and new spellings arrive at every reader as one set
+// of values.
 type deprecatedKeyApplier interface {
 	applyDeprecatedKeys() []retiredSeatKey
 }
