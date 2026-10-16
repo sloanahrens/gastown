@@ -654,16 +654,26 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 }
 
 // substitutionBody is the body of one command substitution as the shell parses
-// it: a backtick span's body drops the backslash of an escaped nested backtick
-// pair — literal to the outer scan, yet a live substitution to the body's own
-// parse — so a nested command the caller must judge is judged (gt-jj3or). A
-// "$(...)" or process-substitution body is returned as written.
+// it: a backtick span's body drops the backslash of each \\, \` and \$ pair, the
+// only three the shell unescapes there. One left-to-right pass keeps a doubled
+// backslash from pairing with the character after it. An escaped nested
+// backtick and a "\$(...)" are literal to the outer scan, yet live
+// substitutions to the body's own parse, so the nested command the caller must
+// judge is judged (gt-jj3or, gt-tder1). A "$(...)" or process-substitution body
+// is returned as written.
 func substitutionBody(text string, span substitutionSpan) string {
 	body := text[span.bodyStart:span.bodyEnd]
-	if text[span.open] == '`' {
-		body = strings.ReplaceAll(body, "\\`", "`")
+	if text[span.open] != '`' {
+		return body
 	}
-	return body
+	var b strings.Builder
+	for i := 0; i < len(body); i++ {
+		if body[i] == '\\' && i+1 < len(body) && strings.IndexByte("\\`$", body[i+1]) >= 0 {
+			i++
+		}
+		b.WriteByte(body[i])
+	}
+	return b.String()
 }
 
 // backtickBodyEnd returns the index of the backtick that closes the one whose

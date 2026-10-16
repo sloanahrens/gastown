@@ -3138,6 +3138,8 @@ func TestDangerousGuardJudgesEscapedNestedBacktick(t *testing.T) {
 		{"a nuke in the nested command", "echo `echo \\`rm -rf /\\``", true},
 		{"a reset onto the remote in the nested command", "echo `echo \\`git reset --hard origin/main\\``", true},
 		{"the nuke in an unquoted heredoc body", "cat > f <<EOF\necho `echo \\`rm -rf /\\``\nEOF", true},
+		{"a reset in an escaped-dollar substitution", "echo `echo \\$(git reset --hard)`", true},
+		{"a harmless escaped-dollar substitution", "echo `echo \\$(echo hi)`", false},
 		{"a harmless nested command", "echo `echo \\`echo hi\\``", false},
 		{"the same body quoted stays data", "cat > f <<'EOF'\necho `echo \\`rm -rf /\\``\nEOF", false},
 		{"an escaped backtick pair opens no substitution", "echo \\`rm -rf /\\`", false},
