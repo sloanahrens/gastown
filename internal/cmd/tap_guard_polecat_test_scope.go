@@ -162,13 +162,11 @@ const testTimingMakeGoal = "test-timing"
 // invocation's tokens from the "make" word onward and dir is the directory the
 // guard placed the segment in ("" when it could not).
 //
-// The last PKGS assignment wins, as in make. The value is word-split, as the
-// recipe's unquoted $(PKGS) is, and each word is judged by the rule a go test
-// package argument with no -run filter gets: the whole-repo wildcard, a heavy
-// package, and a wildcard or shell expansion that can reach one all leave the
-// run unbounded. A word starting with "-" is a go flag the guard cannot read, so
-// it is refused too. Only the PKGS=value spelling counts; PKGS:=value and
-// PKGS?=value stay refused (fail closed).
+// It is true only when the last PKGS=<packages> assignment names packages the
+// guard can read and none is the whole repo, a heavy package, or a pattern that
+// can reach one. Anything else, including PKGS:= and PKGS?=, stays unbounded
+// (fail closed). Several packages need the quoted PKGS="a b" spelling; an
+// unquoted second word is another make goal, not a package.
 func makeTestTimingPKGSBounded(args []string, dir string) bool {
 	runDir, known := makeRunDir(args, dir)
 	if !known || strings.TrimSpace(runDir) == "" {
@@ -177,14 +175,16 @@ func makeTestTimingPKGSBounded(args []string, dir string) bool {
 	var words []string
 	for _, tok := range args[1:] {
 		if value, ok := strings.CutPrefix(tok, "PKGS="); ok {
-			words = strings.Fields(value)
+			words = strings.Fields(value) // the last assignment wins, as in make
 		}
 	}
 	if len(words) == 0 {
 		return false
 	}
+	// The recipe's unquoted $(PKGS) is word-split, so each word is judged as a
+	// go test package argument with no -run filter.
 	for _, w := range words {
-		if strings.HasPrefix(w, "-") {
+		if strings.HasPrefix(w, "-") { // a go flag the guard cannot read
 			return false
 		}
 		if packageArgWildcard(w) && packageWildcardMayReach(w, runDir, heavyTestPackageList()) {
@@ -197,15 +197,26 @@ func makeTestTimingPKGSBounded(args []string, dir string) bool {
 
 // findPolecatWholeSuiteMakeGoal returns the index of the first make invocation
 // in tokens (already lowercased) that names a polecatWholeSuiteMakeGoals goal,
-// and the goal, or -1.
+// and the goal, or -1. A goal PKGS cannot narrow wins over test-timing, which
+// the caller may exempt, wherever either sits in tokens or in the goal list:
+// "make test-timing gate PKGS=./x" reports gate and stays refused.
 func findPolecatWholeSuiteMakeGoal(tokens []string) (int, string) {
 	found, goal := -1, ""
 	for _, g := range polecatWholeSuiteMakeGoals {
+		if g == testTimingMakeGoal {
+			continue
+		}
 		if i := findInvocation(tokens, "make", g); i >= 0 && (found < 0 || i < found) {
 			found, goal = i, g
 		}
 	}
-	return found, goal
+	if found >= 0 {
+		return found, goal
+	}
+	if i := findInvocation(tokens, "make", testTimingMakeGoal); i >= 0 {
+		return i, testTimingMakeGoal
+	}
+	return -1, ""
 }
 
 // evaluatePolecatTestScopeSegment judges one shell segment in cwd, the
