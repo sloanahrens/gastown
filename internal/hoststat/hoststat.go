@@ -123,8 +123,13 @@ func sampleCPUIdle(ctx context.Context, top func(context.Context) ([]byte, error
 	defer cancel()
 	out, err := top(ctx)
 	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
+		// A killed top reports "signal: killed", not the context's error, so
+		// the context says which of the two ended it.
+		switch ctxErr := ctx.Err(); {
+		case errors.Is(ctxErr, context.DeadlineExceeded):
 			return 0, fmt.Errorf("top did not finish within %s: %w", sampleTimeout, ctxErr)
+		case ctxErr != nil:
+			return 0, fmt.Errorf("top was cancelled before it finished: %w", ctxErr)
 		}
 		return 0, fmt.Errorf("top failed: %w", err)
 	}

@@ -146,16 +146,31 @@ func TestCheckPressureCPUTierWarnsOnceOfAThresholdPastOne(t *testing.T) {
 	}
 }
 
+// The daemon warns of a threshold past 1.0 when it starts, before any spawn
+// check, and the first check does not repeat it (gt-kc8v1).
+func TestWarnPressureScaleSpeaksAtStartOnce(t *testing.T) {
+	t.Parallel()
+	d, logs := pressureDaemon(t, 3.0, 50, nil)
+	d.warnPressureScale(d.loadOperationalConfig().GetDaemonConfig().PressureCPUThresholdV())
+	if !strings.Contains(logs.String(), "can never trip") {
+		t.Fatalf("no warning at start: %q", logs.String())
+	}
+	d.checkPressure("polecat")
+	if n := strings.Count(logs.String(), "can never trip"); n != 1 {
+		t.Errorf("warned %d times, want once; log %q", n, logs.String())
+	}
+}
+
 // With no cpuIdleFn the tier runs the real top. The reading depends on the
-// host, so the test holds the contract only: a reading is a percent, and a
-// failure is an error that leaves the spawn free (gt-kc8v1).
-func TestHostCPUIdleProductionReadIsAPercentOrAnError(t *testing.T) {
+// host, so the test holds the contract only: top is readable and the reading
+// is a percent. A host whose top cannot be read fails it, since the gate would
+// be blind there (gt-kc8v1).
+func TestHostCPUIdleProductionReadIsAPercent(t *testing.T) {
 	t.Parallel()
 	d, _ := newTestDaemon(t.TempDir())
 	idle, err := d.hostCPUIdle()
 	if err != nil {
-		t.Logf("top unreadable on this host: %v", err)
-		return
+		t.Fatalf("production top read failed: %v", err)
 	}
 	if idle < 0 || idle > 100 {
 		t.Errorf("idle = %v, want a percent", idle)

@@ -68,11 +68,7 @@ func (d *Daemon) checkPressure(_ string) PressureResult {
 	// daemon log says why it could not be read, so a gate that has gone blind
 	// does not look like a host that is fine.
 	if cpuThreshold > 0 {
-		if cpuThreshold > 1 {
-			d.pressureScaleWarn.Do(func() {
-				d.logger.Printf("pressure_cpu_threshold %.2f can never trip: it is the busy share of the host's cores (at most 1.0), no longer a load average per core; a value tuned for the load average needs re-setting (gt-kc8v1)", cpuThreshold)
-			})
-		}
+		d.warnPressureScale(cpuThreshold)
 		idle, err := d.hostCPUIdle()
 		if err != nil {
 			result.CPUReadErr = err
@@ -109,6 +105,19 @@ func (d *Daemon) checkPressure(_ string) PressureResult {
 	}
 
 	return result
+}
+
+// warnPressureScale says once that a CPU threshold past 1.0 can never trip: it
+// is the busy share of the host's cores, no longer a load average per core, so
+// a value tuned for the old scale leaves the tier dead. Run calls it at start
+// so the warning does not wait for the first spawn check (gt-kc8v1).
+func (d *Daemon) warnPressureScale(cpuThreshold float64) {
+	if cpuThreshold <= 1 {
+		return
+	}
+	d.pressureScaleWarn.Do(func() {
+		d.logger.Printf("pressure_cpu_threshold %.2f can never trip: it is the busy share of the host's cores (at most 1.0), no longer a load average per core; a value tuned for the load average needs re-setting (gt-kc8v1)", cpuThreshold)
+	})
 }
 
 // hostCPUIdle is the host's CPU idle percent, or the reason it could not be

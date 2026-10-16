@@ -924,6 +924,8 @@ func (d *Daemon) Run() (err error) {
 		return err
 	}
 
+	d.warnPressureScale(d.loadOperationalConfig().GetDaemonConfig().PressureCPUThresholdV())
+
 	// Repair metadata.json for all rigs on startup.
 	// This ensures all rigs have proper Dolt server configuration.
 	if _, errs := doltserver.EnsureAllMetadata(d.config.TownRoot); len(errs) > 0 {

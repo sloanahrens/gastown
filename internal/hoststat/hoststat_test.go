@@ -227,6 +227,21 @@ func TestSampleCPUIdleReadsTopAlone(t *testing.T) {
 	}
 }
 
+// A top cut short by its caller was not slow: the error says it was cancelled,
+// not that it outlived the sample window (gt-kc8v1).
+func TestSampleCPUIdleNamesACancelledTopApartFromATimeout(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	_, err := sampleCPUIdle(ctx, func(ctx context.Context) ([]byte, error) {
+		cancel()
+		<-ctx.Done()
+		return nil, errors.New("signal: killed")
+	})
+	if err == nil || !strings.Contains(err.Error(), "cancelled") || strings.Contains(err.Error(), "did not finish") {
+		t.Fatalf("err = %v, want a cancellation, not a timeout", err)
+	}
+}
+
 // A top that cannot be read says why: a failed run, a timeout and an output
 // with no idle share are three different faults to the operator reading the
 // daemon log (gt-kc8v1).
