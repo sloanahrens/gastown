@@ -196,10 +196,41 @@ func TestTheWatchdogReplacesAStreamQuietForNinetySeconds(t *testing.T) {
 	if got := pageNumber(t, dom, "__sources[0].readyState"); got != 2 {
 		t.Errorf("the replaced stream's readyState is %d, want it closed", got)
 	}
-	// The watchdog swaps the stream, not the label: the replacement's onopen or
-	// onerror says what the page is on now.
-	if d := dom.element(t, "conn"); d.Text != "live" || d.Class != "on" {
-		t.Errorf("#conn reads %q in class %q after the swap, want the label the open left", d.Text, d.Class)
+	// The watchdog drops the stream like the browser would have: the chip stops
+	// claiming a stream it no longer has, and the stream that opens next takes
+	// the new build's page (gt-3q3go).
+	if d := dom.element(t, "conn"); d.Text != "reconnecting" || d.Class != "off" {
+		t.Errorf("#conn reads %q in class %q after the swap, want the drop the watchdog made", d.Text, d.Class)
+	}
+	openStream(t, dom)
+	if got := pageReloads(t, dom); got != 1 {
+		t.Errorf("the page reloaded %d times when the watchdog's stream opened, want the new build's page", got)
+	}
+}
+
+// A connect that works clears the backoff, and it clears it before the reload a
+// dropped stream takes the page on: the reload ends the page in a browser, so a
+// reset that came after it would never run (gt-3q3go).
+func TestAStreamThatOpensAfterADropClearsTheBackoff(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	failStream(t, dom, "EventSource.CLOSED") // the delay doubles from here
+	advanceTimers(t, dom, 2000)
+	failStream(t, dom, "EventSource.CLOSED")
+	advanceTimers(t, dom, 4000)
+	openStream(t, dom) // the new build's page, and the reset the drop would have hidden
+
+	// The next failure waits the base delay again, not the doubled one: 4 s here
+	// would mean the reset never ran.
+	failStream(t, dom, "EventSource.CLOSED")
+	advanceTimers(t, dom, 1999)
+	if got := pageStreams(t, dom); got != 3 {
+		t.Fatalf("the page had %d streams 1999 ms into a 2 s wait, want the wait after the reset", got)
+	}
+	advanceTimers(t, dom, 1)
+	if got := pageStreams(t, dom); got != 4 {
+		t.Fatalf("the page had %d streams 2 s after the failure, want the replacement the reset timed", got)
 	}
 }
 

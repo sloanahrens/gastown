@@ -3148,12 +3148,18 @@ function connect() {
   stream = es;
   reconnecting = false;
   lastEvent = Date.now();
-  // The server restarts in place when the gt binary is replaced; a stream that
-  // comes back after dropping may be a new build, so take its page.
-  es.onopen = () => { if (dropped) { location.reload(); return; } retryMs = 0; $("conn").className = "on"; $("conn").textContent = "live"; };
+  es.onopen = () => {
+    // A connect that worked clears the backoff, and it clears it whatever the
+    // page does next: the reload below ends this page, so a reset after it
+    // would never run (gt-3q3go).
+    retryMs = 0;
+    // The server restarts in place when the gt binary is replaced; a stream
+    // that comes back after dropping may be a new build, so take its page.
+    if (dropped) { location.reload(); return; }
+    $("conn").className = "on"; $("conn").textContent = "live";
+  };
   es.onerror = () => {
-    dropped = true;
-    $("conn").className = "off"; $("conn").textContent = "reconnecting";
+    dropStream();
     // A stream the browser is still connecting comes back on its own; one it has
     // given up on is the page's to replace.
     if (es.readyState === EventSource.CLOSED) reconnectStream(es);
@@ -3163,6 +3169,14 @@ function connect() {
   es.addEventListener("backlog", ev => { seen(); $("feed").replaceChildren(); for (const k of Object.keys(counts)) delete counts[k]; JSON.parse(ev.data).forEach(e => pushEntry(e, true)); });
   es.addEventListener("entry", ev => { seen(); pushEntry(JSON.parse(ev.data)); });
   es.addEventListener("alert", ev => { seen(); onAlert(JSON.parse(ev.data)); });
+}
+// dropStream records that the page's stream is gone, whether the browser said so
+// or the page found it out itself. The chip stops claiming the stream is live,
+// and the stream that follows is taken as a new build's page: whatever comes
+// back after a drop says nothing about the build this page is running (gt-3q3go).
+function dropStream() {
+  dropped = true;
+  $("conn").className = "off"; $("conn").textContent = "reconnecting";
 }
 // reconnectStream makes the next stream itself, after a delay that doubles while
 // connects keep failing. A stream that is no longer the live one was replaced
@@ -3242,12 +3256,20 @@ $("models").addEventListener("click", toggleModels);
 paintModelsLine();
 renderChips();
 connect();
-// The server's keepalive comment is not an event the page sees, so a stream can
-// be alive and say nothing for minutes. Replacing it is cheap: the server
-// resends the snapshot, and the page keeps the state it has until it arrives.
+// The watchdog is for a stream the browser has lost without saying so: a
+// half-open connection never reaches CLOSED and never calls back, and an open
+// one that sends nothing reports nothing. A named event is the only liveness the
+// page can read — the server's keepalive is a comment, which is not an event —
+// and the server publishes one on every poll, the fastest every 5 s
+// (dashboard.HealthEvery). SILENT_MS without one is therefore the page's stream
+// to drop rather than a server to wait for, and the margin is wide enough that
+// only a stalled or restarted server reaches it; a server quiet that long costs
+// the refresh that follows the drop, and the page holds the state it has until
+// then (gt-rpble, gt-3q3go).
 setInterval(() => {
   if (reconnecting) return; // a replacement is already on its way
   if (Date.now() - lastEvent < SILENT_MS) return;
+  dropStream();
   stream.close();
   connect();
 }, WATCHDOG_MS);
