@@ -487,6 +487,18 @@ func TestMakeTestOutsideGoTree(t *testing.T) {
 		{"make -w -C into the Go tree", npmRoot, "make -w -C " + goRoot + " test", true},
 		{"make -i -C into the Go tree", npmRoot, "make -i -C " + goRoot + " test", true},
 		{"make -w -C out of the Go tree", goRoot, "make -w -C " + npmRoot + " test", false},
+		// The same letters clustered: valueless -w and -i behind or beside
+		// other letters leave the -C that follows, or that ends the cluster,
+		// as the run directory.
+		{"make -wi -C into the Go tree", npmRoot, "make -wi -C " + goRoot + " test", true},
+		{"make -iw -C into the Go tree", npmRoot, "make -iw -C " + goRoot + " test", true},
+		{"make -sw -C into the Go tree", npmRoot, "make -sw -C " + goRoot + " test", true},
+		{"make -si -C into the Go tree", npmRoot, "make -si -C " + goRoot + " test", true},
+		{"make -wi -C out of the Go tree", goRoot, "make -wi -C " + npmRoot + " test", false},
+		{"make -swiC into the Go tree", npmRoot, "make -swiC " + goRoot + " test", true},
+		{"make -wiC attached into the Go tree", npmRoot, "make -wiC" + goRoot + " test", true},
+		{"make -iwC out of the Go tree", goRoot, "make -iwC " + npmRoot + " test", false},
+		{"make -wiW takes the next token as its value", npmRoot, "make -wiW -C " + goRoot + " test", false},
 		{"make -W file then -C into the Go tree", npmRoot, "make -W file.mk -C " + goRoot + " test", true},
 		{"make -W file then -C out of the Go tree", goRoot, "make -W file.mk -C " + npmRoot + " test", false},
 		{"make -I dir then -C out of the Go tree", goRoot, "make -I inc -C " + npmRoot + " test", false},
@@ -510,6 +522,8 @@ func TestMakeBareIgnoreErrorsFlagKeepsTheDirectory(t *testing.T) {
 	for _, command := range []string{
 		"make -i -C " + goRoot + " gate",
 		"make -w -C " + goRoot + " gate",
+		"make -wi -C " + goRoot + " gate",
+		"make -siC " + goRoot + " gate",
 	} {
 		if !makeActsOnWholeGoModule(shellTokenize(command), npmRoot) {
 			t.Errorf("makeActsOnWholeGoModule(%q, cwd %s) = false, want true", command, npmRoot)
