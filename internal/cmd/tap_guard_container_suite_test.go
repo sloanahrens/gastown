@@ -2440,7 +2440,9 @@ func TestEvaluateContainerSuiteCommand_NestedShapes(t *testing.T) {
 // commandSubstitutionSpans cuts a body with the parentheses balanced and the
 // quotes respected, and runs a substitution that never closes to the end of the
 // text (gt-wrr5c, gt-6v07e). A backslash keeps the next character literal, so
-// an escaped backtick is text rather than the end of a backtick body.
+// an escaped backtick is text rather than the end of a backtick body. A process
+// substitution is a span where the shell performs one — a command line, not
+// inside a quote or a comment (gt-jj3or).
 func TestCommandSubstitutionSpans(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2467,6 +2469,13 @@ func TestCommandSubstitutionSpans(t *testing.T) {
 		{"unterminated backtick", "x=`go test .", []string{"go test ."}},
 		{"unterminated quote in the body", `echo $(a "b) $(c)`, []string{`a "b) $(c)`}},
 		{"unterminated after a closed one", `a=$(one) b=$(two`, []string{"one", "two"}},
+		{"process substitution", `cat <(go test .)`, []string{"go test ."}},
+		{"output process substitution", `cat > >(tee out)`, []string{"tee out"}},
+		{"nested process substitution", `cat <(cat <(go test .))`, []string{"cat <(go test .)"}},
+		{"unterminated process substitution", `cat <(go test .`, []string{"go test ."}},
+		{"single-quoted process substitution", `echo '<(go test .)'`, nil},
+		{"double-quoted process substitution", `echo "<(go test .)"`, nil},
+		{"process substitution in a comment", `echo hi # <(go test .)`, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2560,6 +2569,7 @@ func TestHeredocSubstitutionSpans(t *testing.T) {
 		{"escaped", "run \\$(make gate)\n", nil},
 		{"escaped backslash", "run \\\\$(make gate)\n", []string{"make gate"}},
 		{"unterminated", "run $(make gate\n", []string{"make gate\n"}},
+		{"process substitution is data", "cat <(make gate)\n", nil},
 		{"no substitution", "make gate\n", nil},
 	}
 	for _, tt := range tests {
@@ -2576,7 +2586,7 @@ func TestHeredocSubstitutionSpans(t *testing.T) {
 	}
 }
 
-// TestTapGuardDeepReviewP3Batch pins the six command-text gaps the deep review
+// TestTapGuardDeepReviewP3Batch pins the command-text gaps the deep review
 // filed against the internal/cmd guards (gt-jj3or). Each subtest is a command
 // the shell runs — or a form the guard's own direct spelling already refuses —
 // that at least one guard allowed before this change. They share one test
@@ -2594,8 +2604,8 @@ func TestTapGuardDeepReviewP3Batch(t *testing.T) {
 	t.Run("unquoted_heredoc_substitution", func(t *testing.T) {
 		command := "GT_TEST_DOCKER=1 cat <<EOF\n$(go test ./internal/beads)\nEOF"
 		reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), command, "")
-		if reason == "" {
-			t.Errorf("evaluateContainerSuiteCommand(%q) allowed it, want the container-suite refusal", command)
+		if want := "targets testcontainers-backed package(s)"; !strings.Contains(reason, want) {
+			t.Errorf("evaluateContainerSuiteCommand(%q) reason = %q, want %q", command, reason, want)
 		}
 	})
 
@@ -2609,9 +2619,10 @@ func TestTapGuardDeepReviewP3Batch(t *testing.T) {
 		}
 		proc := fakeGuardProcess(nil, root)
 		sess := guardSession{proc: proc}
+		wantDanger := "Hard reset discards all uncommitted changes irreversibly"
 		for _, command := range []string{"cat <(git reset --hard)", "cat >(git reset --hard)"} {
-			if reason, _ := evaluateDangerousCommand(command, 0, sess); reason == "" {
-				t.Errorf("evaluateDangerousCommand(%q) allowed it, want a refusal", command)
+			if reason, _ := evaluateDangerousCommand(command, 0, sess); !strings.Contains(reason, wantDanger) {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want %q", command, reason, wantDanger)
 			}
 		}
 		if reason, _ := evaluateDangerousCommand(`echo "<(git reset --hard)"`, 0, sess); reason != "" {
@@ -2623,8 +2634,36 @@ func TestTapGuardDeepReviewP3Batch(t *testing.T) {
 		if reason, _ := evaluateDangerousCommand("cat > f <<EOF\ncat <(git reset --hard)\nEOF", 0, sess); reason != "" {
 			t.Errorf("evaluateDangerousCommand(process substitution in a data body) blocked (%q), want allowed", reason)
 		}
-		if reason, _ := evaluateDangerousCommand("bash <<EOF\ncat <(git reset --hard)\nEOF", 0, sess); reason == "" {
-			t.Errorf("evaluateDangerousCommand(process substitution in a script body) allowed it, want a refusal")
+		if reason, _ := evaluateDangerousCommand("bash <<EOF\ncat <(git reset --hard)\nEOF", 0, sess); !strings.Contains(reason, wantDanger) {
+			t.Errorf("evaluateDangerousCommand(process substitution in a script body) reason = %q, want %q", reason, wantDanger)
+		}
+		// The container-suite and polecat test-scope guards read the same spans
+		// through commandSubstitutionSpans, so the command inside one is judged
+		// as the shell runs it. An unterminated "<(" runs to the end of the
+		// text, so the words after the last one are read the same way.
+		wantContainer := "targets testcontainers-backed package(s)"
+		for _, command := range []string{
+			`GT_TEST_DOCKER=1 cat <(go test ./internal/beads)`,
+			`GT_TEST_DOCKER=1 cat >(go test ./internal/beads)`,
+			`GT_TEST_DOCKER=1 cat <(go test ./internal/beads`,
+		} {
+			if reason, _ := evaluateContainerSuiteCommand(proc, command, ""); !strings.Contains(reason, wantContainer) {
+				t.Errorf("evaluateContainerSuiteCommand(%q) reason = %q, want %q", command, reason, wantContainer)
+			}
+		}
+		scopeBlocked := `cat <(make test)`
+		scopeReason, _ := evaluatePolecatTestScope(proc, scopeBlocked)
+		if want := "runs the whole suite"; !strings.Contains(scopeReason, want) {
+			t.Errorf("evaluatePolecatTestScope(%q) reason = %q, want %q", scopeBlocked, scopeReason, want)
+		}
+		// A quoted angle form is plain text: the shell runs nothing.
+		for _, command := range []string{
+			`GT_TEST_DOCKER=1 echo '<(go test ./internal/beads)'`,
+			`GT_TEST_DOCKER=1 echo "<(go test ./internal/beads)"`,
+		} {
+			if reason, _ := evaluateContainerSuiteCommand(proc, command, ""); reason != "" {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked (%q), want allowed", command, reason)
+			}
 		}
 	})
 
@@ -2662,8 +2701,9 @@ func TestTapGuardDeepReviewP3Batch(t *testing.T) {
 	t.Run("slot_run_anchored", func(t *testing.T) {
 		proc := fakeGuardProcess(nil, root)
 		blocked := "GT_TEST_DOCKER=1 go test ./internal/beads -args gt slot run"
-		if reason, _ := evaluateContainerSuiteCommand(proc, blocked, ""); reason == "" {
-			t.Errorf("evaluateContainerSuiteCommand(%q) allowed it, want the container-suite refusal", blocked)
+		reason, _ := evaluateContainerSuiteCommand(proc, blocked, "")
+		if want := "targets testcontainers-backed package(s)"; !strings.Contains(reason, want) {
+			t.Errorf("evaluateContainerSuiteCommand(%q) reason = %q, want %q", blocked, reason, want)
 		}
 		allowed := []string{
 			"gt slot run -- go test ./internal/beads",
@@ -2677,14 +2717,25 @@ func TestTapGuardDeepReviewP3Batch(t *testing.T) {
 		}
 	})
 
+	// The same handoff for a command substitution: the directory its own cd
+	// could not place is carried to its body as unplaced, so "go test ./beads"
+	// there is refused rather than read as the base's own package (gt-jj3or).
+	t.Run("substitution_unplaced_dir", func(t *testing.T) {
+		command := `cd "$X" && GT_TEST_DOCKER=1 v=$(go test ./beads)`
+		reason, _ := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), command, "")
+		if want := "names a directory the guard cannot place"; !strings.Contains(reason, want) {
+			t.Errorf("evaluateContainerSuiteCommand(%q) reason = %q, want %q", command, reason, want)
+		}
+	})
+
 	// The backslash-escaped backtick pair is literal to the outer scan, yet the
 	// shell drops those backslashes when it parses the body, so the body it runs
 	// holds a live substitution around make gate (substitutionBody).
 	t.Run("nested_escaped_backtick", func(t *testing.T) {
 		command := "echo `echo \\`make gate\\``"
 		reason, _ := evaluatePolecatTestScope(fakeGuardProcess(nil, root), command)
-		if reason == "" {
-			t.Errorf("evaluatePolecatTestScope(%q) allowed it, want the test-scope refusal", command)
+		if want := "runs the whole suite"; !strings.Contains(reason, want) {
+			t.Errorf("evaluatePolecatTestScope(%q) reason = %q, want %q", command, reason, want)
 		}
 	})
 }
