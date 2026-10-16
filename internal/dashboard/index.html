@@ -763,8 +763,13 @@ function paintAges(r, now) {
 function workRow(names, p, now) {
   const tr = el("div", "workrow");
   const cell = (cls, text, tip) => { const c = el("span", cls, text); if (tip) c.title = tip; tr.append(c); return c; };
-  cell("wagent", p.agent || (p.has_session ? "–" : ""),
-    p.agent ? "the agent this seat's session was started with" : p.has_session ? "its session recorded no agent" : "this seat has no session");
+  // An idle seat holds nothing, and a parked rig's seat with no bead is stood
+  // down the same way: neither has a model to name — the agent its bead records
+  // is the last job's, not the dispatcher's pick for the next one (gt-hnztc).
+  const noModel = p.state === "idle" || (p.rig_parked && !p.bead);
+  cell("wagent", noModel ? "" : (p.agent || (p.has_session ? "–" : "")),
+    noModel ? "this seat holds no bead, so it has no model — the model is chosen when work is dispatched"
+      : p.agent ? "the agent this seat's session was started with" : p.has_session ? "its session recorded no agent" : "this seat has no session");
   const landed = p.landed_24h
     ? " · landed " + p.landed_24h + " in 24h, om approved " + Math.round(p.approved_24h / p.landed_24h * 100) + "%" +
       (p.avg_score_24h != null ? ", average score " + p.avg_score_24h.toFixed(2) : "")
@@ -779,6 +784,11 @@ function workRow(names, p, now) {
     // The hover reads the bead's description under its id and title; a bead
     // with no description hovers as its title alone (gt-kk6gb).
     bd.title = [p.bead, p.title].filter(Boolean).join(" ") + (p.description ? "\n\n" + p.description : "");
+  } else if (noModel && p.rig) {
+    // The rig stands where the bead would, so a folded row still says where the
+    // seat is — the inventory's reason for it ("reusable") says nothing.
+    bd.append(el("span", "wtitle", p.rig));
+    bd.title = p.rig + (p.state === "idle" ? " — an idle seat holds no bead" : " — a seat in a parked rig holds no bead");
   } else {
     bd.append(el("span", "wtitle", p.reason || "–"));
     bd.title = p.reason || "";
@@ -823,7 +833,7 @@ function workSeats(box, s, pcs, r) {
     box.append(d);
   };
   if (parked.length) fold(parked.length + " in parked rigs (stood down on purpose; not alerts)", parked, openParkedRig, v => { openParkedRig = v; });
-  if (idle.length) fold(idle.length + " idle (free to take work)", idle, openIdle, v => { openIdle = v; });
+  if (idle.length) fold(idle.length + " idle (free to take work; the model is chosen when work is dispatched)", idle, openIdle, v => { openIdle = v; });
 }
 
 // blockedLine counts the beads waiting on another bead apart from the leaked
