@@ -227,7 +227,7 @@ func TestSampleCPUIdleReadsTopAlone(t *testing.T) {
 	}
 }
 
-// A top cut short by its caller was not slow: the error says it was cancelled,
+// A top cut short by its caller was not slow: the error says it was canceled,
 // not that it outlived the sample window (gt-kc8v1).
 func TestSampleCPUIdleNamesACancelledTopApartFromATimeout(t *testing.T) {
 	t.Parallel()
@@ -237,7 +237,7 @@ func TestSampleCPUIdleNamesACancelledTopApartFromATimeout(t *testing.T) {
 		<-ctx.Done()
 		return nil, errors.New("signal: killed")
 	})
-	if err == nil || !strings.Contains(err.Error(), "cancelled") || strings.Contains(err.Error(), "did not finish") {
+	if err == nil || !strings.Contains(err.Error(), "canceled") || strings.Contains(err.Error(), "did not finish") {
 		t.Fatalf("err = %v, want a cancellation, not a timeout", err)
 	}
 }

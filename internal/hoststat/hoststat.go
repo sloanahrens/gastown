@@ -129,7 +129,7 @@ func sampleCPUIdle(ctx context.Context, top func(context.Context) ([]byte, error
 		case errors.Is(ctxErr, context.DeadlineExceeded):
 			return 0, fmt.Errorf("top did not finish within %s: %w", sampleTimeout, ctxErr)
 		case ctxErr != nil:
-			return 0, fmt.Errorf("top was cancelled before it finished: %w", ctxErr)
+			return 0, fmt.Errorf("top was canceled before it finished: %w", ctxErr)
 		}
 		return 0, fmt.Errorf("top failed: %w", err)
 	}
