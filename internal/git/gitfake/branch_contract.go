@@ -47,7 +47,6 @@ type BranchRepo interface {
 	CheckoutNewBranch(branch, startPoint string) error
 	CheckoutResetBranch(branch, startPoint string) error
 	CheckoutDetachForce(ref string) error
-	ResetHard(ref string) error
 	CleanForce() error
 
 	WorktreeAddFromRef(path, branch, startPoint string) error

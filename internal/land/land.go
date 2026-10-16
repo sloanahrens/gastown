@@ -79,6 +79,9 @@ type Repo interface {
 	MergeSquash(branch, message string) error
 	GetConflictingFiles() ([]string, error)
 	AbortMerge() error
+	// ResetHard puts the worktree's HEAD, index and files back at ref, which
+	// is how the landing undoes a probe merge that committed.
+	ResetHard(ref string) error
 	// Push updates remote's branch to the refspec's source, force-updating it:
 	// the merge candidate is the worker's own branch and every retry rebuilds
 	// it.
@@ -1061,7 +1064,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	ctx = WithLandingID(ctx, id)
 	wt := l.open(dir)
 
-	merged, rej, err := mergeWork(wt, w, base)
+	out, err := mergeWork(wt, w, base)
 	if err != nil {
 		// The last shape of a lost record: a squash whose head the target
 		// already carries stages nothing, so mergeWork's commit fails with an
@@ -1082,8 +1085,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// merging it changes nothing: the work is already there by a route
 		// that left no record, so there is nothing for the author to land
 		// and nothing for an operator to repair (gt-sq2oe).
-		var empty *emptySquashError
-		if errors.As(err, &empty) {
+		if out.EmptySquash {
 			return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(wt, EmptyMerge{
 				Target: w.Target, Base: base, Head: w.Head, Stage: "after merge",
 				Comparison: fmt.Sprintf("merging %s changes nothing on %s/%s (its changes are already there, and no land merge of this lander's accounts for them)", shortSHA(w.Head), remote, w.Target),
@@ -1091,6 +1093,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		}
 		return Result{}, err
 	}
+	merged, rej := out.Commit, out.Rejection
 	if rej != nil {
 		// A squash that already landed conflicts with a later landing that
 		// edited the head's own lines: the head meets itself on the target,
@@ -1566,14 +1569,25 @@ func (l *Lander) addWorktree(g Repo, base string) (dir, id string, cleanup func(
 	}, nil
 }
 
+// mergeOutcome is what mergeWork learned from a merge: the merged commit, or
+// the Rejection that stopped it, or, beside an error, EmptySquash for a squash
+// that failed because it staged nothing, the head's changes being already on
+// the base.
+type mergeOutcome struct {
+	Commit      string
+	Rejection   *Rejection
+	EmptySquash bool
+}
+
 // mergeWork merges the declared head into the worktree at base: --no-ff, or
 // a squash when the range still holds auto-save commits so none reach the
-// target (the refinery's stackMerge behavior).
-func mergeWork(wt Repo, w Work, base string) (string, *Rejection, error) {
+// target (the refinery's stackMerge behavior). A merge that fails ends as an
+// InfraError.
+func mergeWork(wt Repo, w Work, base string) (mergeOutcome, error) {
 	msg := fmt.Sprintf("land: %s (%s) onto %s (%s)\n\nWork: %s", w.Branch, shortSHA(w.Head), w.Target, shortSHA(base), w.BeadID)
 	hasAutoSave, err := hasAutoSaveCommits(wt, base, w.Head)
 	if err != nil {
-		return "", nil, &InfraError{Stage: "inspect range", Err: err}
+		return mergeOutcome{}, &InfraError{Stage: "inspect range", Err: err}
 	}
 	if hasAutoSave {
 		err = wt.MergeSquash(w.Head, msg)
@@ -1584,29 +1598,18 @@ func mergeWork(wt Repo, w Work, base string) (string, *Rejection, error) {
 		files, filesErr := wt.GetConflictingFiles()
 		_ = wt.AbortMerge()
 		if filesErr == nil && len(files) > 0 {
-			return "", &Rejection{Kind: RejectConflict, Rework: true, Conflicting: files,
-				Reason: fmt.Sprintf("merging %s into %s conflicts in %d file(s); rebase onto %s and resolve", shortSHA(w.Head), w.Target, len(files), w.Target)}, nil
+			return mergeOutcome{Rejection: &Rejection{Kind: RejectConflict, Rework: true, Conflicting: files,
+				Reason: fmt.Sprintf("merging %s into %s conflicts in %d file(s); rebase onto %s and resolve", shortSHA(w.Head), w.Target, len(files), w.Target)}}, nil
 		}
-		if hasAutoSave && filesErr == nil && mergeChangesNothing(wt, w, base, msg) {
-			err = &emptySquashError{Err: err}
-		}
-		return "", nil, &InfraError{Stage: "merge", Err: err}
+		empty := hasAutoSave && filesErr == nil && mergeChangesNothing(wt, w, base, msg)
+		return mergeOutcome{EmptySquash: empty}, &InfraError{Stage: "merge", Err: err}
 	}
 	merged, err := wt.Rev("HEAD")
 	if err != nil {
-		return "", nil, &InfraError{Stage: "merge", Err: err}
+		return mergeOutcome{}, &InfraError{Stage: "merge", Err: err}
 	}
-	return merged, nil, nil
+	return mergeOutcome{Commit: merged}, nil
 }
-
-// emptySquashError marks a squash that failed because it staged nothing: the
-// head's changes are already on the base. mergeWork keeps it inside the
-// merge's InfraError so the lost-record recovery sees the error it always did,
-// and Land turns it into a RejectEmpty when that recovery finds no landing.
-type emptySquashError struct{ Err error }
-
-func (e *emptySquashError) Error() string { return e.Err.Error() }
-func (e *emptySquashError) Unwrap() error { return e.Err }
 
 // mergeChangesNothing answers whether merging the head onto base would change
 // the target, after a squash of it failed without a conflict. The question is
@@ -1614,14 +1617,19 @@ func (e *emptySquashError) Unwrap() error { return e.Err }
 // whose tree is the base's is the head's work already there, the same
 // comparison the "after merge" check makes. Any other outcome — a merge that
 // fails too, or one that writes something — leaves the squash's own failure
-// to stand. The worktree is the landing's throwaway one, so the probe's commit
-// is never kept.
+// to stand. The probe leaves the worktree where it found it: a merge that
+// failed is aborted and one that committed is reset to base, so the caller
+// reads the tree it had before asking. A reset that fails leaves that
+// unknown, and the answer is then no.
 func mergeChangesNothing(wt Repo, w Work, base, msg string) bool {
 	if wt.MergeNoFF(w.Head, msg) != nil {
 		_ = wt.AbortMerge()
 		return false
 	}
 	same, err := wt.TreesIdentical(base, "HEAD")
+	if wt.ResetHard(base) != nil {
+		return false
+	}
 	return err == nil && same
 }
 

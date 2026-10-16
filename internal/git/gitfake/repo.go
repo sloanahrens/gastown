@@ -49,6 +49,7 @@ type Repo interface {
 	MergeSquash(branch, message string) error
 	GetConflictingFiles() ([]string, error)
 	AbortMerge() error
+	ResetHard(ref string) error
 
 	// Clones and remotes (clone.go).
 	CloneBareWithBranch(url, dest, branch string) error
