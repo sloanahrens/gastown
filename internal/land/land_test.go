@@ -1243,6 +1243,61 @@ func TestLandRecoversUnrecordedSquashLandingUnderALaterLanding(t *testing.T) {
 	}
 }
 
+// lookupFailsRepo is a Repo whose search of the target for a land merge fails,
+// the transient git error completeUnrecordedLanding reports as an InfraError.
+type lookupFailsRepo struct {
+	Repo
+}
+
+func (lookupFailsRepo) FindCommitMatchingSubject(ref, prefix string) (string, error) {
+	return "", errors.New("git log: transient failure")
+}
+
+// TestLandUnrecordedSquashLookupFailureIsInfraNotEmptyRejection: a squash
+// landing whose record was lost is retried under a later landing, so the
+// re-merge stages nothing, and the search of the target for the landing fails
+// on a transient git error. The pass cannot tell a landing it already made
+// from a head that arrived by another route, so it ends as an InfraError the
+// worker retries, never as an empty-merge rejection that sends the author to
+// rework work that landed (gt-xqpmc).
+func TestLandUnrecordedSquashLookupFailureIsInfraNotEmptyRejection(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.squashRange(t)
+	first := f.lander()
+	f.merger.fn = func(req MergeRequest) error {
+		f.setMain(req.Head)
+		return errors.New("the pass ended after the merge, before the record")
+	}
+	if _, err := first.Land(context.Background(), f.work); err == nil {
+		t.Fatal("the first pass returned a landing it never recorded")
+	}
+	f.merger.fn = nil
+	f.base = f.pushMain("d.txt", "someone else landed\n")
+	before := f.bead()
+	labelsBefore := slices.Clone(before.Labels)
+	notesBefore := before.Notes
+
+	l := f.lander()
+	l.openRepo = func(dir string) Repo { return lookupFailsRepo{Repo: f.git.Open(dir)} }
+	_, err := l.Land(context.Background(), f.work)
+	var rej *Rejection
+	if errors.As(err, &rej) {
+		t.Fatalf("Land rejected the retry as %s (rework=%v): %s", rej.Kind, rej.Rework, rej.Reason)
+	}
+	var infra *InfraError
+	if !errors.As(err, &infra) || infra.Stage != "find the landing on the target" {
+		t.Fatalf("Land error = %T %v, want an *InfraError at the find-the-landing stage", err, err)
+	}
+	b := f.bead()
+	if beads.HasLabel(b, LabelRework) || !slices.Equal(b.Labels, labelsBefore) || b.Notes != notesBefore {
+		t.Errorf("the failed lookup changed the bead: labels %v -> %v, notes:\n%s", labelsBefore, b.Labels, b.Notes)
+	}
+	if b.Status == "closed" || len(f.landingLines()) != 0 {
+		t.Errorf("the failed lookup recorded a landing: status=%s lines=%v", b.Status, f.landingLines())
+	}
+}
+
 // TestLandRecoversUnrecordedSquashLandingOverAConflictingLaterLanding: another
 // landing edited the lines the head's own change wrote, between the unrecorded
 // squash and the retry. The retry's squash of the head conflicts with the
