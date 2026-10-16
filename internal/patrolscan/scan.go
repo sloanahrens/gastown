@@ -546,6 +546,17 @@ type Options struct {
 	// could not be read, which is Unknown: a restart taken on an unread cap
 	// is a session raised past a limit nobody measured.
 	SeatCap func(rig, name string) (SeatCap, error)
+	// DoneAge reads how long before now the seat's own most recent event was
+	// a gt done for workBead, and false when it was not (no such event, a
+	// newer event of the seat's, or a log that cannot be read). With
+	// DoneCloseGrace it keeps the DEFERRED recovery from restarting a seat
+	// whose bead has had no time to close behind its done (gt-iwgbd). Nil
+	// leaves the recovery restarting at once, as before.
+	DoneAge func(rig, name, workBead string, now time.Time) (time.Duration, bool)
+	// DoneCloseGrace is how long after its done a seat holding an unclosed
+	// bead is read as a finished turn. Zero or less turns the wait off. The
+	// daemon sets it to the window its crash detector uses (gt-0p9pv).
+	DoneCloseGrace time.Duration
 	// Reap enables the worktree reap pass. Nil leaves it off, and it does
 	// nothing unless the Env also implements ReapEnv.
 	Reap *ReapOptions
@@ -916,6 +927,23 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		f.Outcome = OutcomeWaiting
 		f.Detail = fmt.Sprintf("%s with %s hooked; dead sample %d of %d", res.Reason, work.ID, samples, s.o.DeadSamples)
 		return f, true
+	}
+
+	// A DEFERRED seat whose own last event is a done for this bead has ended
+	// its turn, and the bead's close trails that event: a report-only run that
+	// skipped the close leaves the bead hooked over a dead session, and a
+	// restart here starts its agent again for nothing (gt-iwgbd). The event log
+	// is read only here, for a dead session over open work already confirmed
+	// across ticks, never for every seat. The wait is bounded: a done whose
+	// bead never closes, and a DEFERRED exit with unpushed commits that the
+	// town needs resumed (gt-ks62m), end in the same restart once the grace
+	// passes. The dead samples are kept, so that restart goes ahead on the
+	// first tick after it.
+	if recovery == ExitDeferred && s.o.DoneAge != nil && s.o.DoneCloseGrace > 0 {
+		if age, ok := s.o.DoneAge(rig, name, work.ID, now); ok && age < s.o.DoneCloseGrace {
+			return skip(fmt.Sprintf("%s: the seat ran gt done for it %s ago and the bead has not closed yet",
+				work.ID, age.Round(time.Second)))
+		}
 	}
 
 	// The restart below raises a live session, so it spends a seat as a sling

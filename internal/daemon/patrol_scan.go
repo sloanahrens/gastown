@@ -70,7 +70,8 @@ func patrolScanOptions(config *DaemonPatrolConfig, now func() time.Time) patrols
 		IsRefusal: func(err error) bool {
 			return errors.Is(err, supervisor.ErrRefused) || errors.Is(err, errReapRefused)
 		},
-		Now: now,
+		DoneCloseGrace: polecatDoneCloseGrace,
+		Now:            now,
 	}
 	if c := patrolScanConfig(config); c != nil {
 		o.DeadSamples = c.DeadSamples
@@ -137,6 +138,9 @@ func (d *Daemon) runPatrolScan() {
 	// host's tmux reading, and it is the same cap a sling answers to
 	// (gt-02tcp).
 	opts.SeatCap = env.seatCap
+	// The crash detector's own read of a seat's last done, so the tick and the
+	// detector agree on a turn whose bead has not closed yet (gt-iwgbd).
+	opts.DoneAge = env.doneAge
 	scanner := patrolscan.New(env, ledger, opts)
 	rigs := d.getPatrolRigs("patrol_scan")
 	for _, rigName := range rigs {
@@ -612,6 +616,12 @@ func (h *patrolScanHost) MarkIdle(rig, name string) (bool, error) {
 // work bead carries, for a gt done whose record write was lost: the seat is
 // mid-landing, and a record that still says run reports it dead for the whole
 // of the landing (gt-2z8k1).
+// doneAge answers patrolscan.Options.DoneAge from the event log, through the
+// read the daemon's crash detector uses.
+func (h *patrolScanHost) doneAge(rig, name, workBead string, now time.Time) (time.Duration, bool) {
+	return h.d.seatLastDoneAge(rig, name, workBead, now)
+}
+
 func (h *patrolScanHost) MarkSubmitted(rig, name, workBead string) error {
 	return intent.MarkSubmitted(h.town(), supervisor.IntentSeat(h.seat(rig, name)), workBead, patrolscan.Actor, h.d.clk().Now())
 }

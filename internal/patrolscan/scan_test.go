@@ -703,6 +703,95 @@ func TestDeferredExitSeatIsRestartedNotSkipped(t *testing.T) {
 	}
 }
 
+// A report-only run that ran gt done for its bead without closing it is a
+// finished turn, not a crash: the restart waits for the close to arrive, and
+// goes ahead once the grace has passed with the bead still hooked (gt-iwgbd).
+func TestDeferredExitSeatWaitsOutTheDoneCloseGrace(t *testing.T) {
+	t.Parallel()
+	const grace = 5 * time.Minute
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.agents["ruby"] = AgentRecord{State: "stuck", ExitType: ExitDeferred, CleanupStatus: "clean"}
+
+	clock := now
+	doneAt := now.Add(-time.Minute)
+	var asked []string
+	s := New(env, memLedger{}, Options{
+		Now:            func() time.Time { return clock },
+		SeatCap:        env.seatCapFor,
+		DoneCloseGrace: grace,
+		DoneAge: func(_, name, bead string, at time.Time) (time.Duration, bool) {
+			asked = append(asked, name+" "+bead)
+			if bead != "gt-ruby" {
+				return 0, false
+			}
+			return at.Sub(doneAt), true
+		},
+	})
+
+	r := s.Tick("gastown")
+	f := seatFinding(t, r, "ruby")
+	if f.Outcome != OutcomeSkipped || !strings.Contains(f.Detail, "gt done") {
+		t.Fatalf("inside the grace: %v, want skipped on the done", f)
+	}
+	if len(env.restarts) != 0 {
+		t.Fatalf("restarts = %v, want none inside the grace", env.restarts)
+	}
+
+	clock = doneAt.Add(grace + time.Second)
+	r = s.Tick("gastown")
+	if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeRestarted {
+		t.Fatalf("past the grace: %v, want restarted", f)
+	}
+	if got := strings.Join(env.restarts, ","); got != "ruby" {
+		t.Fatalf("restarts = %q, want ruby once the grace passed", got)
+	}
+	if want := []string{"ruby gt-ruby", "ruby gt-ruby"}; strings.Join(asked, "|") != strings.Join(want, "|") {
+		t.Fatalf("event log asked %q, want one read per tick for the hooked bead", asked)
+	}
+}
+
+// Only a done for the bead the seat still holds buys the wait, and only a
+// DEFERRED seat reads the event log at all: a seat with no done event restarts
+// as it always did, and a crash restart never asks (gt-iwgbd).
+func TestDeferredExitSeatWithoutADoneRestartsAtOnce(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		agent     AgentRecord
+		wantReads int
+	}{
+		{"DEFERRED exit, no done event for the bead", AgentRecord{State: "stuck", ExitType: ExitDeferred}, 1},
+		{"crash, not a DEFERRED exit", AgentRecord{State: "working"}, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			deadWithWork(env, "ruby")
+			env.agents["ruby"] = tc.agent
+			reads := 0
+			s := New(env, memLedger{}, Options{
+				Now:            func() time.Time { return now },
+				SeatCap:        env.seatCapFor,
+				DoneCloseGrace: 5 * time.Minute,
+				DoneAge: func(_, _, _ string, _ time.Time) (time.Duration, bool) {
+					reads++
+					return 0, false
+				},
+			})
+
+			r := s.Tick("gastown")
+
+			if f := seatFinding(t, r, "ruby"); f.Outcome != OutcomeRestarted {
+				t.Fatalf("outcome = %v, want restarted", f)
+			}
+			if reads != tc.wantReads {
+				t.Fatalf("event log reads = %d, want %d", reads, tc.wantReads)
+			}
+		})
+	}
+}
+
 // The restart is confirmed across ticks like any other: the first dead sample
 // reads as waiting, the second restarts. A skipped seat never gets there.
 func TestDeferredExitSeatWaitsOutTheFirstSample(t *testing.T) {

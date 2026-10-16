@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/done"
+	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/patrolscan"
@@ -823,5 +824,30 @@ func TestPatrolScanRootWork(t *testing.T) {
 	r.showErr = errors.New("bd show: timeout")
 	if _, err := h.RootWork("gt-wisp-root"); err == nil {
 		t.Fatal("a failed read must be an error, not a root with no work")
+	}
+}
+
+// The tick waits out a DEFERRED seat's done on the same window and the same
+// event-log read as the crash detector, so the two cannot disagree on a turn
+// whose bead has not closed yet (gt-iwgbd).
+func TestPatrolScanDoneCloseGraceMatchesCrashDetector(t *testing.T) {
+	t.Parallel()
+	if got := patrolScanOptions(nil, time.Now).DoneCloseGrace; got != polecatDoneCloseGrace {
+		t.Fatalf("patrol scan DoneCloseGrace = %s, crash detector polecatDoneCloseGrace = %s", got, polecatDoneCloseGrace)
+	}
+	const seat = "myr/polecats/mycat"
+	townRoot := t.TempDir()
+	line := seatEventLine(testEpoch.Add(-time.Minute), events.TypeDone, seat, "gt-xyz")
+	if err := os.WriteFile(filepath.Join(townRoot, events.EventsFile), []byte(line+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := &patrolScanHost{d: &Daemon{config: &Config{TownRoot: townRoot}, logger: discardLogger}}
+
+	age, ok := h.doneAge("myr", "mycat", "gt-xyz", testEpoch)
+	if !ok || age != time.Minute {
+		t.Fatalf("doneAge = %s, %v; want 1m0s, true", age, ok)
+	}
+	if _, ok := h.doneAge("myr", "mycat", "gt-other", testEpoch); ok {
+		t.Fatal("doneAge dated a done for a bead the seat did not finish")
 	}
 }
