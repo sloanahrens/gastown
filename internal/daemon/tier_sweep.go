@@ -623,7 +623,7 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 		}
 		// A tip the last cycle covered stands; one it only partly reached does
 		// not, which is what Partial records (gt-icmdq).
-		if sha == "" || sha == state.LastGreenSHA || (sha == state.LastSHA && !state.Partial) {
+		if sha == "" || sha == state.LastGreenSHA || tierSweepTipJudged(state, sha) {
 			continue
 		}
 		d.logger.Printf("tier_sweep: %s: red bead(s) closed and main moved; re-running now", rig)
@@ -859,7 +859,44 @@ func (d *Daemon) runTierSweepRig(ctx context.Context, cycle *dogCycle, rig strin
 		d.logger.Printf("tier_sweep: %s: origin/main %s unchanged since the last green sweep; skipping", rig, shortSHA(sha))
 		return true
 	}
+	if tierSweepTipJudged(state, sha) && d.tierSweepJudgedByADeferredCycle(state) {
+		// This run is the retry of a cycle that deferred, so the tip's verdict
+		// is already in the record and re-deriving it costs the rig its whole
+		// stage budget. A cadence run still re-sweeps an unchanged tip: that is
+		// how a red recovers without waiting for main to move (gt-zq1pb).
+		cycle.skipStep(rig, "origin/main "+shortSHA(sha)+" already judged by the last cycle")
+		d.logger.Printf("tier_sweep: %s: origin/main %s already judged by the last cycle; skipping the re-run", rig, shortSHA(sha))
+		return true
+	}
 	return d.tierSweepRigCycle(ctx, cycle, rig, repo, sha, state, now)
+}
+
+// tierSweepTipJudged reports whether state already carries a verdict for sha:
+// the last cycle saw that tip and ran every stage it planned at it, so the
+// record holds a verdict for every tier the sweep covers. A tip that cycle only
+// partly reached is not judged, because the record leaves tiers of it unjudged
+// (gt-icmdq).
+func tierSweepTipJudged(state tierSweepState, sha string) bool {
+	return sha != "" && sha == state.LastSHA && !state.Partial
+}
+
+// tierSweepJudgedByADeferredCycle reports whether the record that judged a
+// rig's tip was written by a cycle that never judged every rig. The sweep's own
+// last-run clock advances only on a cycle that did, so a rig record newer than
+// that clock is an unfinished cycle's work and the run reading it is that
+// cycle's retry (gt-zq1pb).
+func (d *Daemon) tierSweepJudgedByADeferredCycle(state tierSweepState) bool {
+	lastRun, found, err := loadPatrolLastRun(d.config.TownRoot, "tier_sweep")
+	if err != nil {
+		// An unreadable clock says nothing about a deferral, so the tip keeps
+		// the re-run every other cadence run gets.
+		return false
+	}
+	if !found {
+		// No cycle has ever completed, so the record came from one that did not.
+		return true
+	}
+	return state.LastRun.After(lastRun)
 }
 
 // tierSweepStages is the stages one cycle runs for rig: the shell tier, then
@@ -914,6 +951,10 @@ type tierSweepIdleWait struct {
 // stage instead of stalling it beside the load that is already there. A
 // canceled ctx returns its error rather than the cap's verdict, so a daemon
 // drain is never held by the wait.
+//
+// Each poll is bounded by what is left of the cap, so a runner_idle_command
+// that hangs is read as the busy runner it stands for and the stage starts
+// under load at the cap (gt-zq1pb).
 func (d *Daemon) tierSweepAwaitRunnerIdle(ctx context.Context, dir string) (wait tierSweepIdleWait, err error) {
 	command := tierSweepRunnerIdleCommand(d.patrolConfig)
 	if command == "" {
@@ -936,7 +977,18 @@ func (d *Daemon) tierSweepAwaitRunnerIdle(ctx context.Context, dir string) (wait
 		if err := ctx.Err(); err != nil {
 			return wait, err
 		}
-		busy := poll(ctx, dir, command)
+		// Bounded by what is left of the cap: a probe that hangs is read as the
+		// busy runner it stands for (gt-zq1pb).
+		remaining := deadline.Sub(d.clk().Now())
+		if remaining <= 0 {
+			// The cap ran out with the runner still busy: the stage starts
+			// anyway, and the cycle records that it ran under load.
+			wait.underLoad = true
+			return wait, nil
+		}
+		pollCtx, cancelPoll := context.WithTimeout(ctx, remaining)
+		busy := poll(pollCtx, dir, command)
+		cancelPoll()
 		if busy == nil {
 			return wait, nil
 		}
@@ -946,12 +998,11 @@ func (d *Daemon) tierSweepAwaitRunnerIdle(ctx context.Context, dir string) (wait
 		if err := ctx.Err(); err != nil {
 			return wait, err
 		}
-		remaining := deadline.Sub(d.clk().Now())
+		remaining = deadline.Sub(d.clk().Now())
 		if remaining <= 0 {
-			// The cap ran out with the runner still busy: the stage starts
-			// anyway, and the cycle records that it ran under load.
-			wait.underLoad = true
-			return wait, nil
+			// The poll used up the cap: no pause is owed, and the loop's own
+			// check takes the cap's verdict.
+			continue
 		}
 		if remaining > tierSweepRunnerIdlePoll {
 			remaining = tierSweepRunnerIdlePoll
@@ -1087,8 +1138,20 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 			deferred = true
 			continue
 		}
-		logPath := d.tierSweepWriteLog(rig, st.tiers[0], res.output)
 		reported := parseTierSweepSummaries(res.output)
+		if !res.timedOut && ctx.Err() != nil && !tierSweepStageJudged(st, reported) {
+			// The cycle's own deadline ended a stage that never reached a
+			// verdict. Land's gate marks a step TimedOut only when the step's
+			// own timeout killed it, so a stage cut off here arrives as exit -1
+			// with no summary line, and reading that as RED files a bead
+			// against a stage that never finished. Nothing was learned about
+			// the tree, so the cycle defers (gt-zq1pb).
+			d.logger.Printf("tier_sweep: %s: %s stage: the cycle's deadline ended it (exit %d, %v); deferring",
+				rig, st.tiers[0], res.exitCode, ctx.Err())
+			deferred = true
+			continue
+		}
+		logPath := d.tierSweepWriteLog(rig, st.tiers[0], res.output)
 		for _, tier := range st.tiers {
 			ts, ok := reported[tier]
 			if !ok {
@@ -1195,6 +1258,18 @@ func tierSweepRecordedTiers(results map[string]tierSweepTierResult, prior tierSw
 		}
 	}
 	return recorded
+}
+
+// tierSweepStageJudged reports whether a stage reported a summary line for
+// every tier it covers: only then did the stage reach a verdict of its own,
+// rather than being cut off before it could print one.
+func tierSweepStageJudged(st tierSweepStage, reported map[string]tierSweepTierResult) bool {
+	for _, tier := range st.tiers {
+		if _, ok := reported[tier]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // tierSweepAllGreen reports whether every tier of every stage came back GREEN,
