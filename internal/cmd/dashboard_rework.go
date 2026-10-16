@@ -34,7 +34,7 @@ func (r *dashReworkReader) read(now time.Time) *dashboard.Rework {
 	for _, rec := range recs {
 		reviews = append(reviews, dashboard.ReworkReview{
 			Bead: rec.BeadID, Rig: rec.Rig, Attempt: rec.Attempt, Score: rec.Score,
-			Verdict: rec.Verdict, Findings: rec.Findings, Bar: rec.Bar, At: rec.At,
+			Verdict: rec.Verdict, Rejected: rec.Rejected, Findings: rec.Findings, Bar: rec.Bar, At: rec.At,
 		})
 	}
 	out := dashboard.AggregateRework(reviews, now)

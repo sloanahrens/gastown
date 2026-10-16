@@ -30,15 +30,22 @@ const reworkApproved = "approve"
 
 // ReworkReview is one om verdict from the landing worker's review log.
 type ReworkReview struct {
-	Bead     string
-	Rig      string
-	Attempt  int
-	Score    float64
-	Verdict  string
+	Bead    string
+	Rig     string
+	Attempt int
+	Score   float64
+	Verdict string
+	// Rejected is the landing refusing the work on an approving verdict, for
+	// its findings (gt-vu18r); such a review is not an approval.
+	Rejected bool
 	Findings int
 	Bar      float64
 	At       time.Time
 }
+
+// approved is whether the review let the work land: an approving verdict the
+// landing did not turn back for its findings.
+func (r ReworkReview) approved() bool { return r.Verdict == reworkApproved && !r.Rejected }
 
 // ReworkBar is one review bar's share of a window. Bar is 0 when the reviewed
 // tree named none, which the page draws as unknown.
@@ -140,14 +147,14 @@ func reworkSpan(name string, reviews []ReworkReview, from, to time.Time, closed 
 			bars[rs[0].Bar] = t
 		}
 		t.Beads++
-		if rs[0].Verdict == reworkApproved {
+		if rs[0].approved() {
 			t.FirstTry++
 		}
 		rejected, approved := 0, false
 		for _, r := range rs {
 			t.Reviews++
 			t.scoreSum += r.Score
-			if r.Verdict == reworkApproved {
+			if r.approved() {
 				approved = true
 			} else {
 				rejected++

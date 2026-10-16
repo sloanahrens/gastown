@@ -158,3 +158,63 @@ func TestLandLogsNothingForAReviewThatJudgedNothingAndSurvivesALogFailure(t *tes
 		t.Errorf("the failed append is not in the landing log:\n%s", out.String())
 	}
 }
+
+// An approval whose findings the landing refuses is a rejection, and the line
+// says so: om's own verdict stays approve, and Rejected is what the rework
+// table counts (gt-vu18r). An approval the findings let through is not marked.
+func TestLogReviewRecordsFindingsRejection(t *testing.T) {
+	t.Parallel()
+	f := barFixture(t, "0.8")
+	reviews := reviewsFileIn(t)
+	l := f.lander()
+	l.Reviews = reviews
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{Verdict: VerdictApprove, Score: 0.93, Findings: []Finding{{ID: "f-1", Severity: "major", Path: "b.txt", Line: 1, Title: "not atomic"}}}, nil
+	}
+	_, err := l.Land(context.Background(), f.work)
+	f.assertRejected(t, err, RejectReview, LabelRework)
+
+	f.requeue(1)
+	f.review.fn = func(string) (Verdict, error) {
+		return Verdict{Verdict: VerdictApprove, Score: 0.93, Findings: []Finding{{ID: "f-2", Severity: "minor", Path: "b.txt", Line: 1, Title: "name"}}}, nil
+	}
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("second Land: %v", err)
+	}
+
+	recs, err := reviews.Since(time.Time{})
+	if err != nil || len(recs) != 2 {
+		t.Fatalf("review log = %+v, %v; want the bounced approval and the landed one", recs, err)
+	}
+	if recs[0].Verdict != VerdictApprove || !recs[0].Rejected || recs[0].Attempt != 1 {
+		t.Errorf("bounced approval logged as %+v, want attempt 1, om's approve and Rejected", recs[0])
+	}
+	if recs[1].Rejected || recs[1].Attempt != 2 {
+		t.Errorf("landed approval logged as %+v, want attempt 2 and not Rejected", recs[1])
+	}
+}
+
+// A line written before the Rejected field parses as the verdict alone, and a
+// record that is not rejected writes no field.
+func TestReviewRecordRejectedIsOptionalOnTheLine(t *testing.T) {
+	t.Parallel()
+	f := reviewsFileIn(t)
+	if err := os.MkdirAll(filepath.Dir(f.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	old := `{"bead":"gt-old","rig":"gastown","attempt":1,"score":0.9,"verdict":"approve","findings":0,"bar":0.8,"at":"2026-10-14T00:00:00Z"}` + "\n"
+	if err := os.WriteFile(f.Path, []byte(old), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := f.Since(time.Time{})
+	if err != nil || len(recs) != 1 || recs[0].Rejected || recs[0].Verdict != VerdictApprove {
+		t.Fatalf("old line read as %+v, %v; want an approval that is not Rejected", recs, err)
+	}
+	if err := f.Append(ReviewRecord{BeadID: "gt-new", Verdict: VerdictApprove, At: time.Date(2026, 10, 15, 0, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := os.ReadFile(f.Path)
+	if strings.Contains(string(raw), `"rejected"`) {
+		t.Errorf("a record that is not rejected wrote the field:\n%s", raw)
+	}
+}
