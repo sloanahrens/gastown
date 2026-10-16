@@ -546,10 +546,169 @@ func TestDeployWatch_A404IsSaidOutLoudAndKeepsThePicture(t *testing.T) {
 		t.Errorf("log = %v, want one line naming the 404", logged)
 	}
 
-	// The same answer is not news again.
+	// The same answer is not news again, and one poll is not yet a blind watch:
+	// the escalation for reads that keep failing is blindRead's, at the third
+	// poll in a row.
 	w.poll(context.Background())
 	if len(logged) != 1 {
 		t.Errorf("log = %v, want the one line, not one per poll", logged)
+	}
+	if raised := rec.raisedAlerts(); len(raised) != 1 {
+		t.Errorf("raised = %+v, want the failed run's escalation alone", raised)
+	}
+}
+
+// TestDeployWatch_ReadsThatKeepFailingAreEscalatedAndClearedByARead: a
+// repository that always answers nothing holds the picture of its last good
+// poll, which looks like a green deploy. One failed poll is a Forgejo restart;
+// a run of them is escalated, low, under its own key, and the first poll that
+// reads the repository again closes it.
+func TestDeployWatch_ReadsThatKeepFailingAreEscalatedAndClearedByARead(t *testing.T) {
+	t.Parallel()
+	api := &fakeDeployForgejo{listErr: &forgejo.APIError{Method: "GET", Path: "/repos", StatusCode: 404, Body: "not found"}}
+	w, rec := newTestDeployWatch(t, api)
+	w.Logf = func(string, ...any) {}
+	wantKey := deployWatchBrokenKeyPrefix + "fractals"
+
+	for poll := 1; poll < deployWatchBlindPolls; poll++ {
+		w.poll(context.Background())
+		if raised := rec.raisedAlerts(); len(raised) != 0 {
+			t.Fatalf("raised after %d blind poll(s) = %+v, want nothing before the %dth", poll, raised, deployWatchBlindPolls)
+		}
+	}
+	w.poll(context.Background())
+
+	raised := rec.raisedAlerts()
+	if len(raised) != 1 {
+		t.Fatalf("raised = %+v, want the blind escalation at %d polls in a row", raised, deployWatchBlindPolls)
+	}
+	if raised[0].Key != wantKey {
+		t.Errorf("key = %q, want %q", raised[0].Key, wantKey)
+	}
+	if raised[0].Severity != config.SeverityLow {
+		t.Errorf("severity = %q, want %q", raised[0].Severity, config.SeverityLow)
+	}
+	for _, want := range []string{deployTestRepo, fmt.Sprint(deployWatchBlindPolls)} {
+		if !strings.Contains(raised[0].Message, want) {
+			t.Errorf("message %q does not name %q", raised[0].Message, want)
+		}
+	}
+
+	// A watch that stays blind says so once: the escalation is open under this
+	// key, and a repeat would file nothing a reader does not have.
+	w.poll(context.Background())
+	if again := rec.raisedAlerts(); len(again) != 1 {
+		t.Errorf("raised = %+v, want no second escalation while the watch is still blind to this rig", again)
+	}
+
+	api.listErr = nil
+	w.poll(context.Background())
+
+	cleared := rec.clearedAlerts()
+	if len(cleared) != 1 {
+		t.Fatalf("cleared = %+v, want the blind escalation closed by a poll that read the repository", cleared)
+	}
+	if cleared[0].Key != wantKey {
+		t.Errorf("cleared key = %q, want %q", cleared[0].Key, wantKey)
+	}
+
+	// Blindness after a clear is a new episode: the alert was closed, so it is
+	// raised again rather than left at the state of the poll that read once.
+	api.listErr = &forgejo.APIError{Method: "GET", Path: "/repos", StatusCode: 404, Body: "not found"}
+	for range deployWatchBlindPolls {
+		w.poll(context.Background())
+	}
+	if raised := rec.raisedAlerts(); len(raised) != 2 {
+		t.Errorf("raised = %+v, want a second escalation for the second blind spell", raised)
+	}
+}
+
+// TestDeployWatch_ABlindClearThatDidNotLandIsRetried: the escalation is the
+// point, so a clear that did not land leaves the alert open and the next read
+// tries again, while the blindness the open alert already reports raises no
+// second one.
+func TestDeployWatch_ABlindClearThatDidNotLandIsRetried(t *testing.T) {
+	t.Parallel()
+	notFound := &forgejo.APIError{Method: "GET", Path: "/repos", StatusCode: 404, Body: "not found"}
+	api := &fakeDeployForgejo{listErr: notFound}
+	w, rec := newTestDeployWatch(t, api)
+	w.Logf = func(string, ...any) {}
+
+	for range deployWatchBlindPolls {
+		w.poll(context.Background())
+	}
+	if raised := rec.raisedAlerts(); len(raised) != 1 {
+		t.Fatalf("raised = %+v, want the blind escalation first", raised)
+	}
+
+	rec.mu.Lock()
+	rec.clearErr = fmt.Errorf("gt escalate clear: exit 1")
+	rec.mu.Unlock()
+	api.listErr = nil
+	w.poll(context.Background())
+
+	if cleared := rec.clearedAlerts(); len(cleared) != 0 {
+		t.Fatalf("cleared = %+v, want the dropped clear recorded nowhere", cleared)
+	}
+
+	// Blind again before the retry landed: the alert is still open, so this is
+	// not a new blindness to escalate.
+	api.listErr = notFound
+	w.poll(context.Background())
+	if raised := rec.raisedAlerts(); len(raised) != 1 {
+		t.Errorf("raised = %+v, want the one escalation the open alert already carries", raised)
+	}
+
+	rec.mu.Lock()
+	rec.clearErr = nil
+	rec.mu.Unlock()
+	api.listErr = nil
+	w.poll(context.Background())
+
+	cleared := rec.clearedAlerts()
+	if len(cleared) != 1 {
+		t.Fatalf("cleared = %+v, want the retry that landed", cleared)
+	}
+	if want := deployWatchBrokenKeyPrefix + "fractals"; cleared[0].Key != want {
+		t.Errorf("cleared key = %q, want %q", cleared[0].Key, want)
+	}
+}
+
+// TestDeployWatch_TwoBlindRigsAreTwoLogLines: the log is deduplicated per key,
+// and the key is the rig: one remembered message let the rig that logged last
+// stand for every other one, so two repositories answering nothing, or one
+// repository failing while another warns, went unmentioned.
+func TestDeployWatch_TwoBlindRigsAreTwoLogLines(t *testing.T) {
+	t.Parallel()
+	apiErr := &forgejo.APIError{Method: "GET", Path: "/repos", StatusCode: 404, Body: "not found"}
+	one := &fakeDeployForgejo{listErr: apiErr}
+	two := &fakeDeployForgejo{listErr: apiErr}
+	byBase := map[string]deployRunAPI{"http://one.test/api/v1": one, "http://two.test/api/v1": two}
+	w, _ := newTestDeployWatch(t, one)
+	w.API = func(base string) (deployRunAPI, error) { return byBase[base], nil }
+	w.Repos = func() []deployRepo {
+		return []deployRepo{
+			{Rig: "one", Owner: deployTestOwner, Name: deployTestName, APIBase: "http://one.test/api/v1"},
+			{Rig: "two", Owner: deployTestOwner, Name: deployTestName, APIBase: "http://two.test/api/v1"},
+		}
+	}
+	var logged []string
+	w.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	w.poll(context.Background())
+
+	if len(logged) != 2 {
+		t.Fatalf("log = %v, want one line per failing rig", logged)
+	}
+	joined := strings.Join(logged, "\n")
+	for _, rig := range []string{"one", "two"} {
+		if !strings.Contains(joined, rig+": "+deployTestRepo) {
+			t.Errorf("log = %v, want a line about %s", logged, rig)
+		}
+	}
+	w.poll(context.Background())
+	if len(logged) != 2 {
+		t.Errorf("log = %v, want each rig's line said once, not one per poll", logged)
 	}
 }
 
@@ -651,6 +810,95 @@ func TestDeployWatch_AWindowWiderThanThePageBudgetIsSaid(t *testing.T) {
 	}
 	if len(logged) != 1 || !strings.Contains(logged[0], "24h0m0s") {
 		t.Errorf("log = %v, want one line naming the window the pages reach back", logged)
+	}
+}
+
+// TestDeployWatch_AFailureBehindThePageBudgetGoesUnalarmed pins the cost of
+// that budget: the read stops after deployWatchRunPages pages, so a deploy
+// that failed behind them is one no verdict covers. The watch says the reads
+// stop short instead, and raises nothing rather than a failure it guessed at.
+func TestDeployWatch_AFailureBehindThePageBudgetGoesUnalarmed(t *testing.T) {
+	t.Parallel()
+	pages := deployWatchRunLimit * deployWatchRunPages
+	var runs []forgejo.ActionRun
+	for i := range pages {
+		runs = append(runs, deployTestRun(int64(3000+i), "gate.yml", fmt.Sprintf("land/gt-%03d", i),
+			deployRunSucceeded, deployTestNow.Add(-time.Duration(i)*time.Minute), "candidate"))
+	}
+	runs = append(runs, deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed,
+		deployTestNow.Add(-time.Duration(pages)*time.Minute), "fix: guard the retry"))
+	api := &fakeDeployForgejo{runs: runs}
+	w, rec := newTestDeployWatch(t, api)
+	var logged []string
+	w.Logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+
+	w.poll(context.Background())
+
+	if raised := rec.raisedAlerts(); len(raised) != 0 {
+		t.Errorf("raised = %+v, want nothing: the failed run sits past the pages a poll reads", raised)
+	}
+	if failures := w.failures(); len(failures) != 0 {
+		t.Errorf("failures = %+v, want an empty picture", failures)
+	}
+	if api.lists != deployWatchRunPages {
+		t.Errorf("list calls = %d (%v), want the budget spent and no more", api.lists, api.pages)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "full pages") {
+		t.Errorf("log = %v, want one line saying the reads stop short of the window", logged)
+	}
+}
+
+// TestDeployWatch_ARunWithoutAStampIsNotJudged: a run the API sent no creation
+// time for is one the watch cannot place in the window, so it decides nothing
+// — not a failure to escalate, and not a green run to clear an alert with. The
+// run behind it is read on its own stamp.
+func TestDeployWatch_ARunWithoutAStampIsNotJudged(t *testing.T) {
+	t.Parallel()
+	unstamped := deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed, deployTestNow.Add(-time.Hour), "no stamp")
+	unstamped.Created = ""
+	green := deployTestRun(1154, deployWorkflowStaging, "main", deployRunSucceeded, deployTestNow.Add(-2*time.Hour), "with a stamp")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{unstamped, green}}
+	w, rec := newTestDeployWatch(t, api)
+	seedDeployState(t, w)
+
+	w.poll(context.Background())
+
+	if raised := rec.raisedAlerts(); len(raised) != 0 {
+		t.Errorf("raised = %+v, want nothing: a run with no stamp is not inside the window", raised)
+	}
+	if cleared := rec.clearedAlerts(); len(cleared) != 0 {
+		t.Errorf("cleared = %+v, want nothing: no alert is open for this workflow", cleared)
+	}
+	if failures := w.failures(); len(failures) != 0 {
+		t.Errorf("failures = %+v, want an empty picture", failures)
+	}
+}
+
+// TestDeployWatch_APageWhoseStampsNoneParseIsNotFollowed: paging asks the
+// oldest stamp on a page whether the window runs on behind it, and a page that
+// carries no stamp at all cannot answer. The read stops there rather than
+// spending the rest of the budget on pages it could not judge either.
+func TestDeployWatch_APageWhoseStampsNoneParseIsNotFollowed(t *testing.T) {
+	t.Parallel()
+	var runs []forgejo.ActionRun
+	for i := range deployWatchRunLimit {
+		run := deployTestRun(int64(3000+i), "gate.yml", fmt.Sprintf("land/gt-%03d", i),
+			deployRunSucceeded, deployTestNow.Add(-time.Duration(i)*time.Minute), "candidate")
+		run.Created = ""
+		runs = append(runs, run)
+	}
+	runs = append(runs, deployTestRun(1153, deployWorkflowStaging, "main", deployRunFailed,
+		deployTestNow.Add(-time.Hour), "fix: guard the retry"))
+	api := &fakeDeployForgejo{runs: runs}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+
+	if api.lists != 1 {
+		t.Errorf("list calls = %d (%v), want the one page: no stamp on it places the window", api.lists, api.pages)
+	}
+	if raised := rec.raisedAlerts(); len(raised) != 0 {
+		t.Errorf("raised = %+v, want nothing: the read stopped at a page it cannot judge", raised)
 	}
 }
 
