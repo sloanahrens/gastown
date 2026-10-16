@@ -185,7 +185,7 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 		if hasWork {
 			p.Bead = s.Issue.ID
 			p.Title = s.Issue.Title
-			p.Description = truncateRunes(strings.TrimSpace(s.Issue.Description), dashboard.DescriptionCap)
+			p.Description = truncateRunes(dashBeadSummary(s.Issue.Description), dashboard.DescriptionCap)
 			pr := s.Issue.Priority
 			p.Priority = &pr
 			labels = s.Issue.Labels
@@ -211,6 +211,34 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 		return out[i].Rig+"/"+out[i].Name < out[j].Rig+"/"+out[j].Name
 	})
 	return out
+}
+
+// dashBeadSummary is what a seat's hover says about its bead: the description
+// without the dispatcher's attachment lines, cut to the body of its "## Goal"
+// section (up to the next "## " heading) or, with no such section, to its first
+// paragraph (gt-dhc6o).
+func dashBeadSummary(desc string) string {
+	lines := strings.Split(strings.TrimSpace(beads.StripAttachmentFields(desc)), "\n")
+	for i, l := range lines {
+		if !strings.EqualFold(strings.TrimSpace(l), "## Goal") {
+			continue
+		}
+		rest := lines[i+1:]
+		for j, l := range rest {
+			if strings.HasPrefix(strings.TrimSpace(l), "## ") {
+				rest = rest[:j]
+				break
+			}
+		}
+		return strings.TrimSpace(strings.Join(rest, "\n"))
+	}
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "" {
+			lines = lines[:i]
+			break
+		}
+	}
+	return strings.TrimSpace(strings.Join(lines, "\n"))
 }
 
 func hasAnyLabel(labels []string, want ...string) bool {

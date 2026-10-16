@@ -150,45 +150,53 @@ func FormatAttachmentFields(fields *AttachmentFields) string {
 	return strings.Join(lines, "\n")
 }
 
+// attachmentKeys are the known attachment field keys (lowercase), shared by
+// SetAttachmentFields and StripAttachmentFields.
+var attachmentKeys = map[string]bool{
+	"attached_molecule": true,
+	"attached-molecule": true,
+	"attachedmolecule":  true,
+	"attached_formula":  true,
+	"attached-formula":  true,
+	"attachedformula":   true,
+	"attached_at":       true,
+	"attached-at":       true,
+	"attachedat":        true,
+	"attached_args":     true,
+	"attached-args":     true,
+	"attachedargs":      true,
+	"attached_vars":     true,
+	"attached-vars":     true,
+	"attachedvars":      true,
+	"dispatched_by":     true,
+	"dispatched-by":     true,
+	"dispatchedby":      true,
+	"no_merge":          true,
+	"no-merge":          true,
+	"nomerge":           true,
+	"review_only":       true,
+	"review-only":       true,
+	"reviewonly":        true,
+	"mode":              true,
+	"merge_strategy":    true,
+	"merge-strategy":    true,
+	"mergestrategy":     true,
+	"formula_vars":      true,
+	"formula-vars":      true,
+	"formulavars":       true,
+}
+
+// StripAttachmentFields returns desc without its attachment field lines, the
+// dispatcher's plumbing, leaving what the bead is about. It is
+// SetAttachmentFields with no fields to write, so the key list stays in one place.
+func StripAttachmentFields(desc string) string {
+	return SetAttachmentFields(&Issue{Description: desc}, nil)
+}
+
 // SetAttachmentFields updates an issue's description with the given attachment fields.
 // Existing attachment field lines are replaced; other content is preserved.
 // Returns the new description string.
 func SetAttachmentFields(issue *Issue, fields *AttachmentFields) string {
-	// Known attachment field keys (lowercase)
-	attachmentKeys := map[string]bool{
-		"attached_molecule": true,
-		"attached-molecule": true,
-		"attachedmolecule":  true,
-		"attached_formula":  true,
-		"attached-formula":  true,
-		"attachedformula":   true,
-		"attached_at":       true,
-		"attached-at":       true,
-		"attachedat":        true,
-		"attached_args":     true,
-		"attached-args":     true,
-		"attachedargs":      true,
-		"attached_vars":     true,
-		"attached-vars":     true,
-		"attachedvars":      true,
-		"dispatched_by":     true,
-		"dispatched-by":     true,
-		"dispatchedby":      true,
-		"no_merge":          true,
-		"no-merge":          true,
-		"nomerge":           true,
-		"review_only":       true,
-		"review-only":       true,
-		"reviewonly":        true,
-		"mode":              true,
-		"merge_strategy":    true,
-		"merge-strategy":    true,
-		"mergestrategy":     true,
-		"formula_vars":      true,
-		"formula-vars":      true,
-		"formulavars":       true,
-	}
-
 	// Collect non-attachment lines from existing description
 	var otherLines []string
 	if issue != nil && issue.Description != "" {

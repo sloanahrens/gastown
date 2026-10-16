@@ -491,3 +491,32 @@ func TestParseAgentFields_WithCompletionMetadata(t *testing.T) {
 		t.Errorf("MRID = %q, want empty (not in desc)", got.MRID)
 	}
 }
+
+// TestStripAttachmentFields: the dispatcher's attachment lines go, a
+// multi-line attached_args (one JSON string line) goes with its key, and the
+// bead's own text stays (gt-dhc6o).
+func TestStripAttachmentFields(t *testing.T) {
+	block := FormatAttachmentFields(&AttachmentFields{
+		AttachedMolecule: "gt-wisp-1",
+		AttachedFormula:  "mol-polecat-work",
+		AttachedAt:       "2026-10-16T03:33:52Z",
+		AttachedArgs:     "line one\nno_merge: true\nline three",
+		AttachedVars:     []string{"issue=gt-1", "feature=x"},
+		DispatchedBy:     "daemon/spec-dispatch",
+		FormulaVars:      "issue=gt-1\nfeature=x",
+	})
+	tests := []struct {
+		name, desc, want string
+	}{
+		{"block then body", block + "\n\n## Goal\n\nDo it.", "## Goal\n\nDo it."},
+		{"only attachment lines", block, ""},
+		{"no attachment lines", "plain text\n\nmore", "plain text\n\nmore"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := StripAttachmentFields(tt.desc); got != tt.want {
+				t.Errorf("StripAttachmentFields = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

@@ -259,3 +259,37 @@ func TestBuildDashPolecatsCarriesEachPolecatsAgent(t *testing.T) {
 		t.Errorf("polecat agents = %v, want each session's own", got)
 	}
 }
+
+// TestDashBeadSummary: a seat's hover text drops the dispatcher's attachment
+// lines (a multi-line attached_args included) and shows the bead's Goal body,
+// or the first paragraph when there is no Goal section (gt-dhc6o).
+func TestDashBeadSummary(t *testing.T) {
+	t.Parallel()
+	block := beads.FormatAttachmentFields(&beads.AttachmentFields{
+		AttachedMolecule: "gt-wisp-1",
+		AttachedFormula:  "mol-polecat-work",
+		AttachedAt:       "2026-10-16T03:33:52Z",
+		AttachedArgs:     "HOST SAFETY\nno_merge: true\nnever rm",
+		AttachedVars:     []string{"issue=gt-1"},
+		DispatchedBy:     "daemon/spec-dispatch",
+		FormulaVars:      "issue=gt-1",
+	})
+	tests := []struct {
+		name, desc, want string
+	}{
+		{"goal body only", block + "\n\n## Goal\n\nShow the goal.\nSecond line.\n\n## Constraints\n\n- one\n", "Show the goal.\nSecond line."},
+		{"goal last section", block + "\n\n## Constraints\n\n- one\n\n## Goal\n\nTail goal.\n", "Tail goal."},
+		{"no goal: first paragraph", block + "\n\nFirst para\nstill first.\n\nSecond para.", "First para\nstill first."},
+		{"only attachment lines", block, ""},
+		{"empty", "  \n", ""},
+		{"padded plain", "\n  short one \n", "short one"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := dashBeadSummary(tt.desc); got != tt.want {
+				t.Errorf("dashBeadSummary = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
