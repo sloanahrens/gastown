@@ -432,6 +432,73 @@ func TestTierSweepStaleRunLogIsNotSuppressedByTheDeferralSkipLatch(t *testing.T)
 	}
 }
 
+// The skip line and the stale-run line each keep a latch of their own, so
+// neither one's first log swallows the other's, and a restart that is no
+// longer pending resets both (gt-kp9fo).
+func TestTierSweepDeferForRestart_StaleLatch(t *testing.T) {
+	t.Parallel()
+	const staleLine = "sweeping now rather than waiting out the pending restart"
+	const skipLine = "skipping this cycle"
+	now := atHour(time.Now(), 15)
+
+	t.Run("skip then stale", func(t *testing.T) {
+		t.Parallel()
+		d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+		withTierSweepLastRun(t, d, "gastown", now.Add(-20*time.Minute))
+		d.upgradeRestartPending.Store(true)
+		d.tierSweepDeferForRestart(now)
+		if got := strings.Count(logs.String(), skipLine); got != 1 {
+			t.Fatalf("skip line logged %d times, want 1:\n%s", got, logs.String())
+		}
+		d.tierSweepDeferForRestart(now.Add(2 * time.Hour))
+		d.tierSweepDeferForRestart(now.Add(2*time.Hour + time.Minute))
+		if got := strings.Count(logs.String(), staleLine); got != 1 {
+			t.Fatalf("stale line logged %d times, want 1:\n%s", got, logs.String())
+		}
+	})
+
+	t.Run("stale then skip", func(t *testing.T) {
+		t.Parallel()
+		d, _, _, logs := newTierSweepDaemon(t, now, "gastown")
+		withTierSweepLastRun(t, d, "gastown", now.Add(-2*time.Hour))
+		d.upgradeRestartPending.Store(true)
+		if d.tierSweepDeferForRestart(now) {
+			t.Fatal("a sweep past the bound must not defer")
+		}
+		if got := strings.Count(logs.String(), staleLine); got != 1 {
+			t.Fatalf("stale line logged %d times, want 1:\n%s", got, logs.String())
+		}
+		// Earlier than the bound again (the clock stepped back): the skip line
+		// must still be heard after the stale line was logged.
+		if !d.tierSweepDeferForRestart(now.Add(-100 * time.Minute)) {
+			t.Fatal("a sweep inside the bound must defer")
+		}
+		if got := strings.Count(logs.String(), skipLine); got != 1 {
+			t.Fatalf("the stale latch swallowed the skip line (%d):\n%s", got, logs.String())
+		}
+	})
+
+	t.Run("both latches clear once no restart is pending", func(t *testing.T) {
+		t.Parallel()
+		d, _, _, _ := newTierSweepDaemon(t, now, "gastown")
+		withTierSweepLastRun(t, d, "gastown", now.Add(-2*time.Hour))
+		d.upgradeRestartPending.Store(true)
+		d.tierSweepDeferForRestart(now)
+		d.tierSweepSkipLogged.Store(true)
+		if !d.tierSweepStaleLogged.Load() {
+			t.Fatal("the stale run did not latch its line")
+		}
+		d.upgradeRestartPending.Store(false)
+		d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+		d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+		d.triggerTierSweep()
+		waitTierSweepIdle(t, d)
+		if d.tierSweepSkipLogged.Load() || d.tierSweepStaleLogged.Load() {
+			t.Fatal("a heartbeat with no restart pending left a latch set; the next restart would log nothing")
+		}
+	})
+}
+
 // gt-icmdq: a rig caught up at the tip it last swept green keeps a LastRun
 // hours old while it stays quiet. The landing that moves its main owes it a
 // sweep now, and the pending restart has not starved it: the age is the owed
