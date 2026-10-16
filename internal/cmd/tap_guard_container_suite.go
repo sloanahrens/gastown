@@ -333,8 +333,8 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string, c
 			return "bare 'go test' names a directory the guard cannot place", nil
 		}
 		for _, arg := range pkgArgs {
-			if packageArgWildcard(arg) {
-				return fmt.Sprintf("bare 'go test' package argument %q has a wildcard inside a path element, which the guard cannot expand", arg), nil
+			if packageArgWildcard(arg) && packageWildcardMayReachContainerSuite(arg, runCwd) {
+				return fmt.Sprintf("bare 'go test' package argument %q has a wildcard inside a path element that can reach a testcontainers-backed package", arg), nil
 			}
 		}
 		wholeRepo, pkgs := containerSuiteTarget(pkgArgs, runCwd)
@@ -586,9 +586,9 @@ func normalizeGoPackageArg(arg string) string {
 // wildcard inside a path element: a "..." that is not the argument's trailing
 // "/..." ("./internal/b...", "./internal/.../beads"), or a shell glob
 // character the hook sees unexpanded ("./internal/b*", "./internal/{beads,x}").
-// Such an argument reaches a set of packages the guard cannot name without
-// expanding it against the tree, so evaluateContainerSuiteSegment refuses it
-// rather than guessing (gt-d1e8c). The whole-repo spellings and the trailing
+// Such an argument names a set of packages, not one, and
+// packageWildcardMayReachContainerSuite decides whether the set can include a
+// container package (gt-d1e8c). The whole-repo spellings and the trailing
 // "/..." form of a directory are not wildcards in this sense:
 // normalizeGoPackageArg reads them.
 func packageArgWildcard(arg string) bool {
@@ -600,6 +600,71 @@ func packageArgWildcard(arg string) bool {
 		return false
 	}
 	return strings.Contains(strings.TrimSuffix(p, "/..."), "...")
+}
+
+// packageWildcardMayReachContainerSuite reports whether a wildcard package
+// argument (packageArgWildcard) can reach an entry of containerSuitePackages,
+// for an invocation running in cwd. It answers true wherever it cannot tell:
+// the guard fails closed, and refusing a pattern that reaches only light
+// packages costs one wrapped run, while allowing one that reaches a container
+// package starts the suite unwrapped.
+//
+// It does not expand the pattern against the tree — the hook sees the text
+// before the shell does — it matches it against the list, element by element
+// (packagePatternReaches). The argument is read the way every other spelling
+// is: an absolute directory by the module-relative path it names, and one
+// spelled as a path under the run directory also by the path go resolves it to
+// (packageArgsUnderRunDir). A brace expansion is not matched at all, and nor is
+// an absolute pattern whose module the guard cannot place, because the
+// wildcard may sit in the part of the path that says which tree it is.
+func packageWildcardMayReachContainerSuite(arg, cwd string) bool {
+	if strings.Contains(arg, "{") {
+		return true
+	}
+	placed := moduleRelativePackageArgs([]string{arg})[0]
+	if filepath.IsAbs(placed) {
+		return true
+	}
+	readings := []string{normalizeGoPackageArg(placed)}
+	if runPkg, _ := cwdPackagePath(cwd); runPkg != "" && isCwdRelativeGoPackageArg(arg) {
+		readings = append(readings, normalizeGoPackageArg(path.Join(runPkg, arg)))
+	}
+	for _, pattern := range readings {
+		for _, pkg := range containerSuitePackages {
+			if packagePatternReaches(pattern, pkg) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// packagePatternReaches reports whether a package pattern can reach pkg: each
+// of its path elements, up to the shorter of the two paths, matches the
+// element of pkg in the same place. Stopping at the shorter one is
+// packageArgCovers' rule for a pattern that names a directory containing pkg
+// or one inside it. A shell glob never spans a slash, so its element is matched
+// against one element of pkg; go's "..." does span one, so an element holding
+// it is matched on the text before the "..." and, when that matches, the rest
+// is taken to match whatever follows. A pattern path.Match cannot read
+// reaches.
+func packagePatternReaches(pattern, pkg string) bool {
+	patternElems, pkgElems := strings.Split(pattern, "/"), strings.Split(pkg, "/")
+	for i := 0; i < len(patternElems) && i < len(pkgElems); i++ {
+		elem := patternElems[i]
+		prefix, _, spansSlash := strings.Cut(elem, "...")
+		if spansSlash {
+			elem = prefix + "*"
+		}
+		matched, err := path.Match(elem, pkgElems[i])
+		if err != nil || (matched && spansSlash) {
+			return true
+		}
+		if !matched {
+			return false
+		}
+	}
+	return true
 }
 
 // moduleRelativePackageArgs maps each absolute directory argument that lies in

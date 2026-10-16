@@ -126,7 +126,17 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"brace expansion", "GT_TEST_DOCKER=1 go test ./internal/{beads,style}", true},
 		{"star glob hiding behind a dot-dot", "GT_TEST_DOCKER=1 go test ./internal/b*/../beads", true},
 		{"wildcard beside a plain container package", "GT_TEST_DOCKER=1 go test ./internal/b... ./internal/style", true},
-		{"wildcard even when it reaches only light packages", "GT_TEST_DOCKER=1 go test ./internal/st...", true},
+		{"character-class glob reaching two container packages", "GT_TEST_DOCKER=1 go test ./internal/[bc]*", true},
+		{"wildcard leading the path", "GT_TEST_DOCKER=1 go test ./*/beads", true},
+		{"wildcard inside a subpackage of a container package", "GT_TEST_DOCKER=1 go test ./internal/beads/s*", true},
+
+		// Allowed: a pattern the list cannot reach stays allowed — refusing it
+		// would cost a wrapped run for nothing.
+		{"partial wildcard reaching only a light package", "GT_TEST_DOCKER=1 go test ./internal/st...", false},
+		{"star glob reaching only a light package", "GT_TEST_DOCKER=1 go test ./internal/s*", false},
+		{"question-mark glob reaching only light packages", "GT_TEST_DOCKER=1 go test ./internal/sty?e", false},
+		{"wildcard outside internal", "GT_TEST_DOCKER=1 go test ./c*/gt", false},
+		{"wildcard beside a light package", "GT_TEST_DOCKER=1 go test ./internal/st... ./internal/version", false},
 		{"wildcard, wrapped in gt slot run", "gt slot run --role gastown/refinery -- go test ./internal/b...", false},
 		{"wildcard, switch off", "go test ./internal/b...", false},
 		{"pattern value of -skip is not a package", "GT_TEST_DOCKER=1 go test -skip 'Test*' ./internal/style", false},
@@ -609,6 +619,8 @@ func TestEvaluateContainerSuiteCommand_AbsoluteDirectory(t *testing.T) {
 		{"absolute container package, switch off", "go test " + root + "/internal/beads", false},
 		{"absolute container package, wrapped", "gt slot run --role gastown/polecats/topaz -- go test " + root + "/internal/beads", false},
 		{"absolute wildcard element", "GT_TEST_DOCKER=1 go test " + root + "/internal/b...", true},
+		{"absolute glob reaching only a light package", "GT_TEST_DOCKER=1 go test " + root + "/internal/s*", false},
+		{"absolute path with a glob above the module root", "GT_TEST_DOCKER=1 go test /nonexistent-d1e8c/*/internal/beads", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -617,6 +629,63 @@ func TestEvaluateContainerSuiteCommand_AbsoluteDirectory(t *testing.T) {
 				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.blocked)
 			}
 		})
+	}
+}
+
+// A wildcard spelled as a path under the run directory is matched where go
+// resolves it as well as at the module root, the way a plain argument is.
+func TestPackageWildcardFollowsTheRunDir(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name   string
+		relDir string
+		arg    string
+		want   bool
+	}{
+		{"glob under internal reaching beads", "internal", "./b*", true},
+		{"glob under internal reaching only a light package", "internal", "./s*", false},
+		{"ellipsis under internal reaching cmd", "internal", "./c...", true},
+		{"glob one level up from a container package", "internal/beads", "../d*", true},
+		{"glob at the module root", ".", "./internal/b*", true},
+		{"glob under a light directory", "cmd", "./g*", false},
+		{"glob under an unlisted subpackage dir still sees the root reading", "cmd", "./internal/b*", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cwd := filepath.Join(root, filepath.FromSlash(tt.relDir))
+			if got := packageWildcardMayReachContainerSuite(tt.arg, cwd); got != tt.want {
+				t.Errorf("packageWildcardMayReachContainerSuite(%q, %s) = %v, want %v", tt.arg, tt.relDir, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPackagePatternReaches(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		pattern, pkg string
+		want         bool
+	}{
+		{"internal/beads", "internal/beads", true},
+		{"internal/b*", "internal/beads", true},
+		{"internal/b...", "internal/beads", true},
+		{"internal/s*", "internal/beads", false},
+		{"internal/[bc]eads", "internal/beads", true},
+		{"internal/bead?", "internal/beads", true},
+		{"internal/bead??", "internal/beads", false},
+		{"inter*", "internal/beads", true},
+		{"internal/beads/s*", "internal/beads", true},
+		{"internal/.../x", "internal/beads", true},
+		{"i...", "internal/beads", true},
+		{"x...", "internal/beads", false},
+		{"internal/[", "internal/beads", true},
+		{"cmd/g*", "internal/beads", false},
+	}
+	for _, tt := range tests {
+		if got := packagePatternReaches(tt.pattern, tt.pkg); got != tt.want {
+			t.Errorf("packagePatternReaches(%q, %q) = %v, want %v", tt.pattern, tt.pkg, got, tt.want)
+		}
 	}
 }
 
