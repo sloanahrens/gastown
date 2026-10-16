@@ -673,6 +673,87 @@ func TestRunTierSweep_AStageThatNeverRanDefersInsteadOfRed(t *testing.T) {
 	}
 }
 
+// gt-zq1pb: a rig whose record already carries this tip's verdict is not run
+// again when another rig's deferral leaves the job due. Without this rule the
+// deferred cycle's retry — one per heartbeat — re-runs every red rig's 20m and
+// 90m stages, for a verdict the record already holds.
+func TestRunTierSweepDeferredRigSkipsUnchangedRedRigs(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, bd, logs := newTierSweepDaemon(t, now, "gastown", "other")
+	d.patrolConfig.Patrols.TierSweep.Rigs = []string{"gastown", "other"}
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-time.Hour), LastSHA: "redsha", LastGreenSHA: "green0",
+		Tiers: map[string]tierSweepTierResult{
+			"shell": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"TestRed"}, SHA: "redsha"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// other's origin/main cannot be read, so its cycle defers: the job stays
+	// due and the next heartbeat retries the cycle.
+	d.tierSweepSeams.mainSHA = func(_ context.Context, repo string) (string, error) {
+		if filepath.Base(filepath.Dir(repo)) == "other" {
+			return "", errors.New("fetch failed")
+		}
+		return "redsha", nil
+	}
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+
+	if d.runTierSweep() {
+		t.Fatal("runTierSweep reached a verdict with a rig deferring")
+	}
+	if len(rec.stages) != 0 {
+		t.Fatalf("stages = %+v, want none: gastown's tip was already judged and other never reached a stage", rec.stages)
+	}
+	if want := "origin/main redsha already judged by the last cycle"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log missing %q; got:\n%s", want, logs.String())
+	}
+	st := tierSweepTestState(t, d, "gastown")
+	if st.LastSHA != "redsha" || !st.LastRun.Equal(now.Add(-time.Hour)) {
+		t.Errorf("record = %+v, want the skipped rig's record untouched", st)
+	}
+	if len(bd.created) != 0 {
+		t.Errorf("beads = %+v, want none: no stage ran for either rig", bd.created)
+	}
+}
+
+// gt-zq1pb: a runner_idle_command that hangs is read as the busy runner it
+// stands for, so the stage starts under load at the cap. Before this the cap
+// was checked only between polls and each poll ran unbounded, so a hung probe
+// held the wait until the cycle's own deadline, two hours away.
+func TestTierSweepAwaitRunnerIdleBoundsHungPoll(t *testing.T) {
+	t.Parallel()
+	d, _, _, clk := newRunnerIdleDaemon(t, "250ms", nil)
+	// The caller's context stands for the cycle's own two-hour budget: far past
+	// the cap, and short enough that a wait which ignored the cap ends the test
+	// instead of hanging it.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	dir := t.TempDir()
+	d.tierSweepSeams.runnerIdle = func(ctx context.Context, _, _ string) error {
+		// A probe that never answers on its own: it holds until the context the
+		// wait gave it ends.
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	d.tierSweepSeams.idleSleep = func(_ context.Context, pause time.Duration) error {
+		clk.Advance(pause)
+		return nil
+	}
+
+	wait, err := d.tierSweepAwaitRunnerIdle(ctx, dir)
+	if err != nil {
+		t.Fatalf("wait error = %v, want the cap's under-load verdict: a hung poll ends at runner_idle_wait, not at the caller's deadline", err)
+	}
+	if !wait.underLoad {
+		t.Errorf("wait = %+v, want the under-load verdict: the cap ran out with the probe still hung", wait)
+	}
+	if want := 250 * time.Millisecond; wait.waited > want {
+		t.Errorf("waited = %s, want no more than the %s cap", wait.waited, want)
+	}
+}
+
 func TestRunTierSweep_FilesOneBeadPerFailingUnitAndClosesOnGreen(t *testing.T) {
 	t.Parallel()
 	now := atHour(time.Now(), 15)
@@ -684,7 +765,11 @@ func TestRunTierSweep_FilesOneBeadPerFailingUnitAndClosesOnGreen(t *testing.T) {
 		}
 		return tierSweepStageResult{output: b.String(), exitCode: 1, ran: true}
 	}
-	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }
+	// Each cycle below sweeps a new tip: a verdict stands for the tip it was
+	// taken at, so a re-sweep comes with a moved origin/main, and the beads are
+	// keyed by tier and failing unit rather than by tip (gt-zq1pb).
+	sha := "abc123"
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return sha, nil }
 	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
 
 	d.runTierSweep()
@@ -710,6 +795,7 @@ func TestRunTierSweep_FilesOneBeadPerFailingUnitAndClosesOnGreen(t *testing.T) {
 	}
 
 	// A second red run comments on the open beads instead of refiling them.
+	sha = "def456"
 	bd.created = nil
 	bd.open = []*beads.Issue{
 		{ID: "gt-1", Title: "tier sweep (gastown): shell: ./internal/cmd"},
@@ -728,6 +814,7 @@ func TestRunTierSweep_FilesOneBeadPerFailingUnitAndClosesOnGreen(t *testing.T) {
 	}
 
 	// Green closes the tier's open beads.
+	sha = "fedcba"
 	rec.green()
 	bd.comments, bd.open = nil, []*beads.Issue{
 		{ID: "gt-1", Title: "tier sweep (gastown): shell: ./internal/cmd"},
@@ -1284,6 +1371,58 @@ func TestTierSweepRigCycleDeferredKeepsFailedNamesWithTheSHA(t *testing.T) {
 	}
 	if !strings.Contains(bd.created[0].Description, "new2") {
 		t.Errorf("bead = %q, want it filed against the tip the RED was taken at", bd.created[0].Description)
+	}
+}
+
+// gt-zq1pb: the cycle's own deadline is not a verdict about the tree. Land's
+// gate marks a step TimedOut only for the step's own budget, so a stage the
+// cycle's context killed comes back with exit -1 and no flag — read as RED it
+// filed a bead against a stage that never finished, and held LastGreenSHA back.
+// The cycle defers instead, leaving the record it had.
+func TestTierSweepRigCycleParentDeadlineDefers(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, bd, logs := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "deadlinesha", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-time.Hour), LastSHA: "prior", LastGreenSHA: "green0",
+		Tiers: map[string]tierSweepTierResult{
+			"shell": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"TestPrior"}, SHA: "prior"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The stage is running when the cycle's deadline takes it: the gate kills
+	// it and reports exit -1, with no timeout of the stage's own.
+	rec.result = func(tierSweepStage) tierSweepStageResult {
+		cancel()
+		return tierSweepStageResult{exitCode: -1, ran: true}
+	}
+	cycle := d.startDogCycle("tier_sweep")
+	defer cycle.close()
+
+	if d.runTierSweepRig(ctx, cycle, "gastown", now) {
+		t.Error("the rig reported a verdict; want a defer: the cycle's deadline ended its stage")
+	}
+	if len(bd.created) != 0 {
+		t.Errorf("beads = %+v, want none: no stage reached a verdict", bd.created)
+	}
+	if len(bd.comments) != 0 {
+		t.Errorf("comments = %v, want none", bd.comments)
+	}
+	if strings.Contains(logs.String(), "no verdict line") {
+		t.Errorf("the deadline read as a stage verdict; got:\n%s", logs.String())
+	}
+	st := tierSweepTestState(t, d, "gastown")
+	if st.LastSHA != "prior" || st.LastGreenSHA != "green0" {
+		t.Errorf("record = %+v, want the prior record's tips untouched", st)
+	}
+	if got := st.Tiers["shell"]; got.Verdict != tierSweepRed || len(got.FailedNames) != 1 || got.FailedNames[0] != "TestPrior" {
+		t.Errorf("shell verdict = %+v, want the prior RED, not this cycle's", got)
 	}
 }
 

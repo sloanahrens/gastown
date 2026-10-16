@@ -623,7 +623,7 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 		}
 		// A tip the last cycle covered stands; one it only partly reached does
 		// not, which is what Partial records (gt-icmdq).
-		if sha == "" || sha == state.LastGreenSHA || (sha == state.LastSHA && !state.Partial) {
+		if sha == "" || sha == state.LastGreenSHA || tierSweepTipJudged(state, sha) {
 			continue
 		}
 		d.logger.Printf("tier_sweep: %s: red bead(s) closed and main moved; re-running now", rig)
@@ -859,7 +859,26 @@ func (d *Daemon) runTierSweepRig(ctx context.Context, cycle *dogCycle, rig strin
 		d.logger.Printf("tier_sweep: %s: origin/main %s unchanged since the last green sweep; skipping", rig, shortSHA(sha))
 		return true
 	}
+	if tierSweepTipJudged(state, sha) {
+		// The record already carries this tip's verdict, so a re-run buys
+		// nothing. It matters because a cycle that defers on one rig reaches no
+		// verdict, which leaves the job due for every heartbeat — and those
+		// retries re-ran each red rig's 20m and 90m stages (gt-zq1pb). A tip the
+		// last cycle only partly reached is not judged, and still owes a cycle.
+		cycle.skipStep(rig, "origin/main "+shortSHA(sha)+" already judged by the last cycle")
+		d.logger.Printf("tier_sweep: %s: origin/main %s already judged by the last cycle; skipping the re-run", rig, shortSHA(sha))
+		return true
+	}
 	return d.tierSweepRigCycle(ctx, cycle, rig, repo, sha, state, now)
+}
+
+// tierSweepTipJudged reports whether state already carries a verdict for sha:
+// the last cycle saw that tip and ran every stage it planned at it, so the
+// record holds a verdict for every tier the sweep covers. A tip that cycle only
+// partly reached is not judged, because the record leaves tiers of it unjudged
+// (gt-icmdq, gt-zq1pb).
+func tierSweepTipJudged(state tierSweepState, sha string) bool {
+	return sha != "" && sha == state.LastSHA && !state.Partial
 }
 
 // tierSweepStages is the stages one cycle runs for rig: the shell tier, then
@@ -914,6 +933,11 @@ type tierSweepIdleWait struct {
 // stage instead of stalling it beside the load that is already there. A
 // canceled ctx returns its error rather than the cap's verdict, so a daemon
 // drain is never held by the wait.
+//
+// Each poll is given what is left of the cap, so a runner_idle_command that
+// hangs is read as the busy runner it stands for and the wait ends at the cap,
+// with the stage starting under load — not at the cycle's own deadline two
+// hours away (gt-zq1pb).
 func (d *Daemon) tierSweepAwaitRunnerIdle(ctx context.Context, dir string) (wait tierSweepIdleWait, err error) {
 	command := tierSweepRunnerIdleCommand(d.patrolConfig)
 	if command == "" {
@@ -936,7 +960,18 @@ func (d *Daemon) tierSweepAwaitRunnerIdle(ctx context.Context, dir string) (wait
 		if err := ctx.Err(); err != nil {
 			return wait, err
 		}
-		busy := poll(ctx, dir, command)
+		// The poll is bounded by what is left of the cap, so a probe that hangs
+		// ends the wait at the cap instead of at the cycle's deadline (gt-zq1pb).
+		remaining := deadline.Sub(d.clk().Now())
+		if remaining <= 0 {
+			// The cap ran out with the runner still busy: the stage starts
+			// anyway, and the cycle records that it ran under load.
+			wait.underLoad = true
+			return wait, nil
+		}
+		pollCtx, cancelPoll := context.WithTimeout(ctx, remaining)
+		busy := poll(pollCtx, dir, command)
+		cancelPoll()
 		if busy == nil {
 			return wait, nil
 		}
@@ -946,12 +981,11 @@ func (d *Daemon) tierSweepAwaitRunnerIdle(ctx context.Context, dir string) (wait
 		if err := ctx.Err(); err != nil {
 			return wait, err
 		}
-		remaining := deadline.Sub(d.clk().Now())
+		remaining = deadline.Sub(d.clk().Now())
 		if remaining <= 0 {
-			// The cap ran out with the runner still busy: the stage starts
-			// anyway, and the cycle records that it ran under load.
-			wait.underLoad = true
-			return wait, nil
+			// The poll used up the cap: no pause is owed, and the loop's own
+			// check takes the cap's verdict.
+			continue
 		}
 		if remaining > tierSweepRunnerIdlePoll {
 			remaining = tierSweepRunnerIdlePoll
@@ -1084,6 +1118,18 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 			// nothing was learned about the tree, so the cycle is incomplete
 			// and the next heartbeat retries it.
 			d.logger.Printf("tier_sweep: %s: %s stage did not run (%v); deferring", rig, st.tiers[0], res.err)
+			deferred = true
+			continue
+		}
+		if !res.timedOut && ctx.Err() != nil {
+			// The cycle's own deadline took the stage, not the stage's budget:
+			// land's gate marks a step TimedOut only when the step's own
+			// timeout killed it, so a stage cut off here comes back with exit
+			// -1 and no verdict line — which read as RED files a bead against
+			// a stage that never finished and holds LastGreenSHA back. Nothing
+			// was learned about the tree, so the cycle defers (gt-zq1pb).
+			d.logger.Printf("tier_sweep: %s: %s stage: the cycle's deadline ended it (exit %d, %v); deferring",
+				rig, st.tiers[0], res.exitCode, ctx.Err())
 			deferred = true
 			continue
 		}
