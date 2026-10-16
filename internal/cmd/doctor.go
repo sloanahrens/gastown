@@ -41,7 +41,7 @@ Town root protection:
   - town-git                 Verify town root is under version control
   - town-root-branch         Verify town root is on main branch (fixable)
   - foreign-remotes          Detect git remotes from unrelated repos (fixable)
-  - pre-checkout-hook        Verify pre-checkout hook prevents branch switches (fixable)
+  - branch-protection        Verify the post-checkout hook protects the town root branch (fixable)
 
 Infrastructure checks:
   - stale-binary             Check if gt binary is up to date with repo
