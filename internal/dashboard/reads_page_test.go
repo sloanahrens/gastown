@@ -51,9 +51,9 @@ func TestThePageMarksAFailedOrStaleReading(t *testing.T) {
 	}
 
 	// The panel's ages are written on every call, above the unchanged-key early
-	// return that used to freeze them between polls.
+	// return, where the seat ages move in place.
 	workNote := pageFunc(t, "renderWork")
-	note, skip := strings.Index(workNote, `$("worknote").textContent`), strings.Index(workNote, "key === wKey) return;")
+	note, skip := strings.Index(workNote, `$("worknote").textContent`), strings.Index(workNote, "key === wKey)")
 	if note < 0 || skip < 0 || note > skip {
 		t.Errorf("renderWork writes its ages below the early return, so they freeze (note=%d skip=%d)", note, skip)
 	}
