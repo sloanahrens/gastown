@@ -275,7 +275,7 @@ func skipLauncherArgs(name string, launcher prWorkflowLauncher, rest []string) (
 // still names gh or git, since a script the guard cannot reach is not one that
 // runs nothing.
 func prWorkflowInvocations(command string, depth int) (invocations [][]string, tooDeep bool) {
-	tokens := shellTokenize(stripHeredocBodies(strings.TrimSpace(command)))
+	tokens := shellTokenize(prWorkflowTokenText(command))
 
 	var payloads []string
 	for _, segment := range splitShellSegments(tokens) {
@@ -310,6 +310,57 @@ func prWorkflowInvocations(command string, depth int) (invocations [][]string, t
 	return invocations, tooDeep
 }
 
+// prWorkflowSubstitutionWord stands in for a command substitution while the
+// pr-workflow guard tokenizes, so the words on either side of it stay whole.
+const prWorkflowSubstitutionWord = "__gt_substitution__"
+
+// prWorkflowTokenText returns command as the text prWorkflowInvocations
+// tokenizes: every command substitution the shell expands is replaced by one
+// opaque word.
+//
+// shellTokenize splits on whitespace and knows nothing of a substitution scope,
+// so it cuts "x=$(echo hi) gh pr create" into "x=$(echo", "hi)", "gh" — the
+// "$(" left glued to the assignment and the ")" left glued to the last word of
+// the body. The segment judge reads the assignment as setup and "hi)" as the
+// command word, so the "gh pr create" the line really runs, with x set for it,
+// was no word the guard saw and the line was allowed (gt-4t56h). One word in
+// the substitution's place keeps the words behind its ")" whole; the body is
+// judged as a command line of its own by prWorkflowSubstitutions.
+func prWorkflowTokenText(command string) string {
+	text := stripHeredocBodies(strings.TrimSpace(command))
+	spans := substitutionSpansIn(text, true)
+	if len(spans) == 0 {
+		return text
+	}
+	var b strings.Builder
+	b.Grow(len(text))
+	last := 0
+	for _, span := range spans {
+		b.WriteString(text[last:span.open])
+		b.WriteString(prWorkflowSubstitutionWord)
+		last = prWorkflowSpanEnd(text, span)
+	}
+	b.WriteString(text[last:])
+	return b.String()
+}
+
+// prWorkflowSpanEnd returns the index just past a substitution span: the ")" or
+// backtick that closes it sits at bodyEnd, while an unterminated substitution
+// runs to the end of the text.
+func prWorkflowSpanEnd(text string, span substitutionSpan) int {
+	if prWorkflowSpanUnterminated(text, span) {
+		return len(text)
+	}
+	return span.bodyEnd + 1
+}
+
+// prWorkflowSpanUnterminated reports whether the text never closes a
+// substitution: substitutionSpansIn then reads its body to the end of the text,
+// so bodyEnd is the text's length.
+func prWorkflowSpanUnterminated(text string, span substitutionSpan) bool {
+	return span.bodyEnd >= len(text)
+}
+
 // prWorkflowSubstitutions returns the body of every command substitution the
 // shell expands in command: the ones in the command text, and the ones in the
 // body of an unquoted heredoc, which the shell expands while reading it. The
@@ -321,17 +372,37 @@ func prWorkflowInvocations(command string, depth int) (invocations [][]string, t
 // the shell would run it: the backslash that makes a backtick literal, and
 // that the shell drops when it parses the body, is dropped too
 // (substitutionBody), so the "gh pr create" inside "echo \`gh pr create\`" is
-// read as the command it is.
+// read as the command it is. A body that runs to the end of the text hands its
+// last ")" over as a word of its own (prWorkflowSplitBodyParen).
 func prWorkflowSubstitutions(command string) []string {
 	text := stripHeredocBodies(command)
 	var bodies []string
 	for _, span := range substitutionSpansIn(text, true) {
 		body := substitutionBody(text, span)
+		if prWorkflowSpanUnterminated(text, span) {
+			body = prWorkflowSplitBodyParen(body)
+		}
 		if strings.TrimSpace(body) != "" {
 			bodies = append(bodies, body)
 		}
 	}
 	return append(bodies, heredocBodySubstitutions(command)...)
+}
+
+// prWorkflowSplitBodyParen returns body with a space in front of a ")" it ends
+// on, so the word the ")" was glued to is judged whole.
+//
+// The body of a substitution the text leaves unterminated runs to the end of
+// the text, so a ")" there lands inside the body and hides the word it touches:
+// "x=$(echo `gh pr create)" hands "gh pr create)" over one level down, whose
+// last word is not the "create" the line would have run, and the gh inside it
+// went unjudged (gt-4t56h).
+func prWorkflowSplitBodyParen(body string) string {
+	last := len(body) - 1
+	if last < 1 || body[last] != ')' {
+		return body
+	}
+	return body[:last] + " )"
 }
 
 // prWorkflowNamesGhOrGit finds gh or git as a word of its own, path-qualified
