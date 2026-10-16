@@ -485,6 +485,51 @@ func TestPolecatTestScopeBlocksRemainingWholeSuiteGoals(t *testing.T) {
 	}
 }
 
+// make test-timing runs ./... unless PKGS narrows it (Makefile, docs/testing.md),
+// so a PKGS naming light packages is a bounded run; the bare goal, the
+// whole-module values, a heavy package and anything the guard cannot read stay
+// refused. Only test-timing gets the exemption.
+func TestPolecatTestScopeTestTimingPKGSNarrowed(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/dag")
+	tests := []struct {
+		command string
+		blocked bool
+	}{
+		{"make test-timing PKGS=./internal/tmux/...", false},
+		{"make PKGS=./internal/tmux/... test-timing", false},
+		{"make test-timing PKGS=./internal/style ./internal/beads/...", false},
+		{`make test-timing PKGS="./internal/style ./internal/beads/..."`, false},
+		{"make -j4 test-timing PKGS=./internal/style", false},
+		{"gt slot run --role gastown/flint -- make test-timing PKGS=./internal/style", false},
+		{"make test-timing PKGS=./... PKGS=./internal/style", false},
+
+		{"make test-timing", true},
+		{"make test-timing PKGS=", true},
+		{"make test-timing PKGS=./...", true},
+		{"make test-timing PKGS=...", true},
+		{"make test-timing PKGS=./internal/style PKGS=./...", true},
+		{`make test-timing PKGS="./internal/style ./..."`, true},
+		{"make test-timing PKGS=./internal/cmd", true},
+		{"make test-timing PKGS=./internal/...", true},
+		{"make test-timing PKGS=./internal/c?d", true},
+		{"make test-timing PKGS=$PKGS", true},
+		{"make test-timing PKGS=-run=TestX", true},
+		{"make test-timing PKGS:=./internal/style", true},
+		{"make test-timing gate PKGS=./internal/style", true},
+		{"make gate PKGS=./internal/style", true},
+		{"make test-integration-wall PKGS=./internal/style", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.command, func(t *testing.T) {
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, root), tt.command)
+			if blocked := reason != ""; blocked != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) = %q (matched %v), blocked = %v, want %v", tt.command, reason, matched, blocked, tt.blocked)
+			}
+		})
+	}
+}
+
 // A -run that selects every Test function runs essentially the whole package
 // even though it misses the Example, Benchmark and Fuzz probes, so it bounds
 // nothing; a pattern that names one test, or a prefix of some, still does.

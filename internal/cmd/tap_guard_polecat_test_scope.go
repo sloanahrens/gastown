@@ -127,11 +127,55 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth
 // `go test` on the host: gate and its gate-test stage, the slow tiers,
 // and test, which runs them all. test-integration-wall runs `go test -tags
 // integration ./...`, tier-check is the budget runner over ./..., and
-// test-timing defaults to ./... too. gate-lint, lint, build and presubmit are
+// test-timing defaults to ./... too (a PKGS assignment narrows it,
+// makeTestTimingPKGSBounded). gate-lint, lint, build and presubmit are
 // not here — they run no whole-suite test (presubmit tests the changed
 // packages). gt done runs its own gate, so no polecat flow needs these
 // (gt-gl3jb, gt-9udxk).
 var polecatWholeSuiteMakeGoals = []string{"test", "gate", "gate-test", "test-slow", "test-integration", "test-integration-wall", "tier-check", "test-timing"}
+
+// testTimingMakeGoal is the one whole-suite goal that PKGS narrows: its recipe
+// is `bash scripts/test-timing.sh $(PKGS)`, and the script runs ./... only when
+// PKGS is empty.
+const testTimingMakeGoal = "test-timing"
+
+// makeTestTimingPKGSBounded reports whether a `make test-timing` invocation
+// carries a PKGS=<packages> assignment that bounds the run. args holds the
+// invocation's tokens from the "make" word onward and dir is the directory the
+// guard placed the segment in ("" when it could not).
+//
+// The last PKGS assignment wins, as in make. The value is word-split, as the
+// recipe's unquoted $(PKGS) is, and each word is judged by the rule a go test
+// package argument with no -run filter gets: the whole-repo wildcard, a heavy
+// package, and a wildcard or shell expansion that can reach one all leave the
+// run unbounded. A word starting with "-" is a go flag the guard cannot read, so
+// it is refused too. Only the PKGS=value spelling counts; PKGS:=value and
+// PKGS?=value stay refused (fail closed).
+func makeTestTimingPKGSBounded(args []string, dir string) bool {
+	runDir, known := makeRunDir(args, dir)
+	if !known || strings.TrimSpace(runDir) == "" {
+		return false
+	}
+	var words []string
+	for _, tok := range args[1:] {
+		if value, ok := strings.CutPrefix(tok, "PKGS="); ok {
+			words = strings.Fields(value)
+		}
+	}
+	if len(words) == 0 {
+		return false
+	}
+	for _, w := range words {
+		if strings.HasPrefix(w, "-") {
+			return false
+		}
+		if packageArgWildcard(w) && packageWildcardMayReach(w, runDir, heavyTestPackageList()) {
+			return false
+		}
+	}
+	wholeRepo, heavy := polecatHeavyTarget(words, runDir)
+	return !wholeRepo && len(heavy) == 0
+}
 
 // findPolecatWholeSuiteMakeGoal returns the index of the first make invocation
 // in tokens (already lowercased) that names a polecatWholeSuiteMakeGoals goal,
@@ -165,7 +209,11 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool)
 	// directory cannot be placed at all, which leaves that question open
 	// (gt-ofj05).
 	if i, goal := findPolecatWholeSuiteMakeGoal(lower); i >= 0 {
-		if !makeActsOnWholeGoModule(tokens[i:], makeTreeDir(cwd, cwdKnown)) {
+		treeDir := makeTreeDir(cwd, cwdKnown)
+		if !makeActsOnWholeGoModule(tokens[i:], treeDir) {
+			return "", nil
+		}
+		if goal == testTimingMakeGoal && makeTestTimingPKGSBounded(tokens[i:], treeDir) {
 			return "", nil
 		}
 		return fmt.Sprintf("polecat 'make %s' runs the whole suite", goal), nil
