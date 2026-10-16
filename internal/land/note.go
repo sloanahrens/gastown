@@ -20,6 +20,12 @@ const MergeRejectionNoteMarker = dispatch.MergeRejectionNoteMarker
 // LandingNoteMarker opens the landing record block on a work bead.
 const LandingNoteMarker = "LANDING RECORD"
 
+// RiskPathReviewSkippedLine opens the last line of the LANDING RECORD block of
+// a landing RiskPathsRecorded left with no risk path; the label that did it
+// follows in parentheses. No reader of the block parses by line (they match
+// the marker and landed_commit), so the extra line breaks none (gt-g349w).
+const RiskPathReviewSkippedLine = "risk-path review skipped: review-generated"
+
 // Receipt is the om score and still-unresolved finding ids a rejection
 // carries for the deacon's convergence rule (deacon.ParseEditorialReceiptFromNotes).
 type Receipt struct {
@@ -379,13 +385,20 @@ type LandingRecord struct {
 	// carries gt:overseer-review-wanted (gt-vsct7.4). Empty on a landing that
 	// touched nothing on the list.
 	RiskPaths []string `json:"risk_paths,omitempty"`
+	// RiskPathReviewSkippedBy is the label that left RiskPaths empty; the note
+	// carries RiskPathReviewSkippedLine in place of the paths.
+	RiskPathReviewSkippedBy string `json:"risk_path_review_skipped_by,omitempty"`
 }
 
 // NoteBlock is the LANDING RECORD block Land appends to the work bead.
 func (r LandingRecord) NoteBlock() string {
-	return fmt.Sprintf("%s\nlanded_commit: %s\npatch_id: %s\ntarget: %s\nbase: %s\nbranch: %s\nhead: %s\ngate_result: %s\nom_verdict: %s\nom_score: %.4f\nroute: %s\nlanded_at: %s",
+	note := fmt.Sprintf("%s\nlanded_commit: %s\npatch_id: %s\ntarget: %s\nbase: %s\nbranch: %s\nhead: %s\ngate_result: %s\nom_verdict: %s\nom_score: %.4f\nroute: %s\nlanded_at: %s",
 		LandingNoteMarker, r.LandedCommit, r.PatchID, NoteField(r.Target), r.Base, NoteField(r.Branch), r.Head,
 		NoteField(r.GateResult), NoteField(r.OMVerdict), r.OMScore, NoteField(r.Route), r.LandedAt.UTC().Format(time.RFC3339))
+	if r.RiskPathReviewSkippedBy != "" {
+		note += fmt.Sprintf("\n%s (label %s)", RiskPathReviewSkippedLine, NoteField(r.RiskPathReviewSkippedBy))
+	}
+	return note
 }
 
 // CloseReason is the work bead's close reason. target_branch and commit_sha

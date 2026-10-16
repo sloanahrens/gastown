@@ -210,6 +210,8 @@ type Result struct {
 	// RiskPathsFile at Base. They label the work bead and are written to the
 	// landing record; they never reject or delay the landing (gt-vsct7.4).
 	RiskPaths []string
+	// RiskPathReviewSkippedBy is the label that left RiskPaths empty (RiskPathsRecorded).
+	RiskPathReviewSkippedBy string
 }
 
 // RejectionKind says what about the work stopped it from landing.
@@ -1009,7 +1011,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// conflicts with a later landing that edited the head's own lines — still
 	// ends as a conflict rejection with rework (gt-01yt6).
 	if already {
-		if res, handled, err := l.finishedUnrecordedLanding(g, w); handled {
+		if res, handled, err := l.finishedUnrecordedLanding(g, issue, w); handled {
 			return res, err
 		}
 		// The head is on the target with no land merge of this lander's to
@@ -1036,6 +1038,12 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		l.logf("%s: reading risk paths: %v; landing unlabelled", w.BeadID, err)
 		riskPaths = nil
 	}
+	// A bead the review machinery filed records no risk path, so its landing
+	// asks for no risk-path review of the review's own output (gt-g349w).
+	riskPaths, skippedBy := RiskPathsRecorded(issue, riskPaths)
+	if skippedBy != "" {
+		l.logf("%s: risk-path review skipped: the review machinery filed this bead (%s); recording no risk path", w.BeadID, skippedBy)
+	}
 	if same, err := g.TreesIdentical(base, w.Head); err != nil {
 		return Result{}, &InfraError{Stage: "compare trees", Err: err}
 	} else if same {
@@ -1046,7 +1054,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// already landed (gt-064oh). The range checks above already ran; they
 		// read the base..head the head's own first pass read and passed, so
 		// they do not stand between a lost record and its recovery here.
-		if res, handled, err := l.finishedUnrecordedLanding(g, w); handled {
+		if res, handled, err := l.finishedUnrecordedLanding(g, issue, w); handled {
 			return res, err
 		}
 		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(g, EmptyMerge{
@@ -1075,7 +1083,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// so the pass ends as the infra error the worker retries; rejecting
 		// here would send the author to rework work that may have landed
 		// (gt-xqpmc).
-		if res, handled, cerr := l.finishedUnrecordedLanding(g, w); handled {
+		if res, handled, cerr := l.finishedUnrecordedLanding(g, issue, w); handled {
 			return res, cerr
 		}
 		// No land merge accounts for the head's content on the target, and
@@ -1097,7 +1105,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// head on the target the recovery declines and the rejection stands
 		// (gt-01yt6).
 		if rej.Kind == RejectConflict {
-			if res, handled, err := l.finishedUnrecordedLanding(g, w); handled {
+			if res, handled, err := l.finishedUnrecordedLanding(g, issue, w); handled {
 				return res, err
 			}
 		}
@@ -1139,7 +1147,8 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		l.discardCandidate(ctx, w, candRes)
 		return Result{}, gateErr
 	}
-	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes, RiskPaths: riskPaths}
+	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes,
+		RiskPaths: riskPaths, RiskPathReviewSkippedBy: skippedBy}
 	if gateRes.Err != nil {
 		return Result{}, &InfraError{Stage: "gate", Err: gateRes.Err}
 	}
@@ -1332,8 +1341,8 @@ func landMergeMarker(w Work) string {
 // dead ends and the post-merge failure consult it, so the guarantee that a
 // failed lookup comes back as an *InfraError lives here and not in each
 // caller (gt-z0qzo).
-func (l *Lander) finishedUnrecordedLanding(g Repo, w Work) (res Result, handled bool, err error) {
-	completed, err := l.completeUnrecordedLanding(g, w)
+func (l *Lander) finishedUnrecordedLanding(g Repo, issue *beads.Issue, w Work) (res Result, handled bool, err error) {
+	completed, err := l.completeUnrecordedLanding(g, issue, w)
 	if completed != nil {
 		return *completed, true, err
 	}
@@ -1362,7 +1371,7 @@ func asInfraError(stage string, err error) error {
 //
 // The target's history is the whole evidence: om's verdict and the gate's
 // result were not kept, so the record says so rather than inventing them.
-func (l *Lander) completeUnrecordedLanding(g Repo, w Work) (*Result, error) {
+func (l *Lander) completeUnrecordedLanding(g Repo, issue *beads.Issue, w Work) (*Result, error) {
 	remote := l.remote()
 	merged, err := g.FindCommitMatchingSubject(remote+"/"+w.Target, landMergeMarker(w))
 	if err != nil {
@@ -1437,9 +1446,14 @@ func (l *Lander) completeUnrecordedLanding(g Repo, w Work) (*Result, error) {
 		l.logf("%s: reading risk paths: %v; landing unlabelled", w.BeadID, err)
 		riskPaths = nil
 	}
+	riskPaths, skippedBy := RiskPathsRecorded(issue, riskPaths)
+	if skippedBy != "" {
+		l.logf("%s: risk-path review skipped: the review machinery filed this bead (%s); recording no risk path", w.BeadID, skippedBy)
+	}
 	res := &Result{LandedCommit: merged, PatchID: patchID, Base: base,
 		Verdict: Verdict{Verdict: VerdictUnrecorded}, RiskPaths: riskPaths,
-		GateNote: "not recorded: this landing merged on the target before its pass could record the gate result (gt-mdet3)"}
+		RiskPathReviewSkippedBy: skippedBy,
+		GateNote:                "not recorded: this landing merged on the target before its pass could record the gate result (gt-mdet3)"}
 	l.logf("%s: %s merged %s on %s/%s but its record was never written; finishing the landing", w.BeadID, remote, shortSHA(merged), remote, w.Target)
 	if err := l.record(w, *res); err != nil {
 		return res, &RecordError{Result: *res, Err: err}
@@ -1969,6 +1983,7 @@ func (l *Lander) record(w Work, res Result) error {
 		LandedCommit: res.LandedCommit, PatchID: res.PatchID,
 		GateResult: gateRecord(res), OMVerdict: res.Verdict.Verdict, OMScore: res.Verdict.Score,
 		Route: route, LandedAt: l.now().UTC(), RiskPaths: res.RiskPaths,
+		RiskPathReviewSkippedBy: res.RiskPathReviewSkippedBy,
 	}
 	if err := l.Landings.Append(rec); err != nil {
 		return fmt.Errorf("landings file: %w", err)
@@ -1977,8 +1992,8 @@ func (l *Lander) record(w Work, res Result) error {
 }
 
 // recordBead writes the landing onto the work bead: the LANDING RECORD block,
-// the ready label off, the overseer-review-wanted label on when the landing
-// touched a risk path, and the close carrying landed_commit and patch_id. It
+// the ready label off, the overseer-review-wanted label on when the record
+// carries a risk path, and the close carrying landed_commit and patch_id. It
 // is idempotent, so a repair after a partial write finishes the same record.
 func (l *Lander) recordBead(w Work, rec LandingRecord) error {
 	issue, err := l.Beads.Show(w.BeadID)
