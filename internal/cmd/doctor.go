@@ -82,7 +82,6 @@ Rig checks (with --rig flag):
   - mayor-clone-exists       Verify mayor/rig/ clone exists (fixable)
   - polecat-clones-valid     Verify polecat directories are valid clones
   - beads-config-valid       Verify beads configuration (fixable)
-  - editorial-coverage       Verify landed merges carry a matching om approve note
   - harness-drift            Detect hand edits to deploy-managed harness files
   - editorial-required       Warn when a rig has an om rubric but review isn't required
 
