@@ -43,6 +43,20 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 		{"make test with spaced jobs value", "make -j 4 test", true},
 		{"make test with keep-going and load flags", "make -k -l test", true},
 		{"make test with long directory option and spaced value", "make --directory . test", true},
+		// The other goals that run the whole suite on the host (gt-gl3jb).
+		{"make gate", "make gate", true},
+		{"make gate with jobs flag", "make -j4 gate", true},
+		{"make gate wrapped in slot run", "gt slot run --role gastown/zircon -- make gate", true},
+		{"make gate-test", "make gate-test", true},
+		{"make gate-test with jobs flag", "make -j4 gate-test", true},
+		{"make gate-test wrapped in slot run", "gt slot run --role gastown/zircon -- make gate-test", true},
+		{"make test-slow", "make test-slow", true},
+		{"make test-slow with jobs flag", "make -j4 test-slow", true},
+		{"make test-slow wrapped in slot run", "gt slot run --role gastown/zircon -- make test-slow", true},
+		{"make test-integration", "make test-integration", true},
+		{"make test-integration with jobs flag", "make -j4 test-integration", true},
+		{"make test-integration wrapped in slot run", "gt slot run --role gastown/zircon -- make test-integration", true},
+		{"make gate after another goal", "make clean gate", true},
 
 		{"filtered heavy package", "go test ./internal/cmd/ -run 'TestApplyMQCheck|TestSlingDeadAgent'", false},
 		{"filtered heavy package, -run= form", "go test -run=TestFoo ./internal/daemon/", false},
@@ -54,6 +68,9 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 		{"go vet", "go vet ./internal/cmd/ ./internal/daemon/", false},
 		{"go build", "go build ./...", false},
 		{"no go test", "make build", false},
+		{"make lint", "make lint", false},
+		{"make presubmit", "make presubmit", false},
+		{"make gate-lint", "make gate-lint", false},
 		{"empty", "", false},
 	}
 	blocked := 0
@@ -69,8 +86,8 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 24 {
-		t.Errorf("blocked %d of %d cases, want exactly 24", blocked, len(tests))
+	if blocked != 37 {
+		t.Errorf("blocked %d of %d cases, want exactly 37", blocked, len(tests))
 	}
 }
 
