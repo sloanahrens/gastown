@@ -35,7 +35,10 @@ func panelRows(t *testing.T, dom *pageDOM) []panelDrawn {
 
 	v, err := dom.vm.RunString(`JSON.stringify(__byId["attention"].children.map(c => ({
 		text: c.textContent, owner: c.dataset.owner || "", hidden: !!c.hidden,
-		cells: Array.from(c.children).map(k => k.tagName.toLowerCase() + " " + k.className)})))`)
+		cells: (function walk(e) {
+			return Array.from(e.children).reduce((out, k) =>
+				out.concat([k.tagName.toLowerCase() + " " + k.className], walk(k)), []);
+		})(c)})))`)
 	if err != nil {
 		t.Fatalf("reading the panel's rows: %v", err)
 	}
@@ -46,7 +49,8 @@ func panelRows(t *testing.T, dom *pageDOM) []panelDrawn {
 	return out
 }
 
-// panelCells reports whether one row drew a cell of the given tag and class.
+// panelCells reports whether one row drew a cell of the given tag and class,
+// anywhere under it: a row's header cells are inside the button that folds it.
 func panelCells(row panelDrawn, cell string) bool {
 	for _, c := range row.Cells {
 		if c == cell {
@@ -96,10 +100,12 @@ func attentionFoldRows() []any {
 	}
 }
 
-// panelRow is one row of the panel read back as an element: the tag the page
-// drew it with, the aria-expanded it carries and the text it reads.
+// panelRow is one row of the panel read back as an element: the tag the row
+// itself is, the tag of the button its header line folds from, the
+// aria-expanded that button carries and the text the row reads.
 type panelRow struct {
 	Tag      string `json:"tag"`
+	Head     string `json:"head"`
 	Expanded string `json:"expanded"`
 	Text     string `json:"text"`
 }
@@ -112,7 +118,9 @@ func readRow(t *testing.T, dom *pageDOM, i int) panelRow {
 	js := `JSON.stringify((() => {
 		const r = __byId["attention"].children[` + strconv.Itoa(i) + `];
 		if (!r) return null;
-		return {tag: r.tagName.toLowerCase(), expanded: r.getAttribute("aria-expanded"), text: r.textContent};
+		const head = Array.from(r.children).find(c => c.className === "arow-head");
+		return {tag: r.tagName.toLowerCase(), head: head ? head.tagName.toLowerCase() : "",
+			expanded: head ? head.getAttribute("aria-expanded") : null, text: r.textContent};
 	})())`
 	v, err := dom.vm.RunString(js)
 	if err != nil {
@@ -128,14 +136,17 @@ func readRow(t *testing.T, dom *pageDOM, i int) panelRow {
 	return out
 }
 
-// clickRow clicks one of the panel's rows, the way the operator does.
+// clickRow clicks one of the panel's rows, the way the operator does: on the
+// header line, which is the button the row folds from.
 func clickRow(t *testing.T, dom *pageDOM, i int) {
 	t.Helper()
 
 	js := `(() => {
 		const r = __byId["attention"].children[` + strconv.Itoa(i) + `];
 		if (!r) throw new Error("the panel drew no row ` + strconv.Itoa(i) + `");
-		r.onclick();
+		const head = Array.from(r.children).find(c => c.className === "arow-head");
+		if (!head) throw new Error("row ` + strconv.Itoa(i) + ` drew no header line to click");
+		__click(head);
 	})()`
 	if _, err := dom.vm.RunString(js); err != nil {
 		t.Fatalf("clicking row %d: %v", i, err)
@@ -147,7 +158,10 @@ func clickRow(t *testing.T, dom *pageDOM, i int) {
 func rowFolds(t *testing.T, dom *pageDOM) []string {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`JSON.stringify(Array.from(__byId["attention"].children).map(r => r.getAttribute("aria-expanded")))`)
+	v, err := dom.vm.RunString(`JSON.stringify(Array.from(__byId["attention"].children).map(r => {
+		const head = Array.from(r.children).find(c => c.className === "arow-head");
+		return head ? head.getAttribute("aria-expanded") : null;
+	}))`)
 	if err != nil {
 		t.Fatalf("reading the rows' folds: %v", err)
 	}
@@ -163,18 +177,34 @@ func rowFolds(t *testing.T, dom *pageDOM) []string {
 func storedFolds(t *testing.T, dom *pageDOM) map[string]bool {
 	t.Helper()
 
-	v, err := dom.vm.RunString(`localStorage.getItem("gt-attn-collapsed")`)
-	if err != nil {
-		t.Fatalf("reading the page's folds: %v", err)
-	}
-	if v.String() == "null" {
-		return nil
-	}
 	var out map[string]bool
-	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+	if err := json.Unmarshal([]byte(storedFoldsJSON(t, dom)), &out); err != nil {
 		t.Fatalf("reading the page's folds: %v", err)
 	}
 	return out
+}
+
+// storedFoldsJSON reads the folds the page has kept as the store holds them.
+func storedFoldsJSON(t *testing.T, dom *pageDOM) string {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`localStorage.getItem("gt-attn-collapsed") || "{}"`)
+	if err != nil {
+		t.Fatalf("reading the page's folds: %v", err)
+	}
+	return v.String()
+}
+
+// handStore hands one page everything another has written, the way the browser
+// gives a tab what another tab stored.
+func handStore(t *testing.T, from, to *pageDOM) {
+	t.Helper()
+
+	for k, v := range from.storage(t) {
+		if _, err := to.vm.RunString("localStorage.setItem(" + strconv.Quote(k) + ", " + strconv.Quote(v) + ")"); err != nil {
+			t.Fatalf("handing the second tab %s: %v", k, err)
+		}
+	}
 }
 
 // foldOfItem reports whether the page holds a fold for one item, whatever words
@@ -391,10 +421,10 @@ func TestARowFoldsOnItsOwnAndUnfolds(t *testing.T) {
 		t.Errorf("the folded row reads aria-expanded=%q, want false", q.Expanded)
 	}
 
-	// One click folds one row: the escalation beside it is drawn as it was, and
-	// it is the reader's to fold on its own.
-	if e := readRow(t, dom, 1); e.Expanded != "true" || !strings.Contains(e.Text, "raised by gastown/polecats/opal") {
-		t.Errorf("the escalation row reads %+v after the question folded, want it open and untouched", e)
+	// One click folds one row: the escalation beside it keeps every cell it had,
+	// and has none under its header line to fold (gt-1kaed).
+	if e := readRow(t, dom, 1); e.Head != "div" || !strings.Contains(e.Text, "raised by gastown/polecats/opal") {
+		t.Errorf("the escalation row reads %+v after the question folded, want it untouched", e)
 	}
 
 	clickRow(t, dom, 0)
@@ -403,29 +433,52 @@ func TestARowFoldsOnItsOwnAndUnfolds(t *testing.T) {
 	}
 }
 
-// The answer line is the row's own action — the operator clicks it to take it
-// whole and paste it — so that click copies rather than folds the row out from
-// under them (gt-1kaed).
-func TestAClickOnTheAnswerLineDoesNotFoldTheRow(t *testing.T) {
+// The answer line is a line of the row and not part of the button that folds
+// it, so the operator can drag it whole to copy it (gt-1kaed).
+func TestTheAnswerLineIsOutsideTheButtonThatFoldsTheRow(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
 	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": attentionFoldRows()}))
 
-	// The click the browser delivers when it lands on the answer line: the target
-	// is that cell, and the row asks its ancestors whether the click was its own.
-	js := `(() => {
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
 		const row = __byId["attention"].children[0];
-		const cmd = Array.from(row.children).find(k => k.className === "qcmd");
-		if (!cmd) throw new Error("the question row drew no answer line");
-		cmd.closest = s => (s === ".qcmd" ? cmd : null);
-		row.onclick({ target: cmd });
-	})()`
-	if _, err := dom.vm.RunString(js); err != nil {
-		t.Fatalf("clicking the answer line: %v", err)
+		const head = Array.from(row.children).find(c => c.className === "arow-head");
+		const body = Array.from(row.children).find(c => c.className === "arow-body");
+		const cmd = body && Array.from(body.children).find(c => c.className === "qcmd");
+		return {head: head.textContent, row: row.textContent, cmd: !!cmd,
+			headFolds: typeof head.onclick === "function",
+			rowFolds: typeof row.onclick === "function",
+			cmdFolds: !!cmd && typeof cmd.onclick === "function"};
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the question row: %v", err)
 	}
-	if r := readRow(t, dom, 0); r.Expanded != "true" || !strings.Contains(r.Text, `gt answer gt-q1 "<answer>"`) {
-		t.Errorf("the row reads %+v after a click on its answer line, want it open on it", r)
+	var got struct {
+		Head      string `json:"head"`
+		Row       string `json:"row"`
+		Cmd       bool   `json:"cmd"`
+		HeadFolds bool   `json:"headFolds"`
+		RowFolds  bool   `json:"rowFolds"`
+		CmdFolds  bool   `json:"cmdFolds"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("reading the question row: %v", err)
+	}
+
+	if !got.Cmd || !strings.Contains(got.Row, `gt answer gt-q1 "<answer>"`) {
+		t.Errorf("the row reads %q, with the answer line nowhere in it", got.Row)
+	}
+	for _, outside := range []string{`gt answer gt-q1 "<answer>"`, "how many times should a push retry?", "Recommended: retry twice"} {
+		if strings.Contains(got.Head, outside) {
+			t.Errorf("the button reads %q, holding %q the reader has to select outside it", got.Head, outside)
+		}
+	}
+	if !got.HeadFolds {
+		t.Error("the header line carries no fold, want the button the row toggles from")
+	}
+	if got.RowFolds || got.CmdFolds {
+		t.Errorf("the row's own line folds the row (row %v, answer line %v), want the header line alone", got.RowFolds, got.CmdFolds)
 	}
 }
 
@@ -463,34 +516,74 @@ func TestAFoldSurvivesARerenderAndAReload(t *testing.T) {
 	if r := readRow(t, again, 0); r.Expanded != "false" || strings.Contains(r.Text, "how many times should a push retry?") {
 		t.Errorf("the row reads %+v after a reload, want it still folded", r)
 	}
-	// And the rows the reader never touched come back open.
-	if r := readRow(t, again, 1); r.Expanded != "true" || !strings.Contains(r.Text, "raised by gastown/polecats/opal") {
-		t.Errorf("the escalation row reads %+v after a reload, want it open", r)
+	// And the escalation the reader never touched is drawn as it was: it has
+	// nothing under its header line, so it has no fold to come back from.
+	if r := readRow(t, again, 1); r.Head != "div" || !strings.Contains(r.Text, "raised by gastown/polecats/opal") {
+		t.Errorf("the escalation row reads %+v after a reload, want it drawn as it was", r)
 	}
 }
 
-// The row is a button, so the keyboard toggles it the way the click does, and
-// it says whether it is open (gt-1kaed).
-func TestTheRowIsAButtonThatSaysWhetherItIsOpen(t *testing.T) {
+// The header line is the button that folds a row, and only where there is
+// something to fold: a caret on a row that hides nothing promises a fold that
+// never comes (gt-1kaed).
+func TestTheHeaderLineFoldsOnlyWhereThereIsSomethingToFold(t *testing.T) {
 	t.Parallel()
 
 	dom := newPageDOM(t)
 	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": attentionFoldRows()}))
 	switchOwner(t, dom, "overseer")
 
-	for i := range attentionFoldRows() {
-		r := readRow(t, dom, i)
-		if r.Tag != "button" {
-			t.Errorf("row %d is a <%s>, want the button the row toggles from", i, r.Tag)
-		}
-		if r.Expanded != "true" {
-			t.Errorf("row %d reads aria-expanded=%q, want true", i, r.Expanded)
+	// The question carries its own words under its header line; the escalation
+	// and the queue item draw everything on the header line itself.
+	if r := readRow(t, dom, 0); r.Head != "button" || r.Expanded != "true" {
+		t.Errorf("the question row's header is a <%s> reading aria-expanded=%q, want a button reading true", r.Head, r.Expanded)
+	}
+	for i := 1; i <= 2; i++ {
+		if r := readRow(t, dom, i); r.Head == "button" || r.Expanded != "" {
+			t.Errorf("row %d's header is a <%s> reading aria-expanded=%q, want a line with no fold", i, r.Head, r.Expanded)
 		}
 	}
 
 	clickRow(t, dom, 0)
-	if r := readRow(t, dom, 0); r.Tag != "button" || r.Expanded != "false" {
-		t.Errorf("the folded row is a <%s> reading aria-expanded=%q, want a button reading false", r.Tag, r.Expanded)
+	if r := readRow(t, dom, 0); r.Head != "button" || r.Expanded != "false" {
+		t.Errorf("the folded row's header is a <%s> reading aria-expanded=%q, want a button reading false", r.Head, r.Expanded)
+	}
+}
+
+// Folding a row folds it where it stands: the button the reader pressed is
+// still on the page and still holding the keyboard, so the next Enter folds the
+// next row (gt-1kaed).
+func TestTheKeyboardStaysOnTheRowTheReaderFolded(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": attentionFoldRows()}))
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const head = Array.from(__byId["attention"].children[0].children).find(c => c.className === "arow-head");
+		__click(head);
+		const after = Array.from(__byId["attention"].children[0].children).find(c => c.className === "arow-head");
+		return {same: after === head, focused: document.activeElement === after, expanded: after.getAttribute("aria-expanded")};
+	})())`)
+	if err != nil {
+		t.Fatalf("reading where the keyboard is: %v", err)
+	}
+	var got struct {
+		Same     bool   `json:"same"`
+		Focused  bool   `json:"focused"`
+		Expanded string `json:"expanded"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("reading where the keyboard is: %v", err)
+	}
+	if got.Expanded != "false" {
+		t.Fatalf("the row reads aria-expanded=%q after the click, want it folded", got.Expanded)
+	}
+	if !got.Same {
+		t.Error("the fold drew another button, want the row the reader pressed left where it is")
+	}
+	if !got.Focused {
+		t.Error("the fold took the keyboard off the row the reader folded")
 	}
 }
 
@@ -526,8 +619,9 @@ func TestAFoldIsNotKeptWhereStorageFails(t *testing.T) {
 	dom := newPageDOMStoring(t, map[string]string{"gt-attn-collapsed": "{oops"})
 	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": attentionFoldRows()}))
 	switchOwner(t, dom, "overseer")
-	if folds := rowFolds(t, dom); !slices.Equal(folds, []string{"true", "true", "true"}) {
-		t.Errorf("the rows read %v over unreadable storage, want every one of them open", folds)
+	// The question reads open; the two rows beside it have no fold to read.
+	if folds := rowFolds(t, dom); !slices.Equal(folds, []string{"true", "", ""}) {
+		t.Errorf("the rows read %v over unreadable storage, want the question open and no fold elsewhere", folds)
 	}
 
 	// The page goes on drawing over a store that refuses the write: the click is
@@ -552,10 +646,67 @@ func TestAFoldIsNotKeptWhereStorageFails(t *testing.T) {
 	}
 }
 
+// Two tabs are one reader: a page writes the folds it made over whatever the
+// store holds at that moment, so the second tab folding a row of its own does
+// not write away a fold the first tab set. What the second tab draws is what it
+// read at load, which a reload brings up to date (gt-1kaed).
+func TestASecondTabDoesNotUndoTheFirstTabsFold(t *testing.T) {
+	t.Parallel()
+
+	twoQuestions := func() map[string]any {
+		return attentionState(map[string]any{"rows": []any{
+			map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy",
+				"priority": 1, "question": "how many times should a push retry?", "age_sec": 60},
+			map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q2", "title": "which slot",
+				"priority": 2, "question": "which slot should the gate use?", "age_sec": 90},
+		}})
+	}
+
+	// The two tabs are open over one store and neither has folded anything yet.
+	first, second := newPageDOM(t), newPageDOM(t)
+	first.call(t, "renderAttention", twoQuestions())
+	clickRow(t, first, 0)
+
+	// The first tab's fold lands in the store while the second tab holds the
+	// page, which is a key the second one has never seen.
+	handStore(t, first, second)
+	second.call(t, "renderAttention", twoQuestions())
+	clickRow(t, second, 1)
+
+	if folds := storedFolds(t, second); len(folds) != 2 {
+		t.Errorf("the store holds %v, want both tabs' folds", folds)
+	}
+	// A reload draws the row each tab folded, folded.
+	reload := newPageDOMStoring(t, map[string]string{"gt-attn-collapsed": storedFoldsJSON(t, second)})
+	reload.call(t, "renderAttention", twoQuestions())
+	if folds := rowFolds(t, reload); !slices.Equal(folds, []string{"false", "false"}) {
+		t.Errorf("the rows read %v after the reload, want the two rows the reader folded", folds)
+	}
+}
+
+// A list that came back empty is not a list an item left, so the folds are kept
+// for the read that has not landed yet (gt-1kaed).
+func TestAnEmptyListKeepsTheFoldsItCannotAccountFor(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": attentionFoldRows()}))
+	clickRow(t, dom, 0)
+
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{}}))
+	if !foldOfItem(t, dom, "question:gt-q1") {
+		t.Error("the page dropped the fold beside an empty list, want it kept for the read that has not landed")
+	}
+
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": attentionFoldRows()}))
+	if r := readRow(t, dom, 0); r.Expanded != "false" {
+		t.Errorf("the row reads %+v when the list came back, want the fold the reader set", r)
+	}
+}
+
 // A fold is set against the words the reader folded, not against the item for
-// good: a question whose answer changed and a severity that moved bring the row
-// back open rather than hiding the change behind it. An item that leaves the
-// list takes its fold with it (gt-1kaed).
+// good: a question whose answer changed, or whose header line moved, comes back
+// open, and an item that leaves the list takes its fold with it (gt-1kaed).
 func TestARowThatSaysSomethingNewComesBackOpen(t *testing.T) {
 	t.Parallel()
 
@@ -583,17 +734,17 @@ func TestARowThatSaysSomethingNewComesBackOpen(t *testing.T) {
 		t.Error("the page still holds the fold the reader set against the answer that was replaced")
 	}
 
-	// A severity that moved is the same story on an escalation.
-	switchOwner(t, dom, "overseer")
-	clickRow(t, dom, 1)
-	if r := readRow(t, dom, 1); r.Expanded != "false" {
-		t.Fatalf("the escalation row reads %+v after the click, want it folded", r)
+	// A change the row carries on its own header line opens it too: the fold
+	// belongs to the words the reader folded, not to the item for good.
+	clickRow(t, dom, 0)
+	if r := readRow(t, dom, 0); r.Expanded != "false" {
+		t.Fatalf("the question row reads %+v after the click, want it folded", r)
 	}
-	worse := attentionFoldRows()
-	worse[1].(map[string]any)["severity"] = "high"
-	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": worse}))
-	if r := readRow(t, dom, 1); r.Expanded != "true" || !strings.Contains(r.Text, "high") {
-		t.Errorf("the row reads %+v after its severity moved, want it open on the new severity", r)
+	moved := attentionFoldRows()
+	moved[0].(map[string]any)["priority"] = 0
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": moved}))
+	if r := readRow(t, dom, 0); r.Expanded != "true" || !strings.Contains(r.Text, "P0") {
+		t.Errorf("the row reads %+v after its priority moved, want it open on the new priority", r)
 	}
 
 	// The row the queue cleared takes its fold with it: a key whose item is gone

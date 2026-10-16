@@ -26,8 +26,8 @@ import (
 // pageStubJS is the browser the page runs in: the DOM surface index.html's
 // script uses, and nothing more. A render function only builds elements, so
 // createElement, append, textContent, className, classList, hidden and title
-// carry it; anything a later test needs beyond that is added here with the
-// test that needs it.
+// carry it, and focus is where document.activeElement moves; anything a later
+// test needs beyond that is added here with the test that needs it.
 //
 // Two deliberate refusals keep the stub honest about the page. getElementById
 // answers only for the ids index.html's markup carries (__ids, read from the
@@ -65,6 +65,7 @@ function __el(tag) {
       for (var i = 0; i < arguments.length; i++) this.children.push(arguments[i]);
     },
     remove: function () {},
+    focus: function () { document.activeElement = this; },
     setAttribute: function (k, v) { this["attr_" + k] = v; },
     getAttribute: function (k) { return this["attr_" + k]; },
     addEventListener: function () {},
@@ -96,6 +97,12 @@ function __clickSummary(d) {
   if (typeof d.ontoggle === "function") d.ontoggle({ type: "toggle" });
 }
 function __textNode(t) { return { nodeType: 3, textContent: t == null ? "" : String(t) }; }
+// __click is the browser's click on an element: the element takes the keyboard
+// the way a button does, and its handler runs.
+function __click(e) {
+  if (typeof e.focus === "function") e.focus();
+  if (typeof e.onclick === "function") e.onclick({ type: "click", target: e });
+}
 var document = {
   createElement: function (t) { return __el(t); },
   createElementNS: function (ns, t) { return __el(t); },
@@ -104,7 +111,7 @@ var document = {
   querySelector: function () { return null; },
   querySelectorAll: function () { return []; },
   addEventListener: function () {},
-  title: "", hidden: false,
+  title: "", hidden: false, activeElement: null,
   body: __el("body"),
   hasFocus: function () { return true; },
   execCommand: function () { return true; }
