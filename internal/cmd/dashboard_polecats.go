@@ -400,15 +400,28 @@ func dashSeats(townRoot string, sessionNames []string, sessionsKnown bool, cache
 			}
 			// The agent is the live session's own record, read on every poll
 			// and never taken from the cache, so a session left over from
-			// before a model switch keeps showing its own model.
-			item.Agent = ""
-			if entry, ok := sessions.session(rig, name); ok {
-				item.Agent = entry.Agent
-			}
+			// before a model switch keeps showing its own model. With no
+			// session (the seat ran gt done and waits for its bead to land)
+			// the agent the sling recorded on the seat's agent bead stands in;
+			// that bead is already in hand, so it costs no read.
+			item.Agent = dashSeatAgent(sessions, rig, name, agentBead)
 			seats = append(seats, dashSeat{Rig: rig, Name: name, Session: session.PolecatSessionName(reg.PrefixForRig(rig), name), RigParked: rigParked, Item: item, Issue: active[name], HookedAt: hookedAt})
 		}
 	}
 	return seats, nil
+}
+
+// dashSeatAgent is the agent a seat's row names: its live session's own record
+// when a session exists, else the agent the sling stored on the seat's agent
+// bead, else "" (an older agent bead carries no agent line).
+func dashSeatAgent(sessions polecatSessionSet, rig, name string, agentBead *beads.Issue) string {
+	if entry, ok := sessions.session(rig, name); ok {
+		return entry.Agent
+	}
+	if fields := parsePolecatAgentFields(agentBead); fields != nil {
+		return fields.Agent
+	}
+	return ""
 }
 
 // dashSessions is the tmux sessions' last activity, and whether the read

@@ -406,6 +406,7 @@ func reuseIdlePolecatForSlingWith(
 	// destructively.
 	addOpts := polecat.AddOptions{
 		HookBead:      opts.HookBead,
+		Agent:         opts.Agent,
 		BaseBranch:    baseBranch,
 		ResumeBranch:  resumeBranch,
 		AllowRecovery: allowRecovery,
@@ -937,6 +938,7 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 	// Build add options with hook_bead set atomically at spawn time
 	addOpts := polecat.AddOptions{
 		HookBead:     opts.HookBead,
+		Agent:        opts.Agent,
 		BaseBranch:   baseBranch,
 		ResumeBranch: opts.ResumeBranch,
 	}

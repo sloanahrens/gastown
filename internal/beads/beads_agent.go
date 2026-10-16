@@ -46,6 +46,7 @@ type AgentFields struct {
 	ActiveMR          string // Currently active merge request bead ID (for traceability)
 	NotificationLevel string // DND mode: verbose, normal, muted (default: normal)
 	Mode              string // Execution mode: "" (normal) or "ralph" (Ralph Wiggum loop)
+	Agent             string // Agent the sling spawned the seat on (e.g. "claude-sonnet"), kept after its session ends
 	// Note: RoleBead field removed - role definitions are now config-based.
 	// See internal/config/roles/*.toml and config-based-roles.md.
 
@@ -117,6 +118,10 @@ func FormatAgentDescription(title string, fields *AgentFields) string {
 		lines = append(lines, fmt.Sprintf("mode: %s", fields.Mode))
 	}
 
+	if fields.Agent != "" {
+		lines = append(lines, fmt.Sprintf("agent: %s", fields.Agent))
+	}
+
 	// Completion metadata fields (gt-x7t9)
 	if fields.ExitType != "" {
 		lines = append(lines, fmt.Sprintf("exit_type: %s", fields.ExitType))
@@ -181,6 +186,8 @@ func ParseAgentFields(description string) *AgentFields {
 			fields.NotificationLevel = value
 		case "mode":
 			fields.Mode = value
+		case "agent":
+			fields.Agent = value
 		// Completion metadata fields (gt-x7t9)
 		case "exit_type":
 			fields.ExitType = value

@@ -547,3 +547,37 @@ func TestAttachmentKeySpellings(t *testing.T) {
 		t.Errorf("StripAttachmentFields(%q) = %q, want it kept", keep, got)
 	}
 }
+
+// --- AgentFields Agent round-trip (gt-y6cja) ---
+
+func TestAgentFieldsAgentRoundTrip(t *testing.T) {
+	original := &AgentFields{
+		RoleType:   "polecat",
+		Rig:        "gastown",
+		AgentState: "spawning",
+		HookBead:   "gt-abc",
+		Agent:      "claude-sonnet",
+	}
+
+	formatted := FormatAgentDescription("Polecat Test", original)
+	if !strings.Contains(formatted, "agent: claude-sonnet") {
+		t.Errorf("FormatAgentDescription missing agent line, got:\n%s", formatted)
+	}
+	parsed := ParseAgentFields(formatted)
+	if parsed.Agent != "claude-sonnet" || parsed.HookBead != "gt-abc" {
+		t.Errorf("parsed agent %q hook_bead %q, want claude-sonnet and gt-abc", parsed.Agent, parsed.HookBead)
+	}
+}
+
+// An agent bead written before the field existed has no agent line; it parses
+// to an empty Agent and formats back without one.
+func TestAgentFieldsAgentAbsentOnOlderBeads(t *testing.T) {
+	older := "Polecat Old\n\nrole_type: polecat\nrig: gastown\nagent_state: done\nhook_bead: null\n"
+	if got := ParseAgentFields(older).Agent; got != "" {
+		t.Errorf("Agent parsed from a bead with no agent line = %q, want empty", got)
+	}
+	formatted := FormatAgentDescription("Polecat Old", &AgentFields{RoleType: "polecat", Rig: "gastown", AgentState: "done"})
+	if strings.Contains(formatted, "agent:") {
+		t.Errorf("FormatAgentDescription wrote an agent line for an empty Agent:\n%s", formatted)
+	}
+}
