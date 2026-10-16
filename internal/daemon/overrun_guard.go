@@ -165,8 +165,8 @@ func overrunGuardThresholds(c *DaemonPatrolConfig) (nudgeAfter, stopAfter time.D
 
 // overrunScheduledStopAfter returns the limit on a scheduled sling: the
 // configured scheduled_stop_after, 60m when unset or unusable, and zero when it
-// is set to zero, which never stops one. A negative value cannot get here: the
-// config loader refuses it.
+// is set to zero, which never stops one. The config loader keeps a negative or
+// unparseable value as written, so it falls back to 60m here.
 func overrunScheduledStopAfter(c *DaemonPatrolConfig) time.Duration {
 	cfg := overrunGuardConfig(c)
 	if cfg == nil || cfg.ScheduledStopAfter == "" {

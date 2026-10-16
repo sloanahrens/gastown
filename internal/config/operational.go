@@ -41,7 +41,8 @@ const (
 
 	// Pressure check defaults — fully opt-in. All zero = disabled.
 	// Configure in settings/config.json under operational.daemon to enable.
-	// Example: {"pressure_cpu_threshold": 3.0, "pressure_mem_threshold_gb": 0.5}
+	// Example: {"pressure_cpu_threshold": 0.9, "pressure_mem_threshold_gb": 0.5}
+	// pressure_cpu_threshold is the busy share per core, in (0, 1]: 0.9 is 90% busy.
 	DefaultPressureCPUThreshold   = 0.0
 	DefaultPressureMemThresholdGB = 0.0
 	DefaultPressureMaxSessions    = 0
