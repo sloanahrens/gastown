@@ -167,11 +167,10 @@ gt version still loads; every other block stays strict.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `followups` | `bool` | `false` | File shaped `om-followup` beads, priority 3, for the minor findings of a landing om approved at or above the rig's `.om.json` threshold, whatever it scored. A passing review carries no major or critical finding for the feed to file — either refuses the landing back to its author (gt-oi4je) — so its minors are all there is. The findings go in one bead, or one bead per package when they reach more than one package or number more than six. A finding matching an existing follow-up by fingerprint, or by the same path with a similar title, comments `seen again on <bead>` there instead, and the work bead gets one comment naming the beads filed. A landing whose own bead wears `om-followup` files nothing, so a fix's minors never feed the feed again. A retry of a landing attempt that filed before failing refiles none of what it filed, and files the packages that attempt never reached — it says nothing to its own beads, since `seen again` is for a finding another landing raised. `merge_queue.followup_backpressure` open `om-followup` beads stop it. Every read, comment and file is fail-soft and bounded at 20s: the landing is recorded first, and the feed never changes its result. |
-| `om_queue` | `bool` | `false` | Queue the findings of a landing om approved at any score, for the next deep-review run to verify. Per critical and major finding, one `queued: <fingerprint> <priority> <path>:<line> <claim>` line is appended to the work bead's notes, priority `P1` for critical and `P2` for major; info and minor findings are not queued. The bead takes the label `om-findings` and one comment naming the count. A fingerprint a `queued:` or `finding:` line already carries is skipped, so a retried landing writes nothing twice. An approved landing carries no critical or major finding (either refuses it back to the author, gt-oi4je), so the queue has nothing to write while that rule holds. Fail-soft and bounded at 20s: the landing is recorded first, and the queue never changes its result. `om_queue` and `followups` are separate switches; both can be on. |
 
 Read from the rig's own `settings/config.json` only, like `rigPostLandCommand`:
-the feed files beads and the queue writes their notes, and merged repo content
-must not choose that — nor the `merge_queue.followup_backpressure` bound the
+the feed files beads, and merged repo content must not choose that — nor the
+`merge_queue.followup_backpressure` bound the
 feed stops at, which the daemon reads from the same file.
 
 **The `forgejo` block is mandatory for any rig that lands.** It is the rig's

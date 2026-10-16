@@ -144,11 +144,6 @@ type Lander struct {
 	// lander holds no state between landings, so how often the loss reaches a
 	// human is the sink's own business (gt-4ty22). Nil reports nothing.
 	FollowupAlert func(message string)
-	// OMQueue queues the major and critical findings of an approved landing
-	// onto its work bead, for the next deep-review run to verify and file
-	// (gt-qtj72). False means off, and off means nothing in the queue runs. It
-	// writes through Beads, so it needs no surface of its own.
-	OMQueue bool
 	// RangeChecks run on base..head before the merge (the landing worker
 	// passes AttributionCheck). A returned Rejection is written to the bead
 	// like any other.
@@ -783,26 +778,24 @@ func borderlineRejection(v Verdict, bar float64) bool {
 }
 
 // hasMajorFinding reports whether findings carry one om refuses work on: a
-// major or critical, the severities omPriority names.
+// major or critical.
 func hasMajorFinding(findings []Finding) bool {
 	return blockingSeverity(findings) != ""
 }
 
 // blockingSeverity names the severity of the finding that refuses the work
 // whatever its score: critical when there is one, major otherwise, and "" when
-// there is neither (gt-oi4je). A severity omPriority has no priority for —
-// info, or a string this review does not know — does not block.
+// there is neither (gt-oi4je). Info, or a string this review does not know, is
+// not a severity that blocks.
 func blockingSeverity(findings []Finding) string {
 	blocking := ""
 	for _, f := range findings {
-		priority, ok := omPriority(f.Severity)
-		if !ok {
-			continue
+		switch omSeverity(f.Severity) {
+		case omSeverityCritical:
+			return omSeverityCritical
+		case omSeverityMajor:
+			blocking = omSeverityMajor
 		}
-		if priority == omPriorityCritical {
-			return "critical"
-		}
-		blocking = "major"
 	}
 	return blocking
 }
@@ -1220,9 +1213,6 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// The landing is recorded, so the feed runs after it and cannot change it
 	// (gt-s01pn).
 	l.fileFollowups(dir, w, res)
-	// The queue runs after the record for the same reason, and writes only the
-	// work bead's notes, label and comment (gt-qtj72).
-	l.queueOMFindings(w, res)
 	return res, nil
 }
 

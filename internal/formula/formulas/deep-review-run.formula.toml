@@ -19,7 +19,6 @@ mkdir -p /tmp/deep-review-{{issue}}
 cat {{review_script}} > /tmp/deep-review-{{issue}}/deep-review.sh &&
 bd list -l {{run_label}} --all --limit 60 --json > /tmp/deep-review-{{issue}}/runs.json &&
   jq -r '(if type == "object" then .data else . end)[] | select(.id != "{{issue}}") | .notes // empty' /tmp/deep-review-{{issue}}/runs.json > /tmp/deep-review-{{issue}}/prev-notes.txt &&
-  bash /tmp/deep-review-{{issue}}/deep-review.sh om-queued --repo . >> /tmp/deep-review-{{issue}}/prev-notes.txt &&
   cat "${GT_TOWN_ROOT:-$HOME/gt}/.runtime/landings/{{landings_rig}}.jsonl" > /tmp/deep-review-{{issue}}/landings-all.jsonl &&
   git fetch origin {{base_branch}} &&
   bash /tmp/deep-review-{{issue}}/deep-review.sh plan --landings /tmp/deep-review-{{issue}}/landings-all.jsonl \\
@@ -46,9 +45,8 @@ Then skip to the submit step, which closes {{issue}} and runs
 
 **3. Pick up what earlier runs left.** `bash /tmp/deep-review-{{issue}}/deep-review.sh queued
 --prev-notes $D/prev-notes.txt` prints confirmed findings an earlier run
-recorded but did not file, plus the `om-queued` lines from om's reviews of
-approved landings. Step 5 refutes each one like any other finding; file it as
-step 6 describes, ahead of this run's findings. A non-zero exit is a ledger
+recorded but did not file. Step 5 refutes each one like any other finding; file
+it as step 6 describes, ahead of this run's findings. A non-zero exit is a ledger
 the script cannot trust, not an empty queue: escalate as step 1 does.
 
 **4. Review (at most {{max_reviewers}} subagents, read-only).** Reviewers read

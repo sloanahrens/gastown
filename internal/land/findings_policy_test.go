@@ -227,21 +227,20 @@ func TestLandCapsTheFindingRefusal(t *testing.T) {
 	}
 }
 
-// TestBlockingSeverityIsTheQueuesOwnJudgement: the severities that refuse a
-// landing and the ones the finding queue records are one judgement, not two
-// that can drift (gt-oi4je).
-func TestBlockingSeverityIsTheQueuesOwnJudgement(t *testing.T) {
+// TestBlockingSeverity: the severities that refuse a landing whatever its
+// score are the major and the critical, and nothing else (gt-oi4je).
+func TestBlockingSeverity(t *testing.T) {
 	t.Parallel()
 	for _, severity := range []string{"major", "critical"} {
 		f := []Finding{{Severity: severity}}
-		if blockingSeverity(f) == "" || !hasMajorFinding(f) || len(omQueueFindings(f)) != 1 {
-			t.Errorf("%q does not block and queue alike", severity)
+		if blockingSeverity(f) == "" || !hasMajorFinding(f) {
+			t.Errorf("%q does not block", severity)
 		}
 	}
 	for _, severity := range []string{"minor", "info", "blocker", ""} {
 		f := []Finding{{Severity: severity}}
-		if blockingSeverity(f) != "" || hasMajorFinding(f) || len(omQueueFindings(f)) != 0 {
-			t.Errorf("%q blocks or queues, and should do neither", severity)
+		if blockingSeverity(f) != "" || hasMajorFinding(f) {
+			t.Errorf("%q blocks, and should not", severity)
 		}
 	}
 }

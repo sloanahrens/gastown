@@ -96,8 +96,8 @@ func (f *followupFixture) run() string {
 	return log.String()
 }
 
-// majorFinding is a finding the om finding queue records and the follow-up feed
-// does not file: a major refuses the landing it was raised on (gt-oi4je).
+// majorFinding is a finding the follow-up feed does not file: a major refuses
+// the landing it was raised on (gt-oi4je).
 func majorFinding(title string) Finding {
 	return Finding{ID: "1", Severity: "major", Path: "internal/land/note.go", Line: 230, Title: title}
 }
