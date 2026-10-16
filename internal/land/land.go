@@ -1010,7 +1010,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// conflicts with a later landing that edited the head's own lines — still
 	// ends as a conflict rejection with rework (gt-01yt6).
 	if already {
-		if res, err, handled := l.finishedUnrecordedLanding(g, w); handled {
+		if res, handled, err := l.finishedUnrecordedLanding(g, w); handled {
 			return res, err
 		}
 		// The head is on the target with no land merge of this lander's to
@@ -1047,7 +1047,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		// already landed (gt-064oh). The range checks above already ran; they
 		// read the base..head the head's own first pass read and passed, so
 		// they do not stand between a lost record and its recovery here.
-		if res, err, handled := l.finishedUnrecordedLanding(g, w); handled {
+		if res, handled, err := l.finishedUnrecordedLanding(g, w); handled {
 			return res, err
 		}
 		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(g, EmptyMerge{
@@ -1095,14 +1095,12 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	}
 	merged, rej := out.Commit, out.Rejection
 	if rej != nil {
-		// A squash that already landed conflicts with a later landing that
-		// edited the head's own lines: the head meets itself on the target,
-		// and rejecting it would send the author to rework work that took.
-		// mergeWork has aborted the merge, so the worktree is clean. A
-		// conflict with no land merge naming this head on the target is the
-		// author's to resolve, and the recovery declines it (gt-01yt6).
+		// A conflict with the head's own landed squash is the landing meeting
+		// itself, not the author's to resolve; with no land merge naming this
+		// head on the target the recovery declines and the rejection stands
+		// (gt-01yt6).
 		if rej.Kind == RejectConflict {
-			if res, err, handled := l.finishedUnrecordedLanding(g, w); handled {
+			if res, handled, err := l.finishedUnrecordedLanding(g, w); handled {
 				return res, err
 			}
 		}
@@ -1334,15 +1332,15 @@ func landMergeMarker(w Work) string {
 // returns — the landing it finished, its RecordError, or the recovery's own
 // InfraError. A lookup that fails is itself an answer, because without it the
 // pass cannot tell a lost record from a landing to make (gt-064oh).
-func (l *Lander) finishedUnrecordedLanding(g Repo, w Work) (res Result, err error, handled bool) {
+func (l *Lander) finishedUnrecordedLanding(g Repo, w Work) (res Result, handled bool, err error) {
 	completed, err := l.completeUnrecordedLanding(g, w)
 	if completed != nil {
-		return *completed, err, true
+		return *completed, true, err
 	}
 	if err != nil {
-		return Result{}, err, true
+		return Result{}, true, err
 	}
-	return Result{}, nil, false
+	return Result{}, false, nil
 }
 
 // completeUnrecordedLanding finishes a landing this lander merged but never
