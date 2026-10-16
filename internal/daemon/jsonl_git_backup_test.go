@@ -1540,10 +1540,17 @@ func itoa(i int) string {
 	return strconv.Itoa(i)
 }
 
+// seedSubjectPrefix is the head of a backup commit subject written under the
+// current count metric ("backup <ts> m<V>: "), for tests that seed history ahead
+// of a tick.
+var seedSubjectPrefix = fmt.Sprintf("backup 2026-01-01 00:00 m%d: ", countMetricVersion)
+
 // commitBackup writes dbDir/issues.jsonl with n lines and commits it with a
-// backup-style subject line ("backup <ts>: <db>=<n>"), matching
+// backup-style subject line ("backup <ts> m<V>: <db>=<n>"), matching
 // commitAndPushJsonlBackup — the rolling spike baseline derives its window from
-// these subject lines (gt-tj-he).
+// these subject lines (gt-tj-he). The subject carries the current
+// countMetricVersion (seedSubjectPrefix), so the commit enters the window; a
+// test of older history writes its subject with commitAll instead (gt-26qqh).
 func commitBackup(t *testing.T, d *Daemon, gitRepo, db string, n int) {
 	t.Helper()
 	writeNLines(t, filepath.Join(gitRepo, db, "issues.jsonl"), n)
@@ -2880,10 +2887,6 @@ func TestSyncJsonlGitBackupIssuesFailureIsReported(t *testing.T) {
 	}
 }
 
-// seedSubjectPrefix is the head of a backup commit subject written under the
-// current count metric, for tests that seed history ahead of a tick.
-var seedSubjectPrefix = fmt.Sprintf("backup 2026-01-01 00:00 m%d: ", countMetricVersion)
-
 func TestParseCommitVersion(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -3037,12 +3040,11 @@ func TestRecomputeSpikeBaseline_LegacySubjectsAreVersionOne(t *testing.T) {
 	commitAll(t, d, gitRepo, "backup 2026-01-01 00:00: hq=100")
 
 	sb, err := d.recomputeSpikeBaseline(gitRepo)
-	var change *spikeVersionChange
-	if !errors.As(err, &change) {
-		t.Fatalf("recomputeSpikeBaseline = %+v, %v; want a spikeVersionChange", sb, err)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	if change.From != 1 || change.To != countMetricVersion {
-		t.Errorf("change = m%d to m%d, want m1 to m%d", change.From, change.To, countMetricVersion)
+	if len(sb.Counts) != 0 || sb.Rebaselined["hq"] != 1 {
+		t.Fatalf("baseline = counts %v, rebaselined %v; want no window and hq rebaselined from m1", sb.Counts, sb.Rebaselined)
 	}
 	if got := parseCommitCounts("backup 2026-01-01 00:00: hq=100"); got["hq"] != 100 {
 		t.Errorf("legacy subject counts = %v, want hq=100", got)
@@ -3057,6 +3059,109 @@ func TestRecomputeSpikeBaseline_LegacySubjectsAreVersionOne(t *testing.T) {
 	}
 	if entries := sb.Counts["hq"]; len(entries) != 1 || entries[0].N != 7000 {
 		t.Errorf("window = %+v, want only the same-version 7000", entries)
+	}
+	if len(sb.Rebaselined) != 0 {
+		t.Errorf("rebaselined = %v, want none once hq has same-version history", sb.Rebaselined)
+	}
+}
+
+// TestVerifyExportCounts_RebaselinesOnlyTheChangedDatabase: gt was last counted
+// under version 1 while hq has same-version history. gt's count has nothing
+// comparable and is rebaselined, with a log line naming it; hq keeps its spike
+// check, so a jump in hq still halts (gt-7p9aj).
+func TestVerifyExportCounts_RebaselinesOnlyTheChangedDatabase(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	gitRepo := t.TempDir()
+	initGitRepo(t, d, gitRepo)
+	os.MkdirAll(filepath.Join(gitRepo, "hq"), 0755)
+	writeNLines(t, filepath.Join(gitRepo, "hq", "issues.jsonl"), 100)
+	commitAll(t, d, gitRepo, "backup 2026-01-01 00:00: hq=100 gt=50")
+	writeNLines(t, filepath.Join(gitRepo, "hq", "issues.jsonl"), 110)
+	commitAll(t, d, gitRepo, seedSubjectPrefix+"hq=110 [FAILED: gt]")
+
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"hq", "gt"}, map[string]int{"hq": 5000, "gt": 9000}, 0.20)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(spikes) != 1 || spikes[0].DB != "hq" {
+		t.Errorf("spikes = %+v, want only hq's jump to be checked and flagged", spikes)
+	}
+	want := fmt.Sprintf("gt: count metric changed from m1 to m%d", countMetricVersion)
+	if !strings.Contains(logs.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, logs.String())
+	}
+	if strings.Contains(logs.String(), "hq: count metric changed") {
+		t.Errorf("hq has same-version history and was rebaselined:\n%s", logs.String())
+	}
+}
+
+// TestRecomputeSpikeBaseline_VersionedCacheIsTrusted: a cache written under the
+// current version seeds the window as before, with nothing rebaselined, so the
+// cache path rebaselines only a version mismatch (gt-7p9aj).
+func TestRecomputeSpikeBaseline_VersionedCacheIsTrusted(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	gitRepo := t.TempDir()
+	initGitRepo(t, d, gitRepo)
+	cache := &spikeBaseline{
+		Window:   defaultSpikeBaselineWindow,
+		Computed: time.Now().Format(time.RFC3339),
+		Counts: map[string][]spikeCommit{
+			"hq": {{Db: "hq", N: 100, Age: 0, Source: spikeSourceCommit, Version: countMetricVersion}},
+		},
+	}
+	if err := saveSpikeBaselineHistory(gitRepo, cache); err != nil {
+		t.Fatalf("save cache: %v", err)
+	}
+
+	sb, err := d.recomputeSpikeBaseline(gitRepo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n, ok := spikeBaselineCount(sb, "hq"); !ok || n != 100 {
+		t.Errorf("baseline hq = %d, %v; want the cached 100", n, ok)
+	}
+	if len(sb.Rebaselined) != 0 {
+		t.Errorf("rebaselined = %v, want none for a current-version cache", sb.Rebaselined)
+	}
+}
+
+// TestRecomputeSpikeBaseline_MixedVersionCacheRebaselinesStaleDatabaseOnly: hq's
+// cached level is current and gt's predates versioning. The cache keeps hq and
+// rebaselines gt alone, instead of trusting gt's level or discarding hq's
+// (gt-7p9aj).
+func TestRecomputeSpikeBaseline_MixedVersionCacheRebaselinesStaleDatabaseOnly(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	gitRepo := t.TempDir()
+	initGitRepo(t, d, gitRepo)
+	cache := &spikeBaseline{
+		Window:   defaultSpikeBaselineWindow,
+		Computed: time.Now().Format(time.RFC3339),
+		Counts: map[string][]spikeCommit{
+			"hq": {{Db: "hq", N: 100, Age: 0, Source: spikeSourceCommit, Version: countMetricVersion}},
+			"gt": {{Db: "gt", N: 50, Age: 0, Source: spikeSourceCommit}},
+		},
+	}
+	if err := saveSpikeBaselineHistory(gitRepo, cache); err != nil {
+		t.Fatalf("save cache: %v", err)
+	}
+
+	sb, err := d.recomputeSpikeBaseline(gitRepo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if n, ok := spikeBaselineCount(sb, "hq"); !ok || n != 100 {
+		t.Errorf("baseline hq = %d, %v; want the cached 100", n, ok)
+	}
+	if _, ok := spikeBaselineCount(sb, "gt"); ok {
+		t.Errorf("baseline kept gt's version-1 level: %+v", sb.Counts["gt"])
+	}
+	if sb.Rebaselined["gt"] != legacyCountMetricVersion || len(sb.Rebaselined) != 1 {
+		t.Errorf("rebaselined = %v, want only gt from m%d", sb.Rebaselined, legacyCountMetricVersion)
 	}
 }
 
@@ -3076,9 +3181,11 @@ func TestRecomputeSpikeBaseline_UnversionedCacheIsVersionOne(t *testing.T) {
 	if err := saveSpikeBaselineHistory(gitRepo, cache); err != nil {
 		t.Fatalf("save cache: %v", err)
 	}
-	_, err := d.recomputeSpikeBaseline(gitRepo)
-	var change *spikeVersionChange
-	if !errors.As(err, &change) || change.From != 1 {
-		t.Fatalf("err = %v, want a spikeVersionChange from m1", err)
+	sb, err := d.recomputeSpikeBaseline(gitRepo)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := spikeBaselineCount(sb, "hq"); ok || sb.Rebaselined["hq"] != legacyCountMetricVersion {
+		t.Fatalf("baseline = counts %v, rebaselined %v; want hq rebaselined from m%d", sb.Counts, sb.Rebaselined, legacyCountMetricVersion)
 	}
 }

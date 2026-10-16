@@ -1636,9 +1636,10 @@ var errSpikeBaselineBootstrap = errors.New("no backup commit history yet")
 // the old git show HEAD:<relPath> read, which misjudged spikes whenever the
 // committed file count diverged from what the detector expected.
 //
-// Only commits counted under countMetricVersion enter the window. History that
-// holds counts but none of the current version returns a *spikeVersionChange,
-// which the caller treats as a new baseline (gt-26qqh).
+// Only commits counted under countMetricVersion enter the window. A database
+// whose counts all come from another version is listed in the baseline's
+// Rebaselined set instead, so the caller rebaselines that database alone and
+// still checks every database that has same-version history (gt-26qqh).
 //
 // Commit history is the sole authority for the window. The in-repo cache
 // (saveSpikeBaselineHistory) is consulted only when history yields no counts at
@@ -1679,10 +1680,11 @@ func (d *Daemon) recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) 
 		counts map[string]int
 	}
 	var commits []commitSubject
-	// otherVersion is the newest count-bearing commit's version when that is not
-	// the current metric; only same-version commits enter the window, since a
-	// count measured under another definition is not comparable (gt-26qqh).
-	otherVersion := 0
+	// otherVersion maps a database to the newest version it was counted under
+	// when that is not the current metric; only same-version commits enter the
+	// window, since a count measured under another definition is not comparable
+	// (gt-26qqh).
+	otherVersion := map[string]int{}
 	total := 0
 	seen := map[string]bool{}
 	for _, entry := range log {
@@ -1696,8 +1698,10 @@ func (d *Daemon) recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) 
 		}
 		seen[entry.Hash] = true
 		if v := parseCommitVersion(entry.Subject); v != countMetricVersion {
-			if otherVersion == 0 {
-				otherVersion = v
+			for db := range counts {
+				if otherVersion[db] == 0 {
+					otherVersion[db] = v
+				}
 			}
 			continue
 		}
@@ -1735,19 +1739,30 @@ func (d *Daemon) recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) 
 		sort.Slice(window[db], func(i, j int) bool { return window[db][i].Age < window[db][j].Age })
 	}
 
-	if len(window) == 0 && otherVersion != 0 {
-		// Counts exist, all under another metric: a new baseline, not a spike.
-		return nil, &spikeVersionChange{From: otherVersion, To: countMetricVersion}
+	// A database counted only under another metric has no comparable level: it
+	// is a new baseline, not a spike. Databases with same-version history keep
+	// their spike check.
+	rebaselined := map[string]int{}
+	for db, v := range otherVersion {
+		if window[db] == nil {
+			rebaselined[db] = v
+		}
+	}
+	if len(window) == 0 && len(rebaselined) > 0 {
+		// Counts exist, all under another metric.
+		return &spikeBaseline{
+			Window:      defaultSpikeBaselineWindow,
+			Computed:    time.Now().Format(time.RFC3339),
+			Counts:      map[string][]spikeCommit{},
+			Rebaselined: rebaselined,
+		}, nil
 	}
 	if len(window) == 0 {
 		// No count-bearing history. The cache is the only remaining source of
 		// levels, and it may only be trusted here, where no committed level
 		// exists to outrank it.
 		if sb := cachedSpikeBaseline(gitRepo); sb != nil {
-			if v := cachedBaselineVersion(sb); v != countMetricVersion {
-				return nil, &spikeVersionChange{From: v, To: countMetricVersion}
-			}
-			return sb, nil
+			return withoutStaleLevels(sb), nil
 		}
 		if total == 0 {
 			// Fresh repo: nothing to compare against, no spike possible.
@@ -1776,6 +1791,7 @@ func (d *Daemon) recomputeSpikeBaseline(gitRepo string) (*spikeBaseline, error) 
 	// last known levels. Non-fatal on failure: the window is already computed
 	// in memory, and the cache is a fallback, never the source of truth.
 	_ = saveSpikeBaselineHistory(gitRepo, sb)
+	sb.Rebaselined = rebaselined
 	return sb, nil
 }
 
@@ -1949,6 +1965,12 @@ type spikeBaseline struct {
 	Window   int                      `json:"window"`
 	Computed string                   `json:"computed"`
 	Counts   map[string][]spikeCommit `json:"counts"`
+	// Rebaselined maps a database to the count-metric version of the history it
+	// was last counted under, for each database whose only levels were measured
+	// under a version other than countMetricVersion. Such a database has no
+	// comparable level, so the spike check treats its next count as a new
+	// baseline. Derived on every run, never cached (gt-26qqh).
+	Rebaselined map[string]int `json:"-"`
 }
 
 const (
@@ -2005,31 +2027,36 @@ func parseCommitVersion(subject string) int {
 	return legacyCountMetricVersion
 }
 
-// spikeVersionChange is returned by recomputeSpikeBaseline when the history
-// holds counts but none measured under countMetricVersion. It is not a failure:
-// the caller commits this run's counts as the new baseline and logs the change
-// (gt-26qqh).
-type spikeVersionChange struct {
-	From, To int
-}
-
-func (e *spikeVersionChange) Error() string {
-	return fmt.Sprintf("backup history counts under count metric m%d, this run counts under m%d", e.From, e.To)
-}
-
-// cachedBaselineVersion returns the count-metric version of a cache-built
-// baseline: the highest version among its entries (version 1 when the cache
-// predates versioning).
-func cachedBaselineVersion(sb *spikeBaseline) int {
-	version := legacyCountMetricVersion
-	for _, entries := range sb.Counts {
+// withoutStaleLevels drops, per database, the cached levels measured under a
+// count metric other than countMetricVersion and lists the databases left with
+// none in Rebaselined. A cache entry without a version reads as version 1, like
+// a subject without the token. A database with a current-version level keeps its
+// check even when another database's cache entries are stale (gt-26qqh).
+func withoutStaleLevels(sb *spikeBaseline) *spikeBaseline {
+	sb.Rebaselined = map[string]int{}
+	for db, entries := range sb.Counts {
+		kept := entries[:0]
+		stale := 0
 		for _, e := range entries {
-			if e.Version > version {
-				version = e.Version
+			v := e.Version
+			if v == 0 {
+				v = legacyCountMetricVersion
+			}
+			switch {
+			case v == countMetricVersion:
+				kept = append(kept, e)
+			case v > stale:
+				stale = v
 			}
 		}
+		if len(kept) == 0 {
+			delete(sb.Counts, db)
+			sb.Rebaselined[db] = stale
+			continue
+		}
+		sb.Counts[db] = kept
 	}
-	return version
+	return sb
 }
 
 // parseCommitCounts extracts the "db=NNN" count pairs from a git commit's
@@ -2127,16 +2154,6 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 		d.logger.Printf("jsonl_git_backup: verify: no backup history yet (first run) — nothing to compare against, skipping spike check")
 		return nil, nil
 	}
-	var versionChange *spikeVersionChange
-	if errors.As(err, &versionChange) {
-		// The count metric changed since the last backup commit, so the history
-		// holds no count comparable to this run's. Committing this run's counts
-		// is what ends the mismatch; halting would commit nothing and stay
-		// mismatched for ever (gt-26qqh).
-		d.logger.Printf("jsonl_git_backup: verify: count metric changed from m%d to m%d — rebaselining: this run's counts become the new baseline, spike check skipped",
-			versionChange.From, versionChange.To)
-		return nil, nil
-	}
 	if err != nil {
 		// Commits exist but carry no counts this detector can read. Fail loud
 		// (gt-tj-he): a silent skip would read as a first export and anchor an
@@ -2152,6 +2169,15 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 		}
 
 		prevCount, ok := spikeBaselineCount(spikeBase, db)
+		if from, changed := spikeBase.Rebaselined[db]; !ok && changed {
+			// The count metric changed since this database was last committed,
+			// so the history holds no count comparable to this run's. Committing
+			// this run's count is what ends the mismatch; halting would commit
+			// nothing and stay mismatched for ever (gt-26qqh).
+			d.logger.Printf("jsonl_git_backup: verify: %s: count metric changed from m%d to m%d — rebaselining: this run's count (%d) becomes the new baseline, spike check skipped",
+				db, from, countMetricVersion, currentCount)
+			continue
+		}
 		if !ok {
 			// First export of this database — no baseline to compare against.
 			d.logger.Printf("jsonl_git_backup: verify: %s: first export (%d records), skipping spike check", db, currentCount)
