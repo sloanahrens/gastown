@@ -59,7 +59,6 @@ type PatrolsConfig struct {
 	SpecDispatch         *SpecDispatchConfig         `json:"spec_dispatch,omitempty"`
 	OverseerReport       *OverseerReportConfig       `json:"overseer_report,omitempty"`
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
-	RestartTracker       *RestartTrackerConfig       `json:"restart_tracker,omitempty"`
 	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
 
 	// GitHygiene cleans merged and orphaned branches and runs git gc in each
@@ -172,31 +171,92 @@ type DoltServerConfig struct {
 	// LogFile is the path to the Dolt server log file.
 	LogFile string `json:"log_file,omitempty"`
 
-	// AutoRestart controls whether to restart on crash.
-	AutoRestart bool `json:"auto_restart,omitempty"`
+	// AutoRestart decides whether the manager itself brings a crashed or
+	// unhealthy server back up. Nil means on; false leaves it as the check
+	// found it and raises the alert alone. A server that is simply not
+	// running is still started: that is a start, not a restart (gt-gqftr).
+	AutoRestart *bool `json:"auto_restart,omitempty"`
 
-	// RestartDelay is the initial delay before restarting after crash (default 5s).
-	RestartDelay time.Duration `json:"restart_delay,omitempty"`
+	// RestartDelayStr is the wait before the first restart after a crash
+	// (default "5s"); it doubles per restart, up to MaxRestartDelayStr.
+	RestartDelayStr string `json:"restart_delay,omitempty"`
 
-	// MaxRestartDelay is the maximum backoff delay (default 5min).
-	MaxRestartDelay time.Duration `json:"max_restart_delay,omitempty"`
+	// MaxRestartDelayStr caps the backoff delay (default "5m").
+	MaxRestartDelayStr string `json:"max_restart_delay,omitempty"`
 
 	// MaxRestartsInWindow is the maximum number of restarts allowed within
-	// RestartWindow before escalating instead of retrying (default 5).
+	// RestartWindowStr before escalating instead of retrying (default 5).
 	MaxRestartsInWindow int `json:"max_restarts_in_window,omitempty"`
 
-	// RestartWindow is the time window for counting restarts (default 10min).
-	RestartWindow time.Duration `json:"restart_window,omitempty"`
+	// RestartWindowStr is the time window for counting restarts (default "10m").
+	RestartWindowStr string `json:"restart_window,omitempty"`
 
-	// HealthyResetInterval is how long the server must stay healthy before
-	// the backoff counter resets (default 5min).
-	HealthyResetInterval time.Duration `json:"healthy_reset_interval,omitempty"`
+	// HealthyResetIntervalStr is how long the server must stay healthy before
+	// the backoff counter resets (default "5m").
+	HealthyResetIntervalStr string `json:"healthy_reset_interval,omitempty"`
 
-	// HealthCheckInterval is how often to run the Dolt health check,
-	// independent of the general daemon heartbeat. This enables fast
-	// detection of Dolt server crashes without changing the overall
-	// heartbeat frequency. Default 30s.
-	HealthCheckInterval time.Duration `json:"health_check_interval,omitempty"`
+	// HealthCheckIntervalStr is how often to run the Dolt health check,
+	// independent of the general daemon heartbeat, so a crash is seen within
+	// seconds of it happening (default "30s").
+	HealthCheckIntervalStr string `json:"health_check_interval,omitempty"`
+}
+
+// The dolt_server knobs' defaults, read through the accessors below. They live
+// here rather than at the call sites so a block that omits a key cannot fall
+// back to something else per caller (gt-gqftr).
+const (
+	DefaultDoltRestartDelay         = 5 * time.Second
+	DefaultDoltMaxRestartDelay      = 5 * time.Minute
+	DefaultDoltRestartWindow        = 10 * time.Minute
+	DefaultDoltHealthyResetInterval = 5 * time.Minute
+	DefaultDoltHealthCheckInterval  = 30 * time.Second
+)
+
+// AutoRestartEnabled reports whether the manager restarts the server itself; an
+// absent key means it does.
+func (c *DoltServerConfig) AutoRestartEnabled() bool {
+	return c == nil || c.AutoRestart == nil || *c.AutoRestart
+}
+
+// RestartDelay returns the wait before the first restart after a crash.
+func (c *DoltServerConfig) RestartDelay() time.Duration {
+	if c == nil {
+		return DefaultDoltRestartDelay
+	}
+	return positiveDurationOrDefault(c.RestartDelayStr, DefaultDoltRestartDelay)
+}
+
+// MaxRestartDelay returns the cap on the backoff delay.
+func (c *DoltServerConfig) MaxRestartDelay() time.Duration {
+	if c == nil {
+		return DefaultDoltMaxRestartDelay
+	}
+	return positiveDurationOrDefault(c.MaxRestartDelayStr, DefaultDoltMaxRestartDelay)
+}
+
+// RestartWindow returns the window restarts are counted in.
+func (c *DoltServerConfig) RestartWindow() time.Duration {
+	if c == nil {
+		return DefaultDoltRestartWindow
+	}
+	return positiveDurationOrDefault(c.RestartWindowStr, DefaultDoltRestartWindow)
+}
+
+// HealthyResetInterval returns how long the server must stay healthy before the
+// backoff counter resets.
+func (c *DoltServerConfig) HealthyResetInterval() time.Duration {
+	if c == nil {
+		return DefaultDoltHealthyResetInterval
+	}
+	return positiveDurationOrDefault(c.HealthyResetIntervalStr, DefaultDoltHealthyResetInterval)
+}
+
+// HealthCheckInterval returns how often the Dolt health check runs.
+func (c *DoltServerConfig) HealthCheckInterval() time.Duration {
+	if c == nil {
+		return DefaultDoltHealthCheckInterval
+	}
+	return positiveDurationOrDefault(c.HealthCheckIntervalStr, DefaultDoltHealthCheckInterval)
 }
 
 // JsonlGitBackupConfig holds configuration for the jsonl_git_backup patrol.
@@ -479,13 +539,13 @@ func (c *WorktreeCleanupConfig) CoversRig(rig string) bool {
 // Grace returns the idle time before a seat is eligible, defaulting to 30m on
 // an unset or malformed value.
 func (c *WorktreeCleanupConfig) Grace() time.Duration {
-	return worktreeCleanupDuration(c.graceStr(), 30*time.Minute)
+	return positiveDurationOrDefault(c.graceStr(), 30*time.Minute)
 }
 
 // ParkedGrace returns the idle time a parked seat needs, defaulting to 24h on
 // an unset or malformed value.
 func (c *WorktreeCleanupConfig) ParkedGrace() time.Duration {
-	return worktreeCleanupDuration(c.parkedGraceStr(), 24*time.Hour)
+	return positiveDurationOrDefault(c.parkedGraceStr(), 24*time.Hour)
 }
 
 // Cap returns the per-tick removal cap, defaulting to 2 for zero or negative.
@@ -519,14 +579,16 @@ func (c *WorktreeCleanupConfig) parkedGraceStr() string {
 	return c.ParkedGraceStr
 }
 
-func worktreeCleanupDuration(s string, def time.Duration) time.Duration {
+// positiveDurationOrDefault parses a duration knob written as a string, falling
+// back to def when it is unset, unparseable or non-positive. A non-positive
+// value is not usable for a knob that bounds a wait: it would make a grace
+// expire instantly, or spin a restart with no backoff at all.
+func positiveDurationOrDefault(s string, def time.Duration) time.Duration {
 	if s == "" {
 		return def
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil || d <= 0 {
-		// A non-positive grace would make every seat instantly eligible, the
-		// opposite of fail-safe; treat it like an unset one.
 		return def
 	}
 	return d
@@ -579,42 +641,6 @@ type SpecDispatchConfig struct {
 
 	// Template overrides the spec template path.
 	Template string `json:"template,omitempty"`
-}
-
-// RestartTrackerConfig holds configurable parameters for restart tracking.
-// All fields have sensible defaults if zero-valued.
-type RestartTrackerConfig struct {
-	// InitialBackoff is the delay before the first retry (default 30s).
-	InitialBackoff time.Duration `json:"initial_backoff,omitempty"`
-
-	// MaxBackoff is the maximum backoff delay (default 10m).
-	MaxBackoff time.Duration `json:"max_backoff,omitempty"`
-
-	// BackoffMultiplier scales the backoff on each retry (default 2.0).
-	BackoffMultiplier float64 `json:"backoff_multiplier,omitempty"`
-
-	// CrashLoopWindow is the time window for counting crash-loop restarts (default 15m).
-	CrashLoopWindow time.Duration `json:"crash_loop_window,omitempty"`
-
-	// CrashLoopCount is how many restarts within the window trigger crash-loop state (default 5).
-	CrashLoopCount int `json:"crash_loop_count,omitempty"`
-
-	// StabilityPeriod is how long an agent must run without restarting
-	// before its backoff resets (default 30m).
-	StabilityPeriod time.Duration `json:"stability_period,omitempty"`
-
-	// PauseBackoff is the fixed delay applied when an agent is paused due
-	// to a transient external limit (e.g., Claude usage-limit reached)
-	// rather than a true crash. Does not escalate and does not count toward
-	// the crash-loop fault budget. Default 60s: long enough to damp the
-	// retry loop, short enough to recover quickly when the limit resets.
-	PauseBackoff time.Duration `json:"pause_backoff,omitempty"`
-
-	// CrashLoopRecoveryWindow is how long an agent's heartbeat must be
-	// continuously fresh with an advancing cycle count before a crash-loop
-	// flag is auto-cleared (default 10m). Prevents stale flags from an
-	// earlier outage from pinning a now-healthy agent indefinitely (gt-ayx).
-	CrashLoopRecoveryWindow time.Duration `json:"crash_loop_recovery_window,omitempty"`
 }
 
 // ScheduledSlingsConfig is the opt-in scheduled_slings patrol: each entry is a

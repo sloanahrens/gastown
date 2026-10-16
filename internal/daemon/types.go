@@ -125,7 +125,6 @@ type (
 	SpecDispatchConfig         = agentconfig.SpecDispatchConfig
 	OverseerReportConfig       = agentconfig.OverseerReportConfig
 	PatrolScanConfig           = agentconfig.PatrolScanConfig
-	RestartTrackerConfig       = agentconfig.RestartTrackerConfig
 	EventsPruneConfig          = agentconfig.EventsPruneConfig
 	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
