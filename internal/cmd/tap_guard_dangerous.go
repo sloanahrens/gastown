@@ -626,8 +626,9 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			// A "((" in command position — an arithmetic command, and the
 			// header of a C-style "for ((...))" — is an expression too
 			// (gt-dherr). A reserved word that takes a command ("then((",
-			// "do((", "else((") ends at the "(", which delimits it, so the
-			// "((" after it is in command position without a space.
+			// "do((", "else((", "time((", "!((", "{((") or a case pattern's
+			// ")" ends at the "(", which delimits it, so the "((" after it
+			// is in command position without a space (gt-4jcks).
 			w.arith = append(w.arith, arithFrame{kind: arithParen})
 		case w.quote == 0 && w.braces > 0 && r == '(' && (w.subst > 0 || w.followsUnescapedDollar()):
 			// The "(" of a "$(..)" nested in a "${..}" word opens command
@@ -1397,26 +1398,36 @@ func startsShellWord(runes []rune, prevIdx int, prevEscaped bool) bool {
 }
 
 // commandReservedWords are the reserved words after which the shell reads a
-// command, so a "((" glued to one opens an arithmetic command.
+// command, so a "((" glued to one opens an arithmetic command. "time" takes a
+// pipeline, so it stands here with the words that take a command list.
 var commandReservedWords = map[string]bool{
 	"then": true, "do": true, "else": true, "elif": true,
 	"if": true, "while": true, "until": true, "for": true,
+	"time": true,
 }
 
-// endsCommandReservedWord reports whether the word ending at runes[prevIdx] is
-// one of commandReservedWords standing as a word of its own, which the "("
-// after it delimits (gt-he2fi). A word the shell read as part of a longer one
-// (a "dothen" or an escaped character) is not reserved.
+// endsCommandReservedWord reports whether the "(" after runes[prevIdx] stands
+// where the shell reads a command, because what ends there delimits at the "("
+// (gt-he2fi, gt-4jcks): one of commandReservedWords, or a "!" or "{", standing
+// as a word of its own, or the ")" that closes a case pattern. A word the
+// shell read as part of a longer one (a "dothen" or an escaped character) is
+// not reserved. No ")" but a case pattern's is followed by "((" in a command
+// bash accepts, so the ")" needs no check of which construct it closes.
 func endsCommandReservedWord(runes []rune, prevIdx int, prevEscaped bool) bool {
 	if prevEscaped || prevIdx < 0 {
 		return false
 	}
-	start := prevIdx
-	for start > 0 && runes[start-1] >= 'a' && runes[start-1] <= 'z' {
-		start--
+	if runes[prevIdx] == ')' {
+		return true
 	}
-	if !commandReservedWords[string(runes[start:prevIdx+1])] {
-		return false
+	start := prevIdx
+	if r := runes[prevIdx]; r != '!' && r != '{' {
+		for start > 0 && runes[start-1] >= 'a' && runes[start-1] <= 'z' {
+			start--
+		}
+		if !commandReservedWords[string(runes[start:prevIdx+1])] {
+			return false
+		}
 	}
 	return start == 0 || (runes[start-1] != '\\' && startsShellWord(runes, start-1, false))
 }
