@@ -2821,59 +2821,53 @@ function costGCP(box, c) {
   if (!rows.length && late) box.append(el("div", "warnc", "GCP budget · patrol overdue, no alert on its last report"));
 }
 
-// The Claude plan line of the Cost panel: the second summary line of the panel,
-// drawn from State.ClaudePlan (gt-9drev's reader) directly under the DeepSeek
-// part, so the two spend meters are read side by side. Its reader answers a week
-// or a named failure and never a week it could not place: a series too old to
-// measure drawn as 0% would say the limit is untouched (gt-qn3j4).
+// The Claude plan line of the Cost panel, drawn directly under the DeepSeek part
+// so the two spend meters are read side by side. A week its reader could not
+// place is never drawn as 0%, which would say the limit is untouched (gt-qn3j4).
 //
-// The line's tail carries the billing month, which the operator reads to size
-// the plan (gt-bcq4m).
-
-// The series carries limits and percentages, not the plan's name, so the line
-// names the subscription its price buys: the reader's default price
-// (ClaudePlanDefaultUSD) is the Max plan's, and any other price buys a plan this
-// page cannot name.
-const CLAUDE_PLAN_MAX_USD = 200;
-const planName = usd => Math.round(usd) === CLAUDE_PLAN_MAX_USD ? "Claude Max" : "Claude plan";
+// The series carries limits and a price, not a plan's name, so the line names
+// what it has and not a subscription.
 
 // CLAUDE_PLAN_CEILING_PCT mirrors the reader's ClaudePlanCeilingPct; a test
 // pins the two together.
 const CLAUDE_PLAN_CEILING_PCT = 90;
 
-// planReset is a rollover as the operator reads it: the local weekday and clock
-// time. The weekday comes from the page's own table because a browser's locale
-// short name is not what a page test can read back.
+// planReset is a rollover as the operator reads it, off the page's own weekday
+// table: a browser's locale short name is not what a page test can read back.
 const WEEKDAY = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const planReset = secs => {
+  if (secs == null) return "–";
   const d = new Date(secs * 1000);
   return WEEKDAY[d.getDay()] + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
 };
 
-// planDay is a billing month's bound as day and month name, off the page's own
-// table for the same reason planReset is.
+// planDay is a billing month's bound as day and month name, off the same table.
 const MONTH = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 const planDay = secs => {
+  if (secs == null) return "–";
   const d = new Date(secs * 1000);
   return d.getDate() + " " + MONTH[d.getMonth()];
 };
 
-// A percentage of a limit reads whole, as the status line samples it — a tenth
-// of a percent of a week is not a decision. A pace keeps its tenth, since it is
-// the number that says how fast the week is going.
-const planPct = v => Math.round(v) + "%";
-const planPace = v => (v > 0 ? "+" : "") + Number(v).toFixed(1) + "%/day";
+// planPct reads a percentage of a limit whole, as the status line samples it: a
+// tenth of a percent of a week is not a decision. planPace keeps its tenth, since
+// it is the number that says how fast the week is going. A number the reader did
+// not send is a dash, as money draws a dollar it was not sent.
+const planPct = v => v == null ? "–" : Math.round(v) + "%";
+const planPace = v => v == null ? "–" : (v > 0 ? "+" : "") + Number(v).toFixed(1) + "%/day";
 
-// planClass is the line's colour: a week at the ceiling the month rollup counts
-// (CLAUDE_PLAN_CEILING_PCT of the limit) or projected past the limit is bad, one
-// projected past the ceiling warns, and a week with room left is plain.
+// planPrice is the plan's monthly price, not a bill: the line reads "$200/mo"
+// whole, since cents on a monthly price are noise.
+const planPrice = usd => usd == null ? "–" : "$" + Math.round(usd) + "/mo";
+
+// planClass is the line's colour: a week at the ceiling the month rollup counts,
+// or projected past the limit, is bad; past the ceiling it warns.
 function planClass(c) {
   if (c.weekly_pct >= CLAUDE_PLAN_CEILING_PCT || c.projected_pct_at_reset > 100) return "badc";
   return c.projected_pct_at_reset > CLAUDE_PLAN_CEILING_PCT ? "warnc" : "";
 }
 
-// planUnread is why the line carries no week at all: each state the reader can
-// leave it in that holds no number, named as itself.
+// planUnread is why the line carries no week: each unreadable state as itself.
 function planUnread(c) {
   if (c.unavailable) return "the status line's samples could not be read";
   if (!c.sampled_at) return "the status line has written no samples yet";
@@ -2882,19 +2876,18 @@ function planUnread(c) {
 }
 
 // planAPIEquivalent is the hover's words for what the town's Claude tokens would
-// have cost on the API: the week's and the billing month's, at the price table's
-// list rates. They are approximate twice over — the prices move, and a plan
-// weights tokens differently from the meter — so the hover says so rather than
-// reading as a bill. A payload without them has no usage records behind it, and
-// a payload with unpriced models is a floor that names what it could not price.
+// have cost on the API at the price table's list rates, which is approximate —
+// the prices move, and a plan weights tokens differently from the meter — so the
+// hover says so rather than reading as a bill. A payload with unpriced models is
+// a floor that names what it could not price.
 function planAPIEquivalent(c) {
   if (c.api_equivalent_week_usd == null || c.api_equivalent_month_usd == null) return null;
   return "API-equivalent " + money(c.api_equivalent_week_usd) + " this week, " + money(c.api_equivalent_month_usd) + " this month, approximate: plans weight tokens differently from the API" +
     (c.unpriced && c.unpriced.length ? " · counted at zero, no list price: " + c.unpriced.join(", ") : "");
 }
 
-// planMonthSuffix is the month's clause on the line: its utilization and its
-// weeks at the ceiling. A month with no counted weeks draws none, not 0%.
+// planMonthSuffix is the month's clause on the line. A month with no counted
+// weeks draws none, not 0%.
 function planMonthSuffix(c) {
   if (!(c.month_weeks > 0)) return null;
   const words = ["month " + planPct(c.month_utilization_pct) + " of plan"];
@@ -2902,8 +2895,7 @@ function planMonthSuffix(c) {
   return words.join(" · ");
 }
 
-// planMonthHover is the month's part of the hover: its bounds, dollars, mean
-// week, open week and the month before.
+// planMonthHover is the month's part of the hover, which the line has no room for.
 function planMonthHover(c) {
   if (!(c.month_weeks > 0)) return [];
   const out = [
@@ -2923,10 +2915,8 @@ function costClaudePlan(box, c) {
   if (!c) return;
   if (c.unavailable || c.stale) { box.append(el("div", "empty", "Claude plan · unavailable — " + planUnread(c))); return; }
   const line = el("div", planClass(c), [
-    planName(c.plan_usd_month),
-    // The plan's price, not a bill: the line reads "$200/mo" whole, since cents
-    // on a monthly price are noise.
-    "$" + Math.round(c.plan_usd_month) + "/mo",
+    "Claude plan",
+    planPrice(c.plan_usd_month),
     planPct(c.weekly_pct) + " of this week's limit",
     c.weekly_resets_at ? "resets " + planReset(c.weekly_resets_at) : "no reset instant in the newest sample",
     planPace(c.pace_per_day_24h) + " (24h)",
@@ -2936,8 +2926,8 @@ function costClaudePlan(box, c) {
     c.hits_limit_in_days == null ? null : c.hits_limit_in_days > 0 ? "limit in " + c.hits_limit_in_days.toFixed(1) + "d" : "at the limit",
     planMonthSuffix(c),
   ].filter(Boolean).join(" · "));
-  // The hover has what the line has no room for. Dollars are the plan's share
-  // of the month rather than a bill, so they are labelled approximate.
+  // The dollars are the plan's share of the month rather than a bill, so they
+  // are labelled approximate.
   line.title = [
     "5-hour limit " + planPct(c.five_hour_pct) + " used" + (c.five_hour_resets_at ? ", resets " + planReset(c.five_hour_resets_at) : ", no reset instant in the newest sample"),
     "1-hour pace " + planPace(c.pace_per_day_1h),
