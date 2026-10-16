@@ -672,6 +672,41 @@ func TestRunTierSweep_FilesOneBeadPerFailingUnitAndClosesOnGreen(t *testing.T) {
 	}
 }
 
+// A polecat that claims a red-tier bead moves it to in_progress or hooked; the
+// next red sweep still comments on it instead of filing a second P1 bead, and
+// a green sweep closes it (gt-9hzs5).
+func TestTierSweepFileRed_ClaimedBead(t *testing.T) {
+	t.Parallel()
+	title := tierSweepBeadPrefix("gastown", "integration") + "./internal/x"
+	for _, status := range []string{"open", "in_progress", "hooked"} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+			bd := &byStatusBeads{byStatus: map[string][]*beads.Issue{
+				status: {{ID: "gt-claimed", Title: title}},
+			}}
+			d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+			red := map[string]tierSweepTierResult{
+				"integration": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"./internal/x"}},
+			}
+			d.tierSweepRecordBeads("gastown", "abc123", red)
+			if len(bd.created) != 0 {
+				t.Errorf("created = %+v, want a comment on the %s bead instead", bd.created, status)
+			}
+			if len(bd.comments) != 1 || !strings.HasPrefix(bd.comments[0], "gt-claimed: still red") {
+				t.Errorf("comments = %v, want one \"still red\" comment on gt-claimed", bd.comments)
+			}
+
+			green := map[string]tierSweepTierResult{"integration": {Verdict: tierSweepGreen, Passed: 1}}
+			d.tierSweepRecordBeads("gastown", "def456", green)
+			if len(bd.closed) != 1 || !strings.HasPrefix(bd.closed[0], "gt-claimed ") {
+				t.Errorf("closed = %v, want the %s bead closed on green", bd.closed, status)
+			}
+		})
+	}
+}
+
 // TestTierSweepSlotRoleIsNotGateClass pins the reentrancy contract: the
 // sweep's role is not gate-class, so it takes a shared slot and the script's
 // own `gt slot run` calls inherit that role and ride the one hold instead of
