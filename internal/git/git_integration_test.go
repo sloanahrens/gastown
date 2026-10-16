@@ -3178,3 +3178,63 @@ func TestIntegrationRuntimeArtifactPathspecsBesideEditedSource(t *testing.T) {
 		t.Errorf("status NonRuntimePaths = %q, want %q", got, wantWork)
 	}
 }
+
+// The checkout the checkpoint dog classifies: git add -A has staged everything,
+// a committed coverage/ report carries the polecat's edit, and generated output
+// sits beside it. Only HEAD can tell the two apart — the index lists both — so
+// the report's edit stays staged and the output is reset (gt-42qp3).
+func TestIntegrationRuntimeArtifactPathspecsKeepsEditedCommittedReport(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	write := func(rel, content string) {
+		t.Helper()
+		path := filepath.Join(dir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("coverage/report.html", "<html>before</html>\n")
+	if err := g.Add("-A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := g.Commit("committed report"); err != nil {
+		t.Fatal(err)
+	}
+
+	write("coverage/report.html", "<html>after</html>\n")
+	write("coverage/coverage.out", "mode: set\n")
+	if err := g.Add("-A"); err != nil {
+		t.Fatal(err)
+	}
+	staged, err := g.StagedChanges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, change := range staged {
+		paths = append(paths, change.Path)
+	}
+	if got, want := slices.Sorted(slices.Values(paths)), []string{"coverage/coverage.out", "coverage/report.html"}; !slices.Equal(got, want) {
+		t.Fatalf("staged = %q, want %q", got, want)
+	}
+	got := slices.Sorted(slices.Values(g.RuntimeArtifactPathspecs(paths)))
+	if want := []string{"coverage/coverage.out"}; !slices.Equal(got, want) {
+		t.Errorf("RuntimeArtifactPathspecs = %q, want %q", got, want)
+	}
+
+	// The status takes the same side, so gt done blocks on the edit.
+	status, err := g.CheckUncommittedWork()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := slices.Sorted(slices.Values(status.NonRuntimePaths())), []string{"coverage/report.html"}; !slices.Equal(got, want) {
+		t.Errorf("NonRuntimePaths = %q, want %q", got, want)
+	}
+	if got, want := slices.Sorted(slices.Values(status.RuntimeArtifactPaths())), []string{"coverage/coverage.out"}; !slices.Equal(got, want) {
+		t.Errorf("RuntimeArtifactPaths = %q, want %q", got, want)
+	}
+}

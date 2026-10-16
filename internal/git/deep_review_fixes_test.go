@@ -1,6 +1,7 @@
 package git
 
 import (
+	"errors"
 	"reflect"
 	"slices"
 	"strings"
@@ -234,4 +235,69 @@ func TestDiffNameOnlyNoRenames(t *testing.T) {
 		t.Fatalf("DiffNameOnly = %q, want %q", got, want)
 	}
 	s.noUnscripted(t)
+}
+
+// A coverage/ directory holding a committed report and no source file is not
+// an artifact directory: HEAD tracks the report, so the polecat's edit to it
+// is work, while generated output written beside it is still reset (gt-42qp3).
+// The listing stubs mirror the checkpoint dog's state after git add -A, where
+// the index lists the generated output too and only HEAD knows what is content.
+func TestRuntimeArtifactPathspecsListing_KeepsCommittedFileWithoutSource(t *testing.T) {
+	t.Parallel()
+	list := func(root string) ([]string, error) {
+		switch root {
+		case "coverage/":
+			return []string{"coverage/report.html", "coverage/coverage.out"}, nil
+		case "web/.cache/":
+			return []string{"web/.cache/blob.bin"}, nil
+		}
+		return nil, nil
+	}
+	head := func(root string) ([]string, error) {
+		if root == "coverage/" {
+			return []string{"coverage/report.html"}, nil
+		}
+		return nil, nil
+	}
+
+	for _, tc := range []struct {
+		name  string
+		paths []string
+		want  []string
+	}{
+		{
+			name:  "the committed report is not an artifact",
+			paths: []string{"coverage/report.html"},
+			want:  nil,
+		},
+		{
+			name:  "output beside the committed report is reset, narrowed away from it",
+			paths: []string{"coverage/report.html", "coverage/coverage.out"},
+			want:  []string{"coverage/coverage.out"},
+		},
+		{
+			name:  "a directory of untracked generated files is still an artifact directory",
+			paths: []string{"web/.cache/blob.bin"},
+			want:  []string{"web/.cache/"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := RuntimeArtifactPathspecsListing(tc.paths, list, head); !slices.Equal(got, tc.want) {
+				t.Fatalf("RuntimeArtifactPathspecsListing(%q) = %q, want %q", tc.paths, got, tc.want)
+			}
+		})
+	}
+}
+
+// git ls-tree HEAD cannot be read: whether the file under the root is
+// committed content is unknown, so it is kept (gt-42qp3).
+func TestRuntimeArtifactPathspecsListing_KeepsFilesWhenHeadListingFails(t *testing.T) {
+	t.Parallel()
+	empty := func(string) ([]string, error) { return nil, nil }
+	failing := func(string) ([]string, error) { return nil, errors.New("listing failed") }
+	got := RuntimeArtifactPathspecsListing([]string{"coverage/coverage.out"}, empty, failing)
+	if got != nil {
+		t.Fatalf("RuntimeArtifactPathspecsListing with a failed HEAD listing = %q, want none", got)
+	}
 }
