@@ -394,6 +394,74 @@ func TestMaybeResetBackoff_RestartClearsHealthyClock(t *testing.T) {
 	}
 }
 
+// TestMaybeResetBackoff_UnhealthyBranchClearsHealthyClock pins the clear each
+// unhealthy branch of EnsureRunning makes on its own. A deferred restart (a gc
+// in flight) reaches neither stopLocked nor restartWithBackoff, so the branch's
+// clear is the only thing ending the healthy interval: a failing tick that
+// left the clock running would let the recovery tick read the gc's whole
+// duration as healthy time and wipe the backoff (gt-m7a48).
+func TestMaybeResetBackoff_UnhealthyBranchClearsHealthyClock(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		inject func(m *DoltServerManager, err error)
+	}{
+		{"health check", func(m *DoltServerManager, err error) { m.healthCheckFn = func() error { return err } }},
+		{"read-only", func(m *DoltServerManager, err error) { m.writeProbeCheckFn = func() error { return err } }},
+		{"identity", func(m *DoltServerManager, err error) { m.identityCheckFn = func() error { return err } }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var offset atomic.Int64
+			baseTime := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+
+			m := newTestManager(t)
+			m.config.HealthyResetInterval = 5 * time.Minute
+			m.nowFn = func() time.Time { return baseTime.Add(time.Duration(offset.Load())) }
+			m.sleepFn = func(time.Duration) {}
+			m.runningFn = func() (int, bool) { return 1234, true }
+			m.writeProbeCheckFn = func() error { return nil }
+			m.readOnlyAlertFn = func(error) {}
+			m.SetRestartSuppressor(func() bool { return true })
+			m.currentDelay = 40 * time.Millisecond
+			m.restartTimes = []time.Time{baseTime}
+
+			// T0: a healthy tick starts the healthy clock.
+			if err := m.EnsureRunning(); err != nil {
+				t.Fatalf("healthy tick: %v", err)
+			}
+			if m.lastHealthyTime.IsZero() {
+				t.Fatal("a healthy tick should start the healthy clock")
+			}
+
+			// T0+6m: the check fails but the restart is deferred, so only the
+			// branch itself can end the healthy interval.
+			offset.Store(int64(6 * time.Minute))
+			tt.inject(m, fmt.Errorf("injected %s failure", tt.name))
+			if err := m.EnsureRunning(); err != nil {
+				t.Fatalf("failing tick: %v", err)
+			}
+			if !m.lastHealthyTime.IsZero() {
+				t.Errorf("the failing tick should clear the healthy clock, got %v", m.lastHealthyTime)
+			}
+
+			// T0+7m: the server recovers. The clock restarts here, so the
+			// backoff is not yet eligible for a reset.
+			offset.Store(int64(7 * time.Minute))
+			m.healthCheckFn = func() error { return nil }
+			m.writeProbeCheckFn = func() error { return nil }
+			m.identityCheckFn = func() error { return nil }
+			if err := m.EnsureRunning(); err != nil {
+				t.Fatalf("recovery tick: %v", err)
+			}
+			if m.currentDelay != 40*time.Millisecond || len(m.restartTimes) != 1 {
+				t.Errorf("backoff should survive the deferred failure, got delay %v with %d restarts", m.currentDelay, len(m.restartTimes))
+			}
+		})
+	}
+}
+
 func TestDefaultConfig_BackoffFields(t *testing.T) {
 	t.Parallel()
 	cfg := DefaultDoltServerConfig("/tmp/test")
