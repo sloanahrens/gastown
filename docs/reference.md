@@ -928,6 +928,14 @@ writes `acks.json`:
   attention ack` under a flock. The daemon reads it and never writes it, so
   neither process races the other's file.
 
+Every rule has an owner, the human or the overseer, in `ruleOwners` in
+`internal/attention/owner.go`; the dashboard tags each row with it and the push
+channel reads it. `landing.rejected_twice` is the overseer's: rework through the
+second rejection is routine, and the overseer decides what a bead rejected twice
+becomes (a rework brief, a waiver, a split). It keeps its wake, so the overseer
+still sees it. An escalation the third rejection raises that the overseer cannot
+settle is the human's through the escalation owner rule (`EscalationOwner`).
+
 An ack hides its item until the item's condition clears; the ack is then
 dropped, so a recurrence raises a new item rather than hiding behind the old
 ack. A state older than 15 minutes is stale — the daemon has stopped writing

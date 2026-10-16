@@ -49,8 +49,11 @@ var ruleOwners = map[string]Owner{
 	// A silent overseer cannot wake itself; the daemon pushes to the human
 	// instead (gt-3a6h6).
 	RuleOverseerSilent: OwnerSloan,
-	// A bead refused twice is a call the landing loop cannot make.
-	RuleRejectedTwice: OwnerSloan,
+	// Rework through the second rejection is routine; the overseer decides what
+	// a bead that keeps failing becomes (a rework brief, a waiver, a split). An
+	// escalation the third rejection raises that the overseer cannot settle
+	// reaches the human through EscalationOwner (gt-few2w).
+	RuleRejectedTwice: OwnerOverseer,
 	// An escalation is the human's only when the overseer cannot resolve it, and
 	// only the escalation says whether that is so. EscalationOwner reads that
 	// off it; this row is the family default, for the escalation.open item that
