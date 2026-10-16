@@ -91,7 +91,8 @@ func TestPath(t *testing.T) {
 	if err != nil || p != filepath.Join("/town", ".runtime", "landings", "gastown.jsonl") {
 		t.Fatalf("Path = %q, %v", p, err)
 	}
-	for _, bad := range []string{"", ".", "..", "a/b", `a\b`} {
+	// "reviews" is the om review log's file name, not a rig's.
+	for _, bad := range []string{"", ".", "..", "a/b", `a\b`, "reviews"} {
 		if _, err := Path("/town", bad); err == nil {
 			t.Errorf("Path accepted rig %q", bad)
 		}

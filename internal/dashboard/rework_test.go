@@ -1,0 +1,191 @@
+package dashboard
+
+import (
+	"encoding/json"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+)
+
+var reworkNow = time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+
+// rv is one om verdict logged hours before reworkNow.
+func rv(bead string, attempt int, verdict string, score, bar float64, hoursAgo float64) ReworkReview {
+	return ReworkReview{
+		Bead: bead, Rig: "gastown", Attempt: attempt, Verdict: verdict, Score: score, Bar: bar,
+		At: reworkNow.Add(-time.Duration(hoursAgo * float64(time.Hour))),
+	}
+}
+
+func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
+
+func reworkBars(t *testing.T, w ReworkWindow) map[float64]ReworkBar {
+	t.Helper()
+	out := map[float64]ReworkBar{}
+	for _, b := range w.Bars {
+		out[b.Bar] = b
+	}
+	return out
+}
+
+// The table's numbers are the ones tools/om-rework-stats.py prints for the same
+// reviews: a bead belongs to the bar in force at its first review, first-try
+// approvals are beads whose first review approved, reviews per landed bead
+// averages over the beads with an approval, and a loop is a bead rejected three
+// times with no approval (gt-mctxx).
+func TestAggregateReworkGroupsByTheBarAtAbeadsFirstReview(t *testing.T) {
+	t.Parallel()
+
+	const approve, reject = "approve", "request_changes"
+	reviews := []ReworkReview{
+		// gt-a: lands first try under 0.8. Its verdict was logged twice (a
+		// landing retried after the verdict), which counts once.
+		rv("gt-a", 1, approve, 0.9, 0.8, 30), rv("gt-a", 1, approve, 0.9, 0.8, 29),
+		// gt-b: two rejections, then lands.
+		rv("gt-b", 1, reject, 0.5, 0.8, 60), rv("gt-b", 2, reject, 0.6, 0.8, 50), rv("gt-b", 3, approve, 0.85, 0.8, 40),
+		// gt-c: rejected three times, never approved: a loop that ran out.
+		rv("gt-c", 1, reject, 0.4, 0.8, 100), rv("gt-c", 2, reject, 0.4, 0.8, 90), rv("gt-c", 3, reject, 0.4, 0.8, 80),
+		// gt-d: first reviewed under 0.7, approved after the bar moved to 0.8;
+		// the whole loop is the 0.7 bar's.
+		rv("gt-d", 1, reject, 0.6, 0.7, 20), rv("gt-d", 2, approve, 0.82, 0.8, 10),
+		// gt-e: its tree names no bar.
+		rv("gt-e", 1, approve, 0.95, 0, 5),
+		// gt-f reviewed in the week before; gt-g is older than both windows.
+		rv("gt-f", 1, approve, 0.9, 0.8, 24*10), rv("gt-g", 1, approve, 0.9, 0.8, 24*20),
+	}
+	got := AggregateRework(reviews, reworkNow)
+	if len(got.Windows) != 2 || got.Windows[0].Name != "last 7 days" || got.Windows[1].Name != "the 7 days before" {
+		t.Fatalf("windows = %+v, want the last 7 days then the 7 days before", got.Windows)
+	}
+
+	week := got.Windows[0]
+	if len(week.Bars) != 3 || week.Bars[0].Bar != 0.7 || week.Bars[1].Bar != 0.8 || week.Bars[2].Bar != 0 {
+		t.Fatalf("bars = %+v, want 0.7, 0.8 and the unknown bar last", week.Bars)
+	}
+	bars := reworkBars(t, week)
+	b8 := bars[0.8]
+	if b8.Reviews != 7 || b8.Rejected != 5 || b8.Beads != 3 || b8.FirstTry != 1 || b8.Landed != 2 || b8.LoopsOut != 1 ||
+		!near(b8.ReviewsPerLanded, 2) || !near(b8.MeanScore, 4.05/7) {
+		t.Errorf("0.8 bar = %+v, want 7 reviews, 5 rejected, 3 beads, 1 first try, 2 landed at 2.00 reviews, 1 loop out, mean 0.5786", b8)
+	}
+	b7 := bars[0.7]
+	if b7.Reviews != 2 || b7.Rejected != 1 || b7.Beads != 1 || b7.FirstTry != 0 || b7.Landed != 1 || b7.LoopsOut != 0 ||
+		!near(b7.ReviewsPerLanded, 2) || !near(b7.MeanScore, 0.71) {
+		t.Errorf("0.7 bar = %+v, want gt-d's two reviews, landed after a rejection", b7)
+	}
+	b0 := bars[0]
+	if b0.Reviews != 1 || b0.Rejected != 0 || b0.FirstTry != 1 || b0.Landed != 1 || !near(b0.ReviewsPerLanded, 1) {
+		t.Errorf("unknown bar = %+v, want gt-e's one first-try approval", b0)
+	}
+
+	before := got.Windows[1]
+	if len(before.Bars) != 1 || before.Bars[0].Bar != 0.8 || before.Bars[0].Reviews != 1 || before.Bars[0].FirstTry != 1 {
+		t.Errorf("the week before = %+v, want only gt-f", before.Bars)
+	}
+}
+
+// A bead rejected but not yet three times, or approved after three, is not a
+// loop out; and a window with no reviews has no bars, not a nil list.
+func TestAggregateReworkLoopsAndEmptyWindows(t *testing.T) {
+	t.Parallel()
+
+	const approve, reject = "approve", "request_changes"
+	got := AggregateRework([]ReworkReview{
+		rv("gt-two", 1, reject, 0.4, 0.8, 3), rv("gt-two", 2, reject, 0.4, 0.8, 2),
+		rv("gt-late", 1, reject, 0.4, 0.8, 9), rv("gt-late", 2, reject, 0.4, 0.8, 8), rv("gt-late", 3, reject, 0.4, 0.8, 7), rv("gt-late", 4, approve, 0.9, 0.8, 6),
+	}, reworkNow)
+	b := got.Windows[0].Bars[0]
+	if b.LoopsOut != 0 || b.Landed != 1 || !near(b.ReviewsPerLanded, 4) || b.Beads != 2 {
+		t.Errorf("bar = %+v, want no loop out, gt-late landed on its fourth review", b)
+	}
+	if got.Windows[1].Bars == nil || len(got.Windows[1].Bars) != 0 {
+		t.Errorf("empty window bars = %#v, want an empty list", got.Windows[1].Bars)
+	}
+	raw, err := json.Marshal(AggregateRework(nil, reworkNow))
+	if err != nil || !strings.Contains(string(raw), `"bars":[]`) || strings.Contains(string(raw), "null") {
+		t.Errorf("empty payload = %s (%v), want empty bar lists and no null", raw, err)
+	}
+}
+
+// Each window takes the reviews from its start up to its end: the last seven
+// days include the instant they open and the instant of now, and the instant
+// they open is not the earlier window's.
+func TestAggregateReworkWindowEdges(t *testing.T) {
+	t.Parallel()
+
+	week := 7 * 24.0
+	got := AggregateRework([]ReworkReview{
+		rv("gt-now", 1, "approve", 0.9, 0.8, 0),
+		rv("gt-open", 1, "approve", 0.9, 0.8, week),
+		rv("gt-prior-open", 1, "approve", 0.9, 0.8, 2*week),
+		rv("gt-before", 1, "approve", 0.9, 0.8, 2*week+1),
+		{Bead: "gt-future", Rig: "gastown", Attempt: 1, Verdict: "approve", Bar: 0.8, At: reworkNow.Add(time.Minute)},
+	}, reworkNow)
+	if n := got.Windows[0].Bars[0].Reviews; n != 2 {
+		t.Errorf("last 7 days hold %d reviews, want gt-now and gt-open", n)
+	}
+	if n := got.Windows[1].Bars[0].Reviews; n != 1 {
+		t.Errorf("the 7 days before hold %d reviews, want only gt-prior-open", n)
+	}
+	if got.Windows[0].From != "2026-10-07T12:00:00Z" || got.Windows[0].To != "2026-10-14T12:00:00Z" || got.Windows[1].From != "2026-09-30T12:00:00Z" {
+		t.Errorf("window bounds = %+v", got.Windows)
+	}
+}
+
+// The state the page reads carries the table, and a read that failed reaches it
+// as itself.
+func TestReworkReachesTheAPI(t *testing.T) {
+	t.Parallel()
+
+	for _, r := range []*Rework{
+		{Windows: []ReworkWindow{{Name: "last 7 days", Bars: []ReworkBar{{Bar: 0.8, Reviews: 3}}}}},
+		{Unavailable: true},
+	} {
+		h := NewHub(Config{Now: func() time.Time { return reworkNow }, Rework: func() *Rework { return r }})
+		h.pollRework()
+
+		req := httptest.NewRequest("GET", "/api/state", nil)
+		req.Host = "127.0.0.1:8787"
+		rec := httptest.NewRecorder()
+		h.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET /api/state = %d", rec.Code)
+		}
+		body := rec.Body.String()
+		if !strings.Contains(body, `"rework"`) {
+			t.Fatalf("/api/state does not carry the rework the hub holds: %s", body)
+		}
+		if got := strings.Contains(body, `"unavailable":true`); got != r.Unavailable {
+			t.Errorf("/api/state unavailable = %v, want %v: %s", got, r.Unavailable, body)
+		}
+	}
+}
+
+// A reader that reports nothing leaves the state as it was, and the poll
+// defaults to a minute.
+func TestReworkNilReadKeepsTheLastStateAndDefaultsToAMinute(t *testing.T) {
+	t.Parallel()
+
+	var next *Rework
+	h := NewHub(Config{Rework: func() *Rework { return next }})
+	h.pollRework()
+	if h.State().Rework != nil {
+		t.Fatal("a nil read set the table")
+	}
+	next = &Rework{Windows: []ReworkWindow{{Name: "last 7 days"}}}
+	h.pollRework()
+	next = nil
+	h.pollRework()
+	if got := h.State().Rework; got == nil || len(got.Windows) != 1 {
+		t.Errorf("a nil read replaced the last state with %+v", got)
+	}
+
+	var c Config
+	c.defaults()
+	if c.ReworkEvery != 60*time.Second {
+		t.Errorf("ReworkEvery defaults to %v, want 1m", c.ReworkEvery)
+	}
+}

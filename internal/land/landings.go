@@ -39,7 +39,7 @@ type LandingsFile struct {
 
 // RigLandingsFile is <town>/.runtime/landings/<rig>.jsonl.
 func RigLandingsFile(townRoot, rig string) (*LandingsFile, error) {
-	if rig == "" || strings.ContainsAny(rig, `/\`) || rig == "." || rig == ".." {
+	if rig == "" || strings.ContainsAny(rig, `/\`) || rig == "." || rig == ".." || rig+".jsonl" == ReviewsFileName {
 		return nil, fmt.Errorf("invalid rig name %q for a landings file", rig)
 	}
 	return &LandingsFile{Path: filepath.Join(constants.TownRuntimePath(townRoot), "landings", rig+".jsonl")}, nil
@@ -53,18 +53,25 @@ func RigLandingsFile(townRoot, rig string) (*LandingsFile, error) {
 // does not end in a newline) is repaired first, and a short write of rec is
 // rolled back, so no append can glue its record onto a partial one.
 func (f *LandingsFile) Append(rec LandingRecord) error {
-	dir := filepath.Dir(f.Path)
-	if err := ensureLandingsDir(dir); err != nil {
-		return err
-	}
 	line, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("encoding landing record: %w", err)
 	}
-	line = append(line, '\n')
+	return appendJSONLine(f.Path, append(line, '\n'), f.write)
+}
+
+// appendJSONLine appends one newline-terminated record to the log at path with
+// the guarantees Append documents; write, when set, replaces the one write (a
+// test seam). The landings file and the reviews file share it so neither can
+// glue a record onto a torn one.
+func appendJSONLine(path string, line []byte, write func(*os.File, []byte) (int, error)) error {
+	dir := filepath.Dir(path)
+	if err := ensureLandingsDir(dir); err != nil {
+		return err
+	}
 	// O_RDWR, not O_WRONLY: repairing a torn tail reads the file's last byte,
 	// and a rollback truncates it.
-	fh, err := os.OpenFile(f.Path, os.O_RDWR|os.O_APPEND|os.O_CREATE|oNoFollow, 0o600)
+	fh, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND|os.O_CREATE|oNoFollow, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening landings file: %w", err)
 	}
@@ -88,7 +95,7 @@ func (f *LandingsFile) Append(rec LandingRecord) error {
 	if err != nil {
 		return fmt.Errorf("measuring landings file: %w", err)
 	}
-	if err := f.appendRecord(fh, line, start, size); err != nil {
+	if err := appendRecord(fh, write, line, start, size); err != nil {
 		return err
 	}
 	if err := fh.Sync(); err != nil {
@@ -102,8 +109,11 @@ func (f *LandingsFile) Append(rec LandingRecord) error {
 // or fails, so the partial record does not survive for the next append to
 // glue onto. A writer that appended past b's short end since keeps its bytes:
 // the readers skip a torn line, but nothing brings back a deleted record.
-func (f *LandingsFile) appendRecord(fh *os.File, b []byte, start, good int64) error {
-	n, err := f.writeTo(fh, b)
+func appendRecord(fh *os.File, write func(*os.File, []byte) (int, error), b []byte, start, good int64) error {
+	if write == nil {
+		write = func(fh *os.File, b []byte) (int, error) { return fh.Write(b) }
+	}
+	n, err := write(fh, b)
 	if err == nil && n == len(b) {
 		return nil
 	}
@@ -116,13 +126,6 @@ func (f *LandingsFile) appendRecord(fh *os.File, b []byte, start, good int64) er
 		err = io.ErrShortWrite
 	}
 	return fmt.Errorf("appending landing record: %w", err)
-}
-
-func (f *LandingsFile) writeTo(fh *os.File, b []byte) (int, error) {
-	if f.write != nil {
-		return f.write(fh, b)
-	}
-	return fh.Write(b)
 }
 
 // Find returns the latest record for beadID landing head, if the file has one.

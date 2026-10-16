@@ -113,9 +113,19 @@ func TestUsagePanelSetsNoMarkup(t *testing.T) {
 			t.Errorf("costUsage uses %s", bad)
 		}
 	}
-	// Every cell is built through el(), which writes textContent.
-	if !strings.Contains(draw, `tr.append(el("td", cls || "", text))`) {
-		t.Error("costUsage does not draw its cells through el()")
+	// Every cell is built through el(), which writes textContent, in the table
+	// helper the Usage and rework parts share.
+	if !strings.Contains(draw, `const table = costTable;`) {
+		t.Error("costUsage does not draw its tables through costTable")
+	}
+	cells := pageFunc(t, "costTable")
+	if !strings.Contains(cells, `tr.append(el("td", cls || "", text))`) {
+		t.Error("costTable does not draw its cells through el()")
+	}
+	for _, bad := range []string{"innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"} {
+		if strings.Contains(cells, bad) {
+			t.Errorf("costTable uses %s", bad)
+		}
 	}
 }
 
