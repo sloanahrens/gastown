@@ -21,15 +21,23 @@ import (
 // folds - nothing here reads a transcript.
 
 // claudePricesMaxAge is how long the price file may stand before a reader is
-// told it is out of date. Anthropic revises list prices a few times a year, so
-// a quarter is long enough that refresh is rare and short enough that the
-// figures stay near the truth.
+// told it is out of date, which the plan reader reports on the block it draws:
+// the age reaches the operator, who is the one who can re-read the list prices.
+// Anthropic revises list prices a few times a year, so a quarter is long enough
+// that refresh is rare and short enough that the figures stay near the truth.
 const claudePricesMaxAge = 120 * 24 * time.Hour
 
 // claudeAPIWeek is the span the week's figure covers: the seven days the plan's
 // weekly limit closes on, which is the "this week" the plan line's own
 // percentage is measured over.
 const claudeAPIWeek = 7 * 24 * time.Hour
+
+// claudeModelName is the word every Claude model id carries, wherever the scan
+// read it. The table's families are keyed by the ids the reader expects, so a
+// Claude model whose key carries something else of its own - a vendor prefix,
+// say - matches no family and is counted at zero: this is what keeps that model
+// in the named list rather than out of the figure entirely.
+const claudeModelName = "claude"
 
 //go:embed claude_prices.json
 var claudePricesJSON []byte
@@ -80,9 +88,24 @@ var EmbeddedClaudePrices = sync.OnceValues(func() (*ClaudePriceTable, error) {
 	return &t, nil
 })
 
-// Claude is whether a model id belongs to the Claude API at all.
+// Claude is whether a model id belongs to the Claude API at all: the ids the
+// table lists its families under. A Claude model outside that prefix is Claude's
+// too, and the caller names it in Unpriced rather than dropping it.
 func (t *ClaudePriceTable) Claude(model string) bool {
 	return t.Prefix != "" && strings.HasPrefix(model, t.Prefix)
+}
+
+// Aged is how long the rates have stood at now, and whether that is past
+// claudePricesMaxAge. A table dated with something that is not a date is aged
+// as well: nobody can read how old its rates are, which is the same news as
+// rates nobody has refreshed.
+func (t *ClaudePriceTable) Aged(now time.Time) (time.Duration, bool) {
+	asOf, err := time.Parse(time.DateOnly, t.AsOf)
+	if err != nil {
+		return 0, true
+	}
+	age := now.Sub(asOf)
+	return age, age > claudePricesMaxAge
 }
 
 // Family is the rates for a model id's family, by the longest key the id starts
@@ -110,9 +133,11 @@ func (t *ClaudePriceTable) Family(model string) (ClaudePriceFamily, bool) {
 type ClaudeAPIEquivalent struct {
 	WeekUSD  float64
 	MonthUSD float64
-	// Unpriced names the Claude models in those windows the price table has no
-	// rates for. Their tokens are counted at zero rather than guessed at, so a
-	// reading with a non-empty Unpriced is a floor and says so.
+	// Unpriced names the Claude models in those windows the price table cannot
+	// price, whether it lists no family for them or their id carries something
+	// the table's own prefix does not match. Their tokens are counted at zero
+	// rather than guessed at, so a reading with a non-empty Unpriced is a floor
+	// and says so.
 	Unpriced []string
 }
 
@@ -122,9 +147,10 @@ type ClaudeAPIEquivalent struct {
 // The week is the seven days closing at weeklyResetsAt, the instant the status
 // line reports for the plan's own weekly limit: it is the same "this week" the
 // line's percentage is measured over, so the two figures on the hover are two
-// readings of one span. A reset instant the plan does not have, or one that
-// leaves no day in the past, falls back to the seven days to now. The month is
-// the billing month, whose first day is where an invoice's count starts.
+// readings of one span. A reset instant the plan does not have, one the clock
+// has already passed, or one more than a week ahead, falls back to the seven
+// days to now. The month is the billing month, whose first day is where an
+// invoice's count starts.
 //
 // Only complete records count, as in AggregateUsage: a run still in flight would
 // understate both windows.
@@ -133,8 +159,13 @@ func APIEquivalent(recs []UsageRecord, prices *ClaudePriceTable, now time.Time, 
 	if prices == nil {
 		return eq
 	}
+	// The reset instant dates the week only while the window it opens has opened
+	// and lies inside the past week: an instant further ahead leaves no day in
+	// the past to measure, and one the clock has passed opens the window more
+	// than seven days back, so the figure would cover more than the week it
+	// claims to read. Zero is the absent instant and falls back the same way.
 	weekFrom := now.Add(-claudeAPIWeek)
-	if weeks := time.Unix(weeklyResetsAt, 0).Add(-claudeAPIWeek); weeklyResetsAt > 0 && weeks.Before(now) {
+	if weeks := time.Unix(weeklyResetsAt, 0).Add(-claudeAPIWeek); weeks.After(weekFrom) && !weeks.After(now) {
 		weekFrom = weeks
 	}
 	// A month's first day, in the clock the caller reads now off: the boundary
@@ -152,6 +183,13 @@ func APIEquivalent(recs []UsageRecord, prices *ClaudePriceTable, now time.Time, 
 		}
 		for model, m := range r.Models {
 			if !prices.Claude(model) {
+				// A model id that reaches the scan carrying something of its own
+				// ("anthropic/claude-opus-5-5") is outside the table's prefix and
+				// so has no rates this figure can use. Naming it is what keeps it
+				// from vanishing: counted at zero, it is part of the floor.
+				if strings.Contains(strings.ToLower(model), claudeModelName) {
+					unpriced[model] = true
+				}
 				continue
 			}
 			f, ok := prices.Family(model)
