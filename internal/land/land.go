@@ -889,9 +889,11 @@ func (l *Lander) rescoreBorderline(ctx context.Context, v Verdict, in ReviewInpu
 
 // logReview appends the verdict to the reviews log when it is an om decision,
 // approve or request_changes. The attempt is the one a rejection would be
-// recorded as, so a bead's lines count up with its MERGE REJECTION blocks. A
-// failed append is logged and nothing else: a statistic never holds a landing.
-func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict) {
+// recorded as, so a bead's lines count up with its MERGE REJECTION blocks.
+// rejected is whether the landing refuses the work on this verdict, which an
+// approval can earn from its findings alone (gt-vu18r). A failed append is
+// logged and nothing else: a statistic never holds a landing.
+func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict, rejected bool) {
 	if l.Reviews == nil || (v.Verdict != VerdictApprove && v.Verdict != VerdictRequestChanges) {
 		return
 	}
@@ -901,7 +903,7 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict) {
 		l.logf("%s: could not read the review bar for the reviews log (%v); it is logged as 0", w.BeadID, err)
 	}
 	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: CountRejections(issue.Notes) + 1,
-		Score: v.Score, Verdict: v.Verdict, Findings: len(v.Findings), Bar: bar, At: l.now().UTC()}
+		Score: v.Score, Verdict: v.Verdict, Rejected: rejected, Findings: len(v.Findings), Bar: bar, At: l.now().UTC()}
 	if err := l.Reviews.Append(rec); err != nil {
 		l.logf("%s: could not append to the reviews log (%v); the landing is unaffected", w.BeadID, err)
 	}
@@ -1177,8 +1179,11 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	}
 	// The review is over and this is its verdict, whatever the branches below
 	// do with the landing: the work bead gets the one line that ties it to the
-	// review, written before either the rejection or the merge (gt-uebmq).
-	l.logReview(issue, w, dir, verdict)
+	// review, written before either the rejection or the merge (gt-uebmq). The
+	// findings decide the approval's fate before the line is written, so an
+	// approval they bounce is logged as the rejection it is (gt-vu18r).
+	findingsRej := findingsRejection(verdict)
+	l.logReview(issue, w, dir, verdict, findingsRej != nil)
 	l.commentVerdict(w, verdict, reviewStart, time.Now())
 	if verdict.Verdict == VerdictRequestChanges {
 		rej := &Rejection{Kind: RejectReview, Rework: true, Reason: fmt.Sprintf("om requested changes (score %.2f, %d finding(s))", verdict.Score, len(verdict.Findings))}
@@ -1187,7 +1192,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	// An approving verdict is a score and a set of findings, and the findings
 	// refuse the landing too: a major inside the approving band would otherwise
 	// land on its score alone (gt-oi4je).
-	if rej := findingsRejection(verdict); rej != nil {
+	if rej := findingsRej; rej != nil {
 		return Result{}, l.reject(issue, w, rej, &verdict)
 	}
 	if err := ctx.Err(); err != nil {

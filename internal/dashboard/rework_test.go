@@ -189,3 +189,27 @@ func TestReworkNilReadKeepsTheLastStateAndDefaultsToAMinute(t *testing.T) {
 		t.Errorf("ReworkEvery defaults to %v, want 1m", c.ReworkEvery)
 	}
 }
+
+// A bead whose approvals the landing bounced for findings is a rejected bead,
+// not a first-try landing: the verdicts read approve and the table counts them
+// as the three rejections they were (gt-vu18r).
+func TestReworkSpanCountsFindingsBounce(t *testing.T) {
+	t.Parallel()
+	bounced := func(attempt int, hoursAgo float64) ReworkReview {
+		r := rv("gt-bounced", attempt, "approve", 0.93, 0.8, hoursAgo)
+		r.Rejected = true
+		return r
+	}
+	got := AggregateRework([]ReworkReview{bounced(1, 6), bounced(2, 5), bounced(3, 4)}, reworkNow)
+	b := got.Windows[0].Bars[0]
+	if b.Rejected != 3 || b.FirstTry != 0 || b.Landed != 0 || b.LoopsOut != 1 || b.Beads != 1 || b.Reviews != 3 {
+		t.Errorf("bar = %+v, want 3 rejected, no first try, none landed, the bead looped out", b)
+	}
+
+	// A third review the findings let through is the landing after two bounces.
+	got = AggregateRework([]ReworkReview{bounced(1, 6), bounced(2, 5), rv("gt-bounced", 3, "approve", 0.93, 0.8, 4)}, reworkNow)
+	b = got.Windows[0].Bars[0]
+	if b.Rejected != 2 || b.FirstTry != 0 || b.Landed != 1 || b.LoopsOut != 0 || !near(b.ReviewsPerLanded, 3) {
+		t.Errorf("bar = %+v, want 2 rejected then a landing on the third review", b)
+	}
+}

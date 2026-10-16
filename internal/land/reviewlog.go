@@ -30,6 +30,11 @@ type ReviewRecord struct {
 	Attempt int     `json:"attempt"`
 	Score   float64 `json:"score"`
 	Verdict string  `json:"verdict"`
+	// Rejected says the landing refused the work on this verdict, whatever the
+	// verdict says: an approval whose findings findingsRejection turned away
+	// reads approve above and is still a rejection (gt-vu18r). Lines written
+	// before the field carry none, and read as the verdict alone.
+	Rejected bool `json:"rejected,omitempty"`
 	// Findings is how many findings the verdict carried, whatever their
 	// severity.
 	Findings int `json:"findings"`

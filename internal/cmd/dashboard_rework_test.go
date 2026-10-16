@@ -71,3 +71,18 @@ func TestReworkReaderNamesAnUnreadableLog(t *testing.T) {
 		t.Errorf("a log that is a directory read = %+v, want unavailable", got)
 	}
 }
+
+// A bounced approval the worker logs with Rejected reaches the table as a
+// rejection, not a first-try landing (gt-vu18r).
+func TestReworkReaderCountsAFindingsBounce(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	if err := land.TownReviewsFile(root).Append(land.ReviewRecord{BeadID: "gt-a", Rig: "gastown", Attempt: 1, Score: 0.93,
+		Verdict: "approve", Rejected: true, Findings: 1, Bar: 0.8, At: reworkReaderNow.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	bars := newDashReworkReader(root).read(reworkReaderNow).Windows[0].Bars
+	if len(bars) != 1 || bars[0].Rejected != 1 || bars[0].FirstTry != 0 || bars[0].Landed != 0 {
+		t.Errorf("last 7 days = %+v, want one rejection and no first try", bars)
+	}
+}
