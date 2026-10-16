@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -892,6 +893,44 @@ func TestGoTestPackageArgsSkipsFlagValues(t *testing.T) {
 			got := goTestPackageArgs(tt.rest)
 			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
 				t.Errorf("goTestPackageArgs(%q) = %q, want %q", tt.rest, got, tt.want)
+			}
+		})
+	}
+}
+
+// A -c payload whose segment directory the walk cannot place is judged as
+// unplaced, not read against the hook's directory: from a rig outside every Go
+// module the base says nothing about where the shell went, and a payload that
+// runs the suite there is refused like the unplaceable make -C it is
+// (gt-rws47). One that runs no suite stays allowed, and a placed directory is
+// still what decides.
+func TestPolecatTestScopeJudgesUnplacedShellCPayload(t *testing.T) {
+	t.Parallel()
+	nonGo := filepath.Join(t.TempDir(), "gastown", "polecats", "dag")
+	if err := os.MkdirAll(nonGo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	goTree := fakeModule(t, "gastown/polecats/dag")
+	tests := []struct {
+		name    string
+		command string
+		cwd     string
+		blocked bool
+	}{
+		{"unplaced cd, payload makes the suite", `cd "$(git rev-parse --show-toplevel)" && bash -c 'make gate'`, nonGo, true},
+		{"unplaced cd, nested payload", `cd "$(git rev-parse --show-toplevel)" && bash -c "sh -c 'make gate'"`, nonGo, true},
+		{"unplaced cd, payload runs a heavy package", `cd "$(git rev-parse --show-toplevel)" && bash -c 'go test ./internal/cmd'`, goTree, true},
+		{"unplaced cd, payload runs nothing", `cd "$(git rev-parse --show-toplevel)" && bash -c 'echo hi'`, nonGo, false},
+		{"unplaced cd, filtered payload", `cd "$(git rev-parse --show-toplevel)" && bash -c 'go test ./internal/cmd -run TestOne'`, goTree, false},
+		{"placed non-Go cwd, payload makes the suite", "bash -c 'make gate'", nonGo, false},
+		{"placed Go cwd, payload makes the suite", "bash -c 'make gate'", goTree, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, tt.cwd), tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
 			}
 		})
 	}

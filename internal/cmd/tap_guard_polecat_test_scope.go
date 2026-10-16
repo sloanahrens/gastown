@@ -62,32 +62,38 @@ func isPolecatContext(proc guardProcess) bool {
 // when it read the body (heredocBodyDir, gt-1cvqj, gt-v02wh).
 func evaluatePolecatTestScope(proc guardProcess, command string) (reason string, matched []string) {
 	cwd, _ := proc.getwd()
-	return evaluatePolecatTestScopeDepth(proc, command, cwd, 0)
+	return evaluatePolecatTestScopeDepth(proc, command, cwd, true, 0)
 }
 
 // evaluatePolecatTestScopeDepth judges command as a shell starting in cwd —
 // the invocation's directory, or the directory a shell-fed heredoc's body
-// runs in, one level down.
-func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth int) (reason string, matched []string) {
+// runs in, one level down. cwdKnown is false for a -c payload whose segment
+// directory the walk could not place: cwd then only stands in for that
+// directory, and nothing in the payload is judged against it (gt-rws47).
+func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, cwdKnown bool, depth int) (reason string, matched []string) {
 	tokens := shellTokenize(strings.TrimSpace(stripHeredocBodies(command)))
 	vars := shellVarAssignments(tokens)
 	// judge covers one segment and the -c payloads of the shells it starts. A
-	// payload runs in the segment's directory, or in the base when the walk
-	// cannot place it, as a heredoc body does (gt-y1zks).
+	// payload runs in the segment's directory. When the walk cannot place it
+	// the payload is judged as unplaced, so one that runs the suite is
+	// refused, rather than read against the base, which is no evidence of
+	// where the shell is (gt-y1zks, gt-ofj05, gt-rws47).
 	judge := func(segment []string, start int) (string, []string) {
 		segment = commandSegment(segment)
 		dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
+		known = known && cwdKnown
 		if r, m := evaluatePolecatTestScopeSegment(segment, dir, known); r != "" {
 			return r, m
 		}
+		payloads := shellCPayloads(segment)
 		if depth >= maxTestGuardNestDepth {
-			return "", nil
+			return nestedTooDeepRefusal(len(payloads) > 0)
 		}
 		if !known {
 			dir = cwd
 		}
-		for _, payload := range shellCPayloads(segment) {
-			if r, m := evaluatePolecatTestScopeDepth(proc, payload, dir, depth+1); r != "" {
+		for _, payload := range payloads {
+			if r, m := evaluatePolecatTestScopeDepth(proc, payload, dir, known, depth+1); r != "" {
 				return r, m
 			}
 		}
@@ -111,12 +117,13 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth
 		return r, m
 	}
 
+	spans := shellFedHeredocSpans(command)
 	if depth >= maxTestGuardNestDepth {
-		return "", nil
+		return nestedTooDeepRefusal(len(spans) > 0)
 	}
-	for _, span := range shellFedHeredocSpans(command) {
+	for _, span := range spans {
 		bodyCwd := heredocBodyDir(proc, command, span, cwd)
-		if r, m := evaluatePolecatTestScopeDepth(proc, span.body, bodyCwd, depth+1); r != "" {
+		if r, m := evaluatePolecatTestScopeDepth(proc, span.body, bodyCwd, true, depth+1); r != "" {
 			return r, m
 		}
 	}
