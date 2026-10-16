@@ -179,7 +179,7 @@ func TestDecideOverrun_GateSpent(t *testing.T) {
 func TestOverrunStateWithGate(t *testing.T) {
 	t.Parallel()
 	slung := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
-	const maxCharge = 2 * time.Minute
+	const maxCharge, maxTotal = 2 * time.Minute, time.Hour
 
 	tests := []struct {
 		name      string
@@ -198,7 +198,7 @@ func TestOverrunStateWithGate(t *testing.T) {
 			var st overrunState
 			var spent time.Duration
 			for i, inGate := range tt.ticks {
-				st, spent = st.withGate(slung, slung.Add(time.Duration(i+1)*time.Minute), inGate, maxCharge)
+				st, spent = st.withGate(slung, slung.Add(time.Duration(i+1)*time.Minute), inGate, maxCharge, maxTotal)
 			}
 			if spent != tt.wantSpent || st.GateSpent != tt.wantSpent {
 				t.Errorf("gate time after ticks %v = %v (state %v), want %v", tt.ticks, spent, st.GateSpent, tt.wantSpent)
@@ -214,11 +214,11 @@ func TestOverrunStateWithGate(t *testing.T) {
 func TestOverrunStateWithGate_GapIsNotCharged(t *testing.T) {
 	t.Parallel()
 	slung := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
-	const maxCharge = 2 * time.Minute
+	const maxCharge, maxTotal = 2 * time.Minute, time.Hour
 
 	var st overrunState
-	st, _ = st.withGate(slung, slung.Add(time.Minute), true, maxCharge) // seen in the gate
-	st, spent := st.withGate(slung, slung.Add(21*time.Minute), true, maxCharge)
+	st, _ = st.withGate(slung, slung.Add(time.Minute), true, maxCharge, maxTotal) // seen in the gate
+	st, spent := st.withGate(slung, slung.Add(21*time.Minute), true, maxCharge, maxTotal)
 
 	if spent != maxCharge {
 		t.Errorf("gate time across a 20 minute gap = %v, want %v (the charge is capped, the rest counts as the seat's time)", spent, maxCharge)

@@ -95,9 +95,9 @@ func (s overrunState) nudgeHeld(slung, now time.Time) bool {
 
 // withGate folds one tick's gate reading into the record and returns it with
 // the gate time to measure this tick's elapsed against. It charges the interval
-// since the last tick that saw the seat inside its gate, and it drops the
-// accounting of an earlier sling — a rework starts a new clock, and the gate
-// time of the run before it is not this run's.
+// since the last tick that saw the seat inside its gate, never past maxTotal for
+// the sling, and it drops the accounting of an earlier sling — a rework starts
+// a new clock, and the gate time of the run before it is not this run's.
 //
 // A stretch is charged only across intervals whose both ends were seen inside
 // the gate, and no tick charges more than maxCharge (twice the guard's
@@ -106,7 +106,11 @@ func (s overrunState) nudgeHeld(slung, now time.Time) bool {
 // restart, a starved cycle — leaves a gap in which the seat may have left and
 // re-entered. What it cannot watch it does not charge, which keeps the clock
 // counting (the fail-safe direction, gt-vfwuc).
-func (s overrunState) withGate(slung, now time.Time, inGate bool, maxCharge time.Duration) (overrunState, time.Duration) {
+//
+// maxTotal is the ceiling on the whole sling (overrunMaxGateTotal): a gate that
+// does not return is a stuck seat, and past the ceiling the clock runs again
+// even inside the gate.
+func (s overrunState) withGate(slung, now time.Time, inGate bool, maxCharge, maxTotal time.Duration) (overrunState, time.Duration) {
 	if !s.GateSlingAt.Equal(slung) {
 		s.GateSlingAt, s.GateSpent, s.GateSeenAt = slung, 0, time.Time{}
 	}
@@ -114,14 +118,25 @@ func (s overrunState) withGate(slung, now time.Time, inGate bool, maxCharge time
 	case inGate && s.GateSeenAt.IsZero():
 		// The first tick that found the gate: nothing before it is charged.
 		s.GateSeenAt = now
-	case inGate:
+	case inGate && now.After(s.GateSeenAt):
 		s.GateSpent += min(now.Sub(s.GateSeenAt), maxCharge)
 		s.GateSeenAt = now
+	case inGate:
+		// A stamp at or after now is a clock that stepped back. Drop the
+		// stretch rather than charge a negative interval, which would give back
+		// gate time this sling was already credited with; the next tick starts
+		// it again, and what is not charged counts toward the stop (gt-vfwuc).
+		s.GateSeenAt = time.Time{}
 	default:
 		// The gate is over: what it ran past the last tick that saw it open is
 		// not charged, because the guard cannot tell that from work the seat
 		// did after it.
 		s.GateSeenAt = time.Time{}
+	}
+	if s.GateSpent > maxTotal {
+		// The ceiling binds whatever the record held, a state file written
+		// before it existed included.
+		s.GateSpent = maxTotal
 	}
 	return s, s.GateSpent
 }
@@ -150,11 +165,12 @@ type overrunState struct {
 	NudgeFailedAt time.Time `json:"nudge_failed_at,omitzero"`
 
 	// GateSlingAt is the sling the gate accounting below belongs to, GateSpent
-	// the gate time charged for it, and GateSeenAt — when set — the last tick
-	// that saw the seat inside its gate (see withGate). The guard measures the
-	// sling's elapsed time as (now - slung) - GateSpent, so the time a seat
-	// waits inside its own gate does not count toward the 12 and 20 minute rule
-	// (gt-vfwuc).
+	// the gate time charged for it (at most overrunMaxGateTotal for the sling),
+	// and GateSeenAt — when set — the last tick that saw the seat inside its
+	// gate (see withGate). The guard measures the sling's elapsed time as
+	// (now - slung) - GateSpent, so the time a seat waits inside its own gate
+	// does not count toward the 12 and 20 minute rule, and a gate that never
+	// returns does (gt-vfwuc).
 	GateSlingAt time.Time     `json:"gate_sling_at,omitzero"`
 	GateSpent   time.Duration `json:"gate_spent,omitempty"`
 	GateSeenAt  time.Time     `json:"gate_seen_at,omitzero"`

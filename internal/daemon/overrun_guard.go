@@ -46,13 +46,22 @@ const overrunNudgeTimeout = 30 * time.Second
 // the rest of that gap counts as the seat's own time (gt-vfwuc).
 func overrunMaxGateCharge(interval time.Duration) time.Duration { return 2 * interval }
 
+// overrunMaxGateTotal is the ceiling on the gate time one sling may bank: twice
+// the stop threshold. A gate that never returns is a stuck seat, and the
+// exemption must not hold its clock for good. At the default stop the ceiling
+// bounds any sling, gated or not, at an hour of wall time — the same hour the
+// scheduled-sling limit gives a deep review — and leaves a real gate the margin
+// over the slowest one seen (the devops suite, 10 to 25 minutes on a loaded
+// host) that keeps a long gate from counting as the seat's own time (gt-vfwuc).
+func overrunMaxGateTotal(stopAfter time.Duration) time.Duration { return 2 * stopAfter }
+
 // overrunNudgeMessage is what the seat reads at the nudge threshold. It says
 // which time the clock measures, because a seat waiting on its own gate is the
 // one case where a long-running bead is not an overrun (gt-vfwuc).
 const overrunNudgeMessage = "This bead has run longer than expected. Write a split proposal in the bead notes now " +
 	"(gt bead note): ordered steps, each small enough for one pass. Then keep going on the first step. " +
 	"Time spent waiting inside your own gate — a container-gate slot you hold, or a gate suite running in your " +
-	"pane — does not count toward this clock. " +
+	"pane — does not count toward this clock, up to a fixed ceiling: a gate that never returns is still a stop. " +
 	"If the bead is still running at the stop threshold, the session is stopped and the bead goes back to the pool."
 
 // overrunSeat is one polecat seat the guard judges.
@@ -261,6 +270,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		gateRunning = func(overrunSeat) (bool, error) { return false, nil }
 	}
 	maxGateCharge := overrunMaxGateCharge(overrunGuardInterval(d.patrolConfig))
+	maxGateTotal := overrunMaxGateTotal(stopAfter)
 
 	seats, err := s.workingSeats()
 	if err != nil {
@@ -307,7 +317,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			d.logger.Printf("overrun_guard: %s: cannot read the gate state for %s, counting all of its time: %v", who, seat.Bead, err)
 			inGate = false
 		}
-		state, gateSpent := state.withGate(slung, now, inGate, maxGateCharge)
+		state, gateSpent := state.withGate(slung, now, inGate, maxGateCharge, maxGateTotal)
 		if !dry && !state.sameGate(before) {
 			// The gate accounting outlives the tick: it is saved when it moves,
 			// so the next tick — and a stop that begins later — measures the

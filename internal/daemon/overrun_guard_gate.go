@@ -22,24 +22,22 @@ import (
 const overrunGateReadTimeout = 30 * time.Second
 
 // The gate exemption: the time a seat spends inside its own gate does not count
-// toward the 12 and 20 minute rule (gt-vfwuc). A gate can take 10 to 25 minutes
-// on a loaded host, and a seat waiting on one is working, not overrunning. The
-// guard asks two questions about the seat — the answer to either one is the
-// exemption — and the elapsed calculation that subtracts the time is in
-// overrun_guard_decide.go:
+// toward the 12 and 20 minute rule (gt-vfwuc). A gate runs 10 to 25 minutes on a
+// loaded host, so a seat waiting on one is working, not overrunning. Either
+// answer below is the exemption, and the elapsed calculation that subtracts the
+// time is in overrun_guard_decide.go:
 //
-//   - does it hold a slot of the town's container-gate pool under its own role?
-//     A rig whose suite starts containers runs it through `gt slot run`, and
-//     the wait before the slot is granted is gate time too.
-//   - does its own tmux pane have a live gate suite under it? The rig's
-//     configured test, lint and build commands, and the commands a polecat runs
-//     as its own gate: go test, go vet, make test, make gate.
+//   - a slot of the town's container-gate pool held under the seat's own role. A
+//     container-backed suite runs through `gt slot run`, and the wait before the
+//     slot is granted is gate time too.
+//   - a live gate suite under the seat's own tmux pane: the rig's configured
+//     test, lint and build commands, plus the gates a polecat runs whatever the
+//     config names them (go test, go vet, make test, make gate). This is the
+//     only signal for a suite that holds no slot.
 //
-// internal/cmd/tap_polecat_stop.go asks both questions for the Stop hook
-// (polecatStopVerificationRunning, polecatStopPaneChildRunning). Its matcher
-// reads an argv through the dangerous-command guard's shlex tokenizer, which
-// internal/cmd owns and this package cannot import, so the tokenizer below is
-// the reduced one (overrunGateTokens); gt-a1xhd tracks uniting them.
+// The matcher reads an argv through the reduced tokenizer below, not the shlex
+// pass internal/cmd's Stop-hook guard uses — that tokenizer is internal/cmd's to
+// export, and gt-a1xhd tracks uniting the two.
 
 // overrunGateProc is one row of the process table the pane scan reads: the pid,
 // its parent, and the full argv the gate patterns are matched against.

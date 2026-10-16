@@ -308,14 +308,14 @@ func TestOverrunGateSpentIsPerSling(t *testing.T) {
 	first := overrunSlung
 	second := overrunSlung.Add(time.Hour)
 
-	const cap = 2 * time.Minute
-	st, _ := (overrunState{Bead: "gt-gate1"}).withGate(first, first.Add(time.Minute), true, cap)
-	st, spent := st.withGate(first, first.Add(2*time.Minute), true, cap)
+	const cap, total = 2 * time.Minute, time.Hour
+	st, _ := (overrunState{Bead: "gt-gate1"}).withGate(first, first.Add(time.Minute), true, cap, total)
+	st, spent := st.withGate(first, first.Add(2*time.Minute), true, cap, total)
 	if spent != time.Minute {
 		t.Fatalf("gate time inside one gate = %v, want 1m (the interval between the two ticks)", spent)
 	}
 
-	st, spent = st.withGate(second, second.Add(10*time.Second), false, cap)
+	st, spent = st.withGate(second, second.Add(10*time.Second), false, cap, total)
 	if spent != 0 {
 		t.Errorf("gate time of a new sling = %v, want 0: the earlier run's gate time is not this run's", spent)
 	}
@@ -453,5 +453,152 @@ func TestOverrunNudgeMessageNamesGateTime(t *testing.T) {
 		if !strings.Contains(overrunNudgeMessage, want) {
 			t.Errorf("overrunNudgeMessage does not mention %q: %s", want, overrunNudgeMessage)
 		}
+	}
+}
+
+// The ceiling: however long a gate runs, one sling banks at most maxTotal of
+// it (gt-vfwuc).
+func TestOverrunStateWithGate_TotalIsCapped(t *testing.T) {
+	t.Parallel()
+	slung := overrunSlung
+	const maxCharge, maxTotal = 2 * time.Minute, 10 * time.Minute
+
+	var st overrunState
+	var spent time.Duration
+	for i := 1; i <= 90; i++ {
+		st, spent = st.withGate(slung, slung.Add(time.Duration(i)*time.Minute), true, maxCharge, maxTotal)
+	}
+	if spent != maxTotal || st.GateSpent != maxTotal {
+		t.Errorf("gate time after 90 minutes inside one gate = %v (state %v), want the ceiling %v",
+			spent, st.GateSpent, maxTotal)
+	}
+}
+
+// The ceiling binds a record that already holds more than it, such as a state
+// file written for a sling under a longer threshold, whether or not the seat is
+// still inside the gate (gt-vfwuc).
+func TestOverrunStateWithGate_TotalCapsALoadedRecord(t *testing.T) {
+	t.Parallel()
+	slung := overrunSlung
+	const maxCharge, maxTotal = 2 * time.Minute, 40 * time.Minute
+
+	tests := []struct {
+		name   string
+		inGate bool
+	}{
+		{"still inside the gate", true},
+		{"out of the gate", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := overrunState{Bead: "gt-gate1", GateSlingAt: slung, GateSpent: 50 * time.Minute, GateSeenAt: slung}
+			st, spent := st.withGate(slung, slung.Add(time.Minute), tt.inGate, maxCharge, maxTotal)
+			if spent != maxTotal || st.GateSpent != maxTotal {
+				t.Errorf("banked gate time from a record holding 50m = %v (state %v), want %v", spent, st.GateSpent, maxTotal)
+			}
+		})
+	}
+}
+
+// A clock that steps back does not give banked gate time back: the stretch since
+// the stamp is dropped, and what is not charged counts toward the stop
+// (gt-vfwuc).
+func TestOverrunStateWithGate_BackwardStepKeepsBankedTime(t *testing.T) {
+	t.Parallel()
+	slung := overrunSlung
+	const maxCharge, maxTotal = 2 * time.Minute, time.Hour
+
+	var st overrunState
+	st, _ = st.withGate(slung, slung.Add(time.Minute), true, maxCharge, maxTotal)
+	st, spent := st.withGate(slung, slung.Add(2*time.Minute), true, maxCharge, maxTotal)
+	if spent != time.Minute {
+		t.Fatalf("banked after two ticks = %v, want 1m", spent)
+	}
+
+	st, spent = st.withGate(slung, slung.Add(30*time.Second), true, maxCharge, maxTotal)
+	if spent != time.Minute {
+		t.Errorf("banked after a stamp 90s in the future = %v, want 1m: a backward step does not give gate time back", spent)
+	}
+	if !st.GateSeenAt.IsZero() {
+		t.Errorf("GateSeenAt = %v after a backward step, want no stamp so the next tick starts a fresh stretch", st.GateSeenAt)
+	}
+}
+
+// A gate that never returns is a stuck seat: past the ceiling the clock runs
+// again even inside the gate, so the seat is nudged and then stopped a stop
+// threshold after the ceiling — an hour of wall time at the defaults (gt-vfwuc).
+func TestRunOverrunGuard_HungGateIsStopped(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, false)
+	f := newOverrunFake(0, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-gate1"})
+	f.gateRunning = func(overrunSeat) (bool, error) { return true, nil }
+
+	nudgeAfter, stopAfter := overrunGuardThresholds(d.patrolConfig)
+	ceiling := overrunMaxGateTotal(stopAfter)
+
+	var nudgedAt, stoppedAt time.Time
+	for i := 1; i <= 120 && stoppedAt.IsZero(); i++ {
+		f.now = overrunSlung.Add(time.Duration(i) * time.Minute)
+		d.runOverrunGuard(f.seams())
+		if nudgedAt.IsZero() && len(f.nudges) > 0 {
+			nudgedAt = f.now
+		}
+		if len(f.stops) > 0 {
+			stoppedAt = f.now
+		}
+	}
+
+	if stoppedAt.IsZero() {
+		t.Fatalf("a seat inside a gate that never returns was never stopped:\n%s", buf.String())
+	}
+	if want := overrunSlung.Add(ceiling + stopAfter); !stoppedAt.Equal(want) {
+		t.Errorf("stopped after %v of wall time, want %v (%v inside the gate, then %v of the seat's own time)",
+			stoppedAt.Sub(overrunSlung), ceiling+stopAfter, ceiling, stopAfter)
+	}
+	if want := overrunSlung.Add(ceiling + nudgeAfter); !nudgedAt.Equal(want) {
+		t.Errorf("nudged after %v of wall time, want %v: the ceiling, then the nudge threshold",
+			nudgedAt.Sub(overrunSlung), ceiling+nudgeAfter)
+	}
+}
+
+// The gate accounting outlives the tick that saw it: it is saved when it moves,
+// so a later tick — and the stop — measures the same clock (gt-vfwuc).
+func TestRunOverrunGuard_GateAccountingIsSaved(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	seat := overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-gate1"}
+	f := newOverrunFake(0, seat)
+	f.gateRunning = func(overrunSeat) (bool, error) { return true, nil }
+
+	tickOverrunGuard(d, f, 3, time.Minute)
+
+	st, err := readOverrunState(d.config.TownRoot, seat.Bead)
+	if err != nil {
+		t.Fatalf("readOverrunState: %v", err)
+	}
+	if want := 2 * time.Minute; st.GateSpent != want {
+		t.Errorf("banked gate time on disk = %v, want %v (the first tick only opens the stretch)", st.GateSpent, want)
+	}
+	if want := overrunSlung.Add(3 * time.Minute); !st.GateSeenAt.Equal(want) {
+		t.Errorf("GateSeenAt = %v, want the last tick that saw the gate, %v", st.GateSeenAt, want)
+	}
+	if !st.GateSlingAt.Equal(overrunSlung) {
+		t.Errorf("GateSlingAt = %v, want the sling, %v", st.GateSlingAt, overrunSlung)
+	}
+}
+
+// An unset gate seam is no exemption: with no gate reader the guard counts every
+// seat's time, so a daemon that cannot answer the question still stops an
+// overrun (gt-vfwuc).
+func TestRunOverrunGuard_UnsetGateSeamCountsAllTime(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	// gateRunning is left nil: the guard substitutes "not in a gate".
+	f := newOverrunFake(20*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-gate1"})
+
+	d.runOverrunGuard(f.seams())
+
+	if len(f.stops) != 1 {
+		t.Errorf("stops = %v, want the seat stopped at 20 minutes with no gate seam", f.stops)
 	}
 }
