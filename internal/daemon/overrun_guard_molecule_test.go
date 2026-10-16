@@ -22,10 +22,43 @@ const (
 var molSteps = []string{"gt-wisp-s1", "gt-wisp-s2", "gt-wisp-s3"}
 
 // molStore is beadsfake behind overrunHandBackStore, with Children failing on
-// demand to stand for a molecule that cannot be read.
+// demand to stand for a molecule that cannot be read, Show failing its next
+// showFails reads of the work bead to stand for a bead that cannot be read,
+// and a close that refuses closeRefused to stand for bd skipping an issue.
 type molStore struct {
 	*beadsfake.Fake
-	childrenErr error
+	childrenErr  error
+	showFails    int
+	closeRefused map[string]bool
+}
+
+func (s *molStore) Show(id string) (*beads.Issue, error) {
+	if id == molWorkBead && s.showFails > 0 {
+		s.showFails--
+		return nil, errors.New("dolt timeout")
+	}
+	return s.Fake.Show(id)
+}
+
+// ForceCloseWithReason closes the ids it is not told to refuse and reports the
+// rest as a *beads.PartialCloseError, as Close does when bd exits 0 and skips
+// an issue.
+func (s *molStore) ForceCloseWithReason(reason string, ids ...string) error {
+	if len(s.closeRefused) == 0 {
+		return s.Fake.ForceCloseWithReason(reason, ids...)
+	}
+	var closed, refused []string
+	for _, id := range ids {
+		if s.closeRefused[id] {
+			refused = append(refused, id)
+		} else {
+			closed = append(closed, id)
+		}
+	}
+	if err := s.Fake.ForceCloseWithReason(reason, closed...); err != nil {
+		return err
+	}
+	return &beads.PartialCloseError{Closed: closed, NotClosed: refused}
 }
 
 func (s *molStore) Children(parentID string) ([]*beads.Issue, error) {
@@ -185,6 +218,93 @@ func TestHandBackEndingMolecule_UnreadableMoleculeIsLoggedAndTheBeadStillHandedB
 	}
 	if !strings.Contains(log, "left open") || !strings.Contains(log, "dolt unavailable") {
 		t.Errorf("log does not name the unreadable molecule:\n%s", log)
+	}
+}
+
+// A work bead that cannot be read names no molecule: the hand-back goes ahead
+// and ends nothing, and says why.
+func TestHandBackEndingMolecule_UnreadableWorkBeadIsLoggedAndStillHandedBack(t *testing.T) {
+	t.Parallel()
+	s := newMolStore(t)
+	s.showFails = 1
+
+	log, err := s.handBack(t)
+	if err != nil {
+		t.Fatalf("hand-back failed because the work bead was unreadable once: %v", err)
+	}
+
+	work, err := s.Show(molWorkBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work.Status != "open" || work.Assignee != "" || !beads.HasLabel(work, polecat.NeedsSplitLabel) {
+		t.Errorf("bead = status %q assignee %q labels %v, want open, unassigned, needs-split", work.Status, work.Assignee, work.Labels)
+	}
+	for _, id := range append([]string{molRoot}, molSteps...) {
+		if got := s.status(t, id); got == "closed" {
+			t.Errorf("%s closed although the work bead named no molecule", id)
+		}
+	}
+	if !strings.Contains(log, "cannot read "+molWorkBead) || !strings.Contains(log, "dolt timeout") {
+		t.Errorf("log does not name the unreadable work bead:\n%s", log)
+	}
+}
+
+// bd skips an issue it refuses and exits 0: the steps it closed stay closed,
+// the root stays open and the log names what was left. The hand-back stands.
+func TestHandBackEndingMolecule_PartialCloseIsLoggedAndTheBeadStillHandedBack(t *testing.T) {
+	t.Parallel()
+	s := newMolStore(t)
+	s.closeRefused = map[string]bool{molRoot: true, molSteps[1]: true}
+
+	log, err := s.handBack(t)
+	if err != nil {
+		t.Fatalf("hand-back failed because the molecule closed only in part: %v", err)
+	}
+
+	work, err := s.Show(molWorkBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if work.Status != "open" || !beads.HasLabel(work, polecat.NeedsSplitLabel) {
+		t.Errorf("bead = status %q labels %v, want open with needs-split", work.Status, work.Labels)
+	}
+	for id, want := range map[string]string{molSteps[0]: "closed", molSteps[1]: "open", molSteps[2]: "closed", molRoot: "open"} {
+		if got := s.status(t, id); got != want {
+			t.Errorf("%s status = %q, want %q", id, got, want)
+		}
+	}
+	if !strings.Contains(log, "left open") || !strings.Contains(log, "closed 2 of 4") || strings.Contains(log, "ended molecule") {
+		t.Errorf("log does not name the half-ended molecule:\n%s", log)
+	}
+}
+
+// What a refused close left is finished by a repeated hand-back, the repeat the
+// stop makes when it cannot save its progress; the stop does not repeat one on
+// account of the molecule alone.
+func TestHandBackEndingMolecule_RepeatFinishesAMoleculeLeftOpen(t *testing.T) {
+	t.Parallel()
+	s := newMolStore(t)
+	s.closeRefused = map[string]bool{molRoot: true}
+	if _, err := s.handBack(t); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.status(t, molRoot); got != "open" {
+		t.Fatalf("molecule root status = %q after the refused close, want open", got)
+	}
+
+	s.closeRefused = nil
+	log, err := s.handBack(t)
+	if err != nil {
+		t.Fatalf("repeat hand-back: %v", err)
+	}
+	for _, id := range append([]string{molRoot}, molSteps...) {
+		if got := s.status(t, id); got != "closed" {
+			t.Errorf("%s status = %q after the repeat, want closed", id, got)
+		}
+	}
+	if !strings.Contains(log, "ended molecule "+molRoot+" of "+molWorkBead+" (1 bead(s) closed)") {
+		t.Errorf("log does not record the repeat ending the molecule:\n%s", log)
 	}
 }
 

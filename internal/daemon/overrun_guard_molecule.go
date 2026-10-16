@@ -36,7 +36,9 @@ type overrunHandBackStore interface {
 // attachment, and the new run's molecule is not this one to end. It fails
 // closed: a molecule that cannot be read or closed is logged and the hand-back
 // stands, since the bead going back to the pool matters more than the
-// molecule, and a repeated hand-back (the stop retries it) tries again. A
+// molecule, and releasing the seat must not wait on it. The stop does not
+// repeat a hand-back for the molecule alone; it repeats one only when it
+// could not save its progress, and that repeat tries the molecule again. A
 // hand-back that is skipped or fails ends nothing.
 func handBackEndingMolecule(ctx context.Context, store overrunHandBackStore, logf func(format string, args ...any),
 	seat overrunSeat, elapsed time.Duration, note string) error {
