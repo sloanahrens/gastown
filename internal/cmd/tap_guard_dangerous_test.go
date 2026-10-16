@@ -1318,6 +1318,10 @@ func TestEvaluateDangerousCommandUnquotedHeredocSubstitution(t *testing.T) {
 // whose "))" the outer expansion outlives (gt-schaa), and a shift in any
 // of the other arithmetic contexts — a command-position "((" or "for ((",
 // a "$[", an array subscript, and the offset of a "${name:..}" (gt-dherr).
+// The rest are the "${..}" spellings whose word is a pattern or plain text —
+// the "#" and "%" trims, the "/" replacement, the "^" case modification, and
+// the "+" and "=" operator words (gt-adt8r): nothing inside a parameter
+// expansion is a redirection, so a "<<" there is a literal too.
 // Reading any of them as a heredoc stripped the lines below it, so the live
 // command standing where the body would have been was never judged at all.
 // A "let" argument is the exception that stays a heredoc: bash reads its
@@ -1390,6 +1394,36 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 			wantBlock: true,
 		},
 		{
+			name:      "shift in a trim-right pattern",
+			command:   "echo ${v%<<x}\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in a trim-left pattern",
+			command:   "echo ${v#<<x}\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in a replace pattern",
+			command:   "echo ${v/<<x/y}\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an if-set word",
+			command:   "echo ${v+<<x}\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in a case-modification pattern",
+			command:   "echo ${v^<<x}\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in the pattern of a nested expansion",
+			command:   "echo ${a:-${v%<<x}}\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
 			name:      "a real heredoc body stays data",
 			command:   "cat <<EOF\nsudo rm -rf /\nEOF",
 			wantBlock: false,
@@ -1402,6 +1436,11 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 		{
 			name:      "a default-value expansion does not hide the heredoc after it",
 			command:   "echo ${v:-fallback}\ncat <<EOF\nsudo rm -rf /\nEOF",
+			wantBlock: false,
+		},
+		{
+			name:      "a nested expansion does not hide the heredoc after it",
+			command:   "echo ${a:-${b}}\ncat <<EOF\nsudo rm -rf /\nEOF",
 			wantBlock: false,
 		},
 		{
