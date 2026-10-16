@@ -389,6 +389,10 @@ type Daemon struct {
 	// it so a sling can hit its deadline without waiting five minutes.
 	scheduledSlingTimeout time.Duration
 
+	// jsonlLocalPhaseTimeout overrides gitLocalPhaseTimeout, the budget for one
+	// backup tick's local git staging; tests set it to a spent phase.
+	jsonlLocalPhaseTimeout time.Duration
+
 	// scheduledSlingFailures counts consecutive failures per entry name; the
 	// third escalates once, success resets. Touched only by the patrol goroutine.
 	scheduledSlingFailures map[string]int

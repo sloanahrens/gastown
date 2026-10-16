@@ -371,8 +371,8 @@ func (d *Daemon) syncJsonlGitBackup() {
 			// No automatic path out: the state is ambiguous by construction, so
 			// name the manual recovery rather than leave the patrol halted with
 			// no documented way back (gt-tj-he).
-			msg += fmt.Sprintf("\n\n%s has commits, but none record per-database counts ('backup <ts>: <db>=<N>'), so there is no previous level to compare against. To recover, land one count-bearing commit by hand (git -C %s add -A && git -C %s commit -m 'backup <ts>: <db>=<N>'), or start the history over by removing %s/.git — the next run then bootstraps normally.",
-				gitRepo, gitRepo, gitRepo, gitRepo)
+			msg += fmt.Sprintf("\n\n%s has commits, but none record per-database counts ('backup <ts> m%d: <db>=<N>'), so there is no previous level to compare against.\n\n%s\n\nOr start the history over by removing %s/.git — the next run then bootstraps normally.",
+				gitRepo, countMetricVersion, spikeAcceptHint(gitRepo), gitRepo)
 		}
 		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", msg)
 		cycle.failStep("push", baselineErr.Error())
@@ -381,7 +381,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	if len(spikes) > 0 {
 		report := formatSpikeReport(spikes)
 		d.logger.Printf("jsonl_git_backup: HALTING — spike detected:\n%s", report)
-		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", report)
+		d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", report+"\n\n"+spikeAcceptHint(gitRepo))
 		cycle.failStep("push", "spike detected")
 		return // Do NOT commit — spike detected.
 	}
@@ -992,13 +992,25 @@ func capEventRowValues(row json.RawMessage, limit int) (json.RawMessage, error) 
 func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, counts map[string]int, failed []string) error {
 	// The three local commands below share one deadline, so a single slow one
 	// can use the whole phase without three of them stacking past a tick.
-	localDeadline := time.Now().Add(gitLocalPhaseTimeout)
-	localBudget := func() time.Duration { return time.Until(localDeadline) }
+	localDeadline := time.Now().Add(d.jsonlLocalPhaseBudget())
+	// stageGit runs one command of the phase with the time left before the
+	// deadline as its deadline, or refuses the command when that is spent: the
+	// git runner sets a context timeout only above zero (internal/git/exec.go),
+	// so a spent budget would run the command with NO deadline and a `git
+	// commit` that hangs would hold jsonlGitBackupRunning — and with it every
+	// later backup trigger — for the rest of the daemon's uptime (gt-ttqq8).
+	stageGit := func(desc string, op func(g daemonGit) error) error {
+		budget := time.Until(localDeadline)
+		if budget <= 0 {
+			return fmt.Errorf("%s: the local phase budget (%s) is spent; refusing a git command that would run with no deadline", desc, d.jsonlLocalPhaseBudget())
+		}
+		return d.runGitIndexOp(gitRepo, desc, func() error { return op(d.backupGitAt(gitRepo, budget)) })
+	}
 
 	// Stage all JSONL files (flat legacy files + subdirectory structure).
 	// Use "." instead of "*/" to correctly handle initially-untracked subdirectories.
-	if err := d.runGitIndexOp(gitRepo, "git add -A .", func() error {
-		return d.backupGitAt(gitRepo, localBudget()).Add("-A", ".")
+	if err := stageGit("git add -A .", func(g daemonGit) error {
+		return g.Add("-A", ".")
 	}); err != nil {
 		return fmt.Errorf("git add: %w", err)
 	}
@@ -1013,8 +1025,8 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 		for _, db := range failed {
 			paths = append(paths, db, db+".jsonl")
 		}
-		if err := d.runGitIndexOp(gitRepo, "git reset (failed databases)", func() error {
-			return d.backupGitAt(gitRepo, localBudget()).ResetFiles(paths...)
+		if err := stageGit("git reset (failed databases)", func(g daemonGit) error {
+			return g.ResetFiles(paths...)
 		}); err != nil {
 			return fmt.Errorf("unstaging failed databases: %w", err)
 		}
@@ -1024,9 +1036,9 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	// changes": the commit below decides.
 	var staged []gtgit.StagedChange
 	hasStaged := true
-	if err := d.runGitIndexOp(gitRepo, "git diff --cached", func() error {
+	if err := stageGit("git diff --cached", func(g daemonGit) error {
 		var err error
-		staged, err = d.backupGitAt(gitRepo, localBudget()).StagedChanges()
+		staged, err = g.StagedChanges()
 		return err
 	}); err == nil && len(staged) == 0 {
 		hasStaged = false
@@ -1048,8 +1060,8 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 
 	if hasStaged {
 		// Commit.
-		if err := d.runGitIndexOp(gitRepo, "git commit", func() error {
-			return d.backupGitAt(gitRepo, localBudget()).CommitWithAuthor(msg, jsonlBackupAuthor)
+		if err := stageGit("git commit", func(g daemonGit) error {
+			return g.CommitWithAuthor(msg, jsonlBackupAuthor)
 		}); err != nil {
 			return fmt.Errorf("git commit: %w", err)
 		}
@@ -1408,6 +1420,15 @@ func (d *Daemon) backupGitAt(dir string, timeout time.Duration) daemonGit {
 		return d.openGitFn(dir)
 	}
 	return gtgit.NewGit(dir).WithEnv(gitIdentityEnv()).WithTimeout(timeout)
+}
+
+// jsonlLocalPhaseBudget is how long one backup tick's local staging half may
+// take: gitLocalPhaseTimeout, or the test's override.
+func (d *Daemon) jsonlLocalPhaseBudget() time.Duration {
+	if d.jsonlLocalPhaseTimeout != 0 {
+		return d.jsonlLocalPhaseTimeout
+	}
+	return gitLocalPhaseTimeout
 }
 
 // runGitIndexOp runs op, a git command that reads or writes gitRepo's index,
@@ -2303,7 +2324,10 @@ func ensureGitIgnore(gitRepo, entry string) {
 // normal. Small absolute changes (<20 records) are always allowed to avoid
 // false alarms on small databases.
 //
-// A database absent from the baseline window is a first export and is skipped.
+// A database absent from the baseline window is a first export and is skipped,
+// as is one whose baseline is zero: a ratio against zero is not a measurement,
+// so that database is checked again once this run's count is the level
+// (gt-ttqq8).
 func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts map[string]int, threshold float64) ([]spikeInfo, error) {
 	const minAbsoluteDelta = 20 // ignore changes smaller than this many records
 
@@ -2345,6 +2369,18 @@ func (d *Daemon) verifyExportCounts(gitRepo string, databases []string, counts m
 		if !ok {
 			// First export of this database — no baseline to compare against.
 			d.logger.Printf("jsonl_git_backup: verify: %s: first export (%d records), skipping spike check", db, currentCount)
+			continue
+		}
+		if prevCount == 0 {
+			// A level of zero is not a level to measure a change against: the
+			// division has no denominator, so every export of 20+ records from
+			// a baseline of zero read as an infinite spike and halted the tick.
+			// A halt commits nothing, so the level stayed zero and the
+			// database could never be accepted again (gt-ttqq8). Growth from
+			// empty is what this run commits, which is the level the next run
+			// measures against; a database blocked from emptying is caught as a
+			// drop against the levels after this one.
+			d.logger.Printf("jsonl_git_backup: verify: %s: baseline is 0 records, so there is no ratio to compare %d against — accepting this run's count as the level", db, currentCount)
 			continue
 		}
 
@@ -2411,6 +2447,20 @@ func formatSpikeReport(spikes []spikeInfo) string {
 	}
 	b.WriteString("Export halted. Manual review required.")
 	return b.String()
+}
+
+// spikeAcceptHint is how a halt ends. The baseline is the per-database counts in
+// the newest backup commit subjects, and a halted tick commits nothing, so the
+// next tick derives the same level and halts again — every tick, with the export
+// no closer to being backed up, until a newer count-bearing commit exists
+// (gt-ttqq8). Landing the counts the caller names, under the metric the backup
+// itself writes, is what accepting a change means here: it becomes the level the
+// next run measures against.
+func spikeAcceptHint(gitRepo string) string {
+	return fmt.Sprintf("To accept the export and resume the backup, land its counts as the new baseline:\n"+
+		"  git -C %s commit --allow-empty -m 'backup <ts> m%d: <db>=<N> ...'\n"+
+		"The counts under m%d are the level the next run measures against; without a newer count-bearing commit every tick halts.",
+		gitRepo, countMetricVersion, countMetricVersion)
 }
 
 // countFileLines counts the number of non-empty lines in a file. It reads
