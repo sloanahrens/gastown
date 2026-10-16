@@ -1872,6 +1872,32 @@ func TestRunTapGuardContainerSuite_HeredocBodyIsData(t *testing.T) {
 	}
 }
 
+// findInvocation ends a make goal list at a shellCommandSeparators token, so
+// the tokenizer must hand it a separator written without spaces as its own
+// token: "make build;git add test" has no test goal (gt-xdcrl).
+func TestFindInvocation_SeparatorsWrittenWithoutSpaces(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    int
+	}{
+		{"semicolon", "make build;git add test", -1},
+		{"and", "make build&&git add test", -1},
+		{"pipe", "make build|tee test", -1},
+		{"newline", "make build\ngit add test", -1},
+		{"second make after a semicolon", "make build;make test", 3},
+		{"second make after an and", "make build&&make test", 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := findInvocation(lowerTokens(tt.command), "make", "test"); got != tt.want {
+				t.Errorf("findInvocation(%q) = %d, want %d (tokens %q)", tt.command, got, tt.want, lowerTokens(tt.command))
+			}
+		})
+	}
+}
+
 // TestFindInvocation pins findInvocation at its edges: a tool with nothing after
 // it is not an invocation (and must not index past the slice), the go row stays
 // adjacent-only, and the make row finds the goal anywhere after the program
