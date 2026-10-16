@@ -1599,11 +1599,14 @@ const allowNewDatabaseEnv = "BD_ALLOW_NEW_DATABASE"
 // databases on purpose — gt install, gt rig add, a workspace bd never finished
 // — and one that refuses the create breaks all three (be-d4v). args is argv
 // before the --allow-stale/--flat injection, so args[0] is the command word.
+// An inherited value is stripped the way withDatabaseTarget strips an inherited
+// database selector: two entries for one key leave bd reading whichever its
+// getenv reaches first, so the opt-in gt sent is not reliably the one bd sees.
 func applyNewDatabaseOptIn(env []string, args []string) []string {
 	if len(args) == 0 || args[0] != "init" {
 		return env
 	}
-	return append(env, allowNewDatabaseEnv+"=1")
+	return append(StripEnvKey(env, allowNewDatabaseEnv), allowNewDatabaseEnv+"=1")
 }
 
 // runMachine runs one bd call in machine mode (BD_MACHINE=1): a failure exits
