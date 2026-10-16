@@ -48,7 +48,9 @@ func TestDepListRawUserInfoOutsideTownIsDefaultUser(t *testing.T) {
 	}
 }
 
-// A town whose Dolt config sets no password connects as the bare user (gt-sktin).
+// A town whose Dolt config sets a user and no password connects as the bare
+// user. The user is not the default one, so the result shows the town's config
+// was read rather than the default user returned (gt-sktin).
 func TestDepListRawUserInfoWithoutPassword(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
@@ -58,7 +60,14 @@ func TestDepListRawUserInfoWithoutPassword(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if got := depListRawUserInfo(townRoot); got != doltserver.DefaultUser {
-		t.Errorf("depListRawUserInfo without a password = %q, want %q", got, doltserver.DefaultUser)
+	if err := os.MkdirAll(filepath.Join(townRoot, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"type":"town-settings","version":1,"operational":{"dolt":{"user":"admin"}}}`
+	if err := os.WriteFile(filepath.Join(townRoot, "settings", "config.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := depListRawUserInfo(townRoot), "admin"; got != want {
+		t.Errorf("depListRawUserInfo without a password = %q, want %q", got, want)
 	}
 }

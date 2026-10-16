@@ -176,7 +176,7 @@ func reaperUserInfoFor(townRoot string) string {
 	if townRoot == "" {
 		return doltserver.DefaultUser
 	}
-	return doltUserInfo(doltserver.DefaultConfig(townRoot))
+	return doltserver.DefaultConfig(townRoot).UserDSN()
 }
 
 // reaperEndpoint is the town's Dolt host and port (gt-y3pgh.3), with host
