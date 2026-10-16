@@ -414,16 +414,18 @@ func TestPolecatTestScopeMatchAllRunFilter(t *testing.T) {
 		{"backtick substitution value", "go test ./internal/cmd -run \"`echo TestX`\"", true},
 		{"variable value after a narrow one", `go test ./internal/cmd -run TestX -run "$PATTERN"`, true},
 		{"slash inside a bracket class", "go test ./internal/cmd -run '[^/]*'", true},
+		{"invalid pattern", "go test ./internal/cmd -run '('", true},
+		{"most leading letters", "go test ./internal/cmd -run '^Test[^Z]'", true},
 
 		{"name", "go test ./internal/cmd -run TestX", false},
 		{"name, = form", "go test ./internal/cmd -run=TestX", false},
 		{"anchored name", "go test ./internal/cmd -run '^TestX$'", false},
 		{"alternation of names", "go test ./internal/cmd -run 'TestA|TestB'", false},
+		{"three names", "go test ./internal/cmd -run 'TestFoo|TestQuux|TestZeta'", false},
 		{"prefix", "go test ./internal/cmd -run '^TestApply'", false},
 		{"subtest path", "go test ./internal/cmd -run 'TestX/case'", false},
 		{"test binary flag after --", "go test ./internal/cmd -- -test.run TestX", false},
 		{"narrow after a match-all one", "go test ./internal/cmd -run . -run TestX", false},
-		{"invalid pattern", "go test ./internal/cmd -run '('", false},
 		{"trailing anchor", "go test ./internal/cmd -run 'TestA$|TestB$'", false},
 		{"variable value before a narrow one", `go test ./internal/cmd -run "$PATTERN" -run TestX`, false},
 		{"slash inside a group", "go test ./internal/cmd -run '(TestA/b)'", false},
@@ -530,9 +532,10 @@ func TestPolecatTestScopeTestTimingPKGSNarrowed(t *testing.T) {
 	}
 }
 
-// A -run that selects every Test function runs essentially the whole package
+// A -run that selects most Test functions runs essentially the whole package
 // even though it misses the Example, Benchmark and Fuzz probes, so it bounds
-// nothing; a pattern that names one test, or a prefix of some, still does.
+// nothing, and a pattern the guard cannot compile is read the same way; a
+// pattern that names a few tests, or a prefix of some, still bounds the run.
 func TestRunPatternBoundsRunPrefixMatchAll(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -549,13 +552,17 @@ func TestRunPatternBoundsRunPrefixMatchAll(t *testing.T) {
 		{"[^/]*", false},
 		{"[/]*", false},
 		{`\/*`, false},
+		{"^Test[^Z]", false},
+		{"^Test[A-Q]", false},
+		{"(", false},
 
 		{"^TestSpecific$", true},
 		{"TestSpecific", true},
 		{"^TestApply", true},
 		{"TestA|TestB", true},
 		{"TestSpecific/case", true},
-		{"(", true},
+		{"TestFoo|TestQuux|TestZeta", true},
+		{"^Test[A-C]", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.pattern, func(t *testing.T) {
