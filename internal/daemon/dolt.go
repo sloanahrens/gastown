@@ -552,6 +552,7 @@ func (m *DoltServerManager) EnsureRunning() error {
 		// Already running, check health
 		m.lastCheck = m.now()
 		if err := m.checkHealthLocked(); err != nil {
+			m.clearHealthyClock()
 			if m.restartHeldLocked("unhealthy", err) {
 				return nil
 			}
@@ -569,6 +570,7 @@ func (m *DoltServerManager) EnsureRunning() error {
 		// Under concurrent write load, Dolt can enter a persistent read-only
 		// state that requires a server restart to clear.
 		if err := m.checkWriteHealthLocked(); err != nil {
+			m.clearHealthyClock()
 			if m.restartHeldLocked("read-only", err) {
 				return nil
 			}
@@ -588,6 +590,7 @@ func (m *DoltServerManager) EnsureRunning() error {
 		if now.Sub(m.lastIdentityCheck) >= identityCheckInterval {
 			m.lastIdentityCheck = now
 			if err := m.checkDatabaseIdentityLocked(); err != nil {
+				m.clearHealthyClock()
 				if m.restartHeldLocked("identity check failed", err) {
 					return nil
 				}
@@ -630,6 +633,11 @@ func (m *DoltServerManager) EnsureRunning() error {
 // Must be called with m.mu held.
 func (m *DoltServerManager) restartWithBackoff() error {
 	now := m.now()
+
+	// Every restart funnels through here — including the dead-PID path, which
+	// stops nothing — so the replaced process's healthy clock ends here and not
+	// in stopLocked alone (gt-m7a48).
+	m.clearHealthyClock()
 
 	// Prune restart times outside the window
 	m.pruneRestartTimes(now)
@@ -729,6 +737,14 @@ func (m *DoltServerManager) pruneRestartTimes(now time.Time) {
 		}
 	}
 	m.restartTimes = pruned
+}
+
+// clearHealthyClock ends the healthy interval: what maybeResetBackoff measures
+// is continuous healthy time of the current process, not of the town, so an
+// unhealthy tick, a stop and a restart each start it over (gt-m7a48).
+// Must be called with m.mu held.
+func (m *DoltServerManager) clearHealthyClock() {
+	m.lastHealthyTime = time.Time{}
 }
 
 // maybeResetBackoff resets backoff state if the server has been healthy
@@ -1148,6 +1164,7 @@ func (m *DoltServerManager) Stop() error {
 
 // stopLocked stops the Dolt server. Must be called with m.mu held.
 func (m *DoltServerManager) stopLocked() {
+	m.clearHealthyClock()
 	if m.stopFn != nil {
 		m.stopFn()
 		return

@@ -329,6 +329,71 @@ func TestMaybeResetBackoff_AccumulatesAcrossHeartbeats(t *testing.T) {
 	}
 }
 
+// TestMaybeResetBackoff_RestartClearsHealthyClock pins that a restart starts
+// the healthy clock over: the interval it measures is continuous healthy time
+// of the current process, so a replacement that has been up for a minute
+// cannot reset the backoff the crash loop just built (gt-m7a48).
+func TestMaybeResetBackoff_RestartClearsHealthyClock(t *testing.T) {
+	t.Parallel()
+	var (
+		offset  atomic.Int64
+		running atomic.Bool
+	)
+	baseTime := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+
+	m := newTestManager(t)
+	m.config.HealthyResetInterval = 5 * time.Minute
+	m.nowFn = func() time.Time { return baseTime.Add(time.Duration(offset.Load())) }
+	m.sleepFn = func(time.Duration) {}
+	m.startFn = func() error {
+		running.Store(true)
+		return nil
+	}
+	running.Store(true)
+	m.runningFn = func() (int, bool) {
+		if running.Load() {
+			return 1234, true
+		}
+		return 0, false
+	}
+
+	// T0: the server is healthy, which starts the healthy clock.
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("healthy tick: %v", err)
+	}
+
+	// T0+4m: the server has crashed and is restarted, so the replacement
+	// process is seconds old and its five healthy minutes have only begun.
+	offset.Store(int64(4 * time.Minute))
+	running.Store(false)
+	m.mu.Lock()
+	err := m.restartWithBackoff()
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if m.currentDelay != 20*time.Millisecond {
+		t.Fatalf("restart should have advanced the backoff to 20ms, got %v", m.currentDelay)
+	}
+	afterRestart := m.currentDelay
+
+	// T0+5m: the new process has been healthy for a minute. A clock still
+	// trailing to before the restart would read as five healthy minutes and
+	// wipe the crash-loop state.
+	offset.Store(int64(5 * time.Minute))
+	running.Store(true)
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("tick after restart: %v", err)
+	}
+
+	if len(m.restartTimes) != 1 {
+		t.Errorf("restart should still count towards the cap, got %d restarts", len(m.restartTimes))
+	}
+	if m.currentDelay != afterRestart {
+		t.Errorf("backoff should survive the restart, got %v want %v", m.currentDelay, afterRestart)
+	}
+}
+
 func TestDefaultConfig_BackoffFields(t *testing.T) {
 	t.Parallel()
 	cfg := DefaultDoltServerConfig("/tmp/test")
