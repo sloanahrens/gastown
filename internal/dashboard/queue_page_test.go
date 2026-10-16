@@ -25,17 +25,19 @@ func TestWorkQueueOpensOnAllStoresDispatchable(t *testing.T) {
 		}
 	}
 
-	start := strings.Index(page, "function renderQueue(")
-	if start < 0 {
-		t.Fatal("index.html has no renderQueue")
-	}
-	body := page[start:]
-	if end := strings.Index(body, "\n}\n"); end >= 0 {
-		body = body[:end]
-	}
+	body := queueListFunc(t)
 	if want := `qRig !== "all" && !rigs[qRig]) qRig = "all";`; !strings.Contains(body, want) {
-		t.Errorf("renderQueue no longer falls back to all stores when the chosen rig has no rows")
+		t.Errorf("the queue list no longer falls back to all stores when the chosen rig has no rows")
 	}
+}
+
+// queueListFunc is the body of drawQueueList, the function that draws the
+// whole queue inside the Work panel's folded list (gt-vcr3z). A test naming a
+// function that is gone fails here rather than checking nothing.
+func queueListFunc(t *testing.T) string {
+	t.Helper()
+
+	return pageFunc(t, "drawQueueList")
 }
 
 // TestWorkQueueEmptyDispatchableView reads the embedded page (gt-x9gk4): the
@@ -45,18 +47,10 @@ func TestWorkQueueOpensOnAllStoresDispatchable(t *testing.T) {
 func TestWorkQueueEmptyDispatchableView(t *testing.T) {
 	t.Parallel()
 
-	page := string(indexHTML)
-	start := strings.Index(page, "function renderQueue(")
+	body := queueListFunc(t)
+	start := strings.Index(body, "if (!rows.length)")
 	if start < 0 {
-		t.Fatal("index.html has no renderQueue")
-	}
-	body := page[start:]
-	if end := strings.Index(body, "\n}\n"); end >= 0 {
-		body = body[:end]
-	}
-	start = strings.Index(body, "if (!rows.length)")
-	if start < 0 {
-		t.Fatal("renderQueue no longer branches on an empty row set")
+		t.Fatal("the queue list no longer branches on an empty row set")
 	}
 	body = body[start:]
 	for _, want := range []string{
@@ -92,9 +86,10 @@ func TestWorkQueueMarksBeadsHeldByAnAssignee(t *testing.T) {
 
 // TestWorkQueueHidesWispsOnTheBlockedTab reads the embedded page (gt-q6ed5):
 // dead wisp steps outnumbered the real blocked beads, so the Blocked tab opens
-// with them filtered out. The default is a named constant, the chip carries the
-// count of the wisps in scope, and the row filter drops "-wisp-" ids while it
-// is off.
+// with them filtered out. The default is a named constant and the chip carries
+// the count of the wisps in scope. Which rows are wisps is the server's own
+// verdict, read off the row (gt-vcr3z), so the list hides exactly the rows the
+// Work panel's blocked line counts as leaked step wisps.
 func TestWorkQueueHidesWispsOnTheBlockedTab(t *testing.T) {
 	t.Parallel()
 
@@ -102,7 +97,7 @@ func TestWorkQueueHidesWispsOnTheBlockedTab(t *testing.T) {
 	for _, want := range []string{
 		`const DEFAULT_QWISP = false;`,
 		"let qWisp = DEFAULT_QWISP;",
-		`const isWisp = b => b.id.indexOf("-wisp-") >= 0;`,
+		`const isWisp = b => !!b.wisp;`,
 		`chip("wisps", inRig.filter(isWisp).length, qWisp,`,
 		`(qTab !== "blocked" || qWisp || !isWisp(b))`,
 	} {
@@ -111,15 +106,7 @@ func TestWorkQueueHidesWispsOnTheBlockedTab(t *testing.T) {
 		}
 	}
 
-	start := strings.Index(page, "function renderQueue(")
-	if start < 0 {
-		t.Fatal("index.html has no renderQueue")
-	}
-	body := page[start:]
-	if end := strings.Index(body, "\n}\n"); end >= 0 {
-		body = body[:end]
-	}
-	if want := "nothing is blocked outside"; !strings.Contains(body, want) {
+	if want := "nothing is blocked outside"; !strings.Contains(queueListFunc(t), want) {
 		t.Errorf("the empty blocked view no longer names the hidden wisps")
 	}
 }

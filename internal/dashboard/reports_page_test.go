@@ -386,10 +386,10 @@ func TestReportLinksTheBeadIdsWhosePrefixNamesAStore(t *testing.T) {
 	if !strings.Contains(page, `box.append(el("div", "badc", "could not read this bead right now"));`) {
 		t.Error("the detail a report id opens has no failed-read state")
 	}
-	// The queue's rows open through the same helper, so the two panes cannot
-	// drift into two different readers of one route.
-	if q := pageFunc(t, "openBead"); !strings.Contains(q, `beadDetailFor(b.rig, b.id, qDetail, () => renderQueue(state, true));`) {
-		t.Error("the Work queue's rows no longer open a bead through the shared reader")
+	// The Work panel's rows open through the same helper, so the two panes
+	// cannot drift into two different readers of one route.
+	if q := pageFunc(t, "openBead"); !strings.Contains(q, `beadDetailFor(b.rig, b.id, qDetail, () => renderWork(state, true));`) {
+		t.Error("the Work panel's rows no longer open a bead through the shared reader")
 	}
 }
 

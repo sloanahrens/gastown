@@ -10,6 +10,30 @@ import (
 	"time"
 )
 
+// A leaked molecule step wisp is not blocked work (gt-vcr3z): it waits on a
+// molecule no patrol will advance. The blocked list is split by this one
+// classification, so its verdicts are pinned bead by bead.
+func TestIsLeakedStepWispTellsAStepFromBlockedWork(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name, id, typ, parent string
+		want                  bool
+	}{
+		{"a bead waiting on another bead", "gt-real", "task", "", false},
+		{"a step wisp by its id", "gt-wisp-4bac0", "task", "", true},
+		{"a molecule poured as a wisp", "gt-wisp-eutau", "molecule", "", true},
+		{"a step poured under a molecule", "gt-step-1", "task", "gt-wisp-eutau", true},
+		{"a child of a durable epic", "gt-epic-child", "task", "gt-epic", false},
+		{"a molecule whose parent is another", "gt-mol-1", "molecule", "gt-wisp-eutau", false},
+		{"a bead with no type", "gt-x", "", "gt-wisp-eutau", false},
+	} {
+		if got := IsLeakedStepWisp(tc.id, tc.typ, tc.parent); got != tc.want {
+			t.Errorf("%s (%s/%s/%s): wisp = %v, want %v", tc.name, tc.id, tc.typ, tc.parent, got, tc.want)
+		}
+	}
+}
+
 func TestSortQueueRowsOrdersLikeTheDispatcher(t *testing.T) {
 	t.Parallel()
 	d := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)

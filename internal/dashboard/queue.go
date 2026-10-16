@@ -4,6 +4,7 @@ import (
 	"errors"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -50,6 +51,10 @@ type QueueBead struct {
 	// for rows the lint was not run on.
 	Shape     string `json:"shape,omitempty"`
 	ShapeNote string `json:"shape_note,omitempty"`
+	// Wisp marks a blocked row that is a leaked molecule step wisp rather than
+	// blocked work (IsLeakedStepWisp). Set on the blocked list, the only list
+	// the page asks the question of.
+	Wisp bool `json:"wisp,omitempty"`
 }
 
 // Queue is the three lists. A list is capped at queueMaxRows rows, and its
@@ -62,6 +67,12 @@ type Queue struct {
 	LandingTotal int         `json:"landing_total"`
 	Blocked      []QueueBead `json:"blocked"`
 	BlockedTotal int         `json:"blocked_total"`
+	// BlockedWork and BlockedWisps split BlockedTotal: the beads waiting on
+	// another bead, and the leaked molecule step wisps sitting in the same
+	// list. Counted over the whole list, before the rows are capped, so the
+	// two always add up to the total (gt-vcr3z).
+	BlockedWork  int `json:"blocked_work"`
+	BlockedWisps int `json:"blocked_wisps"`
 	// The exact number of beads per store in each list, which the capped rows
 	// above cannot give: the page's filter chips read these.
 	ReadyRigs   map[string]int `json:"ready_rigs"`
@@ -83,6 +94,19 @@ type Queue struct {
 	// the hub fills it and publishes the joined rows as State.Rigs; this field
 	// is the join's input, not part of the page's payload.
 	Rigs []Rig `json:"-"`
+}
+
+// IsWispID reports whether id names a wisp: gt-wisp-c3w9, hq-wisp-e0g8y7.
+func IsWispID(id string) bool { return strings.Contains(id, "-wisp-") }
+
+// IsLeakedStepWisp reports whether a bead on the blocked list is a leaked
+// molecule step wisp rather than blocked work: a bead whose id names a wisp,
+// or a step poured under one (a task whose parent is a wisp molecule). Such a
+// step waits on a molecule nothing will ever advance, so nobody is blocked on
+// it. It is the one verdict the blocked list is split by, so the line above
+// the page's list and the list's own filtering cannot disagree (gt-vcr3z).
+func IsLeakedStepWisp(id, typ, parent string) bool {
+	return IsWispID(id) || (typ == "task" && IsWispID(parent))
 }
 
 // SortQueueRows orders rows the way the dispatcher takes them: most urgent

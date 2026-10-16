@@ -160,8 +160,8 @@ func TestTheHeaderStripCountsTheSeatsThePageCounts(t *testing.T) {
 func TestThePolecatPaneNamesEachPolecatsModel(t *testing.T) {
 	t.Parallel()
 
-	if !strings.Contains(pageFunc(t, "renderSeats"), "p.agent") {
-		t.Error("the polecat pane does not show the polecat's agent")
+	if !strings.Contains(pageFunc(t, "workRow"), "p.agent") {
+		t.Error("the Work panel's seat rows do not show the polecat's agent")
 	}
 }
 
