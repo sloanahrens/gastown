@@ -324,8 +324,9 @@ type OverrunGuardConfig struct {
 	// ScheduledStopAfter is how long after the sling a seat on a scheduled
 	// run (a bead labeled scheduled:<name>) is stopped (e.g., "60m"). Those
 	// runs are judged by this limit alone, not by NudgeAfter or StopAfter.
-	// Default 60m; "0" never stops them. A negative or unparseable value is
-	// rejected when the config loads.
+	// Default 60m; "0" never stops them. A negative or unparseable value loads
+	// with a warning and is kept as written; the guard uses the default, and
+	// saving it is refused.
 	ScheduledStopAfter string `json:"scheduled_stop_after,omitempty"`
 
 	// DryRun logs what a stop would do and sends nothing.

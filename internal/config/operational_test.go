@@ -4,32 +4,28 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"regexp"
+	"strings"
 	"testing"
 	"time"
 )
 
-// TestOperationalPressureExampleWithinBusyShare: the pressure_cpu_threshold
+// TestPressureThresholdsExampleWithinBusyShare: the pressure_cpu_threshold
 // has been the busy share per core since gt-kc8v1 (at most 1.0), so the
-// example operational.go gives for it must be a value that can trip.
-func TestOperationalPressureExampleWithinBusyShare(t *testing.T) {
+// example operational.go gives for it must decode into DaemonThresholds and
+// hold a value that can trip.
+func TestPressureThresholdsExampleWithinBusyShare(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile("operational.go")
-	if err != nil {
-		t.Fatal(err)
+	var dt DaemonThresholds
+	dec := json.NewDecoder(strings.NewReader(PressureThresholdsExample))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&dt); err != nil {
+		t.Fatalf("example %s does not decode into DaemonThresholds: %v", PressureThresholdsExample, err)
 	}
-	m := regexp.MustCompile(`Example: (\{"pressure_cpu_threshold"[^\n]*\})`).FindSubmatch(src)
-	if m == nil {
-		t.Fatal(`operational.go has no "Example: {"pressure_cpu_threshold": ...}" comment`)
-	}
-	var example struct {
-		PressureCPUThreshold float64 `json:"pressure_cpu_threshold"`
-	}
-	if err := json.Unmarshal(m[1], &example); err != nil {
-		t.Fatalf("example %s does not parse: %v", m[1], err)
-	}
-	if got := example.PressureCPUThreshold; got <= 0 || got > 1.0 {
+	if got := dt.PressureCPUThresholdV(); got <= 0 || got > 1.0 {
 		t.Errorf("pressure_cpu_threshold example = %v, want a busy share in (0, 1]", got)
+	}
+	if got := dt.PressureMemThresholdGBV(); got <= 0 {
+		t.Errorf("pressure_mem_threshold_gb example = %v, want a positive floor", got)
 	}
 }
 
