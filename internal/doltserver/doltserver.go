@@ -47,7 +47,7 @@ import (
 	"syscall"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -431,12 +431,12 @@ func (c *Config) SQLArgs() []string {
 
 // UserDSN returns the user[:password] portion of a MySQL DSN. Every Go
 // connection to the town's Dolt builds its DSN from it, so the password rule
-// lives here alone.
+// lives here alone. The driver's own formatter writes it, so the user and
+// password are laid out the way mysql.ParseDSN reads them back.
 func (c *Config) UserDSN() string {
-	if c.Password != "" {
-		return c.User + ":" + c.Password
-	}
-	return c.User
+	cfg := mysql.NewConfig()
+	cfg.User, cfg.Passwd = c.User, c.Password
+	return strings.TrimSuffix(strings.TrimSuffix(cfg.FormatDSN(), "/"), "@")
 }
 
 // EffectiveHost returns the configured host, defaulting to "127.0.0.1" when empty.

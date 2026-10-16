@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
 	"gopkg.in/yaml.v3"
 )
 
@@ -4111,6 +4112,8 @@ func TestUserDSN(t *testing.T) {
 		{"root", "", "root"},
 		{"root", "secret", "root:secret"},
 		{"admin", "p@ss", "admin:p@ss"},
+		{"root", "a/b:c(d)", "root:a/b:c(d)"},
+		{"", "", ""},
 	}
 	for _, tt := range tests {
 		c := &Config{User: tt.user, Password: tt.password}
@@ -4118,6 +4121,20 @@ func TestUserDSN(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("Config{User:%q, Password:%q}.UserDSN() = %q, want %q",
 				tt.user, tt.password, got, tt.want)
+		}
+		// The user part must read back through the driver unchanged, behind
+		// the address a probe appends.
+		if tt.user == "" {
+			continue // no user part to read back
+		}
+		parsed, err := mysql.ParseDSN(got + "@tcp(127.0.0.1:3307)/")
+		if err != nil {
+			t.Errorf("ParseDSN(%q): %v", got, err)
+			continue
+		}
+		if parsed.User != tt.user || parsed.Passwd != tt.password {
+			t.Errorf("ParseDSN(%q) = user %q password %q, want user %q password %q",
+				got, parsed.User, parsed.Passwd, tt.user, tt.password)
 		}
 	}
 }
@@ -5878,11 +5895,12 @@ func TestProbeDSNsCarryPassword(t *testing.T) {
 	cases := []struct {
 		name         string
 		password     bool
-		wantUserPart string
+		wantPassword string
 	}{
-		{"password set", true, "root:secret"},
-		{"no password", false, "root"},
+		{"password set", true, "secret"},
+		{"no password", false, ""},
 	}
+	errOpen := errors.New("open refused")
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -5891,12 +5909,24 @@ func TestProbeDSNsCarryPassword(t *testing.T) {
 				writeTownDoltSettings(t, townRoot, `{"password":"${GT_DOLT_PASSWORD}"}`)
 				writeTownDaemonEnv(t, townRoot, "GT_DOLT_PASSWORD=secret")
 			}
-			probes := map[string]func(h *host, config *Config){
-				"MeasureQueryLatency": func(h *host, _ *Config) { _, _ = h.MeasureQueryLatency(townRoot) },
-				"GetLastCommitAge":    func(h *host, _ *Config) { _, _, _ = h.GetLastCommitAge(townRoot) },
-				"drainConnectionsBeforeStop": func(h *host, config *Config) {
+			// Each probe returns the error its open failure surfaces as; the
+			// drain swallows it by design and returns nil.
+			probes := map[string]struct {
+				run     func(h *host, config *Config) error
+				wantErr bool
+			}{
+				"MeasureQueryLatency": {func(h *host, _ *Config) error {
+					_, err := h.MeasureQueryLatency(townRoot)
+					return err
+				}, true},
+				"GetLastCommitAge": {func(h *host, _ *Config) error {
+					_, _, err := h.GetLastCommitAge(townRoot)
+					return err
+				}, true},
+				"drainConnectionsBeforeStop": {func(h *host, config *Config) error {
 					h.drainConnectionsBeforeStop(config)
-				},
+					return nil
+				}, false},
 			}
 			for name, probe := range probes {
 				f := newFakeHost()
@@ -5904,13 +5934,29 @@ func TestProbeDSNsCarryPassword(t *testing.T) {
 				var got []string
 				h.openDB = func(dsn string) (*sql.DB, error) {
 					got = append(got, dsn)
-					return nil, errors.New("captured")
+					return nil, errOpen
 				}
 				config := h.DefaultConfig(townRoot)
-				probe(h, config)
-				want := fmt.Sprintf("%s@tcp(127.0.0.1:%d)/", tc.wantUserPart, config.Port)
-				if len(got) != 1 || !strings.HasPrefix(got[0], want) {
-					t.Errorf("%s DSNs = %q, want one starting %q", name, got, want)
+				err := probe.run(h, config)
+				if probe.wantErr && !errors.Is(err, errOpen) {
+					t.Errorf("%s error = %v, want one wrapping the open failure", name, err)
+				}
+				if !probe.wantErr && err != nil {
+					t.Errorf("%s error = %v, want none", name, err)
+				}
+				if len(got) != 1 {
+					t.Errorf("%s opened %q, want exactly one DSN", name, got)
+					continue
+				}
+				parsed, perr := mysql.ParseDSN(got[0])
+				if perr != nil {
+					t.Errorf("%s DSN %q does not parse: %v", name, got[0], perr)
+					continue
+				}
+				wantAddr := fmt.Sprintf("127.0.0.1:%d", config.Port)
+				if parsed.User != "root" || parsed.Passwd != tc.wantPassword || parsed.Net != "tcp" || parsed.Addr != wantAddr {
+					t.Errorf("%s DSN = user %q password %q net %q addr %q, want user root password %q net tcp addr %q",
+						name, parsed.User, parsed.Passwd, parsed.Net, parsed.Addr, tc.wantPassword, wantAddr)
 				}
 			}
 		})
