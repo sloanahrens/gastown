@@ -119,6 +119,63 @@ func TestBuildDashPolecatsCapsTheBeadDescription(t *testing.T) {
 	}
 }
 
+// countingBeads counts the reads a seat's work costs. It embeds a nil
+// beads.Client, so any read it does not count (Show, List, ...) panics the
+// test rather than passing unnoticed.
+type countingBeads struct {
+	beads.Client
+	listing      []*beads.Issue
+	listCalls    int
+	showMultiple int
+}
+
+func (c *countingBeads) ListIssueStatuses(...beads.IssueStatus) ([]*beads.Issue, error) {
+	c.listCalls++
+	return c.listing, nil
+}
+
+func (c *countingBeads) ShowMultiple([]string) (map[string]*beads.Issue, error) {
+	c.showMultiple++
+	return nil, nil
+}
+
+// TestSeatDescriptionCostsNoBeadRead: the description a seat row carries rides
+// on the issue the rig's one listing already returned, so adding a seat adds no
+// bd read per poll, and building the rows reads nothing (gt-kk6gb).
+func TestSeatDescriptionCostsNoBeadRead(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 15, 18, 0, 0, 0, time.UTC)
+	names := []string{"agate", "amber", "onyx"}
+	bd := &countingBeads{}
+	hooks := map[string]string{}
+	for _, n := range names {
+		id := "gt-" + n
+		bd.listing = append(bd.listing, &beads.Issue{ID: id, Title: n, Description: "about " + n,
+			Status: string(beads.IssueStatusHooked), Assignee: "gastown/polecats/" + n})
+		hooks[n] = id
+	}
+	active, err := listActivePolecatWorkByName(bd, "gastown", hooks)
+	if err != nil {
+		t.Fatalf("listActivePolecatWorkByName: %v", err)
+	}
+	if bd.listCalls != 1 || bd.showMultiple != 0 {
+		t.Fatalf("reads for %d seats = %d listing, %d routed; want one listing and no per-seat read", len(names), bd.listCalls, bd.showMultiple)
+	}
+	cap1 := polecat.WorkstateDisposition{CountsTowardCapacity: true}
+	var seats []dashSeat
+	for _, n := range names {
+		seats = append(seats, dashSeat{Rig: "gastown", Name: n, Item: dashItem(polecat.StateWorking, cap1), Issue: active[n]})
+	}
+	for _, p := range buildDashPolecats(dashPolecatInputs{Now: now, SessionsKnown: true, Seats: seats}) {
+		if want := "about " + p.Name; p.Description != want {
+			t.Errorf("%s: description = %q, want %q from the listing", p.Name, p.Description, want)
+		}
+	}
+	if bd.listCalls != 1 || bd.showMultiple != 0 {
+		t.Errorf("building the rows read beads again: %d listing, %d routed", bd.listCalls, bd.showMultiple)
+	}
+}
+
 func TestDashBadgeLabels(t *testing.T) {
 	t.Parallel()
 	got := dashBadgeLabels([]string{"gt:ready-to-land", "needs-human", "gt:deferred", "bug"})
