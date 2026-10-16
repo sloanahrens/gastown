@@ -5026,14 +5026,10 @@ func (h *host) serverExecSQL(townRoot, query string) error {
 //	dolt --host=H --port=P --user=U --no-tls sql -q "..."
 func buildServerSQLCmd(ctx context.Context, config *Config, args ...string) *exec.Cmd {
 	// Global connection flags must come before the "sql" subcommand.
-	// Always pass --password to prevent dolt from prompting on stdin
-	// (which fails with "inappropriate ioctl" in non-TTY environments).
-	password := config.Password
 	fullArgs := []string{
 		"--host", config.EffectiveHost(),
 		"--port", strconv.Itoa(config.Port),
 		"--user", config.User,
-		"--password", password,
 		"--no-tls",
 		"sql",
 	}
@@ -5043,7 +5039,18 @@ func buildServerSQLCmd(ctx context.Context, config *Config, args ...string) *exe
 	cmd.Dir = config.DataDir
 	setProcessGroup(cmd)
 
+	cmd.Env = serverSQLEnv(os.Environ(), config.Password)
+
 	return cmd
+}
+
+// serverSQLEnv is base plus the Dolt password. The password goes through
+// DOLT_CLI_PASSWORD, never argv: argv is world readable through ps. It is set
+// even when empty: dolt then skips the stdin prompt, which fails with
+// "inappropriate ioctl" in non-TTY environments, and the appended entry wins
+// over a DOLT_CLI_PASSWORD already in base.
+func serverSQLEnv(base []string, password string) []string {
+	return append(base[:len(base):len(base)], "DOLT_CLI_PASSWORD="+password)
 }
 
 // waitForCatalog polls the Dolt server until the named database is visible in the
