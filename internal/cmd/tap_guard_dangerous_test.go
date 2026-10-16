@@ -1590,6 +1590,21 @@ func TestHeredocWalkBacktickBraceInsideParamExpansion(t *testing.T) {
 			command:   "echo ${v:-\\`echo }\\`}\ncat <<EOF\nsudo rm -rf /\nEOF",
 			wantBlock: false,
 		},
+		{
+			name:      "a brace in backtick text nested in backtick text does not close the expansion around it",
+			command:   "echo `echo ${v:-\\`echo }\\` <<x}`\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "a closed nested backtick pair leaves the braces after it live",
+			command:   "echo `echo ${v:-\\`echo x\\`}`\ncat <<EOF\nsudo rm -rf /\nEOF",
+			wantBlock: false,
+		},
+		{
+			name:      "an unescaped backtick ends the outer text whatever is nested in it",
+			command:   "echo ${v:-`echo \\`echo }` <<x}\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

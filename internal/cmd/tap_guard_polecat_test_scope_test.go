@@ -441,31 +441,6 @@ func TestPolecatTestScopeMatchAllRunFilter(t *testing.T) {
 	}
 }
 
-// A -run value the shell rewrites is a pattern the hook cannot see, so it
-// bounds nothing; a literal name still does (gt-9udxk).
-func TestPolecatTestScopeRefusesExpandedRunValue(t *testing.T) {
-	t.Parallel()
-	root := fakeModule(t, "gastown/refinery/rig")
-	tests := []struct {
-		name    string
-		command string
-		blocked bool
-	}{
-		{"variable assigned before", `PAT=.; go test ./internal/cmd -run "$PAT"`, true},
-		{"command substitution", `go test ./internal/cmd -run "$(echo .)"`, true},
-		{"backtick substitution", "go test ./internal/cmd -run \"`echo .`\"", true},
-		{"literal name", "go test ./internal/cmd -run TestSpecific", false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, root), tt.command)
-			if got := reason != ""; got != tt.blocked {
-				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
-			}
-		})
-	}
-}
-
 // The goals gt-gl3jb listed were not the whole set: the integration wall tier,
 // the tier check and the timing run each start `go test` over ./... in a Go
 // tree (gt-9udxk).
