@@ -2606,8 +2606,19 @@ func TestSyncJsonlGitBackupMetricChangeRebaselinesOnce(t *testing.T) {
 		t.Errorf("rebaseline logged %d time(s), want once; log:\n%s", n, logs.String())
 	}
 
-	// The next tick's history carries the current version, so a genuine spike
-	// within it halts again: the rebaseline is a one-off, not a disabled check.
+	// The next tick compares the current version against itself: an ordinary
+	// change commits and does not halt.
+	lines = 5010
+	d.syncJsonlGitBackup()
+	if got := rec.Escalations(); len(got) != 0 {
+		t.Fatalf("the tick after the rebaseline escalated: %+v", got)
+	}
+	if subjects := backupSubjects(t, d, gitRepo); len(subjects) != 3 {
+		t.Fatalf("subjects = %q, want the tick after the rebaseline to commit", subjects)
+	}
+
+	// A genuine spike within the version halts again: the rebaseline is a
+	// one-off, not a disabled check.
 	lines = 50
 	d.syncJsonlGitBackup()
 	if n := strings.Count(logs.String(), logLine); n != 1 {
