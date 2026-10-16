@@ -640,6 +640,18 @@ func TestCommandSubstitutionRecursion(t *testing.T) {
 		{"backtick wraps sudo", "echo `sudo rm -rf /`", true},
 		{"dollar-paren safe", `echo $(ls -la)`, false},
 		{"backtick safe", "echo `date`", false},
+
+		// A body holding a parenthesis is cut whole, not at the first ")"
+		// (gt-d1mlb).
+		{"quoted paren before a reset", `x=$(grep -E '(a|b)' f; git reset --hard)`, true},
+		{"nested substitution before a reset", `x=$(echo $(date); git reset --hard)`, true},
+		{"reset inside a nested substitution", `x=$(echo $(git reset --hard))`, true},
+		{"subshell before a reset", `x=$( (cd d); git reset --hard )`, true},
+		{"quoted paren, safe body", `x=$(grep -E '(a|b)' f)`, false},
+		{"single-quoted substitution is data", `echo '$(git reset --hard)'`, false},
+		{"escaped substitution is data", `echo \$(git reset --hard)`, false},
+		{"eval of a single-quoted substitution runs it", `eval '$(git reset --hard)'`, true},
+		{"bash -c of a single-quoted substitution runs it", `bash -c 'x=$(grep -E "(a|b)" f; git reset --hard)'`, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -457,6 +457,11 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		// Command substitutions run as real commands.
 		{"writing inside a command substitution", `echo "$(cp a.go ` + sib + `)"`, true},
 		{"writing inside backticks", "echo `cp a.go " + sib + "`", true},
+		// A body holding a parenthesis is cut whole, not at the first ")"
+		// (gt-d1mlb).
+		{"writing after a quoted paren in a substitution", `echo "$(grep -E '(a|b)' f; cp a.go ` + sib + `)"`, true},
+		{"writing after a nested substitution", `echo "$(echo $(date); cp a.go ` + sib + `)"`, true},
+		{"writing inside a nested substitution", `echo "$(echo $(cp a.go ` + sib + `))"`, true},
 		// Fail closed when a checked target cannot be resolved.
 		{"unresolvable variable in a write", "cp a.go $POLECAT_PATHS_UNSET/x.go", true},
 		{"unresolvable variable as a redirect target", "echo hi > $POLECAT_PATHS_UNSET/x.go", true},

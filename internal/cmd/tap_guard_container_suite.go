@@ -410,8 +410,8 @@ type substitutionSpan struct {
 }
 
 // commandSubstitutionSpans finds the outermost command substitutions the shell
-// expands in text, in order. Unlike commandSubstitutionPattern, whose [^()]*
-// body ends the match at the first parenthesis, it balances parentheses and
+// expands in text, in order. Unlike the pattern commandSubstitutions once
+// used, whose [^()]* body ended the match at the first parenthesis, it balances parentheses and
 // steps over quoted text, so a body holding "(ok|FAIL)", "$(NF)" or a nested
 // "$(nproc)" is cut whole (gt-wrr5c). A "$(" or backtick is live outside
 // quotes and inside double quotes; a backslash escapes the next character, and

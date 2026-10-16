@@ -319,8 +319,8 @@ func prWorkflowInvocations(command string, depth int) (invocations [][]string, t
 // A $(...) body runs to its balancing ")", so parentheses inside it, whether a
 // nested $(date) or a quoted "fix (x)", do not end it early. A substitution
 // nested in a body is not returned here: the recursion in prWorkflowInvocations
-// scans the body for its own. commandSubstitutionPattern cannot do this, since
-// it matches only bodies free of parentheses and would let
+// scans the body for its own. The pattern commandSubstitutions once used could
+// not, since it matched only bodies free of parentheses and would let
 // $(gh pr create --title "$(date)") through.
 func prWorkflowSubstitutions(command string) []string {
 	text := stripHeredocBodies(command)
