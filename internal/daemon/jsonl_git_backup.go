@@ -473,11 +473,8 @@ func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) 
 	total += n
 
 	// 2. Export supplemental tables (no scrub, full export). A failing table
-	// must not stop the others, or the issues table already written above, but
-	// it is a failed export: its file is the stale one already in the repo and
-	// its rows are missing from total. Returning (total, nil) would let the
-	// shrunken count reach the spike guard as "possible data loss" or become the
-	// new baseline.
+	// does not stop the others, but its rows are missing from total, which must
+	// not pass for a full export.
 	var tableErrs []string
 	for _, table := range supplementalTables {
 		tn, err := exportTable(table, beadsql.BackupTable(db, table), dbDir, dataDir)

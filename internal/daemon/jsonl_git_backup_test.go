@@ -2689,6 +2689,28 @@ func TestExportDatabaseToJsonlSupplementalSuccess(t *testing.T) {
 	}
 }
 
+// TestExportDatabaseToJsonlIssuesFailureIsReported: the issues export is the
+// function's other export call, and its failure aborts the database before any
+// supplemental table is written from a snapshot the issues export did not
+// complete.
+func TestExportDatabaseToJsonlIssuesFailureIsReported(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	d.jsonlTableExportFn = tableRowsFake(t, map[string]int{"comments": 10}, map[string]bool{"issues": true})
+	gitRepo := t.TempDir()
+
+	n, err := d.exportDatabaseToJsonl("hq", gitRepo, t.TempDir(), false)
+	if err == nil {
+		t.Fatalf("exportDatabaseToJsonl = (%d, nil), want an error for the failed issues table", n)
+	}
+	if !strings.Contains(err.Error(), "issues") {
+		t.Errorf("error = %q, want the failed table named", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(gitRepo, "hq", "comments.jsonl")); statErr == nil {
+		t.Error("comments.jsonl was written after the issues export failed")
+	}
+}
+
 // TestSyncJsonlGitBackupSupplementalFailureNoFalseSpike: a tick whose events
 // export fails raises the export alert, and the rows it lost do not reach the
 // spike guard as "possible data loss".
@@ -2800,6 +2822,61 @@ func TestSyncJsonlGitBackupSupplementalFailureDoesNotCommitFreshIssues(t *testin
 	}
 	if subjects := backupSubjects(t, d, gitRepo); len(subjects) == 0 || !strings.Contains(subjects[0], "[FAILED: hq]") {
 		t.Errorf("subjects = %v, want the newest to keep the [FAILED: hq] marker", subjects)
+	}
+}
+
+// TestSyncJsonlGitBackupIssuesFailureIsReported: the cycle is the export's
+// other caller, and a database whose issues export fails reaches it as a failed
+// database — nothing of that database is committed, and the export alert names
+// it.
+func TestSyncJsonlGitBackupIssuesFailureIsReported(t *testing.T) {
+	t.Parallel()
+
+	d, f := backupTestDaemon(t)
+	root := t.TempDir()
+	townRoot := filepath.Join(root, "town")
+	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(root, "origin.git")
+	f.InitBare(t, remote)
+	f.Commit(t, remote, "main", seedSubjectPrefix+"hq=100", map[string]string{"README": "init\n"})
+	gitRepo := filepath.Join(root, "repo")
+	f.Clone(t, remote, gitRepo)
+
+	rec := notifyfake.New()
+	d.config = &Config{TownRoot: townRoot}
+	d.notifier = rec
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, GitRepo: gitRepo, Databases: []string{"hq", "gt"}},
+	}}
+	// hq's issues export fails; gt exports fully, so the cycle still commits.
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string) (int, error) {
+		if filepath.Base(dir) == "hq" && table == "issues" {
+			return 0, errors.New("signal: killed: context deadline exceeded")
+		}
+		writeNLines(t, filepath.Join(dir, table+".jsonl"), 30)
+		return 30, nil
+	}
+
+	before := f.Ref(gitRepo, "refs/heads/main")
+	d.syncJsonlGitBackup()
+	after := f.Ref(gitRepo, "refs/heads/main")
+
+	if after == before {
+		t.Fatal("no commit was made: gt exported fully and its files should have been committed")
+	}
+	for path := range f.Tree(after) {
+		if strings.HasPrefix(path, "hq/") {
+			t.Errorf("the new HEAD commit carries %s from the failed database", path)
+		}
+	}
+	open := rec.OpenEscalations(alertKeyJSONLExport)
+	if len(open) != 1 {
+		t.Fatalf("open %s escalations = %+v, want one", alertKeyJSONLExport, open)
+	}
+	if !strings.Contains(open[0].Reason, "hq") || !strings.Contains(open[0].Reason, "issues") {
+		t.Errorf("escalation reason = %q, want the database and the failed table", open[0].Reason)
 	}
 }
 
