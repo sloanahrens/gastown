@@ -1339,6 +1339,31 @@ func TestSpecDispatchFailureNamesTheExclusion(t *testing.T) {
 	}
 }
 
+// Clearing the label retries the bead. When the retry fails for another reason,
+// the bead carries both notes, and the same reason failing again adds none
+// (gt-zkqtn).
+func TestSpecDispatchFailureNoteFollowsTheReason(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	retry := func(reason string) {
+		s := f.specs["gt-a"]
+		s.Labels = nil
+		f.specs["gt-a"] = s
+		f.slingErrs["gt-a"] = []error{errors.New(reason)}
+		if r := runSpecDispatchCycle(f.env()); len(r.Failed) != 1 {
+			t.Fatalf("%s: failed = %+v, want one entry", reason, r.Failed)
+		}
+	}
+	retry("rig gastown is down")
+	retry("rig gastown is down")
+	retry("no polecat slot")
+
+	notes := f.notes["gt-a"]
+	if len(notes) != 2 || !strings.Contains(notes[0], "rig gastown is down") || !strings.Contains(notes[1], "no polecat slot") {
+		t.Errorf("bead notes = %q, want one per distinct reason, in order", notes)
+	}
+}
+
 func TestSpecDispatchDryRunTouchesNothing(t *testing.T) {
 	t.Parallel()
 	bad := cleanSpec("gt-bad", 1, "2026-09-29T10:00:00Z")
@@ -2049,6 +2074,71 @@ func TestHasCommentWithPrefix(t *testing.T) {
 	}
 	if hasCommentWithPrefix(comments, "spec-dispatch: gt-a: dispatch failed") {
 		t.Error("different note kind matched")
+	}
+}
+
+// The failure note is written once per reason: a retry that fails for another
+// reason has to leave that reason on the bead, not the first one (gt-zkqtn).
+// bd is a shell stub that keeps the bead's comments in a file, so
+// annotateSpecOnce runs its real read-then-add against it.
+func TestAnnotateSpecOnce_DispatchFailedDifferentReasonRecorded(t *testing.T) {
+	dir := t.TempDir()
+	store := filepath.Join(dir, "comments.txt")
+	script := `#!/bin/sh
+if [ "$1" = "--allow-stale" ] && [ "$2" = "version" ]; then
+  echo "Error: unknown flag: --allow-stale" >&2
+  exit 0
+fi
+if [ "$1" = "comments" ] && [ "$2" = "add" ]; then
+  printf '%s\n' "$4" >> ` + store + `
+  exit 0
+fi
+if [ "$1" = "comments" ]; then
+  printf '['
+  sep=''
+  while IFS= read -r line; do
+    printf '%s{"text":"%s"}' "$sep" "$line"
+    sep=','
+  done < ` + store + `
+  printf ']\n'
+  exit 0
+fi
+exit 0
+`
+	binDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	failNote := func(reason string) string {
+		return fmt.Sprintf("%sgt-x: dispatch failed, left unassigned: %s", specDispatchNotePrefix, reason)
+	}
+	if err := os.WriteFile(store, []byte(failNote("reasonA")+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	townRoot := specTown(t)
+
+	// The same failure on the next tick is still written once.
+	if err := annotateSpecOnce(townRoot, "gt-x", failNote("reasonA"), failNote("reasonA")); err != nil {
+		t.Fatal(err)
+	}
+	// A different reason is a new fact about the bead.
+	if err := annotateSpecOnce(townRoot, "gt-x", failNote("reasonB"), failNote("reasonB")); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Split(strings.TrimSpace(string(data)), "\n")
+	want := []string{failNote("reasonA"), failNote("reasonB")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("comments = %q, want %q", got, want)
 	}
 }
 
