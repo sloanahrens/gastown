@@ -639,6 +639,28 @@ func TestRecountAfterFilter_RejectsRemovedAboveTotal(t *testing.T) {
 	}
 }
 
+// A rejected removal leaves every count as it arrived, not just its own. The
+// recount used to adjust each database as it reached it, so which counts a
+// rejected tick had already changed came down to map order — the counts it
+// returned were neither the old ones nor the new ones (gt-83c3w).
+func TestRecountAfterFilter_RejectsWithoutAdjustingAnyCount(t *testing.T) {
+	t.Parallel()
+	counts := map[string]int{"hq": 100, "gt": 50, "longeye": 20, "beads": 8, "other": 9}
+	// hq's removal is fine on its own; "beads" could not have come from one
+	// export. Map order still decides which is reached first, so a wider map
+	// makes the partly adjusted result near-certain under the old loop rather
+	// than a coin flip — the assertion is on the whole map because that is the
+	// state the caller is left holding.
+	removed := map[string]int{"hq": 1, "gt": 2, "longeye": 3, "other": 4, "beads": 9}
+	if err := recountAfterFilter(counts, removed); err == nil {
+		t.Fatal("recountAfterFilter returned nil error for more records removed than exported")
+	}
+	want := map[string]int{"hq": 100, "gt": 50, "longeye": 20, "beads": 8, "other": 9}
+	if !maps.Equal(counts, want) {
+		t.Errorf("counts = %v, want %v — a rejected recount must leave every count alone", counts, want)
+	}
+}
+
 // TestRecountAfterFilterKeepsCountMetric is the gt-tx0ia regression: counts[db]
 // is the exportDatabaseToJsonl total (issues plus the supplemental tables), and
 // the recount must stay on that metric. It used to overwrite the count with the
@@ -2159,14 +2181,26 @@ func TestSyncJsonlGitBackup_AllExportsFailedEscalates(t *testing.T) {
 // before it. The filter tick used to commit the issues.jsonl line count against
 // a baseline holding the all-tables total, which the spike guard read as a 70%
 // drop, so the backup halted and the baseline could never advance.
+//
+// The tick is asserted to commit, and the assertion is on that commit: a filter
+// tick whose export is byte-identical to the previous one commits nothing, so
+// checking whatever commits happen to exist passes without ever reading a
+// filter-tick count (gt-83c3w).
 func TestSyncJsonlGitBackupFilterTickDoesNotHalt(t *testing.T) {
 	t.Parallel()
 	const (
-		issues        = 30 // real issue rows per tick
+		cleanIssues   = 30 // real issue rows in the clean tick
 		supplemental  = 70 // rows across the supplemental tables per tick
-		cleanCount    = issues + supplemental
+		cleanCount    = cleanIssues + supplemental
 		pollutedTitle = "Test Issue 42"
 	)
+	// The filter tick exports one more real issue row as well as the stray test
+	// bead, so its filtered export still differs from the previous commit and
+	// the tick commits a count to check. Without the extra row the two exports
+	// are byte-identical, the tick has nothing to commit, and the count metric
+	// this test exists to guard is never exercised (gt-83c3w).
+	realIssues := cleanIssues
+	filteredCount := cleanIssues + 1 + supplemental
 
 	d, f := backupTestDaemon(t)
 	root := t.TempDir()
@@ -2196,8 +2230,8 @@ func TestSyncJsonlGitBackupFilterTickDoesNotHalt(t *testing.T) {
 		if err := os.MkdirAll(dbDir, 0755); err != nil {
 			return 0, err
 		}
-		writeNLines(t, filepath.Join(dbDir, "issues.jsonl"), issues)
-		total := issues
+		writeNLines(t, filepath.Join(dbDir, "issues.jsonl"), realIssues)
+		total := realIssues
 		if polluted {
 			bad, _ := json.Marshal(map[string]interface{}{"id": "hq-bad1", "title": pollutedTitle})
 			fh, err := os.OpenFile(filepath.Join(dbDir, "issues.jsonl"), os.O_APPEND|os.O_WRONLY, 0644)
@@ -2219,11 +2253,15 @@ func TestSyncJsonlGitBackupFilterTickDoesNotHalt(t *testing.T) {
 	if got := rec.Escalations(); len(got) != 0 {
 		t.Fatalf("clean tick escalated: %+v", got)
 	}
-	if first := backupSubjects(t, d, gitRepo)[0]; !strings.Contains(first, fmt.Sprintf(": hq=%d", cleanCount)) {
+	beforeTick := backupSubjects(t, d, gitRepo)
+	if first := beforeTick[0]; !strings.Contains(first, fmt.Sprintf(": hq=%d", cleanCount)) {
 		t.Fatalf("clean tick subject = %q, want hq=%d", first, cleanCount)
 	}
 
-	// The same data plus one pollution bead the filter removes.
+	// The same data plus one real issue row and one pollution bead the filter
+	// removes. The filter leaves the committed export holding the extra real
+	// row and no test bead, so the tick commits.
+	realIssues = cleanIssues + 1
 	polluted = true
 	d.syncJsonlGitBackup()
 
@@ -2233,10 +2271,15 @@ func TestSyncJsonlGitBackupFilterTickDoesNotHalt(t *testing.T) {
 		}
 	}
 	subjects := backupSubjects(t, d, gitRepo)
-	for _, s := range subjects {
-		if strings.Contains(s, ": hq=") && !strings.Contains(s, fmt.Sprintf(": hq=%d", cleanCount)) {
-			t.Errorf("commit subject %q carries a count off the %d metric", s, cleanCount)
-		}
+	if len(subjects) != len(beforeTick)+1 {
+		t.Fatalf("filter tick made %d commit(s), want exactly 1 — with no commit the count metric goes unchecked", len(subjects)-len(beforeTick))
+	}
+	// The count is the export total minus the filtered bead: the pre-filter
+	// total (31 issues + 70 supplemental) less the 1 removed. The issues.jsonl
+	// line count left on disk is 31, and that is what the tick used to commit —
+	// a 69% drop from the 100 baseline, which halted the backup.
+	if got, want := subjects[0], fmt.Sprintf(": hq=%d", filteredCount); !strings.Contains(got, want) {
+		t.Errorf("filter tick subject = %q, want %s — the exported total less the filtered bead, not the issues.jsonl line count", got, want)
 	}
 	data, err := os.ReadFile(filepath.Join(gitRepo, "hq", "issues.jsonl"))
 	if err != nil {
