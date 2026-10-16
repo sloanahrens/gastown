@@ -105,7 +105,9 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth
 // ./...") does not hide the run (gt-zn7ma). That flag is also where the run
 // happens: a '.', './' or bare target names a package under the -C directory,
 // not under the shell's cwd, so it is judged there (goTestRunDir, gt-tzdpe);
-// an explicit package argument keeps the reading it has always had.
+// an explicit package argument keeps the reading it has always had. A -C
+// directory the shell expands cannot be placed, so an unfiltered run of a
+// package argument relative to it is refused outright (gt-tgwt7).
 func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool) (reason string, matched []string) {
 	lower := make([]string, len(tokens))
 	for i, t := range tokens {
@@ -144,6 +146,14 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool)
 	wholeRepo, heavy := polecatHeavyTarget(pkgArgs, runCwd)
 	if wholeRepo {
 		return "polecat 'go test' of the whole repo", nil
+	}
+	// A -C directory the shell expands is one goTestRunDir cannot place, so a
+	// package argument spelled relative to it ("./cmd") is read as the
+	// module-root package "cmd", which is not heavy. Without a -run filter
+	// the run could be any package in any tree, so it is refused as the
+	// container rule refuses it (gt-tgwt7).
+	if !hasRun && goDirFlagShellExpanded(tokens, lower, i) && runDirTargetsUnknownDir(pkgArgs) {
+		return "polecat 'go test' runs in a -C directory the shell expands, which the guard cannot place", nil
 	}
 	if len(heavy) > 0 && !hasRun {
 		return "polecat 'go test' of a whole heavy package with no -run filter", heavy
