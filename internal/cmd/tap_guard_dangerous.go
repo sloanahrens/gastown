@@ -1130,16 +1130,16 @@ func resolveShellVar(arg string, vars map[string]string) string {
 //
 // The scan is commandSubstitutionSpans, shared with the container-suite guard.
 // It balances the parentheses of a body, so "$(grep -E '(a|b)' f; git reset
-// --hard)" is cut whole and judged, where a pattern ending the body at the first
-// parenthesis never saw the reset (gt-d1mlb). A substitution nested in a body is
-// judged when the body is, one nesting level deeper.
+// --hard)" is cut whole and judged (gt-d1mlb). A substitution nested in a body
+// is judged when the body is, one nesting level deeper.
 //
 // A backslash before the opening "$(" or backtick escapes it, and single quotes
-// hide it: the shell passes the text through literally and runs nothing, so
-// "\$(git reset --hard)" is data wherever it appears, most visibly in an
-// unquoted heredoc body, which heredocBodySubstitutions otherwise scans for the
-// substitutions the shell DOES expand (gt-y6mhx). An even run of backslashes
-// escapes itself, leaving \\$(cmd) live.
+// hide it (gt-d1mlb): the shell passes the text through literally and runs
+// nothing, so "\$(git reset --hard)" and '$(git reset --hard)' are both data
+// wherever they appear, most visibly in an unquoted heredoc body, which
+// heredocBodySubstitutions otherwise scans for the substitutions the shell DOES
+// expand (gt-y6mhx). An even run of backslashes escapes itself, leaving
+// \\$(cmd) live.
 func commandSubstitutions(command string) []string {
 	return substitutionBodies(command, commandSubstitutionSpans(command))
 }

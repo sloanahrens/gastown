@@ -677,9 +677,18 @@ func TestCommandSubstitutionRecursion(t *testing.T) {
 		{"subshell before a reset", `x=$( (cd d); git reset --hard )`, true},
 		{"quoted paren, safe body", `x=$(grep -E '(a|b)' f)`, false},
 		{"single-quoted substitution is data", `echo '$(git reset --hard)'`, false},
+		{"single-quoted backtick is data", "echo '`git reset --hard`'", false},
 		{"escaped substitution is data", `echo \$(git reset --hard)`, false},
 		{"eval of a single-quoted substitution runs it", `eval '$(git reset --hard)'`, true},
 		{"bash -c of a single-quoted substitution runs it", `bash -c 'x=$(grep -E "(a|b)" f; git reset --hard)'`, true},
+
+		// A substitution the shell would reject is judged rather than passed
+		// unread (gt-6v07e).
+		{"unterminated dollar-paren is judged", `echo $(git reset --hard`, true},
+		{"unterminated backtick is judged", "echo `git reset --hard", true},
+		{"unterminated quote in the body is judged", `echo $(git reset --hard "x`, true},
+		{"unterminated dollar-paren, safe body", `echo $(ls -la`, false},
+		{"unterminated quote, safe body", `echo $(ls -la "x`, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
