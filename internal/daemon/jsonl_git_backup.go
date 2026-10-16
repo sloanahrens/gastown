@@ -819,6 +819,18 @@ func writeTableShardsWith(ops jsonlShardOps, dir, table string, rows []json.RawM
 		return 0, errors.Join(err, withdraw())
 	}
 
+	// A temp an earlier cycle left is named after a shard this export may no
+	// longer write, so the swap stepped over it. It is the same stale tail as
+	// the set-aside shards below, and `git add -A` over the directory would
+	// commit it, so a temp that will not go withdraws the new export rather
+	// than leave it beside a file the commit carries (gt-1911b).
+	//
+	// The sweep runs before the set-aside removal: the withdrawal puts those
+	// files back, so they have to still be there.
+	if err := removeShardTemps(ops.removeAll, dir, table); err != nil {
+		return 0, errors.Join(fmt.Errorf("clearing %s temp files: %w", table, err), withdraw())
+	}
+
 	// The set-aside files are the stale tail of an earlier, longer export, and
 	// nothing else now that the new export has verified. Until they are gone
 	// the directory holds two generations of the export, so one that will not go
@@ -833,13 +845,6 @@ func writeTableShardsWith(ops jsonlShardOps, dir, table string, rows []json.RawM
 	if len(residue) > 0 {
 		errs := append([]error{fmt.Errorf("removing the stale %s shards", table)}, residue...)
 		return 0, errors.Join(append(errs, withdraw())...)
-	}
-	// A temp an earlier cycle left is named after a shard this export may no
-	// longer write, so the swap stepped over it. It is the same stale tail as
-	// the set-aside shards above, and `git add -A` over the directory commits
-	// it (gt-1911b).
-	if err := removeShardTemps(dir, table); err != nil {
-		return 0, fmt.Errorf("clearing %s temp files: %w", table, err)
 	}
 	return len(rows), nil
 }
@@ -883,7 +888,10 @@ func removeShardBackups(dir, table string) error {
 // export's swap steps over them and `git add -A` commits them with it
 // (gt-1911b). The path goes whatever sits at it, since nothing else writes
 // under a temp's name.
-func removeShardTemps(dir, table string) error {
+//
+// remove is the swap's own removal (jsonlShardOps.removeAll), so a test can
+// drive the withdrawal a temp that will not go triggers.
+func removeShardTemps(remove func(path string) error, dir, table string) error {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
@@ -893,7 +901,7 @@ func removeShardTemps(dir, table string) error {
 		if !strings.HasSuffix(name, ".jsonl.tmp") || !strings.HasPrefix(name, table+".") {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
+		if err := remove(filepath.Join(dir, name)); err != nil {
 			return err
 		}
 	}

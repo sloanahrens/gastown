@@ -368,6 +368,39 @@ func TestWriteTableShards_UnremovableBackupWithdrawsTheNewExport(t *testing.T) {
 	assertNoShardLitter(t, dir)
 }
 
+// A temp an earlier cycle left that will not go withdraws the new export, like
+// the set-aside shard it shares a stale tail with: the swap reports a failure
+// it took back, not an export that landed (gt-27gnb).
+func TestWriteTableShards_UnremovableTempWithdrawsTheNewExport(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := writeTableShards(dir, "events", syntheticRows(20, 200), 1000); err != nil {
+		t.Fatalf("first export: %v", err)
+	}
+	before := shardContents(t, dir, "events")
+
+	// A temp past the last shard this export writes, so the swap steps over it.
+	if err := os.WriteFile(filepath.Join(dir, "events.7.jsonl.tmp"), []byte("{}\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	ops := osShardOps()
+	ops.removeAll = func(path string) error {
+		if strings.HasSuffix(path, ".jsonl.tmp") {
+			return errors.New("remove refused")
+		}
+		return os.RemoveAll(path)
+	}
+
+	_, err := writeTableShardsWith(ops, dir, "events", syntheticRows(12, 200), 1000)
+	if err == nil || !strings.Contains(err.Error(), "clearing events temp files") {
+		t.Fatalf("err = %v, want a failed swap naming the temp files", err)
+	}
+	if after := shardContents(t, dir, "events"); !maps.Equal(before, after) {
+		t.Errorf("the failed swap left %v, want the export that was there: %v", after, before)
+	}
+}
+
 // An export that fails verification does not replace the last one that
 // verified; with none to put back it leaves nothing at all (gt-fhcwe).
 func TestWriteTableShards_VerifyFailureLeavesTheLastExportInPlace(t *testing.T) {
