@@ -249,6 +249,11 @@ type attentionSources struct {
 	// outside reads (gt-vsct7.4).
 	riskLandings func(rig string, since time.Time) ([]land.LandingRecord, error)
 	riskNotes    func(ctx context.Context, rig, id string) (string, error)
+	// findingStatus reads one finding bead's status and riskAppend appends a
+	// review line to a work bead's notes: the resolved-FAIL pass's reads and
+	// its only write (attention_risk_audit.go). A nil func turns the pass off.
+	findingStatus func(ctx context.Context, id string) (string, error)
+	riskAppend    func(ctx context.Context, rig, id, note string) error
 	// riskOpen is how many risk-path items collectRiskPaths observed this tick,
 	// and riskCounted whether it got as far as counting: the review-backlog
 	// collector, which runs after it, reads both.
@@ -335,6 +340,15 @@ func (d *Daemon) writeAttention() {
 		d.logger.Printf("attention: reading %s: %v", tipsFileName, err)
 	}
 	src.tips = &tips
+	// The one write of the attention pass runs before the collectors, so a FAIL
+	// whose findings closed leaves the queue on this tick.
+	wrote, err := src.auditResolvedRiskFails(ctx)
+	for _, w := range wrote {
+		d.logger.Printf("attention: audited resolved risk-path FAIL %s", w)
+	}
+	if err != nil {
+		d.logger.Printf("attention: auditing resolved risk-path FAILs: %v", err)
+	}
 	state := d.attentionTick(ctx, src, prev, acks, now)
 	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, repeatedAt: src.repeatedAt, backlogSamples: src.backlogSamples}
 	if len(src.tips.Rigs) == 0 {
@@ -621,6 +635,7 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 		}
 		return is.Notes, nil
 	}
+	d.productionRiskAudit(s)
 	return s
 }
 
