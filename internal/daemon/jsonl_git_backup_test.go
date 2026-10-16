@@ -2220,7 +2220,9 @@ func TestCommitAndPushJsonlBackup_PushesUnpushedCommitWhenNothingStaged(t *testi
 // TestIsOversizeFilePushError pins the classifier the recovery hangs off:
 // GitHub's per-file refusal is recognized, and the other push failures the
 // backup sees are not — a non-fast-forward rejection is not a reason to
-// replace the unpushed range.
+// replace the unpushed range. Each phrase is the refusal itself, so a lone
+// fragment of one is not a match either: arming this recovery drops commits
+// (gt-bodcw).
 func TestIsOversizeFilePushError(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -2228,9 +2230,10 @@ func TestIsOversizeFilePushError(t *testing.T) {
 		errMsg string
 		want   bool
 	}{
-		{"GH001", "git push: remote: error: GH001: Large files detected.", true},
+		{"GH001", "git push: remote: error: GH001: Large files detected. You may want to try Git Large File Storage - https://git-lfs.github.com.", true},
 		{"per-file limit", "git push: remote: error: File hq/events.jsonl is 100.08 MB; this exceeds GitHub's file size limit of 100.00 MB", true},
-		{"large files detected", "git push: remote: error: Large files detected.", true},
+		{"bare GH001", "git push: remote: error: GH001: something else entirely", false},
+		{"bare fragment", "git push: remote: error: Large files detected.", false},
 		{"non-fast-forward", "git push: To /tmp/origin.git\n ! [rejected]        main -> main (non-fast-forward)", false},
 		{"auth failure", "git push: fatal: Authentication failed for 'https://github.com/x/y'", false},
 		{"postBuffer 400", "git push: error: RPC failed; HTTP 400 curl 22 The requested URL returned error: 400", false},
@@ -2321,8 +2324,8 @@ func TestCommitAndPushJsonlBackup_ReplacesUnpushedHistoryOverAnOversizeFile(t *t
 		t.Fatal("the replacing commit's tree is empty")
 	}
 	for path, size := range sizes {
-		if size >= limit {
-			t.Errorf("%s is %d bytes in the pushed tree, at or over the %d-byte limit", path, size, limit)
+		if size > limit {
+			t.Errorf("%s is %d bytes in the pushed tree, over the %d-byte limit the remote refuses", path, size, limit)
 		}
 	}
 	// The replacing commit keeps this tick's subject, counts and metric
@@ -2367,6 +2370,137 @@ func TestCommitAndPushJsonlBackup_KeepsHistoryWhenTheExportIsStillOversize(t *te
 	}
 	if tip := f.Ref(remote, "refs/heads/main"); tip != seed {
 		t.Errorf("origin main = %s, want it still at the seed %s", tip, seed)
+	}
+}
+
+// TestOverLimitFilesBoundary pins the daemon's size check to the boundary the
+// remote uses: a file of exactly limit bytes is one a push carries, so only a
+// bigger one is over the limit — read the other way round, the recovery
+// declines the drop that would let the push through (gt-bodcw).
+func TestOverLimitFilesBoundary(t *testing.T) {
+	t.Parallel()
+	const limit = 1024
+	for _, tt := range []struct {
+		name  string
+		sizes map[string]int64
+		want  []string
+	}{
+		{"under the limit", map[string]int64{"hq/issues.jsonl": limit - 1}, nil},
+		{"at the limit", map[string]int64{"hq/issues.jsonl": limit}, nil},
+		{"over the limit", map[string]int64{"hq/issues.jsonl": limit + 1},
+			[]string{fmt.Sprintf("hq/issues.jsonl (%d bytes)", limit+1)}},
+		{"both, in path order", map[string]int64{"hq/issues.jsonl": limit + 1, "hq/events.jsonl": limit + 2},
+			[]string{fmt.Sprintf("hq/events.jsonl (%d bytes)", limit+2), fmt.Sprintf("hq/issues.jsonl (%d bytes)", limit+1)}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := overLimitFiles(tt.sizes, limit); !slices.Equal(got, tt.want) {
+				t.Errorf("overLimitFiles(%v, %d) = %q, want %q", tt.sizes, limit, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestCommitAndPushJsonlBackup_RecoversWhenTheExportSitsAtTheLimit is the
+// boundary half of the recovery's size guard (gt-bodcw): a tree whose largest
+// file is exactly the limit is one the remote accepts, so the tick must
+// replace the unpushed range and push rather than decline as though the export
+// were too big.
+func TestCommitAndPushJsonlBackup_RecoversWhenTheExportSitsAtTheLimit(t *testing.T) {
+	t.Parallel()
+	d, f, gitRepo, remote, seed, limit := oversizeBackupFixture(t)
+	dbDir := filepath.Join(gitRepo, "hq")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// The over-limit blob sits in the commit below; the tree on top of it
+	// holds a file of exactly the limit.
+	if err := os.WriteFile(filepath.Join(dbDir, "events.jsonl"), bytes.Repeat([]byte("x"), int(limit)*2), 0644); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, d, gitRepo, "backup 2026-10-16 10:00 m2: hq=1")
+	if err := os.WriteFile(filepath.Join(dbDir, "events.jsonl"), bytes.Repeat([]byte("y"), int(limit)), 0644); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, d, gitRepo, "backup 2026-10-16 10:15 m2: hq=1")
+
+	if err := d.commitAndPushJsonlBackup(gitRepo, []string{"hq"}, map[string]int{"hq": 1}, nil); err != nil {
+		t.Fatalf("a tick whose tree sits exactly at the limit should recover, got: %v", err)
+	}
+	head, err := f.Open(gitRepo).Rev("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tip := f.Ref(remote, "refs/heads/main"); tip != head {
+		t.Fatalf("origin main = %s, want the replacing commit %s", tip, head)
+	}
+	if parents := f.Parents(head); len(parents) != 1 || parents[0] != seed {
+		t.Fatalf("the replacing commit's parents = %v, want origin's tip %s alone", parents, seed)
+	}
+}
+
+// TestRecoverOversizeBackupPush_DeclinesWhenOriginTipIsUnknown pins the first
+// guard: without origin/<branch>'s tip there is no telling which commits are
+// unpushed, so the range under HEAD stays (gt-bodcw).
+func TestRecoverOversizeBackupPush_DeclinesWhenOriginTipIsUnknown(t *testing.T) {
+	t.Parallel()
+	d, f, gitRepo, _, _, _ := oversizeBackupFixture(t)
+	head, err := f.Open(gitRepo).Rev("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = d.recoverOversizeBackupPush(gitRepo, "release", "backup 2026-10-16 10:00 m2: hq=1")
+	if err == nil || !strings.Contains(err.Error(), "origin/release's tip is not known locally") {
+		t.Fatalf("error = %v, want the unknown origin tip named", err)
+	}
+	if now, _ := f.Open(gitRepo).Rev("HEAD"); now != head {
+		t.Errorf("HEAD = %s, want the untouched %s", now, head)
+	}
+}
+
+// TestRecoverOversizeBackupPush_DeclinesWhenOriginAlreadyCarriesHead pins the
+// guard against a refusal that is not about the unpushed range at all: with
+// origin's tip at HEAD there is nothing for a replacing commit to carry
+// (gt-bodcw).
+func TestRecoverOversizeBackupPush_DeclinesWhenOriginAlreadyCarriesHead(t *testing.T) {
+	t.Parallel()
+	d, f, gitRepo, _, _, _ := oversizeBackupFixture(t)
+	head, err := f.Open(gitRepo).Rev("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.SetRef(t, gitRepo, "refs/remotes/origin/main", head)
+	err = d.recoverOversizeBackupPush(gitRepo, "main", "backup 2026-10-16 10:00 m2: hq=1")
+	if err == nil || !strings.Contains(err.Error(), "already carries HEAD") {
+		t.Fatalf("error = %v, want the refusal declined", err)
+	}
+	if now, _ := f.Open(gitRepo).Rev("HEAD"); now != head {
+		t.Errorf("HEAD = %s, want the untouched %s", now, head)
+	}
+}
+
+// TestRecoverOversizeBackupPush_DeclinesWhenOriginHoldsUnaccountedCommits is
+// the gt-63sz hazard: origin's branch moved on without this clone, so the
+// commits HEAD cannot account for would go with a replacement the clone has no
+// standing to make. HEAD and origin both stay where they are (gt-bodcw).
+func TestRecoverOversizeBackupPush_DeclinesWhenOriginHoldsUnaccountedCommits(t *testing.T) {
+	t.Parallel()
+	d, f, gitRepo, remote, _, _ := oversizeBackupFixture(t)
+	ahead := f.Commit(t, remote, "main", "operator commit", map[string]string{"README": "operator\n"})
+	f.SetRef(t, gitRepo, "refs/remotes/origin/main", ahead)
+	head, err := f.Open(gitRepo).Rev("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = d.recoverOversizeBackupPush(gitRepo, "main", "backup 2026-10-16 10:00 m2: hq=1")
+	if err == nil || !strings.Contains(err.Error(), "cannot account for") {
+		t.Fatalf("error = %v, want the unaccounted range declined", err)
+	}
+	if now, _ := f.Open(gitRepo).Rev("HEAD"); now != head {
+		t.Errorf("HEAD = %s, want the untouched %s", now, head)
+	}
+	if tip := f.Ref(remote, "refs/heads/main"); tip != ahead {
+		t.Errorf("origin main = %s, want it still at the operator commit %s", tip, ahead)
 	}
 }
 
