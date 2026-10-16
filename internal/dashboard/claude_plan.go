@@ -54,6 +54,13 @@ const (
 
 	// claudePlanDaySecs is a day, the unit both paces are per.
 	claudePlanDaySecs = 86400
+
+	// claudePlanWindowSlackSecs is how far apart two readings' reset instants
+	// may be and still name the same window. A window resets at one instant,
+	// which the status line writes as whole seconds of a countdown the API
+	// recomputes, so two readings of it agree within seconds; two windows are
+	// seven days apart, so this slack never merges them.
+	claudePlanWindowSlackSecs = 60
 )
 
 // ClaudePlanSample is one line of the status line's series, written with the
@@ -90,9 +97,9 @@ type ClaudePlan struct {
 	// rolls over, at the day's pace. It passes claudePlanLimitPct for a week
 	// that will run out before it resets.
 	ProjectedPctAtReset float64 `json:"projected_pct_at_reset"`
-	// HitsLimitInDays is how long the weekly limit lasts at the day's pace, and
-	// null when the pace is flat or falling, or when the limit outlives the
-	// window and so is never hit.
+	// HitsLimitInDays is how long the weekly limit lasts at the day's pace, zero
+	// for a week already at the limit, and null when the pace is flat or falling
+	// or when the limit outlives the window and so is never hit.
 	HitsLimitInDays *float64 `json:"hits_limit_in_days"`
 	// PlanUSDMonth is the monthly price the percentages are drawn against,
 	// WeeklyValueUSD the share of it one week of the limit is worth, and
@@ -102,8 +109,8 @@ type ClaudePlan struct {
 	UsedValueUSD   float64 `json:"used_value_usd"`
 	// SampledAt is the newest sample's instant, in epoch seconds.
 	SampledAt int64 `json:"sampled_at"`
-	// Stale says the newest sample is older than claudePlanStale, or that the
-	// series has none.
+	// Stale says the newest sample is older than claudePlanStale, that the series
+	// has none, or that its window has no end after now to be measured against.
 	Stale bool `json:"stale"`
 	// Unavailable says the series could not be read, which the page draws as
 	// itself and never as a week at 0%.
@@ -159,7 +166,12 @@ func ComputeClaudePlan(samples []ClaudePlanSample, now time.Time, planUSDMonth f
 	p.WeeklyPct, p.FiveHourPct = newest.SevenDay, newest.FiveHour
 	p.WeeklyResetsAt, p.FiveHourResetsAt = newest.SevenDayResetsAt, newest.FiveHourResetsAt
 	p.SampledAt = newest.T
-	p.Stale = now.Sub(time.Unix(newest.T, 0)) > claudePlanStale
+	// A reading the meter cannot place in the current window is not the current
+	// week: with no reset instant, or one the clock has already passed, the
+	// percentage describes a week nobody is spending against now. Zero is the
+	// absent instant and reads the same way.
+	windowEnded := newest.SevenDayResetsAt <= now.Unix()
+	p.Stale = windowEnded || now.Sub(time.Unix(newest.T, 0)) > claudePlanStale
 	p.UsedValueUSD = roundTo2(newest.SevenDay / claudePlanLimitPct * p.WeeklyValueUSD)
 
 	window := claudePlanWindow(samples, newest.SevenDayResetsAt)
@@ -172,7 +184,15 @@ func ComputeClaudePlan(samples []ClaudePlanSample, now time.Time, planUSDMonth f
 		daysLeft = 0
 	}
 	p.ProjectedPctAtReset = roundTo2(newest.SevenDay + pace24h*daysLeft)
-	if pace24h > 0 {
+	// A week already at the limit has nothing left to spend, so it is reached at
+	// no pace at all; below it, the day's pace says when, and a pace that is flat
+	// or falling never gets there. A limit that outlasts the window is the
+	// reset's, not the meter's, so the field stays null.
+	switch {
+	case newest.SevenDay >= claudePlanLimitPct:
+		hits := 0.0
+		p.HitsLimitInDays = &hits
+	case pace24h > 0:
 		if d := (claudePlanLimitPct - newest.SevenDay) / pace24h; d <= daysLeft {
 			hits := roundTo2(d)
 			p.HitsLimitInDays = &hits
@@ -183,11 +203,15 @@ func ComputeClaudePlan(samples []ClaudePlanSample, now time.Time, planUSDMonth f
 
 // claudePlanWindow is the samples of the newest reading's own window, in time
 // order: the limit's resets_at identifies a run of the limit, and a sample from
-// a run that has ended belongs to a week nobody is spending against now.
+// a run that has ended belongs to a week nobody is spending against now. The
+// match allows claudePlanWindowSlackSecs either way, so a reset instant the API
+// reports a few seconds differently does not split one window into two single
+// readings and leave the pace reading zero.
 func claudePlanWindow(samples []ClaudePlanSample, resetsAt int64) []ClaudePlanSample {
 	window := make([]ClaudePlanSample, 0, len(samples))
 	for _, s := range samples {
-		if s.SevenDayResetsAt == resetsAt {
+		if s.SevenDayResetsAt-resetsAt <= claudePlanWindowSlackSecs &&
+			resetsAt-s.SevenDayResetsAt <= claudePlanWindowSlackSecs {
 			window = append(window, s)
 		}
 	}
@@ -256,9 +280,12 @@ func readClaudePlanSamples(path string) ([]ClaudePlanSample, error) {
 }
 
 // planUSD is the price the meter draws against: the configured one, or the
-// default when the operator set none.
+// default when the operator set none. A price that is not a finite positive
+// number is no price, and the default stands in its place: a NaN or an
+// infinity would reach the page as dollars, and the JSON encoder refuses to
+// write it, taking the rest of the state down with the one field.
 func planUSD(planUSDMonth float64) float64 {
-	if planUSDMonth <= 0 {
+	if math.IsNaN(planUSDMonth) || math.IsInf(planUSDMonth, 0) || planUSDMonth <= 0 {
 		return ClaudePlanDefaultUSD
 	}
 	return planUSDMonth

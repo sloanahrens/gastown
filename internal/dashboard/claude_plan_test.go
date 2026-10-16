@@ -28,7 +28,7 @@ func TestComputeClaudePlanPaceProjectionAndDollars(t *testing.T) {
 
 	twoDays, day := 2*24*time.Hour, 24*time.Hour
 	resets := func(d time.Duration) int64 { return claudePlanNow.Add(d).Unix() }
-	one, threeQuarters, aThird := 1.0, 0.75, 0.33
+	zero, one, threeQuarters, aThird := 0.0, 1.0, 0.75, 0.33
 
 	for _, tt := range []struct {
 		name    string
@@ -117,6 +117,45 @@ func TestComputeClaudePlanPaceProjectionAndDollars(t *testing.T) {
 			name:    "a week spent to ninety percent a day before the reset",
 			samples: []ClaudePlanSample{planSample(claudePlanNow, 90, resets(day))},
 			planUSD: 200, planOut: 200, weekly: 90, proj: 90, weekUSD: 46.05, usedUSD: 41.45,
+		},
+		{
+			name: "a week past the limit: reached now, not in a negative time",
+			samples: []ClaudePlanSample{
+				planSample(claudePlanNow.Add(-day), 96, resets(twoDays)),
+				planSample(claudePlanNow, 105, resets(twoDays)),
+			},
+			planUSD: 200, planOut: 200, weekly: 105, pace1h: 9, pace24h: 9, proj: 123,
+			hits: &zero, weekUSD: 46.05, usedUSD: 48.35,
+		},
+		{
+			name:    "a week past the limit that has gone flat: spent, not unknown",
+			samples: []ClaudePlanSample{planSample(claudePlanNow, 102, resets(twoDays))},
+			planUSD: 200, planOut: 200, weekly: 102, proj: 102,
+			hits: &zero, weekUSD: 46.05, usedUSD: 46.97,
+		},
+		{
+			name:    "a window the clock has already left: a week nobody is spending against",
+			samples: []ClaudePlanSample{planSample(claudePlanNow, 88, resets(-time.Hour))},
+			planUSD: 200, planOut: 200, weekly: 88, proj: 88,
+			weekUSD: 46.05, usedUSD: 40.52, stale: true,
+		},
+		{
+			name: "a week with no reset instant to measure against: no end, so no projection",
+			samples: []ClaudePlanSample{
+				planSample(claudePlanNow.Add(-day), 30, 0),
+				planSample(claudePlanNow, 40, 0),
+			},
+			planUSD: 200, planOut: 200, weekly: 40, pace1h: 10, pace24h: 10, proj: 40,
+			weekUSD: 46.05, usedUSD: 18.42, stale: true,
+		},
+		{
+			name: "one window whose reset instant the API reports a few seconds apart",
+			samples: []ClaudePlanSample{
+				planSample(claudePlanNow.Add(-day), 20, resets(twoDays)-4),
+				planSample(claudePlanNow, 32, resets(twoDays)),
+			},
+			planUSD: 200, planOut: 200, weekly: 32, pace1h: 12, pace24h: 12, proj: 56,
+			weekUSD: 46.05, usedUSD: 14.74,
 		},
 		{
 			name:    "the plan's price comes from the flag",
