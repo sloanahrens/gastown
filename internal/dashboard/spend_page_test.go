@@ -6,7 +6,7 @@ import (
 )
 
 // There is no JS engine in the unit tier, so like the other page tests these
-// pin the lines renderSpend draws from, not a rendered DOM.
+// pin the lines costSpend draws from, not a rendered DOM.
 
 // The balance is split into cash and credit under the tile, the credit runway
 // rides beside it, balance rises are listed by the kind the report gave them,
@@ -14,7 +14,7 @@ import (
 func TestSpendPanelShowsCashVersusCreditAndTheCreditEvents(t *testing.T) {
 	t.Parallel()
 
-	body := pageFunc(t, "renderSpend")
+	body := pageFunc(t, "costSpend")
 	for _, want := range []string{
 		// credit > 0: cash and credit under the balance, and the runway.
 		`money(d.cash) + " cash + " + money(d.credit) + " credit"`,
@@ -32,7 +32,7 @@ func TestSpendPanelShowsCashVersusCreditAndTheCreditEvents(t *testing.T) {
 		`"spent (sampled" + (since ? " since " + since[0] : "") + ")"`,
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("renderSpend does not draw the credit view: no %q", want)
+			t.Errorf("costSpend does not draw the credit view: no %q", want)
 		}
 	}
 
@@ -56,7 +56,7 @@ func TestSpendPanelShowsCashVersusCreditAndTheCreditEvents(t *testing.T) {
 func TestSpendPanelToleratesAReportWithoutTheCreditFields(t *testing.T) {
 	t.Parallel()
 
-	body := pageFunc(t, "renderSpend")
+	body := pageFunc(t, "costSpend")
 	for _, want := range []string{
 		// cash and credit lines need both fields.
 		`d.cash != null && d.credit != null`,
@@ -70,7 +70,7 @@ func TestSpendPanelToleratesAReportWithoutTheCreditFields(t *testing.T) {
 		`cr != null`,
 	} {
 		if !strings.Contains(body, want) {
-			t.Errorf("renderSpend does not tolerate an older report: no %q", want)
+			t.Errorf("costSpend does not tolerate an older report: no %q", want)
 		}
 	}
 }
