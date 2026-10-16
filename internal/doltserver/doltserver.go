@@ -432,10 +432,15 @@ func (c *Config) SQLArgs() []string {
 // UserDSN returns the user[:password] portion of a MySQL DSN. Every Go
 // connection to the town's Dolt builds its DSN from it, so the password rule
 // lives here alone. The driver's own formatter writes it, so the user and
-// password are laid out the way mysql.ParseDSN reads them back.
+// password are laid out the way mysql.ParseDSN reads them back. An empty User
+// is the default user: a bare ":password" would otherwise reach a caller that
+// reads an empty user part as root with no password.
 func (c *Config) UserDSN() string {
 	cfg := mysql.NewConfig()
 	cfg.User, cfg.Passwd = c.User, c.Password
+	if cfg.User == "" {
+		cfg.User = DefaultUser
+	}
 	return strings.TrimSuffix(strings.TrimSuffix(cfg.FormatDSN(), "/"), "@")
 }
 

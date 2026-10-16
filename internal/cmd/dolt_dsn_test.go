@@ -232,3 +232,15 @@ func TestFormatDoltDSNCarriesPassword(t *testing.T) {
 		t.Errorf("unix DSN = %q, want %q", unix, want)
 	}
 }
+
+// A config that sets a password and no user connects as root with that
+// password; the bare UserDSN of the pair is empty and would lose it (gt-sktin).
+func TestBuildDoltDSNFromConfig_EmptyUserKeepsPassword(t *testing.T) {
+	t.Parallel()
+	cfg := &doltserver.Config{Password: "secret", Port: 3307}
+	got := buildDoltDSNFromConfigVia(noSocket, cfg, "hq", dsnOpts{})
+	want := "root:secret@tcp(127.0.0.1:3307)/hq"
+	if got != want {
+		t.Errorf("got\n  %s\nwant\n  %s", got, want)
+	}
+}

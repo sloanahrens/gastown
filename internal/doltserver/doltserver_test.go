@@ -4113,7 +4113,9 @@ func TestUserDSN(t *testing.T) {
 		{"root", "secret", "root:secret"},
 		{"admin", "p@ss", "admin:p@ss"},
 		{"root", "a/b:c(d)", "root:a/b:c(d)"},
-		{"", "", ""},
+		// An empty user is the default user, so a password keeps its user part.
+		{"", "", "root"},
+		{"", "secret", "root:secret"},
 	}
 	for _, tt := range tests {
 		c := &Config{User: tt.user, Password: tt.password}
@@ -4124,17 +4126,18 @@ func TestUserDSN(t *testing.T) {
 		}
 		// The user part must read back through the driver unchanged, behind
 		// the address a probe appends.
-		if tt.user == "" {
-			continue // no user part to read back
+		wantUser := tt.user
+		if wantUser == "" {
+			wantUser = DefaultUser
 		}
 		parsed, err := mysql.ParseDSN(got + "@tcp(127.0.0.1:3307)/")
 		if err != nil {
 			t.Errorf("ParseDSN(%q): %v", got, err)
 			continue
 		}
-		if parsed.User != tt.user || parsed.Passwd != tt.password {
+		if parsed.User != wantUser || parsed.Passwd != tt.password {
 			t.Errorf("ParseDSN(%q) = user %q password %q, want user %q password %q",
-				got, parsed.User, parsed.Passwd, tt.user, tt.password)
+				got, parsed.User, parsed.Passwd, wantUser, tt.password)
 		}
 	}
 }
