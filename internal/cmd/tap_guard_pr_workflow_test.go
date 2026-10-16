@@ -397,6 +397,14 @@ func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
 		{"escaped substitution is data", `echo "\$(gh pr create)"`, false},
 		{"substitution in a quoted heredoc body is data", "cat > f <<'EOF'\n$(gh pr create)\nEOF", false},
 
+		// The words behind a substitution's ")" are the shell's next words:
+		// "x=$(echo hi) gh pr create" assigns x and then runs gh pr create, so
+		// the assignment must not swallow the command (gt-4t56h).
+		{"command after a substitution on the same line", "x=$(echo hi) gh pr create", true},
+		{"branch creation after a substitution on the same line", "x=$(echo hi) git checkout -b feature/x", true},
+		{"unrelated gh after a substitution", "x=$(echo hi) gh pr view 12", false},
+		{"unrelated command after a substitution", "x=$(date) ls -la", false},
+
 		// A body holding parentheses of its own still runs to its balancing ")".
 		{"substitution holding a nested substitution", `x=$(gh pr create --title "$(date)")`, true},
 		{"substitution holding a parenthesis in a quote", `x=$(gh pr create --title "fix (x)")`, true},
@@ -409,6 +417,10 @@ func TestPRWorkflowGuard_WrappedVariants(t *testing.T) {
 		{"backtick body with an escaped backtick", "x=`echo \\`gh pr create\\``", true},
 		{"unterminated substitution", "x=$(gh pr create --fill", true},
 		{"unterminated backtick substitution", "x=`gh pr create --fill", true},
+		// A body that runs to the end of the text hands its ")" over as a word
+		// of its own, so the word the ")" touched is judged whole and the gh
+		// behind it is seen (gt-4t56h).
+		{"body running to the end of the text keeps its last word whole", "x=$(echo `gh pr create)", true},
 		{"substitution after a quoted dollar-paren", `echo '$(date)' "$(gh pr create)"`, true},
 		{"substitution after an escaped dollar-paren", `echo \$(date) $(gh pr create)`, true},
 		{"empty substitution", "x=$()", false},
@@ -477,6 +489,7 @@ func TestPRWorkflowGuard_WrappedBlockedInAgentContext(t *testing.T) {
 		{"gh pr create in an echoed substitution", `echo "$(gh pr create)"`, prWorkflowBlockAgentContext},
 		{"session branch with a substituted gh pr create", "git checkout -b " + branch + ` "$(gh pr create)"`, prWorkflowBlockAgentContext},
 		{"gh pr view in a substitution", "url=$(gh pr view 12 --json url)", prWorkflowAllow},
+		{"gh pr create after a substitution on the same line", "x=$(echo hi) gh pr create", prWorkflowBlockAgentContext},
 		{"session branch behind an env prefix keeps the exemption", "GIT_TRACE=1 git checkout -b " + branch, prWorkflowAllow},
 		{"session branch behind env keeps the exemption", "env GIT_TRACE=1 git switch -c " + branch, prWorkflowAllow},
 		{"gh pr view behind env", "GH_REPO=o/r gh pr view 12", prWorkflowAllow},
