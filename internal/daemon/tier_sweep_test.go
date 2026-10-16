@@ -484,9 +484,14 @@ func TestTierSweepDeferForRestart_StaleLatch(t *testing.T) {
 		withTierSweepLastRun(t, d, "gastown", now.Add(-2*time.Hour))
 		d.upgradeRestartPending.Store(true)
 		d.tierSweepDeferForRestart(now)
-		d.tierSweepSkipLogged.Store(true)
 		if !d.tierSweepStaleLogged.Load() {
 			t.Fatal("the stale run did not latch its line")
+		}
+		// The clock steps back inside the bound: the same restart now defers,
+		// so both latches are set by the code that owns them.
+		d.tierSweepDeferForRestart(now.Add(-100 * time.Minute))
+		if !d.tierSweepSkipLogged.Load() {
+			t.Fatal("the deferral did not latch its skip line")
 		}
 		d.upgradeRestartPending.Store(false)
 		d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "abc123", nil }

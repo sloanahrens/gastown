@@ -529,8 +529,10 @@ func TestPatrolScanGHGatesDoesNotRecordAFailedCheck(t *testing.T) {
 
 	d.patrolScanGHGates(h, []string{"myr"})
 
-	if !evaluatePatrolDue(townRoot, "patrol_scan_gh_gates", time.Time{}, time.Now(), ghGateInterval).due {
-		t.Fatal("a tick where every gate check failed recorded itself as run; the next tick will skip the hour")
+	for _, key := range []string{"patrol_scan_gh_gates", "patrol_scan_gh_gates:myr"} {
+		if !evaluatePatrolDue(townRoot, key, time.Time{}, time.Now(), ghGateInterval).due {
+			t.Fatalf("a tick where every gate check failed recorded %s as run; the next tick will skip the hour", key)
+		}
 	}
 }
 
@@ -545,23 +547,31 @@ func TestPatrolScanGHGatesRecordsARunThatAnswered(t *testing.T) {
 
 	d.patrolScanGHGates(h, []string{"myr"})
 
-	if evaluatePatrolDue(townRoot, "patrol_scan_gh_gates", time.Time{}, time.Now(), ghGateInterval).due {
-		t.Fatal("a tick whose every check answered did not record the run")
+	for _, key := range []string{"patrol_scan_gh_gates", "patrol_scan_gh_gates:myr"} {
+		if evaluatePatrolDue(townRoot, key, time.Time{}, time.Now(), ghGateInterval).due {
+			t.Fatalf("a tick whose every check answered did not record %s", key)
+		}
 	}
 }
 
 // bd reads one database per call, so a database whose gate check failed has
-// had no gh gate evaluated even when the others answered. Recording the run
-// would hold that database's gates for the hour (gt-kp9fo).
+// had no gh gate evaluated even when the others answered. Recording its run
+// would hold its gates for the hour (gt-kp9fo); the databases that did answer
+// spend theirs, and the failure is in the log for the operator to see.
 func TestPatrolScanGHGates_PartialFailure(t *testing.T) {
 	t.Parallel()
-	for _, failing := range []string{"", "myr"} {
-		t.Run("fails="+failing, func(t *testing.T) {
+	cases := []struct{ failing, failKey, answerKey string }{
+		{"", "patrol_scan_gh_gates", "patrol_scan_gh_gates:myr"},
+		{"myr", "patrol_scan_gh_gates:myr", "patrol_scan_gh_gates"},
+	}
+	for _, tc := range cases {
+		t.Run("fails="+tc.failing, func(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
-			d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
+			var logs strings.Builder
+			d := &Daemon{logger: log.New(&logs, "", 0), config: &Config{TownRoot: townRoot}}
 			h := &patrolScanHost{d: d, bdGateCheck: func(rig string, _ ...string) ([]byte, error) {
-				if rig == failing {
+				if rig == tc.failing {
 					return nil, errors.New("bd gate check: connection refused")
 				}
 				return []byte("No open gates of type 'gh' found.\n"), nil
@@ -569,10 +579,50 @@ func TestPatrolScanGHGates_PartialFailure(t *testing.T) {
 
 			d.patrolScanGHGates(h, []string{"myr"})
 
-			if !evaluatePatrolDue(townRoot, "patrol_scan_gh_gates", time.Time{}, time.Now(), ghGateInterval).due {
-				t.Fatal("a tick where one database's gate check failed recorded the run; its gh gates wait the hour")
+			if !evaluatePatrolDue(townRoot, tc.failKey, time.Time{}, time.Now(), ghGateInterval).due {
+				t.Fatal("a database whose gate check failed recorded the run; its gh gates wait the hour")
+			}
+			if evaluatePatrolDue(townRoot, tc.answerKey, time.Time{}, time.Now(), ghGateInterval).due {
+				t.Fatal("a database whose gate check answered did not record the run")
+			}
+			where := gateCheckWhere(tc.failing)
+			for _, want := range []string{
+				"patrol_scan: " + where + ": gh gate check failed: bd gate check: connection refused",
+				"patrol_scan: " + where + ": gh gates: the gate check failed; not recording the run",
+			} {
+				if !strings.Contains(logs.String(), want) {
+					t.Errorf("the failure left no line %q in the log:\n%s", want, logs.String())
+				}
 			}
 		})
+	}
+}
+
+// A database that stays down is retried every tick, but only that database:
+// the others spent their hour, and re-running their `gh` checks each two
+// minutes would defeat the cadence (gt-96bsu).
+func TestPatrolScanGHGates_PersistentFailureRetriesOnlyTheFailedDatabase(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	d := &Daemon{logger: log.New(io.Discard, "", 0), config: &Config{TownRoot: townRoot}}
+	calls := map[string]int{}
+	h := &patrolScanHost{d: d, bdGateCheck: func(rig string, _ ...string) ([]byte, error) {
+		calls[rig]++
+		if rig == "myr" {
+			return nil, errors.New("bd gate check: connection refused")
+		}
+		return []byte("No open gates of type 'gh' found.\n"), nil
+	}}
+
+	for tick := 0; tick < 3; tick++ {
+		d.patrolScanGHGates(h, []string{"myr", "yard"})
+	}
+
+	want := map[string]int{"": 1, "yard": 1, "myr": 3}
+	for rig, n := range want {
+		if calls[rig] != n {
+			t.Errorf("gh gate check ran %d times over three ticks for %q, want %d (calls: %v)", calls[rig], rig, n, calls)
+		}
 	}
 }
 
