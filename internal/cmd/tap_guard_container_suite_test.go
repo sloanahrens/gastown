@@ -1643,6 +1643,78 @@ func TestContainerSuiteGuardsStripHeredocBodies(t *testing.T) {
 	}
 }
 
+// A shell-fed heredoc body is a script the reader shell runs, so it inherits
+// the container opt-in the reading line carries, exactly as a -c payload and a
+// command substitution do. A GT_TEST_DOCKER=1 typed before the reader word
+// therefore reaches the body; dropping it let an opt-in line feed a
+// container-backed package to a shell and run it unwrapped on the shared
+// Docker VM (gt-zyccn). An opt-in inside the body already counted, and a body
+// naming no container-backed package stays allowed either way.
+func TestContainerSuiteHeredocBodyHonoursDockerOptIn(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/nux/gastown")
+	tests := []struct {
+		name     string
+		command  string
+		envOptIn string
+		blocked  bool
+	}{
+		{
+			name:    "opt-in on the reader line reaches the body",
+			command: "GT_TEST_DOCKER=1 bash <<'EOF'\ngo test ./internal/beads\nEOF\n",
+			blocked: true,
+		},
+		{
+			name:    "exported opt-in on the reader line reaches the body",
+			command: "export GT_TEST_DOCKER=1; bash <<'EOF'\ngo test ./internal/beads\nEOF\n",
+			blocked: true,
+		},
+		{
+			name:    "opt-in in the body's own text",
+			command: "bash <<'EOF'\nGT_TEST_DOCKER=1 go test ./internal/beads\nEOF\n",
+			blocked: true,
+		},
+		{
+			name:     "hook environment opt-in reaches the body",
+			command:  "bash <<'EOF'\ngo test ./internal/beads\nEOF\n",
+			envOptIn: "1",
+			blocked:  true,
+		},
+		{
+			name:    "no opt-in anywhere",
+			command: "bash <<'EOF'\ngo test ./internal/beads\nEOF\n",
+			blocked: false,
+		},
+		{
+			name:    "opt-in but the body names no container-backed package",
+			command: "GT_TEST_DOCKER=1 bash <<'EOF'\ngo test ./internal/style\nEOF\n",
+			blocked: false,
+		},
+		{
+			name:    "slot-wrapped body with no opt-in",
+			command: "gt slot run --role gastown/nux -- bash <<'EOF'\ngo test ./internal/beads\nEOF\n",
+			blocked: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, matched := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), tt.command, tt.envOptIn)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q, envOptIn %q) blocked = %v (reason %q, matched %v), want %v", tt.command, tt.envOptIn, got, reason, matched, tt.blocked)
+			}
+			if !tt.blocked {
+				return
+			}
+			// Every blocked case here names a container-backed package, so the
+			// verdict must be that package rule, not some neighbouring refusal.
+			if !strings.Contains(reason, "targets testcontainers-backed package(s)") {
+				t.Errorf("evaluateContainerSuiteCommand(%q) reason = %q, want the testcontainers-backed package verdict", tt.command, reason)
+			}
+		})
+	}
+}
+
 // Shell-fed heredocs are followed to a bounded depth, the same bound and the
 // same shape matchesPRWorkflowCommand places on the identical recursion:
 // maxTestGuardNestDepth levels are inspected, so an invocation three shells

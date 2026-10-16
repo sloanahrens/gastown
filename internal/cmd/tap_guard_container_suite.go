@@ -672,10 +672,20 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 	// counts too: the test process inherits it without it being typed.
 	dockerOn := commandEnablesDockerTests(tokens) || envOptIn == "1"
 	vars := shellVarAssignments(tokens)
+	// nestedOptIn is what every script this command runs as a separate shell
+	// inherits: the line's own opt-in when it carries one, the hook
+	// environment's otherwise. A -c payload, a command substitution and a
+	// shell-fed heredoc body are all that same handoff, so a GT_TEST_DOCKER=1
+	// before the reader word reaches the body the shell reads
+	// (gt-zyccn).
+	nestedOptIn := envOptIn
+	if dockerOn {
+		nestedOptIn = "1"
+	}
 
 	// judge covers one segment and the -c payloads of the shells it starts. A
 	// payload runs in the segment's directory (the base when the walk cannot
-	// place it, as for a heredoc body) and inherits the segment's container
+	// place it, as for a heredoc body) and inherits the line's container
 	// opt-in; a slot-run wrapper exempts its payload with the rest of the
 	// segment.
 	judge := func(segment []string, start int) (string, []string) {
@@ -694,12 +704,8 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 		if !known {
 			dir = cwd
 		}
-		payloadOptIn := envOptIn
-		if dockerOn {
-			payloadOptIn = "1"
-		}
 		for _, payload := range payloads {
-			if r, m := evaluateContainerSuiteCommandDepth(proc, payload, dir, payloadOptIn, depth+1); r != "" {
+			if r, m := evaluateContainerSuiteCommandDepth(proc, payload, dir, nestedOptIn, depth+1); r != "" {
 				return r, m
 			}
 		}
@@ -731,12 +737,8 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 	// A command substitution runs outside any slot-run wrapper that precedes
 	// it on the line (`gt slot run -- echo $(go test ./...)`), so it is judged
 	// whatever its segment is, with the container opt-in the line carries.
-	subOptIn := envOptIn
-	if dockerOn {
-		subOptIn = "1"
-	}
 	for _, sub := range subs {
-		if r, m := evaluateContainerSuiteCommandDepth(proc, sub.body, sub.dir, subOptIn, depth+1); r != "" {
+		if r, m := evaluateContainerSuiteCommandDepth(proc, sub.body, sub.dir, nestedOptIn, depth+1); r != "" {
 			return r, m
 		}
 	}
@@ -746,7 +748,7 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 	// (heredocBodyDir, gt-1cvqj, gt-v02wh).
 	for _, span := range spans {
 		bodyCwd := heredocBodyDir(proc, command, span, cwd)
-		if r, m := evaluateContainerSuiteCommandDepth(proc, span.body, bodyCwd, envOptIn, depth+1); r != "" {
+		if r, m := evaluateContainerSuiteCommandDepth(proc, span.body, bodyCwd, nestedOptIn, depth+1); r != "" {
 			return r, m
 		}
 	}
