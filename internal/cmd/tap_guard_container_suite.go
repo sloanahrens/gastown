@@ -888,13 +888,11 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd string, 
 	}
 
 	// judge covers one segment and the -c payloads of the shells it starts. A
-	// payload runs in the segment's directory (the base when the walk cannot
-	// place it, as for a heredoc body) and inherits the line's container
+	// payload runs in the segment's directory and inherits the line's container
 	// opt-in; a slot-run wrapper exempts its payload with the rest of the
 	// segment. A directory the walk cannot place is carried to the payload as
-	// unplaced rather than passed on as the base, so a payload that names it
-	// ("bash -c 'go test ./beads'") is refused instead of read as the base's
-	// own package (gt-jj3or).
+	// unplaced rather than read as the base, so a payload that names it
+	// ("bash -c 'go test ./beads'") is refused (gt-jj3or).
 	judge := func(segment []string, start int) (string, []string) {
 		segment = commandSegment(segment)
 		dir, known := segmentWalkRoot(proc, tokens, start, cwd, vars)
