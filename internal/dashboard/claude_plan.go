@@ -3,10 +3,14 @@ package dashboard
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
 	"sort"
+	"strings"
+	"sync"
 	"time"
 )
 
@@ -18,9 +22,15 @@ import (
 //
 // The series is written by ~/.claude/statusline-command.sh, one JSON line per
 // change: t, five_hour, five_hour_resets_at, seven_day, seven_day_resets_at,
-// percentages 0-100 and resets as epoch seconds. The file only ever grows, so a
-// poll reads its tail rather than all of it, and a line it cannot parse is
-// skipped: a series with one garbled append still measures the week.
+// percentages 0-100 and resets as epoch seconds. A poll reads the tail, and a
+// line it cannot parse is skipped: a series with one garbled append still
+// measures the week.
+//
+// The reader also writes, to files under <town>/.runtime/claude-plan/ only: the
+// weekly closeouts the month rollup reads, and the trim that keeps the status
+// line's series to claudePlanRetentionDays. The series is the status line's
+// file, so the trim is the one place the dashboard rewrites another writer's
+// data (gt-bcq4m).
 
 const (
 	// claudePlanStale is how long after its newest sample the series reads as
@@ -55,12 +65,20 @@ const (
 	// claudePlanDaySecs is a day, the unit both paces are per.
 	claudePlanDaySecs = 86400
 
+	// claudePlanWeekSecs is the weekly window's span; a window starts a week
+	// before the instant it resets.
+	claudePlanWeekSecs = claudePlanWeekDays * claudePlanDaySecs
+
 	// claudePlanWindowSlackSecs is how far apart two readings' reset instants
 	// may be and still name the same window. A window resets at one instant,
 	// which the status line writes as whole seconds of a countdown the API
 	// recomputes, so two readings of it agree within seconds; two windows are
 	// seven days apart, so this slack never merges them.
 	claudePlanWindowSlackSecs = 60
+
+	// claudePlanRetentionDays is how long the raw series is kept; the weekly
+	// history outlives it.
+	claudePlanRetentionDays = 90
 )
 
 // ClaudePlanSample is one line of the status line's series, written with the
@@ -127,23 +145,49 @@ type ClaudePlan struct {
 	// Unavailable says the series could not be read, which the page draws as
 	// itself and never as a week at 0%.
 	Unavailable bool `json:"unavailable,omitempty"`
+	// StateError names the closeout history or trim write that failed on this
+	// poll. The numbers above are still the poll's best answer; the page shows
+	// the error on hover so a history that stopped growing is not mistaken for
+	// one that is healthy.
+	StateError string `json:"state_error,omitempty"`
+
+	// ClaudePlanMonth is the billing month's rollup (gt-bcq4m).
+	ClaudePlanMonth
 }
 
-// ClaudePlanReader reads a status line series from the path it was given.
+// ClaudePlanReader reads a status line series from the path it was given, and
+// keeps the weekly history and the series' trim that live beside it. Reads are
+// serialized, so concurrent callers in one process record a closeout once.
 type ClaudePlanReader struct {
+	mu           sync.Mutex
 	path         string
+	historyPath  string
 	planUSDMonth float64
 	// usage is where the API-equivalent figures' tokens come from: the usage
 	// scan's records, read at the same instant the week is measured at. A reader
 	// without one draws the plan line alone, as it did before gt-d8sem.
-	usage func(now time.Time) []UsageRecord
+	usage      func(now time.Time) []UsageRecord
+	renewalDay int
 }
 
 // NewClaudePlanReader returns a reader of the series at path, pricing its
 // percentages against planUSDMonth, which falls back to ClaudePlanDefaultUSD
-// when it is not a price.
+// when it is not a price. The plan renews on ClaudePlanDefaultRenewalDay unless
+// WithRenewalDay says otherwise.
 func NewClaudePlanReader(path string, planUSDMonth float64) *ClaudePlanReader {
-	return &ClaudePlanReader{path: path, planUSDMonth: planUSDMonth}
+	return &ClaudePlanReader{
+		path:         path,
+		historyPath:  claudePlanWeeksPath(path),
+		planUSDMonth: planUSDMonth,
+		renewalDay:   ClaudePlanDefaultRenewalDay,
+	}
+}
+
+// WithRenewalDay sets the day the billing month starts on; a day no month has
+// falls back to the default.
+func (r *ClaudePlanReader) WithRenewalDay(day int) *ClaudePlanReader {
+	r.renewalDay = planRenewalDay(day)
+	return r
 }
 
 // WithUsage points the reader at the usage scan's records, so its payload also
@@ -159,13 +203,35 @@ func (r *ClaudePlanReader) WithUsage(records func(now time.Time) []UsageRecord) 
 
 // Read returns the block's payload from the series as it stands at now: a file
 // that is missing or unreadable is an unavailable block, never an empty week.
+//
+// The poll also records windows whose reset has passed and trims the series. A
+// failure of either leaves the week and month as drawn and is reported in
+// StateError, so a town whose .runtime is not writable still draws its week.
 func (r *ClaudePlanReader) Read(now time.Time) *ClaudePlan {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	samples, err := readClaudePlanSamples(r.path)
+	var p ClaudePlan
+	var stateErrs []error
 	if err != nil {
-		return &ClaudePlan{PlanUSDMonth: planUSD(r.planUSDMonth), Stale: true, Unavailable: true}
+		p = ClaudePlan{PlanUSDMonth: planUSD(r.planUSDMonth), Stale: true, Unavailable: true}
+	} else {
+		if err := trimClaudePlanSamples(r.path, now.Add(-claudePlanRetentionDays*24*time.Hour)); err != nil {
+			stateErrs = append(stateErrs, fmt.Errorf("series trim: %w", err))
+		}
+		p = ComputeClaudePlan(samples, now, r.planUSDMonth)
+		r.attachAPIEquivalent(&p, now)
 	}
-	p := ComputeClaudePlan(samples, now, r.planUSDMonth)
-	r.attachAPIEquivalent(&p, now)
+	// The history outlives the series, so an unreadable series still reports the
+	// months already recorded.
+	weeks, err := r.claudePlanWeeks(samples, now)
+	if err != nil {
+		stateErrs = append(stateErrs, fmt.Errorf("weekly history: %w", err))
+	}
+	p.ClaudePlanMonth = ComputeClaudePlanMonth(weeks, now, r.planUSDMonth, r.renewalDay)
+	if err := errors.Join(stateErrs...); err != nil {
+		p.StateError = strings.ReplaceAll(err.Error(), "\n", "; ")
+	}
 	return &p
 }
 
@@ -253,20 +319,26 @@ func ComputeClaudePlan(samples []ClaudePlanSample, now time.Time, planUSDMonth f
 
 // claudePlanWindow is the samples of the newest reading's own window, in time
 // order: the limit's resets_at identifies a run of the limit, and a sample from
-// a run that has ended belongs to a week nobody is spending against now. The
-// match allows claudePlanWindowSlackSecs either way, so a reset instant the API
-// reports a few seconds differently does not split one window into two single
-// readings and leave the pace reading zero.
+// a run that has ended belongs to a week nobody is spending against now.
 func claudePlanWindow(samples []ClaudePlanSample, resetsAt int64) []ClaudePlanSample {
 	window := make([]ClaudePlanSample, 0, len(samples))
 	for _, s := range samples {
-		if s.SevenDayResetsAt-resetsAt <= claudePlanWindowSlackSecs &&
-			resetsAt-s.SevenDayResetsAt <= claudePlanWindowSlackSecs {
+		if claudePlanSameWindow(s.SevenDayResetsAt, resetsAt) {
 			window = append(window, s)
 		}
 	}
 	sort.Slice(window, func(i, j int) bool { return window[i].T < window[j].T })
 	return window
+}
+
+// claudePlanSameWindow reports whether two reset instants name one window. The
+// match allows claudePlanWindowSlackSecs either way, so a reset instant the API
+// reports a few seconds differently does not split one window into two single
+// readings and leave the pace reading zero; two windows are a week apart, so the
+// slack never merges two of them.
+func claudePlanSameWindow(a, b int64) bool {
+	d := a - b
+	return -claudePlanWindowSlackSecs <= d && d <= claudePlanWindowSlackSecs
 }
 
 // claudePlanPace is the weekly percentage's rise per day over span, measured

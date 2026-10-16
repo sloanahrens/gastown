@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -130,5 +131,33 @@ func TestDashboardClaudePlanReaderCarriesTheAPIEquivalentDollars(t *testing.T) {
 	empty := newDashboardClaudePlanReader(emptyRoot, newDashUsageReader(emptyRoot), dashboardClaudePlanUSD).Read(now)
 	if empty.APIEquivalentWeekUSD == nil || *empty.APIEquivalentWeekUSD != 0 {
 		t.Errorf("an empty records directory gave %v, want a figure of zero", empty.APIEquivalentWeekUSD)
+	}
+}
+
+// The month rollup's renewal day defaults to the day the reader's billing month
+// starts on, and the flag that sets it is on gt dashboard: a plan renewed on
+// another day draws its month from that day, and the two cannot drift apart
+// without the help saying so.
+func TestDashboardClaudePlanRenewalDayFlag(t *testing.T) {
+	t.Parallel()
+
+	f := dashboardCmd.Flags().Lookup("claude-plan-renewal-day")
+	if f == nil {
+		t.Fatal("gt dashboard has no --claude-plan-renewal-day flag")
+	}
+	if want := fmt.Sprint(dashboard.ClaudePlanDefaultRenewalDay); f.DefValue != want {
+		t.Errorf("--claude-plan-renewal-day defaults to %q, want %q", f.DefValue, want)
+	}
+	if !strings.Contains(dashboardCmd.Long, "--claude-plan-renewal-day") {
+		t.Error("gt dashboard's help does not name the flag the month rollup reads")
+	}
+
+	// The flag's value is the day the reader's month starts on, which is the
+	// plan's own month rather than the calendar's.
+	now := time.Now()
+	reader := dashboard.NewClaudePlanReader(filepath.Join(t.TempDir(), "samples.jsonl"), 200).
+		WithRenewalDay(1)
+	if p := reader.Read(now); p.StartAt != time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location()).Unix() {
+		t.Errorf("a reader renewing on the 1st drew its month from %d, want the 1st of this month", p.StartAt)
 	}
 }

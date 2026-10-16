@@ -32,13 +32,14 @@ import (
 )
 
 var (
-	dashboardPort          int
-	dashboardBind          string
-	dashboardSince         string
-	dashboardSpendCmd      string
-	dashboardForgejoRepos  []string
-	dashboardClaudePlanUSD float64
-	dashboardOpen          bool
+	dashboardPort                 int
+	dashboardBind                 string
+	dashboardSince                string
+	dashboardSpendCmd             string
+	dashboardForgejoRepos         []string
+	dashboardClaudePlanUSD        float64
+	dashboardClaudePlanRenewalDay int
+	dashboardOpen                 bool
 )
 
 var dashboardCmd = &cobra.Command{
@@ -69,7 +70,13 @@ left out.
 --claude-plan-usd prices the plan meter beside it: the Claude weekly and
 five-hour limits, read every minute from the samples the status line appends to
 .runtime/claude-plan/samples.jsonl, with the pace, the projection to the reset
-and the week's dollars drawn against that monthly price.
+and the week's dollars drawn against that monthly price. The same read rolls the
+weeks up into the billing month that starts on the plan's renewal day
+(--claude-plan-renewal-day, the 18th by default): each week is recorded once, as
+its reset passes, in .runtime/claude-plan/weeks.jsonl, and the month reports what
+those weeks came to against the plan's price, how many ran to 90% of the limit
+and how it compares with the month before. The raw series is trimmed to ninety
+days as it is polled; the weekly history is what outlives it.
 
 The Forgejo panel reads the viewer role's token file
 (~/.config/gt/forgejo-viewer.env) and lists the recent activity of every rig
@@ -158,6 +165,7 @@ func init() {
 	dashboardCmd.Flags().StringArrayVar(&dashboardForgejoRepos, "forgejo-repo", nil, "Repo (owner/name) the Forgejo panel reads; repeatable (default: every rig cut over to Forgejo)")
 	dashboardCmd.Flags().BoolVar(&dashboardOpen, "open", false, "Open the page in the default browser")
 	dashboardCmd.Flags().Float64Var(&dashboardClaudePlanUSD, "claude-plan-usd", dashboard.ClaudePlanDefaultUSD, "Monthly price of the Claude plan the plan meter's percentages are drawn against")
+	dashboardCmd.Flags().IntVar(&dashboardClaudePlanRenewalDay, "claude-plan-renewal-day", dashboard.ClaudePlanDefaultRenewalDay, "Day of the month the Claude plan renews on; the plan meter's month rollup runs from this day to the next")
 	rootCmd.AddCommand(dashboardCmd)
 }
 
@@ -175,7 +183,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, dashboardClaudePlanUSD)
+	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay)
 	if err != nil {
 		return err
 	}
@@ -256,8 +264,9 @@ func newDashboardClaudePlanReader(townRoot string, usage *dashUsageReader, planU
 }
 
 // dashboardClaudePlanPath is where the status line appends its Claude plan
-// samples inside the town: one JSON line per reading, appended and never
-// rewritten. The sampler is ~/.claude/statusline-command.sh, outside the repo.
+// samples inside the town: one JSON line per reading. The sampler is
+// ~/.claude/statusline-command.sh, outside the repo; the dashboard's reader
+// trims lines older than the retention.
 func dashboardClaudePlanPath(townRoot string) string {
 	return filepath.Join(townRoot, ".runtime", "claude-plan", "samples.jsonl")
 }
@@ -265,7 +274,7 @@ func dashboardClaudePlanPath(townRoot string) string {
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
 // when the server stops.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, claudePlanUSD float64) (*dashboard.Hub, func(), error) {
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, claudePlanUSD float64, claudePlanRenewalDay int) (*dashboard.Hub, func(), error) {
 	beadReads := openTailBeads(townRoot)
 	rigOfBead := landingRig(townRoot)
 	// The deploy block reads the same repos through the same viewer client as
@@ -332,7 +341,8 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	})
 	deepReview := newDashDeepReviewReader(townRoot)
 	usage := newDashUsageReader(townRoot)
-	claudePlan := newDashboardClaudePlanReader(townRoot, usage, claudePlanUSD)
+	claudePlan := newDashboardClaudePlanReader(townRoot, usage, claudePlanUSD).
+		WithRenewalDay(claudePlanRenewalDay)
 	rework := newDashReworkReader(townRoot)
 	loads := newDashLoads(townRoot, time.Now)
 	return dashboard.NewHub(dashboard.Config{

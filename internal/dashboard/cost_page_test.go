@@ -628,3 +628,169 @@ func TestCostPanelClaudePlanLineWordsTheWeek(t *testing.T) {
 		})
 	}
 }
+
+// planMonthFields is the month rollup's fields as the reader reports them: a
+// billing month at 71% of the plan over three weeks, one of them at the ceiling
+// and one still running, with the month before it at 54%. over replaces them or,
+// on a nil value, drops them.
+func planMonthFields(now time.Time, over map[string]any) map[string]any {
+	m := map[string]any{
+		"month_start_at":             now.AddDate(0, 0, -28).Unix(),
+		"month_end_at":               now.AddDate(0, 0, 1).Unix(),
+		"month_value_used_usd":       138.15,
+		"month_utilization_pct":      71.0,
+		"weeks_at_ceiling":           1,
+		"avg_weekly_pct":             46.0,
+		"month_weeks":                3,
+		"month_open_week":            true,
+		"prev_month_utilization_pct": 54.0,
+	}
+	for k, v := range over {
+		if v == nil {
+			delete(m, k)
+			continue
+		}
+		m[k] = v
+	}
+	return m
+}
+
+// The plan line carries the billing month on its tail: where the plan stands for
+// the month and how many weeks ran to the ceiling, which is the pair that sizes
+// it. The line has no room for the month's own numbers — which month it is, what
+// it comes to, the mean week and the month before — so they are on the hover
+// (gt-bcq4m).
+func TestCostPanelClaudePlanLineCarriesTheMonthSuffix(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	start, end := now.AddDate(0, 0, -28), now.AddDate(0, 0, 1)
+	lines, _ := drawCost(t, map[string]any{
+		"spend":       map[string]any{"balance": 12.5},
+		"claude_plan": claudePlan(now, planMonthFields(now, nil)),
+	})
+	if len(lines) < 2 {
+		t.Fatalf("the panel drew %d lines: %+v", len(lines), lines)
+	}
+	if want := "· month 71% of plan · 1 week at ceiling"; !strings.HasSuffix(lines[1].Text, want) {
+		t.Errorf("the plan line = %q, want it to end %q", lines[1].Text, want)
+	}
+	for _, want := range []string{
+		"billing month " + start.Format("2 Jan") + " to " + end.Format("2 Jan") + ", the plan's renewal day to the next",
+		"about $138.15 of the $200.00 plan, approximate",
+		"mean week 46% over 3 weeks",
+		"the week in progress counts at its latest reading",
+		"month before 54% of plan",
+	} {
+		if !strings.Contains(lines[1].Title, want) {
+			t.Errorf("the plan line's hover has no %q: %q", want, lines[1].Title)
+		}
+	}
+}
+
+// A state error from the reader reaches the hover, so a history that stopped
+// being kept is visible on the page.
+func TestCostPanelClaudePlanHoverShowsAStateError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	lines, _ := drawCost(t, map[string]any{
+		"spend":       map[string]any{"balance": 12.5},
+		"claude_plan": claudePlan(now, planMonthFields(now, map[string]any{"state_error": "weekly history: disk full"})),
+	})
+	if len(lines) < 2 || !strings.Contains(lines[1].Title, "state not kept: weekly history: disk full") {
+		t.Errorf("the plan line's hover does not show the state error: %+v", lines)
+	}
+}
+
+// The month's own words, case by case: the ceiling clause counts the month's
+// weeks and is left out when none of them reached it, and the month before is
+// named only when the history reaches back to one. A month of no counted weeks
+// draws no clause at all — the reader has no history yet — since a month at 0%
+// of the plan would read as a subscription nobody has used.
+func TestCostPanelClaudePlanMonthSuffixWords(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	cases := []struct {
+		name      string
+		over      map[string]any
+		want      []string
+		gone      []string
+		hoverGone []string
+	}{
+		{
+			name: "one week at the ceiling",
+			want: []string{"· month 71% of plan · 1 week at ceiling"},
+		},
+		{
+			name: "two weeks at the ceiling",
+			over: map[string]any{"weeks_at_ceiling": 2},
+			want: []string{"· month 71% of plan · 2 weeks at ceiling"},
+			gone: []string{"1 week at ceiling"},
+		},
+		{
+			name: "a month with no week at the ceiling",
+			over: map[string]any{"weeks_at_ceiling": 0},
+			want: []string{"· month 71% of plan"},
+			gone: []string{"at ceiling"},
+		},
+		{
+			name:      "a month with no month before it",
+			over:      map[string]any{"prev_month_utilization_pct": nil},
+			want:      []string{"· month 71% of plan"},
+			hoverGone: []string{"month before"},
+		},
+		{
+			name:      "a month already closed",
+			over:      map[string]any{"month_open_week": false},
+			want:      []string{"· month 71% of plan"},
+			hoverGone: []string{"in progress"},
+		},
+		{
+			name:      "no month to report",
+			over:      map[string]any{"month_weeks": 0},
+			gone:      []string{"month 71% of plan", "at ceiling"},
+			hoverGone: []string{"billing month", "mean week", "month before"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lines, _ := drawCost(t, map[string]any{
+				"spend":       map[string]any{"balance": 12.5},
+				"claude_plan": claudePlan(now, planMonthFields(now, tc.over)),
+			})
+			if len(lines) < 2 {
+				t.Fatalf("the panel drew %d lines: %+v", len(lines), lines)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(lines[1].Text, want) {
+					t.Errorf("the plan line has no %q: %q", want, lines[1].Text)
+				}
+			}
+			for _, gone := range tc.gone {
+				if strings.Contains(lines[1].Text, gone) {
+					t.Errorf("the plan line still carries %q: %q", gone, lines[1].Text)
+				}
+			}
+			for _, gone := range tc.hoverGone {
+				if strings.Contains(lines[1].Title, gone) {
+					t.Errorf("the plan line's hover still carries %q: %q", gone, lines[1].Title)
+				}
+			}
+		})
+	}
+}
+
+// The page's ceiling is the reader's (ClaudePlanCeilingPct), off a constant that
+// mirrors it: a change to either that left the other behind would colour a week
+// by one threshold and count the month's ceiling weeks by another.
+func TestCostPanelClaudePlanCeilingTracksTheReaderCeiling(t *testing.T) {
+	t.Parallel()
+
+	want := "const CLAUDE_PLAN_CEILING_PCT = " + strconv.Itoa(int(ClaudePlanCeilingPct)) + ";"
+	if !strings.Contains(string(indexHTML), want) {
+		t.Errorf("the page does not carry %q, so its week colour has drifted from the reader's ceiling", want)
+	}
+}
