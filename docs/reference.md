@@ -1028,9 +1028,9 @@ operator hold or when the newest tick is over 10 minutes old. The thresholds are
 open `landing.risk_path` items passes `overseer.review_backlog_threshold`
 (default `15`), or rises by more than `overseer.review_backlog_rise` (default
 `10`) over the lowest count of the last hour. Its summary names the total and
-the change, as `16 open risk-path reviews, +3 in the last hour`. A risk-path
-item wakes on its own only after three hours unreviewed, so a rule on the total
-is what catches a pile.
+the change, as `16 open risk-path reviews, +3 in the last hour (wakes past 15,
+or a rise over 10)`. A risk-path item wakes on its own only after three hours
+unreviewed, so a rule on the total is what catches a pile.
 
 While it holds, more items change the summary and wake nothing. It clears,
 without a wake, when the count falls under half the threshold, and the next
