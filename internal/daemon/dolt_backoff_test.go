@@ -9,6 +9,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 func TestAdvanceBackoff(t *testing.T) {
@@ -863,8 +865,19 @@ func newTestManager(t *testing.T) *DoltServerManager {
 	}
 }
 
-// notARunningPID is above every host's pid ceiling, so it names no process.
-const notARunningPID = 4194300
+// deadPID returns a pid no host has handed out, and proves that on the host
+// before a test relies on it. 1<<30 sits above every pid ceiling — Linux's
+// pid_max tops out at 4194304 — where the old 4194300 did not: that one made
+// the crash-signal tests pass only while this host's ceiling stayed below it.
+func deadPID(t *testing.T) int {
+	t.Helper()
+	const pid = 1 << 30
+	p, err := os.FindProcess(pid)
+	if err != nil || isProcessAlive(p) {
+		t.Fatalf("pid %d is alive on this host: the pid-contract tests need a dead one", pid)
+	}
+	return pid
+}
 
 // A crashed Dolt is reported only if isRunning names the pid it saw gone; the
 // runningFn stub used to be alone in returning a pid with running=false, so
@@ -872,7 +885,8 @@ const notARunningPID = 4194300
 // (gt-ijgck). Port 3307 is the canonical signal path IsDoltUnhealthy reads.
 func TestEnsureRunning_DeadTrackedProcessRaisesCrashSignal(t *testing.T) {
 	t.Parallel()
-	proc, err := os.FindProcess(notARunningPID)
+	dead := deadPID(t)
+	proc, err := os.FindProcess(dead)
 	if err != nil {
 		t.Fatalf("FindProcess: %v", err)
 	}
@@ -891,7 +905,7 @@ func TestEnsureRunning_DeadTrackedProcessRaisesCrashSignal(t *testing.T) {
 		t.Fatalf("EnsureRunning: %v", err)
 	}
 
-	want := []string{fmt.Sprintf("alert:%d", notARunningPID), "start"}
+	want := []string{fmt.Sprintf("alert:%d", dead), "start"}
 	if len(events) != len(want) || events[0] != want[0] || events[1] != want[1] {
 		t.Fatalf("dead tracked process must alert once before the restart, got %v", events)
 	}
@@ -900,8 +914,8 @@ func TestEnsureRunning_DeadTrackedProcessRaisesCrashSignal(t *testing.T) {
 		t.Fatalf("no server_dead signal written: %v", err)
 	}
 	if !strings.Contains(string(signal), `"reason":"server_dead"`) ||
-		!strings.Contains(string(signal), fmt.Sprint(notARunningPID)) {
-		t.Errorf("signal file = %s, want reason server_dead naming PID %d", signal, notARunningPID)
+		!strings.Contains(string(signal), fmt.Sprint(dead)) {
+		t.Errorf("signal file = %s, want reason server_dead naming PID %d", signal, dead)
 	}
 	if !IsDoltUnhealthy(m.townRoot) {
 		t.Error("IsDoltUnhealthy does not see the crash signal")
@@ -913,11 +927,12 @@ func TestEnsureRunning_DeadTrackedProcessRaisesCrashSignal(t *testing.T) {
 // crash and must reach the same alert (gt-ijgck).
 func TestEnsureRunning_DeadPIDFileRaisesCrashSignal(t *testing.T) {
 	t.Parallel()
+	dead := deadPID(t)
 	m := newTestManager(t)
 	m.runningFn = nil
 	m.config.Port = 3307
 	m.sleepFn = func(time.Duration) {}
-	if _, err := writePIDFile(m.pidFile(), notARunningPID); err != nil {
+	if _, err := writePIDFile(m.pidFile(), dead); err != nil {
 		t.Fatalf("writePIDFile: %v", err)
 	}
 
@@ -929,7 +944,7 @@ func TestEnsureRunning_DeadPIDFileRaisesCrashSignal(t *testing.T) {
 		t.Fatalf("EnsureRunning: %v", err)
 	}
 
-	want := []string{fmt.Sprintf("alert:%d", notARunningPID), "start"}
+	want := []string{fmt.Sprintf("alert:%d", dead), "start"}
 	if len(events) != len(want) || events[0] != want[0] || events[1] != want[1] {
 		t.Fatalf("a dead pid file must alert once before the restart, got %v", events)
 	}
@@ -938,17 +953,64 @@ func TestEnsureRunning_DeadPIDFileRaisesCrashSignal(t *testing.T) {
 	}
 }
 
+// The other half of the pid contract, on the branches where the pid in hand is
+// alive but the port is not answering: the false path still carries only a pid
+// observed dead, never that live pid, so EnsureRunning cannot alert a crash for
+// a process that is still there. The pid file names this test binary — alive,
+// and listening on nothing — and the three identity answers are isRunning's
+// own; the pid file's fate is pinned in pid_identity_test.go (gt-ijgck).
+func TestIsRunning_AliveButNotAnsweringNeverNamesTheLivePID(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name        string
+		verifyErr   error
+		wantRunning bool
+	}{
+		{"verified town dolt that does not answer", nil, true},
+		{"identity unverified", fmt.Errorf("ps failed: %w", doltserver.ErrIdentityUnverified), false},
+		{"provably not dolt", fmt.Errorf("PID is sleep: %w", doltserver.ErrNotDoltSQLServer), false},
+		{"another town's dolt", fmt.Errorf("serves elsewhere: %w", doltserver.ErrOtherTownDolt), false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			live := os.Getpid()
+			m := newTestManager(t)
+			m.runningFn = nil
+			// Below the ephemeral range, so no parallel test is handed this
+			// port by net.Listen(":0") and answers the dial.
+			m.config.Port = 13871
+			if _, err := writePIDFile(m.pidFile(), live); err != nil {
+				t.Fatalf("writePIDFile: %v", err)
+			}
+			m.verifyDoltFn = func(string, int) error { return c.verifyErr }
+
+			gotPID, running := m.isRunning()
+			if running != c.wantRunning {
+				t.Fatalf("isRunning = (%d, %v), want running=%v", gotPID, running, c.wantRunning)
+			}
+			if running && gotPID != live {
+				t.Errorf("isRunning = (%d, true), want the live pid %d", gotPID, live)
+			}
+			if !running && gotPID != 0 {
+				t.Errorf("isRunning = (%d, false), want 0: no dead pid was ever tracked, and %d is alive", gotPID, live)
+			}
+		})
+	}
+}
+
 // auto_restart:false must leave a crashed server down for the operator: the
 // crash is still alerted, but nothing starts the server back up (gt-gqftr).
 func TestEnsureRunning_AutoRestartFalseLeavesDeadServer(t *testing.T) {
 	t.Parallel()
+	dead := deadPID(t)
 	m := newTestManager(t)
 	m.runningFn = nil
 	m.config.Port = 3307
 	m.sleepFn = func(time.Duration) {}
 	off := false
 	m.config.AutoRestart = &off
-	if _, err := writePIDFile(m.pidFile(), notARunningPID); err != nil {
+	if _, err := writePIDFile(m.pidFile(), dead); err != nil {
 		t.Fatalf("writePIDFile: %v", err)
 	}
 
@@ -960,7 +1022,7 @@ func TestEnsureRunning_AutoRestartFalseLeavesDeadServer(t *testing.T) {
 		t.Fatalf("EnsureRunning: %v", err)
 	}
 
-	want := []string{fmt.Sprintf("alert:%d", notARunningPID)}
+	want := []string{fmt.Sprintf("alert:%d", dead)}
 	if len(events) != len(want) {
 		t.Fatalf("auto_restart:false must alert and then restart nothing, got %v", events)
 	}
