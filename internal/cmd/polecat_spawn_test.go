@@ -280,3 +280,60 @@ func TestEffectivePolecatDirCap(t *testing.T) {
 		})
 	}
 }
+
+// createdPolecatFake is the polecat manager a fresh sling reads its new polecat
+// back from, recording the removals.
+type createdPolecatFake struct {
+	polecat *polecat.Polecat
+	getErr  error
+	removed []string
+}
+
+func (f *createdPolecatFake) Get(string) (*polecat.Polecat, error) { return f.polecat, f.getErr }
+
+func (f *createdPolecatFake) Remove(name string, force bool) error {
+	if !force {
+		return fmt.Errorf("remove of %s was not forced", name)
+	}
+	f.removed = append(f.removed, name)
+	return nil
+}
+
+// TestPrepareSlingPolecatRemovesAgentBeadWhenGetFails guards the fresh path's
+// read-back: creation has written the agent bead with the hook set, so a Get
+// that fails (the nuke-or-reaper race) has to remove the polecat the way a
+// failed worktree check does, or the bead stays hooked with no sandbox.
+func TestPrepareSlingPolecatRemovesAgentBeadWhenGetFails(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		fake      *createdPolecatFake
+		verifyErr error
+	}{
+		{"read-back fails", &createdPolecatFake{getErr: polecat.ErrPolecatNotFound}, nil},
+		{"worktree verification fails", &createdPolecatFake{polecat: &polecat.Polecat{Name: "alpha", ClonePath: "/gone"}}, errors.New("worktree is gone")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := readBackCreatedPolecat(tt.fake, "rig", "alpha",
+				func(string) error { return tt.verifyErr })
+			if err == nil || got != nil {
+				t.Fatalf("readBackCreatedPolecat = (%+v, %v), want an error and no polecat", got, err)
+			}
+			if !slices.Equal(tt.fake.removed, []string{"alpha"}) {
+				t.Errorf("removed %v, want exactly [alpha]", tt.fake.removed)
+			}
+		})
+	}
+}
+
+func TestReadBackCreatedPolecatKeepsAVerifiedPolecat(t *testing.T) {
+	t.Parallel()
+	fake := &createdPolecatFake{polecat: &polecat.Polecat{Name: "alpha", ClonePath: "/ok"}}
+	got, err := readBackCreatedPolecat(fake, "rig", "alpha", func(string) error { return nil })
+	if err != nil || got != fake.polecat {
+		t.Fatalf("readBackCreatedPolecat = (%+v, %v), want the polecat", got, err)
+	}
+	if len(fake.removed) != 0 {
+		t.Errorf("removed %v from a healthy sling", fake.removed)
+	}
+}

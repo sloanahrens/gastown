@@ -620,10 +620,13 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			if top.depth <= 0 {
 				w.arith = w.arith[:len(w.arith)-1]
 			}
-		case w.quote == 0 && r == '(' && w.runeAt(w.runeIdx+1) == '(' && startsShellWord(w.runes, w.prevIdx, w.prevEsc):
+		case w.quote == 0 && r == '(' && w.runeAt(w.runeIdx+1) == '(' &&
+			(startsShellWord(w.runes, w.prevIdx, w.prevEsc) || endsCommandReservedWord(w.runes, w.prevIdx, w.prevEsc)):
 			// A "((" in command position — an arithmetic command, and the
 			// header of a C-style "for ((...))" — is an expression too
-			// (gt-dherr).
+			// (gt-dherr). A reserved word that takes a command ("then((",
+			// "do((", "else((") ends at the "(", which delimits it, so the
+			// "((" after it is in command position without a space.
 			w.arith = append(w.arith, arithFrame{kind: arithParen})
 		case w.quote == 0 && r == '[' && w.opensSubscript():
 			// A "[" after a word opens an array subscript, and a "$[" opens
@@ -1365,6 +1368,31 @@ func startsShellWord(runes []rune, prevIdx int, prevEscaped bool) bool {
 		return true
 	}
 	return false
+}
+
+// commandReservedWords are the reserved words after which the shell reads a
+// command, so a "((" glued to one opens an arithmetic command.
+var commandReservedWords = map[string]bool{
+	"then": true, "do": true, "else": true, "elif": true,
+	"if": true, "while": true, "until": true, "for": true,
+}
+
+// endsCommandReservedWord reports whether the word ending at runes[prevIdx] is
+// one of commandReservedWords standing as a word of its own, which the "("
+// after it delimits (gt-he2fi). A word the shell read as part of a longer one
+// (a "dothen" or an escaped character) is not reserved.
+func endsCommandReservedWord(runes []rune, prevIdx int, prevEscaped bool) bool {
+	if prevEscaped || prevIdx < 0 {
+		return false
+	}
+	start := prevIdx
+	for start > 0 && runes[start-1] >= 'a' && runes[start-1] <= 'z' {
+		start--
+	}
+	if !commandReservedWords[string(runes[start:prevIdx+1])] {
+		return false
+	}
+	return start == 0 || (runes[start-1] != '\\' && startsShellWord(runes, start-1, false))
 }
 
 // shellQuoteScope is one quoting scope in spaceOutShellOperators: the

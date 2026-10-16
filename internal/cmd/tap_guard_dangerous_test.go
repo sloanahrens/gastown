@@ -1389,6 +1389,36 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 			wantBlock: true,
 		},
 		{
+			name:      "shift in an arithmetic command glued to then",
+			command:   "if true; then((1<<x))\nsudo rm -rf /\nx\nfi",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an arithmetic command glued to do",
+			command:   "while true; do((1<<x))\nsudo rm -rf /\nx\ndone",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an arithmetic command glued to else",
+			command:   "if false; then :; else((1<<x))\nsudo rm -rf /\nx\nfi",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an arithmetic command glued to elif",
+			command:   "if false; then :; elif((1<<x))\nsudo rm -rf /\nx\nthen :; fi",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in a C-style for header glued to for",
+			command:   "for((i=1<<x;i<3;i++)); do :; done\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "shift in an arithmetic command glued to while",
+			command:   "while((1<<x))\nsudo rm -rf /\nx\ndo :; done",
+			wantBlock: true,
+		},
+		{
 			name:      "shift in an array subscript",
 			command:   "a[1<<x]=3\nsudo rm -rf /\nx",
 			wantBlock: true,
@@ -2814,5 +2844,41 @@ func TestANSICQuotedStringKeepsTheCommandsBehindIt(t *testing.T) {
 	}
 	if reason, _ := evaluateDangerousCommand(`echo $'rm -rf /'`, 0, noTownSession); reason != "" {
 		t.Errorf("rm -rf / inside an ANSI-C string is only text, but was blocked (%q)", reason)
+	}
+}
+
+// endsCommandReservedWord decides whether a "((" glued to a word opens an
+// arithmetic command. A word that merely ends in a reserved word, or sits
+// inside a larger word, is not one (gt-he2fi).
+func TestEndsCommandReservedWord(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		text    string
+		escaped bool
+		want    bool
+	}{
+		{"then at the start", "then", false, true},
+		{"do after a semicolon", "a; do", false, true},
+		{"else after a newline", "x\nelse", false, true},
+		{"for glued to the header", "for", false, true},
+		{"reserved word after an open paren", "(do", false, true},
+		{"word ending in a reserved word", "undo", false, false},
+		{"reserved word inside a longer one", "dothen", false, false},
+		{"escaped first character", `\do`, false, false},
+		{"parameter expansion of the name", "$do", false, false},
+		{"upper case is not reserved", "Then", false, false},
+		{"a word that is not reserved", "echo", false, false},
+		{"last rune was escaped", "then", true, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runes := []rune(tt.text)
+			if got := endsCommandReservedWord(runes, len(runes)-1, tt.escaped); got != tt.want {
+				t.Errorf("endsCommandReservedWord(%q, escaped=%v) = %v, want %v", tt.text, tt.escaped, got, tt.want)
+			}
+		})
+	}
+	if endsCommandReservedWord(nil, -1, false) {
+		t.Error("endsCommandReservedWord at the start of the command = true, want false")
 	}
 }

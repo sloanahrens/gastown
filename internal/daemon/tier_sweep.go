@@ -1150,9 +1150,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 		d.tierSweepPromote(rig, repo, sha)
 	}
 	cycle.closeStep(rig)
-	d.logger.Printf("tier_sweep: %s: swept %s (shell %s%s) in %s", rig, shortSHA(sha),
-		results["shell"].Verdict, tierSweepVerdictSummary(results, stages, loaded),
-		d.clk().Now().Sub(now).Round(time.Second))
+	d.logger.Print(tierSweepSweptLine(rig, sha, results, stages, loaded, d.clk().Now().Sub(now)))
 
 	d.tierSweepRecordBeads(rig, sha, results)
 	return !deferred
@@ -1210,6 +1208,30 @@ func tierSweepAllGreen(results map[string]tierSweepTierResult, stages []tierSwee
 		}
 	}
 	return true
+}
+
+// tierSweepSweptLine is the log line that closes a cycle. The dashboard reads
+// it back (parseTierSweepVerdicts), so it has one writer.
+func tierSweepSweptLine(rig, sha string, results map[string]tierSweepTierResult, stages []tierSweepStage, loaded map[string]bool, elapsed time.Duration) string {
+	return fmt.Sprintf("tier_sweep: %s: swept %s (shell %s%s) in %s", rig, shortSHA(sha),
+		results["shell"].Verdict, tierSweepVerdictSummary(results, stages, loaded),
+		elapsed.Round(time.Second))
+}
+
+// TierSweepSweptLine renders the swept line for a cycle that planned the given
+// stages, each a list of tiers, given the verdict of each tier that ran. A tier
+// absent from verdicts did not run. It lets a reader of the daemon log be tested
+// against the line the daemon writes rather than a hand-written copy.
+func TierSweepSweptLine(rig, sha string, stages [][]string, verdicts map[string]string, elapsed time.Duration) string {
+	results := make(map[string]tierSweepTierResult, len(verdicts))
+	for tier, v := range verdicts {
+		results[tier] = tierSweepTierResult{Verdict: v}
+	}
+	planned := make([]tierSweepStage, len(stages))
+	for i, tiers := range stages {
+		planned[i] = tierSweepStage{tiers: tiers}
+	}
+	return tierSweepSweptLine(rig, sha, results, planned, nil, elapsed)
 }
 
 // tierSweepVerdictSummary renders the non-shell verdicts for the cycle log. A

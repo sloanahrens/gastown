@@ -1610,3 +1610,18 @@ func TestRunTierSweepEarlyRetriesATipItsCycleCouldNotCover(t *testing.T) {
 		t.Fatalf("record = %+v, want the retry to land on new2", st)
 	}
 }
+
+// The dashboard reads a swept line back and attaches a rig's failing units only
+// to a tier the line gives a verdict. A tier a Partial cycle never reached
+// carries a verdict from an earlier tip in the record, so the line has to name
+// it with no verdict of its own: that, not a check at the reader, keeps the
+// carried red off this tip's row (gt-euxf1, gt-he2fi).
+func TestTierSweepSweptLineGivesAnUnrunTierNoVerdict(t *testing.T) {
+	t.Parallel()
+	got := TierSweepSweptLine("gastown", "tipb0001ffff", [][]string{{"shell"}, {"integration", "race"}},
+		map[string]string{"shell": "GREEN", "race": "RED"}, 4*time.Minute)
+	want := "tier_sweep: gastown: swept tipb0001 (shell GREEN, integration , race RED) in 4m0s"
+	if got != want {
+		t.Errorf("swept line = %q, want %q", got, want)
+	}
+}
