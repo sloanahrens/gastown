@@ -1303,6 +1303,35 @@ func TestAttentionRiskPath(t *testing.T) {
 	}
 }
 
+// gt-691ob: a bead read that reports no issue and no error leaves nothing to
+// judge, so the landing raises no item. Reading its notes anyway would panic
+// the tick on the nil.
+func TestAttentionRiskPathSkipsABeadReadWithNoIssue(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	good := strings.Repeat("a", 40)
+	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) {
+		return []land.LandingRecord{
+			{BeadID: "gt-gone", Head: strings.Repeat("b", 40), RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now},
+			// The same bead again: the cached nil must not panic either.
+			{BeadID: "gt-gone", Head: strings.Repeat("c", 40), RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now},
+			{BeadID: "gt-abc", Head: good, RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now},
+		}, nil
+	}
+	f.src.riskIssue = func(_ context.Context, _, id string) (*beads.Issue, error) {
+		if id == "gt-gone" {
+			return nil, nil
+		}
+		return &beads.Issue{ID: id, Priority: 2}, nil
+	}
+
+	items := f.collect(t, f.src.collectRiskPaths)
+	if len(items) != 1 || items[0].Bead != "gt-abc" {
+		t.Fatalf("items = %+v, want the one item of the bead that read back", items)
+	}
+}
+
 // gt-zevjx: a risk-path item's severity is judged by its landing's own evidence
 // (attention.RiskPathSeverity), not by the kind alone. A failed review of a P1
 // landing — the machinery the town runs on — is the one that stays high; every
