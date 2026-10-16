@@ -147,9 +147,6 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) 
 	// comment is for a finding another landing raised (gt-4ty22).
 	own := followupIDsForCommit(existing, res.LandedCommit)
 	open := openFollowups(existing)
-	if bound := l.followupBackpressure(); open >= bound {
-		return []string{l.holdBack(open, bound, len(findings))}
-	}
 	var lines []string
 	var fresh []FollowupCandidate
 	for _, c := range findings {

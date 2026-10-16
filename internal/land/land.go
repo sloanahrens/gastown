@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -68,6 +69,9 @@ type Repo interface {
 	DiffNameOnly(base, head string) ([]string, error)
 	ShowFileAtRev(ref, path string) (string, error)
 	PatchID(base, head string) (string, error)
+	// PatchIDZeroContext is PatchID over a diff with no context lines, so an
+	// edit near the change does not alter it (gt-r5uwc).
+	PatchIDZeroContext(base, head string) (string, error)
 	WorktreeAddDetached(path, ref string) error
 	WorktreeRemove(path string, force bool) error
 	WorktreePrune() error
@@ -1367,6 +1371,15 @@ func (l *Lander) completeUnrecordedLanding(g Repo, w Work) (*Result, error) {
 	if err != nil {
 		return nil, &InfraError{Stage: "patch-id of the landing", Err: err}
 	}
+	// The squash check compares changed lines only. A patch-id hashes context
+	// lines too, so the ids above, taken over diffs of different bases, differ
+	// whenever the target edited a line within three of the head's hunk, and
+	// the landing was never finished though its work is on the target
+	// (gt-r5uwc). patchID above stays the recorded one.
+	mergedChange, err := g.PatchIDZeroContext(base, merged)
+	if err != nil {
+		return nil, &InfraError{Stage: "patch-id of the landing", Err: err}
+	}
 	// A --no-ff merge holds the head among its ancestors, so the marker and
 	// the head agree on which work landed. A squash holds it nowhere, and the
 	// marker is then the only thing naming the head: the patch the commit
@@ -1388,11 +1401,11 @@ func (l *Lander) completeUnrecordedLanding(g Repo, w Work) (*Result, error) {
 		if err != nil {
 			return nil, &InfraError{Stage: "merge base of the head", Err: err}
 		}
-		headPatchID, err := g.PatchID(fork, w.Head)
+		headPatchID, err := g.PatchIDZeroContext(fork, w.Head)
 		if err != nil {
 			return nil, &InfraError{Stage: "patch-id of the head", Err: err}
 		}
-		if headPatchID != patchID {
+		if headPatchID != mergedChange {
 			l.logf("%s: %s begins a land merge's subject but its patch is not %s's change; not finishing it",
 				w.BeadID, shortSHA(merged), shortSHA(w.Head))
 			return nil, nil
@@ -1899,7 +1912,9 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	// a bead the next tick slings onto a seat that cannot land it (gt-me800).
 	// The crew that holds it reads the rejection and asks the human for a new
 	// branch.
-	if !beads.HasLabel(now, dispatch.HumanOnlyLabel) {
+	if !slices.ContainsFunc(now.Labels, func(label string) bool {
+		return strings.EqualFold(strings.TrimSpace(label), dispatch.HumanOnlyLabel)
+	}) {
 		unassigned := ""
 		update.Assignee = &unassigned
 	}

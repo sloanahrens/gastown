@@ -28,6 +28,7 @@ type Repo interface {
 	DiffNameOnly(base, head string) ([]string, error)
 	ShowFileAtRev(ref, path string) (string, error)
 	PatchID(base, head string) (string, error)
+	PatchIDZeroContext(base, head string) (string, error)
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
 	FetchRefspecWithEnv(remote, refspec string, env []string) error
 	PushRemoteBranchTip(remote, branch string) (string, error)
@@ -392,10 +393,21 @@ func changedPaths(a, b map[string]string) []string {
 	return paths
 }
 
-// PatchID hashes the change base..head the way patch-id --stable does: by
-// the lines each file removes and adds, without context, line numbers or
-// whitespace, so the same change on another base has the same id.
+// PatchID hashes the change base..head the way patch-id --stable does over
+// git's default diff: the lines each file removes and adds and the three lines
+// of context around them, without line numbers or whitespace. The same change
+// on another base has the same id only while its neighbours are unchanged.
 func (h *handle) PatchID(base, head string) (string, error) {
+	return h.patchID(base, head, 3)
+}
+
+// PatchIDZeroContext is PatchID over git diff -U0: only the removed and added
+// lines, so the id is the change alone, whatever surrounds it.
+func (h *handle) PatchIDZeroContext(base, head string) (string, error) {
+	return h.patchID(base, head, 0)
+}
+
+func (h *handle) patchID(base, head string, ctx int) (string, error) {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
 	b, hd, err := h.resolveRange(base, head, "diff", base+".."+head)
@@ -409,13 +421,9 @@ func (h *handle) PatchID(base, head string) (string, error) {
 	}
 	sum := sha1.New() //nolint:gosec // G401: patch ids, not security
 	for _, p := range paths {
-		removed, added := lineDiff(bt[p], ht[p])
 		fmt.Fprintf(sum, "%s\x00", p)
-		for _, l := range removed {
-			fmt.Fprintf(sum, "-%s\x00", strings.Join(strings.Fields(l), ""))
-		}
-		for _, l := range added {
-			fmt.Fprintf(sum, "+%s\x00", strings.Join(strings.Fields(l), ""))
+		for _, l := range contextLines(bt[p], ht[p], ctx) {
+			fmt.Fprintf(sum, "%c%s\x00", l[0], strings.Join(strings.Fields(l[1:]), ""))
 		}
 	}
 	return hex.EncodeToString(sum.Sum(nil)), nil

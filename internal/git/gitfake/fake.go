@@ -460,6 +460,67 @@ func lineDiff(a, b string) (removed, added []string) {
 	return removed, added
 }
 
+// contextLines returns the lines of the change from a to b the way a unified
+// diff with ctx lines of context lists them: each removed line as "-", each
+// added line as "+", and the unchanged lines within ctx of a change as " ", in
+// file order. A patch-id hashes the context lines along with the changed ones,
+// so the same edit with different neighbours has a different id.
+func contextLines(a, b string, ctx int) []string {
+	al, bl := splitLines(a), splitLines(b)
+	n, m := len(al), len(bl)
+	lcs := make([][]int, n+1)
+	for i := range lcs {
+		lcs[i] = make([]int, m+1)
+	}
+	for i := n - 1; i >= 0; i-- {
+		for j := m - 1; j >= 0; j-- {
+			if al[i] == bl[j] {
+				lcs[i][j] = lcs[i+1][j+1] + 1
+			} else {
+				lcs[i][j] = max(lcs[i+1][j], lcs[i][j+1])
+			}
+		}
+	}
+	var ops []string
+	i, j := 0, 0
+	for i < n && j < m {
+		switch {
+		case al[i] == bl[j]:
+			ops = append(ops, " "+al[i])
+			i++
+			j++
+		case lcs[i+1][j] >= lcs[i][j+1]:
+			ops = append(ops, "-"+al[i])
+			i++
+		default:
+			ops = append(ops, "+"+bl[j])
+			j++
+		}
+	}
+	for ; i < n; i++ {
+		ops = append(ops, "-"+al[i])
+	}
+	for ; j < m; j++ {
+		ops = append(ops, "+"+bl[j])
+	}
+	keep := make([]bool, len(ops))
+	for k, op := range ops {
+		if op[0] == ' ' {
+			continue
+		}
+		for w := max(0, k-ctx); w <= min(len(ops)-1, k+ctx); w++ {
+			keep[w] = true
+		}
+	}
+	var out []string
+	for k, op := range ops {
+		if keep[k] {
+			out = append(out, op)
+		}
+	}
+	return out
+}
+
 func splitLines(s string) []string {
 	lines := strings.SplitAfter(s, "\n")
 	if lines[len(lines)-1] == "" {

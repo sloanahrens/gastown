@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -277,28 +278,35 @@ func (f *landFixture) assertRejected(t *testing.T, err error, kind RejectionKind
 // comes from a person, so the crew that asked for it is the only holder that
 // can act on the refusal. Clearing the assignee instead is what put one back on
 // the dispatcher's board, and from there onto a polecat seat that cannot land
-// it (gt-me800). Everything else about the rejection is unchanged.
+// it (gt-me800). Everything else about the rejection is unchanged. The label is
+// typed by hand, and the dispatch hold folds its case, so a Human-Only bead is
+// held the same way (gt-r5uwc).
 func TestRejectKeepsTheHolderOfAHumanOnlyBead(t *testing.T) {
 	t.Parallel()
-	f := newLandFixture(t)
-	const crew = "fractals/crew/ops"
-	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "land the release workflows", Status: "hooked", Type: "task",
-		Assignee: crew, Labels: []string{LabelReadyToLand, dispatch.HumanOnlyLabel}, Notes: FormatReadyNote(f.work)})
-	f.gate.fn = func(string) GateResult {
-		return GateResult{Passed: false, Steps: []StepResult{{Name: "test", ExitCode: 1}}}
-	}
+	for _, label := range []string{dispatch.HumanOnlyLabel, "Human-Only", " HUMAN-ONLY "} {
+		t.Run(label, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixture(t)
+			const crew = "fractals/crew/ops"
+			f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "land the release workflows", Status: "hooked", Type: "task",
+				Assignee: crew, Labels: []string{LabelReadyToLand, label}, Notes: FormatReadyNote(f.work)})
+			f.gate.fn = func(string) GateResult {
+				return GateResult{Passed: false, Steps: []StepResult{{Name: "test", ExitCode: 1}}}
+			}
 
-	_, err := f.lander().Land(context.Background(), f.work)
-	var rej *Rejection
-	if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
-		t.Fatalf("Land = %T %v, want a recorded gate rejection", err, err)
-	}
-	b := f.bead()
-	if b.Status != "open" || b.Assignee != crew || beads.HasLabel(b, LabelReadyToLand) || !beads.HasLabel(b, LabelRework) {
-		t.Errorf("bead after rejection: status=%s assignee=%q labels=%v", b.Status, b.Assignee, b.Labels)
-	}
-	if CountRejections(b.Notes) != 1 {
-		t.Errorf("rejection not recorded once:\n%s", b.Notes)
+			_, err := f.lander().Land(context.Background(), f.work)
+			var rej *Rejection
+			if !errors.As(err, &rej) || rej.Kind != RejectGate || rej.RecordErr != nil {
+				t.Fatalf("Land = %T %v, want a recorded gate rejection", err, err)
+			}
+			b := f.bead()
+			if b.Status != "open" || b.Assignee != crew || beads.HasLabel(b, LabelReadyToLand) || !beads.HasLabel(b, LabelRework) {
+				t.Errorf("bead after rejection: status=%s assignee=%q labels=%v", b.Status, b.Assignee, b.Labels)
+			}
+			if CountRejections(b.Notes) != 1 {
+				t.Errorf("rejection not recorded once:\n%s", b.Notes)
+			}
+		})
 	}
 }
 
@@ -1240,6 +1248,59 @@ func TestLandRecoversUnrecordedSquashLandingUnderALaterLanding(t *testing.T) {
 	}
 	if len(f.landingLines()) != 1 {
 		t.Fatalf("landings lines = %d, want 1", len(f.landingLines()))
+	}
+}
+
+// TestLandRecoversUnrecordedSquashLandingWithNearbyMainEdit: the target edited a
+// line within three of the head's hunk between the head's fork point and the
+// squash. A patch-id hashes context lines, so the squash's diff (against the
+// edited base) and the head's own diff (against the fork point) hash
+// differently though they change the same lines, and the recovery read the
+// landing as another head's and rejected it with the work on the target
+// (gt-r5uwc).
+//
+// gitfake merges by path, so a retry's squash conflicts with the target's own
+// edit of the file, which is the shape gt-01yt6 recovers from: the squash is
+// written onto the edited main by hand rather than by a first pass.
+func TestLandRecoversUnrecordedSquashLandingWithNearbyMainEdit(t *testing.T) {
+	t.Parallel()
+	lines := func(edits map[int]string) string {
+		var b strings.Builder
+		for i := 1; i <= 30; i++ {
+			if s, ok := edits[i]; ok {
+				b.WriteString(s)
+			} else {
+				fmt.Fprintf(&b, "line %d", i)
+			}
+			b.WriteString("\n")
+		}
+		return b.String()
+	}
+	f := newLandFixtureAt(t)
+	f.git = gitfake.New()
+	f.git.InitBare(t, f.origin)
+	seed := f.git.Commit(t, f.origin, "main", "main: seed", map[string]string{"n.txt": lines(nil)})
+	f.git.SetRef(t, f.origin, "refs/heads/"+fixtureBranch, seed)
+	f.git.Commit(t, f.origin, fixtureBranch, "feat: edit line 20", map[string]string{"n.txt": lines(map[int]string{20: "line 20 by the head"})})
+	head := f.git.Commit(t, f.origin, fixtureBranch, checkpoint.WIPCommitPrefix+" 2026-09-30", map[string]string{"c.txt": "wip\n"})
+	f.base = f.git.Commit(t, f.origin, "main", "main: edit line 18", map[string]string{"n.txt": lines(map[int]string{18: "line 18 by main"})})
+	squash := f.git.Commit(t, f.origin, "main", landMergeMarker(Work{Branch: fixtureBranch, Head: head, Target: "main"})+"cafe1234)",
+		map[string]string{"n.txt": lines(map[int]string{18: "line 18 by main", 20: "line 20 by the head"}), "c.txt": "wip\n"})
+	f.git.Clone(t, f.origin, f.repo)
+	f.ready(head)
+
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("the retry did not finish the squash landing: %v", err)
+	}
+	if res.LandedCommit != squash || len(f.merger.calls) != 0 {
+		t.Errorf("LandedCommit = %s after %d merges, want the squash %s found on the target", res.LandedCommit, len(f.merger.calls), squash)
+	}
+	if b := f.bead(); b.Status != "closed" || CountRejections(b.Notes) != 0 {
+		t.Errorf("bead after the finished landing: status=%s notes=%q", b.Status, b.Notes)
+	}
+	if len(f.landingLines()) != 1 {
+		t.Errorf("landings lines = %d, want 1", len(f.landingLines()))
 	}
 }
 

@@ -824,3 +824,54 @@ func TestLandSurvivesAFollowupFeedFailure(t *testing.T) {
 		})
 	}
 }
+
+// TestFollowupFeedRetryAtTheBackpressureBoundIsQuiet: a retry of a landing whose
+// findings all have beads already — its own from the earlier attempt, and one
+// another landing raised — has nothing for the bound to hold back. It raises no
+// "got no bead" alert, and still leaves the seen-again comment on the other
+// landing's bead (gt-r5uwc).
+func TestFollowupFeedRetryAtTheBackpressureBoundIsQuiet(t *testing.T) {
+	t.Parallel()
+	f := newFollowupFixture(t, 0.8, []Finding{
+		minorFinding("name the error"),
+		minorAt("internal/land/other.go", 10, "swap the nil check"),
+	})
+	var alerts []string
+	f.lander.FollowupAlert = func(message string) { alerts = append(alerts, message) }
+	f.fake.existing = append(openFollowupBeads(DefaultFollowupBackpressure),
+		ExistingFollowup{
+			ID: "gt-filed", Title: "Found: name the error", Status: "open",
+			Description: "## Goal\nFixed: the 1 finding om raised (landed commit 0123456789abcdef0123456789abcdef01234567).\n",
+			Labels:      []string{FollowUpLabel, Fingerprint("internal/land/note.go", "name the error")},
+		},
+		ExistingFollowup{
+			ID: "gt-other", Title: "Found: swap the nil check", Status: "open",
+			Description: "## Goal\nFixed: the 1 finding om raised (landed commit fedcba9876543210fedcba9876543210fedcba98).\n",
+			Labels:      []string{FollowUpLabel, Fingerprint("internal/land/other.go", "swap the nil check")},
+		})
+	f.bd.Seed(
+		beads.Issue{ID: "gt-filed", Title: "Found: name the error", Status: "open", Type: "task"},
+		beads.Issue{ID: "gt-other", Title: "Found: swap the nil check", Status: "open", Type: "task"},
+	)
+	log := f.run()
+	if len(alerts) != 0 || strings.Contains(log, "held back") {
+		t.Errorf("alerts = %v, log = %q; want a retry with nothing to hold back to stay quiet", alerts, log)
+	}
+	if len(f.fake.created) != 0 {
+		t.Errorf("filed %d beads for findings that all have one", len(f.fake.created))
+	}
+	own, err := f.bd.Comments("gt-filed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(own) != 0 {
+		t.Errorf("comments on this landing's own bead = %v, want none", commentTexts(own))
+	}
+	other, err := f.bd.Comments("gt-other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(other) != 1 || !strings.Contains(other[0].Text, "seen again on gt-abc") {
+		t.Errorf("comments on the other landing's bead = %v, want one seen-again", commentTexts(other))
+	}
+}
