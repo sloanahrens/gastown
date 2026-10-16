@@ -407,10 +407,10 @@ func findTestInvocation(tokens []string, tool string) int {
 
 // findInvocation returns the index of the first "<tool> <target>" invocation
 // in tokens (already lowercased) — e.g. "go test", "go build", "make test",
-// "make build" — or -1. For make, options may sit between the program and
-// the target ("make -j4 test", "make -e -w test", "make -C . test") and are
-// stepped over: the target is what decides what runs, not the flags in
-// front of it.
+// "make build" — or -1. For make the target is any goal on the command line,
+// not only the first word after the program: options, variable assignments
+// and earlier goals may precede it ("make -j4 test", "make -C . test",
+// "make GOFLAGS=-count=1 test", "make clean test").
 //
 // Its go row is the narrow reading — the target must follow the binary
 // directly, the adjacency the interim host-hygiene hook's regex recognized
@@ -422,20 +422,19 @@ func findInvocation(tokens []string, tool, target string) int {
 		if tokens[i] != tool {
 			continue
 		}
-		j := i + 1
 		if tool == "make" {
-			for j < len(tokens) && strings.HasPrefix(tokens[j], "-") {
-				flag := tokens[j]
-				j++
-				if j >= len(tokens) || tokens[j] == target {
-					continue
-				}
-				if makeValueFlags[flag] || (makeOptionalNumberFlags[flag] && isAllDigits(tokens[j])) {
-					j++
+			// make runs every goal it is given, so the target may follow
+			// options, NAME=value assignments and other goals. A flag's
+			// value never needs stepping over: the target is never read as
+			// one (see makeValueFlags), so "-C test" is judged as the goal.
+			for _, tok := range tokens[i+1:] {
+				if tok == target {
+					return i
 				}
 			}
+			continue
 		}
-		if j < len(tokens) && tokens[j] == target {
+		if tokens[i+1] == target {
 			return i
 		}
 	}

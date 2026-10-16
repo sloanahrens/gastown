@@ -64,6 +64,14 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"make test with valueless flags", "make -e -w -i test", true},
 		{"make test with bare jobs flag", "make -j test", true},
 		{"make test with spaced jobs value", "make -j 4 test", true},
+		// make runs every goal it is given, so test need not come first
+		// (gt-pm4vn).
+		{"make test after another goal", "make clean test", true},
+		{"make test after the build goal", "make build test", true},
+		{"make test after a variable assignment", "make GOFLAGS=-count=1 test", true},
+		{"make test after a flag and a goal", "make -j4 clean test", true},
+		{"make clean without test", "make clean", false},
+		{"make clean build without test", "make clean build", false},
 
 		// Allowed: wrapped in gt slot run.
 		{"go test wrapped in gt slot run", "gt slot run --role gastown/refinery -- go test ./internal/beads/...", false},
@@ -379,6 +387,9 @@ func TestMakeTestInGoTreeIsRefused(t *testing.T) {
 		{"make test at the module root", goRoot, "make test"},
 		{"make test in a package of the module", filepath.Join(goRoot, "internal", "cmd"), "make test"},
 		{"make test with jobs flag in the module", goRoot, "make -j4 test"},
+		{"make test after another goal in the module", goRoot, "make clean test"},
+		{"make test after the build goal in the module", goRoot, "make build test"},
+		{"make test after a variable assignment in the module", goRoot, "make GOFLAGS=-count=1 test"},
 		{"make test in another Go module", otherModule, "make test"},
 		// A makefile the guard cannot read makes "test" unknown, so even the
 		// tree it runs in says nothing about what the target costs.
