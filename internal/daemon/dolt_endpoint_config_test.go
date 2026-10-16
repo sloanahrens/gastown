@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"gopkg.in/yaml.v3"
@@ -17,21 +16,20 @@ func TestNewDoltServerManagerNormalizesManagedEndpointFromTownConfig(t *testing.
 	writeManagedDoltConfig(t, townRoot, "listener:\n  host: 127.0.0.2\n  port: 5507\n")
 
 	cfg := &DoltServerConfig{
-		Enabled:              true,
-		External:             true,
-		Host:                 "stale-daemon-host",
-		Port:                 9999,
-		User:                 "root",
-		Password:             "secret",
-		DataDir:              filepath.Join(townRoot, "custom-data"),
-		LogFile:              filepath.Join(townRoot, "custom.log"),
-		AutoRestart:          true,
-		RestartDelay:         2 * time.Second,
-		MaxRestartDelay:      3 * time.Second,
-		MaxRestartsInWindow:  4,
-		RestartWindow:        5 * time.Second,
-		HealthyResetInterval: 6 * time.Second,
-		HealthCheckInterval:  7 * time.Second,
+		Enabled:                 true,
+		External:                true,
+		Host:                    "stale-daemon-host",
+		Port:                    9999,
+		User:                    "root",
+		Password:                "secret",
+		DataDir:                 filepath.Join(townRoot, "custom-data"),
+		LogFile:                 filepath.Join(townRoot, "custom.log"),
+		RestartDelayStr:         "2s",
+		MaxRestartDelayStr:      "3s",
+		MaxRestartsInWindow:     4,
+		RestartWindowStr:        "5s",
+		HealthyResetIntervalStr: "6s",
+		HealthCheckIntervalStr:  "7s",
 	}
 
 	m := NewDoltServerManager(townRoot, cfg, func(string, ...interface{}) {})
@@ -50,7 +48,7 @@ func TestNewDoltServerManagerNormalizesManagedEndpointFromTownConfig(t *testing.
 	if m.config.DataDir != cfg.DataDir || m.config.LogFile != cfg.LogFile {
 		t.Fatalf("paths were not preserved: %#v", m.config)
 	}
-	if m.config.RestartDelay != cfg.RestartDelay || m.config.MaxRestartDelay != cfg.MaxRestartDelay || m.config.MaxRestartsInWindow != cfg.MaxRestartsInWindow || m.config.RestartWindow != cfg.RestartWindow || m.config.HealthyResetInterval != cfg.HealthyResetInterval || m.config.HealthCheckInterval != cfg.HealthCheckInterval {
+	if m.config.RestartDelay() != cfg.RestartDelay() || m.config.MaxRestartDelay() != cfg.MaxRestartDelay() || m.config.MaxRestartsInWindow != cfg.MaxRestartsInWindow || m.config.RestartWindow() != cfg.RestartWindow() || m.config.HealthyResetInterval() != cfg.HealthyResetInterval() || m.config.HealthCheckInterval() != cfg.HealthCheckInterval() {
 		t.Fatalf("restart/health settings were not preserved: %#v", m.config)
 	}
 }

@@ -51,24 +51,19 @@ const ShutdownBudget = doltServerStopBudget
 
 // DefaultDoltHealthCheckInterval is how often the dedicated Dolt health check
 // ticker fires, independent of the general daemon heartbeat (3 min).
-// 30 seconds provides fast crash detection: a Dolt server crash is detected
-// within 30s instead of up to 3 minutes.
-const DefaultDoltHealthCheckInterval = 30 * time.Second
+const DefaultDoltHealthCheckInterval = agentconfig.DefaultDoltHealthCheckInterval
 
-// DefaultDoltServerConfig returns sensible defaults for Dolt server config.
+// DefaultDoltServerConfig returns the paths and identity of the server the
+// daemon manages. The backoff knobs are left unset: the accessors on
+// DoltServerConfig hold their defaults, so a daemon.json block that sets one
+// is read through them and one that omits it gets the same value here
+// (gt-gqftr).
 func DefaultDoltServerConfig(townRoot string) *DoltServerConfig {
 	return &DoltServerConfig{
-		Enabled:              false, // Opt-in
-		User:                 "root",
-		DataDir:              filepath.Join(townRoot, "dolt"),
-		LogFile:              filepath.Join(townRoot, "daemon", "dolt-server.log"),
-		AutoRestart:          true,
-		RestartDelay:         5 * time.Second,
-		MaxRestartDelay:      5 * time.Minute,
-		MaxRestartsInWindow:  5,
-		RestartWindow:        10 * time.Minute,
-		HealthyResetInterval: 5 * time.Minute,
-		HealthCheckInterval:  DefaultDoltHealthCheckInterval,
+		Enabled: false, // Opt-in
+		User:    "root",
+		DataDir: filepath.Join(townRoot, "dolt"),
+		LogFile: filepath.Join(townRoot, "daemon", "dolt-server.log"),
 	}
 }
 
@@ -366,13 +361,10 @@ func filterEnvKey(env []string, key string) []string {
 	return out
 }
 
-// HealthCheckInterval returns the configured health check interval,
-// falling back to DefaultDoltHealthCheckInterval if not explicitly set.
+// HealthCheckInterval returns the configured health check interval; an unset
+// key gets DefaultDoltHealthCheckInterval through the config accessor.
 func (m *DoltServerManager) HealthCheckInterval() time.Duration {
-	if m.config != nil && m.config.HealthCheckInterval > 0 {
-		return m.config.HealthCheckInterval
-	}
-	return DefaultDoltHealthCheckInterval
+	return m.config.HealthCheckInterval()
 }
 
 // Status returns the current status of the Dolt server.
@@ -565,12 +557,15 @@ func (m *DoltServerManager) EnsureRunning() error {
 			if m.restartHeldLocked("unhealthy", err) {
 				return nil
 			}
-			m.logger("Dolt server unhealthy: %v, restarting...", err)
 			if m.writeUnhealthySignal("health_check_failed", err.Error()) {
 				m.sendUnhealthyAlert(err)
 			} else {
 				m.logger("Dolt incident already active; suppressing duplicate unhealthy alert")
 			}
+			if m.restartRefused("is unhealthy") {
+				return nil
+			}
+			m.logger("Dolt server unhealthy: %v, restarting...", err)
 			m.stopLocked()
 			return m.restartWithBackoff()
 		}
@@ -583,12 +578,15 @@ func (m *DoltServerManager) EnsureRunning() error {
 			if m.restartHeldLocked("read-only", err) {
 				return nil
 			}
-			m.logger("Dolt server read-only: %v, restarting...", err)
 			if m.writeUnhealthySignal("read_only", err.Error()) {
 				m.sendReadOnlyAlert(err)
 			} else {
 				m.logger("Dolt incident already active; suppressing duplicate read-only alert")
 			}
+			if m.restartRefused("is read-only") {
+				return nil
+			}
+			m.logger("Dolt server read-only: %v, restarting...", err)
 			m.stopLocked()
 			return m.restartWithBackoff()
 		}
@@ -603,12 +601,15 @@ func (m *DoltServerManager) EnsureRunning() error {
 				if m.restartHeldLocked("identity check failed", err) {
 					return nil
 				}
-				m.logger("Dolt server identity check failed: %v, restarting...", err)
 				if m.writeUnhealthySignal("imposter_detected", err.Error()) {
 					m.sendUnhealthyAlert(fmt.Errorf("identity check: %w", err))
 				} else {
 					m.logger("Dolt incident already active; suppressing duplicate identity alert")
 				}
+				if m.restartRefused("failed its identity check") {
+					return nil
+				}
+				m.logger("Dolt server identity check failed: %v, restarting...", err)
 				m.stopLocked()
 				// Also kill any imposters before restarting
 				if killErr := m.killImposters(); killErr != nil {
@@ -627,14 +628,29 @@ func (m *DoltServerManager) EnsureRunning() error {
 
 	// Not running, start it
 	if pid > 0 {
-		m.logger("Dolt server PID %d is dead, cleaning up and restarting...", pid)
 		if m.writeUnhealthySignal("server_dead", fmt.Sprintf("PID %d is dead", pid)) {
 			m.sendCrashAlert(pid)
 		} else {
 			m.logger("Dolt incident already active; suppressing duplicate crash alert")
 		}
+		if m.restartRefused(fmt.Sprintf("PID %d is dead", pid)) {
+			return nil
+		}
+		m.logger("Dolt server PID %d is dead, cleaning up and restarting...", pid)
 	}
 	return m.restartWithBackoff()
+}
+
+// restartRefused reports whether auto_restart is off, logging the restart it
+// refuses: the server is left as the check found it, for the operator to
+// inspect. Callers raise the health signal and the alert first, so a refusal is
+// never a silent one (gt-gqftr).
+func (m *DoltServerManager) restartRefused(cause string) bool {
+	if m.config.AutoRestartEnabled() {
+		return false
+	}
+	m.logger("Dolt server %s; auto_restart is off, leaving it alone", cause)
+	return true
 }
 
 // restartWithBackoff attempts to restart the Dolt server with exponential backoff
@@ -660,11 +676,11 @@ func (m *DoltServerManager) restartWithBackoff() error {
 		if !m.escalated {
 			m.escalated = true
 			m.logger("Dolt server restart cap reached (%d restarts in %v), raising an escalation",
-				len(m.restartTimes), m.config.RestartWindow)
+				len(m.restartTimes), m.config.RestartWindow())
 			m.escalateCrashLoop(len(m.restartTimes))
 		}
 		return fmt.Errorf("dolt server restart cap exceeded (%d restarts in %v); escalation raised",
-			len(m.restartTimes), m.config.RestartWindow)
+			len(m.restartTimes), m.config.RestartWindow())
 	}
 
 	// Mark restart in progress to prevent concurrent restarts during backoff sleep
@@ -704,24 +720,20 @@ func (m *DoltServerManager) restartWithBackoff() error {
 	return m.startLocked()
 }
 
-// getBackoffDelay returns the current backoff delay.
+// getBackoffDelay returns the current backoff delay, which is the configured
+// restart delay on the first restart: an unset key waits the default 5s rather
+// than restarting with no delay at all (gt-gqftr).
 func (m *DoltServerManager) getBackoffDelay() time.Duration {
 	if m.currentDelay <= 0 {
-		return m.config.RestartDelay
+		return m.config.RestartDelay()
 	}
 	return m.currentDelay
 }
 
 // advanceBackoff doubles the current delay up to MaxRestartDelay.
 func (m *DoltServerManager) advanceBackoff() {
-	baseDelay := m.config.RestartDelay
-	if baseDelay <= 0 {
-		baseDelay = 5 * time.Second
-	}
-	maxDelay := m.config.MaxRestartDelay
-	if maxDelay <= 0 {
-		maxDelay = 5 * time.Minute
-	}
+	baseDelay := m.config.RestartDelay()
+	maxDelay := m.config.MaxRestartDelay()
 
 	if m.currentDelay <= 0 {
 		m.currentDelay = baseDelay
@@ -734,11 +746,7 @@ func (m *DoltServerManager) advanceBackoff() {
 
 // pruneRestartTimes removes restart timestamps outside the configured window.
 func (m *DoltServerManager) pruneRestartTimes(now time.Time) {
-	window := m.config.RestartWindow
-	if window <= 0 {
-		window = 10 * time.Minute
-	}
-	cutoff := now.Add(-window)
+	cutoff := now.Add(-m.config.RestartWindow())
 	pruned := m.restartTimes[:0]
 	for _, t := range m.restartTimes {
 		if t.After(cutoff) {
@@ -761,10 +769,7 @@ func (m *DoltServerManager) clearHealthyClock() {
 // Must be called with m.mu held.
 func (m *DoltServerManager) maybeResetBackoff() {
 	now := m.now()
-	resetInterval := m.config.HealthyResetInterval
-	if resetInterval <= 0 {
-		resetInterval = 5 * time.Minute
-	}
+	resetInterval := m.config.HealthyResetInterval()
 
 	if m.lastHealthyTime.IsZero() {
 		m.lastHealthyTime = now
@@ -809,7 +814,7 @@ Log file: %s
 Host: %s:%d
 
 Action needed: Investigate and fix the root cause, then restart the daemon or the Dolt server manually.`,
-		restartCount, m.config.RestartWindow,
+		restartCount, m.config.RestartWindow(),
 		m.config.DataDir, m.config.LogFile,
 		m.config.Host, m.config.Port)
 
@@ -840,7 +845,7 @@ Check the log file for crash details. If crashes recur, the daemon will escalate
 		deadPID,
 		m.config.DataDir, m.config.LogFile,
 		m.config.Host, m.config.Port,
-		m.config.MaxRestartsInWindow, m.config.RestartWindow)
+		m.config.MaxRestartsInWindow, m.config.RestartWindow())
 
 	logger := m.logger
 	n := m.notify()

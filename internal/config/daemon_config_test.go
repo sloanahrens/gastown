@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDaemonPatrolConfigIsTheDaemonsSchema(t *testing.T) {
@@ -35,6 +36,70 @@ func TestDaemonPatrolConfigIsTheDaemonsSchema(t *testing.T) {
 	}
 }
 
+// The dolt_server knobs are durations written as strings, like their siblings
+// in this file. They used to be time.Duration fields, which rejected "5s"
+// outright under strict decoding and read a bare number as nanoseconds
+// (gt-gqftr).
+func TestDoltServerConfig_DurationStrings(t *testing.T) {
+	t.Parallel()
+	body := `{"patrols":{"dolt_server":{"enabled":true,"restart_delay":"7s",` +
+		`"max_restart_delay":"3m","restart_window":"20m",` +
+		`"healthy_reset_interval":"2m","health_check_interval":"45s"}}}`
+	var cfg DaemonPatrolConfig
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("duration strings = %v", err)
+	}
+	ds := cfg.Patrols.DoltServer
+	for _, tt := range []struct {
+		key  string
+		got  time.Duration
+		want time.Duration
+	}{
+		{"restart_delay", ds.RestartDelay(), 7 * time.Second},
+		{"max_restart_delay", ds.MaxRestartDelay(), 3 * time.Minute},
+		{"restart_window", ds.RestartWindow(), 20 * time.Minute},
+		{"healthy_reset_interval", ds.HealthyResetInterval(), 2 * time.Minute},
+		{"health_check_interval", ds.HealthCheckInterval(), 45 * time.Second},
+	} {
+		if tt.got != tt.want {
+			t.Errorf("%s = %v, want %v", tt.key, tt.got, tt.want)
+		}
+	}
+
+	// A bare number is a type error, not a nanosecond count: 5 as 5ns would
+	// read as a restart with no delay at all.
+	err := DecodeJSONFile("daemon.json",
+		[]byte(`{"patrols":{"dolt_server":{"enabled":true,"restart_delay":5}}}`),
+		&DaemonPatrolConfig{})
+	if !errors.Is(err, ErrUnparseable) {
+		t.Errorf(`restart_delay: 5 = %v, want ErrUnparseable`, err)
+	}
+}
+
+// auto_restart is read only when the key is present: absent means the manager
+// restarts the server, and false leaves a crashed server down for the operator
+// (gt-gqftr).
+func TestDoltServerConfig_AutoRestartKey(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		key  string
+		want bool
+	}{
+		{"", true},
+		{`,"auto_restart":true`, true},
+		{`,"auto_restart":false`, false},
+	} {
+		body := `{"patrols":{"dolt_server":{"enabled":true` + tt.key + `}}}`
+		var cfg DaemonPatrolConfig
+		if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+			t.Fatalf("%s = %v", body, err)
+		}
+		if got := cfg.Patrols.DoltServer.AutoRestartEnabled(); got != tt.want {
+			t.Errorf("%s: AutoRestartEnabled = %v, want %v", body, got, tt.want)
+		}
+	}
+}
+
 func TestDaemonPatrolConfigDecodesRebuildOM(t *testing.T) {
 	t.Parallel()
 	var cfg DaemonPatrolConfig
@@ -61,6 +126,10 @@ func TestDaemonPatrolConfigRejectsUnknownPatrolKeys(t *testing.T) {
 		`{"patrols":{"handler":{"enabled":false,"bogus":1}}}`,
 		`{"patrols":{"custom":{"enabled":true}}}`,
 		`{"heartbeet":{"enabled":true}}`,
+		// restart_tracker was declared but nothing read it, so its keys now
+		// fail the decode rather than pretending to configure the daemon
+		// (gt-gqftr).
+		`{"patrols":{"restart_tracker":{"initial_backoff":"30s"}}}`,
 	} {
 		err := DecodeJSONFile("daemon.json", []byte(body), &DaemonPatrolConfig{})
 		if !errors.Is(err, ErrUnparseable) {

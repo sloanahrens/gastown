@@ -15,8 +15,8 @@ func TestAdvanceBackoff(t *testing.T) {
 	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
-			RestartDelay:    5 * time.Second,
-			MaxRestartDelay: 5 * time.Minute,
+			RestartDelayStr:    "5s",
+			MaxRestartDelayStr: "5m",
 		},
 		logger: func(format string, v ...interface{}) {},
 	}
@@ -194,7 +194,7 @@ func TestGetBackoffDelay_InitialValue(t *testing.T) {
 	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
-			RestartDelay: 5 * time.Second,
+			RestartDelayStr: "5s",
 		},
 		logger: func(format string, v ...interface{}) {},
 	}
@@ -206,12 +206,41 @@ func TestGetBackoffDelay_InitialValue(t *testing.T) {
 	}
 }
 
+// A block that omits restart_delay must still wait the documented 5s before
+// its first restart: the zero value reached the sleep and restarted the server
+// immediately, which is the crash-loop amplification the knob exists to damp
+// (gt-gqftr).
+func TestGetBackoffDelay_FirstRestartUsesDefault(t *testing.T) {
+	t.Parallel()
+	m := newTestManager(t)
+	// What a dolt_server block that names neither key decodes to.
+	m.config.RestartDelayStr = ""
+	m.config.MaxRestartDelayStr = ""
+
+	var slept []time.Duration
+	m.sleepFn = func(d time.Duration) { slept = append(slept, d) }
+
+	m.mu.Lock()
+	err := m.restartWithBackoff()
+	m.mu.Unlock()
+	if err != nil {
+		t.Fatalf("restartWithBackoff: %v", err)
+	}
+
+	if len(slept) != 1 || slept[0] != 5*time.Second {
+		t.Fatalf("first restart slept %v, want the default 5s", slept)
+	}
+	if m.currentDelay != 10*time.Second {
+		t.Errorf("backoff after the first restart = %v, want 10s", m.currentDelay)
+	}
+}
+
 func TestPruneRestartTimes(t *testing.T) {
 	t.Parallel()
 	now := time.Now()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
-			RestartWindow: 10 * time.Minute,
+			RestartWindowStr: "10m",
 		},
 		logger: func(format string, v ...interface{}) {},
 		restartTimes: []time.Time{
@@ -233,7 +262,7 @@ func TestMaybeResetBackoff(t *testing.T) {
 	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
-			HealthyResetInterval: 5 * time.Minute,
+			HealthyResetIntervalStr: "5m",
 		},
 		logger:       func(format string, v ...interface{}) {},
 		currentDelay: 40 * time.Second,
@@ -266,7 +295,7 @@ func TestMaybeResetBackoff_NoResetIfNotLongEnough(t *testing.T) {
 	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
-			HealthyResetInterval: 5 * time.Minute,
+			HealthyResetIntervalStr: "5m",
 		},
 		logger:          func(format string, v ...interface{}) {},
 		currentDelay:    40 * time.Second,
@@ -289,7 +318,7 @@ func TestMaybeResetBackoff_AccumulatesAcrossHeartbeats(t *testing.T) {
 	// reset, allowing the delta to accumulate across multiple heartbeat calls.
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
-			HealthyResetInterval: 10 * time.Minute,
+			HealthyResetIntervalStr: "10m",
 		},
 		logger:       func(format string, v ...interface{}) {},
 		currentDelay: 40 * time.Second,
@@ -342,7 +371,7 @@ func TestMaybeResetBackoff_RestartClearsHealthyClock(t *testing.T) {
 	baseTime := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 
 	m := newTestManager(t)
-	m.config.HealthyResetInterval = 5 * time.Minute
+	m.config.HealthyResetIntervalStr = "5m"
 	m.nowFn = func() time.Time { return baseTime.Add(time.Duration(offset.Load())) }
 	m.sleepFn = func(time.Duration) {}
 	m.startFn = func() error {
@@ -417,7 +446,7 @@ func TestMaybeResetBackoff_UnhealthyBranchClearsHealthyClock(t *testing.T) {
 			baseTime := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 
 			m := newTestManager(t)
-			m.config.HealthyResetInterval = 5 * time.Minute
+			m.config.HealthyResetIntervalStr = "5m"
 			m.nowFn = func() time.Time { return baseTime.Add(time.Duration(offset.Load())) }
 			m.sleepFn = func(time.Duration) {}
 			m.runningFn = func() (int, bool) { return 1234, true }
@@ -462,24 +491,29 @@ func TestMaybeResetBackoff_UnhealthyBranchClearsHealthyClock(t *testing.T) {
 	}
 }
 
+// A server manager the daemon built without a dolt_server block must run on the
+// documented defaults, not on the zero values of the fields (gt-gqftr).
 func TestDefaultConfig_BackoffFields(t *testing.T) {
 	t.Parallel()
 	cfg := DefaultDoltServerConfig("/tmp/test")
 
-	if cfg.MaxRestartDelay != 5*time.Minute {
-		t.Errorf("expected MaxRestartDelay 5m, got %v", cfg.MaxRestartDelay)
+	if got := cfg.RestartDelay(); got != 5*time.Second {
+		t.Errorf("RestartDelay = %v, want 5s", got)
 	}
-	if cfg.MaxRestartsInWindow != 5 {
-		t.Errorf("expected MaxRestartsInWindow 5, got %d", cfg.MaxRestartsInWindow)
+	if got := cfg.MaxRestartDelay(); got != 5*time.Minute {
+		t.Errorf("MaxRestartDelay = %v, want 5m", got)
 	}
-	if cfg.RestartWindow != 10*time.Minute {
-		t.Errorf("expected RestartWindow 10m, got %v", cfg.RestartWindow)
+	if got := cfg.RestartWindow(); got != 10*time.Minute {
+		t.Errorf("RestartWindow = %v, want 10m", got)
 	}
-	if cfg.HealthyResetInterval != 5*time.Minute {
-		t.Errorf("expected HealthyResetInterval 5m, got %v", cfg.HealthyResetInterval)
+	if got := cfg.HealthyResetInterval(); got != 5*time.Minute {
+		t.Errorf("HealthyResetInterval = %v, want 5m", got)
 	}
-	if cfg.HealthCheckInterval != DefaultDoltHealthCheckInterval {
-		t.Errorf("expected HealthCheckInterval %v, got %v", DefaultDoltHealthCheckInterval, cfg.HealthCheckInterval)
+	if got := cfg.HealthCheckInterval(); got != DefaultDoltHealthCheckInterval {
+		t.Errorf("HealthCheckInterval = %v, want %v", got, DefaultDoltHealthCheckInterval)
+	}
+	if !cfg.AutoRestartEnabled() {
+		t.Error("auto_restart must be on when the key is absent")
 	}
 }
 
@@ -503,8 +537,8 @@ func TestHealthCheckInterval_Configured(t *testing.T) {
 	t.Parallel()
 	m := &DoltServerManager{
 		config: &DoltServerConfig{
-			Enabled:             true,
-			HealthCheckInterval: 15 * time.Second,
+			Enabled:                true,
+			HealthCheckIntervalStr: "15s",
 		},
 		logger: func(format string, v ...interface{}) {},
 	}
@@ -538,10 +572,10 @@ func TestRestartingFlag_PreventsConcurrentRestarts(t *testing.T) {
 			Enabled:             true,
 			Port:                13306, // Non-standard port to avoid conflicts
 			Host:                "127.0.0.1",
-			RestartDelay:        50 * time.Millisecond,
-			MaxRestartDelay:     100 * time.Millisecond,
+			RestartDelayStr:     "50ms",
+			MaxRestartDelayStr:  "100ms",
 			MaxRestartsInWindow: 10,
-			RestartWindow:       10 * time.Minute,
+			RestartWindowStr:    "10m",
 		},
 		logger: func(format string, v ...interface{}) {},
 	}
@@ -807,14 +841,14 @@ func newTestManager(t *testing.T) *DoltServerManager {
 	}
 	return &DoltServerManager{
 		config: &DoltServerConfig{
-			Enabled:              true,
-			Port:                 13306,
-			Host:                 "127.0.0.1",
-			RestartDelay:         10 * time.Millisecond,
-			MaxRestartDelay:      100 * time.Millisecond,
-			MaxRestartsInWindow:  5,
-			RestartWindow:        10 * time.Minute,
-			HealthyResetInterval: 50 * time.Millisecond,
+			Enabled:                 true,
+			Port:                    13306,
+			Host:                    "127.0.0.1",
+			RestartDelayStr:         "10ms",
+			MaxRestartDelayStr:      "100ms",
+			MaxRestartsInWindow:     5,
+			RestartWindowStr:        "10m",
+			HealthyResetIntervalStr: "50ms",
 		},
 		townRoot:         tmpDir,
 		logger:           func(format string, v ...interface{}) { t.Logf(format, v...) },
@@ -901,6 +935,88 @@ func TestEnsureRunning_DeadPIDFileRaisesCrashSignal(t *testing.T) {
 	}
 	if _, err := os.Stat(m.pidFile()); !os.IsNotExist(err) {
 		t.Errorf("stale pid file left behind: %v", err)
+	}
+}
+
+// auto_restart:false must leave a crashed server down for the operator: the
+// crash is still alerted, but nothing starts the server back up (gt-gqftr).
+func TestEnsureRunning_AutoRestartFalseLeavesDeadServer(t *testing.T) {
+	t.Parallel()
+	m := newTestManager(t)
+	m.runningFn = nil
+	m.config.Port = 3307
+	m.sleepFn = func(time.Duration) {}
+	off := false
+	m.config.AutoRestart = &off
+	if _, err := writePIDFile(m.pidFile(), notARunningPID); err != nil {
+		t.Fatalf("writePIDFile: %v", err)
+	}
+
+	var events []string
+	m.crashAlertFn = func(pid int) { events = append(events, fmt.Sprintf("alert:%d", pid)) }
+	m.startFn = func() error { events = append(events, "start"); return nil }
+
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+
+	want := []string{fmt.Sprintf("alert:%d", notARunningPID)}
+	if len(events) != len(want) {
+		t.Fatalf("auto_restart:false must alert and then restart nothing, got %v", events)
+	}
+	if events[0] != want[0] {
+		t.Errorf("first event = %q, want the crash alert %q", events[0], want[0])
+	}
+}
+
+// The refusal covers a server that is up but broken: stopping it would be the
+// first half of the restart the config forbids, so the manager leaves it
+// running and only alerts (gt-gqftr).
+func TestEnsureRunning_AutoRestartFalseLeavesUnhealthyServerUp(t *testing.T) {
+	t.Parallel()
+	m := newTestManager(t)
+	m.runningFn = func() (int, bool) { return 1234, true }
+	m.healthCheckFn = func() error { return fmt.Errorf("connection refused") }
+	off := false
+	m.config.AutoRestart = &off
+
+	var alerts int
+	var stopped bool
+	m.unhealthyAlertFn = func(error) { alerts++ }
+	m.stopFn = func() { stopped = true }
+	m.startFn = func() error { stopped = true; return nil }
+
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+
+	if stopped {
+		t.Error("auto_restart:false must not stop or start the server")
+	}
+	if alerts != 1 {
+		t.Errorf("unhealthy alerts = %d, want 1", alerts)
+	}
+}
+
+// A server that is not running and has no dead PID on file is started, not
+// restarted, so auto_restart:false still brings the town's data plane up
+// (gt-gqftr).
+func TestEnsureRunning_AutoRestartFalseStillStartsColdServer(t *testing.T) {
+	t.Parallel()
+	m := newTestManager(t)
+	m.sleepFn = func(time.Duration) {}
+	off := false
+	m.config.AutoRestart = &off
+
+	var events []string
+	m.startFn = func() error { events = append(events, "start"); return nil }
+
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+
+	if len(events) != 1 || events[0] != "start" {
+		t.Fatalf("cold start = %v, want one start", events)
 	}
 }
 
@@ -1038,7 +1154,7 @@ func TestEnsureRunning_HealthyResetsBackoff(t *testing.T) {
 	baseTime := time.Now()
 
 	m := newTestManager(t)
-	m.config.HealthyResetInterval = 100 * time.Millisecond
+	m.config.HealthyResetIntervalStr = "100ms"
 	m.runningFn = func() (int, bool) { return 1234, true }
 	m.healthCheckFn = func() error { return nil }
 	m.nowFn = func() time.Time {
