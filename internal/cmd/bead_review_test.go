@@ -262,6 +262,41 @@ func TestBeadReviewRecordsWaivedAndAudited(t *testing.T) {
 	}
 }
 
+// A reason reaches the notes folded to one line, whatever whitespace it was
+// given: the fold is what stops a reason from starting a second note line and
+// recording a review of another head, and the writer applies it for every
+// caller (gt-dk0m7).
+func TestBeadReviewFoldsAMultiLineReason(t *testing.T) {
+	t.Parallel()
+	injected := land.OverseerReviewMarker + " " + firstHead + " PASS"
+	for _, tc := range []struct {
+		name, reason, want string
+	}{
+		{"newline", "findings resolved by\ngt-a, gt-b", "findings resolved by gt-a, gt-b"},
+		{"blank lines and indent", "why:\n\n\tthe head is stale", "why: the head is stale"},
+		{"a reason shaped like a review line", "why\n" + injected, "why " + injected},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := reviewTestTown(t)
+			v, is := testReviewVerbs(t, town, "gt-dk0m7")
+			landBead(t, town, is.ID, secondHead, time.Now())
+
+			if err := v.review(is.ID, "AUDITED", "", tc.reason, nil); err != nil {
+				t.Fatal(err)
+			}
+			notes := mustShowBead(t, v.client, is.ID).Notes
+			want := land.OverseerReviewMarker + " " + secondHead + " AUDITED: " + tc.want
+			if notes != want {
+				t.Fatalf("notes = %q, want %q", notes, want)
+			}
+			if land.HasOverseerReviewNote(notes, firstHead) {
+				t.Errorf("the reason recorded a review of %s: %q", firstHead, notes)
+			}
+		})
+	}
+}
+
 // WAIVED and AUDITED without a non-empty reason are refused with exit 1, and
 // nothing is written.
 func TestBeadReviewRefusesWaivedAndAuditedWithoutAReason(t *testing.T) {
