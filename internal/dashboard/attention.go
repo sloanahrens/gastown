@@ -87,8 +87,7 @@ type Attention struct {
 	// Mine is how many of Rows the human owns, which is the number the strip's
 	// "needs you" fact draws. A non-zero More makes it a floor rather than a
 	// whole: the owner of a row the reader capped out is what that read never
-	// took, so the strip draws the count as "N+" rather than as a number that
-	// leaves the capped rows out in silence.
+	// took (stripNeedsYouAlarm).
 	Mine int `json:"mine"`
 	// Failed names the readers behind the list that could not be read
 	// ("escalations", "questions").

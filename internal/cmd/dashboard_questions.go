@@ -11,9 +11,9 @@ import (
 
 // The question rows of the dashboard's Attention panel: the questions the
 // overseer has filed for Sloan, so he can see what is waiting on him and answer
-// it from a terminal. It reads the
-// town's own beads database, which is where a question is filed — a reader
-// that listed from a rig worktree would see that rig's beads alone.
+// it from a terminal. It reads the town's own beads database, which is where a
+// question is filed — a reader that listed from a rig worktree would see that
+// rig's beads alone.
 //
 // A read that fails is a named state rather than an empty list, because "the
 // overseer has asked nothing" and "the answer could not be read" are different
@@ -23,7 +23,7 @@ import (
 // are internal/question's; gt ask, gt answer and the daemon's question
 // collector read the same ones.
 
-// dashQuestionRows is how many questions the pane draws. A longer queue is
+// dashQuestionRows is how many question rows the panel draws. A longer queue is
 // counted in More rather than truncated silently, and the rows past the cap
 // cost no read of their own.
 const dashQuestionRows = 20
@@ -33,7 +33,7 @@ const dashQuestionRows = 20
 type dashQuestionsReader struct {
 	list     func() ([]*beads.Issue, error)
 	comments func(id string) ([]beads.Comment, error)
-	// all lifts the pane's row cap, for gt questions, which lists the whole
+	// all lifts the panel's row cap, for gt questions, which lists the whole
 	// queue.
 	all bool
 }
@@ -55,8 +55,8 @@ func newQuestionsReader(b questionReads) *dashQuestionsReader {
 	}
 }
 
-// read is the pane's whole reading. A read that fails at any point is an
-// unavailable pane: the page cannot draw "awaiting you" for a question whose
+// read is the panel's whole question reading. A read that fails at any point is
+// an unavailable list: the page cannot draw "awaiting you" for a question whose
 // comments it could not read, since that is the one wrong answer it could give.
 func (r *dashQuestionsReader) read(now time.Time) *dashboard.Questions {
 	issues, err := r.list()
@@ -93,7 +93,7 @@ type questionCandidate struct {
 	askedAt time.Time // zero when the bead's creation time does not parse
 }
 
-// questionRow is one listed bead as the pane draws it, before its comments are
+// questionRow is one listed bead as the panel draws it, before its comments are
 // read.
 func questionRow(issue *beads.Issue) questionCandidate {
 	f := question.Parse(issue)

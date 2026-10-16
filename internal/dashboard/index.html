@@ -279,6 +279,9 @@ const fmtDur = s => {
   return h + "h" + String(m % 60).padStart(2, "0") + "m";
 };
 const age = iso => iso ? fmtDur((Date.now() - new Date(iso).getTime()) / 1000) : "–";
+// firstLine is the opening line of a text another agent wrote — a recommended
+// answer, which runs to a paragraph — for a row that carries one line of it.
+const firstLine = t => String(t).split("\n")[0].trim();
 const clock = iso => new Date(iso).toLocaleTimeString([], {hour12: false});
 const money = v => v == null ? "–" : "$" + Number(v).toFixed(2);
 
@@ -472,11 +475,14 @@ function renderStrip(s) {
   else {
     // A reader that capped rows out of the list never read their owner, so the
     // human's count is a floor: the strip draws "N+" rather than a number that
-    // leaves the capped rows out in silence (gt-bi6w0).
-    const mine = at.mine || 0, capped = at.more || 0;
-    fact(box, String(mine) + (capped ? "+" : ""), "needs you", {cls: a.needs_you || "",
-      tip: mine + " of the " + (at.rows || []).length + " rows waiting on a decision " + (mine === 1 ? "is" : "are") + " the human's" +
-        (capped ? " · " + capped + " more the readers capped out, whose owner they did not read" : "") +
+    // leaves the capped rows out in silence, and "?" rather than a zero that
+    // passes a count nobody made off as none (gt-bi6w0).
+    const mine = at.mine || 0, capped = at.more || 0, unknown = capped > 0 && mine === 0;
+    fact(box, unknown ? "?" : String(mine) + (capped ? "+" : ""), "needs you", {cls: a.needs_you || "",
+      tip: (unknown
+        ? "the readers capped " + capped + " rows out of the list and none of the rows they read is the human's, so how many are is not known"
+        : mine + " of the " + (at.rows || []).length + " rows waiting on a decision " + (mine === 1 ? "is" : "are") + " the human's" +
+          (capped ? " · " + capped + " more the readers capped out, whose owner they did not read" : "")) +
         " · the Attention panel below has the rows"});
   }
 
@@ -2111,10 +2117,13 @@ function renderDispatch(s) {
 // amber the page carries for every other stale reading.
 const QUESTION_OLDEST_SEC = 4 * 3600;
 
-// The owners a row can carry, as the reader's own tags (attention.Owner). The
-// page draws one chip per owner, so an owner the reader adds shows up as a chip
-// rather than as a row nothing can filter.
+// The owners a row can carry, as the reader's own tags (attention.Owner), and
+// the one the panel opens on. The chips are the panel's whole filter: one list,
+// one chip per owner, opened on the human's rows — the panel that lists what
+// needs the human — so the overseer reads its own rows by switching its chip
+// rather than opening a second panel (gt-bi6w0).
 const OWNERS = ["sloan", "overseer"];
+const PANEL_OPENS_ON = "sloan";
 
 // The Attention panel: the one list of what is waiting on a decision or an
 // action — the open escalations, the overseer's open questions and the
@@ -2128,47 +2137,69 @@ const OWNERS = ["sloan", "overseer"];
 // a question is answered with gt answer, a comment on the bead, from a
 // terminal.
 function renderAttention(s) {
-  const box = $("attention"), note = $("attentionnote");
-  box.replaceChildren();
+  attentionState = s;
+  const note = $("attentionnote");
   const at = s.attention;
-  if (!at) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "reading…")); return; }
-  const rows = at.rows || [];
-  const failed = at.failed || [], pending = at.pending || [];
+  const rows = at ? (at.rows || []) : [];
+  const shown = rows.filter(ownerShown);
 
-  // The header names what is waiting and, past four hours, how long the oldest
-  // question has waited — the question is the row type that stops the town
-  // until it is answered.
-  const asks = rows.filter(r => r.kind === "question").map(r => r.age_sec).filter(a => a != null);
+  // The note counts the rows the panel is showing and, past four hours, how
+  // long the oldest question among them has waited — the question is the row
+  // type that stops the town until it is answered. The rows the readers capped
+  // out are counted beside the shown ones only while the filter is showing the
+  // whole list, which is who the cap belongs to (gt-bi6w0).
+  const asks = shown.filter(r => r.kind === "question").map(r => r.age_sec).filter(a => a != null);
   const oldest = asks.length ? Math.max(...asks) : null;
   const stale = oldest != null && oldest > QUESTION_OLDEST_SEC;
+  const capped = shown.length === rows.length ? (at && at.more) || 0 : 0;
   note.className = stale ? "r warnc" : "r";
-  note.textContent = rows.length
-    ? rows.length + (at.more ? " of " + (rows.length + at.more) : "") + " waiting" + (stale ? " · oldest question " + fmtDur(oldest) : "")
+  note.textContent = shown.length
+    ? shown.length + (capped ? " of " + (shown.length + capped) : "") + " waiting" + (stale ? " · oldest question " + fmtDur(oldest) : "")
     : "";
   renderOwnerChips(rows);
+  drawAttention();
+}
 
+// drawAttention draws the panel's body: the reads behind the list that have
+// something to say, then the rows the owner chips are showing. Switching a chip
+// redraws it, so the list holds the rows the reader asked for rather than
+// holding every row and hiding some (gt-bi6w0).
+function drawAttention() {
+  const box = $("attention");
+  box.replaceChildren();
+  const at = attentionState ? attentionState.attention : null;
+  if (!at) { box.append(el("div", "empty", "reading…")); return; }
+  const failed = at.failed || [], pending = at.pending || [];
   // A read that failed is a named state, never an empty panel: "nothing is
   // waiting" and "the list could not be read" must not look alike. The rows the
   // readers did return are still drawn beside the line.
   if (failed.length) box.append(el("div", "badc", "unavailable: the " + failed.join(" and the ") + " could not be read"));
   // A reader that has not reported yet is not a reader that found nothing, so
-  // its absence is named before "nothing waiting" can stand for it.
+  // its absence is named before the empty line can stand for it.
   if (pending.length) box.append(el("div", "empty", "the " + pending.join(" and the ") + " have not been read yet"));
-  if (!rows.length) {
-    if (!failed.length && !pending.length) box.append(el("div", "empty", "nothing waiting"));
+  const shown = (at.rows || []).filter(ownerShown);
+  if (!shown.length) {
+    // A filter with no chip on is the reader's own doing; otherwise the panel is
+    // showing every row it holds and there is nothing waiting on them.
+    if (!failed.length && !pending.length) box.append(el("div", "empty", shownOwners.size ? "nothing needs you" : "every owner chip is off"));
     return;
   }
-  for (const r of rows) box.append(attentionRow(r));
+  for (const r of shown) box.append(attentionRow(r));
 }
 
+// ownerShown reports whether the owner chips are showing a row. A row whose
+// owner the page has no chip for is shown rather than hidden: a rule a newer
+// daemon writes reaches the reader who can act on it, and the panel sorts it
+// last (attention.ownerRank).
+function ownerShown(r) { return OWNERS.indexOf(r.owner) < 0 || shownOwners.has(r.owner); }
+
 // The owner chips are the panel's one filter: one chip per owner the reader can
-// tag a row with, carrying the count of the rows it is showing. The choice
-// survives reloads the way the feed's class chips do, and a chip is drawn at
-// zero rather than dropped, so an owner never disappears from the page.
-const shownOwners = new Set(JSON.parse(localStorage.getItem("gt-attention-owners") || "null") || OWNERS);
-let attentionRows = [];
+// tag a row with, carrying the count of the rows it holds. The choice survives
+// reloads the way the feed's class chips do, and a chip is drawn at zero rather
+// than dropped, so an owner never disappears from the page.
+const shownOwners = new Set(JSON.parse(localStorage.getItem("gt-attention-owners") || "null") || [PANEL_OPENS_ON]);
+let attentionState = null;
 function renderOwnerChips(rows) {
-  attentionRows = rows;
   const counts = {};
   for (const r of rows) counts[r.owner] = (counts[r.owner] || 0) + 1;
   const box = $("attentionchips");
@@ -2180,13 +2211,11 @@ function renderOwnerChips(rows) {
     b.onclick = () => {
       shownOwners.has(o) ? shownOwners.delete(o) : shownOwners.add(o);
       try { localStorage.setItem("gt-attention-owners", JSON.stringify([...shownOwners])); } catch (e) {}
-      renderOwnerChips(attentionRows);
-      applyOwnerFilter();
+      renderAttention(attentionState);
     };
     box.append(b);
   }
 }
-function applyOwnerFilter() { for (const r of $("attention").children) if (r.dataset.owner) r.hidden = !shownOwners.has(r.dataset.owner); }
 
 // attentionRow is one row of the list. Every row carries its owner and its age;
 // a question adds its own words, the answer recommended to it, what answering
@@ -2195,7 +2224,6 @@ function applyOwnerFilter() { for (const r of $("attention").children) if (r.dat
 function attentionRow(r) {
   const row = el("div", "arow");
   row.dataset.owner = r.owner;
-  row.hidden = !shownOwners.has(r.owner);
   row.append(el("span", "tag own-" + r.owner, r.owner || "?"));
   if (r.kind === "escalation") {
     row.append(el("span", "esc " + (SEV_CLASS[r.severity] || "sev-low"), r.severity || "–"));
@@ -2221,7 +2249,9 @@ function attentionRow(r) {
   }
   if (r.age_sec != null) row.append(el("span", "qage", fmtDur(r.age_sec)));
   if (r.question) row.append(el("div", "qtext", r.question));
-  if (r.recommended) row.append(el("div", "qrec", "Recommended: " + r.recommended));
+  // The row carries the recommended answer's opening line: the answer is a
+  // paragraph, and the row is a line the human scans for what to decide.
+  if (r.recommended) row.append(el("div", "qrec", "Recommended: " + firstLine(r.recommended)));
   const held = [];
   if (r.held_count) held.push("holds " + r.held_count + (r.held_count === 1 ? " bead" : " beads"));
   if ((r.held || []).length) held.push("Held: " + r.held.join(", "));

@@ -54,8 +54,8 @@ type StripAlarms struct {
 	// Working is the worst alarm any polecat holding a live reading earns.
 	Working string `json:"working,omitempty"`
 	// NeedsYou is the human's share of what is waiting on a decision: red while
-	// a reading behind the count could not be made, and red while the count is
-	// up.
+	// a reading behind the count could not be made or a row is the human's,
+	// amber while rows went unread that could be.
 	NeedsYou string `json:"needs_you,omitempty"`
 	// Behind is the installed gt's distance from main.
 	Behind string `json:"behind,omitempty"`
@@ -110,7 +110,9 @@ func stripWorkingAlarm(polecats []Polecat) string {
 
 // stripNeedsYouAlarm is the human's share of what is waiting: red while a
 // reading behind the list could not be made, nothing while one of them has not
-// come back, and red while the count is up (gt-bi6w0).
+// come back, and red while the count is up. Rows the readers capped out were
+// never read for an owner, so a count of none beside them is a count nobody
+// made rather than a human with nothing to do: it reads amber (gt-bi6w0).
 func stripNeedsYouAlarm(at *Attention) string {
 	if at == nil {
 		return ""
@@ -123,6 +125,9 @@ func stripNeedsYouAlarm(at *Attention) string {
 	}
 	if at.Mine > 0 {
 		return alarmBad
+	}
+	if at.More > 0 {
+		return alarmWarn
 	}
 	return ""
 }

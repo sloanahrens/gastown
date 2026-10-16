@@ -124,6 +124,13 @@ func TestStripAlarmsTurnWithTheReadingsTheStripHolds(t *testing.T) {
 			state: State{Now: now, Attention: &Attention{Rows: []AttentionRow{{Owner: "overseer"}}}},
 		},
 		{
+			name: "a cap with no human row read is a count nobody made",
+			state: State{Now: now, Attention: &Attention{
+				Rows: []AttentionRow{{Owner: "overseer"}}, More: 3,
+			}},
+			want: StripAlarms{NeedsYou: alarmWarn},
+		},
+		{
 			name:  "a list with nothing waiting is nothing to act on",
 			state: State{Now: now, Attention: &Attention{}},
 		},

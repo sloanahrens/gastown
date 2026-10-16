@@ -25,9 +25,6 @@ func TestTheStripDrawsEachFactOnce(t *testing.T) {
 		`const rr = readOf(s, "ready");`,
 		`fact(box, q == null ? "–" : String(q), "waiting to land",`,
 		`oldest == null ? null : "oldest " + fmtDur(oldest)`,
-		// What needs the human, off the one merged list the panel below draws.
-		`const at = s.attention || null;`,
-		`fact(box, String(mine) + (capped ? "+" : ""), "needs you",`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderStrip has no %q", want)
@@ -244,9 +241,11 @@ func TestTheStripColoursItsAlarmsFromDefinedClasses(t *testing.T) {
 	}
 }
 
-// A reading nobody has made is never drawn as a zero: the landings, the queue
-// and the list behind "needs you" each say they could not be read, and a failed
-// queue read is never a drained one (gt-ywlei, gt-q6h8e).
+// A reading nobody has made is never drawn as a zero: the landings and the
+// queue each say they could not be read, and a failed queue read is never a
+// drained one (gt-ywlei, gt-q6h8e). What the strip draws behind "needs you" is
+// the merged list's own reads, which
+// attention_page_test.go runs the page over (gt-bi6w0).
 func TestTheStripNeverDrawsAReadingNobodyMade(t *testing.T) {
 	t.Parallel()
 
@@ -254,13 +253,6 @@ func TestTheStripNeverDrawsAReadingNobodyMade(t *testing.T) {
 	for _, want := range []string{
 		`const landed = ((t && t.hours) || []).reduce((n, h) => n + h.landed, 0);`,
 		`if (q == null && why) fact(box, "unavailable", "waiting to land"`,
-		// The list of what waits, and the readers behind it: one that failed is
-		// named, one that has not come back is no value yet, in the strip's own
-		// dim, and a list that has not been built at all is neither.
-		`if (!at) fact(box, "–", "needs you",`,
-		`if (failed.length) fact(box, "unavailable", "needs you"`,
-		`"the " + waiters + " could not be read"`,
-		`else if (pending.length) fact(box, "–", "needs you", {cls: a.needs_you || "",`,
 		`"the read that lists them has not come back"`,
 	} {
 		if !strings.Contains(strip, want) {

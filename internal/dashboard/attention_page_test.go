@@ -54,10 +54,109 @@ func panelCells(row panelDrawn, cell string) bool {
 	return false
 }
 
+// switchOwner switches one owner's chip, the way the operator does. The chips
+// are drawn in OWNERS order and each names its owner in its title, which is how
+// the test finds it.
+func switchOwner(t *testing.T, dom *pageDOM, owner string) {
+	t.Helper()
+
+	js := `(() => {
+		const chips = Array.from(__byId["attentionchips"].children);
+		const i = chips.findIndex(b => b.title.indexOf("` + owner + `") >= 0);
+		if (i < 0) throw new Error("no chip names ` + owner + `");
+		chips[i].onclick();
+	})()`
+	if _, err := dom.vm.RunString(js); err != nil {
+		t.Fatalf("switching the %s chip: %v", owner, err)
+	}
+}
+
 // attentionState is the reading the panel is drawn from: the rows of the one
 // list, and what the readers behind it had to say.
 func attentionState(at map[string]any) map[string]any {
 	return map[string]any{"attention": at}
+}
+
+// The panel opens on the human's rows — the criterion's 'Needs you' list — and
+// the owner chips are its one filter: switching the overseer's chip draws its
+// rows into the same list rather than into a panel of their own (gt-bi6w0).
+func TestThePanelOpensOnTheHumanRowsAndTheChipsAddTheRest(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{
+		map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy"},
+		map[string]any{"kind": "escalation", "owner": "overseer", "id": "hq-9", "title": "slot held"},
+		map[string]any{"kind": "item", "owner": "overseer", "id": "slot:gastown", "title": "the slot is held"},
+	}}))
+
+	rows := panelRows(t, dom)
+	if len(rows) != 1 || rows[0].Owner != "sloan" {
+		t.Fatalf("the panel drew %+v before a chip was touched, want the human's row alone", rows)
+	}
+
+	// Each chip carries the count of the rows its owner holds, drawn from the
+	// whole list, so the reader knows what the filter is holding back.
+	v, err := dom.vm.RunString(`JSON.stringify(Array.from(__byId["attentionchips"].children).map(b => ({
+		title: b.title, count: Array.from(b.children).map(k => k.textContent).join("")})))`)
+	if err != nil {
+		t.Fatalf("reading the owner chips: %v", err)
+	}
+	var chips []struct {
+		Title string `json:"title"`
+		Count string `json:"count"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &chips); err != nil {
+		t.Fatalf("reading the owner chips: %v", err)
+	}
+	if len(chips) != 2 || !strings.Contains(chips[0].Title, "sloan") || chips[0].Count != "1" ||
+		!strings.Contains(chips[1].Title, "overseer") || chips[1].Count != "2" {
+		t.Errorf("the chips read %+v, want the human's one row and the overseer's two", chips)
+	}
+
+	switchOwner(t, dom, "overseer")
+	if rows := panelRows(t, dom); len(rows) != 3 {
+		t.Errorf("the panel drew %+v with the overseer's chip on, want the whole list", rows)
+	}
+	// The note counts what the panel is showing, so the chip redraws it too
+	// rather than leaving it counting the rows the filter held back.
+	if note := dom.element(t, "attentionnote").Text; note != "3 waiting" {
+		t.Errorf("the note reads %q with the whole list shown, want it counting the three rows", note)
+	}
+
+	// The human's chip switched off leaves the overseer's rows.
+	switchOwner(t, dom, "sloan")
+	rows = panelRows(t, dom)
+	if len(rows) != 2 {
+		t.Fatalf("the panel drew %+v with the human's chip off, want the overseer's two", rows)
+	}
+	for _, r := range rows {
+		if r.Owner != "overseer" {
+			t.Errorf("row %+v is still drawn with the human's chip off", r)
+		}
+	}
+
+	// Every chip off is the reader's own doing, and the panel says so rather
+	// than passing it off as a town with nothing waiting.
+	switchOwner(t, dom, "overseer")
+	if text := dom.element(t, "attention").Text; !strings.Contains(text, "every owner chip is off") {
+		t.Errorf("the panel reads %q with every chip off", text)
+	}
+}
+
+// A row whose owner the page has no chip for is drawn rather than hidden: a
+// rule a newer daemon writes reaches the reader who can act on it instead of a
+// filter nobody can switch (attention.ownerRank).
+func TestThePanelDrawsARowNoChipOwns(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{
+		map[string]any{"kind": "item", "owner": "someone", "id": "x:1", "title": "a rule from a newer daemon"},
+	}}))
+	if rows := panelRows(t, dom); len(rows) != 1 || rows[0].Owner != "someone" {
+		t.Errorf("the panel drew %+v, want the row whose owner has no chip", rows)
+	}
 }
 
 // One row per thing waiting, each tagged with its owner and carrying what
@@ -70,7 +169,7 @@ func TestThePanelDrawsTheThreeKindsOfRow(t *testing.T) {
 	dom := newPageDOM(t)
 	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{
 		map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy",
-			"question": "how many times should a push retry?", "recommended": "retry twice",
+			"question": "how many times should a push retry?", "recommended": "retry twice\nand page someone if it fails again",
 			"held_count": 2, "held": []any{"gt-h1"}, "effort": "quick",
 			"state": "awaiting", "priority": 0, "age_sec": 5400},
 		map[string]any{"kind": "escalation", "owner": "overseer", "id": "hq-9", "title": "slot held",
@@ -78,6 +177,7 @@ func TestThePanelDrawsTheThreeKindsOfRow(t *testing.T) {
 		map[string]any{"kind": "item", "owner": "overseer", "id": "slot:gastown", "title": "the slot is held",
 			"level": "crit", "rule": "slot.held", "age_sec": 60},
 	}}))
+	switchOwner(t, dom, "overseer") // the panel opens on the human's row alone
 
 	rows := panelRows(t, dom)
 	if len(rows) != 3 {
@@ -98,6 +198,10 @@ func TestThePanelDrawsTheThreeKindsOfRow(t *testing.T) {
 		if !strings.Contains(q.Text, want) {
 			t.Errorf("the question row reads %q, with no %q", q.Text, want)
 		}
+	}
+	// The recommended answer is a paragraph; the row carries its first line.
+	if strings.Contains(q.Text, "and page someone") {
+		t.Errorf("the question row reads the whole recommended answer: %q", q.Text)
 	}
 	// P0 is drawn in the amber the page marks what wants attention with, and
 	// the line that answers the question is one the operator can select whole.
@@ -147,11 +251,11 @@ func TestThePanelNamesAQuestionItCannotDraw(t *testing.T) {
 	}
 }
 
-// Nothing waiting collapses to one line, and a read that failed or has not
-// reported is named rather than drawn as that line: "nothing is waiting" and
+// Nothing the human owns collapses to one line, and a read that failed or has
+// not reported is named rather than drawn as that line: "nothing needs you" and
 // "the list could not be read" are different things to tell the operator
 // (gt-bi6w0).
-func TestThePanelCollapsesWhenNothingIsWaiting(t *testing.T) {
+func TestThePanelCollapsesWhenNothingNeedsTheHuman(t *testing.T) {
 	t.Parallel()
 
 	cases := []struct {
@@ -163,20 +267,27 @@ func TestThePanelCollapsesWhenNothingIsWaiting(t *testing.T) {
 		{
 			name: "nothing waiting",
 			at:   map[string]any{"rows": []any{}},
-			want: []string{"nothing waiting"},
+			want: []string{"nothing needs you"},
 			gone: []string{"have not been read yet", "unavailable"},
+		},
+		{
+			name: "rows only the overseer has to move are not the human's list",
+			at: map[string]any{"rows": []any{
+				map[string]any{"kind": "escalation", "owner": "overseer", "id": "hq-9", "title": "slot held"},
+			}},
+			want: []string{"nothing needs you"},
 		},
 		{
 			name: "a read that failed is named",
 			at:   map[string]any{"rows": []any{}, "failed": []any{"escalations"}},
 			want: []string{"unavailable: the escalations could not be read"},
-			gone: []string{"nothing waiting"},
+			gone: []string{"nothing needs you"},
 		},
 		{
 			name: "a reader that has not reported is not one that found nothing",
 			at:   map[string]any{"rows": []any{}, "pending": []any{"escalations", "questions"}},
 			want: []string{"the escalations and the questions have not been read yet"},
-			gone: []string{"nothing waiting"},
+			gone: []string{"nothing needs you"},
 		},
 	}
 
@@ -209,9 +320,10 @@ func TestThePanelCollapsesWhenNothingIsWaiting(t *testing.T) {
 	}
 }
 
-// The note counts what is waiting and names the rows the readers capped out of
-// the list, and past four hours it marks how long the oldest question has
-// waited: that question is the row type that stops the town (gt-bi6w0).
+// The note counts the rows the panel is showing and names the rows the readers
+// capped out of the list, and past four hours it marks how long the oldest
+// question has waited: that question is the row type that stops the town
+// (gt-bi6w0).
 func TestThePanelNoteCountsTheRowsAndAgesTheOldestQuestion(t *testing.T) {
 	t.Parallel()
 
@@ -225,7 +337,7 @@ func TestThePanelNoteCountsTheRowsAndAgesTheOldestQuestion(t *testing.T) {
 	}{
 		{
 			name:      "one row of a longer queue",
-			rows:      []any{map[string]any{"kind": "escalation", "owner": "overseer", "id": "hq-9", "title": "slot held"}},
+			rows:      []any{map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy"}},
 			more:      2,
 			wantNote:  "1 of 3 waiting",
 			wantClass: "r",
@@ -243,6 +355,18 @@ func TestThePanelNoteCountsTheRowsAndAgesTheOldestQuestion(t *testing.T) {
 			wantNote:   "1 waiting",
 			wantClass:  "r",
 			wantAbsent: "oldest question",
+		},
+		{
+			// The cap belongs to the list the readers read, so it is counted
+			// beside the shown rows only while the filter is showing all of them.
+			name: "rows the filter is holding back are not counted",
+			rows: []any{
+				map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy"},
+				map[string]any{"kind": "escalation", "owner": "overseer", "id": "hq-9", "title": "slot held"},
+			},
+			more:      3,
+			wantNote:  "1 waiting",
+			wantClass: "r",
 		},
 	}
 
@@ -270,61 +394,10 @@ func TestThePanelNoteCountsTheRowsAndAgesTheOldestQuestion(t *testing.T) {
 	}
 }
 
-// The owner tag is also the panel's one filter: a chip per owner carrying the
-// count of the rows it is showing, on by default, and a chip switched off hides
-// the rows that owner has to act on (gt-bi6w0).
-func TestTheOwnerChipFiltersTheRows(t *testing.T) {
-	t.Parallel()
-
-	dom := newPageDOM(t)
-	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{
-		map[string]any{"kind": "question", "owner": "sloan", "id": "gt-q1", "title": "retry policy"},
-		map[string]any{"kind": "escalation", "owner": "overseer", "id": "hq-9", "title": "slot held"},
-		map[string]any{"kind": "item", "owner": "overseer", "id": "slot:gastown", "title": "the slot is held"},
-	}}))
-
-	// One chip per owner the reader can tag a row with, each naming its owner
-	// and carrying its own count: the reader of either role sees the whole list
-	// and filters it.
-	v, err := dom.vm.RunString(`JSON.stringify(Array.from(__byId["attentionchips"].children).map(b => ({
-		title: b.title, count: Array.from(b.children).map(k => k.textContent).join("")})))`)
-	if err != nil {
-		t.Fatalf("reading the owner chips: %v", err)
-	}
-	var chips []struct {
-		Title string `json:"title"`
-		Count string `json:"count"`
-	}
-	if err := json.Unmarshal([]byte(v.String()), &chips); err != nil {
-		t.Fatalf("reading the owner chips: %v", err)
-	}
-	if len(chips) != 2 || !strings.Contains(chips[0].Title, "sloan") || chips[0].Count != "1" ||
-		!strings.Contains(chips[1].Title, "overseer") || chips[1].Count != "2" {
-		t.Errorf("the chips read %+v, want the human's one row and the overseer's two", chips)
-	}
-
-	for _, r := range panelRows(t, dom) {
-		if r.Hidden {
-			t.Errorf("row %+v is hidden before a chip was switched off", r)
-		}
-	}
-
-	// The overseer's chip switched off hides its rows and leaves the human's.
-	if _, err := dom.vm.RunString(`__byId["attentionchips"].children[1].onclick();`); err != nil {
-		t.Fatalf("switching the overseer's chip off: %v", err)
-	}
-	for _, r := range panelRows(t, dom) {
-		want := r.Owner == "overseer"
-		if r.Hidden != want {
-			t.Errorf("row %+v hidden is %v with the overseer's chip off, want %v", r, r.Hidden, want)
-		}
-	}
-}
-
 // The strip's "needs you" is the human's share of the same payload the panel
-// draws, and a count taken beside rows the readers capped out is a floor: the
-// strip draws it as one rather than as a whole that quietly leaves them out
-// (gt-bi6w0).
+// draws: a count taken beside rows the readers capped out is a floor the strip
+// draws as one, and a floor of none is a count nobody made rather than a calm
+// zero (gt-bi6w0).
 func TestTheStripDrawsTheHumanCountAsAFloor(t *testing.T) {
 	t.Parallel()
 
@@ -343,6 +416,16 @@ func TestTheStripDrawsTheHumanCountAsAFloor(t *testing.T) {
 			at:   map[string]any{"mine": 2, "more": 3, "rows": []any{map[string]any{"owner": "sloan"}}},
 			want: "2+ needs you",
 		},
+		{
+			name: "a cap with no human row read is a count nobody made",
+			at:   map[string]any{"mine": 0, "more": 3, "rows": []any{map[string]any{"owner": "overseer"}}},
+			want: "? needs you",
+		},
+		{
+			name: "nothing waiting is a zero the strip can say",
+			at:   map[string]any{"mine": 0, "rows": []any{}},
+			want: "0 needs you",
+		},
 	}
 
 	for _, tc := range cases {
@@ -355,6 +438,66 @@ func TestTheStripDrawsTheHumanCountAsAFloor(t *testing.T) {
 				t.Errorf("the strip reads %q, with no %q", text, tc.want)
 			}
 		})
+	}
+}
+
+// The strip draws the human's count off the one merged list and off nothing
+// else: a reading behind it that failed or has not come back is named rather
+// than drawn as a zero, and the readers the list was merged from are not a
+// second picture of the same number (gt-ywlei, gt-bi6w0).
+func TestTheStripNamesTheReadsBehindTheHumanCount(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		at   map[string]any
+		want []string
+	}{
+		{
+			name: "no list has been built",
+			at:   nil,
+			want: []string{"–", "needs you"},
+		},
+		{
+			name: "a reader that failed",
+			at:   map[string]any{"rows": []any{}, "failed": []any{"escalations"}},
+			want: []string{"unavailable", "needs you"},
+		},
+		{
+			name: "a reader that has not reported",
+			at:   map[string]any{"rows": []any{}, "pending": []any{"questions"}},
+			want: []string{"–", "needs you"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dom := newPageDOM(t)
+			dom.call(t, "renderStrip", map[string]any{"attention": tc.at})
+			text := dom.element(t, "strip").Text
+			for _, want := range tc.want {
+				if !strings.Contains(text, want) {
+					t.Errorf("the strip reads %q, with no %q", text, want)
+				}
+			}
+			if strings.Contains(text, "0 needs you") {
+				t.Errorf("the strip reads %q, passing a count nobody made off as none", text)
+			}
+		})
+	}
+
+	// The old readers are still on the payload, and the strip counts none of
+	// them: a count that rose without the list is the two pictures of one number
+	// the merged list replaced.
+	dom := newPageDOM(t)
+	dom.call(t, "renderStrip", map[string]any{
+		"escalations": map[string]any{"rows": []any{map[string]any{"id": "hq-1"}, map[string]any{"id": "hq-2"}}},
+		"questions":   map[string]any{"rows": []any{map[string]any{"id": "gt-q1"}}},
+	})
+	if text := dom.element(t, "strip").Text; !strings.Contains(text, "– needs you") {
+		t.Errorf("the strip reads %q with no list built, want it reading the readers as nothing to act on", text)
 	}
 }
 
