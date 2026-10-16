@@ -85,6 +85,40 @@ func TestMatchesPRWorkflowCommand(t *testing.T) {
 	}
 }
 
+// TestIsBranchCreation pins the spellings the guard reads as a branch
+// creation, switch's long forms --create (-c) and --force-create (-C)
+// included: the hook carries no If glob to catch them (gt-3mp1), so this
+// reader is the only thing that sees them (gt-g27m7).
+func TestIsBranchCreation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"git switch -c", "git switch -c feature/x", true},
+		{"git switch --create", "git switch --create feature/x", true},
+		{"git switch --create=", "git switch --create=feature/x", true},
+		{"git switch --force-create", "git switch --force-create feature/x", true},
+		{"git switch --force-create=", "git switch --force-create=feature/x", true},
+		{"git switch --force-create behind another flag", "git switch -q --force-create feature/x", true},
+		{"git switch -C clustered", "git switch -qC feature/x", true},
+		{"git checkout -b", "git checkout -b feature/x", true},
+		{"git checkout -qB clustered", "git checkout -qB feature/x", true},
+		{"git switch of a branch", "git switch --detach main", false},
+		{"git switch --force is not a creation", "git switch --force feature/x", false},
+		{"--force-create is not a checkout flag", "git checkout --force-create feature/x", false},
+		{"creation flag after --", "git switch -q -- --force-create", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isBranchCreation(strings.Fields(tt.command)); got != tt.want {
+				t.Errorf("isBranchCreation(%q) = %v, want %v", tt.command, got, tt.want)
+			}
+		})
+	}
+}
+
 // The gt-6hg7 exemption, in three parts: the role gate, the commands it
 // opens, and the commands it must leave blocked. The fixture is
 // newPolecatTestTown (tap_guard_polecat_paths_test.go), a hermetic
@@ -150,6 +184,13 @@ func TestRunTapGuardPRWorkflow_PolecatSessionBranchAllowed(t *testing.T) {
 		{"switch -c a fresh session branch", town.worktree, `git switch -c polecat/ruby/gt-da2x+mu6jwe92`},
 		{"checkout -b with an extra flag", town.worktree, `git checkout -q -b polecat/ruby/gt-da2x+mu6jwe92`},
 		{"checkout -b from a subdirectory of the worktree", filepath.Join(town.worktree, "internal"), `git checkout -b polecat/ruby/gt-da2x+mu6jwe92`},
+		// The long spellings and the clustered flags are the same creation,
+		// so they carry the same exemption (gt-g27m7).
+		{"switch --create a fresh session branch", town.worktree, `git switch --create polecat/ruby/gt-da2x+mu6jwe92`},
+		{"switch -q --create a fresh session branch", town.worktree, `git switch -q --create polecat/ruby/gt-da2x+mu6jwe92`},
+		{"switch --force-create a fresh session branch", town.worktree, `git switch --force-create polecat/ruby/gt-da2x+mu6jwe92`},
+		{"checkout -qB a fresh session branch", town.worktree, `git checkout -qB polecat/ruby/gt-da2x+mu6jwe92`},
+		{"switch -q --create in the worktree", town.worktree, `git switch -q --create feature/x`},
 	}
 	for _, tt := range allowed {
 		t.Run(tt.name, func(t *testing.T) {
@@ -200,6 +241,20 @@ func TestEvaluatePRWorkflowGuard_PolecatBranchCreationStillBlocked(t *testing.T)
 			env:     []string{"GT_ROLE", "gastown/polecats/" + town.name},
 			cwd:     town.rigRoot,
 			command: "git switch --create feature/x",
+		},
+		{
+			// The judge reads --force-create (gt-g27m7), so the exemption's
+			// narrow scope is what keeps this blocked, not a missed spelling.
+			name:    "switch --force-create at the rig root",
+			env:     []string{"GT_ROLE", "gastown/polecats/" + town.name},
+			cwd:     town.rigRoot,
+			command: "git switch --force-create feature/x",
+		},
+		{
+			name:    "switch --force-create in a sibling polecat's worktree",
+			env:     []string{"GT_ROLE", "gastown/polecats/" + town.name},
+			cwd:     town.sibling,
+			command: "git switch --force-create feature/x",
 		},
 		{
 			name:    "checkout -b glued to its name in a sibling polecat's worktree",
