@@ -24,8 +24,8 @@ var beadReviewCmd = &cobra.Command{
 	Short: "Record an overseer review of a bead's landed head",
 	Long: `Record an overseer review of a landed bead as the note the attention
 queue reads: "OVERSEER REVIEW <head> PASS|FAIL", appended to the bead's
-notes. Both verdicts clear the bead's risk-path item — a FAIL says a human
-looked and is filing the follow-up.
+notes. A PASS clears the bead's risk-path item. A FAIL keeps it open, marked
+as failed, until a later PASS for the same head: the review found a defect.
 
 WAIVED and AUDITED clear it for a landing that was reviewed another way (a
 file-level audit) or consciously not reviewed, and need --reason: the note is
@@ -40,7 +40,8 @@ that bead's landing records is refused.
 A bead whose notes already carry a review of that head is left alone, so
 recording the same verdict twice writes one line. Requesting a different
 verdict for that head writes nothing and exits 1, naming the verdict on
-record: the first review of a head stands.
+record: the first review of a head stands, except that a FAIL is superseded by
+a later PASS, WAIVED or AUDITED (the rework landed or the finding was refuted).
 
 Examples:
   gt bead review gt-abc PASS
@@ -94,6 +95,15 @@ func (v *beadVerbs) review(id, verdict, sha, reason string) error {
 		line += ": " + reason
 	}
 	if recorded, ok := land.OverseerReviewVerdict(is.Notes, head); ok {
+		// A FAIL is an open finding, so the verdict that closes it is written
+		// after it; the latest line stands (land.OverseerReviewVerdict).
+		if recorded == land.OverseerReviewFail && verdict != recorded {
+			if err := v.client.AppendNotes(id, line); err != nil {
+				return err
+			}
+			_, err = fmt.Fprintf(v.out, "✓ Recorded %s on %s\n", line, id)
+			return err
+		}
 		if recorded != verdict {
 			return fmt.Errorf("%s already records %s %s %s; %s was not recorded", id, land.OverseerReviewMarker, head, recorded, verdict)
 		}

@@ -1203,9 +1203,10 @@ func TestAttentionDirectPush(t *testing.T) {
 }
 
 // gt-vsct7.4: a landing that touched a risk path raises risk:<bead>:<head12>
-// until a review note names that head. Only an "OVERSEER REVIEW <head>
-// PASS|FAIL" line clears it: the om-bypass marker "OVERSEER REVIEWED" and a
-// review of another head both leave it holding.
+// until a review note names that head. Only an "OVERSEER REVIEW <head> PASS"
+// line clears it (gt-pe01w: a FAIL keeps it open until a later PASS): the
+// om-bypass marker "OVERSEER REVIEWED" and a review of another head both leave
+// it holding.
 func TestAttentionRiskPath(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
@@ -1245,15 +1246,31 @@ func TestAttentionRiskPath(t *testing.T) {
 	if items := f.collect(t, f.src.collectRiskPaths); len(items) != 1 {
 		t.Errorf("items = %+v, want the item held for a review of another head", items)
 	}
-	// A FAIL review of this head clears it: the overseer files the follow-up.
+	// A FAIL review of this head keeps the item open, now saying the review
+	// failed (gt-pe01w): the review found a defect, so it is not an ack.
 	notes = land.OverseerReviewMarker + " " + head + " FAIL"
-	if items := f.collect(t, f.src.collectRiskPaths); len(items) != 0 {
-		t.Errorf("items = %+v, want a FAIL review of this head to clear it", items)
+	items = f.collect(t, f.src.collectRiskPaths)
+	if len(items) != 1 {
+		t.Fatalf("items = %+v, want the item held for a FAIL review of this head", items)
 	}
-	// So does a PASS.
+	if g := items[0]; g.Key != "risk:gt-abc:"+head[:12] || g.Bead != "gt-abc" || g.Severity != attention.SeverityHigh ||
+		!strings.Contains(g.Summary, "gt-abc") || !strings.Contains(g.Summary, "FAILED") {
+		t.Errorf("item = %+v, want the high risk item naming gt-abc and the failed review", g)
+	}
+	// A PASS written after the FAIL clears it.
+	notes += "\n" + land.OverseerReviewMarker + " " + head + " PASS"
+	if items := f.collect(t, f.src.collectRiskPaths); len(items) != 0 {
+		t.Errorf("items = %+v, want a later PASS review of this head to clear it", items)
+	}
+	// A PASS alone clears it too.
 	notes = land.OverseerReviewMarker + " " + head + " PASS"
 	if items := f.collect(t, f.src.collectRiskPaths); len(items) != 0 {
 		t.Errorf("items = %+v, want a PASS review of this head to clear it", items)
+	}
+	// A FAIL of this head after a PASS of another head still holds.
+	notes = land.OverseerReviewMarker + " " + other + " PASS\n" + land.OverseerReviewMarker + " " + head + " FAIL"
+	if items := f.collect(t, f.src.collectRiskPaths); len(items) != 1 {
+		t.Errorf("items = %+v, want the FAIL of this head to hold past another head's PASS", items)
 	}
 	// WAIVED and AUDITED clear it too, but only with their reason (gt-r5ne9).
 	for _, tc := range []struct {

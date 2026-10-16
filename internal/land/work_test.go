@@ -141,7 +141,10 @@ func TestHasOverseerReviewNote(t *testing.T) {
 		want  bool
 	}{
 		{"PASS of this head", "x\n" + OverseerReviewMarker + " " + head + " PASS\n", true},
-		{"FAIL of this head", OverseerReviewMarker + " " + head + " FAIL", true},
+		{"FAIL of this head does not answer", OverseerReviewMarker + " " + head + " FAIL", false},
+		{"PASS after a FAIL answers", OverseerReviewMarker + " " + head + " FAIL\n" + OverseerReviewMarker + " " + head + " PASS", true},
+		{"FAIL after a PASS does not answer", OverseerReviewMarker + " " + head + " PASS\n" + OverseerReviewMarker + " " + head + " FAIL", false},
+		{"PASS of another head after a FAIL does not answer", OverseerReviewMarker + " " + head + " FAIL\n" + OverseerReviewMarker + " " + other + " PASS", false},
 		{"WAIVED with a reason", OverseerReviewMarker + " " + head + " WAIVED: docs-only change", true},
 		{"AUDITED with a reason", "x\n" + OverseerReviewMarker + " " + head + " AUDITED: file-level audit", true},
 		{"WAIVED without a reason", OverseerReviewMarker + " " + head + " WAIVED", false},
@@ -164,8 +167,8 @@ func TestHasOverseerReviewNote(t *testing.T) {
 	}
 }
 
-// OverseerReviewVerdict names the verdict of the first review line for the
-// head, whatever other heads' lines come before it (gt-j84bq).
+// OverseerReviewVerdict names the verdict of the latest review line for the
+// head, whatever other heads' lines come around it (gt-j84bq).
 func TestOverseerReviewVerdict(t *testing.T) {
 	t.Parallel()
 	head := "0123456789abcdef0123456789abcdef01234567"
@@ -180,6 +183,7 @@ func TestOverseerReviewVerdict(t *testing.T) {
 		{"FAIL after another head's PASS", OverseerReviewMarker + " " + other + " PASS\n" + OverseerReviewMarker + " " + head + " FAIL", "FAIL", true},
 		{"WAIVED", OverseerReviewMarker + " " + head + " WAIVED: docs only", "WAIVED", true},
 		{"AUDITED", OverseerReviewMarker + " " + head + " AUDITED: file-level audit", "AUDITED", true},
+		{"PASS after FAIL", OverseerReviewMarker + " " + head + " FAIL\n" + OverseerReviewMarker + " " + other + " FAIL\n" + OverseerReviewMarker + " " + head + " PASS", "PASS", true},
 		{"only another head", OverseerReviewMarker + " " + other + " PASS", "", false},
 		{"WAIVED without a reason", OverseerReviewMarker + " " + head + " WAIVED", "", false},
 	} {
