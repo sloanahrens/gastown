@@ -49,6 +49,73 @@ func TestDeepReviewBeadsCarryARegressionTest(t *testing.T) {
 	}
 }
 
+// deepReviewStep returns the folded text of one numbered step of the review
+// workflow, from its heading to the next step's. Scoping a rule to the step
+// that states it keeps a phrase from somewhere else in the formula from
+// answering for it.
+func deepReviewStep(t *testing.T, folded, heading string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(folded, heading)
+	if !ok {
+		t.Fatalf("deep-review-run lacks a step opening %q", heading)
+	}
+	step, _, ok := strings.Cut(rest, "**9. ")
+	if !ok {
+		t.Fatalf("the step opening %q does not run to step 9", heading)
+	}
+	return step
+}
+
+// TestDeepReviewFailsALandingOnlyOnItsOwnLines guards gt-86uzs: step 8 records
+// a FAIL only for a CONFIRMED finding on a line the landing's own diff added or
+// changed, PASSes one in a file the landing merely touched, and has the FAIL
+// name the finding beads covering it. The rule it replaced failed a landing for
+// any confirmed finding citing one of its paths, which failed 53 landings on
+// tap_guard*.go — many of them the fixes for those very findings.
+func TestDeepReviewFailsALandingOnlyOnItsOwnLines(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	folded := strings.Join(strings.Fields(string(raw)), " ")
+	step := deepReviewStep(t, folded, "**8. Record the reviews of the risk-path items")
+
+	for _, want := range []struct {
+		rule string
+		text string
+	}{
+		{
+			"the FAIL carries the finding beads it broke, one --finding each",
+			"`FAIL --finding <bead>`",
+		},
+		{
+			"the FAIL is for a finding on a line the landing's own diff added or changed",
+			"when a CONFIRMED finding sits on a line its diff added or changed",
+		},
+		{
+			"any other finding, a file merely touched included, is a PASS",
+			"or changed; else PASS.",
+		},
+		{
+			"the open item names the findings and clears on a later PASS",
+			"A FAIL stays open, naming findings, until a later PASS",
+		},
+	} {
+		if !strings.Contains(step, want.text) {
+			t.Errorf("step 8 lacks the review rule %q", want.rule)
+		}
+	}
+	// The rule must rest on the landing's own diff, not on a finding's cited
+	// paths: the wording that failed a landing for code it never wrote is what
+	// this bead removed.
+	for _, gone := range []string{"cites its paths", "cites a path in"} {
+		if strings.Contains(step, gone) {
+			t.Errorf("step 8 still triggers on the finding's paths alone: %q", gone)
+		}
+	}
+}
+
 // TestDeepReviewRunsOnAnyRig guards gt-23w8z: a rig other than gastown is
 // reviewed by naming its landings file and the gastown checkout's script, so
 // the run formula hardcodes neither, and a sling that sets neither var renders

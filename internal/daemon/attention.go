@@ -1245,7 +1245,8 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 // close.
 //
 // A FAIL does not clear the item: the review found a defect, so the item
-// stays, with a summary that says so, until a later PASS for the same head.
+// stays, with a summary that says so and names the finding beads the FAIL line
+// covers, until a later PASS for the same head (gt-86uzs).
 //
 // The notes read is cached per rig and bead for the tick, so a bead landed
 // twice in the window costs one bd show. The cache lives for the one collector
@@ -1287,6 +1288,9 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 			wanted := "overseer review wanted"
 			if verdict, _ := land.OverseerReviewVerdict(notes, rec.Head); verdict == land.OverseerReviewFail {
 				wanted = "overseer review FAILED; rework needed, then a PASS"
+				if f := land.OverseerReviewFindings(notes, rec.Head); len(f) > 0 {
+					wanted = fmt.Sprintf("overseer review FAILED (findings %s); rework needed, then a PASS", strings.Join(f, ","))
+				}
 			}
 			out = append(out, attention.Item{
 				Key:      "risk:" + rec.BeadID + ":" + sha12(rec.Head),

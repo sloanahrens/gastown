@@ -19,6 +19,19 @@ const (
 	secondHead = "89abcdef0123456789abcdef0123456789abcdef"
 )
 
+// findingBead is the finding a FAIL review of the tests names, and failFindings
+// is the --finding value that names it: a FAIL is refused without one
+// (gt-86uzs).
+const findingBead = "gt-finding"
+
+var failFindings = []string{findingBead}
+
+// failLine is the review line a FAIL naming findingBead writes, the form the
+// attention queue's risk-path item reads the finding beads back off.
+func failLine(head string) string {
+	return land.OverseerReviewMarker + " " + head + " FAIL findings=" + findingBead
+}
+
 // reviewTestTown is a town root whose gt- prefix routes to the gastown rig,
 // so a bead's landing record resolves to .runtime/landings/gastown.jsonl.
 // Landings are appended through land.RigLandingsFile, the same writer the
@@ -68,7 +81,7 @@ func TestBeadReviewRecordsTheLandedHead(t *testing.T) {
 	v, is := testReviewVerbs(t, town, "gt-eorhf")
 	landBead(t, town, is.ID, secondHead, time.Now())
 
-	if err := v.review(is.ID, "PASS", "", ""); err != nil {
+	if err := v.review(is.ID, "PASS", "", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	notes := mustShowBead(t, v.client, is.ID).Notes
@@ -92,10 +105,10 @@ func TestBeadReviewUsesTheNewestLanding(t *testing.T) {
 	landBead(t, town, is.ID, firstHead, time.Now().Add(-time.Hour))
 	landBead(t, town, is.ID, secondHead, time.Now())
 
-	if err := v.review(is.ID, "FAIL", "", ""); err != nil {
+	if err := v.review(is.ID, "FAIL", "", "", failFindings); err != nil {
 		t.Fatal(err)
 	}
-	if notes := mustShowBead(t, v.client, is.ID).Notes; notes != land.OverseerReviewMarker+" "+secondHead+" FAIL" {
+	if notes := mustShowBead(t, v.client, is.ID).Notes; notes != failLine(secondHead) {
 		t.Errorf("notes = %q, want the newest head %s", notes, secondHead)
 	}
 }
@@ -108,7 +121,7 @@ func TestBeadReviewSHAReachesAnOlderLanding(t *testing.T) {
 	landBead(t, town, is.ID, firstHead, time.Now().Add(-time.Hour))
 	landBead(t, town, is.ID, secondHead, time.Now())
 
-	if err := v.review(is.ID, "PASS", firstHead, ""); err != nil {
+	if err := v.review(is.ID, "PASS", firstHead, "", nil); err != nil {
 		t.Fatal(err)
 	}
 	if notes := mustShowBead(t, v.client, is.ID).Notes; notes != land.OverseerReviewMarker+" "+firstHead+" PASS" {
@@ -137,7 +150,7 @@ func TestBeadReviewRefusesABadSHA(t *testing.T) {
 		if tc.name == "a 40-hex head this bead never landed" {
 			landBead(t, town, "gt-other", otherHead, time.Now())
 		}
-		err := v.review(is.ID, "PASS", tc.sha, "")
+		err := v.review(is.ID, "PASS", tc.sha, "", nil)
 		if err == nil {
 			t.Fatalf("%s: review succeeded", tc.name)
 		}
@@ -157,7 +170,7 @@ func TestBeadReviewRefusesAnUnlandedBead(t *testing.T) {
 	town := reviewTestTown(t)
 	v, is := testReviewVerbs(t, town, "gt-eorhf")
 
-	err := v.review(is.ID, "PASS", "", "")
+	err := v.review(is.ID, "PASS", "", "", nil)
 	if err == nil || !strings.Contains(err.Error(), "no landing record") {
 		t.Fatalf("review of an unlanded bead: %v", err)
 	}
@@ -177,7 +190,7 @@ func TestBeadReviewIsIdempotent(t *testing.T) {
 	landBead(t, town, is.ID, secondHead, time.Now())
 
 	for i := 0; i < 2; i++ {
-		if err := v.review(is.ID, "PASS", "", ""); err != nil {
+		if err := v.review(is.ID, "PASS", "", "", nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -194,12 +207,12 @@ func TestBeadReviewRefusesABadVerdict(t *testing.T) {
 	landBead(t, town, is.ID, secondHead, time.Now())
 
 	for _, verdict := range []string{"", "PASSED", "maybe", "pass fail"} {
-		if err := v.review(is.ID, verdict, "", ""); err == nil {
+		if err := v.review(is.ID, verdict, "", "", nil); err == nil {
 			t.Errorf("verdict %q accepted", verdict)
 		}
 	}
 	// A lowercase verdict is the same verdict.
-	if err := v.review(is.ID, " pass ", "", ""); err != nil {
+	if err := v.review(is.ID, " pass ", "", "", nil); err != nil {
 		t.Fatalf("lowercase verdict: %v", err)
 	}
 	if notes := mustShowBead(t, v.client, is.ID).Notes; notes != land.OverseerReviewMarker+" "+secondHead+" PASS" {
@@ -213,7 +226,7 @@ func TestBeadReviewRefusesATownLevelBead(t *testing.T) {
 	town := reviewTestTown(t)
 	v, is := testReviewVerbs(t, town, "hq-abc")
 
-	err := v.review(is.ID, "PASS", "", "")
+	err := v.review(is.ID, "PASS", "", "", nil)
 	if err == nil || !strings.Contains(err.Error(), "which rig") {
 		t.Fatalf("review of a town-level bead: %v", err)
 	}
@@ -232,7 +245,7 @@ func TestBeadReviewRecordsWaivedAndAudited(t *testing.T) {
 		v, is := testReviewVerbs(t, town, "gt-r5ne9")
 		landBead(t, town, is.ID, secondHead, time.Now())
 
-		if err := v.review(is.ID, strings.ToLower(verdict), "", "file-level audit,\n no findings"); err != nil {
+		if err := v.review(is.ID, strings.ToLower(verdict), "", "file-level audit,\n no findings", nil); err != nil {
 			t.Fatalf("%s: %v", verdict, err)
 		}
 		notes := mustShowBead(t, v.client, is.ID).Notes
@@ -259,7 +272,7 @@ func TestBeadReviewRefusesWaivedAndAuditedWithoutAReason(t *testing.T) {
 
 	for _, verdict := range []string{"WAIVED", "AUDITED"} {
 		for _, reason := range []string{"", "   ", "\n\t"} {
-			err := v.review(is.ID, verdict, "", reason)
+			err := v.review(is.ID, verdict, "", reason, nil)
 			if err == nil || !strings.Contains(err.Error(), "--reason") {
 				t.Fatalf("%s with reason %q: err = %v, want a --reason error", verdict, reason, err)
 			}
@@ -282,7 +295,7 @@ func TestBeadReviewRefusesAReasonWithPassOrFail(t *testing.T) {
 	landBead(t, town, is.ID, secondHead, time.Now())
 
 	for _, verdict := range []string{"PASS", "FAIL"} {
-		if err := v.review(is.ID, verdict, "", "because"); err == nil {
+		if err := v.review(is.ID, verdict, "", "because", nil); err == nil {
 			t.Errorf("%s with a reason accepted", verdict)
 		}
 	}
@@ -300,7 +313,7 @@ func TestBeadReviewWaivedIsIdempotentPerHead(t *testing.T) {
 	landBead(t, town, is.ID, secondHead, time.Now())
 
 	for _, reason := range []string{"docs only", "docs only, again"} {
-		if err := v.review(is.ID, "WAIVED", "", reason); err != nil {
+		if err := v.review(is.ID, "WAIVED", "", reason, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -318,22 +331,23 @@ func TestBeadReviewRefusesADifferentVerdictForAReviewedHead(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name, first, reason, second, secondReason string
+		secondFindings                            []string
 	}{
-		{"FAIL after PASS", "PASS", "", "FAIL", ""},
-		{"AUDITED after WAIVED", "WAIVED", "docs only", "AUDITED", "audited later"},
-		{"FAIL after WAIVED", "WAIVED", "docs only", "FAIL", ""},
+		{"FAIL after PASS", "PASS", "", "FAIL", "", failFindings},
+		{"AUDITED after WAIVED", "WAIVED", "docs only", "AUDITED", "audited later", nil},
+		{"FAIL after WAIVED", "WAIVED", "docs only", "FAIL", "", failFindings},
 	} {
 		town := reviewTestTown(t)
 		v, is := testReviewVerbs(t, town, "gt-j84bq")
 		landBead(t, town, is.ID, secondHead, time.Now())
-		if err := v.review(is.ID, tc.first, "", tc.reason); err != nil {
+		if err := v.review(is.ID, tc.first, "", tc.reason, nil); err != nil {
 			t.Fatalf("%s: %v", tc.name, err)
 		}
 		before := mustShowBead(t, v.client, is.ID).Notes
 		out := v.out.(*bytes.Buffer)
 		out.Reset()
 
-		err := v.review(is.ID, tc.second, "", tc.secondReason)
+		err := v.review(is.ID, tc.second, "", tc.secondReason, tc.secondFindings)
 		if err == nil {
 			t.Fatalf("%s: review succeeded", tc.name)
 		}
@@ -366,15 +380,15 @@ func TestBeadReviewSupersedesAFail(t *testing.T) {
 		town := reviewTestTown(t)
 		v, is := testReviewVerbs(t, town, "gt-pe01w")
 		landBead(t, town, is.ID, secondHead, time.Now())
-		fail := land.OverseerReviewMarker + " " + secondHead + " FAIL"
-		if err := v.review(is.ID, "FAIL", "", ""); err != nil {
+		fail := failLine(secondHead)
+		if err := v.review(is.ID, "FAIL", "", "", failFindings); err != nil {
 			t.Fatal(err)
 		}
 		if land.HasOverseerReviewNote(mustShowBead(t, v.client, is.ID).Notes, secondHead) {
 			t.Fatalf("%s: a FAIL answers the head", tc.verdict)
 		}
 		for i := 0; i < 2; i++ {
-			if err := v.review(is.ID, tc.verdict, "", tc.reason); err != nil {
+			if err := v.review(is.ID, tc.verdict, "", tc.reason, nil); err != nil {
 				t.Fatalf("%s after FAIL: %v", tc.verdict, err)
 			}
 		}
@@ -385,7 +399,7 @@ func TestBeadReviewSupersedesAFail(t *testing.T) {
 		if !land.HasOverseerReviewNote(notes, secondHead) {
 			t.Errorf("%s: the head is still unanswered after %q", tc.verdict, notes)
 		}
-		if err := v.review(is.ID, "FAIL", "", ""); err == nil {
+		if err := v.review(is.ID, "FAIL", "", "", failFindings); err == nil {
 			t.Errorf("%s: a FAIL was recorded over the closing verdict", tc.verdict)
 		}
 	}
@@ -397,16 +411,20 @@ func TestBeadReviewRefusesADifferentClosingVerdictAfterAClosedFail(t *testing.T)
 	t.Parallel()
 	for _, tc := range []struct {
 		name, closing, closingReason, second, secondReason string
+		secondFindings                                     []string
 	}{
-		{"AUDITED after FAIL then PASS", "PASS", "", "AUDITED", "audited later"},
-		{"PASS after FAIL then WAIVED", "WAIVED", "docs only", "PASS", ""},
-		{"WAIVED after FAIL then AUDITED", "AUDITED", "file-level audit", "WAIVED", "docs only"},
+		{"AUDITED after FAIL then PASS", "PASS", "", "AUDITED", "audited later", nil},
+		{"PASS after FAIL then WAIVED", "WAIVED", "docs only", "PASS", "", nil},
+		{"WAIVED after FAIL then AUDITED", "AUDITED", "file-level audit", "WAIVED", "docs only", nil},
 	} {
 		town := reviewTestTown(t)
 		v, is := testReviewVerbs(t, town, "gt-pe01w")
 		landBead(t, town, is.ID, secondHead, time.Now())
-		for _, step := range []struct{ verdict, reason string }{{"FAIL", ""}, {tc.closing, tc.closingReason}} {
-			if err := v.review(is.ID, step.verdict, "", step.reason); err != nil {
+		for _, step := range []struct {
+			verdict, reason string
+			findings        []string
+		}{{"FAIL", "", failFindings}, {tc.closing, tc.closingReason, nil}} {
+			if err := v.review(is.ID, step.verdict, "", step.reason, step.findings); err != nil {
 				t.Fatalf("%s: %s: %v", tc.name, step.verdict, err)
 			}
 		}
@@ -414,7 +432,7 @@ func TestBeadReviewRefusesADifferentClosingVerdictAfterAClosedFail(t *testing.T)
 		out := v.out.(*bytes.Buffer)
 		out.Reset()
 
-		err := v.review(is.ID, tc.second, "", tc.secondReason)
+		err := v.review(is.ID, tc.second, "", tc.secondReason, tc.secondFindings)
 		if err == nil {
 			t.Fatalf("%s: review succeeded", tc.name)
 		}
@@ -443,7 +461,7 @@ func TestBeadReviewRepeatNamesTheRecordedVerdict(t *testing.T) {
 
 	for i := 0; i < 2; i++ {
 		out.Reset()
-		if err := v.review(is.ID, "FAIL", "", ""); err != nil {
+		if err := v.review(is.ID, "FAIL", "", "", failFindings); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -451,7 +469,124 @@ func TestBeadReviewRepeatNamesTheRecordedVerdict(t *testing.T) {
 	if !strings.Contains(out.String(), want) {
 		t.Errorf("output = %q, want it to contain %q", out.String(), want)
 	}
-	if notes := mustShowBead(t, v.client, is.ID).Notes; notes != land.OverseerReviewMarker+" "+secondHead+" FAIL" {
+	if notes := mustShowBead(t, v.client, is.ID).Notes; notes != failLine(secondHead) {
 		t.Errorf("notes = %q, want one line", notes)
+	}
+}
+
+// A FAIL names the finding beads it covers, in the line the attention queue
+// reads back: "OVERSEER REVIEW <head> FAIL findings=<id>[,<id>]", in the order
+// given, one entry per distinct finding (gt-86uzs).
+func TestBeadReviewRecordsFailFindings(t *testing.T) {
+	t.Parallel()
+	town := reviewTestTown(t)
+	v, is := testReviewVerbs(t, town, "gt-86uzs")
+	landBead(t, town, is.ID, secondHead, time.Now())
+
+	// A repeated id is one entry: the line lists beads, not flags.
+	if err := v.review(is.ID, "fail", "", "", []string{"gt-f1", "gt-f2", "gt-f1"}); err != nil {
+		t.Fatal(err)
+	}
+	notes := mustShowBead(t, v.client, is.ID).Notes
+	if want := land.OverseerReviewMarker + " " + secondHead + " FAIL findings=gt-f1,gt-f2"; notes != want {
+		t.Fatalf("notes = %q, want %q", notes, want)
+	}
+	// A FAIL is not an answer: the risk-path item stays open, naming the
+	// findings it failed on.
+	if verdict, ok := land.OverseerReviewVerdict(notes, secondHead); verdict != land.OverseerReviewFail || !ok {
+		t.Errorf("OverseerReviewVerdict = %q, %v; want a FAIL for %s", verdict, ok, secondHead)
+	}
+	if land.HasOverseerReviewNote(notes, secondHead) {
+		t.Errorf("HasOverseerReviewNote answers a FAIL: %q", notes)
+	}
+	if got := land.OverseerReviewFindings(notes, secondHead); strings.Join(got, ",") != "gt-f1,gt-f2" {
+		t.Errorf("OverseerReviewFindings = %v, want the findings the line names", got)
+	}
+}
+
+// A FAIL with no --finding is refused with exit 1 and writes nothing: the
+// landing's item says which findings it failed on, and a bare FAIL tells the
+// reader nothing (gt-86uzs).
+func TestBeadReviewRefusesFailWithoutAFinding(t *testing.T) {
+	t.Parallel()
+	town := reviewTestTown(t)
+	v, is := testReviewVerbs(t, town, "gt-86uzs")
+	landBead(t, town, is.ID, secondHead, time.Now())
+	out := v.out.(*bytes.Buffer)
+
+	for _, findings := range [][]string{nil, {}, {"  "}} {
+		err := v.review(is.ID, "FAIL", "", "", findings)
+		if err == nil || !strings.Contains(err.Error(), "--finding") {
+			t.Fatalf("FAIL with findings %q: err = %v, want an error naming --finding", findings, err)
+		}
+		if code := exitCodeForError(err); code != 1 {
+			t.Errorf("FAIL with findings %q: exit code %d, want 1", findings, code)
+		}
+	}
+	if out.Len() != 0 {
+		t.Errorf("printed %q on a refused review", out.String())
+	}
+	if notes := mustShowBead(t, v.client, is.ID).Notes; notes != "" {
+		t.Errorf("refused reviews wrote %q", notes)
+	}
+}
+
+// --finding belongs to FAIL: a PASS, WAIVED or AUDITED is refused with it
+// rather than writing a line that names findings it does not report, and a
+// value that is not a bead id is refused rather than folded into the line.
+func TestBeadReviewRefusesFindingsOnOtherVerdicts(t *testing.T) {
+	t.Parallel()
+	town := reviewTestTown(t)
+	v, is := testReviewVerbs(t, town, "gt-86uzs")
+	landBead(t, town, is.ID, secondHead, time.Now())
+
+	for _, tc := range []struct {
+		verdict, reason string
+		findings        []string
+	}{
+		{"PASS", "", failFindings},
+		{"WAIVED", "docs only", failFindings},
+		{"AUDITED", "file-level audit", failFindings},
+		{"FAIL", "", []string{"gt-finding,gt-other"}},
+		{"FAIL", "", []string{"gt-finding broken"}},
+		{"FAIL", "", []string{"#gt-finding"}},
+	} {
+		err := v.review(is.ID, tc.verdict, "", tc.reason, tc.findings)
+		if err == nil {
+			t.Errorf("%s with --finding %q accepted", tc.verdict, tc.findings)
+			continue
+		}
+		if code := exitCodeForError(err); code != 1 {
+			t.Errorf("%s with --finding %q: exit code %d, want 1", tc.verdict, tc.findings, code)
+		}
+	}
+	if notes := mustShowBead(t, v.client, is.ID).Notes; notes != "" {
+		t.Errorf("refused reviews wrote %q", notes)
+	}
+}
+
+// Repeated --finding flags reach the line as one entry per bead.
+func TestBeadReviewFindingList(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name     string
+		findings []string
+		want     []string
+	}{
+		{"repeated flags", []string{"gt-a", "gt-b"}, []string{"gt-a", "gt-b"}},
+		{"space around an id", []string{" gt-a "}, []string{"gt-a"}},
+		{"an empty entry is dropped", []string{"gt-a", ""}, []string{"gt-a"}},
+	} {
+		town := reviewTestTown(t)
+		v, is := testReviewVerbs(t, town, "gt-86uzs")
+		landBead(t, town, is.ID, secondHead, time.Now())
+
+		if err := v.review(is.ID, "FAIL", "", "", tc.findings); err != nil {
+			t.Fatalf("%s: %v", tc.name, err)
+		}
+		got := land.OverseerReviewFindings(mustShowBead(t, v.client, is.ID).Notes, secondHead)
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("%s: findings = %v, want %v", tc.name, got, tc.want)
+		}
 	}
 }
