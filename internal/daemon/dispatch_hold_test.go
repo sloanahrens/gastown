@@ -172,7 +172,7 @@ func TestDispatchQueuedWork_HoldLiftedLineNamesTheDispatchers(t *testing.T) {
 				config: &Config{TownRoot: townRoot},
 				logger: logger,
 				patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{
-					SpecDispatch: &SpecDispatchConfig{Enabled: tc.spec},
+					SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(tc.spec)},
 				}},
 				schedulerDeps: schedulerDepsForTest(),
 			}

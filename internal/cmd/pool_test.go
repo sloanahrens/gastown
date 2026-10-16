@@ -604,7 +604,7 @@ func TestPoolSetOpensTheSecondSeatWithoutSwitchingTheDispatcherOff(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sd == nil || !sd.Enabled || sd.MaxHooked != 2 {
+	if sd == nil || (sd.Enabled == nil || !*sd.Enabled) || sd.MaxHooked != 2 {
 		t.Errorf("spec_dispatch = %+v, want enabled with max_hooked 2", sd)
 	}
 }
@@ -1040,5 +1040,28 @@ func poolTestMigrate(t *testing.T, root string) {
 	}
 	if _, err := os.Stat(config.DaemonPatrolConfigPath(root)); !os.IsNotExist(err) {
 		t.Fatalf("mayor/daemon.json survived the migration: %v", err)
+	}
+}
+
+// A block specDispatchOf makes writes "enabled": true, and it reads as enabled
+// after the JSON round trip the daemon.json write and the ticker's read make.
+func TestSpecDispatchOfKeepsEnabled(t *testing.T) {
+	t.Parallel()
+	pc := &config.DaemonPatrolConfig{}
+	specDispatchOf(pc).MaxHooked = 1
+	raw, err := json.Marshal(pc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"enabled":true`) {
+		t.Errorf("daemon.json = %s, want the block to say enabled:true", raw)
+	}
+	var back config.DaemonPatrolConfig
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	sd := back.Patrols.SpecDispatch
+	if sd == nil || (sd.Enabled != nil && !*sd.Enabled) {
+		t.Errorf("spec_dispatch after the round trip = %+v, want enabled", sd)
 	}
 }

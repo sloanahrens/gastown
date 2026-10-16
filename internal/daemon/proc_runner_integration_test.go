@@ -122,7 +122,7 @@ func TestIntegrationRunCmd_SpecDispatchKillsTheWholeGroup(t *testing.T) {
 func specDispatchDaemon(townRoot, gtPath string) *Daemon {
 	return &Daemon{
 		config:       &Config{TownRoot: townRoot},
-		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: true}}},
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(true)}}},
 		ctx:          context.Background(),
 		logger:       log.New(io.Discard, "", 0),
 		gtPath:       gtPath,

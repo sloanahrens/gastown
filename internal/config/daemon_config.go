@@ -537,9 +537,11 @@ func worktreeCleanupDuration(s string, def time.Duration) time.Duration {
 // polecat seat within the seat budget. The retired label spec and type feature
 // are accepted and ignored (gt-mmsr2). On unless disabled (gt-1gnq9).
 type SpecDispatchConfig struct {
-	// Enabled runs the ticker. Default on (gt-1gnq9): the seat-refill plugin
-	// is deleted, so nothing else fills a free seat. Set false to turn it off.
-	Enabled bool `json:"enabled"`
+	// Enabled runs the ticker. Nil means on (gt-1gnq9): the seat-refill plugin
+	// is deleted, so nothing else fills a free seat, and a block that tunes
+	// only "interval" or "max_hooked" must not switch the dispatcher off by
+	// omitting the key. Set false to turn it off.
+	Enabled *bool `json:"enabled,omitempty"`
 
 	// IntervalStr is the tick cadence (default "60s").
 	IntervalStr string `json:"interval,omitempty"`

@@ -1513,8 +1513,8 @@ func TestSpecBudgetHookedSeatIsOptIn(t *testing.T) {
 	ts := config.NewTownSettings()
 	ts.PolecatPool = &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
 
-	enabled := &config.SpecDispatchConfig{Enabled: true}
-	for _, sd := range []*config.SpecDispatchConfig{nil, enabled, {Enabled: true, MaxHooked: -1}} {
+	enabled := &config.SpecDispatchConfig{Enabled: ptr(true)}
+	for _, sd := range []*config.SpecDispatchConfig{nil, enabled, {Enabled: ptr(true), MaxHooked: -1}} {
 		if got := specBudgetFromConfig(ts, sd).Picture(); got != "deepseek-flash 0/3, deepseek-pro 0/1" {
 			t.Errorf("sd %+v: a hooked seat appeared without max_hooked: %q", sd, got)
 		}

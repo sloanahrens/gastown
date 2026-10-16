@@ -50,7 +50,7 @@ func TestPoolSetSecondWritesAgentAndCapAndSaysWhenItLands(t *testing.T) {
 	if sd == nil || sd.HookedAgent != "deepseek-flash" || sd.MaxHooked != 2 {
 		t.Errorf("spec_dispatch = %+v, want hooked_agent deepseek-flash and max_hooked 2", sd)
 	}
-	if raw, _ := os.ReadFile(config.DaemonPatrolConfigPath(root)); !sd.Enabled || !strings.Contains(string(raw), `"hookless_agent": "old"`) {
+	if raw, _ := os.ReadFile(config.DaemonPatrolConfigPath(root)); (sd.Enabled == nil || !*sd.Enabled) || !strings.Contains(string(raw), `"hookless_agent": "old"`) {
 		t.Errorf("spec_dispatch = %+v, want the keys set-second does not own left as they were", sd)
 	}
 	if got := poolTestBudget(t, root); got["deepseek-flash"] != 2 || got["claude-sonnet"] != 2 {
@@ -151,7 +151,7 @@ func TestPoolSetSecondOpensTheSeatWithoutSwitchingTheDispatcherOff(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sd == nil || !sd.Enabled || sd.HookedAgent != "deepseek-flash" || sd.MaxHooked != 2 {
+	if sd == nil || (sd.Enabled == nil || !*sd.Enabled) || sd.HookedAgent != "deepseek-flash" || sd.MaxHooked != 2 {
 		t.Errorf("spec_dispatch = %+v, want enabled, deepseek-flash, max_hooked 2", sd)
 	}
 }

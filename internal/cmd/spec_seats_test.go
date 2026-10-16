@@ -97,7 +97,7 @@ func TestReadSpecDispatchConfigTellsAbsentFromBroken(t *testing.T) {
 
 	root = poolTestTown(t, poolSecondSettings, specTickDaemon)
 	sd, err = readSpecDispatchConfig(root)
-	if err != nil || sd == nil || !sd.Enabled {
+	if err != nil || sd == nil || (sd.Enabled == nil || !*sd.Enabled) {
 		t.Errorf("a readable block = %+v, %v, want the block the file holds", sd, err)
 	}
 }
