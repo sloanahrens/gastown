@@ -2440,7 +2440,7 @@ func (h *host) cleanStaleSocket(socketPath string) {
 // out or the server is unreachable, we proceed with SIGTERM anyway.
 func (h *host) drainConnectionsBeforeStop(config *Config) {
 	dsn := fmt.Sprintf("%s@tcp(%s:%d)/?timeout=3s&readTimeout=5s&writeTimeout=5s",
-		config.User, config.EffectiveHost(), config.Port)
+		config.userDSN(), config.EffectiveHost(), config.Port)
 	db, err := h.openMySQL(dsn)
 	if err != nil {
 		return
@@ -4773,7 +4773,7 @@ func RecoverReadOnly(townRoot string) error {
 func (h *host) MeasureQueryLatency(townRoot string) (time.Duration, error) {
 	config := h.DefaultConfig(townRoot)
 
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/", config.User, config.EffectiveHost(), config.Port)
+	dsn := fmt.Sprintf("%s@tcp(%s:%d)/", config.userDSN(), config.EffectiveHost(), config.Port)
 	db, err := h.openMySQL(dsn)
 	if err != nil {
 		return 0, fmt.Errorf("opening mysql connection: %w", err)
@@ -4815,7 +4815,7 @@ func MeasureQueryLatency(townRoot string) (time.Duration, error) {
 func (h *host) GetLastCommitAge(townRoot string) (time.Duration, string, error) {
 	config := h.DefaultConfig(townRoot)
 
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/", config.User, config.EffectiveHost(), config.Port)
+	dsn := fmt.Sprintf("%s@tcp(%s:%d)/", config.userDSN(), config.EffectiveHost(), config.Port)
 	db, err := h.openMySQL(dsn)
 	if err != nil {
 		return 0, "", fmt.Errorf("opening mysql connection: %w", err)
