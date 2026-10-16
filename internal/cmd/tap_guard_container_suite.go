@@ -7,6 +7,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -33,11 +34,15 @@ one starving the refinery for 29 minutes).
 This guard blocks, when running as a polecat or refinery:
   - go test <pkg...>   where <pkg...> intersects the testcontainers-backed
                         package list (containerSuitePackages) or is a
-                        whole-repo wildcard (./..., ...). Go's global -C dir
-                        flag between the binary and "test", in either
-                        spelling ("go -C <dir> test ..."), does not hide the
-                        invocation, and the toolchain's own binary names
-                        (go, go1.22.0, gotip) own it too (gt-saorq)
+                        whole-repo wildcard (./..., ...). A package argument
+                        spelled as a path under the directory the
+                        invocation runs in ("./beads/...") is judged there,
+                        which is where go resolves it, as well as at the
+                        module root. Go's global -C dir flag between the
+                        binary and "test", in either spelling ("go -C <dir>
+                        test ..."), does not hide the invocation, and the
+                        toolchain's own binary names (go, go1.22.0, gotip)
+                        own it too (gt-saorq, gt-g6yi7)
   - go test .          (or a bare "go test") when the directory it runs in
                         is one of those packages — the cwd is judged like
                         any other target, not exempted, and a -C dir flag
@@ -599,6 +604,49 @@ func normalizedPackageArgs(pkgArgs []string) []string {
 	return args
 }
 
+// isCwdRelativeGoPackageArg reports whether a go test package argument is
+// spelled as a path under the directory the invocation runs in — ".", "..",
+// "./beads/...", "../beads" — rather than as an import path. Only that
+// spelling moves with the directory: go resolves it against the one it runs
+// in, while an import path is already module-absolute, which is why 'go -C
+// internal list beads' finds no package where 'go -C internal list ./beads'
+// finds this one (gt-g6yi7).
+func isCwdRelativeGoPackageArg(arg string) bool {
+	return arg == "." || arg == ".." ||
+		strings.HasPrefix(arg, "./") || strings.HasPrefix(arg, "../")
+}
+
+// packageArgsUnderRunDir returns the normalized package arguments a go test
+// argument list is judged under for an invocation running in the directory
+// whose module-relative package path is cwd (cwdPackagePath; "" at the module
+// root and outside this module, where the two readings below coincide). Each
+// argument comes back as normalizedPackageArgs reads it, and one spelled as a
+// path under the run directory — "./beads/...", "../beads" — also under the
+// path go resolves that spelling to: 'go -C internal test ./beads/...' and
+// 'cd internal && go test ./beads/...' both run internal/beads, while the
+// module-root reading of the same argument names a package "beads" that go
+// never starts, which let those runs through unwrapped (gt-g6yi7).
+//
+// Both readings stand, because the guard cannot tell which of them a spelling
+// was written for: a run directory it cannot place joins nothing at all, and
+// an explicit argument has always carried its module-root reading (gt-saorq).
+// A match under either one refuses, so this rule only ever blocks more.
+func packageArgsUnderRunDir(pkgArgs []string, cwd string) []string {
+	args := normalizedPackageArgs(pkgArgs)
+	runPkg, _ := cwdPackagePath(cwd)
+	if runPkg == "" {
+		return args // the run dir is the module root: the readings coincide
+	}
+	for _, arg := range pkgArgs {
+		norm := normalizeGoPackageArg(arg)
+		if !isCwdRelativeGoPackageArg(arg) || norm == cwdPackageArg || norm == wholeRepoPackageArg {
+			continue
+		}
+		args = append(args, normalizeGoPackageArg(path.Join(runPkg, arg)))
+	}
+	return args
+}
+
 // cwdTargetsUnplacedDir reports whether a go test package-argument list is one
 // whose meaning rests on a directory the walk could not place. A bare "go test"
 // and an explicit "." both name the directory the command runs in
@@ -645,10 +693,12 @@ func cwdContainerPackages(cwd string) []string {
 // Arguments naming the cwd are resolved here, through cwdContainerPackages,
 // by the same rule as any other argument — one function judges every
 // spelling, so no caller can resolve the argument form and miss the cwd form
-// (gt-1lko).
+// (gt-1lko). cwd is the directory the invocation runs in, so an argument
+// spelled as a path under it is judged there too (packageArgsUnderRunDir,
+// gt-g6yi7).
 func containerSuiteTarget(pkgArgs []string, cwd string) (wholeRepo bool, matched []string) {
 	seen := map[string]bool{}
-	for _, p := range normalizedPackageArgs(pkgArgs) {
+	for _, p := range packageArgsUnderRunDir(pkgArgs, cwd) {
 		if isWholeRepoPackageArg(p) {
 			return true, nil
 		}
