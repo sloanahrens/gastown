@@ -296,13 +296,14 @@ func (d *Daemon) syncJsonlGitBackup() {
 
 	// Phase D: Pollution firewall — filter test data from exports.
 	removed := d.applyPollutionFilter(gitRepo, databases)
-	if removed > 0 {
-		d.logger.Printf("jsonl_git_backup: filtered %d total test-pollution record(s)", removed)
-		// Recount after filtering so spike detection uses accurate numbers.
-		// A recount we could not take leaves the pre-filter totals, which the
-		// spike guard must not compare against — halt rather than commit a
-		// count we know is wrong (gt-q6ljl).
-		if err := recountAfterFilter(gitRepo, databases, counts); err != nil {
+	if total := sumRemoved(removed); total > 0 {
+		d.logger.Printf("jsonl_git_backup: filtered %d total test-pollution record(s)", total)
+		// Take the filtered records out of the counts so spike detection
+		// uses accurate numbers. A count we could not adjust leaves the
+		// pre-filter totals, which the spike guard must not compare
+		// against — halt rather than commit a count we know is wrong
+		// (gt-q6ljl).
+		if err := recountAfterFilter(counts, removed); err != nil {
 			d.logger.Printf("jsonl_git_backup: HALTING — %v", err)
 			d.escalateAlert(alertKeyJSONLSpike, "jsonl_git_backup", fmt.Sprintf("cannot recount exports after the pollution filter: %v — refusing to commit counts that were not verified", err))
 			cycle.failStep("push", err.Error())
@@ -1778,37 +1779,50 @@ func countFileLines(path string) (int, error) {
 	}
 }
 
-// recountAfterFilter re-reads the issues.jsonl file for each database to get
-// accurate post-filter line counts. This is needed because counts from
-// exportDatabaseToJsonl reflect pre-filter totals.
+// recountAfterFilter takes the issue lines the pollution filter removed out of
+// each filtered database's count.
 //
-// A failed recount is returned rather than swallowed: the caller must not
-// commit counts it could not verify. Keeping the pre-filter total silently
-// would feed the spike guard the wrong number and anchor a poisoned baseline
-// in the commit history (gt-q6ljl).
-func recountAfterFilter(gitRepo string, databases []string, counts map[string]int) error {
-	for _, db := range databases {
-		if _, ok := counts[db]; !ok {
+// counts[db] is the exportDatabaseToJsonl total: issues plus the supplemental
+// tables, the same metric the spike baseline is built from. Recounting
+// issues.jsonl alone switched metrics on exactly the ticks the filter fired,
+// so the spike guard read a 76% drop (or, after a polluted first commit, a
+// 3x spike) and halted every later tick (gt-tx0ia).
+//
+// A database the filter left alone keeps its count. A removed count above the
+// database's total cannot come from one export, so it is returned rather than
+// clamped: the caller must not commit counts it could not verify (gt-q6ljl).
+func recountAfterFilter(counts, removed map[string]int) error {
+	for db, n := range removed {
+		total, ok := counts[db]
+		if !ok || n <= 0 {
 			continue
 		}
-		issuesPath := filepath.Join(gitRepo, db, "issues.jsonl")
-		n, err := countFileLines(issuesPath)
-		if err != nil {
-			return fmt.Errorf("recount %s: %w", issuesPath, err)
+		if n > total {
+			return fmt.Errorf("recount %s: filter removed %d records from an export of %d", db, n, total)
 		}
-		counts[db] = n
+		counts[db] = total - n
 	}
 	return nil
 }
 
+// sumRemoved totals a per-database removed-record map.
+func sumRemoved(removed map[string]int) int {
+	total := 0
+	for _, n := range removed {
+		total += n
+	}
+	return total
+}
+
 // applyPollutionFilter reads each database's issues.jsonl, filters out test
-// pollution records, and rewrites the file. Returns total records removed.
+// pollution records, and rewrites the file. Returns the records removed per
+// database; a database it removed nothing from has no entry.
 //
 // The file is rewritten only when the read and the filter both succeed. A read
 // error means the buffer is a partial read, and writing it back would truncate
 // the export — the failure this filter exists to prevent (gt-q6ljl).
-func (d *Daemon) applyPollutionFilter(gitRepo string, databases []string) int {
-	totalRemoved := 0
+func (d *Daemon) applyPollutionFilter(gitRepo string, databases []string) map[string]int {
+	removedByDB := make(map[string]int)
 	for _, db := range databases {
 		issuesPath := filepath.Join(gitRepo, db, "issues.jsonl")
 		removed, err := filterIssuesFile(issuesPath)
@@ -1823,10 +1837,10 @@ func (d *Daemon) applyPollutionFilter(gitRepo string, databases []string) int {
 		}
 		if removed > 0 {
 			d.logger.Printf("jsonl_git_backup: %s: filtered %d test-pollution record(s)", db, removed)
-			totalRemoved += removed
+			removedByDB[db] = removed
 		}
 	}
-	return totalRemoved
+	return removedByDB
 }
 
 // filterIssuesFile filters one issues.jsonl in place and returns the number of
