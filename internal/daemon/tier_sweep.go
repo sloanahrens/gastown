@@ -1459,7 +1459,9 @@ func (d *Daemon) tierSweepBeads(rig string) tierSweepBeadStore {
 
 // tierSweepBeads files one bead per failing unit of a RED tier, and closes a
 // GREEN tier's open beads. A bead-store error is logged and the sweep
-// continues: the verdict is already recorded.
+// continues: the verdict is already recorded. A tier whose open beads cannot
+// be listed is left alone, since filing without knowing which units already
+// have a bead would open a duplicate P1 for each of them.
 func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSweepTierResult) {
 	bd := d.tierSweepBeads(rig)
 	if bd == nil {
@@ -1468,8 +1470,8 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 	for tier, ts := range results {
 		existing, err := tierSweepOpenBeads(bd, rig, tier)
 		if err != nil {
-			d.logger.Printf("tier_sweep: %s: listing %s beads: %v", rig, tierSweepRedLabel, err)
-			existing = nil
+			d.logger.Printf("tier_sweep: %s: listing %s beads for the %s tier, leaving it unrecorded: %v", rig, tierSweepRedLabel, tier, err)
+			continue
 		}
 		if ts.Verdict != tierSweepRed {
 			tierSweepCloseGreen(d, bd, rig, tier, sha, existing)
