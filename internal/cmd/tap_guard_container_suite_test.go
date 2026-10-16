@@ -2822,3 +2822,68 @@ func TestSubstitutionBody(t *testing.T) {
 		t.Errorf("commandSubstitutionSpans(%q) = %v, want one span holding %q", body, nested, "git reset --hard")
 	}
 }
+
+// A process substitution that holds several commands is the script the shell
+// runs, whatever command prints it: the body is cut at the separators, and a
+// quoted word that carries its own parentheses does not close it (gt-n2gt8).
+func TestStdinShellPayloadsMultiCommandProcessSubstitution(t *testing.T) {
+	t.Parallel()
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"two echoes", `bash <(echo 'echo a'; echo 'make test')`, true},
+		{"printf with a quoted substitution word", `bash <(printf '%s\n' 'echo $(date)' 'make test')`, true},
+		{"second command behind &&", `bash <(echo true && echo 'make test')`, true},
+		{"second command behind a pipe", `bash <(echo true | echo 'make test')`, true},
+		{"on stdin", `bash < <(echo 'echo a'; echo 'make test')`, true},
+		{"multi-command body that never closes", `bash <(echo 'echo a'; echo 'make test'`, true},
+		{"nested substitution then the script", `bash <(echo $(date); echo 'make test')`, true},
+		{"harmless commands", `bash <(echo 'echo a'; echo 'make lint')`, false},
+		{"commands behind the substitution are not its body", `bash <(echo 'echo a'); echo 'make lint'`, false},
+		{"script file operand takes the substitution as an argument", `bash ./run.sh <(echo a; echo 'make test')`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc := fakeGuardProcess(nil, goRoot)
+			reason, matched := evaluateContainerSuiteCommand(proc, tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
+// bash -s reads its script from stdin, so a process substitution beside it is a
+// positional parameter and the pipe is still the script (gt-n2gt8). A
+// substitution on stdin replaces the pipe, and -s after the substitution is the
+// script file's own argument.
+func TestStdinShellPayloadsDashSWithProcessSubstitution(t *testing.T) {
+	t.Parallel()
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"pipe is the script", `echo 'make test' | bash -s <(echo true)`, true},
+		{"pipe is the script, clustered flags", `echo 'make test' | bash -es <(echo true)`, true},
+		{"pipe is the script, sh", `echo 'make test' | sh -s <(echo true)`, true},
+		{"harmless pipe", `echo 'make lint' | bash -s <(echo 'make test')`, false},
+		{"substitution on stdin replaces the pipe", `echo 'make test' | bash -s < <(echo true)`, false},
+		{"substitution on stdin is the script", `bash -s < <(echo 'make test')`, true},
+		{"-s after the substitution is the file's argument", `echo 'make lint' | bash <(echo 'make test') -s`, true},
+		{"no -s, the substitution replaces the pipe", `echo 'make test' | bash <(echo true)`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proc := fakeGuardProcess(nil, goRoot)
+			reason, matched := evaluateContainerSuiteCommand(proc, tt.command, "")
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}

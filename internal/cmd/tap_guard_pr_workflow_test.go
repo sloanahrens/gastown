@@ -708,3 +708,43 @@ func TestPRWorkflowGuard_SwitchAbbreviatedCreatePolecat(t *testing.T) {
 		}
 	}
 }
+
+// A command substitution that expands to gh or git, or sits where an argument
+// goes, is judged as the command it may expand to (gt-n2gt8). An empty
+// expansion vanishes ("gh pr $(echo) create" is gh pr create); one that names
+// gh or git leaves the words behind it as that command's arguments.
+func TestPRWorkflowSubstitutionInArgumentSlot(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"empty expansion between gh's subcommands", "gh pr $(echo) create", true},
+		{"empty expansion before gh's subcommands", "gh $(echo) pr create --fill", true},
+		{"empty expansion after gh pr create", "gh pr create $(echo) --fill", true},
+		{"empty expansion before git's subcommand", "git $(echo) checkout -b x", true},
+		{"empty expansion between git's subcommand and flag", "git checkout $(echo) -b x", true},
+		{"backtick expansion in an argument slot", "gh pr `echo` create", true},
+		{"expansion naming gh", "$(echo gh) pr create --fill", true},
+		{"expansion naming git", "$(echo git) checkout -b x", true},
+		{"expansion naming git behind a launcher", "env A=1 $(echo git) switch -c x", true},
+		{"expansion naming gh with the flag first", "$(which gh) -R o/r pr create", true},
+		{"expansion as the value of git -C keeps the subcommand", "git -C $(pwd) checkout -b x", true},
+		{"expansion as the value of gh -R keeps the subcommand", "gh -R $(echo o/r) pr create", true},
+		{"expansion as the value of git -C, no creation", "git -C $(pwd) checkout main", false},
+		{"expansion as a gh argument, no creation", "gh pr view $(echo 12)", false},
+		{"expansion as the pull request number", "gh pr $(echo view) 12", false},
+		{"expansion as a git argument, no creation", "git checkout $(git rev-parse HEAD)", false},
+		{"expansion before an unrelated subcommand", "$(echo gh) pr view 12", false},
+		{"expansion before an unrelated command", "$(echo hi) ls -la", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := matchesPRWorkflowCommand(tt.command); got != tt.want {
+				t.Errorf("matchesPRWorkflowCommand(%q) = %v, want %v", tt.command, got, tt.want)
+			}
+		})
+	}
+}

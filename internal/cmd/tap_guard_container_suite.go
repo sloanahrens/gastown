@@ -190,7 +190,7 @@ var containerSuiteSlotRunTokens = []string{"gt", "slot", "run"}
 // gt-sveq8's "timeout 5 gt slot run -- ..." must stay wrapped, so the
 // launchers count).
 func slotRunWrapped(segment []string) bool {
-	argv, _ := prWorkflowCommand(segment)
+	argv, _, _ := prWorkflowCommand(segment)
 	return hasPrefix(toLowerTokens(argv), containerSuiteSlotRunTokens)
 }
 
@@ -265,21 +265,42 @@ func segmentPayloads(tokens []string, start int, segment []string) []string {
 // A process substitution word on the shell ("sh <(echo 'make gate')", "sh <
 // <(echo 'make gate')") is the script itself, whether the shell opens it as its
 // script file or reads it on stdin, so it is read like a pipe producer and the
-// pipe upstream, which the shell never reads, is not (gt-hizij).
+// pipe upstream, which the shell never reads, is not (gt-hizij). The body may
+// hold several commands, and the output of each is part of the script. The
+// exception is "sh -s <(cmd)": -s reads the script from stdin, so the
+// substitution is only an argument and the pipe is still the script
+// (gt-n2gt8).
 func stdinShellPayloads(tokens []string, start int, segment []string) []string {
 	word, args := segmentCommandWord(trimShellKeywords(segment))
 	if !shellInvokers[filepath.Base(strings.ToLower(word))] {
 		return nil
 	}
 	args, payloads := splitHereStrings(args)
-	args, scripts := splitProcessSubstitutions(args)
-	if !shellReadsStdin(toLowerTokens(args)) {
+	// -s counts only ahead of the first substitution: after it, "sh <(cmd) -s"
+	// runs the substitution as the script file and -s is the file's argument.
+	before := args
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "<(") {
+			before = args[:i]
+			break
+		}
+	}
+	_, dashS := shellReadsStdin(toLowerTokens(before))
+	args, subs := splitProcessSubstitutions(args, tokens[segmentEnd(tokens, start):])
+	if reads, _ := shellReadsStdin(toLowerTokens(args)); !reads {
 		return nil
 	}
-	for _, script := range scripts {
-		payloads = append(payloads, producerPayloads(script)...)
+	scripted := false
+	for _, sub := range subs {
+		if dashS && !sub.onStdin {
+			continue
+		}
+		scripted = true
+		for _, command := range sub.commands {
+			payloads = append(payloads, producerPayloads(command)...)
+		}
 	}
-	if len(scripts) > 0 {
+	if scripted {
 		return payloads
 	}
 	for end := start - 1; end > 0 && tokens[end] == "|"; {
@@ -337,47 +358,94 @@ func splitHereStrings(args []string) (rest, texts []string) {
 	return rest, texts
 }
 
-// splitProcessSubstitutions returns args without their "<(...)" words, and the
-// words inside each one. A bare "<" or "0<" ahead of one is dropped with it:
-// "sh < <(cmd)" reads the substitution on stdin. The substitution closes at the
-// first word ending in ")"; one that never closes runs to the last word, so a
-// line the shell would reject is still judged (gt-hizij).
-func splitProcessSubstitutions(args []string) (rest []string, bodies [][]string) {
+// processSubstitution is one "<(...)" word on a shell: the command lines inside
+// it, and whether a "<" ahead of it makes the shell read it on stdin.
+type processSubstitution struct {
+	commands [][]string
+	onStdin  bool
+}
+
+// segmentEnd returns the index of the separator that ends the segment starting
+// at tokens[start], or len(tokens) for the last segment.
+func segmentEnd(tokens []string, start int) int {
+	for end := start; end < len(tokens); end++ {
+		if shellCommandSeparators[tokens[end]] {
+			return end
+		}
+	}
+	return len(tokens)
+}
+
+// splitProcessSubstitutions returns args without their "<(...)" words, and what
+// each one holds. A bare "<" or "0<" ahead of one is dropped with it:
+// "sh < <(cmd)" reads the substitution on stdin. after holds the tokens behind
+// the segment args came from, separators included: a separator inside the body
+// ends the segment, so "sh <(echo a; echo 'make test')" reaches here as
+// "sh <(echo a" and the rest of the body is the next segment. The body is cut
+// into command lines at those separators.
+//
+// The substitution closes at the first word that ends in ")" with the body's
+// parentheses back to level. A word that holds a pair of its own ("echo
+// $(date)") does not close it; the quote marks are gone by now, so the balance
+// is all that is left to read. One that never closes runs to the end of the
+// line, so a line the shell would reject is still judged (gt-hizij, gt-n2gt8).
+func splitProcessSubstitutions(args, after []string) (rest []string, subs []processSubstitution) {
 	for i := 0; i < len(args); i++ {
 		if !strings.HasPrefix(args[i], "<(") {
 			rest = append(rest, args[i])
 			continue
 		}
+		var sub processSubstitution
 		if n := len(rest); n > 0 && (rest[n-1] == "<" || rest[n-1] == "0<") {
 			rest = rest[:n-1]
+			sub.onStdin = true
 		}
-		var body []string
-		for ; i < len(args); i++ {
-			word := strings.TrimPrefix(args[i], "<(")
-			closed := strings.HasSuffix(word, ")")
+		words := append(append([]string(nil), args[i:]...), after...)
+		var command []string
+		endCommand := func() {
+			if len(command) > 0 {
+				sub.commands = append(sub.commands, command)
+				command = nil
+			}
+		}
+		depth, used := 1, len(words)
+		for j, word := range words {
+			if j > 0 && shellCommandSeparators[word] {
+				endCommand()
+				continue
+			}
+			if j == 0 {
+				word = strings.TrimPrefix(word, "<(")
+			}
+			depth += strings.Count(word, "(") - strings.Count(word, ")")
+			closed := depth <= 0 && strings.HasSuffix(word, ")")
 			word = strings.TrimSuffix(word, ")")
 			if word != "" {
-				body = append(body, word)
+				command = append(command, word)
 			}
 			if closed {
+				used = j + 1
 				break
 			}
 		}
-		bodies = append(bodies, body)
+		endCommand()
+		subs = append(subs, sub)
+		i += min(used, len(args)-i) - 1
 	}
-	return rest, bodies
+	return rest, subs
 }
 
 // shellReadsStdin reports whether a shell invoked with args (lowercased, the
 // words after the invoker) reads its script from stdin: it has no -c payload
-// and no script file operand, or -s asks for stdin outright. Options are
-// walked as shellCPayloadIndex walks them.
-func shellReadsStdin(args []string) bool {
+// and no script file operand, or -s asks for stdin outright; dashS says it was
+// the -s, which leaves every operand to the script as a positional parameter.
+// Options are walked as shellCPayloadIndex walks them.
+func shellReadsStdin(args []string) (reads, dashS bool) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--" || a == "-":
-			return true
+			return true, false
 		case a == "--rcfile" || a == "--init-file":
 			i++
 		case strings.HasPrefix(a, "--"):
@@ -386,20 +454,20 @@ func shellReadsStdin(args []string) bool {
 		case len(a) > 1 && a[0] == '-':
 			i += shellClusterValues(a)
 			if strings.Contains(a[1:], "c") {
-				return false
+				return false, false
 			}
 			if strings.Contains(a[1:], "s") {
-				return true
+				return true, true
 			}
 		default:
 			redirected, skip, replacesStdin := shellRedirection(a)
 			if !redirected || replacesStdin {
-				return false
+				return false, false
 			}
 			i += skip
 		}
 	}
-	return true
+	return true, false
 }
 
 // shellRedirection reports whether word is a redirection (2>&1, >out, &>log,
