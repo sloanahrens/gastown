@@ -316,6 +316,13 @@ func prWorkflowInvocations(command string, depth int) (invocations [][]string, t
 // "$(" the shell leaves literal is skipped, after a backslash and inside single
 // quotes, so a note spelling '$(gh pr create)' stays data.
 //
+// A "#" that starts a word opens a comment to the end of the line, where the
+// shell reads an apostrophe as plain text, so "# don't" must not hide the
+// "$(...)" on the next line. The comment body is still scanned for
+// substitutions, so a "$(" in it is judged as before (over-blocked, never
+// passed). A "$'" opens an ANSI-C string, where "\'" does not close the quote.
+// commandSubstitutionSpans reads both the same way (gt-4vj8j).
+//
 // A $(...) body runs to its balancing ")", so parentheses inside it, whether a
 // nested $(date) or a quoted "fix (x)", do not end it early. A substitution
 // nested in a body is not returned here: the recursion in prWorkflowInvocations
@@ -331,13 +338,18 @@ func prWorkflowSubstitutions(command string) []string {
 		}
 	}
 	var quote byte
+	inComment := false
+	escapedAt := -1
 	for i := 0; i < len(text); i++ {
 		switch c := text[i]; {
+		case inComment && c == '\n':
+			inComment = false
 		case quote == '\'':
 			if c == '\'' {
 				quote = 0
 			}
-		case c == '\\':
+		case c == '\\' && !inComment:
+			escapedAt = i + 1
 			i++
 		case c == '$' && i+1 < len(text) && text[i+1] == '(':
 			end := parenBodyEnd(text, i+2)
@@ -347,6 +359,15 @@ func prWorkflowSubstitutions(command string) []string {
 			end := backtickBodyEnd(text, i+1)
 			add(strings.ReplaceAll(text[i+1:end], "\\`", "`"))
 			i = end
+		case inComment:
+		case quote == 0 && c == '$' && i+1 < len(text) && text[i+1] == '\'':
+			// An unterminated $'...' is left to the plain single-quote case
+			// on the next character, which is how it read before.
+			if end := closingANSIQuote(text, i+2); end >= 0 {
+				i = end
+			}
+		case quote == 0 && c == '#' && startsWordAt(text, i, escapedAt):
+			inComment = true
 		case quote == 0 && (c == '\'' || c == '"'):
 			quote = c
 		case quote == '"' && c == '"':

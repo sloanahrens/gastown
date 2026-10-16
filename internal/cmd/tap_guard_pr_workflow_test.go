@@ -496,3 +496,51 @@ func TestPRWorkflowGuard_WrappedBlockedInAgentContext(t *testing.T) {
 		})
 	}
 }
+
+// An apostrophe in a "#" comment is plain text and a "\'" inside $'...' does not
+// close the string, so neither hides a live "$(gh pr create)" behind it. Quotes
+// elsewhere read as before: a "$(" in a comment is still judged, and a quoted
+// one stays data (gt-4vj8j).
+func TestPRWorkflowSubstitutionCommentAndANSIQuote(t *testing.T) {
+	t.Parallel()
+	town := newPolecatTestTown(t)
+	town = town.withEnv("GT_ROLE", "gastown/polecats/"+town.name)
+
+	tests := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"plain substitution", "x=$(gh pr create --fill)", true},
+		{"apostrophe in a comment", "# don't\nx=$(gh pr create --fill)", true},
+		{"apostrophe in a trailing comment", "echo hi # don't\nx=$(gh pr create --fill)", true},
+		{"comment after a separator", "true;# don't\nx=$(gh pr create --fill)", true},
+		{"double quote in a comment", "# say \"hi\nx=$(gh pr create --fill)", true},
+		{"backtick substitution after a comment", "# don't\nx=`gh pr create --fill`", true},
+		{"escaped quote in an ANSI-C string", `echo $'it\'s' $(gh pr create --fill)`, true},
+		{"substitution in a comment", "echo hi # $(gh pr create --fill)", true},
+		{"apostrophe comment then bare gh pr create", "# don't\ngh pr create --fill", true},
+		{"hash inside a word", `echo a#b $(gh pr create --fill)`, true},
+		{"single-quoted substitution stays data", `echo '$(gh pr create --fill)'`, false},
+		{"ANSI-C string hiding a substitution", `echo $'$(gh pr create)'`, false},
+		{"apostrophe after the comment ended", "# note\necho 'a $(gh pr create)'", false},
+		{"hash after an escaped space", `echo \ #b '$(gh pr create)'`, false},
+		{"gh pr view after a comment", "# don't\nx=$(gh pr view 12)", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := matchesPRWorkflowCommand(tt.command); got != tt.want {
+				t.Errorf("matchesPRWorkflowCommand(%q) = %v, want %v", tt.command, got, tt.want)
+			}
+			want := prWorkflowAllow
+			if tt.want {
+				want = prWorkflowBlockAgentContext
+			}
+			payload := polecatBranchPayload(town.worktree, tt.command)
+			if got := evaluatePRWorkflowGuard([]byte(payload), town.proc()); got != want {
+				t.Errorf("evaluatePRWorkflowGuard(%q) = %v, want %v", tt.command, got, want)
+			}
+		})
+	}
+}
