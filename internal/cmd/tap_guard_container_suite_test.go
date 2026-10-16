@@ -2760,6 +2760,23 @@ func TestTapGuardDeepReviewP3Batch(t *testing.T) {
 			t.Errorf("evaluatePolecatTestScope(%q) allowed, want blocked", command)
 		}
 	})
+
+	// A doubled backslash pairs with itself rather than with the "$" after it,
+	// so the "$(" stays behind one backslash and the body's parse runs nothing;
+	// a second pair restores it. The pass reads parity, not presence, so the
+	// guard must judge each of these the way the shell does (substitutionBody).
+	t.Run("doubled_backslash_in_backticks", func(t *testing.T) {
+		proc := fakeGuardProcess(nil, root)
+		literal := "echo `echo \\\\$(make test)`"
+		if reason, _ := evaluatePolecatTestScope(proc, literal); reason != "" {
+			t.Errorf("evaluatePolecatTestScope(%q) blocked (%q), want allowed", literal, reason)
+		}
+		live := "echo `echo \\\\\\\\$(make test)`"
+		reason, _ := evaluatePolecatTestScope(proc, live)
+		if want := "runs the whole suite"; !strings.Contains(reason, want) {
+			t.Errorf("evaluatePolecatTestScope(%q) reason = %q, want %q", live, reason, want)
+		}
+	})
 }
 
 // substitutionBody drops the backslash of each \\, \` and \$ pair in a backtick
