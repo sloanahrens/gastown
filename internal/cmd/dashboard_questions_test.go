@@ -84,8 +84,9 @@ func questionIDs(rows []dashboard.QuestionRow) []string {
 // dependent_count (omitempty on the Issue field, so a renamed key decodes to
 // zero without an error). Every other test hands the reader a beads.Issue with
 // the field already set, so none would notice bd dropping or renaming it. This
-// one starts from the JSON, in the shape bd prints (testdata/bd_list_question.json,
-// one question holding two beads), through the same decode beads.List runs.
+// one starts from the JSON, in the shape bd prints (testdata/bd_list_question.json:
+// the fields of a `bd list --json` row, with the text and owner replaced; one
+// question holding two beads), through the same decode beads.List runs.
 func TestHeldCountFromBdListJSON(t *testing.T) {
 	t.Parallel()
 

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -516,7 +517,32 @@ func specFromPeer(peer sling.Duplicate) specdispatch.Spec {
 // shape the overlap guard asks it in: the knobs come from the town, and the
 // peer's children from the database its comparison pool came from.
 func specPeerHeldPinned(townRoot, beadsDir string, peer sling.Duplicate) string {
-	return specPeerHeldPinnedTo(os.Stderr, townRoot, beadsDir, peer)
+	return specPeerHeldPinnedTo(specHoldWarn, townRoot, beadsDir, peer)
+}
+
+// specHoldWarn is stderr, each distinct warning once: the guard asks the hold
+// question for every peer, and a corrupt settings file fails it identically
+// for all of them.
+var specHoldWarn io.Writer = &onceWriter{w: os.Stderr}
+
+// onceWriter passes each distinct write through to w once and drops repeats.
+type onceWriter struct {
+	w    io.Writer
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+func (o *onceWriter) Write(p []byte) (int, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.seen[string(p)] {
+		return len(p), nil
+	}
+	if o.seen == nil {
+		o.seen = map[string]bool{}
+	}
+	o.seen[string(p)] = true
+	return o.w.Write(p)
 }
 
 // specPeerHeldPinnedTo is specPeerHeldPinned with the writer its warnings go to.

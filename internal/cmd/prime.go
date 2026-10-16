@@ -483,19 +483,8 @@ func resolvePrimeWorkspace() (cwd, townRoot string, err error) {
 // Called when --hook flag is set for LLM runtime hook integration.
 func handlePrimeHookMode(townRoot, cwd string) {
 	sessionID, source := readHookSessionID()
-	if !primeDryRun {
-		persistSessionID(townRoot, sessionID)
-		if cwd != townRoot {
-			persistSessionID(cwd, sessionID)
-		}
-	}
+	startPrimeHookSession(townRoot, cwd, sessionID, primeDryRun, signalAgentReady)
 	primeHookSessionID = sessionID
-
-	// ZFC: Signal agent readiness via tmux env var (gt-sk5u).
-	// WaitForCommand polls for this instead of probing the process tree.
-	// This handles agents wrapped in shell scripts where pane_current_command
-	// remains "bash" even though the agent is running as a descendant.
-	signalAgentReadyUnlessDryRun(primeDryRun, signalAgentReady)
 
 	// Store source for compact/resume detection in runPrime
 	primeHookSource = source
@@ -504,6 +493,26 @@ func handlePrimeHookMode(townRoot, cwd string) {
 	for _, line := range hookSessionBeaconLines(sessionID, source) {
 		fmt.Println(line)
 	}
+}
+
+// startPrimeHookSession is the part of hook mode that changes the machine: it
+// persists the session ID and signals the agent ready. A dry run is a preview
+// and does neither, so --hook --dry-run leaves the live tmux session's
+// environment alone. signal is signalAgentReady in production.
+func startPrimeHookSession(townRoot, cwd, sessionID string, dryRun bool, signal func()) {
+	if dryRun {
+		return
+	}
+	persistSessionID(townRoot, sessionID)
+	if cwd != townRoot {
+		persistSessionID(cwd, sessionID)
+	}
+
+	// ZFC: Signal agent readiness via tmux env var (gt-sk5u).
+	// WaitForCommand polls for this instead of probing the process tree.
+	// This handles agents wrapped in shell scripts where pane_current_command
+	// remains "bash" even though the agent is running as a descendant.
+	signal()
 }
 
 // hookSessionBeaconLines returns the bracketed session/source markers used by
@@ -543,13 +552,6 @@ func signalAgentReady() {
 	_ = t.SetEnvironment(name, tmux.EnvAgentReady, "1")
 }
 
-// signalAgentReadyUnlessDryRun calls signal unless this is a dry run: a
-// preview changes nothing in the live session, the readiness variable included.
-func signalAgentReadyUnlessDryRun(dryRun bool, signal func()) {
-	if !dryRun {
-		signal()
-	}
-}
 
 // isCompactResume returns true if the current prime is running after compaction or resume.
 // In these cases, the agent already has role context in compressed memory and only needs
@@ -1074,7 +1076,7 @@ func findAgentWorkVia(ctx RoleContext, agentID string, open func(dir string) bea
 			// Show error (a bd that timed out, a dropped connection) says nothing
 			// about the bead, so it escalates nothing and the assignee query
 			// below decides.
-			if isBeadNotFound(showErr) {
+			if hookBead == nil && (showErr == nil || isBeadNotFound(showErr)) {
 				staleHookErr = fmt.Errorf("%w: agent=%s hook_bead=%s cwd=%s: %v",
 					ErrHookUnresolvable, agentID, agentBead.HookBead, ctx.WorkDir, showErr)
 			}
@@ -1094,6 +1096,11 @@ func findAgentWorkVia(ctx RoleContext, agentID string, open func(dir string) bea
 		townB := open(filepath.Join(ctx.TownRoot, ".beads"))
 		townWork, err := listAssignedActiveWork(townB, agentID)
 		if err != nil {
+			// A bead that cannot be resolved is the more specific failure and
+			// the caller fails fast on it; the town error would only mask it.
+			if staleHookErr != nil {
+				return nil, staleHookErr
+			}
 			// The rig query found nothing, so this answer is the only one left:
 			// an hq- hook behind a failing town query must read as a database
 			// error, not as "no work assigned" (GH#2638).

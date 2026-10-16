@@ -2104,6 +2104,20 @@ type childrenFailBD struct {
 
 func (b childrenFailBD) Children(string) ([]*beads.Issue, error) { return nil, b.err }
 
+// TestOnceWriterDropsRepeats: the same settings failure, seen once per peer,
+// reaches stderr once; a different warning still gets through.
+func TestOnceWriterDropsRepeats(t *testing.T) {
+	t.Parallel()
+	var sink bytes.Buffer
+	w := &onceWriter{w: &sink}
+	for _, line := range []string{"settings bad\n", "settings bad\n", "children of gt-a\n", "settings bad\n"} {
+		fmt.Fprint(w, line)
+	}
+	if got, want := sink.String(), "settings bad\nchildren of gt-a\n"; got != want {
+		t.Errorf("wrote %q, want %q", got, want)
+	}
+}
+
 // TestSpecPeerHeldFromWarnsOnReadFailure: a peer-hold question whose inputs will
 // not read answers "not held" — the guard keeps refusing rather than guessing —
 // but says so on stderr. A corrupt settings file used to disable every peer hold

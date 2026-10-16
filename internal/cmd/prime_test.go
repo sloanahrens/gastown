@@ -1111,6 +1111,37 @@ func TestFindAgentWorkReturnsTownFallbackError(t *testing.T) {
 	}
 }
 
+// TestFindAgentWorkUnresolvableOutranksTownError: a hook bead bd reports
+// missing is the failure the polecat fails fast on, so a town query that also
+// fails must not replace it with a plain database error.
+func TestFindAgentWorkUnresolvableOutranksTownError(t *testing.T) {
+	t.Parallel()
+	ctx := hookWorkContext(t)
+	townDir := filepath.Join(ctx.TownRoot, ".beads")
+
+	open := func(dir string) beads.Client {
+		return hookWorkBD{
+			show: func(id string) (*beads.Issue, error) {
+				if id == "hq-igrp" {
+					return nil, errors.New("no issue found matching hq-igrp")
+				}
+				return &beads.Issue{ID: id, HookBead: "hq-igrp"}, nil
+			},
+			assigned: func() ([]*beads.Issue, error) {
+				if dir == townDir {
+					return nil, errors.New("dial tcp 127.0.0.1:3307: connection refused")
+				}
+				return nil, nil
+			},
+		}
+	}
+
+	_, err := findAgentWorkVia(ctx, getAgentIdentity(ctx), open)
+	if !errors.Is(err, ErrHookUnresolvable) {
+		t.Fatalf("findAgentWorkVia error = %v, want ErrHookUnresolvable", err)
+	}
+}
+
 // TestFindAgentWorkShowErrorIsNotUnresolvable: bd show fails for reasons that
 // say nothing about the bead (a timeout, a dropped connection). Only a bead bd
 // reports missing is unresolvable and escalates.
@@ -1123,6 +1154,7 @@ func TestFindAgentWorkShowErrorIsNotUnresolvable(t *testing.T) {
 	}{
 		{"transient bd failure", errors.New("bd: context deadline exceeded"), false},
 		{"bead bd cannot find", errors.New("no issue found matching hq-igrp"), true},
+		{"bd answers with no bead and no error", nil, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1163,7 +1195,9 @@ func TestPrimeHookDryRunDoesNotSignalReady(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			signals := 0
-			signalAgentReadyUnlessDryRun(tc.dryRun, func() { signals++ })
+			townRoot := t.TempDir()
+			// startPrimeHookSession is the function handlePrimeHookMode runs.
+			startPrimeHookSession(townRoot, townRoot, "sess-1", tc.dryRun, func() { signals++ })
 			if signals != tc.wantSignals {
 				t.Errorf("signalled agent readiness %d time(s), want %d", signals, tc.wantSignals)
 			}
