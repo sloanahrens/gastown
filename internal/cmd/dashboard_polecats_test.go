@@ -340,6 +340,13 @@ func TestDashBeadSummary(t *testing.T) {
 		{"only attachment lines", block, ""},
 		{"empty", "  \n", ""},
 		{"padded plain", "\n  short one \n", "short one"},
+		{"goal heading any case and indent", "Intro.\n\n  ## goal  \n\nBody.\n", "Body."},
+		{"empty goal section", "## Goal\n\n## Constraints\n\n- one\n", ""},
+		{"goal keeps its ### subheadings", "## Goal\n\nTop.\n\n### Detail\n\nMore.\n\n## Gate\n\nx", "Top.\n\n### Detail\n\nMore."},
+		{"first goal section wins", "## Goal\n\nOne.\n\n## Goal\n\nTwo.\n", "One."},
+		{"goal heading with trailing text is not a goal", "## Goal: ship\n\nBody.\n\nOther.", "## Goal: ship"},
+		{"single hash goal is not a goal", "# Goal\n\nBody.\n\nOther.", "# Goal"},
+		{"CRLF line endings", "## Goal\r\n\r\nCrlf body.\r\n\r\n## Gate\r\n\r\nx\r\n", "Crlf body."},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
