@@ -85,8 +85,8 @@ type overseerReportSeams struct {
 	// hour is the run behind the hour sections, ending at slot.
 	hour func(slot time.Time) townreport.HourRun
 	// logf is where the report says what it will not fail on: a latest.md copy
-	// it could not refresh. Always set: production takes the daemon's logger
-	// and the test world a no-op, so the report may call it on any failure.
+	// it could not refresh. Production takes the daemon's logger; a seam may
+	// leave it nil, and the report then drops the message.
 	logf func(format string, args ...any)
 }
 
@@ -219,7 +219,7 @@ func overseerReportClamp(text string) string {
 // report the patrol did not write is never replaced, where the copy is replaced
 // by every run that writes a report. A latest.md refresh that fails is logged
 // and leaves the report write alone: the copy is a convenience, the slot's
-// report is the record.
+// report is the record. logf may be nil, and the message is then dropped.
 func writeOverseerReportFile(dir string, slot time.Time, text string, logf func(string, ...any)) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating %s: %w", dir, err)
@@ -238,7 +238,12 @@ func writeOverseerReportFile(dir string, slot time.Time, text string, logf func(
 		return "", fmt.Errorf("writing %s: %w", name, err)
 	}
 	if err := refreshOverseerLatest(dir, text); err != nil {
-		logf("overseer_report: %v", err)
+		// logf is a seam, and a seam may leave it unset: the report is already
+		// in place, so a missing logger costs the message about the copy and
+		// never a panic in the patrol's goroutine.
+		if logf != nil {
+			logf("overseer_report: %v", err)
+		}
 	}
 	return final, nil
 }

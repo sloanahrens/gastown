@@ -503,6 +503,61 @@ func TestOverseerReportLatestCopyFailureIsLogged(t *testing.T) {
 	}
 }
 
+// A report name the run finds taken is the one case the writer leaves without
+// refreshing latest.md, and it says nothing: no report came from this run, so
+// the copy keeps the text of the report that did, and the run is not a failed
+// refresh to log.
+func TestOverseerReportTakenNameKeepsTheLatestCopy(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	dir := townreport.ReportsDir(w.town)
+	slotFile := w.seedReport(t, "20261014T201500Z")
+	copyPath := filepath.Join(dir, overseerLatestName)
+	writeOverseerFile(t, copyPath, "the 10-15 copy\n")
+	var logs []string
+	logf := func(f string, a ...any) { logs = append(logs, fmt.Sprintf(f, a...)) }
+
+	path, err := writeOverseerReportFile(dir, overseerAt("2026-10-14T20:15:00Z"), "the slot's text\n", logf)
+	if path != "" || err != nil {
+		t.Fatalf("writeOverseerReportFile over a taken report name = %q, %v; want nothing and no error", path, err)
+	}
+	if got := readOverseerFile(t, slotFile); got != "earlier report\n" {
+		t.Errorf("the report in place now reads %q", got)
+	}
+	if got := readOverseerFile(t, copyPath); got != "the 10-15 copy\n" {
+		t.Errorf("latest.md now reads %q, want the text the run left alone", got)
+	}
+	if len(logs) != 0 {
+		t.Errorf("logged %q, want nothing: the refresh was skipped, not attempted and failed", logs)
+	}
+	if got := overseerEntries(t, dir); !slices.Equal(got, []string{"20261014T201500Z.md", overseerLatestName}) {
+		t.Errorf("reports dir holds %q, want the report, the copy and no leftover temp file", got)
+	}
+}
+
+// A nil logf is what a hand-built seam may carry, and the report holds: the
+// patrol runs the report on its own goroutine, so a panic there over a copy
+// nobody read is a patrol that stops reporting.
+func TestOverseerReportMissingLoggerIsNotAPanic(t *testing.T) {
+	t.Parallel()
+	w := newOverseerWorld(t, "2026-10-14T20:17:33Z")
+	w.seedReport(t, "20261014T200000Z")
+	// A directory where the copy goes: the rename cannot replace it, which is
+	// the failure the missing logger is asked to report.
+	if err := os.MkdirAll(filepath.Join(townreport.ReportsDir(w.town), overseerLatestName), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	w.logf = nil
+
+	path := w.run(t)
+	if path == "" {
+		t.Fatal("no report was written although only the copy failed")
+	}
+	if text := readOverseerFile(t, path); !strings.Contains(text, "overseer report 2026-10-14T20:15:00Z") {
+		t.Errorf("the report is not the slot's digest:\n%s", text)
+	}
+}
+
 // The window DONE counts is the previous report to the slot, and the first
 // report has a window of one interval.
 func TestOverseerReportDoneCountsSincePreviousReport(t *testing.T) {
