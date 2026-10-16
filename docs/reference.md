@@ -666,8 +666,8 @@ project settings rather than overriding them.
 ### Settings Templates
 
 Gas Town installs one base hooks config for every role, then layers per-role
-overrides. The base config runs `gt prime --hook` on `SessionStart` and
-`PreCompact` and `gt mail check --inject` on `UserPromptSubmit`.
+overrides. The base config is `DefaultBase` in `internal/hooks/config.go`; read
+it there for the commands each hook event runs.
 
 ### Troubleshooting
 
