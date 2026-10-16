@@ -931,6 +931,44 @@ func TestDeployWatch_StateSurvivesARestart(t *testing.T) {
 	}
 }
 
+// TestDeployWatch_RestartWithFailedJobsReadKeepsHighSeverity: the state file
+// says health.yml on main is high because its prod smoke failed, and the
+// daemon that restarts into that state cannot read the jobs. The read is
+// best-effort, so it may not talk the standing alert down: an unread list is
+// not an answer that the prod job was fine (gt-xkikw).
+func TestDeployWatch_RestartWithFailedJobsReadKeepsHighSeverity(t *testing.T) {
+	t.Parallel()
+	run := deployTestRun(9, deployWorkflowHealth, deployRefMain, deployRunFailed, deployTestNow.Add(-time.Minute), "release smoke")
+	api := &fakeDeployForgejo{
+		runs: []forgejo.ActionRun{run},
+		jobs: map[int64][]forgejo.ActionRunJob{9: {deployTestJob(9, deployHealthProdJob, deployRunFailed)}},
+	}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+
+	raised := rec.raisedAlerts()
+	if len(raised) != 1 || raised[0].Severity != config.SeverityHigh {
+		t.Fatalf("raised = %+v, want the prod smoke's one high escalation", raised)
+	}
+	if pushes := rec.pushes(); len(pushes) != 1 {
+		t.Fatalf("pushes = %+v, want the push a high severity is worth", pushes)
+	}
+
+	// The next daemon reads the same state file with the jobs call failing.
+	api.jobErr = fmt.Errorf("dial tcp: connection refused")
+	next, nextRec := newTestDeployWatch(t, api)
+	next.State = w.State
+	next.poll(context.Background())
+
+	if raised := nextRec.raisedAlerts(); len(raised) != 0 {
+		t.Errorf("raised = %+v, want nothing: an unread jobs list is no answer about the prod smoke, and must not re-raise the standing high alert at medium", raised)
+	}
+	if pushes := nextRec.pushes(); len(pushes) != 0 {
+		t.Errorf("pushes = %+v, want nothing: the push for this run already went out", pushes)
+	}
+}
+
 // TestDeployWatch_ARaiseThatDidNotLandIsRetried: the state records a
 // delivery, so a dropped escalation is raised again by the next poll instead
 // of being remembered as sent.
@@ -1014,6 +1052,35 @@ func TestDeployWatch_APushThatDidNotLandIsRetried(t *testing.T) {
 	}
 	if raised := rec.raisedAlerts(); len(raised) != 1 {
 		t.Errorf("raised = %+v, want no second escalation for a push retry", raised)
+	}
+}
+
+// TestDeployWatch_SecondFailingRunPushesAgain: the release failed twice with
+// the first alert still open, so the second failure is a second run and the
+// high-severity push it is worth is owed again. The push goes out once per
+// run, not once per key (gt-xkikw).
+func TestDeployWatch_SecondFailingRunPushesAgain(t *testing.T) {
+	t.Parallel()
+	first := deployTestRun(77, deployWorkflowDeploy, "v0.1.3", deployRunFailed, deployTestNow.Add(-30*time.Minute), "chore: release v0.1.3")
+	api := &fakeDeployForgejo{runs: []forgejo.ActionRun{first}}
+	w, rec := newTestDeployWatch(t, api)
+
+	w.poll(context.Background())
+
+	second := deployTestRun(78, deployWorkflowDeploy, "v0.1.4", deployRunFailed, deployTestNow.Add(-time.Minute), "chore: release v0.1.4")
+	api.runs = []forgejo.ActionRun{second, first}
+	w.poll(context.Background())
+
+	raised := rec.raisedAlerts()
+	if len(raised) != 2 {
+		t.Fatalf("raised = %+v, want the escalation of each failing run", raised)
+	}
+	pushes := rec.pushes()
+	if len(pushes) != 2 {
+		t.Fatalf("pushes = %+v, want one for each failing run", pushes)
+	}
+	if !strings.Contains(pushes[1].Body, "v0.1.4") {
+		t.Errorf("second push = %+v, want the run that is failing now", pushes[1])
 	}
 }
 
