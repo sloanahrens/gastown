@@ -18,21 +18,21 @@ import (
 
 type fakeQueueStore struct {
 	ready, blocked, landing []*beads.Issue
-	held                    []*beads.Issue // the work beads a seat holds: what a status-filtered List returns
+	held                    []*beads.Issue // the work beads a seat holds: what ListIssueStatuses returns
 	err, heldErr            error          // heldErr fails only the held-beads read
 	shown                   *beads.Issue
 }
 
 func (f *fakeQueueStore) ReadyAll() ([]*beads.Issue, error) { return f.ready, f.err }
 func (f *fakeQueueStore) Blocked() ([]*beads.Issue, error)  { return f.blocked, f.err }
-func (f *fakeQueueStore) List(o beads.ListOptions) ([]*beads.Issue, error) {
-	if o.Status != "" {
-		if f.heldErr != nil {
-			return nil, f.heldErr
-		}
-		return f.held, f.err
-	}
+func (f *fakeQueueStore) List(beads.ListOptions) ([]*beads.Issue, error) {
 	return f.landing, f.err
+}
+func (f *fakeQueueStore) ListIssueStatuses(...beads.IssueStatus) ([]*beads.Issue, error) {
+	if f.heldErr != nil {
+		return nil, f.heldErr
+	}
+	return f.held, f.err
 }
 func (f *fakeQueueStore) Show(id string) (*beads.Issue, error) {
 	if f.shown == nil {
@@ -194,6 +194,22 @@ func TestQueueLeavesALiveMoleculesStepsOutOfTheLeak(t *testing.T) {
 		if !strings.Contains(strings.Join(listedWisps, " "), want) {
 			t.Errorf("%s is a step of a molecule no seat holds and must be leaked; leaked = %v", want, listedWisps)
 		}
+	}
+}
+
+// A molecule is live wherever its work bead sits: a step in one store whose
+// work bead is held in another is not leaked.
+func TestQueueCountsAMoleculeLiveWhicheverStoreHoldsItsWorkBead(t *testing.T) {
+	t.Parallel()
+	hq := &fakeQueueStore{held: []*beads.Issue{
+		{ID: "hq-run", Status: "hooked", Assignee: "gastown/polecats/dag", Description: "attached_molecule: gt-wisp-far"},
+	}}
+	gastown := &fakeQueueStore{blocked: []*beads.Issue{
+		{ID: "gt-wisp-f1", Title: "Build", Type: "task", Parent: "gt-wisp-far", BlockedBy: []string{"gt-wisp-far"}},
+	}}
+	q := queueReaderOver(map[string]dashQueueStore{"hq": hq, "gastown": gastown}, "hq", "gastown").read(time.Now())
+	if q.BlockedTotal != 0 || q.BlockedWisps != 0 {
+		t.Errorf("blocked = %d (%d wisps), want 0: the step belongs to a molecule hq's work bead holds", q.BlockedTotal, q.BlockedWisps)
 	}
 }
 

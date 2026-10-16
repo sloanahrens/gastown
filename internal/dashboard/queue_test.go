@@ -43,7 +43,7 @@ func TestIsLeakedStepWispTellsAStepFromBlockedWork(t *testing.T) {
 // neither whatever is live.
 func TestStepVerdictFollowsTheLiveMolecules(t *testing.T) {
 	t.Parallel()
-	live := map[string]bool{"gt-wisp-live": true}
+	live := map[string]bool{"gt-wisp-live": true, "gt-mol-live": true}
 
 	for _, tc := range []struct {
 		name, id, typ, parent string
@@ -56,6 +56,7 @@ func TestStepVerdictFollowsTheLiveMolecules(t *testing.T) {
 		{"a step that names no molecule", "gt-wisp-s3", "task", "", true, false},
 		{"blocked work", "gt-real", "task", "", false, false},
 		{"a child of a durable epic", "gt-child", "task", "gt-epic", false, false},
+		{"a bead under a durable molecule a seat holds", "gt-s1", "task", "gt-mol-live", false, false},
 	} {
 		leaked := IsLeakedStepWisp(tc.id, tc.typ, tc.parent, live)
 		liveStep := IsLiveStep(tc.id, tc.typ, tc.parent, live)

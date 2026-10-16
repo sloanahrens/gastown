@@ -19,6 +19,7 @@ type dashQueueStore interface {
 	ReadyAll() ([]*beads.Issue, error)
 	Blocked() ([]*beads.Issue, error)
 	List(beads.ListOptions) ([]*beads.Issue, error)
+	ListIssueStatuses(statuses ...beads.IssueStatus) ([]*beads.Issue, error)
 	Show(id string) (*beads.Issue, error)
 }
 
@@ -84,12 +85,13 @@ func newDashQueueReader(townRoot string) *dashQueueReader {
 	return r
 }
 
-// liveMolecules is the set of molecules a seat is running: the attached
+// addLiveMolecules adds to live the molecules a seat is running: the attached
 // molecule of every work bead that is hooked or in progress and has an
 // assignee. A bead that is closed, or that nobody holds, keeps its molecule out
-// of the set, which is what makes the molecule's steps leaked (gt-xmys9).
-func liveMolecules(held []*beads.Issue) map[string]bool {
-	live := map[string]bool{}
+// of the set, which is what makes the molecule's steps leaked (gt-xmys9). The
+// assignee is the seat's claim on the bead; whether that seat's session is
+// still up is not read here, the queue read having no per-seat probe to spend.
+func addLiveMolecules(live map[string]bool, held []*beads.Issue) {
 	for _, i := range held {
 		if i.Assignee == "" {
 			continue
@@ -98,7 +100,6 @@ func liveMolecules(held []*beads.Issue) map[string]bool {
 			live[att.AttachedMolecule] = true
 		}
 	}
-	return live
 }
 
 // dashQueueRow is one issue as a queue row.
@@ -162,6 +163,20 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 		rigs = append(rigs, dashboard.Rig{Name: name, Parked: parked})
 		readable[name] = read
 	}
+	// The work beads a seat holds say which molecules are live. One read per
+	// store, not one per step, and pooled across the town so a molecule counts
+	// as live wherever its work bead sits.
+	live := map[string]bool{}
+	heldOK := map[string]bool{}
+	for _, name := range names {
+		if st := stores[name]; st != nil {
+			held, err := st.ListIssueStatuses(beads.IssueStatusHooked, beads.StatusInProgress)
+			if err == nil {
+				addLiveMolecules(live, held)
+			}
+			heldOK[name] = err == nil
+		}
+	}
 	for _, name := range names {
 		st := stores[name]
 		parked := r.parked != nil && r.parked(name)
@@ -172,10 +187,7 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 		rd, err1 := st.ReadyAll()
 		bl, err2 := st.Blocked()
 		ln, err3 := st.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1})
-		// One list per store, not a read per step: the work beads a seat holds
-		// say which molecules are live.
-		held, err4 := st.List(beads.ListOptions{Status: string(beads.IssueStatusHooked) + "," + string(beads.StatusInProgress), Priority: -1})
-		if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+		if err1 != nil || err2 != nil || err3 != nil || !heldOK[name] {
 			q.Unreadable = append(q.Unreadable, name)
 			addRig(name, parked, false)
 			continue
@@ -198,7 +210,6 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 			}
 			ready = append(ready, row)
 		}
-		live := liveMolecules(held)
 		for _, i := range bl {
 			if dashboard.IsLiveStep(i.ID, i.Type, i.Parent, live) {
 				continue
