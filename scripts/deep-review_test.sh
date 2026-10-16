@@ -5,6 +5,8 @@
 # reviewed lines, cursor) on a production-sized tree, fingerprint lookup, and
 # the queued ledger line's severity and its skipped malformed lines, the P3
 # batches (threshold, age, filed, cap, seen, skipped malformed lines),
+# om-queued (the om-findings label's queued lines, the day window, the exact
+# line prefix, de-duplication, both bd --json shapes, untrusted input),
 # plan --mode slice|landings|both, the gate subcommand
 # (count and age thresholds, the green-sweep gate and the sweep records it
 # refuses, both bd --json shapes, untrusted input), the
@@ -679,6 +681,101 @@ assert_eq "non-numeric --min-count" "2" "$(gate_rc --landings "$LANDINGS" --labe
 assert_eq "non-numeric --min-age-min" "2" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --min-age-min soon)"
 assert_eq "unknown flag" "2" "$(gate_rc --landings "$LANDINGS" --label "$LBL" --bogus 1)"
 assert_eq "flag without a value" "2" "$(gate_rc --landings "$LANDINGS" --label)"
+
+# ---- om-queued ------------------------------------------------------------
+
+echo "om-queued: the queued lines om left on an approved landing's work bead"
+mkdir -p "$TMP/ombin" "$TMP/omrig"
+cat > "$TMP/ombin/bd" <<'STUB'
+#!/usr/bin/env bash
+echo "$(pwd -P) $*" > "$OMB_ARGS"
+cat "$OMB_OUT"
+exit "${OMB_RC:-0}"
+STUB
+chmod +x "$TMP/ombin/bd"
+export OMB_ARGS="$TMP/omb.args" OMB_OUT="$TMP/omb.out"
+omq_rc() { local rc=0; PATH="$TMP/ombin:$PATH" "$DR" om-queued "$@" > "$TMP/omq.out" 2> "$TMP/omq.err" || rc=$?; echo "$rc"; }
+omq_out() { paste -sd'|' - < "$TMP/omq.out"; }
+
+# The window is days of the machine clock, so the fixture dates come from it:
+# a bead updated an hour ago is inside any window, one 30 days old is outside.
+ago() { jq -n -r --argjson d "$1" '(now - ($d * 86400)) | strftime("%Y-%m-%dT%H:%M:%SZ")'; }
+cat > "$TMP/omb.out" <<J
+[{"id":"gt-1","updated_at":"$(ago 0)","notes":"queued: internal/a/one.go:Foo:bug P1 internal/a/one.go:12 swap the nil check\\nqueued: internal/b/two.go:Bar:bug P2 internal/b/two.go:3 the second finding\\na note line no run reads\\nqueued:internal/c/three.go:Baz:bug P2 no space after the colon"},
+ {"id":"gt-2","updated_at":"$(ago 0)","notes":"queued: internal/a/one.go:Foo:bug P1 internal/a/one.go:12 swap the nil check\\nno ledger line here"},
+ {"id":"gt-3","updated_at":"$(ago 30)","notes":"queued: internal/old/four.go:Qux:bug P2 internal/old/four.go:9 outside the window"},
+ {"id":"gt-4","updated_at":"$(ago 10)","notes":"queued: internal/mid/five.go:Quux:bug P2 internal/mid/five.go:4 ten days old"}]
+J
+rc="$(omq_rc --repo "$TMP/omrig")"
+assert_eq "exit 0" "0" "$rc"
+assert_eq "the default window is 14 days: both of gt-1's lines, gt-4's at 10 days, gt-2's repeat once" \
+  "queued: internal/a/one.go:Foo:bug P1 internal/a/one.go:12 swap the nil check|queued: internal/b/two.go:Bar:bug P2 internal/b/two.go:3 the second finding|queued: internal/mid/five.go:Quux:bug P2 internal/mid/five.go:4 ten days old" "$(omq_out)"
+assert_eq "a note line no run reads is not printed" "0" "$(grep -c 'a note line no run reads' "$TMP/omq.out" || true)"
+assert_eq "nor is 'queued:' without the space" "0" "$(grep -c '^queued:internal/' "$TMP/omq.out" || true)"
+assert_eq "bd is asked for the label's whole history" "list -l om-findings --all --limit 200 --json" "$(cut -d' ' -f2- "$OMB_ARGS")"
+assert_eq "bd runs in --repo" "$(cd "$TMP/omrig" && pwd -P)" "$(cut -d' ' -f1 "$OMB_ARGS")"
+rc="$(omq_rc --days 7 --repo "$TMP/omrig")"
+assert_eq "exit 0" "0" "$rc"
+assert_eq "--days 7 drops the ten-day-old bead" "queued: internal/a/one.go:Foo:bug P1 internal/a/one.go:12 swap the nil check|queued: internal/b/two.go:Bar:bug P2 internal/b/two.go:3 the second finding" "$(omq_out)"
+
+echo "om-queued: the BD_MACHINE=1 envelope is read like the bare array"
+printf '{"schema_version":1,"data":%s}\n' "$(cat "$TMP/omb.out")" > "$TMP/omenv.json"
+OMB_OUT="$TMP/omenv.json"
+rc="$(omq_rc --repo "$TMP/omrig")"
+assert_eq "exit 0" "0" "$rc"
+assert_eq "the same three lines" "3" "$(wc -l < "$TMP/omq.out" | tr -d ' ')"
+OMB_OUT="$TMP/omb.out"
+
+echo "om-queued: nothing to queue is exit 0 and no output"
+echo '[]' > "$TMP/omempty.json"
+OMB_OUT="$TMP/omempty.json"
+rc="$(omq_rc --repo "$TMP/omrig")"
+assert_eq "exit 0" "0" "$rc"
+assert_eq "no output" "" "$(omq_out)"
+printf '[{"id":"gt-9","updated_at":"%s","notes":null},{"id":"gt-8","updated_at":"%s"}]\n' "$(ago 0)" "$(ago 0)" > "$TMP/omonotes.json"
+OMB_OUT="$TMP/omonotes.json"
+rc="$(omq_rc --repo "$TMP/omrig")"
+assert_eq "a bead with no notes is not a failure" "0" "$rc"
+assert_eq "and prints nothing" "" "$(omq_out)"
+OMB_OUT="$TMP/omb.out"
+
+echo "om-queued: a line a run filed is not pending again, de-duplication included"
+rc="$(omq_rc --repo "$TMP/omrig")"
+{ cat "$TMP/omq.out"; printf 'finding: internal/a/one.go:Foo:bug gt-900\n'; } > "$TMP/om-ledger.txt"
+assert_eq "the filed finding drops out of the queue, the others stay" \
+  "queued: internal/b/two.go:Bar:bug P2 internal/b/two.go:3 the second finding|queued: internal/mid/five.go:Quux:bug P2 internal/mid/five.go:4 ten days old" \
+  "$("$DR" queued --prev-notes "$TMP/om-ledger.txt" | paste -sd'|' -)"
+filed="$(if "$DR" seen --prev-notes "$TMP/om-ledger.txt" internal/a/one.go:Foo:bug; then echo yes; else echo no; fi)"
+assert_eq "and seen reads the appended fingerprint as filed" "yes" "$filed"
+
+echo "om-queued: an input it cannot trust is exit 3, never 'nothing queued'"
+assert_eq "bd fails" "3" "$(OMB_RC=1 omq_rc --repo "$TMP/omrig")"
+echo 'not json' > "$OMB_OUT"
+assert_eq "bd prints something that is not JSON" "3" "$(omq_rc --repo "$TMP/omrig")"
+: > "$OMB_OUT"
+assert_eq "bd prints nothing" "3" "$(omq_rc --repo "$TMP/omrig")"
+echo '{"error":"x"}' > "$OMB_OUT"
+assert_eq "an object without a data list" "3" "$(omq_rc --repo "$TMP/omrig")"
+echo '{"data":{"id":"gt-1"}}' > "$OMB_OUT"
+assert_eq "data is not a list" "3" "$(omq_rc --repo "$TMP/omrig")"
+echo '[1,2]' > "$OMB_OUT"
+assert_eq "rows are not objects" "3" "$(omq_rc --repo "$TMP/omrig")"
+echo '[{"id":"gt-1","notes":"queued: a.go:A:x P1 a.go:1 claim"}]' > "$OMB_OUT"
+assert_eq "a bead without an updated_at" "3" "$(omq_rc --repo "$TMP/omrig")"
+echo '[{"id":"gt-1","updated_at":"yesterday","notes":"queued: a.go:A:x P1 a.go:1 claim"}]' > "$OMB_OUT"
+assert_eq "an updated_at that is not RFC3339" "3" "$(omq_rc --repo "$TMP/omrig")"
+printf '[{"id":"gt-1","updated_at":"%s","notes":7}]\n' "$(ago 0)" > "$OMB_OUT"
+assert_eq "notes is not a string" "3" "$(omq_rc --repo "$TMP/omrig")"
+assert_eq "and none of them wrote a ledger line" "" "$(omq_out)"
+assert_eq "the failure says why" "1" "$(grep -c 'unreadable bead list' "$TMP/omq.err" || true)"
+
+echo "om-queued: usage"
+assert_eq "non-numeric --days" "2" "$(omq_rc --days lots)"
+assert_eq "--days 0" "2" "$(omq_rc --days 0)"
+assert_eq "unknown flag" "2" "$(omq_rc --bogus 1)"
+assert_eq "--repo without a value" "2" "$(omq_rc --repo)"
+assert_eq "missing --repo directory" "2" "$(omq_rc --repo "$TMP/absent")"
+assert_eq "the subcommand is in the usage text" "1" "$("$DR" om-queued --bogus 2>&1 >/dev/null | grep -c 'om-queued \[--days N\] \[--repo DIR\]' || true)"
 
 # ---- docs-audit -----------------------------------------------------------
 
