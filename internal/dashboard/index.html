@@ -158,8 +158,11 @@ section.collapsed>h2{border-bottom:0}
 .toast button{margin-left:auto;background:none;border:0;color:var(--dim);font:inherit;cursor:pointer}
 .alvl{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid currentColor;margin-right:6px}
 .alvl.info{color:var(--blue)}.alvl.warn{color:var(--amber)}.alvl.crit{color:var(--red)}
-.arow{border-top:1px solid var(--line);padding:4px 0;overflow-wrap:anywhere}
+.arow{display:block;width:100%;text-align:left;background:none;border:0;border-top:1px solid var(--line);color:inherit;font:inherit;padding:4px 0;cursor:pointer;overflow-wrap:anywhere}
+.arow:hover{background:#19212b}
+.arow .caret{color:var(--dim);width:10px;display:inline-block}
 .arow .by{color:var(--dim)}
+.arow .badc{display:block}
 .arow .qcmd,.arow .qrec{margin-top:3px}
 .own-sloan{color:var(--amber);border-color:var(--amber)}
 .own-overseer{color:var(--blue);border-color:var(--blue)}
@@ -208,8 +211,8 @@ h3.ohead .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:no
 .dname{color:var(--dim);font-size:11px;letter-spacing:.04em}
 .dbody{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:4px 8px}
 .dskip{color:var(--dim);font-size:11px;margin-top:3px}
-.qrec,.qheld{color:var(--dim);margin:2px 0}
-.qtext{margin:2px 0}
+.arow .qrec,.arow .qheld{color:var(--dim);display:block;margin:2px 0}
+.arow .qtext{display:block;margin:2px 0}
 .qage{color:var(--dim)}
 .qpri,.qeffort{color:var(--dim);font-size:11px;white-space:nowrap}
 .qpri.warnc{color:var(--amber)}
@@ -2400,6 +2403,59 @@ const QUESTION_OLDEST_SEC = 4 * 3600;
 const OWNERS = ["sloan", "overseer"];
 const PANEL_OPENS_ON = "sloan";
 
+// A row of the panel folds on its own: its header line is the row, and the
+// words under that line come back on a click, so one long question stops taking
+// the pane everything waiting shares (gt-1kaed). The choice is the reader's and
+// survives a reload in gt-attn-collapsed, a map of fold key to true, read at
+// load and written on every change the way the panes' folds in gt-collapsed
+// are. A key is the item's name plus a hash of what its row says, so a fold set
+// against one reading of an item never hides the next one (attnFoldKey).
+const ATTN_FOLD_KEY = "gt-attn-collapsed";
+let attnFolded = {};
+try { attnFolded = JSON.parse(localStorage.getItem(ATTN_FOLD_KEY) || "{}") || {}; } catch (e) {}
+
+// attnItemKey names the item a row is about, holding still while the row's
+// words change: the kind, then the id the readers gave it — a bead id, or a
+// queue rule's own item key.
+function attnItemKey(r) { return r.kind + ":" + (r.id || ""); }
+
+// attnStamp hashes what a row says, everything a reader reads off it, so a new
+// question answer, a new severity or a renamed item lands under a key no fold
+// was set against and comes back expanded rather than hidden behind one. The
+// age stays out: it moves with every publish, and a row that only aged is the
+// same row.
+function attnStamp(r) {
+  const said = [r.owner, r.severity, r.level, r.rule, r.priority, r.effort, r.state, r.title,
+    r.question, r.recommended, r.held_count, (r.held || []).join(","), r.malformed, r.escalated_by].join("\u0000");
+  let h = 2166136261;
+  for (let i = 0; i < said.length; i++) h = Math.imul(h ^ said.charCodeAt(i), 16777619);
+  return (h >>> 0).toString(36);
+}
+function attnFoldKey(r) { return attnItemKey(r) + ":" + attnStamp(r); }
+
+// keepAttnFolds drops the folds whose item has left the list and the ones its
+// row no longer answers to; both come back expanded. A list the readers could
+// not all deliver is left alone: it is short by a failed read, not by an item
+// going away.
+function keepAttnFolds(rows, failed, pending) {
+  if (failed.length || pending.length) return;
+  const live = new Set(rows.map(attnFoldKey));
+  let dropped = false;
+  for (const k of Object.keys(attnFolded)) if (!live.has(k)) { delete attnFolded[k]; dropped = true; }
+  if (dropped) saveAttnFolds();
+}
+
+function saveAttnFolds() {
+  try { localStorage.setItem(ATTN_FOLD_KEY, JSON.stringify(attnFolded)); } catch (e) {}
+}
+
+function toggleAttnRow(r) {
+  const k = attnFoldKey(r);
+  if (attnFolded[k]) delete attnFolded[k]; else attnFolded[k] = true;
+  saveAttnFolds();
+  renderAttention(attentionState);
+}
+
 // The Attention panel: the one list of what is waiting on a decision or an
 // action — the open escalations, the overseer's open questions and the
 // attention queue's standing items — every row tagged with the owner who has to
@@ -2445,6 +2501,9 @@ function drawAttention() {
   const at = attentionState ? attentionState.attention : null;
   if (!at) { box.append(el("div", "empty", "reading…")); return; }
   const failed = at.failed || [], pending = at.pending || [];
+  // The folds are swept against the whole list rather than the rows a chip is
+  // showing: an owner switched off is not an item that went away.
+  keepAttnFolds(at.rows || [], failed, pending);
   // A read that failed is a named state, never an empty panel: "nothing is
   // waiting" and "the list could not be read" must not look alike. The rows the
   // readers did return are still drawn beside the line.
@@ -2496,9 +2555,25 @@ function renderOwnerChips(rows) {
 // a question adds its own words, the answer recommended to it, what answering
 // it holds up and the line that answers it, an escalation its severity and who
 // raised it, and a queue item the rule that raised it.
+//
+// The row is the panel's one button, and it folds: a click on the header line
+// takes the words under it off the pane and a second click brings them back
+// (gt-1kaed). A button is the row because the keyboard comes with it — Enter
+// and Space fold it the way they fold a pane header — and its cells are spans
+// because a button's content is inline.
 function attentionRow(r) {
-  const row = el("div", "arow");
+  const folded = !!attnFolded[attnFoldKey(r)];
+  const row = el("button", "arow");
+  row.setAttribute("aria-expanded", folded ? "false" : "true");
+  row.onclick = ev => {
+    // The answer line is the one cell of the row the reader acts with — they
+    // click it to take it whole and paste it — so a click on it is not a click
+    // to fold, the way a pane header leaves the chips inside it alone (gt-1kaed).
+    if (ev && ev.target && ev.target.closest && ev.target.closest(".qcmd")) return;
+    toggleAttnRow(r);
+  };
   row.dataset.owner = r.owner;
+  row.append(el("span", "caret", folded ? "▸" : "▾"));
   row.append(el("span", "tag own-" + r.owner, r.owner || "?"));
   if (r.kind === "escalation") {
     row.append(el("span", "esc " + (SEV_CLASS[r.severity] || "sev-low"), r.severity || "–"));
@@ -2523,16 +2598,20 @@ function attentionRow(r) {
     row.append(el("span", "qstate", r.state === "answered" ? "answered, overseer acting" : "awaiting you"));
   }
   if (r.age_sec != null) row.append(el("span", "qage", fmtDur(r.age_sec)));
-  if (r.question) row.append(el("div", "qtext", r.question));
+  // The words under the header line are left out of a folded row rather than
+  // hidden in it: a fold that only looks folded still leaves the page's search
+  // and its select-all reading what the reader folded away (gt-1kaed).
+  if (folded) return row;
+  if (r.question) row.append(el("span", "qtext", r.question));
   // The row carries the recommended answer's opening line: the answer is a
   // paragraph, and the row is a line the human scans for what to decide.
-  if (r.recommended) row.append(el("div", "qrec", "Recommended: " + firstLine(r.recommended)));
+  if (r.recommended) row.append(el("span", "qrec", "Recommended: " + firstLine(r.recommended)));
   const held = [];
   if (r.held_count) held.push("holds " + r.held_count + (r.held_count === 1 ? " bead" : " beads"));
   if ((r.held || []).length) held.push("Held: " + r.held.join(", "));
-  if (held.length) row.append(el("div", "qheld", held.join(" · ")));
-  if (r.malformed) row.append(el("div", "badc", "the bead's description has no question and recommended answer"));
-  if (r.kind === "question" && r.id) row.append(el("div", "qcmd", 'gt answer ' + r.id + ' "<answer>"'));
+  if (held.length) row.append(el("span", "qheld", held.join(" · ")));
+  if (r.malformed) row.append(el("span", "badc", "the bead's description has no question and recommended answer"));
+  if (r.kind === "question" && r.id) row.append(el("span", "qcmd", 'gt answer ' + r.id + ' "<answer>"'));
   return row;
 }
 

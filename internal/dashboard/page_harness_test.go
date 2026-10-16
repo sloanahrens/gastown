@@ -224,11 +224,22 @@ type pageDOM struct {
 	vm *goja.Runtime
 }
 
-// newPageDOM loads index.html's script, failing the test if the page throws.
-// A page that cannot run is a page the harness does not describe, so a stub
-// missing what a new function uses stops the test rather than silently
-// checking less of the page.
+// newPageDOM loads index.html's script over an empty browser: no storage, so
+// the page reads none of the choices a previous load left behind.
 func newPageDOM(t *testing.T) *pageDOM {
+	t.Helper()
+
+	return newPageDOMStoring(t, nil)
+}
+
+// newPageDOMStoring loads index.html's script over a browser that already holds
+// storage — the page loaded a second time, which is the reload a choice kept in
+// localStorage has to survive. Every value is written before the page's script
+// reads it, so what the page gets back is what the browser would hold. A page
+// that cannot run is a page the harness does not describe, so a stub missing
+// what a new function uses stops the test rather than silently checking less of
+// the page.
+func newPageDOMStoring(t *testing.T, stored map[string]string) *pageDOM {
 	t.Helper()
 
 	vm := goja.New()
@@ -238,10 +249,31 @@ func newPageDOM(t *testing.T) *pageDOM {
 	if _, err := vm.RunString(pageStubJS); err != nil {
 		t.Fatalf("the DOM stub did not load: %v", err)
 	}
+	for k, v := range stored {
+		if _, err := vm.RunString("localStorage.setItem(" + strconv.Quote(k) + ", " + strconv.Quote(v) + ")"); err != nil {
+			t.Fatalf("handing the page its %s: %v", k, err)
+		}
+	}
 	if _, err := vm.RunString(pageScript(t)); err != nil {
 		t.Fatalf("index.html's script did not run: %v", err)
 	}
 	return &pageDOM{vm: vm}
+}
+
+// storage is everything the page has written, the way the browser would hand it
+// to the next load.
+func (p *pageDOM) storage(t *testing.T) map[string]string {
+	t.Helper()
+
+	v, err := p.vm.RunString("JSON.stringify(localStorage._v)")
+	if err != nil {
+		t.Fatalf("reading the page's storage: %v", err)
+	}
+	var out map[string]string
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the page's storage: %v", err)
+	}
+	return out
 }
 
 // call runs one of the page's own functions over a single reading, the state
