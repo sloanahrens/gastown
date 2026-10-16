@@ -64,6 +64,14 @@ func TestEvaluateContainerSuiteCommand(t *testing.T) {
 		{"make test with valueless flags", "make -e -w -i test", true},
 		{"make test with bare jobs flag", "make -j test", true},
 		{"make test with spaced jobs value", "make -j 4 test", true},
+		// make runs every goal it is given, so test need not come first
+		// (gt-pm4vn).
+		{"make test after another goal", "make clean test", true},
+		{"make test after the build goal", "make build test", true},
+		{"make test after a variable assignment", "make GOFLAGS=-count=1 test", true},
+		{"make test after a flag and a goal", "make -j4 clean test", true},
+		{"make clean without test", "make clean", false},
+		{"make clean build without test", "make clean build", false},
 
 		// Allowed: wrapped in gt slot run.
 		{"go test wrapped in gt slot run", "gt slot run --role gastown/refinery -- go test ./internal/beads/...", false},
@@ -379,6 +387,9 @@ func TestMakeTestInGoTreeIsRefused(t *testing.T) {
 		{"make test at the module root", goRoot, "make test"},
 		{"make test in a package of the module", filepath.Join(goRoot, "internal", "cmd"), "make test"},
 		{"make test with jobs flag in the module", goRoot, "make -j4 test"},
+		{"make test after another goal in the module", goRoot, "make clean test"},
+		{"make test after the build goal in the module", goRoot, "make build test"},
+		{"make test after a variable assignment in the module", goRoot, "make GOFLAGS=-count=1 test"},
 		{"make test in another Go module", otherModule, "make test"},
 		// A makefile the guard cannot read makes "test" unknown, so even the
 		// tree it runs in says nothing about what the target costs.
@@ -1719,5 +1730,46 @@ func TestRunTapGuardContainerSuite_HeredocBodyIsData(t *testing.T) {
 	buf.Reset()
 	if err := tapGuardContainerSuite(strings.NewReader(input), &buf, proc); err == nil {
 		t.Fatalf("live make test was allowed through the hook: %s", buf.String())
+	}
+}
+
+// TestFindInvocation pins findInvocation at its edges: a tool with nothing after
+// it is not an invocation (and must not index past the slice), the go row stays
+// adjacent-only, and the make row finds the goal anywhere after the program
+// without matching a word that merely contains it (gt-pm4vn).
+func TestFindInvocation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		tokens []string
+		tool   string
+		target string
+		want   int
+	}{
+		{"empty tokens", nil, "make", "test", -1},
+		{"make is the last token", []string{"make"}, "make", "test", -1},
+		{"go is the last token", []string{"go"}, "go", "test", -1},
+		{"which go ends on the tool", []string{"which", "go"}, "go", "test", -1},
+		{"echo make ends on the tool", []string{"echo", "make"}, "make", "test", -1},
+		{"make test", []string{"make", "test"}, "make", "test", 0},
+		{"make test after a goal", []string{"make", "clean", "test"}, "make", "test", 0},
+		{"make test after an assignment", []string{"make", "goflags=-count=1", "test"}, "make", "test", 0},
+		{"make test after a program prefix", []string{"env", "make", "clean", "test"}, "make", "test", 1},
+		{"make goals without the target", []string{"make", "clean", "build"}, "make", "test", -1},
+		{"make target as a substring of a goal", []string{"make", "test-slow"}, "make", "test", -1},
+		{"make target as a variable value", []string{"make", "deploy", "env=test"}, "make", "test", -1},
+		{"make target before the program", []string{"test", "make", "clean"}, "make", "test", -1},
+		{"second make carries the target", []string{"make", "clean", "&&", "make", "test"}, "make", "test", 0},
+		{"go test is adjacent", []string{"go", "test", "./..."}, "go", "test", 0},
+		{"go with a flag between stays unmatched", []string{"go", "-v", "test"}, "go", "test", -1},
+		{"go build is not go test", []string{"go", "build", "./..."}, "go", "test", -1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := findInvocation(tt.tokens, tt.tool, tt.target); got != tt.want {
+				t.Errorf("findInvocation(%q, %q, %q) = %d, want %d", tt.tokens, tt.tool, tt.target, got, tt.want)
+			}
+		})
 	}
 }
