@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -1975,6 +1976,67 @@ func TestContainerSuiteShellCPayloadAndParens(t *testing.T) {
 			reason, matched := evaluateContainerSuiteCommand(fakeGuardProcess(nil, root), tt.command, "")
 			if got := reason != ""; got != tt.blocked {
 				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
+// The nesting cap is a limit on how far the guards read, not a place to run
+// the suite from: a shell still nested past maxTestGuardNestDepth is refused,
+// because the script inside it was never inspected, and a command at the cap
+// with no shell left in it is judged as usual (gt-rws47).
+func TestTestGuardsRefuseShellsNestedPastTheCap(t *testing.T) {
+	t.Parallel()
+	proc := fakeGuardProcess(nil, "")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"heredoc tower one past the cap", "bash <<'L0'\nbash <<'L1'\nbash <<'L2'\nbash <<'L3'\necho hi\nL3\nL2\nL1\nL0\n", true},
+		{"heredoc tower at the cap, nothing inside", "bash <<'L0'\nbash <<'L1'\nbash <<'L2'\necho hi\nL2\nL1\nL0\n", false},
+		{"heredoc tower at the cap, suite inside", "bash <<'L0'\nbash <<'L1'\nbash <<'L2'\nmake test\nL2\nL1\nL0\n", true},
+		{"c payload tower one past the cap", `bash -c "bash -c \"bash -c 'bash -c \\\"echo hi\\\"'\""`, true},
+		{"c payload tower at the cap, nothing inside", `bash -c "bash -c 'bash -c \"echo hi\"'"`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if reason, _ := evaluateContainerSuiteCommand(proc, tt.command, ""); (reason != "") != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) = %q, blocked want %v", tt.command, reason, tt.blocked)
+			}
+			if reason, _ := evaluatePolecatTestScope(proc, tt.command); (reason != "") != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) = %q, blocked want %v", tt.command, reason, tt.blocked)
+			}
+		})
+	}
+}
+
+// commandSegment drops the ")" that closes the subshell a segment sits in and
+// what follows it, and keeps a group the segment opened itself whole, so the
+// words after that group still reach the rule (gt-y1zks, gt-rws47).
+func TestCommandSegment(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"no parens", []string{"go", "test", "./a"}, []string{"go", "test", "./a"}},
+		{"closer of the enclosing group", []string{"go", "test", ")"}, []string{"go", "test"}},
+		{"opener and closer", []string{"(", "go", "test", "./a", ")"}, []string{"(", "go", "test", "./a"}},
+		{"nested openers lead", []string{"(", "(", "go", "test", ")", ")"}, []string{"(", "(", "go", "test"}},
+		{"words after the closer are cut", []string{"go", "test", ")", "2>&1"}, []string{"go", "test"}},
+		{"balanced group inside is kept", []string{"go", "test", "(", "x", ")", "./internal/cmd"}, []string{"go", "test", "(", "x", ")", "./internal/cmd"}},
+		{"balanced group then the closer", []string{"go", "test", "(", "x", ")", "./a", ")"}, []string{"go", "test", "(", "x", ")", "./a"}},
+		{"only a closer", []string{")"}, []string{}},
+		{"empty", nil, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := commandSegment(tt.in); !reflect.DeepEqual(got, tt.want) && (len(got) != 0 || len(tt.want) != 0) {
+				t.Errorf("commandSegment(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
 	}

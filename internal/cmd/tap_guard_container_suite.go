@@ -186,6 +186,17 @@ var containerSuiteSlotRunTokens = []string{"gt", "slot", "run"}
 // recursion in matchesPRWorkflowCommand.
 const maxTestGuardNestDepth = 3
 
+// nestedTooDeepRefusal is the verdict at maxTestGuardNestDepth for a command
+// that still holds a shell it would have to read: a script the guard cannot
+// reach is refused, not read as one that runs nothing. A level with no nested
+// shell has nothing left to inspect and is allowed (gt-rws47).
+func nestedTooDeepRefusal(holdsNestedShell bool) (string, []string) {
+	if !holdsNestedShell {
+		return "", nil
+	}
+	return fmt.Sprintf("shells nested more than %d deep cannot be inspected for a test run", maxTestGuardNestDepth), nil
+}
+
 // shellCPayloads returns the command strings the shell invokers in segment run
 // with -c. A segment judge reads a quoted payload as one opaque word, so
 // "bash -c 'make gate'" showed it a bash call and nothing else; the callers
@@ -216,10 +227,24 @@ func toLowerTokens(tokens []string) []string {
 // commandSegment cuts a segment at the ")" that closes the subshell it sits
 // in. A ")" left in the argument list reads as a package argument, which hid
 // "(cd internal/cmd && go test)" from the rule for a bare go test (gt-y1zks).
+// The "(" tokens that open that subshell lead the segment and are kept; a
+// group opened after the command word has its own ")", which is not the cut,
+// so the words after it stay in the segment (gt-rws47).
 func commandSegment(segment []string) []string {
-	for i, tok := range segment {
-		if tok == ")" {
-			return segment[:i]
+	lead := 0
+	for lead < len(segment) && segment[lead] == "(" {
+		lead++
+	}
+	open := 0
+	for i := lead; i < len(segment); i++ {
+		switch segment[i] {
+		case "(":
+			open++
+		case ")":
+			if open == 0 {
+				return segment[:i]
+			}
+			open--
 		}
 	}
 	return segment
@@ -278,8 +303,12 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 		if r, m := evaluateContainerSuiteSegment(segment, dockerOn, dir, known); r != "" {
 			return r, m
 		}
-		if depth >= maxTestGuardNestDepth || containsSubsequence(toLowerTokens(segment), containerSuiteSlotRunTokens) {
+		if containsSubsequence(toLowerTokens(segment), containerSuiteSlotRunTokens) {
 			return "", nil
+		}
+		payloads := shellCPayloads(segment)
+		if depth >= maxTestGuardNestDepth {
+			return nestedTooDeepRefusal(len(payloads) > 0)
 		}
 		if !known {
 			dir = cwd
@@ -288,7 +317,7 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 		if dockerOn {
 			payloadOptIn = "1"
 		}
-		for _, payload := range shellCPayloads(segment) {
+		for _, payload := range payloads {
 			if r, m := evaluateContainerSuiteCommandDepth(proc, payload, dir, payloadOptIn, depth+1); r != "" {
 				return r, m
 			}
@@ -313,14 +342,15 @@ func evaluateContainerSuiteCommandDepth(proc guardProcess, command, cwd, envOptI
 		return r, m
 	}
 
+	spans := shellFedHeredocSpans(command)
 	if depth >= maxTestGuardNestDepth {
-		return "", nil
+		return nestedTooDeepRefusal(len(spans) > 0)
 	}
 	// The bodies come off the untouched command: stripHeredocBodies removed
 	// them from the text above, so they are judged here once, as code, in the
 	// directory the shell had reached by the time it read them
 	// (heredocBodyDir, gt-1cvqj, gt-v02wh).
-	for _, span := range shellFedHeredocSpans(command) {
+	for _, span := range spans {
 		bodyCwd := heredocBodyDir(proc, command, span, cwd)
 		if r, m := evaluateContainerSuiteCommandDepth(proc, span.body, bodyCwd, envOptIn, depth+1); r != "" {
 			return r, m
