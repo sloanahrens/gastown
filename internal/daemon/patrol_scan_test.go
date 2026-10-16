@@ -843,11 +843,17 @@ func TestPatrolScanDoneCloseGraceMatchesCrashDetector(t *testing.T) {
 	}
 	h := &patrolScanHost{d: &Daemon{config: &Config{TownRoot: townRoot}, logger: discardLogger}}
 
-	age, ok := h.doneAge("myr", "mycat", "gt-xyz", testEpoch)
-	if !ok || age != time.Minute {
-		t.Fatalf("doneAge = %s, %v; want 1m0s, true", age, ok)
+	// The options the tick runs with, not the host method alone: a tick built
+	// without DoneAge would never wait out a done.
+	opts := h.d.patrolScanRunOptions(h)
+	if opts.DoneAge == nil {
+		t.Fatal("the tick's options leave DoneAge unset")
 	}
-	if _, ok := h.doneAge("myr", "mycat", "gt-other", testEpoch); ok {
-		t.Fatal("doneAge dated a done for a bead the seat did not finish")
+	age, ok := opts.DoneAge("myr", "mycat", "gt-xyz", testEpoch)
+	if !ok || age != time.Minute {
+		t.Fatalf("DoneAge = %s, %v; want 1m0s, true", age, ok)
+	}
+	if _, ok := opts.DoneAge("myr", "mycat", "gt-other", testEpoch); ok {
+		t.Fatal("DoneAge dated a done for a bead the seat did not finish")
 	}
 }
