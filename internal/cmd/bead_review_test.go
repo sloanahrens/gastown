@@ -320,7 +320,6 @@ func TestBeadReviewRefusesADifferentVerdictForAReviewedHead(t *testing.T) {
 		name, first, reason, second, secondReason string
 	}{
 		{"FAIL after PASS", "PASS", "", "FAIL", ""},
-		{"PASS after FAIL", "FAIL", "", "PASS", ""},
 		{"AUDITED after WAIVED", "WAIVED", "docs only", "AUDITED", "audited later"},
 		{"FAIL after WAIVED", "WAIVED", "docs only", "FAIL", ""},
 	} {
@@ -350,6 +349,44 @@ func TestBeadReviewRefusesADifferentVerdictForAReviewedHead(t *testing.T) {
 		}
 		if notes := mustShowBead(t, v.client, is.ID).Notes; notes != before {
 			t.Errorf("%s: notes = %q, want unchanged %q", tc.name, notes, before)
+		}
+	}
+}
+
+// A FAIL keeps the risk-path item open, so a later PASS, WAIVED or AUDITED is
+// written after it and the latest line stands; repeating that verdict is a
+// no-op, and the FAIL cannot be re-recorded over the PASS.
+func TestBeadReviewSupersedesAFail(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ verdict, reason, line string }{
+		{"PASS", "", "PASS"},
+		{"WAIVED", "docs only", "WAIVED: docs only"},
+		{"AUDITED", "file-level audit", "AUDITED: file-level audit"},
+	} {
+		town := reviewTestTown(t)
+		v, is := testReviewVerbs(t, town, "gt-pe01w")
+		landBead(t, town, is.ID, secondHead, time.Now())
+		fail := land.OverseerReviewMarker + " " + secondHead + " FAIL"
+		if err := v.review(is.ID, "FAIL", "", ""); err != nil {
+			t.Fatal(err)
+		}
+		if land.HasOverseerReviewNote(mustShowBead(t, v.client, is.ID).Notes, secondHead) {
+			t.Fatalf("%s: a FAIL answers the head", tc.verdict)
+		}
+		for i := 0; i < 2; i++ {
+			if err := v.review(is.ID, tc.verdict, "", tc.reason); err != nil {
+				t.Fatalf("%s after FAIL: %v", tc.verdict, err)
+			}
+		}
+		notes := mustShowBead(t, v.client, is.ID).Notes
+		if want := fail + "\n" + land.OverseerReviewMarker + " " + secondHead + " " + tc.line; notes != want {
+			t.Errorf("%s: notes = %q, want %q", tc.verdict, notes, want)
+		}
+		if !land.HasOverseerReviewNote(notes, secondHead) {
+			t.Errorf("%s: the head is still unanswered after %q", tc.verdict, notes)
+		}
+		if err := v.review(is.ID, "FAIL", "", ""); err == nil {
+			t.Errorf("%s: a FAIL was recorded over the closing verdict", tc.verdict)
 		}
 	}
 }

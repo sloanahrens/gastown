@@ -37,8 +37,9 @@ const (
 	LabelOverseerReviewWanted = "gt:overseer-review-wanted"
 
 	// OverseerReviewMarker opens the note line "OVERSEER REVIEW <full head
-	// sha> PASS|FAIL" that answers a risk-path item: it names the head a
-	// human looked at, and PASS or FAIL says what they found. The line
+	// sha> PASS|FAIL" that records a review of a risk-path item's head: it
+	// names the head a human looked at. A PASS answers the item; a FAIL keeps
+	// it open until a later PASS for the head. The line
 	// "OVERSEER REVIEW <head> WAIVED: <reason>" or "... AUDITED: <reason>"
 	// answers it too, for a head reviewed another way or consciously not
 	// reviewed; the reason is required. It is not
@@ -216,7 +217,7 @@ func OverseerReviewed(issue *beads.Issue, head string) bool {
 
 // overseerReviewLine matches "OVERSEER REVIEW <sha> PASS|FAIL" or
 // "OVERSEER REVIEW <sha> WAIVED|AUDITED: <reason>", the note that answers a
-// risk-path item. The trailing \b keeps a word from extending a verdict
+// risk-path item, a FAIL excepted: it keeps the item open. The trailing \b keeps a word from extending a verdict
 // ("PASSED" is not PASS), WAIVED and AUDITED answer only with a reason after
 // the colon, and the sha is compared whole, so a review of another head does
 // not answer. It deliberately does not match
@@ -224,28 +225,32 @@ func OverseerReviewed(issue *beads.Issue, head string) bool {
 // reviewed this head (gt-vsct7.4).
 var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (?:(PASS|FAIL)\b|(WAIVED|AUDITED): +\S)`)
 
-// HasOverseerReviewNote reports whether notes carry an "OVERSEER REVIEW <head>
-// PASS|FAIL" line naming exactly head, or a WAIVED or AUDITED line with its
-// reason. Every verdict answers a risk-path item: a FAIL says the head was
-// reviewed and the overseer files the follow-up, which is not the queue's to
-// hold (gt-vsct7.4); WAIVED and AUDITED say the head was consciously left
-// unreviewed or reviewed another way, and the reason is the record (gt-r5ne9).
+// OverseerReviewFail is the verdict of a review that found a defect.
+const OverseerReviewFail = "FAIL"
+
+// HasOverseerReviewNote reports whether notes answer a risk-path item for
+// head: the latest review line naming exactly head is a PASS, or a WAIVED or
+// AUDITED with its reason. A FAIL does not answer: the review found a defect,
+// so the item stays until a later PASS (or WAIVED or AUDITED) for that head.
+// WAIVED and AUDITED say the head was consciously left unreviewed or reviewed
+// another way, and the reason is the record (gt-r5ne9).
 func HasOverseerReviewNote(notes, head string) bool {
-	_, ok := OverseerReviewVerdict(notes, head)
-	return ok
+	verdict, ok := OverseerReviewVerdict(notes, head)
+	return ok && verdict != OverseerReviewFail
 }
 
 // OverseerReviewVerdict returns the verdict (PASS, FAIL, WAIVED or AUDITED)
-// of the first review line in notes that names exactly head, and whether there
-// is one. It reads the lines HasOverseerReviewNote answers to.
+// of the latest review line in notes that names exactly head, and whether there
+// is one. The latest line stands, so a PASS written after a FAIL supersedes it.
 func OverseerReviewVerdict(notes, head string) (string, bool) {
 	if head == "" {
 		return "", false
 	}
+	verdict, found := "", false
 	for _, line := range strings.Split(notes, "\n") {
 		if m := overseerReviewLine.FindStringSubmatch(strings.TrimSpace(line)); m != nil && m[1] == head {
-			return m[2] + m[3], true
+			verdict, found = m[2]+m[3], true
 		}
 	}
-	return "", false
+	return verdict, found
 }

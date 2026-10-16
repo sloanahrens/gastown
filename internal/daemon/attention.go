@@ -1220,14 +1220,14 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 
 // collectRiskPaths raises risk:<bead>:<head12> for each landing in the last
 // attentionRiskPathWindow whose record names a risk path, unless the work
-// bead's notes carry an "OVERSEER REVIEW <that head> PASS|FAIL" line, or a
+// bead's notes carry an "OVERSEER REVIEW <that head> PASS" line, or a
 // WAIVED or AUDITED line with its reason (land.HasOverseerReviewNote). It is the label land.Land writes as
 // gt:overseer-review-wanted made visible as something to do: a landed bead is
 // closed, and the review it asks for comes after, so this item outlives the
 // close.
 //
-// Every verdict clears the item: a FAIL says a human looked and is filing the
-// follow-up, which is not the queue's to hold (gt-vsct7.4).
+// A FAIL does not clear the item: the review found a defect, so the item
+// stays, with a summary that says so, until a later PASS for the same head.
 //
 // The notes read is cached per rig and bead for the tick, so a bead landed
 // twice in the window costs one bd show. The cache lives for the one collector
@@ -1265,6 +1265,10 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 			if land.HasOverseerReviewNote(notes, rec.Head) {
 				continue
 			}
+			wanted := "overseer review wanted"
+			if verdict, _ := land.OverseerReviewVerdict(notes, rec.Head); verdict == land.OverseerReviewFail {
+				wanted = "overseer review FAILED; rework needed, then a PASS"
+			}
 			out = append(out, attention.Item{
 				Key:      "risk:" + rec.BeadID + ":" + sha12(rec.Head),
 				Kind:     attention.KindRiskPath,
@@ -1273,7 +1277,7 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 				Bead:     rec.BeadID,
 				SHA:      rec.Head,
 				LandedAt: rec.LandedAt,
-				Summary:  fmt.Sprintf("%s landed %s touching %s; overseer review wanted", rec.BeadID, sha12(rec.Head), riskPathList(rec.RiskPaths)),
+				Summary:  fmt.Sprintf("%s landed %s touching %s; %s", rec.BeadID, sha12(rec.Head), riskPathList(rec.RiskPaths), wanted),
 			})
 		}
 	}

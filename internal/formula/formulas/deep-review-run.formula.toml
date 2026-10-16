@@ -155,9 +155,10 @@ read, reviewers and verifiers used, then numbered `filed`, `would file` and
 capacity, 0 when none). When total >= 5 and refuted = 0,
 add the line `UNCHALLENGED: no finding was refuted`.
 
-**8. Clear the risk-path items you covered** (live runs only; skip when
+**8. Record the reviews of the risk-path items you covered** (live runs only; skip when
 `{{dry_run}}` is `true` or the mode is `slice`). For each reviewed landing run
 `gt bead review <bead> PASS`, or `FAIL` when a CONFIRMED finding cites its paths.
+A PASS clears the item; a FAIL keeps it open, marked failed, until a later PASS.
 
 **9. Commit the cursor, last** (not in mode `slice`). It tells the next run those
 landings are covered, so it comes last:
