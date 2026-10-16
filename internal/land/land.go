@@ -1068,6 +1068,17 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		} else if cerr != nil {
 			l.logf("%s: reading the target for an unrecorded landing of %s: %v", w.BeadID, shortSHA(w.Head), cerr)
 		}
+		// No land merge accounts for the head's content on the target, and
+		// merging it changes nothing: the work is already there by a route
+		// that left no record, so there is nothing for the author to land
+		// and nothing for an operator to repair (gt-sq2oe).
+		var empty *emptySquashError
+		if errors.As(err, &empty) {
+			return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(wt, EmptyMerge{
+				Target: w.Target, Base: base, Head: w.Head, Stage: "after merge",
+				Comparison: fmt.Sprintf("merging %s changes nothing on %s/%s (its changes are already there, and no land merge of this lander's accounts for them)", shortSHA(w.Head), remote, w.Target),
+			})}, nil)
+		}
 		return Result{}, err
 	}
 	if rej != nil {
@@ -1546,6 +1557,9 @@ func mergeWork(wt Repo, w Work, base string) (string, *Rejection, error) {
 			return "", &Rejection{Kind: RejectConflict, Rework: true, Conflicting: files,
 				Reason: fmt.Sprintf("merging %s into %s conflicts in %d file(s); rebase onto %s and resolve", shortSHA(w.Head), w.Target, len(files), w.Target)}, nil
 		}
+		if hasAutoSave && filesErr == nil && mergeChangesNothing(wt, w, base, msg) {
+			err = &emptySquashError{Err: err}
+		}
 		return "", nil, &InfraError{Stage: "merge", Err: err}
 	}
 	merged, err := wt.Rev("HEAD")
@@ -1553,6 +1567,32 @@ func mergeWork(wt Repo, w Work, base string) (string, *Rejection, error) {
 		return "", nil, &InfraError{Stage: "merge", Err: err}
 	}
 	return merged, nil, nil
+}
+
+// emptySquashError marks a squash that failed because it staged nothing: the
+// head's changes are already on the base. mergeWork keeps it inside the
+// merge's InfraError so the lost-record recovery sees the error it always did,
+// and Land turns it into a RejectEmpty when that recovery finds no landing.
+type emptySquashError struct{ Err error }
+
+func (e *emptySquashError) Error() string { return e.Err.Error() }
+func (e *emptySquashError) Unwrap() error { return e.Err }
+
+// mergeChangesNothing answers whether merging the head onto base would change
+// the target, after a squash of it failed without a conflict. The question is
+// put to git by merging the head without squashing: a conflict-free merge
+// whose tree is the base's is the head's work already there, the same
+// comparison the "after merge" check makes. Any other outcome — a merge that
+// fails too, or one that writes something — leaves the squash's own failure
+// to stand. The worktree is the landing's throwaway one, so the probe's commit
+// is never kept.
+func mergeChangesNothing(wt Repo, w Work, base, msg string) bool {
+	if wt.MergeNoFF(w.Head, msg) != nil {
+		_ = wt.AbortMerge()
+		return false
+	}
+	same, err := wt.TreesIdentical(base, "HEAD")
+	return err == nil && same
 }
 
 // hasAutoSaveCommits reports whether base..head, the commits the landing

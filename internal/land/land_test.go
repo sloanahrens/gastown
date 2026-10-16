@@ -1264,6 +1264,35 @@ func TestLandRecoversUnrecordedSquashLandingForkedBeforeItsBase(t *testing.T) {
 	}
 }
 
+// TestLandRefusesAHeadWhoseContentIsOnAMovedTarget: the head's changes reached
+// the target by commits of someone else's, no land merge names the head, and
+// the target has moved on since, so the two trees differ and the head is not
+// an ancestor. Nothing before the merge sees the head as empty; the squash
+// stages nothing and its commit fails. That is the head's work already being
+// there, a RejectEmpty, and not an InfraError at the merge stage that the
+// worker would retry and escalate as a commit problem (gt-sq2oe).
+func TestLandRefusesAHeadWhoseContentIsOnAMovedTarget(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.squashRange(t)
+	f.pushMain("b.txt", "work\n")
+	f.pushMain("c.txt", "wip\n")
+	f.base = f.pushMain("d.txt", "someone else landed\n")
+	if same, _ := f.git.Open(f.origin).TreesIdentical(f.base, f.work.Head); same {
+		t.Fatal("the target's tree is the head's; the identical-trees check would reject, so the test proves nothing")
+	}
+
+	_, err := f.lander().Land(context.Background(), f.work)
+	var infra *InfraError
+	if errors.As(err, &infra) {
+		t.Fatalf("Land ended as an InfraError at the %s stage: %v", infra.Stage, err)
+	}
+	rej := f.assertRejected(t, err, RejectEmpty, LabelRework)
+	if !strings.Contains(rej.Reason, "empty merge") || !strings.Contains(rej.Reason, "already there") {
+		t.Errorf("reason = %q, want it to name that the head's changes are already on the target", rej.Reason)
+	}
+}
+
 // TestLandDoesNotFinishALandingWhosePatchIsNotTheHeads: the target carries a
 // commit whose subject begins with the land merge's marker for this branch,
 // head and target, but which did not merge this head. The marker alone is not
@@ -1295,9 +1324,12 @@ func TestLandDoesNotFinishALandingWhosePatchIsNotTheHeads(t *testing.T) {
 	}
 
 	_, err := f.lander().Land(context.Background(), f.work)
-	var infra *InfraError
-	if !errors.As(err, &infra) || infra.Stage != "merge" {
-		t.Fatalf("the second pass = %v, want the merge's own InfraError: the marker's commit is not this head's landing", err)
+	// The squash of the head stages nothing — the target carries its work —
+	// and the marker's commit is not its landing, so the pass ends as an
+	// empty merge, never as a record of the planted commit (gt-sq2oe).
+	var rej *Rejection
+	if !errors.As(err, &rej) || rej.Kind != RejectEmpty {
+		t.Fatalf("the second pass = %v, want a RejectEmpty: the marker's commit is not this head's landing", err)
 	}
 	if b := f.bead(); b.Status == "closed" || strings.Contains(b.Notes, planted) {
 		t.Errorf("the pass recorded the planted commit %s as the landing: status=%s notes=%q", shortSHA(planted), b.Status, b.Notes)
