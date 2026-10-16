@@ -684,21 +684,43 @@ func TestASecondTabDoesNotUndoTheFirstTabsFold(t *testing.T) {
 	}
 }
 
-// A list that came back empty is not a list an item left, so the folds are kept
-// for the read that has not landed yet (gt-1kaed).
-func TestAnEmptyListKeepsTheFoldsItCannotAccountFor(t *testing.T) {
+// A list that came back empty, or short by a read that failed or has not
+// reported, is not a list an item left, so the folds are kept for the read that
+// has not landed yet (gt-1kaed).
+func TestAShortOrEmptyListKeepsTheFoldsItCannotAccountFor(t *testing.T) {
 	t.Parallel()
 
-	dom := newPageDOM(t)
-	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": attentionFoldRows()}))
-	clickRow(t, dom, 0)
-
-	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{}}))
-	if !foldOfItem(t, dom, "question:gt-q1") {
-		t.Error("the page dropped the fold beside an empty list, want it kept for the read that has not landed")
+	rows := attentionFoldRows()
+	cases := []struct {
+		name string
+		at   map[string]any
+	}{
+		{"a list that came back empty", map[string]any{"rows": []any{}}},
+		{"a list short by a read that failed", map[string]any{"rows": []any{rows[1], rows[2]}, "failed": []any{"questions"}}},
+		{"a list short by a read that has not reported", map[string]any{"rows": []any{rows[1], rows[2]}, "pending": []any{"questions"}}},
 	}
 
-	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": attentionFoldRows()}))
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dom := newPageDOM(t)
+			dom.call(t, "renderAttention", attentionState(map[string]any{"rows": rows}))
+			clickRow(t, dom, 0)
+
+			dom.call(t, "renderAttention", attentionState(tc.at))
+			if !foldOfItem(t, dom, "question:gt-q1") {
+				t.Error("the page dropped the fold beside a list it could not account for")
+			}
+		})
+	}
+
+	// The question comes back on the next publish with the reader's fold on it.
+	dom := newPageDOM(t)
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": rows}))
+	clickRow(t, dom, 0)
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": []any{}}))
+	dom.call(t, "renderAttention", attentionState(map[string]any{"rows": rows}))
 	if r := readRow(t, dom, 0); r.Expanded != "false" {
 		t.Errorf("the row reads %+v when the list came back, want the fold the reader set", r)
 	}

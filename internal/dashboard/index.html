@@ -2405,11 +2405,9 @@ const QUESTION_OLDEST_SEC = 4 * 3600;
 const OWNERS = ["sloan", "overseer"];
 const PANEL_OPENS_ON = "sloan";
 
-// A row of the panel folds on its own: its header line is the button that folds
-// it, and the words under that line come back on a click, so one long question
-// stops taking the pane everything waiting shares (gt-1kaed). The choice is the
-// reader's and survives a reload in gt-attn-collapsed, a map of fold key to
-// true, read at load like the panes' folds in gt-collapsed.
+// A row of the panel folds on its own, so one long question stops taking the
+// pane everything waiting shares (gt-1kaed). The choice is the reader's and
+// survives a reload in gt-attn-collapsed, a map of fold key to true.
 const ATTN_FOLD_KEY = "gt-attn-collapsed";
 function readAttnFolds() {
   try { return JSON.parse(localStorage.getItem(ATTN_FOLD_KEY) || "{}") || {}; } catch (e) { return {}; }
@@ -2425,9 +2423,11 @@ let attnWritten = Object.assign({}, attnFolds);
 // queue rule's own item key.
 function attnItemKey(r) { return r.kind + ":" + (r.id || ""); }
 
-// attnStamp hashes what a row says, so a new question answer, a new severity or
-// a renamed item lands under a key no fold was set against and comes back open
-// rather than hidden behind one. The age stays out: it moves with every publish.
+// attnStamp hashes what a row says, its header line as well as the words a fold
+// hides, so a new answer, a new severity or a renamed item comes back open
+// rather than hidden behind a fold set against the reading it replaced. The age
+// stays out: it moves with every publish, and a row that only aged is the row
+// the reader folded.
 function attnStamp(r) {
   const said = [r.owner, r.severity, r.level, r.rule, r.priority, r.effort, r.state, r.title,
     r.question, r.recommended, r.held_count, (r.held || []).join(","), r.malformed, r.escalated_by].join("\u0000");
@@ -2571,11 +2571,10 @@ function renderOwnerChips(rows) {
 // it, the words attentionBody holds.
 //
 // The header is the fold's button, and only where there is something to fold: a
-// caret on a row that hides nothing promises a fold that never comes, and a
-// screen reader announces one. The button brings the keyboard with it, and the
-// words stay outside it so the reader can drag the answer line and copy it
-// whole (gt-1kaed). Every cell goes through el(), which writes textContent, so
-// another agent's words show as text and never as markup (gt-bi6w0).
+// caret on a row that hides nothing promises a fold that never comes. The words
+// sit outside the button so the answer line can be dragged and copied whole,
+// and every cell goes through el(), which writes textContent and never markup
+// (gt-1kaed, gt-bi6w0).
 function attentionRow(r) {
   const words = attentionBody(r);
   const foldable = words.length > 0;
@@ -2623,11 +2622,10 @@ function attentionRow(r) {
   return row;
 }
 
-// attentionBody is the words a row says under its header line. It is one
-// function because the row and the fold both draw from it: a folded row cannot
-// open onto cells a redraw would not have drawn (gt-1kaed). The recommended
-// answer is a paragraph and the row is a line the human scans, so a row carries
-// its opening line.
+// attentionBody is the words a row says under its header line, drawn by the row
+// and by the fold from the one function: a folded row cannot open onto cells a
+// redraw would not have drawn (gt-1kaed). The recommended answer is a paragraph
+// and the row is a line the human scans, so a row carries its opening line.
 function attentionBody(r) {
   const body = [];
   if (r.question) body.push(el("span", "qtext", r.question));
