@@ -1,5 +1,4 @@
-# Paths whose landings get gt:overseer-review-wanted (label only; never holds;
-# a landing of a review-deep or om-followup bead records none of these, gt-g349w).
+# Paths whose landings get gt:overseer-review-wanted (label only; never holds).
 # Read from the target's base commit. One glob per line; dir/** = subtree.
 internal/daemon/**
 internal/land/**

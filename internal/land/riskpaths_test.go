@@ -264,7 +264,7 @@ func TestReviewGeneratedLandingSkipsRiskPathReview(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Land: %v", err)
 			}
-			assertRiskPathReviewSkipped(t, f, res)
+			assertRiskPathReviewSkipped(t, f, res, label)
 		})
 	}
 }
@@ -294,7 +294,7 @@ func TestReviewGeneratedUnrecordedLandingSkipsRiskPathReview(t *testing.T) {
 	if res.LandedCommit != merged || res.Verdict.Verdict != VerdictUnrecorded {
 		t.Fatalf("Result = %s, verdict %q; want the recovery of merge %s", res.LandedCommit, res.Verdict.Verdict, merged)
 	}
-	assertRiskPathReviewSkipped(t, f, res)
+	assertRiskPathReviewSkipped(t, f, res, reviewDeepLabel)
 }
 
 // reviewGeneratedRiskPathFixture is a fixture whose work touches a risk path
@@ -320,18 +320,20 @@ func reviewGeneratedRiskPathFixture(t *testing.T, label string) *landFixture {
 
 // assertRiskPathReviewSkipped checks a landing of a review-generated risk-path
 // bead: no risk path in the result or the landings file, no
-// gt:overseer-review-wanted, and the skip named in the note.
-func assertRiskPathReviewSkipped(t *testing.T, f *landFixture, res Result) {
+// gt:overseer-review-wanted, and the skip and the label behind it named in the
+// result, the note and the landings file.
+func assertRiskPathReviewSkipped(t *testing.T, f *landFixture, res Result, label string) {
 	t.Helper()
-	if len(res.RiskPaths) != 0 || !res.RiskPathReviewSkipped {
-		t.Errorf("Result = %q, skipped %v; want no risk path and the skip named", res.RiskPaths, res.RiskPathReviewSkipped)
+	if len(res.RiskPaths) != 0 || res.RiskPathReviewSkippedBy != label {
+		t.Errorf("Result = %q, skipped by %q; want no risk path, skipped by %q", res.RiskPaths, res.RiskPathReviewSkippedBy, label)
 	}
 	bead := f.bead()
 	if beads.HasLabel(bead, LabelOverseerReviewWanted) {
 		t.Errorf("labels = %v, want no %s", bead.Labels, LabelOverseerReviewWanted)
 	}
-	if !strings.Contains(bead.Notes, RiskPathReviewSkippedLine) {
-		t.Errorf("notes lack %q:\n%s", RiskPathReviewSkippedLine, bead.Notes)
+	wantLine := RiskPathReviewSkippedLine + " (label " + label + ")"
+	if !strings.Contains(bead.Notes, wantLine) {
+		t.Errorf("notes lack %q:\n%s", wantLine, bead.Notes)
 	}
 	lines := f.landingLines()
 	if len(lines) != 1 {
@@ -341,8 +343,8 @@ func assertRiskPathReviewSkipped(t *testing.T, f *landFixture, res Result) {
 	if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
 		t.Fatal(err)
 	}
-	if len(rec.RiskPaths) != 0 || !rec.RiskPathReviewSkipped {
-		t.Errorf("record = %q, skipped %v; want no risk path and the skip named", rec.RiskPaths, rec.RiskPathReviewSkipped)
+	if len(rec.RiskPaths) != 0 || rec.RiskPathReviewSkippedBy != label {
+		t.Errorf("record = %q, skipped by %q; want no risk path, skipped by %q", rec.RiskPaths, rec.RiskPathReviewSkippedBy, label)
 	}
 }
 

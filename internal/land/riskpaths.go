@@ -52,7 +52,8 @@ func reviewGenerated(issue *beads.Issue) (string, bool) {
 // The labels are the whole signal: whoever can label a bead can turn the
 // overseer's look off for its landing, as they can already strip
 // gt:overseer-review-wanted from one. That is the trade for stopping review
-// output from feeding itself; om's gate and the periodic slice reviews stay.
+// output from feeding itself; om's gate and the periodic slice reviews stay,
+// and the landing note and landings file name the label that did it.
 func RiskPathsRecorded(issue *beads.Issue, paths []string) (recorded []string, skippedBy string) {
 	if len(paths) == 0 {
 		return paths, ""

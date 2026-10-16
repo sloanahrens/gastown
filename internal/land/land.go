@@ -210,8 +210,8 @@ type Result struct {
 	// RiskPathsFile at Base. They label the work bead and are written to the
 	// landing record; they never reject or delay the landing (gt-vsct7.4).
 	RiskPaths []string
-	// RiskPathReviewSkipped says RiskPaths is empty by RiskPathsRecorded's rule.
-	RiskPathReviewSkipped bool
+	// RiskPathReviewSkippedBy is the label that left RiskPaths empty (RiskPathsRecorded).
+	RiskPathReviewSkippedBy string
 }
 
 // RejectionKind says what about the work stopped it from landing.
@@ -1148,7 +1148,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, gateErr
 	}
 	res := Result{LandedCommit: merged, PatchID: patchID, Base: base, Gate: gateRes,
-		RiskPaths: riskPaths, RiskPathReviewSkipped: skippedBy != ""}
+		RiskPaths: riskPaths, RiskPathReviewSkippedBy: skippedBy}
 	if gateRes.Err != nil {
 		return Result{}, &InfraError{Stage: "gate", Err: gateRes.Err}
 	}
@@ -1452,8 +1452,8 @@ func (l *Lander) completeUnrecordedLanding(g Repo, issue *beads.Issue, w Work) (
 	}
 	res := &Result{LandedCommit: merged, PatchID: patchID, Base: base,
 		Verdict: Verdict{Verdict: VerdictUnrecorded}, RiskPaths: riskPaths,
-		RiskPathReviewSkipped: skippedBy != "",
-		GateNote:              "not recorded: this landing merged on the target before its pass could record the gate result (gt-mdet3)"}
+		RiskPathReviewSkippedBy: skippedBy,
+		GateNote:                "not recorded: this landing merged on the target before its pass could record the gate result (gt-mdet3)"}
 	l.logf("%s: %s merged %s on %s/%s but its record was never written; finishing the landing", w.BeadID, remote, shortSHA(merged), remote, w.Target)
 	if err := l.record(w, *res); err != nil {
 		return res, &RecordError{Result: *res, Err: err}
@@ -1983,7 +1983,7 @@ func (l *Lander) record(w Work, res Result) error {
 		LandedCommit: res.LandedCommit, PatchID: res.PatchID,
 		GateResult: gateRecord(res), OMVerdict: res.Verdict.Verdict, OMScore: res.Verdict.Score,
 		Route: route, LandedAt: l.now().UTC(), RiskPaths: res.RiskPaths,
-		RiskPathReviewSkipped: res.RiskPathReviewSkipped,
+		RiskPathReviewSkippedBy: res.RiskPathReviewSkippedBy,
 	}
 	if err := l.Landings.Append(rec); err != nil {
 		return fmt.Errorf("landings file: %w", err)
