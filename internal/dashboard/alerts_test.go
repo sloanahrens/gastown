@@ -340,9 +340,10 @@ func TestHubCapsRecentAlerts(t *testing.T) {
 	}
 }
 
-// The page carries the alert controls the operator uses, and reads State.Alerts
-// defensively: a town that has raised nothing sends no "alerts" key, and that
-// must not throw. There is no JS harness, so this is a presence check.
+// The page carries the alert controls the operator uses. The alerts are the
+// page's toasts and browser notifications, not a panel: what is waiting rather
+// than merely noticed is the Attention panel's (gt-bi6w0). There is no JS
+// harness, so this is a presence check.
 func TestPageCarriesTheAlertControls(t *testing.T) {
 	t.Parallel()
 	rec := httptest.NewRecorder()
@@ -351,11 +352,11 @@ func TestPageCarriesTheAlertControls(t *testing.T) {
 	NewHub(Config{}).Handler().ServeHTTP(rec, req)
 	page := rec.Body.String()
 	for _, want := range []string{
-		`id="alertsctl"`, `id="toasts"`, `id="alerts"`,
+		`id="alertsctl"`, `id="toasts"`, `id="attention"`,
 		`localStorage.getItem("gt-alerts")`,          // persisted, default off
 		`"(!) " + BASE_TITLE`,                        // the title marker
 		`es.addEventListener("alert"`,                // the server's alert event
-		`((s && s.alerts) || [])`,                    // absent alerts are fine
+		`renderAttention(state)`,                     // the one panel that lists what waits
 		`Notification.permission !== "granted"`,      // degrades without the API
 		`localStorage.setItem("gt-alerts", alertsOn`, // the toggle writes it back
 	} {

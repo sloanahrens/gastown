@@ -112,11 +112,12 @@ interventions by kind and the open question count. A file it cannot read makes
 the panel say so instead of reading as a silent overseer. The panel writes
 nothing; gt overseer beat and gt overseer log do.
 
-The Questions panel reads the town's open overseer-question beads with bd —
-each one's question, the answer the overseer recommends, the work it holds up,
-how long it has waited and whether Sloan has answered it — so he can see what is
-waiting on him and answer it with gt answer, which comments on the bead. The page draws it and
-never writes: there is no form, and a question is closed from a terminal.
+The Needs you panel's question rows are read from the town's open
+overseer-question beads with bd — each one's question, the answer the overseer
+recommends, the work it holds up, how long it has waited and whether Sloan has
+answered it — so he can see what is waiting on him and answer it with gt answer,
+which comments on the bead. The page draws it and never writes: there is no
+form, and a question is closed from a terminal.
 
 The Deep review panel reads the gastown rig's scheduled:deep-review,
 scheduled:deep-review-slice and scheduled:deep-review-risk beads with bd — when

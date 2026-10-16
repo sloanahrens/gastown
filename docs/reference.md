@@ -893,11 +893,12 @@ gt attention ack <key>       # hide an item until its condition clears
 the `events.jsonl` line, and `--since DURATION` replays that window first. One
 `--follow --wake-only` monitor replaces a monitor per condition.
 
-The dashboard's Alerts panel shows the same wake events: a `wake=true` raised
-line is an alert keyed by its `key` and titled with its rule id until a cleared
-line or an ack removes it. Where the dashboard's own alert covers the same
-condition (red main, an open escalation, a polecat stall, a stuck queue), only
-the attention alert shows.
+The dashboard's Needs you panel lists the wake events that stand: a `wake=true`
+raised line is a row keyed by its `key` and tagged with its rule id until a
+cleared line or an ack takes it off. Each new one is also announced as an alert,
+which is a toast and a browser notification while the operator has alerts on.
+Where the dashboard's own alert covers the same condition (red main, an open
+escalation, a polecat stall, a stuck queue), only the attention alert fires.
 
 The queue is three files under `<town>/.runtime/attention/`. The daemon keeps a
 fourth there, `tips.json`: the origin tips the direct-push check has seen, so a
@@ -935,7 +936,7 @@ it — and `gt attention` prints a `STALE` header and exits 3.
 
 A question the overseer has for Sloan is a bead in the town database under the
 label `overseer-question`, so it survives the overseer's session and the
-dashboard's Questions pane and the daemon read it.
+dashboard's Needs you panel and the daemon read it.
 
 ```bash
 gt ask "<title>" <<'EOF'   # file one; body sections below, on stdin

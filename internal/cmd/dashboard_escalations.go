@@ -9,11 +9,11 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 )
 
-// The Escalations panel: the town's open escalation beads, the same set the
-// escalations tile counts (beads.ListEscalationsAcrossRigs). An alert is
-// something the dashboard noticed from its own snapshots; an escalation is a
-// bead somebody raised, with a severity and a raiser, that stays open until it
-// is closed — so the pane lists them instead of only counting them.
+// The escalation rows of the dashboard's Needs you panel: the town's open
+// escalation beads (beads.ListEscalationsAcrossRigs). An alert is something the
+// dashboard noticed from its own snapshots; an escalation is a bead somebody
+// raised, with a severity and a raiser, that stays open until it is closed — so
+// the panel lists them instead of only counting them.
 
 // escalationRows is how many escalations the pane lists, newest first. The rest
 // are counted in More rather than dropped silently.

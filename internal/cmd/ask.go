@@ -21,7 +21,7 @@ import (
 
 // The overseer's questions for Sloan. The convention — the label, the body's
 // sections, the [overseer] comment prefix — is internal/question's, and the
-// dashboard's Questions pane and the daemon's question collector read the
+// dashboard's Needs you panel and the daemon's question collector read the
 // beads these commands write.
 
 var (

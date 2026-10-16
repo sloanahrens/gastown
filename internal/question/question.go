@@ -3,7 +3,7 @@
 // "## Question", "## Recommended answer", "## Held work" and "## Facts"
 // sections and whose comments carry the conversation. The overseer asks with
 // gt ask, Sloan answers with gt answer, and three readers share the one
-// parse: gt questions, the dashboard's Questions pane and the daemon's
+// parse: gt questions, the dashboard's Needs you panel and the daemon's
 // question collector.
 package question
 

@@ -610,8 +610,13 @@ type State struct {
 	Queue       *Queue       `json:"queue,omitempty"`
 	Trend       *Trend       `json:"trend,omitempty"`
 	// Alerts is the most recent alerts the alerter raised, newest last, capped
-	// at alertsKept. The page lists them whether or not alerts are switched on.
+	// at alertsKept.
 	Alerts []Alert `json:"alerts,omitempty"`
+	// Attention is the one list of what is waiting on a decision or an action,
+	// merged from the escalations, the questions and the attention queue's
+	// standing items, each row tagged with its owner. It is nil until the
+	// readers behind it have reported (buildAttention).
+	Attention *Attention `json:"attention,omitempty"`
 	// Reads is one entry per poller that keeps a last good value, keyed by
 	// source, so the page can tell a reading that failed or went old from one
 	// that is merely unchanged. A source missing from it has not reported.

@@ -24,43 +24,70 @@ const (
 // sent as "overseer" too (internal/cmd/mail_identity.go).
 const HumanAddress = "overseer"
 
-// ownerFamily is one row of the owner table: the rule ids it covers, by prefix,
-// and their owner.
-type ownerFamily struct {
-	prefix string
-	owner  Owner
-}
-
-// ownerFamilies is the owner table, most specific rule first. A rule no row
-// covers is the overseer's: it triages what a machine raised, and the human is
-// woken by the push rules rather than by every open row.
-var ownerFamilies = []ownerFamily{
-	// A question is filed for the human to answer. question.answered is not
-	// here: Sloan has answered it, and the overseer owes the next move.
-	{RuleQuestionNew, OwnerSloan},
-	{RuleQuestionStale, OwnerSloan},
+// ruleOwners is the owner table: one row per rule in rules.go, and the one
+// place that decides whether an item waits on the human or on the overseer.
+// Every rule has a row — TestEveryRuleHasAnOwner fails for a rule added to the
+// flags table without one — because the fallback below is a courtesy to a rule
+// this binary does not know, never a way for a new rule to reach the human's
+// panel unnoticed.
+//
+// The three rules a row cannot decide alone are noted at their rows:
+// escalation.open reads the escalation (EscalationOwner), and the two question
+// states belong to whoever owes the next move, which the row states.
+var ruleOwners = map[string]Owner{
+	// A question is filed for the human to answer. question.answered is the
+	// overseer's: the human has answered it, and the overseer owes the next
+	// move, so handing it back to the human would be a row nobody can clear.
+	RuleQuestionNew:      OwnerSloan,
+	RuleQuestionStale:    OwnerSloan,
+	RuleQuestionAnswered: OwnerOverseer,
 	// The physical machine: no agent frees disk or memory.
-	{"host.", OwnerSloan},
+	RuleHostDiskWarn:   OwnerSloan,
+	RuleHostDiskCrit:   OwnerSloan,
+	RuleHostMemLow:     OwnerSloan,
+	RuleHostDockerDown: OwnerSloan,
+	RuleHostProbe:      OwnerSloan,
 	// A silent overseer cannot wake itself; the daemon pushes to the human
 	// instead (gt-3a6h6).
-	{RuleOverseerSilent, OwnerSloan},
+	RuleOverseerSilent: OwnerSloan,
 	// A bead refused twice is a call the landing loop cannot make.
-	{RuleRejectedTwice, OwnerSloan},
-	// An escalation is the human's only when the overseer cannot resolve it,
-	// and only the escalation says whether that is so. EscalationOwner reads
-	// that off it; an escalation.open row carries none of it, so the family
-	// default is the overseer's and the row is the one owner that has to be
-	// corrected per item rather than read off the table.
-	{"escalation.", OwnerOverseer},
+	RuleRejectedTwice: OwnerSloan,
+	// An escalation is the human's only when the overseer cannot resolve it, and
+	// only the escalation says whether that is so. EscalationOwner reads that
+	// off it; this row is the family default, for the escalation.open item that
+	// carries no raiser, and is the one owner a row corrects per item rather
+	// than reads off the table.
+	RuleEscalation: OwnerOverseer,
+	// Everything below is the town looking after itself: a landing, a polecat,
+	// a schedule or the host's own dispatch, which the overseer triages first.
+	RuleRiskPath:       OwnerOverseer,
+	RuleRedMain:        OwnerOverseer,
+	RulePolecatStall:   OwnerOverseer,
+	RuleLandingStuck:   OwnerOverseer,
+	RuleQueueStuck:     OwnerOverseer,
+	RuleDirectPush:     OwnerOverseer,
+	RuleSlotHeld:       OwnerOverseer,
+	RuleSlotDeadHolder: OwnerOverseer,
+	RuleBDSlow:         OwnerOverseer,
+	RuleTierSweepRed:   OwnerOverseer,
+	RuleRevertRefused:  OwnerOverseer,
+	RuleBlockedMail:    OwnerOverseer,
+	RuleOverrunStopped: OwnerOverseer,
+	RuleScheduledGate:  OwnerOverseer,
+	RuleDispatchIdle:   OwnerOverseer,
+	// A deploy that did not ship is work, not a decision: the overseer re-runs
+	// it or finds what stopped it, and the operator hears about it only if it
+	// stays failed (gt-hcbft).
+	RuleDeployFailed: OwnerOverseer,
 }
 
-// RuleOwner returns the owner of rule. An unknown rule is the overseer's, as a
-// line written before the owner table existed reads.
+// RuleOwner returns the owner of rule. A rule with no row — one a newer daemon
+// wrote — is the overseer's, as a line written before the owner table existed
+// reads: the reader that finds it is an agent, and the human is woken by the
+// push rules rather than by every row this binary cannot classify.
 func RuleOwner(rule string) Owner {
-	for _, f := range ownerFamilies {
-		if strings.HasPrefix(rule, f.prefix) {
-			return f.owner
-		}
+	if o, ok := ruleOwners[rule]; ok {
+		return o
 	}
 	return OwnerOverseer
 }

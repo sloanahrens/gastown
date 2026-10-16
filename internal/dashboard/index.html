@@ -148,8 +148,11 @@ section.collapsed>h2{border-bottom:0}
 .alvl{display:inline-block;padding:0 6px;border-radius:4px;font-size:11px;border:1px solid currentColor;margin-right:6px}
 .alvl.info{color:var(--blue)}.alvl.warn{color:var(--amber)}.alvl.crit{color:var(--red)}
 .arow{border-top:1px solid var(--line);padding:4px 0;overflow-wrap:anywhere}
-.arow .t{color:var(--dim)}
-.arow .tx{color:var(--dim)}
+.arow .by{color:var(--dim)}
+.arow .qcmd,.arow .qrec{margin-top:3px}
+.own-sloan{color:var(--amber);border-color:var(--amber)}
+.own-overseer{color:var(--blue);border-color:var(--blue)}
+.tag.rule{font-family:ui-monospace,Menlo,monospace}
 .esc{font-weight:700;text-transform:uppercase;font-size:10px;letter-spacing:.04em;white-space:nowrap}
 .sev-critical{color:var(--red)}.sev-high{color:var(--amber)}.sev-medium{color:var(--blue)}.sev-low{color:var(--dim)}
 .chead{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;margin-bottom:4px}
@@ -181,8 +184,6 @@ section.collapsed>h2{border-bottom:0}
 .rback{margin-bottom:4px}
 .ojline{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;padding:2px 0;overflow-wrap:anywhere}
 .ojage,.okind{color:var(--dim);white-space:nowrap}
-.qcard{padding:4px 0;border-top:1px solid var(--line);overflow-wrap:anywhere}
-.qtext{margin:2px 0}
 .qrec,.qheld{color:var(--dim);margin:2px 0}
 .qage{color:var(--dim)}
 .qpri,.qeffort{color:var(--dim);font-size:11px;white-space:nowrap}
@@ -237,11 +238,9 @@ a.hrow:hover{background:#19212b}
 
 <div class="grid">
   <div class="col">
+    <section><h2>Needs you <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>
     <section><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>
-    <section><h2>Questions <span class="r" id="questionsnote"></span></h2><div class="body" id="questions"></div></section>
     <section><h2>Deep review <span class="r" id="deepreviewnote"></span></h2><div class="body" id="deepreview"></div></section>
-    <section><h2>Escalations <span class="r" id="escalationnote"></span></h2><div class="body" id="escalations"></div></section>
-    <section><h2>Alerts <span class="r" id="alertsnote"></span></h2><div class="body" id="alerts"></div></section>
     <section><h2>Report <span class="r" id="reportnote"></span></h2><div class="body" id="report"></div></section>
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
     <section><h2>Usage <span class="r" id="usagenote"></span></h2><div class="body" id="usage"></div></section>
@@ -344,15 +343,6 @@ function fact(box, value, name, opts) {
   if (opts.extra) x.append(document.createTextNode(" · " + opts.extra));
   if (opts.tip) x.title = opts.tip;
   return x;
-}
-
-// paneCount reads a pane's own reader as a count: nothing before the read has
-// come back, "unavailable" for one that failed or could not be made, else the
-// rows it listed plus the ones it counted and left out.
-function paneCount(pane) {
-  if (!pane) return null;
-  if (pane.unavailable) return "unavailable";
-  return (pane.rows || []).length + (pane.more || 0);
 }
 
 // causeText keys one non-green health field the way the health line does —
@@ -468,18 +458,19 @@ function renderStrip(s) {
     {cls: q == null ? "" : (a.waiting || ""), extra: oldest == null ? null : "oldest " + fmtDur(oldest),
      tip: ["beads submitted and waiting for the landing worker", why, q == null && !why ? "the read that lists them has not come back" : null, oldest == null ? null : "the age is the oldest one's"].filter(Boolean).join(" · ")});
 
-  // Needs you: everything waiting on a decision — the open escalations and the
-  // overseer's open questions — off the same two reads the panes below draw, so
-  // the strip and the panes cannot disagree. Bead gt-bi6w0 wires this to the
-  // one merged attention list; until then it is their sum.
-  const esc = paneCount(s.escalations), ask = paneCount(s.questions);
-  const failed = [esc === "unavailable" ? "the escalations" : null, ask === "unavailable" ? "the questions" : null].filter(Boolean);
-  const pending = [esc === null ? "the escalations" : null, ask === null ? "the questions" : null].filter(Boolean);
-  if (failed.length) fact(box, "unavailable", "needs you", {cls: a.needs_you || "",
-    tip: failed.join(" and ") + " could not be read" + (pending.length ? ", and " + pending.join(" and ") + " has not been read yet" : "")});
-  else if (pending.length) fact(box, "–", "needs you", {cls: a.needs_you || "", tip: pending.join(" and ") + " have not been read yet"});
-  else fact(box, String(esc + ask), "needs you", {cls: a.needs_you || "",
-    tip: esc + " open escalation" + (esc === 1 ? "" : "s") + " · " + ask + " open question" + (ask === 1 ? "" : "s") + " · everything waiting on a decision"});
+  // Needs you: the human's share of the one attention list, off the same
+  // payload the Needs you panel draws, so the strip and the panel cannot
+  // disagree about what is waiting (gt-bi6w0).
+  const at = s.attention || null;
+  const failed = at ? (at.failed || []) : [], pending = at ? (at.pending || []) : [];
+  const waiters = failed.join(" and the "), unread = pending.join(" and the ");
+  if (!at) fact(box, "–", "needs you", {cls: a.needs_you || "", tip: "the list of what is waiting has not been read yet"});
+  else if (failed.length) fact(box, "unavailable", "needs you", {cls: a.needs_you || "",
+    tip: "the " + waiters + " could not be read" + (pending.length ? ", and the " + unread + " have not been read yet" : "")});
+  else if (pending.length) fact(box, "–", "needs you", {cls: a.needs_you || "", tip: "the " + unread + " have not been read yet"});
+  else fact(box, String(at.mine || 0), "needs you", {cls: a.needs_you || "",
+    tip: (at.mine || 0) + " of the " + (at.rows || []).length + " rows waiting on a decision " + ((at.mine || 0) === 1 ? "is" : "are") +
+      " the human's · the Needs you panel below has the rows"});
 
   // The host: its idle share leads, and the load average trails it. macOS
   // counts running threads in its load average, so a load-led reading calls a
@@ -2108,65 +2099,126 @@ function renderDispatch(s) {
   if (d.more) box.append(el("div", "empty", "+" + d.more + " more not named in the log line"));
 }
 
-// A question that has waited four hours is the one the header marks, in the
+// A question that has waited four hours is the one the panel marks, in the
 // amber the page carries for every other stale reading.
 const QUESTION_OLDEST_SEC = 4 * 3600;
 
-// The Questions pane: what the overseer has filed for Sloan, most urgent first
-// and, at one priority, the longest wait first, so what can stop the town is
-// the first thing he reads. Each card carries the question, its priority and
-// effort tag, the answer the overseer recommends, the work it holds up,
-// whether Sloan has answered it, and the line that answers it.
+// The owners a row can carry, as the reader's own tags (attention.Owner). The
+// page draws one chip per owner, so an owner the reader adds shows up as a chip
+// rather than as a row nothing can filter.
+const OWNERS = ["sloan", "overseer"];
+
+// The Attention panel: the one list of what is waiting on a decision or an
+// action — the open escalations, the overseer's open questions and the
+// attention queue's standing items — every row tagged with the owner who has to
+// move, so the human and the overseer read the same list and neither needs a
+// panel of their own (gt-bi6w0).
 //
-// Every cell goes through el(), which writes textContent: the question and the
-// recommended answer are the overseer's own words, and a tag in them shows as
-// that text and never as markup. The pane writes nothing — the answer is gt answer,
-// a comment on the bead, from a terminal.
-function renderQuestions(s) {
-  const box = $("questions"), note = $("questionsnote");
+// Every cell goes through el(), which writes textContent: a question, a
+// recommended answer and a queue summary are other agents' own words, and a tag
+// in them shows as that text and never as markup. The panel writes nothing —
+// a question is answered with gt answer, a comment on the bead, from a
+// terminal.
+function renderAttention(s) {
+  const box = $("attention"), note = $("attentionnote");
   box.replaceChildren();
-  const q = s.questions;
-  if (!q) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "reading…")); return; }
-  // A read that failed is a named state, never an empty pane: "the overseer has
-  // asked nothing" and "the questions could not be read" must not look alike.
-  if (q.unavailable) { note.className = "r"; note.textContent = ""; box.append(el("div", "badc", "unavailable: questions could not be read")); return; }
-  const rows = q.rows || [];
-  // The header names the count and, past four hours, how long the oldest
-  // question has waited, in the amber the page marks every other stale reading
-  // with.
-  const ages = rows.map(r => r.age_sec).filter(a => a != null);
-  const oldest = ages.length ? Math.max(...ages) : null;
+  const at = s.attention;
+  if (!at) { note.className = "r"; note.textContent = ""; box.append(el("div", "empty", "reading…")); return; }
+  const rows = at.rows || [];
+  const failed = at.failed || [], pending = at.pending || [];
+
+  // The header names what is waiting and, past four hours, how long the oldest
+  // question has waited — the question is the row type that stops the town
+  // until it is answered.
+  const asks = rows.filter(r => r.kind === "question").map(r => r.age_sec).filter(a => a != null);
+  const oldest = asks.length ? Math.max(...asks) : null;
   const stale = oldest != null && oldest > QUESTION_OLDEST_SEC;
   note.className = stale ? "r warnc" : "r";
   note.textContent = rows.length
-    ? rows.length + (q.more ? " of " + (rows.length + q.more) : "") + " open" + (stale ? " · oldest " + fmtDur(oldest) : "")
+    ? rows.length + (at.more ? " of " + (rows.length + at.more) : "") + " waiting" + (stale ? " · oldest question " + fmtDur(oldest) : "")
     : "";
-  if (!rows.length) { box.append(el("div", "empty", "none open")); return; }
-  for (const r of rows) box.append(questionCard(r));
-  if (q.more) box.append(el("div", "empty", "+" + q.more + " more"));
+  renderOwnerChips(rows);
+
+  // A read that failed is a named state, never an empty panel: "nothing is
+  // waiting" and "the list could not be read" must not look alike. The rows the
+  // readers did return are still drawn beside the line.
+  if (failed.length) box.append(el("div", "badc", "unavailable: the " + failed.join(" and the ") + " could not be read"));
+  if (!rows.length) {
+    if (!failed.length) box.append(el("div", "empty", "nothing needs you"));
+    return;
+  }
+  // A reader that has not reported yet is not a reader that found nothing.
+  if (pending.length) box.append(el("div", "empty", "the " + pending.join(" and the ") + " have not been read yet"));
+  for (const r of rows) box.append(attentionRow(r));
 }
 
-// questionCard is one question. The state is the reader's own word: awaiting
-// you while the newest comment is the overseer's, answered, overseer acting
-// once Sloan has replied. The command line is the page's whole answer path.
-function questionCard(r) {
-  const c = el("div", "qcard");
-  const head = el("div", "chead");
-  head.append(el("span", "bead", r.id));
-  head.append(el("span", "title", r.title || ""));
-  // The priority is why a card is where it is in the pane, so it is drawn, and
-  // P0 and P1 in the amber the page marks what wants attention with.
-  head.append(el("span", r.priority <= 1 ? "qpri warnc" : "qpri", "P" + r.priority));
-  if (r.effort) head.append(el("span", "qeffort", r.effort));
-  if (r.age_sec != null) head.append(el("span", "qage", fmtDur(r.age_sec)));
-  head.append(el("span", "qstate", r.state === "answered" ? "answered, overseer acting" : "awaiting you"));
-  c.append(head);
-  if (r.question) c.append(el("div", "qtext", r.question));
-  if (r.recommended) c.append(el("div", "qrec", "Recommended: " + r.recommended));
-  if ((r.held || []).length) c.append(el("div", "qheld", "Held: " + r.held.join(", ")));
-  if (r.malformed) c.append(el("div", "badc", "the bead's description has no question and recommended answer"));
-  c.append(el("div", "qcmd", 'gt answer ' + r.id + ' "<answer>"'));
-  return c;
+// The owner chips are the panel's one filter: one chip per owner the reader can
+// tag a row with, carrying the count of the rows it is showing. The choice
+// survives reloads the way the feed's class chips do, and a chip is drawn at
+// zero rather than dropped, so an owner never disappears from the page.
+const shownOwners = new Set(JSON.parse(localStorage.getItem("gt-attention-owners") || "null") || OWNERS);
+let attentionRows = [];
+function renderOwnerChips(rows) {
+  attentionRows = rows;
+  const counts = {};
+  for (const r of rows) counts[r.owner] = (counts[r.owner] || 0) + 1;
+  const box = $("attentionchips");
+  box.replaceChildren();
+  for (const o of OWNERS) {
+    const b = el("button", "chip" + (shownOwners.has(o) ? " on" : ""), o);
+    b.title = "show or hide the rows " + o + " has to act on";
+    b.append(el("b", "", String(counts[o] || 0)));
+    b.onclick = () => {
+      shownOwners.has(o) ? shownOwners.delete(o) : shownOwners.add(o);
+      try { localStorage.setItem("gt-attention-owners", JSON.stringify([...shownOwners])); } catch (e) {}
+      renderOwnerChips(attentionRows);
+      applyOwnerFilter();
+    };
+    box.append(b);
+  }
+}
+function applyOwnerFilter() { for (const r of $("attention").children) if (r.dataset.owner) r.hidden = !shownOwners.has(r.dataset.owner); }
+
+// attentionRow is one row of the list. Every row carries its owner and its age;
+// a question adds what answering it holds up and the line that answers it, an
+// escalation its severity and who raised it, and a queue item the rule that
+// raised it.
+function attentionRow(r) {
+  const row = el("div", "arow");
+  row.dataset.owner = r.owner;
+  row.hidden = !shownOwners.has(r.owner);
+  row.append(el("span", "tag own-" + r.owner, r.owner || "?"));
+  if (r.kind === "escalation") {
+    row.append(el("span", "esc " + (SEV_CLASS[r.severity] || "sev-low"), r.severity || "–"));
+    row.append(el("span", "bead", r.id || ""));
+    if (r.escalated_by) row.append(el("span", "by", "raised by " + r.escalated_by));
+  } else if (r.kind === "item") {
+    // The rule is what the row is about and the level is how loud the queue
+    // raised it, so both are drawn: an item nothing ranks is the reader's to
+    // name, not the page's to guess at.
+    row.append(el("span", "alvl " + (r.level || "info"), r.level || "info"));
+    row.append(el("span", "tag rule", r.rule || ""));
+  } else {
+    row.append(el("span", "bead", r.id || ""));
+  }
+  row.append(el("span", "title", r.title || ""));
+  if (r.kind === "question") {
+    // The priority is why the row is where it is, so it is drawn, and P0 and P1
+    // in the amber the page marks what wants attention with. The state is the
+    // reader's own word.
+    row.append(el("span", r.priority <= 1 ? "qpri warnc" : "qpri", "P" + r.priority));
+    if (r.effort) row.append(el("span", "qeffort", r.effort));
+    row.append(el("span", "qstate", r.state === "answered" ? "answered, overseer acting" : "awaiting you"));
+  }
+  if (r.age_sec != null) row.append(el("span", "qage", fmtDur(r.age_sec)));
+  if (r.recommended) row.append(el("div", "qrec", "Recommended: " + r.recommended));
+  const held = [];
+  if (r.held_count) held.push("holds " + r.held_count + (r.held_count === 1 ? " bead" : " beads"));
+  if ((r.held || []).length) held.push("Held: " + r.held.join(", "));
+  if (held.length) row.append(el("div", "qheld", held.join(" · ")));
+  if (r.malformed) row.append(el("div", "badc", "the bead's description has no question and recommended answer"));
+  if (r.kind === "question" && r.id) row.append(el("div", "qcmd", 'gt answer ' + r.id + ' "<answer>"'));
+  return row;
 }
 
 // The Overseer pane: whether the overseer session is alive, what it has done
@@ -2374,44 +2426,15 @@ function renderUsage(s) {
   box.append(d);
 }
 
-// The Escalations pane: the town's open escalation beads, newest first. An
-// alert is what the dashboard noticed; an escalation is a bead somebody raised,
-// with a severity and a raiser, that stays open until it is closed. Read-only —
-// the page never acks or closes one.
+// An escalation's severity is why a row is where it is, so the panel colours
+// every one of the four and no two share a colour.
 const SEV_CLASS = {critical: "sev-critical", high: "sev-high", medium: "sev-medium", low: "sev-low"};
-function renderEscalations(s) {
-  const box = $("escalations");
-  box.replaceChildren();
-  const e = s.escalations;
-  if (!e) { box.append(el("div", "empty", "reading…")); $("escalationnote").textContent = ""; return; }
-  if (e.unavailable) { box.append(el("div", "badc", "unavailable: escalations could not be read")); $("escalationnote").textContent = ""; return; }
-  const rows = e.rows || [];
-  if (!rows.length) { box.append(el("div", "empty", "none open")); $("escalationnote").textContent = ""; return; }
-  const t = el("table");
-  const hr = el("tr");
-  [["Severity"], ["Id"], ["Title"], ["Raised by"], ["Age", "since it was raised", 1]].forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
-  t.append(hr);
-  for (const r of rows) {
-    const tr = el("tr");
-    tr.append(el("td", "esc " + (SEV_CLASS[r.severity] || "sev-low"), r.severity || "–"));
-    tr.append(el("td", "bead", r.id));
-    tr.append(el("td", "title", r.title || ""));
-    tr.append(el("td", "title", r.escalated_by || "–"));
-    const age = el("td", "n", fmtDur(r.age_sec));
-    if (r.age_sec != null) age.title = "raised " + new Date(r.at).toLocaleString();
-    tr.append(age);
-    t.append(tr);
-  }
-  box.append(t);
-  if (e.more) box.append(el("div", "empty", "+" + e.more + " more"));
-  $("escalationnote").textContent = rows.length + (e.more ? " of " + (rows.length + e.more) : "") + " open";
-}
 
 // Alerts. The server decides what needs attention and pushes each new one as an
 // "alert" event; the page shows a toast, marks the title, and (when the browser
 // allows it) raises a notification — but only while the operator has alerts on.
-// The recent list below renders from State.Alerts either way, so switching
-// alerts off never hides what happened.
+// What is waiting rather than merely noticed is the Attention panel's, and a
+// routine line such as a rejected landing is the feed's.
 const BASE_TITLE = document.title;
 let alertsOn = false;
 try { alertsOn = localStorage.getItem("gt-alerts") === "on"; } catch (e) { alertsOn = false; }
@@ -2454,20 +2477,6 @@ function onAlert(a) {
   showToast(a);
   notify(a);
   if (!document.hasFocus()) { unreadAlerts++; markTitle(); }
-}
-
-function renderAlerts(s) {
-  const box = $("alerts");
-  box.replaceChildren();
-  const list = ((s && s.alerts) || []).slice().reverse();
-  $("alertsnote").textContent = list.length ? list.length + " recent" : "";
-  if (!list.length) { box.append(el("div", "empty", "nothing has needed attention")); return; }
-  for (const a of list) {
-    const row = el("div", "arow");
-    row.append(el("span", "alvl " + a.level, a.level || "info"), el("span", "t", clock(a.at) + "  "));
-    row.append(el("span", "tt", a.title || ""), el("div", "tx", a.text || ""));
-    box.append(row);
-  }
 }
 
 function initAlerts() {
@@ -2679,7 +2688,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderOverseer(state); renderQuestions(state); renderDeepReview(state); renderUsage(state); renderEscalations(state); renderAlerts(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderDeepReview(state); renderUsage(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

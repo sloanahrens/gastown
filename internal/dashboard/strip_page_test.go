@@ -25,9 +25,9 @@ func TestTheStripDrawsEachFactOnce(t *testing.T) {
 		`const rr = readOf(s, "ready");`,
 		`fact(box, q == null ? "–" : String(q), "waiting to land",`,
 		`oldest == null ? null : "oldest " + fmtDur(oldest)`,
-		// What needs the operator, off the two panes that own those rows.
-		`const esc = paneCount(s.escalations), ask = paneCount(s.questions);`,
-		`fact(box, String(esc + ask), "needs you",`,
+		// What needs the human, off the one merged list the panel below draws.
+		`const at = s.attention || null;`,
+		`fact(box, String(at.mine || 0), "needs you",`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderStrip has no %q", want)
@@ -245,27 +245,21 @@ func TestTheStripColoursItsAlarmsFromDefinedClasses(t *testing.T) {
 }
 
 // A reading nobody has made is never drawn as a zero: the landings, the queue
-// and the two panes behind "needs you" each say they could not be read, and a
-// failed queue read is never a drained one. The count a failed read left behind
-// is still drawn — the tile showed it — with the alarm naming the read
-// (gt-ywlei, gt-q6h8e).
+// and the list behind "needs you" each say they could not be read, and a failed
+// queue read is never a drained one (gt-ywlei, gt-q6h8e).
 func TestTheStripNeverDrawsAReadingNobodyMade(t *testing.T) {
 	t.Parallel()
 
-	count := pageFunc(t, "paneCount")
-	for _, want := range []string{"if (!pane) return null;", `if (pane.unavailable) return "unavailable";`, "(pane.rows || []).length + (pane.more || 0)"} {
-		if !strings.Contains(count, want) {
-			t.Errorf("paneCount has no %q", want)
-		}
-	}
 	strip := pageFunc(t, "renderStrip")
 	for _, want := range []string{
 		`const landed = ((t && t.hours) || []).reduce((n, h) => n + h.landed, 0);`,
 		`if (q == null && why) fact(box, "unavailable", "waiting to land"`,
+		// The list of what waits, and the readers behind it: one that failed is
+		// named, one that has not come back is no value yet, in the strip's own
+		// dim, and a list that has not been built at all is neither.
+		`if (!at) fact(box, "–", "needs you",`,
 		`if (failed.length) fact(box, "unavailable", "needs you"`,
-		`failed.join(" and ") + " could not be read"`,
-		// A reading that has not come back is not a failed one: it reads as no
-		// value yet, in the strip's own dim.
+		`"the " + waiters + " could not be read"`,
 		`else if (pending.length) fact(box, "–", "needs you", {cls: a.needs_you || "",`,
 		`"the read that lists them has not come back"`,
 	} {

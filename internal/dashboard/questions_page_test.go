@@ -13,87 +13,104 @@ import (
 // questionPageNow is the instant the page fixtures below are written against.
 var questionPageNow = time.Date(2026, 10, 8, 15, 0, 0, 0, time.UTC)
 
-// The Questions pane is read where the operator looks first: the top of the
-// left column, above Escalations, which is what the layout test pins. What it
-// draws is the state the reader decided — an unreadable read is named rather
-// than drawn as an empty pane, and the rows are drawn as cards.
-func TestQuestionsPanelDrawsTheStateTheReaderDecided(t *testing.T) {
+// The panel is read where the operator looks first — the top of the left
+// column, which is what the layout test pins — and what it draws is the state
+// the reader decided: a read that failed is named rather than drawn as an empty
+// panel, and a reader that has not reported is not a reader that found nothing.
+func TestAttentionPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 	t.Parallel()
 
-	draw := pageFunc(t, "renderQuestions")
+	draw := pageFunc(t, "renderAttention")
 	for _, want := range []string{
-		`const q = s.questions;`,
-		`box.append(el("div", "badc", "unavailable: questions could not be read"))`,
-		`const rows = q.rows || [];`,
-		`if (!rows.length) { box.append(el("div", "empty", "none open")); return; }`,
-		`for (const r of rows) box.append(questionCard(r));`,
-		`if (q.more) box.append(el("div", "empty", "+" + q.more + " more"));`,
+		`const at = s.attention;`,
+		`const rows = at.rows || [];`,
+		`if (failed.length) box.append(el("div", "badc", "unavailable: the " + failed.join(" and the ") + " could not be read"));`,
+		`if (!rows.length) {`,
+		`box.append(el("div", "empty", "nothing needs you"));`,
+		`if (pending.length) box.append(el("div", "empty", "the " + pending.join(" and the ") + " have not been read yet"));`,
+		`for (const r of rows) box.append(attentionRow(r));`,
 	} {
 		if !strings.Contains(draw, want) {
-			t.Errorf("renderQuestions has no %q", want)
+			t.Errorf("renderAttention has no %q", want)
 		}
 	}
-	// The question is the overseer's own text, so every cell goes through el(),
-	// which writes textContent: a tag in it shows as that text, never markup.
+	// The note is what says the readers capped rows out of the list, so the
+	// panel draws no second count of them.
+	if !strings.Contains(draw, `rows.length + (at.more ? " of " + (rows.length + at.more) : "") + " waiting"`) {
+		t.Error("renderAttention does not count the rows its readers capped out")
+	}
+	// A question, a recommendation and a queue summary are other agents' own
+	// text, so every cell goes through el(), which writes textContent: a tag in
+	// them shows as that text, never markup.
 	if strings.Contains(draw, "innerHTML") {
-		t.Error("renderQuestions sets markup from the question's text")
+		t.Error("renderAttention sets markup from the row's text")
 	}
 
 	all := pageFunc(t, "renderAll")
-	if !strings.Contains(all, "renderQuestions(state)") {
-		t.Error("renderAll does not draw the Questions panel")
+	if n := strings.Count(all, "renderAttention(state)"); n != 1 {
+		t.Errorf("renderAll draws the Attention panel %d times, want 1", n)
 	}
-	if !strings.Contains(string(indexHTML), `<section><h2>Questions <span class="r" id="questionsnote"></span></h2><div class="body" id="questions"></div></section>`) {
-		t.Error("the Questions section is not the markup its neighbours are")
+	if !strings.Contains(string(indexHTML), `<section><h2>Needs you <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>`) {
+		t.Error("the Needs you section is not the markup its neighbours are")
 	}
 }
 
-// The header names the count, and past four hours the amber the page marks
-// every stale reading with: the question that has waited longest is the one the
+// The header names what is waiting and, past four hours, the amber the page
+// marks every stale reading with: the question is the row type that stops the
+// town until it is answered, so the one that has waited longest is the one the
 // operator has to see.
-func TestQuestionsPanelMarksTheOldestPastFourHours(t *testing.T) {
+func TestAttentionPanelMarksTheOldestQuestionPastFourHours(t *testing.T) {
 	t.Parallel()
 
 	if !strings.Contains(string(indexHTML), "const QUESTION_OLDEST_SEC = 4 * 3600;") {
 		t.Error("the page does not hold the four-hour threshold")
 	}
-	draw := pageFunc(t, "renderQuestions")
+	draw := pageFunc(t, "renderAttention")
 	for _, want := range []string{
-		`const oldest = ages.length ? Math.max(...ages) : null;`,
+		`const asks = rows.filter(r => r.kind === "question").map(r => r.age_sec).filter(a => a != null);`,
+		`const oldest = asks.length ? Math.max(...asks) : null;`,
 		`const stale = oldest != null && oldest > QUESTION_OLDEST_SEC;`,
 		`note.className = stale ? "r warnc" : "r";`,
-		`(stale ? " · oldest " + fmtDur(oldest) : "")`,
+		`(stale ? " · oldest question " + fmtDur(oldest) : "")`,
 	} {
 		if !strings.Contains(draw, want) {
-			t.Errorf("renderQuestions has no %q", want)
+			t.Errorf("renderAttention has no %q", want)
 		}
 	}
 }
 
-// One question is one card: what the overseer asks, its priority and effort
-// tag, the answer it recommends, the work it holds up, whether Sloan has
-// answered it, and the line that answers it. The page writes nothing — that
-// line is the whole answer path, and the operator copies it into a terminal.
-func TestQuestionCardCarriesTheAnswerPath(t *testing.T) {
+// One row: what it is about, its owner, its age and, for a question, what
+// answering it holds up and the line that answers it. The page writes nothing —
+// that line is the whole answer path, and the operator copies it into a
+// terminal.
+func TestAttentionRowCarriesTheOwnerAndTheAnswerPath(t *testing.T) {
 	t.Parallel()
 
-	draw := pageFunc(t, "questionCard")
+	draw := pageFunc(t, "attentionRow")
+	// The kinds the row branches on are the reader's own, so a kind renamed on
+	// one side is a failure rather than a row drawn as another kind.
+	for _, kind := range []string{AttentionQuestion, AttentionEscalation, AttentionItem} {
+		if !strings.Contains(draw, `r.kind === "`+kind+`"`) {
+			t.Errorf("attentionRow does not draw a %s row", kind)
+		}
+	}
 	for _, want := range []string{
-		`head.append(el("span", "bead", r.id));`,
-		`head.append(el("span", r.priority <= 1 ? "qpri warnc" : "qpri", "P" + r.priority));`,
-		`if (r.effort) head.append(el("span", "qeffort", r.effort));`,
-		`if (r.question) c.append(el("div", "qtext", r.question));`,
-		`if (r.recommended) c.append(el("div", "qrec", "Recommended: " + r.recommended));`,
-		`if ((r.held || []).length) c.append(el("div", "qheld", "Held: " + r.held.join(", ")));`,
+		`row.dataset.owner = r.owner;`,
+		`row.append(el("span", "tag own-" + r.owner, r.owner || "?"));`,
+		`row.append(el("span", "bead", r.id || ""));`,
+		`row.append(el("span", r.priority <= 1 ? "qpri warnc" : "qpri", "P" + r.priority));`,
+		`if (r.effort) row.append(el("span", "qeffort", r.effort));`,
+		`if (r.recommended) row.append(el("div", "qrec", "Recommended: " + r.recommended));`,
+		`held.push("holds " + r.held_count + (r.held_count === 1 ? " bead" : " beads"));`,
 		`el("span", "qstate", r.state === "answered" ? "answered, overseer acting" : "awaiting you")`,
-		`c.append(el("div", "qcmd", 'gt answer ' + r.id + ' "<answer>"'));`,
+		`row.append(el("div", "qcmd", 'gt answer ' + r.id + ' "<answer>"'));`,
 	} {
 		if !strings.Contains(draw, want) {
-			t.Errorf("questionCard has no %q", want)
+			t.Errorf("attentionRow has no %q", want)
 		}
 	}
 	if strings.Contains(draw, "innerHTML") {
-		t.Error("questionCard sets markup from the question's text")
+		t.Error("attentionRow sets markup from the row's text")
 	}
 	// The copy-ready line is one line the operator can select whole.
 	if !strings.Contains(string(indexHTML), `.qcmd{`) {
@@ -137,8 +154,8 @@ func TestQuestionsReachTheAPIAndChangeNothingElse(t *testing.T) {
 	if !strings.Contains(body, `"questions"`) || !strings.Contains(body, `"retry policy"`) {
 		t.Errorf("/api/state does not carry the questions the hub holds: %s", body)
 	}
-	// The row carries what the queue is ordered by, so the panel that renders
-	// it — the Questions pane or the Attention panel — needs no query of its own.
+	// The row carries what the panel orders it by, so the panel that renders it
+	// needs no query of its own.
 	var state struct {
 		Questions Questions `json:"questions"`
 	}
@@ -158,7 +175,7 @@ func TestQuestionsReachTheAPIAndChangeNothingElse(t *testing.T) {
 		t.Errorf("open questions moved the health verdict to %q", st.Health.Verdict)
 	}
 	if st.Escalations == nil || len(st.Escalations.Rows) != 1 {
-		t.Errorf("open questions changed the escalations the pane holds: %+v", st.Escalations)
+		t.Errorf("open questions changed the escalations the reader holds: %+v", st.Escalations)
 	}
 }
 

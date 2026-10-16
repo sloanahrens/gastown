@@ -379,9 +379,9 @@ func (h *Hub) addAlertLocked(al Alert) {
 }
 
 // pollAttention feeds the attention queue's wake events to the alerts, so the
-// Alerts panel shows what the overseer's wake stream shows. An alert that the
-// events clear, or that the Alerter's own alert for the same condition gives
-// way to, leaves the list.
+// Attention panel lists what the overseer's wake stream holds and the page
+// hears each new one. An alert that the events clear, or that the Alerter's own
+// alert for the same condition gives way to, leaves the recent list.
 func (h *Hub) pollAttention() {
 	evs, acks := h.cfg.Attention()
 	h.mu.Lock()
@@ -404,6 +404,7 @@ func (h *Hub) pollAttention() {
 		h.addAlertLocked(al)
 	}
 	if len(removed) > 0 || len(raised) > 0 {
+		h.attentionLocked()
 		h.publishLocked()
 	}
 }
@@ -593,6 +594,7 @@ func (h *Hub) pollQuestions() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Questions = q
+	h.attentionLocked()
 	h.publishLocked()
 }
 
@@ -644,7 +646,15 @@ func (h *Hub) pollEscalation() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Escalations = e
+	h.attentionLocked()
 	h.publishLocked()
+}
+
+// attentionLocked rebuilds the Attention panel from the three readers that feed
+// it, so its one list is never a picture of a reader the hub has already moved
+// past.
+func (h *Hub) attentionLocked() {
+	h.state.Attention = buildAttention(h.state.Escalations, h.state.Questions, h.alerts.Standing(), h.cfg.Now())
 }
 
 func (h *Hub) pollDispatch() {

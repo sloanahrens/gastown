@@ -11,7 +11,7 @@ import (
 // The Overseer panel: whether the overseer session is alive, its last journal
 // lines, and a seven-day count of its interventions by kind. It reads the two
 // files gt overseer beat and gt overseer log write, and counts the open
-// overseer questions the way the Questions panel lists them. Read-only.
+// overseer questions the way the Needs you panel lists them. Read-only.
 //
 // A file that cannot be read makes the pane unavailable rather than silent or
 // empty: the pane must not tell the operator the overseer has gone quiet when
