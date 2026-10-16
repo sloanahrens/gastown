@@ -285,6 +285,10 @@ func (d *Daemon) syncJsonlGitBackup() {
 		// (gt-fxm2i).
 		d.logger.Printf("jsonl_git_backup: no databases exported successfully")
 		cycle.failStep("export", "no databases exported successfully")
+		// Forget the detail a partial cycle recorded: this raise replaces that
+		// alert's text, so the next partial cycle raises rather than matching a
+		// text that no longer describes what is failing (gt-ga9hx).
+		d.jsonlExportAlert = ""
 		d.escalateAlert(alertKeyJSONLExport, "jsonl_git_backup", fmt.Sprintf(
 			"every database export failed — the offsite backup exported nothing this cycle:\n%s",
 			strings.Join(failures, "\n")))
@@ -296,11 +300,15 @@ func (d *Daemon) syncJsonlGitBackup() {
 		// subject that names it exists only when a commit happens for another
 		// reason. Only a tick where every database exported clears it.
 		d.logger.Printf("jsonl_git_backup: %d/%d database export(s) failed: %s", len(failed), len(databases), strings.Join(failed, ", "))
-		d.escalateAlert(alertKeyJSONLExport, "jsonl_git_backup", fmt.Sprintf(
+		d.raiseExportAlert(fmt.Sprintf(
 			"%d of %d database export(s) failed — the offsite copy of %s is stale:\n%s",
 			len(failed), len(databases), strings.Join(failed, ", "), strings.Join(failures, "\n")))
 	} else {
 		d.clearAlerts("every database export succeeded", alertKeyJSONLExport)
+		// The failure is over, and the detail that stood for it with it: the
+		// same failure returning later is a new alert, not a repeat of this
+		// one (gt-ga9hx).
+		d.jsonlExportAlert = ""
 	}
 
 	cycle.closeStep("export")
@@ -389,6 +397,30 @@ func (d *Daemon) syncJsonlGitBackup() {
 
 	d.logger.Printf("jsonl_git_backup: exported %d/%d database(s), push=%s", exported, len(databases), pushStatus)
 	cycle.closeStep("report")
+}
+
+// raiseExportAlert raises the backup's export alert for a partial export
+// failure, unless this process already raised it for the same failure: gt
+// escalate records a repeat on the open escalation bead, so a database that
+// stays broken would spend a Dolt write and a subprocess every 15-minute tick
+// (gt-vwry, the write-per-tick maintenance_gc_stale.go and patrol_scan both
+// skip). A failure that changed — another database, another error — is raised
+// onto that same bead, which is what refreshes its text, and a cycle where
+// every database exported clears the alert and forgets the detail (gt-ga9hx).
+//
+// The detail is remembered only once the escalation landed, so an alert gt
+// escalate dropped is raised again next cycle rather than recorded as
+// delivered (gt-kox0).
+func (d *Daemon) raiseExportAlert(detail string) {
+	if d.jsonlExportAlert == detail {
+		d.logger.Printf("jsonl_git_backup: the export alert is already raised for this failure — not raising it again")
+		return
+	}
+	if err := d.escalateAlertErr(alertKeyJSONLExport, "jsonl_git_backup", detail); err != nil {
+		d.logger.Printf("jsonl_git_backup: the export alert did not reach the town; raising it again next cycle: %v", err)
+		return
+	}
+	d.jsonlExportAlert = detail
 }
 
 // supplementalTables lists non-issues tables to include in JSONL backup.

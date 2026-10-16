@@ -217,6 +217,12 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	jsonlPushFailures int
 
+	// jsonlExportAlert is the partial export failure this process last raised
+	// the export alert for, so an unchanged failure is not raised again every
+	// tick (jsonl_git_backup.go, gt-ga9hx). Only the jsonl_git_backup goroutine
+	// touches it — jsonlGitBackupRunning below keeps one cycle in flight.
+	jsonlExportAlert string
+
 	// jsonlPushFileLimit is the per-file size the JSONL backup treats as too
 	// large for its remote, in tests that drive the oversize-push recovery
 	// with a small file instead of a real 100 MB export; 0 is GitHub's

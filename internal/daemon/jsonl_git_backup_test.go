@@ -2474,10 +2474,15 @@ func TestTriggerJsonlGitBackup_SkipsWhenNotDue(t *testing.T) {
 	}
 }
 
+// partialExportFaults decides what a tick's exports do: every database named
+// here returns the deadline error, and the others export ten rows each. A
+// caller flips the map between ticks to drive a failure, a recovery and a
+// relapse through one daemon.
+type partialExportFaults struct{ failing map[string]bool }
+
 // partialExportDaemon wires a daemon over a fake remote with a seeded baseline
-// and two databases, hq and gt. failHQ decides per call whether hq's export
-// fails; gt always exports.
-func partialExportDaemon(t *testing.T, failHQ *bool) (*Daemon, *notifyfake.Recorder) {
+// and two databases, hq and gt.
+func partialExportDaemon(t *testing.T, faults *partialExportFaults) (*Daemon, *notifyfake.Recorder) {
 	t.Helper()
 	d, f := backupTestDaemon(t)
 	root := t.TempDir()
@@ -2498,7 +2503,7 @@ func partialExportDaemon(t *testing.T, failHQ *bool) (*Daemon, *notifyfake.Recor
 		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, GitRepo: gitRepo, Databases: []string{"hq", "gt"}},
 	}}
 	d.jsonlExportFn = func(db, repo, dataDir string, scrub bool) (int, error) {
-		if db == "hq" && *failHQ {
+		if faults.failing[db] {
 			return 0, errors.New("context deadline exceeded")
 		}
 		dbDir := filepath.Join(repo, db)
@@ -2513,11 +2518,14 @@ func partialExportDaemon(t *testing.T, failHQ *bool) (*Daemon, *notifyfake.Recor
 
 // TestSyncJsonlGitBackupPartialFailureKeepsAlert: a database that fails every
 // tick while another exports must keep the export alert raised, not clear it
-// because exported > 0.
+// because exported > 0 — and the second failing tick must not raise it again.
+// `gt escalate` records a repeat on the open escalation bead, a Dolt write and
+// a subprocess per call, so a failure that stays broken would spend one every
+// 15-minute tick (gt-ga9hx, gt-vwry).
 func TestSyncJsonlGitBackupPartialFailureKeepsAlert(t *testing.T) {
 	t.Parallel()
-	failHQ := true
-	d, rec := partialExportDaemon(t, &failHQ)
+	faults := &partialExportFaults{failing: map[string]bool{"hq": true}}
+	d, rec := partialExportDaemon(t, faults)
 
 	d.syncJsonlGitBackup()
 	d.syncJsonlGitBackup()
@@ -2526,30 +2534,102 @@ func TestSyncJsonlGitBackupPartialFailureKeepsAlert(t *testing.T) {
 	if len(open) != 1 {
 		t.Fatalf("open %s escalations = %+v, want one", alertKeyJSONLExport, open)
 	}
-	if !strings.Contains(open[0].Reason, "hq") || !strings.Contains(open[0].Reason, "context deadline exceeded") {
-		t.Errorf("escalation reason = %q, want the failed database and its error", open[0].Reason)
+	if open[0].Occurrences != 1 {
+		t.Errorf("escalation occurrences = %d after two ticks with the same failure, want 1", open[0].Occurrences)
 	}
-	if strings.Contains(open[0].Reason, "gt:") {
-		t.Errorf("escalation reason = %q, names the database that exported", open[0].Reason)
+	listed, failed := exportAlertFailures(t, open[0].Reason)
+	if !slices.Equal(listed, []string{"hq"}) {
+		t.Errorf("escalation reason = %q lists %v as failing, want exactly [hq]", open[0].Reason, listed)
+	}
+	if want := map[string]string{"hq": "context deadline exceeded"}; !maps.Equal(failed, want) {
+		t.Errorf("escalation failures = %v, want %v", failed, want)
 	}
 }
 
-// TestSyncJsonlGitBackupAllExportedClearsAlert: an open export alert clears on
-// a tick where every database exports.
+// TestSyncJsonlGitBackupAllExportedClearsAlert: a database that recovers clears
+// the export alert — the failing tick has to raise it for this to be about the
+// recovery path at all (gt-ga9hx) — and the same failure returning after that
+// healthy tick is raised again, not matched against the alert the healthy tick
+// took down.
 func TestSyncJsonlGitBackupAllExportedClearsAlert(t *testing.T) {
 	t.Parallel()
-	failHQ := false
-	d, rec := partialExportDaemon(t, &failHQ)
+	faults := &partialExportFaults{failing: map[string]bool{"hq": true}}
+	d, rec := partialExportDaemon(t, faults)
 
-	d.escalateAlert(alertKeyJSONLExport, "jsonl_git_backup", "1 of 2 database export(s) failed")
+	d.syncJsonlGitBackup()
 	if open := rec.OpenEscalations(alertKeyJSONLExport); len(open) != 1 {
-		t.Fatalf("seeded alert: open escalations = %+v, want one", open)
+		t.Fatalf("the failing tick left open escalations = %+v, want one for the healthy tick to clear", open)
 	}
 
+	delete(faults.failing, "hq")
 	d.syncJsonlGitBackup()
 	if open := rec.OpenEscalations(alertKeyJSONLExport); len(open) != 0 {
 		t.Errorf("after an all-exported tick, open escalations = %+v, want none", open)
 	}
+
+	faults.failing["hq"] = true
+	d.syncJsonlGitBackup()
+	if open := rec.OpenEscalations(alertKeyJSONLExport); len(open) != 1 {
+		t.Errorf("the failure returned and left open escalations = %+v, want one", open)
+	}
+}
+
+// TestSyncJsonlGitBackupPartialFailureAfterAllFailedRaisesAgain: an all-failed
+// cycle replaces the alert's text, so a partial failure that returns unchanged
+// is raised again rather than matched against a detail that no longer describes
+// what is failing (gt-ga9hx).
+func TestSyncJsonlGitBackupPartialFailureAfterAllFailedRaisesAgain(t *testing.T) {
+	t.Parallel()
+	faults := &partialExportFaults{failing: map[string]bool{"hq": true}}
+	d, rec := partialExportDaemon(t, faults)
+
+	d.syncJsonlGitBackup() // partial: hq fails, gt exports
+	faults.failing["gt"] = true
+	d.syncJsonlGitBackup() // all fail: the alert's text is replaced
+	delete(faults.failing, "gt")
+	d.syncJsonlGitBackup() // the same partial failure comes back
+
+	open := rec.OpenEscalations(alertKeyJSONLExport)
+	if len(open) != 1 {
+		t.Fatalf("open %s escalations = %+v, want one", alertKeyJSONLExport, open)
+	}
+	listed, _ := exportAlertFailures(t, open[0].Reason)
+	if !slices.Equal(listed, []string{"hq"}) {
+		t.Errorf("escalation reason = %q lists %v as failing, want the partial failure that is standing now", open[0].Reason, listed)
+	}
+}
+
+// exportAlertFailures reads the databases a partial-failure export alert says
+// are failing, and the error it names for each: the comma-separated list
+// between "the offsite copy of " and " is stale" on its summary line, and one
+// "<database>: <error>" line under it. Asserting on the names the alert
+// carries, in both places it carries them, is what lets "the database that
+// exported is not named as failing" fail when a reason names it — a phrase
+// search for "gt:" passes on any rewording that drops the colon (gt-ga9hx).
+func exportAlertFailures(t *testing.T, reason string) (listed []string, failed map[string]string) {
+	t.Helper()
+	summary, detail, ok := strings.Cut(reason, "\n")
+	if !ok {
+		t.Fatalf("escalation reason = %q, want a summary line and a line per failed database", reason)
+	}
+	_, rest, ok := strings.Cut(summary, "the offsite copy of ")
+	if !ok {
+		t.Fatalf("escalation reason = %q, want its summary to name the databases whose copy is stale", reason)
+	}
+	list, _, ok := strings.Cut(rest, " is stale")
+	if !ok {
+		t.Fatalf("escalation reason = %q, want its summary to close the list with \" is stale\"", reason)
+	}
+	listed = strings.Split(list, ", ")
+	failed = map[string]string{}
+	for _, line := range strings.Split(detail, "\n") {
+		db, err, ok := strings.Cut(line, ": ")
+		if !ok {
+			t.Fatalf("failure line %q, want \"<database>: <error>\"", line)
+		}
+		failed[db] = err
+	}
+	return listed, failed
 }
 
 // tableRowsFake returns a jsonlTableExportFn that writes rows[table] lines to
