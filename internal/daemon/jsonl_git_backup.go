@@ -266,6 +266,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 	exported := 0
 	var failed []string
 	var failures []string
+	var exportedDBs []string
 	counts := make(map[string]int)
 	for _, db := range databases {
 		n, err := export(db, gitRepo, dataDir, scrub)
@@ -276,6 +277,7 @@ func (d *Daemon) syncJsonlGitBackup() {
 		} else {
 			counts[db] = n
 			exported++
+			exportedDBs = append(exportedDBs, db)
 		}
 	}
 
@@ -331,7 +333,21 @@ func (d *Daemon) syncJsonlGitBackup() {
 	}
 
 	// Post-scrub verification: re-scan output for any remaining pollution.
-	if remaining := d.verifyNoPollution(gitRepo, databases); remaining > 0 {
+	// Only the databases that exported this cycle are checked, since they are
+	// the ones whose files the commit below carries: a failed database keeps the
+	// copy already in the repo, which the commit phase unstages, and the export
+	// alert already names it (gt-fhcwe).
+	remaining, err := d.verifyNoPollution(gitRepo, exportedDBs)
+	if err != nil {
+		// An export this check could not read is an export nothing looked at.
+		// Committing it would push whatever the unread shards hold and clear the
+		// alert on a result that was never reached (gt-fhcwe).
+		d.logger.Printf("jsonl_git_backup: HALTING — post-scrub verification failed: %v", err)
+		d.escalateAlert(alertKeyJSONLScrub, "jsonl_git_backup", fmt.Sprintf("post-scrub verification could not read the export: %v — refusing to push a backup that was not checked for test pollution", err))
+		cycle.failStep("verify", err.Error())
+		return
+	}
+	if remaining > 0 {
 		d.logger.Printf("jsonl_git_backup: WARNING: %d suspicious record(s) survived scrub+filter", remaining)
 		d.escalateAlert(alertKeyJSONLScrub, "jsonl_git_backup", fmt.Sprintf("post-scrub verification found %d suspicious records — review JSONL exports", remaining))
 	} else {
@@ -653,16 +669,35 @@ func jsonlShardPaths(dir, table string) ([]string, error) {
 	return paths, nil
 }
 
+// jsonlShardOps is the filesystem work a shard swap does. Production passes
+// the os package; a test that drives the rollback of a failing call passes its
+// own, since neither a rename nor a remove that fails part way through the swap
+// can be arranged on a directory that accepts all of them (gt-fhcwe).
+type jsonlShardOps struct {
+	rename func(oldpath, newpath string) error
+	remove func(path string) error
+	verify func(dir, table string, wantRows int, maxFileBytes int64) error
+}
+
+// osShardOps is the swap's real filesystem work.
+func osShardOps() jsonlShardOps {
+	return jsonlShardOps{rename: os.Rename, remove: os.Remove, verify: verifyJsonlShards}
+}
+
 // writeTableShards writes rows as the table's JSONL export in dir, cut into
 // shards of about maxBytes (a single row larger than that gets a shard of its
 // own), and returns the number of rows written.
 //
-// Every shard is written to a temporary file first and renamed into place, then
-// the shards left over from an earlier, longer export are removed, so a table
-// that shrank does not keep a stale tail in the backup. verifyJsonlShards runs
-// last: an export whose files do not hold exactly the rows it was given, or hold
-// a file over jsonlShardHardLimit, is an error and counts as a failed export.
+// The export in dir is replaced whole or not at all: the shards already there
+// are moved aside, the new ones are published, and a failure at any point puts
+// the old export back, so the directory never holds shards from both
+// (gt-fhcwe). A shard over jsonlShardHardLimit is refused while the shards are
+// still in memory, and the export on disk is verified, before either happens.
 func writeTableShards(dir, table string, rows []json.RawMessage, maxBytes int) (int, error) {
+	return writeTableShardsWith(osShardOps(), dir, table, rows, maxBytes)
+}
+
+func writeTableShardsWith(ops jsonlShardOps, dir, table string, rows []json.RawMessage, maxBytes int) (int, error) {
 	var shards []*bytes.Buffer
 	cur := &bytes.Buffer{}
 	for _, row := range rows {
@@ -687,44 +722,149 @@ func writeTableShards(dir, table string, rows []json.RawMessage, maxBytes int) (
 	// An empty table still writes its (empty) first shard, as it always has.
 	shards = append(shards, cur)
 
+	// Screen the sizes while the shards are still only in memory: written first
+	// and rejected after, an oversized shard is committed with the rest of the
+	// cycle's work.
+	if err := checkShardSizes(table, shards, jsonlShardHardLimit); err != nil {
+		return 0, err
+	}
+
 	tmpPaths := make([]string, len(shards))
+	// Best effort: a temp file that will not go is a .tmp nothing else reads,
+	// and the failure being reported is the one to report.
 	removeTmps := func() {
 		for _, p := range tmpPaths {
 			if p != "" {
-				os.Remove(p)
+				_ = ops.remove(p)
 			}
 		}
 	}
 	for i, shard := range shards {
 		tmpPath := filepath.Join(dir, jsonlShardName(table, i+1)+".tmp")
 		if err := os.WriteFile(tmpPath, shard.Bytes(), 0644); err != nil {
+			// The file the write failed on is half written and is not in
+			// tmpPaths yet, so name it too.
+			_ = ops.remove(tmpPath)
 			removeTmps()
 			return 0, fmt.Errorf("writing %s: %w", tmpPath, err)
 		}
 		tmpPaths[i] = tmpPath
 	}
+
+	// The export is rewritten whole every cycle, so a .bak here outlived the
+	// swap it belongs to — a crash cut it short — and holds nothing to restore.
+	if err := removeShardBackups(dir, table); err != nil {
+		removeTmps()
+		return 0, fmt.Errorf("clearing %s shard backups: %w", table, err)
+	}
+	existing, err := jsonlShardPaths(dir, table)
+	if err != nil {
+		removeTmps()
+		return 0, fmt.Errorf("listing %s shards: %w", table, err)
+	}
+	setAside := make([]string, len(existing)) // setAside[i] is where shard i went
+	restore := func() error {
+		var firstErr error
+		for i, path := range existing {
+			if setAside[i] == "" {
+				continue
+			}
+			if err := ops.rename(setAside[i], path); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("restoring %s: %w", filepath.Base(path), err)
+			}
+		}
+		return firstErr
+	}
+	// withdraw takes the shards it just published back out and then puts the
+	// export that was here back, so a half-done swap leaves one generation of
+	// the export rather than a mix of two. A shard that was never published is
+	// not an error to withdraw.
+	withdraw := func() error {
+		var firstErr error
+		for i := range tmpPaths {
+			path := filepath.Join(dir, jsonlShardName(table, i+1))
+			if err := ops.remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
+				firstErr = fmt.Errorf("withdrawing %s: %w", filepath.Base(path), err)
+			}
+		}
+		return errors.Join(firstErr, restore())
+	}
+	for i, path := range existing {
+		setAside[i] = path + ".bak"
+		if err := ops.rename(path, setAside[i]); err != nil {
+			setAside[i] = ""
+			// The rollback can fail too, and then the export is left with a
+			// gap in it, so both failures are reported.
+			err = errors.Join(err, restore())
+			removeTmps()
+			return 0, fmt.Errorf("setting %s aside: %w", filepath.Base(path), err)
+		}
+	}
+
 	for i, tmpPath := range tmpPaths {
-		if err := os.Rename(tmpPath, filepath.Join(dir, jsonlShardName(table, i+1))); err != nil {
+		if err := ops.rename(tmpPath, filepath.Join(dir, jsonlShardName(table, i+1))); err != nil {
+			err = errors.Join(err, withdraw())
 			removeTmps()
 			return 0, fmt.Errorf("renaming %s: %w", tmpPath, err)
 		}
 		tmpPaths[i] = ""
 	}
 
-	existing, err := jsonlShardPaths(dir, table)
-	if err != nil {
-		return 0, fmt.Errorf("listing %s shards: %w", table, err)
-	}
-	for _, path := range existing[len(shards):] {
-		if err := os.Remove(path); err != nil {
-			return 0, fmt.Errorf("removing stale shard %s: %w", path, err)
-		}
+	if err := ops.verify(dir, table, len(rows), jsonlShardHardLimit); err != nil {
+		// The export on disk is not the one that was asked for, so it does not
+		// replace the last one that verified.
+		return 0, errors.Join(err, withdraw())
 	}
 
-	if err := verifyJsonlShards(dir, table, len(rows), jsonlShardHardLimit); err != nil {
-		return 0, err
+	// The set-aside files are the stale tail of an earlier, longer export, and
+	// nothing else now that the new export has verified. Until they are gone
+	// the directory holds two generations of the export, so one that will not go
+	// withdraws the new export instead of leaving the pair to be committed
+	// (gt-fhcwe).
+	var residue []error
+	for _, bak := range setAside {
+		if err := ops.remove(bak); err != nil {
+			residue = append(residue, err)
+		}
+	}
+	if len(residue) > 0 {
+		errs := append([]error{fmt.Errorf("removing the stale %s shards", table)}, residue...)
+		return 0, errors.Join(append(errs, withdraw())...)
 	}
 	return len(rows), nil
+}
+
+// checkShardSizes returns an error naming the first shard over hardLimit, so a
+// shard too big to push is refused while the export is still only in memory
+// (gt-fhcwe).
+func checkShardSizes(table string, shards []*bytes.Buffer, hardLimit int64) error {
+	for i, shard := range shards {
+		if int64(shard.Len()) > hardLimit {
+			return fmt.Errorf("writing %s: shard %d is %d bytes, over the %d byte limit GitHub would refuse", table, i+1, shard.Len(), hardLimit)
+		}
+	}
+	return nil
+}
+
+// removeShardBackups deletes the {table}.jsonl.bak and {table}.N.jsonl.bak
+// files in dir. They are what a shard swap leaves behind when a crash cuts it
+// short, and the next cycle rewrites the whole export, so they are stale
+// duplicates that would otherwise ride into the commit.
+func removeShardBackups(dir, table string) error {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return err
+	}
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".jsonl.bak") || !strings.HasPrefix(name, table+".") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(dir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // verifyJsonlShards checks a table's export on disk: the shards hold wantRows
@@ -2325,8 +2465,9 @@ func sumRemoved(removed map[string]int) int {
 }
 
 // applyPollutionFilter reads each shard of each database's issues export,
-// filters out test pollution records, and rewrites the shard. Returns the records removed per
-// database; a database it removed nothing from has no entry.
+// filters out test pollution records, and rewrites the shard. Returns the
+// records removed per database; a database it removed nothing from has no
+// entry.
 //
 // The file is rewritten only when the read and the filter both succeed. A read
 // error means the buffer is a partial read, and writing it back would truncate
@@ -2362,9 +2503,9 @@ func (d *Daemon) applyPollutionFilter(gitRepo string, databases []string) map[st
 	return removedByDB
 }
 
-// filterIssuesFile filters one issues shard (issues.jsonl, issues.2.jsonl, ...) in place and returns the number of
-// records removed. It writes the file only when the whole read succeeded, so a
-// read error leaves it byte-identical.
+// filterIssuesFile filters one issues shard (issues.jsonl, issues.2.jsonl, ...)
+// in place and returns the number of records removed. It writes the file only
+// when the whole read succeeded, so a read error leaves it byte-identical.
 func filterIssuesFile(path string) (int, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -2388,20 +2529,30 @@ func filterIssuesFile(path string) (int, error) {
 // suspicious records that survived both the SQL scrub and the regex filter.
 // Returns the total number of suspicious records found across all databases.
 //
+// A shard it cannot read, and a database whose export it cannot find at all,
+// are errors rather than a clean result: this is the check that decides whether
+// a polluted export gets pushed, so anything it did not read leaves the export
+// unverified and halts the cycle (gt-fhcwe). Every database it is given
+// exported this cycle, and an export writes at least one issues shard, so
+// nothing to read means the export is not there.
+//
 // The scan uses the same uncapped reader as the filter: a long line must not
 // hide the records after it from the check that shares the filter's definition
 // (gt-q6ljl).
-func (d *Daemon) verifyNoPollution(gitRepo string, databases []string) int {
+func (d *Daemon) verifyNoPollution(gitRepo string, databases []string) (int, error) {
 	total := 0
 	for _, db := range databases {
 		paths, err := jsonlShardPaths(filepath.Join(gitRepo, db), "issues")
 		if err != nil {
-			continue
+			return total, fmt.Errorf("%s: %w", db, err)
+		}
+		if len(paths) == 0 {
+			return total, fmt.Errorf("%s: no issues export to check", db)
 		}
 		for _, issuesPath := range paths {
 			data, err := os.ReadFile(issuesPath)
 			if err != nil {
-				continue
+				return total, fmt.Errorf("%s: %w", filepath.Base(issuesPath), err)
 			}
 			reader := bufio.NewReader(bytes.NewReader(data))
 			for {
@@ -2422,7 +2573,7 @@ func (d *Daemon) verifyNoPollution(gitRepo string, databases []string) int {
 			}
 		}
 	}
-	return total
+	return total, nil
 }
 
 // parseLineCount parses a line count from `wc -l` style output or plain integer.

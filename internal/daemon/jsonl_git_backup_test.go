@@ -626,6 +626,70 @@ func TestApplyPollutionFilter_MissingExportSkipsQuietly(t *testing.T) {
 	}
 }
 
+// The per-shard loop keeps filtering the shards it can read: a shard that fails
+// is named and the others still lose their pollution, so one unreadable file
+// does not quietly disable the filter for the whole export (gt-fhcwe).
+func TestApplyPollutionFilter_OneUnreadableShardStillFiltersTheRest(t *testing.T) {
+	t.Parallel()
+	repo := filepath.Join(t.TempDir(), "backup")
+	dbDir := filepath.Join(repo, "gt")
+	// Shard 1 cannot be read — a directory where the file belongs — so only
+	// shard 2 is filtered.
+	if err := os.MkdirAll(filepath.Join(dbDir, "issues.jsonl"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	good := `{"id":"gt-aaa1","title":"First real bead"}`
+	polluted := `{"id":"gt-bbb2","title":"Test issue 7"}`
+	second := filepath.Join(dbDir, "issues.2.jsonl")
+	if err := os.WriteFile(second, []byte(good+"\n"+polluted+"\n"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	var logs strings.Builder
+	d := &Daemon{logger: log.New(&logs, "", 0)}
+	removed := d.applyPollutionFilter(repo, []string{"gt"})
+	if removed["gt"] != 1 || len(removed) != 1 {
+		t.Errorf("applyPollutionFilter = %v, want only gt=1, from the shard it could read", removed)
+	}
+	if !strings.Contains(logs.String(), "issues.jsonl left untouched") {
+		t.Errorf("the unreadable shard was not named; log = %q", logs.String())
+	}
+	data, err := os.ReadFile(second)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if string(data) != good+"\n" {
+		t.Errorf("issues.2.jsonl = %q, want only the real record", data)
+	}
+}
+
+// A shard the post-scrub check cannot read, and a database whose export it
+// cannot find, leave the export unverified instead of reading as clean: the
+// caller passes the databases this cycle exported, so nothing to read is the
+// export missing rather than a database that never had one (gt-fhcwe).
+func TestVerifyNoPollution_UnreadableShardIsAnError(t *testing.T) {
+	t.Parallel()
+	repo := filepath.Join(t.TempDir(), "backup")
+	if err := os.MkdirAll(filepath.Join(repo, "gt", "issues.2.jsonl"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+
+	if got, err := d.verifyNoPollution(repo, []string{"gt"}); err == nil || got != 0 || !strings.Contains(err.Error(), "issues.2.jsonl") {
+		t.Errorf("verifyNoPollution = (%d, %v), want an error naming the shard it could not read", got, err)
+	}
+	if got, err := d.verifyNoPollution(repo, []string{"missing"}); err == nil || got != 0 {
+		t.Errorf("verifyNoPollution = (%d, %v), want an error for a database with no export", got, err)
+	}
+	// A directory with no issues shard in it is no export either.
+	if err := os.MkdirAll(filepath.Join(repo, "empty"), 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if got, err := d.verifyNoPollution(repo, []string{"empty"}); err == nil || got != 0 {
+		t.Errorf("verifyNoPollution = (%d, %v), want an error for a database with no issues shard", got, err)
+	}
+}
+
 // A removed count above the export's total cannot come from one export; the
 // recount reports it and leaves the count alone rather than clamp it (gt-q6ljl).
 func TestRecountAfterFilter_RejectsRemovedAboveTotal(t *testing.T) {
