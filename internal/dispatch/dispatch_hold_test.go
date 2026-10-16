@@ -191,3 +191,31 @@ func TestSlingHoldFields_Verdicts(t *testing.T) {
 		})
 	}
 }
+
+// TestHasLabel pins the fold the hold rule and its callers share: a label typed
+// by hand matches whatever its case or padding (gt-qaelo).
+func TestHasLabel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		labels []string
+		want   string
+		found  bool
+	}{
+		{"exact", []string{"human-only"}, HumanOnlyLabel, true},
+		{"upper case", []string{"Human-Only"}, HumanOnlyLabel, true},
+		{"padded", []string{"  human-only "}, HumanOnlyLabel, true},
+		{"padded want", []string{"human-only"}, " HUMAN-ONLY ", true},
+		{"among others", []string{"gt:bug", "HUMAN-ONLY"}, HumanOnlyLabel, true},
+		{"absent", []string{"gt:bug"}, HumanOnlyLabel, false},
+		{"prefix only", []string{"human-only-ish"}, HumanOnlyLabel, false},
+		{"no labels", nil, HumanOnlyLabel, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := HasLabel(tc.labels, tc.want); got != tc.found {
+				t.Errorf("HasLabel(%q, %q) = %v, want %v", tc.labels, tc.want, got, tc.found)
+			}
+		})
+	}
+}

@@ -126,19 +126,26 @@ func SlingHoldFields(labels []string, assignee, design, notes string) string {
 	return holdFieldReason(withoutLabels(labels, routingHoldLabels), assignee, design, notes)
 }
 
+// HasLabel reports whether labels carries want, matching as the hold rule does
+// (case- and space-insensitive, since a label is typed by hand). A caller that
+// asks whether a bead wears a hold label, HumanOnlyLabel for one, reads it here
+// instead of folding case a second time (gt-qaelo).
+func HasLabel(labels []string, want string) bool {
+	want = strings.TrimSpace(want)
+	for _, label := range labels {
+		if strings.EqualFold(strings.TrimSpace(label), want) {
+			return true
+		}
+	}
+	return false
+}
+
 // withoutLabels returns labels with every entry of drop removed, matching as
 // the rule does (case- and space-insensitive). The input is never modified.
 func withoutLabels(labels, drop []string) []string {
 	out := make([]string, 0, len(labels))
 	for _, label := range labels {
-		kept := true
-		for _, d := range drop {
-			if strings.EqualFold(strings.TrimSpace(label), strings.TrimSpace(d)) {
-				kept = false
-				break
-			}
-		}
-		if kept {
+		if !HasLabel(drop, label) {
 			out = append(out, label)
 		}
 	}
