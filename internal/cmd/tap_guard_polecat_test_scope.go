@@ -217,6 +217,13 @@ func heavyTestPackageList() []string {
 // ("." ".*" "" "^" "(?i)") runs every test whatever the package holds.
 var runFilterProbes = []string{"TestA", "ExampleB", "BenchmarkC", "FuzzD", "x"}
 
+// runTestFuncProbes are unrelated TestXxx names. A pattern that matches every
+// one of them ("Test" "^Test" "^Test.*" "T") runs every test function whatever
+// the package holds, though it misses the Example and Benchmark probes above.
+// A pattern naming one test or a prefix of some ("TestSpecific" "^TestApply")
+// matches at most one of them.
+var runTestFuncProbes = []string{"TestFoo", "TestQuux", "TestZeta"}
+
 // goTestRunFilterBounds reports whether the tokens after "go test" carry a
 // -run filter that bounds the run. A filter may come as -run before the
 // packages, or as -test.run after "--" (passed straight to the test binary),
@@ -256,12 +263,17 @@ func runPatternBoundsRun(pattern string) bool {
 	if err != nil {
 		return true
 	}
-	for _, probe := range runFilterProbes {
+	return !matchesAllProbes(re, runFilterProbes) && !matchesAllProbes(re, runTestFuncProbes)
+}
+
+// matchesAllProbes reports whether re matches every name in probes.
+func matchesAllProbes(re *regexp.Regexp, probes []string) bool {
+	for _, probe := range probes {
 		if !re.MatchString(probe) {
-			return true
+			return false
 		}
 	}
-	return false
+	return true
 }
 
 // polecatHeavyTarget reports the heavy packages a go test package-argument
