@@ -893,7 +893,7 @@ gt attention ack <key>       # hide an item until its condition clears
 the `events.jsonl` line, and `--since DURATION` replays that window first. One
 `--follow --wake-only` monitor replaces a monitor per condition.
 
-The dashboard's Needs you panel lists the wake events that stand: a `wake=true`
+The dashboard's Attention panel lists the wake events that stand: a `wake=true`
 raised line is a row keyed by its `key` and tagged with its rule id until a
 cleared line or an ack takes it off. Each new one is also announced as an alert,
 which is a toast and a browser notification while the operator has alerts on.
@@ -936,7 +936,7 @@ it — and `gt attention` prints a `STALE` header and exits 3.
 
 A question the overseer has for Sloan is a bead in the town database under the
 label `overseer-question`, so it survives the overseer's session and the
-dashboard's Needs you panel and the daemon read it.
+dashboard's Attention panel and the daemon read it.
 
 ```bash
 gt ask "<title>" <<'EOF'   # file one; body sections below, on stdin

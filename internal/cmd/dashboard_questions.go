@@ -9,7 +9,7 @@ import (
 	"github.com/steveyegge/gastown/internal/question"
 )
 
-// The question rows of the dashboard's Needs you panel: the questions the
+// The question rows of the dashboard's Attention panel: the questions the
 // overseer has filed for Sloan, so he can see what is waiting on him and answer
 // it from a terminal. It reads the
 // town's own beads database, which is where a question is filed — a reader

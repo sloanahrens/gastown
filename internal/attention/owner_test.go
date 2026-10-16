@@ -45,16 +45,30 @@ func TestEveryRuleHasAnOwner(t *testing.T) {
 	}
 }
 
-// The rows the table cannot decide are the overseer's: an escalation.open row
-// carries nothing about who raised the escalation, and EscalationOwner is what
-// reads that off the escalation itself, so the family row must not claim the
-// human. A rule this binary does not know reads the same way, as a line written
-// before the table existed (gt-71714).
-func TestRuleOwnerFallsBackToTheOverseer(t *testing.T) {
+// A rule the table has no row for — one a newer daemon wrote — reads by its
+// family: a host reading and an escalation belong to the human, and everything
+// else to the overseer, as a line written before the table existed reads. The
+// rows the table cannot decide stay the overseer's own: an escalation.open row
+// carries nothing about who raised the escalation, and EscalationOwner reads
+// that off the escalation itself, so the family's own row must not claim the
+// human and the families below must not overrule it (gt-71714, gt-bi6w0).
+func TestRuleOwnerReadsAnUnknownRuleByItsFamily(t *testing.T) {
 	t.Parallel()
-	for _, rule := range []string{RuleEscalation, "something.new", ""} {
-		if got := RuleOwner(rule); got != OwnerOverseer {
-			t.Errorf("RuleOwner(%q) = %q, want the overseer default", rule, got)
+
+	for _, tc := range []struct {
+		rule string
+		want Owner
+	}{
+		{RuleEscalation, OwnerOverseer}, // the family's row, corrected per escalation
+		{"escalation.unhandled_hours", OwnerSloan},
+		{"host.disk_full", OwnerSloan},
+		{"landing.new_rule", OwnerOverseer}, // landing.* is the town's own
+		{"question.expired", OwnerOverseer}, // a question's owner is its state, which only a row states
+		{"something.new", OwnerOverseer},
+		{"", OwnerOverseer},
+	} {
+		if got := RuleOwner(tc.rule); got != tc.want {
+			t.Errorf("RuleOwner(%q) = %q, want %q", tc.rule, got, tc.want)
 		}
 	}
 }

@@ -51,7 +51,7 @@ func TestDeepReviewPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 	// the Report it feeds.
 	html := string(indexHTML)
 	if a, d, r := strings.Index(html, `id="attention"`), strings.Index(html, `id="deepreview"`), strings.Index(html, `id="report"`); !(a < d && d < r) {
-		t.Errorf("the Deep review section is not between Needs you and Report (%d, %d, %d)", a, d, r)
+		t.Errorf("the Deep review section is not between Attention and Report (%d, %d, %d)", a, d, r)
 	}
 }
 

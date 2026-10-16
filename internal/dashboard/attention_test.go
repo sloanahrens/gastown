@@ -28,7 +28,7 @@ func TestBuildAttentionMergesTheReadersIntoOneTaggedList(t *testing.T) {
 	}
 	ask := &Questions{
 		Rows: []QuestionRow{
-			{ID: "gt-q1", Title: "retry policy", Priority: 0, Recommended: "retry twice", HeldCount: 2,
+			{ID: "gt-q1", Title: "retry policy", Priority: 0, Question: "retry?", Recommended: "retry twice", HeldCount: 2,
 				Held: []string{"gt-h1"}, Effort: "quick", AgeSec: ageOfSec(3600), State: QuestionAwaiting},
 			{ID: "gt-q2", Title: "split the bead", Priority: 3, AgeSec: ageOfSec(60), State: QuestionAnswered},
 		},
@@ -72,11 +72,13 @@ func TestBuildAttentionMergesTheReadersIntoOneTaggedList(t *testing.T) {
 		t.Errorf("the list counts %d rows for the human, want 3", at.Mine)
 	}
 
-	// The question's row carries what answering it costs, from the payload the
-	// reader already built rather than a second join (gt-0ft4p).
+	// The question's row carries the question's own words and what answering it
+	// costs, from the payload the reader already built rather than a second
+	// join (gt-0ft4p).
 	q := at.Rows[0]
-	if q.Priority != 0 || q.Recommended != "retry twice" || q.HeldCount != 2 || q.Effort != "quick" || q.State != QuestionAwaiting {
-		t.Errorf("the question row is %+v, want the priority, recommendation, held count, effort and state the reader sent", q)
+	if q.Priority != 0 || q.Question != "retry?" || q.Recommended != "retry twice" ||
+		q.HeldCount != 2 || q.Effort != "quick" || q.State != QuestionAwaiting {
+		t.Errorf("the question row is %+v, want the question, the priority, recommendation, held count, effort and state the reader sent", q)
 	}
 	if len(q.Held) != 1 || q.Held[0] != "gt-h1" {
 		t.Errorf("the question row holds %v, want the bead the description names", q.Held)
@@ -129,6 +131,23 @@ func TestAttentionDoesNotListABeadTwice(t *testing.T) {
 		if r.ID == "esc:hq-1" || r.ID == "ask:gt-q1" {
 			t.Errorf("row %+v repeats a bead the escalation and question rows already carry", r)
 		}
+	}
+}
+
+// The human's share is a floor when a reader capped rows out of the list: the
+// owner of a capped row is what that read never took, so the count the strip
+// draws says so rather than leaving the capped rows out in silence (gt-bi6w0).
+func TestAttentionCountsTheHumanRowsBesideTheCap(t *testing.T) {
+	t.Parallel()
+
+	at := buildAttention(
+		&Escalations{Rows: []EscalationRow{{ID: "hq-1", Title: "disk full", Severity: "high"}}, More: 4},
+		&Questions{Rows: []QuestionRow{{ID: "gt-q1", Title: "retry?", State: QuestionAwaiting}}, More: 1},
+		nil, attentionNow,
+	)
+	if at.Mine != 1 || at.More != 5 {
+		t.Errorf("the list counts %d rows for the human beside %d capped out, want the one awaiting question and both caps",
+			at.Mine, at.More)
 	}
 }
 

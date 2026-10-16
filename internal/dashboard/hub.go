@@ -348,6 +348,11 @@ func (h *Hub) broadcastLocked(f []byte) {
 }
 
 func (h *Hub) publishLocked() {
+	// The Attention list is rebuilt here rather than where each of its readers
+	// lands: a queue item's age is the published instant against the one it was
+	// raised at, so a list built once and published again would show a wait that
+	// stopped growing (gt-bi6w0).
+	h.attentionLocked()
 	h.broadcastLocked(frame("state", h.stateLocked()))
 }
 
@@ -404,7 +409,6 @@ func (h *Hub) pollAttention() {
 		h.addAlertLocked(al)
 	}
 	if len(removed) > 0 || len(raised) > 0 {
-		h.attentionLocked()
 		h.publishLocked()
 	}
 }
@@ -594,7 +598,6 @@ func (h *Hub) pollQuestions() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Questions = q
-	h.attentionLocked()
 	h.publishLocked()
 }
 
@@ -646,13 +649,13 @@ func (h *Hub) pollEscalation() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.state.Escalations = e
-	h.attentionLocked()
 	h.publishLocked()
 }
 
 // attentionLocked rebuilds the Attention panel from the three readers that feed
 // it, so its one list is never a picture of a reader the hub has already moved
-// past.
+// past. publishLocked calls it, so every published list is drawn from the
+// readers as they stand at that instant.
 func (h *Hub) attentionLocked() {
 	h.state.Attention = buildAttention(h.state.Escalations, h.state.Questions, h.alerts.Standing(), h.cfg.Now())
 }

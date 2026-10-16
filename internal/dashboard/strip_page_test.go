@@ -27,7 +27,7 @@ func TestTheStripDrawsEachFactOnce(t *testing.T) {
 		`oldest == null ? null : "oldest " + fmtDur(oldest)`,
 		// What needs the human, off the one merged list the panel below draws.
 		`const at = s.attention || null;`,
-		`fact(box, String(at.mine || 0), "needs you",`,
+		`fact(box, String(mine) + (capped ? "+" : ""), "needs you",`,
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderStrip has no %q", want)

@@ -52,8 +52,11 @@ type AttentionRow struct {
 	Level    string `json:"level,omitempty"`
 	// Priority is a question's bd priority, 0-4.
 	Priority int `json:"priority,omitempty"`
-	// Recommended is the answer the overseer recommends to a question, and
-	// HeldCount, Held and Effort what answering it costs and what it unblocks.
+	// Question is the question's own words, the description's ## Question
+	// section, and Recommended the answer the overseer recommends to it;
+	// HeldCount, Held and Effort are what answering it costs and what it
+	// unblocks.
+	Question    string   `json:"question,omitempty"`
 	Recommended string   `json:"recommended,omitempty"`
 	HeldCount   int      `json:"held_count,omitempty"`
 	Held        []string `json:"held,omitempty"`
@@ -81,9 +84,11 @@ type Attention struct {
 	Rows []AttentionRow `json:"rows"`
 	// More counts the rows the readers capped out of Rows.
 	More int `json:"more,omitempty"`
-	// Mine is how many of Rows are the human's, which is the number the strip's
-	// "needs you" fact draws. The rows a read capped out of the list are counted
-	// nowhere: their owner is what the read did not carry.
+	// Mine is how many of Rows the human owns, which is the number the strip's
+	// "needs you" fact draws. A non-zero More makes it a floor rather than a
+	// whole: the owner of a row the reader capped out is what that read never
+	// took, so the strip draws the count as "N+" rather than as a number that
+	// leaves the capped rows out in silence.
 	Mine int `json:"mine"`
 	// Failed names the readers behind the list that could not be read
 	// ("escalations", "questions").
@@ -144,6 +149,7 @@ func buildAttention(esc *Escalations, ask *Questions, items []Alert, now time.Ti
 				Title:       r.Title,
 				AgeSec:      r.AgeSec,
 				Priority:    r.Priority,
+				Question:    r.Question,
 				Recommended: r.Recommended,
 				HeldCount:   r.HeldCount,
 				Held:        r.Held,

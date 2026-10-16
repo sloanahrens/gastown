@@ -185,6 +185,7 @@ section.collapsed>h2{border-bottom:0}
 .ojline{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;padding:2px 0;overflow-wrap:anywhere}
 .ojage,.okind{color:var(--dim);white-space:nowrap}
 .qrec,.qheld{color:var(--dim);margin:2px 0}
+.qtext{margin:2px 0}
 .qage{color:var(--dim)}
 .qpri,.qeffort{color:var(--dim);font-size:11px;white-space:nowrap}
 .qpri.warnc{color:var(--amber)}
@@ -238,7 +239,7 @@ a.hrow:hover{background:#19212b}
 
 <div class="grid">
   <div class="col">
-    <section><h2>Needs you <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>
+    <section><h2>Attention <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>
     <section><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>
     <section><h2>Deep review <span class="r" id="deepreviewnote"></span></h2><div class="body" id="deepreview"></div></section>
     <section><h2>Report <span class="r" id="reportnote"></span></h2><div class="body" id="report"></div></section>
@@ -459,7 +460,7 @@ function renderStrip(s) {
      tip: ["beads submitted and waiting for the landing worker", why, q == null && !why ? "the read that lists them has not come back" : null, oldest == null ? null : "the age is the oldest one's"].filter(Boolean).join(" · ")});
 
   // Needs you: the human's share of the one attention list, off the same
-  // payload the Needs you panel draws, so the strip and the panel cannot
+  // payload the Attention panel draws, so the strip and the panel cannot
   // disagree about what is waiting (gt-bi6w0).
   const at = s.attention || null;
   const failed = at ? (at.failed || []) : [], pending = at ? (at.pending || []) : [];
@@ -468,9 +469,16 @@ function renderStrip(s) {
   else if (failed.length) fact(box, "unavailable", "needs you", {cls: a.needs_you || "",
     tip: "the " + waiters + " could not be read" + (pending.length ? ", and the " + unread + " have not been read yet" : "")});
   else if (pending.length) fact(box, "–", "needs you", {cls: a.needs_you || "", tip: "the " + unread + " have not been read yet"});
-  else fact(box, String(at.mine || 0), "needs you", {cls: a.needs_you || "",
-    tip: (at.mine || 0) + " of the " + (at.rows || []).length + " rows waiting on a decision " + ((at.mine || 0) === 1 ? "is" : "are") +
-      " the human's · the Needs you panel below has the rows"});
+  else {
+    // A reader that capped rows out of the list never read their owner, so the
+    // human's count is a floor: the strip draws "N+" rather than a number that
+    // leaves the capped rows out in silence (gt-bi6w0).
+    const mine = at.mine || 0, capped = at.more || 0;
+    fact(box, String(mine) + (capped ? "+" : ""), "needs you", {cls: a.needs_you || "",
+      tip: mine + " of the " + (at.rows || []).length + " rows waiting on a decision " + (mine === 1 ? "is" : "are") + " the human's" +
+        (capped ? " · " + capped + " more the readers capped out, whose owner they did not read" : "") +
+        " · the Attention panel below has the rows"});
+  }
 
   // The host: its idle share leads, and the load average trails it. macOS
   // counts running threads in its load average, so a load-led reading calls a
@@ -2143,12 +2151,13 @@ function renderAttention(s) {
   // waiting" and "the list could not be read" must not look alike. The rows the
   // readers did return are still drawn beside the line.
   if (failed.length) box.append(el("div", "badc", "unavailable: the " + failed.join(" and the ") + " could not be read"));
+  // A reader that has not reported yet is not a reader that found nothing, so
+  // its absence is named before "nothing waiting" can stand for it.
+  if (pending.length) box.append(el("div", "empty", "the " + pending.join(" and the ") + " have not been read yet"));
   if (!rows.length) {
-    if (!failed.length) box.append(el("div", "empty", "nothing needs you"));
+    if (!failed.length && !pending.length) box.append(el("div", "empty", "nothing waiting"));
     return;
   }
-  // A reader that has not reported yet is not a reader that found nothing.
-  if (pending.length) box.append(el("div", "empty", "the " + pending.join(" and the ") + " have not been read yet"));
   for (const r of rows) box.append(attentionRow(r));
 }
 
@@ -2180,9 +2189,9 @@ function renderOwnerChips(rows) {
 function applyOwnerFilter() { for (const r of $("attention").children) if (r.dataset.owner) r.hidden = !shownOwners.has(r.dataset.owner); }
 
 // attentionRow is one row of the list. Every row carries its owner and its age;
-// a question adds what answering it holds up and the line that answers it, an
-// escalation its severity and who raised it, and a queue item the rule that
-// raised it.
+// a question adds its own words, the answer recommended to it, what answering
+// it holds up and the line that answers it, an escalation its severity and who
+// raised it, and a queue item the rule that raised it.
 function attentionRow(r) {
   const row = el("div", "arow");
   row.dataset.owner = r.owner;
@@ -2211,6 +2220,7 @@ function attentionRow(r) {
     row.append(el("span", "qstate", r.state === "answered" ? "answered, overseer acting" : "awaiting you"));
   }
   if (r.age_sec != null) row.append(el("span", "qage", fmtDur(r.age_sec)));
+  if (r.question) row.append(el("div", "qtext", r.question));
   if (r.recommended) row.append(el("div", "qrec", "Recommended: " + r.recommended));
   const held = [];
   if (r.held_count) held.push("holds " + r.held_count + (r.held_count === 1 ? " bead" : " beads"));

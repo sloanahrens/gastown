@@ -27,9 +27,8 @@ const HumanAddress = "overseer"
 // ruleOwners is the owner table: one row per rule in rules.go, and the one
 // place that decides whether an item waits on the human or on the overseer.
 // Every rule has a row — TestEveryRuleHasAnOwner fails for a rule added to the
-// flags table without one — because the fallback below is a courtesy to a rule
-// this binary does not know, never a way for a new rule to reach the human's
-// panel unnoticed.
+// flags table without one — so the fallback below answers only for a rule this
+// binary has never seen, one a newer daemon wrote.
 //
 // The three rules a row cannot decide alone are noted at their rows:
 // escalation.open reads the escalation (EscalationOwner), and the two question
@@ -81,13 +80,28 @@ var ruleOwners = map[string]Owner{
 	RuleDeployFailed: OwnerOverseer,
 }
 
-// RuleOwner returns the owner of rule. A rule with no row — one a newer daemon
-// wrote — is the overseer's, as a line written before the owner table existed
-// reads: the reader that finds it is an agent, and the human is woken by the
-// push rules rather than by every row this binary cannot classify.
+// humanFamilies are the rule families the table gives the human as a whole:
+// host readings and escalations. They answer for a rule the table has no row
+// for, so a host or escalation rule a newer daemon writes reaches the human's
+// panel rather than the overseer's. escalation.open is the one row that
+// overrides its own family, because only the escalation says who raised it
+// (EscalationOwner).
+var humanFamilies = []string{"host.", "escalation."}
+
+// RuleOwner returns the owner of rule. A rule the table has no row for reads by
+// its family: a host reading or an escalation is the human's, and everything
+// else is the overseer's, as a line written before the owner table existed
+// reads. A newer daemon's host rule that fell to the overseer would be a
+// reading about the machine nothing wakes the person for, which is why the
+// families are not all read the same way.
 func RuleOwner(rule string) Owner {
 	if o, ok := ruleOwners[rule]; ok {
 		return o
+	}
+	for _, family := range humanFamilies {
+		if strings.HasPrefix(rule, family) {
+			return OwnerSloan
+		}
 	}
 	return OwnerOverseer
 }
