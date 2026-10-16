@@ -56,6 +56,19 @@ func TestIsLeadingBranchCreation(t *testing.T) {
 		{"chained after unrelated segment", "echo hi && git checkout -b temp origin/branch", false},
 		{"chained after pr create", "gh pr create --title foo && git checkout -b temp", false},
 		{"chained before pr create", "git checkout -b temp && gh pr create --title foo", true},
+		// gt-g27m7: the exemption reads the same spellings the judge does, so
+		// a clustered flag or a long spelling is the same leading creation.
+		{"switch --create", "git switch --create feature/x", true},
+		{"switch -q --create", "git switch -q --create feature/x", true},
+		{"switch --create=", "git switch --create=feature/x", true},
+		{"switch --force-create", "git switch --force-create feature/x", true},
+		{"switch --force-create=", "git switch --force-create=feature/x", true},
+		{"switch -qC clustered", "git switch -qC feature/x", true},
+		{"checkout -qB clustered", "git checkout -qB feature/x", true},
+		{"checkout -b glued to its name", "git checkout -bfeature/x", true},
+		{"checkout --create is not a checkout flag", "git checkout --create feature/x", false},
+		{"switch --force is not a creation", "git switch --force feature/x", false},
+		{"--force-create chained after pr create", "gh pr create --title foo && git switch --force-create temp", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

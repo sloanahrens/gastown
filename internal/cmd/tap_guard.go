@@ -463,42 +463,58 @@ func isGhPRCreate(argv []string) bool {
 }
 
 // isBranchCreation reports whether argv, a command from its command word on,
-// is git checkout -b/-B or git switch -c/-C/--create, with other flags before
-// or after the creation flag ("checkout -q -b x", "checkout -bx", "switch
-// --create x"). git may be a path and may carry global options (-C dir, -c k=v)
-// in front of the subcommand. Words after "--" are paths, not flags. The
-// capitals create or reset the branch their lowercase spellings name, so the
-// guard reads both (gt-5wtmz).
+// is git checkout -b/-B or git switch -c/-C/--create/--force-create, with other
+// flags before or after the creation flag ("checkout -q -b x", "checkout -bx",
+// "switch --create x"). git may be a path and may carry global options (-C dir,
+// -c k=v) in front of the subcommand. Words after "--" are paths, not flags.
+// The capitals create or reset the branch their lowercase spellings name, so
+// the guard reads both (gt-5wtmz); --force-create is the long spelling of -C
+// and is read with it (gt-g27m7).
 func isBranchCreation(argv []string) bool {
 	if len(argv) == 0 || filepath.Base(argv[0]) != "git" {
 		return false
 	}
 	rest := argv[1:]
 	at := gitSubcommandIndex(rest)
-	if at < 0 {
-		return false
-	}
-	var creates func(flag string) bool
-	switch rest[at] {
-	case "checkout":
-		creates = func(flag string) bool {
-			return shortFlagCluster(flag, 'b') || shortFlagCluster(flag, 'B')
-		}
-	case "switch":
-		creates = func(flag string) bool {
-			return shortFlagCluster(flag, 'c') || shortFlagCluster(flag, 'C') ||
-				flag == "--create" || strings.HasPrefix(flag, "--create=")
-		}
-	default:
+	if at < 0 || !branchCreatingSubcommand(rest[at]) {
 		return false
 	}
 	for _, flag := range rest[at+1:] {
 		if flag == "--" {
 			break
 		}
-		if creates(flag) {
+		if branchCreationFlag(rest[at], flag) {
 			return true
 		}
+	}
+	return false
+}
+
+// branchCreatingSubcommand reports whether subcommand is one git reads a
+// branch-creation flag for.
+func branchCreatingSubcommand(subcommand string) bool {
+	return subcommand == "checkout" || subcommand == "switch"
+}
+
+// branchCreationFlag reports whether flag is subcommand's branch-creation
+// option in any spelling git's option parser accepts: the bare short flag
+// (-b/-B, -c/-C), a cluster of short flags ("-qB", "-qb"), a short flag glued
+// to its value ("-bx"), and the long spellings --create and --force-create,
+// bare or carrying their value after an "=" ("--create=feature/x"). checkout
+// has no long spelling for -b, and -C's long form is --force-create (gt-g27m7).
+//
+// Both halves of the guard read through this one predicate — isBranchCreation
+// judges with it, isLeadingBranchCreation exempts with it — because an
+// exemption narrower than the judge denies a polecat the spellings it may use
+// for the same creation.
+func branchCreationFlag(subcommand, flag string) bool {
+	switch subcommand {
+	case "checkout":
+		return shortFlagCluster(flag, 'b') || shortFlagCluster(flag, 'B')
+	case "switch":
+		return shortFlagCluster(flag, 'c') || shortFlagCluster(flag, 'C') ||
+			flag == "--create" || strings.HasPrefix(flag, "--create=") ||
+			flag == "--force-create" || strings.HasPrefix(flag, "--force-create=")
 	}
 	return false
 }
@@ -770,9 +786,11 @@ func isPRCreateCommand(command string) bool {
 }
 
 // isLeadingBranchCreation reports whether command's leading segment is a
-// local branch creation — "git checkout -b" or "git switch -c" — with
-// containment for the creation flag so an extra flag between the subcommand
-// and "-b"/"-c" (e.g. "git checkout -q -b temp") still matches.
+// local branch creation — "git checkout -b" or "git switch -c" — reading the
+// creation flag with branchCreationFlag, so containment holds for an extra
+// flag ("git checkout -q -b temp"), a cluster ("git checkout -qB temp") and
+// the long spellings ("git switch --create temp", "git switch --force-create
+// temp") alike (gt-g27m7).
 //
 // The one exemption the pr-workflow guard grants is keyed on this shape: a
 // polecat's fresh session branch (gt-6hg7), scoped to its own worktree.
@@ -795,17 +813,21 @@ func isLeadingBranchCreation(command string) bool {
 	if len(seg) < 2 || !strings.EqualFold(filepath.Base(seg[0]), "git") {
 		return false
 	}
-	lower := make([]string, len(seg))
-	for i, tok := range seg {
-		lower[i] = strings.ToLower(tok)
+	// The subcommand decides which flag letters create a branch, so it is read
+	// first: "-b" is checkout's creation flag and "-c" is switch's, and the
+	// long spellings belong to switch alone.
+	sub := ""
+	for _, tok := range seg[1:] {
+		if lowered := strings.ToLower(tok); branchCreatingSubcommand(lowered) {
+			sub = lowered
+			break
+		}
 	}
-	return (containsToken(lower, "checkout") || containsToken(lower, "switch")) &&
-		(containsToken(lower, "-b") || containsToken(lower, "-c"))
-}
-
-func containsToken(tokens []string, want string) bool {
-	for _, t := range tokens {
-		if t == want {
+	if sub == "" {
+		return false
+	}
+	for _, flag := range seg[1:] {
+		if branchCreationFlag(sub, flag) {
 			return true
 		}
 	}
