@@ -133,9 +133,8 @@ type ClaudePlan struct {
 	// rather than drawing a month of no spend as $0.00 (gt-d8sem).
 	APIEquivalentWeekUSD  *float64 `json:"api_equivalent_week_usd,omitempty"`
 	APIEquivalentMonthUSD *float64 `json:"api_equivalent_month_usd,omitempty"`
-	// Unpriced names the Claude models in those windows whose family the price
-	// table has no rates for; they count zero, so the figures beside this list
-	// are a floor.
+	// Unpriced names the Claude models in those windows the price table cannot
+	// price; they count zero, so the figures beside this list are a floor.
 	Unpriced []string `json:"unpriced,omitempty"`
 	// SampledAt is the newest sample's instant, in epoch seconds.
 	SampledAt int64 `json:"sampled_at"`
@@ -145,10 +144,11 @@ type ClaudePlan struct {
 	// Unavailable says the series could not be read, which the page draws as
 	// itself and never as a week at 0%.
 	Unavailable bool `json:"unavailable,omitempty"`
-	// StateError names the closeout history or trim write that failed on this
-	// poll. The numbers above are still the poll's best answer; the page shows
-	// the error on hover so a history that stopped growing is not mistaken for
-	// one that is healthy.
+	// StateError names what the poll could not do: the closeout history or trim
+	// write that failed, or the price table the API-equivalent figures could not
+	// use. The numbers above are still the poll's best answer; the page shows the
+	// error on hover, so a history that stopped growing is not mistaken for a
+	// healthy one, and a missing figure is not read as a month of no spend.
 	StateError string `json:"state_error,omitempty"`
 
 	// ClaudePlanMonth is the billing month's rollup (gt-bcq4m).
@@ -165,8 +165,12 @@ type ClaudePlanReader struct {
 	planUSDMonth float64
 	// usage is where the API-equivalent figures' tokens come from: the usage
 	// scan's records, read at the same instant the week is measured at. A reader
-	// without one draws the plan line alone, as it did before gt-d8sem.
-	usage      func(now time.Time) []UsageRecord
+	// without one draws the plan line alone.
+	usage func(now time.Time) []UsageRecord
+	// prices is the table the figures' rates come from, read on each poll so a
+	// table this process cannot decode is reported rather than assumed away. It
+	// is EmbeddedClaudePrices unless a test points it elsewhere.
+	prices     func() (*ClaudePriceTable, error)
 	renewalDay int
 }
 
@@ -179,6 +183,7 @@ func NewClaudePlanReader(path string, planUSDMonth float64) *ClaudePlanReader {
 		path:         path,
 		historyPath:  claudePlanWeeksPath(path),
 		planUSDMonth: planUSDMonth,
+		prices:       EmbeddedClaudePrices,
 		renewalDay:   ClaudePlanDefaultRenewalDay,
 	}
 }
@@ -220,7 +225,9 @@ func (r *ClaudePlanReader) Read(now time.Time) *ClaudePlan {
 			stateErrs = append(stateErrs, fmt.Errorf("series trim: %w", err))
 		}
 		p = ComputeClaudePlan(samples, now, r.planUSDMonth)
-		r.attachAPIEquivalent(&p, now)
+		if err := r.attachAPIEquivalent(&p, now); err != nil {
+			stateErrs = append(stateErrs, err)
+		}
 	}
 	// The history outlives the series, so an unreadable series still reports the
 	// months already recorded.
@@ -236,25 +243,36 @@ func (r *ClaudePlanReader) Read(now time.Time) *ClaudePlan {
 }
 
 // attachAPIEquivalent joins the API-equivalent figures to a payload the series
-// answered. It leaves them unset for a town whose records cannot be read: a
-// figure of zero there would be the page's own lie, since "nothing ran" and
-// "the records are gone" are different months (gt-xyzs8, gt-d8sem).
-func (r *ClaudePlanReader) attachAPIEquivalent(p *ClaudePlan, now time.Time) {
+// answered. Records that cannot be read leave both figures unset and are not an
+// error: a figure of zero there would be the page's own lie, since "nothing
+// ran" and "the records are gone" are different months (gt-xyzs8, gt-d8sem).
+//
+// A price table it cannot use is an error instead, so the two are not one
+// silence. A table that will not decode leaves the figures unset, and one that
+// has aged past claudePricesMaxAge prices them from rates nobody has refreshed;
+// the caller reports either on the block, where the page draws it.
+func (r *ClaudePlanReader) attachAPIEquivalent(p *ClaudePlan, now time.Time) error {
 	if r.usage == nil {
-		return
+		return nil
 	}
 	recs := r.usage(now)
 	if recs == nil {
-		return
+		return nil
 	}
-	prices, err := EmbeddedClaudePrices()
+	prices, err := r.prices()
 	if err != nil {
-		return
+		return fmt.Errorf("price table: %w", err)
 	}
 	eq := APIEquivalent(recs, prices, now, p.WeeklyResetsAt)
 	week, month := eq.WeekUSD, eq.MonthUSD
 	p.APIEquivalentWeekUSD, p.APIEquivalentMonthUSD = &week, &month
 	p.Unpriced = eq.Unpriced
+	// The figures stand as the poll's best answer and the age goes beside them,
+	// so a figure drawn from last quarter's rates is not read as a current one.
+	if age, aged := prices.Aged(now); aged {
+		return fmt.Errorf("prices as of %s, %s old: re-read the list prices", prices.AsOf, age.Round(24*time.Hour))
+	}
+	return nil
 }
 
 // ComputeClaudePlan folds the samples into the payload the page draws.
