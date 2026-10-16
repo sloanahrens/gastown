@@ -483,8 +483,10 @@ func heredocSubstitutionSpans(body string) []substitutionSpan {
 // the "$(...)" on the next line. The comment body is still scanned for
 // substitutions, so a "$(" in it is judged as before (over-blocked, never
 // passed). A "$'" opens an ANSI-C string, where "\'" does not close the quote.
-// Both reads end a quoted span earlier than the bare scan did, so they add
-// spans and never drop one (gt-2yc0u).
+// The comment read ends a quoted span earlier than the bare scan did, so it only
+// adds spans. The ANSI-C read ends one later, so a "$(...)" after a "\'" inside
+// $'...' is now literal text and no longer a span, as the shell reads it
+// (gt-2yc0u).
 func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 	var spans []substitutionSpan
 	inDouble := false
