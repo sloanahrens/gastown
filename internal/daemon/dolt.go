@@ -401,11 +401,9 @@ func (m *DoltServerManager) Status() *DoltServerStatus {
 	return status
 }
 
-// isRunning checks if the Dolt server process is running. On the false path the
-// pid it returns is the pid it observed gone — the tracked process's, or the
-// one the pid file names — so EnsureRunning can report a crash rather than a
-// server that was never up (gt-ijgck). It is 0 when no server process was ever
-// identified or the only pid in hand is alive but not answering.
+// isRunning reports whether the Dolt server process is running, and on the
+// false path what it observed gone: the tracked process's pid, or the pid the
+// pid file names, or 0 when the only pid in hand is alive but not answering.
 // Must be called with m.mu held.
 func (m *DoltServerManager) isRunning() (int, bool) {
 	if m.runningFn != nil {
