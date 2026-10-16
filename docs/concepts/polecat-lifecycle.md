@@ -19,7 +19,7 @@ Polecats use these primary operating states:
 | **Idle** | Available before assignment | Spawned or explicitly prepared for work |
 | **Done** | Work completed and session retired | After `gt done` completes successfully |
 | **Stalled** | Session stopped mid-work | Interrupted, crashed, or timed out without being nudged |
-| **Zombie** | Completed work but failed to exit | `gt done` failed during cleanup |
+| **Zombie** | A live tmux session whose worktree directory is gone | A polecat nuked incompletely; `gt polecat list` reports a polecat-named session with an agent bead but no sandbox |
 
 **State cycle (happy path):**
 
@@ -46,7 +46,7 @@ No idle reuse in the happy path. Polecats move: IDLE -> WORKING -> DONE.
 - **Idle** = not yet assigned and safe to use.
 - **Done** = work done, session killed, waiting for the landing worker and cleanup.
 - **Stalled** = supposed to be working, but stopped. The daemon restarts it.
-- **Zombie** = finished work, tried to exit, but cleanup failed. Stuck in limbo.
+- **Zombie** = a live tmux session with no worktree directory (the polecat was nuked incompletely); the same session with no agent bead is foreign, not a zombie.
 
 ## The Retired Completion Model
 
@@ -102,7 +102,7 @@ worker and cleanup own branch and worktree state after handoff.
 |-------|-----------|-----------|-------------|
 | **Identity** | Agent bead, CV chain, work history | Permanent | Never dies |
 | **Sandbox** | Git worktree, branch | Per active assignment/cleanup window | Created for work, retired after cleanup |
-| **Session** | Claude (tmux pane), context window | Ephemeral per step | Cycles per step/handoff |
+| **Session** | Claude (tmux pane), context window | Ephemeral | Cycles when context fills |
 
 ### Identity Layer
 
@@ -120,7 +120,7 @@ the polecat — everything else is infrastructure that comes and goes. See
 
 The Claude session is **ephemeral**. It cycles frequently:
 
-- After each molecule step (via `gt handoff`)
+- When context fills (via `gt handoff`)
 - On context compaction
 - On crash/timeout
 - After extended work periods
@@ -129,9 +129,8 @@ The Claude session is **ephemeral**. It cycles frequently:
 continues working—only the Claude context refreshes.
 
 ```
-Session 1: Steps 1-2 → handoff
-Session 2: Steps 3-4 → handoff
-Session 3: Step 5 → gt done
+Session 1: Steps 1-3 → context fills → handoff
+Session 2: Steps 4-5 → gt done
 ```
 
 All three sessions are the **same polecat**. The sandbox persists throughout.
@@ -204,7 +203,7 @@ The slot:
 │                     Work Happens                            │
 │                                                             │
 │  Session cycles happen here:                               │
-│  - gt handoff between steps                                │
+│  - gt handoff when context fills                           │
 │  - Compaction triggers respawn                             │
 │  - Crash → daemon restarts the session                     │
 │                                                             │
@@ -263,7 +262,7 @@ gt polecat reset Toast   # DON'T: manual lifecycle control
 gt done  # (from inside the polecat session)
 
 # Only explicit nuke destroys polecats:
-gt polecat nuke Toast  # (destroys sandbox, identity persists)
+gt polecat nuke gastown/Toast  # (destroys sandbox, identity persists)
 ```
 
 Polecats manage their own session lifecycle. External manipulation bypasses verification.
@@ -285,7 +284,7 @@ A **stalled** polecat has a hook but no session — this is a **failure**:
 ```bash
 # The daemon's patrol_scan tick restarts the session in the existing sandbox
 # Or, if unrecoverable:
-gt polecat nuke Toast        # Clean up the stalled polecat
+gt polecat nuke gastown/Toast        # Clean up the stalled polecat
 gt sling gt-abc gastown      # Respawn with fresh polecat
 ```
 
