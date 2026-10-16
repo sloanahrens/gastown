@@ -29,14 +29,14 @@ const (
 const reworkApproved = "approve"
 
 // ReworkReview is one om verdict from the landing worker's review log.
+// Rejected is the landing refusing the work on an approving verdict, for its
+// findings (gt-vu18r); such a review is not an approval.
 type ReworkReview struct {
-	Bead    string
-	Rig     string
-	Attempt int
-	Score   float64
-	Verdict string
-	// Rejected is the landing refusing the work on an approving verdict, for
-	// its findings (gt-vu18r); such a review is not an approval.
+	Bead     string
+	Rig      string
+	Attempt  int
+	Score    float64
+	Verdict  string
 	Rejected bool
 	Findings int
 	Bar      float64
@@ -44,7 +44,9 @@ type ReworkReview struct {
 }
 
 // approved is whether the review let the work land: an approving verdict the
-// landing did not turn back for its findings.
+// landing did not turn back for its findings. Lines written before the log
+// carried Rejected read as the verdict alone, which reworkSpan corrects for an
+// approval the bead was reviewed again after.
 func (r ReworkReview) approved() bool { return r.Verdict == reworkApproved && !r.Rejected }
 
 // ReworkBar is one review bar's share of a window. Bar is 0 when the reviewed
@@ -91,7 +93,9 @@ type Rework struct {
 // rework loop that crosses a bar change is not split across two bars. A bead's
 // attempts are its reviews in time order, and a verdict logged twice for the
 // same attempt (a landing retried after the verdict, before the merge) counts
-// once, as the later of the two.
+// once, as the later of the two. An approval followed by a later attempt of the
+// same bead is counted as a rejection: that is how a findings bounce reads in
+// the lines written before the log carried Rejected.
 func AggregateRework(reviews []ReworkReview, now time.Time) Rework {
 	recent, prior := now.Add(-reworkWindow), now.Add(-2*reworkWindow)
 	return Rework{Windows: []ReworkWindow{
@@ -147,14 +151,18 @@ func reworkSpan(name string, reviews []ReworkReview, from, to time.Time, closed 
 			bars[rs[0].Bar] = t
 		}
 		t.Beads++
-		if rs[0].approved() {
+		// An approval the bead was reviewed again after did not land it, whatever
+		// its line says: a log written before Rejected existed carries every
+		// findings bounce as a plain approve, and the next attempt is what shows it.
+		stood := func(i int) bool { return rs[i].approved() && i == len(rs)-1 }
+		if stood(0) {
 			t.FirstTry++
 		}
 		rejected, approved := 0, false
-		for _, r := range rs {
+		for i, r := range rs {
 			t.Reviews++
 			t.scoreSum += r.Score
-			if r.approved() {
+			if stood(i) {
 				approved = true
 			} else {
 				rejected++

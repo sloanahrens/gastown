@@ -213,3 +213,24 @@ func TestReworkSpanCountsFindingsBounce(t *testing.T) {
 		t.Errorf("bar = %+v, want 2 rejected then a landing on the third review", b)
 	}
 }
+
+// A log written before Rejected existed carries a findings bounce as a plain
+// approve; the bead's next attempt is what shows the approval did not land it.
+func TestReworkSpanCountsAnApprovalReviewedAgainAsBounced(t *testing.T) {
+	t.Parallel()
+	legacy := []ReworkReview{
+		rv("gt-old", 1, "approve", 0.9, 0.8, 6),
+		rv("gt-old", 2, "approve", 0.9, 0.8, 5),
+		rv("gt-old", 3, "approve", 0.9, 0.8, 4),
+	}
+	b := AggregateRework(legacy, reworkNow).Windows[0].Bars[0]
+	if b.Rejected != 2 || b.FirstTry != 0 || b.Landed != 1 || b.LoopsOut != 0 || !near(b.ReviewsPerLanded, 3) {
+		t.Errorf("bar = %+v, want 2 rejected then a landing on the third review", b)
+	}
+
+	// Cut off by the window, the last approval seen is not known to be bounced.
+	b = AggregateRework(legacy[:1], reworkNow).Windows[0].Bars[0]
+	if b.Rejected != 0 || b.FirstTry != 1 || b.Landed != 1 {
+		t.Errorf("bar = %+v, want one clean first-try landing", b)
+	}
+}
