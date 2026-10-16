@@ -147,6 +147,10 @@ func (l *Lander) followupFeed(w Work, res Result, findings []FollowupCandidate) 
 	// comment is for a finding another landing raised (gt-4ty22).
 	own := followupIDsForCommit(existing, res.LandedCommit)
 	open := openFollowups(existing)
+	// The backpressure bound is not checked here. A finding that repeats an
+	// existing bead earns its "seen again" comment however many beads are open,
+	// so only the fresh findings meet the bound, in fileFollowupBeads, which
+	// holds back what it cannot file (gt-qaelo).
 	var lines []string
 	var fresh []FollowupCandidate
 	for _, c := range findings {

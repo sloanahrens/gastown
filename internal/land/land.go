@@ -8,7 +8,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -1390,6 +1389,12 @@ func (l *Lander) completeUnrecordedLanding(g Repo, w Work) (*Result, error) {
 	// whenever the target edited a line within three of the head's hunk, and
 	// the landing was never finished though its work is on the target
 	// (gt-r5uwc). patchID above stays the recorded one.
+	//
+	// The price is that the check no longer sees where a change sits: the same
+	// lines added to or removed from the same file match wherever in it they
+	// land. That is enough here because the subject marker has already named
+	// the head's bead, so only another head of that bead whose change is
+	// identical but for its position could match wrongly (gt-qaelo).
 	mergedChange, err := g.PatchIDZeroContext(base, merged)
 	if err != nil {
 		return nil, &InfraError{Stage: "patch-id of the landing", Err: err}
@@ -1931,9 +1936,7 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 	// a bead the next tick slings onto a seat that cannot land it (gt-me800).
 	// The crew that holds it reads the rejection and asks the human for a new
 	// branch.
-	if !slices.ContainsFunc(now.Labels, func(label string) bool {
-		return strings.EqualFold(strings.TrimSpace(label), dispatch.HumanOnlyLabel)
-	}) {
+	if !dispatch.HasLabel(now.Labels, dispatch.HumanOnlyLabel) {
 		unassigned := ""
 		update.Assignee = &unassigned
 	}
