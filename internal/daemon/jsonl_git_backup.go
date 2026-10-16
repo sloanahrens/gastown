@@ -1818,7 +1818,19 @@ func countFileLines(path string) (int, error) {
 // A database the filter left alone keeps its count. A removed count above the
 // database's total cannot come from one export, so it is returned rather than
 // clamped: the caller must not commit counts it could not verify (gt-q6ljl).
+//
+// The recounts are validated as a set before any of them is applied. Adjusting
+// each database as it is reached left counts partly recounted when a later one
+// was rejected, and map order — not the data — decided which databases those
+// were. The caller halts on the error either way, but a partly adjusted map is
+// indistinguishable from a verified one to anything that reads counts next
+// (gt-83c3w).
 func recountAfterFilter(counts, removed map[string]int) error {
+	type adjustment struct {
+		db        string
+		remaining int
+	}
+	var adjustments []adjustment
 	for db, n := range removed {
 		total, ok := counts[db]
 		if !ok || n <= 0 {
@@ -1827,7 +1839,10 @@ func recountAfterFilter(counts, removed map[string]int) error {
 		if n > total {
 			return fmt.Errorf("recount %s: filter removed %d records from an export of %d", db, n, total)
 		}
-		counts[db] = total - n
+		adjustments = append(adjustments, adjustment{db: db, remaining: total - n})
+	}
+	for _, a := range adjustments {
+		counts[a.db] = a.remaining
 	}
 	return nil
 }
