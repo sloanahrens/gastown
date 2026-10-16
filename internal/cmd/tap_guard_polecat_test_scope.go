@@ -287,21 +287,30 @@ func heavyTestPackageList() []string {
 // ("." ".*" "" "^" "(?i)") runs every test whatever the package holds.
 var runFilterProbes = []string{"TestA", "ExampleB", "BenchmarkC", "FuzzD", "x"}
 
-// runTestFuncProbes are unrelated TestXxx names. A pattern that matches every
-// one of them ("Test" "^Test" "^Test.*" "T") runs every test function whatever
-// the package holds, though it misses the Example and Benchmark probes above.
-// A pattern naming one test or a prefix of some ("TestSpecific" "^TestApply")
-// matches at most one of them.
-var runTestFuncProbes = []string{"TestFoo", "TestQuux", "TestZeta"}
+// runLeadingLetterProbes are the TestXxx names TestA..TestZ, one per leading
+// letter. A pattern that matches more than half of them ("Test" "^Test"
+// "^Test.*" "T" "^Test[^Z]") runs most test functions whatever the package
+// holds, though it misses the Example and Benchmark probes above. A pattern
+// naming a few tests or a prefix of some ("TestSpecific" "^TestApply"
+// "TestFoo|TestQuux|TestZeta") matches only the few its letters pick out.
+var runLeadingLetterProbes = leadingLetterProbes()
+
+func leadingLetterProbes() []string {
+	probes := make([]string, 0, 26)
+	for c := 'A'; c <= 'Z'; c++ {
+		probes = append(probes, "Test"+string(c))
+	}
+	return probes
+}
 
 // goTestRunFilterBounds reports whether the tokens after "go test" carry a
 // -run (or, after "--", -test.run) filter that bounds the run; the last one
-// wins, as in go. A pattern that selects every test bounds nothing. One go
-// cannot compile fails before any test starts, and a -run with no value is go's
-// own usage error, so both leave nothing to run. A value the shell expands is
-// a pattern the hook cannot see, so it bounds nothing (gt-ff2l8). The probes
-// are a heuristic: a pattern that matches all of them but not every real test
-// name is refused, which costs one more -run edit.
+// wins, as in go. A pattern that selects every test bounds nothing. A -run with
+// no value is go's own usage error and leaves nothing to run. A value the shell
+// expands, or one the guard cannot compile, is a pattern the hook cannot read,
+// so it bounds nothing (gt-ff2l8). The probes are a heuristic: a pattern that
+// matches most of them but not every real test name is refused, which costs one
+// more -run edit.
 func goTestRunFilterBounds(rest []string) bool {
 	bounded := false
 	for i, t := range rest {
@@ -346,9 +355,11 @@ func runValueShellExpanded(value string) bool {
 func runPatternBoundsRun(pattern string) bool {
 	re, err := regexp.Compile(firstSubtestElement(pattern))
 	if err != nil {
-		return true
+		// go rejects the pattern before any test starts, but the guard's
+		// split may differ from go's, so an unreadable pattern bounds nothing.
+		return false
 	}
-	return !matchesAllProbes(re, runFilterProbes) && !matchesAllProbes(re, runTestFuncProbes)
+	return !matchesAllProbes(re, runFilterProbes) && !matchesMostProbes(re, runLeadingLetterProbes)
 }
 
 // firstSubtestElement returns the part of a -run pattern before its first "/"
@@ -381,6 +392,17 @@ func firstSubtestElement(pattern string) string {
 		}
 	}
 	return pattern
+}
+
+// matchesMostProbes reports whether re matches more than half of probes.
+func matchesMostProbes(re *regexp.Regexp, probes []string) bool {
+	n := 0
+	for _, probe := range probes {
+		if re.MatchString(probe) {
+			n++
+		}
+	}
+	return 2*n > len(probes)
 }
 
 // matchesAllProbes reports whether re matches every name in probes.
