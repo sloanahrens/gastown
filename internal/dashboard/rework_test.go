@@ -213,3 +213,74 @@ func TestReworkSpanCountsFindingsBounce(t *testing.T) {
 		t.Errorf("bar = %+v, want 2 rejected then a landing on the third review", b)
 	}
 }
+
+// A log written before Rejected existed carries a findings bounce as a plain
+// approve, and the bead's next attempt is what shows the approval did not land
+// it. Newer lines in the same log keep what they say.
+func TestReworkSpanReadsLegacyBouncesInAMixedVersionLog(t *testing.T) {
+	t.Parallel()
+	withFindings := func(r ReworkReview, n int, rejected bool) ReworkReview {
+		r.Findings, r.Rejected = n, rejected
+		return r
+	}
+	tests := []struct {
+		name    string
+		reviews []ReworkReview
+		want    ReworkBar // only the fields compared below
+	}{
+		{
+			name: "legacy approvals with findings, then a landing",
+			reviews: []ReworkReview{
+				withFindings(rv("gt-m", 1, "approve", 0.9, 0.8, 6), 3, false),
+				withFindings(rv("gt-m", 2, "approve", 0.9, 0.8, 5), 2, false),
+				withFindings(rv("gt-m", 3, "approve", 0.9, 0.8, 4), 0, false),
+			},
+			want: ReworkBar{Rejected: 2, FirstTry: 0, Landed: 1, ReviewsPerLanded: 3},
+		},
+		{
+			name: "legacy bounce then newer lines that say what they are",
+			reviews: []ReworkReview{
+				withFindings(rv("gt-m", 1, "approve", 0.9, 0.8, 6), 2, false),
+				withFindings(rv("gt-m", 2, "approve", 0.9, 0.8, 5), 1, true),
+				withFindings(rv("gt-m", 3, "approve", 0.9, 0.8, 4), 0, false),
+			},
+			want: ReworkBar{Rejected: 2, FirstTry: 0, Landed: 1, ReviewsPerLanded: 3},
+		},
+		{
+			name: "an approval with no findings was not bounced for them",
+			reviews: []ReworkReview{
+				rv("gt-m", 1, "approve", 0.9, 0.8, 6),
+				rv("gt-m", 2, "approve", 0.9, 0.8, 5),
+			},
+			want: ReworkBar{Rejected: 0, FirstTry: 1, Landed: 1, ReviewsPerLanded: 2},
+		},
+		{
+			name: "the newest approval has no later attempt to show a bounce",
+			reviews: []ReworkReview{
+				withFindings(rv("gt-m", 1, "approve", 0.9, 0.8, 6), 3, false),
+			},
+			want: ReworkBar{Rejected: 0, FirstTry: 1, Landed: 1, ReviewsPerLanded: 1},
+		},
+		{
+			// The line cannot say why the landing refused the work after this
+			// approval, only that the bead was reviewed again.
+			name: "an approval with findings reviewed again counts as refused",
+			reviews: []ReworkReview{
+				withFindings(rv("gt-m", 1, "approve", 0.9, 0.8, 6), 1, false),
+				withFindings(rv("gt-m", 2, "approve", 0.9, 0.8, 5), 0, false),
+			},
+			want: ReworkBar{Rejected: 1, FirstTry: 0, Landed: 1, ReviewsPerLanded: 2},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := AggregateRework(tc.reviews, reworkNow).Windows[0].Bars[0]
+			if b.Rejected != tc.want.Rejected || b.FirstTry != tc.want.FirstTry || b.Landed != tc.want.Landed ||
+				b.LoopsOut != 0 || !near(b.ReviewsPerLanded, tc.want.ReviewsPerLanded) {
+				t.Errorf("bar = %+v, want rejected %d, first try %d, landed %d, %.0f reviews per landed",
+					b, tc.want.Rejected, tc.want.FirstTry, tc.want.Landed, tc.want.ReviewsPerLanded)
+			}
+		})
+	}
+}
