@@ -482,7 +482,7 @@ func TestWriteTownHealth_DispatchField(t *testing.T) {
 		{
 			"spec_dispatch turned off",
 			func(t *testing.T, d *Daemon) {
-				d.patrolConfig.Patrols.SpecDispatch = &SpecDispatchConfig{Enabled: false}
+				d.patrolConfig.Patrols.SpecDispatch = &SpecDispatchConfig{Enabled: boolPtr(false)}
 			},
 			townhealth.Recorded, townhealth.Red, "off", "dispatch=off[R]",
 		},

@@ -22,11 +22,11 @@ func TestSpecDispatchDefaultsOn(t *testing.T) {
 	if !IsPatrolEnabled(&DaemonPatrolConfig{Patrols: &PatrolsConfig{}}, "spec_dispatch") {
 		t.Error("spec_dispatch must be on with no spec_dispatch entry")
 	}
-	off := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: false}}}
+	off := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(false)}}}
 	if IsPatrolEnabled(off, "spec_dispatch") {
 		t.Error("spec_dispatch enabled:false must be off")
 	}
-	on := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: true}}}
+	on := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(true)}}}
 	if !IsPatrolEnabled(on, "spec_dispatch") {
 		t.Error("spec_dispatch enabled:true must be on")
 	}
@@ -333,7 +333,7 @@ func TestTriggerSpecDispatchParkedTicksNothing(t *testing.T) {
 		ctx:          context.Background(),
 		logger:       logger,
 		execCmd:      fake.run,
-		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: true}}},
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(true)}}},
 	}
 
 	for i := 0; i < 3; i++ {
@@ -398,7 +398,7 @@ func TestSpecDispatchEndsTheIdleStreakWhenNoTickIsObserved(t *testing.T) {
 				ctx:          context.Background(),
 				logger:       log.New(io.Discard, "", 0),
 				execCmd:      fake.run,
-				patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: true}}},
+				patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(true)}}},
 			}
 			idle := idleTick(overlapLine)
 			at := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)

@@ -262,10 +262,10 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 	// and ESTOP still park it, and patrols.spec_dispatch.enabled:false turns
 	// it off.
 	if patrol == "spec_dispatch" {
-		if config == nil || config.Patrols == nil || config.Patrols.SpecDispatch == nil {
+		if config == nil || config.Patrols == nil || config.Patrols.SpecDispatch == nil || config.Patrols.SpecDispatch.Enabled == nil {
 			return true
 		}
-		return config.Patrols.SpecDispatch.Enabled
+		return *config.Patrols.SpecDispatch.Enabled
 	}
 	// landing_infra defaults ON: it only observes (one request per instance
 	// and one per rig, per pass) and it makes a Forgejo or runner outage

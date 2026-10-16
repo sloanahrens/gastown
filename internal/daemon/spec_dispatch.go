@@ -21,7 +21,7 @@ import (
 // ones onto a free seat of their class (internal/cmd/spec.go). The decision
 // lives in internal/cmd next to the pool accounting and the sling path, which
 // the daemon cannot import; this side is the cadence, the single-flight guard
-// and the log. Off unless patrols.spec_dispatch.enabled is true.
+// and the log. On unless patrols.spec_dispatch.enabled is false.
 //
 // The ticker never restarts or kills anything, and it honors the operator
 // hold file and ESTOP through the command itself.

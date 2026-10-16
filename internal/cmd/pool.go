@@ -723,14 +723,15 @@ func setSecondSeatAgent(pc *config.DaemonPatrolConfig, agent string, n int) {
 }
 
 // specDispatchOf returns pc's spec_dispatch section, making it when absent. A
-// section made here is enabled: the ticker is on only while the section is
-// absent or says so, and a section without "enabled" turns it off.
+// section made here says "enabled": true, so the file shows the dispatcher is
+// on; a hand-written section without "enabled" is on too.
 func specDispatchOf(pc *config.DaemonPatrolConfig) *config.SpecDispatchConfig {
 	if pc.Patrols == nil {
 		pc.Patrols = &config.PatrolsConfig{}
 	}
 	if pc.Patrols.SpecDispatch == nil {
-		pc.Patrols.SpecDispatch = &config.SpecDispatchConfig{Enabled: true}
+		enabled := true
+		pc.Patrols.SpecDispatch = &config.SpecDispatchConfig{Enabled: &enabled}
 	}
 	return pc.Patrols.SpecDispatch
 }
