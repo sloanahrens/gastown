@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,6 +140,38 @@ func TestRiskPathsParseCommentsAndBlanks(t *testing.T) {
 	}
 }
 
+// RiskPathsRecorded drops the paths of a bead the review machinery filed —
+// and only those, and only when the bead touched a risk path: the labels
+// decide, and a title that reads like a review's finding is not a label.
+func TestRiskPathsRecorded(t *testing.T) {
+	t.Parallel()
+	paths := []string{"internal/daemon/x.go"}
+	for _, tc := range []struct {
+		name       string
+		title      string
+		labels     []string
+		paths      []string
+		wantPaths  []string
+		wantSkipBy string
+	}{
+		{name: "an ordinary bead keeps its paths", labels: []string{LabelReadyToLand}, paths: paths, wantPaths: paths},
+		{name: "review-deep skips", title: "fix: the finding", labels: []string{LabelReadyToLand, reviewDeepLabel}, paths: paths, wantSkipBy: reviewDeepLabel},
+		{name: "om-followup skips", labels: []string{FollowUpLabel}, paths: paths, wantSkipBy: FollowUpLabel},
+		{name: "a review-generated bead that touched no risk path has no review to skip", labels: []string{reviewDeepLabel}},
+		{name: "a title that reads review-generated is not a label", title: "fix: the finding the deep review raised", paths: paths, wantPaths: paths},
+		{name: "another label is not review-generated", labels: []string{LabelRework, LabelNeedsHuman}, paths: paths, wantPaths: paths},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			issue := &beads.Issue{ID: "gt-abc", Title: tc.title, Labels: tc.labels}
+			got, skippedBy := RiskPathsRecorded(issue, tc.paths)
+			if !slices.Equal(got, tc.wantPaths) || skippedBy != tc.wantSkipBy {
+				t.Errorf("RiskPathsRecorded = %q, %q; want %q, %q", got, skippedBy, tc.wantPaths, tc.wantSkipBy)
+			}
+		})
+	}
+}
+
 // Since returns the records landed in the window, oldest first.
 func TestLandingsSinceWindow(t *testing.T) {
 	t.Parallel()
@@ -191,6 +224,9 @@ func TestRiskPathsLandingStillLandsAndLabels(t *testing.T) {
 	if beads.HasLabel(bead, LabelReadyToLand) {
 		t.Errorf("labels = %v, want no %s", bead.Labels, LabelReadyToLand)
 	}
+	if strings.Contains(bead.Notes, RiskPathReviewSkippedLine) {
+		t.Errorf("notes carry %q on a bead nothing review-generated filed:\n%s", RiskPathReviewSkippedLine, bead.Notes)
+	}
 	if bead.Status != "closed" {
 		t.Errorf("status = %q, want the landing to close it", bead.Status)
 	}
@@ -204,6 +240,59 @@ func TestRiskPathsLandingStillLandsAndLabels(t *testing.T) {
 	}
 	if !slices.Equal(rec.RiskPaths, []string{"internal/daemon/x.go"}) {
 		t.Errorf("record risk_paths = %q, want the changed risk path", rec.RiskPaths)
+	}
+}
+
+// A landing of a bead the review machinery filed records no risk path, so
+// neither the attention queue's landing.risk_path item nor the deep review's
+// landings mode reads it as one, and the note says the review the paths would
+// have asked for was skipped (gt-g349w).
+func TestReviewGeneratedLandingSkipsRiskPathReview(t *testing.T) {
+	t.Parallel()
+	for _, label := range []string{reviewDeepLabel, FollowUpLabel} {
+		t.Run(label, func(t *testing.T) {
+			t.Parallel()
+			f := newLandFixtureAt(t)
+			f.git = gitfake.New()
+			f.git.InitBare(t, f.origin)
+			f.base = f.git.Commit(t, f.origin, "main", "main: seed", map[string]string{
+				"a.txt": "one\n", RiskPathsFile: "internal/daemon/**\n",
+			})
+			f.git.SetRef(t, f.origin, "refs/heads/"+fixtureBranch, f.base)
+			head := f.git.Commit(t, f.origin, fixtureBranch, "fix: the finding the review raised",
+				map[string]string{"internal/daemon/tap_guard.go": "x\n"})
+			f.git.Clone(t, f.origin, f.repo)
+			f.ready(head)
+			if err := f.bd.Update(f.work.BeadID, beads.UpdateOptions{AddLabels: []string{label}}); err != nil {
+				t.Fatalf("labelling the bead %s: %v", label, err)
+			}
+
+			res, err := f.lander().Land(context.Background(), f.work)
+			if err != nil {
+				t.Fatalf("Land: %v", err)
+			}
+			if len(res.RiskPaths) != 0 || !res.RiskPathReviewSkipped {
+				t.Errorf("Result = %q, skipped %v; want no risk path and the skip named", res.RiskPaths, res.RiskPathReviewSkipped)
+			}
+			bead := f.bead()
+			if beads.HasLabel(bead, LabelOverseerReviewWanted) {
+				t.Errorf("labels = %v, want no %s", bead.Labels, LabelOverseerReviewWanted)
+			}
+			if !strings.Contains(bead.Notes, RiskPathReviewSkippedLine) {
+				t.Errorf("notes lack %q:\n%s", RiskPathReviewSkippedLine, bead.Notes)
+			}
+			lines := f.landingLines()
+			if len(lines) != 1 {
+				t.Fatalf("landing records = %v, want one", lines)
+			}
+			var rec LandingRecord
+			if err := json.Unmarshal([]byte(lines[0]), &rec); err != nil {
+				t.Fatal(err)
+			}
+			if len(rec.RiskPaths) != 0 || !rec.RiskPathReviewSkipped {
+				t.Errorf("record = %q, skipped %v; want no risk path and the skip named", rec.RiskPaths, rec.RiskPathReviewSkipped)
+			}
+		})
 	}
 }
 

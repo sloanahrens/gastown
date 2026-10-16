@@ -34,6 +34,9 @@ const (
 	// says the overseer stood in for om, this one asks for a human. Land adds
 	// it and nothing strips it — a review does not remove it, and the
 	// attention item it feeds clears on the review note (OverseerReviewMarker).
+	// A landing of a bead the review machinery filed records no risk path and
+	// takes no label, so the review it would ask for cannot feed itself
+	// (gt-g349w).
 	LabelOverseerReviewWanted = "gt:overseer-review-wanted"
 
 	// OverseerReviewMarker opens the note line "OVERSEER REVIEW <full head

@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
@@ -14,6 +15,45 @@ import (
 // the branch being landed, so a submission cannot unlist its own paths
 // (gt-vsct7.4).
 const RiskPathsFile = "internal/land/riskpaths.txt"
+
+// reviewDeepLabel is the label the deep review puts on every bead it files for
+// a finding (the deep-review-run formula's `-l review-deep`).
+const reviewDeepLabel = "review-deep"
+
+// reviewGeneratedLabels are the labels that make a bead review machinery's own
+// output rather than work somebody filed: a finding a deep review raised, or
+// one the post-landing om feed filed (FollowUpLabel).
+var reviewGeneratedLabels = []string{reviewDeepLabel, FollowUpLabel}
+
+// reviewGenerated returns the label on issue that makes its landing review
+// machinery's own output, and whether issue wears one.
+func reviewGenerated(issue *beads.Issue) (string, bool) {
+	for _, label := range reviewGeneratedLabels {
+		if beads.HasLabel(issue, label) {
+			return label, true
+		}
+	}
+	return "", false
+}
+
+// RiskPathsRecorded returns the risk paths a landing of issue records, and the
+// label that made it record none.
+//
+// A bead the review machinery filed is that review's own output coming back
+// around: the fix to a finding on a risk path is itself a risk-path landing,
+// so it records no risk path and takes no gt:overseer-review-wanted. Neither
+// the attention queue's landing.risk_path item nor the deep review's landings
+// mode picks it up, while om still gates it, the record's base and head still
+// name the change, and the bead's note says the review was skipped (gt-g349w).
+func RiskPathsRecorded(issue *beads.Issue, paths []string) (recorded []string, skippedBy string) {
+	if len(paths) == 0 {
+		return paths, ""
+	}
+	if label, ok := reviewGenerated(issue); ok {
+		return nil, label
+	}
+	return paths, ""
+}
 
 // RiskPaths returns the paths base..head changes that match a glob in
 // RiskPathsFile at base, sorted. It never rejects or delays a landing: it
