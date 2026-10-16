@@ -761,6 +761,81 @@ func newTestManager(t *testing.T) *DoltServerManager {
 	}
 }
 
+// notARunningPID is above every host's pid ceiling, so it names no process.
+const notARunningPID = 4194300
+
+// A crashed Dolt is reported only if isRunning names the pid it saw gone; the
+// runningFn stub used to be alone in returning a pid with running=false, so
+// this drives the real isRunning over a tracked process that has exited
+// (gt-ijgck). Port 3307 is the canonical signal path IsDoltUnhealthy reads.
+func TestEnsureRunning_DeadTrackedProcessRaisesCrashSignal(t *testing.T) {
+	t.Parallel()
+	proc, err := os.FindProcess(notARunningPID)
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+
+	m := newTestManager(t)
+	m.runningFn = nil
+	m.config.Port = 3307
+	m.sleepFn = func(time.Duration) {}
+	m.process = proc
+
+	var events []string
+	m.crashAlertFn = func(pid int) { events = append(events, fmt.Sprintf("alert:%d", pid)) }
+	m.startFn = func() error { events = append(events, "start"); return nil }
+
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+
+	want := []string{fmt.Sprintf("alert:%d", notARunningPID), "start"}
+	if len(events) != len(want) || events[0] != want[0] || events[1] != want[1] {
+		t.Fatalf("dead tracked process must alert once before the restart, got %v", events)
+	}
+	signal, err := os.ReadFile(m.unhealthySignalFile())
+	if err != nil {
+		t.Fatalf("no server_dead signal written: %v", err)
+	}
+	if !strings.Contains(string(signal), `"reason":"server_dead"`) ||
+		!strings.Contains(string(signal), fmt.Sprint(notARunningPID)) {
+		t.Errorf("signal file = %s, want reason server_dead naming PID %d", signal, notARunningPID)
+	}
+	if !IsDoltUnhealthy(m.townRoot) {
+		t.Error("IsDoltUnhealthy does not see the crash signal")
+	}
+}
+
+// A daemon that starts against a pid file whose server is already gone never
+// tracked that process, so the pid the file names is the only evidence of the
+// crash and must reach the same alert (gt-ijgck).
+func TestEnsureRunning_DeadPIDFileRaisesCrashSignal(t *testing.T) {
+	t.Parallel()
+	m := newTestManager(t)
+	m.runningFn = nil
+	m.config.Port = 3307
+	m.sleepFn = func(time.Duration) {}
+	if _, err := writePIDFile(m.pidFile(), notARunningPID); err != nil {
+		t.Fatalf("writePIDFile: %v", err)
+	}
+
+	var events []string
+	m.crashAlertFn = func(pid int) { events = append(events, fmt.Sprintf("alert:%d", pid)) }
+	m.startFn = func() error { events = append(events, "start"); return nil }
+
+	if err := m.EnsureRunning(); err != nil {
+		t.Fatalf("EnsureRunning: %v", err)
+	}
+
+	want := []string{fmt.Sprintf("alert:%d", notARunningPID), "start"}
+	if len(events) != len(want) || events[0] != want[0] || events[1] != want[1] {
+		t.Fatalf("a dead pid file must alert once before the restart, got %v", events)
+	}
+	if _, err := os.Stat(m.pidFile()); !os.IsNotExist(err) {
+		t.Errorf("stale pid file left behind: %v", err)
+	}
+}
+
 // TestConcurrentEnsureRunning_OnlyOneRestart verifies that when multiple
 // goroutines call EnsureRunning concurrently and the server is not running,
 // only one goroutine enters restartWithBackoff and starts the server.

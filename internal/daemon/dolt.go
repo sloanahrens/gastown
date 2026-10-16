@@ -388,9 +388,11 @@ func (m *DoltServerManager) Status() *DoltServerStatus {
 	// Check if process is running
 	pid, running := m.isRunning()
 	status.Running = running
-	status.PID = pid
 
 	if running {
+		// isRunning's pid on the false path is the crashed server's, which the
+		// crash report wants and a status reading does not (gt-ijgck).
+		status.PID = pid
 		status.StartedAt = m.startedAt
 
 		// Get version
@@ -407,31 +409,37 @@ func (m *DoltServerManager) Status() *DoltServerStatus {
 	return status
 }
 
-// isRunning checks if the Dolt server process is running.
+// isRunning checks if the Dolt server process is running. On the false path the
+// pid it returns is the pid it observed gone — the tracked process's, or the
+// one the pid file names — so EnsureRunning can report a crash rather than a
+// server that was never up (gt-ijgck). It is 0 when no server process was ever
+// identified or the only pid in hand is alive but not answering.
 // Must be called with m.mu held.
 func (m *DoltServerManager) isRunning() (int, bool) {
 	if m.runningFn != nil {
 		return m.runningFn()
 	}
+	deadPID := 0
 	// First check our tracked process
 	if m.process != nil {
 		if isProcessAlive(m.process) {
 			return m.process.Pid, true
 		}
 		// Process died, clear it
+		deadPID = m.process.Pid
 		m.process = nil
 	}
 
 	// Check PID file with nonce-based ownership verification
 	pid, alive, err := verifyPIDOwnership(m.pidFile())
 	if err != nil || pid == 0 {
-		return 0, false
+		return deadPID, false
 	}
 
 	if !alive {
 		// Process not running, clean up stale PID file
 		_ = os.Remove(m.pidFile())
-		return 0, false
+		return pid, false
 	}
 
 	// Verify it's actually our dolt server by checking port connectivity.
@@ -443,21 +451,22 @@ func (m *DoltServerManager) isRunning() (int, bool) {
 		// ask who the pid is. This town's dolt is running, just not
 		// answering; provably not this town's dolt makes the file stale; an
 		// unreadable identity proves nothing, so keep the file and report not
-		// running for now.
+		// running for now. Nothing here reports a crash: this pid is alive, so
+		// the only death it can name is the tracked one (gt-ijgck).
 		switch err := m.verifyDoltSQLServer(pid); {
 		case err == nil:
 			m.logger("Dolt server PID %d is alive but not answering on %s:%d", pid, m.config.Host, m.config.Port)
 		case doltserver.IsStalePIDFileErr(err):
 			_ = os.Remove(m.pidFile())
-			return 0, false
+			return deadPID, false
 		default:
-			return 0, false
+			return deadPID, false
 		}
 	}
 
 	process, err := os.FindProcess(pid)
 	if err != nil {
-		return 0, false
+		return deadPID, false
 	}
 	m.process = process
 	return pid, true
