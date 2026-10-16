@@ -189,6 +189,46 @@ func TestARejectionIsNotARowOfThePanel(t *testing.T) {
 	}
 }
 
+// A bead rejected twice is routine rework, so the row it raises is the
+// overseer's and never one of the human's: the line the daemon writes for the
+// item is the one the panel reads, and the owner that line carries keeps the
+// row out of the count the strip draws red. The rule keeps its wake, so the row
+// is still there for the overseer to act on (gt-few2w, gt-2f1k2).
+func TestARejectedTwiceRowIsTheOverseersAndNotTheHumans(t *testing.T) {
+	t.Parallel()
+
+	// The line the daemon writes for the condition: the item's own new
+	// transition, carrying the rule its kind maps to and that rule's flags.
+	res := attention.Reconcile(attention.State{}, []attention.Item{{
+		Key: "rejected-twice:gt-9", Kind: attention.KindRejectedTwice,
+		Severity: attention.SeverityHigh, Summary: "gt-9 was rejected twice",
+	}}, attention.Acks{}, attentionNow)
+	if len(res.Events) != 1 {
+		t.Fatalf("the item raised %d transitions (%+v), want the one line the panel reads", len(res.Events), res.Events)
+	}
+
+	a := NewAlerter(func() time.Time { return attentionNow })
+	raised, _ := a.ObserveAttention(res.Events, attention.Acks{})
+	if len(raised) != 1 {
+		t.Fatalf("the line raised %+v, want the one row: a rule that wakes still lists it", raised)
+	}
+
+	at := buildAttention(&Escalations{}, &Questions{}, a.Standing(), attentionNow)
+	if len(at.Rows) != 1 {
+		t.Fatalf("the panel holds %+v, want the rejected bead's own row", at.Rows)
+	}
+	if r := at.Rows[0]; r.Owner != string(attention.OwnerOverseer) || r.Rule != attention.RuleRejectedTwice {
+		t.Errorf("the rejected bead's row is %s under %q, want it the overseer's under %q",
+			r.Owner, r.Rule, attention.RuleRejectedTwice)
+	}
+	if at.Mine != 0 {
+		t.Errorf("the panel counts %d rows for the human, want none: a second rejection is routine rework", at.Mine)
+	}
+	if got := stripNeedsYouAlarm(at); got != "" {
+		t.Errorf("the strip alarms %q for the human, want nothing: the row is the overseer's own", got)
+	}
+}
+
 // A queue item of a rule the bead readers draw a richer row for is not listed
 // again as a summary line: the escalation and the question are already rows,
 // with the raiser, the recommended answer and the work they hold (gt-bi6w0).
