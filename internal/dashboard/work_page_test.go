@@ -330,7 +330,7 @@ func TestTheWorkRowsCannotOverflowTheirPanel(t *testing.T) {
 	if want := `const c = el("span", cls, text); if (tip) c.title = tip; tr.append(c); return c;`; !strings.Contains(pageFunc(t, "workRow"), want) {
 		t.Errorf("a seat's cell does not carry its full text: %s", want)
 	}
-	if !strings.Contains(pageFunc(t, "workRow"), `bd.title = [p.bead, p.title].filter(Boolean).join(" ");`) {
+	if !strings.Contains(pageFunc(t, "workRow"), `bd.title = [p.bead, p.title].filter(Boolean).join(" ")`) {
 		t.Error("a bead's cell does not carry the bead and its whole title, so a clipped title is lost")
 	}
 }
@@ -596,5 +596,85 @@ func TestTheWorkPanelSaysWhyItHasNoSeats(t *testing.T) {
 				t.Errorf("a panel with no seats reads %q, want %q in it", text, tc.want)
 			}
 		})
+	}
+}
+
+// beadTips reads the hover of every seat row's bead cell, in the order the
+// rows are drawn, folded rows included.
+func beadTips(t *testing.T, dom *pageDOM) []string {
+	t.Helper()
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		const out = [];
+		(function walk(n) {
+			for (const c of (n.children || [])) {
+				if (String(c.className).split(" ").indexOf("workrow") >= 0) {
+					out.push(c.children.filter(x => String(x.className).split(" ").indexOf("wbead") >= 0).map(x => x.title)[0] || "");
+				}
+				walk(c);
+			}
+		})(__byId["work"]);
+		return out;
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the seat rows' bead hovers: %v", err)
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(v.String()), &out); err != nil {
+		t.Fatalf("reading the seat rows' bead hovers: %v", err)
+	}
+	return out
+}
+
+// TestTheWorkPanelShowsTheBeadsDescriptionOnHover drives the panel over a seat
+// whose bead has a description and one whose bead has none: the first's bead
+// cell hovers as its id, title and description, the second's as its id and
+// title alone, and the row's text and column count do not change (gt-kk6gb).
+func TestTheWorkPanelShowsTheBeadsDescriptionOnHover(t *testing.T) {
+	t.Parallel()
+
+	described := seat("gastown", "dementus", "working", "gt-kk6gb", "hover shows more", "deepseek-flash", time.Minute)
+	described["description"] = "After this lands, hovering the bead shows its description."
+	bare := seat("gastown", "furiosa", "stalled", "gt-bare", "no description here", "", 0)
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderWork", workState([]any{described, bare}, workQueueReading(1, 0, 0, 0)))
+
+	tips := beadTips(t, dom)
+	if len(tips) != 3 {
+		t.Fatalf("the panel drew %d rows (%v), want a header and two seats", len(tips), tips)
+	}
+	if want := "gt-kk6gb hover shows more\n\nAfter this lands, hovering the bead shows its description."; !contains(tips, want) {
+		t.Errorf("the bead cells hover as %q, want one to read %q", tips, want)
+	}
+	if !contains(tips, "gt-bare no description here") {
+		t.Errorf("a bead with no description must hover as its title alone, got %q", tips)
+	}
+	for _, row := range workRows(t, dom)[1:] {
+		if len(row) != 5 {
+			t.Errorf("a seat's row has %d cells (%v), want the same five as before", len(row), row)
+		}
+		if strings.Contains(strings.Join(row, " "), "After this lands") {
+			t.Errorf("the description must stay in the hover, not the row's text: %v", row)
+		}
+	}
+}
+
+// TestTheWorkPanelRedrawsWhenABeadsDescriptionChanges: the panel is left alone
+// while its key is unchanged, so an edited description must change the key or
+// the hover would keep the old text until something else moved (gt-kk6gb).
+func TestTheWorkPanelRedrawsWhenABeadsDescriptionChanges(t *testing.T) {
+	t.Parallel()
+
+	one := seat("gastown", "dementus", "working", "gt-kk6gb", "hover shows more", "deepseek-flash", time.Minute)
+	one["description"] = "first"
+	dom := newPageDOM(t)
+	s := workState([]any{one}, workQueueReading(1, 0, 0, 0))
+	dom.call(t, "renderWork", s)
+
+	one["description"] = "second"
+	dom.call(t, "renderWork", s)
+	if tips := beadTips(t, dom); len(tips) != 2 || !strings.HasSuffix(tips[1], "second") {
+		t.Errorf("after the description changed the bead cell hovers as %q, want it to end with the new text", tips)
 	}
 }

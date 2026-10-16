@@ -65,17 +65,26 @@ const (
 	StateUnknown = "unknown"
 )
 
+// DescriptionCap is how many characters of a bead's description a seat row
+// carries: enough for the hover to say what the bead is, short enough that a
+// poll of twenty seats stays small.
+const DescriptionCap = 600
+
 // QuietAfter is how long a working session may stay silent before it reads as quiet.
 const QuietAfter = 10 * time.Minute
 
 // Polecat is one polecat: what it holds, what state that is in, and its record.
 type Polecat struct {
-	Rig    string `json:"rig"`
-	Name   string `json:"name"`
-	Bead   string `json:"bead,omitempty"`
-	Title  string `json:"title,omitempty"`
-	State  string `json:"state"`
-	Reason string `json:"reason,omitempty"` // why the town's inventory put it in this state
+	Rig   string `json:"rig"`
+	Name  string `json:"name"`
+	Bead  string `json:"bead,omitempty"`
+	Title string `json:"title,omitempty"`
+	// Description is the bead's description cut at DescriptionCap, for the
+	// Work panel's hover on the bead (gt-kk6gb). It rides the seat's issue,
+	// read once per rig per poll, so it costs no read of its own.
+	Description string `json:"description,omitempty"`
+	State       string `json:"state"`
+	Reason      string `json:"reason,omitempty"` // why the town's inventory put it in this state
 	// Agent is the agent the polecat's live session was started with (its
 	// recorded GT_AGENT), so a session left over from before a model switch
 	// shows its own model. Empty when it has no session or none was recorded.

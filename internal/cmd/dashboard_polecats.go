@@ -185,6 +185,7 @@ func buildDashPolecats(in dashPolecatInputs) []dashboard.Polecat {
 		if hasWork {
 			p.Bead = s.Issue.ID
 			p.Title = s.Issue.Title
+			p.Description = truncateRunes(strings.TrimSpace(s.Issue.Description), dashboard.DescriptionCap)
 			pr := s.Issue.Priority
 			p.Priority = &pr
 			labels = s.Issue.Labels
