@@ -822,3 +822,33 @@ func TestTheWorkPanelRedrawsWhenACommaMovesBetweenTitleAndDescription(t *testing
 		t.Errorf("after a comma moved from the title to the description the bead cell hovers as %q, want gt-noda1 a, a blank line and b,c", tips)
 	}
 }
+
+// TestTheWorkPanelRedrawsWhenASeatsRigIsParked: a park moves a seat holding
+// work into the parked fold while the disposition's reason stands — nothing
+// else in the reading changes — so the panel's key carries rig_parked on its
+// own, or the row stays in the fold it was drawn in until something else moves
+// (gt-u53jg).
+func TestTheWorkPanelRedrawsWhenASeatsRigIsParked(t *testing.T) {
+	t.Parallel()
+
+	held := seat("gastown", "dementus", "working", "gt-u53jg", "a park its reason does not mirror", "deepseek-flash", time.Minute)
+	dom := newPageDOM(t)
+	s := workState([]any{held}, workQueueReading(1, 0, 0, 0))
+	dom.call(t, "renderWork", s)
+	fold := "1 in parked rigs (stood down on purpose; not alerts)"
+	if text := workText(t, dom); strings.Contains(text, fold) {
+		t.Fatalf("the seat is folded as parked before its rig was parked: %q", text)
+	}
+
+	held["rig_parked"] = true
+	dom.call(t, "renderWork", s)
+	if text := workText(t, dom); !strings.Contains(text, fold) {
+		t.Errorf("after only the rig was parked the panel still draws %q, want the seat under %q", text, fold)
+	}
+
+	delete(held, "rig_parked")
+	dom.call(t, "renderWork", s)
+	if text := workText(t, dom); strings.Contains(text, fold) {
+		t.Errorf("after only the rig was unparked the panel still draws %q, want the seat back with the seats holding work", text)
+	}
+}
