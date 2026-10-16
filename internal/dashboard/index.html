@@ -783,10 +783,11 @@ function paintAges(r, now) {
 function workRow(names, p, now) {
   const tr = el("div", "workrow");
   const cell = (cls, text, tip) => { const c = el("span", cls, text); if (tip) c.title = tip; tr.append(c); return c; };
-  // An idle seat holds nothing, and a parked rig's seat with no bead is stood
-  // down the same way: neither has a model to name — the agent its bead records
-  // is the last job's, not the dispatcher's pick for the next one (gt-hnztc).
-  const noModel = p.state === "idle" || (p.rig_parked && !p.bead);
+  // A seat names a model only for a bead it holds: the agent a seat records is
+  // the one its last job ran, and the model for a bead is picked when the bead
+  // is dispatched, so a seat holding nothing has none to name whatever state
+  // the inventory reads it into (gt-hnztc, gt-70txs).
+  const noModel = !p.bead;
   cell("wagent", noModel ? "" : (p.agent || (p.has_session ? "–" : "")),
     noModel ? "this seat holds no bead, so it has no model — the model is chosen when work is dispatched"
       : p.agent ? "the agent this seat's session was started with" : p.has_session ? "its session recorded no agent" : "this seat has no session");
@@ -804,11 +805,14 @@ function workRow(names, p, now) {
     // The hover reads the bead's description under its id and title; a bead
     // with no description hovers as its title alone (gt-kk6gb).
     bd.title = [p.bead, p.title].filter(Boolean).join(" ") + (p.description ? "\n\n" + p.description : "");
-  } else if (noModel && p.rig) {
-    // The rig stands where the bead would, so a folded row still says where the
-    // seat is — the inventory's reason for it ("reusable") says nothing.
+  } else if (p.rig && (p.state === "idle" || p.rig_parked)) {
+    // The rig stands where the bead would, so a row the panel folds away still
+    // says where the seat is — the inventory's reason for it ("reusable") says
+    // nothing there, and rides the hover instead of standing in the cell
+    // (gt-hnztc, gt-70txs).
     bd.append(el("span", "wtitle", p.rig));
-    bd.title = p.rig + (p.state === "idle" ? " — an idle seat holds no bead" : " — a seat in a parked rig holds no bead");
+    bd.title = p.rig + (p.state === "idle" ? " — an idle seat holds no bead" : " — a seat in a parked rig holds no bead") +
+      (p.reason ? " — " + p.reason : "");
   } else {
     bd.append(el("span", "wtitle", p.reason || "–"));
     bd.title = p.reason || "";

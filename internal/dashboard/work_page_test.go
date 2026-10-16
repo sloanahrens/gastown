@@ -239,6 +239,60 @@ func TestTheWorkPanelGivesASeatHoldingNoBeadItsRig(t *testing.T) {
 	}
 }
 
+// TestTheWorkPanelNamesAModelOnlyForABeadASeatHolds drives the panel over the
+// rows the Agent cell is read from where the state and the bead disagree: a
+// seat read as idle that does hold a bead names the model that bead was
+// dispatched with, a seat holding nothing whose state carries a reason keeps
+// that reason in the Bead column, and a parked rig's seat holding nothing
+// names its rig with the inventory's reason beside it on hover. The reason a
+// seat was read into is named wherever the row draws without a rig (gt-70txs).
+func TestTheWorkPanelNamesAModelOnlyForABeadASeatHolds(t *testing.T) {
+	t.Parallel()
+
+	// A hook can outlive the read of the seat's state, so the two disagree.
+	held := seat("gastown", "dementus", "idle", "gt-70txs", "the row names the bead's model", "deepseek-flash", time.Minute)
+	// A seat holding nothing with no rig in its reading: the reason stands
+	// where the rig would.
+	reasoned := seat("", "flotsam", "recovery", "", "", "", 0)
+	reasoned["reason"] = "its worktree needs recovery before reuse"
+	parkedIdle := seat("devops", "anchor", "parked", "", "", "claude-sonnet", 0)
+	parkedIdle["rig_parked"] = true
+	parkedIdle["reason"] = "reusable"
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderWork", workState([]any{held, reasoned, parkedIdle}, workQueueReading(0, 0, 0, 0)))
+
+	// The seats holding nothing, then the seat holding a bead, in the panel's
+	// own order: the busy fold, the parked fold, then the idle fold.
+	agents := workCells(t, dom, "wagent")
+	if len(agents) != 3 {
+		t.Fatalf("the panel drew %d agent cells, want 3", len(agents))
+	}
+	if agents[0].Text != "" || agents[1].Text != "" {
+		t.Errorf("a seat holding nothing names a model: %q, %q", agents[0].Text, agents[1].Text)
+	}
+	if agents[2].Text != "deepseek-flash" {
+		t.Errorf("a seat holding a bead does not name the model it was dispatched with: %q", agents[2].Text)
+	}
+
+	beads := workCells(t, dom, "wbead")
+	if len(beads) != 3 {
+		t.Fatalf("the panel drew %d bead cells, want 3", len(beads))
+	}
+	if beads[0].Text != "its worktree needs recovery before reuse" {
+		t.Errorf("a seat with no rig drops the reason it was read into: %q", beads[0].Text)
+	}
+	if !strings.Contains(beads[1].Text, "devops") {
+		t.Errorf("a parked rig's seat holding nothing does not name its rig: %q", beads[1].Text)
+	}
+	if !strings.Contains(beads[1].Title, "reusable") {
+		t.Errorf("the reason the parked seat was read into is not on hover: %q", beads[1].Title)
+	}
+	if !strings.Contains(beads[2].Text, "gt-70txs") {
+		t.Errorf("the seat holding a bead does not name it: %q", beads[2].Text)
+	}
+}
+
 // workText is the whole text the panel drew.
 func workText(t *testing.T, dom *pageDOM) string {
 	t.Helper()
