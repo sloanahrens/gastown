@@ -1119,6 +1119,235 @@ func TestLandCompletesALandingWhoseRecordWasNeverWritten(t *testing.T) {
 	}
 }
 
+// squashRange adds an auto-save commit to the work branch, which is what makes
+// mergeWork squash: the range it lands then holds a checkpoint commit.
+func (f *landFixture) squashRange(t *testing.T) {
+	t.Helper()
+	f.work.Head = f.git.Commit(t, f.origin, fixtureBranch, checkpoint.WIPCommitPrefix+" 2026-09-30", map[string]string{"c.txt": "wip\n"})
+}
+
+// TestLandRecoversUnrecordedSquashLanding: a range with auto-save commits is
+// squash-merged, so the commit the target gets has one parent and never
+// contains the head. Its record was never written, and the next pass — whose
+// ancestry check cannot see a squash at all — read the identical trees as an
+// empty merge and sent the author back to rework a landing that had already
+// taken (gt-064oh).
+func TestLandRecoversUnrecordedSquashLanding(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.squashRange(t)
+	merged := recoversUnrecordedSquashLanding(t, f)
+	// The fake can answer the premise directly: the target holds a squash of
+	// the head, not the head.
+	if contains, err := f.git.Open(f.repo).IsAncestor(f.work.Head, merged); err != nil || contains {
+		t.Fatalf("the head is reachable from the landed %s (%v); the test proves nothing about a squash", shortSHA(merged), err)
+	}
+}
+
+// recoversUnrecordedSquashLanding takes a fixture whose range has an
+// auto-save commit through a landing that squashes and then loses its record,
+// lands the same head again and returns the squashed commit the second pass
+// must finish. The unit tier runs it over gitfake; the integration tier over
+// real git, whose patch ids are what the recovery matches a squash by.
+func recoversUnrecordedSquashLanding(t *testing.T, f *landFixture) string {
+	t.Helper()
+	l := f.lander()
+	var merged string
+	f.merger.fn = func(req MergeRequest) error {
+		merged = req.Head
+		f.setMain(req.Head)
+		return errors.New("the pass ended after the merge, before the record")
+	}
+	if _, err := l.Land(context.Background(), f.work); err == nil {
+		t.Fatal("the first pass returned a landing it never recorded")
+	}
+	if parents := f.parents(merged); len(parents) != 1 {
+		t.Fatalf("landed commit parents = %v, want the squash's single parent", parents)
+	}
+	if f.bead().Status == "closed" || len(f.landingLines()) != 0 {
+		t.Fatalf("the first pass left a record: status=%s lines=%v", f.bead().Status, f.landingLines())
+	}
+
+	f.merger.fn = nil
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("the second pass did not finish the squash landing: %v", err)
+	}
+	if res.LandedCommit != merged {
+		t.Errorf("LandedCommit = %s, want the squash %s", res.LandedCommit, merged)
+	}
+	if len(f.merger.calls) != 1 {
+		t.Errorf("the merger ran %d times, want the one merge", len(f.merger.calls))
+	}
+	if len(f.gate.dirs) != 1 || len(f.review.calls) != 1 {
+		t.Errorf("the second pass gated and reviewed again: %d gate runs, %d reviews", len(f.gate.dirs), len(f.review.calls))
+	}
+	b := f.bead()
+	if b.Status != "closed" || !strings.Contains(b.Notes, LandingNoteMarker+"\nlanded_commit: "+merged) {
+		t.Errorf("bead after the finished landing: status=%s notes=%q", b.Status, b.Notes)
+	}
+	if CountRejections(b.Notes) != 0 {
+		t.Errorf("the finished landing carries a rejection:\n%s", b.Notes)
+	}
+	lines := f.landingLines()
+	if len(lines) != 1 {
+		t.Fatalf("landings lines = %d, want 1", len(lines))
+	}
+	if !strings.Contains(lines[0], `"om_verdict":"`+VerdictUnrecorded+`"`) {
+		t.Errorf("landing record = %s", lines[0])
+	}
+	return merged
+}
+
+// TestLandRecoversUnrecordedSquashLandingUnderALaterLanding: another landing
+// reached the target between the unrecorded squash and the retry, so the
+// retry's base is no longer tree-identical to the head and nothing rejects
+// before the merge: MergeSquash stages nothing, git commit fails, and every
+// pass reports an InfraError over a landing that already took (gt-064oh).
+func TestLandRecoversUnrecordedSquashLandingUnderALaterLanding(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.squashRange(t)
+	l := f.lander()
+	var merged string
+	f.merger.fn = func(req MergeRequest) error {
+		merged = req.Head
+		f.setMain(req.Head)
+		return errors.New("the pass ended after the merge, before the record")
+	}
+	if _, err := l.Land(context.Background(), f.work); err == nil {
+		t.Fatal("the first pass returned a landing it never recorded")
+	}
+	f.merger.fn = nil
+	f.base = f.pushMain("d.txt", "someone else landed\n")
+	if f.git.Tree(f.work.Head)["d.txt"] != "" || f.git.Tree(f.originMain())["d.txt"] == "" {
+		t.Fatal("the retry's base is still tree-identical to the head; the test proves nothing")
+	}
+
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("the second pass did not finish the squash landing: %v", err)
+	}
+	if res.LandedCommit != merged || f.originMain() != f.base {
+		t.Errorf("LandedCommit = %s, origin/main = %s; want the squash %s under the later landing %s",
+			res.LandedCommit, f.originMain(), merged, f.base)
+	}
+	if len(f.merger.calls) != 1 {
+		t.Errorf("the merger ran %d times, want the one merge", len(f.merger.calls))
+	}
+	if b := f.bead(); b.Status != "closed" || CountRejections(b.Notes) != 0 {
+		t.Errorf("bead after the finished landing: status=%s notes=%q", b.Status, b.Notes)
+	}
+	if len(f.landingLines()) != 1 {
+		t.Fatalf("landings lines = %d, want 1", len(f.landingLines()))
+	}
+}
+
+// TestLandRecoversUnrecordedSquashLandingForkedBeforeItsBase: the branch
+// forked before the base the squash merged onto — another landing reached the
+// target in between — so the head's own change is not the diff between the two
+// tips. The recovery still has to match the landing's patch to that change:
+// read off the landing's base instead, the target's own work between the fork
+// and the landing is folded in reversed, no patch matches, and every retry
+// over a head that already landed fails (gt-064oh).
+func TestLandRecoversUnrecordedSquashLandingForkedBeforeItsBase(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.squashRange(t)
+	f.base = f.pushMain("d.txt", "someone else landed\n")
+	if f.git.Tree(f.work.Head)["d.txt"] != "" {
+		t.Fatal("the head carries the later landing; the branch did not fork before the base it merges onto")
+	}
+	merged := recoversUnrecordedSquashLanding(t, f)
+	if got := f.parents(merged); len(got) != 1 || got[0] != f.base {
+		t.Fatalf("the squash's parents = %v, want the later landing %s it merged onto", got, f.base)
+	}
+}
+
+// TestLandDoesNotFinishALandingWhosePatchIsNotTheHeads: the target carries a
+// commit whose subject begins with the land merge's marker for this branch,
+// head and target, but which did not merge this head. The marker alone is not
+// evidence enough to write a record: the recovery reads the commit's patch
+// against the head's own change and declines when they differ, rather than put
+// a landing the target never saw on the bead (gt-064oh).
+func TestLandDoesNotFinishALandingWhosePatchIsNotTheHeads(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.squashRange(t)
+	l := f.lander()
+	var merged string
+	f.merger.fn = func(req MergeRequest) error {
+		merged = req.Head
+		f.setMain(req.Head)
+		return errors.New("the pass ended after the merge, before the record")
+	}
+	if _, err := l.Land(context.Background(), f.work); err == nil {
+		t.Fatal("the first pass returned a landing it never recorded")
+	}
+	f.merger.fn = nil
+	// A later commit carrying the marker's subject — a second landing of the
+	// same branch and target, or an operator's commit — whose patch is not the
+	// head's change.
+	planted := f.git.Commit(t, f.origin, "main", landMergeMarker(f.work)+shortSHA(f.base)+")",
+		map[string]string{"z.txt": "not this head's work\n"})
+	if planted == merged {
+		t.Fatal("the planted commit is the landing itself; the test proves nothing")
+	}
+
+	_, err := f.lander().Land(context.Background(), f.work)
+	var infra *InfraError
+	if !errors.As(err, &infra) || infra.Stage != "merge" {
+		t.Fatalf("the second pass = %v, want the merge's own InfraError: the marker's commit is not this head's landing", err)
+	}
+	if b := f.bead(); b.Status == "closed" || strings.Contains(b.Notes, planted) {
+		t.Errorf("the pass recorded the planted commit %s as the landing: status=%s notes=%q", shortSHA(planted), b.Status, b.Notes)
+	}
+	if lines := f.landingLines(); len(lines) != 0 {
+		t.Errorf("landings lines = %v, want none", lines)
+	}
+}
+
+// subjectLookups counts the land merge lookups the landing's search of the
+// target makes, so a test can pin that a pass with nothing to recover never
+// walks the target's history (gt-064oh).
+type subjectLookups struct {
+	n int
+}
+
+// countedRepo is a Repo whose unrecorded-landing lookups are counted.
+type countedRepo struct {
+	Repo
+	s *subjectLookups
+}
+
+func (r countedRepo) FindCommitMatchingSubject(ref, prefix string) (string, error) {
+	r.s.n++
+	return r.Repo.FindCommitMatchingSubject(ref, prefix)
+}
+
+// TestLandDoesNotSearchTheTargetForAFreshLanding: a landing with nothing to
+// recover reads the target's history zero times. The search is what finishes a
+// landing the target already carries, so a pass that carries none — the
+// ordinary landing — must not pay for it (gt-064oh).
+func TestLandDoesNotSearchTheTargetForAFreshLanding(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	moved := f.pushMain("c.txt", "other\n")
+	f.base = moved
+	lookups := &subjectLookups{}
+	l := f.lander()
+	l.openRepo = func(dir string) Repo { return countedRepo{Repo: f.git.Open(dir), s: lookups} }
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if lines := f.landingLines(); len(lines) != 1 || f.bead().Status != "closed" {
+		t.Fatalf("the fixture's landing left %d landings lines and the bead %s; the test proves nothing", len(lines), f.bead().Status)
+	}
+	if lookups.n != 0 {
+		t.Errorf("a fresh landing searched the target's history %d time(s) for a land merge naming this head", lookups.n)
+	}
+}
+
 // TestLandFinishesTheUnrecordedLandingARevertQuotes: an operator reverts the
 // landing whose record was never written, and the revert's message quotes the
 // land merge's subject, so a search of whole commit messages finds the revert

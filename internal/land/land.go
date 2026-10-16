@@ -52,6 +52,12 @@ type Repo interface {
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
 	Rev(ref string) (string, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
+	// MergeBase is the best common ancestor of a and b, and it fails when the
+	// two share none (git merge-base exits 1 with no output): the point a
+	// squash of head onto base staged the head's change from, which is what
+	// the recovery of an unrecorded squash landing reads the head's own patch
+	// against (gt-064oh).
+	MergeBase(a, b string) (string, error)
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	TreesIdentical(a, b string) (bool, error)
 	CommitMessages(base, head string) ([]git.CommitMessage, error)
@@ -954,22 +960,36 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		}
 		return Result{}, err
 	}
-	if already, err := g.IsAncestor(w.Head, base); err != nil {
+	already, err := g.IsAncestor(w.Head, base)
+	if err != nil {
 		return Result{}, &InfraError{Stage: "ancestry", Err: err}
-	} else if already {
-		// This lander's own merge is also already reachable when its record
-		// was never written (the daemon died between the merge and the
-		// record, or the MergePull response was lost): that landing is
-		// finished, not rejected. Anything else reached the target by a route
-		// that left no landing record (an operator push), which is not the
-		// author's to rework (gt-mdet3).
-		completed, err := l.completeUnrecordedLanding(g, w)
-		if completed != nil {
-			return *completed, err
+	}
+	// A landing this lander merged but never recorded — the daemon died
+	// between the merge and the record, or the MergePull response was lost —
+	// is finished, not landed again. The land merge's subject names this
+	// branch, head and target, so a search of the target finds it, and the
+	// landing is not the author's work to redo.
+	//
+	// The search runs only where the target already carries this head's work:
+	// the head is on the target (a --no-ff merge contains it, so the ancestry
+	// check above saw it), the two trees are identical, or a re-merge writes
+	// nothing (a squash, which mergeWork makes of a range that still holds
+	// auto-save commits, is a single-parent commit that never contains the
+	// head, so neither cheap test can see it). Those are the three dead ends
+	// the pass would otherwise end on, and each one asks the recovery before
+	// it gives up. A landing that reaches none of them is a landing to make,
+	// and never walks the target's history for a land merge naming a head
+	// nothing merged (gt-064oh). A fourth shape — a retry whose merge
+	// conflicts with a later landing that edited the head's own lines — still
+	// ends as a conflict rejection with rework (gt-01yt6).
+	if already {
+		if res, err, handled := l.finishedUnrecordedLanding(g, w); handled {
+			return res, err
 		}
-		if err != nil {
-			return Result{}, err
-		}
+		// The head is on the target with no land merge of this lander's to
+		// account for it: it reached the target by a route that left no
+		// landing record (an operator push), which is not the author's to
+		// rework (gt-mdet3).
 		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: false,
 			Reason: fmt.Sprintf("empty merge: head %s is already reachable from %s/%s (%s) with no landing record; nothing to land", shortSHA(w.Head), remote, w.Target, shortSHA(base))}, nil)
 	}
@@ -993,6 +1013,16 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	if same, err := g.TreesIdentical(base, w.Head); err != nil {
 		return Result{}, &InfraError{Stage: "compare trees", Err: err}
 	} else if same {
+		// Identical trees before the merge are the other shape of a lost
+		// record rather than an empty range: the squash of a head that forked
+		// at the target writes exactly the head's tree, so the target and the
+		// head compare equal and the author would be sent to rework work that
+		// already landed (gt-064oh). The range checks above already ran; they
+		// read the base..head the head's own first pass read and passed, so
+		// they do not stand between a lost record and its recovery here.
+		if res, err, handled := l.finishedUnrecordedLanding(g, w); handled {
+			return res, err
+		}
 		return Result{}, l.reject(issue, w, &Rejection{Kind: RejectEmpty, Rework: true, Reason: EmptyMergeReason(g, EmptyMerge{
 			Target: w.Target, Base: base, Head: w.Head, Stage: "before merge",
 			Comparison: fmt.Sprintf("%s/%s and %s have identical trees", remote, w.Target, shortSHA(w.Head)),
@@ -1009,6 +1039,17 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 
 	merged, rej, err := mergeWork(wt, w, base)
 	if err != nil {
+		// The last shape of a lost record: a squash whose head the target
+		// already carries stages nothing, so mergeWork's commit fails with an
+		// empty index and every pass reports the merge as infra over a landing
+		// that already took (gt-064oh). mergeWork has aborted the merge, so
+		// the worktree is clean whether or not the recovery finds a landing,
+		// and the merge's own error is the one to report when it does not.
+		if completed, cerr := l.completeUnrecordedLanding(g, w); completed != nil {
+			return *completed, cerr
+		} else if cerr != nil {
+			l.logf("%s: reading the target for an unrecorded landing of %s: %v", w.BeadID, shortSHA(w.Head), cerr)
+		}
 		return Result{}, err
 	}
 	if rej != nil {
@@ -1234,11 +1275,28 @@ func landMergeMarker(w Work) string {
 	return fmt.Sprintf("land: %s (%s) onto %s (", w.Branch, shortSHA(w.Head), w.Target)
 }
 
+// finishedUnrecordedLanding is completeUnrecordedLanding consulted at a dead
+// end: handled reports that the pass is over, with res and err the values Land
+// returns — the landing it finished, its RecordError, or the recovery's own
+// InfraError. A lookup that fails is itself an answer, because without it the
+// pass cannot tell a lost record from a landing to make (gt-064oh).
+func (l *Lander) finishedUnrecordedLanding(g Repo, w Work) (res Result, err error, handled bool) {
+	completed, err := l.completeUnrecordedLanding(g, w)
+	if completed != nil {
+		return *completed, err, true
+	}
+	if err != nil {
+		return Result{}, err, true
+	}
+	return Result{}, nil, false
+}
+
 // completeUnrecordedLanding finishes a landing this lander merged but never
 // recorded: it finds the land merge it made for w's head on the target, writes
 // the record and returns the result. It returns nil, nil when the target
-// carries no such merge, which means the head arrived by a route that left no
-// record of this lander's and is not a landing to complete.
+// carries no such merge — or carries one whose patch is not this head's change
+// — which means the head arrived by a route that left no record of this
+// lander's and is not a landing to complete.
 //
 // The target's history is the whole evidence: om's verdict and the gate's
 // result were not kept, so the record says so rather than inventing them.
@@ -1263,6 +1321,37 @@ func (l *Lander) completeUnrecordedLanding(g Repo, w Work) (*Result, error) {
 	patchID, err := g.PatchID(base, merged)
 	if err != nil {
 		return nil, &InfraError{Stage: "patch-id of the landing", Err: err}
+	}
+	// A --no-ff merge holds the head among its ancestors, so the marker and
+	// the head agree on which work landed. A squash holds it nowhere, and the
+	// marker is then the only thing naming the head: the patch the commit
+	// wrote has to be the head's own change, or the subject matched a
+	// different head's landing and this head's work is not on the target to
+	// record.
+	//
+	// The head's own change is read from its merge base with the base the
+	// landing merged onto, because that is the diff git merge --squash staged
+	// (gt-064oh). Reading it from the landing's base instead — diff base..head
+	// — also folds in every change the target made between the fork and the
+	// landing, reversed: a branch that forked before that base is then read as
+	// a patch that is not the head's change, and its landing is never
+	// finished.
+	if containsHead, err := g.IsAncestor(w.Head, merged); err != nil {
+		return nil, &InfraError{Stage: "ancestry of the landing", Err: err}
+	} else if !containsHead {
+		fork, err := g.MergeBase(base, w.Head)
+		if err != nil {
+			return nil, &InfraError{Stage: "merge base of the head", Err: err}
+		}
+		headPatchID, err := g.PatchID(fork, w.Head)
+		if err != nil {
+			return nil, &InfraError{Stage: "patch-id of the head", Err: err}
+		}
+		if headPatchID != patchID {
+			l.logf("%s: %s begins a land merge's subject but its patch is not %s's change; not finishing it",
+				w.BeadID, shortSHA(merged), shortSHA(w.Head))
+			return nil, nil
+		}
 	}
 	// The risk paths are recomputed rather than carried: the label a landed
 	// path puts on the bead is the same read Land does on a live landing.
