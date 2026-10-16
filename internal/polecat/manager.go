@@ -707,7 +707,11 @@ func (m *Manager) exists(name string) bool {
 
 // AddOptions configures polecat creation.
 type AddOptions struct {
-	HookBead   string // Bead ID to set as hook_bead at spawn time (atomic assignment)
+	HookBead string // Bead ID to set as hook_bead at spawn time (atomic assignment)
+	// Agent is the agent the sling spawns the seat on. It is written to the
+	// agent bead in the same write as HookBead, so the dashboard can still name
+	// the seat's agent after its session has ended.
+	Agent      string
 	BaseBranch string // Override base branch for worktree (e.g., "origin/integration/gt-epic")
 	// ResumeBranch reuses an existing branch (typically a PR head) for the polecat
 	// worktree instead of creating a fresh polecat/<name>/<bead>+<ts> branch (gh#3602).
@@ -1134,6 +1138,7 @@ func (m *Manager) addWithOptionsLocked(name string, opts AddOptions, polecatDir 
 		Rig:        m.rig.Name,
 		AgentState: "spawning",
 		HookBead:   opts.HookBead,
+		Agent:      opts.Agent,
 	}); err != nil {
 		cleanupOnError()
 		return nil, fmt.Errorf("agent bead required for polecat tracking: %w", err)
@@ -1375,6 +1380,7 @@ func (m *Manager) AddWithOptions(name string, opts AddOptions) (_ *Polecat, retE
 		Rig:        m.rig.Name,
 		AgentState: "spawning",
 		HookBead:   opts.HookBead, // Set atomically at spawn time
+		Agent:      opts.Agent,
 	}); err != nil {
 		// Hard fail — an untrackable polecat is worse than no polecat
 		cleanupOnError()
@@ -2124,6 +2130,7 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		Rig:        m.rig.Name,
 		AgentState: "spawning",
 		HookBead:   opts.HookBead, // Set atomically at spawn time
+		Agent:      opts.Agent,
 	}); err != nil {
 		// Hard fail — clean up the new worktree since we can't track this polecat.
 		// removeFailedRepairWorktree also drops polecatDir to prevent a limbo
@@ -2345,6 +2352,7 @@ func (m *Manager) ReuseIdlePolecat(name string, opts AddOptions) (*Polecat, erro
 		Rig:        m.rig.Name,
 		AgentState: "spawning",
 		HookBead:   opts.HookBead,
+		Agent:      opts.Agent,
 	}); err != nil {
 		return nil, fmt.Errorf("agent bead required for polecat tracking: %w", err)
 	}
