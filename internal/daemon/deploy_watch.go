@@ -47,14 +47,27 @@ const (
 	deployWatchWindow = 24 * time.Hour
 
 	// deployWatchRunLimit is runs per page and deployWatchRunPages the most
-	// pages one poll reads per repository. The API deploys no ref filter
-	// (ref=main answers nothing — verified live), so runs are listed
-	// unfiltered and a busy repository can hold more of them inside the
-	// window than one page returns. A page is followed by the next while its
-	// oldest run is still inside the window, so a quiet repository costs one
-	// call and a busy one is read until the window is covered.
+	// pages one poll reads per repository. The run list has no ref filter that
+	// answers for a branch deploy: the route's ref parameter returns nothing
+	// for ref=main against a repository whose staging.yml has run on main
+	// (Forgejo 16.0.5, read live while building gt-hcbft), so runs are listed
+	// unfiltered and a busy repository can hold more of them inside the window
+	// than one page returns. A page is followed by the next while its oldest
+	// run is still inside the window, so a quiet repository costs one call and
+	// a busy one is read until the window is covered.
 	deployWatchRunLimit = 20
 	deployWatchRunPages = 5
+
+	// deployWatchBlindPolls is how many polls in a row a rig's repository may
+	// go unread before the watch escalates that it is blind to it: one failed
+	// poll is a Forgejo restart, and a run of them is a repository the viewer
+	// cannot read at all.
+	deployWatchBlindPolls = 3
+
+	// deployWatchBrokenKeyPrefix keys that escalation:
+	// deploy-watch-broken:<rig>. It is low severity because a blind watch has
+	// no failure to report, only the loss of the reads that would report one.
+	deployWatchBrokenKeyPrefix = "deploy-watch-broken:"
 
 	// deployWatchSource is the source every escalation this watch raises
 	// carries.
@@ -220,16 +233,20 @@ type deployWatch struct {
 	Logf  func(format string, args ...any)
 	Now   func() time.Time
 
-	// picMu guards failing alone. The watch's own goroutine is the only
-	// writer of everything else here — the state file, and the alerts it has
-	// raised — while the attention collector reads this picture from the
-	// heartbeat goroutine, which must never wait on a retrying escalation.
+	// picMu guards failing alone: the watch's own goroutine writes the picture
+	// in poll and the attention collector reads it from the heartbeat
+	// goroutine, which must never wait on a retrying escalation. Everything
+	// else here is that one goroutine's, read and written by no other — the
+	// invariant note and heldOpen read open on without this lock.
 	picMu sync.RWMutex
 	// open is the raised alerts by key, and failing the last poll's picture
 	// per rig. A rig whose list failed keeps the picture it had, and one the
 	// town no longer lists loses it (poll).
 	open    map[string]deployOpenRun
 	failing map[string][]deployFailure
+	// blind is the rigs whose reads are failing, by rig, as the read a poll
+	// could not make (blindRead).
+	blind map[string]deployBlindWatch
 	// jobs is the failing job names of a run, cached by run id (failingJobs),
 	// and settled the alerts already closed or already offered a clear.
 	jobs    map[int64][]string
@@ -241,7 +258,19 @@ type deployWatch struct {
 	stateLost bool
 	loaded    bool
 	dirty     bool
-	lastLog   string
+	// lastLog is the line each key last wrote, so one that stands still is
+	// said once (logOnce).
+	lastLog map[string]string
+}
+
+// deployBlindWatch is one rig's unread repository: the polls in a row that
+// read nothing from it (polls), and whether the blind escalation was raised
+// for them (raised). It lives in memory alone, so a restarted daemon counts
+// from zero and escalates again deployWatchBlindPolls polls later, which files
+// a repeat on the open bead rather than a second one (blindRead).
+type deployBlindWatch struct {
+	polls  int
+	raised bool
 }
 
 // newDeployWatch returns a watch with its state initialized.
@@ -249,8 +278,10 @@ func newDeployWatch() *deployWatch {
 	return &deployWatch{
 		open:    map[string]deployOpenRun{},
 		failing: map[string][]deployFailure{},
+		blind:   map[string]deployBlindWatch{},
 		jobs:    map[int64][]string{},
 		settled: map[string]bool{},
+		lastLog: map[string]string{},
 	}
 }
 
@@ -263,14 +294,17 @@ func (w *deployWatch) now() time.Time {
 	return time.Now()
 }
 
-// logOnce writes one line per distinct message: a Forgejo that is down would
+// logOnce writes one line per key and message: a Forgejo that is down would
 // otherwise repeat the same line every interval for as long as it stays down.
-func (w *deployWatch) logOnce(format string, args ...any) {
+// The key is what the line is about — a rig, or the alert it names — because a
+// single remembered message let the last writer silence every other, so two
+// rigs answering nothing logged as one.
+func (w *deployWatch) logOnce(key, format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
-	if msg == w.lastLog {
+	if w.lastLog[key] == msg {
 		return
 	}
-	w.lastLog = msg
+	w.lastLog[key] = msg
 	if w.Logf != nil {
 		w.Logf("deploy_watch: %s", msg)
 	}
@@ -312,6 +346,7 @@ func (w *deployWatch) poll(ctx context.Context) {
 	for _, repo := range repos {
 		watched[repo.Rig] = true
 		runs, ok := w.runs(ctx, repo, now)
+		w.blindRead(repo, ok)
 		if !ok {
 			continue
 		}
@@ -329,6 +364,14 @@ func (w *deployWatch) poll(ctx context.Context) {
 		w.failing[rig] = failures
 	}
 	w.picMu.Unlock()
+	// A rig the town no longer lists is read by nobody and watched by nothing,
+	// so its count goes with the picture: the escalation it raised stays open
+	// with this rig's other ones.
+	for rig := range w.blind {
+		if !watched[rig] {
+			delete(w.blind, rig)
+		}
+	}
 	w.pruneJobs()
 	if w.dirty {
 		w.save()
@@ -359,7 +402,7 @@ func (w *deployWatch) pruneJobs() {
 func (w *deployWatch) runs(ctx context.Context, repo deployRepo, now time.Time) ([]forgejo.ActionRun, bool) {
 	api, err := w.API(repo.APIBase)
 	if err != nil {
-		w.logOnce("%s: no client for %s: %v", repo.Rig, repo.APIBase, err)
+		w.logOnce(repo.Rig, "%s: no client for %s: %v", repo.Rig, repo.APIBase, err)
 		return nil, false
 	}
 	var out []forgejo.ActionRun
@@ -373,7 +416,7 @@ func (w *deployWatch) runs(ctx context.Context, repo deployRepo, now time.Time) 
 			return out, true
 		}
 	}
-	w.logOnce("%s %s: %d full pages reach only %s back, so a deploy that failed before them is not watched",
+	w.logOnce(repo.Rig, "%s %s: %d full pages reach only %s back, so a deploy that failed before them is not watched",
 		repo.Rig, repo.repo(), deployWatchRunPages, deployWatchWindow)
 	return out, true
 }
@@ -391,14 +434,60 @@ func (w *deployWatch) runPage(ctx context.Context, api deployRunAPI, repo deploy
 			// The rig's own config names this repository, so a 404 is a
 			// repository the viewer cannot read — a blind watch, which says so
 			// rather than passing for a rig that watches nothing.
-			w.logOnce("%s: %s answers 404 on %s: the viewer cannot read the repository the rig names",
+			w.logOnce(repo.Rig, "%s: %s answers 404 on %s: the viewer cannot read the repository the rig names",
 				repo.Rig, repo.repo(), repo.APIBase)
 			return nil, false
 		}
-		w.logOnce("%s %s: reading runs: %v", repo.Rig, repo.repo(), err)
+		w.logOnce(repo.Rig, "%s %s: reading runs: %v", repo.Rig, repo.repo(), err)
 		return nil, false
 	}
 	return list.Runs, true
+}
+
+// blindRead records how this poll's read of repo went, and escalates a
+// repository the watch has gone deployWatchBlindPolls polls without reading.
+// The run list reports the failures it read and nothing at all about the reads
+// that never happened, so a repository that always answers nothing holds the
+// picture of its last good poll standing — which reads exactly like a green
+// deploy. The escalation is keyed per rig and dropped by the first poll that
+// reads the repository again.
+func (w *deployWatch) blindRead(repo deployRepo, ok bool) {
+	cur := w.blind[repo.Rig]
+	key := deployWatchBrokenKeyPrefix + repo.Rig
+	if ok {
+		if !cur.raised {
+			delete(w.blind, repo.Rig)
+			return
+		}
+		reason := fmt.Sprintf("%s: %s answers again, so this rig's deploys are watched",
+			repo.Rig, repo.repo())
+		if err := w.Clear(key, reason); err != nil {
+			// The alert is open and the clear did not land, so the count goes
+			// and the raised flag stays: a read that fails again now reports no
+			// second blindness while that alert nobody closed is still open.
+			w.blind[repo.Rig] = deployBlindWatch{raised: true}
+			w.logOnce(key, "clearing %s: %v", key, err)
+			return
+		}
+		delete(w.blind, repo.Rig)
+		w.logOnce(key, "%s: cleared (%s)", key, reason)
+		return
+	}
+	cur.polls++
+	if cur.raised || cur.polls < deployWatchBlindPolls {
+		w.blind[repo.Rig] = cur
+		return
+	}
+	message := fmt.Sprintf("%s: %d polls in a row read no runs from %s, so a deploy of this rig that fails now goes unseen.\nThe read error is in the deploy_watch log.\nThe first poll that reads %s again closes this.",
+		repo.Rig, cur.polls, repo.repo(), repo.repo())
+	if err := w.Raise(config.SeverityLow, key, message); err != nil {
+		w.logOnce(key, "%s: raising %s: %v", key, config.SeverityLow, err)
+		w.blind[repo.Rig] = cur
+		return
+	}
+	cur.raised = true
+	w.blind[repo.Rig] = cur
+	w.logOnce(key, "%s: blind for %d polls on %s", repo.Rig, cur.polls, repo.repo())
 }
 
 // deployPageInsideWindow is whether a page's oldest run still falls inside the
@@ -510,14 +599,14 @@ func (w *deployWatch) failingJobs(ctx context.Context, repo deployRepo, run forg
 	}
 	api, err := w.API(repo.APIBase)
 	if err != nil {
-		w.logOnce("%s: no client for %s: %v", repo.Rig, repo.APIBase, err)
+		w.logOnce(repo.Rig, "%s: no client for %s: %v", repo.Rig, repo.APIBase, err)
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, deployWatchCallTimeout)
 	defer cancel()
 	jobs, err := api.ListRunJobs(ctx, repo.Owner, repo.Name, run.ID)
 	if err != nil {
-		w.logOnce("%s %s: run %d jobs: %v", repo.Rig, repo.repo(), run.ID, err)
+		w.logOnce(repo.Rig, "%s %s: run %d jobs: %v", repo.Rig, repo.repo(), run.ID, err)
 		return nil
 	}
 	var out []string
@@ -547,13 +636,13 @@ func (w *deployWatch) note(f deployFailure) {
 	open, known := w.open[f.Key]
 	if !known || open.Run != f.RunID || open.Severity != f.Severity {
 		if err := w.Raise(f.Severity, f.Key, f.Message); err != nil {
-			w.logOnce("%s: raising %s: %v", f.Key, f.Severity, err)
+			w.logOnce(f.Key, "%s: raising %s: %v", f.Key, f.Severity, err)
 			return
 		}
 		open.Run = f.RunID
 		open.Severity = f.Severity
 		w.dirty = true
-		w.logOnce("%s: %s run %d failed on %s at %s", f.Rig, f.Workflow, f.RunID, f.Repo, f.Severity)
+		w.logOnce(f.Key, "%s: %s run %d failed on %s at %s", f.Rig, f.Workflow, f.RunID, f.Repo, f.Severity)
 	}
 	if open.Rig != f.Rig || open.Repo != f.Repo || open.Workflow != f.Workflow ||
 		open.Class != f.Class || open.Summary != f.Summary {
@@ -569,7 +658,7 @@ func (w *deployWatch) note(f deployFailure) {
 	// next poll pushes it.
 	if f.Severity == config.SeverityHigh && !open.Pushed && w.Push != nil {
 		if err := w.push(f); err != nil {
-			w.logOnce("%s: push for run %d: %v", f.Key, f.RunID, err)
+			w.logOnce(f.Key, "%s: push for run %d: %v", f.Key, f.RunID, err)
 		} else {
 			open.Pushed = true
 			w.dirty = true
@@ -599,7 +688,7 @@ func (w *deployWatch) clearIfOpen(key, reason string) {
 		return
 	}
 	if err := w.Clear(key, reason); err != nil {
-		w.logOnce("clearing %s: %v", key, err)
+		w.logOnce(key, "clearing %s: %v", key, err)
 		return
 	}
 	delete(w.open, key)
@@ -608,7 +697,7 @@ func (w *deployWatch) clearIfOpen(key, reason string) {
 	}
 	w.settled[key] = true
 	w.dirty = true
-	w.logOnce("%s: cleared (%s)", key, reason)
+	w.logOnce(key, "%s: cleared (%s)", key, reason)
 }
 
 // failures is the picture the last poll left, for the attention queue: the
@@ -648,14 +737,14 @@ func (w *deployWatch) load() {
 	if err != nil {
 		w.stateLost = true
 		if !os.IsNotExist(err) {
-			w.logOnce("reading %s: %v", w.State, err)
+			w.logOnce(w.State, "reading %s: %v", w.State, err)
 		}
 		return
 	}
 	var st deployWatchState
 	if err := json.Unmarshal(data, &st); err != nil {
 		w.stateLost = true
-		w.logOnce("reading %s: %v", w.State, err)
+		w.logOnce(w.State, "reading %s: %v", w.State, err)
 		return
 	}
 	if st.Open != nil {
@@ -671,7 +760,7 @@ func (w *deployWatch) save() {
 		return
 	}
 	if err := atomicfile.EnsureDirAndWriteJSON(w.State, deployWatchState{Open: w.open}); err != nil {
-		w.logOnce("writing %s: %v", w.State, err)
+		w.logOnce(w.State, "writing %s: %v", w.State, err)
 	}
 }
 
