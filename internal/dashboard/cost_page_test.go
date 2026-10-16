@@ -49,7 +49,8 @@ func TestCostPanelReplacesTheDeepSeekAndUsagePanels(t *testing.T) {
 		t.Error("renderCost does not draw DeepSeek, then the GCP line, then Usage")
 	}
 	// The one-line case returns before any part is drawn.
-	if one, parts := strings.Index(cost, `if (!d && !u) {`), strings.Index(cost, "costSpend("); one > parts || !strings.Contains(cost[one:parts], "return;") {
+	one, parts := strings.Index(cost, `if (!d && !u) {`), strings.Index(cost, "costSpend(")
+	if one < 0 || parts < 0 || one > parts || !strings.Contains(cost[one:parts], "return;") {
 		t.Error("a panel with nothing to show goes on to draw its parts")
 	}
 
@@ -352,7 +353,7 @@ func TestCostPanelDrawsTheClaudePlanLineUnderTheDeepSeekLines(t *testing.T) {
 	if !strings.Contains(lines[0].Text, "balance") {
 		t.Errorf("the first line is not the DeepSeek part: %+v", lines[0])
 	}
-	want := "Claude Max · $200/mo · 38% of this week's limit · resets " + resetText(reset) +
+	want := "Claude plan · $200/mo · 38% of this week's limit · resets " + resetText(reset) +
 		" · +9.2%/day (24h) · projected 104% at reset · limit in 6.1d"
 	if lines[1].Text != want {
 		t.Errorf("the line under the DeepSeek part = %q, want %q", lines[1].Text, want)
@@ -369,9 +370,11 @@ func TestCostPanelDrawsTheClaudePlanLineUnderTheDeepSeekLines(t *testing.T) {
 	// panel with neither a spend report nor usage still owes the plan line.
 	cost := pageFunc(t, "renderCost")
 	spend := strings.Index(cost, "const spendWords = costSpend(")
-	plan := strings.Index(cost[spend:], "costClaudePlan(")
-	gcp := strings.Index(cost[spend:], "costGCP(")
-	if spend < 0 || !(0 <= plan && plan < gcp) {
+	if spend < 0 {
+		t.Fatal("renderCost has no drawn panel: no costSpend call behind the spend words")
+	}
+	plan, gcp := strings.Index(cost[spend:], "costClaudePlan("), strings.Index(cost[spend:], "costGCP(")
+	if plan < 0 || gcp < 0 || plan >= gcp {
 		t.Error("the drawn panel does not go DeepSeek, then the Claude plan line, then the GCP line")
 	}
 	if n := strings.Count(cost, "costClaudePlan("); n != 2 {
@@ -393,7 +396,7 @@ func TestCostPanelClaudePlanLineDrawsWithoutASpendReport(t *testing.T) {
 	if !strings.Contains(lines[0].Text, "no spend report") {
 		t.Errorf("the empty panel's first line = %q, want the missing spend report", lines[0].Text)
 	}
-	if !strings.HasPrefix(lines[1].Text, "Claude Max · ") {
+	if !strings.HasPrefix(lines[1].Text, "Claude plan · ") {
 		t.Errorf("the empty panel's second line = %q, want the plan", lines[1].Text)
 	}
 }
@@ -562,24 +565,23 @@ func TestCostPanelClaudePlanHoverCarriesTheAPIEquivalentDollars(t *testing.T) {
 	}
 }
 
-// The page names the plan from its price, off a constant that mirrors the
-// reader's default (ClaudePlanDefaultUSD): a change to the default that left the
-// page behind would call a $100 plan Max.
-func TestCostPanelClaudePlanNameTracksTheReaderDefaultPrice(t *testing.T) {
+// The line names no subscription: the series carries limits and a price, not a
+// plan, so a line at the reader's default price is worded as any other.
+func TestCostPanelClaudePlanLineNamesNoSubscription(t *testing.T) {
 	t.Parallel()
 
-	want := "const CLAUDE_PLAN_MAX_USD = " + strconv.Itoa(int(ClaudePlanDefaultUSD)) + ";"
-	if !strings.Contains(string(indexHTML), want) {
-		t.Errorf("the page does not carry %q, so its plan name has drifted from the reader's default price", want)
-	}
-
 	now := time.Now()
-	lines, _ := drawCost(t, map[string]any{
-		"spend":       map[string]any{"balance": 12.5},
-		"claude_plan": claudePlan(now, map[string]any{"plan_usd_month": 100.0}),
-	})
-	if len(lines) < 2 || !strings.HasPrefix(lines[1].Text, "Claude plan · $100/mo · ") {
-		t.Errorf("a plan at another price = %q, want it named for what it is", lines[1].Text)
+	for _, price := range []float64{ClaudePlanDefaultUSD, 100.0} {
+		lines, _ := drawCost(t, map[string]any{
+			"spend":       map[string]any{"balance": 12.5},
+			"claude_plan": claudePlan(now, map[string]any{"plan_usd_month": price}),
+		})
+		if len(lines) < 2 {
+			t.Fatalf("the panel drew %d lines for a $%v plan: %+v", len(lines), price, lines)
+		}
+		if want := "Claude plan · $" + strconv.Itoa(int(price)) + "/mo · "; !strings.HasPrefix(lines[1].Text, want) {
+			t.Errorf("a plan at $%v = %q, want %q", price, lines[1].Text, want)
+		}
 	}
 }
 
@@ -792,5 +794,32 @@ func TestCostPanelClaudePlanCeilingTracksTheReaderCeiling(t *testing.T) {
 	want := "const CLAUDE_PLAN_CEILING_PCT = " + strconv.Itoa(int(ClaudePlanCeilingPct)) + ";"
 	if !strings.Contains(string(indexHTML), want) {
 		t.Errorf("the page does not carry %q, so its week colour has drifted from the reader's ceiling", want)
+	}
+}
+
+// A number the reader has not sent draws a dash for itself: a field left out of
+// the payload is not a zero, and "NaN%" or "undefined" on the line would read as
+// a measurement nobody took.
+func TestCostPanelClaudePlanLineDrawsNoNaNForAMissingNumber(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	lines, _ := drawCost(t, map[string]any{
+		"spend": map[string]any{"balance": 12.5},
+		"claude_plan": claudePlan(now, planMonthFields(now, map[string]any{
+			"weekly_pct": nil, "projected_pct_at_reset": nil, "pace_per_day_24h": nil,
+			"pace_per_day_1h": nil, "five_hour_pct": nil, "plan_usd_month": nil,
+			"weekly_resets_at": nil, "five_hour_resets_at": nil, "used_value_usd": nil,
+			"weekly_value_usd": nil, "month_start_at": nil, "month_end_at": nil,
+			"month_utilization_pct": nil, "avg_weekly_pct": nil,
+		})),
+	})
+	if len(lines) < 2 {
+		t.Fatalf("the panel drew %d lines: %+v", len(lines), lines)
+	}
+	for _, got := range []string{lines[1].Text, lines[1].Title} {
+		if strings.Contains(got, "NaN") || strings.Contains(got, "undefined") {
+			t.Errorf("a payload missing a number drew %q", got)
+		}
 	}
 }
