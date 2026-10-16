@@ -408,6 +408,8 @@ var supplementalTables = []string{
 // supplemental tables to JSONL files in {gitRepo}/{db}/ directory.
 //
 // Issues go to {db}/issues.jsonl (scrubbed). Other tables go to {db}/{table}.jsonl.
+// A table too large for one file continues in numbered shards (see
+// jsonlShardMaxBytes); the returned count is the rows across all of them.
 // Also writes a legacy {db}.jsonl (symlink to {db}/issues.jsonl) for backward compat.
 //
 // Returns the total number of records exported across all tables. When a
@@ -489,7 +491,8 @@ func jsonlExportCommand(ctx context.Context, useServer bool, host string, port i
 	return cmd
 }
 
-// exportTableToJsonl runs a query and writes the result as JSONL to {dir}/{table}.jsonl.
+// exportTableToJsonl runs a query and writes the result as JSONL to {dir}/{table}.jsonl,
+// continuing in {table}.2.jsonl, {table}.3.jsonl, ... when it outgrows one shard.
 // Connects to the running Dolt server via --host/--port to get current committed data,
 // falling back to embedded mode (cmd.Dir=dataDir) if no server config is available.
 // Returns the number of records exported.
@@ -543,11 +546,86 @@ func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir 
 		return 0, fmt.Errorf("parsing dolt output: %w", err)
 	}
 
-	outPath := filepath.Join(dir, table+".jsonl")
-	tmpPath := outPath + ".tmp"
+	return writeTableShards(dir, table, result.Rows, jsonlShardMaxBytes)
+}
 
-	var buf bytes.Buffer
-	for _, row := range result.Rows {
+// jsonlShardMaxBytes is where a table's export moves on to its next shard.
+// GitHub refuses a push holding any file over 100 MB, and the 8 KB value cap on
+// events rows bounds a row, not a table: hq/events.jsonl reached 100.08 MB on
+// 2026-10-16 with every value capped, and the offsite backup stopped again. A
+// table now exports as numbered shards cut here, so no file grows with the row
+// count.
+const jsonlShardMaxBytes = 50 * 1024 * 1024
+
+// jsonlShardHardLimit is the size no exported file may reach. It sits under
+// GitHub's 100 MB (read as 100 MiB or 100 000 000 bytes) with room for the
+// one row that crosses jsonlShardMaxBytes.
+const jsonlShardHardLimit = 90 * 1024 * 1024
+
+// jsonlShardName names shard n (counting from 1) of a table's export. The first
+// shard keeps the unsharded name, so a table that fits one file reads exactly as
+// it did before sharding.
+func jsonlShardName(table string, n int) string {
+	if n <= 1 {
+		return table + ".jsonl"
+	}
+	return fmt.Sprintf("%s.%d.jsonl", table, n)
+}
+
+// jsonlShardPaths lists the files of a table's export in shard order:
+// {table}.jsonl, then {table}.2.jsonl, {table}.3.jsonl, ... A table with no
+// export in dir has no paths; a dir that cannot be read is an error.
+func jsonlShardPaths(dir, table string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	byShard := make(map[int]string)
+	for _, e := range entries {
+		name := e.Name()
+		if name == jsonlShardName(table, 1) {
+			byShard[1] = filepath.Join(dir, name)
+			continue
+		}
+		rest, ok := strings.CutPrefix(name, table+".")
+		if !ok {
+			continue
+		}
+		num, ok := strings.CutSuffix(rest, ".jsonl")
+		if !ok {
+			continue
+		}
+		// Round-trip through the shard name so "events.02.jsonl" and
+		// "events.x.jsonl" are not taken for shards.
+		if n, err := strconv.Atoi(num); err == nil && n >= 2 && name == jsonlShardName(table, n) {
+			byShard[n] = filepath.Join(dir, name)
+		}
+	}
+	nums := make([]int, 0, len(byShard))
+	for n := range byShard {
+		nums = append(nums, n)
+	}
+	sort.Ints(nums)
+	paths := make([]string, 0, len(nums))
+	for _, n := range nums {
+		paths = append(paths, byShard[n])
+	}
+	return paths, nil
+}
+
+// writeTableShards writes rows as the table's JSONL export in dir, cut into
+// shards of about maxBytes (a single row larger than that gets a shard of its
+// own), and returns the number of rows written.
+//
+// Every shard is written to a temporary file first and renamed into place, then
+// the shards left over from an earlier, longer export are removed, so a table
+// that shrank does not keep a stale tail in the backup. verifyJsonlShards runs
+// last: an export whose files do not hold exactly the rows it was given, or hold
+// a file over jsonlShardHardLimit, is an error and counts as a failed export.
+func writeTableShards(dir, table string, rows []json.RawMessage, maxBytes int) (int, error) {
+	var shards []*bytes.Buffer
+	cur := &bytes.Buffer{}
+	for _, row := range rows {
 		if table == "events" {
 			capped, err := capEventRowValues(row, eventValueBackupCap)
 			if err != nil {
@@ -555,23 +633,86 @@ func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir 
 			}
 			row = capped
 		}
-		var compact bytes.Buffer
-		if err := json.Compact(&compact, row); err != nil {
+		var line bytes.Buffer
+		if err := json.Compact(&line, row); err != nil {
 			return 0, fmt.Errorf("compacting JSON row: %w", err)
 		}
-		buf.Write(compact.Bytes())
-		buf.WriteByte('\n')
+		line.WriteByte('\n')
+		if cur.Len() > 0 && cur.Len()+line.Len() > maxBytes {
+			shards = append(shards, cur)
+			cur = &bytes.Buffer{}
+		}
+		cur.Write(line.Bytes())
+	}
+	// An empty table still writes its (empty) first shard, as it always has.
+	shards = append(shards, cur)
+
+	tmpPaths := make([]string, len(shards))
+	removeTmps := func() {
+		for _, p := range tmpPaths {
+			if p != "" {
+				os.Remove(p)
+			}
+		}
+	}
+	for i, shard := range shards {
+		tmpPath := filepath.Join(dir, jsonlShardName(table, i+1)+".tmp")
+		if err := os.WriteFile(tmpPath, shard.Bytes(), 0644); err != nil {
+			removeTmps()
+			return 0, fmt.Errorf("writing %s: %w", tmpPath, err)
+		}
+		tmpPaths[i] = tmpPath
+	}
+	for i, tmpPath := range tmpPaths {
+		if err := os.Rename(tmpPath, filepath.Join(dir, jsonlShardName(table, i+1))); err != nil {
+			removeTmps()
+			return 0, fmt.Errorf("renaming %s: %w", tmpPath, err)
+		}
+		tmpPaths[i] = ""
 	}
 
-	if err := os.WriteFile(tmpPath, buf.Bytes(), 0644); err != nil {
-		return 0, fmt.Errorf("writing %s: %w", tmpPath, err)
+	existing, err := jsonlShardPaths(dir, table)
+	if err != nil {
+		return 0, fmt.Errorf("listing %s shards: %w", table, err)
 	}
-	if err := os.Rename(tmpPath, outPath); err != nil {
-		os.Remove(tmpPath)
-		return 0, fmt.Errorf("renaming %s: %w", tmpPath, err)
+	for _, path := range existing[len(shards):] {
+		if err := os.Remove(path); err != nil {
+			return 0, fmt.Errorf("removing stale shard %s: %w", path, err)
+		}
 	}
 
-	return len(result.Rows), nil
+	if err := verifyJsonlShards(dir, table, len(rows), jsonlShardHardLimit); err != nil {
+		return 0, err
+	}
+	return len(rows), nil
+}
+
+// verifyJsonlShards checks a table's export on disk: the shards hold wantRows
+// lines between them and none is over maxFileBytes.
+func verifyJsonlShards(dir, table string, wantRows int, maxFileBytes int64) error {
+	paths, err := jsonlShardPaths(dir, table)
+	if err != nil {
+		return fmt.Errorf("verifying %s export: %w", table, err)
+	}
+	got := 0
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil {
+			return fmt.Errorf("verifying %s export: %w", table, err)
+		}
+		if info.Size() > maxFileBytes {
+			return fmt.Errorf("verifying %s export: %s is %d bytes, over the %d byte limit GitHub would refuse", table, filepath.Base(path), info.Size(), maxFileBytes)
+		}
+		n, err := countFileLines(path)
+		if err != nil {
+			return fmt.Errorf("verifying %s export: %w", table, err)
+		}
+		got += n
+	}
+	if got != wantRows {
+		return fmt.Errorf("verifying %s export: %d shard(s) hold %d rows, exported %d", table, len(paths), got, wantRows)
+	}
+	return nil
 }
 
 // eventValueBackupCap bounds the old_value and new_value of each events row in
@@ -1976,8 +2117,8 @@ func sumRemoved(removed map[string]int) int {
 	return total
 }
 
-// applyPollutionFilter reads each database's issues.jsonl, filters out test
-// pollution records, and rewrites the file. Returns the records removed per
+// applyPollutionFilter reads each shard of each database's issues export,
+// filters out test pollution records, and rewrites the shard. Returns the records removed per
 // database; a database it removed nothing from has no entry.
 //
 // The file is rewritten only when the read and the filter both succeed. A read
@@ -1986,16 +2127,25 @@ func sumRemoved(removed map[string]int) int {
 func (d *Daemon) applyPollutionFilter(gitRepo string, databases []string) map[string]int {
 	removedByDB := make(map[string]int)
 	for _, db := range databases {
-		issuesPath := filepath.Join(gitRepo, db, "issues.jsonl")
-		removed, err := filterIssuesFile(issuesPath)
+		// Every shard of issues is filtered; a database whose export failed has
+		// no issues export to filter. That is absence, not a read failure, and
+		// export already reported it. Anything else is a real read failure and
+		// is named.
+		paths, err := jsonlShardPaths(filepath.Join(gitRepo, db), "issues")
 		if err != nil {
-			// A database whose export failed has no issues.jsonl to filter;
-			// that is absence, not a read failure, and export already reported
-			// it. Anything else is a real read failure and is named.
 			if !errors.Is(err, fs.ErrNotExist) {
 				d.logger.Printf("jsonl_git_backup: %s: pollution filter skipped: %v", db, err)
 			}
 			continue
+		}
+		removed := 0
+		for _, issuesPath := range paths {
+			n, err := filterIssuesFile(issuesPath)
+			if err != nil {
+				d.logger.Printf("jsonl_git_backup: %s: pollution filter skipped: %v", db, err)
+				continue
+			}
+			removed += n
 		}
 		if removed > 0 {
 			d.logger.Printf("jsonl_git_backup: %s: filtered %d test-pollution record(s)", db, removed)
@@ -2005,7 +2155,7 @@ func (d *Daemon) applyPollutionFilter(gitRepo string, databases []string) map[st
 	return removedByDB
 }
 
-// filterIssuesFile filters one issues.jsonl in place and returns the number of
+// filterIssuesFile filters one issues shard (issues.jsonl, issues.2.jsonl, ...) in place and returns the number of
 // records removed. It writes the file only when the whole read succeeded, so a
 // read error leaves it byte-identical.
 func filterIssuesFile(path string) (int, error) {
@@ -2016,7 +2166,7 @@ func filterIssuesFile(path string) (int, error) {
 	filtered, removed, err := filterTestPollutionStream(f)
 	f.Close()
 	if err != nil {
-		return 0, fmt.Errorf("read failed, issues.jsonl left untouched: %w", err)
+		return 0, fmt.Errorf("read failed, %s left untouched: %w", filepath.Base(path), err)
 	}
 	if removed == 0 {
 		return 0, nil
@@ -2027,7 +2177,7 @@ func filterIssuesFile(path string) (int, error) {
 	return removed, nil
 }
 
-// verifyNoPollution re-scans all exported issues.jsonl files for any remaining
+// verifyNoPollution re-scans all exported issues shards for any remaining
 // suspicious records that survived both the SQL scrub and the regex filter.
 // Returns the total number of suspicious records found across all databases.
 //
@@ -2037,26 +2187,31 @@ func filterIssuesFile(path string) (int, error) {
 func (d *Daemon) verifyNoPollution(gitRepo string, databases []string) int {
 	total := 0
 	for _, db := range databases {
-		issuesPath := filepath.Join(gitRepo, db, "issues.jsonl")
-		data, err := os.ReadFile(issuesPath)
+		paths, err := jsonlShardPaths(filepath.Join(gitRepo, db), "issues")
 		if err != nil {
 			continue
 		}
-		reader := bufio.NewReader(bytes.NewReader(data))
-		for {
-			line, readErr := reader.ReadBytes('\n')
-			body := trimLineEnding(line)
-			if len(body) > 0 {
-				var record map[string]interface{}
-				if json.Unmarshal(body, &record) == nil && isTestPollution(record) {
-					id, _ := record["id"].(string)
-					title, _ := record["title"].(string)
-					d.logger.Printf("jsonl_git_backup: VERIFY FAIL: %s: suspicious record id=%q title=%q", db, id, title)
-					total++
-				}
+		for _, issuesPath := range paths {
+			data, err := os.ReadFile(issuesPath)
+			if err != nil {
+				continue
 			}
-			if readErr != nil {
-				break
+			reader := bufio.NewReader(bytes.NewReader(data))
+			for {
+				line, readErr := reader.ReadBytes('\n')
+				body := trimLineEnding(line)
+				if len(body) > 0 {
+					var record map[string]interface{}
+					if json.Unmarshal(body, &record) == nil && isTestPollution(record) {
+						id, _ := record["id"].(string)
+						title, _ := record["title"].(string)
+						d.logger.Printf("jsonl_git_backup: VERIFY FAIL: %s: suspicious record id=%q title=%q", db, id, title)
+						total++
+					}
+				}
+				if readErr != nil {
+					break
+				}
 			}
 		}
 	}
