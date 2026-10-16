@@ -70,6 +70,32 @@ func doltCommitMarker(info *townstatus.DoltInfo) string {
 	return fmt.Sprintf("⚠ commits/24h %s > %d", doltserver.FormatCommitCounts(over), info.CommitsPerDayWarn)
 }
 
+// compactorCommitMarker is the Services-line marker for databases the
+// compactor found over its commit line, "" when it reports none. The count is
+// an advisory: it is shown and nothing else follows from it — no escalation,
+// and the health line stays green (gt-3mu6q).
+func compactorCommitMarker(info *townstatus.DoltInfo) string {
+	if len(info.CommitAdvisories) == 0 {
+		return ""
+	}
+	readings := make([]string, 0, len(info.CommitAdvisories))
+	for _, a := range info.CommitAdvisories {
+		readings = append(readings, fmt.Sprintf("%s=%d>%d", a.Database, a.Commits, a.Threshold))
+	}
+	return fmt.Sprintf("⚠ commits over line %s (advisory)", strings.Join(readings, " "))
+}
+
+// compactorCommitAdvisories reads the daemon's compactor record for the town
+// status model.
+func compactorCommitAdvisories(townRoot string) []townstatus.CommitAdvisoryInfo {
+	advisories := daemon.LoadCompactorAdvisories(townRoot, time.Now())
+	out := make([]townstatus.CommitAdvisoryInfo, 0, len(advisories))
+	for _, a := range advisories {
+		out = append(out, townstatus.CommitAdvisoryInfo{Database: a.Database, Commits: a.Commits, Threshold: a.Threshold})
+	}
+	return out
+}
+
 func runStatus(cmd *cobra.Command, args []string) error {
 	if statusHealthLine {
 		return runStatusHealthLine(cmd)
@@ -84,10 +110,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 // and the two caller-owned probes go in, the town's status comes out.
 func gatherTownStatus() (townstatus.TownStatus, error) {
 	return townstatus.Gather(townstatus.Options{
-		Fast:        statusFast,
-		Registry:    townRegistry(),
-		DaemonProbe: daemon.IsRunning,
-		DNDProbe:    detectCurrentDNDStatus,
+		Fast:                  statusFast,
+		Registry:              townRegistry(),
+		DaemonProbe:           daemon.IsRunning,
+		DNDProbe:              detectCurrentDNDStatus,
+		CommitAdvisoriesProbe: compactorCommitAdvisories,
 	})
 }
 
@@ -308,6 +335,9 @@ func outputStatusText(w io.Writer, status townstatus.TownStatus) error {
 				parts = append(parts, fmt.Sprintf("dolt %s", style.Dim.Render(fmt.Sprintf("(stopped, :%d)", status.Dolt.Port))))
 			}
 			if marker := doltCommitMarker(status.Dolt); marker != "" {
+				parts[len(parts)-1] += " " + style.Bold.Render(marker)
+			}
+			if marker := compactorCommitMarker(status.Dolt); marker != "" {
 				parts[len(parts)-1] += " " + style.Bold.Render(marker)
 			}
 		}

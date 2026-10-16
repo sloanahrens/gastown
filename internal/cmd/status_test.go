@@ -223,3 +223,31 @@ func TestOutputStatusText_DoltCommitMarker(t *testing.T) {
 		t.Fatalf("no marker expected under the limit, got: %q", buf.String())
 	}
 }
+
+// The compactor's commit-line advisory marks the Services line beside the
+// commits-per-day meter, and only where the compactor reported a database over
+// its line (gt-3mu6q).
+func TestOutputStatusText_CompactorCommitAdvisoryMarker(t *testing.T) {
+	t.Parallel()
+
+	dolt := &townstatus.DoltInfo{Running: true, PID: 7, Port: 3307, CommitAdvisories: []townstatus.CommitAdvisoryInfo{
+		{Database: "gt", Commits: 31906, Threshold: 20000},
+		{Database: "hq", Commits: 21400, Threshold: 20000},
+	}}
+	var buf bytes.Buffer
+	if err := outputStatusText(&buf, townstatus.TownStatus{Name: "gt", Location: "/tmp/gt", Dolt: dolt}); err != nil {
+		t.Fatalf("outputStatusText error: %v", err)
+	}
+	if out := buf.String(); !strings.Contains(out, "⚠ commits over line gt=31906>20000 hq=21400>20000 (advisory)") {
+		t.Fatalf("want the advisory marker with both readings, got: %q", out)
+	}
+
+	buf.Reset()
+	if err := outputStatusText(&buf, townstatus.TownStatus{Name: "gt", Location: "/tmp/gt",
+		Dolt: &townstatus.DoltInfo{Running: true, PID: 7, Port: 3307}}); err != nil {
+		t.Fatalf("outputStatusText error: %v", err)
+	}
+	if strings.Contains(buf.String(), "commits over line") {
+		t.Fatalf("no advisory marker expected with nothing reported, got: %q", buf.String())
+	}
+}

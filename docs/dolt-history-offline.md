@@ -17,10 +17,10 @@ actor" below).
 
 Flatten only when a database directory under `~/gt/.dolt-data` passes
 **2 GB** on disk. Nothing else is a reason: commit count is not (the
-compactor_dog patrol escalates on it to keep history-query latency visible,
-not to ask for a flatten), and neither is slow growth that the weekly GC
-handles. The 2026-09-29 measurement (gt-8z769) put gt at 775 MB, of which
-307 MB was old-gen history for 19,746 commits; a full GC reclaimed almost
+compactor_dog patrol advises on it to keep history-query latency visible on the
+status line, and raises nothing, gt-3mu6q), and neither is slow growth that the
+weekly GC handles. The 2026-09-29 measurement (gt-8z769) put gt at 775 MB, of
+which 307 MB was old-gen history for 19,746 commits; a full GC reclaimed almost
 nothing, because the size is history, not garbage.
 
 Measure without touching the store (a read of sizes is safe; never write

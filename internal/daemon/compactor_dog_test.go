@@ -304,6 +304,17 @@ func compactorRunDaemon(townRoot string, logBuf *bytes.Buffer) (*Daemon, *notify
 	return d, rec
 }
 
+// compactorClearReason returns the reason the report withdraws one alert key
+// under, "" when it does not withdraw it.
+func compactorClearReason(rep compactorReport, key string) string {
+	for _, a := range rep.cleared {
+		if a.key == key {
+			return a.reason
+		}
+	}
+	return ""
+}
+
 // TestCompactorDogFindingsChecksEveryDatabase is the case the patrol was
 // missing: a database whose commit count is over the line, a database whose
 // store is over the size line, and one under both, all in a single cycle. The
@@ -313,6 +324,10 @@ func compactorRunDaemon(townRoot string, logBuf *bytes.Buffer) (*Daemon, *notify
 // The size line is compactorSizeThreshold itself, the constant production
 // passes (runCompactorDogWith), so what is pinned here is the real 1 GiB line
 // and not a stand-in.
+//
+// The commit count over its line is the run's advisory and not an alarm
+// (gt-3mu6q): it is reported, and its key is withdrawn as advisory so an
+// escalation an older build opened for it is closed.
 func TestCompactorDogFindingsChecksEveryDatabase(t *testing.T) {
 	t.Parallel()
 	const commitThreshold = 20000
@@ -339,18 +354,29 @@ func TestCompactorDogFindingsChecksEveryDatabase(t *testing.T) {
 	rep := compactorDogFindings(p, commitThreshold, compactorSizeThreshold)
 
 	if got := slices.Sorted(slices.Values(compactorAlarmKeys(rep.raised))); !slices.Equal(got, []string{
-		"compactor_dog:busy:commits",
 		"compactor_dog:fat:size",
 	}) {
-		t.Errorf("raised = %v", got)
+		t.Errorf("raised = %v, want fat's size alarm alone: a commit count over its line is an advisory", got)
 	}
 	if got := slices.Sorted(slices.Values(compactorAlarmKeys(rep.cleared))); !slices.Equal(got, []string{
+		"compactor_dog:busy:commits",
 		"compactor_dog:busy:size",
 		"compactor_dog:fat:commits",
 		"compactor_dog:fine:commits",
 		"compactor_dog:fine:size",
 	}) {
 		t.Errorf("cleared = %v", got)
+	}
+	// busy is over the commit line, so its withdrawal is the advisory one.
+	if reason := compactorClearReason(rep, "compactor_dog:busy:commits"); reason != compactorAdvisoryReason {
+		t.Errorf("busy:commits withdrawal reason = %q, want %q", reason, compactorAdvisoryReason)
+	}
+	if reason := compactorClearReason(rep, "compactor_dog:fine:commits"); reason != compactorUnderReason {
+		t.Errorf("fine:commits withdrawal reason = %q, want %q", reason, compactorUnderReason)
+	}
+	if len(rep.advisories) != 1 || rep.advisories[0].db != "busy" || rep.advisories[0].commits != commits ||
+		rep.advisories[0].threshold != commitThreshold {
+		t.Errorf("advisories = %+v, want busy alone at %d commits against %d", rep.advisories, commits, commitThreshold)
 	}
 	if !slices.Equal(rep.names, []string{"busy", "fat", "fine"}) {
 		t.Errorf("checked = %v, want every discovered database", rep.names)
@@ -418,66 +444,155 @@ func TestCompactorDogFindingsSaysWhenSizesAreUnreadable(t *testing.T) {
 	}
 }
 
-// TestCompactorDogCycleRaisesAndWithdrawsAlarms runs two cycles end to end —
-// one with a database over the commit line, one with it under — and checks the
-// escalation and the withdrawal that reach gt. The escalation carries the
-// per-database key `gt escalate` dedupes on, so the same condition over
-// successive cycles leaves one open escalation, not one per cycle (gt-vwry).
-func TestCompactorDogCycleRaisesAndWithdrawsAlarms(t *testing.T) {
+// TestCompactorDogCycleAdvisesOnCommitsAndEscalatesOnSize is the cycle-level
+// contract of gt-3mu6q: one cycle with the commit count over its line and the
+// size under its own raises no escalation, logs the count as an advisory and
+// records it for the status line; a second cycle with the size over its line
+// escalates exactly as before. The withdrawals carry the per-database key
+// `gt escalate` dedupes on, so the same condition over successive cycles
+// leaves one open escalation, not one per cycle (gt-vwry).
+func TestCompactorDogCycleAdvisesOnCommitsAndEscalatesOnSize(t *testing.T) {
 	t.Parallel()
 	var buf bytes.Buffer
-	d, rec := compactorRunDaemon(t.TempDir(), &buf)
+	townRoot := t.TempDir()
+	d, rec := compactorRunDaemon(townRoot, &buf)
 
-	probes := func(commits int) compactorProbes {
+	probes := func(commits int, size int64) compactorProbes {
 		return compactorProbes{
 			databases: func() ([]string, error) { return []string{"hq"}, nil },
 			commits:   func(string) (int, error) { return commits, nil },
-			size:      func(string) (int64, error) { return 1024, nil },
+			size:      func(string) (int64, error) { return size, nil },
 		}
 	}
 
-	if ok := d.runCompactorDogWith(probes(31335)); !ok {
+	// Commits over the line at 31335, the reading that opened the daily
+	// escalation (hq-9kasl), with a store 1024 bytes large.
+	if ok := d.runCompactorDogWith(probes(31335, 1024)); !ok {
 		t.Fatalf("a cycle that read every database reported itself unclean; log:\n%s", buf.String())
 	}
 
-	got := rec.Escalations()
-	if len(got) != 1 {
-		t.Fatalf("escalations = %+v, want one", got)
-	}
-	if key := got[0].Escalation.Fingerprint; key != "compactor_dog:hq:commits" {
-		t.Errorf("escalation key = %q, want compactor_dog:hq:commits", key)
-	}
-	if !strings.Contains(got[0].Escalation.Reason, "31335 commits") {
-		t.Errorf("escalation reason = %q, want the count in it", got[0].Escalation.Reason)
+	if got := rec.Escalations(); len(got) != 0 {
+		t.Fatalf("escalations = %+v, want none: the commit count is advisory, not an alarm", got)
 	}
 
-	// The size line was read and not met, so its alarm is withdrawn; the
-	// commit alarm stays open.
+	// Both keys are withdrawn: the size alarm as a measurement back under its
+	// line, the commit alarm as advisory — which is what closes an escalation
+	// an older build opened for the count.
 	clears := rec.Clears()
-	if len(clears) != 1 || !slices.Equal(clears[0].Fingerprints, []string{"compactor_dog:hq:size"}) {
-		t.Errorf("clears = %+v, want the size key alone", clears)
+	if len(clears) != 2 {
+		t.Fatalf("clears = %+v, want the two alarms withdrawn, one per reason", clears)
+	}
+	reason := map[string]string{}
+	for _, c := range clears {
+		if len(c.Fingerprints) == 1 {
+			reason[c.Fingerprints[0]] = c.Reason
+		}
+	}
+	if reason["compactor_dog:hq:commits"] != compactorAdvisoryReason {
+		t.Errorf("commit withdrawal reason = %q, want %q", reason["compactor_dog:hq:commits"], compactorAdvisoryReason)
+	}
+	if reason["compactor_dog:hq:size"] != compactorUnderReason {
+		t.Errorf("size withdrawal reason = %q, want %q", reason["compactor_dog:hq:size"], compactorUnderReason)
 	}
 
-	// Second cycle: back under the commit line, so both alarms are withdrawn
-	// and nothing new is filed.
-	if ok := d.runCompactorDogWith(probes(900)); !ok {
+	// The advisory is on the cycle's log line and in the record gt status
+	// reads.
+	if !strings.Contains(buf.String(), "ADVISORY") || !strings.Contains(buf.String(), "31335 commits") {
+		t.Errorf("the cycle does not log the count as an advisory; log:\n%s", buf.String())
+	}
+	advisories := LoadCompactorAdvisories(townRoot, time.Now())
+	if len(advisories) != 1 || advisories[0].Database != "hq" || advisories[0].Commits != 31335 {
+		t.Errorf("recorded advisories = %+v, want hq at 31335", advisories)
+	}
+
+	// Second cycle: the store is over the size line, and the commit count is
+	// still over its own. The size escalates; the count still does not.
+	if ok := d.runCompactorDogWith(probes(31335, compactorSizeThreshold)); !ok {
 		t.Fatalf("second cycle reported itself unclean; log:\n%s", buf.String())
 	}
-	if got := rec.Escalations(); len(got) != 1 {
-		t.Errorf("escalations after the second cycle = %d, want the first cycle's one", len(got))
+	got := rec.Escalations()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %+v, want the size line's one alone", got)
+	}
+	if key := got[0].Escalation.Fingerprint; key != "compactor_dog:hq:size" {
+		t.Errorf("escalation key = %q, want compactor_dog:hq:size", key)
+	}
+
+	// Third cycle: back under both lines, so nothing is recorded for the
+	// status line and the commit alarm is withdrawn as a measurement under
+	// its line again.
+	if ok := d.runCompactorDogWith(probes(900, 1024)); !ok {
+		t.Fatalf("third cycle reported itself unclean; log:\n%s", buf.String())
+	}
+	if got := LoadCompactorAdvisories(townRoot, time.Now()); len(got) != 0 {
+		t.Errorf("recorded advisories = %+v, want none under the line", got)
 	}
 	clears = rec.Clears()
-	if len(clears) != 2 {
-		t.Fatalf("clears = %+v, want a second cycle's one", clears)
-	}
-	if want := []string{"compactor_dog:hq:commits", "compactor_dog:hq:size"}; !slices.Equal(clears[1].Fingerprints, want) {
-		t.Errorf("second cycle cleared %v, want %v", clears[1].Fingerprints, want)
+	last := clears[len(clears)-1]
+	// Both keys are under their lines now and share one reason, so they are
+	// one withdrawal.
+	if !slices.Equal(last.Fingerprints, []string{"compactor_dog:hq:commits", "compactor_dog:hq:size"}) ||
+		last.Reason != compactorUnderReason {
+		t.Errorf("third cycle cleared %v as %q, want both keys under %q", last.Fingerprints, last.Reason, compactorUnderReason)
 	}
 
 	// The cycle's own log line names the size line it applied: production
 	// passes compactorSizeThreshold, not a test's value.
 	if !strings.Contains(buf.String(), "size_threshold=1024.0MiB") {
 		t.Errorf("cycle does not log the 1 GiB size line; log:\n%s", buf.String())
+	}
+}
+
+// TestCompactorAdvisoryRecordIsStaleAfterTwoRuns pins the reader's freshness
+// rule: a record from a compactor that has stopped running must not keep
+// claiming a database is over its line on every status line.
+func TestCompactorAdvisoryRecordIsStaleAfterTwoRuns(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	at := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+
+	err := saveCompactorAdvisories(townRoot, at, []compactorAdvisory{{db: "gt", commits: 31906, threshold: 20000}})
+	if err != nil {
+		t.Fatalf("saveCompactorAdvisories: %v", err)
+	}
+
+	if got := LoadCompactorAdvisories(townRoot, at.Add(time.Hour)); len(got) != 1 || got[0].Database != "gt" {
+		t.Errorf("fresh record = %+v, want the gt advisory", got)
+	}
+	if got := LoadCompactorAdvisories(townRoot, at.Add(CompactorAdvisoryStale)); len(got) != 0 {
+		t.Errorf("record at the stale age = %+v, want none", got)
+	}
+
+	// A cycle that finds nothing over the line replaces the record rather than
+	// leaving the previous one to be read as current.
+	if err := saveCompactorAdvisories(townRoot, at.Add(time.Hour), nil); err != nil {
+		t.Fatalf("second saveCompactorAdvisories: %v", err)
+	}
+	if got := LoadCompactorAdvisories(townRoot, at.Add(2*time.Hour)); len(got) != 0 {
+		t.Errorf("recorded advisories = %+v, want none", got)
+	}
+}
+
+// TestLoadCompactorAdvisoriesWithoutARecord pins the reader's silence: no
+// record, an unreadable one, or a town with no daemon directory reads as no
+// advisory — never as an error a status line has to render.
+func TestLoadCompactorAdvisoriesWithoutARecord(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+
+	if got := LoadCompactorAdvisories(townRoot, time.Now()); len(got) != 0 {
+		t.Errorf("advisories with no record = %+v, want none", got)
+	}
+
+	path := compactorStatePath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if got := LoadCompactorAdvisories(townRoot, time.Now()); len(got) != 0 {
+		t.Errorf("advisories from a corrupt record = %+v, want none", got)
 	}
 }
 

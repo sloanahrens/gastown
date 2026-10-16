@@ -15,22 +15,17 @@ import (
 const (
 	defaultCompactorDogInterval = 24 * time.Hour
 	// defaultCompactorCommitThreshold is the commit count at which this patrol
-	// escalates. The daemon monitors only — it never rewrites history, so this
-	// is an escalation line, not a compaction trigger.
-	//
-	// Escalating is not free: each d.escalate mints a bead, and beads are Dolt
-	// commits. A low threshold would let one busy 24h cycle push the commit
-	// count back over the line with its own escalations, re-triggering the
-	// patrol forever. The 2000 default is the buffer against that loop.
-	// Configurable via the "daemon" section of settings/config.json
-	// (patrols.compactor_dog.threshold).
+	// advises. The daemon monitors only — it never rewrites history, and a
+	// count is not a reason to: the line is a report line, not a compaction
+	// trigger.
 	//
 	// Commit count is not the disk cost, which is why the size line below is a
-	// second, independent alarm: this one guards history-query latency and the
-	// town sets it near 20000 (measurements:
+	// separate alarm: this one keeps history-query latency visible and the town
+	// sets it near 20000 (measurements:
 	// docs/plans/2026-09-25-dolt-gc-maintenance-design.md, Problem).
-	// scheduled_maintenance's gc is what actually reclaims disk; both of these
-	// lines only decide when an operator is told.
+	// scheduled_maintenance's gc is what actually reclaims disk.
+	// Configurable via the "daemon" section of settings/config.json
+	// (patrols.compactor_dog.threshold).
 	defaultCompactorCommitThreshold = 2000
 	// compactorSizeThreshold is the on-disk size at which this patrol
 	// escalates: 1 GiB, ahead of the 2 GB line past which flattening is the
@@ -38,8 +33,8 @@ const (
 	// trigger's value leaves a maintenance window of headroom at this town's
 	// write rate, so the alert arrives while the cheap options are open.
 	//
-	// Escalation only, like the commit line above: it decides when an operator
-	// is told, never what is rewritten. A database can sit above it.
+	// Escalation only: it decides when an operator is told, never what is
+	// rewritten. A database can sit above it.
 	compactorSizeThreshold = int64(1) << 30
 	// compactorQueryTimeout is the timeout for individual SQL queries.
 	compactorQueryTimeout = 30 * time.Second
@@ -209,8 +204,8 @@ func compactorDogConfig(config *DaemonPatrolConfig) *CompactorDogConfig {
 
 // compactorDogThreshold returns the configured commit threshold, or
 // defaultCompactorCommitThreshold (2000). This is the commit count at which the
-// patrol escalates; it does not trigger compaction, because the daemon patrol
-// never compacts.
+// patrol advises; it triggers neither compaction nor an escalation, because
+// the daemon patrol never compacts.
 func compactorDogThreshold(config *DaemonPatrolConfig) int {
 	if cd := compactorDogConfig(config); cd != nil {
 		if cd.Threshold > 0 {
@@ -229,6 +224,36 @@ const (
 	compactorSize    compactorCondition = "size"
 )
 
+// Withdrawal reasons. `gt escalate clear` records the reason on the bead it
+// closes, and a count that is over its line reads differently from a
+// measurement that came back under one.
+const (
+	// compactorUnderReason closes an alarm whose measurement is back below
+	// its line.
+	compactorUnderReason = "compactor_dog: back below threshold"
+	// compactorAdvisoryReason closes a commit-count escalation the patrol no
+	// longer raises: the count is an advisory, and this is how the escalation
+	// an older build opened is retired (gt-3mu6q).
+	compactorAdvisoryReason = "commit count is advisory"
+)
+
+// compactorAdvisory is one database's commit count over its line. The count is
+// reported — logged, and recorded for the status line — because it is not a
+// reason to rewrite history: flatten is an offline operator procedure with a
+// single trigger, a database past 2 GB (docs/dolt-history-offline.md).
+type compactorAdvisory struct {
+	db        string
+	commits   int
+	threshold int
+}
+
+// note renders the advisory as the cycle logs it.
+func (a compactorAdvisory) note() string {
+	return fmt.Sprintf("%s has %d commits, over the %d line — advisory only, no escalation; "+
+		"nothing rewrites history routinely and flatten is an offline operator procedure "+
+		"past 2 GB (docs/dolt-history-offline.md)", a.db, a.commits, a.threshold)
+}
+
 // compactorAlertKey is one database-condition's alert key: what `gt escalate`
 // records a repeat of the condition onto, and what `gt escalate clear` closes.
 // It is per database and per condition so that one database back under its
@@ -239,12 +264,16 @@ func compactorAlertKey(db string, condition compactorCondition) string {
 }
 
 // compactorAlarm is one alarm a cycle raises or withdraws. message is set on a
-// raise; a withdrawal carries the cycle's shared reason instead.
+// raise; a withdrawal carries its own reason instead, because a commit count
+// that has become advisory and a size line back under its threshold are
+// different news about the same database.
 type compactorAlarm struct {
 	key       string
 	db        string
 	condition compactorCondition
 	message   string
+	// reason is the withdrawal's reason, set on an alarm to clear.
+	reason string
 }
 
 // compactorProbes are the measurements behind one monitoring cycle: which
@@ -275,6 +304,9 @@ type compactorReport struct {
 	// whose silence could mean either "fine" or "could not look" is the
 	// failure this patrol exists to prevent.
 	unread []string
+	// advisories is one entry per database whose commit count is over its
+	// line: reported, never escalated (gt-3mu6q).
+	advisories []compactorAdvisory
 	// raised and cleared are the alarms to file and to withdraw.
 	raised  []compactorAlarm
 	cleared []compactorAlarm
@@ -287,9 +319,11 @@ type compactorReport struct {
 }
 
 // compactorDogFindings inspects every database against both lines and decides
-// each alarm. Every measurement comes from the probes and the thresholds are
-// parameters, so a cycle over any number of databases is testable with temp
-// directories and fake counters.
+// each alarm: a size over its line to raise, a commit count over its line to
+// advise on, and a measurement back under a line to withdraw. Every
+// measurement comes from the probes and the thresholds are parameters, so a
+// cycle over any number of databases is testable with temp directories and
+// fake counters.
 //
 // It only decides. Filing an escalation is a `gt` subprocess that can take a
 // minute under load, so the caller does that.
@@ -320,17 +354,21 @@ func compactorDogFindings(p compactorProbes, commitThreshold int, sizeThreshold 
 			r.unread = append(r.unread, fmt.Sprintf("%s: counting commits: %v", db, err))
 			reading += " commits unread"
 		case commits >= commitThreshold:
-			r.raised = append(r.raised, compactorAlarm{
+			// Advisory, not alarm: the count is not a reason to rewrite
+			// history, so an escalation for it would page an operator with no
+			// action behind it. The withdrawal is issued anyway — it is what
+			// closes an escalation an older build opened for this key
+			// (gt-3mu6q).
+			r.advisories = append(r.advisories, compactorAdvisory{db: db, commits: commits, threshold: commitThreshold})
+			r.cleared = append(r.cleared, compactorAlarm{
 				key: compactorAlertKey(db, compactorCommits), db: db, condition: compactorCommits,
-				message: fmt.Sprintf("Commit threshold exceeded for %s: %d commits (threshold %d). "+
-					"Nothing rewrites history routinely: flatten is an offline operator procedure "+
-					"(docs/dolt-history-offline.md), triggered only by a database past 2 GB.",
-					db, commits, commitThreshold),
+				reason: compactorAdvisoryReason,
 			})
-			reading += fmt.Sprintf(" %d commits OVER line %d", commits, commitThreshold)
+			reading += fmt.Sprintf(" %d commits OVER line %d (advisory)", commits, commitThreshold)
 		default:
 			r.cleared = append(r.cleared, compactorAlarm{
 				key: compactorAlertKey(db, compactorCommits), db: db, condition: compactorCommits,
+				reason: compactorUnderReason,
 			})
 			reading += fmt.Sprintf(" %d commits ok (line %d)", commits, commitThreshold)
 		}
@@ -354,6 +392,7 @@ func compactorDogFindings(p compactorProbes, commitThreshold int, sizeThreshold 
 			default:
 				r.cleared = append(r.cleared, compactorAlarm{
 					key: compactorAlertKey(db, compactorSize), db: db, condition: compactorSize,
+					reason: compactorUnderReason,
 				})
 				reading += fmt.Sprintf("; %s ok (line %s)", formatBytes(size), formatBytes(sizeThreshold))
 			}
@@ -365,12 +404,13 @@ func compactorDogFindings(p compactorProbes, commitThreshold int, sizeThreshold 
 }
 
 // runCompactorDog checks every production database's commit count and on-disk
-// size, and escalates for each database at or above either line. It never
-// rewrites history.
+// size, escalates for each database at or above the size line, and advises on
+// each one at or above the commit line. It never rewrites history.
 //
 // Rewriting history is not a routine path at all: it is an offline operator
 // procedure (docs/dolt-history-offline.md) with a single trigger, a database
-// past 2 GB. The size alarm is the advance warning of that line.
+// past 2 GB. The size alarm is the advance warning of that line; the commit
+// count is not a second trigger, only a reading (gt-3mu6q).
 //
 // Returns whether the cycle completed cleanly — false when there was nothing
 // to inspect or something could not be inspected, so the caller knows not to
@@ -427,15 +467,25 @@ func (d *Daemon) runCompactorDogWith(p compactorProbes) bool {
 		cycle.closeStep("inspect")
 	}
 
-	// Step "monitor": file and withdraw. Neither is a failure — an alarm over
-	// a line is this patrol working, and a withdrawal is it working again.
+	// The advisories are recorded for gt status to show on the Services line
+	// (gt-3mu6q). A failed write leaves the previous reading in place, which
+	// the line then reports as what it is — the last cycle's measurement.
+	if err := saveCompactorAdvisories(d.config.TownRoot, d.clk().Now(), rep.advisories); err != nil {
+		d.logger.Printf("compactor_dog: WARNING: cannot record commit advisories (%v) — "+
+			"gt status will show the previous cycle's reading", err)
+	}
+
+	// Step "monitor": file, advise and withdraw. None is a failure — an alarm
+	// over a line is this patrol working, and a withdrawal is it working
+	// again.
+	for _, a := range rep.advisories {
+		d.logger.Printf("compactor_dog: ADVISORY %s", a.note())
+	}
 	for _, a := range rep.raised {
 		d.logger.Printf("compactor_dog: %s: %s — ESCALATING", a.db, a.condition)
 		d.escalateAlert(a.key, "compactor_dog", a.message)
 	}
-	if keys := compactorAlarmKeys(rep.cleared); len(keys) > 0 {
-		d.clearAlerts("compactor_dog: back below threshold", keys...)
-	}
+	d.clearWithdrawn(rep.cleared)
 	cycle.closeStep("monitor")
 
 	sizes := ""
@@ -444,8 +494,8 @@ func (d *Daemon) runCompactorDogWith(p compactorProbes) bool {
 		// was read" are different reports, and only one of them is news.
 		sizes = " sizes=unchecked"
 	}
-	d.logger.Printf("compactor_dog: cycle complete — checked=%d raised=%d cleared=%d unread=%d%s",
-		len(rep.names), len(rep.raised), len(rep.cleared), len(rep.unread), sizes)
+	d.logger.Printf("compactor_dog: cycle complete — checked=%d raised=%d advisories=%d cleared=%d unread=%d%s",
+		len(rep.names), len(rep.raised), len(rep.advisories), len(rep.cleared), len(rep.unread), sizes)
 	cycle.closeStep("report")
 
 	return len(rep.unread) == 0
@@ -458,6 +508,24 @@ func compactorAlarmKeys(alarms []compactorAlarm) []string {
 		keys = append(keys, a.key)
 	}
 	return keys
+}
+
+// clearWithdrawn withdraws the alarms a cycle decided to withdraw, one `gt
+// escalate clear` per reason: the reason is recorded on the bead it closes, so
+// a commit count that is now advisory must not be closed as if it had dropped
+// below its line (gt-3mu6q).
+func (d *Daemon) clearWithdrawn(alarms []compactorAlarm) {
+	var reasons []string
+	keys := make(map[string][]string, len(alarms))
+	for _, a := range alarms {
+		if _, seen := keys[a.reason]; !seen {
+			reasons = append(reasons, a.reason)
+		}
+		keys[a.reason] = append(keys[a.reason], a.key)
+	}
+	for _, reason := range reasons {
+		d.clearAlerts(reason, keys[reason]...)
+	}
 }
 
 // compactorDogProbes wires compactorProbes to the live town.
