@@ -418,6 +418,32 @@ func TestCheckpointWorktreeResetsOutputBesideEditedSourceButKeepsTrackedFixture(
 	}
 }
 
+// A committed report under coverage/, with no source file beside it, is no
+// more an artifact directory than one holding source: the checkpoint commits
+// the polecat's edit to the report, while generated output written under the
+// same directory stays out of the commit (gt-42qp3).
+func TestCheckpointWorktreeKeepsEditToCommittedReportUnderCoverage(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	workDir, _, g := checkpointClone(t, d, map[string]string{"coverage/report.html": "<html>before</html>\n"})
+	before := headOf(t, g)
+	writeWorkFiles(t, workDir, map[string]string{
+		"coverage/report.html":  "<html>after</html>\n",
+		"coverage/coverage.out": "mode: set\n",
+	})
+
+	if !d.checkpointWorktree(workDir, "rig", "polecat") {
+		t.Fatal("checkpointWorktree did not create a checkpoint commit")
+	}
+	if got := changedSince(t, g, before); !slices.Equal(got, []string{"coverage/report.html"}) {
+		t.Fatalf("checkpoint commit changed %q, want only the committed report", got)
+	}
+	wantNothingStaged(t, g)
+	if st := worktreeStatus(t, g); !slices.Contains(st.Untracked, "coverage/coverage.out") {
+		t.Fatalf("status %+v: generated output was committed or lost; want it left untracked", st)
+	}
+}
+
 func TestCheckpointWorktreeSkipsRuntimeOnlyNestedArtifacts(t *testing.T) {
 	t.Parallel()
 	d := &Daemon{logger: log.New(io.Discard, "", 0)}
