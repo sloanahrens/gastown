@@ -1082,6 +1082,17 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		return Result{}, err
 	}
 	if rej != nil {
+		// A squash that already landed conflicts with a later landing that
+		// edited the head's own lines: the head meets itself on the target,
+		// and rejecting it would send the author to rework work that took.
+		// mergeWork has aborted the merge, so the worktree is clean. A
+		// conflict with no land merge naming this head on the target is the
+		// author's to resolve, and the recovery declines it (gt-01yt6).
+		if rej.Kind == RejectConflict {
+			if res, err, handled := l.finishedUnrecordedLanding(g, w); handled {
+				return res, err
+			}
+		}
 		return Result{}, l.reject(issue, w, rej, nil)
 	}
 	if same, err := wt.TreesIdentical(base, "HEAD"); err != nil {
