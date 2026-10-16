@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -822,17 +821,14 @@ func TestPoolClaimSessionsSkipDeadAndExpired(t *testing.T) {
 	t.Run("dispatcher roster on disk", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
-		// A child that has exited: its PID names no process.
-		child := exec.Command("true")
-		if err := child.Run(); err != nil {
-			t.Fatal(err)
-		}
+		// Above any pid the OS hands out, so it names no process.
+		const deadPID = 1 << 30
 		dir := poolSeatClaimDir(townRoot)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		for _, c := range []poolSeatClaim{
-			{ID: "crashed-1", PID: child.Process.Pid, Agent: claimAgent, CreatedAt: time.Now()},
+			{ID: "crashed-1", PID: deadPID, Agent: claimAgent, CreatedAt: time.Now()},
 			{ID: "expired-1", PID: os.Getpid(), Agent: claimAgent, CreatedAt: time.Now().Add(-poolSeatClaimTTL - time.Minute)},
 			{ID: "held-1", PID: os.Getpid(), Agent: claimAgent, CreatedAt: time.Now()},
 		} {

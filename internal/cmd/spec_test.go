@@ -2079,63 +2079,34 @@ func TestHasCommentWithPrefix(t *testing.T) {
 
 // The failure note is written once per reason: a retry that fails for another
 // reason has to leave that reason on the bead, not the first one (gt-zkqtn).
-// bd is a shell stub that keeps the bead's comments in a file, so
-// annotateSpecOnce runs its real read-then-add against it.
 func TestAnnotateSpecOnce_DispatchFailedDifferentReasonRecorded(t *testing.T) {
-	dir := t.TempDir()
-	store := filepath.Join(dir, "comments.txt")
-	script := `#!/bin/sh
-if [ "$1" = "--allow-stale" ] && [ "$2" = "version" ]; then
-  echo "Error: unknown flag: --allow-stale" >&2
-  exit 0
-fi
-if [ "$1" = "comments" ] && [ "$2" = "add" ]; then
-  printf '%s\n' "$4" >> ` + store + `
-  exit 0
-fi
-if [ "$1" = "comments" ]; then
-  printf '['
-  sep=''
-  while IFS= read -r line; do
-    printf '%s{"text":"%s"}' "$sep" "$line"
-    sep=','
-  done < ` + store + `
-  printf ']\n'
-  exit 0
-fi
-exit 0
-`
-	binDir := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(binDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-
+	t.Parallel()
 	failNote := func(reason string) string {
 		return fmt.Sprintf("%sgt-x: dispatch failed, left unassigned: %s", specDispatchNotePrefix, reason)
 	}
-	if err := os.WriteFile(store, []byte(failNote("reasonA")+"\n"), 0o644); err != nil {
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-x", Status: "open"})
+	if err := db.AddComment("gt-x", failNote("reasonA")); err != nil {
 		t.Fatal(err)
 	}
-	townRoot := specTown(t)
 
 	// The same failure on the next tick is still written once.
-	if err := annotateSpecOnce(townRoot, "gt-x", failNote("reasonA"), failNote("reasonA")); err != nil {
+	if err := annotateSpecOnce(db, "gt-x", failNote("reasonA"), failNote("reasonA")); err != nil {
 		t.Fatal(err)
 	}
 	// A different reason is a new fact about the bead.
-	if err := annotateSpecOnce(townRoot, "gt-x", failNote("reasonB"), failNote("reasonB")); err != nil {
+	if err := annotateSpecOnce(db, "gt-x", failNote("reasonB"), failNote("reasonB")); err != nil {
 		t.Fatal(err)
 	}
 
-	data, err := os.ReadFile(store)
+	comments, err := db.Comments("gt-x")
 	if err != nil {
 		t.Fatal(err)
 	}
-	got := strings.Split(strings.TrimSpace(string(data)), "\n")
+	var got []string
+	for _, c := range comments {
+		got = append(got, c.Text)
+	}
 	want := []string{failNote("reasonA"), failNote("reasonB")}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("comments = %q, want %q", got, want)

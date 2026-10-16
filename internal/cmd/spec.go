@@ -1397,7 +1397,9 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			}
 			return specRosterFrom(sessions, ts), nil
 		},
-		Annotate: func(id, key, text string) error { return annotateSpecOnce(townRoot, id, key, text) },
+		Annotate: func(id, key, text string) error {
+			return annotateSpecOnce(beads.New(resolveBeadDirFromTownRoot(townRoot, id)), id, key, text)
+		},
 		AddLabel: func(id, label string) error { return poolBeadLabelAdd(townRoot, id, label) },
 		BranchOnOrigin: func(rig, branch string) (bool, error) {
 			return polecat.BranchOnOrigin(filepath.Join(townRoot, rig), branch)
@@ -1675,8 +1677,7 @@ func parseSpecReady(out []byte) ([]*beads.Issue, error) {
 // comment starting with key, so a bead the dispatcher refuses every tick is
 // annotated once. A comment list that cannot be read is an error, not "no
 // comments": writing on a guess would repeat the note every tick.
-func annotateSpecOnce(townRoot, beadID, key, text string) error {
-	b := beads.New(resolveBeadDirFromTownRoot(townRoot, beadID))
+func annotateSpecOnce(b beads.Client, beadID, key, text string) error {
 	comments, err := b.Comments(beadID)
 	if err != nil {
 		return fmt.Errorf("reading comments: %w", err)
