@@ -641,6 +641,24 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 		return fmt.Errorf("git add: %w", err)
 	}
 
+	// A failed database never reached the spike guard: it has no count, and
+	// verifyExportCounts skips a database without one. Its issues.jsonl may
+	// still be fresh (the issues table is written before a supplemental table
+	// fails), so staging it would commit an export nothing checked. Unstage the
+	// whole database; its committed files stay as the last verified copy, and
+	// the [FAILED: <db>] subject and export alert already name it.
+	if len(failed) > 0 {
+		var paths []string
+		for _, db := range failed {
+			paths = append(paths, db, db+".jsonl")
+		}
+		if err := d.runGitIndexOp(gitRepo, "git reset (failed databases)", func() error {
+			return d.backupGitAt(gitRepo, localBudget()).ResetFiles(paths...)
+		}); err != nil {
+			return fmt.Errorf("unstaging failed databases: %w", err)
+		}
+	}
+
 	// Check if there are staged changes. A failed check is not "no
 	// changes": the commit below decides.
 	var staged []gtgit.StagedChange
