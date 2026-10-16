@@ -39,9 +39,20 @@ const (
 // is generous.
 const overrunNudgeTimeout = 30 * time.Second
 
-// overrunNudgeMessage is what the seat reads at the nudge threshold.
+// overrunMaxGateCharge is how much gate time one tick may charge a seat: twice
+// the guard's interval. A cycle takes the interval plus its own bd reads, so
+// the slack leaves a slow tick charged in full; a wider gap is a tick the guard
+// skipped, where the seat may have left and re-entered its gate unwatched, and
+// the rest of that gap counts as the seat's own time (gt-vfwuc).
+func overrunMaxGateCharge(interval time.Duration) time.Duration { return 2 * interval }
+
+// overrunNudgeMessage is what the seat reads at the nudge threshold. It says
+// which time the clock measures, because a seat waiting on its own gate is the
+// one case where a long-running bead is not an overrun (gt-vfwuc).
 const overrunNudgeMessage = "This bead has run longer than expected. Write a split proposal in the bead notes now " +
 	"(gt bead note): ordered steps, each small enough for one pass. Then keep going on the first step. " +
+	"Time spent waiting inside your own gate — a container-gate slot you hold, or a gate suite running in your " +
+	"pane — does not count toward this clock. " +
 	"If the bead is still running at the stop threshold, the session is stopped and the bead goes back to the pool."
 
 // overrunSeat is one polecat seat the guard judges.
@@ -75,6 +86,15 @@ type overrunSeams struct {
 	// gt done sets the label only after its rebase and gate. nil means no
 	// re-check.
 	submittedNow func(seat overrunSeat) bool
+
+	// gateRunning reports whether the seat is inside its own gate now: it holds
+	// a slot of the town's container-gate pool, or a gate suite is running
+	// under its tmux pane (overrun_guard_gate.go). The time it spends there is
+	// subtracted from the sling's elapsed time, so waiting on a gate is not an
+	// overrun. An error means the seat's gate state could not be read, and the
+	// guard then counts all of its time — the direction that stops. nil means
+	// the same: an unset seam is no exemption.
+	gateRunning func(seat overrunSeat) (bool, error)
 
 	// The stop's side effects, called in this order by overrunStop:
 	// pause writes the seat's pause marker, stopSession ends its session,
@@ -217,7 +237,10 @@ func (d *Daemon) triggerOverrunGuard() {
 // parked or undated is left alone. At the nudge threshold the seat is nudged
 // once per sling, remembered in the bead's state file; past the stop
 // threshold the stop seam runs. A seat on a scheduled sling is never nudged and
-// is judged by scheduled_stop_after alone (zero leaves it alone). In dry-run mode nothing is sent, stopped or
+// is judged by scheduled_stop_after alone (zero leaves it alone). The clock it
+// judges is the seat's own time: the time it spends inside its gate is
+// subtracted, and a gate state that cannot be read counts all of its time
+// (overrun_guard_gate.go). In dry-run mode nothing is sent, stopped or
 // written, and the log says what would have happened.
 func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	if !d.isPatrolActive("overrun_guard") {
@@ -232,6 +255,12 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	if cfg := overrunGuardConfig(d.patrolConfig); cfg != nil {
 		dry = cfg.DryRun
 	}
+	// An unset gate seam is no exemption: every seat's time counts.
+	gateRunning := s.gateRunning
+	if gateRunning == nil {
+		gateRunning = func(overrunSeat) (bool, error) { return false, nil }
+	}
+	maxGateCharge := overrunMaxGateCharge(overrunGuardInterval(d.patrolConfig))
 
 	seats, err := s.workingSeats()
 	if err != nil {
@@ -269,9 +298,38 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 		// A nudge sent before this sling belongs to an earlier run of the
 		// bead (a rework re-sling starts a new clock).
 		nudged := !state.NudgedAt.IsZero() && !state.NudgedAt.Before(slung)
+
+		// Gate time does not count (overrun_guard_gate.go). A state that cannot
+		// be read counts all of the seat's time, the direction that stops.
+		before := state
+		inGate, err := gateRunning(seat)
+		if err != nil {
+			d.logger.Printf("overrun_guard: %s: cannot read the gate state for %s, counting all of its time: %v", who, seat.Bead, err)
+			inGate = false
+		}
+		state, gateSpent := state.withGate(slung, now, inGate, maxGateCharge)
+		if !dry && !state.sameGate(before) {
+			// The gate accounting outlives the tick: it is saved when it moves,
+			// so the next tick — and a stop that begins later — measures the
+			// same clock.
+			if err := writeOverrunState(d.config.TownRoot, state); err != nil {
+				d.logger.Printf("overrun_guard: WARNING: %s: gate time on %s not saved (%v) — it is counted again next tick", who, seat.Bead, err)
+			}
+		}
+
+		elapsed := now.Sub(slung) - gateSpent
+		if dry && inGate {
+			// A dry run writes nothing, so it has no banked gate time to
+			// subtract: it says what it sees and leaves the verdict to a real
+			// run rather than logging a stop the guard would not make.
+			d.logger.Printf("overrun_guard: dry run: %s is inside its gate on %s after %s wall — its clock does not run",
+				who, seat.Bead, elapsed.Round(time.Second))
+			continue
+		}
+
 		in := overrunInput{
 			Now: now, SlungAt: slung, Nudged: nudged,
-			NudgeAt: nudgeAfter, StopAt: stopAfter,
+			NudgeAt: nudgeAfter, StopAt: stopAfter, GateSpent: gateSpent,
 		}
 		if seat.Scheduled {
 			// Both thresholds at the one limit: the stop wins from there on
@@ -279,7 +337,6 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			in.NudgeAt, in.StopAt = scheduledStopAfter, scheduledStopAfter
 		}
 		action := decideOverrun(in)
-		elapsed := now.Sub(slung)
 
 		switch action {
 		case overrunNudge:
@@ -335,13 +392,16 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 }
 
 // overrunProdSeams returns the production seams: the daemon's rigs, event
-// log and notifier, and the stop's pause, session, checkpoint and hand-back.
+// log and notifier, the gate reader, and the stop's pause, session, checkpoint
+// and hand-back.
 func (d *Daemon) overrunProdSeams() overrunSeams {
 	sl := &overrunSlungReader{d: d}
+	gate := newOverrunGateReader(d)
 	return d.overrunStopSeams(overrunSeams{
 		now:          time.Now,
 		workingSeats: d.overrunWorkingSeats,
 		slungAt:      sl.slungAt,
+		gateRunning:  gate.running,
 		nudge: func(seat overrunSeat, msg string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), overrunNudgeTimeout)
 			defer cancel()

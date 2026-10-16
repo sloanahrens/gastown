@@ -25,17 +25,27 @@ type overrunInput struct {
 	Now, SlungAt    time.Time
 	Nudged          bool          // the nudge already went out for this sling
 	NudgeAt, StopAt time.Duration // elapsed since SlungAt
+	// GateSpent is how much of this sling the seat spent inside its own gate
+	// (overrun_guard_gate.go): the 12 and 20 minute rule measures the rest of
+	// the time, never the gate.
+	GateSpent time.Duration
 }
 
 // decideOverrun returns the action for one seat. A zero SlungAt or one after
 // Now means the sling time is unknown or wrong, so it acts on nothing. Stop
-// wins over nudge, and fires even when the seat was never nudged. A nudge
-// fires once: Nudged suppresses it on later ticks.
+// wins over nudge, and fires even when the seat was never nudged. A nudge fires
+// once: Nudged suppresses it on later ticks.
+//
+// The elapsed time it judges is the sling's wall time less GateSpent, so a seat
+// waiting on its own gate runs past both thresholds without a nudge or a stop,
+// and one whose non-gate time passes the stop threshold is stopped even while
+// it is in a gate (gt-vfwuc). A GateSpent past the wall time leaves a negative
+// elapsed, which is under both thresholds: acting on nothing.
 func decideOverrun(in overrunInput) overrunAction {
 	if in.SlungAt.IsZero() || in.SlungAt.After(in.Now) {
 		return overrunNone
 	}
-	elapsed := in.Now.Sub(in.SlungAt)
+	elapsed := in.Now.Sub(in.SlungAt) - in.GateSpent
 	switch {
 	case elapsed >= in.StopAt:
 		return overrunStop
@@ -83,6 +93,45 @@ func (s overrunState) nudgeHeld(slung, now time.Time) bool {
 	return n >= overrunNudgeMaxAttempts || (n > 0 && now.Sub(s.NudgeFailedAt) < overrunNudgeRetryAfter)
 }
 
+// withGate folds one tick's gate reading into the record and returns it with
+// the gate time to measure this tick's elapsed against. It charges the interval
+// since the last tick that saw the seat inside its gate, and it drops the
+// accounting of an earlier sling — a rework starts a new clock, and the gate
+// time of the run before it is not this run's.
+//
+// A stretch is charged only across intervals whose both ends were seen inside
+// the gate, and no tick charges more than maxCharge (twice the guard's
+// interval, see overrunMaxGateCharge): the guard cannot date the start of a
+// gate, nor the end of one that ended between ticks, and a tick it skipped — a
+// restart, a starved cycle — leaves a gap in which the seat may have left and
+// re-entered. What it cannot watch it does not charge, which keeps the clock
+// counting (the fail-safe direction, gt-vfwuc).
+func (s overrunState) withGate(slung, now time.Time, inGate bool, maxCharge time.Duration) (overrunState, time.Duration) {
+	if !s.GateSlingAt.Equal(slung) {
+		s.GateSlingAt, s.GateSpent, s.GateSeenAt = slung, 0, time.Time{}
+	}
+	switch {
+	case inGate && s.GateSeenAt.IsZero():
+		// The first tick that found the gate: nothing before it is charged.
+		s.GateSeenAt = now
+	case inGate:
+		s.GateSpent += min(now.Sub(s.GateSeenAt), maxCharge)
+		s.GateSeenAt = now
+	default:
+		// The gate is over: what it ran past the last tick that saw it open is
+		// not charged, because the guard cannot tell that from work the seat
+		// did after it.
+		s.GateSeenAt = time.Time{}
+	}
+	return s, s.GateSpent
+}
+
+// sameGate reports whether two records carry the same gate accounting, so a
+// tick writes the state only when one moved.
+func (s overrunState) sameGate(o overrunState) bool {
+	return s.GateSeenAt.Equal(o.GateSeenAt) && s.GateSpent == o.GateSpent && s.GateSlingAt.Equal(o.GateSlingAt)
+}
+
 // overrunState is what the guard remembers about one bead between ticks.
 //
 // The stop's progress is kept here too, one stamp per step, because every
@@ -100,8 +149,18 @@ type overrunState struct {
 	NudgeFailures int       `json:"nudge_failures,omitempty"`
 	NudgeFailedAt time.Time `json:"nudge_failed_at,omitzero"`
 
+	// GateSlingAt is the sling the gate accounting below belongs to, GateSpent
+	// the gate time charged for it, and GateSeenAt — when set — the last tick
+	// that saw the seat inside its gate (see withGate). The guard measures the
+	// sling's elapsed time as (now - slung) - GateSpent, so the time a seat
+	// waits inside its own gate does not count toward the 12 and 20 minute rule
+	// (gt-vfwuc).
+	GateSlingAt time.Time     `json:"gate_sling_at,omitzero"`
+	GateSpent   time.Duration `json:"gate_spent,omitempty"`
+	GateSeenAt  time.Time     `json:"gate_seen_at,omitzero"`
+
 	// Rig, Polecat and Branch name the seat the stop acts on; Elapsed is how
-	// long it had held the bead when the stop began.
+	// long it had held the bead when the stop began, gate time excluded.
 	Rig     string        `json:"rig,omitempty"`
 	Polecat string        `json:"polecat,omitempty"`
 	Branch  string        `json:"branch,omitempty"`
