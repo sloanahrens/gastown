@@ -86,11 +86,14 @@ func TestCLIMethodsSendTheirArgv(t *testing.T) {
 		t.Errorf("argv:\n got %q\nwant %q", got, want)
 	}
 	for _, c := range r.calls() {
-		// Machine mode rides on every call but bd sql (machineExempt).
+		// Machine mode rides on every call but bd sql (machineExempt); a bd
+		// init also carries the new-database opt-in, pinned by
+		// new_database_optin_test.go.
 		wantEnv := []string{"K=V", "BD_MACHINE=1"}
 		if c.args[0] == "sql" {
 			wantEnv = []string{"K=V"}
 		}
+		wantEnv = applyNewDatabaseOptIn(wantEnv, c.args)
 		if !c.plain || !reflect.DeepEqual(c.env, wantEnv) {
 			t.Errorf("call %v not plain with the given env: plain=%v env=%v, want %v", c.args, c.plain, c.env, wantEnv)
 		}

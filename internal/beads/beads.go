@@ -1563,6 +1563,7 @@ func (b *Beads) runWithStdin(stdinData []byte, args ...string) ([]byte, error) {
 		runEnv = WithoutMachineEnv(runEnv)
 	}
 	runEnv = b.applyAccessMode(runEnv, args)
+	runEnv = applyNewDatabaseOptIn(runEnv, args)
 
 	out, err := b.runBdWithRetry(stdinData, runEnv, args)
 	if err != nil {
@@ -1585,6 +1586,24 @@ func (b *Beads) applyAccessMode(env []string, args []string) []string {
 		return forceBDReadOnly(env)
 	}
 	return forceBDMutation(env)
+}
+
+// allowNewDatabaseEnv is the opt-in bd requires before it creates a database
+// on a server that already carries databases (be-d4v). gt sends the
+// environment form rather than --allow-new-database so a bd from before the
+// flag keeps working.
+const allowNewDatabaseEnv = "BD_ALLOW_NEW_DATABASE"
+
+// applyNewDatabaseOptIn adds the new-database opt-in to the environment of a
+// bd init call, the only verb that creates a database. gt initializes
+// databases on purpose — gt install, gt rig add, a workspace bd never finished
+// — and one that refuses the create breaks all three (be-d4v). args is argv
+// before the --allow-stale/--flat injection, so args[0] is the command word.
+func applyNewDatabaseOptIn(env []string, args []string) []string {
+	if len(args) == 0 || args[0] != "init" {
+		return env
+	}
+	return append(env, allowNewDatabaseEnv+"=1")
 }
 
 // runMachine runs one bd call in machine mode (BD_MACHINE=1): a failure exits
