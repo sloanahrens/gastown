@@ -315,6 +315,39 @@ func TestEvaluatePRWorkflowGuard_PolecatBranchCreationStillBlocked(t *testing.T)
 	}
 }
 
+// A git global option is not a creation flag, so a leading segment that only
+// switches branches behind one exempts nothing: the branch creation glued
+// after it stays blocked (gt-oyvpp). The option is skipped rather than stopped
+// at, so a real creation behind one keeps its exemption.
+func TestEvaluatePRWorkflowGuard_GlobalOptionIsNotACreationFlag(t *testing.T) {
+	t.Parallel()
+	town := newPolecatTestTown(t)
+	town = town.withEnv("GT_ROLE", "gastown/polecats/"+town.name)
+	branch := "polecat/ruby/gt-da2x+mu6jwe92"
+
+	blocked := []string{
+		"git -C . switch main && git checkout -b " + branch,
+		"git -c core.pager=cat switch main && git checkout -b " + branch,
+	}
+	for _, command := range blocked {
+		payload := polecatBranchPayload(town.worktree, command)
+		if got := evaluatePRWorkflowGuard([]byte(payload), town.proc()); got != prWorkflowBlockAgentContext {
+			t.Errorf("evaluatePRWorkflowGuard(%q) = %v, want prWorkflowBlockAgentContext", command, got)
+		}
+	}
+
+	allowed := []string{
+		"git -C . checkout -b " + branch,
+		"git -c core.pager=cat switch -c " + branch,
+	}
+	for _, command := range allowed {
+		payload := polecatBranchPayload(town.worktree, command)
+		if got := evaluatePRWorkflowGuard([]byte(payload), town.proc()); got != prWorkflowAllow {
+			t.Errorf("evaluatePRWorkflowGuard(%q) = %v, want prWorkflowAllow", command, got)
+		}
+	}
+}
+
 // TestRunTapGuardPRWorkflow_PolecatBlockedShapeShowsBanner keeps the block
 // end-to-end for a shape the exemption does not cover — the guard must still
 // exit 2 with the banner, not merely decide to block.

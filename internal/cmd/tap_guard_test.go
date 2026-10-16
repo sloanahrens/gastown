@@ -69,6 +69,21 @@ func TestIsLeadingBranchCreation(t *testing.T) {
 		{"checkout --create is not a checkout flag", "git checkout --create feature/x", false},
 		{"switch --force is not a creation", "git switch --force feature/x", false},
 		{"--force-create chained after pr create", "gh pr create --title foo && git switch --force-create temp", false},
+		// gt-oyvpp: git's global options sit in front of the subcommand, so
+		// they are not creation flags — "-C" and "-c" are git's own, and a
+		// leading segment that only switches branches behind one creates
+		// nothing.
+		{"switch behind git's -C", "git -C /tmp switch main", false},
+		{"switch behind git's -c", "git -c core.pager=cat switch main", false},
+		{"switch behind git's --git-dir", "git --git-dir=/tmp/x switch main", false},
+		{"creation flag after --", "git switch -q -- --force-create", false},
+		// The option is skipped, not stopped at, so a real creation behind it
+		// keeps the exemption the judge reads.
+		{"checkout -b behind git's -C", "git -C /tmp checkout -b temp origin/main", true},
+		{"switch -c behind git's -c", "git -c core.pager=cat switch -c temp origin/main", true},
+		// The exemption reads the judge's set of spellings, the substitution
+		// in the subcommand slot included (gt-g27m7, gt-n2gt8).
+		{"empty expansion in the subcommand slot", "git $(echo) checkout -b temp", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

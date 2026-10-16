@@ -857,11 +857,13 @@ func isPRCreateCommand(command string) bool {
 }
 
 // isLeadingBranchCreation reports whether command's leading segment is a
-// local branch creation — "git checkout -b" or "git switch -c" — reading the
-// creation flag with branchCreationFlag, so containment holds for an extra
-// flag ("git checkout -q -b temp"), a cluster ("git checkout -qB temp") and
-// the long spellings ("git switch --create temp", "git switch --force-create
-// temp") alike (gt-g27m7).
+// local branch creation — "git checkout -b" or "git switch -c" — read with
+// isBranchCreation, the reader the judge blocks with: one reader for both
+// halves, so the exemption carries every spelling the guard blocks (extra
+// flags, clusters, the long spellings; gt-g27m7) and no shape it does not.
+// Reading every word behind git as a flag counted its global options as
+// creation flags — "-C dir" and "-c k=v" are git's own, not switch's — so a
+// leading segment that only switches branches exempted the line (gt-oyvpp).
 //
 // The one exemption the pr-workflow guard grants is keyed on this shape: a
 // polecat's fresh session branch (gt-6hg7), scoped to its own worktree.
@@ -873,7 +875,9 @@ func isPRCreateCommand(command string) bool {
 // (gt-cyz8) — so a checkout glued after an && on the same line is NOT branch
 // creation here and exempts nothing.
 func isLeadingBranchCreation(command string) bool {
-	segs := splitShellSegments(shellTokenize(strings.TrimSpace(command)))
+	// The same token text prWorkflowInvocations reads, so the leading segment
+	// is the one the judge sees and not a second reading of it.
+	segs := splitShellSegments(shellTokenize(prWorkflowTokenText(command)))
 	if len(segs) == 0 {
 		return false
 	}
@@ -881,26 +885,5 @@ func isLeadingBranchCreation(command string) bool {
 	// assignment or launcher in front of git (the shapes the matcher now
 	// reads, gt-zf2vy) keeps the exemption it had when they hid the command.
 	seg, _, _ := prWorkflowCommand(segs[0])
-	if len(seg) < 2 || !strings.EqualFold(filepath.Base(seg[0]), "git") {
-		return false
-	}
-	// The subcommand decides which flag letters create a branch, so it is read
-	// first: "-b" is checkout's creation flag and "-c" is switch's, and the
-	// long spellings belong to switch alone.
-	sub := ""
-	for _, tok := range seg[1:] {
-		if lowered := strings.ToLower(tok); branchCreatingSubcommand(lowered) {
-			sub = lowered
-			break
-		}
-	}
-	if sub == "" {
-		return false
-	}
-	for _, flag := range seg[1:] {
-		if branchCreationFlag(sub, flag) {
-			return true
-		}
-	}
-	return false
+	return isBranchCreation(seg)
 }
