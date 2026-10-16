@@ -26,7 +26,9 @@ import (
 // sits in a wait. This patrol asks the two questions that name that state —
 // does the instance answer, is CI picking runs up — records them for the town
 // health line, and raises one escalation per condition once the failure has
-// lasted long enough to be an outage rather than a blip.
+// lasted long enough to be an outage rather than a blip. The run-queue
+// escalation also names the run holding the runner, so the reader who has to
+// cancel one does not have to find it first (gt-koxwa).
 
 // defaultLandingInfraInterval is how often the probe asks. A landing gate
 // waits minutes, so a minute between observations sees an outage well before
@@ -90,6 +92,12 @@ type landingInfraTarget struct {
 	TokenPath string
 	// TokenErr is why the token path could not be resolved.
 	TokenErr error
+	// ViewerTokenPath is the read-only viewer's token file, the credential the
+	// deploy watch reads a repository with (gt-hcbft). The escalation's name
+	// for the run holding the runner is read through it, so a town whose
+	// viewer token is missing names no run rather than reading one with the
+	// landing bot's write token (gt-koxwa).
+	ViewerTokenPath string
 }
 
 // landingInfraTargets lists the rigs the probe covers: every known rig whose
@@ -111,6 +119,7 @@ func (d *Daemon) landingInfraTargets() []landingInfraTarget {
 		t := landingInfraTarget{Rig: name, TokenErr: dirErr}
 		if dirErr == nil {
 			t.TokenPath = filepath.Join(tokenDir, "forgejo-"+config.ForgejoRoleLanding+".env")
+			t.ViewerTokenPath = filepath.Join(tokenDir, "forgejo-"+config.ForgejoRoleViewer+".env")
 		}
 		out = append(out, t.withRemote(fj.RemoteURL))
 	}
@@ -135,7 +144,7 @@ func (t landingInfraTarget) withRemote(remoteURL string) landingInfraTarget {
 	return t
 }
 
-// infraProber makes the probe's two HTTP calls. The real one goes through the
+// infraProber makes the probe's HTTP calls. The real one goes through the
 // Forgejo API client; tests inject a fake, so no test reaches the network
 // (gt-fn9e6.11).
 type infraProber interface {
@@ -144,6 +153,9 @@ type infraProber interface {
 	// Runs reports the oldest workflow run waiting to be picked up in
 	// owner/repo, the repository's run pickup state (gt-fn9e6.56).
 	Runs(ctx context.Context, apiBase, token, owner, repo string) (forgejo.RunPickup, error)
+	// HoldingRun reports the run holding owner/repo's runner, the run an
+	// operator cancels when the queue stalls (gt-koxwa).
+	HoldingRun(ctx context.Context, apiBase, token, owner, repo string) (forgejo.RunHolder, error)
 }
 
 // forgejoProber is infraProber over the Forgejo client. Every probe call gets
@@ -178,6 +190,17 @@ func (p forgejoProber) Runs(ctx context.Context, apiBase, token, owner, repo str
 		return forgejo.RunPickup{}, err
 	}
 	return c.WaitingRun(ctx, owner, repo)
+}
+
+func (p forgejoProber) HoldingRun(ctx context.Context, apiBase, token, owner, repo string) (forgejo.RunHolder, error) {
+	c, err := forgejo.NewClient("",
+		forgejo.WithBaseURL(apiBase),
+		forgejo.WithToken(token),
+		forgejo.WithHTTPClient(p.http))
+	if err != nil {
+		return forgejo.RunHolder{}, err
+	}
+	return c.HoldingRun(ctx, owner, repo)
 }
 
 // infraResult is one probe's raw outcome for one rig, before the recorder
@@ -266,6 +289,17 @@ type infraAlertAction struct {
 	key    string
 	raise  bool
 	detail string
+	// reds is the rigs a raise is about, each with the field's own detail for
+	// it: the text of the escalation and the repositories its body reads the
+	// run holding the runner from (gt-koxwa). Empty for a clear.
+	reds []infraRedRig
+}
+
+// infraRedRig is one rig whose probe reads red, with the health line's detail
+// for it.
+type infraRedRig struct {
+	Rig    string
+	Detail string
 }
 
 // triggerLandingInfraProbe runs one pass on its own goroutine when the
@@ -289,7 +323,8 @@ func (d *Daemon) triggerLandingInfraProbe() {
 // runLandingInfraProbe makes one pass: probe every covered rig, record what
 // it saw, and raise or clear the escalations the pass decided.
 func (d *Daemon) runLandingInfraProbe(now time.Time) {
-	d.applyInfraAlerts(d.probeLandingInfra(now, d.landingInfraTargets()))
+	tgts := d.landingInfraTargets()
+	d.applyInfraAlerts(d.nameHoldingRuns(tgts, d.probeLandingInfra(now, tgts)))
 }
 
 // applyInfraAlerts raises and clears the escalations a pass decided.
@@ -301,6 +336,89 @@ func (d *Daemon) applyInfraAlerts(actions []infraAlertAction) {
 		}
 		d.clearAlerts(a.detail, a.key)
 	}
+}
+
+// nameHoldingRuns gives a runner escalation the text naming the run holding
+// the runner, which is the run whoever reads the escalation cancels to free
+// the queue (gt-koxwa). A pass reads only the rigs whose escalation it is
+// raising, so a stalled queue costs one read per red rig once, not one per
+// tick; and every way that read can disappoint becomes the escalation's text,
+// never a failure to raise the alarm the pass already decided on.
+func (d *Daemon) nameHoldingRuns(tgts []landingInfraTarget, actions []infraAlertAction) []infraAlertAction {
+	for i := range actions {
+		if !actions[i].raise || actions[i].key != alertKeyRunnerOffline {
+			continue
+		}
+		prober := d.infraProberOrDefault()
+		for _, red := range actions[i].reds {
+			t, ok := infraTargetFor(tgts, red.Rig)
+			if !ok {
+				continue
+			}
+			actions[i].detail += "\n" + holdingRunText(prober, t)
+		}
+	}
+	return actions
+}
+
+// infraTargetFor is the target a pass covered for rig.
+func infraTargetFor(tgts []landingInfraTarget, rig string) (landingInfraTarget, bool) {
+	for _, t := range tgts {
+		if t.Rig == rig {
+			return t, true
+		}
+	}
+	return landingInfraTarget{}, false
+}
+
+// holdingRunText is the escalation's line for the run holding a repository's
+// runner: the repository, the workflow, the run's id and its number in the
+// repository, the ref it runs on, the job holding the runner and the URL that
+// opens the run. A run that cannot be read says so with the reason, which is
+// what tells an operator to look at the viewer credential rather than at the
+// runner.
+func holdingRunText(prober infraProber, t landingInfraTarget) string {
+	repo := t.Owner + "/" + t.Repo
+	token, err := readInfraViewerToken(t)
+	var holder forgejo.RunHolder
+	if err == nil {
+		holder, err = prober.HoldingRun(context.Background(), t.APIBase, token, t.Owner, t.Repo)
+	}
+	if err != nil {
+		return "holding run: " + repo + ": could not be read: " + firstLine(err.Error())
+	}
+	if !holder.Found {
+		return "holding run: " + repo + ": none: no run has been picked up"
+	}
+	line := fmt.Sprintf("holding run: %s %s run %d (#%d) on %s",
+		repo, workflowFileBase(holder.Run.WorkflowID), holder.Run.ID, holder.Run.Index, holder.Run.PrettyRef)
+	if holder.Job.Name != "" {
+		line += ", job " + holder.Job.Name
+	} else {
+		line += ", no job running in it"
+	}
+	if holder.Run.HTMLURL != "" {
+		line += "\nrun: " + holder.Run.HTMLURL
+	}
+	return line
+}
+
+// readInfraViewerToken reads the read-only viewer's token, the credential the
+// deploy watch reads a repository with (gt-hcbft). It is read per raise into a
+// local, so no token outlives the escalation that needed it.
+func readInfraViewerToken(t landingInfraTarget) (string, error) {
+	if t.ViewerTokenPath == "" {
+		return "", errors.New("no " + config.ForgejoRoleViewer + " token file is configured")
+	}
+	return forgejo.ReadTokenFile(t.ViewerTokenPath)
+}
+
+// infraProberOrDefault is the prober a pass makes its calls with.
+func (d *Daemon) infraProberOrDefault() infraProber {
+	if d.landingInfraProber != nil {
+		return d.landingInfraProber
+	}
+	return newForgejoProber()
 }
 
 // probeLandingInfra runs one pass over tgts and folds the outcome into the
@@ -315,10 +433,7 @@ func (d *Daemon) probeLandingInfra(now time.Time, tgts []landingInfraTarget) []i
 	if len(tgts) == 0 {
 		return d.landingInfra.observeNothing()
 	}
-	prober := d.landingInfraProber
-	if prober == nil {
-		prober = newForgejoProber()
-	}
+	prober := d.infraProberOrDefault()
 	// The role's token file is one path for the town; every target carries
 	// the same one (landingInfraTargets). It is read here, per pass, into a
 	// local: nothing that outlives the pass holds it.
@@ -477,7 +592,7 @@ func (st *landingInfraState) judge(now time.Time, c infraConditionSpec, obs map[
 	switch {
 	case red && !*open:
 		*open = true
-		return []infraAlertAction{{key: c.key, raise: true, detail: c.failing + ": " + strings.Join(reds, "; ")}}
+		return []infraAlertAction{{key: c.key, raise: true, reds: reds, detail: c.failing + ": " + infraRedText(reds)}}
 	case !red && green && *open:
 		*open = false
 		return []infraAlertAction{{key: c.key, detail: c.back}}
@@ -486,18 +601,27 @@ func (st *landingInfraState) judge(now time.Time, c infraConditionSpec, obs map[
 	}
 }
 
+// infraRedText is the red rigs as one escalation's sentence names them.
+func infraRedText(reds []infraRedRig) string {
+	lines := make([]string, 0, len(reds))
+	for _, red := range reds {
+		lines = append(lines, red.Rig+": "+red.Detail)
+	}
+	return strings.Join(lines, "; ")
+}
+
 // infraCondition judges every covered rig's probe: red when some rig is red,
 // green when every rig is green, and the red rigs' reasons for the alert to
 // name. The reason is the field's own detail, so the escalation says what the
 // health line says.
-func infraCondition(obs map[string]infraObservation, rigs []string, now time.Time, c infraConditionSpec) (red, green bool, reds []string) {
+func infraCondition(obs map[string]infraObservation, rigs []string, now time.Time, c infraConditionSpec) (red, green bool, reds []infraRedRig) {
 	green = true
 	for _, rig := range rigs {
 		p := obs[rig].probe()
 		switch c.verdict(p, now) {
 		case townhealth.Red:
 			red, green = true, false
-			reds = append(reds, fmt.Sprintf("%s: %s", rig, firstLine(townhealth.InfraField(c.field, rig, p, now).Detail)))
+			reds = append(reds, infraRedRig{Rig: rig, Detail: firstLine(townhealth.InfraField(c.field, rig, p, now).Detail)})
 		case townhealth.Green:
 		default:
 			green = false

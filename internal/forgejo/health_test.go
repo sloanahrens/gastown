@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -99,4 +101,94 @@ func TestWaitingRunForbiddenIsAnError(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.As(err, &apiErr))
 	assert.Equal(t, http.StatusForbidden, apiErr.StatusCode)
+}
+
+// holdClient answers a run-holder read's two calls, the run list and that
+// run's jobs, each from its own body.
+type holdClient struct {
+	runs       string
+	jobs       string
+	jobsStatus int
+	// paths is every path asked, in order.
+	paths []string
+	// query is the run list's query.
+	query url.Values
+}
+
+func (h *holdClient) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	h.paths = append(h.paths, req.URL.Path)
+	switch {
+	case strings.HasSuffix(req.URL.Path, "/jobs"):
+		if h.jobsStatus != 0 {
+			w.WriteHeader(h.jobsStatus)
+		}
+		_, _ = w.Write([]byte(h.jobs))
+	case strings.HasSuffix(req.URL.Path, "/actions/runs"):
+		h.query = req.URL.Query()
+		_, _ = w.Write([]byte(h.runs))
+	default:
+		w.WriteHeader(http.StatusNotFound)
+	}
+}
+
+// TestHoldingRunReadsTheRunInFlightLongestAndItsJob: the runner is held by the
+// run that has occupied it longest — the one later runs queue behind — and the
+// job holding it is the one a runner is running (gt-koxwa).
+func TestHoldingRunReadsTheRunInFlightLongestAndItsJob(t *testing.T) {
+	t.Parallel()
+	h := &holdClient{
+		runs: `{"workflow_runs":[
+			{"id":43,"index_in_repo":8,"status":"running","workflow_id":".forgejo/workflows/staging.yml","prettyref":"main","html_url":"https://forgejo.test/gastown/gastown/actions/runs/43","started":"2026-10-05T11:50:00Z"},
+			{"id":42,"index_in_repo":7,"status":"running","workflow_id":".forgejo/workflows/staging.yml","prettyref":"main","html_url":"https://forgejo.test/gastown/gastown/actions/runs/42","started":"2026-10-05T11:33:22Z"},
+			{"id":41,"index_in_repo":6,"status":"failure","workflow_id":"gate.yml","prettyref":"main","started":"2026-10-05T11:00:00Z"}
+		]}`,
+		jobs: `[{"id":311,"run_id":42,"name":"build","status":"running"},{"id":312,"run_id":42,"name":"deploy","status":"waiting"}]`,
+	}
+	got, err := newTestClient(t, h).HoldingRun(context.Background(), "gastown", "gastown")
+	require.NoError(t, err)
+	assert.True(t, got.Found)
+	assert.Equal(t, int64(42), got.Run.ID)
+	assert.Equal(t, int64(7), got.Run.Index)
+	assert.Equal(t, "main", got.Run.PrettyRef)
+	assert.Equal(t, ".forgejo/workflows/staging.yml", got.Run.WorkflowID)
+	assert.Equal(t, "https://forgejo.test/gastown/gastown/actions/runs/42", got.Run.HTMLURL)
+	assert.Equal(t, "build", got.Job.Name)
+	assert.Equal(t, []string{
+		"/api/v1/repos/gastown/gastown/actions/runs",
+		"/api/v1/repos/gastown/gastown/actions/runs/42/jobs",
+	}, h.paths)
+	assert.Equal(t, []string{RunStatusRunning}, h.query["status"])
+}
+
+// TestHoldingRunNothingInFlightIsNoHolder: a repository with no run in flight
+// holds no runner, and the read stops at the run list (gt-koxwa).
+func TestHoldingRunNothingInFlightIsNoHolder(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ name, runs string }{
+		{name: "an empty queue", runs: `{"workflow_runs":[],"total_count":0}`},
+		{name: "a run the list calls in flight with no start", runs: `{"workflow_runs":[{"id":42,"status":"running","started":"0001-01-01T00:00:00Z"}]}`},
+		{name: "a finished run an instance that ignores the filter hands back", runs: `{"workflow_runs":[{"id":42,"status":"success","started":"2026-10-05T11:33:22Z"}]}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := &holdClient{runs: tc.runs}
+			got, err := newTestClient(t, h).HoldingRun(context.Background(), "gastown", "gastown")
+			require.NoError(t, err)
+			assert.False(t, got.Found)
+			assert.Equal(t, []string{"/api/v1/repos/gastown/gastown/actions/runs"}, h.paths)
+		})
+	}
+}
+
+// TestHoldingRunUnreadableJobsIsAnError: a run whose jobs cannot be read
+// cannot be named with the job holding the runner, so the read fails rather
+// than handing back a run whose holder is unknown (gt-koxwa).
+func TestHoldingRunUnreadableJobsIsAnError(t *testing.T) {
+	t.Parallel()
+	h := &holdClient{
+		runs:       `{"workflow_runs":[{"id":42,"status":"running","started":"2026-10-05T11:33:22Z"}]}`,
+		jobsStatus: http.StatusInternalServerError,
+	}
+	_, err := newTestClient(t, h).HoldingRun(context.Background(), "gastown", "gastown")
+	require.Error(t, err)
 }

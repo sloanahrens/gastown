@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/forgejo"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/townhealth"
@@ -24,10 +25,16 @@ type fakeProber struct {
 	versions map[string]error
 	// pickups maps "owner/repo" to the run queue answer.
 	pickups map[string]fakeRunPickup
+	// holders maps "owner/repo" to the run-holder answer.
+	holders map[string]fakeHolder
 	// tokens is every token handed to a run queue probe, in order.
 	tokens []string
 	// bases is every API base the version probe was asked, in order.
 	bases []string
+	// holderTokens is every token handed to a run-holder read, in order, and
+	// holderRepos the repositories it asked for.
+	holderTokens []string
+	holderRepos  []string
 }
 
 // fakeRunPickup is one repository's run queue: the oldest run waiting on a
@@ -37,6 +44,13 @@ type fakeRunPickup struct {
 	since   time.Time
 	runID   int64
 	err     error
+}
+
+// fakeHolder is one repository's run-holder read: the run holding its runner,
+// or the read that failed.
+type fakeHolder struct {
+	holder forgejo.RunHolder
+	err    error
 }
 
 func (f *fakeProber) Version(_ context.Context, apiBase string) error {
@@ -53,6 +67,13 @@ func (f *fakeProber) Runs(_ context.Context, apiBase, token, owner, repo string)
 	return forgejo.RunPickup{Waiting: a.waiting, Since: a.since, ID: a.runID}, nil
 }
 
+func (f *fakeProber) HoldingRun(_ context.Context, apiBase, token, owner, repo string) (forgejo.RunHolder, error) {
+	f.holderTokens = append(f.holderTokens, token)
+	f.holderRepos = append(f.holderRepos, owner+"/"+repo)
+	h := f.holders[owner+"/"+repo]
+	return h.holder, h.err
+}
+
 // infraDaemon is a daemon whose alerts go to a recorder and whose probe is
 // driven by the targets and prober a test supplies.
 func infraDaemon(t *testing.T, tgts []landingInfraTarget, prober infraProber) (*Daemon, *fakeProber, *notifyfake.Recorder) {
@@ -64,11 +85,11 @@ func infraDaemon(t *testing.T, tgts []landingInfraTarget, prober infraProber) (*
 	return d, fp, rec
 }
 
-// infraTokenFile writes a landing bot token file the way the client reads
-// one, and returns its path.
-func infraTokenFile(t *testing.T, token string) string {
+// infraTokenFile writes a role's token file the way the client reads one, and
+// returns its path.
+func infraTokenFile(t *testing.T, role, token string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "forgejo-landing.env")
+	path := filepath.Join(t.TempDir(), "forgejo-"+role+".env")
 	if err := os.WriteFile(path, []byte("FORGEJO_TOKEN="+token+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -76,15 +97,16 @@ func infraTokenFile(t *testing.T, token string) string {
 }
 
 // infraTargets is one rig landing through one Forgejo instance, with a
-// readable landing bot token.
+// readable landing bot token and a readable viewer token.
 func infraTargets(t *testing.T) []landingInfraTarget {
 	t.Helper()
 	return []landingInfraTarget{{
-		Rig:       "gastown",
-		Owner:     "gastown",
-		Repo:      "gastown",
-		APIBase:   "https://forgejo.test/api/v1",
-		TokenPath: infraTokenFile(t, "token-from-file"),
+		Rig:             "gastown",
+		Owner:           "gastown",
+		Repo:            "gastown",
+		APIBase:         "https://forgejo.test/api/v1",
+		TokenPath:       infraTokenFile(t, config.ForgejoRoleLanding, "token-from-file"),
+		ViewerTokenPath: infraTokenFile(t, config.ForgejoRoleViewer, "viewer-token-from-file"),
 	}}
 }
 
@@ -238,6 +260,111 @@ func TestLandingInfraRaisesAndClearsTheRunnerCondition(t *testing.T) {
 	}
 }
 
+// TestLandingInfraNamesTheRunHoldingTheRunner: the runner escalation names the
+// run whoever reads it cancels to free the queue — the repository, the
+// workflow, the run's id and its number in the repository, the ref, the job
+// holding the runner and the URL — read through the viewer credential once for
+// the raise, not once per pass (gt-koxwa).
+func TestLandingInfraNamesTheRunHoldingTheRunner(t *testing.T) {
+	t.Parallel()
+	prober := &fakeProber{
+		versions: map[string]error{},
+		pickups:  map[string]fakeRunPickup{"gastown/gastown": {waiting: true, since: infraNow, runID: 91}},
+		holders: map[string]fakeHolder{"gastown/gastown": {holder: forgejo.RunHolder{
+			Found: true,
+			Run: forgejo.ActionRun{
+				ID:         42,
+				Index:      7,
+				Status:     forgejo.RunStatusRunning,
+				PrettyRef:  "main",
+				WorkflowID: ".forgejo/workflows/staging.yml",
+				HTMLURL:    "https://forgejo.test/gastown/gastown/actions/runs/42",
+			},
+			Job: forgejo.ActionRunJob{ID: 311, RunID: 42, Name: "build", Status: forgejo.JobStatusRunning},
+		}}},
+	}
+	d, fp, rec := infraDaemon(t, infraTargets(t), prober)
+
+	red := infraNow.Add(townhealth.InfraRunnerRedAfter)
+	d.runLandingInfraProbe(red)
+
+	got := rec.Escalations()
+	if len(got) != 1 || got[0].Escalation.Fingerprint != alertKeyRunnerOffline {
+		t.Fatalf("escalations = %+v, want one keyed %s", got, alertKeyRunnerOffline)
+	}
+	reason := got[0].Escalation.Reason
+	for _, want := range []string{
+		"gastown/gastown", "staging.yml", "run 42", "(#7)", "main", "job build",
+		"https://forgejo.test/gastown/gastown/actions/runs/42",
+	} {
+		if !strings.Contains(reason, want) {
+			t.Errorf("escalation reason %q does not name %q", reason, want)
+		}
+	}
+	if len(fp.holderTokens) != 1 || fp.holderTokens[0] != "viewer-token-from-file" {
+		t.Errorf("holder read tokens = %v, want the viewer token from its file", fp.holderTokens)
+	}
+	if len(fp.holderRepos) != 1 || fp.holderRepos[0] != "gastown/gastown" {
+		t.Errorf("holder reads = %v, want the rig's own repository", fp.holderRepos)
+	}
+
+	d.runLandingInfraProbe(red.Add(time.Minute))
+	if n := len(fp.holderRepos); n != 1 {
+		t.Errorf("holder reads over two passes = %d, want 1: only the pass that raises reads", n)
+	}
+}
+
+// TestLandingInfraHoldingRunThatCannotBeRead: an escalation whose holding run
+// cannot be read says so and is raised anyway — CI not moving is the alarm,
+// and a viewer credential is not what makes it one (gt-koxwa).
+func TestLandingInfraHoldingRunThatCannotBeRead(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		viewer  string
+		holders map[string]fakeHolder
+	}{
+		{name: "no viewer credential"},
+		{
+			name:    "the read fails",
+			viewer:  "viewer-token-from-file",
+			holders: map[string]fakeHolder{"gastown/gastown": {err: errors.New("forgejo: GET /repos/gastown/gastown/actions/runs returned 404")}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tgts := []landingInfraTarget{{
+				Rig: "gastown", Owner: "gastown", Repo: "gastown",
+				APIBase:   "https://forgejo.test/api/v1",
+				TokenPath: infraTokenFile(t, config.ForgejoRoleLanding, "token-from-file"),
+			}}
+			if tc.viewer != "" {
+				tgts[0].ViewerTokenPath = infraTokenFile(t, config.ForgejoRoleViewer, tc.viewer)
+			}
+			prober := &fakeProber{
+				versions: map[string]error{},
+				pickups:  map[string]fakeRunPickup{"gastown/gastown": {waiting: true, since: infraNow, runID: 91}},
+				holders:  tc.holders,
+			}
+			d, _, rec := infraDaemon(t, tgts, prober)
+
+			d.runLandingInfraProbe(infraNow.Add(townhealth.InfraRunnerRedAfter))
+
+			got := rec.Escalations()
+			if len(got) != 1 {
+				t.Fatalf("escalations = %+v, want the escalation raised anyway", got)
+			}
+			reason := got[0].Escalation.Reason
+			if !strings.Contains(reason, "could not be read") {
+				t.Errorf("escalation reason = %q, want it to say the holding run could not be read", reason)
+			}
+			if strings.Contains(reason, "run 42") {
+				t.Errorf("escalation reason = %q, want no run named", reason)
+			}
+		})
+	}
+}
+
 // TestLandingInfraUnreadableRunQueueIsUnknown: a run list the landing bot
 // cannot read is an unanswerable question, never a runner verdict — the 403 a
 // non-owner gets on the repository runner API is exactly what this signal
@@ -327,7 +454,7 @@ func TestLandingInfraRigWithoutABaseURLIsUnknown(t *testing.T) {
 // each rig still asks its own (gt-fn9e6.11).
 func TestLandingInfraInstanceIsProbedOncePerPass(t *testing.T) {
 	t.Parallel()
-	tokenPath := infraTokenFile(t, "token-from-file")
+	tokenPath := infraTokenFile(t, config.ForgejoRoleLanding, "token-from-file")
 	tgts := []landingInfraTarget{
 		{Rig: "alpha", Owner: "gastown", Repo: "alpha", APIBase: "https://forgejo.test/api/v1", TokenPath: tokenPath},
 		{Rig: "beta", Owner: "gastown", Repo: "beta", APIBase: "https://forgejo.test/api/v1", TokenPath: tokenPath},
@@ -359,7 +486,7 @@ func TestLandingInfraTokenNeverLeavesThePass(t *testing.T) {
 	const token = "s3cr3t-landing-token"
 	tgts := []landingInfraTarget{{
 		Rig: "gastown", Owner: "gastown", Repo: "gastown",
-		APIBase: "https://forgejo.test/api/v1", TokenPath: infraTokenFile(t, token),
+		APIBase: "https://forgejo.test/api/v1", TokenPath: infraTokenFile(t, config.ForgejoRoleLanding, token),
 	}}
 	prober := &fakeProber{
 		versions: map[string]error{"https://forgejo.test/api/v1": errors.New("down")},
