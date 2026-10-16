@@ -210,6 +210,9 @@ func TestPolecatTestScopeShellExpandedCDir(t *testing.T) {
 		{"variable, relative heavy argument with dots", `go -C "$PWD/internal" test ./cmd/...`, true},
 		{"variable, parent-relative heavy argument", `go -C "$PWD/internal" test ../internal/cmd`, true},
 		{"variable, relative heavy argument, -count", `go -C "$PWD/internal" test ./cmd -count=1`, true},
+		{"variable, relative light argument", `go -C "$PWD/internal" test ./style`, true},
+		{"variable, relative light argument with dots", `go -C "$PWD/internal" test ./style/...`, true},
+		{"command substitution, relative light argument", `go -C "$(pwd)/internal" test ./style`, true},
 
 		// A -run filter bounds an expanded -C only for an explicit package
 		// argument. A bare or "." target names the directory itself, which the
@@ -227,6 +230,7 @@ func TestPolecatTestScopeShellExpandedCDir(t *testing.T) {
 		{"literal directory with -run", "go -C internal/cmd test . -run X", false},
 		{"variable, relative heavy argument, -run", `go -C "$PWD/internal" test ./cmd -run X`, false},
 		{"variable, relative heavy argument, -run before the argument", `go -C "$PWD/internal" test -run=X ./cmd`, false},
+		{"variable, relative light argument, -run", `go -C "$PWD/internal" test ./style -run X`, false},
 		{"literal directory, light package", "go -C internal/style test .", false},
 		{"literal directory, heavy package", "go -C internal/cmd test .", true},
 	}

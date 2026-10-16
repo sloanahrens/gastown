@@ -173,7 +173,11 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool)
 	// package argument spelled relative to it ("./cmd") is read as the
 	// module-root package "cmd", which is not heavy. Without a -run filter
 	// the run could be any package in any tree, so it is refused as the
-	// container rule refuses it (gt-tgwt7).
+	// container rule refuses it (gt-tgwt7). The refusal is blanket: a light
+	// package ("./style") is refused as well as a heavy one, because the
+	// directory it is relative to is the thing the guard cannot place. A
+	// -run filter, a literal -C or a cd into the package is the way through
+	// (gt-k4lsy).
 	if !hasRun && goDirFlagShellExpanded(tokens, lower, i) && runDirTargetsUnknownDir(pkgArgs) {
 		return "polecat 'go test' runs in a -C directory the shell expands, which the guard cannot place", nil
 	}
