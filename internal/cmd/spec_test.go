@@ -1339,6 +1339,31 @@ func TestSpecDispatchFailureNamesTheExclusion(t *testing.T) {
 	}
 }
 
+// Clearing the label retries the bead. When the retry fails for another reason,
+// the bead carries both notes, and the same reason failing again adds none
+// (gt-zkqtn).
+func TestSpecDispatchFailureNoteFollowsTheReason(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	retry := func(reason string) {
+		s := f.specs["gt-a"]
+		s.Labels = nil
+		f.specs["gt-a"] = s
+		f.slingErrs["gt-a"] = []error{errors.New(reason)}
+		if r := runSpecDispatchCycle(f.env()); len(r.Failed) != 1 {
+			t.Fatalf("%s: failed = %+v, want one entry", reason, r.Failed)
+		}
+	}
+	retry("rig gastown is down")
+	retry("rig gastown is down")
+	retry("no polecat slot")
+
+	notes := f.notes["gt-a"]
+	if len(notes) != 2 || !strings.Contains(notes[0], "rig gastown is down") || !strings.Contains(notes[1], "no polecat slot") {
+		t.Errorf("bead notes = %q, want one per distinct reason, in order", notes)
+	}
+}
+
 func TestSpecDispatchDryRunTouchesNothing(t *testing.T) {
 	t.Parallel()
 	bad := cleanSpec("gt-bad", 1, "2026-09-29T10:00:00Z")
@@ -2049,6 +2074,42 @@ func TestHasCommentWithPrefix(t *testing.T) {
 	}
 	if hasCommentWithPrefix(comments, "spec-dispatch: gt-a: dispatch failed") {
 		t.Error("different note kind matched")
+	}
+}
+
+// The failure note is written once per reason: a retry that fails for another
+// reason has to leave that reason on the bead, not the first one (gt-zkqtn).
+func TestAnnotateSpecOnce_DispatchFailedDifferentReasonRecorded(t *testing.T) {
+	t.Parallel()
+	failNote := func(reason string) string {
+		return fmt.Sprintf("%sgt-x: dispatch failed, left unassigned: %s", specDispatchNotePrefix, reason)
+	}
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-x", Status: "open"})
+	if err := db.AddComment("gt-x", failNote("reasonA")); err != nil {
+		t.Fatal(err)
+	}
+
+	// The same failure on the next tick is still written once.
+	if err := annotateSpecOnce(db, "gt-x", failNote("reasonA"), failNote("reasonA")); err != nil {
+		t.Fatal(err)
+	}
+	// A different reason is a new fact about the bead.
+	if err := annotateSpecOnce(db, "gt-x", failNote("reasonB"), failNote("reasonB")); err != nil {
+		t.Fatal(err)
+	}
+
+	comments, err := db.Comments("gt-x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, c := range comments {
+		got = append(got, c.Text)
+	}
+	want := []string{failNote("reasonA"), failNote("reasonB")}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("comments = %q, want %q", got, want)
 	}
 }
 

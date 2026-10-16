@@ -1020,8 +1020,12 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			if err := env.AddLabel(id, specdispatch.DispatchFailedLabel); err != nil {
 				report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", id, err))
 			}
-			key := fmt.Sprintf("%s%s: dispatch failed", specDispatchNotePrefix, id)
-			if err := env.Annotate(id, key, specDispatchNotePrefix+failLine); err != nil {
+			// The note is its own key: annotateSpecOnce skips a note whose key
+			// a comment already starts with, so a shorter key would hide a
+			// retry's different reason while the same one is still written
+			// once (gt-zkqtn).
+			note := specDispatchNotePrefix + failLine
+			if err := env.Annotate(id, note, note); err != nil {
 				report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
 			}
 			continue
@@ -1393,7 +1397,9 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			}
 			return specRosterFrom(sessions, ts), nil
 		},
-		Annotate: func(id, key, text string) error { return annotateSpecOnce(townRoot, id, key, text) },
+		Annotate: func(id, key, text string) error {
+			return annotateSpecOnce(beads.New(resolveBeadDirFromTownRoot(townRoot, id)), id, key, text)
+		},
 		AddLabel: func(id, label string) error { return poolBeadLabelAdd(townRoot, id, label) },
 		BranchOnOrigin: func(rig, branch string) (bool, error) {
 			return polecat.BranchOnOrigin(filepath.Join(townRoot, rig), branch)
@@ -1671,8 +1677,7 @@ func parseSpecReady(out []byte) ([]*beads.Issue, error) {
 // comment starting with key, so a bead the dispatcher refuses every tick is
 // annotated once. A comment list that cannot be read is an error, not "no
 // comments": writing on a guess would repeat the note every tick.
-func annotateSpecOnce(townRoot, beadID, key, text string) error {
-	b := beads.New(resolveBeadDirFromTownRoot(townRoot, beadID))
+func annotateSpecOnce(b beads.Client, beadID, key, text string) error {
 	comments, err := b.Comments(beadID)
 	if err != nil {
 		return fmt.Errorf("reading comments: %w", err)

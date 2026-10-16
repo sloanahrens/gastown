@@ -457,6 +457,18 @@ func TestMakeTestOutsideGoTree(t *testing.T) {
 		{"an attached alternate makefile", npmRoot, "make -fother.mk test", true},
 		{"a long-form makefile", npmRoot, "make --makefile=other.mk test", true},
 		{"a makefile from stdin", npmRoot, "make - test", true},
+		// Short options cluster: the -C or -f behind a valueless letter still
+		// owns the next token (or the rest of this one), and a value-taking
+		// option ahead of it keeps the letters after it as its own value.
+		{"make -sC into the Go tree", npmRoot, "make -sC " + goRoot + " test", true},
+		{"make -kC into the Go tree", npmRoot, "make -kC " + goRoot + " test", true},
+		{"make -sC attached into the Go tree", npmRoot, "make -sC" + goRoot + " test", true},
+		{"make -sC out of the Go tree", goRoot, "make -sC " + npmRoot + " test", false},
+		{"make -sC a variable", npmRoot, `make -sC "$PWD/sub" test`, true},
+		{"a clustered alternate makefile", npmRoot, "make -sf other.mk test", true},
+		{"a clustered attached alternate makefile", npmRoot, "make -sfother.mk test", true},
+		{"make -oC is -o with the value C", npmRoot, "make -oC " + goRoot + " test", false},
+		{"make -sj4 steers nothing", npmRoot, "make -sj4 test", false},
 		{"a -C from an unknown cwd", "", "make -C . test", true},
 		{"no cwd at all", "", "make test", true},
 	}

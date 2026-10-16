@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -768,6 +769,91 @@ func TestPoolSeatClaimCleanupDropsCrashedAndStaleSlingers(t *testing.T) {
 		t.Fatalf("only the live, fresh claim survives, got %v (crashed=%s stale=%s held=%s)",
 			got, crashed.ID, stale.ID, held.ID)
 	}
+}
+
+// A reader that does not prune (the dry run, the dispatcher's roster) must not
+// count a claim whose sling is gone or past the TTL as a taken seat, and must
+// leave the file where it found it (gt-zkqtn).
+func TestPoolClaimSessionsSkipDeadAndExpired(t *testing.T) {
+	t.Parallel()
+	poolClaims := func(sessions []poolSession) []string {
+		var names []string
+		for _, s := range sessions {
+			if strings.HasPrefix(s.name, "pool-claim/") {
+				names = append(names, s.name)
+			}
+		}
+		return names
+	}
+	occupied := func() ([]poolSession, error) { return nil, nil }
+
+	t.Run("dry run and live decision through the ledger", func(t *testing.T) {
+		t.Parallel()
+		w := newTestPoolTown(cappedPool(3))
+		const crashedPID, livePID = 9001, 9002
+		w.dead[crashedPID] = true
+		seats := w.process().seats
+		for _, c := range []poolSeatClaim{
+			{ID: "crashed-1", PID: crashedPID, Agent: claimAgent, CreatedAt: poolTestNow},
+			{ID: "expired-1", PID: livePID, Agent: claimAgent, CreatedAt: poolTestNow.Add(-poolSeatClaimTTL - time.Minute)},
+		} {
+			if _, err := seats.publish(c); err != nil {
+				t.Fatal(err)
+			}
+		}
+		held, err := seats.publish(poolSeatClaim{ID: "held-1", PID: livePID, Agent: claimAgent, CreatedAt: poolTestNow})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		for _, live := range []bool{false, true} {
+			sessions, d, err := w.process().seats.begin(live, occupied)
+			if err != nil {
+				t.Fatalf("begin(live=%v): %v", live, err)
+			}
+			d.done()
+			if got := poolClaims(sessions); len(got) != 1 || got[0] != "pool-claim/"+held.ID {
+				t.Errorf("begin(live=%v) counted %v, want only the live fresh claim", live, got)
+			}
+		}
+	})
+
+	t.Run("dispatcher roster on disk", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		// Above any pid the OS hands out, so it names no process.
+		const deadPID = 1 << 30
+		dir := poolSeatClaimDir(townRoot)
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		for _, c := range []poolSeatClaim{
+			{ID: "crashed-1", PID: deadPID, Agent: claimAgent, CreatedAt: time.Now()},
+			{ID: "expired-1", PID: os.Getpid(), Agent: claimAgent, CreatedAt: time.Now().Add(-poolSeatClaimTTL - time.Minute)},
+			{ID: "held-1", PID: os.Getpid(), Agent: claimAgent, CreatedAt: time.Now()},
+		} {
+			data, err := json.Marshal(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, c.ID+".json"), data, 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		sessions, err := poolSeatClaimSessions(townRoot, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := poolClaims(sessions); len(got) != 1 || got[0] != "pool-claim/held-1" {
+			t.Errorf("roster counted %v, want only the live fresh claim", got)
+		}
+		for _, id := range []string{"crashed-1", "expired-1"} {
+			if _, err := os.Stat(filepath.Join(dir, id+".json")); err != nil {
+				t.Errorf("a reader deleted claim %s: %v", id, err)
+			}
+		}
+	})
 }
 
 // ── A claim set that cannot be read (gt-t8q5) ───────────────────────────────

@@ -416,7 +416,9 @@ func reuseIdlePolecatForSlingWith(
 		}
 		// Only a resume can end up on a branch someone already holds: a fresh
 		// sling names a new branch, so its fallback cannot collide (gt-0kk2).
-		if errors.Is(err, polecat.ErrBranchHeld) && resumeBranch != "" {
+		// A rework's preference is soft, so a branch another worktree holds
+		// falls through to the pool below like any other failed resume.
+		if errors.Is(err, polecat.ErrBranchHeld) && resumeBranch != "" && !allowRecovery {
 			return nil, fmt.Errorf("cannot reuse idle polecat %s: %w", polecatName, err)
 		}
 		if allowRecovery {

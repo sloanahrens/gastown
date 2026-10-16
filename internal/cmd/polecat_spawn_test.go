@@ -165,6 +165,31 @@ func TestReuseIdlePolecatForSling_StopsOnHeldBranch(t *testing.T) {
 	}
 }
 
+// TestReuseIdlePolecatForSling_ResumeBranchHeldFallsBack is the rework side of
+// the gt-0kk2 stop: a rework's seat preference is soft, so the rejected
+// attempt's branch being checked out elsewhere hands the sling to the pool,
+// which names a fresh branch and cannot collide with the held one. An explicit
+// resume (StopsOnHeldBranch above) still stops.
+func TestReuseIdlePolecatForSling_ResumeBranchHeldFallsBack(t *testing.T) {
+	t.Parallel()
+	fake := authorSeat(nil)
+	fake.reuseErr["garnet"] = fmt.Errorf("%w: %s is already checked out at /town/rig/polecats/beta/rig",
+		polecat.ErrBranchHeld, reworkBranch)
+
+	info, err := reuseForRework(t, fake, SlingSpawnOptions{HookBead: reworkBead},
+		map[string]*reworkSeat{reworkBead: {PolecatName: "garnet", Branch: reworkBranch}})
+
+	if err != nil {
+		t.Fatalf("a rework whose branch is held failed the sling instead of falling back: %v", err)
+	}
+	if info != nil {
+		t.Errorf("expected the caller to allocate fresh, got %+v", info)
+	}
+	if got := fake.reuseOpts["garnet"]; !got.AllowRecovery || got.ResumeBranch != reworkBranch {
+		t.Errorf("reuse options = %+v; the test must exercise the rework resume", got)
+	}
+}
+
 // TestReuseIdlePolecatForSling_FallsBackOnRecoverableReuseFailure keeps the safe
 // half of the fallback: a polecat that needs recovery is not a held branch, so
 // the caller still allocates a fresh one.

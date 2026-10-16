@@ -802,6 +802,11 @@ func poolSeatClaimSessions(townRoot, ownID string) ([]poolSession, error) {
 // holding a claim is about to drop it, and counting both the claim and the
 // session it stands for would read one polecat as two seats.
 //
+// A claim whose sling is gone or past the TTL is not a seat (see stale). A live
+// sling's begin prunes those files before it reads; the dry run and the
+// dispatcher roster read without pruning, so they skip them here rather than
+// count a seat nobody holds. Nothing is deleted on this path.
+//
 // An error is the claim set failing to read, which the caller must answer for
 // rather than treating as no claims (gt-t8q5).
 func (l *poolSeatLedger) claimSessions(ownID string) ([]poolSession, error) {
@@ -812,9 +817,10 @@ func (l *poolSeatLedger) claimSessions(ownID string) ([]poolSession, error) {
 	if len(claims) == 0 {
 		return nil, nil
 	}
+	now := l.now()
 	out := make([]poolSession, 0, len(claims))
 	for _, c := range claims {
-		if c.ID == ownID || c.Agent == "" {
+		if c.ID == ownID || c.Agent == "" || l.stale(c, now) {
 			continue
 		}
 		out = append(out, poolSession{name: "pool-claim/" + c.ID, agent: c.Agent, created: c.CreatedAt})
@@ -866,6 +872,12 @@ func (l *poolSeatLedger) read() ([]poolSeatClaim, error) {
 	return claims, nil
 }
 
+// stale is a claim that cannot become a session: the process that made it is
+// gone, or it has held the seat past the TTL.
+func (l *poolSeatLedger) stale(claim poolSeatClaim, now time.Time) bool {
+	return !l.alive(claim.PID) || now.Sub(claim.CreatedAt) > poolSeatClaimTTL
+}
+
 // cleanupStale drops claims that cannot become sessions: the process that made
 // them is gone, or it has held the seat past the TTL. Both mean the seat is
 // free, and a stale claim is worse than a missing one — it would push a bead to
@@ -882,7 +894,7 @@ func (l *poolSeatLedger) cleanupStale() {
 		return
 	}
 	for _, claim := range claims {
-		if l.alive(claim.PID) && now.Sub(claim.CreatedAt) <= poolSeatClaimTTL {
+		if !l.stale(claim, now) {
 			continue
 		}
 		_ = l.fs.Remove(filepath.Join(l.dir(), claim.ID+".json"))
