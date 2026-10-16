@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -9,14 +10,13 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
-// The git_hygiene patrol cleans each rig's repository (Rig.RepoPath, usually
-// <rig>/mayor/rig): it deletes merged local branches, local agent branches
-// whose remote branch is gone, and merged agent branches on origin, then runs
-// git gc. It was the git-hygiene run.sh plugin (gt-4k3fj.8.5). Two things
-// the script did are gone: it cleared every stash, which drops whatever
-// uncommitted work someone parked there, and it deleted remote branches
-// through `gh api`; the delete is now a git push guarded by the hash the
-// merge check saw.
+// The git_hygiene patrol cleans each rig's repository (gitHygieneRepoPath):
+// it deletes merged local branches, local agent branches whose remote branch
+// is gone, and merged agent branches on origin, then runs git gc. It was the
+// git-hygiene run.sh plugin (gt-4k3fj.8.5). Two things the script did are
+// gone: it cleared every stash, which drops whatever uncommitted work someone
+// parked there, and it deleted remote branches through `gh api`; the delete is
+// now a git push guarded by the hash the merge check saw.
 const defaultGitHygieneInterval = 12 * time.Hour
 
 // gitHygieneProtected are branch names the patrol never deletes, besides the
@@ -69,6 +69,22 @@ func (d *Daemon) triggerGitHygiene() {
 	}()
 }
 
+// gitHygieneRepoPath returns the repository the patrol cleans for r: the
+// rig's shared bare repo (<rig>/.repo.git) when it has one, else the working
+// clone Rig.RepoPath reports ("" when it has neither).
+//
+// Cleaning the bare repo keeps the patrol's fetch out of the clone
+// install-gt.sh merges into after a landing (gt-ckoau), and it is the
+// repository polecat.Manager.repoBase and `gt polecat prune` already work in:
+// the refs every polecat worktree shares.
+func gitHygieneRepoPath(r *rig.Rig) string {
+	bare := filepath.Join(r.Path, ".repo.git")
+	if info, err := os.Stat(bare); err == nil && info.IsDir() {
+		return bare
+	}
+	return r.RepoPath()
+}
+
 // runGitHygiene cleans every known rig's repository and records the run.
 func (d *Daemon) runGitHygiene() {
 	cycle := d.startDogCycle("git_hygiene")
@@ -82,14 +98,14 @@ func (d *Daemon) runGitHygiene() {
 	var repos []string
 	for _, name := range d.getKnownRigs() {
 		r := &rig.Rig{Name: name, Path: filepath.Join(d.config.TownRoot, name)}
-		if p := r.RepoPath(); p != "" {
+		if p := gitHygieneRepoPath(r); p != "" {
 			repos = append(repos, p)
 		}
 	}
 	// No repository to clean is the failure the script guarded against
 	// (gt-chqi): a run over nothing must not read as a clean run.
 	if len(repos) == 0 {
-		cycle.failStep("repos", "no rig has a repository (mayor/rigs.json lists none, or none has a .git)")
+		cycle.failStep("repos", "no rig has a repository (mayor/rigs.json lists none, or none has a .repo.git or a working clone)")
 		return
 	}
 
@@ -111,7 +127,10 @@ func (d *Daemon) runGitHygiene() {
 }
 
 // cleanRigRepo cleans one repository. Every git failure is logged and the
-// rest of the cleanup goes on, as the script's `|| true` did.
+// rest of the cleanup goes on, as the script's `|| true` did — including the
+// branch delete git refuses for a branch a worktree still has checked out,
+// which is what keeps a live polecat's unpushed branch safe now that the
+// patrol lives in the bare repo every worktree shares (gt-ckoau).
 func (d *Daemon) cleanRigRepo(repo string) gitHygieneResult {
 	var res gitHygieneResult
 	g := d.gitAt(repo)
