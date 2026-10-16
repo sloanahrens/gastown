@@ -63,6 +63,11 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 		{"filtered two heavy packages", "go test ./internal/cmd/ ./internal/polecat/ -run TestFoo -count=1", false},
 		{"filtered heavy package in slot run", "gt slot run --role gastown/flint -- go test ./internal/daemon/ -run TestFeedFirstReady", false},
 		{"filter passed to the test binary after --", "go test ./internal/cmd/ -- -test.run TestFoo", false},
+		{"filtered heavy package, --run form", "go test --run TestOne ./internal/cmd", false},
+		{"filtered heavy package, --run= form", "go test --run=TestOne ./internal/cmd", false},
+		{"unfiltered heavy package after a double-dash flag", "go test --timeout 5m ./internal/cmd", true},
+		{"double-dash flag values are not packages", "go test --count 1 --timeout 5m ./internal/style", false},
+		{"double-dash -skip pattern is not a package", "go test --skip 'Test*' ./internal/style", false},
 		{"whole light package", "go test ./internal/git/ -count=1", false},
 		{"whole light packages", "go test ./internal/style/... ./internal/config/", false},
 		{"go vet", "go vet ./internal/cmd/ ./internal/daemon/", false},
@@ -86,8 +91,8 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 37 {
-		t.Errorf("blocked %d of %d cases, want exactly 37", blocked, len(tests))
+	if blocked != 38 {
+		t.Errorf("blocked %d of %d cases, want exactly 38", blocked, len(tests))
 	}
 }
 
@@ -279,6 +284,15 @@ func TestPolecatTestScopeRunDirRelativePackageArgs(t *testing.T) {
 		{"-C dir, light argument", "go -C internal test ./style", false},
 		{"cd into the dir, light argument", "cd " + internal + " && go test ./style", false},
 		{"absolute light directory", "go test " + lightAbs, false},
+
+		// A path that leaves the module and comes back in names the package it
+		// lands on, which a lexical clean of the argument alone never reaches.
+		{"path out of the module root and back into a heavy package", "go test ../" + filepath.Base(root) + "/internal/cmd", true},
+		{"path out of the module root and back into a heavy subtree", "go test ../" + filepath.Base(root) + "/internal/...", true},
+		{"path out of the module root and back, whole repo", "go test ../" + filepath.Base(root) + "/...", true},
+		{"path out of the module root and back, -run", "go test ../" + filepath.Base(root) + "/internal/cmd -run X", false},
+		{"path out of the module root and back into a light package", "go test ../" + filepath.Base(root) + "/internal/style", false},
+		{"path out of a run dir and back into a heavy package", "go -C internal test ../../" + filepath.Base(root) + "/internal/cmd", true},
 
 		// Module-relative spellings name one package, so the run-dir reading
 		// adds nothing to them.
@@ -673,6 +687,36 @@ func TestPolecatTestScopePlacesCdInsideParens(t *testing.T) {
 			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, root), tt.command)
 			if got := reason != ""; got != tt.blocked {
 				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
+// A go test flag takes its value from the next token in the single-dash and
+// the double-dash spelling alike (go accepts both), so a value is never a
+// package argument.
+func TestGoTestPackageArgsSkipsFlagValues(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		rest []string
+		want []string
+	}{
+		{"single-dash run value", []string{"-run", "TestOne", "./internal/cmd"}, []string{"./internal/cmd"}},
+		{"double-dash run value", []string{"--run", "TestOne", "./internal/cmd"}, []string{"./internal/cmd"}},
+		{"double-dash timeout value", []string{"--timeout", "5m", "./internal/cmd"}, []string{"./internal/cmd"}},
+		{"double-dash skip pattern", []string{"--skip", "Test*", "./internal/style"}, []string{"./internal/style"}},
+		{"double-dash value in equals form", []string{"--run=TestOne", "./internal/cmd"}, []string{"./internal/cmd"}},
+		{"double-dash boolean flag keeps the next token", []string{"--race", "./internal/cmd"}, []string{"./internal/cmd"}},
+		{"unknown double-dash flag is not a value flag", []string{"--nonesuch", "x", "./internal/cmd"}, []string{"x", "./internal/cmd"}},
+		{"value flag with no value", []string{"--run"}, nil},
+		{"arguments after -- belong to the test binary", []string{"./internal/cmd", "--", "--run", "TestOne"}, []string{"./internal/cmd"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := goTestPackageArgs(tt.rest)
+			if strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("goTestPackageArgs(%q) = %q, want %q", tt.rest, got, tt.want)
 			}
 		})
 	}

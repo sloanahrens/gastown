@@ -3203,7 +3203,7 @@ func fullSuiteUncachedGoTest(rest []string) bool {
 					count1 = true
 				}
 			}
-			if goTestValueFlags[flag] && !hasValue && i+1 < len(rest) {
+			if isGoTestValueFlag(flag) && !hasValue && i+1 < len(rest) {
 				i++
 			}
 			continue
