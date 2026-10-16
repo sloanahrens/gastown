@@ -360,3 +360,22 @@ func TestReaperUserInfoForNoTownIsDefaultUser(t *testing.T) {
 		t.Errorf("reaperUserInfoFor(\"\") = %q, want %q", got, doltserver.DefaultUser)
 	}
 }
+
+// Outside a town the cwd names no Dolt config: reaperUserInfo connects as the
+// default user rather than read ./settings/config.json from whatever directory
+// the command ran in, which would send that file's password to the --host the
+// reaper is pointed at (gt-1daus).
+func TestReaperUserInfoOutsideTownIgnoresCwdSettings(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "settings"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := `{"type":"town-settings","version":1,"operational":{"dolt":{"user":"admin","password":"secret"}}}`
+	if err := os.WriteFile(filepath.Join(dir, "settings", "config.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(dir)
+	if got := reaperUserInfo(); got != doltserver.DefaultUser {
+		t.Errorf("reaperUserInfo() outside a town = %q, want %q", got, doltserver.DefaultUser)
+	}
+}

@@ -2376,6 +2376,43 @@ func TestCdWalkOrChain(t *testing.T) {
 	}
 }
 
+// A "(" opened inside a subshell nests one more level: the ")" that closes the
+// inner group leaves the walk still inside the outer one, so a cd later in the
+// outer group is the subshell's and the shell stays where it was (gt-1daus).
+func TestCdWalkRootNestedSubshell(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	left := filepath.Join(base, "left")
+	right := filepath.Join(base, "right")
+	for _, dir := range []string{left, right} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	proc := fakeGuardProcess(map[string]string{"HOME": base}, base)
+
+	tests := []struct {
+		name    string
+		command string
+		want    string
+	}{
+		{"a cd after a nested group in the outer group", "cd " + left + " && (true; (true); cd " + right + ";) ; grep -rn TODO", left},
+		{"a cd inside the nested group", "cd " + left + " && (true; (cd " + right + ")) ; grep -rn TODO", left},
+		{"two nested levels", "cd " + left + " && (true; (true; (true); cd " + right + ");) ; grep -rn TODO", left},
+		{"a cd after the closed group still carries", "cd " + left + " && (true; (true)) ; cd " + right + " ; grep -rn TODO", right},
+		{"a flat group is unchanged", "cd " + left + " && (cd " + right + ") ; grep -rn TODO", left},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokens := shellTokenize(tt.command)
+			got, status := cdWalkRoot(proc, tokens, len(tokens), base, shellVarAssignments(tokens))
+			if status != cdWalkPlaced || got != tt.want {
+				t.Errorf("cdWalkRoot(%q) = (%q, %v), want (%q, placed)", tt.command, got, status, tt.want)
+			}
+		})
+	}
+}
+
 // The acceptance criterion for gt-me4vs: a segment is judged in the directory
 // it runs in, not the one the hook was invoked from. The hole was an agent
 // whose cwd is a non-Go tree running the whole module suite through

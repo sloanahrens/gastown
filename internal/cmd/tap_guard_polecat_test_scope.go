@@ -90,7 +90,7 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, cwdKn
 		if r, m := evaluatePolecatTestScopeSegment(segment, dir, known); r != "" {
 			return r, m
 		}
-		payloads := append(shellCPayloads(segment), evalPayloads(segment)...)
+		payloads := segmentPayloads(tokens, start, segment)
 		if depth >= maxTestGuardNestDepth {
 			return nestedTooDeepRefusal(len(payloads) > 0)
 		}
@@ -349,10 +349,16 @@ func goTestRunFilterBounds(rest []string) bool {
 }
 
 // runValueShellExpanded reports whether the shell rewrites a -run value before
-// go sees it: a backtick, or a "$" that opens a variable or a substitution. A
-// "$" that closes a pattern ("^TestX$", "TestA$|TestB") is the regexp anchor.
+// go sees it: a backtick, a "$" that opens a variable, a special parameter
+// ("$@" and "$!" can expand to nothing and leave "-run=", which matches every
+// test) or a substitution, or a brace expansion ("-run={x,.}" becomes "-run=x
+// -run=.", and the last one wins). A "$" that closes a pattern ("^TestX$",
+// "TestA$|TestB") is the regexp anchor.
+//
+// The value arrives with its quotes already removed, so a quoted "{1,2}" that
+// is a regexp repeat reads as a brace expansion and is refused with it.
 func runValueShellExpanded(value string) bool {
-	if strings.Contains(value, "`") {
+	if strings.Contains(value, "`") || braceExpansion(value) {
 		return true
 	}
 	for i := 0; i+1 < len(value); i++ {
@@ -360,9 +366,30 @@ func runValueShellExpanded(value string) bool {
 			continue
 		}
 		c := value[i+1]
-		if c == '{' || c == '(' || c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+		if c == '{' || c == '(' || c == '_' || strings.IndexByte("@!*$#?-", c) >= 0 || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
 			return true
 		}
+	}
+	return false
+}
+
+// braceExpansion reports whether value holds a "{" … "}" pair that carries a
+// comma or a ".." between the braces, the two forms bash expands.
+func braceExpansion(value string) bool {
+	for start := strings.IndexByte(value, '{'); start >= 0; {
+		end := strings.IndexByte(value[start:], '}')
+		if end < 0 {
+			return false
+		}
+		body := value[start+1 : start+end]
+		if strings.Contains(body, ",") || strings.Contains(body, "..") {
+			return true
+		}
+		next := strings.IndexByte(value[start+1:], '{')
+		if next < 0 {
+			return false
+		}
+		start += 1 + next
 	}
 	return false
 }
@@ -380,11 +407,28 @@ func runPatternBoundsRun(pattern string) bool {
 	return !matchesAllProbes(re, runFilterProbes) && !matchesMostProbes(re, runLeadingLetterProbes)
 }
 
-// firstSubtestElement returns the part of a -run pattern before its first "/"
-// outside a bracket class or parentheses, the split testing makes: the "/" in
-// "[^/]*" or "(a/b)" separates nothing.
+// firstSubtestElement returns the part of a -run pattern that selects a test
+// by its own name, as testing splits it (splitRegexp): the pattern is cut at
+// each "|" outside a bracket class or parentheses into alternatives, a test
+// runs when any alternative matches, and an alternative is cut at its first "/"
+// outside a class or parentheses into the elements matched against the test
+// name and then its subtests. The "/" in "[^/]*" or "(a/b)" separates nothing.
+//
+// A pattern with one alternative returns its first element. With several, the
+// result is their first elements as one pattern, each in its own group so a
+// flag in one ("(?i)") does not reach the next: "TestX/a|." selects every test
+// through its second alternative whatever its first one names.
 func firstSubtestElement(pattern string) string {
+	var elements []string
 	classes, groups := 0, 0
+	altStart, elemEnd := 0, -1
+	closeAlternative := func(end int) {
+		if elemEnd < 0 {
+			elemEnd = end
+		}
+		elements = append(elements, pattern[altStart:elemEnd])
+		altStart, elemEnd = end+1, -1
+	}
 	for i := 0; i < len(pattern); i++ {
 		switch pattern[i] {
 		case '[':
@@ -404,12 +448,23 @@ func firstSubtestElement(pattern string) string {
 		case '\\':
 			i++
 		case '/':
+			if classes == 0 && groups == 0 && elemEnd < 0 {
+				elemEnd = i
+			}
+		case '|':
 			if classes == 0 && groups == 0 {
-				return pattern[:i]
+				closeAlternative(i)
 			}
 		}
 	}
-	return pattern
+	closeAlternative(len(pattern))
+	if len(elements) == 1 {
+		return elements[0]
+	}
+	for i, element := range elements {
+		elements[i] = "(?:" + element + ")"
+	}
+	return strings.Join(elements, "|")
 }
 
 // matchesMostProbes reports whether re matches more than half of probes.

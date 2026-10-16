@@ -417,6 +417,9 @@ func TestPolecatTestScopeMatchAllRunFilter(t *testing.T) {
 		{"slash inside a bracket class", "go test ./internal/cmd -run '[^/]*'", true},
 		{"invalid pattern", "go test ./internal/cmd -run '('", true},
 		{"most leading letters", "go test ./internal/cmd -run '^Test[^Z]'", true},
+		{"match-all alternative after a subtest path", "go test ./internal/cmd -run 'TestX/a|.'", true},
+		{"match-all alternative before a subtest path", "go test ./internal/cmd -run '.|TestX/a'", true},
+		{"empty alternative after a subtest path", "go test ./internal/cmd -run 'TestX/a|'", true},
 
 		{"name", "go test ./internal/cmd -run TestX", false},
 		{"name, = form", "go test ./internal/cmd -run=TestX", false},
@@ -430,6 +433,7 @@ func TestPolecatTestScopeMatchAllRunFilter(t *testing.T) {
 		{"trailing anchor", "go test ./internal/cmd -run 'TestA$|TestB$'", false},
 		{"variable value before a narrow one", `go test ./internal/cmd -run "$PATTERN" -run TestX`, false},
 		{"slash inside a group", "go test ./internal/cmd -run '(TestA/b)'", false},
+		{"alternatives each with a subtest path", "go test ./internal/cmd -run 'TestA/x|TestB/y'", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -567,6 +571,12 @@ func TestFirstSubtestElement(t *testing.T) {
 		{"[a-z/", "[a-z/"},
 		{"a]/sub", "a]"},
 		{"/sub", ""},
+		{"TestA|TestB/sub", "(?:TestA)|(?:TestB)"},
+		{"TestX/a|.", "(?:TestX)|(?:.)"},
+		{"(A|B)/sub|C", "(?:(A|B))|(?:C)"},
+		{"[a|b]/sub|C/d", "(?:[a|b])|(?:C)"},
+		{`a\|b/sub`, `a\|b`},
+		{"TestX/a|", "(?:TestX)|(?:)"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.pattern, func(t *testing.T) {
@@ -803,6 +813,90 @@ func TestPolecatTestScopeBlocksShellCPayload(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, tt.cwd), tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
+// An eval string and a script piped into a shell are command lines the segment
+// judges read as quoted words and an echo, so both evaluators judge them as the
+// scripts they are (gt-1daus).
+func TestPolecatTestScopeEvalPayload(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/dag")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"eval make gate", `eval "make gate"`, true},
+		{"eval go test of a heavy package", `eval "go test ./internal/cmd"`, true},
+		{"echo piped into sh", `echo 'make gate' | sh`, true},
+		{"echo piped into bash", `echo 'go test ./internal/cmd' | bash`, true},
+		{"printf piped into a path-qualified shell", `printf '%s\n' 'make gate' | /bin/sh`, true},
+		{"echo piped into sh -s", `echo 'make gate' | sh -s`, true},
+		{"echo piped into sh -", `echo 'make gate' | sh -`, true},
+		{"piped through cat into sh", `echo 'make gate' | cat | sh`, true},
+		{"echo piped into sh after a cd", `cd internal/cmd && echo 'go test .' | sh`, true},
+
+		{"eval echo", `eval "echo hi"`, false},
+		{"echo piped into sh, harmless", `echo 'make lint' | sh`, false},
+		{"echo piped into sh, filtered", `echo 'go test ./internal/cmd -run TestX' | sh`, false},
+		{"echo piped into grep", `echo 'make gate' | grep gate`, false},
+		{"echo piped into a script file", `echo 'make gate' | sh ./run.sh`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			proc := fakeGuardProcess(nil, root)
+			reason, matched := evaluatePolecatTestScope(proc, tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
+			}
+			if tt.blocked {
+				// The container-suite rule's make goal is test, not gate.
+				command := strings.ReplaceAll(tt.command, "make gate", "make test")
+				reason, matched = evaluateContainerSuiteCommand(proc, command, "1")
+				if reason == "" {
+					t.Errorf("evaluateContainerSuiteCommand(%q) allowed it (matched %v)", command, matched)
+				}
+			}
+		})
+	}
+}
+
+// A -run value the shell rewrites before go sees it bounds nothing: brace
+// expansion turns -run={x,.} into -run=x -run=. (the last one wins), and a $@
+// or $! that expands to nothing leaves -run= , which matches every test
+// (gt-1daus). The "$" that closes a pattern is the regexp anchor.
+func TestPolecatTestScopeRefusesExpandedRunValue(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/polecats/dag")
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"brace expansion, = form", "go test ./internal/cmd -run={x,.}", true},
+		{"brace expansion with a prefix", "go test ./internal/cmd -run=TestX{a,b}", true},
+		{"brace expansion in a separate word", "go test ./internal/cmd -run {TestX,.}", true},
+		{"brace sequence", "go test ./internal/cmd -run=TestX{1..3}", true},
+		{"positional parameters, = form", "go test ./internal/cmd -run=$@", true},
+		{"positional parameters, separate word", "go test ./internal/cmd -run $@", true},
+		{"last background pid, quoted", `go test ./internal/cmd -run="$!"`, true},
+		{"all positional parameters", "go test ./internal/cmd -run=$*", true},
+		{"shell pid", "go test ./internal/cmd -run=$$", true},
+
+		{"anchored name", "go test ./internal/cmd -run '^TestX$'", false},
+		{"anchored alternatives", "go test ./internal/cmd -run 'TestA$|TestB$'", false},
+		{"name", "go test ./internal/cmd -run=TestX", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, root), tt.command)
 			if got := reason != ""; got != tt.blocked {
 				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q, matched %v), want %v", tt.command, got, reason, matched, tt.blocked)
 			}
