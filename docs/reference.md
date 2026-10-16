@@ -665,15 +665,9 @@ project settings rather than overriding them.
 
 ### Settings Templates
 
-Gas Town uses two settings templates based on role type:
-
-| Type | Roles | Key Difference |
-|------|-------|----------------|
-| **Interactive** | Crew | Mail injected on `UserPromptSubmit` hook |
-| **Autonomous** | Polecat | Mail injected on `SessionStart` hook |
-
-Autonomous agents may start without user input, so they need mail checked
-at session start. Interactive agents wait for user prompts.
+Gas Town installs one base hooks config for every role, then layers per-role
+overrides. The base config runs `gt prime --hook` on `SessionStart` and
+`PreCompact` and `gt mail check --inject` on `UserPromptSubmit`.
 
 ### Troubleshooting
 

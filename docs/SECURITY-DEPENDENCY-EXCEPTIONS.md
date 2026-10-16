@@ -47,7 +47,7 @@ Scope:
 
 - `internal/testutil`
 - `github.com/testcontainers/testcontainers-go`
-- `github.com/docker/docker` as pulled by testcontainers
+- `github.com/moby/moby/client` and `github.com/moby/moby/api` as pulled by testcontainers
 
 Status:
 
@@ -69,5 +69,6 @@ Required controls:
 - Do not import `internal/testutil` or testcontainer packages from production
   code.
 - Run testcontainer tests only against trusted local Docker daemons.
-- Re-check the exception when `github.com/docker/docker` or testcontainers ships
+- Re-check the exception when `github.com/moby/moby/client`,
+  `github.com/moby/moby/api` or testcontainers ships
   a fixed version for these advisories.

@@ -204,8 +204,8 @@ exercised. The cutover runs the probe and refuses unless it is green, so a
 cutover that starts is one the real runner has already passed. A green probe
 records itself at `~/.config/gt/probe-<rig>.record`, mode 600: key=value lines
 naming the rig, the repository, the probed commit, the context, the verdict and
-the time, with `epoch:` as the age in seconds and each green run overwriting the
-last. A `--dry-run` writes no record, so it prints the probe instead of running
+the time, with `epoch=` as the Unix time of the run in seconds and each green run
+overwriting the last. A `--dry-run` writes no record, so it prints the probe instead of running
 it.
 
 `sudo -u gt-forge gt-approve run forgejo-cutover -- <rig> --repo OWNER/NAME`
