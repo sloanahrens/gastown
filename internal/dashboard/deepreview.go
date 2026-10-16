@@ -56,7 +56,8 @@ type DeepReviewSchedule struct {
 	// Next is the schedule's next-run text: "running" while one of its runs is
 	// open, the gated line for a schedule that runs only when its gate says
 	// there is something to review, "due now" once the interval has passed,
-	// "not scheduled" when the schedule's interval is unusable, else
+	// "not scheduled" when the schedule's interval is unusable, "patrol
+	// disabled" when the town's scheduled_slings patrol is switched off, else
 	// "in <duration>".
 	Next string `json:"next"`
 	// Last is the newest run the schedule filed, nil when it has filed none or
@@ -67,19 +68,22 @@ type DeepReviewSchedule struct {
 // DeepReview is the schedules' standing and the review's newest runs.
 // Unavailable says the read failed, which the block draws as itself and never
 // as an empty list: "no deep review has run" and "the runs could not be read"
-// are different things to tell the operator.
+// are different things to tell the operator. A config that is there and does
+// not parse is one of those failed reads, not a town with no schedules.
 type DeepReview struct {
 	// Schedules is one entry per configured schedule, in the order the town's
-	// config lists them. A town with no scheduled_slings entry to draw — the
-	// patrol off, no config, or a config that would not parse — carries none,
-	// and the block says so in one line.
+	// config lists them — a patrol switched off still carries them, each saying
+	// so in its Next — and none for a town that configures no schedule, which
+	// the block says in one line.
 	Schedules []DeepReviewSchedule `json:"schedules"`
 	// Paused is the reason the town holds dispatch, empty when it does not. A
 	// held town starts no run whatever a schedule's next-run line says.
 	Paused string `json:"paused,omitempty"`
 	// Runs is the review's newest runs across every schedule, newest first,
-	// which the Usage panel joins its own records to by bead id. The block
-	// draws the schedules' Last runs, not this list.
+	// which the Usage panel joins its own records to by bead id. It is listed
+	// whether or not the town's config still names the schedules that filed
+	// them: those runs are the review's history. The block draws the schedules'
+	// Last runs, not this list.
 	Runs        []DeepReviewRun `json:"runs"`
 	Unavailable bool            `json:"unavailable,omitempty"`
 }

@@ -107,8 +107,10 @@ func newDashDeepReviewReader(townRoot string) *dashDeepReviewReader {
 // read is the block's whole reading: one line per entry of the town's
 // scheduled_slings config, with that schedule's next-run text and the newest
 // run it filed, then the review's newest runs. A list that fails is an
-// unavailable block; a digest whose comments cannot be counted is a run that
-// says so, since the runs themselves were read.
+// unavailable block, and so is a patrols config that is there and does not
+// parse: the block says which it is rather than reading as a town that
+// configures no schedule. A digest whose comments cannot be counted is a run
+// that says so, since the runs themselves were read.
 func (r *dashDeepReviewReader) read(now time.Time) *dashboard.DeepReview {
 	out := &dashboard.DeepReview{
 		Schedules: []dashboard.DeepReviewSchedule{},
@@ -120,9 +122,35 @@ func (r *dashDeepReviewReader) read(now time.Time) *dashboard.DeepReview {
 	// audit beside the review's slice and risk paths — is a row the moment it
 	// exists, and one the config drops is a row that goes (gt-uv08f).
 	patrols, err := r.patrols()
-	if err != nil || patrols == nil || patrols.ScheduledSlings == nil || !patrols.ScheduledSlings.Enabled {
-		return out
+	if err != nil {
+		// A config that is there and does not parse is not a town with no
+		// schedules: one is a daemon.json to fix, the other a town that never
+		// ran the review, and the block must not read alike for both (gt-uv08f).
+		return &dashboard.DeepReview{Unavailable: true}
 	}
+	var slings *config.ScheduledSlingsConfig
+	if patrols != nil {
+		slings = patrols.ScheduledSlings
+	}
+	// The schedules the block reads runs from: the config's own entries, and —
+	// when the town configures none, because there is no config or the patrol
+	// carries no entries — the names this binary knows the review has run as.
+	// The runs are the review's history whatever the config now says, and the
+	// Usage panel joins its own records to them by bead id, so a town that
+	// configures no schedule must not read as a review with no runs (gt-uv08f).
+	// Only the config's own entries draw rows: a name the config does not
+	// configure is not a schedule to draw a next run for.
+	entries, drawRows := []config.ScheduledSlingEntry(nil), true
+	if slings != nil {
+		entries = slings.Entries
+	}
+	if len(entries) == 0 {
+		entries, drawRows = knownDeepReviewEntries(), false
+	}
+	// The patrol off leaves every configured schedule unrun: the rows stay,
+	// since the town configures them, and each says the patrol is off rather
+	// than counting down to a run the daemon will not dispatch.
+	enabled := slings != nil && slings.Enabled
 	digests := map[string]string{}
 	digestFor := func(issue *beads.Issue, label string) string {
 		if text, ok := digests[issue.ID]; ok {
@@ -138,20 +166,25 @@ func (r *dashDeepReviewReader) read(now time.Time) *dashboard.DeepReview {
 	// them, which is none of them. A schedule whose list fails leaves the block
 	// with a partial picture of the review, which is worse than saying the
 	// picture could not be read.
-	listed := make([]*beads.Issue, 0, len(patrols.ScheduledSlings.Entries))
-	for _, entry := range patrols.ScheduledSlings.Entries {
+	listed := make([]*beads.Issue, 0, len(entries))
+	for _, entry := range entries {
 		issues, err := r.list(deepReviewLabel(entry.Name))
 		if err != nil {
 			return &dashboard.DeepReview{Unavailable: true}
 		}
 		listed = append(listed, issues...)
+		if !drawRows {
+			continue
+		}
 
 		schedule := dashboard.DeepReviewSchedule{
 			Name: deepReviewField(entry.Name),
 			Rig:  deepReviewField(entry.Rig),
 			Next: deepReviewNotScheduled,
 		}
-		if interval, err := time.ParseDuration(entry.IntervalStr); err == nil && interval > 0 {
+		if !enabled {
+			schedule.Next = deepReviewPatrolOff
+		} else if interval, err := time.ParseDuration(entry.IntervalStr); err == nil && interval > 0 {
 			schedule.Next = deepReviewScheduleNext(&entry, issues, interval, now)
 		}
 		if runs := deepReviewRuns(issues); len(runs) > 0 {
@@ -227,7 +260,23 @@ const (
 	// deepReviewGated is the next-run text of a schedule with a gate_command:
 	// the gate decides whether an interval's run happens at all.
 	deepReviewGated = "gated: runs when needed"
+	// deepReviewPatrolOff is the next-run text of every schedule in a town whose
+	// scheduled_slings patrol is disabled: the schedules are still configured,
+	// so they still draw, but nothing the interval says will be dispatched.
+	deepReviewPatrolOff = "patrol disabled"
 )
+
+// knownDeepReviewEntries are the schedules the review is known to run as, for
+// the town whose config lists none: the slice and risk paths and the legacy
+// name the runs of both carry. They feed the runs listing alone — a town that
+// configures no schedule draws no row for one.
+func knownDeepReviewEntries() []config.ScheduledSlingEntry {
+	entries := make([]config.ScheduledSlingEntry, 0, len(deepReviewModelSchedules))
+	for _, name := range deepReviewModelSchedules {
+		entries = append(entries, config.ScheduledSlingEntry{Name: name, Rig: deepReviewRig})
+	}
+	return entries
+}
 
 // deepReviewNextDue mirrors decideScheduledSling in internal/daemon, which this
 // package may not import, and answers when it would next dispatch: a bead that

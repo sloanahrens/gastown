@@ -191,12 +191,17 @@ func TestDigestBlockDrawsTheDigestsOwnSections(t *testing.T) {
 			t.Errorf("the digest block reads %q, want %q in it", block.Text, want)
 		}
 	}
-	// The header line, the questions section and the health line are not the
-	// three sections the block draws.
-	for _, gone := range []string{"overseer report 2026", "OPEN QUESTIONS", "gt-q1", "health: GREEN"} {
+	// The header line, the questions themselves and the health line are not the
+	// three sections the block draws. The questions' heading is named as a
+	// heading the block does not draw — a section is never dropped in silence —
+	// but none of its rows are drawn here: they are the attention list's.
+	for _, gone := range []string{"overseer report 2026", "gt-q1", "health: GREEN"} {
 		if strings.Contains(block.Text, gone) {
 			t.Errorf("the digest block draws %q: %q", gone, block.Text)
 		}
+	}
+	if !strings.Contains(block.Text, "not drawn: OPEN QUESTIONS") {
+		t.Errorf("the digest block drops the questions section in silence: %q", block.Text)
 	}
 	// The digest's own reading of a section with nothing in it is the reader's
 	// word, not the block's: "(none)" is what the writer writes.
@@ -207,6 +212,27 @@ func TestDigestBlockDrawsTheDigestsOwnSections(t *testing.T) {
 	}})
 	if got := blockNamed(t, overseerBlocks(t, dom), "Digest"); strings.Count(got.Text, "(none)") != 3 {
 		t.Errorf("an empty digest reads %q, want the writer's three empty sections", got.Text)
+	}
+}
+
+// A heading the block does not draw — the questions one, and any a writer adds
+// beside the three — is named under them, in the digest's own order. A section
+// the page silently dropped would read as a digest that never had it (gt-uv08f).
+func TestDigestBlockNamesTheSectionsItDoesNotDraw(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderOverseer", map[string]any{"reports": map[string]any{
+		"state": "fresh", "written": "2026-10-15T20:00:00Z", "times": []any{"2026-10-15T20:00:00Z"},
+		"text": "overseer report x\n\nDONE\n  gt-a1  landed a thing\n\nBACKLOG\n  gt-b2  waiting\n\nOPEN QUESTIONS\n  gt-q1  2h\n",
+	}})
+	block := blockNamed(t, overseerBlocks(t, dom), "Digest")
+	if want := "not drawn: BACKLOG, OPEN QUESTIONS"; !strings.Contains(block.Text, want) {
+		t.Errorf("the digest block reads %q, want %q in it", block.Text, want)
+	}
+	// Naming a heading is not drawing its rows.
+	if strings.Contains(block.Text, "gt-b2") || strings.Contains(block.Text, "gt-q1") {
+		t.Errorf("the digest block draws an undrawn section's rows: %q", block.Text)
 	}
 }
 

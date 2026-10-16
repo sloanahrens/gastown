@@ -104,17 +104,19 @@ overseer.silent_after, the last active time and state, the newest eight journal
 lines, the last seven days of interventions by kind and the open question count.
 The digest reads the daemon's own report from .runtime/overseer/reports — the
 newest file named for the instant it was written — and draws its DONE, IN
-PROGRESS and LEFT sections, with when the writes before that one happened behind
-a disclosure; a report that is late is marked, and an earlier one can be read in
-its place. The Deep review block lists every schedule
-daemon.patrols.scheduled_slings configures, each with when it is next due, the
-"paused: <reason>" a hold file or ESTOP parks dispatch with, and the newest run
-it filed with its findings and the beads filed. The Dispatcher block reads the
-spec dispatcher's last tick from the daemon log: its roster, counts and the
-beads it skipped. The last block is the rows of the attention list the overseer
-owes a move on. Every read that fails says so rather than reading as an empty
-block, the panel writes nothing, and no digest's text is ever drawn. gt overseer
-beat and gt overseer log write the heartbeat and journal.
+PROGRESS and LEFT sections, naming any heading it does not draw, with when the
+writes before that one happened behind a disclosure; a report that is late is
+marked, and an earlier one can be read in its place. The Deep review block lists every schedule
+daemon.patrols.scheduled_slings configures — each with when it is next due, or
+that the patrol is switched off — the "paused: <reason>" a hold file or ESTOP
+parks dispatch with, and the newest run it filed with its findings and the beads
+filed. The Dispatcher block reads the spec dispatcher's last tick from the
+daemon log: its roster, counts and the beads it skipped. The last block is the
+rows of the attention list the overseer owes a move on. Every read that fails
+says so rather than reading as an empty block, the panel writes nothing, and a
+deep-review run's own digest is drawn as its bead and comment count, never as
+the comment's text. gt overseer beat and gt overseer log write the heartbeat and
+journal.
 
 The Attention panel is the one list of what waits on a decision or an action:
 the town's open escalation beads, the open overseer questions and the attention

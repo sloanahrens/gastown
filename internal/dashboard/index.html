@@ -196,6 +196,7 @@ h3.ohead .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:no
 .dsec{margin:4px 0}
 .dname{color:var(--dim);font-size:11px;letter-spacing:.04em}
 .dbody{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:4px 8px}
+.dskip{color:var(--dim);font-size:11px;margin-top:3px}
 .qrec,.qheld{color:var(--dim);margin:2px 0}
 .qtext{margin:2px 0}
 .qage{color:var(--dim)}
@@ -1331,7 +1332,9 @@ function showLatest() { rPick = ""; renderOverseer(state); }
 // block draws the three that say what the town did and what it still has to do.
 // OPEN QUESTIONS is left out: those questions are rows of the attention list,
 // which the panel draws in full, and a digest's ten-minute-old copy of them
-// would be the same fact a second time.
+// would be the same fact a second time. Every other heading — the left-out
+// section and any a writer adds — is named beneath the three rather than
+// dropped in silence (gt-uv08f).
 const DIGEST_SECTIONS = ["DONE", "IN PROGRESS", "LEFT"];
 
 // digestSections reads one digest's text into its sections, keyed by the
@@ -1462,10 +1465,11 @@ function drawDigest(panel, s) {
 }
 
 // drawDigestSections is the digest's body: its DONE, IN PROGRESS and LEFT
-// sections, each named and drawn with the beads in it openable. A digest whose
-// shape the page does not know — an older daemon's, or another tool's report
-// dropped in the same directory — is drawn whole rather than as nothing: the
-// sections are how the block sorts a digest, not what it takes for one.
+// sections, each named and drawn with the beads in it openable, and a line
+// naming the headings the block does not draw. A digest whose shape the page
+// does not know — an older daemon's, or another tool's report dropped in the
+// same directory — is drawn whole rather than as nothing: the sections are how
+// the block sorts a digest, not what it takes for one.
 function drawDigestSections(box, text, prefixes) {
   const secs = digestSections(text);
   const drawn = DIGEST_SECTIONS.filter(n => secs.has(n));
@@ -1482,6 +1486,16 @@ function drawDigestSections(box, text, prefixes) {
     body.append(...reportNodes(digestLines(secs.get(name)), prefixes));
     sec.append(body);
     box.append(sec);
+  }
+  // A heading the block does not draw is named, not dropped in silence: a
+  // digest whose writer adds a section — or another tool's report left in the
+  // same directory — must not read as a digest whose only content is the three
+  // the block draws.
+  const skipped = [...secs.keys()].filter(n => !DIGEST_SECTIONS.includes(n));
+  if (skipped.length) {
+    const row = el("div", "dskip", "not drawn: " + skipped.join(", "));
+    row.title = "the block draws the digest's DONE, IN PROGRESS and LEFT sections; a heading it does not draw is named here rather than dropped";
+    box.append(row);
   }
 }
 
@@ -2166,8 +2180,8 @@ function renderOM(s) {
 //
 // The panel's note is the two readings that go stale on it: the overseer's own
 // standing and the dispatcher's last tick. The tick rides there rather than in
-// the block because that is the reading the daemon's dispatcher-silence watcher
-// dates a pane by.
+// the block because a panel's note is where a reading's age is read from, so a
+// stopped dispatcher is one reading in one place.
 function renderOverseer(s) {
   const box = $("overseer");
   box.replaceChildren();

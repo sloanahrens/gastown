@@ -231,9 +231,10 @@ func TestDeepReviewRunsAreTheNewestTenAcrossEverySchedule(t *testing.T) {
 		t.Errorf("digests = %q, %q, %q", r.Digest, got.Runs[1].Digest, got.Runs[2].Digest)
 	}
 	// Every schedule's newest run is the one the block's row draws, and it is
-	// the same record the runs list carries.
-	if last := scheduleFor(t, got.Schedules, sliceSchedule).Last; last == nil || last.ID != "gt-r03" || last.ID != r.ID && last.Findings != 3 {
-		t.Errorf("the slice row's last run is %+v, want gt-r03", last)
+	// the same record the runs list carries: gt-r03, the newest of the slice's
+	// four, with the counts its notes give it.
+	if last := scheduleFor(t, got.Schedules, sliceSchedule).Last; last == nil || last.ID != "gt-r03" || last.Findings != 3 || last.Filed != 2 {
+		t.Errorf("the slice row's last run is %+v, want gt-r03 with 3 findings and 2 filed", last)
 	}
 	// The digest's text is read for its count and goes no further.
 	if raw := fmt.Sprintf("%+v", got); strings.Contains(raw, "never drawn") {
@@ -440,31 +441,80 @@ func TestDeepReviewGatedScheduleDrawsItsGate(t *testing.T) {
 	}
 }
 
-// A town with no schedule configured, or a patrols config that cannot be read,
-// has no rows at all: the block says so in one line, and there is no list of
-// names left for it to read runs from.
+// A town that configures no schedule draws no row — there is no entry to draw
+// one from — but the review's runs are still listed, by the names the review is
+// known to run as: those runs are its history, and the Usage panel joins its
+// own records to them by bead id, so the list must not empty with the config
+// (gt-uv08f).
 func TestDeepReviewNoScheduleConfigured(t *testing.T) {
 	t.Parallel()
 
 	for name, set := range map[string]func(*fakeDeepReview){
-		"disabled":            func(f *fakeDeepReview) { f.patrols = scheduledPatrols(false, deepReviewInterval, defaultSchedules...) },
 		"no patrols":          func(f *fakeDeepReview) { f.patrols = nil },
 		"no scheduled_slings": func(f *fakeDeepReview) { f.patrols = &config.PatrolsConfig{} },
 		"no entries":          func(f *fakeDeepReview) { f.patrols = scheduledPatrols(true, deepReviewInterval) },
-		"config unreadable":   func(f *fakeDeepReview) { f.patrolsErr = errors.New("bad json") },
 	} {
 		f := newFakeDeepReview(t)
 		set(f)
+		f.set(deepReviewSchedule, runBead("gt-r1", 5, 10, goodNotes))
 		got := f.reader().read(deepReviewNow)
-		if len(got.Schedules) != 0 || len(got.Runs) != 0 {
-			t.Errorf("%s: read as %+v, want no rows and no runs", name, got)
-		}
-		if len(f.labels) != 0 {
-			t.Errorf("%s: the reader listed %v with no schedule to list for", name, f.labels)
+		if len(got.Schedules) != 0 {
+			t.Errorf("%s: drew %+v, want no row for a schedule no config carries", name, got.Schedules)
 		}
 		if got.Unavailable {
 			t.Errorf("%s: a town with no schedule read as unavailable", name)
 		}
+		if len(got.Runs) != 1 || got.Runs[0].ID != "gt-r1" {
+			t.Errorf("%s: runs = %+v, want the run the town filed", name, got.Runs)
+		}
+	}
+}
+
+// A patrol that is configured and switched off is not a town without one: the
+// schedules the config carries still draw their rows, and each says the patrol
+// is off rather than counting down to a run the daemon will not dispatch. The
+// runs it filed before it was switched off are still the review's history
+// (gt-uv08f).
+func TestDeepReviewDisabledPatrolDrawsItsSchedules(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeDeepReview(t)
+	f.patrols = scheduledPatrols(false, deepReviewInterval, defaultSchedules...)
+	f.set(deepReviewSchedule, runBead("gt-r1", 5, 10, goodNotes))
+	got := f.reader().read(deepReviewNow)
+	if got.Unavailable {
+		t.Fatalf("a disabled patrol read as unavailable: %+v", got)
+	}
+	if len(got.Schedules) != len(defaultSchedules) {
+		t.Fatalf("schedules = %+v, want one row per configured schedule", got.Schedules)
+	}
+	for _, s := range got.Schedules {
+		if s.Next != deepReviewPatrolOff {
+			t.Errorf("%s drew %q, want the patrol's own word", s.Name, s.Next)
+		}
+	}
+	if last := scheduleFor(t, got.Schedules, deepReviewSchedule).Last; last == nil || last.ID != "gt-r1" {
+		t.Errorf("the disabled patrol's row carries %+v, want its newest run", last)
+	}
+	if len(got.Runs) != 1 || got.Runs[0].ID != "gt-r1" {
+		t.Errorf("runs = %+v, want the run filed before the patrol was switched off", got.Runs)
+	}
+}
+
+// A patrols config that is there and does not parse is not a town with no
+// schedules: one is a daemon.json to fix and the other is a town that never ran
+// the review, so the block names the read that failed (gt-uv08f).
+func TestDeepReviewUnreadableConfigIsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeDeepReview(t)
+	f.patrolsErr = errors.New("bad json")
+	got := f.reader().read(deepReviewNow)
+	if !got.Unavailable || len(got.Runs) != 0 || len(got.Schedules) != 0 {
+		t.Errorf("an unreadable patrols config read as %+v, want unavailable and nothing else", got)
+	}
+	if len(f.labels) != 0 {
+		t.Errorf("the reader listed %v for a config it could not read", f.labels)
 	}
 }
 
