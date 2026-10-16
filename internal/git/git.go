@@ -1868,10 +1868,15 @@ func (g *Git) RmCached(paths ...string) error {
 	return err
 }
 
-// DiffNameOnly returns filenames changed between two refs.
-// Equivalent to: git diff --name-only <base>...<head>
+// DiffNameOnly returns filenames changed between two refs, with a moved file
+// named by both its old and its new path.
+// Equivalent to: git diff --name-only --no-renames <base>...<head>
 func (g *Git) DiffNameOnly(base, head string) ([]string, error) {
-	out, err := g.run("diff", "--name-only", base+"..."+head)
+	// Rename detection would print a move as its destination alone, and a
+	// caller that reads the paths against a rule — the landing risk check
+	// matches them to risk globs — then never sees the path that left
+	// (gt-j8m6g).
+	out, err := g.run("diff", "--name-only", "--no-renames", base+"..."+head)
 	if err != nil {
 		return nil, err
 	}

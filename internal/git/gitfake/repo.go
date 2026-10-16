@@ -251,15 +251,16 @@ func (h *handle) TreesIdentical(a, b string) (bool, error) {
 }
 
 // DiffNameOnly returns the paths whose content differs between base and head,
-// the shape *git.Git answers from `git diff --name-only base...head`. The fake
-// compares the two trees directly and so never computes a merge base: it
-// agrees with *git.Git only while base is an ancestor of head, which every
-// caller building head on base satisfies. A caller whose base is not an
-// ancestor must not read the fake's answer as git's.
+// the shape *git.Git answers from `git diff --name-only --no-renames
+// base...head`: the paths on both sides of a move, which a content comparison
+// never pairs. The fake compares the two trees directly and so never computes
+// a merge base: it agrees with *git.Git only while base is an ancestor of
+// head, which every caller building head on base satisfies. A caller whose
+// base is not an ancestor must not read the fake's answer as git's.
 func (h *handle) DiffNameOnly(base, head string) ([]string, error) {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
-	args := []string{"diff", "--name-only", base + "..." + head}
+	args := []string{"diff", "--name-only", "--no-renames", base + "..." + head}
 	r, wt, err := h.locate(args...)
 	if err != nil {
 		return nil, err

@@ -206,7 +206,7 @@ func TestStagedDeletionsNonASCIIPath(t *testing.T) {
 func TestDiffNameOnlyNonASCIIPath(t *testing.T) {
 	t.Parallel()
 	s := newScripted(map[string]reply{
-		"diff --name-only main...feature": ok("\"internal/daemon/caf\\303\\251.go\"\nREADME.md\n"),
+		"diff --name-only --no-renames main...feature": ok("\"internal/daemon/caf\\303\\251.go\"\nREADME.md\n"),
 	})
 	got, err := newTestGit(t, s).DiffNameOnly("main", "feature")
 	if err != nil {
@@ -215,4 +215,23 @@ func TestDiffNameOnlyNonASCIIPath(t *testing.T) {
 	if want := []string{"internal/daemon/café.go", "README.md"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("DiffNameOnly = %q, want %q", got, want)
 	}
+}
+
+// A move out of a rule's reach is invisible when git pairs it: --name-only
+// with rename detection on prints the destination alone, so a caller reading
+// the list against its rules loses the path that left. The call must ask for
+// both names (gt-j8m6g).
+func TestDiffNameOnlyNoRenames(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"diff --name-only --no-renames main...moved": ok("internal/daemon/x.go\ninternal/misc/x.go\n"),
+	})
+	got, err := newTestGit(t, s).DiffNameOnly("main", "moved")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"internal/daemon/x.go", "internal/misc/x.go"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("DiffNameOnly = %q, want %q", got, want)
+	}
+	s.noUnscripted(t)
 }
