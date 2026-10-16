@@ -22,6 +22,10 @@ type PressureResult struct {
 	// when the CPU tier ran and top could be read; zero otherwise.
 	CPUIdle float64
 
+	// CPUReadErr is why the CPU tier could not read the host, nil when it
+	// read it or did not run. An unreadable host does not hold the spawn.
+	CPUReadErr error
+
 	// MemAvailableGB is approximate available memory in GB.
 	MemAvailableGB float64
 
@@ -60,14 +64,25 @@ func (d *Daemon) checkPressure(_ string) PressureResult {
 
 	// Tier 1: CPU pressure (busy share of the host's cores). The threshold
 	// keeps its per-core scale: 1.0 is every core busy. A top that cannot be
-	// read is no evidence of a busy host, so it does not hold the spawn.
+	// read is no evidence of a busy host, so it does not hold the spawn; the
+	// daemon log says why it could not be read, so a gate that has gone blind
+	// does not look like a host that is fine.
 	if cpuThreshold > 0 {
-		if idle := d.hostCPUIdle(); idle != nil {
-			result.CPUIdle = *idle
-			busyPerCore := (100 - *idle) / 100
+		if cpuThreshold > 1 {
+			d.pressureScaleWarn.Do(func() {
+				d.logger.Printf("pressure_cpu_threshold %.2f can never trip: it is the busy share of the host's cores (at most 1.0), no longer a load average per core; a value tuned for the load average needs re-setting (gt-kc8v1)", cpuThreshold)
+			})
+		}
+		idle, err := d.hostCPUIdle()
+		if err != nil {
+			result.CPUReadErr = err
+			d.logger.Printf("cpu pressure: not holding the spawn, the CPU tier could not read the host: %v", err)
+		} else {
+			result.CPUIdle = idle
+			busyPerCore := (100 - idle) / 100
 			if busyPerCore > cpuThreshold {
 				result.OK = false
-				result.Reason = fmt.Sprintf("cpu pressure: %.1f%% CPU idle, busy/core %.2f exceeds threshold %.2f", *idle, busyPerCore, cpuThreshold)
+				result.Reason = fmt.Sprintf("cpu pressure: %.1f%% CPU idle, busy/core %.2f exceeds threshold %.2f", idle, busyPerCore, cpuThreshold)
 				return result
 			}
 		}
@@ -96,9 +111,9 @@ func (d *Daemon) checkPressure(_ string) PressureResult {
 	return result
 }
 
-// hostCPUIdle is the host's CPU idle percent, or nil when it could not be
+// hostCPUIdle is the host's CPU idle percent, or the reason it could not be
 // read. Tests answer it through d.cpuIdleFn.
-func (d *Daemon) hostCPUIdle() *float64 {
+func (d *Daemon) hostCPUIdle() (float64, error) {
 	if d.cpuIdleFn != nil {
 		return d.cpuIdleFn()
 	}

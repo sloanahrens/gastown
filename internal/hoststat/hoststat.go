@@ -11,6 +11,8 @@ package hoststat
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os/exec"
 	"runtime"
 	"strconv"
@@ -107,19 +109,30 @@ func sample(ctx context.Context, p probes) Reading {
 // SampleCPUIdle reads the CPU idle share alone: one two-sample top and its
 // second sample, none of the load or process-table probes a full Sample also
 // runs. It is the reading for a caller that gates on idle CPU and needs
-// nothing else, such as the daemon's spawn pressure gate (gt-kc8v1). nil
-// means top could not be read, which a caller must not take for an idle host.
-func SampleCPUIdle(ctx context.Context) *float64 { return sampleCPUIdle(ctx, hostProbes.top) }
+// nothing else, such as the daemon's spawn pressure gate (gt-kc8v1). A non-nil
+// error means top could not be read, which a caller must not take for an idle
+// host; it says whether top failed or timed out, or ran and printed no idle
+// share.
+func SampleCPUIdle(ctx context.Context) (float64, error) {
+	return sampleCPUIdle(ctx, hostProbes.top)
+}
 
 // sampleCPUIdle is SampleCPUIdle over a top probe.
-func sampleCPUIdle(ctx context.Context, top func(context.Context) ([]byte, error)) *float64 {
+func sampleCPUIdle(ctx context.Context, top func(context.Context) ([]byte, error)) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, sampleTimeout)
 	defer cancel()
 	out, err := top(ctx)
 	if err != nil {
-		return nil
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return 0, fmt.Errorf("top did not finish within %s: %w", sampleTimeout, ctxErr)
+		}
+		return 0, fmt.Errorf("top failed: %w", err)
 	}
-	return parseCPUIdle(string(out))
+	idle := parseCPUIdle(string(out))
+	if idle == nil {
+		return 0, errors.New("top ran but printed no CPU idle share")
+	}
+	return *idle, nil
 }
 
 // psOutput lists every process's CPU and command line. The portable -axo form

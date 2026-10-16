@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"math"
+	"strings"
 	"testing"
+	"time"
 )
 
 // macTop holds two real samples of `top -l 2 -n 0 -s 1` from the 24-core
@@ -216,14 +218,39 @@ func TestSampleHoldsEachReadingAgainstItsOwnProbeFailing(t *testing.T) {
 func ptr[T any](v T) *T { return &v }
 
 // SampleCPUIdle runs top alone and reads the last CPU line, the second
-// sample; a top that fails leaves the reading nil (gt-kc8v1).
+// sample (gt-kc8v1).
 func TestSampleCPUIdleReadsTopAlone(t *testing.T) {
 	t.Parallel()
-	got := sampleCPUIdle(context.Background(), func(context.Context) ([]byte, error) { return []byte(macTop), nil })
-	if got == nil || *got != *parseCPUIdle(macTop) {
-		t.Fatalf("sampleCPUIdle = %v, want the idle share of top's last CPU line", got)
+	got, err := sampleCPUIdle(context.Background(), func(context.Context) ([]byte, error) { return []byte(macTop), nil })
+	if err != nil || got != *parseCPUIdle(macTop) {
+		t.Fatalf("sampleCPUIdle = %v, %v, want the idle share of top's last CPU line", got, err)
 	}
-	if got := sampleCPUIdle(context.Background(), func(context.Context) ([]byte, error) { return nil, errors.New("refused") }); got != nil {
-		t.Errorf("sampleCPUIdle after a failed top = %v, want nil", *got)
+}
+
+// A top that cannot be read says why: a failed run, a timeout and an output
+// with no idle share are three different faults to the operator reading the
+// daemon log (gt-kc8v1).
+func TestSampleCPUIdleNamesWhyTopCouldNotBeRead(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		top     func(context.Context) ([]byte, error)
+		wantErr string
+	}{
+		{"top fails", func(context.Context) ([]byte, error) { return nil, errors.New("refused") }, "top failed: refused"},
+		{"top outlives the sample window", func(ctx context.Context) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }, "did not finish"},
+		{"top prints no idle share", func(context.Context) ([]byte, error) { return []byte("garbage\n"), nil }, "no CPU idle share"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			// The caller's own deadline stands in for sampleTimeout.
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			_, err := sampleCPUIdle(ctx, tt.top)
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want one containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }

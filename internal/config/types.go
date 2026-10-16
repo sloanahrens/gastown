@@ -365,6 +365,9 @@ type DaemonThresholds struct {
 	// core busy, measured as 100% minus CPU idle) above which new
 	// non-infrastructure spawns are deferred. Disabled by default (0).
 	// Recommended starting value: 0.9 (trips when under 10% of CPU is idle).
+	// It was a load average per core until gt-kc8v1; a value tuned for that
+	// (such as the old 3.0) is past 1.0 now and never trips, and the daemon
+	// logs a warning when it sees one.
 	PressureCPUThreshold *float64 `json:"pressure_cpu_threshold,omitempty"`
 
 	// PressureMemThresholdGB is the minimum available memory (in GB) below
