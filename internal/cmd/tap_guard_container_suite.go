@@ -435,20 +435,41 @@ func heredocSubstitutionSpans(body string) []substitutionSpan {
 // substitutionSpansIn is the scan behind both. quotes says whether a quote mark
 // in text opens quoted text; inside a substitution's own body closingParen
 // honors quotes either way, as the shell does.
+//
+// With quotes, a "#" that starts a word opens a comment to the end of the line:
+// the shell reads an apostrophe there as plain text, so "# don't" must not hide
+// the "$(...)" on the next line. The comment body is still scanned for
+// substitutions, so a "$(" in it is judged as before (over-blocked, never
+// passed). A "$'" opens an ANSI-C string, where "\'" does not close the quote.
+// Both reads end a quoted span earlier than the bare scan did, so they add
+// spans and never drop one (gt-2yc0u).
 func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 	var spans []substitutionSpan
 	inDouble := false
+	inComment := false
+	escapedAt := -1
 	for i := 0; i < len(text); i++ {
 		switch c := text[i]; {
-		case c == '\\':
+		case inComment && c == '\n':
+			inComment = false
+		case c == '\\' && !inComment:
+			escapedAt = i + 1
 			i++
-		case quotes && c == '\'' && !inDouble:
+		case quotes && !inComment && !inDouble && c == '\'':
 			end := strings.IndexByte(text[i+1:], '\'')
 			if end < 0 {
 				return spans
 			}
 			i += end + 1
-		case quotes && c == '"':
+		case quotes && !inComment && !inDouble && c == '$' && i+1 < len(text) && text[i+1] == '\'':
+			// An unterminated $'...' is left to the plain single-quote scan
+			// on the next character, which is how it read before.
+			if end := closingANSIQuote(text, i+2); end >= 0 {
+				i = end
+			}
+		case quotes && !inComment && !inDouble && c == '#' && startsWordAt(text, i, escapedAt):
+			inComment = true
+		case quotes && !inComment && c == '"':
 			inDouble = !inDouble
 		case c == '$' && i+1 < len(text) && text[i+1] == '(':
 			end := closingParen(text, i+2)
@@ -467,6 +488,39 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 		}
 	}
 	return spans
+}
+
+// startsWordAt reports whether text[i] begins a shell word, the only place a
+// "#" opens a comment: at the start of text or after a blank, newline or
+// command separator. A "#" inside a word (a#b, $#, ${#x}) or right after a
+// backslash-escaped character (escapedAt is that character's index) is literal.
+func startsWordAt(text string, i, escapedAt int) bool {
+	if i == 0 {
+		return true
+	}
+	if escapedAt == i-1 {
+		return false
+	}
+	switch text[i-1] {
+	case ' ', '\t', '\n', ';', '&', '|', '(':
+		return true
+	}
+	return false
+}
+
+// closingANSIQuote returns the index of the "'" that closes a $'...' string
+// whose text starts at from, or -1 when none does. A backslash escapes the next
+// character, so \' stays inside the string.
+func closingANSIQuote(text string, from int) int {
+	for i := from; i < len(text); i++ {
+		switch text[i] {
+		case '\\':
+			i++
+		case '\'':
+			return i
+		}
+	}
+	return -1
 }
 
 // closingParen returns the index of the ")" that closes a "(" whose body starts

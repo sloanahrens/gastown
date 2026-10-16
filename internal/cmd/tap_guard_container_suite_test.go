@@ -2270,6 +2270,60 @@ func TestCommandSubstitutionSpans(t *testing.T) {
 	}
 }
 
+// An apostrophe in a "#" comment is plain text and a "\'" inside $'...' does not
+// close the string, so neither hides a live "$(...)" behind it. The scan still
+// reads quotes elsewhere as before: 'it' closes, a#b is no comment, and a "$(" in
+// a comment is still judged (gt-2yc0u).
+func TestSubstitutionSpansCommentAndANSIQuote(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"apostrophe in a comment", "# don't\nx=$(git reset --hard)", []string{"git reset --hard"}},
+		{"apostrophe in a trailing comment", "echo hi # don't\nx=$(git reset --hard)", []string{"git reset --hard"}},
+		{"comment after a separator", "true;# don't\nx=$(git reset --hard)", []string{"git reset --hard"}},
+		{"double quote in a comment", "# say \"hi\nx=$(git reset --hard)", []string{"git reset --hard"}},
+		{"substitution in a comment", "# don't $(git reset --hard)", []string{"git reset --hard"}},
+		{"escaped quote in an ANSI-C string", `echo $'it\'s' $(git reset --hard)`, []string{"git reset --hard"}},
+		{"ANSI-C string hiding a substitution", `echo $'$(pwd)' $(git reset --hard)`, []string{"git reset --hard"}},
+		{"unterminated ANSI-C string reads as plain quotes", `echo $'it\'s $(git reset --hard)`, []string{"git reset --hard"}},
+		{"plain single quotes", `echo 'it' $(git reset --hard)`, []string{"git reset --hard"}},
+		{"hash inside a word", `echo a#b $(git reset --hard)`, []string{"git reset --hard"}},
+		{"hash after an escaped space", `echo \ #b 'x $(git reset --hard)'`, nil},
+		{"hash inside double quotes", "echo \"# don't\" $(git reset --hard)", []string{"git reset --hard"}},
+		{"hash in a parameter expansion", `echo ${#x} 'a $(git reset --hard)'`, nil},
+		{"apostrophe after the comment ended", "# note\necho 'a $(git reset --hard)'", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var got []string
+			for _, s := range commandSubstitutionSpans(tt.in) {
+				got = append(got, tt.in[s.bodyStart:s.bodyEnd])
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("commandSubstitutionSpans(%q) bodies = %q, want %q", tt.in, got, tt.want)
+			}
+		})
+	}
+
+	for _, command := range []string{
+		"# don't\nx=$(git reset --hard)",
+		`echo $'it\'s' $(git reset --hard)`,
+		`echo a#b $(git reset --hard)`,
+	} {
+		if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
+			t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked", command)
+		}
+	}
+	scope := "# don't forget\nout=$(make gate)"
+	if reason, _ := evaluatePolecatTestScope(fakeGuardProcess(nil, ""), scope); reason == "" {
+		t.Errorf("evaluatePolecatTestScope(%q) allowed, want blocked", scope)
+	}
+}
+
 // heredocSubstitutionSpans cuts the substitutions of an unquoted heredoc body.
 // The body is not shell text: a quote mark in it opens nothing, so an
 // apostrophe in prose does not hide a live "$(" the way commandSubstitutionSpans
