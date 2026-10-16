@@ -480,7 +480,6 @@ func TestPolecatTestScopeTestTimingPKGSNarrowed(t *testing.T) {
 	}{
 		{"make test-timing PKGS=./internal/tmux/...", false},
 		{"make PKGS=./internal/tmux/... test-timing", false},
-		{"make test-timing PKGS=./internal/style ./internal/beads/...", false},
 		{`make test-timing PKGS="./internal/style ./internal/beads/..."`, false},
 		{"make -j4 test-timing PKGS=./internal/style", false},
 		{"gt slot run --role gastown/flint -- make test-timing PKGS=./internal/style", false},
@@ -501,6 +500,21 @@ func TestPolecatTestScopeTestTimingPKGSNarrowed(t *testing.T) {
 		{"make test-timing gate PKGS=./internal/style", true},
 		{"make gate PKGS=./internal/style", true},
 		{"make test-integration-wall PKGS=./internal/style", true},
+	}
+	// Another whole-suite goal beside test-timing stays refused before or after
+	// it, so the exemption does not rest on where either sits in the goal list.
+	for _, goal := range polecatWholeSuiteMakeGoals {
+		if goal == testTimingMakeGoal {
+			continue
+		}
+		tests = append(tests, []struct {
+			command string
+			blocked bool
+		}{
+			{"make test-timing " + goal + " PKGS=./internal/style", true},
+			{"make " + goal + " test-timing PKGS=./internal/style", true},
+			{"make test-timing PKGS=./internal/style && make " + goal, true},
+		}...)
 	}
 	for _, tt := range tests {
 		t.Run(tt.command, func(t *testing.T) {
