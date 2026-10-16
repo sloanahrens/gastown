@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -90,21 +92,6 @@ func init() {
 	tapGuardCmd.AddCommand(tapGuardPRWorkflowCmd)
 }
 
-// prWorkflowCommandPrefixes are the exact command shapes this guard blocks,
-// as whitespace-separated tokens, mirroring the "if" glob patterns in
-// DefaultBase() (Bash(gh pr create*), Bash(git checkout -b*),
-// Bash(git switch -c*)). Checking them here too, against tool_input.command
-// read from stdin, means a hooks-sync regression that drops the If field
-// (formerly the guard's only filter) degrades to "blocks nothing unrelated"
-// instead of "blocks every Bash call" — the shape behind gt-pjeh's 12:04
-// outage, where the guard blocked every Bash call in agent context because
-// it never looked at the command at all.
-var prWorkflowCommandPrefixes = [][]string{
-	{"gh", "pr", "create"},
-	{"git", "checkout", "-b"},
-	{"git", "switch", "-c"},
-}
-
 // shellCommandSeparators are shell operators that start a new command
 // within a single line. Claude Code evaluates Bash permission rules
 // per sub-command, so its "if" glob can fire on a later segment of a
@@ -136,82 +123,235 @@ var shellCommandSeparators = map[string]bool{
 	"}":  true,
 }
 
-// maxPRWorkflowNestDepth bounds the shell-fed-heredoc recursion in
-// matchesPRWorkflowCommand, mirroring maxDangerousNestDepth: a heredoc body
-// can itself contain a heredoc fed to a shell, and without a cap that nesting
-// could recurse as deep as the input text allows.
+// maxPRWorkflowNestDepth bounds the payload recursion in
+// prWorkflowInvocations, mirroring maxDangerousNestDepth: a payload can itself
+// hold a payload, and without a cap that nesting could recurse as deep as the
+// input text allows.
 const maxPRWorkflowNestDepth = 3
 
-// matchesPRWorkflowCommand reports whether command is one of the PR-workflow
-// shapes this guard exists to block. It tokenizes the command (so a quoted
-// argument like a PR body is never mistaken for a shell operator or a
-// command word), splits it into per-segment sub-commands on shell operators,
-// and compares whole tokens rather than raw string prefixes — so e.g.
-// "git checkout -branch" (a different flag) does not falsely match
-// "git checkout -b".
+// matchesPRWorkflowCommand reports whether command runs gh pr create,
+// git checkout -b or git switch -c. The hook is registered without an "if"
+// glob and self-filters here, so a command that runs none of the three is
+// allowed and not every Bash call in agent context is blocked (gt-pjeh).
 //
-// Heredoc bodies are data being written or composed, not shell syntax —
-// the rule evaluateDangerousCommand, checkBashCommand and
-// commandInvokesRawTmuxSendKeys all state — so they are stripped before
-// tokenizing. Now that an unquoted newline ends a command (gt-3j8u), a body
-// line that happens to spell "gh pr create" would otherwise be read as a
-// live invocation and block an ordinary file write.
+// Each shell segment is judged by the command it runs, not by its first words
+// (prWorkflowInvocations), so an env assignment, a launcher, a group opener, a
+// path-qualified binary, gh's -R flag or a bash -c or eval payload cannot
+// hide it (gt-zf2vy). Words are compared whole, so "git checkout -branch"
+// does not match "git checkout -b", and quoted text is never a command word.
 //
-// A heredoc body fed to a shell invoker (bash <<EOF ... EOF) is the
-// exception: that shell runs the body as a script rather than reading it as
-// data, the same distinction the dangerous-command guard draws with
-// shellFedHeredocBodies (gt-9g0y). Without checking those bodies too, "bash
-// <<'EOF'\ngh pr create --title foo\nEOF" tokenized to [bash, <<, 'EOF'] and
-// was allowed, while the identical text as a line of a compound command was
-// blocked (gt-q91m).
+// Heredoc bodies are data, not shell syntax, so they are stripped before
+// tokenizing (gt-3j8u): a body line that spells "gh pr create" would
+// otherwise block an ordinary file write. A body fed to a shell invoker is
+// the exception, because that shell runs it (gt-9g0y, gt-q91m).
 func matchesPRWorkflowCommand(command string) bool {
-	return matchesPRWorkflowCommandDepth(command, 0)
-}
-
-func matchesPRWorkflowCommandDepth(command string, depth int) bool {
-	tokens := shellTokenize(stripHeredocBodies(strings.TrimSpace(command)))
-
-	segmentMatches := func(segment []string) bool {
-		for _, prefix := range prWorkflowCommandPrefixes {
-			if len(segment) < len(prefix) {
-				continue
-			}
-			match := true
-			for i, want := range prefix {
-				if segment[i] != want {
-					match = false
-					break
-				}
-			}
-			if match {
-				return true
-			}
-		}
-		return false
-	}
-
-	var segment []string
-	for _, tok := range tokens {
-		if shellCommandSeparators[tok] {
-			if segmentMatches(segment) {
-				return true
-			}
-			segment = nil
-			continue
-		}
-		segment = append(segment, tok)
-	}
-	if segmentMatches(segment) {
+	invocations, tooDeep := prWorkflowInvocations(command, 0)
+	if tooDeep {
 		return true
 	}
-
-	if depth >= maxPRWorkflowNestDepth {
-		return false
-	}
-	for _, body := range shellFedHeredocBodies(command) {
-		if matchesPRWorkflowCommandDepth(body, depth+1) {
+	for _, argv := range invocations {
+		if isGhPRCreate(argv) || isBranchCreation(argv) {
 			return true
 		}
+	}
+	return false
+}
+
+// prWorkflowLauncher describes a command that runs the command behind it.
+// valueFlags are its own flags whose value is the next word, and positionals
+// counts the operands before the command (timeout's DURATION).
+type prWorkflowLauncher struct {
+	valueFlags  map[string]bool
+	positionals int
+}
+
+// prWorkflowLaunchers are the commands prWorkflowCommand looks through:
+// segmentCommandWord's launchers plus timeout.
+var prWorkflowLaunchers = map[string]prWorkflowLauncher{
+	"env":     {valueFlags: map[string]bool{"-u": true, "--unset": true, "-C": true, "--chdir": true}},
+	"time":    {valueFlags: map[string]bool{"-f": true, "--format": true, "-o": true, "--output": true}},
+	"command": {},
+	"nohup":   {},
+	"builtin": {},
+	"exec":    {valueFlags: map[string]bool{"-a": true}},
+	"nice":    {valueFlags: map[string]bool{"-n": true, "--adjustment": true}},
+	"stdbuf":  {valueFlags: map[string]bool{"-i": true, "-o": true, "-e": true}},
+	"sudo": {valueFlags: map[string]bool{
+		"-u": true, "-g": true, "-C": true, "-h": true, "-p": true, "-r": true,
+		"-t": true, "-T": true, "-U": true, "-D": true,
+	}},
+	"timeout": {valueFlags: map[string]bool{"-s": true, "--signal": true, "-k": true, "--kill-after": true}, positionals: 1},
+}
+
+// prWorkflowCommand returns the command a shell segment runs, from its command
+// word on. It looks through the group openers and control keywords in front
+// (trimShellKeywords), leading NAME=value assignments, and launchers with
+// their flags. payloads holds the command line a launcher itself carries, as
+// in env -S 'gh pr create'. argv is empty when nothing runs.
+func prWorkflowCommand(segment []string) (argv, payloads []string) {
+	seg := trimShellKeywords(segment)
+	for len(seg) > 0 {
+		word := seg[0]
+		if isEnvAssignment(word) || word == "!" {
+			seg = seg[1:]
+			continue
+		}
+		name := strings.ToLower(filepath.Base(word))
+		launcher, ok := prWorkflowLaunchers[name]
+		if !ok {
+			return seg, payloads
+		}
+		var payload string
+		seg, payload = skipLauncherArgs(name, launcher, seg[1:])
+		if payload != "" {
+			payloads = append(payloads, payload)
+		}
+	}
+	return nil, payloads
+}
+
+// skipLauncherArgs drops the flags and operands a launcher takes ahead of the
+// command it runs and returns the words from that command on. "--" ends the
+// flags. env -S takes a whole command line as its value, returned as payload.
+func skipLauncherArgs(name string, launcher prWorkflowLauncher, rest []string) (seg []string, payload string) {
+	i := 0
+	for i < len(rest) {
+		word := rest[i]
+		if word == "--" {
+			i++
+			break
+		}
+		if len(word) < 2 || word[0] != '-' {
+			break
+		}
+		if name == "env" {
+			switch {
+			case word == "-S" || word == "--split-string":
+				if i+1 < len(rest) {
+					payload = rest[i+1]
+				}
+				i += 2
+				continue
+			case strings.HasPrefix(word, "--split-string="):
+				payload = strings.TrimPrefix(word, "--split-string=")
+				i++
+				continue
+			case strings.HasPrefix(word, "-S"):
+				payload = word[2:]
+				i++
+				continue
+			}
+		}
+		if launcher.valueFlags[word] {
+			i += 2
+		} else {
+			i++
+		}
+	}
+	i += launcher.positionals
+	if i > len(rest) {
+		i = len(rest)
+	}
+	return rest[i:], payload
+}
+
+// prWorkflowInvocations returns the command every segment of command runs, as
+// argv from the command word on, plus the commands inside every payload a
+// shell runs: a shell invoker's -c string, an eval's joined arguments, an
+// env -S string, and the body of a heredoc fed to a shell. A payload is read
+// only where a shell runs it, so "echo bash -c 'gh pr create'" is an echo.
+//
+// A payload past maxPRWorkflowNestDepth is not read; tooDeep is set when it
+// still names gh or git, since a script the guard cannot reach is not one that
+// runs nothing.
+func prWorkflowInvocations(command string, depth int) (invocations [][]string, tooDeep bool) {
+	tokens := shellTokenize(stripHeredocBodies(strings.TrimSpace(command)))
+
+	var payloads []string
+	for _, segment := range splitShellSegments(tokens) {
+		argv, launched := prWorkflowCommand(segment)
+		payloads = append(payloads, launched...)
+		if len(argv) == 0 {
+			continue
+		}
+		invocations = append(invocations, argv)
+		name := strings.ToLower(filepath.Base(argv[0]))
+		switch {
+		case shellInvokers[name]:
+			if idx := shellCPayloadIndex(toLowerTokens(argv[1:])); idx >= 0 {
+				payloads = append(payloads, argv[1+idx])
+			}
+		case name == "eval" && len(argv) > 1:
+			payloads = append(payloads, strings.Join(argv[1:], " "))
+		}
+	}
+	payloads = append(payloads, shellFedHeredocBodies(command)...)
+
+	for _, payload := range payloads {
+		if depth >= maxPRWorkflowNestDepth {
+			tooDeep = tooDeep || prWorkflowNamesGhOrGit.MatchString(payload)
+			continue
+		}
+		nested, deep := prWorkflowInvocations(payload, depth+1)
+		invocations = append(invocations, nested...)
+		tooDeep = tooDeep || deep
+	}
+	return invocations, tooDeep
+}
+
+// prWorkflowNamesGhOrGit finds gh or git as a word of its own, path-qualified
+// or not, so "github" and "gh-pages" are not mistaken for the commands.
+var prWorkflowNamesGhOrGit = regexp.MustCompile(`(?i)(^|[^A-Za-z0-9_.-])(gh|git)([^A-Za-z0-9_.-]|$)`)
+
+// ghOptionsWithValue are the gh flags that take the next word as their value
+// when given separately (-R o/r); the glued forms (-Ro/r, --repo=o/r) are one
+// word.
+var ghOptionsWithValue = map[string]bool{"-R": true, "--repo": true}
+
+// ghPositionals returns the first two non-flag words after gh. Flags are
+// skipped wherever they sit, as cobra reads them: gh -R o/r pr create and
+// gh pr create -R o/r are the same command.
+func ghPositionals(args []string) []string {
+	var words []string
+	for i := 0; i < len(args) && len(words) < 2; i++ {
+		switch word := args[i]; {
+		case ghOptionsWithValue[word]:
+			i++
+		case strings.HasPrefix(word, "-"):
+		default:
+			words = append(words, word)
+		}
+	}
+	return words
+}
+
+// isGhPRCreate reports whether argv, a command from its command word on, is
+// gh pr create. gh may be a path.
+func isGhPRCreate(argv []string) bool {
+	if len(argv) == 0 || !strings.EqualFold(filepath.Base(argv[0]), "gh") {
+		return false
+	}
+	words := ghPositionals(argv[1:])
+	return len(words) == 2 && strings.EqualFold(words[0], "pr") && strings.EqualFold(words[1], "create")
+}
+
+// isBranchCreation reports whether argv, a command from its command word on,
+// is git checkout -b or git switch -c. git may be a path and may carry global
+// options (-C dir, -c k=v) in front of the subcommand.
+func isBranchCreation(argv []string) bool {
+	if len(argv) == 0 || filepath.Base(argv[0]) != "git" {
+		return false
+	}
+	rest := argv[1:]
+	at := gitSubcommandIndex(rest)
+	if at < 0 || at+1 >= len(rest) {
+		return false
+	}
+	switch rest[at] {
+	case "checkout":
+		return rest[at+1] == "-b"
+	case "switch":
+		return rest[at+1] == "-c"
 	}
 	return false
 }
@@ -458,23 +598,18 @@ func isInOwnPolecatWorktree(input []byte, proc guardProcess) bool {
 	return scope.isWorktreePath(scope.cwd)
 }
 
-// isPRCreateCommand reports whether command invokes "gh pr create" — the
-// one pr-workflow pattern that stays blocked for every role. Matched as three
-// consecutive tokens (case-insensitive) rather than a substring, so it isn't
-// fooled by "gh" or "pr" appearing quoted
-// elsewhere in the command. The scan is per-segment, not per-token-position:
-// the exemption that consults this guard fires when the command's FIRST
-// token is gh, and the exemption's own test is segment-first, so a "gh pr
-// create" glued after an "&&" on one line must match here too, or the
-// exemption chains past it (gt-cyz8).
+// isPRCreateCommand reports whether command runs "gh pr create" — the one
+// pr-workflow pattern that stays blocked for every role. It reads the same
+// invocations matchesPRWorkflowCommand does, so a gh pr create glued after an
+// "&&" (gt-cyz8) or behind a wrapper (gt-zf2vy) cannot chain past the
+// exemption that consults this check; a payload too deep to read counts.
 func isPRCreateCommand(command string) bool {
-	for _, seg := range splitShellSegments(shellTokenize(strings.TrimSpace(command))) {
-		if len(seg) < 3 {
-			continue
-		}
-		if strings.EqualFold(seg[0], "gh") &&
-			strings.EqualFold(seg[1], "pr") &&
-			strings.EqualFold(seg[2], "create") {
+	invocations, tooDeep := prWorkflowInvocations(command, 0)
+	if tooDeep {
+		return true
+	}
+	for _, argv := range invocations {
+		if isGhPRCreate(argv) {
 			return true
 		}
 	}
@@ -501,8 +636,11 @@ func isLeadingBranchCreation(command string) bool {
 	if len(segs) == 0 {
 		return false
 	}
-	seg := segs[0]
-	if len(seg) < 2 || !strings.EqualFold(seg[0], "git") {
+	// The leading command is the one the first segment runs, so an env
+	// assignment or launcher in front of git (the shapes the matcher now
+	// reads, gt-zf2vy) keeps the exemption it had when they hid the command.
+	seg, _ := prWorkflowCommand(segs[0])
+	if len(seg) < 2 || !strings.EqualFold(filepath.Base(seg[0]), "git") {
 		return false
 	}
 	lower := make([]string, len(seg))
