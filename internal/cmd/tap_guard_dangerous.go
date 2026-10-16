@@ -278,22 +278,29 @@ var shellInvokers = map[string]bool{"bash": true, "sh": true, "zsh": true, "dash
 // "-ic"), after other options ("-x -c", "--norc -c") or after "-o name", and
 // the invoker may be a path ("/bin/bash"). The first operand is a script file:
 // a "-c" after it belongs to that script, not to the shell (gt-kocid).
+//
+// Each o or O in a cluster ("-eo", "-euo", "-oc", "-O") owns the next word as
+// its value, so the payload is the word after the values.
 func shellCPayloadIndex(args []string) int {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
 		case a == "--":
 			return -1
-		case a == "-o" || a == "+o" || a == "--rcfile" || a == "--init-file":
+		case a == "--rcfile" || a == "--init-file":
 			i++ // the option's separate value
 		case strings.HasPrefix(a, "--"):
 			// a long option such as --norc or --login
 		case len(a) > 1 && a[0] == '+':
 			// +x style option negation
+			i += shellClusterValues(a)
 		case len(a) > 1 && a[0] == '-':
+			values := shellClusterValues(a)
+			payload := i + 1 + values
+			i += values
 			if strings.Contains(a[1:], "c") {
-				if i+1 < len(args) {
-					return i + 1
+				if payload < len(args) {
+					return payload
 				}
 				return -1
 			}
@@ -302,6 +309,18 @@ func shellCPayloadIndex(args []string) int {
 		}
 	}
 	return -1
+}
+
+// shellClusterValues returns how many of the words after the shell option word
+// a ("-o", "+o", "-eo", "-oc", "-O") it owns as values: one for each o (-o
+// pipefail) and O (-O extglob) letter, wherever it sits in the cluster, since
+// the shell reads the letters in order. shellCPayloadIndex and shellReadsStdin
+// walk the words before a script or -c payload past them.
+func shellClusterValues(a string) int {
+	if len(a) < 2 || (a[0] != '-' && a[0] != '+') || a[1] == '-' {
+		return 0
+	}
+	return strings.Count(a[1:], "o") + strings.Count(a[1:], "O")
 }
 
 // nestedCommands extracts shell command strings embedded as arguments to
@@ -333,7 +352,25 @@ func nestedCommands(tokens, lowerTokens []string) []string {
 			nested = append(nested, strings.Join(tokens[i+1:], " "))
 		}
 	}
-	return append(nested, slotRunPayloads(tokens)...)
+	nested = append(nested, slotRunPayloads(tokens)...)
+	return append(nested, pipedShellPayloads(tokens)...)
+}
+
+// pipedShellPayloads returns the script text fed to a shell that reads stdin,
+// from a pipe or a here-string ("echo 'git reset --hard' | bash", "sh <<<
+// 'rm -rf /'"), which the matchers see as a quoted word and a bare shell. The
+// test guards read the same shapes through stdinShellPayloads (gt-1daus).
+func pipedShellPayloads(tokens []string) []string {
+	var payloads []string
+	start := 0
+	for i := 0; i <= len(tokens); i++ {
+		if i < len(tokens) && !shellCommandSeparators[tokens[i]] {
+			continue
+		}
+		payloads = append(payloads, stdinShellPayloads(tokens, start, tokens[start:i])...)
+		start = i + 1
+	}
+	return payloads
 }
 
 // slotRunPayloads returns, for every `gt slot run [flags] <argv>` the command
