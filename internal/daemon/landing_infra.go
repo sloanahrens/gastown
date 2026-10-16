@@ -112,7 +112,7 @@ func (d *Daemon) landingInfraTargets() []landingInfraTarget {
 	tokenDir, dirErr := landingWorkerConfig(d.patrolConfig).ForgejoTokenDir()
 	var out []landingInfraTarget
 	for _, name := range d.getKnownRigs() {
-		fj := rig.ResolveForgejoConfig(d.config.TownRoot, name)
+		fj := rig.ResolveForgejoConfigIn(d.repoFileOpener(), d.config.TownRoot, name)
 		if fj == nil {
 			continue
 		}

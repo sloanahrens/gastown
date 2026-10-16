@@ -1255,19 +1255,30 @@ func repoTierSettings(open RepoFileOpener, townRoot, rigName string) (settings *
 }
 
 // ResolveForgejoConfig resolves a rig's Forgejo landing settings
-// (merge_queue.forgejo) from the operator-owned tiers ResolveMergeQueueConfig
-// reads: the rig root config.json floor, then the rig-local
-// settings/config.json override. The block is operator-only, so a repo-committed
-// .gastown/settings.json never chooses it (gt-fn9e6.14).
+// (merge_queue.forgejo) from the tiers ResolveMergeQueueConfig reads — the rig
+// root config.json floor, the repo-committed .gastown/settings.json, and the
+// rig-local settings/config.json override — with the block itself
+// operator-only: a repo-committed .gastown/settings.json never chooses it
+// (gt-fn9e6.14).
 //
 // It is a reader beside ResolveMergeQueueConfig, not a second precedence: it
 // delegates, so the merge stays in config.MergeSettingsCommand and the two
-// resolvers can never disagree about which tier won (gt-fn9e6.3).
+// resolvers can never disagree about which tier won (gt-fn9e6.3). The repo
+// tier is read even though it cannot carry the block, so a landed one is
+// reported rather than passed over in silence (WarnRepoForgejoIgnored).
 //
 // Returns nil when no tier sets a forgejo block, which is every rig until a
 // cutover slice adds one.
 func ResolveForgejoConfig(townRoot, rigName string) *config.ForgejoConfig {
-	mq := ResolveMergeQueueConfig(townRoot, rigName)
+	return ResolveForgejoConfigIn(openRepoFile, townRoot, rigName)
+}
+
+// ResolveForgejoConfigIn is ResolveForgejoConfig over open, the seam its
+// repo-tier read takes (docs/testing.md, "Seams for external tools"): the
+// daemon resolves through ResolveForgejoConfigIn with its own git seam, so its
+// git-free unit tier starts no git (internal/testpolicy/gitfree.txt).
+func ResolveForgejoConfigIn(open RepoFileOpener, townRoot, rigName string) *config.ForgejoConfig {
+	mq := ResolveMergeQueueConfigIn(open, townRoot, rigName)
 	if mq == nil {
 		return nil
 	}
@@ -1307,7 +1318,15 @@ func ResolveLandingRemote(townRoot, rigName string) (string, error) {
 // a verdict that never comes, so the rig lands through its Forgejo remote or not
 // at all (gt-fn9e6.18).
 func ResolveLandingRemoteIn(repo LandingRemotes, townRoot, rigName string) (string, error) {
-	fc := ResolveForgejoConfig(townRoot, rigName)
+	return ResolveLandingRemoteWith(openRepoFile, repo, townRoot, rigName)
+}
+
+// ResolveLandingRemoteWith is ResolveLandingRemoteIn over open, the seam the
+// Forgejo block's repo-tier read takes, so a caller whose unit tier runs no
+// git reads the block through its own git seam rather than this process's
+// (docs/testing.md, "Seams for external tools").
+func ResolveLandingRemoteWith(open RepoFileOpener, repo LandingRemotes, townRoot, rigName string) (string, error) {
+	fc := ResolveForgejoConfigIn(open, townRoot, rigName)
 	if fc == nil || strings.TrimSpace(fc.RemoteURL) == "" {
 		return LandingRemoteOrigin, nil
 	}

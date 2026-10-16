@@ -1286,9 +1286,14 @@ func TestProductionDeployWatch_WiresTheTown(t *testing.T) {
 		t.Fatalf("write token file: %v", err)
 	}
 	newDaemon := func(root, dir string) *Daemon {
-		return &Daemon{logger: discardLogger, config: &Config{TownRoot: root},
+		d := &Daemon{logger: discardLogger, config: &Config{TownRoot: root},
 			patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
 				Forgejo: &config.ForgejoWorkerConfig{TokenDir: dir}}}}}
+		// The watch's rig list resolves each rig's repo-committed settings
+		// through the daemon's git seam, so the unit tier reads a fake world
+		// rather than starting git.
+		useGitfake(t, d)
+		return d
 	}
 
 	d := newDaemon(townRoot, tokenDir)

@@ -121,6 +121,10 @@ func TestNewRigLandingWorker_RefusesARigWhoseConfigDoesNotDecode(t *testing.T) {
 
 	rec := notifyfake.New()
 	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: rec}
+	// The worker resolves the rig's settings and landing remote through the
+	// daemon's git seam, so the unit tier reads a fake world rather than
+	// starting git.
+	useGitfake(t, d)
 
 	if _, err := d.newRigLandingWorker(rigName); err == nil {
 		t.Fatal("newRigLandingWorker() = nil error for a config.json that does not decode; want the rig refused")
@@ -1066,6 +1070,10 @@ func TestNewRigLandingWorker_NoForgejoConfigFailsClosed(t *testing.T) {
 
 	rec := notifyfake.New()
 	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: rec}
+	// The worker resolves the rig's settings and landing remote through the
+	// daemon's git seam, so the unit tier reads a fake world rather than
+	// starting git.
+	useGitfake(t, d)
 	_, err := d.newRigLandingWorker(rigName)
 	if err == nil {
 		t.Fatal("newRigLandingWorker() = nil error for a rig with no merge_queue.forgejo block; want the rig refused")

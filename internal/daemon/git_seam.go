@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // daemonGit is the git surface the daemon drives, declared from the *git.Git
@@ -61,6 +62,12 @@ type daemonGit interface {
 	// gt-fn9e6.9).
 	Remotes() ([]string, error)
 
+	// RefExists and ShowFileAtRev read a rig repository's tracked files, which
+	// is how a rig's repo-committed .gastown/settings.json tier is read
+	// (gt-yj6g1).
+	RefExists(ref string) (bool, error)
+	ShowFileAtRev(ref, path string) (string, error)
+
 	// Rig repository upkeep, for the git_hygiene patrol.
 	FetchPrune(remote string) error
 	RemoteDefaultBranch() string
@@ -87,4 +94,13 @@ func (d *Daemon) gitAt(dir string) daemonGit {
 		return d.openGitFn(dir)
 	}
 	return git.NewGit(dir)
+}
+
+// repoFileOpener is rig.ReadRepoFile's opener over the daemon's git seam
+// (docs/testing.md, "Seams for external tools"): the rigs whose
+// .gastown/settings.json a patrol resolves settings from are the same
+// repositories every other daemon read sees, and its git-free unit tier starts
+// no git for them (gt-yj6g1).
+func (d *Daemon) repoFileOpener() rig.RepoFileOpener {
+	return func(repoPath string) rig.RepoFileReader { return d.gitAt(repoPath) }
 }

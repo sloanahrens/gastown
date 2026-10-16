@@ -204,3 +204,63 @@ func TestResolveMergeQueueConfig_UnreadableRepoDropsRepoTier(t *testing.T) {
 		t.Error("the dropped repo tier was not reported")
 	}
 }
+
+// TestResolveForgejoConfigIn_RepoTierReadsTheOpener: the Forgejo block resolves
+// over open, so a caller whose unit tier runs no git — the daemon's is
+// git-free (internal/testpolicy/gitfree.txt) — reads the repo-committed tier
+// through its own seam. The tier is read rather than skipped: the block is
+// stripped (a landed commit never chooses where the token goes), and the copy
+// that carried it is reported (gt-yj6g1).
+func TestResolveForgejoConfigIn_RepoTierReadsTheOpener(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
+	townRoot := t.TempDir()
+	rigName := "mango-forgejo-seam"
+	repo := bareRigRepo(t, f, townRoot, rigName, map[string]string{
+		".gastown/settings.json": `{"type":"rig-settings","version":1,"merge_queue":{"forgejo":{"remote_url":"https://attacker.example/mango"}}}`,
+	})
+	// The clone carries no block: the tier is main's copy as the seam reads it,
+	// not whatever a run that never opened the seam would find.
+	cloneFile(t, townRoot, rigName, ".gastown/settings.json", `{"type":"rig-settings","version":1}`)
+	rigConfig := `{"type":"rig","version":1,"name":"` + rigName + `","merge_queue":{"forgejo":{"remote_url":"https://forgejo.example/floor/mango"}}}`
+	if err := os.WriteFile(filepath.Join(townRoot, rigName, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	fc := ResolveForgejoConfigIn(fakeRepoOpener(f), townRoot, rigName)
+	if fc == nil || fc.RemoteURL != "https://forgejo.example/floor/mango" {
+		t.Fatalf("ResolveForgejoConfigIn() = %+v, want the rig-root floor block: the repo tier cannot carry one", fc)
+	}
+	if want := "origin/main in " + repo; !RepoForgejoIgnoredWarned(want) {
+		t.Errorf("RepoForgejoIgnoredWarned(%s) = false, want the ignored block reported from main's copy", want)
+	}
+}
+
+// TestResolveLandingRemoteWith_ResolvesThroughTheOpener: the landing remote is
+// resolved over the same seam, so the git-free unit tiers resolve a rig's
+// Forgejo block without starting git (gt-yj6g1).
+func TestResolveLandingRemoteWith_ResolvesThroughTheOpener(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
+	townRoot := t.TempDir()
+	rigName := "mango-landing-seam"
+	repoDir := bareRigRepo(t, f, townRoot, rigName, nil)
+	f.AddRemote(t, repoDir, "origin", "https://github.com/acme/mango.git")
+	f.AddRemote(t, repoDir, "forgejo", "https://forgejo.example/acme/mango.git")
+	rigConfig := `{"type":"rig","version":1,"name":"` + rigName + `","merge_queue":{"forgejo":{"remote_url":"https://forgejo.example/acme/mango.git"}}}`
+	if err := os.WriteFile(filepath.Join(townRoot, rigName, "config.json"), []byte(rigConfig), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo, ok := f.Open(repoDir).(LandingRemotes)
+	if !ok {
+		t.Fatal("gitfake does not implement LandingRemotes")
+	}
+
+	got, err := ResolveLandingRemoteWith(fakeRepoOpener(f), repo, townRoot, rigName)
+	if err != nil {
+		t.Fatalf("ResolveLandingRemoteWith: %v", err)
+	}
+	if got != "forgejo" {
+		t.Errorf("ResolveLandingRemoteWith() = %q, want forgejo (the remote whose URL the block names)", got)
+	}
+}
