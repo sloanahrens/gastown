@@ -229,11 +229,8 @@ func TestTheWorkPanelSummarisesTheQueueAndSplitsTheBlockedList(t *testing.T) {
 	}
 }
 
-// TestTheWorkPanelFoldsTheWholeQueueList drives the panel over a queue with
-// blocked rows and reads the list back: it is one disclosure inside the panel,
-// open on a fresh page load (gt-u9o36), and the beads the server marked as step wisps are the
-// rows it hides — the same verdict the blocked line above it counted
-// (gt-vcr3z).
+// TestTheWorkPanelFoldsTheWholeQueueList reads the queue list back as one
+// disclosure inside the panel, open on a fresh page load (gt-u9o36).
 func TestTheWorkPanelFoldsTheWholeQueueList(t *testing.T) {
 	t.Parallel()
 
@@ -287,14 +284,16 @@ func TestTheWorkPanelKeepsTheQueueListClosedOnceAnOperatorClosesIt(t *testing.T)
 		t.Fatalf("the list reads open = %s on the first render, want true", got)
 	}
 
-	// A click on the summary flips open and fires the toggle handler.
+	// A click on the summary: the stub flips open and fires the page's handler.
 	if _, err := dom.vm.RunString(`(() => {
 		const d = __byId["work"].children.find(c => String(c.className).indexOf("wqueue") >= 0);
-		d.open = false;
-		d.ontoggle();
 		globalThis.__queueList = d;
+		__clickSummary(d);
 	})()`); err != nil {
 		t.Fatal(err)
+	}
+	if got := queueListOpen(t, dom); got != "false" {
+		t.Fatalf("a click on the open list left it open = %s, want false", got)
 	}
 
 	dom.call(t, "renderWork", st)
