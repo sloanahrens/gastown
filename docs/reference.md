@@ -776,7 +776,10 @@ consumers:
 
 `repo_path` is the field a script that runs git in each rig's repository
 consumes. When it is `null` or missing, such a script must fail loudly rather
-than no-op (gt-chqi, gt-xxwx).
+than no-op (gt-chqi, gt-xxwx). The daemon's git_hygiene patrol resolves its
+repository through `gitHygieneRepoPath` in `internal/daemon/git_hygiene.go`,
+which prefers the rig's shared bare repo (`.repo.git/`) to what this field
+reports.
 
 ### Work Tracking (Primary Dashboard)
 
