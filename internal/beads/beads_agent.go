@@ -69,6 +69,9 @@ const (
 	NotifyMuted   = "muted"   // Silent/DND mode - batch for later
 )
 
+// agentLineReplacer flattens line breaks in the agent value to spaces.
+var agentLineReplacer = strings.NewReplacer("\r", " ", "\n", " ")
+
 // FormatAgentDescription creates a description string from agent fields.
 func FormatAgentDescription(title string, fields *AgentFields) string {
 	if fields == nil {
@@ -119,7 +122,9 @@ func FormatAgentDescription(title string, fields *AgentFields) string {
 	}
 
 	if fields.Agent != "" {
-		lines = append(lines, fmt.Sprintf("agent: %s", fields.Agent))
+		// One line: a line break in the value would start a second field
+		// ("claude\nhook_bead: x") that ParseAgentFields reads as real.
+		lines = append(lines, fmt.Sprintf("agent: %s", agentLineReplacer.Replace(fields.Agent)))
 	}
 
 	// Completion metadata fields (gt-x7t9)
