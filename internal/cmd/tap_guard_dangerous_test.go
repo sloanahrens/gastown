@@ -1554,6 +1554,56 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 	}
 }
 
+// A "}" inside the backtick text of a "${..}" word is that command's own text,
+// as it is inside "$(..)" (gt-nwd3k): the expansion ends at the last "}", so the
+// "<<x" before it is text in the word and the "sudo" line is a live command
+// (gt-9udxk).
+func TestHeredocWalkBacktickBraceInsideParamExpansion(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{
+			name:      "a brace in backtick text does not close the expansion",
+			command:   "echo ${v:-`echo }` <<x}\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "a brace in backtick text inside double quotes does not close the expansion",
+			command:   "echo \"${v:-`echo }` <<x}\"\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "the same brace in a command substitution still does not close the expansion",
+			command:   "echo ${v:-$(echo }) <<x}\nsudo rm -rf /\nx",
+			wantBlock: true,
+		},
+		{
+			name:      "a closed backtick pair in an expansion leaves its closing brace live",
+			command:   "echo ${v:-`echo x`}\ncat <<EOF\nsudo rm -rf /\nEOF",
+			wantBlock: false,
+		},
+		{
+			name:      "an escaped backtick opens no command text",
+			command:   "echo ${v:-\\`echo }\\`}\ncat <<EOF\nsudo rm -rf /\nEOF",
+			wantBlock: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if tt.wantBlock && reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked: the shell reads a command here", tt.command)
+			}
+			if !tt.wantBlock && reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed: the body is data for its reader", tt.command, reason)
+			}
+		})
+	}
+}
+
 // TestShellFedHeredocBodyIsInspected pins gt-9g0y: a heredoc body whose
 // reader line runs a shell is a script that shell executes, so it is checked
 // like any other nested shell command. Stripping it with the data bodies —
