@@ -654,3 +654,32 @@ func TestBeadsRedirectCheck_FixConflictingLocalBeads(t *testing.T) {
 		t.Errorf("expected StatusOK after fix, got %v", result.Status)
 	}
 }
+
+func TestMayorCloneExistsCheck_SharedBareRepoNeedsNoClone(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig", ".repo.git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewMayorCloneExistsCheck().Run(&CheckContext{TownRoot: townRoot, RigName: "myrig"})
+
+	if result.Status != StatusOK {
+		t.Errorf("rig whose repo is .repo.git with no mayor/rig clone: %v %v, want OK",
+			result.Status, result.Details)
+	}
+}
+
+func TestMayorCloneExistsCheck_NoRepoAtAllIsStillReported(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "myrig"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewMayorCloneExistsCheck().Run(&CheckContext{TownRoot: townRoot, RigName: "myrig"})
+
+	if result.Status != StatusWarning {
+		t.Errorf("rig with neither .repo.git nor mayor/rig: %v, want Warning", result.Status)
+	}
+}

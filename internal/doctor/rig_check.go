@@ -361,7 +361,8 @@ func (c *HooksPathConfiguredCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 
-// MayorCloneExistsCheck verifies the mayor/rig clone exists.
+// MayorCloneExistsCheck verifies the rig has a repo to work in: its shared bare
+// .repo.git, or a mayor/rig clone.
 type MayorCloneExistsCheck struct {
 	FixableCheck
 	rigPath     string
@@ -375,7 +376,7 @@ func NewMayorCloneExistsCheck() *MayorCloneExistsCheck {
 		FixableCheck: FixableCheck{
 			BaseCheck: BaseCheck{
 				CheckName:        "mayor-clone-exists",
-				CheckDescription: "Verify mayor/rig/ git clone exists",
+				CheckDescription: "Verify the rig has a repo (.repo.git or mayor/rig/)",
 				CheckCategory:    CategoryRig,
 			},
 		},
@@ -399,6 +400,17 @@ func (c *MayorCloneExistsCheck) Run(ctx *CheckContext) *CheckResult {
 	var issues []string
 	c.needsCreate = false
 	c.needsClone = false
+
+	// A rig whose canonical repo is its shared bare repo needs no mayor/rig
+	// clone: the clone is a leftover of the mayoral layout, and the clone the
+	// check wants back is one nobody would work in (gt-9gnar).
+	if _, err := os.Stat(filepath.Join(c.rigPath, ".repo.git")); err == nil {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusOK,
+			Message: "Rig repo is the shared .repo.git",
+		}
+	}
 
 	// Check mayor/ directory
 	if _, err := os.Stat(mayorDir); os.IsNotExist(err) {
