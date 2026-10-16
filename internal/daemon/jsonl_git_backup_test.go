@@ -2507,6 +2507,69 @@ func TestSyncJsonlGitBackupSupplementalFailureNoFalseSpike(t *testing.T) {
 	}
 }
 
+// TestSyncJsonlGitBackupSupplementalFailureDoesNotCommitFreshIssues: a database
+// whose events export fails has no count, so the spike guard skips it. Its
+// issues.jsonl is already rewritten, so a mass drop there (3 rows against a
+// baseline of 1000) must not be committed under the [FAILED: hq] subject.
+func TestSyncJsonlGitBackupSupplementalFailureDoesNotCommitFreshIssues(t *testing.T) {
+	t.Parallel()
+	const baseline = 1000
+
+	d, f := backupTestDaemon(t)
+	root := t.TempDir()
+	townRoot := filepath.Join(root, "town")
+	if err := os.MkdirAll(filepath.Join(townRoot, ".dolt-data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	remote := filepath.Join(root, "origin.git")
+	f.InitBare(t, remote)
+	f.Commit(t, remote, "main", fmt.Sprintf("%shq=%d", seedSubjectPrefix, baseline), map[string]string{"README": "init\n"})
+	gitRepo := filepath.Join(root, "repo")
+	f.Clone(t, remote, gitRepo)
+
+	d.config = &Config{TownRoot: townRoot}
+	d.notifier = notifyfake.New()
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, GitRepo: gitRepo, Databases: []string{"hq", "gt"}},
+	}}
+	// hq's issues export is a 3-row mass drop and its events export fails; gt
+	// exports fully, so the cycle is a partial failure that reaches the commit.
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string) (int, error) {
+		if filepath.Base(dir) == "hq" && table == "events" {
+			return 0, errors.New("signal: killed: context deadline exceeded")
+		}
+		n := 30
+		if filepath.Base(dir) == "hq" && table == "issues" {
+			n = 3
+		}
+		writeNLines(t, filepath.Join(dir, table+".jsonl"), n)
+		return n, nil
+	}
+
+	before := f.Ref(gitRepo, "refs/heads/main")
+	d.syncJsonlGitBackup()
+	after := f.Ref(gitRepo, "refs/heads/main")
+
+	if after == before {
+		t.Fatal("no commit was made: gt exported fully and its files should have been committed")
+	}
+	var gt int
+	for path := range f.Tree(after) {
+		switch {
+		case strings.HasPrefix(path, "hq/"):
+			t.Errorf("the new HEAD commit carries %s from the failed database", path)
+		case strings.HasPrefix(path, "gt/"):
+			gt++
+		}
+	}
+	if gt == 0 {
+		t.Error("the new HEAD commit carries no gt/ file, want the fully exported database committed")
+	}
+	if subjects := backupSubjects(t, d, gitRepo); len(subjects) == 0 || !strings.Contains(subjects[0], "[FAILED: hq]") {
+		t.Errorf("subjects = %v, want the newest to keep the [FAILED: hq] marker", subjects)
+	}
+}
+
 // seedSubjectPrefix is the head of a backup commit subject written under the
 // current count metric, for tests that seed history ahead of a tick.
 var seedSubjectPrefix = fmt.Sprintf("backup 2026-01-01 00:00 m%d: ", countMetricVersion)
