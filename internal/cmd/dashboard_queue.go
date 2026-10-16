@@ -84,6 +84,23 @@ func newDashQueueReader(townRoot string) *dashQueueReader {
 	return r
 }
 
+// liveMolecules is the set of molecules a seat is running: the attached
+// molecule of every work bead that is hooked or in progress and has an
+// assignee. A bead that is closed, or that nobody holds, keeps its molecule out
+// of the set, which is what makes the molecule's steps leaked (gt-xmys9).
+func liveMolecules(held []*beads.Issue) map[string]bool {
+	live := map[string]bool{}
+	for _, i := range held {
+		if i.Assignee == "" {
+			continue
+		}
+		if att := beads.ParseAttachmentFields(i); att != nil && att.AttachedMolecule != "" {
+			live[att.AttachedMolecule] = true
+		}
+	}
+	return live
+}
+
 // dashQueueRow is one issue as a queue row.
 func dashQueueRow(rig string, i *beads.Issue) dashboard.QueueBead {
 	row := dashboard.QueueBead{
@@ -155,7 +172,10 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 		rd, err1 := st.ReadyAll()
 		bl, err2 := st.Blocked()
 		ln, err3 := st.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1})
-		if err1 != nil || err2 != nil || err3 != nil {
+		// One list per store, not a read per step: the work beads a seat holds
+		// say which molecules are live.
+		held, err4 := st.List(beads.ListOptions{Status: string(beads.IssueStatusHooked) + "," + string(beads.StatusInProgress), Priority: -1})
+		if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
 			q.Unreadable = append(q.Unreadable, name)
 			addRig(name, parked, false)
 			continue
@@ -178,11 +198,15 @@ func (r *dashQueueReader) read(now time.Time) *dashboard.Queue {
 			}
 			ready = append(ready, row)
 		}
+		live := liveMolecules(held)
 		for _, i := range bl {
+			if dashboard.IsLiveStep(i.ID, i.Type, i.Parent, live) {
+				continue
+			}
 			row := dashQueueRow(name, i)
 			// Split here, over the whole list, rather than off the capped rows
 			// the page is given: the totals must add up (gt-vcr3z).
-			row.Wisp = dashboard.IsLeakedStepWisp(i.ID, i.Type, i.Parent)
+			row.Wisp = dashboard.IsLeakedStepWisp(i.ID, i.Type, i.Parent, live)
 			if row.Wisp {
 				q.BlockedWisps++
 			} else {

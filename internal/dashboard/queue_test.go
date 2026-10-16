@@ -28,8 +28,39 @@ func TestIsLeakedStepWispTellsAStepFromBlockedWork(t *testing.T) {
 		{"a molecule whose parent is another", "gt-mol-1", "molecule", "gt-wisp-eutau", false},
 		{"a bead with no type", "gt-x", "", "gt-wisp-eutau", false},
 	} {
-		if got := IsLeakedStepWisp(tc.id, tc.typ, tc.parent); got != tc.want {
+		if got := IsLeakedStepWisp(tc.id, tc.typ, tc.parent, nil); got != tc.want {
 			t.Errorf("%s (%s/%s/%s): wisp = %v, want %v", tc.name, tc.id, tc.typ, tc.parent, got, tc.want)
+		}
+		if IsLiveStep(tc.id, tc.typ, tc.parent, nil) {
+			t.Errorf("%s: no molecule is live, so no step is", tc.name)
+		}
+	}
+}
+
+// A step is leaked only when no seat runs its molecule (gt-xmys9): the later
+// steps of a running polecat's checklist wait on the molecule that polecat is
+// walking. The two verdicts are exclusive, and a bead that is no step is
+// neither whatever is live.
+func TestStepVerdictFollowsTheLiveMolecules(t *testing.T) {
+	t.Parallel()
+	live := map[string]bool{"gt-wisp-live": true}
+
+	for _, tc := range []struct {
+		name, id, typ, parent string
+		leaked, liveStep      bool
+	}{
+		{"a step of a running molecule", "gt-wisp-s1", "task", "gt-wisp-live", false, true},
+		{"the running molecule's root", "gt-wisp-live", "molecule", "", false, true},
+		{"a step of a molecule no seat runs", "gt-wisp-s2", "task", "gt-wisp-dead", true, false},
+		{"a dead molecule's root", "gt-wisp-dead", "molecule", "", true, false},
+		{"a step that names no molecule", "gt-wisp-s3", "task", "", true, false},
+		{"blocked work", "gt-real", "task", "", false, false},
+		{"a child of a durable epic", "gt-child", "task", "gt-epic", false, false},
+	} {
+		leaked := IsLeakedStepWisp(tc.id, tc.typ, tc.parent, live)
+		liveStep := IsLiveStep(tc.id, tc.typ, tc.parent, live)
+		if leaked != tc.leaked || liveStep != tc.liveStep {
+			t.Errorf("%s: leaked = %v, live = %v; want %v, %v", tc.name, leaked, liveStep, tc.leaked, tc.liveStep)
 		}
 	}
 }

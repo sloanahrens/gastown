@@ -70,7 +70,8 @@ type Queue struct {
 	// BlockedWork and BlockedWisps split BlockedTotal: the beads waiting on
 	// another bead, and the leaked molecule step wisps sitting in the same
 	// list. Counted over the whole list, before the rows are capped, so the
-	// two always add up to the total (gt-vcr3z).
+	// two always add up to the total (gt-vcr3z). The steps of a molecule a seat
+	// is running are in neither: they are left off the list (IsLiveStep).
 	BlockedWork  int `json:"blocked_work"`
 	BlockedWisps int `json:"blocked_wisps"`
 	// The exact number of beads per store in each list, which the capped rows
@@ -99,14 +100,38 @@ type Queue struct {
 // IsWispID reports whether id names a wisp: gt-wisp-c3w9, hq-wisp-e0g8y7.
 func IsWispID(id string) bool { return strings.Contains(id, "-wisp-") }
 
+// stepMolecule reports whether a bead on the blocked list is molecule step
+// machinery — a bead whose id names a wisp, or a step poured under one (a task
+// whose parent is a wisp molecule) — and which molecule it belongs to. A step
+// names its parent; a bare wisp is its own molecule's root.
+func stepMolecule(id, typ, parent string) (molecule string, ok bool) {
+	if !IsWispID(id) && !(typ == "task" && IsWispID(parent)) {
+		return "", false
+	}
+	if IsWispID(parent) {
+		return parent, true
+	}
+	return id, true
+}
+
+// IsLiveStep reports whether a blocked bead is a step of a molecule a seat is
+// running: live holds the molecules whose work bead a seat holds. Such a step
+// waits on the checklist its polecat is walking, so it is neither blocked work
+// nor a leak, and the queue leaves it off the blocked list.
+func IsLiveStep(id, typ, parent string, live map[string]bool) bool {
+	mol, ok := stepMolecule(id, typ, parent)
+	return ok && live[mol]
+}
+
 // IsLeakedStepWisp reports whether a bead on the blocked list is a leaked
-// molecule step wisp rather than blocked work: a bead whose id names a wisp,
-// or a step poured under one (a task whose parent is a wisp molecule). Such a
-// step waits on a molecule nothing will ever advance, so nobody is blocked on
-// it. It is the one verdict the blocked list is split by, so the line above
-// the page's list and the list's own filtering cannot disagree (gt-vcr3z).
-func IsLeakedStepWisp(id, typ, parent string) bool {
-	return IsWispID(id) || (typ == "task" && IsWispID(parent))
+// molecule step wisp rather than blocked work: molecule step machinery whose
+// work bead is terminal or that no seat holds. Such a step waits on a molecule
+// nothing will ever advance, so nobody is blocked on it. It is the one verdict
+// the blocked list is split by, so the line above the page's list and the
+// list's own filtering cannot disagree (gt-vcr3z, gt-xmys9).
+func IsLeakedStepWisp(id, typ, parent string, live map[string]bool) bool {
+	mol, ok := stepMolecule(id, typ, parent)
+	return ok && !live[mol]
 }
 
 // SortQueueRows orders rows the way the dispatcher takes them: most urgent
