@@ -101,6 +101,110 @@ func TestCheckPolecatHealth_SkipsParkedPolecat(t *testing.T) {
 	}
 }
 
+// seatEventLine is one line of the town event log, attributed to actor with
+// bead in its payload.
+func seatEventLine(ts time.Time, typ, actor, bead string) string {
+	return fmt.Sprintf(`{"ts":%q,"source":"gt","type":%q,"actor":%q,"payload":{"bead":%q},"visibility":"feed"}`,
+		ts.UTC().Format(time.RFC3339), typ, actor, bead)
+}
+
+// TestCheckPolecatHealth_DoneEventIsAFinishedTurn covers gt-0p9pv: a seat
+// whose own last event is a `done` for the bead it still holds ended its turn,
+// and the bead's close is what has not caught up. Within the grace the dead
+// session is that finished turn, not a crash; past it the seat is a crash
+// again, because a done whose bead never closed is work nothing will pick up.
+// The control cases are the ordinary crash: no done at all, a done for another
+// bead, and a later event of the seat's (its next session started).
+func TestCheckPolecatHealth_DoneEventIsAFinishedTurn(t *testing.T) {
+	t.Parallel()
+	const seat = "myr/polecats/mycat"
+	withinGrace := seatEventLine(testEpoch.Add(-time.Minute), events.TypeDone, seat, "gt-xyz")
+	pastGrace := seatEventLine(testEpoch.Add(-polecatDoneCloseGrace-time.Minute), events.TypeDone, seat, "gt-xyz")
+
+	cases := []struct {
+		name      string
+		lines     []string
+		wantCrash bool
+	}{
+		{"done within the grace", []string{withinGrace}, false},
+		{"done past the grace", []string{pastGrace}, true},
+		{
+			"done for another bead",
+			[]string{seatEventLine(testEpoch.Add(-time.Minute), events.TypeDone, seat, "gt-other")},
+			true,
+		},
+		{
+			"no done, only a session start",
+			[]string{seatEventLine(testEpoch.Add(-time.Minute), events.TypeSessionStart, seat, "")},
+			true,
+		},
+		{
+			"the next session started after the done",
+			[]string{withinGrace, seatEventLine(testEpoch.Add(-30*time.Second), events.TypeSessionStart, seat, "")},
+			true,
+		},
+		{
+			"another seat's done",
+			[]string{seatEventLine(testEpoch.Add(-time.Minute), events.TypeDone, "myr/polecats/other", "gt-xyz")},
+			true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bd := hookedWorkBD(t, "gt-xyz", time.Hour)
+			townRoot := t.TempDir()
+			body := strings.Join(tc.lines, "\n") + "\n"
+			if err := os.WriteFile(filepath.Join(townRoot, events.EventsFile), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			var logBuf strings.Builder
+			d := &Daemon{
+				config:        &Config{TownRoot: townRoot},
+				logger:        log.New(&logBuf, "", 0),
+				clock:         newFixedClock(),
+				tmux:          newFakeTmux(newFixedClock()),
+				notifier:      notifyfake.New(),
+				openWorkBeads: bd.open,
+				execCmd:       bd.run,
+			}
+
+			d.checkPolecatHealth("myr", "mycat")
+
+			got := logBuf.String()
+			if crashed := strings.Contains(got, "CRASH DETECTED"); crashed != tc.wantCrash {
+				t.Errorf("CRASH DETECTED = %v, want %v; log: %q", crashed, tc.wantCrash, got)
+			}
+			if tc.wantCrash {
+				return
+			}
+			if !strings.Contains(got, "ran gt done for gt-xyz") {
+				t.Errorf("expected the skip to name the done that ended the turn, got: %q", got)
+			}
+			logged, err := os.ReadFile(filepath.Join(townRoot, events.EventsFile))
+			if err != nil {
+				t.Fatalf("events file: %v", err)
+			}
+			if strings.Contains(string(logged), events.TypeSessionDeath) {
+				t.Errorf("a finished turn must not emit a session_death event: %q", logged)
+			}
+		})
+	}
+}
+
+// TestSeatLastDoneAge_UnreadableLogIsNoEvidence: the events log is a
+// best-effort record, so a town with none — and a seat with no events in it —
+// must answer false rather than date a turn nothing recorded.
+func TestSeatLastDoneAge_UnreadableLogIsNoEvidence(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, logger: discardLogger}
+
+	if age, ok := d.seatLastDoneAge("myr", "mycat", "gt-xyz", testEpoch); ok {
+		t.Errorf("dated a done from an empty log: age %s", age)
+	}
+}
+
 // TestCheckPolecatHealth_SpawningGuardExpires verifies that the spawn grace
 // is time-bound: work hooked more than 5 minutes ago with no session is a
 // crash (gt sling may have failed during spawn).

@@ -2609,6 +2609,18 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 		return
 	}
 
+	// A seat whose own last event is a `done` for the bead it holds has ended
+	// its turn; the bead's close trails that event, and a report-only run that
+	// skipped its close leaves the bead hooked over a dead session (gt-0p9pv).
+	// The window is bounded, so a done whose bead never closes falls through to
+	// the crash below rather than hiding the seat for good.
+	if age, ok := d.seatLastDoneAge(rigName, polecatName, hookBead, d.clk().Now()); ok && age < polecatDoneCloseGrace {
+		skipped = true
+		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: it ran gt done for %s %s ago and the bead has not closed yet",
+			rigName, polecatName, hookBead, age.Round(time.Second))
+		return
+	}
+
 	// Spawn grace (gt-6hby3): gt sling hooks the work bead before the tmux
 	// session exists, so a bead hooked moments ago with no session yet may be
 	// a polecat starting up, and reporting it would double-spawn (issue
@@ -2897,6 +2909,49 @@ func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, error
 // whose agent record still says spawning is taken to be starting up rather
 // than crashed.
 const polecatSpawnGrace = 5 * time.Minute
+
+// polecatDoneCloseGrace is how long after its own `done` event a seat over a
+// bead that has not closed is read as a finished turn rather than a crash: the
+// window the bead's close has to arrive in (gt-0p9pv).
+const polecatDoneCloseGrace = 5 * time.Minute
+
+// seatLastDoneAge returns how long ago the seat's own most recent event was,
+// when that event is a `done` naming hookBead. The event log is a best-effort
+// record, so a log that cannot be read, a seat with no events, and a newer
+// event of the seat's all answer false: none of them shows a finished turn.
+func (d *Daemon) seatLastDoneAge(rigName, polecatName, hookBead string, now time.Time) (time.Duration, bool) {
+	evs, err := events.Read(d.config.TownRoot)
+	if err != nil {
+		// The events read so far are still used: a partial log dates a turn
+		// that a missing one cannot.
+		d.logger.Printf("crash detection: reading the event log for %s/%s: %v", rigName, polecatName, err)
+	}
+	seat := rigName + "/polecats/" + polecatName
+	var last events.Event
+	var lastAt time.Time
+	for _, ev := range evs {
+		if ev.Actor != seat {
+			continue
+		}
+		ts, err := time.Parse(time.RFC3339, ev.Timestamp)
+		if err != nil {
+			continue
+		}
+		if ts.After(lastAt) {
+			last, lastAt = ev, ts
+		}
+	}
+	if lastAt.IsZero() || last.Type != events.TypeDone {
+		return 0, false
+	}
+	bead, _ := last.Payload["bead"].(string)
+	if bead != hookBead {
+		return 0, false
+	}
+	// An event dated ahead of now is a clock skew, not an age; reading it as 0
+	// keeps the seat inside the grace rather than past it.
+	return max(now.Sub(lastAt), 0), true
+}
 
 // polecatAgentRecord reads a seat's agent bead, and reports whether that could
 // be read at all: false for a seat with no bead and for a failed read, either
