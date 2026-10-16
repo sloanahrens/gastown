@@ -195,6 +195,7 @@ func TestSlingHoldFields_Verdicts(t *testing.T) {
 // TestHasLabel pins the fold the hold rule and its callers share: a label typed
 // by hand matches whatever its case or padding (gt-qaelo).
 func TestHasLabel(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		labels []string
