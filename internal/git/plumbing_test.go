@@ -124,6 +124,24 @@ func TestTreeFileBlobs(t *testing.T) {
 	}
 }
 
+// TestTreeFileSizes pins the -l parsing: git pads the size column with spaces
+// to keep the paths in one column, and a gitlink's size is "-", which is not a
+// size any caller can weigh.
+func TestTreeFileSizes(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{"ls-tree -r -l -z --full-tree HEAD": ok(
+		"100644 blob " + readmeV2 + "       8\tREADME.md\x00" +
+			"160000 commit 1111111111111111111111111111111111111111         -\tlibs/sub\x00" +
+			"100644 blob " + alphaV1 + "       3\tdir/with space.txt\x00")})
+	sizes, err := newTestGit(t, s).TreeFileSizes("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]int64{"README.md": 8, "dir/with space.txt": 3}; !reflect.DeepEqual(sizes, want) {
+		t.Fatalf("TreeFileSizes = %v, want %v (gitlinks skipped)", sizes, want)
+	}
+}
+
 func TestTreesIdentical(t *testing.T) {
 	t.Parallel()
 	s := newScripted(map[string]reply{

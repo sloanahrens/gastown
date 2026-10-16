@@ -217,6 +217,12 @@ type Daemon struct {
 	// Only accessed from heartbeat loop goroutine - no sync needed.
 	jsonlPushFailures int
 
+	// jsonlPushFileLimit is the per-file size the JSONL backup treats as too
+	// large for its remote, in tests that drive the oversize-push recovery
+	// with a small file instead of a real 100 MB export; 0 is GitHub's
+	// limit (jsonlPushFileLimitBytes).
+	jsonlPushFileLimit int64
+
 	// jsonlExportFn replaces exportDatabaseToJsonl in tests, so a JSONL backup
 	// cycle's own bookkeeping (counts, failures, alerts) can be driven without
 	// running dolt; nil is the real export.

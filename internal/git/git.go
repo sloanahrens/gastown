@@ -3083,6 +3083,15 @@ func (g *Git) ResetHard(ref string) error {
 	return err
 }
 
+// ResetSoft moves the current branch to ref, leaving the index and working
+// tree exactly as they were (git reset --soft). The commits the branch held
+// above ref survive as staged content, so a caller that replaces a branch's
+// unpushed range keeps every file those commits described.
+func (g *Git) ResetSoft(ref string) error {
+	_, err := g.run("reset", "--soft", ref)
+	return err
+}
+
 // CleanForce removes untracked files and directories from the working tree.
 // Excludes .runtime/ to preserve agent lock files and session state.
 func (g *Git) CleanForce() error {

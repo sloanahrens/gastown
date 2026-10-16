@@ -81,6 +81,10 @@ type Fake struct {
 	repos   map[string]*repo
 	seq     int
 	wt      worktreeState // staging and trees (index.go)
+
+	// pushFileLimit, when positive, is the size in bytes a single file of a
+	// push may have. See SetPushFileLimit.
+	pushFileLimit int64
 }
 
 // New returns an empty world.
@@ -132,6 +136,17 @@ func (f *Fake) Commit(t testing.TB, dir, branch, message string, files map[strin
 	r.has[id] = true
 	r.refs[ref] = id
 	return id
+}
+
+// SetPushFileLimit makes every push in this world refuse a file over limit
+// bytes, the way GitHub refuses one ("remote: error: GH001: Large files
+// detected"). A per-file push limit belongs to the hosting service, not to
+// git, so the default of 0 refuses nothing — the same as git, which sends any
+// size a remote will take.
+func (f *Fake) SetPushFileLimit(limit int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pushFileLimit = limit
 }
 
 // SetRef points ref (a full ref name) at id in the repository at dir.

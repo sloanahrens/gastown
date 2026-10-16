@@ -121,6 +121,46 @@ func RunWorkTreeContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 	})
 
+	t.Run("ResetSoft moves the branch and leaves the index staged against it", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		r := fx.env.Open(fx.clone)
+		g := r.(WorkTree)
+		// A commit on the clone's branch, then a soft reset to its parent: the
+		// commit's files stay on disk AND in the index, staged against the
+		// commit HEAD now names. That is the whole point of a soft reset, and
+		// what a caller replacing a branch's unpushed range reads back out —
+		// reading HEAD's tree instead would lose the export (the JSONL
+		// backup's oversize recovery, gt-q30zx).
+		writeFile(t, filepath.Join(fx.clone, "b.txt"), "work\n")
+		if err := g.Add("-A", "."); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.Commit("backup: b"); err != nil {
+			t.Fatal(err)
+		}
+		committed, err := r.Rev("HEAD")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if err := g.ResetSoft(fx.base); err != nil {
+			t.Fatal(err)
+		}
+		if head, err := r.Rev("HEAD"); err != nil || head != fx.base {
+			t.Fatalf("HEAD after reset --soft = %s, %v; want %s", head, err, fx.base)
+		}
+		if got := readFile(t, filepath.Join(fx.clone, "b.txt")); got != "work\n" {
+			t.Errorf("b.txt after reset --soft = %q, want it left on disk", got)
+		}
+		wantStaged(t, g, git.StagedChange{Status: 'A', Path: "b.txt"})
+		// A soft reset moves a branch, never history: the commit it dropped
+		// from the branch is still there, parented where it was.
+		if parents, err := r.Parents(committed); err != nil || len(parents) != 1 || parents[0] != fx.base {
+			t.Errorf("Parents(%s) = %v, %v; want %s alone", committed, parents, err, fx.base)
+		}
+	})
+
 	t.Run("Add stages files, deletions and directories; ResetFiles unstages them", func(t *testing.T) {
 		t.Parallel()
 		fx := newFixture(t, newEnv(t))
