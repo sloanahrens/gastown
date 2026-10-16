@@ -469,6 +469,16 @@ func TestMakeTestOutsideGoTree(t *testing.T) {
 		{"a clustered attached alternate makefile", npmRoot, "make -sfother.mk test", true},
 		{"make -oC is -o with the value C", npmRoot, "make -oC " + goRoot + " test", false},
 		{"make -sj4 steers nothing", npmRoot, "make -sj4 test", false},
+		// -w (print directory) and -i (ignore errors) take no value, unlike
+		// the uppercase -W (what-if file) and -I (include dir): the -C behind
+		// a bare -w or -i is still the run directory (gt-i6jw6).
+		{"make -w -C into the Go tree", npmRoot, "make -w -C " + goRoot + " test", true},
+		{"make -i -C into the Go tree", npmRoot, "make -i -C " + goRoot + " test", true},
+		{"make -w -C out of the Go tree", goRoot, "make -w -C " + npmRoot + " test", false},
+		{"make -W file then -C into the Go tree", npmRoot, "make -W file.mk -C " + goRoot + " test", true},
+		{"make -W file then -C out of the Go tree", goRoot, "make -W file.mk -C " + npmRoot + " test", false},
+		{"make -I dir then -C out of the Go tree", goRoot, "make -I inc -C " + npmRoot + " test", false},
+		{"make -W swallows a -C that is its value", goRoot, "make -W -C " + npmRoot + " test", true},
 		{"a -C from an unknown cwd", "", "make -C . test", true},
 		{"no cwd at all", "", "make test", true},
 	}
@@ -476,6 +486,25 @@ func TestMakeTestOutsideGoTree(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assertBothGuardsJudge(t, tt.command, tt.cwd, tt.blocked)
 		})
+	}
+}
+
+// The whole-suite goals other than test and build read the same run directory:
+// a bare -i before the -C must not hide it (gt-i6jw6).
+func TestMakeBareIgnoreErrorsFlagKeepsTheDirectory(t *testing.T) {
+	t.Parallel()
+	npmRoot := nonGoTree(t)
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	for _, command := range []string{
+		"make -i -C " + goRoot + " gate",
+		"make -w -C " + goRoot + " gate",
+	} {
+		if !makeActsOnWholeGoModule(shellTokenize(command), npmRoot) {
+			t.Errorf("makeActsOnWholeGoModule(%q, cwd %s) = false, want true", command, npmRoot)
+		}
+	}
+	if makeActsOnWholeGoModule(shellTokenize("make -i -C "+npmRoot+" gate"), goRoot) {
+		t.Errorf("make -i -C <non-Go tree> gate from a Go tree = true, want false")
 	}
 }
 
