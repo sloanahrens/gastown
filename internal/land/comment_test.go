@@ -89,6 +89,19 @@ func TestLandCommentsTheOmVerdictOnEveryOutcome(t *testing.T) {
 			version: version,
 		},
 		{
+			// The findings bounce this approval after the review is over, so
+			// the verdict is still commented: a findings check ordered ahead
+			// of the comment would leave the rejected head with no line tying
+			// it to its review (gt-vu18r).
+			name: "an approve the findings bounce",
+			setup: reviewing(Verdict{Verdict: VerdictApprove, Score: 0.93, Version: version,
+				Findings: []Finding{{ID: "f-1", Severity: "major", Path: "b.txt", Line: 1, Title: "not atomic"}}}),
+			rejected: true,
+			word:     VerdictApprove,
+			score:    "0.93",
+			version:  version,
+		},
+		{
 			name:     "a request for changes",
 			setup:    reviewing(Verdict{Verdict: VerdictRequestChanges, Score: 0.40, Version: version}),
 			rejected: true,
