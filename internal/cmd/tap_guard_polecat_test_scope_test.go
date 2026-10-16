@@ -119,13 +119,16 @@ func TestEvaluatePolecatTestScope_TargetFollowsTheCDirFlag(t *testing.T) {
 		{"-C to the module root", heavy, "go -C " + root + " test .", false},
 		{"-C away from a heavy package after a cd into it", light, "cd " + heavy + " && go -C " + light + " test .", false},
 
-		// An explicit package argument is read whatever -C names, and a
-		// ./-relative one is read under the -C dir as well (gt-q82x1), so this
-		// one also names internal/cmd/internal/style, a path inside the heavy
-		// package. Go finds no such package, but the container rule refuses the
-		// same spelling and the two read it alike.
+		// An explicit package argument is read whatever -C names, so a heavy
+		// one is refused under a light -C dir.
 		{"heavy argument under a light -C dir", light, "go -C " + light + " test ./internal/cmd/", true},
-		{"light argument under a heavy -C dir", light, "go -C " + heavy + " test ./internal/style/", true},
+
+		// A ./-relative argument is read under the -C dir as well, so a light
+		// one under a heavy -C dir also names internal/cmd/internal/style, a
+		// path inside the heavy package. Go finds no such package, but the
+		// guard cannot tell which reading the spelling was written for and
+		// refuses on either, as the container rule does (gt-q82x1).
+		{"light ./ argument under a heavy -C dir is refused", light, "go -C " + heavy + " test ./internal/style/", true},
 
 		// A -C dir the guard places only lexically (go itself fails on a
 		// missing one) is judged where it names, and an explicit argument
@@ -223,8 +226,8 @@ func TestPolecatTestScopeShellExpandedCDir(t *testing.T) {
 // A package argument is read the way the container rule reads it: one spelled
 // as a path under the run directory ("./cmd" under internal/) also names the
 // package go resolves it to, and an absolute directory names the
-// module-relative package it lies in. Read as written, each of these ran the
-// whole of internal/cmd past the guard (gt-q82x1).
+// module-relative package it lies in. Read only as written, each blocked row
+// below names internal/cmd and would pass (gt-q82x1).
 func TestPolecatTestScopeRunDirRelativePackageArgs(t *testing.T) {
 	t.Parallel()
 	root := fakeModule(t, "gastown/refinery/rig")
@@ -252,7 +255,8 @@ func TestPolecatTestScopeRunDirRelativePackageArgs(t *testing.T) {
 		{"cd into the dir, light argument", "cd " + internal + " && go test ./style", false},
 		{"absolute light directory", "go test " + lightAbs, false},
 
-		// Spellings that were allowed before keep their verdicts.
+		// Module-relative spellings name one package, so the run-dir reading
+		// adds nothing to them.
 		{"module-relative light argument", "go test ./internal/style", false},
 		{"module-relative heavy argument, -run", "go test ./internal/cmd -run X", false},
 	}
