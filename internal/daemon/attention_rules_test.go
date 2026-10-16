@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -82,7 +83,9 @@ func TestAttentionRiskPathPromotesThreeHoursAfterLanding(t *testing.T) {
 		return []land.LandingRecord{{BeadID: "gt-abc", Head: head, RiskPaths: []string{"internal/land/land.go"}, LandedAt: landed}}, nil
 	}
 	notes := ""
-	f.src.riskNotes = func(context.Context, string, string) (string, error) { return notes, nil }
+	f.src.riskIssue = func(context.Context, string, string) (*beads.Issue, error) {
+		return &beads.Issue{ID: "gt-abc", Notes: notes, Priority: 2}, nil
+	}
 
 	wakes := func() []attention.Event {
 		var out []attention.Event

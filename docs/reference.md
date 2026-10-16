@@ -918,7 +918,12 @@ writes `acks.json`:
   then the daemon appends one `operator_action` wake line for it.
   `landing.risk_path` is `info` until the landing is three hours old (the
   record's `landed_at`, held in the item) with no review note; the daemon then
-  appends one `operator_action` wake line for it, once per item.
+  appends one `operator_action` wake line for it, once per item. A risk-path
+  item's severity is review debt's — `low`, below the escalation, the red main
+  and the daemon-down item beside it — unless the review that failed it was of a
+  P1 landing, the lane the town's own machinery (daemon, guards, git, dolt)
+  lands in; the one rule is `RiskPathSeverity` in
+  `internal/attention/reviewdebt.go`.
 - `acks.json` — the acknowledged keys, `{acks: [{key, at}]}`, written by `gt
   attention ack` under a flock. The daemon reads it and never writes it, so
   neither process races the other's file.
