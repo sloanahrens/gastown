@@ -505,70 +505,66 @@ func (m *Manager) AddRig(opts AddRigOptions) (*Rig, error) {
 		return nil, fmt.Errorf("updating rig config with default branch: %w", err)
 	}
 
-	// Create mayor as regular clone (separate from bare repo).
-	// Mayor doesn't need to see polecat branches, and stays on the default branch.
-	// Uses --reference to borrow objects from the bare repo we just created,
-	// avoiding a redundant download from the remote (GH#1059).
-	fmt.Printf("  Creating mayor clone...\n")
+	// Create the mayor clone: a regular clone, separate from the bare repo, on
+	// the default branch. A rig whose repository is the shared bare .repo.git is
+	// complete without one (gt-9gnar), so a clone that cannot be created warns
+	// and leaves the rig standing instead of failing the add and rolling
+	// .repo.git back with it (gt-jmqc5).
 	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
-	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
-		return nil, fmt.Errorf("creating mayor dir: %w", err)
+	mayorCloned, cloneErr := m.createMayorClone(mayorRigPath, bareRepoPath, defaultBranch, opts)
+	if cloneErr != nil {
+		fmt.Printf("  Warning: could not create the mayor clone: %v\n", cloneErr)
+		_ = os.RemoveAll(mayorRigPath) // whatever the failed clone left behind
+		fmt.Printf("  Continuing without a mayor clone: the rig's repository is %s\n", filepath.Join(opts.Name, ".repo.git"))
+		m.warnTrackedBeadsWithoutClone(bareGit, opts.GitURL, defaultBranch, opts.BeadsPrefix)
 	}
-	if opts.CloneFilter != "" {
-		if err := m.git.CloneBranchPartialWithReference(opts.GitURL, mayorRigPath, defaultBranch, opts.CloneFilter, bareRepoPath); err != nil {
-			fmt.Printf("  Warning: could not use bare repo as reference with filter: %v\n", err)
-			_ = os.RemoveAll(mayorRigPath)
-			if err := m.git.CloneBranchPartial(opts.GitURL, mayorRigPath, defaultBranch, opts.CloneFilter); err != nil {
-				return nil, fmt.Errorf("cloning for mayor: %w", err)
+
+	if mayorCloned {
+		// Set up sparse checkout on mayor clone if requested
+		if len(opts.SparseCheckout) > 0 {
+			if err := git.InitSparseCheckout(mayorRigPath, opts.SparseCheckout); err != nil {
+				return nil, fmt.Errorf("initializing sparse checkout for mayor: %w", err)
+			}
+			fmt.Printf("   ✓ Configured sparse checkout: %v\n", opts.SparseCheckout)
+		}
+
+		// No explicit checkout needed - --branch already checked out the default branch
+		mayorGit := m.openGit(mayorRigPath)
+		// Configure push URL on mayor clone (separate clone, doesn't inherit from bare repo)
+		if opts.PushURL != "" {
+			if err := mayorGit.ConfigurePushURL("origin", opts.PushURL); err != nil {
+				return nil, fmt.Errorf("configuring mayor push URL: %w", err)
 			}
 		}
-	} else if err := m.git.CloneBranchWithReference(opts.GitURL, mayorRigPath, defaultBranch, bareRepoPath); err != nil {
-		fmt.Printf("  Warning: could not use bare repo as reference: %v\n", err)
-		_ = os.RemoveAll(mayorRigPath)
-		if err := m.git.CloneBranch(opts.GitURL, mayorRigPath, defaultBranch); err != nil {
-			return nil, fmt.Errorf("cloning for mayor: %w", err)
+		// Configure upstream remote on mayor clone (separate clone, doesn't inherit from bare repo)
+		if opts.UpstreamURL != "" {
+			if err := mayorGit.AddUpstreamRemote(opts.UpstreamURL); err != nil {
+				return nil, fmt.Errorf("configuring mayor upstream remote: %w", err)
+			}
 		}
-	}
+		fmt.Printf("   ✓ Created mayor clone\n")
 
-	// Set up sparse checkout on mayor clone if requested
-	if len(opts.SparseCheckout) > 0 {
-		if err := git.InitSparseCheckout(mayorRigPath, opts.SparseCheckout); err != nil {
-			return nil, fmt.Errorf("initializing sparse checkout for mayor: %w", err)
+		// Protect .beads/ (credential key, backups, locks) in the mayor clone.
+		// The mayor clone is a standalone `git clone`, not a linked worktree off
+		// the bare repo, so it gets its own .git/info/exclude that nothing else
+		// writes to. Without this call the mayor clone is unprotected: .beads/
+		// shows up untracked in `git status` and is one `git clean -fd` away from
+		// deleting the beads credential key (gt-ylpg). Every other agent clone
+		// (polecat, witness, crew, refinery) already gets this via
+		// EnsureLocalExcludePatterns at provisioning time; the mayor clone was
+		// the one path that skipped it.
+		if err := ensureLocalExcludePatterns(mayorRigPath, m.openGit(mayorRigPath)); err != nil {
+			return nil, fmt.Errorf("protecting .beads/ in mayor clone: %w", err)
 		}
-		fmt.Printf("   ✓ Configured sparse checkout: %v\n", opts.SparseCheckout)
-	}
-
-	// No explicit checkout needed - --branch already checked out the default branch
-	mayorGit := m.openGit(mayorRigPath)
-	// Configure push URL on mayor clone (separate clone, doesn't inherit from bare repo)
-	if opts.PushURL != "" {
-		if err := mayorGit.ConfigurePushURL("origin", opts.PushURL); err != nil {
-			return nil, fmt.Errorf("configuring mayor push URL: %w", err)
-		}
-	}
-	// Configure upstream remote on mayor clone (separate clone, doesn't inherit from bare repo)
-	if opts.UpstreamURL != "" {
-		if err := mayorGit.AddUpstreamRemote(opts.UpstreamURL); err != nil {
-			return nil, fmt.Errorf("configuring mayor upstream remote: %w", err)
-		}
-	}
-	fmt.Printf("   ✓ Created mayor clone\n")
-
-	// Protect .beads/ (credential key, backups, locks) in the mayor clone.
-	// The mayor clone is a standalone `git clone`, not a linked worktree off
-	// the bare repo, so it gets its own .git/info/exclude that nothing else
-	// writes to. Without this call the mayor clone is unprotected: .beads/
-	// shows up untracked in `git status` and is one `git clean -fd` away from
-	// deleting the beads credential key (gt-ylpg). Every other agent clone
-	// (polecat, witness, crew, refinery) already gets this via
-	// EnsureLocalExcludePatterns at provisioning time; the mayor clone was
-	// the one path that skipped it.
-	if err := ensureLocalExcludePatterns(mayorRigPath, m.openGit(mayorRigPath)); err != nil {
-		return nil, fmt.Errorf("protecting .beads/ in mayor clone: %w", err)
+	} else if len(opts.SparseCheckout) > 0 {
+		fmt.Printf("  Warning: --sparse-checkout configures the mayor clone, and this rig has none\n")
 	}
 
 	// Check if source repo has tracked .beads/ directory.
 	// If so, we need to initialize the database (it doesn't exist after clone since DB files are gitignored).
+	// A rig without a mayor clone has no working tree to read here: the branch
+	// is skipped, and warnTrackedBeadsWithoutClone has already named what the
+	// rig gets instead.
 	sourceBeadsDir := filepath.Join(mayorRigPath, ".beads")
 	if _, err := os.Stat(sourceBeadsDir); err == nil {
 		// Remove any redirect file that might have been accidentally tracked.
@@ -876,6 +872,58 @@ Use crew for your own workspace. Polecats are for batch work dispatch.
 	// Best-effort cleanup: once the add succeeds, the stamp is no longer needed.
 	_ = clearAddOwnershipStamp(rigPath)
 	return m.loadRig(opts.Name, m.config.Rigs[opts.Name])
+}
+
+// createMayorClone makes the rig's mayor clone at mayorRigPath on defaultBranch
+// and reports whether it is there. It borrows objects from the bare repo cloned
+// just before it, avoiding a redundant download from the remote (GH#1059).
+func (m *Manager) createMayorClone(mayorRigPath, bareRepoPath, defaultBranch string, opts AddRigOptions) (bool, error) {
+	fmt.Printf("  Creating mayor clone...\n")
+	if err := os.MkdirAll(filepath.Dir(mayorRigPath), 0755); err != nil {
+		return false, fmt.Errorf("creating mayor dir: %w", err)
+	}
+	if opts.CloneFilter != "" {
+		if err := m.git.CloneBranchPartialWithReference(opts.GitURL, mayorRigPath, defaultBranch, opts.CloneFilter, bareRepoPath); err != nil {
+			fmt.Printf("  Warning: could not use bare repo as reference with filter: %v\n", err)
+			_ = os.RemoveAll(mayorRigPath)
+			if err := m.git.CloneBranchPartial(opts.GitURL, mayorRigPath, defaultBranch, opts.CloneFilter); err != nil {
+				return false, fmt.Errorf("cloning for mayor: %w", err)
+			}
+		}
+	} else if err := m.git.CloneBranchWithReference(opts.GitURL, mayorRigPath, defaultBranch, bareRepoPath); err != nil {
+		fmt.Printf("  Warning: could not use bare repo as reference: %v\n", err)
+		_ = os.RemoveAll(mayorRigPath)
+		if err := m.git.CloneBranch(opts.GitURL, mayorRigPath, defaultBranch); err != nil {
+			return false, fmt.Errorf("cloning for mayor: %w", err)
+		}
+	}
+	return true, nil
+}
+
+// warnTrackedBeadsWithoutClone warns when the rig has no mayor clone but the
+// source repo tracks .beads/. The rig then initializes its own database instead
+// of adopting the repo's, because a tracked .beads/ is read through the clone's
+// working tree (the mayor/rig/.beads the rig's redirect names) and the bare repo
+// has no tree to check out. Nothing else says which of the two databases the new
+// rig will write to.
+func (m *Manager) warnTrackedBeadsWithoutClone(bareGit Repo, sourceURL, defaultBranch, prefix string) {
+	if !repoFilesTrackBeads(bareGit, defaultBranch) {
+		return
+	}
+	fmt.Printf("  Warning: %s tracks .beads/ on %s, and this rig has no clone to read it from\n", util.RedactURL(sourceURL), defaultBranch)
+	fmt.Printf("  This rig gets its own beads database (prefix %q) instead of the repo's tracked one\n", prefix)
+}
+
+// repoFilesTrackBeads reports whether the repository at bareGit tracks .beads/
+// on branch: a bare repo has no working tree to look in, so the files a beads
+// database keeps under version control are read at the ref.
+func repoFilesTrackBeads(bareGit Repo, branch string) bool {
+	for _, path := range []string{".beads/metadata.json", ".beads/config.yaml"} {
+		if _, err := bareGit.ShowFileAtRev(branch, path); err == nil {
+			return true
+		}
+	}
+	return false
 }
 
 // addOwnershipStampFile marks which AddRig invocation currently owns the path.

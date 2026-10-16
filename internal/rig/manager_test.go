@@ -1780,6 +1780,123 @@ func TestAddRig_MayorCloneProtectsBeads(t *testing.T) {
 	}
 }
 
+// TestAddRig_FinishesWithoutAMayorClone is gt-jmqc5: the rig's repository is
+// the shared bare .repo.git, so a clone that cannot be created leaves a
+// complete rig rather than a failed add whose rollback takes .repo.git with it.
+func TestAddRig_FinishesWithoutAMayorClone(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+	gitURL := remoteRepo(t, f, filepath.Join(t.TempDir(), "source"), nil)
+	manager.git = mayorCloneRefused{manager.git}
+
+	if _, err := manager.AddRig(AddRigOptions{
+		Name:          "cloneless",
+		GitURL:        gitURL,
+		BeadsPrefix:   "cl",
+		SkipDoltCheck: true,
+	}); err != nil {
+		t.Fatalf("AddRig with a refused mayor clone: %v", err)
+	}
+
+	rigPath := filepath.Join(root, "cloneless")
+	if _, err := os.Stat(filepath.Join(rigPath, ".repo.git", "HEAD")); err != nil {
+		t.Errorf("rig has no shared bare repo: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, "mayor", "rig", ".git")); !os.IsNotExist(err) {
+		t.Errorf("mayor clone = %v, want the rig to have none", err)
+	}
+	// The rig is usable: registered, and with the beads directory the rest of
+	// the town resolves the prefix through.
+	if _, ok := rigsConfig.Rigs["cloneless"]; !ok {
+		t.Error("rig was not registered in rigs.json")
+	}
+	if _, err := os.Stat(filepath.Join(rigPath, ".beads")); err != nil {
+		t.Errorf("rig has no beads directory: %v", err)
+	}
+}
+
+// TestAddRig_TrackedBeadsWithoutAMayorCloneKeepTheirOwnDatabase is the outcome
+// warnTrackedBeadsWithoutClone names: the repo's .beads/ is read through the
+// clone's working tree, so a rig added without a clone runs its own database
+// instead of adopting the tracked one (gt-jmqc5).
+func TestAddRig_TrackedBeadsWithoutAMayorCloneKeepTheirOwnDatabase(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+
+	tracked := func(name, prefix string) string {
+		return remoteRepo(t, f, filepath.Join(t.TempDir(), name), map[string]string{
+			".beads/config.yaml":   "prefix: " + prefix + "\n",
+			".beads/metadata.json": `{"database":"beads_` + prefix + `"}`,
+		})
+	}
+
+	withClone := tracked("withclone", "tk")
+	if _, err := manager.AddRig(AddRigOptions{
+		Name:          "tracked",
+		GitURL:        withClone,
+		BeadsPrefix:   "tk",
+		SkipDoltCheck: true,
+	}); err != nil {
+		t.Fatalf("AddRig: %v", err)
+	}
+	// The same repo, with every working-tree clone refused.
+	cloneless := tracked("cloneless", "tl")
+	manager.git = mayorCloneRefused{manager.git}
+	if _, err := manager.AddRig(AddRigOptions{
+		Name:          "trackedless",
+		GitURL:        cloneless,
+		BeadsPrefix:   "tl",
+		SkipDoltCheck: true,
+	}); err != nil {
+		t.Fatalf("AddRig without a mayor clone: %v", err)
+	}
+
+	redirect := func(name string) string {
+		data, err := os.ReadFile(filepath.Join(root, name, ".beads", "redirect"))
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(data))
+	}
+	if got := redirect("tracked"); got != "mayor/rig/.beads" {
+		t.Errorf("rig added with a clone: .beads/redirect = %q, want the clone's tracked beads", got)
+	}
+	if got := redirect("trackedless"); got != "" {
+		t.Errorf("rig added without a clone: .beads/redirect = %q, want none: it keeps its own database", got)
+	}
+}
+
+// TestRepoFilesTrackBeads reads a bare repo's tree for the files a beads
+// database keeps in git: detection through a working tree cannot see them, and
+// they are what warnTrackedBeadsWithoutClone explains a rig's own database with.
+func TestRepoFilesTrackBeads(t *testing.T) {
+	t.Parallel()
+	root, rigsConfig := setupTestTown(t)
+	manager, f, _ := testManager(root, rigsConfig)
+	withBeads := remoteRepo(t, f, filepath.Join(t.TempDir(), "withbeads"), map[string]string{
+		".beads/config.yaml": "prefix: wb\n",
+	})
+	withoutBeads := remoteRepo(t, f, filepath.Join(t.TempDir(), "withoutbeads"), nil)
+
+	for name, tc := range map[string]struct {
+		url  string
+		want bool
+	}{
+		"tracks .beads/": {withBeads, true},
+		"no .beads/":     {withoutBeads, false},
+	} {
+		bare := filepath.Join(t.TempDir(), ".repo.git")
+		if err := manager.git.CloneBareWithBranch(tc.url, bare, "main"); err != nil {
+			t.Fatalf("%s: CloneBareWithBranch: %v", name, err)
+		}
+		if got := repoFilesTrackBeads(manager.openGitDir(bare, ""), "main"); got != tc.want {
+			t.Errorf("repoFilesTrackBeads(%s) = %v, want %v", name, got, tc.want)
+		}
+	}
+}
+
 // TestAddRig_BranchFlag verifies that --branch is passed to the bare clone so
 // the bare repo's HEAD and origin tracking ref both point to the specified branch.
 func TestAddRig_BranchFlag(t *testing.T) {

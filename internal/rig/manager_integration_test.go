@@ -59,6 +59,34 @@ func sourceRepo(t *testing.T, name string) string {
 	return dir
 }
 
+// A mayor clone git refuses leaves a rig, not a rolled-back directory: the
+// rig's repository is the shared bare .repo.git, and git agrees that is a
+// repository without a working tree (gt-jmqc5).
+func TestIntegrationAddRigWithoutAMayorClone(t *testing.T) {
+	m, root, _ := realGitManager(t)
+	m.git = mayorCloneRefused{m.git}
+	source := sourceRepo(t, "source")
+
+	if _, err := m.AddRig(AddRigOptions{
+		Name:          "cloneless",
+		GitURL:        source,
+		BeadsPrefix:   "cl",
+		SkipDoltCheck: true,
+	}); err != nil {
+		t.Fatalf("AddRig with a refused mayor clone: %v", err)
+	}
+
+	rigPath := filepath.Join(root, "cloneless")
+	bare := filepath.Join(rigPath, ".repo.git")
+	if got := gitT(t, root, "--git-dir", bare, "symbolic-ref", "--short", "HEAD"); got != "main" {
+		t.Errorf("bare HEAD = %q, want main", got)
+	}
+	gitT(t, root, "--git-dir", bare, "rev-parse", "--verify", "refs/heads/main")
+	if _, err := os.Stat(filepath.Join(rigPath, "mayor", "rig", ".git")); !os.IsNotExist(err) {
+		t.Errorf("mayor clone = %v, want the rig to have none", err)
+	}
+}
+
 func TestIntegrationAddRig(t *testing.T) {
 	m, root, _ := realGitManager(t)
 	source := sourceRepo(t, "source")
