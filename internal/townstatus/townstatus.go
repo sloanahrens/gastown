@@ -53,6 +53,12 @@ type Options struct {
 	// so the caller supplies it — cmd passes detectCurrentDNDStatus. Nil
 	// leaves DND unset.
 	DNDProbe func(townRoot string) *DNDInfo
+	// CommitAdvisoriesProbe reads the databases the compactor found over its
+	// commit line from townRoot. The daemon owns that record, and this package
+	// may not import the daemon, so the caller supplies the probe — cmd passes
+	// a wrapper over daemon.LoadCompactorAdvisories. Nil leaves the field
+	// empty.
+	CommitAdvisoriesProbe func(townRoot string) []CommitAdvisoryInfo
 }
 
 // Gather reads the town's runtime status: the registered rigs and their
@@ -328,6 +334,9 @@ func Gather(opts Options) (TownStatus, error) {
 	}
 	if !fast && (status.Dolt.Remote || status.Dolt.Running) {
 		readDoltCommitMeter(status.Dolt, townRoot, doltserver.CommitsLastDay)
+	}
+	if opts.CommitAdvisoriesProbe != nil {
+		status.Dolt.CommitAdvisories = opts.CommitAdvisoriesProbe(townRoot)
 	}
 
 	// Tmux status

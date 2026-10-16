@@ -270,13 +270,13 @@ CREATE → LIVE → CLOSE → DECAY → COMPACT → FLATTEN
 | CREATE | Any agent | Continuous | `bd create`, `bd mol wisp create` |
 | CLOSE | Agent or patrol | Per-task | `bd close`, `gt done` |
 | DECAY | Reaper patrol | Daily | `DELETE FROM wisps WHERE status='closed' AND age > 7d` |
-| COMPACT | Compactor patrol (monitor) | Daily | Counts commits, escalates at threshold — does not rewrite history |
+| COMPACT | Compactor patrol (monitor) | Daily | Counts commits, advises at the commit threshold and escalates at the size line — does not rewrite history |
 | GC | `scheduled_maintenance` patrol, the one GC actor | Weekly, or on old-gen growth >20% | `CALL dolt_gc('--full')` under the pause marker; history kept |
 | FLATTEN | Operator, offline | Only when a database passes 2 GB | [dolt-history-offline.md](../dolt-history-offline.md) — `DOLT_RESET --soft` + `DOLT_COMMIT` |
 
 All six stages are implemented in code. DECAY runs in the Reaper patrol
 (wisp_reaper.go). COMPACT runs in the Compactor patrol (compactor_dog.go), which
-monitors and escalates. GC runs in scheduled_maintenance (maintenance_gc.go).
+monitors and reports: the size line escalates, the commit count advises. GC runs in scheduled_maintenance (maintenance_gc.go).
 FLATTEN has no command: it is an offline operator procedure with one trigger,
 a database past 2 GB (gt-8z769.3).
 All lifecycle tickers are populated by `EnsureLifecycleDefaults()`
@@ -429,10 +429,10 @@ policy, not settings. The retired keys (`interval`, `threshold`, `mode`,
 `gc_min_bytes`, `gc_growth_ratio`) still parse, so a `daemon` section carrying
 them decodes strictly, and the daemon logs them as ignored.
 
-`patrols.compactor_dog.threshold` is an escalation line only; the compactor
-patrol never compacts, and it escalates on store size as well as on commit
-count. This town sets the commit threshold to 20000 rather than the 2000
-default.
+`patrols.compactor_dog.threshold` is a report line only; the compactor patrol
+never compacts, it escalates on store size, and a commit count over the
+threshold is shown on the status line as an advisory (gt-3mu6q). This town sets
+the commit threshold to 20000 rather than the 2000 default.
 
 All compaction operations are safe on a running server — no downtime
 needed. Can also be wired as a Dolt scheduled event (MySQL-style cron):

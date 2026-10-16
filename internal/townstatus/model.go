@@ -64,6 +64,19 @@ type DoltInfo struct {
 	// CommitsPerDayWarn is the per-database limit the meter is held to
 	// (operational.dolt.commits_per_day_warn).
 	CommitsPerDayWarn int `json:"commits_per_day_warn,omitempty"`
+	// CommitAdvisories lists the databases the compactor found over its
+	// commit line, which the Services line shows as an advisory: the count is
+	// reported and nothing follows from it, because a count is not a reason to
+	// rewrite history (gt-3mu6q).
+	CommitAdvisories []CommitAdvisoryInfo `json:"commit_advisories,omitempty"`
+}
+
+// CommitAdvisoryInfo is one database whose total commit count is over the
+// compactor's commit line.
+type CommitAdvisoryInfo struct {
+	Database  string `json:"database"`
+	Commits   int    `json:"commits"`
+	Threshold int    `json:"threshold"`
 }
 
 // StrayDoltInfo is one Dolt server process that is not the town's own, with
