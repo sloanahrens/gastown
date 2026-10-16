@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"errors"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/slot"
 )
 
@@ -93,37 +95,50 @@ func TestPolecatStopPendingWork(t *testing.T) {
 	}
 }
 
+// fakeStopCheckReads answers the live-suite check from canned evidence. The
+// reads themselves are plumbing over tmux, ps and the pool, and the unit tier
+// starts none of them (docs/testing.md); what is under test here is the
+// decision over those reads and the message it carries.
+type fakeStopCheckReads struct {
+	rep      slot.Report
+	repErr   error
+	panes    []int
+	panesErr error
+	procs    []polecat.Proc
+	procsErr error
+}
+
+func (f fakeStopCheckReads) Slots() (slot.Report, error)           { return f.rep, f.repErr }
+func (f fakeStopCheckReads) PanePIDs(string) ([]int, error)        { return f.panes, f.panesErr }
+func (f fakeStopCheckReads) ProcessTable() ([]polecat.Proc, error) { return f.procs, f.procsErr }
+
+// heldSlot is a pool report holding slot 0 under role.
+func heldSlot(role string) slot.Report {
+	return slot.Report{Slots: []slot.SlotState{{Index: 0, Held: true, Owner: &slot.Owner{Role: role}}}}
+}
+
 // TestPolecatStopVerificationRunning guards the turn-boundary fix for
 // gt-couv: the Stop hook must not treat "my own slot-wrapped suite is still
-// running" as abandonment, but a slot held by an unrelated polecat/rig must
-// not falsely suppress the auto-done either.
-//
-// This runs at every turn boundary and reads only the flock, through
-// slot.StatusPoolLocksOnly, so it never shells out to `docker ps` (gt-a8kx);
-// TestStatusPoolLocksOnlySkipsDockerProbe pins that in internal/slot.
+// running" as abandonment, and gt-78n0: nor a suite still live in the polecat's
+// own pane. A suite belonging to an unrelated polecat/rig must not falsely
+// suppress the auto-done either.
 func TestPolecatStopVerificationRunning(t *testing.T) {
 	t.Parallel()
-	t.Run("no slot held", func(t *testing.T) {
-		stubNoContainers(t)
-		townRoot := t.TempDir()
+	const session = "gt-coral"
+	// An idle pane: the polecat's agent process and nothing under it.
+	idlePane := []polecat.Proc{{PID: 100, PPID: 1, Args: "claude --session-id a"}}
 
-		busy, reason := polecatStopVerificationRunning(townRoot, "gastown", "coral")
+	t.Run("no suite running", func(t *testing.T) {
+		busy, reason := polecatStopSuite(fakeStopCheckReads{panes: []int{100}, procs: idlePane},
+			t.TempDir(), "gastown", "coral", session)
 		if busy {
-			t.Fatalf("busy = true (%s), want false when nothing holds the slot", reason)
+			t.Fatalf("busy = true (%s), want false when nothing holds the slot and the pane is idle", reason)
 		}
 	})
 
 	t.Run("slot held by this polecat", func(t *testing.T) {
-		stubNoContainers(t)
-		townRoot := t.TempDir()
-
-		handle, err := slot.Acquire(townRoot, "gastown/coral", time.Second)
-		if err != nil {
-			t.Fatalf("slot.Acquire: %v", err)
-		}
-		defer handle.Release()
-
-		busy, reason := polecatStopVerificationRunning(townRoot, "gastown", "coral")
+		busy, reason := polecatStopSuite(fakeStopCheckReads{rep: heldSlot("gastown/coral")},
+			t.TempDir(), "gastown", "coral", session)
 		if !busy {
 			t.Fatal("busy = false, want true when this polecat holds the slot")
 		}
@@ -133,18 +148,30 @@ func TestPolecatStopVerificationRunning(t *testing.T) {
 	})
 
 	t.Run("slot held by a different polecat does not suppress", func(t *testing.T) {
-		stubNoContainers(t)
-		townRoot := t.TempDir()
-
-		handle, err := slot.Acquire(townRoot, "gastown/citrine", time.Second)
-		if err != nil {
-			t.Fatalf("slot.Acquire: %v", err)
-		}
-		defer handle.Release()
-
-		busy, reason := polecatStopVerificationRunning(townRoot, "gastown", "coral")
+		busy, reason := polecatStopSuite(fakeStopCheckReads{rep: heldSlot("gastown/citrine"), panes: []int{100}, procs: idlePane},
+			t.TempDir(), "gastown", "coral", session)
 		if busy {
 			t.Fatalf("busy = true (%s), want false when a different polecat holds the slot", reason)
+		}
+	})
+
+	t.Run("a suite still live in this polecat's pane", func(t *testing.T) {
+		procs := append(slices.Clone(idlePane), polecat.Proc{PID: 101, PPID: 100, Args: "go test ./internal/cmd/"})
+		busy, reason := polecatStopSuite(fakeStopCheckReads{panes: []int{100}, procs: procs},
+			t.TempDir(), "gastown", "coral", session)
+		if !busy {
+			t.Fatal("busy = false, want true while go test runs in the polecat's own pane")
+		}
+		if !strings.Contains(reason, "go test") {
+			t.Fatalf("reason = %q, want it to name the go test", reason)
+		}
+	})
+
+	t.Run("an unreadable read is not busy", func(t *testing.T) {
+		busy, reason := polecatStopSuite(fakeStopCheckReads{panesErr: errors.New("tmux is gone")},
+			t.TempDir(), "gastown", "coral", session)
+		if busy {
+			t.Fatalf("busy = true (%s), want false: a turn boundary reads an unreadable state as not busy", reason)
 		}
 	})
 }
@@ -187,11 +214,13 @@ const polecatStopWrapperArgv = `/bin/zsh -c source /Users/sloan/gt/.claude-town/
 
 // TestPolecatStopVerificationArgv guards the gt-78n0 pane scan: the commands
 // that mean "this polecat is still verifying" must be recognized wherever the
-// wrapper buries them, and the ones that only mention a gate must not be.
+// wrapper buries them, and the ones that only mention a gate must not be. The
+// matcher is polecat.SuiteArgv; what is pinned here is this guard's tokenizer
+// and the invocations it feeds the matcher.
 func TestPolecatStopVerificationArgv(t *testing.T) {
 	t.Parallel()
 
-	gates := []stopCheckGate{
+	gates := []polecat.Invocation{
 		{Program: "make", Target: "test"},
 		{Program: "make", Target: "lint"},
 		{Program: "make", Target: "build"},
@@ -355,15 +384,15 @@ func TestStopCheckGateFromCommand(t *testing.T) {
 
 	cases := []struct {
 		command string
-		want    stopCheckGate
+		want    polecat.Invocation
 		ok      bool
 	}{
-		{command: "GOFLAGS=-p=8 make test", want: stopCheckGate{Program: "make", Target: "test"}, ok: true},
-		{command: "make test", want: stopCheckGate{Program: "make", Target: "test"}, ok: true},
-		{command: "make -j4 test", want: stopCheckGate{Program: "make", Target: "test"}, ok: true},
-		{command: "/usr/local/bin/make lint", want: stopCheckGate{Program: "make", Target: "lint"}, ok: true},
-		{command: "go test ./...", want: stopCheckGate{Program: "go", Target: "test"}, ok: true},
-		{command: "pytest -q", want: stopCheckGate{Program: "pytest"}, ok: true},
+		{command: "GOFLAGS=-p=8 make test", want: polecat.Invocation{Program: "make", Target: "test"}, ok: true},
+		{command: "make test", want: polecat.Invocation{Program: "make", Target: "test"}, ok: true},
+		{command: "make -j4 test", want: polecat.Invocation{Program: "make", Target: "test"}, ok: true},
+		{command: "/usr/local/bin/make lint", want: polecat.Invocation{Program: "make", Target: "lint"}, ok: true},
+		{command: "go test ./...", want: polecat.Invocation{Program: "go", Target: "test"}, ok: true},
+		{command: "pytest -q", want: polecat.Invocation{Program: "pytest"}, ok: true},
 		{command: "", ok: false},
 		{command: "   ", ok: false},
 	}
@@ -379,68 +408,6 @@ func TestStopCheckGateFromCommand(t *testing.T) {
 	}
 }
 
-// TestStopCheckDescendantArgvs guards the tree walk that scopes the scan to
-// the polecat's own pane: descendants of a pane must be found at any depth,
-// and another pane's processes must never be.
-func TestStopCheckDescendantArgvs(t *testing.T) {
-	t.Parallel()
-
-	// Pane 100's agent spawns a wrapper (110) that spawns the suite (111);
-	// pane 200 is a different polecat and shares no ancestry.
-	procs := []stopCheckProc{
-		{PID: 100, PPID: 1, Args: "claude --session-id a"},
-		{PID: 110, PPID: 100, Args: "zsh -c eval 'make test'"},
-		{PID: 111, PPID: 110, Args: "make test"},
-		{PID: 200, PPID: 1, Args: "claude --session-id b"},
-		{PID: 210, PPID: 200, Args: "make lint"},
-	}
-
-	got := stopCheckDescendantArgvs([]int{100}, procs)
-	if len(got) != 2 {
-		t.Fatalf("descendants of pane 100 = %v, want the wrapper and its suite", got)
-	}
-	for _, argv := range got {
-		if strings.Contains(argv, "make lint") {
-			t.Fatalf("descendants of pane 100 included another pane's process: %q", argv)
-		}
-	}
-	if len(stopCheckDescendantArgvs([]int{999}, procs)) != 0 {
-		t.Fatal("a pane with no processes must yield no descendants")
-	}
-}
-
-// TestParsePolecatStopPanes guards the pane lookup: only the polecat's own
-// session's panes are returned, and every pane of it, not just the first.
-func TestParsePolecatStopPanes(t *testing.T) {
-	t.Parallel()
-
-	out := "gt-diamond\t42057\ngt-diamond\t42058\ngt-refinery\t66606\nhq-mayor\t81505\n"
-	got := parsePolecatStopPanes(out, "gt-diamond")
-	if len(got) != 2 || got[0] != 42057 || got[1] != 42058 {
-		t.Fatalf("parsePolecatStopPanes = %v, want [42057 42058]", got)
-	}
-	if len(parsePolecatStopPanes(out, "gt-missing")) != 0 {
-		t.Fatal("an unknown session must yield no panes")
-	}
-	if len(parsePolecatStopPanes("no tabs here\n", "gt-diamond")) != 0 {
-		t.Fatal("malformed output must yield no panes")
-	}
-}
-
-// TestParseStopCheckProcessTable guards the ps parse: argv keeps its spaces,
-// and the header and malformed rows are skipped.
-func TestParseStopCheckProcessTable(t *testing.T) {
-	t.Parallel()
-
-	out := "  PID  PPID ARGS\n" +
-		"42057     1 claude --session-id b49c75ca\n" +
-		"59375 59370 sh -c echo hi; sleep 60\n" +
-		"notanumber 1 junk\n"
-	got := parseStopCheckProcessTable(out)
-	if len(got) != 2 {
-		t.Fatalf("parseStopCheckProcessTable returned %d rows, want 2: %+v", len(got), got)
-	}
-	if got[1].PID != 59375 || got[1].PPID != 59370 || got[1].Args != "sh -c echo hi; sleep 60" {
-		t.Fatalf("second row = %+v, want the wrapper's pid, parent and full argv", got[1])
-	}
-}
+// The pane listing parse, the ps parse and the descendant walk this guard's
+// reads use are polecat.ParsePanes, polecat.ParseProcessTable and
+// polecat.DescendantArgvs, tested where they live.

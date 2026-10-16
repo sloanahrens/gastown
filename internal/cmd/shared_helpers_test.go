@@ -5,11 +5,9 @@ package cmd
 // files until those were deleted with the merge queue (gt-v4ssj.6).
 
 import (
-	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
-	"github.com/steveyegge/gastown/internal/slot"
 )
 
 // contains checks if s contains substr (helper for styled output)
@@ -45,24 +43,4 @@ func CodeOfErr(t *testing.T, cmd *cobra.Command) (int, error) {
 	}
 	t.Errorf("command error: %v", err)
 	return 1, err
-}
-
-// stubNoContainersOnce installs the stub below exactly once per test binary.
-// Installed from a t.Parallel test, the seam's own runningGateContainers var
-// would otherwise be written concurrently — the writes race even though every
-// caller installs the same value.
-var stubNoContainersOnce sync.Once
-
-// stubNoContainers overrides package slot's docker-ps lookup so tests that
-// drive slot.Acquire never shell out to the real docker CLI, which would poll
-// for the full gate timeout whenever any dolt/testcontainers/ryuk container is
-// up on the host (gt-tuiy). See slot.SetContainerListerForTest.
-//
-// It installs once and never restores (gt-k317): every caller wants the same
-// lister, and a per-test restore raced under t.Parallel.
-func stubNoContainers(t *testing.T) {
-	t.Helper()
-	stubNoContainersOnce.Do(func() {
-		slot.SetContainerListerForTest(func() ([]string, error) { return nil, nil })
-	})
 }
