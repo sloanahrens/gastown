@@ -301,3 +301,50 @@ func TestRuntimeArtifactPathspecsListing_KeepsFilesWhenHeadListingFails(t *testi
 		t.Fatalf("RuntimeArtifactPathspecsListing with a failed HEAD listing = %q, want none", got)
 	}
 }
+
+// An unborn HEAD — git's own failure for a repo before its first commit —
+// reaches the same keep rather than reset through the real *Git path, not only
+// through the listing seam above: nothing can be told about what is committed
+// under the root, so its output is kept (gt-ji90i).
+func TestRuntimeArtifactPathspecs_UnbornHeadKeepsOutput(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"ls-files -z -- coverage/":                    ok("coverage/coverage.out\x00"),
+		"ls-tree -r -z --name-only HEAD -- coverage/": fail(128, "fatal: Not a valid object name HEAD\n"),
+	})
+	if got := newTestGit(t, s).RuntimeArtifactPathspecs([]string{"coverage/coverage.out"}); got != nil {
+		t.Fatalf("RuntimeArtifactPathspecs with an unborn HEAD = %q, want no pathspec", got)
+	}
+	s.noUnscripted(t)
+}
+
+// Each artifact root costs one index listing and one HEAD listing, however
+// many files it holds: a generated directory of ten files must not spawn ten
+// git calls on the checkpoint dog's and gt done's shared path (gt-ji90i).
+func TestRuntimeArtifactPathspecs_ReadsEachRootOnce(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"ls-files -z -- coverage/":                      ok("coverage/a.out\x00coverage/b.out\x00coverage/c.out\x00"),
+		"ls-tree -r -z --name-only HEAD -- coverage/":   ok(""),
+		"ls-files -z -- web/.cache/":                    ok("web/.cache/blob.bin\x00web/.cache/other.bin\x00"),
+		"ls-tree -r -z --name-only HEAD -- web/.cache/": ok(""),
+	})
+	g := newTestGit(t, s)
+	paths := []string{
+		"coverage/a.out", "coverage/b.out", "web/.cache/blob.bin",
+		"coverage/c.out", "web/.cache/other.bin",
+	}
+	if got, want := g.RuntimeArtifactPathspecs(paths), []string{"coverage/", "web/.cache/"}; !slices.Equal(got, want) {
+		t.Fatalf("RuntimeArtifactPathspecs = %q, want %q", got, want)
+	}
+	want := []string{
+		"ls-files -z -- coverage/",
+		"ls-tree -r -z --name-only HEAD -- coverage/",
+		"ls-files -z -- web/.cache/",
+		"ls-tree -r -z --name-only HEAD -- web/.cache/",
+	}
+	if got := s.sent(); !slices.Equal(got, want) {
+		t.Errorf("git calls = %q, want one listing pair per root %q", got, want)
+	}
+	s.noUnscripted(t)
+}
