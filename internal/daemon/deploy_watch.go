@@ -528,10 +528,13 @@ func (w *deployWatch) verdicts(ctx context.Context, repo deployRepo, runs []forg
 			key := deployAlertKey(repo, wf, class)
 			switch run.Status {
 			case deployRunFailed, deployRunCancelled:
-				jobs := w.failingJobs(ctx, repo, run)
+				jobs, jobsRead := w.failingJobs(ctx, repo, run)
 				severity := deploySeverity(wf, class, jobs)
 				if severity == "" {
 					continue
+				}
+				if !jobsRead {
+					severity = w.standingSeverity(key, severity)
 				}
 				f := deployFailure{
 					Rig:      repo.Rig,
@@ -593,21 +596,23 @@ func (w *deployWatch) heldOpen(repo deployRepo, present map[string]bool) []deplo
 // deciding its workflow, so a failure that stands — which is the common case,
 // since it stands until someone fixes the deploy — costs one jobs call, not
 // one per poll. An unread answer is not cached, so the next poll retries it.
-func (w *deployWatch) failingJobs(ctx context.Context, repo deployRepo, run forgejo.ActionRun) []string {
+// read reports whether the watch actually read the list: an empty one an API
+// answered is an answer, and a failed call is not (standingSeverity).
+func (w *deployWatch) failingJobs(ctx context.Context, repo deployRepo, run forgejo.ActionRun) (names []string, read bool) {
 	if names, ok := w.jobs[run.ID]; ok {
-		return names
+		return names, true
 	}
 	api, err := w.API(repo.APIBase)
 	if err != nil {
 		w.logOnce(repo.Rig, "%s: no client for %s: %v", repo.Rig, repo.APIBase, err)
-		return nil
+		return nil, false
 	}
 	ctx, cancel := context.WithTimeout(ctx, deployWatchCallTimeout)
 	defer cancel()
 	jobs, err := api.ListRunJobs(ctx, repo.Owner, repo.Name, run.ID)
 	if err != nil {
 		w.logOnce(repo.Rig, "%s %s: run %d jobs: %v", repo.Rig, repo.repo(), run.ID, err)
-		return nil
+		return nil, false
 	}
 	var out []string
 	for _, job := range jobs {
@@ -619,7 +624,21 @@ func (w *deployWatch) failingJobs(ctx context.Context, repo deployRepo, run forg
 		w.jobs = map[int64][]string{}
 	}
 	w.jobs[run.ID] = out
-	return out
+	return out, true
+}
+
+// standingSeverity is the level to alert key at when this poll could not read
+// the run's jobs. deploySeverity raises a health.yml failure to high only when
+// the prod smoke is named, so an unread list is no reading at all: reported as
+// the medium of a class without one, it corrects a standing high alert — and
+// the bead the key names — down on the strength of a daemon restart (gt-xkikw).
+// A key with nothing open keeps what the workflow and the class alone imply,
+// and the next poll that reads the list corrects it from there.
+func (w *deployWatch) standingSeverity(key, severity string) string {
+	if open, known := w.open[key]; known && open.Severity == config.SeverityHigh && severity != config.SeverityHigh {
+		return config.SeverityHigh
+	}
+	return severity
 }
 
 // note raises or re-raises the alert for f, and pushes it if it is high. A
@@ -638,6 +657,13 @@ func (w *deployWatch) note(f deployFailure) {
 		if err := w.Raise(f.Severity, f.Key, f.Message); err != nil {
 			w.logOnce(f.Key, "%s: raising %s: %v", f.Key, f.Severity, err)
 			return
+		}
+		if open.Run != f.RunID {
+			// The push is owed once per run, so this run's failure owes its
+			// own delivery: kept, the first run's would silence every failure
+			// behind the same key. A severity the same run is read at
+			// differently leaves that run's delivery where it is (gt-xkikw).
+			open.Pushed = false
 		}
 		open.Run = f.RunID
 		open.Severity = f.Severity
