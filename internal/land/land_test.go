@@ -1243,6 +1243,56 @@ func TestLandRecoversUnrecordedSquashLandingUnderALaterLanding(t *testing.T) {
 	}
 }
 
+// TestLandRecoversUnrecordedSquashLandingOverAConflictingLaterLanding: another
+// landing edited the lines the head's own change wrote, between the unrecorded
+// squash and the retry. The retry's squash of the head conflicts with the
+// target's later version of those lines, and the pass rejected it as a
+// conflict, sending the author to rework work that already landed. The target
+// holds a land merge naming this head, so the conflict is the landing meeting
+// its own work and the pass finishes it (gt-01yt6).
+func TestLandRecoversUnrecordedSquashLandingOverAConflictingLaterLanding(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.squashRange(t)
+	l := f.lander()
+	var merged string
+	f.merger.fn = func(req MergeRequest) error {
+		merged = req.Head
+		f.setMain(req.Head)
+		return errors.New("the pass ended after the merge, before the record")
+	}
+	if _, err := l.Land(context.Background(), f.work); err == nil {
+		t.Fatal("the first pass returned a landing it never recorded")
+	}
+	f.merger.fn = nil
+	// The later landing rewrites b.txt, which the head's change added.
+	f.base = f.pushMain("b.txt", "a later landing's b\n")
+	if f.git.Tree(f.originMain())["b.txt"] == f.git.Tree(f.work.Head)["b.txt"] {
+		t.Fatal("the target still carries the head's b.txt; the retry's merge cannot conflict")
+	}
+
+	res, err := f.lander().Land(context.Background(), f.work)
+	if err != nil {
+		t.Fatalf("the second pass did not finish the squash landing: %v", err)
+	}
+	if res.LandedCommit != merged || f.originMain() != f.base {
+		t.Errorf("LandedCommit = %s, origin/main = %s; want the squash %s under the later landing %s",
+			res.LandedCommit, f.originMain(), merged, f.base)
+	}
+	if len(f.merger.calls) != 1 {
+		t.Errorf("the merger ran %d times, want the one merge", len(f.merger.calls))
+	}
+	if len(f.gate.dirs) != 1 || len(f.review.calls) != 1 {
+		t.Errorf("the second pass gated and reviewed again: %d gate runs, %d reviews", len(f.gate.dirs), len(f.review.calls))
+	}
+	if b := f.bead(); b.Status != "closed" || CountRejections(b.Notes) != 0 {
+		t.Errorf("bead after the finished landing: status=%s notes=%q", b.Status, b.Notes)
+	}
+	if len(f.landingLines()) != 1 {
+		t.Fatalf("landings lines = %d, want 1", len(f.landingLines()))
+	}
+}
+
 // TestLandRecoversUnrecordedSquashLandingForkedBeforeItsBase: the branch
 // forked before the base the squash merged onto — another landing reached the
 // target in between — so the head's own change is not the diff between the two
