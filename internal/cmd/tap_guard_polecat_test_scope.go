@@ -155,14 +155,12 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool)
 	for i, t := range tokens {
 		lower[i] = strings.ToLower(t)
 	}
-	// The make goals in polecatWholeSuiteMakeGoals each run the whole suite
-	// in a Go tree: test chains the other three, test-slow and
-	// test-integration are its two stages, and gate (with gate-test, its
-	// build and unit stage) is the 20-minute `go test ./...`. A gt slot run
-	// wrapper or an env prefix does not change what any of them costs the
-	// host. A rig outside every Go module has no such goals, so its `make
-	// test` is left alone (gt-dieu9) — unless the directory cannot be placed
-	// at all, which leaves that question open (gt-ofj05).
+	// Every goal in polecatWholeSuiteMakeGoals starts the whole-repo `go test`
+	// in a Go tree. A gt slot run wrapper or an env prefix does not change
+	// what that costs the host. A rig outside every Go module has no such
+	// goals, so its `make test` is left alone (gt-dieu9) — unless the
+	// directory cannot be placed at all, which leaves that question open
+	// (gt-ofj05).
 	if i, goal := findPolecatWholeSuiteMakeGoal(lower); i >= 0 {
 		if !makeActsOnWholeGoModule(tokens[i:], makeTreeDir(cwd, cwdKnown)) {
 			return "", nil

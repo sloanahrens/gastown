@@ -558,6 +558,41 @@ func TestRunTapGuardContainerSuite_NonGoRigMakeTestAfterCd(t *testing.T) {
 	}
 }
 
+// The goals gt-gl3jb added read the same premise as make test: a rig outside
+// every Go module has nothing to refuse, a Go tree keeps the refusal, and a
+// directory the guard cannot place keeps it too (gt-dieu9, gt-ofj05).
+func TestPolecatTestScopeWholeSuiteGoalsFollowTheTree(t *testing.T) {
+	t.Parallel()
+	nonGo := nonGoTree(t)
+	goRoot := fakeModule(t, "gastown/refinery/rig")
+	for _, goal := range polecatWholeSuiteMakeGoals {
+		tests := []struct {
+			name    string
+			command string
+			cwd     string
+			blocked bool
+		}{
+			{"non-Go rig", "make " + goal, nonGo, false},
+			{"non-Go rig with jobs flag", "make -j4 " + goal, nonGo, false},
+			{"non-Go rig, cd within it", "cd " + nonGo + " && make " + goal, nonGo, false},
+			{"Go tree", "make " + goal, goRoot, true},
+			{"make -C into the Go tree", "make -C " + goRoot + " " + goal, nonGo, true},
+			{"cd into the Go tree", "cd " + goRoot + " && make " + goal, nonGo, true},
+			{"unset variable in the cd target", `cd "$GT_PE7IY_UNSET" && make ` + goal, nonGo, true},
+			{"command substitution in the cd target", `cd "$(printf /x)" && make ` + goal, nonGo, true},
+			{"make -C a shell-expanded directory", `make -C "$GT_PE7IY_UNSET" ` + goal, nonGo, true},
+		}
+		for _, tt := range tests {
+			t.Run(goal+"/"+tt.name, func(t *testing.T) {
+				reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, tt.cwd), tt.command)
+				if got := reason != ""; got != tt.blocked {
+					t.Errorf("evaluatePolecatTestScope(%q, cwd %s) blocked = %v (reason %q, matched %v), want %v", tt.command, tt.cwd, got, reason, matched, tt.blocked)
+				}
+			})
+		}
+	}
+}
+
 // Through the real hook entry point: a polecat is blocked, the refinery (which
 // must run whole packages) and crew are not.
 func TestRunTapGuardContainerSuite_PolecatTestScope(t *testing.T) {
