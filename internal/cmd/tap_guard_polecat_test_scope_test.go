@@ -1060,6 +1060,8 @@ func TestPolecatTestScope_NestedShapes(t *testing.T) {
 		{"substitution in a later segment", `gofmt -l . && x=$(make gate)`, root, true},
 		{"substitution as an argument of go", `go vet $(go test ./...)`, root, true},
 		{"nested substitution", `echo $(echo $(make gate))`, root, true},
+		{"unterminated substitution", `echo $(make gate`, root, true},
+		{"unterminated backticks", "echo `make gate", root, true},
 		{"body holding a nested substitution", `out=$(go test ./internal/cmd 2>&1 | tail -n $(nproc))`, root, true},
 		{"body holding a grep group", `out=$(go test ./internal/cmd 2>&1 | grep -E '(ok|FAIL)')`, root, true},
 		{"body holding an awk field group", `out=$(go test ./internal/cmd 2>&1 | awk '{print $(NF)}')`, root, true},

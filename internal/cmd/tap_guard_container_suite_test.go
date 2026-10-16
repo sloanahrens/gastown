@@ -2113,6 +2113,8 @@ func TestEvaluateContainerSuiteCommand_NestedShapes(t *testing.T) {
 		{"substitution, awk field group after the run", `GT_TEST_DOCKER=1 out=$(go test ./internal/beads 2>&1 | awk '{print $(NF)}')`, true},
 		{"substitution, nested substitution after the run", `GT_TEST_DOCKER=1 out=$(go test ./internal/beads 2>&1 | tail -n $(nproc))`, true},
 		{"substitution, run nested in an echo", `GT_TEST_DOCKER=1 echo "$(echo $(go test ./internal/beads))"`, true},
+		{"substitution, unterminated", `echo $(make test`, true},
+		{"substitution, unterminated backticks", "echo `make test", true},
 		{"backticks, make test", "`make test`", true},
 		{"eval, container package", `GT_TEST_DOCKER=1 eval "go test ./internal/beads/..."`, true},
 		{"eval, make test", `eval "make test"`, true},
@@ -2158,8 +2160,8 @@ func TestEvaluateContainerSuiteCommand_NestedShapes(t *testing.T) {
 }
 
 // commandSubstitutionSpans cuts a body with the parentheses balanced and the
-// quotes respected; the [^()]* regex ended the match at the first parenthesis
-// and the guards never judged the rest (gt-wrr5c).
+// quotes respected, and runs a substitution that never closes to the end of the
+// text (gt-wrr5c, gt-6v07e).
 func TestCommandSubstitutionSpans(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2180,8 +2182,10 @@ func TestCommandSubstitutionSpans(t *testing.T) {
 		{"single quote hiding a paren", `echo '$(' "$(pwd)" ')'`, []string{"pwd"}},
 		{"escaped", `echo \$(pwd)`, nil},
 		{"escaped paren in the body", `x=$(echo \) ; pwd)`, []string{`echo \) ; pwd`}},
-		{"unterminated", `x=$(go test .`, nil},
-		{"unterminated then closed", `echo $(a "b) $(c)`, []string{"c"}},
+		{"unterminated", `x=$(go test .`, []string{"go test ."}},
+		{"unterminated backtick", "x=`go test .", []string{"go test ."}},
+		{"unterminated quote in the body", `echo $(a "b) $(c)`, []string{`a "b) $(c)`}},
+		{"unterminated after a closed one", `a=$(one) b=$(two`, []string{"one", "two"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2220,7 +2224,7 @@ func TestHeredocSubstitutionSpans(t *testing.T) {
 		{"two", "$(a) and `b`\n", []string{"a", "b"}},
 		{"escaped", "run \\$(make gate)\n", nil},
 		{"escaped backslash", "run \\\\$(make gate)\n", []string{"make gate"}},
-		{"unterminated", "run $(make gate\n", nil},
+		{"unterminated", "run $(make gate\n", []string{"make gate\n"}},
 		{"no substitution", "make gate\n", nil},
 	}
 	for _, tt := range tests {
