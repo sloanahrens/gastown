@@ -3121,3 +3121,15 @@ func TestEndsCommandReservedWord(t *testing.T) {
 		t.Error("endsCommandReservedWord at the start of the command = true, want false")
 	}
 }
+
+func TestDangerousGuardBlocksEscapedNestedBacktick(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"echo `echo \\`rm -rf /\\``",
+		"echo `echo \\`git reset --hard\\``",
+	} {
+		if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
+			t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — the nested backtick command runs", command)
+		}
+	}
+}
