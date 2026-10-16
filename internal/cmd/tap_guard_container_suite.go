@@ -1217,8 +1217,9 @@ func makeRunDir(args []string, cwd string) (dir string, known bool) {
 		} else if len(tok) > 2 {
 			// A short one takes it attached, where the rest of the token is
 			// the value "=" and all ("-Cgo" is the directory "go", "-C=go"
-			// the directory "=go").
-			flag, value, hasValue = tok[:2], tok[2:], true
+			// the directory "=go"). Short options cluster, so the option that
+			// owns the value may sit behind valueless ones ("-sC dir").
+			flag, value, hasValue = splitMakeShortCluster(tok)
 		}
 		lower := strings.ToLower(flag)
 
@@ -1254,6 +1255,29 @@ func makeRunDir(args []string, cwd string) (dir string, known bool) {
 		}
 	}
 	return dir, true
+}
+
+// splitMakeShortCluster splits a clustered short-option token ("-sC", "-kCdir",
+// "-sfother.mk"; tok is longer than two bytes) into the option that takes the
+// rest of the token as its value, that value, and whether the value is attached.
+//
+// It looks for -C and -f, the two options makeRunDir acts on, behind the
+// valueless letters before them. Another option that takes a value ends the
+// scan first ("-oC" is -o with the value "C", not -C): the rest of the token is
+// its value, which makeRunDir steps over as it always has. A token with neither
+// is read by its first letter, as before, so this only finds a -C or -f that
+// the old split hid.
+func splitMakeShortCluster(tok string) (flag, value string, hasValue bool) {
+	for k := 1; k < len(tok); k++ {
+		rest := tok[k+1:]
+		switch tok[k] {
+		case 'C', 'c', 'f', 'F':
+			return "-" + string(tok[k]), rest, rest != ""
+		case 'o', 'O', 'W', 'I', 'E', 'j', 'l':
+			return "-" + string(tok[k]), rest, true
+		}
+	}
+	return tok[:2], tok[2:], true
 }
 
 // resolveMakeDir applies one -C argument to the directory accumulated so far.
