@@ -10,7 +10,10 @@ import (
 // the town's other readers, internal/cmd/dashboard_rework.go; this file holds
 // the payload and the arithmetic, so the windows and the grouping are testable
 // without a disk. The grouping is the one ~/.claude/tools/om-rework-stats.py
-// prints, which is the figure the table has to match (gt-mctxx).
+// prints, which is the figure the table has to match (gt-mctxx). The om time
+// per bar is a second pass over the same records, and only the reader can fill
+// it: the verdict line carries no duration, so the reader joins it to the
+// stages line the landing worker logged for that review (gt-uiiml).
 
 const (
 	// reworkWindow is how far back each of the table's two windows reaches:
@@ -41,6 +44,11 @@ type ReworkReview struct {
 	Findings int
 	Bar      float64
 	At       time.Time
+	// OM is how long this review's om run took, which the reader joins on from
+	// the stages line the landing worker logged as the review ended. Nil when
+	// the log gave no duration for it: the review did not run, or its stages
+	// line is gone.
+	OM *time.Duration
 }
 
 // approved is whether the review let the work land: an approving verdict the
@@ -63,6 +71,24 @@ type ReworkBar struct {
 	// is the mean number of reviews those beads took; 0 when none landed.
 	Landed           int     `json:"landed"`
 	ReviewsPerLanded float64 `json:"reviews_per_landed"`
+	// MeanOMSecs is the mean, over the OMBeads landed beads whose om time the
+	// log gave, of each bead's total om time in seconds — every review it had
+	// before landing, summed. It is 0 with no OMBeads, which the page draws as
+	// a dash rather than a fast bar. The denominator is the landed beads the
+	// sums are known for and not every landed bead, since an unknown sum is not
+	// a zero one.
+	MeanOMSecs float64 `json:"mean_om_secs"`
+	OMBeads    int     `json:"om_beads"`
+	// MedianOMSecs and SlowestOMSecs are the median and the largest of those
+	// per-bead sums, and SlowestOMBead names the bead the largest belongs to.
+	// The mean is the column and these three are its hover.
+	MedianOMSecs  float64 `json:"median_om_secs"`
+	SlowestOMSecs float64 `json:"slowest_om_secs"`
+	SlowestOMBead string  `json:"slowest_om_bead,omitempty"`
+	// OMReviewsMissing counts the reviews of landed beads the log gave no om
+	// duration for. They are left out of the sums, and the page says how many
+	// they are, so a bead averaged over part of its reviews reads as that.
+	OMReviewsMissing int `json:"om_reviews_missing"`
 	// LoopsOut counts the beads rejected ReworkLoopCap times with no approval.
 	LoopsOut  int     `json:"loops_out"`
 	MeanScore float64 `json:"mean_score"`
@@ -94,6 +120,9 @@ type Rework struct {
 // once, as the later of the two. An approval that carried findings and was
 // followed by a later attempt of the same bead counts as a rejection, whatever
 // its line says (see reworkSpan).
+//
+// A bar's om time is read from the landed beads alone: each bead's sum of its
+// reviews' durations, averaged over the beads the log gave one for.
 func AggregateRework(reviews []ReworkReview, now time.Time) Rework {
 	recent, prior := now.Add(-reworkWindow), now.Add(-2*reworkWindow)
 	return Rework{Windows: []ReworkWindow{
@@ -130,10 +159,18 @@ func reworkSpan(name string, reviews []ReworkReview, from, to time.Time, closed 
 		byBead[k] = append(byBead[k], r)
 	}
 
+	type omSum struct {
+		bead string
+		d    time.Duration
+	}
 	type tally struct {
 		ReworkBar
 		scoreSum      float64
 		landedReviews int
+		// omSums is one entry per landed bead whose om time the log gave, in
+		// the order the beads were folded; the mean and its hover are read off
+		// it once every bar is complete.
+		omSums []omSum
 	}
 	bars := map[float64]*tally{}
 	for _, rs := range byBead {
@@ -162,9 +199,15 @@ func reworkSpan(name string, reviews []ReworkReview, from, to time.Time, closed 
 			t.FirstTry++
 		}
 		rejected, approved := 0, false
+		var om time.Duration
+		omKnown := 0
 		for i, r := range rs {
 			t.Reviews++
 			t.scoreSum += r.Score
+			if r.OM != nil {
+				om += *r.OM
+				omKnown++
+			}
 			if stood(i) {
 				approved = true
 			} else {
@@ -176,6 +219,13 @@ func reworkSpan(name string, reviews []ReworkReview, from, to time.Time, closed 
 		case approved:
 			t.Landed++
 			t.landedReviews += len(rs)
+			// The bead's om time is every review it had, the ones with no
+			// duration left out; a bead that has none at all is left out of
+			// the mean rather than counted as free.
+			t.OMReviewsMissing += len(rs) - omKnown
+			if omKnown > 0 {
+				t.omSums = append(t.omSums, omSum{bead: rs[0].Bead, d: om})
+			}
 		case rejected >= ReworkLoopCap:
 			t.LoopsOut++
 		}
@@ -185,6 +235,24 @@ func reworkSpan(name string, reviews []ReworkReview, from, to time.Time, closed 
 			t.ReviewsPerLanded = float64(t.landedReviews) / float64(t.Landed)
 		}
 		t.MeanScore = t.scoreSum / float64(t.Reviews)
+		sums := make([]time.Duration, 0, len(t.omSums))
+		var total time.Duration
+		slowest := omSum{}
+		for i, s := range t.omSums {
+			sums = append(sums, s.d)
+			total += s.d
+			if i == 0 || s.d > slowest.d {
+				slowest = s
+			}
+		}
+		if len(sums) > 0 {
+			sort.Slice(sums, func(i, j int) bool { return sums[i] < sums[j] })
+			t.OMBeads = len(sums)
+			t.MeanOMSecs = total.Seconds() / float64(len(sums))
+			t.MedianOMSecs = medianDuration(sums).Seconds()
+			t.SlowestOMSecs = slowest.d.Seconds()
+			t.SlowestOMBead = slowest.bead
+		}
 		w.Bars = append(w.Bars, t.ReworkBar)
 	}
 	// The bar a tree named orders the rows, and the trees that named none come
@@ -197,4 +265,18 @@ func reworkSpan(name string, reviews []ReworkReview, from, to time.Time, closed 
 		return a < b
 	})
 	return w
+}
+
+// medianDuration is the middle of an ascending slice: the mean of the two
+// middle entries when the count is even, since taking the lower of the two
+// would report one bead's total as the middle of two.
+func medianDuration(ascending []time.Duration) time.Duration {
+	n := len(ascending)
+	if n == 0 {
+		return 0
+	}
+	if n%2 == 1 {
+		return ascending[n/2]
+	}
+	return (ascending[n/2-1] + ascending[n/2]) / 2
 }

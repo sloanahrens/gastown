@@ -355,7 +355,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	usage := newDashUsageReader(townRoot)
 	claudePlan := newDashboardClaudePlanReader(townRoot, usage, claudePlanUSD).
 		WithRenewalDay(claudePlanRenewalDay)
-	rework := newDashReworkReader(townRoot)
+	rework := newDashReworkReader(townRoot).withStages(om.stagesSince)
 	loads := newDashLoads(townRoot, time.Now)
 	return dashboard.NewHub(dashboard.Config{
 		Feed:       feed,

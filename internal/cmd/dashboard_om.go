@@ -1170,19 +1170,34 @@ func (r *omReader) trendInputs(since time.Time) ([]omStage, []omRejection) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_ = r.scanLog()
-	var stages []omStage
-	for _, st := range r.stages {
-		if !st.At.Before(since) {
-			stages = append(stages, st)
-		}
-	}
 	var rejs []omRejection
 	for _, rj := range r.rejects {
 		if !rj.At.Before(since) {
 			rejs = append(rejs, rj)
 		}
 	}
-	return stages, rejs
+	return r.stagesSinceLocked(since), rejs
+}
+
+// stagesSince returns the stage lines at or after since. The rework table's
+// reader asks for the stages of its own window, to time each om verdict
+// (gt-uiiml); the trend panel asks for the same lines through trendInputs.
+func (r *omReader) stagesSince(since time.Time) []omStage {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	_ = r.scanLog()
+	return r.stagesSinceLocked(since)
+}
+
+// stagesSinceLocked is stagesSince with the lock already held.
+func (r *omReader) stagesSinceLocked(since time.Time) []omStage {
+	var stages []omStage
+	for _, st := range r.stages {
+		if !st.At.Before(since) {
+			stages = append(stages, st)
+		}
+	}
+	return stages
 }
 
 // dispatch returns the latest dispatcher tick in the log, nil when there is none.

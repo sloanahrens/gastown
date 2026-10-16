@@ -315,6 +315,14 @@ const fmtDur = s => {
   return h + "h" + String(m % 60).padStart(2, "0") + "m";
 };
 const age = iso => iso ? fmtDur((Date.now() - new Date(iso).getTime()) / 1000) : "–";
+// fmtMS is a span in minutes and seconds, the form the om rework table draws a
+// review's time in: "0:48", "12:05". fmtDur rounds to the nearest unit, which
+// is what a column of unlike durations wants and not what a column of one
+// table's row times does.
+const fmtMS = s => {
+  s = Math.round(Number(s) || 0);
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+};
 // firstLine is the opening line of a text another agent wrote — a recommended
 // answer, which runs to a paragraph — for a row that carries one line of it.
 const firstLine = t => String(t).split("\n")[0].trim();
@@ -2883,8 +2891,9 @@ const fmtTokens = n => {
   if (n >= 1e3) return (n / 1e3).toFixed(1) + "k";
   return String(n);
 };
-// costTable is a table of heads ([text, numeric?]) over rows of [text, class]
-// cells, shared by the Usage and rework parts of the Cost panel.
+// costTable is a table of heads ([text, numeric?]) over rows of [text, class,
+// title?] cells, shared by the Usage and rework parts of the Cost panel. A
+// title is the cell's hover, for a figure whose numbers are behind it.
 function costTable(heads, rows) {
   const t = el("table");
   const hr = el("tr");
@@ -2892,7 +2901,11 @@ function costTable(heads, rows) {
   t.append(hr);
   for (const cells of rows) {
     const tr = el("tr");
-    cells.forEach(([text, cls]) => tr.append(el("td", cls || "", text)));
+    cells.forEach(([text, cls, title]) => {
+      const td = el("td", cls || "", text);
+      if (title) td.title = title;
+      tr.append(td);
+    });
     t.append(tr);
   }
   return t;
@@ -2968,11 +2981,13 @@ function costUsage(box, u, s) {
 // from the landing worker's review log, for the last seven days and the seven
 // before them. A bead counts under the bar in force at its first review in the
 // window. A bar of 0 is a tree that named none and reads "?". A read that
-// failed is a named state, never an empty week.
+// failed is a named state, never an empty week. The om time column is the mean
+// of the landed beads' own totals, each the sum of every review that bead had
+// before it landed; a bar no bead has a time for draws a dash.
 function costRework(box, r) {
   if (!r) { box.append(el("div", "empty", "om rework · reading…")); return; }
   if (r.unavailable) { box.append(el("div", "badc", "om rework · review log unreadable")); return; }
-  const heads = [["Bar", 1], ["Reviews", 1], ["First try", 1], ["Rework", 1], ["Reviews per landed", 1], ["Loops out", 1], ["Mean score", 1]];
+  const heads = [["Bar", 1], ["Reviews", 1], ["First try", 1], ["Rework", 1], ["Reviews per landed", 1], ["Mean om time", 1], ["Loops out", 1], ["Mean score", 1]];
   for (const w of r.windows || []) {
     box.append(el("h3", "sub", "om rework · " + w.name));
     const bars = w.bars || [];
@@ -2983,9 +2998,26 @@ function costRework(box, r) {
       [b.first_try + "/" + b.beads, "n"],
       [Math.round(100 * b.rejected / b.reviews) + "%", "n"],
       [b.landed ? b.reviews_per_landed.toFixed(2) : "–", "n"],
+      [b.om_beads ? fmtMS(b.mean_om_secs) : "–", "n", omTimeHover(b)],
       [String(b.loops_out), "n" + (b.loops_out ? " badc" : "")],
       [b.mean_score.toFixed(2), "n"]])));
   }
+}
+
+// omTimeHover is what the Mean om time cell says behind the figure: how many
+// landed beads it averages, the median bead total and the slowest one, and how
+// many reviews the log gave no om time for — the reviews left out of the sums,
+// which is why a bar can average over fewer beads than it landed. A part that
+// is not known is left out rather than drawn as a zero.
+function omTimeHover(b) {
+  const parts = [];
+  if (b.om_beads) {
+    parts.push("mean of " + b.om_beads + " landed bead" + (b.om_beads === 1 ? "" : "s") + ", each the sum of its reviews");
+    parts.push("median " + fmtMS(b.median_om_secs));
+    parts.push("slowest " + (b.slowest_om_bead ? b.slowest_om_bead + " " : "") + fmtMS(b.slowest_om_secs));
+  }
+  if (b.om_reviews_missing) parts.push(b.om_reviews_missing + " review" + (b.om_reviews_missing === 1 ? "" : "s") + " with no om time");
+  return parts.join(" · ");
 }
 
 // The GCP budget line of the Cost panel: the budget_alert findings the Cloud
