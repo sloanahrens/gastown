@@ -51,6 +51,9 @@ func isPolecatContext(proc guardProcess) bool {
 // A directory the walk cannot place is refused rather than read as a light one,
 // the reading an unplaceable make -C already gets (gt-ofj05).
 //
+// A make goal that runs the whole suite (make test, gate, test-slow,
+// test-integration) is refused on the same ground (gt-gl3jb).
+//
 // Heredoc bodies are stripped before tokenizing, so a body that merely spells
 // "make test" — a bead description, a doc, a formula — is data, not a live
 // invocation. A body fed to a shell invoker is the exception and is judged as
@@ -98,6 +101,26 @@ func evaluatePolecatTestScopeDepth(proc guardProcess, command, cwd string, depth
 	return "", nil
 }
 
+// polecatWholeSuiteMakeGoals are the Makefile goals that start the whole-repo
+// `go test` on the host: gate and its gate-test stage, the two slow tiers,
+// and test, which runs them all. gate-lint, lint, build and presubmit are not
+// here — they run no whole-suite test (presubmit tests the changed packages).
+// gt done runs its own gate, so no polecat flow needs these (gt-gl3jb).
+var polecatWholeSuiteMakeGoals = []string{"test", "gate", "gate-test", "test-slow", "test-integration"}
+
+// findPolecatWholeSuiteMakeGoal returns the index of the first make invocation
+// in tokens (already lowercased) that names a polecatWholeSuiteMakeGoals goal,
+// and the goal, or -1.
+func findPolecatWholeSuiteMakeGoal(tokens []string) (int, string) {
+	found, goal := -1, ""
+	for _, g := range polecatWholeSuiteMakeGoals {
+		if i := findInvocation(tokens, "make", g); i >= 0 && (found < 0 || i < found) {
+			found, goal = i, g
+		}
+	}
+	return found, goal
+}
+
 // evaluatePolecatTestScopeSegment judges one shell segment in cwd, the
 // directory the walk placed it in (cwdKnown says whether it could). The go
 // case is located through findGoSubcommand, so a global -C flag between `go`
@@ -110,17 +133,19 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool)
 	for i, t := range tokens {
 		lower[i] = strings.ToLower(t)
 	}
-	// `make test` is `go test ./...` under another name (see the Makefile
-	// target) in a Go tree, and a gt slot run wrapper or an env prefix does
-	// not change what it costs the host. A rig outside every Go module has no
-	// such target, so its `make test` is left alone (gt-dieu9) — unless the
-	// directory cannot be placed at all, which leaves that question open
-	// (gt-ofj05).
-	if i := findTestInvocation(lower, "make"); i >= 0 {
+	// The make goals in polecatWholeSuiteMakeGoals each run the whole suite
+	// in a Go tree: test chains the other three, test-slow and
+	// test-integration are its two stages, and gate (with gate-test, its
+	// build and unit stage) is the 20-minute `go test ./...`. A gt slot run
+	// wrapper or an env prefix does not change what any of them costs the
+	// host. A rig outside every Go module has no such goals, so its `make
+	// test` is left alone (gt-dieu9) — unless the directory cannot be placed
+	// at all, which leaves that question open (gt-ofj05).
+	if i, goal := findPolecatWholeSuiteMakeGoal(lower); i >= 0 {
 		if !makeActsOnWholeGoModule(tokens[i:], makeTreeDir(cwd, cwdKnown)) {
 			return "", nil
 		}
-		return "polecat 'make test' runs the whole suite", nil
+		return fmt.Sprintf("polecat 'make %s' runs the whole suite", goal), nil
 	}
 	i := findGoSubcommand(lower, "test")
 	if i < 0 {
