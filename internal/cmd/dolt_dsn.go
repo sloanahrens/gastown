@@ -114,6 +114,17 @@ func localDoltSocketPath(port int) string {
 	return probeDoltSocket(doltSocketPathForPort(port))
 }
 
+// doltUserInfo is the user[:password] the town's Dolt config connects with. A
+// config that sets a password and no user connects as the default user: the
+// bare UserDSN of that pair is empty, and formatDoltDSN would then read the
+// empty userInfo as root without the password.
+func doltUserInfo(c *doltserver.Config) string {
+	if c.User == "" {
+		return (&doltserver.Config{User: doltserver.DefaultUser, Password: c.Password}).UserDSN()
+	}
+	return c.UserDSN()
+}
+
 // formatDoltDSN renders a DSN for the given transport. userInfo is the
 // user[:password] part (doltserver.Config.UserDSN); empty means root.
 func formatDoltDSN(userInfo, network, address, dbName string, opts dsnOpts) string {
@@ -175,8 +186,8 @@ func buildDoltDSNFromConfig(c *doltserver.Config, dbName string, opts dsnOpts) s
 func buildDoltDSNFromConfigVia(socketFor func(port int) string, c *doltserver.Config, dbName string, opts dsnOpts) string {
 	if !c.IsRemote() {
 		if sock := socketFor(c.Port); sock != "" {
-			return formatDoltDSN(c.UserDSN(), "unix", sock, dbName, opts)
+			return formatDoltDSN(doltUserInfo(c), "unix", sock, dbName, opts)
 		}
 	}
-	return formatDoltDSN(c.UserDSN(), "tcp", c.HostPort(), dbName, opts)
+	return formatDoltDSN(doltUserInfo(c), "tcp", c.HostPort(), dbName, opts)
 }

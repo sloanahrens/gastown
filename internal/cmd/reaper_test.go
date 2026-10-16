@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/steveyegge/gastown/internal/daemon"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/reaper"
 )
 
@@ -348,5 +349,14 @@ func TestReaperHelpNamesTheDaemonPatrolConfig(t *testing.T) {
 	}
 	if !strings.Contains(reaperAutoCloseCmd.Long, "daemon patrol config") {
 		t.Errorf("auto-close help must name the daemon patrol config:\n%s", reaperAutoCloseCmd.Long)
+	}
+}
+
+// With no town the reaper has no Dolt config to read; it connects as the
+// default user instead of loading the config of an empty town root (gt-sktin).
+func TestReaperUserInfoForNoTownIsDefaultUser(t *testing.T) {
+	t.Parallel()
+	if got := reaperUserInfoFor(""); got != doltserver.DefaultUser {
+		t.Errorf("reaperUserInfoFor(\"\") = %q, want %q", got, doltserver.DefaultUser)
 	}
 }

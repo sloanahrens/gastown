@@ -162,8 +162,21 @@ func defaultReaperEndpoint() (string, int) {
 // reaperUserInfo is the user[:password] the reaper connects to Dolt with, from
 // the town's Dolt config.
 func reaperUserInfo() string {
-	townRoot, _ := workspace.FindFromCwd()
-	return doltserver.DefaultConfig(townRoot).UserDSN()
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil {
+		townRoot = ""
+	}
+	return reaperUserInfoFor(townRoot)
+}
+
+// reaperUserInfoFor is the user[:password] for the town at townRoot. An empty
+// townRoot (the cwd is outside any town) connects as the default user with no
+// password, where DefaultConfig("") would read the config of no town.
+func reaperUserInfoFor(townRoot string) string {
+	if townRoot == "" {
+		return doltserver.DefaultUser
+	}
+	return doltUserInfo(doltserver.DefaultConfig(townRoot))
 }
 
 // reaperEndpoint is the town's Dolt host and port (gt-y3pgh.3), with host
