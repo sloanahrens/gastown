@@ -361,9 +361,10 @@ type DaemonThresholds struct {
 	// RecoveryHeartbeatInterval is the fixed interval for recovery-focused daemon heartbeat (default "3m").
 	RecoveryHeartbeatInterval string `json:"recovery_heartbeat_interval,omitempty"`
 
-	// PressureCPUThreshold is the per-core load average above which new
+	// PressureCPUThreshold is the busy share of the host's cores (1.0 = every
+	// core busy, measured as 100% minus CPU idle) above which new
 	// non-infrastructure spawns are deferred. Disabled by default (0).
-	// Recommended starting value: 3.0 (only trips under severe load).
+	// Recommended starting value: 0.9 (trips when under 10% of CPU is idle).
 	PressureCPUThreshold *float64 `json:"pressure_cpu_threshold,omitempty"`
 
 	// PressureMemThresholdGB is the minimum available memory (in GB) below

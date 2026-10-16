@@ -214,3 +214,16 @@ func TestSampleHoldsEachReadingAgainstItsOwnProbeFailing(t *testing.T) {
 }
 
 func ptr[T any](v T) *T { return &v }
+
+// SampleCPUIdle runs top alone and reads the last CPU line, the second
+// sample; a top that fails leaves the reading nil (gt-kc8v1).
+func TestSampleCPUIdleReadsTopAlone(t *testing.T) {
+	t.Parallel()
+	got := sampleCPUIdle(context.Background(), func(context.Context) ([]byte, error) { return []byte(macTop), nil })
+	if got == nil || *got != *parseCPUIdle(macTop) {
+		t.Fatalf("sampleCPUIdle = %v, want the idle share of top's last CPU line", got)
+	}
+	if got := sampleCPUIdle(context.Background(), func(context.Context) ([]byte, error) { return nil, errors.New("refused") }); got != nil {
+		t.Errorf("sampleCPUIdle after a failed top = %v, want nil", *got)
+	}
+}

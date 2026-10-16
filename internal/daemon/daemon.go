@@ -93,6 +93,11 @@ type Daemon struct {
 	// runCmd); nil runs them for real. Tests set it to a fakeCLI.
 	execCmd cmdRunFunc
 
+	// cpuIdleFn replaces the production read of the host's CPU idle percent
+	// in checkPressure (pressure.go); nil runs top. It returns nil for a
+	// reading that could not be taken.
+	cpuIdleFn func() *float64
+
 	// openWorkBeads opens the beads client the daemon's work-bead reads go
 	// through, given bd's whole environment (see workBeads) and the deadline
 	// for one read; nil is bd at bdPath run from the town root. Tests answer

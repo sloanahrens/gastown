@@ -1,12 +1,13 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
-	"runtime"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/hoststat"
 )
 
 // PressureResult holds the outcome of a pressure check.
@@ -17,8 +18,9 @@ type PressureResult struct {
 	// Reason describes why spawning was blocked (empty if OK).
 	Reason string
 
-	// LoadAvg1 is the 1-minute load average at check time.
-	LoadAvg1 float64
+	// CPUIdle is the percent of all cores idle at check time. It is set only
+	// when the CPU tier ran and top could be read; zero otherwise.
+	CPUIdle float64
 
 	// MemAvailableGB is approximate available memory in GB.
 	MemAvailableGB float64
@@ -30,7 +32,9 @@ type PressureResult struct {
 // checkPressure evaluates system load and session concurrency to decide
 // whether spawning a new agent session is safe. It checks:
 //
-//  1. CPU pressure: 1-minute load average vs threshold (per-core).
+//  1. CPU pressure: share of the host's cores busy (100% minus CPU idle)
+//     vs threshold. Not the load average: macOS counts runnable threads in
+//     it, so a 24-core host with half its CPU idle reads load 30 (gt-kc8v1).
 //  2. Memory pressure: available memory vs minimum threshold.
 //  3. Session concurrency: active tmux sessions vs maximum cap.
 //
@@ -54,15 +58,18 @@ func (d *Daemon) checkPressure(_ string) PressureResult {
 	var result PressureResult
 	result.OK = true
 
-	// Tier 1: CPU pressure (load average per core)
+	// Tier 1: CPU pressure (busy share of the host's cores). The threshold
+	// keeps its per-core scale: 1.0 is every core busy. A top that cannot be
+	// read is no evidence of a busy host, so it does not hold the spawn.
 	if cpuThreshold > 0 {
-		result.LoadAvg1 = loadAverage1()
-		numCPU := float64(runtime.NumCPU())
-		loadPerCore := result.LoadAvg1 / numCPU
-		if loadPerCore > cpuThreshold {
-			result.OK = false
-			result.Reason = fmt.Sprintf("cpu pressure: load/core %.2f exceeds threshold %.2f (load=%.1f, cores=%d)", loadPerCore, cpuThreshold, result.LoadAvg1, int(numCPU))
-			return result
+		if idle := d.hostCPUIdle(); idle != nil {
+			result.CPUIdle = *idle
+			busyPerCore := (100 - *idle) / 100
+			if busyPerCore > cpuThreshold {
+				result.OK = false
+				result.Reason = fmt.Sprintf("cpu pressure: %.1f%% CPU idle, busy/core %.2f exceeds threshold %.2f", *idle, busyPerCore, cpuThreshold)
+				return result
+			}
 		}
 	}
 
@@ -87,6 +94,15 @@ func (d *Daemon) checkPressure(_ string) PressureResult {
 	}
 
 	return result
+}
+
+// hostCPUIdle is the host's CPU idle percent, or nil when it could not be
+// read. Tests answer it through d.cpuIdleFn.
+func (d *Daemon) hostCPUIdle() *float64 {
+	if d.cpuIdleFn != nil {
+		return d.cpuIdleFn()
+	}
+	return hoststat.SampleCPUIdle(context.Background())
 }
 
 // countAgentSessions counts active tmux sessions that belong to Gas Town agents.

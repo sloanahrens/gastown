@@ -104,6 +104,24 @@ func sample(ctx context.Context, p probes) Reading {
 	return r
 }
 
+// SampleCPUIdle reads the CPU idle share alone: one two-sample top and its
+// second sample, none of the load or process-table probes a full Sample also
+// runs. It is the reading for a caller that gates on idle CPU and needs
+// nothing else, such as the daemon's spawn pressure gate (gt-kc8v1). nil
+// means top could not be read, which a caller must not take for an idle host.
+func SampleCPUIdle(ctx context.Context) *float64 { return sampleCPUIdle(ctx, hostProbes.top) }
+
+// sampleCPUIdle is SampleCPUIdle over a top probe.
+func sampleCPUIdle(ctx context.Context, top func(context.Context) ([]byte, error)) *float64 {
+	ctx, cancel := context.WithTimeout(ctx, sampleTimeout)
+	defer cancel()
+	out, err := top(ctx)
+	if err != nil {
+		return nil
+	}
+	return parseCPUIdle(string(out))
+}
+
 // psOutput lists every process's CPU and command line. The portable -axo form
 // is the one internal/land uses: the `-r` a BSD ps sorts by is not a flag but
 // a selection on Linux ("only running processes" in a GNU ps), which would
