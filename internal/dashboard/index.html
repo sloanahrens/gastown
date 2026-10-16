@@ -3129,17 +3129,49 @@ function pushEntry(e, stick) {
   if (atBottom || stick) f.scrollTop = f.scrollHeight;
 }
 
+// The stream, kept alive by the page and not only by the browser. A browser
+// retries a stream it closed itself, but not one the connection ended for good:
+// WebKit reaches EventSource.CLOSED after a failed reconnect and never calls
+// back. Nor does it notice a stream that stays open and sends nothing. Either
+// way the tab keeps a stale page until a manual reload, so a failed stream is
+// replaced on a backoff and a quiet one by a watchdog. (gt-rpble)
+const RECONNECT_MS = 2000, RECONNECT_CAP_MS = 15000;
+const WATCHDOG_MS = 10000, SILENT_MS = 90000;
+let stream = null;        // the live stream, so a replacement can close it
+let dropped = false;      // a stream that opens again after a drop is a new build
+let reconnecting = false; // a replacement is waiting out its delay
+let retryMs = 0;          // that delay, doubled per failed connect up to the cap
+let lastEvent = 0;        // when the live stream last sent a named event
+
 function connect() {
   const es = new EventSource("/stream");
-  let dropped = false;
+  stream = es;
+  reconnecting = false;
+  lastEvent = Date.now();
   // The server restarts in place when the gt binary is replaced; a stream that
   // comes back after dropping may be a new build, so take its page.
-  es.onopen = () => { if (dropped) { location.reload(); return; } $("conn").className = "on"; $("conn").textContent = "live"; };
-  es.onerror = () => { dropped = true; $("conn").className = "off"; $("conn").textContent = "reconnecting"; };
-  es.addEventListener("state", ev => { state = JSON.parse(ev.data); renderAll(); });
-  es.addEventListener("backlog", ev => { $("feed").replaceChildren(); for (const k of Object.keys(counts)) delete counts[k]; JSON.parse(ev.data).forEach(e => pushEntry(e, true)); });
-  es.addEventListener("entry", ev => pushEntry(JSON.parse(ev.data)));
-  es.addEventListener("alert", ev => onAlert(JSON.parse(ev.data)));
+  es.onopen = () => { if (dropped) { location.reload(); return; } retryMs = 0; $("conn").className = "on"; $("conn").textContent = "live"; };
+  es.onerror = () => {
+    dropped = true;
+    $("conn").className = "off"; $("conn").textContent = "reconnecting";
+    // A stream the browser is still connecting comes back on its own; one it has
+    // given up on is the page's to replace.
+    if (es.readyState === EventSource.CLOSED) reconnectStream(es);
+  };
+  const seen = () => { lastEvent = Date.now(); };
+  es.addEventListener("state", ev => { seen(); state = JSON.parse(ev.data); renderAll(); });
+  es.addEventListener("backlog", ev => { seen(); $("feed").replaceChildren(); for (const k of Object.keys(counts)) delete counts[k]; JSON.parse(ev.data).forEach(e => pushEntry(e, true)); });
+  es.addEventListener("entry", ev => { seen(); pushEntry(JSON.parse(ev.data)); });
+  es.addEventListener("alert", ev => { seen(); onAlert(JSON.parse(ev.data)); });
+}
+// reconnectStream makes the next stream itself, after a delay that doubles while
+// connects keep failing. A stream that is no longer the live one was replaced
+// already, so its error does not become a second reconnect.
+function reconnectStream(failed) {
+  if (reconnecting || failed !== stream) return;
+  reconnecting = true;
+  retryMs = retryMs ? Math.min(retryMs * 2, RECONNECT_CAP_MS) : RECONNECT_MS;
+  setTimeout(connect, retryMs);
 }
 initAlerts();
 // Every panel folds when its title bar is clicked; the choice survives reloads.
@@ -3210,6 +3242,15 @@ $("models").addEventListener("click", toggleModels);
 paintModelsLine();
 renderChips();
 connect();
+// The server's keepalive comment is not an event the page sees, so a stream can
+// be alive and say nothing for minutes. Replacing it is cheap: the server
+// resends the snapshot, and the page keeps the state it has until it arrives.
+setInterval(() => {
+  if (reconnecting) return; // a replacement is already on its way
+  if (Date.now() - lastEvent < SILENT_MS) return;
+  stream.close();
+  connect();
+}, WATCHDOG_MS);
 // Ages and elapsed times drift between pushes; redraw the cheap parts locally.
 setInterval(() => { if (state) { renderStrip(state); renderWork(state); renderTierSweep(state); renderForgejo(state); } }, 15000);
 </script>

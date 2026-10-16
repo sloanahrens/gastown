@@ -1,0 +1,230 @@
+package dashboard
+
+import (
+	"strconv"
+	"testing"
+)
+
+// The page keeps its own stream alive (gt-rpble): the operator's tab sat on
+// "reconnecting" for hours after an install while /api/state and the server were
+// fresh, because a browser that has closed a stream for good never retries it
+// and never notices one that stays open and sends nothing. The tests below run
+// index.html's own script against the stream stub and the fake clock in
+// page_harness_test.go and drive each stream by hand, so the reconnect and the
+// watchdog are checked through the page rather than by matching its source
+// (gt-tq4ee).
+
+// pageExpr runs one expression over a loaded page and reads back its value.
+func pageExpr(t *testing.T, dom *pageDOM, expr string) string {
+	t.Helper()
+
+	v, err := dom.vm.RunString(expr)
+	if err != nil {
+		t.Fatalf("%s: %v", expr, err)
+	}
+	return v.String()
+}
+
+// pageNumber runs one expression over a loaded page and reads it as a number.
+func pageNumber(t *testing.T, dom *pageDOM, expr string) int {
+	t.Helper()
+
+	n, err := strconv.Atoi(pageExpr(t, dom, expr))
+	if err != nil {
+		t.Fatalf("%s: %v", expr, err)
+	}
+	return n
+}
+
+// pageStreams is how many streams the page has opened: a replacement is a new
+// EventSource, so the count rises by one per reconnect.
+func pageStreams(t *testing.T, dom *pageDOM) int {
+	t.Helper()
+	return pageNumber(t, dom, "__sources.length")
+}
+
+// liveStream is the index of the stream the page is on now, the one a browser
+// would be delivering events to.
+const liveStream = "__sources.length - 1"
+
+// The stream stub stands in for the browser's EventSource, so its readyState
+// values are the browser's. The page compares a stream against
+// EventSource.CLOSED to tell one the browser has given up on from one it is
+// still connecting, and a stub that renumbered the states would describe a page
+// that never reconnects while the browser's page does (gt-rpble).
+func TestTheStreamStubCarriesTheBrowsersStreamStates(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	if got := pageExpr(t, dom, "[EventSource.CONNECTING, EventSource.OPEN, EventSource.CLOSED].join()"); got != "0,1,2" {
+		t.Fatalf("the stream stub's states read %q, want the browser's 0,1,2", got)
+	}
+}
+
+// failStream fails the live stream, the browser calling its onerror once the
+// stream has reached readyState.
+func failStream(t *testing.T, dom *pageDOM, readyState string) {
+	t.Helper()
+
+	pageExpr(t, dom, "__error(__sources["+liveStream+"], "+readyState+")")
+}
+
+// openStream opens the live stream, the browser calling its onopen when the
+// server accepts it.
+func openStream(t *testing.T, dom *pageDOM) {
+	t.Helper()
+
+	pageExpr(t, dom, "__open(__sources["+liveStream+"])")
+}
+
+// deliverStream sends one named event on the live stream, the reading the
+// server would push.
+func deliverStream(t *testing.T, dom *pageDOM, name, data string) {
+	t.Helper()
+
+	pageExpr(t, dom, "__fire(__sources["+liveStream+"], "+strconv.Quote(name)+", "+data+")")
+}
+
+// advanceTimers moves the page's clock by ms, running the timers that come due
+// on the way.
+func advanceTimers(t *testing.T, dom *pageDOM, ms int) {
+	t.Helper()
+
+	pageExpr(t, dom, "__advance("+strconv.Itoa(ms)+")")
+}
+
+// pageReloads is how many times the page has gone back to the server for a
+// fresh build's page.
+func pageReloads(t *testing.T, dom *pageDOM) int {
+	t.Helper()
+	return pageNumber(t, dom, "__reloads")
+}
+
+// A stream the browser has given up on is the page's to replace. WebKit does
+// exactly this after a failed reconnect, and the delay doubles while connects
+// keep failing so a server that is down is not hammered (gt-rpble).
+func TestAClosedStreamIsReplacedOnABackoffCappedAtFifteenSeconds(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	if got := pageStreams(t, dom); got != 1 {
+		t.Fatalf("the page opened %d streams at load, want the one connect() makes", got)
+	}
+
+	// Each round fails the live stream and waits out its delay: no new stream
+	// before then, one the moment the delay is up.
+	for _, wait := range []int{2000, 4000, 8000, 15000, 15000} {
+		before := pageStreams(t, dom)
+		failStream(t, dom, "EventSource.CLOSED")
+
+		advanceTimers(t, dom, wait-1)
+		if got := pageStreams(t, dom); got != before {
+			t.Fatalf("the page had %d streams %d ms into a %d ms wait, want %d", got, wait-1, wait, before)
+		}
+		advanceTimers(t, dom, 1)
+		if got := pageStreams(t, dom); got != before+1 {
+			t.Fatalf("the page had %d streams %d ms after a failure, want the replacement after %d ms", got, wait, wait)
+		}
+	}
+
+	// The chip names what the page is doing while it waits.
+	if d := dom.element(t, "conn"); d.Text != "reconnecting" || d.Class != "off" {
+		t.Errorf("#conn reads %q in class %q after repeated failures, want the reconnecting label", d.Text, d.Class)
+	}
+}
+
+// A stream the browser is still connecting comes back on its own, so the page
+// leaves it alone: two reconnects — the browser's and the page's — would give an
+// operator two streams to reason about (gt-rpble).
+func TestAStreamTheBrowserIsStillConnectingIsLeftToIt(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	failStream(t, dom, "EventSource.CONNECTING")
+
+	advanceTimers(t, dom, 60000)
+	if got := pageStreams(t, dom); got != 1 {
+		t.Errorf("the page opened %d streams while the browser was retrying the stream, want it left to the browser", got)
+	}
+}
+
+// A stream that reopens after a drop may be a new build's page, so the page
+// takes it — whether the browser retried the stream or the page made a new one
+// (gt-rpble).
+func TestAStreamThatReopensAfterADropTakesTheNewBuildsPage(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name string
+		fail string
+	}{
+		{"the browser retries the stream", "EventSource.CONNECTING"},
+		{"the page replaces the stream", "EventSource.CLOSED"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			dom := newPageDOM(t)
+			failStream(t, dom, tc.fail)
+			advanceTimers(t, dom, 2000) // the page's own reconnect, if it is making one
+			openStream(t, dom)
+			if got := pageReloads(t, dom); got != 1 {
+				t.Errorf("the page reloaded %d times when a dropped stream reopened, want the new build's page", got)
+			}
+		})
+	}
+}
+
+// A stream can be open and alive and still send nothing, which no browser
+// notices. The watchdog replaces it after 90 s without a named event, and the
+// state the page already holds stands until the replacement's snapshot arrives
+// (gt-rpble).
+func TestTheWatchdogReplacesAStreamQuietForNinetySeconds(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	openStream(t, dom)           // the stream is live and talking, and then stops talking
+	advanceTimers(t, dom, 80000) // eight watchdog ticks, 80 s of silence
+	if got := pageStreams(t, dom); got != 1 {
+		t.Fatalf("the page had %d streams after 80 s of silence, want the stream left alone", got)
+	}
+
+	advanceTimers(t, dom, 10000) // the ninth tick
+	if got := pageStreams(t, dom); got != 2 {
+		t.Fatalf("the page had %d streams after 90 s of silence, want the stream replaced", got)
+	}
+	if got := pageNumber(t, dom, "__sources[0].readyState"); got != 2 {
+		t.Errorf("the replaced stream's readyState is %d, want it closed", got)
+	}
+	// The watchdog swaps the stream, not the label: the replacement's onopen or
+	// onerror says what the page is on now.
+	if d := dom.element(t, "conn"); d.Text != "live" || d.Class != "on" {
+		t.Errorf("#conn reads %q in class %q after the swap, want the label the open left", d.Text, d.Class)
+	}
+}
+
+// A named event is the server saying it is alive, so it restarts the watchdog's
+// clock: a stream that is talking is never replaced, whatever the last event
+// was (gt-rpble).
+func TestANamedEventRestartsTheWatchdog(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	advanceTimers(t, dom, 89000)
+	deliverStream(t, dom, "backlog", "[]")
+
+	advanceTimers(t, dom, 2000) // the ninth tick falls here, the one silence from load would have used
+	if got := pageStreams(t, dom); got != 1 {
+		t.Fatalf("the page had %d streams after an event 89 s in, want the replacement clock reset", got)
+	}
+
+	// The replacement comes 90 s after that event, not at the next tick.
+	advanceTimers(t, dom, 88000)
+	if got := pageStreams(t, dom); got != 1 {
+		t.Fatalf("the page had %d streams 90 s after the event, want the stream left alone", got)
+	}
+	advanceTimers(t, dom, 1000)
+	if got := pageStreams(t, dom); got != 2 {
+		t.Fatalf("the page had %d streams 91 s after the event, want the stream replaced", got)
+	}
+}
