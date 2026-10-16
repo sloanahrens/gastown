@@ -475,14 +475,17 @@ func (o *OverseerThresholds) SilentAfterD() time.Duration {
 	return DefaultOverseerSilentAfter
 }
 
-// The review.backlog rule's defaults: the open risk-path count past which it
-// raises, and how fast a rise within an hour raises it before that count.
+// DefaultReviewBacklogThreshold and DefaultReviewBacklogRise are the
+// review.backlog rule's two defaults, in open landing.risk_path items. A
+// configured zero or negative value reads as unset — either would wake on
+// every queue — so the accessors below fall back to these.
 const (
 	DefaultReviewBacklogThreshold = 15
 	DefaultReviewBacklogRise      = 10
 )
 
-// ReviewBacklogThresholdV returns the configured or default backlog threshold.
+// ReviewBacklogThresholdV returns the configured backlog threshold, or its
+// default.
 func (o *OverseerThresholds) ReviewBacklogThresholdV() int {
 	if o != nil && o.ReviewBacklogThreshold > 0 {
 		return o.ReviewBacklogThreshold
@@ -490,7 +493,7 @@ func (o *OverseerThresholds) ReviewBacklogThresholdV() int {
 	return DefaultReviewBacklogThreshold
 }
 
-// ReviewBacklogRiseV returns the configured or default one-hour rise.
+// ReviewBacklogRiseV returns the configured one-hour rise, or its default.
 func (o *OverseerThresholds) ReviewBacklogRiseV() int {
 	if o != nil && o.ReviewBacklogRise > 0 {
 		return o.ReviewBacklogRise
