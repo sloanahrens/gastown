@@ -3,6 +3,7 @@ package cmd
 import (
 	"fmt"
 	"io"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -153,21 +154,35 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool)
 	}
 	rest := tokens[i+1:]
 	runCwd, runCwdKnown := goTestRunDir(tokens, lower, i, cwd, cwdKnown)
-	// A filter may come as -run before the packages, or as -test.run after
-	// "--" (passed straight to the test binary); either bounds the run.
-	hasRun := false
-	for _, t := range rest {
-		if t == "-run" || strings.HasPrefix(t, "-run=") || t == "-test.run" || strings.HasPrefix(t, "-test.run=") {
-			hasRun = true
-		}
-	}
+	hasRun := goTestRunFilterBounds(rest)
 	pkgArgs := goTestPackageArgs(rest)
 	if cwdTargetsUnplacedDir(pkgArgs, runCwdKnown) {
 		return "polecat 'go test' names a directory the guard cannot place", nil
 	}
+	// A package argument spelled relative to a directory the walk could not
+	// place ("cd \"$(git rev-parse --show-toplevel)/internal\" && go test
+	// ./cmd") reads as a module-root package that is not heavy, though go runs
+	// it in that directory. Like the expanded -C below, a -run filter is the
+	// way through (gt-ff2l8).
+	if !hasRun && unplacedDirRelativeArg(pkgArgs, runCwdKnown, heavyTestPackageList()) {
+		return "polecat 'go test' runs in a directory the guard cannot place", nil
+	}
 	wholeRepo, heavy := polecatHeavyTarget(pkgArgs, runCwd)
 	if wholeRepo {
 		return "polecat 'go test' of the whole repo", nil
+	}
+	// An argument with a wildcard inside a path element ("./internal/c?d") or
+	// one the shell rewrites ("$PWD/internal/cmd") names a set of packages the
+	// hook cannot see into, so polecatHeavyTarget reads it as the literal text
+	// and finds no heavy package. Without a -run filter the set is refused when
+	// it can include one, the way the container rule refuses it for its own
+	// list (gt-ff2l8).
+	if !hasRun {
+		for _, arg := range pkgArgs {
+			if packageArgWildcard(arg) && packageWildcardMayReach(arg, runCwd, heavyTestPackageList()) {
+				return fmt.Sprintf("polecat 'go test' package argument %q has a wildcard that can reach a whole heavy package with no -run filter", arg), nil
+			}
+		}
 	}
 	// A -C directory the shell expands is one goTestRunDir cannot place, so a
 	// package argument spelled relative to it ("./cmd") is read as the
@@ -185,6 +200,68 @@ func evaluatePolecatTestScopeSegment(tokens []string, cwd string, cwdKnown bool)
 		return "polecat 'go test' of a whole heavy package with no -run filter", heavy
 	}
 	return "", nil
+}
+
+// heavyTestPackageList is heavyTestPackages as a sorted list.
+func heavyTestPackageList() []string {
+	list := make([]string, 0, len(heavyTestPackages))
+	for pkg := range heavyTestPackages {
+		list = append(list, pkg)
+	}
+	sort.Strings(list)
+	return list
+}
+
+// runFilterProbes are test names a -run pattern is tried against to tell a
+// filter from one that selects everything: a pattern that matches each of them
+// ("." ".*" "" "^" "(?i)") runs every test whatever the package holds.
+var runFilterProbes = []string{"TestA", "ExampleB", "BenchmarkC", "FuzzD", "x"}
+
+// goTestRunFilterBounds reports whether the tokens after "go test" carry a
+// -run filter that bounds the run. A filter may come as -run before the
+// packages, or as -test.run after "--" (passed straight to the test binary),
+// in the "-run X" or "-run=X" form with one or two dashes. The last one wins,
+// as it does in go. A pattern that selects every test ("-run .", "-run ''",
+// "-run '.*'") bounds nothing, so it does not count: matching only the
+// part before a "/" is go's rule for the first level of subtests (gt-ff2l8). A
+// pattern go cannot compile fails the run before any test starts, and a
+// -run with no value is go's own usage error, so neither leaves anything to
+// run. The probes are a heuristic for "matches everything"; a pattern that
+// happens to match all of them and not every real test name is refused, which
+// costs one more -run edit.
+func goTestRunFilterBounds(rest []string) bool {
+	bounded := false
+	for i, t := range rest {
+		flag, value, hasValue := strings.Cut(strings.TrimLeft(t, "-"), "=")
+		if !strings.HasPrefix(t, "-") || (flag != "run" && flag != "test.run") {
+			continue
+		}
+		if !hasValue {
+			if i+1 >= len(rest) {
+				bounded = true
+				continue
+			}
+			value = rest[i+1]
+		}
+		bounded = runPatternBoundsRun(value)
+	}
+	return bounded
+}
+
+// runPatternBoundsRun reports whether a -run pattern leaves some test names
+// out (see goTestRunFilterBounds).
+func runPatternBoundsRun(pattern string) bool {
+	first, _, _ := strings.Cut(pattern, "/")
+	re, err := regexp.Compile(first)
+	if err != nil {
+		return true
+	}
+	for _, probe := range runFilterProbes {
+		if !re.MatchString(probe) {
+			return true
+		}
+	}
+	return false
 }
 
 // polecatHeavyTarget reports the heavy packages a go test package-argument

@@ -329,7 +329,8 @@ func evaluateContainerSuiteSegment(tokens []string, dockerOn bool, cwd string, c
 		// hook's own cwd when getwd failed. A cwd-relative target is refused
 		// there rather than exempted, the reading the make rule gives its ""
 		// tree (makeTreeDir, makeActsOnWholeGoModule).
-		if cwdTargetsUnplacedDir(pkgArgs, runCwdKnown && runCwd != "") {
+		if cwdTargetsUnplacedDir(pkgArgs, runCwdKnown && runCwd != "") ||
+			unplacedDirRelativeArg(pkgArgs, runCwdKnown && runCwd != "", containerSuitePackages) {
 			return "bare 'go test' names a directory the guard cannot place", nil
 		}
 		if goDirFlagShellExpanded(tokens, lower, i) && runDirTargetsUnknownDir(pkgArgs) {
@@ -681,6 +682,13 @@ func shellExpandedPackageArg(arg string) bool {
 // pattern whose module the guard cannot place, because the wildcard may sit in
 // the part of the path that says which tree it is.
 func packageWildcardMayReachContainerSuite(arg, cwd string) bool {
+	return packageWildcardMayReach(arg, cwd, containerSuitePackages)
+}
+
+// packageWildcardMayReach is packageWildcardMayReachContainerSuite's rule for
+// any list of packages: the polecat test-scope guard asks it of the heavy
+// packages (gt-ff2l8).
+func packageWildcardMayReach(arg, cwd string, packages []string) bool {
 	if strings.Contains(arg, "{") || shellExpandedPackageArg(arg) {
 		return true
 	}
@@ -693,7 +701,7 @@ func packageWildcardMayReachContainerSuite(arg, cwd string) bool {
 		readings = append(readings, normalizeGoPackageArg(path.Join(runPkg, arg)))
 	}
 	for _, pattern := range readings {
-		for _, pkg := range containerSuitePackages {
+		for _, pkg := range packages {
 			if packagePatternReaches(pattern, pkg) {
 				return true
 			}
@@ -853,6 +861,49 @@ func cwdTargetsUnplacedDir(pkgArgs []string, cwdKnown bool) bool {
 	for _, p := range normalizedPackageArgs(pkgArgs) {
 		if p == cwdPackageArg {
 			return true
+		}
+	}
+	return false
+}
+
+// unplacedDirRelativeArg reports whether a go test package-argument list has an
+// argument spelled as a path under the run directory ("./beads/...", "./cmd",
+// "../x") that the walk could not place and that can name a package in
+// packages. go resolves that spelling against the directory it runs in, so
+// under an unplaced one "./beads/..." can be internal/beads, yet
+// normalizeGoPackageArg reads it as the module-root package "beads", which is
+// on no list. cwdTargetsUnplacedDir refuses the arguments that name the
+// directory itself; this is the same question for the arguments that name
+// something under it (gt-ff2l8).
+//
+// The unplaced directory is read as any ancestor of a listed package (the
+// "cd internal" it stands in for), so "./beads" is refused because
+// internal/beads is on the list, and "./style" and "./internal/style" are not,
+// which keeps an explicit argument that reaches no listed package on its own
+// reading, as an import path does. A parent-relative argument ("../beads")
+// can land anywhere, so it is refused.
+func unplacedDirRelativeArg(pkgArgs []string, cwdKnown bool, packages []string) bool {
+	if cwdKnown {
+		return false
+	}
+	for _, arg := range pkgArgs {
+		if !isCwdRelativeGoPackageArg(arg) {
+			continue
+		}
+		norm := normalizeGoPackageArg(arg)
+		if norm == cwdPackageArg || norm == wholeRepoPackageArg {
+			continue // judged on their own (cwdTargetsUnplacedDir, isWholeRepoPackageArg)
+		}
+		if norm == ".." || strings.HasPrefix(norm, "../") {
+			return true
+		}
+		for _, pkg := range packages {
+			elems := strings.Split(pkg, "/")
+			for i := 1; i < len(elems); i++ {
+				if packageArgCovers(path.Join(strings.Join(elems[:i], "/"), norm), pkg) {
+					return true
+				}
+			}
 		}
 	}
 	return false
