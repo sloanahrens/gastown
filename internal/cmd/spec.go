@@ -1020,10 +1020,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			if err := env.AddLabel(id, specdispatch.DispatchFailedLabel); err != nil {
 				report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", id, err))
 			}
-			// The note is its own key: a key that stopped at "dispatch failed"
-			// matched the first failure's comment forever, so a retry that
-			// failed for another reason left the old reason on the bead. The
-			// same failure on the next tick still matches and is written once.
+			// The note is its own key: annotateSpecOnce skips a note whose key
+			// a comment already starts with, so a shorter key would hide a
+			// retry's different reason while the same one is still written
+			// once (gt-zkqtn).
 			note := specDispatchNotePrefix + failLine
 			if err := env.Annotate(id, note, note); err != nil {
 				report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))

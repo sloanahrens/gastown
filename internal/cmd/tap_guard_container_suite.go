@@ -1264,9 +1264,8 @@ func makeRunDir(args []string, cwd string) (dir string, known bool) {
 // It looks for -C and -f, the two options makeRunDir acts on, behind the
 // valueless letters before them. Another option that takes a value ends the
 // scan first ("-oC" is -o with the value "C", not -C): the rest of the token is
-// its value, which makeRunDir steps over as it always has. A token with neither
-// is read by its first letter, as before, so this only finds a -C or -f that
-// the old split hid.
+// its value, which makeRunDir steps over. A token with neither is read by its
+// first letter (gt-zkqtn).
 func splitMakeShortCluster(tok string) (flag, value string, hasValue bool) {
 	for k := 1; k < len(tok); k++ {
 		rest := tok[k+1:]
