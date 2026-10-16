@@ -250,11 +250,12 @@ type attentionSources struct {
 	// two outside reads (gt-vsct7.4).
 	riskLandings func(rig string, since time.Time) ([]land.LandingRecord, error)
 	riskIssue    func(ctx context.Context, rig, id string) (*beads.Issue, error)
-	// findingStatus reads one finding bead's status and riskAppend appends a
-	// review line to a work bead's notes: the resolved-FAIL pass's reads and
-	// its only write (attention_risk_audit.go). A nil func turns the pass off.
-	findingStatus func(ctx context.Context, id string) (string, error)
-	riskAppend    func(ctx context.Context, rig, id, note string) error
+	// findingIssue reads one finding bead — the status and the close reason
+	// that resolved it — and riskAppend appends a review line to a work bead's
+	// notes: the resolved-FAIL pass's read and its only write
+	// (attention_risk_audit.go). A nil func turns the pass off.
+	findingIssue func(ctx context.Context, id string) (*beads.Issue, error)
+	riskAppend   func(ctx context.Context, rig, id, note string) error
 	// riskOpen is how many risk-path items collectRiskPaths observed this tick,
 	// and riskCounted whether it got as far as counting: the review-backlog
 	// collector, which runs after it, reads both.

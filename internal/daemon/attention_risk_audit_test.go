@@ -13,12 +13,14 @@ import (
 )
 
 // riskAuditWorld is a town of landed work beads with notes and finding beads
-// with statuses, wired into a fixture's risk-audit sources. Appends go into the
-// notes the next read sees, so a test can check the item left the queue.
+// with statuses and close reasons, wired into a fixture's risk-audit sources.
+// Appends go into the notes the next read sees, so a test can check the item
+// left the queue.
 type riskAuditWorld struct {
 	landings []land.LandingRecord
 	notes    map[string]string
 	status   map[string]string // finding bead id -> status
+	reason   map[string]string // finding bead id -> close reason
 	broken   map[string]error  // finding bead id -> read error
 	appends  []string          // "<bead>: <line>" in write order
 	reads    map[string]int    // finding bead id -> reads
@@ -28,6 +30,7 @@ func newRiskAuditWorld(f *attentionFixture) *riskAuditWorld {
 	w := &riskAuditWorld{
 		notes:  map[string]string{},
 		status: map[string]string{},
+		reason: map[string]string{},
 		broken: map[string]error{},
 		reads:  map[string]int{},
 	}
@@ -37,16 +40,16 @@ func newRiskAuditWorld(f *attentionFixture) *riskAuditWorld {
 		// does to its notes.
 		return &beads.Issue{ID: id, Notes: w.notes[id], Priority: 2}, nil
 	}
-	f.src.findingStatus = func(_ context.Context, id string) (string, error) {
+	f.src.findingIssue = func(_ context.Context, id string) (*beads.Issue, error) {
 		w.reads[id]++
 		if err := w.broken[id]; err != nil {
-			return "", err
+			return nil, err
 		}
 		st, ok := w.status[id]
 		if !ok {
-			return "", beads.ErrNotFound
+			return nil, beads.ErrNotFound
 		}
-		return st, nil
+		return &beads.Issue{ID: id, Status: st, CloseReason: w.reason[id]}, nil
 	}
 	f.src.riskAppend = func(_ context.Context, _, id, note string) error {
 		w.appends = append(w.appends, id+": "+note)
@@ -106,8 +109,9 @@ func TestAttentionRiskAuditClearsAFailWhoseFindingsAreClosed(t *testing.T) {
 }
 
 // A FAIL is left alone unless every finding is known closed: an open bead, a
-// bead in any other state, one bd cannot read, one that does not exist, and a
-// FAIL with no findings= (a note from before the suffix) all hold the item.
+// bead in any other state, one bd cannot read, one that does not exist, a
+// findings= id no bead can have, and a FAIL with no findings= (a note from
+// before the suffix) all hold the item.
 func TestAttentionRiskAuditLeavesAnUnresolvedFailAlone(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
@@ -116,13 +120,16 @@ func TestAttentionRiskAuditLeavesAnUnresolvedFailAlone(t *testing.T) {
 		findings string
 		status   map[string]string
 		broken   map[string]error
+		wantErr  bool
 	}{
-		{"one open", "gt-fa,gt-fb", map[string]string{"gt-fa": "closed", "gt-fb": "open"}, nil},
-		{"in progress", "gt-fa", map[string]string{"gt-fa": "in_progress"}, nil},
-		{"blocked", "gt-fa", map[string]string{"gt-fa": "blocked"}, nil},
-		{"unreadable", "gt-fa,gt-fb", map[string]string{"gt-fa": "closed"}, map[string]error{"gt-fb": errors.New("bd: timeout")}},
-		{"absent", "gt-fa,gt-gone", map[string]string{"gt-fa": "closed"}, nil},
-		{"no findings suffix", "", nil, nil},
+		{"one open", "gt-fa,gt-fb", map[string]string{"gt-fa": "closed", "gt-fb": "open"}, nil, false},
+		{"in progress", "gt-fa", map[string]string{"gt-fa": "in_progress"}, nil, false},
+		{"blocked", "gt-fa", map[string]string{"gt-fa": "blocked"}, nil, false},
+		{"unreadable", "gt-fa,gt-fb", map[string]string{"gt-fa": "closed"}, map[string]error{"gt-fb": errors.New("bd: timeout")}, true},
+		{"absent", "gt-fa,gt-gone", map[string]string{"gt-fa": "closed"}, nil, false},
+		// bd would read "--force" as a flag, so the pass must not ask it.
+		{"an id no bead can have", "gt-fa,--force", map[string]string{"gt-fa": "closed"}, nil, true},
+		{"no findings suffix", "", nil, nil, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -138,8 +145,8 @@ func TestAttentionRiskAuditLeavesAnUnresolvedFailAlone(t *testing.T) {
 				w.broken[id] = err
 			}
 			_, err := f.src.auditResolvedRiskFails(context.Background())
-			if (err != nil) != (tc.broken != nil) {
-				t.Errorf("err = %v, want an error only for an unreadable finding", err)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("err = %v, want an error reported for this case: %v", err, tc.wantErr)
 			}
 			if len(w.appends) != 0 || w.notes["gt-abc"] != fail {
 				t.Errorf("appends = %q, notes = %q, want nothing written", w.appends, w.notes["gt-abc"])
@@ -147,7 +154,85 @@ func TestAttentionRiskAuditLeavesAnUnresolvedFailAlone(t *testing.T) {
 			if items := f.collect(t, f.src.collectRiskPaths); len(items) != 1 {
 				t.Errorf("items = %+v, want the FAIL still in the queue", items)
 			}
+			if w.reads["--force"] != 0 {
+				t.Errorf("the unshaped id was read %d times, want it never given to bd", w.reads["--force"])
+			}
 		})
+	}
+}
+
+// A finding closed as resolved clears the FAIL; one closed for a reason that
+// abandons it — the "supersede:" and "cancel:" prefixes the town records
+// (gt-6hmz) — leaves it standing, whatever case it is written in.
+func TestAttentionRiskAuditHoldsAFailWhoseFindingWasAbandoned(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name   string
+		reason string
+		want   bool // the AUDITED line is written
+	}{
+		{"no reason recorded", "", true},
+		{"closed as fixed", "fixed by gt-xyz", true},
+		{"nothing to change", "no-changes: the finding was already handled", true},
+		{"superseded", "supersede: gt-fx carries it", false},
+		{"cancelled", "cancel: not a defect after all", false},
+		{"the same in capitals", "CANCEL: not a defect after all", false},
+		{"padded supersede", "  Supersede: gt-fx carries it", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newAttentionFixture(t, now)
+			w := newRiskAuditWorld(f)
+			head := strings.Repeat("a", 40)
+			w.land("gt-abc", head, failNote(head, "gt-fa"))
+			w.status["gt-fa"], w.reason["gt-fa"] = "closed", tc.reason
+
+			wrote, err := f.src.auditResolvedRiskFails(context.Background())
+			if err != nil {
+				t.Fatalf("auditResolvedRiskFails: %v", err)
+			}
+			if (len(wrote) == 1) != tc.want {
+				t.Fatalf("wrote = %q, appends = %q, want the line written: %v", wrote, w.appends, tc.want)
+			}
+			if cleared := len(f.collect(t, f.src.collectRiskPaths)) == 0; cleared != tc.want {
+				t.Errorf("queue cleared = %v, want %v (the FAIL clears only with the AUDITED line)", cleared, tc.want)
+			}
+		})
+	}
+}
+
+// The append is judged against the notes as they are at the last moment before
+// it, not the ones the pass started from: bd has no compare-and-swap, and a
+// FAIL that moved while the finding beads were read — here a re-review naming a
+// new finding — takes the next tick instead of an AUDITED line.
+func TestAttentionRiskAuditLeavesAFailThatMovedBeforeTheAppend(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	w := newRiskAuditWorld(f)
+	head := strings.Repeat("a", 40)
+	w.land("gt-abc", head, failNote(head, "gt-fa"))
+	w.status["gt-fa"], w.status["gt-fb"] = "closed", "open"
+	read := f.src.riskIssue
+	reads := 0
+	f.src.riskIssue = func(ctx context.Context, rig, id string) (*beads.Issue, error) {
+		is, err := read(ctx, rig, id)
+		reads++
+		if err != nil || is == nil || reads == 1 {
+			return is, err
+		}
+		// The review moved between the pass's first read and its last.
+		is.Notes += "\n" + failNote(head, "gt-fa,gt-fb")
+		return is, nil
+	}
+
+	wrote, err := f.src.auditResolvedRiskFails(context.Background())
+	if err != nil || len(wrote) != 0 || len(w.appends) != 0 {
+		t.Fatalf("wrote = %q, err = %v, appends = %q, want nothing written", wrote, err, w.appends)
+	}
+	if items := f.collect(t, f.src.collectRiskPaths); len(items) != 1 {
+		t.Errorf("items = %+v, want the FAIL still in the queue", items)
 	}
 }
 
