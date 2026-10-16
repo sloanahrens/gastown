@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // Record is one landing as the landing worker serializes land.LandingRecord.
@@ -45,8 +46,8 @@ type Record struct {
 // Path is <town>/.runtime/landings/<rig>.jsonl, the file the landing worker
 // appends to. A rig name that could leave the directory is refused.
 func Path(townRoot, rig string) (string, error) {
-	// "reviews" is the om review log's name (land.ReviewsFileName), not a rig's.
-	if rig == "" || strings.ContainsAny(rig, `/\`) || rig == "." || rig == ".." || rig == "reviews" {
+	// <rig>.jsonl must not collide with the om review log's file.
+	if rig == "" || strings.ContainsAny(rig, `/\`) || rig == "." || rig == ".." || rig+".jsonl" == land.ReviewsFileName {
 		return "", fmt.Errorf("invalid rig name %q for a landings file", rig)
 	}
 	return filepath.Join(constants.TownRuntimePath(townRoot), "landings", rig+".jsonl"), nil
