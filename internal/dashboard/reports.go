@@ -13,13 +13,13 @@ import (
 	"unicode"
 )
 
-// The Report panel: the overseer's latest hourly report. The overseer writes
-// report files with a tool outside the repo — one file per run, named for the
-// instant it was written, plus the latest.md copy that tool leaves for a human
-// to read — and this dashboard only reads the directory. So the report the pane
-// shows is the newest file that names a timestamp, never a guess at which file
-// is current, and a directory the reader cannot read is a named state rather
-// than an empty pane (a failed read must not look like no reports at all).
+// The Digest block of the Overseer panel: the daemon's latest report. Its
+// overseer_report patrol writes report files — one file per run, named for the
+// instant it wrote it, plus the latest.md copy it leaves for a human to read —
+// and this dashboard only reads the directory. So the report the block shows is
+// the newest file that names a timestamp, never a guess at which file is
+// current, and a directory the reader cannot read is a named state rather than
+// an empty block (a failed read must not look like no reports at all).
 //
 // The reader opens files for reading and writes nothing, so nothing on this
 // page can reach into the overseer's own output.
@@ -61,9 +61,9 @@ const (
 	ReportsError   = "error"
 )
 
-// The sentences the panel's header carries for the states that are not the
-// overseer's own report. An overdue latest is not one of them: the pane names
-// it in its own words, so the reader leaves Note empty.
+// The sentences the block draws for the states that are not the daemon's own
+// report. An overdue latest is not one of them: the block's heading names it in
+// its own words, so the reader leaves Note empty.
 const (
 	reportsNoOverseer = "no overseer reports on this machine"
 	reportsNoneYet    = "the overseer has written no report yet"
@@ -103,11 +103,11 @@ type Reports struct {
 	Text string `json:"text,omitempty"`
 	// Written is when the latest report was written, off its file name.
 	Written time.Time `json:"written,omitzero"`
-	// Overdue marks a latest report older than reportsOverdue. The pane shows
+	// Overdue marks a latest report older than reportsOverdue. The block shows
 	// it in the amber it marks every other stale reading with.
 	Overdue bool `json:"overdue,omitempty"`
 	// Times are the newest writes, newest first, at most reportsKept of them
-	// and the latest among them. The pane lists the ones after the first behind
+	// and the latest among them. The block lists the ones after the first behind
 	// a disclosure.
 	Times []time.Time `json:"times"`
 }

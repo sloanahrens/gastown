@@ -184,6 +184,18 @@ section.collapsed>h2{border-bottom:0}
 .rback{margin-bottom:4px}
 .ojline{display:flex;gap:6px;align-items:baseline;flex-wrap:wrap;padding:2px 0;overflow-wrap:anywhere}
 .ojage,.okind{color:var(--dim);white-space:nowrap}
+/* The Overseer panel draws the overseer's whole side of the town in one panel,
+   so it is a stack of named blocks rather than one reading (gt-uv08f). A block
+   is headed like a section is, one size down, and a rule between blocks is what
+   says where one ends; the first block carries none, since the panel's own
+   header already draws one. */
+.oblock{border-top:1px solid var(--line);margin-top:9px;padding-top:1px}
+.oblock:first-child{border-top:0;margin-top:0;padding-top:0}
+h3.ohead{display:flex;gap:8px;align-items:baseline;margin:0;padding:0 0 2px;font-size:11px;font-weight:400;text-transform:uppercase;letter-spacing:.06em;color:var(--dim)}
+h3.ohead .r{margin-left:auto;text-transform:none;letter-spacing:0;white-space:normal;text-align:right}
+.dsec{margin:4px 0}
+.dname{color:var(--dim);font-size:11px;letter-spacing:.04em}
+.dbody{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;background:#10161d;border:1px solid var(--line);border-radius:6px;padding:4px 8px}
 .qrec,.qheld{color:var(--dim);margin:2px 0}
 .qtext{margin:2px 0}
 .qage{color:var(--dim)}
@@ -241,14 +253,11 @@ a.hrow:hover{background:#19212b}
   <div class="col">
     <section><h2>Attention <span class="chips" id="attentionchips"></span> <span class="r" id="attentionnote"></span></h2><div class="body" id="attention"></div></section>
     <section><h2>Overseer <span class="r" id="overseernote"></span></h2><div class="body" id="overseer"></div></section>
-    <section><h2>Deep review <span class="r" id="deepreviewnote"></span></h2><div class="body" id="deepreview"></div></section>
-    <section><h2>Report <span class="r" id="reportnote"></span></h2><div class="body" id="report"></div></section>
     <section><h2>DeepSeek <span class="r" id="spendnote"></span></h2><div class="body" id="spend"></div></section>
     <section><h2>Usage <span class="r" id="usagenote"></span></h2><div class="body" id="usage"></div></section>
     <section><h2>Rigs <span class="r" id="rigsnote"></span></h2><div class="body" id="rigs"></div></section>
     <section><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps <span class="r" id="tiersweepnote"></span></h2><div class="body" id="tiersweep"></div></section>
     <section><h2>Polecats <span class="r" id="seatsnote"></span></h2><div class="body" id="seats"></div></section>
-    <section><h2>Dispatcher <span class="r" id="dispnote"></span></h2><div class="body" id="disp"></div></section>
     <section><h2>Work queue <span class="r" id="queuenote"></span></h2><div class="body" id="queue"></div></section>
     <section>
       <h2>Feed <span class="chips" id="chips"></span></h2>
@@ -1276,14 +1285,14 @@ function reportNodes(text, prefixes) {
   return out;
 }
 
-// openReportBead opens or closes a bead written in the report: the detail draws
-// under the report, and a second click on the id takes it away.
+// openReportBead opens or closes a bead written in a digest: the detail draws
+// under the block, and a second click on the id takes it away.
 function openReportBead(rig, id) {
   const key = rig + "/" + id;
-  if (rOpen.has(key)) { rOpen.delete(key); renderReports(state); return; }
+  if (rOpen.has(key)) { rOpen.delete(key); renderOverseer(state); return; }
   rOpen.add(key);
-  beadDetailFor(rig, id, rDetail, () => renderReports(state));
-  renderReports(state);
+  beadDetailFor(rig, id, rDetail, () => renderOverseer(state));
+  renderOverseer(state);
 }
 
 // reportFile is the name a report's file carries: the UTC instant of its write
@@ -1308,60 +1317,99 @@ function openReport(name) {
     rRead[name] = {loading: true};
     fetch("/api/report?name=" + encodeURIComponent(name))
       .then(res => res.ok ? res.json() : Promise.reject(new Error(String(res.status))))
-      .then(d => { rRead[name] = {text: d.text || ""}; renderReports(state); })
-      .catch(() => { rRead[name] = {error: true}; renderReports(state); });
+      .then(d => { rRead[name] = {text: d.text || ""}; renderOverseer(state); })
+      .catch(() => { rRead[name] = {error: true}; renderOverseer(state); });
   }
-  renderReports(state);
+  renderOverseer(state);
 }
 
 // showLatest returns the pane to the latest report, the one the hub polls.
-function showLatest() { rPick = ""; renderReports(state); }
+function showLatest() { rPick = ""; renderOverseer(state); }
 
-// The Report panel draws the overseer's own hourly report: the latest one the
-// hub polled, or, once a reader has chosen from the list, an earlier one. Every
-// cell goes through el(), which writes textContent, so a tag in the report
-// shows as that text and never as markup. The report's own line breaks and tabs
-// are kept and the box wraps them, so the pane shows the report the way its
-// writer shaped it.
+// The digest the daemon's report patrol writes is a set of named sections —
+// DONE, IN PROGRESS, LEFT, OPEN QUESTIONS — under a one-line header, and the
+// block draws the three that say what the town did and what it still has to do.
+// OPEN QUESTIONS is left out: those questions are rows of the attention list,
+// which the panel draws in full, and a digest's ten-minute-old copy of them
+// would be the same fact a second time.
+const DIGEST_SECTIONS = ["DONE", "IN PROGRESS", "LEFT"];
+
+// digestSections reads one digest's text into its sections, keyed by the
+// heading the digest writes, in the order it writes them. A heading is the
+// digest's own shape: a line at the left margin in capitals, where every row
+// under one is indented. A section is those indented rows and the blank lines
+// between them, so the header above the first heading and the health line below
+// the last belong to no section and are not drawn.
+function digestSections(text) {
+  const out = new Map();
+  let head = "";
+  for (const raw of String(text == null ? "" : text).split("\n")) {
+    const line = raw.trim();
+    if (line && raw === raw.trimStart() && /^[A-Z][A-Z ]*$/.test(line)) {
+      head = line;
+      if (!out.has(head)) out.set(head, []);
+      continue;
+    }
+    if (!head) continue;
+    if (line && raw === raw.trimStart()) { head = ""; continue; }
+    out.get(head).push(raw);
+  }
+  return out;
+}
+
+// digestLines is one section's rows as the block draws them: the blank lines
+// the digest's own spacing puts around a section are not part of it.
+function digestLines(lines) {
+  const rows = (lines || []).slice();
+  while (rows.length && !rows[0].trim()) rows.shift();
+  while (rows.length && !rows[rows.length - 1].trim()) rows.pop();
+  return rows.join("\n");
+}
+
+// The Digest block of the Overseer panel: the daemon's newest report — the
+// fifteen-minute digest its overseer_report patrol writes — as the sections
+// above, or, once a reader has chosen from the list, an earlier one. Every cell
+// goes through el(), which writes textContent, so a tag in a digest shows as
+// that text and never as markup. A section's own line breaks and tabs are kept
+// and the box wraps them, so the block shows the digest the way its writer
+// shaped it.
 //
-// A bead id in the report opens that bead under the report — the same detail
-// the Work queue's rows draw — so an id never has to be copied into a terminal.
+// A bead id in the digest opens that bead under the block — the same detail the
+// Work queue's rows draw — so an id never has to be copied into a terminal.
 //
-// The pane dates that reading in its header the way every other pane does: the
-// report's age sits beside the title, and a latest report past its hour reads
-// as overdue in the amber the page marks every other stale reading with. The
-// writes before the latest are listed behind a disclosure, so however many the
-// town keeps the pane is one report tall; each of those is a button that reads
-// that report in place of the latest, with a control back to it (gt-4e065).
-function renderReports(s) {
-  const box = $("report"), note = $("reportnote");
-  box.replaceChildren();
-  note.className = "r";
-  note.textContent = "";
-  note.title = "";
+// The block dates that reading in its own heading the way every other reader
+// does: the digest's age sits beside the block's name, and a latest digest past
+// its fifteen minutes reads as overdue in the amber the page marks every other
+// stale reading with. The writes before the latest are listed behind a
+// disclosure, so however many the town keeps the block is one digest tall; each
+// of those is a button that reads that digest in place of the latest, with a
+// control back to it (gt-4e065).
+function drawDigest(panel, s) {
+  const { box, note } = oblock(panel, "Digest");
   const r = s.reports;
   if (!r) { box.append(el("div", "empty", "reading…")); return; }
   // A directory or a report the reader could not read is a named state, and
-  // never an empty pane: "no reports yet" and "could not be read" must not look
-  // alike. Neither state has a write to date, so its header note stays empty.
+  // never an empty block: "no reports yet" and "could not be read" must not
+  // look alike. Neither state has a write to date, so its heading note stays
+  // empty.
   if (r.state === "missing" || r.state === "error") {
     box.append(el("div", r.state === "error" ? "badc" : "empty", r.note || r.state));
     return;
   }
   const times = r.times || [];
-  // A report the pane no longer lists — it aged out of the day the list holds —
-  // is not one the route would read, so the pane falls back to the latest.
+  // A report the block no longer lists — it aged out of the day the list holds
+  // — is not one the route would read, so the block falls back to the latest.
   if (rPick && !times.some(t => reportFile(t) === rPick)) rPick = "";
-  // The pane answers "when" as well as "how long ago", for the report it is
+  // The block answers "when" as well as "how long ago", for the report it is
   // showing: the latest the hub polled, or the earlier one the reader chose,
-  // dated by its own instant so the header always says which is on the pane.
+  // dated by its own instant so the heading always says which is on the block.
   const shown = rPick ? reportTime(rPick) : new Date(r.written);
   note.className = !rPick && r.overdue ? "r warnc" : "r";
   note.textContent = "written " + age(shown) + " ago" + (!rPick && r.overdue ? " · overdue" : "");
   note.title = shown.toLocaleString();
   // A new report is different text, and so is a reader's switch between two of
   // them: the ids opened in the one before belong to text no longer on the
-  // pane, so they close with it.
+  // block, so they close with it.
   const key = rPick || String(r.written);
   if (rKey !== key) { rOpen.clear(); rKey = key; }
   if (rPick) {
@@ -1375,17 +1423,15 @@ function renderReports(s) {
   const prefixes = (s.queue && s.queue.prefixes) || {};
   const read = rPick ? rRead[rPick] : null;
   // A report still being read says so, and one that could not be read names
-  // that failure: showing the latest under a header that names another report
+  // that failure: showing the latest under a heading that names another report
   // would read as a report that had nothing to say.
   if (rPick && !(read && read.text != null)) {
     box.append(el("div", read && read.error ? "badc" : "empty", read && read.error ? "could not read this report" : "reading…"));
   } else {
-    const rep = el("div", "reptext");
-    rep.append(...reportNodes(rPick ? read.text : r.text, prefixes));
-    box.append(rep);
+    drawDigestSections(box, rPick ? read.text : r.text, prefixes);
   }
-  // Every open id draws its detail under the report, and a store the reader
-  // could not reach reads as the failure it was rather than as an empty pane.
+  // Every open id draws its detail under the digest, and a store the reader
+  // could not reach reads as the failure it was rather than as an empty block.
   for (const id of rOpen) {
     const bd = el("div", "rbeadrow");
     bd.append(el("div", "title", id));
@@ -1412,6 +1458,30 @@ function renderReports(s) {
     }
     d.append(ul);
     box.append(d);
+  }
+}
+
+// drawDigestSections is the digest's body: its DONE, IN PROGRESS and LEFT
+// sections, each named and drawn with the beads in it openable. A digest whose
+// shape the page does not know — an older daemon's, or another tool's report
+// dropped in the same directory — is drawn whole rather than as nothing: the
+// sections are how the block sorts a digest, not what it takes for one.
+function drawDigestSections(box, text, prefixes) {
+  const secs = digestSections(text);
+  const drawn = DIGEST_SECTIONS.filter(n => secs.has(n));
+  if (!drawn.length) {
+    const rep = el("div", "reptext");
+    rep.append(...reportNodes(text, prefixes));
+    box.append(rep);
+    return;
+  }
+  for (const name of drawn) {
+    const sec = el("div", "dsec");
+    sec.append(el("div", "dname", name));
+    const body = el("div", "dbody");
+    body.append(...reportNodes(digestLines(secs.get(name)), prefixes));
+    sec.append(body);
+    box.append(sec);
   }
 }
 
@@ -2083,15 +2153,88 @@ function renderOM(s) {
   fold("Scores" + (scored ? " · avg " + scored.avg_score.toFixed(2) : ""), openOMScores, v => { openOMScores = v; }, ...scoreKids);
 }
 
-function renderDispatch(s) {
-  const box = $("disp");
+// The Overseer panel: the overseer's whole side of the town in one panel — its
+// heartbeat and journal, the daemon's newest digest, the deep review's
+// schedules and their newest runs, the spec dispatcher's last tick, and the
+// rows of the attention list the overseer owes a move on (gt-uv08f).
+//
+// Each block names its reader's states as that reader's own — "reading…"
+// before it has reported, "unavailable: …" for a read that failed — because a
+// block with nothing in it and one that could not be read must not look alike.
+// No block writes anything: the overseer beats, logs and answers from a
+// terminal.
+//
+// The panel's note is the two readings that go stale on it: the overseer's own
+// standing and the dispatcher's last tick. The tick rides there rather than in
+// the block because that is the reading the daemon's dispatcher-silence watcher
+// dates a pane by.
+function renderOverseer(s) {
+  const box = $("overseer");
   box.replaceChildren();
+  drawHeartbeat(box, s);
+  drawDigest(box, s);
+  drawDeepReview(box, s);
+  drawDispatch(box, s);
+  drawOverseerQueue(box, s);
+  paintOverseerNote(s);
+}
+
+// oblock appends one block to the Overseer panel and returns the box its body
+// goes in, with the heading's note element beside its name. A block whose
+// reader could not report still gets its heading, so a panel that lost one
+// reader is not a panel that drew nothing.
+function oblock(panel, name) {
+  const b = el("div", "oblock");
+  const head = el("h3", "ohead");
+  const note = el("span", "r");
+  head.append(el("span", "oname", name), note);
+  const box = el("div", "obody");
+  b.append(head, box);
+  panel.append(b);
+  return {box, note};
+}
+
+// paintOverseerNote writes the panel's header note: the overseer's standing,
+// judged by the reader against the silence window the daemon's silent-overseer
+// rule uses, and how long ago the dispatcher last ticked. The second is the
+// reading a stopped tick shows as (the daemon's dispatcher ticks every minute),
+// so the note is drawn in the amber the page marks a stale reading with, and in
+// the alert red once the tick is past the bound the dispatcher's own alert
+// uses.
+function paintOverseerNote(s) {
+  const note = $("overseernote"), o = s.overseer, d = s.dispatch;
+  note.textContent = "";
+  note.title = "";
+  note.className = "r";
+  if (!o && !d) return;
+  const alive = !!o && !o.unavailable && o.status === "alive";
+  const standing = !o ? ""
+    : o.unavailable ? "unavailable"
+    : o.status === "none" ? "no heartbeat"
+    : alive ? "alive"
+    : "silent window " + fmtDur(o.silent_after_sec);
+  const tickSec = d ? (Date.now() - new Date(d.at).getTime()) / 1000 : null;
+  const tick = tickSec == null ? "" : "last tick " + fmtDur(tickSec) + " ago";
+  note.textContent = [standing, tick].filter(Boolean).join(" · ");
+  const warn = !o || !alive;
+  note.className = "r" + (tickSec != null && tickSec > 300 ? " badc" : warn || (tickSec != null && tickSec > 150) ? " warnc" : "");
+}
+
+// The Dispatcher block of the Overseer panel: the last tick the spec dispatcher
+// logged — its roster and counts, the beads it skipped with why, and the
+// warning once it has gone quiet. The tick's age is the panel's note
+// (paintOverseerNote), so a stopped dispatcher is one reading in one place.
+// The block writes nothing: the dispatcher is started, stopped and configured
+// from a terminal.
+//
+// Every cell goes through el(), which writes textContent: a skip reason is the
+// dispatcher's own text and shows as that text, never as markup.
+function drawDispatch(panel, s) {
+  const { box } = oblock(panel, "Dispatcher");
   const d = s.dispatch;
-  if (!d) { box.append(el("div", "empty", "no dispatcher tick in the daemon log yet")); $("dispnote").textContent = ""; return; }
+  if (!d) { box.append(el("div", "empty", "no dispatcher tick in the daemon log yet")); return; }
   const ageSec = (Date.now() - new Date(d.at).getTime()) / 1000;
   const stale = ageSec > 300;
-  $("dispnote").textContent = "last tick " + fmtDur(ageSec) + " ago";
-  $("dispnote").className = "r" + (stale ? " badc" : ageSec > 150 ? " warnc" : "");
   if (stale) box.append(el("div", "badc", "⚠ the dispatcher has not ticked for " + fmtDur(ageSec) + " (it ticks every minute)"));
   const kv = el("div", "kv");
   const add = (v, k, cls) => { const x = el("div"); x.append(el("b", cls || "", String(v)), el("span", "", k)); kv.append(x); };
@@ -2261,19 +2404,18 @@ function attentionRow(r) {
   return row;
 }
 
-// The Overseer pane: whether the overseer session is alive, what it has done
-// lately and what it does most. The status is the reader's own word, judged
-// against the silence window the daemon's silent-overseer rule uses, so the
-// pane and the push agree on when the overseer went quiet. Read-only: the
-// overseer writes its heartbeat and journal with gt overseer beat and log.
+// The heartbeat block of the Overseer panel: whether the overseer session is
+// alive, what it has done lately and what it does most, and the tail of its
+// journal. The status is the reader's own word, judged against the silence
+// window the daemon's silent-overseer rule uses, so the panel and the push
+// agree on when the overseer went quiet. Read-only: the overseer writes its
+// heartbeat and journal with gt overseer beat and log.
 //
 // Every cell goes through el(), which writes textContent: a journal line is the
 // overseer's own text and shows as that text, never as markup.
-function renderOverseer(s) {
-  const box = $("overseer"), note = $("overseernote");
-  box.replaceChildren();
+function drawHeartbeat(panel, s) {
+  const { box } = oblock(panel, "Heartbeat");
   const o = s.overseer;
-  note.className = "r"; note.textContent = "";
   if (!o) { box.append(el("div", "empty", "reading…")); return; }
   // A read that failed is a named state: "the overseer is silent" and "its
   // files could not be read" must not look alike.
@@ -2287,8 +2429,6 @@ function renderOverseer(s) {
   if (o.state) { const c = el("div"); c.append(el("b", "", o.state), el("span", "", "state")); head.append(c); }
   if (o.open_questions != null) { const c = el("div"); c.append(el("b", "", String(o.open_questions)), el("span", "", "open questions")); head.append(c); }
   box.append(head);
-  note.className = alive ? "r" : "r warnc";
-  note.textContent = alive ? "" : "silent window " + fmtDur(o.silent_after_sec);
   const counts = o.interventions || [];
   if (counts.length) {
     box.append(el("div", "empty", "last 7 days: " + counts.map(c => c.kind + " " + c.count).join(" · ")));
@@ -2304,71 +2444,96 @@ function renderOverseer(s) {
   }
 }
 
-// The Deep review pane: when each of the review's schedules is next due, or why
-// the town holds them, and the last ten runs, newest first. Read-only: a run is
-// triggered, paused and edited from a terminal.
+// The Deep review block of the Overseer panel: one row per schedule the town
+// configures — every entry of daemon.patrols.scheduled_slings — with when that
+// schedule is next due and the newest run it filed: the run's bead, whether it
+// is still open, what its notes counted as findings and as beads filed, and
+// the digest it wrote. Read-only: a run is triggered, paused and edited from a
+// terminal.
 //
-// The standing is one cell per configured schedule — two since the review was
-// split into a slice path and a risk path — carrying the schedule's next-run
-// text with its name under it. The reader's own words are what a cell shows; a
-// town with no schedule configured says so in one nameless cell. A held town
-// starts no run whatever an interval says, so "paused" replaces the cells
-// rather than sitting beside them. Every cell goes through el(), which writes
-// textContent: the run's bead id and the hold's reason are text and never
-// markup. The digest column is a reference — the bead and its comment count —
-// and never the digest's text.
-function renderDeepReview(s) {
-  const box = $("deepreview"), note = $("deepreviewnote");
-  box.replaceChildren();
+// The rows are the config's, not a set of names this page knows: a schedule
+// configured beside the review's slice and risk paths is a row the moment it
+// exists (gt-uv08f). A schedule whose interval is unusable, and one the
+// dispatcher holds, still carry their row: the reader's words for those states
+// are what the row's next cell shows. A held town starts no run whatever a
+// schedule's interval says, so "paused" heads the block and is named in it.
+//
+// Every cell goes through el(), which writes textContent: a schedule's name,
+// the run's bead id and the hold's reason are text and never markup. The digest
+// cell is a reference — the bead and its comment count — and never the digest's
+// text.
+function drawDeepReview(panel, s) {
+  const { box, note } = oblock(panel, "Deep review");
   const d = s.deepreview;
-  note.className = "r"; note.textContent = "";
   if (!d) { box.append(el("div", "empty", "reading…")); return; }
-  // A read that failed is a named state, never an empty pane: "no deep review
+  // A read that failed is a named state, never an empty block: "no deep review
   // has run" and "the runs could not be read" must not look alike.
   if (d.unavailable) { box.append(el("div", "badc", "unavailable: deep reviews could not be read")); return; }
-  const nexts = d.next || [];
-  const kv = el("div", "kv");
   if (d.paused) {
-    const cell = el("div");
-    cell.append(el("b", "warnc", "paused"), el("span", "", d.paused));
-    kv.append(cell);
-  } else {
-    // The reader sends one line per configured schedule, and one nameless line
-    // for a town that has none: that line's label is the pane's own subject,
-    // and its text is the reader's word for the state.
-    for (const n of nexts) {
-      const cell = el("div");
-      cell.append(el("b", "", n.text), el("span", "", n.name || "deep review"));
-      kv.append(cell);
-    }
+    note.className = "r warnc";
+    note.textContent = "paused";
+    note.title = d.paused;
+    box.append(el("div", "warnc", "paused: " + d.paused));
   }
-  box.append(kv);
-  const standing = d.paused ? d.paused : nexts.map(n => (n.name ? n.name + " " : "") + n.text).join(" · ");
-  note.className = d.paused ? "r warnc" : "r";
-  note.textContent = d.paused ? "paused" : standing;
-  note.title = (d.paused ? "paused: " : "next: ") + standing;
-  const rows = d.rows || [];
-  if (!rows.length) { box.append(el("div", "empty", "no runs yet")); return; }
+  const scheds = d.schedules || [];
+  if (!scheds.length) { box.append(el("div", "empty", "no deep review schedule configured")); return; }
   const t = el("table");
   const hr = el("tr");
-  [["Run"], ["Kind", "the schedule that filed the run"], ["Status"], ["Took", "closed minus created", 1], ["Found", "finding: lines in the run's notes", 1], ["Filed", "findings that named a bead", 1], ["Queued", "queued: lines in the run's notes", 1], ["Digest"]]
+  [["Schedule", "an entry of daemon.patrols.scheduled_slings"], ["Next", "when the schedule is next due"], ["Last run", "the newest run the schedule filed"], ["Findings", "finding: lines in that run's notes", 1], ["Filed", "those findings that named a bead", 1], ["Digest", "that run's digest bead and its comment count"]]
     .forEach(([h, tip, num]) => { const th = el("th", num ? "n" : "", h); if (tip) th.title = tip; hr.append(th); });
   t.append(hr);
-  for (const r of rows) {
+  for (const sc of scheds) {
     const tr = el("tr");
-    const id = el("td", "title", r.id);
-    if (r.unparsed) { const b = el("span", "badge warnc", "unparsed"); b.title = "a finding:, queued: or cursor: line in the notes is missing its fields"; id.append(document.createTextNode(" "), b); }
-    tr.append(id);
-    tr.append(el("td", "title", r.kind || "–"));
-    tr.append(el("td", r.status === "open" ? "warnc" : "", r.status));
-    tr.append(el("td", "n", r.duration_sec == null ? "–" : fmtDur(r.duration_sec)));
-    tr.append(el("td", "n", String(r.findings)));
-    tr.append(el("td", "n", String(r.filed)));
-    tr.append(el("td", "n", String(r.queued)));
-    tr.append(el("td", "title", r.digest || "–"));
+    const name = el("td", "title", sc.name || "–");
+    if (sc.rig) name.title = sc.rig;
+    tr.append(name);
+    tr.append(el("td", sc.next === "due now" || sc.next === "running" ? "warnc" : "", sc.next));
+    const last = sc.last || null;
+    // The run cell carries the run's bead and the two marks the reader makes
+    // about it: a run that has not closed is in flight — its counts are the
+    // counts so far — and one whose notes were cut or malformed says so.
+    const run = el("td", "title");
+    run.append(el("span", "", last ? last.id : "–"));
+    if (last && last.status !== "closed") {
+      const b = el("span", "badge warnc", last.status);
+      b.title = "the run has not closed: its counts are the ones so far";
+      run.append(document.createTextNode(" "), b);
+    }
+    if (last && last.unparsed) {
+      const b = el("span", "badge warnc", "unparsed");
+      b.title = "a finding: or queued: line in the run's notes is missing its fields";
+      run.append(document.createTextNode(" "), b);
+    }
+    tr.append(run);
+    if (!last) {
+      tr.append(el("td", "n", "–"), el("td", "n", "–"), el("td", "title", "–"));
+    } else {
+      tr.append(el("td", "n", String(last.findings)), el("td", "n", String(last.filed)));
+      tr.append(el("td", "title", last.digest || "–"));
+    }
     t.append(tr);
   }
   box.append(t);
+}
+
+// The block of the Overseer panel that lists what the overseer owes a move on:
+// the rows of the attention list whose owner is the overseer — a landing that
+// wants a post-landing look because it touched a risk path, an idle dispatcher,
+// a stalled polecat, an answered question — drawn with the same row the
+// Attention panel draws them with, so the two panels cannot drift into two
+// readings of one list (gt-bi6w0).
+//
+// The panel exists because the Attention panel opens on the human's rows: the
+// overseer reads its own rows here without switching that panel's chips, which
+// is how one list serves both readers (gt-uv08f).
+function drawOverseerQueue(panel, s) {
+  const { box, note } = oblock(panel, "For the overseer");
+  const at = s.attention;
+  if (!at) { box.append(el("div", "empty", "reading…")); return; }
+  const rows = (at.rows || []).filter(r => r.owner === "overseer");
+  note.textContent = rows.length ? rows.length + " waiting" : "";
+  if (!rows.length) { box.append(el("div", "empty", "nothing is waiting on the overseer")); return; }
+  for (const r of rows) box.append(attentionRow(r));
 }
 
 // The Usage pane: what the town spent over the last day, from the records the
@@ -2440,10 +2605,11 @@ function renderUsage(s) {
         [r.class], [r.model, "title"], [String(r.calls), "n"],
         [isDeepSeek(r.model) ? "est. " + money(r.est_cost_usd) : fmtTokens(r.uncached) + " tokens", "n"]]))
     : none("no usage in the last " + (u.window || "24h")));
-  // What a run's tokens bought: its findings, joined by bead id from the Deep
-  // review pane's rows. A run that pane does not list has no count ("-"), and a
-  // run with none has no per-finding figure to divide into.
-  const found = new Map(((s.deepreview && s.deepreview.rows) || []).map(r => [r.id, r.findings]));
+  // What a run's tokens bought: its findings, joined by bead id from the runs
+  // the Deep review block's reader carries. A run that reader does not list has
+  // no count ("-"), and a run with none has no per-finding figure to divide
+  // into.
+  const found = new Map(((s.deepreview && s.deepreview.runs) || []).map(r => [r.id, r.findings]));
   section("Deep reviews", deep.length
     ? table([["Run"], ["Ended"], ["Took", 1], ["Tokens", 1], ["In subagents", 1], ["Findings", 1], ["Tokens per finding", 1]], deep.map(r => {
         const f = found.get(r.bead);
@@ -2728,7 +2894,7 @@ function renderQueue(s, force) {
   if (qShape === "all" && totalInRig > shownInRig) box.append(el("div", "empty", "+" + (totalInRig - shownInRig) + " more, lower priority, not shown (pick a store to see its first " + 40 + ")"));
 }
 
-function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderDeepReview(state); renderUsage(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderReports(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderDispatch(state); renderQueue(state); }
+function renderAll() { if (!state) return; renderHealth(state.health); renderStrip(state); renderModelsPanel(state); renderAttention(state); renderOverseer(state); renderUsage(state); renderRigs(state); renderSeats(state); renderTrend(state); renderMachine(state); renderCloud(state); renderDeploys(state); renderHealthMark(state); renderForgejo(state); renderTierSweep(state); renderSpend(state); renderOM(state); renderQueue(state); }
 
 const CLASSES = ["failure", "warning", "success", "landing", "dispatch", "restart", "plain"];
 const shown = new Set(JSON.parse(localStorage.getItem("gt-chips") || "null") || CLASSES.filter(c => c !== "plain"));

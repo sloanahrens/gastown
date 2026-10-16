@@ -1,23 +1,24 @@
 package dashboard
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
 
-// The Report panel is read where the operator already looks for a report the
-// town produces: in the left column, directly under Alerts, which is what the
-// layout test pins. What it draws is the state the reader decided — the note
-// names a directory or a report it could not read, and the body is the report
-// itself.
+// The Digest block is read where the operator already looks for the overseer's
+// side of the town: in the Overseer panel, under the heartbeat. What it draws
+// is the state the reader decided — the heading note names a directory or a
+// report it could not read, and the body is the digest's own sections.
 func TestReportPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 	t.Parallel()
 
-	draw := pageFunc(t, "renderReports")
+	draw := pageFunc(t, "drawDigest")
 	for _, want := range []string{
 		`const r = s.reports;`,
 		`if (!r) { box.append(el("div", "empty", "reading…")); return; }`,
@@ -26,7 +27,7 @@ func TestReportPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 		`box.append(el("div", r.state === "error" ? "badc" : "empty", r.note || r.state));`,
 	} {
 		if !strings.Contains(draw, want) {
-			t.Errorf("renderReports has no %q", want)
+			t.Errorf("drawDigest has no %q", want)
 		}
 	}
 
@@ -40,29 +41,29 @@ func TestReportPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 		`note.title = shown.toLocaleString();`,
 	} {
 		if !strings.Contains(draw, want) {
-			t.Errorf("renderReports has no %q", want)
+			t.Errorf("drawDigest has no %q", want)
 		}
 	}
 	// The body is then only the report: the age line that used to sit above it
 	// is gone, and nothing else still spells the old wording.
 	if strings.Contains(draw, "chead") {
-		t.Error("renderReports still draws a body header above the report")
+		t.Error("drawDigest still draws a body header above the report")
 	}
 	if strings.Contains(draw, "report overdue") {
-		t.Error("renderReports still writes the old overdue wording")
+		t.Error("drawDigest still writes the old overdue wording")
 	}
 
-	// The report is another tool's text, so every cell goes through el(), which
-	// writes textContent: a tag in the report shows as that text and never as
-	// markup, and the report's own line breaks are kept by the pre-wrap the box
+	// The digest is another tool's text, so every cell goes through el(), which
+	// writes textContent: a tag in the digest shows as that text and never as
+	// markup, and a section's own line breaks are kept by the pre-wrap the box
 	// carries rather than by an element that parses anything. The text is split
 	// into nodes so a bead id in it can be a button (gt-7005n), and every node
-	// is still built the way the pane always built them.
+	// is still built the way the block always built them.
 	if strings.Contains(draw, "innerHTML") {
-		t.Error("renderReports sets markup from the report's text")
+		t.Error("drawDigest sets markup from the report's text")
 	}
-	if !strings.Contains(draw, `rep.append(...reportNodes(rPick ? read.text : r.text, prefixes));`) {
-		t.Errorf("renderReports has no %q", `rep.append(...reportNodes(rPick ? read.text : r.text, prefixes));`)
+	if !strings.Contains(draw, `drawDigestSections(box, rPick ? read.text : r.text, prefixes);`) {
+		t.Errorf("drawDigest has no %q", `drawDigestSections(box, rPick ? read.text : r.text, prefixes);`)
 	}
 	// A full report shows without scrolling: the box is capped at the height
 	// the Feed pane uses, not the 280px that clipped a long report.
@@ -78,23 +79,25 @@ func TestReportPanelDrawsTheStateTheReaderDecided(t *testing.T) {
 }
 
 // A state with no write to date — no report yet, or one that could not be read —
-// keeps its body text and leaves the header note empty: the pane dates a
-// reading, and there is none.
-func TestReportPanelLeavesTheHeaderNoteEmptyWhenThereIsNoWrite(t *testing.T) {
+// keeps its body text and leaves the heading note empty: the block dates a
+// reading, and there is none. The note is the block's own, drawn fresh with it,
+// so a state that returns before the dating leaves it bare.
+func TestReportPanelLeavesTheHeadingNoteEmptyWhenThereIsNoWrite(t *testing.T) {
 	t.Parallel()
 
-	draw := pageFunc(t, "renderReports")
-	reset := strings.Index(draw, `note.textContent = "";`)
-	state := strings.Index(draw, `if (r.state === "missing" || r.state === "error") {`)
-	dated := strings.Index(draw, `note.textContent = "written " + age(shown) + " ago"`)
-	if reset < 0 || state < 0 || dated < 0 {
-		t.Fatalf("renderReports does not reset the note, name the states, and date the report: %s", draw)
-	}
-	if reset > state {
-		t.Error("renderReports clears the header note only after the nameless states are decided")
-	}
-	if dated < state {
-		t.Error("renderReports dates the report before the state without a write is decided")
+	dom := newPageDOM(t)
+	for name, tc := range map[string]map[string]any{
+		"missing": {"state": "missing", "note": "the overseer has written no report yet"},
+		"error":   {"state": "error", "note": "the reports directory could not be read"},
+	} {
+		dom.call(t, "renderOverseer", map[string]any{"reports": tc})
+		block := blockNamed(t, overseerBlocks(t, dom), "Digest")
+		if block.Note != "" {
+			t.Errorf("%s: the block's note reads %q, want it empty", name, block.Note)
+		}
+		if !strings.Contains(block.Text, tc["note"].(string)) {
+			t.Errorf("%s: the block reads %q, want the reader's own words", name, block.Text)
+		}
 	}
 }
 
@@ -106,7 +109,7 @@ func TestReportPanelLeavesTheHeaderNoteEmptyWhenThereIsNoWrite(t *testing.T) {
 func TestReportPanelListsTheEarlierWritesBehindADisclosure(t *testing.T) {
 	t.Parallel()
 
-	draw := pageFunc(t, "renderReports")
+	draw := pageFunc(t, "drawDigest")
 	for _, want := range []string{
 		`const earlier = times.slice(1);`,
 		`if (earlier.length) {`,
@@ -119,22 +122,153 @@ func TestReportPanelListsTheEarlierWritesBehindADisclosure(t *testing.T) {
 		`d.append(ul);`,
 	} {
 		if !strings.Contains(draw, want) {
-			t.Errorf("renderReports has no %q", want)
+			t.Errorf("drawDigest has no %q", want)
 		}
 	}
 	// A disclosure is closed until it is opened: nothing here opens it.
 	if strings.Contains(draw, "d.open") {
-		t.Error("renderReports opens the list of earlier reports on its own")
+		t.Error("drawDigest opens the list of earlier reports on its own")
 	}
 
-	// The panel is drawn with every other pane, and only exists while the
-	// reader has reported: the state's field is absent until then.
-	all := pageFunc(t, "renderAll")
-	if !strings.Contains(all, "renderReports(state)") {
-		t.Error("renderAll does not draw the Report panel")
+	// The block is drawn inside the Overseer panel, with the blocks beside it,
+	// and the panel is what renderAll draws: the block has no renderer of its
+	// own to call (gt-uv08f).
+	dom := newPageDOM(t)
+	dom.call(t, "renderOverseer", map[string]any{"reports": map[string]any{
+		"state": "fresh", "text": "overseer report\n", "written": "2026-10-15T20:00:00Z",
+		"times": []any{"2026-10-15T20:00:00Z", "2026-10-15T19:45:00Z"},
+	}})
+	if block := blockNamed(t, overseerBlocks(t, dom), "Digest"); !strings.Contains(block.Text, "1 earlier report") {
+		t.Errorf("the digest block reads %q, want the earlier writes behind their disclosure", block.Text)
 	}
-	if !strings.Contains(string(indexHTML), `<section><h2>Report <span class="r" id="reportnote"></span></h2><div class="body" id="report"></div></section>`) {
-		t.Error("the Report section is not the markup its neighbours are")
+	if all := pageFunc(t, "renderAll"); !strings.Contains(all, "renderOverseer(state)") {
+		t.Error("renderAll does not draw the Overseer panel")
+	}
+}
+
+// archiveDigest is a digest in the shape the daemon's report patrol writes it:
+// a header line, then the named sections, each row indented under its heading.
+const archiveDigest = `overseer report 2026-10-15T20:00:00Z (covers 2026-10-15T19:45:00Z to 2026-10-15T20:00:00Z)
+
+DONE
+  gt-a1  landed a thing  gastown
+  dv-b2  shipped another  dv
+
+IN PROGRESS
+  gastown/nux  gt-c3  working on it  23m
+
+LEFT
+  next  gt-d4  gastown  two seats free
+  held  gt-e5  gastown  waiting on gt-a1
+
+OPEN QUESTIONS
+  gt-q1  2h  held: gt-a1
+
+health: GREEN
+`
+
+// The block's body is the digest's own sections: the three that say what the
+// town did and what it still has to do are drawn, with the beads in them
+// openable, and the questions section is left out — those questions are the
+// attention list's rows, which the panel draws in full, so a digest's
+// fifteen-minute-old copy of them would be one fact twice (gt-uv08f).
+func TestDigestBlockDrawsTheDigestsOwnSections(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderOverseer", map[string]any{"reports": map[string]any{
+		"state": "fresh", "text": archiveDigest, "written": "2026-10-15T20:00:00Z",
+		"times": []any{"2026-10-15T20:00:00Z"},
+	}})
+
+	block := blockNamed(t, overseerBlocks(t, dom), "Digest")
+	for _, want := range []string{
+		"DONE", "gt-a1  landed a thing  gastown", "dv-b2  shipped another  dv",
+		"IN PROGRESS", "gastown/nux  gt-c3  working on it  23m",
+		"LEFT", "next  gt-d4  gastown  two seats free", "held  gt-e5  gastown  waiting on gt-a1",
+	} {
+		if !strings.Contains(block.Text, want) {
+			t.Errorf("the digest block reads %q, want %q in it", block.Text, want)
+		}
+	}
+	// The header line, the questions section and the health line are not the
+	// three sections the block draws.
+	for _, gone := range []string{"overseer report 2026", "OPEN QUESTIONS", "gt-q1", "health: GREEN"} {
+		if strings.Contains(block.Text, gone) {
+			t.Errorf("the digest block draws %q: %q", gone, block.Text)
+		}
+	}
+	// The digest's own reading of a section with nothing in it is the reader's
+	// word, not the block's: "(none)" is what the writer writes.
+	dom = newPageDOM(t)
+	dom.call(t, "renderOverseer", map[string]any{"reports": map[string]any{
+		"state": "fresh", "text": "overseer report x\n\nDONE\n  (none)\n\nIN PROGRESS\n  (none)\n\nLEFT\n  (none)\n",
+		"written": "2026-10-15T20:00:00Z", "times": []any{"2026-10-15T20:00:00Z"},
+	}})
+	if got := blockNamed(t, overseerBlocks(t, dom), "Digest"); strings.Count(got.Text, "(none)") != 3 {
+		t.Errorf("an empty digest reads %q, want the writer's three empty sections", got.Text)
+	}
+}
+
+// A digest whose shape the page does not recognise — an older daemon's, or
+// another tool's report in the same directory — is drawn whole rather than as
+// nothing: the sections are how the block sorts a digest, not what it takes for
+// one.
+func TestDigestBlockDrawsADigestOfAnUnknownShapeWhole(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderOverseer", map[string]any{"reports": map[string]any{
+		"state": "fresh", "text": "a report with no sections at all\ngt-a1 is mentioned\n",
+		"written": "2026-10-15T20:00:00Z", "times": []any{"2026-10-15T20:00:00Z"},
+	}})
+	block := blockNamed(t, overseerBlocks(t, dom), "Digest")
+	if !strings.Contains(block.Text, "a report with no sections at all") || !strings.Contains(block.Text, "gt-a1 is mentioned") {
+		t.Errorf("the block reads %q, want the whole report", block.Text)
+	}
+}
+
+// The digest is parsed by its own shape — a heading is a line of capitals at
+// the left margin, where every row under one is indented — and the page holds
+// that shape in one place, so a section the writer changes is a section the
+// block follows.
+func TestDigestSectionsReadTheDigestShape(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	v, err := dom.vm.RunString(`JSON.stringify(Array.from(digestSections(` + strconv.Quote(archiveDigest) + `).entries()).map(([k, rows]) => [k, digestLines(rows)]))`)
+	if err != nil {
+		t.Fatalf("reading the digest's sections: %v", err)
+	}
+	var got [][2]string
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("reading the digest's sections: %v", err)
+	}
+	want := [][2]string{
+		{"DONE", "  gt-a1  landed a thing  gastown\n  dv-b2  shipped another  dv"},
+		{"IN PROGRESS", "  gastown/nux  gt-c3  working on it  23m"},
+		{"LEFT", "  next  gt-d4  gastown  two seats free\n  held  gt-e5  gastown  waiting on gt-a1"},
+		{"OPEN QUESTIONS", "  gt-q1  2h  held: gt-a1"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("the digest read as %v, want its four sections", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("section %d read as %q, want %q", i, got[i], want[i])
+		}
+	}
+	// The header line above the first heading belongs to no section, and the
+	// blank lines the writer puts around a section are not part of it: a row
+	// that is not indented and not capitals is not a heading either.
+	for _, text := range []string{
+		"",
+		"a report with no sections",
+		"overseer report x\n\nlower case heading\n  a row\n",
+	} {
+		if v, err := dom.vm.RunString(`String(digestSections(` + strconv.Quote(text) + `).size)`); err != nil || v.String() != "0" {
+			t.Errorf("digestSections(%.20q) read %v sections (%v), want none", text, v, err)
+		}
 	}
 }
 
@@ -192,21 +326,21 @@ func TestReportLinksTheBeadIdsWhosePrefixNamesAStore(t *testing.T) {
 	// failed read draws the failure detailBlock already names.
 	open := pageFunc(t, "openReportBead")
 	for _, want := range []string{
-		`if (rOpen.has(key)) { rOpen.delete(key); renderReports(state); return; }`,
-		`beadDetailFor(rig, id, rDetail, () => renderReports(state));`,
+		`if (rOpen.has(key)) { rOpen.delete(key); renderOverseer(state); return; }`,
+		`beadDetailFor(rig, id, rDetail, () => renderOverseer(state));`,
 	} {
 		if !strings.Contains(open, want) {
 			t.Errorf("openReportBead has no %q", want)
 		}
 	}
-	draw := pageFunc(t, "renderReports")
+	draw := pageFunc(t, "drawDigest")
 	for _, want := range []string{
-		`rep.append(...reportNodes(rPick ? read.text : r.text, prefixes));`,
+		`drawDigestSections(box, rPick ? read.text : r.text, prefixes);`,
 		`bd.append(detailBlock(rDetail[id] || {loading: true}));`,
 		`const prefixes = (s.queue && s.queue.prefixes) || {};`,
 	} {
 		if !strings.Contains(draw, want) {
-			t.Errorf("renderReports has no %q", want)
+			t.Errorf("drawDigest has no %q", want)
 		}
 	}
 	// The click reads the bead from the one route with the rig its prefix mapped
@@ -361,7 +495,7 @@ func TestReportPanelReadsAnEarlierReportFromItsTimestamp(t *testing.T) {
 		`const rRead = {};`,
 		`function reportFile(t) {`,
 		`function reportTime(name) {`,
-		`function showLatest() { rPick = ""; renderReports(state); }`,
+		`function showLatest() { rPick = ""; renderOverseer(state); }`,
 	} {
 		if !strings.Contains(page, want) {
 			t.Errorf("index.html has no %q", want)
@@ -374,17 +508,17 @@ func TestReportPanelReadsAnEarlierReportFromItsTimestamp(t *testing.T) {
 	for _, want := range []string{
 		`fetch("/api/report?name=" + encodeURIComponent(name))`,
 		`.then(res => res.ok ? res.json() : Promise.reject(new Error(String(res.status))))`,
-		`.then(d => { rRead[name] = {text: d.text || ""}; renderReports(state); })`,
-		`.catch(() => { rRead[name] = {error: true}; renderReports(state); });`,
+		`.then(d => { rRead[name] = {text: d.text || ""}; renderOverseer(state); })`,
+		`.catch(() => { rRead[name] = {error: true}; renderOverseer(state); });`,
 	} {
 		if !strings.Contains(open, want) {
 			t.Errorf("openReport has no %q", want)
 		}
 	}
 
-	// The pane dispatches a timestamp's click to that reader, returns through
+	// The block dispatches a timestamp's click to that reader, returns through
 	// its own control, and names a failed read in the body.
-	draw := pageFunc(t, "renderReports")
+	draw := pageFunc(t, "drawDigest")
 	for _, want := range []string{
 		`b.onclick = () => openReport(name);`,
 		`const b = el("button", "rbead", "← back to latest");`,
@@ -392,7 +526,7 @@ func TestReportPanelReadsAnEarlierReportFromItsTimestamp(t *testing.T) {
 		`box.append(el("div", read && read.error ? "badc" : "empty", read && read.error ? "could not read this report" : "reading…"));`,
 	} {
 		if !strings.Contains(draw, want) {
-			t.Errorf("renderReports has no %q", want)
+			t.Errorf("drawDigest has no %q", want)
 		}
 	}
 }

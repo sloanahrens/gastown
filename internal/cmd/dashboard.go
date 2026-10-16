@@ -98,19 +98,23 @@ whether that is overdue, the projects it watches and its open findings by
 severity, and it writes nothing there. On a machine with no reports directory
 the panel says so and is re-read at a slow interval rather than every minute.
 
-The Report panel reads the overseer's own hourly report from
-.runtime/overseer/reports under the town root: the newest file named for the
-instant it was written, its text, and when the writes before it happened. An
-hourly report that is late is marked, the text is drawn as text and never as
-markup, and a directory the reader cannot read says so rather than reading as
-one with no reports in it. The panel writes nothing there.
-
-The Overseer panel reads the heartbeat and journal under
-.runtime/overseer: alive or silent against overseer.silent_after, the last
-active time and state, the newest eight journal lines, the last seven days of
-interventions by kind and the open question count. A file it cannot read makes
-the panel say so instead of reading as a silent overseer. The panel writes
-nothing; gt overseer beat and gt overseer log do.
+The Overseer panel is the overseer's whole side of the town in one panel, in
+five blocks. The heartbeat reads .runtime/overseer: alive or silent against
+overseer.silent_after, the last active time and state, the newest eight journal
+lines, the last seven days of interventions by kind and the open question count.
+The digest reads the daemon's own report from .runtime/overseer/reports — the
+newest file named for the instant it was written — and draws its DONE, IN
+PROGRESS and LEFT sections, with when the writes before that one happened behind
+a disclosure; a report that is late is marked, and an earlier one can be read in
+its place. The Deep review block lists every schedule
+daemon.patrols.scheduled_slings configures, each with when it is next due, the
+"paused: <reason>" a hold file or ESTOP parks dispatch with, and the newest run
+it filed with its findings and the beads filed. The Dispatcher block reads the
+spec dispatcher's last tick from the daemon log: its roster, counts and the
+beads it skipped. The last block is the rows of the attention list the overseer
+owes a move on. Every read that fails says so rather than reading as an empty
+block, the panel writes nothing, and no digest's text is ever drawn. gt overseer
+beat and gt overseer log write the heartbeat and journal.
 
 The Attention panel is the one list of what waits on a decision or an action:
 the town's open escalation beads, the open overseer questions and the attention
@@ -120,14 +124,6 @@ overseer recommends, the work it holds up, how long it has waited and the bead
 id to answer — Sloan answers with gt answer, which comments on the bead. The
 page draws it and never writes: there is no form, and a question is closed from
 a terminal.
-
-The Deep review panel reads the gastown rig's scheduled:deep-review,
-scheduled:deep-review-slice and scheduled:deep-review-risk beads with bd — when
-each schedule is next due by its interval, or "paused: <reason>" while a hold
-file or ESTOP parks dispatch, and the last ten runs across the schedules with
-their kind, status, duration, findings, beads filed and a reference to the
-digest. A read that fails says so rather than reading as no runs. The panel
-never writes and never draws a digest's text.
 
 Lifecycle: the dashboard watches its own binary and the town registry. When make
 install replaces the binary, or a rig is added to or removed from the town, the
