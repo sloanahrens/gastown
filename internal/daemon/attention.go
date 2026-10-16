@@ -244,11 +244,12 @@ type attentionSources struct {
 	// Already loaded and written back by writeAttention.
 	tips *directPushTips
 
-	// riskLandings reads a rig's landing records in a window; riskNotes reads
-	// one work bead's notes. Together they are the risk-path collector's two
-	// outside reads (gt-vsct7.4).
+	// riskLandings reads a rig's landing records in a window; riskIssue reads
+	// one work bead — the notes that carry its review lines and the priority its
+	// item's severity is judged on. Together they are the risk-path collector's
+	// two outside reads (gt-vsct7.4).
 	riskLandings func(rig string, since time.Time) ([]land.LandingRecord, error)
-	riskNotes    func(ctx context.Context, rig, id string) (string, error)
+	riskIssue    func(ctx context.Context, rig, id string) (*beads.Issue, error)
 	// findingStatus reads one finding bead's status and riskAppend appends a
 	// review line to a work bead's notes: the resolved-FAIL pass's reads and
 	// its only write (attention_risk_audit.go). A nil func turns the pass off.
@@ -625,15 +626,11 @@ func (d *Daemon) attentionSources(now time.Time) *attentionSources {
 	s.landedCommit = d.attentionLandedCommit
 	s.commitInfo = d.attentionCommitInfo
 	s.riskLandings = d.attentionRiskLandings
-	s.riskNotes = func(ctx context.Context, rig, id string) (string, error) {
+	s.riskIssue = func(ctx context.Context, rig, id string) (*beads.Issue, error) {
 		if err := ctx.Err(); err != nil {
-			return "", err
+			return nil, err
 		}
-		is, err := d.rigWorkBeads(rig).Show(id)
-		if err != nil {
-			return "", err
-		}
-		return is.Notes, nil
+		return d.rigWorkBeads(rig).Show(id)
 	}
 	d.productionRiskAudit(s)
 	return s
@@ -1263,10 +1260,14 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 // stays, with a summary that says so and names the finding beads the FAIL line
 // covers, until a later PASS for the same head (gt-86uzs).
 //
-// The notes read is cached per rig and bead for the tick, so a bead landed
-// twice in the window costs one bd show. The cache lives for the one collector
-// call: a review note written between ticks must be seen on the next, so
-// nothing carries over.
+// Its severity is review debt's, judged by attention.RiskPathSeverity from the
+// verdict and the work bead's own priority: the queue holds dozens of these at
+// once, and only a failed review of a P1 landing is an incident (gt-zevjx).
+//
+// The bead read is cached per rig and bead for the tick, so a bead landed twice
+// in the window costs one bd show. The cache lives for the one collector call:
+// a review note written between ticks must be seen on the next, so nothing
+// carries over.
 //
 // Like the other landing collectors it reads only the rigs whose landing
 // worker is on (attentionLandingRigs): a town with landings disabled has no
@@ -1274,7 +1275,7 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.Item, error) {
 	s.riskOpen, s.riskCounted = 0, false
 	var out []attention.Item
-	notesFor := map[string]string{}
+	beadsFor := map[string]*beads.Issue{}
 	since := s.now.Add(-attentionRiskPathWindow)
 	for _, rig := range s.landingRigs() {
 		if err := ctx.Err(); err != nil {
@@ -1289,28 +1290,33 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 				continue
 			}
 			cacheKey := rig + "\x00" + rec.BeadID
-			notes, ok := notesFor[cacheKey]
+			issue, ok := beadsFor[cacheKey]
 			if !ok {
-				notes, err = s.riskNotes(ctx, rig, rec.BeadID)
+				issue, err = s.riskIssue(ctx, rig, rec.BeadID)
 				if err != nil {
 					return nil, fmt.Errorf("%s: %w", rec.BeadID, err)
 				}
-				notesFor[cacheKey] = notes
+				beadsFor[cacheKey] = issue
 			}
+			notes := issue.Notes
 			if land.HasOverseerReviewNote(notes, rec.Head) {
 				continue
 			}
+			verdict, _ := land.OverseerReviewVerdict(notes, rec.Head)
 			wanted := "overseer review wanted"
-			if verdict, _ := land.OverseerReviewVerdict(notes, rec.Head); verdict == land.OverseerReviewFail {
+			if verdict == land.OverseerReviewFail {
 				wanted = "overseer review FAILED; rework needed, then a PASS"
 				if f := land.OverseerReviewFindings(notes, rec.Head); len(f) > 0 {
 					wanted = fmt.Sprintf("overseer review FAILED (findings %s); rework needed, then a PASS", strings.Join(f, ","))
 				}
 			}
 			out = append(out, attention.Item{
-				Key:      "risk:" + rec.BeadID + ":" + sha12(rec.Head),
-				Kind:     attention.KindRiskPath,
-				Severity: attention.SeverityHigh,
+				Key:  "risk:" + rec.BeadID + ":" + sha12(rec.Head),
+				Kind: attention.KindRiskPath,
+				Severity: attention.RiskPathSeverity(attention.RiskPathEvidence{
+					Failed:   verdict == land.OverseerReviewFail,
+					Priority: issue.Priority,
+				}),
 				Rig:      rig,
 				Bead:     rec.BeadID,
 				SHA:      rec.Head,

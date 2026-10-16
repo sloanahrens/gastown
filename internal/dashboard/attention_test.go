@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -91,6 +92,56 @@ func TestBuildAttentionMergesTheReadersIntoOneTaggedList(t *testing.T) {
 	}
 	if item.Title != "the volume is 96% full" || item.Rule != attention.RuleHostDiskCrit {
 		t.Errorf("the item is %+v, want the summary line titled and the rule named", item)
+	}
+}
+
+// gt-zevjx: the review queue does not read as an incident. A risk-path item the
+// queue raised at review debt's severity draws the calm chip — the level the
+// alerts carry is what the page colours and ranks by — and it sorts behind the
+// human's question and behind the daemon's own alarms.
+func TestAttentionPanelSortsTheAlarmsAboveReviewDebt(t *testing.T) {
+	t.Parallel()
+
+	// The levels are the ones the daemon's severities map to, so the rows here
+	// are the rows its events raise.
+	items := []Alert{
+		{ID: "alert-1", At: attentionNow.Add(-time.Hour), Level: attentionLevel(attention.SeverityLow), Key: "risk:gt-abc:deadbeef",
+			Title: attention.RuleRiskPath, Text: "gt-abc landed deadbeef touching internal/daemon/attention.go; overseer review FAILED",
+			Rule: attention.RuleRiskPath},
+		{ID: "alert-2", At: attentionNow.Add(-2 * time.Minute), Level: attentionLevel(attention.SeverityHigh), Key: "red-main:gastown:internal/cmd",
+			Title: attention.RuleRedMain, Text: "internal/cmd is red on main", Rule: attention.RuleRedMain},
+		{ID: "alert-3", At: attentionNow.Add(-time.Minute), Level: attentionLevel(attention.SeverityHigh), Key: "host.docker_stack_down",
+			Title: attention.RuleHostDockerDown, Text: "3 of 4 stack containers not running", Rule: attention.RuleHostDockerDown},
+	}
+	ask := &Questions{Rows: []QuestionRow{{ID: "gt-q1", Title: "retry policy", Priority: 0, State: QuestionAwaiting}}}
+
+	at := buildAttention(nil, ask, items, attentionNow)
+	want := []string{"gt-q1", "host.docker_stack_down", "red-main:gastown:internal/cmd", "risk:gt-abc:deadbeef"}
+	if len(at.Rows) != len(want) {
+		t.Fatalf("the list holds %+v, want the question and the three queue items", at.Rows)
+	}
+	for i, id := range want {
+		if at.Rows[i].ID != id {
+			t.Fatalf("row %d is %q, want %q (%+v)", i, at.Rows[i].ID, id, at.Rows)
+		}
+	}
+
+	debt := at.Rows[len(at.Rows)-1]
+	for _, row := range at.Rows[1 : len(at.Rows)-1] {
+		if row.Level != LevelCrit {
+			t.Errorf("the alarm %q draws level %q, want the crit it is", row.ID, row.Level)
+		}
+		if row.Urgency >= debt.Urgency {
+			t.Errorf("the alarm %q ranks %d against the debt's %d, want it louder", row.ID, row.Urgency, debt.Urgency)
+		}
+	}
+	if debt.Level != LevelWarn {
+		t.Errorf("the review-debt row draws level %q, want the warn its low severity maps to", debt.Level)
+	}
+	// The page colours and ranks a queue row from its own level, so the level
+	// above is the style the operator sees.
+	if !strings.Contains(string(indexHTML), `el("span", "alvl " + (r.level || "info")`) {
+		t.Error("the page no longer draws an item row from its level")
 	}
 }
 

@@ -32,7 +32,11 @@ func newRiskAuditWorld(f *attentionFixture) *riskAuditWorld {
 		reads:  map[string]int{},
 	}
 	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) { return w.landings, nil }
-	f.src.riskNotes = func(_ context.Context, _, id string) (string, error) { return w.notes[id], nil }
+	f.src.riskIssue = func(_ context.Context, _, id string) (*beads.Issue, error) {
+		// P2: an ordinary landing, so its item is review debt whatever the pass
+		// does to its notes.
+		return &beads.Issue{ID: id, Notes: w.notes[id], Priority: 2}, nil
+	}
 	f.src.findingStatus = func(_ context.Context, id string) (string, error) {
 		w.reads[id]++
 		if err := w.broken[id]; err != nil {

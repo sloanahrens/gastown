@@ -68,11 +68,12 @@ func (s *attentionSources) auditResolvedRiskFails(ctx context.Context) ([]string
 			if rec.BeadID == "" || rec.Head == "" || len(rec.RiskPaths) == 0 {
 				continue
 			}
-			notes, err := s.riskNotes(ctx, rig, rec.BeadID)
+			issue, err := s.riskIssue(ctx, rig, rec.BeadID)
 			if err != nil {
 				note(fmt.Errorf("%s: %w", rec.BeadID, err))
 				continue
 			}
+			notes := issue.Notes
 			if verdict, _ := land.OverseerReviewVerdict(notes, rec.Head); verdict != land.OverseerReviewFail {
 				continue
 			}

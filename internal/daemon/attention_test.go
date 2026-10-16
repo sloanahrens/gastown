@@ -75,7 +75,7 @@ func newAttentionFixture(t *testing.T, now time.Time) *attentionFixture {
 		commitInfo:    func(string, string) (string, string) { return "", "" },
 		tips:          &directPushTips{},
 		riskLandings:  func(string, time.Time) ([]land.LandingRecord, error) { return nil, nil },
-		riskNotes:     func(context.Context, string, string) (string, error) { return "", nil },
+		riskIssue:     func(context.Context, string, string) (*beads.Issue, error) { return &beads.Issue{}, nil },
 
 		host:        healthyHost(),
 		reworkNotes: map[string]reworkNote{},
@@ -1222,7 +1222,9 @@ func TestAttentionRiskPath(t *testing.T) {
 		}, nil
 	}
 	notes := ""
-	f.src.riskNotes = func(context.Context, string, string) (string, error) { return notes, nil }
+	f.src.riskIssue = func(context.Context, string, string) (*beads.Issue, error) {
+		return &beads.Issue{ID: "gt-abc", Notes: notes, Priority: 2}, nil
+	}
 
 	items := f.collect(t, f.src.collectRiskPaths)
 	if len(items) != 1 {
@@ -1230,7 +1232,7 @@ func TestAttentionRiskPath(t *testing.T) {
 	}
 	got := items[0]
 	if got.Key != "risk:gt-abc:"+head[:12] || got.Kind != attention.KindRiskPath ||
-		got.Rig != attentionRig || got.Bead != "gt-abc" || got.SHA != head || got.Severity != attention.SeverityHigh {
+		got.Rig != attentionRig || got.Bead != "gt-abc" || got.SHA != head || got.Severity != attention.SeverityLow {
 		t.Errorf("item = %+v, want risk:gt-abc:<head12> with the full head in SHA", got)
 	}
 	if !strings.Contains(got.Summary, "internal/daemon/attention.go") {
@@ -1254,9 +1256,9 @@ func TestAttentionRiskPath(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("items = %+v, want the item held for a FAIL review of this head", items)
 	}
-	if g := items[0]; g.Key != "risk:gt-abc:"+head[:12] || g.Bead != "gt-abc" || g.Severity != attention.SeverityHigh ||
+	if g := items[0]; g.Key != "risk:gt-abc:"+head[:12] || g.Bead != "gt-abc" || g.Severity != attention.SeverityLow ||
 		!strings.Contains(g.Summary, "gt-abc") || !strings.Contains(g.Summary, "FAILED") {
-		t.Errorf("item = %+v, want the high risk item naming gt-abc and the failed review", g)
+		t.Errorf("item = %+v, want the review-debt item naming gt-abc and the failed review", g)
 	}
 	// A FAIL naming its findings holds the item and says which beads the
 	// landing broke, so the reader knows what the rework answers (gt-86uzs).
@@ -1301,6 +1303,90 @@ func TestAttentionRiskPath(t *testing.T) {
 	}
 }
 
+// gt-zevjx: a risk-path item's severity is judged by its landing's own evidence
+// (attention.RiskPathSeverity), not by the kind alone. A failed review of a P1
+// landing — the machinery the town runs on — is the one that stays high; every
+// other, reviewed or not, is review debt the queue holds dozens of, and it is
+// low.
+func TestAttentionRiskPathSeverityIsReviewDebt(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	head := func(seed string) string { return strings.Repeat(seed, 40) }
+	landing := func(id, seed string) land.LandingRecord {
+		return land.LandingRecord{BeadID: id, Head: head(seed), RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)}
+	}
+	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) {
+		return []land.LandingRecord{landing("gt-debt", "a"), landing("gt-core", "b"), landing("gt-new", "c")}, nil
+	}
+	issues := map[string]*beads.Issue{
+		// An ordinary landing whose review found a defect: review debt.
+		"gt-debt": {ID: "gt-debt", Priority: 2, Notes: land.OverseerReviewMarker + " " + head("a") + " FAIL findings=gt-f1"},
+		// A P1 landing — the daemon, the guards, git, dolt — failed: an incident.
+		"gt-core": {ID: "gt-core", Priority: 1, Notes: land.OverseerReviewMarker + " " + head("b") + " FAIL"},
+		// A P1 landing nobody has reviewed yet: review debt all the same.
+		"gt-new": {ID: "gt-new", Priority: 1},
+	}
+	f.src.riskIssue = func(_ context.Context, _, id string) (*beads.Issue, error) { return issues[id], nil }
+
+	want := map[string]attention.Severity{
+		"gt-debt": attention.SeverityLow,
+		"gt-core": attention.SeverityHigh,
+		"gt-new":  attention.SeverityLow,
+	}
+	items := f.collect(t, f.src.collectRiskPaths)
+	if len(items) != len(want) {
+		t.Fatalf("items = %+v, want one per landing", items)
+	}
+	for _, it := range items {
+		if it.Severity != want[it.Bead] {
+			t.Errorf("item %+v is severity %q, want %q", it, it.Severity, want[it.Bead])
+		}
+	}
+}
+
+// gt-zevjx: the debt is quieter than the alarms it sits beside. The same tick
+// raises an escalation, a red main and a daemon-down host — each an incident
+// that wants somebody now — at the queue's high severity, and the risk-path
+// item of an ordinary landing is the low one.
+func TestAttentionRiskPathItemIsQuieterThanTheAlarms(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) {
+		return []land.LandingRecord{{BeadID: "gt-abc", Head: strings.Repeat("a", 40),
+			RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)}}, nil
+	}
+	f.src.riskIssue = func(context.Context, string, string) (*beads.Issue, error) {
+		return &beads.Issue{ID: "gt-abc", Priority: 2}, nil
+	}
+	f.src.escalations = func(context.Context) ([]*beads.Issue, error) {
+		return []*beads.Issue{{ID: "hq-1", Title: "the volume is filling"}}, nil
+	}
+	f.src.redMain = func(context.Context, string) ([]*beads.Issue, error) {
+		return []*beads.Issue{{ID: "gt-red", Title: "internal/cmd is red"}}, nil
+	}
+	// A host with no stack container running: the daemon's docker rule fires.
+	f.src.host = &fakeHost{disk: hostDisk{UsedPct: 40, FreeGB: 300}, memFree: 60}
+
+	severity := map[attention.Kind]attention.Severity{}
+	for _, collect := range []func(context.Context) ([]attention.Item, error){
+		f.src.collectRiskPaths, f.src.collectEscalations, f.src.collectRedMain, f.src.collectHostDocker,
+	} {
+		for _, it := range f.collect(t, collect) {
+			severity[it.Kind] = it.Severity
+		}
+	}
+	for _, kind := range []attention.Kind{attention.KindEscalation, attention.KindRedMain, attention.KindHostDocker} {
+		if got := severity[kind]; got != attention.SeverityHigh {
+			t.Errorf("the %s item is severity %q, want the high an incident carries", kind, got)
+		}
+	}
+	if got := severity[attention.KindRiskPath]; got != attention.SeverityLow {
+		t.Errorf("the risk-path item is severity %q, want the low of review debt beside %v", got, severity)
+	}
+}
+
 // The collector is wired into the tick, and two records naming one bead cost
 // one bd show.
 func TestAttentionRiskPathTickAndOneReadPerBead(t *testing.T) {
@@ -1314,7 +1400,10 @@ func TestAttentionRiskPathTickAndOneReadPerBead(t *testing.T) {
 		}, nil
 	}
 	reads := 0
-	f.src.riskNotes = func(context.Context, string, string) (string, error) { reads++; return "", nil }
+	f.src.riskIssue = func(context.Context, string, string) (*beads.Issue, error) {
+		reads++
+		return &beads.Issue{}, nil
+	}
 
 	st := f.tick(t, now)
 	var risk []attention.Item
