@@ -258,28 +258,51 @@ func (d *Daemon) omSkewNoEmbedReaches(townRoot, rev string, paths []string) (boo
 // every other directive counts, and a rule this reads too broadly makes the
 // alert fire rather than a skew be dismissed.
 func (d *Daemon) omSkewEmbedRules(townRoot, rev string) ([]omSkewEmbedRule, error) {
+	if err := omSkewCommitRevs(rev); err != nil {
+		return nil, err
+	}
 	src, err := omSkewCloneDir(townRoot)
 	if err != nil {
 		return nil, err
 	}
-	// -n prints "file:line:content", which is how a pattern learns the
-	// directory it is relative to. A tree carrying no directive is git grep's
-	// exit 1, an answer and not a failure.
+	// -n prints each match's file and line number, which is how a pattern
+	// learns the directory it is relative to. A tree carrying no directive is
+	// git grep's exit 1, an answer and not a failure.
 	out, err := d.omSkewGitNoMatch("-C", src, "grep", "-n", "-F", "-e", "//go:embed", rev, "--", "*.go")
 	if err != nil {
 		return nil, err
 	}
+	return parseOMSkewEmbedRules(rev, out)
+}
+
+// parseOMSkewEmbedRules reads the answer to the search above. Searching a
+// revision prefixes every line with that revision as it was written —
+// "<rev>:<file>:<line>:<content>" — and the prefix has to come off before the
+// fields are read: with it left on, the sha is taken for the file name and no
+// directive is ever recognized, so the allowlist dismisses the skew a directive
+// says is real (gt-8n9hj). A non-empty line without the prefix is an output
+// shape this does not know, and a shape it cannot read alarms rather than
+// dismisses.
+func parseOMSkewEmbedRules(rev, out string) ([]omSkewEmbedRule, error) {
+	prefix := rev + ":"
 	var rules []omSkewEmbedRule
 	for _, line := range strings.Split(out, "\n") {
-		file, rest, ok := strings.Cut(line, ":")
-		if !ok {
+		if line == "" {
 			continue
 		}
-		// The line number sits between the file and the directive.
-		_, content, ok := strings.Cut(rest, ":")
+		rest, ok := strings.CutPrefix(line, prefix)
 		if !ok {
-			continue
+			return nil, fmt.Errorf("git grep printed %q, which does not carry the revision %s it searched", line, rev)
 		}
+		// The line number sits between the file and the directive. All three
+		// fields are required and the middle one is that number: a line whose
+		// fields this cannot tell apart (a path carrying a colon) alarms rather
+		// than passing the directive over.
+		fields := strings.SplitN(rest, ":", 3)
+		if len(fields) != 3 || !omSkewLineNumber(fields[1]) {
+			return nil, fmt.Errorf("git grep printed %q, which carries no <file>:<line>:<content>", line)
+		}
+		file, content := fields[0], fields[2]
 		patterns, ok := strings.CutPrefix(strings.TrimSpace(content), "//go:embed")
 		// A line the search matched but this prefix does not confirm (a comment
 		// about go:embed, or "//go:embedding") names no pattern.
@@ -295,6 +318,19 @@ func (d *Daemon) omSkewEmbedRules(townRoot, rev string) ([]omSkewEmbedRule, erro
 		}
 	}
 	return rules, nil
+}
+
+// omSkewLineNumber reports whether s is the line number git grep -n prints.
+func omSkewLineNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // omSkewEmbedPatterns returns one directive's patterns with any all: prefix
@@ -360,6 +396,19 @@ func omSkewCloneDir(townRoot string) (string, error) {
 	return src, nil
 }
 
+// omSkewCommitRevs holds each revision to a commit id before it reaches git's
+// argv, so a value that looks like an option is refused rather than read as
+// one. Every function here that hands git a revision calls this first: the
+// guard covers the calls, not one call (gt-8n9hj).
+func omSkewCommitRevs(revs ...string) error {
+	for _, rev := range revs {
+		if !isCommitSHA(rev) {
+			return fmt.Errorf("%q is not a commit id to hand git", rev)
+		}
+	}
+	return nil
+}
+
 // omSkewChangedPaths lists the files that differ between the installed om's
 // commit and origin/main's, from the rebuild_om clone. Renames are not
 // detected, so a file moved out of Go source is listed under both names.
@@ -372,10 +421,8 @@ func (d *Daemon) omSkewChangedPaths(townRoot, installed, remote string) ([]strin
 	// that looks like an option would otherwise be read as one, and the diff
 	// deciding the alert would be a diff of something else. The "--" marks the
 	// same boundary from git's side (gt-8n9hj).
-	for _, rev := range []string{installed, remote} {
-		if !isCommitSHA(rev) {
-			return nil, fmt.Errorf("%q is not a commit id to diff against", rev)
-		}
+	if err := omSkewCommitRevs(installed, remote); err != nil {
+		return nil, err
 	}
 	out, err := d.omSkewGit("-C", src, "diff", "--name-only", "-z", "--no-renames", installed, remote, "--")
 	if err != nil {
@@ -534,9 +581,11 @@ func (d *Daemon) omSkewRemoteSHA(townRoot string) (string, error) {
 	return sha, nil
 }
 
-// omSkewGit runs one read-only git call, bounded by omSkewRemoteTimeout and
-// returning its trimmed stdout.
-func (d *Daemon) omSkewGit(args ...string) (string, error) {
+// omSkewGitRun runs one read-only git call, bounded by omSkewRemoteTimeout,
+// and returns its trimmed stdout with the command's own error: the status
+// omSkewGitNoMatch reads is read where exec produces it, not off a wrapped
+// error another function builds (gt-8n9hj).
+func (d *Daemon) omSkewGitRun(args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), omSkewRemoteTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -545,21 +594,37 @@ func (d *Daemon) omSkewGit(args ...string) (string, error) {
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
 	out, err := d.combinedOutput(cmd)
 	if err != nil {
-		return "", fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
-// omSkewGitNoMatch is omSkewGit for the calls whose exit 1 is an answer: git
+// omSkewGit is omSkewGitRun for the calls whose non-zero exit is a failure,
+// named in the error so a log line says which read it was.
+func (d *Daemon) omSkewGit(args ...string) (string, error) {
+	out, err := d.omSkewGitRun(args...)
+	return out, omSkewGitErr(args, err)
+}
+
+// omSkewGitNoMatch is omSkewGitRun for the calls whose exit 1 is an answer: git
 // grep found no line, which is a tree carrying no directive rather than a
 // question the clone could not answer.
 func (d *Daemon) omSkewGitNoMatch(args ...string) (string, error) {
-	out, err := d.omSkewGit(args...)
+	out, err := d.omSkewGitRun(args...)
 	var coded interface{ ExitCode() int }
 	if err != nil && errors.As(err, &coded) && coded.ExitCode() == 1 {
 		return "", nil
 	}
-	return out, err
+	return out, omSkewGitErr(args, err)
+}
+
+// omSkewGitErr names the call in a failure, and is nil for a call that
+// succeeded.
+func omSkewGitErr(args []string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
 }
 
 // parseLSRemoteMain returns the sha ls-remote printed for refs/heads/main,

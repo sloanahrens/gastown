@@ -566,6 +566,9 @@ func TestOMSkewClearsWhenTheSkewTurnsOutHarmless(t *testing.T) {
 	mkdirs(t, filepath.Join(d.config.TownRoot, rebuildOMSrcDir, ".git"))
 	// omSkewOnce runs on this goroutine, so changed needs no lock.
 	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		if gitSub(c, "grep") {
+			return cliReply{} // a source carrying no directive
+		}
 		return cliReply{stdout: strings.Join(changed, "\x00") + "\x00"}
 	})
 
@@ -681,7 +684,8 @@ func TestOMSkewUnreadableEmbedsLogOnce(t *testing.T) {
 
 // TestOMSkewAlertsWhenAnEmbedCarriesAnExemptPath: the allowlist is a shape rule
 // and a //go:embed directive is what makes it wrong, so a docs-only change a
-// directive reaches keeps the alert (gt-8n9hj).
+// directive reaches keeps the alert (gt-8n9hj). grep is the line git grep
+// prints, without the revision prefix the fake adds (omSkewGrepOut).
 func TestOMSkewAlertsWhenAnEmbedCarriesAnExemptPath(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -719,7 +723,7 @@ func TestOMSkewAlertsWhenAnEmbedCarriesAnExemptPath(t *testing.T) {
 					if tc.grepErr != nil {
 						return *tc.grepErr
 					}
-					return cliReply{stdout: tc.grep, code: tc.grepEC}
+					return cliReply{stdout: omSkewGrepOut(tc.grep), code: tc.grepEC}
 				}
 				return cliReply{}
 			})
@@ -786,10 +790,99 @@ func TestOMSkewEmbedPatterns(t *testing.T) {
 	}
 }
 
-// TestOMSkewDiffRefusesRevisionsThatAreNotCommitIDs: both revisions reach git's
-// argv, so a value that looks like an option is refused before the call rather
-// than read as one (gt-8n9hj).
-func TestOMSkewDiffRefusesRevisionsThatAreNotCommitIDs(t *testing.T) {
+// omSkewGrepOut is git grep's answer as it prints it when a revision is
+// searched: every line prefixed by that revision as it was written. The
+// prefix is part of the shape the parser reads, so the fake carries it rather
+// than the bare line (gt-8n9hj).
+func omSkewGrepOut(lines string) string {
+	var b strings.Builder
+	for _, line := range strings.Split(strings.TrimSuffix(lines, "\n"), "\n") {
+		if line == "" {
+			continue
+		}
+		b.WriteString(omSkewRemoteSHA + ":" + line + "\n")
+	}
+	return b.String()
+}
+
+// TestParseOMSkewEmbedRules pins the reading of git grep's answer. Searching a
+// revision prefixes every line with it, and a parser that reads the sha as the
+// file name recognizes no directive at all — the allowlist then dismisses the
+// skew a directive says is real, which is the failure this pins (gt-8n9hj).
+func TestParseOMSkewEmbedRules(t *testing.T) {
+	t.Parallel()
+	const rev = omSkewRemoteSHA
+	tests := []struct {
+		name  string
+		out   string
+		rules []omSkewEmbedRule
+		fails bool
+	}{
+		{name: "a directive the revision prefixes", out: rev + ":docs/doc.go:3://go:embed gate.md\n",
+			rules: []omSkewEmbedRule{{dir: "docs", pattern: "gate.md"}}},
+		{name: "a directive at the tree root", out: rev + ":main.go:7://go:embed README.md\n",
+			rules: []omSkewEmbedRule{{dir: "", pattern: "README.md"}}},
+		{name: "several patterns and a blank line", out: rev + ":docs/doc.go:3://go:embed a.md  b.md\n\n",
+			rules: []omSkewEmbedRule{{dir: "docs", pattern: "a.md"}, {dir: "docs", pattern: "b.md"}}},
+		{name: "a tree carrying no directive", out: ""},
+		{name: "a directive in a test source", out: rev + ":docs/doc_test.go:3://go:embed gate.md\n"},
+		{name: "a comment about go:embed", out: rev + ":docs/doc.go:3:\t// a //go:embed directive carries\n"},
+		{name: "a line that only starts like a directive", out: rev + ":docs/doc.go:3://go:embedding gate.md\n"},
+		{name: "a line carrying no revision", out: "docs/doc.go:3://go:embed gate.md\n", fails: true},
+		{name: "a line carrying no line number", out: rev + ":docs/doc.go://go:embed gate.md\n", fails: true},
+		{name: "a line that is a file name alone", out: rev + ":docs/doc.go\n", fails: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			rules, err := parseOMSkewEmbedRules(rev, tc.out)
+			if tc.fails {
+				if err == nil {
+					t.Errorf("parseOMSkewEmbedRules(%q) = %+v, want the line refused", tc.out, rules)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("parseOMSkewEmbedRules(%q): %v", tc.out, err)
+			}
+			if !slices.Equal(rules, tc.rules) {
+				t.Errorf("parseOMSkewEmbedRules(%q) = %+v, want %+v", tc.out, rules, tc.rules)
+			}
+		})
+	}
+}
+
+// TestOMSkewGitNoMatchReadsTheExitStatusItIsGiven: git grep's exit 1 is the
+// answer "no line matched", read off the command's own error where it is
+// produced, so it does not depend on how another function builds the error it
+// hands back (gt-8n9hj).
+func TestOMSkewGitNoMatchReadsTheExitStatusItIsGiven(t *testing.T) {
+	t.Parallel()
+	d, _ := omSkewDaemon(t)
+	code := 1
+	withRebuildGTCli(t, d, func(cliCall) cliReply { return cliReply{stderr: "no match", code: code} })
+
+	out, err := d.omSkewGitNoMatch("grep", "-n", "x")
+	if err != nil || out != "" {
+		t.Errorf("exit 1 gave (%q, %v), want it read as a search that matched nothing", out, err)
+	}
+
+	code = 128
+	if _, err := d.omSkewGitNoMatch("grep", "-n", "x"); err == nil {
+		t.Error("exit 128 was read as a search that matched nothing")
+	} else if !strings.Contains(err.Error(), "git grep -n x") {
+		t.Errorf("exit 128 gave %q, want the call named in the error", err)
+	}
+	if _, err := d.omSkewGit("grep", "-n", "x"); err == nil {
+		t.Error("exit 128 was read as a success")
+	}
+}
+
+// TestOMSkewRefusesRevisionsThatAreNotCommitIDs: every revision reaches git's
+// argv, in the diff and in the grep that reads the embed directives alike, so
+// a value that looks like an option is refused before the call rather than
+// read as one (gt-8n9hj).
+func TestOMSkewRefusesRevisionsThatAreNotCommitIDs(t *testing.T) {
 	t.Parallel()
 	d, _ := omSkewDaemon(t)
 	cli := omSkewClone(t, d, []string{".om.json"}, nil)
@@ -797,11 +890,17 @@ func TestOMSkewDiffRefusesRevisionsThatAreNotCommitIDs(t *testing.T) {
 	if _, err := d.omSkewChangedPaths(d.config.TownRoot, omSkewInstalledSHA, omSkewRemoteSHA); err != nil {
 		t.Fatalf("a diff of two commit ids failed: %v", err)
 	}
+	if _, err := d.omSkewEmbedRules(d.config.TownRoot, omSkewRemoteSHA); err != nil {
+		t.Fatalf("a grep of a commit id failed: %v", err)
+	}
 	if _, err := d.omSkewChangedPaths(d.config.TownRoot, "--output=/tmp/om-skew", omSkewRemoteSHA); err == nil {
 		t.Error("an installed revision that is not a commit id was diffed")
 	}
 	if _, err := d.omSkewChangedPaths(d.config.TownRoot, omSkewInstalledSHA, "--no-index"); err == nil {
 		t.Error("a remote revision that is not a commit id was diffed")
+	}
+	if _, err := d.omSkewEmbedRules(d.config.TownRoot, "--no-index"); err == nil {
+		t.Error("a revision that is not a commit id was searched for embed directives")
 	}
 	if diffs := omSkewDiffCalls(cli); len(diffs) != 1 {
 		t.Errorf("git calls = %q, want only the one diff of two commit ids", diffs)
