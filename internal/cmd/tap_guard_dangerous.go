@@ -1430,10 +1430,11 @@ var commandReservedWords = map[string]bool{
 // endsCommandReservedWord reports whether the "(" after runes[prevIdx] stands
 // where the shell reads a command, because what ends there delimits at the "("
 // (gt-he2fi, gt-4jcks): one of commandReservedWords, or a "!" or "{", standing
-// as a word of its own, or the ")" that closes a case pattern. A word the
-// shell read as part of a longer one (a "dothen" or an escaped character) is
-// not reserved. No ")" but a case pattern's is followed by "((" in a command
-// bash accepts, so the ")" needs no check of which construct it closes.
+// as a word of its own, or a ")" that closes a case pattern or a function's
+// "()". A word the shell read as part of a longer one (a "dothen" or an
+// escaped character) is not reserved. In a command bash accepts, a ")" glued
+// to "((" closes only one of those two (a function body may be an arithmetic
+// command), so the ")" needs no check of which construct it closes.
 func endsCommandReservedWord(runes []rune, prevIdx int, prevEscaped bool) bool {
 	if prevEscaped || prevIdx < 0 {
 		return false
