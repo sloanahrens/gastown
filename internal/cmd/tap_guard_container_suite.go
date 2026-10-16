@@ -331,7 +331,8 @@ type nestedScript struct {
 // line leave the shell in, found by the walk segmentWalkRoot gives a segment.
 // A "$(" the shell leaves literal is skipped: after a backslash, or inside
 // single quotes, where a bead note spelling "$(make gate)" is data. Heredoc
-// bodies are stripped first, as the segment judges do.
+// bodies are stripped first, as the segment judges do, and the substitutions of
+// an unquoted body are added back (heredocSubstitutionScripts).
 func substitutionScripts(proc guardProcess, command, cwd string, cwdKnown bool) []nestedScript {
 	text := stripHeredocBodies(command)
 	var scripts []nestedScript
@@ -353,6 +354,35 @@ func substitutionScripts(proc guardProcess, command, cwd string, cwdKnown bool) 
 		}
 		scripts = append(scripts, nestedScript{body: body, dir: dir, known: known})
 	}
+	return append(scripts, heredocSubstitutionScripts(proc, command, cwd, cwdKnown)...)
+}
+
+// heredocSubstitutionScripts returns the substitutions written in the bodies of
+// unquoted heredocs, each with the directory the shell is in when it reads the
+// body. stripHeredocBodies drops those bodies before substitutionScripts scans
+// the line, yet the shell expands "$(make gate)" in "cat > f <<EOF" while
+// reading the body, so the suite runs though no segment word is a make. A quoted
+// tag keeps its body literal, and an unterminated heredoc is not stripped, so
+// substitutionScripts already scanned it (gt-6fkng, gt-x50o8).
+func heredocSubstitutionScripts(proc guardProcess, command, cwd string, cwdKnown bool) []nestedScript {
+	var scripts []nestedScript
+	for _, span := range scanHeredocs(command) {
+		if span.bodyStart < 0 || span.quoted || span.unterminated {
+			continue
+		}
+		dir, placed := heredocBodyCwd(proc, command, span, cwd)
+		known := placed && cwdKnown
+		if !known {
+			dir = cwd
+		}
+		for _, sub := range heredocSubstitutionSpans(span.body) {
+			body := span.body[sub.bodyStart:sub.bodyEnd]
+			if strings.TrimSpace(body) == "" {
+				continue
+			}
+			scripts = append(scripts, nestedScript{body: body, dir: dir, known: known})
+		}
+	}
 	return scripts
 }
 
@@ -372,19 +402,34 @@ type substitutionSpan struct {
 // single quotes hide everything until the closing quote. A substitution that
 // never closes yields no span, and the scan resumes after its opening.
 func commandSubstitutionSpans(text string) []substitutionSpan {
+	return substitutionSpansIn(text, true)
+}
+
+// heredocSubstitutionSpans is commandSubstitutionSpans for the text of an
+// unquoted heredoc body. There a quote mark is an ordinary character, so the
+// apostrophe in "don't" hides nothing and a "$(make gate)" after it is live;
+// only a backslash still keeps the next character literal (gt-6fkng).
+func heredocSubstitutionSpans(body string) []substitutionSpan {
+	return substitutionSpansIn(body, false)
+}
+
+// substitutionSpansIn is the scan behind both. quotes says whether a quote mark
+// in text opens quoted text; inside a substitution's own body closingParen
+// honors quotes either way, as the shell does.
+func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 	var spans []substitutionSpan
 	inDouble := false
 	for i := 0; i < len(text); i++ {
 		switch c := text[i]; {
 		case c == '\\':
 			i++
-		case c == '\'' && !inDouble:
+		case quotes && c == '\'' && !inDouble:
 			end := strings.IndexByte(text[i+1:], '\'')
 			if end < 0 {
 				return spans
 			}
 			i += end + 1
-		case c == '"':
+		case quotes && c == '"':
 			inDouble = !inDouble
 		case c == '$' && i+1 < len(text) && text[i+1] == '(':
 			end := closingParen(text, i+2)
@@ -527,6 +572,12 @@ func commandSegment(segment []string) []string {
 // shell had reached when it read the body (heredocBodyDir), the same
 // distinction matchesPRWorkflowCommand and evaluateDangerousCommand draw
 // (gt-ohe8n, gt-1cvqj, gt-v02wh).
+//
+// A command substitution ($(...) or backticks) is a command line of its own,
+// judged like a -c payload even when it sits under a slot-run wrapper, and so
+// is a substitution in an unquoted heredoc body: "out=$(go test ./...)" and
+// "cat > f <<EOF" holding "$(make gate)" run the suite though no segment word
+// is a go or make binary (gt-t1pct, gt-6fkng, substitutionScripts).
 func evaluateContainerSuiteCommand(proc guardProcess, command, envOptIn string) (reason string, matched []string) {
 	cwd, _ := proc.getwd()
 	return evaluateContainerSuiteCommandDepth(proc, command, cwd, envOptIn, 0)
