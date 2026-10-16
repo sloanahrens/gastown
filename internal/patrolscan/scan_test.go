@@ -2143,17 +2143,91 @@ func TestClosedWorkRootIsClosedWithItsSteps(t *testing.T) {
 	}
 }
 
-// A root a live polecat still holds goes too once its work bead is over.
-func TestClosedWorkRootClosesWhoeverHoldsIt(t *testing.T) {
+// A root a live polecat holds is left alone even when its work bead is over:
+// the polecat may be finishing its steps. The rule does not read its edge.
+func TestClosedWorkRootLeavesRootALivePolecatHolds(t *testing.T) {
+	t.Parallel()
+	for _, live := range []string{"session", "directory"} {
+		t.Run(live, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			moleculeRoot(env, "gt-wisp-root", "closed", 48*time.Hour)
+			env.wisps[0].Assignee = "gastown/polecats/onyx"
+			if live == "session" {
+				env.sessions["onyx"] = true
+			} else {
+				env.dirs["onyx"] = true
+			}
+			r := scanner(env, nil).Tick("gastown")
+			if len(env.closed) != 0 || len(env.rootReads) != 0 || r.Count(OutcomeUnknown) != 0 {
+				t.Fatalf("closed %v, root reads %v; report %v", env.closed, env.rootReads, r.Lines())
+			}
+		})
+	}
+}
+
+// A root whose polecat is gone goes once its work bead is over, even when the
+// holder rules leave it (the seat still holds a hooked bead).
+func TestClosedWorkRootClosesRootAGonePolecatHolds(t *testing.T) {
 	t.Parallel()
 	env := newFake()
 	moleculeRoot(env, "gt-wisp-root", "closed", 48*time.Hour)
 	env.wisps[0].Assignee = "gastown/polecats/onyx"
-	env.sessions["onyx"] = true
+	env.active = []Work{{ID: "gt-a", Status: "hooked", Assignee: "gastown/polecats/onyx"}}
 	r := scanner(env, nil).Tick("gastown")
 	if got := strings.Join(env.closed, ","); got != "gt-wisp-root" {
 		t.Fatalf("closed = %q; report %v", got, r.Lines())
 	}
+}
+
+// A holder that cannot be read is Unknown, not live and not gone.
+func TestClosedWorkRootUnreadableHolderIsUnknown(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	moleculeRoot(env, "gt-wisp-root", "closed", 48*time.Hour)
+	env.wisps[0].Assignee = "gastown/polecats/onyx"
+	env.active = []Work{{ID: "gt-a", Status: "hooked", Assignee: "gastown/polecats/onyx"}}
+	env.sessionErr["onyx"] = errors.New("tmux: no server")
+	r := scanner(env, nil).Tick("gastown")
+	if len(env.closed) != 0 || len(env.rootReads) != 0 || r.Count(OutcomeUnknown) == 0 {
+		t.Fatalf("closed %v, root reads %v; report %v", env.closed, env.rootReads, r.Lines())
+	}
+}
+
+// A blocks edge to another wisp is not a work bead: a root that waits only on
+// a closed wisp is not closed for it, and one that also waits on an open work
+// bead is not closed for the wisp either.
+func TestClosedWorkRootIgnoresEdgesToWisps(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		work []WorkRef
+	}{
+		{"only a wisp", []WorkRef{{ID: "gt-wisp-other", Status: "closed"}}},
+		{"wisp and open work bead", []WorkRef{{ID: "gt-wisp-other", Status: "closed"}, {ID: "gt-work", Status: "open"}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			moleculeRoot(env, "gt-wisp-root", "closed", 48*time.Hour)
+			env.rootWork["gt-wisp-root"] = tc.work
+			r := scanner(env, nil).Tick("gastown")
+			if len(env.closed) != 0 || r.Count(OutcomeUnknown) != 0 {
+				t.Fatalf("closed %v; report %v", env.closed, r.Lines())
+			}
+		})
+	}
+	t.Run("wisp and closed work bead", func(t *testing.T) {
+		t.Parallel()
+		env := newFake()
+		moleculeRoot(env, "gt-wisp-root", "closed", 48*time.Hour)
+		env.rootWork["gt-wisp-root"] = []WorkRef{{ID: "gt-wisp-other", Status: "open"}, {ID: "gt-work", Status: "closed"}}
+		r := scanner(env, nil).Tick("gastown")
+		if got := strings.Join(env.closed, ","); got != "gt-wisp-root" {
+			t.Fatalf("closed = %q; report %v", got, r.Lines())
+		}
+	})
 }
 
 // The holder rules close a gone seat's tree from its unassigned root; the

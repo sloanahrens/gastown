@@ -35,8 +35,8 @@
 //   - leaked wisps: a wisp a gone polecat still holds, whether it is pinned,
 //     open or in_progress, is closed once it is a day old and its root is
 //     gone or closed too; see leakedWisps. An open molecule root a day old
-//     whose work bead is closed is closed with its steps, whoever holds it
-//     (closedWorkRoots).
+//     whose work bead is closed is closed with its steps unless a polecat
+//     still alive holds it (closedWorkRoots).
 //
 // Every read that fails makes the answer Unknown, and Unknown is never acted
 // on: a failed bd read is not "no work", "not held" or "bead gone". The tick
@@ -1296,8 +1296,8 @@ const (
 // because CloseMolecule closes the whole tree under the wisp it is given.
 // Every read that fails yields Unknown and no write.
 //
-// Whether or not any polecat holds a wisp, the pass then closes the open
-// molecule roots whose work bead is over (closedWorkRoots).
+// Unless a failed read or the cap on closes ends the tick first, the pass then
+// closes the open molecule roots whose work bead is over (closedWorkRoots).
 func (s *Scanner) leakedWisps(rig string, r *Report) {
 	unknown := func(subject, why string) {
 		r.Findings = append(r.Findings, Finding{Kind: "wisp", Subject: subject, Outcome: OutcomeUnknown, Detail: why})
@@ -1417,8 +1417,8 @@ func capFinding(id string) Finding {
 		Detail: fmt.Sprintf("closed %d this tick; the rest wait for the next", leakedWispMaxPerTick)}
 }
 
-// closedWorkRoots closes open molecule roots whose work bead is over, whoever
-// holds them or whether anyone does. The holder rules reach only wisps a gone
+// closedWorkRoots closes open molecule roots whose work bead is over, held by
+// a gone polecat or by nobody. The holder rules reach only wisps a gone
 // polecat holds, so a root that leaked by some other path (a work bead closed
 // by hand, a landing that outlived its seat) stays open for good; the blocks
 // edge from the root to its work bead is the one record that does not depend
@@ -1427,13 +1427,17 @@ func capFinding(id string) Finding {
 // A root is closed only when all of these hold:
 //   - it is a listed, open wisp with no parent, older than leakedWispMinAge,
 //     that the holder rules did not already close this tick;
+//   - no polecat that is still alive holds it: that polecat may be finishing
+//     its steps;
 //   - it has at least one blocks edge to a work bead, and every such bead
-//     reads closed or tombstone.
+//     reads closed or tombstone. An edge to another wisp is not a work bead.
 //
-// A root with no blocks edge (a patrol root), a young root, and a root whose
-// work bead is anything but over are left alone. A root, an edge or a work
-// bead that cannot be read yields Unknown and no write. The only reads are
-// one RootWork per candidate root, so a tick with no candidate makes none.
+// A root with no blocks edge (a patrol root), a young root, a root a live
+// polecat holds, and a root whose work bead is anything but over are left
+// alone. A root, an edge, a holder or a work bead that cannot be read yields
+// Unknown and no write. The reads are one RootWork per candidate root and a
+// holder check for a candidate a polecat holds, so a tick with no candidate
+// makes none.
 func (s *Scanner) closedWorkRoots(r *Report, wisps []Wisp, closed map[string]bool, calls *int) {
 	now := s.o.Now()
 	for _, w := range wisps {
@@ -1450,10 +1454,26 @@ func (s *Scanner) closedWorkRoots(r *Report, wisps []Wisp, closed map[string]boo
 		if now.Sub(w.CreatedAt) <= leakedWispMinAge {
 			continue
 		}
-		work, err := s.env.RootWork(w.ID)
+		if rig, name, held := strings.Cut(w.Assignee, "/polecats/"); held {
+			gone, why := s.holderGone(rig, name)
+			if why != "" {
+				unknown("holder " + name + ": " + why)
+				continue
+			}
+			if !gone {
+				continue
+			}
+		}
+		refs, err := s.env.RootWork(w.ID)
 		if err != nil {
 			unknown("work bead edge unreadable: " + err.Error())
 			continue
+		}
+		var work []WorkRef
+		for _, ref := range refs {
+			if !strings.Contains(ref.ID, "-wisp-") {
+				work = append(work, ref)
+			}
 		}
 		if len(work) == 0 {
 			continue
