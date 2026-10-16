@@ -1457,11 +1457,12 @@ func (d *Daemon) tierSweepBeads(rig string) tierSweepBeadStore {
 	return beads.NewPinned(beads.ResolveBeadsDir(rigPath), beads.WithBin(d.bdPathOrDefault()))
 }
 
-// tierSweepBeads files one bead per failing unit of a RED tier, and closes a
-// GREEN tier's open beads, never one a polecat has claimed. A bead-store error is logged and the sweep
-// continues: the verdict is already recorded. A tier whose open beads cannot
-// be listed is left alone, since filing without knowing which units already
-// have a bead would open a duplicate P1 for each of them.
+// tierSweepRecordBeads files one bead per failing unit of a RED tier, and
+// closes a GREEN tier's open beads, never one a polecat has claimed. A
+// bead-store error is logged and the sweep continues: the verdict is already
+// recorded. A tier whose open beads cannot be listed is left alone, since
+// filing without knowing which units already have a bead would open a
+// duplicate P1 for each of them.
 func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSweepTierResult) {
 	bd := d.tierSweepBeads(rig)
 	if bd == nil {

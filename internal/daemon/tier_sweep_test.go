@@ -801,7 +801,7 @@ func TestTierSweepOpenBeads_ListErrorFilesNoDuplicate(t *testing.T) {
 	for _, failStatus := range []string{"open", string(beads.StatusInProgress), beads.StatusHooked} {
 		t.Run(failStatus, func(t *testing.T) {
 			t.Parallel()
-			d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+			d, _, _, logs := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
 			byStatus := map[string][]*beads.Issue{}
 			for _, status := range []string{"open", string(beads.StatusInProgress), beads.StatusHooked} {
 				byStatus[status] = []*beads.Issue{{ID: "gt-" + status, Title: tierSweepBeadPrefix("gastown", "integration") + "./internal/" + status}}
@@ -819,6 +819,10 @@ func TestTierSweepOpenBeads_ListErrorFilesNoDuplicate(t *testing.T) {
 			d.tierSweepRecordBeads("gastown", "abc123", red)
 			if len(bd.created) != 0 || len(bd.comments) != 0 {
 				t.Errorf("created = %+v, comments = %v, want nothing filed or commented from an unknown state", bd.created, bd.comments)
+			}
+			wantLog := "listing " + tierSweepRedLabel + " beads for the integration tier, leaving it unrecorded"
+			if !strings.Contains(logs.String(), wantLog) || !strings.Contains(logs.String(), "--status="+failStatus+": boom") {
+				t.Errorf("log lacks the skip alarm %q naming the failed %s list:\n%s", wantLog, failStatus, logs.String())
 			}
 
 			green := map[string]tierSweepTierResult{"integration": {Verdict: tierSweepGreen, Passed: 1}}
