@@ -20,7 +20,8 @@ import (
 // DOM stub below: a test calls a render function with the reading the server
 // would send and reads back the element it drew. The engine is a library, not
 // a tool, so the unit tier stays hermetic — nothing here starts a process,
-// sleeps, reads a clock or touches the network.
+// sleeps or touches the network, and the clock the page reads is frozen when
+// the stub loads and moves only under __advance.
 
 // pageStubJS is the browser the page runs in: the DOM surface index.html's
 // script uses, and nothing more. A render function only builds elements, so
@@ -31,8 +32,10 @@ import (
 // Two deliberate refusals keep the stub honest about the page. getElementById
 // answers only for the ids index.html's markup carries (__ids, read from the
 // file), so a render into an id the markup lost fails the test instead of
-// quietly passing against a stub that invents elements. And no timer ever
-// fires: a test drives each redraw itself, so nothing renders behind it.
+// quietly passing against a stub that invents elements. And time is the test's:
+// Date.now reads the fake clock (__epoch is the real one, read once when the
+// stub loads) and the clock only moves under __advance, so nothing redraws or
+// reconnects behind a test that only reads.
 const pageStubJS = `
 var __byId = {};
 __ids.forEach(function (id) { __byId[id] = __el("div"); });
@@ -112,24 +115,75 @@ var localStorage = {
   setItem: function (k, v) { this._v[k] = String(v); },
   removeItem: function (k) { delete this._v[k]; }
 };
+// __sources is every stream the page has opened, in order: the page replaces a
+// stream by closing it and opening a new EventSource, so the list is how many
+// streams the page has run through.
+var __sources = [];
+var __reloads = 0;
 var EventSource = function (url) {
   this.url = url;
+  this.readyState = EventSource.CONNECTING;
   this.onopen = null;
   this.onerror = null;
-  this.addEventListener = function () {};
-  this.close = function () {};
+  this._listeners = {};
+  this.addEventListener = function (type, fn) { (this._listeners[type] = this._listeners[type] || []).push(fn); };
+  this.close = function () { this.readyState = EventSource.CLOSED; };
+  __sources.push(this);
 };
-var location = { href: "http://localhost/", reload: function () {} };
+EventSource.CONNECTING = 0;
+EventSource.OPEN = 1;
+EventSource.CLOSED = 2;
+// __open, __error and __fire are the browser and the server talking to one
+// stream: the page hears only the events behind them, and a test drives each one
+// by hand.
+function __open(s) { s.readyState = EventSource.OPEN; if (typeof s.onopen === "function") s.onopen({ type: "open" }); }
+function __error(s, state) {
+  s.readyState = state;
+  if (typeof s.onerror === "function") s.onerror({ type: "error" });
+}
+function __fire(s, type, data) {
+  var ls = s._listeners[type] || [];
+  for (var i = 0; i < ls.length; i++) ls[i]({ type: type, data: JSON.stringify(data) });
+}
+var location = { href: "http://localhost/", reload: function () { __reloads++; } };
 var navigator = {};
 var history = { pushState: function () {}, replaceState: function () {} };
 function alert() {}
 function addEventListener() {}
 function removeEventListener() {}
-function setInterval() { return 1; }
-function setTimeout() { return 1; }
-function clearInterval() {}
-function clearTimeout() {}
-function requestAnimationFrame() { return 1; }
+// The fake clock, and the timers the page schedules against it. Nothing fires
+// until __advance moves past a timer's due time, in due order, so a test runs
+// the page's redraws and reconnects when it asks for them rather than when they
+// fall. An interval reschedules itself by its own period, never at zero, so
+// __advance always makes progress; the step count is a runaway guard, not a
+// limit a test should reach.
+var __epoch = Date.now(), __clock = 0, __timerSeq = 0, __timers = [];
+Date.now = function () { return __epoch + __clock; };
+function __schedule(fn, ms, every, args) {
+  __timerSeq++;
+  __timers.push({ id: __timerSeq, fn: fn, at: __clock + (ms > 0 ? ms : 0), every: every ? (ms > 0 ? ms : 10) : 0, args: args });
+  return __timerSeq;
+}
+function setTimeout(fn) { return __schedule(fn, arguments[1], false, [].slice.call(arguments, 2)); }
+function setInterval(fn) { return __schedule(fn, arguments[1], true, [].slice.call(arguments, 2)); }
+function clearTimeout(id) { __timers = __timers.filter(function (t) { return t.id !== id; }); }
+function clearInterval(id) { clearTimeout(id); }
+function requestAnimationFrame(fn) { return __schedule(fn, 16, false, []); }
+function __advance(ms) {
+  var end = __clock + ms;
+  for (var step = 0; step < 100000; step++) {
+    var next = null;
+    for (var i = 0; i < __timers.length; i++) {
+      var t = __timers[i];
+      if (t.at <= end && (!next || t.at < next.at || (t.at === next.at && t.id < next.id))) next = t;
+    }
+    if (!next) break;
+    __clock = next.at;
+    if (next.every) next.at = __clock + next.every; else clearTimeout(next.id);
+    next.fn.apply(null, next.args);
+  }
+  __clock = end;
+}
 var window = this;
 function __snap(id) {
   var e = __byId[id];
