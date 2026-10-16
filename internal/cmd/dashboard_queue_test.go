@@ -18,7 +18,8 @@ import (
 
 type fakeQueueStore struct {
 	ready, blocked, landing []*beads.Issue
-	err                     error
+	held                    []*beads.Issue // the work beads a seat holds: what ListIssueStatuses returns
+	err, heldErr            error          // heldErr fails only the held-beads read
 	shown                   *beads.Issue
 }
 
@@ -26,6 +27,12 @@ func (f *fakeQueueStore) ReadyAll() ([]*beads.Issue, error) { return f.ready, f.
 func (f *fakeQueueStore) Blocked() ([]*beads.Issue, error)  { return f.blocked, f.err }
 func (f *fakeQueueStore) List(beads.ListOptions) ([]*beads.Issue, error) {
 	return f.landing, f.err
+}
+func (f *fakeQueueStore) ListIssueStatuses(...beads.IssueStatus) ([]*beads.Issue, error) {
+	if f.heldErr != nil {
+		return nil, f.heldErr
+	}
+	return f.held, f.err
 }
 func (f *fakeQueueStore) Show(id string) (*beads.Issue, error) {
 	if f.shown == nil {
@@ -134,6 +141,86 @@ func TestQueueSplitsLeakedStepWispsFromBlockedWork(t *testing.T) {
 		if want := row.ID != "gt-real"; row.Wisp != want {
 			t.Errorf("%s: wisp = %v, want %v", row.ID, row.Wisp, want)
 		}
+	}
+}
+
+// A step counts as leaked only when its molecule's work bead is terminal or no
+// seat holds it (gt-xmys9). The steps of a molecule whose work bead is hooked
+// to a seat are a live checklist: neither listed nor counted as leaked, and
+// not blocked work either. A work bead that is closed, or open with nobody on
+// it, leaves its steps leaked. The line's count and the list's rows come from
+// one verdict, so they agree.
+func TestQueueLeavesALiveMoleculesStepsOutOfTheLeak(t *testing.T) {
+	t.Parallel()
+	st := &fakeQueueStore{
+		held: []*beads.Issue{
+			{ID: "gt-run", Status: "hooked", Assignee: "gastown/polecats/dag", Description: "attached_molecule: gt-wisp-live\nattached_formula: mol-polecat-work"},
+			{ID: "gt-work", Status: "in_progress", Assignee: "gastown/polecats/rictus", Description: "attached_molecule: gt-wisp-busy"},
+			// recorded on a bead nobody holds: not a seat's checklist
+			{ID: "gt-orphan", Status: "hooked", Description: "attached_molecule: gt-wisp-orphan"},
+		},
+		blocked: []*beads.Issue{
+			{ID: "gt-real", Title: "waits on another bead", Type: "task", Priority: 2, BlockedBy: []string{"gt-x"}},
+			{ID: "gt-wisp-live", Title: "mol-polecat-work", Type: "molecule", BlockedBy: []string{"gt-run"}},
+			{ID: "gt-wisp-l1", Title: "Self-review changes", Type: "task", Parent: "gt-wisp-live", BlockedBy: []string{"gt-wisp-live"}},
+			{ID: "gt-wisp-l2", Title: "Submit work", Type: "task", Parent: "gt-wisp-live", BlockedBy: []string{"gt-wisp-l1"}},
+			{ID: "gt-wisp-b1", Title: "Build", Type: "task", Parent: "gt-wisp-busy", BlockedBy: []string{"gt-wisp-busy"}},
+			// the work bead closed, so no seat's list names this molecule
+			{ID: "gt-wisp-d1", Title: "Self-review changes", Type: "task", Parent: "gt-wisp-closed", BlockedBy: []string{"gt-wisp-closed"}},
+			{ID: "gt-wisp-d2", Title: "Submit work", Type: "task", Parent: "gt-wisp-closed", BlockedBy: []string{"gt-wisp-d1"}},
+			{ID: "gt-wisp-o1", Title: "Build", Type: "task", Parent: "gt-wisp-orphan", BlockedBy: []string{"gt-wisp-orphan"}},
+			{ID: "gt-wisp-n1", Title: "Build", Type: "task", Parent: "gt-wisp-unknown"},
+		},
+	}
+	q := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown").read(time.Now())
+
+	if q.BlockedTotal != 5 || q.BlockedWork != 1 || q.BlockedWisps != 4 {
+		t.Errorf("blocked = %d work + %d wisps of %d, want 1 work and 4 wisps of 5 (the 4 live steps are in neither)", q.BlockedWork, q.BlockedWisps, q.BlockedTotal)
+	}
+	var listedWisps []string
+	for _, row := range q.Blocked {
+		if strings.HasPrefix(row.ID, "gt-wisp-l") || row.ID == "gt-wisp-b1" || row.ID == "gt-wisp-live" {
+			t.Errorf("%s belongs to a molecule a seat holds, so it must not be listed", row.ID)
+		}
+		if row.Wisp {
+			listedWisps = append(listedWisps, row.ID)
+		}
+	}
+	// the line's count and the rows the list marks are one verdict
+	if len(listedWisps) != q.BlockedWisps {
+		t.Errorf("the line counts %d leaked wisps but the list marks %v", q.BlockedWisps, listedWisps)
+	}
+	for _, want := range []string{"gt-wisp-d1", "gt-wisp-d2", "gt-wisp-o1", "gt-wisp-n1"} {
+		if !strings.Contains(strings.Join(listedWisps, " "), want) {
+			t.Errorf("%s is a step of a molecule no seat holds and must be leaked; leaked = %v", want, listedWisps)
+		}
+	}
+}
+
+// A molecule is live wherever its work bead sits: a step in one store whose
+// work bead is held in another is not leaked.
+func TestQueueCountsAMoleculeLiveWhicheverStoreHoldsItsWorkBead(t *testing.T) {
+	t.Parallel()
+	hq := &fakeQueueStore{held: []*beads.Issue{
+		{ID: "hq-run", Status: "hooked", Assignee: "gastown/polecats/dag", Description: "attached_molecule: gt-wisp-far"},
+	}}
+	gastown := &fakeQueueStore{blocked: []*beads.Issue{
+		{ID: "gt-wisp-f1", Title: "Build", Type: "task", Parent: "gt-wisp-far", BlockedBy: []string{"gt-wisp-far"}},
+	}}
+	q := queueReaderOver(map[string]dashQueueStore{"hq": hq, "gastown": gastown}, "hq", "gastown").read(time.Now())
+	if q.BlockedTotal != 0 || q.BlockedWisps != 0 {
+		t.Errorf("blocked = %d (%d wisps), want 0: the step belongs to a molecule hq's work bead holds", q.BlockedTotal, q.BlockedWisps)
+	}
+}
+
+// A store whose held beads cannot be read is named unreadable, not read as if
+// no seat held anything and every live step leaked.
+func TestQueueNamesAStoreWhoseHeldBeadsFailToRead(t *testing.T) {
+	t.Parallel()
+	st := &fakeQueueStore{heldErr: errors.New("dolt down"), blocked: []*beads.Issue{{ID: "gt-wisp-a", Type: "task", Parent: "gt-wisp-m"}}}
+	q := queueReaderOver(map[string]dashQueueStore{"gastown": st}, "gastown").read(time.Now())
+	if q.BlockedWisps != 0 || len(q.Unreadable) != 1 {
+		t.Errorf("wisps = %d, unreadable = %v", q.BlockedWisps, q.Unreadable)
 	}
 }
 
