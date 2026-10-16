@@ -130,6 +130,12 @@ type tierSweepState struct {
 	// the verdicts carried forward for the tiers it never reached, and the tip
 	// owes the rest of itself to the next one (gt-icmdq).
 	Partial bool `json:"partial,omitempty"`
+	// EarlyRun is true while an early re-run wrote the record rather than the
+	// hourly town-wide cycle. An early re-run runs inside the interval, so its
+	// record is no evidence about a town-wide cycle that deferred, and the
+	// cadence run reading it re-derives the tip instead of taking it for a
+	// deferred cycle's (gt-1911b).
+	EarlyRun bool `json:"early_run,omitempty"`
 	// LastGreenSHA is the tip of the last cycle that covered every tier the
 	// sweep is scheduled to cover and was green throughout. It is the skip
 	// key: while origin/main equals it there is nothing new to sweep.
@@ -630,7 +636,7 @@ func (d *Daemon) runTierSweepEarly(rigs []string, now time.Time) {
 		if cycle == nil {
 			cycle = d.startDogCycle("tier_sweep")
 		}
-		d.tierSweepRigCycle(ctx, cycle, rig, repo, sha, state, now)
+		d.tierSweepRigCycle(ctx, cycle, rig, repo, sha, state, now, tierSweepEarlyRun)
 	}
 }
 
@@ -868,7 +874,7 @@ func (d *Daemon) runTierSweepRig(ctx context.Context, cycle *dogCycle, rig strin
 		d.logger.Printf("tier_sweep: %s: origin/main %s already judged by the last cycle; skipping the re-run", rig, shortSHA(sha))
 		return true
 	}
-	return d.tierSweepRigCycle(ctx, cycle, rig, repo, sha, state, now)
+	return d.tierSweepRigCycle(ctx, cycle, rig, repo, sha, state, now, tierSweepTownWideRun)
 }
 
 // tierSweepTipJudged reports whether state already carries a verdict for sha:
@@ -885,7 +891,21 @@ func tierSweepTipJudged(state tierSweepState, sha string) bool {
 // last-run clock advances only on a cycle that did, so a rig record newer than
 // that clock is an unfinished cycle's work and the run reading it is that
 // cycle's retry (gt-zq1pb).
+//
+// Two records newer than the clock are not that cycle's work, and the tip they
+// judged is re-derived. One an early re-run wrote: it ran inside the interval,
+// outside the town-wide cycle, and its tip is the cadence run's to judge. One
+// older than the sweep's staleness bound: a rig that defers on every heartbeat
+// never lets a cycle complete, so without the bound the siblings it judged
+// would hold their verdicts until main moved, and a red that recovered on its
+// own would never be re-read (gt-1911b).
 func (d *Daemon) tierSweepJudgedByADeferredCycle(state tierSweepState) bool {
+	if state.EarlyRun {
+		return false
+	}
+	if d.clk().Now().Sub(state.LastRun) >= tierSweepStaleAfter(d.patrolConfig) {
+		return false
+	}
 	lastRun, found, err := loadPatrolLastRun(d.config.TownRoot, "tier_sweep")
 	if err != nil {
 		// An unreadable clock says nothing about a deferral, so the tip keeps
@@ -1064,9 +1084,20 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	}
 }
 
+// tierSweepRunKind names which run writes a record: the hourly town-wide cycle,
+// whose records a deferral's retry may read as its own work, or an early re-run,
+// whose records it may not (gt-1911b).
+type tierSweepRunKind bool
+
+const (
+	tierSweepTownWideRun tierSweepRunKind = false
+	tierSweepEarlyRun    tierSweepRunKind = true
+)
+
 // tierSweepRigCycle runs the stages, writes the record, and files or closes the
-// beads the verdicts imply.
-func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, repo, sha string, state tierSweepState, now time.Time) bool {
+// beads the verdicts imply. The record says which run wrote it: kind is
+// tierSweepEarlyRun for an early re-run.
+func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, repo, sha string, state tierSweepState, now time.Time, kind tierSweepRunKind) bool {
 	seams := d.tierSweepSeams
 
 	dir, err := d.tierSweepWorkDir(rig)
@@ -1180,6 +1211,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	}
 
 	state.LastRun = now
+	state.EarlyRun = bool(kind)
 	// The record this cycle replaces, read before the fields below rebind it:
 	// its LastSHA dates the verdicts the cycle carries forward.
 	prior := state

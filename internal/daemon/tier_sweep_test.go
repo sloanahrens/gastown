@@ -754,6 +754,95 @@ func TestRunTierSweepReSweepsATipACompletedCycleJudged(t *testing.T) {
 	}
 }
 
+// gt-1911b: an early re-run writes its record outside the town-wide cycle, so
+// the cadence run that reads it re-derives the tip. Read as a deferred cycle's
+// record, an unchanged red would be skipped for another interval.
+func TestRunTierSweepReSweepsAfterAnEarlyReRunRecord(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "new2", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-15 * time.Minute), LastSHA: "red1", LastGreenSHA: "green0",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fix landed and main moved, so the early re-run takes new2 and comes
+	// back red: the record is that re-run's, written at now.
+	d.runTierSweepEarly([]string{"gastown"}, now)
+	if st := tierSweepTestState(t, d, "gastown"); st.LastSHA != "new2" {
+		t.Fatalf("record = %+v, want the early re-run's tip new2", st)
+	}
+	// The town's clock stands two hours behind that record: no town-wide cycle
+	// has judged every rig, which is what a deferred cycle's record looks like.
+	if err := savePatrolLastRun(d.config.TownRoot, "tier_sweep", now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+
+	rec.stages = nil
+	d.runTierSweep()
+
+	if len(rec.stages) == 0 {
+		t.Errorf("no stage ran for the tip an early re-run judged; the cadence run read it as a deferred cycle's, log:\n%s", logs.String())
+	}
+}
+
+// gt-1911b: the retry's skip is a concession to the one cycle being retried, so
+// it lapses with the sweep's staleness bound. A rig that defers on every
+// heartbeat never lets a cycle complete, and the rigs that cycle already judged
+// would hold their verdicts until main moved.
+func TestRunTierSweepReSweepsARedWhileASiblingRigDefers(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, _, logs := newTierSweepDaemon(t, now, "gastown", "other")
+	d.patrolConfig.Patrols.TierSweep.Rigs = []string{"gastown", "other"}
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastRun: now.Add(-time.Hour), LastSHA: "redsha", LastGreenSHA: "green0",
+		Tiers: map[string]tierSweepTierResult{
+			"shell": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"TestRed"}, SHA: "redsha"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The town's clock stands two hours behind that record, and other is the
+	// rig that keeps every cycle since from judging every rig.
+	if err := savePatrolLastRun(d.config.TownRoot, "tier_sweep", now.Add(-2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	d.tierSweepSeams.mainSHA = func(_ context.Context, repo string) (string, error) {
+		if filepath.Base(filepath.Dir(repo)) == "other" {
+			return "", errors.New("fetch failed")
+		}
+		return "redsha", nil
+	}
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+
+	// The heartbeat after the deferral is that cycle's retry: gastown's tip is
+	// already judged, and stands.
+	if d.runTierSweep() {
+		t.Fatal("runTierSweep reached a verdict with a rig deferring")
+	}
+	if len(rec.stages) != 0 {
+		t.Fatalf("stages = %+v, want none on the retry of the cycle that judged gastown", rec.stages)
+	}
+
+	clk, ok := d.clock.(*clockwork.FakeClock)
+	if !ok {
+		t.Fatalf("test clock = %T, want a fake clock to advance", d.clock)
+	}
+	clk.Advance(2 * time.Hour)
+	rec.stages = nil
+
+	if d.runTierSweep() {
+		t.Fatal("runTierSweep reached a verdict with a rig deferring")
+	}
+	if len(rec.stages) == 0 {
+		t.Errorf("gastown's red was not re-swept while other deferred every cycle, log:\n%s", logs.String())
+	}
+}
+
 // gt-zq1pb: a runner_idle_command that hangs is read as the busy runner it
 // stands for, so a hung probe ends the wait under load at the cap rather than
 // at the cycle's own deadline.
