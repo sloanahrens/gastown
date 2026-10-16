@@ -439,6 +439,17 @@ func TestMakeTestOutsideGoTree(t *testing.T) {
 		{"make --directory into the Go tree", npmRoot, "make --directory=" + goRoot + " test", true},
 		{"make -C attached into the Go tree", npmRoot, "make -C" + goRoot + " test", true},
 		{"make -C chaining into the Go tree", npmRoot, "make -C " + filepath.Join(goRoot, "internal") + " -C cmd test", true},
+		// A -C directory the shell expands names a tree the hook cannot see, so
+		// it is unplaced and refused rather than joined onto the cwd as a
+		// literal that names nothing (gt-8a1pa); a literal one keeps its verdict.
+		{"make -C a variable", npmRoot, `make -C "$PWD/sub" test`, true},
+		{"make --directory= a variable", npmRoot, `make --directory="$PWD/sub" test`, true},
+		{"make -C attached a variable", npmRoot, `make -C"$PWD/sub" test`, true},
+		{"make -C a command substitution", npmRoot, `make -C "$(pwd)/sub" test`, true},
+		{"make -C a backtick substitution", npmRoot, "make -C `pwd`/sub test", true},
+		{"make -C a leading tilde", npmRoot, "make -C ~/sub test", true},
+		{"make -C a variable after a literal directory", npmRoot, `make -C sub -C "$SUB" test`, true},
+		{"make -C a literal relative directory", npmRoot, "make -C sub test", false},
 		// "--" ends make's option processing, so what follows is a target it
 		// never reads as a flag: the tree stays the one it started in.
 		{"a -C after the end of options", npmRoot, "make -- -C " + goRoot + " test", false},

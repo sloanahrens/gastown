@@ -191,6 +191,19 @@ func TestPolecatTestScopeShellExpandedCDir(t *testing.T) {
 		{"variable, parent-relative heavy argument", `go -C "$PWD/internal" test ../internal/cmd`, true},
 		{"variable, relative heavy argument, -count", `go -C "$PWD/internal" test ./cmd -count=1`, true},
 
+		// A -run filter bounds an expanded -C only for an explicit package
+		// argument. A bare or "." target names the directory itself, which the
+		// guard cannot place, and that refusal is read before the filter.
+		{"variable, dot target, -run", `go -C "$PWD/internal/cmd" test . -run X`, true},
+		{"variable, -C= spelling, dot target, -run=", `go -C="$PWD/internal/cmd" test -run=X .`, true},
+		{"command substitution, dot target, -test.run after -args", `go -C "$(pwd)/internal/cmd" test . -args -test.run X`, true},
+		{"leading tilde, dot target, -run", "go -C ~/gt/x/internal/cmd test . -run X", true},
+		{"expanded after a literal directory, dot target, -run", `go -C internal -C "$SUB" test . -run X`, true},
+		{"variable, -C= spelling, relative heavy argument, -run", `go -C="$PWD/internal" test ./cmd -run X`, false},
+		{"command substitution, relative heavy argument, -run=", `go -C "$(pwd)/internal" test -run=X ./cmd`, false},
+		{"leading tilde, relative heavy argument, -run", "go -C ~/gt/x/internal test ./cmd -run X", false},
+		{"backtick substitution, relative heavy argument, -test.run after -args", "go -C `pwd`/internal test ./cmd -args -test.run X", false},
+		{"expanded after a literal directory, relative heavy argument, -run", `go -C internal -C "$SUB" test ./cmd -run X`, false},
 		{"literal directory with -run", "go -C internal/cmd test . -run X", false},
 		{"variable, relative heavy argument, -run", `go -C "$PWD/internal" test ./cmd -run X`, false},
 		{"variable, relative heavy argument, -run before the argument", `go -C "$PWD/internal" test -run=X ./cmd`, false},
