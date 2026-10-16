@@ -1020,6 +1020,159 @@ func TestErrHookUnresolvable_IsErrors(t *testing.T) {
 	}
 }
 
+// TestPrimeStateKeepsHandoffMarker: gt prime --state reports the session state
+// and nothing else. Consuming the marker first made it report "normal" for a
+// post-handoff worktree and left the next real prime without the warning.
+func TestPrimeStateKeepsHandoffMarker(t *testing.T) {
+	workDir := t.TempDir()
+	runtimeDir := filepath.Join(workDir, constants.DirRuntime)
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatalf("create runtime dir: %v", err)
+	}
+	markerPath := filepath.Join(runtimeDir, constants.FileHandoffMarker)
+	if err := os.WriteFile(markerPath, []byte("predecessor-session-abc"), 0o644); err != nil {
+		t.Fatalf("write handoff marker: %v", err)
+	}
+
+	oldState, oldReason := primeState, primeHandoffReason
+	t.Cleanup(func() { primeState, primeHandoffReason = oldState, oldReason })
+	primeState, primeHandoffReason = true, ""
+
+	var out bytes.Buffer
+	handlePrimeHandoffMarker(&out, workDir)
+	if out.Len() != 0 {
+		t.Errorf("--state printed the post-handoff warning ahead of its report: %q", out.String())
+	}
+	if _, err := os.Stat(markerPath); err != nil {
+		t.Fatalf("--state consumed the handoff marker: %v", err)
+	}
+
+	ctx := RoleContext{Role: RoleUnknown, WorkDir: workDir, TownRoot: failingTownBD(t)}
+	out.Reset()
+	outputState(&out, ctx, false)
+	if !strings.Contains(out.String(), "state: post-handoff") {
+		t.Errorf("--state after a handoff reports %q, want state: post-handoff", out.String())
+	}
+
+	// The next real prime still finds the marker and consumes it.
+	primeState = false
+	out.Reset()
+	handlePrimeHandoffMarker(&out, workDir)
+	if out.Len() == 0 {
+		t.Error("the real prime after --state printed no post-handoff warning")
+	}
+	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
+		t.Errorf("the real prime left the handoff marker behind: %v", err)
+	}
+}
+
+// hookWorkBD answers findAgentWorkVia from a table: show by bead id, and the
+// assignee query by the directory the database was opened at. Any other call
+// panics on the nil embedded Client, so a test names every query it expects.
+type hookWorkBD struct {
+	beads.Client
+	show     func(id string) (*beads.Issue, error)
+	assigned func() ([]*beads.Issue, error)
+}
+
+func (b hookWorkBD) Show(id string) (*beads.Issue, error) { return b.show(id) }
+
+func (b hookWorkBD) ListAssignedIssueStatuses(string, ...beads.IssueStatus) ([]*beads.Issue, error) {
+	return b.assigned()
+}
+
+func hookWorkContext(t *testing.T) RoleContext {
+	t.Helper()
+	return RoleContext{Role: RolePolecat, Rig: "gastown", Polecat: "dag", TownRoot: t.TempDir(), WorkDir: t.TempDir()}
+}
+
+// TestFindAgentWorkReturnsTownFallbackError: when the rig has no assigned work,
+// the town query is the only answer left, and a failure of it is a database
+// error. Swallowed, an hq- hooked agent got the NO WORK directive.
+func TestFindAgentWorkReturnsTownFallbackError(t *testing.T) {
+	t.Parallel()
+	ctx := hookWorkContext(t)
+	townDir := filepath.Join(ctx.TownRoot, ".beads")
+	townDown := errors.New("dial tcp 127.0.0.1:3307: connection refused")
+
+	open := func(dir string) beads.Client {
+		return hookWorkBD{
+			show: func(string) (*beads.Issue, error) { return nil, errors.New("no issue found") },
+			assigned: func() ([]*beads.Issue, error) {
+				if dir == townDir {
+					return nil, townDown
+				}
+				return nil, nil
+			},
+		}
+	}
+
+	got, err := findAgentWorkVia(ctx, getAgentIdentity(ctx), open)
+	if got != nil || !errors.Is(err, townDown) {
+		t.Fatalf("findAgentWorkVia = (%v, %v), want (nil, the town query's error)", got, err)
+	}
+}
+
+// TestFindAgentWorkShowErrorIsNotUnresolvable: bd show fails for reasons that
+// say nothing about the bead (a timeout, a dropped connection). Only a bead bd
+// reports missing is unresolvable and escalates.
+func TestFindAgentWorkShowErrorIsNotUnresolvable(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name           string
+		showErr        error
+		wantUnresolved bool
+	}{
+		{"transient bd failure", errors.New("bd: context deadline exceeded"), false},
+		{"bead bd cannot find", errors.New("no issue found matching hq-igrp"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := hookWorkContext(t)
+			open := func(string) beads.Client {
+				return hookWorkBD{
+					show: func(id string) (*beads.Issue, error) {
+						if id == "hq-igrp" {
+							return nil, tc.showErr
+						}
+						return &beads.Issue{ID: id, HookBead: "hq-igrp"}, nil
+					},
+					assigned: func() ([]*beads.Issue, error) { return nil, nil },
+				}
+			}
+
+			_, err := findAgentWorkVia(ctx, getAgentIdentity(ctx), open)
+			if got := errors.Is(err, ErrHookUnresolvable); got != tc.wantUnresolved {
+				t.Fatalf("findAgentWorkVia error = %v, ErrHookUnresolvable = %v, want %v", err, got, tc.wantUnresolved)
+			}
+		})
+	}
+}
+
+// TestPrimeHookDryRunDoesNotSignalReady: --hook --dry-run previews a prime; it
+// must not set GT_AGENT_READY in the live tmux session it runs inside.
+func TestPrimeHookDryRunDoesNotSignalReady(t *testing.T) {
+	t.Setenv("GT_SESSION_ID", "dry-run-test")
+	oldDry, oldSignal := primeDryRun, signalAgentReadyFn
+	t.Cleanup(func() { primeDryRun, signalAgentReadyFn = oldDry, oldSignal })
+
+	signals := 0
+	signalAgentReadyFn = func() { signals++ }
+	dir := t.TempDir()
+
+	primeDryRun = true
+	handlePrimeHookMode(dir, dir)
+	if signals != 0 {
+		t.Errorf("--hook --dry-run signalled agent readiness %d time(s), want none", signals)
+	}
+
+	primeDryRun = false
+	handlePrimeHookMode(dir, dir)
+	if signals != 1 {
+		t.Errorf("--hook signalled agent readiness %d time(s), want 1", signals)
+	}
+}
+
 // TestShouldRenderMemories is the pure unit half of the memory role gate
 // (gt-o51s, plan Task 8 C3), for the same reason TestShouldSkipStartupMailInject
 // is the pure half of the mail gate: the subprocess-based tests that exercise

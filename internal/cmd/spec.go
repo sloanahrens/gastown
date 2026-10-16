@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
+	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -359,10 +360,13 @@ type specHoldKnobs struct {
 // specHoldKnobsFrom reads the knobs from the town's settings — the same keys
 // runSpecDispatch reads them from. The second result is false when those
 // settings will not load, which leaves the hold question unanswered rather
-// than answered wrongly.
+// than answered wrongly — and says so on stderr, since an unanswered question
+// disables every peer hold.
 func specHoldKnobsFrom(townRoot string) (specHoldKnobs, bool) {
-	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	path := config.TownSettingsPath(townRoot)
+	ts, err := config.LoadOrCreateTownSettings(path)
 	if err != nil {
+		warnSpecHoldUnread("town settings "+path, err)
 		return specHoldKnobs{}, false
 	}
 	sd := loadSpecDispatchConfig(townRoot)
@@ -438,10 +442,23 @@ func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, peer sling.Duplic
 	}
 	children, err := store.Children(peer.ID)
 	if err != nil {
+		warnSpecHoldUnread("children of "+peer.ID, err)
 		return ""
 	}
 	spec.Children = childSpecs(children)
 	return specdispatch.OpenChildHold(spec)
+}
+
+// specHoldWarnOut is where an unanswered peer-hold question says so; a test
+// swaps it to read the warning.
+var specHoldWarnOut io.Writer = os.Stderr
+
+// warnSpecHoldUnread tells the operator a peer-hold question went unanswered
+// because what it reads would not load, so the peer counts as not held. It
+// writes to stderr so it cannot corrupt a caller's stdout report.
+func warnSpecHoldUnread(what string, err error) {
+	fmt.Fprintf(specHoldWarnOut, "%s spec peer-hold check degraded: could not read %s, treating the peer as not held: %v\n",
+		style.Dim.Render("Warning:"), what, err)
 }
 
 // maxNamedBlockers bounds the blocker ids specPeerBlocked names, so one widely

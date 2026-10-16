@@ -587,24 +587,19 @@ func detectSessionState(ctx RoleContext) SessionState {
 	return state
 }
 
-// checkHandoffMarker checks for a handoff marker file and outputs a warning if found.
-// This prevents the "handoff loop" bug where a new session sees /handoff in context
-// and incorrectly runs it again. The marker tells the new session: "handoff is DONE,
-// the /handoff you see in context was from YOUR PREDECESSOR, not a request for you."
-//
-// The marker format is: "session_id\nreason" (reason is optional, on second line).
-// When present, the reason is stored in primeHandoffReason for compact/resume detection.
-// This enables compaction-triggered handoff cycles to route through the lighter
-// compact/resume path instead of full re-initialization. (GH#1965)
-func checkHandoffMarker(workDir string) {
-	if reason := checkHandoffMarkerTo(os.Stdout, workDir); reason != "" {
-		primeHandoffReason = reason
-	}
-}
-
 // checkHandoffMarkerTo consumes workDir's handoff marker, writes the
 // post-handoff warning to w, and returns the handoff reason the marker
 // carried ("" when it carried none or there was no marker).
+//
+// The warning prevents the "handoff loop" bug where a new session sees /handoff
+// in context and incorrectly runs it again. The marker tells the new session:
+// "handoff is DONE, the /handoff you see in context was from YOUR PREDECESSOR,
+// not a request for you."
+//
+// The marker format is: "session_id\nreason" (reason is optional, on second line).
+// The caller stores the reason in primeHandoffReason for compact/resume detection.
+// This enables compaction-triggered handoff cycles to route through the lighter
+// compact/resume path instead of full re-initialization. (GH#1965)
 func checkHandoffMarkerTo(w io.Writer, workDir string) (reason string) {
 	markerPath := filepath.Join(workDir, constants.DirRuntime, constants.FileHandoffMarker)
 	data, err := os.ReadFile(markerPath)
