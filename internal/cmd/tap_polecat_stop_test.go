@@ -127,20 +127,22 @@ func TestPolecatStopVerificationRunning(t *testing.T) {
 	const session = "gt-coral"
 	// An idle pane: the polecat's agent process and nothing under it.
 	idlePane := []polecat.Proc{{PID: 100, PPID: 1, Args: "claude --session-id a"}}
+	// The same pane with the polecat's own verification suite under it.
+	gatePane := append(slices.Clone(idlePane), polecat.Proc{PID: 101, PPID: 100, Args: "go test ./internal/cmd/"})
 
 	t.Run("no suite running", func(t *testing.T) {
-		busy, reason := polecatStopSuite(fakeStopCheckReads{panes: []int{100}, procs: idlePane},
+		busy, reason, err := polecatStopSuite(fakeStopCheckReads{panes: []int{100}, procs: idlePane},
 			t.TempDir(), "gastown", "coral", session)
-		if busy {
-			t.Fatalf("busy = true (%s), want false when nothing holds the slot and the pane is idle", reason)
+		if busy || err != nil {
+			t.Fatalf("busy, err = %v, %v (%s), want false, nil when nothing holds the slot and the pane is idle", busy, err, reason)
 		}
 	})
 
 	t.Run("slot held by this polecat", func(t *testing.T) {
-		busy, reason := polecatStopSuite(fakeStopCheckReads{rep: heldSlot("gastown/coral")},
+		busy, reason, err := polecatStopSuite(fakeStopCheckReads{rep: heldSlot("gastown/coral")},
 			t.TempDir(), "gastown", "coral", session)
-		if !busy {
-			t.Fatal("busy = false, want true when this polecat holds the slot")
+		if !busy || err != nil {
+			t.Fatalf("busy, err = %v, %v, want true, nil when this polecat holds the slot", busy, err)
 		}
 		if !strings.Contains(reason, "gastown/coral") {
 			t.Fatalf("reason = %q, want it to name the holder gastown/coral", reason)
@@ -148,30 +150,49 @@ func TestPolecatStopVerificationRunning(t *testing.T) {
 	})
 
 	t.Run("slot held by a different polecat does not suppress", func(t *testing.T) {
-		busy, reason := polecatStopSuite(fakeStopCheckReads{rep: heldSlot("gastown/citrine"), panes: []int{100}, procs: idlePane},
+		busy, reason, err := polecatStopSuite(fakeStopCheckReads{rep: heldSlot("gastown/citrine"), panes: []int{100}, procs: idlePane},
 			t.TempDir(), "gastown", "coral", session)
-		if busy {
-			t.Fatalf("busy = true (%s), want false when a different polecat holds the slot", reason)
+		if busy || err != nil {
+			t.Fatalf("busy, err = %v, %v (%s), want false, nil when a different polecat holds the slot", busy, err, reason)
 		}
 	})
 
 	t.Run("a suite still live in this polecat's pane", func(t *testing.T) {
-		procs := append(slices.Clone(idlePane), polecat.Proc{PID: 101, PPID: 100, Args: "go test ./internal/cmd/"})
-		busy, reason := polecatStopSuite(fakeStopCheckReads{panes: []int{100}, procs: procs},
+		busy, reason, err := polecatStopSuite(fakeStopCheckReads{panes: []int{100}, procs: gatePane},
 			t.TempDir(), "gastown", "coral", session)
-		if !busy {
-			t.Fatal("busy = false, want true while go test runs in the polecat's own pane")
+		if !busy || err != nil {
+			t.Fatalf("busy, err = %v, %v, want true, nil while go test runs in the polecat's own pane", busy, err)
 		}
 		if !strings.Contains(reason, "go test") {
 			t.Fatalf("reason = %q, want it to name the go test", reason)
 		}
 	})
 
-	t.Run("an unreadable read is not busy", func(t *testing.T) {
-		busy, reason := polecatStopSuite(fakeStopCheckReads{panesErr: errors.New("tmux is gone")},
+	t.Run("an unreadable read is not busy, and is reported", func(t *testing.T) {
+		busy, reason, err := polecatStopSuite(fakeStopCheckReads{panesErr: errors.New("tmux is gone")},
 			t.TempDir(), "gastown", "coral", session)
 		if busy {
 			t.Fatalf("busy = true (%s), want false: a turn boundary reads an unreadable state as not busy", reason)
+		}
+		if err == nil {
+			t.Fatal("err = nil, want the failed read so the guard can say it could not read the state")
+		}
+	})
+
+	// gt-a1xhd: the slot read is the one that fails first here, and a failed
+	// slot read must not take the pane scan with it — the suite running in the
+	// polecat's own pane is exactly what the deferral is for.
+	t.Run("an unreadable slot read still finds the pane's suite", func(t *testing.T) {
+		busy, reason, err := polecatStopSuite(fakeStopCheckReads{repErr: errors.New("flock is gone"), panes: []int{100}, procs: gatePane},
+			t.TempDir(), "gastown", "coral", session)
+		if !busy {
+			t.Fatalf("busy = false (%v), want true: a slot read that failed must not hide the suite in the pane", err)
+		}
+		if !strings.Contains(reason, "go test") {
+			t.Fatalf("reason = %q, want it to name the go test", reason)
+		}
+		if err == nil {
+			t.Fatal("err = nil, want the failed read alongside the suite that was found")
 		}
 	})
 }
@@ -216,7 +237,8 @@ const polecatStopWrapperArgv = `/bin/zsh -c source /Users/sloan/gt/.claude-town/
 // that mean "this polecat is still verifying" must be recognized wherever the
 // wrapper buries them, and the ones that only mention a gate must not be. The
 // matcher is polecat.SuiteArgv; what is pinned here is this guard's tokenizer
-// and the invocations it feeds the matcher.
+// (stopCheckTokens) and the invocations it feeds the matcher
+// (stopCheckMatchingSuites over the rig's configured gates).
 func TestPolecatStopVerificationArgv(t *testing.T) {
 	t.Parallel()
 
@@ -365,12 +387,12 @@ func TestPolecatStopVerificationArgv(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, ok := polecatStopVerificationArgv(tc.argv, gates)
+			got, ok := polecat.SuiteArgv(tc.argv, stopCheckTokens, stopCheckMatchingSuites(gates))
 			if ok != tc.expect {
-				t.Fatalf("polecatStopVerificationArgv(%q) = (%q, %v), want ok=%v", tc.argv, got, ok, tc.expect)
+				t.Fatalf("polecat.SuiteArgv(%q) = (%q, %v), want ok=%v", tc.argv, got, ok, tc.expect)
 			}
 			if ok && got != tc.want {
-				t.Fatalf("polecatStopVerificationArgv(%q) named %q, want %q", tc.argv, got, tc.want)
+				t.Fatalf("polecat.SuiteArgv(%q) named %q, want %q", tc.argv, got, tc.want)
 			}
 		})
 	}

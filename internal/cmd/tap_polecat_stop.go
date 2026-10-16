@@ -128,7 +128,14 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 	// (gt-couv): the polecat can still be legitimately waiting on a
 	// background verification step. Two independent turn-end signals veto
 	// the auto-run in that case; either one is enough to hold off.
-	if busy, busyReason := polecatStopVerificationRunning(townRoot, rigName, polecatName, sessionName); busy {
+	busy, busyReason, readErr := polecatStopVerificationRunning(townRoot, rigName, polecatName, sessionName)
+	if readErr != nil {
+		// An unreadable read does not hold the auto gt done back (see
+		// polecatStopSuite), so say so: silently it is indistinguishable from a
+		// seat that was read and found idle.
+		fmt.Fprintf(os.Stderr, "polecat-stop-check: could not read whether a verification suite is live (%v) — an unreadable read is not busy here\n", readErr)
+	}
+	if busy {
 		fmt.Fprintf(os.Stderr, "polecat-stop-check: %s — deferring gt done\n", busyReason)
 		return nil
 	}
@@ -204,8 +211,9 @@ func polecatStopPendingWorkIn(g polecatStopGit, branch string) (bool, string, er
 // polecatStopVerificationRunning reports whether this polecat's own
 // verification suite is still live — its own suite holding a container-gate
 // slot, or a suite invocation live under its own panes — and names it for the
-// deferral message.
-func polecatStopVerificationRunning(townRoot, rigName, polecatName, sessionName string) (bool, string) {
+// deferral message. The error is a read that failed; the caller reports it and
+// carries on, since the reading stands on its own.
+func polecatStopVerificationRunning(townRoot, rigName, polecatName, sessionName string) (bool, string, error) {
 	return polecatStopSuite(stopCheckReads{townRoot: townRoot}, townRoot, rigName, polecatName, sessionName)
 }
 
@@ -215,8 +223,13 @@ func polecatStopVerificationRunning(townRoot, rigName, polecatName, sessionName 
 // asks (polecat.LiveSuite, gt-a1xhd). An unreadable read is "not busy" here,
 // the turn-boundary reading: the grace period and the next turn's reads both
 // still stand between this Stop event and an auto gt done, and a later Stop
-// re-runs them. The overrun guard maps the same error the other way.
-func polecatStopSuite(reads polecat.SuiteReads, townRoot, rigName, polecatName, sessionName string) (bool, string) {
+// re-runs them. The overrun guard maps the same error the other way, and the
+// error is returned rather than swallowed so the caller can say a read failed.
+//
+// A failed read only loses the answer that read would have given: the check
+// still reports a suite the other read found, so an unreadable slot state
+// cannot hide the suite running in this polecat's pane.
+func polecatStopSuite(reads polecat.SuiteReads, townRoot, rigName, polecatName, sessionName string) (bool, string, error) {
 	found, err := polecat.LiveSuite(reads, polecat.SuiteQuery{
 		Session: sessionName,
 		// `<rig>/<polecat>` is the role the formula's own gate wrap passes to
@@ -226,16 +239,13 @@ func polecatStopSuite(reads polecat.SuiteReads, townRoot, rigName, polecatName, 
 		Suites: stopCheckSuites(townRoot, rigName),
 		Split:  stopCheckTokens,
 	})
-	if err != nil {
-		return false, ""
-	}
 	switch {
 	case found.Slot.Held:
-		return true, fmt.Sprintf("container-gate slot %d held by %s (verification suite running)", found.Slot.Index, found.Slot.Owner.Role)
+		return true, fmt.Sprintf("container-gate slot %d held by %s (verification suite running)", found.Slot.Index, found.Slot.Owner.Role), err
 	case found.Invocation != "":
-		return true, fmt.Sprintf("%s is still running in this polecat's pane", found.Invocation)
+		return true, fmt.Sprintf("%s is still running in this polecat's pane", found.Invocation), err
 	}
-	return false, ""
+	return false, "", err
 }
 
 // stopCheckReads reads one live-suite question's evidence straight from the
@@ -428,10 +438,4 @@ func stopCheckGateFromCommand(command string) (polecat.Invocation, bool) {
 var commonBareVerificationInvocations = []polecat.Invocation{
 	{Program: "go", Target: "test"},
 	{Program: "go", Target: "vet"},
-}
-
-// polecatStopVerificationArgv reports whether a process's argv is a live
-// verification or build suite, and names it for the deferral message.
-func polecatStopVerificationArgv(argv string, gates []polecat.Invocation) (string, bool) {
-	return polecat.SuiteArgv(argv, stopCheckTokens, stopCheckMatchingSuites(gates))
 }

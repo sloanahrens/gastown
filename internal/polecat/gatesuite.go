@@ -86,28 +86,49 @@ func (f Found) Busy() bool { return f.Slot.Held || f.Invocation != "" }
 // container-gate pool slot held under one of its own roles, or a suite
 // invocation live under one of its own panes — and says what it found.
 //
-// An error reports that a read failed. Which way that failure is read is the
-// caller's: the overrun guard counts all of the seat's time, the direction that
-// stops it, while the Stop hook reads "not busy", its turn-boundary semantics.
+// A read that fails does not end the question: the reads are asked in turn and
+// a failed one leaves the reads after it to answer, so a slot read the host
+// refuses still lets the pane scan find the suite the seat is running. The Stop
+// hook asks the slot read first, and short-circuiting it there hid a live pane
+// suite from it (gt-a1xhd).
+//
+// The error comes out with whatever was found, and each caller maps it: the
+// overrun guard counts all of the seat's time on any error, the direction that
+// stops it, while the Stop hook reads an error as "not busy" unless a suite was
+// found, its turn-boundary semantics.
 func LiveSuite(reads SuiteReads, q SuiteQuery) (Found, error) {
-	rep, err := reads.Slots()
-	if err != nil {
-		return Found{}, fmt.Errorf("container-gate slot status: %w", err)
-	}
-	if held, ok := SlotHeldBy(rep, q.Roles); ok {
+	rep, slotErr := reads.Slots()
+	if slotErr != nil {
+		slotErr = fmt.Errorf("container-gate slot status: %w", slotErr)
+	} else if held, ok := SlotHeldBy(rep, q.Roles); ok {
 		return Found{Slot: held}, nil
 	}
 
+	name, paneErr := paneSuite(reads, q)
+	switch {
+	case paneErr != nil && slotErr != nil:
+		return Found{}, slotErr // the first read that failed is the one to report
+	case paneErr != nil:
+		return Found{}, paneErr
+	case name != "":
+		return Found{Invocation: name}, slotErr
+	}
+	return Found{}, slotErr
+}
+
+// paneSuite names a suite invocation live under one of the seat's own panes, ""
+// when the panes hold none.
+func paneSuite(reads SuiteReads, q SuiteQuery) (string, error) {
 	panes, err := reads.PanePIDs(q.Session)
 	if err != nil {
-		return Found{}, err
+		return "", err
 	}
 	if len(panes) == 0 {
-		return Found{}, fmt.Errorf("no pane found for session %s", q.Session)
+		return "", fmt.Errorf("no pane found for session %s", q.Session)
 	}
 	procs, err := reads.ProcessTable()
 	if err != nil {
-		return Found{}, err
+		return "", err
 	}
 
 	split := q.Split
@@ -119,10 +140,10 @@ func LiveSuite(reads SuiteReads, q SuiteQuery) (Found, error) {
 	// seat that is not gating.
 	for _, argv := range DescendantArgvs(panes, procs) {
 		if name, ok := SuiteArgv(argv, split, q.Suites); ok {
-			return Found{Invocation: name}, nil
+			return name, nil
 		}
 	}
-	return Found{}, nil
+	return "", nil
 }
 
 // SlotHeldBy returns the first pool slot held under one of roles.

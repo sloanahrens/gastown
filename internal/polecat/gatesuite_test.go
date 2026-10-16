@@ -255,6 +255,20 @@ func TestLiveSuite(t *testing.T) {
 		}
 	})
 
+	// The slot read is asked first, so it is the read a failing host takes out
+	// first; the pane scan it would have short-circuited is the only sight a
+	// caller has of a suite holding no slot (gt-a1xhd).
+	t.Run("a slot read that failed still leaves the pane scan", func(t *testing.T) {
+		got, err := LiveSuite(fakeSuiteReads{repErr: errors.New("flock is gone"), panes: []int{100}, procs: []Proc{agent, running}},
+			SuiteQuery{Roles: []string{"gastown/coral"}, Session: "gt-coral", Suites: suite})
+		if err == nil {
+			t.Error("LiveSuite = nil error; want the failed read reported with what was found")
+		}
+		if got.Invocation != "make test" {
+			t.Errorf("LiveSuite = %+v; want the pane's make test, not a blank answer for an unreadable slot state", got)
+		}
+	})
+
 	t.Run("an unreadable pane list", func(t *testing.T) {
 		if _, err := LiveSuite(fakeSuiteReads{panesErr: errors.New("tmux is gone")}, SuiteQuery{Session: "gt-coral"}); err == nil {
 			t.Error("LiveSuite = nil error; want one")
