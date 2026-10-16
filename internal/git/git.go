@@ -1457,12 +1457,21 @@ func (g *Git) PatchIDVerbatim(base, head string) (string, error) {
 	return g.patchID(base, head, "--verbatim")
 }
 
-// patchID is the shared plumbing; mode is git patch-id's hashing algorithm.
-// The diff comes from runOutput, not run: run's trim eats the trailing
-// whitespace of the diff's last line, which is a real change to the line when
-// the mode preserves whitespace (gt-2colr).
-func (g *Git) patchID(base, head, mode string) (string, error) {
-	diff, err := g.runOutput("diff", base+".."+head)
+// PatchIDZeroContext is PatchID over a diff with no context lines
+// (git diff -U0 base..head | git patch-id --stable). Patch-ids hash context
+// lines, so PatchID differs for the same edit when the surrounding lines
+// differ; this id is the changed lines alone, for a caller matching one change
+// across two bases (gt-r5uwc).
+func (g *Git) PatchIDZeroContext(base, head string) (string, error) {
+	return g.patchID(base, head, "--stable", "-U0")
+}
+
+// patchID is the shared plumbing; mode is git patch-id's hashing algorithm and
+// diffArgs are extra git diff flags. The diff comes from runOutput, not run:
+// run's trim eats the trailing whitespace of the diff's last line, which is a
+// real change to the line when the mode preserves whitespace (gt-2colr).
+func (g *Git) patchID(base, head, mode string, diffArgs ...string) (string, error) {
+	diff, err := g.runOutput(append(append([]string{"diff"}, diffArgs...), base+".."+head)...)
 	if err != nil {
 		return "", err
 	}

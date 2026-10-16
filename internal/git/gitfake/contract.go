@@ -316,6 +316,47 @@ func RunRepoContract(t *testing.T, newEnv func(t *testing.T) Env) {
 		}
 	})
 
+	t.Run("PatchIDZeroContext ignores the lines around the change", func(t *testing.T) {
+		t.Parallel()
+		fx := newFixture(t, newEnv(t))
+		file := func(edits map[int]string) string {
+			var b strings.Builder
+			for i := 1; i <= 12; i++ {
+				if s, ok := edits[i]; ok {
+					b.WriteString(s + "\n")
+				} else {
+					fmt.Fprintf(&b, "line %d\n", i)
+				}
+			}
+			return b.String()
+		}
+		// The same edit of line 6 on two bases, one of which also edited line 4,
+		// inside the three lines of context git diff puts around line 6.
+		plain := fx.env.Commit(t, fx.origin, "main", "n: plain", map[string]string{"n.txt": file(nil)})
+		plainEdit := fx.env.Commit(t, fx.origin, "main", "n: edit 6", map[string]string{"n.txt": file(map[int]string{6: "six"})})
+		near := fx.env.Commit(t, fx.origin, "main", "n: edit 4", map[string]string{"n.txt": file(map[int]string{4: "four"})})
+		nearEdit := fx.env.Commit(t, fx.origin, "main", "n: edit 4 and 6", map[string]string{"n.txt": file(map[int]string{4: "four", 6: "six"})})
+		g := fx.env.Open(fx.clone)
+		fx.fetch(t, g, "main")
+		a, err := g.PatchIDZeroContext(plain, plainEdit)
+		if err != nil || a == "" {
+			t.Fatalf("PatchIDZeroContext = %q, %v", a, err)
+		}
+		if b, err := g.PatchIDZeroContext(near, nearEdit); err != nil || b != a {
+			t.Errorf("the same edit beside another: %q, %v; want %q", b, err, a)
+		}
+		full, err := g.PatchID(plain, plainEdit)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := g.PatchID(near, nearEdit); err != nil || got == full {
+			t.Errorf("PatchID of the same edit beside another: %q, %v; want it to differ from %q", got, err, full)
+		}
+		if _, err := g.PatchIDZeroContext(plain, plain); err == nil {
+			t.Error("PatchIDZeroContext of an empty range succeeded")
+		}
+	})
+
 	t.Run("a detached worktree checks out the ref and is removed", func(t *testing.T) {
 		t.Parallel()
 		fx := newFixture(t, newEnv(t))
