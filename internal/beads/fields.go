@@ -150,81 +150,60 @@ func FormatAttachmentFields(fields *AttachmentFields) string {
 	return strings.Join(lines, "\n")
 }
 
-// attachmentKeys are the known attachment field keys (lowercase), shared by
-// SetAttachmentFields and StripAttachmentFields.
-var attachmentKeys = map[string]bool{
-	"attached_molecule": true,
-	"attached-molecule": true,
-	"attachedmolecule":  true,
-	"attached_formula":  true,
-	"attached-formula":  true,
-	"attachedformula":   true,
-	"attached_at":       true,
-	"attached-at":       true,
-	"attachedat":        true,
-	"attached_args":     true,
-	"attached-args":     true,
-	"attachedargs":      true,
-	"attached_vars":     true,
-	"attached-vars":     true,
-	"attachedvars":      true,
-	"dispatched_by":     true,
-	"dispatched-by":     true,
-	"dispatchedby":      true,
-	"no_merge":          true,
-	"no-merge":          true,
-	"nomerge":           true,
-	"review_only":       true,
-	"review-only":       true,
-	"reviewonly":        true,
-	"mode":              true,
-	"merge_strategy":    true,
-	"merge-strategy":    true,
-	"mergestrategy":     true,
-	"formula_vars":      true,
-	"formula-vars":      true,
-	"formulavars":       true,
+// isAttachmentKey reports whether key (lowercase) names an attachment field,
+// in its underscore, hyphen or run-together spelling. It is a switch, not a
+// package-level map, so no caller can mutate the key list.
+func isAttachmentKey(key string) bool {
+	switch key {
+	case "attached_molecule", "attached-molecule", "attachedmolecule",
+		"attached_formula", "attached-formula", "attachedformula",
+		"attached_at", "attached-at", "attachedat",
+		"attached_args", "attached-args", "attachedargs",
+		"attached_vars", "attached-vars", "attachedvars",
+		"dispatched_by", "dispatched-by", "dispatchedby",
+		"no_merge", "no-merge", "nomerge",
+		"review_only", "review-only", "reviewonly",
+		"mode",
+		"merge_strategy", "merge-strategy", "mergestrategy",
+		"formula_vars", "formula-vars", "formulavars":
+		return true
+	}
+	return false
 }
 
 // StripAttachmentFields returns desc without its attachment field lines, the
-// dispatcher's plumbing, leaving what the bead is about. It is
-// SetAttachmentFields with no fields to write, so the key list stays in one place.
+// dispatcher's plumbing, leaving what the bead is about.
 func StripAttachmentFields(desc string) string {
-	return SetAttachmentFields(&Issue{Description: desc}, nil)
+	return strings.Join(withoutAttachmentLines(desc), "\n")
 }
 
-// SetAttachmentFields updates an issue's description with the given attachment fields.
-// Existing attachment field lines are replaced; other content is preserved.
-// Returns the new description string.
-func SetAttachmentFields(issue *Issue, fields *AttachmentFields) string {
-	// Collect non-attachment lines from existing description
+// withoutAttachmentLines returns desc's lines minus the attachment field
+// lines, with leading and trailing blank lines trimmed and blank lines inside
+// the content kept. SetAttachmentFields and StripAttachmentFields both start
+// from it, so the two agree on what an attachment line is.
+func withoutAttachmentLines(desc string) []string {
 	var otherLines []string
-	if issue != nil && issue.Description != "" {
-		for _, line := range strings.Split(issue.Description, "\n") {
-			trimmed := strings.TrimSpace(line)
-			if trimmed == "" {
-				// Preserve blank lines in content
-				otherLines = append(otherLines, line)
-				continue
-			}
-
-			// Check if this is an attachment field line
-			colonIdx := strings.Index(trimmed, ":")
-			if colonIdx == -1 {
-				otherLines = append(otherLines, line)
-				continue
-			}
-
-			key := strings.ToLower(strings.TrimSpace(trimmed[:colonIdx]))
-			if !attachmentKeys[key] {
-				otherLines = append(otherLines, line)
-			}
-			// Skip attachment field lines - they'll be replaced
+	for _, line := range strings.Split(desc, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			// Preserve blank lines in content
+			otherLines = append(otherLines, line)
+			continue
 		}
-	}
 
-	// Build new description: attachment fields first, then other content
-	formatted := FormatAttachmentFields(fields)
+		// Check if this is an attachment field line
+		colonIdx := strings.Index(trimmed, ":")
+		if colonIdx == -1 {
+			otherLines = append(otherLines, line)
+			continue
+		}
+
+		key := strings.ToLower(strings.TrimSpace(trimmed[:colonIdx]))
+		if !isAttachmentKey(key) {
+			otherLines = append(otherLines, line)
+		}
+		// Skip attachment field lines - they'll be replaced
+	}
 
 	// Trim trailing blank lines from other content
 	for len(otherLines) > 0 && strings.TrimSpace(otherLines[len(otherLines)-1]) == "" {
@@ -234,7 +213,21 @@ func SetAttachmentFields(issue *Issue, fields *AttachmentFields) string {
 	for len(otherLines) > 0 && strings.TrimSpace(otherLines[0]) == "" {
 		otherLines = otherLines[1:]
 	}
+	return otherLines
+}
 
+// SetAttachmentFields updates an issue's description with the given attachment fields.
+// Existing attachment field lines are replaced; other content is preserved.
+// Returns the new description string.
+func SetAttachmentFields(issue *Issue, fields *AttachmentFields) string {
+	var desc string
+	if issue != nil {
+		desc = issue.Description
+	}
+	otherLines := withoutAttachmentLines(desc)
+
+	// Build new description: attachment fields first, then other content
+	formatted := FormatAttachmentFields(fields)
 	if formatted == "" {
 		return strings.Join(otherLines, "\n")
 	}
