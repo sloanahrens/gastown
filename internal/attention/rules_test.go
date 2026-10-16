@@ -51,6 +51,7 @@ func TestRuleFlagsAssignments(t *testing.T) {
 		RuleHostDiskCrit, RuleHostMemLow, RuleHostDockerDown,
 		RuleQuestionNew, RuleQuestionAnswered, RuleDispatchIdle,
 		RuleDeployFailed,
+		RuleReviewBacklog,
 	}
 	for _, r := range wake {
 		f, _ := Flags(r)

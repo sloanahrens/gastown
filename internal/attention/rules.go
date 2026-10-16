@@ -67,6 +67,9 @@ const (
 
 	// RuleDeployFailed is the failed-deploy rule (gt-hcbft).
 	RuleDeployFailed = "deploy.failed"
+
+	// RuleReviewBacklog is the review-backlog rule (gt-ee6ox).
+	RuleReviewBacklog = "review.backlog"
 )
 
 var (
@@ -102,6 +105,9 @@ var ruleFlags = map[string]RuleFlags{
 	// A deploy that failed is an app that did not ship; it waits on the
 	// overseer until the next run of that workflow is green.
 	RuleDeployFailed: flagsWake,
+	// Each risk-path item wakes on its own only after RiskPathPromoteAfter, so
+	// a pile of them goes unnoticed; this rule wakes on the total.
+	RuleReviewBacklog: flagsWake,
 	// A question is waiting on Sloan, or Sloan has answered and the overseer
 	// has yet to act; both are the overseer's to pick up.
 	RuleQuestionNew:      flagsWake,
@@ -189,6 +195,7 @@ var kindRules = map[Kind]string{
 	KindOverseerSilent:   RuleOverseerSilent,
 	KindDispatchIdle:     RuleDispatchIdle,
 	KindDeployFailed:     RuleDeployFailed,
+	KindReviewBacklog:    RuleReviewBacklog,
 }
 
 // RuleFor is the rule id of an item. The disk collector's key is its rule

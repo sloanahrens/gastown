@@ -80,6 +80,9 @@ const (
 	// KindDeployFailed: a deploy workflow's newest run on an app rig's main or
 	// a v* tag failed, so a landing or a release did not ship (gt-hcbft).
 	KindDeployFailed Kind = "deploy-failed"
+	// KindReviewBacklog: the open risk-path queue passed its threshold or rose
+	// fast, so unreviewed landings are piling up faster than they clear.
+	KindReviewBacklog Kind = "review-backlog"
 )
 
 // Kinds is every kind an item may carry, in one place for tests and readers
@@ -92,7 +95,7 @@ func Kinds() []Kind {
 		KindRevertRefused, KindBlockedMail, KindOverrunStopped, KindScheduledGate,
 		KindHostDisk, KindHostMem, KindHostDocker, KindHostProbe,
 		KindQuestionNew, KindQuestionAnswered, KindQuestionStale,
-		KindOverseerSilent, KindDispatchIdle, KindDeployFailed,
+		KindOverseerSilent, KindDispatchIdle, KindDeployFailed, KindReviewBacklog,
 	}
 }
 

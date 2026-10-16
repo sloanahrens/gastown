@@ -703,3 +703,32 @@ func TestOverseerThresholds(t *testing.T) {
 		t.Errorf("parsed overseer section = %+v", o)
 	}
 }
+
+func TestOverseerReviewBacklogThresholds(t *testing.T) {
+	t.Parallel()
+
+	var op *OperationalConfig
+	o := op.GetOverseerConfig()
+	if got := o.ReviewBacklogThresholdV(); got != 15 || DefaultReviewBacklogThreshold != 15 {
+		t.Errorf("default ReviewBacklogThresholdV = %d, want 15", got)
+	}
+	if got := o.ReviewBacklogRiseV(); got != 10 || DefaultReviewBacklogRise != 10 {
+		t.Errorf("default ReviewBacklogRiseV = %d, want 10", got)
+	}
+	// A zero or negative value would make every queue a backlog, so it reads
+	// as unset.
+	for _, v := range []int{0, -3} {
+		o := &OverseerThresholds{ReviewBacklogThreshold: v, ReviewBacklogRise: v}
+		if o.ReviewBacklogThresholdV() != 15 || o.ReviewBacklogRiseV() != 10 {
+			t.Errorf("value %d: got %d, %d, want the defaults", v, o.ReviewBacklogThresholdV(), o.ReviewBacklogRiseV())
+		}
+	}
+
+	var parsed OperationalConfig
+	if err := json.Unmarshal([]byte(`{"overseer":{"review_backlog_threshold":30,"review_backlog_rise":5}}`), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if o := parsed.GetOverseerConfig(); o.ReviewBacklogThresholdV() != 30 || o.ReviewBacklogRiseV() != 5 {
+		t.Errorf("parsed overseer section = %+v", o)
+	}
+}
