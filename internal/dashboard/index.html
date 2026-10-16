@@ -2826,6 +2826,9 @@ function costGCP(box, c) {
 // part, so the two spend meters are read side by side. Its reader answers a week
 // or a named failure and never a week it could not place: a series too old to
 // measure drawn as 0% would say the limit is untouched (gt-qn3j4).
+//
+// The line's tail carries the billing month, which the operator reads to size
+// the plan (gt-bcq4m).
 
 // The series carries limits and percentages, not the plan's name, so the line
 // names the subscription its price buys: the reader's default price
@@ -2833,6 +2836,10 @@ function costGCP(box, c) {
 // page cannot name.
 const CLAUDE_PLAN_MAX_USD = 200;
 const planName = usd => Math.round(usd) === CLAUDE_PLAN_MAX_USD ? "Claude Max" : "Claude plan";
+
+// CLAUDE_PLAN_CEILING_PCT mirrors the reader's ClaudePlanCeilingPct; a test
+// pins the two together.
+const CLAUDE_PLAN_CEILING_PCT = 90;
 
 // planReset is a rollover as the operator reads it: the local weekday and clock
 // time. The weekday comes from the page's own table because a browser's locale
@@ -2843,6 +2850,14 @@ const planReset = secs => {
   return WEEKDAY[d.getDay()] + " " + String(d.getHours()).padStart(2, "0") + ":" + String(d.getMinutes()).padStart(2, "0");
 };
 
+// planDay is a billing month's bound as day and month name, off the page's own
+// table for the same reason planReset is.
+const MONTH = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const planDay = secs => {
+  const d = new Date(secs * 1000);
+  return d.getDate() + " " + MONTH[d.getMonth()];
+};
+
 // A percentage of a limit reads whole, as the status line samples it — a tenth
 // of a percent of a week is not a decision. A pace keeps its tenth, since it is
 // the number that says how fast the week is going.
@@ -2850,11 +2865,11 @@ const planPct = v => Math.round(v) + "%";
 const planPace = v => (v > 0 ? "+" : "") + Number(v).toFixed(1) + "%/day";
 
 // planClass is the line's colour: a week at the ceiling the month rollup counts
-// (90% of the limit) or projected past the limit is bad, one projected past 90%
-// warns, and a week with room left is plain.
+// (CLAUDE_PLAN_CEILING_PCT of the limit) or projected past the limit is bad, one
+// projected past the ceiling warns, and a week with room left is plain.
 function planClass(c) {
-  if (c.weekly_pct >= 90 || c.projected_pct_at_reset > 100) return "badc";
-  return c.projected_pct_at_reset > 90 ? "warnc" : "";
+  if (c.weekly_pct >= CLAUDE_PLAN_CEILING_PCT || c.projected_pct_at_reset > 100) return "badc";
+  return c.projected_pct_at_reset > CLAUDE_PLAN_CEILING_PCT ? "warnc" : "";
 }
 
 // planUnread is why the line carries no week at all: each state the reader can
@@ -2878,6 +2893,29 @@ function planAPIEquivalent(c) {
     (c.unpriced && c.unpriced.length ? " · counted at zero, no list price: " + c.unpriced.join(", ") : "");
 }
 
+// planMonthSuffix is the month's clause on the line: its utilization and its
+// weeks at the ceiling. A month with no counted weeks draws none, not 0%.
+function planMonthSuffix(c) {
+  if (!(c.month_weeks > 0)) return null;
+  const words = ["month " + planPct(c.month_utilization_pct) + " of plan"];
+  if (c.weeks_at_ceiling > 0) words.push(c.weeks_at_ceiling === 1 ? "1 week at ceiling" : c.weeks_at_ceiling + " weeks at ceiling");
+  return words.join(" · ");
+}
+
+// planMonthHover is the month's part of the hover: its bounds, dollars, mean
+// week, open week and the month before.
+function planMonthHover(c) {
+  if (!(c.month_weeks > 0)) return [];
+  const out = [
+    "billing month " + planDay(c.month_start_at) + " to " + planDay(c.month_end_at) + ", the plan's renewal day to the next",
+    "about " + money(c.month_value_used_usd) + " of the " + money(c.plan_usd_month) + " plan, approximate",
+    "mean week " + planPct(c.avg_weekly_pct) + " over " + c.month_weeks + (c.month_weeks === 1 ? " week" : " weeks"),
+  ];
+  if (c.month_open_week) out.push("the week in progress counts at its latest reading");
+  if (c.prev_month_utilization_pct != null) out.push("month before " + planPct(c.prev_month_utilization_pct) + " of plan");
+  return out;
+}
+
 // costClaudePlan draws the line into box. No block at all is the reader's first
 // poll not answered yet — the start-up silence the GCP line keeps too — and
 // every answer after it is a week or a named failure.
@@ -2896,18 +2934,18 @@ function costClaudePlan(box, c) {
     // A week already at its limit is reached at no pace, so the reader sends 0
     // for it rather than a day count.
     c.hits_limit_in_days == null ? null : c.hits_limit_in_days > 0 ? "limit in " + c.hits_limit_in_days.toFixed(1) + "d" : "at the limit",
+    planMonthSuffix(c),
   ].filter(Boolean).join(" · "));
-  // The hover has what the line has no room for: the five-hour limit, the hour's
-  // pace, and what the week's share of the plan comes to. Those dollars are the
-  // plan's own share of the month rather than a bill, so they are labelled
-  // approximate.
+  // The hover has what the line has no room for. Dollars are the plan's share
+  // of the month rather than a bill, so they are labelled approximate.
   line.title = [
     "5-hour limit " + planPct(c.five_hour_pct) + " used" + (c.five_hour_resets_at ? ", resets " + planReset(c.five_hour_resets_at) : ", no reset instant in the newest sample"),
     "1-hour pace " + planPace(c.pace_per_day_1h),
     "about " + money(c.used_value_usd) + " of this week's " + money(c.weekly_value_usd) + ", approximate (the plan's share of the month, not a bill)",
     planAPIEquivalent(c),
     c.sampled_at ? "newest sample " + fmtDur((Date.now() - c.sampled_at * 1000) / 1000) + " ago" : null,
-  ].filter(Boolean).join(" · ");
+    c.state_error ? "state not kept: " + c.state_error : null,
+  ].filter(Boolean).concat(planMonthHover(c)).join(" · ");
   box.append(line);
 }
 
