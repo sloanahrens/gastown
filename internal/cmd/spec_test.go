@@ -616,6 +616,40 @@ func TestSpecHeldBeadsFromAStore(t *testing.T) {
 	}
 }
 
+// An epic's prose names its children's files, so a claimed epic is not a seat
+// working one of them: the held read leaves it out, as the sling-time guard
+// does, and a child naming the epic's file still dispatches (gt-aoyss).
+func TestHeldBeadsFromSkipsEpics(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(
+		beads.Issue{ID: "gt-epic", Type: "epic", Status: string(beads.StatusInProgress),
+			Description: "Children touch a.go."},
+		beads.Issue{ID: "gt-task", Type: "task", Status: beads.StatusHooked,
+			Description: "The fix lands in b.go."},
+	)
+	got, err := heldBeadsFrom(db, func(string, error) {}, t.TempDir())
+	if err != nil {
+		t.Fatalf("heldBeadsFrom: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gt-task" || !reflect.DeepEqual(got[0].Paths, []string{"b.go"}) {
+		t.Fatalf("held = %+v, want only the hooked task naming b.go", got)
+	}
+
+	child := cleanSpec("gt-child", 1, "2026-09-29T10:00:00Z")
+	child.Description += "\nThe fix lands in a.go.\n"
+	env := specDispatchEnv{Held: func(string) ([]specdispatch.HeldBead, error) { return got, nil }}
+	why, err := specHeldHold(env, "gastown", child, map[string]heldRead{})
+	if err != nil || why != "" {
+		t.Fatalf("specHeldHold = %q, %v; want no hold for a child naming the epic's file", why, err)
+	}
+	other := cleanSpec("gt-other", 1, "2026-09-29T10:00:00Z")
+	other.Description += "\nThe fix lands in b.go.\n"
+	if why, err := specHeldHold(env, "gastown", other, map[string]heldRead{}); err != nil || why == "" {
+		t.Fatalf("specHeldHold = %q, %v; want a hold for a candidate naming the hooked task's file", why, err)
+	}
+}
+
 // --dry-run holds an unshaped bead too: it reports the unshaped reason and
 // writes nothing (gt-f8ppx acceptance 1).
 func TestSpecDispatchDryRunHoldsUnshaped(t *testing.T) {
