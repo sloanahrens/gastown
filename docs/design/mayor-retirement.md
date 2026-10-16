@@ -452,7 +452,6 @@ directory. **D** = DELETE (the role); **E** = EDIT (remove the role references);
 | `daemon.go` | E | mayor dispatch ticker and ensureMayorRunning. |
 | `dog_cycle.go` | E | mayor_dispatch comment. |
 | `dolt.go` | E | Escalation mail to mayor/. |
-| `git_hygiene.go` | K | mayor/rig paths. |
 | `handler.go` | K | mayor/rigs.json. |
 | `jsonl_git_backup.go` | E | escalateAlert sends to the mayor. |
 | `log_rotation.go` | K | mayor/rig/.beads log path. |
