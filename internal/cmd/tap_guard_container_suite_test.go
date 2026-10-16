@@ -956,8 +956,9 @@ func TestEvaluateContainerSuiteCommand_CwdStyle(t *testing.T) {
 // the command, so the shell's cwd has no say in what the target tests
 // (gt-tzdpe). An explicit package argument carries its own path and keeps its
 // reading, and one spelled as a path under that -C directory ("./beads/...")
-// is judged where it lands as well (gt-g6yi7). The polecat scope rule's half
-// of the same hole is gt-zn7ma, so these rows pin the container rule alone.
+// is judged where it lands as well (gt-g6yi7). The polecat scope rule reads the
+// bare and "." forms the same way, pinned in
+// TestEvaluatePolecatTestScope_TargetFollowsTheCDirFlag.
 func TestContainerSuiteGoTestTargetFollowsTheCDirFlag(t *testing.T) {
 	t.Parallel()
 	root := fakeModule(t, "gastown/refinery/rig")

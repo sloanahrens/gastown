@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -70,6 +71,86 @@ func TestEvaluatePolecatTestScope(t *testing.T) {
 	}
 	if blocked != 24 {
 		t.Errorf("blocked %d of %d cases, want exactly 24", blocked, len(tests))
+	}
+}
+
+// A bare or "." target is judged in the directory the invocation's own -C dir
+// flag names, not in the one the hook runs in: Go chdirs on -C before it runs
+// the command (gt-tzdpe), the reading the container rule gives the same
+// spellings (TestContainerSuiteGoTestTargetFollowsTheCDirFlag). An explicit
+// package argument carries its own path and keeps its reading, and a -C
+// directory the guard cannot place is refused rather than read as a light one.
+func TestEvaluatePolecatTestScope_TargetFollowsTheCDirFlag(t *testing.T) {
+	t.Parallel()
+	root := fakeModule(t, "gastown/refinery/rig")
+	heavy := filepath.Join(root, "internal", "cmd")
+	light := filepath.Join(root, "internal", "style")
+	nowhere := filepath.Join(root, "nowhere")
+	heavyLink := symlinkedTree(t, heavy)
+
+	tests := []struct {
+		name    string
+		cwd     string
+		command string
+		blocked bool
+	}{
+		{"-C into a heavy package, dot target", light, "go -C " + heavy + " test .", true},
+		{"-C into a heavy package, dot-slash target", light, "go -C " + heavy + " test ./", true},
+		{"-C into a heavy package, bare target", light, "go -C " + heavy + " test", true},
+		{"-C= into a heavy package", light, "go -C=" + heavy + " test .", true},
+		{"-C through a link into a heavy package", light, "go -C " + heavyLink + " test .", true},
+		{"versioned binary with a -C dir", light, "go1.22.0 -C " + heavy + " test .", true},
+		{"a relative -C composed onto an absolute one", light, "go -C " + root + " -C internal/cmd test .", true},
+		{"-C into a heavy package after a cd away", heavy, "cd " + light + " && go -C " + heavy + " test .", true},
+		{"-C into a heavy package with -run", light, "go -C " + heavy + " test . -run TestOne", false},
+
+		// The reverse reading: a -C dir the hook is not in stops the hook's
+		// own directory from refusing the target.
+		{"-C out of a heavy package, dot target", heavy, "go -C " + light + " test .", false},
+		{"-C out of a heavy package, bare target", heavy, "go -C " + light + " test", false},
+		{"-C to the module root", heavy, "go -C " + root + " test .", false},
+		{"-C away from a heavy package after a cd into it", light, "cd " + heavy + " && go -C " + light + " test .", false},
+
+		// An explicit package argument is read whatever -C names.
+		{"heavy argument under a light -C dir", light, "go -C " + light + " test ./internal/cmd/", true},
+		{"light argument under a heavy -C dir", light, "go -C " + heavy + " test ./internal/style/", false},
+
+		// A -C dir the guard places only lexically (go itself fails on a
+		// missing one) is judged where it names, and an explicit argument
+		// carries its own path. The -C it cannot place at all is the relative
+		// one under an unreadable cwd, in the next test.
+		{"-C to a missing directory, light argument", light, "go -C " + nowhere + " test ./internal/style/", false},
+		{"-C to a missing directory, heavy argument", light, "go -C " + nowhere + " test ./internal/cmd/", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, matched := evaluatePolecatTestScope(fakeGuardProcess(nil, tt.cwd), tt.command)
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) from %s blocked = %v (reason %q, matched %v), want %v",
+					tt.command, tt.cwd, got, reason, matched, tt.blocked)
+			}
+		})
+	}
+}
+
+// A relative -C under a hook cwd the guard cannot read names nothing it can
+// place, so a cwd-relative target is refused there (gt-tzdpe).
+func TestEvaluatePolecatTestScope_RelativeCDirUnderUnplacedCwd(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		command string
+		blocked bool
+	}{
+		{"go -C internal/style test .", true},
+		{"go -C=internal/style test .", true},
+		{"go -C internal/style test", true},
+		{"go -C internal/style test ./internal/style/", false},
+	}
+	for _, tt := range tests {
+		reason, _ := evaluatePolecatTestScope(fakeGuardProcess(nil, ""), tt.command)
+		if got := reason != ""; got != tt.blocked {
+			t.Errorf("evaluatePolecatTestScope(%q) from an unplaced cwd blocked = %v (reason %q), want %v", tt.command, got, reason, tt.blocked)
+		}
 	}
 }
 
