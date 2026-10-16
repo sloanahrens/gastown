@@ -1523,15 +1523,21 @@ func backupSubjects(t *testing.T, d *Daemon, dir string) []string {
 	return subjects
 }
 
-func writeNLines(t *testing.T, path string, n int) {
-	t.Helper()
+// nLines is the export text writeNLines writes, for a test that seeds a commit
+// with it as well as a worktree.
+func nLines(n int) string {
 	var buf []byte
 	for i := 0; i < n; i++ {
 		line, _ := json.Marshal(map[string]interface{}{"id": "rec-" + itoa(i), "title": "Record " + itoa(i)})
 		buf = append(buf, line...)
 		buf = append(buf, '\n')
 	}
-	if err := os.WriteFile(path, buf, 0644); err != nil {
+	return string(buf)
+}
+
+func writeNLines(t *testing.T, path string, n int) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(nLines(n)), 0644); err != nil {
 		t.Fatalf("writing %s: %v", path, err)
 	}
 }
@@ -2772,7 +2778,9 @@ func TestSyncJsonlGitBackupSupplementalFailureNoFalseSpike(t *testing.T) {
 // TestSyncJsonlGitBackupSupplementalFailureDoesNotCommitFreshIssues: a database
 // whose events export fails has no count, so the spike guard skips it. Its
 // issues.jsonl is already rewritten, so a mass drop there (3 rows against a
-// baseline of 1000) must not be committed under the [FAILED: hq] subject.
+// baseline of 1000) must not be committed under the [FAILED: hq] subject — and
+// the export the failed database does have committed stays in the tree, so the
+// last verified copy survives the tick.
 func TestSyncJsonlGitBackupSupplementalFailureDoesNotCommitFreshIssues(t *testing.T) {
 	t.Parallel()
 	const baseline = 1000
@@ -2785,7 +2793,11 @@ func TestSyncJsonlGitBackupSupplementalFailureDoesNotCommitFreshIssues(t *testin
 	}
 	remote := filepath.Join(root, "origin.git")
 	f.InitBare(t, remote)
-	f.Commit(t, remote, "main", fmt.Sprintf("%shq=%d", seedSubjectPrefix, baseline), map[string]string{"README": "init\n"})
+	// The seed commit is the last verified backup: hq's export at the count its
+	// subject records, which the tick below must leave in the tree.
+	verified := nLines(baseline)
+	f.Commit(t, remote, "main", fmt.Sprintf("%shq=%d", seedSubjectPrefix, baseline),
+		map[string]string{"README": "init\n", "hq/issues.jsonl": verified})
 	gitRepo := filepath.Join(root, "repo")
 	f.Clone(t, remote, gitRepo)
 
@@ -2815,13 +2827,21 @@ func TestSyncJsonlGitBackupSupplementalFailureDoesNotCommitFreshIssues(t *testin
 	if after == before {
 		t.Fatal("no commit was made: gt exported fully and its files should have been committed")
 	}
+	// hq's committed issues.jsonl is the seed's, unchanged: the exact text is
+	// what fails when the fresh 3-row export is committed, and what fails when
+	// the seeded copy is dropped — "no hq/ path in the tree" reads as a pass on
+	// both.
+	tree := f.Tree(after)
+	if got := tree["hq/issues.jsonl"]; got != verified {
+		t.Errorf("hq/issues.jsonl in the new commit = %d bytes, want the %d byte last verified export", len(got), len(verified))
+	}
 	var gt int
-	for path := range f.Tree(after) {
+	for path := range tree {
 		switch {
-		case strings.HasPrefix(path, "hq/"):
-			t.Errorf("the new HEAD commit carries %s from the failed database", path)
 		case strings.HasPrefix(path, "gt/"):
 			gt++
+		case strings.HasPrefix(path, "hq/") && path != "hq/issues.jsonl":
+			t.Errorf("the new HEAD commit carries %s from the failed database", path)
 		}
 	}
 	if gt == 0 {
