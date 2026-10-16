@@ -244,17 +244,13 @@ var runFilterProbes = []string{"TestA", "ExampleB", "BenchmarkC", "FuzzD", "x"}
 var runTestFuncProbes = []string{"TestFoo", "TestQuux", "TestZeta"}
 
 // goTestRunFilterBounds reports whether the tokens after "go test" carry a
-// -run filter that bounds the run. A filter may come as -run before the
-// packages, or as -test.run after "--" (passed straight to the test binary),
-// in the "-run X" or "-run=X" form with one or two dashes. The last one wins,
-// as it does in go. A pattern that selects every test (-run . or -run .* or an
-// empty one) bounds nothing, so it does not count; go matches only the part
-// before a "/" against the test name, the first level of subtests (gt-ff2l8). A
-// pattern go cannot compile fails the run before any test starts, and a
-// -run with no value is go's own usage error, so neither leaves anything to
-// run. The probes are a heuristic for "matches everything"; a pattern that
-// happens to match all of them and not every real test name is refused, which
-// costs one more -run edit.
+// -run (or, after "--", -test.run) filter that bounds the run; the last one
+// wins, as in go. A pattern that selects every test bounds nothing. One go
+// cannot compile fails before any test starts, and a -run with no value is go's
+// own usage error, so both leave nothing to run. A value the shell expands is
+// a pattern the hook cannot see, so it bounds nothing (gt-ff2l8). The probes
+// are a heuristic: a pattern that matches all of them but not every real test
+// name is refused, which costs one more -run edit.
 func goTestRunFilterBounds(rest []string) bool {
 	bounded := false
 	for i, t := range rest {
@@ -269,20 +265,71 @@ func goTestRunFilterBounds(rest []string) bool {
 			}
 			value = rest[i+1]
 		}
-		bounded = runPatternBoundsRun(value)
+		bounded = !runValueShellExpanded(value) && runPatternBoundsRun(value)
 	}
 	return bounded
 }
 
+// runValueShellExpanded reports whether the shell rewrites a -run value before
+// go sees it: a backtick, or a "$" that opens a variable or a substitution. A
+// "$" that closes a pattern ("^TestX$", "TestA$|TestB") is the regexp anchor.
+func runValueShellExpanded(value string) bool {
+	if strings.Contains(value, "`") {
+		return true
+	}
+	for i := 0; i+1 < len(value); i++ {
+		if value[i] != '$' {
+			continue
+		}
+		c := value[i+1]
+		if c == '{' || c == '(' || c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			return true
+		}
+	}
+	return false
+}
+
 // runPatternBoundsRun reports whether a -run pattern leaves some test names
-// out (see goTestRunFilterBounds).
+// out (see goTestRunFilterBounds). go matches only the first "/" element of
+// the pattern against the test name.
 func runPatternBoundsRun(pattern string) bool {
-	first, _, _ := strings.Cut(pattern, "/")
-	re, err := regexp.Compile(first)
+	re, err := regexp.Compile(firstSubtestElement(pattern))
 	if err != nil {
 		return true
 	}
 	return !matchesAllProbes(re, runFilterProbes) && !matchesAllProbes(re, runTestFuncProbes)
+}
+
+// firstSubtestElement returns the part of a -run pattern before its first "/"
+// outside a bracket class or parentheses, the split testing makes: the "/" in
+// "[^/]*" or "(a/b)" separates nothing.
+func firstSubtestElement(pattern string) string {
+	classes, groups := 0, 0
+	for i := 0; i < len(pattern); i++ {
+		switch pattern[i] {
+		case '[':
+			classes++
+		case ']':
+			if classes > 0 {
+				classes--
+			}
+		case '(':
+			if classes == 0 {
+				groups++
+			}
+		case ')':
+			if classes == 0 {
+				groups--
+			}
+		case '\\':
+			i++
+		case '/':
+			if classes == 0 && groups == 0 {
+				return pattern[:i]
+			}
+		}
+	}
+	return pattern
 }
 
 // matchesAllProbes reports whether re matches every name in probes.
