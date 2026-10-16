@@ -1474,6 +1474,21 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 			wantBlock: false,
 		},
 		{
+			name:      "a hash in an expansion word is no comment, so the heredoc after it stays data",
+			command:   "echo ${v% # }\ncat <<EOF\nsudo rm -rf /\nEOF",
+			wantBlock: false,
+		},
+		{
+			name:      "a hash in a command substitution nested in an expansion is still a comment",
+			command:   "echo ${v:-$(echo # } <<EOF\n)}\nsudo rm -rf /\nEOF",
+			wantBlock: true,
+		},
+		{
+			name:      "a comment after a closed nested substitution in an expansion",
+			command:   "echo ${v:-$(echo x) # }\ncat <<EOF\nsudo rm -rf /\nEOF",
+			wantBlock: false,
+		},
+		{
 			name:      "a shift in a let argument is a real heredoc",
 			command:   "let y=1<<x\nsudo rm -rf /\nx",
 			wantBlock: false,

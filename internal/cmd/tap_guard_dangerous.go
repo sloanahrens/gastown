@@ -558,6 +558,7 @@ type heredocQuoteWalk struct {
 	escaped bool         // the rune at runeIdx is literal text behind a backslash
 	arith   []arithFrame // contexts open here where "<<" is no operator, innermost last
 	braces  int          // "${" expansions open here, the level a brace frame belongs to
+	subst   int          // "(" open in a "$(..)" nested in a "${..}" word, where "#" comments again
 	prevIdx int          // the rune the shell read last, for startsShellWord
 	prevEsc bool         // that rune was backslash-escaped
 }
@@ -603,7 +604,7 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			w.quote = r
 		case w.quote != 0 && r == w.quote:
 			w.quote = 0
-		case r == '#' && startsShellWord(w.runes, w.prevIdx, w.prevEsc):
+		case r == '#' && w.readsComment() && startsShellWord(w.runes, w.prevIdx, w.prevEsc):
 			w.comment = true
 		case w.quote == 0 && r == '$' && w.runeAt(w.runeIdx+1) == '(' && w.runeAt(w.runeIdx+2) == '(':
 			// "$((" opens an arithmetic expansion. The two "(" that follow
@@ -628,6 +629,14 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			// "do((", "else((") ends at the "(", which delimits it, so the
 			// "((" after it is in command position without a space.
 			w.arith = append(w.arith, arithFrame{kind: arithParen})
+		case w.quote == 0 && w.braces > 0 && r == '(' && (w.subst > 0 || w.followsUnescapedDollar()):
+			// The "(" of a "$(..)" nested in a "${..}" word opens command
+			// text, and a "#" there starts a comment again. The "(" inside
+			// it nest, so the ")" that returns the count to zero ends it
+			// (gt-p833d).
+			w.subst++
+		case w.quote == 0 && w.subst > 0 && r == ')':
+			w.subst--
 		case w.quote == 0 && r == '[' && w.opensSubscript():
 			// A "[" after a word opens an array subscript, and a "$[" opens
 			// the deprecated arithmetic expansion: their text is an
@@ -657,6 +666,9 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			w.arith = append(w.arith, arithFrame{kind: arithBrace, brace: w.braces})
 		case w.quote == 0 && r == '}' && w.braces > 0:
 			w.braces--
+			if w.braces == 0 {
+				w.subst = 0
+			}
 			w.closeArithBraces()
 		}
 		w.prevIdx, w.prevEsc = w.runeIdx, escaped
@@ -701,6 +713,20 @@ func (w *heredocQuoteWalk) bracketArith() bool {
 	return top != nil && top.kind == arithBracket
 }
 
+// readsComment reports whether a word-leading "#" at the current rune starts a
+// comment. The text of a "${..}" expansion is a name, an operator and a word,
+// and bash ends no line inside it: echo "A${v:- # }B" prints "A # B". Reading
+// the "#" as a comment skipped the "}" that closes the expansion and left the
+// frame open over every later "<<". Command text nested in the word, a
+// "$(..)", reads comments as anywhere (gt-p833d).
+func (w *heredocQuoteWalk) readsComment() bool { return w.braces == 0 || w.subst > 0 }
+
+// followsUnescapedDollar reports whether the rune before the current one is a
+// "$" that no backslash escaped, which makes a "(" after it open "$(".
+func (w *heredocQuoteWalk) followsUnescapedDollar() bool {
+	return w.runeAt(w.prevIdx) == '$' && !w.prevEsc
+}
+
 // opensSubscript reports whether the "[" at the current rune follows a word
 // character, "]" or "$" — where it opens an array subscript or the "$["
 // arithmetic expansion, whose text is an expression. A "[" in command position
@@ -734,7 +760,7 @@ func (w *heredocQuoteWalk) skipTo(to int) {
 		w.runeIdx++
 	}
 	w.quote, w.comment, w.escaped, w.prevIdx, w.prevEsc = 0, false, false, -1, false
-	w.arith, w.braces = nil, 0
+	w.arith, w.braces, w.subst = nil, 0, 0
 }
 
 // heredocReaderLine returns the text of the line the heredoc operator at
