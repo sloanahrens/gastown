@@ -142,6 +142,43 @@ func (g *Git) TreeFileBlobs(rev string) (map[string]string, error) {
 	return blobs, nil
 }
 
+// TreeFileSizes returns path -> blob size in bytes for every regular file in
+// rev's tree, recursively (git ls-tree -r -l). A caller weighs what a commit
+// would send against a remote's per-file limit without reading the working
+// tree, which is not the same set: a file the tree no longer holds but the
+// worktree still does is not part of the push.
+//
+// Submodule entries are skipped, as they are in TreeFileBlobs: a gitlink is
+// not a blob and git prints no size for one.
+func (g *Git) TreeFileSizes(rev string) (map[string]int64, error) {
+	out, err := g.run("ls-tree", "-r", "-l", "-z", "--full-tree", rev)
+	if err != nil {
+		return nil, err
+	}
+	sizes := make(map[string]int64)
+	for _, entry := range strings.Split(out, "\x00") {
+		if entry == "" {
+			continue
+		}
+		meta, path, found := strings.Cut(entry, "\t")
+		if !found {
+			continue
+		}
+		// git pads the size column with spaces to keep the paths in one
+		// column, so the fields are read positionally rather than cut.
+		fields := strings.Fields(meta)
+		if len(fields) < 4 || fields[1] != "blob" {
+			continue
+		}
+		size, err := strconv.ParseInt(fields[3], 10, 64)
+		if err != nil {
+			continue
+		}
+		sizes[path] = size
+	}
+	return sizes, nil
+}
+
 // BlobDiffLines compares two blobs of the same file and returns the multiset of
 // lines the second side ADDS and the multiset of lines it REMOVES, keyed by
 // line text. Because it diffs two bare blobs there is no path involved and no

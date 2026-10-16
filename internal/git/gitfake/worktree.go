@@ -35,6 +35,11 @@ type WorkTree interface {
 	ConfigSet(key, value string) error
 	ConfigGet(key string) (string, error)
 	CommitWithAuthor(message, author string) error
+	// ResetSoft replaces a branch's tip without touching the index or the
+	// working tree, and TreeFileSizes weighs a tree's files, for the JSONL
+	// backup's oversize-push recovery (gt-q30zx).
+	ResetSoft(ref string) error
+	TreeFileSizes(rev string) (map[string]int64, error)
 	PackSize() (string, error)
 	LogAll(max int) ([]git.LogEntry, error)
 

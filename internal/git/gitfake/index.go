@@ -526,6 +526,24 @@ func (h *handle) TreeFileBlobs(rev string) (map[string]string, error) {
 	return blobs, nil
 }
 
+// TreeFileSizes maps every file of rev's tree (a commit, or a tree WriteTree
+// wrote) to its size in bytes. The fake holds each blob's content, so its
+// length is the size git would report.
+func (h *handle) TreeFileSizes(rev string) (map[string]int64, error) {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := []string{"ls-tree", "-r", "-l", "-z", "--full-tree", rev}
+	tree, err := h.treeAt(rev, args...)
+	if err != nil {
+		return nil, err
+	}
+	sizes := make(map[string]int64, len(tree))
+	for p, c := range tree {
+		sizes[p] = int64(len(c))
+	}
+	return sizes, nil
+}
+
 // treeAt resolves rev to a tree: a tree WriteTree wrote, or a commit's.
 func (h *handle) treeAt(rev string, args ...string) (map[string]string, error) {
 	r, wt, err := h.locate(args...)

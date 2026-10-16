@@ -43,6 +43,14 @@ type daemonGit interface {
 	RemoteURL(remote string) (string, error)
 	CurrentBranch() (string, error)
 	CommitWithAuthor(message, author string) error
+	// ResetSoft moves the repository's branch to a ref and leaves its index
+	// and working tree alone, so the commits it had above the ref become
+	// staged content (the oversize-push recovery, gt-q30zx).
+	ResetSoft(ref string) error
+	// TreeFileSizes maps a rev's tree to each file's size in bytes, so the
+	// backup can weigh what a push would send against the remote's per-file
+	// limit without reading the working tree.
+	TreeFileSizes(rev string) (map[string]int64, error)
 	Push(remote, refspec string, force bool) error
 	PushWithTimeout(remote, refspec string, force bool, timeout time.Duration) error
 	PackSize() (string, error)

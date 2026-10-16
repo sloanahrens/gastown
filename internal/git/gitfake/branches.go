@@ -662,6 +662,33 @@ func (h *handle) ResetHard(ref string) error {
 	return checkoutTree(wt.path, old, h.f.treeOf(id), true)
 }
 
+// ResetSoft moves the branch HEAD to ref and stops: the index and the working
+// tree are left exactly as git left them (git reset --soft), so the commits
+// the branch held above ref survive as staged content in the index.
+func (h *handle) ResetSoft(ref string) error {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := []string{"reset", "--soft", ref}
+	r, wt, err := h.workTree(args...)
+	if err != nil {
+		return err
+	}
+	id, ok := h.resolve(r, wt, ref)
+	if !ok {
+		return unknownRevision(ref, args...)
+	}
+	// The index is read before HEAD moves: its content is the tree the branch
+	// held, which is what git leaves staged. Re-anchoring it to ref afterwards
+	// is what keeps stage() from reading this move as a checkout and rewriting
+	// the index to ref's tree — reset --soft is the one HEAD move git does NOT
+	// rewrite the index for (worktreeState's rule in index.go).
+	ix := h.f.stage(r, wt)
+	wt.merge = nil
+	setHead(r, wt, id)
+	ix.base = id
+	return nil
+}
+
 // CleanForce is git clean -fd --exclude=.runtime: untracked files and
 // directories go; ignored ones and .runtime stay.
 func (h *handle) CleanForce() error {

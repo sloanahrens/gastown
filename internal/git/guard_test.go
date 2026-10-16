@@ -48,6 +48,7 @@ func TestTownRootMutatingGitCommandsAreBlocked(t *testing.T) {
 		{"checkout reset branch", func(g *Git) error { return g.CheckoutResetBranch("polecat/reset", "polecat/safety") }},
 		{"checkout detach force", func(g *Git) error { return g.CheckoutDetachForce("polecat/safety") }},
 		{"reset hard", func(g *Git) error { return g.ResetHard("polecat/safety") }},
+		{"reset soft", func(g *Git) error { return g.ResetSoft("polecat/safety") }},
 		{"clean force", func(g *Git) error { return g.CleanForce() }},
 		{"clean force ignored", func(g *Git) error { return g.CleanForceIgnored() }},
 	} {

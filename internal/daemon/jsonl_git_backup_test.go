@@ -2140,6 +2140,159 @@ func TestCommitAndPushJsonlBackup_PushesUnpushedCommitWhenNothingStaged(t *testi
 	}
 }
 
+// TestIsOversizeFilePushError pins the classifier the recovery hangs off:
+// GitHub's per-file refusal is recognized, and the other push failures the
+// backup sees are not — a non-fast-forward rejection is not a reason to
+// replace the unpushed range.
+func TestIsOversizeFilePushError(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		errMsg string
+		want   bool
+	}{
+		{"GH001", "git push: remote: error: GH001: Large files detected.", true},
+		{"per-file limit", "git push: remote: error: File hq/events.jsonl is 100.08 MB; this exceeds GitHub's file size limit of 100.00 MB", true},
+		{"large files detected", "git push: remote: error: Large files detected.", true},
+		{"non-fast-forward", "git push: To /tmp/origin.git\n ! [rejected]        main -> main (non-fast-forward)", false},
+		{"auth failure", "git push: fatal: Authentication failed for 'https://github.com/x/y'", false},
+		{"postBuffer 400", "git push: error: RPC failed; HTTP 400 curl 22 The requested URL returned error: 400", false},
+		{"timeout", "git push: context deadline exceeded", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isOversizeFilePushError(tt.errMsg); got != tt.want {
+				t.Errorf("isOversizeFilePushError(%q) = %v, want %v", tt.errMsg, got, tt.want)
+			}
+		})
+	}
+}
+
+// oversizeBackupFixture is a backup repository cloned from a remote whose main
+// is at the returned seed commit, with a file limit small enough for a test to
+// exceed — mirrored on both sides, so the remote refuses exactly what the
+// daemon considers too large.
+func oversizeBackupFixture(t *testing.T) (d *Daemon, f *gitfake.Fake, gitRepo, remote, seed string, limit int64) {
+	t.Helper()
+	d, f = backupTestDaemon(t)
+	limit = 1024
+	d.jsonlPushFileLimit = limit
+	f.SetPushFileLimit(limit)
+	root := t.TempDir()
+	remote = filepath.Join(root, "origin.git")
+	f.InitBare(t, remote)
+	f.Commit(t, remote, "main", "seed", map[string]string{"README": "init\n"})
+	gitRepo = filepath.Join(root, "repo")
+	f.Clone(t, remote, gitRepo)
+	seed = f.Ref(remote, "refs/heads/main")
+	return d, f, gitRepo, remote, seed, limit
+}
+
+// TestCommitAndPushJsonlBackup_ReplacesUnpushedHistoryOverAnOversizeFile is
+// the gt-q30zx regression, and the acceptance criterion of that bead.
+//
+// A tick whose export was just fixed still cannot push: the remote weighs the
+// objects the push sends, and the commit made before the export sharded its
+// tables (gt-4btp4) keeps its over-limit blob reachable from HEAD. The tick
+// must replace that unpushed range with one commit on origin's tip, whose tree
+// holds no such file, and push it.
+func TestCommitAndPushJsonlBackup_ReplacesUnpushedHistoryOverAnOversizeFile(t *testing.T) {
+	t.Parallel()
+	d, f, gitRepo, remote, seed, limit := oversizeBackupFixture(t)
+	dbDir := filepath.Join(gitRepo, "hq")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// The history this bead is about, as two unpushed commits: the export
+	// before sharding wrote one over-limit file, the sharded export after it
+	// writes only files the limit accepts.
+	big := bytes.Repeat([]byte("x"), int(limit)*2)
+	if err := os.WriteFile(filepath.Join(dbDir, "events.jsonl"), big, 0644); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, d, gitRepo, "backup 2026-10-16 10:00 m2: hq=1")
+	if err := os.WriteFile(filepath.Join(dbDir, "events.jsonl"), []byte("x\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeNLines(t, filepath.Join(dbDir, "issues.jsonl"), 5)
+	commitAll(t, d, gitRepo, "backup 2026-10-16 10:15 m2: hq=5")
+
+	// The tick re-exports the same sharded files, so it has nothing to commit:
+	// only the push can fail, and it fails until the unpushed range is gone.
+	if err := d.commitAndPushJsonlBackup(gitRepo, []string{"hq"}, map[string]int{"hq": 5}, nil); err != nil {
+		t.Fatalf("a tick whose unpushed history holds an over-limit file should recover, got: %v", err)
+	}
+
+	head, err := f.Open(gitRepo).Rev("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tip := f.Ref(remote, "refs/heads/main"); tip != head {
+		t.Fatalf("origin main = %s, want the replacing commit %s", tip, head)
+	}
+	// Exactly one commit carries the export now, parented on origin's tip: the
+	// range holding the over-limit blob went rather than being pushed.
+	if parents := f.Parents(head); len(parents) != 1 || parents[0] != seed {
+		t.Fatalf("the replacing commit's parents = %v, want origin's tip %s alone", parents, seed)
+	}
+	sizes, err := d.backupGitAt(gitRepo, 0).TreeFileSizes("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sizes) == 0 {
+		t.Fatal("the replacing commit's tree is empty")
+	}
+	for path, size := range sizes {
+		if size >= limit {
+			t.Errorf("%s is %d bytes in the pushed tree, at or over the %d-byte limit", path, size, limit)
+		}
+	}
+	// The replacing commit keeps this tick's subject, counts and metric
+	// version included: the spike baseline is read back out of these lines
+	// (gt-26qqh).
+	if subject := backupSubjects(t, d, gitRepo)[0]; !strings.HasPrefix(subject, "backup ") || !strings.Contains(subject, ": hq=5") {
+		t.Errorf("commit subject = %q; want this tick's counts", subject)
+	}
+}
+
+// TestCommitAndPushJsonlBackup_KeepsHistoryWhenTheExportIsStillOversize is the
+// other half of gt-q30zx: replacing the unpushed range only helps when the
+// tree being committed fits. A file still over the limit means the export is
+// what needs fixing, so the recovery must decline, name the file, and leave
+// the branch where it is rather than flatten the history into another refusal.
+func TestCommitAndPushJsonlBackup_KeepsHistoryWhenTheExportIsStillOversize(t *testing.T) {
+	t.Parallel()
+	d, f, gitRepo, remote, seed, limit := oversizeBackupFixture(t)
+	dbDir := filepath.Join(gitRepo, "hq")
+	if err := os.MkdirAll(dbDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	big := bytes.Repeat([]byte("x"), int(limit)*2)
+	if err := os.WriteFile(filepath.Join(dbDir, "events.jsonl"), big, 0644); err != nil {
+		t.Fatal(err)
+	}
+	commitAll(t, d, gitRepo, "backup 2026-10-16 10:00 m2: hq=1")
+	commit, err := f.Open(gitRepo).Rev("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = d.commitAndPushJsonlBackup(gitRepo, []string{"hq"}, map[string]int{"hq": 1}, nil)
+	if err == nil {
+		t.Fatal("a push refused for an over-limit file must stay a failure while the export holds it")
+	}
+	if !strings.Contains(err.Error(), "hq/events.jsonl") || !strings.Contains(err.Error(), fmt.Sprintf("%d bytes", len(big))) {
+		t.Errorf("error = %v; want it to name the over-limit file and its size", err)
+	}
+	if head, _ := f.Open(gitRepo).Rev("HEAD"); head != commit {
+		t.Errorf("HEAD = %s, want the unpushed commit %s left alone", head, commit)
+	}
+	if tip := f.Ref(remote, "refs/heads/main"); tip != seed {
+		t.Errorf("origin main = %s, want it still at the seed %s", tip, seed)
+	}
+}
+
 // TestSyncJsonlGitBackup_AllExportsFailedEscalates is the gt-fxm2i regression
 // for the export phase: when every database fails to export, the cycle must
 // escalate, not merely log — matching the init and no-databases paths.

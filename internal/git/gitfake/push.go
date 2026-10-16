@@ -49,7 +49,12 @@ func (h *handle) Push(remote, refspec string, force bool) error {
 	if !strings.HasPrefix(dstRef, "refs/") {
 		dstRef = "refs/heads/" + dst
 	}
-	if cur, exists := rr.refs[dstRef]; exists && !force && !h.f.isAncestor(cur, id) {
+	cur := rr.refs[dstRef]
+	if path, size, over := h.f.oversizePushBlob(rr, cur, id); over {
+		return gitErr(1, fmt.Sprintf("remote: error: GH001: Large files detected. You may want to try Git Large File Storage - https://git-lfs.github.com.\nremote: error: File %s is %.2f MB; this exceeds GitHub's file size limit of %.2f MB\nTo %s\n ! [remote rejected] %s -> %s (pre-receive hook declined)\nerror: failed to push some refs to '%s'",
+			path, float64(size)/1e6, float64(h.f.pushFileLimit)/1e6, url, src, dst, url), args...)
+	}
+	if cur != "" && !force && !h.f.isAncestor(cur, id) {
 		return gitErr(1, fmt.Sprintf("To %s\n ! [rejected]        %s -> %s (non-fast-forward)\nerror: failed to push some refs to '%s'", url, src, dst, url), args...)
 	}
 	h.f.copyObjects(rr, id)
@@ -60,6 +65,40 @@ func (h *handle) Push(remote, refspec string, force bool) error {
 		}
 	}
 	return nil
+}
+
+// oversizePushBlob reports one file that pushing id to rr would send over the
+// world's per-file push limit, with its size: the first in path order, so the
+// refusal names the same file every time. A push sends the objects reachable
+// from id that rr does not already hold, which is why a blob living only in an
+// unpushed commit blocks a push whose own tree no longer holds it (the shape
+// of the failure the JSONL backup recovers from, gt-q30zx). ok is false when
+// the world sets no limit, or when every file being sent fits.
+func (f *Fake) oversizePushBlob(rr *repo, cur, id string) (path string, size int64, ok bool) {
+	if f.pushFileLimit <= 0 {
+		return "", 0, false
+	}
+	// The remote's own objects are not sent, so they are not weighed.
+	held := map[string]bool{}
+	for c := range rr.has {
+		if obj := f.objects[c]; obj != nil {
+			for _, content := range obj.tree {
+				held[blobID(content)] = true
+			}
+		}
+	}
+	for _, c := range f.rangeCommits(cur, id) {
+		for p, content := range c.tree {
+			n := int64(len(content))
+			if n <= f.pushFileLimit || held[blobID(content)] {
+				continue
+			}
+			if !ok || p < path {
+				path, size, ok = p, n, true
+			}
+		}
+	}
+	return path, size, ok
 }
 
 // StashCount is the number of stash entries made on the checkout's branch

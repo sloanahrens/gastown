@@ -562,6 +562,17 @@ const jsonlShardMaxBytes = 50 * 1024 * 1024
 // one row that crosses jsonlShardMaxBytes.
 const jsonlShardHardLimit = 90 * 1024 * 1024
 
+// jsonlPushFileLimitBytes is the per-file size the backup's remote refuses a
+// push for. GitHub checks it against the objects the push SENDS — the whole
+// unpushed range — not against the tree being committed, which is why a
+// sharded export can still be unpushable (gt-q30zx). A test lowers the bound
+// through Daemon.jsonlPushFileLimit rather than writing a real 100 MB export.
+const jsonlPushFileLimitBytes = 100 * 1024 * 1024
+
+// jsonlBackupAuthor authors every backup commit, the replacing one included
+// (see recoverOversizeBackupPush).
+const jsonlBackupAuthor = "Gas Town Daemon <daemon@gastown.local>"
+
 // jsonlShardName names shard n (counting from 1) of a table's export. The first
 // shard keeps the unsharded name, so a table that fits one file reads exactly as
 // it did before sharding.
@@ -829,7 +840,7 @@ func (d *Daemon) commitAndPushJsonlBackup(gitRepo string, databases []string, co
 	if hasStaged {
 		// Commit.
 		if err := d.runGitIndexOp(gitRepo, "git commit", func() error {
-			return d.backupGitAt(gitRepo, localBudget()).CommitWithAuthor(msg, "Gas Town Daemon <daemon@gastown.local>")
+			return d.backupGitAt(gitRepo, localBudget()).CommitWithAuthor(msg, jsonlBackupAuthor)
 		}); err != nil {
 			return fmt.Errorf("git commit: %w", err)
 		}
@@ -880,7 +891,16 @@ func (d *Daemon) pushJsonlBackup(gitRepo string, committed bool, msg string) err
 	}
 
 	if err := d.backupGitAt(gitRepo, gitCmdTimeout).PushWithTimeout("origin", branch, false, gitPushTimeout); err != nil {
-		return fmt.Errorf("git push: %w", err)
+		if !isOversizeFilePushError(err.Error()) {
+			return fmt.Errorf("git push: %w", err)
+		}
+		// The remote weighed what the push sends and refused it for a file
+		// over its limit. Re-exporting cannot clear that: the file is in the
+		// unpushed history, not in the tree (gt-q30zx).
+		if rerr := d.recoverOversizeBackupPush(gitRepo, branch, msg); rerr != nil {
+			return fmt.Errorf("git push: %w; replacing the unpushed history: %v", err, rerr)
+		}
+		return nil
 	}
 	if committed {
 		d.logger.Printf("jsonl_git_backup: committed and pushed: %s", msg)
@@ -888,6 +908,139 @@ func (d *Daemon) pushJsonlBackup(gitRepo string, committed bool, msg string) err
 		d.logger.Printf("jsonl_git_backup: pushed previously unpushed commit(s) to origin/%s", branch)
 	}
 	return nil
+}
+
+// isOversizeFilePushError reports whether a git push error is the remote
+// refusing the push for a file over its per-file limit — GitHub's "remote:
+// error: GH001: Large files detected" and the "is N MB; this exceeds GitHub's
+// file size limit of 100.00 MB" line beside it. Like isPostBufferPushError it
+// is a string classifier (no exec), cheap enough for the error path and easy
+// to table-test.
+func isOversizeFilePushError(errMsg string) bool {
+	return strings.Contains(errMsg, "GH001") ||
+		strings.Contains(errMsg, "exceeds GitHub's file size limit") ||
+		strings.Contains(errMsg, "Large files detected")
+}
+
+// pushFileLimitBytes is the per-file size this daemon's backup remote refuses:
+// GitHub's shipped limit, or the smaller one a test set (jsonlPushFileLimit).
+func (d *Daemon) pushFileLimitBytes() int64 {
+	if d.jsonlPushFileLimit > 0 {
+		return d.jsonlPushFileLimit
+	}
+	return jsonlPushFileLimitBytes
+}
+
+// recoverOversizeBackupPush replaces the backup repository's unpushed range
+// with a single commit on origin's tip and pushes that (gt-q30zx).
+//
+// A remote refuses a push for a file over its limit, and it weighs the objects
+// the push SENDS: every commit in origin/<branch>..HEAD. A commit made before
+// the export sharded its tables (gt-4btp4) therefore keeps its over-limit blob
+// on that path forever, and the push is refused on every tick no matter how
+// often the export is re-run — the tree being committed holds only shards, but
+// the history still carries the blob. Dropping the range is the only way out,
+// and until this recovery existed it took an operator moving the branch back
+// to origin's tip by hand.
+//
+// The range is REPLACED, not rewritten: origin's tip becomes the new commit's
+// parent, so the push that follows is a fast-forward and every commit origin
+// already has is untouched. Nor is anything dropped blindly. Recovery runs
+// only when
+//
+//   - the tree being committed weighs under the limit. A file still over it
+//     means the export is what needs fixing, and flattening the history would
+//     only fail the next push;
+//   - origin's tip is an ancestor of HEAD, so the commits being dropped are
+//     exactly the range origin does not have — a local commit origin lacks
+//     cannot have contributed content the new tree keeps (gt-63sz);
+//   - at least one commit is actually unpushed, which is the only state this
+//     refusal can describe.
+//
+// The commit subject is the one this tick built, counts and metric version
+// included, so the spike baseline's history keeps the level it read
+// (gt-26qqh). On any refusal HEAD is left where it was, and the caller reports
+// the original push failure.
+func (d *Daemon) recoverOversizeBackupPush(gitRepo, branch, msg string) error {
+	limit := d.pushFileLimitBytes()
+	g := d.backupGitAt(gitRepo, gitCmdTimeout)
+
+	// The index is what the replacing commit will carry, and commitAndPush has
+	// just committed it (or found nothing staged), so it is HEAD's tree.
+	sizes, err := g.TreeFileSizes("HEAD")
+	if err != nil {
+		return fmt.Errorf("weighing HEAD's tree: %w", err)
+	}
+	if over := overLimitFiles(sizes, limit); len(over) > 0 {
+		return fmt.Errorf("the export itself still holds a file over the %d-byte limit (%s) — shard the table (gt-4btp4); the unpushed history is not the problem", limit, strings.Join(over, ", "))
+	}
+
+	originTip, err := g.Rev("refs/remotes/origin/" + branch)
+	if err != nil {
+		return fmt.Errorf("origin/%s's tip is not known locally (%v) — cannot tell which commits are unpushed", branch, err)
+	}
+	head, err := g.Rev("HEAD")
+	if err != nil {
+		return fmt.Errorf("resolving HEAD: %w", err)
+	}
+	if head == originTip {
+		return fmt.Errorf("origin/%s already carries HEAD; this refusal is not about the unpushed range", branch)
+	}
+	contained, err := g.IsAncestor(originTip, "HEAD")
+	if err != nil {
+		return fmt.Errorf("checking whether origin/%s's tip is an ancestor of HEAD: %w", branch, err)
+	}
+	if !contained {
+		return fmt.Errorf("origin/%s holds commits HEAD does not — refusing to replace a range this repository cannot account for", branch)
+	}
+
+	var staged int
+	if err := d.runGitIndexOp(gitRepo, "git reset --soft (oversize recovery)", func() error {
+		if err := g.ResetSoft(originTip); err != nil {
+			return err
+		}
+		changes, err := g.StagedChanges()
+		if err != nil {
+			return err
+		}
+		staged = len(changes)
+		if staged == 0 {
+			// The unpushed commits held nothing the export does not: origin
+			// already carries HEAD's content, so there is nothing to push.
+			return nil
+		}
+		return g.CommitWithAuthor(msg, jsonlBackupAuthor)
+	}); err != nil {
+		return fmt.Errorf("replacing the unpushed range with a commit on %s: %w", originTip, err)
+	}
+	if staged == 0 {
+		d.logger.Printf("jsonl_git_backup: dropped unpushed commit(s) over an over-limit file; origin/%s already carries the export", branch)
+		return nil
+	}
+
+	if err := g.PushWithTimeout("origin", branch, false, gitPushTimeout); err != nil {
+		return fmt.Errorf("git push after replacing the unpushed range: %w", err)
+	}
+	d.logger.Printf("jsonl_git_backup: replaced the unpushed commits with one on origin/%s's tip — an over-limit file survived in their history", branch)
+	return nil
+}
+
+// overLimitFiles lists the files of a tree whose blob reaches limit bytes,
+// each with its size, in path order so a tick's diagnosis names the same files
+// the tick before it did.
+func overLimitFiles(sizes map[string]int64, limit int64) []string {
+	paths := make([]string, 0, len(sizes))
+	for path, size := range sizes {
+		if size >= limit {
+			paths = append(paths, path)
+		}
+	}
+	sort.Strings(paths)
+	over := make([]string, 0, len(paths))
+	for _, path := range paths {
+		over = append(over, fmt.Sprintf("%s (%d bytes)", path, sizes[path]))
+	}
+	return over
 }
 
 // jsonlBackupAheadOf reports whether the backup repository's HEAD holds commits
