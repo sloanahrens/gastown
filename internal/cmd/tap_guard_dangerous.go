@@ -1143,11 +1143,15 @@ func heredocSubstitutions(body string) []string {
 	return substitutionBodies(body, heredocSubstitutionSpans(body))
 }
 
-// substitutionBodies returns the non-empty bodies of spans, cut from text.
+// substitutionBodies returns the non-empty bodies of spans, each cut the way the
+// shell runs it (substitutionBody), which is what every guard recursing into a
+// command substitution needs: cut raw, the backslash an escaped nested backtick
+// pair carries stayed in the body and the command the shell runs went unjudged
+// (gt-h3312).
 func substitutionBodies(text string, spans []substitutionSpan) []string {
 	var out []string
 	for _, span := range spans {
-		if body := text[span.bodyStart:span.bodyEnd]; body != "" {
+		if body := substitutionBody(text, span); body != "" {
 			out = append(out, body)
 		}
 	}

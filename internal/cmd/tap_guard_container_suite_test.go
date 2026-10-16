@@ -1777,6 +1777,46 @@ func TestContainerSuiteGuardsBoundHeredocRecursion(t *testing.T) {
 	}
 }
 
+// An unquoted heredoc body is scanned for the substitutions the shell expands
+// while reading it, so the body of a backtick span there is judged the way the
+// shell parses it — with the backslash that escapes a nested backtick pair
+// dropped. Cut raw, the body handed to the evaluator held "\`", which opens no
+// substitution, so "echo \`make test\`" written inside a heredoc ran make test
+// with nothing refusing it, while the same text on a command line
+// (substitutionScripts) was refused (gt-h3312). The pair below pins that the
+// unquoted body is judged and the quoted one stays data.
+func TestContainerSuiteHeredocEscapedNestedBacktickIsJudged(t *testing.T) {
+	t.Parallel()
+	goTree := fakeModule(t, "gastown/refinery/rig")
+	proc := fakeGuardProcess(nil, goTree)
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{
+			name:    "escaped nested backtick in an unquoted body",
+			command: "cat > f <<EOF\necho `echo \\`make test\\``\nEOF\n",
+			blocked: true,
+		},
+		{
+			name:    "the same body quoted stays data",
+			command: "cat > f <<'EOF'\necho `echo \\`make test\\``\nEOF\n",
+			blocked: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateContainerSuiteCommand(proc, tt.command, ""); (reason != "") != tt.blocked {
+				t.Errorf("evaluateContainerSuiteCommand(%q) blocked = %v (reason %q), want %v", tt.command, reason != "", reason, tt.blocked)
+			}
+			if reason, _ := evaluatePolecatTestScope(proc, tt.command); (reason != "") != tt.blocked {
+				t.Errorf("evaluatePolecatTestScope(%q) blocked = %v (reason %q), want %v", tt.command, reason != "", reason, tt.blocked)
+			}
+		})
+	}
+}
+
 // A shell-fed heredoc's body runs in the directory its reader line left the
 // shell in, so the cd on that line is not a way around the guards: a polecat
 // in a non-Go rig cannot cd into a Go tree and feed the suite to bash, which

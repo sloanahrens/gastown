@@ -452,7 +452,10 @@ func heredocSubstitutionScripts(proc guardProcess, command, cwd string, cwdKnown
 			dir = cwd
 		}
 		for _, sub := range heredocSubstitutionSpans(span.body) {
-			body := span.body[sub.bodyStart:sub.bodyEnd]
+			// substitutionBody drops the backslash an escaped nested backtick
+			// pair carries, so the nested command the body's own parse runs is
+			// judged here as it is in substitutionScripts (gt-h3312).
+			body := substitutionBody(span.body, sub)
 			if strings.TrimSpace(body) == "" {
 				continue
 			}
@@ -570,15 +573,18 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 	return spans
 }
 
-// substitutionBody is the text of a command substitution as the shell runs it,
-// for a substitution written in a command line (not in a heredoc body, where an
-// escape suppresses the substitution instead and the body is data; see
-// heredocSubstitutionScripts). The body of a backtick span has the backslash
-// that escapes a nested backtick pair dropped, which is what the shell does when
-// it parses the body: a backslash-escaped backtick pair around "make gate" is
+// substitutionBody is the text of one command substitution as the shell runs it,
+// for a span written on a command line or in an unquoted heredoc body alike:
+// either way an escape suppresses the substitution where it sits, so a span the
+// scan did find is one the shell performs, and the backslashes are dropped when
+// its body is parsed. The body of a backtick span therefore has the backslash
+// escaping a nested backtick pair dropped, which is what the shell does when it
+// parses the body: a backslash-escaped backtick pair around "make gate" is
 // literal to the outer scan, yet the body the shell runs holds it as a live
 // substitution, so its own parse runs make (gt-jj3or). A "$(...)" and a process
 // substitution carry no such escaping; their bodies are returned as written.
+// Every guard reads its bodies through here or through substitutionBodies
+// (gt-h3312).
 func substitutionBody(text string, span substitutionSpan) string {
 	body := text[span.bodyStart:span.bodyEnd]
 	if text[span.open] == '`' {
