@@ -126,3 +126,22 @@ func verdictCommented(comments []beads.Comment, head, prefix string) bool {
 	}
 	return false
 }
+
+// commentReviewLogFailure writes on the work bead that its om verdict is not
+// in the reviews log, so the rework table's undercount traces to the verdict it
+// lacks rather than to a daemon log line alone. It is fail-soft and bounded
+// like commentVerdict: it never returns an error and never changes the landing.
+func (l *Lander) commentReviewLogFailure(w Work, rec ReviewRecord, appendErr error) {
+	text := fmt.Sprintf("om %s %.2f (attempt %d) is not in the reviews log: %s",
+		rec.Verdict, rec.Score, rec.Attempt, elideMiddle(NoteField(appendErr.Error()), reviewErrorReasonMax))
+	done := make(chan error, 1)
+	go func() { done <- l.Beads.AddComment(w.BeadID, text) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			l.logf("%s: could not comment the failed reviews-log append on the bead (%v); the landing is unaffected", w.BeadID, err)
+		}
+	case <-time.After(commentTimeout):
+		l.logf("%s: commenting the failed reviews-log append on the bead did not finish in %s; the landing is unaffected", w.BeadID, commentTimeout)
+	}
+}

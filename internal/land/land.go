@@ -895,8 +895,9 @@ func (l *Lander) rescoreBorderline(ctx context.Context, v Verdict, in ReviewInpu
 // approve or request_changes. The attempt is the one a rejection would be
 // recorded as, so a bead's lines count up with its MERGE REJECTION blocks.
 // rejected is whether the landing refuses the work on this verdict, which an
-// approval can earn from its findings alone (gt-vu18r). A failed append is
-// logged and nothing else: a statistic never holds a landing.
+// approval can earn from its findings alone (gt-vu18r). A failed append never
+// holds a landing, but the line it loses is a hole in the rework table, so it
+// is also written on the work bead, where the table's reader can find it.
 func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict, rejected bool) {
 	if l.Reviews == nil || (v.Verdict != VerdictApprove && v.Verdict != VerdictRequestChanges) {
 		return
@@ -910,6 +911,7 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict, re
 		Score: v.Score, Verdict: v.Verdict, Rejected: rejected, Findings: len(v.Findings), Bar: bar, At: l.now().UTC()}
 	if err := l.Reviews.Append(rec); err != nil {
 		l.logf("%s: could not append to the reviews log (%v); the landing is unaffected", w.BeadID, err)
+		l.commentReviewLogFailure(w, rec, err)
 	}
 }
 

@@ -157,6 +157,17 @@ func TestLandLogsNothingForAReviewThatJudgedNothingAndSurvivesALogFailure(t *tes
 	if !strings.Contains(out.String(), "could not append to the reviews log") {
 		t.Errorf("the failed append is not in the landing log:\n%s", out.String())
 	}
+	comments, err := broken.bd.Comments(broken.work.BeadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var onBead bool
+	for _, c := range comments {
+		onBead = onBead || strings.HasPrefix(c.Text, "om approve 0.90 (attempt 1) is not in the reviews log")
+	}
+	if !onBead {
+		t.Errorf("the failed append is not on the bead; comments = %+v", comments)
+	}
 }
 
 // An approval whose findings the landing refuses is a rejection, and the line
