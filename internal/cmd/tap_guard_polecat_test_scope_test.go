@@ -105,7 +105,12 @@ func TestEvaluatePolecatTestScope_TargetFollowsTheCDirFlag(t *testing.T) {
 		{"-C into a heavy package after a cd to an unrelated dir", light, "cd /tmp && go -C " + heavy + " test .", true},
 		{"-C= into a heavy package after a cd to an unrelated dir", light, "cd /tmp && go -C=" + heavy + " test .", true},
 		{"-C= into a heavy package after a cd away", heavy, "cd " + light + " && go -C=" + heavy + " test .", true},
+
+		// A -run filter bounds the run wherever -C points, in every spelling
+		// the carve-out reads; the unfiltered rows above are refused.
 		{"-C into a heavy package with -run", light, "go -C " + heavy + " test . -run TestOne", false},
+		{"-C into a heavy package with -run=", light, "go -C " + heavy + " test -run=TestOne .", false},
+		{"-C into a heavy package with -test.run after -args", light, "go -C " + heavy + " test . -args -test.run TestOne", false},
 
 		// The reverse reading: a -C dir the hook is not in stops the hook's
 		// own directory from refusing the target.
