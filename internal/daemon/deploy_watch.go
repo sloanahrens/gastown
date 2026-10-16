@@ -552,7 +552,7 @@ func (w *deployWatch) verdicts(ctx context.Context, repo deployRepo, runs []forg
 					continue
 				}
 				if !jobsRead {
-					severity = w.standingSeverity(key, severity)
+					severity = w.standingSeverity(key, run.ID, severity)
 				}
 				f := deployFailure{
 					Rig:      repo.Rig,
@@ -650,10 +650,11 @@ func (w *deployWatch) failingJobs(ctx context.Context, repo deployRepo, run forg
 // the prod smoke is named, so an unread list is no reading at all: reported as
 // the medium of a class without one, it corrects a standing high alert — and
 // the bead the key names — down on the strength of a daemon restart (gt-xkikw).
-// A key with nothing open keeps what the workflow and the class alone imply,
-// and the next poll that reads the list corrects it from there.
-func (w *deployWatch) standingSeverity(key, severity string) string {
-	if open, known := w.open[key]; known && open.Severity == config.SeverityHigh && severity != config.SeverityHigh {
+// The standing high is carried only onto the run that earned it; a key with
+// nothing open, or open for another run, keeps what the workflow and the class
+// imply (gt-t2u66).
+func (w *deployWatch) standingSeverity(key string, runID int64, severity string) string {
+	if open, known := w.open[key]; known && open.Run == runID && open.Severity == config.SeverityHigh && severity != config.SeverityHigh {
 		return config.SeverityHigh
 	}
 	return severity

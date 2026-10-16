@@ -1011,6 +1011,38 @@ func TestDeployWatch_RestartWithFailedJobsReadKeepsHighSeverity(t *testing.T) {
 	}
 }
 
+// TestDeployWatch_UnreadJobsOfANewRunDoNotCarryAnotherRunsHigh: the open
+// alert is high because run 9's prod smoke failed. Run 10 then fails under the
+// same key and its jobs cannot be read. The standing high was earned by run 9,
+// so run 10 alerts at the level the workflow alone implies and pushes nothing
+// at high (gt-t2u66).
+func TestDeployWatch_UnreadJobsOfANewRunDoNotCarryAnotherRunsHigh(t *testing.T) {
+	t.Parallel()
+	first := deployTestRun(9, deployWorkflowHealth, deployRefMain, deployRunFailed, deployTestNow.Add(-time.Hour), "release smoke")
+	api := &fakeDeployForgejo{
+		runs: []forgejo.ActionRun{first},
+		jobs: map[int64][]forgejo.ActionRunJob{9: {deployTestJob(9, deployHealthProdJob, deployRunFailed)}},
+	}
+	w, rec := newTestDeployWatch(t, api)
+	w.poll(context.Background())
+	if raised := rec.raisedAlerts(); len(raised) != 1 || raised[0].Severity != config.SeverityHigh {
+		t.Fatalf("raised = %+v, want the prod smoke's one high escalation", raised)
+	}
+
+	second := deployTestRun(10, deployWorkflowHealth, deployRefMain, deployRunFailed, deployTestNow.Add(-time.Minute), "release smoke")
+	api.runs = []forgejo.ActionRun{first, second}
+	api.jobErr = fmt.Errorf("dial tcp: connection refused")
+	w.poll(context.Background())
+
+	raised := rec.raisedAlerts()
+	if len(raised) != 2 || raised[1].Severity == config.SeverityHigh {
+		t.Errorf("raised = %+v, want run 10 raised below high: its jobs were never read", raised)
+	}
+	if pushes := rec.pushes(); len(pushes) != 1 {
+		t.Errorf("pushes = %+v, want only run 9's push", pushes)
+	}
+}
+
 // TestDeployWatch_ARaiseThatDidNotLandIsRetried: the state records a
 // delivery, so a dropped escalation is raised again by the next poll instead
 // of being remembered as sent.
