@@ -22,6 +22,14 @@ func rv(bead string, attempt int, verdict string, score, bar float64, hoursAgo f
 
 func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
+// withOM is one review as the reader joined it to its stages line: om took
+// secs. A review the log gave no duration for is one without this.
+func withOM(r ReworkReview, secs float64) ReworkReview {
+	d := time.Duration(secs * float64(time.Second))
+	r.OM = &d
+	return r
+}
+
 func reworkBars(t *testing.T, w ReworkWindow) map[float64]ReworkBar {
 	t.Helper()
 	out := map[float64]ReworkBar{}
@@ -282,5 +290,73 @@ func TestReworkSpanReadsLegacyBouncesInAMixedVersionLog(t *testing.T) {
 					b, tc.want.Rejected, tc.want.FirstTry, tc.want.Landed, tc.want.ReviewsPerLanded)
 			}
 		})
+	}
+}
+
+// A bar's om time is the mean, over the landed beads the log timed, of each
+// bead's own total: every review it had before landing, summed. A review the
+// log gave no duration for is left out of its bead's total and counted, and a
+// bead with no duration at all is left out of the mean rather than counted as
+// free (gt-uiiml).
+func TestAggregateReworkMeanOMTime(t *testing.T) {
+	t.Parallel()
+
+	const approve, reject = "approve", "request_changes"
+	got := AggregateRework([]ReworkReview{
+		// gt-one landed on its only review, 40s of om.
+		withOM(rv("gt-one", 1, approve, 0.9, 0.8, 6), 40),
+		// gt-three was reviewed three times, and the middle verdict's stages
+		// line named no om stage: its total is the two that carry one, 240s.
+		withOM(rv("gt-three", 1, reject, 0.5, 0.8, 5), 90),
+		rv("gt-three", 2, reject, 0.6, 0.8, 4),
+		withOM(rv("gt-three", 3, approve, 0.85, 0.8, 3), 150),
+		// gt-loop was rejected three times and never landed: its reviews are
+		// not part of any bead's total, and none of them is counted missing.
+		rv("gt-loop", 1, reject, 0.4, 0.8, 5), rv("gt-loop", 2, reject, 0.4, 0.8, 4), rv("gt-loop", 3, reject, 0.4, 0.8, 3),
+		// gt-none landed and no review of it has a time.
+		rv("gt-none", 1, approve, 0.9, 0.8, 2),
+	}, reworkNow)
+
+	b := got.Windows[0].Bars[0]
+	if b.Landed != 3 || b.LoopsOut != 1 {
+		t.Fatalf("bar = %+v, want gt-one, gt-three and gt-none landed and gt-loop out", b)
+	}
+	if b.OMBeads != 2 || !near(b.MeanOMSecs, 140) || !near(b.MedianOMSecs, 140) ||
+		!near(b.SlowestOMSecs, 240) || b.SlowestOMBead != "gt-three" {
+		t.Errorf("om time = %+v, want 140s mean over gt-one's 40 and gt-three's 240, slowest gt-three", b)
+	}
+	if b.OMReviewsMissing != 2 {
+		t.Errorf("om reviews missing = %d, want gt-three's middle review and gt-none's only one", b.OMReviewsMissing)
+	}
+}
+
+// The median is the middle of the landed beads' totals, the mean of the two
+// middle ones when the count is even; a bar whose beads have no om time at all
+// has no mean to draw.
+func TestAggregateReworkMeanOMTimeMedianAndEmptyBars(t *testing.T) {
+	t.Parallel()
+
+	const approve, reject = "approve", "request_changes"
+	got := AggregateRework([]ReworkReview{
+		withOM(rv("gt-a", 1, approve, 0.9, 0.8, 6), 60),
+		withOM(rv("gt-b", 1, approve, 0.9, 0.8, 5), 120),
+		withOM(rv("gt-c", 1, approve, 0.9, 0.8, 4), 300),
+		withOM(rv("gt-d", 1, approve, 0.9, 0.8, 3), 900),
+	}, reworkNow)
+	b := got.Windows[0].Bars[0]
+	if b.OMBeads != 4 || !near(b.MeanOMSecs, 345) || !near(b.MedianOMSecs, 210) || !near(b.SlowestOMSecs, 900) {
+		t.Errorf("om time = %+v, want a mean of 345s and a median of 210s over four beads", b)
+	}
+
+	// Nothing landed in this bar, and the window after it holds nothing at all.
+	empty := AggregateRework([]ReworkReview{
+		rv("gt-x", 1, reject, 0.4, 0.5, 3), rv("gt-x", 2, reject, 0.4, 0.5, 2),
+	}, reworkNow)
+	eb := empty.Windows[0].Bars[0]
+	if eb.OMBeads != 0 || eb.MeanOMSecs != 0 || eb.MedianOMSecs != 0 || eb.SlowestOMSecs != 0 || eb.SlowestOMBead != "" || eb.OMReviewsMissing != 0 {
+		t.Errorf("a bar with no landing = %+v, want no om time and no missing reviews", eb)
+	}
+	if len(empty.Windows[1].Bars) != 0 {
+		t.Errorf("a window with no reviews = %+v, want no bars", empty.Windows[1].Bars)
 	}
 }

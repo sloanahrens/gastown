@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"sort"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
@@ -18,15 +19,30 @@ import (
 // verdict; one that cannot be read is an unavailable table.
 type dashReworkReader struct {
 	file *land.ReviewsFile
+	// stages hands back the daemon log's landing stages at or after a time,
+	// which is where a review's om duration is: the verdict line carries none,
+	// and the daemon log is no source the dashboard may parse itself, so the om
+	// reader that already scans it does the reading. Nil leaves every review
+	// without a duration, which the table draws as no om time at all.
+	stages func(since time.Time) []omStage
 }
 
 func newDashReworkReader(townRoot string) *dashReworkReader {
 	return &dashReworkReader{file: land.TownReviewsFile(townRoot)}
 }
 
-// read loads both windows' worth of the log and folds it.
+// withStages gives the reader the stage lines of the om reader that scans the
+// daemon log.
+func (r *dashReworkReader) withStages(stages func(since time.Time) []omStage) *dashReworkReader {
+	r.stages = stages
+	return r
+}
+
+// read loads both windows' worth of the log, times the reviews it holds and
+// folds them.
 func (r *dashReworkReader) read(now time.Time) *dashboard.Rework {
-	recs, err := r.file.Since(now.Add(-dashboard.ReworkReach))
+	since := now.Add(-dashboard.ReworkReach)
+	recs, err := r.file.Since(since)
 	if err != nil {
 		return &dashboard.Rework{Unavailable: true}
 	}
@@ -37,6 +53,60 @@ func (r *dashReworkReader) read(now time.Time) *dashboard.Rework {
 			Verdict: rec.Verdict, Rejected: rec.Rejected, Findings: rec.Findings, Bar: rec.Bar, At: rec.At,
 		})
 	}
+	if r.stages != nil {
+		withReviewOM(reviews, r.stages(since))
+	}
 	out := dashboard.AggregateRework(reviews, now)
 	return &out
+}
+
+// withReviewOM fills each review's om duration in from the stages lines: the
+// last line the landing worker logged for the bead at or before the verdict,
+// within omStageJoinMin and not already read as another review's. The worker
+// logs the line that times a review as the review ends and writes the verdict a
+// moment later, so a verdict's own line is always behind it. A bead's reviews
+// are timed in order and each line is spent once: the window reaches back
+// omStageJoinMin, far enough that a slow rework would otherwise let a review
+// claim the line of the review before it and count one om run twice. A review
+// left with no line, or with one that named no om stage (the review did not
+// run), keeps no duration and is left out of its bead's sum.
+func withReviewOM(reviews []dashboard.ReworkReview, stages []omStage) {
+	byBead := map[string][]int{}
+	for i := range reviews {
+		byBead[reviews[i].Bead] = append(byBead[reviews[i].Bead], i)
+	}
+	for bead, idxs := range byBead {
+		sort.Slice(idxs, func(a, b int) bool { return reviews[idxs[a]].At.Before(reviews[idxs[b]].At) })
+		var mine []omStage
+		for _, st := range stages {
+			if st.Bead == bead {
+				mine = append(mine, st)
+			}
+		}
+		sort.Slice(mine, func(i, j int) bool { return mine[i].At.Before(mine[j].At) })
+		spent := make([]bool, len(mine))
+		for _, i := range idxs {
+			at := reviews[i].At
+			best := -1
+			for j := range mine {
+				if spent[j] || mine[j].At.After(at) || mine[j].At.Before(at.Add(-omStageJoinMin)) {
+					continue
+				}
+				if best < 0 || mine[j].At.After(mine[best].At) {
+					best = j
+				}
+			}
+			if best < 0 {
+				continue
+			}
+			// A line that named no om stage is still this review's: spending it
+			// keeps it off the review after it, which has a line of its own.
+			spent[best] = true
+			if mine[best].OM == nil {
+				continue
+			}
+			d := *mine[best].OM
+			reviews[i].OM = &d
+		}
+	}
 }

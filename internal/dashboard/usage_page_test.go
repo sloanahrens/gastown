@@ -119,7 +119,7 @@ func TestUsagePanelSetsNoMarkup(t *testing.T) {
 		t.Error("costUsage does not draw its tables through costTable")
 	}
 	cells := pageFunc(t, "costTable")
-	if !strings.Contains(cells, `tr.append(el("td", cls || "", text))`) {
+	if !strings.Contains(cells, `const td = el("td", cls || "", text);`) || !strings.Contains(cells, "tr.append(td)") {
 		t.Error("costTable does not draw its cells through el()")
 	}
 	for _, bad := range []string{"innerHTML", "insertAdjacentHTML", "outerHTML", "document.write"} {

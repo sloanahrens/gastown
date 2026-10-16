@@ -37,8 +37,10 @@ func drawCostChildren(t *testing.T, s map[string]any) (kids []reworkChild, note 
 func reworkPayload() map[string]any {
 	return map[string]any{"windows": []any{
 		map[string]any{"name": "last 7 days", "bars": []any{
-			map[string]any{"bar": 0.7, "reviews": 2, "rejected": 1, "beads": 1, "first_try": 0, "landed": 1, "reviews_per_landed": 2.0, "loops_out": 0, "mean_score": 0.71},
-			map[string]any{"bar": 0.8, "reviews": 7, "rejected": 5, "beads": 3, "first_try": 1, "landed": 2, "reviews_per_landed": 2.0, "loops_out": 1, "mean_score": 0.5786},
+			map[string]any{"bar": 0.7, "reviews": 2, "rejected": 1, "beads": 1, "first_try": 0, "landed": 1, "reviews_per_landed": 2.0, "loops_out": 0, "mean_score": 0.71,
+				"mean_om_secs": 145.0, "om_beads": 1, "median_om_secs": 145.0, "slowest_om_secs": 145.0, "slowest_om_bead": "gt-a", "om_reviews_missing": 1},
+			map[string]any{"bar": 0.8, "reviews": 7, "rejected": 5, "beads": 3, "first_try": 1, "landed": 2, "reviews_per_landed": 2.0, "loops_out": 1, "mean_score": 0.5786,
+				"mean_om_secs": 190.0, "om_beads": 2, "median_om_secs": 190.0, "slowest_om_secs": 300.0, "slowest_om_bead": "gt-c"},
 			map[string]any{"bar": 0, "reviews": 1, "rejected": 1, "beads": 1, "first_try": 0, "landed": 0, "reviews_per_landed": 0, "loops_out": 0, "mean_score": 0.4},
 		}},
 		map[string]any{"name": "the 7 days before", "bars": []any{}},
@@ -75,16 +77,16 @@ func TestCostPanelDrawsTheReworkTable(t *testing.T) {
 	if len(subs) != 2 || subs[0] != "om rework · last 7 days" || subs[1] != "om rework · the 7 days before" {
 		t.Fatalf("rework headings = %q, want one per window", subs)
 	}
-	if strings.Join(heads, "|") != "Bar|Reviews|First try|Rework|Reviews per landed|Loops out|Mean score" {
+	if strings.Join(heads, "|") != "Bar|Reviews|First try|Rework|Reviews per landed|Mean om time|Loops out|Mean score" {
 		t.Errorf("columns = %q", heads)
 	}
 	if len(tables) != 1 {
 		t.Fatalf("drew %d rework tables, want one: the empty window has none", len(tables))
 	}
 	want := [][]string{
-		{"0.70", "2", "0/1", "50%", "2.00", "0", "0.71"},
-		{"0.80", "7", "1/3", "71%", "2.00", "1", "0.58"},
-		{"?", "1", "0/1", "100%", "–", "0", "0.40"},
+		{"0.70", "2", "0/1", "50%", "2.00", "2:25", "0", "0.71"},
+		{"0.80", "7", "1/3", "71%", "2.00", "3:10", "1", "0.58"},
+		{"?", "1", "0/1", "100%", "–", "–", "0", "0.40"},
 	}
 	rows := tables[0][1:]
 	if len(rows) != len(want) {
@@ -101,6 +103,44 @@ func TestCostPanelDrawsTheReworkTable(t *testing.T) {
 	}
 	if !empty {
 		t.Error("the window with no reviews does not say so")
+	}
+}
+
+// The Mean om time cell's hover carries what the figure is made of: how many
+// landed beads it averages, the median bead total, the slowest one and how many
+// reviews had no om time to count. A bar with no such bead has nothing to say.
+func TestCostPanelHoversTheMeanOMTime(t *testing.T) {
+	t.Parallel()
+
+	s := costSpendUsage()
+	s["rework"] = reworkPayload()
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", s)
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children
+		.filter(c => c.tagName === "TABLE" && c.children[0].children.map(x => x.textContent).indexOf("Mean om time") >= 0)
+		.map(t => t.children.slice(1).map(r => r.children[5].title)))`)
+	if err != nil {
+		t.Fatalf("reading the column's hovers: %v", err)
+	}
+	var tables [][]string
+	if err := json.Unmarshal([]byte(v.String()), &tables); err != nil {
+		t.Fatalf("reading the column's hovers: %v", err)
+	}
+	if len(tables) != 1 {
+		t.Fatalf("read %d tables, want the one rework table", len(tables))
+	}
+	want := []string{
+		"mean of 1 landed bead, each the sum of its reviews · median 2:25 · slowest gt-a 2:25 · 1 review with no om time",
+		"mean of 2 landed beads, each the sum of its reviews · median 3:10 · slowest gt-c 5:00",
+		"",
+	}
+	if len(tables[0]) != len(want) {
+		t.Fatalf("hovers = %q, want one per row", tables[0])
+	}
+	for i := range want {
+		if tables[0][i] != want[i] {
+			t.Errorf("row %d hover = %q, want %q", i, tables[0][i], want[i])
+		}
 	}
 }
 
