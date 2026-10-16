@@ -642,9 +642,10 @@ func detectPrefix(beadsDir string) string {
 	}
 
 	// 2. Fallback: read from config.yaml.
-	// NOTE: Inside towns, this is typically unreachable because GetRigPrefix
-	// always returns at least "gt" (the default) when a rig isn't found in
-	// rigs.json. This fallback is primarily for standalone rigs outside towns.
+	// NOTE: Inside towns, this is reached only when rigs.json exists but is
+	// unreadable (GetRigPrefix returns ""), because it returns the "gt" default
+	// when a rig isn't found in rigs.json. It is primarily for standalone rigs
+	// outside towns.
 	configPath := filepath.Join(beadsDir, "config.yaml")
 	if data, err := os.ReadFile(configPath); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {

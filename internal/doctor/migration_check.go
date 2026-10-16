@@ -89,7 +89,12 @@ func (c *DoltMetadataCheck) Run(ctx *CheckContext) *CheckResult {
 			}
 			expectedDB = reg
 		} else if _, err := os.Stat(filepath.Join(doltDataDir, rigName)); os.IsNotExist(err) {
-			// Rig name not found — check if prefix-named DB exists
+			// Rig name not found — check if prefix-named DB exists. An empty
+			// prefix (rigs.json unreadable) names no database, and a stat of
+			// the data dir itself would read as one.
+			if prefix == "" {
+				continue
+			}
 			if _, err := os.Stat(filepath.Join(doltDataDir, prefix)); os.IsNotExist(err) {
 				continue // No database under either name
 			}

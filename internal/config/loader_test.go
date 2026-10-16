@@ -4502,10 +4502,8 @@ func TestGetRigPrefixCorruptRigsJSON(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte("{not json"), 0o644); err != nil {
 		t.Fatalf("write corrupt rigs.json: %v", err)
 	}
-	if got := GetRigPrefix(townRoot, "gastown"); got == "gt" {
-		t.Errorf("GetRigPrefix with a corrupt rigs.json = %q, want not the gt fallback", got)
-	} else if got != "" {
-		t.Errorf("GetRigPrefix with a corrupt rigs.json = %q, want empty", got)
+	if got := GetRigPrefix(townRoot, "gastown"); got != "" {
+		t.Errorf("GetRigPrefix with a corrupt rigs.json = %q, want empty (not the gt fallback)", got)
 	}
 }
 

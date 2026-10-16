@@ -178,13 +178,16 @@ func GetTownBeadsPath(townRoot string) string {
 
 // GetPrefixForRig returns the beads prefix for a given rig name.
 // The prefix is returned without the trailing hyphen (e.g., "bd" not "bd-").
-// If the rig is not found in routes, returns "gt" as the default.
+// If the rig is not found in routes, returns "gt" as the default, also when
+// rigs.json is unreadable: this function's callers build ids and paths from
+// the result without an empty check. A caller that can refuse a guess uses
+// config.GetRigPrefix, which returns "" there.
 // The townRoot should be the Gas Town root directory (e.g., ~/gt).
 func GetPrefixForRig(townRoot, rigName string) string {
 	beadsDir := filepath.Join(townRoot, ".beads")
 	routes, err := LoadRoutes(beadsDir)
 	if err != nil || routes == nil {
-		return config.GetRigPrefix(townRoot, rigName)
+		return rigPrefixOrDefault(townRoot, rigName)
 	}
 
 	// Look for a route where the path starts with the rig name
@@ -197,7 +200,16 @@ func GetPrefixForRig(townRoot, rigName string) string {
 		}
 	}
 
-	return config.GetRigPrefix(townRoot, rigName)
+	return rigPrefixOrDefault(townRoot, rigName)
+}
+
+// rigPrefixOrDefault returns the rig's prefix from rigs.json, or "gt" when
+// config.GetRigPrefix returns "" for an unreadable rigs.json.
+func rigPrefixOrDefault(townRoot, rigName string) string {
+	if prefix := config.GetRigPrefix(townRoot, rigName); prefix != "" {
+		return prefix
+	}
+	return "gt"
 }
 
 // RegisteredRigDatabases returns the Dolt databases the town's rigs own, which

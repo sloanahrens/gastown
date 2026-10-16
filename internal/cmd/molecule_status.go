@@ -39,6 +39,12 @@ func buildAgentBeadID(identity string, role Role, townRoot string) string {
 		return config.GetRigPrefix(townRoot, rig)
 	}
 
+	// An unreadable rigs.json yields no prefix, and an id built from none is
+	// malformed: return no id, which every caller already checks for.
+	if len(parts) >= 2 && getPrefix(parts[0]) == "" {
+		return ""
+	}
+
 	// If role is unknown or empty, try to infer from identity
 	if role == RoleUnknown || role == Role("") {
 		switch {

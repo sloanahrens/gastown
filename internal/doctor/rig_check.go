@@ -798,8 +798,12 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 
 	// Case 1: No beads at all - initialize with bd init
 	if !hasTrackedBeads && !hasLocalBeads {
-		// Get the rig's beads prefix from rigs.json (falls back to "gt" if not found)
+		// Get the rig's beads prefix from rigs.json (falls back to "gt" if not
+		// found; empty when rigs.json exists but is unreadable)
 		prefix := config.GetRigPrefix(ctx.TownRoot, ctx.RigName)
+		if prefix == "" {
+			return fmt.Errorf("rig %s: rigs.json is unreadable, so its beads prefix is unknown; fix rigs.json before initializing .beads", ctx.RigName)
+		}
 
 		// Create .beads directory
 		if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
