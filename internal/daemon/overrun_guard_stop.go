@@ -40,8 +40,10 @@ const (
 //     exists only in the worktree (see below for when the push is given up);
 //  5. hand the bead back (status open, assignee cleared, needs-split) so the
 //     roster no longer counts the seat; a bead found closed or re-slung to
-//     another polecat is left alone. The attention item for the stop is
-//     derived from that hand-back (collectOverrunStopped);
+//     another polecat is left alone. The molecule the bead carried is ended
+//     with the hand-back (handBackEndingMolecule), so the run leaves none
+//     open. The attention item for the stop is derived from that hand-back
+//     (collectOverrunStopped);
 //  6. release the seat: reset its agent bead (hook_bead cleared, so the roster
 //     stops counting it as dead-hooked), record the cleanup status that reset
 //     clears, then retire the seat — end the pause and stop its record in the
@@ -394,8 +396,7 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 		defer cancel()
 		store := beads.NewPlain(d.config.TownRoot, bdMutationRoutingEnv(d.config.TownRoot),
 			beads.WithBin(d.bdPathOrDefault())).WithTimeout(overrunHandBackTimeout)
-		err := polecat.HandBackNoted(ctx, polecat.NewBeadWriter(store, overrunActor), seat.Bead,
-			seat.Rig+"/polecats/"+seat.Polecat, seat.Branch, elapsed, note)
+		err := handBackEndingMolecule(ctx, store, d.logger.Printf, seat, elapsed, note)
 		if errors.Is(err, polecat.ErrHandBackSkipped) {
 			// The bead is no longer this seat's: nothing to release, nothing to repeat.
 			d.logger.Printf("overrun_guard: %s/%s: %v", seat.Rig, seat.Polecat, err)
