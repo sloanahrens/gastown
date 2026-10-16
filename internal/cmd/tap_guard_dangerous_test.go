@@ -3151,3 +3151,28 @@ func TestDangerousGuardJudgesEscapedNestedBacktick(t *testing.T) {
 		})
 	}
 }
+
+// gt-5wtmz: a ")" inside a "#" comment is comment text that closes no "$(",
+// and a "#" after a ")" that ends a word part ("$(date)#x") opens no comment.
+func TestDangerousGuardParenInCommentDoesNotEndSubstitution(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"a reset after a comment holding a closing paren", "x=$(\n# a) b\ngit reset --hard)", true},
+		{"a nuke after a comment holding a closing paren", "out=$( # note )\nrm -rf /)", true},
+		{"a force push whose flag is glued to the closing paren", "x=$(echo ok # )\ngit push --force)", true},
+		{"a process substitution after a substitution close", "cat $(date)#<(git reset --hard)", true},
+		{"a process substitution after an arithmetic close", "cat $((1))#<(git reset --hard)", true},
+		{"a process substitution after a quoted paren close", `cat $(")")#<(git reset --hard)`, true},
+		{"a substitution the quotes after a word part keep literal", "echo $(date)#'x $(git reset --hard)'", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); (reason != "") != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, reason != "", reason, tt.blocked)
+			}
+		})
+	}
+}
