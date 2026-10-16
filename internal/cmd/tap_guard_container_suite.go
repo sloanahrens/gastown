@@ -474,9 +474,12 @@ func heredocSubstitutionSpans(body string) []substitutionSpan {
 	return substitutionSpansIn(body, false)
 }
 
-// substitutionSpansIn is the scan behind both. quotes says whether a quote mark
-// in text opens quoted text; inside a substitution's own body closingParen
-// honors quotes either way, as the shell does.
+// substitutionSpansIn is the one command-substitution scan: the
+// commandSubstitutionSpans and heredocSubstitutionSpans wrappers serve the
+// container-suite and dangerous guards, and the pr-workflow guard reads it
+// directly for the payloads it recurses into (gt-ejn41). quotes says whether a
+// quote mark in text opens quoted text; inside a substitution's own body
+// closingParen honors quotes either way, as the shell does.
 //
 // With quotes, a "#" that starts a word opens a comment to the end of the line:
 // the shell reads an apostrophe there as plain text, so "# don't" must not hide
@@ -523,15 +526,32 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: end})
 			i = end
 		case c == '`':
-			end := strings.IndexByte(text[i+1:], '`')
-			if end < 0 {
+			end := backtickBodyEnd(text, i+1)
+			if end == len(text) {
 				return append(spans, substitutionSpan{open: i, bodyStart: i + 1, bodyEnd: len(text)})
 			}
-			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 1, bodyEnd: i + 1 + end})
-			i += end + 1
+			spans = append(spans, substitutionSpan{open: i, bodyStart: i + 1, bodyEnd: end})
+			i = end
 		}
 	}
 	return spans
+}
+
+// backtickBodyEnd returns the index of the backtick that closes the one whose
+// body starts at start, or len(text) when none does. A backslash keeps the next
+// character literal, so the shell reads "\`" as a literal backtick and the body
+// runs on past it; the shell drops that backslash, so a caller judging the body
+// as a command line drops it too (gt-ejn41).
+func backtickBodyEnd(text string, start int) int {
+	for i := start; i < len(text); i++ {
+		switch text[i] {
+		case '\\':
+			i++
+		case '`':
+			return i
+		}
+	}
+	return len(text)
 }
 
 // startsWordAt reports whether text[i] begins a shell word, the only place a

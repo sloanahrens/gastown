@@ -2343,7 +2343,8 @@ func TestEvaluateContainerSuiteCommand_NestedShapes(t *testing.T) {
 
 // commandSubstitutionSpans cuts a body with the parentheses balanced and the
 // quotes respected, and runs a substitution that never closes to the end of the
-// text (gt-wrr5c, gt-6v07e).
+// text (gt-wrr5c, gt-6v07e). A backslash keeps the next character literal, so
+// an escaped backtick is text rather than the end of a backtick body.
 func TestCommandSubstitutionSpans(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -2359,6 +2360,8 @@ func TestCommandSubstitutionSpans(t *testing.T) {
 		{"subshell", `x=$( (cd a && ls) )`, []string{` (cd a && ls) `}},
 		{"two", `a=$(one) b=$(two (x))`, []string{"one", "two (x)"}},
 		{"backticks", "x=`pwd`", []string{"pwd"}},
+		{"backticks with an escaped backtick", "x=`echo \\`pwd\\``", []string{"echo \\`pwd\\`"}},
+		{"paren inside backticks in the body", "x=$(echo `a)b`)", []string{"echo `a)b`"}},
 		{"in double quotes", `echo "$(pwd)"`, []string{"pwd"}},
 		{"single quoted", `echo '$(pwd)'`, nil},
 		{"single quote hiding a paren", `echo '$(' "$(pwd)" ')'`, []string{"pwd"}},
