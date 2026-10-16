@@ -470,6 +470,17 @@ func TestMakeTestOutsideGoTree(t *testing.T) {
 		{"a clustered attached alternate makefile", npmRoot, "make -sfother.mk test", true},
 		{"make -oC is -o with the value C", npmRoot, "make -oC " + goRoot + " test", false},
 		{"make -sj4 steers nothing", npmRoot, "make -sj4 test", false},
+		// A value-taking letter that ends the cluster owns the next token, so
+		// the -C behind it is a value, not a directory.
+		{"make -so takes the next token as its value", npmRoot, "make -so -C " + goRoot + " test", false},
+		{"make -sW takes the next token as its value", npmRoot, "make -sW -C " + goRoot + " test", false},
+		{"make -sj leaves a flag to be read", npmRoot, "make -sj -C " + goRoot + " test", true},
+		// make has no lowercase -c or uppercase -F; the guard reads them as -C
+		// and -f, as it does standing alone.
+		{"a clustered lowercase c is -C", npmRoot, "make -sc " + goRoot + " test", true},
+		{"a clustered lowercase c out of the Go tree", goRoot, "make -sc " + npmRoot + " test", false},
+		{"a clustered uppercase F is -f", npmRoot, "make -sF other.mk test", true},
+		{"a clustered attached uppercase F is -f", npmRoot, "make -sFother.mk test", true},
 		// -w (print directory) and -i (ignore errors) take no value, unlike
 		// the uppercase -W (what-if file) and -I (include dir): the -C behind
 		// a bare -w or -i is still the run directory (gt-i6jw6).

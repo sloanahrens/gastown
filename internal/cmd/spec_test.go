@@ -1364,6 +1364,33 @@ func TestSpecDispatchFailureNoteFollowsTheReason(t *testing.T) {
 	}
 }
 
+// A bead that already carries the note an earlier dispatcher wrote keeps it as
+// the one note for that reason, and a retry that fails differently adds one
+// (gt-0vz9k).
+func TestSpecDispatchFailureNoteOnABeadWithTheOldNote(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	old := fmt.Sprintf("%sgt-a: dispatch failed, left unassigned: rig gastown is down; excluded from the queue until label %s is cleared", specDispatchNotePrefix, specdispatch.DispatchFailedLabel)
+	f.notes["gt-a"] = []string{old}
+	retry := func(reason string) {
+		s := f.specs["gt-a"]
+		s.Labels = nil
+		f.specs["gt-a"] = s
+		f.slingErrs["gt-a"] = []error{errors.New(reason)}
+		if r := runSpecDispatchCycle(f.env()); len(r.Failed) != 1 {
+			t.Fatalf("%s: failed = %+v, want one entry", reason, r.Failed)
+		}
+	}
+	retry("rig gastown is down")
+	if notes := f.notes["gt-a"]; len(notes) != 1 || notes[0] != old {
+		t.Fatalf("notes after the same reason = %q, want only the old note", notes)
+	}
+	retry("no polecat slot")
+	if notes := f.notes["gt-a"]; len(notes) != 2 || notes[0] != old || !strings.Contains(notes[1], "no polecat slot") {
+		t.Errorf("notes after a new reason = %q, want the old note then one for the new reason", notes)
+	}
+}
+
 func TestSpecDispatchDryRunTouchesNothing(t *testing.T) {
 	t.Parallel()
 	bad := cleanSpec("gt-bad", 1, "2026-09-29T10:00:00Z")

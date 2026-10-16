@@ -1401,8 +1401,15 @@ func makeRunDir(args []string, cwd string) (dir string, known bool) {
 // It looks for -C and -f, the two options makeRunDir acts on, behind the
 // valueless letters before them. Another option that takes a value ends the
 // scan first ("-oC" is -o with the value "C", not -C): the rest of the token is
-// its value, which makeRunDir steps over. A token with neither is read by its
-// first letter (gt-zkqtn).
+// its value, which makeRunDir steps over. A value-taking letter that ends the
+// token ("-so") has no attached value, so its value is the next token and
+// makeRunDir steps over that one. A token with neither is read by its first
+// letter (gt-zkqtn).
+//
+// The letters are read as makeRunDir reads a lone option, case-insensitively
+// for -C and -f: "-sc dir" and "-sF file" are judged as -C and -f although make
+// has no such options, so a spelling make rejects keeps the refusal it would
+// have drawn as "-C" (fail closed).
 func splitMakeShortCluster(tok string) (flag, value string, hasValue bool) {
 	for k := 1; k < len(tok); k++ {
 		rest := tok[k+1:]
@@ -1410,7 +1417,7 @@ func splitMakeShortCluster(tok string) (flag, value string, hasValue bool) {
 		case 'C', 'c', 'f', 'F':
 			return "-" + string(tok[k]), rest, rest != ""
 		case 'o', 'O', 'W', 'I', 'E', 'j', 'l':
-			return "-" + string(tok[k]), rest, true
+			return "-" + string(tok[k]), rest, rest != ""
 		}
 	}
 	return tok[:2], tok[2:], true

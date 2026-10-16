@@ -821,16 +821,17 @@ func TestPoolClaimSessionsSkipDeadAndExpired(t *testing.T) {
 	t.Run("dispatcher roster on disk", func(t *testing.T) {
 		t.Parallel()
 		townRoot := t.TempDir()
-		// Above any pid the OS hands out, so it names no process.
-		const deadPID = 1 << 30
+		// The claim files are real; which pid is alive and what time it is
+		// are pinned, so the test names no process and reads no clock.
+		const deadPID, livePID = 9001, 9002
 		dir := poolSeatClaimDir(townRoot)
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatal(err)
 		}
 		for _, c := range []poolSeatClaim{
-			{ID: "crashed-1", PID: deadPID, Agent: claimAgent, CreatedAt: time.Now()},
-			{ID: "expired-1", PID: os.Getpid(), Agent: claimAgent, CreatedAt: time.Now().Add(-poolSeatClaimTTL - time.Minute)},
-			{ID: "held-1", PID: os.Getpid(), Agent: claimAgent, CreatedAt: time.Now()},
+			{ID: "crashed-1", PID: deadPID, Agent: claimAgent, CreatedAt: poolTestNow},
+			{ID: "expired-1", PID: livePID, Agent: claimAgent, CreatedAt: poolTestNow.Add(-poolSeatClaimTTL - time.Minute)},
+			{ID: "held-1", PID: livePID, Agent: claimAgent, CreatedAt: poolTestNow},
 		} {
 			data, err := json.Marshal(c)
 			if err != nil {
@@ -841,7 +842,12 @@ func TestPoolClaimSessionsSkipDeadAndExpired(t *testing.T) {
 			}
 		}
 
-		sessions, err := poolSeatClaimSessions(townRoot, "")
+		// poolSeatClaimSessions is this ledger with the live process table and
+		// the wall clock; the dispatcher's roster reads through it.
+		ledger := poolSeatLedgerFor(townRoot, newPoolSeatClaimStore())
+		ledger.alive = func(pid int) bool { return pid != deadPID }
+		ledger.now = func() time.Time { return poolTestNow }
+		sessions, err := ledger.claimSessions("")
 		if err != nil {
 			t.Fatal(err)
 		}
