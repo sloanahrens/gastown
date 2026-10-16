@@ -204,6 +204,12 @@ type deployOpenRun struct {
 // deployWatchState is that memory as the state file holds it.
 type deployWatchState struct {
 	Open map[string]deployOpenRun `json:"open,omitempty"`
+	// Blind names the rigs whose blind escalation is open. That bead outlives
+	// the daemon, so the watch that raised it has to remember it across a
+	// restart: a fresh watch that reads the rig again would otherwise take it
+	// for one it was never blind to and leave the bead claiming a rig whose
+	// deploys go unseen (blindRead).
+	Blind []string `json:"blind,omitempty"`
 }
 
 // deployWatch polls the app rigs' deploy workflows. Every seam is a function
@@ -265,9 +271,10 @@ type deployWatch struct {
 
 // deployBlindWatch is one rig's unread repository: the polls in a row that
 // read nothing from it (polls), and whether the blind escalation was raised
-// for them (raised). It lives in memory alone, so a restarted daemon counts
-// from zero and escalates again deployWatchBlindPolls polls later, which files
-// a repeat on the open bead rather than a second one (blindRead).
+// for them (raised). The count lives in memory alone, so a restarted daemon
+// counts from zero; raised is what the state file keeps, so the daemon that
+// restarts while the bead is open still closes it when the read comes back
+// (blindRead).
 type deployBlindWatch struct {
 	polls  int
 	raised bool
@@ -367,8 +374,14 @@ func (w *deployWatch) poll(ctx context.Context) {
 	// A rig the town no longer lists is read by nobody and watched by nothing,
 	// so its count goes with the picture: the escalation it raised stays open
 	// with this rig's other ones.
-	for rig := range w.blind {
+	for rig, b := range w.blind {
 		if !watched[rig] {
+			// The bead stays open — a repository that vanished is not a green
+			// deploy — but this watch is no longer the one holding it, so the
+			// state file drops it with the rig.
+			if b.raised {
+				w.dirty = true
+			}
 			delete(w.blind, rig)
 		}
 	}
@@ -470,6 +483,7 @@ func (w *deployWatch) blindRead(repo deployRepo, ok bool) {
 			return
 		}
 		delete(w.blind, repo.Rig)
+		w.dirty = true
 		w.logOnce(key, "%s: cleared (%s)", key, reason)
 		return
 	}
@@ -487,6 +501,10 @@ func (w *deployWatch) blindRead(repo deployRepo, ok bool) {
 	}
 	cur.raised = true
 	w.blind[repo.Rig] = cur
+	// The state file carries the bead this poll just raised, so the daemon
+	// that replaces this one closes it rather than starting out blind to
+	// nothing.
+	w.dirty = true
 	w.logOnce(key, "%s: blind for %d polls on %s", repo.Rig, cur.polls, repo.repo())
 }
 
@@ -756,6 +774,9 @@ func (w *deployWatch) load() {
 	if w.settled == nil {
 		w.settled = map[string]bool{}
 	}
+	if w.blind == nil {
+		w.blind = map[string]deployBlindWatch{}
+	}
 	if w.State == "" {
 		return
 	}
@@ -776,6 +797,26 @@ func (w *deployWatch) load() {
 	if st.Open != nil {
 		w.open = st.Open
 	}
+	// A rig the state file holds open starts back at no failed polls: the
+	// count is this process's, and the flag is all a restart needs to close
+	// the bead once the read returns.
+	for _, rig := range st.Blind {
+		w.blind[rig] = deployBlindWatch{raised: true}
+	}
+}
+
+// blindRigs is the rigs whose blind escalation this watch is holding open, for
+// the state file: the raised entries, in a stable order so a rewrite of the
+// same memory is the same bytes.
+func (w *deployWatch) blindRigs() []string {
+	out := make([]string, 0, len(w.blind))
+	for rig, b := range w.blind {
+		if b.raised {
+			out = append(out, rig)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // save writes the state file. A write that fails is logged and retried on the
@@ -785,7 +826,7 @@ func (w *deployWatch) save() {
 	if w.State == "" {
 		return
 	}
-	if err := atomicfile.EnsureDirAndWriteJSON(w.State, deployWatchState{Open: w.open}); err != nil {
+	if err := atomicfile.EnsureDirAndWriteJSON(w.State, deployWatchState{Open: w.open, Blind: w.blindRigs()}); err != nil {
 		w.logOnce(w.State, "writing %s: %v", w.State, err)
 	}
 }
