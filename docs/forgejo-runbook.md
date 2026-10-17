@@ -90,9 +90,9 @@ sudo -u gt-forge gt-approve run forgejo-provision -- --role viewer --repo OWNER/
 ```
 
 `--dry-run` reads the live state and prints what it would write without
-sending a write. Expect one line per action, then `provisioning complete`; a
-second run reports the users, token files, access and rules it found already in
-place.
+sending a write. Expect one line per action, then `dry run: no write was sent`;
+a real run ends with `provisioning complete`, and a second real run reports the
+users, token files, access and rules it found already in place.
 
 The bot logins and gate workflow a rig uses are its operator-only
 `merge_queue.forgejo` settings; the flags here must carry the same values, and
@@ -197,7 +197,8 @@ proves the last of those before anything changes: it clones the rig's GitHub
 throwaway worktree of the rig's own repository — the same push the landing
 worker makes, so the rig's pre-push hook runs and a hook that refuses `land/*`
 fails the probe rather than the first landing — then waits for the real gate
-status and requires green before deleting the branch and the worktree.
+status and requires green; the branch and the worktree are deleted on every
+path, red, timed out or green.
 `--town-root` says which town holds the rig; where that repository is absent the
 probe pushes from the clone instead and warns that the hooks were not
 exercised. The cutover runs the probe and refuses unless it is green, so a
