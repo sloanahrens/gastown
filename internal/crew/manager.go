@@ -543,7 +543,11 @@ func (m *Manager) Remove(name string, force bool) error {
 		crewGit := m.gitAt(crewPath)
 		hasChanges, err := crewGit.HasUncommittedChanges()
 		if err != nil {
-			return fmt.Errorf("checking for uncommitted changes: %w", err)
+			// The clone is left alone because its state is unknown. The caller
+			// sees this as a plain error, so it names the way out: a
+			// directory git cannot read (a corrupt index, a leftover that is
+			// not a clone) goes only with force.
+			return fmt.Errorf("checking for uncommitted changes in %s (use --force to remove it anyway): %w", crewPath, err)
 		}
 		if hasChanges {
 			return ErrHasChanges

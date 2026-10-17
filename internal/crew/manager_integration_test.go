@@ -3,9 +3,11 @@
 package crew
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
@@ -130,6 +132,47 @@ func TestIntegrationManagerAddSyncsRemotesFromTheBareRepo(t *testing.T) {
 	}
 	if got, err := crewGit.GetPushURL("origin"); err != nil || got != origin {
 		t.Errorf("crew origin push URL = %q, %v; want %q", got, err, origin)
+	}
+}
+
+// TestIntegrationRemoveRefusesCorruptIndex is gt-5sbxt on real git: a clone
+// whose index is truncated makes `git status` fail, and Remove without force
+// must keep it (and name --force) rather than read the failure as "clean".
+func TestIntegrationRemoveRefusesCorruptIndex(t *testing.T) {
+	rigPath := t.TempDir()
+	crewPath := filepath.Join(rigPath, "crew", "corrupt")
+	if err := os.MkdirAll(filepath.Dir(crewPath), 0755); err != nil {
+		t.Fatalf("failed to create crew dir: %v", err)
+	}
+	if err := runCmd("git", "init", "-q", "-b", "main", crewPath); err != nil {
+		t.Fatalf("failed to init %s: %v", crewPath, err)
+	}
+	// A truncated index is what an interrupted write leaves behind.
+	if err := os.WriteFile(filepath.Join(crewPath, ".git", "index"), []byte("DIRC"), 0644); err != nil {
+		t.Fatalf("failed to corrupt the index: %v", err)
+	}
+	if _, err := git.NewGit(crewPath).HasUncommittedChanges(); err == nil {
+		t.Fatal("git status on a truncated index succeeded; the corruption does not exercise Remove")
+	}
+
+	mgr := &Manager{rig: &rig.Rig{Name: "test-rig", Path: rigPath}}
+
+	err := mgr.Remove("corrupt", false)
+	if err == nil {
+		t.Fatal("Remove(name, false) on a corrupt index returned nil; want an error")
+	}
+	if errors.Is(err, ErrHasChanges) || !strings.Contains(err.Error(), "--force") {
+		t.Errorf("error = %q; want the status failure naming --force", err)
+	}
+	if _, statErr := os.Stat(crewPath); statErr != nil {
+		t.Errorf("Remove deleted the clone despite the failed check: %v", statErr)
+	}
+
+	if err := mgr.Remove("corrupt", true); err != nil {
+		t.Fatalf("Remove(name, true) failed: %v", err)
+	}
+	if _, statErr := os.Stat(crewPath); !os.IsNotExist(statErr) {
+		t.Errorf("forced Remove left the clone in place: %v", statErr)
 	}
 }
 
