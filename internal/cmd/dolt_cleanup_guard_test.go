@@ -4,6 +4,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 func TestAgentActor(t *testing.T) {
@@ -219,8 +221,22 @@ func TestResolveDestructiveActor(t *testing.T) {
 		if !isAgent {
 			t.Error("unset identity off-terminal must be treated as an agent (spoofing guard, gt-2oy)")
 		}
-		if actor == "" {
-			t.Error("agent-by-default actor should carry a descriptive label")
+		if actor != doltserver.UnidentifiedActor {
+			t.Errorf("agent-by-default actor = %q, want doltserver.UnidentifiedActor", actor)
 		}
 	})
+}
+
+// TestDoltCleanupForceRefusesUnidentifiedActor covers gt-kz9k0: with no env
+// identity and no terminal, --force must fail closed before the authorization
+// bead is looked up, so no database can be removed.
+func TestDoltCleanupForceRefusesUnidentifiedActor(t *testing.T) {
+	t.Parallel()
+	err := authorizeCleanupForce(t.TempDir(), "", false, "hq-abc")
+	if err == nil {
+		t.Fatal("expected refusal for an unidentified actor")
+	}
+	if !errors.Is(err, doltserver.ErrUnidentifiedActor) {
+		t.Errorf("error = %v, want ErrUnidentifiedActor (refusal must precede the bead lookup)", err)
+	}
 }
