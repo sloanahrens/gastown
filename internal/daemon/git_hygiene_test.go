@@ -321,6 +321,169 @@ func (cherryFails) Cherry(upstream, head string) (string, error) {
 	return "", errors.New("cherry: boom")
 }
 
+// The force-delete is not polecat/*'s alone, so the unpushed-work check is not
+// either: origin drops fix/ and dog/ branches too, and one of them can hold the
+// only copy of its commits (gt-era1g).
+func TestRunGitHygiene_KeepsOrphansOfOtherPrefixesWithUnpushedCommits(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	// fix/landed's work landed on origin's main as a different commit.
+	f.Commit(t, origin, "main", "landed", map[string]string{"x.txt": "x\n"})
+
+	bare := filepath.Join(d.config.TownRoot, "r1", ".repo.git")
+	f.InitBare(t, bare)
+	f.AddRemote(t, bare, "origin", origin)
+	f.SetRef(t, bare, "refs/heads/main", base)
+	f.SetRef(t, bare, "refs/heads/fix/landed", base)
+	f.Commit(t, bare, "fix/landed", "landed elsewhere", map[string]string{"x.txt": "x\n"})
+	f.SetRef(t, bare, "refs/heads/fix/only-copy", base)
+	f.Commit(t, bare, "fix/only-copy", "never pushed", map[string]string{"p.txt": "p\n"})
+	f.SetRef(t, bare, "refs/heads/dog/only-copy", base)
+	f.Commit(t, bare, "dog/only-copy", "never pushed", map[string]string{"q.txt": "q\n"})
+
+	d.runGitHygiene()
+
+	local, err := d.gitAt(bare).ListBranches("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"dog/only-copy", "fix/only-copy", "main"}; !slices.Equal(local, want) {
+		t.Errorf("local branches = %v, want %v (fix/landed is on origin, the other two hold the only copy)", local, want)
+	}
+	for _, branch := range []string{"dog/only-copy", "fix/only-copy"} {
+		if !strings.Contains(logs.String(), "keep orphan "+branch) {
+			t.Errorf("log does not say why %s was kept:\n%s", branch, logs.String())
+		}
+	}
+	if !strings.Contains(logs.String(), "0 merged, 1 orphan, 0 remote") {
+		t.Errorf("log lacks the summary:\n%s", logs.String())
+	}
+}
+
+// A polecat branch whose work reached origin's integration branch carries
+// nothing unpushed, though origin dropped the branch itself: cherry reads the
+// patch on that base, the branch an epic's polecats merge through (gt-era1g).
+func TestRunGitHygiene_DeletesAnOrphanWhoseWorkIsOnAnIntegrationBranch(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.SetRef(t, origin, "refs/heads/integration/epic", base)
+	f.Commit(t, origin, "integration/epic", "epic work", map[string]string{"e.txt": "e\n"})
+
+	bare := filepath.Join(d.config.TownRoot, "r1", ".repo.git")
+	f.InitBare(t, bare)
+	f.AddRemote(t, bare, "origin", origin)
+	f.SetRef(t, bare, "refs/heads/main", base)
+	f.SetRef(t, bare, "refs/heads/polecat/epic-work", base)
+	f.Commit(t, bare, "polecat/epic-work", "epic work", map[string]string{"e.txt": "e\n"})
+
+	d.runGitHygiene()
+
+	local, err := d.gitAt(bare).ListBranches("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"main"}; !slices.Equal(local, want) {
+		t.Errorf("local branches = %v, want %v: the work is on origin's integration base", local, want)
+	}
+	if !strings.Contains(logs.String(), "0 merged, 1 orphan, 0 remote") {
+		t.Errorf("log lacks the summary:\n%s", logs.String())
+	}
+}
+
+// The check reads the bases through this repository's remote-tracking refs, so
+// it cannot depend on the cycle's fetch having written them: a failed fetch is
+// logged and the cleanup goes on, and cherry then fails on a missing base, which
+// keeps every orphan forever (gt-era1g).
+func TestRunGitHygiene_ResolvesABaseTheFailedFetchNeverWrote(t *testing.T) {
+	t.Parallel()
+	d, _, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.Commit(t, origin, "main", "landed", map[string]string{"x.txt": "x\n"})
+
+	bare := filepath.Join(d.config.TownRoot, "r1", ".repo.git")
+	f.InitBare(t, bare)
+	f.AddRemote(t, bare, "origin", origin)
+	f.SetRef(t, bare, "refs/heads/main", base)
+	f.SetRef(t, bare, "refs/heads/polecat/old", base)
+	f.Commit(t, bare, "polecat/old", "landed elsewhere", map[string]string{"x.txt": "x\n"})
+
+	openGit := d.openGitFn
+	d.openGitFn = func(dir string) daemonGit { return fetchPruneFails{openGit(dir)} }
+
+	d.runGitHygiene()
+
+	if !strings.Contains(logs.String(), "fetch --prune") {
+		t.Errorf("log does not report the failed fetch:\n%s", logs.String())
+	}
+	local, err := d.gitAt(bare).ListBranches("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"main"}; !slices.Equal(local, want) {
+		t.Errorf("local branches = %v, want %v: polecat/old's work is on origin/main", local, want)
+	}
+	if strings.Contains(logs.String(), "cannot tell whether it holds unpushed commits") {
+		t.Errorf("the check could not resolve its base:\n%s", logs.String())
+	}
+}
+
+// fetchPruneFails is a daemonGit whose cycle fetch always errors, so the
+// repository keeps whatever remote-tracking refs it already had.
+type fetchPruneFails struct{ daemonGit }
+
+func (fetchPruneFails) FetchPrune(remote string) error { return errors.New("fetch: boom") }
+
+// A base ref the failed fetch left stale judges a branch by an old tip and
+// reads landed work as unpushed, keeping the branch; the check refreshes it to
+// the tip ls-remote reported (gt-era1g).
+func TestRunGitHygiene_RefreshesABaseTheFailedFetchLeftStale(t *testing.T) {
+	t.Parallel()
+	d, _, _ := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	// polecat/old's work landed on origin's main as a different commit.
+	f.Commit(t, origin, "main", "landed", map[string]string{"x.txt": "x\n"})
+
+	bare := filepath.Join(d.config.TownRoot, "r1", ".repo.git")
+	f.InitBare(t, bare)
+	f.AddRemote(t, bare, "origin", origin)
+	f.SetRef(t, bare, "refs/heads/main", base)
+	// The tracking ref the cycle should have refreshed, left at the old tip.
+	f.SetRef(t, bare, "refs/remotes/origin/main", base)
+	f.SetRef(t, bare, "refs/heads/polecat/old", base)
+	f.Commit(t, bare, "polecat/old", "landed elsewhere", map[string]string{"x.txt": "x\n"})
+
+	openGit := d.openGitFn
+	d.openGitFn = func(dir string) daemonGit { return fetchPruneFails{openGit(dir)} }
+
+	d.runGitHygiene()
+
+	local, err := d.gitAt(bare).ListBranches("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"main"}; !slices.Equal(local, want) {
+		t.Errorf("local branches = %v, want %v: polecat/old's work is on origin/main's tip", local, want)
+	}
+}
+
 // The working clone install-gt.sh merges into is left alone while the shared
 // bare repo beside it is cleaned (gt-ckoau).
 func TestRunGitHygiene_CleansTheBareRepoWhenTheRigAlsoHasAClone(t *testing.T) {

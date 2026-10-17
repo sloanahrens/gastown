@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -24,8 +25,8 @@ const defaultGitHygieneInterval = 12 * time.Hour
 // default and checked-out branches.
 var gitHygieneProtected = map[string]bool{"main": true, "master": true, "refinery-patrol": true}
 
-// gitHygieneLocalOrphanPrefixes name the local agent branches deleted, merged
-// or not, once origin no longer has them.
+// gitHygieneLocalOrphanPrefixes name the local agent branches deleted once
+// origin no longer has them and they hold no commit whose patch origin lacks.
 var gitHygieneLocalOrphanPrefixes = []string{"polecat/", "dog/", "fix/", "pr-", "integration/", "worktree-agent-"}
 
 // gitHygieneRemotePrefixes name the origin branches deleted once merged into
@@ -136,8 +137,8 @@ func (d *Daemon) runGitHygiene() {
 // branch delete git refuses for a branch a worktree still has checked out.
 // That refusal protects only a live polecat: a polecat whose session died
 // before gt done pushed leaves its branch ref in the shared bare repo with no
-// worktree, so an orphan polecat/* branch is kept while it holds commits
-// origin lacks (gt-a0jxl).
+// worktree, so an orphan branch is kept while it holds commits origin lacks
+// (gt-a0jxl).
 func (d *Daemon) cleanRigRepo(repo string) gitHygieneResult {
 	var res gitHygieneResult
 	g := d.gitAt(repo)
@@ -167,6 +168,14 @@ func (d *Daemon) cleanRigRepo(repo string) gitHygieneResult {
 		onRemote[strings.TrimPrefix(ref.Name, "refs/heads/")] = ref.Hash
 	}
 
+	// The bases an orphaned branch is judged against, resolved once per
+	// repository.
+	var bases []string
+	var basesErr error
+	if remoteOK {
+		bases, basesErr = hygieneBases(g, def, onRemote)
+	}
+
 	branches, err := g.ListBranches("")
 	if err != nil {
 		logf("list branches: %v", err)
@@ -186,16 +195,17 @@ func (d *Daemon) cleanRigRepo(repo string) gitHygieneResult {
 		if _, ok := onRemote[b]; !remoteOK || ok || !hasAnyPrefix(b, gitHygieneLocalOrphanPrefixes) {
 			continue
 		}
-		if strings.HasPrefix(b, "polecat/") {
-			holds, err := holdsUnpushedWork(g, def, b, onRemote)
-			if err != nil {
-				logf("keep orphan %s: cannot tell whether it holds unpushed commits: %v", b, err)
-				continue
-			}
-			if holds {
-				logf("keep orphan %s: it holds commits that are not on origin", b)
-				continue
-			}
+		// Every orphan prefix, not polecat/* alone: the delete below is
+		// forced, and any of these branches can hold the only copy of a
+		// session's work (gt-era1g).
+		holds, err := holdsUnpushedWork(g, bases, basesErr, b)
+		if err != nil {
+			logf("keep orphan %s: cannot tell whether it holds unpushed commits: %v", b, err)
+			continue
+		}
+		if holds {
+			logf("keep orphan %s: it holds commits that are not on origin", b)
+			continue
 		}
 		if err := g.DeleteBranch(b, true); err != nil {
 			logf("delete orphan %s: %v", b, err)
@@ -226,21 +236,58 @@ func (d *Daemon) cleanRigRepo(repo string) gitHygieneResult {
 	return res
 }
 
-// holdsUnpushedWork reports whether local branch b has a commit whose patch is
-// on neither origin's default branch nor any of origin's integration branches,
-// the test polecat.Manager.PlanStaleBranches applies (gt-429ue). Patch identity
-// keeps a rebased or squash-landed branch from reading as unpushed work. An
-// error means the answer is unknown, and callers keep the branch.
-func holdsUnpushedWork(g daemonGit, def, b string, onRemote map[string]string) (bool, error) {
-	bases := []string{"origin/" + def}
+// hygieneBases resolves the refs an orphaned branch is judged against: origin's
+// default branch, then every integration branch origin has, each made to name
+// the tip ls-remote reported for it. An error means the check cannot run, and
+// callers keep the branch.
+func hygieneBases(g daemonGit, def string, onRemote map[string]string) ([]string, error) {
 	var integration []string
 	for name := range onRemote {
 		if strings.HasPrefix(name, "integration/") {
-			integration = append(integration, "origin/"+name)
+			integration = append(integration, name)
 		}
 	}
 	sort.Strings(integration)
-	return polecat.UnmergedOnAllBases(g.Cherry, append(bases, integration...), "refs/heads/"+b)
+	names := append([]string{def}, integration...)
+	bases := make([]string, 0, len(names))
+	for _, name := range names {
+		if err := settleOriginRef(g, name, onRemote[name]); err != nil {
+			return nil, err
+		}
+		bases = append(bases, "origin/"+name)
+	}
+	return bases, nil
+}
+
+// settleOriginRef makes refs/remotes/origin/<branch> name the tip ls-remote
+// reported for it, fetching that one ref when this repository lacks it or holds
+// another commit. cherry reads the bases through these refs, and the cycle's
+// fetch is not proof they were written: a fetch that fails is logged and the
+// cleanup goes on, and a repository that never fetched has none of them. An
+// unresolved base would make every orphan read as holding unpushed work
+// (gt-era1g).
+func settleOriginRef(g daemonGit, branch, want string) error {
+	// ls-remote did not report the branch, so origin has none to read.
+	if want == "" {
+		return fmt.Errorf("origin has no %s branch", branch)
+	}
+	ref := "refs/remotes/origin/" + branch
+	if have, err := g.Rev(ref); err == nil && strings.TrimSpace(have) == want {
+		return nil
+	}
+	return g.FetchRefspecWithTimeout("origin", "+refs/heads/"+branch+":"+ref, git.RemoteQueryTimeout)
+}
+
+// holdsUnpushedWork reports whether local branch b has a commit whose patch is
+// on none of bases, the test polecat.Manager.PlanStaleBranches applies
+// (gt-429ue). Patch identity keeps a rebased or squash-landed branch from
+// reading as unpushed work. An error — from resolving the bases or from cherry
+// — means the answer is unknown, and callers keep the branch.
+func holdsUnpushedWork(g daemonGit, bases []string, basesErr error, b string) (bool, error) {
+	if basesErr != nil {
+		return false, basesErr
+	}
+	return polecat.UnmergedOnAllBases(g.Cherry, bases, "refs/heads/"+b)
 }
 
 func hasAnyPrefix(s string, prefixes []string) bool {
