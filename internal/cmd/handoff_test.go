@@ -19,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // handoffTestRegistry maps the rig prefixes the handoff tests use.
@@ -1296,6 +1297,59 @@ func TestBuildRestartCommand_CarriesNoParentCredentials(t *testing.T) {
 			}
 			if !strings.Contains(cmd, "ANTHROPIC_MODEL=fake-model") {
 				t.Errorf("restart command does not forward ANTHROPIC_MODEL: %s", cmd)
+			}
+		})
+	}
+}
+
+// TestHandoffSessionDryRunSkipsMoleculeCleanup: a self-handoff --dry-run only
+// previews, so it must not close the attached molecule; a live one closes it
+// once, before the mail send (gt-fmhjf). The mail send fails in the live run
+// so no pane is respawned.
+func TestHandoffSessionDryRunSkipsMoleculeCleanup(t *testing.T) {
+	t.Parallel()
+	mailErr := errors.New("dolt down")
+	tests := []struct {
+		name         string
+		dryRun       bool
+		wantCleanups int
+		wantMails    int
+		wantErr      error
+	}{
+		{"dry run leaves the molecule alone", true, 0, 0, nil},
+		{"live run closes it once", false, 1, 1, mailErr},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var cleanups, mails int
+			steps := handoffSteps{
+				buildPlan: func(string, buildRestartCommandOpts) (restartPlan, error) {
+					return restartPlan{Command: "true"}, nil
+				},
+				updateSessionEnv: func(*session.PrefixRegistry, *tmux.Tmux, string) {},
+				cleanupMolecule:  func() { cleanups++ },
+				sendMail: func(string, string) (string, error) {
+					mails++
+					return "", mailErr
+				},
+				logNoPersist: func(string, string, error) {},
+			}
+			err := handoffSession(sessionHandoff{
+				reg:            handoffTestRegistry(),
+				pane:           "%0",
+				currentSession: "gt-crew-tester",
+				targetSession:  "gt-crew-tester",
+				dryRun:         tt.dryRun,
+			}, steps)
+			if !errors.Is(err, tt.wantErr) {
+				t.Errorf("err = %v, want %v", err, tt.wantErr)
+			}
+			if cleanups != tt.wantCleanups {
+				t.Errorf("molecule cleanup ran %d times, want %d", cleanups, tt.wantCleanups)
+			}
+			if mails != tt.wantMails {
+				t.Errorf("mail sent %d times, want %d", mails, tt.wantMails)
 			}
 		})
 	}
