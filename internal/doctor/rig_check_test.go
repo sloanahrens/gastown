@@ -1030,20 +1030,6 @@ func TestGitExcludePathErrors(t *testing.T) {
 			t.Fatalf("err = %v, want a not-a-gitdir-file error", err)
 		}
 	})
-
-	t.Run("unreadable .git file", func(t *testing.T) {
-		t.Parallel()
-		if os.Geteuid() == 0 {
-			t.Skip("root reads a mode-000 file")
-		}
-		repo := t.TempDir()
-		if err := os.WriteFile(filepath.Join(repo, ".git"), []byte("gitdir: /nowhere\n"), 0000); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := gitExcludePath(repo); err == nil || !strings.Contains(err.Error(), "cannot read .git file") {
-			t.Fatalf("err = %v, want a cannot-read error", err)
-		}
-	})
 }
 
 // TestGitExcludeConfiguredCheckRunRejectsBadGitFile: an unreadable .git
