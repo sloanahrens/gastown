@@ -196,6 +196,27 @@ func TestSessionManagerListEmpty(t *testing.T) {
 	}
 }
 
+// TestSessionManagerListPolecatsEmpty: a rig with no sessions, or no tmux
+// server at all (ListSessions maps that to nil, nil), lists as empty rather
+// than as an error, so gt rig shutdown/stop treat it as stopped (gt-ev685).
+func TestSessionManagerListPolecatsEmpty(t *testing.T) {
+	t.Parallel()
+
+	r := &rig.Rig{
+		Name:     "test-rig-unlikely-name",
+		Polecats: []string{},
+	}
+	m := newTestSessionManager(r)
+
+	infos, err := m.ListPolecats()
+	if err != nil {
+		t.Fatalf("ListPolecats: %v", err)
+	}
+	if len(infos) != 0 {
+		t.Errorf("infos count = %d, want 0", len(infos))
+	}
+}
+
 func TestStopNotFound(t *testing.T) {
 	t.Parallel()
 

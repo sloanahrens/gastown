@@ -1668,10 +1668,15 @@ func looksLikeHandoffBeadID(reg *session.PrefixRegistry, arg string) bool {
 	return looksLikeBeadID(arg)
 }
 
-// isCrewSessionName reports whether name is a crew session of a registered
-// rig: <prefix>-crew-<name>, or the legacy <prefix>-<rig>-crew-<name>.
+// isCrewSessionName reports whether name is a crew session: <prefix>-crew-<name>
+// (any short prefix, registered or not, since a rig missing from the registry
+// still has live crew sessions to restart), or the legacy
+// <prefix>-<rig>-crew-<name> of a registered rig.
 func isCrewSessionName(reg *session.PrefixRegistry, name string) bool {
 	if id, err := session.ParseSessionNameWithRegistry(name, reg); err == nil && id.Role == session.RoleCrew {
+		return true
+	}
+	if _, rest, ok := strings.Cut(name, "-"); ok && strings.HasPrefix(rest, "crew-") && len(rest) > len("crew-") {
 		return true
 	}
 	for rigName, prefix := range reg.AllRigs() {

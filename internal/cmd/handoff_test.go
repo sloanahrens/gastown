@@ -1568,7 +1568,7 @@ func TestResolveRoleToSession_OverseerArgument(t *testing.T) {
 func TestHandoffSessionNameNotTreatedAsBead(t *testing.T) {
 	t.Parallel()
 	reg := handoffTestRegistry()
-	for _, name := range []string{"gt-gastown-crew-max", "gt-crew-max", "hq-overseer"} {
+	for _, name := range []string{"gt-gastown-crew-max", "gt-crew-max", "zz-crew-max", "hq-overseer"} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			if !looksLikeBeadID(name) {
@@ -1584,7 +1584,7 @@ func TestHandoffSessionNameNotTreatedAsBead(t *testing.T) {
 		})
 	}
 	// A bead ID that merely contains "-crew-" is still a bead.
-	for _, id := range []string{"gt-abc123", "bd-ka761", "hq-cv-abc", "ap-qtsup.16", "gt-fix-crew-1", "hq-wisp-crew-x"} {
+	for _, id := range []string{"gt-abc123", "bd-ka761", "hq-cv-abc", "ap-qtsup.16", "gt-fix-crew-1", "hq-wisp-crew-x", "gt-crew-", "gt-gastown-crew-"} {
 		t.Run(id, func(t *testing.T) {
 			t.Parallel()
 			if !looksLikeHandoffBeadID(reg, id) {
