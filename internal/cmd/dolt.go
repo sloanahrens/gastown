@@ -1190,7 +1190,7 @@ func resolveDestructiveActor(envActor string, stdoutIsTTY bool) (actor string, i
 	if stdoutIsTTY {
 		return "", false
 	}
-	return doltserver.UnidentifiedActor, true
+	return string(doltserver.UnidentifiedActor), true
 }
 
 // authorizeCleanupForce enforces the force guardrails for a destructive

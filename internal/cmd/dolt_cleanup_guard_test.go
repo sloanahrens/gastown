@@ -223,7 +223,7 @@ func TestResolveDestructiveActor(t *testing.T) {
 		if !isAgent {
 			t.Error("unset identity off-terminal must be treated as an agent (spoofing guard, gt-2oy)")
 		}
-		if actor != doltserver.UnidentifiedActor {
+		if actor != string(doltserver.UnidentifiedActor) {
 			t.Errorf("agent-by-default actor = %q, want doltserver.UnidentifiedActor", actor)
 		}
 	})

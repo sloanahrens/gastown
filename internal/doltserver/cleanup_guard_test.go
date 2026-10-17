@@ -132,7 +132,7 @@ func TestValidateForceAuthorization(t *testing.T) {
 // bead, including one the same agent had just created.
 func TestValidateForceAuthorizationUnidentifiedActor(t *testing.T) {
 	t.Parallel()
-	for _, actor := range []string{UnidentifiedActor, ""} {
+	for _, actor := range []string{string(UnidentifiedActor), ""} {
 		issue := &beads.Issue{
 			ID:        "hq-auth1",
 			Title:     "Authorize forced cleanup of testdb_*",
@@ -147,5 +147,62 @@ func TestValidateForceAuthorizationUnidentifiedActor(t *testing.T) {
 		if !errors.Is(err, ErrUnidentifiedActor) {
 			t.Errorf("actor %q: error = %v, want ErrUnidentifiedActor", actor, err)
 		}
+	}
+}
+
+// TestIsUnidentifiedActor covers gt-kz9k0: only a missing identity or the
+// sentinel itself counts as unidentified. A real identity never does, and an
+// environment identity that happens to equal the sentinel's literal value is
+// still refused (the safe direction).
+func TestIsUnidentifiedActor(t *testing.T) {
+	t.Parallel()
+	for _, actor := range []string{"", string(UnidentifiedActor)} {
+		if !IsUnidentifiedActor(actor) {
+			t.Errorf("IsUnidentifiedActor(%q) = false, want true", actor)
+		}
+	}
+	for _, actor := range []string{"gastown/polecats/onyx", "overseer", "unidentified-agent"} {
+		if IsUnidentifiedActor(actor) {
+			t.Errorf("IsUnidentifiedActor(%q) = true, want false", actor)
+		}
+	}
+}
+
+// TestUnidentifiedActorIsNotAnIdentity pins the sentinel to a placeholder
+// rather than an agent name: a GT_ROLE names a rig and role ("<rig>/<role>"),
+// so the sentinel cannot pass for one (gt-kz9k0, gt-od3fn).
+func TestUnidentifiedActorIsNotAnIdentity(t *testing.T) {
+	t.Parallel()
+	got := string(UnidentifiedActor)
+	if got == "" {
+		t.Fatal("UnidentifiedActor must be a distinct value, not the empty string")
+	}
+	if strings.Contains(got, "/") {
+		t.Errorf("UnidentifiedActor = %q has GT_ROLE shape; it must not read as a real identity", got)
+	}
+	if !IsUnidentifiedActor(got) {
+		t.Errorf("IsUnidentifiedActor(%q) = false; the sentinel must always be refused", got)
+	}
+}
+
+// TestErrUnidentifiedActorText guards the refusal's wording (gt-od3fn): it gives
+// the reason no bead can authorize an unidentified process and a concrete
+// retry, without repeating the --authorized-by usage block that
+// checkAgentForceAuthorization already prints.
+func TestErrUnidentifiedActorText(t *testing.T) {
+	t.Parallel()
+	msg := ErrUnidentifiedActor.Error()
+	for _, want := range []string{
+		"cannot be identified",
+		"created by this same process",
+		"GT_ROLE=",
+		"interactive terminal",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("ErrUnidentifiedActor should contain %q, got:\n%s", want, msg)
+		}
+	}
+	if strings.Contains(msg, "--authorized-by") {
+		t.Errorf("ErrUnidentifiedActor repeats the --authorized-by usage hint:\n%s", msg)
 	}
 }
