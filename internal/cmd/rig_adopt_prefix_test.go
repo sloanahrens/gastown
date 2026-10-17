@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 )
 
@@ -47,11 +46,9 @@ func readIfPresent(t *testing.T, path string) string {
 	return string(b)
 }
 
-// Adopting a rig whose .beads uses xx, with no --prefix, registered the prefix
-// derived from the name (my_project -> mp): the detection ran after
-// RegisterRig, behind a guard that RegisterRig's non-empty prefix always
-// failed. InitBeads, VerifyRigIdentity and the identity bead then used mp
-// against a database holding xx- issues (gt-prqdo).
+// A rig adopted without --prefix is registered, in rigs.json and routes.jsonl,
+// under the prefix its .beads database holds (xx), not one derived from its
+// name (my_project would give mp).
 func TestAdoptDetectedPrefixRegistered(t *testing.T) {
 	t.Parallel()
 	town := adoptPrefixTown(t, "my_project", "xx")
@@ -67,11 +64,6 @@ func TestAdoptDetectedPrefixRegistered(t *testing.T) {
 	if result.BeadsPrefix != "xx" {
 		t.Errorf("result prefix = %q, want xx", result.BeadsPrefix)
 	}
-	// The identity bead is created under result.BeadsPrefix.
-	if got, want := beads.RigBeadIDWithPrefix(result.BeadsPrefix, "my_project"), beads.RigBeadIDWithPrefix("xx", "my_project"); got != want {
-		t.Errorf("identity bead id = %q, want %q", got, want)
-	}
-
 	rigs, err := config.LoadRigsConfig(filepath.Join(town, "mayor", "rigs.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -90,8 +82,7 @@ func TestAdoptDetectedPrefixRegistered(t *testing.T) {
 	}
 }
 
-// A detected prefix wins over bd's silence, and bd's answer wins over the
-// database name.
+// bd's issue_prefix answer wins over the database name in metadata.json.
 func TestAdoptPrefixPrefersBdOverMetadataName(t *testing.T) {
 	t.Parallel()
 	town := adoptPrefixTown(t, "my_project", "xx")
@@ -102,9 +93,8 @@ func TestAdoptPrefixPrefersBdOverMetadataName(t *testing.T) {
 	}
 }
 
-// --prefix aa against a .beads of bb returned the mismatch error after the rig
-// was written to rigs.json, routed and committed, so the retry met
-// ErrRigExists. Nothing is written now (gt-prqdo).
+// A --prefix that disagrees with the rig's .beads fails with the town
+// untouched, so a retry with the right prefix is not met by ErrRigExists.
 func TestAdoptPrefixMismatchWritesNothing(t *testing.T) {
 	t.Parallel()
 	town := adoptPrefixTown(t, "my_project", "bb")
@@ -136,5 +126,74 @@ func TestAdoptPrefixMismatchWritesNothing(t *testing.T) {
 		prefix: "bb",
 	}, noBdPrefix); err != nil {
 		t.Errorf("retry with the matching prefix: %v", err)
+	}
+}
+
+// The detection tries the rig-level .beads, then mayor/rig's, and errors on a
+// metadata.json it cannot trust or a prefix it cannot find instead of registering a name-derived prefix.
+func TestDetectAdoptBeadsPrefixDirs(t *testing.T) {
+	t.Parallel()
+	const doltMeta = `{"backend":"dolt","dolt_database":"beads_zz"}`
+	tests := []struct {
+		name       string
+		rigMeta    *string // rig-level .beads/metadata.json; nil leaves the directory empty
+		rigMetaDir bool    // make the rig-level metadata.json a directory, so reading it fails with a non-ENOENT error
+		mayorMeta  *string // mayor/rig/.beads/metadata.json; nil leaves it absent
+		flagPrefix string
+		want       string
+		wantErr    string
+	}{
+		{name: "rig-level metadata", rigMeta: ptr(doltMeta), want: "zz"},
+		{name: "falls through an empty rig-level .beads to mayor/rig", mayorMeta: ptr(doltMeta), want: "zz"},
+		{name: "no metadata anywhere", want: ""},
+		{name: "empty backend is dolt", rigMeta: ptr(`{"dolt_database":"beads_zz"}`), want: "zz"},
+		{name: "dolt backend with no prefix", rigMeta: ptr(`{"backend":"dolt"}`), mayorMeta: ptr(`{"backend":"dolt"}`), wantErr: "no prefix detectable"},
+		{name: "dolt backend with no prefix falls through to mayor/rig", rigMeta: ptr(`{"backend":"dolt"}`), mayorMeta: ptr(doltMeta), want: "zz"},
+		{name: "dolt backend with no prefix with --prefix", rigMeta: ptr(`{"backend":"dolt"}`), flagPrefix: "aa", want: ""},
+		{name: "unreadable metadata", rigMetaDir: true, mayorMeta: ptr(doltMeta), wantErr: "reading"},
+		{name: "unparseable metadata", rigMeta: ptr(`{not json`), mayorMeta: ptr(doltMeta), wantErr: "parsing"},
+		{name: "non-dolt backend", rigMeta: ptr(`{"backend":"sqlite"}`), mayorMeta: ptr(doltMeta), wantErr: "pass --prefix"},
+		{name: "non-dolt backend with --prefix", rigMeta: ptr(`{"backend":"sqlite"}`), flagPrefix: "aa", want: ""},
+		{name: "mismatch in mayor/rig", mayorMeta: ptr(doltMeta), flagPrefix: "aa", wantErr: "prefix mismatch"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rigPath := filepath.Join(t.TempDir(), "rig")
+			rigBeads := filepath.Join(rigPath, ".beads")
+			mayorBeads := filepath.Join(rigPath, "mayor", "rig", ".beads")
+			if err := os.MkdirAll(rigBeads, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if tt.rigMetaDir {
+				if err := os.Mkdir(filepath.Join(rigBeads, "metadata.json"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.rigMeta != nil {
+				if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(*tt.rigMeta), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.mayorMeta != nil {
+				if err := os.MkdirAll(mayorBeads, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(mayorBeads, "metadata.json"), []byte(*tt.mayorMeta), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, err := detectAdoptBeadsPrefix(rigPath, tt.flagPrefix, noBdPrefix)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("detectAdoptBeadsPrefix error = %v, want one containing %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Errorf("detectAdoptBeadsPrefix = %q, %v; want %q", got, err, tt.want)
+			}
+		})
 	}
 }
