@@ -3096,15 +3096,10 @@ const planDay = secs => {
 const planPct = v => v == null ? "–" : Math.round(v) + "%";
 const planPace = v => v == null ? "–" : (v > 0 ? "+" : "") + Number(v).toFixed(1) + "%/day";
 
-// planHourly is the same pace over an hour instead of a day, with what that hour
-// of plan use is worth beside it: a point of the weekly limit is a hundredth of
-// weekly_value_usd, so the hour's points price at that share of the plan's week,
-// and the tilde marks an estimate of plan value rather than a bill. A pace that
-// draws as no points an hour draws a dash instead of "+0.00%/h": the reader
-// sends zero both for a week flat to the tenth and for a window with no sample
-// an hour apart, the page cannot tell those apart, and of the two errors the
-// zero is the one that says the limit is untouched. The daily figure beside it
-// keeps the flat reading (gt-d2sy4).
+// planHourly is the pace over an hour rather than a day, with the hour's plan
+// value beside it, the tilde marking an estimate of plan value and not a bill. A
+// pace that rounds to no points an hour draws a dash rather than a zero, which
+// would say the limit is untouched (gt-d2sy4).
 const planHourly = (perDay, weeklyValue, window) => {
   const pct = perDay == null ? NaN : Number(perDay) / 24;
   if (!(Math.abs(pct) >= 0.005)) return "– " + window;
@@ -3175,8 +3170,7 @@ function costClaudePlan(box, c) {
     planPrice(c.plan_usd_month),
     planPct(c.weekly_pct) + " of this week's limit",
     c.weekly_resets_at ? "resets " + planReset(c.weekly_resets_at) : "no reset instant in the newest sample",
-    planPace(c.pace_per_day_24h) + " (24h)",
-    // The two paces again as an hour's worth, beside the DeepSeek line's own
+    // The two windows' paces as an hour's worth, beside the DeepSeek line's own
     // hourly pair, which is how the two meters are read against each other.
     planHourly(c.pace_per_day_1h, c.weekly_value_usd, "last 1h"),
     planHourly(c.pace_per_day_24h, c.weekly_value_usd, "last 24h"),

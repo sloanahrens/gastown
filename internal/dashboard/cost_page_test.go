@@ -574,7 +574,7 @@ func TestCostPanelDrawsTheClaudePlanLineUnderTheDeepSeekLines(t *testing.T) {
 		t.Errorf("the first line is not the DeepSeek part: %+v", lines[0])
 	}
 	want := "Claude plan · $200/mo · 38% of this week's limit · resets " + resetText(reset) +
-		" · +9.2%/day (24h) · +0.13%/h (~$0.06/h) last 1h · +0.38%/h (~$0.18/h) last 24h" +
+		" · +0.13%/h (~$0.06/h) last 1h · +0.38%/h (~$0.18/h) last 24h" +
 		" · projected 104% at reset · limit in 6.1d"
 	if lines[1].Text != want {
 		t.Errorf("the line under the DeepSeek part = %q, want %q", lines[1].Text, want)
@@ -826,7 +826,7 @@ func TestCostPanelClaudePlanLineWordsTheWeek(t *testing.T) {
 		{"a limit beyond the window", map[string]any{"hits_limit_in_days": nil, "projected_pct_at_reset": 80.0},
 			[]string{"projected 80% at reset"}, []string{"limit in", "at the limit"}},
 		{"a falling week", map[string]any{"pace_per_day_24h": -1.2, "projected_pct_at_reset": 30.0, "hits_limit_in_days": nil},
-			[]string{"-1.2%/day (24h)"}, []string{"limit in", "at the limit"}},
+			[]string{"-0.05%/h", "last 24h"}, []string{"limit in", "at the limit"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -885,31 +885,35 @@ func TestCostPanelClaudePlanLineGivesTheHourlyPace(t *testing.T) {
 	// which are the two things the line has no room to say.
 	for _, want := range []string{
 		"plan value at $0.46 a point of the week",
-		"the colour comes from the projection: 104% at reset",
+		"the colour comes from the projection: 104% at reset, past the limit bad, past 90% a warning, as a week already at 90% of the limit is",
 	} {
 		if !strings.Contains(line.Title, want) {
 			t.Errorf("the plan line's hover has no %q: %q", want, line.Title)
 		}
 	}
 
-	// A window with no 1h sample, one the reader measured flat to the tenth, and
-	// one whose pace rounds to no points an hour all draw the dash: the page
-	// cannot tell them apart, and a zero would read as a week nothing is being
-	// spent against.
-	for _, over := range []map[string]any{
-		{"pace_per_day_1h": nil},
-		{"pace_per_day_1h": 0.0},
-		{"pace_per_day_24h": 0.0},
-		{"pace_per_day_1h": 0.04},
-		{"pace_per_day_1h": -0.04},
+	// A window with no sample of its age, one the reader measured flat to the
+	// tenth, and one whose pace rounds to no points an hour all draw the dash
+	// for their own window: the page cannot tell the flat week from the empty
+	// window, and of the two errors a zero is the one that says the limit is
+	// untouched.
+	for _, tc := range []struct {
+		over   map[string]any
+		window string
+	}{
+		{map[string]any{"pace_per_day_1h": nil}, "last 1h"},
+		{map[string]any{"pace_per_day_1h": 0.0}, "last 1h"},
+		{map[string]any{"pace_per_day_24h": 0.0}, "last 24h"},
+		{map[string]any{"pace_per_day_1h": 0.04}, "last 1h"},
+		{map[string]any{"pace_per_day_1h": -0.04}, "last 1h"},
 	} {
-		flat := plan(over)
-		if strings.Contains(flat.Text, "0.00%/h") {
-			t.Errorf("a plan with %v draws a zero: %q", over, flat.Text)
+		flat := plan(tc.over)
+		if !strings.Contains(flat.Text, "– "+tc.window) {
+			t.Errorf("a plan with %v has no dash beside %s: %q", tc.over, tc.window, flat.Text)
 		}
-	}
-	if missing := plan(map[string]any{"pace_per_day_1h": nil}); !strings.Contains(missing.Text, "– last 1h") {
-		t.Errorf("a plan with no 1h pace = %q, want the dash beside the hour", missing.Text)
+		if strings.Contains(flat.Text, "0.00%/h") {
+			t.Errorf("a plan with %v draws a zero: %q", tc.over, flat.Text)
+		}
 	}
 	// A payload without the week's price draws the percentages alone rather than
 	// a dollar the reader never sent.
