@@ -56,7 +56,7 @@ A package whose unit-tier test files call a container entry point is Docker-back
 | unit | in-process only: fakes, fake clock, `t.TempDir`, `git` (not in a package listed in `gitfree.txt`) | none | `TestX` | `make gate` |
 | integration | real tmux, Docker, bd, Dolt, the gt binary, real processes | `//go:build integration` | `TestIntegrationX` in a converted package (`integration-name` fails any other `Test…` name except `TestMain`; packages in `unconverted.txt` are exempt until converted). The tier run has no name filter: the build tag alone selects it | `make test-integration` |
 
-- `make test-timing PKGS=./internal/<pkg>/...` measures the unit tier in a tmux pane that launchd starts. It is a measurement, not a gate. macOS scans every new executable there, which is the town's condition after a reboot. The script first prints a probe (ms per new executable; a taxed pane shows 50 or more), then the seconds taken. A converted package's target is 5 s or less in that pane. The integration tier's target is 60 s or less.
+- `make test-timing PKGS=./internal/<pkg>/...` measures the unit tier in a tmux pane that launchd starts. It is not part of `make gate`. macOS scans every new executable there, which is the town's condition after a reboot. The script first prints a probe (ms per new executable; a taxed pane shows 50 or more), then the seconds taken. A converted package's target is 5 s or less in that pane; pass `TARGET_SECONDS=5` to hold the run to it, since the script's default target is 90 s. The script exits 1 when over target and 3 when the pane is exempt (probe under 50 ms). The integration tier's target is 60 s or less.
 
 ### The time budget
 
@@ -249,7 +249,7 @@ if pill := dom.element(t, "verdict"); pill.Class != "pill degraded" {
 
 Reading index.html as a string — what every page test did before this harness — checks that a function mentions the right names, not that it draws anything. A renderHealth that painted every verdict grey, `pill unknown`, passed those tests and fails this one: each case runs the function over a reading and reads the page's own output. `dom.call` fails on a function the page no longer declares, so a test naming a dead function is a red test rather than a passing one that checks nothing.
 
-The stub is the browser the page runs in, and it is small on purpose: the render functions build elements, so `createElement`, `append`, `textContent`, `className`, `classList`, `hidden` and `title` carry them. Two limits keep it honest. `getElementById` answers only for the ids index.html's markup carries, read from the file, so a render into an id the markup dropped fails instead of passing against a stub that invents elements. And no timer ever fires: the test drives each redraw, and nothing renders behind it. A test that needs more DOM adds it to the stub in the same change.
+The stub is the browser the page runs in, and it is small on purpose: the render functions build elements, so `createElement`, `append`, `textContent`, `className`, `classList`, `hidden` and `title` carry them. Two limits keep it honest. `getElementById` answers only for the ids index.html's markup carries, read from the file, so a render into an id the markup dropped fails instead of passing against a stub that invents elements. And time is the test's: `Date.now` reads a fake clock that moves only when a test calls `__advance`, which runs the timers that come due in order, so nothing redraws or reconnects behind a test that only reads. A test that needs more DOM adds it to the stub in the same change.
 
 The engine is a library, not a tool: nothing here starts a process, sleeps, reads a clock or opens a socket, so the unit tier stays hermetic and no rule in [The rules](#the-rules) needs an exemption for a page test.
 
@@ -467,7 +467,7 @@ Common sources of flakes, and their fixes:
 
 ```bash
 go test -count=1 -cover ./internal/<pkg>/                    # unit coverage
-make test-timing PKGS=./internal/<pkg>/...                   # unit tier, taxed pane: target 5 s or less
+TARGET_SECONDS=5 make test-timing PKGS=./internal/<pkg>/...  # unit tier, taxed pane: target 5 s or less
 go test -tags integration -count=1 ./internal/<pkg>/...   # target 60 s or less
 ```
 
