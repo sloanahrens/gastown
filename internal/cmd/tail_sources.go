@@ -547,13 +547,20 @@ func (s *landingsSource) Poll() []tailLine {
 	var out []tailLine
 	// A line that is not a record is counted, never echoed: the stream must
 	// not republish whatever text ended up in the file. It has no timestamp
-	// to cut at, so on the backlog read it is left out with the rest of the
-	// history --since excludes rather than printed as if it were current.
+	// to cut at, so on the backlog read it is not printed as if it were
+	// current. The count still goes out, at the moment of the read: a file
+	// the operator cannot fully read is a fact about the file, and dropping
+	// it silently hides the damage for the rest of the run.
+	var unreadable int
 	for _, b := range bad {
 		if backlog {
+			unreadable++
 			continue
 		}
 		out = append(out, tailLine{At: now, Rig: s.rig, Kind: tailKindLandings, Text: fmt.Sprintf("unreadable landings line (%d bytes)", len(b))})
+	}
+	if unreadable > 0 {
+		out = append(out, tailLine{At: now, Rig: s.rig, Kind: tailKindLandings, Text: fmt.Sprintf("skipped %d unreadable landings line(s) in backlog", unreadable)})
 	}
 	for _, r := range recs {
 		at := r.LandedAt
@@ -725,6 +732,10 @@ type tailWatchSource struct {
 	// started is set by the first poll that read every file, so a first poll
 	// that failed is retried as a backlog read cut at the cutoff.
 	started bool
+	// backlogUnreadable carries the bad-line count across polls: a failing
+	// sibling holds the backlog open, while the files that did read have
+	// already advanced past their bad lines and will not offer them again.
+	backlogUnreadable int
 }
 
 // newTailWatchSource is the production watch source: the two files, in the
@@ -749,6 +760,11 @@ func (s *tailWatchSource) Poll() []tailLine {
 	backlog := !s.started
 	var out []tailLine
 	read := true
+	// A line that is not an alert has no timestamp to cut at, so on the
+	// backlog read it is left out with the rest of the history --since
+	// excludes. It is counted, never echoed: the stream must not republish
+	// whatever text ended up in the file, but a file the operator cannot fully
+	// read must not look clean for the rest of the run either.
 	for _, f := range s.files {
 		items, err := f.readNew()
 		if err != nil {
@@ -761,12 +777,8 @@ func (s *tailWatchSource) Poll() []tailLine {
 		f.failed.clear()
 		for _, item := range items {
 			if item.Bad != "" {
-				// A line that is not an alert has no timestamp to cut at, so
-				// on the backlog read it is left out with the rest of the
-				// history --since excludes. It is counted, never echoed: the
-				// stream must not republish whatever text ended up in the
-				// file.
 				if backlog {
+					s.backlogUnreadable++
 					continue
 				}
 				out = append(out, s.line(now, "skipped unreadable watch line in %s (%d bytes)", f.name, len(item.Bad)))
@@ -779,7 +791,14 @@ func (s *tailWatchSource) Poll() []tailLine {
 			out = append(out, tailLine{At: item.Alert.TS, Rig: tailKindWatch, Kind: tailKindWatch, Class: class, Text: tailWatchText(item.Alert)})
 		}
 	}
+	// Only the poll that completes the backlog reports the count: a file that
+	// failed keeps started false, so reporting on that poll would repeat the
+	// same lines every tick until the read recovers.
 	if read {
+		if s.backlogUnreadable > 0 {
+			out = append(out, s.line(now, "skipped %d unreadable watch line(s) in backlog", s.backlogUnreadable))
+			s.backlogUnreadable = 0
+		}
 		s.started = true
 	}
 	return out
@@ -1462,37 +1481,46 @@ func (t *tailDeploys) observe(lines []tailLine) []tailLine {
 	if t == nil {
 		return nil
 	}
-	t.mu.Lock()
 	var out []tailLine
 	for _, ln := range lines {
-		if ln.Kind != tailKindDaemon {
+		at, installed, restart := t.feed(ln)
+		if !restart {
 			continue
 		}
-		// One line carries one fact, so the first shape that matches wins and
-		// the rest are not tried.
-		if m := tailDeployDispatchRe.FindStringSubmatch(ln.Text); m != nil {
-			if r := t.record(m[1]); r.dispatched.IsZero() {
-				r.dispatched = ln.At
-			}
-		} else if m := tailDeployLandedRe.FindStringSubmatch(ln.Text); m != nil {
-			if r := t.record(m[1]); r.landed.IsZero() {
-				r.landed, r.sha = ln.At, m[2]
-			}
-		} else if m := tailDeployMergeRe.FindStringSubmatch(ln.Text); m != nil {
-			if r := t.record(m[1]); r.merged.IsZero() {
-				r.merged = ln.At
-			}
-		} else if m := tailDeployRestartRe.FindStringSubmatch(ln.Text); m != nil {
-			// The ancestry checks shell out to git with their own timeouts,
-			// so the lock is released around them: a stuck mount must not
-			// hold the summary and the Landings table off the tracker.
-			t.mu.Unlock()
-			out = append(out, t.deployAt(ln.At, m[1])...)
-			t.mu.Lock()
-		}
+		// The ancestry checks shell out to git with their own timeouts, so
+		// deployAt runs unlocked: a stuck mount must not hold the summary and
+		// the Landings table off the tracker. feed keeps its own critical
+		// section under a deferred unlock rather than a manual pair.
+		out = append(out, t.deployAt(at, installed)...)
 	}
-	t.mu.Unlock()
 	return out
+}
+
+// feed records one daemon line and reports the restart it announced, if any.
+func (t *tailDeploys) feed(ln tailLine) (time.Time, string, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if ln.Kind != tailKindDaemon {
+		return time.Time{}, "", false
+	}
+	// One line carries one fact, so the first shape that matches wins and
+	// the rest are not tried.
+	if m := tailDeployDispatchRe.FindStringSubmatch(ln.Text); m != nil {
+		if r := t.record(m[1]); r.dispatched.IsZero() {
+			r.dispatched = ln.At
+		}
+	} else if m := tailDeployLandedRe.FindStringSubmatch(ln.Text); m != nil {
+		if r := t.record(m[1]); r.landed.IsZero() {
+			r.landed, r.sha = ln.At, m[2]
+		}
+	} else if m := tailDeployMergeRe.FindStringSubmatch(ln.Text); m != nil {
+		if r := t.record(m[1]); r.merged.IsZero() {
+			r.merged = ln.At
+		}
+	} else if m := tailDeployRestartRe.FindStringSubmatch(ln.Text); m != nil {
+		return ln.At, m[1], true
+	}
+	return time.Time{}, "", false
 }
 
 // deployAt marks every waiting landed bead whose commit the installed commit

@@ -389,9 +389,28 @@ func TestReaperUserInfoOutsideTownIgnoresCwdSettings(t *testing.T) {
 // hands each database the hash of its own set from the list, rather than
 // passing one database's hash to all of them — which refused every database
 // but the one it was made for.
+//
+// The live-time read is the operator's dry run with only the write defeated:
+// same StaleAge, MaxCloses and Force. Rebuilding its options here instead
+// would let the two hashes diverge on an option one call got and the other
+// did not, so the sweep asserts the options are the live run's. The other half
+// — that the real AutoClose hashes the same set whatever DryRun, MaxCloses and
+// Force say — is pinned by TestAutoCloseDryRunHashIgnoresTheWriteOptions in
+// internal/reaper, where the fake issues table lives.
 func TestReaperAutoCloseWholeTownPreviewHash(t *testing.T) {
 	t.Parallel()
-	sweep := func(_ *beadsql.DB, _ reaper.Writer, dbName string, _ reaper.AutoCloseOptions) (*reaper.AutoCloseResult, error) {
+	live := reaper.AutoCloseOptions{StaleAge: time.Hour, MaxCloses: 3, Force: true}
+	sweep := func(_ *beadsql.DB, _ reaper.Writer, dbName string, opts reaper.AutoCloseOptions) (*reaper.AutoCloseResult, error) {
+		if !opts.DryRun {
+			t.Errorf("%s: preview sweep was not a dry run", dbName)
+		}
+		if opts.PreviewHash != "" {
+			t.Errorf("%s: preview sweep carried preview hash %q", dbName, opts.PreviewHash)
+		}
+		opts.DryRun, opts.PreviewHash = false, ""
+		if opts != live {
+			t.Errorf("%s: preview sweep options = %+v, want the live run's %+v", dbName, opts, live)
+		}
 		return &reaper.AutoCloseResult{Database: dbName, PreviewHash: "hash-" + dbName}, nil
 	}
 
@@ -401,7 +420,7 @@ func TestReaperAutoCloseWholeTownPreviewHash(t *testing.T) {
 	}
 
 	for _, dbName := range []string{"gastown", "beads"} {
-		got, err := autoClosePreviewHash(sweep, nil, dbName, time.Hour, hashes, true)
+		got, err := autoClosePreviewHash(sweep, nil, dbName, live, hashes, true)
 		if err != nil {
 			t.Fatalf("autoClosePreviewHash(%s): %v", dbName, err)
 		}
@@ -412,7 +431,7 @@ func TestReaperAutoCloseWholeTownPreviewHash(t *testing.T) {
 
 	// A database the dry run did not show stays unauthorized, so its sweep
 	// reports the hash to re-run for rather than tripping over a sibling's.
-	got, err := autoClosePreviewHash(sweep, nil, "hq", time.Hour, hashes, true)
+	got, err := autoClosePreviewHash(sweep, nil, "hq", live, hashes, true)
 	if err != nil {
 		t.Fatalf("autoClosePreviewHash(hq): %v", err)
 	}
@@ -422,7 +441,7 @@ func TestReaperAutoCloseWholeTownPreviewHash(t *testing.T) {
 
 	// A single-database run passes the operator's hash through untouched; the
 	// sweep compares it and reports a mismatch.
-	got, err = autoClosePreviewHash(sweep, nil, "gastown", time.Hour, parseReaperPreviewHashes("stale"), false)
+	got, err = autoClosePreviewHash(sweep, nil, "gastown", live, parseReaperPreviewHashes("stale"), false)
 	if err != nil || got != "stale" {
 		t.Errorf("single-db autoClosePreviewHash = %q, %v; want the operator's hash", got, err)
 	}

@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
@@ -160,31 +159,36 @@ func TestResolveFormula(t *testing.T) {
 // TestValidateNoTaskOnlySchedulerFlagsRejectsBranchAndPR: --branch and --pr
 // resume an existing branch, which only a task bead has; epic and convoy mode
 // must refuse them rather than drop them silently.
+//
+// The flags come from slingCmd itself. A stand-in here would pass even if gt
+// sling stopped registering one of them, so the mode check would have nothing
+// to reject and the refusal would never happen in practice.
+//
+//testpolicy:allow parallel — sets Changed on slingCmd's process-global flags, which other tests read
 func TestValidateNoTaskOnlySchedulerFlagsRejectsBranchAndPR(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		flag  string
-		value string
-		set   func(cmd *cobra.Command)
-	}{
-		{flag: "branch", value: "fix/x", set: func(cmd *cobra.Command) { cmd.Flags().String("branch", "", "") }},
-		{flag: "pr", value: "7", set: func(cmd *cobra.Command) { cmd.Flags().Int("pr", 0, "") }},
-	} {
-		t.Run(tc.flag, func(t *testing.T) {
-			t.Parallel()
-			cmd := &cobra.Command{}
-			tc.set(cmd)
-			if err := cmd.Flags().Set(tc.flag, tc.value); err != nil {
-				t.Fatalf("set --%s: %v", tc.flag, err)
+	// slingCmd's flags are process-global, so this test does not run parallel
+	// with the ones that read them.
+	for _, name := range []string{"branch", "pr"} {
+		t.Run(name, func(t *testing.T) {
+			f := slingCmd.Flags().Lookup(name)
+			if f == nil {
+				t.Fatalf("gt sling has no --%s flag, so epic and convoy mode cannot refuse it", name)
 			}
+			// Mark it changed as a parse would; setting the value would write
+			// the shared sling-time variables other tests read. Restore the
+			// prior state rather than false: another test may have left the
+			// flag set.
+			prior := f.Changed
+			f.Changed = true
+			defer func() { f.Changed = prior }()
 
 			for _, mode := range []string{"epic", "convoy"} {
-				err := validateNoTaskOnlySchedulerFlags(cmd, mode)
+				err := validateNoTaskOnlySchedulerFlags(slingCmd, mode)
 				if err == nil {
-					t.Fatalf("validateNoTaskOnlySchedulerFlags(%s) accepted --%s", mode, tc.flag)
+					t.Fatalf("validateNoTaskOnlySchedulerFlags(%s) accepted --%s", mode, name)
 				}
-				if !strings.Contains(err.Error(), "--"+tc.flag) {
-					t.Fatalf("validateNoTaskOnlySchedulerFlags(%s) error = %v, want --%s", mode, err, tc.flag)
+				if !strings.Contains(err.Error(), "--"+name) {
+					t.Fatalf("validateNoTaskOnlySchedulerFlags(%s) error = %v, want --%s", mode, err, name)
 				}
 			}
 		})

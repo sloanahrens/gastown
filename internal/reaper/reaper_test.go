@@ -563,6 +563,65 @@ func TestAutoCloseLiveClosesThePreviewedSet(t *testing.T) {
 	}
 }
 
+// TestAutoCloseDryRunHashIgnoresTheWriteOptions pins the contract the
+// whole-town preview mapping in internal/cmd relies on: that mapping runs the
+// live sweep with DryRun set and every other option unchanged, so DryRun,
+// MaxCloses and Force must not move the hash. If any of them did, a whole-town
+// live run would refuse every database but the one the operator's dry run
+// hashed, as a mismatch against a preview nobody was shown.
+func TestAutoCloseDryRunHashIgnoresTheWriteOptions(t *testing.T) {
+	t.Parallel()
+	state := newStaleIssueState("hq-a", "hq-b")
+	db := openFakeReaperDB(t, state)
+	t.Cleanup(func() { _ = db.Close() })
+
+	preview, err := AutoClose(db, nil, "hq", AutoCloseOptions{StaleAge: MinStaleIssueAge, DryRun: true})
+	if err != nil {
+		t.Fatalf("dry run: %v", err)
+	}
+	if preview.PreviewHash == "" {
+		t.Fatal("dry run returned no preview hash, so there is no baseline to compare")
+	}
+
+	for _, opts := range []AutoCloseOptions{
+		{StaleAge: MinStaleIssueAge, DryRun: true, MaxCloses: 1},
+		{StaleAge: MinStaleIssueAge, DryRun: true, Force: true},
+		{StaleAge: MinStaleIssueAge, DryRun: true, MaxCloses: 1, Force: true},
+	} {
+		got, err := AutoClose(db, nil, "hq", opts)
+		if err != nil {
+			t.Fatalf("dry run with %+v: %v", opts, err)
+		}
+		if got.PreviewHash != preview.PreviewHash {
+			t.Errorf("dry run with %+v hashed %q, want the plain dry run's %q: a write option changed the set",
+				opts, got.PreviewHash, preview.PreviewHash)
+		}
+	}
+
+	// The live sweep computes the same hash from the same options. Here the
+	// cap refuses before anything is written and the result still reports the
+	// hash, so the live side of the parity is observable too.
+	live, err := AutoClose(db, state.writer(), "hq", AutoCloseOptions{
+		StaleAge:    MinStaleIssueAge,
+		MaxCloses:   1,
+		PreviewHash: preview.PreviewHash,
+	})
+	if !errors.Is(err, ErrTooManyCloses) {
+		t.Fatalf("live run over the cap: error = %v, want ErrTooManyCloses", err)
+	}
+	if live == nil || live.PreviewHash != preview.PreviewHash {
+		t.Fatalf("live run over the cap reported preview hash %v, want the dry run's %q", live, preview.PreviewHash)
+	}
+	if live.Closed != 0 {
+		t.Errorf("refused live run reported Closed = %d, want 0", live.Closed)
+	}
+	for id, status := range state.staleIssueStatuses() {
+		if status != "open" {
+			t.Errorf("%s status = %q after a refused sweep, want open", id, status)
+		}
+	}
+}
+
 // TestAutoClosePreviewHashBindsTheExactSet: a hash naming a different set is not
 // authorization. The sweep may only close what the dry run showed, so a
 // candidate that appeared after the preview refuses the whole run rather than

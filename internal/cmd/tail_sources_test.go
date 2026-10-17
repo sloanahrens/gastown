@@ -235,11 +235,13 @@ func TestWatchSource_ReadsBothFilesColorsBySeverityAndNotesBadLines(t *testing.T
 	got := s.Poll()
 	// The backlog is the file's own order, cut at the cutoff. Its unreadable
 	// lines go with the rest of the history --since excludes: they carry no
-	// timestamp to say they fall inside the window.
+	// timestamp to say they fall inside the window. Their count is reported
+	// once, at the end of the backlog.
 	want := []string{
 		"watch watch bd-slow: bd took 4s",
 		"watch watch direct-push: a commit landed outside the queue",
 		"watch watch polecat-stall: gastown/opal silent 40m",
+		"watch watch skipped 2 unreadable watch line(s) in backlog",
 	}
 	if !reflect.DeepEqual(texts(got), want) {
 		t.Fatalf("backlog:\n%q\nwant\n%q", texts(got), want)
@@ -1460,10 +1462,12 @@ func TestTailWatchSourceTwoFailingFilesNotDeduped(t *testing.T) {
 	}
 }
 
-// TestTailWatchSourceBacklogSkipsOldMalformedLines: a line that is not an
+// TestTailWatchSourceBacklogReportsOldMalformedLines: a line that is not an
 // alert has no timestamp, so the backlog read --since starts the stream with
-// leaves it out rather than printing it as if it were current.
-func TestTailWatchSourceBacklogSkipsOldMalformedLines(t *testing.T) {
+// cannot place it in the window and does not echo it. It still reports the
+// count: a feed file the operator cannot fully read must not look clean for
+// the rest of the run.
+func TestTailWatchSourceBacklogReportsOldMalformedLines(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	alerts := filepath.Join(town, ".runtime", "watch", "alerts.jsonl")
@@ -1474,8 +1478,11 @@ func TestTailWatchSourceBacklogSkipsOldMalformedLines(t *testing.T) {
 		`{"ts":"2026-09-30T13:59:00Z","severity":"high","text":"in window"}`+"\n")
 
 	s := newTailWatchSource(town, at("2026-09-30T13:00:00Z"), fixedNow)
-	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{"watch watch in window"}) {
-		t.Fatalf("backlog = %q; want the malformed line left out", got)
+	if got := texts(s.Poll()); !reflect.DeepEqual(got, []string{
+		"watch watch in window",
+		"watch watch skipped 1 unreadable watch line(s) in backlog",
+	}) {
+		t.Fatalf("backlog = %q; want the count noted, not the line echoed", got)
 	}
 	// A malformed line appended after the backlog read is current, and noted.
 	appendFile(t, alerts, "garbage\n")
@@ -1485,18 +1492,59 @@ func TestTailWatchSourceBacklogSkipsOldMalformedLines(t *testing.T) {
 	}
 }
 
-// TestLandingsSourceBacklogSkipsOldMalformedLines: the landings file has the
-// same shape — a non-record line has no landed_at to cut at, so the backlog
-// read leaves it out and only a later one is noted.
-func TestLandingsSourceBacklogSkipsOldMalformedLines(t *testing.T) {
+// TestTailWatchSourceBacklogCountSurvivesAFailedSibling: a sibling that cannot
+// be read holds the backlog open, and the files that did read have already
+// advanced past their bad lines. The count therefore has to live on the source
+// until the backlog completes, or the damage vanishes the moment the retry
+// succeeds — the same silent drop, one poll later.
+func TestTailWatchSourceBacklogCountSurvivesAFailedSibling(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	alerts := filepath.Join(town, ".runtime", "watch", "alerts.jsonl")
+	if err := os.MkdirAll(filepath.Dir(alerts), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	appendFile(t, alerts, "garbage from days ago\n"+
+		`{"ts":"2026-09-30T13:59:00Z","severity":"high","text":"in window"}`+"\n")
+	// A directory where the events file belongs: opening it succeeds and the
+	// read fails, so the backlog cannot complete.
+	events := attention.EventsPath(town)
+	if err := os.MkdirAll(events, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newTailWatchSource(town, at("2026-09-30T13:00:00Z"), fixedNow)
+	first := texts(s.Poll())
+	if len(first) != 2 ||
+		first[0] != "watch watch in window" ||
+		!strings.HasPrefix(first[1], "watch watch cannot read events.jsonl: ") {
+		t.Fatalf("first poll = %q; want the alert and the sibling's failure, no count yet", first)
+	}
+
+	if err := os.Remove(events); err != nil {
+		t.Fatal(err)
+	}
+	if got := texts(s.Poll()); !reflect.DeepEqual(got,
+		[]string{"watch watch skipped 1 unreadable watch line(s) in backlog"}) {
+		t.Fatalf("second poll = %q; want the count carried from the failed poll", got)
+	}
+}
+
+// TestLandingsSourceBacklogReportsOldMalformedLines: a non-record line has no
+// landed_at to cut at, so the backlog read cannot place it in the window and
+// does not echo it. It still reports the count: a file the operator cannot
+// fully read must not look clean for the rest of the run.
+func TestLandingsSourceBacklogReportsOldMalformedLines(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "gastown.jsonl")
 	appendFile(t, path, "garbage from days ago\n"+
 		`{"bead":"gt-new","rig":"gastown","landed_at":"2026-09-30T13:55:00Z"}`+"\n")
 	s := &landingsSource{rig: "gastown", reader: &landings.Reader{Path: path}, cutoff: at("2026-09-30T13:00:00Z"), now: fixedNow}
 	got := texts(s.Poll())
-	if len(got) != 1 || !strings.HasPrefix(got[0], "gastown landings landed gt-new ") {
-		t.Fatalf("backlog = %q; want the unreadable line left out", got)
+	if len(got) != 2 ||
+		got[0] != "gastown landings skipped 1 unreadable landings line(s) in backlog" ||
+		!strings.HasPrefix(got[1], "gastown landings landed gt-new ") {
+		t.Fatalf("backlog = %q; want the count noted, not the line echoed", got)
 	}
 	appendFile(t, path, "garbage\n")
 	if got := texts(s.Poll()); !reflect.DeepEqual(got,
