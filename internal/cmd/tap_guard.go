@@ -555,11 +555,11 @@ func branchCreatingSubcommand(subcommand string) bool {
 // branchCreationFlag reports whether flag is subcommand's branch-creation
 // option in any spelling git's option parser accepts: the bare short flag
 // (-b/-B, -c/-C), a cluster of short flags ("-qB", "-qb"), a short flag glued
-// to its value ("-bx"), and the long spellings --create and --force-create,
-// bare or carrying their value after an "=" ("--create=feature/x"), and the
-// abbreviations git resolves to them ("--cre", "--force-cr"; gt-osc72).
-// checkout has no long spelling for -b, and -C's long form is --force-create
-// (gt-g27m7).
+// to its value ("-bx"), and switch's long spellings --create and
+// --force-create, bare, carrying their value after an "="
+// ("--create=feature/x"), or abbreviated to a prefix of the name
+// (switchLongFlagCreatesBranch). checkout has no long spelling for -b, and
+// -C's long form is --force-create (gt-g27m7).
 //
 // Both halves of the guard read through this one predicate — isBranchCreation
 // judges with it, isLeadingBranchCreation exempts with it — because an
@@ -571,23 +571,50 @@ func branchCreationFlag(subcommand, flag string) bool {
 		return shortFlagCluster(flag, 'b') || shortFlagCluster(flag, 'B')
 	case "switch":
 		return shortFlagCluster(flag, 'c') || shortFlagCluster(flag, 'C') ||
-			longFlagAbbrev(flag, "--create", len("--cr")) ||
-			longFlagAbbrev(flag, "--force-create", len("--force-"))
+			switchLongFlagCreatesBranch(flag)
 	}
 	return false
 }
 
-// longFlagAbbrev reports whether flag, with any "=value" dropped, spells the
-// long option full: in whole, or as a prefix of at least minLen bytes, the
-// way git's option parser resolves an abbreviation (gt-osc72). minLen is the
-// shortest prefix git 2.42 reads as full alone: "--c" is ambiguous with
-// --conflict, "--f" and "--fo" with --force, and "--force" is --force itself,
-// so switch creates a branch on "--cr" and "--force-" and up and refuses the
-// shorter ones. A shorter prefix that a newer git resolves to full would read
-// as no creation here; a longer one never changes meaning.
-func longFlagAbbrev(flag, full string, minLen int) bool {
+// switchCreationOptions are the long spellings of git switch's
+// branch-creation flags: --create (switch's short -c) and --force-create (-C).
+var switchCreationOptions = []string{"--create", "--force-create"}
+
+// switchOptionsOverlappingCreation are git switch's other long options whose
+// own spelling a prefix of a creation option also spells. git's parser takes
+// an exact match before it abbreviates, so "--force" is switch's force — throw
+// away local changes — and not the --force-create it also prefixes.
+var switchOptionsOverlappingCreation = []string{"--force"}
+
+// switchLongFlagCreatesBranch reports whether flag, a "--" word from a git
+// switch command line, names a branch-creation option: --create or
+// --force-create, in full or as any prefix of it, with any "=value" dropped.
+//
+// Every prefix counts, the ones the installed git refuses as ambiguous
+// included ("--c" against --conflict, "--f" and "--fo" against --force):
+// which prefixes an option set leaves unambiguous is a property of the git
+// that runs the command, and a guard reading command text cannot know it.
+// Reading one version's shortest resolvable prefix as the floor lets a
+// shorter prefix that another version resolves past the guard, which is the
+// bypass it exists to close; reading them all as the creation errs the other
+// way, and blocks only commands git refuses, which create no branch
+// (gt-osc72, gt-19s3v).
+func switchLongFlagCreatesBranch(flag string) bool {
 	name, _, _ := strings.Cut(flag, "=")
-	return len(name) >= minLen && strings.HasPrefix(full, name)
+	if len(name) <= len("--") {
+		return false // "--" is the end-of-options marker, not an option
+	}
+	for _, option := range switchOptionsOverlappingCreation {
+		if name == option {
+			return false
+		}
+	}
+	for _, option := range switchCreationOptions {
+		if strings.HasPrefix(option, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // shortFlagCluster reports whether word is a short-option cluster ("-q", "-qb",
