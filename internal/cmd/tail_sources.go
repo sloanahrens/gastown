@@ -732,6 +732,10 @@ type tailWatchSource struct {
 	// started is set by the first poll that read every file, so a first poll
 	// that failed is retried as a backlog read cut at the cutoff.
 	started bool
+	// backlogUnreadable carries the bad-line count across polls: a failing
+	// sibling holds the backlog open, while the files that did read have
+	// already advanced past their bad lines and will not offer them again.
+	backlogUnreadable int
 }
 
 // newTailWatchSource is the production watch source: the two files, in the
@@ -756,6 +760,11 @@ func (s *tailWatchSource) Poll() []tailLine {
 	backlog := !s.started
 	var out []tailLine
 	read := true
+	// A line that is not an alert has no timestamp to cut at, so on the
+	// backlog read it is left out with the rest of the history --since
+	// excludes. It is counted, never echoed: the stream must not republish
+	// whatever text ended up in the file, but a file the operator cannot fully
+	// read must not look clean for the rest of the run either.
 	for _, f := range s.files {
 		items, err := f.readNew()
 		if err != nil {
@@ -768,12 +777,8 @@ func (s *tailWatchSource) Poll() []tailLine {
 		f.failed.clear()
 		for _, item := range items {
 			if item.Bad != "" {
-				// A line that is not an alert has no timestamp to cut at, so
-				// on the backlog read it is left out with the rest of the
-				// history --since excludes. It is counted, never echoed: the
-				// stream must not republish whatever text ended up in the
-				// file.
 				if backlog {
+					s.backlogUnreadable++
 					continue
 				}
 				out = append(out, s.line(now, "skipped unreadable watch line in %s (%d bytes)", f.name, len(item.Bad)))
@@ -786,7 +791,14 @@ func (s *tailWatchSource) Poll() []tailLine {
 			out = append(out, tailLine{At: item.Alert.TS, Rig: tailKindWatch, Kind: tailKindWatch, Class: class, Text: tailWatchText(item.Alert)})
 		}
 	}
+	// Only the poll that completes the backlog reports the count: a file that
+	// failed keeps started false, so reporting on that poll would repeat the
+	// same lines every tick until the read recovers.
 	if read {
+		if s.backlogUnreadable > 0 {
+			out = append(out, s.line(now, "skipped %d unreadable watch line(s) in backlog", s.backlogUnreadable))
+			s.backlogUnreadable = 0
+		}
 		s.started = true
 	}
 	return out

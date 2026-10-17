@@ -393,7 +393,10 @@ func TestReaperUserInfoOutsideTownIgnoresCwdSettings(t *testing.T) {
 // The live-time read is the operator's dry run with only the write defeated:
 // same StaleAge, MaxCloses and Force. Rebuilding its options here instead
 // would let the two hashes diverge on an option one call got and the other
-// did not, so the sweep asserts the options are the live run's.
+// did not, so the sweep asserts the options are the live run's. The other half
+// — that the real AutoClose hashes the same set whatever DryRun, MaxCloses and
+// Force say — is pinned by TestAutoCloseDryRunHashIgnoresTheWriteOptions in
+// internal/reaper, where the fake issues table lives.
 func TestReaperAutoCloseWholeTownPreviewHash(t *testing.T) {
 	t.Parallel()
 	live := reaper.AutoCloseOptions{StaleAge: time.Hour, MaxCloses: 3, Force: true}

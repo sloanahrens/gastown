@@ -175,9 +175,12 @@ func TestValidateNoTaskOnlySchedulerFlagsRejectsBranchAndPR(t *testing.T) {
 				t.Fatalf("gt sling has no --%s flag, so epic and convoy mode cannot refuse it", name)
 			}
 			// Mark it changed as a parse would; setting the value would write
-			// the shared sling-time variables other tests read.
+			// the shared sling-time variables other tests read. Restore the
+			// prior state rather than false: another test may have left the
+			// flag set.
+			prior := f.Changed
 			f.Changed = true
-			defer func() { f.Changed = false }()
+			defer func() { f.Changed = prior }()
 
 			for _, mode := range []string{"epic", "convoy"} {
 				err := validateNoTaskOnlySchedulerFlags(slingCmd, mode)
