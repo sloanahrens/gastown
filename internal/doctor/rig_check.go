@@ -403,8 +403,10 @@ func (c *MayorCloneExistsCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// A rig whose canonical repo is its shared bare repo needs no mayor/rig
 	// clone: the clone is a leftover of the mayoral layout, and the clone the
-	// check wants back is one nobody would work in (gt-9gnar).
-	if _, err := os.Stat(filepath.Join(c.rigPath, ".repo.git")); err == nil {
+	// check wants back is one nobody would work in (gt-9gnar). Only a directory
+	// is that repo, so a stray file at the path leaves the rig's health to the
+	// mayor/rig check below rather than passing for a working rig (gt-jx8sh).
+	if dirExists(filepath.Join(c.rigPath, ".repo.git")) {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,

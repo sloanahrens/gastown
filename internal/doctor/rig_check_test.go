@@ -683,3 +683,22 @@ func TestMayorCloneExistsCheck_NoRepoAtAllIsStillReported(t *testing.T) {
 		t.Errorf("rig with neither .repo.git nor mayor/rig: %v, want Warning", result.Status)
 	}
 }
+
+func TestMayorCloneExistsCheck_BareRepoPathHoldingAFileIsNotARepo(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigPath := filepath.Join(townRoot, "myrig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".repo.git"), []byte("not a repo\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewMayorCloneExistsCheck().Run(&CheckContext{TownRoot: townRoot, RigName: "myrig"})
+
+	if result.Status != StatusWarning {
+		t.Errorf("rig whose .repo.git is a file and has no mayor/rig clone: %v %v, want Warning",
+			result.Status, result.Details)
+	}
+}

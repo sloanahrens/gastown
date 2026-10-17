@@ -16,14 +16,6 @@ type CloneDivergenceCheck struct {
 	BaseCheck
 }
 
-// liveMayorCloneRig is the one rig whose mayor/rig clone is still worked in, so
-// its distance from origin/main stays a finding (gt-9gnar): gt plugin sync
-// reads the town's plugins out of <town>/gastown/mayor/rig/plugins, and a stale
-// clone there ships stale plugins (internal/cmd/plugin.go). Every other rig's
-// canonical repo is its shared .repo.git, which polecat/manager.go's repoBase
-// prefers to mayor/rig.
-const liveMayorCloneRig = "gastown"
-
 // NewCloneDivergenceCheck creates a new clone divergence check.
 func NewCloneDivergenceCheck() *CloneDivergenceCheck {
 	return &CloneDivergenceCheck{
@@ -68,10 +60,12 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	if len(infos) == 0 {
+		// The wording this check has reported since it was added; gt-9gnar
+		// reworded it as an unrelated edit (gt-jx8sh).
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
-			Message: "No clones to check",
+			Message: "No valid git clones found",
 		}
 	}
 
@@ -122,14 +116,23 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 // unmaintainedMayorClone reports whether info is a mayor/rig clone the town
-// stopped working in: a clone of a rig other than liveMayorCloneRig that holds
-// no commits of its own, so it is a stale copy of the rig's shared .repo.git
-// and nothing else (gt-9gnar). Reporting its distance from origin/main buried
-// the real divergence in gt-s5zor. A clone holding its own commits is a working
-// copy wherever it sits, so that one keeps the check it has today.
+// stopped working in: a clone that holds no commits of its own, so it is a
+// stale copy of the rig's shared .repo.git and nothing else (gt-9gnar).
+// Reporting its distance from origin/main buried the real divergence in
+// gt-s5zor. A clone holding its own commits is a working copy wherever it sits,
+// so that one keeps the check it has today.
 func (c *CloneDivergenceCheck) unmaintainedMayorClone(ctx *CheckContext, info cloneInfo) bool {
 	rig := mayorCloneRig(ctx.TownRoot, info.path)
-	if rig == "" || rig == liveMayorCloneRig {
+	if rig == "" {
+		return false
+	}
+	// The town's own gt source checkout is worked in whatever it holds: the
+	// installed binary is built from it and gt plugin sync takes the town's
+	// plugins out of it (internal/cmd/plugin.go), so a stale clone there ships
+	// stale plugins. It is the checkout holding the gt source, the marker
+	// version.hasGtSource reads, which keeps this rule on the clone's contents
+	// rather than on the name of a rig (gt-jx8sh).
+	if fileExists(filepath.Join(info.path, "cmd", "gt", "main.go")) {
 		return false
 	}
 	// HEAD is an ancestor of origin/main exactly when the clone holds no
