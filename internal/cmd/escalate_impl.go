@@ -51,6 +51,9 @@ type escalateRun struct {
 	hookedBead func(townRoot, seat string) string
 	raise      func(notify.EscalationRequest, *config.EscalationConfig) (*notify.RaiseResult, error)
 	clear      func(townRoot string, keys []string, closedBy, reason string) ([]string, error)
+	// beadsClient opens the town's beads, where the cleared escalations'
+	// delivery beads live.
+	beadsClient func(townRoot string) beads.Client
 }
 
 func escalateRunFromFlags() escalateRun {
@@ -75,6 +78,7 @@ func escalateRunFromFlags() escalateRun {
 		hookedBead:  findPolecatHookedBead,
 		raise:       notify.Raise,
 		clear:       notify.Clear,
+		beadsClient: func(townRoot string) beads.Client { return beads.New(beads.ResolveBeadsDir(townRoot)) },
 	}
 }
 
@@ -334,6 +338,18 @@ func (r escalateRun) clearAlerts(args []string) error {
 	closed, err := r.clear(townRoot, keys, closedBy, r.clearReason)
 	if err != nil {
 		return err
+	}
+
+	// Like gt escalate close, clearing leaves the escalation's routed mail
+	// beads open unless they are closed here; open, they pile up as phantom
+	// P1/P2s in `bd ready`. Best-effort: the escalations are already closed.
+	if len(closed) > 0 {
+		bd := r.beadsClient(townRoot)
+		for _, id := range closed {
+			if _, err := closeEscalationDeliveryBeads(bd, id, closedBy); err != nil {
+				style.FprintWarning(r.errOut, "failed to close delivery bead(s) of %s: %v", id, err)
+			}
+		}
 	}
 
 	if r.json {
