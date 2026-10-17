@@ -863,8 +863,11 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 			return fmt.Errorf("rig %s: rigs.json is unreadable, so its beads prefix is unknown; fix rigs.json before initializing .beads", ctx.RigName)
 		}
 
-		// Create .beads directory
-		if err := os.MkdirAll(rigBeadsDir, 0755); err != nil {
+		// Create the .beads directory, remembering whether this fix owns it: a
+		// failed bd init may undo only the directory this fix created, never a
+		// directory that was already there.
+		createdBeadsDir, err := ensureOwnedDir(rigBeadsDir)
+		if err != nil {
 			return fmt.Errorf("creating .beads directory: %w", err)
 		}
 
@@ -882,9 +885,12 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 		bd := ctx.bd(rigPath, bdEnv)
 		if err := bd.InitDatabase(beads.InitOptions{Prefix: prefix, Database: ctx.RigName, ServerPort: doltCfg.Port}); err != nil {
 			// A .beads directory without a database reads as healthy to Run
-			// ("Rig uses local beads"), so the fix must not leave one behind:
-			// undo the directory it just created and report the failure.
-			_ = os.RemoveAll(rigBeadsDir)
+			// ("Rig uses local beads"), so the fix must not leave behind the
+			// one it created. A directory it did not create holds data that is
+			// not this fix's to delete, so it stays.
+			if createdBeadsDir {
+				_ = os.RemoveAll(rigBeadsDir)
+			}
 			return fmt.Errorf("bd init failed: %w", bdCause(err))
 		}
 		// Configure Gas Town bead types (beads v0.46.0+). Rig remains durable,
@@ -927,6 +933,36 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 	}
 
 	return nil
+}
+
+// ensureOwnedDir creates dir when it is absent and reports whether this call
+// created it. An existing directory is never reported as created, so a caller
+// that removes its own work after a later failure cannot delete another
+// writer's data.
+func ensureOwnedDir(dir string) (bool, error) {
+	err := os.Mkdir(dir, 0755)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, fs.ErrExist):
+		info, statErr := os.Stat(dir)
+		if statErr != nil {
+			return false, statErr
+		}
+		if !info.IsDir() {
+			return false, fmt.Errorf("%s exists and is not a directory", dir)
+		}
+		return false, nil
+	case errors.Is(err, fs.ErrNotExist):
+		// A missing parent: the directory itself is still absent, so creating
+		// the whole path leaves it owned by this call.
+		if mkErr := os.MkdirAll(dir, 0755); mkErr != nil {
+			return false, mkErr
+		}
+		return true, nil
+	default:
+		return false, err
+	}
 }
 
 // hasBeadsData checks if a beads directory has actual data (issues.db, config.yaml)

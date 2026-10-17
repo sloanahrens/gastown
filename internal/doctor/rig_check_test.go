@@ -512,8 +512,7 @@ func TestBeadsRedirectCheck_FixInitBeads(t *testing.T) {
 		t.Fatalf("expected StatusError before fix, got %v", result.Status)
 	}
 
-	// Apply fix - runs bd init (the fallback without bd is
-	// TestBeadsRedirectCheck_FixInitFallsBackToConfigYAML)
+	// Apply fix - runs bd init
 	if err := check.Fix(ctx); err != nil {
 		t.Fatalf("Fix failed: %v", err)
 	}
@@ -704,8 +703,11 @@ func TestDefaultBranchAllRigsSkippedRigNotCounted(t *testing.T) {
 
 		result := NewDefaultBranchAllRigsCheck().Run(&CheckContext{TownRoot: townRoot})
 
-		if strings.Contains(result.Message, "validated") {
-			t.Errorf("message = %q, want no validated claim when every rig was skipped", result.Message)
+		// Every rig was skipped before its ref was checked, so the only honest
+		// verdict is the no-op pass, never a validated tally.
+		const want = "No rigs with custom default_branch configured"
+		if result.Status != StatusOK || result.Message != want {
+			t.Errorf("result = %v %q, want StatusOK %q", result.Status, result.Message, want)
 		}
 	})
 }
@@ -919,6 +921,150 @@ func TestGitExcludeConfiguredWorktreeUsesCommonDir(t *testing.T) {
 				t.Errorf("after Fix: %v %q, want StatusOK", result.Status, result.Message)
 			}
 		})
+	}
+}
+
+// TestEnsureOwnedDir: only a directory this call creates is reported as
+// owned. Fix removes its own directory when bd init fails, and it must never
+// remove one that already existed.
+func TestEnsureOwnedDir(t *testing.T) {
+	t.Parallel()
+
+	t.Run("creates a missing directory", func(t *testing.T) {
+		t.Parallel()
+		dir := filepath.Join(t.TempDir(), "made")
+		created, err := ensureOwnedDir(dir)
+		if err != nil || !created {
+			t.Fatalf("ensureOwnedDir(%s) = (%v, %v), want (true, nil)", dir, created, err)
+		}
+		if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+			t.Fatalf("directory after ensureOwnedDir: %v, %v", info, err)
+		}
+	})
+
+	t.Run("existing directory is not owned", func(t *testing.T) {
+		t.Parallel()
+		dir := t.TempDir()
+		marker := filepath.Join(dir, "metadata.json")
+		if err := os.WriteFile(marker, []byte("{}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		created, err := ensureOwnedDir(dir)
+		if err != nil || created {
+			t.Fatalf("ensureOwnedDir(existing) = (%v, %v), want (false, nil)", created, err)
+		}
+		if _, err := os.Stat(marker); err != nil {
+			t.Errorf("pre-existing content after ensureOwnedDir: %v", err)
+		}
+	})
+
+	t.Run("existing file is an error", func(t *testing.T) {
+		t.Parallel()
+		path := filepath.Join(t.TempDir(), ".beads")
+		if err := os.WriteFile(path, []byte("x"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if created, err := ensureOwnedDir(path); err == nil || created {
+			t.Fatalf("ensureOwnedDir(file) = (%v, %v), want an error", created, err)
+		}
+	})
+}
+
+// TestGitExcludePathPlainGitDir: a repository whose .git is a directory is its
+// own common dir.
+func TestGitExcludePathPlainGitDir(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	got, err := gitExcludePath(repo)
+	if err != nil {
+		t.Fatalf("gitExcludePath: %v", err)
+	}
+	if want := filepath.Join(repo, ".git", "info", "exclude"); got != want {
+		t.Errorf("path = %q, want %q", got, want)
+	}
+}
+
+// TestGitExcludePathWorktreeWithoutCommonDir: a worktree gitdir without a
+// commondir file is its own common dir.
+func TestGitExcludePathWorktreeWithoutCommonDir(t *testing.T) {
+	t.Parallel()
+	repo := t.TempDir()
+	gitDir := filepath.Join(repo, ".repo.git", "worktrees", "mayorrig")
+	if err := os.MkdirAll(gitDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".git"), []byte("gitdir: "+gitDir+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := gitExcludePath(repo)
+	if err != nil {
+		t.Fatalf("gitExcludePath: %v", err)
+	}
+	if want := filepath.Join(gitDir, "info", "exclude"); got != want {
+		t.Errorf("path = %q, want %q", got, want)
+	}
+}
+
+// TestGitExcludePathErrors: every failure branch returns the error that
+// explains it, never a path git would not read.
+func TestGitExcludePathErrors(t *testing.T) {
+	t.Parallel()
+
+	t.Run("missing .git", func(t *testing.T) {
+		t.Parallel()
+		if _, err := gitExcludePath(t.TempDir()); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("err = %v, want fs.ErrNotExist", err)
+		}
+	})
+
+	t.Run("not a gitdir file", func(t *testing.T) {
+		t.Parallel()
+		repo := t.TempDir()
+		if err := os.WriteFile(filepath.Join(repo, ".git"), []byte("this is not a gitdir pointer\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := gitExcludePath(repo); err == nil || !strings.Contains(err.Error(), "not a gitdir file") {
+			t.Fatalf("err = %v, want a not-a-gitdir-file error", err)
+		}
+	})
+
+	t.Run("unreadable .git file", func(t *testing.T) {
+		t.Parallel()
+		if os.Geteuid() == 0 {
+			t.Skip("root reads a mode-000 file")
+		}
+		repo := t.TempDir()
+		if err := os.WriteFile(filepath.Join(repo, ".git"), []byte("gitdir: /nowhere\n"), 0000); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := gitExcludePath(repo); err == nil || !strings.Contains(err.Error(), "cannot read .git file") {
+			t.Fatalf("err = %v, want a cannot-read error", err)
+		}
+	})
+}
+
+// TestGitExcludeConfiguredCheckRunRejectsBadGitFile: an unreadable .git
+// pointer is an error verdict, not an exclude that "has no entries".
+func TestGitExcludeConfiguredCheckRunRejectsBadGitFile(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	mayorRig := filepath.Join(townRoot, "testrig", "mayor", "rig")
+	if err := os.MkdirAll(mayorRig, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorRig, ".git"), []byte("garbage\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	result := NewGitExcludeConfiguredCheck().Run(&CheckContext{TownRoot: townRoot, RigName: "testrig"})
+	if result.Status != StatusError {
+		t.Fatalf("status = %v %q, want StatusError", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "Cannot resolve mayor/rig git dir") {
+		t.Errorf("message = %q, want the resolution failure", result.Message)
 	}
 }
 
