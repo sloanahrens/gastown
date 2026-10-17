@@ -1,8 +1,10 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1289,10 +1291,19 @@ func sessionWorkDir(reg *session.PrefixRegistry, sessionName, townRoot string) (
 			// The git worktree is polecats/<name>/<rig>; the legacy layout
 			// keeps the clone at polecats/<name> itself.
 			polecatDir := filepath.Join(townRoot, identity.Rig, "polecats", identity.Name)
-			if info, err := os.Stat(filepath.Join(polecatDir, identity.Rig)); err == nil && info.IsDir() {
-				return filepath.Join(polecatDir, identity.Rig), nil
+			worktree := filepath.Join(polecatDir, identity.Rig)
+			info, err := os.Stat(worktree)
+			switch {
+			case err == nil && info.IsDir():
+				return worktree, nil
+			case err == nil || errors.Is(err, fs.ErrNotExist):
+				return polecatDir, nil
+			default:
+				// Only a missing worktree means the legacy layout; any other
+				// failure (permissions, a file in the path) must not quietly
+				// respawn the pane in the wrong directory.
+				return "", fmt.Errorf("stat polecat worktree %s: %w", worktree, err)
 			}
-			return polecatDir, nil
 		default:
 			return "", fmt.Errorf("unknown session type: %s (role %s, try specifying role explicitly)", sessionName, identity.Role)
 		}

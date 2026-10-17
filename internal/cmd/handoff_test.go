@@ -94,6 +94,7 @@ func TestSessionWorkDir(t *testing.T) {
 		sessionName string
 		mkdirs      []string // created under the town root before the call
 		wantDir     string   // relative to the town root; "" is the town root itself
+		files       []string // regular files created under the town root before the call
 		wantErr     bool
 	}{
 		{
@@ -122,9 +123,17 @@ func TestSessionWorkDir(t *testing.T) {
 		{
 			name:        "legacy polecat clone at the polecat directory",
 			sessionName: "gt-furiosa",
-			mkdirs:      []string{"gastown/polecats/furiosa/.git"},
+			mkdirs:      []string{"gastown/polecats/furiosa"},
 			wantDir:     "gastown/polecats/furiosa",
 			wantErr:     false,
+		},
+		{
+			// A stat failure other than "not found" (here ENOTDIR, the
+			// polecat directory being a file) is not the legacy layout.
+			name:        "stat error other than not-exist is returned",
+			sessionName: "gt-furiosa",
+			files:       []string{"gastown/polecats/furiosa"},
+			wantErr:     true,
 		},
 	}
 
@@ -137,11 +146,23 @@ func TestSessionWorkDir(t *testing.T) {
 					t.Fatalf("mkdir %s: %v", d, err)
 				}
 			}
+			for _, f := range tt.files {
+				path := filepath.Join(townRoot, f)
+				if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+					t.Fatalf("mkdir for %s: %v", f, err)
+				}
+				if err := os.WriteFile(path, nil, 0644); err != nil {
+					t.Fatalf("write %s: %v", f, err)
+				}
+			}
 			wantDir := filepath.Join(townRoot, tt.wantDir)
 
 			gotDir, err := sessionWorkDir(handoffTestRegistry(), tt.sessionName, townRoot)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("sessionWorkDir() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if tt.wantErr {
 				return
 			}
 			if gotDir != wantDir {
