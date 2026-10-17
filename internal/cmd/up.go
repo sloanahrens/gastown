@@ -712,21 +712,32 @@ func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error
 // pinned bead (handoff work), or one sling left hooked or the polecat flow
 // claimed in_progress. polecatPath is polecats/<name>; bd resolves from it up
 // to the rig's .beads, which is where sling writes the hooked bead (gt-b3qpu).
-func polecatHasWork(polecatPath, agentID string) bool {
-	return hasAssignedWork(beads.New(polecatPath), agentID)
+var polecatHasWork = polecatHasWorkIn(func(polecatPath string) beads.Client {
+	return beads.New(polecatPath)
+})
+
+// polecatHasWorkIn is polecatHasWork with the bead store opener passed in.
+func polecatHasWorkIn(open func(polecatPath string) beads.Client) func(polecatPath, agentID string) (bool, error) {
+	return func(polecatPath, agentID string) (bool, error) {
+		return hasAssignedWork(open(polecatPath), agentID)
+	}
 }
 
 // hasAssignedWork reports whether store holds any of agentID's pinned, hooked
-// or in_progress beads.
-func hasAssignedWork(store beads.Client, agentID string) bool {
-	statuses := append(activeWorkStatuses(), beads.IssueStatusPinned)
+// or in_progress beads. A store error is returned, not read as "no work": the
+// caller cannot tell an idle polecat from one it failed to look up.
+func hasAssignedWork(store beads.Client, agentID string) (bool, error) {
+	statuses := append([]beads.IssueStatus{beads.IssueStatusPinned}, activeWorkStatuses()...)
 	work, err := store.ListAssignedIssueStatuses(agentID, statuses...)
-	return err == nil && len(work) > 0
+	if err != nil {
+		return false, err
+	}
+	return len(work) > 0, nil
 }
 
 // startPolecatsWithWorkUsing is startPolecatsWithWork with the has-work check
 // and the session start passed in.
-func startPolecatsWithWorkUsing(townRoot, rigName string, hasWork func(polecatPath, agentID string) bool, start func(polecatName string) error) ([]string, map[string]error) {
+func startPolecatsWithWorkUsing(townRoot, rigName string, hasWork func(polecatPath, agentID string) (bool, error), start func(polecatName string) error) ([]string, map[string]error) {
 	started := []string{}
 	failed := map[string]error{}
 
@@ -763,7 +774,12 @@ func startPolecatsWithWorkUsing(townRoot, rigName string, hasWork func(polecatPa
 
 		// Check if this polecat has work attached (pinned, hooked or in_progress)
 		agentID := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
-		if !hasWork(polecatPath, agentID) {
+		has, err := hasWork(polecatPath, agentID)
+		if err != nil {
+			failed[polecatName] = fmt.Errorf("checking %s for assigned work: %w", agentID, err)
+			continue
+		}
+		if !has {
 			continue
 		}
 

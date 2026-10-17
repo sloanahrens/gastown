@@ -2,9 +2,13 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -134,7 +138,11 @@ func TestPolecatHasWorkHookedAndInProgress(t *testing.T) {
 			if err := store.Update(is.ID, beads.UpdateOptions{Status: &status}); err != nil {
 				t.Fatalf("Update to %s: %v", tc.status, err)
 			}
-			if got := hasAssignedWork(store, agent); got != tc.want {
+			got, err := hasAssignedWork(store, agent)
+			if err != nil {
+				t.Fatalf("hasAssignedWork: %v", err)
+			}
+			if got != tc.want {
 				t.Errorf("hasAssignedWork with a %s bead = %v, want %v", tc.status, got, tc.want)
 			}
 		})
@@ -153,10 +161,93 @@ func TestPolecatHasWorkIgnoresOtherAssignees(t *testing.T) {
 	if err := store.Update(is.ID, beads.UpdateOptions{Status: &status}); err != nil {
 		t.Fatalf("Update: %v", err)
 	}
-	if hasAssignedWork(store, "gastown/polecats/p1") {
-		t.Error("hasAssignedWork counted a bead assigned to another polecat")
+	if got, err := hasAssignedWork(store, "gastown/polecats/p1"); err != nil || got {
+		t.Errorf("hasAssignedWork counted a bead assigned to another polecat: got=%v err=%v", got, err)
 	}
-	if !hasAssignedWork(store, "gastown/polecats/p2") {
-		t.Error("hasAssignedWork missed a hooked bead assigned to the polecat")
+	if got, err := hasAssignedWork(store, "gastown/polecats/p2"); err != nil || !got {
+		t.Errorf("hasAssignedWork missed a hooked bead assigned to the polecat: got=%v err=%v", got, err)
+	}
+}
+
+// failingListStore is a bead store whose assigned-issue lookup fails.
+type failingListStore struct {
+	beads.Client
+	err error
+}
+
+func (s failingListStore) ListAssignedIssueStatuses(string, ...beads.IssueStatus) ([]*beads.Issue, error) {
+	return nil, s.err
+}
+
+// A store error is neither "has work" nor "no work": hasAssignedWork returns
+// it so gt up can report the polecat it could not check.
+func TestHasAssignedWorkReturnsStoreError(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("dolt unreachable")
+	got, err := hasAssignedWork(failingListStore{Client: beadsfake.New(), err: boom}, "gastown/polecats/p1")
+	if !errors.Is(err, boom) || got {
+		t.Fatalf("hasAssignedWork = (%v, %v), want (false, %v)", got, err, boom)
+	}
+}
+
+// The production wiring: polecatHasWorkIn opens the store at the polecat's
+// own directory, and startPolecatsWithWorkUsing starts only the polecat whose
+// hooked bead is there, and reports (rather than skips) the one whose store
+// lookup failed.
+func TestStartPolecatsWithWorkUsingProductionWiring(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rig = "gastown"
+	polecatsDir := filepath.Join(townRoot, rig, "polecats")
+	for _, name := range []string{"busy", "idle", "broken"} {
+		if err := os.MkdirAll(filepath.Join(polecatsDir, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	store := beadsfake.New()
+	is, err := store.Create(beads.CreateOptions{Title: "work", Assignee: rig + "/polecats/busy"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	hooked := string(beads.IssueStatusHooked)
+	if err := store.Update(is.ID, beads.UpdateOptions{Status: &hooked}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	boom := errors.New("dolt unreachable")
+	var mu sync.Mutex
+	var opened []string
+	open := func(polecatPath string) beads.Client {
+		mu.Lock()
+		opened = append(opened, polecatPath)
+		mu.Unlock()
+		if filepath.Base(polecatPath) == "broken" {
+			return failingListStore{Client: store, err: boom}
+		}
+		return store
+	}
+
+	var started []string
+	start := func(name string) error {
+		started = append(started, name)
+		return nil
+	}
+	got, failed := startPolecatsWithWorkUsing(townRoot, rig, polecatHasWorkIn(open), start)
+
+	if len(got) != 1 || got[0] != "busy" || len(started) != 1 || started[0] != "busy" {
+		t.Errorf("started = %v (start called for %v), want only busy", got, started)
+	}
+	if !errors.Is(failed["broken"], boom) || len(failed) != 1 {
+		t.Errorf("failed = %v, want only broken, wrapping the store error", failed)
+	}
+	sort.Strings(opened)
+	want := []string{
+		filepath.Join(polecatsDir, "broken"),
+		filepath.Join(polecatsDir, "busy"),
+		filepath.Join(polecatsDir, "idle"),
+	}
+	if !slices.Equal(opened, want) {
+		t.Errorf("store opened at %v, want each polecat's own directory %v", opened, want)
 	}
 }

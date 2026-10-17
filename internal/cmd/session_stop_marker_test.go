@@ -140,7 +140,7 @@ func TestStartPolecatsWithWorkSkipsParkedPolecat(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(rigPath, "polecats", "garnet"), 0755); err != nil {
 		t.Fatalf("mkdir polecat: %v", err)
 	}
-	hasWork := func(string, string) bool { return true }
+	hasWork := func(string, string) (bool, error) { return true, nil }
 	refused := func(string) error { return errors.New("tmux: refused by test") }
 	startPolecatsWithWork := func(townRoot, rigName string) ([]string, map[string]error) {
 		return startPolecatsWithWorkUsing(townRoot, rigName, hasWork, refused)
