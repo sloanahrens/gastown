@@ -222,12 +222,14 @@ func TestDoctorPositionalCheckNames(t *testing.T) {
 // so a runDoctor that stopped passing its positional arguments or the --check
 // flag to the selection would fail here. An unknown name is refused before any
 // check runs, which keeps the test off the host (gt-m2lqo).
+//
+//testpolicy:allow parallel — runDoctor reads the --check flag variable and the working directory, both process-wide
 func TestRunDoctorRefusesUnknownCheckName(t *testing.T) {
 	townRoot := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GT_TOWN_ROOT", townRoot)
+	//testpolicy:allow no-chdir — the cwd is the input under test: runDoctor finds the town from the working directory
 	t.Chdir(townRoot)
 
 	cases := []struct {
@@ -243,7 +245,11 @@ func TestRunDoctorRefusesUnknownCheckName(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			saved := doctorCheck
-			t.Cleanup(func() { doctorCheck = saved })
+			t.Cleanup(func() {
+				//testpolicy:allow no-global-swap — restores the flag variable swapped below
+				doctorCheck = saved
+			})
+			//testpolicy:allow no-global-swap — runDoctor reads the --check flag variable; it is not an argument
 			doctorCheck = tc.flag
 
 			err := runDoctor(doctorCmd, tc.args)
