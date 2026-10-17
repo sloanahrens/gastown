@@ -126,7 +126,8 @@ The checks marked (fixable) above are repairable one at a time:
   gt doctor fix --help           the fixer's flags
 
 Use --rig to check a specific rig instead of the entire workspace.
-Use --check <name> to run only the named check (repeatable).
+Use --check <name>, or a bare check name ('gt doctor daemon'), to run only the
+named check (repeatable).
 Use --slow to highlight slow checks (default threshold: 1s, e.g. --slow=500ms).
 Use --live-fire to add hooks-live-fire (spawns a real claude -p session
 against a live polecat settings.json to verify a PreToolUse guard actually
@@ -167,7 +168,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 		// as part of a default (unwrapped) 'gt doctor' invocation.
 		d.Register(doctor.NewHooksLiveFireCheck())
 	}
-	if err := selectDoctorChecks(d, doctorCheck); err != nil {
+	if err := selectDoctorChecks(d, doctorCheckNames(doctorCheck, args)); err != nil {
 		return err
 	}
 
@@ -196,9 +197,19 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// selectDoctorChecks narrows d to the checks named by --check. Doctor.Only
-// drops a name nothing registers, so a typo beside a real name would run the
-// real one and exit 0; every unknown name is refused instead (gt-uh7hy).
+// doctorCheckNames joins the --check flag values and the positional arguments
+// into one list of check names, so 'gt doctor daemon' selects what
+// 'gt doctor --check daemon' does instead of running every check (gt-m2lqo).
+func doctorCheckNames(flagNames, args []string) []string {
+	names := make([]string, 0, len(flagNames)+len(args))
+	names = append(names, flagNames...)
+	return append(names, args...)
+}
+
+// selectDoctorChecks narrows d to the named checks, from --check or from
+// positional arguments. Doctor.Only drops a name nothing registers, so a typo
+// beside a real name would run the real one and exit 0; every unknown name is
+// refused instead (gt-uh7hy).
 func selectDoctorChecks(d *doctor.Doctor, names []string) error {
 	if len(names) == 0 {
 		return nil
@@ -214,7 +225,7 @@ func selectDoctorChecks(d *doctor.Doctor, names []string) error {
 		}
 	}
 	if len(unknown) > 0 {
-		return fmt.Errorf("no registered check matches --check %s (run 'gt doctor --help' to list checks)", strings.Join(unknown, ", "))
+		return fmt.Errorf("no registered check matches %s (run 'gt doctor --help' to list checks)", strings.Join(unknown, ", "))
 	}
 	d.Only(names)
 	return nil
