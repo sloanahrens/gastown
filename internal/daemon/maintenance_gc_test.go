@@ -1031,3 +1031,29 @@ func TestMaintenanceGCCycleTimeoutStillEscalates(t *testing.T) {
 		t.Errorf("escalations = %v, want one", f.escalations)
 	}
 }
+
+// A gc that fails for a reason of its own while the daemon is leaving is still
+// a failure: only the call's cancellation is the shutdown's doing.
+func TestMaintenanceGCCycleShutdownDoesNotMaskARealFailure(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d.ctx = ctx
+	d.maint.gcExec = func(_ context.Context, _ *Daemon, db string) error {
+		f.gcCalls = append(f.gcCalls, db)
+		cancel() // the shutdown begins, but the gc fails on its own
+		return errors.New("dolt_gc --full: connection refused")
+	}
+
+	out := d.maintenanceGCCycle([]string{"hq"}, "/unused")
+
+	if out.outcome != gcOutcomeFailed {
+		t.Fatalf("outcome = %v, want failed", out.outcome)
+	}
+	if len(f.escalations) != 1 {
+		t.Errorf("escalations = %v, want one", f.escalations)
+	}
+}

@@ -635,3 +635,40 @@ func TestCatchUpGCSkipsWithAnExternalServer(t *testing.T) {
 		t.Errorf("gc ran against an external server: %v", f.gcCalls)
 	}
 }
+
+// A catch-up cycle cut off by the daemon's shutdown is not an attempt: it
+// neither escalates nor starts the retry gap, so the next daemon's first tick
+// gc's the database again.
+func TestCatchUpGCInterruptedByShutdownIsNotThrottled(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpGCDaemon(t)
+	catchUpGCStale(t, d, "gt")
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d.ctx = ctx
+	d.maint.gcExec = func(ctx context.Context, _ *Daemon, db string) error {
+		f.gcCalls = append(f.gcCalls, db)
+		cancel() // shutdown() cancels d.ctx while the gc runs
+		return ctx.Err()
+	}
+
+	d.runScheduledMaintenance()
+	if len(f.gcCalls) != 1 || len(f.escalations) != 0 {
+		t.Fatalf("calls=%v escalations=%v, want one attempt and no escalation", f.gcCalls, f.escalations)
+	}
+	if at := d.catchUpGCAttemptAt.Load(); at != 0 {
+		t.Errorf("catchUpGCAttemptAt = %d, want 0: a shutdown is not an attempt", at)
+	}
+
+	// The next tick of a daemon that is running again, well inside the gap.
+	d.ctx = context.Background()
+	d.maint.now = func() time.Time { return catchUpNow.Add(5 * time.Minute) }
+	d.maint.gcExec = func(_ context.Context, _ *Daemon, db string) error {
+		f.gcCalls = append(f.gcCalls, db)
+		return nil
+	}
+	d.runScheduledMaintenance()
+	if len(f.gcCalls) != 2 {
+		t.Errorf("gc calls = %v, want a second attempt on the next tick", f.gcCalls)
+	}
+}
