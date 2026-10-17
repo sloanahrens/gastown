@@ -837,15 +837,31 @@ func runRigMenu(cmd *cobra.Command, args []string) error {
 	return execCmd.Run()
 }
 
-func runRigRemove(cmd *cobra.Command, args []string) error {
-	name := args[0]
+// rigRemoveTmux is the tmux surface gt rig remove uses: every session on the
+// server, and an operator stop of one of them. A test supplies both.
+type rigRemoveTmux struct {
+	list func() ([]string, error)
+	stop func(session, reason string) error
+}
 
+func runRigRemove(cmd *cobra.Command, args []string) error {
 	// Find workspace
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
+	sup := operatorSupervisor(townRoot)
+	actor := operatorActor("gt rig remove")
+	return removeRigIn(townRoot, args[0], rigRemoveForce, rigRemoveTmux{
+		list: tmux.NewTmux().ListSessions,
+		stop: func(session, reason string) error { return sup.StopSession(session, reason, actor) },
+	})
+}
+
+// removeRigIn removes rig name from the registry of the town at townRoot,
+// first stopping its tmux sessions when force is set.
+func removeRigIn(townRoot, name string, force bool, tm rigRemoveTmux) error {
 	// Load rigs config
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfig(rigsPath)
@@ -868,20 +884,24 @@ func runRigRemove(cmd *cobra.Command, args []string) error {
 	// falls back to the default "gt", which matches the gastown rig's
 	// sessions, so a mistyped name would stop another rig's agents before
 	// RemoveRig reports it missing (gt-bfo4z).
-	t := tmux.NewTmux()
 	var sessions []string
 	var sessErr error
 	if mgr.RigExists(name) {
-		sessions, sessErr = findRigSessions(t, townRegistry(), name)
+		var all []string
+		if all, sessErr = tm.list(); sessErr != nil {
+			sessErr = fmt.Errorf("listing tmux sessions: %w", sessErr)
+		} else {
+			sessions = rigSessionsIn(townRegistry(), all, name)
+		}
 	}
 	if sessErr != nil {
-		if !rigRemoveForce {
+		if !force {
 			return fmt.Errorf("could not verify session state for rig %s: %w (use --force to skip check)", name, sessErr)
 		}
 		fmt.Printf("  %s Could not check tmux sessions: %v (proceeding due to --force)\n", style.Warning.Render("!"), sessErr)
 	}
 	if len(sessions) > 0 {
-		if !rigRemoveForce {
+		if !force {
 			fmt.Printf("%s Rig %s has %d running tmux session(s):\n",
 				style.Warning.Render("⚠"), name, len(sessions))
 			for _, s := range sessions {
@@ -898,11 +918,9 @@ func runRigRemove(cmd *cobra.Command, args []string) error {
 		// through the supervisor: an operator stop, logged and not refused by
 		// an e-stop (gt-4k3fj.4.1).
 		fmt.Printf("Killing %d tmux session(s) for rig %s...\n", len(sessions), name)
-		sup := operatorSupervisor(townRoot)
-		actor := operatorActor("gt rig remove")
 		var killErrors []string
 		for _, s := range sessions {
-			if err := sup.StopSession(s, "rig remove --force "+name, actor); err != nil {
+			if err := tm.stop(s, "rig remove --force "+name); err != nil {
 				fmt.Printf("  %s Failed to kill session %s: %v\n", style.Warning.Render("!"), s, err)
 				killErrors = append(killErrors, s)
 			} else {

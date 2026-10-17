@@ -1,34 +1,50 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync"
 	"testing"
 )
 
-// fakeTmuxSessions installs a tmux shim on PATH that lists the given sessions
-// and logs every invocation, so a test can see which tmux commands a verb ran
-// without a tmux server. It returns the log's path.
-func fakeTmuxSessions(t *testing.T, sessions ...string) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("tmux shim is POSIX-only; tmux itself does not run on Windows")
-	}
+// recordingRigTmux is a tmux server holding sessions, which records the
+// sessions removeRigIn asked to stop. Every stop fails, so a registered rig's
+// removal ends at the stop and touches nothing else in the town.
+type recordingRigTmux struct {
+	mu      sync.Mutex
+	stopped []string
+}
 
-	binDir := t.TempDir()
-	logPath := filepath.Join(binDir, "tmux.log")
-	script := "#!/bin/sh\n" +
-		`printf '%s\n' "$*" >> "` + logPath + "\"\n" +
-		`for a in "$@"; do if [ "$a" = list-sessions ]; then printf '%s\n' ` +
-		"'" + strings.Join(sessions, "' '") + "'; fi; done\n" +
-		"exit 0\n"
-	if err := os.WriteFile(filepath.Join(binDir, "tmux"), []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake tmux: %v", err)
+func (r *recordingRigTmux) tmux(sessions ...string) rigRemoveTmux {
+	return rigRemoveTmux{
+		list: func() ([]string, error) { return sessions, nil },
+		stop: func(session, _ string) error {
+			r.mu.Lock()
+			defer r.mu.Unlock()
+			r.stopped = append(r.stopped, session)
+			return errors.New("stop refused by test")
+		},
 	}
-	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	return logPath
+}
+
+// rigRemoveTown writes a town whose registry holds the named rigs.
+func rigRemoveTown(t *testing.T, rigs ...string) string {
+	t.Helper()
+	entries := make([]string, len(rigs))
+	for i, name := range rigs {
+		entries[i] = `"` + name + `":{"git_url":"file:///nonexistent"}`
+	}
+	town := t.TempDir()
+	rigsPath := filepath.Join(town, "mayor", "rigs.json")
+	if err := os.MkdirAll(filepath.Dir(rigsPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rigsPath, []byte(`{"version":1,"rigs":{`+strings.Join(entries, ",")+`}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return town
 }
 
 // A rig name the registry does not know has no sessions of its own, but its
@@ -36,37 +52,21 @@ func fakeTmuxSessions(t *testing.T, sessions ...string) string {
 // remove gastwon --force used to stop every gt-* session before it found the
 // rig missing (gt-bfo4z).
 func TestRigRemoveUnknownRigTouchesNoSessions(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		force bool
-	}{
-		{"force", true},
-		{"no force", false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			town := t.TempDir()
-			for path, body := range map[string]string{
-				"mayor/town.json": `{"type":"town","version":2,"name":"test"}`,
-				"mayor/rigs.json": `{"version":1,"rigs":{}}`,
-			} {
-				full := filepath.Join(town, path)
-				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
-					t.Fatal(err)
-				}
-			}
-			t.Chdir(town)
+	t.Parallel()
 
-			logPath := fakeTmuxSessions(t, "gt-witness", "gt-crew-sloan", "gt-furiosa")
-			prevForce := rigRemoveForce
-			rigRemoveForce = tc.force
-			t.Cleanup(func() { rigRemoveForce = prevForce })
+	for _, force := range []bool{true, false} {
+		name := "no force"
+		if force {
+			name = "force"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 
-			err := runRigRemove(rigRemoveCmd, []string{"gastwon"})
+			var rec recordingRigTmux
+			err := removeRigIn(rigRemoveTown(t), "gastwon", force,
+				rec.tmux("gt-witness", "gt-crew-sloan", "gt-furiosa"))
 			if err == nil {
-				t.Fatal("runRigRemove for an unregistered rig = nil, want the not-found error")
+				t.Fatal("removeRigIn for an unregistered rig = nil, want the not-found error")
 			}
 			if !strings.Contains(err.Error(), "gastwon") {
 				t.Errorf("error = %v, want it to name the rig", err)
@@ -74,43 +74,41 @@ func TestRigRemoveUnknownRigTouchesNoSessions(t *testing.T) {
 			if strings.Contains(err.Error(), "running sessions") {
 				t.Errorf("error = %v: refused over sessions of a rig that is not registered", err)
 			}
-
-			log, _ := os.ReadFile(logPath)
-			if strings.Contains(string(log), "kill") {
-				t.Errorf("a session was stopped for an unregistered rig; tmux saw:\n%s", log)
+			if len(rec.stopped) != 0 {
+				t.Errorf("stopped %v for an unregistered rig, want no session touched", rec.stopped)
 			}
 		})
 	}
 }
 
-// The registered rig keeps the old behavior: --force stops its sessions.
-func TestRigRemoveRegisteredRigStopsSessionsWithForce(t *testing.T) {
-	town := t.TempDir()
-	for path, body := range map[string]string{
-		"mayor/town.json": `{"type":"town","version":2,"name":"test"}`,
-		"mayor/rigs.json": `{"version":1,"rigs":{"gastown":{"git_url":"file:///nonexistent"}}}`,
-	} {
-		full := filepath.Join(town, path)
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(full, []byte(body), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	t.Chdir(town)
+// A registered rig keeps the old behavior: without --force its sessions refuse
+// the removal and are left running, and with --force they are stopped.
+func TestRigRemoveRegisteredRigSessions(t *testing.T) {
+	t.Parallel()
 
-	logPath := fakeTmuxSessions(t, "gt-witness")
-	prevForce := rigRemoveForce
-	rigRemoveForce = false
-	t.Cleanup(func() { rigRemoveForce = prevForce })
+	t.Run("no force refuses", func(t *testing.T) {
+		t.Parallel()
 
-	err := runRigRemove(rigRemoveCmd, []string{"gastown"})
-	if err == nil || !strings.Contains(err.Error(), "running sessions") {
-		t.Fatalf("runRigRemove without --force on a rig with sessions = %v, want the running-sessions refusal", err)
-	}
-	log, _ := os.ReadFile(logPath)
-	if strings.Contains(string(log), "kill") {
-		t.Errorf("refusal stopped a session; tmux saw:\n%s", log)
-	}
+		var rec recordingRigTmux
+		err := removeRigIn(rigRemoveTown(t, "gastown"), "gastown", false, rec.tmux("gt-witness"))
+		if err == nil || !strings.Contains(err.Error(), "running sessions") {
+			t.Fatalf("removeRigIn = %v, want the running-sessions refusal", err)
+		}
+		if len(rec.stopped) != 0 {
+			t.Errorf("refusal stopped %v, want no session touched", rec.stopped)
+		}
+	})
+
+	t.Run("force stops its sessions", func(t *testing.T) {
+		t.Parallel()
+
+		var rec recordingRigTmux
+		err := removeRigIn(rigRemoveTown(t, "gastown"), "gastown", true, rec.tmux("gt-witness", "other-1"))
+		if err == nil || !strings.Contains(err.Error(), "failed to kill") {
+			t.Fatalf("removeRigIn = %v, want the aborted-kill error from the failing stop", err)
+		}
+		if got := strings.Join(rec.stopped, ","); got != "gt-witness" {
+			t.Errorf("stopped %q, want only the rig's own session gt-witness", got)
+		}
+	})
 }
