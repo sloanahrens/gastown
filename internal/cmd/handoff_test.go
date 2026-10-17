@@ -509,36 +509,35 @@ func TestPolecatHandoffDoneCmd(t *testing.T) {
 	}
 }
 
-// TestRunHandoffPolecatDryRunDoesNotRunDone: a polecat's handoff --dry-run
+// TestPolecatHandoffDryRunDoesNotRunDone: a polecat's handoff --dry-run
 // previews the gt done and does not run it; without --dry-run it runs once.
-// It mutates package state, so it cannot run in parallel.
-func TestRunHandoffPolecatDryRunDoesNotRunDone(t *testing.T) {
-	for _, tt := range []struct {
-		name     string
-		dryRun   bool
-		wantRuns int
-		wantOut  string
+// A caller that is not a polecat is left to the rest of runHandoff.
+func TestPolecatHandoffDryRunDoesNotRunDone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		env         map[string]string
+		dryRun      bool
+		wantHandled bool
+		wantRuns    int
+		wantOut     string
 	}{
-		{"dry run", true, 0, "Would execute: gt done --status DEFERRED"},
-		{"real run", false, 1, "Polecat detected (Toast)"},
-	} {
+		{"dry run", map[string]string{"GT_ROLE": "gastown/polecats/Toast"}, true, true, 0, "Would execute: gt done --status DEFERRED"},
+		{"real run", map[string]string{"GT_ROLE": "gastown/polecats/Toast"}, false, true, 1, "Polecat detected (Toast)"},
+		{"not a polecat", map[string]string{"GT_ROLE": "gastown/crew/max"}, true, false, 0, ""},
+	}
+	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Setenv("GT_ROLE", "gastown/polecats/Toast")
-			t.Setenv("GT_POLECAT", "")
-
-			origDryRun, origOut, origRun := handoffDryRun, polecatHandoffOut, runPolecatHandoffDone
-			t.Cleanup(func() {
-				handoffDryRun, polecatHandoffOut, runPolecatHandoffDone = origDryRun, origOut, origRun
-			})
-
+			t.Parallel()
 			var out bytes.Buffer
 			runs := 0
-			handoffDryRun = tt.dryRun
-			polecatHandoffOut = &out
-			runPolecatHandoffDone = func(*exec.Cmd) error { runs++; return nil }
-
-			if err := runHandoff(nil, nil); err != nil {
-				t.Fatalf("runHandoff: %v", err)
+			handled, err := polecatHandoff(func(k string) string { return tt.env[k] }, nil, tt.dryRun, &out,
+				func(*exec.Cmd) error { runs++; return nil })
+			if err != nil {
+				t.Fatalf("polecatHandoff: %v", err)
+			}
+			if handled != tt.wantHandled {
+				t.Errorf("handled = %v, want %v", handled, tt.wantHandled)
 			}
 			if runs != tt.wantRuns {
 				t.Errorf("gt done ran %d times, want %d", runs, tt.wantRuns)
