@@ -1247,6 +1247,55 @@ func TestMessagingConfigValidation(t *testing.T) {
 	}
 }
 
+// TestValidateMessagingConfigRejectsListCycle: a list member is sent through
+// the same path as the list, so lists a=[list:b], b=[list:a] sent one message
+// back and forth until the stack overflowed (gt-0lhli).
+func TestValidateMessagingConfigRejectsListCycle(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		lists   map[string][]string
+		wantErr bool
+	}{
+		{
+			name:  "nested list without a cycle",
+			lists: map[string][]string{"a": {"list:b"}, "b": {"gastown/crew/max"}},
+		},
+		{
+			name:  "member names an unknown list",
+			lists: map[string][]string{"a": {"list:missing"}},
+		},
+		{
+			name:    "two lists name each other",
+			lists:   map[string][]string{"a": {"list:b"}, "b": {"list:a"}},
+			wantErr: true,
+		},
+		{
+			name:    "list names itself",
+			lists:   map[string][]string{"a": {"list:a"}},
+			wantErr: true,
+		},
+		{
+			name:    "three lists form a cycle",
+			lists:   map[string][]string{"a": {"list:b"}, "b": {"list:c"}, "c": {"list:a"}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateMessagingConfig(&MessagingConfig{Version: 1, Lists: tt.lists})
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("validateMessagingConfig() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr && !errors.Is(err, ErrCyclicReference) {
+				t.Errorf("validateMessagingConfig() error = %v, want ErrCyclicReference", err)
+			}
+		})
+	}
+}
+
 func TestLoadMessagingConfigNotFound(t *testing.T) {
 	t.Parallel()
 	_, err := LoadMessagingConfig("/nonexistent/path.json")
