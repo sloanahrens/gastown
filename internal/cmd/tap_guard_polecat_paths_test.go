@@ -451,6 +451,28 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		// cd decides where later relative paths land.
 		{"cd into a sibling worktree", "cd " + p.sibling + " && ls", true},
 		{"cd to the town root", "cd " + town + " && ls", true},
+		// A cd moves the directory every later word resolves from: ../coral is a
+		// path inside the polecat's own directory from the worktree, and the
+		// sibling polecat's directory from one level up (gt-g2zd6).
+		{"cd up then rm a sibling polecat dir", "cd .. && rm -rf ../" + p.other, true},
+		{"cd up twice then rm a sibling polecat dir", "cd .. && cd .. && rm -rf " + p.other, true},
+		{"cd up with a semicolon", "cd ..; rm -rf ../" + p.other, true},
+		{"cd -P up then rm a sibling polecat dir", "cd -P .. && rm -rf ../" + p.other, true},
+		{"cd -- up then rm a sibling polecat dir", "cd -- .. && rm -rf ../" + p.other, true},
+		{"pushd up then rm a sibling polecat dir", "pushd .. && rm -rf ../" + p.other, true},
+		{"cd up then redirect into a sibling polecat dir", "cd .. && echo x > ../" + p.other + "/f", true},
+		{"cd up then mv into a sibling polecat dir", "cd .. && mv a ../" + p.other + "/a", true},
+		{"cd up in a subshell", "(cd .. && rm -rf ../" + p.other + ")", true},
+		{"cd up in a brace group", "{ cd ..; rm -rf ../" + p.other + "; }", true},
+		{"cd up inside bash -c", "bash -c 'cd .. && rm -rf ../" + p.other + "'", true},
+		{"cd up inside sh -lc", "sh -lc 'cd .. && cd .. && rm -rf " + p.other + "'", true},
+		{"cd up inside bash -o pipefail -c", "bash -o pipefail -c 'cd .. && rm -rf ../" + p.other + "'", true},
+		{"cd up then a substitution that removes a sibling", "cd .. && echo $(rm -rf ../" + p.other + ")", true},
+		{"cd home then rm a sibling polecat dir by a relative path", "cd ~ && rm -rf gt/" + p.rig + "/polecats/" + p.other, true},
+		{"bare cd then rm a sibling polecat dir by a relative path", "cd && rm -rf gt/" + p.rig + "/polecats/" + p.other, true},
+		{"cd up then git -C a sibling polecat dir", "cd .. && git -C ../" + p.other + " checkout -- .", true},
+		{"cd up then cd into a sibling polecat dir", "cd .. && cd ../" + p.other, true},
+		{"cd with an unresolvable destination then rm", "cd $POLECAT_PATHS_UNSET && rm -rf build", true},
 		// git -C reaches another tree without naming a path anywhere else.
 		{"git -C into a sibling worktree", "git -C " + p.sibling + " checkout -- .", true},
 		{"git -C into the town mayor dir", "git -C " + filepath.Join(town, "mayor") + " status", true},
@@ -485,6 +507,18 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"build in the worktree", "make build", false},
 		{"scoped tests", "GOFLAGS=-p=6 go test ./internal/cmd/...", false},
 		{"cd own worktree then build", "cd " + p.worktree + " && go build ./...", false},
+		{"cd a worktree subdir then rm build", "cd internal && rm -rf build", false},
+		{"cd an absolute worktree subdir then rm build", "cd " + filepath.Join(p.worktree, "internal") + " && rm -rf build", false},
+		{"cd a worktree subdir then test", "cd internal/cmd && go test ./...", false},
+		{"cd a worktree subdir then rm beside it", "cd internal/cmd && rm -rf ../build", false},
+		{"cd up to the polecat dir then ls", "cd .. && ls", false},
+		{"cd up to the polecat dir then rm inside it", "cd .. && rm -rf scratch", false},
+		{"cd -P a worktree subdir then rm build", "cd -P internal && rm -rf build", false},
+		{"cd to /tmp then rm", "cd /tmp/polecat-paths-probe && rm -rf build", false},
+		{"cd out of the town then rm", "cd " + p.root + " && rm -rf elsewhere", false},
+		{"bash -c cd a worktree subdir then rm build", "bash -c 'cd internal && rm -rf build'", false},
+		{"bash script file with a later -c", "bash run.sh -c 'cd .. && ls'", false},
+		{"cd - then ls", "cd - && ls", false},
 		{"write inside own worktree", "cp a.go " + own, false},
 		{"rm a glob inside own worktree", "rm -rf " + filepath.Join(p.worktree, "tmp") + "/*", false},
 		{"mkdir inside own worktree", "mkdir -p " + filepath.Join(p.worktree, "internal", "new"), false},
@@ -951,5 +985,85 @@ func TestSegmentCommandWord(t *testing.T) {
 	}
 	if word, _ := segmentCommandWord([]string{"FOO=bar"}); word != "" {
 		t.Errorf("an assignment-only segment should have no command word, got %q", word)
+	}
+}
+
+func TestCdDestination(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		command string
+		args    []string
+		want    string
+		found   bool
+	}{
+		{"plain", "cd", []string{"src"}, "src", true},
+		{"no operand", "cd", nil, "", false},
+		{"logical flag", "cd", []string{"-L", "src"}, "src", true},
+		{"physical flag", "cd", []string{"-P", "src"}, "src", true},
+		{"end of options", "cd", []string{"--", "-odd"}, "-odd", true},
+		{"end of options with nothing after", "cd", []string{"--"}, "", false},
+		{"previous directory", "cd", []string{"-"}, "-", true},
+		{"pushd directory", "pushd", []string{"src"}, "src", true},
+		{"pushd rotation", "pushd", []string{"+1"}, "", false},
+		{"pushd -n flag", "pushd", []string{"-n", "src"}, "src", true},
+		{"cd operand that starts with a plus", "cd", []string{"+x"}, "+x", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, found := cdDestination(tc.command, tc.args)
+			if got != tc.want || found != tc.found {
+				t.Errorf("cdDestination(%q, %q) = (%q, %v), want (%q, %v)", tc.command, tc.args, got, found, tc.want, tc.found)
+			}
+		})
+	}
+}
+
+func TestShellPayload(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		command string
+		args    []string
+		want    string
+		found   bool
+	}{
+		{"bash -c", "bash", []string{"-c", "cd .. && ls"}, "cd .. && ls", true},
+		{"sh -lc cluster", "sh", []string{"-lc", "ls"}, "ls", true},
+		{"option with a value first", "bash", []string{"-o", "pipefail", "-c", "ls"}, "ls", true},
+		{"set option off first", "bash", []string{"+o", "history", "-c", "ls"}, "ls", true},
+		{"-c without a payload", "bash", []string{"-c"}, "", false},
+		{"script file owns a later -c", "bash", []string{"run.sh", "-c", "ls"}, "", false},
+		{"no -c", "bash", []string{"-x", "run.sh"}, "", false},
+		{"long option is not a cluster", "bash", []string{"--norc", "ls"}, "", false},
+		{"not a shell", "python3", []string{"-c", "print(1)"}, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, found := shellPayload(tc.command, tc.args)
+			if got != tc.want || found != tc.found {
+				t.Errorf("shellPayload(%q, %q) = (%q, %v), want (%q, %v)", tc.command, tc.args, got, found, tc.want, tc.found)
+			}
+		})
+	}
+}
+
+// TestPolecatPathGuardBashCdChainIsBounded pins that a long chain of relative
+// cds, each of which doubles the directories followCd tracks, is refused
+// rather than followed without limit (gt-g2zd6).
+func TestPolecatPathGuardBashCdChainIsBounded(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	var steps []string
+	for i := 0; i < 12; i++ {
+		steps = append(steps, fmt.Sprintf("cd d%d", i))
+	}
+	chain := strings.Join(steps, " && ")
+	if err := p.run(t, "Bash", commandInput(chain)); err == nil {
+		t.Errorf("command %q: expected BLOCK for an untrackable cd chain, got allow", chain)
+	}
+	short := "cd d0 && cd d1 && cd d2 && ls"
+	if err := p.run(t, "Bash", commandInput(short)); err != nil {
+		t.Errorf("command %q: expected allow, got block: %v", short, err)
 	}
 }
