@@ -1922,11 +1922,27 @@ func redirectTargets(command string) []string {
 				i++
 			}
 			j := i + 1
+			// ">&" is bash's redirect-both operator: with a word that is a file
+			// descriptor number or "-" it duplicates or closes that descriptor
+			// (2>&1, >&2, >&-), and any other word is a file ("echo x >& y"
+			// writes y, same as &>y).
+			if j < len(runes) && runes[j] == '&' {
+				j++
+				for j < len(runes) && (runes[j] == ' ' || runes[j] == '\t') {
+					j++
+				}
+				word, next := readShellWord(runes, j)
+				if !isFileDescriptorWord(word) && word != "" {
+					targets = append(targets, word)
+				}
+				i = next - 1
+				continue
+			}
 			for j < len(runes) && (runes[j] == ' ' || runes[j] == '\t') {
 				j++
 			}
-			if j >= len(runes) || runes[j] == '&' {
-				continue // a file-descriptor duplication, not a path
+			if j >= len(runes) {
+				continue
 			}
 			word, next := readShellWord(runes, j)
 			if word != "" {
@@ -1936,6 +1952,25 @@ func redirectTargets(command string) []string {
 		}
 	}
 	return targets
+}
+
+// isFileDescriptorWord reports whether word is one of the forms bash reads as
+// a file-descriptor operation after ">&": a number (2>&1, >&2) or "-" (>&-,
+// close). Any other word is a file name, including one led by a variable whose
+// expansion cannot be known here.
+func isFileDescriptorWord(word string) bool {
+	if word == "-" {
+		return true
+	}
+	if word == "" {
+		return false
+	}
+	for _, r := range word {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // readShellWord reads one shell word starting at start, honoring quotes and

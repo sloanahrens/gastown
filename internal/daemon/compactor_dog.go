@@ -14,7 +14,7 @@ import (
 
 const (
 	defaultCompactorDogInterval = 24 * time.Hour
-	// defaultCompactorCommitThreshold is the commit count at which this patrol
+	// DefaultCompactorCommitThreshold is the commit count at which this patrol
 	// advises. The daemon monitors only — it never rewrites history, and a
 	// count is not a reason to: the line is a report line, not a compaction
 	// trigger.
@@ -26,7 +26,7 @@ const (
 	// scheduled_maintenance's gc is what actually reclaims disk.
 	// Configurable via the "daemon" section of settings/config.json
 	// (patrols.compactor_dog.threshold).
-	defaultCompactorCommitThreshold = 2000
+	DefaultCompactorCommitThreshold = 2000
 	// compactorSizeThreshold is the on-disk size at which this patrol
 	// escalates: 1 GiB, ahead of the 2 GB line past which flattening is the
 	// offline operator procedure (docs/dolt-history-offline.md). Half the
@@ -203,7 +203,7 @@ func compactorDogConfig(config *DaemonPatrolConfig) *CompactorDogConfig {
 }
 
 // compactorDogThreshold returns the configured commit threshold, or
-// defaultCompactorCommitThreshold (2000). This is the commit count at which the
+// DefaultCompactorCommitThreshold (2000). This is the commit count at which the
 // patrol advises; it triggers neither compaction nor an escalation, because
 // the daemon patrol never compacts.
 func compactorDogThreshold(config *DaemonPatrolConfig) int {
@@ -212,7 +212,7 @@ func compactorDogThreshold(config *DaemonPatrolConfig) int {
 			return cd.Threshold
 		}
 	}
-	return defaultCompactorCommitThreshold
+	return DefaultCompactorCommitThreshold
 }
 
 // compactorCondition names one measured property of one database. The pair

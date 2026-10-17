@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/daemon"
 )
 
 // setupTestTown creates a minimal Gas Town workspace for testing.
@@ -724,6 +726,55 @@ func TestConfigSetGet(t *testing.T) {
 			t.Errorf("error = %v, want 'unknown config key'", err)
 		}
 	})
+}
+
+// TestConfigGetCompactorThresholdDefault: with no override, config get prints
+// the daemon's own default for lifecycle.compactor.threshold. It printed 500
+// from a second hardcoded copy while the daemon used 2000.
+func TestConfigGetCompactorThresholdDefault(t *testing.T) {
+	t.Parallel()
+	townRoot := setupTestTownForConfig(t)
+
+	var out bytes.Buffer
+	if err := configGet(townConfigCmdEnv(townRoot, &out), []string{"lifecycle.compactor.threshold"}); err != nil {
+		t.Fatalf("configGet: %v", err)
+	}
+	want := fmt.Sprintf("%d (default)", daemon.DefaultCompactorCommitThreshold)
+	if got := strings.TrimSpace(out.String()); got != want {
+		t.Fatalf("config get lifecycle.compactor.threshold = %q, want %q", got, want)
+	}
+}
+
+// TestConfigSetDefaultAgentRejectsUnknown: `gt config set default_agent` takes
+// the same names `gt config default-agent` does, and stores nothing when it
+// rejects one.
+func TestConfigSetDefaultAgentRejectsUnknown(t *testing.T) {
+	t.Parallel()
+	townRoot := setupTestTownForConfig(t)
+	settingsPath := config.TownSettingsPath(townRoot)
+
+	err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"default_agent", "bogus"})
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("config set default_agent bogus = %v, want a not-found error", err)
+	}
+	loaded, err := config.LoadOrCreateTownSettings(settingsPath)
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if loaded.DefaultAgent == "bogus" {
+		t.Fatalf("default_agent stored %q despite the rejection", loaded.DefaultAgent)
+	}
+
+	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"default_agent", "claude"}); err != nil {
+		t.Fatalf("config set default_agent claude: %v", err)
+	}
+	loaded, err = config.LoadOrCreateTownSettings(settingsPath)
+	if err != nil {
+		t.Fatalf("load settings: %v", err)
+	}
+	if loaded.DefaultAgent != "claude" {
+		t.Fatalf("default_agent = %q, want claude", loaded.DefaultAgent)
+	}
 }
 
 func TestSchedulerConfigSetZero(t *testing.T) {

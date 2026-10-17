@@ -1046,6 +1046,41 @@ func TestRedirectTargets(t *testing.T) {
 	}
 }
 
+// TestRedirectTargetsAmpersandRedirect: bash's ">&" duplicates a file
+// descriptor only when the word is a descriptor number or "-" (2>&1, >&2,
+// >&-); any other word is a file, so "echo x >& sibling.go" writes the
+// sibling worktree and the guard must treat it as a write.
+func TestRedirectTargetsAmpersandRedirect(t *testing.T) {
+	t.Parallel()
+
+	const siblingFile = "/gt/gastown/polecats/coral/gastown/internal.go"
+	for _, tc := range []struct {
+		command string
+		want    []string
+	}{
+		{"echo x >& " + siblingFile, []string{siblingFile}},
+		{"echo x >&" + siblingFile, []string{siblingFile}},
+		{"make 2>&1", nil},
+		{"make >&2", nil},
+		{"make >& 2", nil},
+		{"make >&-", nil},
+	} {
+		if got := redirectTargets(tc.command); strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Errorf("redirectTargets(%q) = %q, want %q", tc.command, got, tc.want)
+		}
+	}
+
+	p := newPolecatTestTown(t)
+	if err := p.run(t, "Bash", commandInput("echo x >& "+filepath.Join(p.sibling, "internal.go"))); err == nil {
+		t.Errorf("redirect >& into the sibling worktree allowed: it is a write, not fd duplication")
+	}
+	for _, allowed := range []string{"make 2>&1", "make >&2"} {
+		if err := p.run(t, "Bash", commandInput(allowed)); err != nil {
+			t.Errorf("%q refused: %v", allowed, err)
+		}
+	}
+}
+
 func TestSegmentCommandWord(t *testing.T) {
 	t.Parallel()
 	word, args := segmentCommandWord([]string{"GOFLAGS=-p=6", "env", "FOO=bar", "make", "build"})
