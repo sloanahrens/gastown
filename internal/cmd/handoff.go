@@ -206,6 +206,15 @@ func polecatHandoff(getenv func(string) string, environ []string, dryRun bool, o
 	return true, run(doneCmd)
 }
 
+// runPolecatDone runs the gt done a polecat's handoff hands it, wired to this
+// process's stdout and stderr. A package variable so a test of runHandoff can
+// count the runs instead of ending its own session.
+var runPolecatDone = func(doneCmd *exec.Cmd) error {
+	doneCmd.Stdout = os.Stdout
+	doneCmd.Stderr = os.Stderr
+	return doneCmd.Run()
+}
+
 func runHandoff(cmd *cobra.Command, args []string) error {
 	reg := townRegistry()
 	// Handle --stdin: read message body from stdin (avoids shell quoting issues)
@@ -240,11 +249,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// GT_POLECAT in their environment from spawning polecats. Only block if the
 	// parsed role is actually polecat (handles compound forms like
 	// "gastown/polecats/Toast"). If GT_ROLE is unset, fall back to GT_POLECAT.
-	handled, err := polecatHandoff(os.Getenv, os.Environ(), handoffDryRun, os.Stdout, func(doneCmd *exec.Cmd) error {
-		doneCmd.Stdout = os.Stdout
-		doneCmd.Stderr = os.Stderr
-		return doneCmd.Run()
-	})
+	handled, err := polecatHandoff(os.Getenv, os.Environ(), handoffDryRun, cmd.OutOrStdout(), runPolecatDone)
 	if handled {
 		return err
 	}

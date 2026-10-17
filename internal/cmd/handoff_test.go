@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
@@ -560,6 +561,51 @@ func TestPolecatHandoffDryRunDoesNotRunDone(t *testing.T) {
 			}
 			if handled != tt.wantHandled {
 				t.Errorf("handled = %v, want %v", handled, tt.wantHandled)
+			}
+			if runs != tt.wantRuns {
+				t.Errorf("gt done ran %d times, want %d", runs, tt.wantRuns)
+			}
+			if !strings.Contains(out.String(), tt.wantOut) {
+				t.Errorf("output = %q, want it to contain %q", out.String(), tt.wantOut)
+			}
+		})
+	}
+}
+
+// TestRunHandoffPolecatDryRunDoesNotRunDone drives runHandoff itself, so it
+// covers the wiring TestPolecatHandoffDryRunDoesNotRunDone cannot: that
+// runHandoff passes --dry-run and the process environment to the polecat branch
+// and reaches the done runner through runPolecatDone.
+//
+//testpolicy:allow parallel — runHandoff reads the --dry-run flag variable, GT_ROLE and runPolecatDone, all process-wide
+func TestRunHandoffPolecatDryRunDoesNotRunDone(t *testing.T) {
+	tests := []struct {
+		name     string
+		dryRun   bool
+		wantRuns int
+		wantOut  string
+	}{
+		{"dry run", true, 0, "Would execute: gt done --status DEFERRED"},
+		{"real run", false, 1, "Polecat detected (Toast)"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			//testpolicy:allow no-env — the process environment is the input under test: runHandoff reads GT_ROLE with os.Getenv
+			t.Setenv("GT_ROLE", "gastown/polecats/Toast")
+			prevDryRun, prevRun := handoffDryRun, runPolecatDone
+			t.Cleanup(func() {
+				//testpolicy:allow no-global-swap — restores the variables swapped below
+				handoffDryRun, runPolecatDone = prevDryRun, prevRun
+			})
+			runs := 0
+			//testpolicy:allow no-global-swap — runHandoff reads the flag variable and the done runner; neither is an argument
+			handoffDryRun, runPolecatDone = tt.dryRun, func(*exec.Cmd) error { runs++; return nil }
+
+			var out bytes.Buffer
+			cmd := &cobra.Command{}
+			cmd.SetOut(&out)
+			if err := runHandoff(cmd, nil); err != nil {
+				t.Fatalf("runHandoff: %v", err)
 			}
 			if runs != tt.wantRuns {
 				t.Errorf("gt done ran %d times, want %d", runs, tt.wantRuns)
