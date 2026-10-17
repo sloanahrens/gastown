@@ -878,6 +878,15 @@ type doneRun struct {
 	deps        doneSubmitDeps
 }
 
+// resolveLandingRemote is the rig's configured landing remote, which can fail
+// closed (gt-fn9e6.18).
+func (r *doneRun) resolveLandingRemote() (string, error) {
+	if r.deps.landingRemote != nil {
+		return r.deps.landingRemote(r.townRoot, r.rigName)
+	}
+	return rig.ResolveLandingRemote(r.townRoot, r.rigName)
+}
+
 // doneSubmission is what a COMPLETED run handed over.
 type doneSubmission struct {
 	sourceIssue *beads.Issue
@@ -934,9 +943,30 @@ func Run(opts Options) error {
 		return err
 	}
 
+	// Get agent bead ID for cross-referencing. Resolved before the first
+	// fallible step so every early return can still record cleanup_status.
+	ctx, actorID := resolveDoneAgentIdentity(opts.Detect, getenv, r.cwd, r.townRoot, r.rigName, r.polecatName)
+	if actorID != "" {
+		r.sender = actorID
+	}
+	r.agentBeadID = ctx.BeadID()
+	r.agent = ctx
+
+	// Recreate the agent bead if it's missing (hq-xu4p). Completion metadata
+	// writes to it; when it's gone every write fails
+	// 'issue not found'.
+	ensureAgentBeadExists(beads.ForAgentBead(beads.New(r.cwd)), r.agentBeadID, ctx)
+
 	// Auto-detect cleanup status if not explicitly provided
 	// This prevents premature polecat cleanup by recording the git state
 	cleanupStatus := opts.CleanupStatus
+	// failRun records the worktree's git state before returning err: a session
+	// that dies on this error must not strand its slot with cleanup_status
+	// missing (hq-vx224).
+	failRun := func(err error) error {
+		selfReportCleanupStatus(r.g, r.branch, beads.ForAgentBead(beads.New(filepath.Join(r.townRoot, r.rigName))), r.agentBeadID, cleanupStatus)
+		return err
+	}
 	if cleanupStatus == "" {
 		cleanupStatus = observeCleanupStatus(r.g, r.branch)
 	}
@@ -945,7 +975,7 @@ func Run(opts Options) error {
 	}
 	if cleanupStatus == "uncommitted" {
 		if err := autoSaveUncommittedWork(r.g, r.cwd, r.branch, exitType); err != nil {
-			return err
+			return failRun(err)
 		}
 		// Re-observe rather than assume the safety net caught everything: a
 		// failed add or commit leaves the work uncommitted, and the status the
@@ -961,18 +991,6 @@ func Run(opts Options) error {
 		r.issueID = info.Issue
 	}
 
-	// Get agent bead ID for cross-referencing.
-	ctx, actorID := resolveDoneAgentIdentity(opts.Detect, getenv, r.cwd, r.townRoot, r.rigName, r.polecatName)
-	if actorID != "" {
-		r.sender = actorID
-	}
-	r.agentBeadID = ctx.BeadID()
-	r.agent = ctx
-
-	// Recreate the agent bead if it's missing (hq-xu4p). Completion metadata
-	// writes to it; when it's gone every write fails
-	// 'issue not found'.
-	ensureAgentBeadExists(beads.ForAgentBead(beads.New(r.cwd)), r.agentBeadID, ctx)
 	var assignedIssueIDs []string
 	loadAssignedIssueIDs := func() []string {
 		if assignedIssueIDs == nil && r.sender != "" {
@@ -987,7 +1005,7 @@ func Run(opts Options) error {
 		if hookIssue, ambiguous := selectAssignedIssue("", loadAssignedIssueIDs()); hookIssue != "" {
 			r.issueID = hookIssue
 		} else if ambiguous {
-			return fmt.Errorf("multiple active assignments found for %s; cannot infer issue from hook. Use --issue to disambiguate", r.sender)
+			return failRun(fmt.Errorf("multiple active assignments found for %s; cannot infer issue from hook. Use --issue to disambiguate", r.sender))
 		}
 	}
 
@@ -1004,7 +1022,7 @@ func Run(opts Options) error {
 			fmt.Printf("  Use --issue to override if the branch-derived id is actually correct.\n\n")
 			r.issueID = hookIssue
 		} else if ambiguous {
-			return fmt.Errorf("branch %q embeds issue %s but %s has multiple active assignments; use --issue to disambiguate", r.branch, info.Issue, r.sender)
+			return failRun(fmt.Errorf("branch %q embeds issue %s but %s has multiple active assignments; use --issue to disambiguate", r.branch, info.Issue, r.sender))
 		}
 	}
 
@@ -1034,8 +1052,7 @@ func Run(opts Options) error {
 			// Nothing is reported done, but the worktree's git state is still
 			// recorded: a session that dies before re-running gt done must not
 			// strand its slot (hq-vx224).
-			selfReportCleanupStatus(r.g, r.branch, beads.ForAgentBead(beads.New(filepath.Join(r.townRoot, r.rigName))), r.agentBeadID, cleanupStatus)
-			return err
+			return failRun(err)
 		}
 	} else {
 		fmt.Printf("%s Signaling %s\n", style.Bold.Render("→"), exitType)
@@ -1223,7 +1240,7 @@ func submitForLanding(r *doneRun) error {
 	// (gt-fn9e6.9); a Forgejo remote_url no remote carries fails closed here,
 	// before anything is fetched or pushed (gt-fn9e6.18).
 	repo := r.deps.repo
-	landingRemote, err := rig.ResolveLandingRemote(r.townRoot, r.rigName)
+	landingRemote, err := r.resolveLandingRemote()
 	if err != nil {
 		return err
 	}
@@ -1241,7 +1258,7 @@ func submitForLanding(r *doneRun) error {
 		return fmt.Errorf("counting commits ahead of %s: %w", baseRef, err)
 	}
 	if aheadCount == 0 {
-		return completeWithoutCode(r, sub, target, baseRef, isNoMergeTask)
+		return completeWithoutCode(r, sub, target, baseRef, landingRemote, isNoMergeTask)
 	}
 	if reviewOnlySource {
 		return fmt.Errorf("cannot complete review-only issue %s with commits ahead of %s; add a fresh review evidence comment and complete without code changes", r.issueID, baseRef)
@@ -1278,7 +1295,9 @@ func submitForLanding(r *doneRun) error {
 
 	// Push submodule commits first, so the parent's pointer never names a
 	// commit the submodule's remote lacks (gt-dzs).
-	r.deps.pushSubmodules(baseRef)
+	if err := r.deps.pushSubmodules(baseRef); err != nil {
+		return err
+	}
 	if err := pushBranchForLanding(r, sub.sourceBD, head, baseRef); err != nil {
 		return err
 	}
@@ -1363,12 +1382,14 @@ func resolveDoneTarget(r *doneRun, source *beads.Issue) (string, error) {
 // target is the resolved landing branch (--target, the bead's base_branch or
 // the rig default): the already-landed check and the close record use it, so
 // work bound for a non-default branch is verified there, not on the default.
+// landingRemote is the rig's landing remote, the one the branch was pushed to:
+// the pushed-branch guard and the landed check read it, not a fixed origin.
 // Polecats must have at least one commit unless the work is non-code
 // (gastown#1484). Only an explicit --cleanup-status clean, or a bead the
 // polecat already closed, passes that guard: the observed "clean" of a fresh
 // branch is what a polecat that did nothing reports too. The error text must
 // not mention --cleanup-status=clean: agents read errors and self-bypass.
-func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string, isNoMergeTask bool) error {
+func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef, landingRemote string, isNoMergeTask bool) error {
 	repo := r.deps.repo
 	alreadyClosed := sub.sourceIssue != nil && sub.sourceIssue.Status == string(beads.StatusClosed)
 	if r.opts.polecatEnv && r.opts.cleanupStatus != "clean" && !isNoMergeTask && !alreadyClosed {
@@ -1377,8 +1398,8 @@ func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string,
 		// BranchPushedToRemote alone is not proof: with no remote branch it
 		// compares HEAD against origin's default branch, which a fresh
 		// branch trivially satisfies, so origin must hold the branch.
-		pushed, unpushed, pushErr := repo.BranchPushedToRemote(r.branch, "origin")
-		remoteTip, tipErr := repo.PushRemoteBranchTip("origin", r.branch)
+		pushed, unpushed, pushErr := repo.BranchPushedToRemote(r.branch, landingRemote)
+		remoteTip, tipErr := repo.PushRemoteBranchTip(landingRemote, r.branch)
 		if pushErr != nil || tipErr != nil || remoteTip == "" || !pushed || unpushed != 0 {
 			return fmt.Errorf("cannot complete: no commits on branch ahead of %s\n"+
 				"Polecats must have at least 1 commit to submit.\n"+
@@ -1421,12 +1442,12 @@ func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef string,
 
 	closeReason := "Completed with no code changes (already fixed or already landed)"
 	if !isNoMergeTask {
-		if repo.ForkBackedRemote("origin") {
+		if repo.ForkBackedRemote(landingRemote) {
 			return fmt.Errorf("cannot close no-code bead in fork/upstream mode: %s has no commits ahead of %s; use the fork PR flow instead", r.branch, baseRef)
 		}
 		headSHA, _ := repo.Rev("HEAD")
-		if verifyErr := repo.VerifyPushedCommitReachableFromPushTarget("origin", target, headSHA); verifyErr != nil {
-			noteVerifiedPushFailure(bd, r.cwd, r.issueID, target, headSHA, verifyErr)
+		if verifyErr := repo.VerifyPushedCommitReachableFromPushTarget(landingRemote, target, headSHA); verifyErr != nil {
+			noteVerifiedPushFailure(bd, r.cwd, r.issueID, target, headSHA, verifyErr, !alreadyClosed)
 			return fmt.Errorf("cannot close no-code bead: %w", verifyErr)
 		}
 		if headSHA != "" {
@@ -1525,7 +1546,7 @@ func runDoneLocalGate(r *doneRun, head string) error {
 // assumed origin. Its resolution can fail closed; submitForLanding reaches it
 // first (gt-fn9e6.18).
 func pushBranchForLanding(r *doneRun, sourceBD beads.Client, head, baseRef string) error {
-	remote, err := rig.ResolveLandingRemote(r.townRoot, r.rigName)
+	remote, err := r.resolveLandingRemote()
 	if err != nil {
 		return err
 	}
@@ -1543,7 +1564,7 @@ func pushBranchForLanding(r *doneRun, sourceBD beads.Client, head, baseRef strin
 		func() error { return verifyPushLanded(r.deps.repo, remote, r.townRoot, r.rigName, r.branch, head) },
 		r.deps.sleep, r.deps.retryDelays)
 	if verifyErr != nil {
-		noteVerifiedPushFailure(sourceBD, r.cwd, r.issueID, r.branch, head, verifyErr)
+		noteVerifiedPushFailure(sourceBD, r.cwd, r.issueID, r.branch, head, verifyErr, true)
 		msg := unlandedPushMessage(r.branch, firstErr, verifyErr)
 		if lastPushErr != nil {
 			return doneExit(doneExitPushFailed, msg, verifyErr)
@@ -1671,23 +1692,27 @@ func reportDone(r *doneRun, exitType string) error {
 	return nil
 }
 
-// pushSubmoduleChanges detects submodules modified between baseRef
-// and HEAD, and pushes each submodule's new commit to its remote before the
-// parent repo push. This prevents the parent's submodule pointer from
-// referencing commits that don't exist on the submodule's remote (gt-dzs).
 // submodulePusher is what pushSubmoduleChanges needs from the worktree.
 type submodulePusher interface {
 	SubmoduleChanges(base, head string) ([]git.SubmoduleChange, error)
 	PushSubmoduleCommit(path, sha, remote string) error
 }
 
-func pushSubmoduleChanges(g submodulePusher, baseRef string) {
+// pushSubmoduleChanges detects submodules modified between baseRef
+// and HEAD, and pushes each submodule's new commit to its remote before the
+// parent repo push. This prevents the parent's submodule pointer from
+// referencing commits that don't exist on the submodule's remote (gt-dzs).
+//
+// A refused submodule push stops the submit: the parent would otherwise be
+// pushed and marked ready to land with a gitlink to a commit the submodule's
+// remote lacks, which breaks every checkout of the landed tree.
+func pushSubmoduleChanges(g submodulePusher, baseRef string) error {
 	subChanges, err := g.SubmoduleChanges(baseRef, "HEAD")
 	if err != nil {
 		// Non-fatal: repos without submodules return nil, nil.
 		// Only warn if the error is real (not just "no submodules").
 		style.PrintWarning("could not detect submodule changes: %v", err)
-		return
+		return nil
 	}
 	for _, sc := range subChanges {
 		if sc.NewSHA == "" {
@@ -1696,11 +1721,11 @@ func pushSubmoduleChanges(g submodulePusher, baseRef string) {
 		sha := ShortSHA(sc.NewSHA)
 		fmt.Printf("Pushing submodule %s (%s)...\n", sc.Path, sha)
 		if subPushErr := g.PushSubmoduleCommit(sc.Path, sc.NewSHA, "origin"); subPushErr != nil {
-			style.PrintWarning("submodule push failed for %s: %v (parent push may fail)", sc.Path, subPushErr)
-		} else {
-			fmt.Printf("%s Submodule %s pushed\n", style.Bold.Render("✓"), sc.Path)
+			return fmt.Errorf("pushing submodule %s at %s to origin: %w\nThe parent branch was not pushed: its gitlink would name a commit the submodule remote lacks. Fix the submodule push, then re-run gt done", sc.Path, sha, subPushErr)
 		}
+		fmt.Printf("%s Submodule %s pushed\n", style.Bold.Render("✓"), sc.Path)
 	}
+	return nil
 }
 
 func forceCloseIssueWithRetry(closeFn func(string, ...string) error, issueID, reason, successFormat string) error {
@@ -1756,7 +1781,11 @@ func NotifyDoneEscalated(bd beads.Client, issueID string) {
 	fmt.Printf("%s Recorded escalation on %s\n", style.Bold.Render("✓"), issueID)
 }
 
-func noteVerifiedPushFailure(sourceBD beads.Client, cwd, issueID, branch, commit string, verifyErr error) {
+// noteVerifiedPushFailure records a push or landing check that could not be
+// verified on the bead. reopen sets the bead back to in_progress; the no-code
+// path passes false for a bead the polecat already closed, because reopening
+// it would trip the zero-commit guard on the retry.
+func noteVerifiedPushFailure(sourceBD beads.Client, cwd, issueID, branch, commit string, verifyErr error, reopen bool) {
 	if issueID == "" || cwd == "" {
 		return
 	}
@@ -1765,8 +1794,10 @@ func noteVerifiedPushFailure(sourceBD beads.Client, cwd, issueID, branch, commit
 		routed, _, _ := routedIssueBeads(cwd, issueID)
 		bd = routed
 	}
-	inProgress := "in_progress"
-	_ = bd.Update(issueID, beads.UpdateOptions{Status: &inProgress})
+	if reopen {
+		inProgress := "in_progress"
+		_ = bd.Update(issueID, beads.UpdateOptions{Status: &inProgress})
+	}
 	msg := fmt.Sprintf("verified_push_failed: commit %s not verified on origin/%s: %v", commit, branch, verifyErr)
 	_ = bd.AddComment(issueID, msg)
 }

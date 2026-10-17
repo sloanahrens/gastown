@@ -84,6 +84,11 @@ func isCrewActor(actor string) bool {
 func crewBeadFromBranch(branch string, routed func(prefix string) bool) string {
 	id := parseBranchName(branch).Issue
 	if id == "" {
+		if m := embeddedIssuePattern.FindStringSubmatch(branch); len(m) > 1 {
+			id = m[1]
+		}
+	}
+	if id == "" {
 		return ""
 	}
 	if prefix := beads.ExtractPrefix(id); prefix == "" || !routed(prefix) {

@@ -63,6 +63,12 @@ type fakeDoneRepo struct {
 	// verifyErr makes the worktree's own origin query fail to run.
 	verifyErr error
 
+	// laggingRemotes are remotes that hold nothing the branch pushed: a
+	// mirror that has not caught up with the landing remote.
+	laggingRemotes map[string]bool
+	// reachableRemotes are the remotes the no-code landed check asked.
+	reachableRemotes []string
+
 	pushes   []string // "<branch> <sha> lease=<expected>"
 	verified []string // targets VerifyPushedCommitReachableFromPushTarget ran against
 
@@ -136,6 +142,9 @@ func (f *fakeDoneRepo) AbortRebase() error {
 }
 
 func (f *fakeDoneRepo) BranchPushedToRemote(localBranch, remote string) (bool, int, error) {
+	if f.laggingRemotes[remote] {
+		return false, 0, nil
+	}
 	tip := f.origin[localBranch]
 	if tip == "" && f.preservedByDefault {
 		// git.BranchPreservationStatus with no remote branch: HEAD is judged
@@ -149,7 +158,8 @@ func (f *fakeDoneRepo) ForkBackedRemote(string) bool { return false }
 
 func (f *fakeDoneRepo) VerifyPushedCommitReachableFromPushTarget(remote, branch, commit string) error {
 	f.verified = append(f.verified, branch)
-	if f.reachable[branch][commit] {
+	f.reachableRemotes = append(f.reachableRemotes, remote)
+	if !f.laggingRemotes[remote] && f.reachable[branch][commit] {
 		return nil
 	}
 	return fmt.Errorf("commit %s is not reachable from %s/%s", commit, remote, branch)
@@ -171,6 +181,9 @@ func (f *fakeDoneRepo) VerifyPushedCommit(remote, branch, commit string) error {
 func (f *fakeDoneRepo) PushRemoteBranchTip(remote, branch string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.laggingRemotes[remote] {
+		return "", nil
+	}
 	return f.origin[branch], nil
 }
 
@@ -305,7 +318,7 @@ func newSubmitHarness(t *testing.T) *submitHarness {
 		localGate:      func(string, string, string) (land.Gate, error) { return h.gate, nil },
 		checkBranch:    func(string, doneSubmission) error { h.stages = append(h.stages, "check@"+h.repo.head); return nil },
 		rewriteBranch:  func(string, doneSubmission) error { h.stages = append(h.stages, "rewrite@"+h.repo.head); return nil },
-		pushSubmodules: func(string) { h.stages = append(h.stages, "submodules") },
+		pushSubmodules: func(string) error { h.stages = append(h.stages, "submodules"); return nil },
 		sleep:          func(d time.Duration) { h.sleeps = append(h.sleeps, d) },
 		retryDelays:    pushLandingRetryDelays,
 	}
