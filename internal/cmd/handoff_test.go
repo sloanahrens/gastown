@@ -1371,33 +1371,40 @@ func TestBuildRestartCommand_CarriesNoParentCredentials(t *testing.T) {
 
 // TestHandoffSessionDryRunSkipsMoleculeCleanup: a self-handoff --dry-run only
 // previews, so it must not close the attached molecule; a live one closes it
-// once, before the mail send (gt-fmhjf). The mail send fails in the live run
-// so no pane is respawned.
+// once, before the session env update and the mail send (gt-fmhjf). The mail
+// send fails in the live run so no pane is respawned.
+//
+// It drives handoffSession with fakes, not runHandoff: runHandoff needs a tmux
+// session, TMUX_PANE and the handoff cooldown before it reaches the cleanup,
+// and the dry-run flag reaches handoffSession as a field, not through
+// handoffDryRun.
 func TestHandoffSessionDryRunSkipsMoleculeCleanup(t *testing.T) {
 	t.Parallel()
 	mailErr := errors.New("dolt down")
 	tests := []struct {
-		name         string
-		dryRun       bool
-		wantCleanups int
-		wantMails    int
-		wantErr      error
+		name      string
+		dryRun    bool
+		wantCalls []string
+		wantErr   error
 	}{
-		{"dry run leaves the molecule alone", true, 0, 0, nil},
-		{"live run closes it once", false, 1, 1, mailErr},
+		{"dry run leaves the molecule alone", true, nil, nil},
+		{"live run closes it before the env update and the mail", false,
+			[]string{"cleanupMolecule", "updateSessionEnv", "sendMail"}, mailErr},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			var cleanups, mails int
+			var calls []string
 			steps := handoffSteps{
 				buildPlan: func(string, buildRestartCommandOpts) (restartPlan, error) {
 					return restartPlan{Command: "true"}, nil
 				},
-				updateSessionEnv: func(*session.PrefixRegistry, *tmux.Tmux, string) {},
-				cleanupMolecule:  func() { cleanups++ },
+				updateSessionEnv: func(*session.PrefixRegistry, *tmux.Tmux, string) {
+					calls = append(calls, "updateSessionEnv")
+				},
+				cleanupMolecule: func() { calls = append(calls, "cleanupMolecule") },
 				sendMail: func(string, string) (string, error) {
-					mails++
+					calls = append(calls, "sendMail")
 					return "", mailErr
 				},
 				logNoPersist: func(string, string, error) {},
@@ -1412,11 +1419,8 @@ func TestHandoffSessionDryRunSkipsMoleculeCleanup(t *testing.T) {
 			if !errors.Is(err, tt.wantErr) {
 				t.Errorf("err = %v, want %v", err, tt.wantErr)
 			}
-			if cleanups != tt.wantCleanups {
-				t.Errorf("molecule cleanup ran %d times, want %d", cleanups, tt.wantCleanups)
-			}
-			if mails != tt.wantMails {
-				t.Errorf("mail sent %d times, want %d", mails, tt.wantMails)
+			if !slices.Equal(calls, tt.wantCalls) {
+				t.Errorf("calls = %v, want %v", calls, tt.wantCalls)
 			}
 		})
 	}
