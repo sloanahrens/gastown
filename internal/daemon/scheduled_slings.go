@@ -240,6 +240,10 @@ type scheduledSlingRunner interface {
 	// runGate runs the entry's gate_command under ctx's deadline and returns
 	// its combined output and run error (see scheduledGateAllows).
 	runGate(ctx context.Context, e ScheduledSlingEntry) ([]byte, error)
+	// admit reports the town's reason for refusing this entry's sling right
+	// now — the pool at its cap, the merge queue over its limit — or "" when
+	// the sling has a seat (dispatch.SlingRefusalMarker is the shared contract).
+	admit(ctx context.Context, e ScheduledSlingEntry) (string, error)
 }
 
 const (
@@ -247,6 +251,9 @@ const (
 	scheduledSlingCommandTimeout = 5 * time.Minute
 	// scheduledSlingLookupTimeout bounds the bead read after a sling timed out.
 	scheduledSlingLookupTimeout = 30 * time.Second
+	// scheduledSlingAdmitTimeout bounds the capacity pre-flight, which runs on
+	// its own clock so a slow probe does not leave the sling below less budget.
+	scheduledSlingAdmitTimeout  = 30 * time.Second
 	scheduledSlingEscalateAfter = 3
 )
 
@@ -326,6 +333,31 @@ func (r *execScheduledSlingRunner) sling(ctx context.Context, beadID, branch str
 		return fmt.Errorf("gt sling %s: %w: %s", beadID, err, slingErrorLine(string(stderr)))
 	}
 	return nil
+}
+
+// admit asks `gt sling --dry-run` — the route the live sling would take, a
+// refusal included — so the answer is read before the run bead that refusal
+// would cost exists. The preview prints the refusal on stdout where the live
+// sling prints it on stderr, so both streams are searched for the marker
+// (dispatch.SlingRefusalReason).
+func (r *execScheduledSlingRunner) admit(ctx context.Context, e ScheduledSlingEntry) (string, error) {
+	args := []string{"sling", e.Formula, e.Rig, "--dry-run", "--no-boot"}
+	if e.Agent != "" {
+		args = append(args, "--agent="+e.Agent)
+	}
+	args = append(args, "--actor=daemon/scheduled:"+e.Name)
+	cmd := exec.CommandContext(ctx, r.gtPath, args...)
+	cmd.Dir = r.townRoot
+	cmd.Env = daemonGTEnv(bdMutationRoutingEnv(r.townRoot))
+	util.SetProcessGroup(cmd)
+	stdout, stderr, err := runWith(r.execCmd, cmd)
+	if reason, ok := dispatch.SlingRefusalReason(string(stdout) + "\n" + string(stderr)); ok {
+		return reason, nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("gt sling --dry-run: %w: %s", err, slingErrorLine(string(stderr)))
+	}
+	return "", nil
 }
 
 // slingErrorLine is the one-line summary of a failed sling's output: the
@@ -538,6 +570,22 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	if !d.scheduledGateAllows(ctx, r, e) {
 		return nil
 	}
+	// Asking before the run bead exists costs one probe; the sling's own refusal
+	// costs a bead created and failed-closed on every tick the town stays full
+	// (gt-ttqq8). A spec-dispatched run is not slung by this patrol, so it has
+	// no capacity to pre-check.
+	if e.Dispatch != scheduledDispatchSpec {
+		reason, err := d.scheduledSlingAdmits(ctx, r, e)
+		if err != nil {
+			// A probe that cannot answer is not the town at capacity (the pool's
+			// own posture on an uncountable seat read): dispatch as before, and
+			// let the sling's refusal be the backstop.
+			d.logger.Printf("scheduled_slings: %s: capacity pre-flight could not answer (%v); dispatching as before", e.Name, err)
+		} else if reason != "" {
+			d.logger.Printf("scheduled_slings: %s: deferred before creating a run bead: %s", e.Name, reason)
+			return &scheduledSlingDeferred{cause: errors.New(reason)}
+		}
+	}
 	// The gate ran on its own clock; create and sling start a full budget, so a
 	// slow gate does not cut gt sling short.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.scheduledSlingBudget())
@@ -574,6 +622,14 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 		return err
 	}
 	return nil
+}
+
+// scheduledSlingAdmits runs the runner's capacity pre-flight on its own budget:
+// gt sling's route decision does not spend the entry's sling budget.
+func (d *Daemon) scheduledSlingAdmits(ctx context.Context, r scheduledSlingRunner, e ScheduledSlingEntry) (string, error) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scheduledSlingAdmitTimeout)
+	defer cancel()
+	return r.admit(ctx, e)
 }
 
 // resumeReopenedScheduledRun slings a reopened run bead again on the branch the

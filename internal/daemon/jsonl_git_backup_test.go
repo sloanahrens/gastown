@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"maps"
+	"math"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -965,6 +966,100 @@ func TestRecomputeSpikeBaseline_CommitHistoryOutranksWarmCache(t *testing.T) {
 		if e.Source == spikeSourceCache {
 			t.Errorf("a readable commit history must contribute no cached entries, got %+v", e)
 		}
+	}
+}
+
+// TestVerifyExportCounts_ZeroBaselineGrowth: a database whose committed level
+// is 0 has no ratio to divide by — |current-0|/0 is +Inf, which beat every
+// threshold — and since a halted tick commits nothing, the level stayed 0, so
+// every later run halted on the same non-measurement and the database could
+// never back up at all (gt-ttqq8). Growth is measured against the small-change
+// floor instead: finite, and a bulk load into an empty database still halts for
+// an operator to accept.
+func TestVerifyExportCounts_ZeroBaselineGrowth(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	gitRepo := t.TempDir()
+	initGitRepo(t, d, gitRepo)
+	os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755)
+	commitBackup(t, d, gitRepo, "testdb", 0)
+
+	spikes, err := d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 25}, 0.20)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(spikes) != 1 {
+		t.Fatalf("0 → 25 = %+v, want one spike: growth past the floor from empty is the bulk load an operator confirms", spikes)
+	}
+	if math.IsInf(spikes[0].Delta, 0) || math.IsNaN(spikes[0].Delta) {
+		t.Errorf("delta = %v; a zero baseline must not divide to a non-finite ratio", spikes[0].Delta)
+	}
+	if spikes[0].Previous != 0 || spikes[0].Current != 25 {
+		t.Errorf("spike = %+v, want 0 → 25", spikes[0])
+	}
+
+	// Below the floor the same growth is an ordinary small change, so a database
+	// that fills a few records at a time backs up unattended.
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 15}, 0.20)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(spikes) != 0 {
+		t.Errorf("0 → 15 = %+v, want no spike below the small-change floor", spikes)
+	}
+
+	// Once a level is committed the guard measures as usual again.
+	commitBackup(t, d, gitRepo, "testdb", 25)
+	spikes, err = d.verifyExportCounts(gitRepo, []string{"testdb"}, map[string]int{"testdb": 120}, 0.20)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(spikes) != 1 || spikes[0].Previous != 25 || spikes[0].Current != 120 {
+		t.Errorf("25 → 120 = %+v, want one spike measured against 25", spikes)
+	}
+}
+
+// acceptHintSubject returns the commit subject a halt escalation tells the
+// operator to land.
+func acceptHintSubject(t *testing.T, reason string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(reason, "-m ")
+	if !ok {
+		t.Fatalf("the halt escalation names no commit to land:\n%s", reason)
+	}
+	subject, err := strconv.Unquote(strings.TrimSpace(rest))
+	if err != nil {
+		t.Fatalf("the named commit subject is not a quoted string (%v): %q", err, rest)
+	}
+	return subject
+}
+
+// TestSyncJsonlGitBackupZeroBaselineGrowthHaltsWithTheAcceptPath: what a halt
+// names must be a subject the baseline parser reads, or accepting the export is
+// a command that leaves the patrol halted — the failure gt-ttqq8 is about. The
+// escalation carries the counts this run measured, under the metric the writer
+// itself records, so landing it is the level the next tick compares against.
+func TestSyncJsonlGitBackupZeroBaselineGrowthHaltsWithTheAcceptPath(t *testing.T) {
+	t.Parallel()
+	lines := 25
+	var logs strings.Builder
+	d, rec, gitRepo := metricChangeDaemon(t, seedSubjectPrefix+"hq=0", &lines, &logs)
+
+	d.syncJsonlGitBackup()
+
+	open := rec.OpenEscalations(alertKeyJSONLSpike)
+	if len(open) != 1 {
+		t.Fatalf("open spike escalations = %+v, want one", open)
+	}
+	subject := acceptHintSubject(t, open[0].Reason)
+	if got := parseCommitCounts(subject)["hq"]; got != 25 {
+		t.Errorf("the accept subject %q names hq=%d, want the level this run measured (25)", subject, got)
+	}
+	if v := parseCommitVersion(subject); v != countMetricVersion {
+		t.Errorf("the accept subject %q reads as metric version %d, want %d", subject, v, countMetricVersion)
+	}
+	if subjects := backupSubjects(t, d, gitRepo); len(subjects) != 1 {
+		t.Errorf("a halted tick committed: %q", subjects)
 	}
 }
 
@@ -2094,6 +2189,69 @@ func TestRunGitIndexOp_OtherFailuresAreNotRetried(t *testing.T) {
 	failure := errors.New("git add: fatal: pathspec 'x' did not match any files")
 	if err := d.runGitIndexOp(gitRepo, "git add", func() error { calls++; return failure }); !errors.Is(err, failure) || calls != 1 {
 		t.Fatalf("runGitIndexOp = %v after %d call(s); want the failure, not retried", err, calls)
+	}
+}
+
+// TestCommitAndPushJsonlBackup_ExhaustedLocalBudgetFailsFast is the gt-ttqq8
+// regression for the phase deadline: the local commands share one, so
+// time.Until(localDeadline) reaches zero once an earlier one has spent it, and
+// the git runner sets a context timeout only above zero (internal/git/exec.go)
+// — the commit after that ran with no deadline at all. A commit that hangs
+// holds jsonlGitBackupRunning, and every later backup trigger skips while it
+// does. The phase refuses the command instead, from the first it cannot bound.
+func TestCommitAndPushJsonlBackup_ExhaustedLocalBudgetFailsFast(t *testing.T) {
+	t.Parallel()
+	d, _ := backupTestDaemon(t)
+	gitRepo := t.TempDir()
+	initGitRepo(t, d, gitRepo)
+	if err := os.MkdirAll(filepath.Join(gitRepo, "testdb"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeNLines(t, filepath.Join(gitRepo, "testdb", "issues.jsonl"), 5)
+
+	d.jsonlLocalPhaseTimeout = -time.Second
+
+	err := d.commitAndPushJsonlBackup(gitRepo, []string{"testdb"}, map[string]int{"testdb": 5}, nil)
+	if err == nil {
+		t.Fatal("a spent local phase budget must fail the tick, got nil")
+	}
+	if !contains(err.Error(), "git add") || !contains(err.Error(), "budget") {
+		t.Errorf("error = %v; want the first unbindable command and the budget named", err)
+	}
+	if subjects := backupSubjects(t, d, gitRepo); len(subjects) != 1 {
+		t.Errorf("commits = %q; want the init commit alone — a spent phase runs no git command", subjects)
+	}
+}
+
+// TestStageGit_ReReadsTheBudgetForEachAttempt: runGitIndexOp retries an op that
+// lost a race for the index lock, so a budget read once for the phase would let
+// the retry outlive the deadline — and the command it then runs carries no
+// deadline at all (gt-ttqq8).
+func TestStageGit_ReReadsTheBudgetForEachAttempt(t *testing.T) {
+	t.Parallel()
+	gitRepo := lockTestRepo(t)
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+
+	reads, calls := 0, 0
+	remaining := func() time.Duration {
+		reads++
+		if reads == 1 {
+			return time.Minute
+		}
+		return -time.Second
+	}
+	err := d.stageGit(gitRepo, "git add", remaining, func(daemonGit) error {
+		calls++
+		return indexLockErr // the lock appeared between the check and git's attempt
+	})
+	if err == nil || !contains(err.Error(), "budget") {
+		t.Fatalf("stageGit = %v; want the retried command refused on a spent budget", err)
+	}
+	if reads != 2 {
+		t.Errorf("the budget was read %d time(s), want once per attempt", reads)
+	}
+	if calls != 1 {
+		t.Errorf("the op ran %d time(s); the refused retry must not run it", calls)
 	}
 }
 
@@ -3234,8 +3392,18 @@ func TestSyncJsonlGitBackupSpikeWithinVersionStillHalts(t *testing.T) {
 
 	d.syncJsonlGitBackup()
 
-	if open := rec.OpenEscalations(alertKeyJSONLSpike); len(open) != 1 {
+	open := rec.OpenEscalations(alertKeyJSONLSpike)
+	if len(open) != 1 {
 		t.Fatalf("open spike escalations = %+v, want one", open)
+	}
+	// A halted tick commits nothing, so the next tick derives the level the
+	// report names and halts again — every tick, until a newer count-bearing
+	// commit exists. The escalation is where the operator reads how to land one
+	// (gt-ttqq8).
+	for _, want := range []string{gitRepo, "commit --allow-empty", fmt.Sprintf(" m%d: ", countMetricVersion)} {
+		if !strings.Contains(open[0].Reason, want) {
+			t.Errorf("the halt escalation must name the way to accept the export, missing %q:\n%s", want, open[0].Reason)
+		}
 	}
 	if subjects := backupSubjects(t, d, gitRepo); len(subjects) != 1 {
 		t.Errorf("a halted tick committed: %q", subjects)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -206,6 +207,18 @@ type fakeScheduledRunner struct {
 	// there. probeErr makes the origin probe fail.
 	goneBranches []string
 	probeErr     error
+
+	// admitReason is the capacity pre-flight's answer, "" for "the sling has a
+	// seat"; admitErr makes the probe unable to answer. admitted records the
+	// entries the patrol asked about, in order.
+	admitReason string
+	admitErr    error
+	admitted    []string
+}
+
+func (f *fakeScheduledRunner) admit(_ context.Context, e ScheduledSlingEntry) (string, error) {
+	f.admitted = append(f.admitted, e.Name)
+	return f.admitReason, f.admitErr
 }
 
 func (f *fakeScheduledRunner) originHasBranch(_ context.Context, _, branch string) (bool, error) {
@@ -709,6 +722,89 @@ func TestRunScheduledSlingEntry_CapacityRefusalIsADeferralAndRetiresTheBead(t *t
 	}
 }
 
+// TestRunScheduledSlingEntry_CapacityRefusalCreatesNoBead is the gt-ttqq8
+// regression for the churn: the run bead is created before the sling, so a
+// refusal at capacity used to leave one bead created and failed-closed on every
+// tick the town stayed full — 96 a day for a single entry. The pre-flight
+// answers before the bead exists, so a full town costs the patrol a probe and
+// nothing in the beads store.
+func TestRunScheduledSlingEntry_CapacityRefusalCreatesNoBead(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{
+		createID:    "gt-run1",
+		now:         time.Now(),
+		admitReason: "sling refused: polecat pool full (2/2 claude-sonnet seats); raise polecat_pool.max_seats to spawn",
+	}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
+
+	before := len(f.beads)
+	for tick := 1; tick <= 2; tick++ {
+		err := d.runScheduledSlingEntry(context.Background(), docAuditEntry, now.Add(time.Duration(tick)*scheduledSlingsTickInterval))
+		var deferred *scheduledSlingDeferred
+		if !errors.As(err, &deferred) {
+			t.Fatalf("tick %d: a capacity refusal must come back as a deferral, got %v", tick, err)
+		}
+	}
+	if len(f.beads) != before {
+		t.Errorf("bead count = %d after two refused ticks, want %d", len(f.beads), before)
+	}
+	if len(f.created) != 0 || len(f.closedIDs) != 0 {
+		t.Errorf("created %v and closed %v; a refused capacity check leaves no bead behind", f.created, f.closedIDs)
+	}
+	if len(f.slungIDs) != 0 {
+		t.Errorf("slung %v; a refused capacity check never reaches the sling", f.slungIDs)
+	}
+	if len(f.admitted) != 2 {
+		t.Errorf("the pre-flight ran %d time(s), want once per tick", len(f.admitted))
+	}
+}
+
+// TestRunScheduledSlingEntry_CapacityProbeThatCannotAnswerDispatches: a probe
+// the town cannot answer is not a refusal — the pool's own posture on an
+// uncountable seat read — so the tick dispatches as before and the sling's
+// refusal is the backstop (gt-ttqq8).
+func TestRunScheduledSlingEntry_CapacityProbeThatCannotAnswerDispatches(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{
+		createID: "gt-run1",
+		now:      time.Now(),
+		admitErr: errors.New("gt sling --dry-run: exit status 1: formula 'mol-doc-audit' not found"),
+	}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+
+	if err := d.runScheduledSlingEntry(context.Background(), docAuditEntry, time.Now()); err != nil {
+		t.Fatalf("an unanswerable probe must not block the dispatch: %v", err)
+	}
+	if len(f.admitted) != 1 {
+		t.Errorf("the pre-flight ran %d time(s), want once", len(f.admitted))
+	}
+	if len(f.created) != 1 || len(f.slungIDs) != 1 {
+		t.Errorf("created %v and slung %v; an unanswerable probe dispatches as before", f.created, f.slungIDs)
+	}
+}
+
+// TestRunScheduledSlingEntry_SpecDispatchSkipsTheCapacityProbe: the dispatcher
+// slings a spec-dispatched run, not this patrol, so the entry has no capacity
+// of its own to pre-check and the probe must not run — a full pool is no reason
+// to withhold a bead the dispatcher will queue regardless (gt-ttqq8).
+func TestRunScheduledSlingEntry_SpecDispatchSkipsTheCapacityProbe(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now(), admitReason: capacityRefusals["pool full"]}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{specAuditEntry}, f)
+
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	if err := d.runScheduledSlingEntry(context.Background(), specAuditEntry, now); err != nil {
+		t.Fatalf("a spec-dispatched run must be created with the pool full: %v", err)
+	}
+	if len(f.admitted) != 0 {
+		t.Errorf("the capacity pre-flight ran for a spec-dispatched entry (%v); this patrol does not sling it", f.admitted)
+	}
+	if len(f.created) != 1 || len(f.slungIDs) != 0 {
+		t.Errorf("created %v and slung %v; want the run bead created for the dispatcher and no sling", f.created, f.slungIDs)
+	}
+}
+
 func TestRunScheduledSlingEntry_NonCapacitySlingFailureIsNotADeferral(t *testing.T) {
 	t.Parallel()
 	f := &fakeScheduledRunner{createID: "gt-x", slingErr: errors.New("gt sling gt-x: exit status 1: worktree verification failed"), now: time.Now()}
@@ -819,6 +915,65 @@ func TestExecScheduledRunner_SlingArgv(t *testing.T) {
 	want = []string{"sling", "gt-run1", "gastown", "--formula=mol-doc-audit", "--agent=deepseek-pro", "--branch=polecat/nux/x", "--actor=daemon/scheduled:doc-audit", "--no-boot", "--var", "slice_docs=8"}
 	if strings.Join(got, " ") != strings.Join(want, " ") {
 		t.Errorf("resume argv\n got %v\nwant %v", got, want)
+	}
+}
+
+// TestExecScheduledSlingRunner_AdmitReadsTheDryRunRoute: the real runner asks
+// `gt sling --dry-run` for the route, and reads the refusal out of the preview
+// on stdout — where a dry run reports — through the same marker the live sling
+// puts on stderr (gt-ttqq8).
+func TestExecScheduledSlingRunner_AdmitReadsTheDryRunRoute(t *testing.T) {
+	t.Parallel()
+	entry := docAuditEntry
+	cases := map[string]struct {
+		stdout  string
+		stderr  string
+		cmdErr  error
+		reason  string
+		wantErr bool
+	}{
+		"refused seat pool": {
+			stdout: "Would spawn fresh polecat in rig 'gastown'\n  sling refused: polecat pool full (2/2 seats); raise polecat_pool.max_seats to spawn\n",
+			reason: "sling refused: polecat pool full (2/2 seats); raise polecat_pool.max_seats to spawn",
+		},
+		"seat free": {
+			stdout: "Would spawn fresh polecat in rig 'gastown'\nWould cook formula: mol-doc-audit\n",
+		},
+		"probe cannot answer": {
+			stderr:  "Error: formula 'mol-doc-audit' not found\n",
+			cmdErr:  errors.New("exit status 1"),
+			wantErr: true,
+		},
+	}
+	for name, tt := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var got *exec.Cmd
+			r := &execScheduledSlingRunner{townRoot: "/town", gtPath: "gt", execCmd: func(cmd *exec.Cmd) ([]byte, []byte, error) {
+				got = cmd
+				return []byte(tt.stdout), []byte(tt.stderr), tt.cmdErr
+			}}
+			reason, err := r.admit(context.Background(), entry)
+			if tt.wantErr && err == nil {
+				t.Fatalf("a probe that cannot answer must report an error, got reason %q", reason)
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("admit: %v", err)
+			}
+			if reason != tt.reason {
+				t.Errorf("reason = %q, want %q", reason, tt.reason)
+			}
+			want := []string{"sling", "mol-doc-audit", "gastown", "--dry-run", "--no-boot", "--agent=deepseek-pro", "--actor=daemon/scheduled:doc-audit"}
+			if got == nil {
+				t.Fatalf("the probe ran no command; want %v", want)
+			}
+			if strings.Join(got.Args[1:], " ") != strings.Join(want, " ") {
+				t.Errorf("argv = %v, want %v", got.Args, want)
+			}
+			if got.Dir != "/town" {
+				t.Errorf("dir = %q, want the town root", got.Dir)
+			}
+		})
 	}
 }
 
