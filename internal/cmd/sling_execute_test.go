@@ -163,6 +163,8 @@ func TestExecuteSlingSuccess(t *testing.T) {
 		"agent hook gastown/polecats/Toast gt-abc123",
 		"agent mode gastown/polecats/Toast ralph",
 		"start session Toast",
+		// The pool note follows the session, at the commit point (gt-fvak3).
+		"note dispatched",
 		"unlock assignee gastown/polecats/Toast",
 		"unlock bead gt-abc123",
 		"release seat",
