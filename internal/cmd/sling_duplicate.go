@@ -409,6 +409,11 @@ func (p *duplicatePools) noteSlingCandidateDispatched(townRoot string, candidate
 // precede the peer judging it, and sling.Blocking then lets that peer past the
 // guard and onto a second seat for one defect (gt-dzjtz).
 //
+// The caller records this at its commit point, not beside the hook write: the
+// note outlives a rollback, so a sling that is later unwound would otherwise
+// leave its bead reading as hooked work the tick had already given back
+// (gt-fvak3).
+//
 // It is a no-op when the pool was never fetched: a fresh fetch would find the
 // bead in the database anyway, now that its hook has landed.
 func (p *duplicatePools) noteDispatched(beadsDir string, candidate duplicateCandidate) {
@@ -423,10 +428,13 @@ func (p *duplicatePools) noteDispatched(beadsDir string, candidate duplicateCand
 	for i, existing := range entry.candidates {
 		if existing.ID == candidate.ID {
 			// A slice poolFor already handed out is shared with readers, so the
-			// corrected row goes into a copy rather than in place.
+			// corrected row goes into a copy rather than in place. The whole row
+			// is replaced: the candidate is the bead as the sling's own show read
+			// it, while every other field of the snapshot's row is as stale as
+			// the status this corrects (gt-fvak3).
 			updated := make([]duplicateCandidate, len(entry.candidates))
 			copy(updated, entry.candidates)
-			updated[i].Status = candidate.Status
+			updated[i] = candidate
 			entry.candidates = updated
 			return
 		}

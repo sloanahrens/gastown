@@ -512,10 +512,6 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	// Labels live on the base bead even when a formula wisp was hooked.
 	d.ClearOrphanLabels(townRoot, opts.BeadID, hookWorkDir)
 
-	// The bead is dispatched now, so later dispatches in this process should
-	// see it in the pool even though their snapshot predates this hook.
-	d.NoteDispatched(townRoot, dupCandidate)
-
 	// 7. Log dispatch event
 	_ = d.LogFeed(events.TypeSling, actor, events.SlingPayload(beadToHook, targetAgent))
 
@@ -545,6 +541,12 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 	}
 	fmt.Fprintf(d.out(), "  %s Session started for %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName)
 	_ = pane
+
+	// The dispatch is committed once the session that runs the hook is up: no
+	// path below unwinds it. Only now is the pool note written, so later
+	// dispatches in this process still see the bead as hooked while a dispatch
+	// that rolls back leaves no note behind (gt-fvak3).
+	d.NoteDispatched(townRoot, dupCandidate)
 
 	result.Success = true
 	return result, nil
