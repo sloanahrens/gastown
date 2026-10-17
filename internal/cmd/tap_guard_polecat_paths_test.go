@@ -545,6 +545,11 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"python with no paths", `python3 -c "print(1)"`, false},
 		{"heredoc body into own worktree", "cat > " + own + " <<'EOF'\nsee " + sib + " for context\nEOF", false},
 		{"heredoc body mentioning the mayor dir", "cat > " + own + " <<'EOF'\n" + mayor + "\nEOF", false},
+		{"redirect after a heredoc whose body holds an apostrophe", "cat <<'EOF' > " + own + "\nit's x\nEOF\necho y > " + filepath.Join(p.sibling, "internal.go"), true},
+		{"redirect after a heredoc body with no apostrophe", "cat <<'EOF' > " + own + "\nx\nEOF\necho y > " + filepath.Join(p.sibling, "internal.go"), true},
+		{"commit body quoting a redirect into town settings", "git commit -F - <<'EOF'\nfix: runs a > " + settings + "\nEOF", false},
+		{"redirect on the heredoc opener line into a sibling", "cat <<'EOF' > " + sib + "\nx\nEOF", true},
+		{"redirect on the heredoc opener line into own worktree", "cat <<'EOF' > " + own + "\nx\nEOF", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

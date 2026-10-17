@@ -48,7 +48,7 @@ import (
 //     directories and the session scratchpad are writable at all.
 //  5. Judge the parse, not the spelling. Bash arguments are checked from a
 //     tokenised command with heredoc bodies stripped, redirection targets read
-//     off the raw line, command substitutions recursed into, and both
+//     off that same stripped line, command substitutions recursed into, and both
 //     `--flag=/path` values and the path-shaped runs inside an interpreter's
 //     -c/-e payload treated as targets. Heredoc bodies are data on stdin, so a
 //     commit message or mail body that merely *mentions* a sibling worktree
@@ -341,7 +341,12 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 		}
 	}
 
-	for _, target := range redirectTargets(command) {
+	// Redirections are read off the heredoc-stripped text too: a body is data,
+	// so an apostrophe in it must not flip redirectTargets' quote tracking and
+	// hide a later real redirect, and a "> path" it quotes is no write. The
+	// opener line ("cat <<'EOF' > notes.txt") survives stripping and is still
+	// scanned.
+	for _, target := range redirectTargets(stripped) {
 		if reason := s.checkBashTarget(target, "redirection", true); reason != "" {
 			return reason
 		}
