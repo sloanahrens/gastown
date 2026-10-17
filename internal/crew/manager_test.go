@@ -270,6 +270,8 @@ func TestManagerRemove(t *testing.T) {
 
 // corruptStatusRepo answers the status check the way git does for a clone
 // with a corrupt index (or dubious ownership): an error, not a clean status.
+// The unit tier runs no git, so this stands in; the integration tier proves
+// it against a real corrupt index (TestIntegrationRemoveRefusesCorruptIndex).
 type corruptStatusRepo struct {
 	crewRepo
 }
@@ -301,8 +303,10 @@ func TestRemoveRefusesWhenStatusCheckFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("Remove(name, false) with a failing status check returned nil; want an error")
 	}
-	if !strings.Contains(err.Error(), "checking for uncommitted changes") {
-		t.Errorf("error = %q; want it to name the status check", err)
+	for _, want := range []string{"checking for uncommitted changes", "--force"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error = %q; want it to contain %q", err, want)
+		}
 	}
 	if _, statErr := os.Stat(crewPath); statErr != nil {
 		t.Errorf("Remove deleted the clone despite the failed check: %v", statErr)
