@@ -542,7 +542,10 @@ func (m *Manager) Remove(name string, force bool) error {
 	if !force {
 		crewGit := m.gitAt(crewPath)
 		hasChanges, err := crewGit.HasUncommittedChanges()
-		if err == nil && hasChanges {
+		if err != nil {
+			return fmt.Errorf("checking for uncommitted changes: %w", err)
+		}
+		if hasChanges {
 			return ErrHasChanges
 		}
 	}

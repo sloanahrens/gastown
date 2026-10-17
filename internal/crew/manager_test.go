@@ -268,6 +268,54 @@ func TestManagerRemove(t *testing.T) {
 	}
 }
 
+// corruptStatusRepo answers the status check the way git does for a clone
+// with a corrupt index (or dubious ownership): an error, not a clean status.
+type corruptStatusRepo struct {
+	crewRepo
+}
+
+func (corruptStatusRepo) HasUncommittedChanges() (bool, error) {
+	return false, errors.New("fatal: .git/index: index file smaller than expected")
+}
+
+// TestRemoveRefusesWhenStatusCheckFails covers gt-5sbxt: when the uncommitted-
+// changes check errors, Remove without --force must not fall through to
+// deleting the clone. Only a check that ran and found changes may refuse, and
+// only --force may delete blind.
+func TestRemoveRefusesWhenStatusCheckFails(t *testing.T) {
+	t.Parallel()
+	rigPath := t.TempDir()
+	r := &rig.Rig{Name: "test-rig", Path: rigPath}
+
+	crewPath := filepath.Join(rigPath, "crew", "corrupt")
+	if err := os.MkdirAll(crewPath, 0755); err != nil {
+		t.Fatalf("creating crew dir: %v", err)
+	}
+
+	mgr := &Manager{
+		rig:     r,
+		openGit: func(string) crewRepo { return corruptStatusRepo{} },
+	}
+
+	err := mgr.Remove("corrupt", false)
+	if err == nil {
+		t.Fatal("Remove(name, false) with a failing status check returned nil; want an error")
+	}
+	if !strings.Contains(err.Error(), "checking for uncommitted changes") {
+		t.Errorf("error = %q; want it to name the status check", err)
+	}
+	if _, statErr := os.Stat(crewPath); statErr != nil {
+		t.Errorf("Remove deleted the clone despite the failed check: %v", statErr)
+	}
+
+	if err := mgr.Remove("corrupt", true); err != nil {
+		t.Fatalf("Remove(name, true) failed: %v", err)
+	}
+	if _, statErr := os.Stat(crewPath); !os.IsNotExist(statErr) {
+		t.Errorf("forced Remove left the clone in place: %v", statErr)
+	}
+}
+
 func TestManagerGetWithStaleStateName(t *testing.T) {
 	t.Parallel()
 	f := gitfake.New()
