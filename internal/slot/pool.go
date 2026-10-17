@@ -694,32 +694,32 @@ func (g *Gate) underHoldOfClass(townRoot string, match func(string) bool) bool {
 }
 
 // holdsSlot reports whether the slot m names is still held by the pid m
-// names: the slot file exists, its flock is taken, and its owner file names
-// that pid. A marker outlives its hold in every process spawned while the hold
-// was active (gt-off9) — holders cannot clear it in a child, so an agent
-// session or a dog carries it for the rest of its life — which makes the
-// marker alone no license for anything. Every use of an inherited marker (the
-// reentrant fast path, InheritedRole, the hold classes) goes through this check.
+// names: the slot's owner file exists and names that pid, and that pid is not
+// gone (ownerGone, which also rejects a stranger wearing a recycled pid). A
+// marker outlives its hold in every process spawned while the hold was active
+// (gt-off9) — holders cannot clear it in a child, so an agent session or a dog
+// carries it for the rest of its life — which makes the marker alone no
+// license for anything. Every use of an inherited marker (the reentrant fast
+// path, InheritedRole, the hold classes) goes through this check.
+//
+// It never probes the flock, for the reason runningGate gives: the fast path
+// calls this on every reentrant acquire, and a probe that finds the slot free
+// takes the lock for an instant and can make a real acquirer fall through to
+// another slot. The owner file is written right after the flock is taken and
+// removed right before it is released, so an owner file naming a live pid is a
+// live hold.
+//
+// A lock path that names no slot of this town returns false. Callers do not
+// reach that branch (grants and validAncestor reject such a marker first); it
+// stays fail-closed so a marker that slips past them never reads slot 0's
+// owner file in place of the slot it named.
 func (g *Gate) holdsSlot(townRoot string, m reentrantMark) bool {
 	i, ok := slotIndexFromLockPath(townRoot, m.lockPath)
 	if !ok {
 		return false
 	}
-	if _, err := os.Stat(m.lockPath); err != nil {
-		// Probing would create the file, and a created slot file is a slot
-		// Status then reports (discoverSlots).
-		return false
-	}
-	unlock, free, err := lock.FlockTryAcquire(m.lockPath)
-	if err != nil {
-		return false
-	}
-	if free {
-		unlock()
-		return false
-	}
 	owner := readSlotOwner(townRoot, i)
-	return owner != nil && owner.PID == m.pid
+	return owner != nil && owner.PID == m.pid && !g.ownerGone(owner)
 }
 
 // runningGate reports whether a live merge gate (IsGateRole) holds one of
