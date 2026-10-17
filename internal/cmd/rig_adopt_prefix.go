@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -25,18 +26,25 @@ type rigAdoptRequest struct {
 	force       bool
 }
 
+// errNoDetectablePrefix marks a dolt .beads whose prefix neither bd nor the
+// database name in metadata.json yields.
+var errNoDetectablePrefix = errors.New("no prefix detectable")
+
 // detectAdoptBeadsPrefix returns the prefix the adopted rig's own beads
-// database uses, or "" when it has none to detect. flagPrefix is --prefix; a
-// detected prefix that disagrees with it is an error.
+// database uses, or "" when it has no .beads with a metadata.json. flagPrefix
+// is --prefix; a detected prefix that disagrees with it is an error.
 //
 // It reads the same .beads directories the adopt goes on to use, rig-level
 // first and then mayor/rig's, and takes the first prefix either yields. A
 // .beads without a metadata.json has nothing to detect and the next one is
-// tried; one whose metadata.json cannot be read or parsed, or whose backend
-// cannot name a prefix, is an error rather than a rig registered under a
-// prefix derived from its name. configGet is the bd lookup, a parameter so a
-// test can answer without a bd binary.
+// tried. Without --prefix, a metadata.json that cannot be read or parsed, a
+// backend other than dolt, and a dolt database that yields no prefix are
+// errors rather than a rig registered under a prefix derived from its name;
+// the last is raised only after the other directory has had its turn.
+// configGet is the bd lookup, a parameter so a test can answer without a bd
+// binary.
 func detectAdoptBeadsPrefix(rigPath, flagPrefix string, configGet func(workDir string) (string, error)) (string, error) {
+	var undetected error
 	for _, beadsDir := range []string{
 		filepath.Join(rigPath, ".beads"),
 		filepath.Join(rigPath, "mayor", "rig", ".beads"),
@@ -45,6 +53,12 @@ func detectAdoptBeadsPrefix(rigPath, flagPrefix string, configGet func(workDir s
 			continue
 		}
 		detected, err := detectBeadsDirPrefix(beadsDir, flagPrefix, configGet)
+		if errors.Is(err, errNoDetectablePrefix) {
+			if undetected == nil {
+				undetected = err
+			}
+			continue
+		}
 		if err != nil {
 			return "", err
 		}
@@ -52,14 +66,15 @@ func detectAdoptBeadsPrefix(rigPath, flagPrefix string, configGet func(workDir s
 			return detected, nil
 		}
 	}
-	return "", nil
+	return "", undetected
 }
 
 // detectBeadsDirPrefix is the prefix of one .beads directory: bd's
 // issue_prefix, else the "beads_<prefix>" dolt_database name in metadata.json,
-// which survives a clone because dolt/ is gitignored since bd v0.50+. A
-// backend other than dolt has no database name to read, so it is an error
-// unless flagPrefix already settles the prefix.
+// which survives a clone because dolt/ is gitignored since bd v0.50+. An absent
+// backend is dolt, which bd writes by default; any other backend has no
+// database name to read, so it is an error unless flagPrefix already settles
+// the prefix.
 func detectBeadsDirPrefix(beadsDir, flagPrefix string, configGet func(workDir string) (string, error)) (string, error) {
 	metaPath := filepath.Join(beadsDir, "metadata.json")
 	metaBytes, err := os.ReadFile(metaPath)
@@ -75,7 +90,7 @@ func detectBeadsDirPrefix(beadsDir, flagPrefix string, configGet func(workDir st
 	if err := json.Unmarshal(metaBytes, &meta); err != nil {
 		return "", fmt.Errorf("parsing %s: %w", metaPath, err)
 	}
-	if meta.Backend != "dolt" {
+	if meta.Backend != "" && meta.Backend != "dolt" {
 		if flagPrefix != "" {
 			return "", nil
 		}
@@ -90,6 +105,9 @@ func detectBeadsDirPrefix(beadsDir, flagPrefix string, configGet func(workDir st
 		if db := config.BeadsMetadataDatabase(beadsDir); strings.HasPrefix(db, "beads_") {
 			detected = strings.TrimPrefix(db, "beads_")
 		}
+	}
+	if detected == "" && flagPrefix == "" {
+		return "", fmt.Errorf("%s: %w: pass --prefix", metaPath, errNoDetectablePrefix)
 	}
 	if detected != "" && flagPrefix != "" && strings.TrimSuffix(flagPrefix, "-") != detected {
 		return "", fmt.Errorf("prefix mismatch: source repo uses '%s' but --prefix '%s' was provided", detected, flagPrefix)

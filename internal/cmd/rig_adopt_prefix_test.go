@@ -130,13 +130,14 @@ func TestAdoptPrefixMismatchWritesNothing(t *testing.T) {
 }
 
 // The detection tries the rig-level .beads, then mayor/rig's, and errors on a
-// metadata.json it cannot trust instead of registering a name-derived prefix.
+// metadata.json it cannot trust or a prefix it cannot find instead of registering a name-derived prefix.
 func TestDetectAdoptBeadsPrefixDirs(t *testing.T) {
 	t.Parallel()
 	const doltMeta = `{"backend":"dolt","dolt_database":"beads_zz"}`
 	tests := []struct {
 		name       string
 		rigMeta    *string // rig-level .beads/metadata.json; nil leaves the directory empty
+		rigMetaDir bool    // make the rig-level metadata.json a directory, so reading it fails with a non-ENOENT error
 		mayorMeta  *string // mayor/rig/.beads/metadata.json; nil leaves it absent
 		flagPrefix string
 		want       string
@@ -145,6 +146,11 @@ func TestDetectAdoptBeadsPrefixDirs(t *testing.T) {
 		{name: "rig-level metadata", rigMeta: ptr(doltMeta), want: "zz"},
 		{name: "falls through an empty rig-level .beads to mayor/rig", mayorMeta: ptr(doltMeta), want: "zz"},
 		{name: "no metadata anywhere", want: ""},
+		{name: "empty backend is dolt", rigMeta: ptr(`{"dolt_database":"beads_zz"}`), want: "zz"},
+		{name: "dolt backend with no prefix", rigMeta: ptr(`{"backend":"dolt"}`), mayorMeta: ptr(`{"backend":"dolt"}`), wantErr: "no prefix detectable"},
+		{name: "dolt backend with no prefix falls through to mayor/rig", rigMeta: ptr(`{"backend":"dolt"}`), mayorMeta: ptr(doltMeta), want: "zz"},
+		{name: "dolt backend with no prefix with --prefix", rigMeta: ptr(`{"backend":"dolt"}`), flagPrefix: "aa", want: ""},
+		{name: "unreadable metadata", rigMetaDir: true, mayorMeta: ptr(doltMeta), wantErr: "reading"},
 		{name: "unparseable metadata", rigMeta: ptr(`{not json`), mayorMeta: ptr(doltMeta), wantErr: "parsing"},
 		{name: "non-dolt backend", rigMeta: ptr(`{"backend":"sqlite"}`), mayorMeta: ptr(doltMeta), wantErr: "pass --prefix"},
 		{name: "non-dolt backend with --prefix", rigMeta: ptr(`{"backend":"sqlite"}`), flagPrefix: "aa", want: ""},
@@ -158,6 +164,11 @@ func TestDetectAdoptBeadsPrefixDirs(t *testing.T) {
 			mayorBeads := filepath.Join(rigPath, "mayor", "rig", ".beads")
 			if err := os.MkdirAll(rigBeads, 0o755); err != nil {
 				t.Fatal(err)
+			}
+			if tt.rigMetaDir {
+				if err := os.Mkdir(filepath.Join(rigBeads, "metadata.json"), 0o755); err != nil {
+					t.Fatal(err)
+				}
 			}
 			if tt.rigMeta != nil {
 				if err := os.WriteFile(filepath.Join(rigBeads, "metadata.json"), []byte(*tt.rigMeta), 0o644); err != nil {
