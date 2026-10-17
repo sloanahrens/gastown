@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
 
 // writeTestrigRigsJSON registers rig "testrig" with prefix "tr".
@@ -701,4 +702,65 @@ func TestMayorCloneExistsCheck_BareRepoPathHoldingAFileIsNotARepo(t *testing.T) 
 		t.Errorf("rig whose .repo.git is a file and has no mayor/rig clone: %v %v, want Warning",
 			result.Status, result.Details)
 	}
+}
+
+// hooksPathRig builds a rig named rigName holding one polecat clone at rel
+// (relative to the rig dir), and returns the check context over it.
+func hooksPathRig(t *testing.T, rigName, rel string) *CheckContext {
+	t.Helper()
+	townRoot := t.TempDir()
+	clonePath := filepath.Join(townRoot, rigName, rel)
+	gf := gitfake.New()
+	gf.InitRepo(t, clonePath)
+	if err := os.MkdirAll(filepath.Join(clonePath, ".githooks"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	return withGit(&CheckContext{TownRoot: townRoot, RigName: rigName}, gf)
+}
+
+// assertHooksPathConfigured warns for the clone at rel, fixes it, and passes.
+func assertHooksPathConfigured(t *testing.T, ctx *CheckContext, rel string) {
+	t.Helper()
+	check := NewHooksPathConfiguredCheck()
+
+	result := check.Run(ctx)
+	if result.Status != StatusWarning {
+		t.Fatalf("clone at %s with hooksPath unset: %v %v, want Warning", rel, result.Status, result.Details)
+	}
+	listed := false
+	for _, detail := range result.Details {
+		if detail == rel {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Fatalf("details = %v, want %s", result.Details, rel)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if got, _ := ctx.git(filepath.Join(ctx.RigPath(), rel)).ConfigGet("core.hooksPath"); got != ".githooks" {
+		t.Fatalf("core.hooksPath after Fix = %q, want .githooks", got)
+	}
+	if result := check.Run(ctx); result.Status != StatusOK {
+		t.Fatalf("after Fix: %v %v, want OK", result.Status, result.Details)
+	}
+}
+
+func TestHooksPathConfiguredNestedPolecatWorktree(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	nested := filepath.Join("polecats", "p1", rigName)
+	// Polecat worktrees are nested under polecats/<name>/<rigname>/; the
+	// parent polecats/<name>/ is not itself a git clone.
+	assertHooksPathConfigured(t, hooksPathRig(t, rigName, nested), nested)
+}
+
+func TestHooksPathConfiguredLegacyFlatPolecatWorktree(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	flat := filepath.Join("polecats", "p1")
+	// The flat polecats/<name>/ layout predates the per-rig nesting.
+	assertHooksPathConfigured(t, hooksPathRig(t, rigName, flat), flat)
 }
