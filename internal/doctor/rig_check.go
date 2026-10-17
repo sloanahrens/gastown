@@ -1286,6 +1286,22 @@ func NewBareRepoExistsCheck() *BareRepoExistsCheck {
 // DestructiveFix marks this repair as destructive (gt-638go.3): it quarantines the shared .repo.git.
 func (c *BareRepoExistsCheck) DestructiveFix() bool { return true }
 
+// worktreeMetaMissing returns the files git needs in a worktree's registration
+// directory (.repo.git/worktrees/<name>/) but cannot find: gitdir, HEAD, and
+// commondir. A registration lacking any of them is one git cannot use, and
+// without commondir every git command in the worktree fails with "fatal: not a
+// git repository" (gt-ux2hv).
+func worktreeMetaMissing(metaDir string) []string {
+	var missing []string
+	for _, name := range []string{"gitdir", "HEAD", "commondir"} {
+		data, err := os.ReadFile(filepath.Join(metaDir, name))
+		if err != nil || strings.TrimSpace(string(data)) == "" {
+			missing = append(missing, name)
+		}
+	}
+	return missing
+}
+
 // Run checks if .repo.git exists when worktrees reference it.
 func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 	if ctx.RigName == "" {
@@ -1338,8 +1354,10 @@ func (c *BareRepoExistsCheck) Run(ctx *CheckContext) *CheckResult {
 				targetPath = filepath.Join(wtDir, targetPath)
 			}
 
-			// Check if the target exists
-			if _, err := os.Stat(targetPath); os.IsNotExist(err) {
+			// A registration directory git cannot use leaves the worktree just
+			// as dead as a missing one, so a half-written entry must not pass
+			// for healthy (gt-ux2hv).
+			if _, err := os.Stat(targetPath); os.IsNotExist(err) || len(worktreeMetaMissing(targetPath)) > 0 {
 				relPath, _ := filepath.Rel(rigPath, wtDir)
 				if relPath == "" {
 					relPath = wtDir
@@ -1683,9 +1701,14 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 
-	// Re-register broken worktrees so the bare repo knows about them.
-	// Git worktrees are tracked in .repo.git/worktrees/<name>/ with a gitdir file
-	// pointing back to the worktree. We need to create these metadata entries.
+	// Re-register broken worktrees so the bare repo knows about them: git
+	// needs gitdir, HEAD and commondir in .repo.git/worktrees/<name>/, and
+	// git worktree repair cannot recreate them (it needs the entry's gitdir to
+	// exist already). The default branch is what a lost HEAD is replaced with.
+	branch := strings.TrimSpace(ctx.git(bareRepoPath).DefaultBranch())
+	if branch == "" {
+		branch = "main"
+	}
 	for _, relPath := range c.brokenWorktrees {
 		wtPath := filepath.Join(rigPath, relPath)
 		gitFile := filepath.Join(wtPath, ".git")
@@ -1721,10 +1744,18 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 			continue
 		}
 
-		// Detect which branch the worktree was on: read it from the live
-		// worktree gitdir (missing-bare-repo path), else default to main.
-		headContent := "ref: refs/heads/main\n"
-		if oldHead, err := os.ReadFile(filepath.Join(gitdir, "HEAD")); err == nil {
+		// commondir is what sends git to the shared object store two levels up;
+		// without it the worktree stays dead with gitdir and HEAD in place
+		// (gt-ux2hv).
+		if err := os.WriteFile(filepath.Join(wtMetaDir, "commondir"), []byte("../..\n"), 0644); err != nil {
+			continue
+		}
+
+		// A partial entry can still carry the worktree's HEAD; keep the branch
+		// it names. When the entry is gone the branch went with it and no copy
+		// remains, so the default branch is the only answer left.
+		headContent := "ref: refs/heads/" + branch + "\n"
+		if oldHead, err := os.ReadFile(filepath.Join(wtMetaDir, "HEAD")); err == nil && strings.TrimSpace(string(oldHead)) != "" {
 			headContent = string(oldHead)
 		}
 
