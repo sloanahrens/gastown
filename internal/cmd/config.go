@@ -505,14 +505,6 @@ func configAgentRemove(e configCmdEnv, args []string) error {
 		return fmt.Errorf("finding town root: %w", err)
 	}
 
-	// Check if trying to remove built-in
-	builtInAgents := config.AgentRegistryFor(townRoot, "").Names()
-	for _, builtin := range builtInAgents {
-		if name == builtin {
-			return fmt.Errorf("cannot remove built-in agent '%s' (use 'gt config agent set' to override it)", name)
-		}
-	}
-
 	// Load town settings
 	settingsPath := config.TownSettingsPath(townRoot)
 	townSettings, err := config.LoadOrCreateTownSettings(settingsPath)
@@ -520,8 +512,21 @@ func configAgentRemove(e configCmdEnv, args []string) error {
 		return fmt.Errorf("loading town settings: %w", err)
 	}
 
-	// Check if agent exists
-	if townSettings.Agents == nil || townSettings.Agents[name] == nil {
+	hasEntry := townSettings.Agents != nil && townSettings.Agents[name] != nil
+
+	// A built-in name is refused only when there is no override to delete.
+	isBuiltin := false
+	for _, builtin := range config.AgentRegistryFor(townRoot, "").Names() {
+		if name == builtin {
+			isBuiltin = true
+			break
+		}
+	}
+	if isBuiltin && !hasEntry {
+		return fmt.Errorf("cannot remove built-in agent '%s' (use 'gt config agent set' to override it)", name)
+	}
+
+	if !hasEntry {
 		return fmt.Errorf("custom agent '%s' not found", name)
 	}
 
@@ -533,6 +538,10 @@ func configAgentRemove(e configCmdEnv, args []string) error {
 		return fmt.Errorf("saving town settings: %w", err)
 	}
 
+	if isBuiltin {
+		fmt.Fprintf(e.out, "Removed override of built-in agent '%s'; the built-in is restored\n", style.Bold.Render(name))
+		return nil
+	}
 	fmt.Fprintf(e.out, "Removed custom agent '%s'\n", style.Bold.Render(name))
 	return nil
 }
