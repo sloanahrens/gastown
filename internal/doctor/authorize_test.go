@@ -1,10 +1,12 @@
 package doctor
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // TestValidateFixAuthorizationHint pins the remedy the unlabeled-bead error
@@ -63,9 +65,16 @@ func TestValidateFixAuthorization(t *testing.T) {
 			actor: "gastown/polecats/amber",
 		},
 		{
-			name:  "an unidentified actor cannot self-authorize",
-			issue: &beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "overseer", Labels: []string{FixAuthLabel}},
-			actor: "",
+			name:    "an empty actor is refused",
+			issue:   &beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "overseer", Labels: []string{FixAuthLabel}},
+			actor:   "",
+			wantErr: "cannot be identified",
+		},
+		{
+			name:    "the unidentified-actor sentinel is refused",
+			issue:   &beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "overseer", Labels: []string{FixAuthLabel}},
+			actor:   doltserver.UnidentifiedActor,
+			wantErr: "cannot be identified",
 		},
 	}
 
@@ -86,5 +95,18 @@ func TestValidateFixAuthorization(t *testing.T) {
 				t.Errorf("ValidateFixAuthorization() = %v, want it to contain %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestValidateFixAuthorizationUnidentifiedActor covers gt-2kwxr: the actor
+// resolves to a sentinel no bead can carry as CreatedBy, so a bead the
+// unidentified process created itself must not authorize a repair.
+func TestValidateFixAuthorizationUnidentifiedActor(t *testing.T) {
+	t.Parallel()
+	issue := &beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "self-made", Labels: []string{FixAuthLabel}}
+	for _, actor := range []string{"", doltserver.UnidentifiedActor} {
+		if err := ValidateFixAuthorization(issue, actor); !errors.Is(err, ErrUnidentifiedFixActor) {
+			t.Errorf("actor %q: error = %v, want ErrUnidentifiedFixActor", actor, err)
+		}
 	}
 }
