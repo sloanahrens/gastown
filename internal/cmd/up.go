@@ -118,7 +118,7 @@ one whose session died while it held work.
 
 Use --restore to also start:
   • Crew       - Per rig settings (settings/config.json crew.startup)
-  • Polecats   - Those with pinned beads (work attached)
+  • Polecats   - Those with work attached (a pinned, hooked or in_progress bead)
 
 Running 'gt up' multiple times is safe - it only starts services that
 aren't already running.`,
@@ -690,7 +690,8 @@ func parseCrewStartupPreference(pref string, available []string) []string {
 	return result
 }
 
-// startPolecatsWithWork starts polecats that have pinned beads (work attached).
+// startPolecatsWithWork starts polecats that have work attached: a pinned
+// handoff bead, or a bead sling hooked or a polecat flow claimed in_progress.
 // Returns list of started polecat names and map of errors.
 func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error) {
 	// Get polecat session manager
@@ -704,22 +705,27 @@ func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error
 	start := func(polecatName string) error {
 		return restartPolecatOnSlungAgent(polecatMgr, townRoot, rigName, polecatName, polecat.SessionStartOptions{})
 	}
-	return startPolecatsWithWorkUsing(townRoot, rigName, polecatHasPinnedWork, start)
+	return startPolecatsWithWorkUsing(townRoot, rigName, polecatHasWork, start)
 }
 
-// polecatHasPinnedWork reports whether agentID has a pinned bead in the store
-// at polecatPath.
-func polecatHasPinnedWork(polecatPath, agentID string) bool {
-	pinnedBeads, err := beads.New(polecatPath).List(beads.ListOptions{
-		Status:   beads.StatusPinned,
-		Assignee: agentID,
-		Priority: -1,
-	})
-	return err == nil && len(pinnedBeads) > 0
+// polecatHasWork reports whether agentID has work in the rig's bead store: a
+// pinned bead (handoff work), or one sling left hooked or the polecat flow
+// claimed in_progress. polecatPath is polecats/<name>; bd resolves from it up
+// to the rig's .beads, which is where sling writes the hooked bead (gt-b3qpu).
+func polecatHasWork(polecatPath, agentID string) bool {
+	return hasAssignedWork(beads.New(polecatPath), agentID)
 }
 
-// startPolecatsWithWorkUsing is startPolecatsWithWork with the pinned-work
-// check and the session start passed in.
+// hasAssignedWork reports whether store holds any of agentID's pinned, hooked
+// or in_progress beads.
+func hasAssignedWork(store beads.Client, agentID string) bool {
+	statuses := append(activeWorkStatuses(), beads.IssueStatusPinned)
+	work, err := store.ListAssignedIssueStatuses(agentID, statuses...)
+	return err == nil && len(work) > 0
+}
+
+// startPolecatsWithWorkUsing is startPolecatsWithWork with the has-work check
+// and the session start passed in.
 func startPolecatsWithWorkUsing(townRoot, rigName string, hasWork func(polecatPath, agentID string) bool, start func(polecatName string) error) ([]string, map[string]error) {
 	started := []string{}
 	failed := map[string]error{}
@@ -755,7 +761,7 @@ func startPolecatsWithWorkUsing(townRoot, rigName string, hasWork func(polecatPa
 			continue
 		}
 
-		// Check if this polecat has a pinned bead (work attached)
+		// Check if this polecat has work attached (pinned, hooked or in_progress)
 		agentID := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 		if !hasWork(polecatPath, agentID) {
 			continue
