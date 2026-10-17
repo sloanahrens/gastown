@@ -1123,6 +1123,170 @@ func TestTownGroupSendSurfacesQueryFailure(t *testing.T) {
 	}
 }
 
+// wispAgentScript answers the two commands queryAgentsInDir issues plus the
+// batched bd show it uses to fill in the wisps' omitted description.
+func wispAgentScript(wisps, issues, shown string, wispCode int) *bdScript {
+	return &bdScript{answer: func(c bdCall) (string, string, int) {
+		argv := strings.Join(c.Args, " ")
+		switch {
+		case strings.HasPrefix(argv, "mol wisp list"):
+			if wispCode != 0 {
+				return "", "Error: wisps table unavailable\n", wispCode
+			}
+			return wisps, "", 0
+		case strings.HasPrefix(argv, "list --label=gt:agent"):
+			return issues, "", 0
+		case strings.HasPrefix(argv, "show "):
+			return shown, "", 0
+		}
+		return "[]", "", 0
+	}}
+}
+
+// TestQueryAgentsInDirWispWrapper: `bd mol wisp list --json` prints a wrapper
+// object, not the bare array queryAgentsInDir unmarshalled, so a wisp-backed
+// agent was never found by @town, @rig or @polecats resolution (gt-c2sxh).
+func TestQueryAgentsInDirWispWrapper(t *testing.T) {
+	t.Parallel()
+	bd := wispAgentScript(
+		`{"count":1,"schema_version":1,"wisps":[
+			{"id":"gt-gastown-polecat-nux","title":"gt-gastown-polecat-nux","status":"open","type":"task","labels":["gt:agent"],"priority":2}
+		]}`,
+		`[]`,
+		`[{"id":"gt-gastown-polecat-nux","title":"gt-gastown-polecat-nux","description":"gt-gastown-polecat-nux\n\nrole_type: polecat\nrig: gastown\nagent_state: idle","status":"open","issue_type":"task","labels":["gt:agent"]}]`,
+		0,
+	)
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	got, err := r.queryAgentsInDir(t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("queryAgentsInDir: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gt-gastown-polecat-nux" {
+		t.Fatalf("queryAgentsInDir() = %+v, want the agent in the wisp wrapper", got)
+	}
+	if !strings.Contains(got[0].Description, "rig: gastown") {
+		t.Errorf("description = %q, want the batched bd show to fill it in", got[0].Description)
+	}
+}
+
+// TestQueryAgentsInDirWispWrapperWithoutMetadata: bd 1.2.2 prints neither
+// labels nor description for a wisp, so the agent is recognized by its ID
+// shape and read in full from bd show.
+func TestQueryAgentsInDirWispWrapperWithoutMetadata(t *testing.T) {
+	t.Parallel()
+	bd := wispAgentScript(
+		`{"count":1,"schema_version":1,"wisps":[
+			{"created_at":"2026-09-29T00:33:04Z","id":"gt-gastown-crew-max","priority":2,"status":"open","title":"crew max","type":"task","updated_at":"2026-09-29T00:33:04Z"}
+		]}`,
+		`[]`,
+		`[{"id":"gt-gastown-crew-max","description":"crew max\n\nrole_type: crew\nrig: gastown","status":"open","issue_type":"task","labels":["gt:agent"]}]`,
+		0,
+	)
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	got, err := r.queryAgentsInDir(t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("queryAgentsInDir: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gt-gastown-crew-max" {
+		t.Fatalf("queryAgentsInDir() = %+v, want the agent identified by ID shape", got)
+	}
+	if !strings.Contains(got[0].Description, "rig: gastown") {
+		t.Errorf("description = %q, want the batched bd show to fill it in", got[0].Description)
+	}
+}
+
+// TestQueryAgentsInDirWispDescFilter: the description filter bd applies to
+// the issues table has to be applied client-side to wisp agents, which is
+// what @rig and @polecats resolution rely on.
+func TestQueryAgentsInDirWispDescFilter(t *testing.T) {
+	t.Parallel()
+	bd := wispAgentScript(
+		`{"count":2,"wisps":[
+			{"id":"gt-gastown-polecat-nux","status":"open","labels":["gt:agent"],"description":"role_type: polecat\nrig: gastown"},
+			{"id":"gt-other-polecat-fury","status":"open","labels":["gt:agent"],"description":"role_type: polecat\nrig: other"}
+		]}`,
+		`[]`,
+		``,
+		0,
+	)
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	got, err := r.queryAgentsInDir(t.TempDir(), "RIG: GASTOWN")
+	if err != nil {
+		t.Fatalf("queryAgentsInDir: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gt-gastown-polecat-nux" {
+		t.Fatalf("queryAgentsInDir() = %+v, want only the agent whose rig matches", got)
+	}
+	for _, call := range bd.argvs() {
+		if strings.HasPrefix(call, "show ") {
+			t.Errorf("bd calls = %q, want no bd show when the wisp carries a description", bd.argvs())
+		}
+	}
+}
+
+// TestQueryAgentsInDirWispBareArray keeps reading the bare array older bd
+// printed.
+func TestQueryAgentsInDirWispBareArray(t *testing.T) {
+	t.Parallel()
+	bd := wispAgentScript(
+		`[{"id":"gt-gastown-polecat-nux","status":"open","description":"role_type: polecat\nrig: gastown","labels":["gt:agent"]}]`,
+		`[]`,
+		``,
+		0,
+	)
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	got, err := r.queryAgentsInDir(t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("queryAgentsInDir: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gt-gastown-polecat-nux" {
+		t.Fatalf("queryAgentsInDir() = %+v, want the agent in the bare array", got)
+	}
+}
+
+// TestQueryAgentsInDirWispFailureKeepsIssueAgents: the wisp read is the
+// fallback; breaking it must not hide the agents the issues query found.
+func TestQueryAgentsInDirWispFailureKeepsIssueAgents(t *testing.T) {
+	t.Parallel()
+	bd := wispAgentScript(
+		``,
+		`[{"id":"hq-deacon","description":"role_type: deacon\nrig: null","status":"open","issue_type":"agent","labels":["gt:agent"]}]`,
+		``,
+		1,
+	)
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	got, err := r.queryAgentsInDir(t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("queryAgentsInDir: %v, want the issues result", err)
+	}
+	if len(got) != 1 || got[0].ID != "hq-deacon" {
+		t.Fatalf("queryAgentsInDir() = %+v, want the issue-backed agent", got)
+	}
+}
+
+// TestQueryAgentsInDirWispFailureSurfaces: with nothing found, a failed wisp
+// query is an error, not an empty town.
+func TestQueryAgentsInDirWispFailureSurfaces(t *testing.T) {
+	t.Parallel()
+	bd := wispAgentScript(``, `[]`, ``, 1)
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	if got, err := r.queryAgentsInDir(t.TempDir(), ""); err == nil || len(got) != 0 {
+		t.Fatalf("queryAgentsInDir() = %+v, %v, want the failed wisp query reported", got, err)
+	}
+}
+
 func TestAgentBeadToAddress(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
