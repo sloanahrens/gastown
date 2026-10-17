@@ -1277,7 +1277,8 @@ func isInterpreterCommand(base string) bool {
 
 // isWriteCapableCommand reports whether a command word can write to a path
 // named on its command line. sed joins the list only with -i: without it sed
-// reads and prints, and a polecat reading a sibling worktree is allowed.
+// reads and prints, and a polecat reading a sibling worktree is allowed. The
+// -i may sit inside a cluster such as -ri or -Ei (sedArgEditsInPlace).
 func isWriteCapableCommand(base string, args []string) bool {
 	if writeCommands[base] {
 		return true
@@ -1297,10 +1298,31 @@ func isWriteCapableCommand(base string, args []string) bool {
 	}
 	if base == "sed" {
 		for _, arg := range args {
-			// "-i", "-i.bak" (backup suffix) and "--in-place[=SUFFIX]".
-			if strings.HasPrefix(arg, "-i") || strings.HasPrefix(arg, "--in-place") {
+			if sedArgEditsInPlace(arg) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+// sedArgEditsInPlace reports whether a sed argument turns on in-place editing:
+// "--in-place[=SUFFIX]", or an "i" inside a short-option cluster ("-i",
+// "-i.bak", "-ri", "-ni", "-Ei"). The cluster is read option by option and
+// stops at -e, -f and -l, whose attached value ("-es/i/x/") is not a flag.
+func sedArgEditsInPlace(arg string) bool {
+	if strings.HasPrefix(arg, "--") {
+		return strings.HasPrefix(arg, "--in-place")
+	}
+	if !strings.HasPrefix(arg, "-") {
+		return false
+	}
+	for _, c := range arg[1:] {
+		switch c {
+		case 'i':
+			return true
+		case 'e', 'f', 'l':
+			return false
 		}
 	}
 	return false

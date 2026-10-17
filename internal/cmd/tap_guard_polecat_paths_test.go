@@ -462,6 +462,13 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"writing after a quoted paren in a substitution", `echo "$(grep -E '(a|b)' f; cp a.go ` + sib + `)"`, true},
 		{"writing after a nested substitution", `echo "$(echo $(date); cp a.go ` + sib + `)"`, true},
 		{"writing inside a nested substitution", `echo "$(echo $(cp a.go ` + sib + `))"`, true},
+		// sed edits in place when i sits anywhere in a short-option cluster,
+		// not only when the argument starts with -i (gt-x9gya).
+		{"sed -i on a sibling", "sed -i 's/a/b/' " + filepath.Join(p.sibling, "internal.go"), true},
+		{"sed -ri on a sibling", "sed -ri 's/a/b/' " + filepath.Join(p.sibling, "internal.go"), true},
+		{"sed -ni on a sibling", "sed -ni 's/a/b/p' " + filepath.Join(p.sibling, "internal.go"), true},
+		{"sed -Ei on a sibling", "sed -Ei 's/a/b/' " + filepath.Join(p.sibling, "internal.go"), true},
+		{"sed --in-place on a sibling", "sed --in-place=.bak 's/a/b/' " + filepath.Join(p.sibling, "internal.go"), true},
 		// Fail closed when a checked target cannot be resolved.
 		{"unresolvable variable in a write", "cp a.go $POLECAT_PATHS_UNSET/x.go", true},
 		{"unresolvable variable as a redirect target", "echo hi > $POLECAT_PATHS_UNSET/x.go", true},
@@ -499,6 +506,8 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"curl to stdout", "curl -s https://example.com/x", false},
 		{"curl -o in /tmp", "curl -o /tmp/polecat-paths-probe/x https://example.com/x", false},
 		{"sed reading a sibling", "sed -n '1,10p' " + filepath.Join(p.sibling, "internal.go"), false},
+		{"sed -n s///p reading a sibling", "sed -n 's/a/b/p' " + filepath.Join(p.sibling, "internal.go"), false},
+		{"sed -ri on an own-worktree file", "sed -ri 's/a/b/' " + own, false},
 		{"python with no paths", `python3 -c "print(1)"`, false},
 		{"heredoc body into own worktree", "cat > " + own + " <<'EOF'\nsee " + sib + " for context\nEOF", false},
 		{"heredoc body mentioning the mayor dir", "cat > " + own + " <<'EOF'\n" + mayor + "\nEOF", false},
