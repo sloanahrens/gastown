@@ -1441,3 +1441,35 @@ func TestAutoHandoffStateDir(t *testing.T) {
 		})
 	}
 }
+
+// The overseer's GT_ROLE is the role "overseer", not its session name. The
+// handoff must resolve it to hq-overseer, or sessionWorkDir cannot parse it.
+//
+//testpolicy:allow parallel — getCurrentTmuxSession reads GT_ROLE from the process environment, which t.Setenv sets for the whole process
+func TestGetCurrentTmuxSession_OverseerRole(t *testing.T) {
+	//testpolicy:allow no-env — the process environment is the input under test: getCurrentTmuxSession takes no role argument
+	t.Setenv("GT_ROLE", "overseer")
+
+	got, err := getCurrentTmuxSession()
+	if err != nil {
+		t.Fatalf("getCurrentTmuxSession: %v", err)
+	}
+	if want := session.OverseerSessionName(); got != want {
+		t.Fatalf("getCurrentTmuxSession = %q, want %q", got, want)
+	}
+
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{"name":"gastown"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := buildRestartPlan(got, restartOpts(townRoot, map[string]string{}))
+	if err != nil {
+		t.Fatalf("buildRestartPlan(%q): %v", got, err)
+	}
+	if plan.WorkDir != townRoot {
+		t.Errorf("plan.WorkDir = %q, want the town root %q", plan.WorkDir, townRoot)
+	}
+}

@@ -674,7 +674,7 @@ func getCurrentTmuxSession() (string, error) {
 
 // resolveRoleToSession converts a role name or path to a tmux session name.
 // Accepts:
-//   - Role shortcuts: "crew"
+//   - Role shortcuts: "crew", "overseer"
 //   - Full paths: "<rig>/crew/<name>"
 //   - Direct session names (passed through)
 //
@@ -702,6 +702,10 @@ func resolveRoleToSession(reg *session.PrefixRegistry, role string) (string, err
 			return "", fmt.Errorf("cannot determine crew identity - run from crew directory or specify GT_RIG/GT_CREW")
 		}
 		return session.CrewSessionName(reg.PrefixForRig(rig), crewName), nil
+
+	case string(session.RoleOverseer):
+		// GT_ROLE=overseer names the role, not the hq-overseer session.
+		return session.OverseerSessionName(), nil
 
 	default:
 		// Assume it's a direct session name (e.g., gt-gastown-crew-max)
