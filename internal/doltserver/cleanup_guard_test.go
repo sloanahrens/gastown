@@ -1,6 +1,7 @@
 package doltserver
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -123,4 +124,28 @@ func TestValidateForceAuthorization(t *testing.T) {
 			t.Errorf("error should call out self-authorization, got: %v", err)
 		}
 	})
+}
+
+// TestValidateForceAuthorizationUnidentifiedActor covers gt-kz9k0: the actor
+// resolveDestructiveActor reports for unset GT_ROLE/BD_ACTOR off-terminal never
+// equals a bead's CreatedBy, so the self-authorization check used to pass any
+// bead, including one the same agent had just created.
+func TestValidateForceAuthorizationUnidentifiedActor(t *testing.T) {
+	t.Parallel()
+	for _, actor := range []string{UnidentifiedActor, ""} {
+		issue := &beads.Issue{
+			ID:        "hq-auth1",
+			Title:     "Authorize forced cleanup of testdb_*",
+			Status:    "open",
+			CreatedBy: "gastown/polecats/onyx",
+			Labels:    []string{ForceAuthLabel},
+		}
+		err := ValidateForceAuthorization(issue, actor)
+		if err == nil {
+			t.Fatalf("actor %q: expected refusal, got nil", actor)
+		}
+		if !errors.Is(err, ErrUnidentifiedActor) {
+			t.Errorf("actor %q: error = %v, want ErrUnidentifiedActor", actor, err)
+		}
+	}
 }

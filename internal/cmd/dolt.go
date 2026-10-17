@@ -983,21 +983,8 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 	// ephemeral nudge. Forcing agents through --authorized-by leaves a durable
 	// audit trail on the authorizing bead.
 	if doltCleanupForce && !doltCleanupDry {
-		// Identity is corroborated, not just read from env: unset GT_ROLE/BD_ACTOR
-		// off-terminal is treated as an agent, so agents cannot pose as human
-		// operators by unsetting their env (gt-2oy).
-		if actor, isAgent := resolveDestructiveActor(agentActor(os.Getenv), ui.IsTerminal()); isAgent {
-			if err := checkAgentForceAuthorization(actor, doltCleanupAuthorizedBy); err != nil {
-				return err
-			}
-			issue, err := beads.New(townRoot).Show(doltCleanupAuthorizedBy)
-			if err != nil {
-				return fmt.Errorf("--authorized-by bead %q not found: %w", doltCleanupAuthorizedBy, err)
-			}
-			// The bead must be a genuine authorization record, not just any bead (gt-2oy).
-			if err := doltserver.ValidateForceAuthorization(issue, actor); err != nil {
-				return err
-			}
+		if err := authorizeCleanupForce(townRoot, agentActor(os.Getenv), ui.IsTerminal(), doltCleanupAuthorizedBy); err != nil {
+			return err
 		}
 	}
 
@@ -1194,6 +1181,8 @@ func cleanupExitError(failed []string, targeted int) error {
 // 'env -u GT_ROLE -u BD_ACTOR gt dolt cleanup --force' to pose as a human
 // operator (gt-2oy). So unset identity only counts as human when stdout is an
 // interactive terminal; off-terminal, unset identity is agent-by-default.
+// The agent-by-default actor is doltserver.UnidentifiedActor, which every
+// authorization guard refuses (gt-kz9k0).
 func resolveDestructiveActor(envActor string, stdoutIsTTY bool) (actor string, isAgent bool) {
 	if envActor != "" {
 		return envActor, true
@@ -1201,7 +1190,34 @@ func resolveDestructiveActor(envActor string, stdoutIsTTY bool) (actor string, i
 	if stdoutIsTTY {
 		return "", false
 	}
-	return "unidentified agent (GT_ROLE/BD_ACTOR unset, not an interactive terminal)", true
+	return doltserver.UnidentifiedActor, true
+}
+
+// authorizeCleanupForce enforces the force guardrails for a destructive
+// cleanup: an agent needs a genuine authorization bead (gt-61x, gt-2oy), and an
+// unidentified actor can never supply one (gt-kz9k0).
+//
+// The actor and bead are parameters rather than reads of process state so each
+// refusal is testable without mutating the environment.
+func authorizeCleanupForce(townRoot, envActor string, stdoutIsTTY bool, authorizedBy string) error {
+	actor, isAgent := resolveDestructiveActor(envActor, stdoutIsTTY)
+	if !isAgent {
+		return nil
+	}
+	// Refuse before the bead lookup: an unidentified process can create the very
+	// bead it names, so no bead can authorize it (gt-kz9k0).
+	if doltserver.IsUnidentifiedActor(actor) {
+		return doltserver.ErrUnidentifiedActor
+	}
+	if err := checkAgentForceAuthorization(actor, authorizedBy); err != nil {
+		return err
+	}
+	issue, err := beads.New(townRoot).Show(authorizedBy)
+	if err != nil {
+		return fmt.Errorf("--authorized-by bead %q not found: %w", authorizedBy, err)
+	}
+	// The bead must be a genuine authorization record, not just any bead (gt-2oy).
+	return doltserver.ValidateForceAuthorization(issue, actor)
 }
 
 // holdsGateError decides whether cleanup may continue after a failed holds

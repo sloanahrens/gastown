@@ -1,6 +1,7 @@
 package doltserver
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -76,12 +77,42 @@ func holdsFromIssues(issues []*beads.Issue) []DatabaseHold {
 // bead — including one it had just created itself.
 const ForceAuthLabel = "dolt-force-auth"
 
+// UnidentifiedActor labels an agent whose identity cannot be resolved: both
+// GT_ROLE and BD_ACTOR are unset and stdout is not an interactive terminal
+// (gt-2oy). No bead can carry it as CreatedBy, so a guard comparing CreatedBy
+// against the actor must refuse it outright (gt-kz9k0).
+const UnidentifiedActor = "unidentified agent (GT_ROLE/BD_ACTOR unset, not an interactive terminal)"
+
+// ErrUnidentifiedActor refuses a forced cleanup whose actor is unknown: the
+// process that would create the authorization bead is its only requester.
+var ErrUnidentifiedActor = errors.New(`forced Dolt cleanup refused: the actor cannot be identified (gt-kz9k0)
+
+GT_ROLE and BD_ACTOR are both unset and stdout is not an interactive terminal,
+so any authorization bead would have to be created by this same unidentified
+process.
+
+Run as an agent with its identity set:
+  GT_ROLE=gastown/polecats/<name> gt dolt cleanup --force --authorized-by <bead-id>
+
+Or run the cleanup from an interactive terminal as the operator`)
+
+// IsUnidentifiedActor reports whether actor names a process with no resolvable identity (gt-kz9k0).
+func IsUnidentifiedActor(actor string) bool {
+	return actor == "" || actor == UnidentifiedActor
+}
+
 // ValidateForceAuthorization checks that the --authorized-by bead is a genuine
-// authorization record (gt-2oy): it must carry the ForceAuthLabel label, must
-// not be closed, and must not have been created by the requesting actor itself.
+// authorization record (gt-2oy): the actor must be identified, and the bead must
+// carry the ForceAuthLabel label, must not be closed, and must not have been
+// created by the requesting actor itself.
 func ValidateForceAuthorization(issue *beads.Issue, actor string) error {
 	if issue == nil {
 		return fmt.Errorf("authorization bead not found")
+	}
+	// CreatedBy never equals UnidentifiedActor, so the self-authorization check
+	// below would pass for every bead this process could create (gt-kz9k0).
+	if IsUnidentifiedActor(actor) {
+		return ErrUnidentifiedActor
 	}
 	labeled := false
 	for _, label := range issue.Labels {
@@ -101,7 +132,7 @@ An authorization bead must be created by the overseer with:
 		return fmt.Errorf("authorization bead %s is %s — a forced cleanup requires an open authorization (gt-2oy)",
 			issue.ID, issue.Status)
 	}
-	if actor != "" && issue.CreatedBy == actor {
+	if issue.CreatedBy == actor {
 		return fmt.Errorf("authorization bead %s was created by %s itself — self-authorization is not allowed (gt-2oy); the bead must record an overseer decision",
 			issue.ID, actor)
 	}
