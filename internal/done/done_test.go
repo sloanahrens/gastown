@@ -1222,6 +1222,29 @@ func TestSelfReportCleanupStatusAlwaysWrites(t *testing.T) {
 	})
 }
 
+// TestRunAmbiguityErrorWritesCleanupStatus: the errors Run stops on before it
+// reports anything done (an ambiguous hook, a failed auto-save) still write
+// cleanup_status to the agent bead and hand the original error back. Run itself
+// needs real git, which the unit tier does not run; the end-to-end check is
+// TestIntegrationRunAmbiguityErrorWritesCleanupStatus.
+func TestRunAmbiguityErrorWritesCleanupStatus(t *testing.T) {
+	t.Parallel()
+	for _, stop := range []error{
+		errors.New("multiple active assignments found for gastown/polecats/jasper; cannot infer issue from hook. Use --issue to disambiguate"),
+		errors.New("cannot auto-save unmerged conflicts: a.go"),
+	} {
+		updater := &doneFakeCleanupUpdater{}
+		got := failWithCleanupStatus(stop, unobservableGit{}, "fix/add-retry", updater, "gt-gastown-polecat-jasper", "")
+		if got != stop {
+			t.Errorf("failWithCleanupStatus returned %v, want %v", got, stop)
+		}
+		if updater.calls != 1 || updater.id != "gt-gastown-polecat-jasper" || updater.status != "unknown" {
+			t.Errorf("stop %q wrote cleanup_status %q to %q in %d call(s), want one write of %q to the agent bead",
+				stop, updater.status, updater.id, updater.calls, "unknown")
+		}
+	}
+}
+
 // TestMRVerificationSetsMRFailed verifies that if MR bead creation returns
 // success but the bead cannot be read back (verification fails), mrFailed
 // is set to true. This is the core fix for GH#1945: without verification,

@@ -538,6 +538,15 @@ func selfReportCleanupStatus(g cleanupStatusGit, branch string, updater beads.Cl
 	}
 }
 
+// failWithCleanupStatus records the worktree's git state on the agent bead and
+// returns err. Run stops through it on the errors that leave nothing reported
+// done (an ambiguous hook, a failed auto-save): the slot's reclaim reads
+// cleanup_status and cannot repair a missing one (hq-vx224).
+func failWithCleanupStatus(err error, g cleanupStatusGit, branch string, updater beads.Client, agentBeadID, doneCleanupStatus string) error {
+	selfReportCleanupStatus(g, branch, updater, agentBeadID, doneCleanupStatus)
+	return err
+}
+
 // cleanupStatusToReport is the value selfReportCleanupStatus records: the
 // computed status, else a freshly observed one, else "unknown". Total, like the
 // report itself. A run that folds the report into a larger agent-bead write
@@ -964,8 +973,7 @@ func Run(opts Options) error {
 	// that dies on this error must not strand its slot with cleanup_status
 	// missing (hq-vx224).
 	failRun := func(err error) error {
-		selfReportCleanupStatus(r.g, r.branch, beads.ForAgentBead(beads.New(filepath.Join(r.townRoot, r.rigName))), r.agentBeadID, cleanupStatus)
-		return err
+		return failWithCleanupStatus(err, r.g, r.branch, beads.ForAgentBead(beads.New(filepath.Join(r.townRoot, r.rigName))), r.agentBeadID, cleanupStatus)
 	}
 	if cleanupStatus == "" {
 		cleanupStatus = observeCleanupStatus(r.g, r.branch)
@@ -1447,7 +1455,7 @@ func completeWithoutCode(r *doneRun, sub doneSubmission, target, baseRef, landin
 		}
 		headSHA, _ := repo.Rev("HEAD")
 		if verifyErr := repo.VerifyPushedCommitReachableFromPushTarget(landingRemote, target, headSHA); verifyErr != nil {
-			noteVerifiedPushFailure(bd, r.cwd, r.issueID, target, headSHA, verifyErr, !alreadyClosed)
+			noteVerifiedPushFailure(bd, r.cwd, r.issueID, landingRemote, target, headSHA, verifyErr, !alreadyClosed)
 			return fmt.Errorf("cannot close no-code bead: %w", verifyErr)
 		}
 		if headSHA != "" {
@@ -1564,7 +1572,7 @@ func pushBranchForLanding(r *doneRun, sourceBD beads.Client, head, baseRef strin
 		func() error { return verifyPushLanded(r.deps.repo, remote, r.townRoot, r.rigName, r.branch, head) },
 		r.deps.sleep, r.deps.retryDelays)
 	if verifyErr != nil {
-		noteVerifiedPushFailure(sourceBD, r.cwd, r.issueID, r.branch, head, verifyErr, true)
+		noteVerifiedPushFailure(sourceBD, r.cwd, r.issueID, remote, r.branch, head, verifyErr, true)
 		msg := unlandedPushMessage(r.branch, firstErr, verifyErr)
 		if lastPushErr != nil {
 			return doneExit(doneExitPushFailed, msg, verifyErr)
@@ -1720,6 +1728,9 @@ func pushSubmoduleChanges(g submodulePusher, baseRef string) error {
 		}
 		sha := ShortSHA(sc.NewSHA)
 		fmt.Printf("Pushing submodule %s (%s)...\n", sc.Path, sha)
+		// "origin" is the submodule repository's own remote, not the parent's
+		// landing remote: the rig's landing remote names a remote of the
+		// parent and a submodule does not necessarily have one of that name.
 		if subPushErr := g.PushSubmoduleCommit(sc.Path, sc.NewSHA, "origin"); subPushErr != nil {
 			return fmt.Errorf("pushing submodule %s at %s to origin: %w\nThe parent branch was not pushed: its gitlink would name a commit the submodule remote lacks. Fix the submodule push, then re-run gt done", sc.Path, sha, subPushErr)
 		}
@@ -1785,7 +1796,7 @@ func NotifyDoneEscalated(bd beads.Client, issueID string) {
 // verified on the bead. reopen sets the bead back to in_progress; the no-code
 // path passes false for a bead the polecat already closed, because reopening
 // it would trip the zero-commit guard on the retry.
-func noteVerifiedPushFailure(sourceBD beads.Client, cwd, issueID, branch, commit string, verifyErr error, reopen bool) {
+func noteVerifiedPushFailure(sourceBD beads.Client, cwd, issueID, remote, branch, commit string, verifyErr error, reopen bool) {
 	if issueID == "" || cwd == "" {
 		return
 	}
@@ -1798,7 +1809,7 @@ func noteVerifiedPushFailure(sourceBD beads.Client, cwd, issueID, branch, commit
 		inProgress := "in_progress"
 		_ = bd.Update(issueID, beads.UpdateOptions{Status: &inProgress})
 	}
-	msg := fmt.Sprintf("verified_push_failed: commit %s not verified on origin/%s: %v", commit, branch, verifyErr)
+	msg := fmt.Sprintf("verified_push_failed: commit %s not verified on %s/%s: %v", commit, remote, branch, verifyErr)
 	_ = bd.AddComment(issueID, msg)
 }
 
