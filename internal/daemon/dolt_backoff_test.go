@@ -1060,6 +1060,69 @@ func TestEnsureRunning_AutoRestartFalseLeavesUnhealthyServerUp(t *testing.T) {
 	}
 }
 
+// The read-only and identity branches refuse the same way the unhealthy branch
+// does: the failure is signalled and alerted, then the server is left up and
+// untouched. An imposter is not killed either, since killing it is the second
+// half of the restart the config forbids (gt-gqftr).
+func TestEnsureRunning_AutoRestartFalseLeavesReadOnlyAndImposterServersUp(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		inject func(m *DoltServerManager, err error)
+		alert  func(m *DoltServerManager, alerts *int)
+		reason string
+	}{
+		{
+			"read-only",
+			func(m *DoltServerManager, err error) { m.writeProbeCheckFn = func() error { return err } },
+			func(m *DoltServerManager, alerts *int) { m.readOnlyAlertFn = func(error) { *alerts++ } },
+			"read_only",
+		},
+		{
+			"identity",
+			func(m *DoltServerManager, err error) { m.identityCheckFn = func() error { return err } },
+			func(m *DoltServerManager, alerts *int) { m.unhealthyAlertFn = func(error) { *alerts++ } },
+			"imposter_detected",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			m := newTestManager(t)
+			m.runningFn = func() (int, bool) { return 1234, true }
+			m.writeProbeCheckFn = func() error { return nil }
+			off := false
+			m.config.AutoRestart = &off
+			tt.inject(m, fmt.Errorf("injected %s failure", tt.name))
+
+			var alerts int
+			tt.alert(m, &alerts)
+			var touched bool
+			m.stopFn = func() { touched = true }
+			m.startFn = func() error { touched = true; return nil }
+			m.killImpostersFn = func() error { touched = true; return nil }
+
+			if err := m.EnsureRunning(); err != nil {
+				t.Fatalf("EnsureRunning: %v", err)
+			}
+
+			if touched {
+				t.Error("auto_restart:false must not stop, start or kill anything")
+			}
+			if alerts != 1 {
+				t.Errorf("alerts = %d, want 1", alerts)
+			}
+			signal, err := os.ReadFile(m.unhealthySignalFile())
+			if err != nil {
+				t.Fatalf("no unhealthy signal written: %v", err)
+			}
+			if !strings.Contains(string(signal), `"reason":"`+tt.reason+`"`) {
+				t.Errorf("signal file = %s, want reason %s", signal, tt.reason)
+			}
+		})
+	}
+}
+
 // A server that is not running and has no dead PID on file is started, not
 // restarted, so auto_restart:false still brings the town's data plane up
 // (gt-gqftr).
