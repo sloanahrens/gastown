@@ -102,3 +102,21 @@ func TestSessionHooksCheck_ListFailureIsSkipped(t *testing.T) {
 		t.Errorf("status = %v, want skipped", res.Status)
 	}
 }
+
+// The live-session check is 'session-hooks-live'; 'session-hooks' belongs to
+// the settings.json config check, whose fix hint ('gt doctor fix
+// session-hooks') and --check selection resolve by name (gt-uh7hy).
+func TestSessionHooksCheck_Name(t *testing.T) {
+	t.Parallel()
+	c := NewSessionHooksCheck()
+	if got := c.Name(); got != "session-hooks-live" {
+		t.Errorf("Name() = %q, want session-hooks-live", got)
+	}
+	if got := NewSessionHookCheck().Name(); got != "session-hooks" {
+		t.Errorf("config check Name() = %q, want session-hooks", got)
+	}
+	c.listerForTest = fakeHooksLister{err: errors.New("no server")}
+	if res := c.Run(sessionHooksCtx(t)); res.Name != "session-hooks-live" {
+		t.Errorf("result Name = %q, want session-hooks-live", res.Name)
+	}
+}
