@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -227,10 +229,10 @@ func TestResolveDestructiveActor(t *testing.T) {
 	})
 }
 
-// TestDoltCleanupForceRefusesUnidentifiedActor covers gt-kz9k0: with no env
-// identity and no terminal, --force must fail closed before the authorization
-// bead is looked up, so no database can be removed.
-func TestDoltCleanupForceRefusesUnidentifiedActor(t *testing.T) {
+// TestAuthorizeCleanupForceRefusesUnidentifiedActor covers the guard helper:
+// with no env identity and no terminal, --force must fail closed before the
+// authorization bead is looked up, so no database can be removed (gt-kz9k0).
+func TestAuthorizeCleanupForceRefusesUnidentifiedActor(t *testing.T) {
 	t.Parallel()
 	err := authorizeCleanupForce(t.TempDir(), "", false, "hq-abc")
 	if err == nil {
@@ -238,5 +240,65 @@ func TestDoltCleanupForceRefusesUnidentifiedActor(t *testing.T) {
 	}
 	if !errors.Is(err, doltserver.ErrUnidentifiedActor) {
 		t.Errorf("error = %v, want ErrUnidentifiedActor (refusal must precede the bead lookup)", err)
+	}
+}
+
+// TestRunDoltCleanupForceRefusesUnidentifiedActor drives the command itself:
+// with GT_ROLE/BD_ACTOR unset and stdout not a terminal, `gt dolt cleanup
+// --force --authorized-by hq-abc` must refuse before it discovers or removes
+// any database. Calling authorizeCleanupForce directly cannot catch the guard
+// being dropped from this call site.
+//
+//testpolicy:allow parallel — runDoltCleanup reads process-wide state (flags, environment, stdout, cwd)
+func TestRunDoltCleanupForceRefusesUnidentifiedActor(t *testing.T) {
+	// Own everything the command resolves: a sandbox town with no .dolt-data,
+	// so a dropped guard finds nothing to remove, and a temp cwd that keeps
+	// any real town above the test out of the walk-up search.
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	//testpolicy:allow no-chdir — runDoltCleanup resolves the town root by walking up from the process cwd
+	t.Chdir(t.TempDir())
+	//testpolicy:allow no-env — GT_TOWN_ROOT is the fallback the command reads when the cwd is outside a town
+	t.Setenv("GT_TOWN_ROOT", townRoot)
+	//testpolicy:allow no-env — GT_ROLE is the identity the command reads via agentActor
+	t.Setenv("GT_ROLE", "")
+	//testpolicy:allow no-env — BD_ACTOR is the fallback identity the command reads
+	t.Setenv("BD_ACTOR", "")
+
+	// stdout must not be a terminal, or the command classifies the actor as a
+	// human operator and correctly lets the force through.
+	stdout := os.Stdout
+	devNull, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	//testpolicy:allow no-global-swap — ui.IsTerminal reads os.Stdout inside runDoltCleanup; it is not an argument
+	os.Stdout = devNull
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores the os.Stdout swapped above
+		os.Stdout = stdout
+		devNull.Close()
+	})
+
+	// The cleanup flags are package-level and bound to the shared command tree.
+	force, dry, authorizedBy := doltCleanupForce, doltCleanupDry, doltCleanupAuthorizedBy
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores the flag variables swapped below
+		doltCleanupForce, doltCleanupDry, doltCleanupAuthorizedBy = force, dry, authorizedBy
+	})
+	//testpolicy:allow no-global-swap — runDoltCleanup reads the --force, --dry-run and --authorized-by flag variables; they are not arguments
+	doltCleanupForce, doltCleanupDry, doltCleanupAuthorizedBy = true, false, "hq-abc"
+
+	err = runDoltCleanup(nil, nil)
+	if err == nil {
+		t.Fatal("runDoltCleanup with --force and an unidentified actor = nil, want refusal")
+	}
+	if !errors.Is(err, doltserver.ErrUnidentifiedActor) {
+		t.Errorf("error = %v, want ErrUnidentifiedActor (refusal must precede orphan discovery and removal)", err)
 	}
 }
