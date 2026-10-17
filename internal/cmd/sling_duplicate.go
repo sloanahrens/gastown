@@ -402,7 +402,13 @@ func (p *duplicatePools) noteSlingCandidateDispatched(townRoot string, candidate
 	}
 }
 
-// noteDispatched appends one already-dispatched bead to a rig's cached pool.
+// noteDispatched records one already-dispatched bead in a rig's cached pool as
+// hooked, whether the pool already holds a row for it or the row is appended.
+// The sling's hook write has landed, so the bead holds a seat, and the cached
+// row predates that write. Left open, it reads as unstarted work that may not
+// precede the peer judging it, and sling.Blocking then lets that peer past the
+// guard and onto a second seat for one defect (gt-dzjtz).
+//
 // It is a no-op when the pool was never fetched: a fresh fetch would find the
 // bead in the database anyway, now that its hook has landed.
 func (p *duplicatePools) noteDispatched(beadsDir string, candidate duplicateCandidate) {
@@ -413,8 +419,15 @@ func (p *duplicatePools) noteDispatched(beadsDir string, candidate duplicateCand
 	if !ok {
 		return
 	}
-	for _, existing := range entry.candidates {
+	candidate.Status = beads.StatusHooked
+	for i, existing := range entry.candidates {
 		if existing.ID == candidate.ID {
+			// A slice poolFor already handed out is shared with readers, so the
+			// corrected row goes into a copy rather than in place.
+			updated := make([]duplicateCandidate, len(entry.candidates))
+			copy(updated, entry.candidates)
+			updated[i].Status = candidate.Status
+			entry.candidates = updated
 			return
 		}
 	}

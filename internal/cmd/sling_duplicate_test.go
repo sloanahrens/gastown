@@ -504,13 +504,13 @@ func TestDuplicateIntraBatchDetection(t *testing.T) {
 	}
 }
 
-// TestCheckSlingDuplicatesReadiesTheCandidate (gt-mknmb): the bead the check is
-// about to sling joins the pool once its hook lands, under the status it had
-// before the sling, so it can be the peer the next bead of the same burst is
-// weighed against. Its row has to carry the readiness half a bd show gave the
-// sling — read from a row that never was, the shape lint refuses it for a
-// description it does not have, and the guard stops refusing the second filing
-// of the same defect.
+// TestCheckSlingDuplicatesReadiesTheCandidate (gt-mknmb): the row the sling's
+// check hands to noteDispatched carries the readiness half a bd show gave the
+// sling, so it answers the dispatcher's hold question exactly as the stored
+// record does — read from a row that never was, the shape lint refuses the bead
+// for a description it does not have. The row is filed back as hooked once the
+// hook lands (gt-dzjtz), so the next bead of the same burst is refused by the
+// seat the first one holds.
 func TestCheckSlingDuplicatesReadiesTheCandidate(t *testing.T) {
 	t.Parallel()
 	knobs := specHoldKnobs{
@@ -1132,15 +1132,17 @@ func TestOpenClusterDispatchesPastAHeldHead(t *testing.T) {
 }
 
 // TestOpenClusterBurstKeepsRefusingANotedDispatchedPeer is the gt-bvvab
-// acceptance bar, over the one bead the gt-00gee dispatchability question can
-// answer wrong: the peer this same tick has already slung.
+// acceptance bar: the peer this same tick has already slung must keep refusing
+// the beads behind it.
 //
-// A burst reads one pool for the whole tick, so a bead it slung mid-tick reaches
-// the beads behind it only as the row the guard weighed it by — still open
-// (sling.go noteDispatched). The dispatcher's hold question has to be answered
-// from that row: answered from anything live it sees the peer hooked, hooked is
-// a hold, and a held peer stops refusing, so the next bead of the tick is slung
-// onto a seat the first one already holds (gt-mcq, gt-bvvab).
+// A burst reads one pool for the whole tick, so a bead it slung mid-tick
+// reaches the beads behind it only as the row noteDispatched files back into
+// that pool. The row records the hook that landed, so the peer reads as work in
+// flight and sling.Blocking refuses on the seat alone, whatever the two beads'
+// ranks (gt-dzjtz). Filed under its pre-sling status instead, the peer read as
+// unstarted work, and the refusal fell to the dispatcher's hold question, which
+// took the stale open row as dispatchable — so the next bead of the tick went
+// onto a seat the first one already held (gt-mcq, gt-bvvab).
 //
 // The cluster is the gt-nlkba shape — two ready beads naming one test, sharing
 // no path — slung in board order, the way the gt-3vr/gt-rl0 double dispatch was
@@ -1205,7 +1207,7 @@ func TestOpenClusterBurstKeepsRefusingANotedDispatchedPeer(t *testing.T) {
 	}
 
 	// The lead's sling lands: the hook write makes it work in flight, and the
-	// burst files the row the guard weighed it by back into the pool.
+	// burst files its row back into the pool as hooked (gt-dzjtz).
 	status, assignee := "hooked", "gastown/polecats/x"
 	if err := db.Update("gt-lead", beads.UpdateOptions{Status: &status, Assignee: &assignee}); err != nil {
 		t.Fatalf("hook gt-lead: %v", err)
@@ -1233,6 +1235,135 @@ func TestOpenClusterBurstKeepsRefusingANotedDispatchedPeer(t *testing.T) {
 	}
 	if !peer.Blocking(*next) {
 		t.Errorf("Blocking(gt-next) = false over the gt-lead slung earlier in this tick: a peer whose seat is already spent must keep refusing, or the burst puts two seats on one defect")
+	}
+}
+
+// TestNoteDispatchedMarksCachedPeerHooked is the gt-dzjtz acceptance bar: the
+// row a landed sling files back into the tick's pool records the hook, so a
+// peer of the just-slung bead is weighed against work in flight rather than
+// against the open row the snapshot holds.
+//
+// Both shapes are covered. A bead the pool already holds is the common one — a
+// batch's snapshot predates every hook the batch makes — and a bead appended
+// after the fetch had the same hole, since it was appended under its pre-sling
+// status.
+func TestNoteDispatchedMarksCachedPeerHooked(t *testing.T) {
+	t.Parallel()
+	beadsDir := t.TempDir()
+	cached := ranked(newDuplicateCandidate("gt-cached", "guard blocks a nested command", "open",
+		"TestDangerousGuard_Integration fails in internal/cmd/tap_guard_dangerous.go."), 1, "2026-10-15T09:00:00Z")
+	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
+		return []duplicateCandidate{cached}, nil
+	}, noPeerHolds)
+
+	if status := poolRow(t, mustPool(t, pools, beadsDir), "gt-cached").Status; status != "open" {
+		t.Fatalf("the snapshot row for gt-cached reads %q, want open", status)
+	}
+
+	// The cached bead's sling lands after the fetch, as it does in a burst.
+	pools.noteDispatched(beadsDir, cached)
+	if got := poolRow(t, mustPool(t, pools, beadsDir), "gt-cached").Status; got != beads.StatusHooked {
+		t.Errorf("the cached peer reads %q after its sling landed, want %q: an open row is work that may not precede the candidate weighing it, so the guard lets a second seat onto the defect", got, beads.StatusHooked)
+	}
+
+	// A bead the snapshot never held is appended once its own hook lands.
+	fresh := ranked(newDuplicateCandidate("gt-fresh", "guard judges the argv after `gt slot run --`", "open",
+		"TestDangerousGuard_Integration fails in internal/cmd/tap_guard_dangerous.go."), 2, "2026-10-15T10:00:00Z")
+	pools.noteDispatched(beadsDir, fresh)
+	pool := mustPool(t, pools, beadsDir)
+	if got := poolRow(t, pool, "gt-fresh").Status; got != beads.StatusHooked {
+		t.Errorf("the appended bead reads %q after its sling landed, want %q", got, beads.StatusHooked)
+	}
+	if len(pool) != 2 {
+		t.Errorf("the pool holds %d beads, want the snapshot's one plus the appended one", len(pool))
+	}
+}
+
+// TestBatchSlingRefusesPeerOfJustSlungHeldLead is the gt-dzjtz acceptance bar
+// over the seat the wrong rank wastes. gt-a outranks gt-b but the dispatcher
+// holds it — routed to a person — so its rank never refuses gt-b. gt-b is slung
+// first, and gt-a is then the bead behind it.
+//
+// Against a pool row left open, gt-a's check sees unstarted work that ranks
+// behind it: Blocking is false, and the batch slings gt-a onto the seat gt-b
+// already holds. The row records the hook instead, so the seat alone refuses
+// whatever the two beads' ranks.
+func TestBatchSlingRefusesPeerOfJustSlungHeldLead(t *testing.T) {
+	t.Parallel()
+	townRoot := duplicateTown(t)
+	const shared = "TestDangerousGuard_Integration is the test that fails."
+	shaped := specTestDescription + "\n\n" + shared
+
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-a", Title: "guard blocks a nested command", Type: "task", Status: "open",
+		Priority: 1, CreatedAt: "2026-10-15T09:00:00Z", Description: shaped,
+		AcceptanceCriteria: specTestAcceptance, Labels: []string{"needs-human"}})
+	db.Seed(beads.Issue{ID: "gt-b", Title: "guard judges the argv after `gt slot run --`", Type: "task", Status: "open",
+		Priority: 2, CreatedAt: "2026-10-15T10:00:00Z", Description: shaped,
+		AcceptanceCriteria: specTestAcceptance})
+
+	knobs := specHoldKnobs{
+		MaxPriority: 2,
+		ShapeGate:   specdispatch.ShapeGateWarn,
+		Template:    specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
+	}
+	pools := newDuplicatePools(
+		func(beadsDir string) ([]duplicateCandidate, error) {
+			return fetchDuplicatePoolFrom(db, func(dir string, err error) {
+				t.Errorf("enrichment of %s failed: %v", dir, err)
+			}, beadsDir)
+		},
+		func(_, _ string, peer duplicateCandidate) string { return specPeerHeldFrom(db, knobs, peer) },
+	)
+	beadsDir := duplicateBeadsDir(townRoot, "gt-a")
+	if beadsDir == "" {
+		t.Fatal("the town routes no gt- bead to a rig, so the batch has no pool to read")
+	}
+
+	// check is one bead of the batch as sling.go runs it: the guard's verdict
+	// against the tick's pool, through the same resolver the tick wires.
+	check := func(id string) (*duplicateCandidate, []duplicateMatch) {
+		t.Helper()
+		issue, err := db.Show(id)
+		if err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		candidate, matches, err := pools.check(townRoot, id, beadInfoOf(issue))
+		if err != nil {
+			t.Fatalf("check %s: %v", id, err)
+		}
+		if candidate == nil {
+			t.Fatalf("%s names %s, so the guard has to inspect it", id, shared)
+		}
+		return candidate, matches
+	}
+
+	// The case only exists while gt-a is held: dispatchable, it outranks gt-b and
+	// refuses it on the rank alone.
+	if why := specPeerHeldFrom(db, knobs, poolRow(t, mustPool(t, pools, beadsDir), "gt-a")); why == "" {
+		t.Fatal("gt-a must be held, or it refuses gt-b before the batch reaches it")
+	}
+
+	b, bMatches := check("gt-b")
+	if d := decideSlingDuplicates(*b, bMatches); d.Blocked {
+		t.Fatalf("gt-b must be slung: the bead ahead of it is held, so nothing dispatchable precedes it: %s", d.Message)
+	}
+
+	// gt-b's sling lands and the batch files it back into the tick's pool.
+	status, assignee := "hooked", "gastown/polecats/x"
+	if err := db.Update("gt-b", beads.UpdateOptions{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatalf("hook gt-b: %v", err)
+	}
+	pools.noteSlingCandidateDispatched(townRoot, b)
+
+	// gt-a is the batch's other member, checked against the same tick's pool.
+	a, aMatches := check("gt-a")
+	decision := decideSlingDuplicates(*a, aMatches)
+	if !decision.Blocked {
+		t.Fatalf("gt-a was not refused against a pool where gt-b is already hooked: the batch puts two seats on one defect")
+	}
+	if !strings.Contains(decision.Message, "gt-b") {
+		t.Errorf("the refusal must name the bead holding the seat, gt-b:\n%s", decision.Message)
 	}
 }
 

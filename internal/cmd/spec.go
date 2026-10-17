@@ -1097,10 +1097,9 @@ var specHeldStatuses = []string{beads.StatusHooked, string(beads.StatusInProgres
 // epic or wayfinder map would otherwise hold every ready child that names one.
 // The sling-time guard skips epics for the same reason (findDuplicateMatches).
 //
-// The read is fresh, not the guard's cached pool: that cache can predate the
-// bead being hooked, and the burst path files a just-dispatched bead under its
-// pre-sling status (noteSlingCandidateDispatched), which is the one case this
-// hold exists for.
+// The read is fresh, not the guard's cached pool: that pool is a snapshot of
+// the database at fetch time, while the seat this hold protects is the bead's
+// own live status.
 func heldBeadsFrom(store beads.Client, warn func(beadsDir string, err error), beadsDir string) ([]specdispatch.HeldBead, error) {
 	cands, err := listDuplicateCandidates(store, warn, beadsDir, specHeldStatuses, time.Time{})
 	if err != nil {
