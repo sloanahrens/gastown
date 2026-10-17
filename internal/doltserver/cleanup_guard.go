@@ -77,24 +77,20 @@ func holdsFromIssues(issues []*beads.Issue) []DatabaseHold {
 // bead — including one it had just created itself.
 const ForceAuthLabel = "dolt-force-auth"
 
-// UnidentifiedActor labels an agent whose identity cannot be resolved: both
-// GT_ROLE and BD_ACTOR are unset and stdout is not an interactive terminal
-// (gt-2oy). No bead can carry it as CreatedBy, so a guard comparing CreatedBy
-// against the actor must refuse it outright (gt-kz9k0).
-const UnidentifiedActor = "unidentified agent (GT_ROLE/BD_ACTOR unset, not an interactive terminal)"
+// UnidentifiedActor is the sentinel actor for a process whose identity cannot
+// be resolved because GT_ROLE and BD_ACTOR are unset off-terminal (gt-2oy); a
+// token rather than a description, so messages render it as-is (gt-kz9k0).
+const UnidentifiedActor = "unidentified-agent"
 
 // ErrUnidentifiedActor refuses a forced cleanup whose actor is unknown: the
-// process that would create the authorization bead is its only requester.
+// process that would create the authorization bead is its only requester
+// (gt-kz9k0).
 var ErrUnidentifiedActor = errors.New(`forced Dolt cleanup refused: the actor cannot be identified (gt-kz9k0)
 
 GT_ROLE and BD_ACTOR are both unset and stdout is not an interactive terminal,
-so any authorization bead would have to be created by this same unidentified
-process.
-
-Run as an agent with its identity set:
-  GT_ROLE=gastown/polecats/<name> gt dolt cleanup --force --authorized-by <bead-id>
-
-Or run the cleanup from an interactive terminal as the operator`)
+so the authorization bead would have to be created by this same process.
+Retry with an agent identity set, or from an interactive terminal as the
+operator.`)
 
 // IsUnidentifiedActor reports whether actor names a process with no resolvable identity (gt-kz9k0).
 func IsUnidentifiedActor(actor string) bool {
@@ -109,7 +105,7 @@ func ValidateForceAuthorization(issue *beads.Issue, actor string) error {
 	if issue == nil {
 		return fmt.Errorf("authorization bead not found")
 	}
-	// CreatedBy never equals UnidentifiedActor, so the self-authorization check
+	// CreatedBy cannot equal UnidentifiedActor, so the self-authorization check
 	// below would pass for every bead this process could create (gt-kz9k0).
 	if IsUnidentifiedActor(actor) {
 		return ErrUnidentifiedActor
