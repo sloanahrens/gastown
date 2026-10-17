@@ -163,6 +163,8 @@ func TestExecuteSlingSuccess(t *testing.T) {
 		"agent hook gastown/polecats/Toast gt-abc123",
 		"agent mode gastown/polecats/Toast ralph",
 		"start session Toast",
+		// The pool note follows the session, at the commit point (gt-fvak3).
+		"note dispatched",
 		"unlock assignee gastown/polecats/Toast",
 		"unlock bead gt-abc123",
 		"release seat",
@@ -300,9 +302,16 @@ func TestExecuteSlingRollsBackAfterTheSpawn(t *testing.T) {
 				}
 				h.wantNo("rollback")
 				h.wantCalls("hook", "hook gt-abc123 gastown/polecats/Toast")
+				// The pool note marks the bead hooked for the rest of the tick,
+				// and a committed sling is the only one that can take it (gt-fvak3).
+				h.wantCalls("note dispatched", "note dispatched")
 				return
 			}
 			wantSlingErr(t, err, tc.errSub)
+			// A rolled-back sling leaves no pool note behind: the note outlives
+			// the rollback, so the bead would read as hooked work the tick had
+			// already given back (gt-fvak3).
+			h.wantNo("note dispatched")
 			var undo []string
 			undo = append(undo, h.matching("rollback")...)
 			undo = append(undo, h.matching("cleanup spawn")...)

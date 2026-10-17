@@ -157,7 +157,7 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		checkDuplicates: func(string, string, *beadInfo) (*duplicateCandidate, []duplicateMatch, error) {
 			return nil, nil, nil
 		},
-		noteDispatched: func(string, *duplicateCandidate) {},
+		noteDispatched: func(string, *duplicateCandidate) { h.record("note dispatched") },
 		crossRigGuard: func(id, agent, _ string) error {
 			h.record("cross-rig guard %s %s", id, agent)
 			return nil

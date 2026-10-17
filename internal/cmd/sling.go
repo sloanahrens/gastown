@@ -1082,10 +1082,6 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	r.steps.Step("hook")
 	r.clearOrphanLabels(townRoot, beadID, hookWorkDir)
 
-	// The bead is dispatched now, so later dispatches in this process should
-	// see it in the pool even though their snapshot predates this hook.
-	r.noteDispatched(townRoot, dupCandidate)
-
 	fmt.Fprintf(r.out, "%s Work attached to hook (status=hooked)\n", style.Bold.Render("✓"))
 
 	// Log sling event to activity feed
@@ -1133,6 +1129,13 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// Commit point (gt-7evi4): the work is hooked and any polecat this sling
 	// spawned is running it. Nothing after this is rolled back.
 	slingCommitted = true
+
+	// Later dispatches in this process should see the bead in the pool even
+	// though their snapshot predates its hook. The note is written here, past
+	// the point where the sling can still be unwound: made beside the hook
+	// write, it would outlive a rollback and leave the bead reading as hooked
+	// work the tick had already given back (gt-fvak3).
+	r.noteDispatched(townRoot, dupCandidate)
 
 	// Try to inject the "start now" prompt (graceful if no tmux)
 	// Skip for freshly spawned polecats - SessionManager.Start() already sent StartupNudge.

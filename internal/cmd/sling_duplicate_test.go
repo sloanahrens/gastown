@@ -186,9 +186,12 @@ func TestTestNamesOverlap(t *testing.T) {
 func TestSlingDuplicateCheckCatchesTonightPairs(t *testing.T) {
 	t.Parallel()
 	t.Run("gt-80o and gt-g6b", func(t *testing.T) {
-		// gt-g6b was dispatched while gt-80o was still open, so the pool holds
-		// the closed-after-the-fact side. Replay in both directions: whichever
-		// bead is being slung must see the other.
+		// gt-g6b was dispatched while gt-80o was still open and was closed
+		// after the fact, so the replay hands each direction the other side's
+		// row as it stood at that bead's sling: a tick's pool would read a bead
+		// it just dispatched as hooked (noteDispatched), not open, which is a
+		// different question from this pair's. Replay in both directions:
+		// whichever bead is being slung must see the other.
 		cases := []struct {
 			name      string
 			candidate duplicateCandidate
@@ -1260,10 +1263,20 @@ func TestNoteDispatchedMarksCachedPeerHooked(t *testing.T) {
 		t.Fatalf("the snapshot row for gt-cached reads %q, want open", status)
 	}
 
-	// The cached bead's sling lands after the fetch, as it does in a burst.
-	pools.noteDispatched(beadsDir, cached)
-	if got := poolRow(t, mustPool(t, pools, beadsDir), "gt-cached").Status; got != beads.StatusHooked {
-		t.Errorf("the cached peer reads %q after its sling landed, want %q: an open row is work that may not precede the candidate weighing it, so the guard lets a second seat onto the defect", got, beads.StatusHooked)
+	// The cached bead's sling lands after the fetch, as it does in a burst. The
+	// candidate is the row the bead's own show returned, which can differ from
+	// the snapshot's in more than its status.
+	landed := ranked(newDuplicateCandidate("gt-cached", "guard judges the argv after `gt slot run --`", "open",
+		"TestDangerousGuard_Integration fails in internal/cmd/tap_guard_dangerous.go."), 2, "2026-10-15T09:30:00Z")
+	pools.noteDispatched(beadsDir, landed)
+	row := poolRow(t, mustPool(t, pools, beadsDir), "gt-cached")
+	if row.Status != beads.StatusHooked {
+		t.Errorf("the cached peer reads %q after its sling landed, want %q: an open row is work that may not precede the candidate weighing it, so the guard lets a second seat onto the defect", row.Status, beads.StatusHooked)
+	}
+	// The whole row is corrected, not just its status: a snapshot field left
+	// behind is as stale as the status the note repairs (gt-fvak3).
+	if row.Title != landed.Title || row.Priority != landed.Priority || row.CreatedAt != landed.CreatedAt {
+		t.Errorf("the cached peer reads %+v after its sling landed, want the landed row %+v: the note corrects the whole row, not only its status", row, landed)
 	}
 
 	// A bead the snapshot never held is appended once its own hook lands.

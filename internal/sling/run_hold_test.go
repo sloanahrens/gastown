@@ -42,6 +42,8 @@ type fakeSlingDeps struct {
 	hooks     int
 	rollback  int
 	started   int
+	startErr  error // what StartSession fails with, nil to start
+	noted     int   // dispatches filed back into the tick's duplicate pool
 }
 
 func (f *fakeSlingDeps) deps() *Deps {
@@ -72,12 +74,12 @@ func (f *fakeSlingDeps) deps() *Deps {
 		Hook:               func(string, string, string, string, *FieldUpdates) error { f.hooks++; return nil },
 		RecordReassignment: func(string, string, string, string, string) {},
 		ClearOrphanLabels:  func(string, string, string) {},
-		NoteDispatched:     func(string, *Duplicate) {},
+		NoteDispatched:     func(string, *Duplicate) { f.noted++ },
 		LogFeed:            func(string, string, map[string]interface{}) error { return nil },
 		UpdateAgentHook:    func(string, string, string, string) {},
 		UpdateAgentMode:    func(string, string, string, string) {},
 		StoreFields:        func(string, string, FieldUpdates) error { return nil },
-		StartSession:       func(*Spawn) (string, error) { f.started++; return "%1", nil },
+		StartSession:       func(*Spawn) (string, error) { f.started++; return "%1", f.startErr },
 		RollbackArtifacts: func(*Spawn, string, string, string) {
 			f.rollback++
 		},
@@ -164,6 +166,39 @@ func TestRunTakesABeadRoutedByItsOwnSeat(t *testing.T) {
 	if f.hooks != 1 || result == nil || !result.Success {
 		t.Fatalf("hooks = %d, result %+v, want the dispatch to take the bead", f.hooks, result)
 	}
+}
+
+// TestRunNotesThePoolOnlyAfterTheSessionStarts is the gt-fvak3 regression: the
+// note marks the bead hooked for the rest of the tick, so a dispatch that rolls
+// its hook back must not leave the note behind. A session that fails to start
+// unwinds the dispatch; the same dispatch with a started session is committed
+// and notes the bead exactly once.
+func TestRunNotesThePoolOnlyAfterTheSessionStarts(t *testing.T) {
+	t.Parallel()
+	t.Run("session fails", func(t *testing.T) {
+		f := &fakeSlingDeps{startErr: errors.New("tmux: no server")}
+		if _, err := Run(context.Background(), f.deps(), holdTestOptions()); err == nil {
+			t.Fatal("a dispatch whose session failed to start must fail")
+		}
+		if f.hooks != 1 || f.rollback != 1 {
+			t.Fatalf("hooks = %d, rollback = %d, want the hook written and then rolled back", f.hooks, f.rollback)
+		}
+		if f.noted != 0 {
+			t.Errorf("the pool was noted %d time(s) for a rolled-back dispatch, want 0: the note would outlive the rollback", f.noted)
+		}
+	})
+	t.Run("session starts", func(t *testing.T) {
+		f := &fakeSlingDeps{}
+		if _, err := Run(context.Background(), f.deps(), holdTestOptions()); err != nil {
+			t.Fatalf("dispatch failed: %v", err)
+		}
+		if f.rollback != 0 {
+			t.Fatalf("rollback = %d, want 0", f.rollback)
+		}
+		if f.noted != 1 {
+			t.Errorf("the pool was noted %d time(s) for a committed dispatch, want 1", f.noted)
+		}
+	})
 }
 
 // TestRunForceTakesAHeldBead: the operator's own --force is the override the
