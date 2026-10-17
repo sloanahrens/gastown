@@ -234,6 +234,10 @@ func (d *Daemon) maybeCatchUpGC(now time.Time) {
 			// stays reserved for a run that failed.
 			return
 		}
+		if res.outcome == gcOutcomeInterrupted {
+			// A shutdown is not an attempt: leave the throttle alone.
+			return
+		}
 		d.catchUpGCAttemptAt.Store(d.maintenance().now().UnixNano())
 	})
 }

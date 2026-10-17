@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -1784,5 +1785,57 @@ func TestEnsureRunning_HealthyAfterReadOnlyRecovery(t *testing.T) {
 	// Unhealthy signal should be cleared
 	if _, err := os.Stat(m.unhealthySignalFile()); err == nil {
 		t.Error("expected DOLT_UNHEALTHY signal to be cleared after recovery")
+	}
+}
+
+// A server that exits after the first 5 seconds but inside the stop budget
+// ends the wait when it exits. stopLocked holds m.mu for the wait, so one that
+// sat out the full budget for a process already gone held the lock for 30s and
+// could outlive launchd's ExitTimeOut (gt-u3gph).
+func TestStopLockedSlowStopSignals(t *testing.T) {
+	t.Parallel()
+	const exitsAfter = 8 * time.Second
+	clk := newFixedClock()
+	start := clk.Now()
+	// A pid no host allocates: the TERM stopLocked sends it finds nothing.
+	m, logs := newStopTestManager(t, deadPID(t))
+	m.clock = clk
+	m.verifyDoltFn = func(string, int) error { return nil }
+	m.processAliveFn = func(*os.Process) bool { return clk.Since(start) < exitsAfter }
+
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		m.stopLocked()
+	}()
+	// Two sleepers, the poll and the budget: advance only once both are
+	// waiting, so the poller sees every tick (docs/testing.md, "The clock"). A
+	// poller that gave up early leaves one, and the wait for two times out.
+	for done := false; !done; {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		blocked := make(chan error, 1)
+		go func() { blocked <- clk.BlockUntilContext(ctx, 2) }()
+		select {
+		case <-returned:
+			done = true
+		case err := <-blocked:
+			if err != nil {
+				t.Fatalf("the stop poll stopped at %v, before the server exited at %v: %v", clk.Since(start), exitsAfter, err)
+			}
+			clk.Advance(doltServerStopPoll)
+		}
+		cancel()
+	}
+
+	if waited := clk.Since(start); waited >= doltServerStopBudget {
+		t.Errorf("stopLocked waited %v for a server that exited at %v, want it to end with the server", waited, exitsAfter)
+	}
+	if strings.Contains(logs.String(), "forcing termination") {
+		t.Errorf("a server that exited inside the budget was force-killed:\n%s", logs.String())
+	}
+	if !strings.Contains(logs.String(), "stopped gracefully") {
+		t.Errorf("graceful stop not logged:\n%s", logs.String())
 	}
 }
