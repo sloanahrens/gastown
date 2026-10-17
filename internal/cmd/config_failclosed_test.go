@@ -20,7 +20,7 @@ func TestDaemonJSONSettersRefuseAnUnparseableFile(t *testing.T) {
 		"lifecycle":   func(town string) error { return setLifecycleConfig(town, "lifecycle.reaper.enabled", "true") },
 		"maintenance": func(town string) error { return setMaintenanceConfig(town, "maintenance.window", "03:00") },
 		"get lifecycle": func(town string) error {
-			return getLifecycleConfig(town, "lifecycle.reaper.enabled")
+			return getLifecycleConfig(io.Discard, town, "lifecycle.reaper.enabled")
 		},
 		"get maintenance": func(town string) error {
 			return getMaintenanceConfig(io.Discard, town, "maintenance.window")

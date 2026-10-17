@@ -550,6 +550,28 @@ func runConfigDefaultAgent(cmd *cobra.Command, args []string) error {
 	return configDefaultAgent(cwdConfigCmdEnv(), args)
 }
 
+// validateAgentName returns an error unless name is a known agent: one of the
+// town's built-ins from settings/agents.json or a custom agent in its settings.
+// `gt config default-agent <name>` and `gt config set default_agent <name>`
+// both go through it, so the two ways to set the default accept the same set.
+func validateAgentName(townRoot, name string, townSettings *config.TownSettings) error {
+	registry, err := config.LoadAgentRegistryFor(townRoot, "")
+	if err != nil {
+		return fmt.Errorf("loading agent registry: %w", err)
+	}
+	for _, builtin := range registry.Names() {
+		if name == builtin {
+			return nil
+		}
+	}
+	if townSettings != nil && townSettings.Agents != nil {
+		if _, ok := townSettings.Agents[name]; ok {
+			return nil
+		}
+	}
+	return fmt.Errorf("agent '%s' not found (use 'gt config default-agent list' to see available agents)", name)
+}
+
 func configDefaultAgent(e configCmdEnv, args []string) error {
 	townRoot, err := e.findTown()
 	if err != nil {
@@ -561,12 +583,6 @@ func configDefaultAgent(e configCmdEnv, args []string) error {
 	townSettings, err := config.LoadOrCreateTownSettings(settingsPath)
 	if err != nil {
 		return fmt.Errorf("loading town settings: %w", err)
-	}
-
-	// Load the town's agent registry (built-ins plus settings/agents.json)
-	registry, err := config.LoadAgentRegistryFor(townRoot, "")
-	if err != nil {
-		return fmt.Errorf("loading agent registry: %w", err)
 	}
 
 	if len(args) == 0 {
@@ -582,23 +598,8 @@ func configDefaultAgent(e configCmdEnv, args []string) error {
 	// Set new default
 	name := args[0]
 
-	// Verify agent exists
-	isValid := false
-	builtInAgents := registry.Names()
-	for _, builtin := range builtInAgents {
-		if name == builtin {
-			isValid = true
-			break
-		}
-	}
-	if !isValid && townSettings.Agents != nil {
-		if _, ok := townSettings.Agents[name]; ok {
-			isValid = true
-		}
-	}
-
-	if !isValid {
-		return fmt.Errorf("agent '%s' not found (use 'gt config default-agent list' to see available agents)", name)
+	if err := validateAgentName(townRoot, name, townSettings); err != nil {
+		return err
 	}
 
 	// Set default
@@ -901,6 +902,9 @@ func configSet(e configCmdEnv, args []string) error {
 		}
 
 	case "default_agent":
+		if err := validateAgentName(townRoot, value, townSettings); err != nil {
+			return err
+		}
 		townSettings.DefaultAgent = value
 
 	case "scheduler.max_polecats":
@@ -1079,7 +1083,7 @@ func configGet(e configCmdEnv, args []string) error {
 
 	default:
 		if strings.HasPrefix(key, "lifecycle.") {
-			return getLifecycleConfig(townRoot, key)
+			return getLifecycleConfig(e.out, townRoot, key)
 		}
 		poolValue, handled := polecatPoolValue(townSettings.PolecatPool, key)
 		if !handled {
@@ -1293,7 +1297,7 @@ func setLifecycleConfig(townRoot, key, value string) error {
 }
 
 // getLifecycleConfig gets a lifecycle.* key from daemon.json.
-func getLifecycleConfig(townRoot, key string) error {
+func getLifecycleConfig(w io.Writer, townRoot, key string) error {
 	patrolConfig, err := daemon.ReadPatrolConfig(townRoot)
 	if err != nil {
 		return err
@@ -1342,7 +1346,7 @@ func getLifecycleConfig(townRoot, key string) error {
 		if patrolConfig != nil && patrolConfig.Patrols != nil && patrolConfig.Patrols.CompactorDog != nil && patrolConfig.Patrols.CompactorDog.Threshold > 0 {
 			value = strconv.Itoa(patrolConfig.Patrols.CompactorDog.Threshold)
 		} else {
-			value = "500 (default)"
+			value = fmt.Sprintf("%d (default)", daemon.DefaultCompactorCommitThreshold)
 		}
 
 	// Doctor
@@ -1379,7 +1383,7 @@ func getLifecycleConfig(townRoot, key string) error {
 		return fmt.Errorf("unknown lifecycle key: %q\n\nSupported lifecycle keys:\n  lifecycle.reaper.enabled\n  lifecycle.reaper.interval\n  lifecycle.reaper.delete_age\n  lifecycle.compactor.enabled\n  lifecycle.compactor.interval\n  lifecycle.compactor.threshold\n  lifecycle.doctor.enabled\n  lifecycle.doctor.interval\n  lifecycle.backup.enabled\n  lifecycle.backup.interval", key)
 	}
 
-	fmt.Println(value)
+	fmt.Fprintln(w, value)
 	return nil
 }
 

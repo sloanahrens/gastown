@@ -396,7 +396,7 @@ func runEscalateList(cmd *cobra.Command, args []string) error {
 
 // listEscalations writes the escalations across every rig's database to w:
 // the open ones, or every one with all.
-func listEscalations(w, errOut io.Writer, bd *beads.Beads, all, asJSON bool) error {
+func listEscalations(w, errOut io.Writer, bd beads.Client, all, asJSON bool) error {
 	var err error
 	// Both branches query across rigs: escalations live in the database of the
 	// rig that filed them, so a single-database list reports "No escalations
@@ -420,7 +420,8 @@ func listEscalations(w, errOut io.Writer, bd *beads.Beads, all, asJSON bool) err
 	// query may still return stale IDs (e.g. from a cached or cross-rig query)
 	// that no longer exist in the live database. We skip any entries that cannot
 	// be fetched individually, since they cannot be acked or closed anyway.
-	var live []*beads.Issue
+	// Non-nil even when empty: `--json` must print [] rather than null.
+	live := make([]*beads.Issue, 0, len(issues))
 	var phantomCount int
 	for _, issue := range issues {
 		if _, err := bd.Show(issue.ID); err != nil {
@@ -590,6 +591,68 @@ func closeDeliveryBeads(bd beads.Client, ids []string, escalationID, closedBy st
 	return closed, nil
 }
 
+// planReescalation computes what ReescalateEscalation would do for issue,
+// without writing anything. Critical wins over the count limit, so the reason
+// matches the message the dry run prints for an escalation that is both.
+func planReescalation(issue *beads.Issue, maxReescalations int) *beads.ReescalationResult {
+	fields := beads.ParseEscalationFields(issue.Description)
+	plan := &beads.ReescalationResult{
+		ID:          issue.ID,
+		Title:       issue.Title,
+		OldSeverity: fields.Severity,
+	}
+	switch {
+	case fields.Severity == "critical":
+		plan.Skipped = true
+		plan.SkipReason = "already at critical severity"
+		plan.NewSeverity = "critical"
+	case maxReescalations > 0 && fields.ReescalationCount >= maxReescalations:
+		plan.Skipped = true
+		plan.SkipReason = fmt.Sprintf("already at max reescalations (%d)", maxReescalations)
+	default:
+		plan.NewSeverity = getNextSeverity(fields.Severity)
+		plan.ReescalationNum = fields.ReescalationCount + 1
+	}
+	return plan
+}
+
+// writeEscalateStaleDryRun writes what `gt escalate stale --dry-run` would do.
+// asJSON prints the planned ReescalationResult entries, the same shape the real
+// run returns, so a script reads the plan in either mode.
+func writeEscalateStaleDryRun(w io.Writer, stale []*beads.Issue, threshold string, maxReescalations int, asJSON bool) error {
+	plans := make([]*beads.ReescalationResult, 0, len(stale))
+	for _, issue := range stale {
+		plans = append(plans, planReescalation(issue, maxReescalations))
+	}
+	if asJSON {
+		out, err := json.MarshalIndent(plans, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encoding dry run: %w", err)
+		}
+		fmt.Fprintln(w, string(out))
+		return nil
+	}
+
+	fmt.Fprintf(w, "Would re-escalate %d stale escalations (threshold: %s):\n\n", len(plans), threshold)
+	for _, plan := range plans {
+		emoji := severityEmoji(plan.OldSeverity)
+		if plan.Skipped {
+			fmt.Fprintf(w, "  %s %s [SKIP] %s\n", emoji, plan.ID, plan.Title)
+			if plan.OldSeverity == "critical" {
+				fmt.Fprintf(w, "     Already at critical severity\n")
+			} else {
+				fmt.Fprintf(w, "     Already at max reescalations (%d)\n", maxReescalations)
+			}
+		} else {
+			fmt.Fprintf(w, "  %s %s %s\n", emoji, plan.ID, plan.Title)
+			fmt.Fprintf(w, "     %s → %s (reescalation %d/%d)\n",
+				plan.OldSeverity, plan.NewSeverity, plan.ReescalationNum, maxReescalations)
+		}
+		fmt.Fprintln(w)
+	}
+	return nil
+}
+
 func runEscalateStale(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -628,31 +691,7 @@ func runEscalateStale(cmd *cobra.Command, args []string) error {
 
 	// Dry run mode - just show what would happen
 	if escalateDryRun {
-		fmt.Printf("Would re-escalate %d stale escalations (threshold: %s):\n\n", len(stale), threshold)
-		for _, issue := range stale {
-			fields := beads.ParseEscalationFields(issue.Description)
-			newSeverity := getNextSeverity(fields.Severity)
-			willSkip := maxReescalations > 0 && fields.ReescalationCount >= maxReescalations
-			if fields.Severity == "critical" {
-				willSkip = true
-			}
-
-			emoji := severityEmoji(fields.Severity)
-			if willSkip {
-				fmt.Printf("  %s %s [SKIP] %s\n", emoji, issue.ID, issue.Title)
-				if fields.Severity == "critical" {
-					fmt.Printf("     Already at critical severity\n")
-				} else {
-					fmt.Printf("     Already at max reescalations (%d)\n", maxReescalations)
-				}
-			} else {
-				fmt.Printf("  %s %s %s\n", emoji, issue.ID, issue.Title)
-				fmt.Printf("     %s → %s (reescalation %d/%d)\n",
-					fields.Severity, newSeverity, fields.ReescalationCount+1, maxReescalations)
-			}
-			fmt.Println()
-		}
-		return nil
+		return writeEscalateStaleDryRun(os.Stdout, stale, threshold.String(), maxReescalations, escalateStaleJSON)
 	}
 
 	// Perform re-escalation
@@ -675,26 +714,7 @@ func runEscalateStale(cmd *cobra.Command, args []string) error {
 
 			// Send mail to each target about the reescalation
 			for _, target := range targets {
-				msg := &mail.Message{
-					From:    reescalatedBy,
-					To:      target,
-					Subject: fmt.Sprintf("[%s→%s] Re-escalated: %s", strings.ToUpper(result.OldSeverity), strings.ToUpper(result.NewSeverity), result.Title),
-					Body:    formatReescalationMailBody(result, reescalatedBy),
-					Type:    mail.TypeTask,
-				}
-
-				// Set priority based on new severity
-				switch result.NewSeverity {
-				case config.SeverityCritical:
-					msg.Priority = mail.PriorityUrgent
-				case config.SeverityHigh:
-					msg.Priority = mail.PriorityHigh
-				case config.SeverityMedium:
-					msg.Priority = mail.PriorityNormal
-				default:
-					msg.Priority = mail.PriorityLow
-				}
-
+				msg := reescalationMail(result, reescalatedBy, target)
 				if err := router.Send(msg); err != nil {
 					style.PrintWarning("failed to send reescalation to %s: %v", target, err)
 				}
@@ -762,6 +782,32 @@ func getNextSeverity(severity string) string {
 	default:
 		return "critical"
 	}
+}
+
+// reescalationMail builds the mail announcing result to one target. ThreadID
+// is the escalation id, as the original escalation's mail sets it
+// (internal/notify/escalate.go), so the delivery bead carries
+// thread:<escalation id> and `gt escalate close` closes it with the rest.
+func reescalationMail(result *beads.ReescalationResult, from, target string) *mail.Message {
+	msg := &mail.Message{
+		From:     from,
+		To:       target,
+		Subject:  fmt.Sprintf("[%s→%s] Re-escalated: %s", strings.ToUpper(result.OldSeverity), strings.ToUpper(result.NewSeverity), result.Title),
+		Body:     formatReescalationMailBody(result, from),
+		Type:     mail.TypeTask,
+		ThreadID: result.ID,
+	}
+	switch result.NewSeverity {
+	case config.SeverityCritical:
+		msg.Priority = mail.PriorityUrgent
+	case config.SeverityHigh:
+		msg.Priority = mail.PriorityHigh
+	case config.SeverityMedium:
+		msg.Priority = mail.PriorityNormal
+	default:
+		msg.Priority = mail.PriorityLow
+	}
+	return msg
 }
 
 func formatReescalationMailBody(result *beads.ReescalationResult, reescalatedBy string) string {

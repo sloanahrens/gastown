@@ -347,7 +347,7 @@ type CompactorDogConfig struct {
 	IntervalStr string `json:"interval,omitempty"`
 	// Threshold is the minimum commit count before this patrol escalates.
 	// The daemon monitors and escalates — it does not compact. Defaults to
-	// 2000; see defaultCompactorCommitThreshold.
+	// 2000; see daemon.DefaultCompactorCommitThreshold.
 	Threshold int `json:"threshold,omitempty"`
 	// Databases lists specific database names to check.
 	// If empty, falls back to wisp_reaper config, then auto-discovery.

@@ -33,7 +33,7 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 			CompactorDog: &CompactorDogConfig{
 				Enabled:     true,
 				IntervalStr: "24h",
-				Threshold:   defaultCompactorCommitThreshold,
+				Threshold:   DefaultCompactorCommitThreshold,
 			},
 			CheckpointDog: &CheckpointDogConfig{
 				Enabled:     true,
