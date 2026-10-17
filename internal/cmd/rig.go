@@ -520,7 +520,7 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	// Auto-assign a namepool theme that doesn't collide with other rigs (gas-21k).
-	autoAssignNamepoolTheme(townRoot, name, mgr)
+	autoAssignNamepoolTheme(os.Stdout, townRoot, name, mgr)
 
 	// Ensure hooks-base.json exists before syncing (needed for gt hooks diff).
 	ensureHooksBase()
@@ -1143,7 +1143,7 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 	}
 
 	// Auto-assign a namepool theme that doesn't collide with other rigs (gas-21k).
-	autoAssignNamepoolTheme(townRoot, name, mgr)
+	autoAssignNamepoolTheme(os.Stdout, townRoot, name, mgr)
 
 	// Ensure hooks-base.json exists and sync hooks for the adopted rig.
 	ensureHooksBase()
@@ -1856,13 +1856,14 @@ func isGitRemoteURL(s string) bool {
 // autoAssignNamepoolTheme picks a namepool theme for a new rig that doesn't collide
 // with themes already in use by other rigs. This ensures polecat names are unique
 // across rigs (gas-21k). If all built-in themes are taken, falls back to hash-based
-// selection where collisions are possible but unavoidable.
-func autoAssignNamepoolTheme(townRoot, rigName string, mgr *rig.Manager) {
+// selection where collisions are possible but unavoidable. Progress and warnings
+// go to out.
+func autoAssignNamepoolTheme(out io.Writer, townRoot, rigName string, mgr *rig.Manager) {
 	usedThemes := mgr.UsedNamepoolThemes(polecat.ThemeForRig)
 	chosenTheme := polecat.ThemeForRigAvoiding(rigName, usedThemes)
 	settingsPath := filepath.Join(townRoot, rigName, "settings", "config.json")
 	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
-		fmt.Printf("  %s Could not create settings directory: %v\n", style.Warning.Render("!"), err)
+		fmt.Fprintf(out, "  %s Could not create settings directory: %v\n", style.Warning.Render("!"), err)
 		return
 	}
 	rigSettings, err := config.LoadRigSettings(settingsPath)
@@ -1874,7 +1875,7 @@ func autoAssignNamepoolTheme(townRoot, rigName string, mgr *rig.Manager) {
 	} else if err != nil {
 		// The file exists but does not load (a retired key, bad JSON):
 		// saving a blank struct over it would drop the rig's other settings.
-		fmt.Printf("  %s Could not load %s, leaving it untouched: %v\n", style.Warning.Render("!"), settingsPath, err)
+		fmt.Fprintf(out, "  %s Could not load %s, leaving it untouched: %v\n", style.Warning.Render("!"), settingsPath, err)
 		return
 	}
 	// Only set namepool theme if not already configured
@@ -1885,8 +1886,8 @@ func autoAssignNamepoolTheme(townRoot, rigName string, mgr *rig.Manager) {
 		Style: chosenTheme,
 	}
 	if err := config.SaveRigSettings(settingsPath, rigSettings); err != nil {
-		fmt.Printf("  %s Could not save namepool theme: %v\n", style.Warning.Render("!"), err)
+		fmt.Fprintf(out, "  %s Could not save namepool theme: %v\n", style.Warning.Render("!"), err)
 	} else {
-		fmt.Printf("  Namepool theme: %s (auto-assigned for cross-rig uniqueness)\n", chosenTheme)
+		fmt.Fprintf(out, "  Namepool theme: %s (auto-assigned for cross-rig uniqueness)\n", chosenTheme)
 	}
 }
