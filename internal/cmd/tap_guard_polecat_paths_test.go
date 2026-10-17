@@ -491,6 +491,19 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"sed -ni on a sibling", "sed -ni 's/a/b/p' " + filepath.Join(p.sibling, "internal.go"), true},
 		{"sed -Ei on a sibling", "sed -Ei 's/a/b/' " + filepath.Join(p.sibling, "internal.go"), true},
 		{"sed --in-place on a sibling", "sed --in-place=.bak 's/a/b/' " + filepath.Join(p.sibling, "internal.go"), true},
+		// GNU sed accepts an unambiguous prefix of a long option.
+		{"sed --in-plac on a sibling", "sed --in-plac 's/a/b/' " + filepath.Join(p.sibling, "internal.go"), true},
+		{"sed --in on a sibling", "sed --in 's/a/b/' " + filepath.Join(p.sibling, "internal.go"), true},
+		{"sed --i=.bak on a sibling", "sed --i=.bak 's/a/b/' " + filepath.Join(p.sibling, "internal.go"), true},
+		{"sed --quiet reads a sibling", "sed --quiet 's/a/b/p' " + filepath.Join(p.sibling, "internal.go"), false},
+		{"sed --in-placex is not in-place", "sed --in-placex 's/a/b/' " + filepath.Join(p.sibling, "internal.go"), false},
+		// A cluster ends at -e, -f or -l: what follows is that option's value,
+		// not more flags, so the i in it does not turn editing on.
+		{"sed -es/i/x/ reads a sibling", "sed -es/i/x/ " + filepath.Join(p.sibling, "internal.go"), false},
+		{"sed -nes/i/x/p reads a sibling", "sed -nes/i/x/p " + filepath.Join(p.sibling, "internal.go"), false},
+		{"sed -fi.sed reads a sibling", "sed -fi.sed " + filepath.Join(p.sibling, "internal.go"), false},
+		{"sed -l5i reads a sibling", "sed -l5i " + filepath.Join(p.sibling, "internal.go"), false},
+		{"sed -ie edits a sibling (i before e)", "sed -ie 's/a/b/' " + filepath.Join(p.sibling, "internal.go"), true},
 		// Fail closed when a checked target cannot be resolved.
 		{"unresolvable variable in a write", "cp a.go $POLECAT_PATHS_UNSET/x.go", true},
 		{"unresolvable variable as a redirect target", "echo hi > $POLECAT_PATHS_UNSET/x.go", true},

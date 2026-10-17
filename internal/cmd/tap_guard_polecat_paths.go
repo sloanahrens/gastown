@@ -1444,12 +1444,15 @@ func isWriteCapableCommand(base string, args []string) bool {
 }
 
 // sedArgEditsInPlace reports whether a sed argument turns on in-place editing:
-// "--in-place[=SUFFIX]", or an "i" inside a short-option cluster ("-i",
-// "-i.bak", "-ri", "-ni", "-Ei"). The cluster is read option by option and
-// stops at -e, -f and -l, whose attached value ("-es/i/x/") is not a flag.
+// "--in-place[=SUFFIX]" or any unambiguous abbreviation of it ("--in",
+// "--in-p"; GNU getopt_long accepts a prefix, and no other sed long option
+// starts with "--i"), or an "i" inside a short-option cluster ("-i", "-i.bak",
+// "-ri", "-ni", "-Ei"). The cluster is read option by option and stops at -e,
+// -f and -l, whose attached value ("-es/i/x/") is not a flag.
 func sedArgEditsInPlace(arg string) bool {
-	if strings.HasPrefix(arg, "--") {
-		return strings.HasPrefix(arg, "--in-place")
+	if long, ok := strings.CutPrefix(arg, "--"); ok {
+		name, _, _ := strings.Cut(long, "=")
+		return name != "" && strings.HasPrefix("in-place", name)
 	}
 	if !strings.HasPrefix(arg, "-") {
 		return false
