@@ -1544,3 +1544,19 @@ func TestGetCurrentTmuxSession_OverseerRole(t *testing.T) {
 		t.Errorf("plan.WorkDir = %q, want the town root %q", plan.WorkDir, townRoot)
 	}
 }
+
+// resolveRoleToSession also parses the explicit target of handoff, hook and
+// sling, so the overseer shortcut maps there too, not only for GT_ROLE.
+func TestResolveRoleToSession_OverseerArgument(t *testing.T) {
+	t.Parallel()
+	reg := session.NewPrefixRegistry()
+	for _, arg := range []string{"overseer", "Overseer"} {
+		got, err := resolveRoleToSession(reg, arg)
+		if err != nil {
+			t.Fatalf("resolveRoleToSession(%q): %v", arg, err)
+		}
+		if want := session.OverseerSessionName(); got != want {
+			t.Errorf("resolveRoleToSession(%q) = %q, want %q", arg, got, want)
+		}
+	}
+}
