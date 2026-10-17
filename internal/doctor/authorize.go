@@ -36,9 +36,8 @@ func ValidateFixAuthorization(issue *beads.Issue, actor string) error {
 	if issue == nil {
 		return fmt.Errorf("authorization bead not found")
 	}
-	// CreatedBy never equals the unidentified-actor sentinel, so the
-	// self-authorization check below would pass for every bead this process
-	// could create (gt-2kwxr).
+	// Refused outright, before the self-authorization check below (gt-2kwxr;
+	// see doltserver.IsUnidentifiedActor).
 	if doltserver.IsUnidentifiedActor(actor) {
 		return ErrUnidentifiedFixActor
 	}

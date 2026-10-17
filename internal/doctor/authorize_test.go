@@ -73,7 +73,7 @@ func TestValidateFixAuthorization(t *testing.T) {
 		{
 			name:    "the unidentified-actor sentinel is refused",
 			issue:   &beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "overseer", Labels: []string{FixAuthLabel}},
-			actor:   doltserver.UnidentifiedActor,
+			actor:   string(doltserver.UnidentifiedActor),
 			wantErr: "cannot be identified",
 		},
 	}
@@ -104,7 +104,7 @@ func TestValidateFixAuthorization(t *testing.T) {
 func TestValidateFixAuthorizationUnidentifiedActor(t *testing.T) {
 	t.Parallel()
 	issue := &beads.Issue{ID: "hq-1", Status: "open", CreatedBy: "self-made", Labels: []string{FixAuthLabel}}
-	for _, actor := range []string{"", doltserver.UnidentifiedActor} {
+	for _, actor := range []string{"", string(doltserver.UnidentifiedActor)} {
 		if err := ValidateFixAuthorization(issue, actor); !errors.Is(err, ErrUnidentifiedFixActor) {
 			t.Errorf("actor %q: error = %v, want ErrUnidentifiedFixActor", actor, err)
 		}
