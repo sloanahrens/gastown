@@ -760,6 +760,51 @@ func TestRunScheduledSlingEntry_CapacityRefusalCreatesNoBead(t *testing.T) {
 	}
 }
 
+// TestRunScheduledSlingEntry_CapacityProbeThatCannotAnswerDispatches: a probe
+// the town cannot answer is not a refusal — the pool's own posture on an
+// uncountable seat read — so the tick dispatches as before and the sling's
+// refusal is the backstop (gt-ttqq8).
+func TestRunScheduledSlingEntry_CapacityProbeThatCannotAnswerDispatches(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{
+		createID: "gt-run1",
+		now:      time.Now(),
+		admitErr: errors.New("gt sling --dry-run: exit status 1: formula 'mol-doc-audit' not found"),
+	}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+
+	if err := d.runScheduledSlingEntry(context.Background(), docAuditEntry, time.Now()); err != nil {
+		t.Fatalf("an unanswerable probe must not block the dispatch: %v", err)
+	}
+	if len(f.admitted) != 1 {
+		t.Errorf("the pre-flight ran %d time(s), want once", len(f.admitted))
+	}
+	if len(f.created) != 1 || len(f.slungIDs) != 1 {
+		t.Errorf("created %v and slung %v; an unanswerable probe dispatches as before", f.created, f.slungIDs)
+	}
+}
+
+// TestRunScheduledSlingEntry_SpecDispatchSkipsTheCapacityProbe: the dispatcher
+// slings a spec-dispatched run, not this patrol, so the entry has no capacity
+// of its own to pre-check and the probe must not run — a full pool is no reason
+// to withhold a bead the dispatcher will queue regardless (gt-ttqq8).
+func TestRunScheduledSlingEntry_SpecDispatchSkipsTheCapacityProbe(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now(), admitReason: capacityRefusals["pool full"]}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{specAuditEntry}, f)
+
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.UTC)
+	if err := d.runScheduledSlingEntry(context.Background(), specAuditEntry, now); err != nil {
+		t.Fatalf("a spec-dispatched run must be created with the pool full: %v", err)
+	}
+	if len(f.admitted) != 0 {
+		t.Errorf("the capacity pre-flight ran for a spec-dispatched entry (%v); this patrol does not sling it", f.admitted)
+	}
+	if len(f.created) != 1 || len(f.slungIDs) != 0 {
+		t.Errorf("created %v and slung %v; want the run bead created for the dispatcher and no sling", f.created, f.slungIDs)
+	}
+}
+
 func TestRunScheduledSlingEntry_NonCapacitySlingFailureIsNotADeferral(t *testing.T) {
 	t.Parallel()
 	f := &fakeScheduledRunner{createID: "gt-x", slingErr: errors.New("gt sling gt-x: exit status 1: worktree verification failed"), now: time.Now()}
@@ -919,7 +964,10 @@ func TestExecScheduledSlingRunner_AdmitReadsTheDryRunRoute(t *testing.T) {
 				t.Errorf("reason = %q, want %q", reason, tt.reason)
 			}
 			want := []string{"sling", "mol-doc-audit", "gastown", "--dry-run", "--no-boot", "--agent=deepseek-pro", "--actor=daemon/scheduled:doc-audit"}
-			if got == nil || strings.Join(got.Args[1:], " ") != strings.Join(want, " ") {
+			if got == nil {
+				t.Fatalf("the probe ran no command; want %v", want)
+			}
+			if strings.Join(got.Args[1:], " ") != strings.Join(want, " ") {
 				t.Errorf("argv = %v, want %v", got.Args, want)
 			}
 			if got.Dir != "/town" {

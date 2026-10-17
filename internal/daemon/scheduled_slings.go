@@ -335,13 +335,11 @@ func (r *execScheduledSlingRunner) sling(ctx context.Context, beadID, branch str
 	return nil
 }
 
-// admit asks `gt sling --dry-run` for the route this entry's sling would take.
-// The dry run resolves the target and peeks the seat pool without claiming a
-// seat — "the route it would take, a refusal included" (peekPolecatPoolAgent) —
-// so its answer is the live sling's, read before the run bead that refusal
-// would otherwise cost exists. A refusal is recognized by the same marker the
-// live sling's stderr carries (dispatch.SlingRefusalReason); the preview reports
-// it on stdout, so both streams are searched.
+// admit asks `gt sling --dry-run` — the route the live sling would take, a
+// refusal included — so the answer is read before the run bead that refusal
+// would cost exists. The preview prints the refusal on stdout where the live
+// sling prints it on stderr, so both streams are searched for the marker
+// (dispatch.SlingRefusalReason).
 func (r *execScheduledSlingRunner) admit(ctx context.Context, e ScheduledSlingEntry) (string, error) {
 	args := []string{"sling", e.Formula, e.Rig, "--dry-run", "--no-boot"}
 	if e.Agent != "" {
@@ -572,11 +570,10 @@ func (d *Daemon) runScheduledSlingEntry(ctx context.Context, e ScheduledSlingEnt
 	if !d.scheduledGateAllows(ctx, r, e) {
 		return nil
 	}
-	// A full seat pool is the same shape one step later, and here the refusal is
-	// free: asking before the run bead exists costs one probe, where the sling's
-	// own refusal costs a bead created and failed-closed on every tick the town
-	// stays full (gt-ttqq8). A spec-dispatched run is not slung by this patrol,
-	// so it has no capacity to pre-check.
+	// Asking before the run bead exists costs one probe; the sling's own refusal
+	// costs a bead created and failed-closed on every tick the town stays full
+	// (gt-ttqq8). A spec-dispatched run is not slung by this patrol, so it has
+	// no capacity to pre-check.
 	if e.Dispatch != scheduledDispatchSpec {
 		reason, err := d.scheduledSlingAdmits(ctx, r, e)
 		if err != nil {
