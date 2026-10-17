@@ -336,13 +336,10 @@ func InvocationIndex(tokens []string, program, target string) int {
 // reached as gmake, the name GNU make carries on macOS, so a seat running
 // "gmake test" is running the rig's configured "make test" and its goals are
 // read the same way through either name (gt-y1zks, gt-gy5ro). Any other program
-// keeps the exact word. Both sides are InvocationTokens' reading: lowercased
-// basenames.
+// keeps the exact word. Both sides are InvocationTokens' reading, already
+// lowercased basenames, so no path needs stripping here.
 func invocationProgram(tok, program string) bool {
-	if tok == program {
-		return true
-	}
-	return program == "make" && filepath.Base(tok) == "gmake"
+	return tok == program || (program == "make" && tok == "gmake")
 }
 
 // isTokenSeparator reports whether tok ends one command and begins the next, so
@@ -357,8 +354,7 @@ func isTokenSeparator(tok string) bool {
 
 // InvocationPresent reports whether tokens carry the invocation. An invocation
 // with no target matches its program anywhere, the reading a rig whose config
-// names a bare program gets — gmake included, for the same reason
-// InvocationIndex takes it (gt-gy5ro).
+// names a bare program gets (gmake included, as invocationProgram reads it).
 func InvocationPresent(tokens []string, inv Invocation) bool {
 	if inv.Target == "" {
 		return slices.ContainsFunc(tokens, func(tok string) bool { return invocationProgram(tok, inv.Program) })

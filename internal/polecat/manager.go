@@ -3160,6 +3160,10 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	// "git_state=unknown", so a richer reason string would read to that gate as
 	// a *different* blocker and strand the slot. The detailed reason belongs to
 	// the list path (ProbeLiveGitState), which has no such gate.
+	// An unjudged comparison (git.ErrComparisonUnjudgeable) needs no
+	// probeReportsWork reading here, unlike the discard guards: it is an error,
+	// so it takes the else branch and fails the git check, the stricter of the
+	// two outcomes (gt-gy5ro).
 	if status, err := g.CheckUncommittedWork(); err == nil {
 		facts.GitDirty = !status.CleanExcludingRuntimeAndIndexSkew(g)
 		facts.StashCount = status.StashCount

@@ -3210,8 +3210,11 @@ func TestRepairWorktree_UnjudgeableKeepsDirtyWorktree(t *testing.T) {
 				}
 				return
 			}
-			if errors.As(err, &refusal) {
+			if err != nil {
 				t.Fatalf("forced repair = %v, want --force to keep its meaning and bypass the unjudged comparison", err)
+			}
+			if !mgr.exists("toast") {
+				t.Fatal("the forced repair left no polecat behind")
 			}
 		})
 	}
