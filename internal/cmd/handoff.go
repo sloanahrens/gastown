@@ -1208,7 +1208,13 @@ func sessionWorkDir(reg *session.PrefixRegistry, sessionName, townRoot string) (
 			// The overseer is the human operator, working from the town root.
 			return townRoot, nil
 		case session.RolePolecat:
-			return fmt.Sprintf("%s/%s/polecats/%s", townRoot, identity.Rig, identity.Name), nil
+			// The git worktree is polecats/<name>/<rig>; the legacy layout
+			// keeps the clone at polecats/<name> itself.
+			polecatDir := filepath.Join(townRoot, identity.Rig, "polecats", identity.Name)
+			if info, err := os.Stat(filepath.Join(polecatDir, identity.Rig)); err == nil && info.IsDir() {
+				return filepath.Join(polecatDir, identity.Rig), nil
+			}
+			return polecatDir, nil
 		default:
 			return "", fmt.Errorf("unknown session type: %s (role %s, try specifying role explicitly)", sessionName, identity.Role)
 		}

@@ -86,18 +86,18 @@ func TestHandoffStdinFlag(t *testing.T) {
 
 func TestSessionWorkDir(t *testing.T) {
 	t.Parallel()
-	townRoot := "/home/test/gt"
 
 	tests := []struct {
 		name        string
 		sessionName string
-		wantDir     string
+		mkdirs      []string // created under the town root before the call
+		wantDir     string   // relative to the town root; "" is the town root itself
 		wantErr     bool
 	}{
 		{
 			name:        "crew runs from crew subdirectory",
 			sessionName: "gt-crew-holden",
-			wantDir:     townRoot + "/gastown/crew/holden",
+			wantDir:     "gastown/crew/holden",
 			wantErr:     false,
 		},
 		{
@@ -105,20 +105,45 @@ func TestSessionWorkDir(t *testing.T) {
 			// deacon dir it used to map to belongs to a retired role.
 			name:        "overseer runs from town root",
 			sessionName: "hq-overseer",
-			wantDir:     townRoot,
+			wantDir:     "",
+			wantErr:     false,
+		},
+		{
+			// The polecat's git worktree is polecats/<name>/<rig>, not the
+			// polecat directory above it.
+			name:        "polecat runs from its worktree subdirectory",
+			sessionName: "gt-furiosa",
+			mkdirs:      []string{"gastown/polecats/furiosa/gastown"},
+			wantDir:     "gastown/polecats/furiosa/gastown",
+			wantErr:     false,
+		},
+		{
+			name:        "legacy polecat clone at the polecat directory",
+			sessionName: "gt-furiosa",
+			mkdirs:      []string{"gastown/polecats/furiosa/.git"},
+			wantDir:     "gastown/polecats/furiosa",
 			wantErr:     false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			for _, d := range tt.mkdirs {
+				if err := os.MkdirAll(filepath.Join(townRoot, d), 0755); err != nil {
+					t.Fatalf("mkdir %s: %v", d, err)
+				}
+			}
+			wantDir := filepath.Join(townRoot, tt.wantDir)
+
 			gotDir, err := sessionWorkDir(handoffTestRegistry(), tt.sessionName, townRoot)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("sessionWorkDir() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if gotDir != tt.wantDir {
-				t.Errorf("sessionWorkDir() = %q, want %q", gotDir, tt.wantDir)
+			if gotDir != wantDir {
+				t.Errorf("sessionWorkDir() = %q, want %q", gotDir, wantDir)
 			}
 		})
 	}
