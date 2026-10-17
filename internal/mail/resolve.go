@@ -10,8 +10,6 @@ package mail
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/constants"
@@ -190,36 +188,11 @@ func (r *Resolver) validateAgentAddress(address string) error {
 	}
 
 	// Check workspace directories as fallback
-	if r.townRoot != "" {
-		switch len(parts) {
-		case 2:
-			rig, name := parts[0], parts[1]
-			// Singleton role: rig/name (e.g., gastown/refinery)
-			if dirExistsAt(filepath.Join(r.townRoot, rig, name)) {
-				return nil
-			}
-			// Named agent (normalized, could be crew or polecat)
-			for _, role := range []string{"crew", "polecats"} {
-				if dirExistsAt(filepath.Join(r.townRoot, rig, role, name)) {
-					return nil
-				}
-			}
-		case 3:
-			// Explicit: rig/crew/name or rig/polecats/name
-			if (parts[1] == constants.RoleCrew || parts[1] == "polecats") &&
-				dirExistsAt(filepath.Join(r.townRoot, parts[0], parts[1], parts[2])) {
-				return nil
-			}
-		}
+	if r.townRoot != "" && agentWorkspaceDir(r.townRoot, normalized) != "" {
+		return nil
 	}
 
 	return fmt.Errorf("%w: %s (no matching agent or workspace found)", ErrUnknownRecipient, address)
-}
-
-// dirExistsAt returns true if path exists and is a directory.
-func dirExistsAt(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
 }
 
 // resolvePattern expands a wildcard pattern to matching agents.

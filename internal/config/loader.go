@@ -35,6 +35,10 @@ var (
 
 	// ErrMissingField indicates a required field is missing.
 	ErrMissingField = errors.New("missing required field")
+
+	// ErrCyclicReference indicates config entries reference each other in a
+	// cycle, which a consumer expanding them would recurse through forever.
+	ErrCyclicReference = errors.New("cyclic reference")
 )
 
 // LoadTownConfig loads and validates a town configuration file.
@@ -817,6 +821,9 @@ func validateMessagingConfig(c *MessagingConfig) error {
 			return fmt.Errorf("%w: list '%s' has no recipients", ErrMissingField, name)
 		}
 	}
+	if err := validateListCycles(c.Lists); err != nil {
+		return err
+	}
 
 	// Validate queues have at least one worker
 	for name, queue := range c.Queues {
@@ -848,6 +855,59 @@ func validateMessagingConfig(c *MessagingConfig) error {
 		}
 	}
 
+	return nil
+}
+
+// validateListCycles rejects mailing lists that are members of themselves,
+// directly or through other lists. Sending to a list expands each member
+// through the same send path, so a cycle a=[list:b], b=[list:a] recursed
+// until the stack overflowed (gt-0lhli). A member naming a list that does not
+// exist is not a cycle: the send reports the unknown list.
+func validateListCycles(lists map[string][]string) error {
+	const listPrefix = "list:"
+
+	const (
+		visiting = 1
+		done     = 2
+	)
+	state := make(map[string]int, len(lists))
+
+	var visit func(name string, path []string) error
+	visit = func(name string, path []string) error {
+		switch state[name] {
+		case visiting:
+			return fmt.Errorf("%w: list '%s' is a member of itself via %s",
+				ErrCyclicReference, name, strings.Join(append(path, name), " -> "))
+		case done:
+			return nil
+		}
+		state[name] = visiting
+		for _, member := range lists[name] {
+			if !strings.HasPrefix(member, listPrefix) {
+				continue
+			}
+			named := strings.TrimPrefix(member, listPrefix)
+			if _, ok := lists[named]; !ok {
+				continue
+			}
+			if err := visit(named, append(append([]string(nil), path...), name)); err != nil {
+				return err
+			}
+		}
+		state[name] = done
+		return nil
+	}
+
+	names := make([]string, 0, len(lists))
+	for name := range lists {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if err := visit(name, nil); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

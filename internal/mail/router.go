@@ -23,6 +23,10 @@ import (
 // ErrUnknownList indicates a mailing list name was not found in configuration.
 var ErrUnknownList = errors.New("unknown mailing list")
 
+// ErrListCycle indicates a mailing list expands, through its members, to
+// itself.
+var ErrListCycle = errors.New("mailing list cycle")
+
 // ErrUnknownQueue indicates a queue name was not found in configuration.
 var ErrUnknownQueue = errors.New("unknown queue")
 
@@ -665,12 +669,8 @@ func (r *Router) resolveAgentsByRole(roleType, rig string) ([]string, error) {
 
 	var addresses []string
 	for _, agent := range agents {
-		// Filter by rig if specified
-		if rig != "" {
-			// Check if agent's description contains matching rig
-			if !strings.Contains(agent.Description, "rig: "+rig) {
-				continue
-			}
+		if rig != "" && descriptionField(agent.Description, "rig") != rig {
+			continue
 		}
 		if addr := agentBeadToAddress(agent); addr != "" {
 			addresses = append(addresses, addr)
@@ -691,12 +691,28 @@ func (r *Router) resolveAgentsByRig(rig string) ([]string, error) {
 
 	var addresses []string
 	for _, agent := range agents {
+		// The query is a substring match, so rig "foo" also returns "foobar".
+		if descriptionField(agent.Description, "rig") != rig {
+			continue
+		}
 		if addr := agentBeadToAddress(agent); addr != "" {
 			addresses = append(addresses, addr)
 		}
 	}
 
 	return addresses, nil
+}
+
+// descriptionField returns the value of a "key: value" line in an agent
+// description, or "" when the field is absent (gt-0lhli).
+func descriptionField(description, key string) string {
+	prefix := key + ":"
+	for _, line := range strings.Split(description, "\n") {
+		if value, ok := strings.CutPrefix(strings.TrimSpace(line), prefix); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 // queryAgents queries agent beads using bd list with description filtering.
@@ -1202,31 +1218,50 @@ func (r *Router) validateAgentWorkspace(identity string) bool {
 	if isReservedTownSubpath(identity) || isRetiredAgentAddress(identity) {
 		return false
 	}
+	return agentWorkspaceDir(r.townRoot, identity) != ""
+}
 
+// agentWorkspaceDir returns the workspace directory identity names under
+// townRoot, or "" when identity names no agent workspace. A bare <rig>/<name>
+// matches only a named crew or polecat workspace or a rig singleton, since
+// infrastructure directories (settings, scripts) have the same shape (gt-0lhli).
+func agentWorkspaceDir(townRoot, identity string) string {
 	parts := strings.Split(identity, "/")
+	for _, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return ""
+		}
+	}
 
 	switch len(parts) {
 	case 2:
 		rig, name := parts[0], parts[1]
-		// Singleton role: gastown/refinery
-		if dirExists(filepath.Join(r.townRoot, rig, name)) {
-			return true
+		for _, role := range rigSingletonRoles {
+			if name == role {
+				if path := filepath.Join(townRoot, rig, name); dirExists(path) {
+					return path
+				}
+			}
 		}
-		// Named role (identity normalized away crew/polecats): check both
-		for _, role := range []string{"crew", "polecats"} {
-			if dirExists(filepath.Join(r.townRoot, rig, role, name)) {
-				return true
+		for _, role := range []string{constants.RoleCrew, "polecats"} {
+			if path := filepath.Join(townRoot, rig, role, name); dirExists(path) {
+				return path
 			}
 		}
 	case 3:
-		// Explicit role paths: rig/crew/<name> or rig/polecats/<name>
-		if parts[1] == "crew" || parts[1] == "polecats" {
-			return dirExists(filepath.Join(r.townRoot, parts[0], parts[1], parts[2]))
+		if parts[1] == constants.RoleCrew || parts[1] == "polecats" {
+			if path := filepath.Join(townRoot, parts[0], parts[1], parts[2]); dirExists(path) {
+				return path
+			}
 		}
 	}
 
-	return false
+	return ""
 }
+
+// rigSingletonRoles are the roles a rig keeps as a single named workspace
+// directly under the rig, addressable as <rig>/<role>.
+var rigSingletonRoles = []string{"refinery", "witness"}
 
 // isReservedTownSubpath reports whether address sits under a town-level
 // directory that holds no mailboxes of its own: the mayor state directory
@@ -1405,7 +1440,20 @@ func (r *Router) sendToSingle(msg *Message) error {
 // Each recipient gets their own message copy with the same content.
 // Collects all delivery errors and reports partial failures.
 func (r *Router) sendToList(msg *Message) error {
+	return r.sendToListVisited(msg, map[string]bool{})
+}
+
+// sendToListVisited fans a list message out, tracking the lists already
+// expanded on this path. Config validation rejects cycles; the guard bounds a
+// list that reaches the send path without one (gt-0lhli).
+func (r *Router) sendToListVisited(msg *Message, expanding map[string]bool) error {
 	listName := parseListName(msg.To)
+	if expanding[listName] {
+		return fmt.Errorf("%w: %s", ErrListCycle, msg.To)
+	}
+	expanding[listName] = true
+	defer delete(expanding, listName)
+
 	recipients, err := r.expandList(listName)
 	if err != nil {
 		return err
@@ -1419,8 +1467,14 @@ func (r *Router) sendToList(msg *Message) error {
 		msgCopy.To = recipient
 		msgCopy.ID = "" // Each fan-out copy gets its own ID from bd create
 
-		if err := r.Send(&msgCopy); err != nil {
-			errs = append(errs, fmt.Sprintf("%s: %v", recipient, err))
+		var sendErr error
+		if isListAddress(recipient) {
+			sendErr = r.sendToListVisited(&msgCopy, expanding)
+		} else {
+			sendErr = r.Send(&msgCopy)
+		}
+		if sendErr != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", recipient, sendErr))
 		}
 	}
 
@@ -2085,11 +2139,39 @@ func (r *Router) isSessionMuted(sessionID string) bool {
 	if r.townRoot == "" || sessionID == "" || sessionID == session.OverseerSessionName() {
 		return false
 	}
-	level, err := r.townBeads().GetAgentNotificationLevel(sessionID)
+	agentBeadID := sessionNameToAgentBeadID(sessionID, r.prefixes)
+	if agentBeadID == "" {
+		return false
+	}
+	level, err := r.townBeads().GetAgentNotificationLevel(agentBeadID)
 	if err != nil {
 		return false
 	}
 	return level == beads.NotifyMuted
+}
+
+// sessionNameToAgentBeadID maps an agent session name to its agent bead:
+// gt-dementus -> gt-gastown-polecat-dementus. It returns "" for a session
+// name that is no agent's, which the mute check treats as unmuted (gt-0lhli).
+func sessionNameToAgentBeadID(sessionID string, prefixes *session.PrefixRegistry) string {
+	identity, err := session.ParseSessionNameWithRegistry(sessionID, prefixes)
+	if err != nil || identity == nil {
+		return ""
+	}
+	switch identity.Role {
+	case session.RoleCrew:
+		return beads.AgentBeadIDWithPrefix(identity.Prefix, identity.Rig, constants.RoleCrew, identity.Name)
+	case session.RolePolecat:
+		// A singleton session parses as a polecat named for its role.
+		for _, role := range rigSingletonRoles {
+			if identity.Name == role {
+				return beads.AgentBeadIDWithPrefix(identity.Prefix, identity.Rig, role, "")
+			}
+		}
+		return beads.AgentBeadIDWithPrefix(identity.Prefix, identity.Rig, constants.RolePolecat, identity.Name)
+	default:
+		return ""
+	}
 }
 
 func nudgeKindForMessage(msg *Message) string {
@@ -2257,7 +2339,7 @@ func addressToAgentBeadID(reg *session.PrefixRegistry, address string) string {
 	if address == "overseer" {
 		return "" // Overseer is a human, no agent bead
 	}
-	if isReservedTownSubpath(address) {
+	if isReservedTownSubpath(address) || isRetiredAgentAddress(address) {
 		return ""
 	}
 
@@ -2274,15 +2356,21 @@ func addressToAgentBeadID(reg *session.PrefixRegistry, address string) string {
 	switch {
 	case strings.HasPrefix(target, "crew/"):
 		crewName := strings.TrimPrefix(target, "crew/")
-		return session.CrewSessionName(rigPrefix, crewName)
+		return beads.AgentBeadIDWithPrefix(rigPrefix, rig, constants.RoleCrew, crewName)
 	case strings.HasPrefix(target, "polecat/"):
 		pcName := strings.TrimPrefix(target, "polecat/")
-		return session.PolecatSessionName(rigPrefix, pcName)
+		return beads.AgentBeadIDWithPrefix(rigPrefix, rig, constants.RolePolecat, pcName)
 	case strings.HasPrefix(target, "polecats/"):
 		pcName := strings.TrimPrefix(target, "polecats/")
-		return session.PolecatSessionName(rigPrefix, pcName)
+		return beads.AgentBeadIDWithPrefix(rigPrefix, rig, constants.RolePolecat, pcName)
 	default:
-		return session.PolecatSessionName(rigPrefix, target)
+		// A bare rig/name is a rig singleton (witness, refinery) or a polecat.
+		for _, role := range rigSingletonRoles {
+			if target == role {
+				return beads.AgentBeadIDWithPrefix(rigPrefix, rig, role, "")
+			}
+		}
+		return beads.AgentBeadIDWithPrefix(rigPrefix, rig, constants.RolePolecat, target)
 	}
 }
 

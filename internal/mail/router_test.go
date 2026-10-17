@@ -2,6 +2,7 @@ package mail
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1730,27 +1731,27 @@ func TestAddressToAgentBeadID(t *testing.T) {
 		{
 			name:     "witness",
 			address:  "gastown/witness",
-			expected: "gt-witness",
+			expected: "gt-gastown-witness",
 		},
 		{
 			name:     "refinery",
 			address:  "gastown/refinery",
-			expected: "gt-refinery",
+			expected: "gt-gastown-refinery",
 		},
 		{
 			name:     "crew member",
 			address:  "gastown/crew/max",
-			expected: "gt-crew-max",
+			expected: "gt-gastown-crew-max",
 		},
 		{
 			name:     "polecat (default)",
 			address:  "gastown/alpha",
-			expected: "gt-alpha",
+			expected: "gt-gastown-polecat-alpha",
 		},
 		{
 			name:     "explicit polecat with polecats/ prefix",
 			address:  "gastown/polecats/alpha",
-			expected: "gt-alpha",
+			expected: "gt-gastown-polecat-alpha",
 		},
 		{
 			name:     "empty address",
@@ -2681,6 +2682,174 @@ type mutedTown struct {
 	muted map[string]bool
 }
 
+// TestResolveAgentsByRoleExactRigMatch: @crew/foo addresses rig foo, whose
+// name is a prefix of rig foobar. The description filter runs in bd as a
+// substring match, so the rig has to be compared as a field value or the
+// broadcast also reaches the other rig's agents (gt-0lhli).
+func TestResolveAgentsByRoleExactRigMatch(t *testing.T) {
+	t.Parallel()
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		if strings.HasPrefix(strings.Join(c.Args, " "), "list --label=gt:agent") {
+			return `[
+				{"id":"gt-foo-crew-alice","description":"crew alice\n\nrole_type: crew\nrig: foo","status":"open","issue_type":"agent","labels":["gt:agent"]},
+				{"id":"gt-foo-crew-carol","description":"crew carol\n\nrole_type: crew","status":"open","issue_type":"agent","labels":["gt:agent"]},
+				{"id":"gt-foobar-crew-bob","description":"crew bob\n\nrole_type: crew\nrig: foobar","status":"open","issue_type":"agent","labels":["gt:agent"]}
+			]`, "", 0
+		}
+		return "[]", "", 0
+	}}
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	got, err := r.resolveAgentsByRole("crew", "foo")
+	if err != nil {
+		t.Fatalf("resolveAgentsByRole: %v", err)
+	}
+	if len(got) != 1 || got[0] != "foo/alice" {
+		t.Errorf("resolveAgentsByRole(crew, foo) = %q, want [foo/alice]", got)
+	}
+
+	got, err = r.resolveAgentsByRig("foo")
+	if err != nil {
+		t.Fatalf("resolveAgentsByRig: %v", err)
+	}
+	if len(got) != 1 || got[0] != "foo/alice" {
+		t.Errorf("resolveAgentsByRig(foo) = %q, want [foo/alice]", got)
+	}
+}
+
+// TestValidateAgentWorkspaceRejectsNonAgentDir: every directory under a rig
+// matches the bare <rig>/<name> address shape, so the workspace fallback
+// admitted infrastructure directories as mail recipients (gt-0lhli).
+func TestValidateAgentWorkspaceRejectsNonAgentDir(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{
+		"gastown/settings",
+		"gastown/scripts",
+		"gastown/crew/alice",
+		"gastown/polecats/nux",
+		"gastown/refinery",
+	} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r := &Router{townRoot: townRoot}
+
+	tests := []struct {
+		identity string
+		want     bool
+	}{
+		{"gastown/settings", false},
+		{"gastown/scripts", false},
+		{"gastown/polecats", false},
+		{"gastown/crew", false},
+		{"gastown/crew/alice", true},
+		{"gastown/alice", true},
+		{"gastown/polecats/nux", true},
+		{"gastown/refinery", true},
+	}
+	for _, tt := range tests {
+		if got := r.validateAgentWorkspace(tt.identity); got != tt.want {
+			t.Errorf("validateAgentWorkspace(%q) = %v, want %v", tt.identity, got, tt.want)
+		}
+	}
+}
+
+// TestSendToListRejectsListCycle: list members are sent through the same
+// path, so lists a=[list:b], b=[list:a] sent one message back and forth until
+// the stack overflowed. The config is rejected before any delivery (gt-0lhli).
+func TestSendToListRejectsListCycle(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	configDir := filepath.Join(townRoot, "config")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	messaging := `{"type":"messaging","version":1,"lists":{"a":["list:b"],"b":["list:a"]}}`
+	if err := os.WriteFile(filepath.Join(configDir, "messaging.json"), []byte(messaging), 0644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewRouterWithTownRoot(t.TempDir(), townRoot, testPrefixRegistry())
+	r.bd = (&bdScript{}).run
+	r.town = noTownBeads{}
+
+	err := r.sendToList(&Message{From: "overseer", To: "list:a", Subject: "s", Body: "b"})
+	if err == nil {
+		t.Fatal("sendToList(list:a) = nil, want the cyclic list rejected")
+	}
+	if !strings.Contains(err.Error(), "cyclic") {
+		t.Errorf("sendToList error = %v, want a cycle reported", err)
+	}
+}
+
+// TestSendToListVisitedRejectsRuntimeCycle: a list already expanding on this
+// path is reported instead of re-expanded, whatever let it reach the send
+// path (gt-0lhli).
+func TestSendToListVisitedRejectsRuntimeCycle(t *testing.T) {
+	t.Parallel()
+	r := &Router{}
+	err := r.sendToListVisited(&Message{From: "overseer", To: "list:a"}, map[string]bool{"a": true})
+	if !errors.Is(err, ErrListCycle) {
+		t.Fatalf("sendToListVisited(list:a, expanding a) = %v, want ErrListCycle", err)
+	}
+}
+
+// TestIsRecipientMutedUsesAgentBeadID: the DND check keys the lookup by the
+// recipient's agent bead ID, not by its session name (gt-0lhli).
+func TestIsRecipientMutedUsesAgentBeadID(t *testing.T) {
+	t.Parallel()
+	r := &Router{
+		prefixes: testPrefixRegistry(),
+		town: mutedTown{muted: map[string]bool{
+			"gt-gastown-crew-max": true,
+			"gt-gastown-witness":  true,
+		}},
+		townRoot: t.TempDir(),
+	}
+
+	for address, want := range map[string]bool{
+		"gastown/crew/max":  true,
+		"gastown/witness":   true,
+		"gastown/crew/loud": false,
+		"gastown/alpha":     false,
+	} {
+		if got := r.isRecipientMuted(address); got != want {
+			t.Errorf("isRecipientMuted(%q) = %v, want %v", address, got, want)
+		}
+	}
+}
+
+// TestIsSessionMutedResolvesBeadID: a tmux session name carries the rig's
+// prefix (gt-dementus), not the agent bead ID (gt-gastown-polecat-dementus),
+// so looking the session name up as a bead found no level and left a muted
+// agent notified (gt-0lhli).
+func TestIsSessionMutedResolvesBeadID(t *testing.T) {
+	t.Parallel()
+	r := &Router{
+		prefixes: testPrefixRegistry(),
+		town: mutedTown{muted: map[string]bool{
+			"gt-gastown-polecat-dementus": true,
+			"gt-gastown-crew-holden":      true,
+			"gt-gastown-witness":          true,
+		}},
+		townRoot: t.TempDir(),
+	}
+
+	for sessionID, want := range map[string]bool{
+		"gt-dementus":         true,
+		"gt-crew-holden":      true,
+		"gt-witness":          true,
+		"gt-crew-loud":        false,
+		"gt-gastown-unparsed": false,
+	} {
+		if got := r.isSessionMuted(sessionID); got != want {
+			t.Errorf("isSessionMuted(%q) = %v, want %v", sessionID, got, want)
+		}
+	}
+}
+
 func (m mutedTown) GetAgentNotificationLevel(id string) (string, error) {
 	if m.muted[id] {
 		return beads.NotifyMuted, nil
@@ -2696,7 +2865,8 @@ func TestNotifyRecipient_MutedSessionIsSkipped(t *testing.T) {
 	fake := newFakeNotifyTmux(sessionName)
 	r := &Router{
 		bd:       noBeadsDatabase,
-		town:     mutedTown{muted: map[string]bool{sessionName: true}},
+		prefixes: testPrefixRegistry(),
+		town:     mutedTown{muted: map[string]bool{"gt-gastown-crew-mutedtest": true}},
 		workDir:  t.TempDir(),
 		townRoot: t.TempDir(),
 		tmux:     fake,

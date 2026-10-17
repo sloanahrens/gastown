@@ -95,6 +95,45 @@ func TestAgentBeadIDToAddress(t *testing.T) {
 	}
 }
 
+// TestResolverValidateAgentAddressWorkspaceDirs: the workspace fallback
+// accepts only agent workspace shapes, not every directory under a rig
+// (gt-0lhli).
+func TestResolverValidateAgentAddressWorkspaceDirs(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{
+		"gastown/settings",
+		"gastown/crew/alice",
+		"gastown/polecats/nux",
+		"gastown/refinery",
+	} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatalf("creating %s: %v", dir, err)
+		}
+	}
+
+	resolver := NewResolver(nil, townRoot)
+	tests := []struct {
+		address string
+		wantErr bool
+	}{
+		{"gastown/settings", true},
+		{"gastown/scripts", true},
+		{"gastown/crew/alice", false},
+		{"gastown/alice", false},
+		{"gastown/polecats/nux", false},
+		{"gastown/refinery", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.address, func(t *testing.T) {
+			err := resolver.validateAgentAddress(tt.address)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateAgentAddress(%q) error = %v, wantErr %v", tt.address, err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestResolverValidateAgentAddressRetiredDogs(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
