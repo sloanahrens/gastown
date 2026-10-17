@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -381,13 +382,18 @@ func parseGroupAddress(address string) *ParsedGroup {
 
 // agentBead represents an agent bead as returned by bd list --label=gt:agent.
 type agentBead struct {
-	ID          string   `json:"id"`
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	Status      string   `json:"status"`
-	CreatedBy   string   `json:"created_by"`
-	Type        string   `json:"issue_type"`
-	Labels      []string `json:"labels"`
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	CreatedBy   string `json:"created_by"`
+	Type        string `json:"issue_type"`
+	// WispType is the issue type `bd mol wisp list --json` prints under
+	// "type"; bd list spells the same field "issue_type". Agent beads are
+	// created --type=task, so this identifies nothing on its own, but a bd
+	// that reports an agent there must not be ignored.
+	WispType string   `json:"type"`
+	Labels   []string `json:"labels"`
 }
 
 // agentBeadToAddress converts an agent bead to a mail address, or "" when the
@@ -771,40 +777,54 @@ func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, 
 	// Query issues table (backward compat during migration)
 	stdout, issuesErr := runBdCommand(ctx, r.bd, args, filepath.Dir(beadsDir), beadsDir)
 
-	// Also query wisps table for migrated agent beads (best-effort)
+	// Also query the wisps table for migrated agent beads.
 	wispCtx, wispCancel := bdReadCtx()
 	defer wispCancel()
-	wispOut, _ := runBdCommand(wispCtx, r.bd, []string{"mol", "wisp", "list", "--json"}, filepath.Dir(beadsDir), beadsDir)
+	wispOut, wispErr := runBdCommand(wispCtx, r.bd, []string{"mol", "wisp", "list", "--json"}, filepath.Dir(beadsDir), beadsDir)
 
 	// Merge results: collect agent beads from both sources
 	seenIDs := make(map[string]bool)
 	var agents []*agentBead
+	var queryErrors []string
 
-	// Parse wisps first (primary source after migration)
-	if len(wispOut) > 0 {
-		var wispAgents []*agentBead
-		if json.Unmarshal(wispOut, &wispAgents) == nil {
-			for _, agent := range wispAgents {
-				if isAgentBeadEntry(agent) {
-					seenIDs[agent.ID] = true
-					agents = append(agents, agent)
-				}
+	// Parse wisps first (primary source after migration). bd prints them in
+	// a wrapper object, and without a description; the description the
+	// group filters need comes from a follow-up read.
+	if wispErr != nil {
+		queryErrors = append(queryErrors, fmt.Sprintf("list wisps: %v", wispErr))
+	} else {
+		wispAgents, err := r.wispAgentBeads(beadsDir, wispOut)
+		if err != nil {
+			queryErrors = append(queryErrors, err.Error())
+		}
+		for _, agent := range wispAgents {
+			if !matchesDescContains(agent, descContains) {
+				continue
 			}
+			seenIDs[agent.ID] = true
+			agents = append(agents, agent)
 		}
 	}
 
 	// Then issues (backward compat, skip duplicates)
 	if len(stdout) > 0 {
 		var issueAgents []*agentBead
-		if json.Unmarshal(stdout, &issueAgents) == nil {
-			for _, agent := range issueAgents {
-				if !seenIDs[agent.ID] {
-					agents = append(agents, agent)
-				}
+		if err := json.Unmarshal(stdout, &issueAgents); err != nil {
+			queryErrors = append(queryErrors, fmt.Sprintf("parse agent list: %v", err))
+		}
+		for _, agent := range issueAgents {
+			if !seenIDs[agent.ID] {
+				agents = append(agents, agent)
 			}
 		}
-	} else if issuesErr != nil && len(agents) == 0 {
-		return nil, fmt.Errorf("querying agents in %s: %w", beadsDir, issuesErr)
+	} else if issuesErr != nil {
+		queryErrors = append(queryErrors, fmt.Sprintf("list agents: %v", issuesErr))
+	}
+
+	// A failed query is reported only when nothing was found at all: one
+	// source failing must not hide the agents the other one returned.
+	if len(agents) == 0 && len(queryErrors) > 0 {
+		return nil, fmt.Errorf("querying agents in %s: %s", beadsDir, strings.Join(queryErrors, "; "))
 	}
 
 	// Filter for active agents (closed/deleted agents are inactive)
@@ -818,9 +838,131 @@ func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, 
 	return active, nil
 }
 
+// wispAgentBeads returns the agent beads among the wisps `bd mol wisp list
+// --json` reported, with the fields the group filters need.
+//
+// bd wraps the wisps in an object (older bd printed a bare array) and omits
+// each wisp's description, so unmarshalling the output into a slice always
+// failed and no wisp-backed agent was ever resolved (gt-c2sxh). The labels
+// bd prints when a wisp has them identify most agents; a wisp without them
+// falls back to the agent ID naming convention, as beads itself does for the
+// same omits-metadata output. Their full record — description, label and
+// type — then comes from one batched `bd show`, which the client-side rig
+// and role filters cannot do without. A show failure leaves the bare wisp in
+// place and is reported, so the caller can tell "no such agent" from "could
+// not ask".
+func (r *Router) wispAgentBeads(beadsDir string, out []byte) ([]*agentBead, error) {
+	wisps, err := parseWispList(out)
+	if err != nil {
+		return nil, err
+	}
+
+	var agents []*agentBead
+	var needFull []string
+	for _, wisp := range wisps {
+		if wisp == nil || wisp.ID == "" {
+			continue
+		}
+		if !isAgentBeadEntry(wisp) && !isAgentBeadIDByShape(wisp.ID) {
+			continue
+		}
+		agents = append(agents, wisp)
+		if wisp.Description == "" {
+			needFull = append(needFull, wisp.ID)
+		}
+	}
+	if len(needFull) == 0 {
+		return agents, nil
+	}
+
+	ctx, cancel := bdReadCtx()
+	defer cancel()
+	showArgs := append([]string{"show"}, needFull...)
+	showArgs = append(showArgs, "--json")
+	showOut, showErr := runBdCommand(ctx, r.bd, showArgs, filepath.Dir(beadsDir), beadsDir)
+	if showErr != nil {
+		return agents, fmt.Errorf("read wisp agents in %s: %w", beadsDir, showErr)
+	}
+	var full []*agentBead
+	if err := json.Unmarshal(showOut, &full); err != nil {
+		return agents, fmt.Errorf("parse wisp agents in %s: %w", beadsDir, err)
+	}
+	byID := make(map[string]*agentBead, len(full))
+	for _, bead := range full {
+		byID[bead.ID] = bead
+	}
+	for _, agent := range agents {
+		bead, ok := byID[agent.ID]
+		if !ok {
+			continue
+		}
+		if bead.Description != "" {
+			agent.Description = bead.Description
+		}
+		if bead.Type != "" {
+			agent.Type = bead.Type
+		}
+		if len(bead.Labels) > 0 {
+			agent.Labels = bead.Labels
+		}
+	}
+	return agents, nil
+}
+
+// parseWispList decodes `bd mol wisp list --json`: an object of
+// {"count":N,"wisps":[...]} since bd 1.x, a bare array in older versions.
+func parseWispList(out []byte) ([]*agentBead, error) {
+	out = bytes.TrimSpace(out)
+	if len(out) == 0 {
+		return nil, nil
+	}
+	if out[0] == '[' {
+		var wisps []*agentBead
+		if err := json.Unmarshal(out, &wisps); err != nil {
+			return nil, fmt.Errorf("parsing bd mol wisp list: %w", err)
+		}
+		return wisps, nil
+	}
+	var wrapper struct {
+		Wisps []*agentBead `json:"wisps"`
+	}
+	if err := json.Unmarshal(out, &wrapper); err != nil {
+		return nil, fmt.Errorf("parsing bd mol wisp list: %w", err)
+	}
+	return wrapper.Wisps, nil
+}
+
+// matchesDescContains applies bd list's --desc-contains filter to a bead
+// whose description came from the wisp list's batched bd show. bd's own
+// filter is a case-insensitive substring match.
+func matchesDescContains(a *agentBead, descContains string) bool {
+	if descContains == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(a.Description), strings.ToLower(descContains))
+}
+
+// isAgentBeadIDByShape reports whether id follows the agent bead naming
+// convention <prefix>-<rig>-<role>[-<name>], with the role marker taken from
+// the same crew/polecat set beads' own detector uses. It is the fallback for
+// wisps whose JSON omits labels and type.
+func isAgentBeadIDByShape(id string) bool {
+	parts := strings.Split(id, "-")
+	if len(parts) < 2 {
+		return false
+	}
+	for _, part := range parts[1:] {
+		switch part {
+		case constants.RoleCrew, constants.RolePolecat:
+			return true
+		}
+	}
+	return false
+}
+
 // isAgentBeadEntry checks if an agentBead entry is an actual agent bead.
 func isAgentBeadEntry(a *agentBead) bool {
-	if a.Type == "agent" {
+	if a.Type == "agent" || a.WispType == "agent" {
 		return true
 	}
 	for _, l := range a.Labels {
