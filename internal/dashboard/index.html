@@ -2998,6 +2998,7 @@ function costRework(box, r) {
   if (!r) { box.append(el("div", "empty", "om rework · reading…")); return; }
   if (r.unavailable) { box.append(el("div", "badc", "om rework · review log unreadable")); return; }
   const heads = [["Bar", 1], ["Reviews", 1], ["First try", 1], ["Rework", 1], ["Reviews per landed", 1], ["Mean om time", 1], ["Loops out", 1], ["Mean score", 1]];
+  if (r.om_unavailable) box.append(el("div", "badc", "om rework · om times unavailable: the daemon log could not be read"));
   for (const w of r.windows || []) {
     box.append(el("h3", "sub", "om rework · " + w.name));
     const bars = w.bars || [];

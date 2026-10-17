@@ -1181,12 +1181,18 @@ func (r *omReader) trendInputs(since time.Time) ([]omStage, []omRejection) {
 
 // stagesSince returns the stage lines at or after since. The rework table's
 // reader asks for the stages of its own window, to time each om verdict
-// (gt-uiiml); the trend panel asks for the same lines through trendInputs.
-func (r *omReader) stagesSince(since time.Time) []omStage {
+// (gt-uiiml); the trend panel asks for the same lines through trendInputs. A
+// log that cannot be read while the reader holds no lines is an error, never an
+// empty slice: the caller tells a log it could not read from a window with no
+// landings in it. A reader that already holds lines answers from them, as the
+// panel's own read does.
+func (r *omReader) stagesSince(since time.Time) ([]omStage, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_ = r.scanLog()
-	return r.stagesSinceLocked(since)
+	if err := r.scanLog(); err != nil && len(r.stages) == 0 {
+		return nil, err
+	}
+	return r.stagesSinceLocked(since), nil
 }
 
 // stagesSinceLocked is stagesSince with the lock already held.

@@ -23,8 +23,10 @@ type dashReworkReader struct {
 	// which is where a review's om duration is: the verdict line carries none,
 	// and the daemon log is no source the dashboard may parse itself, so the om
 	// reader that already scans it does the reading. Nil leaves every review
-	// without a duration, which the table draws as no om time at all.
-	stages func(since time.Time) []omStage
+	// without a duration, which the table draws as no om time at all. An error
+	// is a daemon log that could not be read, which the table says apart from
+	// reviews the log has no line for.
+	stages func(since time.Time) ([]omStage, error)
 }
 
 func newDashReworkReader(townRoot string) *dashReworkReader {
@@ -33,7 +35,7 @@ func newDashReworkReader(townRoot string) *dashReworkReader {
 
 // withStages gives the reader the stage lines of the om reader that scans the
 // daemon log.
-func (r *dashReworkReader) withStages(stages func(since time.Time) []omStage) *dashReworkReader {
+func (r *dashReworkReader) withStages(stages func(since time.Time) ([]omStage, error)) *dashReworkReader {
 	r.stages = stages
 	return r
 }
@@ -53,10 +55,20 @@ func (r *dashReworkReader) read(now time.Time) *dashboard.Rework {
 			Verdict: rec.Verdict, Rejected: rec.Rejected, Findings: rec.Findings, Bar: rec.Bar, At: rec.At,
 		})
 	}
+	omUnavailable := false
 	if r.stages != nil {
-		withReviewOM(reviews, r.stages(since))
+		// A review at or after since is timed by a line up to omStageJoinMin
+		// before it, so the lines are read from that far back: from since
+		// itself, the oldest reviews of the window would lose theirs.
+		stages, err := r.stages(since.Add(-omStageJoinMin))
+		if err != nil {
+			omUnavailable = true
+		} else {
+			withReviewOM(reviews, stages)
+		}
 	}
 	out := dashboard.AggregateRework(reviews, now)
+	out.OMUnavailable = omUnavailable
 	return &out
 }
 

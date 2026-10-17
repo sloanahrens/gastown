@@ -199,3 +199,66 @@ func TestWithReviewOMTakesOnlyTheLineBeforeTheVerdict(t *testing.T) {
 		}
 	}
 }
+
+// A review in the window's first minutes is timed by a stages line logged just
+// before the window opened, so the lines are read from omStageJoinMin before
+// its start and not from the start itself.
+func TestReworkReaderTimesAReviewAtTheWindowStart(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.Local)
+	start := now.Add(-dashboard.ReworkReach)
+	root := t.TempDir()
+	if err := land.TownReviewsFile(root).Append(land.ReviewRecord{
+		BeadID: "gt-edge", Rig: "gastown", Attempt: 1, Score: 0.9, Verdict: "approve", Bar: 0.8, At: start.Add(time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	om := &omReader{logPath: omTestLogFile(t, reworkStageLine("gt-edge", start.Add(-time.Minute), "lint 18s, gate 1m, om 2m"))}
+	var asked time.Time
+	stages := func(since time.Time) ([]omStage, error) {
+		asked = since
+		return om.stagesSince(since)
+	}
+	got := newDashReworkReader(root).withStages(stages).read(now)
+	if want := start.Add(-omStageJoinMin); !asked.Equal(want) {
+		t.Errorf("stages asked from %v, want %v: omStageJoinMin before the window", asked, want)
+	}
+	var timed *dashboard.ReworkBar
+	for _, w := range got.Windows {
+		for i := range w.Bars {
+			if w.Bars[i].OMBeads > 0 {
+				timed = &w.Bars[i]
+			}
+		}
+	}
+	if timed == nil || timed.MeanOMSecs != 120 {
+		t.Fatalf("read = %+v, want gt-edge timed at 120s from the line before the window", got)
+	}
+}
+
+// A daemon log that cannot be read is said apart from reviews the log has no
+// line for: the table keeps its figures and carries OMUnavailable.
+func TestReworkReaderSaysAnUnreadableDaemonLog(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 14, 12, 0, 0, 0, time.Local)
+	root := t.TempDir()
+	if err := land.TownReviewsFile(root).Append(land.ReviewRecord{
+		BeadID: "gt-one", Rig: "gastown", Attempt: 1, Score: 0.9, Verdict: "approve", Bar: 0.8, At: now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	om := &omReader{logPath: filepath.Join(t.TempDir(), "absent.log")}
+	got := newDashReworkReader(root).withStages(om.stagesSince).read(now)
+	if got.Unavailable || !got.OMUnavailable || len(got.Windows[0].Bars) != 1 {
+		t.Fatalf("read = %+v, want the review table with OMUnavailable", got)
+	}
+
+	// With the log readable and no line for the review, the table does not say so.
+	readable := &omReader{logPath: omTestLogFile(t, reworkStageLine("gt-other", now.Add(-time.Hour), "om 1m"))}
+	got = newDashReworkReader(root).withStages(readable.stagesSince).read(now)
+	if got.OMUnavailable {
+		t.Errorf("a readable log with no line for the review read as OMUnavailable: %+v", got)
+	}
+}

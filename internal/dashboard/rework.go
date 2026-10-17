@@ -108,6 +108,10 @@ type ReworkWindow struct {
 type Rework struct {
 	Windows     []ReworkWindow `json:"windows"`
 	Unavailable bool           `json:"unavailable,omitempty"`
+	// OMUnavailable says the daemon log the om times come from could not be
+	// read, so no review has a duration; the page says so rather than count
+	// every review as one the log had no line for.
+	OMUnavailable bool `json:"om_unavailable,omitempty"`
 }
 
 // AggregateRework folds the review log into the table's two windows, the last
