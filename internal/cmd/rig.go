@@ -1938,11 +1938,16 @@ func autoAssignNamepoolTheme(townRoot, rigName string, mgr *rig.Manager) {
 		return
 	}
 	rigSettings, err := config.LoadRigSettings(settingsPath)
-	if err != nil {
+	if errors.Is(err, config.ErrNotFound) {
 		rigSettings = &config.RigSettings{
 			Type:    "rig-settings",
 			Version: 1,
 		}
+	} else if err != nil {
+		// The file exists but does not load (a retired key, bad JSON):
+		// saving a blank struct over it would drop the rig's other settings.
+		fmt.Printf("  %s Could not load %s, leaving it untouched: %v\n", style.Warning.Render("!"), settingsPath, err)
+		return
 	}
 	// Only set namepool theme if not already configured
 	if rigSettings.Namepool != nil && rigSettings.Namepool.Style != "" {
