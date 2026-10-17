@@ -690,3 +690,90 @@ func TestBareRepoExistsRunRejectsWorktreeMissingCommondir(t *testing.T) {
 		t.Errorf("expected StatusOK after Fix, got %v: %s", result.Status, result.Message)
 	}
 }
+
+// A commondir that cannot be written leaves the worktree unusable, so Fix has
+// to report it. Skipping the entry silently left the operator with a Run that
+// kept failing and no Fix error saying why (gt-9d3zt).
+func TestBareRepoExistsFixReportsCommondirWriteFailure(t *testing.T) {
+	t.Parallel()
+	gf := gitfake.New()
+	tmpDir := t.TempDir()
+	rigName := "testrig"
+	rigDir := filepath.Join(tmpDir, rigName)
+
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, "https://github.com/example/repo.git")
+	setupWorktreeRef(t, rigDir, bareRepo)
+
+	// A directory where the file belongs makes the write fail on POSIX hosts.
+	commondir := filepath.Join(bareRepo, "worktrees", "rig", "commondir")
+	if err := os.Remove(commondir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(commondir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewBareRepoExistsCheck()
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
+	if result := check.Run(ctx); result.Status != StatusError {
+		t.Fatalf("expected StatusError before Fix, got %v: %s", result.Status, result.Message)
+	}
+
+	err := check.Fix(ctx)
+	if err == nil {
+		t.Fatal("Fix swallowed the failed commondir write")
+	}
+	if !strings.Contains(err.Error(), "commondir") {
+		t.Errorf("expected error naming commondir, got %v", err)
+	}
+}
+
+// The worktree's .git file names the registration git reads HEAD from, so that
+// is where Fix takes the branch from. Reading only the directory Fix is about
+// to create would put a worktree on the default branch whenever its
+// registration lives somewhere else (gt-9d3zt).
+func TestBareRepoExistsFixReadsHeadFromWorktreeGitdir(t *testing.T) {
+	t.Parallel()
+	gf := gitfake.New()
+	tmpDir := t.TempDir()
+	rigName := "testrig"
+	rigDir := filepath.Join(tmpDir, rigName)
+
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, "https://github.com/example/repo.git")
+
+	// The worktree points at a registration outside bareRepo/worktrees/rig and
+	// that entry has lost its gitdir, so Run reports the worktree as broken and
+	// Fix rewrites the entry under the bare repo.
+	polecatWt := filepath.Join(rigDir, "polecats", "nux", rigName)
+	if err := os.MkdirAll(polecatWt, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldGitdir := filepath.Join(tmpDir, "old.repo.git", "worktrees", "rig")
+	if err := os.MkdirAll(oldGitdir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(polecatWt, ".git"), []byte("gitdir: "+oldGitdir+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const wantHead = "ref: refs/heads/polecat/nux/work\n"
+	if err := os.WriteFile(filepath.Join(oldGitdir, "HEAD"), []byte(wantHead), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewBareRepoExistsCheck()
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
+	if result := check.Run(ctx); result.Status != StatusError {
+		t.Fatalf("expected StatusError for the incomplete registration, got %v: %s", result.Status, result.Message)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+
+	got, err := os.ReadFile(filepath.Join(bareRepo, "worktrees", "rig", "HEAD"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != wantHead {
+		t.Errorf("Fix wrote HEAD %q, want the branch from the worktree's gitdir %q", string(got), wantHead)
+	}
+}
