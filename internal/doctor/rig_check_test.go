@@ -704,21 +704,27 @@ func TestMayorCloneExistsCheck_BareRepoPathHoldingAFileIsNotARepo(t *testing.T) 
 	}
 }
 
-// hooksPathRig builds a rig named rigName holding one polecat clone at rel
-// (relative to the rig dir), and returns the check context over it.
-func hooksPathRig(t *testing.T, rigName, rel string) *CheckContext {
+// hooksPathRig builds a rig named rigName holding one polecat clone at each
+// of rels (relative to the rig dir), and returns the check context over it.
+// A clone nested inside another must be listed before its parent: gitfake,
+// like git init, leaves a path that already resolves to a repository alone.
+func hooksPathRig(t *testing.T, rigName string, rels ...string) *CheckContext {
 	t.Helper()
 	townRoot := t.TempDir()
-	clonePath := filepath.Join(townRoot, rigName, rel)
 	gf := gitfake.New()
-	gf.InitRepo(t, clonePath)
-	if err := os.MkdirAll(filepath.Join(clonePath, ".githooks"), 0755); err != nil {
-		t.Fatal(err)
+	for _, rel := range rels {
+		clonePath := filepath.Join(townRoot, rigName, rel)
+		gf.InitRepo(t, clonePath)
+		if err := os.MkdirAll(filepath.Join(clonePath, ".githooks"), 0755); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return withGit(&CheckContext{TownRoot: townRoot, RigName: rigName}, gf)
 }
 
-// assertHooksPathConfigured warns for the clone at rel, fixes it, and passes.
+// assertHooksPathConfigured warns for exactly the clone at rel, fixes it, and
+// passes. The exact list is the point: a detail for any other path would mean
+// the check resolved a different directory than the one on disk.
 func assertHooksPathConfigured(t *testing.T, ctx *CheckContext, rel string) {
 	t.Helper()
 	check := NewHooksPathConfiguredCheck()
@@ -727,14 +733,8 @@ func assertHooksPathConfigured(t *testing.T, ctx *CheckContext, rel string) {
 	if result.Status != StatusWarning {
 		t.Fatalf("clone at %s with hooksPath unset: %v %v, want Warning", rel, result.Status, result.Details)
 	}
-	listed := false
-	for _, detail := range result.Details {
-		if detail == rel {
-			listed = true
-		}
-	}
-	if !listed {
-		t.Fatalf("details = %v, want %s", result.Details, rel)
+	if want := []string{rel}; !reflect.DeepEqual(result.Details, want) {
+		t.Fatalf("details = %v, want exactly %v", result.Details, want)
 	}
 
 	if err := check.Fix(ctx); err != nil {
@@ -763,6 +763,50 @@ func TestHooksPathConfiguredLegacyFlatPolecatWorktree(t *testing.T) {
 	flat := filepath.Join("polecats", "p1")
 	// The flat polecats/<name>/ layout predates the per-rig nesting.
 	assertHooksPathConfigured(t, hooksPathRig(t, rigName, flat), flat)
+}
+
+// A polecat directory can hold both layouts while only the nested path is a
+// clone; the check has to configure that one and leave its parent alone.
+func TestHooksPathConfiguredNestedPreferredOverFlatClone(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	nested := filepath.Join("polecats", "p1", rigName)
+	flat := filepath.Join("polecats", "p1")
+	ctx := hooksPathRig(t, rigName, nested, flat)
+
+	assertHooksPathConfigured(t, ctx, nested)
+
+	if got, _ := ctx.git(filepath.Join(ctx.RigPath(), flat)).ConfigGet("core.hooksPath"); got != "" {
+		t.Fatalf("flat clone core.hooksPath = %q, want untouched", got)
+	}
+}
+
+// A nested directory that is not a clone is not the polecat's worktree: the
+// flat clone at polecats/<name> is, and it is the one the check resolves.
+func TestHooksPathConfiguredNestedDirectoryWithoutGitFallsBackToFlat(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	flat := filepath.Join("polecats", "p1")
+	ctx := hooksPathRig(t, rigName, flat)
+	if err := os.MkdirAll(filepath.Join(ctx.RigPath(), flat, rigName), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	assertHooksPathConfigured(t, ctx, flat)
+}
+
+// A stat that fails for a reason other than not-exist (ENOTDIR here) must not
+// be read as "the nested worktree is there": the flat clone is the candidate.
+func TestHooksPathConfiguredNestedPathStatErrorFallsBackToFlat(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	flat := filepath.Join("polecats", "p1")
+	ctx := hooksPathRig(t, rigName, flat)
+	if err := os.WriteFile(filepath.Join(ctx.RigPath(), flat, rigName), []byte("not a directory\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	assertHooksPathConfigured(t, ctx, flat)
 }
 
 // The gt-ux2hv acceptance scenario: a polecat worktree whose
