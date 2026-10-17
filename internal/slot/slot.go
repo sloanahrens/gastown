@@ -221,7 +221,8 @@ func (m reentrantMark) grants(townRoot, role string, selfPID int) bool {
 // shell-level nested wrap never sees. The second return is false when this
 // process holds no marker, the marker names a different town, or the
 // marker predates roles (an empty role carries no value to hand back, even
-// though grants() still treats it as reentrant for any role).
+// though grants() still treats it as reentrant for any role), or the ancestor
+// no longer holds the slot the marker names (a stale marker, gt-dfuxn).
 func InheritedRole(townRoot string) (string, bool) {
 	return NewGate().InheritedRole(townRoot)
 }
@@ -230,7 +231,7 @@ func InheritedRole(townRoot string) (string, bool) {
 // environment.
 func (g *Gate) InheritedRole(townRoot string) (string, bool) {
 	m, ok := g.reentrantHolder(townRoot)
-	if !ok || !m.validAncestor(townRoot, g.pid) || m.role == "" {
+	if !ok || !m.validAncestor(townRoot, g.pid) || m.role == "" || !g.holdsSlot(townRoot, m) {
 		return "", false
 	}
 	return m.role, true

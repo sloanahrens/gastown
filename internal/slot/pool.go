@@ -429,9 +429,11 @@ func (g *Gate) acquirePool(townRoot, role string, timeout time.Duration, pool Po
 
 	// Reentrant fast path (see ReentrantEnvVar): a descendant of a process
 	// holding ANY slot of this town, doing the same role's work, does not
-	// compete with its ancestor. A first-class holder never takes it.
+	// compete with its ancestor — while that ancestor still holds the slot
+	// (holdsSlot): a stale marker contends like any other caller. A
+	// first-class holder never takes the fast path.
 	if !firstClass {
-		if m, ok := g.reentrantHolder(townRoot); ok && m.grants(townRoot, role, g.pid) {
+		if m, ok := g.reentrantHolder(townRoot); ok && m.grants(townRoot, role, g.pid) && g.holdsSlot(townRoot, m) {
 			return &Handle{gate: g, townRoot: townRoot, unlock: func() {}, reentrant: true}, nil
 		}
 	}
@@ -688,7 +690,21 @@ func (g *Gate) underHoldOfClass(townRoot string, match func(string) bool) bool {
 	if !ok || !m.validAncestor(townRoot, g.pid) || !match(m.role) {
 		return false
 	}
-	i, _ := slotIndexFromLockPath(townRoot, m.lockPath)
+	return g.holdsSlot(townRoot, m)
+}
+
+// holdsSlot reports whether the slot m names is still held by the pid m
+// names: the slot file exists, its flock is taken, and its owner file names
+// that pid. A marker outlives its hold in every process spawned while the hold
+// was active (gt-off9) — holders cannot clear it in a child, so an agent
+// session or a dog carries it for the rest of its life — which makes the
+// marker alone no license for anything. Every use of an inherited marker (the
+// reentrant fast path, InheritedRole, the hold classes) goes through this check.
+func (g *Gate) holdsSlot(townRoot string, m reentrantMark) bool {
+	i, ok := slotIndexFromLockPath(townRoot, m.lockPath)
+	if !ok {
+		return false
+	}
 	if _, err := os.Stat(m.lockPath); err != nil {
 		// Probing would create the file, and a created slot file is a slot
 		// Status then reports (discoverSlots).

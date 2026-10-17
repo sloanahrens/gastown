@@ -463,23 +463,114 @@ func TestInheritedRole(t *testing.T) {
 	tests := []struct {
 		name     string
 		envValue string
+		// hold, when set, is a role a live holder takes in the subtest's own
+		// town before the child asks; the child inherits the holder's marker.
+		hold     string
 		wantRole string
 		wantOK   bool
 	}{
-		{"genuine ancestor hold", lockPath + "|" + foreignPID + "|hm/landing", "hm/landing", true},
-		{"no marker at all", "", "", false},
-		{"legacy marker has no role to hand back", lockPath + "|" + foreignPID, "", false},
-		{"own pid is a sibling, not an ancestor", lockPath + "|" + strconv.Itoa(os.Getpid()) + "|gastown/landing", "", false},
-		{"another town's lock", LockPath(t.TempDir()) + "|" + foreignPID + "|gastown/landing", "", false},
+		{"genuine ancestor hold", "", "hm/landing", "hm/landing", true},
+		{"no marker at all", "", "", "", false},
+		{"legacy marker has no role to hand back", lockPath + "|" + foreignPID, "", "", false},
+		{"own pid is a sibling, not an ancestor", lockPath + "|" + strconv.Itoa(os.Getpid()) + "|gastown/landing", "", "", false},
+		{"another town's lock", LockPath(t.TempDir()) + "|" + foreignPID + "|gastown/landing", "", "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			tg := newTestGate(t)
-			tg.env.Setenv(ReentrantEnvVar, tt.envValue)
-			role, ok := tg.InheritedRole(townRoot)
+			town := townRoot
+			asker := tg.Gate
+			if tt.hold != "" {
+				town = t.TempDir()
+				defer release(t, tg.mustAcquirePool(t, town, tt.hold, DefaultPool))
+				asker = tg.child()
+			} else {
+				tg.env.Setenv(ReentrantEnvVar, tt.envValue)
+			}
+			role, ok := asker.InheritedRole(town)
 			if ok != tt.wantOK || role != tt.wantRole {
 				t.Errorf("InheritedRole() = (%q, %v), want (%q, %v)", role, ok, tt.wantRole, tt.wantOK)
+			}
+		})
+	}
+}
+
+// staleMarkerRole is the role every stale-marker case's marker names and its
+// caller acts as, so that before gt-dfuxn the marker granted the fast path.
+const staleMarkerRole = "gastown/crew/sloan"
+
+// staleMarkerCases build, in a fresh town, a process whose inherited marker
+// names an ancestor hold that is not in force (gt-dfuxn): holders cannot clear
+// the marker in a child, so agent sessions and dogs carry it for the rest of
+// their life.
+var staleMarkerCases = []struct {
+	name  string
+	setup func(t *testing.T, tg *testGate, town string) *Gate
+}{
+	{"nothing ever held the slot", func(t *testing.T, tg *testGate, town string) *Gate {
+		child := tg.child()
+		armReentrant(child.env, town, 0, staleMarkerRole, foreignPID()+7)
+		return child
+	}},
+	{"the holder released", func(t *testing.T, tg *testGate, town string) *Gate {
+		holder := tg.mustAcquirePool(t, town, staleMarkerRole, Pool{Slots: 2})
+		child := tg.child()
+		release(t, holder)
+		return child
+	}},
+	{"another process holds the slot now", func(t *testing.T, tg *testGate, town string) *Gate {
+		tg.mustAcquirePool(t, town, "gastown/other", Pool{Slots: 2})
+		child := tg.child()
+		armReentrant(child.env, town, 0, staleMarkerRole, foreignPID()+7)
+		return child
+	}},
+}
+
+// TestInheritedRoleStaleMarker: a marker whose ancestor no longer holds the
+// slot hands back no role, so a nested wrap does not take the dead holder's
+// role and ride a fast path it has no licence for.
+func TestInheritedRoleStaleMarker(t *testing.T) {
+	t.Parallel()
+	for _, tc := range staleMarkerCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tg := newTestGate(t)
+			town := t.TempDir()
+			child := tc.setup(t, tg, town)
+			if role, ok := child.InheritedRole(town); ok {
+				t.Errorf("InheritedRole() = (%q, true) under a stale marker, want ok == false", role)
+			}
+		})
+	}
+}
+
+// TestAcquirePoolStaleMarkerTakesLock: a same-role marker whose ancestor no
+// longer holds the slot does not make the caller reentrant. It takes the lock
+// for real, visible to every other caller.
+func TestAcquirePoolStaleMarkerTakesLock(t *testing.T) {
+	t.Parallel()
+	pool := Pool{Slots: 2}
+	for _, tc := range staleMarkerCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			tg := newTestGate(t)
+			town := t.TempDir()
+			child := tc.setup(t, tg, town)
+			h, err, _ := tg.run(t, func() (*Handle, error) { return child.AcquirePool(town, staleMarkerRole, shortWait, pool) })
+			if err != nil {
+				t.Fatalf("AcquirePool under a stale marker: %v", err)
+			}
+			defer release(t, h)
+			if h.reentrant {
+				t.Fatalf("AcquirePool under a stale marker took the reentrant fast path, want the lock")
+			}
+			rep, err := tg.StatusPool(town, pool)
+			if err != nil {
+				t.Fatalf("StatusPool: %v", err)
+			}
+			if owner := rep.Slots[h.Index].Owner; !rep.Slots[h.Index].Held || owner == nil || owner.PID != child.pid || owner.Role != staleMarkerRole {
+				t.Fatalf("slot %d should be held by the caller as %q: %+v", h.Index, staleMarkerRole, rep.Slots[h.Index])
 			}
 		})
 	}
