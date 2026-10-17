@@ -126,14 +126,62 @@ func TestDaemonPatrolConfigRejectsUnknownPatrolKeys(t *testing.T) {
 		`{"patrols":{"handler":{"enabled":false,"bogus":1}}}`,
 		`{"patrols":{"custom":{"enabled":true}}}`,
 		`{"heartbeet":{"enabled":true}}`,
-		// restart_tracker was declared but nothing read it, so its keys now
-		// fail the decode rather than pretending to configure the daemon
-		// (gt-gqftr).
-		`{"patrols":{"restart_tracker":{"initial_backoff":"30s"}}}`,
 	} {
 		err := DecodeJSONFile("daemon.json", []byte(body), &DaemonPatrolConfig{})
 		if !errors.Is(err, ErrUnparseable) {
 			t.Errorf("%s = %v, want ErrUnparseable", body, err)
+		}
+	}
+}
+
+// restart_tracker is retired (gt-gqftr): nothing reads it, but a daemon.json
+// that still carries the block must keep loading rather than stop the daemon,
+// and the block survives a rewrite verbatim.
+func TestDaemonPatrolConfigDecodesRetiredRestartTracker(t *testing.T) {
+	t.Parallel()
+	block := `{"initial_backoff":"30s","crash_loop_count":5}`
+	var cfg DaemonPatrolConfig
+	err := DecodeJSONFile("daemon.json",
+		[]byte(`{"patrols":{"restart_tracker":`+block+`}}`), &cfg)
+	if err != nil {
+		t.Fatalf("retired restart_tracker = %v, want it to decode", err)
+	}
+	if got := string(cfg.Patrols.RestartTracker); got != block {
+		t.Errorf("restart_tracker = %s, want it kept verbatim as %s", got, block)
+	}
+}
+
+// A dolt_server duration that is malformed or not positive reads as the
+// default, like the worktree_cleanup durations: a zero restart_delay would
+// restart with no backoff at all, and an unset knob must not differ from a bad
+// one per caller (gt-gqftr).
+func TestDoltServerConfig_BadDurationReadsAsDefault(t *testing.T) {
+	t.Parallel()
+	knobs := []struct {
+		key  string
+		read func(*DoltServerConfig) time.Duration
+		def  time.Duration
+	}{
+		{"restart_delay", (*DoltServerConfig).RestartDelay, DefaultDoltRestartDelay},
+		{"max_restart_delay", (*DoltServerConfig).MaxRestartDelay, DefaultDoltMaxRestartDelay},
+		{"restart_window", (*DoltServerConfig).RestartWindow, DefaultDoltRestartWindow},
+		{"healthy_reset_interval", (*DoltServerConfig).HealthyResetInterval, DefaultDoltHealthyResetInterval},
+		{"health_check_interval", (*DoltServerConfig).HealthCheckInterval, DefaultDoltHealthCheckInterval},
+	}
+	for _, k := range knobs {
+		for _, value := range []string{`""`, `"soon"`, `"5"`, `"0s"`, `"-3s"`} {
+			body := `{"patrols":{"dolt_server":{"enabled":true,"` + k.key + `":` + value + `}}}`
+			var cfg DaemonPatrolConfig
+			if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+				t.Fatalf("%s = %v", body, err)
+			}
+			if got := k.read(cfg.Patrols.DoltServer); got != k.def {
+				t.Errorf("%s = %v, want the default %v", body, got, k.def)
+			}
+		}
+		// Absent block: the accessors answer on a nil receiver too.
+		if got := k.read(nil); got != k.def {
+			t.Errorf("nil dolt_server %s = %v, want the default %v", k.key, got, k.def)
 		}
 	}
 }

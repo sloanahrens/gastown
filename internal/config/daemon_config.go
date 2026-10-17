@@ -61,6 +61,12 @@ type PatrolsConfig struct {
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
 
+	// RestartTracker is retired (gt-gqftr): no code read the block. It is
+	// declared, like the other retired keys, so a daemon.json that still
+	// carries it keeps loading under strict decoding and is kept verbatim.
+	// Delete the key by hand.
+	RestartTracker json.RawMessage `json:"restart_tracker,omitempty"`
+
 	// GitHygiene cleans merged and orphaned branches and runs git gc in each
 	// rig's repository (internal/daemon/git_hygiene.go). On when absent.
 	GitHygiene *PatrolConfig `json:"git_hygiene,omitempty"`
@@ -178,7 +184,10 @@ type DoltServerConfig struct {
 	AutoRestart *bool `json:"auto_restart,omitempty"`
 
 	// RestartDelayStr is the wait before the first restart after a crash
-	// (default "5s"); it doubles per restart, up to MaxRestartDelayStr.
+	// (default "5s"); it doubles per restart, up to MaxRestartDelayStr. The
+	// five duration knobs take a string; a bare number is a type error
+	// rather than a nanosecond count (gt-gqftr). An unparseable or
+	// non-positive string reads as the default.
 	RestartDelayStr string `json:"restart_delay,omitempty"`
 
 	// MaxRestartDelayStr caps the backoff delay (default "5m").
