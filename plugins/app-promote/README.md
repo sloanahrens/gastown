@@ -1,8 +1,8 @@
 # app-promote
 
-Advances each app rig's GitHub `main` to the newest commit the deployed staging
-stack proved. What counts as green, what it refuses and how it reports a
-failure: `plugin.md` beside this file.
+Before changing what the plugin promotes or reading a failure it raised, read
+`plugin.md` beside this file: it defines the gate (GitHub follows prod), what the
+plugin refuses and how it reports a failure. This file covers installing it.
 
 ## What it needs
 
@@ -13,8 +13,8 @@ failure: `plugin.md` beside this file.
   (`<rig>/settings/config.json`, the operator tier) must name `promote_target`
   and `promote_key_file`, or `gt promote` refuses every sha and the plugin logs
   `not promotable` each run. `bash scripts/forgejo-cutover.sh <rig>` writes both.
-- **The app repo's `staging.yml`** with an integration job (the job named in
-  `rigs.conf`, `staging` by default) that runs on `main`.
+- **The app repo's `deploy.yml`** with the prod integration job `plugin.md`
+  names. A repo whose `deploy.yml` lacks it is never promoted.
 
 ## Installing it, and adding a rig
 
