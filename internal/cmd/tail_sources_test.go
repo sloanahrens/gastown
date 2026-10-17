@@ -1485,18 +1485,21 @@ func TestTailWatchSourceBacklogSkipsOldMalformedLines(t *testing.T) {
 	}
 }
 
-// TestLandingsSourceBacklogSkipsOldMalformedLines: the landings file has the
-// same shape — a non-record line has no landed_at to cut at, so the backlog
-// read leaves it out and only a later one is noted.
-func TestLandingsSourceBacklogSkipsOldMalformedLines(t *testing.T) {
+// TestLandingsSourceBacklogReportsOldMalformedLines: a non-record line has no
+// landed_at to cut at, so the backlog read cannot place it in the window and
+// does not echo it. It still reports the count: a file the operator cannot
+// fully read must not look clean for the rest of the run.
+func TestLandingsSourceBacklogReportsOldMalformedLines(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "gastown.jsonl")
 	appendFile(t, path, "garbage from days ago\n"+
 		`{"bead":"gt-new","rig":"gastown","landed_at":"2026-09-30T13:55:00Z"}`+"\n")
 	s := &landingsSource{rig: "gastown", reader: &landings.Reader{Path: path}, cutoff: at("2026-09-30T13:00:00Z"), now: fixedNow}
 	got := texts(s.Poll())
-	if len(got) != 1 || !strings.HasPrefix(got[0], "gastown landings landed gt-new ") {
-		t.Fatalf("backlog = %q; want the unreadable line left out", got)
+	if len(got) != 2 ||
+		got[0] != "gastown landings skipped 1 unreadable landings line(s) in backlog" ||
+		!strings.HasPrefix(got[1], "gastown landings landed gt-new ") {
+		t.Fatalf("backlog = %q; want the count noted, not the line echoed", got)
 	}
 	appendFile(t, path, "garbage\n")
 	if got := texts(s.Poll()); !reflect.DeepEqual(got,

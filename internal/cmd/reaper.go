@@ -167,19 +167,25 @@ func parseReaperPreviewHashes(list string) []string {
 // hash, so the sweep refuses with the one to re-run for instead of tripping
 // over a hash that belongs to a sibling database (gt-fokkb).
 //
+// opts is the live sweep's own options: the preview is that sweep with only
+// the write defeated, so it cannot hash a different set because an option
+// (StaleAge, MaxCloses, Force) reached one call and not the other. The
+// operator's dry run goes through the same options, which makes this call
+// identical to the one that printed the hash.
+//
 // sweep is reaper.AutoClose, passed in so the mapping is testable without a
 // Dolt server.
-func autoClosePreviewHash(sweep func(*beadsql.DB, reaper.Writer, string, reaper.AutoCloseOptions) (*reaper.AutoCloseResult, error), db *beadsql.DB, dbName string, staleAge time.Duration, hashes []string, wholeTown bool) (string, error) {
+func autoClosePreviewHash(sweep func(*beadsql.DB, reaper.Writer, string, reaper.AutoCloseOptions) (*reaper.AutoCloseResult, error), db *beadsql.DB, dbName string, opts reaper.AutoCloseOptions, hashes []string, wholeTown bool) (string, error) {
 	if len(hashes) == 0 {
 		return "", nil
 	}
 	if !wholeTown {
 		return hashes[0], nil
 	}
-	preview, err := sweep(db, nil, dbName, reaper.AutoCloseOptions{
-		StaleAge: staleAge,
-		DryRun:   true,
-	})
+	previewOpts := opts
+	previewOpts.DryRun = true
+	previewOpts.PreviewHash = ""
+	preview, err := sweep(db, nil, dbName, previewOpts)
 	if err != nil {
 		return "", err
 	}
@@ -689,15 +695,13 @@ Four guards apply, the first three answering the 2026-09-16 mis-close that swept
     notice is the refusal rather than a stop. --force lifts the floor.
   - more than --max-closes candidates in one database refuses the whole run
     (nothing is closed) unless --force.
-  - auto-close disarmed in the daemon patrol config (daemon.patrols.wisp_reaper.auto_close=false
-    in settings/config.json)
+  - auto-close disarmed in the daemon patrol config
+    (daemon.patrols.wisp_reaper.auto_close=false in settings/config.json)
     is refused unless --force.
   - a live run with no --preview hash is refused (nothing is closed) unless
-    --force: the sweep only closes a set a dry run already showed. The dry run
-    prints the hash; hand it back verbatim, and for a whole-town run pass the
-    comma-separated list it prints, one hash per database. This is what keeps
-    the counting ahead of the writing regardless of how the two commands were ordered
-    (gt-39bu — the 2026-09-20 reaper ran live before its dry run).
+    --force: the sweep only closes a set a dry run already showed, whatever
+    order the two commands ran in (gt-39bu — the 2026-09-20 reaper ran live
+    before its dry run). --preview says where the hash comes from.
 
 When --db is provided, auto-closes in a single database. When omitted,
 auto-discovers all databases on the Dolt server and auto-closes in each one.
@@ -751,19 +755,20 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 				db.Close()
 				continue
 			}
-			previewHash, err := autoClosePreviewHash(reaper.AutoClose, db, dbName, staleAge, previewHashes, len(databases) > 1 && !reaperDryRun)
+			opts := reaper.AutoCloseOptions{
+				StaleAge:  staleAge,
+				DryRun:    reaperDryRun,
+				MaxCloses: reaperMaxCloses,
+				Force:     reaperForce,
+			}
+			previewHash, err := autoClosePreviewHash(reaper.AutoClose, db, dbName, opts, previewHashes, len(databases) > 1 && !reaperDryRun)
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "%s: preview error: %v\n", dbName, err)
 				db.Close()
 				continue
 			}
-			result, err := reaper.AutoClose(db, w, dbName, reaper.AutoCloseOptions{
-				StaleAge:    staleAge,
-				DryRun:      reaperDryRun,
-				MaxCloses:   reaperMaxCloses,
-				PreviewHash: previewHash,
-				Force:       reaperForce,
-			})
+			opts.PreviewHash = previewHash
+			result, err := reaper.AutoClose(db, w, dbName, opts)
 			db.Close()
 			if err != nil {
 				// A below-floor stale-age is a soft error (gt-ecpj): the sweep
