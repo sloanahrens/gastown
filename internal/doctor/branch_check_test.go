@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -65,7 +66,42 @@ func TestCloneDivergenceCheck_MayorCloneWithItsOwnWorkIsReported(t *testing.T) {
 	}
 }
 
-func TestCloneDivergenceCheck_GastownMayorCloneIsStillReported(t *testing.T) {
+// townSourceCheckout marks clonePath as the town's gt source checkout, the
+// tree the check resolves its live clone through (version.GetRepoRootForTown).
+func townSourceCheckout(t *testing.T, clonePath string) {
+	t.Helper()
+	dir := filepath.Join(clonePath, "cmd", "gt")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestCloneDivergenceCheck_TownSourceCheckoutIsStillReported(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
+	townRoot := t.TempDir()
+	source := filepath.Join(townRoot, "gastown", "mayor", "rig")
+	cloneBehind(t, f, source, 60, false)
+	townSourceCheckout(t, source)
+
+	result := NewCloneDivergenceCheck().Run(withGit(&CheckContext{TownRoot: townRoot}, f))
+
+	if result.Status != StatusError {
+		t.Fatalf("the town's source checkout 60 behind: %v %v, want Error", result.Status, result.Details)
+	}
+	if len(result.Details) != 1 || !strings.Contains(result.Details[0], "gastown/mayor/rig") {
+		t.Errorf("details = %v, want one naming gastown/mayor/rig", result.Details)
+	}
+}
+
+// TestCloneDivergenceCheck_CloneThatIsNoOnesSourceCheckoutStaysExempt: the
+// exemption follows the town's source checkout, not the rig's name, so a
+// gastown clone that is nobody's source checkout is the same retired leftover
+// as any other rig's (gt-jx8sh).
+func TestCloneDivergenceCheck_CloneThatIsNoOnesSourceCheckoutStaysExempt(t *testing.T) {
 	t.Parallel()
 	f := gitfake.New()
 	townRoot := t.TempDir()
@@ -73,11 +109,9 @@ func TestCloneDivergenceCheck_GastownMayorCloneIsStillReported(t *testing.T) {
 
 	result := NewCloneDivergenceCheck().Run(withGit(&CheckContext{TownRoot: townRoot}, f))
 
-	if result.Status != StatusError {
-		t.Fatalf("gastown/mayor/rig 60 behind: %v %v, want Error", result.Status, result.Details)
-	}
-	if len(result.Details) != 1 || !strings.Contains(result.Details[0], "gastown/mayor/rig") {
-		t.Errorf("details = %v, want one naming gastown/mayor/rig", result.Details)
+	if result.Status != StatusOK {
+		t.Errorf("gastown/mayor/rig 60 behind in a town with no gt source checkout: %v %v, want OK",
+			result.Status, result.Details)
 	}
 }
 
