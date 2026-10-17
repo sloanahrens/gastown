@@ -1711,10 +1711,26 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 	// Re-register broken worktrees so the bare repo knows about them: git
 	// needs gitdir, HEAD and commondir in .repo.git/worktrees/<name>/, and
 	// git worktree repair cannot recreate them (it needs the entry's gitdir to
-	// exist already). The default branch is what a lost HEAD is replaced with.
-	branch := strings.TrimSpace(ctx.git(bareRepoPath).DefaultBranch())
-	if branch == "" {
-		branch = "main"
+	// exist already). The default branch is what a lost HEAD is replaced with;
+	// ask for it only when a worktree actually needs it, since most repairs
+	// keep the branch the existing entry still names.
+	var defaultBranch string
+	branchOrDefault := func() string {
+		if defaultBranch == "" {
+			defaultBranch = strings.TrimSpace(ctx.git(bareRepoPath).DefaultBranch())
+			if defaultBranch == "" {
+				defaultBranch = "main"
+			}
+		}
+		return defaultBranch
+	}
+	var registerErrs []error
+	// Every file git needs has to land for the worktree to come back, so a
+	// skipped entry is a failed repair: report the stage at which it stopped
+	// instead of returning nil and leaving the operator with a Run that keeps
+	// failing and no reason (gt-9d3zt).
+	register := func(relPath, stage string, err error) {
+		registerErrs = append(registerErrs, fmt.Errorf("registering worktree %s: %s: %w", relPath, stage, err))
 	}
 	for _, relPath := range c.brokenWorktrees {
 		wtPath := filepath.Join(rigPath, relPath)
@@ -1722,11 +1738,13 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 
 		content, err := os.ReadFile(gitFile)
 		if err != nil {
+			register(relPath, "reading .git", err)
 			continue
 		}
 
 		line := strings.TrimSpace(string(content))
 		if !strings.HasPrefix(line, "gitdir: ") {
+			registerErrs = append(registerErrs, fmt.Errorf("registering worktree %s: .git does not name a gitdir", relPath))
 			continue
 		}
 
@@ -1742,12 +1760,14 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 		// Create worktree metadata directory
 		wtMetaDir := filepath.Join(bareRepoPath, "worktrees", worktreeName)
 		if err := os.MkdirAll(wtMetaDir, 0755); err != nil {
+			register(relPath, "creating "+wtMetaDir, err)
 			continue
 		}
 
 		// Write gitdir file (points back to the worktree's .git file)
 		gitdirFile := filepath.Join(wtMetaDir, "gitdir")
 		if err := os.WriteFile(gitdirFile, []byte(wtPath+"/.git\n"), 0644); err != nil {
+			register(relPath, "writing gitdir", err)
 			continue
 		}
 
@@ -1755,24 +1775,79 @@ func (c *BareRepoExistsCheck) Fix(ctx *CheckContext) error {
 		// without it the worktree stays dead with gitdir and HEAD in place
 		// (gt-ux2hv).
 		if err := os.WriteFile(filepath.Join(wtMetaDir, "commondir"), []byte("../..\n"), 0644); err != nil {
+			register(relPath, "writing commondir", err)
 			continue
 		}
 
-		// A partial entry can still carry the worktree's HEAD; keep the branch
-		// it names. When the entry is gone the branch went with it and no copy
-		// remains, so the default branch is the only answer left.
-		headContent := "ref: refs/heads/" + branch + "\n"
-		if oldHead, err := os.ReadFile(filepath.Join(wtMetaDir, "HEAD")); err == nil && strings.TrimSpace(string(oldHead)) != "" {
-			headContent = string(oldHead)
+		// HEAD comes from the registration the worktree's .git file names, so
+		// the repair keeps the branch git last recorded instead of guessing.
+		// A copy in the entry under the bare repo is the fallback; when neither
+		// names a branch the entry is gone and the default branch is all that
+		// is left (gt-9d3zt).
+		headContent := registrationHead(ctx.TownRoot, gitdir)
+		if headContent == "" {
+			headContent = registrationHead(ctx.TownRoot, wtMetaDir)
+		}
+		if headContent == "" {
+			headContent = "ref: refs/heads/" + branchOrDefault() + "\n"
 		}
 
 		headFile := filepath.Join(wtMetaDir, "HEAD")
 		if err := os.WriteFile(headFile, []byte(headContent), 0644); err != nil {
+			register(relPath, "writing HEAD", err)
 			continue
 		}
 	}
 
-	return nil
+	return errors.Join(registerErrs...)
+}
+
+// registrationHead returns the HEAD a registration directory holds, as one
+// line with a trailing newline, or "" when the directory has no HEAD this
+// repair should copy.
+//
+// gitdir comes from a worktree's .git file, which is worktree content and not
+// trusted input: the path is followed only inside the town, and only content
+// shaped like a HEAD is returned, so a crafted file cannot choose what lands
+// in the repaired entry (gt-9d3zt).
+func registrationHead(townRoot, gitdir string) string {
+	root, err := filepath.EvalSymlinks(townRoot)
+	if err != nil {
+		root = filepath.Clean(townRoot)
+	}
+	dir, err := filepath.EvalSymlinks(gitdir)
+	if err != nil {
+		return ""
+	}
+	if dir != root && !strings.HasPrefix(dir, root+string(filepath.Separator)) {
+		return ""
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "HEAD"))
+	if err != nil {
+		return ""
+	}
+	head := strings.TrimSpace(string(data))
+	if !looksLikeHead(head) {
+		return ""
+	}
+	return head + "\n"
+}
+
+// looksLikeHead reports whether s has the shape git writes into HEAD: a
+// symbolic ref under refs/, or a SHA-1 or SHA-256 object name.
+func looksLikeHead(s string) bool {
+	if ref, ok := strings.CutPrefix(s, "ref: "); ok {
+		return strings.HasPrefix(ref, "refs/") && !strings.ContainsAny(ref, " \t\r\n")
+	}
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", r) {
+			return false
+		}
+	}
+	return true
 }
 
 // bareRepoRemovalBlockers lists what makes a corrupt .repo.git unsafe to
