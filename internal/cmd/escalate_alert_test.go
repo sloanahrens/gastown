@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/notify"
 )
@@ -22,18 +24,22 @@ type escalateFixture struct {
 	cleared  [][]string
 	raiseRes *notify.RaiseResult
 	closed   []string
+	errOut   *strings.Builder
+	db       *beadsfake.Fake // the town's beads, where delivery beads live
 }
 
 func newEscalateFixture(t *testing.T) *escalateFixture {
 	t.Helper()
 	town := t.TempDir()
-	fx := &escalateFixture{out: &strings.Builder{}, town: town, raiseRes: &notify.RaiseResult{ID: "hq-created"}}
+	fx := &escalateFixture{out: &strings.Builder{}, errOut: &strings.Builder{}, town: town, raiseRes: &notify.RaiseResult{ID: "hq-created"}, db: beadsfake.New(beadsfake.WithPrefix("hq"))}
 	fx.r = escalateRun{
-		severity: "high",
-		in:       strings.NewReader(""),
-		out:      fx.out,
-		townRoot: func() (string, error) { return town, nil },
-		sender:   func() string { return "daemon" },
+		errOut:      fx.errOut,
+		beadsClient: func(string) beads.Client { return fx.db },
+		severity:    "high",
+		in:          strings.NewReader(""),
+		out:         fx.out,
+		townRoot:    func() (string, error) { return town, nil },
+		sender:      func() string { return "daemon" },
 		raise: func(req notify.EscalationRequest, _ *config.EscalationConfig) (*notify.RaiseResult, error) {
 			fx.raised = append(fx.raised, req)
 			return fx.raiseRes, nil
@@ -220,5 +226,62 @@ func TestRunEscalateClear_ReportsAClearFailure(t *testing.T) {
 	fx.r.clear = func(string, []string, string, string) ([]string, error) { return nil, errors.New("dolt down") }
 	if err := fx.r.clearAlerts(nil); err == nil || !strings.Contains(err.Error(), "dolt down") {
 		t.Fatalf("clearAlerts = %v, want the clear failure", err)
+	}
+}
+
+// failingListBeads is a beads client whose List fails, standing in for a
+// bd that cannot list the delivery beads.
+type failingListBeads struct{ beads.Client }
+
+func (failingListBeads) List(beads.ListOptions) ([]*beads.Issue, error) {
+	return nil, errors.New("bd list down")
+}
+
+// TestRunEscalateClear_ClosesTheDeliveryBeadsOfTheClearedEscalation: clearing
+// an escalation closes the mail beads routed for it, as gt escalate close
+// does, and leaves every other thread's open.
+func TestRunEscalateClear_ClosesTheDeliveryBeadsOfTheClearedEscalation(t *testing.T) {
+	t.Parallel()
+	fx := newEscalateFixture(t)
+	fx.r.clearKeys = []string{"k"}
+	fx.closed = []string{"hq-esc"}
+	fx.db.Seed(
+		beads.Issue{ID: "hq-mail", Title: "[HIGH] alert", Status: "open", Labels: []string{"gt:message", "thread:hq-esc"}},
+		beads.Issue{ID: "hq-other", Title: "other thread", Status: "open", Labels: []string{"gt:message", "thread:hq-zzz"}},
+	)
+
+	if err := fx.r.clearAlerts(nil); err != nil {
+		t.Fatalf("clearAlerts: %v", err)
+	}
+	for id, want := range map[string]string{"hq-mail": "closed", "hq-other": "open"} {
+		issue, err := fx.db.Show(id)
+		if err != nil {
+			t.Fatalf("show %s: %v", id, err)
+		}
+		if issue.Status != want {
+			t.Errorf("%s status = %q, want %q", id, issue.Status, want)
+		}
+	}
+}
+
+// TestRunEscalateClear_DeliveryCloseFailureIsOnlyAWarning: the escalation is
+// already closed, so a bd that cannot close its mail beads must not turn the
+// clear (and the producer's patrol) into an error or break --json output.
+func TestRunEscalateClear_DeliveryCloseFailureIsOnlyAWarning(t *testing.T) {
+	t.Parallel()
+	fx := newEscalateFixture(t)
+	fx.r.clearKeys = []string{"k"}
+	fx.r.json = true
+	fx.closed = []string{"hq-esc"}
+	fx.r.beadsClient = func(string) beads.Client { return failingListBeads{fx.db} }
+
+	if err := fx.r.clearAlerts(nil); err != nil {
+		t.Fatalf("clearAlerts: %v", err)
+	}
+	if !strings.Contains(fx.errOut.String(), "hq-esc") || !strings.Contains(fx.errOut.String(), "bd list down") {
+		t.Errorf("stderr = %q, want a warning naming the escalation and the failure", fx.errOut.String())
+	}
+	if !strings.Contains(fx.out.String(), `"count": 1`) {
+		t.Errorf("stdout = %q, want the unchanged --json result", fx.out.String())
 	}
 }
