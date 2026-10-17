@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doctor"
+	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -107,6 +108,12 @@ func authorizeDestructiveFix(townRoot string, check doctor.Check, envActor strin
 	actor, isAgent := resolveDestructiveActor(envActor, stdoutIsTTY)
 	if !isAgent {
 		return nil
+	}
+	// Refuse before the bead lookup: an unidentified process can create the
+	// very bead it names, so no --authorized-by bead can authorize it
+	// (gt-2kwxr).
+	if doltserver.IsUnidentifiedActor(actor) {
+		return doctor.ErrUnidentifiedFixActor
 	}
 	if authorizedBy == "" {
 		return fmt.Errorf(`%q can destroy state or end a running process, and agent actor %q may not run it without recorded authorization (gt-638go.3)
