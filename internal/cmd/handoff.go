@@ -78,6 +78,46 @@ var (
 	handoffYes        bool
 )
 
+// handoffSteps are the collaborators of handoffSession that reach tmux, the
+// mail store, the beads store or the town feed. runHandoff passes
+// liveHandoffSteps; a unit test passes fakes and counts the calls.
+type handoffSteps struct {
+	buildPlan        func(sessionName string, opts buildRestartCommandOpts) (restartPlan, error)
+	updateSessionEnv func(reg *session.PrefixRegistry, t *tmux.Tmux, sessionName string)
+	// cleanupMolecule closes the molecule steps the session leaves behind.
+	cleanupMolecule func()
+	sendMail        func(subject, message string) (string, error)
+	// logNoPersist records that the handoff mail did not persist.
+	logNoPersist func(agent, subject string, err error)
+}
+
+var liveHandoffSteps = handoffSteps{
+	buildPlan:        buildRestartPlan,
+	updateSessionEnv: updateSessionEnvForHandoff,
+	cleanupMolecule:  cleanupMoleculeOnHandoff,
+	sendMail:         sendHandoffMail,
+	logNoPersist: func(agent, subject string, err error) {
+		if townRoot, trErr := workspace.FindFromCwd(); trErr == nil && townRoot != "" {
+			_ = events.LogFeedTo(townRoot, events.TypeHandoffNoPersist, agent,
+				events.HandoffFailedPayload(subject, err))
+		}
+	},
+}
+
+// sessionHandoff is what handoffSession hands off: the session the caller is
+// in, the session to restart (the same, for a self-handoff) and the mail.
+type sessionHandoff struct {
+	reg            *session.PrefixRegistry
+	t              *tmux.Tmux // the caller's server, for pane operations
+	townTmux       *tmux.Tmux // the town socket, for a remote session
+	pane           string
+	currentSession string
+	targetSession  string
+	dryRun         bool
+	subject        string
+	message        string
+}
+
 func init() {
 	handoffCmd.Flags().BoolVarP(&handoffWatch, "watch", "w", true, "Switch to new session (for remote handoff)")
 	handoffCmd.Flags().BoolVarP(&handoffDryRun, "dry-run", "n", false, "Show what would be done without executing")
@@ -294,8 +334,28 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	return handoffSession(sessionHandoff{
+		reg:            reg,
+		t:              t,
+		townTmux:       townTmux,
+		pane:           pane,
+		currentSession: currentSession,
+		targetSession:  targetSession,
+		dryRun:         handoffDryRun,
+		subject:        handoffSubject,
+		message:        handoffMessage,
+	}, liveHandoffSteps)
+}
+
+// handoffSession restarts p.targetSession: another session through
+// handoffRemoteSession, or the caller's own after a dry-run preview, the
+// molecule cleanup and the handoff mail.
+func handoffSession(p sessionHandoff, steps handoffSteps) error {
+	reg, t, townTmux, pane := p.reg, p.t, p.townTmux, p.pane
+	currentSession, targetSession := p.currentSession, p.targetSession
+
 	// Build the restart command
-	plan, err := buildRestartPlan(targetSession, buildRestartCommandOpts{Registry: reg})
+	plan, err := steps.buildPlan(targetSession, buildRestartCommandOpts{Registry: reg})
 	if err != nil {
 		return err
 	}
@@ -309,10 +369,6 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 		return handoffRemoteSession(townTmux, targetSession, plan)
 	}
 
-	// Close any in-progress molecule steps before cycling (gt-e26g).
-	// Without this, patrol agents that handoff mid-cycle leak orphaned wisps.
-	cleanupMoleculeOnHandoff()
-
 	// Handing off ourselves - print feedback then respawn
 	fmt.Printf("%s Handing off %s...\n", style.Bold.Render("🤝"), currentSession)
 
@@ -323,35 +379,37 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	}
 
 	// Dry run mode - show what would happen (BEFORE any side effects)
-	if handoffDryRun {
-		if handoffSubject != "" || handoffMessage != "" {
-			fmt.Printf("Would send handoff mail: subject=%q (auto-hooked)\n", handoffSubject)
+	if p.dryRun {
+		if p.subject != "" || p.message != "" {
+			fmt.Printf("Would send handoff mail: subject=%q (auto-hooked)\n", p.subject)
 		}
 		fmt.Printf("Would execute: tmux clear-history -t %s\n", pane)
 		fmt.Printf("Would execute: tmux respawn-pane -k -t %s %s\n", pane, restartCmd)
 		return nil
 	}
 
+	// Close any in-progress molecule steps before cycling (gt-e26g).
+	// Without this, patrol agents that handoff mid-cycle leak orphaned wisps.
+	// Below the dry-run guard: a preview must not close the molecule.
+	steps.cleanupMolecule()
+
 	// Update tmux session environment for liveness detection.
 	// IsAgentAliveChecked reads GT_PROCESS_NAMES via tmux show-environment (session env),
 	// not from shell exports. The restart command sets shell exports for the child
 	// process, but we must also update the session env so liveness checks work.
 	// Placed after the dry-run guard to avoid mutating session state during dry-run.
-	updateSessionEnvForHandoff(reg, t, currentSession)
+	steps.updateSessionEnv(reg, t, currentSession)
 
 	// Send handoff mail to self (defaults applied inside sendHandoffMail).
 	// The mail is auto-hooked so the next session picks it up.
 	// CRITICAL: Mail must persist to Dolt BEFORE logging the handoff event.
 	// If Dolt is down, we must NOT log a handoff that did not happen.
-	beadID, err := sendHandoffMail(handoffSubject, handoffMessage)
+	beadID, err := steps.sendMail(p.subject, p.message)
 	if err != nil {
 		// Handoff persistence failure is fatal — do not silently continue.
 		// A silent failure causes the next session to find an empty hook,
 		// losing all handoff context.
-		if townRoot, trErr := workspace.FindFromCwd(); trErr == nil && townRoot != "" {
-			_ = events.LogFeedTo(townRoot, events.TypeHandoffNoPersist, agent,
-				events.HandoffFailedPayload(handoffSubject, err))
-		}
+		steps.logNoPersist(agent, p.subject, err)
 		fmt.Fprintf(os.Stderr, "The session was NOT respawned. Fix the issue and retry 'gt handoff'.\n")
 		return fmt.Errorf("handoff mail failed to persist (Dolt may be down): %w", err)
 	}
@@ -359,7 +417,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 
 	// Log handoff event AFTER Dolt persistence succeeds.
 	if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-		_ = events.LogFeed(events.TypeHandoff, agent, events.HandoffPayload(handoffSubject, true))
+		_ = events.LogFeed(events.TypeHandoff, agent, events.HandoffPayload(p.subject, true))
 	}
 
 	// NOTE: reportAgentState("stopped") removed (gt-zecmc)
