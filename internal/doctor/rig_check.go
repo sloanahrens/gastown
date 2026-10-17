@@ -127,9 +127,8 @@ func (c *GitExcludeConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Check mayor/rig/ which is the authoritative clone
 	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
-	gitDir := filepath.Join(mayorRigPath, ".git")
-	info, err := os.Stat(gitDir)
-	if os.IsNotExist(err) {
+	excludePath, err := gitExcludePath(mayorRigPath)
+	if errors.Is(err, fs.ErrNotExist) {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
@@ -137,29 +136,15 @@ func (c *GitExcludeConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 			FixHint: "Run rig-is-git-repo check first",
 		}
 	}
-
-	// If .git is a file (worktree), read the actual git dir
-	if info.Mode().IsRegular() {
-		content, err := os.ReadFile(gitDir)
-		if err != nil {
-			return &CheckResult{
-				Name:    c.Name(),
-				Status:  StatusError,
-				Message: fmt.Sprintf("Cannot read .git file: %v", err),
-			}
-		}
-		// Format: "gitdir: /path/to/actual/git/dir"
-		line := strings.TrimSpace(string(content))
-		if strings.HasPrefix(line, "gitdir: ") {
-			gitDir = strings.TrimPrefix(line, "gitdir: ")
-			// Resolve relative paths
-			if !filepath.IsAbs(gitDir) {
-				gitDir = filepath.Join(rigPath, gitDir)
-			}
+	if err != nil {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusError,
+			Message: fmt.Sprintf("Cannot resolve mayor/rig git dir: %v", err),
 		}
 	}
 
-	c.excludePath = filepath.Join(gitDir, "info", "exclude")
+	c.excludePath = excludePath
 
 	// Read existing excludes
 	existing := make(map[string]bool)
@@ -241,6 +226,56 @@ func (c *GitExcludeConfiguredCheck) Fix(ctx *CheckContext) error {
 	}
 
 	return nil
+}
+
+// gitExcludePath returns the info/exclude file git reads for the repository at
+// repoPath: for a worktree (.git is a file) that is the common dir's file, since
+// git ignores the per-worktree gitdir's.
+func gitExcludePath(repoPath string) (string, error) {
+	gitPath := filepath.Join(repoPath, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return "", err
+	}
+
+	gitDir := gitPath
+	if info.Mode().IsRegular() {
+		content, err := os.ReadFile(gitPath)
+		if err != nil {
+			return "", fmt.Errorf("cannot read .git file: %w", err)
+		}
+		// Format: "gitdir: /path/to/actual/git/dir"
+		line := strings.TrimSpace(string(content))
+		if !strings.HasPrefix(line, "gitdir: ") {
+			return "", fmt.Errorf("%s is not a gitdir file", gitPath)
+		}
+		gitDir = strings.TrimSpace(strings.TrimPrefix(line, "gitdir: "))
+		// A relative gitdir is relative to the .git file's directory.
+		if !filepath.IsAbs(gitDir) {
+			gitDir = filepath.Join(filepath.Dir(gitPath), gitDir)
+		}
+		gitDir = commonGitDir(gitDir)
+	}
+
+	return filepath.Join(gitDir, "info", "exclude"), nil
+}
+
+// commonGitDir follows a worktree gitdir's commondir file to the git dir it
+// shares with the main checkout. A gitdir without a commondir is its own
+// common dir.
+func commonGitDir(gitDir string) string {
+	data, err := os.ReadFile(filepath.Join(gitDir, "commondir"))
+	if err != nil {
+		return gitDir
+	}
+	common := strings.TrimSpace(string(data))
+	if common == "" {
+		return gitDir
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(gitDir, common)
+	}
+	return common
 }
 
 // HooksPathConfiguredCheck verifies all clones have core.hooksPath set to .githooks.
@@ -846,21 +881,19 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 		)
 		bd := ctx.bd(rigPath, bdEnv)
 		if err := bd.InitDatabase(beads.InitOptions{Prefix: prefix, Database: ctx.RigName, ServerPort: doltCfg.Port}); err != nil {
-			err = bdCause(err)
-			// bd might not be installed — create config.yaml via shared helper.
-			if writeErr := beads.EnsureConfigYAML(rigBeadsDir, prefix); writeErr != nil {
-				return fmt.Errorf("bd init failed (%v) and fallback config creation failed: %w", err, writeErr)
-			}
-			// Continue - minimal config created
-		} else {
-			// Configure Gas Town bead types (beads v0.46.0+). Rig remains durable,
-			// not infra/wisp-backed.
-			for _, cfg := range []struct{ key, value string }{
-				{"types.custom", constants.BeadsCustomTypes},
-				{"types.infra", constants.BeadsInfraTypes},
-			} {
-				_ = bd.ConfigSet(cfg.key, cfg.value) // Ignore errors - older beads don't need this
-			}
+			// A .beads directory without a database reads as healthy to Run
+			// ("Rig uses local beads"), so the fix must not leave one behind:
+			// undo the directory it just created and report the failure.
+			_ = os.RemoveAll(rigBeadsDir)
+			return fmt.Errorf("bd init failed: %w", bdCause(err))
+		}
+		// Configure Gas Town bead types (beads v0.46.0+). Rig remains durable,
+		// not infra/wisp-backed.
+		for _, cfg := range []struct{ key, value string }{
+			{"types.custom", constants.BeadsCustomTypes},
+			{"types.infra", constants.BeadsInfraTypes},
+		} {
+			_ = bd.ConfigSet(cfg.key, cfg.value) // Ignore errors - older beads don't need this
 		}
 		if err := doltserver.EnsureMetadataForBeadsDir(ctx.TownRoot, rigBeadsDir, ctx.RigName, ctx.RigName); err != nil {
 			return fmt.Errorf("ensuring metadata.json: %w", err)
@@ -870,8 +903,12 @@ func (c *BeadsRedirectCheck) Fix(ctx *CheckContext) error {
 
 	// Case 2: Tracked beads exist - create redirect (may need to remove conflicting local beads)
 	if hasTrackedBeads {
-		// Check if local beads have conflicting data
-		if hasLocalBeads && hasBeadsData(rigBeadsDir) {
+		// A local beads database with no redirect is a genuine conflict: the
+		// directory has to go for bd to follow the tracked beads. When a
+		// redirect is already present, only its target is wrong, so rewriting
+		// it must leave metadata.json and any local data in place.
+		_, redirectErr := os.Stat(redirectPath)
+		if hasLocalBeads && errors.Is(redirectErr, fs.ErrNotExist) && hasBeadsData(rigBeadsDir) {
 			// Remove conflicting local beads directory
 			if err := os.RemoveAll(rigBeadsDir); err != nil {
 				return fmt.Errorf("removing conflicting local beads: %w", err)
@@ -1226,13 +1263,14 @@ func (c *DefaultBranchAllRigsCheck) Run(ctx *CheckContext) *CheckResult {
 			continue // Using default "main", skip
 		}
 
-		rigsChecked++
-
 		// Check bare repo for the ref
 		bareRepoPath := filepath.Join(rigPath, ".repo.git")
 		if _, err := os.Stat(bareRepoPath); os.IsNotExist(err) {
 			continue // No bare repo, skip
 		}
+
+		// Only a rig whose ref was checked counts as validated below.
+		rigsChecked++
 
 		ref := fmt.Sprintf("refs/remotes/origin/%s", cfg.DefaultBranch)
 		if ok, _ := ctx.git(bareRepoPath).RefExists(ref); !ok {

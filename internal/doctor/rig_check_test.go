@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -91,10 +92,10 @@ func TestBeadsRedirectCheck_FixInitBeadsUsesCanonicalDatabase(t *testing.T) {
 	}
 }
 
-// TestBeadsRedirectCheck_FixInitFallsBackToConfigYAML: when bd init fails
-// (bd missing or erroring), the fix still leaves a minimal config.yaml
-// carrying the rig's prefix.
-func TestBeadsRedirectCheck_FixInitFallsBackToConfigYAML(t *testing.T) {
+// TestBeadsRedirectFixInitFailureReturnsError: a failed bd init must surface
+// as a Fix error and leave no .beads directory, since Run treats any .beads
+// at the rig root as local beads and reports OK.
+func TestBeadsRedirectFixInitFailureReturnsError(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 	rigDir := filepath.Join(tmpDir, "testrig")
@@ -106,18 +107,20 @@ func TestBeadsRedirectCheck_FixInitFallsBackToConfigYAML(t *testing.T) {
 	bd.db(rigDir).FailWith("init", errors.New("bd: command not found"))
 	ctx := bd.ctx(tmpDir)
 	ctx.RigName = "testrig"
-	if err := NewBeadsRedirectCheck().Fix(ctx); err != nil {
-		t.Fatalf("Fix failed: %v", err)
+
+	check := NewBeadsRedirectCheck()
+	err := check.Fix(ctx)
+	if err == nil {
+		t.Fatal("Fix returned nil after bd init failed")
 	}
-	data, err := os.ReadFile(filepath.Join(rigDir, ".beads", "config.yaml"))
-	if err != nil {
-		t.Fatalf("fallback config.yaml: %v", err)
+	if !strings.Contains(err.Error(), "command not found") {
+		t.Errorf("Fix error = %v, want the bd init failure", err)
 	}
-	if !strings.Contains(string(data), "tr") {
-		t.Errorf("fallback config.yaml lacks the prefix:\n%s", data)
+	if _, statErr := os.Stat(filepath.Join(rigDir, ".beads")); !errors.Is(statErr, fs.ErrNotExist) {
+		t.Errorf(".beads after a failed init: stat err = %v, want the directory removed", statErr)
 	}
-	if got, _ := bd.db(rigDir).ConfigGet("types.custom"); got != "" {
-		t.Errorf("types configured after a failed init: %q", got)
+	if result := check.Run(ctx); result.Status == StatusOK {
+		t.Errorf("Run after a failed init reported OK: %q", result.Message)
 	}
 }
 
@@ -339,6 +342,59 @@ func TestBeadsRedirectCheck_FixWrongRedirect(t *testing.T) {
 	result = check.Run(ctx)
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK after fix, got %v", result.Status)
+	}
+}
+
+// TestBeadsRedirectFixKeepsMetadataOnWrongRedirect: Run flags only the wrong
+// redirect target, so Fix must correct the redirect without deleting the
+// metadata.json, config.yaml and other files the directory already holds.
+func TestBeadsRedirectFixKeepsMetadataOnWrongRedirect(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	rigName := "testrig"
+	rigDir := filepath.Join(tmpDir, rigName)
+
+	trackedBeads := filepath.Join(rigDir, "mayor", "rig", ".beads")
+	if err := os.MkdirAll(trackedBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	rigBeads := filepath.Join(rigDir, ".beads")
+	if err := os.MkdirAll(rigBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"redirect":      "wrong/path\n",
+		"metadata.json": `{"database":"testrig"}`,
+		"config.yaml":   "prefix: tr\n",
+	} {
+		if err := os.WriteFile(filepath.Join(rigBeads, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	check := NewBeadsRedirectCheck()
+	ctx := &CheckContext{TownRoot: tmpDir, RigName: rigName}
+	if result := check.Run(ctx); result.Status != StatusError {
+		t.Fatalf("wrong redirect before fix: %v %q, want StatusError", result.Status, result.Message)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(rigBeads, "metadata.json")); err != nil {
+		t.Errorf("metadata.json after Fix: %v, want it kept", err)
+	}
+	content, err := os.ReadFile(filepath.Join(rigBeads, "redirect"))
+	if err != nil {
+		t.Fatalf("redirect file after Fix: %v", err)
+	}
+	if got := string(content); got != "mayor/rig/.beads\n" {
+		t.Errorf("redirect content = %q, want 'mayor/rig/.beads\\n'", got)
+	}
+	if result := check.Run(ctx); result.Status != StatusOK {
+		t.Errorf("after Fix: %v %q, want StatusOK", result.Status, result.Message)
 	}
 }
 
@@ -601,6 +657,59 @@ func TestDefaultBranchExistsCheck_NotFixable(t *testing.T) {
 	}
 }
 
+// TestDefaultBranchAllRigsSkippedRigNotCounted: a rig with no .repo.git is
+// skipped, so it must not appear in the "All N rig(s) validated" tally, and a
+// town whose rigs were all skipped is not reported as validated.
+func TestDefaultBranchAllRigsSkippedRigNotCounted(t *testing.T) {
+	t.Parallel()
+
+	writeRigConfig := func(t *testing.T, townRoot, rigName string) {
+		t.Helper()
+		rigPath := filepath.Join(townRoot, rigName)
+		if err := os.MkdirAll(rigPath, 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(`{"default_branch":"dev"}`), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("skipped rig excluded from count", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		writeRigConfig(t, townRoot, "skippedrig")
+		writeRigConfig(t, townRoot, "validrig")
+
+		// validrig has a bare repo carrying the configured default_branch.
+		gf := gitfake.New()
+		bareRepo := filepath.Join(townRoot, "validrig", ".repo.git")
+		gf.InitBare(t, bareRepo)
+		id := gf.Commit(t, bareRepo, "dev", "init", nil)
+		gf.SetRef(t, bareRepo, "refs/remotes/origin/dev", id)
+
+		result := NewDefaultBranchAllRigsCheck().Run(withGit(&CheckContext{TownRoot: townRoot}, gf))
+
+		if result.Status != StatusOK {
+			t.Fatalf("status = %v %v, want StatusOK", result.Status, result.Details)
+		}
+		if !strings.Contains(result.Message, "All 1 rig(s)") {
+			t.Errorf("message = %q, want it to count only the validated rig", result.Message)
+		}
+	})
+
+	t.Run("skipped-only town is not validated", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		writeRigConfig(t, townRoot, "skippedrig")
+
+		result := NewDefaultBranchAllRigsCheck().Run(&CheckContext{TownRoot: townRoot})
+
+		if strings.Contains(result.Message, "validated") {
+			t.Errorf("message = %q, want no validated claim when every rig was skipped", result.Message)
+		}
+	})
+}
+
 func TestBeadsRedirectCheck_FixConflictingLocalBeads(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
@@ -745,6 +854,71 @@ func assertHooksPathConfigured(t *testing.T, ctx *CheckContext, rel string) {
 	}
 	if result := check.Run(ctx); result.Status != StatusOK {
 		t.Fatalf("after Fix: %v %v, want OK", result.Status, result.Details)
+	}
+}
+
+// TestGitExcludeConfiguredWorktreeUsesCommonDir: when mayor/rig is a worktree,
+// git reads info/exclude from the common dir, never from the per-worktree
+// gitdir. Entries parked in the per-worktree file must not count as configured,
+// and Fix must write the common dir's file.
+func TestGitExcludeConfiguredWorktreeUsesCommonDir(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name   string
+		gitdir func(rigPath string) string
+	}{
+		{"absolute", func(rigPath string) string {
+			return filepath.Join(rigPath, ".repo.git", "worktrees", "mayorrig")
+		}},
+		{"relative", func(string) string {
+			return filepath.Join("..", "..", ".repo.git", "worktrees", "mayorrig")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			rigPath := filepath.Join(townRoot, "testrig")
+			mayorRig := filepath.Join(rigPath, "mayor", "rig")
+			worktreeDir := filepath.Join(rigPath, ".repo.git", "worktrees", "mayorrig")
+			for _, dir := range []string{mayorRig, worktreeDir, filepath.Join(worktreeDir, "info")} {
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.WriteFile(filepath.Join(worktreeDir, "commondir"), []byte("../..\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			// git ignores the per-worktree exclude, so these entries have no effect.
+			perWorktree := filepath.Join(worktreeDir, "info", "exclude")
+			if err := os.WriteFile(perWorktree, []byte("/polecats/\n/mayor/\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(mayorRig, ".git"), []byte("gitdir: "+tc.gitdir(rigPath)+"\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			ctx := &CheckContext{TownRoot: townRoot, RigName: "testrig"}
+			check := NewGitExcludeConfiguredCheck()
+			if result := check.Run(ctx); result.Status != StatusWarning {
+				t.Fatalf("entries only in the per-worktree exclude: %v %q, want StatusWarning", result.Status, result.Message)
+			}
+
+			if err := check.Fix(ctx); err != nil {
+				t.Fatalf("Fix: %v", err)
+			}
+			data, err := os.ReadFile(filepath.Join(rigPath, ".repo.git", "info", "exclude"))
+			if err != nil {
+				t.Fatalf("common dir exclude after Fix: %v", err)
+			}
+			for _, want := range check.requiredExcludes() {
+				if !strings.Contains(string(data), want) {
+					t.Errorf("common dir exclude lacks %q after Fix:\n%s", want, data)
+				}
+			}
+			if result := check.Run(ctx); result.Status != StatusOK {
+				t.Errorf("after Fix: %v %q, want StatusOK", result.Status, result.Message)
+			}
+		})
 	}
 }
 
