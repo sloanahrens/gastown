@@ -311,7 +311,7 @@ func InvocationFromCommand(split SplitFunc, command string) (Invocation, bool) {
 // other goals ("make -j4 test"); every other program keeps the adjacent pair.
 func InvocationIndex(tokens []string, program, target string) int {
 	for i := 0; i+1 < len(tokens); i++ {
-		if tokens[i] != program {
+		if !invocationProgram(tokens[i], program) {
 			continue
 		}
 		if program == "make" {
@@ -332,6 +332,19 @@ func InvocationIndex(tokens []string, program, target string) int {
 	return -1
 }
 
+// invocationProgram reports whether tok names program in an argv. make is also
+// reached as gmake, the name GNU make carries on macOS, so a seat running
+// "gmake test" is running the rig's configured "make test" and its goals are
+// read the same way through either name (gt-y1zks, gt-gy5ro). Any other program
+// keeps the exact word. Both sides are InvocationTokens' reading: lowercased
+// basenames.
+func invocationProgram(tok, program string) bool {
+	if tok == program {
+		return true
+	}
+	return program == "make" && filepath.Base(tok) == "gmake"
+}
+
 // isTokenSeparator reports whether tok ends one command and begins the next, so
 // a matcher reaching it must stop reading the current command's arguments.
 func isTokenSeparator(tok string) bool {
@@ -344,10 +357,11 @@ func isTokenSeparator(tok string) bool {
 
 // InvocationPresent reports whether tokens carry the invocation. An invocation
 // with no target matches its program anywhere, the reading a rig whose config
-// names a bare program gets.
+// names a bare program gets — gmake included, for the same reason
+// InvocationIndex takes it (gt-gy5ro).
 func InvocationPresent(tokens []string, inv Invocation) bool {
 	if inv.Target == "" {
-		return slices.Contains(tokens, inv.Program)
+		return slices.ContainsFunc(tokens, func(tok string) bool { return invocationProgram(tok, inv.Program) })
 	}
 	return InvocationIndex(tokens, inv.Program, inv.Target) >= 0
 }
