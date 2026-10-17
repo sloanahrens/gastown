@@ -254,11 +254,10 @@ has no green cycle on record. A rig the sweep does not cover is promoted as the
 caller asks, green or not: there the caller must have the green verdict first.
 
 The `app-promote` script plugin calls it for the app rigs: it promotes the
-commit of the newest release whose `deploy.yml` run passed the
-`prod-integration` job, so GitHub's `main` follows prod and never leads it
-(dv-jokk). Before installing it or adding a rig to it,
-read `plugins/app-promote/README.md`; the rig list it reads is beside it, in
-`rigs.conf`. Use the command by hand to retry one of those promotions after a
+commit of the newest release proved on prod, so GitHub's `main` follows prod and
+never leads it (dv-jokk). Before installing it or adding a rig to it, read
+`plugins/app-promote/README.md`; the rig list it reads is beside it, in
+`rigs.conf`, and `plugin.md` defines the gate. Use the command by hand to retry one of those promotions after a
 failure, and to prove a rig's deploy key and target before the plugin is
 installed.
 

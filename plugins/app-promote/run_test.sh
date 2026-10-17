@@ -55,12 +55,20 @@ fi
 shape=runs
 case "$url" in
   */actions/runs/*/jobs) shape=jobs ;;
+  */actions/runs\?*page=2*) shape=runs-page2 ;;
   */compare/main...*) shape=compare-main ;;
   */compare/*) shape=compare ;;
+  */tags/*) shape="tag-${url##*/}" ;;
 esac
 if [ -n "${STUB_HTTP_STATUS:-}" ] && [ "$STUB_HTTP_STATUS" != 200 ]; then
   printf '{"message":"stub says %s"}' "$STUB_HTTP_STATUS" >"$out"
   printf '%s' "$STUB_HTTP_STATUS"
+  exit 0
+fi
+# A tag with no fixture is a ref that is not a tag: the API answers 404.
+if [ ! -f "$STUB_STATE/$shape.json" ]; then
+  printf '{"message":"not found"}' >"$out"
+  printf '404'
   exit 0
 fi
 cp "$STUB_STATE/$shape.json" "$out"
@@ -111,8 +119,15 @@ write_jobs() {
  {"id":3,"name":"prod-integration","status":"$1","needs":["prod"]}]
 JSON
 }
+# write_tag NAME SHA makes NAME a tag of the repo naming SHA; the stub answers 404
+# for a tag it has no file for.
+write_tag() {
+  printf '{"name":"%s","commit":{"sha":"%s"}}' "$1" "$2" >"$STATE/tag-$1.json"
+}
 write_runs
 write_jobs success
+write_tag v0.2.0 "$GREEN"
+write_tag v0.1.0 "$OLDER"
 # The commit is ahead of last_promoted and on main: the compare against last
 # holds commits, the compare against main holds none.
 cat >"$STATE/compare.json" <<'JSON'
@@ -283,6 +298,83 @@ run_runs "$TMP/out"
 expect_nothing "a tag whose commit main does not hold is not promoted" "is not on main"
 cat >"$STATE/compare-main.json" <<'JSON'
 {"total_commits":0,"commits":[]}
+JSON
+
+echo "app-promote: a branch named like a release is not a release"
+write_state fractals "$OLDER"
+cat >"$STATE/runs.json" <<JSON
+{"total_count":1,"workflow_runs":[
+ {"id":12,"workflow_id":"deploy.yml","status":"success","event":"workflow_dispatch","prettyref":"v-hotfix","commit_sha":"$STAGING_ONLY","created":"2026-10-09T05:00:00Z"}
+]}
+JSON
+run_runs "$TMP/out"
+expect_nothing "a successful deploy run at a branch named v-hotfix has no tag behind it: nothing" "no successful deploy.yml run on a v* tag"
+cat >"$STATE/runs.json" <<JSON
+{"total_count":2,"workflow_runs":[
+ {"id":12,"workflow_id":"deploy.yml","status":"success","event":"workflow_dispatch","prettyref":"v-hotfix","commit_sha":"$STAGING_ONLY","created":"2026-10-09T05:00:00Z"},
+ {"id":7,"workflow_id":"deploy.yml","status":"success","event":"push","prettyref":"v0.1.0","commit_sha":"$OLDER","created":"2026-10-09T02:59:20Z"}
+]}
+JSON
+write_state fractals ""
+run_runs "$TMP/out"
+if [ "$rc" == 0 ] && [ "$(cat "$STATE/promotes")" == "promote --rig fractals --sha $OLDER" ]; then
+  pass "the newer branch run is passed over for the older run that is a real tag"
+else
+  fail "the newer branch run is passed over (rc=$rc, $(cat "$TMP/out"))"
+fi
+write_tag v0.1.0 "$STAGING_ONLY"
+run_runs "$TMP/out"
+expect_nothing "a tag that names another commit than the run's is not a release of it" "no successful deploy.yml run on a v* tag"
+write_tag v0.1.0 "$OLDER"
+write_runs
+
+echo "app-promote: a release run past the first page of runs is still found"
+write_state fractals "$OLDER"
+{
+  printf '{"total_count":51,"workflow_runs":['
+  for i in $(seq 100 149); do
+    printf '{"id":%s,"workflow_id":"deploy.yml","status":"success","event":"workflow_dispatch","prettyref":"main","commit_sha":"%s","created":"2026-10-10T00:%02d:00Z"},' "$i" "$STAGING_ONLY" $((i - 100))
+  done
+  printf '{"id":13,"workflow_id":"deploy.yml","status":"failure","event":"push","prettyref":"main","commit_sha":"%s","created":"2026-10-10T01:00:00Z"}' "$STAGING_ONLY"
+  printf ']}'
+} >"$STATE/runs.json"
+cat >"$STATE/runs-page2.json" <<JSON
+{"total_count":51,"workflow_runs":[
+ {"id":9,"workflow_id":"deploy.yml","status":"success","event":"push","prettyref":"v0.2.0","commit_sha":"$GREEN","created":"2026-10-09T03:14:42Z"}
+]}
+JSON
+run_runs "$TMP/out"
+if [ "$rc" == 0 ] && [ "$(cat "$STATE/promotes")" == "promote --rig fractals --sha $GREEN" ]; then
+  pass "50 newer branch runs on page 1 do not hide the release on page 2"
+else
+  fail "50 newer branch runs on page 1 do not hide the release on page 2 (rc=$rc, $(cat "$TMP/out"))"
+fi
+rm -f "$STATE/runs-page2.json"
+write_runs
+
+echo "app-promote: a compare that cannot be read fails closed"
+write_state fractals "$OLDER"
+for body in '' 'not json' '{}' '{"total_commits":"two"}' '{"total_commits":null}'; do
+  printf '%s' "$body" >"$STATE/compare-main.json"
+  run_runs "$TMP/out"
+  if [ "$rc" == 1 ] && [ ! -s "$STATE/promotes" ] && grep -qF "no commit count in the reply" "$TMP/out"; then
+    pass "compare against main answering '$body': exit 1, nothing promoted"
+  else
+    fail "compare against main answering '$body' (rc=$rc, promotes=$(tr '\n' '|' <"$STATE/promotes"), $(cat "$TMP/out"))"
+  fi
+done
+cat >"$STATE/compare-main.json" <<'JSON'
+{"total_commits":0,"commits":[]}
+JSON
+printf '{}' >"$STATE/compare.json"
+run_runs "$TMP/out"
+if [ "$rc" == 1 ] && [ ! -s "$STATE/promotes" ] && grep -qF "no commit count in the reply" "$TMP/out"; then
+  pass "compare against last_promoted answering {}: exit 1, nothing promoted"
+else
+  fail "compare against last_promoted answering {} (rc=$rc, promotes=$(tr '\n' '|' <"$STATE/promotes"), $(cat "$TMP/out"))"
+fi
+cat >"$STATE/compare.json" <<'JSON'
+{"total_commits":2,"commits":[{},{}]}
 JSON
 
 echo "app-promote: an unreadable Forgejo fails closed"

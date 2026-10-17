@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
-# app-promote/run.sh — advance each configured app rig's GitHub main to the
-# newest commit a release proved on prod: GitHub follows prod.
-#
-# What "proved on prod" means, what it refuses and the manual procedure:
-# plugin.md and README.md beside this script (gt-5xrmp, gt-vdhwk).
+# app-promote/run.sh — GitHub follows prod (gt-5xrmp, gt-vdhwk). Before changing
+# what it promotes, read plugin.md beside this script: it defines the gate.
 
 set -euo pipefail
 
@@ -38,10 +35,13 @@ TAG_PREFIX="v"
 MAIN_BRANCH="main"
 DEFAULT_JOB="prod-integration"
 
-# The run list is asked bounded; Forgejo 16.0.5 honors `limit` only alongside
-# `page` and answers the repo's whole history otherwise
-# (internal/dashboard/deploys.go).
-RUNS_PAGE="limit=50&page=1"
+# The run list is asked a page at a time, for the deploy workflow alone: the
+# repo's other workflows (health.yml runs hourly) would otherwise push release
+# runs off the page. Forgejo 16.0.5 honors `limit` only alongside `page`
+# (internal/dashboard/deploys.go). Runs come newest first, so the search stops at
+# the first page holding a release; MAX_PAGES bounds a repo that has none.
+RUNS_LIMIT=50
+MAX_PAGES=10
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/app-promote.XXXXXX")"
 RESP_FILE="$WORK/response.json"
@@ -75,15 +75,16 @@ read_viewer_token() {
   chmod 600 "$CURL_CONFIG"
 }
 
-# api PATH GETs one API path. HTTP_STATUS is the code, RESP_FILE the body, and
-# both a curl that could not reach Forgejo and a non-200 answer are failures: a
+# api PATH [ALSO_OK] GETs one API path. HTTP_STATUS is the code, RESP_FILE the
+# body, and both a curl that could not reach Forgejo and an answer other than 200
+# (or ALSO_OK, for a read whose "no such thing" is an answer) are failures: a
 # read that failed must never read as "nothing to promote".
 api() {
-  local path=$1
+  local path=$1 also_ok=${2:-200}
   HTTP_STATUS=$(curl -sS -o "$RESP_FILE" -w '%{http_code}' -K "$CURL_CONFIG" \
     -H 'Accept: application/json' "$API_URL$path") ||
     fail "GET $API_URL$path: curl could not reach Forgejo"
-  [ "$HTTP_STATUS" = 200 ] ||
+  [ "$HTTP_STATUS" = 200 ] || [ "$HTTP_STATUS" = "$also_ok" ] ||
     fail "GET $API_URL$path returned $HTTP_STATUS: $(head -c 300 "$RESP_FILE" | tr '\n' ' ')"
 }
 
@@ -109,30 +110,81 @@ with open(sys.argv[1]) as f:
 ' "$state" || fail "rig $1: cannot read the red-main record $state"
 }
 
-# pick_release_run reads a run list on stdin and prints "<sha>\t<run id>\t<tag>"
-# for the newest run of the deploy workflow on a release tag that succeeded, or
-# nothing. Newest is by the run's created stamp, not the order the API sent (the
-# dashboard sorts the same way, internal/dashboard/deploys.go). A tag run's
-# prettyref is the tag itself and a branch run's is the branch.
-pick_release_run() {
+# release_candidates reads a run list on stdin and prints "<sha>\t<run id>\t<ref>"
+# per successful run of the deploy workflow at a ref named like a release tag,
+# newest first. Newest is by the run's created stamp, not the order the API sent
+# (the dashboard sorts the same way, internal/dashboard/deploys.go). A run's
+# prettyref is the tag or the branch it ran at and does not say which, so the
+# caller confirms each with tag_commit; the name pattern here only keeps the tag
+# lookup's URL safe.
+release_candidates() {
   python3 -I -c '
-import json, sys
+import json, re, sys
 
 workflow, prefix = sys.argv[1], sys.argv[2]
-data = json.load(sys.stdin)
-best = None
-for run in data.get("workflow_runs") or []:
+name = re.compile("^" + re.escape(prefix) + "[A-Za-z0-9._-]*$")
+runs = []
+for run in json.load(sys.stdin).get("workflow_runs") or []:
     if str(run.get("workflow_id") or "").rsplit("/", 1)[-1] != workflow:
         continue
-    if not (run.get("prettyref") or "").startswith(prefix):
+    if not name.match(run.get("prettyref") or ""):
         continue
     if (run.get("status") or "") != "success":
         continue
-    if best is None or (run.get("created") or "") > (best.get("created") or ""):
-        best = run
-if best is not None and best.get("commit_sha") and best.get("id"):
-    print("%s\t%s\t%s" % (best["commit_sha"], best["id"], best["prettyref"]))
+    if run.get("commit_sha") and run.get("id"):
+        runs.append(run)
+runs.sort(key=lambda r: r.get("created") or "", reverse=True)
+for run in runs:
+    print("%s\t%s\t%s" % (run["commit_sha"], run["id"], run["prettyref"]))
 ' "$DEPLOY_WORKFLOW" "$TAG_PREFIX"
+}
+
+# tag_commit reads a Forgejo tag on stdin and prints the commit it names.
+tag_commit() {
+  python3 -I -c '
+import json, sys
+
+print((json.load(sys.stdin).get("commit") or {}).get("sha") or "")
+'
+}
+
+# find_release REPO sets sha, run_id and tag to the newest successful deploy run
+# whose ref is a tag naming the run's own commit, or returns 1 when there is
+# none. A branch named like a release has no tag behind it (404), and a ref that
+# is a tag but names another commit is no release of this run's.
+find_release() {
+  local repo=$1 page=1 candidates line ref_sha size
+  local page_file="$WORK/runs-page.json"
+  while [ "$page" -le "$MAX_PAGES" ]; do
+    api "/repos/$repo/actions/runs?workflow_id=$DEPLOY_WORKFLOW&limit=$RUNS_LIMIT&page=$page"
+    cp "$RESP_FILE" "$page_file"
+    candidates="$(release_candidates <"$page_file")" || fail "cannot read the run list of $repo"
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      IFS=$'\t' read -r sha run_id tag <<<"$line"
+      api "/repos/$repo/tags/$tag" 404
+      [ "$HTTP_STATUS" = 200 ] || continue
+      ref_sha="$(tag_commit <"$RESP_FILE")" || fail "cannot read tag $tag of $repo"
+      if [ "$ref_sha" = "$sha" ]; then
+        return 0
+      fi
+    done <<<"$candidates"
+    size="$(runs_in_page <"$page_file")" || fail "cannot read the run list of $repo"
+    # A short page is the last one.
+    [ "$size" -ge "$RUNS_LIMIT" ] || return 1
+    page=$((page + 1))
+  done
+  return 1
+}
+
+# runs_in_page reads a run list on stdin and prints how many runs it holds: a
+# full page means older ones may follow.
+runs_in_page() {
+  python3 -I -c '
+import json, sys
+
+print(len(json.load(sys.stdin).get("workflow_runs") or []))
+'
 }
 
 # has_integration_job JOB reads a run's jobs on stdin and prints yes when JOB is
@@ -150,17 +202,24 @@ print("yes" if any(
 ' "$1"
 }
 
-# compare_count reads a Forgejo compare of A...B on stdin and prints how many
-# commits B holds that A does not. 16.0.5 sends no comparison status, only those
-# commits, so the count is the whole answer: nonzero is "B is ahead of A", zero
-# is "B is A or an ancestor of A". On the rig's main, where history is linear, a
-# commit that is not ahead of last_promoted can only be behind it.
-compare_count() {
-  python3 -I -c '
+# commits_ahead REPO BASE HEAD prints how many commits HEAD holds that BASE does
+# not. 16.0.5 sends no comparison status, only those commits, so the count is
+# the whole answer: nonzero is "HEAD is ahead of BASE", zero is "HEAD is BASE or
+# an ancestor of it". On the rig's main, where history is linear, a commit that
+# is not ahead of last_promoted can only be behind it. A reply without an integer
+# count fails the run, because a check that cannot read its answer must not pass.
+commits_ahead() {
+  local repo=$1 base=$2 head=$3 count
+  api "/repos/$repo/compare/$base...$head"
+  count="$(python3 -I -c '
 import json, sys
 
-print(int(json.load(sys.stdin).get("total_commits") or 0))
-'
+total = json.load(sys.stdin).get("total_commits")
+if isinstance(total, bool) or not isinstance(total, int) or total < 0:
+    sys.exit(1)
+print(total)
+' <"$RESP_FILE")" || fail "compare $base...$head in $repo: no commit count in the reply"
+  printf '%s\n' "$count"
 }
 
 # --- Main --------------------------------------------------------------------
@@ -175,13 +234,10 @@ while read -r rig repo job; do
   job="${job:-$DEFAULT_JOB}"
   checked=$((checked + 1))
 
-  api "/repos/$repo/actions/runs?$RUNS_PAGE"
-  pick="$(pick_release_run <"$RESP_FILE")" || fail "rig $rig: cannot read the run list of $repo"
-  if [ -z "$pick" ]; then
+  if ! find_release "$repo"; then
     log "rig $rig: no successful $DEPLOY_WORKFLOW run on a $TAG_PREFIX* tag in $repo"
     continue
   fi
-  IFS=$'\t' read -r sha run_id tag <<<"$pick"
   short="${sha:0:8}"
 
   api "/repos/$repo/actions/runs/$run_id/jobs"
@@ -197,14 +253,14 @@ while read -r rig repo job; do
   fi
   # A tag can name a commit that never reached the rig's main; gt promote
   # refuses that too, but the plugin says so without calling it.
-  api "/repos/$repo/compare/$MAIN_BRANCH...$sha"
-  if [ "$(compare_count <"$RESP_FILE")" -gt 0 ]; then
+  off_main=$(commits_ahead "$repo" "$MAIN_BRANCH" "$sha")
+  if [ "$off_main" -gt 0 ]; then
     log "rig $rig: $tag ($short) is not on $MAIN_BRANCH in $repo; not promoting"
     continue
   fi
   if [ -n "$last" ]; then
-    api "/repos/$repo/compare/$last...$sha"
-    if [ "$(compare_count <"$RESP_FILE")" -eq 0 ]; then
+    ahead=$(commits_ahead "$repo" "$last" "$sha")
+    if [ "$ahead" -eq 0 ]; then
       log "rig $rig: $short is not ahead of last_promoted ${last:0:8}; nothing to do"
       continue
     fi

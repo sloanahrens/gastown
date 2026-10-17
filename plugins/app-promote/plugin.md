@@ -18,10 +18,11 @@ timeout = "5m"
 
 # App Promote
 
-Advances each app rig's GitHub `main` to the commit of the newest release that
-the integration tier proved on prod: GitHub follows prod (dv-jokk, gt-vdhwk).
-The rigs it promotes and their Forgejo repositories are in `rigs.conf` beside
-this file.
+GitHub follows prod (dv-jokk, gt-vdhwk): this plugin advances each app rig's
+GitHub `main` to the commit of the newest release the integration tier proved on
+prod. The rigs and their Forgejo repositories are in `rigs.conf` beside this
+file. This file is the one definition of the gate; `README.md`, `rigs.conf` and
+`run.sh` point here.
 
 Before running it by hand, installing it, or reading a failure it raised, read
 `README.md` beside this file.
@@ -29,12 +30,13 @@ Before running it by hand, installing it, or reading a failure it raised, read
 ## What counts as proved on prod
 
 A commit is proved on prod when its release run — `.forgejo/workflows/deploy.yml`
-on a `v*` tag — succeeded and its `prod-integration` job, the app's integration
+at a `v*` tag — succeeded and its `prod-integration` job, the app's integration
 tier run against the prod URL after the release deployed, succeeded with it. A
 staging run proves nothing here: a commit that only staging has shown is never
-promoted, and neither is a `deploy.yml` run at a branch. The runs, their refs and
-their jobs come from the Forgejo Actions API through the read-only viewer token,
-the same endpoints the dashboard's Deploys reader uses
+promoted. Neither is a `deploy.yml` run at a branch, even a branch whose name
+starts with `v`: the run's ref must resolve to a tag that names the run's own
+commit. The runs, tags and jobs come from the Forgejo Actions API through the
+read-only viewer token, the same endpoints the dashboard's Deploys reader uses
 (`internal/dashboard/deploys.go`); this plugin holds no GitHub credential, and
 `gt promote` reads the rig's own deploy key.
 
