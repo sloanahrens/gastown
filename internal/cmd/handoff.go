@@ -82,7 +82,10 @@ var (
 
 // handoffSteps are the collaborators of handoffSession that reach tmux, the
 // mail store, the beads store or the town feed. runHandoff passes
-// liveHandoffSteps; a unit test passes fakes and counts the calls.
+// liveHandoffSteps; a unit test passes fakes and records the calls in order.
+// Each field is one call a self-handoff makes that a test cannot let run: the
+// handoffSession body is runHandoff's tail moved over unchanged, so the order
+// of the calls stays where it was.
 type handoffSteps struct {
 	buildPlan        func(sessionName string, opts buildRestartCommandOpts) (restartPlan, error)
 	updateSessionEnv func(reg *session.PrefixRegistry, t *tmux.Tmux, sessionName string)
