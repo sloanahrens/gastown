@@ -291,13 +291,20 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Add polecat clones
+	// Add polecat clones. A polecat worktree is nested at
+	// polecats/<name>/<rigname>/; the flat polecats/<name>/ layout predates
+	// that nesting, so fall back to it when the nested path is absent.
 	polecatDir := filepath.Join(rigPath, "polecats")
 	if entries, err := os.ReadDir(polecatDir); err == nil {
 		for _, entry := range entries {
-			if entry.IsDir() {
-				clonePaths = append(clonePaths, filepath.Join(polecatDir, entry.Name()))
+			if !entry.IsDir() {
+				continue
 			}
+			clonePath := filepath.Join(polecatDir, entry.Name(), ctx.RigName)
+			if _, err := os.Stat(clonePath); os.IsNotExist(err) {
+				clonePath = filepath.Join(polecatDir, entry.Name())
+			}
+			clonePaths = append(clonePaths, clonePath)
 		}
 	}
 
