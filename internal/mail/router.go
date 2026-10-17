@@ -704,9 +704,7 @@ func (r *Router) resolveAgentsByRig(rig string) ([]string, error) {
 }
 
 // descriptionField returns the value of a "key: value" line in an agent
-// description, or "" when the field is absent. Agent descriptions put one
-// field per line (beads.FormatAgentDescription); matching the value as a
-// substring let rig "foo" select an agent whose rig is "foobar" (gt-0lhli).
+// description, or "" when the field is absent (gt-0lhli).
 func descriptionField(description, key string) string {
 	prefix := key + ":"
 	for _, line := range strings.Split(description, "\n") {
@@ -1224,12 +1222,9 @@ func (r *Router) validateAgentWorkspace(identity string) bool {
 }
 
 // agentWorkspaceDir returns the workspace directory identity names under
-// townRoot, or "" when identity is not an agent workspace shape.
-//
-// A bare <rig>/<name> address only names an agent when name is a rig
-// singleton: every infrastructure directory under a rig (settings, scripts,
-// directives) has the same shape, so matching any directory there accepted
-// mail for recipients that never read it (gt-0lhli).
+// townRoot, or "" when identity names no agent workspace. A bare <rig>/<name>
+// matches only a named crew or polecat workspace or a rig singleton, since
+// infrastructure directories (settings, scripts) have the same shape (gt-0lhli).
 func agentWorkspaceDir(townRoot, identity string) string {
 	parts := strings.Split(identity, "/")
 	for _, part := range parts {
@@ -1448,10 +1443,9 @@ func (r *Router) sendToList(msg *Message) error {
 	return r.sendToListVisited(msg, map[string]bool{})
 }
 
-// sendToListVisited fans a list message out, tracking the lists being
-// expanded on this path. Config validation rejects cycles up front; this
-// guard keeps a list that reaches a caller another way from recursing
-// without bound (gt-0lhli).
+// sendToListVisited fans a list message out, tracking the lists already
+// expanded on this path. Config validation rejects cycles; the guard bounds a
+// list that reaches the send path without one (gt-0lhli).
 func (r *Router) sendToListVisited(msg *Message, expanding map[string]bool) error {
 	listName := parseListName(msg.To)
 	if expanding[listName] {
@@ -2156,11 +2150,9 @@ func (r *Router) isSessionMuted(sessionID string) bool {
 	return level == beads.NotifyMuted
 }
 
-// sessionNameToAgentBeadID maps a tmux session name to the agent bead that
-// holds its notification level: gt-dementus → gt-gastown-polecat-dementus.
-// The session name carries the rig's prefix rather than the rig name, so the
-// registry is what makes the bead ID derivable; looking the session name up
-// as a bead ID found nothing and left muted agents notified (gt-0lhli).
+// sessionNameToAgentBeadID maps an agent session name to its agent bead:
+// gt-dementus -> gt-gastown-polecat-dementus. It returns "" for a session
+// name that is no agent's, which the mute check treats as unmuted (gt-0lhli).
 func sessionNameToAgentBeadID(sessionID string, prefixes *session.PrefixRegistry) string {
 	identity, err := session.ParseSessionNameWithRegistry(sessionID, prefixes)
 	if err != nil || identity == nil {
@@ -2170,6 +2162,12 @@ func sessionNameToAgentBeadID(sessionID string, prefixes *session.PrefixRegistry
 	case session.RoleCrew:
 		return beads.AgentBeadIDWithPrefix(identity.Prefix, identity.Rig, constants.RoleCrew, identity.Name)
 	case session.RolePolecat:
+		// A singleton session parses as a polecat named for its role.
+		for _, role := range rigSingletonRoles {
+			if identity.Name == role {
+				return beads.AgentBeadIDWithPrefix(identity.Prefix, identity.Rig, role, "")
+			}
+		}
 		return beads.AgentBeadIDWithPrefix(identity.Prefix, identity.Rig, constants.RolePolecat, identity.Name)
 	default:
 		return ""
@@ -2334,9 +2332,9 @@ func (r *Router) isRecipientMuted(address string) bool {
 	return level == beads.NotifyMuted
 }
 
-// addressToAgentBeadID converts a mail address to an agent bead ID for DND
-// lookup. Returns empty string if the address cannot be converted. reg maps
-// the rig to its prefix.
+// addressToAgentBeadID converts a mail address to an agent bead ID for DND lookup.
+// Returns empty string if the address cannot be converted. reg maps the rig to
+// its prefix.
 func addressToAgentBeadID(reg *session.PrefixRegistry, address string) string {
 	if address == "overseer" {
 		return "" // Overseer is a human, no agent bead

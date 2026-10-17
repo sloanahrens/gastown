@@ -2,6 +2,7 @@ package mail
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2691,6 +2692,7 @@ func TestResolveAgentsByRoleExactRigMatch(t *testing.T) {
 		if strings.HasPrefix(strings.Join(c.Args, " "), "list --label=gt:agent") {
 			return `[
 				{"id":"gt-foo-crew-alice","description":"crew alice\n\nrole_type: crew\nrig: foo","status":"open","issue_type":"agent","labels":["gt:agent"]},
+				{"id":"gt-foo-crew-carol","description":"crew carol\n\nrole_type: crew","status":"open","issue_type":"agent","labels":["gt:agent"]},
 				{"id":"gt-foobar-crew-bob","description":"crew bob\n\nrole_type: crew\nrig: foobar","status":"open","issue_type":"agent","labels":["gt:agent"]}
 			]`, "", 0
 		}
@@ -2782,6 +2784,43 @@ func TestSendToListRejectsListCycle(t *testing.T) {
 	}
 }
 
+// TestSendToListVisitedRejectsRuntimeCycle: a list already expanding on this
+// path is reported instead of re-expanded, whatever let it reach the send
+// path (gt-0lhli).
+func TestSendToListVisitedRejectsRuntimeCycle(t *testing.T) {
+	t.Parallel()
+	r := &Router{}
+	err := r.sendToListVisited(&Message{From: "overseer", To: "list:a"}, map[string]bool{"a": true})
+	if !errors.Is(err, ErrListCycle) {
+		t.Fatalf("sendToListVisited(list:a, expanding a) = %v, want ErrListCycle", err)
+	}
+}
+
+// TestIsRecipientMutedUsesAgentBeadID: the DND check keys the lookup by the
+// recipient's agent bead ID, not by its session name (gt-0lhli).
+func TestIsRecipientMutedUsesAgentBeadID(t *testing.T) {
+	t.Parallel()
+	r := &Router{
+		prefixes: testPrefixRegistry(),
+		town: mutedTown{muted: map[string]bool{
+			"gt-gastown-crew-max": true,
+			"gt-gastown-witness":  true,
+		}},
+		townRoot: t.TempDir(),
+	}
+
+	for address, want := range map[string]bool{
+		"gastown/crew/max":  true,
+		"gastown/witness":   true,
+		"gastown/crew/loud": false,
+		"gastown/alpha":     false,
+	} {
+		if got := r.isRecipientMuted(address); got != want {
+			t.Errorf("isRecipientMuted(%q) = %v, want %v", address, got, want)
+		}
+	}
+}
+
 // TestIsSessionMutedResolvesBeadID: a tmux session name carries the rig's
 // prefix (gt-dementus), not the agent bead ID (gt-gastown-polecat-dementus),
 // so looking the session name up as a bead found no level and left a muted
@@ -2793,6 +2832,7 @@ func TestIsSessionMutedResolvesBeadID(t *testing.T) {
 		town: mutedTown{muted: map[string]bool{
 			"gt-gastown-polecat-dementus": true,
 			"gt-gastown-crew-holden":      true,
+			"gt-gastown-witness":          true,
 		}},
 		townRoot: t.TempDir(),
 	}
@@ -2800,6 +2840,7 @@ func TestIsSessionMutedResolvesBeadID(t *testing.T) {
 	for sessionID, want := range map[string]bool{
 		"gt-dementus":         true,
 		"gt-crew-holden":      true,
+		"gt-witness":          true,
 		"gt-crew-loud":        false,
 		"gt-gastown-unparsed": false,
 	} {
