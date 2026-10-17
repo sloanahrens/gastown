@@ -445,7 +445,7 @@ echo '{"polecat_branch_template": "adam/{year}/{month}/{description}"}' > \
   ~/gt/.beads-wisp/config/myrig.json
 
 # Or set via rig identity bead labels (persistent)
-bd update gt-rig-myrig --labels="polecat_branch_template:adam/{year}/{month}/{description}"
+bd update gt-rig-myrig --add-label=polecat_branch_template:adam/{year}/{month}/{description}
 ```
 
 **Template Variables:**
@@ -627,15 +627,18 @@ additively with any project-level settings in the customer repo.
 
 ### CLAUDE.md
 
-Only `~/gt/CLAUDE.md` exists on disk — a minimal identity anchor that prevents
-agents from losing their Gas Town identity after context compaction or new sessions.
+`~/gt/CLAUDE.md` is a minimal identity anchor that prevents agents from losing
+their Gas Town identity after context compaction or new sessions.
 
 Full role context (~300-500 lines per role) is injected ephemerally by `gt prime`
-via the SessionStart hook. No per-directory CLAUDE.md or AGENTS.md files are created.
+via the SessionStart hook. Each polecat worktree also gets a `CLAUDE.md` carrying
+the `gt done` lifecycle contract (`CLAUDE.local.md` when the repo already tracks a
+`CLAUDE.md`).
 
-**Why no per-directory files?**
+**Why so little else on disk?**
 - Claude Code traverses upward from CWD for CLAUDE.md — all agents under `~/gt/` find the town-root file
 - The real context comes from `gt prime`, making on-disk bootstrap pointers redundant
+- The polecat file carries the one contract a restarted session must not lose: `gt done`
 
 ### Customer Repo Files (CLAUDE.md and .claude/)
 

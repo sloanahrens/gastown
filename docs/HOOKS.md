@@ -97,7 +97,7 @@ Each takes `--help` for its flags.
 | `gt hooks override <target> [--show]` | Edit (or print) a role or rig+role override |
 | `gt hooks list` / `gt hooks scan` | Show managed targets and their sync status / the hooks in current settings files |
 | `gt hooks init [--dry-run]` | Bootstrap base and overrides from existing settings files; only when no base exists |
-| `gt hooks registry` / `gt hooks install <id>` | Browse the registry / copy a hook into the base config |
+| `gt hooks registry` / `gt hooks install <id> [--role R] [--all-rigs]` | Browse the registry / add a hook to a settings.json |
 
 ## Shipped hooks
 
@@ -125,8 +125,10 @@ Not in that table: guards the tap surface carries that no default installs
 ## Registry is a catalog, not the source of truth
 
 `registry.toml` lists the hooks that exist; base + overrides decide which are
-active where. `gt hooks install` copies from one to the other. The split keeps
-per-machine differences (PATH) and per-role overrides out of the shared registry.
+active where. `gt hooks install <id> [--role R] [--all-rigs]` writes a registry
+hook to a settings.json (the current target, or every worktree of a role); base
+and overrides are unchanged. That split keeps per-machine differences (PATH)
+and per-role overrides out of the shared registry.
 
 ## Known Gaps
 
@@ -172,8 +174,8 @@ the matcher kind (gt-5ihs):
   a deny hook gated by a leading-`*` glob fires on unrelated commands. A
   guard that needs to discriminate on the command text reads
   `tool_input.command` off stdin and exits 2 only when it recognizes its
-  own forbidden shape (`tap_guard_polecat_paths.go`,
-  `tap_guard_pr_workflow.go`, `tap_guard_dangerous.go`). The field remains
+  own forbidden shape (`tap_guard_polecat_paths.go`, `tap_guard.go`,
+  `tap_guard_dangerous.go`). The field remains
   available for operator-supplied overrides;
   `TestBuiltinHooksNeverUseIf` asserts no built-in config sets it.
 
