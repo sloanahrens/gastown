@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -505,6 +506,47 @@ func TestPolecatHandoffDoneCmd(t *testing.T) {
 	env := strings.Join(cmd.Env, "\n")
 	if !strings.Contains(env, envDoneFromHandoff+"=1") || !strings.Contains(env, "GT_ROLE=gastown/polecats/Toast") {
 		t.Fatalf("env = %v, want the caller's environment plus %s=1", cmd.Env, envDoneFromHandoff)
+	}
+}
+
+// TestRunHandoffPolecatDryRunDoesNotRunDone: a polecat's handoff --dry-run
+// previews the gt done and does not run it; without --dry-run it runs once.
+// It mutates package state, so it cannot run in parallel.
+func TestRunHandoffPolecatDryRunDoesNotRunDone(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		dryRun   bool
+		wantRuns int
+		wantOut  string
+	}{
+		{"dry run", true, 0, "Would execute: gt done --status DEFERRED"},
+		{"real run", false, 1, "Polecat detected (Toast)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("GT_ROLE", "gastown/polecats/Toast")
+			t.Setenv("GT_POLECAT", "")
+
+			origDryRun, origOut, origRun := handoffDryRun, polecatHandoffOut, runPolecatHandoffDone
+			t.Cleanup(func() {
+				handoffDryRun, polecatHandoffOut, runPolecatHandoffDone = origDryRun, origOut, origRun
+			})
+
+			var out bytes.Buffer
+			runs := 0
+			handoffDryRun = tt.dryRun
+			polecatHandoffOut = &out
+			runPolecatHandoffDone = func(*exec.Cmd) error { runs++; return nil }
+
+			if err := runHandoff(nil, nil); err != nil {
+				t.Fatalf("runHandoff: %v", err)
+			}
+			if runs != tt.wantRuns {
+				t.Errorf("gt done ran %d times, want %d", runs, tt.wantRuns)
+			}
+			if !strings.Contains(out.String(), tt.wantOut) {
+				t.Errorf("output = %q, want it to contain %q", out.String(), tt.wantOut)
+			}
+		})
 	}
 }
 

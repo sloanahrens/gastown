@@ -145,6 +145,15 @@ func polecatHandoffDoneCmd(environ []string) *exec.Cmd {
 	return doneCmd
 }
 
+// The polecat branch of runHandoff reaches its output and the gt done command
+// through these variables so a unit test can read what it printed and observe
+// whether the command ran.
+var (
+	polecatHandoffOut io.Writer = os.Stdout
+
+	runPolecatHandoffDone = func(doneCmd *exec.Cmd) error { return doneCmd.Run() }
+)
+
 func runHandoff(cmd *cobra.Command, args []string) error {
 	reg := townRegistry()
 	// Handle --stdin: read message body from stdin (avoids shell quoting issues)
@@ -180,12 +189,16 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 	// parsed role is actually polecat (handles compound forms like
 	// "gastown/polecats/Toast"). If GT_ROLE is unset, fall back to GT_POLECAT.
 	if isPolecat, polecatName := handoffPolecat(os.Getenv); isPolecat {
-		fmt.Printf("%s Polecat detected (%s) - using gt done for handoff\n",
+		fmt.Fprintf(polecatHandoffOut, "%s Polecat detected (%s) - using gt done for handoff\n",
 			style.Bold.Render("🐾"), polecatName)
 		doneCmd := polecatHandoffDoneCmd(os.Environ())
+		if handoffDryRun {
+			fmt.Fprintf(polecatHandoffOut, "Would execute: %s\n", strings.Join(doneCmd.Args, " "))
+			return nil
+		}
 		doneCmd.Stdout = os.Stdout
 		doneCmd.Stderr = os.Stderr
-		return doneCmd.Run()
+		return runPolecatHandoffDone(doneCmd)
 	}
 
 	// Prompt for confirmation unless --yes/-y was passed or stdin is not a TTY.
