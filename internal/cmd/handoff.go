@@ -490,8 +490,9 @@ func runHandoffAuto() error {
 	if tmux.IsInsideTmux() {
 		if name, err := getCurrentTmuxSession(); err == nil {
 			sessionName = name
-			// Only the directory is used; a session with no plan keeps
-			// the marker in the current directory.
+			// No respawn here, but the session's workDir is where the
+			// post-compact prime looks; failing to resolve it keeps the
+			// marker in the current directory.
 			if townRoot := detectTownRootFromCwd(); townRoot != "" {
 				if dir, err := sessionWorkDir(townRegistry(), name, townRoot); err == nil {
 					plan.WorkDir = dir
@@ -499,7 +500,9 @@ func runHandoffAuto() error {
 			}
 		}
 	}
-	writeHandoffMarker(handoffStateDir(plan), sessionName, "")
+	if dir := handoffStateDir(plan); dir != "" {
+		writeHandoffMarker(dir, sessionName, "")
+	}
 
 	// Log handoff event
 	if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
