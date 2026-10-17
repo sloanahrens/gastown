@@ -1148,8 +1148,14 @@ func TestRunPatternBoundsRun_TwoCharTestPattern(t *testing.T) {
 		{"^Test..", false},
 		{"Test.{2,}", false},
 		{"Test[A-Za-z]{2}", false},
+		// A pattern that needs a longer or differently shaped name than the
+		// first probe tail still matches a probe that fits it (gt-ylkm2).
+		{"Test.{30,}", false},
+		{"Test[A-Za-z]+_", false},
+		{"Test[A-Za-z_]+[0-9]", false},
 
 		{"^TestApply", true},
+		{"^TestApply_.*", true},
 		{"TestA|TestB", true},
 		{"^Test[A-C]..", true},
 	}

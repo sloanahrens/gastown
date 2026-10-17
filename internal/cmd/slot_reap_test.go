@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -147,11 +148,10 @@ func TestPrintSlotDebris(t *testing.T) {
 	}
 }
 
-// A container whose removal errored sits in Debris and Failed with no error
-// from Reap, so the command must turn it into a non-zero exit and must not
-// count it as removed (gt-uh7hy).
-func TestReap_FailedRemovalIsReported(t *testing.T) {
-	t.Parallel()
+// reapWithFailedRemoval is what slot.Reap returns when one of two debris
+// containers will not go: both sit in Debris, the stuck one in Failed with no
+// error from Reap, the other in Removed.
+func reapWithFailedRemoval() (slot.ReapReport, slot.ContainerVerdict, slot.ContainerVerdict) {
 	stuck := slot.ContainerVerdict{
 		Container: slot.GateContainer{ID: "stuck-id", Image: "dolthub/dolt-sql-server:2.2.0", Name: "stuck_one"},
 		Verdict:   slot.VerdictDebris,
@@ -162,15 +162,23 @@ func TestReap_FailedRemovalIsReported(t *testing.T) {
 		Verdict:   slot.VerdictDebris,
 		Reason:    "owning test process is gone",
 	}
-	report := slot.ReapReport{
+	return slot.ReapReport{
 		OlderThan: 30 * time.Minute,
 		Debris:    []slot.ContainerVerdict{stuck, gone},
 		Removed:   []string{gone.Container.Display()},
 		Failed:    []string{stuck.Container.Display() + ": removal in progress"},
-	}
+	}, stuck, gone
+}
+
+// A container whose removal errored sits in Debris and Failed with no error
+// from Reap, so the command must turn it into a non-zero exit and must not
+// count it as removed (gt-uh7hy).
+func TestReap_FailedRemovalIsReported(t *testing.T) {
+	t.Parallel()
+	report, stuck, gone := reapWithFailedRemoval()
 
 	out := &bytes.Buffer{}
-	err := finishSlotReap(slotTestCmd(out), report, nil)
+	err := finishSlotReap(slotTestCmd(out), report, nil, false)
 	if err == nil {
 		t.Fatal("finishSlotReap returned nil for a run with a failed removal, want a non-zero exit")
 	}
@@ -184,10 +192,97 @@ func TestReap_FailedRemovalIsReported(t *testing.T) {
 
 	report.Failed, report.Removed = nil, []string{stuck.Container.Display(), gone.Container.Display()}
 	out.Reset()
-	if err := finishSlotReap(slotTestCmd(out), report, nil); err != nil {
+	if err := finishSlotReap(slotTestCmd(out), report, nil, false); err != nil {
 		t.Errorf("finishSlotReap = %v for a run that removed everything, want nil", err)
 	}
 	if got := out.String(); !strings.Contains(got, "Removed 2 gate container(s)") {
 		t.Errorf("output = %q, want the plain count when nothing failed", got)
 	}
+}
+
+// TestReapGateContainers drives the command from the town lookup to the exit
+// error in both output modes, so a failed removal that reaches the report but
+// not the exit code, or that the JSON path leaves out, is caught where the
+// operator sees it (gt-ylkm2).
+func TestReapGateContainers(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	findTown := func() (string, error) { return town, nil }
+
+	t.Run("failed removal text", func(t *testing.T) {
+		t.Parallel()
+		report, _, _ := reapWithFailedRemoval()
+		var gotTown string
+		var gotOpts slot.ReapOptions
+		reap := func(townRoot string, opts slot.ReapOptions) (slot.ReapReport, error) {
+			gotTown, gotOpts = townRoot, opts
+			return report, nil
+		}
+
+		out := &bytes.Buffer{}
+		err := reapGateContainers(slotTestCmd(out), findTown, reap, slot.ReapOptions{OlderThan: 30 * time.Minute, DryRun: true}, false)
+		if err == nil || !strings.Contains(err.Error(), "1 gate container(s) could not be removed") {
+			t.Fatalf("error = %v, want the failed count as the exit error", err)
+		}
+		if gotTown != town || !gotOpts.DryRun || gotOpts.OlderThan != 30*time.Minute {
+			t.Errorf("reap got town %q opts %+v, want the lookup's town and the flags passed through", gotTown, gotOpts)
+		}
+		got := out.String()
+		if !strings.Contains(got, "stuck_one") || !strings.Contains(got, "removal in progress") {
+			t.Errorf("output = %q, want the failed container and docker's reason named", got)
+		}
+	})
+
+	t.Run("failed removal json", func(t *testing.T) {
+		t.Parallel()
+		report, _, _ := reapWithFailedRemoval()
+		reap := func(string, slot.ReapOptions) (slot.ReapReport, error) { return report, nil }
+
+		out := &bytes.Buffer{}
+		err := reapGateContainers(slotTestCmd(out), findTown, reap, slot.ReapOptions{}, true)
+		if err == nil || !strings.Contains(err.Error(), "1 gate container(s) could not be removed") {
+			t.Fatalf("error = %v, want the failed count as the exit error", err)
+		}
+		var decoded struct {
+			Removed []string `json:"removed"`
+			Failed  []string `json:"failed"`
+		}
+		if err := json.Unmarshal(out.Bytes(), &decoded); err != nil {
+			t.Fatalf("decoding output %q: %v", out.String(), err)
+		}
+		if len(decoded.Removed) != 1 || !strings.Contains(decoded.Removed[0], "gone_one") {
+			t.Errorf("removed = %v, want only gone_one", decoded.Removed)
+		}
+		if len(decoded.Failed) != 1 || !strings.Contains(decoded.Failed[0], "stuck_one") || !strings.Contains(decoded.Failed[0], "removal in progress") {
+			t.Errorf("failed = %v, want stuck_one with docker's reason", decoded.Failed)
+		}
+	})
+
+	t.Run("reap error wins", func(t *testing.T) {
+		t.Parallel()
+		report, _, _ := reapWithFailedRemoval()
+		boom := errors.New("listing gate containers: docker unreachable")
+		reap := func(string, slot.ReapOptions) (slot.ReapReport, error) { return report, boom }
+
+		out := &bytes.Buffer{}
+		if err := reapGateContainers(slotTestCmd(out), findTown, reap, slot.ReapOptions{}, false); !errors.Is(err, boom) {
+			t.Errorf("error = %v, want Reap's own error", err)
+		}
+		if !strings.Contains(out.String(), "stuck_one") {
+			t.Errorf("output = %q, want the report printed before the error", out.String())
+		}
+	})
+
+	t.Run("not in a town", func(t *testing.T) {
+		t.Parallel()
+		noTown := func() (string, error) { return "", errors.New("no town") }
+		reap := func(string, slot.ReapOptions) (slot.ReapReport, error) {
+			t.Error("reap ran with no town")
+			return slot.ReapReport{}, nil
+		}
+		err := reapGateContainers(slotTestCmd(&bytes.Buffer{}), noTown, reap, slot.ReapOptions{}, false)
+		if err == nil || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
+			t.Errorf("error = %v, want the workspace refusal", err)
+		}
+	})
 }
