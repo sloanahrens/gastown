@@ -244,6 +244,8 @@ func storeObjects(t *testing.T, dir string) {
 }
 
 // setupWorktreeRef creates a polecat worktree (polecats/nux/<rig>) with a .git file pointing to .repo.git.
+// The registration under .repo.git/worktrees/rig holds the three files git
+// writes: gitdir, HEAD and commondir.
 func setupWorktreeRef(t *testing.T, rigDir, bareRepo string) {
 	t.Helper()
 	polecatWt := filepath.Join(rigDir, "polecats", "nux", filepath.Base(rigDir))
@@ -257,6 +259,15 @@ func setupWorktreeRef(t *testing.T, rigDir, bareRepo string) {
 	gitContent := "gitdir: " + filepath.Join(bareRepo, "worktrees", "rig") + "\n"
 	if err := os.WriteFile(filepath.Join(polecatWt, ".git"), []byte(gitContent), 0644); err != nil {
 		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"gitdir":    filepath.Join(polecatWt, ".git") + "\n",
+		"HEAD":      "ref: refs/heads/main\n",
+		"commondir": "../..\n",
+	} {
+		if err := os.WriteFile(filepath.Join(worktreeDir, name), []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -641,5 +652,41 @@ func TestBareRepoExistsCheck_FixPreservesLegacyPushURL(t *testing.T) {
 	}
 	if actualPush != legacyPushURL {
 		t.Errorf("expected push URL to be preserved as %q, got %q", legacyPushURL, actualPush)
+	}
+}
+
+// A registration holding gitdir and HEAD but no commondir is what the older
+// Fix wrote. Git cannot use it, so Run must report it instead of calling the
+// worktree healthy (gt-ux2hv).
+func TestBareRepoExistsRunRejectsWorktreeMissingCommondir(t *testing.T) {
+	t.Parallel()
+	gf := gitfake.New()
+	tmpDir := t.TempDir()
+	rigName := "testrig"
+	rigDir := filepath.Join(tmpDir, rigName)
+
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, "https://github.com/example/repo.git")
+	setupWorktreeRef(t, rigDir, bareRepo)
+	commondir := filepath.Join(bareRepo, "worktrees", "rig", "commondir")
+	if err := os.Remove(commondir); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewBareRepoExistsCheck()
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
+	result := check.Run(ctx)
+	if result.Status != StatusError {
+		t.Fatalf("expected StatusError for a registration without commondir, got %v: %s", result.Status, result.Message)
+	}
+
+	// Fix completes the registration rather than only re-creating missing dirs.
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+	if _, err := os.Stat(commondir); err != nil {
+		t.Fatalf("Fix did not write commondir: %v", err)
+	}
+	if result := NewBareRepoExistsCheck().Run(ctx); result.Status != StatusOK {
+		t.Errorf("expected StatusOK after Fix, got %v: %s", result.Status, result.Message)
 	}
 }
