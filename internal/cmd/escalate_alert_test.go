@@ -264,6 +264,27 @@ func TestRunEscalateClear_ClosesTheDeliveryBeadsOfTheClearedEscalation(t *testin
 	}
 }
 
+// TestRunEscalateClear_NilBeadsClientSkipsDeliveryClose: a run with no beads
+// client still clears the escalation and reports it, rather than panicking.
+func TestRunEscalateClear_NilBeadsClientSkipsDeliveryClose(t *testing.T) {
+	t.Parallel()
+	fx := newEscalateFixture(t)
+	fx.r.clearKeys = []string{"k"}
+	fx.r.json = true
+	fx.closed = []string{"hq-esc"}
+	fx.r.beadsClient = nil
+
+	if err := fx.r.clearAlerts(nil); err != nil {
+		t.Fatalf("clearAlerts: %v", err)
+	}
+	if !strings.Contains(fx.out.String(), `"count": 1`) {
+		t.Errorf("stdout = %q, want the --json result with the cleared escalation", fx.out.String())
+	}
+	if fx.errOut.Len() != 0 {
+		t.Errorf("stderr = %q, want no warning", fx.errOut.String())
+	}
+}
+
 // TestRunEscalateClear_DeliveryCloseFailureIsOnlyAWarning: the escalation is
 // already closed, so a bd that cannot close its mail beads must not turn the
 // clear (and the producer's patrol) into an error or break --json output.
