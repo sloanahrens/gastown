@@ -293,7 +293,9 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Add polecat clones. A polecat worktree is nested at
 	// polecats/<name>/<rigname>/; the flat polecats/<name>/ layout predates
-	// that nesting, so fall back to it when the nested path is absent.
+	// that nesting. Only a nested .git proves the worktree, so a failed stat
+	// for any reason falls back to the flat path, which the .git check below
+	// judges.
 	polecatDir := filepath.Join(rigPath, "polecats")
 	if entries, err := os.ReadDir(polecatDir); err == nil {
 		for _, entry := range entries {
@@ -301,7 +303,7 @@ func (c *HooksPathConfiguredCheck) Run(ctx *CheckContext) *CheckResult {
 				continue
 			}
 			clonePath := filepath.Join(polecatDir, entry.Name(), ctx.RigName)
-			if _, err := os.Stat(clonePath); os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(clonePath, ".git")); err != nil {
 				clonePath = filepath.Join(polecatDir, entry.Name())
 			}
 			clonePaths = append(clonePaths, clonePath)
