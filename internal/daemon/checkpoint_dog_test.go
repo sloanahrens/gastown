@@ -966,3 +966,34 @@ func TestTriggerCheckpointDog_SkipsWhenNotDue(t *testing.T) {
 		t.Errorf("expected a not-due log line, got: %q", buf.String())
 	}
 }
+
+// A refusal ends the checkpoint with the files as the polecat left them and
+// the index as HEAD has it: the content the revert guard refused must not wait
+// in the index for the polecat's next `git commit` (gt-u3gph).
+func TestCheckpointRefusalLeavesIndexClean(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{
+		logger:                log.New(io.Discard, "", 0),
+		checkpointRevertAlert: (&checkpointAlertRecorder{}).alert,
+	}
+	polecat, g := newCheckpointRevertScenario(t, d)
+	writeWorkFiles(t, polecat, map[string]string{"keep.txt": "keep\n", "wip.txt": "real work in progress\n"})
+
+	if d.checkpointWorktree(polecat, "rig", "polecat") {
+		t.Fatal("checkpointWorktree created a checkpoint that reverts already-merged work")
+	}
+
+	staged, err := g.StagedChanges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(staged) != 0 {
+		t.Errorf("refused checkpoint left %v staged for the polecat's next commit", staged)
+	}
+	for name, want := range map[string]string{"keep.txt": "keep\n", "wip.txt": "real work in progress\n"} {
+		got, err := os.ReadFile(filepath.Join(polecat, name))
+		if err != nil || string(got) != want {
+			t.Errorf("%s = %q, %v; want the polecat's content %q untouched", name, got, err, want)
+		}
+	}
+}

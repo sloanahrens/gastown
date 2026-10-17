@@ -182,7 +182,7 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 
 // checkpointWorktreeOutcome is checkpointWorktree with a clean worktree told
 // apart from a refused checkpoint; the overrun guard retries only the latter.
-func (d *Daemon) checkpointWorktreeOutcome(workDir, rigName, polecatName string) checkpointOutcome {
+func (d *Daemon) checkpointWorktreeOutcome(workDir, rigName, polecatName string) (outcome checkpointOutcome) {
 	g := d.gitAt(workDir)
 
 	// Check git status (exclude runtime dirs from consideration)
@@ -204,6 +204,21 @@ func (d *Daemon) checkpointWorktreeOutcome(workDir, rigName, polecatName string)
 	if status.Clean {
 		return checkpointClean
 	}
+
+	// Whatever `git add -A` staged stays in the index when the checkpoint
+	// ends without a commit, and the polecat's next `git commit` would record
+	// it: the content the revert guard refused, the deletions and conflict
+	// leftovers it did not. Every outcome but a created checkpoint unstages
+	// the lot. The files stay as the polecat left them; only the index is
+	// reset.
+	defer func() {
+		if outcome == checkpointCreated {
+			return
+		}
+		if err := g.ResetFiles("."); err != nil {
+			d.logger.Printf("checkpoint_dog: git reset after refused checkpoint failed in %s/%s: %v", rigName, polecatName, err)
+		}
+	}()
 
 	// Stage everything
 	if err := g.Add("-A"); err != nil {

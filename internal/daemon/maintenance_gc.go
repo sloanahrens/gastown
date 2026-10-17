@@ -505,6 +505,10 @@ const (
 	gcOutcomeDeferred
 	// gcOutcomeFailed: a gc failed; the run stopped and escalated once.
 	gcOutcomeFailed
+	// gcOutcomeInterrupted: the daemon began shutting down mid-gc, which
+	// cancels the gc's context. Not a gc failure and not a finished cycle: the
+	// database stays due and the next daemon's catch-up collects it.
+	gcOutcomeInterrupted
 )
 
 func (o maintenanceGCOutcome) String() string {
@@ -515,6 +519,8 @@ func (o maintenanceGCOutcome) String() string {
 		return "deferred"
 	case gcOutcomeFailed:
 		return "failed"
+	case gcOutcomeInterrupted:
+		return "interrupted"
 	}
 	return "unknown"
 }
@@ -604,6 +610,10 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string) maintena
 
 		err := d.maintenanceGCOne(parent, dataDir, c)
 		d.doltMaintMu.Unlock()
+		if err != nil && d.shuttingDown() {
+			d.logger.Printf("scheduled_maintenance: gc of %s interrupted by daemon shutdown: %v — not a gc failure", c.name, err)
+			return maintenanceGCResult{outcome: gcOutcomeInterrupted, reason: err.Error()}
+		}
 		if err != nil {
 			d.maintenance().escalate(d, "scheduled_maintenance", fmt.Sprintf(
 				"scheduled_maintenance: CALL dolt_gc('--full') on %s (size before %s): %v\n"+
@@ -706,6 +716,9 @@ func (d *Daemon) startMaintenanceGC(databases []string, windowEnd time.Time) {
 		d.logger.Printf("scheduled_maintenance: cycle %s", res.outcome)
 		if res.outcome == gcOutcomeDeferred {
 			d.recordGCDeferral(windowEnd, res.reason, res.pending)
+			return
+		}
+		if res.outcome == gcOutcomeInterrupted {
 			return
 		}
 		d.resetGCDeferralStreak()

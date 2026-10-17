@@ -973,3 +973,61 @@ func TestMaintenanceDSNCarriesPassword(t *testing.T) {
 		t.Errorf("maintenanceDSN = %q, want it to hold :secret@", got)
 	}
 }
+
+// A shutdown cancels the daemon's context, and with it the gc call. That is
+// the daemon leaving, not a gc that failed: nothing escalates, and the cycle
+// is not marked finished, so the database stays due for the next daemon.
+func TestMaintenanceGCCycleShutdownNoEscalation(t *testing.T) {
+	t.Parallel()
+	d, logs := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}, "gt": {600 * mib, 0}}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	d.ctx = ctx
+	d.maint.gcExec = func(ctx context.Context, _ *Daemon, db string) error {
+		f.gcCalls = append(f.gcCalls, db)
+		cancel() // shutdown() cancels d.ctx while the gc runs
+		return ctx.Err()
+	}
+
+	// The window's dispatch: backup, then the cycle, then the finished mark.
+	d.startMaintenanceGC([]string{"hq", "gt"}, gcTestNow.Add(time.Hour))
+
+	if got := strings.Join(f.gcCalls, ","); got != "gt" {
+		t.Errorf("gc calls = %s, want gt only — the run must stop at the shutdown", got)
+	}
+	if len(f.escalations) != 0 {
+		t.Errorf("a shutdown escalated as a gc failure: %v", f.escalations)
+	}
+	if d.maintenanceGCFinishedAt.Load() != 0 {
+		t.Error("a gc cut off by shutdown marked the cycle finished")
+	}
+	if !strings.Contains(logs.String(), "cycle interrupted") {
+		t.Errorf("log does not name the interruption:\n%s", logs.String())
+	}
+	if f.marker != nil {
+		t.Errorf("pause marker left behind: %+v", f.marker)
+	}
+}
+
+// A gc that times out while the daemon is still running is a real failure and
+// escalates: the interruption branch keys on the daemon leaving, not on any
+// context error.
+func TestMaintenanceGCCycleTimeoutStillEscalates(t *testing.T) {
+	t.Parallel()
+	d, _ := gcTestDaemon(t)
+	f := withGCFakes(t, d)
+	f.sizes = map[string]gcMeasure{"hq": {300 * mib, 0}}
+	d.ctx = context.Background()
+	f.gcErr = map[string]error{"hq": context.DeadlineExceeded}
+
+	out := d.maintenanceGCCycle([]string{"hq"}, "/unused")
+
+	if out.outcome != gcOutcomeFailed {
+		t.Fatalf("outcome = %v, want failed", out.outcome)
+	}
+	if len(f.escalations) != 1 {
+		t.Errorf("escalations = %v, want one", f.escalations)
+	}
+}

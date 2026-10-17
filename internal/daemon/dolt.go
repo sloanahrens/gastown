@@ -30,6 +30,9 @@ const doltCmdTimeout = 15 * time.Second
 // for, not an estimate.
 const doltServerStopBudget = 30 * time.Second
 
+// doltServerStopPoll is how often stopLocked checks that the server has exited.
+const doltServerStopPoll = 100 * time.Millisecond
+
 // ShutdownBudget is the real wall-clock ceiling on Daemon.shutdown(): its one
 // bounded step, the Dolt SQL server's own graceful-stop wait
 // (doltServerStopBudget) before it SIGKILLs. Everything else in shutdown is
@@ -157,6 +160,9 @@ type DoltServerManager struct {
 	execCmd cmdRunFunc
 	// clock times the manager's own waits (see clk()); nil is the real clock.
 	clock clockwork.Clock
+	// processAliveFn replaces isProcessAlive in stopLocked's wait for the
+	// server to exit; nil asks the OS.
+	processAliveFn func(*os.Process) bool
 	// verifyDoltFn proves a PID is a dolt sql-server serving townRoot before
 	// the manager signals it; nil uses doltserver.VerifyTownDoltSQLServerPID.
 	verifyDoltFn func(townRoot string, pid int) error
@@ -1215,22 +1221,36 @@ func (m *DoltServerManager) stopLocked() {
 		m.logger("Warning: failed to send termination signal: %v", err)
 	}
 
-	// Wait for graceful shutdown (up to 5 seconds)
+	// Wait for graceful shutdown, polling through the whole budget: a server
+	// that exits at 8s ends the wait at 8s. A poller that gave up early would
+	// leave the select below waiting out the full budget, with m.mu held, for
+	// a process that was already gone.
+	alive := isProcessAlive
+	if m.processAliveFn != nil {
+		alive = m.processAliveFn
+	}
 	done := make(chan struct{})
+	quit := make(chan struct{})
+	defer close(quit)
 	go func() {
-		for i := 0; i < 50; i++ {
-			if !isProcessAlive(process) {
+		for waited := time.Duration(0); waited < doltServerStopBudget; waited += doltServerStopPoll {
+			if !alive(process) {
 				close(done)
 				return
 			}
-			m.clk().Sleep(100 * time.Millisecond)
+			select {
+			case <-quit:
+				return
+			default:
+			}
+			m.clk().Sleep(doltServerStopPoll)
 		}
 	}()
 
 	select {
 	case <-done:
 		m.logger("Dolt SQL server stopped gracefully")
-	case <-time.After(doltServerStopBudget):
+	case <-m.clk().After(doltServerStopBudget):
 		// Force kill — this budget allows Dolt to flush its append-only journal
 		// under load. A SIGKILL mid-journal-write causes corruption requiring
 		// dolt fsck to recover.
