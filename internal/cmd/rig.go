@@ -1001,19 +1001,6 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	// Load rigs config. A missing file is a town with no rigs yet; a file
-	// that does not parse is damage and adopting a rig must not replace it
-	// with one entry (gt-52mgl).
-	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsPath)
-	if err != nil {
-		return fmt.Errorf("loading rigs config: %w", err)
-	}
-
-	// Create rig manager
-	g := git.NewGit(townRoot)
-	mgr := rig.NewManager(townRoot, rigsConfig, g)
-
 	fmt.Printf("Adopting existing rig %s...\n", style.Bold.Render(name))
 
 	// Validate --url if provided
@@ -1033,40 +1020,19 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 		return fmt.Errorf("invalid upstream URL %q: expected a remote URL (e.g. https://, git@host:, ssh://, s3://, file:///abs/path)", rigAddUpstreamURL)
 	}
 
-	// Register the existing rig
-	result, err := mgr.RegisterRig(rig.RegisterRigOptions{
-		Name:        name,
-		GitURL:      rigAddAdoptURL,
-		PushURL:     rigAddPushURL,
-		UpstreamURL: rigAddUpstreamURL,
-		BeadsPrefix: rigAddPrefix,
-		Force:       rigAddAdoptForce,
+	// Register the existing rig, under the prefix its own beads uses.
+	mgr, result, err := adoptRegisterIn(townRoot, rigAdoptRequest{
+		name:        name,
+		gitURL:      rigAddAdoptURL,
+		pushURL:     rigAddPushURL,
+		upstreamURL: rigAddUpstreamURL,
+		prefix:      rigAddPrefix,
+		force:       rigAddAdoptForce,
+	}, func(workDir string) (string, error) {
+		return beads.NewPlain(workDir, nil).ConfigGet("issue_prefix")
 	})
 	if err != nil {
-		return fmt.Errorf("adopting rig: %w", err)
-	}
-
-	// Save only this rig's entry: rigsConfig was loaded before the adoption
-	// ran, and saving it whole reverts a rig another gt process registered or
-	// parked in that window (gt-4iobv).
-	if err := config.SetRigEntry(rigsPath, name, rigsConfig.Rigs[name]); err != nil {
-		return fmt.Errorf("saving rigs config: %w", err)
-	}
-
-	// Add route to town-level routes.jsonl for prefix-based routing
-	if result.BeadsPrefix != "" {
-		routePath := name
-		mayorRigBeads := filepath.Join(townRoot, name, "mayor", "rig", ".beads")
-		if _, err := os.Stat(mayorRigBeads); err == nil {
-			routePath = name + "/mayor/rig"
-		}
-		route := beads.Route{
-			Prefix: result.BeadsPrefix + "-",
-			Path:   routePath,
-		}
-		if err := beads.AppendRoute(townRoot, route); err != nil {
-			fmt.Printf("  %s Could not update routes.jsonl: %v\n", style.Warning.Render("!"), err)
-		}
+		return err
 	}
 
 	// Commit town-level config changes (rigs.json, daemon.json, routes.jsonl)
@@ -1086,54 +1052,12 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 		}
 		foundBeadsCandidate = true
 
-		// Detect prefix from Dolt metadata: try "bd config get issue_prefix" first,
-		// then extract from metadata.json dolt_database name as fallback.
-		// metadata.json survives clone (dolt/ is gitignored since bd v0.50+).
-		prefixDetected := false
-		metadataPath := filepath.Join(beadsDir, "metadata.json")
-		if metaBytes, readErr := os.ReadFile(metadataPath); readErr == nil {
-			var meta struct {
-				Backend string `json:"backend"`
-			}
-			if json.Unmarshal(metaBytes, &meta) == nil && meta.Backend == "dolt" {
-				workDir := filepath.Dir(beadsDir)
-				if detected, bdErr := beads.NewPlain(workDir, nil).ConfigGet("issue_prefix"); bdErr == nil {
-					if detected != "" {
-						if rigAddPrefix != "" && strings.TrimSuffix(rigAddPrefix, "-") != detected {
-							return fmt.Errorf("prefix mismatch: source repo uses '%s' but --prefix '%s' was provided", detected, rigAddPrefix)
-						}
-						if result.BeadsPrefix == "" {
-							result.BeadsPrefix = detected
-						}
-						prefixDetected = true
-					}
-				}
-				// Fallback: extract prefix from dolt_database name in metadata.json.
-				// Format: "beads_<prefix>" (e.g. "beads_my_project" → "my_project").
-				// This survives clone because metadata.json is tracked by git.
-				if !prefixDetected {
-					if db := config.BeadsMetadataDatabase(beadsDir); strings.HasPrefix(db, "beads_") {
-						detected := strings.TrimPrefix(db, "beads_")
-						if detected != "" {
-							if rigAddPrefix != "" && strings.TrimSuffix(rigAddPrefix, "-") != detected {
-								return fmt.Errorf("prefix mismatch: source repo uses '%s' but --prefix '%s' was provided", detected, rigAddPrefix)
-							}
-							if result.BeadsPrefix == "" {
-								result.BeadsPrefix = detected
-							}
-							prefixDetected = true
-						}
-					}
-				}
-			}
-		}
-
 		// Re-init database if metadata.json is missing or dolt/ directory is missing.
 		// Since bd v0.50+, dolt/ is gitignored and won't exist after clone.
 		// Use mgr.InitBeads() for consistency with the non-adopt path — it handles
 		// BEADS_DIR env isolation, prefix validation, custom types config, tracked-beads
 		// redirect, and fallback config creation.
-		metadataPath = filepath.Join(beadsDir, "metadata.json")
+		metadataPath := filepath.Join(beadsDir, "metadata.json")
 		needsInit := false
 		if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
 			needsInit = true
