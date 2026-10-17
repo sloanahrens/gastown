@@ -40,13 +40,16 @@ func TestGitHygieneRepoPath(t *testing.T) {
 	tests := []struct {
 		name string
 		// layout is what the rig root holds: "bare" for the shared .repo.git,
-		// "clone" for a mayor/rig working tree.
+		// "emptybare" for a directory with that name and no repository behind
+		// it, "clone" for a mayor/rig working tree.
 		layout []string
 		want   string // the repository to clean, relative to the rig root; "" for none
 	}{
 		{name: "shared bare repo only", layout: []string{"bare"}, want: ".repo.git"},
 		{name: "bare repo beside the working clone", layout: []string{"bare", "clone"}, want: ".repo.git"},
 		{name: "working clone only", layout: []string{"clone"}, want: filepath.Join("mayor", "rig")},
+		{name: "empty .repo.git beside the working clone", layout: []string{"emptybare", "clone"}, want: filepath.Join("mayor", "rig")},
+		{name: "empty .repo.git directory only", layout: []string{"emptybare"}, want: ""},
 		{name: "no repository", layout: nil, want: ""},
 	}
 	for _, tt := range tests {
@@ -54,11 +57,17 @@ func TestGitHygieneRepoPath(t *testing.T) {
 			t.Parallel()
 			rigRoot := t.TempDir()
 			for _, dir := range tt.layout {
-				if dir == "bare" {
+				switch dir {
+				case "bare":
+					// A git directory, by the HEAD file Rig.BareRepoPath reads.
 					mustMkdirAll(t, filepath.Join(rigRoot, ".repo.git"))
-					continue
+					writeFile(t, filepath.Join(rigRoot, ".repo.git", "HEAD"), "ref: refs/heads/main\n")
+				case "emptybare":
+					// The directory name with nothing behind it (gt-nm4b9).
+					mustMkdirAll(t, filepath.Join(rigRoot, ".repo.git"))
+				default:
+					mustMkdirAll(t, filepath.Join(rigRoot, "mayor", "rig", ".git"))
 				}
-				mustMkdirAll(t, filepath.Join(rigRoot, "mayor", "rig", ".git"))
 			}
 
 			want := tt.want
@@ -79,6 +88,7 @@ func TestGitHygieneRepoPath_LeavesRepoPathAlone(t *testing.T) {
 	rigRoot := t.TempDir()
 	clone := filepath.Join(rigRoot, "mayor", "rig")
 	mustMkdirAll(t, filepath.Join(rigRoot, ".repo.git"))
+	writeFile(t, filepath.Join(rigRoot, ".repo.git", "HEAD"), "ref: refs/heads/main\n")
 	mustMkdirAll(t, filepath.Join(clone, ".git"))
 	r := &rig.Rig{Name: "r1", Path: rigRoot}
 
@@ -361,8 +371,32 @@ func TestRunGitHygiene_NoRigRepositoryIsAFailedCycle(t *testing.T) {
 
 	d.runGitHygiene()
 
-	if len(feed.payloads) != 1 || !strings.Contains(feed.payloads[0]["reason"].(string), "no rig has a repository") {
-		t.Errorf("feed = %v, want one failed git_hygiene cycle", feed.payloads)
+	if len(feed.payloads) != 1 {
+		t.Fatalf("feed = %v, want one failed git_hygiene cycle", feed.payloads)
+	}
+	reason, _ := feed.payloads[0]["reason"].(string)
+	if !strings.Contains(reason, "no rig has a repository (mayor/rigs.json lists none, or none has a .repo.git or a working clone)") {
+		t.Errorf("reason = %q, want the no-repository failure naming both layouts", reason)
+	}
+}
+
+// A rig whose .repo.git carries the name and no repository behind it has no
+// repository to clean, so its cycle fails like a rig with no layout at all
+// (gt-nm4b9).
+func TestRunGitHygiene_EmptyBareRepoDirectoryIsAFailedCycle(t *testing.T) {
+	t.Parallel()
+	d, feed, _ := newGitHygieneDaemon(t, "r1")
+	useGitfake(t, d)
+	mustMkdirAll(t, filepath.Join(d.config.TownRoot, "r1", ".repo.git"))
+
+	d.runGitHygiene()
+
+	if len(feed.payloads) != 1 {
+		t.Fatalf("feed = %v, want one failed git_hygiene cycle", feed.payloads)
+	}
+	reason, _ := feed.payloads[0]["reason"].(string)
+	if !strings.Contains(reason, "no rig has a repository") {
+		t.Errorf("reason = %q, want the no-repository failure", reason)
 	}
 }
 
