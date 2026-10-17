@@ -110,3 +110,18 @@ func TestValidateFixAuthorizationUnidentifiedActor(t *testing.T) {
 		}
 	}
 }
+
+// TestErrUnidentifiedFixActorText guards the refusal's wording (gt-0ozuy): one
+// line, with the retry instruction shared with the forced-cleanup refusal.
+func TestErrUnidentifiedFixActorText(t *testing.T) {
+	t.Parallel()
+	msg := ErrUnidentifiedFixActor.Error()
+	if strings.Contains(msg, "\n") {
+		t.Errorf("ErrUnidentifiedFixActor should be a single line, got:\n%s", msg)
+	}
+	for _, want := range []string{"cannot be identified", doltserver.UnidentifiedActorRetry} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("ErrUnidentifiedFixActor should contain %q, got:\n%s", want, msg)
+		}
+	}
+}

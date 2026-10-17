@@ -17,16 +17,8 @@ const FixAuthLabel = "doctor-fix-auth"
 // ErrUnidentifiedFixActor refuses a destructive doctor repair whose actor is
 // unknown: the process that would create the authorization bead is its only
 // requester (gt-2kwxr, the gt-kz9k0 guard for gt doctor fix).
-var ErrUnidentifiedFixActor = errors.New(`destructive doctor repair refused: the actor cannot be identified (gt-2kwxr)
-
-GT_ROLE and BD_ACTOR are both unset and stdout is not an interactive terminal,
-so any authorization bead would have to be created by this same unidentified
-process.
-
-Run as an agent with its identity set:
-  GT_ROLE=gastown/polecats/<name> gt doctor fix <check> --authorized-by <bead-id>
-
-Or run the repair from an interactive terminal as the operator`)
+var ErrUnidentifiedFixActor = errors.New("destructive doctor repair refused: the actor cannot be identified; " +
+	doltserver.UnidentifiedActorRetry)
 
 // ValidateFixAuthorization checks that the --authorized-by bead is a genuine
 // authorization record, not any bead an agent happened to point at: the actor

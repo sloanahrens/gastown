@@ -98,8 +98,12 @@ var ErrUnidentifiedActor = errors.New(`forced Dolt cleanup refused: the actor ca
 GT_ROLE and BD_ACTOR are both unset and stdout is not an interactive terminal,
 so the authorization bead would have to be created by this same process.
 
-Retry as an agent with GT_ROLE set (for example GT_ROLE=gastown/polecats/<name>),
-or run the cleanup from an interactive terminal as the operator.`)
+` + UnidentifiedActorRetry)
+
+// UnidentifiedActorRetry is the one retry instruction every destructive-operation
+// refusal of an unidentified actor ends with (gt-0ozuy).
+const UnidentifiedActorRetry = "Retry as an agent with GT_ROLE set (for example GT_ROLE=gastown/polecats/<name>), " +
+	"or from an interactive terminal as the operator."
 
 // IsUnidentifiedActor reports whether actor names a process with no resolvable
 // identity (gt-kz9k0). Callers refuse such an actor outright: the
