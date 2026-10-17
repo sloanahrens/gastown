@@ -1574,7 +1574,7 @@ func TestHandoffSessionNameNotTreatedAsBead(t *testing.T) {
 			if !looksLikeBeadID(name) {
 				t.Fatalf("looksLikeBeadID(%q) = false: the case this test guards is gone", name)
 			}
-			if looksLikeHandoffBeadID(name) {
+			if looksLikeHandoffBeadID(reg, name) {
 				t.Errorf("looksLikeHandoffBeadID(%q) = true, want a session name", name)
 			}
 			got, err := resolveRoleToSession(reg, name)
@@ -1583,10 +1583,11 @@ func TestHandoffSessionNameNotTreatedAsBead(t *testing.T) {
 			}
 		})
 	}
-	for _, id := range []string{"gt-abc123", "bd-ka761", "hq-cv-abc", "ap-qtsup.16"} {
+	// A bead ID that merely contains "-crew-" is still a bead.
+	for _, id := range []string{"gt-abc123", "bd-ka761", "hq-cv-abc", "ap-qtsup.16", "gt-fix-crew-1", "hq-wisp-crew-x"} {
 		t.Run(id, func(t *testing.T) {
 			t.Parallel()
-			if !looksLikeHandoffBeadID(id) {
+			if !looksLikeHandoffBeadID(reg, id) {
 				t.Errorf("looksLikeHandoffBeadID(%q) = false, want a bead ID", id)
 			}
 		})

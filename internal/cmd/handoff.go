@@ -333,7 +333,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 		arg := args[0]
 
 		// Check if arg is a bead ID (gt-xxx, hq-xxx, bd-xxx, etc.)
-		if looksLikeHandoffBeadID(arg) {
+		if looksLikeHandoffBeadID(reg, arg) {
 			// Hook the bead first
 			if err := hookBeadForHandoff(arg); err != nil {
 				return fmt.Errorf("hooking bead: %w", err)
@@ -1658,12 +1658,29 @@ func warnHandoffGitStatusWith(w io.Writer, g handoffGit) {
 // hook rather than a session to restart. Crew and overseer session names
 // (gt-crew-max, hq-overseer) have the shape of a short-prefix bead ID, so they
 // are ruled out first; otherwise they take the bead branch and fail with
-// "bead not found" before resolveRoleToSession sees them.
-func looksLikeHandoffBeadID(arg string) bool {
-	if arg == session.OverseerSessionName() || strings.Contains(arg, "-crew-") {
+// "bead not found" before resolveRoleToSession sees them. Only a crew marker in
+// a session position counts: a bead ID that merely contains "-crew-" (a sub-ID
+// like gt-fix-crew-1) is still a bead.
+func looksLikeHandoffBeadID(reg *session.PrefixRegistry, arg string) bool {
+	if arg == session.OverseerSessionName() || isCrewSessionName(reg, arg) {
 		return false
 	}
 	return looksLikeBeadID(arg)
+}
+
+// isCrewSessionName reports whether name is a crew session of a registered
+// rig: <prefix>-crew-<name>, or the legacy <prefix>-<rig>-crew-<name>.
+func isCrewSessionName(reg *session.PrefixRegistry, name string) bool {
+	if id, err := session.ParseSessionNameWithRegistry(name, reg); err == nil && id.Role == session.RoleCrew {
+		return true
+	}
+	for rigName, prefix := range reg.AllRigs() {
+		marker := prefix + "-" + rigName + "-crew-"
+		if strings.HasPrefix(name, marker) && len(name) > len(marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // looksLikeBeadID checks if a string looks like a bead ID.

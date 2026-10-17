@@ -1638,7 +1638,6 @@ func runRigStop(cmd *cobra.Command, args []string) error {
 // Split from runRigStop so a unit test supplies the town root, the flags and
 // the session opener.
 func runRigStopIn(townRoot string, rigNames []string, force, nuclear bool, open openRigPolecatSessions) error {
-
 	// Load rigs config
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsPath)
