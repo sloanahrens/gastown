@@ -13,6 +13,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
+	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/daemon"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/reaper"
@@ -380,5 +381,49 @@ func TestReaperUserInfoOutsideTownIgnoresCwdSettings(t *testing.T) {
 	t.Chdir(dir)
 	if got := reaperUserInfo(); got != doltserver.DefaultUser {
 		t.Errorf("reaperUserInfo() outside a town = %q, want %q", got, doltserver.DefaultUser)
+	}
+}
+
+// TestReaperAutoCloseWholeTownPreviewHash: PreviewHash binds the database
+// name, so a whole-town dry run produces one hash per database. The live run
+// hands each database the hash of its own set from the list, rather than
+// passing one database's hash to all of them — which refused every database
+// but the one it was made for.
+func TestReaperAutoCloseWholeTownPreviewHash(t *testing.T) {
+	t.Parallel()
+	sweep := func(_ *beadsql.DB, _ reaper.Writer, dbName string, _ reaper.AutoCloseOptions) (*reaper.AutoCloseResult, error) {
+		return &reaper.AutoCloseResult{Database: dbName, PreviewHash: "hash-" + dbName}, nil
+	}
+
+	hashes := parseReaperPreviewHashes(" hash-gastown , hash-beads ,,")
+	if want := []string{"hash-gastown", "hash-beads"}; !reflect.DeepEqual(hashes, want) {
+		t.Fatalf("parseReaperPreviewHashes = %#v, want %#v", hashes, want)
+	}
+
+	for _, dbName := range []string{"gastown", "beads"} {
+		got, err := autoClosePreviewHash(sweep, nil, dbName, time.Hour, hashes, true)
+		if err != nil {
+			t.Fatalf("autoClosePreviewHash(%s): %v", dbName, err)
+		}
+		if want := "hash-" + dbName; got != want {
+			t.Errorf("autoClosePreviewHash(%s) = %q, want %q", dbName, got, want)
+		}
+	}
+
+	// A database the dry run did not show stays unauthorized, so its sweep
+	// reports the hash to re-run for rather than tripping over a sibling's.
+	got, err := autoClosePreviewHash(sweep, nil, "hq", time.Hour, hashes, true)
+	if err != nil {
+		t.Fatalf("autoClosePreviewHash(hq): %v", err)
+	}
+	if got != "" {
+		t.Errorf("autoClosePreviewHash(hq) = %q, want no hash", got)
+	}
+
+	// A single-database run passes the operator's hash through untouched; the
+	// sweep compares it and reports a mismatch.
+	got, err = autoClosePreviewHash(sweep, nil, "gastown", time.Hour, parseReaperPreviewHashes("stale"), false)
+	if err != nil || got != "stale" {
+		t.Errorf("single-db autoClosePreviewHash = %q, %v; want the operator's hash", got, err)
 	}
 }

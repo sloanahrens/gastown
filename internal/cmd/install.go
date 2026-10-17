@@ -98,6 +98,11 @@ func runInstall(cmd *cobra.Command, args []string) error {
 	if len(args) > 0 {
 		targetPath = args[0]
 	}
+	// cobra.MaximumNArgs(1) accepts an empty string as the one argument, and
+	// the ~ expansion below indexes the path.
+	if targetPath == "" {
+		return fmt.Errorf("install path must not be empty")
+	}
 
 	// Expand ~ and resolve to absolute path
 	if targetPath[0] == '~' {

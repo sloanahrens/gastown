@@ -546,8 +546,13 @@ func (s *landingsSource) Poll() []tailLine {
 	s.failed.clear()
 	var out []tailLine
 	// A line that is not a record is counted, never echoed: the stream must
-	// not republish whatever text ended up in the file.
+	// not republish whatever text ended up in the file. It has no timestamp
+	// to cut at, so on the backlog read it is left out with the rest of the
+	// history --since excludes rather than printed as if it were current.
 	for _, b := range bad {
+		if backlog {
+			continue
+		}
 		out = append(out, tailLine{At: now, Rig: s.rig, Kind: tailKindLandings, Text: fmt.Sprintf("unreadable landings line (%d bytes)", len(b))})
 	}
 	for _, r := range recs {
@@ -636,6 +641,11 @@ func parseTailWatchLine(line []byte) (tailWatchAlert, bool) {
 type tailWatchFile struct {
 	path string
 	name string // the base name, which is how a note names the file
+
+	// failed is this file's own last failure. One per file, because the two
+	// files fail for their own reasons: a shared record makes two failing
+	// files overwrite each other's message and reprint on every poll.
+	failed tailOnce
 	// offset and info are the previous read's end and the file it ended in,
 	// so a replaced file is recognized rather than read as a longer one.
 	offset int64
@@ -715,7 +725,6 @@ type tailWatchSource struct {
 	// started is set by the first poll that read every file, so a first poll
 	// that failed is retried as a backlog read cut at the cutoff.
 	started bool
-	failed  tailOnce
 }
 
 // newTailWatchSource is the production watch source: the two files, in the
@@ -744,15 +753,22 @@ func (s *tailWatchSource) Poll() []tailLine {
 		items, err := f.readNew()
 		if err != nil {
 			read = false
-			if s.failed.first(err.Error()) {
+			if f.failed.first(err.Error()) {
 				out = append(out, s.line(now, "cannot read %s: %v", f.name, err))
 			}
 			continue
 		}
+		f.failed.clear()
 		for _, item := range items {
 			if item.Bad != "" {
-				// A line that is not an alert is counted, never echoed: the
-				// stream must not republish whatever text ended up in the file.
+				// A line that is not an alert has no timestamp to cut at, so
+				// on the backlog read it is left out with the rest of the
+				// history --since excludes. It is counted, never echoed: the
+				// stream must not republish whatever text ended up in the
+				// file.
+				if backlog {
+					continue
+				}
 				out = append(out, s.line(now, "skipped unreadable watch line in %s (%d bytes)", f.name, len(item.Bad)))
 				continue
 			}
@@ -765,7 +781,6 @@ func (s *tailWatchSource) Poll() []tailLine {
 	}
 	if read {
 		s.started = true
-		s.failed.clear()
 	}
 	return out
 }
@@ -1448,7 +1463,6 @@ func (t *tailDeploys) observe(lines []tailLine) []tailLine {
 		return nil
 	}
 	t.mu.Lock()
-	defer t.mu.Unlock()
 	var out []tailLine
 	for _, ln := range lines {
 		if ln.Kind != tailKindDaemon {
@@ -1469,9 +1483,15 @@ func (t *tailDeploys) observe(lines []tailLine) []tailLine {
 				r.merged = ln.At
 			}
 		} else if m := tailDeployRestartRe.FindStringSubmatch(ln.Text); m != nil {
+			// The ancestry checks shell out to git with their own timeouts,
+			// so the lock is released around them: a stuck mount must not
+			// hold the summary and the Landings table off the tracker.
+			t.mu.Unlock()
 			out = append(out, t.deployAt(ln.At, m[1])...)
+			t.mu.Lock()
 		}
 	}
+	t.mu.Unlock()
 	return out
 }
 
@@ -1479,14 +1499,35 @@ func (t *tailDeploys) observe(lines []tailLine) []tailLine {
 // contains, and returns their lines. A bead that landed after the restart
 // cannot be in a binary built before it, so it is not asked.
 func (t *tailDeploys) deployAt(at time.Time, installed string) []tailLine {
-	var out []tailLine
+	type candidate struct{ bead, sha string }
+
+	// Snapshot the beads the restart could deploy under the lock, then ask
+	// git without it. The answers may be stale by the time the lock is taken
+	// again, so the record is re-read before it is marked.
+	t.mu.Lock()
+	var candidates []candidate
 	for _, bead := range t.order {
 		r := t.records[bead]
 		if !t.inRestartRig(bead) || r.landed.IsZero() || !r.deployed.IsZero() || r.sha == "" || r.landed.After(at) {
 			continue
 		}
-		ancestor, ok := t.ancestor(r.sha, installed)
-		if !ok || !ancestor {
+		candidates = append(candidates, candidate{bead: bead, sha: r.sha})
+	}
+	t.mu.Unlock()
+
+	var deployed []candidate
+	for _, c := range candidates {
+		if ancestor, ok := t.ancestor(c.sha, installed); ok && ancestor {
+			deployed = append(deployed, c)
+		}
+	}
+
+	var out []tailLine
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, c := range deployed {
+		r := t.records[c.bead]
+		if r.landed.IsZero() || !r.deployed.IsZero() || r.sha != c.sha || r.landed.After(at) {
 			continue
 		}
 		r.deployed = at

@@ -425,3 +425,18 @@ func TestEnsureEscalationConfig_KeepsSectionOnTwoFileTown(t *testing.T) {
 		t.Errorf("settings/config.json = %q, want it byte-identical to %q", after, customized)
 	}
 }
+
+// TestRunInstallEmptyPathArgErrors: cobra.MaximumNArgs(1) accepts "" as the one
+// argument, and runInstall indexes the path to expand ~. An empty path must be
+// refused rather than panic. The error comes before any path is written, so
+// there is no need for an INSTALL_DIR.
+func TestRunInstallEmptyPathArgErrors(t *testing.T) {
+	t.Parallel()
+	err := runInstall(nil, []string{""})
+	if err == nil {
+		t.Fatal(`runInstall("") returned no error`)
+	}
+	if !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf(`runInstall("") error = %v, want it to name the empty path`, err)
+	}
+}

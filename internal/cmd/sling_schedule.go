@@ -389,7 +389,7 @@ func detectSchedulerIDType(id string) (string, error) {
 // not epic mode.
 var schedulerTaskOnlyFlagNames = []string{
 	"account", "agent", "ralph", "args", "var",
-	"base-branch", "no-merge", "review-only",
+	"base-branch", "branch", "pr", "no-merge", "review-only",
 }
 
 // validateNoTaskOnlySchedulerFlags checks that no task-only flags were set.
