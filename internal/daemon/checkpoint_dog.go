@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -209,13 +210,24 @@ func (d *Daemon) checkpointWorktreeOutcome(workDir, rigName, polecatName string)
 	// ends without a commit, and the polecat's next `git commit` would record
 	// it: the content the revert guard refused, the deletions and conflict
 	// leftovers it did not. Every outcome but a created checkpoint unstages
-	// the lot. The files stay as the polecat left them; only the index is
-	// reset.
+	// what the checkpoint itself staged. The files stay as the polecat left
+	// them; only the index is reset.
+	//
+	// A path the polecat had already staged is not the checkpoint's to
+	// unstage, so the paths staged before `git add -A` are read first and left
+	// alone. `git add -A` restages such a path from the working tree, so one
+	// the polecat staged and then edited stays staged at its newer content.
+	before, err := g.StagedChanges()
+	if err != nil {
+		d.logger.Printf("checkpoint_dog: git diff --cached failed in %s/%s: %v", rigName, polecatName, err)
+		return checkpointRefused
+	}
+	ownStaging := stagedPaths(before, 0)
 	defer func() {
 		if outcome == checkpointCreated {
 			return
 		}
-		if err := g.ResetFiles("."); err != nil {
+		if err := unstageCheckpointed(g, ownStaging); err != nil {
 			d.logger.Printf("checkpoint_dog: git reset after refused checkpoint failed in %s/%s: %v", rigName, polecatName, err)
 		}
 	}()
@@ -362,6 +374,29 @@ func checkpointBlockedReason(g daemonGit, status *gtgit.GitStatus) string {
 		}
 	}
 	return ""
+}
+
+// unstageCheckpointed resets the index to HEAD for every path except those in
+// keep, the paths the polecat had staged before the checkpoint began. With
+// nothing to keep it resets the whole index.
+func unstageCheckpointed(g daemonGit, keep []string) error {
+	if len(keep) == 0 {
+		return g.ResetFiles(".")
+	}
+	staged, err := g.StagedChanges()
+	if err != nil {
+		return err
+	}
+	var paths []string
+	for _, p := range stagedPaths(staged, 0) {
+		if !slices.Contains(keep, p) {
+			paths = append(paths, p)
+		}
+	}
+	if len(paths) == 0 {
+		return nil
+	}
+	return g.ResetFiles(paths...)
 }
 
 // stagedPaths returns the paths of staged changes with the given status, or

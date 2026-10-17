@@ -997,3 +997,31 @@ func TestCheckpointRefusalLeavesIndexClean(t *testing.T) {
 		}
 	}
 }
+
+// A refusal unstages what the checkpoint staged, not what the polecat had
+// already staged itself: its own `git add` stays in the index for its next
+// commit.
+func TestCheckpointRefusalKeepsThePolecatsOwnStaging(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{
+		logger:                log.New(io.Discard, "", 0),
+		checkpointRevertAlert: (&checkpointAlertRecorder{}).alert,
+	}
+	polecat, g := newCheckpointRevertScenario(t, d)
+	writeWorkFiles(t, polecat, map[string]string{"keep.txt": "keep\n", "own.txt": "staged by the polecat\n", "wip.txt": "unstaged work\n"})
+	if err := g.Add("own.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	if d.checkpointWorktree(polecat, "rig", "polecat") {
+		t.Fatal("checkpointWorktree created a checkpoint that reverts already-merged work")
+	}
+
+	staged, err := g.StagedChanges()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := stagedPaths(staged, 0); !slices.Equal(got, []string{"own.txt"}) {
+		t.Errorf("staged after the refusal = %v, want only the polecat's own.txt", got)
+	}
+}

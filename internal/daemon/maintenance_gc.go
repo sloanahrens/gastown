@@ -610,7 +610,10 @@ func (d *Daemon) maintenanceGCCycle(databases []string, dataDir string) maintena
 
 		err := d.maintenanceGCOne(parent, dataDir, c)
 		d.doltMaintMu.Unlock()
-		if err != nil && d.shuttingDown() {
+		// Only a cancelled call is the shutdown's doing. Any other error that
+		// lands while the daemon is leaving (a Dolt failure, a timeout) is a
+		// gc failure and escalates.
+		if err != nil && d.shuttingDown() && errors.Is(err, context.Canceled) {
 			d.logger.Printf("scheduled_maintenance: gc of %s interrupted by daemon shutdown: %v — not a gc failure", c.name, err)
 			return maintenanceGCResult{outcome: gcOutcomeInterrupted, reason: err.Error()}
 		}
