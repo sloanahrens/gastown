@@ -2,7 +2,6 @@ package daemon
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -79,9 +78,13 @@ func (d *Daemon) triggerGitHygiene() {
 // install-gt.sh merges into after a landing (gt-ckoau), and it is the
 // repository polecat.Manager.repoBase and `gt polecat prune` already work in:
 // the refs every polecat worktree shares.
+//
+// The shared bare repo comes from Rig.BareRepoPath, whose HEAD test keeps an
+// empty .repo.git/ from standing in for a repository the rig does not have:
+// every git command of the cycle would fail against it, and the working clone
+// the rig does have would go unclean (gt-nm4b9).
 func gitHygieneRepoPath(r *rig.Rig) string {
-	bare := filepath.Join(r.Path, ".repo.git")
-	if info, err := os.Stat(bare); err == nil && info.IsDir() {
+	if bare := r.BareRepoPath(); bare != "" {
 		return bare
 	}
 	return r.RepoPath()
