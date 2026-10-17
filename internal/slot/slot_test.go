@@ -519,6 +519,12 @@ var staleMarkerCases = []struct {
 		release(t, holder)
 		return child
 	}},
+	{"the holder died without releasing", func(t *testing.T, tg *testGate, town string) *Gate {
+		tg.mustAcquirePool(t, town, staleMarkerRole, Pool{Slots: 2})
+		child := tg.child()
+		tg.gone[tg.pid] = true
+		return child
+	}},
 	{"another process holds the slot now", func(t *testing.T, tg *testGate, town string) *Gate {
 		tg.mustAcquirePool(t, town, "gastown/other", Pool{Slots: 2})
 		child := tg.child()
@@ -542,6 +548,50 @@ func TestInheritedRoleStaleMarker(t *testing.T) {
 				t.Errorf("InheritedRole() = (%q, true) under a stale marker, want ok == false", role)
 			}
 		})
+	}
+}
+
+// TestHoldsSlot pins holdsSlot's answer for a marker naming a live hold, a lock
+// path outside the town's lock directory, and a slot file the lock directory
+// does not define. The last two are guards callers never reach (validAncestor
+// rejects them first); they must stay false and must not read slot 0's owner
+// file in place of the slot they named.
+func TestHoldsSlot(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	town := t.TempDir()
+	h := tg.mustAcquirePool(t, town, staleMarkerRole, Pool{Slots: 2})
+	defer release(t, h)
+	live := reentrantMark{lockPath: SlotLockPath(town, h.Index), pid: tg.pid, role: staleMarkerRole}
+
+	for _, tc := range []struct {
+		name string
+		m    reentrantMark
+		want bool
+	}{
+		{"the named slot is held by the named pid", live, true},
+		{"another town's lock path", reentrantMark{lockPath: SlotLockPath(t.TempDir(), h.Index), pid: tg.pid, role: staleMarkerRole}, false},
+		{"a file in the lock directory that is no slot", reentrantMark{lockPath: filepath.Join(LockDir(town), "unrelated.lock"), pid: tg.pid, role: staleMarkerRole}, false},
+		{"the named pid does not own the slot", reentrantMark{lockPath: live.lockPath, pid: tg.pid + 1, role: staleMarkerRole}, false},
+	} {
+		if got := tg.child().holdsSlot(town, tc.m); got != tc.want {
+			t.Errorf("%s: holdsSlot = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// TestHoldsSlotLeavesNoSlotFile: judging a marker whose slot was never created
+// creates no slot file, which Status would report as a slot (discoverSlots).
+func TestHoldsSlotLeavesNoSlotFile(t *testing.T) {
+	t.Parallel()
+	tg := newTestGate(t)
+	town := t.TempDir()
+	m := reentrantMark{lockPath: SlotLockPath(town, 1), pid: foreignPID(), role: staleMarkerRole}
+	if tg.holdsSlot(town, m) {
+		t.Fatal("holdsSlot = true for a slot nothing ever held")
+	}
+	if _, err := os.Stat(m.lockPath); !os.IsNotExist(err) {
+		t.Errorf("holdsSlot left the slot file behind: stat err = %v", err)
 	}
 }
 
