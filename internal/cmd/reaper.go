@@ -141,6 +141,56 @@ func reaperDatabaseNames() []string {
 	return parseReaperDatabaseList(reaperDB)
 }
 
+// parseReaperPreviewHashes splits a --preview list on commas, dropping blanks.
+// A whole-town dry run prints one hash per database — PreviewHash binds the
+// database name — so the live run takes them together rather than one hash
+// that can only ever authorize the database it was made for.
+func parseReaperPreviewHashes(list string) []string {
+	var hashes []string
+	for _, part := range strings.Split(list, ",") {
+		if h := strings.TrimSpace(part); h != "" {
+			hashes = append(hashes, h)
+		}
+	}
+	return hashes
+}
+
+// autoClosePreviewHash returns the preview hash to give one database's sweep.
+//
+// A single-database run hands the operator's hash through untouched: the sweep
+// compares it and reports the hash to re-run for, exactly as before.
+//
+// A whole-town run cannot, because PreviewHash includes the database name and
+// one hash therefore authorizes one database. The database's current set is
+// read here, and its own hash authorizes the sweep only when the operator's
+// dry run printed it. A database whose set the dry run did not show gets no
+// hash, so the sweep refuses with the one to re-run for instead of tripping
+// over a hash that belongs to a sibling database (gt-fokkb).
+//
+// sweep is reaper.AutoClose, passed in so the mapping is testable without a
+// Dolt server.
+func autoClosePreviewHash(sweep func(*beadsql.DB, reaper.Writer, string, reaper.AutoCloseOptions) (*reaper.AutoCloseResult, error), db *beadsql.DB, dbName string, staleAge time.Duration, hashes []string, wholeTown bool) (string, error) {
+	if len(hashes) == 0 {
+		return "", nil
+	}
+	if !wholeTown {
+		return hashes[0], nil
+	}
+	preview, err := sweep(db, nil, dbName, reaper.AutoCloseOptions{
+		StaleAge: staleAge,
+		DryRun:   true,
+	})
+	if err != nil {
+		return "", err
+	}
+	for _, h := range hashes {
+		if h == preview.PreviewHash {
+			return h, nil
+		}
+	}
+	return "", nil
+}
+
 // parseReaperDatabaseList splits a --db list on commas, dropping blanks.
 func parseReaperDatabaseList(list string) []string {
 	parts := strings.Split(list, ",")
@@ -644,8 +694,9 @@ Four guards apply, the first three answering the 2026-09-16 mis-close that swept
     is refused unless --force.
   - a live run with no --preview hash is refused (nothing is closed) unless
     --force: the sweep only closes a set a dry run already showed. The dry run
-    prints the hash; hand it back verbatim. This is what keeps the counting
-    ahead of the writing regardless of how the two commands were ordered
+    prints the hash; hand it back verbatim, and for a whole-town run pass the
+    comma-separated list it prints, one hash per database. This is what keeps
+    the counting ahead of the writing regardless of how the two commands were ordered
     (gt-39bu — the 2026-09-20 reaper ran live before its dry run).
 
 When --db is provided, auto-closes in a single database. When omitted,
@@ -663,6 +714,7 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 		}
 
 		databases := reaperDatabaseNames()
+		previewHashes := parseReaperPreviewHashes(reaperPreview)
 
 		var results []*reaper.AutoCloseResult
 		var refusals []string
@@ -699,11 +751,17 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 				db.Close()
 				continue
 			}
+			previewHash, err := autoClosePreviewHash(reaper.AutoClose, db, dbName, staleAge, previewHashes, len(databases) > 1 && !reaperDryRun)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%s: preview error: %v\n", dbName, err)
+				db.Close()
+				continue
+			}
 			result, err := reaper.AutoClose(db, w, dbName, reaper.AutoCloseOptions{
 				StaleAge:    staleAge,
 				DryRun:      reaperDryRun,
 				MaxCloses:   reaperMaxCloses,
-				PreviewHash: reaperPreview,
+				PreviewHash: previewHash,
 				Force:       reaperForce,
 			})
 			db.Close()
@@ -755,6 +813,20 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 				}
 				fmt.Printf("\n%sAuto-close summary (%d databases): auto-closed %d stale issues\n",
 					prefix, len(results), totalClosed)
+			}
+			if reaperDryRun && len(results) > 1 {
+				// The live run needs one hash per database, since PreviewHash
+				// binds the database name; print the whole-town list so the
+				// operator hands back every set this run showed.
+				var hints []string
+				for _, r := range results {
+					if !r.Floored && r.PreviewHash != "" {
+						hints = append(hints, r.PreviewHash)
+					}
+				}
+				if len(hints) > 0 {
+					fmt.Printf("whole-town live run: --preview=%s\n", strings.Join(hints, ","))
+				}
 			}
 		}
 
@@ -1000,7 +1072,7 @@ func init() {
 	// --preview is auto-close's own: `gt reaper run` previews in-process before
 	// it writes, so it has no separate preview to be handed (gt-39bu).
 	reaperAutoCloseCmd.Flags().StringVar(&reaperPreview, "preview", "",
-		"Preview hash from a preceding --dry-run; a live run without it is refused")
+		"Preview hash from a preceding --dry-run; a live run without it is refused. A whole-town dry run prints one per database: pass them comma-separated")
 
 	reaperCmd.AddCommand(reaperDatabasesCmd)
 	reaperCmd.AddCommand(reaperScanCmd)

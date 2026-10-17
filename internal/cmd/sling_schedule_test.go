@@ -4,8 +4,10 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/wisp"
 )
@@ -153,4 +155,38 @@ func TestResolveFormula(t *testing.T) {
 			t.Errorf("got %q, want %q", got, "mol-polecat-work")
 		}
 	})
+}
+
+// TestValidateNoTaskOnlySchedulerFlagsRejectsBranchAndPR: --branch and --pr
+// resume an existing branch, which only a task bead has; epic and convoy mode
+// must refuse them rather than drop them silently.
+func TestValidateNoTaskOnlySchedulerFlagsRejectsBranchAndPR(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		flag  string
+		value string
+		set   func(cmd *cobra.Command)
+	}{
+		{flag: "branch", value: "fix/x", set: func(cmd *cobra.Command) { cmd.Flags().String("branch", "", "") }},
+		{flag: "pr", value: "7", set: func(cmd *cobra.Command) { cmd.Flags().Int("pr", 0, "") }},
+	} {
+		t.Run(tc.flag, func(t *testing.T) {
+			t.Parallel()
+			cmd := &cobra.Command{}
+			tc.set(cmd)
+			if err := cmd.Flags().Set(tc.flag, tc.value); err != nil {
+				t.Fatalf("set --%s: %v", tc.flag, err)
+			}
+
+			for _, mode := range []string{"epic", "convoy"} {
+				err := validateNoTaskOnlySchedulerFlags(cmd, mode)
+				if err == nil {
+					t.Fatalf("validateNoTaskOnlySchedulerFlags(%s) accepted --%s", mode, tc.flag)
+				}
+				if !strings.Contains(err.Error(), "--"+tc.flag) {
+					t.Fatalf("validateNoTaskOnlySchedulerFlags(%s) error = %v, want --%s", mode, err, tc.flag)
+				}
+			}
+		})
+	}
 }
