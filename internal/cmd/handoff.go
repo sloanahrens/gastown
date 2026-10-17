@@ -427,12 +427,9 @@ func handoffSession(p sessionHandoff, steps handoffSteps) error {
 	// Write handoff marker for successor detection (prevents handoff loop bug).
 	// The marker is cleared by gt prime after it outputs the warning.
 	// This tells the new session "you're post-handoff, don't re-run /handoff"
-	if cwd, err := os.Getwd(); err == nil {
-		writeHandoffMarker(cwd, currentSession, "")
-	}
-
+	// Both go under the successor's workDir, which may differ from our cwd.
 	// Record handoff time for cooldown enforcement (gt-058d).
-	recordHandoffTime()
+	recordHandoffState(plan, currentSession, "")
 
 	// NOTE: For self-handoff, we do NOT call KillPaneProcesses here.
 	// That would kill the gt handoff process itself before it can call RespawnPane,
@@ -488,18 +485,21 @@ func runHandoffAuto() error {
 	}
 
 	// Write handoff marker so post-compact prime knows it's post-handoff
-	if cwd, err := os.Getwd(); err == nil {
-		runtimeDir := filepath.Join(cwd, constants.DirRuntime)
-		_ = os.MkdirAll(runtimeDir, 0755)
-		markerPath := filepath.Join(runtimeDir, constants.FileHandoffMarker)
-		sessionName := "auto-handoff"
-		if tmux.IsInsideTmux() {
-			if name, err := getCurrentTmuxSession(); err == nil {
-				sessionName = name
+	sessionName := "auto-handoff"
+	var plan restartPlan
+	if tmux.IsInsideTmux() {
+		if name, err := getCurrentTmuxSession(); err == nil {
+			sessionName = name
+			// Only the directory is used; a session with no plan keeps
+			// the marker in the current directory.
+			if townRoot := detectTownRootFromCwd(); townRoot != "" {
+				if dir, err := sessionWorkDir(townRegistry(), name, townRoot); err == nil {
+					plan.WorkDir = dir
+				}
 			}
 		}
-		_ = os.WriteFile(markerPath, []byte(sessionName), 0644)
 	}
+	writeHandoffMarker(handoffStateDir(plan), sessionName, "")
 
 	// Log handoff event
 	if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
@@ -609,22 +609,10 @@ func runHandoffCycle() error {
 	// Format: "session_id\nreason" — the reason enables isCompactResume()
 	// to detect compaction-triggered cycles and use a lighter continuation
 	// directive instead of full re-initialization. (GH#1965)
-	if cwd, err := os.Getwd(); err == nil {
-		writeHandoffMarker(cwd, currentSession, handoffReason)
-	}
-
-	// Record handoff time for cooldown enforcement (gt-058d).
-	recordHandoffTime()
-
-	// Log cycle event AFTER persistence succeeds.
-	if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
-		agent := sessionToGTRole(reg, currentSession)
-		if agent == "" {
-			agent = currentSession
-		}
-		_ = events.LogFeed(events.TypeHandoff, agent, events.HandoffPayload(subject, true))
-	}
-
+	// The cooldown is recorded with it (gt-058d). Both go under the
+	// successor's workDir, which may differ from our cwd, so the plan comes
+	// first.
+	//
 	// Build restart command for a fresh session — the successor picks up
 	// context from the handoff mail + hook, not from --continue.
 	// Using --continue would resume the same over-threshold conversation,
@@ -636,6 +624,16 @@ func runHandoffCycle() error {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "handoff --cycle: could not build restart command: %v\n", err)
 		return err
+	}
+	recordHandoffState(plan, currentSession, handoffReason)
+
+	// Log cycle event AFTER persistence succeeds.
+	if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
+		agent := sessionToGTRole(reg, currentSession)
+		if agent == "" {
+			agent = currentSession
+		}
+		_ = events.LogFeed(events.TypeHandoff, agent, events.HandoffPayload(subject, true))
 	}
 
 	fmt.Fprintf(os.Stderr, "handoff --cycle: cycling session %s\n", currentSession)
@@ -1146,7 +1144,7 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 	}
 
 	envCmd := secretPrefix + config.PrependEnv(execPrefix+runtimeCmd, envMap)
-	plan := restartPlan{Command: cdPrefix + envCmd}
+	plan := restartPlan{Command: cdPrefix + envCmd, WorkDir: workDir}
 	if syncHooks {
 		settingsDir := config.RoleSettingsDir(simpleRole, rigPath)
 		if settingsDir == "" {
@@ -1910,12 +1908,29 @@ func enforceHandoffCooldownIn(w io.Writer, role, dir string, sleep func(time.Dur
 	sleep(remaining)
 }
 
-// recordHandoffTime writes the current timestamp to the handoff cooldown file.
-// Called before respawning to establish the baseline for the next cooldown check.
-func recordHandoffTime() {
-	if cwd, err := os.Getwd(); err == nil {
-		recordHandoffTimeIn(cwd)
+// handoffStateDir is the directory whose .runtime/ holds the handoff marker
+// and cooldown: the one the successor starts in, which gt prime reads the
+// marker from. It falls back to the current directory when the plan names
+// none.
+func handoffStateDir(plan restartPlan) string {
+	if plan.WorkDir != "" {
+		return plan.WorkDir
 	}
+	cwd, _ := os.Getwd()
+	return cwd
+}
+
+// recordHandoffState tells the successor of session it is post-handoff and
+// starts the cooldown, both under the plan's workDir, not the caller's cwd
+// (crew run gt handoff from crew/<name>/src, and the successor starts in
+// crew/<name>). Called before respawning.
+func recordHandoffState(plan restartPlan, session, reason string) {
+	dir := handoffStateDir(plan)
+	if dir == "" {
+		return
+	}
+	writeHandoffMarker(dir, session, reason)
+	recordHandoffTimeIn(dir)
 }
 
 // lastHandoffAge reports how long ago the last handoff recorded in dir was.

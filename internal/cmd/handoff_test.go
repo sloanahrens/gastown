@@ -1354,3 +1354,49 @@ func TestHandoffSessionDryRunSkipsMoleculeCleanup(t *testing.T) {
 		})
 	}
 }
+
+// A crew member who runs gt handoff from crew/max/src has a successor that
+// starts in crew/max and reads the marker there. Both the marker and the
+// cooldown go under the plan's workDir, not under the caller's cwd.
+func TestHandoffMarkerWrittenInPlanWorkDir(t *testing.T) {
+	townRoot := t.TempDir()
+	srcDir := filepath.Join(townRoot, "gastown", "crew", "max", "src")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(srcDir)
+
+	plan, err := buildRestartPlan("gt-crew-max", restartOpts(townRoot, map[string]string{}))
+	if err != nil {
+		t.Fatalf("buildRestartPlan: %v", err)
+	}
+	crewDir := filepath.Join(townRoot, "gastown", "crew", "max")
+	if plan.WorkDir != crewDir {
+		t.Fatalf("plan.WorkDir = %q, want %q", plan.WorkDir, crewDir)
+	}
+
+	recordHandoffState(plan, "gt-crew-max", "unit-cycle")
+
+	for _, name := range []string{constants.FileHandoffMarker, constants.FileLastHandoffTS} {
+		if _, err := os.Stat(filepath.Join(crewDir, constants.DirRuntime, name)); err != nil {
+			t.Errorf("%s not under the successor's workDir: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(srcDir, constants.DirRuntime, name)); err == nil {
+			t.Errorf("%s written under the caller's cwd %s", name, srcDir)
+		}
+	}
+}
+
+// With no workDir in the plan the state stays in the current directory.
+func TestHandoffStateFallsBackToCwd(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+
+	recordHandoffState(restartPlan{}, "gt-refinery", "")
+
+	for _, name := range []string{constants.FileHandoffMarker, constants.FileLastHandoffTS} {
+		if _, err := os.Stat(filepath.Join(dir, constants.DirRuntime, name)); err != nil {
+			t.Errorf("%s not written under cwd: %v", name, err)
+		}
+	}
+}
