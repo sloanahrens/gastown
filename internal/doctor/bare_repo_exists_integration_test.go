@@ -29,12 +29,8 @@ func runRealGit(t *testing.T, dir string, args ...string) {
 // worktree directory still exists: git reports "not a git repository". Fix has
 // to leave it usable, which takes commondir as well as gitdir and HEAD
 // (gt-ux2hv). Real git, because only git can say whether the entry it reads is
-// one it can use.
-//
-// This is the gt-ux2hv acceptance scenario it names
-// TestBareRepoExistsFixReregistersUsableWorktree in
-// internal/doctor/rig_check_test.go; the integration tag and TestIntegration
-// name are the unit tier's policy, as the file header says (gt-9d3zt).
+// one it can use; the unit tier's TestBareRepoExistsFixReregistersUsableWorktree
+// covers the registration Fix writes, this covers git accepting it (gt-9d3zt).
 func TestIntegrationBareRepoExistsFixReregistersUsableWorktree(t *testing.T) {
 	t.Parallel()
 	if _, err := exec.LookPath("git"); err != nil {

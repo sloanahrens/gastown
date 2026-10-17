@@ -764,3 +764,40 @@ func TestHooksPathConfiguredLegacyFlatPolecatWorktree(t *testing.T) {
 	// The flat polecats/<name>/ layout predates the per-rig nesting.
 	assertHooksPathConfigured(t, hooksPathRig(t, rigName, flat), flat)
 }
+
+// The gt-ux2hv acceptance scenario: a polecat worktree whose
+// .repo.git/worktrees/<name> directory was removed is dead, so Fix has to
+// re-register it and the Run after Fix has to call it healthy again. git's own
+// agreement that the repaired worktree is usable needs real git, which unit
+// tests in this package may not run; the integration tier proves that half
+// (gt-9d3zt).
+func TestBareRepoExistsFixReregistersUsableWorktree(t *testing.T) {
+	t.Parallel()
+	gf := gitfake.New()
+	tmpDir := t.TempDir()
+	rigName := "testrig"
+	rigDir := filepath.Join(tmpDir, rigName)
+
+	bareRepo := initBareRepoWithRemote(t, gf, rigDir, "https://github.com/example/repo.git")
+	setupWorktreeRef(t, rigDir, bareRepo)
+	wtMetaDir := filepath.Join(bareRepo, "worktrees", "rig")
+	if err := os.RemoveAll(wtMetaDir); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewBareRepoExistsCheck()
+	ctx := withGit(&CheckContext{TownRoot: tmpDir, RigName: rigName}, gf)
+	if result := check.Run(ctx); result.Status != StatusError {
+		t.Fatalf("expected StatusError with the registration removed, got %v: %s", result.Status, result.Message)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+	if result := NewBareRepoExistsCheck().Run(ctx); result.Status != StatusOK {
+		t.Fatalf("expected StatusOK after Fix, got %v: %s", result.Status, result.Message)
+	}
+	if missing := worktreeMetaMissing(wtMetaDir); len(missing) > 0 {
+		t.Errorf("Fix left the registration incomplete: missing %v", missing)
+	}
+}
