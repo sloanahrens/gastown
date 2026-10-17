@@ -2226,14 +2226,20 @@ function costSpend(box, d, r) {
   if (history.length) {
     const dayText = v => v.spent < 0 ? "+" + money(-v.spent) + " added" : money(v.spent);
     const fig = v => (v && v.spent != null) ? dayText(v) : "–";
-    // A day with no figure is left out of the mean rather than counted as zero,
-    // and a history shorter than a week says how many days the mean covers.
-    const complete = history.slice(0, -1).filter(([, v]) => v && v.spent != null).slice(-7);
+    // The mean is a spend rate, so a day with no figure is left out rather than
+    // counted as zero, and a day the balance rose on is left out rather than
+    // counted negative: a top-up says what was added, not what the day cost,
+    // and averaging it in reports a rate nobody spent (gt-3ux9j).
+    const complete = history.slice(0, -1).filter(([, v]) => v && v.spent != null && v.spent >= 0).slice(-7);
     const mean = complete.length ? complete.reduce((sum, [, v]) => sum + v.spent, 0) / complete.length : null;
+    // A history shorter than a week says how many days the mean covers. With no
+    // spend day behind today there is no rate to show, and the clause goes
+    // rather than reading as "–/day", which a reader takes for a report that
+    // failed to send a figure.
     const line = el("div", "title", "today " + fig(history[history.length - 1][1]) +
       " · yesterday " + fig(history.length > 1 ? history[history.length - 2][1] : null) +
-      " · 7-day avg " + (mean == null ? "–" : money(mean)) + "/day" +
-      (mean != null && complete.length < 7 ? " (" + complete.length + (complete.length === 1 ? " day" : " days") + ")" : ""));
+      (mean == null ? "" : " · 7-day avg " + money(mean) + "/day" +
+        (complete.length < 7 ? " (" + complete.length + (complete.length === 1 ? " day" : " days") + ")" : "")));
     line.title = history.slice().reverse().map(([day, v]) => day.slice(5) + " " + fig(v)).join(" · ");
     box.append(line);
   }
