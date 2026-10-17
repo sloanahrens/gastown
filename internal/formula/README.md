@@ -12,8 +12,8 @@ gastown renders what `bd cook` returns. Nothing in gastown parses a formula.
 - `overlay.go`: the one overlay dir, `<town>/formula-overlays/<formula>.toml`,
   whose step overrides bd applies when it cooks.
 
-Check a formula against bd's strict decoder with `bd formula lint
-internal/formula/formulas`.
+Check a formula against bd's strict decoder with `bd cook --dry-run <formula>`,
+one formula file at a time.
 
 ## Gastown fields
 
@@ -21,7 +21,8 @@ bd's strict decode rejects keys it does not know, so gastown's own fields
 use the places it accepts:
 
 - Step metadata: a workflow step's `metadata.target` (where `gt formula run`
-  slings it) and `metadata.interactive` (keep it in the current session).
+  slings it) and `metadata.interactive` (if any step sets it, `gt formula run`
+  hooks every ready step to the current session instead of slinging it).
 - There is no formula-level `agent` (bd rejects the top-level key): pass
   `gt formula run --agent`, which applies to workflow steps.
 
@@ -41,7 +42,7 @@ required = true
 [[steps]]
 id = "design"
 title = "Design"
-metadata.target = "mayor"
+metadata.target = "rig"
 description = "..."
 
 [[steps]]
