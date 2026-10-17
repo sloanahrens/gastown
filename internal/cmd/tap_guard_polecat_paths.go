@@ -188,11 +188,12 @@ func tapGuardPolecatPaths(stdin io.Reader, stderr io.Writer, proc guardProcess) 
 // polecatPathScope is the set of paths the guarded polecat may write to,
 // resolved once per hook invocation.
 type polecatPathScope struct {
-	worktree     string // canonical own git worktree (the session's cwd)
-	ownDir       string // canonical <town>/<rig>/polecats/<name>
-	repoGit      string // canonical <town>/<rig>/.repo.git
-	townRoot     string // canonical town root
-	cwd          string // canonical directory relative targets resolve against
+	worktree     string   // canonical own git worktree (the session's cwd)
+	ownDir       string   // canonical <town>/<rig>/polecats/<name>
+	repoGit      string   // canonical <town>/<rig>/.repo.git
+	townRoot     string   // canonical town root
+	cwd          string   // canonical directory relative targets resolve against
+	dirs         []string // canonical directories the shell may stand in while the command line runs (see walkDirs); empty means just cwd
 	scratch      []string
 	protectedBin []string // shared host binary dirs no polecat may write to (gt-tnts5)
 	vars         commandVars
@@ -297,6 +298,15 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 			if reason := s.checkBashArgs(args, base, true); reason != "" {
 				return reason
 			}
+			// A shell's -c payload is a command line of its own, and a cd inside
+			// it moves the directory its later words resolve from. The words
+			// were judged above from where this shell stands; the payload is
+			// walked again so that cd is followed (gt-g2zd6).
+			if payload, ok := shellPayload(base, args); ok {
+				if reason := s.checkBashCommand(payload, depth+1); reason != "" {
+					return reason
+				}
+			}
 		case isWriteCapableCommand(base, args):
 			if reason := s.checkBashArgs(args, base, true); reason != "" {
 				return reason
@@ -310,8 +320,14 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 			// cd is not a write, but it decides where every later relative path
 			// lands: a polecat that walks into a sibling worktree (or a
 			// town-level tree such as mayor/) is one careless relative write
-			// away from corrupting them.
+			// away from corrupting them. The destination is judged from every
+			// directory the shell may already be in, and each later word is then
+			// judged from the directory it lands in too (gt-g2zd6).
 			if reason := s.checkBashArgs(args, base, false); reason != "" {
+				return reason
+			}
+			var reason string
+			if s, reason = s.followCd(base, args); reason != "" {
 				return reason
 			}
 		case base == "git":
@@ -369,11 +385,123 @@ func (s polecatPathScope) checkBashTarget(raw, context string, destructive bool)
 		}
 	}
 	for _, candidate := range candidates {
-		if reason := s.checkBashPathFrom(candidate, s.cwd, context); reason != "" {
-			return reason
+		for _, dir := range s.walkDirs() {
+			if reason := s.checkBashPathFrom(candidate, dir, context); reason != "" {
+				return reason
+			}
 		}
 	}
 	return ""
+}
+
+// maxWalkDirs bounds how many directories followCd tracks. Every relative cd
+// can double the set (the old directory stays in it), so a long chain of cds
+// reaches the bound and is refused rather than growing without limit.
+const maxWalkDirs = 256
+
+// walkDirs returns the directories a relative path in the command being walked
+// may resolve from: the session cwd until a cd has been seen, then every
+// directory a cd could have left the shell in (gt-g2zd6).
+func (s polecatPathScope) walkDirs() []string {
+	if len(s.dirs) == 0 {
+		return []string{s.cwd}
+	}
+	return s.dirs
+}
+
+// followCd returns the scope for the words after a cd or pushd, and a reason
+// when the destination must be refused.
+//
+// The guard judges a line statically, so it cannot tell which cds ran: `cd x ||
+// cd y`, a cd that fails, a cd inside a ( subshell ) or a pipeline stage all
+// leave the shell somewhere other than the last cd names. The old directory
+// therefore stays in the set, and the destination is added to it as resolved
+// from every directory already in it. A word is then judged from each of them,
+// so `cd .. && rm -rf ../coral` is judged from polecats/<own>/ as well as from
+// the worktree, where it used to read as a path inside the polecat's own
+// directory (gt-g2zd6). The price is that a relative path which climbs out of a
+// subdirectory (`cd internal/cmd && rm -rf ../../x`) is also judged from the
+// worktree, and is refused when that reading leaves the polecat's own tree.
+//
+// A destination that cannot be resolved (an unknown variable, a command
+// substitution) is refused, as it is for any other path the guard cannot pin.
+func (s polecatPathScope) followCd(command string, args []string) (polecatPathScope, string) {
+	dest, found := cdDestination(command, args)
+	switch {
+	case !found && command == "pushd":
+		return s, "" // pushd with no operand swaps the top two stack entries: a directory already in the set
+	case !found:
+		dest = "~" // a bare cd goes home
+	case dest == "-":
+		return s, "" // back to $OLDPWD, a directory this line or an earlier command already stood in
+	}
+	dirs := append([]string(nil), s.walkDirs()...)
+	seen := make(map[string]bool, len(dirs))
+	for _, dir := range dirs {
+		seen[dir] = true
+	}
+	for _, from := range s.walkDirs() {
+		if reason := s.checkBashPathFrom(dest, from, command); reason != "" {
+			return s, reason
+		}
+		target, ok := canonicalizeToolPath(s.proc, dest, from)
+		if !ok || seen[target] {
+			continue
+		}
+		seen[target] = true
+		dirs = append(dirs, target)
+	}
+	if len(dirs) > maxWalkDirs {
+		return s, "too many directory changes to follow in one command — split it into commands that each stay in one directory"
+	}
+	s.dirs = dirs
+	return s, ""
+}
+
+// cdDestination returns the directory operand of a cd or pushd, past its
+// options. pushd also takes +N / -N stack rotations, which name no directory.
+func cdDestination(command string, args []string) (string, bool) {
+	for i, arg := range args {
+		switch {
+		case arg == "--":
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+			return "", false
+		case arg != "-" && strings.HasPrefix(arg, "-"):
+			continue
+		case command == "pushd" && strings.HasPrefix(arg, "+"):
+			continue
+		}
+		return arg, true
+	}
+	return "", false
+}
+
+// shellPayload returns the command line a shell runs from its -c option
+// (`bash -c '...'`, `sh -lc '...'`), which is code the guard walks as a command
+// of its own. Options before -c that take a value (-o pipefail) are skipped;
+// the first plain operand is a script file, after which -c is the script's.
+func shellPayload(command string, args []string) (string, bool) {
+	switch command {
+	case "sh", "bash", "zsh", "dash", "ksh", "fish":
+	default:
+		return "", false
+	}
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "-o" || arg == "+o" || arg == "-O" || arg == "+O" || arg == "--rcfile" || arg == "--init-file":
+			i++ // the next word is this option's value
+		case len(arg) > 1 && arg[0] == '-' && arg[1] != '-':
+			if strings.Contains(arg, "c") && i+1 < len(args) {
+				return args[i+1], true
+			}
+		case arg == "--" || !strings.HasPrefix(arg, "-"):
+			return "", false
+		}
+	}
+	return "", false
 }
 
 // checkBashIndirection denies a write target that names its destination through
@@ -457,29 +585,33 @@ func (s polecatPathScope) checkSymlinkText(args []string) string {
 // destination itself when it is an existing directory (ln then creates the link
 // inside it); else, with a single operand, the cwd.
 func (s polecatPathScope) symlinkDirs(ln lnArgs) []string {
-	var raws []string
-	switch {
-	case ln.targetDir != "":
-		raws = append(raws, ln.targetDir)
-	case ln.dest != "":
-		raws = append(raws, pathDirPart(ln.dest))
-		if dest, ok := canonicalizeToolPath(s.proc, ln.dest, s.cwd); ok {
-			if info, err := os.Stat(dest); err == nil && info.IsDir() {
-				raws = append(raws, dest)
-			}
-		}
-	default:
-		raws = append(raws, ".")
-	}
 	var dirs []string
-	for _, raw := range raws {
-		dir, ok := canonicalizeToolPath(s.proc, raw, s.cwd)
-		if !ok {
-			// Only an unresolvable spelling gets here (an unknown variable), and
-			// checkBashArgs has already denied that same operand fail-closed.
-			continue
+	// A cd earlier in the line moves the directory these operands resolve from
+	// (gt-g2zd6), so each is resolved from every directory the shell may be in.
+	for _, from := range s.walkDirs() {
+		var raws []string
+		switch {
+		case ln.targetDir != "":
+			raws = append(raws, ln.targetDir)
+		case ln.dest != "":
+			raws = append(raws, pathDirPart(ln.dest))
+			if dest, ok := canonicalizeToolPath(s.proc, ln.dest, from); ok {
+				if info, err := os.Stat(dest); err == nil && info.IsDir() {
+					raws = append(raws, dest)
+				}
+			}
+		default:
+			raws = append(raws, ".")
 		}
-		dirs = append(dirs, dir)
+		for _, raw := range raws {
+			dir, ok := canonicalizeToolPath(s.proc, raw, from)
+			if !ok {
+				// Only an unresolvable spelling gets here (an unknown variable), and
+				// checkBashArgs has already denied that same operand fail-closed.
+				continue
+			}
+			dirs = append(dirs, dir)
+		}
 	}
 	return dirs
 }
