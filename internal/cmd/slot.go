@@ -458,16 +458,27 @@ func printSlotDebris(cmd *cobra.Command, debris []string) {
 }
 
 func runSlotReap(cmd *cobra.Command, _ []string) error {
-	townRoot, err := workspace.FindFromCwdOrError()
+	return reapGateContainers(cmd, workspace.FindFromCwdOrError, slot.Reap,
+		slot.ReapOptions{OlderThan: slotReapOlderThan, DryRun: slotReapDryRun}, slotReapJSON)
+}
+
+// reapGateContainers is runSlotReap with the town lookup, the reap and the
+// flags passed in, so a test drives the command from the town lookup to the
+// exit error without a docker or a working directory (gt-ylkm2).
+func reapGateContainers(
+	cmd *cobra.Command,
+	findTown func() (string, error),
+	reap func(townRoot string, opts slot.ReapOptions) (slot.ReapReport, error),
+	opts slot.ReapOptions,
+	asJSON bool,
+) error {
+	townRoot, err := findTown()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	report, reapErr := slot.Reap(townRoot, slot.ReapOptions{
-		OlderThan: slotReapOlderThan,
-		DryRun:    slotReapDryRun,
-	})
-	return finishSlotReap(cmd, report, reapErr)
+	report, reapErr := reap(townRoot, opts)
+	return finishSlotReap(cmd, report, reapErr, asJSON)
 }
 
 // finishSlotReap prints the report and returns the error the command exits
@@ -476,8 +487,8 @@ func runSlotReap(cmd *cobra.Command, _ []string) error {
 // report prints first and the error second. A container whose removal failed
 // is in Failed with no error from Reap, so it becomes one here: left alone,
 // the run counts the container as removed and exits 0 (gt-uh7hy).
-func finishSlotReap(cmd *cobra.Command, report slot.ReapReport, reapErr error) error {
-	if slotReapJSON {
+func finishSlotReap(cmd *cobra.Command, report slot.ReapReport, reapErr error, asJSON bool) error {
+	if asJSON {
 		if err := printSlotReapJSON(cmd, report); err != nil {
 			return err
 		}

@@ -340,18 +340,48 @@ func leadingLetterProbes() []string {
 	return probes
 }
 
-// runLongNameProbes are the leading-letter probes with a long tail. Every name
-// above has one character after "Test", so a pattern that needs more
-// ("Test.." "Test.{2,}") matches none of them and would be judged bounded
-// while it selects every real test, whose names run longer (gt-uh7hy).
-var runLongNameProbes = longNameProbes()
+// runLongNameTails are the endings runLongNameProbeSets put after "Test" and a
+// leading letter. Every name above has one character after "Test", so a
+// pattern that needs more ("Test.." "Test.{2,}") matches none of them and would
+// be judged bounded while it selects every real test, whose names run longer
+// (gt-uh7hy). The tails differ in length and in shape so a pattern that needs a
+// long name ("Test.{30,}") or a mixed-case, underscored or numbered one
+// ("Test[A-Za-z]+_") is read against a name that fits it (gt-ylkm2).
+//
+// The probes stay a heuristic. A pattern that needs more than the longest tail,
+// or a shape none of them has, still passes as bounded, so the guard cannot
+// rule out a pattern that counts or names more than this.
+var runLongNameTails = []string{
+	"bcdefghijklmnopqrstuvwxyz",
+	"oo_Bar2Baz",
+	strings.Repeat("longTestName", 6),
+}
 
-func longNameProbes() []string {
-	probes := make([]string, 0, 26)
-	for c := 'A'; c <= 'Z'; c++ {
-		probes = append(probes, "Test"+string(c)+"bcdefghijklmnopqrstuvwxyz")
+// runLongNameProbeSets holds one TestXxx set per tail, A to Z each. A pattern
+// that matches most of any one set is judged to select most tests.
+var runLongNameProbeSets = longNameProbeSets()
+
+func longNameProbeSets() [][]string {
+	sets := make([][]string, 0, len(runLongNameTails))
+	for _, tail := range runLongNameTails {
+		probes := make([]string, 0, 26)
+		for c := 'A'; c <= 'Z'; c++ {
+			probes = append(probes, "Test"+string(c)+tail)
+		}
+		sets = append(sets, probes)
 	}
-	return probes
+	return sets
+}
+
+// matchesMostLongNameProbes reports whether re matches most of any one set of
+// long-name probes.
+func matchesMostLongNameProbes(re *regexp.Regexp) bool {
+	for _, probes := range runLongNameProbeSets {
+		if matchesMostProbes(re, probes) {
+			return true
+		}
+	}
+	return false
 }
 
 // goTestRunFilterBounds reports whether the tokens after "go test" carry a
@@ -450,7 +480,7 @@ func runPatternBoundsRun(pattern string) bool {
 	}
 	return !matchesAllProbes(re, runFilterProbes) &&
 		!matchesMostProbes(re, runLeadingLetterProbes) &&
-		!matchesMostProbes(re, runLongNameProbes)
+		!matchesMostLongNameProbes(re)
 }
 
 // firstSubtestElement returns the part of a -run pattern that selects a test
