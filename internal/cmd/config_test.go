@@ -532,6 +532,14 @@ func TestConfigAgentRemove(t *testing.T) {
 		if _, ok := loaded.Agents["claude"]; ok {
 			t.Error("override of claude still exists after removal")
 		}
+		// The override was the default agent: the default stays named, and
+		// now resolves to the built-in rather than the deleted override.
+		if loaded.DefaultAgent != "claude" {
+			t.Errorf("DefaultAgent = %q, want claude", loaded.DefaultAgent)
+		}
+		if rc := config.ResolveAgentConfig(townRoot, ""); filepath.Base(rc.Command) != "claude" {
+			t.Errorf("default agent resolves to command %q, want the built-in claude", rc.Command)
+		}
 	})
 
 	t.Run("returns error for non-existent custom agent", func(t *testing.T) {
