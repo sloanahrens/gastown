@@ -506,7 +506,9 @@ type heredocSpan struct {
 // subscript) or the text of a "${..}", whose "#", "%", "/" and "^" operators
 // take patterns — where it is a shift or a literal. Accepting any of them
 // stripped a body the shell never read, and the live commands standing in for
-// that body went unchecked.
+// that body went unchecked. A "<<" inside a "#" comment is skipped for the
+// same reason: the shell parses none of the comment, and the lines below it
+// are live.
 func scanHeredocs(command string) []heredocSpan {
 	matches := heredocStartPattern.FindAllStringSubmatchIndex(command, -1)
 	if matches == nil {
@@ -520,7 +522,7 @@ func scanHeredocs(command string) []heredocSpan {
 		if start < stripped {
 			continue // inside a previously accepted heredoc body
 		}
-		if walk.advanceTo(start) != 0 || walk.escaped || walk.readsData() {
+		if walk.advanceTo(start) != 0 || walk.comment || walk.escaped || walk.readsData() {
 			continue
 		}
 		if start > 0 && command[start-1] == '<' {
