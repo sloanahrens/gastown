@@ -1787,6 +1787,7 @@ func TestEnsureRunning_HealthyAfterReadOnlyRecovery(t *testing.T) {
 		t.Error("expected DOLT_UNHEALTHY signal to be cleared after recovery")
 	}
 }
+
 // A server that exits after the first 5 seconds but inside the stop budget
 // ends the wait when it exits. stopLocked holds m.mu for the wait, so one that
 // sat out the full budget for a process already gone held the lock for 30s and
