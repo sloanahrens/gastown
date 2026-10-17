@@ -227,10 +227,10 @@ func TestResolveDestructiveActor(t *testing.T) {
 	})
 }
 
-// TestDoltCleanupForceRefusesUnidentifiedActor covers gt-kz9k0: with no env
-// identity and no terminal, --force must fail closed before the authorization
-// bead is looked up, so no database can be removed.
-func TestDoltCleanupForceRefusesUnidentifiedActor(t *testing.T) {
+// TestAuthorizeCleanupForceRefusesUnidentifiedActor covers the guard helper:
+// with no env identity and no terminal, --force must fail closed before the
+// authorization bead is looked up, so no database can be removed (gt-kz9k0).
+func TestAuthorizeCleanupForceRefusesUnidentifiedActor(t *testing.T) {
 	t.Parallel()
 	err := authorizeCleanupForce(t.TempDir(), "", false, "hq-abc")
 	if err == nil {
@@ -238,5 +238,36 @@ func TestDoltCleanupForceRefusesUnidentifiedActor(t *testing.T) {
 	}
 	if !errors.Is(err, doltserver.ErrUnidentifiedActor) {
 		t.Errorf("error = %v, want ErrUnidentifiedActor (refusal must precede the bead lookup)", err)
+	}
+}
+
+// TestDoltCleanupForceRefusesUnidentifiedActor drives the command itself, as
+// gt-kz9k0's acceptance criterion requires: `gt dolt cleanup --force
+// --authorized-by hq-abc` with GT_ROLE/BD_ACTOR unset and no terminal must
+// refuse before it discovers or removes any database (om finding 0d69d0eb43cb).
+// Calling authorizeCleanupForce directly cannot catch the guard being dropped
+// from this call site.
+//
+//testpolicy:allow parallel — runDoltCleanup reads the package-level cleanup flags, which are process-wide
+func TestDoltCleanupForceRefusesUnidentifiedActor(t *testing.T) {
+	// The cleanup flags are package-level and bound to the shared command tree.
+	force, dry, authorizedBy := doltCleanupForce, doltCleanupDry, doltCleanupAuthorizedBy
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores the flag variables swapped below
+		doltCleanupForce, doltCleanupDry, doltCleanupAuthorizedBy = force, dry, authorizedBy
+	})
+	//testpolicy:allow no-env — the process environment is the input under test: runDoltCleanup reads GT_ROLE via agentActor(os.Getenv)
+	t.Setenv("GT_ROLE", "")
+	//testpolicy:allow no-env — BD_ACTOR is the fallback identity the same read consults
+	t.Setenv("BD_ACTOR", "")
+	//testpolicy:allow no-global-swap — runDoltCleanup reads the --force, --dry-run and --authorized-by flag variables; they are not arguments
+	doltCleanupForce, doltCleanupDry, doltCleanupAuthorizedBy = true, false, "hq-abc"
+
+	err := runDoltCleanup(nil, nil)
+	if err == nil {
+		t.Fatal("runDoltCleanup with --force and an unidentified actor = nil, want refusal")
+	}
+	if !errors.Is(err, doltserver.ErrUnidentifiedActor) {
+		t.Errorf("error = %v, want ErrUnidentifiedActor (refusal must precede orphan discovery and removal)", err)
 	}
 }
