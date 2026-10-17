@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/formula"
 )
 
@@ -99,5 +101,62 @@ func TestSyncUpFormulas_ReplacesDriftThenIsQuiet(t *testing.T) {
 	syncUpFormulas(townRoot, &out, &errOut)
 	if out.Len() != 0 || errOut.Len() != 0 {
 		t.Fatalf("in-sync town: out=%q err=%q", out.String(), errOut.String())
+	}
+}
+
+// TestPolecatHasWorkHookedAndInProgress: `gt up --restore` must restart a
+// polecat whose slung bead sling left hooked, or the polecat flow claimed
+// in_progress, not only one holding a pinned bead (gt-b3qpu).
+func TestPolecatHasWorkHookedAndInProgress(t *testing.T) {
+	t.Parallel()
+	const agent = "gastown/polecats/p1"
+
+	cases := []struct {
+		name   string
+		status beads.IssueStatus
+		want   bool
+	}{
+		{"hooked", beads.IssueStatusHooked, true},
+		{"in_progress", beads.StatusInProgress, true},
+		{"pinned", beads.IssueStatusPinned, true},
+		{"closed", beads.StatusClosed, false},
+		{"open", beads.StatusOpen, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			store := beadsfake.New()
+			is, err := store.Create(beads.CreateOptions{Title: "work", Assignee: agent})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			status := string(tc.status)
+			if err := store.Update(is.ID, beads.UpdateOptions{Status: &status}); err != nil {
+				t.Fatalf("Update to %s: %v", tc.status, err)
+			}
+			if got := hasAssignedWork(store, agent); got != tc.want {
+				t.Errorf("hasAssignedWork with a %s bead = %v, want %v", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
+// A bead assigned to someone else is not this polecat's work.
+func TestPolecatHasWorkIgnoresOtherAssignees(t *testing.T) {
+	t.Parallel()
+	store := beadsfake.New()
+	is, err := store.Create(beads.CreateOptions{Title: "work", Assignee: "gastown/polecats/p2"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	status := string(beads.IssueStatusHooked)
+	if err := store.Update(is.ID, beads.UpdateOptions{Status: &status}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if hasAssignedWork(store, "gastown/polecats/p1") {
+		t.Error("hasAssignedWork counted a bead assigned to another polecat")
+	}
+	if !hasAssignedWork(store, "gastown/polecats/p2") {
+		t.Error("hasAssignedWork missed a hooked bead assigned to the polecat")
 	}
 }
