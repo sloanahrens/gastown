@@ -205,3 +205,36 @@ func TestCostPanelNamesTheReworkStates(t *testing.T) {
 		}
 	}
 }
+
+// A bar that landed beads but has no om time for any of them draws a dash, and
+// its hover names only the reviews that had none: no mean, median or slowest
+// bead to describe.
+func TestCostPanelHoversABarWithNoLandedOMTime(t *testing.T) {
+	t.Parallel()
+
+	s := costSpendUsage()
+	s["rework"] = map[string]any{"windows": []any{
+		map[string]any{"name": "last 7 days", "bars": []any{
+			map[string]any{"bar": 0.8, "reviews": 3, "rejected": 1, "beads": 2, "first_try": 1, "landed": 2, "reviews_per_landed": 1.5, "loops_out": 0, "mean_score": 0.8,
+				"mean_om_secs": 0.0, "om_beads": 0, "median_om_secs": 0.0, "slowest_om_secs": 0.0, "om_reviews_missing": 3},
+		}},
+	}}
+	dom := newPageDOM(t)
+	dom.call(t, "renderCost", s)
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children
+		.filter(c => c.tagName === "TABLE" && c.children[0].children.map(x => x.textContent).indexOf("Mean om time") >= 0)
+		.map(t => t.children.slice(1).map(r => [r.children[5].textContent, r.children[5].title])))`)
+	if err != nil {
+		t.Fatalf("reading the column: %v", err)
+	}
+	var tables [][][]string
+	if err := json.Unmarshal([]byte(v.String()), &tables); err != nil {
+		t.Fatalf("reading the column: %v", err)
+	}
+	if len(tables) != 1 || len(tables[0]) != 1 {
+		t.Fatalf("read %v, want the one row of the one rework table", tables)
+	}
+	if got := tables[0][0]; got[0] != "–" || got[1] != "3 reviews with no om time" {
+		t.Errorf("cell = %q, want a dash hovering %q", got, "3 reviews with no om time")
+	}
+}

@@ -73,7 +73,8 @@ type ReworkBar struct {
 	ReviewsPerLanded float64 `json:"reviews_per_landed"`
 	// MeanOMSecs is the mean, over the OMBeads landed beads whose om time the
 	// log gave, of each bead's total om time in seconds — every review it had
-	// before landing, summed. It is 0 with no OMBeads, which the page draws as
+	// in this window, summed, so a rework loop that began before the window
+	// opened is summed from its first review inside it. It is 0 with no OMBeads, which the page draws as
 	// a dash rather than a fast bar. The denominator is the landed beads the
 	// sums are known for and not every landed bead, since an unknown sum is not
 	// a zero one.
@@ -126,7 +127,8 @@ type Rework struct {
 // its line says (see reworkSpan).
 //
 // A bar's om time is read from the landed beads alone: each bead's sum of its
-// reviews' durations, averaged over the beads the log gave one for.
+// reviews' durations in the window, averaged over the beads the log gave one
+// for. Like every other count here, a bead's sum stops at the window's edge.
 func AggregateRework(reviews []ReworkReview, now time.Time) Rework {
 	recent, prior := now.Add(-reworkWindow), now.Add(-2*reworkWindow)
 	return Rework{Windows: []ReworkWindow{
@@ -223,9 +225,9 @@ func reworkSpan(name string, reviews []ReworkReview, from, to time.Time, closed 
 		case approved:
 			t.Landed++
 			t.landedReviews += len(rs)
-			// The bead's om time is every review it had, the ones with no
-			// duration left out; a bead that has none at all is left out of
-			// the mean rather than counted as free.
+			// The bead's om time is every review it had in the window, the
+			// ones with no duration left out; a bead that has none at all is
+			// left out of the mean rather than counted as free.
 			t.OMReviewsMissing += len(rs) - omKnown
 			if omKnown > 0 {
 				t.omSums = append(t.omSums, omSum{bead: rs[0].Bead, d: om})

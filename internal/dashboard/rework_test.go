@@ -360,3 +360,57 @@ func TestAggregateReworkMeanOMTimeMedianAndEmptyBars(t *testing.T) {
 		t.Errorf("a window with no reviews = %+v, want no bars", empty.Windows[1].Bars)
 	}
 }
+
+// A bead's om time is the sum of its reviews inside the window, as every other
+// figure in the table is: a loop that began before the window opened is summed
+// from its first review inside it, and the reviews before are the prior
+// window's.
+func TestAggregateReworkOMTimeStopsAtTheWindowEdge(t *testing.T) {
+	t.Parallel()
+
+	const approve, reject = "approve", "request_changes"
+	got := AggregateRework([]ReworkReview{
+		// gt-edge was refused eight days ago, 600s of om, and landed three hours ago.
+		withOM(rv("gt-edge", 1, reject, 0.5, 0.8, 8*24), 600),
+		withOM(rv("gt-edge", 2, approve, 0.9, 0.8, 3), 100),
+	}, reworkNow)
+
+	b := got.Windows[0].Bars[0]
+	if b.Landed != 1 || b.OMBeads != 1 || !near(b.MeanOMSecs, 100) || !near(b.SlowestOMSecs, 100) || b.OMReviewsMissing != 0 {
+		t.Errorf("recent window = %+v, want gt-edge's one review in it, 100s", b)
+	}
+	p := got.Windows[1].Bars[0]
+	if p.Landed != 0 || p.OMBeads != 0 || p.MeanOMSecs != 0 {
+		t.Errorf("prior window = %+v, want the refused review and no om time, nothing landed in it", p)
+	}
+}
+
+// A bar whose landed beads all lack a time reaches the page with no mean, no
+// median, no slowest bead and the count of reviews the log gave nothing for,
+// and the JSON keeps the fields the page tests against.
+func TestAggregateReworkOMTimeJSONWhenNoLandedBeadHasOne(t *testing.T) {
+	t.Parallel()
+
+	const approve, reject = "approve", "request_changes"
+	got := AggregateRework([]ReworkReview{
+		rv("gt-a", 1, approve, 0.9, 0.8, 6),
+		rv("gt-b", 1, reject, 0.5, 0.8, 5), rv("gt-b", 2, approve, 0.9, 0.8, 4),
+	}, reworkNow)
+	raw, err := json.Marshal(got.Windows[0].Bars[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]float64{"landed": 2, "om_beads": 0, "mean_om_secs": 0, "median_om_secs": 0, "slowest_om_secs": 0, "om_reviews_missing": 3}
+	for k, v := range want {
+		if g, ok := m[k].(float64); !ok || g != v {
+			t.Errorf("%s = %v in %s, want %v", k, m[k], raw, v)
+		}
+	}
+	if _, ok := m["slowest_om_bead"]; ok {
+		t.Errorf("slowest_om_bead present in %s, want it omitted with no timed bead", raw)
+	}
+}
