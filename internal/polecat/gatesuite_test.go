@@ -136,6 +136,8 @@ func TestSuiteArgv(t *testing.T) {
 		{"go vet at the path it was exec'd with", "/usr/local/go/bin/go vet ./...", "go vet"},
 		{"a backgrounded gt done still running", "/usr/local/bin/gt done", "gt done"},
 		{"make after a separator is a goal", "make clean && make test", "make test"},
+		{"the GNU make spelling", "gmake gate", "make gate"},
+		{"gmake's goals read as make's", "/usr/local/bin/gmake clean test", "make test"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -169,6 +171,35 @@ func TestSuiteArgvTargetlessGate(t *testing.T) {
 	suites := []Invocation{{Program: "pytest"}}
 	if got, ok := SuiteArgv("pytest -q --maxfail=1", GateTokens, suites); !ok || got != "pytest" {
 		t.Errorf("SuiteArgv = %q, %v; want %q, true", got, ok, "pytest")
+	}
+}
+
+// TestInvocationPresent_Gmake covers gt-gy5ro: GNU make answers to gmake, the
+// name it carries on macOS, so a seat running "gmake test" is running the rig's
+// configured "make test". Read as absent, the Stop hook saw no live suite under
+// that seat and ran gt done over it while the suite was still going.
+func TestInvocationPresent_Gmake(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		tokens []string
+		inv    Invocation
+		want   bool
+	}{
+		{"gmake for a configured make", []string{"gmake", "test"}, Invocation{Program: "make", Target: "test"}, true},
+		{"gmake's goals read as make's", []string{"gmake", "clean", "test"}, Invocation{Program: "make", Target: "test"}, true},
+		{"make still matches make", []string{"make", "test"}, Invocation{Program: "make", Target: "test"}, true},
+		{"a targetless make matches gmake too", []string{"gmake", "test"}, Invocation{Program: "make"}, true},
+		{"another program keeps the exact word", []string{"cmake", "test"}, Invocation{Program: "make", Target: "test"}, false},
+		{"a gmake token does not match another program", []string{"gmake", "test"}, Invocation{Program: "pytest", Target: "test"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := InvocationPresent(tt.tokens, tt.inv); got != tt.want {
+				t.Errorf("InvocationPresent(%v, %+v) = %v, want %v", tt.tokens, tt.inv, got, tt.want)
+			}
+		})
 	}
 }
 

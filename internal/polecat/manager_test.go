@@ -17,6 +17,7 @@ import (
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -3132,4 +3133,165 @@ func TestCheckDoltHealth_DatabaseNotFoundIsUnhealthy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// unjudgeableProbe is a repository whose unpushed-commit comparison cannot be
+// made: it answers with the worktree facts the probe gathered and the error
+// git.Git returns once no comparison ref could be resolved — the shape a clone
+// sees when another clone advanced the remote branch past its object store, so
+// whether the commit is already preserved is unknown (gt-gy5ro). The fake world
+// produces neither refs nor that error, so a test spells it out here.
+type unjudgeableProbe struct {
+	gitRepo
+	facts git.UncommittedWorkStatus
+}
+
+func (p unjudgeableProbe) CheckUncommittedWork() (*git.UncommittedWorkStatus, error) {
+	facts := p.facts
+	return &facts, fmt.Errorf("checking unpushed commits: %w", git.ErrComparisonUnjudgeable)
+}
+
+// unjudgeableOpener is the manager's own opener over w's world, with the
+// repository at dir answering CheckUncommittedWork the unjudgeable way. Only
+// that path changes: every other repository, and every other call, is the
+// world's.
+func unjudgeableOpener(w *world, dir string, facts git.UncommittedWorkStatus) gitOpener {
+	base := w.opener()
+	wrap := func(opened gitRepo, at string) gitRepo {
+		if at != dir {
+			return opened
+		}
+		return unjudgeableProbe{gitRepo: opened, facts: facts}
+	}
+	return gitOpener{
+		open:    func(d string) gitRepo { return wrap(base.open(d), d) },
+		openDir: func(gitDir, workDir string) gitRepo { return wrap(base.openDir(gitDir, workDir), workDir) },
+	}
+}
+
+// TestRepairWorktree_UnjudgeableKeepsDirtyWorktree covers gt-gy5ro: the repair
+// guard read only a probe that succeeded, so a comparison that could not be
+// judged — the unpushed-commit count is unknown — rebuilt the worktree of a
+// non-force repair anyway. A dirty worktree makes the same point through the
+// facts the probe did gather; a clean one isolates the unjudged comparison, the
+// case where the count was the only thing that would have refused.
+func TestRepairWorktree_UnjudgeableKeepsDirtyWorktree(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		facts       git.UncommittedWorkStatus
+		force       bool
+		wantRefusal bool
+	}{
+		{name: "dirty worktree", facts: git.UncommittedWorkStatus{HasUncommittedChanges: true, ModifiedFiles: []string{"wip.txt"}}, wantRefusal: true},
+		{name: "clean worktree", facts: git.UncommittedWorkStatus{}, wantRefusal: true},
+		{name: "forced", facts: git.UncommittedWorkStatus{}, force: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mgr, _, _, added, w := canonicalWithPolecats(t, true, "toast")
+			p := added["toast"]
+			clonePath := mgr.clonePath("toast")
+			mgr.gits = unjudgeableOpener(w, clonePath, tt.facts)
+
+			_, err := mgr.RepairWorktreeWithOptions("toast", tt.force, AddOptions{})
+
+			var refusal *UnjudgedWorkError
+			if tt.wantRefusal {
+				if !errors.As(err, &refusal) {
+					t.Fatalf("repair error = %v, want an UnjudgedWorkError: the worktree may hold work no remote has", err)
+				}
+				if !mgr.exists("toast") {
+					t.Fatal("the refused repair removed the polecat anyway")
+				}
+				if got := w.branch(t, clonePath); got != p.Branch {
+					t.Fatalf("clone branch = %q, want it left on %q", got, p.Branch)
+				}
+				return
+			}
+			if errors.As(err, &refusal) {
+				t.Fatalf("forced repair = %v, want --force to keep its meaning and bypass the unjudged comparison", err)
+			}
+		})
+	}
+}
+
+// TestRemove_UnjudgeableWithoutForceKeepsClone covers gt-gy5ro: a removal
+// without --force must not discard a clone whose work it could not judge
+// preserved. --force is the operator accepting that loss, so it still removes
+// the clone.
+func TestRemove_UnjudgeableWithoutForceKeepsClone(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		facts git.UncommittedWorkStatus
+		force bool
+	}{
+		{name: "clean facts", facts: git.UncommittedWorkStatus{}},
+		{name: "dirty facts", facts: git.UncommittedWorkStatus{HasUncommittedChanges: true, ModifiedFiles: []string{"wip.txt"}}},
+		{name: "forced", facts: git.UncommittedWorkStatus{}, force: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mgr, _, bd, _, w := canonicalWithPolecats(t, true, "toast")
+			// A polecat that never reported a cleanup_status is the one that
+			// takes the git probe rather than the self-reported path.
+			bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) { f.CleanupStatus = "" })
+			mgr.gits = unjudgeableOpener(w, mgr.clonePath("toast"), tt.facts)
+
+			err := mgr.Remove("toast", tt.force)
+
+			if tt.force {
+				if err != nil {
+					t.Fatalf("Remove with --force = %v, want the unjudged comparison bypassed", err)
+				}
+				if _, statErr := os.Stat(mgr.polecatDir("toast")); !os.IsNotExist(statErr) {
+					t.Fatalf("polecat dir survived removal, stat err=%v", statErr)
+				}
+				return
+			}
+			var refusal *UnjudgedWorkError
+			if !errors.As(err, &refusal) {
+				t.Fatalf("Remove error = %v, want an UnjudgedWorkError", err)
+			}
+			if _, statErr := os.Stat(mgr.polecatDir("toast")); statErr != nil {
+				t.Fatalf("the refused removal took the clone with it: %v", statErr)
+			}
+		})
+	}
+}
+
+// TestDetectStalePolecats_UnjudgeableComparisonReportsWork covers the same
+// fail-open pattern in the staleness listing (gt-gy5ro): a worktree whose
+// unpushed comparison could not be judged read as clean, which left it a
+// cleanup candidate with nothing having checked whether a remote holds its
+// commits.
+func TestDetectStalePolecats_UnjudgeableComparisonReportsWork(t *testing.T) {
+	t.Parallel()
+	mgr, _, _, added, w := canonicalWithPolecats(t, true, "toast")
+	// The listing asks tmux whether each polecat's session is live; the fake
+	// answers for the world rather than reaching the host's tmux.
+	mgr.tmux = newFakeProbe()
+	mgr.gits = unjudgeableOpener(w, added["toast"].ClonePath, git.UncommittedWorkStatus{})
+
+	infos, err := mgr.DetectStalePolecats(0)
+	if err != nil {
+		t.Fatalf("DetectStalePolecats: %v", err)
+	}
+
+	for _, info := range infos {
+		if info.Name != "toast" {
+			continue
+		}
+		if !info.HasUncommittedWork {
+			t.Error("HasUncommittedWork = false for a worktree whose unpushed comparison could not be judged")
+		}
+		if info.IsStale {
+			t.Errorf("polecat read as stale (%s); wanted it kept", info.Reason)
+		}
+		return
+	}
+	t.Fatalf("DetectStalePolecats reported no polecat named toast: %+v", infos)
 }

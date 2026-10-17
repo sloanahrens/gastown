@@ -154,6 +154,23 @@ func (e *UncommittedWorkError) Unwrap() error {
 	return ErrHasUncommittedWork
 }
 
+// UnjudgedWorkError reports a worktree whose work could not be judged preserved:
+// nothing compared the branch with what the remote holds, so the discard paths
+// refuse it as work no remote may have (gt-gy5ro).
+type UnjudgedWorkError struct {
+	PolecatName string
+	// Cause is the probe's error, one wrapping git.ErrComparisonUnjudgeable.
+	Cause error
+}
+
+func (e *UnjudgedWorkError) Error() string {
+	return fmt.Sprintf("polecat %s: no branch comparison could be judged, so its worktree may hold work that is on no remote: %v", e.PolecatName, e.Cause)
+}
+
+func (e *UnjudgedWorkError) Unwrap() error {
+	return e.Cause
+}
+
 // Manager handles polecat lifecycle.
 type Manager struct {
 	rig *rig.Rig
@@ -635,6 +652,30 @@ func (m *Manager) checkCleanupStatus(name string, status CleanupStatus, force bo
 			Status:      &git.UncommittedWorkStatus{HasUncommittedChanges: true},
 		}
 	}
+}
+
+// probeReportsWork reads a CheckUncommittedWork probe for a caller that must
+// not read the worktree as clean: the facts the probe gathered are not clean by
+// clean's reading, or the probe could not judge what the remote already holds
+// (git.ErrComparisonUnjudgeable), which leaves the unpushed-commit count unknown
+// and so reads as work no remote has (gt-gy5ro). A probe that failed any other
+// way returns no status at all, and a status that was never gathered has no
+// facts to judge.
+func probeReportsWork(status *git.UncommittedWorkStatus, err error, clean func(*git.UncommittedWorkStatus) bool) bool {
+	if errors.Is(err, git.ErrComparisonUnjudgeable) {
+		return true
+	}
+	return err == nil && !clean(status)
+}
+
+// workRefusal names why a probe that probeReportsWork reported refuses to
+// discard the worktree: an unjudged comparison says so itself, since the facts
+// it could not gather are exactly what it cannot describe.
+func workRefusal(name string, status *git.UncommittedWorkStatus, err error) error {
+	if errors.Is(err, git.ErrComparisonUnjudgeable) {
+		return &UnjudgedWorkError{PolecatName: name, Cause: err}
+	}
+	return &UncommittedWorkError{PolecatName: name, Status: status}
 }
 
 // repoBase returns the git directory and Git object to use for worktree operations.
@@ -1530,14 +1571,16 @@ func (m *Manager) removeWithOptionsLocked(name string, opts RemoveOptions) error
 			// Fallback path: Check git directly (for polecats that haven't reported yet)
 			polecatGit := m.gits.Open(clonePath)
 			status, err := polecatGit.CheckUncommittedWork()
-			if err == nil && !status.Clean() {
-				if opts.Force {
-					// Force mode: bypass uncommitted changes and unpushed commits.
-					// Only block on stashes, which represent intentional work-in-progress.
-					if status.StashCount > 0 {
-						return &UncommittedWorkError{PolecatName: name, Status: status}
-					}
-				} else {
+			if probeReportsWork(status, err, (*git.UncommittedWorkStatus).Clean) {
+				switch {
+				case !opts.Force:
+					return workRefusal(name, status, err)
+				case status != nil && status.StashCount > 0:
+					// Force mode: bypass uncommitted changes, unpushed commits
+					// and an unjudged comparison (the operator accepts losing
+					// work no remote has). Only stashes still block: they are
+					// intentional work-in-progress, and the probe gathered them
+					// even when the comparison failed.
 					return &UncommittedWorkError{PolecatName: name, Status: status}
 				}
 			}
@@ -1953,11 +1996,13 @@ func (m *Manager) RepairWorktreeWithOptions(name string, force bool, opts AddOpt
 		return nil, fmt.Errorf("finding repo base: %w", err)
 	}
 
-	// Check for uncommitted work unless forced
+	// Check for uncommitted work unless forced. An unjudged comparison refuses
+	// the repair too: this path replaces the worktree, and a count it could not
+	// read is work no remote may have (gt-gy5ro).
 	if !force {
 		status, err := polecatGit.CheckUncommittedWork()
-		if err == nil && !status.Clean() {
-			return nil, &UncommittedWorkError{PolecatName: name, Status: status}
+		if probeReportsWork(status, err, (*git.UncommittedWorkStatus).Clean) {
+			return nil, workRefusal(name, status, err)
 		}
 	}
 
@@ -4096,9 +4141,12 @@ func (m *Manager) DetectStalePolecats(threshold int) ([]*StalenessInfo, error) {
 		polecatGit := m.gits.Open(p.ClonePath)
 		info.CommitsBehind = countCommitsBehind(polecatGit, defaultBranch)
 
-		// Check for uncommitted work (excluding .beads/ files which are synced across worktrees)
+		// Check for uncommitted work (excluding .beads/ files which are synced across worktrees).
+		// A comparison that could not be judged counts as work: the count is
+		// unknown, and this flag is what keeps a cleanup candidate out of the
+		// reaper's list (gt-gy5ro).
 		status, err := polecatGit.CheckUncommittedWork()
-		if err == nil && !status.CleanExcludingBeads() {
+		if probeReportsWork(status, err, (*git.UncommittedWorkStatus).CleanExcludingBeads) {
 			info.HasUncommittedWork = true
 		}
 
