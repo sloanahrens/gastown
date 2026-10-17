@@ -863,9 +863,17 @@ func runRigRemove(cmd *cobra.Command, args []string) error {
 	g := git.NewGit(townRoot)
 	mgr := rig.NewManager(townRoot, rigsConfig, g)
 
-	// Check for running tmux sessions before removing
+	// Check for running tmux sessions before removing. Only a registered rig
+	// has sessions to find: the prefix of a name the registry does not know
+	// falls back to the default "gt", which matches the gastown rig's
+	// sessions, so a mistyped name would stop another rig's agents before
+	// RemoveRig reports it missing (gt-bfo4z).
 	t := tmux.NewTmux()
-	sessions, sessErr := findRigSessions(t, townRegistry(), name)
+	var sessions []string
+	var sessErr error
+	if mgr.RigExists(name) {
+		sessions, sessErr = findRigSessions(t, townRegistry(), name)
+	}
 	if sessErr != nil {
 		if !rigRemoveForce {
 			return fmt.Errorf("could not verify session state for rig %s: %w (use --force to skip check)", name, sessErr)
