@@ -1406,6 +1406,11 @@ func TestHeredocDoesNotHideRealCommand(t *testing.T) {
 			wantBlock: true,
 		},
 		{
+			name:      "a double angle in a comment is text, not a heredoc",
+			command:   "echo hi # cat <<EOF\nsudo rm -rf /\nEOF",
+			wantBlock: true,
+		},
+		{
 			name:      "arithmetic shift over a force push",
 			command:   "echo $((1<<EOF))\ngit push --force origin x\nEOF",
 			wantBlock: true,

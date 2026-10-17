@@ -595,6 +595,17 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"commit body quoting a redirect into town settings", "git commit -F - <<'EOF'\nfix: runs a > " + settings + "\nEOF", false},
 		{"redirect on the heredoc opener line into a sibling", "cat <<'EOF' > " + sib + "\nx\nEOF", true},
 		{"redirect on the heredoc opener line into own worktree", "cat <<'EOF' > " + own + "\nx\nEOF", false},
+		// Redirections are read off the stripped text, so a "<<" the stripper
+		// wrongly took for a heredoc would hide the real redirect standing where
+		// its body would have been. None of these is a heredoc to the shell, and
+		// a sibling redirect follows each.
+		{"redirect after a shift in arithmetic expansion", "echo $((1 <<EOF))\necho y > " + sib + "\nEOF", true},
+		{"redirect after a here-string", "cat <<<EOF\necho y > " + sib + "\nEOF", true},
+		{"redirect after a quoted double angle", "echo '<<EOF'\necho y > " + sib + "\nEOF", true},
+		{"redirect after an expansion word holding a double angle", "echo ${v%<<EOF}\necho y > " + sib + "\nEOF", true},
+		{"redirect after an unterminated heredoc", "cat <<EOF\necho y > " + sib, true},
+		{"redirect after a commented double angle", "echo hi # cat <<EOF\necho y > " + sib + "\nEOF", true},
+		{"redirect after an escaped double angle", "echo \\<<EOF\necho y > " + sib + "\nEOF", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
