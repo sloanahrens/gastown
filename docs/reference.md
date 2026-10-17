@@ -638,7 +638,6 @@ the `gt done` lifecycle contract (`CLAUDE.local.md` when the repo already tracks
 **Why so little else on disk?**
 - Claude Code traverses upward from CWD for CLAUDE.md — all agents under `~/gt/` find the town-root file
 - The real context comes from `gt prime`, making on-disk bootstrap pointers redundant
-- The polecat file carries the one contract a restarted session must not lose: `gt done`
 
 ### Customer Repo Files (CLAUDE.md and .claude/)
 

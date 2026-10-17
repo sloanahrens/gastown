@@ -91,13 +91,13 @@ Each takes `--help` for its flags.
 
 | Command | Does |
 |---|---|
-| `gt hooks sync [--dry-run]` | Regenerate every managed settings file from base + overrides, keeping non-hooks fields |
+| `gt hooks sync` | Regenerate every managed settings file from base + overrides, keeping non-hooks fields |
 | `gt hooks diff` | Show what `sync` would change |
-| `gt hooks base [--show]` | Edit (or print) the shared base config |
-| `gt hooks override <target> [--show]` | Edit (or print) a role or rig+role override |
+| `gt hooks base` | Edit the shared base config |
+| `gt hooks override <target>` | Edit a role or rig+role override |
 | `gt hooks list` / `gt hooks scan` | Show managed targets and their sync status / the hooks in current settings files |
-| `gt hooks init [--dry-run]` | Bootstrap base and overrides from existing settings files; only when no base exists |
-| `gt hooks registry` / `gt hooks install <id> [--role R] [--all-rigs]` | Browse the registry / add a hook to a settings.json |
+| `gt hooks init` | Bootstrap base and overrides from existing settings files; only when no base exists |
+| `gt hooks registry` / `gt hooks install <id>` | Browse the registry / install one of its hooks |
 
 ## Shipped hooks
 
@@ -125,10 +125,9 @@ Not in that table: guards the tap surface carries that no default installs
 ## Registry is a catalog, not the source of truth
 
 `registry.toml` lists the hooks that exist; base + overrides decide which are
-active where. `gt hooks install <id> [--role R] [--all-rigs]` writes a registry
-hook to a settings.json (the current target, or every worktree of a role); base
-and overrides are unchanged. That split keeps per-machine differences (PATH)
-and per-role overrides out of the shared registry.
+active where. `gt hooks install` changes only settings files; base and overrides
+are unchanged. That split keeps per-machine differences (PATH) and per-role
+overrides out of the shared registry.
 
 ## Known Gaps
 
