@@ -49,7 +49,11 @@ type doneSubmitDeps struct {
 	// trailers and the Gas Town overlay before the gate sees the branch.
 	rewriteBranch func(baseRef string, sub doneSubmission) error
 	// pushSubmodules pushes changed submodule commits before the branch.
-	pushSubmodules func(baseRef string)
+	pushSubmodules func(baseRef string) error
+	// landingRemote resolves the rig's landing remote; nil resolves it from the
+	// rig's configuration (rig.ResolveLandingRemote). A unit test sets it to
+	// name a remote other than origin without building a bare repository.
+	landingRemote func(townRoot, rigName string) (string, error)
 	// sleep waits between push and close retries.
 	sleep func(time.Duration)
 	// retryDelays is the wait schedule before each re-attempt of the branch
@@ -133,7 +137,7 @@ func (r *doneRun) useRealSubmitDeps(o Options) {
 		localGate:      localGate,
 		checkBranch:    func(baseRef string, sub doneSubmission) error { return checkBranchForSubmit(r, sub, baseRef) },
 		rewriteBranch:  func(baseRef string, sub doneSubmission) error { return rewriteBranchForSubmit(r, sub, baseRef) },
-		pushSubmodules: func(baseRef string) { pushSubmoduleChanges(r.g, baseRef) },
+		pushSubmodules: func(baseRef string) error { return pushSubmoduleChanges(r.g, baseRef) },
 		sleep:          sleep,
 		retryDelays:    delays,
 	}

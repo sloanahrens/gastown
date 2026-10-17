@@ -14,8 +14,15 @@ type branchInfo struct {
 	Worker string // Worker name (polecat name)
 }
 
-// issuePattern matches issue IDs in branch names (e.g., "gt-xyz" or "gt-abc.1")
-var issuePattern = regexp.MustCompile(`([a-z]+-[a-z0-9]+(?:\.[0-9]+)?)`)
+// issuePattern matches a branch name that is exactly an issue ID (e.g.,
+// "gt-xyz" or "gt-abc.1"). It is anchored: a branch such as fix/add-retry
+// carries no issue, and an unanchored match would read "add-retry" as one.
+var issuePattern = regexp.MustCompile(`^([a-z]+-[a-z0-9]+(?:\.[0-9]+)?)$`)
+
+// embeddedIssuePattern finds an issue ID anywhere in a branch name. Only crew
+// branches (crew/<user>/<id>-<slug>) use it, and crewBeadFromBranch checks the
+// prefix it finds against the town's routes.
+var embeddedIssuePattern = regexp.MustCompile(`([a-z]+-[a-z0-9]+(?:\.[0-9]+)?)`)
 
 // parseBranchName extracts issue ID and worker from a branch name.
 //
@@ -36,7 +43,7 @@ func parseBranchName(branch string) branchInfo {
 		return info
 	}
 
-	// Try to find an issue ID pattern in the branch name
+	// A non-polecat branch carries an issue only when it is the bare id.
 	// Common patterns: prefix-xxx, prefix-xxx.n (subtask)
 	if matches := issuePattern.FindStringSubmatch(branch); len(matches) > 1 {
 		info.Issue = matches[1]

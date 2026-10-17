@@ -1222,6 +1222,29 @@ func TestSelfReportCleanupStatusAlwaysWrites(t *testing.T) {
 	})
 }
 
+// TestRunAmbiguityErrorWritesCleanupStatus: the errors Run stops on before it
+// reports anything done (an ambiguous hook, a failed auto-save) still write
+// cleanup_status to the agent bead and hand the original error back. Run itself
+// needs real git, which the unit tier does not run; the end-to-end check is
+// TestIntegrationRunAmbiguityErrorWritesCleanupStatus.
+func TestRunAmbiguityErrorWritesCleanupStatus(t *testing.T) {
+	t.Parallel()
+	for _, stop := range []error{
+		errors.New("multiple active assignments found for gastown/polecats/jasper; cannot infer issue from hook. Use --issue to disambiguate"),
+		errors.New("cannot auto-save unmerged conflicts: a.go"),
+	} {
+		updater := &doneFakeCleanupUpdater{}
+		got := failWithCleanupStatus(stop, unobservableGit{}, "fix/add-retry", updater, "gt-gastown-polecat-jasper", "")
+		if got != stop {
+			t.Errorf("failWithCleanupStatus returned %v, want %v", got, stop)
+		}
+		if updater.calls != 1 || updater.id != "gt-gastown-polecat-jasper" || updater.status != "unknown" {
+			t.Errorf("stop %q wrote cleanup_status %q to %q in %d call(s), want one write of %q to the agent bead",
+				stop, updater.status, updater.id, updater.calls, "unknown")
+		}
+	}
+}
+
 // TestMRVerificationSetsMRFailed verifies that if MR bead creation returns
 // success but the bead cannot be read back (verification fails), mrFailed
 // is set to true. This is the core fix for GH#1945: without verification,
@@ -1516,27 +1539,128 @@ func (f *fakeSubmodules) PushSubmoduleCommit(path, sha, remote string) error {
 
 // TestPushSubmoduleChanges pushes each changed submodule's new commit to its
 // origin before the parent push (gt-dzs), skips a removed submodule, and
-// treats a repo without submodules, or a failed listing or push, as a
-// warning rather than a stop.
+// treats a repo without submodules or a failed listing as a warning rather
+// than a stop. A refused submodule push stops the submit: the parent would
+// otherwise carry a gitlink to a commit the submodule's remote lacks.
 func TestPushSubmoduleChanges(t *testing.T) {
 	t.Parallel()
 	f := &fakeSubmodules{changes: []gitpkg.SubmoduleChange{
 		{Path: "libs/sub", OldSHA: "old", NewSHA: "0123456789abcdef"},
 		{Path: "libs/gone", OldSHA: "old", NewSHA: ""},
 	}}
-	pushSubmoduleChanges(f, "origin/main")
+	if err := pushSubmoduleChanges(f, "origin/main"); err != nil {
+		t.Errorf("pushSubmoduleChanges = %v, want nil", err)
+	}
 	if strings.Join(f.pushed, ",") != "libs/sub@0123456789abcdef to origin" {
 		t.Errorf("pushed %v, want only libs/sub's new commit to origin", f.pushed)
 	}
 
 	none := &fakeSubmodules{}
-	pushSubmoduleChanges(none, "origin/main")
+	if err := pushSubmoduleChanges(none, "origin/main"); err != nil {
+		t.Errorf("no submodules: %v, want nil", err)
+	}
 	failing := &fakeSubmodules{listErr: errors.New("no .gitmodules")}
-	pushSubmoduleChanges(failing, "origin/main")
+	if err := pushSubmoduleChanges(failing, "origin/main"); err != nil {
+		t.Errorf("failed listing: %v, want a warning only", err)
+	}
 	refused := &fakeSubmodules{changes: f.changes[:1], pushErr: errors.New("rejected")}
-	pushSubmoduleChanges(refused, "origin/main")
+	err := pushSubmoduleChanges(refused, "origin/main")
+	if err == nil {
+		t.Fatal("a refused submodule push returned nil; want the submit stopped")
+	}
+	for _, want := range []string{"libs/sub", "rejected"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
 	if len(none.pushed)+len(failing.pushed) != 0 || len(refused.pushed) != 1 {
 		t.Errorf("pushes: none %v, failing %v, refused %v", none.pushed, failing.pushed, refused.pushed)
+	}
+}
+
+// TestSubmitStopsBeforeTheParentPushWhenASubmodulePushFails: the branch is
+// neither pushed nor marked ready to land while a submodule commit is missing
+// from its remote.
+func TestSubmitStopsBeforeTheParentPushWhenASubmodulePushFails(t *testing.T) {
+	t.Parallel()
+	h := newSubmitHarness(t)
+	h.r.deps.pushSubmodules = func(string) error { return errors.New("pushing submodule libs/sub: rejected") }
+	err := h.submit()
+	if err == nil || !strings.Contains(err.Error(), "libs/sub") {
+		t.Fatalf("submit = %v, want the submodule refusal", err)
+	}
+	if len(h.repo.pushes) != 0 {
+		t.Errorf("pushed %v after a refused submodule push", h.repo.pushes)
+	}
+	if got := h.source(t).Status; got == string(beads.StatusClosed) || beads.HasLabel(h.source(t), "gt:ready-to-land") {
+		t.Errorf("bead status %s, labels %v: marked ready to land after a refused submodule push", got, h.source(t).Labels)
+	}
+}
+
+// TestParseBranchNameNonPolecatBranch: only a bare issue id names an issue on
+// a non-polecat branch. fix/add-retry used to yield "add-retry", a bogus bead
+// id when nothing was hooked.
+func TestParseBranchNameNonPolecatBranch(t *testing.T) {
+	t.Parallel()
+	for branch, want := range map[string]string{
+		"fix/add-retry":                 "",
+		"feature/routed-submit":         "",
+		"main":                          "",
+		"release-2":                     "release-2", // a bare id is an id
+		"gt-abc.2":                      "gt-abc.2",
+		"gt-abc":                        "gt-abc",
+		"polecat/jasper/gt-a8i3+xyz":    "gt-a8i3",
+		"polecat/jasper-abc":            "",
+		"crew/sloan/gt-3e7tk-crew-done": "",
+	} {
+		if got := parseBranchName(branch).Issue; got != want {
+			t.Errorf("parseBranchName(%q).Issue = %q, want %q", branch, got, want)
+		}
+	}
+}
+
+// TestCompleteWithoutCodeAlreadyClosedStaysClosed: a failed already-landed
+// check on a bead the polecat closed with gt bead close leaves it closed.
+// Reopening it to in_progress made the retry fail the zero-commit guard.
+func TestCompleteWithoutCodeAlreadyClosedStaysClosed(t *testing.T) {
+	t.Parallel()
+	h := newSubmitHarness(t)
+	h.repo.ahead = 0
+	h.bd.Seed(beads.Issue{ID: "bd-source", Title: "the work", Type: "task", Status: string(beads.StatusClosed), CloseReason: "no-changes: nothing to do"})
+	// Nothing is reachable from the target, so the landed check fails.
+	err := h.submit()
+	if err == nil || !strings.Contains(err.Error(), "cannot close no-code bead") {
+		t.Fatalf("submit = %v, want the failed landed check", err)
+	}
+	if got := h.source(t).Status; got != string(beads.StatusClosed) {
+		t.Errorf("bead status = %s, want it left closed", got)
+	}
+	// The retry, once the commit is reachable, passes the zero-commit guard.
+	h.repo.reachable["main"] = map[string]bool{"feature1": true}
+	if err := h.submit(); err != nil {
+		t.Errorf("retry: %v", err)
+	}
+}
+
+// TestCompleteWithoutCodeUsesLandingRemote: the no-code path checks the rig's
+// landing remote like the commits-ahead path does. With a landing remote other
+// than origin and an origin that lags, work that already landed is accepted.
+func TestCompleteWithoutCodeUsesLandingRemote(t *testing.T) {
+	t.Parallel()
+	h := newSubmitHarness(t)
+	h.r.deps.landingRemote = func(string, string) (string, error) { return "forgejo", nil }
+	h.repo.laggingRemotes = map[string]bool{"origin": true}
+	h.repo.ahead = 0
+	h.repo.origin[doneTestBranch] = "feature1"
+	h.repo.reachable["main"] = map[string]bool{"feature1": true}
+	if err := h.submit(); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if strings.Join(h.repo.reachableRemotes, ",") != "forgejo" {
+		t.Errorf("landed check asked %v, want only the landing remote forgejo", h.repo.reachableRemotes)
+	}
+	if got := h.source(t).Status; got != string(beads.StatusClosed) {
+		t.Errorf("bead status = %s, want closed", got)
 	}
 }
 

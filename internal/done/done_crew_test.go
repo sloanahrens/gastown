@@ -361,6 +361,10 @@ func TestCrewBeadFromBranch(t *testing.T) {
 		"crew/sloan/crew-done-submit":     "",
 		"crew/sloan/fix":                  "",
 		"gt-abc.2":                        "gt-abc.2",
+		// parseBranchName reads only a bare id; the embedded fallback finds
+		// the routed id inside a crew slug, and drops an unrouted one.
+		"crew/sloan/gt-3e7tk.2-crew-submit": "gt-3e7tk.2",
+		"feature/xx-abc-thing":              "",
 	} {
 		if got := crewBeadFromBranch(branch, routed); got != want {
 			t.Errorf("crewBeadFromBranch(%q) = %q, want %q", branch, got, want)
