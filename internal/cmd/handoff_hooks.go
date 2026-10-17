@@ -9,6 +9,10 @@ import (
 type restartPlan struct {
 	// Command is what the pane runs (buildRestartCommand).
 	Command string
+	// WorkDir is the directory the successor starts in (the cd in Command).
+	// The handoff marker and cooldown are recorded under it, where the
+	// successor's gt prime looks, not under the caller's cwd.
+	WorkDir string
 	// Hooks is the settings sync the respawn runs first; nil for a session
 	// without a role, which has no managed settings to sync.
 	Hooks *respawnHooks

@@ -1354,3 +1354,90 @@ func TestHandoffSessionDryRunSkipsMoleculeCleanup(t *testing.T) {
 		})
 	}
 }
+
+// A crew member who runs gt handoff from crew/max/src has a successor that
+// starts in crew/max and reads the marker there. Both the marker and the
+// cooldown go under the plan's workDir, not under the caller's cwd.
+func TestHandoffMarkerWrittenInPlanWorkDir(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	srcDir := filepath.Join(townRoot, "gastown", "crew", "max", "src")
+	if err := os.MkdirAll(srcDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := buildRestartPlan("gt-crew-max", restartOpts(townRoot, map[string]string{}))
+	if err != nil {
+		t.Fatalf("buildRestartPlan: %v", err)
+	}
+	crewDir := filepath.Join(townRoot, "gastown", "crew", "max")
+	if plan.WorkDir != crewDir {
+		t.Fatalf("plan.WorkDir = %q, want %q", plan.WorkDir, crewDir)
+	}
+
+	// srcDir is the caller's cwd, passed in rather than entered so the test
+	// stays parallel (the testpolicy bans chdir).
+	recordHandoffState(plan, srcDir, "gt-crew-max", "unit-cycle")
+
+	for _, name := range []string{constants.FileHandoffMarker, constants.FileLastHandoffTS} {
+		if _, err := os.Stat(filepath.Join(crewDir, constants.DirRuntime, name)); err != nil {
+			t.Errorf("%s not under the successor's workDir: %v", name, err)
+		}
+		if _, err := os.Stat(filepath.Join(srcDir, constants.DirRuntime, name)); err == nil {
+			t.Errorf("%s written under the caller's cwd %s", name, srcDir)
+		}
+	}
+}
+
+// The plan's workDir wins; without one the state stays in cwd, and with
+// neither there is no directory to write under.
+func TestHandoffStateDir(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		plan restartPlan
+		cwd  string
+		want string
+	}{
+		{"plan workDir wins", restartPlan{WorkDir: "/town/gastown/crew/max"}, "/town/gastown/crew/max/src", "/town/gastown/crew/max"},
+		{"empty plan falls back to cwd", restartPlan{}, "/town/gastown/crew/max/src", "/town/gastown/crew/max/src"},
+		{"neither is empty", restartPlan{}, "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := handoffStateDir(tt.plan, tt.cwd); got != tt.want {
+				t.Errorf("handoffStateDir() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// gt handoff --auto respawns nothing, but the post-compact prime still reads
+// the marker from the session's workDir, not from where the command ran.
+func TestAutoHandoffStateDir(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	srcDir := filepath.Join(townRoot, "gastown", "crew", "max", "src")
+	crewDir := filepath.Join(townRoot, "gastown", "crew", "max")
+	reg := handoffTestRegistry()
+
+	tests := []struct {
+		name     string
+		session  string
+		townRoot string
+		want     string
+	}{
+		{"crew session resolves to its workDir", "gt-crew-max", townRoot, crewDir},
+		{"unparseable session keeps cwd", "not-a-gt-session", townRoot, srcDir},
+		{"no town root keeps cwd", "gt-crew-max", "", srcDir},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := autoHandoffStateDir(reg, tt.session, tt.townRoot, srcDir); got != tt.want {
+				t.Errorf("autoHandoffStateDir() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
