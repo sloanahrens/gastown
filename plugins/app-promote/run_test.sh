@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Tests for plugins/app-promote/run.sh (gt-5xrmp): a curl stub serves canned
-# Forgejo Actions JSON and records every call, and a gt stub records the
+# Tests for plugins/app-promote/run.sh (gt-5xrmp, gt-vdhwk): a curl stub serves
+# canned Forgejo Actions JSON and records every call, and a gt stub records the
 # promotes, so the selection, the idempotence and the failure paths are
 # exercised without a Forgejo, a town database or a GitHub target. Run directly
 # or via the shell tier: scripts/tier-sweep.sh discovers it as a `*_test.sh`
@@ -24,7 +24,8 @@ VIEWER_TOKEN="viewer-token-not-to-be-printed"
 # curl serves the fixture the current case named and records the URL and whether
 # the token travelled in the mode-600 config file rather than an argv. The real
 # Forgejo is never reached: FORGEJO_API_URL points run.sh at a name that does
-# not resolve.
+# not resolve. A compare against main is the "is it on main" read and has its
+# own fixture, apart from the compare against last_promoted.
 mkdir -p "$TMP/bin"
 cat >"$TMP/bin/curl" <<'STUB'
 #!/usr/bin/env bash
@@ -54,6 +55,7 @@ fi
 shape=runs
 case "$url" in
   */actions/runs/*/jobs) shape=jobs ;;
+  */compare/main...*) shape=compare-main ;;
   */compare/*) shape=compare ;;
 esac
 if [ -n "${STUB_HTTP_STATUS:-}" ] && [ "$STUB_HTTP_STATUS" != 200 ]; then
@@ -81,30 +83,43 @@ mkdir -p "$STATE"
 # --- Fixtures -----------------------------------------------------------------
 GREEN="aaaa111122223333444455556666777788889999"
 OLDER="bbbb111122223333444455556666777788889999"
-NOT_GREEN="cccc111122223333444455556666777788889999"
+STAGING_ONLY="cccc111122223333444455556666777788889999"
 TOWN="$TMP/town"
 mkdir -p "$TOWN/.runtime/red-main" "$TMP/config/gt"
 printf 'FORGEJO_TOKEN=%s\n' "$VIEWER_TOKEN" >"$TMP/config/gt/forgejo-viewer.env"
 chmod 600 "$TMP/config/gt/forgejo-viewer.env"
 
-# A run list whose newest staging run on main succeeded, an older one that also
-# did, a newer one still running, and one of the same workflow named by its path
-# at a land ref. Nothing but the created stamp orders them.
-cat >"$STATE/runs.json" <<JSON
-{"total_count":5,"workflow_runs":[
- {"id":9,"workflow_id":"staging.yml","status":"success","event":"push","prettyref":"main","commit_sha":"$GREEN","created":"2026-10-09T03:14:42Z"},
- {"id":8,"workflow_id":"gate.yml","status":"success","event":"push","prettyref":"land/fr-x","commit_sha":"$GREEN","created":"2026-10-09T03:13:39Z"},
- {"id":7,"workflow_id":"staging.yml","status":"success","event":"push","prettyref":"main","commit_sha":"$OLDER","created":"2026-10-09T02:59:20Z"},
- {"id":6,"workflow_id":"staging.yml","status":"running","event":"push","prettyref":"main","commit_sha":"$NOT_GREEN","created":"2026-10-09T03:20:40Z"},
- {"id":5,"workflow_id":".forgejo/workflows/staging.yml","status":"success","event":"push","prettyref":"land/fr-y","commit_sha":"$OLDER","created":"2026-10-09T03:19:00Z"}
+# A run list whose newest successful deploy run is the tag v0.2.0 at GREEN, with
+# an older tag run that also succeeded, a newer tag run still running, a newer
+# successful staging run on main that must prove nothing, and a newer successful
+# deploy run at a branch. Nothing but the created stamp orders them.
+write_runs() {
+  cat >"$STATE/runs.json" <<JSON
+{"total_count":6,"workflow_runs":[
+ {"id":9,"workflow_id":"deploy.yml","status":"success","event":"push","prettyref":"v0.2.0","commit_sha":"$GREEN","created":"2026-10-09T03:14:42Z"},
+ {"id":8,"workflow_id":".forgejo/workflows/staging.yml","status":"success","event":"push","prettyref":"main","commit_sha":"$STAGING_ONLY","created":"2026-10-09T03:40:00Z"},
+ {"id":7,"workflow_id":"deploy.yml","status":"success","event":"push","prettyref":"v0.1.0","commit_sha":"$OLDER","created":"2026-10-09T02:59:20Z"},
+ {"id":6,"workflow_id":"deploy.yml","status":"running","event":"push","prettyref":"v0.3.0","commit_sha":"$STAGING_ONLY","created":"2026-10-09T03:20:40Z"},
+ {"id":5,"workflow_id":"gate.yml","status":"success","event":"push","prettyref":"land/fr-y","commit_sha":"$OLDER","created":"2026-10-09T03:19:00Z"}
 ]}
 JSON
-cat >"$STATE/jobs.json" <<'JSON'
+}
+write_jobs() {
+  cat >"$STATE/jobs.json" <<JSON
 [{"id":1,"name":"build","status":"success"},
- {"id":2,"name":"staging","status":"success","needs":["build"]}]
+ {"id":2,"name":"prod","status":"success","needs":["build"]},
+ {"id":3,"name":"prod-integration","status":"$1","needs":["prod"]}]
 JSON
+}
+write_runs
+write_jobs success
+# The commit is ahead of last_promoted and on main: the compare against last
+# holds commits, the compare against main holds none.
 cat >"$STATE/compare.json" <<'JSON'
 {"total_commits":2,"commits":[{},{}]}
+JSON
+cat >"$STATE/compare-main.json" <<'JSON'
+{"total_commits":0,"commits":[]}
 JSON
 
 # run_runs OUT [GT_RC GT_OUT CURL_FAIL HTTP_STATUS] runs run.sh against the
@@ -152,55 +167,105 @@ write_state() {
   fi
 }
 
-echo "app-promote: promotes the newest integration-green commit per rig"
+# expect_nothing NAME PATTERN checks that the run exited 0, logged PATTERN,
+# promoted nothing and recorded itself as skipped.
+expect_nothing() {
+  if [ "$rc" == 0 ] && [ ! -s "$STATE/promotes" ] && grep -qF "$2" "$TMP/out" \
+    && grep -qF "[plugin-result skipped]" "$TMP/out"; then
+    pass "$1"
+  else
+    fail "$1 (rc=$rc, promotes=$(tr '\n' '|' <"$STATE/promotes"), $(cat "$TMP/out"))"
+  fi
+}
+
+echo "app-promote: promotes the commit the newest prod-green release tag names"
 write_state fractals "$OLDER"
-write_state beaver "$GREEN"
 run_runs "$TMP/out"
-if [ "$rc" == 0 ] && grep -qF "rig fractals: promoted ${GREEN:0:8}" "$TMP/out"; then
-  pass "the rig whose last_promoted is behind is promoted to the newest green sha"
+if [ "$rc" == 0 ] && grep -qF "rig fractals: promoted ${GREEN:0:8} (v0.2.0)" "$TMP/out"; then
+  pass "prod-integration green and ahead: promoted to the tag's commit"
 else
-  fail "the rig whose last_promoted is behind is promoted (rc=$rc, $(cat "$TMP/out"))"
+  fail "prod-integration green and ahead: promoted (rc=$rc, $(cat "$TMP/out"))"
 fi
 if [ "$(cat "$STATE/promotes")" == "promote --rig fractals --sha $GREEN" ]; then
-  pass "gt promote is called with the rig and the green sha, and only for that rig"
+  pass "gt promote is called with the rig and the tag's commit"
 else
-  fail "gt promote is called with the rig and the green sha ($(tr '\n' '|' <"$STATE/promotes"))"
-fi
-if grep -qF "rig beaver: ${GREEN:0:8} is already promoted" "$TMP/out"; then
-  pass "the rig already at the green sha is left alone"
-else
-  fail "the rig already at the green sha is left alone ($(cat "$TMP/out"))"
+  fail "gt promote is called with the rig and the tag's commit ($(tr '\n' '|' <"$STATE/promotes"))"
 fi
 if grep -qF "/repos/sloan/fractals-nextjs/actions/runs/9/jobs" "$STATE/calls"; then
-  pass "the green run's jobs are read for the run the newest stamp names"
+  pass "the jobs read are the newest successful tag run's, not the newer staging or branch runs"
 else
-  fail "the green run's jobs are read ($(tr '\n' ' ' <"$STATE/calls"))"
+  fail "the jobs read are the newest successful tag run's ($(tr '\n' ' ' <"$STATE/calls"))"
+fi
+if grep -qF "/repos/sloan/fractals-nextjs/compare/main...$GREEN" "$STATE/calls"; then
+  pass "the commit is checked against the rig's Forgejo main"
+else
+  fail "the commit is checked against the rig's Forgejo main ($(tr '\n' ' ' <"$STATE/calls"))"
 fi
 no_token_printed "the viewer token reaches no output and no argv"
 
-echo "app-promote: nothing to promote records a skipped run"
-write_state fractals "$GREEN"
-write_state beaver "$GREEN"
+echo "app-promote: a first promotion has no last_promoted to compare with"
+write_state fractals ""
 run_runs "$TMP/out"
-if [ "$rc" == 0 ] && grep -qF "[plugin-result skipped]" "$TMP/out" && [ ! -s "$STATE/promotes" ]; then
-  pass "both rigs already promoted: no gt promote and the skip marker"
+if [ "$rc" == 0 ] && [ "$(cat "$STATE/promotes")" == "promote --rig fractals --sha $GREEN" ] \
+  && [ "$(grep -cF '/compare/' "$STATE/calls")" == 1 ]; then
+  pass "no red-main record: promoted after the one compare against main"
 else
-  fail "both rigs already promoted: no gt promote and the skip marker (rc=$rc, $(cat "$TMP/out"))"
+  fail "no red-main record: promoted (rc=$rc, $(cat "$TMP/out"); $(tr '\n' ' ' <"$STATE/calls"))"
 fi
 
-echo "app-promote: a green sha behind last_promoted is left alone"
-write_state fractals "$NOT_GREEN"
-write_state beaver "$NOT_GREEN"
+echo "app-promote: a failed prod-integration job proves nothing"
+write_jobs failure
+write_state fractals "$OLDER"
+run_runs "$TMP/out"
+expect_nothing "a run whose prod-integration job failed is not promoted" "has no successful 'prod-integration' job"
+
+echo "app-promote: a missing prod-integration job proves nothing"
+cat >"$STATE/jobs.json" <<'JSON'
+[{"id":1,"name":"build","status":"success"},
+ {"id":2,"name":"prod","status":"success","needs":["build"]}]
+JSON
+run_runs "$TMP/out"
+expect_nothing "a release run that predates the job is not promoted" "has no successful 'prod-integration' job"
+write_jobs success
+
+echo "app-promote: staging alone never promotes"
+cat >"$STATE/runs.json" <<JSON
+{"total_count":1,"workflow_runs":[
+ {"id":8,"workflow_id":".forgejo/workflows/staging.yml","status":"success","event":"push","prettyref":"main","commit_sha":"$STAGING_ONLY","created":"2026-10-09T03:40:00Z"}
+]}
+JSON
+run_runs "$TMP/out"
+expect_nothing "a green staging run and its jobs with no release run: nothing" "no successful deploy.yml run on a v* tag"
+if ! grep -qF "/actions/runs/8/jobs" "$STATE/calls"; then
+  pass "the staging run's jobs are never read"
+else
+  fail "the staging run's jobs are never read ($(tr '\n' ' ' <"$STATE/calls"))"
+fi
+
+echo "app-promote: a deploy run for a branch is not a release"
+cat >"$STATE/runs.json" <<JSON
+{"total_count":2,"workflow_runs":[
+ {"id":10,"workflow_id":"deploy.yml","status":"success","event":"workflow_dispatch","prettyref":"main","commit_sha":"$STAGING_ONLY","created":"2026-10-09T04:00:00Z"},
+ {"id":11,"workflow_id":"deploy.yml","status":"running","event":"push","prettyref":"v0.3.0","commit_sha":"$STAGING_ONLY","created":"2026-10-09T04:10:00Z"}
+]}
+JSON
+run_runs "$TMP/out"
+expect_nothing "a successful deploy.yml run at main, and a tag run still going: nothing" "no successful deploy.yml run on a v* tag"
+write_runs
+
+echo "app-promote: a commit equal to last_promoted is already on GitHub"
+write_state fractals "$GREEN"
+run_runs "$TMP/out"
+expect_nothing "the tag's commit is last_promoted: no gt promote and the skip marker" "is already promoted"
+
+echo "app-promote: a commit behind last_promoted is left alone"
+write_state fractals "$STAGING_ONLY"
 cat >"$STATE/compare.json" <<'JSON'
 {"total_commits":0,"commits":[]}
 JSON
 run_runs "$TMP/out"
-if [ "$rc" == 0 ] && [ ! -s "$STATE/promotes" ] && grep -qF "is not ahead of last_promoted" "$TMP/out"; then
-  pass "a sha behind last_promoted is reported and not promoted"
-else
-  fail "a sha behind last_promoted is reported and not promoted (rc=$rc, $(cat "$TMP/out"))"
-fi
-if [ "$(grep -cF '/repos/sloan/fractals-nextjs/compare/' "$STATE/calls")" == 1 ]; then
+expect_nothing "a sha behind last_promoted is reported and not promoted" "is not ahead of last_promoted"
+if [ "$(grep -cF "/repos/sloan/fractals-nextjs/compare/$STAGING_ONLY...$GREEN" "$STATE/calls")" == 1 ]; then
   pass "the comparison against last_promoted is one compare read"
 else
   fail "the comparison against last_promoted is one compare read ($(tr '\n' ' ' <"$STATE/calls"))"
@@ -209,32 +274,15 @@ cat >"$STATE/compare.json" <<'JSON'
 {"total_commits":2,"commits":[{},{}]}
 JSON
 
-echo "app-promote: a failed integration job is not integration-green"
-cat >"$STATE/jobs.json" <<'JSON'
-[{"id":1,"name":"build","status":"success"},
- {"id":2,"name":"staging","status":"failure","needs":["build"]}]
-JSON
+echo "app-promote: a release commit that is not on Forgejo main is refused"
 write_state fractals "$OLDER"
-run_runs "$TMP/out"
-if [ "$rc" == 0 ] && [ ! -s "$STATE/promotes" ] && grep -qF "has no successful 'staging' job" "$TMP/out"; then
-  pass "a run whose staging job failed is not promoted"
-else
-  fail "a run whose staging job failed is not promoted (rc=$rc, $(cat "$TMP/out"))"
-fi
-
-echo "app-promote: a missing integration job is not integration-green"
-cat >"$STATE/jobs.json" <<'JSON'
-[{"id":1,"name":"build","status":"success"}]
+cat >"$STATE/compare-main.json" <<'JSON'
+{"total_commits":1,"commits":[{}]}
 JSON
 run_runs "$TMP/out"
-if [ "$rc" == 0 ] && [ ! -s "$STATE/promotes" ] && grep -qF "has no successful 'staging' job" "$TMP/out"; then
-  pass "a run with no staging job is not promoted"
-else
-  fail "a run with no staging job is not promoted (rc=$rc, $(cat "$TMP/out"))"
-fi
-cat >"$STATE/jobs.json" <<'JSON'
-[{"id":1,"name":"build","status":"success"},
- {"id":2,"name":"staging","status":"success","needs":["build"]}]
+expect_nothing "a tag whose commit main does not hold is not promoted" "is not on main"
+cat >"$STATE/compare-main.json" <<'JSON'
+{"total_commits":0,"commits":[]}
 JSON
 
 echo "app-promote: an unreadable Forgejo fails closed"
@@ -264,7 +312,6 @@ mv "$TMP/viewer.env" "$TMP/config/gt/forgejo-viewer.env"
 
 echo "app-promote: a refused promotion is this run's nothing-to-do"
 write_state fractals "$OLDER"
-write_state beaver "$GREEN"
 run_runs "$TMP/out" 1 "Error: rig fractals names no merge_queue.forgejo.promote_target, so it does not promote"
 if [ "$rc" == 0 ] && grep -qF "rig fractals: not promotable: Error: rig fractals names no merge_queue" "$TMP/out" \
   && grep -qF "[plugin-result skipped]" "$TMP/out"; then

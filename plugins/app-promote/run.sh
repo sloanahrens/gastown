@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# app-promote/run.sh — advance each configured app rig's GitHub main to its
-# newest integration-green main commit.
+# app-promote/run.sh — advance each configured app rig's GitHub main to the
+# newest commit a release proved on prod: GitHub follows prod.
 #
-# What "integration-green" means, what it refuses and the manual procedure:
-# plugin.md and README.md beside this script (gt-5xrmp).
+# What "proved on prod" means, what it refuses and the manual procedure:
+# plugin.md and README.md beside this script (gt-5xrmp, gt-vdhwk).
 
 set -euo pipefail
 
@@ -27,14 +27,16 @@ TOWN_ROOT="${GT_TOWN_ROOT:-${GT_ROOT:-$HOME/gt}}"
 API_URL="${FORGEJO_API_URL:-http://127.0.0.1:3000/api/v1}"
 TOKEN_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/gt/forgejo-viewer.env"
 
-# The workflow whose run on main makes a commit integration-green, the ref it
-# deploys from, and the job that proves the deployed stack. A run at any other
-# ref has nothing on main to deploy (staging.yml's own stale-ref step refuses
-# it), so it proves nothing; the job is a column of rigs.conf because a
-# workflow that names it otherwise would read as a repo that never goes green.
-STAGING_WORKFLOW="staging.yml"
-MAIN_REF="main"
-DEFAULT_JOB="staging"
+# The workflow whose run on a release tag deploys that commit to prod, the tag
+# prefix that marks a run as a release (deploy.yml triggers on v*), the branch
+# the released commit must be on, and the job that runs the integration tier
+# against prod. A run at a branch is not a release and proves nothing about what
+# prod serves; the job is a column of rigs.conf because a workflow that names it
+# otherwise would read as a repo that never goes green.
+DEPLOY_WORKFLOW="deploy.yml"
+TAG_PREFIX="v"
+MAIN_BRANCH="main"
+DEFAULT_JOB="prod-integration"
 
 # The run list is asked bounded; Forgejo 16.0.5 honors `limit` only alongside
 # `page` and answers the repo's whole history otherwise
@@ -107,34 +109,35 @@ with open(sys.argv[1]) as f:
 ' "$state" || fail "rig $1: cannot read the red-main record $state"
 }
 
-# pick_green_run reads a run list on stdin and prints "<sha>\t<run id>" for the
-# newest run of the staging workflow on main that succeeded, or nothing. Newest
-# is by the run's created stamp, not the order the API sent (the dashboard sorts
-# the same way, internal/dashboard/deploys.go).
-pick_green_run() {
+# pick_release_run reads a run list on stdin and prints "<sha>\t<run id>\t<tag>"
+# for the newest run of the deploy workflow on a release tag that succeeded, or
+# nothing. Newest is by the run's created stamp, not the order the API sent (the
+# dashboard sorts the same way, internal/dashboard/deploys.go). A tag run's
+# prettyref is the tag itself and a branch run's is the branch.
+pick_release_run() {
   python3 -I -c '
 import json, sys
 
-workflow, ref = sys.argv[1], sys.argv[2]
+workflow, prefix = sys.argv[1], sys.argv[2]
 data = json.load(sys.stdin)
 best = None
 for run in data.get("workflow_runs") or []:
     if str(run.get("workflow_id") or "").rsplit("/", 1)[-1] != workflow:
         continue
-    if (run.get("prettyref") or "") != ref:
+    if not (run.get("prettyref") or "").startswith(prefix):
         continue
     if (run.get("status") or "") != "success":
         continue
     if best is None or (run.get("created") or "") > (best.get("created") or ""):
         best = run
 if best is not None and best.get("commit_sha") and best.get("id"):
-    print("%s\t%s" % (best["commit_sha"], best["id"]))
-' "$STAGING_WORKFLOW" "$MAIN_REF"
+    print("%s\t%s\t%s" % (best["commit_sha"], best["id"], best["prettyref"]))
+' "$DEPLOY_WORKFLOW" "$TAG_PREFIX"
 }
 
 # has_integration_job JOB reads a run's jobs on stdin and prints yes when JOB is
 # among them and succeeded. A run the API calls successful can still lack it:
-# the workflow changed, or the job is named otherwise in this rig.
+# the workflow predates the job, or the job is named otherwise in this rig.
 has_integration_job() {
   python3 -I -c '
 import json, sys
@@ -147,17 +150,16 @@ print("yes" if any(
 ' "$1"
 }
 
-# is_ahead reads a Forgejo compare of last_promoted...green on stdin and prints
-# yes when the green commit is ahead. 16.0.5 sends no comparison status, only
-# the commits the second holds that the first does not, so a nonempty list is
-# the whole of "ahead": both commits are on the rig's main, where history is
-# linear and a commit that is not ahead can only be behind, which the same list
-# reports empty.
-is_ahead() {
+# compare_count reads a Forgejo compare of A...B on stdin and prints how many
+# commits B holds that A does not. 16.0.5 sends no comparison status, only those
+# commits, so the count is the whole answer: nonzero is "B is ahead of A", zero
+# is "B is A or an ancestor of A". On the rig's main, where history is linear, a
+# commit that is not ahead of last_promoted can only be behind it.
+compare_count() {
   python3 -I -c '
 import json, sys
 
-print("yes" if int(json.load(sys.stdin).get("total_commits") or 0) > 0 else "no")
+print(int(json.load(sys.stdin).get("total_commits") or 0))
 '
 }
 
@@ -174,18 +176,17 @@ while read -r rig repo job; do
   checked=$((checked + 1))
 
   api "/repos/$repo/actions/runs?$RUNS_PAGE"
-  pick="$(pick_green_run <"$RESP_FILE")" || fail "rig $rig: cannot read the run list of $repo"
+  pick="$(pick_release_run <"$RESP_FILE")" || fail "rig $rig: cannot read the run list of $repo"
   if [ -z "$pick" ]; then
-    log "rig $rig: no successful $STAGING_WORKFLOW run on $MAIN_REF in $repo"
+    log "rig $rig: no successful $DEPLOY_WORKFLOW run on a $TAG_PREFIX* tag in $repo"
     continue
   fi
-  sha="${pick%%$'\t'*}"
-  run_id="${pick##*$'\t'}"
+  IFS=$'\t' read -r sha run_id tag <<<"$pick"
   short="${sha:0:8}"
 
   api "/repos/$repo/actions/runs/$run_id/jobs"
   if [ "$(has_integration_job "$job" <"$RESP_FILE")" != yes ]; then
-    log "rig $rig: run $run_id ($short) has no successful '$job' job; not integration-green"
+    log "rig $rig: run $run_id ($tag, $short) has no successful '$job' job; prod is not proven"
     continue
   fi
 
@@ -194,9 +195,16 @@ while read -r rig repo job; do
     log "rig $rig: $short is already promoted; nothing to do"
     continue
   fi
+  # A tag can name a commit that never reached the rig's main; gt promote
+  # refuses that too, but the plugin says so without calling it.
+  api "/repos/$repo/compare/$MAIN_BRANCH...$sha"
+  if [ "$(compare_count <"$RESP_FILE")" -gt 0 ]; then
+    log "rig $rig: $tag ($short) is not on $MAIN_BRANCH in $repo; not promoting"
+    continue
+  fi
   if [ -n "$last" ]; then
     api "/repos/$repo/compare/$last...$sha"
-    if [ "$(is_ahead <"$RESP_FILE")" != yes ]; then
+    if [ "$(compare_count <"$RESP_FILE")" -eq 0 ]; then
       log "rig $rig: $short is not ahead of last_promoted ${last:0:8}; nothing to do"
       continue
     fi
@@ -206,7 +214,7 @@ while read -r rig repo job; do
   out="$(cd "$TOWN_ROOT" && gt promote --rig "$rig" --sha "$sha" 2>&1)" || rc=$?
   cause="$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tail -n 1 || true)"
   if [ "$rc" -eq 0 ]; then
-    log "rig $rig: promoted $short"
+    log "rig $rig: promoted $short ($tag)"
     promoted=$((promoted + 1))
     continue
   fi

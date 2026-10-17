@@ -1,6 +1,6 @@
 +++
 name = "app-promote"
-description = "Promote each app rig's newest integration-green main commit to its GitHub target"
+description = "Promote each app rig's newest prod-proven release commit to its GitHub target (GitHub follows prod)"
 version = 1
 
 [gate]
@@ -18,35 +18,38 @@ timeout = "5m"
 
 # App Promote
 
-Advances each app rig's GitHub `main` to the newest commit on the rig's Forgejo
-`main` that the deployed staging stack proved, so GitHub tracks what staging has
-shown without waiting for a Gas Town landing (gt-5xrmp). The rigs it promotes
-and their Forgejo repositories are in `rigs.conf` beside this file.
+Advances each app rig's GitHub `main` to the commit of the newest release that
+the integration tier proved on prod: GitHub follows prod (dv-jokk, gt-vdhwk).
+The rigs it promotes and their Forgejo repositories are in `rigs.conf` beside
+this file.
 
 Before running it by hand, installing it, or reading a failure it raised, read
 `README.md` beside this file.
 
-## What counts as integration-green
+## What counts as proved on prod
 
-A commit is integration-green when its `.forgejo/workflows/staging.yml` run on
-`main` succeeded and its integration job — the `staging` job that applies the
-built digest to the staging stack and checks its health — succeeded with it. The
-runs, their refs and their jobs come from the Forgejo Actions API through the
-read-only viewer token, the same endpoints the dashboard's Deploys reader uses
+A commit is proved on prod when its release run — `.forgejo/workflows/deploy.yml`
+on a `v*` tag — succeeded and its `prod-integration` job, the app's integration
+tier run against the prod URL after the release deployed, succeeded with it. A
+staging run proves nothing here: a commit that only staging has shown is never
+promoted, and neither is a `deploy.yml` run at a branch. The runs, their refs and
+their jobs come from the Forgejo Actions API through the read-only viewer token,
+the same endpoints the dashboard's Deploys reader uses
 (`internal/dashboard/deploys.go`); this plugin holds no GitHub credential, and
 `gt promote` reads the rig's own deploy key.
 
-The job name is a column of `rigs.conf`, because a workflow whose integration
-job is named otherwise would otherwise read as a repo that never goes green.
+The job name is the optional third column of `rigs.conf`, because a workflow
+whose job is named otherwise would read as a repo that never goes green.
 
 ## What it promotes
 
-The newest integration-green commit, and only when it is ahead of the rig's
-`last_promoted` (the record `gt promote`, the landing verdict and the tier sweep
-all write: `.runtime/red-main/<rig>.json` under the town root). A commit equal to
-`last_promoted` is already on GitHub; one behind it was called green after a
-newer commit had already been promoted, and pushing it would roll GitHub back.
-Both are nothing to do, and a run with nothing to do across every rig prints
+The commit of the newest such release, and only when it is on the rig's Forgejo
+`main` and ahead of the rig's `last_promoted` (the record `gt promote`, the
+landing verdict and the tier sweep all write: `.runtime/red-main/<rig>.json`
+under the town root). A commit equal to `last_promoted` is already on GitHub; one
+behind it was proved after a newer commit had already been promoted, and pushing
+it would roll GitHub back; one not on `main` is not what the rig ships. Each is
+logged and skipped, and a run with nothing to do across every rig prints
 `[plugin-result skipped]`, so the receipt says so.
 
 `gt promote` is idempotent, so a second run of the same sha is harmless: it
