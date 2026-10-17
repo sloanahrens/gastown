@@ -395,7 +395,8 @@ func TestCostPanelDayLineAveragesTheLastSevenCompleteDays(t *testing.T) {
 
 // A history shorter than a week says how many days its mean covers, a day the
 // report listed without a figure reads as a dash rather than as nothing spent,
-// and a negative day reads as the balance rise it is (gt-53s6m).
+// a negative day reads as the balance rise it is, and a rise is left out of the
+// mean rather than read as a cheaper rate (gt-53s6m, gt-3ux9j).
 func TestCostPanelDayLineWordsAShortHistory(t *testing.T) {
 	t.Parallel()
 
@@ -423,8 +424,9 @@ func TestCostPanelDayLineWordsAShortHistory(t *testing.T) {
 	if got, want := day(1.0, 2.0, nil).Text, "today – · yesterday $2.00 · 7-day avg $1.50/day (2 days)"; got != want {
 		t.Errorf("a day with no figure = %q, want %q", got, want)
 	}
-	// Today alone: no yesterday and nothing to average, both dashes.
-	if got, want := day(3.0).Text, "today $3.00 · yesterday – · 7-day avg –/day"; got != want {
+	// Today alone: no yesterday to name, and nothing behind today to average, so
+	// neither the yesterday figure nor a mean is drawn (gt-3ux9j).
+	if got, want := day(3.0).Text, "today $3.00 · yesterday –"; got != want {
 		t.Errorf("a one-day history = %q, want %q", got, want)
 	}
 	// A negative day is a balance rise here, as on the credits line.
@@ -434,6 +436,17 @@ func TestCostPanelDayLineWordsAShortHistory(t *testing.T) {
 	}
 	if !strings.Contains(rise.Title, "03-04 +$37.33 added") {
 		t.Errorf("the day line's hover = %q, want the rise worded as one", rise.Title)
+	}
+	// A rise inside the window is not a day's spend, so the mean is taken over
+	// the spend days alone rather than dragged below the rate they show
+	// (gt-3ux9j).
+	if got, want := day(1.0, -37.33, 3.0, 4.0).Text, "today $4.00 · yesterday $3.00 · 7-day avg $2.00/day (2 days)"; got != want {
+		t.Errorf("a rise in the mean's window = %q, want %q", got, want)
+	}
+	// Every day behind today rose: there is no spend to average, so the mean is
+	// left off rather than drawn as a rate the report did not send (gt-3ux9j).
+	if got, want := day(-1.0, -2.0, 3.0).Text, "today $3.00 · yesterday +$2.00 added"; got != want {
+		t.Errorf("a window of rises = %q, want %q", got, want)
 	}
 }
 
