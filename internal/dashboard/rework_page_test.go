@@ -144,6 +144,30 @@ func TestCostPanelHoversTheMeanOMTime(t *testing.T) {
 	}
 }
 
+// An unreadable daemon log is named above the table, which still draws: the
+// review figures are the review log's own and the missing part is the om time.
+func TestCostPanelNamesAnUnreadableOMTimeLog(t *testing.T) {
+	t.Parallel()
+
+	s := costSpendUsage()
+	r := reworkPayload()
+	r["om_unavailable"] = true
+	s["rework"] = r
+	kids, _ := drawCostChildren(t, s)
+	var named, tables int
+	for _, k := range kids {
+		if k.Class == "badc" && strings.Contains(k.Text, "daemon log could not be read") {
+			named++
+		}
+		if k.Tag == "TABLE" {
+			tables++
+		}
+	}
+	if named != 1 || tables == 0 {
+		t.Errorf("drew %d naming lines and %d tables, want one line and the table", named, tables)
+	}
+}
+
 // A read that failed is named, and a read still pending is reading; neither
 // draws a table, and the panel's section contract stays.
 func TestCostPanelNamesTheReworkStates(t *testing.T) {
