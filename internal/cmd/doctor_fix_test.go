@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doctor"
+	"github.com/steveyegge/gastown/internal/doltserver"
 )
 
 // TestDoctorHasNoBlanketFixFlag locks in the split (gt-638go.3): the town-wide
@@ -65,6 +68,21 @@ func TestAuthorizeDoctorFixRefusesAgentWithoutAuthorization(t *testing.T) {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal should mention %q, got: %v", want, err)
 		}
+	}
+}
+
+// TestAuthorizeDoctorFixRefusesUnidentifiedActor covers gt-2kwxr: with no env
+// identity and no terminal the actor is the unidentified sentinel, and the
+// refusal must hold even when the named bead is one it could have created.
+func TestAuthorizeDoctorFixRefusesUnidentifiedActor(t *testing.T) {
+	t.Parallel()
+	actor, isAgent := resolveDestructiveActor("", false)
+	if !isAgent || !doltserver.IsUnidentifiedActor(actor) {
+		t.Fatalf("resolveDestructiveActor(\"\", false) = %q, %v; want the unidentified agent", actor, isAgent)
+	}
+	issue := &beads.Issue{ID: "gt-1", Status: "open", CreatedBy: "self-made", Labels: []string{doctor.FixAuthLabel}}
+	if err := doctor.ValidateFixAuthorization(issue, actor); !errors.Is(err, doctor.ErrUnidentifiedFixActor) {
+		t.Errorf("error = %v, want doctor.ErrUnidentifiedFixActor", err)
 	}
 }
 
