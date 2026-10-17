@@ -163,3 +163,55 @@ func TestRunDoctorUnknownCheckAmongKnown(t *testing.T) {
 		t.Errorf("checks after --check daemon = %d, want exactly daemon", len(got))
 	}
 }
+
+// 'gt doctor clone-divergence' ignored its argument and ran every check; a
+// positional name now selects like --check does, and an unknown one is refused
+// the same way (gt-m2lqo).
+func TestDoctorPositionalCheckNames(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		flag     []string
+		args     []string
+		wantErr  string
+		wantRuns []string
+	}{
+		{name: "positional alone", args: []string{"daemon"}, wantRuns: []string{"daemon"}},
+		{name: "flag alone", flag: []string{"daemon"}, wantRuns: []string{"daemon"}},
+		{name: "flag and positional", flag: []string{"daemon"}, args: []string{"disk-space"}, wantRuns: []string{"daemon", "disk-space"}},
+		{name: "unknown positional", args: []string{"dameon"}, wantErr: "dameon"},
+		{name: "unknown positional beside known", args: []string{"daemon", "dameon"}, wantErr: "dameon"},
+		{name: "unknown positional beside known flag", flag: []string{"daemon"}, args: []string{"dameon"}, wantErr: "dameon"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := newDoctorForCommand("")
+			err := selectDoctorChecks(d, doctorCheckNames(tc.flag, tc.args))
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("selectDoctorChecks accepted %v %v, want an error naming %s", tc.flag, tc.args, tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Errorf("error = %q, want it to name %s", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("selectDoctorChecks(%v, %v) = %v, want nil", tc.flag, tc.args, err)
+			}
+			got := make(map[string]bool)
+			for _, c := range d.Checks() {
+				got[c.Name()] = true
+			}
+			if len(got) != len(tc.wantRuns) {
+				t.Errorf("checks after selection = %v, want exactly %v", got, tc.wantRuns)
+			}
+			for _, name := range tc.wantRuns {
+				if !got[name] {
+					t.Errorf("check %q missing after selection, have %v", name, got)
+				}
+			}
+		})
+	}
+}
