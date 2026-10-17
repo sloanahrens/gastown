@@ -848,9 +848,12 @@ func (r *Router) queryAgentsInDir(beadsDir, descContains string) ([]*agentBead, 
 // falls back to the agent ID naming convention, as beads itself does for the
 // same omits-metadata output. Their full record — description, label and
 // type — then comes from one batched `bd show`, which the client-side rig
-// and role filters cannot do without. A show failure leaves the bare wisp in
-// place and is reported, so the caller can tell "no such agent" from "could
-// not ask".
+// and role filters cannot do without. That read also decides the ID-shape
+// guess: a wisp the convention merely looks like but the full record does
+// not carry gt:agent evidence on is a task whose ID happens to read like an
+// agent's, not an agent, and is dropped. A show failure is reported and
+// leaves only the wisps their own record confirmed, so the caller can tell
+// "no such agent" from "could not ask" without sending to a guess.
 func (r *Router) wispAgentBeads(beadsDir string, out []byte) ([]*agentBead, error) {
 	wisps, err := parseWispList(out)
 	if err != nil {
@@ -859,15 +862,22 @@ func (r *Router) wispAgentBeads(beadsDir string, out []byte) ([]*agentBead, erro
 
 	var agents []*agentBead
 	var needFull []string
+	unconfirmed := make(map[string]bool)
 	for _, wisp := range wisps {
 		if wisp == nil || wisp.ID == "" {
 			continue
 		}
-		if !isAgentBeadEntry(wisp) && !isAgentBeadIDByShape(wisp.ID) {
+		confirmed := isAgentBeadEntry(wisp)
+		if !confirmed && !isAgentBeadIDByShape(wisp.ID) {
 			continue
 		}
 		agents = append(agents, wisp)
-		if wisp.Description == "" {
+		if !confirmed {
+			unconfirmed[wisp.ID] = true
+		}
+		// An unconfirmed wisp needs the full record even when it carries a
+		// description: shape alone is not evidence of an agent.
+		if !confirmed || wisp.Description == "" {
 			needFull = append(needFull, wisp.ID)
 		}
 	}
@@ -881,11 +891,11 @@ func (r *Router) wispAgentBeads(beadsDir string, out []byte) ([]*agentBead, erro
 	showArgs = append(showArgs, "--json")
 	showOut, showErr := runBdCommand(ctx, r.bd, showArgs, filepath.Dir(beadsDir), beadsDir)
 	if showErr != nil {
-		return agents, fmt.Errorf("read wisp agents in %s: %w", beadsDir, showErr)
+		return confirmedAgents(agents, unconfirmed), fmt.Errorf("read wisp agents in %s: %w", beadsDir, showErr)
 	}
 	var full []*agentBead
 	if err := json.Unmarshal(showOut, &full); err != nil {
-		return agents, fmt.Errorf("parse wisp agents in %s: %w", beadsDir, err)
+		return confirmedAgents(agents, unconfirmed), fmt.Errorf("parse wisp agents in %s: %w", beadsDir, err)
 	}
 	byID := make(map[string]*agentBead, len(full))
 	for _, bead := range full {
@@ -906,7 +916,21 @@ func (r *Router) wispAgentBeads(beadsDir string, out []byte) ([]*agentBead, erro
 			agent.Labels = bead.Labels
 		}
 	}
-	return agents, nil
+	return confirmedAgents(agents, unconfirmed), nil
+}
+
+// confirmedAgents drops the wisps that only the ID-shape fallback admitted
+// and the enriched record did not confirm as agents. It is also what keeps a
+// show that failed from handing back bare guesses as agents.
+func confirmedAgents(agents []*agentBead, unconfirmed map[string]bool) []*agentBead {
+	confirmed := agents[:0]
+	for _, agent := range agents {
+		if unconfirmed[agent.ID] && !isAgentBeadEntry(agent) {
+			continue
+		}
+		confirmed = append(confirmed, agent)
+	}
+	return confirmed
 }
 
 // parseWispList decodes `bd mol wisp list --json`: an object of

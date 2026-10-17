@@ -1199,6 +1199,119 @@ func TestQueryAgentsInDirWispWrapperWithoutMetadata(t *testing.T) {
 	}
 }
 
+// TestQueryAgentsInDirDropsShapeOnlyNonAgentWisp: the ID-shape fallback
+// admits any wisp whose ID reads like an agent's, so bd show has to decide.
+// A task named like one ("fix-polecat-crash" puts the role marker where a
+// rig name goes) that carries no gt:agent evidence is not an agent and must
+// not resolve as a send target (gt-9hxog).
+func TestQueryAgentsInDirDropsShapeOnlyNonAgentWisp(t *testing.T) {
+	t.Parallel()
+	bd := wispAgentScript(
+		`{"count":1,"wisps":[{"id":"gt-fix-polecat-crash","status":"open"}]}`,
+		`[]`,
+		`[{"id":"gt-fix-polecat-crash","description":"polecats crash on exit","status":"open","issue_type":"task"}]`,
+		0,
+	)
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	got, err := r.queryAgentsInDir(t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("queryAgentsInDir: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("queryAgentsInDir() = %+v, want the shape-only wisp bd show did not confirm dropped", got)
+	}
+}
+
+// TestQueryAgentsInDirShapeWispWithDescriptionConfirmed: an ID-shape match
+// is not evidence of an agent on its own, so it is read in full even when
+// the wisp list already printed a description; that read confirms the
+// agent and supplies the fields the filters need (gt-9hxog).
+func TestQueryAgentsInDirShapeWispWithDescriptionConfirmed(t *testing.T) {
+	t.Parallel()
+	bd := wispAgentScript(
+		`{"count":1,"wisps":[{"id":"gt-gastown-polecat-nux","status":"open","description":"polecat nux"}]}`,
+		`[]`,
+		`[{"id":"gt-gastown-polecat-nux","description":"polecat nux\n\nrole_type: polecat\nrig: gastown","status":"open","issue_type":"task","labels":["gt:agent"]}]`,
+		0,
+	)
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	got, err := r.queryAgentsInDir(t.TempDir(), "")
+	if err != nil {
+		t.Fatalf("queryAgentsInDir: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gt-gastown-polecat-nux" {
+		t.Fatalf("queryAgentsInDir() = %+v, want the agent bd show confirmed", got)
+	}
+	if !strings.Contains(got[0].Description, "rig: gastown") {
+		t.Errorf("description = %q, want the batched bd show to fill it in", got[0].Description)
+	}
+}
+
+// TestQueryAgentsInDirShowFailureDropsBareWisps: when the confirming read
+// fails, the shape-only wisp is a guess, not an agent. It must not be
+// returned as a send target, and with nothing else found the failure has to
+// surface (gt-9hxog).
+func TestQueryAgentsInDirShowFailureDropsBareWisps(t *testing.T) {
+	t.Parallel()
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		argv := strings.Join(c.Args, " ")
+		switch {
+		case strings.HasPrefix(argv, "mol wisp list"):
+			return `{"count":1,"wisps":[{"id":"gt-gastown-polecat-nux","status":"open"}]}`, "", 0
+		case strings.HasPrefix(argv, "show "):
+			return "", "Error: no issue found matching \"gt-gastown-polecat-nux\"\n", 1
+		}
+		return "[]", "", 0
+	}}
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	got, err := r.queryAgentsInDir(t.TempDir(), "")
+	if err == nil {
+		t.Fatal("queryAgentsInDir() = nil error, want the failed bd show reported")
+	}
+	if len(got) != 0 {
+		t.Fatalf("queryAgentsInDir() = %+v, want no bare shape-only wisp sent to", got)
+	}
+}
+
+// TestQueryAgentsInDirMalformedWispList: a wisp list the JSON decoder cannot
+// read is a query failure, not an empty town.
+func TestQueryAgentsInDirMalformedWispList(t *testing.T) {
+	t.Parallel()
+	bd := wispAgentScript(`{"count":1,"wisps":[`, `[]`, ``, 0)
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	got, err := r.queryAgentsInDir(t.TempDir(), "")
+	if err == nil || len(got) != 0 {
+		t.Fatalf("queryAgentsInDir() = %+v, %v, want the malformed wisp list reported", got, err)
+	}
+}
+
+// TestQueryAgentsInDirMalformedShowOutput: the confirming read failing to
+// parse is reported like a failed one, and no bare guess is returned.
+func TestQueryAgentsInDirMalformedShowOutput(t *testing.T) {
+	t.Parallel()
+	bd := wispAgentScript(
+		`{"count":1,"wisps":[{"id":"gt-gastown-polecat-nux","status":"open"}]}`,
+		`[]`,
+		`not json`,
+		0,
+	)
+	r := NewRouterWithTownRoot(t.TempDir(), t.TempDir(), testPrefixRegistry())
+	r.bd = bd.run
+
+	got, err := r.queryAgentsInDir(t.TempDir(), "")
+	if err == nil || len(got) != 0 {
+		t.Fatalf("queryAgentsInDir() = %+v, %v, want the unparsable bd show reported", got, err)
+	}
+}
+
 // TestQueryAgentsInDirWispDescFilter: the description filter bd applies to
 // the issues table has to be applied client-side to wisp agents, which is
 // what @rig and @polecats resolution rely on.
