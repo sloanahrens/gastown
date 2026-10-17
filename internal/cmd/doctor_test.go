@@ -102,6 +102,30 @@ func TestDoctorHelpListsOnlyRegisteredChecks(t *testing.T) {
 	}
 }
 
+// TestDoctorHelpDescribesMayorCloneExistsAsEitherRepo pins the help line to what
+// the check does: a rig passes on its shared .repo.git alone (gt-9gnar), so the
+// line must not claim the mayor/rig clone is what is verified (gt-7dfez).
+func TestDoctorHelpDescribesMayorCloneExistsAsEitherRepo(t *testing.T) {
+	t.Parallel()
+
+	const prefix = "  - mayor-clone-exists "
+	found := false
+	for line := range strings.SplitSeq(doctorCmd.Long, "\n") {
+		if !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		found = true
+		for _, want := range []string{".repo.git", "mayor/rig"} {
+			if !strings.Contains(line, want) {
+				t.Errorf("`gt doctor --help` line for mayor-clone-exists %q does not name %q", line, want)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("no mayor-clone-exists line in the doctor help text")
+	}
+}
+
 // registeredCheckNames is the set of names a doctor instance holds.
 func registeredCheckNames(d *doctor.Doctor) map[string]bool {
 	names := make(map[string]bool, len(d.Checks()))
