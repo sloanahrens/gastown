@@ -29,11 +29,13 @@ type rigAdoptRequest struct {
 // database uses, or "" when it has none to detect. flagPrefix is --prefix; a
 // detected prefix that disagrees with it is an error.
 //
-// It reads the same .beads the adopt goes on to use: the rig-level one, else
-// mayor/rig's. It asks bd for issue_prefix first and falls back to the
-// "beads_<prefix>" dolt_database name in metadata.json, which survives a clone
-// because dolt/ is gitignored since bd v0.50+. configGet is the bd lookup, a
-// parameter so a test can answer without a bd binary.
+// It reads the same .beads directories the adopt goes on to use, rig-level
+// first and then mayor/rig's, and takes the first prefix either yields. A
+// .beads without a metadata.json has nothing to detect and the next one is
+// tried; one whose metadata.json cannot be read or parsed, or whose backend
+// cannot name a prefix, is an error rather than a rig registered under a
+// prefix derived from its name. configGet is the bd lookup, a parameter so a
+// test can answer without a bd binary.
 func detectAdoptBeadsPrefix(rigPath, flagPrefix string, configGet func(workDir string) (string, error)) (string, error) {
 	for _, beadsDir := range []string{
 		filepath.Join(rigPath, ".beads"),
@@ -42,21 +44,42 @@ func detectAdoptBeadsPrefix(rigPath, flagPrefix string, configGet func(workDir s
 		if _, err := os.Stat(beadsDir); err != nil {
 			continue
 		}
-		return detectBeadsDirPrefix(beadsDir, flagPrefix, configGet)
+		detected, err := detectBeadsDirPrefix(beadsDir, flagPrefix, configGet)
+		if err != nil {
+			return "", err
+		}
+		if detected != "" {
+			return detected, nil
+		}
 	}
 	return "", nil
 }
 
+// detectBeadsDirPrefix is the prefix of one .beads directory: bd's
+// issue_prefix, else the "beads_<prefix>" dolt_database name in metadata.json,
+// which survives a clone because dolt/ is gitignored since bd v0.50+. A
+// backend other than dolt has no database name to read, so it is an error
+// unless flagPrefix already settles the prefix.
 func detectBeadsDirPrefix(beadsDir, flagPrefix string, configGet func(workDir string) (string, error)) (string, error) {
-	metaBytes, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
-	if err != nil {
+	metaPath := filepath.Join(beadsDir, "metadata.json")
+	metaBytes, err := os.ReadFile(metaPath)
+	if os.IsNotExist(err) {
 		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading %s: %w", metaPath, err)
 	}
 	var meta struct {
 		Backend string `json:"backend"`
 	}
-	if json.Unmarshal(metaBytes, &meta) != nil || meta.Backend != "dolt" {
-		return "", nil
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return "", fmt.Errorf("parsing %s: %w", metaPath, err)
+	}
+	if meta.Backend != "dolt" {
+		if flagPrefix != "" {
+			return "", nil
+		}
+		return "", fmt.Errorf("%s names backend %q, not dolt, so the rig's prefix cannot be detected: pass --prefix", metaPath, meta.Backend)
 	}
 
 	detected := ""
