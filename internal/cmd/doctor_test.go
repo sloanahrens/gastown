@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -211,6 +213,48 @@ func TestDoctorPositionalCheckNames(t *testing.T) {
 				if !got[name] {
 					t.Errorf("check %q missing after selection, have %v", name, got)
 				}
+			}
+		})
+	}
+}
+
+// The cases above drive selectDoctorChecks directly; this one runs runDoctor,
+// so a runDoctor that stopped passing its positional arguments or the --check
+// flag to the selection would fail here. An unknown name is refused before any
+// check runs, which keeps the test off the host (gt-m2lqo).
+func TestRunDoctorRefusesUnknownCheckName(t *testing.T) {
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GT_TOWN_ROOT", townRoot)
+	t.Chdir(townRoot)
+
+	cases := []struct {
+		name string
+		flag []string
+		args []string
+	}{
+		{name: "positional", args: []string{"dameon"}},
+		{name: "positional beside known", args: []string{"daemon", "dameon"}},
+		{name: "flag", flag: []string{"dameon"}},
+		{name: "flag beside known positional", flag: []string{"dameon"}, args: []string{"daemon"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			saved := doctorCheck
+			t.Cleanup(func() { doctorCheck = saved })
+			doctorCheck = tc.flag
+
+			err := runDoctor(doctorCmd, tc.args)
+			if err == nil {
+				t.Fatalf("runDoctor(--check %v, %v) = nil, want an error naming dameon", tc.flag, tc.args)
+			}
+			if !strings.Contains(err.Error(), "dameon") {
+				t.Errorf("error = %q, want it to name dameon", err)
+			}
+			if !strings.Contains(err.Error(), "no registered check matches") {
+				t.Errorf("error = %q, want the unknown-check refusal, not another failure", err)
 			}
 		})
 	}
