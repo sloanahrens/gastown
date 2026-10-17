@@ -676,10 +676,13 @@ func TestPRWorkflowSubstitutionCommentAndANSIQuote(t *testing.T) {
 // TestPRWorkflowGuard_SwitchAbbreviatedCreate pins the abbreviations of
 // switch's --create and --force-create (gt-osc72). git's option parser takes
 // any unambiguous prefix, so "git switch --cre x" creates a branch (verified on
-// git 2.42.0) and the guard blocks it for a non-polecat agent. The shortest
-// prefixes git accepts are "--cr" and "--force-"; "--c", "--f" and "--fo" are
-// ambiguous and git refuses them, "--force" is a different option, and
-// --orphan, --detach and --discard-changes are not creations.
+// git 2.42.0) and the guard blocks it for a non-polecat agent. The guard reads
+// every prefix of the option as the creation, the prefixes one version refuses
+// as ambiguous included — on git 2.42.0 "--c" is ambiguous with --conflict and
+// "--f" and "--fo" with --force, so that version creates no branch from them
+// while a version whose option set leaves them unambiguous does (gt-19s3v).
+// "--force" exact-matches its own option, and --orphan, --detach and
+// --discard-changes are not creations.
 func TestPRWorkflowGuard_SwitchAbbreviatedCreate(t *testing.T) {
 	t.Parallel()
 	town := newPolecatTestTown(t)
@@ -699,9 +702,11 @@ func TestPRWorkflowGuard_SwitchAbbreviatedCreate(t *testing.T) {
 		{"--force-creat behind another flag", "git switch -q --force-creat feature/x", prWorkflowBlockAgentContext},
 		{"--cre behind git -C", "git -C /tmp/repo switch --cre feature/x", prWorkflowBlockAgentContext},
 		{"--cre in bash -c", `bash -c "git switch --cre feature/x"`, prWorkflowBlockAgentContext},
-		{"--c is ambiguous", "git switch --c feature/x", prWorkflowAllow},
-		{"--f is ambiguous", "git switch --f feature/x", prWorkflowAllow},
-		{"--fo is ambiguous", "git switch --fo feature/x", prWorkflowAllow},
+		{"--c, ambiguous on 2.42", "git switch --c feature/x", prWorkflowBlockAgentContext},
+		{"--f, ambiguous on 2.42", "git switch --f feature/x", prWorkflowBlockAgentContext},
+		{"--fo, ambiguous on 2.42", "git switch --fo feature/x", prWorkflowBlockAgentContext},
+		{"--for, ambiguous on 2.42", "git switch --for feature/x", prWorkflowBlockAgentContext},
+		{"--forc, ambiguous on 2.42", "git switch --forc feature/x", prWorkflowBlockAgentContext},
 		{"--force is its own option", "git switch --force feature/x", prWorkflowAllow},
 		{"--conflict", "git switch --conflict=merge feature/x", prWorkflowAllow},
 		{"--orphan", "git switch --orphan feature/x", prWorkflowAllow},
