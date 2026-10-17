@@ -7,13 +7,12 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
-	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
 func namepoolTestManager(t *testing.T, townRoot string) *rig.Manager {
 	t.Helper()
-	return rig.NewManager(townRoot, &config.RigsConfig{Rigs: map[string]config.RigEntry{}}, git.NewGit(townRoot))
+	return rig.NewManager(townRoot, &config.RigsConfig{Rigs: map[string]config.RigEntry{}}, nil)
 }
 
 func TestAutoAssignNamepoolTheme_UnparseableSettingsLeftUntouched(t *testing.T) {
