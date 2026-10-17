@@ -294,11 +294,11 @@ func TestPool_ReentrantMarkerOnAnySlot(t *testing.T) {
 	defer h0.Release()
 	defer h1.Release()
 
-	// Slot 1, a different PID than ours as a real child would see it, and
-	// the child's own role — the marker only reaches that role's work
-	// (gt-off9, see reentrantMark.grants).
-	armReentrant(tg.env, town, 1, "gastown/b-child", foreignPID())
-	h, err, elapsed := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, "gastown/b-child", shortWait, pool) })
+	// A child of the slot 1 holder (it inherited that holder's marker, and
+	// has a different PID than ours) doing the holder's role's work — the
+	// marker only reaches that role's work (gt-off9, see reentrantMark.grants).
+	child := tg.child()
+	h, err, elapsed := tg.run(t, func() (*Handle, error) { return child.AcquirePool(town, "gastown/b", shortWait, pool) })
 	if err != nil {
 		t.Fatalf("reentrant AcquirePool: %v", err)
 	}
@@ -318,20 +318,22 @@ func TestPool_ReentrantMarkerOnAnySlot(t *testing.T) {
 
 // TestPool_RealAcquireNeverRidesTheMarker is the gt-off9 test for the
 // daemon's side of the fix: AcquirePoolReal must take a real, visible hold
-// even when the process carries a marker naming its own role — the shape a
-// marker inherited from a predecessor daemon process has, whose flock the
-// kernel already dropped.
+// even when the process carries a live marker naming its own role — the shape
+// a daemon spawned by a holder of that role has.
 func TestPool_RealAcquireNeverRidesTheMarker(t *testing.T) {
 	t.Parallel()
 	tg := newTestGate(t)
 	town := t.TempDir()
 	const role = "mango/landing"
 
-	armReentrant(tg.env, town, 0, role, foreignPID())
+	pool := Pool{Slots: 2}
+	holder := tg.mustAcquirePool(t, town, role, pool)
+	defer release(t, holder)
+	daemon := tg.child()
 
-	// Sanity check on the hole this closes: with this marker, the ordinary
+	// Sanity check on the hole this closes: under the live hold, the ordinary
 	// AcquirePool hands out a reentrant handle that holds nothing at all.
-	reentrant, err, _ := tg.run(t, func() (*Handle, error) { return tg.AcquirePool(town, role, shortWait, DefaultPool) })
+	reentrant, err, _ := tg.run(t, func() (*Handle, error) { return daemon.AcquirePool(town, role, shortWait, pool) })
 	if err != nil {
 		t.Fatalf("AcquirePool under a same-role marker: %v", err)
 	}
@@ -339,7 +341,7 @@ func TestPool_RealAcquireNeverRidesTheMarker(t *testing.T) {
 		t.Fatalf("AcquirePool under a same-role marker returned a real handle, want the reentrant fast path")
 	}
 
-	h, err, _ := tg.run(t, func() (*Handle, error) { return tg.AcquirePoolReal(town, role, 5*time.Second, DefaultPool) })
+	h, err, _ := tg.run(t, func() (*Handle, error) { return daemon.AcquirePoolReal(town, role, 5*time.Second, pool) })
 	if err != nil {
 		t.Fatalf("AcquirePoolReal: %v", err)
 	}
@@ -347,28 +349,28 @@ func TestPool_RealAcquireNeverRidesTheMarker(t *testing.T) {
 		t.Fatalf("AcquirePoolReal returned a reentrant handle; the daemon's suite would be invisible to every other caller")
 	}
 
-	rep, err := tg.Status(town)
+	rep, err := tg.StatusPool(town, pool)
 	if err != nil {
-		t.Fatalf("Status while the real hold is outstanding: %v", err)
+		t.Fatalf("StatusPool while the real hold is outstanding: %v", err)
 	}
-	if !rep.Held {
-		t.Fatalf("AcquirePoolReal took no flock — the hold is invisible: %+v", rep)
+	if rep.HeldCount != 2 || h.Index == holder.Index {
+		t.Fatalf("AcquirePoolReal took no slot of its own — the hold is invisible: index %d beside the holder's %d, %+v", h.Index, holder.Index, rep)
 	}
-	if rep.Owner == nil || rep.Owner.Role != role || rep.Owner.PID != os.Getpid() {
-		t.Fatalf("owner file should name the real holder: %+v", rep.Owner)
+	if owner := rep.Slots[h.Index].Owner; owner == nil || owner.Role != role || owner.PID != daemon.pid {
+		t.Fatalf("owner file should name the real holder: %+v", owner)
 	}
 
 	// It arms the marker for its own descendants like any other holder, but
 	// names its own role — the part that keeps the marker harmless in the
 	// unrelated processes the daemon spawns while holding (reentrantMark.grants).
-	if got := tg.env.Getenv(reentrantHolderEnvVar); got != reentrantEnvValue(town, h.Index, role, os.Getpid()) {
+	if got := daemon.env.Getenv(reentrantHolderEnvVar); got != reentrantEnvValue(town, h.Index, role, daemon.pid) {
 		t.Fatalf("marker after AcquirePoolReal = %q, want this hold named by its own role", got)
 	}
 
 	if err := h.Release(); err != nil {
 		t.Fatalf("Release: %v", err)
 	}
-	if rep, _ = tg.Status(town); rep.Held {
+	if rep, _ = tg.StatusPool(town, pool); rep.HeldCount != 1 {
 		t.Fatalf("the hold outlived Release: %+v", rep)
 	}
 }
