@@ -68,14 +68,28 @@ func TestEscalateListJSONEmptyIsArray(t *testing.T) {
 
 // TestEscalateStaleDryRunJSON: `gt escalate stale --dry-run --json` emits the
 // JSON plan even though the dry run never reaches the real-run JSON branch.
+// Skipped entries stay in the plan with the reason they were skipped: a script
+// reading the dry run needs to see the escalations it would leave alone, not
+// only the ones it would bump.
 func TestEscalateStaleDryRunJSON(t *testing.T) {
 	t.Parallel()
-	fields := &beads.EscalationFields{Severity: "medium", Reason: "disk full", EscalatedBy: "gastown/witness"}
-	stale := []*beads.Issue{{
-		ID:          "hq-esc1",
-		Title:       "disk full",
-		Description: beads.FormatEscalationDescription("disk full", fields),
-	}}
+	escalation := func(id, title, severity string, reescalations int) *beads.Issue {
+		return &beads.Issue{
+			ID:    id,
+			Title: title,
+			Description: beads.FormatEscalationDescription(title, &beads.EscalationFields{
+				Severity:          severity,
+				Reason:            "disk full",
+				EscalatedBy:       "gastown/witness",
+				ReescalationCount: reescalations,
+			}),
+		}
+	}
+	stale := []*beads.Issue{
+		escalation("hq-esc1", "disk full", "medium", 0),
+		escalation("hq-esc2", "already critical", "critical", 0),
+		escalation("hq-esc3", "flapping", "high", 3),
+	}
 
 	var out bytes.Buffer
 	if err := writeEscalateStaleDryRun(&out, stale, "4h0m0s", 3, true); err != nil {
@@ -85,10 +99,19 @@ func TestEscalateStaleDryRunJSON(t *testing.T) {
 	if err := json.Unmarshal(out.Bytes(), &plan); err != nil {
 		t.Fatalf("dry-run --json is not JSON: %v\n%s", err, out.String())
 	}
-	if len(plan) != 1 {
-		t.Fatalf("plan has %d entries, want 1: %s", len(plan), out.String())
+	want := []beads.ReescalationResult{
+		{ID: "hq-esc1", Title: "disk full", OldSeverity: "medium", NewSeverity: "high", ReescalationNum: 1},
+		{ID: "hq-esc2", Title: "already critical", OldSeverity: "critical", NewSeverity: "critical",
+			Skipped: true, SkipReason: "already at critical severity"},
+		{ID: "hq-esc3", Title: "flapping", OldSeverity: "high",
+			Skipped: true, SkipReason: "already at max reescalations (3)"},
 	}
-	if plan[0].Skipped || plan[0].OldSeverity != "medium" || plan[0].NewSeverity != "high" {
-		t.Errorf("plan = %+v, want an unskipped medium→high entry", plan[0])
+	if len(plan) != len(want) {
+		t.Fatalf("plan has %d entries, want %d: %s", len(plan), len(want), out.String())
+	}
+	for i, got := range plan {
+		if got != want[i] {
+			t.Errorf("plan[%d] = %+v, want %+v", i, got, want[i])
+		}
 	}
 }

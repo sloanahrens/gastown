@@ -1060,6 +1060,15 @@ func TestRedirectTargetsAmpersandRedirect(t *testing.T) {
 	}{
 		{"echo x >& " + siblingFile, []string{siblingFile}},
 		{"echo x >&" + siblingFile, []string{siblingFile}},
+		// A variable-led word is never a descriptor: its expansion cannot be
+		// known here, so the guard reads it as a file target.
+		{"echo x >& $out", []string{"$out"}},
+		{"echo x >& ${out}", []string{"${out}"}},
+		{"echo x >& \"$out/internal.go\"", []string{"$out/internal.go"}},
+		// Quotes are removed before the descriptor test, so a quoted path is a
+		// file path with its spaces intact and a quoted number is still a fd.
+		{"cat x >& '/tmp/with space/x'", []string{"/tmp/with space/x"}},
+		{"make 2>&\"1\"", nil},
 		{"make 2>&1", nil},
 		{"make >&2", nil},
 		{"make >& 2", nil},
@@ -1073,6 +1082,9 @@ func TestRedirectTargetsAmpersandRedirect(t *testing.T) {
 	p := newPolecatTestTown(t)
 	if err := p.run(t, "Bash", commandInput("echo x >& "+filepath.Join(p.sibling, "internal.go"))); err == nil {
 		t.Errorf("redirect >& into the sibling worktree allowed: it is a write, not fd duplication")
+	}
+	if err := p.run(t, "Bash", commandInput("echo x >& '"+filepath.Join(p.sibling, "with space.go")+"'")); err == nil {
+		t.Errorf("quoted redirect >& into the sibling worktree allowed")
 	}
 	for _, allowed := range []string{"make 2>&1", "make >&2"} {
 		if err := p.run(t, "Bash", commandInput(allowed)); err != nil {
