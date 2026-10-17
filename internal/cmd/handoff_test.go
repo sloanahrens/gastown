@@ -1399,7 +1399,7 @@ func TestHandoffSessionDryRunSkipsMoleculeCleanup(t *testing.T) {
 				buildPlan: func(string, buildRestartCommandOpts) (restartPlan, error) {
 					return restartPlan{Command: "true"}, nil
 				},
-				updateSessionEnv: func(*session.PrefixRegistry, *tmux.Tmux, string) {
+				updateSessionEnv: func(*session.PrefixRegistry, *tmux.Tmux, string, func(string) (string, bool)) {
 					calls = append(calls, "updateSessionEnv")
 				},
 				cleanupMolecule: func() { calls = append(calls, "cleanupMolecule") },
@@ -1558,5 +1558,195 @@ func TestResolveRoleToSession_OverseerArgument(t *testing.T) {
 		if want := session.OverseerSessionName(); got != want {
 			t.Errorf("resolveRoleToSession(%q) = %q, want %q", arg, got, want)
 		}
+	}
+}
+
+// TestHandoffSessionNameNotTreatedAsBead: a crew or overseer session name has
+// the shape of a short-prefix bead ID, but gt handoff <session-name> restarts
+// that session; it must not take the bead branch and fail with "bead not
+// found" (gt-ev685).
+func TestHandoffSessionNameNotTreatedAsBead(t *testing.T) {
+	t.Parallel()
+	reg := handoffTestRegistry()
+	for _, name := range []string{"gt-gastown-crew-max", "gt-crew-max", "hq-overseer"} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if !looksLikeBeadID(name) {
+				t.Fatalf("looksLikeBeadID(%q) = false: the case this test guards is gone", name)
+			}
+			if looksLikeHandoffBeadID(name) {
+				t.Errorf("looksLikeHandoffBeadID(%q) = true, want a session name", name)
+			}
+			got, err := resolveRoleToSession(reg, name)
+			if err != nil || got != name {
+				t.Errorf("resolveRoleToSession(%q) = %q, %v; want the name itself", name, got, err)
+			}
+		})
+	}
+	for _, id := range []string{"gt-abc123", "bd-ka761", "hq-cv-abc", "ap-qtsup.16"} {
+		t.Run(id, func(t *testing.T) {
+			t.Parallel()
+			if !looksLikeHandoffBeadID(id) {
+				t.Errorf("looksLikeHandoffBeadID(%q) = false, want a bead ID", id)
+			}
+		})
+	}
+}
+
+// TestHandoffRemoteDryRunLeavesTargetEnv: a remote --dry-run only previews, so
+// it must not rewrite the target's tmux env (the env update is the only
+// SetEnvironment caller); a live one updates it once, after the target is
+// found and before the respawn. A restart of another session is built from
+// an environment without the caller's agent keys, so a handoff between agents
+// of different kinds keeps the target's agent (gt-ev685).
+func TestHandoffRemoteDryRunLeavesTargetEnv(t *testing.T) {
+	t.Parallel()
+
+	t.Run("dry run makes no env update", func(t *testing.T) {
+		t.Parallel()
+		var calls []string
+		ops := recordingRemoteOps(&calls)
+		err := runRemoteHandoff(ops, "gt-crew-max", restartPlan{Command: "true"}, true, true,
+			func() { calls = append(calls, "updateEnv") })
+		if err != nil {
+			t.Fatalf("runRemoteHandoff: %v", err)
+		}
+		if want := []string{"hasSession", "sessionPane"}; !slices.Equal(calls, want) {
+			t.Errorf("calls = %v, want %v", calls, want)
+		}
+	})
+
+	t.Run("live run updates the env before the respawn", func(t *testing.T) {
+		t.Parallel()
+		var calls []string
+		ops := recordingRemoteOps(&calls)
+		err := runRemoteHandoff(ops, "gt-crew-max", restartPlan{Command: "true"}, false, true,
+			func() { calls = append(calls, "updateEnv") })
+		if err != nil {
+			t.Fatalf("runRemoteHandoff: %v", err)
+		}
+		want := []string{"hasSession", "sessionPane", "updateEnv", "respawn", "switchClient"}
+		if !slices.Equal(calls, want) {
+			t.Errorf("calls = %v, want %v", calls, want)
+		}
+	})
+
+	t.Run("a missing target gets no env update", func(t *testing.T) {
+		t.Parallel()
+		var calls []string
+		ops := recordingRemoteOps(&calls)
+		ops.hasSession = func(string) (bool, error) { return false, nil }
+		err := runRemoteHandoff(ops, "gt-crew-max", restartPlan{Command: "true"}, false, false,
+			func() { calls = append(calls, "updateEnv") })
+		if err == nil {
+			t.Fatal("runRemoteHandoff of a missing session = nil, want an error")
+		}
+		if len(calls) != 0 {
+			t.Errorf("calls = %v, want none", calls)
+		}
+	})
+
+	t.Run("handoffSession builds a remote target's restart and env without the caller's agent", func(t *testing.T) {
+		t.Parallel()
+		for _, dryRun := range []bool{true, false} {
+			t.Run(fmt.Sprintf("dryRun=%v", dryRun), func(t *testing.T) {
+				t.Parallel()
+				var calls []string
+				var buildLookup, updateLookup func(string) (string, bool)
+				steps := handoffSteps{
+					buildPlan: func(_ string, opts buildRestartCommandOpts) (restartPlan, error) {
+						buildLookup = opts.LookupEnv
+						return restartPlan{Command: "true"}, nil
+					},
+					updateSessionEnv: func(_ *session.PrefixRegistry, _ *tmux.Tmux, _ string, lookup func(string) (string, bool)) {
+						calls = append(calls, "updateSessionEnv")
+						updateLookup = lookup
+					},
+					remoteOps: func(*tmux.Tmux) remoteHandoffOps { return recordingRemoteOps(&calls) },
+				}
+				err := handoffSession(sessionHandoff{
+					reg:            handoffTestRegistry(),
+					pane:           "%0",
+					currentSession: "gt-crew-tester",
+					targetSession:  "gt-crew-max",
+					dryRun:         dryRun,
+				}, steps)
+				if err != nil {
+					t.Fatalf("handoffSession: %v", err)
+				}
+				wantCalls := []string{"hasSession", "sessionPane"}
+				if !dryRun {
+					wantCalls = append(wantCalls, "updateSessionEnv", "respawn")
+				}
+				if !slices.Equal(calls, wantCalls) {
+					t.Errorf("calls = %v, want %v", calls, wantCalls)
+				}
+				lookups := map[string]func(string) (string, bool){"buildPlan": buildLookup}
+				if !dryRun {
+					lookups["updateSessionEnv"] = updateLookup
+				}
+				for who, lookup := range lookups {
+					if lookup == nil {
+						t.Errorf("%s got no env lookup for a remote target", who)
+						continue
+					}
+					for _, key := range []string{"GT_AGENT", "GT_AGENT_OVERRIDE", "GT_PROCESS_NAMES"} {
+						if v, ok := lookup(key); ok || v != "" {
+							t.Errorf("%s env carries the caller's %s = %q", who, key, v)
+						}
+					}
+				}
+			})
+		}
+	})
+
+	t.Run("a restart built from the remote env keeps the target's agent", func(t *testing.T) {
+		t.Parallel()
+		townRoot := newHandoffTown(t)
+		caller := map[string]string{
+			"GT_AGENT":         "claude",
+			"GT_PROCESS_NAMES": "caller-procs",
+		}
+		opts := restartOpts(townRoot, caller)
+		opts.LookupEnv = remoteHandoffEnv(opts.LookupEnv)
+		opts.SessionEnv = func(_, key string) (string, error) {
+			if key == "GT_AGENT" {
+				return string(config.AgentGroqCompound), nil
+			}
+			return "", errors.New("unset")
+		}
+		cmd, err := buildRestartCommandWithOpts("gt-crew-holden", opts)
+		if err != nil {
+			t.Fatalf("buildRestartCommandWithOpts: %v", err)
+		}
+		if !strings.Contains(cmd, "GT_AGENT="+string(config.AgentGroqCompound)) {
+			t.Errorf("restart does not keep the target's agent\ncmd: %s", cmd)
+		}
+		if strings.Contains(cmd, "caller-procs") {
+			t.Errorf("restart carries the caller's GT_PROCESS_NAMES\ncmd: %s", cmd)
+		}
+	})
+}
+
+// recordingRemoteOps are remoteHandoffOps for a live session that append each
+// call to calls.
+func recordingRemoteOps(calls *[]string) remoteHandoffOps {
+	return remoteHandoffOps{
+		hasSession: func(string) (bool, error) {
+			*calls = append(*calls, "hasSession")
+			return true, nil
+		},
+		sessionPane: func(string) (string, error) {
+			*calls = append(*calls, "sessionPane")
+			return "%7", nil
+		},
+		respawn: func(string, string, restartPlan) error {
+			*calls = append(*calls, "respawn")
+			return nil
+		},
+		switchClient: func(string) error {
+			*calls = append(*calls, "switchClient")
+			return nil
+		},
 	}
 }

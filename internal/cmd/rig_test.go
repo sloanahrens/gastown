@@ -2,14 +2,154 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/rig"
 )
+
+// stubRigPolecatSessions is a rigPolecatSessions with canned answers that
+// counts StopAll calls.
+type stubRigPolecatSessions struct {
+	infos    []polecat.SessionInfo
+	listErr  error
+	stopErr  error
+	stopCall int
+}
+
+func (s *stubRigPolecatSessions) ListPolecats() ([]polecat.SessionInfo, error) {
+	return s.infos, s.listErr
+}
+
+func (s *stubRigPolecatSessions) StopAll(bool) error {
+	s.stopCall++
+	return s.stopErr
+}
+
+func (s *stubRigPolecatSessions) open(*rig.Rig, string, string) rigPolecatSessions { return s }
+
+// registeredRigTown writes a town at a temp dir with one registered rig, "testrig", and
+// returns its root.
+func registeredRigTown(t *testing.T) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	rigsConfig := &config.RigsConfig{
+		Version: 1,
+		Rigs: map[string]config.RigEntry{
+			"testrig": {GitURL: "git@github.com:test/testrig.git", AddedAt: time.Now().Truncate(time.Second)},
+		},
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveRigsConfig(filepath.Join(townRoot, "mayor", "rigs.json"), rigsConfig); err != nil {
+		t.Fatalf("save rigs.json: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "testrig"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot
+}
+
+// TestRunRigShutdownListPolecatsError: a polecat session list that cannot be
+// read is a failed shutdown and stop, not an empty rig. Both used to skip the
+// stop block and report success while the sessions still ran (gt-ev685).
+func TestRunRigShutdownListPolecatsError(t *testing.T) {
+	t.Parallel()
+	listErr := errors.New("tmux server unreachable")
+	infos := []polecat.SessionInfo{{Polecat: "furiosa", Running: true}}
+
+	tests := []struct {
+		name     string
+		stub     stubRigPolecatSessions
+		wantErr  bool
+		wantStop int
+	}{
+		{"list error", stubRigPolecatSessions{listErr: listErr}, true, 0},
+		{"stop error", stubRigPolecatSessions{infos: infos, stopErr: errors.New("kill failed")}, true, 1},
+		{"no sessions", stubRigPolecatSessions{}, false, 0},
+		{"stopped", stubRigPolecatSessions{infos: infos}, false, 1},
+	}
+	for _, tt := range tests {
+		t.Run("shutdown/"+tt.name, func(t *testing.T) {
+			t.Parallel()
+			stub := tt.stub // a copy: shutdown and stop run in parallel
+			err := runRigShutdownIn(registeredRigTown(t), "testrig", false, true, stub.open)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("runRigShutdownIn err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if stub.stopCall != tt.wantStop {
+				t.Errorf("StopAll calls = %d, want %d", stub.stopCall, tt.wantStop)
+			}
+		})
+		t.Run("stop/"+tt.name, func(t *testing.T) {
+			t.Parallel()
+			stub := tt.stub
+			err := runRigStopIn(registeredRigTown(t), []string{"testrig"}, false, true, stub.open)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("runRigStopIn err = %v, wantErr %v", err, tt.wantErr)
+			}
+			if stub.stopCall != tt.wantStop {
+				t.Errorf("StopAll calls = %d, want %d", stub.stopCall, tt.wantStop)
+			}
+		})
+	}
+}
+
+// TestRunRigListLoadError: a rigs.json that cannot be parsed is an error, not
+// "No rigs configured." with exit 0, and a --json run writes no text. A
+// missing rigs.json is an empty town, and --json then prints a valid empty
+// list (gt-ev685).
+func TestRunRigListLoadError(t *testing.T) {
+	t.Parallel()
+
+	for _, asJSON := range []bool{false, true} {
+		t.Run("malformed", func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			err := runRigListIn(corruptRigsTown(t), &out, asJSON)
+			if err == nil {
+				t.Fatal("runRigListIn with a malformed rigs.json = nil, want an error")
+			}
+			if !strings.Contains(err.Error(), "rigs config") {
+				t.Errorf("err = %v, want it to name the rigs config", err)
+			}
+			if strings.Contains(out.String(), "No rigs configured.") {
+				t.Errorf("output = %q, want no \"No rigs configured.\" text", out.String())
+			}
+		})
+	}
+
+	t.Run("missing json is an empty list", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		if err := runRigListIn(t.TempDir(), &out, true); err != nil {
+			t.Fatalf("runRigListIn: %v", err)
+		}
+		if got := strings.TrimSpace(out.String()); got != "[]" {
+			t.Errorf("--json output = %q, want []", got)
+		}
+	})
+
+	t.Run("missing text says no rigs", func(t *testing.T) {
+		t.Parallel()
+		var out bytes.Buffer
+		if err := runRigListIn(t.TempDir(), &out, false); err != nil {
+			t.Fatalf("runRigListIn: %v", err)
+		}
+		if !strings.Contains(out.String(), "No rigs configured.") {
+			t.Errorf("output = %q, want \"No rigs configured.\"", out.String())
+		}
+	})
+}
 
 func TestIsGitRemoteURL(t *testing.T) {
 	t.Parallel()

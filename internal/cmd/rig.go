@@ -614,18 +614,28 @@ func runRigList(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return runRigListIn(townRoot, os.Stdout, rigListJSON)
+}
 
-	// Load rigs config
+// runRigListIn lists the rigs of the town at townRoot to out. Split from
+// runRigList so a unit test supplies the town root, the writer and the --json
+// choice. A missing rigs.json is an empty town; one that cannot be read or
+// parsed is an error, never "No rigs configured." (and never text on a
+// --json run).
+func runRigListIn(townRoot string, out io.Writer, asJSON bool) error {
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsPath)
 	if err != nil {
-		fmt.Println("No rigs configured.")
-		return nil
+		return fmt.Errorf("loading rigs config: %w", err)
 	}
 
 	if len(rigsConfig.Rigs) == 0 {
-		fmt.Println("No rigs configured.")
-		fmt.Printf("\nAdd one with: %s\n", style.Dim.Render("gt rig add <name> <git-url>"))
+		if asJSON {
+			_, err := fmt.Fprintln(out, "[]")
+			return err
+		}
+		fmt.Fprintln(out, "No rigs configured.")
+		fmt.Fprintf(out, "\nAdd one with: %s\n", style.Dim.Render("gt rig add <name> <git-url>"))
 		return nil
 	}
 
@@ -688,16 +698,16 @@ func runRigList(cmd *cobra.Command, args []string) error {
 		return rigs[i].Name < rigs[j].Name
 	})
 
-	if rigListJSON {
-		enc := json.NewEncoder(os.Stdout)
+	if asJSON {
+		enc := json.NewEncoder(out)
 		enc.SetIndent("", "  ")
 		return enc.Encode(rigs)
 	}
 
-	fmt.Printf("Rigs in %s:\n\n", townRoot)
+	fmt.Fprintf(out, "Rigs in %s:\n\n", townRoot)
 	for _, ri := range rigs {
 		if ri.Status == "error" {
-			fmt.Printf("  %s %s\n", style.Warning.Render("!"), ri.Name)
+			fmt.Fprintf(out, "  %s %s\n", style.Warning.Render("!"), ri.Name)
 			continue
 		}
 
@@ -708,11 +718,11 @@ func runRigList(cmd *cobra.Command, args []string) error {
 			space = "  "
 		}
 
-		fmt.Printf("%s%s%s\n", led, space, style.Bold.Render(ri.Name))
+		fmt.Fprintf(out, "%s%s%s\n", led, space, style.Bold.Render(ri.Name))
 
-		fmt.Printf("   Sessions: %d\n", ri.Sessions)
-		fmt.Printf("   Polecats: %d  Crew: %d\n", ri.Polecats, ri.Crew)
-		fmt.Println()
+		fmt.Fprintf(out, "   Sessions: %d\n", ri.Sessions)
+		fmt.Fprintf(out, "   Polecats: %d  Crew: %d\n", ri.Polecats, ri.Crew)
+		fmt.Fprintln(out)
 	}
 
 	return nil
@@ -733,8 +743,11 @@ func runRigMenu(cmd *cobra.Command, args []string) error {
 	}
 
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	rigsConfig, err := config.LoadRigsConfig(rigsPath)
-	if err != nil || len(rigsConfig.Rigs) == 0 {
+	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsPath)
+	if err != nil {
+		return fmt.Errorf("loading rigs config: %w", err)
+	}
+	if len(rigsConfig.Rigs) == 0 {
 		return fmt.Errorf("no rigs configured")
 	}
 
@@ -1343,15 +1356,51 @@ func isAgentSessionHealthy(t *tmux.Tmux, sessionName string) bool {
 	return t.CheckSessionHealth(sessionName, 0) == tmux.SessionHealthy
 }
 
-func runRigShutdown(cmd *cobra.Command, args []string) error {
-	rigName := args[0]
+// rigPolecatSessions is the slice of polecat.SessionManager that gt rig
+// shutdown and gt rig stop drive.
+type rigPolecatSessions interface {
+	ListPolecats() ([]polecat.SessionInfo, error)
+	StopAll(force bool) error
+}
 
+// openRigPolecatSessions opens r's polecat sessions for an operator stop.
+type openRigPolecatSessions func(r *rig.Rig, stopReason, actor string) rigPolecatSessions
+
+func supervisedRigPolecatSessions(r *rig.Rig, stopReason, actor string) rigPolecatSessions {
+	return supervisedPolecatSessions(tmux.NewTmux(), r, stopReason, actor)
+}
+
+// stopRigPolecats stops every polecat session of a rig and returns what went
+// wrong. A session list that cannot be read is a failure, not an empty rig:
+// skipping it would report the rig stopped while its sessions still run.
+func stopRigPolecats(m rigPolecatSessions, force bool) []string {
+	infos, err := m.ListPolecats()
+	if err != nil {
+		return []string{fmt.Sprintf("listing polecat sessions: %v", err)}
+	}
+	if len(infos) == 0 {
+		return nil
+	}
+	fmt.Printf("  Stopping %d polecat session(s)...\n", len(infos))
+	if err := m.StopAll(force); err != nil {
+		return []string{fmt.Sprintf("polecat sessions: %v", err)}
+	}
+	return nil
+}
+
+func runRigShutdown(cmd *cobra.Command, args []string) error {
 	// Find workspace
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return runRigShutdownIn(townRoot, args[0], rigShutdownForce, rigShutdownNuclear, supervisedRigPolecatSessions)
+}
 
+// runRigShutdownIn shuts down rigName of the town at townRoot. Split from
+// runRigShutdown so a unit test supplies the town root, the flags and the
+// session opener.
+func runRigShutdownIn(townRoot, rigName string, force, nuclear bool, open openRigPolecatSessions) error {
 	// Load rigs config and get rig
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfigOrEmpty(rigsPath)
@@ -1367,25 +1416,15 @@ func runRigShutdown(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check all polecats for uncommitted work (unless nuclear)
-	if !rigShutdownNuclear && !checkUncommittedWork(r, rigName, "shutdown", rigShutdownForce) {
+	if !nuclear && !checkUncommittedWork(r, rigName, "shutdown", force) {
 		return fmt.Errorf("refusing to shutdown with uncommitted work")
 	}
 
 	fmt.Printf("Shutting down rig %s...\n", style.Bold.Render(rigName))
 
-	var errors []string
-
 	// 1. Stop all polecat sessions
 	// An operator stop: the supervisor's Stop, logged (gt-4k3fj.4.1).
-	t := tmux.NewTmux()
-	polecatMgr := supervisedPolecatSessions(t, r, "rig shutdown", operatorActor("gt rig shutdown"))
-	infos, err := polecatMgr.ListPolecats()
-	if err == nil && len(infos) > 0 {
-		fmt.Printf("  Stopping %d polecat session(s)...\n", len(infos))
-		if err := polecatMgr.StopAll(rigShutdownForce); err != nil {
-			errors = append(errors, fmt.Sprintf("polecat sessions: %v", err))
-		}
-	}
+	errors := stopRigPolecats(open(r, "rig shutdown", operatorActor("gt rig shutdown")), force)
 
 	if len(errors) > 0 {
 		fmt.Printf("\n%s Some agents failed to stop:\n", style.Warning.Render("⚠"))
@@ -1592,6 +1631,13 @@ func runRigStop(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
+	return runRigStopIn(townRoot, args, rigStopForce, rigStopNuclear, supervisedRigPolecatSessions)
+}
+
+// runRigStopIn stops the rigs named in rigNames in the town at townRoot.
+// Split from runRigStop so a unit test supplies the town root, the flags and
+// the session opener.
+func runRigStopIn(townRoot string, rigNames []string, force, nuclear bool, open openRigPolecatSessions) error {
 
 	// Load rigs config
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
@@ -1608,7 +1654,7 @@ func runRigStop(cmd *cobra.Command, args []string) error {
 	var failed []string
 
 	// Process each rig
-	for _, rigName := range args {
+	for _, rigName := range rigNames {
 		r, err := rigMgr.GetRig(rigName)
 		if err != nil {
 			fmt.Printf("%s Rig '%s' not found\n", style.Warning.Render("⚠"), rigName)
@@ -1617,26 +1663,16 @@ func runRigStop(cmd *cobra.Command, args []string) error {
 		}
 
 		// Check all polecats for uncommitted work (unless nuclear)
-		if !rigStopNuclear && !checkUncommittedWork(r, rigName, "stop", rigStopForce) {
+		if !nuclear && !checkUncommittedWork(r, rigName, "stop", force) {
 			failed = append(failed, rigName)
 			continue
 		}
 
 		fmt.Printf("Stopping rig %s...\n", style.Bold.Render(rigName))
 
-		var errors []string
-
 		// 1. Stop all polecat sessions
 		// An operator stop: the supervisor's Stop, logged (gt-4k3fj.4.1).
-		t := tmux.NewTmux()
-		polecatMgr := supervisedPolecatSessions(t, r, "rig stop", operatorActor("gt rig stop"))
-		infos, err := polecatMgr.ListPolecats()
-		if err == nil && len(infos) > 0 {
-			fmt.Printf("  Stopping %d polecat session(s)...\n", len(infos))
-			if err := polecatMgr.StopAll(rigStopForce); err != nil {
-				errors = append(errors, fmt.Sprintf("polecat sessions: %v", err))
-			}
-		}
+		errors := stopRigPolecats(open(r, "rig stop", operatorActor("gt rig stop")), force)
 
 		if len(errors) > 0 {
 			fmt.Printf("%s Some agents in %s failed to stop:\n", style.Warning.Render("⚠"), rigName)
@@ -1651,7 +1687,7 @@ func runRigStop(cmd *cobra.Command, args []string) error {
 	}
 
 	// Summary
-	if len(args) > 1 {
+	if len(rigNames) > 1 {
 		fmt.Println()
 		if len(succeeded) > 0 {
 			fmt.Printf("%s Stopped: %s\n", style.Success.Render("✓"), strings.Join(succeeded, ", "))

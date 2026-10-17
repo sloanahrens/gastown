@@ -87,8 +87,13 @@ var (
 // handoffSession body is runHandoff's tail moved over unchanged, so the order
 // of the calls stays where it was.
 type handoffSteps struct {
-	buildPlan        func(sessionName string, opts buildRestartCommandOpts) (restartPlan, error)
-	updateSessionEnv func(reg *session.PrefixRegistry, t *tmux.Tmux, sessionName string)
+	buildPlan func(sessionName string, opts buildRestartCommandOpts) (restartPlan, error)
+	// updateSessionEnv refreshes sessionName's tmux env from lookupEnv, the
+	// process environment its restart command was built from.
+	updateSessionEnv func(reg *session.PrefixRegistry, t *tmux.Tmux, sessionName string, lookupEnv func(string) (string, bool))
+	// remoteOps are the tmux calls of a handoff to another session, on the
+	// town socket townTmux.
+	remoteOps func(townTmux *tmux.Tmux) remoteHandoffOps
 	// cleanupMolecule closes the molecule steps the session leaves behind.
 	cleanupMolecule func()
 	sendMail        func(subject, message string) (string, error)
@@ -99,6 +104,7 @@ type handoffSteps struct {
 var liveHandoffSteps = handoffSteps{
 	buildPlan:        buildRestartPlan,
 	updateSessionEnv: updateSessionEnvForHandoff,
+	remoteOps:        liveRemoteHandoffOps,
 	cleanupMolecule:  cleanupMoleculeOnHandoff,
 	sendMail:         sendHandoffMail,
 	logNoPersist: func(agent, subject string, err error) {
@@ -119,6 +125,7 @@ type sessionHandoff struct {
 	currentSession string
 	targetSession  string
 	dryRun         bool
+	watch          bool // switch the caller's client to a remote target
 	subject        string
 	message        string
 }
@@ -326,7 +333,7 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 		arg := args[0]
 
 		// Check if arg is a bead ID (gt-xxx, hq-xxx, bd-xxx, etc.)
-		if looksLikeBeadID(arg) {
+		if looksLikeHandoffBeadID(arg) {
 			// Hook the bead first
 			if err := hookBeadForHandoff(arg); err != nil {
 				return fmt.Errorf("hooking bead: %w", err)
@@ -352,20 +359,31 @@ func runHandoff(cmd *cobra.Command, args []string) error {
 		currentSession: currentSession,
 		targetSession:  targetSession,
 		dryRun:         handoffDryRun,
+		watch:          handoffWatch,
 		subject:        handoffSubject,
 		message:        handoffMessage,
 	}, liveHandoffSteps)
 }
 
 // handoffSession restarts p.targetSession: another session through
-// handoffRemoteSession, or the caller's own after a dry-run preview, the
+// runRemoteHandoff, or the caller's own after a dry-run preview, the
 // molecule cleanup and the handoff mail.
 func handoffSession(p sessionHandoff, steps handoffSteps) error {
 	reg, t, townTmux, pane := p.reg, p.t, p.townTmux, p.pane
 	currentSession, targetSession := p.currentSession, p.targetSession
 
+	// A restart of another session runs that session's agent, so it is built
+	// without the caller's GT_AGENT, GT_AGENT_OVERRIDE and GT_PROCESS_NAMES:
+	// they describe the caller's agent, and the session env fallback supplies
+	// the target's own.
+	remote := targetSession != currentSession
+	lookupEnv := os.LookupEnv
+	if remote {
+		lookupEnv = remoteHandoffEnv(os.LookupEnv)
+	}
+
 	// Build the restart command
-	plan, err := steps.buildPlan(targetSession, buildRestartCommandOpts{Registry: reg})
+	plan, err := steps.buildPlan(targetSession, buildRestartCommandOpts{Registry: reg, LookupEnv: lookupEnv})
 	if err != nil {
 		return err
 	}
@@ -373,10 +391,12 @@ func handoffSession(p sessionHandoff, steps handoffSteps) error {
 
 	// If handing off a different session, we need to find its pane and respawn there.
 	// Remote sessions live on the town socket, so use townTmux for their operations.
-	if targetSession != currentSession {
-		// Update tmux session env before respawn (not during dry-run — see below)
-		updateSessionEnvForHandoff(reg, townTmux, targetSession)
-		return handoffRemoteSession(townTmux, targetSession, plan)
+	if remote {
+		// The session env update is a side effect, so it runs inside the
+		// remote handoff after the dry-run check, not before it.
+		return runRemoteHandoff(steps.remoteOps(townTmux), targetSession, plan, p.dryRun, p.watch, func() {
+			steps.updateSessionEnv(reg, townTmux, targetSession, lookupEnv)
+		})
 	}
 
 	// Handing off ourselves - print feedback then respawn
@@ -408,7 +428,7 @@ func handoffSession(p sessionHandoff, steps handoffSteps) error {
 	// not from shell exports. The restart command sets shell exports for the child
 	// process, but we must also update the session env so liveness checks work.
 	// Placed after the dry-run guard to avoid mutating session state during dry-run.
-	steps.updateSessionEnv(reg, t, currentSession)
+	steps.updateSessionEnv(reg, t, currentSession, lookupEnv)
 
 	// Send handoff mail to self (defaults applied inside sendHandoffMail).
 	// The mail is auto-hooked so the next session picks it up.
@@ -649,7 +669,7 @@ func runHandoffCycle() error {
 
 	// Refresh the tmux session env, which liveness checks read, so it names the
 	// agent the pane is about to run (gt-di8p).
-	updateSessionEnvForHandoff(reg, t, currentSession)
+	updateSessionEnvForHandoff(reg, t, currentSession, os.LookupEnv)
 
 	// Respawn pane — this atomically kills current process and starts fresh
 	return superviseHandoff(currentSession, "gt handoff", "handoff --cycle", func() error {
@@ -1183,9 +1203,15 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 //
 // Every caller that respawns a pane from buildRestartCommand must call this
 // too, or the session env keeps naming the agent the pane no longer runs.
-func updateSessionEnvForHandoff(reg *session.PrefixRegistry, t *tmux.Tmux, sessionName string) {
+//
+// lookupEnv is the process environment the restart command was built from:
+// os.LookupEnv for a session restarting itself, remoteHandoffEnv's view for
+// another session, whose agent is the one in its own tmux env.
+func updateSessionEnvForHandoff(reg *session.PrefixRegistry, t *tmux.Tmux, sessionName string, lookupEnv func(string) (string, bool)) {
+	getenv := func(key string) string { v, _ := lookupEnv(key); return v }
+
 	// Resolve current agent using the same priority as buildRestartCommandWithOpts
-	currentAgent := os.Getenv("GT_AGENT")
+	currentAgent := getenv(config.EnvAgent)
 	if currentAgent == "" {
 		if val, err := t.GetEnvironment(sessionName, config.EnvAgent); err == nil && val != "" {
 			currentAgent = val
@@ -1211,7 +1237,7 @@ func updateSessionEnvForHandoff(reg *session.PrefixRegistry, t *tmux.Tmux, sessi
 	// previous agent's process names (gt-di8p). Pin and marker are both read
 	// with the same priority as in buildRestartCommandWithOpts — a session env
 	// that disagrees with the command would report the wrong agent alive.
-	pinnedByOverride := os.Getenv(config.EnvAgentOverride) == "1"
+	pinnedByOverride := getenv(config.EnvAgentOverride) == "1"
 	if !pinnedByOverride {
 		if marker, err := t.GetEnvironment(sessionName, config.EnvAgentOverride); err == nil && marker == "1" {
 			pinnedByOverride = true
@@ -1262,7 +1288,7 @@ func updateSessionEnvForHandoff(reg *session.PrefixRegistry, t *tmux.Tmux, sessi
 	}
 	if processNames == "" {
 		// Preserve existing value or compute from current agent
-		if pn := os.Getenv("GT_PROCESS_NAMES"); pn != "" {
+		if pn := getenv("GT_PROCESS_NAMES"); pn != "" {
 			processNames = pn
 		} else {
 			resolved := config.AgentRegistryFor(townRoot, rigPath).ResolveProcessNames(currentAgent, "")
@@ -1349,11 +1375,53 @@ func detectTownRootFromCwd() string {
 	return townRootFrom(workspace.FindFromCwdOrError)
 }
 
-// handoffRemoteSession respawns a different session and optionally switches to it.
-func handoffRemoteSession(t *tmux.Tmux, targetSession string, plan restartPlan) error {
+// remoteHandoffEnv is lookup without the keys that name the caller's own
+// agent: GT_AGENT, GT_AGENT_OVERRIDE and GT_PROCESS_NAMES. A restart of
+// another session reads its agent from that session's tmux env instead, so a
+// handoff between agents of different kinds keeps the target's agent.
+func remoteHandoffEnv(lookup func(string) (string, bool)) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		switch key {
+		case config.EnvAgent, config.EnvAgentOverride, "GT_PROCESS_NAMES":
+			return "", false
+		}
+		return lookup(key)
+	}
+}
+
+// remoteHandoffOps are the tmux calls a remote handoff makes, so a unit test
+// can drive runRemoteHandoff without a tmux server.
+type remoteHandoffOps struct {
+	hasSession   func(sessionName string) (bool, error)
+	sessionPane  func(sessionName string) (string, error)
+	respawn      func(sessionName, pane string, plan restartPlan) error
+	switchClient func(sessionName string) error
+}
+
+func liveRemoteHandoffOps(t *tmux.Tmux) remoteHandoffOps {
+	return remoteHandoffOps{
+		hasSession:  t.HasSession,
+		sessionPane: getSessionPane,
+		respawn: func(sessionName, pane string, plan restartPlan) error {
+			return superviseHandoff(sessionName, "gt handoff", "handoff (remote)", func() error {
+				plan.syncSettings()
+				return respawnRemotePane(t, sessionName, pane, plan.Command)
+			})
+		},
+		switchClient: func(sessionName string) error {
+			return tmux.BuildCommand("switch-client", "-t", sessionName).Run()
+		},
+	}
+}
+
+// runRemoteHandoff respawns a different session and optionally switches to
+// it. updateEnv refreshes the target's tmux env; it runs once the target is
+// found and the dry-run check has passed, because a preview must not rewrite
+// the target's env.
+func runRemoteHandoff(ops remoteHandoffOps, targetSession string, plan restartPlan, dryRun, watch bool, updateEnv func()) error {
 	restartCmd := plan.Command
 	// Check if target session exists
-	exists, err := t.HasSession(targetSession)
+	exists, err := ops.hasSession(targetSession)
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
 	}
@@ -1362,7 +1430,7 @@ func handoffRemoteSession(t *tmux.Tmux, targetSession string, plan restartPlan) 
 	}
 
 	// Get the pane ID for the target session
-	targetPane, err := getSessionPane(targetSession)
+	targetPane, err := ops.sessionPane(targetSession)
 	if err != nil {
 		return fmt.Errorf("getting target pane: %w", err)
 	}
@@ -1370,27 +1438,28 @@ func handoffRemoteSession(t *tmux.Tmux, targetSession string, plan restartPlan) 
 	fmt.Printf("%s Handing off %s...\n", style.Bold.Render("🤝"), targetSession)
 
 	// Dry run mode
-	if handoffDryRun {
+	if dryRun {
 		fmt.Printf("Would execute: tmux clear-history -t %s\n", targetPane)
 		fmt.Printf("Would execute: tmux respawn-pane -k -t %s %s\n", targetPane, restartCmd)
-		if handoffWatch {
+		if watch {
 			fmt.Printf("Would execute: tmux switch-client -t %s\n", targetSession)
 		}
 		return nil
 	}
 
-	if err := superviseHandoff(targetSession, "gt handoff", "handoff (remote)", func() error {
-		plan.syncSettings()
-		return respawnRemotePane(t, targetSession, targetPane, restartCmd)
-	}); err != nil {
+	// Before the respawn: liveness checks read this env, and the respawn
+	// replaces the agent it names.
+	updateEnv()
+
+	if err := ops.respawn(targetSession, targetPane, plan); err != nil {
 		return err
 	}
 
 	// If --watch, switch to that session
-	if handoffWatch {
+	if watch {
 		fmt.Printf("Switching to %s...\n", targetSession)
 		// Use tmux switch-client to move our view to the target session
-		if err := tmux.BuildCommand("switch-client", "-t", targetSession).Run(); err != nil {
+		if err := ops.switchClient(targetSession); err != nil {
 			// Non-fatal - they can manually switch
 			fmt.Printf("Note: Could not auto-switch (use: tmux switch-client -t %s)\n", targetSession)
 		}
@@ -1583,6 +1652,18 @@ func warnHandoffGitStatusWith(w io.Writer, g handoffGit) {
 		fmt.Fprintf(w, "%s   %d unpushed commit(s) — run 'git push' before handoff\n", ui.IconWarn, status.UnpushedCommits)
 	}
 	fmt.Fprintln(w, "  (use --no-git-check to suppress this warning)")
+}
+
+// looksLikeHandoffBeadID reports whether a gt handoff argument names a bead to
+// hook rather than a session to restart. Crew and overseer session names
+// (gt-crew-max, hq-overseer) have the shape of a short-prefix bead ID, so they
+// are ruled out first; otherwise they take the bead branch and fail with
+// "bead not found" before resolveRoleToSession sees them.
+func looksLikeHandoffBeadID(arg string) bool {
+	if arg == session.OverseerSessionName() || strings.Contains(arg, "-crew-") {
+		return false
+	}
+	return looksLikeBeadID(arg)
 }
 
 // looksLikeBeadID checks if a string looks like a bead ID.
