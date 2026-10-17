@@ -5,6 +5,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -472,6 +473,20 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"bare cd then rm a sibling polecat dir by a relative path", "cd && rm -rf gt/" + p.rig + "/polecats/" + p.other, true},
 		{"cd up then git -C a sibling polecat dir", "cd .. && git -C ../" + p.other + " checkout -- .", true},
 		{"cd up then cd into a sibling polecat dir", "cd .. && cd ../" + p.other, true},
+		// $OLDPWD is set by an earlier command unless a cd of this line set it.
+		{"cd - after a cd up is judged from the set", "cd .. && cd - && rm -rf ../" + p.other, true},
+		{"cd - first returns to a directory the guard never saw", "cd - && ls", true},
+		{"cd - first then rm", "cd - && rm -rf build", true},
+		{"cd - after OLDPWD is assigned", "cd internal && OLDPWD=" + p.sibling + " cd - && rm -rf x", true},
+		{"cd - inside bash -c with no cd before it", "bash -c 'cd - && ls'", true},
+		// A shell behind a wrapper is walked like a bare one.
+		{"timeout wrapping bash -c cd up then rm a sibling", "timeout 5 bash -c 'cd .. && rm -rf ../" + p.other + "'", true},
+		{"env -i wrapping bash -c cd up then rm a sibling", "env -i bash -c 'cd .. && rm -rf ../" + p.other + "'", true},
+		{"nice -n wrapping sh -c cd up then rm a sibling", "nice -n 5 sh -c 'cd .. && rm -rf ../" + p.other + "'", true},
+		{"sudo -u wrapping bash -c cd up then rm a sibling", "sudo -u root bash -c 'cd .. && rm -rf ../" + p.other + "'", true},
+		{"env assignment then timeout wrapping bash -c", "A=1 timeout 5 /bin/bash -c 'cd .. && rm -rf ../" + p.other + "'", true},
+		{"xargs sh -c cd up then rm a sibling", "ls | xargs -I{} sh -c 'cd .. && rm -rf ../" + p.other + "'", true},
+		{"find -exec sh -c cd up then rm a sibling", `find . -name x -exec sh -c 'cd .. && rm -rf ../` + p.other + `' \;`, true},
 		{"cd with an unresolvable destination then rm", "cd $POLECAT_PATHS_UNSET && rm -rf build", true},
 		// git -C reaches another tree without naming a path anywhere else.
 		{"git -C into a sibling worktree", "git -C " + p.sibling + " checkout -- .", true},
@@ -527,11 +542,16 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"cd up to the polecat dir then ls", "cd .. && ls", false},
 		{"cd up to the polecat dir then rm inside it", "cd .. && rm -rf scratch", false},
 		{"cd -P a worktree subdir then rm build", "cd -P internal && rm -rf build", false},
-		{"cd to /tmp then rm", "cd /tmp/polecat-paths-probe && rm -rf build", false},
+		{"cd to the host temp dir then rm", "cd " + filepath.Join(p.hostTmp, "polecat-paths-probe") + " && rm -rf build", false},
 		{"cd out of the town then rm", "cd " + p.root + " && rm -rf elsewhere", false},
 		{"bash -c cd a worktree subdir then rm build", "bash -c 'cd internal && rm -rf build'", false},
 		{"bash script file with a later -c", "bash run.sh -c 'cd .. && ls'", false},
-		{"cd - then ls", "cd - && ls", false},
+		{"cd - after a cd of this line then rm", "cd internal && cd - && rm -rf build", false},
+		{"timeout wrapping bash -c cd a worktree subdir then rm build", "timeout 5 bash -c 'cd internal && rm -rf build'", false},
+		{"env -i wrapping bash -c cd a worktree subdir then rm build", "env -i bash -c 'cd internal && rm -rf build'", false},
+		{"xargs sh -c cd a worktree subdir then rm build", "ls | xargs sh -c 'cd internal && rm -rf build'", false},
+		{"find -name bash is not a shell invocation", "find . -name bash -print", false},
+		{"timeout wrapping a script file with a later -c", "timeout 5 bash run.sh -c 'cd .. && ls'", false},
 		{"write inside own worktree", "cp a.go " + own, false},
 		{"rm a glob inside own worktree", "rm -rf " + filepath.Join(p.worktree, "tmp") + "/*", false},
 		{"mkdir inside own worktree", "mkdir -p " + filepath.Join(p.worktree, "internal", "new"), false},
@@ -1106,5 +1126,93 @@ func TestPolecatPathGuardBashCdChainIsBounded(t *testing.T) {
 	short := "cd d0 && cd d1 && cd d2 && ls"
 	if err := p.run(t, "Bash", commandInput(short)); err != nil {
 		t.Errorf("command %q: expected allow, got block: %v", short, err)
+	}
+}
+
+// TestPolecatPathGuardBashCdSearchesCdpath pins that a bare relative cd operand
+// is also judged under every $CDPATH entry, where the shell looks it up before
+// the current directory.
+func TestPolecatPathGuardBashCdSearchesCdpath(t *testing.T) {
+	t.Parallel()
+	// @POLECATS@ stands for <rig>/polecats in the fixture's town.
+	const polecats = "@POLECATS@"
+	cases := []struct {
+		name      string
+		cdpath    string
+		command   string
+		wantBlock bool
+	}{
+		{"absolute entry reaches a sibling polecat dir", polecats, "cd coral", true},
+		{"relative entry reaches a sibling polecat dir", "../..", "cd coral", true},
+		{"relative entry that stays in the polecat's own dir", "..", "cd coral", false},
+		{"second entry reaches a sibling polecat dir", ".:" + polecats, "cd coral", true},
+		{"entry with a trailing slash", polecats + "/", "cd coral", true},
+		{"entry reaches a sibling, cd then rm", polecats, "cd coral/gastown && rm -rf internal.go", true},
+		{"dot-slash operand skips the search", polecats, "cd ./internal && rm -rf build", false},
+		{"dot-dot operand skips the search", polecats, "cd .. && ls", false},
+		{"tilde operand skips the search", polecats, "cd ~ && ls", false},
+		{"entry that holds no sibling", ".:", "cd internal && rm -rf build", false},
+		{"empty CDPATH", "", "cd internal && rm -rf build", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := newPolecatTestTown(t)
+			cdpath := strings.ReplaceAll(tc.cdpath, polecats, filepath.Join(p.rigRoot, "polecats"))
+			p = p.withEnv("CDPATH", cdpath)
+			err := p.run(t, "Bash", commandInput(tc.command))
+			if tc.wantBlock && err == nil {
+				t.Errorf("CDPATH=%q command %q: expected BLOCK, got allow", cdpath, tc.command)
+			}
+			if !tc.wantBlock && err != nil {
+				t.Errorf("CDPATH=%q command %q: expected allow, got block: %v", cdpath, tc.command, err)
+			}
+		})
+	}
+
+	t.Run("CDPATH assigned on the line is refused for a searched operand", func(t *testing.T) {
+		t.Parallel()
+		p := newPolecatTestTown(t)
+		for _, command := range []string{"CDPATH=../.. cd coral", "export CDPATH=../..; cd coral", "CDPATH=../..; cd coral && ls"} {
+			if err := p.run(t, "Bash", commandInput(command)); err == nil {
+				t.Errorf("command %q: expected BLOCK, got allow", command)
+			}
+		}
+		if err := p.run(t, "Bash", commandInput("CDPATH=.. cd ./internal && ls")); err != nil {
+			t.Errorf("a ./ operand is never searched, got block: %v", err)
+		}
+	})
+}
+
+func TestWrappedShell(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		cmdline   []string
+		wantShell string
+		wantArgs  []string
+		found     bool
+	}{
+		{"timeout", []string{"timeout", "5", "bash", "-c", "ls"}, "bash", []string{"-c", "ls"}, true},
+		{"env with an option", []string{"env", "-i", "sh", "-c", "ls"}, "sh", []string{"-c", "ls"}, true},
+		{"nice with an option", []string{"nice", "-n", "5", "zsh", "-c", "ls"}, "zsh", []string{"-c", "ls"}, true},
+		{"shell by path", []string{"sudo", "/bin/bash", "-c", "ls"}, "bash", []string{"-c", "ls"}, true},
+		{"leading assignment", []string{"A=1", "timeout", "5", "bash", "-c", "ls"}, "bash", []string{"-c", "ls"}, true},
+		{"xargs", []string{"xargs", "-I{}", "sh", "-c", "ls {}"}, "sh", []string{"-c", "ls {}"}, true},
+		{"find -exec", []string{"find", ".", "-exec", "sh", "-c", "ls", ";"}, "sh", []string{"-c", "ls", ";"}, true},
+		{"find -execdir", []string{"find", ".", "-execdir", "bash", "-c", "ls", ";"}, "bash", []string{"-c", "ls", ";"}, true},
+		{"find without -exec", []string{"find", ".", "-name", "bash"}, "", nil, false},
+		{"wrapper without a shell", []string{"timeout", "5", "make", "build"}, "", nil, false},
+		{"not a wrapper", []string{"echo", "bash", "-c", "ls"}, "", nil, false},
+		{"only assignments", []string{"A=1"}, "", nil, false},
+		{"empty", nil, "", nil, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shell, args, found := wrappedShell(tc.cmdline)
+			if shell != tc.wantShell || !slices.Equal(args, tc.wantArgs) || found != tc.found {
+				t.Errorf("wrappedShell(%q) = (%q, %q, %v), want (%q, %q, %v)", tc.cmdline, shell, args, found, tc.wantShell, tc.wantArgs, tc.found)
+			}
+		})
 	}
 }

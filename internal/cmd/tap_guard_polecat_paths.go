@@ -277,12 +277,14 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 
 	segments := splitShellSegments(shellTokenize(stripped))
 	for _, segment := range segments {
-		word, args := segmentCommandWord(trimShellKeywords(segment))
+		cmdline := trimShellKeywords(segment)
+		word, args := segmentCommandWord(cmdline)
 		// A launcher can carry a construct rather than a command — `time ( rm
 		// -rf X )`, `! { rm -rf X; }` — so what it carried is re-read until the
 		// word is a command again.
 		for opensConstruct(word) {
-			word, args = segmentCommandWord(trimShellKeywords(append([]string{word}, args...)))
+			cmdline = trimShellKeywords(append([]string{word}, args...))
+			word, args = segmentCommandWord(cmdline)
 		}
 		if word == "" {
 			continue
@@ -336,6 +338,23 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 			for _, dir := range gitDashCDirs(args) {
 				if reason := s.checkBashTarget(dir, "git -C", false); reason != "" {
 					return reason
+				}
+			}
+		}
+		// A shell can also be the command a wrapper runs (`timeout 5 bash -c`,
+		// `xargs sh -c`, `find -exec sh -c`, `env -i bash -c`): the command word
+		// is then the wrapper or one of its options, and the shell's payload is
+		// walked here instead. A shell that is the command word itself was
+		// handled above.
+		if !isInterpreterCommand(base) {
+			if shell, shellArgs, ok := wrappedShell(cmdline); ok {
+				if payload, ok := shellPayload(shell, shellArgs); ok {
+					if reason := s.checkBashArgs(shellArgs, shell, true); reason != "" {
+						return reason
+					}
+					if reason := s.checkBashCommand(payload, depth+1); reason != "" {
+						return reason
+					}
 				}
 			}
 		}
@@ -430,6 +449,8 @@ func (s polecatPathScope) walkDirs() []string {
 //
 // A destination that cannot be resolved (an unknown variable, a command
 // substitution) is refused, as it is for any other path the guard cannot pin.
+// So is `cd -` before any cd of the line has run: $OLDPWD then comes from an
+// earlier command.
 func (s polecatPathScope) followCd(command string, args []string) (polecatPathScope, string) {
 	dest, found := cdDestination(command, args)
 	switch {
@@ -438,7 +459,16 @@ func (s polecatPathScope) followCd(command string, args []string) (polecatPathSc
 	case !found:
 		dest = "~" // a bare cd goes home
 	case dest == "-":
-		return s, "" // back to $OLDPWD, a directory this line or an earlier command already stood in
+		// $OLDPWD is a directory this line stood in only after a cd of its own;
+		// before one it was set by an earlier command, which this guard never saw.
+		if len(s.dirs) == 0 || s.vars.assigned["OLDPWD"] {
+			return s, "cd - returns to a directory this guard cannot see — cd to the directory by its path"
+		}
+		return s, ""
+	}
+	dests, reason := s.cdDestinations(dest)
+	if reason != "" {
+		return s, reason
 	}
 	dirs := append([]string(nil), s.walkDirs()...)
 	seen := make(map[string]bool, len(dirs))
@@ -446,21 +476,57 @@ func (s polecatPathScope) followCd(command string, args []string) (polecatPathSc
 		seen[dir] = true
 	}
 	for _, from := range s.walkDirs() {
-		if reason := s.checkBashPathFrom(dest, from, command); reason != "" {
-			return s, reason
+		for _, dest := range dests {
+			if reason := s.checkBashPathFrom(dest, from, command); reason != "" {
+				return s, reason
+			}
+			target, ok := canonicalizeToolPath(s.proc, dest, from)
+			if !ok || seen[target] {
+				continue
+			}
+			seen[target] = true
+			dirs = append(dirs, target)
 		}
-		target, ok := canonicalizeToolPath(s.proc, dest, from)
-		if !ok || seen[target] {
-			continue
-		}
-		seen[target] = true
-		dirs = append(dirs, target)
 	}
 	if len(dirs) > maxWalkDirs {
 		return s, "too many directory changes to follow in one command — split it into commands that each stay in one directory"
 	}
 	s.dirs = dirs
 	return s, ""
+}
+
+// cdDestinations returns the paths a cd operand may name. A bare relative
+// operand (`cd src`) is also looked up under each directory of $CDPATH before
+// the current one, so each CDPATH entry joined to it is a destination too; the
+// operand itself stays in the list for the lookup that finds nothing. A
+// relative entry resolves from the directory the cd runs in, and an empty one
+// is that directory. CDPATH assigned on this line is a value the guard cannot
+// read, so a cd that would search it is refused.
+func (s polecatPathScope) cdDestinations(dest string) ([]string, string) {
+	dests := []string{dest}
+	if !cdSearchesCdpath(dest) {
+		return dests, ""
+	}
+	if s.vars.assigned["CDPATH"] {
+		return nil, "cd searches $CDPATH, which this command line sets — cd to the directory by a path that starts with ./ or /"
+	}
+	for _, entry := range strings.Split(s.proc.getenv("CDPATH"), ":") {
+		if entry != "" {
+			dests = append(dests, strings.TrimSuffix(entry, "/")+"/"+dest)
+		}
+	}
+	return dests, ""
+}
+
+// cdSearchesCdpath reports whether a shell looks a cd operand up under $CDPATH:
+// every operand that is not absolute and does not start with ./ or ../. A
+// ~ operand is expanded before the lookup, so it is not searched.
+func cdSearchesCdpath(dest string) bool {
+	switch {
+	case dest == "", dest == ".", dest == "..", dest[0] == '/', dest[0] == '~':
+		return false
+	}
+	return !strings.HasPrefix(dest, "./") && !strings.HasPrefix(dest, "../")
 }
 
 // cdDestination returns the directory operand of a cd or pushd, past its
@@ -483,14 +549,64 @@ func cdDestination(command string, args []string) (string, bool) {
 	return "", false
 }
 
+// shellCommands are the shells whose -c option takes a command line.
+var shellCommands = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true, "fish": true,
+}
+
+// shellWrappers run, as their own operand, a command whose name sits somewhere
+// after their options (`timeout 5 bash`, `nice -n 5 bash`, `sudo -u x bash`).
+// find joins them only through -exec and its kin (see wrappedShell).
+var shellWrappers = map[string]bool{
+	"env": true, "sudo": true, "doas": true, "nice": true, "ionice": true,
+	"nohup": true, "setsid": true, "stdbuf": true, "timeout": true, "exec": true,
+	"command": true, "builtin": true, "time": true, "xargs": true, "watch": true,
+}
+
+// wrappedShell returns the shell a wrapper command runs, with the words after
+// it: `timeout 5 bash -c '...'` gives ("bash", ["-c", "..."]). The wrapper's
+// own options are not told apart from its operands: the first shell's name
+// after the wrapper starts the shell's command line.
+func wrappedShell(cmdline []string) (string, []string, bool) {
+	i := 0
+	for i < len(cmdline) && isEnvAssignment(cmdline[i]) {
+		i++
+	}
+	if i == len(cmdline) {
+		return "", nil, false
+	}
+	wrapper := filepath.Base(cmdline[i])
+	rest := cmdline[i+1:]
+	switch {
+	case wrapper == "find":
+		start := -1
+		for j, arg := range rest {
+			if arg == "-exec" || arg == "-execdir" || arg == "-ok" || arg == "-okdir" {
+				start = j + 1
+				break
+			}
+		}
+		if start < 0 {
+			return "", nil, false
+		}
+		rest = rest[start:]
+	case !shellWrappers[wrapper]:
+		return "", nil, false
+	}
+	for j, word := range rest {
+		if base := filepath.Base(word); shellCommands[base] {
+			return base, rest[j+1:], true
+		}
+	}
+	return "", nil, false
+}
+
 // shellPayload returns the command line a shell runs from its -c option
 // (`bash -c '...'`, `sh -lc '...'`), which is code the guard walks as a command
 // of its own. Options before -c that take a value (-o pipefail) are skipped;
 // the first plain operand is a script file, after which -c is the script's.
 func shellPayload(command string, args []string) (string, bool) {
-	switch command {
-	case "sh", "bash", "zsh", "dash", "ksh", "fish":
-	default:
+	if !shellCommands[command] {
 		return "", false
 	}
 	for i := 0; i < len(args); i++ {
