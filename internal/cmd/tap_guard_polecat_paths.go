@@ -1486,13 +1486,56 @@ func bashPathCandidates(word string) []string {
 		return nil
 	}
 	if looksLikePathWord(word) {
-		out = append(out, word)
+		// A word holding whitespace is quoted payload text, not one path.
+		path := word
+		if strings.ContainsAny(word, " \t\n") {
+			path = cutAtLiteralDollar(word, word)
+		}
+		if path != "" {
+			out = append(out, path)
+		}
 	}
 	if _, value, found := strings.Cut(word, "="); found && value != "" {
 		out = append(out, bashPathCandidates(value)...)
 	}
 	out = append(out, embeddedPaths(word)...)
 	return dedupeStrings(out)
+}
+
+// cutAtLiteralDollar cuts payload text at its first "$" when the text holds no
+// shell variable start. Such a "$" belongs to the payload language
+// (perl's $1, $. and $_), so the path stops there: "/town/mayor/x$1" is judged
+// as "/town/mayor/x", and a run that opens with the "$" names no path. A run
+// with a real variable ($HOME/x, ${X}, $(cmd)) is returned whole and is still
+// refused as unresolvable. runAndNext is the run plus the character after it,
+// because pathRun stops at the "(" of $(cmd) and leaves a bare "$" behind.
+func cutAtLiteralDollar(run, runAndNext string) string {
+	cut := strings.IndexByte(run, '$')
+	if cut < 0 || hasShellVariableStart(runAndNext) {
+		return run
+	}
+	return run[:cut]
+}
+
+// hasShellVariableStart reports whether s holds a "$" that begins $NAME, ${...}
+// or $(...). "$_" alone is not one: it is perl's topic variable, and "$1", "$."
+// and "$$" do not begin a name either.
+func hasShellVariableStart(s string) bool {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] != '$' {
+			continue
+		}
+		next := s[i+1]
+		switch {
+		case next == '{' || next == '(':
+			return true
+		case next >= 'a' && next <= 'z' || next >= 'A' && next <= 'Z':
+			return true
+		case next == '_' && i+2 < len(s) && isShellVarNameChar(s[i+2]):
+			return true
+		}
+	}
+	return false
 }
 
 // dedupeStrings drops repeated candidates, keeping the first occurrence: a word
@@ -1562,8 +1605,8 @@ func embeddedPaths(word string) []string {
 		if run == "" {
 			continue
 		}
-		if looksLikeExplicitPath(run) {
-			out = append(out, run)
+		if path := cutAtLiteralDollar(run, word[i:min(len(word), i+len(run)+1)]); looksLikeExplicitPath(path) {
+			out = append(out, path)
 		}
 		i += len(run) - 1
 	}
