@@ -1244,13 +1244,13 @@ func resolveMergeQueueConfigIn(open RepoFileOpener, townRoot, rigName string) (*
 		}
 	default:
 		// Either failure drops the tier and is reported, never resolved from
-		// the stale mayor/rig copy it exists to stop trusting. Only the tier
-		// this run cannot read goes to the caller: it may name another landing
-		// host, so the landing remote fails closed on it (gt-yj6g1). A file
-		// that read fine and did not parse cannot, the Forgejo block being
-		// stripped from the repo tier (gt-fn9e6.14) — failing closed there buys
-		// no safety and strands the rig, the commit that repairs the file
-		// having to land through the worker it stopped (gt-mvbbe).
+		// the stale mayor/rig copy it exists to stop trusting. Only an
+		// unreadable tier goes to the caller, so the landing remote fails
+		// closed on it (gt-yj6g1). A malformed one does not: the landing remote
+		// reads only merge_queue.forgejo, which StripRepoForgejo removes from
+		// every repo tier whether or not it parses (gt-fn9e6.14), so dropping
+		// the tier cannot change the remote, and failing closed would stop the
+		// worker that has to land the repairing commit (gt-mvbbe).
 		WarnRepoFileUnreadable(rigName, err)
 		var malformed *malformedRepoSettingsError
 		if !errors.As(err, &malformed) {

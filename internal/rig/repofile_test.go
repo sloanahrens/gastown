@@ -397,10 +397,32 @@ func TestResolveMergeQueueConfig_MalformedRepoTierIsReportedOnce(t *testing.T) {
 	if !RepoFileUnreadableWarned(rigName) {
 		t.Fatal("the dropped repo tier was not reported")
 	}
+	// A report that is cleared and printed again replaces this marker.
+	const marker = "first report"
+	repoFileWarnedRigs.Store(rigName, marker)
 	ResolveMergeQueueConfigIn(malformed, townRoot, rigName)
 
-	if got := RepoFileUnreadableWarnCount(rigName); got != 1 {
-		t.Errorf("the dropped repo tier was reported %d time(s) over two resolutions, want once", got)
+	if got, _ := repoFileWarnedRigs.Load(rigName); got != marker {
+		t.Error("the dropped repo tier was reported again on the second resolution, want once")
+	}
+}
+
+// TestReadRepoFile_AnsweringReadKeepsTheDropReported: a read that answers is not
+// a resolution that stopped dropping the tier, so ReadRepoFile — the editorial
+// check calls it too — leaves a report in place (gt-mvbbe).
+func TestReadRepoFile_AnsweringReadKeepsTheDropReported(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigName := "mango-read-keeps-report"
+	rigRepoDir(t, townRoot, rigName)
+	WarnRepoFileUnreadable(rigName, errors.New("parsing: invalid character"))
+
+	open := stubOpener(stubRepo{refExists: true, data: `{}`})
+	if _, err := ReadRepoFile(open, townRoot, rigName, ".gastown/settings.json"); err != nil {
+		t.Fatalf("ReadRepoFile() error = %v", err)
+	}
+	if !RepoFileUnreadableWarned(rigName) {
+		t.Error("an answering read cleared the report of a dropped tier")
 	}
 }
 
