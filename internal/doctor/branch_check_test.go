@@ -66,8 +66,9 @@ func TestCloneDivergenceCheck_MayorCloneWithItsOwnWorkIsReported(t *testing.T) {
 	}
 }
 
-// townSourceCheckout marks clonePath as the town's gt source checkout, the
-// tree the check resolves its live clone through (version.GetRepoRootForTown).
+// townSourceCheckout marks clonePath as a gt source checkout: it writes the
+// marker version.hasGtSource reads, which is what makes a clone the tree the
+// town builds from.
 func townSourceCheckout(t *testing.T, clonePath string) {
 	t.Helper()
 	dir := filepath.Join(clonePath, "cmd", "gt")
@@ -97,11 +98,11 @@ func TestCloneDivergenceCheck_TownSourceCheckoutIsStillReported(t *testing.T) {
 	}
 }
 
-// TestCloneDivergenceCheck_CloneThatIsNoOnesSourceCheckoutStaysExempt: the
-// exemption follows the town's source checkout, not the rig's name, so a
-// gastown clone that is nobody's source checkout is the same retired leftover
-// as any other rig's (gt-jx8sh).
-func TestCloneDivergenceCheck_CloneThatIsNoOnesSourceCheckoutStaysExempt(t *testing.T) {
+// TestCloneDivergenceCheck_RetiredGastownCloneIsNotReported: the exemption
+// follows what a clone holds, not the name of its rig, so a gastown clone
+// holding no gt source is the same retired leftover as any other rig's
+// (gt-jx8sh).
+func TestCloneDivergenceCheck_RetiredGastownCloneIsNotReported(t *testing.T) {
 	t.Parallel()
 	f := gitfake.New()
 	townRoot := t.TempDir()
@@ -110,8 +111,25 @@ func TestCloneDivergenceCheck_CloneThatIsNoOnesSourceCheckoutStaysExempt(t *test
 	result := NewCloneDivergenceCheck().Run(withGit(&CheckContext{TownRoot: townRoot}, f))
 
 	if result.Status != StatusOK {
-		t.Errorf("gastown/mayor/rig 60 behind in a town with no gt source checkout: %v %v, want OK",
+		t.Errorf("gastown/mayor/rig 60 behind, holding no gt source and no work of its own: %v %v, want OK",
 			result.Status, result.Details)
+	}
+}
+
+// TestCloneDivergenceCheck_NoValidClonesMessageIsUnchanged pins the wording,
+// which gt-9gnar changed without a test (gt-jx8sh).
+func TestCloneDivergenceCheck_NoValidClonesMessageIsUnchanged(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
+	townRoot := t.TempDir()
+	// The town's only clone is a retired one, so the check exempts it and has
+	// nothing left to report.
+	cloneBehind(t, f, filepath.Join(townRoot, "devops", "mayor", "rig"), 60, false)
+
+	result := NewCloneDivergenceCheck().Run(withGit(&CheckContext{TownRoot: townRoot}, f))
+
+	if result.Message != "No valid git clones found" {
+		t.Errorf("message = %q, want %q", result.Message, "No valid git clones found")
 	}
 }
 

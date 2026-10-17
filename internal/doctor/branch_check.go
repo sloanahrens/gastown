@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
-	"github.com/steveyegge/gastown/internal/version"
 )
 
 // CloneDivergenceCheck detects when git clones have drifted significantly apart.
@@ -48,8 +46,6 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	liveSource := liveSourceCheckout(ctx)
-
 	// Gather info about each clone
 	var infos []cloneInfo
 	for _, path := range clones {
@@ -57,13 +53,15 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 		if err != nil {
 			continue // Skip problematic clones
 		}
-		if c.unmaintainedMayorClone(ctx, info, liveSource) {
+		if c.unmaintainedMayorClone(ctx, info) {
 			continue
 		}
 		infos = append(infos, info)
 	}
 
 	if len(infos) == 0 {
+		// The wording this check has reported since it was added; gt-9gnar
+		// reworded it as an unrelated edit (gt-jx8sh).
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -117,33 +115,24 @@ func (c *CloneDivergenceCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// liveSourceCheckout returns the mayor/rig clone the town itself reads — its gt
-// source checkout, which the installed binary is built from and which gt plugin
-// sync takes the town's plugins out of — so that clone's distance from
-// origin/main stays a finding (gt-9gnar): a stale clone there ships stale
-// plugins. Every other rig's canonical repo is its shared .repo.git, which
-// polecat/manager.go's repoBase prefers to mayor/rig. The path is resolved, not
-// spelled out, so the rule is the layout the rest of the town uses rather than
-// a rig name (gt-jx8sh). "" means the town has no source checkout, and then no
-// mayor/rig clone is live.
-func liveSourceCheckout(ctx *CheckContext) string {
-	repoRoot, err := version.GetRepoRootForTown(ctx.TownRoot)
-	if err != nil {
-		return ""
-	}
-	return repoRoot
-}
-
 // unmaintainedMayorClone reports whether info is a mayor/rig clone the town
-// stopped working in: a clone that is not liveSource, the town's own gt source
-// checkout, and holds no commits of its own, so it is a stale copy of the rig's
-// shared .repo.git and nothing else (gt-9gnar). Reporting its distance from
-// origin/main buried the real divergence in gt-s5zor. A clone holding its own
-// commits is a working copy wherever it sits, so that one keeps the check it
-// has today.
-func (c *CloneDivergenceCheck) unmaintainedMayorClone(ctx *CheckContext, info cloneInfo, liveSource string) bool {
+// stopped working in: a clone that holds no commits of its own, so it is a
+// stale copy of the rig's shared .repo.git and nothing else (gt-9gnar).
+// Reporting its distance from origin/main buried the real divergence in
+// gt-s5zor. A clone holding its own commits is a working copy wherever it sits,
+// so that one keeps the check it has today.
+func (c *CloneDivergenceCheck) unmaintainedMayorClone(ctx *CheckContext, info cloneInfo) bool {
 	rig := mayorCloneRig(ctx.TownRoot, info.path)
-	if rig == "" || info.path == liveSource {
+	if rig == "" {
+		return false
+	}
+	// The town's own gt source checkout is worked in whatever it holds: the
+	// installed binary is built from it and gt plugin sync takes the town's
+	// plugins out of it (internal/cmd/plugin.go), so a stale clone there ships
+	// stale plugins. It is the checkout holding the gt source, the marker
+	// version.hasGtSource reads, which keeps this rule on the clone's contents
+	// rather than on the name of a rig (gt-jx8sh).
+	if fileExists(filepath.Join(info.path, "cmd", "gt", "main.go")) {
 		return false
 	}
 	// HEAD is an ancestor of origin/main exactly when the clone holds no
