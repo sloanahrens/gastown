@@ -342,8 +342,9 @@ func (r escalateRun) clearAlerts(args []string) error {
 
 	// Like gt escalate close, clearing leaves the escalation's routed mail
 	// beads open unless they are closed here; open, they pile up as phantom
-	// P1/P2s in `bd ready`. Best-effort: the escalations are already closed.
-	if len(closed) > 0 {
+	// P1/P2s in `bd ready`. Best-effort: the escalations are already closed,
+	// so a run built without a beads client skips this rather than panics.
+	if len(closed) > 0 && r.beadsClient != nil {
 		bd := r.beadsClient(townRoot)
 		for _, id := range closed {
 			if _, err := closeEscalationDeliveryBeads(bd, id, closedBy); err != nil {
