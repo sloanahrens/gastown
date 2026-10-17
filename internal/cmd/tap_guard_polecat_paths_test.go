@@ -543,6 +543,13 @@ func TestPolecatPathGuardBash(t *testing.T) {
 		{"sed -n s///p reading a sibling", "sed -n 's/a/b/p' " + filepath.Join(p.sibling, "internal.go"), false},
 		{"sed -ri on an own-worktree file", "sed -ri 's/a/b/' " + own, false},
 		{"python with no paths", `python3 -c "print(1)"`, false},
+		// gt-uqp17: a perl payload's $1, $. and $_ are not path variables.
+		{"perl -pi -e with a capture group reference", `perl -pi -e 's/(foo)/bar$1/g' main.go`, false},
+		{"perl -pi -e with the line counter", `perl -pi -e 's/foo/bar/ if $. > 2' main.go`, false},
+		{"perl -ne printing the topic variable", `perl -ne 'print $_ if /x/' main.go`, false},
+		{"perl -e payload leading a path with an unresolved variable", `perl -e 'unlink "$NO_SUCH_VAR_UQP17/x"'`, true},
+		{"perl -e payload with $1 and an unresolved variable path", `perl -e 's/(a)/$1/; unlink "$NO_SUCH_VAR_UQP17/x"'`, true},
+		{"perl -e payload deleting under $GT_TOWN_ROOT", `perl -e 'unlink "$GT_TOWN_ROOT/` + p.rig + `/polecats/` + p.other + `/x"'`, true},
 		{"heredoc body into own worktree", "cat > " + own + " <<'EOF'\nsee " + sib + " for context\nEOF", false},
 		{"heredoc body mentioning the mayor dir", "cat > " + own + " <<'EOF'\n" + mayor + "\nEOF", false},
 		{"redirect after a heredoc whose body holds an apostrophe", "cat <<'EOF' > " + own + "\nit's x\nEOF\necho y > " + filepath.Join(p.sibling, "internal.go"), true},
@@ -938,6 +945,12 @@ func TestBashPathCandidates(t *testing.T) {
 		{`open('/town/mayor/x','w')`, []string{"/town/mayor/x"}},
 		{`f(1/2)`, nil},
 		{`print("http://x/y")`, nil},
+		{`s/(foo)/bar$1/g`, nil},
+		{`s/foo/bar/ if $. > 2`, nil},
+		{`print $_ if /x/`, []string{"/x/"}},
+		{`unlink $path`, []string{"$path"}},
+		{`unlink "$HOME/x"`, []string{"$HOME/x"}},
+		{`s/(a)/$1/; unlink "$X/y"`, []string{"$X/y"}},
 	}
 	for _, tc := range cases {
 		got := bashPathCandidates(tc.word)

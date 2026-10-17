@@ -1492,7 +1492,45 @@ func bashPathCandidates(word string) []string {
 		out = append(out, bashPathCandidates(value)...)
 	}
 	out = append(out, embeddedPaths(word)...)
-	return dedupeStrings(out)
+	return dedupeStrings(dropNonVariableDollars(out))
+}
+
+// dropNonVariableDollars removes candidates whose every "$" is not the start of
+// a shell variable. An interpreter payload is full of such dollars — perl's $1,
+// $. and $_ in s/(a)/b$1/g, "if $. > 2" and "print $_" — and canonicalizeToolPath
+// refuses any path still holding a "$" after expansion, so a payload that merely
+// mentions one was refused as unresolvable although no path starts with a
+// variable. A candidate with a real variable ($HOME/x, ${X}, $(cmd), $path)
+// stays and is judged as before (gt-uqp17).
+func dropNonVariableDollars(candidates []string) []string {
+	out := candidates[:0]
+	for _, candidate := range candidates {
+		if strings.Contains(candidate, "$") && !hasShellVariableStart(candidate) {
+			continue
+		}
+		out = append(out, candidate)
+	}
+	return out
+}
+
+// hasShellVariableStart reports whether s holds a "$" that begins $NAME, ${...}
+// or $(...). "$_" alone is not one: in a payload it is perl's topic variable.
+func hasShellVariableStart(s string) bool {
+	for i := 0; i+1 < len(s); i++ {
+		if s[i] != '$' {
+			continue
+		}
+		next := s[i+1]
+		switch {
+		case next == '{' || next == '(':
+			return true
+		case next >= 'a' && next <= 'z' || next >= 'A' && next <= 'Z':
+			return true
+		case next == '_' && i+2 < len(s) && isShellVarNameChar(s[i+2]):
+			return true
+		}
+	}
+	return false
 }
 
 // dedupeStrings drops repeated candidates, keeping the first occurrence: a word
