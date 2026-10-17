@@ -27,6 +27,7 @@ import (
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/suggest"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 	"golang.org/x/term"
@@ -851,17 +852,23 @@ func runRigRemove(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	sup := operatorSupervisor(townRoot)
-	actor := operatorActor("gt rig remove")
-	return removeRigIn(townRoot, args[0], rigRemoveForce, rigRemoveTmux{
-		list: tmux.NewTmux().ListSessions,
+	tm := newRigRemoveTmux(tmux.NewTmux().ListSessions, operatorSupervisor(townRoot), operatorActor("gt rig remove"))
+	return removeRigIn(townRoot, args[0], rigRemoveForce, townRegistry(), tm)
+}
+
+// newRigRemoveTmux routes the stops of gt rig remove --force through sup as
+// operator stops by actor, so an e-stop does not refuse them.
+func newRigRemoveTmux(list func() ([]string, error), sup *supervisor.Supervisor, actor string) rigRemoveTmux {
+	return rigRemoveTmux{
+		list: list,
 		stop: func(session, reason string) error { return sup.StopSession(session, reason, actor) },
-	})
+	}
 }
 
 // removeRigIn removes rig name from the registry of the town at townRoot,
-// first stopping its tmux sessions when force is set.
-func removeRigIn(townRoot, name string, force bool, tm rigRemoveTmux) error {
+// first stopping its tmux sessions when force is set. reg supplies the
+// rig's session prefix.
+func removeRigIn(townRoot, name string, force bool, reg *session.PrefixRegistry, tm rigRemoveTmux) error {
 	// Load rigs config
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
 	rigsConfig, err := config.LoadRigsConfig(rigsPath)
@@ -879,11 +886,8 @@ func removeRigIn(townRoot, name string, force bool, tm rigRemoveTmux) error {
 	g := git.NewGit(townRoot)
 	mgr := rig.NewManager(townRoot, rigsConfig, g)
 
-	// Check for running tmux sessions before removing. Only a registered rig
-	// has sessions to find: the prefix of a name the registry does not know
-	// falls back to the default "gt", which matches the gastown rig's
-	// sessions, so a mistyped name would stop another rig's agents before
-	// RemoveRig reports it missing (gt-bfo4z).
+	// Only a registered rig has sessions: an unknown name's prefix falls back
+	// to "gt", which would match another rig's sessions (gt-bfo4z).
 	var sessions []string
 	var sessErr error
 	if mgr.RigExists(name) {
@@ -891,7 +895,7 @@ func removeRigIn(townRoot, name string, force bool, tm rigRemoveTmux) error {
 		if all, sessErr = tm.list(); sessErr != nil {
 			sessErr = fmt.Errorf("listing tmux sessions: %w", sessErr)
 		} else {
-			sessions = rigSessionsIn(townRegistry(), all, name)
+			sessions = rigSessionsIn(reg, all, name)
 		}
 	}
 	if sessErr != nil {
