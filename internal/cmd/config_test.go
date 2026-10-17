@@ -501,6 +501,39 @@ func TestConfigAgentRemove(t *testing.T) {
 		}
 	})
 
+	t.Run("removes override of built-in agent", func(t *testing.T) {
+		townRoot := setupTestTownForConfig(t)
+		settingsPath := config.TownSettingsPath(townRoot)
+
+		settings := &config.TownSettings{
+			Type:         "town-settings",
+			Version:      config.CurrentTownSettingsVersion,
+			DefaultAgent: "claude",
+			Agents: map[string]*config.RuntimeConfig{
+				"claude": {Command: "claude-glm"},
+			},
+		}
+		if err := config.SaveTownSettings(settingsPath, settings); err != nil {
+			t.Fatalf("save settings: %v", err)
+		}
+
+		var out bytes.Buffer
+		if err := configAgentRemove(townConfigCmdEnv(townRoot, &out), []string{"claude"}); err != nil {
+			t.Fatalf("configAgentRemove failed: %v", err)
+		}
+		if !strings.Contains(out.String(), "built-in is restored") {
+			t.Errorf("output = %q, want it to say the built-in is restored", out.String())
+		}
+
+		loaded, err := config.LoadOrCreateTownSettings(settingsPath)
+		if err != nil {
+			t.Fatalf("load settings: %v", err)
+		}
+		if _, ok := loaded.Agents["claude"]; ok {
+			t.Error("override of claude still exists after removal")
+		}
+	})
+
 	t.Run("returns error for non-existent custom agent", func(t *testing.T) {
 		townRoot := setupTestTownForConfig(t)
 
