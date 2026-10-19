@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,6 +117,37 @@ type downServices struct {
 	killImposters    func(townRoot string) error
 	findIdleMonitors func(townRoot string) []int
 	findOrphans      func(townRoot string) []int
+
+	// sessions replaces the per-rig session stops, which need a live tmux
+	// server. Nil means the real ones. When set, runDownWith opens no tmux, so
+	// the phases that read it (the legacy-socket sweep, --all's verification
+	// and --nuke) are skipped, as they are for a registry that will not load.
+	sessions *downSessionStops
+}
+
+// downSessionStops are the per-rig session phases of gt down. Each returns how
+// many sessions it stopped (or would stop, in a dry run) and how many failed
+// to stop; runDownWith clears allOK on a failed count.
+type downSessionStops struct {
+	polecats func(force, dryRun bool) (stopped, failed int)
+	crew     func(dryRun bool) (stopped, failed int)
+}
+
+// realDownSessionStops stops the sessions of rigs on tmux t.
+func realDownSessionStops(t *tmux.Tmux, townRoot string, rigsConfig *config.RigsConfig, rigs []string) *downSessionStops {
+	// Every session gt down ends goes through the supervisor's operator
+	// stop: logged with the actor, and not refused by an e-stop, since an
+	// operator shutting the town down is what an e-stop asks for
+	// (gt-4k3fj.4.1).
+	stop := downStop{tmux: t, sup: operatorSupervisor(townRoot), townRoot: townRoot, actor: operatorActor("gt down"), force: downForce}
+	return &downSessionStops{
+		polecats: func(force, dryRun bool) (int, int) {
+			return stopAllPolecats(t, stop, townRoot, rigsConfig, rigs, force, dryRun)
+		},
+		crew: func(dryRun bool) (int, int) {
+			return stopAllCrew(t, stop, townRoot, rigsConfig, rigs, dryRun)
+		},
+	}
 }
 
 // realDownServices is downServices on the running host.
@@ -154,7 +186,7 @@ func runDownWith(townRoot string, svc downServices) error {
 	// --all's verification and --nuke go with the per-rig stops, and the
 	// services below are stopped without tmux (gt-sjtps).
 	var t *tmux.Tmux
-	if rigsConfig != nil {
+	if rigsConfig != nil && svc.sessions == nil {
 		t = tmux.NewTmux()
 		if !t.IsAvailable() {
 			return fmt.Errorf("tmux not available (is tmux installed and on PATH?)")
@@ -203,15 +235,13 @@ func runDownWith(townRoot string, svc downServices) error {
 	// registry means no tmux was opened for them, so they are reported as
 	// skipped and the services below still run (gt-sjtps).
 	crewStopped := 0
-	if t == nil {
+	sessions := svc.sessions
+	if sessions == nil && t != nil {
+		sessions = realDownSessionStops(t, townRoot, rigsConfig, rigs)
+	}
+	if sessions == nil {
 		reportRigSessionsSkipped(rigs, rigsErr)
 	} else {
-		// Every session gt down ends goes through the supervisor's operator
-		// stop: logged with the actor, and not refused by an e-stop, since an
-		// operator shutting the town down is what an e-stop asks for
-		// (gt-4k3fj.4.1).
-		stop := downStop{tmux: t, sup: operatorSupervisor(townRoot), townRoot: townRoot, actor: operatorActor("gt down"), force: downForce}
-
 		// Phase 0.5: Stop polecats if --polecats
 		if downPolecats {
 			if downDryRun {
@@ -219,7 +249,10 @@ func runDownWith(townRoot string, svc downServices) error {
 			} else {
 				fmt.Println("Stopping polecats...")
 			}
-			polecatsStopped := stopAllPolecats(t, stop, townRoot, rigsConfig, rigs, downForce, downDryRun)
+			polecatsStopped, polecatsFailed := sessions.polecats(downForce, downDryRun)
+			if polecatsFailed > 0 {
+				allOK = false
+			}
 			if downDryRun {
 				if polecatsStopped > 0 {
 					printDownStatus("Polecats", true, fmt.Sprintf("%d would stop", polecatsStopped))
@@ -238,7 +271,11 @@ func runDownWith(townRoot string, svc downServices) error {
 
 		// Phase 0.6: Stop crew member sessions.
 		// Crew sessions consume tokens and must be stopped during any shutdown.
-		crewStopped = stopAllCrew(t, stop, townRoot, rigsConfig, rigs, downDryRun)
+		var crewFailed int
+		crewStopped, crewFailed = sessions.crew(downDryRun)
+		if crewFailed > 0 {
+			allOK = false
+		}
 		if downDryRun {
 			if crewStopped > 0 {
 				printDownStatus("Crew", true, fmt.Sprintf("%d would stop", crewStopped))
@@ -536,12 +573,11 @@ func rigAgentsNotStopped(rigNames []string) string {
 
 // stopAllPolecats stops all polecat sessions across all rigs.
 // Stops are performed in parallel for faster teardown.
-// Returns the number of polecats stopped (or would be stopped in dry-run).
+// Returns the number of polecats stopped (or would be stopped in dry-run) and
+// the number whose stop failed.
 // rigsConfig is the town's rig registry; the caller skips this phase when it
 // is nil, which is what an unreadable rigs.json leaves it (gt-52mgl, gt-sjtps).
-func stopAllPolecats(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *config.RigsConfig, rigNames []string, force bool, dryRun bool) int {
-	stopped := 0
-
+func stopAllPolecats(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *config.RigsConfig, rigNames []string, force bool, dryRun bool) (stopped, failed int) {
 	g := git.NewGit(townRoot)
 	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
 
@@ -561,17 +597,11 @@ func stopAllPolecats(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *c
 				fmt.Printf("  %s [%s] %s would stop\n", style.Dim.Render("○"), rigName, info.Polecat)
 			}
 		}
-		return stopped
+		return stopped, 0
 	}
 
 	// Collect targets and stop all in parallel.
-	type polecatResult struct {
-		rigName string
-		name    string
-		err     error
-	}
-
-	var results []polecatResult
+	var results []downStopResult
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
@@ -594,33 +624,23 @@ func stopAllPolecats(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *c
 				defer wg.Done()
 				err := mgr.Stop(name, force)
 				mu.Lock()
-				results = append(results, polecatResult{rigName: rn, name: name, err: err})
+				results = append(results, downStopResult{rigName: rn, name: name, err: err})
 				mu.Unlock()
 			}(rigName, info.Polecat, polecatMgr)
 		}
 	}
 	wg.Wait()
 
-	for _, res := range results {
-		if res.err == nil {
-			stopped++
-			fmt.Printf("  %s [%s] %s stopped\n", style.SuccessPrefix, res.rigName, res.name)
-		} else {
-			fmt.Printf("  %s [%s] %s: %s\n", style.ErrorPrefix, res.rigName, res.name, res.err.Error())
-		}
-	}
-
-	return stopped
+	return reportStopResults(os.Stdout, results)
 }
 
 // stopAllCrew stops all crew member sessions across all rigs.
 // Stops are performed in parallel for faster teardown.
-// Returns the number of crew sessions stopped (or would be stopped in dry-run).
+// Returns the number of crew sessions stopped (or would be stopped in dry-run)
+// and the number whose stop failed.
 // rigsConfig is the town's rig registry; the caller skips this phase when it
 // is nil, which is what an unreadable rigs.json leaves it (gt-52mgl, gt-sjtps).
-func stopAllCrew(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *config.RigsConfig, rigNames []string, dryRun bool) int {
-	stopped := 0
-
+func stopAllCrew(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *config.RigsConfig, rigNames []string, dryRun bool) (stopped, failed int) {
 	g := git.NewGit(townRoot)
 	rigMgr := rig.NewManager(townRoot, rigsConfig, g)
 
@@ -661,16 +681,11 @@ func stopAllCrew(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *confi
 	}
 
 	if len(targets) == 0 {
-		return stopped
+		return stopped, 0
 	}
 
 	// Stop all crew sessions in parallel.
-	type crewResult struct {
-		rigName string
-		name    string
-		err     error
-	}
-	results := make([]crewResult, len(targets))
+	results := make([]downStopResult, len(targets))
 	var wg sync.WaitGroup
 
 	for i, tgt := range targets {
@@ -678,21 +693,37 @@ func stopAllCrew(t *tmux.Tmux, stop downStop, townRoot string, rigsConfig *confi
 		go func(i int, tgt crewTarget) {
 			defer wg.Done()
 			err := stop.session(tgt.sessionID)
-			results[i] = crewResult{rigName: tgt.rigName, name: tgt.name, err: err}
+			results[i] = downStopResult{rigName: tgt.rigName, name: "crew/" + tgt.name, err: err}
 		}(i, tgt)
 	}
 	wg.Wait()
 
+	crewStopped, crewFailed := reportStopResults(os.Stdout, results)
+	return stopped + crewStopped, crewFailed
+}
+
+// downStopResult is the outcome of stopping one session; name is what the
+// report prints after the rig, such as "nux" or "crew/sloan".
+type downStopResult struct {
+	rigName string
+	name    string
+	err     error
+}
+
+// reportStopResults prints one line per stop and returns how many succeeded
+// and how many failed. A caller that drops the failed count reports a shutdown
+// that left sessions running as clean.
+func reportStopResults(w io.Writer, results []downStopResult) (stopped, failed int) {
 	for _, res := range results {
 		if res.err == nil {
 			stopped++
-			fmt.Printf("  %s [%s] crew/%s stopped\n", style.SuccessPrefix, res.rigName, res.name)
+			fmt.Fprintf(w, "  %s [%s] %s stopped\n", style.SuccessPrefix, res.rigName, res.name)
 		} else {
-			fmt.Printf("  %s [%s] crew/%s: %s\n", style.ErrorPrefix, res.rigName, res.name, res.err.Error())
+			failed++
+			fmt.Fprintf(w, "  %s [%s] %s: %s\n", style.ErrorPrefix, res.rigName, res.name, res.err.Error())
 		}
 	}
-
-	return stopped
+	return stopped, failed
 }
 
 func printDownStatus(name string, ok bool, detail string) {

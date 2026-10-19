@@ -1066,3 +1066,29 @@ func TestSpecDispatchOfKeepsEnabled(t *testing.T) {
 		t.Errorf("spec_dispatch after the round trip = %+v, want enabled:true", sd)
 	}
 }
+
+// With pro_max 0 the dispatcher opens no pro seat, so a second seat that runs
+// the pro agent is the second seat. Matching by agent name alone labelled it the
+// pro seat, and show then listed the second seat as "not run".
+func TestSeatHeldByZeroProMaxSecondSeat(t *testing.T) {
+	t.Parallel()
+	zero := 0
+	ts := &config.TownSettings{PolecatPool: &config.PolecatPool{Agent: "claude-sonnet", ProMax: &zero}}
+	sd := &config.SpecDispatchConfig{HookedAgent: config.DefaultSeatRefillProAgent, MaxHooked: 2}
+
+	v := poolSeatsOf(ts, sd)
+
+	if got := v.seatHeldBy(config.DefaultSeatRefillProAgent); got != secondSeat {
+		t.Errorf("seatHeldBy(%s) = %s, want the second seat: the pro seat is closed", config.DefaultSeatRefillProAgent, seatName(got))
+	}
+	var seats []string
+	for _, s := range v.seats {
+		seats = append(seats, seatName(s.seat)+"="+s.agent)
+	}
+	if want := []string{"pool seat=claude-sonnet", "second seat=deepseek-pro"}; !slices.Equal(seats, want) {
+		t.Errorf("listed seats = %q, want %q", seats, want)
+	}
+	if holder, shadowed := v.shadowedSecondSeat(); shadowed {
+		t.Errorf("the running second seat is reported as not run, shadowed by the %s", seatName(holder))
+	}
+}

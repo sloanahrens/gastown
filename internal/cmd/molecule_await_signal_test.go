@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -631,6 +632,34 @@ func TestRunMoleculeAwaitSignal_SignalResetsIdleWhenReadFailed(t *testing.T) {
 	}
 	if got := idleLabelChanges(w.db); len(got) != 1 || got[0] != "idle:0" {
 		t.Fatalf("idle label changes = %q, want exactly [idle:0]", got)
+	}
+}
+
+// Under --json stdout is the one object a parsing caller decodes, so the
+// agent-bead read warning goes to stderr, not ahead of the object.
+func TestAwaitSignalJSONStdoutIsPureJSON(t *testing.T) {
+	t.Parallel()
+	w := newAwaitSignalTown(t, []string{"gt:agent", "idle:0"}, 1) // the initial agent-bead read fails
+	var stdout bytes.Buffer
+	w.run.out = &stdout
+	w.run.quiet = false
+	w.run.json = true
+	w.run.backoff = awaitSignalBackoff{base: "1ms", mult: 1}
+
+	if err := w.run.run(w.beadsDir, w.townRoot); err != nil {
+		t.Fatalf("await-signal --json: %v", err)
+	}
+
+	dec := json.NewDecoder(&stdout)
+	var result AwaitSignalResult
+	if err := dec.Decode(&result); err != nil {
+		t.Fatalf("stdout does not start with a JSON object: %v\n%s", err, stdout.String())
+	}
+	if dec.More() {
+		t.Errorf("stdout holds more than the one JSON object:\n%s", stdout.String())
+	}
+	if !strings.Contains(w.stderr.String(), "Could not read agent bead") {
+		t.Errorf("stderr = %q, want the agent-bead read warning", w.stderr.String())
 	}
 }
 

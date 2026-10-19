@@ -206,6 +206,16 @@ type awaitSignalRun struct {
 	wait func(ctx context.Context, townRoot, rig string) (*AwaitSignalResult, error)
 }
 
+// warnOut is where the agent-bead warnings go: stdout, except under --json,
+// where stdout carries the one JSON object a parsing caller decodes and the
+// warnings go to stderr.
+func (r awaitSignalRun) warnOut() io.Writer {
+	if r.json {
+		return r.errOut
+	}
+	return r.out
+}
+
 func awaitSignalFromFlags(role string) awaitSignalRun {
 	return awaitSignalRun{
 		backoff:     awaitSignalBackoffFromFlags(),
@@ -234,7 +244,7 @@ func (r awaitSignalRun) run(beadsDir, townRoot string) error {
 		if err != nil {
 			// Agent bead might not exist yet - that's OK, start at 0
 			if !r.quiet {
-				fmt.Fprintf(r.out, "%s Could not read agent bead (starting at idle=0): %v\n",
+				fmt.Fprintf(r.warnOut(), "%s Could not read agent bead (starting at idle=0): %v\n",
 					style.Dim.Render("⚠"), err)
 			}
 		} else {
@@ -280,7 +290,7 @@ func (r awaitSignalRun) run(beadsDir, townRoot string) error {
 		windowEnd := now.Add(timeout)
 		if err := setAgentBackoffUntil(agentBeadsDB(r.db, beadsDir), r.agentBead, windowEnd); err != nil {
 			if !r.quiet {
-				fmt.Fprintf(r.out, "%s Failed to persist backoff window: %v\n",
+				fmt.Fprintf(r.warnOut(), "%s Failed to persist backoff window: %v\n",
 					style.Dim.Render("⚠"), err)
 			}
 		}
