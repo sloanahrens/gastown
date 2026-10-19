@@ -6,8 +6,7 @@
 
 Polecats have three distinct lifecycle layers that operate independently. The
 key design principle: **clean completion retires the live polecat session**.
-The agent identity and landing evidence persist, and a completed polecat is
-reused only once the workstate gate finds it clean.
+The agent identity and landing evidence persist.
 
 ## Operating States
 
@@ -44,8 +43,7 @@ Polecats use these primary operating states:
          └──────────┘
 ```
 
-Polecats move: IDLE -> WORKING -> SUBMITTED -> DONE. A Done polecat is reused by
-the next `gt sling` only once the workstate gate finds it clean.
+Polecats move: IDLE -> WORKING -> SUBMITTED -> DONE.
 
 **Key distinctions:**
 
@@ -178,8 +176,7 @@ git checkout -b polecat/<name>/<new-issue>+<timestamp>
 # Start working
 ```
 
-A submitted sandbox is not a reusable idle worktree while its bead is unlanded
-or cleanup state remains attached.
+To learn when a submitted or done sandbox is reused, read "Sandboxes Without Work" below.
 
 ### Slot Layer
 
@@ -246,9 +243,6 @@ The slot:
 ```bash
 gt handoff --cycle  # Session cycles, polecat continues
 ```
-
-A plain `gt handoff` from a polecat runs `gt done --status DEFERRED` and leaves
-the session to end; only `gt handoff --cycle` respawns it.
 
 **Sandbox setup**: For active work. `gt sling` prepares a fresh branch for the assignment.
 
