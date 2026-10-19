@@ -512,6 +512,7 @@ func TestLooksGenerated(t *testing.T) {
 		want       bool
 	}{
 		{"pkg/coverage/", "pkg/coverage/coverage.out", true},
+		{"pkg/coverage/", "pkg/coverage/unit.out", true},
 		{"pkg/coverage/", "pkg/coverage/lcov.info", true},
 		{"pkg/coverage/", "pkg/coverage/lcov-report/index.html", true},
 		{"pkg/coverage/", "pkg/coverage/lcov-report/css/a.css", true},

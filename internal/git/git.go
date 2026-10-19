@@ -2127,10 +2127,14 @@ func (g *Git) RemoteDefaultBranch() string {
 	// Try to get from origin/HEAD symbolic ref
 	out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD")
 	if err == nil && out != "" {
-		// Returns refs/remotes/origin/main -> extract branch name
-		parts := strings.Split(out, "/")
-		if len(parts) > 0 {
-			return parts[len(parts)-1]
+		// Returns refs/remotes/origin/main -> extract branch name. A default
+		// branch name may itself contain slashes (release/1.0): only the
+		// refs/remotes/<remote>/ prefix is stripped, never up to the last
+		// slash.
+		if rest, ok := strings.CutPrefix(out, "refs/remotes/"); ok {
+			if _, branch, found := strings.Cut(rest, "/"); found && branch != "" {
+				return branch
+			}
 		}
 	}
 
@@ -4658,7 +4662,10 @@ func looksGenerated(root, path string) bool {
 		return true
 	}
 	switch filepath.Ext(name) {
-	case ".profraw", ".profdata", ".gcda", ".gcno", ".gcov", ".prof", ".pprof", ".lcov":
+	// ".out" covers the name a coverage tool is commonly given even when it
+	// does not end in coverage.out: `go test -coverprofile=pkg/coverage/unit.out`
+	// writes generator output into the tree just the same.
+	case ".out", ".profraw", ".profdata", ".gcda", ".gcno", ".gcov", ".prof", ".pprof", ".lcov":
 		return true
 	}
 	return false
