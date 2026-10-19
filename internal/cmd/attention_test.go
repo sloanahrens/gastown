@@ -376,3 +376,43 @@ func TestAttentionFollowFlagsNeedFollow(t *testing.T) {
 		t.Errorf("no follow flags = %v, want nil", err)
 	}
 }
+
+// The ack leaves a line in acks-history.jsonl that is still there once the
+// item has cleared and the daemon's prune has dropped the ack.
+func TestAttentionAckAppendsHistoryThatSurvivesTheItemClearing(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	town, state := attentionSet(t, now)
+
+	if err := ackAttention(town, "red-main:gastown", now); err != nil {
+		t.Fatalf("ackAttention: %v", err)
+	}
+	// The item clears: the daemon writes a state without it and prunes.
+	cleared := attention.State{Updated: now, Items: state.Items[:1]}
+	if err := attention.WriteState(town, cleared); err != nil {
+		t.Fatal(err)
+	}
+	if err := attention.PruneAcks(town, cleared); err != nil {
+		t.Fatal(err)
+	}
+
+	hist, err := attention.ReadAcksHistory(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) != 1 {
+		t.Fatalf("history = %+v, want one line", hist)
+	}
+	h := hist[0]
+	if h.Key != "red-main:gastown" || h.Kind != attention.KindRedMain || h.Rule != attention.RuleRedMain || !h.TS.Equal(now) {
+		t.Errorf("history line = %+v, want key red-main:gastown, kind red-main, rule %s at %v", h, attention.RuleRedMain, now)
+	}
+
+	// A refused ack of an unknown key leaves no line.
+	if err := ackAttention(town, "no:such:key", now); err == nil {
+		t.Fatal("unknown key acked")
+	}
+	if hist, _ = attention.ReadAcksHistory(town); len(hist) != 1 {
+		t.Errorf("history after refused ack = %+v, want still one line", hist)
+	}
+}

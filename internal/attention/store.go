@@ -297,8 +297,15 @@ func PruneAcks(townRoot string, state State) error {
 
 // Acknowledge records key as acknowledged at at, under the flock. The read
 // and the write happen inside the lock, so two concurrent acks both survive.
-// A key that is already acked is left with its original time.
+// A key that is already acked is left with its original time. It writes no
+// history line; gt attention ack goes through AcknowledgeItem.
 func Acknowledge(townRoot, key string, at time.Time) error {
+	return acknowledge(townRoot, key, at, nil)
+}
+
+// acknowledge is Acknowledge, plus one acks-history.jsonl line for rec when rec
+// is set and the key was not already acked.
+func acknowledge(townRoot, key string, at time.Time, rec *AckRecord) error {
 	if key == "" {
 		return errors.New("ack needs a key")
 	}
@@ -315,7 +322,16 @@ func Acknowledge(townRoot, key string, at time.Time) error {
 		return nil
 	}
 	acks.Acks = append(acks.Acks, Ack{Key: key, At: at})
-	return writeAcksLocked(townRoot, acks)
+	if err := writeAcksLocked(townRoot, acks); err != nil {
+		return err
+	}
+	if rec == nil {
+		return nil
+	}
+	if err := appendAckHistoryLocked(townRoot, *rec); err != nil {
+		return fmt.Errorf("acked %s but could not record it in %s: %w", key, AcksHistoryFileName, err)
+	}
+	return nil
 }
 
 // lockAcks creates the queue directory and takes the acks flock. The caller
