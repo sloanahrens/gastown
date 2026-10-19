@@ -231,15 +231,8 @@ func runPolecatIdentityAdd(cmd *cobra.Command, args []string) error {
 		fmt.Printf("Generated name: %s\n", polecatName)
 	}
 
-	// Check if identity already exists
 	bd := beads.New(r.Path)
 	beadID := polecatBeadIDForRig(r, rigName, polecatName)
-	existingIssue, _, _ := beads.GetAgentBead(bd, beadID)
-	if existingIssue != nil && existingIssue.Status != "closed" {
-		return fmt.Errorf("identity bead %s already exists", beadID)
-	}
-
-	// Create identity bead
 	fields := &beads.AgentFields{
 		RoleType:   "polecat",
 		Rig:        rigName,
@@ -247,9 +240,9 @@ func runPolecatIdentityAdd(cmd *cobra.Command, args []string) error {
 	}
 
 	title := fmt.Sprintf("Polecat %s in %s", polecatName, rigName)
-	issue, err := beads.CreateOrReopenAgentBead(bd, beadID, title, fields)
+	issue, err := addPolecatIdentity(bd, beadID, title, fields)
 	if err != nil {
-		return fmt.Errorf("creating identity bead: %w", err)
+		return err
 	}
 
 	fmt.Printf("%s Created identity bead: %s\n", style.SuccessPrefix, issue.ID)
@@ -547,11 +540,30 @@ func runPolecatIdentityShow(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// addPolecatIdentity creates an identity bead only once its ID is proven free.
+// The proof comes first because CreateOrReopenAgentBead treats a refused create
+// as a signal to rewrite the bead already under the ID, and that reopen clears
+// hook_bead and cleanup_status of a live identity. Without the check a failed
+// read of the existing bead falls through to that rewrite (gt-gfcz8).
+//
+// bd is a beads.Client rather than *beads.Beads so a fake drives it without a
+// rig or a town.
+func addPolecatIdentity(bd beads.Client, beadID, title string, fields *beads.AgentFields) (*beads.Issue, error) {
+	if err := ensureNewIdentityAbsent(bd, beadID); err != nil {
+		return nil, err
+	}
+	issue, err := beads.CreateOrReopenAgentBead(bd, beadID, title, fields)
+	if err != nil {
+		return nil, fmt.Errorf("creating identity bead: %w", err)
+	}
+	return issue, nil
+}
+
 // ensureNewIdentityAbsent reports that newBeadID names no live identity, which
-// is how a rename learns the target name is free. A failed lookup is returned
-// rather than read as absence: ignoring it is what let a transient error fall
-// through to CreateOrReopenAgentBead, which overwrites the description of the
-// bead that was there all along (gt-u3hc1).
+// is how a rename or an add learns the name is free. A failed lookup is
+// returned rather than read as absence: ignoring it is what let a transient
+// error fall through to CreateOrReopenAgentBead, which overwrites the
+// description of the bead that was there all along (gt-u3hc1, gt-gfcz8).
 //
 // bd is a beads.Client rather than *beads.Beads so a fake drives it without a
 // rig or a town.
