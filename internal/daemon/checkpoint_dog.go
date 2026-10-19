@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/checkpoint"
+	"github.com/steveyegge/gastown/internal/done"
 	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
@@ -479,6 +480,16 @@ func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (bl
 		return false, ""
 	}
 
+	// A seat on a deletes-by-spec bead is directed to delete what merged
+	// commits added, so its deletions are work, not a stale tree. The waiver is
+	// the one gt done applies (the label plus a description naming every
+	// reverted path), so the dog and gt done agree on a directed deletion. The
+	// dog stands down without an escalation.
+	if note, waived := d.checkpointDeletesBySpec(rigName, polecatName, report.Reverted); waived {
+		d.logger.Printf("checkpoint_dog: %s/%s: %s", rigName, polecatName, note)
+		return false, ""
+	}
+
 	var paths []string
 	for _, f := range report.Reverted {
 		paths = append(paths, f.Paths...)
@@ -497,6 +508,26 @@ func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (bl
 	}
 
 	return true, reason
+}
+
+// checkpointDeletesBySpec reports whether the seat's hooked bead directs the
+// deletions in reverted (done.DeletesBySpecNote), and the note saying so. A bead
+// that cannot be found or read waives nothing: the refusal stands, because a
+// check that could not run must not read as a check that passed.
+func (d *Daemon) checkpointDeletesBySpec(rigName, polecatName string, reverted []gtgit.RevertedMerge) (string, bool) {
+	if d.config == nil || d.config.TownRoot == "" {
+		return "", false
+	}
+	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
+	id, err := d.assignedActiveWorkBead(rigName, assignee)
+	if err != nil || id == "" {
+		return "", false
+	}
+	issue, err := d.workBeads(d.workBeadsEnv(rigName), workBeadReadTimeout).Show(id)
+	if err != nil {
+		return "", false
+	}
+	return done.DeletesBySpecNote(issue, reverted)
 }
 
 // isGitWorktree reports whether the given directory is the root of a git

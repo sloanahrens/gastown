@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 )
@@ -1023,5 +1024,63 @@ func TestCheckpointRefusalKeepsThePolecatsOwnStaging(t *testing.T) {
 	}
 	if got := stagedPaths(staged, 0); !slices.Equal(got, []string{"own.txt"}) {
 		t.Errorf("staged after the refusal = %v, want only the polecat's own.txt", got)
+	}
+}
+
+// TestCheckpointWorktreeDeletesBySpec covers the revert guard against a seat
+// whose hooked bead may direct the deletion (gt-p8k4i): the staged tree reverts
+// keep.txt, and only a deletes-by-spec bead whose description names that path
+// lets the checkpoint through, the same waiver gt done applies.
+func TestCheckpointWorktreeDeletesBySpec(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		labels      []string
+		description string
+		status      string
+		wantCommit  bool
+	}{
+		{"label and named path", []string{"deletes-by-spec"}, "Delete keep.txt.", "hooked", true},
+		{"in_progress bead", []string{"deletes-by-spec"}, "Delete keep.txt.", "in_progress", true},
+		{"label without the path named", []string{"deletes-by-spec"}, "Delete the old files.", "hooked", false},
+		{"path named without the label", nil, "Delete keep.txt.", "hooked", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			alerts := &checkpointAlertRecorder{}
+			bd := newWorkBD(t)
+			bd.db.Seed(beads.Issue{ID: "gt-del", Status: tt.status, Assignee: "rig/polecats/polecat",
+				Labels: tt.labels, Description: tt.description})
+			d := &Daemon{
+				logger:                log.New(io.Discard, "", 0),
+				config:                &Config{TownRoot: t.TempDir()},
+				openWorkBeads:         bd.open,
+				checkpointRevertAlert: alerts.alert,
+			}
+			polecat, g := newCheckpointRevertScenario(t, d)
+			writeWorkFiles(t, polecat, map[string]string{"keep.txt": "keep\n", "wip.txt": "real work in progress\n"})
+			before := headOf(t, g)
+
+			created := d.checkpointWorktree(polecat, "rig", "polecat")
+			if created != tt.wantCommit {
+				t.Fatalf("checkpointWorktree = %v, want %v", created, tt.wantCommit)
+			}
+			if tt.wantCommit {
+				if got := changedSince(t, g, before); !slices.Equal(got, []string{"keep.txt", "wip.txt"}) {
+					t.Errorf("checkpoint commit changed %q, want keep.txt and wip.txt", got)
+				}
+				if len(alerts.calls) != 0 {
+					t.Errorf("a directed deletion raised an escalation: %+v", alerts.calls)
+				}
+				return
+			}
+			if after := headOf(t, g); after != before {
+				t.Errorf("refused checkpoint advanced HEAD to %s, want %s", after, before)
+			}
+			if len(alerts.calls) != 1 {
+				t.Errorf("want exactly one escalation, got %+v", alerts.calls)
+			}
+		})
 	}
 }

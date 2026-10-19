@@ -137,6 +137,22 @@ func waiverFromIssue(issue *beads.Issue) revertWaiver {
 	return revertWaiver{claimed: true, description: issue.Description}
 }
 
+// DeletesBySpecNote reports whether issue is a deletes-by-spec bead whose
+// description names every path reverted undoes, and if so the one-line note
+// recording why the revert guard stands down. It is the check gt done applies
+// to its own branch, shared with checkpoint_dog so the two guards agree on what
+// a directed deletion is.
+func DeletesBySpecNote(issue *beads.Issue, reverted []git.RevertedMerge) (string, bool) {
+	waive := waiverFromIssue(issue)
+	if !waive.claimed {
+		return "", false
+	}
+	if _, unnamed := revertedPaths(reverted, waive.description); len(unnamed) > 0 {
+		return "", false
+	}
+	return deletesBySpecNote(reverted, waive.description), true
+}
+
 // revertedPaths is the paths the branch undoes, once each in report order, and
 // the subset the description does not name (namedInDescription). The count is
 // of files being deleted, not of report lines, so a path undone by two commits
