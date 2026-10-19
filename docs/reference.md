@@ -304,19 +304,24 @@ The spec dispatcher's policy lives in the town's `settings/config.json`, under
 `polecat_pool`, beside the seats it fills: `max_priority` is the ceiling on a
 candidate bead's number (the daemon's idle-seat check counts to the same
 number), and `shape_gate` is what a dispatch does with a candidate's shape lint
-(`gt spec lint`): off, warn or refuse. `agent` and `max_seats` are the pool's
-own seat — the agent its polecats run, up to `max_seats` live sessions, refused
-past the cap — and `min_spawn_gap` staggers its spawns. `max_total` caps live
-polecats across every seat, for a town whose two agents are each inside their
-own cap and over the number wanted; `gt pool set-total <n>` sets it, and an
-absent key (or 0) is no total cap. The seat's keys were
-`overflow_agent` and `max_overflow` until gt-plk1z: a file still carrying those
-loads the same values, warns once per process, and keeps the old keys as the
-operator wrote them — gt reads them but writes only the new names, so delete the
-old pair by hand. The reserved pro seat's keys — `pro_max`, `pro_agent`,
-`pro_label` — are retired (gt-kr91q): a file that still carries them loads with
-a warning and the values are ignored. Pin a bead to a model with an
-`agent:<name>` label instead.
+(`gt spec lint`): off, warn or refuse. `seats` is the seat map, one entry per
+agent: `cap` is the live polecats allowed on that agent (0 closes the seat),
+`closed` is an optional daily `HH:MM-HH:MM` window in `timezone` during which
+the seat takes no new spawn, and `names` is an optional list of polecat names
+for the seat. `min_spawn_gap` staggers spawns. `max_total` caps live polecats
+across every seat, for a town whose agents are each inside their own cap and
+over the number wanted; `gt pool set-total <n>` sets it, and an absent key (or 0)
+is no total cap. `gt pool show` prints the seats, `gt pool set <agent>=<cap>`
+changes them.
+
+The two-seat keys the map replaced no longer load (gt-mukgk): `polecat_pool.agent`,
+`max_seats`, `overflow_agent`, `max_overflow`, `pro_agent`, `pro_max` and
+`pro_label`, `daemon.patrols.spec_dispatch.hooked_agent`, `max_hooked` and
+`prefer_hooked`, `role_agents.polecat`, and `agent` on a `dispatch: "spec"`
+entry in `scheduled_slings`. A file that holds one fails to load with a message
+that names the key and what replaced it; `gt pool migrate` converts the file
+(`--dry-run` prints the changes and writes nothing). Pin a bead to a model with
+an `agent:<name>` label.
 `gt config get --help` lists the keys with their defaults; `gt config get
 polecat_pool.<key>` prints the effective value. Edit the file by hand, or `gt
 config set polecat_pool.<key> <value>`.

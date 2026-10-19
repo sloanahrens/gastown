@@ -88,11 +88,10 @@ func TestTheModelsLineFoldsTheTablesUnderIt(t *testing.T) {
 	}
 
 	body := pageFunc(t, "renderModelsPanel")
-	for _, want := range []string{`"drift"`, `rr.model || "unknown"`, `"closed"`, "sr.key", "rr.key", "rr.drift",
-		// Every seat the panel draws is named as gt pool show names it
-		// (gt-u8usx): a second row labelled "pool seat" is a row an operator
-		// reads as the wrong seat.
-		`"pool seat", second: "second seat"`} {
+	for _, want := range []string{`"drift"`, `rr.model || "unknown"`, "sr.key", "rr.key", "rr.drift",
+		// One row per agent in the seat map, with the state gt pool show
+		// prints beside it: an open seat, a cap of 0, or a closed window.
+		"sr.agent", "sr.state"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("renderModelsPanel does not draw %s", want)
 		}
@@ -117,7 +116,7 @@ func TestTheHeaderStripCountsTheSeatsThePageCounts(t *testing.T) {
 	now := time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)
 	h := NewHub(Config{
 		Now:    func() time.Time { return now },
-		Models: func() *Models { return &Models{Polecat: "deepseek-flash", SeatCap: 4, OM: "sonnet"} },
+		Models: func() *Models { return &Models{Unrecorded: "deepseek-flash", SeatCap: 4, OM: "sonnet"} },
 		Summary: func() Summary {
 			return Summary{Polecats: []Polecat{
 				{Rig: "gastown", Name: "agate", CountsTowardCapacity: true},
@@ -151,7 +150,7 @@ func TestTheHeaderStripCountsTheSeatsThePageCounts(t *testing.T) {
 	if st.Models.Seats.Live != 2 || st.Models.Seats.Cap != 4 {
 		t.Errorf("seats = %+v, want 2/4", *st.Models.Seats)
 	}
-	if st.Models.Polecat != "deepseek-flash" || st.Models.OM != "sonnet" {
+	if st.Models.Unrecorded != "deepseek-flash" || st.Models.OM != "sonnet" {
 		t.Errorf("strip = %+v", st.Models)
 	}
 }
@@ -174,10 +173,10 @@ func TestTheModelsPanelCountsLivePolecatsPerSeat(t *testing.T) {
 	h := NewHub(Config{
 		Now: func() time.Time { return time.Date(2026, 10, 12, 12, 0, 0, 0, time.UTC) },
 		Models: func() *Models {
-			return &Models{Polecat: "claude-sonnet", SeatRows: []ModelSeat{
-				{Seat: "pool", Agent: "claude-sonnet", Cap: 3},
-				{Seat: "second", Agent: "deepseek-flash", Cap: 2},
-				{Seat: "extra", Closed: true},
+			return &Models{Unrecorded: "claude-sonnet", SeatRows: []ModelSeat{
+				{Agent: "claude-sonnet", Cap: 3},
+				{Agent: "deepseek-flash", Cap: 2},
+				{Agent: "claude-haiku", Cap: 0, Closed: true},
 			}}
 		},
 		Summary: func() Summary {
@@ -195,17 +194,17 @@ func TestTheModelsPanelCountsLivePolecatsPerSeat(t *testing.T) {
 	h.pollModels()
 	for _, s := range h.State().Models.SeatRows {
 		if s.Live != nil {
-			t.Fatalf("seat %q has a live count before the polecats were read", s.Seat)
+			t.Fatalf("seat %q has a live count before the polecats were read", s.Agent)
 		}
 	}
 	h.pollSummary()
 	h.pollModels()
 	rows := h.State().Models.SeatRows
 	if rows[0].Live == nil || *rows[0].Live != 2 {
-		t.Errorf("pool seat live = %v, want 2", rows[0].Live)
+		t.Errorf("claude-sonnet seat live = %v, want 2", rows[0].Live)
 	}
 	if rows[1].Live == nil || *rows[1].Live != 1 {
-		t.Errorf("second seat live = %v, want 1", rows[1].Live)
+		t.Errorf("deepseek-flash seat live = %v, want 1", rows[1].Live)
 	}
 	if rows[2].Live != nil {
 		t.Errorf("a closed seat has a live count: %d", *rows[2].Live)

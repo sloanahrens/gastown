@@ -1,0 +1,30 @@
+{
+  "daemon": {
+    "patrols": {
+      "spec_dispatch": {
+        "enabled": true,
+        "max_per_tick": 1
+      }
+    },
+    "type": "daemon-patrol-config",
+    "version": 1
+  },
+  "default_agent": "claude",
+  "polecat_pool": {
+    "max_total": 5,
+    "min_spawn_gap": "4m",
+    "seats": {
+      "claude-haiku": {
+        "cap": 3
+      },
+      "claude-sonnet": {
+        "cap": 2
+      }
+    }
+  },
+  "role_agents": {
+    "crew": "claude-opus"
+  },
+  "type": "town-settings",
+  "version": 1
+}

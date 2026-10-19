@@ -522,11 +522,11 @@ func (h *Hub) pollModels() {
 		for _, p := range h.polecats {
 			if p.CountsTowardCapacity && !p.RigParked {
 				live++
-				// A session with no recorded agent runs the polecat role's
-				// own, the way the dispatcher's roster counts it.
+				// A session with no recorded agent is counted the way the
+				// dispatcher's roster counts it: on the map's only seat.
 				agent := p.Agent
 				if agent == "" {
-					agent = m.Polecat
+					agent = m.Unrecorded
 				}
 				byAgent[agent]++
 			}

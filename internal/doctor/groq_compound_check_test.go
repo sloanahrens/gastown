@@ -59,7 +59,7 @@ func TestGroqCompoundConfigured_RoleAgent(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	settings := config.NewTownSettings()
-	settings.RoleAgents["polecat"] = string(config.AgentGroqCompound)
+	settings.RoleAgents["crew"] = string(config.AgentGroqCompound)
 	writeTownSettings(t, tmp, settings)
 
 	c := NewGroqCompoundCheck()
@@ -68,11 +68,24 @@ func TestGroqCompoundConfigured_RoleAgent(t *testing.T) {
 	}
 }
 
+func TestGroqCompoundConfigured_PolecatSeat(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	settings := config.NewTownSettings()
+	settings.PolecatPool = &config.PolecatPool{Seats: map[string]config.SeatConfig{string(config.AgentGroqCompound): {Cap: 1}}}
+	writeTownSettings(t, tmp, settings)
+
+	c := NewGroqCompoundCheck()
+	if !c.groqCompoundConfigured(tmp) {
+		t.Error("groqCompoundConfigured = false, want true when a polecat seat runs groq-compound")
+	}
+}
+
 func TestGroqCompoundConfigured_NoMatch(t *testing.T) {
 	t.Parallel()
 	tmp := t.TempDir()
 	settings := config.NewTownSettings()
-	settings.RoleAgents["polecat"] = "claude"
+	settings.RoleAgents["crew"] = "claude"
 	writeTownSettings(t, tmp, settings)
 
 	c := NewGroqCompoundCheck()

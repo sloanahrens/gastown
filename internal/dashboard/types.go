@@ -313,12 +313,14 @@ type OM struct {
 // read leaves its field empty and the page says unknown, because a town whose
 // model is unreadable is not a town running nothing.
 type Models struct {
-	// Polecat is the model the polecat role resolves to (role_agents.polecat),
-	// empty when the settings cannot be read or name none.
-	Polecat string `json:"polecat,omitempty"`
-	// SeatCap is the pool's cap on live polecats (polecat_pool.max_seats).
-	// Zero is a pool that declares none, which is shown as the live count
-	// alone rather than as a cap of zero.
+	// Unrecorded is the agent a polecat that records none is counted on: the
+	// seat map's only seat, none when the map has several (config.UnrecordedAgent).
+	// Empty when the settings cannot be read.
+	Unrecorded string `json:"unrecorded,omitempty"`
+	// SeatCap is the cap on live polecats the strip shows the count against:
+	// polecat_pool.max_total, else the open seats' caps added up. Zero is a
+	// town that declares neither, which is shown as the live count alone
+	// rather than as a cap of zero.
 	SeatCap int `json:"seat_cap,omitempty"`
 	// OM is the model the reviewer runs, shortened to the name a person uses
 	// for it, empty when the reviewer's config cannot be read or names none.
@@ -355,24 +357,18 @@ type AgentActivity struct {
 	Rejected int    `json:"rejected"`
 }
 
-// ModelSeat is one of the town's two polecat seats: the pool seat
-// (polecat_pool.agent capped by max_seats) and the second seat
-// (spec_dispatch hooked_agent capped by max_hooked).
+// ModelSeat is one entry of the town's seat map (polecat_pool.seats).
 type ModelSeat struct {
-	// Seat is "pool" or "second".
-	Seat  string `json:"seat"`
 	Agent string `json:"agent,omitempty"`
-	// Cap is the seat's cap. CapDefault marks an open seat whose cap key is
-	// unset — a pool seat with no max_seats, which sling leaves uncapped and
-	// the dispatcher holds to its own default — and the number shown is that
-	// default.
-	Cap        int  `json:"cap,omitempty"`
-	CapDefault bool `json:"cap_default,omitempty"`
-	// Closed is a seat nothing may fill: the pool with no agent, the second
-	// seat with no max_hooked above zero.
+	// Cap is the seat's cap on live polecats.
+	Cap int `json:"cap"`
+	// State is "open", "closed (cap 0)", or "closed until HH:MM" for a seat
+	// inside its daily closed window.
+	State string `json:"state,omitempty"`
+	// Closed is a seat nothing may fill now: a cap of 0, or inside its window.
 	Closed bool `json:"closed,omitempty"`
-	// Unknown is a seat whose config could not be read: neither open nor
-	// closed, as far as the page can tell.
+	// Unknown is a seat map whose config could not be read: neither open nor
+	// closed, as far as the page can tell. It is a single row with no agent.
 	Unknown bool `json:"unknown,omitempty"`
 	// Live is the polecats holding the seat, filled by the hub from the same
 	// polecat list the seats pane counts; nil until that list has been read.

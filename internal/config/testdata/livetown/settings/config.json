@@ -258,7 +258,6 @@
     "crew": "claude-opus",
     "deacon": "deepseek-flash",
     "dog": "deepseek-flash",
-    "polecat": "deepseek-flash",
     "refinery": "deepseek-flash-refinery",
     "witness": "deepseek-flash-patrol",
     "mayor": "claude-sonnet"
@@ -279,7 +278,10 @@
     "max_local": 0,
     "idle_fill": true,
     "min_spawn_gap": "4m",
-    "agent": "deepseek-flash",
-    "max_seats": 1
+    "seats": {
+      "deepseek-flash": {
+        "cap": 1
+      }
+    }
   }
 }

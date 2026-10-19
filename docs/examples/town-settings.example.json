@@ -35,9 +35,14 @@
         "deacon":   "opus-46",
         "witness":  "opus-46-capped",
         "refinery": "opus-46-capped",
-        "polecat":  "opus-46-capped",
         "crew":     "opus-46",
         "dog":      "opus-46"
+    },
+
+    "polecat_pool": {
+        "seats": {
+            "opus-46-capped": { "cap": 3 }
+        }
     },
 
     "cli_theme": "dark",

@@ -15,9 +15,9 @@ import (
 // hand-back the same seat, its bead still assigned, filled the pool.
 func TestPoolRosterDoesNotCountAHandedBackSeat(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 1}
+	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 1}}}
 	ts := config.NewTownSettings()
-	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
+	ts.PolecatPool = pool
 
 	stuck := &beads.AgentFields{AgentState: "working"}
 

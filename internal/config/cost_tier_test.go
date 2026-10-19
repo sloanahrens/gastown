@@ -51,12 +51,11 @@ func TestCostTierRoleAgents(t *testing.T) {
 		if ra == nil {
 			t.Fatal("standard tier returned nil")
 		}
-		if len(ra) != len(TierManagedRoles) {
-			t.Errorf("standard tier has %d entries, want %d (all managed roles)", len(ra), len(TierManagedRoles))
+		if len(ra) != len(tierAgentRoles) {
+			t.Errorf("standard tier has %d entries, want %d (all managed roles)", len(ra), len(tierAgentRoles))
 		}
 		expected := map[string]string{
-			"polecat": "",
-			"crew":    "",
+			"crew": "",
 		}
 		for role, want := range expected {
 			if val, ok := ra[role]; !ok {
@@ -74,8 +73,7 @@ func TestCostTierRoleAgents(t *testing.T) {
 			t.Fatal("economy tier returned nil")
 		}
 		expected := map[string]string{
-			"polecat": "", // use default (opus)
-			"crew":    "", // use default (opus)
+			"crew": "", // use default (opus)
 		}
 		for role, want := range expected {
 			if got := ra[role]; got != want {
@@ -91,8 +89,7 @@ func TestCostTierRoleAgents(t *testing.T) {
 			t.Fatal("budget tier returned nil")
 		}
 		expected := map[string]string{
-			"polecat": "claude-sonnet",
-			"crew":    "claude-sonnet",
+			"crew": "claude-sonnet",
 		}
 		for role, want := range expected {
 			if got := ra[role]; got != want {
@@ -108,8 +105,7 @@ func TestCostTierRoleAgents(t *testing.T) {
 			t.Fatal("custom-groq-opus tier returned nil")
 		}
 		expected := map[string]string{
-			"polecat": "groq-compound",
-			"crew":    "",
+			"crew": "",
 		}
 		for role, want := range expected {
 			if got := ra[role]; got != want {
@@ -322,7 +318,7 @@ func TestGetCurrentTier(t *testing.T) {
 		t.Parallel()
 		settings := NewTownSettings()
 		settings.RoleAgents = map[string]string{
-			"polecat": "some-custom-agent",
+			"crew": "some-custom-agent",
 		}
 		if got := GetCurrentTier(settings); got != "" {
 			t.Errorf("GetCurrentTier = %q, want empty string for custom config", got)
@@ -334,7 +330,7 @@ func TestGetCurrentTier(t *testing.T) {
 		settings := NewTownSettings()
 		settings.CostTier = "budget" // says budget
 		settings.RoleAgents = map[string]string{
-			"polecat": "some-custom-agent", // but actually custom
+			"crew": "some-custom-agent", // but actually custom
 		}
 		// Should detect mismatch and infer from RoleAgents
 		if got := GetCurrentTier(settings); got != "" {
@@ -347,8 +343,7 @@ func TestGetCurrentTier(t *testing.T) {
 		settings := NewTownSettings()
 		// Set RoleAgents matching budget tier but without CostTier field
 		settings.RoleAgents = map[string]string{
-			"polecat": "claude-sonnet",
-			"crew":    "claude-sonnet",
+			"crew": "claude-sonnet",
 		}
 		if got := GetCurrentTier(settings); got != "budget" {
 			t.Errorf("GetCurrentTier = %q, want %q (inferred)", got, "budget")
@@ -370,8 +365,7 @@ func TestTierRolesMatch(t *testing.T) {
 	t.Run("budget tier matches", func(t *testing.T) {
 		t.Parallel()
 		actual := map[string]string{
-			"polecat": "claude-sonnet",
-			"crew":    "claude-sonnet",
+			"crew": "claude-sonnet",
 		}
 		expected := CostTierRoleAgents(TierBudget)
 		if !tierRolesMatch(actual, expected) {
@@ -393,8 +387,8 @@ func TestTierRolesMatch(t *testing.T) {
 
 	t.Run("different tier-managed values don't match", func(t *testing.T) {
 		t.Parallel()
-		actual := map[string]string{"polecat": "claude-haiku"}
-		expected := CostTierRoleAgents(TierBudget) // polecat = claude-sonnet
+		actual := map[string]string{"crew": "claude-haiku"}
+		expected := CostTierRoleAgents(TierBudget) // crew = claude-sonnet
 		if tierRolesMatch(actual, expected) {
 			t.Error("different tier-managed values should not match")
 		}
@@ -410,7 +404,7 @@ func TestApplyCostTier_PreservesCustomRoleAgents(t *testing.T) {
 		// Simulate a user who set a custom non-tier role
 		settings.RoleAgents["custom-role"] = "custom-agent"
 		// Also set a tier-managed role that economy would have set
-		settings.RoleAgents["polecat"] = "claude-sonnet"
+		settings.RoleAgents["crew"] = "claude-sonnet"
 
 		if err := ApplyCostTier(settings, TierStandard); err != nil {
 			t.Fatalf("ApplyCostTier: %v", err)
@@ -421,8 +415,8 @@ func TestApplyCostTier_PreservesCustomRoleAgents(t *testing.T) {
 			t.Error("standard tier should preserve non-tier RoleAgents entry 'custom-role'")
 		}
 		// Tier-managed role should be cleared
-		if _, ok := settings.RoleAgents["polecat"]; ok {
-			t.Error("standard tier should remove tier-managed role 'polecat'")
+		if _, ok := settings.RoleAgents["crew"]; ok {
+			t.Error("standard tier should remove tier-managed role 'crew'")
 		}
 	})
 

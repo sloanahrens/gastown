@@ -42,7 +42,7 @@ import (
 // (internal/cmd imports internal/daemon, so the call cannot go the other way).
 //
 // This is the dispatcher that replaced the seat-refill plugin (gt-4k3fj.8.8):
-// the pool's seats (agent/max_seats) and the town's total
+// the pool's seats (polecat_pool.seats) and the town's total
 // (polecat_pool.max_total, gt-bcpj5), the operator's
 // ceiling (polecat_pool.max_priority) and the shape gate
 // (polecat_pool.shape_gate) all come from the same keys the plugin read, so the
@@ -64,17 +64,8 @@ import (
 // — it skips the tick instead.
 
 const (
-	specDispatchActor      = "daemon/spec-dispatch"
-	specDispatchNotePrefix = "spec-dispatch: "
-	// defaultSpecHookedAgent is the agent the optional hooked seat runs when
-	// spec_dispatch.max_hooked names a cap but no agent.
-	defaultSpecHookedAgent = "claude-sonnet"
-	// defaultSpecSeatCap caps the pool's seat when the pool leaves max_seats
-	// unset. The pool itself reads an unset max_seats as uncapped, but an
-	// uncapped dispatcher seat is an unbounded run of paid sessions, so the
-	// dispatcher gives itself a cap it can defend rather than treating the
-	// pool's silence as infinite room.
-	defaultSpecSeatCap      = 2
+	specDispatchActor       = "daemon/spec-dispatch"
+	specDispatchNotePrefix  = "spec-dispatch: "
 	defaultSpecMaxPerTick   = 1
 	specLintExitRefused     = 1
 	specLintExitNeedsPlan   = 2
@@ -194,17 +185,16 @@ if the bead has changed since the board was read — a submission in that window
 would otherwise be slung to a seat already landing it, and a re-read that fails
 holds the candidate for the next tick rather than slinging blind (gt-01gix).
 One that still holds is slung onto a free seat within the budget, drawn at
-random among the models in the mix: the pool's agent (capped by max_seats) and
-the claude-sonnet hooked seat, which is off unless
-patrols.spec_dispatch.max_hooked is set above zero. A bead carrying an
-agent:<name> label draws only among that agent's seats.
+random among the agents with a free, open seat in polecat_pool.seats. A bead
+carrying an agent:<name> label draws only among that agent's seats, and waits
+when that seat is closed or full.
 
 Every dispatch's sling args tell the polecat to test install paths in a
 temporary INSTALL_DIR.
 
-Budget comes from polecat_pool in settings/config.json (agent, max_seats,
-min_spawn_gap) and daemon.patrols.spec_dispatch
-in settings/config.json (hooked_agent, max_hooked, prefer_hooked, max_per_tick).
+Budget comes from polecat_pool in settings/config.json (seats, max_total,
+timezone, min_spawn_gap) and daemon.patrols.spec_dispatch
+in settings/config.json (max_per_tick).
 A town that has not run gt config migrate still keeps that patrol block in
 mayor/daemon.json. Both blocks are read on every tick, so a seat added, moved or
 closed applies at the next tick — no daemon restart. A block that does not parse
@@ -1198,75 +1188,20 @@ func firstErrLine(err error) string {
 	return s
 }
 
-// specBudgetFromConfig builds the seat list from polecat_pool and
-// patrols.spec_dispatch. Each seat is one agent with its own cap:
-//
-//   - the pool's agent, capped at max_seats (the dispatcher's own
-//     defaultSpecSeatCap when the pool leaves it unset)
-//   - the second seat (spec_dispatch.hooked_agent, claude-sonnet by default),
-//     off unless max_hooked names a cap above zero
-//
-// A bead with no agent:<name> label draws uniformly among the mix's free
-// seats, so neither model is preferred. Order decides only which seat an agent
-// named twice keeps: prefer_hooked moves the second seat first for that dedup.
-// The reserved pro seat is gone; a pinned bead waits for its agent's seat
-// rather than falling back.
+// specBudgetFor is the tick's budget: one seat per entry of polecat_pool.seats,
+// in the loader's order (sorted by agent name). A bead with no agent:<name>
+// label draws uniformly among the agents with a free, open seat; a labeled
+// bead goes only to that agent's seat and waits when it is closed or full
+// (gt-mukgk).
 //
 // polecat_pool.max_total, when set, caps the seats together on top of each
-// seat's own cap: a town whose two agents are each inside their cap still has
-// the total to answer to (gt-bcpj5).
-func specBudgetFromConfig(ts *config.TownSettings, sd *config.SpecDispatchConfig) specdispatch.Budget {
-	var b specdispatch.Budget
-	var pool *config.PolecatPool
-	if ts != nil {
-		pool = ts.PolecatPool
+// seat's own cap: a town whose agents are each inside their cap still has the
+// total to answer to (gt-bcpj5).
+func specBudgetFor(townRoot string, ts *config.TownSettings, now time.Time) (specdispatch.Budget, error) {
+	if ts == nil {
+		return specdispatch.Budget{}, nil
 	}
-	if pool != nil {
-		b.MinSpawnGap = pool.MinSpawnGapD()
-		b.MaxTotal = pool.GetMaxTotal()
-		if pool.Agent != "" {
-			capacity := pool.MaxSeats
-			if capacity <= 0 {
-				capacity = defaultSpecSeatCap
-			}
-			b.Seats = append(b.Seats, specdispatch.Seat{Agent: pool.Agent, Cap: capacity})
-		}
-	}
-
-	if sd != nil && sd.MaxHooked > 0 {
-		agent := sd.HookedAgent
-		if agent == "" {
-			agent = defaultSpecHookedAgent
-		}
-		hooked := specdispatch.Seat{Agent: agent, Cap: sd.MaxHooked}
-		if sd.PreferHooked {
-			b.Seats = append([]specdispatch.Seat{hooked}, b.Seats...)
-		} else {
-			b.Seats = append(b.Seats, hooked)
-		}
-	}
-
-	seen := map[string]bool{}
-	seats := b.Seats[:0:0]
-	for _, seat := range b.Seats {
-		if seat.Agent == "" || seen[seat.Agent] {
-			continue
-		}
-		seen[seat.Agent] = true
-		seats = append(seats, seat)
-	}
-	b.Seats = seats
-	return b
-}
-
-// specBudgetFor is the tick's budget: the seat map when polecat_pool.seats names
-// any seat, the two-seat keys otherwise. A settings file with no seats key
-// dispatches exactly as it did before the map (gt-mukgk).
-func specBudgetFor(townRoot string, ts *config.TownSettings, sd *config.SpecDispatchConfig, now time.Time) (specdispatch.Budget, error) {
-	if ts != nil && ts.PolecatPool != nil && len(ts.PolecatPool.Seats) > 0 {
-		return specBudgetFromSeats(ts, now, config.AgentResolver(townRoot, ts))
-	}
-	return specBudgetFromConfig(ts, sd), nil
+	return specBudgetFromSeats(ts, now, config.AgentResolver(townRoot, ts))
 }
 
 // specBudgetFromSeats builds the seat list from polecat_pool.seats: one seat per
@@ -1303,30 +1238,23 @@ func specBudgetFromSeats(ts *config.TownSettings, now time.Time, known func(agen
 
 // specRosterFrom counts the seats the pool counts as taken (live polecats,
 // in-flight seat claims, seats mid-landing, and dead-hooked seats) per agent.
-// An empty GT_AGENT runs the polecat role default. A dead-hooked seat also
-// counts in DeadHooked, so the picture can say why a full seat shows fewer live
-// sessions than its number (gt-tldj4); it has no spawn time, so it never arms
-// the stagger.
+// A dead-hooked seat also counts in DeadHooked, so the picture can say why a
+// full seat shows fewer live sessions than its number (gt-tldj4); it has no
+// spawn time, so it never arms the stagger.
 //
 // A polecat that records no agent is counted on the seat map's only seat, and
 // under config.UnknownSeatAgent when the map has several: the tick lists it
-// (Unrecorded) and never counts it on a seat it may not hold. A town with no
-// seat map keeps the polecat role default (gt-mukgk).
+// (Unrecorded) and never counts it on a seat it may not hold (gt-mukgk).
 func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster {
 	r := specRoster{Live: map[string]int{}, DeadHooked: map[string]int{}}
-	roleDefault := ""
-	var pool *config.PolecatPool
+	var unrecorded string
 	if ts != nil {
-		roleDefault = ts.RoleAgents["polecat"]
-		pool = ts.PolecatPool
-	}
-	if pool != nil && len(pool.Seats) > 0 {
-		roleDefault = pool.UnrecordedAgent()
+		unrecorded = ts.PolecatPool.UnrecordedAgent()
 	}
 	for _, s := range sessions {
 		agent := s.agent
 		if agent == "" {
-			agent = roleDefault
+			agent = unrecorded
 		}
 		if agent == config.UnknownSeatAgent {
 			r.Unrecorded = append(r.Unrecorded, s.name)
@@ -1441,7 +1369,7 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	}
 	maxPriority := ts.PolecatPool.GetMaxPriority()
 
-	budget, err := specBudgetFor(townRoot, ts, sd, time.Now())
+	budget, err := specBudgetFor(townRoot, ts, time.Now())
 	if err != nil {
 		return specDispatchReport{}, err
 	}

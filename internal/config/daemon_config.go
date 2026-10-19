@@ -610,28 +610,17 @@ func positiveDurationOrDefault(s string, def time.Duration) time.Duration {
 type SpecDispatchConfig struct {
 	// Enabled runs the ticker. Nil means on (gt-1gnq9): the seat-refill plugin
 	// is deleted, so nothing else fills a free seat, and a block that tunes
-	// only "interval" or "max_hooked" must not switch the dispatcher off by
+	// only "interval" or "max_per_tick" must not switch the dispatcher off by
 	// omitting the key. Set false to turn it off.
 	Enabled *bool `json:"enabled,omitempty"`
 
 	// IntervalStr is the tick cadence (default "60s").
 	IntervalStr string `json:"interval,omitempty"`
 
-	// Seats are per agent, each with its own cap. Every agent runs the claude
-	// CLI with the town's managed settings, so no seat is less guarded than
-	// another. The "hooked" key names predate that and are kept for config
-	// compatibility.
-
-	// HookedAgent is the agent seat the dispatcher may use beside the pool's
-	// own agent (polecat_pool.agent). Default "claude-sonnet".
-	HookedAgent string `json:"hooked_agent,omitempty"`
-
-	// MaxHooked caps live polecats on HookedAgent. A cap above zero opens the
-	// second seat; zero or less leaves it closed, and an omitted key decodes
-	// to zero (omitempty), so unset is closed, not a default. Read by
-	// specBudgetFromConfig (internal/cmd/spec.go) and gt pool, which writes
-	// and reports the same rule: "0 closes the seat".
-	MaxHooked int `json:"max_hooked,omitempty"`
+	// The dispatcher's seats are polecat_pool.seats in the town settings: one
+	// entry per agent, each with its own cap. hooked_agent, max_hooked and
+	// prefer_hooked are retired with the second seat they named (gt-mukgk);
+	// gt pool migrate converts a file that still holds them.
 
 	// HooklessAgent and MaxHookless are retired with the hookless seat class
 	// (gt-4k3fj.8.7): nothing reads them. They are declared so a daemon.json
@@ -639,11 +628,6 @@ type SpecDispatchConfig struct {
 	// verbatim. Delete the keys by hand.
 	HooklessAgent json.RawMessage `json:"hookless_agent,omitempty"`
 	MaxHookless   json.RawMessage `json:"max_hookless,omitempty"`
-
-	// PreferHooked puts the HookedAgent seat first. Default: the pool's seat
-	// first (polecat_pool.agent, capped by polecat_pool.max_seats, default 2
-	// when unset), then HookedAgent.
-	PreferHooked bool `json:"prefer_hooked,omitempty"`
 
 	// MaxPerTick bounds slings per tick (default 1).
 	MaxPerTick int `json:"max_per_tick,omitempty"`
@@ -675,12 +659,9 @@ type ScheduledSlingEntry struct {
 	// shaped bead, labeled scheduled:<name> and formula:<formula> with Vars in
 	// a "## Formula vars" section, and the spec dispatcher picks the seat, the
 	// queue position and the moment: a full pool is a wait, not a failed sling.
-	// The dispatcher chooses the seat and the moment. With "spec", Agent is
-	// optional: when set, the scheduler writes it onto each run bead as an
-	// agent:<name> label and the dispatcher slings the bead only onto a seat of
-	// that agent, waiting when none is free and never falling back to another
-	// agent (a review approved for a Claude model must not land on a cheaper
-	// seat because that seat happens to be free). Empty means any seat.
+	// The dispatcher chooses the seat and the moment, so a "spec" entry runs
+	// on any agent with a free seat and cannot carry an Agent: the file does
+	// not load with one (retired_keys.go, gt-mukgk).
 	Dispatch string `json:"dispatch,omitempty"`
 
 	// GateCommand is a shell command that decides whether a due run happens.

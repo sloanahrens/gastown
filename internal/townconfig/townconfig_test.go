@@ -222,7 +222,7 @@ func TestTwoBrokenFilesGiveTwoLines(t *testing.T) {
 func TestRefusedPoolPolicyFailsClosedAtLoad(t *testing.T) {
 	t.Parallel()
 	root := copyLiveTown(t)
-	write(t, root, FileSettings, `{"type":"town-settings","version":1,"polecat_pool":{"agent":"deepseek-flash","max_seats":2,"max_priority":-1}}`)
+	write(t, root, FileSettings, `{"type":"town-settings","version":1,"polecat_pool":{"seats":{"claude":{"cap":2}},"max_priority":-1}}`)
 	_, err := Load(root)
 	if err == nil {
 		t.Fatal("Load with max_priority -1 = nil, want a refusal")
@@ -237,7 +237,7 @@ func TestRefusedPoolPolicyFailsClosedAtLoad(t *testing.T) {
 	}
 
 	// The keys are optional: the same polecat_pool without them loads.
-	write(t, root, FileSettings, `{"type":"town-settings","version":1,"polecat_pool":{"agent":"deepseek-flash","max_seats":2}}`)
+	write(t, root, FileSettings, `{"type":"town-settings","version":1,"polecat_pool":{"seats":{"claude":{"cap":2}}}}`)
 	if _, err := Load(root); err != nil {
 		t.Fatalf("Load without the policy keys = %v", err)
 	}
@@ -433,7 +433,7 @@ func TestRefusedSeatMapFailsClosedAtLoad(t *testing.T) {
 	if _, err := Load(root); err != nil {
 		t.Fatalf("Load with a seat on a defined agent = %v", err)
 	}
-	write(t, root, FileSettings, `{"type":"town-settings","version":1,"polecat_pool":{"agent":"deepseek-flash","max_seats":2}}`)
+	write(t, root, FileSettings, `{"type":"town-settings","version":1,"polecat_pool":{"max_total":2}}`)
 	if _, err := Load(root); err != nil {
 		t.Fatalf("Load without the seat map = %v", err)
 	}

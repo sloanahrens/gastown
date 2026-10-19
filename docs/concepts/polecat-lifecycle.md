@@ -332,8 +332,8 @@ The daemon is the only process that kills or restarts a polecat
 ([ADR 0003](../adr/0003-one-supervisor-no-idle-llm.md)). Its `patrol_scan` tick
 ([ADR 0005](../adr/0005-patrol-scan-tick.md)) restarts a polecat whose session
 is dead on two consecutive samples while it holds work — unless the town is
-already at its polecat cap (`polecat_pool.max_seats`, or `max_total` across
-every seat), which the restart answers to as a sling does, leaving the seat
+already at its polecat cap (its agent's `polecat_pool.seats.<agent>.cap`, or
+`max_total` across every seat), which the restart answers to as a sling does, leaving the seat
 hooked until one frees. It closes the molecules of hooked work whose polecat
 is gone, and returns a gone polecat's work bead
 to the ready queue with its surviving branch recorded. It does

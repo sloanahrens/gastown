@@ -63,8 +63,13 @@ func decodeJSONStrict(path string, data []byte, v any) error {
 
 func unknownKeysError(keys []keyRef) error {
 	names := make([]string, 0, len(keys))
+	paths := make([]string, 0, len(keys))
 	for _, k := range keys {
 		names = append(names, strconv.Quote(k.path))
+		paths = append(paths, k.path)
+	}
+	if anyRetired(paths) {
+		return retiredKeysError(paths)
 	}
 	if len(keys) == 1 {
 		return fmt.Errorf("unknown key %s", names[0])

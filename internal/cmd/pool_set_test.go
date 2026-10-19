@@ -4,14 +4,15 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// poolRoleSettings is a seat-map town that also names role_agents.polecat, the
-// key the retired gt pool mix used to write beside the seats.
+// poolRoleSettings is a seat-map town that also names role_agents for other
+// roles: the keys gt pool does not own and must leave as they are.
 const poolRoleSettings = `{
   "type": "town-settings",
   "version": 1,
@@ -19,17 +20,17 @@ const poolRoleSettings = `{
     "claude-sonnet": {"command": "claude"},
     "claude-haiku": {"command": "claude"}
   },
-  "role_agents": {"polecat": "claude-sonnet", "witness": "claude-haiku"},
+  "role_agents": {"crew": "claude-sonnet", "witness": "claude-haiku"},
   "polecat_pool": {"seats": {"claude-sonnet": {"cap": 2}}}
 }
 `
 
-const poolModelTable = `{"roles": {"polecat": "sonnet-profile"}}
+const poolModelTable = `{"roles": {"crew": "sonnet-profile"}}
 `
 
-// gt pool set writes polecat_pool alone: role_agents.polecat and the models
-// table the retired mix used to write stay as they were, because the seat map
-// is the source of truth for the polecat's model (gt-mukgk).
+// gt pool set writes polecat_pool alone: role_agents and the models table stay
+// as they were, because the seat map is the source of truth for the polecat's
+// model (gt-mukgk).
 func TestPoolSetLeavesRoleAgentsAndTheModelTableAlone(t *testing.T) {
 	t.Parallel()
 	root := poolTestTown(t, poolRoleSettings, "")
@@ -44,7 +45,7 @@ func TestPoolSetLeavesRoleAgentsAndTheModelTableAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ts.RoleAgents["polecat"] != "claude-sonnet" || ts.RoleAgents["witness"] != "claude-haiku" {
+	if ts.RoleAgents["crew"] != "claude-sonnet" || ts.RoleAgents["witness"] != "claude-haiku" || len(ts.RoleAgents) != 2 {
 		t.Errorf("role_agents = %v, want both entries as they were", ts.RoleAgents)
 	}
 	if got, err := os.ReadFile(modelsPath); err != nil || string(got) != poolModelTable {
@@ -81,136 +82,62 @@ func TestPoolSetRefusesContradictoryOrEmptyRemoval(t *testing.T) {
 	}
 }
 
-// With no two-seat keys left to fall back on, removing every seat is allowed:
-// the guard is for a file whose old keys would take dispatch back (gt-mukgk).
-func TestPoolSetRemovesEverySeatWhenNoTwoSeatKeysRun(t *testing.T) {
+// Removing every seat is allowed: an empty map is a map with no seats, so the
+// dispatcher spawns nothing rather than falling back to anything (gt-mukgk).
+func TestPoolSetRemovesEverySeat(t *testing.T) {
 	t.Parallel()
-	root := poolTestTown(t, poolSeatMapSettings, poolTwoSeatDaemonWithoutSeats)
+	root := poolTestTown(t, poolSeatMapSettings, "")
 
 	poolTestSetSeats(t, root, nil, []string{"claude-sonnet", "deepseek-flash"}, 0, false)
 	if caps := poolTestSeatCaps(t, root); len(caps) != 0 {
 		t.Errorf("seats after removing both = %v, want none", caps)
 	}
-}
-
-// The guard also fires on each way the daemon file can still run a second seat,
-// and on the pool seat key alone (gt-mukgk).
-func TestPoolSetRemoveGuardNamesEachLegacyKey(t *testing.T) {
-	t.Parallel()
-	for _, tc := range []struct {
-		name     string
-		settings string
-		daemon   string
-	}{
-		{"polecat_pool.agent", poolLegacyPoolAgentOverMap, ""},
-		{"spec_dispatch.hooked_agent", poolSeatMapSettings,
-			`{"type": "daemon-patrol-config", "version": 1, "patrols": {"spec_dispatch": {"enabled": true, "hooked_agent": "claude-sonnet"}}}`},
-		{"spec_dispatch.max_hooked", poolSeatMapSettings,
-			`{"type": "daemon-patrol-config", "version": 1, "patrols": {"spec_dispatch": {"enabled": true, "max_hooked": 1}}}`},
-	} {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			root := poolTestTown(t, tc.settings, tc.daemon)
-			before := poolTestRawSettings(t, root)
-			err := runPoolSetSeats(&bytes.Buffer{}, root, nil, []string{"claude-sonnet", "deepseek-flash"}, 0, false)
-			if err == nil || !strings.Contains(err.Error(), "cap to 0") {
-				t.Fatalf("removing every seat = %v, want the two-seat-key refusal naming the cap-0 replacement", err)
-			}
-			if after := poolTestRawSettings(t, root); after != before {
-				t.Error("a refused remove rewrote the file")
-			}
-		})
+	if got := poolTestTownBudget(t, root).Picture(); got != "no seats" {
+		t.Errorf("the dispatcher's budget after removing every seat = %q, want no seats", got)
 	}
 }
 
-const poolTwoSeatDaemonWithoutSeats = `{
-  "type": "daemon-patrol-config",
-  "version": 1,
-  "patrols": {"spec_dispatch": {"enabled": true, "interval": "30s"}}
-}
-`
-
-// poolLegacyPoolAgentOverMap is a map town that kept polecat_pool.agent, which
-// an emptied map would hand dispatch back to.
-const poolLegacyPoolAgentOverMap = `{
-  "type": "town-settings",
-  "version": 1,
-  "agents": {
-    "claude-sonnet": {"command": "claude"},
-    "claude-opus": {"command": "claude"},
-    "deepseek-flash": {"command": "claude"}
-  },
-  "polecat_pool": {
-    "agent": "claude-opus",
-    "timezone": "America/Chicago",
-    "seats": {
-      "claude-sonnet": {"cap": 2},
-      "deepseek-flash": {"cap": 3}
-    }
-  }
-}
-`
-
-func TestPoolLegacySeatsSet(t *testing.T) {
+// A cap of 0 closes a seat and keeps what else it carries, so the seat can be
+// reopened with its window and names as they were (gt-mukgk).
+func TestPoolSetZeroClosesTheSeatAndKeepsItsWindowAndNames(t *testing.T) {
 	t.Parallel()
-	pool := func(agent string) *config.TownSettings {
-		return &config.TownSettings{PolecatPool: &config.PolecatPool{Agent: agent}}
+	root := poolTestTown(t, poolSeatMapSettings, "")
+
+	out := poolTestSetSeats(t, root, []poolSeatCap{{Agent: "claude-sonnet", Cap: 0}, {Agent: "deepseek-flash", Cap: 0}}, nil, 0, false)
+	if !strings.Contains(out, "claude-sonnet: cap 0") {
+		t.Errorf("set output = %q, want the cap it wrote", out)
 	}
-	for _, tc := range []struct {
-		name string
-		ts   *config.TownSettings
-		sd   *config.SpecDispatchConfig
-		want bool
-	}{
-		{"no settings, no patrol block", nil, nil, false},
-		{"a pool with neither key", pool(""), &config.SpecDispatchConfig{}, false},
-		{"polecat_pool.agent", pool("claude-opus"), nil, true},
-		{"spec_dispatch.hooked_agent", pool(""), &config.SpecDispatchConfig{HookedAgent: "claude-sonnet"}, true},
-		{"spec_dispatch.max_hooked", pool(""), &config.SpecDispatchConfig{MaxHooked: 1}, true},
-	} {
-		if got := poolLegacySeatsSet(tc.ts, tc.sd); got != tc.want {
-			t.Errorf("%s: poolLegacySeatsSet = %v, want %v", tc.name, got, tc.want)
+	sonnet, ok := poolTestSeatEntry(t, root, "claude-sonnet")
+	if !ok || sonnet.Cap != 0 || !slices.Equal(sonnet.Names, []string{"kestrel"}) {
+		t.Errorf("claude-sonnet = %+v, want it kept at cap 0 with its names", sonnet)
+	}
+	flash, ok := poolTestSeatEntry(t, root, "deepseek-flash")
+	if !ok || flash.Cap != 0 || flash.Closed != "20:00-08:00" {
+		t.Errorf("deepseek-flash = %+v, want it kept at cap 0 with its window", flash)
+	}
+	if !strings.Contains(poolTestShowAt(t, root), "closed (cap 0)") {
+		t.Error("show does not say the closed seat is closed")
+	}
+}
+
+// A file that still holds a retired two-seat key does not load, so set refuses
+// it before writing, and the error names the replacement and the command that
+// converts the file (gt-mukgk).
+func TestPoolSetRefusesAFileCarryingRetiredKeys(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, `{"type":"town-settings","version":1,"polecat_pool":{"agent":"claude-opus","max_seats":3}}`, "")
+	before := poolTestRawSettings(t, root)
+
+	err := runPoolSetSeats(&bytes.Buffer{}, root, []poolSeatCap{{Agent: "claude-haiku", Cap: 2}}, nil, 0, false)
+	if err == nil {
+		t.Fatal("set on a file with retired keys: want a refusal")
+	}
+	for _, want := range []string{"polecat_pool.agent was replaced by polecat_pool.seats", "run gt pool migrate"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal = %q, want it to contain %q", err, want)
 		}
 	}
-}
-
-// The first set on a two-seat town says it seeded the map, so the operator
-// learns the old keys no longer decide dispatch; a set on a town that already
-// has a map says nothing of the kind (gt-mukgk).
-func TestPoolSetSaysWhenItSeededTheMap(t *testing.T) {
-	t.Parallel()
-	root := poolTestTown(t, poolTwoSeatSettings, poolTwoSeatDaemon)
-	out := poolTestSetSeats(t, root, []poolSeatCap{{Agent: "claude-haiku", Cap: 2}}, nil, 0, false)
-	if !strings.Contains(out, "seeded polecat_pool.seats from the two-seat keys (claude-opus, claude-sonnet)") {
-		t.Errorf("first set output lacks the seeding notice:\n%s", out)
-	}
-	out = poolTestSetSeats(t, root, []poolSeatCap{{Agent: "claude-haiku", Cap: 1}}, nil, 0, false)
-	if strings.Contains(out, "seeded") {
-		t.Errorf("a set on an existing map reports a seeding:\n%s", out)
-	}
-}
-
-// Once the map exists the dispatcher ignores the second seat, so set-second
-// refuses rather than write a key that changes nothing, and names the
-// replacement (gt-mukgk).
-func TestPoolSetSecondRefusesOnASeatMap(t *testing.T) {
-	t.Parallel()
-	root := poolTestTown(t, poolSeatMapSettings, poolTwoSeatDaemon)
-	before := poolTestRawSettings(t, root)
-	daemonBefore, err := os.ReadFile(config.DaemonPatrolConfigPath(root))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	err = runPoolSetSecond(&bytes.Buffer{}, root, "claude-haiku", 2)
-	if err == nil || !strings.Contains(err.Error(), "gt pool set claude-haiku=2") {
-		t.Fatalf("set-second on a seat map = %v, want a refusal naming gt pool set claude-haiku=2", err)
-	}
 	if after := poolTestRawSettings(t, root); after != before {
-		t.Error("a refused set-second rewrote the settings")
-	}
-	if daemonAfter, _ := os.ReadFile(config.DaemonPatrolConfigPath(root)); string(daemonAfter) != string(daemonBefore) {
-		t.Error("a refused set-second rewrote the patrol config")
+		t.Error("a refused set rewrote the file")
 	}
 }

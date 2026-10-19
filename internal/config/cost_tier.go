@@ -52,42 +52,42 @@ func IsValidTier(tier string) bool {
 // entries (e.g., user-defined roles or non-Claude agents for non-tier roles) are preserved.
 var TierManagedRoles = []string{"polecat", "crew"}
 
+// tierAgentRoles is the subset of TierManagedRoles whose agent a tier sets in
+// role_agents. The polecat's agents are the seats in polecat_pool.seats
+// (gt-mukgk), so role_agents.polecat is a retired key that a tier never
+// writes. A tier still sets the polecat's effort.
+var tierAgentRoles = []string{"crew"}
+
 // CostTierRoleAgents returns the role_agents mapping for a given tier.
-// All tiers explicitly map every tier-managed role. Standard tier maps roles
-// to empty string when they should use the default/opus model.
+// All tiers explicitly map every role in tierAgentRoles. Standard tier maps
+// roles to empty string when they should use the default/opus model.
 func CostTierRoleAgents(tier CostTier) map[string]string {
 	switch tier {
 	case TierStandard:
 		return map[string]string{
-			"polecat": "",
-			"crew":    "",
+			"crew": "",
 		}
 
 	case TierEconomy:
 		return map[string]string{
-			"polecat": "",
-			"crew":    "",
+			"crew": "",
 		}
 
 	case TierBudget:
 		return map[string]string{
-			"polecat": "claude-sonnet",
-			"crew":    "claude-sonnet",
+			"crew": "claude-sonnet",
 		}
 
 	case TierCustomGroqOpus:
 		// Crew keeps the default (opus) for highest-quality work.
-		// Polecats use Groq Compound for fast, low-cost work.
 		return map[string]string{
-			"polecat": "groq-compound",
-			"crew":    "", // use default (opus)
+			"crew": "", // use default (opus)
 		}
 
 	case TierCustomGroqSonnet:
-		// Crew and polecats use Groq Compound for fast, low-cost work.
+		// Crew uses Groq Compound for fast, low-cost work.
 		return map[string]string{
-			"polecat": "groq-compound",
-			"crew":    "groq-compound",
+			"crew": "groq-compound",
 		}
 
 	default:
@@ -226,7 +226,7 @@ func ApplyCostTier(settings *TownSettings, tier CostTier) error {
 		settings.RoleAgents = make(map[string]string)
 	}
 
-	for _, role := range TierManagedRoles {
+	for _, role := range tierAgentRoles {
 		agentName := roleAgents[role]
 		if agentName == "" {
 			delete(settings.RoleAgents, role)
@@ -294,7 +294,7 @@ func GetCurrentTier(settings *TownSettings) string {
 // tierRolesMatch checks if the actual RoleAgents map matches a tier's expected
 // assignments for tier-managed roles only.
 func tierRolesMatch(actual, expected map[string]string) bool {
-	for _, role := range TierManagedRoles {
+	for _, role := range tierAgentRoles {
 		actualVal := actual[role]     // "" if not present
 		expectedVal := expected[role] // "" means "use default"
 		if actualVal != expectedVal {
@@ -314,9 +314,9 @@ func TierDescription(tier CostTier) string {
 	case TierBudget:
 		return "All roles use Sonnet"
 	case TierCustomGroqOpus:
-		return "Crew → Claude Opus; Polecat → Groq compound-beta"
+		return "Crew → Claude Opus"
 	case TierCustomGroqSonnet:
-		return "All roles → Groq compound-beta"
+		return "Crew → Groq compound-beta"
 	default:
 		return "Unknown tier"
 	}
@@ -333,8 +333,11 @@ func FormatTierRoleTable(tier CostTier) string {
 	roles := TierManagedRoles
 	var lines []string
 	for _, role := range roles {
-		agent := roleAgents[role]
-		if agent == "" {
+		agent, managed := roleAgents[role]
+		switch {
+		case !managed:
+			agent = "(polecat_pool.seats)"
+		case agent == "":
 			agent = "(default/opus)"
 		}
 		effort := roleEffort[role]

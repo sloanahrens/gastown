@@ -1,0 +1,12 @@
+{
+  "polecat_pool": {
+    "min_spawn_gap": "4m",
+    "seats": {
+      "claude-sonnet": {
+        "cap": 2
+      }
+    }
+  },
+  "type": "town-settings",
+  "version": 1
+}

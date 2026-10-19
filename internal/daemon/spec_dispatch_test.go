@@ -431,7 +431,7 @@ func TestSpecDispatchSeatsUnreadableEndsTheIdleStreak(t *testing.T) {
 	root := t.TempDir()
 	writeSpecSeatTown(t, root, specSeatPool("claude-sonnet", 2))
 	d, _, _ := specSeatDaemon(t, root)
-	writeSpecSeatBody(t, root, `{"type": "town-settings", "version": 1, "polecat_pool": {"agent": "claude-sonnet", "max_seats":`)
+	writeSpecSeatBody(t, root, `{"type": "town-settings", "version": 1, "polecat_pool": {"seats":`)
 
 	idle := idleTick(overlapLine)
 	at := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)

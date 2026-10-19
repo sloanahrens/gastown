@@ -824,7 +824,7 @@ func TestHealthSourcesDispatchReportsParkedSeats(t *testing.T) {
 	// The body stops one character short of the closing brace: the read
 	// fails, the ticker parks, and the park is all the record carries — no
 	// tick ran on it.
-	writeSpecSeatBody(t, root, `{"type": "town-settings", "version": 1, "polecat_pool": {"agent": "claude-sonnet", "max_seats":`)
+	writeSpecSeatBody(t, root, `{"type": "town-settings", "version": 1, "polecat_pool": {"seats":`)
 	if specSeatTick(d) {
 		t.Fatal("the ticker ticked on a seat file that does not parse")
 	}

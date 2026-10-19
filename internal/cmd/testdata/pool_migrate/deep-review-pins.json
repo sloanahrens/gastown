@@ -1,0 +1,45 @@
+{
+  "type": "town-settings",
+  "version": 1,
+  "polecat_pool": {
+    "seats": {
+      "claude-sonnet": {
+        "cap": 2
+      }
+    }
+  },
+  "daemon": {
+    "type": "daemon-patrol-config",
+    "version": 1,
+    "patrols": {
+      "scheduled_slings": {
+        "enabled": true,
+        "entries": [
+          {
+            "name": "deep-review-slice",
+            "rig": "gastown",
+            "formula": "mol-deep-review",
+            "interval": "24h",
+            "dispatch": "spec",
+            "agent": "claude-sonnet"
+          },
+          {
+            "name": "deep-review-risk",
+            "rig": "gastown",
+            "formula": "mol-deep-review",
+            "interval": "24h",
+            "dispatch": "spec",
+            "agent": "claude-opus"
+          },
+          {
+            "name": "nightly",
+            "rig": "gastown",
+            "formula": "mol-nightly",
+            "interval": "24h",
+            "agent": "claude-haiku"
+          }
+        ]
+      }
+    }
+  }
+}

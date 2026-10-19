@@ -694,10 +694,10 @@ func TestRunScheduledSlingEntry_ClosesBeadWhenSlingFails(t *testing.T) {
 // capacityRefusals are the lines gt sling prints when it will not take a bead
 // for lack of room, as the pool guard and the merge-queue guard word them.
 var capacityRefusals = map[string]string{
-	"pool full":    "gt sling gt-x: exit status 1: sling refused: polecat pool full (2/2 claude-sonnet seats); raise polecat_pool.max_seats to spawn",
+	"pool full":    "gt sling gt-x: exit status 1: sling refused: polecat pool full (2/2 claude-sonnet seats); raise polecat_pool.seats.claude-sonnet.cap to spawn",
 	"total full":   "gt sling gt-x: exit status 1: sling refused: polecat pool total full (4/4 seats); raise polecat_pool.max_total to spawn",
 	"merge queue":  "gt sling gt-x: exit status 1: sling refused: merge queue has 5 ready; raise merge_queue.max_ready_for_dispatch",
-	"cobra prefix": "gt sling gt-x: exit status 1: Error: sling refused: polecat pool full (2/2 seats); raise polecat_pool.max_seats to spawn",
+	"cobra prefix": "gt sling gt-x: exit status 1: Error: sling refused: polecat pool full (2/2 seats); raise polecat_pool.seats.claude-sonnet.cap to spawn",
 }
 
 func TestRunScheduledSlingEntry_CapacityRefusalIsADeferralAndRetiresTheBead(t *testing.T) {
@@ -733,7 +733,7 @@ func TestRunScheduledSlingEntry_CapacityRefusalCreatesNoBead(t *testing.T) {
 	f := &fakeScheduledRunner{
 		createID:    "gt-run1",
 		now:         time.Now(),
-		admitReason: "sling refused: polecat pool full (2/2 claude-sonnet seats); raise polecat_pool.max_seats to spawn",
+		admitReason: "sling refused: polecat pool full (2/2 claude-sonnet seats); raise polecat_pool.seats.claude-sonnet.cap to spawn",
 	}
 	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
 	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
@@ -859,7 +859,7 @@ func TestSlingErrorLineKeepsTheRefusalLine(t *testing.T) {
 	t.Parallel()
 	stderr := "[sling] step admission took 1s (total 1s)\n" +
 		"warning: stale hook file ignored\n" +
-		"Error: sling refused: polecat pool full (2/2 seats); raise polecat_pool.max_seats to spawn\n"
+		"Error: sling refused: polecat pool full (2/2 seats); raise polecat_pool.seats.claude-sonnet.cap to spawn\n"
 	got := slingErrorLine(stderr)
 	if !isScheduledSlingRefusal(errors.New(got)) {
 		t.Fatalf("summary %q lost the refusal marker", got)
@@ -933,8 +933,8 @@ func TestExecScheduledSlingRunner_AdmitReadsTheDryRunRoute(t *testing.T) {
 		wantErr bool
 	}{
 		"refused seat pool": {
-			stdout: "Would spawn fresh polecat in rig 'gastown'\n  sling refused: polecat pool full (2/2 seats); raise polecat_pool.max_seats to spawn\n",
-			reason: "sling refused: polecat pool full (2/2 seats); raise polecat_pool.max_seats to spawn",
+			stdout: "Would spawn fresh polecat in rig 'gastown'\n  sling refused: polecat pool full (2/2 seats); raise polecat_pool.seats.claude-sonnet.cap to spawn\n",
+			reason: "sling refused: polecat pool full (2/2 seats); raise polecat_pool.seats.claude-sonnet.cap to spawn",
 		},
 		"seat free": {
 			stdout: "Would spawn fresh polecat in rig 'gastown'\nWould cook formula: mol-doc-audit\n",

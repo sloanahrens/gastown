@@ -22,10 +22,11 @@ import (
 // operational.daemon.boot_spawn_cooldown and the rest) and the mail:mayor
 // route action gt-rwp7z.6 retired from the defaults: a
 // live file must lose such a key before a binary carrying the deletion is
-// installed, or the startup gate refuses the town. The one rename: gt-plk1z
-// moved polecat_pool.overflow_agent/max_overflow to agent/max_seats, and the
-// fixture carries the new names — a file still holding the old ones loads
-// through PolecatPool.applyDeprecatedKeys (types_test.go).
+// installed, or the startup gate refuses the town. The seat map is the same
+// kind of change: gt-mukgk retired polecat_pool.agent/max_seats, the second
+// seat's keys and role_agents.polecat, and the fixture carries polecat_pool.seats
+// instead — a file still holding the old keys fails to load, and gt pool migrate
+// converts it (retired_keys_test.go).
 // Strict decoding must accept every key they carry: a kernel that refused the
 // live town would stop it the moment it shipped.
 const liveTown = "testdata/livetown"
@@ -67,11 +68,11 @@ func TestLiveTownFilesDecodeStrictly(t *testing.T) {
 	}
 }
 
-// TestLiveTownPolecatPoolSeat: the town's own settings/config.json names the
-// seat pool's agent and cap, and those are the values the pool's admission and
-// the spec dispatcher read. The live town runs its polecats on one agent with a
-// cap of one, so a decode that dropped either key would show up here as an
-// uncapped pool or a pool with no seat at all.
+// TestLiveTownPolecatPoolSeat: the town's own settings/config.json names its
+// seats, and those are the values the pool's admission and the spec dispatcher
+// read. The live town runs its polecats on one agent with a cap of one, so a
+// decode that dropped the seat or its cap would show up here as a pool with no
+// seat at all.
 func TestLiveTownPolecatPoolSeat(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(liveTown, "settings/config.json")
@@ -87,14 +88,12 @@ func TestLiveTownPolecatPoolSeat(t *testing.T) {
 	if pool == nil {
 		t.Fatal("the live town's polecat_pool did not load")
 	}
-	if pool.Agent != "deepseek-flash" {
-		t.Errorf("polecat_pool.agent = %q, want deepseek-flash", pool.Agent)
+	seats, err := Seats(&ts, nil)
+	if err != nil {
+		t.Fatalf("Seats: %v", err)
 	}
-	if pool.MaxSeats != 1 {
-		t.Errorf("polecat_pool.max_seats = %d, want 1", pool.MaxSeats)
-	}
-	if !pool.SeatsCapped() {
-		t.Error("a pool with an agent and max_seats 1 is capped")
+	if len(seats) != 1 || seats[0].Agent != "deepseek-flash" || seats[0].Cap != 1 {
+		t.Errorf("polecat_pool.seats = %+v, want one deepseek-flash seat with cap 1", seats)
 	}
 }
 

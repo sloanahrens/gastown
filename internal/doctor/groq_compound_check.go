@@ -134,5 +134,11 @@ func (c *GroqCompoundCheck) groqCompoundConfigured(townRoot string) bool {
 			return true
 		}
 	}
+	// Polecats run on the agents their seat map names.
+	if pool := townSettings.PolecatPool; pool != nil {
+		if _, ok := pool.Seats[string(config.AgentGroqCompound)]; ok {
+			return true
+		}
+	}
 	return false
 }
