@@ -70,6 +70,9 @@ func (h *patrolScanHost) seatCap(rig, name string) (patrolscan.SeatCap, error) {
 			key := "polecat_pool.seats." + agent + ".cap"
 			// A cap of 0 closes the seat (gt pool set <agent>=0), the way
 			// specdispatch.Seat.Free reads it: held however few are live.
+			// SeatConfig.Cap is a plain int (internal/config/seats.go), so a
+			// seat with no cap key is cap 0 and closed too: that is the design,
+			// not a missing cap.
 			if seat.Cap <= 0 {
 				return patrolscan.SeatCap{Live: byAgent[agent], Closed: true, Key: key}, nil
 			}

@@ -964,10 +964,10 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		if err != nil {
 			return unknown("seat cap unreadable", err)
 		}
-		if cap.Closed {
-			return skip(fmt.Sprintf("%s stays hooked: %s is 0, the seat is closed", work.ID, cap.Key))
-		}
 		if cap.Full() {
+			if cap.Closed {
+				return skip(fmt.Sprintf("%s stays hooked: %s is 0, the seat is closed", work.ID, cap.Key))
+			}
 			return skip(fmt.Sprintf("%s stays hooked: %s full (%d/%d polecats live), waiting for a free seat",
 				work.ID, cap.Key, cap.Live, cap.Limit))
 		}
