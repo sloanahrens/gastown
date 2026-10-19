@@ -448,18 +448,10 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 				strings.Contains(hookBead.Description, "is_wisp: true")
 
 			if attachment.AttachedMolecule != "" {
-				progress, err := getMoleculeProgressInfo(b, attachment.AttachedMolecule)
-				if err != nil {
-					style.PrintWarning("progress unavailable: %v", err)
-				}
-				status.Progress = progress
+				status.Progress = moleculeProgressOrWarn(os.Stderr, b, attachment.AttachedMolecule)
 				status.NextAction = determineNextAction(status)
 			} else if attachment.AttachedFormula != "" {
-				progress, err := getMoleculeProgressInfo(b, hookBead.ID)
-				if err != nil {
-					style.PrintWarning("progress unavailable: %v", err)
-				}
-				status.Progress = progress
+				status.Progress = moleculeProgressOrWarn(os.Stderr, b, hookBead.ID)
 				status.NextAction = determineNextAction(status)
 			}
 		}
@@ -513,6 +505,17 @@ func buildAgentIdentity(ctx RoleContext) string {
 }
 
 // getMoleculeProgressInfo gets progress info for a molecule instance.
+// moleculeProgressOrWarn is the molecule's progress, or nil with a warning on w
+// when it cannot be read. Status output goes to stdout, so w is stderr.
+func moleculeProgressOrWarn(w io.Writer, b beads.Client, moleculeRootID string) *MoleculeProgressInfo {
+	progress, err := getMoleculeProgressInfo(b, moleculeRootID)
+	if err != nil {
+		style.FprintWarning(w, "progress unavailable: %v", err)
+		return nil
+	}
+	return progress
+}
+
 func getMoleculeProgressInfo(b beads.Client, moleculeRootID string) (*MoleculeProgressInfo, error) {
 	// Get the molecule root issue
 	root, err := b.Show(moleculeRootID)
@@ -1027,7 +1030,7 @@ func moleculeCurrentFrom(b beads.Client, handoff *beads.Issue, target string) Mo
 			info.StepsComplete++
 			closedIDs[child.ID] = true
 		case "in_progress", "pinned", "hooked":
-			// A pinned or hooked step is held by an agent, as in_progress says (gt-fxboi).
+			// A pinned or hooked step is held by an agent, as in_progress says.
 			inProgressSteps = append(inProgressSteps, child)
 		case "open":
 			openStepIDs = append(openStepIDs, child.ID)

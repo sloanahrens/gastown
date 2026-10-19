@@ -328,3 +328,45 @@ func assertMoleculeCurrentHeldStep(t *testing.T, heldStatus string) {
 		t.Errorf("CurrentStepID = %q, want the pinned step %s", info.CurrentStepID, pinned.ID)
 	}
 }
+
+// TestMoleculeProgressOrWarnReportsUnreadableProgress: a molecule whose progress
+// cannot be read yields no progress and a warning on the writer it is given, so
+// stdout stays the status itself.
+func TestMoleculeProgressOrWarnReportsUnreadableProgress(t *testing.T) {
+	t.Parallel()
+
+	var warned bytes.Buffer
+	progress := moleculeProgressOrWarn(&warned, beadsfake.New(), "gt-missing")
+
+	if progress != nil {
+		t.Errorf("progress = %+v, want nil for an unreadable molecule", progress)
+	}
+	if !strings.Contains(warned.String(), "progress unavailable") {
+		t.Errorf("warning = %q, want it to say progress is unavailable", warned.String())
+	}
+}
+
+// TestMoleculeProgressOrWarnSilentWhenReadable: a readable molecule warns about
+// nothing.
+func TestMoleculeProgressOrWarnSilentWhenReadable(t *testing.T) {
+	t.Parallel()
+
+	fake := beadsfake.New()
+	root, err := fake.Create(beads.CreateOptions{Title: "mol-polecat-work"})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	if _, err := fake.Create(beads.CreateOptions{Title: "step", Parent: root.ID}); err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+
+	var warned bytes.Buffer
+	progress := moleculeProgressOrWarn(&warned, fake, root.ID)
+
+	if progress == nil || progress.TotalSteps != 1 {
+		t.Errorf("progress = %+v, want one step", progress)
+	}
+	if warned.Len() != 0 {
+		t.Errorf("warning = %q, want none", warned.String())
+	}
+}
