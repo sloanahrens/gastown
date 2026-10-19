@@ -38,6 +38,24 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"zsh foreach gt done", "foreach f (a b c); gt done; end", true},
 		{"zsh foreach slot poll", "foreach r (gastown beads) gt slot status; end", true},
 
+		// The other shapes zsh accepts, and the modifiers that prefix them
+		// (gt-ezhf4). Each was verified to loop in zsh.
+		{"zsh repeat of an && list", "repeat 20 make lint && gt done", true},
+		{"zsh repeat of a pipeline", "repeat 20 echo hi | gt done", true},
+		{"zsh repeat do block", "repeat 3 do gt done; done", true},
+		{"zsh repeat do block, gate after another command", "repeat 3 do echo hi; gt done; done", true},
+		{"zsh repeat do block around a for", "repeat 3 do for i in 1; do echo hi; done; gt done; done", true},
+		{"zsh repeat do block around a repeat do block", "repeat 3 do repeat 2 do echo hi; done; gt done; done", true},
+		{"zsh foreach braced", "foreach f (a b c) { gt done }", true},
+		{"zsh foreach, gate after a nested foreach", "foreach a (1 2); foreach b (3 4); echo hi; end; gt done; end", true},
+		{"noglob repeat", "noglob repeat 20 gt done", true},
+		{"nocorrect repeat", "nocorrect repeat 20 gt done", true},
+		{"builtin repeat", "builtin repeat 20 gt done", true},
+		{"exec repeat", "exec repeat 20 gt done", true},
+		{"noglob foreach", "noglob foreach f (a b); gt done; end", true},
+		{"time then noglob repeat", "time noglob repeat 20 gt done", true},
+		{"repeat of a noglob gate", "repeat 20 noglob gt done", true},
+
 		// A keyword that follows then/do/else or an opening brace or paren
 		// starts a loop as surely as one that starts the line (deep-review
 		// gt-dilqk).
@@ -90,6 +108,13 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"zsh repeat with no gate command, braced", "repeat 3 { gofmt -l; echo hi }", false},
 		{"zsh foreach with no gate command", "foreach f (a b); echo $f; end", false},
 		{"zsh repeat word as an argument", "echo repeat 20 gt done", false},
+		{"zsh repeat do block closed before a sanctioned gt done", "repeat 3 do echo hi; done; gt done", false},
+		{"zsh repeat do block around a nested block, closed before gt done", "repeat 3 do repeat 2 do echo hi; done; done; gt done", false},
+		{"zsh repeat do block never closed", "repeat 3 do gt done", false},
+		{"zsh foreach braced, closed before a sanctioned gt done", "foreach f (a b) { echo hi }; gt done", false},
+		{"zsh foreach nest closed before a sanctioned gt done", "foreach a (1 2); foreach b (3 4); echo hi; end; end; gt done", false},
+		{"noglob with a sanctioned gt done", "noglob gt done", false},
+		{"noglob repeat that never runs the gate", "noglob repeat 3 gofmt -l", false},
 		{"seq with no gate command", "seq 1 5", false},
 		{"xargs with no gate command", "seq 1 5 | xargs -I{} echo {}", false},
 
@@ -139,8 +164,8 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 39 {
-		t.Errorf("blocked %d of %d cases, want exactly 39", blocked, len(tests))
+	if blocked != 54 {
+		t.Errorf("blocked %d of %d cases, want exactly 54", blocked, len(tests))
 	}
 }
 

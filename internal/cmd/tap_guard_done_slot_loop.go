@@ -18,9 +18,13 @@ import (
 // What it blocks:
 //
 //  1. A `for` / `while` / `until` block that runs `gt done`, or a read-only
-//     `gt slot` poll, inside a body that closes. The zsh `repeat` and `foreach`
-//     loops count the same way (the shell this town runs). Taking and releasing
-//     the slot is bounded work, so `gt slot run` and `gt slot reap` may be repeated.
+//     `gt slot` poll, inside a body that closes. Taking and releasing the slot
+//     is bounded work, so `gt slot run` and `gt slot reap` may be repeated.
+//     The zsh `repeat` and `foreach` loops (the shell this town runs) are
+//     policed the same way, in every spelling zsh accepts: `repeat N cmd`
+//     (which repeats the whole `&&` / `||` / `|` list), `repeat N do … done`,
+//     `repeat N { … }`, `foreach NAME (…) … end` and `foreach NAME (…) { … }`,
+//     behind a `noglob` / `nocorrect` / `builtin` / `exec` modifier.
 //  2. A repeat wrapper — `xargs` / `watch` — whose OWN payload runs the gate.
 //     The gate is looked for in that wrapper's arguments, never in the command
 //     line at large, so `… | xargs gofmt -w && gt done` is the ordinary
@@ -70,6 +74,24 @@ func doneSlotLoopSkipLead(segment []string) []string {
 		segment = segment[1:]
 	}
 	return segment
+}
+
+// doneSlotLoopModifiers are zsh precommand modifiers that run the command
+// behind them unchanged, which segmentCommandWord (shared with other guards)
+// does not know: `noglob repeat 20 gt done` is still the repeat.
+var doneSlotLoopModifiers = map[string]bool{"noglob": true, "nocorrect": true}
+
+// doneSlotLoopCommandWord returns a segment's command word and arguments after
+// the clause openers, the launchers segmentCommandWord skips, and the modifiers
+// above, in any order (`time noglob gt done`).
+func doneSlotLoopCommandWord(segment []string) (string, []string) {
+	for {
+		word, args := segmentCommandWord(doneSlotLoopSkipLead(segment))
+		if !doneSlotLoopModifiers[strings.ToLower(word)] {
+			return word, args
+		}
+		segment = args
+	}
 }
 
 // doneSlotLoopWrapperValueFlags names the wrapper flags that take the next
@@ -176,10 +198,10 @@ func doneSlotLoopHasBlockingLoop(tokens, lowerTokens []string) bool {
 }
 
 // doneSlotLoopHasZshLoop reports whether a zsh `repeat` or `foreach` at a
-// command position runs the gate in its body. zsh closes these with `}` or
-// `end`, not `done`, and a `repeat COUNT gt done` line has no closer at all, so
-// the depth walk above never sees them close (gt-yjep0). Each body is found
-// on its own and judged as the command line it is.
+// command position runs the gate in its body. zsh closes these with `}`, `done`
+// or `end`, and a `repeat COUNT gt done` line has no closer at all, so the depth
+// walk above never sees them close (gt-yjep0). Each body is found on its own
+// and judged as the command line it is.
 func doneSlotLoopHasZshLoop(tokens, lowerTokens []string) bool {
 	commandWords := doneSlotLoopSegmentCommandWords(tokens)
 	for i := range lowerTokens {
@@ -189,7 +211,7 @@ func doneSlotLoopHasZshLoop(tokens, lowerTokens []string) bool {
 		var body []string
 		switch lowerTokens[i] {
 		case "repeat":
-			body = doneSlotLoopRepeatBody(tokens, i+2) // i+1 is the COUNT
+			body = doneSlotLoopRepeatBody(tokens, lowerTokens, commandWords, i+2) // i+1 is the COUNT
 		case "foreach":
 			body = doneSlotLoopForeachBody(tokens, lowerTokens, commandWords, i+1) // i+1 is NAME
 		default:
@@ -203,37 +225,73 @@ func doneSlotLoopHasZshLoop(tokens, lowerTokens []string) bool {
 }
 
 // doneSlotLoopRepeatBody returns the body of a `repeat COUNT` that starts at
-// tokens[start]: the braced group when one follows, else the words up to the
-// next command separator.
-func doneSlotLoopRepeatBody(tokens []string, start int) []string {
+// tokens[start], in the three shapes zsh accepts: a braced group, a
+// `do … done` block, or the short form, which repeats a whole sublist — the
+// words up to the next `;` or `&`, so `repeat 3 make lint && gt done` repeats
+// the gate too. A `do` block with no `done` runs nothing, because the shell
+// rejects it, so it returns nil.
+func doneSlotLoopRepeatBody(tokens, lowerTokens []string, commandWords map[int]bool, start int) []string {
 	if start >= len(tokens) {
 		return nil
 	}
-	if tokens[start] != "{" {
-		end := start
-		for end < len(tokens) && !shellCommandSeparators[tokens[end]] {
-			end++
-		}
-		return tokens[start:end]
+	switch {
+	case tokens[start] == "{":
+		return doneSlotLoopBracedBody(tokens, start)
+	case lowerTokens[start] == "do":
+		return doneSlotLoopDoBody(tokens, lowerTokens, commandWords, start)
 	}
+	end := start
+	for end < len(tokens) && tokens[end] != ";" && tokens[end] != "&" && tokens[end] != "}" {
+		end++
+	}
+	return tokens[start:end]
+}
+
+// doneSlotLoopBracedBody returns the words inside the brace group that opens at
+// tokens[open], or all the words behind it when the group never closes.
+func doneSlotLoopBracedBody(tokens []string, open int) []string {
 	depth := 0
-	for k := start; k < len(tokens); k++ {
+	for k := open; k < len(tokens); k++ {
 		switch tokens[k] {
 		case "{":
 			depth++
 		case "}":
 			depth--
 			if depth == 0 {
-				return tokens[start+1 : k]
+				return tokens[open+1 : k]
 			}
 		}
 	}
-	return tokens[start+1:]
+	return tokens[open+1:]
 }
 
-// doneSlotLoopForeachBody returns the body of a `foreach NAME (WORDS) ... end`
-// whose NAME sits at tokens[name]: the words after the list's closing paren up
-// to the `end` that closes it. A foreach with no `end` runs nothing, because
+// doneSlotLoopDoBody returns the words between the `do` at tokens[do] and the
+// `done` that closes it. A nested block opens with a loop keyword or a
+// `repeat COUNT do`, each closed by a `done` of its own.
+func doneSlotLoopDoBody(tokens, lowerTokens []string, commandWords map[int]bool, do int) []string {
+	depth := 1
+	for k := do + 1; k < len(tokens); k++ {
+		if !doneSlotLoopIsCommandWord(commandWords, k) {
+			continue
+		}
+		switch {
+		case doneSlotLoopKeywords[lowerTokens[k]],
+			lowerTokens[k] == "repeat" && k+2 < len(tokens) && lowerTokens[k+2] == "do":
+			depth++
+		case lowerTokens[k] == "done":
+			depth--
+			if depth == 0 {
+				return tokens[do+1 : k]
+			}
+		}
+	}
+	return nil
+}
+
+// doneSlotLoopForeachBody returns the body of a `foreach NAME (WORDS)` whose
+// NAME sits at tokens[name]: the braced group that follows the list's closing
+// paren, else the words after it up to the `end` that closes it, skipping the
+// `end` of any nested foreach. A foreach with no `end` runs nothing, because
 // the shell rejects it, so it returns nil.
 func doneSlotLoopForeachBody(tokens, lowerTokens []string, commandWords map[int]bool, name int) []string {
 	list := -1
@@ -246,9 +304,22 @@ func doneSlotLoopForeachBody(tokens, lowerTokens []string, commandWords map[int]
 	if list < 0 {
 		return nil
 	}
+	if list+1 < len(tokens) && tokens[list+1] == "{" {
+		return doneSlotLoopBracedBody(tokens, list+1)
+	}
+	depth := 1
 	for k := list + 1; k < len(tokens); k++ {
-		if lowerTokens[k] == "end" && doneSlotLoopIsCommandWord(commandWords, k) {
-			return tokens[list+1 : k]
+		if !doneSlotLoopIsCommandWord(commandWords, k) {
+			continue
+		}
+		switch lowerTokens[k] {
+		case "foreach":
+			depth++
+		case "end":
+			depth--
+			if depth == 0 {
+				return tokens[list+1 : k]
+			}
 		}
 	}
 	return nil
@@ -262,7 +333,7 @@ func doneSlotLoopForeachBody(tokens, lowerTokens []string, commandWords map[int]
 // gate nowhere (gt-7dxw review).
 func doneSlotLoopHasRepeater(tokens []string) bool {
 	for _, segment := range splitShellSegments(tokens) {
-		word, args := segmentCommandWord(doneSlotLoopSkipLead(segment))
+		word, args := doneSlotLoopCommandWord(segment)
 		word = strings.ToLower(word)
 		if !doneSlotLoopRepeaters[word] {
 			continue
@@ -299,7 +370,7 @@ func doneSlotLoopExecutesGate(tokens []string) bool {
 		return doneSlotLoopExecutesGate(shellTokenize(tokens[0]))
 	}
 	for _, segment := range splitShellSegments(tokens) {
-		word, args := segmentCommandWord(doneSlotLoopLower(doneSlotLoopSkipLead(segment)))
+		word, args := doneSlotLoopCommandWord(doneSlotLoopLower(segment))
 		switch {
 		case word == "gt":
 			if doneSlotLoopPoliteGtArgs(args) {
@@ -456,37 +527,52 @@ func doneSlotLoopSegmentCommandWords(tokens []string) map[int]bool {
 			i++
 			continue
 		}
-		j := i
-		for j < len(tokens) && !shellCommandSeparators[tokens[j]] {
-			if isEnvAssignment(tokens[j]) || doneSlotLoopLeadWords[strings.ToLower(tokens[j])] {
-				j++
-				continue
+		// `repeat COUNT do cmd …` runs cmd as a command of its own, so the walk
+		// starts over behind the `do`.
+		for j := i; j < len(tokens) && !shellCommandSeparators[tokens[j]]; {
+			j = doneSlotLoopSkipToCommandWord(tokens, j)
+			if j >= len(tokens) || shellCommandSeparators[tokens[j]] {
+				break
 			}
-			if doneSlotLoopIsCaseArmPattern(tokens[j]) {
-				j++
-				continue
-			}
-			if strings.ToLower(tokens[j]) == "case" {
-				if arm := doneSlotLoopFirstCaseArmEnd(tokens, j); arm > j {
-					j = arm + 1
-					continue
-				}
-			}
-			switch tokens[j] {
-			case "!", "time", "sudo", "command", "nohup", "env", "nice", "stdbuf":
-				j++
-				continue
-			}
-			break
-		}
-		if j < len(tokens) && !shellCommandSeparators[tokens[j]] {
 			words[j] = true
+			if strings.ToLower(tokens[j]) != "repeat" || j+2 >= len(tokens) || strings.ToLower(tokens[j+2]) != "do" {
+				break
+			}
+			j += 3
 		}
 		for i < len(tokens) && !shellCommandSeparators[tokens[i]] {
 			i++
 		}
 	}
 	return words
+}
+
+// doneSlotLoopSkipToCommandWord returns the index of the command word at or
+// behind tokens[j], or the index of the segment's end when it holds none.
+func doneSlotLoopSkipToCommandWord(tokens []string, j int) int {
+	for j < len(tokens) && !shellCommandSeparators[tokens[j]] {
+		if isEnvAssignment(tokens[j]) || doneSlotLoopLeadWords[strings.ToLower(tokens[j])] {
+			j++
+			continue
+		}
+		if doneSlotLoopIsCaseArmPattern(tokens[j]) {
+			j++
+			continue
+		}
+		if strings.ToLower(tokens[j]) == "case" {
+			if arm := doneSlotLoopFirstCaseArmEnd(tokens, j); arm > j {
+				j = arm + 1
+				continue
+			}
+		}
+		switch tokens[j] {
+		case "!", "time", "sudo", "command", "nohup", "env", "nice", "stdbuf", "exec", "builtin", "noglob", "nocorrect":
+			j++
+			continue
+		}
+		break
+	}
+	return j
 }
 
 // doneSlotLoopIsCaseArmPattern reports whether a segment-leading token is a
