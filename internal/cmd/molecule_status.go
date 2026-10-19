@@ -448,11 +448,17 @@ func runMoleculeStatus(cmd *cobra.Command, args []string) error {
 				strings.Contains(hookBead.Description, "is_wisp: true")
 
 			if attachment.AttachedMolecule != "" {
-				progress, _ := getMoleculeProgressInfo(b, attachment.AttachedMolecule)
+				progress, err := getMoleculeProgressInfo(b, attachment.AttachedMolecule)
+				if err != nil {
+					style.PrintWarning("progress unavailable: %v", err)
+				}
 				status.Progress = progress
 				status.NextAction = determineNextAction(status)
 			} else if attachment.AttachedFormula != "" {
-				progress, _ := getMoleculeProgressInfo(b, hookBead.ID)
+				progress, err := getMoleculeProgressInfo(b, hookBead.ID)
+				if err != nil {
+					style.PrintWarning("progress unavailable: %v", err)
+				}
 				status.Progress = progress
 				status.NextAction = determineNextAction(status)
 			}
@@ -1021,9 +1027,7 @@ func moleculeCurrentFrom(b beads.Client, handoff *beads.Issue, target string) Mo
 			info.StepsComplete++
 			closedIDs[child.ID] = true
 		case "in_progress", "pinned", "hooked":
-			// A pinned or hooked step is held by an agent, which is what
-			// in_progress says; leaving it out of every bucket reported the
-			// molecule blocked with no current step.
+			// A pinned or hooked step is held by an agent, as in_progress says (gt-fxboi).
 			inProgressSteps = append(inProgressSteps, child)
 		case "open":
 			openStepIDs = append(openStepIDs, child.ID)

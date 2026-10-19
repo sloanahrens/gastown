@@ -75,6 +75,43 @@ func TestReadHookSessionID_PersistedFileFallback(t *testing.T) {
 	}
 }
 
+// TestRuntimeStateSearched_SymlinkedCwdStillClimbs: the working directory and
+// the town root can name one directory through different symlinks, as /var and
+// /private/var do on macOS. The climb to the agent's directory must still find
+// its file, and still skip the town root's shared copy.
+func TestRuntimeStateSearched_SymlinkedCwdStillClimbs(t *testing.T) {
+	t.Parallel()
+	base := t.TempDir()
+	townRoot := filepath.Join(base, "real", "town")
+	agentDir := filepath.Join(townRoot, "rig", "polecats", "nux")
+	nested := filepath.Join(agentDir, "repo")
+	if err := os.MkdirAll(nested, 0755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	link := filepath.Join(base, "link")
+	if err := os.Symlink(filepath.Join(base, "real"), link); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	write := func(dir, id string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Join(dir, ".runtime"), 0755); err != nil {
+			t.Fatalf("mkdir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".runtime", "session_id"), []byte(id+"\n"), 0644); err != nil {
+			t.Fatalf("write session_id: %v", err)
+		}
+	}
+	write(agentDir, "agent-session")
+	write(townRoot, "shared-town-session")
+
+	env := testPrimeHookEnv(filepath.Join(link, "town", "rig", "polecats", "nux", "repo"), nil)
+	env.findTown = func() (string, error) { return townRoot, nil }
+
+	if got := env.runtimeStateSearched("session_id"); got != "agent-session" {
+		t.Errorf("session ID = %q, want the agent directory's %q", got, "agent-session")
+	}
+}
+
 // TestReadHookSessionID_SourceFromEnv verifies GT_HOOK_SOURCE env var
 // populates the source return value.
 func TestReadHookSessionID_SourceFromEnv(t *testing.T) {

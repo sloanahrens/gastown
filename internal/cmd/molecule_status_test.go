@@ -273,11 +273,22 @@ func TestMoleculeProgressShowMultipleFailureNotReady(t *testing.T) {
 	}
 }
 
-// TestMoleculeCurrentPinnedStepIsCurrent: a step a hand-off left pinned is held
-// by an agent, so it is the molecule's current step; counting it in the total
-// but in no bucket reported the molecule blocked with no current step.
-func TestMoleculeCurrentPinnedStepIsCurrent(t *testing.T) {
+// TestMoleculeCurrentHeldStepIsCurrent: a step a hand-off left pinned or hooked
+// is held by an agent, so it is the molecule's current step; counting it in the
+// total but in no bucket reported the molecule blocked with no current step.
+func TestMoleculeCurrentHeldStepIsCurrent(t *testing.T) {
 	t.Parallel()
+
+	for _, held := range []string{beads.StatusPinned, beads.StatusHooked} {
+		t.Run(held, func(t *testing.T) {
+			t.Parallel()
+			assertMoleculeCurrentHeldStep(t, held)
+		})
+	}
+}
+
+func assertMoleculeCurrentHeldStep(t *testing.T, heldStatus string) {
+	t.Helper()
 
 	fake := beadsfake.New()
 	root, err := fake.Create(beads.CreateOptions{Title: "mol-polecat-work"})
@@ -295,9 +306,9 @@ func TestMoleculeCurrentPinnedStepIsCurrent(t *testing.T) {
 	if err := fake.Close(done.ID); err != nil {
 		t.Fatalf("close step: %v", err)
 	}
-	status := string(beads.StatusPinned)
+	status := heldStatus
 	if err := fake.Update(pinned.ID, beads.UpdateOptions{Status: &status}); err != nil {
-		t.Fatalf("pin step: %v", err)
+		t.Fatalf("set step status %s: %v", heldStatus, err)
 	}
 
 	handoff := &beads.Issue{

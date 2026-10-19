@@ -266,6 +266,10 @@ func (e primeHookEnv) runtimeStateSearched(name string) string {
 	if err != nil || townRoot == "" {
 		return ""
 	}
+	// getwd and findTown can name one directory through different symlinks
+	// (/var and /private/var on macOS); a spelling mismatch must not read as
+	// "outside the town".
+	cwd, townRoot = resolvedPath(cwd), resolvedPath(townRoot)
 	for dir := filepath.Dir(cwd); dir != townRoot; dir = filepath.Dir(dir) {
 		if !strings.HasPrefix(dir, townRoot+string(filepath.Separator)) {
 			return "" // cwd is outside the town
@@ -276,6 +280,14 @@ func (e primeHookEnv) runtimeStateSearched(name string) string {
 	}
 
 	return ""
+}
+
+// resolvedPath is p with symlinks resolved, or p when they cannot be.
+func resolvedPath(p string) string {
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return filepath.Clean(p)
 }
 
 // resolveSessionIDForPrime finds the session ID from available sources.
