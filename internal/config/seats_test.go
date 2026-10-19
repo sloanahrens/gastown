@@ -110,6 +110,37 @@ func TestWindowBoundaries(t *testing.T) {
 	}
 }
 
+// SeatWindow is the one place a seat's window is resolved: nil for a seat with
+// none, and an error the router reads as shut for a window it cannot load.
+func TestSeatWindow(t *testing.T) {
+	t.Parallel()
+
+	chicago := &PolecatPool{Timezone: "America/Chicago"}
+	if w, err := SeatWindow(chicago, SeatConfig{Cap: 1}); w != nil || err != nil {
+		t.Errorf("a seat with no window = %v, %v; want nil, nil", w, err)
+	}
+	if _, err := SeatWindow(&PolecatPool{}, SeatConfig{Closed: "20:00-08:00"}); err == nil || !strings.Contains(err.Error(), "polecat_pool.timezone") {
+		t.Errorf("a window with no timezone must name polecat_pool.timezone: %v", err)
+	}
+	if _, err := SeatWindow(&PolecatPool{Timezone: "Mars/Olympus"}, SeatConfig{Closed: "20:00-08:00"}); err == nil {
+		t.Error("a window in an unknown zone must fail")
+	}
+	if _, err := SeatWindow(chicago, SeatConfig{Closed: "bogus"}); err == nil {
+		t.Error("a window that is not HH:MM-HH:MM must fail")
+	}
+	w, err := SeatWindow(chicago, SeatConfig{Closed: "20:00-08:00"})
+	if err != nil {
+		t.Fatalf("SeatWindow: %v", err)
+	}
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !w.Closed(time.Date(2026, 10, 19, 21, 0, 0, 0, loc)) || w.Closed(time.Date(2026, 10, 19, 12, 0, 0, 0, loc)) {
+		t.Errorf("the 20:00-08:00 window in Chicago reads wrong at 21:00 or 12:00")
+	}
+}
+
 // A same-day window is closed between its bounds, and OpensAt returns the same
 // day's end.
 func TestWindowSameDay(t *testing.T) {

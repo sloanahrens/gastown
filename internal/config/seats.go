@@ -69,7 +69,7 @@ func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
 			if loc == nil {
 				return nil, fmt.Errorf("polecat_pool.seats.%s.closed needs polecat_pool.timezone", a)
 			}
-			w, err := ParseWindow(c.Closed, loc)
+			w, err := SeatWindow(pool, c)
 			if err != nil {
 				return nil, fmt.Errorf("polecat_pool.seats.%s.closed: %w", a, err)
 			}
@@ -121,6 +121,23 @@ func ParseWindow(s string, loc *time.Location) (*Window, error) {
 		return nil, fmt.Errorf("window %q: start and end are the same", s)
 	}
 	return &Window{StartMin: start, EndMin: end, Loc: loc}, nil
+}
+
+// SeatWindow resolves seat's closed window in pool's timezone, or returns nil for
+// a seat with no window. The loader and the sling router both read windows
+// through it, so they cannot disagree about what a window means.
+func SeatWindow(pool *PolecatPool, seat SeatConfig) (*Window, error) {
+	if seat.Closed == "" {
+		return nil, nil
+	}
+	if pool.Timezone == "" {
+		return nil, fmt.Errorf("needs polecat_pool.timezone")
+	}
+	loc, err := time.LoadLocation(pool.Timezone)
+	if err != nil {
+		return nil, fmt.Errorf("polecat_pool.timezone %q: %w", pool.Timezone, err)
+	}
+	return ParseWindow(seat.Closed, loc)
 }
 
 // parseClock returns the minutes after midnight for an HH:MM clock time.
