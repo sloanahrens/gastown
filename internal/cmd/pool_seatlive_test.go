@@ -51,7 +51,7 @@ func TestSeatLiveRosterCountsEachSeatOnItsAgent(t *testing.T) {
 				{name: "a", agent: "claude-sonnet"},
 				{name: "b"},
 			},
-			want:        map[string]int{"claude-sonnet": 1, "unknown": 1},
+			want:        map[string]int{"claude-sonnet": 1, config.UnknownSeatAgent: 1},
 			wantNoAgent: []string{"b"},
 		},
 		{
@@ -100,7 +100,7 @@ func TestSeatLiveSessionlessSeatsOnTheSeatMap(t *testing.T) {
 	}{
 		{"mid-landing on its recorded agent", false, "claude-haiku", []string{"claude-sonnet", "claude-haiku"}, map[string]int{"claude-haiku": 1}},
 		{"dead-hooked on its recorded agent", true, "claude-haiku", []string{"claude-sonnet", "claude-haiku"}, map[string]int{"claude-haiku": 1}},
-		{"mid-landing, no record, several seats", false, "", []string{"claude-sonnet", "claude-haiku"}, map[string]int{"unknown": 1}},
+		{"mid-landing, no record, several seats", false, "", []string{"claude-sonnet", "claude-haiku"}, map[string]int{config.UnknownSeatAgent: 1}},
 		{"dead-hooked, no record, one seat", true, "", []string{"claude-haiku"}, map[string]int{"claude-haiku": 1}},
 	}
 	for _, c := range cases {

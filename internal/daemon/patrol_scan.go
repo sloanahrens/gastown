@@ -352,7 +352,8 @@ type patrolScanHost struct {
 	// for the unit tier, which cannot start bd.
 	agentRecord func(rig, name string) (string, error)
 	// unrecordedLogged is set once the census has listed the polecats that
-	// record no agent, so a tick logs them once however many restarts ask.
+	// record no agent. The host lives one tick (patrol_scan.go), so each tick
+	// logs them once however many restarts ask.
 	unrecordedLogged bool
 }
 

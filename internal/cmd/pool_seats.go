@@ -130,11 +130,9 @@ func polecatIntentSeat(rigName, polecatName string) intent.Seat {
 // slungAgent is the agent a sessionless seat is counted on: the one its sling
 // recorded (intent.MarkSlung), or fallback when the record names none.
 //
-// fallback is what a seat with no record is counted on (PolecatPool.
-// UnrecordedAgent): the pool's own agent before the seat map, which is what
-// these seats were counted on before the record existed: a seat slung before then, or one a sling left on
-// the role default — which the record stores as no agent at all — reads exactly
-// as it did (gt-2q283).
+// fallback is PolecatPool.UnrecordedAgent. A seat slung before the record
+// existed, or one a sling left on the role default (which the record stores as
+// no agent at all), is counted on it (gt-2q283).
 func slungAgent(rec intent.Record, fallback string) string {
 	if agent := strings.TrimSpace(rec.Agent); agent != "" {
 		return agent

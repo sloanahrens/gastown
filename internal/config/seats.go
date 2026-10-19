@@ -55,6 +55,9 @@ func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
 	out := make([]Seat, 0, len(agents))
 	for _, a := range agents {
 		c := pool.Seats[a]
+		if a == UnknownSeatAgent {
+			return nil, fmt.Errorf("polecat_pool.seats.%s: that key counts polecats that record no agent, and names no seat", a)
+		}
 		if !known(a) {
 			return nil, fmt.Errorf("polecat_pool.seats.%s: no agent of that name in agents or the built-in presets", a)
 		}
@@ -160,7 +163,7 @@ func (w *Window) OpensAt(t time.Time) time.Time {
 // UnknownSeatAgent is the key a polecat is counted under when it records no
 // agent and the seat map has no single seat to put it on. It is no seat, so it
 // fills none, and it still counts toward max_total.
-const UnknownSeatAgent = "unknown"
+const UnknownSeatAgent = "(unrecorded)"
 
 // UnrecordedAgent is the agent a polecat that records none is counted on: the
 // seat map's only seat, UnknownSeatAgent when the map has several, and the

@@ -44,6 +44,7 @@ func TestSeatsRejects(t *testing.T) {
 		key  string
 	}{
 		"unknown agent":      {PolecatPool{Seats: map[string]SeatConfig{"nope": {Cap: 1}}}, "polecat_pool.seats.nope"},
+		"the unrecorded key": {PolecatPool{Seats: map[string]SeatConfig{UnknownSeatAgent: {Cap: 1}}}, "polecat_pool.seats." + UnknownSeatAgent},
 		"negative cap":       {PolecatPool{Seats: map[string]SeatConfig{"claude-sonnet": {Cap: -1}}}, "polecat_pool.seats.claude-sonnet.cap"},
 		"bad window":         {PolecatPool{Timezone: "America/Chicago", Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "8pm-8am"}}}, "polecat_pool.seats.claude-sonnet.closed"},
 		"window, no zone":    {PolecatPool{Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "20:00-08:00"}}}, "polecat_pool.seats.claude-sonnet.closed"},

@@ -54,11 +54,17 @@ func (h *patrolScanHost) seatCap(rig, name string) (patrolscan.SeatCap, error) {
 	if pool.SeatsCapped() && byAgent[pool.Agent] >= pool.MaxSeats {
 		return patrolscan.SeatCap{Live: byAgent[pool.Agent], Limit: pool.MaxSeats, Key: "polecat_pool.max_seats"}, nil
 	}
-	// The seat map: the restarting polecat answers to its own agent's seat.
+	// The seat map: the restarting polecat answers to the seat it will launch
+	// on, the agent its bead recorded, else the role default a restart starts
+	// a polecat with no record on. Placing it on no seat would let it past a
+	// full one.
 	if len(pool.Seats) > 0 {
-		agent, err := h.seatLiveAgent(rig, name, "", pool)
+		agent, err := h.recordedAgent(rig, name)
 		if err != nil {
-			return patrolscan.SeatCap{}, err
+			return patrolscan.SeatCap{}, fmt.Errorf("reading the agent bead of %s/%s: %w", rig, name, err)
+		}
+		if agent == "" {
+			agent = ts.RoleAgents["polecat"]
 		}
 		if seat, ok := pool.Seats[agent]; ok && seat.Cap > 0 && byAgent[agent] >= seat.Cap {
 			return patrolscan.SeatCap{Live: byAgent[agent], Limit: seat.Cap, Key: "polecat_pool.seats." + agent + ".cap"}, nil
@@ -73,8 +79,13 @@ func (h *patrolScanHost) seatCap(rig, name string) (patrolscan.SeatCap, error) {
 // with no session to read); failing that, the pool's UnrecordedAgent. A polecat
 // that falls to the last is never counted on a seat it may not hold. A bead
 // that cannot be read is an error, not an unrecorded agent: the census would
-// otherwise move a polecat between seats on a bd hiccup.
+// otherwise move a polecat between seats on a bd hiccup. A pool with no seat
+// map reads no bead: its caps are stated on GT_AGENT alone, and a census that
+// never needed bd must not start failing with it.
 func (h *patrolScanHost) seatLiveAgent(rig, name, sessionAgent string, pool *agentconfig.PolecatPool) (string, error) {
+	if len(pool.Seats) == 0 {
+		return strings.TrimSpace(sessionAgent), nil
+	}
 	recorded, err := h.recordedAgent(rig, name)
 	if err != nil {
 		return "", fmt.Errorf("reading the agent bead of %s/%s: %w", rig, name, err)
@@ -84,9 +95,6 @@ func (h *patrolScanHost) seatLiveAgent(rig, name, sessionAgent string, pool *age
 	}
 	if agent := strings.TrimSpace(sessionAgent); agent != "" {
 		return agent, nil
-	}
-	if len(pool.Seats) == 0 {
-		return "", nil // no seat map: the older pool counts GT_AGENT alone
 	}
 	return pool.UnrecordedAgent(), nil
 }
