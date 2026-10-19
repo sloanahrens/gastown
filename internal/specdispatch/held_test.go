@@ -39,10 +39,16 @@ func TestHeldOverlap(t *testing.T) {
 			want:  "gt-t61ft (held by " + seat + ") is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes",
 		},
 		{
-			name:  "a held bead with no assignee names no holder",
+			name:  "a held bead with no assignee does not hold",
 			paths: []string{guard},
 			held:  []HeldBead{{ID: "gt-t61ft", Paths: []string{guard}}},
-			want:  "gt-t61ft is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes",
+			want:  "",
+		},
+		{
+			name:  "an unassigned bead does not shadow an assigned one with a higher id",
+			paths: []string{guard},
+			held:  []HeldBead{{ID: "gt-a1", Paths: []string{guard}}, {ID: "gt-z9", Assignee: seat, Paths: []string{guard}}},
+			want:  "gt-z9 (held by " + seat + ") is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes",
 		},
 		{
 			name:  "an id-less entry is skipped",
