@@ -250,7 +250,9 @@ func takePatrolSeatKeys(doc map[string]any) patrolSeatKeys {
 			out.hooked = &legacySeat{agent: agent, cap: capacity, from: fmt.Sprintf("spec_dispatch hooked_agent %q, max_hooked %d", agent, capacity)}
 		case agent != "":
 			// A named agent with no cap above zero was a closed second seat.
-			out.hooked = &legacySeat{agent: agent, cap: 0, from: fmt.Sprintf("spec_dispatch hooked_agent %q (max_hooked unset: closed)", agent)}
+			// It ran nothing, so it is not carried over: a stale name would
+			// fail the seat loader and block the whole migration.
+			out.lines = append(out.lines, fmt.Sprintf("removed spec_dispatch hooked_agent %q: the second seat was closed (max_hooked unset); add it back with gt pool set %s=<cap>", agent, agent))
 		}
 		if p, ok := spec["prefer_hooked"].(bool); ok {
 			out.prefer = p
@@ -265,7 +267,7 @@ func takePatrolSeatKeys(doc map[string]any) patrolSeatKeys {
 		if hadPrefer {
 			out.lines = append(out.lines, "removed spec_dispatch prefer_hooked: a bead with no agent label draws uniformly among the free seats")
 		}
-		if out.hooked == nil && (hadAgent || hadCap) {
+		if out.hooked == nil && agent == "" && (hadAgent || hadCap) {
 			out.lines = append(out.lines, "removed spec_dispatch hooked_agent, max_hooked: they named no open seat")
 		}
 	}
@@ -359,10 +361,29 @@ func migratePoolKeys(settings map[string]any, hooked *legacySeat, prefer bool) (
 	if roles, ok := settings["role_agents"].(map[string]any); ok {
 		if v, present := roles["polecat"]; present {
 			delete(roles, "polecat")
-			lines = append(lines, fmt.Sprintf("removed role_agents.polecat (%v): polecat_pool.seats names the agents polecats run on", v))
+			// With no seat at all the role default was the only thing naming
+			// the polecats' model, so it becomes the one seat rather than
+			// being dropped and leaving the town on default_agent.
+			if agent := stringOf(v); agent != "" && !hasSeats(settings) {
+				if pool == nil {
+					pool = map[string]any{}
+					settings["polecat_pool"] = pool
+				}
+				pool["seats"] = map[string]any{agent: map[string]any{"cap": json.Number(strconv.Itoa(poolMigrateDefaultSeatCap))}}
+				lines = append(lines, fmt.Sprintf("role_agents.polecat %q (no polecat_pool.agent) -> polecat_pool.seats.%s.cap %d", agent, agent, poolMigrateDefaultSeatCap))
+			} else {
+				lines = append(lines, fmt.Sprintf("removed role_agents.polecat (%v): polecat_pool.seats names the agents polecats run on", v))
+			}
 		}
 	}
 	return lines, nil
+}
+
+// hasSeats reports whether the settings tree names at least one seat.
+func hasSeats(settings map[string]any) bool {
+	pool, _ := settings["polecat_pool"].(map[string]any)
+	seats, _ := pool["seats"].(map[string]any)
+	return len(seats) > 0
 }
 
 // checkMigrated decodes the converted trees the way the loaders do, and reads

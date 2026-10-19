@@ -417,7 +417,7 @@ func TestTakePatrolSeatKeys(t *testing.T) {
 		wantNoSeat bool
 	}{
 		{name: "a cap with no agent", spec: `{"max_hooked":2}`, wantAgent: poolMigrateDefaultHookedAgent, wantCap: 2},
-		{name: "an agent with no cap is a closed seat", spec: `{"hooked_agent":"claude-haiku"}`, wantAgent: "claude-haiku", wantCap: 0},
+		{name: "an agent with no cap is a closed seat, reported and not carried over", spec: `{"hooked_agent":"claude-haiku"}`, wantNoSeat: true},
 		{name: "an agent and a cap", spec: `{"hooked_agent":"claude-haiku","max_hooked":3}`, wantAgent: "claude-haiku", wantCap: 3},
 		{name: "a zero cap and no agent names no seat", spec: `{"max_hooked":0}`, wantNoSeat: true},
 		{name: "prefer_hooked alone names no seat", spec: `{"prefer_hooked":true}`, wantNoSeat: true},
@@ -456,5 +456,73 @@ func TestPoolMigrateCommandIsRegistered(t *testing.T) {
 	}
 	if poolMigrateCmd.Flags().Lookup("dry-run") == nil {
 		t.Error("gt pool migrate has no --dry-run flag")
+	}
+}
+
+// A town whose only word on the polecats' model is role_agents.polecat keeps it:
+// it becomes the one seat, so migrating does not move the town onto default_agent.
+func TestPoolMigrateRolePolecatWithNoPoolBecomesTheSeat(t *testing.T) {
+	t.Parallel()
+	root, settings := writeMigrateTown(t, []byte(`{"type":"town-settings","version":1,`+
+		`"role_agents":{"polecat":"claude-sonnet","crew":"claude-opus"}}`))
+
+	var out bytes.Buffer
+	if err := runPoolMigrate(&out, root, false, migrateNow); err != nil {
+		t.Fatalf("runPoolMigrate: %v\n%s", err, out.String())
+	}
+	var ts config.TownSettings
+	if err := config.DecodeJSONFile(settings, readFile(t, settings), &ts); err != nil {
+		t.Fatalf("the settings file does not load: %v", err)
+	}
+	if got := ts.PolecatPool.Seats; len(got) != 1 || got["claude-sonnet"].Cap != poolMigrateDefaultSeatCap {
+		t.Errorf("seats = %+v, want claude-sonnet alone at the default cap\n%s", got, out.String())
+	}
+	if _, kept := ts.RoleAgents["polecat"]; kept || ts.RoleAgents["crew"] != "claude-opus" {
+		t.Errorf("role_agents = %v, want polecat gone and crew kept", ts.RoleAgents)
+	}
+}
+
+// With a pool agent the seat map already names the polecats' model, so
+// role_agents.polecat is only removed, as before.
+func TestPoolMigrateRolePolecatIsDroppedWhenThePoolHasASeat(t *testing.T) {
+	t.Parallel()
+	root, settings := writeMigrateTown(t, []byte(`{"type":"town-settings","version":1,`+
+		`"role_agents":{"polecat":"claude-opus"},"polecat_pool":{"agent":"claude-sonnet","max_seats":2}}`))
+
+	var out bytes.Buffer
+	if err := runPoolMigrate(&out, root, false, migrateNow); err != nil {
+		t.Fatalf("runPoolMigrate: %v\n%s", err, out.String())
+	}
+	var ts config.TownSettings
+	if err := config.DecodeJSONFile(settings, readFile(t, settings), &ts); err != nil {
+		t.Fatalf("the settings file does not load: %v", err)
+	}
+	if got := ts.PolecatPool.Seats; len(got) != 1 || got["claude-sonnet"].Cap != 2 {
+		t.Errorf("seats = %+v, want claude-sonnet 2 alone", got)
+	}
+}
+
+// A second seat that was closed (a hooked_agent with no max_hooked) is reported
+// and not carried over, so a stale agent name there cannot fail the seat loader
+// and block the whole migration.
+func TestPoolMigrateClosedStaleHookedAgentDoesNotBlock(t *testing.T) {
+	t.Parallel()
+	root, settings := writeMigrateTown(t, []byte(`{"type":"town-settings","version":1,`+
+		`"polecat_pool":{"agent":"claude-sonnet","max_seats":2},`+
+		`"daemon":{"patrols":{"spec_dispatch":{"enabled":true,"hooked_agent":"model-that-no-longer-exists"}}}}`))
+
+	var out bytes.Buffer
+	if err := runPoolMigrate(&out, root, false, migrateNow); err != nil {
+		t.Fatalf("runPoolMigrate: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "model-that-no-longer-exists") || !strings.Contains(out.String(), "closed") {
+		t.Errorf("the dropped closed seat is not reported:\n%s", out.String())
+	}
+	var ts config.TownSettings
+	if err := config.DecodeJSONFile(settings, readFile(t, settings), &ts); err != nil {
+		t.Fatalf("the settings file does not load: %v", err)
+	}
+	if got := ts.PolecatPool.Seats; len(got) != 1 || got["claude-sonnet"].Cap != 2 {
+		t.Errorf("seats = %+v, want claude-sonnet 2 alone", got)
 	}
 }
