@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -150,9 +149,11 @@ func TestRunPluginSync_ReportsExtraItLeaves(t *testing.T) {
 	}
 }
 
-// The same dry run with --clean must say what it would remove, not just name
-// the plugin.
-func TestRunPluginSync_DryRunCleanSaysWouldRemove(t *testing.T) {
+// A --clean dry run of an extra the source never held reports it protected and
+// fails like the real run: without history in the source, a runtime-only plugin
+// cannot be told from a hand edit. The integration tier covers the retired
+// plugin the source did ship, which "would be removed".
+func TestRunPluginSync_DryRunCleanProtectsUnshippedExtra(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
@@ -161,33 +162,14 @@ func TestRunPluginSync_DryRunCleanSaysWouldRemove(t *testing.T) {
 	writeTestPlugin(t, sourcePlugins, "current-plugin", "current")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "current-plugin", "current")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "seat-refill", "retired")
-	// The source once shipped seat-refill, so --clean may remove the runtime
-	// copy: a plugin the source never held would be protected as an edit.
-	writeTestPlugin(t, sourcePlugins, "seat-refill", "retired")
-	gitInTest(t, sourcePlugins, "init", "-q")
-	gitInTest(t, sourcePlugins, "add", "-A")
-	gitInTest(t, sourcePlugins, "commit", "-q", "-m", "ship seat-refill")
-	if err := os.RemoveAll(filepath.Join(sourcePlugins, "seat-refill")); err != nil {
-		t.Fatal(err)
-	}
 
 	var out bytes.Buffer
 	r := pluginSyncRun{townRoot: townRoot, dryRun: true, clean: true, out: &out, errOut: io.Discard}
-	if err := r.run(); err != nil {
-		t.Fatalf("run() error = %v", err)
+	if err := r.run(); err == nil {
+		t.Fatalf("run() = nil, want the protected-plugin error; output:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "seat-refill (would be removed)") {
-		t.Errorf("--clean dry run did not name what it would remove; output:\n%s", out.String())
-	}
-}
-
-// gitInTest runs git in dir with a fixed identity and no signing.
-func gitInTest(t *testing.T, dir string, args ...string) {
-	t.Helper()
-	cmd := exec.Command("git", append([]string{"-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"}, args...)...)
-	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
+	if strings.Contains(out.String(), "would be removed") || !strings.Contains(out.String(), "seat-refill (protected") {
+		t.Errorf("--clean dry run output:\n%s", out.String())
 	}
 }
 
