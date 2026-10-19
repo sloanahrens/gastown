@@ -420,6 +420,7 @@ func TestAttentionAckAppendsHistoryThatSurvivesTheItemClearing(t *testing.T) {
 // The help text counts the queue's files and names the rotation size from the
 // code, so adding a file or changing EventsMaxBytes shows up here.
 func TestAttentionHelpNamesFilesAndRotationSize(t *testing.T) {
+	t.Parallel()
 	long := attentionCmd.Long
 	files := []string{"state.json", "events.jsonl", "acks.json", "acks-history.jsonl"}
 	for _, f := range files {
