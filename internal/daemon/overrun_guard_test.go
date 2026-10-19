@@ -177,7 +177,7 @@ func (f *overrunFake) seams() overrunSeams {
 		},
 		recordCleanup: func(seat overrunSeat) error { return f.step("record-cleanup", seat) },
 		retire:        func(seat overrunSeat) error { return f.step("retire", seat) },
-		stopLapsed: func(seat overrunSeat) (string, error) {
+		stopLapsed: func(seat overrunSeat, _ bool) (string, error) {
 			f.calls = append(f.calls, "recheck "+seat.Rig+"/"+seat.Polecat)
 			return f.lapsed, f.lapsedErr
 		},

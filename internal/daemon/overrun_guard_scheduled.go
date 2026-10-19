@@ -49,7 +49,9 @@ func (d *Daemon) overrunScheduledStop(s overrunSeams, seat overrunSeat, st overr
 	if st.StopBeganAt.IsZero() {
 		st.Rig, st.Polecat, st.Branch, st.Elapsed, st.Scheduled = seat.Rig, seat.Polecat, seat.Branch, elapsed, true
 	}
-	resumed := !st.SessionStoppedAt.IsZero()
+	// StopBeganAt decides, not SessionStoppedAt: a failed clearPause or save
+	// leaves the stop begun with the session not yet recorded as stopped.
+	resumed := !st.StopBeganAt.IsZero()
 	elapsed = st.Elapsed
 	seat.Scheduled = true
 
@@ -74,8 +76,24 @@ func (d *Daemon) overrunScheduledStop(s overrunSeams, seat overrunSeat, st overr
 		}
 	}
 
-	// 2. Stop the session.
+	// 2. Stop the session. A resumed stop looks first: an operator may have
+	// lifted the pause and started a new session, which stopSession would kill.
 	if st.SessionStoppedAt.IsZero() {
+		if resumed && s.stopLapsed != nil {
+			why, err := s.stopLapsed(seat, false)
+			if err != nil {
+				d.logger.Printf("overrun_guard: stop scheduled %s on %s: cannot re-check the seat: %v", who, st.Bead, err)
+				return
+			}
+			if why != "" {
+				d.logger.Printf("overrun_guard: scheduled %s on %s: %s; abandoning the stop, session left running", who, st.Bead, why)
+				// A save that fails is only warned of: the next tick reads the
+				// same seat and abandons again, and stops nothing meanwhile.
+				st.StoppedAt = now
+				save()
+				return
+			}
+		}
 		if err := s.stopSession(seat); err != nil {
 			d.logger.Printf("overrun_guard: stop scheduled %s on %s: session stop failed: %v", who, st.Bead, err)
 			if cerr := s.clearPause(seat); cerr != nil {
@@ -84,7 +102,14 @@ func (d *Daemon) overrunScheduledStop(s overrunSeams, seat overrunSeat, st overr
 				return
 			}
 			st.StopBeganAt = time.Time{}
-			save()
+			if !save() {
+				// The saved stop stays begun, and a begun stop with no pause
+				// marker reads as an operator resume: put the pause back so the
+				// two agree and the next tick stops the session again.
+				if perr := s.pause(seat); perr != nil {
+					d.logger.Printf("overrun_guard: WARNING: %s: pause marker not restored: %v", who, perr)
+				}
+			}
 			return
 		}
 		d.logger.Printf("overrun_guard: stopped scheduled %s on %s after %s", who, st.Bead, elapsed.Round(time.Second))
@@ -98,7 +123,7 @@ func (d *Daemon) overrunScheduledStop(s overrunSeams, seat overrunSeat, st overr
 	// back: an operator lifted the pause, or a new session started on it. The
 	// comment would then describe a run that is not stopped, so the stop ends.
 	if resumed && s.stopLapsed != nil {
-		why, err := s.stopLapsed(seat)
+		why, err := s.stopLapsed(seat, true)
 		if err != nil {
 			d.logger.Printf("overrun_guard: stop scheduled %s on %s: cannot re-check the seat: %v", who, st.Bead, err)
 			return

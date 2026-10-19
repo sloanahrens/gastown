@@ -139,10 +139,85 @@ func TestStop_FailedMarkerClearKeepsTheStopPending(t *testing.T) {
 	f.now = f.now.Add(time.Minute)
 	d.runOverrunGuard(f.seams())
 
-	want := []string{"stop gastown/capable", "checkpoint gastown/capable", "push gastown/capable", "hand-back gastown/capable", "recheck gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
+	// The resumed stop looks at the seat before and after stopping the session.
+	want := []string{"recheck gastown/capable", "stop gastown/capable", "recheck gastown/capable", "checkpoint gastown/capable", "push gastown/capable", "hand-back gastown/capable", "recheck gastown/capable", "reset-agent-bead gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
 	if !reflect.DeepEqual(f.calls, want) {
 		t.Errorf("resumed call order = %q, want %q (no second pause)", f.calls, want)
 	}
+}
+
+// A stop begun on an earlier tick but not past stopping the session is resumed
+// with StopBeganAt set and SessionStoppedAt zero.
+func TestOverrunStop(t *testing.T) {
+	t.Parallel()
+
+	// A pause marker that could not be cleared after a failed session stop
+	// leaves exactly that. If an operator ran gt agent resume and a new session
+	// started meanwhile, the resumed stop looks at the seat before it stops the
+	// session, and ends without killing it or handing the bead back.
+	t.Run("resumed before the session stop keeps a new session", func(t *testing.T) {
+		t.Parallel()
+		d, buf := newOverrunDaemon(t, false)
+		f := newOverrunFake(21*time.Minute, stopSeat)
+		f.failOn = map[string]error{"stop": errors.New("tmux refused"), "clear-pause": errors.New("disk full")}
+		d.runOverrunGuard(f.seams())
+
+		st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11")
+		if st.StopBeganAt.IsZero() || !st.SessionStoppedAt.IsZero() {
+			t.Fatalf("state %+v, want a stop begun with the session not stopped", st)
+		}
+
+		f.seats, f.calls, f.failOn = nil, nil, nil
+		f.lapsed = "the pause marker is gone"
+		f.now = f.now.Add(time.Minute)
+		d.runOverrunGuard(f.seams())
+
+		if want := []string{"recheck gastown/capable"}; !reflect.DeepEqual(f.calls, want) {
+			t.Errorf("calls = %q, want only the re-check (the new session is not stopped, nothing handed back)", f.calls)
+		}
+		if len(f.handedBack) != 0 {
+			t.Errorf("handed back a bead whose seat was taken back: %q", f.handedBack)
+		}
+		if !strings.Contains(buf.String(), "abandoning the stop") {
+			t.Errorf("log lacks the abandon line:\n%s", buf.String())
+		}
+		if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); st.StoppedAt.IsZero() {
+			t.Error("StoppedAt not saved; the next tick would resume the abandoned stop")
+		}
+	})
+
+	// A failed session stop clears the pause and saves the stop as not begun.
+	// When that save fails the saved stop stays begun, and a begun stop with no
+	// pause marker is what an operator resume looks like: the pause goes back so
+	// the next tick stops the session instead of abandoning the stop.
+	t.Run("failed save after a failed session stop restores the pause", func(t *testing.T) {
+		t.Parallel()
+		d, _ := newOverrunDaemon(t, false)
+		f := newOverrunFake(21*time.Minute, stopSeat)
+		f.failOn = map[string]error{"stop": errors.New("tmux refused")}
+		s := f.seams()
+		stop := s.stopSession
+		s.stopSession = func(seat overrunSeat) error {
+			// Make the next save fail: a directory where the state file goes.
+			path, err := overrunStatePath(d.config.TownRoot, seat.Bead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Mkdir(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			return stop(seat)
+		}
+		d.runOverrunGuard(s)
+
+		want := []string{"pause gastown/capable", "stop gastown/capable", "clear-pause gastown/capable", "pause gastown/capable"}
+		if !reflect.DeepEqual(f.calls, want) {
+			t.Errorf("calls = %q, want %q (the pause put back once its clearing could not be saved)", f.calls, want)
+		}
+	})
 }
 
 func TestStop_RunsOnceAfterStoppedAt(t *testing.T) {
@@ -775,20 +850,20 @@ func TestOverrunStopLapsed_ReadsThePauseMarkerAndTheSession(t *testing.T) {
 	tm := newFakeTmux(newFixedClock())
 	d.tmux = tm
 
-	if why, err := d.overrunStopLapsed(stopSeat); err != nil || why != "the pause marker is gone" {
+	if why, err := d.overrunStopLapsed(stopSeat, true); err != nil || why != "the pause marker is gone" {
 		t.Errorf("no marker: got %q, %v", why, err)
 	}
 
 	if err := agentpause.Pause(d.config.TownRoot, stopSeat.Rig, constants.RolePolecat, stopSeat.Polecat, overrunPauseReason, overrunActor, ""); err != nil {
 		t.Fatal(err)
 	}
-	if why, err := d.overrunStopLapsed(stopSeat); err != nil || why != "" {
+	if why, err := d.overrunStopLapsed(stopSeat, true); err != nil || why != "" {
 		t.Errorf("paused, no session: got %q, %v; want the stop to still own the seat", why, err)
 	}
 
 	name := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(stopSeat.Rig), stopSeat.Polecat)
 	tm.addSession(name, "node", time.Now())
-	if why, err := d.overrunStopLapsed(stopSeat); err != nil || why != "a session is running on the seat" {
+	if why, err := d.overrunStopLapsed(stopSeat, true); err != nil || why != "a session is running on the seat" {
 		t.Errorf("paused with a live session: got %q, %v", why, err)
 	}
 }

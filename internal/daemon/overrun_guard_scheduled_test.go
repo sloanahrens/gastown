@@ -260,6 +260,29 @@ func TestRunOverrunGuard_ScheduledFailedStopRetriesNextTick(t *testing.T) {
 	}
 }
 
+// A scheduled stop resumed with StopBeganAt set and the session not recorded
+// as stopped (the pause marker could not be cleared) re-checks the seat before
+// stopping the session: a seat taken back by an operator keeps its new session.
+func TestRunOverrunGuard_ScheduledResumedBeforeSessionStopKeepsANewSession(t *testing.T) {
+	t.Parallel()
+	d, buf := newScheduledOverrunDaemon(t, "", false)
+	f := newOverrunFake(61*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-r71dd", Scheduled: true})
+	f.failOn = map[string]error{"stop": errors.New("tmux refused"), "clear-pause": errors.New("disk full")}
+	d.runOverrunGuard(f.seams())
+
+	f.seats, f.calls, f.failOn = nil, nil, nil
+	f.lapsed = "the pause marker is gone"
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(f.seams())
+
+	if want := []string{"recheck gastown/capable"}; !slices.Equal(f.calls, want) {
+		t.Errorf("calls = %v, want only the re-check (no stop, comment or close)", f.calls)
+	}
+	if !strings.Contains(buf.String(), "abandoning the stop") {
+		t.Errorf("log lacks the abandon line:\n%s", buf.String())
+	}
+}
+
 // A comment that fails after the session is gone is retried from the saved
 // state on the next tick, when the seat is no longer listed; the resume goes on
 // to close the run bead and release the seat, and never hands the bead back.

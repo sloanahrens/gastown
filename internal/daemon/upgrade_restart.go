@@ -355,10 +355,39 @@ func (d *Daemon) loadMarkerForUpgrade() (m *restartPendingMarker, own string, ok
 }
 
 // clearCoveredMarker deletes a marker own already covers and appends its
-// daemon_restarted receipt. Returns true when it cleared the marker.
+// daemon_restarted receipt. Returns true when the caller must not act on m
+// any further this pass: it cleared the marker, or the marker changed or could
+// not be read back while git was answering and the next heartbeat reads it.
 func (d *Daemon) clearCoveredMarker(m *restartPendingMarker, own string, now time.Time) bool {
+	return d.clearCoveredMarkerWith(nil, m, own, now)
+}
+
+// clearCoveredMarkerWith is clearCoveredMarker with the window after the
+// ancestry check exposed: beforeRemove, when non-nil, runs in it, so a test
+// can stand in for install-gt.sh replacing the marker there.
+//
+// markerCovered runs git subprocesses while install-gt.sh writes the same
+// path. The commit is re-read before the receipt and the removal, as
+// stampRestartAttemptWith does before its rename: removing by path alone would
+// delete a newer install's marker and leave the daemon on the old binary.
+func (d *Daemon) clearCoveredMarkerWith(beforeRemove func(), m *restartPendingMarker, own string, now time.Time) bool {
 	if !d.markerCovered(m, own) {
 		return false
+	}
+	if beforeRemove != nil {
+		beforeRemove()
+	}
+	// A marker that cannot be read back is left alone too: removing what the
+	// re-read could not confirm is the delete this re-read exists to prevent.
+	// The next heartbeat reads it again, and drops it if it is corrupt.
+	cur, err := restartMarkerCommitAt(restartMarkerPath(d.config.TownRoot))
+	if err != nil {
+		d.logger.Printf("upgrade-restart: cannot re-read marker %s before clearing it; left for the next heartbeat: %v", m.Commit, err)
+		return true
+	}
+	if cur != m.Commit {
+		d.logger.Printf("upgrade-restart: marker %s replaced by %s while checking coverage; left for the next heartbeat", m.Commit, cur)
+		return true
 	}
 	townRoot := d.config.TownRoot
 	rec := installReceipt{
