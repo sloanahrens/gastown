@@ -521,7 +521,8 @@ func TestSpecDispatchHoldsASecondFilingOfHeldWork(t *testing.T) {
 		s.Description = specTestDescription + "\n\nToday internal/daemon/overrun_guard.go (~254) calls Nudge with a 30 s context."
 		return s
 	}
-	heldBead := specdispatch.HeldBead{ID: "gt-t61ft", Paths: []string{guard}}
+	const seat = "gastown/polecats/capable"
+	heldBead := specdispatch.HeldBead{ID: "gt-t61ft", Assignee: seat, Paths: []string{guard}}
 
 	t.Run("a shared path holds and names the bead it overlaps", func(t *testing.T) {
 		t.Parallel()
@@ -531,7 +532,7 @@ func TestSpecDispatchHoldsASecondFilingOfHeldWork(t *testing.T) {
 		if len(f.slung) != 0 || len(r.Dispatched) != 0 {
 			t.Fatalf("slung a second filing of held work: slung %v report %+v", f.slung, r)
 		}
-		want := "gt-wikw1: held: gt-t61ft is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes"
+		want := "gt-wikw1: held: gt-t61ft (held by " + seat + ") is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes"
 		if len(r.Skipped) != 1 || r.Skipped[0].Line != want {
 			t.Fatalf("skipped = %+v, want %q", r.Skipped, want)
 		}
@@ -583,7 +584,7 @@ func TestSpecDispatchHeldPlanDocumentDoesNotHoldSiblings(t *testing.T) {
 	const code = "internal/cmd/spec.go"
 
 	db := beadsfake.New()
-	db.Seed(beads.Issue{ID: "gt-held-task", Status: beads.StatusHooked,
+	db.Seed(beads.Issue{ID: "gt-held-task", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable",
 		Description: "Plan " + plan + "; the fix lands in " + code + "."})
 	dir := t.TempDir()
 	heldEnv := func(f *fakeSpecTown) specDispatchEnv {
@@ -630,37 +631,69 @@ func TestSpecDispatchHeldPlanDocumentDoesNotHoldSiblings(t *testing.T) {
 
 // The held read is the rig's own beads: the two statuses a working seat holds,
 // with the paths their own text names — description and notes both, as the
-// sling-time guard reads them (gt-z80p9).
+// sling-time guard reads them (gt-z80p9). Only a bead an assignee names is a
+// seat's work: the same statuses with no assignee were never slung and hold
+// nothing (gt-xrog0).
 func TestSpecHeldBeadsFromAStore(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
 	db.Seed(
 		beads.Issue{ID: "gt-hooked", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable",
 			Description: "internal/daemon/overrun_guard.go (~254) calls Nudge with a 30 s context."},
-		beads.Issue{ID: "gt-claimed", Status: string(beads.StatusInProgress), Notes: "the fix lands in internal/notify/cli.go"},
+		beads.Issue{ID: "gt-claimed", Status: string(beads.StatusInProgress), Assignee: "gastown/polecats/capable",
+			Notes: "the fix lands in internal/notify/cli.go"},
+		beads.Issue{ID: "gt-stray", Status: string(beads.StatusInProgress),
+			Description: "internal/daemon/overrun_guard.go, a handoff bead no sling touched"},
 		beads.Issue{ID: "gt-ready", Status: "open", Description: "internal/daemon/overrun_guard.go"},
 		beads.Issue{ID: "gt-landed", Status: "closed", Description: "internal/daemon/overrun_guard.go"},
-		beads.Issue{ID: "gt-wordless", Status: beads.StatusHooked, Description: "no path at all"},
+		beads.Issue{ID: "gt-wordless", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable", Description: "no path at all"},
 	)
 	got, err := heldBeadsFrom(db, func(string, error) {}, t.TempDir())
 	if err != nil {
 		t.Fatalf("heldBeadsFrom: %v", err)
 	}
-	paths := map[string][]string{}
+	held := map[string]specdispatch.HeldBead{}
 	for _, h := range got {
-		paths[h.ID] = h.Paths
+		held[h.ID] = h
 	}
-	if len(paths) != 3 {
+	if len(held) != 3 {
 		t.Fatalf("held = %+v, want the three beads a seat holds", got)
 	}
-	if want := []string{"internal/daemon/overrun_guard.go"}; !reflect.DeepEqual(paths["gt-hooked"], want) {
-		t.Errorf("gt-hooked paths = %v, want %v", paths["gt-hooked"], want)
+	if _, ok := held["gt-stray"]; ok {
+		t.Errorf("held = %+v, want the unassigned in_progress bead left out", got)
 	}
-	if want := []string{"internal/notify/cli.go"}; !reflect.DeepEqual(paths["gt-claimed"], want) {
-		t.Errorf("gt-claimed paths = %v, want %v (notes are read too)", paths["gt-claimed"], want)
+	if want := []string{"internal/daemon/overrun_guard.go"}; !reflect.DeepEqual(held["gt-hooked"].Paths, want) {
+		t.Errorf("gt-hooked paths = %v, want %v", held["gt-hooked"].Paths, want)
 	}
-	if len(paths["gt-wordless"]) != 0 {
-		t.Errorf("gt-wordless paths = %v, want none", paths["gt-wordless"])
+	if want := []string{"internal/notify/cli.go"}; !reflect.DeepEqual(held["gt-claimed"].Paths, want) {
+		t.Errorf("gt-claimed paths = %v, want %v (notes are read too)", held["gt-claimed"].Paths, want)
+	}
+	if len(held["gt-wordless"].Paths) != 0 {
+		t.Errorf("gt-wordless paths = %v, want none", held["gt-wordless"].Paths)
+	}
+	for _, h := range got {
+		if h.Assignee != "gastown/polecats/capable" {
+			t.Errorf("%s assignee = %q, want the seat named in the hold reason", h.ID, h.Assignee)
+		}
+	}
+}
+
+// An unassigned in_progress bead naming a file does not hold a candidate naming
+// it too: no seat was ever slung it, so it is not a seat's work (gt-xrog0).
+func TestSpecHeldHoldSkipsAnUnassignedInProgressBead(t *testing.T) {
+	t.Parallel()
+	const guard = "internal/daemon/overrun_guard.go"
+	dir := t.TempDir()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-stray", Status: string(beads.StatusInProgress),
+		Description: "internal/daemon/overrun_guard.go (~254) calls Nudge with a 30 s context."})
+	env := specDispatchEnv{Held: func(string) ([]specdispatch.HeldBead, error) {
+		return heldBeadsFrom(db, func(string, error) {}, dir)
+	}}
+	candidate := cleanSpec("gt-second", 2, "2026-10-19T10:00:00Z")
+	candidate.Description += "\nToday " + guard + " calls Nudge with a 30 s context.\n"
+	if why, err := specHeldHold(env, "gastown", candidate, map[string]heldRead{}); err != nil || why != "" {
+		t.Fatalf("specHeldHold = %q, %v; want no hold from an unassigned bead", why, err)
 	}
 }
 
@@ -673,7 +706,7 @@ func TestHeldBeadsFromSkipsEpics(t *testing.T) {
 	db.Seed(
 		beads.Issue{ID: "gt-epic", Type: "epic", Status: string(beads.StatusInProgress),
 			Description: "Children touch a.go."},
-		beads.Issue{ID: "gt-task", Type: "task", Status: beads.StatusHooked,
+		beads.Issue{ID: "gt-task", Type: "task", Status: beads.StatusHooked, Assignee: "gastown/polecats/capable",
 			Description: "The fix lands in b.go."},
 	)
 	got, err := heldBeadsFrom(db, func(string, error) {}, t.TempDir())

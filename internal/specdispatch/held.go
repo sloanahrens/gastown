@@ -7,12 +7,16 @@ import (
 )
 
 // HeldBead is one bead a working seat already holds, reduced to what the
-// overlap rule reads: the bead's id, and the paths its own text names. The
-// caller reads the set (a rig's hooked and in-progress beads) and fills Paths;
-// nothing here queries (gt-z80p9).
+// overlap rule reads: its id, the seat holding it, and the paths its own text
+// names. The caller reads the set and fills the fields; nothing here queries.
+//
+// Assignee lets the hold line say whose seat to patrol or which stray bead to
+// close; a bead no assignee names was never slung and is not held at all
+// (gt-z80p9, gt-xrog0).
 type HeldBead struct {
-	ID    string
-	Paths []string
+	ID       string
+	Assignee string
+	Paths    []string
 }
 
 // maxNamedHeldPaths bounds the shared paths the hold line names, so a pair of
@@ -22,7 +26,8 @@ const maxNamedHeldPaths = 3
 
 // HeldOverlap reports why a candidate is the same defect a working seat is
 // already on: a bead in held names a path the candidate's own text names too,
-// and the reason names that bead and the paths the two share (gt-z80p9).
+// and the reason names that bead, the seat holding it, and the paths the two
+// share (gt-z80p9, gt-xrog0).
 //
 // Paths alone decide it, and only against work a seat already has in hand. Two
 // beads describing one defect from different vantage points share no vocabulary
@@ -41,7 +46,7 @@ func HeldOverlap(paths []string, held []HeldBead) string {
 			mine[p] = true
 		}
 	}
-	var match string
+	var match, assignee string
 	var shared []string
 	for _, h := range held {
 		if h.ID == "" || (match != "" && h.ID >= match) {
@@ -57,7 +62,7 @@ func HeldOverlap(paths []string, held []HeldBead) string {
 			continue
 		}
 		sort.Strings(both)
-		match, shared = h.ID, both
+		match, assignee, shared = h.ID, h.Assignee, both
 	}
 	if match == "" {
 		return ""
@@ -68,7 +73,11 @@ func HeldOverlap(paths []string, held []HeldBead) string {
 		more = len(named) - maxNamedHeldPaths
 		named = named[:maxNamedHeldPaths]
 	}
-	reason := fmt.Sprintf("%s is already hooked to a working seat and names %s", match, strings.Join(named, ", "))
+	holder := match
+	if assignee != "" {
+		holder = fmt.Sprintf("%s (held by %s)", match, assignee)
+	}
+	reason := fmt.Sprintf("%s is already hooked to a working seat and names %s", holder, strings.Join(named, ", "))
 	if more > 0 {
 		reason += fmt.Sprintf(" (+%d more)", more)
 	}

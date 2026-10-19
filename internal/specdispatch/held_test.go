@@ -7,6 +7,7 @@ import "testing"
 func TestHeldOverlap(t *testing.T) {
 	t.Parallel()
 	const guard = "internal/daemon/overrun_guard.go"
+	const seat = "gastown/polecats/capable"
 	cases := []struct {
 		name  string
 		paths []string
@@ -22,37 +23,43 @@ func TestHeldOverlap(t *testing.T) {
 		{
 			name:  "a candidate naming no path cannot overlap",
 			paths: nil,
-			held:  []HeldBead{{ID: "gt-t61ft", Paths: []string{guard}}},
+			held:  []HeldBead{{ID: "gt-t61ft", Assignee: seat, Paths: []string{guard}}},
 			want:  "",
 		},
 		{
 			name:  "distinct paths do not hold",
 			paths: []string{"internal/notify/cli.go"},
-			held:  []HeldBead{{ID: "gt-t61ft", Paths: []string{guard}}},
+			held:  []HeldBead{{ID: "gt-t61ft", Assignee: seat, Paths: []string{guard}}},
 			want:  "",
 		},
 		{
-			name:  "a shared path holds",
+			name:  "a shared path holds and names its seat",
 			paths: []string{"internal/notify/cli.go", guard},
+			held:  []HeldBead{{ID: "gt-t61ft", Assignee: seat, Paths: []string{guard}}},
+			want:  "gt-t61ft (held by " + seat + ") is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes",
+		},
+		{
+			name:  "a held bead with no assignee names no holder",
+			paths: []string{guard},
 			held:  []HeldBead{{ID: "gt-t61ft", Paths: []string{guard}}},
 			want:  "gt-t61ft is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes",
 		},
 		{
 			name:  "an id-less entry is skipped",
 			paths: []string{guard},
-			held:  []HeldBead{{Paths: []string{guard}}, {ID: "gt-two", Paths: []string{guard}}},
-			want:  "gt-two is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes",
+			held:  []HeldBead{{Paths: []string{guard}}, {ID: "gt-two", Assignee: seat, Paths: []string{guard}}},
+			want:  "gt-two (held by " + seat + ") is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes",
 		},
 		{
 			name:  "the lowest overlapping id is named, whatever the read order",
 			paths: []string{guard},
-			held:  []HeldBead{{ID: "gt-z9", Paths: []string{guard}}, {ID: "gt-a1", Paths: []string{guard}}},
-			want:  "gt-a1 is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes",
+			held:  []HeldBead{{ID: "gt-z9", Assignee: seat, Paths: []string{guard}}, {ID: "gt-a1", Assignee: "gastown/polecats/other", Paths: []string{guard}}},
+			want:  "gt-a1 (held by gastown/polecats/other) is already hooked to a working seat and names " + guard + "; the hold lifts when that bead closes",
 		},
 		{
 			name:  "a held bead naming other paths too does not hold",
 			paths: []string{"internal/notify/cli.go"},
-			held:  []HeldBead{{ID: "gt-t61ft", Paths: []string{guard, "internal/nudge/deliver/deliver.go"}}},
+			held:  []HeldBead{{ID: "gt-t61ft", Assignee: seat, Paths: []string{guard, "internal/nudge/deliver/deliver.go"}}},
 			want:  "",
 		},
 	}
@@ -71,8 +78,8 @@ func TestHeldOverlap(t *testing.T) {
 func TestHeldOverlapCapsTheNamedPaths(t *testing.T) {
 	t.Parallel()
 	paths := []string{"a/one.go", "b/two.go", "c/three.go", "d/four.go", "e/five.go"}
-	got := HeldOverlap(paths, []HeldBead{{ID: "gt-wide", Paths: paths}})
-	want := "gt-wide is already hooked to a working seat and names a/one.go, b/two.go, c/three.go (+2 more); the hold lifts when that bead closes"
+	got := HeldOverlap(paths, []HeldBead{{ID: "gt-wide", Assignee: "gastown/polecats/capable", Paths: paths}})
+	want := "gt-wide (held by gastown/polecats/capable) is already hooked to a working seat and names a/one.go, b/two.go, c/three.go (+2 more); the hold lifts when that bead closes"
 	if got != want {
 		t.Errorf("HeldOverlap = %q, want %q", got, want)
 	}
