@@ -347,3 +347,173 @@ func TestRealGuardProcessIsTheProcess(t *testing.T) {
 		t.Error("realGuardProcess does not read the working directory through os.Getwd")
 	}
 }
+
+func bdCloseIDs(t *testing.T, command string) [][]string {
+	t.Helper()
+	var out [][]string
+	for _, inv := range parseBdCloseInvocations(command) {
+		out = append(out, inv.IDs)
+	}
+	return out
+}
+
+// TestParseBdCloseInvocations_SubstitutionEvalXargs: a close run through a
+// command substitution, eval or xargs is still a close.
+func TestParseBdCloseInvocations_SubstitutionEvalXargs(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, command string }{
+		{"dollar-paren substitution", "echo $(bd close gt-x)"},
+		{"substitution inside double quotes", `echo "$(bd close gt-x)"`},
+		{"backtick substitution", "echo `bd close gt-x`"},
+		{"nested substitution", "echo $(echo $(bd close gt-x))"},
+		{"eval of a quoted command", "eval 'bd close gt-x'"},
+		{"eval of bare words", "eval bd close gt-x"},
+		{"xargs fed by echo", "echo gt-x | xargs bd close"},
+		{"xargs with flags fed by printf", `printf 'gt-x\n' | xargs -n 1 bd close`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := bdCloseIDs(t, tt.command)
+			if len(got) != 1 || !reflect.DeepEqual(got[0], []string{"gt-x"}) {
+				t.Errorf("parseBdCloseInvocations(%q) ids = %v, want one invocation holding [gt-x]", tt.command, got)
+			}
+		})
+	}
+
+	notCloses := []string{
+		"echo '$(bd close gt-x)'",         // single quotes hide the substitution
+		`echo \$(bd close gt-x)`,          // escaped, literal text
+		"echo 'bd close gt-x' | xargs ls", // xargs of something else
+		"ls | xargs bd close",             // producer unreadable: close reported, no ids
+	}
+	for _, command := range notCloses {
+		for _, ids := range bdCloseIDs(t, command) {
+			if len(ids) != 0 {
+				t.Errorf("parseBdCloseInvocations(%q) read ids %v, want none", command, ids)
+			}
+		}
+	}
+}
+
+// TestParseBdCloseInvocations_EnvFlagsAndPath: env may be a path and carry its
+// own flags before the command.
+func TestParseBdCloseInvocations_EnvFlagsAndPath(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"/usr/bin/env bd close gt-x",
+		"env -i bd close gt-x",
+		"env -u FOO bd close gt-x",
+		"env -u FOO -i BAR=1 bd close gt-x",
+		"env -- bd close gt-x",
+		"env FOO=1 bd close gt-x",
+	} {
+		got := bdCloseIDs(t, command)
+		if len(got) != 1 || !reflect.DeepEqual(got[0], []string{"gt-x"}) {
+			t.Errorf("parseBdCloseInvocations(%q) ids = %v, want one invocation with [gt-x]", command, got)
+		}
+	}
+	if got := parseBdCloseInvocations("env -u bd echo close gt-x"); len(got) != 0 {
+		t.Errorf("env of another command parsed as a close: %+v", got)
+	}
+}
+
+// TestParseBdCloseInvocations_RepeatedReasonPositional: bd maps the n'th
+// --reason to the n'th id, so one id's override must not cover the others.
+func TestParseBdCloseInvocations_RepeatedReasonPositional(t *testing.T) {
+	t.Parallel()
+	scope := bdCloseInvariantScope{
+		branch:  "polecat/malachite/gt-a+gt-b",
+		target:  "origin/main",
+		counter: fakeCloseTimeCommitCounter{count: 3},
+	}
+
+	got := parseBdCloseInvocations("bd close gt-a gt-b --reason x --reason 'supersede: a'")
+	if len(got) != 1 {
+		t.Fatalf("got %d invocations, want 1: %+v", len(got), got)
+	}
+	if want := []string{"x", "supersede: a"}; !reflect.DeepEqual(got[0].Reasons, want) {
+		t.Errorf("Reasons = %q, want %q", got[0].Reasons, want)
+	}
+	if r := got[0].reasonFor(0); r != "x" {
+		t.Errorf("reasonFor(gt-a) = %q, want x", r)
+	}
+	if r := got[0].reasonFor(1); r != "supersede: a" {
+		t.Errorf("reasonFor(gt-b) = %q, want the supersede reason", r)
+	}
+	if id, refusal := firstBdCloseRefusal(scope, got, ""); id != "gt-a" || refusal == "" {
+		t.Errorf("guard refused (%q, %q), want gt-a refused", id, refusal)
+	}
+
+	// Reversed: gt-a is overridden, gt-b is the one refused.
+	rev := parseBdCloseInvocations("bd close gt-a gt-b --reason 'supersede: a' --reason x")
+	if id, refusal := firstBdCloseRefusal(scope, rev, ""); id != "gt-b" || refusal == "" {
+		t.Errorf("reversed: guard refused (%q, %q), want gt-b refused", id, refusal)
+	}
+
+	// Flags between the ids do not change the pairing.
+	mid := parseBdCloseInvocations("bd close gt-a --reason 'supersede: a' gt-b --reason 'cancel: b'")
+	if id, refusal := firstBdCloseRefusal(scope, mid, ""); refusal != "" {
+		t.Errorf("both ids overridden but guard refused %q: %s", id, refusal)
+	}
+
+	// One reason still covers every id; a count that is neither one nor one per
+	// id falls back to the last reason, as before.
+	one := parseBdCloseInvocations("bd close gt-a gt-b --reason 'supersede: a'")
+	if id, refusal := firstBdCloseRefusal(scope, one, ""); refusal != "" {
+		t.Errorf("a single supersede reason covers both ids but %q was refused: %s", id, refusal)
+	}
+	three := parseBdCloseInvocations("bd close gt-a gt-b --reason x --reason y --reason 'supersede: z'")
+	if r := three[0].reasonFor(0); r != "supersede: z" {
+		t.Errorf("mismatched reason count: reasonFor = %q, want the last reason", r)
+	}
+}
+
+// TestParseBdCloseInvocations_ReasonFile: --reason-file's path is the flag's
+// value, not an id, and the file's reason is what the guard judges.
+func TestParseBdCloseInvocations_ReasonFile(t *testing.T) {
+	t.Parallel()
+	for _, command := range []string{
+		"bd close gt-abc --reason-file /tmp/r.txt",
+		"bd close gt-abc --reason-file=/tmp/r.txt",
+		"bd close --reason-file /tmp/r.txt gt-abc",
+	} {
+		got := parseBdCloseInvocations(command)
+		if len(got) != 1 || !reflect.DeepEqual(got[0].IDs, []string{"gt-abc"}) || got[0].ReasonFile != "/tmp/r.txt" {
+			t.Errorf("parseBdCloseInvocations(%q) = %+v, want ids [gt-abc] and ReasonFile /tmp/r.txt", command, got)
+		}
+	}
+
+	dir := t.TempDir()
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(dir+"/"+name, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("supersede.txt", "supersede: folded into gt-y\n")
+	write("plain.txt", "done\n")
+	scope := bdCloseInvariantScope{
+		branch:  "polecat/malachite/gt-abc+muck73gu",
+		target:  "origin/main",
+		counter: fakeCloseTimeCommitCounter{count: 2},
+	}
+
+	tests := []struct {
+		name, command, cwd string
+		refused            bool
+	}{
+		{"supersede in the file", "bd close gt-abc --reason-file " + dir + "/supersede.txt", "", false},
+		{"relative path reads against the cwd", "bd close gt-abc --reason-file supersede.txt", dir, false},
+		{"a file without an override", "bd close gt-abc --reason-file " + dir + "/plain.txt", "", true},
+		{"a missing file stays refused", "bd close gt-abc --reason-file " + dir + "/missing.txt", "", true},
+		{"stdin cannot be read and stays refused", "bd close gt-abc --reason-file -", "", true},
+		{"an explicit reason wins", "bd close gt-abc --reason 'cancel: x' --reason-file " + dir + "/plain.txt", "", false},
+	}
+	for _, tt := range tests {
+		id, refusal := firstBdCloseRefusal(scope, parseBdCloseInvocations(tt.command), tt.cwd)
+		if (refusal != "") != tt.refused {
+			t.Errorf("%s: refused = %v (%q %q), want %v", tt.name, refusal != "", id, refusal, tt.refused)
+		}
+	}
+}

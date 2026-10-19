@@ -115,9 +115,48 @@ func init() {
 // is reported as an invocation with zero ids rather than being dropped — the
 // caller can then tell "no bd close here" from "a bd close whose ids this
 // parser could not read".
+//
+// Reason is the last --reason given. bd maps repeated --reason flags to ids by
+// position (the first reason to the first id), so Reasons keeps every one when
+// the flag was repeated and is nil otherwise; reasonFor reads the pair. A
+// --reason-file is carried as ReasonFile and read by the guard, which knows the
+// session's cwd; the parser never touches the filesystem.
 type bdCloseInvocation struct {
-	IDs    []string
-	Reason string
+	IDs        []string
+	Reason     string
+	Reasons    []string
+	ReasonFile string
+}
+
+// reasonFor returns the close reason that applies to the idx'th id. Repeated
+// reasons pair with ids by position only when there is one per id; any other
+// count is a command bd rejects, so the last reason stands, as it did before
+// the flags were tracked per id.
+func (inv bdCloseInvocation) reasonFor(idx int) string {
+	if len(inv.Reasons) == len(inv.IDs) && idx < len(inv.Reasons) {
+		return inv.Reasons[idx]
+	}
+	return inv.Reason
+}
+
+// withReasonFile fills in the reason a --reason-file names. An explicit
+// --reason wins, and a file that cannot be read leaves the reason empty, which
+// the invariant refuses exactly as it did when the flag was not understood.
+// A relative path is read against cwd, the directory bd runs in.
+func (inv bdCloseInvocation) withReasonFile(cwd string) bdCloseInvocation {
+	if inv.ReasonFile == "" || inv.Reason != "" || inv.ReasonFile == "-" {
+		return inv
+	}
+	path := inv.ReasonFile
+	if !filepath.IsAbs(path) && filepath.IsAbs(cwd) {
+		path = filepath.Join(cwd, path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return inv
+	}
+	inv.Reason = strings.TrimSpace(string(data))
+	return inv
 }
 
 // payloadCwd reads the session cwd from the hook payload. The branch under
@@ -165,20 +204,29 @@ func tapGuardBdCloseInvariant(stdin io.Reader, proc guardProcess) error {
 		return nil
 	}
 
+	if id, refusal := firstBdCloseRefusal(scope, invocations, payloadCwd(input)); refusal != "" {
+		printBdCloseInvariantBlock(id, scope.branch, refusal)
+		return NewSilentExit(2) // Exit 2 = BLOCK in Claude Code hooks
+	}
+	return nil
+}
+
+// firstBdCloseRefusal returns the first id among invocations that the
+// invariant refuses to close, with the refusal message, or "" when every close
+// may proceed. cwd is the directory a --reason-file path is read against.
+func firstBdCloseRefusal(scope bdCloseInvariantScope, invocations []bdCloseInvocation, cwd string) (id, refusal string) {
 	for _, invocation := range invocations {
-		for _, id := range invocation.IDs {
+		invocation = invocation.withReasonFile(cwd)
+		for i, id := range invocation.IDs {
 			if !branchNamesBead(scope.branch, id) {
 				continue
 			}
-			refusal := bdCloseInvariantRefusal(scope, id, invocation.Reason)
-			if refusal == "" {
-				continue
+			if refusal := bdCloseInvariantRefusal(scope, id, invocation.reasonFor(i)); refusal != "" {
+				return id, refusal
 			}
-			printBdCloseInvariantBlock(id, scope.branch, refusal)
-			return NewSilentExit(2) // Exit 2 = BLOCK in Claude Code hooks
 		}
 	}
-	return nil
+	return "", ""
 }
 
 // bdCloseInvariantScope is everything the invariant needs that depends on the
@@ -298,10 +346,14 @@ func isBeadIDShaped(s string) bool {
 // the value of -r/--reason is consumed as the reason rather than mistaken for
 // an id.
 func parseBdCloseInvocations(command string) []bdCloseInvocation {
-	tokens := shellTokenize(stripHeredocBodies(strings.TrimSpace(command)))
+	stripped := stripHeredocBodies(strings.TrimSpace(command))
+	tokens := shellTokenize(stripped)
 
 	var invocations []bdCloseInvocation
 	var segment []string
+	// pipedFrom is the segment feeding the current one through a pipe, which is
+	// where `xargs bd close` gets the ids it closes.
+	var pipedFrom []string
 	caseDepth := 0
 	flush := func() {
 		caseDepth += bdCloseCaseDepthChange(segment)
@@ -309,20 +361,70 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 			segment = bdCloseUnglueArmLabel(segment)
 		}
 		if invocation, ok := parseBdCloseSegment(segment); ok {
+			if bdCloseSegmentRunsXargs(segment) {
+				invocation.IDs = append(invocation.IDs, bdCloseEchoedIDs(pipedFrom)...)
+			}
 			invocations = append(invocations, invocation)
 		}
 		invocations = append(invocations, parseBdCloseShellPayload(segment)...)
-		segment = nil
 	}
 	for _, tok := range tokens {
 		if shellCommandSeparators[tok] {
 			flush()
+			pipedFrom = nil
+			if tok == "|" {
+				pipedFrom = segment
+			}
+			segment = nil
 			continue
 		}
 		segment = append(segment, tok)
 	}
 	flush()
+	// A command substitution runs its body as a command of its own, wherever
+	// the surrounding word sits (`echo $(bd close gt-x)`), so each body is
+	// parsed the way a whole command is. A nested substitution is found when
+	// its enclosing body is parsed.
+	for _, body := range commandSubstitutions(stripped) {
+		invocations = append(invocations, parseBdCloseInvocations(body)...)
+	}
 	return invocations
+}
+
+// bdCloseSegmentRunsXargs reports whether xargs stands in front of the bd
+// command word of segment, so the ids piped into the segment are bd's operands.
+func bdCloseSegmentRunsXargs(segment []string) bool {
+	for _, tok := range segment {
+		if isBdCommandWord(tok) {
+			return false
+		}
+		if filepath.Base(tok) == "xargs" {
+			return true
+		}
+	}
+	return false
+}
+
+// bdCloseEchoedIDs returns the words an `echo` or `printf` segment writes, the
+// ids that `echo gt-x | xargs bd close` hands to bd. Any other producer (a
+// file, a query) is not readable and yields none, which is the guard's usual
+// fail-open answer for an id it cannot resolve.
+func bdCloseEchoedIDs(segment []string) []string {
+	tokens := bdCloseCommandTokens(segment)
+	if len(tokens) < 2 {
+		return nil
+	}
+	if word := filepath.Base(tokens[0]); word != "echo" && word != "printf" {
+		return nil
+	}
+	var ids []string
+	for _, tok := range tokens[1:] {
+		if strings.HasPrefix(tok, "-") || strings.Contains(tok, "%") {
+			continue // an echo flag or a printf format directive
+		}
+		ids = append(ids, strings.Fields(strings.ReplaceAll(tok, `\n`, " "))...)
+	}
+	return ids
 }
 
 // parseBdCloseSegment parses one shell segment as a possible `bd close`.
@@ -349,14 +451,22 @@ func parseBdCloseSegment(segment []string) (bdCloseInvocation, bool) {
 			// malformed command that the shell will reject, so there is
 			// nothing to read and nothing to skip.
 			if i+1 < len(rest) {
-				invocation.Reason = rest[i+1]
+				invocation.addReason(rest[i+1])
 				i++
 			}
 		case strings.HasPrefix(tok, "--reason="):
-			invocation.Reason = strings.TrimPrefix(tok, "--reason=")
+			invocation.addReason(strings.TrimPrefix(tok, "--reason="))
 		case strings.HasPrefix(tok, "-r") && len(tok) > 2:
 			// Glued short form: "-rsupersede: dup".
-			invocation.Reason = tok[2:]
+			invocation.addReason(tok[2:])
+		case tok == "--reason-file":
+			// The path is the flag's value, not an id; the guard reads it.
+			if i+1 < len(rest) {
+				invocation.ReasonFile = rest[i+1]
+				i++
+			}
+		case strings.HasPrefix(tok, "--reason-file="):
+			invocation.ReasonFile = strings.TrimPrefix(tok, "--reason-file=")
 		case strings.HasPrefix(tok, "-") && tok != "-":
 			// Any other flag (-f/--force, --json, ...) has no bearing on the
 			// invariant and is not an id.
@@ -364,7 +474,17 @@ func parseBdCloseSegment(segment []string) (bdCloseInvocation, bool) {
 			invocation.IDs = append(invocation.IDs, tok)
 		}
 	}
+	// Reasons only carries a repeated flag; one reason is Reason alone.
+	if len(invocation.Reasons) < 2 {
+		invocation.Reasons = nil
+	}
 	return invocation, true
+}
+
+// addReason records one --reason value: Reason keeps the last, Reasons all.
+func (inv *bdCloseInvocation) addReason(reason string) {
+	inv.Reason = reason
+	inv.Reasons = append(inv.Reasons, reason)
 }
 
 // isBdCloseSubcommand reports whether word is a name `bd close` answers to.
@@ -412,7 +532,7 @@ func isBdCommandWord(tok string) bool {
 // (deep-review gt-dilqk).
 var (
 	bdCloseLeadWords = map[string]bool{"then": true, "do": true, "else": true, "elif": true, "if": true, "while": true, "until": true, "{": true, "(": true, "!": true}
-	bdCloseLaunchers = map[string]bool{"time": true, "nohup": true, "exec": true, "sudo": true, "nice": true, "stdbuf": true, "timeout": true}
+	bdCloseLaunchers = map[string]bool{"time": true, "nohup": true, "exec": true, "sudo": true, "nice": true, "stdbuf": true, "timeout": true, "xargs": true}
 )
 
 // bdCloseLauncherValueFlags names, per launcher, the flags that consume the
@@ -430,6 +550,7 @@ var bdCloseLauncherValueFlags = map[string]map[string]bool{
 	"stdbuf":  {"-i": true, "-o": true, "-e": true},
 	"timeout": {"-s": true, "-k": true},
 	"nice":    {"-n": true},
+	"xargs":   {"-I": true, "-n": true, "-P": true, "-L": true, "-s": true, "-d": true, "-E": true, "-a": true},
 }
 
 // bdCloseCommandTokens returns the segment from its command word on: clause and
@@ -597,6 +718,11 @@ func bdCloseCaseDepthChange(segment []string) int {
 // parseBdCloseShellPayload reads the closes inside a `bash -c '...'` payload.
 func parseBdCloseShellPayload(segment []string) []bdCloseInvocation {
 	tokens := bdCloseCommandTokens(segment)
+	// eval joins its arguments with spaces and runs the result as a command
+	// line, so `eval 'bd close gt-x'` is a close.
+	if len(tokens) >= 2 && tokens[0] == "eval" {
+		return parseBdCloseInvocations(strings.Join(tokens[1:], " "))
+	}
 	if len(tokens) < 3 || !shellInvokers[filepath.Base(tokens[0])] {
 		return nil
 	}
@@ -609,14 +735,20 @@ func parseBdCloseShellPayload(segment []string) []bdCloseInvocation {
 
 // stripLeadingEnvAssignments drops leading VAR=value tokens (and the
 // "env"/"command" prefixes that can precede them) so `FOO=1 bd close gt-x` is
-// recognized. An assignment is only stripped from the front, so an argument
-// later in the command that merely contains "=" is left alone. Reuses
-// isEnvAssignment from tap_guard_polecat_paths.go, which draws the same
-// NAME=value distinction for the same reason.
+// recognized. env may be a path (/usr/bin/env) and carry its own flags, so
+// `env -i bd close gt-x` and `env -u FOO bd close gt-x` are recognized too;
+// env's flags are only skipped, never read. An assignment is only stripped from
+// the front, so an argument later in the command that merely contains "=" is
+// left alone. Reuses isEnvAssignment from tap_guard_polecat_paths.go, which
+// draws the same NAME=value distinction for the same reason.
 func stripLeadingEnvAssignments(tokens []string) []string {
 	for len(tokens) > 0 {
 		tok := tokens[0]
-		if tok == "env" || tok == "command" {
+		if filepath.Base(tok) == "env" {
+			tokens = bdCloseSkipEnvFlags(tokens[1:])
+			continue
+		}
+		if tok == "command" {
 			tokens = tokens[1:]
 			continue
 		}
@@ -625,6 +757,29 @@ func stripLeadingEnvAssignments(tokens []string) []string {
 			continue
 		}
 		break
+	}
+	return tokens
+}
+
+// bdCloseEnvValueFlags are env's flags that consume the next token, so the
+// value is not left behind as the command word (`env -u FOO bd close gt-x`).
+var bdCloseEnvValueFlags = map[string]bool{
+	"-u": true, "--unset": true, "-C": true, "--chdir": true, "-P": true,
+	"-S": true, "--split-string": true,
+}
+
+// bdCloseSkipEnvFlags drops env's own flags (and the values they take) from the
+// front of tokens, the part of the command line after the word env.
+func bdCloseSkipEnvFlags(tokens []string) []string {
+	for len(tokens) > 0 && strings.HasPrefix(tokens[0], "-") {
+		flag := tokens[0]
+		tokens = tokens[1:]
+		if flag == "--" {
+			break
+		}
+		if bdCloseEnvValueFlags[flag] && len(tokens) > 0 {
+			tokens = tokens[1:]
+		}
 	}
 	return tokens
 }

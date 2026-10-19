@@ -413,3 +413,39 @@ func TestRunReady_AllSourcesFailedIsACommandFailure(t *testing.T) {
 			"zero-item report, which is byte-identical to what an idle town prints", got)
 	}
 }
+
+// TestPrintReadyHuman_CappedZeroRowsKeepsNote: a capped source whose page was
+// filtered down to no rows still says more exist, so the town-wide all-clear
+// must not replace that note.
+func TestPrintReadyHuman_CappedZeroRowsKeepsNote(t *testing.T) {
+	t.Parallel()
+	const allClear = "No ready work across town."
+
+	t.Run("capped with no rows keeps the capped note", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		result := ReadyResult{Sources: []ReadySource{{Name: "town", Capped: true}}}
+		if err := printReadyHuman(&buf, result); err != nil {
+			t.Fatalf("printReadyHuman: %v", err)
+		}
+		out := buf.String()
+		if !strings.Contains(out, cappedNote(result.Sources[0], 0)) {
+			t.Errorf("output %q lacks the capped note", out)
+		}
+		if strings.Contains(out, allClear) {
+			t.Errorf("output %q claims an all-clear for a capped source", out)
+		}
+	})
+
+	t.Run("uncapped empty town still prints the all-clear", func(t *testing.T) {
+		t.Parallel()
+		var buf bytes.Buffer
+		result := ReadyResult{Sources: []ReadySource{{Name: "town"}}}
+		if err := printReadyHuman(&buf, result); err != nil {
+			t.Fatalf("printReadyHuman: %v", err)
+		}
+		if got := strings.TrimSpace(buf.String()); got != allClear {
+			t.Errorf("output = %q, want %q", got, allClear)
+		}
+	})
+}

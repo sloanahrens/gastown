@@ -331,7 +331,13 @@ func renderReady(w io.Writer, sources []ReadySource, townRoot string, jsonOut bo
 }
 
 func printReadyHuman(w io.Writer, result ReadyResult) error {
-	if result.Summary.Total == 0 {
+	// A capped source whose every row was filtered out has zero items yet says
+	// more exist; the all-clear would hide that note.
+	anyCapped := false
+	for _, src := range result.Sources {
+		anyCapped = anyCapped || src.Capped
+	}
+	if result.Summary.Total == 0 && !anyCapped {
 		fmt.Fprintln(w, "No ready work across town.")
 		return nil
 	}
