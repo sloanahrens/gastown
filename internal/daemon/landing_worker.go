@@ -672,6 +672,13 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 			_, err := intent.ClearLanded(townRoot, seat, w.BeadID, "landing worker", time.Now())
 			return err
 		},
+		// The agent a landing ran on is the one its seat's agent bead names:
+		// the sling writes it there and the session's end leaves it, so the
+		// landing worker reads the seat's own record rather than a role
+		// default (gt-mukgk.6).
+		AgentBeadID: func(polecat string) string {
+			return beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, rigName), rigName, polecat)
+		},
 	}, nil
 }
 

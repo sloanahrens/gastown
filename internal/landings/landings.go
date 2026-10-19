@@ -41,6 +41,9 @@ type Record struct {
 	OMScore      float64   `json:"om_score"`
 	Route        string    `json:"route"`
 	LandedAt     time.Time `json:"landed_at"`
+	// Agent is the agent the landing's polecat seat ran on, written from its
+	// agent bead; a crew landing has no seat and leaves it empty (gt-mukgk.6).
+	Agent string `json:"agent,omitempty"`
 }
 
 // Path is <town>/.runtime/landings/<rig>.jsonl, the file the landing worker

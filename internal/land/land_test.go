@@ -2136,3 +2136,46 @@ func (b *countingFlaky) Update(id string, opts beads.UpdateOptions) error {
 	b.count.updates++
 	return b.Fake.Update(id, opts)
 }
+
+// TestLandingRecordAgent: a landing records the agent its seat ran on, in the
+// landings file and in the bead's LANDING RECORD block; a landing with no seat
+// behind it — a crew's — records no agent at all rather than an empty line the
+// reader would count as a seat (gt-mukgk.6).
+func TestLandingRecordAgent(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.work.Agent = "claude-haiku"
+	if _, err := f.lander().Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	var rec LandingRecord
+	if err := json.Unmarshal([]byte(f.landingLines()[0]), &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Agent != "claude-haiku" {
+		t.Errorf("landings file agent = %q, want claude-haiku:\n%s", rec.Agent, f.landingLines()[0])
+	}
+	bead, err := f.bd.Show("gt-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(bead.Notes, "\nagent: claude-haiku") {
+		t.Errorf("the bead's LANDING RECORD block carries no agent line:\n%s", bead.Notes)
+	}
+
+	crew := newLandFixture(t)
+	crew.work.Worker = ""
+	if _, err := crew.lander().Land(context.Background(), crew.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	if line := crew.landingLines()[0]; strings.Contains(line, `"agent"`) {
+		t.Errorf("a landing with no seat recorded an agent: %s", line)
+	}
+	bead, err = crew.bd.Show("gt-abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(bead.Notes, "\nagent:") {
+		t.Errorf("a landing with no seat wrote an agent line:\n%s", bead.Notes)
+	}
+}

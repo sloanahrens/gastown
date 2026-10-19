@@ -33,8 +33,14 @@ type ReviewRecord struct {
 	// Rejected says the landing refused the work on this verdict, whatever the
 	// verdict says: an approval whose findings findingsRejection turned away
 	// reads approve above and is still a rejection (gt-vu18r). Lines written
-	// before the field carry none, and read as the verdict alone.
+	// before the field carry none, and read as the verdict alone. A
+	// request_changes verdict is a rejection too, with or without the flag.
 	Rejected bool `json:"rejected,omitempty"`
+	// Agent is the agent the polecat's seat ran on, so a reader can count a
+	// seat's rejections beside its landings. A crew review has no seat and
+	// records none, and lines written before the field carry none
+	// (gt-mukgk.6).
+	Agent string `json:"agent,omitempty"`
 	// Findings is how many findings the verdict carried, whatever their
 	// severity.
 	Findings int `json:"findings"`

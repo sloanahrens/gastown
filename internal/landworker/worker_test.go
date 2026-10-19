@@ -1045,3 +1045,43 @@ func TestPassCISilenceRunIsBrokenByAnotherOutcome(t *testing.T) {
 		t.Fatalf("escalated %d times without %d silences in a row", n, h.w.CISilenceEscalateAfter)
 	}
 }
+
+// TestPassRecordsTheAgentItsSeatRanOn: the landing worker reads the agent the
+// polecat's seat was spawned on from its agent bead, which outlives the
+// session, and carries it into the landing request so the record names the
+// seat the work really cost (gt-mukgk.6).
+func TestPassRecordsTheAgentItsSeatRanOn(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.seedReady(t, "gt-abc")
+	h.bd.Seed(beads.Issue{ID: "gt-gastown-polecat-opal", Title: "opal", Status: "done", Type: "agent",
+		Description: "role_type: polecat\nrig: gastown\nagent_state: done\nhook_bead: null\nagent: claude-haiku"})
+	h.w.AgentBeadID = func(polecat string) string { return beads.PolecatBeadID("gastown", polecat) }
+	if rep := h.w.Pass(context.Background()); rep.Landed != 1 {
+		t.Fatalf("report %v; want one landing", rep)
+	}
+	if got := h.lander.calls[0].Agent; got != "claude-haiku" {
+		t.Errorf("landing agent = %q, want claude-haiku; the seat's agent bead names it", got)
+	}
+}
+
+// TestPassCrewLandingAsksNoSeatForAnAgent: a crew landing has no seat, so the
+// worker records no agent and never asks an agent bead for one — the crew's
+// own bead is not a polecat seat (gt-mukgk.6).
+func TestPassCrewLandingAsksNoSeatForAnAgent(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	w := land.Work{Branch: branch, Head: noteHead, Target: "main"}
+	h.bd.Seed(beads.Issue{ID: "gt-crew", Title: "work", Status: "hooked", Type: "task", Assignee: "gastown/crew/sloan",
+		Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(w)})
+	h.w.AgentBeadID = func(polecat string) string {
+		t.Errorf("asked for the agent of a crew landing's worker %q", polecat)
+		return ""
+	}
+	if rep := h.w.Pass(context.Background()); rep.Landed != 1 {
+		t.Fatalf("report %v; want one landing", rep)
+	}
+	if got := h.lander.calls[0].Agent; got != "" {
+		t.Errorf("crew landing recorded agent %q, want none", got)
+	}
+}
