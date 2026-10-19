@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 )
 
@@ -225,11 +226,11 @@ type Seat struct {
 	// toward Cap, and naming them explains a full seat that shows fewer live
 	// sessions than its number (gt-tldj4).
 	DeadHooked int
-	// Closed is true while the seat's window is shut: it counts its live
-	// polecats but takes no new spawn. OpensAt is when it next opens
-	// (gt-mukgk).
-	Closed  bool
-	OpensAt time.Time
+	// Window is the seat's daily closed period, nil when it never shuts. It is
+	// carried rather than snapshotted into a Closed flag: the choice re-reads it
+	// against Budget.Now, so a seat whose window shuts between the budget's
+	// construction and the choice is seen shut (gt-t8new).
+	Window *config.Window
 }
 
 // AgentLabelPrefix starts the label that pins a bead to one agent's seats:
@@ -242,12 +243,17 @@ const AgentLabelPrefix = "agent:"
 // seat choice refuses to guess between them.
 func (s Spec) PinnedAgents() []string { return s.labelValues(AgentLabelPrefix) }
 
-// Free reports whether the seat has room and is open.
-func (s Seat) Free() bool { return s.Agent != "" && !s.Closed && s.Live < s.Cap }
+// closed reports whether the seat's window holds at t.
+func (s Seat) closed(t time.Time) bool { return s.Window != nil && s.Window.Closed(t) }
 
-// closedUntil renders when a closed seat opens: "closed until 08:00".
-func (s Seat) closedUntil() string {
-	return "closed until " + s.OpensAt.Format("15:04")
+// FreeAt reports whether the seat has room and is open at t. Its window is
+// read at t rather than from a snapshot, so a caller asking either side of a
+// boundary sees the window shut or open as it is then (gt-t8new).
+func (s Seat) FreeAt(t time.Time) bool { return s.Agent != "" && !s.closed(t) && s.Live < s.Cap }
+
+// closedUntil renders when a closed seat opens from t: "closed until 08:00".
+func (s Seat) closedUntil(t time.Time) string {
+	return "closed until " + s.Window.OpensAt(t).Format("15:04")
 }
 
 // takes reports whether the seat may take spec: a bead pinned to an agent (an
@@ -283,7 +289,11 @@ type Budget struct {
 	// newest polecat is younger than the gap.
 	NewestSpawn time.Time
 	MinSpawnGap time.Duration
-	Now         time.Time
+	// Now is the tick's clock. The seats' windows are read against it at choice
+	// time, and the picture and the skip reasons render from it, so a caller
+	// that refreshes it before each choice sees a window that shut mid-tick
+	// (gt-t8new).
+	Now time.Time
 	// Rand drives the draw among free seats. Nil draws from the package
 	// source; a seeded source makes a test's choice reproducible.
 	Rand *rand.Rand
@@ -301,8 +311,8 @@ func (b Budget) Picture() string {
 		if s.DeadHooked > 0 {
 			p += fmt.Sprintf(" (%d dead-hooked)", s.DeadHooked)
 		}
-		if s.Closed {
-			p += " (" + s.closedUntil() + ")"
+		if s.closed(b.Now) {
+			p += " (" + s.closedUntil(b.Now) + ")"
 		}
 		parts = append(parts, p)
 	}
@@ -365,8 +375,10 @@ type SeatChoice struct {
 // town with no free seat at all. An unlabelled bead draws uniformly among the
 // free seats of every model in the mix, so no model is preferred by list
 // order; a bead pinned with an agent:<name> label may take only that agent's
-// seat. A seat existing without room for this bead is a skip, not a refusal:
-// the bead stays ready and the next tick asks again.
+// seat. Each seat's window is read against b.Now here, not trusted from a
+// snapshot, so a seat that shut since the budget was built is not drawn. A seat
+// existing without room for this bead is a skip, not a refusal: the bead stays
+// ready and the next tick asks again.
 func ChooseSeat(b Budget, spec Spec) SeatChoice {
 	// The town's total is asked before the seats are, because it caps every
 	// seat at once: a town at its total has no free seat whatever the seats
@@ -387,7 +399,7 @@ func ChooseSeat(b Budget, spec Spec) SeatChoice {
 	open := make([]Seat, 0, len(b.Seats))
 	var passedOver []string
 	for _, seat := range b.Seats {
-		if !seat.Free() {
+		if !seat.FreeAt(b.Now) {
 			continue
 		}
 		if seat.takes(spec) {
@@ -409,8 +421,8 @@ func ChooseSeat(b Budget, spec Spec) SeatChoice {
 		}
 		for _, seat := range b.Seats {
 			if seat.Agent == pinned[0] {
-				if seat.Closed {
-					return SeatChoice{Skip: true, Reason: fmt.Sprintf("waiting for a %s seat, %s%s: %s", pinned[0], seat.closedUntil(), left, b.Picture())}
+				if seat.closed(b.Now) {
+					return SeatChoice{Skip: true, Reason: fmt.Sprintf("waiting for a %s seat, %s%s: %s", pinned[0], seat.closedUntil(b.Now), left, b.Picture())}
 				}
 				return SeatChoice{Skip: true, Reason: fmt.Sprintf("waiting for a %s seat%s: %s", pinned[0], left, b.Picture())}
 			}

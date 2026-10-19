@@ -2301,7 +2301,7 @@ func TestSpecBudgetFromSeatMap(t *testing.T) {
 	}
 	// A closed seat still counts its live polecats.
 	b.SetLive(map[string]int{"deepseek-flash": 2})
-	if flash := b.Seats[2]; !flash.Closed || flash.Live != 2 || flash.Free() {
+	if flash := b.Seats[2]; flash.Window == nil || !flash.Window.Closed(night) || flash.Live != 2 || flash.FreeAt(night) {
 		t.Fatalf("flash = %+v", flash)
 	}
 
@@ -2310,8 +2310,50 @@ func TestSpecBudgetFromSeatMap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.Seats[2].Closed || !b.Seats[2].Free() {
+	if b.Seats[2].Window == nil || b.Seats[2].Window.Closed(day) || !b.Seats[2].FreeAt(day) {
 		t.Fatalf("flash at noon = %+v, want open", b.Seats[2])
+	}
+}
+
+// The tick's budget is built from one clock read, but the choice runs on a
+// later one: a tick that starts at 19:59:58 on a seat whose window shuts at
+// 20:00 must not sling onto it when the board read and the pre-sling holds
+// carry the choice past the boundary (gt-t8new).
+func TestSpecDispatchRechecksTheSeatWindow(t *testing.T) {
+	t.Parallel()
+	ts := config.NewTownSettings()
+	ts.PolecatPool = &config.PolecatPool{
+		Timezone: "UTC",
+		Seats:    map[string]config.SeatConfig{"deepseek-flash": {Cap: 2, Closed: "20:00-08:00"}},
+	}
+	start := time.Date(2026, 10, 19, 19, 59, 58, 0, time.UTC)
+	budget, err := specBudgetFromSeats(ts, start, func(string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !budget.Seats[0].FreeAt(start) {
+		t.Fatalf("at the tick's start the flash seat = %+v, want open", budget.Seats[0])
+	}
+
+	f := newFakeSpecTown(cleanSpec("gt-seat", 2, "2026-09-29T10:00:00Z"))
+	env := f.env()
+	env.Budget = budget
+	// Every read the cycle makes is past the boundary; the budget's own clock
+	// is the only pre-boundary one.
+	env.Now = func() time.Time { return start.Add(5 * time.Second) }
+	r := runSpecDispatchCycle(env)
+
+	if len(f.slung) != 0 {
+		t.Fatalf("slung %v onto a seat shut before the choice, want a skip", f.slung)
+	}
+	found := false
+	for _, skip := range r.Skipped {
+		if skip.Bead == "gt-seat" && strings.Contains(skip.Line, "closed until 08:00") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("skipped = %+v, want the seat named closed", r.Skipped)
 	}
 }
 
@@ -2360,8 +2402,8 @@ func TestSpecBudgetFromSeatMapShowsTheWindowInThePoolTimezone(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := b.Seats[0].Closed; got != tc.closed {
-				t.Errorf("Closed = %v, want %v", got, tc.closed)
+			if got := b.Seats[0].Window != nil && b.Seats[0].Window.Closed(tc.now); got != tc.closed {
+				t.Errorf("Closed at the tick = %v, want %v", got, tc.closed)
 			}
 			if got := b.Picture(); got != tc.picture {
 				t.Errorf("picture = %q, want %q", got, tc.picture)

@@ -756,6 +756,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	budget.SetLive(roster.Live)
 	budget.SetDeadHooked(roster.DeadHooked)
 	budget.NewestSpawn = roster.Newest
+	// The picture reads each seat's window at the tick's clock; the budget was
+	// built a moment before, and its construction time is no longer the one the
+	// report speaks for (gt-t8new).
+	budget.Now = env.Now()
 	report.Roster = budget.Picture()
 	if len(roster.Unrecorded) > 0 {
 		sort.Strings(roster.Unrecorded)
@@ -1262,9 +1266,10 @@ func specBudgetFor(townRoot string, ts *config.TownSettings, sd *config.SpecDisp
 }
 
 // specBudgetFromSeats builds the seat list from polecat_pool.seats: one seat per
-// agent, in the loader's order (sorted by agent name). A seat whose closed
-// window holds now is listed and counts its live polecats but takes no spawn,
-// and says when it opens. known is the loader's agent resolver
+// agent, in the loader's order (sorted by agent name). A seat's window is
+// carried on the seat and read at choice time against Budget.Now, so a seat
+// shut then takes no spawn while still counting its live polecats and saying
+// when it opens (gt-t8new). known is the loader's agent resolver
 // (config.AgentResolver). A map the loader rejects is an error: the daemon
 // checked it at start, so a tick that meets one dispatches nothing rather than
 // run on part of the list.
@@ -1277,13 +1282,11 @@ func specBudgetFromSeats(ts *config.TownSettings, now time.Time, known func(agen
 	if err != nil {
 		return b, fmt.Errorf("reading the seat map: %w", err)
 	}
+	// Now is the construction time: a picture drawn before the tick refreshes it
+	// reads each window as of the seats' read (gt-t8new).
+	b.Now = now
 	for _, s := range seats {
-		seat := specdispatch.Seat{Agent: s.Agent, Cap: s.Cap}
-		if s.Window != nil && s.Window.Closed(now) {
-			seat.Closed = true
-			seat.OpensAt = s.Window.OpensAt(now)
-		}
-		b.Seats = append(b.Seats, seat)
+		b.Seats = append(b.Seats, specdispatch.Seat{Agent: s.Agent, Cap: s.Cap, Window: s.Window})
 	}
 	return b, nil
 }
