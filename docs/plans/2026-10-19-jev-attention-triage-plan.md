@@ -4,7 +4,7 @@
 
 Design: docs/plans/2026-10-19-jev-attention-triage-design.md (bead gt-sxg5u, commit 3babac6c).
 
-Every bead is held with `needs-human` until Sloan approves this plan. Then release them in dependency order.
+Task beads were held with `needs-human` until approval, then released in dependency order.
 
 ## Tasks
 
@@ -37,7 +37,7 @@ Three tasks start in parallel. The replay report and the live job share the clie
 ## Operator steps (not polecat work)
 
 - Sloan approves this plan. Then the holds come off, in the order above.
-- Sloan provides the Jev API key. It goes in `~/.config/gt/jev.env`. Nobody prints it or puts it in a commit.
+- Sloan provides the Jev API key. It goes in `~/.config/gt/jev.env`. Nobody prints it or puts it in a commit. Check: the file is mode 600, and `git grep` for the key returns nothing before any commit.
 - Sloan reviews the pilot report and decides whether the live job goes on.
 - The kickstart after turning the flag on is done by the overseer, on a quiet town.
 

@@ -2,7 +2,7 @@
 
 # Jev advisory triage for the attention queue (pilot design)
 
-Bead: gt-sxg5u. Status: design, awaiting Sloan's approval of the pilot before any code.
+Bead: gt-sxg5u.
 
 ## Goal
 
@@ -29,14 +29,12 @@ Rejected for the pilot:
 
 - An item with an escalation kind, or with a confidence below `confidence_floor`, is always shown as `needs-you`, whatever Jev said.
 - A parse failure, a timeout or a 429 writes `needs-you` with reason `no-answer`.
-- Jev's answer can only lower an item's priority when it is confident. It can never hide an item.
+- Jev may move an item away from `needs-you` only when its label is not an escalation kind and its confidence is at least `confidence_floor`. Otherwise the item stays `needs-you`. Jev can never hide an item.
 - The summary goes into the state as data. The prompt says so, and the answer is parsed against the schema only.
 
 ## Pilot and measures
 
-Ground truth is a proxy, because the events do not record what the overseer did:
-- an item that was acked before it cleared is `needs-you`;
-- an item that cleared without an ack is `auto`.
+Ground truth is defined in "Measuring the pilot" below.
 
 The pilot replays the full event history offline, read-only, and reports:
 - precision and recall of `needs-you` against the proxy;
@@ -58,7 +56,7 @@ The pilot does not start until gt-s1xj6 has landed. Until then, the replay repor
 
 ## Cost
 
-Input is $42 per billion tokens. At an estimated 500 tokens per item, the full history of about 1,700 events comes to roughly $0.04 per replay, so the $5 cap leaves a wide margin. The pilot records the real token counts and replaces this estimate.
+Input is $42 per billion tokens. At an estimated 500 tokens per item, the full history of about 1,700 events comes to roughly $0.04 per replay, so the flat $5 cap sits well above it. The pilot records the real token counts and replaces this estimate.
 
 ## Error handling and testing
 
