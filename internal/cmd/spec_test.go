@@ -2315,6 +2315,61 @@ func TestSpecBudgetFromSeatMap(t *testing.T) {
 	}
 }
 
+// The window is read in polecat_pool.timezone and the picture shows the opening
+// in that zone's wall clock, whatever zone the tick's clock is in (gt-r23nm).
+func TestSpecBudgetFromSeatMapShowsTheWindowInThePoolTimezone(t *testing.T) {
+	t.Parallel()
+	known := func(string) bool { return true }
+	for _, tc := range []struct {
+		name, zone string
+		now        time.Time
+		closed     bool
+		picture    string
+	}{
+		{
+			// 03:00 UTC is 23:00 the evening before in New York (UTC-4): shut.
+			name: "west of UTC, shut", zone: "America/New_York",
+			now:     time.Date(2026, 10, 19, 3, 0, 0, 0, time.UTC),
+			closed:  true,
+			picture: "deepseek-flash 0/3 (closed until 08:00)",
+		},
+		{
+			// 03:00 UTC is 12:00 in Tokyo (UTC+9): open, though 03:00 UTC is
+			// inside 20:00-08:00 read as UTC.
+			name: "east of UTC, open", zone: "Asia/Tokyo",
+			now:     time.Date(2026, 10, 19, 3, 0, 0, 0, time.UTC),
+			closed:  false,
+			picture: "deepseek-flash 0/3",
+		},
+		{
+			// 12:00 UTC is 21:00 in Tokyo: shut, though noon UTC is open read as UTC.
+			name: "east of UTC, shut", zone: "Asia/Tokyo",
+			now:     time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC),
+			closed:  true,
+			picture: "deepseek-flash 0/3 (closed until 08:00)",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := config.NewTownSettings()
+			ts.PolecatPool = &config.PolecatPool{
+				Timezone: tc.zone,
+				Seats:    map[string]config.SeatConfig{"deepseek-flash": {Cap: 3, Closed: "20:00-08:00"}},
+			}
+			b, err := specBudgetFromSeats(ts, tc.now, known)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := b.Seats[0].Closed; got != tc.closed {
+				t.Errorf("Closed = %v, want %v", got, tc.closed)
+			}
+			if got := b.Picture(); got != tc.picture {
+				t.Errorf("picture = %q, want %q", got, tc.picture)
+			}
+		})
+	}
+}
+
 func TestSpecBudgetFromSeatMapRejectsWhatTheLoaderRejects(t *testing.T) {
 	t.Parallel()
 	ts := config.NewTownSettings()
