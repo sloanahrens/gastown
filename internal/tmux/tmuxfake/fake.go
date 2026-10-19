@@ -29,7 +29,7 @@ type session struct {
 
 	panePID     string   // the pane process; see SetPaneProcesses
 	descendants []string // its descendants, deepest first
-	killed      []string // PIDs a kill signalled, in order
+	killed      []string // PIDs a kill signaled, in order
 }
 
 // Server is an in-memory tmux server. Methods mirror *tmux.Tmux signatures.
@@ -252,7 +252,7 @@ func (s *Server) KillPaneProcesses(pane string) error {
 }
 
 // KillPaneProcessesExcluding is KillPaneProcesses minus excludePIDs: an
-// excluded descendant or pane process is not signalled.
+// excluded descendant or pane process is not signaled.
 func (s *Server) KillPaneProcessesExcluding(pane string, excludePIDs []string) error {
 	return s.killPaneProcesses(pane, excludePIDs)
 }
@@ -274,7 +274,7 @@ func (s *Server) killPaneProcesses(pane string, exclude []string) error {
 	return err
 }
 
-// Killed returns the PIDs signalled by KillPaneProcesses* in session, in order.
+// Killed returns the PIDs signaled by KillPaneProcesses* in session, in order.
 func (s *Server) Killed(session string) []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
