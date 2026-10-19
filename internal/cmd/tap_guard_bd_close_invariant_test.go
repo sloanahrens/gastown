@@ -517,3 +517,140 @@ func TestParseBdCloseInvocations_ReasonFile(t *testing.T) {
 		}
 	}
 }
+
+// TestBdCloseInvariantBlockPath_NewForms drives each close form the parser
+// learned in gt-0e0nz through the decision the guard turns into exit 2
+// (firstBdCloseRefusal): parsing a form is not enough if the ids or the reason
+// it read never reach the refusal. Every row closes gt-arno on a branch cut
+// for gt-arno with unmerged commits, so a form the guard cannot see is allowed
+// where it must be refused.
+func TestBdCloseInvariantBlockPath_NewForms(t *testing.T) {
+	t.Parallel()
+	scope := bdCloseInvariantScope{
+		branch:  "polecat/malachite/gt-arno+muck73gu",
+		target:  "origin/main",
+		counter: fakeCloseTimeCommitCounter{count: 3},
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/supersede.txt", []byte("supersede: folded into gt-y\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name, command string
+		wantID        string // the id the guard refuses; "" when the close passes
+	}{
+		{"dollar-paren substitution", "echo $(bd close gt-arno)", "gt-arno"},
+		{"backtick substitution", "echo `bd close gt-arno`", "gt-arno"},
+		{"eval", "eval 'bd close gt-arno'", "gt-arno"},
+		{"xargs fed by echo", "echo gt-arno | xargs bd close", "gt-arno"},
+		{"xargs fed by printf", `printf 'gt-arno\n' | xargs -n 1 bd close`, "gt-arno"},
+		{"xargs with an unreadable producer", "cat ids.txt | xargs bd close", "gt-arno"},
+		{"xargs with an unreadable producer and a lookup", "bd list --json | xargs bd close", "gt-arno"},
+		{"xargs with no producer", "xargs bd close < ids.txt", "gt-arno"},
+		{"env with flags", "env -u FOO bd close gt-arno", "gt-arno"},
+		{"repeated reason leaves this id unoverridden", "bd close gt-arno gt-other --reason x --reason 'supersede: y'", "gt-arno"},
+		{"reason file without an override", "bd close gt-arno --reason-file " + dir + "/missing.txt", "gt-arno"},
+
+		{"substitution with a supersede reason", "echo $(bd close gt-arno --reason 'supersede: dup')", ""},
+		{"xargs fed by echo with a supersede reason", "echo gt-arno | xargs bd close --reason 'cancel: x'", ""},
+		{"xargs with an unreadable producer and a supersede reason", "cat ids.txt | xargs bd close --reason 'supersede: y'", ""},
+		{"repeated reason overrides this id", "bd close gt-other gt-arno --reason x --reason 'supersede: y'", ""},
+		{"reason file with an override", "bd close gt-arno --reason-file " + dir + "/supersede.txt", ""},
+		{"a close of another bead through a new form", "echo gt-other | xargs bd close", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			id, refusal := firstBdCloseRefusal(scope, parseBdCloseInvocations(tt.command), "")
+			if tt.wantID == "" {
+				if refusal != "" {
+					t.Errorf("%q refused %q (%s), want it allowed", tt.command, id, refusal)
+				}
+				return
+			}
+			if id != tt.wantID || refusal == "" {
+				t.Errorf("%q refused (%q, %q), want %s refused", tt.command, id, refusal, tt.wantID)
+			}
+		})
+	}
+
+	t.Run("an unreadable producer on a branch that names no bead is allowed", func(t *testing.T) {
+		t.Parallel()
+		other := scope
+		other.branch = "feature/cleanup"
+		if id, refusal := firstBdCloseRefusal(other, parseBdCloseInvocations("cat ids.txt | xargs bd close"), ""); refusal != "" {
+			t.Errorf("a branch cut for no bead has nothing to judge, but %q was refused: %s", id, refusal)
+		}
+	})
+}
+
+// TestBranchBeadID: the bead a polecat branch was cut for, and nothing for any
+// other shape.
+func TestBranchBeadID(t *testing.T) {
+	t.Parallel()
+	for branch, want := range map[string]string{
+		"polecat/malachite/gt-arno+muck73gu": "gt-arno",
+		"polecat/malachite/GT-Arno+muck73gu": "gt-arno",
+		"polecat/malachite/gt-arno":          "gt-arno",
+		"polecat/malachite/temp+muck73gu":    "",
+		"feature/gt-arno":                    "",
+		"main":                               "",
+		"":                                   "",
+	} {
+		if got := branchBeadID(branch); got != want {
+			t.Errorf("branchBeadID(%q) = %q, want %q", branch, got, want)
+		}
+	}
+}
+
+// TestReadBdCloseReasonFile_Bounded: the path comes from the command, so the
+// read must not block on a FIFO, follow a device, or load an oversized file.
+func TestReadBdCloseReasonFile_Bounded(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	t.Run("a device is not read", func(t *testing.T) {
+		t.Parallel()
+		if got, ok := readBdCloseReasonFile("/dev/zero"); ok {
+			t.Errorf("read %d bytes from /dev/zero, want it refused unread", len(got))
+		}
+	})
+
+	t.Run("a directory is not read", func(t *testing.T) {
+		t.Parallel()
+		if _, ok := readBdCloseReasonFile(dir); ok {
+			t.Error("read a directory, want it refused")
+		}
+	})
+
+	t.Run("an oversized file is cut at the cap", func(t *testing.T) {
+		t.Parallel()
+		big := dir + "/big.txt"
+		body := "supersede: " + strings.Repeat("x", 2*bdCloseReasonFileMaxBytes)
+		if err := os.WriteFile(big, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		got, ok := readBdCloseReasonFile(big)
+		if !ok {
+			t.Fatal("a regular file must be read")
+		}
+		if len(got) != bdCloseReasonFileMaxBytes {
+			t.Errorf("read %d bytes, want the first %d", len(got), bdCloseReasonFileMaxBytes)
+		}
+		if !strings.HasPrefix(got, "supersede: ") {
+			t.Errorf("the head of the file must survive the cut, got %.20q", got)
+		}
+	})
+
+	t.Run("a regular file is trimmed", func(t *testing.T) {
+		t.Parallel()
+		p := dir + "/r.txt"
+		if err := os.WriteFile(p, []byte("  cancel: x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := readBdCloseReasonFile(p); !ok || got != "cancel: x" {
+			t.Errorf("got (%q, %v), want (cancel: x, true)", got, ok)
+		}
+	})
+}

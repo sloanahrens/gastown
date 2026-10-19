@@ -79,6 +79,10 @@ const (
 	// alongside "/". Both are component separators when matching a bead ID
 	// against a branch name.
 	bdCloseInvariantBranchSeparator = '+'
+
+	// bdCloseReasonFileMaxBytes caps how much of a --reason-file is read. A
+	// supersede:/cancel: reason is a sentence, so the cap is generous.
+	bdCloseReasonFileMaxBytes = 64 << 10
 )
 
 var tapGuardBdCloseInvariantCmd = &cobra.Command{
@@ -121,11 +125,16 @@ func init() {
 // the flag was repeated and is nil otherwise; reasonFor reads the pair. A
 // --reason-file is carried as ReasonFile and read by the guard, which knows the
 // session's cwd; the parser never touches the filesystem.
+//
+// IDsUnreadable marks an `xargs bd close` whose ids come from a producer the
+// parser cannot read (a file, a query): the close is real but names ids unknown
+// here, so the guard judges the bead its branch was cut for.
 type bdCloseInvocation struct {
-	IDs        []string
-	Reason     string
-	Reasons    []string
-	ReasonFile string
+	IDs           []string
+	Reason        string
+	Reasons       []string
+	ReasonFile    string
+	IDsUnreadable bool
 }
 
 // reasonFor returns the close reason that applies to the idx'th id. Repeated
@@ -142,7 +151,10 @@ func (inv bdCloseInvocation) reasonFor(idx int) string {
 // withReasonFile fills in the reason a --reason-file names. An explicit
 // --reason wins, and a file that cannot be read leaves the reason empty, which
 // the invariant refuses exactly as it did when the flag was not understood.
-// A relative path is read against cwd, the directory bd runs in.
+// A relative path is read against cwd, the directory bd runs in. The path comes
+// from the command, so only a regular file is read, and only its first
+// bdCloseReasonFileMaxBytes: /dev/zero, a FIFO or a multi-gigabyte file named
+// there must not stall or exhaust a guard that runs on every Bash call.
 func (inv bdCloseInvocation) withReasonFile(cwd string) bdCloseInvocation {
 	if inv.ReasonFile == "" || inv.Reason != "" || inv.ReasonFile == "-" {
 		return inv
@@ -151,12 +163,33 @@ func (inv bdCloseInvocation) withReasonFile(cwd string) bdCloseInvocation {
 	if !filepath.IsAbs(path) && filepath.IsAbs(cwd) {
 		path = filepath.Join(cwd, path)
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
+	reason, ok := readBdCloseReasonFile(path)
+	if !ok {
 		return inv
 	}
-	inv.Reason = strings.TrimSpace(string(data))
+	inv.Reason = reason
 	return inv
+}
+
+// readBdCloseReasonFile returns the trimmed head of the regular file at path.
+// A device, FIFO, directory or unreadable path reports ok=false without being
+// opened, so the read cannot block; a regular file is cut at
+// bdCloseReasonFileMaxBytes, far past any close reason.
+func readBdCloseReasonFile(path string) (string, bool) {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() {
+		return "", false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", false
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, bdCloseReasonFileMaxBytes))
+	if err != nil {
+		return "", false
+	}
+	return strings.TrimSpace(string(data)), true
 }
 
 // payloadCwd reads the session cwd from the hook payload. The branch under
@@ -217,6 +250,16 @@ func tapGuardBdCloseInvariant(stdin io.Reader, proc guardProcess) error {
 func firstBdCloseRefusal(scope bdCloseInvariantScope, invocations []bdCloseInvocation, cwd string) (id, refusal string) {
 	for _, invocation := range invocations {
 		invocation = invocation.withReasonFile(cwd)
+		if invocation.IDsUnreadable {
+			// The ids are unknown, so this close may name the bead the branch
+			// was cut for; judge it as if it did, under the reason the command
+			// carries (a supersede:/cancel: reason still clears it).
+			if id := branchBeadID(scope.branch); id != "" {
+				if refusal := bdCloseInvariantRefusal(scope, id, invocation.Reason); refusal != "" {
+					return id, refusal
+				}
+			}
+		}
 		for i, id := range invocation.IDs {
 			if !branchNamesBead(scope.branch, id) {
 				continue
@@ -322,6 +365,22 @@ func branchNamesBead(branch, issueID string) bool {
 	return false
 }
 
+// branchBeadID returns the bead id a polecat branch
+// (`polecat/<name>/<bead-id>+<suffix>`) was cut for, or "" for any other branch
+// shape, which names no bead.
+func branchBeadID(branch string) string {
+	parts := strings.Split(branch, "/")
+	if len(parts) != 3 || parts[0] != "polecat" {
+		return ""
+	}
+	id, _, _ := strings.Cut(parts[2], string(bdCloseInvariantBranchSeparator))
+	id = strings.ToLower(strings.TrimSpace(id))
+	if !isBeadIDShaped(id) {
+		return ""
+	}
+	return id
+}
+
 // isBeadIDShaped reports whether s has the town's "<prefix>-<slug>" bead ID
 // shape. The dash requirement is what keeps a branch component that happens to
 // equal a plain word ("temp", "main", the hex suffix of another polecat's
@@ -362,7 +421,9 @@ func parseBdCloseInvocations(command string) []bdCloseInvocation {
 		}
 		if invocation, ok := parseBdCloseSegment(segment); ok {
 			if bdCloseSegmentRunsXargs(segment) {
-				invocation.IDs = append(invocation.IDs, bdCloseEchoedIDs(pipedFrom)...)
+				ids, readable := bdCloseEchoedIDs(pipedFrom)
+				invocation.IDs = append(invocation.IDs, ids...)
+				invocation.IDsUnreadable = !readable
 			}
 			invocations = append(invocations, invocation)
 		}
@@ -407,24 +468,24 @@ func bdCloseSegmentRunsXargs(segment []string) bool {
 
 // bdCloseEchoedIDs returns the words an `echo` or `printf` segment writes, the
 // ids that `echo gt-x | xargs bd close` hands to bd. Any other producer (a
-// file, a query) is not readable and yields none, which is the guard's usual
-// fail-open answer for an id it cannot resolve.
-func bdCloseEchoedIDs(segment []string) []string {
+// file, a query), or none at all, is not readable: readable is false and the
+// caller judges the branch's own bead rather than letting the close through
+// unexamined.
+func bdCloseEchoedIDs(segment []string) (ids []string, readable bool) {
 	tokens := bdCloseCommandTokens(segment)
 	if len(tokens) < 2 {
-		return nil
+		return nil, false
 	}
 	if word := filepath.Base(tokens[0]); word != "echo" && word != "printf" {
-		return nil
+		return nil, false
 	}
-	var ids []string
 	for _, tok := range tokens[1:] {
 		if strings.HasPrefix(tok, "-") || strings.Contains(tok, "%") {
 			continue // an echo flag or a printf format directive
 		}
 		ids = append(ids, strings.Fields(strings.ReplaceAll(tok, `\n`, " "))...)
 	}
-	return ids
+	return ids, true
 }
 
 // parseBdCloseSegment parses one shell segment as a possible `bd close`.
