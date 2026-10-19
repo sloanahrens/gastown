@@ -24,15 +24,6 @@ type fakeCollisionLister struct {
 
 func (f fakeCollisionLister) ListSessions() ([]string, error) { return f.sessions, f.err }
 
-// withCollisionLister swaps the session lister buildCollisionReport reads for
-// the test. It mutates a package var, so callers must not run in parallel.
-func withCollisionLister(t *testing.T, l collisionSessionLister) {
-	t.Helper()
-	orig := newCollisionSessionLister
-	newCollisionSessionLister = func() collisionSessionLister { return l }
-	t.Cleanup(func() { newCollisionSessionLister = orig })
-}
-
 // liveCrewLockTown is a town root holding one lock, held by this test process,
 // for crew member alice of rig gastown.
 func liveCrewLockTown(t *testing.T) string {
@@ -86,11 +77,11 @@ func TestRunAgentsFixNoCollisionsPrintsNothing(t *testing.T) {
 }
 
 func TestBuildCollisionReportListSessionsError(t *testing.T) {
+	t.Parallel()
 	townRoot := liveCrewLockTown(t)
 	boom := errors.New("tmux: protocol version mismatch")
-	withCollisionLister(t, fakeCollisionLister{err: boom})
 
-	report, err := buildCollisionReport(session.NewPrefixRegistry(), townRoot)
+	report, err := buildCollisionReport(fakeCollisionLister{err: boom}, session.NewPrefixRegistry(), townRoot)
 	if !errors.Is(err, boom) {
 		t.Fatalf("buildCollisionReport error = %v, want it to wrap %v", err, boom)
 	}
@@ -102,10 +93,10 @@ func TestBuildCollisionReportListSessionsError(t *testing.T) {
 // With no tmux server ListSessions answers nil, nil: the lock's session is
 // genuinely absent, so the live lock is an orphan.
 func TestBuildCollisionReportNoSessionsOrphansLiveLock(t *testing.T) {
+	t.Parallel()
 	townRoot := liveCrewLockTown(t)
-	withCollisionLister(t, fakeCollisionLister{})
 
-	report, err := buildCollisionReport(session.NewPrefixRegistry(), townRoot)
+	report, err := buildCollisionReport(fakeCollisionLister{}, session.NewPrefixRegistry(), townRoot)
 	if err != nil {
 		t.Fatalf("buildCollisionReport: %v", err)
 	}

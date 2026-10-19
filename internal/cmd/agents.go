@@ -556,7 +556,7 @@ func runAgentsCheck(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	report, err := buildCollisionReport(townRegistry(), townRoot)
+	report, err := buildCollisionReport(tmux.NewTmux(), townRegistry(), townRoot)
 	if err != nil {
 		return err
 	}
@@ -610,7 +610,7 @@ func runAgentsFix(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check for remaining issues
-	report, err := buildCollisionReport(townRegistry(), townRoot)
+	report, err := buildCollisionReport(tmux.NewTmux(), townRegistry(), townRoot)
 	if err != nil {
 		return err
 	}
@@ -641,15 +641,13 @@ func writeAgentsFixReport(w io.Writer, report *CollisionReport) {
 	fmt.Fprintf(w, "To fix, close duplicate sessions or remove lock files manually.\n")
 }
 
-// collisionSessionLister is the slice of tmux buildCollisionReport reads; a
-// var so tests can substitute a fake without a tmux server.
+// collisionSessionLister is the slice of tmux buildCollisionReport reads, so
+// tests can pass a fake without a tmux server.
 type collisionSessionLister interface {
 	ListSessions() ([]string, error)
 }
 
-var newCollisionSessionLister = func() collisionSessionLister { return tmux.NewTmux() }
-
-func buildCollisionReport(reg *session.PrefixRegistry, townRoot string) (*CollisionReport, error) {
+func buildCollisionReport(lister collisionSessionLister, reg *session.PrefixRegistry, townRoot string) (*CollisionReport, error) {
 	report := &CollisionReport{
 		Locks: make(map[string]*lock.LockInfo),
 	}
@@ -658,7 +656,7 @@ func buildCollisionReport(reg *session.PrefixRegistry, townRoot string) (*Collis
 	// ListSessions already maps "no server running" to nil, nil; any other
 	// error is unknown session state, and treating it as "no sessions" would
 	// report every live lock as orphaned.
-	sessions, err := newCollisionSessionLister().ListSessions()
+	sessions, err := lister.ListSessions()
 	if err != nil {
 		return nil, fmt.Errorf("listing tmux sessions: %w", err)
 	}
