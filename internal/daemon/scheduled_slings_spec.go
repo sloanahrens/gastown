@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"fmt"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -28,27 +27,18 @@ type scheduledRunBead struct {
 	Priority    int
 }
 
-// scheduledAgentNameRe is what an entry's agent may look like when it is also a
-// label value: the agent:<name> label is read back by the dispatcher, so a space
-// or a colon would split it.
-var scheduledAgentNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]*$`)
-
 // scheduledSpecLabels are the labels a spec-dispatched run bead carries: its
-// identity, its formula and, when the entry names an agent, the agent: pin that
-// keeps the dispatcher on that agent's seats.
+// identity and its formula. It carries no agent: pin, so the dispatcher gives
+// the run any free seat.
 func scheduledSpecLabels(e ScheduledSlingEntry) []string {
-	labels := []string{scheduledSlingLabel(e), specdispatch.FormulaLabelPrefix + e.Formula}
-	if e.Agent != "" {
-		labels = append(labels, specdispatch.AgentLabelPrefix+e.Agent)
-	}
-	return labels
+	return []string{scheduledSlingLabel(e), specdispatch.FormulaLabelPrefix + e.Formula}
 }
 
 // scheduledSlingValidateDispatch rejects a dispatch value the patrol does not
-// know, and a spec dispatch whose agent could not be written as a label. A spec
-// entry may name an agent: the dispatcher still chooses the seat and the moment,
-// but only among that agent's seats (the agent: label). It also rejects a var
-// the dispatcher could not read back out of the "## Formula vars" section.
+// know, and a spec dispatch that names an agent: the dispatcher chooses the seat
+// and the moment, so the run takes a seat from polecat_pool.seats. It also
+// rejects a var the dispatcher could not read back out of the "## Formula vars"
+// section.
 func scheduledSlingValidateDispatch(e ScheduledSlingEntry) error {
 	switch e.Dispatch {
 	case "":
@@ -57,8 +47,8 @@ func scheduledSlingValidateDispatch(e ScheduledSlingEntry) error {
 	default:
 		return fmt.Errorf("scheduled_slings[%s]: dispatch %q must be empty or %q", e.Name, e.Dispatch, scheduledDispatchSpec)
 	}
-	if e.Agent != "" && !scheduledAgentNameRe.MatchString(e.Agent) {
-		return fmt.Errorf("scheduled_slings[%s]: agent %q must match %s: it becomes the bead's %s label", e.Name, e.Agent, scheduledAgentNameRe, specdispatch.AgentLabelPrefix)
+	if e.Agent != "" {
+		return fmt.Errorf("scheduled_slings[%s]: a spec entry takes no agent; it gets a seat from polecat_pool.seats", e.Name)
 	}
 	for k, v := range e.Vars {
 		// One var is one line of the section: a newline would end it early, a
