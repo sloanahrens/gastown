@@ -136,3 +136,20 @@ func TestSeatsAbsent(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentResolverKnowsWhatTheLauncherKnows(t *testing.T) {
+	t.Parallel()
+	ts := NewTownSettings()
+	ts.Agents = map[string]*RuntimeConfig{"my-agent": {Command: "my-agent"}}
+	known := AgentResolver("", ts)
+	for name, want := range map[string]bool{
+		"my-agent":      true, // the town's own agents
+		"claude-sonnet": true, // a cost-tier preset
+		"claude-haiku":  true,
+		"nope":          false,
+	} {
+		if got := known(name); got != want {
+			t.Errorf("known(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

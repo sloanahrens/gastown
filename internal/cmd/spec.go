@@ -1241,6 +1241,43 @@ func specBudgetFromConfig(ts *config.TownSettings, sd *config.SpecDispatchConfig
 	return b
 }
 
+// specBudgetFor is the tick's budget: the seat map when polecat_pool.seats names
+// any seat, the two-seat keys otherwise. A settings file with no seats key
+// dispatches exactly as it did before the map (gt-mukgk).
+func specBudgetFor(townRoot string, ts *config.TownSettings, sd *config.SpecDispatchConfig, now time.Time) (specdispatch.Budget, error) {
+	if ts != nil && ts.PolecatPool != nil && len(ts.PolecatPool.Seats) > 0 {
+		return specBudgetFromSeats(ts, now, config.AgentResolver(townRoot, ts))
+	}
+	return specBudgetFromConfig(ts, sd), nil
+}
+
+// specBudgetFromSeats builds the seat list from polecat_pool.seats: one seat per
+// agent, in the loader's order (sorted by agent name). A seat whose closed
+// window holds now is listed and counts its live polecats but takes no spawn,
+// and says when it opens. known is the loader's agent resolver
+// (config.AgentResolver). A map the loader rejects is an error: the daemon
+// checked it at start, so a tick that meets one dispatches nothing rather than
+// run on part of the list.
+func specBudgetFromSeats(ts *config.TownSettings, now time.Time, known func(agent string) bool) (specdispatch.Budget, error) {
+	var b specdispatch.Budget
+	pool := ts.PolecatPool
+	b.MinSpawnGap = pool.MinSpawnGapD()
+	b.MaxTotal = pool.GetMaxTotal()
+	seats, err := config.Seats(ts, known)
+	if err != nil {
+		return b, fmt.Errorf("reading the seat map: %w", err)
+	}
+	for _, s := range seats {
+		seat := specdispatch.Seat{Agent: s.Agent, Cap: s.Cap}
+		if s.Window != nil && s.Window.Closed(now) {
+			seat.Closed = true
+			seat.OpensAt = s.Window.OpensAt(now)
+		}
+		b.Seats = append(b.Seats, seat)
+	}
+	return b, nil
+}
+
 // specRosterFrom counts the seats the pool counts as taken (live polecats,
 // in-flight seat claims, seats mid-landing, and dead-hooked seats) per agent.
 // An empty GT_AGENT runs the polecat role default. A dead-hooked seat also
@@ -1368,7 +1405,10 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	}
 	maxPriority := ts.PolecatPool.GetMaxPriority()
 
-	budget := specBudgetFromConfig(ts, sd)
+	budget, err := specBudgetFor(townRoot, ts, sd, time.Now())
+	if err != nil {
+		return specDispatchReport{}, err
+	}
 	env := specDispatchEnv{
 		Hold: func() string { return dispatch.OperatorHold(townRoot) },
 		Candidates: func() specBoardRead {

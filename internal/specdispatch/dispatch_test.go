@@ -538,3 +538,51 @@ func TestChooseSeatPinnedAgent(t *testing.T) {
 		t.Errorf("pinned bead over the town total = %+v", got)
 	}
 }
+
+func TestClosedSeatTakesNoSpawn(t *testing.T) {
+	t.Parallel()
+	opens := time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC)
+	closed := Seat{Agent: "deepseek-flash", Cap: 3, Live: 1, Closed: true, OpensAt: opens}
+	if closed.Free() {
+		t.Fatal("a closed seat with room must not be free")
+	}
+	b := Budget{
+		Seats: []Seat{{Agent: "claude-sonnet", Cap: 1, Live: 1}, closed},
+		Now:   time.Date(2026, 10, 19, 21, 0, 0, 0, time.UTC),
+		Rand:  randForIndex(0, 2),
+	}
+	got := ChooseSeat(b, goodSpec())
+	if !got.Skip || got.Agent != "" {
+		t.Fatalf("every open seat full and one closed: %+v, want a skip", got)
+	}
+	if want := "deepseek-flash 1/3 (closed until 08:00)"; !strings.Contains(got.Reason, want) {
+		t.Errorf("reason %q lacks the closed seat in the picture %q", got.Reason, want)
+	}
+	// An unpinned bead goes to the open seat, never the closed one.
+	b.Seats[0].Live = 0
+	if got := ChooseSeat(b, goodSpec()); got.Skip || got.Agent != "claude-sonnet" {
+		t.Errorf("unpinned bead took %+v, want the open claude-sonnet seat", got)
+	}
+}
+
+func TestPinnedBeadWaitsOnClosedSeat(t *testing.T) {
+	t.Parallel()
+	opens := time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC)
+	b := Budget{
+		Seats: []Seat{
+			{Agent: "claude-sonnet", Cap: 3},
+			{Agent: "deepseek-flash", Cap: 3, Closed: true, OpensAt: opens},
+		},
+		Now:  time.Date(2026, 10, 19, 21, 0, 0, 0, time.UTC),
+		Rand: randForIndex(0, 2),
+	}
+	pinned := goodSpec()
+	pinned.Labels = []string{AgentLabelPrefix + "deepseek-flash"}
+	got := ChooseSeat(b, pinned)
+	if !got.Skip || got.Agent != "" {
+		t.Fatalf("pinned bead took %+v; it must wait", got)
+	}
+	if want := "waiting for a deepseek-flash seat, closed until 08:00 (free seats left alone: claude-sonnet)"; !strings.Contains(got.Reason, want) {
+		t.Errorf("reason = %q, want it to contain %q", got.Reason, want)
+	}
+}

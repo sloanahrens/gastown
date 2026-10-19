@@ -2273,3 +2273,78 @@ func TestSpecPeerHeldFromWarnsOnReadFailure(t *testing.T) {
 		}
 	})
 }
+
+func TestSpecBudgetFromSeatMap(t *testing.T) {
+	t.Parallel()
+	ts := config.NewTownSettings()
+	ts.PolecatPool = &config.PolecatPool{
+		Timezone:    "UTC",
+		MinSpawnGap: "4m",
+		Seats: map[string]config.SeatConfig{
+			"claude-sonnet":  {Cap: 3},
+			"claude-haiku":   {Cap: 2},
+			"deepseek-flash": {Cap: 3, Closed: "20:00-08:00"},
+		},
+	}
+	known := func(string) bool { return true }
+	night := time.Date(2026, 10, 19, 21, 0, 0, 0, time.UTC)
+	b, err := specBudgetFromSeats(ts, night, known)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.Seats) != 3 || b.MinSpawnGap != 4*time.Minute {
+		t.Fatalf("budget = %+v", b)
+	}
+	// Seats come in the loader's order, and only the shut one is closed.
+	if got := b.Picture(); got != "claude-haiku 0/2, claude-sonnet 0/3, deepseek-flash 0/3 (closed until 08:00)" {
+		t.Fatalf("picture = %q", got)
+	}
+	// A closed seat still counts its live polecats.
+	b.SetLive(map[string]int{"deepseek-flash": 2})
+	if flash := b.Seats[2]; !flash.Closed || flash.Live != 2 || flash.Free() {
+		t.Fatalf("flash = %+v", flash)
+	}
+
+	day := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	b, err = specBudgetFromSeats(ts, day, known)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Seats[2].Closed || !b.Seats[2].Free() {
+		t.Fatalf("flash at noon = %+v, want open", b.Seats[2])
+	}
+}
+
+func TestSpecBudgetFromSeatMapRejectsWhatTheLoaderRejects(t *testing.T) {
+	t.Parallel()
+	ts := config.NewTownSettings()
+	ts.PolecatPool = &config.PolecatPool{Seats: map[string]config.SeatConfig{"nope": {Cap: 1}}}
+	_, err := specBudgetFromSeats(ts, time.Now(), config.AgentResolver("", ts))
+	if err == nil || !strings.Contains(err.Error(), "polecat_pool.seats.nope") {
+		t.Fatalf("err = %v, want the loader's message naming the seat", err)
+	}
+}
+
+// A settings file with no seats key dispatches exactly as before the map.
+func TestSpecBudgetForSeatMapKeepsTheOldKeys(t *testing.T) {
+	t.Parallel()
+	ts := config.NewTownSettings()
+	ts.PolecatPool = &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
+	got, err := specBudgetFor("", ts, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := specBudgetFromConfig(ts, nil); got.Picture() != want.Picture() || got.Picture() != "deepseek-flash 0/3" {
+		t.Fatalf("picture = %q, want the old keys' %q", got.Picture(), want.Picture())
+	}
+
+	// Once the map names a seat, it is the whole list.
+	ts.PolecatPool.Seats = map[string]config.SeatConfig{"claude-haiku": {Cap: 1}}
+	got, err = specBudgetFor("", ts, nil, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Picture() != "claude-haiku 0/1" {
+		t.Fatalf("picture = %q", got.Picture())
+	}
+}
