@@ -97,12 +97,17 @@ func TestSeatLiveSessionlessSeatsOnTheSeatMap(t *testing.T) {
 		deadHooked bool
 		slungAgent string
 		seats      []string
-		want       map[string]int
+		// roleDefault is the polecat role default in the town's settings;
+		// empty is claude-sonnet.
+		roleDefault string
+		want        map[string]int
 	}{
-		{"mid-landing on its recorded agent", false, "claude-haiku", []string{"claude-sonnet", "claude-haiku"}, map[string]int{"claude-haiku": 1}},
-		{"dead-hooked on its recorded agent", true, "claude-haiku", []string{"claude-sonnet", "claude-haiku"}, map[string]int{"claude-haiku": 1}},
-		{"mid-landing, no record, several seats, on the role default", false, "", []string{"claude-sonnet", "claude-haiku"}, map[string]int{"claude-sonnet": 1}},
-		{"dead-hooked, no record, one seat", true, "", []string{"claude-haiku"}, map[string]int{"claude-haiku": 1}},
+		{"mid-landing on its recorded agent", false, "claude-haiku", []string{"claude-sonnet", "claude-haiku"}, "", map[string]int{"claude-haiku": 1}},
+		{"dead-hooked on its recorded agent", true, "claude-haiku", []string{"claude-sonnet", "claude-haiku"}, "", map[string]int{"claude-haiku": 1}},
+		{"mid-landing, no record, several seats, on the role default", false, "", []string{"claude-sonnet", "claude-haiku"}, "", map[string]int{"claude-sonnet": 1}},
+		{"dead-hooked, no record, one seat", true, "", []string{"claude-haiku"}, "", map[string]int{"claude-haiku": 1}},
+		{"mid-landing, no record, role default is no seat, counts on no seat", false, "", []string{"claude-sonnet", "claude-haiku"}, "claude-opus", map[string]int{config.UnknownSeatAgent: 1}},
+		{"dead-hooked, no record, role default is no seat, counts on no seat", true, "", []string{"claude-sonnet", "claude-haiku"}, "claude-opus", map[string]int{config.UnknownSeatAgent: 1}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -110,7 +115,11 @@ func TestSeatLiveSessionlessSeatsOnTheSeatMap(t *testing.T) {
 			ts := seatMapTown(c.seats...)
 			// The role default a restart starts a seat with no record on
 			// (gt-zj9yf), read from the town's settings.
-			ts.RoleAgents = map[string]string{"polecat": "claude-sonnet"}
+			roleDefault := c.roleDefault
+			if roleDefault == "" {
+				roleDefault = "claude-sonnet"
+			}
+			ts.RoleAgents = map[string]string{"polecat": roleDefault}
 			town := t.TempDir()
 			if err := config.SaveTownSettings(config.TownSettingsPath(town), ts); err != nil {
 				t.Fatalf("SaveTownSettings: %v", err)
