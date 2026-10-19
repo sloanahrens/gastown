@@ -358,21 +358,28 @@ func runFormulaRun(cmd *cobra.Command, args []string) error {
 
 	// Handle dry-run mode
 	if formulaRunDryRun {
-		return dryRunFormula(f, formulaName, targetRig)
+		return dryRunFormula(os.Stdout, f, formulaName, targetRig)
 	}
 
 	switch f.Type {
 	case "workflow":
 		return executeWorkflowFormula(f, formulaName, targetRig)
 	default:
-		fmt.Printf("%s Formula type '%s' is not supported for execution.\n",
-			style.Dim.Render("Note:"), f.Type)
-		fmt.Printf("Currently only 'workflow' formulas can be run.\n")
-		fmt.Printf("\nTo run '%s' manually:\n", formulaName)
-		fmt.Printf("  1. View formula:   gt formula show %s\n", formulaName)
-		fmt.Printf("  2. Sling to rig:   gt sling %s %s  (cooks it and pours a wisp)\n", formulaName, targetRig)
-		return nil
+		return reportUnsupportedFormulaType(os.Stdout, f, formulaName, targetRig)
 	}
+}
+
+// reportUnsupportedFormulaType tells the user gt formula run cannot execute
+// this formula type. Both the real run and --dry-run report it, so a dry run
+// never promises an execution the real run refuses.
+func reportUnsupportedFormulaType(w io.Writer, f *cookedFormula, formulaName, targetRig string) error {
+	fmt.Fprintf(w, "%s Formula type '%s' is not supported for execution.\n",
+		style.Dim.Render("Note:"), f.Type)
+	fmt.Fprintf(w, "Currently only 'workflow' formulas can be run.\n")
+	fmt.Fprintf(w, "\nTo run '%s' manually:\n", formulaName)
+	fmt.Fprintf(w, "  1. View formula:   gt formula show %s\n", formulaName)
+	fmt.Fprintf(w, "  2. Sling to rig:   gt sling %s %s  (cooks it and pours a wisp)\n", formulaName, targetRig)
+	return nil
 }
 
 // runFormulaSync syncs the town's on-disk formulas with the embedded set.
@@ -617,27 +624,32 @@ func (r *formulaSyncReport) behindPhrase() string {
 }
 
 // dryRunFormula shows what would happen without executing
-func dryRunFormula(f *cookedFormula, formulaName, targetRig string) error {
-	fmt.Printf("%s Would execute formula:\n", style.Dim.Render("[dry-run]"))
-	fmt.Printf("  Formula: %s\n", style.Bold.Render(formulaName))
-	fmt.Printf("  Type:    %s\n", f.Type)
-	fmt.Printf("  Rig:     %s\n", targetRig)
+func dryRunFormula(w io.Writer, f *cookedFormula, formulaName, targetRig string) error {
+	// The real run refuses these types, so the preview must too.
+	if f.Type != "workflow" {
+		return reportUnsupportedFormulaType(w, f, formulaName, targetRig)
+	}
+
+	fmt.Fprintf(w, "%s Would execute formula:\n", style.Dim.Render("[dry-run]"))
+	fmt.Fprintf(w, "  Formula: %s\n", style.Bold.Render(formulaName))
+	fmt.Fprintf(w, "  Type:    %s\n", f.Type)
+	fmt.Fprintf(w, "  Rig:     %s\n", targetRig)
 	// Show effective agent override (GH#2118)
 	if formulaRunAgent != "" {
-		fmt.Printf("  Agent:   %s\n", formulaRunAgent)
+		fmt.Fprintf(w, "  Agent:   %s\n", formulaRunAgent)
 	}
 
 	// Show --set variables if provided
 	if len(formulaRunSet) > 0 {
-		fmt.Printf("  Set:")
+		fmt.Fprintf(w, "  Set:")
 		for _, s := range formulaRunSet {
-			fmt.Printf(" %s", s)
+			fmt.Fprintf(w, " %s", s)
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 	}
 
 	if f.Type == "workflow" && len(f.Steps) > 0 {
-		fmt.Printf("\n  Steps (%d sequential):\n", len(f.Steps))
+		fmt.Fprintf(w, "\n  Steps (%d sequential):\n", len(f.Steps))
 		for i, step := range f.Steps {
 			needsStr := ""
 			if len(step.Needs) > 0 {
@@ -647,7 +659,7 @@ func dryRunFormula(f *cookedFormula, formulaName, targetRig string) error {
 			if len(step.Needs) == 0 {
 				readyStr = " ← ready"
 			}
-			fmt.Printf("    %d. %s: %s%s%s\n", i+1, step.ID, step.Title, needsStr, readyStr)
+			fmt.Fprintf(w, "    %d. %s: %s%s%s\n", i+1, step.ID, step.Title, needsStr, readyStr)
 		}
 	}
 

@@ -466,3 +466,37 @@ func TestFormatFormulaSyncReport_NamesOrphanedCopies(t *testing.T) {
 		}
 	}
 }
+
+// A dry run of a formula type gt formula run cannot execute reports "not
+// supported" like the real run, instead of printing "Would execute".
+func TestDryRunFormulaRefusesUnsupportedType(t *testing.T) {
+	t.Parallel()
+	for _, typ := range []string{"task", "patrol", "expansion"} {
+		t.Run(typ, func(t *testing.T) {
+			var buf bytes.Buffer
+			f := &cookedFormula{Type: typ}
+			if err := dryRunFormula(&buf, f, "some-formula", "gastown"); err != nil {
+				t.Fatalf("dryRunFormula: %v", err)
+			}
+			out := buf.String()
+			if strings.Contains(out, "Would execute") {
+				t.Errorf("dry run promises an execution the real run refuses:\n%s", out)
+			}
+			if !strings.Contains(out, "not supported for execution") {
+				t.Errorf("dry run does not report the type as unsupported:\n%s", out)
+			}
+		})
+	}
+}
+
+func TestDryRunFormulaWorkflowStillPreviews(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	f := &cookedFormula{Type: "workflow", Steps: []cookedStep{{ID: "a", Title: "First"}}}
+	if err := dryRunFormula(&buf, f, "wf", "gastown"); err != nil {
+		t.Fatalf("dryRunFormula: %v", err)
+	}
+	if out := buf.String(); !strings.Contains(out, "Would execute") || !strings.Contains(out, "First") {
+		t.Errorf("workflow dry run lost its preview:\n%s", out)
+	}
+}

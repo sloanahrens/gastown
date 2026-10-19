@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doltserver"
@@ -249,5 +250,57 @@ func TestOutputStatusText_CompactorCommitAdvisoryMarker(t *testing.T) {
 	}
 	if strings.Contains(buf.String(), "commits over line") {
 		t.Fatalf("no advisory marker expected with nothing reported, got: %q", buf.String())
+	}
+}
+
+// renderAgentDetails writes to the frame buffer w, never to stdout: gt status
+// --watch --verbose clears the screen between frames, which erases anything
+// printed outside the buffer.
+func TestRenderAgentDetailsWritesToWriter(t *testing.T) {
+	t.Parallel()
+	agent := townstatus.AgentRuntime{
+		Name:      "max",
+		Address:   "beads/crew/max",
+		Role:      "crew",
+		Running:   true,
+		AgentInfo: "claude opus",
+	}
+
+	var buf bytes.Buffer
+	renderAgentDetails(&buf, agent, "", nil, t.TempDir())
+	if out := buf.String(); !strings.Contains(out, "agent: claude opus") {
+		t.Errorf("agent line missing from the writer; got %q", out)
+	}
+}
+
+func TestTruncateWithEllipsisKeepsRunesWhole(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		in     string
+		maxLen int
+		want   string
+	}{
+		{"short ascii unchanged", "hello", 10, "hello"},
+		{"exact width unchanged", "hello", 5, "hello"},
+		{"ascii truncated", "hello world", 8, "hello..."},
+		{"multi-byte at the cut", "ééééééééé", 6, "ééé..."},
+		{"multi-byte within width", "ééééé", 5, "ééééé"},
+		{"cjk title", "修复字符串截断的问题在这里", 8, "修复字符串..."},
+		{"narrow width", "héllo", 3, "hél"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateWithEllipsis(tt.in, tt.maxLen)
+			if !utf8.ValidString(got) {
+				t.Errorf("truncateWithEllipsis(%q, %d) = %q, invalid UTF-8", tt.in, tt.maxLen, got)
+			}
+			if n := utf8.RuneCountInString(got); n > tt.maxLen {
+				t.Errorf("truncateWithEllipsis(%q, %d) = %q, %d runes, over the width", tt.in, tt.maxLen, got, n)
+			}
+			if got != tt.want {
+				t.Errorf("truncateWithEllipsis(%q, %d) = %q, want %q", tt.in, tt.maxLen, got, tt.want)
+			}
+		})
 	}
 }

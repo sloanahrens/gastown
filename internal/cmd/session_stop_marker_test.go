@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -143,7 +144,7 @@ func TestStartPolecatsWithWorkSkipsParkedPolecat(t *testing.T) {
 	hasWork := func(string, string) (bool, error) { return true, nil }
 	refused := func(string) error { return errors.New("tmux: refused by test") }
 	startPolecatsWithWork := func(townRoot, rigName string) ([]string, map[string]error) {
-		return startPolecatsWithWorkUsing(townRoot, rigName, hasWork, refused)
+		return startPolecatsWithWorkUsing(townRoot, rigName, io.Discard, hasWork, refused)
 	}
 
 	// Control: unparked, the polecat is started and the failure reaches the
