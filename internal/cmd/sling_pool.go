@@ -118,15 +118,44 @@ func poolSeatAgents(pool *config.PolecatPool) []string {
 	return agents
 }
 
-// poolDefaultAgent is the agent a sling that named none runs on: the seat with
-// the most room (its cap less its live polecats), the first by name when
-// several tie. It is "" when no seat has room. A sling that names no agent has
-// no label to honor, so it goes where there is the most room, which spreads the
-// town's polecats over the seats rather than filling one; the dispatcher, which
-// draws at random, never asks (it names the agent it drew).
-func poolDefaultAgent(pool *config.PolecatPool, sessions []poolSession) string {
+// poolSeatClosedAt reports whether agent's seat is inside its closed window at
+// now. A seat with no window is always open. A window the loader would refuse
+// (a bad zone or range, or no timezone) reads as closed: the town checked the
+// map at start, so a window that cannot be read here is a map nobody vetted,
+// and the cost rule behind a window is safer kept than guessed away.
+func poolSeatClosedAt(pool *config.PolecatPool, agent string, now time.Time) bool {
+	seat, ok := poolSeatOf(pool, agent)
+	if !ok || seat.Closed == "" {
+		return false
+	}
+	if pool.Timezone == "" {
+		return true
+	}
+	loc, err := time.LoadLocation(pool.Timezone)
+	if err != nil {
+		return true
+	}
+	w, err := config.ParseWindow(seat.Closed, loc)
+	if err != nil {
+		return true
+	}
+	return w.Closed(now)
+}
+
+// poolDefaultAgent is the agent a sling that named none runs on: the seat open
+// at now with the most room (its cap less its live polecats), the first by name
+// when several tie. It is "" when no open seat has room. A sling that names no
+// agent has no label to honor, so it goes where there is the most room, which
+// spreads the town's polecats over the seats rather than filling one; the
+// dispatcher, which draws at random, never asks (it names the agent it drew).
+// A seat inside its closed window is no candidate: this sling chose no seat, so
+// nothing in it asked to spend on a seat the town shut.
+func poolDefaultAgent(pool *config.PolecatPool, sessions []poolSession, now time.Time) string {
 	best, bestRoom := "", 0
 	for _, agent := range poolSeatAgents(pool) {
+		if poolSeatClosedAt(pool, agent, now) {
+			continue
+		}
 		room := pool.Seats[agent].Cap - poolSeatCount(agent, sessions)
 		if room > bestRoom {
 			best, bestRoom = agent, room
@@ -167,7 +196,8 @@ func poolSeatCapKey(agent string) string {
 // to admit, and the request stands untouched (gt-4lbz). A request for an agent
 // with a seat is admitted by that seat's cap like any other sling; a cap of 0
 // is a closed seat and refuses. A request that names none goes to the seat with
-// the most room (poolDefaultAgent), and is refused when no seat has any.
+// the most room among the seats open now (poolDefaultAgent), and is refused when
+// no seat has any.
 //
 // raise names the polecat_pool key whose cap refused the sling — the seat's cap
 // for a seat, max_total for the town's total — so the refusal can say what to
@@ -179,10 +209,11 @@ func poolSeatCapKey(agent string) string {
 // pool's business, but max_total is a cap on the town, and a request for any
 // agent adds one of the polecats it bounds (gt-bcpj5).
 //
-// A seat's closed window is the dispatcher's: it keeps the spec dispatcher from
-// spawning on that seat. A sling is an operator or a script naming an agent,
-// and it is admitted by the cap alone.
-func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []poolSession) (agent, reason string, refused bool, raise string) {
+// A seat's closed window bounds a choice, not a request: a sling that names no
+// agent is placed only on a seat open at now, while a sling that names a closed
+// seat's agent is an operator or a script naming an agent, and it is admitted by
+// the cap alone.
+func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []poolSession, now time.Time) (agent, reason string, refused bool, raise string) {
 	if pool == nil {
 		return "", "pool: no polecat pool configured", false, ""
 	}
@@ -198,8 +229,10 @@ func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []pool
 	}
 	agent = requested
 	if agent == "" {
-		if agent = poolDefaultAgent(pool, sessions); agent == "" {
-			if len(pool.Seats) != 1 {
+		if agent = poolDefaultAgent(pool, sessions, now); agent == "" {
+			// A one-seat pool shows that seat's own refusal, unless its window
+			// has shut it: this sling may not take that seat.
+			if len(pool.Seats) != 1 || poolSeatClosedAt(pool, poolSeatAgents(pool)[0], now) {
 				return "", "pool: every seat is full or closed -> no seat for a sling that named no agent", true, "polecat_pool.seats"
 			}
 			// The only seat's own refusal names its count, any dead-hooked
@@ -1133,15 +1166,16 @@ func (e *poolBackpressureError) Unwrap() error { return errPoolBackpressure }
 
 // poolUncountedFallback is the agent a decision falls back to when it cannot
 // count something it decides from: the one the caller asked for, else the first
-// seat by name that is open (a cap above 0), else none, which leaves the
+// seat by name that is open (a cap above 0 and outside its closed window at
+// now), else none, which leaves the
 // caller's own default agent to run. The reason line names whichever it was, so
 // a fallback never reads as a deliberate route.
-func poolUncountedFallback(pool *config.PolecatPool, requested string) (agent, name string) {
+func poolUncountedFallback(pool *config.PolecatPool, requested string, now time.Time) (agent, name string) {
 	if requested != "" {
 		return requested, requested
 	}
 	for _, a := range poolSeatAgents(pool) {
-		if pool.Seats[a].Cap > 0 {
+		if pool.Seats[a].Cap > 0 && !poolSeatClosedAt(pool, a, now) {
 			return a, a
 		}
 	}
@@ -1186,7 +1220,7 @@ func (r *poolRouter) route(requested string, live bool) (agent, reason string, e
 		// on a tmux hiccup — and the reason names the read that failed rather
 		// than passing an unknown count off as a clean one (gt-t8q5, gt-67fj).
 		// No seat is claimed on either path.
-		fallback, named := poolUncountedFallback(pool, requested)
+		fallback, named := poolUncountedFallback(pool, requested, r.now())
 		var oe *poolOccupancyError
 		if errors.As(seatErr, &oe) {
 			what := "count seats"
@@ -1199,7 +1233,7 @@ func (r *poolRouter) route(requested string, live bool) (agent, reason string, e
 		return fallback,
 			"pool: cannot read seat claims (" + seatErr.Error() + "), using " + named, nil
 	}
-	agent, reason, refused, raise := choosePoolAgent(pool, requested, sessions)
+	agent, reason, refused, raise := choosePoolAgent(pool, requested, sessions, r.now())
 	if live && !refused {
 		seat.claimFor(agent, pool, "")
 	}

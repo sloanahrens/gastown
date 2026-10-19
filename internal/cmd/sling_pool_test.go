@@ -82,7 +82,7 @@ func TestChoosePoolAgent(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, reason, refused, raise := choosePoolAgent(c.pool, c.requested, c.sessions)
+			got, reason, refused, raise := choosePoolAgent(c.pool, c.requested, c.sessions, poolTestNow)
 			if got != c.want {
 				t.Errorf("agent = %q, want %q (reason: %s)", got, c.want, reason)
 			}
@@ -1720,7 +1720,7 @@ func TestPoolRosterCountsADeferredExitSeatsWork(t *testing.T) {
 			// A sling next to this seat must be refused while the crashed
 			// polecat's restart is coming, and its line must name the seat that
 			// filled the pool (gt-bc9b6, acceptance 2 and 3).
-			_, reason, refused, raise := choosePoolAgent(pool, "", sessions)
+			_, reason, refused, raise := choosePoolAgent(pool, "", sessions, poolTestNow)
 			if refused != (c.wantSeats > 0) {
 				t.Fatalf("refused = %v, want %v (%s)", refused, c.wantSeats > 0, reason)
 			}
@@ -1747,8 +1747,147 @@ func TestPoolRosterHoldsADeferredExitSeatUnderTheTownTotal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith: %v", err)
 	}
-	_, reason, refused, raise := choosePoolAgent(pool, "", sessions)
+	_, reason, refused, raise := choosePoolAgent(pool, "", sessions, poolTestNow)
 	if !refused || raise != "polecat_pool.max_total" {
 		t.Fatalf("the town's total must refuse with the dead seat counted: refused=%v raise=%q (%s)", refused, raise, reason)
 	}
+}
+
+// ── Seat windows on a sling (gt-y2tm3) ──────────────────────────────────────
+
+// windowedPool is flash shut 20:00-08:00 Chicago time beside an always-open
+// sonnet seat. Flash has the more room, so a pick that ignores the window lands
+// on it.
+func windowedPool() *config.PolecatPool {
+	return &config.PolecatPool{
+		Timezone: "America/Chicago",
+		Seats: map[string]config.SeatConfig{
+			"deepseek-flash": {Cap: 3, Closed: "20:00-08:00"},
+			"claude-sonnet":  {Cap: 2},
+		},
+	}
+}
+
+// chicagoAt is the wall clock in the pool's zone; September is CDT.
+func chicagoAt(t *testing.T, hour, min int) time.Time {
+	t.Helper()
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatalf("loading America/Chicago: %v", err)
+	}
+	return time.Date(2026, 9, 18, hour, min, 0, 0, loc)
+}
+
+// TestChoosePoolAgentSeatWindows pins that a sling naming no agent is placed
+// only on a seat open at the clock it is given, and that a sling naming a closed
+// seat's agent is still admitted by the cap alone.
+func TestChoosePoolAgentSeatWindows(t *testing.T) {
+	t.Parallel()
+	s := func(agent string) poolSession { return poolSession{name: "gt-x", agent: agent} }
+	pool := windowedPool()
+	flashOnly := &config.PolecatPool{Timezone: "America/Chicago", Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 3, Closed: "20:00-08:00"}}}
+	noZone := &config.PolecatPool{Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 3, Closed: "20:00-08:00"}, "claude-sonnet": {Cap: 2}}}
+	badRange := &config.PolecatPool{Timezone: "America/Chicago", Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 3, Closed: "bogus"}, "claude-sonnet": {Cap: 2}}}
+	sonnetFull := []poolSession{s("claude-sonnet"), s("claude-sonnet")}
+	flashFull := []poolSession{s("deepseek-flash"), s("deepseek-flash"), s("deepseek-flash")}
+
+	const (
+		everySeat = "pool: every seat is full or closed -> no seat for a sling that named no agent"
+		flashCap  = "polecat_pool.seats.deepseek-flash.cap"
+	)
+	cases := []struct {
+		name        string
+		pool        *config.PolecatPool
+		requested   string
+		sessions    []poolSession
+		now         time.Time
+		want        string
+		wantWhy     string
+		wantRefused bool
+		wantRaise   string
+	}{
+		{"by day the seat with the most room wins", pool, "", nil, chicagoAt(t, 12, 0), "deepseek-flash", "pool: seat 1/3 -> deepseek-flash", false, ""},
+		{"at 21:00 an unnamed sling skips the closed seat with the most room", pool, "", nil, chicagoAt(t, 21, 0), "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
+		{"at 03:00 the window still holds past midnight", pool, "", nil, chicagoAt(t, 3, 0), "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
+		{"the window opens at its end", pool, "", nil, chicagoAt(t, 8, 0), "deepseek-flash", "pool: seat 1/3 -> deepseek-flash", false, ""},
+		{"the window closes at its start", pool, "", nil, chicagoAt(t, 20, 0), "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
+		{"at 21:00 with every open seat full an unnamed sling is refused", pool, "", sonnetFull, chicagoAt(t, 21, 0), "", everySeat, true, "polecat_pool.seats"},
+		{"a one-seat pool whose seat is shut refuses an unnamed sling", flashOnly, "", nil, chicagoAt(t, 21, 0), "", everySeat, true, "polecat_pool.seats"},
+		{"a one-seat pool whose seat is open still shows the seat's own count", flashOnly, "", flashFull, chicagoAt(t, 12, 0), "deepseek-flash", "pool: full (3/3) -> no seat for deepseek-flash", true, flashCap},
+		{"a sling naming the closed seat's agent is admitted by the cap alone", pool, "deepseek-flash", nil, chicagoAt(t, 21, 0), "deepseek-flash", "pool: seat 1/3 -> deepseek-flash", false, ""},
+		{"a sling naming the closed seat's agent is still held by its cap", pool, "deepseek-flash", flashFull, chicagoAt(t, 21, 0), "deepseek-flash", "pool: full (3/3) -> no seat for deepseek-flash", true, flashCap},
+		{"a window with no timezone reads as shut", noZone, "", nil, chicagoAt(t, 12, 0), "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
+		{"a window that does not parse reads as shut", badRange, "", nil, chicagoAt(t, 12, 0), "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, reason, refused, raise := choosePoolAgent(c.pool, c.requested, c.sessions, c.now)
+			if got != c.want || reason != c.wantWhy || refused != c.wantRefused || raise != c.wantRaise {
+				t.Errorf("got (%q, %q, refused=%v, raise=%q), want (%q, %q, refused=%v, raise=%q)",
+					got, reason, refused, raise, c.want, c.wantWhy, c.wantRefused, c.wantRaise)
+			}
+		})
+	}
+}
+
+// TestRouteUnnamedSlingReadsTheRouterClock is the sling end of gt-y2tm3: the
+// router hands its own clock to the choice, so a live `gt sling` with no agent
+// at 21:00 claims the open seat, and one with the open seat full is refused
+// naming polecat_pool.seats, while a sling naming the shut seat's agent is
+// admitted.
+func TestRouteUnnamedSlingReadsTheRouterClock(t *testing.T) {
+	t.Parallel()
+	night := chicagoAt(t, 21, 0)
+	atNight := func(w *testPoolTown) *poolRouter {
+		r := w.process()
+		r.now = func() time.Time { return night }
+		return r
+	}
+
+	t.Run("an unnamed sling claims the open seat", func(t *testing.T) {
+		t.Parallel()
+		w := newTestPoolTown(windowedPool())
+		agent, reason, err := atNight(w).route("", true)
+		if err != nil || agent != "claude-sonnet" {
+			t.Fatalf("route = %q (%s) %v, want claude-sonnet", agent, reason, err)
+		}
+		if claims := w.claims(t); len(claims) != 1 || claims[0].Agent != "claude-sonnet" {
+			t.Errorf("claims = %+v, want one on claude-sonnet", claims)
+		}
+	})
+
+	t.Run("an unnamed sling with every open seat full is refused", func(t *testing.T) {
+		t.Parallel()
+		w := newTestPoolTown(windowedPool())
+		w.liveSessions("claude-sonnet", "claude-sonnet")
+		agent, reason, err := atNight(w).route("", true)
+		if !errors.Is(err, errPoolBackpressure) || agent != "" {
+			t.Fatalf("route = %q (%s) %v, want a backpressure refusal", agent, reason, err)
+		}
+		if !strings.Contains(err.Error(), "raise polecat_pool.seats to spawn") {
+			t.Errorf("the refusal must name polecat_pool.seats: %v", err)
+		}
+		if claims := w.claims(t); len(claims) != 0 {
+			t.Errorf("a refused sling must not claim a seat: %+v", claims)
+		}
+	})
+
+	t.Run("a sling naming the shut seat's agent is admitted", func(t *testing.T) {
+		t.Parallel()
+		w := newTestPoolTown(windowedPool())
+		agent, reason, err := atNight(w).route("deepseek-flash", true)
+		if err != nil || agent != "deepseek-flash" {
+			t.Fatalf("route = %q (%s) %v, want deepseek-flash", agent, reason, err)
+		}
+	})
+
+	t.Run("an unreadable count falls back to an open seat", func(t *testing.T) {
+		t.Parallel()
+		w := newTestPoolTown(windowedPool())
+		w.lister = &fakeLister{err: errors.New("tmux: no server")}
+		agent, reason, err := atNight(w).route("", true)
+		if err != nil || agent != "claude-sonnet" {
+			t.Fatalf("route = %q (%s) %v, want the open seat", agent, reason, err)
+		}
+	})
 }
