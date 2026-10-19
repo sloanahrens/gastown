@@ -79,10 +79,6 @@ type Window struct {
 	Loc              *time.Location
 }
 
-// UnknownSeatAgent is the roster's key for a polecat that records no agent on
-// a map with several seats (Task 3). It names no seat, so Seats rejects it.
-const UnknownSeatAgent = "(unrecorded)"
-
 // Seats returns the town's seats sorted by agent name. known reports whether
 // an agent name resolves (the agents map or a built-in preset).
 func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error)
@@ -133,7 +129,7 @@ func TestSeatsSortedAndValidated(t *testing.T) {
 func TestSeatsRejects(t *testing.T) {
 	cases := map[string]PolecatPool{
 		"unknown agent":      {Seats: map[string]SeatConfig{"nope": {Cap: 1}}},
-		"the unrecorded key": {Seats: map[string]SeatConfig{UnknownSeatAgent: {Cap: 1}}},
+		"unrecorded name":     {Seats: map[string]SeatConfig{"(unrecorded)": {Cap: 1}}},
 		"negative cap":       {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: -1}}},
 		"bad window":         {Timezone: "America/Chicago", Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "8pm-8am"}}},
 		"window, no zone":    {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "20:00-08:00"}}},
@@ -145,7 +141,7 @@ func TestSeatsRejects(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ts := NewTownSettings()
 			ts.PolecatPool = &pool
-			known := func(a string) bool { return a != "nope" }
+			known := func(a string) bool { return a != "nope" && a != "(unrecorded)" }
 			if _, err := Seats(ts, known); err == nil {
 				t.Fatal("want an error")
 			}
@@ -259,9 +255,6 @@ func Seats(ts *TownSettings, known func(string) bool) ([]Seat, error) {
 	out := make([]Seat, 0, len(agents))
 	for _, a := range agents {
 		c := pool.Seats[a]
-		if a == UnknownSeatAgent {
-			return nil, fmt.Errorf("polecat_pool.seats.%s: that key counts polecats that record no agent, and names no seat", a)
-		}
 		if !known(a) {
 			return nil, fmt.Errorf("polecat_pool.seats.%s: no agent of that name in agents or the built-in presets", a)
 		}
@@ -369,7 +362,10 @@ func TestSpecBudgetFromSeatMap(t *testing.T) {
 		},
 	}
 	now := time.Date(2026, 10, 19, 21, 0, 0, 0, time.UTC)
-	b := specBudgetFromSeats(ts, now, func(string) bool { return true })
+	b, err := specBudgetFromSeats(ts, now, func(string) bool { return true })
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(b.Seats) != 3 {
 		t.Fatalf("seats = %+v", b.Seats)
 	}
@@ -449,12 +445,13 @@ Expected: PASS.
 **Interfaces:**
 - Consumes: `config.Seats` (Task 1), `specdispatch.Budget.SetLive(map[string]int)`.
 - Produces: the roster's per-agent map keys are the agent each seat was spawned on (the agent bead's `Agent` field), so `SetLive` fills every seat in the map.
+- Produces: `specRoster.Unrecorded []string` holds the names of polecats that record no agent on a map with several seats. It is not a map key. The tick sets `Budget.LiveTotal` to the sum of `Live` plus `len(Unrecorded)`, because `SetLive` sums only the per-agent map.
 
-- [ ] **Step 1: Write the failing test.** Build a roster with three live polecats whose agent beads record `claude-sonnet`, `claude-haiku` and `deepseek-flash`, and a sessionless one whose bead records `claude-haiku`. Assert the per-agent map is `{"claude-sonnet": 1, "claude-haiku": 2, "deepseek-flash": 1}`, not a count under the role default. A fourth polecat recording no agent, on a map with several seats, fills no seat's count, is returned in `Unrecorded`, and still counts in `LiveTotal`.
+- [ ] **Step 1: Write the failing test.** Build a roster with three live polecats whose agent beads record `claude-sonnet`, `claude-haiku` and `deepseek-flash`, and a sessionless one whose bead records `claude-haiku`. Assert the per-agent map is `{"claude-sonnet": 1, "claude-haiku": 2, "deepseek-flash": 1}`, not a count under the role default. A fourth polecat recording no agent, on a map with several seats, fills no seat's count and is returned in `Unrecorded`. Assert `LiveTotal` is 5: the four in `Live` plus that one.
 
 - [ ] **Step 2: Run it and confirm it fails**, with `go test ./internal/daemon/ -run SeatLive -count=1`.
 
-- [ ] **Step 3: Implement.** Key the count on the agent bead's recorded agent. Where no agent is recorded, use the seat map's single agent if the map has exactly one seat; with several seats, count it under `config.UnknownSeatAgent` (`"(unrecorded)"`). That key is no seat: `SetLive` adds it to no seat and the choice never sees it, but it counts in `LiveTotal`, so it answers to `max_total`. The loader refuses a `seats` entry of that name (Task 1). The tick reports the bucket once per tick, naming the polecats: `roster: N polecat(s) record no agent and count under "(unrecorded)", on no seat: <names>`. `gt pool show` lists seats only, so that notice is where the bucket appears.
+- [ ] **Step 3: Implement.** Key the count on the agent bead's recorded agent. Where no agent is recorded, use the seat map's single agent if the map has exactly one seat; with several seats, add the polecat's name to `Unrecorded` and leave `Live` alone. The tick computes `LiveTotal` as the sum of `Live` plus `len(Unrecorded)`, so `max_total` sees the polecat. The config package defines no bucket key (Task 1 has none), so neither the loader nor the seat map ever sees the name `(unrecorded)`. The tick reports the bucket once per tick, naming the polecats: `roster: N polecat(s) record no agent and count toward max_total on no seat: <names>`. `gt pool show` lists seats only, so that notice is where the bucket appears.
 
 - [ ] **Step 4: Run the tests**, `go test ./internal/daemon/ -count=1`, expect PASS.
 
@@ -535,7 +532,7 @@ Expected: PASS.
 - [ ] **Step 4: Run the tests**, `go test ./internal/land/ -count=1`, expect PASS.
 - [ ] **Step 5: Write the failing dashboard test:** with two rigs' landings files and the town review log inside 24 hours, `agentActivity` returns one sorted row per agent with its landing and rejection counts; a record naming no agent credits nobody; a log with an entry outside the window contributes nothing.
 - [ ] **Step 6: Run it and confirm it fails**, `go test ./internal/cmd/ -run ModelsAgentActivity -count=1`.
-- [ ] **Step 7: Implement.** `agentActivity` reads `land.RigLandingsFile` for `hq` and each known rig and `land.TownReviewsFile`, keeps records at or after the reader's injected `now` minus `modelsActivityWindow` (24h), counts `Landed` per record `Agent` and `Rejected` per review `Agent` whose verdict is request-changes or whose record is flagged rejected, sorts the agents, and returns the union of both maps. A missing file is an empty window; one that cannot be read is returned by name so the panel can say which. The panel renders the rows beneath the seat rows.
+- [ ] **Step 7: Implement.** `agentActivity` reads `land.RigLandingsFile` for `hq` and each known rig and `land.TownReviewsFile`, keeps records at or after the reader's injected `now` minus `modelsActivityWindow` (24h), counts `Landed` once per landing record under its `Agent`, and `Rejected` once per review record under its `Agent` where the record's `Rejected` field is true or its `Verdict` is `request_changes` (the two conditions make one rejection, not two; a record with no `Agent` credits no row), sorts the agents, and returns the union of both maps. A missing file is an empty window; one that cannot be read is returned by name so the panel can say which. The panel renders the rows beneath the seat rows.
 - [ ] **Step 8: Run the tests**, `go test ./internal/land/ ./internal/cmd/ -count=1`, expect PASS.
 - [ ] **Step 9: Commit** — `feat(land): record the agent each landing ran on (gt-mukgk)`
 
@@ -560,7 +557,7 @@ Expected: PASS.
 
 - [ ] **Step 1: Write the failing tests.**
   - For each retired key, a settings file carrying it fails to load, with a message containing `was replaced by` and `gt pool migrate`.
-  - Golden files: `two-seat.json` (pool seat + second seat) migrates to a `seats` map with both caps; `pro-seat.json` (pool and pro seats on different agents) becomes one entry per agent; `same-agent.json` (pool and pro seats on one agent) becomes one entry whose cap is the sum of the two caps; `deep-review-pins.json` strips `agent` from spec entries. Running migrate on its own output changes nothing.
+  - Golden files: `two-seat.json` (pool seat + second seat) migrates to a `seats` map with both caps; `pro-seat.json` (pool and pro seats on different agents) becomes one entry per agent; `same-agent.json` (pool and pro seats on one agent) becomes one entry whose cap is the sum of the two caps; `deep-review-pins.json` strips `agent` from spec entries; `seat-conflict.json` (a legacy pool agent that `seats` already names) fails with nothing written and that agent named. Running migrate on its own output changes nothing.
 - [ ] **Step 2: Run them and confirm they fail**, `go test ./internal/config/ ./internal/cmd/ -run 'Retired|PoolMigrate' -count=1`.
 - [ ] **Step 3: Implement the messages.** In `parse_error.go`, when a `ParseError`'s `Keys` holds one of these paths, append the replacement:
 
@@ -584,7 +581,7 @@ var retiredSeatKeys = map[string]string{
      - the pro seat: `pro_agent`, capped at `pro_max`, only when `pro_agent` is set and `pro_max` is above zero;
      - the second seat: `spec_dispatch.hooked_agent` (or `defaultSpecHookedAgent` when empty), capped at `max_hooked`, only when `max_hooked` is above zero.
 
-     Two legacy keys that name one agent add their caps, since they were independent pools and the merged seat must hold what both held. `pro_label` has no seat equivalent and is dropped; the bead's `agent:<name>` label replaces it. A legacy key naming an agent already present in `seats` stops the migration with nothing written and a message naming that agent, because a sum there would silently change a cap the operator set on the new key;
+     Two legacy keys that name one agent add their caps, since they were independent pools and the merged seat must hold what both held. `pro_label` has no seat equivalent and is dropped; the bead's `agent:<name>` label replaces it. The collision check reads `seats` as the file has it before any legacy key is applied. A legacy key naming an agent already in that map stops the migration with nothing written and a message naming that agent, because a sum there would silently change a cap the operator set on the new key. Legacy keys never collide with each other (they only sum), so the result does not depend on the order they are read;
   2. removes the retired keys, and `agent` from `scheduled_slings` entries whose `dispatch` is `spec`;
   3. backs up the file as `config.json.bak-<UTC timestamp>-pool-migrate`, then writes the result atomically;
   4. prints each change, or "nothing to migrate".
@@ -598,7 +595,7 @@ var retiredSeatKeys = map[string]string{
 - [ ] every retired key fails to load with `was replaced by` and `gt pool migrate`
 - [ ] the four golden migrations match, and a second run changes nothing
 - [ ] the pro seat migrates to a seat of its own; two legacy keys on one agent merge into one seat whose cap is their sum
-- [ ] a legacy key naming an agent already in `seats` stops the migration with nothing written
+- [ ] a legacy key naming an agent already in `seats` stops the migration with nothing written, and the message names that agent
 - [ ] `--dry-run` writes nothing
 - [ ] no reader references a removed field (`go build ./...`)
 
