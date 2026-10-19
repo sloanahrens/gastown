@@ -217,6 +217,9 @@ func (t *Town) loadSettings() error {
 	if err := s.PolecatPool.Validate(); err != nil {
 		return oneLine(t.path(FileSettings), err)
 	}
+	if _, err := config.Seats(&s, config.SeatsKnownTo(&s)); err != nil {
+		return oneLine(t.path(FileSettings), err)
+	}
 	if err := t.checkLiteralSecrets(&s); err != nil {
 		return err
 	}
