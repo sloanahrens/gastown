@@ -3,6 +3,8 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -19,6 +21,42 @@ import (
 
 // crewAtRetried tracks if we've already retried after stale session cleanup
 var crewAtRetried bool
+
+// paneProcessKiller is the part of *tmux.Tmux the respawn path kills with.
+type paneProcessKiller interface {
+	KillPaneProcesses(pane string) error
+	KillPaneProcessesExcluding(pane string, excludePIDs []string) error
+}
+
+// killPaneForRespawn clears paneID's processes before it is respawned. When
+// callerPane (the caller's $TMUX_PANE) is paneID, gt crew at is running inside
+// the pane it is restarting, so the pane process and every ancestor of the
+// caller in callerPIDs are spared: killing them would kill gt before it can
+// call RespawnPane. RespawnPane's -k then replaces the survivors.
+func killPaneForRespawn(t paneProcessKiller, paneID, callerPane string, callerPIDs []string) error {
+	if callerPane == paneID {
+		return t.KillPaneProcessesExcluding(paneID, callerPIDs)
+	}
+	return t.KillPaneProcesses(paneID)
+}
+
+// callerPIDChain returns this process's PID followed by its ancestors, nearest
+// first. An ancestor that cannot be read ends the chain.
+func callerPIDChain() []string {
+	chain := []string{strconv.Itoa(os.Getpid())}
+	for len(chain) < 64 {
+		out, err := exec.Command("ps", "-o", "ppid=", "-p", chain[len(chain)-1]).Output()
+		if err != nil {
+			break
+		}
+		ppid := strings.TrimSpace(string(out))
+		if ppid == "" || ppid == "0" || ppid == "1" {
+			break
+		}
+		chain = append(chain, ppid)
+	}
+	return chain
+}
 
 func runCrewAt(cmd *cobra.Command, args []string) error {
 	var name string
@@ -334,7 +372,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 				}
 				// Kill all processes in the pane before respawning to prevent orphan leaks
 				// RespawnPane's -k flag only sends SIGHUP which Claude/Node may ignore
-				if err := t.KillPaneProcesses(paneID); err != nil {
+				if err := killPaneForRespawn(t, paneID, os.Getenv("TMUX_PANE"), callerPIDChain()); err != nil {
 					// Non-fatal but log the warning
 					style.PrintWarning("could not kill pane processes: %v", err)
 				}
