@@ -109,6 +109,9 @@ type Options struct {
 	LaunchDaemonsDir string
 	// GTCommand is the binary every nested gt invocation runs (gt dolt, gt
 	// estop, gt thaw, gt polecat). The command passes its own executable.
+	// Each nested call runs with TownRoot as its working directory (the
+	// script's cd "$GT_ROOT"), so the caller's cwd never decides which town
+	// they act on.
 	GTCommand string
 	UID       int
 
@@ -362,15 +365,13 @@ func (e *engine) gcActive() bool {
 		strings.HasPrefix(m.Actor, "daemon/scheduled_maintenance")
 }
 
-// holdOn reports whether the operator hold exists.
+// holdOn reports whether the operator hold exists. Only a successful stat is
+// evidence of one: an unreadable path is not a hold, and reporting it as one
+// would make setHold skip the write that raises the hold and clearHold skip
+// the removal that lifts it.
 func (e *engine) holdOn() bool {
 	_, err := os.Stat(dispatch.HoldFilePath(e.o.TownRoot))
-	if err == nil {
-		return true
-	}
-	// A hold that cannot be ruled out is left alone (dispatch.OperatorHold
-	// fails closed the same way).
-	return !os.IsNotExist(err)
+	return err == nil
 }
 
 // estopOn reports whether the town ESTOP sentinel exists.
@@ -405,9 +406,9 @@ func (e *engine) clearHold() error {
 		fmt.Fprintf(e.o.Out, "  [dry-run] rm -f %s\n", path)
 		return nil
 	}
-	if !e.holdOn() {
-		return nil
-	}
+	// Remove without asking holdOn first: a hold path that cannot be read
+	// must surface the removal error rather than leave the hold up while the
+	// state reports success.
 	fmt.Fprintf(e.o.Out, "  + rm -f %s\n", path)
 	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("removing the hold %s: %w", path, err)

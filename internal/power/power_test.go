@@ -58,6 +58,13 @@ type fake struct {
 	jobhostRan    bool
 	failJobhost   bool
 	unexpectedRun error
+
+	// broken parts: commands that fail or leave a part down, for the alarm
+	// and refusal branches.
+	doltStartNoop bool
+	failEstop     bool
+	failBootout   bool
+	failComposeSt bool
 }
 
 func newFake(t *testing.T) *fake {
@@ -124,12 +131,18 @@ func (f *fake) run(_ context.Context, dir, name string, args ...string) (string,
 		}
 		return "○ Dolt server is not running\n", errors.New("exit status 1")
 	case name == "gt" && len(args) >= 2 && args[0] == "dolt" && args[1] == "start":
+		if f.doltStartNoop {
+			return "", nil
+		}
 		f.dolt = true
 		return "", nil
 	case name == "gt" && len(args) >= 2 && args[0] == "dolt" && args[1] == "stop":
 		f.dolt = false
 		return "", nil
 	case name == "gt" && len(args) >= 1 && args[0] == "estop":
+		if f.failEstop {
+			return "estop refused", errors.New("exit status 1")
+		}
 		if err := os.WriteFile(estop.FilePath(f.town), []byte("manual\t2026-10-19T12:00:00Z\ttest\n"), 0o644); err != nil {
 			f.t.Fatal(err)
 		}
@@ -159,6 +172,9 @@ func (f *fake) run(_ context.Context, dir, name string, args ...string) (string,
 		f.loaded[label] = true
 		return "", nil
 	case name == "launchctl" && args[0] == "bootout":
+		if f.failBootout {
+			return "bootout refused", errors.New("exit status 5")
+		}
 		delete(f.loaded, filepath.Base(args[1]))
 		return "", nil
 	case name == "docker" && args[0] == "info":
@@ -175,6 +191,9 @@ func (f *fake) run(_ context.Context, dir, name string, args ...string) (string,
 		f.composeN, f.forgejo = 5, true
 		return "", nil
 	case name == "docker" && len(args) >= 2 && args[0] == "compose" && args[1] == "stop":
+		if f.failComposeSt {
+			return "stop failed", errors.New("exit status 1")
+		}
 		f.composeN, f.forgejo = 0, false
 		return "", nil
 	case name == "jobhost":
@@ -512,6 +531,115 @@ func TestStandbyWaitsForDoltGC(t *testing.T) {
 	}
 }
 
+// TestDrainFailsWhenDoltIsUnreachable is the fail-open regression: a drain
+// that cannot read the landing queues must fail, never skip the wait.
+func TestDrainFailsWhenDoltIsUnreachable(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	f.dolt = false
+	o, _, _ := f.optsWithOut()
+	err := newEngine(o).drain(context.Background())
+	if code := codeOf(t, err); code != ExitDrainTimeout {
+		t.Fatalf("exit code = %d, want %d", code, ExitDrainTimeout)
+	}
+	if !strings.Contains(err.Error(), "Dolt") {
+		t.Errorf("error %q does not name Dolt", err)
+	}
+	if estop.IsActive(f.town) {
+		t.Error("a failed drain set the ESTOP")
+	}
+}
+
+func TestStandbyTreatsUnreadablePolecatListAsNotDrained(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	f.setPending(0)
+	f.polecatErr = errors.New("gt polecat list failed")
+	o, _, _ := f.optsWithOut()
+	o.Timeout = time.Minute
+	err := Standby(context.Background(), o)
+	if code := codeOf(t, err); code != ExitDrainTimeout {
+		t.Fatalf("exit code = %d, want %d", code, ExitDrainTimeout)
+	}
+	if !strings.Contains(err.Error(), "polecats working=?") {
+		t.Errorf("timeout error %q does not report the unreadable polecat list", err)
+	}
+}
+
+func TestStandbyReportsEstopFailure(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	f.setPending(0)
+	f.failEstop = true
+	o, _, _ := f.optsWithOut()
+	err := Standby(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "gt estop") {
+		t.Fatalf("error = %v, want a gt estop failure", err)
+	}
+	if _, statErr := os.Stat(dispatch.HoldFilePath(f.town)); statErr != nil {
+		t.Errorf("the hold must stay set when the ESTOP fails: %v", statErr)
+	}
+	if _, statErr := os.Stat(StatePath(f.town)); !os.IsNotExist(statErr) {
+		t.Errorf("a failed standby recorded a state: %v", statErr)
+	}
+}
+
+func TestFullFailsWhenDoltNeverComesUp(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	f.dolt = false
+	f.doltStartNoop = true // gt dolt start succeeds but Dolt never answers
+	o, _, _ := f.optsWithOut()
+	err := Full(context.Background(), o)
+	if code := codeOf(t, err); code != ExitNotHealthy {
+		t.Fatalf("exit code = %d, want %d", code, ExitNotHealthy)
+	}
+	if _, statErr := os.Stat(dispatch.HoldFilePath(f.town)); statErr != nil {
+		t.Errorf("full must leave the hold in place when Dolt does not come up: %v", statErr)
+	}
+}
+
+func TestHoldOnTreatsAnUnreadablePathAsNoHold(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.Chmod(town, 0o000); err != nil {
+		t.Skipf("cannot make the town root unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(town, 0o755) })
+	if newEngine(Options{TownRoot: town}).holdOn() {
+		t.Error("holdOn reported a hold for a path it could not stat")
+	}
+}
+
+// TestNestedGTCallsRunFromTheTownRoot pins the script's cd "$GT_ROOT": the
+// caller's cwd must not decide which town the nested gt calls act on.
+func TestNestedGTCallsRunFromTheTownRoot(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	f.setPending(0)
+	o, _, _ := f.optsWithOut()
+	if err := Standby(context.Background(), o); err != nil {
+		t.Fatalf("Standby: %v", err)
+	}
+	sawGT := false
+	for _, c := range f.cmds {
+		if c.name == "gt" {
+			sawGT = true
+			if c.dir != f.town {
+				t.Errorf("nested %q ran in %q, want the town root %q", c.line(), c.dir, f.town)
+			}
+		}
+	}
+	if !sawGT {
+		t.Fatal("standby ran no nested gt command")
+	}
+}
+
 func TestOffRequiresYes(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)
@@ -526,6 +654,9 @@ func TestOffRequiresYes(t *testing.T) {
 	if f.jobhostRan || f.composeN != 5 {
 		t.Error("off without --yes changed a part")
 	}
+	if len(f.cmds) != 0 {
+		t.Errorf("off without --yes ran %d command(s) before refusing: %v", len(f.cmds), f.cmds)
+	}
 }
 
 func TestOffRefusesReleaseBotWithoutForceCloud(t *testing.T) {
@@ -533,7 +664,7 @@ func TestOffRefusesReleaseBotWithoutForceCloud(t *testing.T) {
 	f := newFake(t)
 	f.setHealthy()
 	f.releasebot = true
-	o, _, _ := f.optsWithOut()
+	o, out, _ := f.optsWithOut()
 	o.Yes = true
 	err := Off(context.Background(), o)
 	if code := codeOf(t, err); code != ExitUsage {
@@ -542,8 +673,16 @@ func TestOffRefusesReleaseBotWithoutForceCloud(t *testing.T) {
 	if !strings.Contains(err.Error(), "--force-cloud") {
 		t.Errorf("error %q does not name --force-cloud", err)
 	}
+	// The alarm comes before the refusal, and the refusal comes before any
+	// change: the hold is not set and no command ran.
+	if !strings.Contains(out.String(), "cloud release bot") {
+		t.Errorf("refused off did not warn about the release bot:\n%s", out)
+	}
 	if _, statErr := os.Stat(dispatch.HoldFilePath(f.town)); !os.IsNotExist(statErr) {
 		t.Errorf("refused off changed the hold: %v", statErr)
+	}
+	if len(f.cmds) != 0 {
+		t.Errorf("refused off ran %d command(s): %v", len(f.cmds), f.cmds)
 	}
 }
 
@@ -559,7 +698,7 @@ func TestOffDryRunNeedsNoYesAndChangesNothing(t *testing.T) {
 		t.Fatalf("Off dry-run: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"[dry-run] touch ", "[dry-run] gt estop", "[dry-run] launchctl bootout", "[dry-run] docker compose stop"} {
+	for _, want := range []string{"[dry-run] touch ", "[dry-run] gt estop", "[dry-run] launchctl bootout", "[dry-run] docker compose stop", "cloud release bot"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("dry-run output missing %q:\n%s", want, got)
 		}
@@ -604,6 +743,90 @@ func TestOffStopsTheTownButKeepsDolt(t *testing.T) {
 		t.Errorf("state file = %q, %v; want an off record", data, err)
 	}
 	assertNeverDestructive(t, f)
+}
+
+func TestOffRefusesWhenDoltIsDown(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	f.dolt = false
+	o, _, _ := f.optsWithOut()
+	o.Yes = true
+	err := Off(context.Background(), o)
+	if code := codeOf(t, err); code != ExitNotHealthy {
+		t.Fatalf("exit code = %d, want %d", code, ExitNotHealthy)
+	}
+	if !strings.Contains(err.Error(), "Dolt is down") {
+		t.Errorf("error %q does not name Dolt", err)
+	}
+	// The script raises the hold before it checks Dolt, so a refused off
+	// leaves the town held rather than half-set.
+	if _, statErr := os.Stat(dispatch.HoldFilePath(f.town)); statErr != nil {
+		t.Errorf("refused off did not set the hold: %v", statErr)
+	}
+	if !f.loaded[DaemonLabel] || f.composeN != 5 || estop.IsActive(f.town) {
+		t.Errorf("refused off stopped a part: daemon=%v compose=%d estop=%v",
+			f.loaded[DaemonLabel], f.composeN, estop.IsActive(f.town))
+	}
+}
+
+func TestOffDryRunRefusesWhenDoltIsDown(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	f.dolt = false
+	o, out, _ := f.optsWithOut()
+	o.DryRun = true
+	err := Off(context.Background(), o)
+	if code := codeOf(t, err); code != ExitNotHealthy {
+		t.Fatalf("exit code = %d, want %d (dry-run must refuse what a real off refuses)", code, ExitNotHealthy)
+	}
+	if _, statErr := os.Stat(dispatch.HoldFilePath(f.town)); !os.IsNotExist(statErr) {
+		t.Errorf("dry-run created the hold: %v", statErr)
+	}
+	if _, statErr := os.Stat(StatePath(f.town)); !os.IsNotExist(statErr) {
+		t.Errorf("dry-run recorded a state: %v", statErr)
+	}
+	if strings.Contains(out.String(), "[dry-run] gt estop") {
+		t.Errorf("dry-run printed a stop past the Dolt refusal:\n%s", out)
+	}
+}
+
+func TestOffReportsBootoutFailure(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	f.setPending(0)
+	f.failBootout = true
+	o, _, _ := f.optsWithOut()
+	o.Yes = true
+	err := Off(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "launchctl bootout") {
+		t.Fatalf("error = %v, want a launchctl bootout failure", err)
+	}
+	if !estop.IsActive(f.town) {
+		t.Error("off failed before setting the ESTOP")
+	}
+	if f.composeN != 5 {
+		t.Errorf("off continued past the failed bootout: compose=%d", f.composeN)
+	}
+}
+
+func TestOffReportsComposeStopFailure(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	f.setPending(0)
+	f.failComposeSt = true
+	o, _, _ := f.optsWithOut()
+	o.Yes = true
+	err := Off(context.Background(), o)
+	if err == nil || !strings.Contains(err.Error(), "docker compose stop") {
+		t.Fatalf("error = %v, want a docker compose stop failure", err)
+	}
+	if f.loaded[DaemonLabel] {
+		t.Error("off did not stop the daemon before the compose failure")
+	}
 }
 
 func TestOffWithDoltStopsDolt(t *testing.T) {

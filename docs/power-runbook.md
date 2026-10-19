@@ -44,7 +44,11 @@ the working polecats and any running gc, and exits 3. Nothing is killed and
 no part is stopped: re-run the command to keep waiting.
 
 `off` refuses to start when Dolt is down, because the landing queues cannot be
-read and the drain cannot be verified.
+read and the drain cannot be verified. This refusal applies under `--dry-run`
+too, so a preview never shows a stop the real command would refuse. A drain
+that finds Dolt unreachable when it runs (for example, Dolt died mid-standby)
+fails with exit 3 and names Dolt instead of skipping the wait: an unreadable
+queue is not an empty one.
 
 These states never run `gt down`, `gt shutdown` or `--nuke`: those delete
 polecat worktrees, which is not a shutdown any power state performs.
@@ -102,6 +106,6 @@ state either.
 
 ## Updating this page
 
-`gt power` is a port of the operator script `~/.claude/tools/gt-power.sh`
-(gt-xagpa). When a state's ordering or the drain changes, change this page in
-the same commit.
+`gt power` replaced the operator's shell script of the same states (gt-xagpa).
+When a state's ordering or the drain changes, change this page in the same
+commit.

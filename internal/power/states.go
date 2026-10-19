@@ -160,7 +160,9 @@ func Off(ctx context.Context, o Options) error {
 	if err := e.setHold(); err != nil {
 		return err
 	}
-	if !o.DryRun && !e.doltUp(ctx) {
+	// This refusal also runs under --dry-run: a preview that walked past it
+	// would show a stop the real command refuses to perform.
+	if !e.doltUp(ctx) {
 		return exitError(ExitNotHealthy, "Dolt is down, so the landing queues cannot be read and the drain cannot be verified: run 'gt power standby' first")
 	}
 	if err := e.drain(ctx); err != nil {
@@ -260,9 +262,13 @@ func (e *engine) ensureInfra(ctx context.Context) error {
 // finish. Unknown readings are not a drained town: a queue that cannot be
 // read is not an empty one.
 func (e *engine) drain(ctx context.Context) error {
-	if !e.doltUp(ctx) {
-		e.say("Dolt is down: cannot read landing queues; skipping the drain wait")
-		return nil
+	// Dolt down is not a reason to skip the wait: without it the landing
+	// queues cannot be read at all, so the town is not drained, and a stop
+	// that treats the unreadable queues as empty is fail-open. The hold is
+	// already set by the caller, and nothing has been stopped yet.
+	if !e.o.DryRun && !e.doltUp(ctx) {
+		return exitError(ExitDrainTimeout,
+			"Dolt is unreachable, so the landing queues cannot be read and the drain cannot be verified. Nothing was killed and the hold stays set; start Dolt and re-run")
 	}
 	if e.o.DryRun {
 		p, pok := e.pendingLandings()
