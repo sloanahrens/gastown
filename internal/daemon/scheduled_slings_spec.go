@@ -35,10 +35,10 @@ func scheduledSpecLabels(e ScheduledSlingEntry) []string {
 }
 
 // scheduledSlingValidateDispatch rejects a dispatch value the patrol does not
-// know, and a spec dispatch that names an agent: the dispatcher chooses the seat
-// and the moment, so the run takes a seat from polecat_pool.seats. It also
-// rejects a var the dispatcher could not read back out of the "## Formula vars"
-// section.
+// know, and a var the dispatcher could not read back out of the "## Formula
+// vars" section. A spec entry that still names an agent is not rejected: the
+// patrol skips an invalid entry, so refusing it would silently stop a config
+// that ran before. The agent is ignored and createSpecDispatchedRun says so.
 func scheduledSlingValidateDispatch(e ScheduledSlingEntry) error {
 	switch e.Dispatch {
 	case "":
@@ -46,9 +46,6 @@ func scheduledSlingValidateDispatch(e ScheduledSlingEntry) error {
 	case scheduledDispatchSpec:
 	default:
 		return fmt.Errorf("scheduled_slings[%s]: dispatch %q must be empty or %q", e.Name, e.Dispatch, scheduledDispatchSpec)
-	}
-	if e.Agent != "" {
-		return fmt.Errorf("scheduled_slings[%s]: a spec entry takes no agent; it gets a seat from polecat_pool.seats", e.Name)
 	}
 	for k, v := range e.Vars {
 		// One var is one line of the section: a newline would end it early, a
@@ -149,6 +146,9 @@ func reportUntakenSpecRuns(runs []scheduledBead, e ScheduledSlingEntry, now time
 // identity label that the skip-open and skip-recent decisions read and the
 // formula label the dispatcher slings with.
 func (d *Daemon) createSpecDispatchedRun(ctx context.Context, r scheduledSlingRunner, e ScheduledSlingEntry, title string) error {
+	if e.Agent != "" {
+		d.logger.Printf("scheduled_slings: %s: ignoring agent %q: a spec entry gets a seat from polecat_pool.seats; remove it from the entry", e.Name, e.Agent)
+	}
 	desc, acceptance := scheduledSpecBody(e)
 	id, err := r.createBead(ctx, e.Rig, scheduledRunBead{
 		Title:       title,

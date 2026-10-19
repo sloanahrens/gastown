@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"log"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"slices"
@@ -36,12 +37,10 @@ func TestScheduledSlingEntry_ValidateDispatch(t *testing.T) {
 		mutate func(*ScheduledSlingEntry)
 		want   string
 	}{
-		"unknown dispatch":                     {func(e *ScheduledSlingEntry) { e.Dispatch = "sling" }, `dispatch "sling"`},
-		"spec agent":                           {func(e *ScheduledSlingEntry) { e.Dispatch, e.Agent = "spec", "claude-sonnet" }, "scheduled_slings[a]: a spec entry takes no agent; it gets a seat from polecat_pool.seats"},
-		"spec agent that is not a label value": {func(e *ScheduledSlingEntry) { e.Dispatch, e.Agent = "spec", "Claude Sonnet" }, "a spec entry takes no agent"},
-		"var with newline":                     {func(e *ScheduledSlingEntry) { e.Dispatch, e.Vars = "spec", map[string]string{"k": "a\nb=c"} }, "key=value line"},
-		"var key with =":                       {func(e *ScheduledSlingEntry) { e.Dispatch, e.Vars = "spec", map[string]string{"a=b": "c"} }, "key=value line"},
-		"comment var key":                      {func(e *ScheduledSlingEntry) { e.Dispatch, e.Vars = "spec", map[string]string{"#a": "c"} }, "key=value line"},
+		"unknown dispatch": {func(e *ScheduledSlingEntry) { e.Dispatch = "sling" }, `dispatch "sling"`},
+		"var with newline": {func(e *ScheduledSlingEntry) { e.Dispatch, e.Vars = "spec", map[string]string{"k": "a\nb=c"} }, "key=value line"},
+		"var key with =":   {func(e *ScheduledSlingEntry) { e.Dispatch, e.Vars = "spec", map[string]string{"a=b": "c"} }, "key=value line"},
+		"comment var key":  {func(e *ScheduledSlingEntry) { e.Dispatch, e.Vars = "spec", map[string]string{"#a": "c"} }, "key=value line"},
 	}
 	for name, c := range cases {
 		e := base
@@ -49,6 +48,14 @@ func TestScheduledSlingEntry_ValidateDispatch(t *testing.T) {
 		err := scheduledSlingValidate(e)
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("%s: err = %v, want one containing %q", name, err, c.want)
+		}
+	}
+	// A spec entry that still names an agent stays valid: it is ignored, not refused.
+	for _, agent := range []string{"claude-sonnet", "Claude Sonnet"} {
+		stale := base
+		stale.Dispatch, stale.Agent = "spec", agent
+		if err := scheduledSlingValidate(stale); err != nil {
+			t.Errorf("a spec entry naming agent %q must validate: %v", agent, err)
 		}
 	}
 	// An agent with no dispatch, and any vars with no dispatch, stay valid.
@@ -364,11 +371,57 @@ func TestRunScheduledSlingEntry_SpecDispatchWritesNoAgentPin(t *testing.T) {
 	if got := spec.PinnedAgents(); len(got) != 0 {
 		t.Errorf("a spec run must not pin: %v", got)
 	}
-	b := specdispatch.Budget{
-		Seats: []specdispatch.Seat{{Agent: "deepseek-flash", Cap: 2, Live: 2}, {Agent: "claude-sonnet", Cap: 2}},
-		Now:   time.Now(),
+	// Whichever seat is the only free one takes the run.
+	for _, free := range []string{"deepseek-flash", "claude-sonnet"} {
+		seats := []specdispatch.Seat{{Agent: "deepseek-flash", Cap: 2, Live: 2}, {Agent: "claude-sonnet", Cap: 2, Live: 2}}
+		for i := range seats {
+			if seats[i].Agent == free {
+				seats[i].Live = 0
+			}
+		}
+		b := specdispatch.Budget{Seats: seats, Now: time.Now()}
+		if got := specdispatch.ChooseSeat(b, spec); got.Skip || got.Agent != free {
+			t.Errorf("the scheduled run took %+v, want the one free seat %s", got, free)
+		}
 	}
-	if got := specdispatch.ChooseSeat(b, spec); got.Skip || got.Agent != "claude-sonnet" {
-		t.Errorf("the scheduled run took %+v, want the one free seat", got)
+	// With both seats free the draw reaches both, so no model is excluded.
+	b := specdispatch.Budget{
+		Seats: []specdispatch.Seat{{Agent: "deepseek-flash", Cap: 2}, {Agent: "claude-sonnet", Cap: 2}},
+		Now:   time.Now(),
+		Rand:  rand.New(rand.NewSource(1)),
+	}
+	drawn := map[string]bool{}
+	for range 50 {
+		got := specdispatch.ChooseSeat(b, spec)
+		if got.Skip {
+			t.Fatalf("the scheduled run was skipped with free seats: %+v", got)
+		}
+		drawn[got.Agent] = true
+	}
+	if len(drawn) != 2 {
+		t.Errorf("the draw reached %v, want both seats", drawn)
+	}
+}
+
+// An entry written before the seat map may still name an agent. It must not be
+// skipped as invalid (that silently stops the schedule): the run is created
+// with no agent: pin and the log says the agent is ignored.
+func TestRunScheduledSlingEntry_SpecDispatchIgnoresAStaleAgent(t *testing.T) {
+	t.Parallel()
+	e := specAuditEntry
+	e.Agent = "claude-sonnet"
+	f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
+	d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, f)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	d.runScheduledSlings()
+	if len(f.runs) != 1 {
+		t.Fatalf("created = %+v, want one run for an entry that names an agent; log:\n%s", f.runs, logs.String())
+	}
+	if want := []string{"scheduled:deep-review", "formula:mol-deep-review"}; !slices.Equal(f.runs[0].Labels, want) {
+		t.Errorf("labels = %v, want %v", f.runs[0].Labels, want)
+	}
+	if !strings.Contains(logs.String(), `ignoring agent "claude-sonnet"`) {
+		t.Errorf("log does not say the agent is ignored:\n%s", logs.String())
 	}
 }
