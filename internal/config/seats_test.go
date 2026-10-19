@@ -302,3 +302,23 @@ func TestWindowAcrossDST(t *testing.T) {
 		t.Errorf("both 01:30s must be closed: %v %v", w.Closed(first), w.Closed(second))
 	}
 }
+
+func TestUnrecordedAgent(t *testing.T) {
+	t.Parallel()
+	seat := SeatConfig{Cap: 1}
+	cases := []struct {
+		name string
+		pool *PolecatPool
+		want string
+	}{
+		{"no pool", nil, ""},
+		{"no seat map keeps the pool agent", &PolecatPool{Agent: "claude-sonnet"}, "claude-sonnet"},
+		{"one seat is where it sits", &PolecatPool{Seats: map[string]SeatConfig{"claude-haiku": seat}}, "claude-haiku"},
+		{"several seats place it on none", &PolecatPool{Seats: map[string]SeatConfig{"claude-haiku": seat, "claude-sonnet": seat}}, UnknownSeatAgent},
+	}
+	for _, c := range cases {
+		if got := c.pool.UnrecordedAgent(); got != c.want {
+			t.Errorf("%s: UnrecordedAgent() = %q, want %q", c.name, got, c.want)
+		}
+	}
+}

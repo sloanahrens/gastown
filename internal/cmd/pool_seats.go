@@ -114,6 +114,12 @@ func liveSeatKeys(live []poolSession) map[string]bool {
 	return seats
 }
 
+// poolOwnsSeats reports whether the pool names a seat for a sessionless polecat
+// to be counted on: a seat map, or the older pool agent.
+func poolOwnsSeats(pool *config.PolecatPool) bool {
+	return pool != nil && (pool.Agent != "" || len(pool.Seats) > 0)
+}
+
 // polecatIntentSeat is the intent-record key of a polecat seat, built through
 // the same constructor the writers use (supervisor.SeatFor), so the reader of a
 // seat's record names it the way the writer does.
@@ -124,8 +130,9 @@ func polecatIntentSeat(rigName, polecatName string) intent.Seat {
 // slungAgent is the agent a sessionless seat is counted on: the one its sling
 // recorded (intent.MarkSlung), or fallback when the record names none.
 //
-// fallback is the pool's own agent, which is what these seats were counted on
-// before the record existed: a seat slung before then, or one a sling left on
+// fallback is what a seat with no record is counted on (PolecatPool.
+// UnrecordedAgent): the pool's own agent before the seat map, which is what
+// these seats were counted on before the record existed: a seat slung before then, or one a sling left on
 // the role default — which the record stores as no agent at all — reads exactly
 // as it did (gt-2q283).
 func slungAgent(rec intent.Record, fallback string) string {
@@ -191,9 +198,10 @@ func restartPolecatOnSlungAgent(mgr polecatStarter, townRoot, rigName, polecatNa
 // picture. The fallback is the pool's own seat, which can only over-count it —
 // a refused sling rather than an admitted one.
 func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, disposition polecatDispositionFunc, live []poolSession) ([]poolSession, error) {
-	if townRoot == "" || pool == nil || pool.Agent == "" || disposition == nil {
+	if townRoot == "" || !poolOwnsSeats(pool) || disposition == nil {
 		return nil, nil
 	}
+	fallback := pool.UnrecordedAgent()
 	liveSeats := liveSeatKeys(live)
 	rigs, err := knownRigNames(townRoot)
 	if err != nil {
@@ -218,7 +226,7 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 			rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, name))
 			out = append(out, poolSession{
 				name:       "dead/" + rigName + "/" + name,
-				agent:      slungAgent(rec, pool.Agent),
+				agent:      slungAgent(rec, fallback),
 				rig:        rigName,
 				polecat:    name,
 				deadHooked: true,
@@ -290,9 +298,10 @@ func poolSeatWorkFor(townRoot string) poolSeatWorkFunc {
 // as it read then. A nil pool (or one with no agent) owns no seat, so nothing
 // is rendered and no bead is read.
 func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSeatWorkFunc, live []poolSession) ([]poolSession, error) {
-	if townRoot == "" || pool == nil || pool.Agent == "" || work == nil {
+	if townRoot == "" || !poolOwnsSeats(pool) || work == nil {
 		return nil, nil
 	}
+	fallback := pool.UnrecordedAgent()
 	liveSeats := liveSeatKeys(live)
 
 	type landing struct {
@@ -337,7 +346,7 @@ func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSea
 			rig:   rig,
 			name:  name,
 			bead:  rec.WorkBead,
-			agent: slungAgent(rec, pool.Agent),
+			agent: slungAgent(rec, fallback),
 		})
 		return nil
 	})

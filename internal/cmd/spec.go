@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -670,6 +671,9 @@ type specRoster struct {
 	// DeadHooked counts, per agent, the seats inside Live that no tmux session
 	// holds: a crashed polecat waiting for its supervised restart (gt-tldj4).
 	DeadHooked map[string]int
+	// Unrecorded names the polecats counted under config.UnknownSeatAgent
+	// because they record no agent and the seat map has several seats.
+	Unrecorded []string
 	Newest     time.Time
 }
 
@@ -753,6 +757,12 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	budget.SetDeadHooked(roster.DeadHooked)
 	budget.NewestSpawn = roster.Newest
 	report.Roster = budget.Picture()
+	if len(roster.Unrecorded) > 0 {
+		sort.Strings(roster.Unrecorded)
+		report.Notices = append(report.Notices, fmt.Sprintf(
+			"roster: %d polecat(s) record no agent and count under %q, on no seat: %s",
+			len(roster.Unrecorded), config.UnknownSeatAgent, strings.Join(roster.Unrecorded, ", ")))
+	}
 
 	read := env.Candidates()
 	report.Errors = append(report.Errors, read.Errors...)
@@ -1284,16 +1294,29 @@ func specBudgetFromSeats(ts *config.TownSettings, now time.Time, known func(agen
 // counts in DeadHooked, so the picture can say why a full seat shows fewer live
 // sessions than its number (gt-tldj4); it has no spawn time, so it never arms
 // the stagger.
+//
+// A polecat that records no agent is counted on the seat map's only seat, and
+// under config.UnknownSeatAgent when the map has several: the tick lists it
+// (Unrecorded) and never counts it on a seat it may not hold. A town with no
+// seat map keeps the polecat role default (gt-mukgk).
 func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster {
 	r := specRoster{Live: map[string]int{}, DeadHooked: map[string]int{}}
 	roleDefault := ""
+	var pool *config.PolecatPool
 	if ts != nil {
 		roleDefault = ts.RoleAgents["polecat"]
+		pool = ts.PolecatPool
+	}
+	if pool != nil && len(pool.Seats) > 0 {
+		roleDefault = pool.UnrecordedAgent()
 	}
 	for _, s := range sessions {
 		agent := s.agent
 		if agent == "" {
 			agent = roleDefault
+		}
+		if agent == config.UnknownSeatAgent {
+			r.Unrecorded = append(r.Unrecorded, s.name)
 		}
 		r.Live[agent]++
 		if s.deadHooked {

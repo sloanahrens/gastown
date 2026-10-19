@@ -348,6 +348,12 @@ type patrolScanHost struct {
 	// every seat with a branch asks whether a bead claims it, and one
 	// listing answers them all.
 	reapClaims map[string]reapClaim
+	// agentRecord is the polecat agent bead's recorded agent when nil: a seam
+	// for the unit tier, which cannot start bd.
+	agentRecord func(rig, name string) (string, error)
+	// unrecordedLogged is set once the census has listed the polecats that
+	// record no agent, so a tick logs them once however many restarts ask.
+	unrecordedLogged bool
 }
 
 var _ patrolscan.Env = (*patrolScanHost)(nil)
