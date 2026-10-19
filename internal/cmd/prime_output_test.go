@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -292,6 +293,54 @@ func TestOutputUnknownContextListsCrew(t *testing.T) {
 	for _, want := range []string{"<rig>/polecats/<name>/", "<rig>/crew/<name>/"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("unknown-role context omits navigable dir %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestOutputPrimeContextFallbackPolecatAndCrewIncludeQuickReference pins the
+// quick-reference table to the writer. Both role briefs once wrote it to
+// os.Stdout while every other line went to w, so the text staticRoleTextWarn
+// captures into a bytes.Buffer lost the table and the process stdout gained
+// it (gt-2u6i4).
+//
+//testpolicy:allow parallel — swaps os.Stdout to prove nothing is written to the process stdout
+func TestOutputPrimeContextFallbackPolecatAndCrewIncludeQuickReference(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	stdout := os.Stdout
+	//testpolicy:allow no-global-swap — the fallback briefs must not touch the process stdout; the pipe proves it
+	os.Stdout = w
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores the os.Stdout swapped above
+		os.Stdout = stdout
+		r.Close()
+	})
+
+	ctx := RoleContext{TownRoot: t.TempDir(), Rig: "myrig", Polecat: "toast"}
+	renderers := map[string]func(io.Writer, RoleContext){
+		"polecat": outputPolecatContext,
+		"crew":    outputCrewContext,
+	}
+	outputs := map[string]string{}
+	for name, render := range renderers {
+		var buf bytes.Buffer
+		render(&buf, ctx)
+		outputs[name] = buf.String()
+	}
+
+	w.Close()
+	leaked, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("reading the captured stdout: %v", err)
+	}
+	if len(leaked) != 0 {
+		t.Errorf("the fallback briefs wrote to the process stdout:\n%s", leaked)
+	}
+	for name, out := range outputs {
+		if !strings.Contains(out, "Command Quick-Reference") {
+			t.Errorf("%s fallback omits the Command Quick-Reference table:\n%s", name, out)
 		}
 	}
 }
