@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -25,6 +26,10 @@ type session struct {
 	screen  []string
 	sent    []string
 	idle    bool
+
+	panePID     string   // the pane process; see SetPaneProcesses
+	descendants []string // its descendants, deepest first
+	killed      []string // PIDs a kill signaled, in order
 }
 
 // Server is an in-memory tmux server. Methods mirror *tmux.Tmux signatures.
@@ -227,6 +232,56 @@ func (s *Server) RespawnPane(pane, command string) error {
 		ss.paneCmd = paneCommand(command)
 	})
 	return err
+}
+
+// SetPaneProcesses gives session's pane a process tree: the pane process panePID
+// and its descendants, deepest first (the order *tmux.Tmux signals them in).
+func (s *Server) SetPaneProcesses(session, panePID string, descendants ...string) {
+	s.mutate(func() {
+		if ss := s.sessions[session]; ss != nil {
+			ss.panePID = panePID
+			ss.descendants = descendants
+		}
+	})
+}
+
+// KillPaneProcesses records a signal to every process in pane's tree,
+// descendants first and the pane process last, as *tmux.Tmux does.
+func (s *Server) KillPaneProcesses(pane string) error {
+	return s.killPaneProcesses(pane, nil)
+}
+
+// KillPaneProcessesExcluding is KillPaneProcesses minus excludePIDs: an
+// excluded descendant or pane process is not signaled.
+func (s *Server) KillPaneProcessesExcluding(pane string, excludePIDs []string) error {
+	return s.killPaneProcesses(pane, excludePIDs)
+}
+
+func (s *Server) killPaneProcesses(pane string, exclude []string) error {
+	var err error
+	s.mutate(func() {
+		ss, ok := s.sessions[sessionName(pane)]
+		if !ok {
+			err = paneNotFound("kill pane processes", pane)
+			return
+		}
+		for _, pid := range append(append([]string(nil), ss.descendants...), ss.panePID) {
+			if pid != "" && !slices.Contains(exclude, pid) {
+				ss.killed = append(ss.killed, pid)
+			}
+		}
+	})
+	return err
+}
+
+// Killed returns the PIDs signaled by KillPaneProcesses* in session, in order.
+func (s *Server) Killed(session string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ss := s.sessions[session]; ss != nil {
+		return append([]string(nil), ss.killed...)
+	}
+	return nil
 }
 
 func (s *Server) IsIdle(session string) bool {

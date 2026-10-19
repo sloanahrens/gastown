@@ -3,6 +3,8 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -19,6 +21,50 @@ import (
 
 // crewAtRetried tracks if we've already retried after stale session cleanup
 var crewAtRetried bool
+
+// paneProcessKiller is the part of *tmux.Tmux the respawn path kills with.
+type paneProcessKiller interface {
+	KillPaneProcesses(pane string) error
+	KillPaneProcessesExcluding(pane string, excludePIDs []string) error
+}
+
+// killPaneForRespawn clears paneID's processes before it is respawned. When
+// callerPane (the caller's $TMUX_PANE) is paneID, gt crew at is running inside
+// the pane it is restarting, so the pane process and every ancestor of the
+// caller are spared: killing them would kill gt before it can call
+// RespawnPane. It kills nothing when the caller's ancestry cannot be read,
+// because a truncated chain would let the sweep reach gt. RespawnPane's -k
+// then SIGHUPs whatever was spared once gt has issued it.
+func killPaneForRespawn(t paneProcessKiller, paneID, callerPane string, callerChain func() ([]string, error)) error {
+	if callerPane != paneID {
+		return t.KillPaneProcesses(paneID)
+	}
+	chain, err := callerChain()
+	if err != nil {
+		return fmt.Errorf("not killing pane processes, caller ancestry unreadable: %w", err)
+	}
+	return t.KillPaneProcessesExcluding(paneID, chain)
+}
+
+// callerPIDChain returns this process's PID followed by its ancestors, nearest
+// first, up to init. A ps failure or a chain that never reaches init is an
+// error: a partial chain would leave an ancestor unprotected.
+func callerPIDChain() ([]string, error) {
+	const maxDepth = 64
+	chain := []string{strconv.Itoa(os.Getpid())}
+	for len(chain) < maxDepth {
+		out, err := exec.Command("ps", "-o", "ppid=", "-p", chain[len(chain)-1]).Output()
+		if err != nil {
+			return nil, fmt.Errorf("reading parent of %s: %w", chain[len(chain)-1], err)
+		}
+		ppid := strings.TrimSpace(string(out))
+		if ppid == "" || ppid == "0" || ppid == "1" {
+			return chain, nil
+		}
+		chain = append(chain, ppid)
+	}
+	return nil, fmt.Errorf("process ancestry deeper than %d", maxDepth)
+}
 
 func runCrewAt(cmd *cobra.Command, args []string) error {
 	var name string
@@ -334,7 +380,7 @@ func runCrewAt(cmd *cobra.Command, args []string) error {
 				}
 				// Kill all processes in the pane before respawning to prevent orphan leaks
 				// RespawnPane's -k flag only sends SIGHUP which Claude/Node may ignore
-				if err := t.KillPaneProcesses(paneID); err != nil {
+				if err := killPaneForRespawn(t, paneID, os.Getenv("TMUX_PANE"), callerPIDChain); err != nil {
 					// Non-fatal but log the warning
 					style.PrintWarning("could not kill pane processes: %v", err)
 				}
