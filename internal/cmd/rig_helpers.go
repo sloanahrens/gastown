@@ -70,14 +70,19 @@ func getRigIn(townRoot, rigName string) (string, *rig.Rig, error) {
 	return townRoot, r, nil
 }
 
-// rigRegistered reports whether rigName is in the town's rig registry.
-func rigRegistered(townRoot, rigName string) bool {
+// rigRegistered reports whether rigName is in the town's rig registry. A
+// registry that cannot be read is an error, not "unregistered": the caller
+// must not read a failed read as a rig the town does not know.
+func rigRegistered(townRoot, rigName string) (bool, error) {
 	rigsConfig, err := config.LoadRigsConfig(constants.MayorRigsPath(townRoot))
-	if err != nil || rigsConfig == nil {
-		return false
+	if err != nil {
+		return false, err
+	}
+	if rigsConfig == nil {
+		return false, nil
 	}
 	_, ok := rigsConfig.Rigs[rigName]
-	return ok
+	return ok, nil
 }
 
 // findCurrentRig resolves the rig the caller is working in: the first path
@@ -102,8 +107,16 @@ func findCurrentRigWith(getenv func(string) string, cwd, townRoot string) (strin
 			rigName = inferred
 		}
 	}
-	if envRig := getenv("GT_RIG"); envRig != "" && (rigName == "" || !rigRegistered(townRoot, rigName)) {
-		rigName = envRig
+	if envRig := getenv("GT_RIG"); envRig != "" {
+		// GT_RIG replaces a cwd-derived rig only when the registry says that
+		// rig is unknown. A registry that cannot be read keeps the cwd rig, so
+		// getRigIn below reports the read failure rather than GT_RIG quietly
+		// sending the command to another rig.
+		if rigName == "" {
+			rigName = envRig
+		} else if registered, err := rigRegistered(townRoot, rigName); err == nil && !registered {
+			rigName = envRig
+		}
 	}
 	if rigName == "" {
 		return "", nil, fmt.Errorf("not inside a rig directory (and GT_RIG not set)")

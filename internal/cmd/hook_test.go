@@ -237,6 +237,8 @@ func TestIsBeadID(t *testing.T) {
 		{"3web-abc", false},
 		{"_gt-abc", false},
 		{"g.t-abc", false},
+		{"abcdefghijklmnopqrst-abc", true},
+		{"abcdefghijklmnopqrstu-abc", false},
 		{"", false},
 	}
 	for _, tt := range tests {
