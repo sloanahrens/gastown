@@ -10,7 +10,9 @@ import (
 // TestPluginHistoryGlyph verifies `gt plugin history` picks a distinct glyph
 // per result, and in particular that ResultWarning does not collapse onto the
 // ResultSuccess checkmark (gt-hrt9): a warning is a run that found something
-// and reported it, not a quiet success.
+// and reported it, not a quiet success. The same holds for ResultPrinted: a run
+// that only printed a plugin's instructions did no work and must not read as
+// the success checkmark.
 func TestPluginHistoryGlyph(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -22,6 +24,7 @@ func TestPluginHistoryGlyph(t *testing.T) {
 		{plugin.ResultFailure, "✗", "Error"},
 		{plugin.ResultSkipped, "○", "Dim"},
 		{plugin.ResultWarning, "!", "Warning"},
+		{plugin.ResultPrinted, "▸", "Info"},
 	}
 
 	seenIcons := map[string]plugin.RunResult{}
@@ -45,6 +48,8 @@ func TestPluginHistoryGlyph(t *testing.T) {
 			wantStyle = style.Dim.Render("x")
 		case "Warning":
 			wantStyle = style.Warning.Render("x")
+		case "Info":
+			wantStyle = style.Info.Render("x")
 		}
 		if got := gotStyle.Render("x"); got != wantStyle {
 			t.Errorf("pluginHistoryGlyph(%q) style = %q, want %q", c.result, got, wantStyle)
@@ -57,5 +62,12 @@ func TestPluginHistoryGlyph(t *testing.T) {
 	warningStyle, warningIcon := pluginHistoryGlyph(plugin.ResultWarning)
 	if successIcon == warningIcon && successStyle.Render("x") == warningStyle.Render("x") {
 		t.Error("ResultWarning renders identically to ResultSuccess — a warning receipt would be invisible in `gt plugin history`")
+	}
+
+	// ResultPrinted is what `gt plugin run` records when it only printed the
+	// plugin's instructions; a success checkmark would claim work never done.
+	_, printedIcon := pluginHistoryGlyph(plugin.ResultPrinted)
+	if printedIcon == successIcon {
+		t.Error("ResultPrinted renders like ResultSuccess — a printed run would read as work done in `gt plugin history`")
 	}
 }
