@@ -27,7 +27,7 @@ var (
 // under errors.Is.
 type RateLimitError struct {
 	// RetryAfter is the delay the server asked for through Retry-After or
-	// retry-after-ms; zero when it named none.
+	// retry-after-ms; zero when it named none or an unusable value.
 	RetryAfter time.Duration
 }
 
