@@ -68,6 +68,23 @@ func TestResolve(t *testing.T) {
 	}
 }
 
+// A floor that is not a number from 0 to 1 cannot be compared against, so no
+// answer, however confident, gets through it.
+func TestResolveInvalidFloorFailsSafe(t *testing.T) {
+	t.Parallel()
+	for _, floor := range []float64{math.NaN(), -0.1, 1.5, math.Inf(1), math.Inf(-1)} {
+		got := Resolve(item(attention.KindBDSlow, "s"), answer("noise", 0.99), floor)
+		if got.Label != NeedsYou || got.Reason != ReasonLowConfidence || got.JevChoice != "noise" {
+			t.Errorf("floor %v: got {%s %q jev=%q}, want needs-you low-confidence", floor, got.Label, got.Reason, got.JevChoice)
+		}
+	}
+	for _, floor := range []float64{0, 1} {
+		if got := Resolve(item(attention.KindBDSlow, "s"), answer("noise", 1), floor); got.Label != Noise {
+			t.Errorf("floor %v: got %s, want noise", floor, got.Label)
+		}
+	}
+}
+
 // Every kind that is not an escalation kind can take a confident noise; the
 // only kinds that cannot are in escalationKinds, and each of those maps to
 // needs-you.
@@ -240,5 +257,23 @@ func TestBuildQuestionQuotingAndCap(t *testing.T) {
 	exact := strings.Repeat("x", maxSummaryRunes)
 	if got := BuildQuestion(item(attention.KindBDSlow, exact)).State; strings.Contains(got, "…") {
 		t.Errorf("a summary at the cap was cut")
+	}
+}
+
+// The identifier values are capped too: a runaway rig or bead is cut, not sent.
+func TestBuildQuestionCapsIdentifierFields(t *testing.T) {
+	t.Parallel()
+	it := item(attention.KindBDSlow, "s")
+	it.Rig = strings.Repeat("r", maxFieldRunes+50)
+	it.Bead = strings.Repeat("b", maxFieldRunes+50)
+	got := BuildQuestion(it).State
+	if strings.Contains(got, strings.Repeat("r", maxFieldRunes+1)) {
+		t.Errorf("rig not cut to %d runes: %s", maxFieldRunes, got)
+	}
+	if strings.Contains(got, strings.Repeat("b", maxFieldRunes+1)) {
+		t.Errorf("bead not cut to %d runes: %s", maxFieldRunes, got)
+	}
+	if strings.Count(got, "…") != 2 {
+		t.Errorf("want both cut values marked: %s", got)
 	}
 }

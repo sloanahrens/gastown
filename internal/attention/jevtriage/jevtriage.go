@@ -41,16 +41,21 @@ const (
 	ReasonNone Reason = ""
 	// ReasonEscalationKind: the item's kind is one Jev never lowers.
 	ReasonEscalationKind Reason = "escalation-kind"
-	// ReasonLowConfidence: Jev's confidence is below the configured floor.
+	// ReasonLowConfidence: Jev's confidence is below the configured floor, or
+	// the floor itself is not a number from 0 to 1.
 	ReasonLowConfidence Reason = "low-confidence"
 	// ReasonNoAnswer: there is no usable answer, because the call failed,
 	// timed out, was rate limited, or returned something that does not parse.
 	ReasonNoAnswer Reason = "no-answer"
 )
 
-// maxSummaryRunes caps the summary in the state, so one runaway summary
-// cannot run up the token bill of a call.
-const maxSummaryRunes = 500
+// The caps on the item values in the state, so one runaway value cannot run
+// up the token bill of a call. The summary is free text and gets the larger
+// cap; every other value is an identifier.
+const (
+	maxSummaryRunes = 500
+	maxFieldRunes   = 200
+)
 
 // instructions is the question text. It is the same for every item: nothing
 // from an item is ever spliced into it.
@@ -86,24 +91,24 @@ type Question struct {
 }
 
 // BuildQuestion builds the Choice question for one item. Only the State
-// depends on the item, and it carries every item value as a JSON string, so a
-// summary with quotes, newlines or instruction-like text stays inside its
-// quotes on its own line.
+// depends on the item, and it carries every item value, cut to a length cap,
+// as a JSON string, so a value with quotes, newlines or instruction-like text
+// stays inside its quotes on its own line.
 func BuildQuestion(it attention.Item) Question {
 	var b strings.Builder
 	b.WriteString("attention item\n")
-	field := func(name, value string) {
-		fmt.Fprintf(&b, "%s: %s\n", name, quote(value))
+	field := func(name, value string, max int) {
+		fmt.Fprintf(&b, "%s: %s\n", name, quote(truncate(value, max)))
 	}
-	field("kind", string(it.Kind))
-	field("severity", string(it.Severity))
+	field("kind", string(it.Kind), maxFieldRunes)
+	field("severity", string(it.Severity), maxFieldRunes)
 	if it.Rig != "" {
-		field("rig", it.Rig)
+		field("rig", it.Rig, maxFieldRunes)
 	}
 	if it.Bead != "" {
-		field("bead", it.Bead)
+		field("bead", it.Bead, maxFieldRunes)
 	}
-	field("summary", truncate(it.Summary, maxSummaryRunes))
+	field("summary", it.Summary, maxSummaryRunes)
 
 	c := make(map[string]string, len(criteria))
 	for k, v := range criteria {
@@ -172,7 +177,9 @@ func ForcedNeedsYou(it attention.Item) bool {
 //     anything.
 //  2. A nil answer, a choice that is not one of the three options, or a
 //     confidence outside 0 to 1 is needs-you with ReasonNoAnswer.
-//  3. A confidence below floor is needs-you with ReasonLowConfidence.
+//  3. A floor that is NaN or outside 0 to 1, or a confidence below floor, is
+//     needs-you with ReasonLowConfidence. A bad floor must not make every
+//     comparison false and let every answer through.
 //  4. Otherwise the label is Jev's choice.
 //
 // Every rule lands on needs-you, so Jev's answer can lower an item's
@@ -192,7 +199,7 @@ func Resolve(it attention.Item, ans *Answer, floor float64) Verdict {
 		v.Reason = ReasonEscalationKind
 	case !usable:
 		v.Reason = ReasonNoAnswer
-	case ans.Confidence < floor:
+	case !(floor >= 0 && floor <= 1), ans.Confidence < floor:
 		v.Reason = ReasonLowConfidence
 	default:
 		v.Label = Label(ans.Choice)
