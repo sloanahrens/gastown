@@ -1,10 +1,14 @@
 package daemon
 
 import (
+	"context"
+	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // checkSeatMap is the daemon's start-time read of polecat_pool.seats: a map the
@@ -59,5 +63,46 @@ func TestCheckSeatMapAtStart(t *testing.T) {
 				t.Fatalf("checkSeatMap = %v, want an error naming %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// A helper that refuses proves nothing about the start unless Run calls it: a
+// daemon that never reaches the check starts on a map the operator cannot have
+// meant, and no test above notices (gt-uo9u3).
+func TestRunRefusesStartOnInvalidSeatMap(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "daemon"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	settings := filepath.Join(town, "settings", "config.json")
+	if err := os.MkdirAll(filepath.Dir(settings), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settings, []byte(`{"type":"town-settings","version":1,"polecat_pool":{"seats":{"nope":{"cap":1}}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultConfig(town)
+	d := &Daemon{config: cfg, logger: log.New(io.Discard, "", 0)}
+	// A start that got past the check would run the whole loop; a canceled
+	// context ends it at the first select instead of parking the test.
+	d.ctx, d.cancel = context.WithCancel(context.Background())
+	d.cancel()
+
+	bounded, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- d.Run() }()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "polecat_pool.seats.nope") {
+			t.Fatalf("Run = %v, want a refusal naming the unknown seat", err)
+		}
+	case <-bounded.Done():
+		t.Fatal("Run did not return: the start-time seat check is not wired into Run")
+	}
+	if _, err := os.Stat(cfg.PidFile); !os.IsNotExist(err) {
+		t.Errorf("Run wrote %s before refusing; the seat check must come before startup side effects", cfg.PidFile)
 	}
 }
