@@ -127,7 +127,9 @@ var findingSeparatorRE = regexp.MustCompile(`:[0-9]+ — `)
 // defuseFindingPath keeps a path from carrying the separator that
 // rejectionFindingRE ends the path at. The parser splits at the first one, so
 // a path holding ":N — " would read back cut short with the rest in the title;
-// the em dash is flattened to a hyphen.
+// the em dash is flattened to a hyphen. The rewrite is lossy on purpose: the
+// note line has no escape for the separator, and a path holding one is rare
+// enough that a legible near-match beats a finding cut in two.
 func defuseFindingPath(path string) string {
 	return findingSeparatorRE.ReplaceAllStringFunc(path, func(sep string) string {
 		return strings.Replace(sep, "—", "-", 1)

@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -636,13 +635,14 @@ func TestRealRunExitZeroWithWaitDelayIsSuccess(t *testing.T) {
 // TestStepOutcomeMapsWaitResults covers what runStep does with Wait's result,
 // not only the predicate it calls: an exit-0 step held past WaitDelay passes, a
 // cancelled context wins over the error, and any other error is an
-// infrastructure error with no exit code. The real pipe held by a child is
-// TestIntegrationRunStepWaitDelay.
+// infrastructure error with no exit code. A real child holding the pipe, and
+// the exit codes it returns, are TestIntegrationRunStepWaitDelay's.
 func TestStepOutcomeMapsWaitResults(t *testing.T) {
 	t.Parallel()
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	boom := errors.New("boom")
+	signaled := &exec.ExitError{} // no exit code: the step died on a signal
 	tests := []struct {
 		name       string
 		ctx        context.Context
@@ -656,6 +656,7 @@ func TestStepOutcomeMapsWaitResults(t *testing.T) {
 		{name: "wrapped WaitDelay error", ctx: context.Background(), err: fmt.Errorf("wait: %w", exec.ErrWaitDelay), exitedZero: true},
 		{name: "WaitDelay without an exit 0 stays an error", ctx: context.Background(), err: exec.ErrWaitDelay, wantCode: -1, wantErr: exec.ErrWaitDelay},
 		{name: "another error is infrastructure", ctx: context.Background(), err: boom, exitedZero: true, wantCode: -1, wantErr: boom},
+		{name: "an exit with no code is infrastructure", ctx: context.Background(), err: signaled, wantCode: -1, wantErr: signaled},
 		{name: "a cancelled context is its error", ctx: cancelled, err: boom, wantCode: -1, wantErr: context.Canceled},
 	}
 	for _, tt := range tests {
@@ -669,52 +670,13 @@ func TestStepOutcomeMapsWaitResults(t *testing.T) {
 	}
 }
 
-// runStepHelperEnv switches the test binary into the step TestRunStepKeepsExitCodes
-// runs. The name avoids the GT_/BD_ prefixes the hermetic harness scrubs.
-const runStepHelperEnv = "RUNSTEP_HELPER_EXIT"
-
-// TestRunStepHelperProcess is the step: it writes a line, then exits with the
-// code the env names. It does nothing in an ordinary run.
-func TestRunStepHelperProcess(t *testing.T) {
+// TestRunStepCannotStart: a command that cannot start is an error with no exit
+// code. No process runs, so this stays in the default suite; the exit codes of
+// a real child are TestIntegrationRunStepWaitDelay's.
+func TestRunStepCannotStart(t *testing.T) {
 	t.Parallel()
-	code := os.Getenv(runStepHelperEnv)
-	if code == "" {
-		return
+	code, err := runStep(context.Background(), t.TempDir(), nil, []string{filepath.Join(t.TempDir(), "missing")}, io.Discard, time.Second)
+	if err == nil || code != -1 {
+		t.Fatalf("runStep = (%d, %v), want (-1, an error)", code, err)
 	}
-	n, err := strconv.Atoi(code)
-	if err != nil {
-		os.Exit(99)
-	}
-	fmt.Println("step output")
-	os.Exit(n)
-}
-
-// TestRunStepKeepsExitCodes runs runStep for real, with the test binary
-// re-executing itself as the step (a start the unit tier's subprocess
-// tripwire does not see): the exit code comes back as the code with no error,
-// and a command that cannot start is an error with no code.
-func TestRunStepKeepsExitCodes(t *testing.T) {
-	t.Parallel()
-	argv := []string{os.Args[0], "-test.run=^TestRunStepHelperProcess$"}
-	for _, exit := range []string{"0", "3"} {
-		t.Run("exit "+exit, func(t *testing.T) {
-			t.Parallel()
-			var out strings.Builder
-			code, err := runStep(context.Background(), t.TempDir(), []string{runStepHelperEnv + "=" + exit}, argv, &out, time.Second)
-			want, _ := strconv.Atoi(exit)
-			if err != nil || code != want {
-				t.Fatalf("runStep = (%d, %v), want (%d, nil)", code, err, want)
-			}
-			if !strings.Contains(out.String(), "step output") {
-				t.Fatalf("output = %q, want the step's line", out.String())
-			}
-		})
-	}
-	t.Run("cannot start", func(t *testing.T) {
-		t.Parallel()
-		code, err := runStep(context.Background(), t.TempDir(), nil, []string{filepath.Join(t.TempDir(), "missing")}, io.Discard, time.Second)
-		if err == nil || code != -1 {
-			t.Fatalf("runStep = (%d, %v), want (-1, an error)", code, err)
-		}
-	})
 }
