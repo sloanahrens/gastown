@@ -3,6 +3,7 @@ package cmd
 import (
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -18,13 +19,13 @@ func TestPluginHistoryGlyph(t *testing.T) {
 	cases := []struct {
 		result    plugin.RunResult
 		wantIcon  string
-		wantStyle string // style var name, for the collision check below
+		wantStyle lipgloss.Style
 	}{
-		{plugin.ResultSuccess, "✓", "Success"},
-		{plugin.ResultFailure, "✗", "Error"},
-		{plugin.ResultSkipped, "○", "Dim"},
-		{plugin.ResultWarning, "!", "Warning"},
-		{plugin.ResultPrinted, "▸", "Info"},
+		{plugin.ResultSuccess, "✓", style.Success},
+		{plugin.ResultFailure, "✗", style.Error},
+		{plugin.ResultSkipped, "○", style.Dim},
+		{plugin.ResultWarning, "!", style.Warning},
+		{plugin.ResultPrinted, "▸", style.Info},
 	}
 
 	seenIcons := map[string]plugin.RunResult{}
@@ -38,19 +39,7 @@ func TestPluginHistoryGlyph(t *testing.T) {
 		}
 		seenIcons[gotIcon] = c.result
 
-		var wantStyle string
-		switch c.wantStyle {
-		case "Success":
-			wantStyle = style.Success.Render("x")
-		case "Error":
-			wantStyle = style.Error.Render("x")
-		case "Dim":
-			wantStyle = style.Dim.Render("x")
-		case "Warning":
-			wantStyle = style.Warning.Render("x")
-		case "Info":
-			wantStyle = style.Info.Render("x")
-		}
+		wantStyle := c.wantStyle.Render("x")
 		if got := gotStyle.Render("x"); got != wantStyle {
 			t.Errorf("pluginHistoryGlyph(%q) style = %q, want %q", c.result, got, wantStyle)
 		}
