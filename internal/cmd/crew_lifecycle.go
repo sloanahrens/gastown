@@ -63,9 +63,8 @@ func runCrewRemoveWith(args []string, rigFlag string, force, purge bool, env cre
 			continue
 		}
 
-		// A tmux failure is not "no session": reading it that way skipped the
-		// running-session guard below and the kill, and removed the workspace
-		// out from under a live session.
+		// A tmux failure says nothing about whether a session is live, so it
+		// stops the removal, with or without --force.
 		sessionID := crewSessionName(townRegistry(), r.Name, name)
 		hasSession, err := env.hasSession(sessionID)
 		if err != nil {

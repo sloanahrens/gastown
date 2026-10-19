@@ -273,11 +273,22 @@ func TestMoleculeProgressShowMultipleFailureNotReady(t *testing.T) {
 	}
 }
 
-// TestMoleculeCurrentPinnedStepIsCurrent: a step a hand-off left pinned is held
-// by an agent, so it is the molecule's current step; counting it in the total
-// but in no bucket reported the molecule blocked with no current step.
-func TestMoleculeCurrentPinnedStepIsCurrent(t *testing.T) {
+// TestMoleculeCurrentHeldStepIsCurrent: a step a hand-off left pinned or hooked
+// is held by an agent, so it is the molecule's current step; counting it in the
+// total but in no bucket reported the molecule blocked with no current step.
+func TestMoleculeCurrentHeldStepIsCurrent(t *testing.T) {
 	t.Parallel()
+
+	for _, held := range []string{beads.StatusPinned, beads.StatusHooked} {
+		t.Run(held, func(t *testing.T) {
+			t.Parallel()
+			assertMoleculeCurrentHeldStep(t, held)
+		})
+	}
+}
+
+func assertMoleculeCurrentHeldStep(t *testing.T, heldStatus string) {
+	t.Helper()
 
 	fake := beadsfake.New()
 	root, err := fake.Create(beads.CreateOptions{Title: "mol-polecat-work"})
@@ -295,9 +306,9 @@ func TestMoleculeCurrentPinnedStepIsCurrent(t *testing.T) {
 	if err := fake.Close(done.ID); err != nil {
 		t.Fatalf("close step: %v", err)
 	}
-	status := string(beads.StatusPinned)
+	status := heldStatus
 	if err := fake.Update(pinned.ID, beads.UpdateOptions{Status: &status}); err != nil {
-		t.Fatalf("pin step: %v", err)
+		t.Fatalf("set step status %s: %v", heldStatus, err)
 	}
 
 	handoff := &beads.Issue{
@@ -315,5 +326,47 @@ func TestMoleculeCurrentPinnedStepIsCurrent(t *testing.T) {
 	}
 	if info.CurrentStepID != pinned.ID {
 		t.Errorf("CurrentStepID = %q, want the pinned step %s", info.CurrentStepID, pinned.ID)
+	}
+}
+
+// TestMoleculeProgressOrWarnReportsUnreadableProgress: a molecule whose progress
+// cannot be read yields no progress and a warning on the writer it is given, so
+// stdout stays the status itself.
+func TestMoleculeProgressOrWarnReportsUnreadableProgress(t *testing.T) {
+	t.Parallel()
+
+	var warned bytes.Buffer
+	progress := moleculeProgressOrWarn(&warned, beadsfake.New(), "gt-missing")
+
+	if progress != nil {
+		t.Errorf("progress = %+v, want nil for an unreadable molecule", progress)
+	}
+	if !strings.Contains(warned.String(), "progress unavailable") {
+		t.Errorf("warning = %q, want it to say progress is unavailable", warned.String())
+	}
+}
+
+// TestMoleculeProgressOrWarnSilentWhenReadable: a readable molecule warns about
+// nothing.
+func TestMoleculeProgressOrWarnSilentWhenReadable(t *testing.T) {
+	t.Parallel()
+
+	fake := beadsfake.New()
+	root, err := fake.Create(beads.CreateOptions{Title: "mol-polecat-work"})
+	if err != nil {
+		t.Fatalf("create root: %v", err)
+	}
+	if _, err := fake.Create(beads.CreateOptions{Title: "step", Parent: root.ID}); err != nil {
+		t.Fatalf("create step: %v", err)
+	}
+
+	var warned bytes.Buffer
+	progress := moleculeProgressOrWarn(&warned, fake, root.ID)
+
+	if progress == nil || progress.TotalSteps != 1 {
+		t.Errorf("progress = %+v, want one step", progress)
+	}
+	if warned.Len() != 0 {
+		t.Errorf("warning = %q, want none", warned.String())
 	}
 }

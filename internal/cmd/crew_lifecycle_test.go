@@ -13,9 +13,7 @@ import (
 
 // TestCrewRemoveTmuxErrorKeepsWorkspace: a has-session that fails for a reason
 // tmux does not recognise as "no session" says nothing about whether the
-// member's session is live. It was read as "no session", which skipped the
-// running-session guard and the kill and removed the workspace under a session
-// that might be running. With or without --force, the removal now stops there.
+// member's session is live, so the removal stops there, with or without --force.
 func TestCrewRemoveTmuxErrorKeepsWorkspace(t *testing.T) {
 	t.Parallel()
 
