@@ -250,7 +250,11 @@ func runReconcile(out io.Writer, stores reconcileStores, townRoot, id string, ap
 	// show` from the town directory falls back to routes.jsonl and finds
 	// the rig row instead of reporting not-found, which would make this
 	// verify falsely fail with "still exists" (gt-1361).
-	if stillThere, _, _ := townBd.GetAgentBeadInStoreOnly(id); stillThere != nil {
+	stillThere, _, err := townBd.GetAgentBeadInStoreOnly(id)
+	if err != nil {
+		return fmt.Errorf("step 4/4 verify: town row %s unreadable after delete: %w", id, err)
+	}
+	if stillThere != nil {
 		return fmt.Errorf("step 4/4 verify: town row %s still exists after delete", id)
 	}
 	after, _, err := rigBd.GetAgentBeadInStoreOnly(id)

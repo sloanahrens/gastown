@@ -33,11 +33,19 @@ type reconcileDB struct {
 	w    *reconcileTown
 	name string
 	row  *beads.Issue
+
+	// readErrAfterDelete, when set, is what a read returns once
+	// DeleteLegacyAgentBead has removed the row: the step 4 verify read.
+	readErrAfterDelete error
+	deleted            bool
 }
 
 func (d *reconcileDB) GetAgentBeadInStoreOnly(id string) (*beads.Issue, *beads.AgentFields, error) {
 	d.w.mu.Lock()
 	defer d.w.mu.Unlock()
+	if d.deleted && d.readErrAfterDelete != nil {
+		return nil, nil, d.readErrAfterDelete
+	}
 	if d.row == nil || d.row.ID != id {
 		return nil, nil, nil
 	}
@@ -60,6 +68,7 @@ func (d *reconcileDB) DeleteLegacyAgentBead(id string) error {
 		return errors.New("refusing to delete " + id + ": not present in this database")
 	}
 	d.row = nil
+	d.deleted = true
 	return nil
 }
 
@@ -163,6 +172,27 @@ func TestReconcile_ApplyUpdatesRigThenArchivesThenDeletesTown(t *testing.T) {
 	archive, err := os.ReadFile(filepath.Join(w.townRoot, ".beads", "archive", "agent-bead-legacy.jsonl"))
 	if err != nil || !strings.Contains(string(archive), `"gt-gastown-polecat-garnet"`) {
 		t.Fatalf("archive must contain the town row before delete: %v / %s", err, archive)
+	}
+}
+
+// A town row that cannot be read after the delete is unconfirmed, not gone:
+// the command must fail instead of printing "reconciled".
+func TestRunReconcileVerifyReadError(t *testing.T) {
+	t.Parallel()
+	w := setupReconcileTown(t,
+		"agent_state: done\nactive_mr: null\n",
+		"agent_state: done\nactive_mr: null\n")
+	w.town.readErrAfterDelete = errors.New("dolt connection refused")
+	var out bytes.Buffer
+	err := runReconcile(&out, w.stores(), w.townRoot, garnetID, true, false)
+	if err == nil {
+		t.Fatalf("expected a step 4/4 verify error; output:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "step 4/4 verify") || !strings.Contains(err.Error(), "dolt connection refused") {
+		t.Errorf("error should name the verify step and the read failure, got: %v", err)
+	}
+	if strings.Contains(out.String(), "reconciled") {
+		t.Errorf("must not print reconciled when the delete is unconfirmed; output:\n%s", out.String())
 	}
 }
 

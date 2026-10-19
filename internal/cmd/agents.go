@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -555,7 +556,7 @@ func runAgentsCheck(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("not in a Gas Town workspace: %w", err)
 	}
 
-	report, err := buildCollisionReport(townRegistry(), townRoot)
+	report, err := buildCollisionReport(tmux.NewTmux(), townRegistry(), townRoot)
 	if err != nil {
 		return err
 	}
@@ -609,39 +610,55 @@ func runAgentsFix(cmd *cobra.Command, args []string) error {
 	}
 
 	// Check for remaining issues
-	report, err := buildCollisionReport(townRegistry(), townRoot)
+	report, err := buildCollisionReport(tmux.NewTmux(), townRegistry(), townRoot)
 	if err != nil {
 		return err
 	}
 
-	if report.Collisions > 0 {
-		fmt.Println()
-		fmt.Printf("%s %d collision(s) require manual intervention:\n\n",
-			style.Bold.Render("⚠"), report.Collisions)
-
-		for _, issue := range report.Issues {
-			if issue.Type == "collision" {
-				fmt.Printf("  %s %s\n", style.Bold.Render("!"), issue.Message)
-			}
-		}
-
-		fmt.Println()
-		fmt.Printf("To fix, close duplicate sessions or remove lock files manually.\n")
-	}
-
+	writeAgentsFixReport(os.Stdout, report)
 	return nil
 }
 
-func buildCollisionReport(reg *session.PrefixRegistry, townRoot string) (*CollisionReport, error) {
+// writeAgentsFixReport lists what `gt agents fix` cannot clean itself. The
+// Collisions count includes orphaned locks (buildCollisionReport bumps it for
+// "orphaned" and never emits a "collision" issue), so both types are listed
+// or the header would announce issues and show none.
+func writeAgentsFixReport(w io.Writer, report *CollisionReport) {
+	if report.Collisions == 0 {
+		return
+	}
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "%s %d collision(s) require manual intervention:\n\n",
+		style.Bold.Render("⚠"), report.Collisions)
+
+	for _, issue := range report.Issues {
+		if issue.Type == "collision" || issue.Type == "orphaned" {
+			fmt.Fprintf(w, "  %s %s\n", style.Bold.Render("!"), issue.Message)
+		}
+	}
+
+	fmt.Fprintln(w)
+	fmt.Fprintf(w, "To fix, close duplicate sessions or remove lock files manually.\n")
+}
+
+// collisionSessionLister is the slice of tmux buildCollisionReport reads, so
+// tests can pass a fake without a tmux server.
+type collisionSessionLister interface {
+	ListSessions() ([]string, error)
+}
+
+func buildCollisionReport(lister collisionSessionLister, reg *session.PrefixRegistry, townRoot string) (*CollisionReport, error) {
 	report := &CollisionReport{
 		Locks: make(map[string]*lock.LockInfo),
 	}
 
 	// Get all tmux sessions
-	t := tmux.NewTmux()
-	sessions, err := t.ListSessions()
+	// ListSessions already maps "no server running" to nil, nil; any other
+	// error is unknown session state, and treating it as "no sessions" would
+	// report every live lock as orphaned.
+	sessions, err := lister.ListSessions()
 	if err != nil {
-		sessions = []string{} // Continue even if tmux not running
+		return nil, fmt.Errorf("listing tmux sessions: %w", err)
 	}
 
 	// Filter to Gas Town sessions

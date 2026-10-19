@@ -1,12 +1,109 @@
 package cmd
 
 import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/lock"
+	"github.com/steveyegge/gastown/internal/session"
 )
+
+// fakeCollisionLister is a tmux whose ListSessions answers sessions, err.
+type fakeCollisionLister struct {
+	sessions []string
+	err      error
+}
+
+func (f fakeCollisionLister) ListSessions() ([]string, error) { return f.sessions, f.err }
+
+// liveCrewLockTown is a town root holding one lock, held by this test process,
+// for crew member alice of rig gastown.
+func liveCrewLockTown(t *testing.T) string {
+	t.Helper()
+	townRoot := t.TempDir()
+	runtimeDir := filepath.Join(townRoot, "gastown", "crew", "alice", ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(lock.LockInfo{PID: os.Getpid(), AcquiredAt: time.Now(), SessionID: "live"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(runtimeDir, "agent.lock"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return townRoot
+}
+
+func TestRunAgentsFixListsOrphanedLocks(t *testing.T) {
+	t.Parallel()
+	report := &CollisionReport{
+		Collisions: 1,
+		Issues: []CollisionIssue{{
+			Type:      "orphaned",
+			WorkerDir: "/town/gastown/crew/alice",
+			Message:   "Lock exists (PID 42) but no tmux session 'gt-crew-alice'",
+			PID:       42,
+		}},
+	}
+	var out bytes.Buffer
+	writeAgentsFixReport(&out, report)
+
+	got := out.String()
+	header := strings.Index(got, "1 collision(s) require manual intervention")
+	if header < 0 {
+		t.Fatalf("missing the manual-intervention header:\n%s", got)
+	}
+	if listed := strings.Index(got, "Lock exists (PID 42) but no tmux session 'gt-crew-alice'"); listed < header {
+		t.Errorf("the orphaned issue must be listed under the header:\n%s", got)
+	}
+}
+
+func TestRunAgentsFixNoCollisionsPrintsNothing(t *testing.T) {
+	t.Parallel()
+	var out bytes.Buffer
+	writeAgentsFixReport(&out, &CollisionReport{StaleLocks: 2})
+	if out.Len() != 0 {
+		t.Errorf("a report with no collisions must print nothing, got:\n%s", out.String())
+	}
+}
+
+func TestBuildCollisionReportListSessionsError(t *testing.T) {
+	t.Parallel()
+	townRoot := liveCrewLockTown(t)
+	boom := errors.New("tmux: protocol version mismatch")
+
+	report, err := buildCollisionReport(fakeCollisionLister{err: boom}, session.NewPrefixRegistry(), townRoot)
+	if !errors.Is(err, boom) {
+		t.Fatalf("buildCollisionReport error = %v, want it to wrap %v", err, boom)
+	}
+	if report != nil && report.Collisions != 0 {
+		t.Errorf("unknown session state must not be reported as %d collision(s)", report.Collisions)
+	}
+}
+
+// With no tmux server ListSessions answers nil, nil: the lock's session is
+// genuinely absent, so the live lock is an orphan.
+func TestBuildCollisionReportNoSessionsOrphansLiveLock(t *testing.T) {
+	t.Parallel()
+	townRoot := liveCrewLockTown(t)
+
+	report, err := buildCollisionReport(fakeCollisionLister{}, session.NewPrefixRegistry(), townRoot)
+	if err != nil {
+		t.Fatalf("buildCollisionReport: %v", err)
+	}
+	if report.Collisions != 1 || len(report.Issues) != 1 || report.Issues[0].Type != "orphaned" {
+		t.Errorf("want one orphaned issue, got collisions=%d issues=%+v", report.Collisions, report.Issues)
+	}
+}
 
 func TestAgentsCmd_DefaultRunE(t *testing.T) {
 	t.Parallel()
