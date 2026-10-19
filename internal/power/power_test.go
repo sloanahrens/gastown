@@ -603,13 +603,14 @@ func TestFullFailsWhenDoltNeverComesUp(t *testing.T) {
 	}
 }
 
-func TestHoldOnTreatsAnUnreadablePathAsNoHold(t *testing.T) {
+func TestHoldOnTreatsAStatErrorAsNoHold(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	if err := os.Chmod(town, 0o000); err != nil {
-		t.Skipf("cannot make the town root unreadable: %v", err)
+	// A regular file where the town root should be makes stat fail with
+	// ENOTDIR, which is a stat error but not "does not exist".
+	town := filepath.Join(t.TempDir(), "town")
+	if err := os.WriteFile(town, nil, 0o644); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(town, 0o755) })
 	if newEngine(Options{TownRoot: town}).holdOn() {
 		t.Error("holdOn reported a hold for a path it could not stat")
 	}
