@@ -159,6 +159,46 @@ func TestExtractContentRefs(t *testing.T) {
 	}
 }
 
+// The overlap guard reads a plan document as context, not work (gt-4wb27):
+// every child of an epic cites the plan it implements, so a shared docs/plans
+// path says nothing about two children colliding. Code paths still count.
+func TestExtractOverlapRefsIgnoresPlanDocuments(t *testing.T) {
+	t.Parallel()
+	const plan = "docs/plans/2026-10-19-epic-plan.md"
+	tests := []struct {
+		name      string
+		text      string
+		wantFiles []string
+	}{
+		{
+			name:      "a cited plan is dropped",
+			text:      "Plan: " + plan + ".",
+			wantFiles: []string{},
+		},
+		{
+			name:      "a plan beside a code path keeps the code path",
+			text:      "Plan: " + plan + "; the fix lands in internal/cmd/spec.go.",
+			wantFiles: []string{"internal/cmd/spec.go"},
+		},
+		{
+			name:      "a relative spelling of the plan is dropped too",
+			text:      "./" + plan,
+			wantFiles: []string{},
+		},
+		{
+			name:      "design docs outside docs/plans still count",
+			text:      "See docs/design/2026-10-19-epic-design.md.",
+			wantFiles: []string{"docs/design/2026-10-19-epic-design.md"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assertStrings(t, "files", extractOverlapRefs(tt.text).Files, tt.wantFiles)
+		})
+	}
+}
+
 func TestTestNamesOverlap(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -763,7 +803,7 @@ func newDuplicateCandidate(id, title, status string, parts ...string) duplicateC
 		ID:     id,
 		Title:  title,
 		Status: status,
-		Refs:   extractContentRefs(append([]string{title}, parts...)...),
+		Refs:   extractOverlapRefs(append([]string{title}, parts...)...),
 	}
 }
 

@@ -1085,7 +1085,7 @@ type heldRead struct {
 // (gt-z80p9). A candidate naming no path cannot be caught this way, so it never
 // pays for the read.
 func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads map[string]heldRead) (string, error) {
-	paths := extractContentRefs(full.Title, full.Description, full.Design, full.Notes).Files
+	paths := extractOverlapRefs(full.Title, full.Description, full.Design, full.Notes).Files
 	if len(paths) == 0 {
 		return "", nil
 	}
