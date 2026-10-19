@@ -132,13 +132,10 @@ A scheduled sling entry with `"dispatch": "spec"` in `daemon.patrols.scheduled_s
 run to this dispatcher (gt-z5g3c): the `scheduled_slings` patrol creates one
 shaped, report-only bead labeled `scheduled:<name>` and `formula:<formula>`, with
 the entry's `vars` sorted in a `## Formula vars` section, and does not sling. The
-entry may name an `agent` (an agent from `agents`, e.g. `claude-sonnet`): the
-patrol then also writes an `agent:<name>` label on the bead, and the dispatcher
-slings it only onto a seat of that agent. A full seat is a wait (`waiting for a
-<agent> seat`), an agent with no seat in the pool is a louder skip, and neither
-ever falls back to another agent's seat, so a review approved for a Claude model
-cannot land on a cheaper seat because that seat is free. With no `agent` the
-dispatcher picks any seat, as before. The open
+entry takes no `agent`: the review is an ordinary bead and draws a seat from the
+[seat map](#seats-and-budget) like any other, so deep reviews run on every model
+the town has seats for (gt-mukgk). An `agent` still on a spec entry is ignored
+with one log line, and `gt pool migrate` removes it. The open
 bead is the queue: the entry's skip-open rule holds the next run, and the patrol
 never retires it as stalled however long a full pool keeps it waiting. The bead's
 priority is the entry's `priority` (3 when unset), held at
@@ -171,68 +168,128 @@ strict parser parks every rig on an unknown key.
 
 ## Seats and budget
 
-A seat is one agent with its own cap. Every agent runs the claude CLI with the
-town's managed settings and guard hooks, so no seat is less guarded than
-another.
+The seat map, `polecat_pool.seats` in `settings/config.json`, is the one place
+that says which models run, how many of each and when. It holds any number of
+agents. Every reader goes through one loader, `config.Seats`, so the dispatcher,
+`gt sling`, the roster and `gt pool show` cannot disagree about it (gt-mukgk).
 
-Seats:
+```json
+"polecat_pool": {
+  "seats": {
+    "claude-sonnet":  {"cap": 3},
+    "claude-haiku":   {"cap": 3, "names": ["kestrel", "merlin"]},
+    "deepseek-flash": {"cap": 3, "closed": "20:00-08:00"}
+  },
+  "max_total": 9,
+  "timezone": "America/Chicago",
+  "min_spawn_gap": "4m",
+  "max_priority": 2
+}
+```
 
-| Seat | Cap | Takes |
-|---|---|---|
-| `polecat_pool.agent` | `polecat_pool.max_seats`, 2 when unset | every candidate |
-| `spec_dispatch.hooked_agent` | `spec_dispatch.max_hooked`, off by default | every candidate |
+Each key of `seats` is an agent name, and each agent has one seat. The agent's
+command, arguments and environment stay in the `agents` map; the built-in
+presets stand in for a name the town does not define. Every agent runs the
+claude CLI with the town's managed settings and guard hooks, so no seat is less
+guarded than another.
 
-The `hooked_agent` seat (default `claude-sonnet`) is off unless `max_hooked`
-names a cap above zero, because a seat nobody asked for is a seat the dispatcher
-must not spend. An unlabelled bead draws uniformly at random among the free
-seats, so neither model is preferred by list order; a bead carrying an
-`agent:<name>` label draws only among that agent's seats and waits, rather than
-falling back, when that seat is full. The reserved pro seat
-(`polecat_pool.pro_agent`/`pro_max`/`pro_label`) was retired (gt-kr91q): those
-keys load with a warning and are ignored.
+| Seat key | Meaning |
+|---|---|
+| `cap` | live polecats on that agent; 0 closes the seat |
+| `closed` | optional daily window `HH:MM-HH:MM` in `polecat_pool.timezone`; the start is inclusive, the end exclusive, and an end before the start wraps past midnight |
+| `names` | optional polecat names drawn for that seat |
 
-`polecat_pool.max_total`, when set, caps the seats together: the pool's own cap
-is per agent, so two agents each inside their own can still run more polecats
-than the town wants. A town at its total is skipped whatever room the seats
-show. Absent or 0 means no total cap.
+`polecat_pool.max_total`, when set, caps live polecats across every seat: a
+seat's cap is per agent, so seats each inside their own cap can still run more
+polecats than the town wants. A town at its total is skipped whatever room the
+seats show. Absent means no total cap.
 
-To read or change the pool seat and the `hooked_agent` seat, run `gt pool show`
-or `gt pool set <agent> <n>` instead of editing the files: `n` of 0 closes the
-seat by removing its keys, where a hand-written `max_seats: 0` would mean
-uncapped to sling and the default cap here. `gt pool set-total <n>` sets the
-total the same way, 0 removing it. `gt pool set-second <agent> <n>` sets the
-`hooked_agent` seat's agent and cap in one write, which `gt pool set` cannot: it
-takes only an agent a seat already holds. The dispatcher keeps one
-seat per agent: a second seat on the pool's agent never runs, and `gt pool show`
-prints it as `not run`. `prefer_hooked` moves the second seat first in that
-list, which decides only which seat a repeated agent keeps; the draw among free
-seats is random.
+The loader refuses, with a message naming the key, an agent that is neither in
+`agents` nor a preset, a negative cap, a `closed` window that does not parse or
+has no valid `timezone`, and a name listed in two seats. A tick that meets a
+rejected map fails with `reading the seat map: <loader message>` and dispatches
+nothing, and the daemon refuses to start on one. It never runs on part of the
+list.
 
-Changing the mix is one verb, not five: `gt pool mix <agent>=<n> [<agent>=<n>]`
-writes the seats above together with `polecat_pool.max_total` and
-`role_agents.polecat`, and refuses a mix that leaves an agent the town has pinned
-work for — a `scheduled_slings` entry's agent, a bead's `agent:<name>` label —
-without a seat.
+### Choosing a seat
 
-Every seat key is read on every tick, the `hooked_agent` seat's block included,
-so a seat added, moved or closed applies at the next tick: no daemon restart and
-no kickstart, which cut the tick then in flight the last time one was run
-(gt-jdnab). The daemon logs `spec_dispatch: seats now ...` on the tick that reads
-a mix different from the last one, and a seat file that does not parse parks the
-ticker with one line per distinct error, leaving the seats in force the ones the
-last good read named rather than ticking with a seat silently dropped. The
-patrol's `enabled` key is still read at daemon start, so turning the ticker off
-and on again is the one key here that needs a restart.
+A bead with no `agent:<name>` label draws uniformly at random among the agents
+with a free, open seat. The draw is per agent, not per free slot, so a seat with
+a small cap still gets work and list order prefers no model. A bead labeled
+`agent:<name>` draws only that agent's seat. When the seat is full the tick
+reports `waiting for a <agent> seat`; when it is inside its window, `waiting for
+a <agent> seat, closed until 08:00`; and an agent with no seat in the map is a
+louder skip, `pinned to <agent>, which has no seat in the pool`. None of them
+falls back to another agent's seat, so work approved for one model cannot land
+on a cheaper one because that seat is free. A full town is skipped with `seats
+full`, and the bead stays ready for the next tick.
+
+### Closed windows
+
+A seat inside its `closed` window stays in the map and still counts the
+polecats it already has, but takes no new spawn. The window repeats daily and is
+read at the tick's clock in `polecat_pool.timezone`, so `20:00-08:00` is open at
+19:59 and 08:00, closed at 20:00 and 07:59. `gt sling` honors the same window.
+
+### Occupancy
 
 Occupancy is every live polecat session, the seats whose session is gone while
 their work is still assigned (a crashed polecat waiting for its supervised
-restart) or still landing, and the seat claims in-flight slings hold, counted
-per agent from the session's `GT_AGENT`; `gt pool show` prints that count beside
-each seat's cap, naming the seats no session holds. An empty `GT_AGENT`
-counts as the polecat role default. `polecat_pool.min_spawn_gap` applies to the
-newest polecat on any seat. At most `max_per_tick` (default 1) beads are slung
-per tick. A full seat is skipped, never overfilled, and the bead stays ready
-for the next tick.
+restart) or still landing, and the seat claims in-flight slings hold. Each is
+counted on the agent its seat was spawned on, which the agent bead records, not
+on a role default. A polecat that records no agent fills no seat but counts
+toward `max_total`, and the tick names it: `roster: N polecat(s) record no agent
+and count under "(unrecorded)", on no seat: <names>`.
+`polecat_pool.min_spawn_gap` applies to the newest polecat on any seat. At most
+`max_per_tick` (default 1) beads are slung per tick. A full seat is skipped,
+never overfilled.
+
+### Names
+
+A name drawn for a seat is bound to that seat's agent and is never handed to
+another (gt-m9dty). A seat with a `names` list draws from it first; a seat with
+no list, or whose list is spent, draws from the themed default list. A name
+bound before a list named it keeps its binding.
+
+### `gt pool`
+
+Change seats with `gt pool`, not by editing the file.
+
+- `gt pool show` prints one line per agent: live over cap, then `open`,
+  `closed (cap 0)` or `closed until HH:MM`, then the total against
+  `max_total`. A dead-hooked seat is named beside its count.
+- `gt pool set <agent>=<cap>...` changes the listed seats and leaves the rest,
+  `gt pool set claude-haiku=2 deepseek-flash=3`. `--total N` sets `max_total`
+  (0 removes it) and `--remove <agent>` drops a seat. A cap of 0 closes the seat
+  and keeps its window and names. The whole resulting map is validated before
+  anything is written, so an unknown agent or a bad window writes nothing, and
+  the previous file is kept beside it as `<file>.bak-<timestamp>`.
+  `gt pool set-total <n>` is `--total` as a verb.
+- `gt pool migrate [--dry-run]` converts a config that still holds the retired
+  two-seat keys. It reads raw JSON, so it works on a file the loader refuses,
+  checks that the converted files load, backs each up as
+  `<file>.bak-<UTC timestamp>-pool-migrate`, and writes atomically. A second run
+  finds nothing to do, and a seat already in `seats` is never overwritten.
+- The `mix` verb of `gt pool` is retired: it prints the `gt pool set` line that
+  replaces it and exits 2.
+
+The retired keys no longer load, and the error names `gt pool migrate`:
+`polecat_pool.agent`, `max_seats`, `pro_agent`, `pro_max` and `pro_label`; the
+second-seat keys under `daemon.patrols.spec_dispatch`; and
+`role_agents.polecat`. The cutover is one step on a quiet town: land the code,
+`gt pool migrate`, restart the daemon.
+
+### Taking effect
+
+Every seat key is read on every tick, so a seat added, moved or closed applies
+at the next tick: no daemon restart and no kickstart, which cut the tick then in
+flight the last time one was run (gt-jdnab). The daemon logs `spec_dispatch:
+seats now ...` on the tick that reads a map different from the last one, and a
+seat file that does not parse parks the ticker with one line per distinct error,
+leaving the seats in force the ones the last good read named rather than ticking
+with a seat silently dropped. The patrol's `enabled` key is still read at daemon
+start, so turning the ticker off and on again is the one key here that needs a
+restart.
 
 ## Host safety
 
@@ -267,8 +324,7 @@ To park it, set `daemon.patrols.spec_dispatch.enabled` false in
 `gt config migrate` (historical layout) that patrol block lived in `mayor/daemon.json`. The
 operator hold file (`<town>/seat-refill.hold`) and ESTOP already stop the tick
 without a restart.
-The seat budget comes from `polecat_pool`, not from this block; `max_hooked` is
-the only seat key here, and it is opt-in.
+The seat budget comes from `polecat_pool.seats`, not from this block.
 
 `gt status --line` and the health tick report `dispatch=off[R]` while the
 ticker is off, `dispatch=stalled[R]` when every tick in its ten-minute window
