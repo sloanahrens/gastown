@@ -2,7 +2,7 @@
 
 # Jev advisory triage: implementation plan
 
-Design: docs/plans/2026-10-19-jev-attention-triage-design.md (bead gt-sxg5u, commit 3babac6c).
+Design: docs/plans/2026-10-19-jev-attention-triage-design.md (bead gt-sxg5u).
 
 Task beads were held with `needs-human` until approval, then released in dependency order.
 

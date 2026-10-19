@@ -27,9 +27,9 @@ Rejected for the pilot:
 
 ## Fail-safe rules
 
-- An item with an escalation kind, or with a confidence below `confidence_floor`, is always shown as `needs-you`, whatever Jev said.
+- An item whose `kind` is `escalation` (the kind the queue gives items raised by `gt escalate`), or with a confidence below `confidence_floor`, is always shown as `needs-you`, whatever Jev said.
 - A parse failure, a timeout or a 429 writes `needs-you` with reason `no-answer`.
-- Jev may move an item away from `needs-you` only when its label is not an escalation kind and its confidence is at least `confidence_floor`. Otherwise the item stays `needs-you`. Jev can never hide an item.
+- Jev may move an item away from `needs-you` only when no rule above applies. Jev can never hide an item.
 - The summary goes into the state as data. The prompt says so, and the answer is parsed against the schema only.
 
 ## Pilot and measures
@@ -48,7 +48,7 @@ The pilot report goes to Sloan. Turning the triage on live needs his approval.
 
 The pilot has two tiers of ground truth. The tiers are reported separately.
 
-**Tier 1, what exists today.** `events.jsonl` (and `events.jsonl.1`) records every new and cleared transition. An ack is not recorded there, and `acks.json` drops an ack when its item clears. So tier 1 can say that an item cleared, but not whether a human acted on it first. The proxy label is: an item that was still acked when it cleared is `needs-you`, and an item that cleared without an ack is `auto`. This is only possible for items whose ack survives until they clear, which is why tier 1 is weak.
+**Tier 1, what exists today.** `events.jsonl` (and `events.jsonl.1`) records every new and cleared transition. An ack is not recorded there, and `acks.json` drops an ack when its item clears. So tier 1 can say that an item cleared, but not whether a human acted on it first. Tier 1 therefore gives no ground-truth label. It is used only to check counts against tier 2. This is only possible for items whose ack survives until they clear, which is why tier 1 is weak.
 
 **Tier 2, the ack history (gt-s1xj6).** `gt attention ack` appends one line per ack to `acks-history.jsonl` in the attention directory, written under the existing acks lock and rotated at the events size limit. Each line is `{ts, key, kind, rule}`. The history outlives the ack and the item, so the replay can label an item by what the overseer did, even after it cleared. The replay uses tier 2 as the primary label and reports tier 1 alongside it, so the difference between the two shows how much tier 1 was missing.
 
@@ -76,4 +76,4 @@ Input is $42 per billion tokens. At an estimated 500 tokens per item, the full h
 - Measure offline before anything reads the output.
 - Code in the gastown rig, behind a config flag that defaults to off.
 - Pin `jev-1.13.0`, not the preview alias.
-- Pilot spend cap: the estimate plus $5.
+- Pilot spend cap: a flat $5, well above the replay estimate of about $0.04.
