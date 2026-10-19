@@ -128,13 +128,13 @@ func TestSeatsSortedAndValidated(t *testing.T) {
 
 func TestSeatsRejects(t *testing.T) {
 	cases := map[string]PolecatPool{
-		"unknown agent":      {Seats: map[string]SeatConfig{"nope": {Cap: 1}}},
-		"unrecorded name":     {Seats: map[string]SeatConfig{"(unrecorded)": {Cap: 1}}},
-		"negative cap":       {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: -1}}},
-		"bad window":         {Timezone: "America/Chicago", Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "8pm-8am"}}},
-		"window, no zone":    {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "20:00-08:00"}}},
-		"bad zone":           {Timezone: "Mars/Olympus", Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "20:00-08:00"}}},
-		"name in two seats":  {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Names: []string{"nux"}}, "claude-haiku": {Cap: 1, Names: []string{"nux"}}}},
+		"unknown agent":     {Seats: map[string]SeatConfig{"nope": {Cap: 1}}},
+		"unrecorded name":   {Seats: map[string]SeatConfig{"(unrecorded)": {Cap: 1}}},
+		"negative cap":      {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: -1}}},
+		"bad window":        {Timezone: "America/Chicago", Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "8pm-8am"}}},
+		"window, no zone":   {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "20:00-08:00"}}},
+		"bad zone":          {Timezone: "Mars/Olympus", Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "20:00-08:00"}}},
+		"name in two seats": {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Names: []string{"nux"}}, "claude-haiku": {Cap: 1, Names: []string{"nux"}}}},
 	}
 	for name, pool := range cases {
 		pool := pool
