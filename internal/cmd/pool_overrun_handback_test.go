@@ -46,7 +46,7 @@ func TestPoolRosterDoesNotCountAHandedBackSeat(t *testing.T) {
 				t.Fatalf("roster = %d live, %d dead-hooked, want %d of each (%+v)",
 					r.Live["deepseek-flash"], r.DeadHooked["deepseek-flash"], c.wantDead, sessions)
 			}
-			_, reason, refused, _ := choosePoolAgent(pool, "", sessions)
+			_, reason, refused, _ := choosePoolAgent(pool, "", sessions, poolTestNow)
 			if refused != (c.wantDead > 0) {
 				t.Fatalf("refused = %v, want %v (%s)", refused, c.wantDead > 0, reason)
 			}
