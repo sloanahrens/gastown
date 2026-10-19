@@ -46,6 +46,7 @@ type Client struct {
 	httpClient *http.Client
 	baseURL    string
 	key        string
+	keyPaths   []string
 	timeout    time.Duration
 }
 
@@ -71,6 +72,9 @@ func WithTimeout(d time.Duration) Option {
 // WithKey sets the API key directly, skipping the key files.
 func WithKey(key string) Option { return func(c *Client) { c.key = key } }
 
+// WithKeyPaths sets the files the key is searched in, in place of KeyPaths.
+func WithKeyPaths(paths ...string) Option { return func(c *Client) { c.keyPaths = paths } }
+
 // NewClient builds a client, reading the key from the key files unless
 // WithKey supplies one.
 func NewClient(opts ...Option) (*Client, error) {
@@ -78,13 +82,22 @@ func NewClient(opts ...Option) (*Client, error) {
 	for _, o := range opts {
 		o(c)
 	}
-	if c.key == "" {
-		key, err := ReadKey()
-		if err != nil {
-			return nil, err
-		}
-		c.key = key
+	if c.key != "" {
+		return c, nil
 	}
+	var (
+		key string
+		err error
+	)
+	if c.keyPaths != nil {
+		key, err = readKeyFrom(c.keyPaths)
+	} else {
+		key, err = ReadKey()
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.key = key
 	return c, nil
 }
 

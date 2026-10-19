@@ -83,6 +83,7 @@ var shoeCriteria = map[string]string{
 const shoeState = "My running shoes arrived in the wrong size. Can I swap them for a size 10?"
 
 func TestChoice_ParsesFixture(t *testing.T) {
+	t.Parallel()
 	rs := &respond{body: readTestdata(t, "choice_response.json")}
 	c := newTestClient(t, rs)
 
@@ -97,6 +98,7 @@ func TestChoice_ParsesFixture(t *testing.T) {
 }
 
 func TestChoice_RequestShape(t *testing.T) {
+	t.Parallel()
 	rs := &respond{body: readTestdata(t, "choice_response.json")}
 	c := newTestClient(t, rs)
 
@@ -111,6 +113,7 @@ func TestChoice_RequestShape(t *testing.T) {
 }
 
 func TestChoice_StructuredState(t *testing.T) {
+	t.Parallel()
 	rs := &respond{body: readTestdata(t, "choice_response.json")}
 	c := newTestClient(t, rs)
 
@@ -121,6 +124,7 @@ func TestChoice_StructuredState(t *testing.T) {
 }
 
 func TestChoice_NoOptions(t *testing.T) {
+	t.Parallel()
 	rs := &respond{}
 	c := newTestClient(t, rs)
 
@@ -130,6 +134,7 @@ func TestChoice_NoOptions(t *testing.T) {
 }
 
 func TestChoice_Timeout(t *testing.T) {
+	t.Parallel()
 	calls := 0
 	block := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		calls++
@@ -147,6 +152,7 @@ func TestChoice_Timeout(t *testing.T) {
 }
 
 func TestChoice_CallerDeadlineIsTimeout(t *testing.T) {
+	t.Parallel()
 	block := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		<-r.Context().Done()
 		return nil, r.Context().Err()
@@ -161,6 +167,7 @@ func TestChoice_CallerDeadlineIsTimeout(t *testing.T) {
 }
 
 func TestChoice_CallerCancelIsNotTimeout(t *testing.T) {
+	t.Parallel()
 	block := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		<-r.Context().Done()
 		return nil, r.Context().Err()
@@ -176,6 +183,7 @@ func TestChoice_CallerCancelIsNotTimeout(t *testing.T) {
 }
 
 func TestChoice_RateLimit(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name   string
 		header http.Header
@@ -203,6 +211,7 @@ func TestChoice_RateLimit(t *testing.T) {
 }
 
 func TestChoice_HTTPErrors(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		status  int
@@ -239,6 +248,7 @@ func TestChoice_HTTPErrors(t *testing.T) {
 }
 
 func TestChoice_LongErrorBodyIsCut(t *testing.T) {
+	t.Parallel()
 	rs := &respond{status: 500, body: strings.Repeat("é", 500)}
 	c := newTestClient(t, rs)
 
@@ -251,6 +261,7 @@ func TestChoice_LongErrorBodyIsCut(t *testing.T) {
 }
 
 func TestChoice_BadResponses(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		body string
@@ -273,6 +284,7 @@ func TestChoice_BadResponses(t *testing.T) {
 }
 
 func TestChoice_TransportErrorScrubsKey(t *testing.T) {
+	t.Parallel()
 	boom := roundTripFunc(func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("dial failed for header Authorization: Bearer " + testKey)
 	})
@@ -287,27 +299,27 @@ func TestChoice_TransportErrorScrubsKey(t *testing.T) {
 }
 
 func TestWithTimeout_NonPositiveKeepsDefault(t *testing.T) {
+	t.Parallel()
 	c := newTestClient(t, &respond{}, WithTimeout(0))
 	assert.Equal(t, DefaultTimeout, c.timeout)
 }
 
 func TestNewClient_ReadsKeyFile(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	t.Setenv("GT_TOWN_ROOT", "")
-	writeKeyFile(t, dir+"/gt/jev.env", "TYPESAFE_API_KEY="+testKey+"\n", 0o600)
+	t.Parallel()
+	path := t.TempDir() + "/gt/jev.env"
+	writeKeyFile(t, path, "TYPESAFE_API_KEY="+testKey+"\n", 0o600)
 
-	c, err := NewClient()
+	c, err := NewClient(WithKeyPaths(path))
 
 	require.NoError(t, err)
 	assert.Equal(t, testKey, c.key)
 }
 
 func TestNewClient_MissingKeyNamesFilesNotKey(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	t.Setenv("GT_TOWN_ROOT", "")
+	t.Parallel()
+	path := t.TempDir() + "/gt/jev.env"
 
-	_, err := NewClient()
+	_, err := NewClient(WithKeyPaths(path))
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "jev.env")

@@ -17,6 +17,7 @@ func writeKeyFile(t *testing.T, path, content string, mode os.FileMode) {
 }
 
 func TestParseKey(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		data string
@@ -44,6 +45,7 @@ func TestParseKey(t *testing.T) {
 }
 
 func TestKeyPaths(t *testing.T) {
+	t.Parallel()
 	home := func() (string, error) { return "/home/u", nil }
 	env := func(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
@@ -67,6 +69,7 @@ func TestKeyPaths(t *testing.T) {
 }
 
 func TestReadKeyFrom(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	first := filepath.Join(dir, "jev.env")
 	second := filepath.Join(dir, "daemon.env")
@@ -102,6 +105,7 @@ func TestReadKeyFrom(t *testing.T) {
 }
 
 func TestReadKeyFile_RefusesOpenPermissions(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), "jev.env")
 	writeKeyFile(t, path, "TYPESAFE_API_KEY=secret-value\n", 0o644)
 
@@ -113,11 +117,13 @@ func TestReadKeyFile_RefusesOpenPermissions(t *testing.T) {
 }
 
 func TestReadKeyFile_RefusesDirectory(t *testing.T) {
+	t.Parallel()
 	_, err := ReadKeyFile(t.TempDir())
 	require.Error(t, err)
 }
 
 func TestReadKeyFrom_OpenPermissionsAbortSearch(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	open := filepath.Join(dir, "jev.env")
 	later := filepath.Join(dir, "daemon.env")
