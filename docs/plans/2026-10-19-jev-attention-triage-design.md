@@ -1,0 +1,69 @@
+# Jev advisory triage for the attention queue (pilot design)
+
+Bead: gt-sxg5u. Status: design, awaiting Sloan's approval of the pilot before any code.
+
+## Goal
+
+Suggest a disposition for each attention item so the overseer sees the items that need a human first. Jev answers a single Choice question per item: `needs-you`, `auto-fixable` or `noise`. Its answer is a suggestion shown beside the item. It never acks, hides, wakes or changes an item.
+
+Attention items come from `<town>/.runtime/attention/`. `state.json` holds the current set, `events.jsonl` (rotated to `events.jsonl.1` at 1 MB) holds every new and cleared transition, and `acks.json` holds acknowledgements. Each item carries `key, kind, severity, rig, bead, sha, summary, first_seen, last_seen, acked_at`.
+
+## Approach (chosen: advisory sidecar)
+
+A separate job reads the queue and writes its own file, `<town>/.runtime/attention/jev-triage.json`. `gt attention` reads that file and adds a suggestion column. The daemon, `gt attention ack`, and the wake stream are unchanged.
+
+Rejected for the pilot:
+- **Auto-ack noise.** An ack hides an item until its condition clears. A wrong call would hide a real problem.
+- **Gate the wake stream.** Fewer interruptions, but a miss becomes silence. Revisit after calibration.
+
+## Components
+
+1. **Triage classifier** (`internal/attention/jevtriage`): for each item, build a state with the item's kind, severity, rig, bead and summary, and ask one Choice question. It returns the label, the probabilities and the confidence, and writes them to `jev-triage.json` keyed by item key and `last_seen`.
+2. **Display**: `gt attention` gets one extra column, `jev`, showing the label and confidence. Items with no answer show `-`.
+3. **Config**: `attention.jev_triage.enabled` (default false), `model` (pinned `jev-1.13.0`), `confidence_floor`, and `max_spend_usd` (pilot cap: $5).
+4. **Replay tool** (pilot): reads `events.jsonl` and `events.jsonl.1` and classifies every item it finds, writing a report.
+
+## Fail-safe rules
+
+- An item with an escalation kind, or with a confidence below `confidence_floor`, is always shown as `needs-you`, whatever Jev said.
+- A parse failure, a timeout or a 429 writes `needs-you` with reason `no-answer`.
+- Jev's answer can only lower an item's priority when it is confident. It can never hide an item.
+- The summary goes into the state as data. The prompt says so, and the answer is parsed against the schema only.
+
+## Pilot and measures
+
+Ground truth is a proxy, because the events do not record what the overseer did:
+- an item that was acked before it cleared is `needs-you`;
+- an item that cleared without an ack is `auto`.
+
+The pilot replays the full event history offline, read-only, and reports:
+- precision and recall of `needs-you` against the proxy;
+- calibration: stated confidence against proxy accuracy, by bin;
+- how many items the fail-safe rules forced to `needs-you`;
+- the actual spend against the $5 cap.
+
+The pilot report goes to Sloan. Turning the triage on live needs his approval.
+
+## Cost
+
+Input is $42 per billion tokens. At an estimated 500 tokens per item, the full history of about 1,700 events comes to roughly $0.04 per replay, so the $5 cap leaves a wide margin. The pilot records the real token counts and replaces this estimate.
+
+## Error handling and testing
+
+- The triage job is advisory, so a crash or a stale file leaves `gt attention` working. It shows `-` for the suggestions.
+- Unit tests: the fail-safe rules, the no-answer path, the summary-as-data prompt, and the schema parse.
+- A replay test on a fixed events fixture checks the report's shape.
+
+## Out of scope
+
+- The other three uses (deep-review dedupe, P3 severity, risk-diff second opinion). Each gets its own design after this pilot.
+- Any change to ack semantics, the daemon, or the wake stream.
+- Landing or security decisions.
+
+## Decisions settled in grilling (2026-10-19)
+
+- First use: attention-queue triage.
+- Measure offline before anything reads the output.
+- Code in the gastown rig, behind a config flag that defaults to off.
+- Pin `jev-1.13.0`, not the preview alias.
+- Pilot spend cap: the estimate plus $5.
