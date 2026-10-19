@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -94,7 +95,13 @@ func FormatRejectionNote(n RejectionNote) string {
 		note += "\nGate tail:"
 		for _, line := range strings.Split(tail, "\n") {
 			if len(line) > gateTailLineMax {
-				line = line[:gateTailLineMax] + " …"
+				// Back up to a rune start: a cut inside a multibyte rune
+				// leaves invalid UTF-8 in the note.
+				cut := gateTailLineMax
+				for cut > 0 && !utf8.RuneStart(line[cut]) {
+					cut--
+				}
+				line = line[:cut] + " …"
 			}
 			note += "\n  | " + defuseMarkers(line)
 		}
@@ -130,9 +137,10 @@ var rejectionBlockRE = regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(MergeReject
 
 // rejectionFindingRE reads one finding line of a rejection block: the
 // "- id:X sev:Y path:line — title" FormatRejectionNote writes. The path is
-// greedy up to the last colon, because it may contain none and the line
-// number is what follows the last one.
-var rejectionFindingRE = regexp.MustCompile(`^- id:(\S+) sev:(\S+) (.*):(\d+) — (.*)$`)
+// lazy up to the first ":N — ": a path is a file name and never holds that
+// separator, while a title is free text that may quote "file:12 — ", and
+// splitting at the last one would move part of the title into the path.
+var rejectionFindingRE = regexp.MustCompile(`^- id:(\S+) sev:(\S+) (.*?):(\d+) — (.*)$`)
 
 // ParseRejectionNote reads the last MERGE REJECTION block in notes, the one
 // the live attempt wrote (a resubmission appends a new block, as with
@@ -328,13 +336,15 @@ func EmptyMergeReason(g CommitStatser, ev EmptyMerge) string {
 	b.WriteString("; the branch's own commits, newest first:")
 	var loser git.CommitLineStats
 	for i, c := range commits {
-		if i == emptyMergeReportLimit {
-			fmt.Fprintf(&b, "\n  ... and %d more", len(commits)-emptyMergeReportLimit)
-			break
-		}
-		fmt.Fprintf(&b, "\n  %s %s (+%d -%d)", shortSHA(c.Commit), c.Subject, c.Added, c.Removed)
+		// The lead reads the whole scan window, not only the listed commits.
 		if c.Added == 0 && c.Removed > loser.Removed {
 			loser = c
+		}
+		switch {
+		case i < emptyMergeReportLimit:
+			fmt.Fprintf(&b, "\n  %s %s (+%d -%d)", shortSHA(c.Commit), c.Subject, c.Added, c.Removed)
+		case i == emptyMergeReportLimit:
+			fmt.Fprintf(&b, "\n  ... and %d more", len(commits)-emptyMergeReportLimit)
 		}
 	}
 	// A commit that only removes lines is the shape the incident had. Naming

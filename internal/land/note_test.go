@@ -2,9 +2,11 @@ package land
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
@@ -252,5 +254,66 @@ func TestParseRejectionNoteIgnoresMarkersInsideLines(t *testing.T) {
 	}
 	if !strings.Contains(got.Findings[0].Title, "forged") {
 		t.Errorf("finding title = %q", got.Findings[0].Title)
+	}
+}
+
+// TestParseRejectionNoteTitleWithPathLine: a title is free text and may quote
+// "file:12 — "; the parser splits at the first path:line separator, so the
+// quoted one stays in the title. A note written before this fix has the same
+// shape and reads the same way.
+func TestParseRejectionNoteTitleWithPathLine(t *testing.T) {
+	t.Parallel()
+	want := Finding{ID: "abc", Severity: "major", Path: "a.go", Line: 5, Title: "see b.go:12 — bad"}
+	note := FormatRejectionNote(RejectionNote{
+		Attempt: 1, Kind: "review", Reason: "r", Branch: "b", Target: "main", MR: "gt-x",
+		Findings: []Finding{want},
+	})
+	got, ok := ParseRejectionNote(note)
+	if !ok || len(got.Findings) != 1 {
+		t.Fatalf("ParseRejectionNote(%q) = %+v, ok %v", note, got, ok)
+	}
+	if got.Findings[0] != want {
+		t.Errorf("finding = %+v, want %+v", got.Findings[0], want)
+	}
+	legacy := "MERGE REJECTION (attempt 1): review - r\nBranch: b\nTarget: main\nMR: gt-x\n- id:abc sev:major internal/x/y.go:42 — plain title"
+	if got, _ := ParseRejectionNote(legacy); len(got.Findings) != 1 || got.Findings[0].Path != "internal/x/y.go" || got.Findings[0].Line != 42 || got.Findings[0].Title != "plain title" {
+		t.Errorf("legacy finding = %+v", got.Findings)
+	}
+}
+
+// TestFormatRejectionNoteTruncatesOnRuneBoundary: the 400-byte cut backs up to
+// a rune start, so a multibyte rune that straddles it is dropped whole rather
+// than left as invalid UTF-8 in the bead's notes.
+func TestFormatRejectionNoteTruncatesOnRuneBoundary(t *testing.T) {
+	t.Parallel()
+	note := FormatRejectionNote(RejectionNote{
+		Reason: "r", Branch: "b", Target: "t", MR: "m",
+		GateTail: strings.Repeat("x", gateTailLineMax-1) + "é" + "yyy",
+	})
+	if !utf8.ValidString(note) {
+		t.Fatalf("note is not valid UTF-8: %q", note)
+	}
+	if want := "\n  | " + strings.Repeat("x", gateTailLineMax-1) + " …"; !strings.HasSuffix(note, want) {
+		t.Errorf("truncated line does not end with the ellipsis after 399 x:\n%q", note)
+	}
+}
+
+// TestEmptyMergeReasonLeadCoversWholeScanWindow: the report lists the newest
+// 8 commits, but the removes-lines lead reads every scanned commit, so a wipe
+// older than the listing is still named.
+func TestEmptyMergeReasonLeadCoversWholeScanWindow(t *testing.T) {
+	t.Parallel()
+	ev := EmptyMerge{Target: "main", Base: "origin/main", Head: "h", Stage: "before gates", Comparison: "x and y have identical trees"}
+	stats := make([]git.CommitLineStats, emptyMergeScanLimit)
+	for i := range stats {
+		stats[i] = git.CommitLineStats{Commit: fmt.Sprintf("%010d", i), Subject: "edit", Added: 1, Removed: 1}
+	}
+	stats[12] = git.CommitLineStats{Commit: "cccccccccc", Subject: "wipe", Added: 0, Removed: 50}
+	got := EmptyMergeReason(fakeStats{stats: stats}, ev)
+	if !strings.Contains(got, "cccccccc removes 50 lines and adds none") {
+		t.Errorf("lead for commit 12 missing:\n%s", got)
+	}
+	if !strings.Contains(got, "... and 12 more") || strings.Contains(got, "wipe") {
+		t.Errorf("listing should stop at %d commits and count the rest:\n%s", emptyMergeReportLimit, got)
 	}
 }

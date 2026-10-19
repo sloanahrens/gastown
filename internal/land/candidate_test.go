@@ -183,6 +183,20 @@ func TestParseGateWorkflow(t *testing.T) {
 	}
 }
 
+// TestParseGateWorkflowUsesJobNameContext holds the context to what Forgejo
+// reports: a job that sets name: posts "<workflow> / <name> (push)", not its
+// key, so waiting on the key waits out the window and reads as CI silence.
+func TestParseGateWorkflowUsesJobNameContext(t *testing.T) {
+	t.Parallel()
+	wf, err := ParseGateWorkflow([]byte("name: ci\njobs:\n  gate:\n    name: Merge gate\n    runs-on: x\n"))
+	if err != nil {
+		t.Fatalf("ParseGateWorkflow: %v", err)
+	}
+	if got, want := wf.Context(), "ci / Merge gate (push)"; got != want {
+		t.Fatalf("Context() = %q, want %q", got, want)
+	}
+}
+
 // TestGastownGateWorkflowFixesTheRequiredContext pins this repo's committed
 // gate workflow to the contract the candidate gate derives from it. The file
 // is the single source of the required context "ci / gate (push)"; if its name
