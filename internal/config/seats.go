@@ -1,0 +1,138 @@
+package config
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+	"time"
+)
+
+// SeatConfig is one entry of polecat_pool.seats (gt-mukgk).
+type SeatConfig struct {
+	Cap    int      `json:"cap"`
+	Closed string   `json:"closed,omitempty"` // "HH:MM-HH:MM" in polecat_pool.timezone
+	Names  []string `json:"names,omitempty"`
+}
+
+// Seat is a validated seat, as every reader sees it.
+type Seat struct {
+	Agent  string
+	Cap    int
+	Window *Window // nil: always open
+	Names  []string
+}
+
+// Window is a daily closed period in one timezone.
+type Window struct {
+	StartMin, EndMin int // minutes after local midnight
+	Loc              *time.Location
+}
+
+// Seats returns the town's seats sorted by agent name; known reports whether an
+// agent name resolves.
+func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
+	if ts == nil || ts.PolecatPool == nil {
+		return nil, nil
+	}
+	pool := ts.PolecatPool
+	var loc *time.Location
+	if pool.Timezone != "" {
+		l, err := time.LoadLocation(pool.Timezone)
+		if err != nil {
+			return nil, fmt.Errorf("polecat_pool.timezone %q: %w", pool.Timezone, err)
+		}
+		loc = l
+	}
+	agents := make([]string, 0, len(pool.Seats))
+	for a := range pool.Seats {
+		agents = append(agents, a)
+	}
+	sort.Strings(agents)
+	owner := map[string]string{}
+	out := make([]Seat, 0, len(agents))
+	for _, a := range agents {
+		c := pool.Seats[a]
+		if !known(a) {
+			return nil, fmt.Errorf("polecat_pool.seats.%s: no agent of that name in agents or the built-in presets", a)
+		}
+		if c.Cap < 0 {
+			return nil, fmt.Errorf("polecat_pool.seats.%s.cap %d: must be 0 or more", a, c.Cap)
+		}
+		s := Seat{Agent: a, Cap: c.Cap, Names: c.Names}
+		if c.Closed != "" {
+			if loc == nil {
+				return nil, fmt.Errorf("polecat_pool.seats.%s.closed needs polecat_pool.timezone", a)
+			}
+			w, err := ParseWindow(c.Closed, loc)
+			if err != nil {
+				return nil, fmt.Errorf("polecat_pool.seats.%s.closed: %w", a, err)
+			}
+			s.Window = w
+		}
+		for _, n := range c.Names {
+			if prev, ok := owner[n]; ok {
+				return nil, fmt.Errorf("polecat_pool.seats: name %q is in both %s and %s", n, prev, a)
+			}
+			owner[n] = a
+		}
+		out = append(out, s)
+	}
+	return out, nil
+}
+
+// ParseWindow parses "HH:MM-HH:MM" as a daily window in loc.
+func ParseWindow(s string, loc *time.Location) (*Window, error) {
+	parts := strings.Split(s, "-")
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("window %q: want HH:MM-HH:MM", s)
+	}
+	start, err := parseClock(parts[0])
+	if err != nil {
+		return nil, fmt.Errorf("window %q: %w", s, err)
+	}
+	end, err := parseClock(parts[1])
+	if err != nil {
+		return nil, fmt.Errorf("window %q: %w", s, err)
+	}
+	if start == end {
+		return nil, fmt.Errorf("window %q: start and end are the same", s)
+	}
+	return &Window{StartMin: start, EndMin: end, Loc: loc}, nil
+}
+
+// parseClock returns the minutes after midnight for an HH:MM clock time.
+func parseClock(s string) (int, error) {
+	t, err := time.Parse("15:04", strings.TrimSpace(s))
+	if err != nil {
+		return 0, fmt.Errorf("%q is not HH:MM", s)
+	}
+	return t.Hour()*60 + t.Minute(), nil
+}
+
+// minute is t as minutes after midnight in the window's location.
+func (w *Window) minute(t time.Time) int {
+	l := t.In(w.Loc)
+	return l.Hour()*60 + l.Minute()
+}
+
+// Closed reports whether t falls inside the window.
+func (w *Window) Closed(t time.Time) bool {
+	m := w.minute(t)
+	if w.StartMin < w.EndMin {
+		return m >= w.StartMin && m < w.EndMin
+	}
+	return m >= w.StartMin || m < w.EndMin
+}
+
+// OpensAt returns the first instant at or after t when the window is open.
+func (w *Window) OpensAt(t time.Time) time.Time {
+	if !w.Closed(t) {
+		return t
+	}
+	l := t.In(w.Loc)
+	open := time.Date(l.Year(), l.Month(), l.Day(), w.EndMin/60, w.EndMin%60, 0, 0, w.Loc)
+	if !open.After(l) {
+		open = open.AddDate(0, 0, 1)
+	}
+	return open
+}

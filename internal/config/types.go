@@ -1654,6 +1654,10 @@ type PolecatPool struct {
 	// each inside their own cap then exceed what the town wants (5 live where
 	// 3 was meant), which is what this key bounds.
 	MaxTotal *int `json:"max_total,omitempty"`
+	// Seats is the seat map: agent name -> cap, window, names (gt-mukgk).
+	Seats map[string]SeatConfig `json:"seats,omitempty"`
+	// Timezone is the IANA zone the seats' closed windows are read in.
+	Timezone string `json:"timezone,omitempty"`
 	// DeprecatedOverflowAgent and DeprecatedMaxOverflow are the retired
 	// spellings of Agent and MaxSeats, declared so a settings file written
 	// before the rename (gt-plk1z) loads. applyDeprecatedKeys folds them into
