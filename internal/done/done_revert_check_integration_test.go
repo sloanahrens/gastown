@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/revertwaiver"
 )
 
 // The scenarios below reproduce gt-63sz against real repositories. The shape
@@ -446,7 +447,7 @@ func TestIntegrationReportRevertedMerges_RefusesStaleBranch(t *testing.T) {
 		t.Fatalf("refusal states the rewrite cause without naming a file:\n%s", msg)
 	}
 	remedy := msg[remedyAt:]
-	flagged, _ := revertedPaths(detectRevertedMerges(t, s.polecat).Reverted, "")
+	flagged, _ := revertwaiver.Paths(detectRevertedMerges(t, s.polecat).Reverted, "")
 	if len(flagged) == 0 {
 		t.Fatal("the scenario flagged no path to name")
 	}

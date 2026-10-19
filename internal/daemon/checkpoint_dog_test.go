@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
+	"github.com/steveyegge/gastown/internal/revertwaiver"
 )
 
 func TestCheckpointDogInterval_Default(t *testing.T) {
@@ -661,10 +662,16 @@ func (r *checkpointAlertRecorder) alert(key, source, message string) {
 // do to its working tree from there.
 func newCheckpointRevertScenario(t *testing.T, d *Daemon) (string, gitfake.WorkTree) {
 	t.Helper()
+	return newCheckpointRevertScenarioOn(t, d, "polecat/turquoise/gt-test")
+}
+
+// newCheckpointRevertScenarioOn is newCheckpointRevertScenario with the
+// worktree's branch named, so a test can pin the bead the branch carries.
+func newCheckpointRevertScenarioOn(t *testing.T, d *Daemon, branch string) (string, gitfake.WorkTree) {
+	t.Helper()
 	f := useGitfake(t, d)
 	dir := t.TempDir()
 	origin, polecat := filepath.Join(dir, "origin.git"), filepath.Join(dir, "polecat")
-	const branch = "polecat/turquoise/gt-test"
 
 	f.InitBare(t, origin)
 	base := f.Commit(t, origin, "main", "base", map[string]string{"keep.txt": "keep\n"})
@@ -1059,6 +1066,122 @@ func TestCheckpointWorktreeDeletesBySpec(t *testing.T) {
 				checkpointRevertAlert: alerts.alert,
 			}
 			polecat, g := newCheckpointRevertScenario(t, d)
+			writeWorkFiles(t, polecat, map[string]string{"keep.txt": "keep\n", "wip.txt": "real work in progress\n"})
+			before := headOf(t, g)
+
+			created := d.checkpointWorktree(polecat, "rig", "polecat")
+			if created != tt.wantCommit {
+				t.Fatalf("checkpointWorktree = %v, want %v", created, tt.wantCommit)
+			}
+			if tt.wantCommit {
+				if got := changedSince(t, g, before); !slices.Equal(got, []string{"keep.txt", "wip.txt"}) {
+					t.Errorf("checkpoint commit changed %q, want keep.txt and wip.txt", got)
+				}
+				if len(alerts.calls) != 0 {
+					t.Errorf("a directed deletion raised an escalation: %+v", alerts.calls)
+				}
+				return
+			}
+			if after := headOf(t, g); after != before {
+				t.Errorf("refused checkpoint advanced HEAD to %s, want %s", after, before)
+			}
+			if len(alerts.calls) != 1 {
+				t.Errorf("want exactly one escalation, got %+v", alerts.calls)
+			}
+		})
+	}
+}
+
+// TestCheckpointDeletesBySpecFailsClosed covers every lookup the deletes-by-spec
+// waiver makes: a missing config, an unreadable work-bead store and a bead that
+// cannot be read all waive nothing, so the refusal and its escalation stand
+// (gt-rp83g).
+func TestCheckpointDeletesBySpecFailsClosed(t *testing.T) {
+	t.Parallel()
+	reverted := []gtgit.RevertedMerge{{Commit: "abc1234", Paths: []string{"keep.txt"}}}
+	tests := []struct {
+		name    string
+		config  func(*testing.T) *Config
+		seed    bool
+		breakBD func(*workBD)
+		want    bool
+	}{
+		{"no daemon config", func(*testing.T) *Config { return nil }, true, nil, false},
+		{"config without a town root", func(*testing.T) *Config { return &Config{} }, true, nil, false},
+		{"work-bead list fails", townConfig, true, func(b *workBD) { b.listErr = errors.New("bd down") }, false},
+		{"no assigned work", townConfig, false, nil, false},
+		{"bead read fails", townConfig, true, func(b *workBD) { b.showErr = errors.New("bd down") }, false},
+		{"label and path named", townConfig, true, nil, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bd := newWorkBD(t)
+			if tt.breakBD != nil {
+				tt.breakBD(bd)
+			}
+			if tt.seed {
+				bd.db.Seed(beads.Issue{ID: "gt-del", Status: "hooked", Assignee: "rig/polecats/polecat",
+					Labels: []string{revertwaiver.Label}, Description: "Delete keep.txt."})
+			}
+			d := &Daemon{
+				logger:        log.New(io.Discard, "", 0),
+				config:        tt.config(t),
+				openWorkBeads: bd.open,
+			}
+			useGitfake(t, d)
+
+			note, waived := d.checkpointDeletesBySpec(t.TempDir(), "rig", "polecat", reverted)
+			if waived != tt.want {
+				t.Fatalf("checkpointDeletesBySpec waived = %v (%q), want %v", waived, note, tt.want)
+			}
+			if waived && note == "" {
+				t.Error("a waiver carried no note for the log")
+			}
+		})
+	}
+}
+
+// townConfig is a daemon config over a fresh temp town root.
+func townConfig(t *testing.T) *Config {
+	t.Helper()
+	return &Config{TownRoot: t.TempDir()}
+}
+
+// TestCheckpointDeletesBySpecReadsTheBeadTheBranchCarries covers the lookup's
+// source: the waiver is read from the issue the checkpointed branch names, not
+// from the first active bead the seat also holds. A stale assignment labeled
+// deletes-by-spec must not waive a deletion the branch's own bead did not
+// direct (gt-rp83g).
+func TestCheckpointDeletesBySpecReadsTheBeadTheBranchCarries(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		staleLabels  []string
+		branchLabels []string
+		wantCommit   bool
+	}{
+		{"stale assignment is the labeled one", []string{revertwaiver.Label}, nil, false},
+		{"branch bead is the labeled one", nil, []string{revertwaiver.Label}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			alerts := &checkpointAlertRecorder{}
+			bd := newWorkBD(t)
+			// The fake lists newest first, so the active-bead fallback picks the
+			// stale bead; only the branch pins the bead under test.
+			bd.db.Seed(beads.Issue{ID: "gt-branch", Status: "hooked", Assignee: "rig/polecats/polecat",
+				Labels: tt.branchLabels, Description: "Delete keep.txt."})
+			bd.db.Seed(beads.Issue{ID: "gt-stale", Status: "hooked", Assignee: "rig/polecats/polecat",
+				Labels: tt.staleLabels, Description: "Delete keep.txt."})
+			d := &Daemon{
+				logger:                log.New(io.Discard, "", 0),
+				config:                townConfig(t),
+				openWorkBeads:         bd.open,
+				checkpointRevertAlert: alerts.alert,
+			}
+			polecat, g := newCheckpointRevertScenarioOn(t, d, "polecat/polecat/gt-branch+mabc123")
 			writeWorkFiles(t, polecat, map[string]string{"keep.txt": "keep\n", "wip.txt": "real work in progress\n"})
 			before := headOf(t, g)
 
