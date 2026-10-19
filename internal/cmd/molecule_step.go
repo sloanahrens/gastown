@@ -107,56 +107,16 @@ func runMoleculeStepDone(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	result := StepDoneResult{
-		StepID:     stepID,
-		MoleculeID: moleculeID,
-	}
-
-	// Step 3: Close the step
-	if moleculeStepDryRun {
-		if isPinnedStep(step) {
-			fmt.Printf("[dry-run] Would release pinned step: %s\n", stepID)
-		}
-		fmt.Printf("[dry-run] Would close step: %s\n", stepID)
-		result.StepClosed = true
-	} else {
-		if err := closeStep(b, step); err != nil {
-			return fmt.Errorf("closing step: %w", err)
-		}
-		result.StepClosed = true
-		fmt.Printf("%s Closed step %s: %s\n", style.Bold.Render("✓"), stepID, step.Title)
-	}
-
-	// Step 4: Find all ready steps (supports fan-out pattern)
-	readySteps, allComplete, err := findAllReadySteps(b, moleculeID)
+	result, readySteps, err := completeStep(os.Stdout, os.Stderr, b, step, moleculeID, moleculeStepDryRun, moleculeJSON)
 	if err != nil {
-		return fmt.Errorf("finding next steps: %w", err)
+		return err
 	}
 
-	if allComplete {
-		result.Complete = true
-		result.Action = "done"
-	} else if len(readySteps) > 1 {
-		// Multiple ready steps - fan-out pattern
-		result.Action = "parallel"
-		result.ParallelSteps = make([]string, len(readySteps))
-		for i, s := range readySteps {
-			result.ParallelSteps[i] = s.ID
-		}
-	} else if len(readySteps) == 1 {
-		result.NextStepID = readySteps[0].ID
-		result.NextStepTitle = readySteps[0].Title
-		result.Action = "continue"
-	} else {
-		// There are more steps but none are ready (blocked on dependencies)
-		result.Action = "no_more_ready"
-	}
-
-	// JSON output
+	// --json reports what happened and stops: the next-step assignment and the
+	// gt done run below act on the session, which a caller reading JSON did not
+	// ask for.
 	if moleculeJSON {
-		enc := json.NewEncoder(os.Stdout)
-		enc.SetIndent("", "  ")
-		return enc.Encode(result)
+		return nil
 	}
 
 	// Step 5: Handle next action
@@ -178,6 +138,70 @@ func runMoleculeStepDone(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// completeStep closes step (or says it would, on a dry run), then reads what
+// comes next. The human lines go to out, or to errOut under asJSON so stdout
+// holds only the JSON object, which asJSON also writes to out.
+func completeStep(out, errOut io.Writer, b beads.Client, step *beads.Issue, moleculeID string, dryRun, asJSON bool) (StepDoneResult, []*beads.Issue, error) {
+	say := out
+	if asJSON {
+		say = errOut
+	}
+
+	result := StepDoneResult{
+		StepID:     step.ID,
+		MoleculeID: moleculeID,
+	}
+
+	// Step 3: Close the step
+	if dryRun {
+		if isPinnedStep(step) {
+			fmt.Fprintf(say, "[dry-run] Would release pinned step: %s\n", step.ID)
+		}
+		fmt.Fprintf(say, "[dry-run] Would close step: %s\n", step.ID)
+		result.StepClosed = true
+	} else {
+		if err := closeStep(b, step); err != nil {
+			return result, nil, fmt.Errorf("closing step: %w", err)
+		}
+		result.StepClosed = true
+		fmt.Fprintf(say, "%s Closed step %s: %s\n", style.Bold.Render("✓"), step.ID, step.Title)
+	}
+
+	// Step 4: Find all ready steps (supports fan-out pattern)
+	readySteps, allComplete, err := findAllReadySteps(b, moleculeID)
+	if err != nil {
+		return result, nil, fmt.Errorf("finding next steps: %w", err)
+	}
+
+	if allComplete {
+		result.Complete = true
+		result.Action = "done"
+	} else if len(readySteps) > 1 {
+		// Multiple ready steps - fan-out pattern
+		result.Action = "parallel"
+		result.ParallelSteps = make([]string, len(readySteps))
+		for i, s := range readySteps {
+			result.ParallelSteps[i] = s.ID
+		}
+	} else if len(readySteps) == 1 {
+		result.NextStepID = readySteps[0].ID
+		result.NextStepTitle = readySteps[0].Title
+		result.Action = "continue"
+	} else {
+		// There are more steps but none are ready (blocked on dependencies)
+		result.Action = "no_more_ready"
+	}
+
+	if asJSON {
+		enc := json.NewEncoder(out)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(result); err != nil {
+			return result, readySteps, fmt.Errorf("writing step result: %w", err)
+		}
+	}
+	return result, readySteps, nil
 }
 
 // isPinnedStep reports whether a step still carries the pin a hand-off left on it.
@@ -241,7 +265,7 @@ func extractMoleculeIDFromStep(stepID string) string {
 // which uses the materialized blocked_issues_cache for correct handling of all
 // blocking types (blocks, conditional-blocks, waits-for), transitive propagation,
 // and cross-rig dependencies. See #1420.
-func findAllReadySteps(b *beads.Beads, moleculeID string) ([]*beads.Issue, bool, error) {
+func findAllReadySteps(b beads.Client, moleculeID string) ([]*beads.Issue, bool, error) {
 	// Check completion: list all children to detect "all closed" state.
 	// bd ready --mol only returns open+unblocked steps, so it can't distinguish
 	// "all complete" from "all blocked".
@@ -471,21 +495,7 @@ func handleMoleculeComplete(cwd, townRoot, moleculeID string, dryRun bool) error
 	// Unpin the molecule bead (set status to open, will be closed by gt done or manually)
 	workDir, err := findLocalBeadsDir()
 	if err == nil {
-		b := beads.New(workDir)
-		pinnedBeads, err := b.List(beads.ListOptions{
-			Status:   beads.StatusPinned,
-			Assignee: agentID,
-			Priority: -1,
-		})
-		if err == nil && len(pinnedBeads) > 0 {
-			// Unpin by setting status to open
-			open := string(beads.StatusOpen)
-			if err := beads.NewPlain(gitRoot, nil).Update(pinnedBeads[0].ID, beads.UpdateOptions{Status: &open}); err != nil {
-				style.PrintWarning("could not unpin bead: %v", err)
-			} else {
-				fmt.Printf("%s Work unpinned\n", style.Bold.Render("✓"))
-			}
-		}
+		unpinWork(os.Stdout, beads.New(workDir), beads.NewPlain(gitRoot, nil), agentID)
 	}
 
 	// For polecats, use gt done to signal completion
@@ -501,6 +511,32 @@ func handleMoleculeComplete(cwd, townRoot, moleculeID string, dryRun bool) error
 	// For other roles, just print completion message
 	fmt.Printf("\nMolecule %s is complete. Ready for next assignment.\n", moleculeID)
 	return nil
+}
+
+// unpinWork sets agentID's pinned bead back to open. A role with no agent
+// identity unpins nothing: an empty assignee filter lists every pinned bead,
+// and the first of them can be another agent's handoff bead.
+func unpinWork(w io.Writer, lister interface {
+	List(opts beads.ListOptions) ([]*beads.Issue, error)
+}, updater stepAssigner, agentID string) {
+	if agentID == "" {
+		return
+	}
+	pinnedBeads, err := lister.List(beads.ListOptions{
+		Status:   beads.StatusPinned,
+		Assignee: agentID,
+		Priority: -1,
+	})
+	if err != nil || len(pinnedBeads) == 0 {
+		return
+	}
+	// Unpin by setting status to open
+	open := string(beads.StatusOpen)
+	if err := updater.Update(pinnedBeads[0].ID, beads.UpdateOptions{Status: &open}); err != nil {
+		style.PrintWarning("could not unpin bead: %v", err)
+		return
+	}
+	fmt.Fprintf(w, "%s Work unpinned\n", style.Bold.Render("✓"))
 }
 
 // getGitRoot is defined in prime.go

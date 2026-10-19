@@ -1197,7 +1197,7 @@ func TestPrimeHookDryRunDoesNotSignalReady(t *testing.T) {
 			signals := 0
 			townRoot := t.TempDir()
 			// startPrimeHookSession is the function handlePrimeHookMode runs.
-			startPrimeHookSession(townRoot, townRoot, "sess-1", tc.dryRun, func() { signals++ })
+			startPrimeHookSession(townRoot, "sess-1", tc.dryRun, func() { signals++ })
 			if signals != tc.wantSignals {
 				t.Errorf("signalled agent readiness %d time(s), want %d", signals, tc.wantSignals)
 			}
@@ -1300,5 +1300,49 @@ func TestPolecatQuickReferenceNamesLandingWorker(t *testing.T) {
 	out := buf.String()
 	if !strings.Contains(out, "landing worker closes it") || !strings.Contains(out, " done` lands your branch") {
 		t.Fatalf("root-issue row should name the landing worker and done, got:\n%s", out)
+	}
+}
+
+// TestReadHookSessionIgnoresOtherAgentsTownRootState: the town root is shared
+// by every agent, so a session_id found there is whichever agent's hook wrote
+// last. A hook run from a directory holding no state of its own mints a session
+// instead of adopting that one, while a run from beneath the directory its own
+// hook persisted into still finds it.
+func TestReadHookSessionIgnoresOtherAgentsTownRootState(t *testing.T) {
+	t.Parallel()
+
+	const fresh = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0"
+	townRoot := t.TempDir()
+	agentA := filepath.Join(townRoot, "gastown", "polecats", "a", "gastown")
+	agentB := filepath.Join(townRoot, "gastown", "polecats", "b", "gastown")
+	empty := filepath.Join(townRoot, "scratch")
+	nestedB := filepath.Join(agentB, "internal", "cmd")
+	for _, dir := range []string{agentA, agentB, empty, nestedB} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+
+	// Each agent's SessionStart hook persists the session it resolved.
+	startPrimeHookSession(agentA, "session-a", false, func() {})
+	startPrimeHookSession(agentB, "session-b", false, func() {})
+	// State an earlier build left at the town root.
+	persistSessionID(townRoot, "session-b")
+
+	hookFrom := func(dir string) string {
+		e := testPrimeHookEnv(dir, nil)
+		e.findTown = func() (string, error) { return townRoot, nil }
+		e.newID = func() string { return fresh }
+		return e.readHookSession().sessionID
+	}
+
+	if got := hookFrom(empty); got != fresh {
+		t.Errorf("hook from a directory with no state = %q, want a fresh session %q, not another agent's", got, fresh)
+	}
+	if got := hookFrom(nestedB); got != "session-b" {
+		t.Errorf("hook from beneath agent B's directory = %q, want its own session-b", got)
+	}
+	if got := hookFrom(agentA); got != "session-a" {
+		t.Errorf("hook from agent A's directory = %q, want its own session-a", got)
 	}
 }

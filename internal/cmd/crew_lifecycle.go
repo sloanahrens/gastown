@@ -17,20 +17,36 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/mail"
+	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
+// crewRemoveEnv is what crew remove reads outside the process before it
+// touches a workspace: the member's rig, and whether its session exists.
+type crewRemoveEnv struct {
+	member     func(rigOverride, name string) (*crew.Manager, *rig.Rig, error)
+	hasSession func(sessionID string) (bool, error)
+}
+
 func runCrewRemove(cmd *cobra.Command, args []string) error {
+	return runCrewRemoveWith(args, crewRig, crewForce, crewPurge, crewRemoveEnv{
+		member:     getCrewManagerForMember,
+		hasSession: tmux.NewTmux().HasSession,
+	})
+}
+
+// runCrewRemoveWith is runCrewRemove for the given flag values and env.
+func runCrewRemoveWith(args []string, rigFlag string, force, purge bool, env crewRemoveEnv) error {
 	var lastErr error
 
 	// --purge implies --force
-	forceRemove := crewForce || crewPurge
+	forceRemove := force || purge
 
 	for _, arg := range args {
 		name := arg
-		rigOverride := crewRig
+		rigOverride := rigFlag
 
 		// Parse rig/name format (e.g., "beads/emma" -> rig=beads, name=emma)
 		if rig, crewName, ok := parseRigSlashName(name); ok {
@@ -40,29 +56,33 @@ func runCrewRemove(cmd *cobra.Command, args []string) error {
 			name = crewName
 		}
 
-		crewMgr, r, err := getCrewManagerForMember(rigOverride, name)
+		crewMgr, r, err := env.member(rigOverride, name)
 		if err != nil {
 			fmt.Printf("Error removing %s: %v\n", arg, err)
 			lastErr = err
 			continue
 		}
 
-		// Check for running session (unless forced)
-		if !forceRemove {
-			t := tmux.NewTmux()
-			sessionID := crewSessionName(townRegistry(), r.Name, name)
-			hasSession, _ := t.HasSession(sessionID)
-			if hasSession {
-				fmt.Printf("Error removing %s: session '%s' is running (use --force to kill and remove)\n", arg, sessionID)
-				lastErr = fmt.Errorf("session running")
-				continue
-			}
+		// A tmux failure is not "no session": reading it that way skipped the
+		// running-session guard below and the kill, and removed the workspace
+		// out from under a live session.
+		sessionID := crewSessionName(townRegistry(), r.Name, name)
+		hasSession, err := env.hasSession(sessionID)
+		if err != nil {
+			fmt.Printf("Error removing %s: checking session '%s': %v\n", arg, sessionID, err)
+			lastErr = err
+			continue
+		}
+
+		// A running session blocks removal (unless forced)
+		if hasSession && !forceRemove {
+			fmt.Printf("Error removing %s: session '%s' is running (use --force to kill and remove)\n", arg, sessionID)
+			lastErr = fmt.Errorf("session running")
+			continue
 		}
 
 		// Kill session if it exists (with proper process cleanup to avoid orphans)
-		t := tmux.NewTmux()
-		sessionID := crewSessionName(townRegistry(), r.Name, name)
-		if hasSession, _ := t.HasSession(sessionID); hasSession {
+		if hasSession {
 			sup := operatorSupervisor(filepath.Dir(r.Path))
 			if err := sup.StopSession(sessionID, "crew remove --force", operatorActor("gt crew remove")); err != nil {
 				fmt.Printf("Error killing session for %s: %v\n", arg, err)
@@ -125,7 +145,7 @@ func runCrewRemove(cmd *cobra.Command, args []string) error {
 		agentBeadID := beads.CrewBeadIDWithPrefix(prefix, r.Name, name)
 
 		rigBd := beads.NewPlain(r.Path, nil)
-		if crewPurge {
+		if purge {
 			// --purge: DELETE the agent bead entirely (obliterate)
 			if err := rigBd.DeleteIssues(agentBeadID); err != nil {
 				// Non-fatal: bead might not exist
