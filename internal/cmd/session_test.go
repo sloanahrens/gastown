@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 func TestSessionInfoJSONOutput(t *testing.T) {
@@ -128,5 +129,35 @@ func TestSessionInfoJSONOutputNotRunning(t *testing.T) {
 
 	if parsed["running"] != false {
 		t.Errorf("running = %v, want false", parsed["running"])
+	}
+}
+
+// stubPolecatSessionLister models a rig whose tmux holds a polecat session and
+// a crew session under the same rig prefix: List returns both, ListPolecats
+// only the polecat, as polecat.SessionManager does.
+type stubPolecatSessionLister struct{}
+
+func (stubPolecatSessionLister) List() ([]polecat.SessionInfo, error) {
+	return []polecat.SessionInfo{
+		{Polecat: "amber", SessionID: "gt-amber", Running: true},
+		{Polecat: "crew-sloan", SessionID: "gt-crew-sloan", Running: true},
+	}, nil
+}
+
+func (stubPolecatSessionLister) ListPolecats() ([]polecat.SessionInfo, error) {
+	return []polecat.SessionInfo{{Polecat: "amber", SessionID: "gt-amber", Running: true}}, nil
+}
+
+// A crew session carries the rig prefix, so listing it as polecat crew-sloan
+// pointed `gt session stop` at a seat that does not exist.
+func TestRunSessionListSkipsCrewSessions(t *testing.T) {
+	t.Parallel()
+	rigs := []*rig.Rig{{Name: "gastown"}}
+
+	got := listPolecatSessions(rigs, func(*rig.Rig) polecatSessionLister { return stubPolecatSessionLister{} })
+
+	want := []SessionListItem{{Rig: "gastown", Polecat: "amber", SessionID: "gt-amber", Running: true}}
+	if len(got) != len(want) || got[0] != want[0] {
+		t.Errorf("listPolecatSessions = %+v, want %+v", got, want)
 	}
 }

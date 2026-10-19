@@ -363,3 +363,41 @@ func TestOutputPrimeContextFallbackPolecatAndCrewIncludeQuickReference(t *testin
 		}
 	}
 }
+
+// A rig whose only directive is directives/_common.md is a rig directive, and
+// its truncation pointer must name that file: the role file it used to name
+// does not exist.
+func TestOutputRoleDirectivesCappedCommonOnly(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	rigDir := filepath.Join(town, "myrig", "directives")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	common := filepath.Join(rigDir, "_common.md")
+	if err := os.WriteFile(common, []byte(strings.Repeat("shared rule line x\n", 400)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	outputRoleDirectivesCapped(RoleContext{Role: RolePolecat, TownRoot: town, Rig: "myrig"}, &buf, false, true)
+	out := buf.String()
+
+	if !strings.Contains(out, "## Rig Directives") || strings.Contains(out, "Town Directives") {
+		t.Errorf("header does not label a rig-only _common.md as a rig directive:\n%.200s", out)
+	}
+	if !strings.Contains(out, "directive truncated") {
+		t.Fatalf("directive was not truncated:\n%.200s", out)
+	}
+	if !strings.Contains(out, common) {
+		t.Errorf("truncation pointer does not name %s", common)
+	}
+	for _, missing := range []string{
+		filepath.Join(town, "directives", "polecat.md"),
+		filepath.Join(rigDir, "polecat.md"),
+	} {
+		if strings.Contains(out, missing) {
+			t.Errorf("truncation pointer names %s, which was not loaded", missing)
+		}
+	}
+}

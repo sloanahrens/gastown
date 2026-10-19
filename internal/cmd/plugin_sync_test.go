@@ -149,9 +149,11 @@ func TestRunPluginSync_ReportsExtraItLeaves(t *testing.T) {
 	}
 }
 
-// The same dry run with --clean must say what it would remove, not just name
-// the plugin.
-func TestRunPluginSync_DryRunCleanSaysWouldRemove(t *testing.T) {
+// A --clean dry run of an extra the source never held reports it protected and
+// fails like the real run: without history in the source, a runtime-only plugin
+// cannot be told from a hand edit. The integration tier covers the retired
+// plugin the source did ship, which "would be removed".
+func TestRunPluginSync_DryRunCleanProtectsUnshippedExtra(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
@@ -163,11 +165,11 @@ func TestRunPluginSync_DryRunCleanSaysWouldRemove(t *testing.T) {
 
 	var out bytes.Buffer
 	r := pluginSyncRun{townRoot: townRoot, dryRun: true, clean: true, out: &out, errOut: io.Discard}
-	if err := r.run(); err != nil {
-		t.Fatalf("run() error = %v", err)
+	if err := r.run(); err == nil {
+		t.Fatalf("run() = nil, want the protected-plugin error; output:\n%s", out.String())
 	}
-	if !strings.Contains(out.String(), "seat-refill (would be removed)") {
-		t.Errorf("--clean dry run did not name what it would remove; output:\n%s", out.String())
+	if strings.Contains(out.String(), "would be removed") || !strings.Contains(out.String(), "seat-refill (protected") {
+		t.Errorf("--clean dry run output:\n%s", out.String())
 	}
 }
 
@@ -175,5 +177,48 @@ func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The real sync leaves a runtime copy holding edits the source never had and
+// exits non-zero. The dry run previewed it as "content differs" and exited 0.
+func TestPluginSyncDryRunReportsProtected(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	markTestTown(t, townRoot)
+	sourcePlugins := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	writeTestPlugin(t, sourcePlugins, "edited-plugin", "source text")
+	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "edited-plugin", "hand edit")
+
+	var out, errOut bytes.Buffer
+	dry := pluginSyncRun{townRoot: townRoot, dryRun: true, out: &out, errOut: &errOut}
+	dryErr := dry.run()
+	if dryErr == nil {
+		t.Fatalf("dry run returned nil for a plugin holding runtime edits; output:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "content differs") {
+		t.Errorf("dry run previewed a protected plugin as syncable; output:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "edited-plugin (protected") {
+		t.Errorf("dry run did not report edited-plugin as protected; output:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "edited-plugin/plugin.md") {
+		t.Errorf("stderr = %q, want the edited file named", errOut.String())
+	}
+
+	realErr := pluginSyncRun{townRoot: townRoot, out: io.Discard, errOut: io.Discard}.run()
+	if realErr == nil || realErr.Error() != dryErr.Error() {
+		t.Errorf("dry run error = %v, real run error = %v; want the same", dryErr, realErr)
+	}
+
+	// --force discards the edits, so the preview is a plain diff again.
+	out.Reset()
+	forced := pluginSyncRun{townRoot: townRoot, dryRun: true, force: true, out: &out, errOut: io.Discard}
+	if err := forced.run(); err != nil {
+		t.Fatalf("--force dry run error = %v", err)
+	}
+	if !strings.Contains(out.String(), "edited-plugin (content differs)") {
+		t.Errorf("--force dry run output:\n%s", out.String())
 	}
 }

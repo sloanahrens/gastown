@@ -134,19 +134,18 @@ func outputRoleDirectivesCapped(ctx RoleContext, w io.Writer, explainEnabled, ca
 		return
 	}
 
-	// Determine source label for the header
+	// The header and the truncation pointer name the files that were loaded,
+	// _common.md included: a rig holding only directives/_common.md is a rig
+	// directive, and a role file that does not exist is nothing to point at.
+	sources := config.RoleDirectiveSources(role, townRoot, rigName)
+	townDir := filepath.Join(townRoot, "directives") + string(filepath.Separator)
 	hasTown := false
 	hasRig := false
-	if data, err := os.ReadFile(townPath); err == nil { //nolint:gosec // G304: path is from trusted config
-		if s := strings.TrimSpace(string(data)); s != "" {
+	for _, src := range sources {
+		if strings.HasPrefix(src, townDir) {
 			hasTown = true
-		}
-	}
-	if rigPath != "" {
-		if data, err := os.ReadFile(rigPath); err == nil { //nolint:gosec // G304: path is from trusted config
-			if s := strings.TrimSpace(string(data)); s != "" {
-				hasRig = true
-			}
+		} else {
+			hasRig = true
 		}
 	}
 
@@ -168,11 +167,8 @@ func outputRoleDirectivesCapped(ctx RoleContext, w io.Writer, explainEnabled, ca
 			cut = primeDirectiveMaxChars
 		}
 		fmt.Fprintln(w, content[:cut])
-		fmt.Fprintf(w, "\n_[prime] directive truncated at %d of %d chars; read the file(s) above in full: %s", cut, len(content), townPath)
-		if rigPath != "" {
-			fmt.Fprintf(w, ", %s", rigPath)
-		}
-		fmt.Fprintln(w, "_")
+		fmt.Fprintf(w, "\n_[prime] directive truncated at %d of %d chars; read the file(s) above in full: %s_\n",
+			cut, len(content), strings.Join(sources, ", "))
 		return
 	}
 	fmt.Fprintln(w, content)
