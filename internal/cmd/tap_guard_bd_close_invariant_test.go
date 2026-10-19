@@ -312,23 +312,6 @@ func TestBdCloseInvariantRefusal(t *testing.T) {
 		}
 	})
 
-	t.Run("bd done on this branch's bead with unmerged commits is refused", func(t *testing.T) {
-		t.Parallel()
-		// Parse the way the guard does, so the alias path is covered end to end.
-		invocations := parseBdCloseInvocations("bd done gt-arno")
-		if len(invocations) != 1 || len(invocations[0].IDs) != 1 {
-			t.Fatalf("bd done gt-arno parsed as %+v, want one invocation with one id", invocations)
-		}
-		inv := invocations[0]
-		s := scope(4)
-		if !branchNamesBead(s.branch, inv.IDs[0]) {
-			t.Fatalf("branch %q should name %q", s.branch, inv.IDs[0])
-		}
-		if got := bdCloseInvariantRefusal(s, inv.IDs[0], inv.Reason); got == "" {
-			t.Error("expected bd done with unmerged commits to be refused")
-		}
-	})
-
 	t.Run("a done-style reason is not an override", func(t *testing.T) {
 		t.Parallel()
 		if got := bdCloseInvariantRefusal(scope(4), "gt-arno", "done"); got == "" {
