@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 )
 
@@ -539,16 +540,22 @@ func TestChooseSeatPinnedAgent(t *testing.T) {
 	}
 }
 
+// nightWindow is a seat window shut from 20:00 until 08:00 UTC, so a budget
+// clock at 21:00 reads it closed and a clock at noon reads it open.
+func nightWindow() *config.Window {
+	return &config.Window{StartMin: 20 * 60, EndMin: 8 * 60, Loc: time.UTC}
+}
+
 func TestClosedSeatTakesNoSpawn(t *testing.T) {
 	t.Parallel()
-	opens := time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC)
-	closed := Seat{Agent: "deepseek-flash", Cap: 3, Live: 1, Closed: true, OpensAt: opens}
-	if closed.Free() {
+	shut := time.Date(2026, 10, 19, 21, 0, 0, 0, time.UTC)
+	closed := Seat{Agent: "deepseek-flash", Cap: 3, Live: 1, Window: nightWindow()}
+	if closed.FreeAt(shut) {
 		t.Fatal("a closed seat with room must not be free")
 	}
 	b := Budget{
 		Seats: []Seat{{Agent: "claude-sonnet", Cap: 1, Live: 1}, closed},
-		Now:   time.Date(2026, 10, 19, 21, 0, 0, 0, time.UTC),
+		Now:   shut,
 		Rand:  randForIndex(0, 2),
 	}
 	got := ChooseSeat(b, goodSpec())
@@ -567,11 +574,10 @@ func TestClosedSeatTakesNoSpawn(t *testing.T) {
 
 func TestPinnedBeadWaitsOnClosedSeat(t *testing.T) {
 	t.Parallel()
-	opens := time.Date(2026, 10, 20, 8, 0, 0, 0, time.UTC)
 	b := Budget{
 		Seats: []Seat{
 			{Agent: "claude-sonnet", Cap: 3},
-			{Agent: "deepseek-flash", Cap: 3, Closed: true, OpensAt: opens},
+			{Agent: "deepseek-flash", Cap: 3, Window: nightWindow()},
 		},
 		Now:  time.Date(2026, 10, 19, 21, 0, 0, 0, time.UTC),
 		Rand: randForIndex(0, 2),
@@ -584,5 +590,66 @@ func TestPinnedBeadWaitsOnClosedSeat(t *testing.T) {
 	}
 	if want := "waiting for a deepseek-flash seat, closed until 08:00 (free seats left alone: claude-sonnet)"; !strings.Contains(got.Reason, want) {
 		t.Errorf("reason = %q, want it to contain %q", got.Reason, want)
+	}
+}
+
+// A seat's window is read at choice time, not snapshotted when the budget was
+// built: a tick whose board read and first sling carry it past 20:00 must not
+// sling onto the flash seat it saw open at 19:59:58 (gt-t8new). The seating is
+// pinned to the flash seat so the closed seat is the only one either choice can
+// report; the pinned half is the wait the closed seat already owes.
+func TestChooseSeatRechecksTheWindowAtChoiceTime(t *testing.T) {
+	t.Parallel()
+	b := Budget{
+		Seats: []Seat{{Agent: "deepseek-flash", Cap: 2, Window: nightWindow()}},
+		Now:   time.Date(2026, 10, 19, 19, 59, 58, 0, time.UTC),
+	}
+	spec := goodSpec()
+	spec.Labels = []string{AgentLabelPrefix + "deepseek-flash"}
+	if got := ChooseSeat(b, spec); got.Skip || got.Agent != "deepseek-flash" {
+		t.Fatalf("before the boundary = %+v, want the flash seat", got)
+	}
+
+	// The board read and contention retries carry the tick across the boundary.
+	b.Now = time.Date(2026, 10, 19, 20, 0, 1, 0, time.UTC)
+	got := ChooseSeat(b, spec)
+	if !got.Skip || got.Agent != "" {
+		t.Fatalf("a seat that shut mid-tick took %+v, want a skip", got)
+	}
+	if want := "closed until 08:00"; !strings.Contains(got.Reason, want) {
+		t.Errorf("reason = %q, want it to name the seat closed (%q)", got.Reason, want)
+	}
+
+	// An unpinned bead is not drawn onto it either, on the same clock.
+	got = ChooseSeat(b, goodSpec())
+	if !got.Skip || got.Agent != "" || !strings.Contains(got.Reason, "closed until 08:00") {
+		t.Fatalf("unpinned bead at the shut seat = %+v, want a skip naming the window", got)
+	}
+
+	// The window is read both ways: a seat shut when the budget was built and
+	// open by choice time takes the bead.
+	b.Now = time.Date(2026, 10, 20, 8, 0, 1, 0, time.UTC)
+	if got := ChooseSeat(b, spec); got.Skip || got.Agent != "deepseek-flash" {
+		t.Fatalf("after the window opened = %+v, want the flash seat", got)
+	}
+}
+
+// A budget with no clock cannot read a windowed seat, so it must not draw one.
+// The Closed/OpensAt snapshot made a zero Budget.Now harmless; carrying the
+// window must not quietly read it at year one and depend on the hour that
+// happens to name (gt-t8new).
+func TestChooseSeatZeroClockDoesNotDrawAWindowedSeat(t *testing.T) {
+	t.Parallel()
+	b := Budget{Seats: []Seat{{Agent: "deepseek-flash", Cap: 2, Window: nightWindow()}}}
+	if got := ChooseSeat(b, goodSpec()); !got.Skip || got.Agent != "" || !strings.Contains(got.Reason, "no clock") {
+		t.Fatalf("unpinned bead with no clock = %+v, want a skip naming the missing clock", got)
+	}
+	spec := goodSpec()
+	spec.Labels = []string{AgentLabelPrefix + "deepseek-flash"}
+	if got := ChooseSeat(b, spec); !got.Skip || got.Agent != "" || !strings.Contains(got.Reason, "closed, no clock") {
+		t.Fatalf("pinned bead with no clock = %+v, want a skip naming the missing clock", got)
+	}
+	if pic := b.Picture(); !strings.Contains(pic, "closed, no clock") {
+		t.Errorf("picture = %q, want it to name the window the zero clock cannot read", pic)
 	}
 }
