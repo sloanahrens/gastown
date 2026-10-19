@@ -573,6 +573,61 @@ func TestSpecDispatchHoldsASecondFilingOfHeldWork(t *testing.T) {
 	})
 }
 
+// A plan document is context every child of an epic cites, not work any one of
+// them does, so a held child's plan must not serialize its siblings (gt-4wb27,
+// the gt-mukgk force-sling). The code file it names still holds a second filing
+// of the same defect.
+func TestSpecDispatchHeldPlanDocumentDoesNotHoldSiblings(t *testing.T) {
+	t.Parallel()
+	const plan = "docs/plans/2026-10-19-epic-plan.md"
+	const code = "internal/cmd/spec.go"
+
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-held-task", Status: beads.StatusHooked,
+		Description: "Plan " + plan + "; the fix lands in " + code + "."})
+	dir := t.TempDir()
+	heldEnv := func(f *fakeSpecTown) specDispatchEnv {
+		env := f.env()
+		env.Held = func(string) ([]specdispatch.HeldBead, error) {
+			return heldBeadsFrom(db, func(string, error) {}, dir)
+		}
+		return env
+	}
+	citing := func(id, created, text string) specdispatch.Spec {
+		s := cleanSpec(id, 2, created)
+		s.Description = specTestDescription + "\n\n" + text
+		return s
+	}
+
+	t.Run("two siblings citing only the plan both dispatch", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(
+			citing("gt-sibling-a", "2026-10-19T10:00:00Z", "Plan "+plan+"; the fix lands in internal/cmd/a.go."),
+			citing("gt-sibling-b", "2026-10-19T10:01:00Z", "Plan "+plan+"; the fix lands in internal/cmd/b.go."),
+		)
+		env := heldEnv(f)
+		env.PerTick = 2
+		r := runSpecDispatchCycle(env)
+		if got := strings.Join(f.slung, " "); got != "gt-sibling-a gt-sibling-b" {
+			t.Fatalf("slung %q, want both siblings the shared plan does not make one defect; report %+v", got, r)
+		}
+	})
+
+	t.Run("a second filing naming the held code file is still held", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(
+			citing("gt-dup", "2026-10-19T10:00:00Z", "Plan "+plan+"; the same "+code+" fix."),
+		)
+		r := runSpecDispatchCycle(heldEnv(f))
+		if len(f.slung) != 0 {
+			t.Fatalf("slung a second filing of the held code file: %v", f.slung)
+		}
+		if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, code) {
+			t.Fatalf("skipped = %+v, want the hold to name the shared code path", r.Skipped)
+		}
+	})
+}
+
 // The held read is the rig's own beads: the two statuses a working seat holds,
 // with the paths their own text names — description and notes both, as the
 // sling-time guard reads them (gt-z80p9).

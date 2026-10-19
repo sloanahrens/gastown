@@ -152,6 +152,26 @@ func extractContentRefs(parts ...string) contentRefs {
 	return contentRefs{Tests: sortedKeys(tests), Files: sortedKeys(files)}
 }
 
+// planDocPrefix is the docs tree the overlap guard reads as context, not work:
+// every child of a plan cites it, so it must not hold siblings apart (gt-4wb27).
+const planDocPrefix = "docs/plans/"
+
+// extractOverlapRefs is extractContentRefs for the content-overlap guard, minus
+// the plan documents a bead cites. A code path named beside the plan still
+// counts.
+func extractOverlapRefs(parts ...string) contentRefs {
+	refs := extractContentRefs(parts...)
+	files := make([]string, 0, len(refs.Files))
+	for _, path := range refs.Files {
+		if strings.HasPrefix(path, planDocPrefix) {
+			continue
+		}
+		files = append(files, path)
+	}
+	refs.Files = files
+	return refs
+}
+
 // normalizeFileToken reduces one prose token to a repo-relative file path, or
 // reports that it is not a file reference at all.
 func normalizeFileToken(raw string) (string, bool) {
@@ -277,7 +297,7 @@ func (p *duplicatePools) check(townRoot, beadID string, info *beadInfo) (*duplic
 	if info == nil {
 		return nil, nil, nil
 	}
-	refs := extractContentRefs(info.Title, info.Description, info.Design, info.Notes)
+	refs := extractOverlapRefs(info.Title, info.Description, info.Design, info.Notes)
 	if refs.Empty() {
 		return nil, nil, nil
 	}
@@ -588,7 +608,7 @@ func listDuplicateCandidates(store beads.Client, warn func(beadsDir string, err 
 			CreatedAt: row.CreatedAt,
 			Blockers:  detail.Blockers,
 			Ready:     readinessOf(row, detail),
-			Refs: extractContentRefs(row.Title, row.Description, row.CloseReason,
+			Refs: extractOverlapRefs(row.Title, row.Description, row.CloseReason,
 				detail.Design, detail.Notes),
 		})
 	}
