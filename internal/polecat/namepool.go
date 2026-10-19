@@ -119,9 +119,10 @@ type NamePool struct {
 	// binding outlives the polecat: a freed name comes back only to a seat of
 	// its own model, which is what keeps a rig's names meaningful per model
 	// (gt-m9dty). A name with no binding either predates the rule or has not
-	// been allocated with a model yet: it is anyone's, and the first
-	// allocation that names a model binds it for good. That is why reconcile
-	// never invents a binding from a last-slung agent bead.
+	// been allocated with a model yet. While it is in use it stays unbound,
+	// because reconcile never invents a binding from a last-slung agent bead;
+	// once released it is anyone's, and the first allocation that names a
+	// model binds it for good.
 	Bindings map[string]string `json:"bindings,omitempty"`
 
 	// SeatNames maps a normalized agent name to the names its seat lists.
@@ -419,7 +420,8 @@ func normalizeModel(model string) string {
 	return strings.ToLower(strings.TrimSpace(model))
 }
 
-// sameModel compares two already-normalized-or-not model names.
+// sameModel reports whether a and b name the same model. Case and surrounding
+// space are ignored, matching the form bindings are stored in.
 func sameModel(a, b string) bool {
 	return normalizeModel(a) == normalizeModel(b)
 }

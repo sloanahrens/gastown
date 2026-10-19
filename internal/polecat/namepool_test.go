@@ -1784,3 +1784,84 @@ func TestNamePool_SeatNamesAreNotPersisted(t *testing.T) {
 		t.Fatalf("seat lists are configuration and must not reach the state file:\n%s", data)
 	}
 }
+
+// TestNamePool_ResetClearsBindings pins that Reset frees a bound name for
+// any model: the binding goes with the name, not just the in-use mark.
+func TestNamePool_ResetClearsBindings(t *testing.T) {
+	t.Parallel()
+	pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "mad-max", nil, DefaultPoolSize)
+
+	name, err := pool.AllocateFor("claude-sonnet")
+	if err != nil {
+		t.Fatalf("AllocateFor: %v", err)
+	}
+	pool.Reset()
+
+	if got := pool.ModelOf(name); got != "" {
+		t.Errorf("ModelOf(%q) after Reset = %q, want unbound", name, got)
+	}
+	if pool.ActiveCount() != 0 {
+		t.Errorf("ActiveCount after Reset = %d, want 0", pool.ActiveCount())
+	}
+	next, err := pool.AllocateFor("deepseek-flash")
+	if err != nil {
+		t.Fatalf("AllocateFor(flash) after Reset: %v", err)
+	}
+	if next != name {
+		t.Fatalf("flash drew %q after Reset, want the freed %q", next, name)
+	}
+	if got := pool.ModelOf(name); got != "deepseek-flash" {
+		t.Errorf("ModelOf(%q) = %q, want deepseek-flash", name, got)
+	}
+}
+
+// TestNamePool_InUseBeforeRuleStaysUnbound pins that a name already in use
+// when reconcile runs carries no binding. It stays out of reach while in use
+// and becomes anyone's once released.
+func TestNamePool_InUseBeforeRuleStaysUnbound(t *testing.T) {
+	t.Parallel()
+	pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "mad-max", nil, DefaultPoolSize)
+	pool.Reconcile([]string{"furiosa"})
+
+	if got := pool.ModelOf("furiosa"); got != "" {
+		t.Fatalf("ModelOf(furiosa) after reconcile = %q, want unbound", got)
+	}
+	sonnet, err := pool.AllocateFor("claude-sonnet")
+	if err != nil {
+		t.Fatalf("AllocateFor(sonnet): %v", err)
+	}
+	if sonnet != "nux" {
+		t.Fatalf("sonnet drew %q while furiosa is in use, want nux", sonnet)
+	}
+
+	pool.Release("furiosa")
+	flash, err := pool.AllocateFor("deepseek-flash")
+	if err != nil {
+		t.Fatalf("AllocateFor(flash) after release: %v", err)
+	}
+	if flash != "furiosa" {
+		t.Fatalf("flash drew %q after release, want furiosa", flash)
+	}
+	if got := pool.ModelOf("furiosa"); got != "deepseek-flash" {
+		t.Errorf("ModelOf(furiosa) = %q, want deepseek-flash", got)
+	}
+}
+
+func TestSameModel(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{"claude-sonnet", "claude-sonnet", true},
+		{"Claude-Sonnet", "claude-sonnet", true},
+		{" deepseek-flash ", "deepseek-flash", true},
+		{"claude-sonnet", "claude-haiku", false},
+		{"", "", true},
+	}
+	for _, tt := range tests {
+		if got := sameModel(tt.a, tt.b); got != tt.want {
+			t.Errorf("sameModel(%q, %q) = %v, want %v", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
