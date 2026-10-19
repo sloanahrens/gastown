@@ -1,3 +1,5 @@
+> Status: approved by Sloan 2026-10-19; task beads released in dependency order. Bead gt-sxg5u.
+
 # Jev advisory triage: implementation plan
 
 Design: docs/plans/2026-10-19-jev-attention-triage-design.md (bead gt-sxg5u, commit 3babac6c).
