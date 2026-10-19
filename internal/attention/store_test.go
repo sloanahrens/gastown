@@ -429,3 +429,32 @@ func TestAcknowledgeItemHistoryRotatesAtTheCap(t *testing.T) {
 		t.Fatalf("history = %+v, want the new line in the fresh file", got)
 	}
 }
+
+// A history write that fails does not lose the ack: acks.json already holds it,
+// and the error names the key and the history file so the operator knows the
+// measurement line is missing.
+func TestAcknowledgeItemHistoryFailureKeepsTheAck(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	// A directory where the log should be makes the append fail.
+	if err := os.MkdirAll(AcksHistoryPath(town), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	it := Item{Key: "esc:hq-1", Kind: KindEscalation}
+	err := AcknowledgeItem(town, it, reconcileNow)
+	if err == nil {
+		t.Fatal("AcknowledgeItem = nil, want the history write error")
+	}
+	for _, want := range []string{"acked esc:hq-1", AcksHistoryFileName} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+	acks, rerr := ReadAcks(town)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if !AckedKey(acks, it.Key) {
+		t.Errorf("acks = %+v, want %s kept despite the history failure", acks.Acks, it.Key)
+	}
+}
