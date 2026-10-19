@@ -66,9 +66,10 @@ const (
 // for the branch), the stop gives up on it, and the comment's note says the
 // branch exists only in the worktree, names the path and says why the push
 // failed; step 6 is skipped. The hand-back's needs-split label raises the
-// attention item. A stop resumed past step 2 first checks
-// the pause is still down and no session runs on the seat; if not, the seat
-// was taken back and the stop ends without a hand-back. Every stop looks
+// attention item. A resumed stop first checks the pause is still down, before
+// it stops the session and again before step 3, where it also checks that no
+// session runs on the seat; if not, the seat was taken back and the stop ends
+// without a hand-back. Every stop looks
 // again just before step 6, because the push and hand-back can outlast an
 // operator resume and a new sling: a seat taken back by then keeps the bead
 // handed back, and the release is left to its new holder.
@@ -138,9 +139,11 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 				return
 			}
 			if why != "" {
+				d.logger.Printf("overrun_guard: %s on %s: %s; abandoning the stop, session left running", who, st.Bead, why)
+				// A save that fails is only warned of: the next tick reads the
+				// same seat and abandons again, and stops nothing meanwhile.
 				st.StoppedAt = now
 				save()
-				d.logger.Printf("overrun_guard: %s on %s: %s; abandoning the stop, session left running", who, st.Bead, why)
 				return
 			}
 		}
@@ -152,7 +155,14 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 				return
 			}
 			st.StopBeganAt = time.Time{}
-			save()
+			if !save() {
+				// The saved stop stays begun, and a begun stop with no pause
+				// marker reads as an operator resume: put the pause back so the
+				// two agree and the next tick stops the session again.
+				if perr := s.pause(seat); perr != nil {
+					d.logger.Printf("overrun_guard: WARNING: %s: pause marker not restored: %v", who, perr)
+				}
+			}
 			return
 		}
 		st.SessionStoppedAt = now

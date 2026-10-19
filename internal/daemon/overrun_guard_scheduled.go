@@ -86,9 +86,11 @@ func (d *Daemon) overrunScheduledStop(s overrunSeams, seat overrunSeat, st overr
 				return
 			}
 			if why != "" {
+				d.logger.Printf("overrun_guard: scheduled %s on %s: %s; abandoning the stop, session left running", who, st.Bead, why)
+				// A save that fails is only warned of: the next tick reads the
+				// same seat and abandons again, and stops nothing meanwhile.
 				st.StoppedAt = now
 				save()
-				d.logger.Printf("overrun_guard: scheduled %s on %s: %s; abandoning the stop, session left running", who, st.Bead, why)
 				return
 			}
 		}
@@ -100,7 +102,14 @@ func (d *Daemon) overrunScheduledStop(s overrunSeams, seat overrunSeat, st overr
 				return
 			}
 			st.StopBeganAt = time.Time{}
-			save()
+			if !save() {
+				// The saved stop stays begun, and a begun stop with no pause
+				// marker reads as an operator resume: put the pause back so the
+				// two agree and the next tick stops the session again.
+				if perr := s.pause(seat); perr != nil {
+					d.logger.Printf("overrun_guard: WARNING: %s: pause marker not restored: %v", who, perr)
+				}
+			}
 			return
 		}
 		d.logger.Printf("overrun_guard: stopped scheduled %s on %s after %s", who, st.Bead, elapsed.Round(time.Second))

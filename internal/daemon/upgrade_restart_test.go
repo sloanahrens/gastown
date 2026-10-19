@@ -878,57 +878,83 @@ func TestStampRestartAttemptDoesNotOverwriteANewerMarker(t *testing.T) {
 // clearCoveredMarker removes a marker by path after a git ancestry check.
 // install-gt.sh writing a newer marker in between must survive: removing it
 // would leave the daemon on the old binary with no request left to restart for.
-func TestClearCoveredMarkerKeepsANewerMarker(t *testing.T) {
+func TestClearCoveredMarker(t *testing.T) {
 	t.Parallel()
-	d := upgradeTestDaemon(t)
-	captureEscalations(d)
-	withOwnCommit(d, "bbb")
-	fakeHistory(t, d, "aaa", "bbb", "ccc")
-	writeMarker(t, d, restartPendingMarker{Commit: "aaa", Repo: upgradeRepo})
-	m, own, ok := d.loadMarkerForUpgrade()
-	if !ok {
-		t.Fatal("no marker loaded")
+	// loaded is a daemon running bbb with a marker for aaa on disk, and the
+	// marker as the heartbeat read it.
+	loaded := func(t *testing.T) (*Daemon, *restartPendingMarker, string) {
+		t.Helper()
+		d := upgradeTestDaemon(t)
+		captureEscalations(d)
+		withOwnCommit(d, "bbb")
+		fakeHistory(t, d, "aaa", "bbb", "ccc")
+		writeMarker(t, d, restartPendingMarker{Commit: "aaa", Repo: upgradeRepo})
+		m, own, ok := d.loadMarkerForUpgrade()
+		if !ok {
+			t.Fatal("no marker loaded")
+		}
+		return d, m, own
 	}
 
-	swapped := false
-	handled := d.clearCoveredMarkerWith(func() {
-		swapped = true
-		writeMarker(t, d, restartPendingMarker{Commit: "ccc", Repo: upgradeRepo})
-	}, m, own, time.Now())
+	t.Run("keeps a newer marker written during the ancestry check", func(t *testing.T) {
+		t.Parallel()
+		d, m, own := loaded(t)
 
-	if !swapped {
-		t.Fatal("the test never swapped the marker")
-	}
-	if !handled {
-		t.Error("the caller was told to go on with the marker it read; it was replaced")
-	}
-	if got, err := readRestartMarker(d.config.TownRoot); err != nil || got == nil || got.Commit != "ccc" {
-		t.Fatalf("marker = %+v (err %v), want the newer marker left in place", got, err)
-	}
-	if rs := readReceipts(t, d); len(rs) != 0 {
-		t.Errorf("receipts = %+v, want none for a marker that was not cleared", rs)
-	}
-}
+		swapped := false
+		handled := d.clearCoveredMarkerWith(func() {
+			swapped = true
+			writeMarker(t, d, restartPendingMarker{Commit: "ccc", Repo: upgradeRepo})
+		}, m, own, time.Now())
 
-// With nothing replacing it, the covered marker is still cleared with a receipt.
-func TestClearCoveredMarkerClearsTheMarkerItRead(t *testing.T) {
-	t.Parallel()
-	d := upgradeTestDaemon(t)
-	captureEscalations(d)
-	withOwnCommit(d, "bbb")
-	fakeHistory(t, d, "aaa", "bbb")
-	writeMarker(t, d, restartPendingMarker{Commit: "aaa", Repo: upgradeRepo})
-	m, own, _ := d.loadMarkerForUpgrade()
+		if !swapped {
+			t.Fatal("the test never swapped the marker")
+		}
+		if !handled {
+			t.Error("the caller was told to go on with the marker it read; it was replaced")
+		}
+		if got, err := readRestartMarker(d.config.TownRoot); err != nil || got == nil || got.Commit != "ccc" {
+			t.Fatalf("marker = %+v (err %v), want the newer marker left in place", got, err)
+		}
+		if rs := readReceipts(t, d); len(rs) != 0 {
+			t.Errorf("receipts = %+v, want none for a marker that was not cleared", rs)
+		}
+	})
 
-	if !d.clearCoveredMarker(m, own, time.Now()) {
-		t.Fatal("covered marker not cleared")
-	}
-	if markerExists(t, d) {
-		t.Error("covered marker still on disk")
-	}
-	if rs := readReceipts(t, d); len(rs) != 1 || rs[0].Commit != "aaa" {
-		t.Errorf("receipts = %+v, want one for aaa", rs)
-	}
+	t.Run("keeps a marker it cannot read back", func(t *testing.T) {
+		t.Parallel()
+		d, m, own := loaded(t)
+
+		handled := d.clearCoveredMarkerWith(func() {
+			if err := os.WriteFile(restartMarkerPath(d.config.TownRoot), []byte("{not json"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}, m, own, time.Now())
+
+		if !handled {
+			t.Error("the caller was told to go on with a marker that could not be read back")
+		}
+		if !markerExists(t, d) {
+			t.Error("a marker the re-read could not confirm was removed")
+		}
+		if rs := readReceipts(t, d); len(rs) != 0 {
+			t.Errorf("receipts = %+v, want none for a marker that was not cleared", rs)
+		}
+	})
+
+	t.Run("clears the marker it read, with a receipt", func(t *testing.T) {
+		t.Parallel()
+		d, m, own := loaded(t)
+
+		if !d.clearCoveredMarker(m, own, time.Now()) {
+			t.Fatal("covered marker not cleared")
+		}
+		if markerExists(t, d) {
+			t.Error("covered marker still on disk")
+		}
+		if rs := readReceipts(t, d); len(rs) != 1 || rs[0].Commit != "aaa" {
+			t.Errorf("receipts = %+v, want one for aaa", rs)
+		}
+	})
 }
 
 // The stamp still lands when nothing replaced the marker, and it keeps the
