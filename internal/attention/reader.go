@@ -104,8 +104,10 @@ func Read(townRoot string) (Snapshot, error) {
 func records(events []Event, state State, acks Acks) []Record {
 	var out []Record
 	open := make(map[string]int, len(state.Items))
+	cleared := make(map[string]time.Time, len(state.Items))
 	for _, ev := range events {
 		if ev.State == EventCleared {
+			cleared[ev.Key] = ev.TS
 			if i, ok := open[ev.Key]; ok {
 				at := ev.TS
 				r := &out[i]
@@ -134,6 +136,12 @@ func records(events []Event, state State, acks Acks) []Record {
 	for _, it := range state.Items {
 		i, ok := open[it.Key]
 		if !ok {
+			if at, gone := cleared[it.Key]; gone && !it.FirstSeen.After(at) {
+				// The state was written before the clear, so it still lists
+				// an item the log says is gone. A real recurrence would have
+				// a first_seen of its own past the clear.
+				continue
+			}
 			out = append(out, Record{Key: it.Key})
 			i = len(out) - 1
 		}

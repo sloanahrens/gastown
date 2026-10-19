@@ -226,6 +226,37 @@ func TestReadSplitsRecurrenceIntoLives(t *testing.T) {
 	}
 }
 
+func TestReadDoesNotResurrectItemClearedAfterState(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	key := "red-main:gastown"
+	writeEventFile(t, EventsPath(town),
+		Event{TS: readBase, Key: key, Class: KindRedMain, Severity: SeverityHigh, Text: "main red", State: EventNew},
+		Event{TS: readBase.Add(10 * time.Minute), Key: key, State: EventCleared},
+	)
+	// state.json is one tick behind the clear in events.jsonl.
+	if err := WriteState(town, State{
+		Updated: readBase.Add(5 * time.Minute),
+		Items: []Item{{
+			Key: key, Kind: KindRedMain, Severity: SeverityHigh, Summary: "main red",
+			FirstSeen: readBase, LastSeen: readBase.Add(5 * time.Minute),
+		}},
+	}); err != nil {
+		t.Fatalf("WriteState: %v", err)
+	}
+
+	snap, err := Read(town)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(snap.Items) != 1 {
+		t.Fatalf("records = %d, want only the cleared life", len(snap.Items))
+	}
+	if snap.Items[0].ClearedAt == nil {
+		t.Errorf("item = %+v, want the clear to win over the stale state", snap.Items[0])
+	}
+}
+
 func TestReadNeverWrites(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
