@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 )
 
@@ -216,6 +215,16 @@ func parseTime(s string) time.Time {
 	return time.Time{}
 }
 
+// SeatWindow is a seat's daily closed period: Closed reports whether t falls
+// inside it, and OpensAt returns the next instant at or after t when it is
+// open. It is the seam the dispatcher reads a window through, so this package
+// keeps its clock rule without importing the config package that parses the
+// window (gt-t8new).
+type SeatWindow interface {
+	Closed(t time.Time) bool
+	OpensAt(t time.Time) time.Time
+}
+
 // Seat is one capped agent the dispatcher may sling onto.
 type Seat struct {
 	Agent string
@@ -230,7 +239,7 @@ type Seat struct {
 	// carried rather than snapshotted into a Closed flag: the choice re-reads it
 	// against Budget.Now, so a seat whose window shuts between the budget's
 	// construction and the choice is seen shut (gt-t8new).
-	Window *config.Window
+	Window SeatWindow
 }
 
 // AgentLabelPrefix starts the label that pins a bead to one agent's seats:
@@ -243,8 +252,20 @@ const AgentLabelPrefix = "agent:"
 // seat choice refuses to guess between them.
 func (s Spec) PinnedAgents() []string { return s.labelValues(AgentLabelPrefix) }
 
-// closed reports whether the seat's window holds at t.
-func (s Seat) closed(t time.Time) bool { return s.Window != nil && s.Window.Closed(t) }
+// closed reports whether the seat's window holds at t. A zero t is no clock at
+// all: the window cannot be read, so the seat counts as shut rather than being
+// drawn on a guess. A caller that carries a window must supply Budget.Now, and
+// one that does not gets a skip it can see instead of a spawn the window may
+// have refused (gt-t8new).
+func (s Seat) closed(t time.Time) bool {
+	if s.Window == nil {
+		return false
+	}
+	if t.IsZero() {
+		return true
+	}
+	return s.Window.Closed(t)
+}
 
 // FreeAt reports whether the seat has room and is open at t. Its window is
 // read at t rather than from a snapshot, so a caller asking either side of a
@@ -252,7 +273,12 @@ func (s Seat) closed(t time.Time) bool { return s.Window != nil && s.Window.Clos
 func (s Seat) FreeAt(t time.Time) bool { return s.Agent != "" && !s.closed(t) && s.Live < s.Cap }
 
 // closedUntil renders when a closed seat opens from t: "closed until 08:00".
+// With a zero clock there is no hour to name, so the reason says the window
+// cannot be read instead (gt-t8new).
 func (s Seat) closedUntil(t time.Time) string {
+	if t.IsZero() {
+		return "closed, no clock to read the window"
+	}
 	return "closed until " + s.Window.OpensAt(t).Format("15:04")
 }
 

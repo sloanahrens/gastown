@@ -2338,9 +2338,16 @@ func TestSpecDispatchRechecksTheSeatWindow(t *testing.T) {
 	f := newFakeSpecTown(cleanSpec("gt-seat", 2, "2026-09-29T10:00:00Z"))
 	env := f.env()
 	env.Budget = budget
-	// Every read the cycle makes is past the boundary; the budget's own clock
-	// is the only pre-boundary one.
-	env.Now = func() time.Time { return start.Add(5 * time.Second) }
+	// The tick's clock advances a second on every read, so the reads before the
+	// choice carry it across the boundary: the picture and the revert check run
+	// at 19:59:58 and 19:59:59, and the choice runs at 20:00:00. Only a clock
+	// re-read at the choice sees the window shut (gt-t8new).
+	now := start
+	env.Now = func() time.Time {
+		t := now
+		now = now.Add(time.Second)
+		return t
+	}
 	r := runSpecDispatchCycle(env)
 
 	if len(f.slung) != 0 {

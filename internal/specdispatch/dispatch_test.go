@@ -620,8 +620,7 @@ func TestChooseSeatRechecksTheWindowAtChoiceTime(t *testing.T) {
 		t.Errorf("reason = %q, want it to name the seat closed (%q)", got.Reason, want)
 	}
 
-	// An unpinned bead is not drawn onto it either.
-	b.Now = time.Date(2026, 10, 19, 20, 0, 1, 0, time.UTC)
+	// An unpinned bead is not drawn onto it either, on the same clock.
 	got = ChooseSeat(b, goodSpec())
 	if !got.Skip || got.Agent != "" || !strings.Contains(got.Reason, "closed until 08:00") {
 		t.Fatalf("unpinned bead at the shut seat = %+v, want a skip naming the window", got)
@@ -632,5 +631,25 @@ func TestChooseSeatRechecksTheWindowAtChoiceTime(t *testing.T) {
 	b.Now = time.Date(2026, 10, 20, 8, 0, 1, 0, time.UTC)
 	if got := ChooseSeat(b, spec); got.Skip || got.Agent != "deepseek-flash" {
 		t.Fatalf("after the window opened = %+v, want the flash seat", got)
+	}
+}
+
+// A budget with no clock cannot read a windowed seat, so it must not draw one.
+// The Closed/OpensAt snapshot made a zero Budget.Now harmless; carrying the
+// window must not quietly read it at year one and depend on the hour that
+// happens to name (gt-t8new).
+func TestChooseSeatZeroClockDoesNotDrawAWindowedSeat(t *testing.T) {
+	t.Parallel()
+	b := Budget{Seats: []Seat{{Agent: "deepseek-flash", Cap: 2, Window: nightWindow()}}}
+	if got := ChooseSeat(b, goodSpec()); !got.Skip || got.Agent != "" || !strings.Contains(got.Reason, "no clock") {
+		t.Fatalf("unpinned bead with no clock = %+v, want a skip naming the missing clock", got)
+	}
+	spec := goodSpec()
+	spec.Labels = []string{AgentLabelPrefix + "deepseek-flash"}
+	if got := ChooseSeat(b, spec); !got.Skip || got.Agent != "" || !strings.Contains(got.Reason, "closed, no clock") {
+		t.Fatalf("pinned bead with no clock = %+v, want a skip naming the missing clock", got)
+	}
+	if pic := b.Picture(); !strings.Contains(pic, "closed, no clock") {
+		t.Errorf("picture = %q, want it to name the window the zero clock cannot read", pic)
 	}
 }

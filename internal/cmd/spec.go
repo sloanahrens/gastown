@@ -931,6 +931,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: rig hold: %s", id, hold)})
 			continue
 		}
+		// Re-read the clock at the choice, per candidate: the board read and the
+		// holds above can carry the tick past a seat's window boundary, and the
+		// snapshot taken when the budget was built is not the clock the choice
+		// runs on (gt-t8new).
 		budget.Now = env.Now()
 		seat := specdispatch.ChooseSeat(budget, full)
 		if seat.Skip {
@@ -1286,7 +1290,13 @@ func specBudgetFromSeats(ts *config.TownSettings, now time.Time, known func(agen
 	// reads each window as of the seats' read (gt-t8new).
 	b.Now = now
 	for _, s := range seats {
-		b.Seats = append(b.Seats, specdispatch.Seat{Agent: s.Agent, Cap: s.Cap, Window: s.Window})
+		seat := specdispatch.Seat{Agent: s.Agent, Cap: s.Cap}
+		// Copy a window only when there is one: a typed nil *Window stored in
+		// the SeatWindow interface would read as a window and be called on.
+		if s.Window != nil {
+			seat.Window = s.Window
+		}
+		b.Seats = append(b.Seats, seat)
 	}
 	return b, nil
 }
