@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.gastown.power-boot</string>
+
+    <!-- The login job gt power documents as the reboot-to-standby path: the
+         hold is written so a reboot lands in standby until an operator runs
+         gt power full. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{.GTPath}}</string>
+        <string>power</string>
+        <string>boot-hold</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>{{.TownRoot}}</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>{{.TownRoot}}/daemon/power-boot.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{.TownRoot}}/daemon/power-boot.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>GT_TOWN_ROOT</key>
+        <string>{{.TownRoot}}</string>
+        {{- range $key, $value := .Env }}
+        <key>{{$key}}</key>
+        <string>{{$value}}</string>
+        {{- end }}
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

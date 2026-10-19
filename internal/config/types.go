@@ -174,6 +174,17 @@ type TownSettings struct {
 	// Dashboard configures gt dashboard's own panels. Its sections are the
 	// panels' switches; gt dashboard reads them when it starts.
 	Dashboard *DashboardConfig `json:"dashboard,omitempty"`
+
+	// ForgejoStack locates the Forgejo compose stack gt power starts and
+	// stops.
+	ForgejoStack *ForgejoStackConfig `json:"forgejo,omitempty"`
+}
+
+// ForgejoStackConfig is where the Forgejo compose stack lives.
+type ForgejoStackConfig struct {
+	// Dir is the stack's directory, the one docker compose runs in. Empty
+	// means ~/forgejo.
+	Dir string `json:"dir,omitempty"`
 }
 
 // DashboardConfig is gt dashboard's own settings.

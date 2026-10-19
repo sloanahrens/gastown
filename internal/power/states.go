@@ -1,0 +1,329 @@
+package power
+
+import (
+	"context"
+	"fmt"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Status prints every part and the derived state, and changes nothing.
+func Status(ctx context.Context, o Options) error {
+	e := newEngine(o)
+	r := e.read(ctx)
+	pending := "?"
+	if r.pendingOK {
+		pending = strconv.Itoa(r.pending)
+	}
+	compose := "DOWN"
+	if r.forgejo {
+		compose = "ok"
+	}
+	line := func(label, value string) {
+		fmt.Fprintf(o.Out, "%-28s %s\n", label, value)
+	}
+	line("state", derive(r))
+	line("dolt :3307", yesNo(r.dolt, "up", "DOWN"))
+	line("docker engine", yesNo(r.docker, "up", "DOWN"))
+	line("forgejo healthz", fmt.Sprintf("%s (compose services running: %d)", compose, r.compose))
+	line(fmt.Sprintf("daemon (%s)", DaemonLabel), yesNo(r.daemon, "loaded", "NOT loaded"))
+	for _, label := range WatcherLabels {
+		line(label, yesNo(r.watchers[label], "loaded", "NOT loaded"))
+	}
+	line("ESTOP file", yesNo(r.estop, "present", "absent"))
+	line("hold file", yesNo(r.hold, "present", "absent"))
+	line("landings pending", pending)
+	line("polecats working", r.workingCount())
+	line("dolt gc running", strconv.Itoa(boolInt(r.gc)))
+	line("last requested", r.last)
+	line("cloud-deploy daemons", fmt.Sprintf("%d plist(s), outside the states; see %s",
+		r.cloud, filepath.Join(o.TownRoot, "devops", "wizard-src", "cloud-check.sh")))
+	return nil
+}
+
+func yesNo(ok bool, yes, no string) string {
+	if ok {
+		return yes
+	}
+	return no
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// Full brings every part up, clears the ESTOP and the hold, and records the
+// state. The hold goes down first so nothing dispatches while the stack comes
+// up.
+func Full(ctx context.Context, o Options) error {
+	e := newEngine(o)
+	e.say("-> full")
+	if err := e.setHold(); err != nil {
+		return err
+	}
+	if err := e.ensureInfra(ctx); err != nil {
+		return err
+	}
+	if !o.DryRun {
+		if err := e.waitUntil(ctx, "daemon loaded", 30*time.Second, func(ctx context.Context) bool {
+			return e.loaded(ctx, DaemonLabel)
+		}); err != nil {
+			return exitError(ExitNotHealthy, "daemon is not loaded; hold left in place: %v", err)
+		}
+		if err := e.waitUntil(ctx, "dolt up", 10*time.Second, e.doltUp); err != nil {
+			return exitError(ExitNotHealthy, "Dolt is not up; hold left in place: %v", err)
+		}
+	}
+	if err := e.clearEstop(ctx); err != nil {
+		return err
+	}
+	if err := e.clearHold(); err != nil {
+		return err
+	}
+	if err := e.record(string(StateFull)); err != nil {
+		return err
+	}
+	if o.DryRun {
+		fmt.Fprintf(o.Out, "  [dry-run] would then check: gt status Health\n")
+		e.say("dry-run complete: nothing was changed")
+		return nil
+	}
+	if err := o.Sleep(ctx, 5*time.Second); err != nil {
+		return err
+	}
+	if out, err := e.exec(ctx, o.TownRoot, o.GTCommand, "status"); err == nil {
+		if line := healthLine(out); line != "" {
+			e.say("%s", line)
+		}
+	}
+	e.say("full reached; dispatch resumes on the next 60 s tick")
+	return nil
+}
+
+// healthLine is the first "Health" line of gt status output.
+func healthLine(out string) string {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.HasPrefix(l, "Health") {
+			return l
+		}
+	}
+	return ""
+}
+
+// Standby sets the hold, brings the parts up, drains, then sets the ESTOP.
+func Standby(ctx context.Context, o Options) error {
+	e := newEngine(o)
+	e.say("-> standby")
+	if err := e.setHold(); err != nil {
+		return err
+	}
+	if err := e.ensureInfra(ctx); err != nil {
+		return err
+	}
+	if err := e.drain(ctx); err != nil {
+		return err
+	}
+	if err := e.setEstop(ctx, StateStandby); err != nil {
+		return err
+	}
+	e.jobhostDown(ctx)
+	if err := e.record(string(StateStandby)); err != nil {
+		return err
+	}
+	if o.DryRun {
+		e.say("dry-run complete: nothing was changed")
+		return nil
+	}
+	e.say("standby reached")
+	return nil
+}
+
+// Off runs standby's drain, then stops the daemon, the watchers and the
+// Forgejo stack. Dolt stays up unless WithDolt.
+func Off(ctx context.Context, o Options) error {
+	e := newEngine(o)
+	if !o.DryRun && !o.Yes {
+		return exitError(ExitUsage, "off stops the daemon, the watchers and Forgejo: re-run with --yes (or --dry-run to preview)")
+	}
+	if bots := e.releaseBots(); len(bots) > 0 {
+		e.say("the cloud release bot and patrol poll Forgejo every 30 min: while it is stopped they log forgejo_read errors and deploys pause. Prefer 'standby' while any app is live.")
+		if !o.DryRun && !o.ForceCloud {
+			return exitError(ExitUsage, "re-run with --force-cloud to stop Forgejo anyway")
+		}
+	}
+	e.say("-> off")
+	if err := e.setHold(); err != nil {
+		return err
+	}
+	// This refusal also runs under --dry-run: a preview that walked past it
+	// would show a stop the real command refuses to perform.
+	if !e.doltUp(ctx) {
+		return exitError(ExitNotHealthy, "Dolt is down, so the landing queues cannot be read and the drain cannot be verified: run 'gt power standby' first")
+	}
+	if err := e.drain(ctx); err != nil {
+		return err
+	}
+	if err := e.setEstop(ctx, StateOff); err != nil {
+		return err
+	}
+	for _, label := range append([]string{DaemonLabel}, WatcherLabels...) {
+		if !e.loaded(ctx, label) {
+			continue
+		}
+		if err := e.run(ctx, "", "launchctl", "bootout", fmt.Sprintf("gui/%d/%s", o.UID, label)); err != nil {
+			return err
+		}
+	}
+	if e.composeRunning(ctx) != 0 {
+		if err := e.run(ctx, o.ForgejoDir, "docker", "compose", "stop"); err != nil {
+			return err
+		}
+	}
+	if o.WithDolt {
+		e.say("stopping Dolt: bd (including the ~/.claude beads DB) stops working until 'gt power full' or 'gt dolt start'")
+		if err := e.run(ctx, o.TownRoot, o.GTCommand, "dolt", "stop"); err != nil {
+			return err
+		}
+	}
+	e.jobhostDown(ctx)
+	if err := e.record(string(StateOff)); err != nil {
+		return err
+	}
+	if o.DryRun {
+		e.say("dry-run complete: nothing was changed")
+		return nil
+	}
+	e.say("off reached. The Forgejo stack stays stopped across a reboot; 'gt power full' starts it again. Cloud-deploy daemons untouched.")
+	return nil
+}
+
+// BootHold is the login job: it writes the hold so a reboot lands in
+// standby.
+func BootHold(ctx context.Context, o Options) error {
+	e := newEngine(o)
+	if err := e.setHold(); err != nil {
+		return err
+	}
+	if err := e.record("standby (boot)"); err != nil {
+		return err
+	}
+	if o.DryRun {
+		e.say("dry-run complete: nothing was changed")
+	}
+	return nil
+}
+
+// ensureInfra brings Docker, the Forgejo stack, Dolt, the watchers and the
+// daemon up.
+func (e *engine) ensureInfra(ctx context.Context) error {
+	if !e.dockerUp(ctx) {
+		if err := e.run(ctx, "", "open", "-a", "Docker"); err != nil {
+			return err
+		}
+		if err := e.waitUntil(ctx, "docker engine", 240*time.Second, e.dockerUp); err != nil {
+			return exitError(ExitNotHealthy, "Docker did not start; start Docker Desktop")
+		}
+	}
+	if e.composeRunning(ctx) < 4 {
+		if err := e.run(ctx, e.o.ForgejoDir, "docker", "compose", "up", "-d"); err != nil {
+			return err
+		}
+	}
+	if err := e.waitUntil(ctx, "forgejo healthz 200", 180*time.Second, e.forgejoOK); err != nil {
+		return exitError(ExitNotHealthy, "Forgejo not healthy")
+	}
+	if !e.doltUp(ctx) {
+		if err := e.run(ctx, e.o.TownRoot, e.o.GTCommand, "dolt", "start"); err != nil {
+			return err
+		}
+	}
+	if err := e.waitUntil(ctx, "dolt up", 60*time.Second, e.doltUp); err != nil {
+		return exitError(ExitNotHealthy, "Dolt not up")
+	}
+	launchAgents := filepath.Join(e.o.HomeDir, "Library", "LaunchAgents")
+	for _, label := range append(append([]string{}, WatcherLabels...), DaemonLabel) {
+		if e.loaded(ctx, label) {
+			continue
+		}
+		plist := filepath.Join(launchAgents, label+".plist")
+		if err := e.run(ctx, "", "launchctl", "bootstrap", fmt.Sprintf("gui/%d", e.o.UID), plist); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// drain waits for the landing queues, the polecats and any Dolt gc to
+// finish. Unknown readings are not a drained town: a queue that cannot be
+// read is not an empty one.
+func (e *engine) drain(ctx context.Context) error {
+	// Dolt down is not a reason to skip the wait: without it the landing
+	// queues cannot be read at all, so the town is not drained, and a stop
+	// that treats the unreadable queues as empty is fail-open. The hold is
+	// already set by the caller, and nothing has been stopped yet.
+	if !e.o.DryRun && !e.doltUp(ctx) {
+		return exitError(ExitDrainTimeout,
+			"Dolt is unreachable, so the landing queues cannot be read and the drain cannot be verified. Nothing was killed and the hold stays set; start Dolt and re-run")
+	}
+	if e.o.DryRun {
+		p, pok := e.pendingLandings()
+		ps := "?"
+		if pok {
+			ps = strconv.Itoa(p)
+		}
+		working, werr := e.workingPolecats(ctx)
+		ws := "?"
+		if werr == nil {
+			ws = strconv.Itoa(len(working))
+		}
+		fmt.Fprintf(e.o.Out, "  [dry-run] drain: landings pending=%s, polecats working=%s, dolt gc running=%d, timeout %s\n",
+			ps, ws, boolInt(e.gcActive()), e.o.Timeout)
+		return nil
+	}
+	deadline := e.o.Now().Add(e.o.Timeout)
+	for {
+		p, pok := e.pendingLandings()
+		working, werr := e.workingPolecats(ctx)
+		g := e.gcActive()
+		if pok && p == 0 && werr == nil && len(working) == 0 && !g {
+			e.say("drained: no pending landings, no working polecats, no Dolt gc running")
+			return nil
+		}
+		ps, ws := "?", "?"
+		if pok {
+			ps = strconv.Itoa(p)
+		}
+		if werr == nil {
+			ws = strconv.Itoa(len(working))
+		}
+		if !e.o.Now().Before(deadline) {
+			for _, name := range working {
+				e.warn("  %s working", name)
+			}
+			if g {
+				e.warn("  a Dolt maintenance gc is running (daemon/dolt.pause); a bootout now would cancel it")
+			}
+			return exitError(ExitDrainTimeout,
+				"drain timed out after %s: landings pending=%s, polecats working=%s. ESTOP and hold stay set; nothing was killed",
+				e.o.Timeout, ps, ws)
+		}
+		e.say("draining: landings pending=%s, polecats working=%s, dolt gc running=%d", ps, ws, boolInt(g))
+		if err := e.o.Sleep(ctx, 30*time.Second); err != nil {
+			return err
+		}
+	}
+}
+
+// clearEstop clears a town ESTOP through gt thaw, which also nudges the
+// sessions the stop held.
+func (e *engine) clearEstop(ctx context.Context) error {
+	if !e.estopOn() {
+		return nil
+	}
+	return e.run(ctx, e.o.TownRoot, e.o.GTCommand, "thaw")
+}
