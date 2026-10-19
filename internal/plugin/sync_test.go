@@ -539,3 +539,37 @@ func TestSyncPlugins_CleanProtectsRuntimeOnlyPlugin(t *testing.T) {
 		t.Errorf("local-only not protected: %+v", result)
 	}
 }
+
+// The dry-run preview and the real sync share one guard (editGuard); this pins
+// that for every option mix the preview names exactly the plugins the run
+// protects, so a future edit to one cannot silently split them.
+func TestProtectedEdits_MatchesSyncPlugins(t *testing.T) {
+	t.Parallel()
+	for _, opts := range []SyncOptions{{}, {Clean: true}, {Force: true}, {Clean: true, Force: true}} {
+		srcDir := t.TempDir()
+		dstDir := t.TempDir()
+		hist := &fakeHistory{}
+		createTestPlugin(t, srcDir, "edited", "+++\nname = \"edited\"\n+++\n", map[string]string{"run.sh": "repo\n"})
+		createTestPlugin(t, srcDir, "stale", "+++\nname = \"stale\"\n+++\nv2", nil)
+		hist.commit(t, srcDir)
+		createTestPlugin(t, dstDir, "edited", "+++\nname = \"edited\"\n+++\n", map[string]string{"run.sh": "hand edit\n"})
+		createTestPlugin(t, dstDir, "stale", "+++\nname = \"stale\"\n+++\nv1", nil)
+		createTestPlugin(t, dstDir, "gone", "+++\nname = \"gone\"\n+++\nlocal only", nil)
+
+		report, err := DetectDrift(srcDir, dstDir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		preview, err := protectedEdits(srcDir, dstDir, report, opts, hist.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := syncPlugins(srcDir, dstDir, opts, hist.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(preview, result.Protected) {
+			t.Errorf("opts %+v: preview protects %v, sync protects %v", opts, preview, result.Protected)
+		}
+	}
+}
