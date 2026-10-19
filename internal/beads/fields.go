@@ -83,12 +83,13 @@ func ParseAttachmentFields(issue *Issue) *AttachmentFields {
 			fields.ReviewOnly = strings.ToLower(value) == "true"
 			hasFields = true
 		case "mode":
-			// Only the lowercase key FormatAttachmentFields writes; a prose
-			// "Mode: read-only" line is not an attachment field.
-			if key != "mode" {
+			if !isModeField(key, value) {
 				continue
 			}
 			fields.Mode = value
+			if strings.EqualFold(value, "ralph") {
+				fields.Mode = "ralph" // callers compare against the lowercase name
+			}
 			hasFields = true
 		case "merge_strategy", "merge-strategy", "mergestrategy":
 			fields.MergeStrategy = value
@@ -156,14 +157,24 @@ func FormatAttachmentFields(fields *AttachmentFields) string {
 	return strings.Join(lines, "\n")
 }
 
-// isAttachmentKey reports whether key, as written in the description, names an
-// attachment field, in its underscore, hyphen or run-together spelling and any
-// case. The exception is mode, a word that opens ordinary prose lines: it
-// counts only as the lowercase key FormatAttachmentFields writes. It is a
-// switch, not a package-level map, so no caller can mutate the key list.
-func isAttachmentKey(key string) bool {
+// isModeField reports whether a "key: value" line is the Mode attachment
+// field. Mode opens ordinary prose lines, so it counts only as the lowercase
+// key FormatAttachmentFields writes, or as "Mode: ralph" in any case, the form
+// descriptions written by hand carry (gt-dk6vt).
+func isModeField(key, value string) bool {
+	if key == "mode" {
+		return true
+	}
+	return strings.EqualFold(key, "mode") && strings.EqualFold(value, "ralph")
+}
+
+// isAttachmentKey reports whether the line "key: value" names an attachment
+// field, in its underscore, hyphen or run-together spelling and any case. Mode
+// is the exception, decided by isModeField. It is a switch, not a
+// package-level map, so no caller can mutate the key list.
+func isAttachmentKey(key, value string) bool {
 	if strings.EqualFold(key, "mode") {
-		return key == "mode"
+		return isModeField(key, value)
 	}
 	switch strings.ToLower(key) {
 	case "attached_molecule", "attached-molecule", "attachedmolecule",
@@ -209,7 +220,8 @@ func withoutAttachmentLines(desc string) []string {
 		}
 
 		key := strings.TrimSpace(trimmed[:colonIdx])
-		if !isAttachmentKey(key) {
+		value := strings.TrimSpace(trimmed[colonIdx+1:])
+		if !isAttachmentKey(key, value) {
 			otherLines = append(otherLines, line)
 		}
 		// Skip attachment field lines - they'll be replaced
@@ -770,7 +782,7 @@ func FormatRoleConfig(config *RoleConfig) string {
 	if config.StartCommand != "" {
 		lines = append(lines, "start_command: "+config.StartCommand)
 	}
-	// Sort env var keys for deterministic output
+	// Map order is random; sorted so formatting twice writes the same bytes (gt-rtqld)
 	envKeys := make([]string, 0, len(config.EnvVars))
 	for k := range config.EnvVars {
 		envKeys = append(envKeys, k)

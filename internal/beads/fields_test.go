@@ -541,9 +541,12 @@ func TestAttachmentKeySpellings(t *testing.T) {
 			t.Errorf("SetAttachmentFields(%q, nil) = %q, want %q", desc, got, "body")
 		}
 	}
-	// mode opens ordinary prose lines, so only the lowercase key counts.
-	if got := StripAttachmentFields("mode: x\nbody"); got != "body" {
-		t.Errorf("StripAttachmentFields(mode line) = %q, want %q", got, "body")
+	// mode opens ordinary prose lines: the lowercase key counts with any
+	// value, other cases only with the value ralph.
+	for _, desc := range []string{"mode: x\nbody", "mode: ralph\nbody", "Mode: ralph\nbody", "MODE: ralph\nbody", "MODE: Ralph\nbody"} {
+		if got := StripAttachmentFields(desc); got != "body" {
+			t.Errorf("StripAttachmentFields(%q) = %q, want %q", desc, got, "body")
+		}
 	}
 	if got, keepMode := StripAttachmentFields("Mode: x\nbody"), "Mode: x\nbody"; got != keepMode {
 		t.Errorf("StripAttachmentFields(prose Mode line) = %q, want it kept", got)
@@ -602,6 +605,20 @@ func TestAgentFieldsAgentLineBreakCannotInjectField(t *testing.T) {
 		if !strings.HasPrefix(parsed.Agent, "claude") {
 			t.Errorf("agent %q: parsed Agent = %q, want it to keep the claude prefix", agent, parsed.Agent)
 		}
+	}
+}
+
+// Descriptions written by hand carry "Mode: ralph" or "MODE: ralph"; both still
+// parse as the Mode field (gt-dk6vt).
+func TestParseAttachmentFieldsAcceptsMixedCaseRalphMode(t *testing.T) {
+	for _, line := range []string{"Mode: ralph", "MODE: ralph", "MODE: Ralph"} {
+		parsed := ParseAttachmentFields(&Issue{Description: line + "\n\n## Goal\n\nDo it."})
+		if parsed == nil || parsed.Mode != "ralph" {
+			t.Errorf("ParseAttachmentFields(%q) = %+v, want Mode ralph", line, parsed)
+		}
+	}
+	if parsed := ParseAttachmentFields(&Issue{Description: "Mode: read-only\nDo it."}); parsed != nil {
+		t.Errorf("prose Mode line parsed as fields: %+v", parsed)
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -977,29 +978,36 @@ func TestCreateAgentBead_WritesThroughBDCreateOnly(t *testing.T) {
 // otherwise, so ListAgentBeads must ask for all of them or the doctor checks
 // report the agent beads past the page as missing.
 func TestListAgentBeadsPassesNoLimit(t *testing.T) {
-	_, rigBeadsDir, _, logPath := setupDualScopeTown(t,
-		func(rig, _ string) string { return rig })
+	t.Parallel()
+	const total = 60 // past bd list's default page of 50
+	rec := newRecorder(func(args []string) reply {
+		if len(args) == 0 || args[0] != "list" {
+			return reply{}
+		}
+		limit := 50 // bd list's page size; --limit=0 lifts it
+		for _, a := range args {
+			if v, ok := strings.CutPrefix(a, "--limit="); ok {
+				limit, _ = strconv.Atoi(v)
+			}
+		}
+		rows := total
+		if limit > 0 {
+			rows = min(rows, limit)
+		}
+		issues := make([]*Issue, 0, rows)
+		for i := 0; i < rows; i++ {
+			issues = append(issues, &Issue{ID: fmt.Sprintf("gt-r-polecat-p%02d", i), Labels: []string{"gt:agent"}})
+		}
+		out, _ := json.Marshal(issues)
+		return reply{stdout: string(out)}
+	})
+	b := newRecordedBeads(t.TempDir(), rec)
 
-	bd := NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir).ForAgentBead()
-	if _, err := bd.ListAgentBeads(); err != nil {
+	got, err := b.ListAgentBeads()
+	if err != nil {
 		t.Fatalf("ListAgentBeads: %v", err)
 	}
-
-	logBytes, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatalf("read mock log: %v", err)
-	}
-	sawList := false
-	for _, line := range strings.Split(string(logBytes), "\n") {
-		if !strings.Contains(line, "args=list") || !strings.Contains(line, "--label=gt:agent") {
-			continue
-		}
-		sawList = true
-		if !strings.Contains(line, "--limit=0") {
-			t.Errorf("bd list for gt:agent beads carries no --limit=0: %s", line)
-		}
-	}
-	if !sawList {
-		t.Fatalf("ListAgentBeads never ran bd list --label=gt:agent; log:\n%s", logBytes)
+	if len(got) != total {
+		t.Errorf("ListAgentBeads returned %d agent beads, want all %d; argv: %q", len(got), total, rec.argvs())
 	}
 }
