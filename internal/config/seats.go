@@ -162,7 +162,14 @@ func (w *Window) OpensAt(t time.Time) time.Time {
 // built-in presets. It is the loader's own lookup, so the seat map and a launch
 // agree on what a name means. An empty townRoot skips settings/agents.json.
 func AgentResolver(townRoot string, ts *TownSettings) func(agent string) bool {
-	reg := AgentRegistryFor(townRoot, "")
+	return agentResolverIn(processHost, townRoot, ts)
+}
+
+// agentResolverIn is AgentResolver resolving against h. A test names the host
+// whose PATH and environment the lookup reads; the exported resolver reads the
+// process's.
+func agentResolverIn(h host, townRoot string, ts *TownSettings) func(agent string) bool {
+	reg := agentRegistryFor(h, townRoot, "")
 	return func(agent string) bool {
 		return lookupAgentConfigIfExists(reg, agent, ts, nil) != nil
 	}
