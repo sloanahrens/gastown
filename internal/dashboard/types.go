@@ -571,7 +571,7 @@ type State struct {
 	Viewers   int       `json:"viewers"`
 	Health    Health    `json:"health"`
 	Summary   *Summary  `json:"summary,omitempty"`
-	SummaryAt time.Time `json:"summary_at,omitempty"`
+	SummaryAt time.Time `json:"summary_at,omitzero"`
 	Polecats  []Polecat `json:"polecats"`
 	// Rigs is one row per known rig, joined from the queue and the polecats
 	// (RigRows). It is nil until both readers have reported.

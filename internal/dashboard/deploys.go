@@ -282,6 +282,8 @@ type DeployReader struct {
 	api   deployAPI
 	repos []string // owner/name overrides; empty reads the viewer's whole list
 	now   func() time.Time
+	// timeout is the deadline of one whole refresh; forgejoTimeout outside tests.
+	timeout time.Duration
 
 	mu     sync.Mutex
 	watch  map[string]deployWatch // run key -> the stages last seen and since when
@@ -310,7 +312,7 @@ type cachedCheck struct {
 // owner/name list to read instead of every repo the viewer can see.
 func NewDeployReader(api deployAPI, repos []string) *DeployReader {
 	return &DeployReader{
-		api: api, repos: append([]string(nil), repos...), now: time.Now,
+		api: api, repos: append([]string(nil), repos...), now: time.Now, timeout: forgejoTimeout,
 		watch: map[string]deployWatch{}, checks: map[string]cachedCheck{},
 	}
 }
@@ -323,7 +325,7 @@ func (r *DeployReader) Read() *Deploys {
 	// The whole refresh — the repo list, every run query and every jobs query
 	// — shares the panel's deadline, so a slow Forgejo cannot hold the block
 	// past it however many repos the viewer sees.
-	ctx, cancel := context.WithTimeout(context.Background(), forgejoTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
 
 	// A copy, because the viewer's whole list is appended to it, and the
@@ -418,7 +420,9 @@ func (r *DeployReader) Read() *Deploys {
 	// Built fresh every refresh, so an entry goes the moment its run leaves the
 	// window and the map cannot grow with a town's history.
 	checks := make(map[string]cachedCheck, len(prevChecks))
-	hctx, cancelHealth := context.WithTimeout(ctx, healthReadBudget)
+	// Derived from a fresh context, not ctx: the deploy reads above may have spent
+	// all of ctx's timeout, and the health read would then start already expired.
+	hctx, cancelHealth := context.WithTimeout(context.Background(), healthReadBudget)
 	defer cancelHealth()
 	for _, name := range readable {
 		owner, repo, _ := strings.Cut(name, "/")
@@ -429,10 +433,10 @@ func (r *DeployReader) Read() *Deploys {
 		switch {
 		case res.listFailed, res.unread:
 			healthUnread = append(healthUnread, name)
-		case res.unknown:
-			healthMissing = append(healthMissing, name)
 		case res.failed:
 			healthFailed = append(healthFailed, name)
+		case res.unknown:
+			healthMissing = append(healthMissing, name)
 		}
 	}
 	r.mu.Lock()
@@ -552,7 +556,8 @@ type healthRun struct {
 
 // healthRead is one repo's scheduled checks as the block reads them: the rows to
 // draw and the newest run's word on the app — unread, or failed. unread and
-// failed are read only where a row was drawn; listFailed (the runs could not be
+// failed are read only where a row was drawn, except that failed also holds for
+// an unknown repo whose newest run failed; listFailed (the runs could not be
 // listed) and unknown (no environment the block knows) mean no row was.
 type healthRead struct {
 	rows       []DeployHealthRow
@@ -665,7 +670,9 @@ func foldHealth(name string, window []healthRun) healthRead {
 		// job the workflow renamed, say — so there is no row to fold them into
 		// and no result to report. That is a repo whose checks the block cannot
 		// read, not a repo with no checks.
-		return healthRead{unknown: true}
+		// A failing newest run is still a failure: the run's own status or any
+		// job, whatever its name, says so.
+		return healthRead{unknown: true, failed: healthFailed(window)}
 	}
 	// The newest run is what the row's result comes from, so a window whose
 	// newest run could not be read has no result to report whatever the runs
