@@ -9,8 +9,9 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/checkpoint"
-	"github.com/steveyegge/gastown/internal/done"
 	gtgit "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/revertwaiver"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -485,7 +486,7 @@ func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (bl
 	// the one gt done applies (the label plus a description naming every
 	// reverted path), so the dog and gt done agree on a directed deletion. The
 	// dog stands down without an escalation.
-	if note, waived := d.checkpointDeletesBySpec(rigName, polecatName, report.Reverted); waived {
+	if note, waived := d.checkpointDeletesBySpec(workDir, rigName, polecatName, report.Reverted); waived {
 		d.logger.Printf("checkpoint_dog: %s/%s: %s", rigName, polecatName, note)
 		return false, ""
 	}
@@ -510,16 +511,16 @@ func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (bl
 	return true, reason
 }
 
-// checkpointDeletesBySpec reports whether the seat's hooked bead directs the
-// deletions in reverted (done.DeletesBySpecNote), and the note saying so. A bead
-// that cannot be found or read waives nothing: the refusal stands, because a
-// check that could not run must not read as a check that passed.
-func (d *Daemon) checkpointDeletesBySpec(rigName, polecatName string, reverted []gtgit.RevertedMerge) (string, bool) {
+// checkpointDeletesBySpec reports whether the bead the checkpointed branch
+// carries directs the deletions in reverted (revertwaiver.Note), and the note
+// saying so. A bead that cannot be found or read waives nothing: the refusal
+// stands, because a check that could not run must not read as a check that
+// passed.
+func (d *Daemon) checkpointDeletesBySpec(workDir, rigName, polecatName string, reverted []gtgit.RevertedMerge) (string, bool) {
 	if d.config == nil || d.config.TownRoot == "" {
 		return "", false
 	}
-	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
-	id, err := d.assignedActiveWorkBead(rigName, assignee)
+	id, err := d.checkpointedWorkBead(workDir, rigName, polecatName)
 	if err != nil || id == "" {
 		return "", false
 	}
@@ -527,7 +528,22 @@ func (d *Daemon) checkpointDeletesBySpec(rigName, polecatName string, reverted [
 	if err != nil {
 		return "", false
 	}
-	return done.DeletesBySpecNote(issue, reverted)
+	return revertwaiver.Note(issue, reverted)
+}
+
+// checkpointedWorkBead returns the work bead the branch in workDir carries: the
+// issue encoded in the seat's polecat branch, which is the bead this
+// checkpoint protects (gt-rp83g). The seat's assigned active bead answers only
+// when the branch names no issue for this seat — a legacy branch, a detached
+// HEAD, or a branch another seat wrote. Resolving by branch keeps a stale or
+// extra assignment from deciding whether the deletion was directed.
+func (d *Daemon) checkpointedWorkBead(workDir, rigName, polecatName string) (string, error) {
+	if branch, err := d.gitAt(workDir).CurrentBranch(); err == nil {
+		if meta, ok := polecat.ParseBranchName(branch); ok && meta.Issue != "" && meta.Polecat == polecatName {
+			return meta.Issue, nil
+		}
+	}
+	return d.assignedActiveWorkBead(rigName, fmt.Sprintf("%s/polecats/%s", rigName, polecatName))
 }
 
 // isGitWorktree reports whether the given directory is the root of a git
