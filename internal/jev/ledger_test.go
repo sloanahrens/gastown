@@ -1,0 +1,127 @@
+package jev
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// ledgerLines reads path and decodes its lines.
+func ledgerLines(t *testing.T, path string) []LedgerRecord {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var out []LedgerRecord
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		var rec LedgerRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &rec), line)
+		out = append(out, rec)
+	}
+	return out
+}
+
+func TestChoice_WithLedgerAppendsOneLine(t *testing.T) {
+	t.Parallel()
+	rs := &respond{body: readTestdata(t, "choice_response.json")}
+	dir := filepath.Join(t.TempDir(), "jev")
+	path := filepath.Join(dir, "usage.jsonl")
+	c := newTestClient(t, rs, WithLedger(path), WithCaller("test caller"), WithWarnings(io.Discard))
+
+	before := time.Now()
+	got, err := c.Choice(context.Background(), shoeState, "Which team should handle this?", shoeCriteria)
+	require.NoError(t, err)
+
+	lines := ledgerLines(t, path)
+	require.Len(t, lines, 1)
+	assert.Equal(t, "test caller", lines[0].Caller)
+	assert.Equal(t, got.Usage.InputTokens, lines[0].InputTokens)
+	assert.Equal(t, got.Usage.OutputTokens, lines[0].OutputTokens)
+	assert.False(t, lines[0].TS.IsZero())
+	assert.WithinDuration(t, before, lines[0].TS, time.Minute)
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "the ledger is private")
+	dirInfo, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm(), "the ledger directory is private")
+}
+
+func TestChoice_WithLedgerKeepsTheDefaultCaller(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	c := newTestClient(t, &respond{body: readTestdata(t, "choice_response.json")}, WithLedger(path))
+
+	_, err := c.Choice(context.Background(), shoeState, "q?", shoeCriteria)
+	require.NoError(t, err)
+
+	lines := ledgerLines(t, path)
+	require.Len(t, lines, 1)
+	assert.Equal(t, defaultCaller, lines[0].Caller)
+}
+
+func TestChoice_LedgerUnwritableWarnsAndKeepsTheAnswer(t *testing.T) {
+	t.Parallel()
+	// A regular file where the ledger's directory should be makes every
+	// write fail without touching permissions.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o600))
+	var warnings strings.Builder
+	c := newTestClient(t, &respond{body: readTestdata(t, "choice_response.json")},
+		WithLedger(filepath.Join(blocker, "usage.jsonl")), WithWarnings(&warnings))
+
+	got, err := c.Choice(context.Background(), shoeState, "Which team should handle this?", shoeCriteria)
+
+	require.NoError(t, err, "a ledger failure never fails the call")
+	assert.Equal(t, "returns", got.Choice)
+	assert.EqualValues(t, 328, got.Usage.InputTokens)
+	assert.Contains(t, warnings.String(), "usage ledger")
+	assert.NotContains(t, warnings.String(), testKey)
+}
+
+func TestChoice_LedgerWritesNoPromptAnswerOrKey(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	rs := &respond{body: readTestdata(t, "choice_response.json")}
+	c := newTestClient(t, rs, WithLedger(path), WithCaller("test caller"))
+
+	_, err := c.Choice(context.Background(), shoeState, "Which team should handle this?", shoeCriteria)
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	line := string(data)
+	require.Contains(t, string(rs.raw), shoeState, "the request did carry the state")
+	assert.NotContains(t, line, shoeState)
+	assert.NotContains(t, line, "Which team should handle this?")
+	assert.NotContains(t, line, testKey)
+
+	var fields map[string]any
+	require.NoError(t, json.Unmarshal(data, &fields))
+	assert.Len(t, fields, 4, "a line holds the four fields and nothing else")
+}
+
+func TestChoice_NoLedgerLineForAFailedCall(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	c := newTestClient(t, &respond{status: http.StatusUnauthorized, body: `{"error":"bad key"}`}, WithLedger(path))
+
+	_, err := c.Choice(context.Background(), shoeState, "q?", shoeCriteria)
+
+	require.ErrorIs(t, err, ErrUnauthorized)
+	assert.NoFileExists(t, path)
+}
+
+func TestUsageLedgerPath(t *testing.T) {
+	t.Parallel()
+	assert.Equal(t, filepath.Join("/town", ".runtime", "jev", "usage.jsonl"), UsageLedgerPath("/town"))
+}

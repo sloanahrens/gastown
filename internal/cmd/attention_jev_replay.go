@@ -68,10 +68,29 @@ func runAttentionJevReplay(cmd *cobra.Command, _ []string) error {
 		MaxSpendUSD:         jevReplayMaxSpend,
 		USDPerBillionTokens: jevReplayUSDPerBTok,
 	}
-	newClassifier := func() (jevreplay.Classifier, error) { return jev.NewClient() }
+	newClassifier := func() (jevreplay.Classifier, error) {
+		return newJevReplayClient(townRoot, cmd.ErrOrStderr())
+	}
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	return jevReplayWithFlags(ctx, cmd.OutOrStdout(), townRoot, newClassifier, opts, jevReplayOut)
+}
+
+// jevReplayCaller names the replay in the town's usage ledger, so a spend
+// reader can separate its cost from other Jev callers'.
+const jevReplayCaller = "attention jev-replay"
+
+// newJevReplayClient builds the replay's Jev client, which records each
+// answered call in the town's usage ledger and warns to warn when a ledger
+// write fails. extra options come last, so a test can supply its key and
+// transport.
+func newJevReplayClient(townRoot string, warn io.Writer, extra ...jev.Option) (*jev.Client, error) {
+	opts := append([]jev.Option{
+		jev.WithLedger(jev.UsageLedgerPath(townRoot)),
+		jev.WithCaller(jevReplayCaller),
+		jev.WithWarnings(warn),
+	}, extra...)
+	return jev.NewClient(opts...)
 }
 
 // jevReplayWithFlags refuses options and an --out path that could spend
