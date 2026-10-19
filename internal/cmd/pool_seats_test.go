@@ -527,11 +527,21 @@ func TestSessionlessSeatsCountOnTheAgentTheyWereSlung(t *testing.T) {
 	t.Parallel()
 	// The pool's seat, and the role default an unrecorded seat falls back to.
 	pool := &config.PolecatPool{Agent: "claude-sonnet", MaxSeats: 2, MaxTotal: intPtr(4)}
+	// The seat map of the dispatcher's next shape: one seat each for two
+	// agents, the role default being one of them. A seat that records no agent
+	// is on neither by its record, and its restart starts it on the role
+	// default, so that is the seat it holds.
+	seatMapPool := &config.PolecatPool{
+		Seats:    map[string]config.SeatConfig{"claude-sonnet": {Cap: 1}, "claude-haiku": {Cap: 1}},
+		MaxTotal: intPtr(2),
+	}
 	ts := config.NewTownSettings()
 	ts.RoleAgents = map[string]string{"polecat": "claude-sonnet"}
 
 	cases := []struct {
 		name string
+		// seatMap runs the case on seatMapPool instead of pool.
+		seatMap bool
 		// deadHooked stages the seat as a crashed polecat whose bead is still
 		// hooked instead of one mid-landing; one is no session at all and the
 		// other is a session that ended.
@@ -562,6 +572,24 @@ func TestSessionlessSeatsCountOnTheAgentTheyWereSlung(t *testing.T) {
 			deadHooked: true,
 			want:       "claude-sonnet",
 		},
+		{
+			name:       "in a multi-seat map a dead-hooked seat with no agent record counts on the role default seat",
+			seatMap:    true,
+			deadHooked: true,
+			want:       "claude-sonnet",
+		},
+		{
+			name:    "in a multi-seat map a seat mid-landing with no agent record counts on the role default seat",
+			seatMap: true,
+			want:    "claude-sonnet",
+		},
+		{
+			name:       "in a multi-seat map a dead-hooked seat still counts on the agent it was slung on",
+			seatMap:    true,
+			deadHooked: true,
+			slungAgent: "claude-haiku",
+			want:       "claude-haiku",
+		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -569,6 +597,17 @@ func TestSessionlessSeatsCountOnTheAgentTheyWereSlung(t *testing.T) {
 			town := t.TempDir()
 			writeTestRigsConfig(t, town, "gastown")
 			writeTownPolecatDir(t, town, "gastown", "jade")
+			pool, ts := pool, ts
+			if c.seatMap {
+				pool = seatMapPool
+				// The restart reads the role default from the town's settings.
+				ts = config.NewTownSettings()
+				ts.RoleAgents = map[string]string{"polecat": "claude-sonnet"}
+				ts.PolecatPool = seatMapPool
+				if err := config.SaveTownSettings(config.TownSettingsPath(town), ts); err != nil {
+					t.Fatalf("SaveTownSettings: %v", err)
+				}
+			}
 
 			seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "jade"}
 			rec := intent.Record{Agent: c.slungAgent}
