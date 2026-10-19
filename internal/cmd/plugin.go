@@ -805,11 +805,7 @@ func runPluginHistory(cmd *cobra.Command, args []string) error {
 }
 
 // pluginHistoryGlyph picks the icon and style `gt plugin history` renders for
-// a run result. Warning gets its own glyph — it is what a run recorded when it
-// found something and reported it, and folding it into the success checkmark
-// would make it indistinguishable from a quiet, nothing-to-report run. Printed
-// likewise: the run only showed the plugin's instructions, so it must never
-// read as work done.
+// a run result. Each result renders distinctly.
 func pluginHistoryGlyph(result plugin.RunResult) (lipgloss.Style, string) {
 	switch result {
 	case plugin.ResultFailure:
