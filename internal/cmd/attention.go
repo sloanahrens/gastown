@@ -52,6 +52,9 @@ The queue is three files under <town>/.runtime/attention/:
   acks.json      the acknowledged keys, {acks: [{key, at}]}. gt attention ack
                  writes it under a flock; the daemon only reads it, so neither
                  process races the other's file.
+  acks-history.jsonl  one line per ack, {ts, key, kind, rule}, appended by
+                 gt attention ack and rotated to acks-history.jsonl.1 at 1 MB.
+                 acks.json forgets an ack when its item clears; this does not.
 
 An ack hides its item until the item clears; the ack is then dropped, so a
 recurrence raises a new item. gt attention never writes state.json or
@@ -197,10 +200,11 @@ func ackAttention(townRoot, key string, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	if _, ok := attention.Find(state, key); !ok {
+	it, ok := attention.Find(state, key)
+	if !ok {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("no attention item with key %q", key)}
 	}
-	return attention.Acknowledge(townRoot, key, now)
+	return attention.AcknowledgeItem(townRoot, it, now)
 }
 
 // renderAttention prints the table: a STALE header when the state is old, then

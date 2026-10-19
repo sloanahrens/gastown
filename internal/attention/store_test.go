@@ -1,6 +1,7 @@
 package attention
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -330,5 +331,101 @@ func TestReadRetainedEventsSpansTheRotation(t *testing.T) {
 	evs, err := ReadRetainedEvents(town)
 	if err != nil || len(evs) != 2 || evs[0].Key != "old" || evs[1].Key != "new" {
 		t.Fatalf("ReadRetainedEvents = %+v, %v, want old then new", evs, err)
+	}
+}
+
+// An ack outlives its item in acks-history.jsonl: the line carries the item's
+// kind and rule, and PruneAcks leaves it alone when the item clears.
+func TestAcknowledgeItemHistorySurvivesTheItemClearing(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	it := Item{Key: "esc:hq-1", Kind: KindEscalation}
+	if err := AcknowledgeItem(town, it, reconcileNow); err != nil {
+		t.Fatalf("AcknowledgeItem: %v", err)
+	}
+	if err := PruneAcks(town, State{Updated: reconcileNow}); err != nil {
+		t.Fatalf("PruneAcks: %v", err)
+	}
+	acks, err := ReadAcks(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(acks.Acks) != 0 {
+		t.Fatalf("acks = %+v, want the ack pruned with its item", acks.Acks)
+	}
+	got, err := ReadAcksHistory(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []AckRecord{{TS: reconcileNow, Key: "esc:hq-1", Kind: KindEscalation, Rule: RuleEscalation}}
+	if len(got) != 1 || !got[0].TS.Equal(want[0].TS) || got[0].Key != want[0].Key || got[0].Kind != want[0].Kind || got[0].Rule != want[0].Rule {
+		t.Fatalf("history = %+v, want %+v", got, want)
+	}
+	raw, err := os.ReadFile(AcksHistoryPath(town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		t.Fatalf("history line is not JSON: %v\n%s", err, raw)
+	}
+	if len(fields) != 4 {
+		t.Errorf("history line fields = %v, want exactly ts, key, kind, rule", fields)
+	}
+	for _, k := range []string{"ts", "key", "kind", "rule"} {
+		if _, ok := fields[k]; !ok {
+			t.Errorf("history line lacks %q: %s", k, raw)
+		}
+	}
+}
+
+// A repeat ack is not a new ack, and the plain Acknowledge keeps no history.
+func TestAcknowledgeItemWritesOneLinePerAck(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	it := Item{Key: "esc:hq-1", Kind: KindEscalation}
+	for range 2 {
+		if err := AcknowledgeItem(town, it, reconcileNow); err != nil {
+			t.Fatalf("AcknowledgeItem: %v", err)
+		}
+	}
+	if err := Acknowledge(town, "esc:hq-2", reconcileNow); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadAcksHistory(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("history = %+v, want one line", got)
+	}
+}
+
+// The history is rotated at the events cap like the other queue logs.
+func TestAcknowledgeItemHistoryRotatesAtTheCap(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(Dir(town), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(AcksHistoryPath(town), []byte(strings.Repeat("\n", EventsMaxBytes)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := AcknowledgeItem(town, Item{Key: "esc:hq-1", Kind: KindEscalation}, reconcileNow); err != nil {
+		t.Fatalf("AcknowledgeItem: %v", err)
+	}
+	rotated, err := os.Stat(RotatedAcksHistoryPath(town))
+	if err != nil {
+		t.Fatalf("rotated file: %v", err)
+	}
+	if rotated.Size() != EventsMaxBytes {
+		t.Errorf("rotated = %d bytes, want the full log moved", rotated.Size())
+	}
+	got, err := ReadAcksHistory(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Key != "esc:hq-1" {
+		t.Fatalf("history = %+v, want the new line in the fresh file", got)
 	}
 }
