@@ -184,14 +184,21 @@ func runAttentionAck(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	d, err := attention.ParseDisposition(attentionDisposition)
+	return ackAttentionWithDisposition(cmd.OutOrStdout(), townRoot, args[0], attentionDisposition, time.Now())
+}
+
+// ackAttentionWithDisposition parses the --disposition value and acks key. A
+// value that is not a disposition is refused before anything is read or
+// written.
+func ackAttentionWithDisposition(w io.Writer, townRoot, key, disposition string, now time.Time) error {
+	d, err := attention.ParseDisposition(disposition)
 	if err != nil {
 		return err
 	}
-	if err := ackAttention(townRoot, args[0], time.Now(), d); err != nil {
+	if err := ackAttention(townRoot, key, now, d); err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "acked %s (%s)\n", args[0], d)
+	fmt.Fprintf(w, "acked %s (%s)\n", key, d)
 	return nil
 }
 

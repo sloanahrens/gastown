@@ -470,30 +470,16 @@ func TestAttentionHelpNamesFilesAndRotationSize(t *testing.T) {
 	}
 }
 
-// runAttentionAck refuses a missing or unknown --disposition and writes
-// neither acks.json nor acks-history.jsonl. It reads the flag from a package
-// variable and the town from the cwd, so this test cannot run in parallel.
-func TestRunAttentionAckRefusesABadDisposition(t *testing.T) {
+// ackAttentionWithDisposition, which runAttentionAck calls with the flag value,
+// refuses a missing or unknown disposition with an error that lists the valid
+// ones, and neither acks.json nor acks-history.jsonl changes.
+func TestAckAttentionWithDispositionRefusesABadOne(t *testing.T) {
+	t.Parallel()
 	now := time.Now()
 	town, _ := attentionSet(t, now)
-	t.Chdir(town)
 	wantAcks, err := attention.ReadAcks(town)
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	runAck := func(t *testing.T, disposition string) (string, error) {
-		t.Helper()
-		prev := attentionDisposition
-		attentionDisposition = disposition
-		var out bytes.Buffer
-		attentionAckCmd.SetOut(&out)
-		t.Cleanup(func() {
-			attentionDisposition = prev
-			attentionAckCmd.SetOut(nil)
-		})
-		err := runAttentionAck(attentionAckCmd, []string{"esc:hq-3"})
-		return out.String(), err
 	}
 
 	for _, tc := range []struct{ name, disposition string }{
@@ -502,12 +488,13 @@ func TestRunAttentionAckRefusesABadDisposition(t *testing.T) {
 		{"wrong case", "Noise"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out, err := runAck(t, tc.disposition)
-			if err == nil || !strings.Contains(err.Error(), "disposition must be") {
-				t.Fatalf("runAttentionAck(%q) = %v, want the disposition error", tc.disposition, err)
+			var out bytes.Buffer
+			err := ackAttentionWithDisposition(&out, town, "esc:hq-3", tc.disposition, now)
+			if err == nil || !strings.Contains(err.Error(), "disposition must be needed-human, fixed-by-overseer or noise") {
+				t.Fatalf("disposition %q: err = %v, want the disposition error", tc.disposition, err)
 			}
-			if out != "" {
-				t.Errorf("a refused ack printed %q", out)
+			if out.Len() != 0 {
+				t.Errorf("a refused ack printed %q", out.String())
 			}
 			acks, err := attention.ReadAcks(town)
 			if err != nil {
@@ -522,19 +509,17 @@ func TestRunAttentionAckRefusesABadDisposition(t *testing.T) {
 		})
 	}
 
-	t.Run("valid", func(t *testing.T) {
-		out, err := runAck(t, "noise")
-		if err != nil {
-			t.Fatalf("runAttentionAck: %v", err)
-		}
-		if want := "acked esc:hq-3 (noise)\n"; out != want {
-			t.Errorf("output = %q, want %q", out, want)
-		}
-		hist, err := attention.ReadAcksHistory(town)
-		if err != nil || len(hist) != 1 || hist[0].Disposition != attention.DispositionNoise {
-			t.Errorf("history = %+v, %v, want one noise line", hist, err)
-		}
-	})
+	var out bytes.Buffer
+	if err := ackAttentionWithDisposition(&out, town, "esc:hq-3", "noise", now); err != nil {
+		t.Fatalf("a valid disposition: %v", err)
+	}
+	if want := "acked esc:hq-3 (noise)\n"; out.String() != want {
+		t.Errorf("output = %q, want %q", out.String(), want)
+	}
+	hist, err := attention.ReadAcksHistory(town)
+	if err != nil || len(hist) != 1 || hist[0].Disposition != attention.DispositionNoise {
+		t.Errorf("history = %+v, %v, want one noise line", hist, err)
+	}
 }
 
 // The help text tells a caller written before --disposition was required what
