@@ -43,7 +43,7 @@ func liveCrewLockTown(t *testing.T) string {
 	return townRoot
 }
 
-func TestRunAgentsFixListsOrphanedLocks(t *testing.T) {
+func TestWriteAgentsFixReportListsOrphanedLocks(t *testing.T) {
 	t.Parallel()
 	report := &CollisionReport{
 		Collisions: 1,
@@ -67,7 +67,7 @@ func TestRunAgentsFixListsOrphanedLocks(t *testing.T) {
 	}
 }
 
-func TestRunAgentsFixNoCollisionsPrintsNothing(t *testing.T) {
+func TestWriteAgentsFixReportNoCollisionsPrintsNothing(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	writeAgentsFixReport(&out, &CollisionReport{StaleLocks: 2})
