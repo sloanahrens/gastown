@@ -514,6 +514,36 @@ func TestStandbyTreatsUnknownLandingQueueAsNotDrained(t *testing.T) {
 	}
 }
 
+// TestStandbyTreatsUnparseableLandingFieldAsNotDrained pins the mixed report:
+// one rig's landing queue read as "0 pending" must not hide another rig whose
+// read failed (Value "?"). The queue is then not known, so standby times out
+// before it sets the ESTOP.
+func TestStandbyTreatsUnparseableLandingFieldAsNotDrained(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	err := townhealth.Write(f.town, townhealth.Report{
+		At:      f.now,
+		Verdict: townhealth.Green,
+		Fields: []townhealth.Field{
+			{Name: townhealth.FieldLanding, Rig: "gastown", Tag: townhealth.Recorded, Verdict: townhealth.Green, Value: "0 pending"},
+			{Name: townhealth.FieldLanding, Rig: "beads", Tag: townhealth.Unknown, Verdict: townhealth.VerdictUnknown, Value: "?"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, _, _ := f.optsWithOut()
+	o.Timeout = time.Minute
+	err = Standby(context.Background(), o)
+	if code := codeOf(t, err); code != ExitDrainTimeout {
+		t.Fatalf("exit code = %d, want %d", code, ExitDrainTimeout)
+	}
+	if _, statErr := os.Stat(estop.FilePath(f.town)); !os.IsNotExist(statErr) {
+		t.Errorf("ESTOP was set although a landing queue was unread (stat err = %v)", statErr)
+	}
+}
+
 func TestStandbyWaitsForDoltGC(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)
