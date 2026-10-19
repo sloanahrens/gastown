@@ -147,11 +147,13 @@ func TestSeatsAbsent(t *testing.T) {
 	}
 }
 
+// The resolver reads a PATH and environment like the launcher's; a scripted
+// host keeps this test from depending on where it runs (gt-nkedc).
 func TestAgentResolverKnowsWhatTheLauncherKnows(t *testing.T) {
 	t.Parallel()
 	ts := NewTownSettings()
 	ts.Agents = map[string]*RuntimeConfig{"my-agent": {Command: "my-agent"}}
-	known := AgentResolver("", ts)
+	known := agentResolverIn(agentHost(nil), "", ts)
 	for name, want := range map[string]bool{
 		"my-agent":      true, // the town's own agents
 		"claude-sonnet": true, // a cost-tier preset
