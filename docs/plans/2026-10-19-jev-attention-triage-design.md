@@ -44,6 +44,16 @@ The pilot replays the full event history offline, read-only, and reports:
 
 The pilot report goes to Sloan. Turning the triage on live needs his approval.
 
+## Measuring the pilot
+
+The pilot has two tiers of ground truth. The tiers are reported separately.
+
+**Tier 1, what exists today.** `events.jsonl` (and `events.jsonl.1`) records every new and cleared transition. An ack is not recorded there, and `acks.json` drops an ack when its item clears. So tier 1 can say that an item cleared, but not whether a human acted on it first. The proxy label is: an item that was still acked when it cleared is `needs-you`, and an item that cleared without an ack is `auto`. This is only possible for items whose ack survives until they clear, which is why tier 1 is weak.
+
+**Tier 2, the ack history (gt-s1xj6).** `gt attention ack` appends one line per ack to `acks-history.jsonl` in the attention directory, written under the existing acks lock and rotated at the events size limit. Each line is `{ts, key, kind, rule}`. The history outlives the ack and the item, so the replay can label an item by what the overseer did, even after it cleared. The replay uses tier 2 as the primary label and reports tier 1 alongside it, so the difference between the two shows how much tier 1 was missing.
+
+The pilot does not start until gt-s1xj6 has landed. Until then, the replay reports tier 1 only and says so.
+
 ## Cost
 
 Input is $42 per billion tokens. At an estimated 500 tokens per item, the full history of about 1,700 events comes to roughly $0.04 per replay, so the $5 cap leaves a wide margin. The pilot records the real token counts and replaces this estimate.

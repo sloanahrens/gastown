@@ -11,7 +11,8 @@ Every bead is held with `needs-human` until Sloan approves this plan. Then relea
 | gt-iek4e | Jev client: Choice call, timeout, 429, usage capture | none |
 | gt-bwdp0 | Triage prompt and fail-safe mapping (pure functions) | none |
 | gt-qml0l | Attention queue reader (state, events with rotation, acks; read-only) | none |
-| gt-vbkfy | Jev replay report: proxy labels, precision, recall, calibration, spend | gt-iek4e, gt-bwdp0, gt-qml0l |
+| gt-s1xj6 | Ack history `acks-history.jsonl` (tier-2 ground truth; design section "Measuring the pilot") | none (dispatched 11:46, furiosa) |
+| gt-vbkfy | Jev replay report: tier-2 and tier-1 labels, precision, recall, calibration, spend | gt-iek4e, gt-bwdp0, gt-qml0l, gt-s1xj6 |
 | gt-pmfyq | Live triage job behind `attention.jev_triage.enabled` (default off) | gt-iek4e, gt-bwdp0, gt-qml0l |
 | gt-irbdc | `gt attention` jev column, display only | gt-pmfyq |
 
