@@ -5,10 +5,13 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // The header strip answers what the town is running on: the model the polecat
@@ -25,11 +28,18 @@ import (
 type modelsReader struct {
 	townRoot string
 	omPath   string
+	// now is the clock the last-24-hours window is measured from; nil reads
+	// the host's.
+	now func() time.Time
 }
 
 func newModelsReader(townRoot string) *modelsReader {
 	return &modelsReader{townRoot: townRoot, omPath: omConfigPath()}
 }
+
+// modelsActivityWindow is how far back the panel counts each agent's landings
+// and rejections.
+const modelsActivityWindow = 24 * time.Hour
 
 // read returns the strip's models. Each config is read on its own: one that is
 // missing or unparseable leaves its field empty, for the page to call unknown,
@@ -58,11 +68,86 @@ func (r *modelsReader) read() *dashboard.Models {
 	// unparseable one is neither, and the panel says so.
 	patrols, patrolsErr := loadDashPatrols(r.townRoot)
 	m.SeatRows = modelSeatRows(r.townRoot, ts, tsErr, patrols, patrolsErr)
+	m.Activity = r.agentActivity()
 	m.Roles = modelRoleRows(modelRoleInputs{
 		townRoot: r.townRoot, ts: ts, tsErr: tsErr, patrols: patrols, patrolsErr: patrolsErr,
 		omBackend: om.Backend, table: loadModelTable(filepath.Join(r.townRoot, "settings", "models.json")),
 	})
 	return m
+}
+
+// agentActivity counts the last 24 hours of landings and rejections per agent,
+// the panel's answer to which seat the town's work is really going to. The
+// landings come from each rig's landings file, the record the landing worker
+// writes with the agent the landing ran on; the rejections come from the
+// town's review log, the verdicts the worker refused the landing on. Both are
+// files the worker writes and the page reads, never the daemon's log. A
+// record naming no agent — a crew landing, or one written before the records
+// carried agents — is counted for nobody, so the table never credits a seat
+// with work nobody proved it ran.
+//
+// A file that is missing is a window with nothing to count; one that cannot be
+// read, or a rig whose name is unusable, is left out of the count rather than
+// failing the whole panel: the other seats' numbers are still true.
+func (r *modelsReader) agentActivity() []dashboard.AgentActivity {
+	now := time.Now()
+	if r.now != nil {
+		now = r.now()
+	}
+	since := now.Add(-modelsActivityWindow)
+
+	landed := map[string]int{}
+	rigs, err := knownRigNames(r.townRoot)
+	if err != nil {
+		// A town with no readable rig registry still has the HQ landings; a
+		// registry read failure costs the rigs' rows, not the panel.
+		rigs = nil
+	}
+	for _, rig := range append([]string{"hq"}, rigs...) {
+		f, err := land.RigLandingsFile(r.townRoot, rig)
+		if err != nil {
+			continue
+		}
+		recs, err := f.Since(since)
+		if err != nil {
+			continue
+		}
+		for _, rec := range recs {
+			if agent := strings.TrimSpace(rec.Agent); agent != "" {
+				landed[agent]++
+			}
+		}
+	}
+
+	rejected := map[string]int{}
+	if recs, err := land.TownReviewsFile(r.townRoot).Since(since); err == nil {
+		for _, rec := range recs {
+			agent := strings.TrimSpace(rec.Agent)
+			// A request_changes verdict refused the landing with or without
+			// the Rejected flag, which only an approving verdict's findings
+			// set (gt-vu18r).
+			if agent != "" && (rec.Rejected || rec.Verdict == land.VerdictRequestChanges) {
+				rejected[agent]++
+			}
+		}
+	}
+
+	agents := make([]string, 0, len(landed)+len(rejected))
+	seen := map[string]bool{}
+	for _, by := range []map[string]int{landed, rejected} {
+		for agent := range by {
+			if !seen[agent] {
+				seen[agent] = true
+				agents = append(agents, agent)
+			}
+		}
+	}
+	sort.Strings(agents)
+	out := make([]dashboard.AgentActivity, 0, len(agents))
+	for _, agent := range agents {
+		out = append(out, dashboard.AgentActivity{Agent: agent, Landed: landed[agent], Rejected: rejected[agent]})
+	}
+	return out
 }
 
 // loadDashPatrols reads the daemon's patrol config, nil with no error when the

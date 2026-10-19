@@ -912,7 +912,7 @@ func (l *Lander) logReview(issue *beads.Issue, w Work, dir string, v Verdict, re
 		l.logf("%s: could not read the review bar for the reviews log (%v); it is logged as 0", w.BeadID, err)
 	}
 	rec := ReviewRecord{BeadID: w.BeadID, Rig: w.Rig, Attempt: CountRejections(issue.Notes) + 1,
-		Score: v.Score, Verdict: v.Verdict, Rejected: rejected, Findings: len(v.Findings), Bar: bar, At: l.now().UTC()}
+		Score: v.Score, Verdict: v.Verdict, Rejected: rejected, Agent: w.Agent, Findings: len(v.Findings), Bar: bar, At: l.now().UTC()}
 	if err := l.Reviews.Append(rec); err != nil {
 		l.logf("%s: could not append to the reviews log (%v); the landing is unaffected", w.BeadID, err)
 		l.commentReviewLogFailure(w, rec, err)
@@ -1982,7 +1982,7 @@ func (l *Lander) record(w Work, res Result) error {
 		BeadID: w.BeadID, Rig: w.Rig, Branch: w.Branch, Head: w.Head, Target: w.Target, Base: res.Base,
 		LandedCommit: res.LandedCommit, PatchID: res.PatchID,
 		GateResult: gateRecord(res), OMVerdict: res.Verdict.Verdict, OMScore: res.Verdict.Score,
-		Route: route, LandedAt: l.now().UTC(), RiskPaths: res.RiskPaths,
+		Route: route, Agent: w.Agent, LandedAt: l.now().UTC(), RiskPaths: res.RiskPaths,
 		RiskPathReviewSkippedBy: res.RiskPathReviewSkippedBy,
 	}
 	if err := l.Landings.Append(rec); err != nil {

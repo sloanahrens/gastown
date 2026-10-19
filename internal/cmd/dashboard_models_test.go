@@ -5,9 +5,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dashboard"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // The header strip names the model a reviewer runs, not the command that runs
@@ -478,5 +480,81 @@ func TestModelsReaderNamesTheAgentOfEachDeepReviewSchedule(t *testing.T) {
 		if len(rows) != 1 || rows[0].Role != "deep-review" || rows[0].Model != "" || !strings.Contains(rows[0].Note, tc.note) || rows[0].Drift != "" {
 			t.Errorf("%s: deep-review rows = %+v, want one unknown row noting %q", name, rows, tc.note)
 		}
+	}
+}
+
+// TestDashboardModelsCountsLandingsAndRejectionsPerAgent: the panel's last 24
+// hours count each agent's landings off the landings file, where the landing
+// worker records the agent the seat ran on, and its rejections off the review
+// log, where it records the verdicts that refused a landing. A record outside
+// the window, and one naming no agent (a crew landing), is counted for nobody
+// (gt-mukgk.6).
+func TestDashboardModelsCountsLandingsAndRejectionsPerAgent(t *testing.T) {
+	t.Parallel()
+
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(town, "mayor", "rigs.json"),
+		`{"version":1,"rigs":{"gastown":{"git_url":"u","added_at":"2026-01-01T00:00:00Z","beads":{"prefix":"gt"}}}}`)
+	now := time.Date(2026, 10, 19, 18, 0, 0, 0, time.UTC)
+
+	landings, err := land.RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range []land.LandingRecord{
+		{BeadID: "gt-a", Rig: "gastown", Agent: "claude-sonnet", LandedAt: now.Add(-1 * time.Hour)},
+		{BeadID: "gt-b", Rig: "gastown", Agent: "claude-sonnet", LandedAt: now.Add(-2 * time.Hour)},
+		{BeadID: "gt-c", Rig: "gastown", Agent: "claude-haiku", LandedAt: now.Add(-3 * time.Hour)},
+		// Outside the window: the panel counts a day, not the file.
+		{BeadID: "gt-d", Rig: "gastown", Agent: "deepseek-flash", LandedAt: now.Add(-30 * time.Hour)},
+		// A crew landing has no seat, so it names no agent.
+		{BeadID: "gt-e", Rig: "gastown", LandedAt: now.Add(-1 * time.Hour)},
+	} {
+		if err := landings.Append(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reviews := land.TownReviewsFile(town)
+	for _, rec := range []land.ReviewRecord{
+		{BeadID: "gt-c", Rig: "gastown", Agent: "claude-haiku", Verdict: land.VerdictRequestChanges, At: now.Add(-1 * time.Hour)},
+		{BeadID: "gt-f", Rig: "gastown", Agent: "claude-haiku", Verdict: land.VerdictApprove, Rejected: true, At: now.Add(-2 * time.Hour)},
+		// An approval is not a rejection.
+		{BeadID: "gt-a", Rig: "gastown", Agent: "claude-sonnet", Verdict: land.VerdictApprove, At: now.Add(-1 * time.Hour)},
+		// Outside the window.
+		{BeadID: "gt-g", Rig: "gastown", Agent: "claude-sonnet", Verdict: land.VerdictRequestChanges, At: now.Add(-30 * time.Hour)},
+		// A crew review names no agent.
+		{BeadID: "gt-h", Rig: "gastown", Verdict: land.VerdictRequestChanges, At: now.Add(-1 * time.Hour)},
+	} {
+		if err := reviews.Append(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := &modelsReader{townRoot: town, omPath: filepath.Join(t.TempDir(), "missing.json"), now: func() time.Time { return now }}
+	m := r.read()
+	want := []dashboard.AgentActivity{{Agent: "claude-haiku", Landed: 1, Rejected: 2}, {Agent: "claude-sonnet", Landed: 2}}
+	if len(m.Activity) != len(want) {
+		t.Fatalf("activity = %+v, want %+v", m.Activity, want)
+	}
+	for i := range want {
+		if m.Activity[i] != want[i] {
+			t.Errorf("activity[%d] = %+v, want %+v", i, m.Activity[i], want[i])
+		}
+	}
+}
+
+// TestDashboardModelsWithNoLandingsSaysNothing: a town that has never landed
+// has no per-agent rows, and the panel says nothing rather than inventing a
+// seat with zero landings (gt-mukgk.6).
+func TestDashboardModelsWithNoLandingsSaysNothing(t *testing.T) {
+	t.Parallel()
+
+	r := &modelsReader{townRoot: t.TempDir(), omPath: filepath.Join(t.TempDir(), "missing.json")}
+	if got := r.read().Activity; len(got) != 0 {
+		t.Errorf("activity = %+v, want none for a town with no landings", got)
 	}
 }

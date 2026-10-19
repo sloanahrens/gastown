@@ -588,8 +588,8 @@ function renderModelsPanel(s) {
   if (!modelsOpen) { box.replaceChildren(); return; }
   const m = s.models;
   box.replaceChildren();
-  const seats = (m && m.seat_rows) || [], roles = (m && m.roles) || [];
-  if (!seats.length && !roles.length) { box.append(el("div", "empty", "no seats and no roles have been read yet")); return; }
+  const seats = (m && m.seat_rows) || [], roles = (m && m.roles) || [], activity = (m && m.activity) || [];
+  if (!seats.length && !roles.length && !activity.length) { box.append(el("div", "empty", "no seats and no roles have been read yet")); return; }
   const table = (cols, rows) => {
     const t = el("table"), head = el("tr");
     cols.forEach(([h, num]) => head.append(el("th", num ? "n" : "", h)));
@@ -624,7 +624,19 @@ function renderModelsPanel(s) {
     tr.append(model);
     return tr;
   });
+  // Each agent's last 24 hours: what its seats landed and what the landing
+  // worker refused. A record naming no agent is counted for nobody, so an
+  // agent missing from the table is one no record named, never one that
+  // landed nothing.
+  const activityRows = activity.map(aa => {
+    const tr = el("tr");
+    tr.append(el("td", "", aa.agent), el("td", "n", String(aa.landed)), el("td", "n", String(aa.rejected)));
+    return tr;
+  });
   box.append(table([["Seat"], ["Agent"], ["Live / cap", 1]], seatRows), table([["Role"], ["Model"]], roleRows));
+  if (activityRows.length) {
+    box.append(table([["Agent"], ["Landed / 24h", 1], ["Rejected / 24h", 1]], activityRows));
+  }
 }
 
 function copyText(text, btn) {

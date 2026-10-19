@@ -413,6 +413,10 @@ type LandingRecord struct {
 	// RiskPathReviewSkippedBy is the label that left RiskPaths empty; the note
 	// carries RiskPathReviewSkippedLine in place of the paths.
 	RiskPathReviewSkippedBy string `json:"risk_path_review_skipped_by,omitempty"`
+	// Agent is the agent the polecat's seat ran on, from its agent bead. A
+	// crew landing has no seat and records none, so the field is left out of
+	// the JSON and the note rather than written empty (gt-mukgk.6).
+	Agent string `json:"agent,omitempty"`
 }
 
 // NoteBlock is the LANDING RECORD block Land appends to the work bead.
@@ -420,6 +424,11 @@ func (r LandingRecord) NoteBlock() string {
 	note := fmt.Sprintf("%s\nlanded_commit: %s\npatch_id: %s\ntarget: %s\nbase: %s\nbranch: %s\nhead: %s\ngate_result: %s\nom_verdict: %s\nom_score: %.4f\nroute: %s\nlanded_at: %s",
 		LandingNoteMarker, r.LandedCommit, r.PatchID, NoteField(r.Target), r.Base, NoteField(r.Branch), r.Head,
 		NoteField(r.GateResult), NoteField(r.OMVerdict), r.OMScore, NoteField(r.Route), r.LandedAt.UTC().Format(time.RFC3339))
+	// A crew landing has no seat, so it carries no agent line at all: an
+	// empty "agent:" would read as a seat nobody could name (gt-mukgk.6).
+	if r.Agent != "" {
+		note += "\nagent: " + NoteField(r.Agent)
+	}
 	if r.RiskPathReviewSkippedBy != "" {
 		note += fmt.Sprintf("\n%s (label %s)", RiskPathReviewSkippedLine, NoteField(r.RiskPathReviewSkippedBy))
 	}

@@ -333,6 +333,20 @@ type Models struct {
 	// Roles is the panel's model-per-role table, each row naming the config
 	// key it was read from.
 	Roles []ModelRole `json:"roles,omitempty"`
+	// Activity is the panel's last 24 hours per agent: the landings each
+	// agent's seat landed and the landings it was refused, off the records
+	// the landing worker writes with the agent it ran on (gt-mukgk.6).
+	Activity []AgentActivity `json:"activity,omitempty"`
+}
+
+// AgentActivity is one agent's seat over the last 24 hours: the landings it
+// completed and the landings the landing worker refused. A record that names
+// no agent — a crew landing, or one written before the records carried an
+// agent — is counted for nobody rather than against a guessed seat.
+type AgentActivity struct {
+	Agent    string `json:"agent"`
+	Landed   int    `json:"landed"`
+	Rejected int    `json:"rejected"`
 }
 
 // ModelSeat is one of the town's two polecat seats: the pool seat

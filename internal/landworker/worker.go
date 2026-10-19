@@ -124,6 +124,12 @@ type Worker struct {
 	// ClearIntent returns the author polecat's seat from submitted to stop
 	// once the worker has finished with its bead. nil skips it.
 	ClearIntent func(w land.Work) error
+	// AgentBeadID names the agent bead a polecat's seat wrote its agent on,
+	// which the worker reads to record the agent each landing ran on
+	// (gt-mukgk.6). The prefix is the town's, so the caller supplies the id;
+	// nil, or an id the store has no bead for, leaves the landing without an
+	// agent rather than guessing one.
+	AgentBeadID func(polecat string) string
 	// PostLand, when set, runs the rig's post-landing command after each
 	// new landing (never after a record repair).
 	PostLand PostLandTrigger
@@ -429,7 +435,10 @@ func (w *Worker) queueRecentRepairs() {
 }
 
 func workFromRecord(rec land.LandingRecord, issue *beads.Issue) land.Work {
-	work := land.Work{BeadID: rec.BeadID, Rig: rec.Rig, Branch: rec.Branch, Head: rec.Head, Target: rec.Target}
+	// The record being finished already names the agent its landing ran on,
+	// so the repair writes it back rather than asking the agent bead again,
+	// which a seat reset since may answer differently (gt-mukgk.6).
+	work := land.Work{BeadID: rec.BeadID, Rig: rec.Rig, Branch: rec.Branch, Head: rec.Head, Target: rec.Target, Agent: rec.Agent}
 	if ready, ok := land.ParseReadyNote(issue.Notes); ok {
 		work.Worker = ready.Worker
 	} else {
@@ -515,6 +524,7 @@ var submittedRE = regexp.MustCompile(`Submitted for landing: (\S+) @ ([0-9a-fA-F
 // failing that, the latest submission comment.
 func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool) {
 	if work, err := land.WorkFromBead(issue, w.Rig); err == nil {
+		work.Agent = w.seatAgent(work.Worker)
 		return work, true
 	}
 	comments, err := w.Beads.Comments(issue.ID)
@@ -531,9 +541,38 @@ func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool) {
 		if target == "" {
 			target = "main"
 		}
-		return land.Work{BeadID: issue.ID, Rig: w.Rig, Branch: m[1], Head: m[2], Target: target, Worker: polecatFromAssignee(issue.Assignee)}, true
+		work := land.Work{BeadID: issue.ID, Rig: w.Rig, Branch: m[1], Head: m[2], Target: target, Worker: polecatFromAssignee(issue.Assignee)}
+		work.Agent = w.seatAgent(work.Worker)
+		return work, true
 	}
 	return land.Work{}, false
+}
+
+// seatAgent is the agent a landing's polecat seat ran on: the agent line its
+// agent bead carries, which the sling wrote and the session's end leaves in
+// place (gt-mukgk.6). A crew landing has no seat, so its worker is empty and
+// it asks nobody. A bead the store does not have — a landing request naming a
+// seat that never wrote one, or an older agent bead with no agent line — is no
+// agent, never an error that would hold the landing.
+func (w *Worker) seatAgent(polecat string) string {
+	if w.AgentBeadID == nil || polecat == "" {
+		return ""
+	}
+	id := w.AgentBeadID(polecat)
+	if id == "" {
+		return ""
+	}
+	issue, err := w.Beads.Show(id)
+	if err != nil {
+		if !errors.Is(err, beads.ErrNotFound) {
+			w.logf("%s: reading the agent bead %s: %v; the landing records no agent", polecat, id, err)
+		}
+		return ""
+	}
+	if issue == nil {
+		return ""
+	}
+	return strings.TrimSpace(beads.ParseAgentFields(issue.Description).Agent)
 }
 
 // polecatFromAssignee is the polecat name in "<rig>/polecats/<name>".

@@ -66,6 +66,11 @@ type Work struct {
 	Head   string
 	Target string
 	Worker string
+	// Agent is the agent the polecat's seat ran on, read from its agent bead
+	// and kept after the session ends (gt-mukgk.6). A crew landing has no
+	// seat and carries none, and every record written for it leaves the field
+	// empty rather than guessing the role's default.
+	Agent string
 	// Submitted is when the bead was submitted for landing, and is what the
 	// landing worker orders the ready queue by: a comment on the bead is not
 	// a submission and does not move it (gt-t2jhf). Zero on a bead submitted
