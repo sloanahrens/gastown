@@ -53,9 +53,16 @@ func renderFormulaChecklist(formulaName string, steps []checklistStep, fullStep 
 				if cut <= 0 {
 					// No newline to cut at: back up to the start of the rune
 					// the byte limit lands in, so the body stays valid UTF-8.
+					// A rune is at most UTFMax bytes, so a longer run of
+					// continuation bytes is not UTF-8 and is cut at the limit
+					// rather than backed up to an empty body.
 					cut = primeStepBodyMaxChars
-					for cut > 0 && !utf8.RuneStart(desc[cut]) {
-						cut--
+					start := cut
+					for start > cut-(utf8.UTFMax-1) && !utf8.RuneStart(desc[start]) {
+						start--
+					}
+					if utf8.RuneStart(desc[start]) {
+						cut = start
 					}
 				}
 				sb.WriteString(desc[:cut])

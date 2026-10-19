@@ -117,6 +117,37 @@ type downServices struct {
 	killImposters    func(townRoot string) error
 	findIdleMonitors func(townRoot string) []int
 	findOrphans      func(townRoot string) []int
+
+	// sessions replaces the per-rig session stops, which need a live tmux
+	// server. Nil means the real ones. When set, runDownWith opens no tmux, so
+	// the phases that read it (the legacy-socket sweep, --all's verification
+	// and --nuke) are skipped, as they are for a registry that will not load.
+	sessions *downSessionStops
+}
+
+// downSessionStops are the per-rig session phases of gt down. Each returns how
+// many sessions it stopped (or would stop, in a dry run) and how many failed
+// to stop; runDownWith clears allOK on a failed count.
+type downSessionStops struct {
+	polecats func(force, dryRun bool) (stopped, failed int)
+	crew     func(dryRun bool) (stopped, failed int)
+}
+
+// realDownSessionStops stops the sessions of rigs on tmux t.
+func realDownSessionStops(t *tmux.Tmux, townRoot string, rigsConfig *config.RigsConfig, rigs []string) *downSessionStops {
+	// Every session gt down ends goes through the supervisor's operator
+	// stop: logged with the actor, and not refused by an e-stop, since an
+	// operator shutting the town down is what an e-stop asks for
+	// (gt-4k3fj.4.1).
+	stop := downStop{tmux: t, sup: operatorSupervisor(townRoot), townRoot: townRoot, actor: operatorActor("gt down"), force: downForce}
+	return &downSessionStops{
+		polecats: func(force, dryRun bool) (int, int) {
+			return stopAllPolecats(t, stop, townRoot, rigsConfig, rigs, force, dryRun)
+		},
+		crew: func(dryRun bool) (int, int) {
+			return stopAllCrew(t, stop, townRoot, rigsConfig, rigs, dryRun)
+		},
+	}
 }
 
 // realDownServices is downServices on the running host.
@@ -155,7 +186,7 @@ func runDownWith(townRoot string, svc downServices) error {
 	// --all's verification and --nuke go with the per-rig stops, and the
 	// services below are stopped without tmux (gt-sjtps).
 	var t *tmux.Tmux
-	if rigsConfig != nil {
+	if rigsConfig != nil && svc.sessions == nil {
 		t = tmux.NewTmux()
 		if !t.IsAvailable() {
 			return fmt.Errorf("tmux not available (is tmux installed and on PATH?)")
@@ -204,15 +235,13 @@ func runDownWith(townRoot string, svc downServices) error {
 	// registry means no tmux was opened for them, so they are reported as
 	// skipped and the services below still run (gt-sjtps).
 	crewStopped := 0
-	if t == nil {
+	sessions := svc.sessions
+	if sessions == nil && t != nil {
+		sessions = realDownSessionStops(t, townRoot, rigsConfig, rigs)
+	}
+	if sessions == nil {
 		reportRigSessionsSkipped(rigs, rigsErr)
 	} else {
-		// Every session gt down ends goes through the supervisor's operator
-		// stop: logged with the actor, and not refused by an e-stop, since an
-		// operator shutting the town down is what an e-stop asks for
-		// (gt-4k3fj.4.1).
-		stop := downStop{tmux: t, sup: operatorSupervisor(townRoot), townRoot: townRoot, actor: operatorActor("gt down"), force: downForce}
-
 		// Phase 0.5: Stop polecats if --polecats
 		if downPolecats {
 			if downDryRun {
@@ -220,7 +249,7 @@ func runDownWith(townRoot string, svc downServices) error {
 			} else {
 				fmt.Println("Stopping polecats...")
 			}
-			polecatsStopped, polecatsFailed := stopAllPolecats(t, stop, townRoot, rigsConfig, rigs, downForce, downDryRun)
+			polecatsStopped, polecatsFailed := sessions.polecats(downForce, downDryRun)
 			if polecatsFailed > 0 {
 				allOK = false
 			}
@@ -243,7 +272,7 @@ func runDownWith(townRoot string, svc downServices) error {
 		// Phase 0.6: Stop crew member sessions.
 		// Crew sessions consume tokens and must be stopped during any shutdown.
 		var crewFailed int
-		crewStopped, crewFailed = stopAllCrew(t, stop, townRoot, rigsConfig, rigs, downDryRun)
+		crewStopped, crewFailed = sessions.crew(downDryRun)
 		if crewFailed > 0 {
 			allOK = false
 		}

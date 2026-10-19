@@ -498,6 +498,21 @@ func TestRenderFormulaChecklistTruncatesOnRuneBoundary(t *testing.T) {
 	}
 }
 
+// A body that is not UTF-8 (a run of continuation bytes with no rune start) has
+// no boundary to back up to; it is cut at the limit, not emptied.
+func TestRenderFormulaChecklistKeepsBodyWithNoRuneStart(t *testing.T) {
+	t.Parallel()
+	body := strings.Repeat("\x80", primeStepBodyMaxChars+100)
+	f := &cookedFormula{Steps: []cookedStep{{Title: "Long", Description: body}}}
+
+	out := renderFormulaChecklist("mol-long", f.checklist(), 1)
+
+	want := fmt.Sprintf("truncated at %d of %d chars", primeStepBodyMaxChars, len(body))
+	if !strings.Contains(out, want) {
+		t.Errorf("a body with no rune start must be cut at the limit (%q):\n%s", want, out[len(out)-300:])
+	}
+}
+
 // An unknown role has no template, so this one takes staticRoleText's
 // hardcoded-fallback branch.
 func TestStaticRoleText_UnknownRoleKeepsFallbackContextAndContextFile(t *testing.T) {

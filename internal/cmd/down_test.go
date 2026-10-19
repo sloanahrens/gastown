@@ -8,12 +8,36 @@ import (
 	"testing"
 )
 
-// A session that fails to stop is counted, and runDownWith clears allOK on that
-// count, so gt down exits non-zero instead of printing "All services stopped".
-// The unit tier starts no tmux (docs/testing.md) and runDownWith opens one
-// before any session phase, so this drives the tally stopAllCrew and
-// stopAllPolecats return their failure count from.
+// A crew session that fails to stop makes runDownWith return an error, so gt
+// down exits non-zero instead of printing "All services stopped". The unit tier
+// starts no tmux (docs/testing.md), so the session stops are the seam
+// downServices.sessions supplies; the daemon and Dolt still stop.
 func TestRunDownSessionStopErrorExitsNonZero(t *testing.T) {
+	t.Parallel()
+	town := downTestTown(t, `{"version":1,"rigs":{"gastown":{"git_url":"file:///tmp/gastown","added_at":"2026-01-01T00:00:00Z"}}}`, "gastown")
+	rec := &downServicesRecorder{}
+	svc := rec.services()
+	svc.sessions = &downSessionStops{
+		polecats: func(force, dryRun bool) (int, int) { return 0, 0 },
+		crew:     func(dryRun bool) (int, int) { return 1, 1 },
+	}
+
+	err := runDownWith(town, svc)
+
+	if err == nil {
+		t.Fatal("runDownWith with a crew session that would not stop = nil, want a non-zero exit")
+	}
+	if !strings.Contains(err.Error(), "not all services stopped") {
+		t.Errorf("error = %v, want it to say not all services stopped", err)
+	}
+	if got, want := strings.Join(rec.stops(), ","), "daemon,dolt"; got != want {
+		t.Errorf("stopped %q, want %q: a failed session stop must not skip the town services", got, want)
+	}
+}
+
+// The tally of a stop pass: one line per session, and the count of those that
+// failed, which runDownWith clears allOK on.
+func TestReportStopResultsCountsFailures(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
 	stopped, failed := reportStopResults(&out, []downStopResult{
