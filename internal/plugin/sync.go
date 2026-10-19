@@ -48,10 +48,13 @@ func SyncPluginsWithOptions(sourceDir, targetDir string, opts SyncOptions) (*Syn
 // checked, and its extras too under opts.Clean, the two cases a sync replaces
 // or removes. Under opts.Force nothing is protected.
 func ProtectedEdits(sourceDir, targetDir string, report *DriftReport, opts SyncOptions) (map[string][]string, error) {
-	if opts.Force {
-		return nil, nil
-	}
-	hist, prefix := sourceHistory(sourceDir)
+	return protectedEdits(sourceDir, targetDir, report, opts, sourceHistory)
+}
+
+// protectedEdits is ProtectedEdits reading the source's blob history through
+// history, which unit tests script instead of running git.
+func protectedEdits(sourceDir, targetDir string, report *DriftReport, opts SyncOptions, history func(sourceDir string) (blobHistory, string)) (map[string][]string, error) {
+	g := newEditGuard(sourceDir, opts, history)
 	names := make([]string, 0, len(report.Drifted)+len(report.Extra))
 	for _, d := range report.Drifted {
 		names = append(names, d.Name)
@@ -59,22 +62,51 @@ func ProtectedEdits(sourceDir, targetDir string, report *DriftReport, opts SyncO
 	if opts.Clean {
 		names = append(names, report.Extra...)
 	}
-
-	var protected map[string][]string
 	for _, name := range names {
-		edits, err := runtimeEdits(name, filepath.Join(sourceDir, name), filepath.Join(targetDir, name), hist, prefix)
-		if err != nil {
-			return nil, fmt.Errorf("%s: checking for runtime edits: %w", name, err)
+		if _, err := g.allows(name, filepath.Join(sourceDir, name), filepath.Join(targetDir, name)); err != nil {
+			return nil, err
 		}
-		if len(edits) == 0 {
-			continue
-		}
-		if protected == nil {
-			protected = map[string][]string{}
-		}
-		protected[name] = edits
 	}
-	return protected, nil
+	return g.protected, nil
+}
+
+// editGuard decides whether a sync may replace or remove a runtime plugin
+// directory and records each refusal. The real sync and the dry-run preview
+// (ProtectedEdits) both ask it, so the preview cannot drift from the run.
+type editGuard struct {
+	force     bool
+	hist      blobHistory
+	prefix    string
+	protected map[string][]string
+}
+
+func newEditGuard(sourceDir string, opts SyncOptions, history func(sourceDir string) (blobHistory, string)) *editGuard {
+	g := &editGuard{force: opts.Force}
+	if !g.force {
+		g.hist, g.prefix = history(sourceDir)
+	}
+	return g
+}
+
+// allows reports whether dstPluginDir may be replaced or removed. When it may
+// not, the runtime edits are recorded in g.protected. An error means the check
+// itself failed and the plugin must be left alone.
+func (g *editGuard) allows(name, srcPluginDir, dstPluginDir string) (bool, error) {
+	if g.force {
+		return true, nil
+	}
+	edits, err := runtimeEdits(name, srcPluginDir, dstPluginDir, g.hist, g.prefix)
+	if err != nil {
+		return false, fmt.Errorf("%s: checking for runtime edits: %w", name, err)
+	}
+	if len(edits) == 0 {
+		return true, nil
+	}
+	if g.protected == nil {
+		g.protected = map[string][]string{}
+	}
+	g.protected[name] = edits
+	return false, nil
 }
 
 // syncPlugins is SyncPluginsWithOptions reading the source's blob history
@@ -82,30 +114,15 @@ func ProtectedEdits(sourceDir, targetDir string, report *DriftReport, opts SyncO
 func syncPlugins(sourceDir, targetDir string, opts SyncOptions, history func(sourceDir string) (blobHistory, string)) (*SyncResult, error) {
 	result := &SyncResult{}
 	clean := opts.Clean
-	var hist blobHistory
-	var prefix string
-	if !opts.Force {
-		hist, prefix = history(sourceDir)
-	}
-	// guard reports whether dstPluginDir may be replaced or removed; when it
-	// may not, it records the runtime edits in result.Protected.
+	g := newEditGuard(sourceDir, opts, history)
+	// guard reports whether dstPluginDir may be replaced or removed; a failed
+	// check lands in result.Errors, a refusal in g.protected.
 	guard := func(name, srcPluginDir, dstPluginDir string) bool {
-		if opts.Force {
-			return true
-		}
-		edits, err := runtimeEdits(name, srcPluginDir, dstPluginDir, hist, prefix)
+		ok, err := g.allows(name, srcPluginDir, dstPluginDir)
 		if err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("%s: checking for runtime edits: %v", name, err))
-			return false
+			result.Errors = append(result.Errors, err.Error())
 		}
-		if len(edits) == 0 {
-			return true
-		}
-		if result.Protected == nil {
-			result.Protected = map[string][]string{}
-		}
-		result.Protected[name] = edits
-		return false
+		return ok
 	}
 
 	srcInfo, err := os.Stat(sourceDir)
@@ -176,6 +193,7 @@ func syncPlugins(sourceDir, targetDir string, opts SyncOptions, history func(sou
 		}
 	}
 
+	result.Protected = g.protected
 	return result, nil
 }
 
