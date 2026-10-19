@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -340,7 +341,10 @@ func TestNormalizeCompactionAnomalyRemovesUnsupportedHealthClaim(t *testing.T) {
 
 // compactReportFixture is a compactReportRun over a shared fake, with the
 // compaction answering an empty result, no active wisps and every mail
-// recorded.
+// recorded. Its workDir is a bare temp dir outside any town, so the sweep's
+// target resolver yields the one "current" target (see
+// TestDailyDigestOutsideATownListsOnlyTheWorkingDirectory); withTown puts it
+// in a town with registered rigs.
 type compactReportFixture struct {
 	r     compactReportRun
 	db    *beadsfake.Fake
@@ -363,6 +367,18 @@ func newCompactReportFixture(t *testing.T, now time.Time) *compactReportFixture 
 		out: io.Discard,
 	}
 	return fx
+}
+
+// withTown moves the run's working directory to the root of a new town that
+// registers rigs, so the digest's targets are "current" plus each rig.
+func (fx *compactReportFixture) withTown(t *testing.T, rigs ...string) {
+	t.Helper()
+	townRoot := t.TempDir()
+	writeTestRigsConfig(t, townRoot, rigs...)
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{}`), 0644); err != nil {
+		t.Fatalf("write town.json: %v", err)
+	}
+	fx.r.workDir = townRoot
 }
 
 // event seeds an event bead in status (closed when "").
@@ -483,13 +499,7 @@ func TestRunDailyDigestMailsAfterTheAuditBead(t *testing.T) {
 func TestDailyDigestActiveCountsRigDatabases(t *testing.T) {
 	t.Parallel()
 	fx := newCompactReportFixture(t, time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC))
-
-	townRoot := t.TempDir()
-	writeTestRigsConfig(t, townRoot, "gastown")
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{}`), 0644); err != nil {
-		t.Fatalf("write town.json: %v", err)
-	}
-	fx.r.workDir = townRoot
+	fx.withTown(t, "gastown")
 
 	patrol := func(id string) *beads.Issue {
 		return &beads.Issue{ID: id, Title: "patrol step", WispType: "patrol", Ephemeral: true}
@@ -525,31 +535,85 @@ func TestDailyDigestActiveCountsRigDatabases(t *testing.T) {
 	}
 }
 
-// A database the digest cannot list fails the digest and names the database,
-// rather than reporting an understated Active count.
-func TestDailyDigestNamesTheRigDatabaseItCannotList(t *testing.T) {
+// A database the digest cannot list does not block the digest: it names the
+// database in the Errors section, as the sweep does, and the Active column
+// counts the databases that answered.
+func TestDailyDigestReportsTheRigDatabaseItCannotListAndSends(t *testing.T) {
 	t.Parallel()
 	fx := newCompactReportFixture(t, time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC))
-
-	townRoot := t.TempDir()
-	writeTestRigsConfig(t, townRoot, "gastown")
-	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(`{}`), 0644); err != nil {
-		t.Fatalf("write town.json: %v", err)
+	fx.withTown(t, "gastown")
+	fx.r.wisps = func(target compactTarget) ([]*beads.Issue, error) {
+		if target.label == "gastown" {
+			return nil, errors.New("dolt down")
+		}
+		return []*beads.Issue{{ID: "hq-1", Title: "patrol step", WispType: "patrol", Ephemeral: true}}, nil
 	}
-	fx.r.workDir = townRoot
+	var out bytes.Buffer
+	fx.r.json = true
+	fx.r.out = &out
+
+	if err := fx.r.dailyDigest(); err != nil {
+		t.Fatalf("dailyDigest: %v", err)
+	}
+
+	var report compactReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatalf("parsing digest %q: %v", out.String(), err)
+	}
+	want := []string{"gastown: listing active wisps: dolt down"}
+	if !reflect.DeepEqual(report.Errors, want) {
+		t.Errorf("Errors = %v, want %v", report.Errors, want)
+	}
+	if got := report.Categories["Patrols"].Active; got != 1 {
+		t.Errorf("Patrols Active = %d, want 1 from the database that answered", got)
+	}
+}
+
+// The mailed digest carries the unreachable database in its Errors section.
+func TestDailyDigestMailsDespiteAnUnlistableRigDatabase(t *testing.T) {
+	t.Parallel()
+	fx := newCompactReportFixture(t, time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC))
+	fx.withTown(t, "gastown")
 	fx.r.wisps = func(target compactTarget) ([]*beads.Issue, error) {
 		if target.label == "gastown" {
 			return nil, errors.New("dolt down")
 		}
 		return nil, nil
 	}
-
-	err := fx.r.dailyDigest()
-	if err == nil || !strings.Contains(err.Error(), "gastown") || !strings.Contains(err.Error(), "dolt down") {
-		t.Fatalf("dailyDigest error = %v, want one naming gastown and the listing failure", err)
+	var body string
+	fx.r.mail = func(subject, b string) error {
+		fx.mails = append(fx.mails, subject)
+		body = b
+		return nil
 	}
-	if len(fx.mails) != 0 {
-		t.Fatalf("mails = %v, want none after a failed listing", fx.mails)
+
+	if err := fx.r.dailyDigest(); err != nil {
+		t.Fatalf("dailyDigest: %v", err)
+	}
+	if len(fx.mails) != 1 {
+		t.Fatalf("mails = %v, want the digest sent once", fx.mails)
+	}
+	if !strings.Contains(body, "### Errors") || !strings.Contains(body, "gastown: listing active wisps: dolt down") {
+		t.Errorf("digest body = %q, want an Errors section naming gastown", body)
+	}
+}
+
+// Outside a town the resolver finds no rigs: the digest lists only the
+// working directory's own database, labelled "current".
+func TestDailyDigestOutsideATownListsOnlyTheWorkingDirectory(t *testing.T) {
+	t.Parallel()
+	fx := newCompactReportFixture(t, time.Date(2026, 5, 15, 12, 0, 0, 0, time.UTC))
+	var asked []string
+	fx.r.wisps = func(target compactTarget) ([]*beads.Issue, error) {
+		asked = append(asked, target.label)
+		return nil, nil
+	}
+
+	if err := fx.r.dailyDigest(); err != nil {
+		t.Fatalf("dailyDigest: %v", err)
+	}
+	if want := []string{"current"}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("targets asked = %v, want %v", asked, want)
 	}
 }
 

@@ -194,13 +194,14 @@ func (r compactReportRun) dailyDigest() error {
 	}
 
 	// Query active wisps for the "Active" column
-	activeWisps, err := r.activeWisps()
+	activeWisps, listErrors, err := r.activeWisps()
 	if err != nil {
 		return err
 	}
 
 	// Build report
 	report := buildReport(dateStr, &result, activeWisps)
+	report.Errors = append(report.Errors, listErrors...)
 
 	// Detect anomalies
 	report.Anomalies = detectAnomalies(report)
@@ -243,24 +244,29 @@ func (r compactReportRun) dailyDigest() error {
 // covers. The targets come from resolveCompactTargets, the sweep's own
 // resolver, so the Active column counts the databases behind Deleted and
 // Promoted: the cwd database plus every registered rig.
-func (r compactReportRun) activeWisps() ([]*beads.Issue, error) {
+//
+// A database that cannot be listed does not stop the digest. Like the sweep,
+// which records "<label>: listing wisps: <err>" and moves on, it comes back as
+// a listing error for the report's Errors section, and the Active column
+// counts the databases that answered.
+func (r compactReportRun) activeWisps() (wisps []*beads.Issue, listErrors []string, err error) {
 	targets, err := resolveCompactTargets(beads.FindTownRoot(r.workDir), r.workDir, "")
 	if err != nil {
-		return nil, fmt.Errorf("resolving compaction targets: %w", err)
+		return nil, nil, fmt.Errorf("resolving compaction targets: %w", err)
 	}
 	list := r.wisps
 	if list == nil {
 		list = func(t compactTarget) ([]*beads.Issue, error) { return listReportWisps(beads.New(t.workDir)) }
 	}
-	var all []*beads.Issue
 	for _, t := range targets {
-		wisps, err := list(t)
+		got, err := list(t)
 		if err != nil {
-			return nil, fmt.Errorf("listing active wisps in %s: %w", t.label, err)
+			listErrors = append(listErrors, fmt.Sprintf("%s: listing active wisps: %v", t.label, err))
+			continue
 		}
-		all = append(all, wisps...)
+		wisps = append(wisps, got...)
 	}
-	return all, nil
+	return wisps, listErrors, nil
 }
 
 // listReportWisps includes infrastructure wisps that the default bd list view
