@@ -489,6 +489,23 @@ func TestRuntimeArtifactPathspecsBesideKeepsNewFixtureBesideEditedSource(t *test
 	}
 }
 
+// The blanket .out entry in looksGenerated resets a profile written under any
+// name (unit.out) beside edited source, but never a .out file HEAD tracks, nor
+// one under testdata/ (gt-ey0e3).
+func TestRuntimeArtifactPathspecsBesideSparesTrackedAndFixtureOutFiles(t *testing.T) {
+	t.Parallel()
+	list := func(string) ([]string, error) {
+		return []string{"pkg/coverage/collector.go", "pkg/coverage/expected.out"}, nil
+	}
+	got := RuntimeArtifactPathspecsListing([]string{
+		"pkg/coverage/collector.go", "pkg/coverage/expected.out",
+		"pkg/coverage/testdata/golden.out", "pkg/coverage/unit.out",
+	}, list, list)
+	if want := []string{"pkg/coverage/unit.out"}; !slices.Equal(got, want) {
+		t.Fatalf("RuntimeArtifactPathspecsListing = %q, want %q", got, want)
+	}
+}
+
 // go tool cover -html and -coverprofile write reports under whatever name the
 // caller picks; the common ones are generator output beside edited source even
 // though looksGenerated has no entry for the exact file (gt-dlwi0).
@@ -513,6 +530,12 @@ func TestLooksGenerated(t *testing.T) {
 	}{
 		{"pkg/coverage/", "pkg/coverage/coverage.out", true},
 		{"pkg/coverage/", "pkg/coverage/unit.out", true},
+		{"pkg/coverage/", "pkg/coverage/Unit.OUT", true},
+		{"pkg/coverage/", "pkg/coverage/sub/unit.out", true},
+		{"pkg/coverage/", "pkg/coverage/testdata/golden.out", false},
+		{"pkg/coverage/", "pkg/coverage/out", false},
+		{"pkg/coverage/", "pkg/coverage/unit.out.md", false},
+		{"pkg/coverage/", "pkg/coverage/layout.outline", false},
 		{"pkg/coverage/", "pkg/coverage/lcov.info", true},
 		{"pkg/coverage/", "pkg/coverage/lcov-report/index.html", true},
 		{"pkg/coverage/", "pkg/coverage/lcov-report/css/a.css", true},

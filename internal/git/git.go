@@ -4638,10 +4638,14 @@ func (b sourceBeside) spares(root, path string, changedSources []string) bool {
 // looksGenerated reports whether path, a file under the coverage/ or .cache/
 // directory root, reads as generator output: anything in a .cache, a coverage
 // reporter's report directory or well-known report file (go tool cover -html
-// writes coverage.html), or a compiler's or profiler's data (.profraw, .prof).
-// A bare .html is not listed: report.html or a template may be hand-written.
-// A file under testdata/ is a fixture by Go convention whatever
-// its name, since a coverage package tests against sample lcov.info files.
+// writes coverage.html), a compiler's or profiler's data (.profraw, .prof), or
+// any file ending in .out, the name `go test -coverprofile=` is given whatever
+// the profile is called (unit.out). A bare .html is not listed: report.html or
+// a template may be hand-written, and so may a file named just "out". A file
+// under testdata/ is a fixture by Go convention whatever its name, since a
+// coverage package tests against sample lcov.info files and golden .out files.
+// spares keeps a file HEAD tracks under the root, so a committed expected.out
+// is never reset.
 func looksGenerated(root, path string) bool {
 	if filepath.Base(strings.TrimSuffix(root, "/")) == ".cache" {
 		return true
