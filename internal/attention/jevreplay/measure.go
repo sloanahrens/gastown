@@ -34,7 +34,8 @@ func proxyTier1(r attention.Record) proxy {
 // life, from the raise to the clear (to now while it stands). An ack that
 // carries a disposition labels the item by it, so fixed-by-overseer and noise
 // read as not needing a human; a line written before dispositions existed
-// keeps the old reading, that an ack means a human was needed.
+// keeps the old reading, that an ack means a human was needed. When the life
+// holds more than one ack with a disposition, the latest one decides.
 func proxyTier2(r attention.Record, history []attention.AckRecord) proxy {
 	if p, ok := dispositionInLife(r, history); ok {
 		return p
@@ -52,20 +53,28 @@ func label(acked bool, r attention.Record) proxy {
 	return proxyNone
 }
 
-// dispositionInLife labels by the first ack in the item's life that carries a
-// disposition. The two dispositions that are not needed-human share proxyAuto,
-// the "no human was needed" side of the proxy.
+// dispositionInLife labels by the latest ack in the item's life that carries a
+// disposition: a later ack is the human's last word on the item, so it
+// supersedes an earlier one. Ties on the timestamp keep the later line. The
+// two dispositions that are not needed-human share proxyAuto, the "no human
+// was needed" side of the proxy.
 func dispositionInLife(r attention.Record, history []attention.AckRecord) (proxy, bool) {
-	for _, a := range history {
+	var last *attention.AckRecord
+	for i, a := range history {
 		if a.Key != r.Key || a.Disposition == "" || !inLife(a.TS, r) {
 			continue
 		}
-		if a.Disposition.NeedsHuman() {
-			return proxyNeedsYou, true
+		if last == nil || !a.TS.Before(last.TS) {
+			last = &history[i]
 		}
-		return proxyAuto, true
 	}
-	return proxyNone, false
+	if last == nil {
+		return proxyNone, false
+	}
+	if last.Disposition.NeedsHuman() {
+		return proxyNeedsYou, true
+	}
+	return proxyAuto, true
 }
 
 func ackedInLife(r attention.Record, history []attention.AckRecord) bool {

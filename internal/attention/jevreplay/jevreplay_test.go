@@ -386,6 +386,22 @@ func TestProxyLabels(t *testing.T) {
 	assert.Equal(t, proxyNeedsYou, proxyTier2(cleared, at(1, "")))
 	// The disposition wins over an ack acks.json still holds.
 	assert.Equal(t, proxyAuto, proxyTier2(ackedStanding, at(1, attention.DispositionNoise)))
+
+	// A later disposition-bearing ack supersedes an earlier one in the life,
+	// whichever order the history arrives in.
+	two := func(t1, t2 int, d1, d2 attention.Disposition) []attention.AckRecord {
+		return []attention.AckRecord{
+			{TS: t0.Add(time.Duration(t1) * time.Minute), Key: "k", Disposition: d1},
+			{TS: t0.Add(time.Duration(t2) * time.Minute), Key: "k", Disposition: d2},
+		}
+	}
+	assert.Equal(t, proxyAuto, proxyTier2(cleared, two(1, 5, attention.DispositionNeededHuman, attention.DispositionFixedByOverseer)))
+	assert.Equal(t, proxyAuto, proxyTier2(cleared, two(1, 5, attention.DispositionNeededHuman, attention.DispositionNoise)))
+	assert.Equal(t, proxyNeedsYou, proxyTier2(cleared, two(1, 5, attention.DispositionNoise, attention.DispositionNeededHuman)))
+	paired := two(1, 5, attention.DispositionNeededHuman, attention.DispositionNoise)
+	assert.Equal(t, proxyAuto, proxyTier2(cleared, []attention.AckRecord{paired[1], paired[0]}), "order in the slice does not decide")
+	// A later disposition after the clear belongs to no life and changes nothing.
+	assert.Equal(t, proxyNeedsYou, proxyTier2(cleared, two(1, 11, attention.DispositionNeededHuman, attention.DispositionNoise)))
 }
 
 func TestReportSaysTheLabelsAreAProxy(t *testing.T) {
