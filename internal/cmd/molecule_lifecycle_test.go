@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -203,5 +204,40 @@ func TestSquashDigestReportsPreCloseProgress(t *testing.T) {
 	}
 	if !strings.Contains(desc, "Status: partial") {
 		t.Errorf("digest description = %q, want \"Status: partial\"", desc)
+	}
+}
+
+// TestSquashWarnsWhenDigestProgressUnreadable: a failed progress read is
+// reported on stderr, and the squash still writes a digest without the
+// execution summary.
+func TestSquashWarnsWhenDigestProgressUnreadable(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	db := handoffMoleculeDB(t, "witness Handoff", "gt-wisp-mol4",
+		beads.Issue{ID: "gt-step-1", Title: "Step 1", Status: "open"})
+	db.showErrID, db.showErr = "gt-wisp-mol4", errors.New("dolt unreachable")
+	var errOut bytes.Buffer
+	e := testMoleculeEnv(townRoot, db)
+	e.noDigest = false
+	e.errOut = &errOut
+	if err := moleculeSquash(squashCmd(context.Background()), e, []string{"witness"}); err != nil {
+		t.Fatalf("squash: %v", err)
+	}
+	if got := errOut.String(); !strings.Contains(got, "reading progress of gt-wisp-mol4") || !strings.Contains(got, "dolt unreachable") {
+		t.Errorf("stderr = %q, want a warning naming the molecule and the read error", got)
+	}
+	digests, err := db.List(beads.ListOptions{Ephemeral: true, Status: "all", Priority: -1})
+	if err != nil {
+		t.Fatalf("listing digests: %v", err)
+	}
+	var desc string
+	var found bool
+	for _, is := range digests {
+		if is.Title == "Digest: gt-wisp-mol4" {
+			desc, found = is.Description, true
+		}
+	}
+	if !found || strings.Contains(desc, "Execution Summary") {
+		t.Errorf("digest found = %v, description = %q, want a digest without an execution summary", found, desc)
 	}
 }

@@ -246,7 +246,11 @@ func moleculeSquash(cmd *cobra.Command, e moleculeLifecycleEnv, args []string) (
 	// closes every step, and a read afterwards counts them all as done.
 	var progress *MoleculeProgressInfo
 	if !e.noDigest {
-		progress, _ = getMoleculeProgressInfo(b, moleculeID)
+		var progressErr error
+		progress, progressErr = getMoleculeProgressInfo(b, moleculeID)
+		if progressErr != nil {
+			fmt.Fprintf(e.errOut, "warning: reading progress of %s for the digest: %v\n", moleculeID, progressErr)
+		}
 	}
 
 	// Recursively close all descendant step issues before squashing
