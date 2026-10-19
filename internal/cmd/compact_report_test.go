@@ -746,7 +746,9 @@ func TestQueryCompactionReportsRejectsMatchingEventsWithoutUsablePayload(t *test
 // TestFindExistingWeeklyRollup: the idempotency check sees closed rollup
 // beads (gt-9t9), treats an overlapping later window as already sent
 // (gt-sqk), and lets a window that only touches the previous one at its end
-// day through, as the run seven days later does (gt-o8skm).
+// day through, as the run seven days later does (gt-o8skm). The boundary is
+// exclusive on the start side too, and zero-length windows are covered only
+// when they sit strictly inside an existing window (gt-wvyp4).
 func TestFindExistingWeeklyRollup(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
@@ -756,6 +758,31 @@ func TestFindExistingWeeklyRollup(t *testing.T) {
 		{"2026-09-02", "2026-09-09", "hq-roll"},
 		{"2026-09-08", "2026-09-15", ""},
 		{"2026-09-16", "2026-09-23", ""},
+		{"2026-08-25", "2026-09-01", ""},
+		{"2026-08-26", "2026-09-02", "hq-roll"},
+		{"2026-09-04", "2026-09-04", "hq-roll"},
+		{"2026-09-01", "2026-09-01", ""},
+		{"2026-09-08", "2026-09-08", ""},
+	} {
+		id, err := findExistingWeeklyRollup(db, tc.start, tc.end)
+		if err != nil || id != tc.want {
+			t.Errorf("window %s..%s: id %q err %v, want %q", tc.start, tc.end, id, err, tc.want)
+		}
+	}
+}
+
+// TestFindExistingWeeklyRollupZeroLengthExisting: a zero-length rollup covers
+// no day, so only an identical window or one strictly around it counts as
+// already sent.
+func TestFindExistingWeeklyRollupZeroLengthExisting(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(event("hq-zero", "Weekly Compaction Rollup 2026-09-04 to 2026-09-04", "", ""))
+	for _, tc := range []struct{ start, end, want string }{
+		{"2026-09-04", "2026-09-04", "hq-zero"},
+		{"2026-09-01", "2026-09-08", "hq-zero"},
+		{"2026-09-04", "2026-09-11", ""},
+		{"2026-08-28", "2026-09-04", ""},
 	} {
 		id, err := findExistingWeeklyRollup(db, tc.start, tc.end)
 		if err != nil || id != tc.want {
