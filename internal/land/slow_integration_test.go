@@ -82,3 +82,30 @@ func TestIntegrationRealRunTracksTheStageProcess(t *testing.T) {
 		t.Errorf("pids %v still tracked after the command ended", left)
 	}
 }
+
+// TestIntegrationRunStepWaitDelay: a background child that holds the output
+// pipe past WaitDelay does not turn an exit 0 into an infrastructure error,
+// and does not hide a non-zero exit.
+func TestIntegrationRunStepWaitDelay(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		script   string
+		wantCode int
+	}{
+		{name: "exit 0", script: "sleep 3 & exit 0", wantCode: 0},
+		{name: "non-zero exit", script: "sleep 3 & exit 3", wantCode: 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			code, err := runStep(context.Background(), t.TempDir(), nil, []string{"sh", "-c", tt.script}, &bytes.Buffer{}, 100*time.Millisecond)
+			if err != nil {
+				t.Fatalf("runStep err = %v, want exit code %d and no error", err, tt.wantCode)
+			}
+			if code != tt.wantCode {
+				t.Fatalf("runStep code = %d, want %d", code, tt.wantCode)
+			}
+		})
+	}
+}

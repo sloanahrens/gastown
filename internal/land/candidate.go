@@ -62,7 +62,8 @@ var ErrCISilence = errors.New("the candidate gate reported no verdict")
 type GateWorkflow struct {
 	// Name is the workflow's `name:` line, the left half of the context.
 	Name string
-	// Job is the single job key under `jobs:`.
+	// Job is the single job's name as Forgejo reports it: its `name:` when it
+	// sets one, otherwise its key under `jobs:`.
 	Job string
 }
 
@@ -83,11 +84,14 @@ func GateWorkflowPath(workflow string) string {
 // ParseGateWorkflow reads a gate workflow file's identity. The file must name
 // the workflow and hold exactly one job: an identity this cannot read is a
 // context that cannot be derived, which fails the landing closed rather than
-// polling a guess.
+// polling a guess. The job reports under its `name:` when it sets one, so that
+// is the half of the context this returns, not the key.
 func ParseGateWorkflow(data []byte) (GateWorkflow, error) {
 	var doc struct {
-		Name string         `yaml:"name"`
-		Jobs map[string]any `yaml:"jobs"`
+		Name string `yaml:"name"`
+		Jobs map[string]struct {
+			Name string `yaml:"name"`
+		} `yaml:"jobs"`
 	}
 	if err := yaml.Unmarshal(data, &doc); err != nil {
 		return GateWorkflow{}, fmt.Errorf("parsing the gate workflow: %w", err)
@@ -100,8 +104,11 @@ func ParseGateWorkflow(data []byte) (GateWorkflow, error) {
 		return GateWorkflow{}, fmt.Errorf("the gate workflow has %d jobs, want exactly one: the required context is <name> / <job> (push)", len(doc.Jobs))
 	}
 	job := ""
-	for key := range doc.Jobs {
-		job = strings.TrimSpace(key)
+	for key, j := range doc.Jobs {
+		job = strings.TrimSpace(j.Name)
+		if job == "" {
+			job = strings.TrimSpace(key)
+		}
 	}
 	if job == "" {
 		return GateWorkflow{}, errors.New("the gate workflow's job has no name, so the status context it reports cannot be derived")

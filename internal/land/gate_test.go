@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -597,6 +598,35 @@ func TestParseShellTierFailuresReadsTheRealSummaryLine(t *testing.T) {
 			t.Parallel()
 			if got := parseShellTierFailures(tc.out + "\n"); !reflect.DeepEqual(got, tc.want) {
 				t.Fatalf("parseShellTierFailures(%q) = %v, want %v", tc.out, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestRealRunExitZeroWithWaitDelayIsSuccess: a step that exits 0 while a
+// background child holds the output pipe past WaitDelay passed. Wait reports
+// exec.ErrWaitDelay for that, which is not an ExitError; reading it as an
+// infrastructure error told the gate a passing step "did not run". The real
+// process is TestIntegrationRunStepWaitDelay.
+func TestRealRunExitZeroWithWaitDelayIsSuccess(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		err        error
+		exitedZero bool
+		want       bool
+	}{
+		{name: "exit 0, pipe held past WaitDelay", err: exec.ErrWaitDelay, exitedZero: true, want: true},
+		{name: "wrapped WaitDelay error", err: fmt.Errorf("wait: %w", exec.ErrWaitDelay), exitedZero: true, want: true},
+		{name: "non-zero exit stays a failure", err: exec.ErrWaitDelay, exitedZero: false, want: false},
+		{name: "exit 0 with another error stays an error", err: errors.New("boom"), exitedZero: true, want: false},
+		{name: "no error needs no rescue", err: nil, exitedZero: true, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := passedPastWaitDelay(tt.err, tt.exitedZero); got != tt.want {
+				t.Fatalf("passedPastWaitDelay(%v, %v) = %v, want %v", tt.err, tt.exitedZero, got, tt.want)
 			}
 		})
 	}

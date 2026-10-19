@@ -592,7 +592,23 @@ func lastLines(s string, n int) string {
 	return strings.Join(lines, "\n") + "\n"
 }
 
+// stepWaitDelay is how long a step is given, after it exits, to release an
+// output pipe a background child still holds.
+const stepWaitDelay = 10 * time.Second
+
 func realRun(ctx context.Context, dir string, env, argv []string, out io.Writer) (int, error) {
+	return runStep(ctx, dir, env, argv, out, stepWaitDelay)
+}
+
+// passedPastWaitDelay is whether Wait's error only says a child outlived the
+// WaitDelay on the output pipe while the step itself exited 0. Wait reports
+// exec.ErrWaitDelay for that, which is not an ExitError; a non-zero exit stays
+// an ExitError and a failure.
+func passedPastWaitDelay(err error, exitedZero bool) bool {
+	return exitedZero && errors.Is(err, exec.ErrWaitDelay)
+}
+
+func runStep(ctx context.Context, dir string, env, argv []string, out io.Writer, waitDelay time.Duration) (int, error) {
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...) //nolint:gosec // G204: gate commands come from the rig's own config
 	cmd.Dir = dir
 	// Its own process group, so a step's timeout kills make and the test
@@ -601,13 +617,16 @@ func realRun(ctx context.Context, dir string, env, argv []string, out io.Writer)
 	cmd.Env = mergeEnv(os.Environ(), env)
 	cmd.Stdout = out
 	cmd.Stderr = out
-	cmd.WaitDelay = 10 * time.Second
+	cmd.WaitDelay = waitDelay
 	err := cmd.Start()
 	if err == nil {
 		// The slow-landing alarm names the processes a stage is running.
 		untrack := trackPID(ctx, cmd.Process.Pid)
 		err = cmd.Wait()
 		untrack()
+	}
+	if passedPastWaitDelay(err, cmd.ProcessState != nil && cmd.ProcessState.Success()) {
+		err = nil
 	}
 	if err == nil {
 		return 0, nil
