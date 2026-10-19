@@ -68,6 +68,7 @@ type tierSweepEvent struct {
 // and times it from its true start rather than inferring it (gt-rntre).
 type tierSweepStarted struct {
 	at    time.Time
+	sha   string
 	tiers []string
 }
 
@@ -176,13 +177,17 @@ func (r *tierSweepReader) parseLogLine(line string) {
 		if err != nil {
 			return
 		}
-		r.start[m[2]] = tierSweepStarted{at: at, tiers: splitTierSweepTiers(m[4])}
+		r.start[m[2]] = tierSweepStarted{at: at, sha: m[3], tiers: splitTierSweepTiers(m[4])}
 		return
 	}
 	if m := tierSweepAbortedRe.FindStringSubmatch(line); m != nil {
 		// The cycle is over and swept nothing: the rig is idle, not running
-		// until tierSweepStaleAfter expires.
-		delete(r.start, m[2])
+		// until tierSweepStaleAfter expires. Only the cycle the line names
+		// closes: an aborted line for another sha belongs to a cycle already
+		// replaced, and must not end the one that is running.
+		if open, ok := r.start[m[2]]; ok && open.sha == m[3] {
+			delete(r.start, m[2])
+		}
 		return
 	}
 	if m := tierSweepSweptRe.FindStringSubmatch(line); m != nil {

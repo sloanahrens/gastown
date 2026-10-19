@@ -88,3 +88,67 @@ func TestFindCurrentRigCwdAndErrors(t *testing.T) {
 		}
 	})
 }
+
+// The unexported-seam tests above hand findCurrentRigWith its cwd; this one
+// runs the production wrapper, which reads the process cwd and GT_RIG itself.
+// It changes the process cwd, so it is not parallel.
+//
+//testpolicy:allow parallel — findCurrentRig reads the process working directory and GT_RIG, both process-wide
+func TestFindCurrentRigReadsCwdAndEnvironment(t *testing.T) {
+	townRoot := townWithRigs(t, "gastown", "beads")
+	// t.TempDir may sit behind a symlink (/var -> /private/var on macOS) that
+	// the process cwd resolves, which would put cwd outside townRoot.
+	townRoot, err := filepath.EvalSymlinks(townRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(townRoot, "beads", "crew"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("registered cwd component beats GT_RIG", func(t *testing.T) {
+		//testpolicy:allow no-chdir — the cwd is the input under test: findCurrentRig reads the working directory
+		t.Chdir(filepath.Join(townRoot, "beads", "crew"))
+		//testpolicy:allow no-env — GT_RIG is the input under test: findCurrentRig reads it from the process environment
+		t.Setenv("GT_RIG", "gastown")
+		name, r, err := findCurrentRig(townRoot)
+		if err != nil || name != "beads" || r == nil || r.Name != "beads" {
+			t.Errorf("findCurrentRig = %q, %+v, %v, want beads", name, r, err)
+		}
+	})
+	t.Run("town-level directory falls back to GT_RIG", func(t *testing.T) {
+		//testpolicy:allow no-chdir — the cwd is the input under test: findCurrentRig reads the working directory
+		t.Chdir(filepath.Join(townRoot, "mayor"))
+		//testpolicy:allow no-env — GT_RIG is the input under test: findCurrentRig reads it from the process environment
+		t.Setenv("GT_RIG", "gastown")
+		name, r, err := findCurrentRig(townRoot)
+		if err != nil || name != "gastown" || r == nil || r.Name != "gastown" {
+			t.Errorf("findCurrentRig = %q, %+v, %v, want gastown", name, r, err)
+		}
+	})
+}
+
+// A registry that cannot be read says nothing about whether the cwd rig is
+// registered, so GT_RIG must not take its place: the caller gets the read
+// failure for the rig the cwd names.
+func TestFindCurrentRigRegistryUnreadableKeepsCwdRig(t *testing.T) {
+	t.Parallel()
+	townRoot := townWithRigs(t, "gastown", "beads")
+	if err := os.WriteFile(constants.MayorRigsPath(townRoot), []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	getenv := func(k string) string {
+		if k == "GT_RIG" {
+			return "gastown"
+		}
+		return ""
+	}
+
+	name, _, err := findCurrentRigWith(getenv, filepath.Join(townRoot, "beads", "crew"), townRoot)
+	if err == nil {
+		t.Fatalf("findCurrentRigWith = %q, want an error from the unreadable registry", name)
+	}
+	if name == "gastown" {
+		t.Errorf("GT_RIG replaced the cwd rig %q over an unreadable registry", "beads")
+	}
+}

@@ -677,13 +677,18 @@ func sessionNameToCanonicalAddress(reg *session.PrefixRegistry, sessionName, tar
 	return canonicalAssigneeAddress(identity), true
 }
 
+// maxBeadIDPrefixLen is the longest rig prefix beadsPrefixRegexp accepts.
+const maxBeadIDPrefixLen = 20
+
 // isBeadID checks if a string looks like a bead ID.
 // Bead IDs have the format <prefix>-<id> where prefix starts with a letter
 // and may contain letters, digits and underscores, the alphabet a rig prefix
 // may use (beadsPrefixRegexp), e.g. gt-abc123, web3-abc, japanese_reader-id3a.
+// A prefix longer than maxBeadIDPrefixLen is no rig prefix, so a long
+// hyphenated word is still a mistyped subcommand.
 func isBeadID(s string) bool {
 	dashIdx := strings.Index(s, "-")
-	if dashIdx <= 0 || dashIdx >= len(s)-1 {
+	if dashIdx <= 0 || dashIdx >= len(s)-1 || dashIdx > maxBeadIDPrefixLen {
 		return false
 	}
 	for i, c := range s[:dashIdx] {

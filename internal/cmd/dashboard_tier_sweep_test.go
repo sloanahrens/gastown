@@ -333,3 +333,22 @@ func TestTierSweepReaderAbortedCycle(t *testing.T) {
 		t.Errorf("an aborted cycle still reads running: %+v", ts.Running)
 	}
 }
+
+// An aborted line closes the cycle it names by sha. One for a cycle already
+// replaced (the log shows it after the newer start) leaves the running cycle
+// of the same rig open.
+func TestTierSweepReaderAbortedLineForAnotherShaKeepsTheOpenCycle(t *testing.T) {
+	t.Parallel()
+	r, _ := tierSweepTestReader(t,
+		"2026/10/04 14:00:00 tier_sweep: gastown: sweep started a9be03e4 (shell)",
+		"2026/10/04 14:01:00 tier_sweep: gastown: sweep started b7c1d2e3 (shell)",
+		"2026/10/04 14:01:01 "+daemon.TierSweepAbortedLine("gastown", "a9be03e4ffff", "no stage ran"),
+	)
+	ts := r.read(time.Date(2026, 10, 4, 14, 2, 0, 0, time.Local))
+	if ts.Running == nil || ts.Running.Rig != "gastown" {
+		t.Fatalf("running = %+v, want gastown's newer cycle still open", ts.Running)
+	}
+	if open := r.start["gastown"]; open.sha != "b7c1d2e3" {
+		t.Errorf("open start sha = %q, want b7c1d2e3", open.sha)
+	}
+}
