@@ -544,7 +544,7 @@ func (b *Beads) ListAgentBeads() (map[string]*Issue, error) {
 	// (gt-0hmt2).
 	issues, cached := b.issueSnapshot.agentBeads()
 	if !cached {
-		out, err := b.run("list", "--label=gt:agent", "--include-infra", "--json", "--flat", "--no-pager")
+		out, err := b.run("list", "--label=gt:agent", "--include-infra", "--limit=0", "--json", "--flat", "--no-pager")
 		if err != nil {
 			return nil, err
 		}

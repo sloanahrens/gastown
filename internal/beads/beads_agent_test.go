@@ -972,3 +972,34 @@ func TestCreateAgentBead_WritesThroughBDCreateOnly(t *testing.T) {
 		t.Errorf("bd creates = %q, want one create --id=gt-r-polecat-x --labels=gt:agent", creates)
 	}
 }
+
+// TestListAgentBeadsPassesNoLimit: bd list stops at 50 rows unless told
+// otherwise, so ListAgentBeads must ask for all of them or the doctor checks
+// report the agent beads past the page as missing.
+func TestListAgentBeadsPassesNoLimit(t *testing.T) {
+	_, rigBeadsDir, _, logPath := setupDualScopeTown(t,
+		func(rig, _ string) string { return rig })
+
+	bd := NewWithBeadsDir(filepath.Dir(rigBeadsDir), rigBeadsDir).ForAgentBead()
+	if _, err := bd.ListAgentBeads(); err != nil {
+		t.Fatalf("ListAgentBeads: %v", err)
+	}
+
+	logBytes, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("read mock log: %v", err)
+	}
+	sawList := false
+	for _, line := range strings.Split(string(logBytes), "\n") {
+		if !strings.Contains(line, "args=list") || !strings.Contains(line, "--label=gt:agent") {
+			continue
+		}
+		sawList = true
+		if !strings.Contains(line, "--limit=0") {
+			t.Errorf("bd list for gt:agent beads carries no --limit=0: %s", line)
+		}
+	}
+	if !sawList {
+		t.Fatalf("ListAgentBeads never ran bd list --label=gt:agent; log:\n%s", logBytes)
+	}
+}
