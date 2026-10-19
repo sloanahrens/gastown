@@ -56,35 +56,40 @@ func init() {
 	attentionCmd.AddCommand(attentionJevReplayCmd)
 }
 
-// newJevReplayClassifier builds the Jev client; tests replace it.
-var newJevReplayClassifier = func() (jevreplay.Classifier, error) { return jev.NewClient() }
-
 func runAttentionJevReplay(cmd *cobra.Command, _ []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
-	}
-	if !(jevReplayFloor >= 0 && jevReplayFloor <= 1) {
-		return fmt.Errorf("--confidence-floor must be from 0 to 1, not %v", jevReplayFloor)
 	}
 	opts := jevreplay.Options{
 		Floor:               jevReplayFloor,
 		MaxSpendUSD:         jevReplayMaxSpend,
 		USDPerBillionTokens: jevReplayUSDPerBTok,
 	}
+	newClassifier := func() (jevreplay.Classifier, error) { return jev.NewClient() }
+	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	return jevReplayWithFlags(ctx, cmd.OutOrStdout(), townRoot, newClassifier, opts, jevReplayOut)
+}
+
+// jevReplayWithFlags refuses options and an --out path that could spend
+// unbounded or write into the queue, before it builds the Jev client, then
+// replays.
+func jevReplayWithFlags(ctx context.Context, w io.Writer, townRoot string, newClassifier func() (jevreplay.Classifier, error), opts jevreplay.Options, out string) error {
+	if !(opts.Floor >= 0 && opts.Floor <= 1) {
+		return fmt.Errorf("--confidence-floor must be from 0 to 1, not %v", opts.Floor)
+	}
 	if err := opts.Validate(); err != nil {
 		return err
 	}
-	if err := checkJevReplayOut(townRoot, jevReplayOut); err != nil {
+	if err := checkJevReplayOut(townRoot, out); err != nil {
 		return err
 	}
-	c, err := newJevReplayClassifier()
+	c, err := newClassifier()
 	if err != nil {
 		return err
 	}
-	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	return attentionJevReplay(ctx, cmd.OutOrStdout(), townRoot, c, opts, jevReplayOut)
+	return attentionJevReplay(ctx, w, townRoot, c, opts, out)
 }
 
 // attentionJevReplay reads the queue, replays it and prints the report, then

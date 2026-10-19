@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -179,55 +181,47 @@ func TestAttentionJevReplaySpendCapStopsTheRun(t *testing.T) {
 	assert.Contains(t, buf.String(), "Spend: $4.0000 of $5.00 cap")
 }
 
-// runJevReplayCmd runs the real command with its flags set from args.
-func runJevReplayCmd(t *testing.T, town string, args ...string) error {
-	t.Helper()
-	t.Chdir(town)
-	prev := newJevReplayClassifier
-	t.Cleanup(func() { newJevReplayClassifier = prev })
-	newJevReplayClassifier = func() (jevreplay.Classifier, error) {
-		t.Fatal("the client must not be built when the options are refused")
-		return nil, nil
-	}
-	f := attentionJevReplayCmd.Flags()
-	// Put every flag back to its default when the run is over, so the next
-	// call starts clean.
-	defer func() {
-		for _, name := range []string{"out", "max-spend-usd", "confidence-floor", "usd-per-billion-tokens"} {
-			fl := f.Lookup(name)
-			_ = f.Set(name, fl.DefValue)
-			fl.Changed = false
-		}
-	}()
-	for i := 0; i < len(args); i += 2 {
-		require.NoError(t, f.Set(args[i], args[i+1]))
-	}
-	return runAttentionJevReplay(attentionJevReplayCmd, nil)
-}
-
-func TestAttentionJevReplayCommandRefusesOptionsBeforeSpendingAnything(t *testing.T) {
+func TestAttentionJevReplayRefusesOptionsBeforeBuildingTheClient(t *testing.T) {
+	t.Parallel()
 	town := jevReplayTown(t)
 	dir := attention.Dir(town)
 	before := attentionFiles(t, town)
+	good := jevreplay.Options{Floor: 0.7, MaxSpendUSD: 5, USDPerBillionTokens: 42}
+	elsewhere := filepath.Join(t.TempDir(), "report.txt")
 
-	// The price has no default, so leaving it out is refused.
-	err := runJevReplayCmd(t, town)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "price per billion tokens")
-
-	err = runJevReplayCmd(t, town, "usd-per-billion-tokens", "42", "max-spend-usd", "NaN")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "spend cap")
-
-	err = runJevReplayCmd(t, town, "usd-per-billion-tokens", "42", "confidence-floor", "1.5")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "confidence-floor")
-
-	err = runJevReplayCmd(t, town, "usd-per-billion-tokens", "42", "out", filepath.Join(dir, "report.txt"))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "attention directory")
-
+	for name, tc := range map[string]struct {
+		mutate func(*jevreplay.Options)
+		out    string
+		want   string
+	}{
+		"no price (the flag's default)": {func(o *jevreplay.Options) { o.USDPerBillionTokens = 0 }, elsewhere, "price per billion tokens"},
+		"NaN cap":                       {func(o *jevreplay.Options) { o.MaxSpendUSD = math.NaN() }, elsewhere, "spend cap"},
+		"zero cap":                      {func(o *jevreplay.Options) { o.MaxSpendUSD = 0 }, elsewhere, "spend cap"},
+		"floor above one":               {func(o *jevreplay.Options) { o.Floor = 1.5 }, elsewhere, "confidence-floor"},
+		"out under the attention dir":   {func(*jevreplay.Options) {}, filepath.Join(dir, "report.txt"), "attention directory"},
+	} {
+		opts := good
+		tc.mutate(&opts)
+		newClassifier := func() (jevreplay.Classifier, error) {
+			t.Errorf("%s: the client was built though the options were refused", name)
+			return nil, errors.New("not reached")
+		}
+		var buf bytes.Buffer
+		err := jevReplayWithFlags(context.Background(), &buf, town, newClassifier, opts, tc.out)
+		require.Error(t, err, name)
+		assert.Contains(t, err.Error(), tc.want, name)
+		assert.Empty(t, buf.String(), "%s: nothing is printed", name)
+	}
 	assert.Equal(t, before, attentionFiles(t, town))
+	_, err := os.Stat(elsewhere)
+	assert.True(t, os.IsNotExist(err), "no report is written when the options are refused")
+
+	// Good options build the client and replay.
+	c, _ := jevServer(t)
+	var buf bytes.Buffer
+	require.NoError(t, jevReplayWithFlags(context.Background(), &buf, town,
+		func() (jevreplay.Classifier, error) { return c, nil }, good, elsewhere))
+	assert.Contains(t, buf.String(), "TP 2, FP 0, FN 0, TN 2")
 }
 
 func TestAttentionJevReplayRefusesOutUnderTheAttentionDirectory(t *testing.T) {
