@@ -1065,7 +1065,40 @@ func TestPassRecordsTheAgentItsSeatRanOn(t *testing.T) {
 	}
 }
 
-// TestPassCrewLandingAsksNoSeatForAnAgent: a crew landing has no seat, so the
+// TestPassAsksForTheAgentOnlyWhenItLands: a record repair carries the agent
+// its record holds, and a bead whose branch is gone lands nothing, so
+// neither reads the seat's agent bead (gt-4atwn).
+func TestPassAsksForTheAgentOnlyWhenItLands(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		setup func(h *harness)
+	}{
+		{"repair of a landing on the target", func(h *harness) {
+			h.files.recs = []land.LandingRecord{{BeadID: "gt-abc", Rig: "gastown", Branch: branch, Head: "a932cb5a", Target: "main", LandedCommit: "6db29a35"}}
+			h.remote.contains["6db29a35"] = true
+			h.w.startupDone = true
+		}},
+		{"branch missing from origin", func(h *harness) {
+			h.remote.tips = map[string]string{}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			h.seedReady(t, "gt-abc")
+			tc.setup(h)
+			h.w.AgentBeadID = func(polecat string) string {
+				t.Errorf("asked for the agent of %q though nothing lands", polecat)
+				return ""
+			}
+			h.w.Pass(context.Background())
+		})
+	}
+}
+
+// TestPassCrewLandingAsksNoSeatForAnAgent:a crew landing has no seat, so the
 // worker records no agent and never asks an agent bead for one — the crew's
 // own bead is not a polecat seat (gt-mukgk.6).
 func TestPassCrewLandingAsksNoSeatForAnAgent(t *testing.T) {

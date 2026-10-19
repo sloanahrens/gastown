@@ -499,6 +499,7 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 		w.logf("%s: %s moved from the submitted %s to %s; landing the tip", issue.ID, work.Branch, short(work.Head), short(tip))
 	}
 	work.Head = tip
+	work.Agent = w.seatAgent(work.Worker)
 	w.landOne(ctx, work, rep)
 }
 
@@ -521,10 +522,10 @@ func resubmittedAfter(notes, landedCommit string) bool {
 var submittedRE = regexp.MustCompile(`Submitted for landing: (\S+) @ ([0-9a-fA-F]{4,40})(?: onto (\S+))?`)
 
 // resolveWork reads the landing request from the READY TO LAND block, or,
-// failing that, the latest submission comment.
+// failing that, the latest submission comment. It leaves Agent empty: process
+// asks the seat's agent bead only for a request it is about to land.
 func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool) {
 	if work, err := land.WorkFromBead(issue, w.Rig); err == nil {
-		work.Agent = w.seatAgent(work.Worker)
 		return work, true
 	}
 	comments, err := w.Beads.Comments(issue.ID)
@@ -541,9 +542,7 @@ func (w *Worker) resolveWork(issue *beads.Issue) (land.Work, bool) {
 		if target == "" {
 			target = "main"
 		}
-		work := land.Work{BeadID: issue.ID, Rig: w.Rig, Branch: m[1], Head: m[2], Target: target, Worker: polecatFromAssignee(issue.Assignee)}
-		work.Agent = w.seatAgent(work.Worker)
-		return work, true
+		return land.Work{BeadID: issue.ID, Rig: w.Rig, Branch: m[1], Head: m[2], Target: target, Worker: polecatFromAssignee(issue.Assignee)}, true
 	}
 	return land.Work{}, false
 }
