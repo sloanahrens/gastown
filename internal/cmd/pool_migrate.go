@@ -116,7 +116,7 @@ func runPoolMigrate(w io.Writer, townRoot string, dryRun bool, now time.Time) er
 
 	// Plan on copies: the plan converts in place, and the write below plans
 	// again from the patrol document as read.
-	plan, err := planPoolMigrate(townRoot, cloneTree(settings), cloneTree(patrol))
+	plan, err := planPoolMigrate(townRoot, cloneJSONTree(settings), cloneJSONTree(patrol))
 	if err != nil {
 		return err
 	}
@@ -138,8 +138,8 @@ func runPoolMigrate(w io.Writer, townRoot string, dryRun bool, now time.Time) er
 	// which finds the seats in place and removes the keys.
 	wroteSettings := false
 	err = config.UpdateRawJSON(settingsPath, func(tree map[string]any) (bool, error) {
-		before := cloneTree(tree)
-		if _, err := planPoolMigrate(townRoot, tree, cloneTree(patrol)); err != nil {
+		before := cloneJSONTree(tree)
+		if _, err := planPoolMigrate(townRoot, tree, cloneJSONTree(patrol)); err != nil {
 			return false, err
 		}
 		// A plan that only removes keys from the separate patrol file leaves
@@ -459,9 +459,9 @@ func stringOf(v any) string {
 	return strings.TrimSpace(s)
 }
 
-// cloneTree copies a JSON tree, so a plan can change a document without
+// cloneJSONTree copies a JSON tree, so a plan can change a document without
 // changing the one the caller holds. A nil tree stays nil.
-func cloneTree(tree map[string]any) map[string]any {
+func cloneJSONTree(tree map[string]any) map[string]any {
 	if tree == nil {
 		return nil
 	}
