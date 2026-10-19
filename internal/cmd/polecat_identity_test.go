@@ -384,6 +384,104 @@ func (c closeFailsClient) CloseWithReason(reason string, ids ...string) error {
 	return c.Client.CloseWithReason(reason, ids...)
 }
 
+// transferFailsClient fails TransferIfAssignee when the expected assignee
+// matches, so a test can fail exactly the rollback a rename makes after a
+// failed close. refuse reports the claim as no longer held instead of erroring.
+type transferFailsClient struct {
+	beads.Client
+	expected string
+	refuse   bool
+	err      error
+}
+
+func (c transferFailsClient) TransferIfAssignee(id, expected, status, assignee string) (bool, error) {
+	if expected == c.expected {
+		if c.refuse {
+			return false, nil
+		}
+		return false, c.err
+	}
+	return c.Client.TransferIfAssignee(id, expected, status, assignee)
+}
+
+// TestIdentityRenameRestoreFailureLeavesNewIdentityOpen: when the old identity
+// will not close and the hook cannot be rolled back, both failures surface and
+// the new identity stays open, so the name the work is assigned to still has one
+// (gt-fkz54).
+func TestIdentityRenameRestoreFailureLeavesNewIdentityOpen(t *testing.T) {
+	t.Parallel()
+	const (
+		oldAssignee = "gastown/polecats/agate"
+		newAssignee = "gastown/polecats/basalt"
+		oldBeadID   = "gt-gastown-polecat-agate"
+		newBeadID   = "gt-gastown-polecat-basalt"
+		hookBead    = "gt-hook5"
+	)
+	closeSentinel := errors.New("dolt unreachable")
+	restoreSentinel := errors.New("dolt still unreachable")
+
+	tests := []struct {
+		name        string
+		refuse      bool
+		rollbackErr error
+		want        string
+	}{
+		{name: "rollback errors", rollbackErr: restoreSentinel, want: "dolt still unreachable"},
+		{name: "claim no longer held", refuse: true, want: "no longer held"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			db := beadsfake.New(beadsfake.WithPrefix("gt"))
+			db.Seed(beads.Issue{ID: oldBeadID, Title: "Polecat agate in gastown", Status: string(beads.StatusOpen)})
+			db.Seed(beads.Issue{
+				ID: hookBead, Title: "work", Status: string(beads.IssueStatusHooked), Assignee: oldAssignee,
+			})
+			faulty := transferFailsClient{
+				Client:   closeFailsClient{Client: db, id: oldBeadID, err: closeSentinel},
+				expected: newAssignee,
+				refuse:   tt.refuse,
+				err:      tt.rollbackErr,
+			}
+			fields := &beads.AgentFields{RoleType: "polecat", Rig: "gastown", HookBead: hookBead}
+
+			err := renameIdentityBeads(faulty, oldBeadID, newBeadID, "Polecat basalt in gastown",
+				fields, oldAssignee, newAssignee)
+			if !errors.Is(err, closeSentinel) {
+				t.Fatalf("renameIdentityBeads = %v, want the close failure %v", err, closeSentinel)
+			}
+			if tt.rollbackErr != nil && !errors.Is(err, tt.rollbackErr) {
+				t.Errorf("renameIdentityBeads = %v, want the rollback failure %v", err, tt.rollbackErr)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error = %v, want it to say %q", err, tt.want)
+			}
+
+			got, err := db.Show(hookBead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.Assignee != newAssignee {
+				t.Errorf("assignee = %q, want %q: the failed rollback leaves the work on the new name", got.Assignee, newAssignee)
+			}
+			newBead, err := db.Show(newBeadID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if newBead.Status != string(beads.StatusOpen) {
+				t.Errorf("new identity status = %q, want open: its name still holds the hook", newBead.Status)
+			}
+			oldBead, err := db.Show(oldBeadID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if oldBead.Status != string(beads.StatusOpen) {
+				t.Errorf("old identity status = %q, want open: its close is what failed", oldBead.Status)
+			}
+		})
+	}
+}
+
 // TestMoveLiveHookReassignsWorkHeldUnderTheOldName: rename inherits the hook, so
 // the work bead's assignee has to follow the new name. Copying the reference
 // alone left the renamed identity claiming a bead still assigned to the old one
