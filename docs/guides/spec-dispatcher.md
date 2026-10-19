@@ -134,8 +134,8 @@ shaped, report-only bead labeled `scheduled:<name>` and `formula:<formula>`, wit
 the entry's `vars` sorted in a `## Formula vars` section, and does not sling. The
 entry takes no `agent`: the review is an ordinary bead and draws a seat from the
 [seat map](#seats-and-budget) like any other, so deep reviews run on every model
-the town has seats for (gt-mukgk). An `agent` still on a spec entry is ignored
-with one log line, and `gt pool migrate` removes it. The open
+the town has seats for (gt-mukgk). The config load refuses an `agent` on a spec
+entry, and the error names the replacement. The open
 bead is the queue: the entry's skip-open rule holds the next run, and the patrol
 never retires it as stalled however long a full pool keeps it waiting. The bead's
 priority is the entry's `priority` (3 when unset), held at
@@ -173,31 +173,11 @@ that says which models run, how many of each and when. It holds any number of
 agents. Every reader goes through one loader, `config.Seats`, so the dispatcher,
 `gt sling`, the roster and `gt pool show` cannot disagree about it (gt-mukgk).
 
-```json
-"polecat_pool": {
-  "seats": {
-    "claude-sonnet":  {"cap": 3},
-    "claude-haiku":   {"cap": 3, "names": ["kestrel", "merlin"]},
-    "deepseek-flash": {"cap": 3, "closed": "20:00-08:00"}
-  },
-  "max_total": 9,
-  "timezone": "America/Chicago",
-  "min_spawn_gap": "4m",
-  "max_priority": 2
-}
-```
-
-Each key of `seats` is an agent name, and each agent has one seat. The agent's
-command, arguments and environment stay in the `agents` map; the built-in
-presets stand in for a name the town does not define. Every agent runs the
-claude CLI with the town's managed settings and guard hooks, so no seat is less
-guarded than another.
-
-| Seat key | Meaning |
-|---|---|
-| `cap` | live polecats on that agent; 0 closes the seat |
-| `closed` | optional daily window `HH:MM-HH:MM` in `polecat_pool.timezone`; the start is inclusive, the end exclusive, and an end before the start wraps past midnight |
-| `names` | optional polecat names drawn for that seat |
+Each key of `seats` is an agent name, and each agent has one seat; a `cap` of 0
+closes it. The agent's command, arguments and environment stay in the `agents`
+map; the built-in presets stand in for a name the town does not define. Every
+agent runs the claude CLI with the town's managed settings and guard hooks, so
+no seat is less guarded than another.
 
 `polecat_pool.max_total`, when set, caps live polecats across every seat: a
 seat's cap is per agent, so seats each inside their own cap can still run more
@@ -228,8 +208,9 @@ full`, and the bead stays ready for the next tick.
 
 A seat inside its `closed` window stays in the map and still counts the
 polecats it already has, but takes no new spawn. The window repeats daily and is
-read at the tick's clock in `polecat_pool.timezone`, so `20:00-08:00` is open at
-19:59 and 08:00, closed at 20:00 and 07:59. `gt sling` honors the same window.
+read at the tick's clock in `polecat_pool.timezone`. The start is inclusive and
+the end exclusive, and an end before the start wraps past midnight, so
+`20:00-08:00` is open at 19:59 and 08:00, closed at 20:00 and 07:59. `gt sling` honors the same window.
 
 ### Occupancy
 
@@ -253,31 +234,9 @@ bound before a list named it keeps its binding.
 
 ### `gt pool`
 
-Change seats with `gt pool`, not by editing the file.
-
-- `gt pool show` prints one line per agent: live over cap, then `open`,
-  `closed (cap 0)` or `closed until HH:MM`, then the total against
-  `max_total`. A dead-hooked seat is named beside its count.
-- `gt pool set <agent>=<cap>...` changes the listed seats and leaves the rest,
-  `gt pool set claude-haiku=2 deepseek-flash=3`. `--total N` sets `max_total`
-  (0 removes it) and `--remove <agent>` drops a seat. A cap of 0 closes the seat
-  and keeps its window and names. The whole resulting map is validated before
-  anything is written, so an unknown agent or a bad window writes nothing, and
-  the previous file is kept beside it as `<file>.bak-<timestamp>`.
-  `gt pool set-total <n>` is `--total` as a verb.
-- `gt pool migrate [--dry-run]` converts a config that still holds the retired
-  two-seat keys. It reads raw JSON, so it works on a file the loader refuses,
-  checks that the converted files load, backs each up as
-  `<file>.bak-<UTC timestamp>-pool-migrate`, and writes atomically. A second run
-  finds nothing to do, and a seat already in `seats` is never overwritten.
-- The `mix` verb of `gt pool` is retired: it prints the `gt pool set` line that
-  replaces it and exits 2.
-
-The retired keys no longer load, and the error names `gt pool migrate`:
-`polecat_pool.agent`, `max_seats`, `pro_agent`, `pro_max` and `pro_label`; the
-second-seat keys under `daemon.patrols.spec_dispatch`; and
-`role_agents.polecat`. The cutover is one step on a quiet town: land the code,
-`gt pool migrate`, restart the daemon.
+Change seats with `gt pool`, not by editing the file. `gt pool set` validates
+the whole resulting map before it writes, so an unknown agent or a bad window
+writes nothing. `gt pool --help` lists the verbs.
 
 ### Taking effect
 
