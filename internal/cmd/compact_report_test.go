@@ -681,7 +681,8 @@ func TestQueryCompactionReportsRejectsMatchingEventsWithoutUsablePayload(t *test
 
 // TestFindExistingWeeklyRollup: the idempotency check sees closed rollup
 // beads (gt-9t9), treats an overlapping later window as already sent
-// (gt-sqk), and lets a non-overlapping window through.
+// (gt-sqk), and lets a window that only touches the previous one at its end
+// day through, as the run seven days later does (gt-o8skm).
 func TestFindExistingWeeklyRollup(t *testing.T) {
 	t.Parallel()
 	db := beadsfake.New()
@@ -689,6 +690,7 @@ func TestFindExistingWeeklyRollup(t *testing.T) {
 	for _, tc := range []struct{ start, end, want string }{
 		{"2026-09-01", "2026-09-08", "hq-roll"},
 		{"2026-09-02", "2026-09-09", "hq-roll"},
+		{"2026-09-08", "2026-09-15", ""},
 		{"2026-09-16", "2026-09-23", ""},
 	} {
 		id, err := findExistingWeeklyRollup(db, tc.start, tc.end)
