@@ -2127,10 +2127,14 @@ func (g *Git) RemoteDefaultBranch() string {
 	// Try to get from origin/HEAD symbolic ref
 	out, err := g.run("symbolic-ref", "refs/remotes/origin/HEAD")
 	if err == nil && out != "" {
-		// Returns refs/remotes/origin/main -> extract branch name
-		parts := strings.Split(out, "/")
-		if len(parts) > 0 {
-			return parts[len(parts)-1]
+		// Returns refs/remotes/origin/main -> extract branch name. A default
+		// branch name may itself contain slashes (release/1.0): only the
+		// refs/remotes/<remote>/ prefix is stripped, never up to the last
+		// slash.
+		if rest, ok := strings.CutPrefix(out, "refs/remotes/"); ok {
+			if _, branch, found := strings.Cut(rest, "/"); found && branch != "" {
+				return branch
+			}
 		}
 	}
 
@@ -4634,10 +4638,14 @@ func (b sourceBeside) spares(root, path string, changedSources []string) bool {
 // looksGenerated reports whether path, a file under the coverage/ or .cache/
 // directory root, reads as generator output: anything in a .cache, a coverage
 // reporter's report directory or well-known report file (go tool cover -html
-// writes coverage.html), or a compiler's or profiler's data (.profraw, .prof).
-// A bare .html is not listed: report.html or a template may be hand-written.
-// A file under testdata/ is a fixture by Go convention whatever
-// its name, since a coverage package tests against sample lcov.info files.
+// writes coverage.html), a compiler's or profiler's data (.profraw, .prof), or
+// any file ending in .out, the name `go test -coverprofile=` is given whatever
+// the profile is called (unit.out). A bare .html is not listed: report.html or
+// a template may be hand-written, and so may a file named just "out". A file
+// under testdata/ is a fixture by Go convention whatever its name, since a
+// coverage package tests against sample lcov.info files and golden .out files.
+// spares keeps a file HEAD tracks under the root, so a committed expected.out
+// is never reset.
 func looksGenerated(root, path string) bool {
 	if filepath.Base(strings.TrimSuffix(root, "/")) == ".cache" {
 		return true
@@ -4658,7 +4666,10 @@ func looksGenerated(root, path string) bool {
 		return true
 	}
 	switch filepath.Ext(name) {
-	case ".profraw", ".profdata", ".gcda", ".gcno", ".gcov", ".prof", ".pprof", ".lcov":
+	// ".out" covers the name a coverage tool is commonly given even when it
+	// does not end in coverage.out: `go test -coverprofile=pkg/coverage/unit.out`
+	// writes generator output into the tree just the same.
+	case ".out", ".profraw", ".profdata", ".gcda", ".gcno", ".gcov", ".prof", ".pprof", ".lcov":
 		return true
 	}
 	return false

@@ -109,6 +109,49 @@ func TestBlobDiffLines(t *testing.T) {
 	}
 }
 
+// TestBlobDiffLinesTrailingWhitespaceLastLine: the diff is read raw, not
+// through run's TrimSpace. The last changed line of a commit can be whitespace
+// that is part of the line — "foo    " or a line of only spaces — and trimming
+// it yields the wrong map key, or drops the line's content entirely.
+func TestBlobDiffLinesTrailingWhitespaceLastLine(t *testing.T) {
+	t.Parallel()
+	const oldBlob, newBlob = "1111111111111111111111111111111111111111", "2222222222222222222222222222222222222222"
+	for _, tc := range []struct {
+		name      string
+		lastLine  string
+		wantAdded string
+	}{
+		{
+			name:      "trailing spaces",
+			lastLine:  "+foo    ",
+			wantAdded: "foo    ",
+		},
+		{
+			name:      "whitespace-only",
+			lastLine:  "+   ",
+			wantAdded: "   ",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newScripted(map[string]reply{
+				"diff --unified=0 --no-color " + oldBlob + " " + newBlob: ok("diff --git a/f b/f\n" +
+					"index 8ae0569..e1b0675 100644\n--- a/f\n+++ b/f\n@@ -1 +1 @@\n-old\n" + tc.lastLine + "\n"),
+			})
+			added, removed, err := newTestGit(t, s).BlobDiffLines(oldBlob, newBlob)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := map[string]int{tc.wantAdded: 1}; !reflect.DeepEqual(added, want) {
+				t.Fatalf("added = %v, want %v", added, want)
+			}
+			if want := map[string]int{"old": 1}; !reflect.DeepEqual(removed, want) {
+				t.Fatalf("removed = %v, want %v", removed, want)
+			}
+		})
+	}
+}
+
 func TestTreeFileBlobs(t *testing.T) {
 	t.Parallel()
 	s := newScripted(map[string]reply{"ls-tree -r -z --full-tree HEAD": ok(

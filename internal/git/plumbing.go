@@ -194,7 +194,10 @@ func (g *Git) BlobDiffLines(oldBlob, newBlob string) (added, removed map[string]
 	if oldBlob == "" || newBlob == "" {
 		return empty, empty, nil
 	}
-	out, err := g.run("diff", "--unified=0", "--no-color", oldBlob, newBlob)
+	// runOutput, not run: run trims the whole diff, which eats the trailing
+	// whitespace of its last line. A line of only spaces, or one that ends in
+	// spaces, is real content here — it is the map key callers compare.
+	out, err := g.runOutput("diff", "--unified=0", "--no-color", oldBlob, newBlob)
 	if err != nil {
 		return nil, nil, err
 	}

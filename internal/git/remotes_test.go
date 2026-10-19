@@ -31,6 +31,54 @@ func plainRemotes() *scripted {
 	})
 }
 
+// TestRemoteDefaultBranch: the default branch keeps its slashes. origin/HEAD
+// points at refs/remotes/origin/release/1.0 in a repo whose default branch is
+// release/1.0, and splitting the ref on "/" and taking the last segment
+// reports "1.0" — a branch no fetch or push guard can resolve.
+func TestRemoteDefaultBranch(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		replies map[string]reply
+		want    string
+	}{
+		{
+			name:    "slash-free default",
+			replies: map[string]reply{"symbolic-ref refs/remotes/origin/HEAD": ok("refs/remotes/origin/main\n")},
+			want:    "main",
+		},
+		{
+			name:    "slash-named default",
+			replies: map[string]reply{"symbolic-ref refs/remotes/origin/HEAD": ok("refs/remotes/origin/release/1.0\n")},
+			want:    "release/1.0",
+		},
+		{
+			name: "falls back to origin/master",
+			replies: map[string]reply{
+				"symbolic-ref refs/remotes/origin/HEAD": fail(128, ""),
+				"rev-parse --verify origin/master":      ok("abc123\n"),
+			},
+			want: "master",
+		},
+		{
+			name: "falls back to origin/main",
+			replies: map[string]reply{
+				"symbolic-ref refs/remotes/origin/HEAD": fail(128, ""),
+				"rev-parse --verify origin/master":      fail(128, ""),
+				"rev-parse --verify origin/main":        ok("abc123\n"),
+			},
+			want: "main",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := newTestGit(t, newScripted(tc.replies)).RemoteDefaultBranch(); got != tc.want {
+				t.Fatalf("RemoteDefaultBranch = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestForkBackedDefaultPushGuardSplitPushURL(t *testing.T) {
 	t.Parallel()
 	s := splitRemotes()
