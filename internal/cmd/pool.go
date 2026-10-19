@@ -192,6 +192,10 @@ type poolSeatView struct {
 	// default of 1, and 0 the closed pro seat.
 	proAgent  string
 	proMaxSet bool
+	// proOpen is whether specBudgetFromConfig opens the pro seat at all: a
+	// polecat_pool block whose pro_max is above zero. A closed pro seat holds
+	// no agent, even though proAgent is still set.
+	proOpen bool
 	// hookedAgent is the agent the second seat runs, spec_dispatch's default
 	// when hooked_agent is unset. hookedCap is max_hooked; 0 means closed.
 	// preferHooked puts that seat first in the dispatcher's list.
@@ -224,6 +228,7 @@ func poolSeatsOf(ts *config.TownSettings, sd *config.SpecDispatchConfig) poolSea
 		v.poolCap = ts.PolecatPool.MaxSeats
 		v.proAgent = ts.PolecatPool.GetProAgent()
 		v.proMaxSet = ts.PolecatPool.ProMax != nil
+		v.proOpen = ts.PolecatPool.GetProMax() > 0
 		v.totalCap = ts.PolecatPool.GetMaxTotal()
 		v.totalCapSet = ts.PolecatPool.MaxTotal != nil
 	}
@@ -241,11 +246,16 @@ func poolSeatsOf(ts *config.TownSettings, sd *config.SpecDispatchConfig) poolSea
 }
 
 // seatHeldBy names the seat one of the dispatcher's seats came from: the first
-// seat in the dispatcher's own precedence whose agent it is. Every seat
-// specBudgetFromConfig builds comes from one of these three names, so the
-// fallback is unreachable; the pool seat is what an unnamed seat would be.
+// seat in the dispatcher's own precedence whose agent it is. A closed pro seat
+// holds no agent, so a second seat that runs the pro agent is the second seat,
+// not the pro seat. Every seat specBudgetFromConfig builds comes from one of
+// these three names, so the fallback is unreachable; the pool seat is what an
+// unnamed seat would be.
 func (v poolSeatView) seatHeldBy(agent string) poolSeatKey {
 	for _, k := range v.seatPrecedence() {
+		if k == proSeat && !v.proOpen {
+			continue
+		}
 		if v.agentOn(k) == agent {
 			return k
 		}

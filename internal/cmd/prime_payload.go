@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -50,7 +51,12 @@ func renderFormulaChecklist(formulaName string, steps []checklistStep, fullStep 
 			if len(desc) > primeStepBodyMaxChars {
 				cut := strings.LastIndexByte(desc[:primeStepBodyMaxChars], '\n')
 				if cut <= 0 {
+					// No newline to cut at: back up to the start of the rune
+					// the byte limit lands in, so the body stays valid UTF-8.
 					cut = primeStepBodyMaxChars
+					for cut > 0 && !utf8.RuneStart(desc[cut]) {
+						cut--
+					}
 				}
 				sb.WriteString(desc[:cut])
 				fmt.Fprintf(&sb, "\n\n_[prime] step body truncated at %d of %d chars; read it in full with `%s prime --step %d --formula %s`._",

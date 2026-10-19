@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/beads"
@@ -471,6 +472,29 @@ func TestRenderFormulaChecklist_CapsOversizedStepBody(t *testing.T) {
 	}
 	if !strings.Contains(out, "step body truncated") || !strings.Contains(out, "gt prime --step 1 --formula mol-big") {
 		t.Fatalf("truncated body must say so and name the fetch command:\n%s", out[len(out)-400:])
+	}
+}
+
+// A step body with no newline in its first primeStepBodyMaxChars bytes is cut at
+// the byte limit, which can land inside a multi-byte rune. The checklist reaches
+// the agent as text, so it must stay valid UTF-8.
+func TestRenderFormulaChecklistTruncatesOnRuneBoundary(t *testing.T) {
+	t.Parallel()
+	// 2999 ASCII bytes, then 3-byte runes: the first one spans bytes 2999-3001,
+	// so the 3000-byte limit falls inside it.
+	body := strings.Repeat("a", primeStepBodyMaxChars-1) + strings.Repeat("€", 34)
+	if len(body) < 3100 {
+		t.Fatalf("test body is %d bytes, want at least 3100", len(body))
+	}
+	f := &cookedFormula{Steps: []cookedStep{{Title: "Long", Description: body}}}
+
+	out := renderFormulaChecklist("mol-long", f.checklist(), 1)
+
+	if !utf8.ValidString(out) {
+		t.Fatalf("checklist is not valid UTF-8 after truncating a %d-byte body with no newline", len(body))
+	}
+	if !strings.Contains(out, "step body truncated") {
+		t.Errorf("a body over the limit must say it was truncated:\n%s", out[len(out)-300:])
 	}
 }
 
