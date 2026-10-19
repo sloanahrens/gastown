@@ -32,7 +32,9 @@ var attentionJevReplayCmd = &cobra.Command{
 	Hidden: true,
 	Long: `Replay every item the retained attention files describe through the Jev
 triage, oldest first, and print how needs-you compares with a proxy for what a
-human did: an acked item needed them, an item that cleared with no ack did not.
+human did: an acked item is labeled by the disposition its ack recorded (an ack
+with none, from before dispositions, reads as needed-human), and an item that
+cleared with no ack did not need them.
 
 The report gives precision and recall of needs-you, calibration by confidence
 band, how many items the fail-safe rules forced to needs-you, and the spend

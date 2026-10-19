@@ -3,6 +3,7 @@ package jevreplay
 import (
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/attention/jevtriage"
@@ -30,8 +31,14 @@ func proxyTier1(r attention.Record) proxy {
 }
 
 // proxyTier2 adds the ack history: an ack of the item's key made during its
-// life, from the raise to the clear (to now while it stands).
+// life, from the raise to the clear (to now while it stands). An ack that
+// carries a disposition labels the item by it, so fixed-by-overseer and noise
+// read as not needing a human; a line written before dispositions existed
+// keeps the old reading, that an ack means a human was needed.
 func proxyTier2(r attention.Record, history []attention.AckRecord) proxy {
+	if p, ok := dispositionInLife(r, history); ok {
+		return p
+	}
 	return label(r.Acked || ackedInLife(r, history), r)
 }
 
@@ -45,17 +52,38 @@ func label(acked bool, r attention.Record) proxy {
 	return proxyNone
 }
 
+// dispositionInLife labels by the first ack in the item's life that carries a
+// disposition. The two dispositions that are not needed-human share proxyAuto,
+// the "no human was needed" side of the proxy.
+func dispositionInLife(r attention.Record, history []attention.AckRecord) (proxy, bool) {
+	for _, a := range history {
+		if a.Key != r.Key || a.Disposition == "" || !inLife(a.TS, r) {
+			continue
+		}
+		if a.Disposition.NeedsHuman() {
+			return proxyNeedsYou, true
+		}
+		return proxyAuto, true
+	}
+	return proxyNone, false
+}
+
 func ackedInLife(r attention.Record, history []attention.AckRecord) bool {
 	for _, a := range history {
-		if a.Key != r.Key || a.TS.Before(r.FirstSeen) {
-			continue
+		if a.Key == r.Key && inLife(a.TS, r) {
+			return true
 		}
-		if r.ClearedAt != nil && a.TS.After(*r.ClearedAt) {
-			continue
-		}
-		return true
 	}
 	return false
+}
+
+// inLife reports whether at falls in the item's life: from the raise to the
+// clear, or to now while the item stands.
+func inLife(at time.Time, r attention.Record) bool {
+	if at.Before(r.FirstSeen) {
+		return false
+	}
+	return r.ClearedAt == nil || !at.After(*r.ClearedAt)
 }
 
 // nBins is the number of equal confidence bands: wide enough to fill on a
@@ -144,9 +172,11 @@ func ratio(num, den int) *float64 {
 func (r Report) Write(w io.Writer) {
 	p := func(format string, args ...any) { fmt.Fprintf(w, format, args...) }
 	p("Jev replay of the attention queue history\n")
-	p("The labels are a proxy, not a judgment: an acked item counts as needing a human and an item\n")
-	p("that cleared with no ack counts as settled on its own. A human may ack what they could have\n")
-	p("ignored and may let a real problem clear unseen.\n\n")
+	p("The labels are a proxy, not a judgment: an acked item is labeled by its recorded\n")
+	p("disposition, fixed-by-overseer and noise counting as not needing a human, and an ack with\n")
+	p("none (from before dispositions existed) counting as needed-human. An item that cleared\n")
+	p("with no ack counts as settled on its own. A human may ack what they could have ignored\n")
+	p("and may let a real problem clear unseen.\n\n")
 
 	p("Items: %d in the history, %d reached\n", r.Items, r.Reached)
 	switch r.Stopped {

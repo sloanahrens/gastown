@@ -335,12 +335,13 @@ func TestReadRetainedEventsSpansTheRotation(t *testing.T) {
 }
 
 // An ack outlives its item in acks-history.jsonl: the line carries the item's
-// kind and rule, and PruneAcks leaves it alone when the item clears.
+// kind, rule and the disposition the ack gave, and PruneAcks leaves it alone
+// when the item clears.
 func TestAcknowledgeItemHistorySurvivesTheItemClearing(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	it := Item{Key: "esc:hq-1", Kind: KindEscalation}
-	if err := AcknowledgeItem(town, it, reconcileNow); err != nil {
+	if err := AcknowledgeItem(town, it, reconcileNow, DispositionFixedByOverseer); err != nil {
 		t.Fatalf("AcknowledgeItem: %v", err)
 	}
 	if err := PruneAcks(town, State{Updated: reconcileNow}); err != nil {
@@ -357,9 +358,12 @@ func TestAcknowledgeItemHistorySurvivesTheItemClearing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []AckRecord{{TS: reconcileNow, Key: "esc:hq-1", Kind: KindEscalation, Rule: RuleEscalation}}
+	want := []AckRecord{{TS: reconcileNow, Key: "esc:hq-1", Kind: KindEscalation, Rule: RuleEscalation, Disposition: DispositionFixedByOverseer}}
 	if len(got) != 1 || !got[0].TS.Equal(want[0].TS) || got[0].Key != want[0].Key || got[0].Kind != want[0].Kind || got[0].Rule != want[0].Rule {
 		t.Fatalf("history = %+v, want %+v", got, want)
+	}
+	if got[0].Disposition != DispositionFixedByOverseer {
+		t.Errorf("history disposition = %q, want %q", got[0].Disposition, DispositionFixedByOverseer)
 	}
 	raw, err := os.ReadFile(AcksHistoryPath(town))
 	if err != nil {
@@ -369,12 +373,86 @@ func TestAcknowledgeItemHistorySurvivesTheItemClearing(t *testing.T) {
 	if err := json.Unmarshal(raw, &fields); err != nil {
 		t.Fatalf("history line is not JSON: %v\n%s", err, raw)
 	}
-	if len(fields) != 4 {
-		t.Errorf("history line fields = %v, want exactly ts, key, kind, rule", fields)
+	if len(fields) != 5 {
+		t.Errorf("history line fields = %v, want exactly ts, key, kind, rule, disposition", fields)
 	}
-	for _, k := range []string{"ts", "key", "kind", "rule"} {
+	for _, k := range []string{"ts", "key", "kind", "rule", "disposition"} {
 		if _, ok := fields[k]; !ok {
 			t.Errorf("history line lacks %q: %s", k, raw)
+		}
+	}
+}
+
+// A history line written before dispositions existed still reads: the field is
+// absent and the record's disposition is empty.
+func TestReadAcksHistoryReadsLinesWithoutADisposition(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(Dir(town), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"ts":"2026-10-14T10:00:00Z","key":"esc:hq-1","kind":"escalation","rule":"escalation.open"}` + "\n"
+	if err := os.WriteFile(AcksHistoryPath(town), []byte(line), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadAcksHistory(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Key != "esc:hq-1" || got[0].Disposition != "" {
+		t.Fatalf("history = %+v, want the old line with no disposition", got)
+	}
+}
+
+// A new ack must say why: an empty or unknown disposition is refused before
+// anything is written, so no line and no ack land.
+func TestAcknowledgeItemRefusesAMissingOrUnknownDisposition(t *testing.T) {
+	t.Parallel()
+	for _, d := range []Disposition{"", "because", "Needed-Human"} {
+		town := t.TempDir()
+		it := Item{Key: "esc:hq-1", Kind: KindEscalation}
+		if err := AcknowledgeItem(town, it, reconcileNow, d); err == nil {
+			t.Errorf("AcknowledgeItem(disposition %q) = nil, want an error", d)
+		} else if !strings.Contains(err.Error(), string(DispositionNeededHuman)) {
+			t.Errorf("error for %q = %q, want it to name the accepted values", d, err)
+		}
+		acks, err := ReadAcks(town)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(acks.Acks) != 0 {
+			t.Errorf("disposition %q wrote an ack: %+v", d, acks.Acks)
+		}
+		if hist, err := ReadAcksHistory(town); err != nil || len(hist) != 0 {
+			t.Errorf("disposition %q wrote history %+v, %v", d, hist, err)
+		}
+	}
+}
+
+// ParseDisposition accepts exactly the three values, and NeedsHuman counts an
+// empty (pre-disposition) disposition with the old reading.
+func TestParseDisposition(t *testing.T) {
+	t.Parallel()
+	for _, want := range Dispositions() {
+		got, err := ParseDisposition(string(want))
+		if err != nil || got != want {
+			t.Errorf("ParseDisposition(%q) = %q, %v", want, got, err)
+		}
+	}
+	for _, bad := range []string{"", "needed", "noise ", "fixed-by-overseer "} {
+		if got, err := ParseDisposition(bad); err == nil {
+			t.Errorf("ParseDisposition(%q) = %q, want an error", bad, got)
+		}
+	}
+	needs := map[Disposition]bool{
+		DispositionNeededHuman:     true,
+		DispositionFixedByOverseer: false,
+		DispositionNoise:           false,
+		"":                         true,
+	}
+	for d, want := range needs {
+		if got := d.NeedsHuman(); got != want {
+			t.Errorf("%q.NeedsHuman() = %v, want %v", d, got, want)
 		}
 	}
 }
@@ -385,7 +463,7 @@ func TestAcknowledgeItemWritesOneLinePerAck(t *testing.T) {
 	town := t.TempDir()
 	it := Item{Key: "esc:hq-1", Kind: KindEscalation}
 	for range 2 {
-		if err := AcknowledgeItem(town, it, reconcileNow); err != nil {
+		if err := AcknowledgeItem(town, it, reconcileNow, DispositionNeededHuman); err != nil {
 			t.Fatalf("AcknowledgeItem: %v", err)
 		}
 	}
@@ -411,7 +489,7 @@ func TestAcknowledgeItemHistoryRotatesAtTheCap(t *testing.T) {
 	if err := os.WriteFile(AcksHistoryPath(town), []byte(strings.Repeat("\n", EventsMaxBytes)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := AcknowledgeItem(town, Item{Key: "esc:hq-1", Kind: KindEscalation}, reconcileNow); err != nil {
+	if err := AcknowledgeItem(town, Item{Key: "esc:hq-1", Kind: KindEscalation}, reconcileNow, DispositionNeededHuman); err != nil {
 		t.Fatalf("AcknowledgeItem: %v", err)
 	}
 	rotated, err := os.Stat(RotatedAcksHistoryPath(town))
@@ -441,7 +519,7 @@ func TestAcknowledgeItemHistoryFailureKeepsTheAck(t *testing.T) {
 		t.Fatal(err)
 	}
 	it := Item{Key: "esc:hq-1", Kind: KindEscalation}
-	err := AcknowledgeItem(town, it, reconcileNow)
+	err := AcknowledgeItem(town, it, reconcileNow, DispositionNeededHuman)
 	if err == nil {
 		t.Fatal("AcknowledgeItem = nil, want the history write error")
 	}
