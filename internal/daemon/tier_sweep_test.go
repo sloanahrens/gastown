@@ -1291,6 +1291,10 @@ func TestRunTierSweep_DeferredSweepLogsNoDuration(t *testing.T) {
 	if strings.Contains(out, "swept ") || strings.Contains(out, "finished (exit") {
 		t.Errorf("a deferred sweep logged a stage or sweep line; got:\n%s", out)
 	}
+	// The started line is closed, or the dashboard reads the rig as running.
+	if want := TierSweepAbortedLine("gastown", "abc123", "no stage ran"); !strings.Contains(out, want) {
+		t.Errorf("log missing the closing line %q; got:\n%s", want, out)
+	}
 }
 
 // tierSweepCoverageTown writes the files TierSweepCoverageFor reads: a

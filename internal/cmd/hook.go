@@ -678,22 +678,23 @@ func sessionNameToCanonicalAddress(reg *session.PrefixRegistry, sessionName, tar
 }
 
 // isBeadID checks if a string looks like a bead ID.
-// Bead IDs have the format <prefix>-<id> where prefix starts with a
-// lowercase letter and may contain underscores (e.g. gt-abc123,
-// japanese_reader-id3a).
+// Bead IDs have the format <prefix>-<id> where prefix starts with a letter
+// and may contain letters, digits and underscores, the alphabet a rig prefix
+// may use (beadsPrefixRegexp), e.g. gt-abc123, web3-abc, japanese_reader-id3a.
 func isBeadID(s string) bool {
 	dashIdx := strings.Index(s, "-")
 	if dashIdx <= 0 || dashIdx >= len(s)-1 {
 		return false
 	}
 	for i, c := range s[:dashIdx] {
+		isLetter := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 		if i == 0 {
-			if c < 'a' || c > 'z' {
+			if !isLetter {
 				return false
 			}
 			continue
 		}
-		if !((c >= 'a' && c <= 'z') || c == '_') {
+		if !isLetter && !(c >= '0' && c <= '9') && c != '_' {
 			return false
 		}
 	}

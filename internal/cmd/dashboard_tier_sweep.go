@@ -47,6 +47,11 @@ var (
 	// tiers the cycle will run (gt-rntre):
 	// "tier_sweep: gastown: sweep started a9be03e4 (shell, integration, race)".
 	tierSweepStartedRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) tier_sweep: (\S+): sweep started (\S+) \(([^)]*)\)\s*$`)
+	// tierSweepAbortedRe matches the line closing a cycle that started and
+	// ended with no swept line, because no stage ran or the record was not
+	// written:
+	// "tier_sweep: gastown: sweep aborted a9be03e4 (no stage ran)".
+	tierSweepAbortedRe = regexp.MustCompile(`^(\d{4}/\d\d/\d\d \d\d:\d\d:\d\d) tier_sweep: (\S+): sweep aborted (\S+) \(([^)]*)\)\s*$`)
 )
 
 // tierSweepEvent is the newest thing the log said about one rig: a stage that
@@ -172,6 +177,12 @@ func (r *tierSweepReader) parseLogLine(line string) {
 			return
 		}
 		r.start[m[2]] = tierSweepStarted{at: at, tiers: splitTierSweepTiers(m[4])}
+		return
+	}
+	if m := tierSweepAbortedRe.FindStringSubmatch(line); m != nil {
+		// The cycle is over and swept nothing: the rig is idle, not running
+		// until tierSweepStaleAfter expires.
+		delete(r.start, m[2])
 		return
 	}
 	if m := tierSweepSweptRe.FindStringSubmatch(line); m != nil {

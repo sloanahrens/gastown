@@ -220,3 +220,28 @@ func TestHookThenDisplaceReleasesOnlyAfterTheNewHookCommits(t *testing.T) {
 		}
 	})
 }
+
+func TestIsBeadID(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		in   string
+		want bool
+	}{
+		{"gt-abc123", true},
+		{"japanese_reader-id3a", true},
+		{"web3-abc", true},
+		{"Gas-abc1", true},
+		{"nodash", false},
+		{"-abc", false},
+		{"gt-", false},
+		{"3web-abc", false},
+		{"_gt-abc", false},
+		{"g.t-abc", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isBeadID(tt.in); got != tt.want {
+			t.Errorf("isBeadID(%q) = %v, want %v", tt.in, got, tt.want)
+		}
+	}
+}
