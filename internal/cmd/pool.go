@@ -17,22 +17,21 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// gt pool reads and changes the town's two polecat seats: the pool seat
-// (polecat_pool.agent capped by max_seats, in settings/config.json) and the
-// second seat (spec_dispatch hooked_agent capped by max_hooked, in the daemon
-// patrol config: the "daemon" section of settings/config.json on a two-file
-// town, mayor/daemon.json on a five-file one). Each is a cap-per-agent knob a
-// hand edit gets wrong, and max_seats of 0 reads as uncapped to sling and as
-// the dispatcher's default cap, so closing the pool seat means removing its
-// keys rather than writing a zero.
+// gt pool reads and changes the town's polecat seats. The seat map
+// (polecat_pool.seats) is one entry per agent: a cap, an optional daily closed
+// window and optional polecat names (gt-mukgk). gt pool show prints each seat
+// with its occupancy and whether it is open; gt pool set changes only the
+// agents it names and validates the whole resulting map before writing.
 //
-// gt pool set-second sets the second seat's agent and cap together: set takes
-// only the agent a seat already holds, so the second seat's agent was otherwise
-// a hand edit of the patrol config.
+// Until the two-seat keys are retired (gt-mukgk.7), a town with no seat map
+// still runs polecat_pool.agent/max_seats and spec_dispatch's hooked_agent/
+// max_hooked. show prints those seats, and set seeds the map from them so a
+// first set does not drop a running seat. set-second and set-total change the
+// two-seat keys directly; gt pool mix is retired and prints its gt pool set
+// replacement.
 //
-// It also reads and sets the cap beside the seats rather than on one: max_total
-// bounds live polecats across every seat (gt pool set-total). An absent
-// max_total, like a written 0, is no cap.
+// max_total bounds live polecats across every seat. An absent max_total, like a
+// written 0, is no cap.
 
 var poolCmd = &cobra.Command{
 	Use:     "pool",
@@ -43,46 +42,67 @@ var poolCmd = &cobra.Command{
 
 var poolShowCmd = &cobra.Command{
 	Use:   "show",
-	Short: "Print each open polecat seat with its agent and cap",
+	Short: "Print each seat with its cap, occupancy and open or closed state",
 	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, _ []string) error {
 		townRoot, err := workspace.FindFromCwdOrError()
 		if err != nil {
 			return err
 		}
-		return runPoolShow(cmd.OutOrStdout(), townRoot)
+		return runPoolShowAt(cmd.OutOrStdout(), townRoot, time.Now())
 	},
 }
 
+var (
+	poolSetTotalCap int
+	poolSetRemove   []string
+)
+
 var poolSetCmd = &cobra.Command{
-	Use:   "set <agent> <n>",
-	Short: "Set an agent's seat cap; 0 closes the seat",
-	Long: `Set the cap of the seat <agent> holds. n above 0 sets the cap; 0 closes the
-seat. Closing the pool seat removes its keys, because a max_seats of 0 reads as
-uncapped to sling and as the dispatcher's default cap.
+	Use:   "set <agent>=<cap>...",
+	Short: "Set seat caps and the total, leaving the other seats alone",
+	Long: `Set the cap of each named seat in polecat_pool.seats. Every other seat, and
+every key gt pool does not own, keeps its value. A cap of 0 closes the seat but
+keeps its window and names.
 
-<agent> must be the pool agent (polecat_pool.agent) or the second seat's agent
-(spec_dispatch hooked_agent, claude-sonnet when unset; the daemon patrol
-config, which is the "daemon" section of settings/config.json on a two-file
-town and mayor/daemon.json on a five-file one). When the pool has no agent, an
-agent holding neither seat becomes the pool agent. Any other agent is refused.
+gt pool set claude-haiku=2 deepseek-flash=3
+gt pool set claude-haiku=0 --remove old-model --total 8
 
-Both seats take effect at the dispatcher's next tick, which reads them from
-the files on every run: no daemon restart or kickstart is needed.
+The whole resulting map is validated with the seat loader before anything is
+written, so an unknown agent, a name in two seats or a window without a timezone
+fails the run and leaves the file as it was.
+
+--total N sets polecat_pool.max_total, the cap on live polecats across every
+seat; 0 removes the key. --remove <agent> drops that seat from the map and may
+be repeated.
+
+The dispatcher reads the file on every tick, so a change holds from the next
+tick with no daemon restart.
+
+A town whose file has no polecat_pool.seats still runs the two-seat keys. The
+first set seeds the map from the seats the dispatcher is running, so a set on
+one agent does not drop the others (gt-mukgk).
 
 The file is written atomically and the previous copy is kept beside it as
-<file>.bak-<timestamp>. Keys gt pool does not own are left as they are.`,
-	Args: cobra.ExactArgs(2),
+<file>.bak-<timestamp>.`,
+	Args: cobra.ArbitraryArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		n, err := strconv.Atoi(args[1])
-		if err != nil || n < 0 {
-			return fmt.Errorf("cap %q: want a whole number, 0 or more (0 closes the seat)", args[1])
+		changes, err := parsePoolSeatCaps(args)
+		if err != nil {
+			return err
+		}
+		totalSet := cmd.Flags().Changed("total")
+		if totalSet && poolSetTotalCap < 0 {
+			return fmt.Errorf("total %d: want a whole number, 0 or more (0 removes the cap)", poolSetTotalCap)
+		}
+		if len(changes) == 0 && len(poolSetRemove) == 0 && !totalSet {
+			return fmt.Errorf("nothing to change: name <agent>=<cap>, --total N or --remove <agent>")
 		}
 		townRoot, err := workspace.FindFromCwdOrError()
 		if err != nil {
 			return err
 		}
-		return runPoolSet(cmd.OutOrStdout(), townRoot, args[0], n)
+		return runPoolSetSeats(cmd.OutOrStdout(), townRoot, changes, poolSetRemove, poolSetTotalCap, totalSet)
 	},
 }
 
@@ -120,10 +140,10 @@ var poolSetSecondCmd = &cobra.Command{
 	Use:   "set-second <agent> <n>",
 	Short: "Set the second seat's agent and cap together; 0 closes the seat",
 	Long: `Set the second seat's agent (spec_dispatch hooked_agent) and cap (max_hooked)
-in one write. gt pool set only moves the cap of an agent a seat already holds,
-so this is the verb for changing which agent the second seat runs: two
-claude-sonnet seats and two deepseek-flash seats is gt pool set claude-sonnet 2
-for the pool seat and gt pool set-second deepseek-flash 2.
+in one write. gt pool set only moves the cap of a seat in the seat map, so this
+is the verb for changing which agent a town with no seat map runs: two
+claude-sonnet seats and two deepseek-flash seats is gt pool set-second
+deepseek-flash 2 once the seat map replaces the two-seat keys (gt-mukgk).
 
 <agent> must be a known preset: a built-in one, one in the town's
 settings/agents.json, or a custom agent in settings/config.json (gt config agent
@@ -155,6 +175,8 @@ own are left as they are.`,
 }
 
 func init() {
+	poolSetCmd.Flags().IntVar(&poolSetTotalCap, "total", 0, "Cap live polecats across every seat; 0 removes the cap")
+	poolSetCmd.Flags().StringArrayVar(&poolSetRemove, "remove", nil, "Drop this agent's seat from the map; repeat for more")
 	poolCmd.AddCommand(poolShowCmd, poolSetCmd, poolSetSecondCmd, poolSetTotalCmd)
 	rootCmd.AddCommand(poolCmd)
 }
@@ -296,12 +318,344 @@ func loadPoolSpecDispatch(townRoot string) (*config.SpecDispatchConfig, error) {
 	return readSpecDispatchConfig(townRoot)
 }
 
+// poolHasSeatMap reports whether the file uses the seat map. Until the two-seat
+// keys are retired, a file without a map dispatches from those keys instead
+// (specBudgetFor, gt-mukgk).
+func poolHasSeatMap(ts *config.TownSettings) bool {
+	return ts != nil && ts.PolecatPool != nil && len(ts.PolecatPool.Seats) > 0
+}
+
 func runPoolShow(w io.Writer, townRoot string) error {
-	v, err := loadPoolSeats(townRoot)
+	return runPoolShowAt(w, townRoot, time.Now())
+}
+
+// runPoolShowAt is runPoolShow with the clock the closed windows are read at.
+func runPoolShowAt(w io.Writer, townRoot string, now time.Time) error {
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return fmt.Errorf("loading town settings: %w", err)
+	}
+	if poolHasSeatMap(ts) {
+		return runPoolSeatMapShow(w, townRoot, ts, now, poolLiveFor(townRoot))
+	}
+	sd, err := loadPoolSpecDispatch(townRoot)
 	if err != nil {
 		return err
 	}
-	return renderPoolShow(w, townRoot, v, poolLiveFor(townRoot))
+	return renderPoolShow(w, townRoot, poolSeatsOf(ts, sd), poolLiveFor(townRoot))
+}
+
+// poolSeatMapView is polecat_pool.seats as show prints it: the loader's sorted
+// seats, the total cap and the clock a closed window is read at.
+type poolSeatMapView struct {
+	seats    []config.Seat
+	maxTotal *int
+	timezone string
+	now      time.Time
+}
+
+// poolSeatMapOf validates and sorts the file's seat map through config.Seats,
+// with the known-agent check the town's load gate uses, so show cannot print a
+// seat the next town start would refuse (gt-mukgk).
+func poolSeatMapOf(ts *config.TownSettings, now time.Time) (poolSeatMapView, error) {
+	seats, err := config.Seats(ts, config.SeatsKnownTo(ts))
+	if err != nil {
+		return poolSeatMapView{}, fmt.Errorf("reading the seat map: %w", err)
+	}
+	v := poolSeatMapView{seats: seats, now: now}
+	if ts.PolecatPool != nil {
+		v.maxTotal = ts.PolecatPool.MaxTotal
+		v.timezone = ts.PolecatPool.Timezone
+	}
+	return v, nil
+}
+
+// runPoolSeatMapShow is the seat-map page with the occupancy passed in, so a
+// test pins the wording against canned counts (docs/testing.md).
+func runPoolSeatMapShow(w io.Writer, townRoot string, ts *config.TownSettings, now time.Time, live poolShowLive) error {
+	v, err := poolSeatMapOf(ts, now)
+	if err != nil {
+		return err
+	}
+	renderPoolSeatMap(w, townRoot, v, live)
+	return nil
+}
+
+// renderPoolSeatMap prints one line per agent: live over cap, then open or
+// closed with the next opening, and the town's total beneath them.
+func renderPoolSeatMap(w io.Writer, townRoot string, v poolSeatMapView, live poolShowLive) {
+	width := len("total")
+	for _, s := range v.seats {
+		if len(s.Agent) > width {
+			width = len(s.Agent)
+		}
+	}
+	for _, s := range v.seats {
+		fmt.Fprintf(w, "%-*s  %s  %s\n", width, s.Agent, live.seatCount(s.Agent, s.Cap), v.seatState(s))
+	}
+	fmt.Fprintf(w, "%-*s  %s\n", width, "total", live.totalCount(v.maxTotal))
+	keys := "polecat_pool.seats, max_total"
+	if v.timezone != "" {
+		keys += ", timezone " + v.timezone
+	}
+	fmt.Fprintf(w, "read: %s (%s)\n", config.SourcePathRel(townRoot, config.TownSettingsPath(townRoot)), keys)
+}
+
+// seatCount is a seat's occupancy. A picture that could not be read is no
+// count, so the line names the cap alone rather than inventing a zero (gt-bc9b6).
+func (l poolShowLive) seatCount(agent string, cap int) string {
+	if !l.ok {
+		return fmt.Sprintf("cap %d", cap)
+	}
+	return fmt.Sprintf("%d/%d", l.live[agent], cap)
+}
+
+// totalCount is the town's occupancy against max_total, which may be absent.
+func (l poolShowLive) totalCount(max *int) string {
+	cap := 0
+	if max != nil {
+		cap = *max
+	}
+	switch {
+	case l.ok && cap > 0:
+		return fmt.Sprintf("%d/%d", l.total, cap)
+	case l.ok:
+		return fmt.Sprintf("%d live", l.total)
+	case cap > 0:
+		return fmt.Sprintf("cap %d", cap)
+	default:
+		return "no cap"
+	}
+}
+
+// seatState is open, closed by a cap of 0, or closed by the window with the
+// next opening printed so an operator knows when work will move.
+func (v poolSeatMapView) seatState(s config.Seat) string {
+	if s.Cap == 0 {
+		return "closed (cap 0)"
+	}
+	if s.Window != nil && s.Window.Closed(v.now) {
+		return "closed until " + s.Window.OpensAt(v.now).Format("15:04")
+	}
+	return "open"
+}
+
+// poolSeatCap is one <agent>=<cap> pair of gt pool set.
+type poolSeatCap struct {
+	Agent string
+	Cap   int
+}
+
+// parsePoolSeatCaps reads the set arguments. Every argument is a pair, so a
+// mistyped one is refused rather than read as a seat name.
+func parsePoolSeatCaps(args []string) ([]poolSeatCap, error) {
+	out := make([]poolSeatCap, 0, len(args))
+	seen := map[string]bool{}
+	for _, arg := range args {
+		agent, count, ok := strings.Cut(arg, "=")
+		agent = strings.TrimSpace(agent)
+		if !ok || agent == "" {
+			return nil, fmt.Errorf("set %q: want <agent>=<cap>, as in gt pool set claude-haiku=2", arg)
+		}
+		n, err := strconv.Atoi(strings.TrimSpace(count))
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("cap %q: want a whole number, 0 or more (0 closes the seat)", count)
+		}
+		if seen[agent] {
+			return nil, fmt.Errorf("set names %s twice", agent)
+		}
+		seen[agent] = true
+		out = append(out, poolSeatCap{Agent: agent, Cap: n})
+	}
+	return out, nil
+}
+
+// runPoolSetSeats writes the named changes to polecat_pool.seats and
+// max_total. The whole resulting map is validated before the write, so a
+// refusal leaves the file as it was.
+func runPoolSetSeats(w io.Writer, townRoot string, changes []poolSeatCap, remove []string, total int, totalSet bool) error {
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return fmt.Errorf("loading town settings: %w", err)
+	}
+	removing := map[string]bool{}
+	for _, agent := range remove {
+		if agent == "" {
+			return fmt.Errorf("--remove: agent name is empty")
+		}
+		removing[agent] = true
+	}
+	for _, c := range changes {
+		if removing[c.Agent] {
+			return fmt.Errorf("%s is both set and removed", c.Agent)
+		}
+	}
+	needSeats := len(changes) > 0 || len(remove) > 0
+	seats, maxTotal, err := poolSeatMapForSet(townRoot, ts, needSeats)
+	if err != nil {
+		return err
+	}
+	before := copyPoolSeatMap(seats)
+	for _, agent := range remove {
+		if _, ok := seats[agent]; !ok {
+			return fmt.Errorf("%q is not a seat: the seats are %s", agent, poolSeatNames(seats))
+		}
+		delete(seats, agent)
+	}
+	// An empty map hands the town back to the two-seat keys it is about to
+	// replace; a cap of 0 closes the same seat without that detour (gt-mukgk).
+	if len(remove) > 0 && len(seats) == 0 {
+		legacy, err := poolLegacySeatsInForce(townRoot, ts)
+		if err != nil {
+			return err
+		}
+		if legacy {
+			return fmt.Errorf("removing every seat would hand dispatch back to the two-seat keys: set the last seat's cap to 0 instead")
+		}
+	}
+	for _, c := range changes {
+		seat := seats[c.Agent]
+		seat.Cap = c.Cap
+		seats[c.Agent] = seat
+	}
+	if totalSet {
+		if total == 0 {
+			maxTotal = nil
+		} else {
+			n := total
+			maxTotal = &n
+		}
+	}
+	if err := validatePoolSeatMap(ts, seats, maxTotal); err != nil {
+		return err
+	}
+	stamp := time.Now().UTC().Format("20060102T150405Z")
+	err = writeTownSeats(townRoot, stamp, func(ts *config.TownSettings) error {
+		if ts.PolecatPool == nil {
+			ts.PolecatPool = &config.PolecatPool{}
+		}
+		ts.PolecatPool.Seats = seats
+		if totalSet {
+			setMaxTotal(ts, total)
+		}
+		return ts.PolecatPool.Validate()
+	})
+	if err != nil {
+		return fmt.Errorf("writing the seat map: %w", err)
+	}
+	printPoolSeatChanges(w, before, changes, remove, total, totalSet)
+	return nil
+}
+
+// poolSeatMapForSet is the map a set starts from. A file with a map gives it up
+// wholesale. A file without one still runs the two-seat keys, so the first set
+// seeds the map from the seats the dispatcher runs: a set on one agent must not
+// drop the others (gt-mukgk).
+func poolSeatMapForSet(townRoot string, ts *config.TownSettings, needSeats bool) (map[string]config.SeatConfig, *int, error) {
+	var seats map[string]config.SeatConfig
+	var maxTotal *int
+	if ts.PolecatPool != nil {
+		maxTotal = ts.PolecatPool.MaxTotal
+		if len(ts.PolecatPool.Seats) > 0 {
+			seats = copyPoolSeatMap(ts.PolecatPool.Seats)
+		}
+	}
+	if !needSeats || seats != nil {
+		return seats, maxTotal, nil
+	}
+	sd, err := loadPoolSpecDispatch(townRoot)
+	if err != nil {
+		return nil, nil, err
+	}
+	seats = map[string]config.SeatConfig{}
+	for _, s := range specBudgetFromConfig(ts, sd).Seats {
+		seats[s.Agent] = config.SeatConfig{Cap: s.Cap}
+	}
+	return seats, maxTotal, nil
+}
+
+// poolLegacySeatsInForce reports whether the file still runs the two seats the
+// map replaces. It reads the patrol config only when a caller needs the answer,
+// which is the one write that would empty the map.
+func poolLegacySeatsInForce(townRoot string, ts *config.TownSettings) (bool, error) {
+	sd, err := loadPoolSpecDispatch(townRoot)
+	if err != nil {
+		return false, err
+	}
+	return poolLegacySeatsSet(ts, sd), nil
+}
+
+// copyPoolSeatMap copies a seat map, names included, so a plan cannot rewrite
+// the entries the caller loaded.
+func copyPoolSeatMap(in map[string]config.SeatConfig) map[string]config.SeatConfig {
+	out := make(map[string]config.SeatConfig, len(in))
+	for agent, seat := range in {
+		if seat.Names != nil {
+			seat.Names = append([]string(nil), seat.Names...)
+		}
+		out[agent] = seat
+	}
+	return out
+}
+
+// poolLegacySeatsSet reports whether the file still configures the two seats
+// the map replaces.
+func poolLegacySeatsSet(ts *config.TownSettings, sd *config.SpecDispatchConfig) bool {
+	if ts != nil && ts.PolecatPool != nil && ts.PolecatPool.Agent != "" {
+		return true
+	}
+	return sd != nil && (sd.HookedAgent != "" || sd.MaxHooked > 0)
+}
+
+// validatePoolSeatMap runs the resulting map through the dispatcher's loader.
+func validatePoolSeatMap(ts *config.TownSettings, seats map[string]config.SeatConfig, maxTotal *int) error {
+	probe := *ts
+	pool := config.PolecatPool{}
+	if ts.PolecatPool != nil {
+		pool = *ts.PolecatPool
+	}
+	pool.Seats, pool.MaxTotal = seats, maxTotal
+	probe.PolecatPool = &pool
+	if _, err := config.Seats(&probe, config.SeatsKnownTo(&probe)); err != nil {
+		return fmt.Errorf("the seat map this would write is invalid: %w", err)
+	}
+	return nil
+}
+
+// poolSeatNames names a map's seats for a refusal.
+func poolSeatNames(seats map[string]config.SeatConfig) string {
+	names := make([]string, 0, len(seats))
+	for agent := range seats {
+		names = append(names, agent)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return "none"
+	}
+	return strings.Join(names, ", ")
+}
+
+// printPoolSeatChanges reports each write, then when it lands. The dispatcher
+// reads the file every tick, so nothing has to be restarted.
+func printPoolSeatChanges(w io.Writer, before map[string]config.SeatConfig, changes []poolSeatCap, remove []string, total int, totalSet bool) {
+	for _, agent := range remove {
+		fmt.Fprintf(w, "removed %s\n", agent)
+	}
+	for _, c := range changes {
+		if _, existed := before[c.Agent]; existed {
+			fmt.Fprintf(w, "%s: cap %d\n", c.Agent, c.Cap)
+		} else {
+			fmt.Fprintf(w, "%s: cap %d (new seat)\n", c.Agent, c.Cap)
+		}
+	}
+	if totalSet {
+		if total == 0 {
+			fmt.Fprintln(w, "total cap removed (max_total)")
+		} else {
+			fmt.Fprintf(w, "total: cap %d live polecats across every seat\n", total)
+		}
+	}
+	fmt.Fprintln(w, "takes effect at the dispatcher's next tick; no restart is needed")
 }
 
 // renderPoolShow prints one page: each open seat with its agent and cap, the
@@ -436,60 +790,6 @@ func (v poolSeatView) capText(s poolListedSeat) string {
 	}
 }
 
-// poolSeatFor picks the seat a set of agent to n lands on, or the refusal
-// naming the seats. An agent's seat is the one the dispatcher gives its name:
-// the first of the dispatcher's two names it is, which is the seat
-// specBudgetFromConfig's dedup keeps when one name holds both. An agent
-// holding neither opens the pool seat on a cap above 0; closing needs a seat
-// to close.
-func poolSeatFor(v poolSeatView, agent string, n int) (poolSeatKey, error) {
-	for _, k := range v.seatPrecedence() {
-		if v.agentOn(k) == agent {
-			return k, nil
-		}
-	}
-	if v.poolAgent == "" && n > 0 {
-		return poolSeat, nil
-	}
-	pool := "none"
-	if v.poolAgent != "" {
-		pool = v.poolAgent
-	}
-	return 0, fmt.Errorf("%q holds no seat: the pool seat is %s (polecat_pool.agent) and the second seat is %s (spec_dispatch hooked_agent)",
-		agent, pool, v.hookedAgent)
-}
-
-func runPoolSet(w io.Writer, townRoot, agent string, n int) error {
-	if agent == "" {
-		return fmt.Errorf("agent name is empty")
-	}
-	v, err := loadPoolSeats(townRoot)
-	if err != nil {
-		return err
-	}
-	seat, err := poolSeatFor(v, agent, n)
-	if err != nil {
-		return err
-	}
-	stamp := time.Now().UTC().Format("20060102T150405Z")
-	switch seat {
-	case poolSeat:
-		err = writeTownSeats(townRoot, stamp, func(ts *config.TownSettings) error {
-			setPoolSeat(ts, agent, n)
-			return ts.PolecatPool.Validate()
-		})
-	case secondSeat:
-		err = writePatrolSeats(townRoot, stamp, func(pc *config.DaemonPatrolConfig) {
-			setSecondSeat(pc, n)
-		})
-	}
-	if err != nil {
-		return fmt.Errorf("writing the %s: %w", seatName(seat), err)
-	}
-	printSeatChange(w, seat, agent, n)
-	return nil
-}
-
 // printSeatChange reports a seat write and, for the second seat, when it lands.
 // The ticker reads every seat from the files per tick, so the write holds from
 // the next tick it runs and nothing has to be restarted (gt-jdnab).
@@ -597,8 +897,7 @@ func runPoolSetTotal(w io.Writer, townRoot string, n int) error {
 }
 
 // setMaxTotal sets the town's total cap, or removes max_total for 0: an absent
-// key is no cap and a written 0 reads the same, so a zero is never written
-// (the same reason setPoolSeat removes max_seats rather than writing a 0).
+// key is no cap and a written 0 reads the same, so a zero is never written.
 func setMaxTotal(ts *config.TownSettings, n int) {
 	if ts.PolecatPool == nil {
 		if n == 0 {
@@ -629,24 +928,6 @@ func writeTownSeats(townRoot, stamp string, change func(*config.TownSettings) er
 		}
 		return change(ts)
 	}, config.FoldRetiredPoolSeatKeys())
-}
-
-// setPoolSeat opens the pool seat on agent at n, or closes it for n of 0 by
-// removing both keys: a max_seats of 0 reads as uncapped to sling and as the
-// default cap to the dispatcher, so a zero is never written. The write folds
-// the retired spellings of both keys onto them (writeTownSeats), so a file that
-// carried overflow_agent does not keep supplying the seat.
-func setPoolSeat(ts *config.TownSettings, agent string, n int) {
-	if n == 0 {
-		if ts.PolecatPool != nil {
-			ts.PolecatPool.Agent, ts.PolecatPool.MaxSeats = "", 0
-		}
-		return
-	}
-	if ts.PolecatPool == nil {
-		ts.PolecatPool = &config.PolecatPool{}
-	}
-	ts.PolecatPool.Agent, ts.PolecatPool.MaxSeats = agent, n
 }
 
 // writePatrolSeats changes the daemon patrol config under the file's lock,
