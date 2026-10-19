@@ -435,12 +435,11 @@ function seatFacts(m) {
   const out = [];
   for (const sr of m.seat_rows) {
     const key = sr.key || "no config key recorded";
-    if (sr.unknown) { out.push({text: (sr.seat || "seat") + " seat unknown", title: "the config this seat is read from could not be read · " + key}); continue; }
+    if (sr.unknown) { out.push({text: "seats unknown", title: "the seat map could not be read · " + key}); continue; }
     if (sr.closed) continue;
-    const where = "the " + (sr.seat || "unknown") + " seat · " + key;
     out.push({
-      text: (sr.agent || "no agent") + " " + (sr.live == null ? "–" : sr.live) + "/" + sr.cap + (sr.cap_default ? "*" : ""),
-      title: where + (sr.live == null ? " · the polecats have not been read yet" : "") + (sr.cap_default ? " · the cap key is unset, so this is the default the dispatcher holds it to" : ""),
+      text: (sr.agent || "no agent") + " " + (sr.live == null ? "–" : sr.live) + "/" + sr.cap,
+      title: key + (sr.live == null ? " · the polecats have not been read yet" : ""),
     });
   }
   return out;
@@ -597,20 +596,14 @@ function renderModelsPanel(s) {
     t.append(head, ...rows);
     return t;
   };
-  // Each seat is named as gt pool show names it, and a key this page does not
-  // know is shown as the server sent it rather than as some other seat.
-  const seatNames = {pool: "pool seat", second: "second seat"};
-  const capDefaultWhy = {
-    pool: "max_seats is unset: sling leaves the seat uncapped and the dispatcher holds it to ",
-  };
+  // One row per agent in the seat map, in the order gt pool show prints them.
+  // A seat nothing may fill now says why: a cap of 0, or its closed window.
   const seatRows = seats.map(sr => {
     const tr = el("tr");
-    const name = el("td", "", seatNames[sr.seat] || sr.seat); name.title = sr.key; tr.append(name);
-    tr.append(el("td", sr.closed || sr.unknown ? "title" : "", sr.unknown ? "unknown" : sr.closed ? "closed" : sr.agent));
+    const name = el("td", "", sr.unknown ? "unknown" : sr.agent); name.title = sr.key; tr.append(name);
+    tr.append(el("td", sr.closed || sr.unknown ? "title" : "", sr.unknown ? "the seat map could not be read" : sr.state || ""));
     const open = !sr.closed && !sr.unknown;
-    const c = el("td", "n", open ? (sr.live != null ? sr.live : "–") + "/" + sr.cap + (sr.cap_default ? "*" : "") : "");
-    if (sr.cap_default) c.title = (capDefaultWhy[sr.seat] || "the seat's cap is unset and the dispatcher holds it to ") + sr.cap;
-    tr.append(c);
+    tr.append(el("td", "n", open ? (sr.live != null ? sr.live : "–") + "/" + sr.cap : ""));
     return tr;
   });
   const roleRows = roles.map(rr => {
@@ -636,7 +629,7 @@ function renderModelsPanel(s) {
     tr.append(el("td", "", aa.agent), el("td", "n", String(aa.landed)), el("td", "n", String(aa.rejected)));
     return tr;
   });
-  box.append(table([["Seat"], ["Agent"], ["Live / cap", 1]], seatRows), table([["Role"], ["Model"]], roleRows));
+  box.append(table([["Agent"], ["Seat"], ["Live / cap", 1]], seatRows), table([["Role"], ["Model"]], roleRows));
   if (activityRows.length) {
     box.append(table([["Agent"], ["Landed / 24h", 1], ["Rejected / 24h", 1]], activityRows));
   }

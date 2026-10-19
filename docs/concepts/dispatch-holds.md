@@ -49,9 +49,9 @@ any assignee, when it wears `gt:ready-to-land`, `spec-dispatch-failed`,
 label, or when `dispatch.DispatchHoldFields` asserts a hold on its fields — the
 table above, read rather than copied (gt-lxxo4).
 
-`needs-pro` was the retired pro seat's selector (`polecat_pool.pro_label`). With
-the reserved seat gone, nothing lifts the table's hold on it, so a `needs-pro`
-bead is held like any other marker (gt-kr91q).
+`needs-pro` was the retired pro seat's selector. With the reserved seat gone,
+nothing lifts the table's hold on it, so a `needs-pro` bead is held like any
+other marker (gt-kr91q).
 
 The dispatcher also holds a bead whose notes carry a live `READY TO LAND`
 block — one no `LANDING RECORD` and no `MERGE REJECTION` follows (gt-kr5xv).

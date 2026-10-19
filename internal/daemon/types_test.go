@@ -24,7 +24,7 @@ func TestIsPatrolEnabledSpecDispatchOmittedEnabled(t *testing.T) {
 	t.Parallel()
 	for _, text := range []string{
 		`{"patrols":{"spec_dispatch":{"interval":"30s"}}}`,
-		`{"patrols":{"spec_dispatch":{"max_hooked":1}}}`,
+		`{"patrols":{"spec_dispatch":{"max_per_tick":2}}}`,
 		`{"patrols":{"spec_dispatch":{}}}`,
 	} {
 		if !IsPatrolEnabled(decodePatrols(t, text), "spec_dispatch") {

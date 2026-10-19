@@ -135,7 +135,7 @@ func TestSeatsAbsent(t *testing.T) {
 
 	for name, ts := range map[string]*TownSettings{
 		"no pool":  NewTownSettings(),
-		"no seats": {PolecatPool: &PolecatPool{MaxSeats: 2}},
+		"no seats": {PolecatPool: &PolecatPool{MinSpawnGap: "4m"}},
 		"nil town": nil,
 	} {
 		got, err := Seats(ts, func(string) bool { return true })
@@ -242,7 +242,7 @@ func TestSeatsFromSettingsFile(t *testing.T) {
 		t.Parallel()
 		for name, body := range map[string]string{
 			"no pool":  `{"type":"town-settings","version":1}`,
-			"no seats": `{"type":"town-settings","version":1,"polecat_pool":{"agent":"claude-sonnet","max_seats":2}}`,
+			"no seats": `{"type":"town-settings","version":1,"polecat_pool":{"min_spawn_gap":"4m"}}`,
 		} {
 			got, err := Seats(decode(t, body), nil)
 			if err != nil || len(got) != 0 {
@@ -313,7 +313,7 @@ func TestUnrecordedAgent(t *testing.T) {
 		want string
 	}{
 		{"no pool", nil, ""},
-		{"no seat map keeps the pool agent", &PolecatPool{Agent: "claude-sonnet"}, "claude-sonnet"},
+		{"no seats place it on none", &PolecatPool{MinSpawnGap: "4m"}, ""},
 		{"one seat is where it sits", &PolecatPool{Seats: map[string]SeatConfig{"claude-haiku": seat}}, "claude-haiku"},
 		{"several seats place it on none", &PolecatPool{Seats: map[string]SeatConfig{"claude-haiku": seat, "claude-sonnet": seat}}, UnknownSeatAgent},
 	}

@@ -204,10 +204,11 @@ func TestSeatLiveUnreadableRecord(t *testing.T) {
 }
 
 // A pool with no seat map counts GT_AGENT alone and never reads an agent bead:
-// a census that did not need bd before must not fail with it.
+// a census that did not need bd before must not fail with it. Such a pool holds
+// only a total cap.
 func TestSeatLiveNoSeatMapReadsNoBead(t *testing.T) {
 	t.Parallel()
-	settings := `{"type":"town-settings","version":1,"polecat_pool":{"agent":"claude-sonnet","max_seats":2}}`
+	settings := `{"type":"town-settings","version":1,"polecat_pool":{"max_total":2}}`
 	h, _ := seatLiveHost(t, settings, []sessionEnv{
 		{rig: "gastown", name: "ruby", agent: "claude-sonnet"},
 		{rig: "gastown", name: "pearl", agent: "claude-sonnet"},
@@ -222,23 +223,40 @@ func TestSeatLiveNoSeatMapReadsNoBead(t *testing.T) {
 	}
 }
 
-// A restart of a polecat that records no agent launches on the role default, so
-// it answers to that seat's cap: it is not let past a full seat as a polecat on
-// no seat.
-func TestSeatLiveUnrecordedRestartAnswersToTheRoleDefault(t *testing.T) {
+// A restart of a polecat that records no agent answers to the map's only seat:
+// that is the seat the census counts it on, so it is not let past a full seat as
+// a polecat on no seat.
+func TestSeatLiveUnrecordedRestartAnswersToTheOnlySeat(t *testing.T) {
 	t.Parallel()
-	settings := `{"type":"town-settings","version":1,"role_agents":{"polecat":"claude-haiku"},` +
-		`"polecat_pool":{"seats":{"claude-sonnet":{"cap":3},"claude-haiku":{"cap":1}}}}`
+	settings := `{"type":"town-settings","version":1,"polecat_pool":{"seats":{"claude-haiku":{"cap":1}}}}`
 	sessions := []sessionEnv{{rig: "gastown", name: "pearl"}}
 	records := recordedAgents(map[string]string{"gastown/pearl": "claude-haiku"})
 	h, _ := seatLiveHost(t, settings, sessions, records)
 
-	got, err := h.seatCap("gastown", "nova") // no record: restarts on claude-haiku
+	got, err := h.seatCap("gastown", "nova") // no record: restarts on the only seat
 	if err != nil {
 		t.Fatalf("seatCap: %v", err)
 	}
 	want := patrolscan.SeatCap{Live: 1, Limit: 1, Key: "polecat_pool.seats.claude-haiku.cap"}
 	if got != want {
 		t.Fatalf("seatCap = %+v, want %+v", got, want)
+	}
+}
+
+// With several seats a restart that records no agent sits on none, so it is held
+// by no seat's cap: the town's total still bounds it.
+func TestSeatLiveUnrecordedRestartWithSeveralSeatsAnswersToNone(t *testing.T) {
+	t.Parallel()
+	settings := `{"type":"town-settings","version":1,"polecat_pool":{"seats":{"claude-sonnet":{"cap":1},"claude-haiku":{"cap":1}}}}`
+	sessions := []sessionEnv{{rig: "gastown", name: "pearl"}}
+	records := recordedAgents(map[string]string{"gastown/pearl": "claude-haiku"})
+	h, _ := seatLiveHost(t, settings, sessions, records)
+
+	got, err := h.seatCap("gastown", "nova")
+	if err != nil {
+		t.Fatalf("seatCap: %v", err)
+	}
+	if got != (patrolscan.SeatCap{}) {
+		t.Fatalf("seatCap = %+v, want no cap", got)
 	}
 }

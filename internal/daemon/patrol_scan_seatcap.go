@@ -17,11 +17,9 @@ import (
 // the cap a dispatch answers to and hands it to patrolscan, which holds the
 // seat hooked while the town is at it.
 //
-// The cap is read the way the spec dispatcher reads its budget: the pool's own
-// seat (polecat_pool.agent, capped by max_seats) and the town's total across
-// every seat (polecat_pool.max_total). A pool that leaves max_seats unset is
-// uncapped here, as it is to a sling; the dispatcher's defensive default for
-// its own seat is the dispatcher's rule, not a town cap.
+// The cap is read the way the spec dispatcher reads its budget: the seat of the
+// agent the polecat will launch on (polecat_pool.seats.<agent>.cap) and the
+// town's total across every seat (polecat_pool.max_total).
 
 // seatCap implements patrolscan's seat-cap read over the town's settings and
 // its live sessions, for a restart of rig/name. A pool with neither cap set
@@ -39,7 +37,7 @@ func (h *patrolScanHost) seatCap(rig, name string) (patrolscan.SeatCap, error) {
 		return patrolscan.SeatCap{}, fmt.Errorf("reading town settings: %w", err)
 	}
 	pool := ts.PolecatPool
-	if pool == nil || (pool.GetMaxTotal() <= 0 && !pool.SeatsCapped() && len(pool.Seats) == 0) {
+	if pool == nil || (pool.GetMaxTotal() <= 0 && len(pool.Seats) == 0) {
 		return patrolscan.SeatCap{}, nil
 	}
 	byAgent, total, err := h.livePolecatCensus(rig+"/polecats/"+name, pool)
@@ -51,20 +49,16 @@ func (h *patrolScanHost) seatCap(rig, name string) (patrolscan.SeatCap, error) {
 	if totalCap := pool.GetMaxTotal(); totalCap > 0 && total >= totalCap {
 		return patrolscan.SeatCap{Live: total, Limit: totalCap, Key: "polecat_pool.max_total"}, nil
 	}
-	if pool.SeatsCapped() && byAgent[pool.Agent] >= pool.MaxSeats {
-		return patrolscan.SeatCap{Live: byAgent[pool.Agent], Limit: pool.MaxSeats, Key: "polecat_pool.max_seats"}, nil
-	}
 	// The seat map: the restarting polecat answers to the seat it will launch
-	// on, the agent its bead recorded, else the role default a restart starts
-	// a polecat with no record on. Placing it on no seat would let it past a
-	// full one.
+	// on, the agent its bead recorded, else the map's only seat. A map with
+	// several seats and no record places it on none, as the census does.
 	if len(pool.Seats) > 0 {
 		agent, err := h.recordedAgent(rig, name)
 		if err != nil {
 			return patrolscan.SeatCap{}, fmt.Errorf("reading the agent bead of %s/%s: %w", rig, name, err)
 		}
 		if agent == "" {
-			agent = ts.RoleAgents["polecat"]
+			agent = pool.UnrecordedAgent()
 		}
 		if seat, ok := pool.Seats[agent]; ok {
 			key := "polecat_pool.seats." + agent + ".cap"

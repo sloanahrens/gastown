@@ -1,0 +1,43 @@
+{
+  "daemon": {
+    "patrols": {
+      "scheduled_slings": {
+        "enabled": true,
+        "entries": [
+          {
+            "dispatch": "spec",
+            "formula": "mol-deep-review",
+            "interval": "24h",
+            "name": "deep-review-slice",
+            "rig": "gastown"
+          },
+          {
+            "dispatch": "spec",
+            "formula": "mol-deep-review",
+            "interval": "24h",
+            "name": "deep-review-risk",
+            "rig": "gastown"
+          },
+          {
+            "agent": "claude-haiku",
+            "formula": "mol-nightly",
+            "interval": "24h",
+            "name": "nightly",
+            "rig": "gastown"
+          }
+        ]
+      }
+    },
+    "type": "daemon-patrol-config",
+    "version": 1
+  },
+  "polecat_pool": {
+    "seats": {
+      "claude-sonnet": {
+        "cap": 2
+      }
+    }
+  },
+  "type": "town-settings",
+  "version": 1
+}

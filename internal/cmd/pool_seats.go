@@ -115,9 +115,9 @@ func liveSeatKeys(live []poolSession) map[string]bool {
 }
 
 // poolOwnsSeats reports whether the pool names a seat for a sessionless polecat
-// to be counted on: a seat map, or the older pool agent.
+// to be counted on: a seat map.
 func poolOwnsSeats(pool *config.PolecatPool) bool {
-	return pool != nil && (pool.Agent != "" || len(pool.Seats) > 0)
+	return pool != nil && len(pool.Seats) > 0
 }
 
 // polecatIntentSeat is the intent-record key of a polecat seat, built through

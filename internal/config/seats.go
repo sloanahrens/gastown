@@ -166,17 +166,17 @@ func (w *Window) OpensAt(t time.Time) time.Time {
 const UnknownSeatAgent = "(unrecorded)"
 
 // UnrecordedAgent is the agent a polecat that records none is counted on: the
-// seat map's only seat, UnknownSeatAgent when the map has several, and the
-// pool's own agent for a pool with no seat map yet. A count under another
-// agent's name would read as that agent's seat taken (gt-2q283), so the
-// ambiguous case gets a key of its own for the caller to report.
+// seat map's only seat, UnknownSeatAgent when the map has several, and none
+// for a pool with no seats. A count under another agent's name would read as
+// that agent's seat taken (gt-2q283), so the ambiguous case gets a key of its
+// own for the caller to report.
 func (p *PolecatPool) UnrecordedAgent() string {
 	if p == nil {
 		return ""
 	}
 	switch len(p.Seats) {
 	case 0:
-		return p.Agent
+		return ""
 	case 1:
 		for agent := range p.Seats {
 			return agent

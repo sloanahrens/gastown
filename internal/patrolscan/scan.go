@@ -381,8 +381,8 @@ func (w Work) HasLabel(label string) bool {
 type SeatCap struct {
 	// Live is how many polecats are live now.
 	Live int
-	// Limit is the cap they are counted against: polecat_pool.max_seats for
-	// the pool's own seat, or polecat_pool.max_total across every seat. Zero
+	// Limit is the cap they are counted against: the seat's cap for the
+	// agent's own seat, or polecat_pool.max_total across every seat. Zero
 	// is no cap, which is the answer when the pool has none.
 	Limit int
 	// Closed is set for a seat whose cap is 0 (gt pool set <agent>=0): the
@@ -390,8 +390,8 @@ type SeatCap struct {
 	// live. Limit stays 0 there, since zero is also how a pool states no cap.
 	Closed bool
 	// Key names the polecat_pool key Limit came from — the key the operator
-	// raises — so the wait names what holds it: "polecat_pool.max_seats" or
-	// "polecat_pool.max_total". Empty when there is no cap.
+	// raises — so the wait names what holds it: "polecat_pool.seats.<agent>.cap"
+	// or "polecat_pool.max_total". Empty when there is no cap.
 	Key string
 }
 

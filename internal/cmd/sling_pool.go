@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -23,16 +24,12 @@ import (
 
 // Polecat seat pool (gt-md4z, gt-jzr1).
 //
-// polecat_pool caps how many polecats run on the pool's agent (agent) at once:
-// max_seats live sessions, after which a sling is refused rather than spawning
-// an unbounded run of paid sessions (10 polecats on a 3+3 town, spend pace
-// $2.62/h). The pool once also ran a bounded local-model seat (local_agent,
-// max_local) with bead-shape routing between the two; the local model was
-// retired on 2026-09-27 and its seat with it (D4), so the pool's agent seat is
-// its only seat. The keys carried the local seat's names until gt-plk1z, and a
-// settings file still carrying them loads unchanged.
+// polecat_pool.seats caps how many polecats run on each agent at once: a seat's
+// cap of live sessions, after which a sling for that agent is refused rather
+// than spawning an unbounded run of paid sessions (10 polecats on a 3+3 town,
+// spend pace $2.62/h).
 //
-// max_total (gt-bcpj5) is the cap beside that one: live polecats across every
+// max_total (gt-bcpj5) is the cap beside those: live polecats across every
 // seat, so a town whose seats are each inside their own cap has a number that
 // bounds them together.
 
@@ -77,58 +74,114 @@ type poolSession struct {
 	deadHooked bool
 }
 
-// poolSeatCount counts the live polecat sessions sitting on the pool's seat. A
-// nil pool, or one with no agent, has no seat to count.
+// poolSeatCount counts the live polecat sessions sitting on agent's seat. An
+// empty agent has no seat to count.
 //
 // This is the pool's one count of itself, shared by the admission decision
 // (choosePoolAgent) and the idle-seat patrol (gt daemon dispatch-check). The
 // patrol must not count seats its own way: a nudge that named room the next
 // sling would refuse is worse than no nudge, because it spends an agent's
 // attention to produce a refusal (gt-59o9).
-func poolSeatCount(pool *config.PolecatPool, sessions []poolSession) int {
-	if pool == nil || pool.Agent == "" {
+func poolSeatCount(agent string, sessions []poolSession) int {
+	if agent == "" {
 		return 0
 	}
 	n := 0
 	for _, s := range sessions {
-		if s.agent == pool.Agent {
+		if s.agent == agent {
 			n++
 		}
 	}
 	return n
 }
 
-// poolOwnsAgent reports whether requested names the seat the pool controls. An
+// poolSeatOf returns agent's entry in the seat map.
+func poolSeatOf(pool *config.PolecatPool, agent string) (config.SeatConfig, bool) {
+	if pool == nil || agent == "" {
+		return config.SeatConfig{}, false
+	}
+	seat, ok := pool.Seats[agent]
+	return seat, ok
+}
+
+// poolSeatAgents lists the seat map's agents in the loader's order, sorted by
+// name, so every choice made from the map is repeatable.
+func poolSeatAgents(pool *config.PolecatPool) []string {
+	if pool == nil {
+		return nil
+	}
+	agents := make([]string, 0, len(pool.Seats))
+	for agent := range pool.Seats {
+		agents = append(agents, agent)
+	}
+	sort.Strings(agents)
+	return agents
+}
+
+// poolDefaultAgent is the agent a sling that named none runs on: the seat with
+// the most room (its cap less its live polecats), the first by name when
+// several tie. It is "" when no seat has room. A sling that names no agent has
+// no label to honor, so it goes where there is the most room, which spreads the
+// town's polecats over the seats rather than filling one; the dispatcher, which
+// draws at random, never asks (it names the agent it drew).
+func poolDefaultAgent(pool *config.PolecatPool, sessions []poolSession) string {
+	best, bestRoom := "", 0
+	for _, agent := range poolSeatAgents(pool) {
+		room := pool.Seats[agent].Cap - poolSeatCount(agent, sessions)
+		if room > bestRoom {
+			best, bestRoom = agent, room
+		}
+	}
+	return best
+}
+
+// poolOwnsAgent reports whether requested names a seat the pool controls. An
 // empty request has no seat to leave alone, so it is trivially "owned": the
 // pool is free to pick for it. Both choosePoolAgent and the router's own-error
 // fallbacks (a tmux-listing or seat-claim read failure) test this same
 // question — a seat the pool never owned is not the pool's to override on a
 // hiccup any more than it is the pool's to admit (gt-67fj, gt-gcrk).
 func poolOwnsAgent(pool *config.PolecatPool, requested string) bool {
-	return requested == "" || requested == pool.Agent
+	if requested == "" {
+		return true
+	}
+	_, ok := poolSeatOf(pool, requested)
+	return ok
+}
+
+// poolSeatCapKey is the polecat_pool key that caps agent's seat, which a
+// refusal names so the operator raises the number that held the sling.
+func poolSeatCapKey(agent string) string {
+	return "polecat_pool.seats." + agent + ".cap"
 }
 
 // choosePoolAgent decides the agent for a new polecat given the pool, the agent
 // the caller asked for, and the live polecat sessions. It is pure. It returns
 // "" with an empty reason when the pool has no opinion, so the caller keeps the
-// agent it asked for (or role_agents when it asked for none), and refused when
-// the seat is at its cap, so the caller stops the sling instead of spawning
-// past it.
+// agent it asked for (or the town's default agent when it asked for none), and
+// refused when the seat is at its cap, so the caller stops the sling instead of
+// spawning past it.
 //
 // requested is the agent named on the command line (--agent), including any
-// agent recorded at sling time. An agent the pool does not own leaves
-// it nothing to admit, and the request stands untouched (gt-4lbz). A request
-// for the pool's own agent is admitted by the seat's cap like any other sling.
+// agent recorded at sling time. An agent with no seat leaves the pool nothing
+// to admit, and the request stands untouched (gt-4lbz). A request for an agent
+// with a seat is admitted by that seat's cap like any other sling; a cap of 0
+// is a closed seat and refuses. A request that names none goes to the seat with
+// the most room (poolDefaultAgent), and is refused when no seat has any.
 //
-// raise names the polecat_pool key whose cap refused the sling — max_seats for
-// a seat, max_total for the town's total — so the refusal can say what to raise
-// rather than pointing at a key that would not move. It is empty unless the
-// sling was refused.
+// raise names the polecat_pool key whose cap refused the sling — the seat's cap
+// for a seat, max_total for the town's total — so the refusal can say what to
+// raise rather than pointing at a key that would not move. It is empty unless
+// the sling was refused.
 //
-// A request the pool does not own still answers to the town's total: max_seats
-// is the pool's own seat's, so another agent's request is none of the pool's
-// business, but max_total is a cap on the town, and a request for any agent
-// adds one of the polecats it bounds (gt-bcpj5).
+// A request for an agent with no seat still answers to the town's total: a
+// seat's cap is that agent's alone, so another agent's request is none of the
+// pool's business, but max_total is a cap on the town, and a request for any
+// agent adds one of the polecats it bounds (gt-bcpj5).
+//
+// A seat's closed window is the dispatcher's: it keeps the spec dispatcher from
+// spawning on that seat. A sling is an operator or a script naming an agent,
+// and it is admitted by the cap alone.
 func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []poolSession) (agent, reason string, refused bool, raise string) {
 	if pool == nil {
 		return "", "pool: no polecat pool configured", false, ""
@@ -138,45 +191,61 @@ func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []pool
 		return agent, fmt.Sprintf("pool: total full (%d/%d across every seat) -> no seat for %s", len(sessions), total, agent), true, "polecat_pool.max_total"
 	}
 	switch {
-	case pool.Agent == "":
-		return "", "pool: polecat_pool has no agent; using the role default", false, ""
+	case len(pool.Seats) == 0:
+		return "", "pool: polecat_pool has no seats; using the default agent", false, ""
 	case !poolOwnsAgent(pool, requested):
 		return "", "", false, ""
 	}
-	n := poolSeatCount(pool, sessions)
-	if !pool.SeatsCapped() {
-		return pool.Agent, fmt.Sprintf("pool: seat %d (uncapped) -> %s", n+1, pool.Agent), false, ""
+	agent = requested
+	if agent == "" {
+		if agent = poolDefaultAgent(pool, sessions); agent == "" {
+			if len(pool.Seats) != 1 {
+				return "", "pool: every seat is full or closed -> no seat for a sling that named no agent", true, "polecat_pool.seats"
+			}
+			// The only seat's own refusal names its count, any dead-hooked
+			// seat in it, and the cap to raise.
+			for only := range pool.Seats {
+				agent = only
+			}
+		}
 	}
-	if n >= pool.MaxSeats {
-		return pool.Agent, fmt.Sprintf("pool: full (%d/%d%s) -> no seat for %s", n, pool.MaxSeats, deadHookedNote(pool, sessions), pool.Agent), true, "polecat_pool.max_seats"
+	seat := pool.Seats[agent]
+	n := poolSeatCount(agent, sessions)
+	if seat.Cap <= 0 {
+		return agent, fmt.Sprintf("pool: closed (cap 0) -> no seat for %s", agent), true, poolSeatCapKey(agent)
 	}
-	return pool.Agent, fmt.Sprintf("pool: seat %d/%d -> %s", n+1, pool.MaxSeats, pool.Agent), false, ""
+	if n >= seat.Cap {
+		return agent, fmt.Sprintf("pool: full (%d/%d%s) -> no seat for %s", n, seat.Cap, deadHookedNote(agent, sessions), agent), true, poolSeatCapKey(agent)
+	}
+	return agent, fmt.Sprintf("pool: seat %d/%d -> %s", n+1, seat.Cap, agent), false, ""
 }
 
 // poolRefusalAgent names the agent a refusal is about: the one the caller asked
-// for when it asked for one, else the pool's own agent, else the role default a
-// request-less sling would run. It is only ever printed — a refusal stops the
-// sling, so the caller takes no agent from it — and it names the request
-// because the total gives no seat to point at instead.
+// for when it asked for one, else the only seat's agent, which a request-less
+// sling on a one-seat pool runs, else the default agent. It is only ever
+// printed — a refusal stops the sling, so the caller takes no agent from it —
+// and it names the request because the total gives no seat to point at instead.
 func poolRefusalAgent(pool *config.PolecatPool, requested string) string {
 	if requested != "" {
 		return requested
 	}
-	if pool.Agent != "" {
-		return pool.Agent
+	if len(pool.Seats) == 1 {
+		for only := range pool.Seats {
+			return only
+		}
 	}
-	return "the role default"
+	return "the default agent"
 }
 
-// deadHookedNote names the dead-hooked seats inside the pool's live count, so a
+// deadHookedNote names the dead-hooked seats inside an agent's live count, so a
 // full-seat refusal says when a crashed seat waiting for its supervised restart
 // is what filled it: the operator otherwise sees "3/3" with fewer than three
 // live sessions and no reason (gt-tldj4). Empty when no dead-hooked seat holds
 // a seat, so the common refusal keeps its wording.
-func deadHookedNote(pool *config.PolecatPool, sessions []poolSession) string {
+func deadHookedNote(agent string, sessions []poolSession) string {
 	n := 0
 	for _, s := range sessions {
-		if s.deadHooked && s.agent == pool.Agent {
+		if s.deadHooked && s.agent == agent {
 			n++
 		}
 	}
@@ -762,16 +831,16 @@ func (l *poolSeatLedger) begin(live bool, occupied func() ([]poolSession, error)
 // capped. A cap nothing claims is the gt-eoi9 race again.
 //
 // A seat is what a claim can hold, so a route the town's total admitted on an
-// agent the pool does not own is not claimed: the claim set is the pool's own
-// seat's, and a claim on that seat would count one polecat where the other
-// agent runs another (gt-bcpj5). Two such slings racing the total can both
-// read the last polecat and admit, the same window the seat cap closes with a
-// claim, and neither more nor less.
+// agent with no seat is not claimed: a claim is counted on a seat's agent, and
+// one for an agent with none would count one polecat where another agent runs
+// another (gt-bcpj5). Two such slings racing the total can both read the last
+// polecat and admit, the same window the seat cap closes with a claim, and
+// neither more nor less.
 func (d *poolSeatDecision) claimFor(agent string, pool *config.PolecatPool, beadID string) {
 	if d.unlock == nil || pool == nil {
 		return
 	}
-	if agent != pool.Agent || !pool.SeatsCapped() {
+	if seat, ok := poolSeatOf(pool, agent); !ok || seat.Cap <= 0 {
 		return
 	}
 	claim, err := d.ledger.write(agent, beadID)
@@ -1040,37 +1109,43 @@ var errPoolBackpressure = errors.New("polecat pool backpressure")
 // automated path that carries --force for the safety guards it also needs opens
 // the cap with that same flag, so a cap that --force opens is a cap no
 // automated path is actually held by: that is the spawn (a 4th flash session
-// with max_seats 3) this guard exists to stop. Capacity is a property of
-// the town, so it is raised where it is declared — polecat_pool.max_seats, or
-// polecat_pool.max_total when the town's total is what held it — which the pool
-// reads on every sling.
+// on a seat capped at 3) this guard exists to stop. Capacity is a property of
+// the town, so it is raised where it is declared — the seat's cap in
+// polecat_pool.seats, or polecat_pool.max_total when the town's total is what
+// held it — which the pool reads on every sling.
 type poolBackpressureError struct {
 	Reason string
-	// Raise is the polecat_pool key the operator raises to spawn: max_seats for
-	// a seat, max_total for the town's total. Empty is max_seats, the seat cap
-	// every refusal without a total was.
+	// Raise is the polecat_pool key the operator raises to spawn: a seat's cap
+	// or max_total for the town's total. Empty is the seat map, the place a
+	// seat cap is declared.
 	Raise string
 }
 
 func (e *poolBackpressureError) Error() string {
 	raise := e.Raise
 	if raise == "" {
-		raise = "polecat_pool.max_seats"
+		raise = "polecat_pool.seats"
 	}
 	return dispatch.SlingRefusalMarker + " " + e.Reason + "; raise " + raise + " to spawn"
 }
 
 func (e *poolBackpressureError) Unwrap() error { return errPoolBackpressure }
 
-// poolUncountedFallback names the agent a decision falls back to when it cannot
-// count something it decides from: the pool's agent, or the role default when
-// the pool has none, which the caller resolves. The reason line names whichever
-// it was, so a fallback never reads as a deliberate route.
-func poolUncountedFallback(pool *config.PolecatPool) string {
-	if pool.Agent != "" {
-		return pool.Agent
+// poolUncountedFallback is the agent a decision falls back to when it cannot
+// count something it decides from: the one the caller asked for, else the first
+// seat by name that is open (a cap above 0), else none, which leaves the
+// caller's own default agent to run. The reason line names whichever it was, so
+// a fallback never reads as a deliberate route.
+func poolUncountedFallback(pool *config.PolecatPool, requested string) (agent, name string) {
+	if requested != "" {
+		return requested, requested
 	}
-	return "the role default"
+	for _, a := range poolSeatAgents(pool) {
+		if pool.Seats[a].Cap > 0 {
+			return a, a
+		}
+	}
+	return "", "the default agent"
 }
 
 // route decides the route. live distinguishes a sling that will spawn from a
@@ -1111,17 +1186,18 @@ func (r *poolRouter) route(requested string, live bool) (agent, reason string, e
 		// on a tmux hiccup — and the reason names the read that failed rather
 		// than passing an unknown count off as a clean one (gt-t8q5, gt-67fj).
 		// No seat is claimed on either path.
+		fallback, named := poolUncountedFallback(pool, requested)
 		var oe *poolOccupancyError
 		if errors.As(seatErr, &oe) {
 			what := "count seats"
 			if oe.sessions {
 				what = "list sessions"
 			}
-			return pool.Agent,
-				"pool: cannot " + what + " (" + seatErr.Error() + "), using " + poolUncountedFallback(pool), nil
+			return fallback,
+				"pool: cannot " + what + " (" + seatErr.Error() + "), using " + named, nil
 		}
-		return pool.Agent,
-			"pool: cannot read seat claims (" + seatErr.Error() + "), using " + poolUncountedFallback(pool), nil
+		return fallback,
+			"pool: cannot read seat claims (" + seatErr.Error() + "), using " + named, nil
 	}
 	agent, reason, refused, raise := choosePoolAgent(pool, requested, sessions)
 	if live && !refused {

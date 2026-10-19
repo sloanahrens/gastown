@@ -11,16 +11,18 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 )
 
-// specSeatPool is a settings file block opening the pool seat on agent at cap.
+// specSeatPool is a settings file block opening one seat on agent at cap.
 func specSeatPool(agent string, cap int) string {
-	return fmt.Sprintf(`"polecat_pool": {"agent": %q, "max_seats": %d}`, agent, cap)
+	return fmt.Sprintf(`"polecat_pool": {"seats": {%q: {"cap": %d}}}`, agent, cap)
 }
 
-// specSeatSecond is a settings file block putting the second seat on agent at
-// cap, in the "daemon" section the two-file layout keeps the patrol document in.
-func specSeatSecond(agent string, cap int) string {
-	return fmt.Sprintf(`"daemon": {"type": "daemon-patrol-config", "version": 1, "patrols": {"spec_dispatch": {"enabled": true, "hooked_agent": %q, "max_hooked": %d}}}`,
-		agent, cap)
+// specSeatPools is a settings file block opening a seat per agent=cap pair.
+func specSeatPools(seats map[string]int) string {
+	var parts []string
+	for agent, cap := range seats {
+		parts = append(parts, fmt.Sprintf(`%q: {"cap": %d}`, agent, cap))
+	}
+	return `"polecat_pool": {"seats": {` + strings.Join(parts, ", ") + `}}`
 }
 
 // writeSpecSeatTown writes the town's whole settings/config.json from the
@@ -87,7 +89,7 @@ func TestTriggerSpecDispatchAnnouncesASeatChangeAndTicksOnIt(t *testing.T) {
 	if !specSeatTick(d) {
 		t.Fatal("the first tick did not start")
 	}
-	if n := countContaining(lines(), "spec_dispatch: seats now pool_agent=claude-sonnet max_seats=2"); n != 1 {
+	if n := countContaining(lines(), "spec_dispatch: seats now claude-sonnet=2"); n != 1 {
 		t.Errorf("first-tick seat line = %d, want one naming the mix it ran with:\n%s", n, strings.Join(lines(), "\n"))
 	}
 
@@ -99,13 +101,13 @@ func TestTriggerSpecDispatchAnnouncesASeatChangeAndTicksOnIt(t *testing.T) {
 		t.Errorf("seat lines = %d, want the one the first tick logged:\n%s", n, strings.Join(lines(), "\n"))
 	}
 
-	// The operator moves the second seat onto deepseek-flash: the next tick
-	// runs with it and says so, once.
-	writeSpecSeatTown(t, root, specSeatPool("claude-sonnet", 2), specSeatSecond("deepseek-flash", 2))
+	// The operator opens a seat on deepseek-flash: the next tick runs with it
+	// and says so, once.
+	writeSpecSeatTown(t, root, specSeatPools(map[string]int{"claude-sonnet": 2, "deepseek-flash": 2}))
 	if !specSeatTick(d) || !specSeatTick(d) {
 		t.Fatal("the ticker did not tick after the seat change")
 	}
-	if n := countContaining(lines(), "spec_dispatch: seats now", "hooked_agent=deepseek-flash", "max_hooked=2"); n != 1 {
+	if n := countContaining(lines(), "spec_dispatch: seats now", "claude-sonnet=2 deepseek-flash=2"); n != 1 {
 		t.Errorf("seat-change lines = %d, want one for the new mix:\n%s", n, strings.Join(lines(), "\n"))
 	}
 	if calls := fake.argvs("spec", "dispatch"); len(calls) != 5 {
@@ -146,7 +148,7 @@ func TestTriggerSpecDispatchParksOnASeatFileThatDoesNotParse(t *testing.T) {
 		t.Fatal("the first tick did not start")
 	}
 
-	writeSpecSeatBody(t, root, `{"type": "town-settings", "version": 1, "polecat_pool": {"agent": "claude-sonnet", "max_seats":`)
+	writeSpecSeatBody(t, root, `{"type": "town-settings", "version": 1, "polecat_pool": {"seats":`)
 	for i := 0; i < 3; i++ {
 		if specSeatTick(d) {
 			t.Fatal("the ticker ticked on a seat file that does not parse")
@@ -211,7 +213,7 @@ func TestSpecSeatTrackerRetriesAReadThatFailed(t *testing.T) {
 	// One byte moved turns the body into one that does not parse without
 	// changing its size, so the good body can be put back under a stamp the
 	// failed read already saw.
-	broken := strings.Replace(good, `"max_seats":`, `"max_seats",`, 1)
+	broken := strings.Replace(good, `"cap":`, `"cap",`, 1)
 	if broken == good || len(broken) != len(good) {
 		t.Fatalf("broken body = %q, want the good one with one byte moved", broken)
 	}
@@ -233,7 +235,7 @@ func TestSpecSeatTrackerRetriesAReadThatFailed(t *testing.T) {
 		t.Fatal(err)
 	}
 	picture, err := tr.read(root)
-	if err != nil || picture != "pool_agent=claude-sonnet max_seats=2" {
+	if err != nil || picture != "claude-sonnet=2" {
 		t.Errorf("read after the file parsed again = %q, %v, want the seat picture", picture, err)
 	}
 }
@@ -266,7 +268,7 @@ func TestSpecSeatTrackerReadsOnlyWhenAFileMoved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first != "pool_agent=claude-sonnet max_seats=2" {
+	if first != "claude-sonnet=2" {
 		t.Fatalf("picture = %q", first)
 	}
 
@@ -287,36 +289,63 @@ func TestSpecSeatTrackerReadsOnlyWhenAFileMoved(t *testing.T) {
 
 	// Moving the stamp reads the file again.
 	writeSpecSeatTown(t, root, specSeatPool("claude-sonnet", 40))
-	if got, err := tr.read(root); err != nil || !strings.Contains(got, "max_seats=40") {
+	if got, err := tr.read(root); err != nil || !strings.Contains(got, "claude-sonnet=40") {
 		t.Errorf("read after the file moved = %q, %v, want the new cap", got, err)
 	}
 }
 
-// The picture names the seat keys the files set, in the order the dispatcher
-// reads them, and leaves out a key written as its zero — a closed seat reads as
-// the key going away (gt-jdnab).
-func TestSpecSeatPictureNamesTheKeysTheFilesSet(t *testing.T) {
+// The picture names the seat map in the loader's order, sorted by agent, with a
+// closed window beside its seat, and the total cap last. A seat with a cap of 0
+// is a closed seat and renders as one; max_total is a pointer, so its 0 is the
+// cap explicitly removed and renders (gt-jdnab, gt-mukgk).
+func TestSpecSeatPictureNamesTheSeatMap(t *testing.T) {
 	t.Parallel()
-	four := 4
+	four, zero := 4, 0
 	for _, tc := range []struct {
 		name string
 		pool *config.PolecatPool
-		sd   *config.SpecDispatchConfig
 		want string
 	}{
-		{"no blocks at all", nil, nil, ""},
-		{"the pool seat", &config.PolecatPool{Agent: "claude-sonnet", MaxSeats: 2}, nil, "pool_agent=claude-sonnet max_seats=2"},
-		{"a pool seat closed by removing max_seats", &config.PolecatPool{Agent: "claude-sonnet"}, nil, "pool_agent=claude-sonnet"},
-		{"the second seat", nil, &config.SpecDispatchConfig{HookedAgent: "deepseek-flash", MaxHooked: 2}, "hooked_agent=deepseek-flash max_hooked=2"},
-		{"a second seat closed by max_hooked 0", nil, &config.SpecDispatchConfig{HookedAgent: "deepseek-flash"}, "hooked_agent=deepseek-flash"},
-		{"the hooked seat preferred", nil, &config.SpecDispatchConfig{PreferHooked: true}, "prefer_hooked=true"},
-		{"a total cap", &config.PolecatPool{MaxTotal: &four}, nil, "max_total=4"},
+		{"no pool at all", nil, ""},
+		{"a pool with no seats", &config.PolecatPool{MinSpawnGap: "4m"}, ""},
+		{"one seat", &config.PolecatPool{Seats: map[string]config.SeatConfig{"claude-sonnet": {Cap: 2}}}, "claude-sonnet=2"},
+		{"seats are sorted by agent", &config.PolecatPool{Seats: map[string]config.SeatConfig{
+			"deepseek-flash": {Cap: 3}, "claude-haiku": {Cap: 1}, "claude-sonnet": {Cap: 2},
+		}}, "claude-haiku=1 claude-sonnet=2 deepseek-flash=3"},
+		{"a seat closed by its cap", &config.PolecatPool{Seats: map[string]config.SeatConfig{"claude-sonnet": {Cap: 0}}}, "claude-sonnet=0"},
+		{"a closed window", &config.PolecatPool{Seats: map[string]config.SeatConfig{
+			"deepseek-flash": {Cap: 3, Closed: "20:00-08:00"},
+		}}, "deepseek-flash=3(closed 20:00-08:00)"},
+		{"a total cap", &config.PolecatPool{MaxTotal: &four}, "max_total=4"},
+		{"a total cap removed", &config.PolecatPool{MaxTotal: &zero}, "max_total=0"},
+		{"seats then the total", &config.PolecatPool{
+			Seats: map[string]config.SeatConfig{"claude-sonnet": {Cap: 2}}, MaxTotal: &four,
+		}, "claude-sonnet=2 max_total=4"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := specSeatPicture(tc.pool, tc.sd); got != tc.want {
-				t.Errorf("specSeatPicture(%+v, %+v) = %q, want %q", tc.pool, tc.sd, got, tc.want)
+			if got := specSeatPicture(tc.pool); got != tc.want {
+				t.Errorf("specSeatPicture(%+v) = %q, want %q", tc.pool, got, tc.want)
 			}
 		})
+	}
+}
+
+// A settings file that still holds a retired seat key parks the ticker with the
+// pointer to the migration, rather than ticking on seats the dispatcher no
+// longer reads (gt-mukgk).
+func TestTriggerSpecDispatchParksOnARetiredSeatKey(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	writeSpecSeatTown(t, root, `"polecat_pool": {"agent": "claude-sonnet", "max_seats": 2}`)
+	d, fake, lines := specSeatDaemon(t, root)
+	if specSeatTick(d) {
+		t.Fatal("the ticker ticked on a file holding polecat_pool.agent")
+	}
+	if calls := fake.argvs("spec", "dispatch"); len(calls) != 0 {
+		t.Errorf("tick calls = %d, want none (%v)", len(calls), calls)
+	}
+	if n := countContaining(lines(), "spec_dispatch: not ticking:", "polecat_pool.agent was replaced by", "gt pool migrate"); n != 1 {
+		t.Errorf("park lines = %d, want one naming the replacement and the migration:\n%s", n, strings.Join(lines(), "\n"))
 	}
 }

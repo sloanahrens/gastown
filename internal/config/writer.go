@@ -36,40 +36,11 @@ func WriteConfigJSON[T any](path string, v *T, perm os.FileMode) error {
 	})
 }
 
-// WriteOption adjusts how a config write treats the file it rewrites.
-type WriteOption func(*writeOptions)
-
-// writeOptions is what a write's options collect.
-type writeOptions struct {
-	foldRetiredSeatKeys bool
-}
-
-// FoldRetiredPoolSeatKeys is the write option for a change to the pool seat: it
-// rewrites the retired polecat_pool spellings in the file, overflow_agent and
-// max_overflow, onto the current keys holding the value each folded into
-// (types.go retiredPoolSeatKeys). The loader folds a retired spelling into the
-// current key on every read, so one left behind keeps supplying the seat after
-// the write (gt-aq7zo). A write without the option leaves it as the operator
-// wrote it.
-func FoldRetiredPoolSeatKeys() WriteOption {
-	return func(o *writeOptions) { o.foldRetiredSeatKeys = true }
-}
-
-// newWriteOptions collects the options of one write.
-func newWriteOptions(opts []WriteOption) writeOptions {
-	var o writeOptions
-	for _, opt := range opts {
-		opt(&o)
-	}
-	return o
-}
-
 // UpdateConfigJSON decodes path into a T under the file's lock (a zero T and
 // exists=false when the file is absent), calls mutate, and writes the
 // result. When mutate returns an error nothing is written. A file that does
 // not parse is never written.
-func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, exists bool) error, opts ...WriteOption) error {
-	options := newWriteOptions(opts)
+func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, exists bool) error) error {
 	// A retired file of the two-file layout is written in its host
 	// (layout.go). The check repeats under the file's lock: gt config
 	// migrate holds that lock while it moves the file, and a writer that
@@ -77,7 +48,7 @@ func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, ex
 	if host, key, ok, _, err := sectionFor(path); err != nil {
 		return err
 	} else if ok {
-		return updateSection(host, key, mutate, options)
+		return updateSection(host, key, mutate)
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -92,7 +63,7 @@ func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, ex
 		if err != nil {
 			return err
 		}
-		return updateSection(host, key, mutate, options)
+		return updateSection(host, key, mutate)
 	}
 	defer unlock()
 
@@ -131,7 +102,6 @@ func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, ex
 		if err != nil {
 			return fmt.Errorf("reading %s before writing: %w", path, err)
 		}
-		options.foldRetiredKeys(orig, base)
 		result = applyChanges(orig, base, next)
 	}
 	out, err := json.MarshalIndent(result, "", "  ")
@@ -139,46 +109,6 @@ func UpdateConfigJSON[T any](path string, perm os.FileMode, mutate func(v *T, ex
 		return fmt.Errorf("encoding %s: %w", path, err)
 	}
 	return replaceFile(path, append(out, '\n'), mode)
-}
-
-// foldRetiredKeys puts the value a retired polecat_pool spelling supplied under
-// the key it folds into, then drops the spelling, so the changes merge onto a
-// file that says what the loader read. base is the file decoded, so a current
-// key that disagrees with the file's own tree is one applyDeprecatedKeys filled
-// in: the file carried only the retired spelling, or carried a current key the
-// fold did not use. Written under the current name, the value outlives the
-// write — a change that leaves it alone keeps it, one that moves it writes the
-// new one — where left under the retired name it folds back in on the next read
-// and reopens a seat the operator closed (gt-aq7zo).
-func (o writeOptions) foldRetiredKeys(orig, base any) {
-	if !o.foldRetiredSeatKeys {
-		return
-	}
-	for _, r := range retiredPoolSeatKeys {
-		file := objectAt(orig, r.parent)
-		if _, ok := file[r.old]; !ok {
-			continue
-		}
-		if v, ok := objectAt(base, r.parent)[r.current]; ok && !reflect.DeepEqual(file[r.current], v) {
-			file[r.current] = v
-		}
-		delete(file, r.old)
-	}
-}
-
-// objectAt follows path through nested JSON objects to the object it names, or
-// nil when any step is absent or not an object.
-func objectAt(tree any, path []string) map[string]any {
-	m, ok := tree.(map[string]any)
-	if !ok {
-		return nil
-	}
-	for _, k := range path {
-		if m, ok = m[k].(map[string]any); !ok {
-			return nil
-		}
-	}
-	return m
 }
 
 // jsonValue is v's JSON form as a generic tree.

@@ -1,0 +1,12 @@
+{
+  "type": "town-settings",
+  "version": 1,
+  "polecat_pool": {
+    "agent": "claude-sonnet",
+    "max_seats": 2,
+    "min_spawn_gap": "4m",
+    "pro_agent": "claude-opus",
+    "pro_label": "needs-pro",
+    "pro_max": 1
+  }
+}

@@ -1490,6 +1490,19 @@ func TestSpecDispatchHoldsAtTheTownTotal(t *testing.T) {
 	}
 }
 
+// specSeatTown is town settings whose pool holds seats. Each seat's agent is
+// defined in agents, so the loader's known-agent check (the one a tick reads
+// through) passes without a settings file on disk.
+func specSeatTown(seats map[string]config.SeatConfig) *config.TownSettings {
+	ts := config.NewTownSettings()
+	ts.Agents = map[string]*config.RuntimeConfig{}
+	for agent := range seats {
+		ts.Agents[agent] = &config.RuntimeConfig{Command: "claude"}
+	}
+	ts.PolecatPool = &config.PolecatPool{Seats: seats}
+	return ts
+}
+
 // The town's total reaches the tick's budget from polecat_pool.max_total
 // (gt-bcpj5). An absent key and a written 0 are the same town — one with no
 // total cap — which is why every reader tests the value above zero.
@@ -1506,81 +1519,77 @@ func TestSpecBudgetCarriesTheTownTotal(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			ts := config.NewTownSettings()
-			ts.PolecatPool = &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3, MaxTotal: tc.maxTotal}
-			if got := specBudgetFromConfig(ts, nil).MaxTotal; got != tc.want {
-				t.Errorf("budget MaxTotal = %d, want %d", got, tc.want)
+			ts := specSeatTown(map[string]config.SeatConfig{"deepseek-flash": {Cap: 3}})
+			ts.PolecatPool.MaxTotal = tc.maxTotal
+			b, err := specBudgetFor("", ts, time.Now())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if b.MaxTotal != tc.want {
+				t.Errorf("budget MaxTotal = %d, want %d", b.MaxTotal, tc.want)
 			}
 		})
 	}
 }
 
-func TestSpecBudgetFromConfig(t *testing.T) {
+// The tick's budget is one seat per entry of the seat map at its own cap, in
+// the loader's order, with the pool's spawn gap. A cap of 0 is a closed seat:
+// it is listed at 0 and takes nothing, where the retired max_seats read 0 as a
+// default of 2 (gt-mukgk).
+func TestSpecBudgetForSeats(t *testing.T) {
 	t.Parallel()
-	ts := config.NewTownSettings()
-	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
-	ts.PolecatPool = &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3, MinSpawnGap: "4m"}
+	ts := specSeatTown(map[string]config.SeatConfig{"deepseek-flash": {Cap: 3}})
+	ts.PolecatPool.MinSpawnGap = "4m"
 
-	// The pool's seat at max_seats. No claude-sonnet seat is in the budget
-	// (gt-4k3fj.8.8), and the reserved pro seat is retired: a stale pro_max in
-	// the struct opens no seat.
-	b := specBudgetFromConfig(ts, nil)
+	b, err := specBudgetFor("", ts, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got := b.Picture(); got != "deepseek-flash 0/3" || b.MinSpawnGap != 4*time.Minute {
-		t.Fatalf("defaults = %q gap %v", got, b.MinSpawnGap)
+		t.Fatalf("one seat = %q gap %v", got, b.MinSpawnGap)
 	}
 
-	// max_seats unset: the dispatcher caps the seat itself rather than
-	// treating the pool's silence as unlimited room.
-	ts.PolecatPool.MaxSeats = 0
-	if got := specBudgetFromConfig(ts, nil).Picture(); got != "deepseek-flash 0/2" {
-		t.Fatalf("unset max_seats = %q", got)
+	ts = specSeatTown(map[string]config.SeatConfig{"deepseek-flash": {Cap: 3}, "claude-sonnet": {Cap: 1}, "claude-haiku": {Cap: 0}})
+	b, err = specBudgetFor("", ts, time.Now())
+	if err != nil {
+		t.Fatal(err)
 	}
-	ts.PolecatPool.MaxSeats = 3
-}
-
-// The hooked seat is off unless spec_dispatch names a cap above zero, even in
-// a town whose patrol is enabled: a seat nobody asked for is a seat the
-// dispatcher must not spend (gt-4k3fj.8.8 acceptance 3).
-func TestSpecBudgetHookedSeatIsOptIn(t *testing.T) {
-	t.Parallel()
-	ts := config.NewTownSettings()
-	ts.PolecatPool = &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
-
-	enabled := &config.SpecDispatchConfig{Enabled: ptr(true)}
-	for _, sd := range []*config.SpecDispatchConfig{nil, enabled, {Enabled: ptr(true), MaxHooked: -1}} {
-		if got := specBudgetFromConfig(ts, sd).Picture(); got != "deepseek-flash 0/3" {
-			t.Errorf("sd %+v: a hooked seat appeared without max_hooked: %q", sd, got)
-		}
+	if got := b.Picture(); got != "claude-haiku 0/0, claude-sonnet 0/1, deepseek-flash 0/3" {
+		t.Fatalf("three seats = %q, want every seat by name with its own cap", got)
 	}
-
-	// An explicit cap adds it after the pool's seat (default agent).
-	if got := specBudgetFromConfig(ts, &config.SpecDispatchConfig{MaxHooked: 1}).Picture(); got != "deepseek-flash 0/3, claude-sonnet 0/1" {
-		t.Errorf("max_hooked 1 = %q", got)
-	}
-	// prefer_hooked moves it first, and hooked_agent names its agent.
-	sd := &config.SpecDispatchConfig{MaxHooked: 2, PreferHooked: true, HookedAgent: "claude-opus"}
-	if got := specBudgetFromConfig(ts, sd).Picture(); got != "claude-opus 0/2, deepseek-flash 0/3" {
-		t.Errorf("prefer_hooked = %q", got)
-	}
-	// hooked_agent naming the pool's agent keeps that seat once.
-	sd = &config.SpecDispatchConfig{MaxHooked: 2, HookedAgent: "deepseek-flash"}
-	if got := specBudgetFromConfig(ts, sd).Picture(); got != "deepseek-flash 0/3" {
-		t.Errorf("duplicate seat = %q", got)
+	if b.Seats[0].FreeAt(b.Now) {
+		t.Errorf("a seat with a cap of 0 takes a spawn: %+v", b.Seats[0])
 	}
 }
 
-// A pool with no agent has no seat for the dispatcher to fill: the
-// pool's own admission point says the same (choosePoolAgent). The retired pro
-// seat used to stand in here; it is gone.
+// A pool with no seat has none for the dispatcher to fill: the pool's own
+// admission point says the same (choosePoolAgent). A seat map the loader
+// rejects stops the tick's budget rather than running on part of the list.
 func TestSpecBudgetWithoutAPoolSeat(t *testing.T) {
 	t.Parallel()
 	ts := config.NewTownSettings()
-	if got := specBudgetFromConfig(ts, nil).Picture(); got != "no seats" {
-		t.Errorf("nil pool = %q, want no seats", got)
+	for name, pool := range map[string]*config.PolecatPool{
+		"nil pool":       nil,
+		"empty pool":     {},
+		"max_total only": {MaxTotal: intPtr(3)},
+	} {
+		ts.PolecatPool = pool
+		b, err := specBudgetFor("", ts, time.Now())
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got := b.Picture(); got != "no seats" {
+			t.Errorf("%s = %q, want no seats", name, got)
+		}
 	}
-	ts.PolecatPool = &config.PolecatPool{MaxSeats: 3}
-	if got := specBudgetFromConfig(ts, nil).Picture(); got != "no seats" {
-		t.Errorf("pool without an agent = %q, want no seats", got)
+
+	if b, err := specBudgetFor("", nil, time.Now()); err != nil || b.Picture() != "no seats" {
+		t.Errorf("nil settings = %q, %v, want no seats", b.Picture(), err)
+	}
+
+	ts.PolecatPool = &config.PolecatPool{Seats: map[string]config.SeatConfig{"no-such-agent": {Cap: 1}}}
+	if _, err := specBudgetFor("", ts, time.Now()); err == nil || !strings.Contains(err.Error(), "polecat_pool.seats.no-such-agent") {
+		t.Errorf("an unknown agent = %v, want the loader's message naming the seat", err)
 	}
 }
 
@@ -1589,12 +1598,12 @@ func intPtr(n int) *int { return &n }
 func TestSpecRosterCountsByAgent(t *testing.T) {
 	t.Parallel()
 	ts := config.NewTownSettings()
-	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
+	ts.PolecatPool = seatPool("deepseek-flash", 3)
 	now := time.Now()
 	r := specRosterFrom([]poolSession{
 		{name: "a", agent: "claude-sonnet", created: now.Add(-time.Hour)},
 		{name: "b", agent: "deepseek-flash", created: now.Add(-2 * time.Hour)},
-		{name: "c", agent: "", created: now.Add(-time.Minute)}, // role default
+		{name: "c", agent: "", created: now.Add(-time.Minute)}, // the pool's only seat
 		{name: "pool-claim/x", agent: "deepseek-flash", created: now.Add(-30 * time.Second)},
 	}, ts)
 	if r.Live["claude-sonnet"] != 1 || r.Live["deepseek-flash"] != 3 || !r.Newest.Equal(now.Add(-30*time.Second)) {
@@ -1609,7 +1618,7 @@ func TestSpecRosterCountsByAgent(t *testing.T) {
 func TestSpecRosterCountsDeadHookedSeats(t *testing.T) {
 	t.Parallel()
 	ts := config.NewTownSettings()
-	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
+	ts.PolecatPool = seatPool("deepseek-flash", 3)
 	now := time.Now()
 	r := specRosterFrom([]poolSession{
 		{name: "gt-live", agent: "deepseek-flash", created: now.Add(-time.Hour)},
@@ -2484,27 +2493,27 @@ func TestSpecBudgetFromSeatMapRejectsWhatTheLoaderRejects(t *testing.T) {
 	}
 }
 
-// A settings file with no seats key dispatches exactly as before the map.
-func TestSpecBudgetForSeatMapKeepsTheOldKeys(t *testing.T) {
+// The seat map is the whole list: the tick's budget names the agents the map
+// holds, and a map emptied of its seats leaves the dispatcher with none rather
+// than a default agent to spend (gt-mukgk).
+func TestSpecBudgetForIsTheSeatMapAlone(t *testing.T) {
 	t.Parallel()
-	ts := config.NewTownSettings()
-	ts.PolecatPool = &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
-	got, err := specBudgetFor("", ts, nil, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if want := specBudgetFromConfig(ts, nil); got.Picture() != want.Picture() || got.Picture() != "deepseek-flash 0/3" {
-		t.Fatalf("picture = %q, want the old keys' %q", got.Picture(), want.Picture())
-	}
-
-	// Once the map names a seat, it is the whole list.
-	ts.PolecatPool.Seats = map[string]config.SeatConfig{"claude-haiku": {Cap: 1}}
-	got, err = specBudgetFor("", ts, nil, time.Now())
+	ts := specSeatTown(map[string]config.SeatConfig{"claude-haiku": {Cap: 1}})
+	got, err := specBudgetFor("", ts, time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got.Picture() != "claude-haiku 0/1" {
 		t.Fatalf("picture = %q", got.Picture())
+	}
+
+	ts.PolecatPool.Seats = nil
+	got, err = specBudgetFor("", ts, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Picture() != "no seats" {
+		t.Fatalf("an emptied map = %q, want no seats", got.Picture())
 	}
 }
 

@@ -34,6 +34,11 @@ func (e *ParseError) Error() string {
 		where = fmt.Sprintf("does not parse at line %d", e.Line)
 	}
 	msg := strings.ReplaceAll(e.Err.Error(), "\n", " ")
+	// A file holding retired seat keys is not broken by hand: gt pool migrate
+	// converts it, and its message already says so.
+	if anyRetired(e.Keys) {
+		return fmt.Sprintf("%s: %s: %s; gt will not start the town from it and will never rewrite it", e.Path, where, msg)
+	}
 	return fmt.Sprintf("%s: %s: %s; gt will not start the town from it and will never rewrite it: fix the file by hand", e.Path, where, msg)
 }
 
@@ -48,23 +53,17 @@ func (e *ParseError) Unwrap() error { return e.Err }
 // file, the offset turned into a line and column, and for unknown keys every
 // undeclared key path.
 //
-// A type that declares applyDeprecatedKeys folds retired key spellings into
-// the fields that replaced them once the decode succeeds, so every reader —
-// including the writer, which re-marshals what it decoded — sees the current
-// names (PolecatPool.applyDeprecatedKeys).
+// A retired seat key (retired_keys.go) is such an error too, and its message
+// names the key that replaced it and says to run gt pool migrate. A type that
+// declares retiredKeys reports the retired keys the key walk cannot see, so a
+// file holding one fails the same way.
 func DecodeJSONFile(path string, data []byte, v any) error {
-	return decodeJSONFileWarning(path, data, v, seatPoolKeyWarn)
-}
-
-// decodeJSONFileWarning is DecodeJSONFile with the warning sink named, so a
-// test reads the lines a load writes instead of the process's stderr.
-func decodeJSONFileWarning(path string, data []byte, v any, warn *retiredKeyWarnings) error {
 	if err := decodeJSONStrict(path, data, v); err != nil {
 		return err
 	}
-	if a, ok := v.(deprecatedKeyApplier); ok {
-		for _, k := range a.applyDeprecatedKeys() {
-			warn.warn(k.old, k.current)
+	if f, ok := v.(retiredKeyFinder); ok {
+		if keys := f.retiredKeys(); len(keys) > 0 {
+			return &ParseError{Path: path, Keys: keys, Err: retiredKeysError(keys)}
 		}
 	}
 	return nil

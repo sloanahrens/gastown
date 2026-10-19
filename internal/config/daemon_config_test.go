@@ -285,7 +285,7 @@ func TestDaemonPatrolConfigDecodesRetiredStewardKeys(t *testing.T) {
 // keeps them on a rewrite.
 func TestDaemonPatrolConfigDecodesRetiredHooklessKeys(t *testing.T) {
 	t.Parallel()
-	body := `{"patrols":{"spec_dispatch":{"enabled":true,"hooked_agent":"claude-sonnet","hookless_agent":"local-coder","max_hookless":2}}}`
+	body := `{"patrols":{"spec_dispatch":{"enabled":true,"hookless_agent":"local-coder","max_hookless":2}}}`
 	var cfg DaemonPatrolConfig
 	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
 		t.Fatalf("decode: %v", err)

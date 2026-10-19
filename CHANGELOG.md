@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The two-seat polecat keys** (gt-mukgk) — `polecat_pool.agent`, `max_seats`,
+  `overflow_agent`, `max_overflow`, `pro_agent`, `pro_max` and `pro_label`,
+  `daemon.patrols.spec_dispatch.hooked_agent`, `max_hooked` and `prefer_hooked`,
+  `role_agents.polecat`, and `agent` on a `dispatch: "spec"` entry in
+  `scheduled_slings` no longer load. `polecat_pool.seats` is the one source of
+  truth for which agents run polecats and how many of each. A file that still
+  holds an old key fails to load with a message naming what replaced it; run
+  `gt pool migrate` (`--dry-run` first) to convert it, then restart the daemon.
+  `gt pool set-second` is gone with the second seat, and the cost tiers no longer
+  write `role_agents.polecat`.
+
 - **The reserved pro seat** (gt-kr91q) — `polecat_pool.pro_agent`, `pro_max`
   and `pro_label` are retired with the seat they configured. A bead reaches a
   specific model through its `agent:<name>` label; nothing else is reserved.

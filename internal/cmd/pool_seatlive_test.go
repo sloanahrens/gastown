@@ -60,16 +60,6 @@ func TestSeatLiveRosterCountsEachSeatOnItsAgent(t *testing.T) {
 			sessions: []poolSession{{name: "a"}},
 			want:     map[string]int{"claude-haiku": 1},
 		},
-		{
-			name: "a town with no seat map keeps the polecat role default",
-			ts: func() *config.TownSettings {
-				ts := config.NewTownSettings()
-				ts.RoleAgents = map[string]string{"polecat": "claude-sonnet"}
-				return ts
-			}(),
-			sessions: []poolSession{{name: "a"}},
-			want:     map[string]int{"claude-sonnet": 1},
-		},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -97,7 +87,8 @@ func TestSeatLiveSessionlessSeatsOnTheSeatMap(t *testing.T) {
 		deadHooked bool
 		slungAgent string
 		seats      []string
-		// roleDefault is the polecat role default in the town's settings;
+		// roleDefault is the town's default agent, which a restart runs a seat
+		// with no record on;
 		// empty is claude-sonnet.
 		roleDefault string
 		want        map[string]int
@@ -114,12 +105,13 @@ func TestSeatLiveSessionlessSeatsOnTheSeatMap(t *testing.T) {
 			t.Parallel()
 			ts := seatMapTown(c.seats...)
 			// The role default a restart starts a seat with no record on
-			// (gt-zj9yf), read from the town's settings.
+			// (gt-zj9yf): the town's default agent, role_agents.polecat being
+			// retired.
 			roleDefault := c.roleDefault
 			if roleDefault == "" {
 				roleDefault = "claude-sonnet"
 			}
-			ts.RoleAgents = map[string]string{"polecat": roleDefault}
+			ts.DefaultAgent = roleDefault
 			town := t.TempDir()
 			if err := config.SaveTownSettings(config.TownSettingsPath(town), ts); err != nil {
 				t.Fatalf("SaveTownSettings: %v", err)

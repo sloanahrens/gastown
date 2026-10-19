@@ -37,7 +37,7 @@ func TestPolecatPool_SeatRefillPolicy(t *testing.T) {
 			"type": "town-settings",
 			"version": 1,
 			"polecat_pool": {
-				"agent": "deepseek-flash",
+				"seats": {"deepseek-flash": {"cap": 2}},
 				"max_priority": 3,
 				"top_candidates": 5,
 				"empty_seconds": 60,
@@ -102,7 +102,7 @@ func TestPolecatPool_MaxTotal(t *testing.T) {
 	}
 
 	path := filepath.Join(t.TempDir(), "config.json")
-	settingsJSON := `{"type":"town-settings","version":1,"polecat_pool":{"agent":"deepseek-flash","max_seats":3,"max_total":2}}`
+	settingsJSON := `{"type":"town-settings","version":1,"polecat_pool":{"seats":{"deepseek-flash":{"cap":3}},"max_total":2}}`
 	if err := os.WriteFile(path, []byte(settingsJSON), 0644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}

@@ -5,12 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
@@ -88,15 +87,16 @@ type TownSettings struct {
 	Agents map[string]*RuntimeConfig `json:"agents,omitempty"`
 
 	// RoleAgents maps role names to agent aliases for per-role model selection.
-	// Keys are role names: "deacon", "witness", "refinery", "polecat", "crew".
+	// Keys are role names: "deacon", "witness", "refinery", "crew". The
+	// polecat key is retired: polecat_pool.seats names the polecats' agents.
 	// Values are agent names (built-in presets or custom agents defined in Agents).
 	// This allows cost optimization by using different models for different roles.
-	// Example: {"witness": "claude-opus", "polecat": "claude-sonnet"}
+	// Example: {"witness": "claude-opus", "crew": "claude-sonnet"}
 	RoleAgents map[string]string `json:"role_agents,omitempty"`
 
-	// PolecatPool, when set, runs `gt sling`'s polecats on the pool's agent
-	// instead of role_agents.polecat, at most max_seats at a time; a sling
-	// past the cap is refused. An --agent the pool does not own is left alone.
+	// PolecatPool, when set, runs `gt sling`'s polecats on the agents named in
+	// its seat map, each at most its seat's cap at a time; a sling past the cap
+	// is refused. An --agent with no seat is left alone.
 	PolecatPool *PolecatPool `json:"polecat_pool,omitempty"`
 
 	// CrewAgents maps individual crew worker names to agent aliases at the town level.
@@ -1628,8 +1628,8 @@ func NewEscalationConfig() *EscalationConfig {
 	}
 }
 
-// PolecatPool bounds how many polecats run at once on the pool's agent, and
-// optionally across the town's seats together. See TownSettings.PolecatPool.
+// PolecatPool is the town's polecat seat map: which agents run polecats, how
+// many of each, and when. See TownSettings.PolecatPool.
 type PolecatPool struct {
 	// LocalAgent, MaxLocal and IdleFill are retired with the local-model seat
 	// (D4; the local model was retired 2026-09-27): nothing reads them. They
@@ -1642,29 +1642,15 @@ type PolecatPool struct {
 	// MinSpawnGap is the minimum time between two spec-dispatcher spawns
 	// (e.g. "4m").
 	MinSpawnGap string `json:"min_spawn_gap,omitempty"`
-	// Agent is the agent the pool's polecats run. Empty means the pool has no
-	// seat and the normal role_agents resolution applies.
-	Agent string `json:"agent,omitempty"`
-	// MaxSeats is the number of live polecat sessions allowed on Agent. Zero
-	// leaves the seat uncapped.
-	MaxSeats int `json:"max_seats,omitempty"`
-	// MaxTotal caps live polecats across every seat — Agent's, the pro seat's
-	// and the second seat's alike — where MaxSeats caps one agent's seat
-	// alone. Absent (or 0) is the town's silence: no total cap. Two agents
-	// each inside their own cap then exceed what the town wants (5 live where
-	// 3 was meant), which is what this key bounds.
+	// MaxTotal caps live polecats across every seat, where a seat's cap bounds
+	// one agent alone. Absent (or 0) is the town's silence: no total cap. Two
+	// agents each inside their own cap then exceed what the town wants (5 live
+	// where 3 was meant), which is what this key bounds.
 	MaxTotal *int `json:"max_total,omitempty"`
 	// Seats is the seat map: agent name -> cap, window, names (gt-mukgk).
 	Seats map[string]SeatConfig `json:"seats,omitempty"`
 	// Timezone is the IANA zone the seats' closed windows are read in.
 	Timezone string `json:"timezone,omitempty"`
-	// DeprecatedOverflowAgent and DeprecatedMaxOverflow are the retired
-	// spellings of Agent and MaxSeats, declared so a settings file written
-	// before the rename (gt-plk1z) loads. applyDeprecatedKeys folds them into
-	// the fields above at decode time and clears them here, so no writer emits
-	// them.
-	DeprecatedOverflowAgent *string `json:"overflow_agent,omitempty"`
-	DeprecatedMaxOverflow   *int    `json:"max_overflow,omitempty"`
 
 	// The keys below are the spec dispatcher's dispatch policy
 	// (internal/cmd/spec.go), read from here so a policy change is one edit in
@@ -1692,15 +1678,6 @@ type PolecatPool struct {
 	// empty this long. Retired with the plugin: the dispatcher fills a free
 	// seat at once.
 	DispatchEmptySeconds *int `json:"dispatch_empty_seconds,omitempty"`
-	// DeprecatedProMax, DeprecatedProAgent and DeprecatedProLabel are the
-	// retired reserved pro seat's keys. Declared so a settings file written
-	// before the seat's retirement still decodes, they are folded away at
-	// decode time (applyDeprecatedKeys) and warn once per process: the
-	// dispatcher no longer reads them, and an unlabelled bead draws at random
-	// among the free seats. Pin a bead with an agent:<name> label instead.
-	DeprecatedProMax   *int    `json:"pro_max,omitempty"`
-	DeprecatedProAgent *string `json:"pro_agent,omitempty"`
-	DeprecatedProLabel *string `json:"pro_label,omitempty"`
 	// Mode is how an empty seat was filled: "sling" dispatched the bead
 	// directly, "nudge" asked the retired planner instead. Retired with the
 	// plugin: the dispatcher always slings, and the planner it could have
@@ -1831,8 +1808,15 @@ func (p *PolecatPool) Validate() error {
 			errs = append(errs, fmt.Errorf("polecat_pool.%s = %d: must be >= 0", k.key, *k.v))
 		}
 	}
-	if p.MaxSeats < 0 {
-		errs = append(errs, fmt.Errorf("polecat_pool.max_seats = %d: must be >= 0", p.MaxSeats))
+	seatAgents := make([]string, 0, len(p.Seats))
+	for agent := range p.Seats {
+		seatAgents = append(seatAgents, agent)
+	}
+	sort.Strings(seatAgents)
+	for _, agent := range seatAgents {
+		if c := p.Seats[agent].Cap; c < 0 {
+			errs = append(errs, fmt.Errorf("polecat_pool.seats.%s.cap = %d: must be >= 0", agent, c))
+		}
 	}
 	if p.MinSpawnGap != "" {
 		if d, err := time.ParseDuration(p.MinSpawnGap); err != nil || d < 0 {
@@ -1866,123 +1850,3 @@ func (p *PolecatPool) MinSpawnGapD() time.Duration {
 	}
 	return d
 }
-
-// SeatsCapped reports whether the pool bounds live polecats on Agent:
-// max_seats set, and an agent whose sessions to count.
-func (p *PolecatPool) SeatsCapped() bool {
-	return p != nil && p.MaxSeats > 0 && p.Agent != ""
-}
-
-// applyDeprecatedKeys folds the retired polecat_pool key spellings into the
-// fields that replaced them, so every reader downstream sees one set of values
-// whether the file is old or new, and returns the retired keys that supplied a
-// value so the caller can report them. DecodeJSONFile calls it on every load
-// (deprecatedKeyApplier). The current key wins when a file carries both, and
-// either way the retired fields are cleared, so nothing writes them back out.
-//
-// A retired key with no current spelling — the pro seat's pro_max, pro_agent
-// and pro_label — is cleared and reported without folding: the value is
-// ignored, and the warning says the seat is gone.
-func (p *PolecatPool) applyDeprecatedKeys() []retiredSeatKey {
-	if p == nil {
-		return nil
-	}
-	var used []retiredSeatKey
-	if p.Agent == "" && p.DeprecatedOverflowAgent != nil {
-		p.Agent = *p.DeprecatedOverflowAgent
-		used = append(used, retiredSeatKey{old: "overflow_agent", current: "agent"})
-	}
-	if p.MaxSeats == 0 && p.DeprecatedMaxOverflow != nil {
-		p.MaxSeats = *p.DeprecatedMaxOverflow
-		used = append(used, retiredSeatKey{old: "max_overflow", current: "max_seats"})
-	}
-	for _, k := range []struct {
-		old string
-		set bool
-	}{
-		{"pro_max", p.DeprecatedProMax != nil},
-		{"pro_agent", p.DeprecatedProAgent != nil},
-		{"pro_label", p.DeprecatedProLabel != nil},
-	} {
-		if k.set {
-			used = append(used, retiredSeatKey{old: k.old})
-		}
-	}
-	p.DeprecatedOverflowAgent, p.DeprecatedMaxOverflow = nil, nil
-	p.DeprecatedProMax, p.DeprecatedProAgent, p.DeprecatedProLabel = nil, nil, nil
-	return used
-}
-
-// applyDeprecatedKeys folds the town file's retired keys into their current
-// fields (PolecatPool.applyDeprecatedKeys).
-func (s *TownSettings) applyDeprecatedKeys() []retiredSeatKey {
-	if s == nil {
-		return nil
-	}
-	return s.PolecatPool.applyDeprecatedKeys()
-}
-
-// retiredPoolSeatKey is one retired polecat_pool spelling: the object holding it
-// in a settings file, the spelling itself, and the key it was folded into.
-type retiredPoolSeatKey struct {
-	// parent is the object the spelling sits in, from the file's top level.
-	parent []string
-	// old is the retired key, current the key that replaced it.
-	old, current string
-}
-
-// retiredPoolSeatKeys is the retired polecat_pool spellings applyDeprecatedKeys
-// folds, with the object each sits in so the config writer can rewrite them
-// onto the current keys on a write that changes the seat (writer.go
-// foldRetiredKeys, gt-aq7zo).
-var retiredPoolSeatKeys = []retiredPoolSeatKey{
-	{parent: []string{"polecat_pool"}, old: "overflow_agent", current: "agent"},
-	{parent: []string{"polecat_pool"}, old: "max_overflow", current: "max_seats"},
-}
-
-// deprecatedKeyApplier is the hook a config type uses to fold retired key
-// spellings into the fields that replaced them: it returns the retired keys it
-// read so the caller can warn about each. DecodeJSONFile runs it after a
-// successful decode, so old and new spellings arrive at every reader as one set
-// of values.
-type deprecatedKeyApplier interface {
-	applyDeprecatedKeys() []retiredSeatKey
-}
-
-// retiredSeatKey is one retired polecat_pool key a settings file used, with the
-// key that replaced it. current is empty for a key whose feature is gone: the
-// value is ignored rather than folded.
-type retiredSeatKey struct {
-	old     string
-	current string
-}
-
-// retiredKeyWarnings reports each retired key at most once per process: one
-// warning points an operator at the new name without a daemon that reads the
-// file on every pass repeating the line forever.
-type retiredKeyWarnings struct {
-	mu   sync.Mutex
-	out  io.Writer
-	seen map[string]bool
-}
-
-// warn writes oldKey's retirement line, unless an earlier call already did.
-func (w *retiredKeyWarnings) warn(oldKey, newKey string) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.seen[oldKey] {
-		return
-	}
-	if w.seen == nil {
-		w.seen = map[string]bool{}
-	}
-	w.seen[oldKey] = true
-	if newKey == "" {
-		fmt.Fprintf(w.out, "warning: polecat_pool.%s is retired and ignored: the reserved pro seat is gone, and an unlabelled bead draws a random free seat (pin one with an agent:<name> label)\n", oldKey)
-		return
-	}
-	fmt.Fprintf(w.out, "warning: polecat_pool.%s is retired; the value loaded as polecat_pool.%s, which replaces it\n", oldKey, newKey)
-}
-
-// seatPoolKeyWarn carries the retired polecat_pool spellings' warnings.
-var seatPoolKeyWarn = &retiredKeyWarnings{out: os.Stderr}

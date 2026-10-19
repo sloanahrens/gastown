@@ -274,7 +274,7 @@ func TestTheStripNamesTheOpenSeatsAndTheRetiredSeatIsGone(t *testing.T) {
 		// no seats: the reader always sends the seats it read.
 		`if (!m || !(m.seat_rows || []).length) return null;`,
 		`if (sr.unknown) {`,
-		`" seat unknown"`,
+		`"seats unknown"`,
 		`if (sr.closed) continue;`,
 		`(sr.live == null ? "–" : sr.live)`,
 		`sr.key || "no config key recorded"`,

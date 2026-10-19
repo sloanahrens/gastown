@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 
@@ -12,9 +13,7 @@ import (
 
 // The spec dispatcher's seat settings, read on every tick (gt-jdnab).
 //
-// A seat is one agent with its own cap: the pool seat (polecat_pool.agent,
-// capped by max_seats) and the second seat (patrols.spec_dispatch
-// hooked_agent, max_hooked, prefer_hooked).
+// A seat is one agent with its own cap, an entry of polecat_pool.seats.
 // A tick shells out to `gt spec dispatch`, which builds its seat list from
 // these files every run, so an edit to the mix lands at the next tick with no
 // restart — a kickstart costs the tick or the landing in flight (gt-jdnab).
@@ -118,57 +117,49 @@ func specSeatStamps(files []string) string {
 }
 
 // readSpecSeatPicture reads the two blocks the seats come from and renders the
-// keys they set. An unreadable block is an error: the ticker parks on it rather
-// than tick with a picture that lost a seat to a typo (gt-jdnab). Nothing here
-// writes: LoadOrCreateTownSettings parses a town settings file and hands back
-// defaults in memory for an absent one, so a tick that finds no settings leaves
-// the town as it was (gt-jdnab).
+// seat map they set. An unreadable block is an error: the ticker parks on it
+// rather than tick with a picture that lost a seat to a typo (gt-jdnab). The
+// patrol document is read although the seats no longer live in it, because a
+// file that does not parse, or still holds a retired key, must park the ticker
+// too. Nothing here writes: LoadOrCreateTownSettings parses a town settings
+// file and hands back defaults in memory for an absent one, so a tick that
+// finds no settings leaves the town as it was (gt-jdnab).
 func readSpecSeatPicture(townRoot string) (string, error) {
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
 	if err != nil {
 		return "", fmt.Errorf("reading the polecat pool: %w", err)
 	}
-	pc, err := ReadPatrolConfig(townRoot)
-	if err != nil {
+	if _, err := ReadPatrolConfig(townRoot); err != nil {
 		return "", err
 	}
-	var sd *SpecDispatchConfig
-	if pc != nil && pc.Patrols != nil {
-		sd = pc.Patrols.SpecDispatch
-	}
-	return specSeatPicture(ts.PolecatPool, sd), nil
+	return specSeatPicture(ts.PolecatPool), nil
 }
 
-// specSeatPicture renders the seat keys the files set, in the order the
-// dispatcher reads them: "pool_agent=claude-sonnet max_seats=4
-// hooked_agent=deepseek-flash max_hooked=2". A key written as its zero is left
-// out, because a zero closes the seat it names — max_seats 0 is the pool seat
-// closed and max_hooked 0 the second seat closed, the same as removing the key.
-// max_total is a pointer, so its 0 is the cap explicitly removed and renders.
-func specSeatPicture(pool *config.PolecatPool, sd *SpecDispatchConfig) string {
+// specSeatPicture renders the seat map, one entry per agent in the loader's
+// order (sorted by agent name), then the total cap: "claude-haiku=3
+// claude-sonnet=2 deepseek-flash=3(closed 20:00-08:00) max_total=8". A seat
+// whose cap is 0 is closed and renders as such. max_total is a pointer, so its
+// 0 is the cap explicitly removed and renders.
+func specSeatPicture(pool *config.PolecatPool) string {
+	if pool == nil {
+		return ""
+	}
+	agents := make([]string, 0, len(pool.Seats))
+	for agent := range pool.Seats {
+		agents = append(agents, agent)
+	}
+	sort.Strings(agents)
 	var parts []string
-	add := func(key string, set bool, value any) {
-		if set {
-			parts = append(parts, fmt.Sprintf("%s=%v", key, value))
+	for _, agent := range agents {
+		seat := pool.Seats[agent]
+		part := fmt.Sprintf("%s=%d", agent, seat.Cap)
+		if seat.Closed != "" {
+			part += "(closed " + seat.Closed + ")"
 		}
+		parts = append(parts, part)
 	}
-	if pool != nil {
-		add("pool_agent", pool.Agent != "", pool.Agent)
-		add("max_seats", pool.MaxSeats != 0, pool.MaxSeats)
-		add("max_total", pool.MaxTotal != nil, intValue(pool.MaxTotal))
-	}
-	if sd != nil {
-		add("hooked_agent", sd.HookedAgent != "", sd.HookedAgent)
-		add("max_hooked", sd.MaxHooked != 0, sd.MaxHooked)
-		add("prefer_hooked", sd.PreferHooked, sd.PreferHooked)
+	if pool.MaxTotal != nil {
+		parts = append(parts, fmt.Sprintf("max_total=%d", *pool.MaxTotal))
 	}
 	return strings.Join(parts, " ")
-}
-
-// intValue is a *int's value, 0 for nil.
-func intValue(p *int) int {
-	if p == nil {
-		return 0
-	}
-	return *p
 }

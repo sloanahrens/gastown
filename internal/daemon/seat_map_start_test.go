@@ -21,7 +21,12 @@ func TestCheckSeatMapAtStart(t *testing.T) {
 		wantErr  string // empty: the start goes ahead
 	}{
 		{name: "no settings file"},
-		{name: "no seats key", settings: `{"type":"town-settings","version":1,"polecat_pool":{"agent":"deepseek-flash","max_seats":3}}`},
+		{name: "no seats key", settings: `{"type":"town-settings","version":1,"polecat_pool":{"min_spawn_gap":"4m"}}`},
+		{
+			name:     "a retired two-seat key",
+			settings: `{"type":"town-settings","version":1,"polecat_pool":{"agent":"deepseek-flash","max_seats":3}}`,
+			wantErr:  "polecat_pool.agent was replaced by",
+		},
 		{name: "valid seat map", settings: `{"type":"town-settings","version":1,"polecat_pool":{"seats":{"claude-sonnet":{"cap":3},"claude-haiku":{"cap":2}}}}`},
 		{
 			name:     "unknown agent",

@@ -3596,7 +3596,7 @@ func TestResolveRoleAgentConfig(t *testing.T) {
 	townSettings.RoleAgents = map[string]string{
 		"mayor":   "claude", // mayor uses default claude
 		"witness": "gemini", // witness uses gemini
-		"polecat": "codex",  // polecats use codex
+		"dog":     "codex",  // dog uses codex
 	}
 	townSettings.Agents = map[string]*RuntimeConfig{
 		"claude-haiku": {
@@ -3631,8 +3631,8 @@ func TestResolveRoleAgentConfig(t *testing.T) {
 	})
 
 	t.Run("town RoleAgents used when rig has no override", func(t *testing.T) {
-		rc := resolveRoleAgentConfig(fh, "polecat", townRoot, rigPath)
-		// Should get codex from town's RoleAgents (rig doesn't override polecat)
+		rc := resolveRoleAgentConfig(fh, "dog", townRoot, rigPath)
+		// Should get codex from town's RoleAgents (rig doesn't override dog)
 		if rc.Command != "codex" {
 			t.Errorf("Command = %q, want %q", rc.Command, "codex")
 		}
@@ -3665,7 +3665,7 @@ func TestResolveRoleAgentName(t *testing.T) {
 	townSettings.DefaultAgent = "claude"
 	townSettings.RoleAgents = map[string]string{
 		"witness": "gemini",
-		"polecat": "codex",
+		"dog":     "codex",
 	}
 	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
@@ -3692,7 +3692,7 @@ func TestResolveRoleAgentName(t *testing.T) {
 	})
 
 	t.Run("town role-specific agent", func(t *testing.T) {
-		name, isRoleSpecific := ResolveRoleAgentName("polecat", townRoot, rigPath)
+		name, isRoleSpecific := ResolveRoleAgentName("dog", townRoot, rigPath)
 		if name != "codex" {
 			t.Errorf("name = %q, want %q", name, "codex")
 		}
@@ -3734,7 +3734,7 @@ func TestRoleAgentsRoundTrip(t *testing.T) {
 		original.RoleAgents = map[string]string{
 			"mayor":   "claude-opus",
 			"witness": "claude-haiku",
-			"polecat": "claude-sonnet",
+			"crew":    "claude-sonnet",
 		}
 
 		if err := SaveTownSettings(townSettingsPath, original); err != nil {
@@ -3755,8 +3755,8 @@ func TestRoleAgentsRoundTrip(t *testing.T) {
 		if loaded.RoleAgents["witness"] != "claude-haiku" {
 			t.Errorf("RoleAgents[witness] = %q, want %q", loaded.RoleAgents["witness"], "claude-haiku")
 		}
-		if loaded.RoleAgents["polecat"] != "claude-sonnet" {
-			t.Errorf("RoleAgents[polecat] = %q, want %q", loaded.RoleAgents["polecat"], "claude-sonnet")
+		if loaded.RoleAgents["crew"] != "claude-sonnet" {
+			t.Errorf("RoleAgents[crew] = %q, want %q", loaded.RoleAgents["crew"], "claude-sonnet")
 		}
 	})
 
@@ -4685,20 +4685,20 @@ func TestBuildStartupCommand_RoleAgentsSetGTAgent(t *testing.T) {
 	townRoot := t.TempDir()
 	rigPath := filepath.Join(townRoot, "testrig")
 
-	// Configure opencode as the polecat agent via role_agents.
+	// Configure opencode as the polecat agent via the rig's role_agents (the
+	// town's role_agents.polecat is retired for the seat map).
 	// Define it as a custom agent so the test doesn't depend on the
 	// opencode binary being in PATH (ValidateAgentConfig calls exec.LookPath).
 	townSettings := NewTownSettings()
 	townSettings.Agents["opencode"] = &RuntimeConfig{
 		Command: "opencode",
 	}
-	townSettings.RoleAgents = map[string]string{
-		"polecat": "opencode",
-	}
 	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
 	}
-	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+	rigSettings := NewRigSettings()
+	rigSettings.RoleAgents = map[string]string{"polecat": "opencode"}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), rigSettings); err != nil {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
@@ -4726,13 +4726,12 @@ func TestBuildStartupCommand_RoleAgentsCustomAgentSetGTAgent(t *testing.T) {
 		Command: "opencode",
 		Args:    []string{"-m", "openai/gpt-5.3-codex"},
 	}
-	townSettings.RoleAgents = map[string]string{
-		"polecat": "codex",
-	}
 	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
 	}
-	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+	rigSettings := NewRigSettings()
+	rigSettings.RoleAgents = map[string]string{"polecat": "codex"}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), rigSettings); err != nil {
 		t.Fatalf("SaveRigSettings: %v", err)
 	}
 
@@ -5153,7 +5152,7 @@ func TestBuildStartupCommand_CostTierGroqCompoundResolvesKeyReference(t *testing
 	rigPath := filepath.Join(townRoot, "testrig")
 
 	townSettings := NewTownSettings()
-	if err := ApplyCostTier(townSettings, TierCustomGroqOpus); err != nil {
+	if err := ApplyCostTier(townSettings, TierCustomGroqSonnet); err != nil {
 		t.Fatalf("ApplyCostTier: %v", err)
 	}
 	if err := SaveTownSettings(TownSettingsPath(townRoot), townSettings); err != nil {
@@ -5172,7 +5171,8 @@ func TestBuildStartupCommand_CostTierGroqCompoundResolvesKeyReference(t *testing
 			got, "${GROQ_API_KEY}")
 	}
 
-	cmd, err := buildStartupCommand(fh, map[string]string{"GT_ROLE": "testrig/polecats/nux"}, rigPath, "")
+	// The tier sets the crew's agent; the polecat's agents are the seats.
+	cmd, err := buildStartupCommand(fh, map[string]string{"GT_ROLE": "testrig/crew/nux"}, rigPath, "")
 	if err != nil {
 		t.Fatalf("BuildStartupCommand returned an error with GROQ_API_KEY set: %v", err)
 	}

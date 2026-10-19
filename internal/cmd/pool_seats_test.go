@@ -230,7 +230,7 @@ func submittedWork(ids ...string) poolSeatWorkFunc {
 // free (gt-thy6r, gt-59o9, gt-t8q5).
 func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
+	pool := seatPool("deepseek-flash", 3)
 	live := &fakeLister{sessions: map[string]map[string]string{
 		"gt-jade": {"GT_ROLE": "gastown/polecats/jade", "GT_AGENT": "deepseek-flash"},
 	}}
@@ -253,7 +253,7 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 			town := t.TempDir()
 			work := submittedWork()
 			if c.claim {
-				writeSeatClaim(t, town, "claim-1", pool.Agent)
+				writeSeatClaim(t, town, "claim-1", "deepseek-flash")
 			}
 			if c.landing {
 				writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
@@ -264,7 +264,7 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
-			if n := poolSeatCount(pool, got); n != c.want {
+			if n := poolSeatCount("deepseek-flash", got); n != c.want {
 				t.Fatalf("seat count = %d, want %d (%+v)", n, c.want, got)
 			}
 		})
@@ -280,7 +280,7 @@ func TestPoolSeatSessionsCountsEveryKindOfTakenSeat(t *testing.T) {
 // cap.
 func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
+	pool := seatPool("deepseek-flash", 3)
 
 	held := polecat.WorkstateDisposition{
 		Verdict:              polecat.WorkstateVerdictNeedsRecovery,
@@ -345,7 +345,7 @@ func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
-			if n := poolSeatCount(pool, got); n != c.want {
+			if n := poolSeatCount("deepseek-flash", got); n != c.want {
 				t.Fatalf("seat count = %d, want %d (%+v)", n, c.want, got)
 			}
 		})
@@ -358,7 +358,7 @@ func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 // restart can no longer be the tick that pushes the town past its cap.
 func TestPoolSeatSessionsRestartKeepsTheCount(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
+	pool := seatPool("deepseek-flash", 3)
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "gastown")
 	writeTownPolecatDir(t, town, "gastown", "ember")
@@ -374,7 +374,7 @@ func TestPoolSeatSessionsRestartKeepsTheCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith (crashed): %v", err)
 	}
-	if n := poolSeatCount(pool, crashed); n != 1 {
+	if n := poolSeatCount("deepseek-flash", crashed); n != 1 {
 		t.Fatalf("a crashed seat holds its seat: count = %d (%+v)", n, crashed)
 	}
 
@@ -385,7 +385,7 @@ func TestPoolSeatSessionsRestartKeepsTheCount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith (restarted): %v", err)
 	}
-	if n := poolSeatCount(pool, after); n != 1 {
+	if n := poolSeatCount("deepseek-flash", after); n != 1 {
 		t.Fatalf("the restart must not change the count: got %d (%+v)", n, after)
 	}
 }
@@ -406,7 +406,7 @@ func writeTownPolecatDir(t *testing.T, townRoot, rigName, polecatName string) {
 // free rather than held for a wait that is over.
 func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
+	pool := seatPool("deepseek-flash", 3)
 	town := t.TempDir()
 	writeLandingSeat(t, town, "gastown", "ruby", "gt-ruby")
 
@@ -442,7 +442,7 @@ func TestPoolLandingSeatEndsWithTheLabel(t *testing.T) {
 // polecat's — a witness, refinery or crew seat — hold no pool seat either.
 func TestPoolLandingSeatSkipsASeatThatIsGone(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
+	pool := seatPool("deepseek-flash", 3)
 	town := t.TempDir()
 
 	// A submitted record with no polecat directory behind it.
@@ -469,9 +469,9 @@ func TestPoolLandingSeatSkipsASeatThatIsGone(t *testing.T) {
 // poolSeatSessions → specRosterFrom path the tick line prints.
 func TestSpecRosterCountsACompletingSeatOnce(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
+	pool := seatPool("deepseek-flash", 3)
 	ts := config.NewTownSettings()
-	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
+	ts.PolecatPool = pool
 
 	jade := map[string]map[string]string{
 		"gt-jade": {"GT_ROLE": "gastown/polecats/jade", "GT_AGENT": "deepseek-flash"},
@@ -508,7 +508,7 @@ func TestSpecRosterCountsACompletingSeatOnce(t *testing.T) {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
 			if got := specRosterFrom(sessions, ts).Live["deepseek-flash"]; got != c.want {
-				t.Fatalf("roster = %d/%d, want %d/%d (%+v)", got, pool.MaxSeats, c.want, pool.MaxSeats, sessions)
+				t.Fatalf("roster = %d/%d, want %d/%d (%+v)", got, 3, c.want, 3, sessions)
 			}
 		})
 	}
@@ -518,25 +518,25 @@ func TestSpecRosterCountsACompletingSeatOnce(t *testing.T) {
 // tmux session — mid-landing after `gt done`, or dead-hooked and waiting for its
 // supervised restart — is counted on the agent it was slung on, read from its
 // intent record, rather than under the pool's own agent. The town is the shape
-// of 2026-10-14: a two-seat claude-sonnet pool (claude-sonnet is also the
-// polecat role default) and a two-seat deepseek-flash hooked seat. A finished
+// of 2026-10-14: a two-seat claude-sonnet pool (the pool's only seat now, so the one
+// a seat with no record falls back to) and a two-seat deepseek-flash hooked seat. A finished
 // flash seat waiting to land read as Sonnet then, which made the tick line
 // claude-sonnet 4/2 (1 dead-hooked), deepseek-flash 0/2 with two Sonnet sessions
 // in the town.
 func TestSessionlessSeatsCountOnTheAgentTheyWereSlung(t *testing.T) {
 	t.Parallel()
-	// The pool's seat, and the role default an unrecorded seat falls back to.
-	pool := &config.PolecatPool{Agent: "claude-sonnet", MaxSeats: 2, MaxTotal: intPtr(4)}
-	// The seat map of the dispatcher's next shape: one seat each for two
-	// agents, the role default being one of them. A seat that records no agent
-	// is on neither by its record, and its restart starts it on the role
-	// default, so that is the seat it holds.
+	// The pool's only seat, which an unrecorded seat falls back to.
+	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{"claude-sonnet": {Cap: 2}}, MaxTotal: intPtr(4)}
+	// A map of two seats, the town's default agent being one of them. A seat
+	// that records no agent is on neither by its record, and its restart
+	// starts it on the polecat role default (the default agent, now that
+	// role_agents.polecat is retired), so that is the seat it holds.
 	seatMapPool := &config.PolecatPool{
 		Seats:    map[string]config.SeatConfig{"claude-sonnet": {Cap: 1}, "claude-haiku": {Cap: 1}},
 		MaxTotal: intPtr(2),
 	}
 	ts := config.NewTownSettings()
-	ts.RoleAgents = map[string]string{"polecat": "claude-sonnet"}
+	ts.PolecatPool = pool
 
 	cases := []struct {
 		name string
@@ -547,8 +547,8 @@ func TestSessionlessSeatsCountOnTheAgentTheyWereSlung(t *testing.T) {
 		// other is a session that ended.
 		deadHooked bool
 		// slungAgent is the agent the seat's record names. Empty is a seat
-		// slung before the record existed, or one the sling left on the role
-		// default.
+		// slung before the record existed, or one the sling left to the
+		// pool's only seat.
 		slungAgent string
 		want       string
 	}{
@@ -564,11 +564,11 @@ func TestSessionlessSeatsCountOnTheAgentTheyWereSlung(t *testing.T) {
 			want:       "deepseek-flash",
 		},
 		{
-			name: "a sessionless seat with no agent record falls back to the role default",
+			name: "a sessionless seat with no agent record falls back to the pool's only seat",
 			want: "claude-sonnet",
 		},
 		{
-			name:       "a dead-hooked seat with no agent record falls back to the role default",
+			name:       "a dead-hooked seat with no agent record falls back to the pool's only seat",
 			deadHooked: true,
 			want:       "claude-sonnet",
 		},
@@ -600,9 +600,9 @@ func TestSessionlessSeatsCountOnTheAgentTheyWereSlung(t *testing.T) {
 			pool, ts := pool, ts
 			if c.seatMap {
 				pool = seatMapPool
-				// The restart reads the role default from the town's settings.
+				// The restart reads the default agent from the town's settings.
 				ts = config.NewTownSettings()
-				ts.RoleAgents = map[string]string{"polecat": "claude-sonnet"}
+				ts.DefaultAgent = "claude-sonnet"
 				ts.PolecatPool = seatMapPool
 				if err := config.SaveTownSettings(config.TownSettingsPath(town), ts); err != nil {
 					t.Fatalf("SaveTownSettings: %v", err)
@@ -656,10 +656,10 @@ func TestSessionlessSeatsCountOnTheAgentTheyWereSlung(t *testing.T) {
 			// and cap arithmetic is unchanged: a seat another agent runs is
 			// simply not one of its seats. The town's total still sees it.
 			wantOnPoolSeat := 0
-			if c.want == pool.Agent {
+			if c.want == "claude-sonnet" {
 				wantOnPoolSeat = 1
 			}
-			if n := poolSeatCount(pool, sessions); n != wantOnPoolSeat {
+			if n := poolSeatCount("claude-sonnet", sessions); n != wantOnPoolSeat {
 				t.Fatalf("pool seat count = %d, want %d (%+v)", n, wantOnPoolSeat, sessions)
 			}
 			total := 0
@@ -806,7 +806,7 @@ func TestHasBeadsDatabase(t *testing.T) {
 // over that bead counts nothing.
 func TestPoolSeatSessionsDropsAnOverrunStoppedSeatOnceItsAgentBeadIsReset(t *testing.T) {
 	t.Parallel()
-	pool := &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3}
+	pool := seatPool("deepseek-flash", 3)
 	handedBack := &beads.Issue{ID: "gt-0pt32", Status: "open", Labels: []string{polecat.NeedsSplitLabel}}
 
 	cases := []struct {
@@ -841,7 +841,7 @@ func TestPoolSeatSessionsDropsAnOverrunStoppedSeatOnceItsAgentBeadIsReset(t *tes
 			if err != nil {
 				t.Fatalf("poolSeatSessionsWith: %v", err)
 			}
-			if n := poolSeatCount(pool, sessions); n != c.want {
+			if n := poolSeatCount("deepseek-flash", sessions); n != c.want {
 				t.Fatalf("pool seat count = %d, want %d (%+v)", n, c.want, sessions)
 			}
 		})
