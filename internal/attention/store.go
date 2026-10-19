@@ -214,23 +214,34 @@ func ParseEventLine(line string) (Event, bool) {
 }
 
 func readEventsFile(path string) ([]Event, error) {
+	out, _, err := readEventsFileCounted(path)
+	return out, err
+}
+
+// readEventsFileCounted is readEventsFile plus how many non-blank lines it
+// skipped, so a caller reporting the log can say it lost lines.
+func readEventsFileCounted(path string) ([]Event, int, error) {
 	f, err := os.Open(path) //nolint:gosec // G304: a path built from the town root
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
+		return nil, 0, nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer f.Close()
 	var out []Event
+	skipped := 0
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
-		if e, ok := ParseEventLine(scanner.Text()); ok {
+		line := scanner.Text()
+		if e, ok := ParseEventLine(line); ok {
 			out = append(out, e)
+		} else if strings.TrimSpace(line) != "" {
+			skipped++
 		}
 	}
-	return out, scanner.Err()
+	return out, skipped, scanner.Err()
 }
 
 // ReadAcks loads acks.json. A missing file reads as no acks with no error.
