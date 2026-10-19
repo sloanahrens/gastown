@@ -32,7 +32,7 @@ func TestCrewAtRespawnSparesCallerPane(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			srv := tmuxfake.New(clockwork.NewFakeClock())
+			srv := tmuxfake.New(clockwork.NewFakeClockAt(awaitEventTestEpoch))
 			if err := srv.NewSession(session, t.TempDir()); err != nil {
 				t.Fatal(err)
 			}
