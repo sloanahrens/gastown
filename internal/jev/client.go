@@ -4,7 +4,7 @@
 //
 // The API key comes from a 0600 key file (see KeyPaths) and appears in
 // neither errors nor logs; the client logs nothing, and request bodies are
-// never echoed.
+// never echoed. The usage ledger (WithLedger) records token counts alone.
 package jev
 
 import (
@@ -53,6 +53,13 @@ type Client struct {
 	key        string
 	keyPaths   []string
 	timeout    time.Duration
+
+	// ledgerPath, caller and warnings configure the usage ledger; ledger is
+	// built from them by NewClient, and nil when no path is set.
+	ledgerPath string
+	caller     string
+	warnings   io.Writer
+	ledger     *ledger
 }
 
 // Option configures a Client.
@@ -90,6 +97,12 @@ func NewClient(opts ...Option) (*Client, error) {
 	}
 	if c.httpClient == nil {
 		c.httpClient = http.DefaultClient
+	}
+	if c.caller == "" {
+		c.caller = defaultCaller
+	}
+	if c.ledgerPath != "" {
+		c.ledger = &ledger{path: c.ledgerPath, caller: c.caller, warnings: c.warnings}
 	}
 	if c.key != "" {
 		return c, nil
@@ -202,7 +215,12 @@ func (c *Client) Choice(ctx context.Context, state any, instructions string, cri
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
 		return nil, &StatusError{Status: resp.StatusCode, Message: c.message(data)}
 	}
-	return parseAnswer(data, criteria)
+	ans, err := parseAnswer(data, criteria)
+	if err != nil {
+		return nil, err
+	}
+	c.ledger.record(ans.Usage)
+	return ans, nil
 }
 
 // parseAnswer decodes a 2xx body and returns ErrBadResponse when it does not

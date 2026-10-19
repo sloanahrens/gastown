@@ -99,10 +99,9 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
-// jevServer answers every Choice with confidence .9: needs-you for red:one,
+// jevTransport answers every Choice with confidence .9: needs-you for red:one,
 // noise for everything else. It counts the calls.
-func jevServer(t *testing.T) (*jev.Client, *atomic.Int32) {
-	t.Helper()
+func jevTransport() (http.RoundTripper, *atomic.Int32) {
 	var n atomic.Int32
 	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		n.Add(1)
@@ -127,10 +126,17 @@ func jevServer(t *testing.T) (*jev.Client, *atomic.Int32) {
 			Body: io.NopCloser(bytes.NewReader(data)), Request: r,
 		}, nil
 	})
+	return rt, &n
+}
+
+// jevServer is jevTransport behind a client, for the replay tests.
+func jevServer(t *testing.T) (*jev.Client, *atomic.Int32) {
+	t.Helper()
+	rt, n := jevTransport()
 	c, err := jev.NewClient(jev.WithKey("test-key"), jev.WithBaseURL("http://jev.test/v1/systemone"),
 		jev.WithHTTPClient(&http.Client{Transport: rt}))
 	require.NoError(t, err)
-	return c, &n
+	return c, n
 }
 
 func TestAttentionJevReplayReportsFixtureNumbers(t *testing.T) {
@@ -245,6 +251,38 @@ func TestAttentionJevReplayRefusesOutUnderTheAttentionDirectory(t *testing.T) {
 	link := filepath.Join(t.TempDir(), "link")
 	require.NoError(t, os.Symlink(dir, link))
 	assert.Error(t, checkJevReplayOut(town, filepath.Join(link, "report.txt")))
+}
+
+func TestAttentionJevReplayRecordsUsageInTheTownLedger(t *testing.T) {
+	t.Parallel()
+	town := jevReplayTown(t)
+	rt, _ := jevTransport()
+	var warnings bytes.Buffer
+	c, err := newJevReplayClient(town, &warnings,
+		jev.WithKey("test-key"), jev.WithBaseURL("http://jev.test/v1/systemone"),
+		jev.WithHTTPClient(&http.Client{Transport: rt}))
+	require.NoError(t, err)
+
+	var buf bytes.Buffer
+	opts := jevreplay.Options{Floor: 0.7, MaxSpendUSD: 5, USDPerBillionTokens: 42}
+	require.NoError(t, attentionJevReplay(context.Background(), &buf, town, c, opts, ""))
+
+	path := jev.UsageLedgerPath(town)
+	assert.Equal(t, filepath.Join(town, ".runtime", "jev", "usage.jsonl"), path,
+		"the ledger sits under the town, so a test town never writes the real one")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	require.Len(t, lines, 4, "one line per call, and the escalation is decided by kind with no call")
+	for _, line := range lines {
+		var rec jev.LedgerRecord
+		require.NoError(t, json.Unmarshal([]byte(line), &rec), line)
+		assert.Equal(t, jevReplayCaller, rec.Caller)
+		assert.Equal(t, 400, rec.InputTokens)
+		assert.Equal(t, 100, rec.OutputTokens)
+		assert.False(t, rec.TS.IsZero())
+	}
+	assert.Empty(t, warnings.String())
 }
 
 func TestAttentionJevReplayIsHiddenUnderAttention(t *testing.T) {
