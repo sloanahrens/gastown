@@ -158,7 +158,7 @@ like the watch feed's, so --rig does not narrow them.
 With -f, one dim "📊" line reports the town's state: the seats in use against
 the cap with the polecat:bead pairs holding them, the beads waiting to land,
 origin/main against the binary you are running, the open escalations, and the
-DeepSeek rate when ~/.runtime/watch/spend.json was written in the last fifteen
+DeepSeek rate when <town>/.runtime/watch/spend.json was written in the last fifteen
 minutes. It prints on the first poll, then only when one of those fields moves
 and at most once every five minutes; a field that cannot be read is left out.
 The line also carries the town's shipping speed: the median
