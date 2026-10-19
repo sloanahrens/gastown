@@ -1460,3 +1460,327 @@ func TestEffectiveTheme(t *testing.T) {
 		})
 	}
 }
+
+func TestNamePool_AllocateForBindsName(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	pool := NewNamePoolWithConfig(tmpDir, "testrig", "mad-max", nil, DefaultPoolSize)
+
+	name, err := pool.AllocateFor("claude-sonnet")
+	if err != nil {
+		t.Fatalf("AllocateFor: %v", err)
+	}
+	if name != "furiosa" {
+		t.Fatalf("AllocateFor drew %q, want furiosa", name)
+	}
+	if got := pool.ModelOf(name); got != "claude-sonnet" {
+		t.Errorf("ModelOf(%q) = %q, want claude-sonnet", name, got)
+	}
+}
+
+// TestNamePool_FreedNameReturnsOnlyToItsModel pins the naming decision
+// (gt-m9dty): names are kept as separate lists per model, so a freed Sonnet
+// name is drawn by the next Sonnet seat and never by another model.
+func TestNamePool_FreedNameReturnsOnlyToItsModel(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	pool := NewNamePoolWithConfig(tmpDir, "testrig", "mad-max", nil, DefaultPoolSize)
+
+	sonnetName, err := pool.AllocateFor("claude-sonnet")
+	if err != nil {
+		t.Fatalf("AllocateFor(sonnet): %v", err)
+	}
+	flashName, err := pool.AllocateFor("deepseek-flash")
+	if err != nil {
+		t.Fatalf("AllocateFor(flash): %v", err)
+	}
+	if sonnetName != "furiosa" || flashName != "nux" {
+		t.Fatalf("allocation = %q, %q; want furiosa, nux", sonnetName, flashName)
+	}
+
+	pool.Release(sonnetName)
+
+	// Furiosa is free, but bound to Sonnet: flash draws past it.
+	next, err := pool.AllocateFor("deepseek-flash")
+	if err != nil {
+		t.Fatalf("AllocateFor(flash) after release: %v", err)
+	}
+	if next == sonnetName {
+		t.Fatalf("flash was handed %q, a name bound to claude-sonnet", next)
+	}
+	if next != "slit" {
+		t.Fatalf("flash drew %q, want slit", next)
+	}
+
+	back, err := pool.AllocateFor("claude-sonnet")
+	if err != nil {
+		t.Fatalf("AllocateFor(sonnet) after release: %v", err)
+	}
+	if back != sonnetName {
+		t.Fatalf("sonnet drew %q, want its freed name %q", back, sonnetName)
+	}
+}
+
+// TestNamePool_UnboundAllocateLeavesNamesForModels: a caller that names no
+// model (pool init, an identity add) draws only names no model has claimed.
+func TestNamePool_UnboundAllocateLeavesNamesForModels(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	pool := NewNamePoolWithConfig(tmpDir, "testrig", "mad-max", nil, 2)
+
+	for _, model := range []string{"claude-sonnet", "deepseek-flash"} {
+		if _, err := pool.AllocateFor(model); err != nil {
+			t.Fatalf("AllocateFor(%s): %v", model, err)
+		}
+	}
+
+	name, err := pool.Allocate()
+	if err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	if name != "3" {
+		t.Fatalf("Allocate drew %q, want overflow 3: both themed names are bound", name)
+	}
+}
+
+func TestNamePool_BindingSurvivesLoad(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	pool := NewNamePoolWithConfig(tmpDir, "testrig", "mad-max", nil, DefaultPoolSize)
+
+	name, err := pool.AllocateFor("Claude-Sonnet")
+	if err != nil {
+		t.Fatalf("AllocateFor: %v", err)
+	}
+	if err := pool.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	reloaded := NewNamePoolWithConfig(tmpDir, "testrig", "mad-max", nil, DefaultPoolSize)
+	if err := reloaded.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := reloaded.ModelOf(name); got != "claude-sonnet" {
+		t.Fatalf("ModelOf(%q) after reload = %q, want claude-sonnet", name, got)
+	}
+	// InUse is derived from the filesystem, so the reloaded pool must not hand
+	// the name back to another model even though nothing marks it in use.
+	other, err := reloaded.AllocateFor("deepseek-flash")
+	if err != nil {
+		t.Fatalf("AllocateFor(flash): %v", err)
+	}
+	if other == name {
+		t.Fatalf("flash was handed %q, a name bound to claude-sonnet across a restart", name)
+	}
+}
+
+func TestNamePool_BindRefusesAnotherModel(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	pool := NewNamePoolWithConfig(tmpDir, "testrig", "mad-max", nil, DefaultPoolSize)
+
+	if _, err := pool.AllocateFor("claude-sonnet"); err != nil {
+		t.Fatalf("AllocateFor: %v", err)
+	}
+	if err := pool.Bind("furiosa", "deepseek-flash"); err == nil {
+		t.Fatal("Bind moved a name to a second model; want a refusal")
+	}
+	if got := pool.ModelOf("furiosa"); got != "claude-sonnet" {
+		t.Fatalf("ModelOf(furiosa) = %q after refused rebind, want claude-sonnet", got)
+	}
+	// The same model under different case or spacing is the same model.
+	if err := pool.Bind("furiosa", " claude-sonnet "); err != nil {
+		t.Fatalf("Bind to the same model: %v", err)
+	}
+}
+
+// TestNamePool_OverflowNamesAreNotBound: an overflow name is drawn once and
+// never handed out again, so binding it would only grow the state file
+// forever (gt-m9dty).
+func TestNamePool_OverflowNamesAreNotBound(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	pool := NewNamePoolWithConfig(tmpDir, "testrig", "mad-max", nil, 1)
+
+	if _, err := pool.AllocateFor("claude-sonnet"); err != nil {
+		t.Fatalf("AllocateFor(sonnet): %v", err)
+	}
+	overflow, err := pool.AllocateFor("deepseek-flash")
+	if err != nil {
+		t.Fatalf("AllocateFor(flash): %v", err)
+	}
+	if overflow != "2" {
+		t.Fatalf("AllocateFor drew %q, want overflow 2", overflow)
+	}
+	if got := pool.ModelOf(overflow); got != "" {
+		t.Fatalf("ModelOf(%q) = %q; overflow names are not bound", overflow, got)
+	}
+	if err := pool.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(tmpDir, ".runtime", "namepool-state.json"))
+	if err != nil {
+		t.Fatalf("reading pool state: %v", err)
+	}
+	if strings.Contains(string(data), "deepseek-flash") {
+		t.Fatalf("the overflow name's model was persisted; bindings would grow without bound:\n%s", data)
+	}
+}
+
+func TestNamePool_SeatNamesAreAllocatedToTheirAgent(t *testing.T) {
+	t.Parallel()
+	pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "mad-max", nil, DefaultPoolSize)
+	pool.SetSeatNames(map[string][]string{"claude-haiku": {"kestrel", "merlin"}})
+
+	first, err := pool.AllocateFor("claude-haiku")
+	if err != nil {
+		t.Fatalf("AllocateFor: %v", err)
+	}
+	second, err := pool.AllocateFor("Claude-Haiku")
+	if err != nil {
+		t.Fatalf("AllocateFor: %v", err)
+	}
+	if first != "kestrel" || second != "merlin" {
+		t.Fatalf("haiku drew %q, %q; want kestrel, merlin", first, second)
+	}
+	for _, name := range []string{first, second} {
+		if got := pool.ModelOf(name); got != "claude-haiku" {
+			t.Errorf("ModelOf(%q) = %q, want claude-haiku", name, got)
+		}
+	}
+}
+
+func TestNamePool_SeatNameIsNeverAllocatedToAnotherAgent(t *testing.T) {
+	t.Parallel()
+	// Furiosa is a themed name; the haiku seat lists it, so it is haiku's alone.
+	pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "mad-max", nil, DefaultPoolSize)
+	pool.SetSeatNames(map[string][]string{"claude-haiku": {"kestrel", "furiosa"}})
+
+	for _, model := range []string{"claude-sonnet", "deepseek-flash", ""} {
+		for i := 0; i < 3; i++ {
+			name, err := pool.AllocateFor(model)
+			if err != nil {
+				t.Fatalf("AllocateFor(%q): %v", model, err)
+			}
+			if name == "kestrel" || name == "furiosa" {
+				t.Fatalf("AllocateFor(%q) drew %q, a name the haiku seat lists", model, name)
+			}
+		}
+	}
+	if err := pool.Bind("kestrel", "claude-sonnet"); err == nil {
+		t.Fatal("Bind gave haiku's listed name to sonnet; want a refusal")
+	}
+	if err := pool.Bind("kestrel", "claude-haiku"); err != nil {
+		t.Fatalf("Bind to the listing seat: %v", err)
+	}
+}
+
+func TestNamePool_BoundSeatNameComesBackOnlyToItsAgent(t *testing.T) {
+	t.Parallel()
+	pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "mad-max", nil, DefaultPoolSize)
+	pool.SetSeatNames(map[string][]string{"claude-haiku": {"kestrel", "merlin"}})
+
+	name, err := pool.AllocateFor("claude-haiku")
+	if err != nil || name != "kestrel" {
+		t.Fatalf("AllocateFor = %q, %v; want kestrel", name, err)
+	}
+	pool.Release(name)
+
+	other, err := pool.AllocateFor("claude-sonnet")
+	if err != nil {
+		t.Fatalf("AllocateFor(sonnet): %v", err)
+	}
+	if other == "kestrel" {
+		t.Fatal("a freed bound name went to another agent")
+	}
+	back, err := pool.AllocateFor("claude-haiku")
+	if err != nil || back != "kestrel" {
+		t.Fatalf("haiku drew %q, %v; want its freed name kestrel", back, err)
+	}
+}
+
+func TestNamePool_SeatWithoutListUsesThemedDefault(t *testing.T) {
+	t.Parallel()
+	pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "mad-max", nil, DefaultPoolSize)
+	pool.SetSeatNames(map[string][]string{"claude-haiku": {"kestrel"}})
+
+	name, err := pool.AllocateFor("deepseek-flash")
+	if err != nil {
+		t.Fatalf("AllocateFor: %v", err)
+	}
+	if name != "furiosa" {
+		t.Fatalf("a seat with no list drew %q, want the themed default furiosa", name)
+	}
+	if got := pool.ModelOf(name); got != "deepseek-flash" {
+		t.Errorf("ModelOf(%q) = %q, want deepseek-flash", name, got)
+	}
+}
+
+func TestNamePool_SpentSeatListFallsBackToThemedDefault(t *testing.T) {
+	t.Parallel()
+	pool := NewNamePoolWithConfig(t.TempDir(), "testrig", "mad-max", nil, DefaultPoolSize)
+	pool.SetSeatNames(map[string][]string{"claude-haiku": {"kestrel"}})
+
+	if _, err := pool.AllocateFor("claude-haiku"); err != nil {
+		t.Fatalf("AllocateFor: %v", err)
+	}
+	name, err := pool.AllocateFor("claude-haiku")
+	if err != nil {
+		t.Fatalf("AllocateFor with a spent list: %v", err)
+	}
+	if name != "furiosa" {
+		t.Fatalf("a spent list drew %q, want the themed default furiosa", name)
+	}
+}
+
+func TestNamePool_ExistingBindingsSurviveSeatNames(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// A pool state written before any seat lists its names.
+	old := NewNamePoolWithConfig(dir, "testrig", "mad-max", nil, DefaultPoolSize)
+	if err := old.Bind("furiosa", "claude-sonnet"); err != nil {
+		t.Fatalf("Bind: %v", err)
+	}
+	if err := old.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	// The haiku seat now lists furiosa, but the binding keeps it with sonnet.
+	pool := NewNamePoolWithConfig(dir, "testrig", "mad-max", nil, DefaultPoolSize)
+	pool.SetSeatNames(map[string][]string{"claude-haiku": {"furiosa", "kestrel"}})
+	if err := pool.Load(); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if got := pool.ModelOf("furiosa"); got != "claude-sonnet" {
+		t.Fatalf("ModelOf(furiosa) = %q after Load, want claude-sonnet", got)
+	}
+	haiku, err := pool.AllocateFor("claude-haiku")
+	if err != nil || haiku != "kestrel" {
+		t.Fatalf("haiku drew %q, %v; want kestrel, not the name bound to sonnet", haiku, err)
+	}
+	sonnet, err := pool.AllocateFor("claude-sonnet")
+	if err != nil || sonnet != "furiosa" {
+		t.Fatalf("sonnet drew %q, %v; want its bound furiosa", sonnet, err)
+	}
+}
+
+func TestNamePool_SeatNamesAreNotPersisted(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	pool := NewNamePoolWithConfig(dir, "testrig", "mad-max", nil, DefaultPoolSize)
+	pool.SetSeatNames(map[string][]string{"claude-haiku": {"kestrel"}})
+	if _, err := pool.AllocateFor("claude-haiku"); err != nil {
+		t.Fatalf("AllocateFor: %v", err)
+	}
+	if err := pool.Save(); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".runtime", "namepool-state.json"))
+	if err != nil {
+		t.Fatalf("reading pool state: %v", err)
+	}
+	if strings.Contains(string(data), "seat") {
+		t.Fatalf("seat lists are configuration and must not reach the state file:\n%s", data)
+	}
+}

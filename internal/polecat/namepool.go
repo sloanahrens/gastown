@@ -115,6 +115,19 @@ type NamePool struct {
 	// MaxSize is the maximum number of themed names before overflow.
 	MaxSize int `json:"max_size"`
 
+	// Bindings maps a name to the model its slot was first allocated to. The
+	// binding outlives the polecat: a freed name comes back only to a seat of
+	// its own model, which is what keeps a rig's names meaningful per model
+	// (gt-m9dty). A name with no binding either predates the rule or has not
+	// been allocated with a model yet: it is anyone's, and the first
+	// allocation that names a model binds it for good. That is why reconcile
+	// never invents a binding from a last-slung agent bead.
+	Bindings map[string]string `json:"bindings,omitempty"`
+
+	// SeatNames maps a normalized agent name to the names its seat lists.
+	// Configuration from polecat_pool.seats, never persisted (SetSeatNames).
+	SeatNames map[string][]string `json:"-"`
+
 	// stateFile is the path to persist pool state.
 	stateFile string
 
@@ -128,6 +141,7 @@ func NewNamePool(rigPath, rigName string) *NamePool {
 		RigName:      rigName,
 		Theme:        ThemeForRig(rigName),
 		InUse:        make(map[string]bool),
+		Bindings:     make(map[string]string),
 		OverflowNext: DefaultPoolSize + 1,
 		MaxSize:      DefaultPoolSize,
 		stateFile:    filepath.Join(rigPath, ".runtime", "namepool-state.json"),
@@ -148,6 +162,7 @@ func NewNamePoolWithConfig(rigPath, rigName, theme string, customNames []string,
 		Theme:        theme,
 		CustomNames:  customNames,
 		InUse:        make(map[string]bool),
+		Bindings:     make(map[string]string),
 		OverflowNext: maxSize + 1,
 		MaxSize:      maxSize,
 		stateFile:    filepath.Join(rigPath, ".runtime", "namepool-state.json"),
@@ -208,6 +223,7 @@ func (p *NamePool) Load() error {
 		if os.IsNotExist(err) {
 			// Initialize with empty state
 			p.InUse = make(map[string]bool)
+			p.Bindings = make(map[string]string)
 			p.OverflowNext = p.MaxSize + 1
 			return nil
 		}
@@ -223,6 +239,10 @@ func (p *NamePool) Load() error {
 	}
 
 	p.InUse = make(map[string]bool)
+	p.Bindings = loaded.Bindings
+	if p.Bindings == nil {
+		p.Bindings = make(map[string]string)
+	}
 
 	p.OverflowNext = loaded.OverflowNext
 	if p.OverflowNext < p.MaxSize+1 {
@@ -238,14 +258,16 @@ func (p *NamePool) Load() error {
 // namePoolState is the subset of NamePool that is persisted to the state file.
 // Only runtime state is saved, not configuration (Theme, CustomNames come from settings).
 type namePoolState struct {
-	RigName      string `json:"rig_name"`
-	OverflowNext int    `json:"overflow_next"`
-	MaxSize      int    `json:"max_size"`
+	RigName      string            `json:"rig_name"`
+	OverflowNext int               `json:"overflow_next"`
+	MaxSize      int               `json:"max_size"`
+	Bindings     map[string]string `json:"bindings,omitempty"`
 }
 
 // Save persists the pool state to disk using atomic write.
-// Only runtime state (OverflowNext, MaxSize) is saved - configuration like
-// Theme and CustomNames come from settings/config.json and are not persisted here.
+// Only runtime state (OverflowNext, MaxSize, model bindings) is saved -
+// configuration like Theme and CustomNames come from settings/config.json and
+// are not persisted here.
 func (p *NamePool) Save() error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
@@ -260,38 +282,152 @@ func (p *NamePool) Save() error {
 		RigName:      p.RigName,
 		OverflowNext: p.OverflowNext,
 		MaxSize:      p.MaxSize,
+		Bindings:     p.Bindings,
 	}
 
 	return atomicfile.WriteJSON(p.stateFile, state)
 }
 
-// Allocate returns a name from the pool.
-// It prefers names in order from the theme list, and falls back to overflow names
-// when the pool is exhausted.
+// Allocate returns an unbound name from the pool: one no model has claimed.
+// Seats whose model is known allocate with AllocateFor so the name is bound
+// to that model.
 func (p *NamePool) Allocate() (string, error) {
+	return p.AllocateFor("")
+}
+
+// AllocateFor returns a name for a seat on model, binding the name to it.
+// A name bound to another model is never handed out, and an unbound name is
+// bound by being allocated. Names are taken in theme order; overflow names
+// back the pool when no eligible themed name is free.
+func (p *NamePool) AllocateFor(model string) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	model = normalizeModel(model)
+
+	// A seat with a names list draws from it first. A seat with none, or whose
+	// list is spent, falls through to the themed default below.
+	for _, name := range p.SeatNames[model] {
+		if p.InUse[name] || !p.eligibleForLocked(name, model) {
+			continue
+		}
+		p.InUse[name] = true
+		p.Bindings[name] = model
+		return name, nil
+	}
 
 	names := p.getNames()
 
 	// Try to find first available name from the theme
 	for i := 0; i < len(names) && i < p.MaxSize; i++ {
 		name := names[i]
-		if !p.InUse[name] {
-			p.InUse[name] = true
-			return name, nil
+		if p.InUse[name] || !p.eligibleForLocked(name, model) {
+			continue
 		}
+		p.InUse[name] = true
+		if model != "" {
+			p.Bindings[name] = model
+		}
+		return name, nil
 	}
 
-	// Pool exhausted, use overflow naming
+	// Pool exhausted, use overflow naming. An overflow name is drawn once and
+	// never handed out again (Release is a no-op for it), so it is not bound:
+	// a binding could only grow the state file, never protect the name
+	// (gt-m9dty).
 	name := p.formatOverflowName(p.OverflowNext)
 	p.OverflowNext++
 	return name, nil
 }
 
+// eligibleForLocked reports whether the seat on model may take name. A bound
+// name belongs to its model alone, and that binding outranks a seat list: a
+// name bound before the list named it stays with the model it was bound to. An
+// unbound name is anyone's unless another seat lists it.
+func (p *NamePool) eligibleForLocked(name, model string) bool {
+	if bound := p.Bindings[name]; bound != "" {
+		return model != "" && sameModel(bound, model)
+	}
+	return !p.reservedForOtherLocked(name, model)
+}
+
+// reservedForOtherLocked reports whether a seat other than model lists name.
+func (p *NamePool) reservedForOtherLocked(name, model string) bool {
+	for agent, names := range p.SeatNames {
+		if agent == model {
+			continue
+		}
+		for _, n := range names {
+			if n == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// SetSeatNames sets the names each seat lists, keyed by agent. A listed name
+// is allocated only to its seat's agent. It is configuration, read from the
+// seat map and not persisted; an agent absent from the map draws from the
+// themed default.
+func (p *NamePool) SetSeatNames(seatNames map[string][]string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.SeatNames = make(map[string][]string, len(seatNames))
+	for agent, names := range seatNames {
+		if agent = normalizeModel(agent); agent != "" && len(names) > 0 {
+			p.SeatNames[agent] = append([]string(nil), names...)
+		}
+	}
+}
+
+// Bind records model as the model of name. It reports an error when the name
+// is already bound to another model: a name keeps the model its slot was
+// first allocated to.
+func (p *NamePool) Bind(name, model string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.bindLocked(name, model)
+}
+
+func (p *NamePool) bindLocked(name, model string) error {
+	model = normalizeModel(model)
+	if name == "" || model == "" {
+		return nil
+	}
+	if bound := p.Bindings[name]; bound != "" && !sameModel(bound, model) {
+		return fmt.Errorf("name %q is bound to %s, not %s", name, bound, model)
+	}
+	if p.Bindings[name] == "" && p.reservedForOtherLocked(name, model) {
+		return fmt.Errorf("name %q is listed by another seat, not %s", name, model)
+	}
+	p.Bindings[name] = model
+	return nil
+}
+
+// ModelOf returns the model name is bound to, or "" when it has none.
+func (p *NamePool) ModelOf(name string) string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.Bindings[name]
+}
+
+// normalizeModel is the form bindings are stored and compared in, so a model
+// named with stray case or space cannot masquerade as a second model.
+func normalizeModel(model string) string {
+	return strings.ToLower(strings.TrimSpace(model))
+}
+
+// sameModel compares two already-normalized-or-not model names.
+func sameModel(a, b string) bool {
+	return normalizeModel(a) == normalizeModel(b)
+}
+
 // Release returns a name slot to the available pool.
 // Called when a polecat is nuked - the name becomes available for new polecats.
 // NOTE: This releases the NAME, not the polecat. The polecat is gone (nuked).
+// The model binding is kept: the freed name remains its model's.
 // For overflow names, this is a no-op (they are not reusable).
 func (p *NamePool) Release(name string) {
 	p.mu.Lock()
@@ -304,12 +440,19 @@ func (p *NamePool) Release(name string) {
 	// Overflow names are not reusable, so we don't track them
 }
 
-// isThemedName checks if a name is in the theme pool.
+// isThemedName checks if a name is in the theme pool or listed by a seat.
 func (p *NamePool) isThemedName(name string) bool {
 	names := p.getNames()
 	for _, n := range names {
 		if n == name {
 			return true
+		}
+	}
+	for _, seatNames := range p.SeatNames {
+		for _, n := range seatNames {
+			if n == name {
+				return true
+			}
 		}
 	}
 	return false
@@ -338,6 +481,13 @@ func (p *NamePool) ActiveNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// IsInUse reports whether name is currently marked in use.
+func (p *NamePool) IsInUse(name string) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.InUse[name]
 }
 
 // MarkInUse marks a name as in use (for reconciling with existing polecats).
@@ -782,11 +932,12 @@ func (p *NamePool) AddCustomName(name string) {
 	p.CustomNames = append(p.CustomNames, name)
 }
 
-// Reset clears the pool state, releasing all names.
+// Reset clears the pool state, releasing all names and their model bindings.
 func (p *NamePool) Reset() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	p.InUse = make(map[string]bool)
+	p.Bindings = make(map[string]string)
 	p.OverflowNext = p.MaxSize + 1
 }
