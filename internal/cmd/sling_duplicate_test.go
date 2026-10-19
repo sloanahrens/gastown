@@ -186,6 +186,31 @@ func TestExtractOverlapRefsIgnoresPlanDocuments(t *testing.T) {
 			wantFiles: []string{},
 		},
 		{
+			name:      "a plan in a subdirectory of docs/plans is dropped",
+			text:      "Plan: docs/plans/2026-10/epic-plan.md.",
+			wantFiles: []string{},
+		},
+		{
+			name:      "a parent-relative spelling of the plan is dropped too",
+			text:      "../" + plan,
+			wantFiles: []string{},
+		},
+		{
+			name:      "a sibling directory sharing the prefix text still counts",
+			text:      "See docs/plans-archive/old-plan.md.",
+			wantFiles: []string{"docs/plans-archive/old-plan.md"},
+		},
+		{
+			name:      "a file named plans beside docs still counts",
+			text:      "See docs/plans.md.",
+			wantFiles: []string{"docs/plans.md"},
+		},
+		{
+			name:      "a plan cited twice and a code path cited once keep only the code path",
+			text:      plan + " and again " + plan + ", fix in internal/cmd/sling.go",
+			wantFiles: []string{"internal/cmd/sling.go"},
+		},
+		{
 			name:      "design docs outside docs/plans still count",
 			text:      "See docs/design/2026-10-19-epic-design.md.",
 			wantFiles: []string{"docs/design/2026-10-19-epic-design.md"},
@@ -472,6 +497,35 @@ func TestCheckSlingDuplicatesSkipsBareBead(t *testing.T) {
 	}
 	if fetched != 0 {
 		t.Errorf("expected no pool fetch for a bead with no references, got %d", fetched)
+	}
+}
+
+// A bead whose only file reference is a plan document has nothing left to
+// compare once the plan is dropped (gt-4wb27), so it is not guarded: no
+// candidate, no pool fetch. This is the intended cost of letting siblings share
+// a plan, pinned so a change to it is deliberate.
+func TestCheckSlingDuplicatesSkipsBeadNamingOnlyAPlan(t *testing.T) {
+	t.Parallel()
+	fetched := 0
+	pools := newDuplicatePools(func(string) ([]duplicateCandidate, error) {
+		fetched++
+		return nil, nil
+	}, noPeerHolds)
+
+	info := &beadInfo{
+		Title:       "Implement step 2 of the epic",
+		Status:      "open",
+		Description: "Plan: docs/plans/2026-10-19-epic-plan.md",
+	}
+	candidate, matches, err := pools.check(t.TempDir(), "gt-plan-only", info)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+	if candidate != nil || matches != nil {
+		t.Errorf("a bead naming only a plan should skip the check, got %+v %+v", candidate, matches)
+	}
+	if fetched != 0 {
+		t.Errorf("expected no pool fetch for a plan-only bead, got %d", fetched)
 	}
 }
 
