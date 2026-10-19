@@ -1,4 +1,4 @@
-> Status: approved by Sloan 2026-10-19; pilot not started. Bead gt-sxg5u.
+> Status: historical (2026-10). Merged in: gt-sxg5u. Not maintained.
 
 # Jev advisory triage for the attention queue (pilot design)
 

@@ -1,4 +1,4 @@
-> Status: approved by Sloan 2026-10-19; task beads released in dependency order. Bead gt-sxg5u.
+> Status: historical (2026-10). Merged in: gt-sxg5u. Not maintained.
 
 # Jev advisory triage: implementation plan
 
