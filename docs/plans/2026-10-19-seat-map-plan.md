@@ -36,6 +36,7 @@
 | `internal/cmd/pool.go`, `pool_seats.go`, `pool_mix.go` | `gt pool show`, `gt pool set`; `gt pool mix` removed | 4 |
 | `internal/daemon/scheduled_slings_spec.go` | spec entries take no agent pin | 5 |
 | `internal/land/land.go` | `LandingRecord.Agent` | 6 |
+| `internal/cmd/dashboard_models.go` | landings and rejections per agent in the models panel | 6 |
 | `internal/config/parse_error.go`, `internal/cmd/pool_migrate.go` | retired-key messages, `gt pool migrate` | 7 |
 | `internal/polecat/namepool.go` | per-seat names and the agent binding | 8 |
 | `docs/guides/spec-dispatcher.md` | rewritten seat section | 9 |
@@ -77,6 +78,10 @@ type Window struct {
 	StartMin, EndMin int // minutes after local midnight
 	Loc              *time.Location
 }
+
+// UnknownSeatAgent is the roster's key for a polecat that records no agent on
+// a map with several seats (Task 3). It names no seat, so Seats rejects it.
+const UnknownSeatAgent = "(unrecorded)"
 
 // Seats returns the town's seats sorted by agent name. known reports whether
 // an agent name resolves (the agents map or a built-in preset).
@@ -127,12 +132,13 @@ func TestSeatsSortedAndValidated(t *testing.T) {
 
 func TestSeatsRejects(t *testing.T) {
 	cases := map[string]PolecatPool{
-		"unknown agent":    {Seats: map[string]SeatConfig{"nope": {Cap: 1}}},
-		"negative cap":     {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: -1}}},
-		"bad window":       {Timezone: "America/Chicago", Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "8pm-8am"}}},
-		"window, no zone":  {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "20:00-08:00"}}},
-		"bad zone":         {Timezone: "Mars/Olympus", Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "20:00-08:00"}}},
-		"name in two seats": {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Names: []string{"nux"}}, "claude-haiku": {Cap: 1, Names: []string{"nux"}}}},
+		"unknown agent":      {Seats: map[string]SeatConfig{"nope": {Cap: 1}}},
+		"the unrecorded key": {Seats: map[string]SeatConfig{UnknownSeatAgent: {Cap: 1}}},
+		"negative cap":       {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: -1}}},
+		"bad window":         {Timezone: "America/Chicago", Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "8pm-8am"}}},
+		"window, no zone":    {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "20:00-08:00"}}},
+		"bad zone":           {Timezone: "Mars/Olympus", Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "20:00-08:00"}}},
+		"name in two seats":  {Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Names: []string{"nux"}}, "claude-haiku": {Cap: 1, Names: []string{"nux"}}}},
 	}
 	for name, pool := range cases {
 		pool := pool
@@ -253,6 +259,9 @@ func Seats(ts *TownSettings, known func(string) bool) ([]Seat, error) {
 	out := make([]Seat, 0, len(agents))
 	for _, a := range agents {
 		c := pool.Seats[a]
+		if a == UnknownSeatAgent {
+			return nil, fmt.Errorf("polecat_pool.seats.%s: that key counts polecats that record no agent, and names no seat", a)
+		}
 		if !known(a) {
 			return nil, fmt.Errorf("polecat_pool.seats.%s: no agent of that name in agents or the built-in presets", a)
 		}
@@ -303,7 +312,7 @@ Expected: PASS.
 
 **Files:**
 - Modify: `internal/specdispatch/dispatch.go` (`Seat`, `Free`, `reason`, the pinned-bead wait reason)
-- Modify: `internal/cmd/spec.go` (`specBudgetFromConfig`)
+- Modify: `internal/cmd/spec.go` (`specBudgetFor`, `specBudgetFromSeats`, and the tick that builds the budget)
 - Test: `internal/specdispatch/dispatch_test.go`, `internal/cmd/spec_test.go`
 
 **Interfaces:**
@@ -385,10 +394,10 @@ Expected: FAIL on the missing fields and function.
 
 In `dispatch.go`, make `Free` return false when `s.Closed`, and give the reason for a closed seat as `fmt.Sprintf("seat %s closed until %s", s.Agent, s.OpensAt.Format("15:04"))`. The pinned-bead path must return that reason, not fall through to another agent.
 
-In `spec.go`, add `specBudgetFromSeats(ts, now, known)` and have `specBudgetFromConfig` call it when `ts.PolecatPool.Seats` is non-empty, keeping the old path for a file without `seats` until Task 7:
+In `spec.go`, add `specBudgetFromSeats(ts, now, known) (specdispatch.Budget, error)` and have `specBudgetFor` choose it when `ts.PolecatPool.Seats` is non-empty, keeping the old path for a file without `seats` until Task 7. `specBudgetFor` returns the error too, and the tick stops on it: `gt spec dispatch` exits non-zero with `reading the seat map: <loader message>` and the daemon logs `spec_dispatch: tick failed: reading the seat map: <loader message>`. An empty budget returned in silence would read as a town with no work and hide the broken config that caused it.
 
 ```go
-func specBudgetFromSeats(ts *config.TownSettings, now time.Time, known func(string) bool) specdispatch.Budget {
+func specBudgetFromSeats(ts *config.TownSettings, now time.Time, known func(string) bool) (specdispatch.Budget, error) {
 	var b specdispatch.Budget
 	pool := ts.PolecatPool
 	b.MinSpawnGap = pool.MinSpawnGapD()
@@ -396,8 +405,7 @@ func specBudgetFromSeats(ts *config.TownSettings, now time.Time, known func(stri
 	b.Now = now
 	seats, err := config.Seats(ts, known)
 	if err != nil {
-		// the daemon validated the file at start; a tick that cannot read it dispatches nothing
-		return b
+		return b, fmt.Errorf("reading the seat map: %w", err)
 	}
 	for _, s := range seats {
 		seat := specdispatch.Seat{Agent: s.Agent, Cap: s.Cap}
@@ -407,7 +415,7 @@ func specBudgetFromSeats(ts *config.TownSettings, now time.Time, known func(stri
 		}
 		b.Seats = append(b.Seats, seat)
 	}
-	return b
+	return b, nil
 }
 ```
 
@@ -428,6 +436,7 @@ Expected: PASS.
 - [ ] three agents in the map give three seats in the budget
 - [ ] a settings file with no `seats` key dispatches exactly as before
 - [ ] the daemon refuses to start on a seat map the loader rejects
+- [ ] a tick that meets a rejected seat map fails with `reading the seat map: <loader message>` and dispatches nothing, rather than reporting an empty budget
 
 ---
 
@@ -441,11 +450,11 @@ Expected: PASS.
 - Consumes: `config.Seats` (Task 1), `specdispatch.Budget.SetLive(map[string]int)`.
 - Produces: the roster's per-agent map keys are the agent each seat was spawned on (the agent bead's `Agent` field), so `SetLive` fills every seat in the map.
 
-- [ ] **Step 1: Write the failing test.** Build a roster with three live polecats whose agent beads record `claude-sonnet`, `claude-haiku` and `deepseek-flash`, and a sessionless one whose bead records `claude-haiku`. Assert the per-agent map is `{"claude-sonnet": 1, "claude-haiku": 2, "deepseek-flash": 1}`, not a count under the role default.
+- [ ] **Step 1: Write the failing test.** Build a roster with three live polecats whose agent beads record `claude-sonnet`, `claude-haiku` and `deepseek-flash`, and a sessionless one whose bead records `claude-haiku`. Assert the per-agent map is `{"claude-sonnet": 1, "claude-haiku": 2, "deepseek-flash": 1}`, not a count under the role default. A fourth polecat recording no agent, on a map with several seats, fills no seat's count, is returned in `Unrecorded`, and still counts in `LiveTotal`.
 
 - [ ] **Step 2: Run it and confirm it fails**, with `go test ./internal/daemon/ -run SeatLive -count=1`.
 
-- [ ] **Step 3: Implement.** Key the count on the agent bead's recorded agent. Where no agent is recorded, use the seat map's single agent if the map has exactly one seat, and otherwise count it under `"unknown"` and log it once per tick.
+- [ ] **Step 3: Implement.** Key the count on the agent bead's recorded agent. Where no agent is recorded, use the seat map's single agent if the map has exactly one seat; with several seats, count it under `config.UnknownSeatAgent` (`"(unrecorded)"`). That key is no seat: `SetLive` adds it to no seat and the choice never sees it, but it counts in `LiveTotal`, so it answers to `max_total`. The loader refuses a `seats` entry of that name (Task 1). The tick reports the bucket once per tick, naming the polecats: `roster: N polecat(s) record no agent and count under "(unrecorded)", on no seat: <names>`. `gt pool show` lists seats only, so that notice is where the bucket appears.
 
 - [ ] **Step 4: Run the tests**, `go test ./internal/daemon/ -count=1`, expect PASS.
 
@@ -454,7 +463,7 @@ Expected: PASS.
 **Acceptance:**
 - [ ] three agents' live polecats are each counted on their own seat
 - [ ] a sessionless seat counts under its recorded agent (the gt-2q283 case)
-- [ ] a polecat with no recorded agent is reported, not silently counted elsewhere
+- [ ] a polecat with no recorded agent fills no seat, counts toward `max_total`, and is named in the tick's notice
 
 ---
 
@@ -513,21 +522,28 @@ Expected: PASS.
 
 **Files:**
 - Modify: `internal/land/land.go` (`LandingRecord`, `record`, and where `Work` is built)
-- Test: `internal/land/land_test.go`
+- Modify: `internal/cmd/dashboard_models.go` (`modelsReader.agentActivity` and the panel that renders its rows)
+- Test: `internal/land/land_test.go`, `internal/cmd/dashboard_models_test.go`
 
 **Interfaces:**
 - Produces: `LandingRecord.Agent string` (`json:"agent,omitempty"`), and the bead's LANDING RECORD block gains a line `agent: <x>`.
+- Produces: `dashboard.AgentActivity{Agent, Landed, Rejected}` rows, one per agent with activity in the last 24 hours, rendered in the models panel.
 
 - [ ] **Step 1: Write the failing test:** a landing whose polecat's agent bead records `claude-haiku` writes `"agent":"claude-haiku"` to the landings file and `agent: claude-haiku` to the bead note.
 - [ ] **Step 2: Run it and confirm it fails**, `go test ./internal/land/ -run LandingRecordAgent -count=1`.
 - [ ] **Step 3: Implement.** Carry the agent in `Work` from the polecat's agent bead, and copy it into the record. A crew landing has no seat, so it writes no agent line.
 - [ ] **Step 4: Run the tests**, `go test ./internal/land/ -count=1`, expect PASS.
-- [ ] **Step 5: Commit** — `feat(land): record the agent each landing ran on (gt-mukgk)`
+- [ ] **Step 5: Write the failing dashboard test:** with two rigs' landings files and the town review log inside 24 hours, `agentActivity` returns one sorted row per agent with its landing and rejection counts; a record naming no agent credits nobody; a log with an entry outside the window contributes nothing.
+- [ ] **Step 6: Run it and confirm it fails**, `go test ./internal/cmd/ -run ModelsAgentActivity -count=1`.
+- [ ] **Step 7: Implement.** `agentActivity` reads `land.RigLandingsFile` for `hq` and each known rig and `land.TownReviewsFile`, keeps records at or after the reader's injected `now` minus `modelsActivityWindow` (24h), counts `Landed` per record `Agent` and `Rejected` per review `Agent` whose verdict is request-changes or whose record is flagged rejected, sorts the agents, and returns the union of both maps. A missing file is an empty window; one that cannot be read is returned by name so the panel can say which. The panel renders the rows beneath the seat rows.
+- [ ] **Step 8: Run the tests**, `go test ./internal/land/ ./internal/cmd/ -count=1`, expect PASS.
+- [ ] **Step 9: Commit** — `feat(land): record the agent each landing ran on (gt-mukgk)`
 
 **Acceptance:**
 - [ ] a polecat landing records its agent in the landings file and the bead note
 - [ ] a crew landing records no agent
-- [ ] the dashboard models panel (`internal/cmd/dashboard_models.go`) shows landings and rejections per agent over the last 24 hours, read from the landings file
+- [ ] the dashboard models panel (`internal/cmd/dashboard_models.go`) shows landings per agent from the landings files and rejections per agent from the town review log, over the last 24 hours
+- [ ] a record that names no agent adds nothing to any agent's row
 
 ---
 
@@ -544,7 +560,7 @@ Expected: PASS.
 
 - [ ] **Step 1: Write the failing tests.**
   - For each retired key, a settings file carrying it fails to load, with a message containing `was replaced by` and `gt pool migrate`.
-  - Golden files: `two-seat.json` (pool seat + second seat) migrates to a `seats` map with both caps; `pro-seat.json` drops the pro keys; `deep-review-pins.json` strips `agent` from spec entries. Running migrate on its own output changes nothing.
+  - Golden files: `two-seat.json` (pool seat + second seat) migrates to a `seats` map with both caps; `pro-seat.json` (pool and pro seats on different agents) becomes one entry per agent; `same-agent.json` (pool and pro seats on one agent) becomes one entry whose cap is the sum of the two caps; `deep-review-pins.json` strips `agent` from spec entries. Running migrate on its own output changes nothing.
 - [ ] **Step 2: Run them and confirm they fail**, `go test ./internal/config/ ./internal/cmd/ -run 'Retired|PoolMigrate' -count=1`.
 - [ ] **Step 3: Implement the messages.** In `parse_error.go`, when a `ParseError`'s `Keys` holds one of these paths, append the replacement:
 
@@ -563,7 +579,12 @@ var retiredSeatKeys = map[string]string{
 ```
 
 - [ ] **Step 4: Implement `gt pool migrate`.** It reads the file as raw JSON (a `map[string]any`), so the strict decoder's refusal does not stop it. It:
-  1. writes `seats[<agent>] = {"cap": <max_seats>}` for `polecat_pool.agent`, and the same for `hooked_agent`/`max_hooked`;
+  1. adds a cap to `seats[<agent>].cap` for each legacy seat that was in use, mirroring the order `specBudgetFromConfig` read them:
+     - the pool seat: `polecat_pool.agent`, capped at `max_seats`, or `defaultSpecSeatCap` when `max_seats` is unset or not above zero;
+     - the pro seat: `pro_agent`, capped at `pro_max`, only when `pro_agent` is set and `pro_max` is above zero;
+     - the second seat: `spec_dispatch.hooked_agent` (or `defaultSpecHookedAgent` when empty), capped at `max_hooked`, only when `max_hooked` is above zero.
+
+     Two legacy keys that name one agent add their caps, since they were independent pools and the merged seat must hold what both held. `pro_label` has no seat equivalent and is dropped; the bead's `agent:<name>` label replaces it. A legacy key naming an agent already present in `seats` stops the migration with nothing written and a message naming that agent, because a sum there would silently change a cap the operator set on the new key;
   2. removes the retired keys, and `agent` from `scheduled_slings` entries whose `dispatch` is `spec`;
   3. backs up the file as `config.json.bak-<UTC timestamp>-pool-migrate`, then writes the result atomically;
   4. prints each change, or "nothing to migrate".
@@ -575,7 +596,9 @@ var retiredSeatKeys = map[string]string{
 
 **Acceptance:**
 - [ ] every retired key fails to load with `was replaced by` and `gt pool migrate`
-- [ ] the three golden migrations match, and a second run changes nothing
+- [ ] the four golden migrations match, and a second run changes nothing
+- [ ] the pro seat migrates to a seat of its own; two legacy keys on one agent merge into one seat whose cap is their sum
+- [ ] a legacy key naming an agent already in `seats` stops the migration with nothing written
 - [ ] `--dry-run` writes nothing
 - [ ] no reader references a removed field (`go build ./...`)
 
