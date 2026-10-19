@@ -3,6 +3,7 @@ package daemon
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/patrolscan"
 )
@@ -25,6 +26,12 @@ func TestPatrolScanSeatCap(t *testing.T) {
 	polecat := func(rig, name, agent string) sessionEnv {
 		return sessionEnv{rig: rig, name: name, agent: agent}
 	}
+	// The closed windows are cut around the fixed clock (testEpoch), so the
+	// cases hold whatever hour the clock is set to: openWindow is closed at the
+	// clock, laterWindow opens two hours after it.
+	clockHHMM := func(d time.Duration) string { return testEpoch.Add(d).Format("15:04") }
+	openWindow := clockHHMM(-time.Hour) + "-" + clockHHMM(time.Hour)
+	laterWindow := clockHHMM(2*time.Hour) + "-" + clockHHMM(4*time.Hour)
 	cases := []struct {
 		name     string
 		settings string
@@ -138,23 +145,22 @@ func TestPatrolScanSeatCap(t *testing.T) {
 		},
 		{
 			// gt-her01: a crash inside the seat's closed window spends no
-			// seat, exactly as a sling to that seat is refused. The fixed
-			// clock is at 15:04 UTC.
+			// seat, exactly as a sling to that seat is refused.
 			name:     "a seat inside its closed window holds the restart",
-			settings: pool(`"timezone":"UTC","seats":{"` + poolAgent + `":{"cap":3,"closed":"14:00-16:00"}}`),
+			settings: pool(`"timezone":"UTC","seats":{"` + poolAgent + `":{"cap":3,"closed":"` + openWindow + `"}}`),
 			sessions: []sessionEnv{polecat("gastown", "pearl", poolAgent)},
 			restart:  "gastown/ruby",
 			want: patrolscan.SeatCap{
 				Live:         1,
 				Closed:       true,
 				Key:          "polecat_pool.seats." + poolAgent + ".closed",
-				ClosedDetail: "the seat is closed until 16:00 (polecat_pool.seats." + poolAgent + ".closed)",
+				ClosedDetail: "the seat is closed until " + clockHHMM(time.Hour) + " (polecat_pool.seats." + poolAgent + ".closed)",
 			},
 			wantFull: true,
 		},
 		{
 			name:     "a seat outside its closed window takes the restart",
-			settings: pool(`"timezone":"UTC","seats":{"` + poolAgent + `":{"cap":3,"closed":"16:00-18:00"}}`),
+			settings: pool(`"timezone":"UTC","seats":{"` + poolAgent + `":{"cap":3,"closed":"` + laterWindow + `"}}`),
 			sessions: []sessionEnv{polecat("gastown", "ruby", poolAgent)},
 			restart:  "gastown/ruby",
 		},
@@ -162,7 +168,7 @@ func TestPatrolScanSeatCap(t *testing.T) {
 			// A window the loader would refuse is not read as open: the
 			// restart waits for the seat cap to be readable.
 			name:     "a closed window with no timezone cannot be read",
-			settings: pool(`"seats":{"` + poolAgent + `":{"cap":3,"closed":"14:00-16:00"}}`),
+			settings: pool(`"seats":{"` + poolAgent + `":{"cap":3,"closed":"` + openWindow + `"}}`),
 			sessions: []sessionEnv{polecat("gastown", "ruby", poolAgent)},
 			restart:  "gastown/ruby",
 			wantErr:  true,
