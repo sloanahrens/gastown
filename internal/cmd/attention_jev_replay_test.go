@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -92,31 +91,42 @@ func attentionFiles(t *testing.T, town string) map[string]string {
 	return out
 }
 
+// roundTripFunc serves each request in-process, so the real client runs
+// without a socket.
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
 // jevServer answers every Choice with confidence .9: needs-you for red:one,
 // noise for everything else. It counts the calls.
 func jevServer(t *testing.T) (*jev.Client, *atomic.Int32) {
 	t.Helper()
 	var n atomic.Int32
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	rt := roundTripFunc(func(r *http.Request) (*http.Response, error) {
 		n.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		choice, other := "noise", "needs-you"
 		if strings.Contains(string(body), "summary of red:one") {
 			choice, other = "needs-you", "noise"
 		}
-		resp := map[string]any{
+		data, err := json.Marshal(map[string]any{
 			"model": jev.Model,
 			"answers": map[string]any{"q": map[string]any{
 				"type": "choice", "choice": choice, "confidence": 0.9,
 				"probabilities": map[string]float64{choice: 0.9, other: 0.05, "auto-fixable": 0.05},
 			}},
 			"usage": map[string]int{"input_tokens": 400, "output_tokens": 100},
+		})
+		if err != nil {
+			return nil, err
 		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(resp)
-	}))
-	t.Cleanup(srv.Close)
-	c, err := jev.NewClient(jev.WithKey("test-key"), jev.WithBaseURL(srv.URL))
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}},
+			Body: io.NopCloser(bytes.NewReader(data)), Request: r,
+		}, nil
+	})
+	c, err := jev.NewClient(jev.WithKey("test-key"), jev.WithBaseURL("http://jev.test/v1/systemone"),
+		jev.WithHTTPClient(&http.Client{Transport: rt}))
 	require.NoError(t, err)
 	return c, &n
 }
