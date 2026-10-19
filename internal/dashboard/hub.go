@@ -879,7 +879,9 @@ func (h *Hub) pollFeed() {
 	changed := false
 	// A batch longer than a page's buffer (the 2h preface of the first poll on a
 	// busy town) goes out as one backlog frame: one entry frame each would fill
-	// the buffer and drop the page.
+	// the buffer and drop the page. The frame carries the whole ring, not just
+	// this batch, which is safe because the page's backlog handler replaces its
+	// feed rather than appending to it (TestBacklogHandlerReplacesTheFeed).
 	burst := len(entries) > feedBurstMax
 	for i := range entries {
 		h.seq++

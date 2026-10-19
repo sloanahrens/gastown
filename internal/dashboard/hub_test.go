@@ -50,3 +50,21 @@ func TestPollFeedFirstBurstNotDropped(t *testing.T) {
 	}
 	assert.Equal(t, preface, delivered, "every entry of the preface reaches the page")
 }
+
+// pollFeed's burst frame is the whole ring, which the page has mostly drawn
+// already, so the page must replace its feed and counts on a backlog frame:
+// appending would draw every row twice (gt-2lbvr).
+func TestBacklogHandlerReplacesTheFeed(t *testing.T) {
+	t.Parallel()
+
+	_, handler, ok := strings.Cut(string(indexHTML), `addEventListener("backlog"`)
+	require.True(t, ok, "index.html has no backlog handler")
+	handler, _, _ = strings.Cut(handler, "\n")
+	for _, want := range []string{
+		`$("feed").replaceChildren()`,
+		`delete counts[k]`,
+		`pushEntry(e, true)`,
+	} {
+		assert.Contains(t, handler, want, "the backlog handler must start from an empty feed")
+	}
+}
