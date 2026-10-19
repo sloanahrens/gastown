@@ -70,18 +70,45 @@ func getRigIn(townRoot, rigName string) (string, *rig.Rig, error) {
 	return townRoot, r, nil
 }
 
+// rigRegistered reports whether rigName is in the town's rig registry.
+func rigRegistered(townRoot, rigName string) bool {
+	rigsConfig, err := config.LoadRigsConfig(constants.MayorRigsPath(townRoot))
+	if err != nil || rigsConfig == nil {
+		return false
+	}
+	_, ok := rigsConfig.Rigs[rigName]
+	return ok
+}
+
 // findCurrentRig resolves the rig the caller is working in: the first path
-// component of cwd under the town root, else GT_RIG (gt run from the town
-// root through a shell alias).
+// component of cwd under the town root when that component is a registered rig
+// (town-level dirs like mayor/ are not), else GT_RIG (gt run from the town
+// root through a shell alias). An unregistered component with no GT_RIG set is
+// still looked up, so the error names it.
 func findCurrentRig(townRoot string) (string, *rig.Rig, error) {
-	rigName, err := inferRigFromCwd(townRoot)
-	if err != nil || rigName == "" {
-		rigName = os.Getenv("GT_RIG")
+	cwd, err := filepath.Abs(".")
+	if err != nil {
+		cwd = ""
+	}
+	return findCurrentRigWith(os.Getenv, cwd, townRoot)
+}
+
+// findCurrentRigWith is findCurrentRig reading the environment through getenv
+// and taking the working directory as cwd ("" when unknown).
+func findCurrentRigWith(getenv func(string) string, cwd, townRoot string) (string, *rig.Rig, error) {
+	rigName := ""
+	if cwd != "" {
+		if inferred, err := inferRigFromDir(townRoot, cwd); err == nil {
+			rigName = inferred
+		}
+	}
+	if envRig := getenv("GT_RIG"); envRig != "" && (rigName == "" || !rigRegistered(townRoot, rigName)) {
+		rigName = envRig
 	}
 	if rigName == "" {
 		return "", nil, fmt.Errorf("not inside a rig directory (and GT_RIG not set)")
 	}
-	_, r, err := getRig(rigName)
+	_, r, err := getRigIn(townRoot, rigName)
 	if err != nil {
 		return "", nil, err
 	}

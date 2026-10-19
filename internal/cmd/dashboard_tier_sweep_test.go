@@ -304,3 +304,32 @@ func TestTierSweepIgnoresARigTheRegistryDoesNotKnow(t *testing.T) {
 		}
 	}
 }
+
+// The daemon closes a cycle that started and swept nothing (no stage ran, or
+// the record was not written) with an aborted line: the rig reads idle at once,
+// not running until tierSweepStaleAfter expires. A later cycle of the same rig
+// opens a new start, and another rig's open cycle is left alone.
+func TestTierSweepReaderAbortedCycle(t *testing.T) {
+	t.Parallel()
+	aborted := daemon.TierSweepAbortedLine("gastown", "a9be03e4ffff", "no stage ran")
+	r, _ := tierSweepTestReader(t,
+		"2026/10/04 14:00:00 tier_sweep: gastown: sweep started a9be03e4 (shell, integration, race)",
+		"2026/10/04 14:00:01 tier_sweep: beads: sweep started 11111111 (shell)",
+		"2026/10/04 14:00:02 "+aborted,
+	)
+	ts := r.read(time.Date(2026, 10, 4, 14, 5, 0, 0, time.Local))
+	if ts.Running == nil || ts.Running.Rig != "beads" {
+		t.Fatalf("running = %+v, want only beads: gastown's cycle aborted", ts.Running)
+	}
+	if _, open := r.start["gastown"]; open {
+		t.Errorf("gastown still has an open start after its aborted line")
+	}
+
+	r2, _ := tierSweepTestReader(t,
+		"2026/10/04 14:00:00 tier_sweep: gastown: sweep started a9be03e4 (shell, integration, race)",
+		"2026/10/04 14:00:02 "+aborted,
+	)
+	if ts := r2.read(time.Date(2026, 10, 4, 14, 5, 0, 0, time.Local)); ts.Running != nil {
+		t.Errorf("an aborted cycle still reads running: %+v", ts.Running)
+	}
+}

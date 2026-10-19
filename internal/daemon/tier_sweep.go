@@ -1202,6 +1202,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 
 	if len(results) == 0 {
 		// Nothing ran at all: the record would be a lie.
+		d.logger.Print(tierSweepAbortedLine(rig, sha, "no stage ran"))
 		return false
 	}
 
@@ -1231,6 +1232,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	}
 	if err := writeTierSweepState(d.config.TownRoot, rig, state); err != nil {
 		d.logger.Printf("tier_sweep: %s: writing the sweep record: %v", rig, err)
+		d.logger.Print(tierSweepAbortedLine(rig, sha, "sweep record not written"))
 		return false
 	}
 	// A cycle that covered every tier green is the verdict that advances the
@@ -1318,6 +1320,19 @@ func tierSweepSweptLine(rig, sha string, results map[string]tierSweepTierResult,
 	return fmt.Sprintf("tier_sweep: %s: swept %s (shell %s%s) in %s", rig, shortSHA(sha),
 		results["shell"].Verdict, tierSweepVerdictSummary(results, stages, loaded),
 		elapsed.Round(time.Second))
+}
+
+// tierSweepAbortedLine is the log line that closes a cycle that logged "sweep
+// started" and then ended without a swept line. The dashboard reads it back
+// (tierSweepAbortedRe), so it has one writer; the reason holds no parenthesis.
+func tierSweepAbortedLine(rig, sha, reason string) string {
+	return fmt.Sprintf("tier_sweep: %s: sweep aborted %s (%s)", rig, shortSHA(sha), reason)
+}
+
+// TierSweepAbortedLine renders the aborted line for the cycle on sha, so a
+// reader of the daemon log is tested against the line the daemon writes.
+func TierSweepAbortedLine(rig, sha, reason string) string {
+	return tierSweepAbortedLine(rig, sha, reason)
 }
 
 // TierSweepSweptLine renders the swept line for a cycle that planned the given

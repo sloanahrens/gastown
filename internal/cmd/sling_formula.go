@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/cli"
@@ -43,7 +44,13 @@ func trimJSONForError(jsonOutput []byte) string {
 	s := strings.TrimSpace(string(jsonOutput))
 	const maxLen = 500
 	if len(s) > maxLen {
-		return s[:maxLen] + "..."
+		// Cut on a rune boundary: a byte slice through a multibyte rune
+		// leaves invalid UTF-8 in the error.
+		cut := maxLen
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		return s[:cut] + "..."
 	}
 	return s
 }
