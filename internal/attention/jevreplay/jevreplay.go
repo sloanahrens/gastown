@@ -14,6 +14,8 @@ package jevreplay
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
@@ -34,13 +36,30 @@ type Options struct {
 	// Floor is the confidence below which an answer is forced to needs-you.
 	Floor float64
 	// MaxSpendUSD stops the run once the spend reaches it, or would reach it
-	// on a call as dear as the dearest so far. It must be above zero.
+	// on a call as dear as the dearest so far. It must be finite and above
+	// zero.
 	MaxSpendUSD float64
-	// USDPerBillionTokens prices input and output tokens alike.
+	// USDPerBillionTokens prices input and output tokens alike. It must be
+	// finite and above zero: at zero every call costs nothing and the cap
+	// never trips.
 	USDPerBillionTokens float64
 	// Sleep waits d for a rate limit; nil uses a timer that ctx can cut short.
 	Sleep func(ctx context.Context, d time.Duration) error
 }
+
+// Validate refuses options under which the spend cap could not hold: a cap
+// or a price that is zero, negative, infinite or NaN.
+func (o Options) Validate() error {
+	if !positiveFinite(o.MaxSpendUSD) {
+		return fmt.Errorf("jevreplay: the spend cap must be finite and above zero, not %v", o.MaxSpendUSD)
+	}
+	if !positiveFinite(o.USDPerBillionTokens) {
+		return fmt.Errorf("jevreplay: the price per billion tokens must be finite and above zero, not %v", o.USDPerBillionTokens)
+	}
+	return nil
+}
+
+func positiveFinite(f float64) bool { return f > 0 && !math.IsInf(f, 0) && !math.IsNaN(f) }
 
 // Stop says why a run ended before every item was reached.
 type Stop string
@@ -54,6 +73,9 @@ const (
 	StopInterrupted Stop = "interrupted"
 	// StopUnauthorized: Jev refused the key, so no later call could succeed.
 	StopUnauthorized Stop = "unauthorized"
+	// StopNoUsage: a call answered with no token usage, so its cost is
+	// unknown and the cap can no longer be enforced.
+	StopNoUsage Stop = "no-usage"
 )
 
 // Confusion counts the needs-you decisions against the proxy.
@@ -148,8 +170,8 @@ type Report struct {
 // history the proxy adds to the acks the snapshot holds. It returns the
 // report so far with an error only for a refused key.
 func Run(ctx context.Context, c Classifier, snap attention.Snapshot, history []attention.AckRecord, opts Options) (Report, error) {
-	if opts.MaxSpendUSD <= 0 {
-		return Report{}, errors.New("jevreplay: the spend cap must be above zero")
+	if err := opts.Validate(); err != nil {
+		return Report{}, err
 	}
 	r := &run{c: c, opts: opts}
 	rep := Report{
@@ -187,6 +209,11 @@ func Run(ctx context.Context, c Classifier, snap attention.Snapshot, history []a
 					rep.Stopped = StopInterrupted
 					break
 				}
+			} else if ans.Usage.InputTokens+ans.Usage.OutputTokens <= 0 {
+				// An answer that reports no usage costs nothing on paper, so
+				// carrying on would let the spend sit under the cap forever.
+				rep.Stopped = StopNoUsage
+				break
 			} else {
 				addUsage(&rep.Spend, ans.Usage, opts.USDPerBillionTokens)
 				r.noteCall(ans.Usage)

@@ -22,8 +22,9 @@ const (
 )
 
 // proxyTier1 labels from what the queue files still hold: an ack in
-// state.json, or in acks.json up to the clear. acks.json drops an ack when
-// its item clears, so a cleared item usually reads as auto here.
+// state.json, or in acks.json up to the clear. attention.Reconcile drops an
+// ack from acks.json when its item clears, so a cleared item reads as auto
+// here unless state.json recorded the ack first.
 func proxyTier1(r attention.Record) proxy {
 	return label(r.Acked, r)
 }
@@ -153,6 +154,8 @@ func (r Report) Write(w io.Writer) {
 		p("STOPPED at the spend cap after %d of %d items; the numbers below cover only those.\n", r.Reached, r.Items)
 	case StopInterrupted:
 		p("STOPPED by interrupt after %d of %d items; the numbers below cover only those.\n", r.Reached, r.Items)
+	case StopNoUsage:
+		p("STOPPED after %d of %d items: Jev answered with no token usage, so the spend cannot be held to the cap.\n", r.Reached, r.Items)
 	case StopUnauthorized:
 		p("STOPPED: Jev refused the API key after %d of %d items.\n", r.Reached, r.Items)
 	}

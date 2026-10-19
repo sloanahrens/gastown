@@ -52,7 +52,7 @@ func init() {
 	f.StringVar(&jevReplayOut, "out", "", "Also write the report to this file")
 	f.Float64Var(&jevReplayMaxSpend, "max-spend-usd", 5, "Stop the run when the spend reaches this many US dollars")
 	f.Float64Var(&jevReplayFloor, "confidence-floor", 0.7, "Confidence below which an answer is forced to needs-you")
-	f.Float64Var(&jevReplayUSDPerBTok, "usd-per-billion-tokens", 42, "Price of input and output tokens, in US dollars per billion")
+	f.Float64Var(&jevReplayUSDPerBTok, "usd-per-billion-tokens", 0, "Price of input and output tokens, in US dollars per billion (required: the spend cap is only as good as this)")
 	attentionCmd.AddCommand(attentionJevReplayCmd)
 }
 
@@ -67,6 +67,14 @@ func runAttentionJevReplay(cmd *cobra.Command, _ []string) error {
 	if !(jevReplayFloor >= 0 && jevReplayFloor <= 1) {
 		return fmt.Errorf("--confidence-floor must be from 0 to 1, not %v", jevReplayFloor)
 	}
+	opts := jevreplay.Options{
+		Floor:               jevReplayFloor,
+		MaxSpendUSD:         jevReplayMaxSpend,
+		USDPerBillionTokens: jevReplayUSDPerBTok,
+	}
+	if err := opts.Validate(); err != nil {
+		return err
+	}
 	if err := checkJevReplayOut(townRoot, jevReplayOut); err != nil {
 		return err
 	}
@@ -76,11 +84,6 @@ func runAttentionJevReplay(cmd *cobra.Command, _ []string) error {
 	}
 	ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	opts := jevreplay.Options{
-		Floor:               jevReplayFloor,
-		MaxSpendUSD:         jevReplayMaxSpend,
-		USDPerBillionTokens: jevReplayUSDPerBTok,
-	}
 	return attentionJevReplay(ctx, cmd.OutOrStdout(), townRoot, c, opts, jevReplayOut)
 }
 
@@ -96,10 +99,9 @@ func attentionJevReplay(ctx context.Context, w io.Writer, townRoot string, c jev
 	if err != nil {
 		return err
 	}
+	// The options are valid by now, so Run's only error is a refused key, and
+	// the report of what it got to is still worth printing.
 	rep, runErr := jevreplay.Run(ctx, c, snap, history, opts)
-	if runErr != nil && rep.Items == 0 {
-		return runErr
-	}
 	var text strings.Builder
 	rep.Write(&text)
 	if _, err := w.Write([]byte(text.String())); err != nil {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -215,14 +216,56 @@ func TestRunSpendCapStopsAndSaysSo(t *testing.T) {
 	assert.Contains(t, buf.String(), "Spend: $2.4000 of $3.00 cap")
 }
 
-func TestRunRejectsNoCap(t *testing.T) {
+func TestRunRejectsOptionsThatLeaveTheCapOpen(t *testing.T) {
 	t.Parallel()
-	for _, cap := range []float64{0, -1} {
+	snap, history := fixture()
+	for name, mutate := range map[string]func(*Options){
+		"zero cap":       func(o *Options) { o.MaxSpendUSD = 0 },
+		"negative cap":   func(o *Options) { o.MaxSpendUSD = -1 },
+		"NaN cap":        func(o *Options) { o.MaxSpendUSD = math.NaN() },
+		"infinite cap":   func(o *Options) { o.MaxSpendUSD = math.Inf(1) },
+		"zero price":     func(o *Options) { o.USDPerBillionTokens = 0 },
+		"negative price": func(o *Options) { o.USDPerBillionTokens = -5 },
+		"NaN price":      func(o *Options) { o.USDPerBillionTokens = math.NaN() },
+		"infinite price": func(o *Options) { o.USDPerBillionTokens = math.Inf(1) },
+	} {
 		o := opts()
-		o.MaxSpendUSD = cap
-		_, err := Run(context.Background(), newStub(), attention.Snapshot{}, nil, o)
-		assert.Error(t, err, "cap %v", cap)
+		mutate(&o)
+		st := newStub()
+		_, err := Run(context.Background(), st, snap, history, o)
+		assert.Error(t, err, name)
+		assert.Error(t, o.Validate(), name)
+		assert.Empty(t, st.calls, "%s: no call is made", name)
 	}
+	assert.NoError(t, opts().Validate())
+}
+
+// noUsage answers like the stub but reports no tokens.
+type noUsage struct{ *stub }
+
+func (n noUsage) Choice(ctx context.Context, state any, ins string, crit map[string]string) (*jev.Answer, error) {
+	ans, err := n.stub.Choice(ctx, state, ins, crit)
+	if ans != nil {
+		ans.Usage = jev.Usage{}
+	}
+	return ans, err
+}
+
+func TestRunStopsWhenAnAnswerReportsNoUsage(t *testing.T) {
+	t.Parallel()
+	snap, history := fixture()
+	st := newStub()
+	rep, err := Run(context.Background(), noUsage{st}, snap, history, opts())
+	require.NoError(t, err)
+
+	assert.Equal(t, StopNoUsage, rep.Stopped)
+	assert.Equal(t, 1, rep.Asked, "the run does not carry on unpriced")
+	assert.Equal(t, 0, rep.Reached)
+	assert.Zero(t, rep.Spend.USD)
+
+	var buf bytes.Buffer
+	rep.Write(&buf)
+	assert.Contains(t, buf.String(), "STOPPED after 0 of 8 items: Jev answered with no token usage")
 }
 
 func TestRunRateLimitWaitsOnceThenRetries(t *testing.T) {

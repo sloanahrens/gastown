@@ -177,7 +177,57 @@ func TestAttentionJevReplaySpendCapStopsTheRun(t *testing.T) {
 	// The escalation is reached free, ahead of the two calls.
 	assert.Contains(t, buf.String(), "STOPPED at the spend cap after 3 of 5 items")
 	assert.Contains(t, buf.String(), "Spend: $4.0000 of $5.00 cap")
-	assert.Contains(t, buf.String(), "of $5.00 cap")
+}
+
+// runJevReplayCmd runs the real command with its flags set from args.
+func runJevReplayCmd(t *testing.T, town string, args ...string) error {
+	t.Helper()
+	t.Chdir(town)
+	prev := newJevReplayClassifier
+	t.Cleanup(func() { newJevReplayClassifier = prev })
+	newJevReplayClassifier = func() (jevreplay.Classifier, error) {
+		t.Fatal("the client must not be built when the options are refused")
+		return nil, nil
+	}
+	f := attentionJevReplayCmd.Flags()
+	// Put every flag back to its default when the run is over, so the next
+	// call starts clean.
+	defer func() {
+		for _, name := range []string{"out", "max-spend-usd", "confidence-floor", "usd-per-billion-tokens"} {
+			fl := f.Lookup(name)
+			_ = f.Set(name, fl.DefValue)
+			fl.Changed = false
+		}
+	}()
+	for i := 0; i < len(args); i += 2 {
+		require.NoError(t, f.Set(args[i], args[i+1]))
+	}
+	return runAttentionJevReplay(attentionJevReplayCmd, nil)
+}
+
+func TestAttentionJevReplayCommandRefusesOptionsBeforeSpendingAnything(t *testing.T) {
+	town := jevReplayTown(t)
+	dir := attention.Dir(town)
+	before := attentionFiles(t, town)
+
+	// The price has no default, so leaving it out is refused.
+	err := runJevReplayCmd(t, town)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "price per billion tokens")
+
+	err = runJevReplayCmd(t, town, "usd-per-billion-tokens", "42", "max-spend-usd", "NaN")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "spend cap")
+
+	err = runJevReplayCmd(t, town, "usd-per-billion-tokens", "42", "confidence-floor", "1.5")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "confidence-floor")
+
+	err = runJevReplayCmd(t, town, "usd-per-billion-tokens", "42", "out", filepath.Join(dir, "report.txt"))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "attention directory")
+
+	assert.Equal(t, before, attentionFiles(t, town))
 }
 
 func TestAttentionJevReplayRefusesOutUnderTheAttentionDirectory(t *testing.T) {
