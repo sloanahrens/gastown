@@ -242,7 +242,7 @@ func outputPolecatContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintln(w, "Mail can be hooked for ad-hoc instructions: `"+cli.Name()+" hook attach <mail-id>`")
 	fmt.Fprintln(w, "If mail is on your hook, read and execute its instructions (GUPP applies).")
 	fmt.Fprintln(w)
-	outputCommandQuickReference(os.Stdout, ctx)
+	outputCommandQuickReference(w, ctx)
 	fmt.Fprintf(w, "Polecat: %s | Rig: %s\n",
 		style.Dim.Render(ctx.Polecat), style.Dim.Render(ctx.Rig))
 }
@@ -272,7 +272,7 @@ func outputCrewContext(w io.Writer, ctx RoleContext) {
 	fmt.Fprintln(w, "Mail can be hooked for ad-hoc instructions: `"+cli.Name()+" hook attach <mail-id>`")
 	fmt.Fprintln(w, "If mail is on your hook, read and execute its instructions (GUPP applies).")
 	fmt.Fprintln(w)
-	outputCommandQuickReference(os.Stdout, ctx)
+	outputCommandQuickReference(w, ctx)
 	fmt.Fprintf(w, "Crew: %s | Rig: %s\n",
 		style.Dim.Render(ctx.Polecat), style.Dim.Render(ctx.Rig))
 }
