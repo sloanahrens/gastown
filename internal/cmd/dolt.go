@@ -1538,10 +1538,11 @@ func runDoltFixMetadata(cmd *cobra.Command, args []string) error {
 // gt dolt cleanup listing says which are safe to remove.
 func tooManyOrphansHint() string {
 	return "  The server is likely overloaded. SQL cleanup would take hours.\n\n" +
-		"  Instead, stop the server and remove the orphans one by one:\n\n" +
-		"    gt dolt stop\n" +
+		"  Instead, list the orphans while the server is still up (the hold lookup\n" +
+		"  needs it), then stop the server and remove them from the filesystem:\n\n" +
 		"    gt dolt cleanup --dry-run    # lists each orphan and marks the ones HELD by a hold bead\n" +
+		"    gt dolt stop\n" +
+		"    (delete each orphan directory that listing did not mark HELD, by its full name)\n" +
 		"    gt dolt start\n\n" +
-		"  Remove only the orphans that listing does not mark HELD, each by its full name.\n" +
-		"  Never remove a database in bulk by glob: a glob also matches held databases.\n"
+		"  Never remove databases in bulk by glob: a glob also matches held databases.\n"
 }

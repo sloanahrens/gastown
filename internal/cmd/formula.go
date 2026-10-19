@@ -648,7 +648,7 @@ func dryRunFormula(w io.Writer, f *cookedFormula, formulaName, targetRig string)
 		fmt.Fprintln(w)
 	}
 
-	if f.Type == "workflow" && len(f.Steps) > 0 {
+	if len(f.Steps) > 0 {
 		fmt.Fprintf(w, "\n  Steps (%d sequential):\n", len(f.Steps))
 		for i, step := range f.Steps {
 			needsStr := ""

@@ -75,6 +75,12 @@ func TestDoltCleanupHintNamesNoBlanketRm(t *testing.T) {
 	if !strings.Contains(hint, "gt dolt cleanup") {
 		t.Errorf("hint does not point at gt dolt cleanup:\n%s", hint)
 	}
+	// The hold lookup queries the server, so the listing must come before the
+	// stop; listed after it, no orphan would be marked HELD.
+	list, stop := strings.Index(hint, "gt dolt cleanup --dry-run"), strings.Index(hint, "gt dolt stop")
+	if list < 0 || stop < 0 || list > stop {
+		t.Errorf("hint must list orphans (gt dolt cleanup --dry-run) before gt dolt stop:\n%s", hint)
+	}
 }
 
 // A dry run changes nothing, so a running daemon or Dolt server must not stop
