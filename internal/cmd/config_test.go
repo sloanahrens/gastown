@@ -887,13 +887,6 @@ func TestConfigSetGetPolecatPoolPolicy(t *testing.T) {
 		t.Errorf("polecat_pool.max_priority = %q, want the default 2", got)
 	}
 	stdout.Reset()
-	if err := configGet(townConfigCmdEnv(townRoot, &stdout), []string{"polecat_pool.pro_label"}); err != nil {
-		t.Fatalf("configGet polecat_pool.pro_label: %v", err)
-	}
-	if got := strings.TrimSpace(stdout.String()); got != "needs-pro" {
-		t.Errorf("polecat_pool.pro_label = %q, want the default needs-pro", got)
-	}
-	stdout.Reset()
 	if err := configGet(townConfigCmdEnv(townRoot, &stdout), []string{"polecat_pool.shape_gate"}); err != nil {
 		t.Fatalf("configGet polecat_pool.shape_gate: %v", err)
 	}
@@ -948,9 +941,12 @@ func TestConfigSetGetPolecatPoolPolicy(t *testing.T) {
 		t.Errorf("saved shape_gate = %q, want refuse", got)
 	}
 
-	// A knob that is not one of the pool's keys is still an unknown key.
-	if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{"polecat_pool.max_bogus", "1"}); err == nil {
-		t.Error("configSet polecat_pool.max_bogus = nil, want an unknown-key error")
+	// A knob that is not one of the pool's keys is still an unknown key: the
+	// retired pro seat's keys included, since the seat they configured is gone.
+	for _, key := range []string{"polecat_pool.max_bogus", "polecat_pool.pro_max", "polecat_pool.pro_agent", "polecat_pool.pro_label"} {
+		if err := configSet(townConfigCmdEnv(townRoot, io.Discard), []string{key, "1"}); err == nil || !strings.Contains(err.Error(), "unknown config key") {
+			t.Errorf("configSet %s = %v, want an unknown-key error", key, err)
+		}
 	}
 }
 

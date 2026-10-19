@@ -41,7 +41,7 @@ import (
 // (internal/cmd imports internal/daemon, so the call cannot go the other way).
 //
 // This is the dispatcher that replaced the seat-refill plugin (gt-4k3fj.8.8):
-// the pool's seats (agent/max_seats, pro_*) and the town's total
+// the pool's seats (agent/max_seats) and the town's total
 // (polecat_pool.max_total, gt-bcpj5), the operator's
 // ceiling (polecat_pool.max_priority) and the shape gate
 // (polecat_pool.shape_gate) all come from the same keys the plugin read, so the
@@ -192,16 +192,17 @@ A clean candidate is re-read once more immediately before its sling and dropped
 if the bead has changed since the board was read — a submission in that window
 would otherwise be slung to a seat already landing it, and a re-read that fails
 holds the candidate for the next tick rather than slinging blind (gt-01gix).
-One that still holds is slung onto the first free seat within the budget: the
-pool's agent (capped by max_seats), then the pro seat (pro_agent, capped by
-pro_max, taking only pro_label beads). The claude-sonnet hooked seat is off
-unless patrols.spec_dispatch.max_hooked is set above zero.
+One that still holds is slung onto a free seat within the budget, drawn at
+random among the models in the mix: the pool's agent (capped by max_seats) and
+the claude-sonnet hooked seat, which is off unless
+patrols.spec_dispatch.max_hooked is set above zero. A bead carrying an
+agent:<name> label draws only among that agent's seats.
 
 Every dispatch's sling args tell the polecat to test install paths in a
 temporary INSTALL_DIR.
 
 Budget comes from polecat_pool in settings/config.json (agent, max_seats,
-min_spawn_gap, pro_agent, pro_max, pro_label) and daemon.patrols.spec_dispatch
+min_spawn_gap) and daemon.patrols.spec_dispatch
 in settings/config.json (hooked_agent, max_hooked, prefer_hooked, max_per_tick).
 A town that has not run gt config migrate still keeps that patrol block in
 mayor/daemon.json. Both blocks are read on every tick, so a seat added, moved or
@@ -347,13 +348,12 @@ func childSpecs(issues []*beads.Issue) []specdispatch.Child {
 }
 
 // specHoldKnobs is the dispatcher's own settings the peer-hold question reads:
-// the candidate filter's priority ceiling and reserved labels, and the shape
-// gate with the template it lints against. Reading them from the town is the
-// caller's (specHoldKnobsFrom), so the hold rule itself is a function of the
-// bead and these values.
+// the candidate filter's priority ceiling, and the shape gate with the
+// template it lints against. Reading them from the town is the caller's
+// (specHoldKnobsFrom), so the hold rule itself is a function of the bead and
+// these values.
 type specHoldKnobs struct {
 	MaxPriority int
-	Reserved    []string
 	ShapeGate   string
 	Template    specdispatch.Template
 	// Warn is where a question left unanswered because its inputs would not
@@ -377,7 +377,6 @@ func specHoldKnobsFrom(townRoot string, warn io.Writer) (specHoldKnobs, bool) {
 	knobs := specHoldKnobs{
 		Warn:        warn,
 		MaxPriority: ts.PolecatPool.GetMaxPriority(),
-		Reserved:    specBudgetFromConfig(ts, sd).ReservedLabels(),
 		ShapeGate:   ts.PolecatPool.GetShapeGate(),
 	}
 	if knobs.ShapeGate != specdispatch.ShapeGateOff {
@@ -420,7 +419,7 @@ func specHoldKnobsFrom(townRoot string, warn io.Writer) (specHoldKnobs, bool) {
 // seats on one defect.
 func specPeerHeldFrom(store beads.Client, knobs specHoldKnobs, peer sling.Duplicate) string {
 	spec := specFromPeer(peer)
-	if ok, why := specdispatch.Eligible(spec, knobs.MaxPriority, knobs.Reserved); !ok {
+	if ok, why := specdispatch.Eligible(spec, knobs.MaxPriority); !ok {
 		return why
 	}
 	if why := specPeerBlocked(peer.Ready.OpenBlockers); why != "" {
@@ -782,7 +781,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			continue
 		}
 		// The ready board is a snapshot; re-check the fresh bead.
-		if ok, why := specdispatch.Eligible(full, env.MaxPriority, budget.ReservedLabels()); !ok {
+		if ok, why := specdispatch.Eligible(full, env.MaxPriority); !ok {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: not eligible (%s)", id, why)})
 			continue
 		}
@@ -974,7 +973,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: %s: re-read failed: %s", id, specStaleReason, firstErrLine(err))})
 			continue
 		}
-		if ok, why := specdispatch.Eligible(latest, env.MaxPriority, budget.ReservedLabels()); !ok {
+		if ok, why := specdispatch.Eligible(latest, env.MaxPriority); !ok {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: %s: %s", id, specStaleReason, why)})
 			continue
 		}
@@ -1186,13 +1185,14 @@ func firstErrLine(err error) string {
 //
 //   - the pool's agent, capped at max_seats (the dispatcher's own
 //     defaultSpecSeatCap when the pool leaves it unset)
-//   - the pro seat: pro_agent, capped at pro_max, taking only pro_label beads
+//   - the second seat (spec_dispatch.hooked_agent, claude-sonnet by default),
+//     off unless max_hooked names a cap above zero
 //
-// The hooked seat (spec_dispatch.hooked_agent, claude-sonnet by default) is
-// off unless max_hooked names a cap above zero: the pool's agents are the
-// town's seats, and a seat nobody asked for is a seat the dispatcher must not
-// spend. Order is the list above; prefer_hooked moves the hooked seat first.
-// An agent named twice keeps its first seat.
+// A bead with no agent:<name> label draws uniformly among the mix's free
+// seats, so neither model is preferred. Order decides only which seat an agent
+// named twice keeps: prefer_hooked moves the second seat first for that dedup.
+// The reserved pro seat is gone; a pinned bead waits for its agent's seat
+// rather than falling back.
 //
 // polecat_pool.max_total, when set, caps the seats together on top of each
 // seat's own cap: a town whose two agents are each inside their cap still has
@@ -1212,13 +1212,6 @@ func specBudgetFromConfig(ts *config.TownSettings, sd *config.SpecDispatchConfig
 				capacity = defaultSpecSeatCap
 			}
 			b.Seats = append(b.Seats, specdispatch.Seat{Agent: pool.Agent, Cap: capacity})
-		}
-		if pool.GetProMax() > 0 {
-			b.Seats = append(b.Seats, specdispatch.Seat{
-				Agent: pool.GetProAgent(),
-				Cap:   pool.GetProMax(),
-				Label: pool.GetProLabel(),
-			})
 		}
 	}
 
@@ -1379,7 +1372,7 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	env := specDispatchEnv{
 		Hold: func() string { return dispatch.OperatorHold(townRoot) },
 		Candidates: func() specBoardRead {
-			return specCandidates(townRoot, maxPriority, specReadyBoard, budget.ReservedLabels())
+			return specCandidates(townRoot, maxPriority, specReadyBoard)
 		},
 		Show:     func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
 		Children: func(id string) ([]specdispatch.Child, error) { return specChildren(townRoot, id) },
@@ -1533,10 +1526,9 @@ type specBoardRead struct {
 // specCandidates reads every operational rig's ready work beads and keeps the
 // eligible ones, ordered across rigs. A rig whose board cannot be read is
 // reported and skipped; the rest still dispatch. maxPriority is the operator's
-// ceiling on a candidate's priority number, and reserved the labels the tick's
-// seats reserve — the same pair the per-candidate re-check uses, so a bead the
-// seats route is not dropped here before it can reach them.
-func specCandidates(townRoot string, maxPriority int, board specBoard, reserved []string) specBoardRead {
+// ceiling on a candidate's priority number — the same value the per-candidate
+// re-check uses.
+func specCandidates(townRoot string, maxPriority int, board specBoard) specBoardRead {
 	var read specBoardRead
 	names, err := knownRigNames(townRoot)
 	if err != nil {
@@ -1576,7 +1568,7 @@ func specCandidates(townRoot string, maxPriority int, board specBoard, reserved 
 			// board-carried label is reported instead: the operator's label is
 			// what holds the bead, so the tick log and the dry run say so
 			// rather than leaving the bead an unexplained absence (gt-k1g3e).
-			if ok, why := specdispatch.Eligible(s, maxPriority, reserved); !ok {
+			if ok, why := specdispatch.Eligible(s, maxPriority); !ok {
 				if specdispatch.BoardCarried(s) {
 					read.Skipped = append(read.Skipped, specDispatchEntry{Bead: s.ID, Rig: name, Line: fmt.Sprintf("%s: not eligible (%s)", s.ID, why)})
 				}

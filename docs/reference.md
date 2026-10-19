@@ -303,8 +303,7 @@ instead, for a Docker runtime that cannot mount tmpfs there. Measurements:
 The spec dispatcher's policy lives in the town's `settings/config.json`, under
 `polecat_pool`, beside the seats it fills: `max_priority` is the ceiling on a
 candidate bead's number (the daemon's idle-seat check counts to the same
-number), `pro_max`, `pro_agent` and `pro_label` configure the pro seat, and
-`shape_gate` is what a dispatch does with a candidate's shape lint
+number), and `shape_gate` is what a dispatch does with a candidate's shape lint
 (`gt spec lint`): off, warn or refuse. `agent` and `max_seats` are the pool's
 own seat — the agent its polecats run, up to `max_seats` live sessions, refused
 past the cap — and `min_spawn_gap` staggers its spawns. `max_total` caps live
@@ -314,7 +313,10 @@ absent key (or 0) is no total cap. The seat's keys were
 `overflow_agent` and `max_overflow` until gt-plk1z: a file still carrying those
 loads the same values, warns once per process, and keeps the old keys as the
 operator wrote them — gt reads them but writes only the new names, so delete the
-old pair by hand.
+old pair by hand. The reserved pro seat's keys — `pro_max`, `pro_agent`,
+`pro_label` — are retired (gt-kr91q): a file that still carries them loads with
+a warning and the values are ignored. Pin a bead to a model with an
+`agent:<name>` label instead.
 `gt config get --help` lists the keys with their defaults; `gt config get
 polecat_pool.<key>` prints the effective value. Edit the file by hand, or `gt
 config set polecat_pool.<key> <value>`.

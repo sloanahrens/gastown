@@ -262,23 +262,21 @@ func TestTheStripNeverDrawsAReadingNobodyMade(t *testing.T) {
 }
 
 // The strip's seats are the open ones: a seat nothing may fill is left to the
-// models line, a seat nobody could read says unknown rather than passing as a
-// seat nobody runs, and the pro seat is named the reserved one — which is what
-// the town keeps it for (gt pool mix). A seat whose polecats have not been read
-// shows no count (gt-ywlei).
-func TestTheStripNamesTheOpenSeatsAndTheReservedOne(t *testing.T) {
+// models line, and a seat nobody could read says unknown rather than passing as
+// a seat nobody runs. A seat whose polecats have not been read shows no count
+// (gt-ywlei).
+func TestTheStripNamesTheOpenSeatsAndTheRetiredSeatIsGone(t *testing.T) {
 	t.Parallel()
 
 	body := pageFunc(t, "seatFacts")
 	for _, want := range []string{
 		// No rows is a settings read that has not come back, never a town with
-		// no seats: the reader always sends the three.
+		// no seats: the reader always sends the seats it read.
 		`if (!m || !(m.seat_rows || []).length) return null;`,
 		`if (sr.unknown) {`,
 		`" seat unknown"`,
 		`if (sr.closed) continue;`,
 		`(sr.live == null ? "–" : sr.live)`,
-		`(sr.seat === "pro" ? " (reserved)" : "")`,
 		`sr.key || "no config key recorded"`,
 	} {
 		if !strings.Contains(body, want) {

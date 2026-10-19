@@ -25,11 +25,9 @@ const HumanOnlyLabel = "human-only"
 // dispatchHoldLabels records, kept apart because a reader that has already
 // routed the bead reads only the second one.
 //
-// routingHoldLabels ask for a seat rather than a hold: needs-pro wants a
-// specific runtime, and a dispatcher whose seats include the one that label
-// selects (polecat_pool.pro_label) routes the bead to it instead of reading
-// the label as a hold (gt-lxxo4). A reader with no seat to match must drop
-// these rather than refuse the bead for wearing its own seat's selector
+// routingHoldLabels ask for a seat rather than a hold. needs-pro matches no seat
+// (gt-kr91q), so the dispatcher holds a bead wearing it until the label is
+// swapped for agent:<name>; a sling that is given its target ignores it
 // (SlingHoldFields).
 //
 // humanHoldLabels are the holds no polecat can settle, however the bead came
@@ -116,9 +114,7 @@ func holdFieldReason(labels []string, assignee, design, notes string) string {
 // bead is re-slingable under --force, and without it when its holder is dead),
 // and reading it again here would refuse the re-slings those guards admit. The
 // routing labels are dropped because a sling is already given its target: a
-// bead wearing the selector of the seat it is being sent to is being routed,
-// not held, and refusing it there would break the pro seat's own dispatch.
-// Every other marker holds, the human labels included — which no guard at the
+// bead wearing a routing label is being routed, not held. Every other marker holds, the human labels included — which no guard at the
 // start reads at all, so this is the read that keeps a hold written
 // mid-dispatch from being overwritten by the dispatch's own hook write
 // (gt-0k7kb).

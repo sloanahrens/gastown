@@ -13,8 +13,8 @@ import (
 // The spec dispatcher's seat settings, read on every tick (gt-jdnab).
 //
 // A seat is one agent with its own cap: the pool seat (polecat_pool.agent,
-// capped by max_seats), the pro seat (pro_agent, pro_max, pro_label) and the
-// second seat (patrols.spec_dispatch hooked_agent, max_hooked, prefer_hooked).
+// capped by max_seats) and the second seat (patrols.spec_dispatch
+// hooked_agent, max_hooked, prefer_hooked).
 // A tick shells out to `gt spec dispatch`, which builds its seat list from
 // these files every run, so an edit to the mix lands at the next tick with no
 // restart — a kickstart costs the tick or the landing in flight (gt-jdnab).
@@ -144,8 +144,7 @@ func readSpecSeatPicture(townRoot string) (string, error) {
 // hooked_agent=deepseek-flash max_hooked=2". A key written as its zero is left
 // out, because a zero closes the seat it names — max_seats 0 is the pool seat
 // closed and max_hooked 0 the second seat closed, the same as removing the key.
-// pro_max and max_total are pointers, so their 0 is the seat explicitly closed
-// (an absent pro_max is the dispatcher's default of 1) and renders.
+// max_total is a pointer, so its 0 is the cap explicitly removed and renders.
 func specSeatPicture(pool *config.PolecatPool, sd *SpecDispatchConfig) string {
 	var parts []string
 	add := func(key string, set bool, value any) {
@@ -156,9 +155,6 @@ func specSeatPicture(pool *config.PolecatPool, sd *SpecDispatchConfig) string {
 	if pool != nil {
 		add("pool_agent", pool.Agent != "", pool.Agent)
 		add("max_seats", pool.MaxSeats != 0, pool.MaxSeats)
-		add("pro_agent", pool.ProAgent != "", pool.ProAgent)
-		add("pro_max", pool.ProMax != nil, intValue(pool.ProMax))
-		add("pro_label", pool.ProLabel != "", pool.ProLabel)
 		add("max_total", pool.MaxTotal != nil, intValue(pool.MaxTotal))
 	}
 	if sd != nil {

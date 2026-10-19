@@ -427,10 +427,9 @@ function renderHealth(h) {
 // off the seat rows the hub fills from the same polecats the Work panel's seat
 // rows draw, so the two cannot disagree. A closed seat — nothing may fill it — is
 // left to the models line, and a seat whose config nobody could read says
-// unknown rather than passing as a seat nobody runs. The pro seat is named the
-// reserved one, which is what the town keeps it for: work pinned to its agent
-// (gt pool mix). No rows at all is a settings read that has not come back, not
-// a town with no seats: the reader always sends the three.
+// unknown rather than passing as a seat nobody runs. No rows at all is a
+// settings read that has not come back, not a town with no seats: the reader
+// always sends the seats it read.
 function seatFacts(m) {
   if (!m || !(m.seat_rows || []).length) return null;
   const out = [];
@@ -438,9 +437,9 @@ function seatFacts(m) {
     const key = sr.key || "no config key recorded";
     if (sr.unknown) { out.push({text: (sr.seat || "seat") + " seat unknown", title: "the config this seat is read from could not be read · " + key}); continue; }
     if (sr.closed) continue;
-    const where = (sr.seat === "pro" ? "the pro seat, reserved for work pinned to its agent" : "the " + (sr.seat || "unknown") + " seat") + " · " + key;
+    const where = "the " + (sr.seat || "unknown") + " seat · " + key;
     out.push({
-      text: (sr.agent || "no agent") + " " + (sr.live == null ? "–" : sr.live) + "/" + sr.cap + (sr.cap_default ? "*" : "") + (sr.seat === "pro" ? " (reserved)" : ""),
+      text: (sr.agent || "no agent") + " " + (sr.live == null ? "–" : sr.live) + "/" + sr.cap + (sr.cap_default ? "*" : ""),
       title: where + (sr.live == null ? " · the polecats have not been read yet" : "") + (sr.cap_default ? " · the cap key is unset, so this is the default the dispatcher holds it to" : ""),
     });
   }
@@ -473,7 +472,7 @@ function renderStrip(s) {
   const seats = seatFacts(s.models);
   const sp = factBox(box);
   if (!seats) { sp.append(el("b", "", "–"), document.createTextNode(" seats")); sp.title = "the town's settings have not been read yet"; }
-  else if (!seats.length) { sp.append(el("b", "", "no open seats")); sp.title = "every seat is closed: the pool, the pro seat and the second seat name no agent the dispatcher could run"; }
+  else if (!seats.length) { sp.append(el("b", "", "no open seats")); sp.title = "every seat is closed: the pool seat and the second seat name no agent the dispatcher could run"; }
   else seats.forEach((f, i) => { const x = el("span", "", (i ? " · " : "") + f.text); if (f.title) x.title = f.title; sp.append(x); });
 
   // Working: the polecats on the job, off POLE_WORKING, so which states are
@@ -599,10 +598,9 @@ function renderModelsPanel(s) {
   };
   // Each seat is named as gt pool show names it, and a key this page does not
   // know is shown as the server sent it rather than as some other seat.
-  const seatNames = {pool: "pool seat", pro: "pro seat", second: "second seat"};
+  const seatNames = {pool: "pool seat", second: "second seat"};
   const capDefaultWhy = {
     pool: "max_seats is unset: sling leaves the seat uncapped and the dispatcher holds it to ",
-    pro: "pro_max is unset: the dispatcher runs the pro seat at its own default of ",
   };
   const seatRows = seats.map(sr => {
     const tr = el("tr");

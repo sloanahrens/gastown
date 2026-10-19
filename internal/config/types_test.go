@@ -358,6 +358,72 @@ func TestPolecatPool_SeatKeyRenameReportsTheRetiredKey(t *testing.T) {
 	}
 }
 
+// TestPolecatPool_ProSeatKeysAreRetired: the reserved pro seat is gone, so a
+// settings file still carrying pro_max, pro_agent or pro_label decodes and
+// loads — the strict parser must not park the town on them — while the load
+// drops the values and warns once per key, however many times the file is read.
+func TestPolecatPool_ProSeatKeysAreRetired(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		poolJSON string
+		wantKeys []string
+	}{
+		{
+			name:     "all three retired keys warn",
+			poolJSON: `{"agent":"deepseek-flash","pro_max":2,"pro_agent":"deepseek-reasoner","pro_label":"hard"}`,
+			wantKeys: []string{"pro_max", "pro_agent", "pro_label"},
+		},
+		{
+			name:     "one retired key warns for itself alone",
+			poolJSON: `{"agent":"deepseek-flash","pro_label":"hard"}`,
+			wantKeys: []string{"pro_label"},
+		},
+		{
+			name:     "the current keys warn about nothing",
+			poolJSON: `{"agent":"deepseek-flash","max_seats":2}`,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out strings.Builder
+			warn := &retiredKeyWarnings{out: &out}
+			doc := []byte(`{"type":"town-settings","version":1,"polecat_pool":` + tc.poolJSON + `}`)
+			// Two loads, as a daemon reading the file on every pass makes them.
+			for range 2 {
+				var ts TownSettings
+				if err := decodeJSONFileWarning("settings/config.json", doc, &ts, warn); err != nil {
+					t.Fatalf("decodeJSONFileWarning: %v", err)
+				}
+				pool := ts.PolecatPool
+				if pool == nil {
+					t.Fatal("polecat_pool did not load")
+				}
+				if pool.DeprecatedProMax != nil || pool.DeprecatedProAgent != nil || pool.DeprecatedProLabel != nil {
+					t.Errorf("retired pro fields survived the load: %+v", pool)
+				}
+			}
+			if len(tc.wantKeys) == 0 {
+				if out.Len() != 0 {
+					t.Fatalf("a file with no retired keys warned:\n%s", out.String())
+				}
+				return
+			}
+			lines := strings.Split(strings.TrimSuffix(out.String(), "\n"), "\n")
+			if len(lines) != len(tc.wantKeys) {
+				t.Fatalf("%d warning lines over two loads, want %d (one per key):\n%s", len(lines), len(tc.wantKeys), out.String())
+			}
+			for i, key := range tc.wantKeys {
+				want := "polecat_pool." + key + " is retired and ignored"
+				if !strings.Contains(lines[i], want) {
+					t.Errorf("line %d = %q, want it to contain %q", i, lines[i], want)
+				}
+			}
+		})
+	}
+}
+
 // TestRetiredKeyWarnings_OnePerProcess: a daemon reads the settings file on
 // every pass, so a retired key must not repeat its line. The first use warns,
 // every use after it stays quiet, and each retired key has its own line.
@@ -373,6 +439,12 @@ func TestRetiredKeyWarnings_OnePerProcess(t *testing.T) {
 	w.warn("max_overflow", "max_seats")
 	if got := strings.Count(out.String(), "\n"); got != 2 {
 		t.Errorf("%d lines after a second retired key, want 2:\n%s", got, out.String())
+	}
+	// A retired key whose feature is gone says so rather than naming a
+	// replacement that does not exist.
+	w.warn("pro_max", "")
+	if !strings.Contains(out.String(), "polecat_pool.pro_max is retired and ignored") {
+		t.Errorf("a retired key with no replacement did not say it is ignored:\n%s", out.String())
 	}
 }
 

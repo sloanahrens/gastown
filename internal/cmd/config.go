@@ -775,11 +775,6 @@ const polecatPoolKeyHelp = `  polecat_pool.max_priority    Priority ceiling for 
   polecat_pool.dispatch_empty_seconds
                               Retired with the plugin; kept and ignored. The
                               dispatcher fills a free seat at once (default: 0)
-  polecat_pool.pro_max         Cap on the pro seat; 0 drops it (default: 1)
-  polecat_pool.pro_agent       Agent the pro seat runs (default: deepseek-pro)
-  polecat_pool.pro_label       Label a bead carries to reach the pro seat, and
-                              the one the other seats leave alone (default:
-                              needs-pro)
   polecat_pool.mode            Retired with the plugin; kept and ignored. The
                               dispatcher always slings: "sling" used to fill an
                               empty seat, "nudge" asked a town agent to fill
@@ -804,15 +799,12 @@ var (
 		{"empty_seconds", (*config.PolecatPool).GetEmptySeconds, func(p *config.PolecatPool, v int) { p.EmptySeconds = &v }},
 		{"nudge_seconds", (*config.PolecatPool).GetNudgeSeconds, func(p *config.PolecatPool, v int) { p.NudgeSeconds = &v }},
 		{"dispatch_empty_seconds", (*config.PolecatPool).GetDispatchEmptySeconds, func(p *config.PolecatPool, v int) { p.DispatchEmptySeconds = &v }},
-		{"pro_max", (*config.PolecatPool).GetProMax, func(p *config.PolecatPool, v int) { p.ProMax = &v }},
 	}
 	polecatPoolStringKeys = []struct {
 		key string
 		get func(*config.PolecatPool) string
 		set func(*config.PolecatPool, string)
 	}{
-		{"pro_agent", (*config.PolecatPool).GetProAgent, func(p *config.PolecatPool, v string) { p.ProAgent = v }},
-		{"pro_label", (*config.PolecatPool).GetProLabel, func(p *config.PolecatPool, v string) { p.ProLabel = v }},
 		{"mode", (*config.PolecatPool).GetMode, func(p *config.PolecatPool, v string) { p.Mode = v }},
 		{"shape_gate", (*config.PolecatPool).GetShapeGate, func(p *config.PolecatPool, v string) { p.ShapeGate = v }},
 	}

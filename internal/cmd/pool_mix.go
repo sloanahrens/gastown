@@ -22,22 +22,18 @@ import (
 )
 
 // gt pool mix puts the whole polecat model mix on one line of one command: the
-// pool seat, the second seat, the pro seat and max_total, plus
-// role_agents.polecat and the polecat role of the model table gt-models.sh
-// reads. Setting the mix key by key is six commands with three traps in them
-// (gt-lwlva): gt-models.sh set-role polecat follow rewrites the pool seat as a
-// side effect, gt pool set refuses an agent the pool seat no longer holds, and
-// a second seat naming the pool seat's agent is silently not run. The run
-// refuses to leave work pinned to an agent the mix gives no seat, which is how
-// the deep reviews pinned to agent:claude-sonnet were stranded without a Sonnet
-// seat.
+// pool seat, the second seat and max_total, plus role_agents.polecat and the
+// polecat role of the model table gt-models.sh reads. Setting the mix key by
+// key is six commands with three traps in them (gt-lwlva): gt-models.sh
+// set-role polecat follow rewrites the pool seat as a side effect, gt pool set
+// refuses an agent the pool seat no longer holds, and a second seat naming the
+// pool seat's agent is silently not run. The run refuses to leave work pinned
+// to an agent the mix gives no seat, which is how the deep reviews pinned to
+// agent:claude-sonnet were stranded without a Sonnet seat.
 
 const poolMixMaxAgents = 2
 
-var (
-	poolMixDryRun     bool
-	poolMixKeepPinned bool
-)
+var poolMixDryRun bool
 
 var poolMixCmd = &cobra.Command{
 	Use:   "mix <agent>=<n> [<agent>=<n>]",
@@ -51,23 +47,20 @@ gt pool mix deepseek-flash=2 claude-sonnet=2     two seats, two agents
 gt pool mix deepseek-flash=4                     four flash, no second seat
 gt pool mix claude-sonnet=4                      four sonnet, no second seat
 
-max_total becomes the mix's total, role_agents.polecat becomes the agent the
+max_total becomes the mix's total, and role_agents.polecat becomes the agent the
 mix leaves first open (a polecat spawned on the role rather than a seat runs
-it), and the pro seat closes unless --keep-pinned reserves it. role_agents and
-the models table's polecat role are written together, so gt-models.sh show reads
-the mix as the town's model rather than as DRIFT.
+it). role_agents and the models table's polecat role are written together, so
+gt-models.sh show reads the mix as the town's model rather than as DRIFT.
 
 <agent> must be a known preset; gt config agent list names them. A count of 0
 closes that agent's seat.
 
 Work pinned to an agent — a scheduled_slings entry naming one, or an open bead
 carrying an agent:<name> label — that the mix gives no seat fails the run with
-the command that would seat it: name that agent in the mix, or pass
---keep-pinned to reserve the pro seat for it (pro_agent that agent, pro_max 1,
-pro_label agent:<name>, max_total one higher).
+the command that would seat it: name that agent in the mix.
 
 --dry-run prints the seats the mix would leave and the keys it would write,
-and writes nothing. The pool seat and the pro seat take effect at the
+and writes nothing. The pool seat takes effect at the
 dispatcher's next tick; the second seat is read when the daemon starts, so a
 change to it needs a kickstart, which the run says. Each file is written
 atomically and the previous copy is kept beside it as <file>.bak-<timestamp>;
@@ -82,14 +75,13 @@ keys gt pool does not own are left as they are.`,
 		if err != nil {
 			return err
 		}
-		opts := poolMixOptions{dryRun: poolMixDryRun, keepPinned: poolMixKeepPinned}
+		opts := poolMixOptions{dryRun: poolMixDryRun}
 		return runPoolMix(cmd.OutOrStdout(), townRoot, mix, opts)
 	},
 }
 
 func init() {
 	poolMixCmd.Flags().BoolVar(&poolMixDryRun, "dry-run", false, "Print the seats and the keys the mix would write, and write nothing")
-	poolMixCmd.Flags().BoolVar(&poolMixKeepPinned, "keep-pinned", false, "Reserve the pro seat for a pinned agent the mix gives no seat")
 	poolCmd.AddCommand(poolMixCmd)
 }
 
@@ -101,13 +93,11 @@ type poolMixEntry struct {
 
 // poolMixOptions is one run's flags.
 type poolMixOptions struct {
-	dryRun     bool
-	keepPinned bool
+	dryRun bool
 }
 
 // parsePoolMix reads the mix arguments. Two agents is the ceiling: the town has
-// two seats besides the reserved pro seat, so a third name would be describing
-// a seat that does not exist.
+// two seats, so a third name would be describing a seat that does not exist.
 func parsePoolMix(args []string) ([]poolMixEntry, error) {
 	if len(args) > poolMixMaxAgents {
 		return nil, fmt.Errorf("a mix names at most %d agents (the town runs one seat per agent); %s name %d", poolMixMaxAgents, strings.Join(args, " "), len(args))
@@ -133,16 +123,6 @@ func parsePoolMix(args []string) ([]poolMixEntry, error) {
 	return mix, nil
 }
 
-// poolMixArgs renders a mix the way it is typed, for a refusal that names the
-// command to run instead.
-func poolMixArgs(mix []poolMixEntry) string {
-	parts := make([]string, 0, len(mix))
-	for _, e := range mix {
-		parts = append(parts, fmt.Sprintf("%s=%d", e.agent, e.seats))
-	}
-	return strings.Join(parts, " ")
-}
-
 // poolMixInputs is the town a mix plans against: the configs it rewrites and
 // the agents the town has pinned work for.
 type poolMixInputs struct {
@@ -164,24 +144,20 @@ type poolMixPlan struct {
 	secondAgent    string
 	secondAgentSet bool
 	secondSeats    int
-	// proAgent is the agent the reserved pro seat runs; empty closes the seat,
-	// which is what a mix with no pinned work to seat leaves behind.
-	proAgent   string
-	proSeats   int
-	maxTotal   int
-	roleAgent  string  // role_agents.polecat; empty leaves the key alone
-	modelTable bool    // whether the models table's polecat role is written
-	modelRole  *string // its value; nil is the table's null, "follow the default"
-	kickstart  bool
-	notes      []string
-	ts         *config.TownSettings
-	sd         *config.SpecDispatchConfig
+	maxTotal       int
+	roleAgent      string  // role_agents.polecat; empty leaves the key alone
+	modelTable     bool    // whether the models table's polecat role is written
+	modelRole      *string // its value; nil is the table's null, "follow the default"
+	kickstart      bool
+	notes          []string
+	ts             *config.TownSettings
+	sd             *config.SpecDispatchConfig
 }
 
 // planPoolMix applies mix to a copy of the town's seats and reports what the
 // run would write. It writes nothing: every refusal a mix can earn is decided
 // here, before the first file is opened.
-func planPoolMix(mix []poolMixEntry, opts poolMixOptions, in poolMixInputs) (poolMixPlan, error) {
+func planPoolMix(mix []poolMixEntry, in poolMixInputs) (poolMixPlan, error) {
 	for _, e := range mix {
 		if err := checkKnownAgent(in.townRoot, e.agent); err != nil {
 			return poolMixPlan{}, err
@@ -223,27 +199,22 @@ func planPoolMix(mix []poolMixEntry, opts poolMixOptions, in poolMixInputs) (poo
 	missing := poolMixUnseatedPins(in.pinned, seated)
 	switch {
 	case len(missing) == 0:
-		// The pro seat is the reserved one: with nothing to reserve it for,
-		// the mix closes it, so the seats it leaves are the mix and no more.
-	case len(missing) == 1 && opts.keepPinned:
-		plan.proAgent, plan.proSeats = missing[0], 1
-		plan.maxTotal++
+		// Nothing is pinned to a model the mix does not seat: the seats it
+		// leaves are the mix and no more.
+	case len(missing) == 1 && len(mix) < poolMixMaxAgents:
+		return poolMixPlan{}, fmt.Errorf("work is pinned to %s, which this mix gives no seat: name it in the mix, as in `gt pool mix %s`, or re-point the pin (a scheduled_slings entry's agent, a bead's %s<name> label) at an agent the mix seats",
+			missing[0], poolMixSeatSuggestion(mix, missing), specdispatch.AgentLabelPrefix)
 	case len(missing) == 1:
-		return poolMixPlan{}, fmt.Errorf("work is pinned to %s, which this mix gives no seat: run `gt pool mix %s --keep-pinned` to reserve the pro seat for it (pro_agent %s, pro_max 1, pro_label %s%s), or name it in the mix",
-			missing[0], poolMixArgs(mix), missing[0], specdispatch.AgentLabelPrefix, missing[0])
+		return poolMixPlan{}, fmt.Errorf("work is pinned to %s, which this mix gives no seat: re-point the pin (a scheduled_slings entry's agent, a bead's %s<name> label) at an agent the mix seats, since the town runs two seats",
+			missing[0], specdispatch.AgentLabelPrefix)
 	default:
-		return poolMixPlan{}, fmt.Errorf("work is pinned to %s and the town seats two agents plus one reserved pro seat: run `%s` to seat two of them, and re-point the other pins (a scheduled_slings entry's agent, a bead's %s<name> label) at an agent the mix seats",
+		return poolMixPlan{}, fmt.Errorf("work is pinned to %s and the town seats two agents: run `%s` to seat two of them, and re-point the other pins (a scheduled_slings entry's agent, a bead's %s<name> label) at an agent the mix seats",
 			strings.Join(missing, ", "), poolMixSeatSuggestion(mix, missing), specdispatch.AgentLabelPrefix)
 	}
 
 	// The seats the plan leaves, applied to the copies the report renders and
 	// applyPoolMix re-applies to each file's own copy.
 	setPoolSeat(ts, plan.poolAgent, plan.poolSeats)
-	setProSeat(ts, plan.proSeats)
-	if plan.proSeats > 0 {
-		ts.PolecatPool.ProAgent = plan.proAgent
-		ts.PolecatPool.ProLabel = specdispatch.AgentLabelPrefix + plan.proAgent
-	}
 	setMaxTotal(ts, plan.maxTotal)
 	if plan.roleAgent != "" {
 		setRoleAgent(ts, constants.RolePolecat, plan.roleAgent)
@@ -333,10 +304,13 @@ func poolMixSeatSuggestion(mix []poolMixEntry, missing []string) string {
 	if seats <= 0 {
 		seats = 1
 	}
+	missingSeats := seats
+	if len(mix) > 1 && mix[1].seats > 0 {
+		missingSeats = mix[1].seats
+	}
 	args := []string{
 		fmt.Sprintf("%s=%d", mix[0].agent, seats),
-		fmt.Sprintf("%s=%d", missing[0], seats),
-		"--keep-pinned",
+		fmt.Sprintf("%s=%d", missing[0], missingSeats),
 	}
 	return "gt pool mix " + strings.Join(args, " ")
 }
@@ -401,7 +375,7 @@ func runPoolMixWith(w io.Writer, townRoot string, mix []poolMixEntry, opts poolM
 	if err != nil {
 		return err
 	}
-	plan, err := planPoolMix(mix, opts, poolMixInputs{townRoot: townRoot, ts: ts, pc: pc, table: table, pinned: pinned})
+	plan, err := planPoolMix(mix, poolMixInputs{townRoot: townRoot, ts: ts, pc: pc, table: table, pinned: pinned})
 	if err != nil {
 		return err
 	}
@@ -436,7 +410,7 @@ func runPoolMixWith(w io.Writer, townRoot string, mix []poolMixEntry, opts poolM
 	if plan.kickstart {
 		fmt.Fprintln(w, "the second seat is read when the daemon starts: kickstart the daemon for this mix to take effect")
 	} else {
-		fmt.Fprintln(w, "the pool seat and the pro seat take effect at the dispatcher's next tick; no daemon kickstart is needed")
+		fmt.Fprintln(w, "the pool seat takes effect at the dispatcher's next tick; no daemon kickstart is needed")
 	}
 	return nil
 }
@@ -481,14 +455,6 @@ func (p poolMixPlan) keyLines() []string {
 	} else {
 		out = append(out, "polecat_pool.max_total removed (no total cap)")
 	}
-	if p.proSeats > 0 {
-		out = append(out,
-			"polecat_pool.pro_agent = "+p.proAgent,
-			fmt.Sprintf("polecat_pool.pro_max = %d", p.proSeats),
-			"polecat_pool.pro_label = "+specdispatch.AgentLabelPrefix+p.proAgent)
-	} else {
-		out = append(out, "polecat_pool.pro_max = 0 (the pro seat is closed)")
-	}
 	if p.secondAgentSet {
 		out = append(out, "patrols.spec_dispatch.hooked_agent = "+p.secondAgent)
 	}
@@ -516,11 +482,6 @@ func applyPoolMix(townRoot string, plan poolMixPlan) (string, error) {
 	stamp := time.Now().UTC().Format("20060102T150405Z")
 	err := writeTownSeats(townRoot, stamp, func(ts *config.TownSettings) error {
 		setPoolSeat(ts, plan.poolAgent, plan.poolSeats)
-		setProSeat(ts, plan.proSeats)
-		if plan.proSeats > 0 {
-			ts.PolecatPool.ProAgent = plan.proAgent
-			ts.PolecatPool.ProLabel = specdispatch.AgentLabelPrefix + plan.proAgent
-		}
 		setMaxTotal(ts, plan.maxTotal)
 		if plan.roleAgent != "" {
 			setRoleAgent(ts, constants.RolePolecat, plan.roleAgent)

@@ -1688,14 +1688,15 @@ type PolecatPool struct {
 	// empty this long. Retired with the plugin: the dispatcher fills a free
 	// seat at once.
 	DispatchEmptySeconds *int `json:"dispatch_empty_seconds,omitempty"`
-	// ProMax caps the pro seat, a class of work that reaches a seat only by
-	// carrying ProLabel. Default 1; 0 drops the seat.
-	ProMax *int `json:"pro_max,omitempty"`
-	// ProAgent is the agent the pro seat runs. Default "deepseek-pro".
-	ProAgent string `json:"pro_agent,omitempty"`
-	// ProLabel is the label a bead carries to reach the pro seat, and the one
-	// the other seats leave alone. Default "needs-pro".
-	ProLabel string `json:"pro_label,omitempty"`
+	// DeprecatedProMax, DeprecatedProAgent and DeprecatedProLabel are the
+	// retired reserved pro seat's keys. Declared so a settings file written
+	// before the seat's retirement still decodes, they are folded away at
+	// decode time (applyDeprecatedKeys) and warn once per process: the
+	// dispatcher no longer reads them, and an unlabelled bead draws at random
+	// among the free seats. Pin a bead with an agent:<name> label instead.
+	DeprecatedProMax   *int    `json:"pro_max,omitempty"`
+	DeprecatedProAgent *string `json:"pro_agent,omitempty"`
+	DeprecatedProLabel *string `json:"pro_label,omitempty"`
 	// Mode is how an empty seat was filled: "sling" dispatched the bead
 	// directly, "nudge" asked the retired planner instead. Retired with the
 	// plugin: the dispatcher always slings, and the planner it could have
@@ -1720,9 +1721,6 @@ const (
 	DefaultSeatRefillEmptySeconds         = 300
 	DefaultSeatRefillNudgeSeconds         = 900
 	DefaultSeatRefillDispatchEmptySeconds = 0
-	DefaultSeatRefillProMax               = 1
-	DefaultSeatRefillProAgent             = "deepseek-pro"
-	DefaultSeatRefillProLabel             = "needs-pro"
 	DefaultSeatRefillMode                 = "sling"
 	DefaultSeatRefillShapeGate            = "warn"
 )
@@ -1776,14 +1774,6 @@ func (p *PolecatPool) GetDispatchEmptySeconds() int {
 	return intOr(p.DispatchEmptySeconds, DefaultSeatRefillDispatchEmptySeconds)
 }
 
-// GetProMax returns the pro seat's cap, or its default.
-func (p *PolecatPool) GetProMax() int {
-	if p == nil {
-		return DefaultSeatRefillProMax
-	}
-	return intOr(p.ProMax, DefaultSeatRefillProMax)
-}
-
 // GetMaxTotal returns the cap on live polecats across every seat, or 0 for a
 // town with no total cap: an absent max_total is the town's silence rather than
 // a cap of zero, and a written 0 says the same thing, so every reader tests the
@@ -1793,22 +1783,6 @@ func (p *PolecatPool) GetMaxTotal() int {
 		return 0
 	}
 	return intOr(p.MaxTotal, 0)
-}
-
-// GetProAgent returns the pro seat's agent, or its default.
-func (p *PolecatPool) GetProAgent() string {
-	if p == nil || p.ProAgent == "" {
-		return DefaultSeatRefillProAgent
-	}
-	return p.ProAgent
-}
-
-// GetProLabel returns the pro seat's bead selector, or its default.
-func (p *PolecatPool) GetProLabel() string {
-	if p == nil || p.ProLabel == "" {
-		return DefaultSeatRefillProLabel
-	}
-	return p.ProLabel
 }
 
 // GetMode returns how an empty seat is filled, or its default.
@@ -1847,7 +1821,6 @@ func (p *PolecatPool) Validate() error {
 		{"empty_seconds", p.EmptySeconds},
 		{"nudge_seconds", p.NudgeSeconds},
 		{"dispatch_empty_seconds", p.DispatchEmptySeconds},
-		{"pro_max", p.ProMax},
 		{"max_total", p.MaxTotal},
 	} {
 		if k.v != nil && *k.v < 0 {
@@ -1902,6 +1875,10 @@ func (p *PolecatPool) SeatsCapped() bool {
 // value so the caller can report them. DecodeJSONFile calls it on every load
 // (deprecatedKeyApplier). The current key wins when a file carries both, and
 // either way the retired fields are cleared, so nothing writes them back out.
+//
+// A retired key with no current spelling — the pro seat's pro_max, pro_agent
+// and pro_label — is cleared and reported without folding: the value is
+// ignored, and the warning says the seat is gone.
 func (p *PolecatPool) applyDeprecatedKeys() []retiredSeatKey {
 	if p == nil {
 		return nil
@@ -1915,7 +1892,20 @@ func (p *PolecatPool) applyDeprecatedKeys() []retiredSeatKey {
 		p.MaxSeats = *p.DeprecatedMaxOverflow
 		used = append(used, retiredSeatKey{old: "max_overflow", current: "max_seats"})
 	}
+	for _, k := range []struct {
+		old string
+		set bool
+	}{
+		{"pro_max", p.DeprecatedProMax != nil},
+		{"pro_agent", p.DeprecatedProAgent != nil},
+		{"pro_label", p.DeprecatedProLabel != nil},
+	} {
+		if k.set {
+			used = append(used, retiredSeatKey{old: k.old})
+		}
+	}
 	p.DeprecatedOverflowAgent, p.DeprecatedMaxOverflow = nil, nil
+	p.DeprecatedProMax, p.DeprecatedProAgent, p.DeprecatedProLabel = nil, nil, nil
 	return used
 }
 
@@ -1956,7 +1946,8 @@ type deprecatedKeyApplier interface {
 }
 
 // retiredSeatKey is one retired polecat_pool key a settings file used, with the
-// key that replaced it.
+// key that replaced it. current is empty for a key whose feature is gone: the
+// value is ignored rather than folded.
 type retiredSeatKey struct {
 	old     string
 	current string
@@ -1982,6 +1973,10 @@ func (w *retiredKeyWarnings) warn(oldKey, newKey string) {
 		w.seen = map[string]bool{}
 	}
 	w.seen[oldKey] = true
+	if newKey == "" {
+		fmt.Fprintf(w.out, "warning: polecat_pool.%s is retired and ignored: the reserved pro seat is gone, and an unlabelled bead draws a random free seat (pin one with an agent:<name> label)\n", oldKey)
+		return
+	}
 	fmt.Fprintf(w.out, "warning: polecat_pool.%s is retired; the value loaded as polecat_pool.%s, which replaces it\n", oldKey, newKey)
 }
 

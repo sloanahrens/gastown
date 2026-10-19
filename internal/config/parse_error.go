@@ -53,12 +53,18 @@ func (e *ParseError) Unwrap() error { return e.Err }
 // including the writer, which re-marshals what it decoded — sees the current
 // names (PolecatPool.applyDeprecatedKeys).
 func DecodeJSONFile(path string, data []byte, v any) error {
+	return decodeJSONFileWarning(path, data, v, seatPoolKeyWarn)
+}
+
+// decodeJSONFileWarning is DecodeJSONFile with the warning sink named, so a
+// test reads the lines a load writes instead of the process's stderr.
+func decodeJSONFileWarning(path string, data []byte, v any, warn *retiredKeyWarnings) error {
 	if err := decodeJSONStrict(path, data, v); err != nil {
 		return err
 	}
 	if a, ok := v.(deprecatedKeyApplier); ok {
 		for _, k := range a.applyDeprecatedKeys() {
-			seatPoolKeyWarn.warn(k.old, k.current)
+			warn.warn(k.old, k.current)
 		}
 	}
 	return nil

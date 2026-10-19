@@ -294,11 +294,10 @@ func TestSpecSeatTrackerReadsOnlyWhenAFileMoved(t *testing.T) {
 
 // The picture names the seat keys the files set, in the order the dispatcher
 // reads them, and leaves out a key written as its zero — a closed seat reads as
-// the key going away, except pro_max, whose 0 is the closed pro seat against an
-// absent key's default of 1 (gt-jdnab).
+// the key going away (gt-jdnab).
 func TestSpecSeatPictureNamesTheKeysTheFilesSet(t *testing.T) {
 	t.Parallel()
-	two, zero, four := 2, 0, 4
+	four := 4
 	for _, tc := range []struct {
 		name string
 		pool *config.PolecatPool
@@ -311,9 +310,6 @@ func TestSpecSeatPictureNamesTheKeysTheFilesSet(t *testing.T) {
 		{"the second seat", nil, &config.SpecDispatchConfig{HookedAgent: "deepseek-flash", MaxHooked: 2}, "hooked_agent=deepseek-flash max_hooked=2"},
 		{"a second seat closed by max_hooked 0", nil, &config.SpecDispatchConfig{HookedAgent: "deepseek-flash"}, "hooked_agent=deepseek-flash"},
 		{"the hooked seat preferred", nil, &config.SpecDispatchConfig{PreferHooked: true}, "prefer_hooked=true"},
-		{"a written pro_max 0 is the closed pro seat", &config.PolecatPool{ProMax: &zero}, nil, "pro_max=0"},
-		{"the pro seat's own agent, cap and label", &config.PolecatPool{ProAgent: "codex", ProMax: &two, ProLabel: "needs-pro"}, nil,
-			"pro_agent=codex pro_max=2 pro_label=needs-pro"},
 		{"a total cap", &config.PolecatPool{MaxTotal: &four}, nil, "max_total=4"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
