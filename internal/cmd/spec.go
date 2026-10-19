@@ -1092,7 +1092,9 @@ func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads
 }
 
 // specHeldStatuses are the statuses that mean a working seat holds the bead:
-// the sling hooks it, and the polecat's claim makes it in_progress.
+// the sling hooks it, and the polecat's claim makes it in_progress. The status
+// only means a seat when an assignee names one; heldBeadsFrom drops the rest
+// (gt-xrog0).
 var specHeldStatuses = []string{beads.StatusHooked, string(beads.StatusInProgress)}
 
 // heldBeadsFrom reduces the beads one store holds to the fields the overlap
@@ -1104,6 +1106,11 @@ var specHeldStatuses = []string{beads.StatusHooked, string(beads.StatusInProgres
 // epic or wayfinder map would otherwise hold every ready child that names one.
 // The sling-time guard skips epics for the same reason (findDuplicateMatches).
 //
+// An unassigned bead is not held: hooked or in_progress means a seat only when
+// an assignee names one, and one stray handoff bead would otherwise hold every
+// ready bead naming the same file until an operator closed it by hand
+// (gt-xrog0).
+//
 // The read is fresh, not the guard's cached pool: that pool is a snapshot of
 // the database at fetch time, while the seat this hold protects is the bead's
 // own live status.
@@ -1114,10 +1121,10 @@ func heldBeadsFrom(store beads.Client, warn func(beadsDir string, err error), be
 	}
 	out := make([]specdispatch.HeldBead, 0, len(cands))
 	for _, c := range cands {
-		if c.IsEpic() {
+		if c.IsEpic() || c.Ready.Assignee == "" {
 			continue
 		}
-		out = append(out, specdispatch.HeldBead{ID: c.ID, Paths: c.Refs.Files})
+		out = append(out, specdispatch.HeldBead{ID: c.ID, Assignee: c.Ready.Assignee, Paths: c.Refs.Files})
 	}
 	return out, nil
 }
