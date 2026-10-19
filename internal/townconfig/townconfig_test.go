@@ -408,3 +408,33 @@ func TestLoadDecodesWorktreeCleanupBlock(t *testing.T) {
 			wc.IsEnabled(), wc.IsDryRun(), wc.Cap())
 	}
 }
+
+// TestRefusedSeatMapFailsClosedAtLoad: a polecat_pool.seats map no reader could
+// act on is refused at load, with one line naming the file and the key
+// (gt-mukgk); the same pool with a valid map, or none, loads.
+func TestRefusedSeatMapFailsClosedAtLoad(t *testing.T) {
+	t.Parallel()
+	root := copyLiveTown(t)
+	write(t, root, FileSettings, `{"type":"town-settings","version":1,"polecat_pool":{"seats":{"no-such-agent":{"cap":1}}}}`)
+	_, err := Load(root)
+	if err == nil {
+		t.Fatal("Load with an unknown seat agent = nil, want a refusal")
+	}
+	if msg := err.Error(); strings.Contains(msg, "\n") ||
+		!strings.Contains(msg, filepath.Join(root, FileSettings)) ||
+		!strings.Contains(msg, "polecat_pool.seats.no-such-agent") {
+		t.Errorf("refusal %q must be one line naming settings/config.json and the key", msg)
+	}
+	if err := Check(root); err == nil {
+		t.Error("Check = nil for a refused seat map")
+	}
+
+	write(t, root, FileSettings, `{"type":"town-settings","version":1,"agents":{"my-agent":{"command":"claude"}},"polecat_pool":{"seats":{"my-agent":{"cap":1}}}}`)
+	if _, err := Load(root); err != nil {
+		t.Fatalf("Load with a seat on a defined agent = %v", err)
+	}
+	write(t, root, FileSettings, `{"type":"town-settings","version":1,"polecat_pool":{"agent":"deepseek-flash","max_seats":2}}`)
+	if _, err := Load(root); err != nil {
+		t.Fatalf("Load without the seat map = %v", err)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	_ "time/tzdata" // the window tests read America/Chicago, so they must not depend on the host's zoneinfo
 )
 
 // The seat map is the one place a town says which agents run, how many of each
@@ -52,6 +53,15 @@ func TestSeatsRejects(t *testing.T) {
 			"claude-sonnet": {Cap: 1, Names: []string{"nux"}},
 			"claude-haiku":  {Cap: 1, Names: []string{"nux"}},
 		}}, `name "nux"`},
+		"name twice in one seat": {PolecatPool{Seats: map[string]SeatConfig{
+			"claude-sonnet": {Cap: 2, Names: []string{"nux", "furiosa", "nux"}},
+		}}, `polecat_pool.seats.claude-sonnet.names: name "nux" is listed twice`},
+		"empty name": {PolecatPool{Seats: map[string]SeatConfig{
+			"claude-sonnet": {Cap: 1, Names: []string{"nux", ""}},
+		}}, "polecat_pool.seats.claude-sonnet.names"},
+		"blank name": {PolecatPool{Seats: map[string]SeatConfig{
+			"claude-sonnet": {Cap: 1, Names: []string{"  "}},
+		}}, "polecat_pool.seats.claude-sonnet.names"},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -151,5 +161,142 @@ func TestAgentResolverKnowsWhatTheLauncherKnows(t *testing.T) {
 		if got := known(name); got != want {
 			t.Errorf("known(%q) = %v, want %v", name, got, want)
 		}
+	}
+}
+
+// A nil known callback accepts every agent name instead of panicking.
+func TestSeatsNilKnown(t *testing.T) {
+	t.Parallel()
+
+	ts := NewTownSettings()
+	ts.PolecatPool = &PolecatPool{Seats: map[string]SeatConfig{"anything": {Cap: 1}}}
+	got, err := Seats(ts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Agent != "anything" {
+		t.Fatalf("seats = %+v", got)
+	}
+}
+
+// SeatsKnownTo resolves an agent the settings define and a built-in preset, and
+// refuses any other name.
+func TestSeatsKnownTo(t *testing.T) {
+	t.Parallel()
+
+	ts := NewTownSettings()
+	ts.Agents = map[string]*RuntimeConfig{"my-agent": {Command: "claude"}}
+	known := SeatsKnownTo(ts)
+	if !known("my-agent") {
+		t.Error("an agent defined in settings must resolve")
+	}
+	if !known("claude") {
+		t.Error("a built-in preset must resolve")
+	}
+	if known("no-such-agent") {
+		t.Error("an undefined name must not resolve")
+	}
+	if SeatsKnownTo(nil)("my-agent") {
+		t.Error("nil settings define no agents")
+	}
+}
+
+// A settings file decodes and yields its seats with the new keys, and decodes
+// to no seats without them.
+func TestSeatsFromSettingsFile(t *testing.T) {
+	t.Parallel()
+
+	decode := func(t *testing.T, body string) *TownSettings {
+		t.Helper()
+		var ts TownSettings
+		if err := DecodeJSONFile("settings/config.json", []byte(body), &ts); err != nil {
+			t.Fatal(err)
+		}
+		return &ts
+	}
+
+	t.Run("with the keys", func(t *testing.T) {
+		t.Parallel()
+		ts := decode(t, `{"type":"town-settings","version":1,"polecat_pool":{
+			"timezone":"America/Chicago",
+			"seats":{
+				"deepseek-flash":{"cap":3,"closed":"20:00-08:00","names":["nux"]},
+				"claude-sonnet":{"cap":2}
+			}}}`)
+		got, err := Seats(ts, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 || got[0].Agent != "claude-sonnet" || got[1].Agent != "deepseek-flash" {
+			t.Fatalf("seats = %+v", got)
+		}
+		if got[1].Window == nil || got[1].Window.StartMin != 20*60 || len(got[1].Names) != 1 || got[1].Names[0] != "nux" {
+			t.Fatalf("deepseek-flash seat = %+v", got[1])
+		}
+	})
+
+	t.Run("without the keys", func(t *testing.T) {
+		t.Parallel()
+		for name, body := range map[string]string{
+			"no pool":  `{"type":"town-settings","version":1}`,
+			"no seats": `{"type":"town-settings","version":1,"polecat_pool":{"agent":"claude-sonnet","max_seats":2}}`,
+		} {
+			got, err := Seats(decode(t, body), nil)
+			if err != nil || len(got) != 0 {
+				t.Errorf("%s: seats = %+v, err = %v", name, got, err)
+			}
+		}
+	})
+}
+
+// Chicago leaves daylight time on 2026-11-01 and enters it on 2026-03-08, so a
+// window's wall-clock bounds sit at different UTC offsets on either side. The
+// window reads the wall clock, so it opens at 08:00 local whichever offset
+// that is.
+func TestWindowAcrossDST(t *testing.T) {
+	t.Parallel()
+
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w, err := ParseWindow("20:00-08:00", loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name  string
+		from  time.Time // closed
+		opens time.Time
+	}{
+		{
+			name:  "fall back, evening before",
+			from:  time.Date(2026, 10, 31, 21, 0, 0, 0, loc),
+			opens: time.Date(2026, 11, 1, 14, 0, 0, 0, time.UTC), // 08:00 CST, UTC-6
+		},
+		{
+			name:  "spring forward, evening before",
+			from:  time.Date(2026, 3, 7, 21, 0, 0, 0, loc),
+			opens: time.Date(2026, 3, 8, 13, 0, 0, 0, time.UTC), // 08:00 CDT, UTC-5
+		},
+	} {
+		if !w.Closed(tc.from) {
+			t.Errorf("%s: %v must be closed", tc.name, tc.from)
+		}
+		got := w.OpensAt(tc.from)
+		if !got.Equal(tc.opens) {
+			t.Errorf("%s: OpensAt = %v, want %v", tc.name, got.UTC(), tc.opens)
+		}
+		if w.Closed(got) {
+			t.Errorf("%s: the window is still closed at the instant OpensAt returned", tc.name)
+		}
+	}
+
+	// The repeated hour: 01:30 happens twice on 2026-11-01, once in each offset,
+	// and both fall inside the closed period.
+	first := time.Date(2026, 11, 1, 6, 30, 0, 0, time.UTC)  // 01:30 CDT
+	second := time.Date(2026, 11, 1, 7, 30, 0, 0, time.UTC) // 01:30 CST
+	if !w.Closed(first) || !w.Closed(second) {
+		t.Errorf("both 01:30s must be closed: %v %v", w.Closed(first), w.Closed(second))
 	}
 }

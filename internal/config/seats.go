@@ -29,10 +29,13 @@ type Window struct {
 }
 
 // Seats returns the town's seats sorted by agent name; known reports whether an
-// agent name resolves.
+// agent name resolves. A nil known accepts every name.
 func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
 	if ts == nil || ts.PolecatPool == nil {
 		return nil, nil
+	}
+	if known == nil {
+		known = func(string) bool { return true }
 	}
 	pool := ts.PolecatPool
 	var loc *time.Location
@@ -70,7 +73,13 @@ func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
 			s.Window = w
 		}
 		for _, n := range c.Names {
+			if strings.TrimSpace(n) == "" {
+				return nil, fmt.Errorf("polecat_pool.seats.%s.names: a name is empty", a)
+			}
 			if prev, ok := owner[n]; ok {
+				if prev == a {
+					return nil, fmt.Errorf("polecat_pool.seats.%s.names: name %q is listed twice", a, n)
+				}
 				return nil, fmt.Errorf("polecat_pool.seats: name %q is in both %s and %s", n, prev, a)
 			}
 			owner[n] = a
@@ -78,6 +87,17 @@ func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// SeatsKnownTo returns the known callback for Seats under settings s: an agent
+// resolves when s defines it in agents or it is a built-in preset.
+func SeatsKnownTo(s *TownSettings) func(agent string) bool {
+	return func(agent string) bool {
+		if s != nil && s.Agents[agent] != nil {
+			return true
+		}
+		return IsKnownPreset(agent)
+	}
 }
 
 // ParseWindow parses "HH:MM-HH:MM" as a daily window in loc.
