@@ -23,6 +23,23 @@ func TestParseBdCloseInvocations(t *testing.T) {
 			want:    []bdCloseInvocation{{IDs: []string{"gt-arno"}}},
 		},
 		{
+			// `bd close --help` lists "done" as an alias; it closes the bead
+			// the same way, so the guard has to see it.
+			name:    "done alias",
+			command: "bd done gt-abc",
+			want:    []bdCloseInvocation{{IDs: []string{"gt-abc"}}},
+		},
+		{
+			name:    "done alias with a reason",
+			command: `bd done -r "cancel: x" gt-abc`,
+			want:    []bdCloseInvocation{{IDs: []string{"gt-abc"}, Reason: "cancel: x"}},
+		},
+		{
+			name:    "done alias behind a global flag",
+			command: "bd --db x done gt-abc",
+			want:    []bdCloseInvocation{{IDs: []string{"gt-abc"}}},
+		},
+		{
 			name:    "multiple ids",
 			command: "bd close gt-arno gt-other",
 			want:    []bdCloseInvocation{{IDs: []string{"gt-arno", "gt-other"}}},
@@ -292,6 +309,23 @@ func TestBdCloseInvariantRefusal(t *testing.T) {
 		}
 		if !strings.Contains(got, "4") {
 			t.Errorf("refusal must name the unmerged commit count, got %q", got)
+		}
+	})
+
+	t.Run("bd done on this branch's bead with unmerged commits is refused", func(t *testing.T) {
+		t.Parallel()
+		// Parse the way the guard does, so the alias path is covered end to end.
+		invocations := parseBdCloseInvocations("bd done gt-arno")
+		if len(invocations) != 1 || len(invocations[0].IDs) != 1 {
+			t.Fatalf("bd done gt-arno parsed as %+v, want one invocation with one id", invocations)
+		}
+		inv := invocations[0]
+		s := scope(4)
+		if !branchNamesBead(s.branch, inv.IDs[0]) {
+			t.Fatalf("branch %q should name %q", s.branch, inv.IDs[0])
+		}
+		if got := bdCloseInvariantRefusal(s, inv.IDs[0], inv.Reason); got == "" {
+			t.Error("expected bd done with unmerged commits to be refused")
 		}
 	})
 
