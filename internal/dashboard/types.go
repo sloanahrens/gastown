@@ -337,6 +337,12 @@ type Models struct {
 	// agent's seat landed and the landings it was refused, off the records
 	// the landing worker writes with the agent it ran on (gt-mukgk.6).
 	Activity []AgentActivity `json:"activity,omitempty"`
+	// ActivityUnreadable names the landings and review sources the activity
+	// count could not read, by the name the panel shows. A source that is
+	// missing is a window with nothing to count and is not named; one that is
+	// there and cannot be read is, because its records are missing from a
+	// table that would otherwise read as an empty window (gt-h3cwd).
+	ActivityUnreadable []string `json:"activity_unreadable,omitempty"`
 }
 
 // AgentActivity is one agent's seat over the last 24 hours: the landings it

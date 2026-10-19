@@ -68,7 +68,7 @@ func (r *modelsReader) read() *dashboard.Models {
 	// unparseable one is neither, and the panel says so.
 	patrols, patrolsErr := loadDashPatrols(r.townRoot)
 	m.SeatRows = modelSeatRows(r.townRoot, ts, tsErr, patrols, patrolsErr)
-	m.Activity = r.agentActivity()
+	m.Activity, m.ActivityUnreadable = r.agentActivity()
 	m.Roles = modelRoleRows(modelRoleInputs{
 		townRoot: r.townRoot, ts: ts, tsErr: tsErr, patrols: patrols, patrolsErr: patrolsErr,
 		omBackend: om.Backend, table: loadModelTable(filepath.Join(r.townRoot, "settings", "models.json")),
@@ -88,28 +88,38 @@ func (r *modelsReader) read() *dashboard.Models {
 //
 // A file that is missing is a window with nothing to count; one that cannot be
 // read, or a rig whose name is unusable, is left out of the count rather than
-// failing the whole panel: the other seats' numbers are still true.
-func (r *modelsReader) agentActivity() []dashboard.AgentActivity {
+// failing the whole panel: the other seats' numbers are still true. Those
+// sources are returned by name, because a count that lost a file and a count
+// that found nothing in one are the same empty table, and only the panel's
+// naming of the failures tells the operator which the window is (gt-h3cwd).
+func (r *modelsReader) agentActivity() ([]dashboard.AgentActivity, []string) {
 	now := time.Now()
 	if r.now != nil {
 		now = r.now()
 	}
 	since := now.Add(-modelsActivityWindow)
 
+	unreadable := []string{}
 	landed := map[string]int{}
 	rigs, err := knownRigNames(r.townRoot)
 	if err != nil {
-		// A town with no readable rig registry still has the HQ landings; a
-		// registry read failure costs the rigs' rows, not the panel.
+		// A town that never wrote a rig registry has no rigs, and its HQ
+		// landings are the whole window; one that wrote a registry that
+		// cannot be read has landings this count cannot name.
+		if !errors.Is(err, config.ErrNotFound) {
+			unreadable = append(unreadable, "the rig registry")
+		}
 		rigs = nil
 	}
 	for _, rig := range append([]string{"hq"}, rigs...) {
 		f, err := land.RigLandingsFile(r.townRoot, rig)
 		if err != nil {
+			unreadable = append(unreadable, rig+" landings")
 			continue
 		}
 		recs, err := f.Since(since)
 		if err != nil {
+			unreadable = append(unreadable, rig+" landings")
 			continue
 		}
 		for _, rec := range recs {
@@ -120,7 +130,10 @@ func (r *modelsReader) agentActivity() []dashboard.AgentActivity {
 	}
 
 	rejected := map[string]int{}
-	if recs, err := land.TownReviewsFile(r.townRoot).Since(since); err == nil {
+	recs, err := land.TownReviewsFile(r.townRoot).Since(since)
+	if err != nil {
+		unreadable = append(unreadable, "the review log")
+	} else {
 		for _, rec := range recs {
 			agent := strings.TrimSpace(rec.Agent)
 			// A request_changes verdict refused the landing with or without
@@ -147,7 +160,7 @@ func (r *modelsReader) agentActivity() []dashboard.AgentActivity {
 	for _, agent := range agents {
 		out = append(out, dashboard.AgentActivity{Agent: agent, Landed: landed[agent], Rejected: rejected[agent]})
 	}
-	return out
+	return out, unreadable
 }
 
 // loadDashPatrols reads the daemon's patrol config, nil with no error when the

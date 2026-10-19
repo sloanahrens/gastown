@@ -547,6 +547,60 @@ func TestDashboardModelsCountsLandingsAndRejectionsPerAgent(t *testing.T) {
 	}
 }
 
+// TestDashboardModelsNamesActivitySourcesItCouldNotRead: a landings file or
+// review log that is there and cannot be read is a window the panel must not
+// show as empty, so the count names each source it lost. A file that is not
+// there, and a town that never wrote a rig registry, are an empty window and
+// name nothing (gt-h3cwd).
+func TestDashboardModelsNamesActivitySourcesItCouldNotRead(t *testing.T) {
+	t.Parallel()
+
+	// A directory where a log belongs opens and then fails to scan, standing
+	// in for a file the panel cannot read; it is emphatically not missing.
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(town, "mayor", "rigs.json"),
+		`{"version":1,"rigs":{"gastown":{"git_url":"u","added_at":"2026-01-01T00:00:00Z","beads":{"prefix":"gt"}}}}`)
+	landings, err := land.RigLandingsFile(town, "gastown")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(landings.Path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(landings.Path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(land.TownReviewsFile(town).Path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	m := (&modelsReader{townRoot: town, omPath: filepath.Join(t.TempDir(), "missing.json")}).read()
+	want := []string{"gastown landings", "the review log"}
+	if strings.Join(m.ActivityUnreadable, "|") != strings.Join(want, "|") {
+		t.Errorf("activity unreadable = %v, want %v", m.ActivityUnreadable, want)
+	}
+
+	// A registry that is there and does not parse loses every rig's landings,
+	// and says so.
+	broken := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(broken, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(broken, "mayor", "rigs.json"), `{"rigs":`)
+	if got := (&modelsReader{townRoot: broken, omPath: filepath.Join(t.TempDir(), "missing.json")}).read().ActivityUnreadable; len(got) != 1 || got[0] != "the rig registry" {
+		t.Errorf("unreadable registry = %v, want the rig registry named", got)
+	}
+
+	// Nothing written yet is an empty window, not a read that failed.
+	fresh := (&modelsReader{townRoot: t.TempDir(), omPath: filepath.Join(t.TempDir(), "missing.json")}).read()
+	if len(fresh.ActivityUnreadable) != 0 {
+		t.Errorf("fresh town unreadable = %v, want none", fresh.ActivityUnreadable)
+	}
+}
+
 // TestDashboardModelsWithNoLandingsSaysNothing: a town that has never landed
 // has no per-agent rows, and the panel says nothing rather than inventing a
 // seat with zero landings (gt-mukgk.6).
