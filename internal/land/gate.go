@@ -625,7 +625,15 @@ func runStep(ctx context.Context, dir string, env, argv []string, out io.Writer,
 		err = cmd.Wait()
 		untrack()
 	}
-	if passedPastWaitDelay(err, cmd.ProcessState != nil && cmd.ProcessState.Success()) {
+	return stepOutcome(ctx, err, cmd.ProcessState != nil && cmd.ProcessState.Success())
+}
+
+// stepOutcome turns what Start and Wait returned into runStep's result: a
+// step that exited 0 passes even when a child kept its output pipe past
+// WaitDelay, a canceled context is the context's error, a non-zero exit is its
+// code, and any other error means the step did not run.
+func stepOutcome(ctx context.Context, err error, exitedZero bool) (int, error) {
+	if passedPastWaitDelay(err, exitedZero) {
 		err = nil
 	}
 	if err == nil {

@@ -73,7 +73,7 @@ func FormatRejectionNote(n RejectionNote) string {
 		fmt.Sprintf("\nBranch: %s\nTarget: %s\nMR: %s", n.Branch, n.Target, n.MR)
 	for _, f := range n.Findings {
 		note += fmt.Sprintf("\n- id:%s sev:%s %s:%d — %s",
-			NoteField(f.ID), NoteField(f.Severity), NoteField(f.Path), f.Line, defuseMarkers(NoteField(f.Title)))
+			NoteField(f.ID), NoteField(f.Severity), defuseFindingPath(NoteField(f.Path)), f.Line, defuseMarkers(NoteField(f.Title)))
 	}
 	if n.Receipt != nil {
 		note += fmt.Sprintf("\nScore: %.4f", n.Receipt.Score)
@@ -119,6 +119,21 @@ func defuseMarkers(line string) string {
 	line = strings.ReplaceAll(line, MergeRejectionNoteMarker, "MERGE-REJECTION")
 	line = strings.ReplaceAll(line, ReadyNoteMarker, "READY-TO-LAND")
 	return strings.ReplaceAll(line, LandingNoteMarker, "LANDING-RECORD")
+}
+
+// findingSeparatorRE is the ":N — " that ends a finding's path in a note line.
+var findingSeparatorRE = regexp.MustCompile(`:[0-9]+ — `)
+
+// defuseFindingPath keeps a path from carrying the separator that
+// rejectionFindingRE ends the path at. The parser splits at the first one, so
+// a path holding ":N — " would read back cut short with the rest in the title;
+// the em dash is flattened to a hyphen. The rewrite is lossy on purpose: the
+// note line has no escape for the separator, and a path holding one is rare
+// enough that a legible near-match beats a finding cut in two.
+func defuseFindingPath(path string) string {
+	return findingSeparatorRE.ReplaceAllStringFunc(path, func(sep string) string {
+		return strings.Replace(sep, "—", "-", 1)
+	})
 }
 
 // CountRejections is the number of MERGE REJECTION blocks in notes, the

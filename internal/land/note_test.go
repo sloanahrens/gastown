@@ -281,6 +281,27 @@ func TestParseRejectionNoteTitleWithPathLine(t *testing.T) {
 	}
 }
 
+// TestParseRejectionNotePathWithSeparator: a path that holds ":N — " would end
+// at that first separator on the way back in, so the writer flattens the dash
+// and the finding round-trips with the path whole and the title untouched.
+func TestParseRejectionNotePathWithSeparator(t *testing.T) {
+	t.Parallel()
+	in := Finding{ID: "abc", Severity: "minor", Path: "docs/a:12 — b.md", Line: 5, Title: "see c.go:7 — x"}
+	note := FormatRejectionNote(RejectionNote{
+		Attempt: 1, Kind: "review", Reason: "r", Branch: "b", Target: "main", MR: "gt-x",
+		Findings: []Finding{in},
+	})
+	got, ok := ParseRejectionNote(note)
+	if !ok || len(got.Findings) != 1 {
+		t.Fatalf("ParseRejectionNote(%q) = %+v, ok %v", note, got, ok)
+	}
+	want := in
+	want.Path = "docs/a:12 - b.md"
+	if got.Findings[0] != want {
+		t.Errorf("finding = %+v, want %+v", got.Findings[0], want)
+	}
+}
+
 // TestFormatRejectionNoteTruncatesOnRuneBoundary: the 400-byte cut backs up to
 // a rune start, so a multibyte rune that straddles it is dropped whole rather
 // than left as invalid UTF-8 in the bead's notes.

@@ -199,8 +199,9 @@ func TestParseGateWorkflowUsesJobNameContext(t *testing.T) {
 
 // TestGastownGateWorkflowFixesTheRequiredContext pins this repo's committed
 // gate workflow to the contract the candidate gate derives from it. The file
-// is the single source of the required context "ci / gate (push)"; if its name
-// or job key moves without the branch-protection rule moving too, the landing
+// is the single source of the required context "ci / gate (push)". The job
+// reports under its `name:` when it sets one, else its key, so this fails if the
+// workflow name, the job key or a job `name:` moves without the branch-protection rule moving too, the landing
 // waits on a context nobody posts and every candidate goes silently red
 // (gt-fn9e6.10).
 func TestGastownGateWorkflowFixesTheRequiredContext(t *testing.T) {
