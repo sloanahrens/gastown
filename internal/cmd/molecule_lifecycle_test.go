@@ -172,3 +172,36 @@ func TestSquashClosesDescendantsAndRoot(t *testing.T) {
 		t.Errorf("closes = %v, want %v (the closed step left alone, the root last)", got, want)
 	}
 }
+
+// TestSquashDigestReportsPreCloseProgress: the digest counts the steps done
+// when the squash began, not the steps the squash itself then closed.
+func TestSquashDigestReportsPreCloseProgress(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	steps := []beads.Issue{{ID: "gt-step-1", Title: "Step 1", Status: "closed"}}
+	for _, id := range []string{"gt-step-2", "gt-step-3", "gt-step-4", "gt-step-5", "gt-step-6"} {
+		steps = append(steps, beads.Issue{ID: id, Title: id, Status: "open"})
+	}
+	db := handoffMoleculeDB(t, "witness Handoff", "gt-wisp-mol3", steps...)
+	e := testMoleculeEnv(townRoot, db)
+	e.noDigest = false
+	if err := moleculeSquash(squashCmd(context.Background()), e, []string{"witness"}); err != nil {
+		t.Fatalf("squash: %v", err)
+	}
+	digests, err := db.List(beads.ListOptions{Ephemeral: true, Status: "all", Priority: -1})
+	if err != nil {
+		t.Fatalf("listing digests: %v", err)
+	}
+	var desc string
+	for _, is := range digests {
+		if is.Title == "Digest: gt-wisp-mol3" {
+			desc = is.Description
+		}
+	}
+	if !strings.Contains(desc, "Steps: 1/6 completed") || strings.Contains(desc, "6/6") {
+		t.Errorf("digest description = %q, want \"Steps: 1/6 completed\" and not \"6/6\"", desc)
+	}
+	if !strings.Contains(desc, "Status: partial") {
+		t.Errorf("digest description = %q, want \"Status: partial\"", desc)
+	}
+}

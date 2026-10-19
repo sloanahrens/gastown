@@ -242,6 +242,13 @@ func moleculeSquash(cmd *cobra.Command, e moleculeLifecycleEnv, args []string) (
 		}
 	}
 
+	// Read the digest's progress before the steps are closed: discardDescendants
+	// closes every step, and a read afterwards counts them all as done.
+	var progress *MoleculeProgressInfo
+	if !e.noDigest {
+		progress, _ = getMoleculeProgressInfo(b, moleculeID)
+	}
+
 	// Recursively close all descendant step issues before squashing
 	// This prevents orphaned step issues from accumulating (gt-psj76.1)
 	childrenClosed, stepsForced, descErr := discardDescendants(b, moleculeID)
@@ -253,9 +260,6 @@ func moleculeSquash(cmd *cobra.Command, e moleculeLifecycleEnv, args []string) (
 	// Patrol molecules (deacon, witness, refinery) run frequently and their
 	// digests pollute the database with thousands of low-value beads.
 	if !e.noDigest {
-		// Get progress info for the digest
-		progress, _ := getMoleculeProgressInfo(b, moleculeID)
-
 		// Create a digest issue
 		digestTitle := fmt.Sprintf("Digest: %s", moleculeID)
 		digestDesc := fmt.Sprintf(`Squashed molecule execution.
