@@ -1058,7 +1058,7 @@ func tailOpenEscalations(townRoot string) (int, error) {
 	return len(issues), nil
 }
 
-// tailSpend reads the health watch's DeepSeek rate: ~/.runtime/watch/spend.json
+// tailSpend reads the health watch's DeepSeek rate: <town>/.runtime/watch/spend.json
 // is {"ts", "per_hour", "balance"}, rewritten as the watch measures it. A file
 // older than tailSummarySpendFresh reports nothing.
 func tailSpend(townRoot string) (perHour float64, at time.Time, err error) {
