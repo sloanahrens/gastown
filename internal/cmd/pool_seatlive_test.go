@@ -88,7 +88,8 @@ func TestSeatLiveRosterCountsEachSeatOnItsAgent(t *testing.T) {
 // TestSeatLiveSessionlessSeatsOnTheSeatMap is the gt-2q283 case on a pool that
 // names its agents in the seat map and has no polecat_pool.agent: a seat with no
 // session, mid-landing or dead-hooked, counts on the agent its record names, and
-// one whose record names none follows the same placement rule as a live one.
+// one whose record names none counts on the only seat, or on the polecat role
+// default where the map has several: the seat its restart lands on (gt-zj9yf).
 func TestSeatLiveSessionlessSeatsOnTheSeatMap(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -100,14 +101,20 @@ func TestSeatLiveSessionlessSeatsOnTheSeatMap(t *testing.T) {
 	}{
 		{"mid-landing on its recorded agent", false, "claude-haiku", []string{"claude-sonnet", "claude-haiku"}, map[string]int{"claude-haiku": 1}},
 		{"dead-hooked on its recorded agent", true, "claude-haiku", []string{"claude-sonnet", "claude-haiku"}, map[string]int{"claude-haiku": 1}},
-		{"mid-landing, no record, several seats", false, "", []string{"claude-sonnet", "claude-haiku"}, map[string]int{config.UnknownSeatAgent: 1}},
+		{"mid-landing, no record, several seats, on the role default", false, "", []string{"claude-sonnet", "claude-haiku"}, map[string]int{"claude-sonnet": 1}},
 		{"dead-hooked, no record, one seat", true, "", []string{"claude-haiku"}, map[string]int{"claude-haiku": 1}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
 			t.Parallel()
 			ts := seatMapTown(c.seats...)
+			// The role default a restart starts a seat with no record on
+			// (gt-zj9yf), read from the town's settings.
+			ts.RoleAgents = map[string]string{"polecat": "claude-sonnet"}
 			town := t.TempDir()
+			if err := config.SaveTownSettings(config.TownSettingsPath(town), ts); err != nil {
+				t.Fatalf("SaveTownSettings: %v", err)
+			}
 			writeTestRigsConfig(t, town, "gastown")
 			writeTownPolecatDir(t, town, "gastown", "jade")
 			seat := intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "jade"}
