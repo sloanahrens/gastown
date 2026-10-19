@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
@@ -331,6 +332,11 @@ func outputPluginListText(plugins []*plugin.Plugin, townRoot string) error {
 }
 
 func printPluginSummary(p *plugin.Plugin) {
+	writePluginSummary(os.Stdout, p)
+}
+
+// writePluginSummary writes the list entry for p to w.
+func writePluginSummary(w io.Writer, p *plugin.Plugin) {
 	gateType := "manual"
 	if p.Gate != nil && p.Gate.Type != "" {
 		gateType = string(p.Gate.Type)
@@ -338,7 +344,13 @@ func printPluginSummary(p *plugin.Plugin) {
 
 	desc := p.Description
 	if len(desc) > 50 {
-		desc = desc[:47] + "..."
+		// Cut at a rune boundary: a byte slice through a multi-byte rune
+		// prints invalid UTF-8.
+		cut := 47
+		for cut > 0 && !utf8.RuneStart(desc[cut]) {
+			cut--
+		}
+		desc = desc[:cut] + "..."
 	}
 
 	typeTag := gateType
@@ -346,9 +358,9 @@ func printPluginSummary(p *plugin.Plugin) {
 		typeTag = "exec-wrapper"
 	}
 
-	fmt.Printf("    %s %s\n", style.Bold.Render(p.Name), style.Dim.Render(fmt.Sprintf("[%s]", typeTag)))
+	fmt.Fprintf(w, "    %s %s\n", style.Bold.Render(p.Name), style.Dim.Render(fmt.Sprintf("[%s]", typeTag)))
 	if desc != "" {
-		fmt.Printf("      %s\n", style.Dim.Render(desc))
+		fmt.Fprintf(w, "      %s\n", style.Dim.Render(desc))
 	}
 }
 
@@ -529,9 +541,14 @@ func (r pluginRun) run(name string) error {
 		}
 		if !gateOpen {
 			fmt.Fprintf(r.out, "%s %s (use --force to override)\n", style.Warning.Render("Gate closed:"), gateReason)
-		} else {
-			fmt.Fprintf(r.out, "%s Would execute plugin instructions\n", style.Success.Render("Gate open:"))
+			return nil
 		}
+		// A real run past an open gate refuses a script plugin, so the preview
+		// does too rather than promising an execution that cannot happen.
+		if err := r.refuseScriptPlugin(p); err != nil {
+			return err
+		}
+		fmt.Fprintf(r.out, "%s Would execute plugin instructions\n", style.Success.Render("Gate open:"))
 		return nil
 	}
 
@@ -555,9 +572,8 @@ func (r pluginRun) run(name string) error {
 	// script plugin on any other gate has no run path at all today
 	// (gt-o1z7, d249eaeae0f3/fec069dde34c: executing run.sh from the CLI
 	// both fails open on a bd error and can overlap the daemon's own run).
-	if p.Execution != nil && p.Execution.Type == plugin.ExecTypeScript {
-		fmt.Fprintf(r.errOut, "Plugin %s has a run.sh; `gt plugin run` does not execute plugin scripts (there is no script interpreter here). If its gate is cooldown, the daemon heartbeat runs it; otherwise, run the script directly or edit the plugin's gate.\n", p.Name)
-		return fmt.Errorf("plugin %s is script-type; gt plugin run does not run scripts", p.Name)
+	if err := r.refuseScriptPlugin(p); err != nil {
+		return err
 	}
 
 	// Print the instructions for the agent/user to execute. This command
@@ -584,6 +600,16 @@ func (r pluginRun) run(name string) error {
 		fmt.Fprintln(r.out, "This receipt says the instructions were printed, not executed. Record the real result after doing the work.")
 	}
 
+	return nil
+}
+
+// refuseScriptPlugin prints the refusal and returns its error when p is a
+// script-type plugin, nil otherwise.
+func (r pluginRun) refuseScriptPlugin(p *plugin.Plugin) error {
+	if p.Execution != nil && p.Execution.Type == plugin.ExecTypeScript {
+		fmt.Fprintf(r.errOut, "Plugin %s has a run.sh; `gt plugin run` does not execute plugin scripts (there is no script interpreter here). If its gate is cooldown, the daemon heartbeat runs it; otherwise, run the script directly or edit the plugin's gate.\n", p.Name)
+		return fmt.Errorf("plugin %s is script-type; gt plugin run does not run scripts", p.Name)
+	}
 	return nil
 }
 
@@ -658,7 +684,18 @@ func (r pluginSyncRun) run() error {
 			return nil
 		}
 
+		// A plugin holding runtime edits is one the real sync leaves alone
+		// and fails over, so the preview says that instead of "would sync".
+		protected, err := plugin.ProtectedEdits(sourceDir, targetDir, report, plugin.SyncOptions{Clean: r.clean, Force: r.force})
+		if err != nil {
+			return fmt.Errorf("detecting drift: %w", err)
+		}
+
 		for _, d := range report.Drifted {
+			if _, ok := protected[d.Name]; ok {
+				fmt.Fprintf(r.out, "  %s %s (protected, runtime edits)\n", style.Warning.Render("!"), d.Name)
+				continue
+			}
 			fmt.Fprintf(r.out, "  %s %s (content differs)\n", style.Warning.Render("~"), d.Name)
 		}
 		for _, name := range report.Missing {
@@ -667,13 +704,15 @@ func (r pluginSyncRun) run() error {
 		// Name an extra even without --clean: it is drift whether or not this
 		// run removes it (gt-bw1wo).
 		for _, name := range report.Extra {
-			if r.clean {
+			if _, ok := protected[name]; ok {
+				fmt.Fprintf(r.out, "  %s %s (protected, runtime edits)\n", style.Warning.Render("!"), name)
+			} else if r.clean {
 				fmt.Fprintf(r.out, "  %s %s (would be removed)\n", style.Error.Render("-"), name)
 			} else {
 				fmt.Fprintf(r.out, "  %s %s (in runtime, not in source)\n", style.Warning.Render("!"), name)
 			}
 		}
-		return nil
+		return reportProtectedPlugins(r.errOut, protected)
 	}
 
 	result, err := plugin.SyncPluginsWithOptions(sourceDir, targetDir, plugin.SyncOptions{Clean: r.clean, Force: r.force})

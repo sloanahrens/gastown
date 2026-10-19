@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -160,6 +161,15 @@ func TestRunPluginSync_DryRunCleanSaysWouldRemove(t *testing.T) {
 	writeTestPlugin(t, sourcePlugins, "current-plugin", "current")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "current-plugin", "current")
 	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "seat-refill", "retired")
+	// The source once shipped seat-refill, so --clean may remove the runtime
+	// copy: a plugin the source never held would be protected as an edit.
+	writeTestPlugin(t, sourcePlugins, "seat-refill", "retired")
+	gitInTest(t, sourcePlugins, "init", "-q")
+	gitInTest(t, sourcePlugins, "add", "-A")
+	gitInTest(t, sourcePlugins, "commit", "-q", "-m", "ship seat-refill")
+	if err := os.RemoveAll(filepath.Join(sourcePlugins, "seat-refill")); err != nil {
+		t.Fatal(err)
+	}
 
 	var out bytes.Buffer
 	r := pluginSyncRun{townRoot: townRoot, dryRun: true, clean: true, out: &out, errOut: io.Discard}
@@ -171,9 +181,62 @@ func TestRunPluginSync_DryRunCleanSaysWouldRemove(t *testing.T) {
 	}
 }
 
+// gitInTest runs git in dir with a fixed identity and no signing.
+func gitInTest(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", append([]string{"-c", "user.email=t@t", "-c", "user.name=t", "-c", "commit.gpgsign=false"}, args...)...)
+	cmd.Dir = dir
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
 func writeFile(t *testing.T, path, content string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// The real sync leaves a runtime copy holding edits the source never had and
+// exits non-zero. The dry run previewed it as "content differs" and exited 0.
+func TestPluginSyncDryRunReportsProtected(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	markTestTown(t, townRoot)
+	sourcePlugins := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	writeTestPlugin(t, sourcePlugins, "edited-plugin", "source text")
+	writeTestPlugin(t, filepath.Join(townRoot, "plugins"), "edited-plugin", "hand edit")
+
+	var out, errOut bytes.Buffer
+	dry := pluginSyncRun{townRoot: townRoot, dryRun: true, out: &out, errOut: &errOut}
+	dryErr := dry.run()
+	if dryErr == nil {
+		t.Fatalf("dry run returned nil for a plugin holding runtime edits; output:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "content differs") {
+		t.Errorf("dry run previewed a protected plugin as syncable; output:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), "edited-plugin (protected") {
+		t.Errorf("dry run did not report edited-plugin as protected; output:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "edited-plugin/plugin.md") {
+		t.Errorf("stderr = %q, want the edited file named", errOut.String())
+	}
+
+	realErr := pluginSyncRun{townRoot: townRoot, out: io.Discard, errOut: io.Discard}.run()
+	if realErr == nil || realErr.Error() != dryErr.Error() {
+		t.Errorf("dry run error = %v, real run error = %v; want the same", dryErr, realErr)
+	}
+
+	// --force discards the edits, so the preview is a plain diff again.
+	out.Reset()
+	forced := pluginSyncRun{townRoot: townRoot, dryRun: true, force: true, out: &out, errOut: io.Discard}
+	if err := forced.run(); err != nil {
+		t.Fatalf("--force dry run error = %v", err)
+	}
+	if !strings.Contains(out.String(), "edited-plugin (content differs)") {
+		t.Errorf("--force dry run output:\n%s", out.String())
 	}
 }

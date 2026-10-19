@@ -51,10 +51,9 @@ var sessionCmd = &cobra.Command{
 Sessions are tmux sessions running Claude for each polecat.
 Use the subcommands to start, stop, attach, and monitor sessions.
 
-Addresses are <rig>/<name>. <name> is a polecat, or one of the rig's roles
-(witness, refinery), which own sessions named after themselves. An address
-that names neither is refused as not found by every subcommand, so a session
-that does not exist is never reported as a stopped or restarted one.
+Addresses are <rig>/<name>, where <name> is one of the rig's polecats. An
+address that names no polecat is refused as not found by every subcommand, so
+a session that does not exist is never reported as a stopped or restarted one.
 
 TIP: To send messages to a running session, use 'gt nudge' (not 'session inject').
 The nudge command uses reliable delivery that works correctly with Claude Code.`,
@@ -487,6 +486,37 @@ type SessionListItem struct {
 	Running   bool   `json:"running"`
 }
 
+// polecatSessionLister is the slice of polecat.SessionManager that gt session list
+// reads. List returns every session carrying the rig's prefix, crew included;
+// ListPolecats returns the polecat seats only.
+type polecatSessionLister interface {
+	List() ([]polecat.SessionInfo, error)
+	ListPolecats() ([]polecat.SessionInfo, error)
+}
+
+// listPolecatSessions collects the polecat sessions of rigs, skipping a rig
+// whose sessions cannot be listed. It asks ListPolecats, not List: a crew
+// session such as gt-crew-sloan carries the rig prefix too, and listing it as
+// polecat crew-sloan points `gt session stop` at a seat that does not exist.
+func listPolecatSessions(rigs []*rig.Rig, open func(*rig.Rig) polecatSessionLister) []SessionListItem {
+	var items []SessionListItem
+	for _, r := range rigs {
+		infos, err := open(r).ListPolecats()
+		if err != nil {
+			continue
+		}
+		for _, info := range infos {
+			items = append(items, SessionListItem{
+				Rig:       r.Name,
+				Polecat:   info.Polecat,
+				SessionID: info.SessionID,
+				Running:   info.Running,
+			})
+		}
+	}
+	return items
+}
+
 func runSessionList(cmd *cobra.Command, args []string) error {
 	// Find town root
 	townRoot, err := workspace.FindFromCwdOrError()
@@ -522,24 +552,9 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 
 	// Collect sessions from all rigs
 	t := tmux.NewTmux()
-	var allSessions []SessionListItem
-
-	for _, r := range rigs {
-		polecatMgr := polecat.NewSessionManager(t, r, townRegistry())
-		infos, err := polecatMgr.List()
-		if err != nil {
-			continue
-		}
-
-		for _, info := range infos {
-			allSessions = append(allSessions, SessionListItem{
-				Rig:       r.Name,
-				Polecat:   info.Polecat,
-				SessionID: info.SessionID,
-				Running:   info.Running,
-			})
-		}
-	}
+	allSessions := listPolecatSessions(rigs, func(r *rig.Rig) polecatSessionLister {
+		return polecat.NewSessionManager(t, r, townRegistry())
+	})
 
 	// Output
 	if sessionListJSON {

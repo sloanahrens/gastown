@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"bytes"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/plugin"
 )
@@ -142,5 +145,64 @@ type = "script"
 	}
 	if len(rec.recorded) != 0 {
 		t.Fatalf("script-type refusal recorded a receipt: %+v", rec.recorded)
+	}
+}
+
+// The dry run previews the real run, so it refuses what the real run refuses:
+// a script plugin on an open gate printed "Gate open" and exited 0 while the
+// real run returned this error.
+func TestPluginRunDryRunRefusesScriptPlugin(t *testing.T) {
+	t.Parallel()
+	rec := &fakePluginRecorder{}
+	r := newFakePluginRun(t, "script-plugin", `+++
+name = "script-plugin"
+description = "test plugin"
+
+[gate]
+type = "manual"
+
+[execution]
+type = "script"
++++
+
+# Instructions
+
+(unused for a script plugin)
+`, rec)
+	r.dryRun = true
+	var out, errOut bytes.Buffer
+	r.out, r.errOut = &out, &errOut
+
+	err := r.run("script-plugin")
+	if err == nil {
+		t.Fatalf("dry run of a script plugin returned nil; output:\n%s", out.String())
+	}
+	if !strings.Contains(err.Error(), "script-type") {
+		t.Errorf("error = %q, want the real run's script-type refusal", err)
+	}
+	if strings.Contains(out.String(), "Gate open") {
+		t.Errorf("dry run promised an execution that cannot happen; output:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "has a run.sh") {
+		t.Errorf("stderr = %q, want the real run's refusal message", errOut.String())
+	}
+}
+
+// The list entry cuts a long description at 47 bytes; a multi-byte rune
+// straddling that byte must be dropped whole, not sliced into invalid UTF-8.
+func TestPrintPluginSummaryTruncatesOnRuneBoundary(t *testing.T) {
+	t.Parallel()
+	// 46 ASCII bytes, then 3-byte runes: byte 47 falls inside the first one.
+	desc := strings.Repeat("a", 46) + strings.Repeat("世", 10)
+	p := &plugin.Plugin{Name: "wide", Description: desc}
+
+	var out bytes.Buffer
+	writePluginSummary(&out, p)
+
+	if !utf8.ValidString(out.String()) {
+		t.Errorf("summary is not valid UTF-8: %q", out.String())
+	}
+	if !strings.Contains(out.String(), strings.Repeat("a", 46)+"...") {
+		t.Errorf("summary = %q, want the description cut after the 46 ASCII bytes", out.String())
 	}
 }

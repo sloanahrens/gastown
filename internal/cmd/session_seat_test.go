@@ -108,3 +108,20 @@ func TestResolveSessionSeatRejectsUnknownName(t *testing.T) {
 		t.Errorf("error = %q, want it to name the missing polecat and say not found", err)
 	}
 }
+
+// The group help promises which addresses resolve; this holds it to the
+// resolver. It said a rig role (witness, refinery) was an address while the
+// resolver refused both.
+func TestResolveSessionSeatHelpMatchesResolver(t *testing.T) {
+	t.Parallel()
+	townRoot := setupSessionSeatTown(t, "amber")
+
+	for _, role := range []string{"witness", "refinery"} {
+		_, err := resolveSessionSeatWith([]string{"gastown/" + role}, rigsIn(townRoot))
+		resolves := err == nil
+		named := strings.Contains(sessionCmd.Long, role)
+		if named != resolves {
+			t.Errorf("help names %q = %v, but the resolver accepts gastown/%s = %v", role, named, role, resolves)
+		}
+	}
+}

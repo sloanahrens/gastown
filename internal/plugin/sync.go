@@ -42,6 +42,41 @@ func SyncPluginsWithOptions(sourceDir, targetDir string, opts SyncOptions) (*Syn
 	return syncPlugins(sourceDir, targetDir, opts, sourceHistory)
 }
 
+// ProtectedEdits returns what SyncPluginsWithOptions(sourceDir, targetDir,
+// opts) would report in Protected, without writing anything. report is
+// DetectDrift's result for the same directories: its drifted plugins are
+// checked, and its extras too under opts.Clean, the two cases a sync replaces
+// or removes. Under opts.Force nothing is protected.
+func ProtectedEdits(sourceDir, targetDir string, report *DriftReport, opts SyncOptions) (map[string][]string, error) {
+	if opts.Force {
+		return nil, nil
+	}
+	hist, prefix := sourceHistory(sourceDir)
+	names := make([]string, 0, len(report.Drifted)+len(report.Extra))
+	for _, d := range report.Drifted {
+		names = append(names, d.Name)
+	}
+	if opts.Clean {
+		names = append(names, report.Extra...)
+	}
+
+	var protected map[string][]string
+	for _, name := range names {
+		edits, err := runtimeEdits(name, filepath.Join(sourceDir, name), filepath.Join(targetDir, name), hist, prefix)
+		if err != nil {
+			return nil, fmt.Errorf("%s: checking for runtime edits: %w", name, err)
+		}
+		if len(edits) == 0 {
+			continue
+		}
+		if protected == nil {
+			protected = map[string][]string{}
+		}
+		protected[name] = edits
+	}
+	return protected, nil
+}
+
 // syncPlugins is SyncPluginsWithOptions reading the source's blob history
 // through history, which unit tests script instead of running git.
 func syncPlugins(sourceDir, targetDir string, opts SyncOptions, history func(sourceDir string) (blobHistory, string)) (*SyncResult, error) {
