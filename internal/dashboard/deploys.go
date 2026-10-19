@@ -72,7 +72,8 @@ const (
 	// healthReadBudget bounds the scheduled checks' own read, which runs last on
 	// a deadline of its own: the runs no earlier refresh read the jobs of are
 	// the refresh's costliest read, and it must not spend the time the deploy
-	// rows need.
+	// rows need. The deadline is detached from the deploy reads' on purpose, so a
+	// refresh can run to forgejoTimeout plus this.
 	healthReadBudget = forgejoTimeout / 2
 
 	// deployNoRunnerAfter is how long a deploy run may sit waiting before the
@@ -282,7 +283,8 @@ type DeployReader struct {
 	api   deployAPI
 	repos []string // owner/name overrides; empty reads the viewer's whole list
 	now   func() time.Time
-	// timeout is the deadline of one whole refresh; forgejoTimeout outside tests.
+	// timeout is the deadline of the refresh's deploy reads; forgejoTimeout
+	// outside tests. The checks' read has healthReadBudget on top of it.
 	timeout time.Duration
 
 	mu     sync.Mutex
@@ -322,9 +324,10 @@ func NewDeployReader(api deployAPI, repos []string) *DeployReader {
 // the newest deployJobsKept of those.
 func (r *DeployReader) Read() *Deploys {
 	now := r.now()
-	// The whole refresh — the repo list, every run query and every jobs query
-	// — shares the panel's deadline, so a slow Forgejo cannot hold the block
-	// past it however many repos the viewer sees.
+	// The repo list, every run query and every jobs query share the panel's
+	// deadline, so a slow Forgejo cannot hold the deploy rows past it however
+	// many repos the viewer sees. The scheduled checks are read after them under
+	// a budget of their own (healthReadBudget).
 	ctx, cancel := context.WithTimeout(context.Background(), r.timeout)
 	defer cancel()
 
