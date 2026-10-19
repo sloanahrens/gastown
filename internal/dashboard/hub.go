@@ -864,6 +864,11 @@ func dispatchBead(text string) (string, bool) {
 	return "", false
 }
 
+// feedBurstMax is the most entries pollFeed sends as frames of their own; it
+// leaves room in a page's 64-frame buffer for the state and alert frames that
+// follow.
+const feedBurstMax = 32
+
 func (h *Hub) pollFeed() {
 	entries := h.cfg.Feed()
 	if len(entries) == 0 {
@@ -872,6 +877,10 @@ func (h *Hub) pollFeed() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	changed := false
+	// A batch longer than a page's buffer (the 2h preface of the first poll on a
+	// busy town) goes out as one backlog frame: one entry frame each would fill
+	// the buffer and drop the page.
+	burst := len(entries) > feedBurstMax
 	for i := range entries {
 		h.seq++
 		entries[i].Seq = h.seq
@@ -888,10 +897,15 @@ func (h *Hub) pollFeed() {
 			delete(h.gating, m[1])
 			changed = true
 		}
-		h.broadcastLocked(frame("entry", e))
+		if !burst {
+			h.broadcastLocked(frame("entry", e))
+		}
 	}
 	if n := len(h.ring); n > h.cfg.RingSize {
 		h.ring = append([]Entry(nil), h.ring[n-h.cfg.RingSize:]...)
+	}
+	if burst {
+		h.broadcastLocked(frame("backlog", h.ring))
 	}
 	if alerts := h.observeLocked(entries); alerts > 0 {
 		changed = true

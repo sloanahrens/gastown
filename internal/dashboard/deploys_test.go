@@ -46,6 +46,11 @@ type deployStub struct {
 	// their own (gt-t9w60).
 	healthDeadline time.Time
 	jobsDeadline   time.Time
+
+	// spendTimeout makes a deploy query wait out the refresh's deadline before it
+	// answers, and healthCtxErr is the error the checks' read began under.
+	spendTimeout bool
+	healthCtxErr error
 }
 
 func (s *deployStub) ListUserRepos(context.Context) ([]forgejo.Repository, error) {
@@ -64,8 +69,15 @@ func (s *deployStub) ListRuns(ctx context.Context, owner, repo string, f forgejo
 	if f.WorkflowID == healthWorkflow {
 		s.healthAsked = append(s.healthAsked, name)
 		s.healthDeadline, _ = ctx.Deadline()
+		s.healthCtxErr = ctx.Err()
+		if s.healthCtxErr != nil {
+			return nil, s.healthCtxErr
+		}
 	} else {
 		s.runsAsked = append(s.runsAsked, name+" "+f.WorkflowID)
+		if s.spendTimeout {
+			<-ctx.Done()
+		}
 	}
 	if err := s.runsErr[name]; err != nil {
 		return nil, err
@@ -901,7 +913,9 @@ func TestDeployReaderSaysAHealthRowItCouldNotRead(t *testing.T) {
 
 	// A run whose jobs named no environment the block knows is not a check of
 	// one, and draws no row at all: the repo is said as one whose checks the
-	// block cannot read rather than drawn as a repo with no checks.
+	// block cannot read rather than drawn as a repo with no checks. The run
+	// passed: a failing one is filed as failed (TestFoldHealthUnknownEnvKeepsFailure).
+	stub.runs = map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(2, "success", 5)}}
 	stub.jobsErr = nil
 	stub.jobs = map[int64][]forgejo.ActionRunJob{2: {testJob("off", "skipped"), testJob("something-else", "success")}}
 	d = newDeployTestReader(stub, nil).Read()
@@ -1144,6 +1158,56 @@ func TestDeployReaderNamesTheReposWhoseChecksNameNoEnvironment(t *testing.T) {
 	assert.Empty(t, d.Health)
 	assert.Empty(t, d.HealthFailed)
 	assert.Empty(t, d.HealthUnread)
+}
+
+// The checks read on a budget of their own, so a refresh whose deploy reads
+// spent the whole Forgejo timeout still reads them: the repo's health is neither
+// unread nor missing for want of time the deploys took (gt-bfh09).
+func TestReadHealthHasOwnDeadline(t *testing.T) {
+	t.Parallel()
+
+	stub := &deployStub{
+		repos:        []string{"sloan/fractals-nextjs"},
+		spendTimeout: true,
+		runs: map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {
+			testHealthRun(1, "success", 1),
+		}},
+		jobs: map[int64][]forgejo.ActionRunJob{1: healthJobs("success", "success", "success")},
+	}
+	r := newDeployTestReader(stub, nil)
+	r.timeout = time.Millisecond
+	d := r.Read()
+
+	require.NoError(t, stub.healthCtxErr, "the checks' read began under the deploy reads' spent deadline")
+	assert.Empty(t, d.HealthUnread)
+	require.Len(t, d.Health, 2)
+	assert.Equal(t, "success", d.Health[0].Status)
+}
+
+// A repo whose newest check failed and names no environment the block knows has
+// no row to carry the failure, so the strip is the only place it can show: it
+// is filed as failed, not as a repo whose checks are missing (gt-bfh09).
+func TestFoldHealthUnknownEnvKeepsFailure(t *testing.T) {
+	t.Parallel()
+
+	window := []healthRun{{
+		run:    testHealthRun(1, "failure", 5),
+		envs:   map[string]string{},
+		failed: true,
+	}}
+	got := foldHealth("sloan/fractals-nextjs", window)
+
+	assert.True(t, got.failed, "a failing newest run is a failure whatever its jobs are called")
+	assert.Empty(t, got.rows)
+
+	stub := &deployStub{
+		repos: []string{"sloan/fractals-nextjs"},
+		runs:  map[string][]forgejo.ActionRun{"sloan/fractals-nextjs": {testHealthRun(1, "failure", 5)}},
+		jobs:  map[int64][]forgejo.ActionRunJob{1: {testJob("off", "success"), testJob("integration-staging", "failure")}},
+	}
+	d := newDeployTestReader(stub, nil).Read()
+	assert.Equal(t, []string{"sloan/fractals-nextjs"}, d.HealthFailed)
+	assert.Empty(t, d.HealthMissing)
 }
 
 // Neither a cancelled check nor a run still moving is a failure: only a check
