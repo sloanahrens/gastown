@@ -24,11 +24,8 @@ import (
 // agents it names and validates the whole resulting map before writing.
 //
 // Until the two-seat keys are retired (gt-mukgk.7), a town with no seat map
-// still runs polecat_pool.agent/max_seats and spec_dispatch's hooked_agent/
-// max_hooked. show prints those seats, and set seeds the map from them so a
-// first set does not drop a running seat. set-second and set-total change the
-// two-seat keys directly; gt pool mix is retired and prints its gt pool set
-// replacement.
+// still dispatches from them, and the first set seeds the map from them. Once
+// the map exists the dispatcher ignores those keys, so set-second refuses.
 //
 // max_total bounds live polecats across every seat. An absent max_total, like a
 // written 0, is no cap.
@@ -81,7 +78,8 @@ tick with no daemon restart.
 
 A town whose file has no polecat_pool.seats still runs the two-seat keys. The
 first set seeds the map from the seats the dispatcher is running, so a set on
-one agent does not drop the others (gt-mukgk).
+one agent does not drop the others, and says so. From then on the dispatcher
+ignores the two-seat keys (gt-mukgk).
 
 The file is written atomically and the previous copy is kept beside it as
 <file>.bak-<timestamp>.`,
@@ -140,10 +138,9 @@ var poolSetSecondCmd = &cobra.Command{
 	Use:   "set-second <agent> <n>",
 	Short: "Set the second seat's agent and cap together; 0 closes the seat",
 	Long: `Set the second seat's agent (spec_dispatch hooked_agent) and cap (max_hooked)
-in one write. gt pool set only moves the cap of a seat in the seat map, so this
-is the verb for changing which agent a town with no seat map runs: two
-claude-sonnet seats and two deepseek-flash seats is gt pool set-second
-deepseek-flash 2 once the seat map replaces the two-seat keys (gt-mukgk).
+in one write. It is the verb for changing which agent a town with no seat map
+runs. A town with a seat map is refused, since the dispatcher no longer reads
+these keys: gt pool set <agent>=<cap> does the same there (gt-mukgk).
 
 <agent> must be a known preset: a built-in one, one in the town's
 settings/agents.json, or a custom agent in settings/config.json (gt config agent
@@ -308,12 +305,9 @@ func loadPoolSeats(townRoot string) (poolSeatView, error) {
 	return poolSeatsOf(ts, sd), nil
 }
 
-// loadPoolSpecDispatch reads spec_dispatch the way the daemon does. Unlike
-// loadSpecDispatchConfig it returns the read error: a file that does not parse
-// must stop a seat change, not read as "no seats".
-// loadPoolSpecDispatch is the one read of the patrol block gt pool reads and
-// writes: readSpecDispatchConfig, so pool and the ticker cannot drift onto two
-// readings of one file (gt-jdnab).
+// loadPoolSpecDispatch is readSpecDispatchConfig, so pool and the ticker cannot
+// drift onto two readings of one file (gt-jdnab). It returns the read error: a
+// file that does not parse must stop a seat change, not read as "no seats".
 func loadPoolSpecDispatch(townRoot string) (*config.SpecDispatchConfig, error) {
 	return readSpecDispatchConfig(townRoot)
 }
@@ -491,7 +485,7 @@ func runPoolSetSeats(w io.Writer, townRoot string, changes []poolSeatCap, remove
 		}
 	}
 	needSeats := len(changes) > 0 || len(remove) > 0
-	seats, maxTotal, err := poolSeatMapForSet(townRoot, ts, needSeats)
+	seats, maxTotal, seeded, err := poolSeatMapForSet(townRoot, ts, needSeats)
 	if err != nil {
 		return err
 	}
@@ -543,15 +537,19 @@ func runPoolSetSeats(w io.Writer, townRoot string, changes []poolSeatCap, remove
 	if err != nil {
 		return fmt.Errorf("writing the seat map: %w", err)
 	}
+	if seeded {
+		fmt.Fprintf(w, "seeded polecat_pool.seats from the two-seat keys (%s); the dispatcher now reads the map and ignores those keys\n",
+			poolSeatNames(before))
+	}
 	printPoolSeatChanges(w, before, changes, remove, total, totalSet)
 	return nil
 }
 
-// poolSeatMapForSet is the map a set starts from. A file with a map gives it up
-// wholesale. A file without one still runs the two-seat keys, so the first set
-// seeds the map from the seats the dispatcher runs: a set on one agent must not
-// drop the others (gt-mukgk).
-func poolSeatMapForSet(townRoot string, ts *config.TownSettings, needSeats bool) (map[string]config.SeatConfig, *int, error) {
+// poolSeatMapForSet is the map a set starts from, and whether it was seeded. A
+// file without a map still runs the two-seat keys, so the first set seeds the
+// map from the seats the dispatcher runs: a set on one agent must not drop the
+// others (gt-mukgk).
+func poolSeatMapForSet(townRoot string, ts *config.TownSettings, needSeats bool) (map[string]config.SeatConfig, *int, bool, error) {
 	var seats map[string]config.SeatConfig
 	var maxTotal *int
 	if ts.PolecatPool != nil {
@@ -561,17 +559,17 @@ func poolSeatMapForSet(townRoot string, ts *config.TownSettings, needSeats bool)
 		}
 	}
 	if !needSeats || seats != nil {
-		return seats, maxTotal, nil
+		return seats, maxTotal, false, nil
 	}
 	sd, err := loadPoolSpecDispatch(townRoot)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, false, err
 	}
 	seats = map[string]config.SeatConfig{}
 	for _, s := range specBudgetFromConfig(ts, sd).Seats {
 		seats[s.Agent] = config.SeatConfig{Cap: s.Cap}
 	}
-	return seats, maxTotal, nil
+	return seats, maxTotal, true, nil
 }
 
 // poolLegacySeatsInForce reports whether the file still runs the two seats the
@@ -813,6 +811,13 @@ func runPoolSetSecond(w io.Writer, townRoot, agent string, n int) error {
 	}
 	if err := checkKnownAgent(townRoot, agent); err != nil {
 		return err
+	}
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return fmt.Errorf("loading town settings: %w", err)
+	}
+	if poolHasSeatMap(ts) {
+		return fmt.Errorf("polecat_pool.seats is set, so the dispatcher no longer reads the second seat: gt pool set %s=%d changes the seat map", agent, n)
 	}
 	v, err := loadPoolSeats(townRoot)
 	if err != nil {

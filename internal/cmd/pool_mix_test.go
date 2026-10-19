@@ -39,6 +39,44 @@ func TestPoolMixPrintsItsSetReplacementAndExits2(t *testing.T) {
 	}
 }
 
+// The signpost exits 2 for every argument list, not only a clean one: a
+// malformed pair, the old --dry-run flag and no argument at all (gt-mukgk).
+func TestPoolMixExits2WhateverTheArguments(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"no arguments", nil, "gt pool set <agent>=<cap>"},
+		{"a malformed pair", []string{"nonsense"}, "run gt pool set nonsense"},
+		{"the old dry-run flag", []string{"--dry-run", "claude-haiku=3"}, "run gt pool set claude-haiku=3 --total 3"},
+		{"the flag alone", []string{"--dry-run"}, "gt pool set <agent>=<cap>"},
+	} {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var out bytes.Buffer
+			err := runPoolMix(&out, tc.args)
+			if code, ok := IsSilentExit(err); !ok || code != 2 {
+				t.Fatalf("runPoolMix(%q) = %v, want a silent exit 2", tc.args, err)
+			}
+			if got := out.String(); !strings.Contains(got, tc.want) || strings.Contains(got, "--dry-run") {
+				t.Errorf("runPoolMix(%q) printed %q, want %q and no --dry-run", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
+// The command takes any flag through to the signpost, so cobra's own
+// unknown-flag error (exit 1) cannot replace the exit 2.
+func TestPoolMixCommandPassesFlagsThrough(t *testing.T) {
+	t.Parallel()
+	if !poolMixCmd.DisableFlagParsing {
+		t.Error("gt pool mix parses flags: an old --dry-run would fail with exit 1, not 2")
+	}
+}
+
 func TestPoolMixReplacement(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
