@@ -5628,3 +5628,42 @@ func TestIsSubprocessCrash(t *testing.T) {
 // TestBeadsSubprocessTimeoutFromTownSettings in beads_subprocess_timeout_test.go
 // now pin the same defaults, overrides and fail-closed cases against
 // operational.session settings (gt-y3pgh.2.6).
+
+// TestRoleConfigRoundTripKeepsHealthFields: the health thresholds survive a
+// format and parse, and the env_var lines come out in sorted order.
+func TestRoleConfigRoundTripKeepsHealthFields(t *testing.T) {
+	original := &RoleConfig{
+		SessionPattern:      "gt-{rig}-{name}",
+		EnvVars:             map[string]string{"ZED": "1", "ALPHA": "2", "MIKE": "3", "BRAVO": "4"},
+		PingTimeout:         "45s",
+		ConsecutiveFailures: 5,
+		KillCooldown:        "10m",
+		StuckThreshold:      "2h",
+	}
+
+	formatted := FormatRoleConfig(original)
+	parsed := ParseRoleConfig(formatted)
+	if parsed == nil {
+		t.Fatal("round-trip parse returned nil")
+	}
+	if parsed.PingTimeout != original.PingTimeout ||
+		parsed.ConsecutiveFailures != original.ConsecutiveFailures ||
+		parsed.KillCooldown != original.KillCooldown ||
+		parsed.StuckThreshold != original.StuckThreshold {
+		t.Errorf("health fields lost: got %+v, want %+v", parsed, original)
+	}
+	if !reflect.DeepEqual(parsed.EnvVars, original.EnvVars) {
+		t.Errorf("EnvVars = %v, want %v", parsed.EnvVars, original.EnvVars)
+	}
+
+	var envLines []string
+	for _, line := range strings.Split(formatted, "\n") {
+		if strings.HasPrefix(line, "env_var: ") {
+			envLines = append(envLines, line)
+		}
+	}
+	wantLines := []string{"env_var: ALPHA=2", "env_var: BRAVO=4", "env_var: MIKE=3", "env_var: ZED=1"}
+	if !reflect.DeepEqual(envLines, wantLines) {
+		t.Errorf("env_var lines = %q, want %q", envLines, wantLines)
+	}
+}

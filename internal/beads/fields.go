@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -82,6 +83,11 @@ func ParseAttachmentFields(issue *Issue) *AttachmentFields {
 			fields.ReviewOnly = strings.ToLower(value) == "true"
 			hasFields = true
 		case "mode":
+			// Only the lowercase key FormatAttachmentFields writes; a prose
+			// "Mode: read-only" line is not an attachment field.
+			if key != "mode" {
+				continue
+			}
 			fields.Mode = value
 			hasFields = true
 		case "merge_strategy", "merge-strategy", "mergestrategy":
@@ -150,11 +156,16 @@ func FormatAttachmentFields(fields *AttachmentFields) string {
 	return strings.Join(lines, "\n")
 }
 
-// isAttachmentKey reports whether key (lowercase) names an attachment field,
-// in its underscore, hyphen or run-together spelling. It is a switch, not a
-// package-level map, so no caller can mutate the key list.
+// isAttachmentKey reports whether key, as written in the description, names an
+// attachment field, in its underscore, hyphen or run-together spelling and any
+// case. The exception is mode, a word that opens ordinary prose lines: it
+// counts only as the lowercase key FormatAttachmentFields writes. It is a
+// switch, not a package-level map, so no caller can mutate the key list.
 func isAttachmentKey(key string) bool {
-	switch key {
+	if strings.EqualFold(key, "mode") {
+		return key == "mode"
+	}
+	switch strings.ToLower(key) {
 	case "attached_molecule", "attached-molecule", "attachedmolecule",
 		"attached_formula", "attached-formula", "attachedformula",
 		"attached_at", "attached-at", "attachedat",
@@ -163,7 +174,6 @@ func isAttachmentKey(key string) bool {
 		"dispatched_by", "dispatched-by", "dispatchedby",
 		"no_merge", "no-merge", "nomerge",
 		"review_only", "review-only", "reviewonly",
-		"mode",
 		"merge_strategy", "merge-strategy", "mergestrategy",
 		"formula_vars", "formula-vars", "formulavars":
 		return true
@@ -198,7 +208,7 @@ func withoutAttachmentLines(desc string) []string {
 			continue
 		}
 
-		key := strings.ToLower(strings.TrimSpace(trimmed[:colonIdx]))
+		key := strings.TrimSpace(trimmed[:colonIdx])
 		if !isAttachmentKey(key) {
 			otherLines = append(otherLines, line)
 		}
@@ -760,8 +770,26 @@ func FormatRoleConfig(config *RoleConfig) string {
 	if config.StartCommand != "" {
 		lines = append(lines, "start_command: "+config.StartCommand)
 	}
-	for k, v := range config.EnvVars {
-		lines = append(lines, "env_var: "+k+"="+v)
+	// Sort env var keys for deterministic output
+	envKeys := make([]string, 0, len(config.EnvVars))
+	for k := range config.EnvVars {
+		envKeys = append(envKeys, k)
+	}
+	sort.Strings(envKeys)
+	for _, k := range envKeys {
+		lines = append(lines, "env_var: "+k+"="+config.EnvVars[k])
+	}
+	if config.PingTimeout != "" {
+		lines = append(lines, "ping_timeout: "+config.PingTimeout)
+	}
+	if config.ConsecutiveFailures != 0 {
+		lines = append(lines, "consecutive_failures: "+strconv.Itoa(config.ConsecutiveFailures))
+	}
+	if config.KillCooldown != "" {
+		lines = append(lines, "kill_cooldown: "+config.KillCooldown)
+	}
+	if config.StuckThreshold != "" {
+		lines = append(lines, "stuck_threshold: "+config.StuckThreshold)
 	}
 	// Sort wisp TTL keys for deterministic output
 	wispTypes := make([]string, 0, len(config.WispTTLs))

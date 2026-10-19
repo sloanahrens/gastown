@@ -532,7 +532,6 @@ func TestAttachmentKeySpellings(t *testing.T) {
 	} {
 		keys = append(keys, base, strings.ReplaceAll(base, "_", "-"), strings.ReplaceAll(base, "_", ""))
 	}
-	keys = append(keys, "mode")
 	for _, key := range keys {
 		desc := strings.ToUpper(key) + ": x\nbody"
 		if got := StripAttachmentFields(desc); got != "body" {
@@ -541,6 +540,13 @@ func TestAttachmentKeySpellings(t *testing.T) {
 		if got := SetAttachmentFields(&Issue{Description: desc}, nil); got != "body" {
 			t.Errorf("SetAttachmentFields(%q, nil) = %q, want %q", desc, got, "body")
 		}
+	}
+	// mode opens ordinary prose lines, so only the lowercase key counts.
+	if got := StripAttachmentFields("mode: x\nbody"); got != "body" {
+		t.Errorf("StripAttachmentFields(mode line) = %q, want %q", got, "body")
+	}
+	if got, keepMode := StripAttachmentFields("Mode: x\nbody"), "Mode: x\nbody"; got != keepMode {
+		t.Errorf("StripAttachmentFields(prose Mode line) = %q, want it kept", got)
 	}
 	const keep = "attached_other: x\nbody"
 	if got := StripAttachmentFields(keep); got != keep {
@@ -596,5 +602,24 @@ func TestAgentFieldsAgentLineBreakCannotInjectField(t *testing.T) {
 		if !strings.HasPrefix(parsed.Agent, "claude") {
 			t.Errorf("agent %q: parsed Agent = %q, want it to keep the claude prefix", agent, parsed.Agent)
 		}
+	}
+}
+
+// A prose line that starts with the word Mode is the bead's own text, not the
+// attachment field: SetAttachmentFields leaves it where it is and does not
+// promote it to a mode: line at the top.
+func TestSetAttachmentFieldsKeepsProseModeLine(t *testing.T) {
+	issue := &Issue{Description: "attached_molecule: gt-wisp-old\n\n## Goal\n\nMode: read-only\nDo it."}
+	newDesc := SetAttachmentFields(issue, &AttachmentFields{AttachedMolecule: "gt-wisp-new"})
+
+	want := "attached_molecule: gt-wisp-new\n\n## Goal\n\nMode: read-only\nDo it."
+	if newDesc != want {
+		t.Errorf("SetAttachmentFields =\n%q\nwant\n%q", newDesc, want)
+	}
+	if strings.Contains(newDesc, "mode: read-only") {
+		t.Errorf("prose Mode line became an attachment line:\n%s", newDesc)
+	}
+	if parsed := ParseAttachmentFields(&Issue{Description: newDesc}); parsed == nil || parsed.Mode != "" {
+		t.Errorf("parsed Mode = %+v, want empty", parsed)
 	}
 }
