@@ -1,3 +1,5 @@
+> Status: proposed (2026-10), awaiting Sloan's approval (gt-hdj6n). Historical once the replay report is delivered; not maintained.
+
 # Jev duplicate check for new findings (replay design)
 
 Bead: gt-hdj6n.
@@ -8,18 +10,20 @@ When a Found, review-deep or om-followup bead is filed, retrieve the closest exi
 
 Nothing reads the answer until an offline replay over history has been reported to Sloan. A live hook into filing is a separate design that waits on that report.
 
-Before changing the spend cap, the 429 retry or the fail-safe rules, read `docs/plans/2026-10-19-jev-attention-triage-design.md` (historical): the replay reuses `internal/jev` and the cap handling of `internal/attention/jevreplay` unchanged in meaning.
+Before changing the spend cap, the 429 retry or the fail-safe rules, read `internal/attention/jevreplay/jevreplay.go`, the live implementation of the cap and the one retry that the replay reuses unchanged in meaning, and `internal/jev` for `Client.Choice` (design history: gt-sxg5u).
 
 ## What the data allows
 
 `bd list --all` on 2026-10-19 holds 780 findings (title starts `Found:`, or label `review-deep` or `om-followup`), 774 of them closed. The 138 closed-as-duplicate positives named in the bead description do not survive inspection of the close reasons:
 
-| Close reason | Count | Use |
+| Close reason | Findings | Use |
 |---|---|---|
 | `Superseded by D<n> gt-...` (backlog audit 2026-09-29) | 108 | Excluded. The named bead is a plan decision created after the finding, so no as-of retrieval can find it, and it is not a duplicate in the sense asked. |
 | Names a later non-finding bead (a fix) | 13 | Excluded. The finding was not a duplicate of anything that existed when it was filed. |
-| Names an earlier bead, or a later finding | 17 pairs | Positives: 16 distinct findings (one names two originals). |
+| Names an earlier bead, or a later finding | 16 | Positives: 17 finding-original pairs (one finding names two originals). |
 | Everything else closed | 637 | Negatives. |
+
+The bead's 138 counted pairs (108 + 13 + 17), so it counts the two-original finding twice. The findings are 108 + 13 + 16 = 137, and with the 637 negatives they total the 774 closed.
 
 Two properties shape the replay:
 
@@ -43,14 +47,14 @@ The 6 findings still open or hooked are not scored. Pair rules 1 and 2 are the o
 For a finding filed at time T:
 
 1. Query `hm query --json --rig gastown --limit 100` with the finding's title and description.
-2. Drop hits that are not beads, are the finding itself, were created at or after T (creation time comes from the export, because `hm --until` filters on `updated_at` and would drop the originals that were closed after T), or come from comment, notes or close-reason chunks (the index holds text written after T that names the duplicate).
+2. Drop hits that are not beads, are the finding itself, were created at or after T (creation time comes from the export, because `hm --until` filters on `updated_at` and would drop the originals that were closed after T), or whose matched chunk is anything but the title or description (`child_provenance.field`; comment, notes and close-reason text is written after T and names the duplicate). A hit is one bead scored by its single best chunk, so a bead whose best chunk is a comment is dropped whole, even when its title also matches.
 3. Keep the first 5 distinct beads by rank.
 
 hm ranks; it does not supply the text. Each candidate is shown to Jev as its title and the first 600 characters of its description from the export, so no comment or close reason reaches Jev. The index holds current text and a description edited after T is not recoverable; the report states this residual.
 
 The pool is every gastown bead, open or closed, findings or not, because an `already fixed by` original is usually a fix bead.
 
-Retrieval is measured before any Jev call: recall at 1, 3, 5 and 10 over the positives, the count of findings with no candidate, and the mean candidates after filtering. If recall at 5 is below 0.8 the replay stops there. Jev cannot choose an original that retrieval did not offer.
+Retrieval is measured before any Jev call: recall at 1, 3, 5 and 10 over the positives, the count of findings with no candidate, the mean candidates after filtering, and the originals lost to the matched-chunk drop in step 2, which makes recall a lower bound. If recall at 5 is below 0.8 the replay stops there. Jev cannot choose an original that retrieval did not offer.
 
 ## The Choice question
 
