@@ -66,13 +66,19 @@ func parseWindowTime(window string) (hour, minute int, err error) {
 // its configured HH:MM start.
 const maintenanceWindowLength = time.Hour
 
-// maintenanceWindowBounds returns the start and end of the window on now's
-// day. Both isInMaintenanceWindow and maintenanceWindowEnd derive from it, so
-// the deferral streak can never disagree with the window it counts.
+// maintenanceWindowBounds returns the start and end of the window containing
+// now, or of now's day's window when none is open. A window that starts late
+// in the evening runs past midnight, so yesterday's window is checked first.
+// Both isInMaintenanceWindow and maintenanceWindowEnd derive from it, so the
+// deferral streak can never disagree with the window it counts.
 func maintenanceWindowBounds(now time.Time, window string) (start, end time.Time, err error) {
 	hour, minute, err := parseWindowTime(window)
 	if err != nil {
 		return time.Time{}, time.Time{}, err
+	}
+	prev := time.Date(now.Year(), now.Month(), now.Day()-1, hour, minute, 0, 0, now.Location())
+	if now.Before(prev.Add(maintenanceWindowLength)) && !now.Before(prev) {
+		return prev, prev.Add(maintenanceWindowLength), nil
 	}
 	start = time.Date(now.Year(), now.Month(), now.Day(), hour, minute, 0, 0, now.Location())
 	return start, start.Add(maintenanceWindowLength), nil

@@ -97,7 +97,10 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	if st.StopBeganAt.IsZero() {
 		st.Rig, st.Polecat, st.Branch, st.Elapsed = seat.Rig, seat.Polecat, seat.Branch, elapsed
 	}
-	resumed := !st.SessionStoppedAt.IsZero()
+	// A stop resumed from any saved progress may find the seat taken back, so
+	// StopBeganAt decides, not SessionStoppedAt: a failed clearPause or save
+	// leaves the stop begun with the session not yet recorded as stopped.
+	resumed := !st.StopBeganAt.IsZero()
 	branch := st.Branch
 	if branch == "" {
 		branch = "(unknown)"
@@ -125,8 +128,22 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		}
 	}
 
-	// 2. Stop the session.
+	// 2. Stop the session. A resumed stop looks first: an operator may have
+	// lifted the pause and started a new session, which stopSession would kill.
 	if st.SessionStoppedAt.IsZero() {
+		if resumed && s.stopLapsed != nil {
+			why, err := s.stopLapsed(seat, false)
+			if err != nil {
+				d.logger.Printf("overrun_guard: stop %s on %s: cannot re-check the seat: %v", who, st.Bead, err)
+				return
+			}
+			if why != "" {
+				st.StoppedAt = now
+				save()
+				d.logger.Printf("overrun_guard: %s on %s: %s; abandoning the stop, session left running", who, st.Bead, why)
+				return
+			}
+		}
 		if err := s.stopSession(seat); err != nil {
 			d.logger.Printf("overrun_guard: stop %s on %s: session stop failed: %v", who, st.Bead, err)
 			if cerr := s.clearPause(seat); cerr != nil {
@@ -148,7 +165,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// back: an operator lifted the pause, or a new session started on it.
 	// Steps 3 to 5 then act on a bead that session holds, so the stop ends.
 	if resumed && s.stopLapsed != nil {
-		why, err := s.stopLapsed(seat)
+		why, err := s.stopLapsed(seat, true)
 		if err != nil {
 			d.logger.Printf("overrun_guard: stop %s on %s: cannot re-check the seat: %v", who, st.Bead, err)
 			return
@@ -272,7 +289,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// record, which would then be that sling's, so look again first. The bead
 	// is already handed back; only the release is left to its new holder.
 	if s.stopLapsed != nil {
-		why, err := s.stopLapsed(seat)
+		why, err := s.stopLapsed(seat, true)
 		if err != nil {
 			d.logger.Printf("overrun_guard: stop %s on %s: cannot re-check the seat before releasing it: %v", who, st.Bead, err)
 			return
@@ -595,13 +612,19 @@ func recordOverrunCleanupStatus(c beads.Client, id, status string) error {
 // owns its seat: the pause marker is gone (an operator resumed the seat) or a
 // session is running on it. Either way the bead may belong to that session,
 // and handing it back would release work in progress.
-func (d *Daemon) overrunStopLapsed(seat overrunSeat) (string, error) {
+//
+// Before the session is stopped (sessionStopped false) a running session is the
+// one being stopped, so only the pause marker is read.
+func (d *Daemon) overrunStopLapsed(seat overrunSeat, sessionStopped bool) (string, error) {
 	paused, _, err := agentpause.IsPaused(d.config.TownRoot, seat.Rig, constants.RolePolecat, seat.Polecat)
 	if err != nil {
 		return "", fmt.Errorf("read pause marker: %w", err)
 	}
 	if !paused {
 		return "the pause marker is gone", nil
+	}
+	if !sessionStopped {
+		return "", nil
 	}
 	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat)
 	alive, err := d.tmux.HasSession(sessionName)

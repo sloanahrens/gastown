@@ -64,6 +64,27 @@ func TestMaintenanceWindowEndMatchesWindow(t *testing.T) {
 	}
 }
 
+// A window that starts before midnight closes after it: the end is the next
+// day, and the last instant before it is still in the window.
+func TestMaintenanceWindowEndMatchesWindowPastMidnight(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 2, 28, 23, 50, 0, 0, time.Local)
+	end := maintenanceWindowEnd(now, "23:45")
+	if want := time.Date(2026, 3, 1, 0, 45, 0, 0, time.Local); !end.Equal(want) {
+		t.Fatalf("maintenanceWindowEnd = %v, want %v", end, want)
+	}
+	if !isInMaintenanceWindow(end.Add(-time.Nanosecond), "23:45") {
+		t.Error("isInMaintenanceWindow is false just before maintenanceWindowEnd")
+	}
+	if isInMaintenanceWindow(end, "23:45") {
+		t.Error("isInMaintenanceWindow is true at maintenanceWindowEnd")
+	}
+	// After midnight the end is still the one the window opened with.
+	if got := maintenanceWindowEnd(time.Date(2026, 3, 1, 0, 10, 0, 0, time.Local), "23:45"); !got.Equal(end) {
+		t.Errorf("maintenanceWindowEnd after midnight = %v, want %v", got, end)
+	}
+}
+
 func TestIsInMaintenanceWindow(t *testing.T) {
 	t.Parallel()
 	loc := time.Local
@@ -114,6 +135,24 @@ func TestIsInMaintenanceWindow(t *testing.T) {
 			name:   "midnight window",
 			now:    time.Date(2026, 2, 28, 0, 15, 0, 0, loc),
 			window: "00:00",
+			want:   true,
+		},
+		{
+			name:   "window from the previous evening still open after midnight",
+			now:    time.Date(2026, 3, 1, 0, 10, 0, 0, loc),
+			window: "23:30",
+			want:   true,
+		},
+		{
+			name:   "window from the previous evening closed",
+			now:    time.Date(2026, 3, 1, 0, 30, 0, 0, loc),
+			window: "23:30",
+			want:   false,
+		},
+		{
+			name:   "late window open before midnight",
+			now:    time.Date(2026, 2, 28, 23, 45, 0, 0, loc),
+			window: "23:30",
 			want:   true,
 		},
 		{

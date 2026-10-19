@@ -149,8 +149,10 @@ type overrunSeams struct {
 	// hand-back, whether the stop still owns the seat. It returns why not
 	// (the pause marker is gone, a session is running) or "" when it does; an
 	// error means the seat could not be read and the step is retried. nil means
-	// no re-check.
-	stopLapsed func(seat overrunSeat) (string, error)
+	// no re-check. sessionStopped is false for the check before the session is
+	// stopped, when the stop's own session may still be running and only a
+	// missing pause marker means the seat was taken back.
+	stopLapsed func(seat overrunSeat, sessionStopped bool) (string, error)
 }
 
 // overrunGuardConfig returns the patrol's config, or nil when absent.

@@ -49,7 +49,9 @@ func (d *Daemon) overrunScheduledStop(s overrunSeams, seat overrunSeat, st overr
 	if st.StopBeganAt.IsZero() {
 		st.Rig, st.Polecat, st.Branch, st.Elapsed, st.Scheduled = seat.Rig, seat.Polecat, seat.Branch, elapsed, true
 	}
-	resumed := !st.SessionStoppedAt.IsZero()
+	// StopBeganAt decides, not SessionStoppedAt: a failed clearPause or save
+	// leaves the stop begun with the session not yet recorded as stopped.
+	resumed := !st.StopBeganAt.IsZero()
 	elapsed = st.Elapsed
 	seat.Scheduled = true
 
@@ -74,8 +76,22 @@ func (d *Daemon) overrunScheduledStop(s overrunSeams, seat overrunSeat, st overr
 		}
 	}
 
-	// 2. Stop the session.
+	// 2. Stop the session. A resumed stop looks first: an operator may have
+	// lifted the pause and started a new session, which stopSession would kill.
 	if st.SessionStoppedAt.IsZero() {
+		if resumed && s.stopLapsed != nil {
+			why, err := s.stopLapsed(seat, false)
+			if err != nil {
+				d.logger.Printf("overrun_guard: stop scheduled %s on %s: cannot re-check the seat: %v", who, st.Bead, err)
+				return
+			}
+			if why != "" {
+				st.StoppedAt = now
+				save()
+				d.logger.Printf("overrun_guard: scheduled %s on %s: %s; abandoning the stop, session left running", who, st.Bead, why)
+				return
+			}
+		}
 		if err := s.stopSession(seat); err != nil {
 			d.logger.Printf("overrun_guard: stop scheduled %s on %s: session stop failed: %v", who, st.Bead, err)
 			if cerr := s.clearPause(seat); cerr != nil {
@@ -98,7 +114,7 @@ func (d *Daemon) overrunScheduledStop(s overrunSeams, seat overrunSeat, st overr
 	// back: an operator lifted the pause, or a new session started on it. The
 	// comment would then describe a run that is not stopped, so the stop ends.
 	if resumed && s.stopLapsed != nil {
-		why, err := s.stopLapsed(seat)
+		why, err := s.stopLapsed(seat, true)
 		if err != nil {
 			d.logger.Printf("overrun_guard: stop scheduled %s on %s: cannot re-check the seat: %v", who, st.Bead, err)
 			return
