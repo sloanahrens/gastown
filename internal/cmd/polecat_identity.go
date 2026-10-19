@@ -579,18 +579,11 @@ func ensureNewIdentityAbsent(bd beads.Client, newBeadID string) error {
 	return nil
 }
 
-// moveLiveHook reassigns hookBead from oldAssignee to newAssignee when the
-// reference names live work, so a renamed identity does not inherit a hook
-// still assigned to the old name (gt-u3hc1). A reference the classifier calls
-// safe — terminal, submitted, or inert — has nothing to move.
-//
-// An unreadable or unmodeled reference is an error rather than a copy, the same
-// fail-closed reading ClassifyHookBead gives it, and a claim the guard no
-// longer holds is refused: rename must not adopt work it cannot show is the
-// renamed polecat's.
-//
-// The returned issue is the work that followed the name, nil when nothing
-// moved, so a later failure can put the hook back (gt-fkz54).
+// moveLiveHook reassigns hookBead to newAssignee so a renamed identity does not
+// inherit work still assigned to the old name, and returns the moved work, nil
+// when nothing moved. A safe reference has nothing to move; an unreadable one, or
+// a claim held by someone else, is an error rather than an adoption (gt-u3hc1,
+// gt-fkz54).
 func moveLiveHook(bd beads.Client, hookBead, oldAssignee, newAssignee string) (*beads.Issue, error) {
 	work, disposition := classifyHookBeadRef(bd, hookBead)
 	if disposition.Safe {
@@ -610,9 +603,9 @@ func moveLiveHook(bd beads.Client, hookBead, oldAssignee, newAssignee string) (*
 	return work, nil
 }
 
-// restoreHookAssignee undoes moveLiveHook's transfer when the rename aborts
-// after it. TransferIfAssignee's expected-assignee guard keeps a concurrent
-// holder's claim untouched (gt-fkz54).
+// restoreHookAssignee returns work to the old assignee after a failed rename;
+// the expected-assignee guard leaves a concurrent holder's claim untouched
+// (gt-fkz54).
 func restoreHookAssignee(bd beads.Client, work *beads.Issue, from, to string) error {
 	if work == nil {
 		return nil
@@ -627,19 +620,14 @@ func restoreHookAssignee(bd beads.Client, work *beads.Issue, from, to string) er
 	return nil
 }
 
-// renameIdentityBeads is rename's beads half: open the new identity, move the
-// live hook, and close the old identity only once both hold. A failed close
-// therefore has to put the hook back, or the work is left assigned to a name
-// whose identity the rename just closed and no open identity holds it
-// (gt-fkz54). When the reverse fails too, the new identity is left open rather
-// than closed, so the name the work is assigned to still has one.
+// renameIdentityBeads renames the identity, rolling the hook back if the old
+// identity cannot close. When the rollback fails too, the new identity stays
+// open so the hook's assignee still has one (gt-fkz54).
 func renameIdentityBeads(bd beads.Client, oldBeadID, newBeadID, newTitle string, fields *beads.AgentFields, oldAssignee, newAssignee string) error {
 	if _, err := addPolecatIdentity(bd, newBeadID, newTitle, fields); err != nil {
 		return err
 	}
 
-	// The inherited hook describes the new identity only once the work it names
-	// has followed the name.
 	moved, err := moveLiveHook(bd, fields.HookBead, oldAssignee, newAssignee)
 	if err != nil {
 		_ = bd.CloseWithReason("rename failed", newBeadID)
