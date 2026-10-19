@@ -526,3 +526,28 @@ func TestPoolMigrateClosedStaleHookedAgentDoesNotBlock(t *testing.T) {
 		t.Errorf("seats = %+v, want claude-sonnet 2 alone", got)
 	}
 }
+
+// A cap that is not a number is refused, not read as absent: reading it as absent
+// would write the default cap over what the operator meant, silently.
+func TestPoolMigrateRefusesAWrongTypedCap(t *testing.T) {
+	t.Parallel()
+	for name, body := range map[string]string{
+		"max_seats": `{"type":"town-settings","version":1,"polecat_pool":{"agent":"claude-sonnet","max_seats":"three"}}`,
+		"max_hooked": `{"type":"town-settings","version":1,"polecat_pool":{"agent":"claude-sonnet","max_seats":2},` +
+			`"daemon":{"patrols":{"spec_dispatch":{"hooked_agent":"deepseek-flash","max_hooked":"two"}}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			root, settings := writeMigrateTown(t, []byte(body))
+			before := readFile(t, settings)
+			var out bytes.Buffer
+			err := runPoolMigrate(&out, root, false, migrateNow)
+			if err == nil || !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "not a number") {
+				t.Fatalf("err = %v, want a refusal naming %s", err, name)
+			}
+			if !bytes.Equal(before, readFile(t, settings)) {
+				t.Error("a refused migration changed the file")
+			}
+		})
+	}
+}

@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 )
 
@@ -29,8 +28,8 @@ var retiredSeatKeys = map[string]string{
 	"role_agents.polecat": "polecat_pool.seats",
 }
 
-// retiredScheduledAgent is the retired key for an agent on a scheduled entry
-// the spec dispatcher runs. The entry's index stays in the reported path.
+// retiredScheduledAgentReplacement is what replaced the agent on a scheduled
+// entry the spec dispatcher runs. The entry's index stays in the reported path.
 const retiredScheduledAgentReplacement = "an agent:<name> label on the bead, or a seat in polecat_pool.seats"
 
 // retiredKeyReplacement returns what replaced the key at path, and whether the
@@ -130,15 +129,4 @@ func (c *DaemonPatrolConfig) retiredKeys() []string {
 		}
 	}
 	return keys
-}
-
-// RetiredSeatKeyPaths lists the retired seat keys, sorted, for a caller that
-// prints or tests the table.
-func RetiredSeatKeyPaths() []string {
-	out := make([]string, 0, len(retiredSeatKeys))
-	for k := range retiredSeatKeys {
-		out = append(out, k)
-	}
-	sort.Strings(out)
-	return out
 }

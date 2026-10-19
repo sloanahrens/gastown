@@ -207,6 +207,9 @@ func planPoolMigrate(townRoot string, settings, patrol map[string]any) (*poolMig
 		doc, separate = inTree, false
 	}
 	found := takePatrolSeatKeys(doc)
+	if found.err != nil {
+		return nil, found.err
+	}
 	poolLines, err := migratePoolKeys(settings, found.hooked, found.prefer)
 	if err != nil {
 		return nil, err
@@ -232,6 +235,8 @@ type patrolSeatKeys struct {
 	lines []string
 	// changed is whether the document held any key to remove.
 	changed bool
+	// err is a retired key that holds a value the migration cannot read.
+	err error
 }
 
 // takePatrolSeatKeys removes the second seat's keys and the agent pin on spec
@@ -241,6 +246,10 @@ func takePatrolSeatKeys(doc map[string]any) patrolSeatKeys {
 	patrols, _ := doc["patrols"].(map[string]any)
 	if spec, ok := patrols["spec_dispatch"].(map[string]any); ok {
 		agent := stringOf(spec["hooked_agent"])
+		if err := wrongTyped(spec, "max_hooked"); err != nil {
+			out.err = fmt.Errorf("spec_dispatch.%w", err)
+			return out
+		}
 		capacity, _ := intOf(spec["max_hooked"])
 		switch {
 		case capacity > 0:
@@ -298,6 +307,9 @@ func migratePoolKeys(settings map[string]any, hooked *legacySeat, prefer bool) (
 
 	var poolSeat *legacySeat
 	if pool != nil {
+		if err := wrongTyped(pool, "max_seats", "max_overflow"); err != nil {
+			return nil, fmt.Errorf("polecat_pool.%w", err)
+		}
 		agent := stringOf(pool["agent"])
 		if agent == "" {
 			agent = stringOf(pool["overflow_agent"])
@@ -408,6 +420,20 @@ func checkMigrated(townRoot string, settings, patrol map[string]any) error {
 		var pc config.DaemonPatrolConfig
 		if err := config.DecodeJSONFile(config.DaemonPatrolConfigPath(townRoot), data, &pc); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// wrongTyped names a key that is present but not a number, so a migration
+// refuses it instead of reading it as absent and writing a default cap over
+// what the operator meant.
+func wrongTyped(m map[string]any, keys ...string) error {
+	for _, k := range keys {
+		if v, present := m[k]; present {
+			if _, ok := intOf(v); !ok {
+				return fmt.Errorf("%s is %v, not a number: fix it by hand and run gt pool migrate again", k, v)
+			}
 		}
 	}
 	return nil
