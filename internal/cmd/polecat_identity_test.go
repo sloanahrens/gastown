@@ -600,3 +600,69 @@ func TestIdentityAddReturnsReadError(t *testing.T) {
 		t.Errorf("description after a failed read was rewritten:\n%s\nwant it untouched:\n%s", got.Description, original)
 	}
 }
+
+// TestAddPolecatIdentityCreatesOnlyAFreeID: the add path's two settled answers.
+// An ID with no bead is created, and an ID a live identity holds is refused
+// with that identity's description left as it was (gt-gfcz8).
+func TestAddPolecatIdentityCreatesOnlyAFreeID(t *testing.T) {
+	t.Parallel()
+	const beadID = "gt-gastown-polecat-basalt"
+	title := "Polecat basalt in gastown"
+	fields := &beads.AgentFields{
+		RoleType:   "polecat",
+		Rig:        "gastown",
+		AgentState: "idle",
+	}
+
+	t.Run("absent identity is created", func(t *testing.T) {
+		t.Parallel()
+		db := beadsfake.New(beadsfake.WithPrefix("gt"))
+
+		issue, err := addPolecatIdentity(db, beadID, title, fields)
+		if err != nil {
+			t.Fatalf("addPolecatIdentity on a free ID = %v, want nil", err)
+		}
+		if issue == nil || issue.ID != beadID {
+			t.Fatalf("addPolecatIdentity = %+v, want the bead %s", issue, beadID)
+		}
+		got, err := db.Show(beadID)
+		if err != nil {
+			t.Fatalf("reading the created bead: %v", err)
+		}
+		if got.Title != title {
+			t.Errorf("title = %q, want %q", got.Title, title)
+		}
+	})
+
+	t.Run("live identity is refused and left untouched", func(t *testing.T) {
+		t.Parallel()
+		db := beadsfake.New(beadsfake.WithPrefix("gt"))
+		original := beads.FormatAgentDescription(title, &beads.AgentFields{
+			RoleType:      "polecat",
+			Rig:           "gastown",
+			AgentState:    "working",
+			HookBead:      "gt-work1",
+			CleanupStatus: "clean",
+		})
+		db.Seed(beads.Issue{
+			ID:          beadID,
+			Title:       title,
+			Status:      string(beads.StatusOpen),
+			Labels:      []string{"gt:agent"},
+			Description: original,
+		})
+
+		_, err := addPolecatIdentity(db, beadID, title, fields)
+		if err == nil || !strings.Contains(err.Error(), "already exists") {
+			t.Fatalf("addPolecatIdentity on a live ID = %v, want an already-exists refusal", err)
+		}
+
+		got, err := db.Show(beadID)
+		if err != nil {
+			t.Fatalf("reading the existing bead: %v", err)
+		}
+		if got.Description != original {
+			t.Errorf("description of a live identity was rewritten:\n%s\nwant it untouched:\n%s", got.Description, original)
+		}
+	})
+}
