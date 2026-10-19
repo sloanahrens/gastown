@@ -31,6 +31,10 @@ var (
 	attentionInterval time.Duration
 )
 
+// attentionRotateSize is the size at which events.jsonl and acks-history.jsonl
+// rotate, spelled for the help text from attention.EventsMaxBytes.
+var attentionRotateSize = fmt.Sprintf("%d MB", attention.EventsMaxBytes>>20)
+
 var attentionCmd = &cobra.Command{
 	Use:     "attention",
 	GroupID: GroupDiag,
@@ -39,22 +43,23 @@ var attentionCmd = &cobra.Command{
 the daemon last wrote it, oldest first. Ack an item to hide it until its
 condition clears.
 
-The queue is three files under <town>/.runtime/attention/:
+The queue is four files under <town>/.runtime/attention/:
 
   state.json     the current set, rewritten atomically by the daemon every
                  heartbeat; each item is {key, kind, severity, rig, bead, sha,
                  summary, first_seen, last_seen, acked_at}. An item exits the
                  set on its own once its condition clears.
   events.jsonl   the transitions, append-only, rotated to events.jsonl.1 at
-                 1 MB. Each line is {ts, class, severity, text, key, state}:
+                 ` + attentionRotateSize + `. Each line is {ts, class, severity, text, key, state}:
                  state is new or cleared, and the first four fields are exactly
                  the alerts.jsonl schema the gt tail watch source reads.
   acks.json      the acknowledged keys, {acks: [{key, at}]}. gt attention ack
                  writes it under a flock; the daemon only reads it, so neither
                  process races the other's file.
   acks-history.jsonl  one line per ack, {ts, key, kind, rule}, appended by
-                 gt attention ack and rotated to acks-history.jsonl.1 at 1 MB.
-                 acks.json forgets an ack when its item clears; this does not.
+                 gt attention ack and rotated to acks-history.jsonl.1 at
+                 ` + attentionRotateSize + `. acks.json forgets an ack when its item
+                 clears; this does not.
 
 An ack hides its item until the item clears; the ack is then dropped, so a
 recurrence raises a new item. gt attention never writes state.json or
