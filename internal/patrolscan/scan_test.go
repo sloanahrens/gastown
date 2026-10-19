@@ -541,6 +541,34 @@ func TestCrashRestartUnderTheCapKeepsItsTiming(t *testing.T) {
 	}
 }
 
+// A seat inside its closed window is held like a closed cap (gt-her01), and
+// the skip line names the window and its opening hour rather than claiming a
+// cap of 0 the seat does not have.
+func TestClosedWindowSeatNamesItsWindow(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	deadWithWork(env, "ruby")
+	env.seatCap = SeatCap{
+		Live:         1,
+		Closed:       true,
+		Key:          "polecat_pool.seats.deepseek-flash.closed",
+		ClosedDetail: "the seat is closed until 16:00 (polecat_pool.seats.deepseek-flash.closed)",
+	}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if len(env.restarts) != 0 {
+		t.Fatalf("restarts = %v, want none on a closed window", env.restarts)
+	}
+	f := seatFinding(t, r, "ruby")
+	if f.Outcome != OutcomeSkipped || !strings.Contains(f.Detail, "closed until 16:00") {
+		t.Fatalf("outcome = %v (%q), want skipped naming the window", f.Outcome, f.Detail)
+	}
+	if strings.Contains(f.Detail, "is 0") {
+		t.Fatalf("detail = %q, want no claim of a cap of 0", f.Detail)
+	}
+}
+
 // A cap that cannot be read is an unknown, not a full pool and not a free one:
 // a restart taken on an unread cap is a session raised past a limit nobody
 // measured, so the seat waits and the tick says why.

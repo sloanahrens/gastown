@@ -19,7 +19,9 @@ import (
 //
 // The cap is read the way the spec dispatcher reads its budget: the seat of the
 // agent the polecat will launch on (polecat_pool.seats.<agent>.cap) and the
-// town's total across every seat (polecat_pool.max_total).
+// town's total across every seat (polecat_pool.max_total). The seat's closed
+// window holds the restart as it holds a sling: a crash inside the window
+// spends no seat (gt-her01).
 
 // seatCap implements patrolscan's seat-cap read over the town's settings and
 // its live sessions, for a restart of rig/name. A pool with neither cap set
@@ -69,6 +71,28 @@ func (h *patrolScanHost) seatCap(rig, name string) (patrolscan.SeatCap, error) {
 			// not a missing cap.
 			if seat.Cap <= 0 {
 				return patrolscan.SeatCap{Live: byAgent[agent], Closed: true, Key: key}, nil
+			}
+			// The seat's closed window holds the restart exactly as it holds a
+			// sling (gt-her01). The window is read through the loader's own
+			// helper, so a restart and a sling cannot disagree about what the
+			// window means. A window that cannot be read is an error, not an
+			// open seat: the restart waits to be told, rather than spending a
+			// seat the window may have refused.
+			w, err := agentconfig.SeatWindow(pool, seat)
+			if err != nil {
+				return patrolscan.SeatCap{}, fmt.Errorf("reading the closed window of seat %s: %w", agent, err)
+			}
+			if w != nil {
+				now := h.d.clk().Now()
+				if w.Closed(now) {
+					closedKey := "polecat_pool.seats." + agent + ".closed"
+					return patrolscan.SeatCap{
+						Live:         byAgent[agent],
+						Closed:       true,
+						Key:          closedKey,
+						ClosedDetail: fmt.Sprintf("the seat is closed until %s (%s)", w.OpensAt(now).Format("15:04"), closedKey),
+					}, nil
+				}
 			}
 			if byAgent[agent] >= seat.Cap {
 				return patrolscan.SeatCap{Live: byAgent[agent], Limit: seat.Cap, Key: key}, nil

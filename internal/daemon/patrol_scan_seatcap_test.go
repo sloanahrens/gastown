@@ -137,6 +137,37 @@ func TestPatrolScanSeatCap(t *testing.T) {
 			sessions: []sessionEnv{polecat("gastown", "ruby", poolAgent)},
 		},
 		{
+			// gt-her01: a crash inside the seat's closed window spends no
+			// seat, exactly as a sling to that seat is refused. The fixed
+			// clock is at 15:04 UTC.
+			name:     "a seat inside its closed window holds the restart",
+			settings: pool(`"timezone":"UTC","seats":{"` + poolAgent + `":{"cap":3,"closed":"14:00-16:00"}}`),
+			sessions: []sessionEnv{polecat("gastown", "pearl", poolAgent)},
+			restart:  "gastown/ruby",
+			want: patrolscan.SeatCap{
+				Live:         1,
+				Closed:       true,
+				Key:          "polecat_pool.seats." + poolAgent + ".closed",
+				ClosedDetail: "the seat is closed until 16:00 (polecat_pool.seats." + poolAgent + ".closed)",
+			},
+			wantFull: true,
+		},
+		{
+			name:     "a seat outside its closed window takes the restart",
+			settings: pool(`"timezone":"UTC","seats":{"` + poolAgent + `":{"cap":3,"closed":"16:00-18:00"}}`),
+			sessions: []sessionEnv{polecat("gastown", "ruby", poolAgent)},
+			restart:  "gastown/ruby",
+		},
+		{
+			// A window the loader would refuse is not read as open: the
+			// restart waits for the seat cap to be readable.
+			name:     "a closed window with no timezone cannot be read",
+			settings: pool(`"seats":{"` + poolAgent + `":{"cap":3,"closed":"14:00-16:00"}}`),
+			sessions: []sessionEnv{polecat("gastown", "ruby", poolAgent)},
+			restart:  "gastown/ruby",
+			wantErr:  true,
+		},
+		{
 			name:     "a pool with no cap set",
 			settings: pool(`"min_spawn_gap":"4m"`),
 		},
@@ -161,11 +192,14 @@ func TestPatrolScanSeatCap(t *testing.T) {
 			if tc.settings != "" {
 				writeTownFile(t, town, "settings/config.json", tc.settings)
 			}
-			tm := newFakeTmux(newFixedClock())
+			clk := newFixedClock()
+			tm := newFakeTmux(clk)
 			for _, s := range tc.sessions {
 				seatEnv(t, tm, s)
 			}
-			h := &patrolScanHost{d: &Daemon{config: &Config{TownRoot: town}, tmux: tm}, agentRecord: noAgentRecord}
+			// The closed window is read at the daemon's clock, the same fixed
+			// clock the fake tmux runs on.
+			h := &patrolScanHost{d: &Daemon{config: &Config{TownRoot: town}, tmux: tm, clock: clk}, agentRecord: noAgentRecord}
 
 			restart := tc.restart
 			if restart == "" {
