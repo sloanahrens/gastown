@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -109,19 +110,39 @@ func TestResolveSessionSeatRejectsUnknownName(t *testing.T) {
 	}
 }
 
-// The group help promises which addresses resolve; this holds it to the
-// resolver. It said a rig role (witness, refinery) was an address while the
-// resolver refused both.
+// The session help, group and subcommands alike, must offer an address only
+// where the resolver accepts one: a rig role (witness, refinery) written as
+// <rig>/<role> is an address the resolver refuses, and a polecat address in
+// the documented <rig>/<polecat> shape is one it accepts.
 func TestResolveSessionSeatHelpMatchesResolver(t *testing.T) {
 	t.Parallel()
 	townRoot := setupSessionSeatTown(t, "amber")
 
+	var helpTexts []string
+	helpTexts = append(helpTexts, sessionCmd.Use, sessionCmd.Long)
+	for _, sub := range sessionCmd.Commands() {
+		helpTexts = append(helpTexts, sub.Use, sub.Short, sub.Long, sub.Example)
+	}
+	help := strings.Join(helpTexts, "\n")
+
 	for _, role := range []string{"witness", "refinery"} {
 		_, err := resolveSessionSeatWith([]string{"gastown/" + role}, rigsIn(townRoot))
 		resolves := err == nil
-		named := strings.Contains(sessionCmd.Long, role)
+		named := regexp.MustCompile(`[>\w]/` + role + `\b`).MatchString(help)
 		if named != resolves {
-			t.Errorf("help names %q = %v, but the resolver accepts gastown/%s = %v", role, named, role, resolves)
+			t.Errorf("help offers <rig>/%s = %v, but the resolver accepts gastown/%s = %v", role, named, role, resolves)
+		}
+	}
+
+	if !strings.Contains(sessionCmd.Long, "<rig>/<name>") || !strings.Contains(sessionCmd.Long, "polecats") {
+		t.Errorf("group help does not say an address is <rig>/<name> naming one of the rig's polecats:\n%s", sessionCmd.Long)
+	}
+	if _, err := resolveSessionSeatWith([]string{"gastown/amber"}, rigsIn(townRoot)); err != nil {
+		t.Errorf("the documented <rig>/<polecat> address gastown/amber does not resolve: %v", err)
+	}
+	for _, sub := range sessionCmd.Commands() {
+		if strings.Contains(sub.Use, "<rig>/") && !strings.Contains(sub.Use, "<rig>/<polecat>") {
+			t.Errorf("%q documents an address shape other than <rig>/<polecat>", sub.Use)
 		}
 	}
 }

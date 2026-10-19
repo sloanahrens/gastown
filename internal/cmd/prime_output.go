@@ -137,6 +137,9 @@ func outputRoleDirectivesCapped(ctx RoleContext, w io.Writer, explainEnabled, ca
 	// The header and the truncation pointer name the files that were loaded,
 	// _common.md included: a rig holding only directives/_common.md is a rig
 	// directive, and a role file that does not exist is nothing to point at.
+	// RoleDirectiveSources also drops a whitespace-only file, as LoadRoleDirective
+	// does, so a blank town file never earns the Town label
+	// (TestOutputRoleDirectivesWhitespaceOnlyTownFileIsNotTown).
 	sources := config.RoleDirectiveSources(role, townRoot, rigName)
 	townDir := filepath.Join(townRoot, "directives") + string(filepath.Separator)
 	hasTown := false

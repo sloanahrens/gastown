@@ -148,8 +148,10 @@ func (stubPolecatSessionLister) ListPolecats() ([]polecat.SessionInfo, error) {
 	return []polecat.SessionInfo{{Polecat: "amber", SessionID: "gt-amber", Running: true}}, nil
 }
 
-// A crew session carries the rig prefix, so listing it as polecat crew-sloan
-// pointed `gt session stop` at a seat that does not exist.
+// listPolecatSessions reports what the lister's ListPolecats returns, never
+// its List: a crew session shares the rig prefix, and listed as polecat
+// crew-sloan it names a seat `gt session stop` cannot find. The real filter
+// behind ListPolecats is held to this in session_list_integration_test.go.
 func TestRunSessionListSkipsCrewSessions(t *testing.T) {
 	t.Parallel()
 	rigs := []*rig.Rig{{Name: "gastown"}}
