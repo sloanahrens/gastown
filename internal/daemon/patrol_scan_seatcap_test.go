@@ -34,6 +34,8 @@ func TestPatrolScanSeatCap(t *testing.T) {
 		// restart is the seat the read is for, "rig/name"; empty is a seat
 		// with no session of its own among sessions.
 		restart string
+		// wantFull is what patrolscan acts on: whether the restart is held.
+		wantFull bool
 	}{
 		{
 			// gt-zwiww: an agent-gone seat keeps its session, and its restart
@@ -60,8 +62,9 @@ func TestPatrolScanSeatCap(t *testing.T) {
 				polecat("gastown", "pearl", poolAgent),
 				polecat("gastown", "onyx", poolAgent),
 			},
-			restart: "gastown/ruby",
-			want:    patrolscan.SeatCap{Live: 2, Limit: 2, Key: poolSeat},
+			restart:  "gastown/ruby",
+			want:     patrolscan.SeatCap{Live: 2, Limit: 2, Key: poolSeat},
+			wantFull: true,
 		},
 		{
 			name:     "a polecat of the same name in another rig is another seat",
@@ -69,6 +72,7 @@ func TestPatrolScanSeatCap(t *testing.T) {
 			sessions: []sessionEnv{polecat("beads", "ruby", poolAgent)},
 			restart:  "gastown/ruby",
 			want:     patrolscan.SeatCap{Live: 1, Limit: 1, Key: poolSeat},
+			wantFull: true,
 		},
 		{
 			name:     "the pool seat is full",
@@ -78,7 +82,8 @@ func TestPatrolScanSeatCap(t *testing.T) {
 				polecat("gastown", "pearl", poolAgent),
 				polecat("gastown", "onyx", poolAgent),
 			},
-			want: patrolscan.SeatCap{Live: 3, Limit: 3, Key: poolSeat},
+			want:     patrolscan.SeatCap{Live: 3, Limit: 3, Key: poolSeat},
+			wantFull: true,
 		},
 		{
 			name:     "the pool seat has room",
@@ -95,7 +100,8 @@ func TestPatrolScanSeatCap(t *testing.T) {
 				polecat("gastown", "ruby", poolAgent),
 				polecat("gastown", "pearl", "deepseek-pro"),
 			},
-			want: patrolscan.SeatCap{Live: 2, Limit: 2, Key: total},
+			want:     patrolscan.SeatCap{Live: 2, Limit: 2, Key: total},
+			wantFull: true,
 		},
 		{
 			name:     "sessions that hold no seat are not counted",
@@ -107,6 +113,28 @@ func TestPatrolScanSeatCap(t *testing.T) {
 				{rig: "gastown", name: "refinery"}, // a refinery session
 				{rig: "gastown", name: "sloan", crew: true},
 			},
+		},
+		{
+			// gt-h6423: gt pool set <agent>=0 closes the seat. The restart is
+			// held like a full seat's, not read as "no cap".
+			name:     "a seat the operator closed with cap 0 holds the restart",
+			settings: `{"type":"town-settings","version":1,"role_agents":{"polecat":"` + poolAgent + `"},"polecat_pool":{"seats":{"` + poolAgent + `":{"cap":0}}}}`,
+			sessions: []sessionEnv{polecat("gastown", "ruby", poolAgent)},
+			restart:  "gastown/nova",
+			want:     patrolscan.SeatCap{Live: 1, Closed: true, Key: "polecat_pool.seats." + poolAgent + ".cap"},
+			wantFull: true,
+		},
+		{
+			name:     "a closed seat holds the restart with no polecat live on it",
+			settings: `{"type":"town-settings","version":1,"role_agents":{"polecat":"` + poolAgent + `"},"polecat_pool":{"seats":{"` + poolAgent + `":{"cap":0}}}}`,
+			restart:  "gastown/nova",
+			want:     patrolscan.SeatCap{Closed: true, Key: "polecat_pool.seats." + poolAgent + ".cap"},
+			wantFull: true,
+		},
+		{
+			name:     "a seat with room is not closed",
+			settings: `{"type":"town-settings","version":1,"role_agents":{"polecat":"` + poolAgent + `"},"polecat_pool":{"seats":{"` + poolAgent + `":{"cap":2}}}}`,
+			sessions: []sessionEnv{polecat("gastown", "ruby", poolAgent)},
 		},
 		{
 			name:     "a pool with no cap set",
@@ -156,6 +184,9 @@ func TestPatrolScanSeatCap(t *testing.T) {
 			}
 			if got != tc.want {
 				t.Fatalf("seatCap = %+v, want %+v", got, tc.want)
+			}
+			if got.Full() != tc.wantFull {
+				t.Fatalf("seatCap %+v: Full() = %v, want %v", got, got.Full(), tc.wantFull)
 			}
 		})
 	}

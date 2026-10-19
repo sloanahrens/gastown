@@ -520,6 +520,9 @@ func TestCrashRestartUnderTheCapKeepsItsTiming(t *testing.T) {
 		{"at the cap less one, second sample", SeatCap{Live: 2, Limit: 3, Key: key}, 2, true},
 		{"no cap read at all", SeatCap{}, 2, true},
 		{"a written zero is no cap", SeatCap{Live: 5, Limit: 0, Key: key}, 2, true},
+		// gt-h6423: cap 0 closes the seat, so it holds the restart where a
+		// written zero in Limit alone is no cap.
+		{"a seat the operator closed", SeatCap{Live: 1, Closed: true, Key: "polecat_pool.seats.deepseek-flash.cap"}, 2, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

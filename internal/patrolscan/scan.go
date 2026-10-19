@@ -376,7 +376,8 @@ func (w Work) HasLabel(label string) bool {
 // so the restart adds no live polecat and must not wait on itself (gt-zwiww).
 //
 // The zero value is no cap holding the restart: a pool with none, or a cap
-// with room.
+// with room. A seat the operator closed with a cap of 0 is not that zero
+// value: Closed holds its restart.
 type SeatCap struct {
 	// Live is how many polecats are live now.
 	Live int
@@ -384,15 +385,20 @@ type SeatCap struct {
 	// the pool's own seat, or polecat_pool.max_total across every seat. Zero
 	// is no cap, which is the answer when the pool has none.
 	Limit int
+	// Closed is set for a seat whose cap is 0 (gt pool set <agent>=0): the
+	// operator closed it, and no restart goes onto it however few polecats are
+	// live. Limit stays 0 there, since zero is also how a pool states no cap.
+	Closed bool
 	// Key names the polecat_pool key Limit came from — the key the operator
 	// raises — so the wait names what holds it: "polecat_pool.max_seats" or
 	// "polecat_pool.max_total". Empty when there is no cap.
 	Key string
 }
 
-// Full reports whether the cap has no room for one more live polecat. A cap of
-// zero is no cap, so it is never full.
-func (c SeatCap) Full() bool { return c.Limit > 0 && c.Live >= c.Limit }
+// Full reports whether the cap has no room for one more live polecat. A Limit
+// of zero is no cap, so it is never full, unless Closed says the zero is a seat
+// the operator closed.
+func (c SeatCap) Full() bool { return c.Closed || (c.Limit > 0 && c.Live >= c.Limit) }
 
 // Wisp is the slice of a non-closed wisp the leaked-wisp pass decides on.
 type Wisp struct {
@@ -959,6 +965,9 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 			return unknown("seat cap unreadable", err)
 		}
 		if cap.Full() {
+			if cap.Closed {
+				return skip(fmt.Sprintf("%s stays hooked: %s is 0, the seat is closed", work.ID, cap.Key))
+			}
 			return skip(fmt.Sprintf("%s stays hooked: %s full (%d/%d polecats live), waiting for a free seat",
 				work.ID, cap.Key, cap.Live, cap.Limit))
 		}
