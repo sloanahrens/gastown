@@ -468,3 +468,69 @@ func TestEnsureNewIdentityAbsentReportsALookupError(t *testing.T) {
 		}
 	})
 }
+
+// failFirstShowClient fails one ID's first Show and delegates every later read,
+// the shape of a transient error: the lookup that should refuse the write fails
+// while the rewrite that follows can still reach the bead.
+type failFirstShowClient struct {
+	beads.Client
+	id   string
+	err  error
+	seen bool
+}
+
+func (c *failFirstShowClient) Show(id string) (*beads.Issue, error) {
+	if id == c.id && !c.seen {
+		c.seen = true
+		return nil, c.err
+	}
+	return c.Client.Show(id)
+}
+
+// TestIdentityAddReturnsReadError: gt polecat identity add must believe only a
+// real answer to "is this identity free". Swallowing the lookup error let a
+// transient failure look like absence, and the CreateOrReopenAgentBead that
+// followed rewrote the existing bead's description with hook_bead and
+// cleanup_status cleared (gt-gfcz8).
+func TestIdentityAddReturnsReadError(t *testing.T) {
+	t.Parallel()
+	const beadID = "gt-gastown-polecat-basalt"
+	title := "Polecat basalt in gastown"
+
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	existing := &beads.AgentFields{
+		RoleType:      "polecat",
+		Rig:           "gastown",
+		AgentState:    "working",
+		HookBead:      "gt-work1",
+		CleanupStatus: "clean",
+	}
+	original := beads.FormatAgentDescription(title, existing)
+	db.Seed(beads.Issue{
+		ID:          beadID,
+		Title:       title,
+		Status:      string(beads.StatusOpen),
+		Labels:      []string{"gt:agent"},
+		Description: original,
+	})
+
+	sentinel := errors.New("dolt unreachable")
+	faulty := &failFirstShowClient{Client: db, id: beadID, err: sentinel}
+
+	_, err := addPolecatIdentity(faulty, beadID, title, &beads.AgentFields{
+		RoleType:   "polecat",
+		Rig:        "gastown",
+		AgentState: "idle",
+	})
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("addPolecatIdentity on a failed read = %v, want %v wrapped", err, sentinel)
+	}
+
+	got, err := db.Show(beadID)
+	if err != nil {
+		t.Fatalf("reading the existing bead: %v", err)
+	}
+	if got.Description != original {
+		t.Errorf("description after a failed read was rewritten:\n%s\nwant it untouched:\n%s", got.Description, original)
+	}
+}
