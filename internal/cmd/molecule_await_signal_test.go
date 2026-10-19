@@ -182,6 +182,52 @@ func TestEffectiveTimeoutNoMaxDoesNotOverflow(t *testing.T) {
 	}
 }
 
+// backoffTimeout is the layer that guards the overflow; effectiveTimeout's
+// final clamp would mask a wrapped value only if it came out above the bound,
+// so assert the guard's own result: a positive duration that stops at the
+// limit instead of wrapping.
+func TestBackoffTimeoutOverflowGuard(t *testing.T) {
+	t.Parallel()
+	const hugeMax = 2562047 * time.Hour // near math.MaxInt64 nanoseconds
+
+	tests := []struct {
+		name string
+		bo   awaitSignalBackoff
+		idle []int
+		want time.Duration
+	}{
+		{
+			name: "no max stops at the single-wait bound",
+			bo:   awaitSignalBackoff{base: "30s", mult: 2},
+			idle: []int{28, 29, 30, 54, 100},
+			want: awaitSignalMaxWait,
+		},
+		{
+			name: "huge max stops at max when another multiply would overflow",
+			bo:   awaitSignalBackoff{base: "30s", mult: 2, max: hugeMax.String()},
+			idle: []int{40, 54, 100},
+			want: hugeMax,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			for _, idle := range tt.idle {
+				got, err := tt.bo.backoffTimeout(idle)
+				if err != nil {
+					t.Fatalf("backoffTimeout(%d) error = %v", idle, err)
+				}
+				if got <= 0 {
+					t.Errorf("backoffTimeout(%d) = %v, wrapped non-positive", idle, got)
+				}
+				if got != tt.want {
+					t.Errorf("backoffTimeout(%d) = %v, want %v", idle, got, tt.want)
+				}
+			}
+		})
+	}
+}
+
 func TestAwaitSignalResult(t *testing.T) {
 	t.Parallel()
 	// Test that result struct marshals correctly
