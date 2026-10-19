@@ -90,7 +90,7 @@ func TestRuntimeStateSearched_SymlinkedCwdStillClimbs(t *testing.T) {
 	}
 	link := filepath.Join(base, "link")
 	if err := os.Symlink(filepath.Join(base, "real"), link); err != nil {
-		t.Skipf("symlinks unavailable: %v", err)
+		t.Fatalf("symlink: %v", err)
 	}
 	write := func(dir, id string) {
 		t.Helper()
