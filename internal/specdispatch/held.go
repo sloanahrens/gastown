@@ -11,8 +11,8 @@ import (
 // names. The caller reads the set and fills the fields; nothing here queries.
 //
 // Assignee lets the hold line say whose seat to patrol or which stray bead to
-// close; a bead no assignee names was never slung and is not held at all
-// (gt-z80p9, gt-xrog0).
+// close; a bead no assignee names was never slung and is not held at all, so
+// HeldOverlap skips it whatever the caller passed (gt-z80p9, gt-xrog0).
 type HeldBead struct {
 	ID       string
 	Assignee string
@@ -35,7 +35,9 @@ const maxNamedHeldPaths = 3
 // against a held bead that signal stands alone, where against the whole open
 // pool it does not: a shared file there is as often two genuinely distinct
 // beads in one package (gt-mcq). Naming the lowest overlapping id keeps the
-// line a candidate held twice reports identical.
+// line a candidate held twice reports identical. An entry with no assignee
+// never holds: the hold fails open rather than blocking a candidate on a bead
+// no seat is working.
 func HeldOverlap(paths []string, held []HeldBead) string {
 	if len(paths) == 0 || len(held) == 0 {
 		return ""
@@ -49,7 +51,7 @@ func HeldOverlap(paths []string, held []HeldBead) string {
 	var match, assignee string
 	var shared []string
 	for _, h := range held {
-		if h.ID == "" || (match != "" && h.ID >= match) {
+		if h.ID == "" || h.Assignee == "" || (match != "" && h.ID >= match) {
 			continue
 		}
 		both := make([]string, 0, len(h.Paths))
@@ -73,11 +75,7 @@ func HeldOverlap(paths []string, held []HeldBead) string {
 		more = len(named) - maxNamedHeldPaths
 		named = named[:maxNamedHeldPaths]
 	}
-	holder := match
-	if assignee != "" {
-		holder = fmt.Sprintf("%s (held by %s)", match, assignee)
-	}
-	reason := fmt.Sprintf("%s is already hooked to a working seat and names %s", holder, strings.Join(named, ", "))
+	reason := fmt.Sprintf("%s (held by %s) is already hooked to a working seat and names %s", match, assignee, strings.Join(named, ", "))
 	if more > 0 {
 		reason += fmt.Sprintf(" (+%d more)", more)
 	}
