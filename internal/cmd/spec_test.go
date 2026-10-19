@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -125,7 +126,8 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			{Agent: "claude-sonnet", Cap: 2},
 		}
 	}
-	budget := specdispatch.Budget{Seats: seats, MaxTotal: f.maxTotal}
+	// A fixed seed keeps the seat draw the same on every run.
+	budget := specdispatch.Budget{Seats: seats, MaxTotal: f.maxTotal, Rand: rand.New(rand.NewSource(1))}
 	return specDispatchEnv{
 		Hold: func() string { return f.hold },
 		Candidates: func() specBoardRead {

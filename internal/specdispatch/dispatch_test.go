@@ -459,6 +459,23 @@ func TestRetryOnContention(t *testing.T) {
 	})
 }
 
+// A budget with no Rand is what the production tick runs: the draw falls back
+// to the package source, which must still reach every free seat.
+func TestChooseSeatDefaultSourceReachesEveryFreeSeat(t *testing.T) {
+	t.Parallel()
+	b := baseBudget()
+	b.Rand = nil
+	seen := map[string]bool{}
+	// Each draw lands on a given seat with probability 1/2, so missing one seat
+	// in 200 draws has probability 2^-199.
+	for range 200 {
+		seen[ChooseSeat(b, goodSpec()).Agent] = true
+	}
+	if !seen["deepseek-flash"] || !seen["claude-sonnet"] || len(seen) != 2 {
+		t.Errorf("200 unseeded draws reached %v, want both free seats", seen)
+	}
+}
+
 // A bead pinned with an agent: label is slung only onto a seat of that agent. A
 // free seat of another agent is not a fallback: the bead waits, and the skip
 // says which seat it waits for.
@@ -489,15 +506,15 @@ func TestChooseSeatPinnedAgent(t *testing.T) {
 	// The pinned agent's seat is full and the flash seat is free: wait, never fall back.
 	b.Seats[1].Live = 2
 	got := ChooseSeat(b, pinned)
-	if !got.Skip || got.Agent != "" || !strings.Contains(got.Reason, "waiting for a claude-sonnet seat") {
-		t.Errorf("pinned bead with its seat full = %+v, want a skip that names the seat", got)
+	if !got.Skip || got.Agent != "" || !strings.Contains(got.Reason, "waiting for a claude-sonnet seat (free seats left alone: deepseek-flash)") {
+		t.Errorf("pinned bead with its seat full = %+v, want a skip that names the seat and the free seat it left alone", got)
 	}
 
 	// An agent that has no seat in the pool at all is a different, louder skip.
 	orphan := goodSpec()
 	orphan.Labels = []string{"agent:deepseek-pro"}
 	got = ChooseSeat(b, orphan)
-	if !got.Skip || !strings.Contains(got.Reason, "deepseek-pro, which has no seat in the pool") {
+	if !got.Skip || !strings.Contains(got.Reason, "deepseek-pro, which has no seat in the pool (free seats left alone: deepseek-flash)") {
 		t.Errorf("bead pinned to an agent with no seat = %+v", got)
 	}
 

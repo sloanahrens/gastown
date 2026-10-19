@@ -15,7 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gt pool show` and `gt pool set` drop the row and the name, `gt pool mix`
   drops `--keep-pinned` (name the pinned agent in the mix instead), and the
   dashboard drops the row. A settings file still carrying the keys decodes,
-  warns once per process and ignores them.
+  warns once per process and ignores them. A bead still labelled `needs-pro`
+  is held by the dispatcher, since no seat matches the label now: swap it for
+  `agent:<name>`. A script that passes `--keep-pinned` to `gt pool mix` must
+  drop the flag.
 
 - **The steward job runner** (gt-4rizh, gt-m7ffk) — the daemon-side patrol that
   spawned one headless job per landing-queue event, its ledger and monitoring,

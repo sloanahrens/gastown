@@ -1369,9 +1369,6 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	maxPriority := ts.PolecatPool.GetMaxPriority()
 
 	budget := specBudgetFromConfig(ts, sd)
-	// The seat draw is uniform among the mix's free seats: seed a source for
-	// this tick so the choice is random over the run and injectable in tests.
-	budget.Rand = rand.New(rand.NewSource(time.Now().UnixNano())) //nolint:gosec // G404: a seat draw needs no cryptographic source
 	env := specDispatchEnv{
 		Hold: func() string { return dispatch.OperatorHold(townRoot) },
 		Candidates: func() specBoardRead {

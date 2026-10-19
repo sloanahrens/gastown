@@ -373,14 +373,15 @@ func ChooseSeat(b Budget, spec Spec) SeatChoice {
 		return SeatChoice{Skip: true, Reason: fmt.Sprintf("conflicting %s labels (%s): a bead names one agent", AgentLabelPrefix, strings.Join(pinned, ", "))}
 	}
 	open := make([]Seat, 0, len(b.Seats))
-	free := false
+	var passedOver []string
 	for _, seat := range b.Seats {
 		if !seat.Free() {
 			continue
 		}
-		free = true
 		if seat.takes(spec) {
 			open = append(open, seat)
+		} else {
+			passedOver = append(passedOver, seat.Agent)
 		}
 	}
 	if len(open) > 0 {
@@ -390,15 +391,16 @@ func ChooseSeat(b Budget, spec Spec) SeatChoice {
 	if len(pinned) == 1 {
 		// Never another agent's seat: the label says which model may run the
 		// bead, so a full or missing seat is a wait, not a fallback.
+		left := ""
+		if len(passedOver) > 0 {
+			left = fmt.Sprintf(" (free seats left alone: %s)", strings.Join(passedOver, ", "))
+		}
 		for _, seat := range b.Seats {
 			if seat.Agent == pinned[0] {
-				return SeatChoice{Skip: true, Reason: fmt.Sprintf("waiting for a %s seat: %s", pinned[0], b.Picture())}
+				return SeatChoice{Skip: true, Reason: fmt.Sprintf("waiting for a %s seat%s: %s", pinned[0], left, b.Picture())}
 			}
 		}
-		return SeatChoice{Skip: true, Reason: fmt.Sprintf("pinned to %s, which has no seat in the pool: %s", pinned[0], b.Picture())}
-	}
-	if free {
-		return SeatChoice{Skip: true, Reason: "no free seat takes this bead: " + b.Picture()}
+		return SeatChoice{Skip: true, Reason: fmt.Sprintf("pinned to %s, which has no seat in the pool%s: %s", pinned[0], left, b.Picture())}
 	}
 	return SeatChoice{Skip: true, Reason: "seats full: " + b.Picture()}
 }
