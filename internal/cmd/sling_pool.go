@@ -128,14 +128,7 @@ func poolSeatClosedAt(pool *config.PolecatPool, agent string, now time.Time) boo
 	if !ok || seat.Closed == "" {
 		return false
 	}
-	if pool.Timezone == "" {
-		return true
-	}
-	loc, err := time.LoadLocation(pool.Timezone)
-	if err != nil {
-		return true
-	}
-	w, err := config.ParseWindow(seat.Closed, loc)
+	w, err := config.SeatWindow(pool, seat)
 	if err != nil {
 		return true
 	}
@@ -1167,9 +1160,9 @@ func (e *poolBackpressureError) Unwrap() error { return errPoolBackpressure }
 // poolUncountedFallback is the agent a decision falls back to when it cannot
 // count something it decides from: the one the caller asked for, else the first
 // seat by name that is open (a cap above 0 and outside its closed window at
-// now), else none, which leaves the
-// caller's own default agent to run. The reason line names whichever it was, so
-// a fallback never reads as a deliberate route.
+// now), else none, which leaves the caller's own default agent to run. The
+// reason line names whichever it was, so a fallback never reads as a deliberate
+// route.
 func poolUncountedFallback(pool *config.PolecatPool, requested string, now time.Time) (agent, name string) {
 	if requested != "" {
 		return requested, requested

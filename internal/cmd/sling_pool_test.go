@@ -1830,6 +1830,45 @@ func TestChoosePoolAgentSeatWindows(t *testing.T) {
 	}
 }
 
+// TestPoolUncountedFallback pins the agent a decision falls back to when it
+// cannot count the pool: the requested agent stands, else the first seat by
+// name that has a cap and is open at the clock, else no agent at all.
+func TestPoolUncountedFallback(t *testing.T) {
+	t.Parallel()
+	night := chicagoAt(t, 21, 0)
+	shutFirst := &config.PolecatPool{
+		Timezone: "America/Chicago",
+		Seats: map[string]config.SeatConfig{
+			"a-shut": {Cap: 1, Closed: "20:00-08:00"},
+			"b-open": {Cap: 1},
+		},
+	}
+
+	cases := []struct {
+		name      string
+		pool      *config.PolecatPool
+		requested string
+		now       time.Time
+		agent     string
+		named     string
+	}{
+		{"a named agent stands even when a seat is open", windowedPool(), "deepseek-flash", night, "deepseek-flash", "deepseek-flash"},
+		{"an unnamed sling takes the first open seat by name", windowedPool(), "", night, "claude-sonnet", "claude-sonnet"},
+		{"a shut window is skipped for the next open seat by name", shutFirst, "", night, "b-open", "b-open"},
+		{"a seat at cap 0 is never the fallback", &config.PolecatPool{Seats: map[string]config.SeatConfig{"a-closed": {Cap: 0}, "b-open": {Cap: 1}}}, "", night, "b-open", "b-open"},
+		{"no open seat leaves the default agent to run", &config.PolecatPool{Timezone: "America/Chicago", Seats: map[string]config.SeatConfig{"claude-sonnet": {Cap: 0}, "deepseek-flash": {Cap: 3, Closed: "20:00-08:00"}}}, "", night, "", "the default agent"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			agent, named := poolUncountedFallback(c.pool, c.requested, c.now)
+			if agent != c.agent || named != c.named {
+				t.Errorf("poolUncountedFallback = %q, %q; want %q, %q", agent, named, c.agent, c.named)
+			}
+		})
+	}
+}
+
 // TestRouteUnnamedSlingReadsTheRouterClock is the sling end of gt-y2tm3: the
 // router hands its own clock to the choice, so a live `gt sling` with no agent
 // at 21:00 claims the open seat, and one with the open seat full is refused
