@@ -27,6 +27,17 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"while read re-running gt done", "while read -r x; do gt done; done < /tmp/beads", true},
 		{"nested loop", "for i in 1 2; do for j in a b; do gt done; done; done", true},
 
+		// zsh repeat and foreach run their body a count or a list of times
+		// with no `done` to close them (gt-yjep0). The body is the braced
+		// group, or the rest of the line, or the words up to `end`.
+		{"zsh repeat with a braced gt done", "repeat 20 { gt done; sleep 60 }", true},
+		{"zsh repeat gt done on the line", "repeat 20 gt done", true},
+		{"zsh repeat polling the slot", "repeat 5 gt slot status", true},
+		{"zsh repeat behind then", "if true; then repeat 20 gt done; fi", true},
+		{"zsh repeat in a brace group", "{ repeat 3 gt done; }", true},
+		{"zsh foreach gt done", "foreach f (a b c); gt done; end", true},
+		{"zsh foreach slot poll", "foreach r (gastown beads) gt slot status; end", true},
+
 		// A keyword that follows then/do/else or an opening brace or paren
 		// starts a loop as surely as one that starts the line (deep-review
 		// gt-dilqk).
@@ -74,6 +85,11 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"loop with no gate command", "while read -r x; do bd close \"$x\"; done < list", false},
 		{"for loop over files", `for f in $(git diff --name-only); do gofmt -w "$f"; done`, false},
 		{"a quoted for is not a block", `grep -rn "for" --include="*.go" .`, false},
+		{"zsh repeat with a closed body and a sanctioned gt done", "repeat 3 { echo hi; }; gt done", false},
+		{"zsh repeat with no gate command", "repeat 3 gofmt -l", false},
+		{"zsh repeat with no gate command, braced", "repeat 3 { gofmt -l; echo hi }", false},
+		{"zsh foreach with no gate command", "foreach f (a b); echo $f; end", false},
+		{"zsh repeat word as an argument", "echo repeat 20 gt done", false},
 		{"seq with no gate command", "seq 1 5", false},
 		{"xargs with no gate command", "seq 1 5 | xargs -I{} echo {}", false},
 
@@ -123,8 +139,8 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 32 {
-		t.Errorf("blocked %d of %d cases, want exactly 32", blocked, len(tests))
+	if blocked != 39 {
+		t.Errorf("blocked %d of %d cases, want exactly 39", blocked, len(tests))
 	}
 }
 
@@ -154,6 +170,8 @@ func TestDoneSlotLoopReachesGuard(t *testing.T) {
 		`bash -c "for i in $(seq 1 5); do gt done; done"`,
 		"echo $(for i in 1 2; do gt slot status; done)",
 		`seq 1 300 | xargs -I{} bash -c 'gt done'`,
+		"repeat 20 gt done",
+		"repeat 20 { gt done; sleep 60 }",
 	} {
 		if reason, _ := evaluateDangerousCommand(nested, 0, noTownSession); reason != doneSlotLoopReason {
 			t.Errorf("evaluateDangerousCommand(%q) reason = %q, want %q", nested, reason, doneSlotLoopReason)
