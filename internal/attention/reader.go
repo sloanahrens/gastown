@@ -35,7 +35,9 @@ type Record struct {
 	// LastSeen is when the item was last observed: the clear when it has
 	// cleared, the daemon's last tick while it stands.
 	LastSeen time.Time `json:"last_seen"`
-	// ClearedAt is when the item cleared, nil while it stands.
+	// ClearedAt is when the item cleared, nil while it stands. A life the log
+	// raised again without a clear ends at that second raise, so only the
+	// last life of a key can be the standing one.
 	ClearedAt *time.Time `json:"cleared_at,omitempty"`
 	// AckedAt is the ack in force for the item: the state's ack while it
 	// stands, or the ack made at or before it cleared.
@@ -119,6 +121,14 @@ func records(events []Event, state State, acks Acks) []Record {
 				continue
 			}
 		}
+		if i, ok := open[ev.Key]; ok {
+			// A second raise with no clear between: the earlier life ended
+			// here, and leaving it open would show two standing lives.
+			at := ev.TS
+			out[i].LastSeen = at
+			out[i].ClearedAt = &at
+			delete(open, ev.Key)
+		}
 		r := Record{
 			Key: ev.Key, Kind: ev.Class, Severity: ev.Severity,
 			Summary: ev.Text, Rule: ev.Rule,
@@ -134,7 +144,9 @@ func records(events []Event, state State, acks Acks) []Record {
 		out = append(out, r)
 	}
 
+	known := make(map[string]Item, len(state.Items))
 	for _, it := range state.Items {
+		known[it.Key] = it
 		i, ok := open[it.Key]
 		if !ok {
 			if at, gone := cleared[it.Key]; gone && !it.FirstSeen.After(at) {
@@ -161,6 +173,8 @@ func records(events []Event, state State, acks Acks) []Record {
 		}
 	}
 
+	fillMissing(out, known)
+
 	for i := range out {
 		r := &out[i]
 		if r.Acked { // state.json already records the ack that hid this item.
@@ -176,8 +190,7 @@ func records(events []Event, state State, acks Acks) []Record {
 		r.AckedAt, r.Acked = &at, true
 	}
 
-	// A malformed log can raise a key twice without a clear; only the last
-	// life can be the standing one, so rank the earlier ones before it.
+	// Lives that start together are ranked so the one that ended comes first.
 	sort.SliceStable(out, func(i, j int) bool {
 		a, b := out[i], out[j]
 		if !a.FirstSeen.Equal(b.FirstSeen) {
@@ -192,6 +205,43 @@ func records(events []Event, state State, acks Acks) []Record {
 		return false
 	})
 	return out
+}
+
+// fillMissing gives a life the kind, severity and rig it lacks, which a bare
+// line (or a clear whose raising line was rotated away) leaves empty. The
+// standing state describes the key best; failing that, the latest other life
+// of the key that has the field supplies it.
+func fillMissing(out []Record, known map[string]Item) {
+	for i := range out {
+		r := &out[i]
+		if r.Kind != "" && r.Severity != "" && r.Rig != "" {
+			continue
+		}
+		from := known[r.Key]
+		for j := len(out) - 1; j >= 0; j-- {
+			if j == i || out[j].Key != r.Key {
+				continue
+			}
+			if from.Kind == "" {
+				from.Kind = out[j].Kind
+			}
+			if from.Severity == "" {
+				from.Severity = out[j].Severity
+			}
+			if from.Rig == "" {
+				from.Rig = out[j].Rig
+			}
+		}
+		if r.Kind == "" {
+			r.Kind = from.Kind
+		}
+		if r.Severity == "" {
+			r.Severity = from.Severity
+		}
+		if r.Rig == "" {
+			r.Rig = from.Rig
+		}
+	}
 }
 
 // ackAt returns the latest time key was acknowledged, ignoring an ack later
