@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -503,11 +504,23 @@ func (bo awaitSignalBackoff) backoffTimeout(idleCycles int) (time.Duration, erro
 			}
 		}
 
+		// Without --backoff-max the running timeout still stops at
+		// awaitSignalMaxWait: effectiveTimeout clamps to it anyway, and
+		// multiplying past it wraps negative near idle 29 and to 0 from idle 54.
+		limit := awaitSignalMaxWait
+		if maxDur > 0 {
+			limit = maxDur
+		}
+
 		timeout := base
 		for i := 0; i < idleCycles; i++ {
 			// Cap early to prevent int64 overflow at high idle counts.
-			if maxDur > 0 && timeout >= maxDur {
-				return maxDur, nil
+			if timeout >= limit {
+				return limit, nil
+			}
+			// A huge --backoff-max can sit above what one more multiply fits.
+			if bo.mult > 1 && timeout > math.MaxInt64/time.Duration(bo.mult) {
+				return limit, nil
 			}
 			timeout *= time.Duration(bo.mult)
 		}

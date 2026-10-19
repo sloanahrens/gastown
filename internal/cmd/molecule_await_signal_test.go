@@ -154,6 +154,34 @@ func TestCalculateEffectiveTimeout(t *testing.T) {
 	}
 }
 
+// Without --backoff-max, 30s * 2^idle wrapped negative at idle 29 and to 0
+// from idle 54, so every wait expired at once and the patrol spun.
+func TestEffectiveTimeoutNoMaxDoesNotOverflow(t *testing.T) {
+	t.Parallel()
+	bo := awaitSignalBackoff{base: "30s", mult: 2}
+	for _, idle := range []int{28, 29, 30, 54, 100} {
+		got, err := bo.effectiveTimeout(idle)
+		if err != nil {
+			t.Fatalf("effectiveTimeout(%d) error = %v", idle, err)
+		}
+		if got != awaitSignalMaxWait {
+			t.Errorf("effectiveTimeout(%d) = %v, want %v", idle, got, awaitSignalMaxWait)
+		}
+	}
+
+	// A --backoff-max too large for another multiply must not wrap either.
+	huge := awaitSignalBackoff{base: "30s", mult: 2, max: "2562047h"}
+	for _, idle := range []int{40, 54, 100} {
+		got, err := huge.effectiveTimeout(idle)
+		if err != nil {
+			t.Fatalf("huge max: effectiveTimeout(%d) error = %v", idle, err)
+		}
+		if got != awaitSignalMaxWait {
+			t.Errorf("huge max: effectiveTimeout(%d) = %v, want %v", idle, got, awaitSignalMaxWait)
+		}
+	}
+}
+
 func TestAwaitSignalResult(t *testing.T) {
 	t.Parallel()
 	// Test that result struct marshals correctly
