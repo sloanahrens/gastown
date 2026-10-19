@@ -172,8 +172,14 @@ func restartPolecatOnSlungAgent(mgr polecatStarter, townRoot, rigName, polecatNa
 // dispatcher sling a second polecat onto the seat the restart brings back. A
 // pool with no seat map, or one seat, keeps UnrecordedAgent.
 //
-// The role default read cannot fail: unreadable settings resolve as the
-// restart would resolve them.
+// The role default read returns no error: config.ResolveRoleAgentName answers
+// a name for unreadable settings too, as the restart resolves them, and the
+// result it discards is isRoleSpecific, not an error.
+//
+// A role default that is no seat in the map is not a seat the restart fills
+// either, so the seat is counted under config.UnknownSeatAgent as in
+// PolecatPool.UnrecordedAgent: it counts toward max_total, fills no seat, and
+// the tick lists it.
 func unrecordedSeatAgent(townRoot string, pool *config.PolecatPool) func(rigName string) string {
 	if pool == nil || len(pool.Seats) < 2 {
 		agent := pool.UnrecordedAgent()
@@ -184,6 +190,9 @@ func unrecordedSeatAgent(townRoot string, pool *config.PolecatPool) func(rigName
 		agent, ok := byRig[rigName]
 		if !ok {
 			agent, _ = config.ResolveRoleAgentName(constants.RolePolecat, townRoot, filepath.Join(townRoot, rigName))
+			if _, isSeat := pool.Seats[agent]; !isSeat {
+				agent = config.UnknownSeatAgent
+			}
 			byRig[rigName] = agent
 		}
 		return agent
