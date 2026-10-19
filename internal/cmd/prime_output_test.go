@@ -312,11 +312,27 @@ func TestOutputPrimeContextFallbackPolecatAndCrewIncludeQuickReference(t *testin
 	stdout := os.Stdout
 	//testpolicy:allow no-global-swap — the fallback briefs must not touch the process stdout; the pipe proves it
 	os.Stdout = w
+	writerClosed := false
 	t.Cleanup(func() {
 		//testpolicy:allow no-global-swap — restores the os.Stdout swapped above
 		os.Stdout = stdout
+		if !writerClosed {
+			w.Close()
+		}
 		r.Close()
 	})
+
+	// Drain the pipe while the briefs render: a leak larger than the pipe
+	// buffer would otherwise block the writer before w.Close is reached.
+	type drained struct {
+		data []byte
+		err  error
+	}
+	leakedCh := make(chan drained, 1)
+	go func() {
+		data, err := io.ReadAll(r)
+		leakedCh <- drained{data, err}
+	}()
 
 	ctx := RoleContext{TownRoot: t.TempDir(), Rig: "myrig", Polecat: "toast"}
 	renderers := map[string]func(io.Writer, RoleContext){
@@ -330,13 +346,16 @@ func TestOutputPrimeContextFallbackPolecatAndCrewIncludeQuickReference(t *testin
 		outputs[name] = buf.String()
 	}
 
-	w.Close()
-	leaked, err := io.ReadAll(r)
-	if err != nil {
-		t.Fatalf("reading the captured stdout: %v", err)
+	writerClosed = true
+	if err := w.Close(); err != nil {
+		t.Fatalf("closing the stdout pipe: %v", err)
 	}
-	if len(leaked) != 0 {
-		t.Errorf("the fallback briefs wrote to the process stdout:\n%s", leaked)
+	leaked := <-leakedCh
+	if leaked.err != nil {
+		t.Fatalf("reading the captured stdout: %v", leaked.err)
+	}
+	if len(leaked.data) != 0 {
+		t.Errorf("the fallback briefs wrote to the process stdout:\n%s", leaked.data)
 	}
 	for name, out := range outputs {
 		if !strings.Contains(out, "Command Quick-Reference") {
