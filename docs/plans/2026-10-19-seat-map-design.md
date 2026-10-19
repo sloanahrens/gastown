@@ -49,7 +49,7 @@ The map lives in `polecat_pool`, beside the dispatch policy keys it already sits
 
 ## Loader
 
-One function, `config.Seats(settings)`, returns the seats as a typed list (agent, cap, window, names), in the order the file lists them. Every reader calls it. It rejects, at load:
+One function, `config.Seats(settings)`, returns the seats as a typed list (agent, cap, window, names), sorted by agent name so every reader and report sees the same order. Every reader calls it. It rejects, at load:
 
 - an agent that is neither in the `agents` map nor a built-in preset;
 - a negative cap;
@@ -106,7 +106,7 @@ The cutover is one operator step on a quiet town: land the code, run `gt pool mi
 
 ## Testing
 
-- Loader: a table test per rejection rule, and one for file order.
+- Loader: a table test per rejection rule, and one for the sorted order.
 - Dispatcher: seeded random source; pinned bead with closed, full and open seats; uniform choice across agents with unequal caps.
 - Windows: an injected clock at 07:59, 08:00, 19:59, 20:00 and across midnight.
 - Strict decoding: one test per retired key, checking the message names its replacement.
