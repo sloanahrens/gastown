@@ -1029,6 +1029,54 @@ func TestNewRigLandingWorker_WiresTheForgejoLanding(t *testing.T) {
 	}
 }
 
+// TestNewRigLandingWorker_AgentBeadIDNamesTheSeatsAgent: a landing records the
+// agent it ran on, so the worker needs the polecat seat's own agent bead id.
+// The id carries the rig's routed prefix, not the "gt" default, because a rig
+// with its own database files the bead under that prefix and a "gt-" id would
+// name no bead at all (gt-mukgk.6, gt-eeewn).
+func TestNewRigLandingWorker_AgentBeadIDNamesTheSeatsAgent(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rigName = "testrig"
+	forgejoRigConfig(t, townRoot, rigName)
+	// The rig routes under its own prefix, so the id the worker builds has to
+	// follow the route rather than a compiled-in default.
+	townBeads := filepath.Join(townRoot, ".beads")
+	if err := os.MkdirAll(townBeads, 0o755); err != nil {
+		t.Fatalf("mkdir .beads: %v", err)
+	}
+	routes := `{"prefix":"tr-","path":"` + rigName + `/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townBeads, "routes.jsonl"), []byte(routes), 0o644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	// The rig lands through Forgejo like every rig whose config names it, so
+	// construction needs the landing bot token it would read in production.
+	tokenDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(tokenDir, "forgejo-landing.env"), []byte("FORGEJO_TOKEN=secret\n"), 0o600); err != nil {
+		t.Fatalf("write token file: %v", err)
+	}
+	d := &Daemon{logger: discardLogger, config: &Config{TownRoot: townRoot}, notifier: notifyfake.New(),
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{LandingWorker: &LandingWorkerConfig{
+			Forgejo: &config.ForgejoWorkerConfig{TokenDir: tokenDir}}}}}
+	f := useGitfake(t, d)
+	forgejoLandingRemote(t, f, townRoot, rigName)
+
+	w, err := d.newRigLandingWorker(rigName)
+	if err != nil {
+		t.Fatalf("newRigLandingWorker: %v", err)
+	}
+	if w.AgentBeadID == nil {
+		t.Fatal("AgentBeadID is nil; a landing would record no agent")
+	}
+	for _, polecat := range []string{"dementus", "furiosa"} {
+		want := "tr-" + rigName + "-polecat-" + polecat
+		if got := w.AgentBeadID(polecat); got != want {
+			t.Errorf("AgentBeadID(%q) = %q, want %q", polecat, got, want)
+		}
+	}
+}
+
 // TestNewRigLandingWorker_ForgejoRemoteUnmatchedFailsClosed: a rig whose
 // Forgejo block names a URL no remote carries must not build a worker at all.
 // Building one against origin would push candidates to GitHub, and every
