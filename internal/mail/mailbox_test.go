@@ -900,3 +900,139 @@ func TestMailboxLegacyAtomicArchive(t *testing.T) {
 		t.Errorf("Archived message ID = %q, want msg-002", archived[0].ID)
 	}
 }
+
+// writeTypesSentinel marks beadsDir as already configured so listFromDir does
+// not spawn bd list for the custom-type setup check.
+func writeTypesSentinel(t *testing.T, beadsDir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
+		t.Fatalf("write types sentinel: %v", err)
+	}
+}
+
+// A failed wisp query must surface: wisp-stored mail lives only in the wisps
+// table, so swallowing the error shows an empty inbox with a nil error.
+func TestListFromDirWispError(t *testing.T) {
+	t.Parallel()
+	beadsDir := t.TempDir()
+	writeTypesSentinel(t, beadsDir)
+
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		switch c.Args[0] {
+		case "list":
+			return "No issues found.\n", "", 0
+		case "sql":
+			return "", "Error: context deadline exceeded: timed out waiting for bd sql\n", 1
+		}
+		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+	}}
+
+	m := NewMailboxWithBeadsDir("gastown/synth", t.TempDir(), beadsDir)
+	m.bd = bd.run
+
+	if _, err := m.List(); err == nil {
+		t.Fatal("List returned nil error for a failed wisp query; wisp mail would read as an empty inbox")
+	} else if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("List error = %v, want the wisp query failure", err)
+	}
+}
+
+// A database without a wisps table is normal (no wisp has been written yet),
+// and must keep listing as empty rather than failing.
+func TestListFromDirMissingWispTableIsEmpty(t *testing.T) {
+	t.Parallel()
+	beadsDir := t.TempDir()
+	writeTypesSentinel(t, beadsDir)
+
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		switch c.Args[0] {
+		case "list":
+			return "No issues found.\n", "", 0
+		case "sql":
+			return "", "Error 1146 (42S02): Table 'beads.wisps' doesn't exist\n", 1
+		}
+		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+	}}
+
+	m := NewMailboxWithBeadsDir("gastown/synth", t.TempDir(), beadsDir)
+	m.bd = bd.run
+
+	msgs, err := m.List()
+	if err != nil {
+		t.Fatalf("List with no wisps table: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("messages = %d, want 0", len(msgs))
+	}
+}
+
+// One oversized legacy line must not poison the inbox: List used to fail with
+// bufio.ErrTooLong for good, which also left Delete unable to remove it.
+func TestListLegacyLongLine(t *testing.T) {
+	t.Parallel()
+	m := NewMailbox(t.TempDir())
+
+	msg := &Message{
+		ID:        "msg-long",
+		Subject:   "large body",
+		Body:      strings.Repeat("x", 100*1024),
+		Timestamp: time.Now(),
+	}
+	if err := m.Append(msg); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	listed, err := m.List()
+	if err != nil {
+		t.Fatalf("List with a 100KB line: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != msg.ID {
+		t.Fatalf("List = %#v, want the 100KB message", listed)
+	}
+
+	if err := m.Delete(msg.ID); err != nil {
+		t.Fatalf("Delete of the 100KB message: %v", err)
+	}
+	after, err := m.List()
+	if err != nil {
+		t.Fatalf("List after delete: %v", err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("messages after delete = %d, want 0", len(after))
+	}
+}
+
+// Archive and PurgeArchive must both take the archive lock. That lock is what
+// keeps an append from landing between a purge's read and its rewrite. The test
+// makes the lock unacquirable with a dangling symlink into a directory that does
+// not exist, so the lock file cannot be opened. Each operation must then fail on
+// the lock instead of running unlocked.
+func TestPurgeArchiveConcurrentArchive(t *testing.T) {
+	t.Parallel()
+	beadsDir := t.TempDir()
+	m := NewMailboxWithBeadsDir("gastown/synth", t.TempDir(), beadsDir)
+	missing := filepath.Join(t.TempDir(), "missing", "archive.lock")
+	if err := os.Symlink(missing, m.ArchivePath()+".lock"); err != nil {
+		t.Fatalf("block archive lock: %v", err)
+	}
+
+	fresh := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		switch c.Args[0] {
+		case "show":
+			return fmt.Sprintf(`[{"id":%q,"title":"msg","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":%q}]`,
+				c.Args[1], fresh), "", 0
+		case "close":
+			return "", "", 0
+		}
+		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+	}}
+	m.bd = bd.run
+
+	if err := m.Archive("race-archive"); err == nil || !strings.Contains(err.Error(), "acquiring archive lock") {
+		t.Errorf("Archive with the archive lock unavailable: err = %v, want an archive lock error", err)
+	}
+	if _, err := m.PurgeArchive(1); err == nil || !strings.Contains(err.Error(), "acquiring archive lock") {
+		t.Errorf("PurgeArchive with the archive lock unavailable: err = %v, want an archive lock error", err)
+	}
+}

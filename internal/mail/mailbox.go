@@ -23,6 +23,10 @@ import (
 // timeNow is a function that returns the current time. It can be overridden in tests.
 var timeNow = time.Now
 
+// maxMailboxLineBytes is the largest JSONL line the legacy inbox and archive
+// scanners accept (gt-3ueel).
+const maxMailboxLineBytes = 16 << 20
+
 // Common errors
 var (
 	ErrMessageNotFound = errors.New("message not found")
@@ -98,6 +102,20 @@ func (m *Mailbox) lockLegacy() (*flock.Flock, error) {
 	fl := flock.New(m.path + ".lock")
 	if err := fl.Lock(); err != nil {
 		return nil, fmt.Errorf("acquiring mailbox lock: %w", err)
+	}
+	return fl, nil
+}
+
+// lockArchive takes the exclusive archive lock shared by appendToArchive and
+// PurgeArchive (gt-3ueel). Callers must defer Unlock.
+func (m *Mailbox) lockArchive() (*flock.Flock, error) {
+	lockPath := m.ArchivePath() + ".lock"
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+		return nil, fmt.Errorf("creating archive directory: %w", err)
+	}
+	fl := flock.New(lockPath)
+	if err := fl.Lock(); err != nil {
+		return nil, fmt.Errorf("acquiring archive lock: %w", err)
 	}
 	return fl, nil
 }
@@ -178,6 +196,10 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 	if assignee.err != nil {
 		return nil, assignee.err
 	}
+	// A missing wisps table means no wisp was written yet; any other failure is returned.
+	if wisps.err != nil && !isMissingWispTable(wisps.err) {
+		return nil, wisps.err
+	}
 
 	// Deduplicate messages across queries (assignee + CC + wisps may overlap).
 	seen := make(map[string]bool)
@@ -189,6 +211,22 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 	}
 
 	return messages, nil
+}
+
+// isMissingWispTable reports whether a wisps query failed because the table is
+// absent. bd exposes no typed error, so this matches the MySQL/Dolt messages it
+// passes through; the generic "doesn't exist" form must name wisps so other
+// missing objects still surface.
+func isMissingWispTable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "error 1146") ||
+		strings.Contains(msg, "42s02") ||
+		strings.Contains(msg, "no such table") ||
+		strings.Contains(msg, "table not found") ||
+		(strings.Contains(msg, "wisps") && (strings.Contains(msg, "doesn't exist") || strings.Contains(msg, "does not exist")))
 }
 
 func (m *Mailbox) queryIssueMessagesByAssignee(beadsDir string, identities []string) ([]BeadsMessage, error) {
@@ -448,6 +486,7 @@ func (m *Mailbox) listLegacy() ([]*Message, error) {
 
 	messages := make([]*Message, 0)
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxMailboxLineBytes)
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
@@ -948,6 +987,12 @@ func (m *Mailbox) appendToArchive(msg *Message) error {
 		return err
 	}
 
+	fl, err := m.lockArchive()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = fl.Unlock() }()
+
 	// Open for append
 	file, err := os.OpenFile(archivePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644) //nolint:gosec // G302: archive is non-sensitive operational data
 	if err != nil {
@@ -979,6 +1024,7 @@ func (m *Mailbox) ListArchived() ([]*Message, error) {
 
 	var messages []*Message
 	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), maxMailboxLineBytes)
 	lineNum := 0
 	for scanner.Scan() {
 		lineNum++
@@ -1006,6 +1052,12 @@ func (m *Mailbox) ListArchived() ([]*Message, error) {
 func (m *Mailbox) PurgeArchive(olderThanDays int) (int, error) {
 	if m.legacy {
 		fl, err := m.lockLegacy()
+		if err != nil {
+			return 0, err
+		}
+		defer func() { _ = fl.Unlock() }()
+	} else {
+		fl, err := m.lockArchive()
 		if err != nil {
 			return 0, err
 		}
