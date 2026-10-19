@@ -318,6 +318,72 @@ func TestQueryAssignedIssuesReturnsEveryRowNotJustTheFirstPage(t *testing.T) {
 	}
 }
 
+// TestIdentityRenameCloseFailureRestoresHook: the hook transfer runs before the
+// old identity closes, so a failed close must put the work back. Otherwise it
+// stays assigned to a name whose identity bead the failed run closes, and a
+// retry refuses at moveLiveHook's holder guard for good (gt-fkz54).
+func TestIdentityRenameCloseFailureRestoresHook(t *testing.T) {
+	t.Parallel()
+	const (
+		oldAssignee = "gastown/polecats/agate"
+		newAssignee = "gastown/polecats/basalt"
+		oldBeadID   = "gt-gastown-polecat-agate"
+		newBeadID   = "gt-gastown-polecat-basalt"
+		hookBead    = "gt-hook4"
+	)
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(beads.Issue{ID: oldBeadID, Title: "Polecat agate in gastown", Status: string(beads.StatusOpen)})
+	db.Seed(beads.Issue{
+		ID: hookBead, Title: "work", Status: string(beads.IssueStatusHooked), Assignee: oldAssignee,
+	})
+	sentinel := errors.New("dolt unreachable")
+	faulty := closeFailsClient{Client: db, id: oldBeadID, err: sentinel}
+	fields := &beads.AgentFields{RoleType: "polecat", Rig: "gastown", HookBead: hookBead}
+
+	err := renameIdentityBeads(faulty, oldBeadID, newBeadID, "Polecat basalt in gastown",
+		fields, oldAssignee, newAssignee)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("renameIdentityBeads = %v, want %v wrapped", err, sentinel)
+	}
+
+	got, err := db.Show(hookBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Assignee != oldAssignee {
+		t.Errorf("assignee = %q, want %q: the failed close must leave the hook where it found it", got.Assignee, oldAssignee)
+	}
+	if got.Status != string(beads.IssueStatusHooked) {
+		t.Errorf("status = %q, want the hooked status it had", got.Status)
+	}
+	// The failed attempt leaves nothing behind for the retry to trip over.
+	newBead, err := db.Show(newBeadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newBead.Status != string(beads.StatusClosed) {
+		t.Errorf("new identity status = %q, want closed once the hook is back on the old name", newBead.Status)
+	}
+}
+
+// closeFailsClient is a beads.Client whose CloseWithReason reports err for one
+// ID and delegates the rest, so a test can fail exactly the close a rename
+// makes on the old identity.
+type closeFailsClient struct {
+	beads.Client
+	id  string
+	err error
+}
+
+func (c closeFailsClient) CloseWithReason(reason string, ids ...string) error {
+	for _, id := range ids {
+		if id == c.id {
+			return c.err
+		}
+	}
+	return c.Client.CloseWithReason(reason, ids...)
+}
+
 // TestMoveLiveHookReassignsWorkHeldUnderTheOldName: rename inherits the hook, so
 // the work bead's assignee has to follow the new name. Copying the reference
 // alone left the renamed identity claiming a bead still assigned to the old one
@@ -334,7 +400,7 @@ func TestMoveLiveHookReassignsWorkHeldUnderTheOldName(t *testing.T) {
 		ID: hookBead, Title: "work", Status: string(beads.IssueStatusHooked), Assignee: oldAssignee,
 	})
 
-	if err := moveLiveHook(db, hookBead, oldAssignee, newAssignee); err != nil {
+	if _, err := moveLiveHook(db, hookBead, oldAssignee, newAssignee); err != nil {
 		t.Fatalf("moveLiveHook: %v", err)
 	}
 	got, err := db.Show(hookBead)
@@ -367,7 +433,7 @@ func TestMoveLiveHookRefusesWhatItCannotShowIsTheRenamedPolecatsWork(t *testing.
 		t.Parallel()
 		db := newDB()
 		db.Seed(beads.Issue{ID: "gt-hook2", Title: "work", Status: string(beads.StatusInProgress), Assignee: oldAssignee})
-		if err := moveLiveHook(db, "gt-hook2", oldAssignee, newAssignee); err != nil {
+		if _, err := moveLiveHook(db, "gt-hook2", oldAssignee, newAssignee); err != nil {
 			t.Fatalf("moveLiveHook: %v", err)
 		}
 		got, err := db.Show("gt-hook2")
@@ -383,7 +449,7 @@ func TestMoveLiveHookRefusesWhatItCannotShowIsTheRenamedPolecatsWork(t *testing.
 		t.Parallel()
 		db := newDB()
 		db.Seed(beads.Issue{ID: "gt-done1", Title: "shipped", Status: string(beads.StatusClosed), Assignee: oldAssignee})
-		if err := moveLiveHook(db, "gt-done1", oldAssignee, newAssignee); err != nil {
+		if _, err := moveLiveHook(db, "gt-done1", oldAssignee, newAssignee); err != nil {
 			t.Fatalf("moveLiveHook: %v", err)
 		}
 		got, err := db.Show("gt-done1")
@@ -397,7 +463,7 @@ func TestMoveLiveHookRefusesWhatItCannotShowIsTheRenamedPolecatsWork(t *testing.
 
 	t.Run("unreadable reference is refused", func(t *testing.T) {
 		t.Parallel()
-		if err := moveLiveHook(newDB(), "gt-gone1", oldAssignee, newAssignee); err == nil {
+		if _, err := moveLiveHook(newDB(), "gt-gone1", oldAssignee, newAssignee); err == nil {
 			t.Error("moveLiveHook on a missing hook bead = nil, want a refusal")
 		}
 	})
@@ -406,7 +472,7 @@ func TestMoveLiveHookRefusesWhatItCannotShowIsTheRenamedPolecatsWork(t *testing.
 		t.Parallel()
 		db := newDB()
 		db.Seed(beads.Issue{ID: "gt-hook3", Title: "someone else's", Status: string(beads.IssueStatusHooked), Assignee: "gastown/polecats/emerald"})
-		err := moveLiveHook(db, "gt-hook3", oldAssignee, newAssignee)
+		_, err := moveLiveHook(db, "gt-hook3", oldAssignee, newAssignee)
 		if err == nil {
 			t.Fatal("moveLiveHook on another polecat's claim = nil, want a refusal")
 		}
@@ -417,7 +483,7 @@ func TestMoveLiveHookRefusesWhatItCannotShowIsTheRenamedPolecatsWork(t *testing.
 
 	t.Run("no hook is a no-op", func(t *testing.T) {
 		t.Parallel()
-		if err := moveLiveHook(newDB(), "", oldAssignee, newAssignee); err != nil {
+		if _, err := moveLiveHook(newDB(), "", oldAssignee, newAssignee); err != nil {
 			t.Errorf("moveLiveHook(\"\") = %v, want nil", err)
 		}
 	})
