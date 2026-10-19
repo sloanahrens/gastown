@@ -29,7 +29,8 @@ type Record struct {
 	// Rule is the stable id of the rule that raised the item, when the raising
 	// line carries one.
 	Rule string `json:"rule,omitempty"`
-	// FirstSeen is when the item was raised.
+	// FirstSeen is when the item was raised: the state's first_seen while it
+	// stands, else the new line, else the clear when the raising line is gone.
 	FirstSeen time.Time `json:"first_seen"`
 	// LastSeen is when the item was last observed: the clear when it has
 	// cleared, the daemon's last tick while it stands.
