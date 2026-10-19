@@ -946,6 +946,12 @@ func (d *Daemon) Run() (err error) {
 		return err
 	}
 
+	// The seat map must read cleanly before anything is dispatched: a daemon
+	// that ran on a partial seat list would spend seats the operator closed.
+	if err := checkSeatMap(d.config.TownRoot); err != nil {
+		return err
+	}
+
 	d.warnPressureScale(d.loadOperationalConfig().GetDaemonConfig().PressureCPUThresholdV())
 
 	// Repair metadata.json for all rigs on startup.
@@ -1652,6 +1658,20 @@ func (d *Daemon) reportDoltWarnings(warnings []string) {
 	cycle := d.startDogCycle("doctor_dog")
 	defer cycle.close()
 	cycle.failStep("dolt-health", strings.Join(warnings, "; "))
+}
+
+// checkSeatMap loads the town settings and the seat map in them through the
+// loader, and returns the loader's message when either is rejected (gt-mukgk).
+// A town with no seats key passes.
+func checkSeatMap(townRoot string) error {
+	ts, err := agentconfig.LoadOrCreateTownSettings(agentconfig.TownSettingsPath(townRoot))
+	if err != nil {
+		return fmt.Errorf("seat map: loading town settings: %w", err)
+	}
+	if _, err := agentconfig.Seats(ts, agentconfig.AgentResolver(townRoot, ts)); err != nil {
+		return fmt.Errorf("seat map: %w", err)
+	}
+	return nil
 }
 
 // checkAllRigsDolt verifies all rigs are using the Dolt backend.

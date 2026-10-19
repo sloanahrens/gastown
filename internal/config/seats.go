@@ -136,3 +136,14 @@ func (w *Window) OpensAt(t time.Time) time.Time {
 	}
 	return open
 }
+
+// AgentResolver returns the known predicate Seats takes: an agent resolves when
+// the launcher would find it, in the town's agents, settings/agents.json or the
+// built-in presets. It is the loader's own lookup, so the seat map and a launch
+// agree on what a name means. An empty townRoot skips settings/agents.json.
+func AgentResolver(townRoot string, ts *TownSettings) func(agent string) bool {
+	reg := AgentRegistryFor(townRoot, "")
+	return func(agent string) bool {
+		return lookupAgentConfigIfExists(reg, agent, ts, nil) != nil
+	}
+}

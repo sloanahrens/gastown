@@ -225,6 +225,11 @@ type Seat struct {
 	// toward Cap, and naming them explains a full seat that shows fewer live
 	// sessions than its number (gt-tldj4).
 	DeadHooked int
+	// Closed is true while the seat's window is shut: it counts its live
+	// polecats but takes no new spawn. OpensAt is when it next opens
+	// (gt-mukgk).
+	Closed  bool
+	OpensAt time.Time
 }
 
 // AgentLabelPrefix starts the label that pins a bead to one agent's seats:
@@ -238,8 +243,13 @@ const AgentLabelPrefix = "agent:"
 // seat choice refuses to guess between them.
 func (s Spec) PinnedAgents() []string { return s.labelValues(AgentLabelPrefix) }
 
-// Free reports whether the seat has room.
-func (s Seat) Free() bool { return s.Agent != "" && s.Live < s.Cap }
+// Free reports whether the seat has room and is open.
+func (s Seat) Free() bool { return s.Agent != "" && !s.Closed && s.Live < s.Cap }
+
+// closedUntil renders when a closed seat opens: "closed until 08:00".
+func (s Seat) closedUntil() string {
+	return "closed until " + s.OpensAt.Format("15:04")
+}
 
 // takes reports whether the seat may take spec: a bead pinned to an agent (an
 // agent:<name> label) is that agent's alone, and a seat of any other agent
@@ -291,6 +301,9 @@ func (b Budget) Picture() string {
 		p := fmt.Sprintf("%s %d/%d", s.Agent, s.Live, s.Cap)
 		if s.DeadHooked > 0 {
 			p += fmt.Sprintf(" (%d dead-hooked)", s.DeadHooked)
+		}
+		if s.Closed {
+			p += " (" + s.closedUntil() + ")"
 		}
 		parts = append(parts, p)
 	}
@@ -397,6 +410,9 @@ func ChooseSeat(b Budget, spec Spec) SeatChoice {
 		}
 		for _, seat := range b.Seats {
 			if seat.Agent == pinned[0] {
+				if seat.Closed {
+					return SeatChoice{Skip: true, Reason: fmt.Sprintf("waiting for a %s seat, %s%s: %s", pinned[0], seat.closedUntil(), left, b.Picture())}
+				}
 				return SeatChoice{Skip: true, Reason: fmt.Sprintf("waiting for a %s seat%s: %s", pinned[0], left, b.Picture())}
 			}
 		}
