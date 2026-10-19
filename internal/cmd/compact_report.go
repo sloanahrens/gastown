@@ -130,8 +130,9 @@ type compactReportRun struct {
 	// db records and finds the audit event beads; nil is bd in the working
 	// directory with the process environment (compactReportDB).
 	db beads.Client
-	// wisps lists the active wisps; nil asks bd in workDir (listReportWisps).
-	wisps func() ([]*beads.Issue, error)
+	// wisps lists the active wisps of one database the sweep covers; nil
+	// asks bd in that target's directory (listReportWisps).
+	wisps func(compactTarget) ([]*beads.Issue, error)
 	// compact runs `gt compact --json` and returns its output.
 	compact func() ([]byte, error)
 	// mail sends subject and body to the overseer.
@@ -193,13 +194,9 @@ func (r compactReportRun) dailyDigest() error {
 	}
 
 	// Query active wisps for the "Active" column
-	wisps := r.wisps
-	if wisps == nil {
-		wisps = func() ([]*beads.Issue, error) { return listReportWisps(beads.New(r.workDir)) }
-	}
-	activeWisps, err := wisps()
+	activeWisps, err := r.activeWisps()
 	if err != nil {
-		return fmt.Errorf("listing active wisps: %w", err)
+		return err
 	}
 
 	// Build report
@@ -240,6 +237,30 @@ func (r compactReportRun) dailyDigest() error {
 	}
 
 	return nil
+}
+
+// activeWisps lists the active wisps of every database the gt compact sweep
+// covers. The targets come from resolveCompactTargets, the sweep's own
+// resolver, so the Active column counts the databases behind Deleted and
+// Promoted: the cwd database plus every registered rig.
+func (r compactReportRun) activeWisps() ([]*beads.Issue, error) {
+	targets, err := resolveCompactTargets(beads.FindTownRoot(r.workDir), r.workDir, "")
+	if err != nil {
+		return nil, fmt.Errorf("resolving compaction targets: %w", err)
+	}
+	list := r.wisps
+	if list == nil {
+		list = func(t compactTarget) ([]*beads.Issue, error) { return listReportWisps(beads.New(t.workDir)) }
+	}
+	var all []*beads.Issue
+	for _, t := range targets {
+		wisps, err := list(t)
+		if err != nil {
+			return nil, fmt.Errorf("listing active wisps in %s: %w", t.label, err)
+		}
+		all = append(all, wisps...)
+	}
+	return all, nil
 }
 
 // listReportWisps includes infrastructure wisps that the default bd list view
