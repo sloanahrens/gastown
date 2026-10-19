@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"reflect"
+	"sort"
 	"testing"
 	"time"
 
@@ -166,8 +167,59 @@ func TestSpecTickReads(t *testing.T) {
 	if none.Calls() != 0 {
 		t.Errorf("nil ledger counted %d calls", none.Calls())
 	}
-	want := "tick cost: 4 bd call(s) outside the sling path in 1.234s"
+	want := "tick cost: 4 bd read call(s) outside the sling path in 1.234s"
 	if line := specTickCost(reads, 1234*time.Millisecond); line != want {
 		t.Errorf("specTickCost = %q, want %q", line, want)
+	}
+}
+
+// The roster the tick draws, through its production wiring over a fake, counts
+// the seats the per-seat read counts, and the reads it made are exactly the bd
+// reads that reached the store, so the tick's cost line is the store's count
+// (gt-u8rbh).
+func TestSpecRosterSessionsWiringCountsItsReads(t *testing.T) {
+	t.Parallel()
+	town, db, lister := seatTown(t, 25)
+	pool := seatPool("deepseek-flash", 30)
+
+	perSeat := newCountingStore(db)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	if err != nil {
+		t.Fatalf("per-seat roster: %v", err)
+	}
+
+	store := newCountingStore(db)
+	reads := newSpecTickReads()
+	got, err := specRosterSessionsWith(reads, town, pool, lister, func(string) beads.Client { return store })
+	if err != nil {
+		t.Fatalf("roster: %v", err)
+	}
+
+	sortSeats := func(s []poolSession) {
+		sort.Slice(s, func(i, j int) bool { return s[i].name < s[j].name })
+	}
+	sortSeats(got)
+	sortSeats(want)
+	if len(got) != len(want) {
+		t.Fatalf("roster = %+v, want the per-seat read's %+v", got, want)
+	}
+	for i := range got {
+		if got[i].name != want[i].name || got[i].agent != want[i].agent || got[i].deadHooked != want[i].deadHooked {
+			t.Errorf("seat %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if n := poolSeatCount("deepseek-flash", got); n != 4 {
+		t.Fatalf("seat count = %d, want 3 live and 1 dead-hooked", n)
+	}
+
+	reached := len(store.multis) + store.lists + store.assigned
+	for _, n := range store.shows {
+		reached += n
+	}
+	if reads.Calls() != reached {
+		t.Errorf("tick cost counts %d reads, the store saw %d", reads.Calls(), reached)
+	}
+	if store.assigned != 0 || store.lists != 1 {
+		t.Errorf("assigned-work reads = %d lists and %d per-polecat, want one list", store.lists, store.assigned)
 	}
 }

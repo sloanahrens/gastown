@@ -314,8 +314,8 @@ func showSpec(townRoot, beadID string) (specdispatch.Spec, error) {
 	return showSpecWith(nil, beadID, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
 }
 
-// showSpecWith is showSpec over read, answered from the tick's reads when one
-// of them already read the bead (gt-u8rbh).
+// showSpecWith is showSpec through the tick's ledger when reads is one, so a
+// bead the tick already read is not read again (gt-u8rbh).
 func showSpecWith(reads *specTickReads, beadID string, read func(id string) (*beads.Issue, error)) (specdispatch.Spec, error) {
 	issue, err := reads.show(beadID, func() (*beads.Issue, error) { return read(beadID) })
 	if err != nil {
@@ -324,12 +324,10 @@ func showSpecWith(reads *specTickReads, beadID string, read func(id string) (*be
 	return specFromIssue(issue), nil
 }
 
-// specTickReads holds the beads one tick has read, by id, and counts its bd
-// calls, so a bead the roster, the candidate loop and the held-work read all
-// want costs one call (gt-u8rbh). A tick builds one and drops it, so nothing is
-// served across ticks; the re-read before a sling (specDispatchEnv.ShowFresh)
-// bypasses it. A failed read is not kept. A tick is single-goroutine, so there
-// is no lock. A nil ledger reads through and counts nothing.
+// specTickReads is one tick's read ledger: a bead any read of the tick fetched
+// is served from here, and every read that reaches bd is counted (gt-u8rbh).
+// It lives for one tick; the pre-sling re-read (specDispatchEnv.ShowFresh)
+// bypasses it. A nil ledger reads through and counts nothing.
 type specTickReads struct {
 	shows map[string]*beads.Issue
 	calls int
@@ -1521,7 +1519,10 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		Held:    func(rig string) ([]specdispatch.HeldBead, error) { return specHeldBeads(reads, townRoot, rig) },
 		RigHold: func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		RevertInFlight: func(rig string) *specdispatch.Revert {
-			return rigRevertInFlightPinned(townRoot, rig)
+			return rigRevertInFlight(townRoot, rig, func(beadID string) bool {
+				reads.call()
+				return revertBeadOpen(townRoot, rig, beadID)
+			})
 		},
 		Roster: func() (specRoster, error) {
 			// The same seat picture `gt daemon dispatch-check` nudges from:
@@ -1539,7 +1540,6 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			return annotateSpecOnce(beads.New(resolveBeadDirFromTownRoot(townRoot, id)), id, key, text)
 		},
 		AddLabel: func(id, label string) error {
-			reads.call()
 			return poolBeadLabelAdd(townRoot, id, label)
 		},
 		BranchOnOrigin: func(rig, branch string) (bool, error) {
@@ -1568,24 +1568,29 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	return report, nil
 }
 
-// specTickCost is the tick's one cost line. The daemon logs every notice, so
-// this is where a tick that outruns its interval shows how many bd calls it
-// spent; the calls inside a sling are the sling's own and not counted.
+// specTickCost is the tick's one cost line. It counts the reads the tick makes
+// itself. The sling path, the pre-sling re-read and the writes are not counted.
 func specTickCost(reads *specTickReads, took time.Duration) string {
-	return fmt.Sprintf("tick cost: %d bd call(s) outside the sling path in %s", reads.Calls(), took.Round(time.Millisecond))
+	return fmt.Sprintf("tick cost: %d bd read call(s) outside the sling path in %s", reads.Calls(), took.Round(time.Millisecond))
 }
 
-// specRosterSessions is the seat picture poolSeatSessions draws, with the
-// polecat-state reads batched per rig and answered from the tick's reads
-// (gt-u8rbh).
+// specRosterSessions is the seat picture poolSeatSessions draws, with its
+// polecat-state reads batched per rig and read through the tick's ledger.
 func specRosterSessions(reads *specTickReads, townRoot string, pool *config.PolecatPool) ([]poolSession, error) {
+	return specRosterSessionsWith(reads, townRoot, pool, newPoolSessionLister(), func(dir string) beads.Client { return beads.New(dir) })
+}
+
+// specRosterSessionsWith is specRosterSessions with the session lister and the
+// store for a directory passed in, so a test can run this wiring over a fake.
+func specRosterSessionsWith(reads *specTickReads, townRoot string, pool *config.PolecatPool, lister sessionLister, storeFor func(dir string) beads.Client) ([]poolSession, error) {
+	store := func(dir string) beads.Client { return reads.client(storeFor(dir)) }
 	batch := newPoolSeatBatch(townRoot,
-		func(rigName string) beads.Client { return reads.client(beads.New(filepath.Join(townRoot, rigName))) },
-		func(bd beads.Client, id string) (*beads.Issue, error) { return reads.client(bd).Show(id) })
+		func(rigName string) beads.Client { return store(filepath.Join(townRoot, rigName)) },
+		func(bd beads.Client, id string) (*beads.Issue, error) { return bd.Show(id) })
 	work := func(ids []string) (map[string]*beads.Issue, error) {
-		return reads.client(beads.New(townRoot)).ShowMultiple(ids)
+		return store(townRoot).ShowMultiple(ids)
 	}
-	return poolSeatSessionsWith(newPoolSessionLister(), townRoot, batch.disposition, work, pool)
+	return poolSeatSessionsWith(lister, townRoot, batch.disposition, work, pool)
 }
 
 func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {
@@ -1642,14 +1647,6 @@ func rigRevertInFlight(townRoot, rig string, beadOpen func(beadID string) bool) 
 		return nil
 	}
 	return rv
-}
-
-// rigRevertInFlightPinned is rigRevertInFlight against the rig's own beads,
-// the shape both dispatchers call it in.
-func rigRevertInFlightPinned(townRoot, rig string) *specdispatch.Revert {
-	return rigRevertInFlight(townRoot, rig, func(beadID string) bool {
-		return revertBeadOpen(townRoot, rig, beadID)
-	})
 }
 
 // revertBeadOpen reports whether the revert bead the state records is still

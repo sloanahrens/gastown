@@ -64,13 +64,11 @@ func seatTown(t *testing.T, polecats int) (town string, db *beadsfake.Fake, list
 	return town, db, lister
 }
 
-// batchOver is the batch over store, falling back to the per-seat read over it.
+// batchOver is the batch over store.
 func batchOver(town string, store *countingStore) *poolSeatBatch {
-	batch := newPoolSeatBatch(town,
+	return newPoolSeatBatch(town,
 		func(string) beads.Client { return store },
 		func(_ beads.Client, id string) (*beads.Issue, error) { return store.Show(id) })
-	batch.live = seatReadsOver(store)
-	return batch
 }
 
 // TestPoolSeatBatchReadsIdlePolecatsInBatches is the roster over 25 polecat
@@ -144,5 +142,41 @@ func TestPoolSeatBatchFallsBackWhenTheBatchFails(t *testing.T) {
 	}
 	if store.assigned != 6 {
 		t.Errorf("per-polecat assigned-work reads = %d, want one for each of the 6", store.assigned)
+	}
+}
+
+// The batch picks each assignee's issue from one list of every assignee's
+// work. The pick must be the one GetAssignedIssue makes for that assignee alone:
+// the most-preferred status first, closed work never picked, and an assignee
+// with nothing live gets no pick.
+func TestAssignedByAssigneeMatchesGetAssignedIssue(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(
+		beads.Issue{ID: "gt-closed", Status: "closed", Assignee: "gastown/polecats/a"},
+		beads.Issue{ID: "gt-hooked", Status: beads.StatusHooked, Assignee: "gastown/polecats/a"},
+		beads.Issue{ID: "gt-prog", Status: string(beads.StatusInProgress), Assignee: "gastown/polecats/a"},
+		beads.Issue{ID: "gt-open", Status: string(beads.StatusOpen), Assignee: "gastown/polecats/a"},
+		beads.Issue{ID: "gt-prog-b", Status: string(beads.StatusInProgress), Assignee: "gastown/polecats/b"},
+		beads.Issue{ID: "gt-hooked-b", Status: beads.StatusHooked, Assignee: "gastown/polecats/b"},
+		beads.Issue{ID: "gt-free", Status: string(beads.StatusOpen)},
+		beads.Issue{ID: "gt-closed-c", Status: "closed", Assignee: "gastown/polecats/c"},
+	)
+	work, err := db.List(beads.ListOptions{Status: strings.Join(assignedStatuses, ","), Priority: -1})
+	if err != nil {
+		t.Fatalf("batched list: %v", err)
+	}
+	picks := assignedByAssignee(work)
+	for _, who := range []string{"gastown/polecats/a", "gastown/polecats/b", "gastown/polecats/c", "gastown/polecats/none"} {
+		want, err := db.GetAssignedIssue(who)
+		if err != nil {
+			t.Fatalf("GetAssignedIssue(%s): %v", who, err)
+		}
+		got := picks[who]
+		switch {
+		case want == nil && got == nil:
+		case want == nil || got == nil || want.ID != got.ID:
+			t.Errorf("%s: batch picked %v, GetAssignedIssue picks %v", who, got, want)
+		}
 	}
 }
