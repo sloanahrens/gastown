@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -41,6 +42,51 @@ const poolTestDaemon = `{
       "max_hooked": 2,
       "hookless_agent": "old"
     }
+  }
+}
+`
+
+// poolSeatMapSettings is a town on the seat map: two seats, one of them with a
+// closed window, and names on one so a cap change can be shown to keep them.
+const poolSeatMapSettings = `{
+  "type": "town-settings",
+  "version": 1,
+  "agents": {
+    "claude-sonnet": {"command": "claude"},
+    "claude-haiku": {"command": "claude"},
+    "deepseek-flash": {"command": "claude"}
+  },
+  "polecat_pool": {
+    "timezone": "America/Chicago",
+    "seats": {
+      "claude-sonnet": {"cap": 2, "names": ["kestrel"]},
+      "deepseek-flash": {"cap": 3, "closed": "20:00-08:00"}
+    },
+    "max_total": 5,
+    "min_spawn_gap": "4m"
+  }
+}
+`
+
+// poolTwoSeatSettings is a town still on the two-seat keys: the map has not
+// replaced them yet, and claude-opus is a town-defined agent as it is in town.
+const poolTwoSeatSettings = `{
+  "type": "town-settings",
+  "version": 1,
+  "agents": {
+    "claude-opus": {"command": "claude"},
+    "claude-sonnet": {"command": "claude"},
+    "claude-haiku": {"command": "claude"}
+  },
+  "polecat_pool": {"agent": "claude-opus", "max_seats": 3, "min_spawn_gap": "4m"}
+}
+`
+
+const poolTwoSeatDaemon = `{
+  "type": "daemon-patrol-config",
+  "version": 1,
+  "patrols": {
+    "spec_dispatch": {"enabled": true, "interval": "30s", "hooked_agent": "claude-sonnet", "max_hooked": 2}
   }
 }
 `
@@ -100,13 +146,55 @@ func poolTestSetTotal(t *testing.T, root string, n int) string {
 	return out.String()
 }
 
-func poolTestSet(t *testing.T, root, agent string, n int) string {
+// poolTestSetSeats runs one gt pool set on parsed changes.
+func poolTestSetSeats(t *testing.T, root string, changes []poolSeatCap, remove []string, total int, totalSet bool) string {
 	t.Helper()
 	var out bytes.Buffer
-	if err := runPoolSet(&out, root, agent, n); err != nil {
-		t.Fatalf("set %s %d: %v", agent, n, err)
+	if err := runPoolSetSeats(&out, root, changes, remove, total, totalSet); err != nil {
+		t.Fatalf("pool set: %v", err)
 	}
 	return out.String()
+}
+
+// poolTestSeatCaps is polecat_pool.seats as caps by agent.
+func poolTestSeatCaps(t *testing.T, root string) map[string]int {
+	t.Helper()
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ts.PolecatPool == nil {
+		return nil
+	}
+	out := make(map[string]int, len(ts.PolecatPool.Seats))
+	for agent, seat := range ts.PolecatPool.Seats {
+		out[agent] = seat.Cap
+	}
+	return out
+}
+
+// poolTestSeatEntry is one seat as the settings file holds it.
+func poolTestSeatEntry(t *testing.T, root, agent string) (config.SeatConfig, bool) {
+	t.Helper()
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ts.PolecatPool == nil {
+		return config.SeatConfig{}, false
+	}
+	seat, ok := ts.PolecatPool.Seats[agent]
+	return seat, ok
+}
+
+// poolTestRawSettings is the settings file's bytes, for the no-write refusals.
+func poolTestRawSettings(t *testing.T, root string) string {
+	t.Helper()
+	raw, err := os.ReadFile(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
 }
 
 // poolTestRetiredSeat is a pool seat as the rename gt-plk1z left it: spelled
@@ -337,342 +425,290 @@ func TestPoolSetTotalBacksUpTheFile(t *testing.T) {
 	}
 }
 
-func TestPoolSetChangesThePoolSeatCap(t *testing.T) {
+// A set changes the named agents and nothing else: a seat it did not name keeps
+// its cap, and a named seat keeps the window and names a cap change does not
+// touch (gt-mukgk).
+func TestPoolSetChangesOnlyTheNamedAgents(t *testing.T) {
 	t.Parallel()
-	root := poolTestTown(t, poolTestSettings, poolTestDaemon)
-	out := poolTestSet(t, root, "claude-opus", 5)
-	if got := poolTestBudget(t, root)["claude-opus"]; got != 5 {
-		t.Errorf("pool seat cap = %d, want 5", got)
+	root := poolTestTown(t, poolSeatMapSettings, "")
+
+	out := poolTestSetSeats(t, root, []poolSeatCap{{Agent: "claude-haiku", Cap: 2}}, nil, 0, false)
+	caps := poolTestSeatCaps(t, root)
+	for agent, want := range map[string]int{"claude-haiku": 2, "claude-sonnet": 2, "deepseek-flash": 3} {
+		if caps[agent] != want {
+			t.Errorf("seats[%s] = %d, want %d (seats: %v)", agent, caps[agent], want, caps)
+		}
 	}
-	if strings.Contains(out, "daemon") || strings.Contains(out, "kickstart") {
-		t.Errorf("a pool seat change mentioned a restart:\n%s", out)
+	if !strings.Contains(out, "claude-haiku: cap 2 (new seat)") {
+		t.Errorf("set output = %q, want the new seat named", out)
+	}
+
+	out = poolTestSetSeats(t, root, []poolSeatCap{{Agent: "deepseek-flash", Cap: 4}}, nil, 0, false)
+	seat, ok := poolTestSeatEntry(t, root, "deepseek-flash")
+	if !ok || seat.Cap != 4 || seat.Closed != "20:00-08:00" {
+		t.Errorf("deepseek-flash = %+v, want cap 4 with its closed window kept", seat)
+	}
+	if strings.Contains(out, "new seat") {
+		t.Errorf("a cap change on an existing seat is reported as a new seat:\n%s", out)
+	}
+	if sonnet, _ := poolTestSeatEntry(t, root, "claude-sonnet"); !slices.Contains(sonnet.Names, "kestrel") {
+		t.Errorf("claude-sonnet lost its names: %+v", sonnet)
 	}
 }
 
-func TestPoolSetChangesTheSecondSeatCapAndSaysWhenItLands(t *testing.T) {
+// --remove drops one seat and --total sets the town cap; neither implies the
+// other, and a total of 0 removes the key (gt-mukgk).
+func TestPoolSetRemovesASeatAndSetsTheTotal(t *testing.T) {
 	t.Parallel()
-	root := poolTestTown(t, poolTestSettings, poolTestDaemon)
-	out := poolTestSet(t, root, "claude-sonnet", 4)
-	if got := poolTestBudget(t, root)["claude-sonnet"]; got != 4 {
-		t.Errorf("second seat cap = %d, want 4", got)
-	}
-	// The second seat lands like the other seat: at the next tick, with no
-	// restart asked for (gt-jdnab).
-	if !strings.Contains(out, "next tick") || strings.Contains(out, "kickstart") || strings.Contains(out, "daemon start") {
-		t.Errorf("a second seat change should say it lands at the next tick and need no restart:\n%s", out)
-	}
-}
+	root := poolTestTown(t, poolSeatMapSettings, "")
 
-func TestPoolSetOpensThePoolSeatWhenThePoolHasNone(t *testing.T) {
-	t.Parallel()
-	root := poolTestTown(t, `{"type":"town-settings","version":1}`, poolTestDaemon)
-	poolTestSet(t, root, "claude-haiku", 2)
-	caps := poolTestBudget(t, root)
-	if caps["claude-haiku"] != 2 {
-		t.Errorf("budget = %v, want claude-haiku at 2", caps)
+	out := poolTestSetSeats(t, root, nil, []string{"deepseek-flash"}, 8, true)
+	if caps := poolTestSeatCaps(t, root); caps["deepseek-flash"] != 0 || caps["claude-sonnet"] != 2 {
+		t.Errorf("seats after --remove = %v, want claude-sonnet at 2 and no deepseek-flash", caps)
 	}
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ts.PolecatPool.Agent != "claude-haiku" || ts.PolecatPool.MaxSeats != 2 {
-		t.Errorf("polecat_pool = %+v, want agent claude-haiku max_seats 2", ts.PolecatPool)
+	if ts.PolecatPool.MaxTotal == nil || *ts.PolecatPool.MaxTotal != 8 {
+		t.Errorf("max_total = %v, want 8", ts.PolecatPool.MaxTotal)
 	}
-}
-
-func TestPoolSetRefusesAnAgentHoldingNoSeat(t *testing.T) {
-	t.Parallel()
-	root := poolTestTown(t, poolTestSettings, poolTestDaemon)
-	before, _ := os.ReadFile(config.TownSettingsPath(root))
-	for _, n := range []int{3, 0} {
-		err := runPoolSet(&bytes.Buffer{}, root, "deepseek", n)
-		if err == nil {
-			t.Fatalf("set deepseek %d: want a refusal", n)
-		}
-		for _, want := range []string{"claude-opus", "claude-sonnet"} {
-			if !strings.Contains(err.Error(), want) {
-				t.Errorf("set deepseek %d: refusal %q does not name %s", n, err, want)
-			}
+	for _, want := range []string{"removed deepseek-flash", "total: cap 8 live polecats across every seat"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("set output lacks %q:\n%s", want, out)
 		}
 	}
-	after, _ := os.ReadFile(config.TownSettingsPath(root))
-	if string(before) != string(after) {
-		t.Error("a refused set changed the settings file")
-	}
-}
 
-func TestPoolSetZeroClosesThePoolSeat(t *testing.T) {
-	t.Parallel()
-	root := poolTestTown(t, poolTestSettings, poolTestDaemon)
-	poolTestSet(t, root, "claude-opus", 0)
-	if cap, ok := poolTestBudget(t, root)["claude-opus"]; ok {
-		t.Errorf("budget still has a claude-opus seat at %d", cap)
-	}
-	raw, err := os.ReadFile(config.TownSettingsPath(root))
+	poolTestSetSeats(t, root, nil, nil, 0, true)
+	ts, err = config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var doc struct {
-		PolecatPool map[string]any `json:"polecat_pool"`
-	}
-	if err := json.Unmarshal(raw, &doc); err != nil {
-		t.Fatal(err)
-	}
-	for _, key := range []string{"agent", "max_seats"} {
-		if v, ok := doc.PolecatPool[key]; ok {
-			t.Errorf("polecat_pool.%s = %v was written, want the key removed", key, v)
-		}
-	}
-	if doc.PolecatPool["min_spawn_gap"] != "4m" {
-		t.Errorf("closing the seat dropped min_spawn_gap: %v", doc.PolecatPool)
+	if ts.PolecatPool.MaxTotal != nil {
+		t.Errorf("max_total = %d after --total 0, want the key gone", *ts.PolecatPool.MaxTotal)
 	}
 }
 
-// A seat a file spells with the retired keys must close for real: the loader
-// folds overflow_agent into agent, so the thread it just cut has to leave the
-// file, or the next load hangs it again (gt-aq7zo).
-func TestPoolSetZeroClosesASeatSpelledWithTheRetiredKeys(t *testing.T) {
+// An invalid result writes nothing: an unknown agent is refused by the loader
+// the town starts with, and the file keeps its bytes (gt-mukgk).
+func TestPoolSetRefusesAnInvalidMapAndWritesNothing(t *testing.T) {
 	t.Parallel()
-	root := poolTestTown(t, poolTestRetiredSeat, poolTestDaemon)
-	poolTestSet(t, root, "codex", 0)
+	root := poolTestTown(t, poolSeatMapSettings, "")
+	before := poolTestRawSettings(t, root)
 
-	pool := poolTestPoolSection(t, root)
-	for _, key := range []string{"agent", "max_seats", "overflow_agent", "max_overflow"} {
-		if v, ok := pool[key]; ok {
-			t.Errorf("polecat_pool.%s = %v was left behind, want the key gone", key, v)
+	err := runPoolSetSeats(&bytes.Buffer{}, root, []poolSeatCap{{Agent: "not-an-agent", Cap: 2}}, nil, 0, false)
+	if err == nil {
+		t.Fatal("set on an unknown agent: want a refusal")
+	}
+	if !strings.Contains(err.Error(), "no agent of that name") {
+		t.Errorf("refusal = %q, want the loader's unknown-agent message", err)
+	}
+	if after := poolTestRawSettings(t, root); after != before {
+		t.Errorf("a refused set rewrote the file:\n%s", after)
+	}
+}
+
+func TestPoolSetRefusesToRemoveASeatThatIsNotThere(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, poolSeatMapSettings, "")
+	before := poolTestRawSettings(t, root)
+
+	err := runPoolSetSeats(&bytes.Buffer{}, root, nil, []string{"claude-haiku"}, 0, false)
+	if err == nil {
+		t.Fatal("removing a seat the map does not have: want a refusal")
+	}
+	for _, want := range []string{"is not a seat", "claude-sonnet, deepseek-flash"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal = %q, want it to name %q", err, want)
 		}
 	}
-	if pool["min_spawn_gap"] != "4m" {
-		t.Errorf("closing the seat dropped min_spawn_gap: %v", pool)
+	if after := poolTestRawSettings(t, root); after != before {
+		t.Error("a refused remove rewrote the file")
 	}
-	v, err := loadPoolSeats(root)
+}
+
+// A town still on the two-seat keys keeps every seat the dispatcher runs: the
+// first set seeds the map from those keys, so naming one agent does not drop
+// the others, and the old keys stay for the migration (gt-mukgk).
+func TestPoolSetSeedsTheMapFromTheTwoSeatKeys(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, poolTwoSeatSettings, poolTwoSeatDaemon)
+
+	poolTestSetSeats(t, root, []poolSeatCap{{Agent: "claude-haiku", Cap: 2}}, nil, 0, false)
+	caps := poolTestSeatCaps(t, root)
+	for agent, want := range map[string]int{"claude-opus": 3, "claude-sonnet": 2, "claude-haiku": 2} {
+		if caps[agent] != want {
+			t.Errorf("seats[%s] = %d, want %d (seats: %v)", agent, caps[agent], want, caps)
+		}
+	}
+	pool := poolTestPoolSection(t, root)
+	if pool["agent"] != "claude-opus" || pool["max_seats"] != float64(3) {
+		t.Errorf("set rewrote the two-seat keys: %v", pool)
+	}
+
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.poolAgent != "" {
-		t.Errorf("the pool seat still runs %s", v.poolAgent)
-	}
-	if cap, ok := poolTestBudget(t, root)["codex"]; ok {
-		t.Errorf("the dispatcher still has a codex seat at %d", cap)
-	}
-}
-
-// A cap set on a seat the file spells with the retired keys lands on the
-// current keys, so what the file holds is what the loader reads (gt-aq7zo).
-func TestPoolSetOpensASeatSpelledWithTheRetiredKeys(t *testing.T) {
-	t.Parallel()
-	root := poolTestTown(t, poolTestRetiredSeat, poolTestDaemon)
-	out := poolTestSet(t, root, "codex", 5)
-	if strings.Contains(out, "kickstart") {
-		t.Errorf("a pool seat change mentioned a restart:\n%s", out)
-	}
-
-	pool := poolTestPoolSection(t, root)
-	if pool["agent"] != "codex" || pool["max_seats"] != float64(5) {
-		t.Errorf("polecat_pool = %v, want agent codex and max_seats 5", pool)
-	}
-	for _, key := range []string{"overflow_agent", "max_overflow"} {
-		if v, ok := pool[key]; ok {
-			t.Errorf("polecat_pool.%s = %v was left behind, want the key gone", key, v)
-		}
-	}
-	v, err := loadPoolSeats(root)
+	sd, err := loadPoolSpecDispatch(root)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if v.poolAgent != "codex" || v.poolCap != 5 {
-		t.Errorf("loadPoolSeats = %s cap %d, want codex cap 5", v.poolAgent, v.poolCap)
+	budget, err := specBudgetFor(root, ts, sd, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(budget.Seats) != 3 {
+		t.Errorf("the dispatcher runs %+v, want every seeded seat", budget.Seats)
 	}
 }
 
-// A cap that does not move is still written under the current name: the file
-// held the value as max_overflow, so a write that only dropped the retired
-// spelling would leave the cap on the page with no current key holding it
-// (gt-aq7zo).
-func TestPoolSetWritesTheCurrentKeysWhenTheCapDoesNotMove(t *testing.T) {
+// Removing the last seat from a file still running the two-seat keys is
+// refused: an empty map is no map, so the next tick would go back to those keys
+// rather than run nothing. A cap of 0 closes the seat without that detour
+// (gt-mukgk).
+func TestPoolSetRefusesToRemoveEverySeatWhileTheTwoSeatKeysRun(t *testing.T) {
 	t.Parallel()
-	root := poolTestTown(t, poolTestRetiredSeat, poolTestDaemon)
-	poolTestSet(t, root, "codex", 3)
+	root := poolTestTown(t, poolTwoSeatSettings, poolTwoSeatDaemon)
+	before := poolTestRawSettings(t, root)
 
-	pool := poolTestPoolSection(t, root)
-	if pool["agent"] != "codex" || pool["max_seats"] != float64(3) {
-		t.Errorf("polecat_pool = %v, want agent codex and max_seats 3", pool)
+	err := runPoolSetSeats(&bytes.Buffer{}, root, nil, []string{"claude-opus", "claude-sonnet"}, 0, false)
+	if err == nil || !strings.Contains(err.Error(), "cap to 0") {
+		t.Fatalf("removing every seat = %v, want a refusal naming the cap-0 replacement", err)
 	}
-	for _, key := range []string{"overflow_agent", "max_overflow"} {
-		if v, ok := pool[key]; ok {
-			t.Errorf("polecat_pool.%s = %v was left behind, want the key gone", key, v)
-		}
+	if after := poolTestRawSettings(t, root); after != before {
+		t.Error("a refused remove rewrote the file")
 	}
 }
 
-func TestPoolSetZeroClosesTheSecondSeat(t *testing.T) {
-	t.Parallel()
-	root := poolTestTown(t, poolTestSettings, poolTestDaemon)
-	poolTestSet(t, root, "claude-sonnet", 0)
-	if cap, ok := poolTestBudget(t, root)["claude-sonnet"]; ok {
-		t.Errorf("budget still has a claude-sonnet seat at %d", cap)
-	}
-	if got := poolTestBudget(t, root)["claude-opus"]; got != 3 {
-		t.Errorf("closing the second seat moved the pool seat to %d", got)
-	}
-	raw, _ := os.ReadFile(config.DaemonPatrolConfigPath(root))
-	if strings.Contains(string(raw), "max_hooked") {
-		t.Errorf("max_hooked was written back:\n%s", raw)
-	}
-}
-
-func TestPoolSetSwapsSeatsTheWayTheIncidentDid(t *testing.T) {
-	t.Parallel()
-	root := poolTestTown(t,
-		`{"type":"town-settings","version":1,"polecat_pool":{"agent":"deepseek","max_seats":4}}`,
-		`{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{"enabled":true,"hooked_agent":"claude-sonnet"}}}`)
-	poolTestSet(t, root, "deepseek", 0)
-	poolTestSet(t, root, "claude-sonnet", 3)
-	caps := poolTestBudget(t, root)
-	if _, ok := caps["deepseek"]; ok || caps["claude-sonnet"] != 3 {
-		t.Errorf("budget = %v, want claude-sonnet at 3 and no deepseek seat", caps)
-	}
-}
-
+// The write keeps every key gt pool does not own and a backup of the file it
+// replaces (gt-mukgk).
 func TestPoolSetKeepsEveryKeyItDoesNotOwn(t *testing.T) {
 	t.Parallel()
-	root := poolTestTown(t, poolTestSettings, poolTestDaemon)
-	poolTestSet(t, root, "claude-opus", 5)
-	poolTestSet(t, root, "claude-sonnet", 4)
+	root := poolTestTown(t, poolSeatMapSettings, "")
+	poolTestSetSeats(t, root, []poolSeatCap{{Agent: "claude-haiku", Cap: 2}}, nil, 0, false)
 
-	settings, _ := os.ReadFile(config.TownSettingsPath(root))
-	for _, want := range []string{`"feed_curator"`, `"min_spawn_gap": "4m"`, `"local_agent": "retired-local"`, `"max_seats": 5`} {
-		if !strings.Contains(string(settings), want) {
-			t.Errorf("settings lost %s:\n%s", want, settings)
+	raw := poolTestRawSettings(t, root)
+	for _, want := range []string{`"min_spawn_gap": "4m"`, `"max_total": 5`, `"timezone": "America/Chicago"`} {
+		if !strings.Contains(raw, want) {
+			t.Errorf("settings lost %s:\n%s", want, raw)
 		}
-	}
-	if err := json.Unmarshal(settings, new(map[string]json.RawMessage)); err != nil {
-		t.Fatalf("settings no longer parse: %v", err)
-	}
-
-	daemon, _ := os.ReadFile(config.DaemonPatrolConfigPath(root))
-	for _, want := range []string{`"steward"`, `"mode": "shadow"`, `"hookless_agent": "old"`, `"interval": "30s"`, `"max_hooked": 4`} {
-		if !strings.Contains(string(daemon), want) {
-			t.Errorf("daemon config lost %s:\n%s", want, daemon)
-		}
-	}
-}
-
-func TestPoolSetLeavesATimestampedBackupOfTheFileItReplaces(t *testing.T) {
-	t.Parallel()
-	root := poolTestTown(t, poolTestSettings, poolTestDaemon)
-	poolTestSet(t, root, "claude-opus", 5)
-	poolTestSet(t, root, "claude-sonnet", 4)
-	for path, original := range map[string]string{
-		config.TownSettingsPath(root):       poolTestSettings,
-		config.DaemonPatrolConfigPath(root): poolTestDaemon,
-	} {
-		baks, _ := filepath.Glob(path + ".bak-*")
-		if len(baks) != 1 {
-			t.Fatalf("%s backups = %v, want one", filepath.Base(path), baks)
-		}
-		got, _ := os.ReadFile(baks[0])
-		if string(got) != original {
-			t.Errorf("%s holds %q, want the file as it was before the change", baks[0], got)
-		}
-	}
-}
-
-func TestPoolSetBacksUpTheHostWhenDaemonConfigLivesInSettings(t *testing.T) {
-	t.Parallel()
-	settings := `{"type":"town-settings","version":1,"polecat_pool":{"agent":"claude-opus","max_seats":3},` +
-		`"daemon":{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{"enabled":true,"max_hooked":2}}}}` + "\n"
-	root := poolTestTown(t, settings, "")
-	poolTestSet(t, root, "claude-sonnet", 6)
-	if got := poolTestBudget(t, root)["claude-sonnet"]; got != 6 {
-		t.Errorf("second seat cap = %d, want 6", got)
 	}
 	baks, _ := filepath.Glob(config.TownSettingsPath(root) + ".bak-*")
 	if len(baks) != 1 {
 		t.Fatalf("settings backups = %v, want one", baks)
 	}
-	if got, _ := os.ReadFile(baks[0]); string(got) != settings {
+	if got, _ := os.ReadFile(baks[0]); string(got) != poolSeatMapSettings {
 		t.Errorf("backup = %q, want the settings file as it was", got)
-	}
-}
-
-func TestPoolSetOpensTheSecondSeatWithoutSwitchingTheDispatcherOff(t *testing.T) {
-	t.Parallel()
-	root := poolTestTown(t, poolTestSettings, "")
-	poolTestSet(t, root, "claude-sonnet", 2)
-	sd, err := loadPoolSpecDispatch(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sd == nil || (sd.Enabled == nil || !*sd.Enabled) || sd.MaxHooked != 2 {
-		t.Errorf("spec_dispatch = %+v, want enabled with max_hooked 2", sd)
 	}
 }
 
 func TestPoolSetRefusesAFileItCannotParse(t *testing.T) {
 	t.Parallel()
 	root := poolTestTown(t, `{"type":"town-settings",`, poolTestDaemon)
-	if err := runPoolSet(&bytes.Buffer{}, root, "claude-opus", 2); err == nil {
+	if err := runPoolSetSeats(&bytes.Buffer{}, root, []poolSeatCap{{Agent: "claude-haiku", Cap: 2}}, nil, 0, false); err == nil {
 		t.Fatal("want an error for settings that do not parse")
 	}
-	got, _ := os.ReadFile(config.TownSettingsPath(root))
-	if string(got) != `{"type":"town-settings",` {
+	if got := poolTestRawSettings(t, root); got != `{"type":"town-settings",` {
 		t.Errorf("a file that did not parse was rewritten: %q", got)
 	}
 }
 
-// When one name holds both seats the dispatcher runs it once, at the seat it
-// lists first. A set on that name lands on the seat that survives the dedup,
-// so the command and the picture name one seat, not two (gt-riazi).
-func TestPoolSetLandsOnTheSeatTheDedupKeeps(t *testing.T) {
+func TestParsePoolSeatCapsRefuses(t *testing.T) {
 	t.Parallel()
-	root := poolTestTown(t,
-		`{"type":"town-settings","version":1,"polecat_pool":{"agent":"deepseek-pro","max_seats":2}}`,
-		`{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{"enabled":true,"hooked_agent":"deepseek-pro","max_hooked":1}}}`)
-	poolTestSet(t, root, "deepseek-pro", 4)
-
-	pool := poolTestPoolSection(t, root)
-	if pool["max_seats"] != float64(4) {
-		t.Errorf("polecat_pool = %v, want the pool seat's max_seats at 4", pool)
+	for _, arg := range []string{"claude-haiku", "=2", "claude-haiku=x", "claude-haiku=-1"} {
+		if _, err := parsePoolSeatCaps([]string{arg}); err == nil {
+			t.Errorf("parsePoolSeatCaps(%q): want a refusal", arg)
+		}
 	}
-	sd, err := loadPoolSpecDispatch(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sd.MaxHooked != 1 {
-		t.Errorf("max_hooked = %d, want the second seat left at 1", sd.MaxHooked)
-	}
-	if seats := poolTestSeatList(t, root); len(seats) != 1 || seats[0].Cap != 4 {
-		t.Errorf("seats = %+v, want one deepseek-pro seat at 4", seats)
+	if _, err := parsePoolSeatCaps([]string{"claude-haiku=1", "claude-haiku=2"}); err == nil {
+		t.Error("parsePoolSeatCaps: want a refusal for one agent named twice")
 	}
 }
 
-// The retired pro seat's keys are the file's: a set that rewrites the pool
-// section leaves pro_agent, pro_label, pro_max and the keys of other sections
-// as they were, for the operator to delete by hand.
-func TestPoolSetLeavesTheRetiredProSeatKeysAlone(t *testing.T) {
+// gt pool set takes --total and --remove in addition to the pairs (gt-mukgk).
+func TestPoolSetCommandTakesTheTotalAndRemoveFlags(t *testing.T) {
 	t.Parallel()
-	root := poolTestTown(t,
-		`{"type":"town-settings","version":1,"polecat_pool":{"agent":"claude-opus","max_seats":3,"pro_agent":"deepseek-reasoner","pro_label":"needs-gpu","pro_max":1,"min_spawn_gap":"4m"}}`,
-		poolTestDaemon)
-	poolTestSet(t, root, "claude-opus", 4)
-
-	pool := poolTestPoolSection(t, root)
-	for key, want := range map[string]any{
-		"agent":         "claude-opus",
-		"max_seats":     float64(4),
-		"pro_agent":     "deepseek-reasoner",
-		"pro_label":     "needs-gpu",
-		"pro_max":       float64(1),
-		"min_spawn_gap": "4m",
-	} {
-		if pool[key] != want {
-			t.Errorf("polecat_pool.%s = %v, want %v", key, pool[key], want)
+	for _, flag := range []string{"total", "remove"} {
+		if poolSetCmd.Flags().Lookup(flag) == nil {
+			t.Errorf("gt pool set has no --%s", flag)
 		}
 	}
-	seats := poolTestSeatList(t, root)
-	if len(seats) != 2 || seats[0].Agent != "claude-opus" || seats[0].Cap != 4 || seats[1].Agent != "claude-sonnet" {
-		t.Errorf("seats = %+v, want the pool seat at 4 and the second seat: the pro keys open no seat", seats)
+}
+
+// show reads the seat map: live over cap, open or closed with the next
+// opening, one line per agent and the town's total (gt-mukgk).
+func TestPoolShowSeatMapPrintsEachAgentAndTheTotal(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, poolSeatMapSettings, "")
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	loc, err := time.LoadLocation("America/Chicago")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 19, 21, 0, 0, 0, loc)
+	live := poolShowLive{ok: true, live: map[string]int{"claude-sonnet": 1}, total: 1}
+
+	var out bytes.Buffer
+	if err := runPoolSeatMapShow(&out, root, ts, now, live); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	for _, want := range []string{
+		"claude-sonnet   1/2  open",
+		"deepseek-flash  0/3  closed until 08:00",
+		"total           1/5",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("show output lacks %q:\n%s", want, got)
+		}
+	}
+}
+
+// A picture that could not be read is no count: show names the caps and the
+// total cap rather than inventing a zero (gt-bc9b6).
+func TestPoolShowSeatMapNamesTheCapsWithoutARoster(t *testing.T) {
+	t.Parallel()
+	root := poolTestTown(t, poolSeatMapSettings, "")
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runPoolSeatMapShow(&out, root, ts, time.Now(), poolShowLive{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"deepseek-flash  cap 3", "total           cap 5"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("show output lacks %q:\n%s", want, out.String())
+		}
+	}
+}
+
+// A file with a seat map runs the map: the two-seat keys beside it open no seat
+// and show does not print them (gt-mukgk).
+func TestPoolShowSeatMapIgnoresTheTwoSeatKeys(t *testing.T) {
+	t.Parallel()
+	settings := `{"type":"town-settings","version":1,` +
+		`"agents":{"claude-sonnet":{"command":"claude"},"claude-haiku":{"command":"claude"}},` +
+		`"polecat_pool":{"agent":"claude-opus","max_seats":9,` +
+		`"seats":{"claude-sonnet":{"cap":2},"claude-haiku":{"cap":1}}}}`
+	root := poolTestTown(t, settings, "")
+	var out bytes.Buffer
+	if err := runPoolShow(&out, root); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	if strings.Contains(got, "pool seat") || strings.Contains(got, "claude-opus") {
+		t.Errorf("show printed the two-seat keys beside the map:\n%s", got)
+	}
+	for _, agent := range []string{"claude-sonnet", "claude-haiku"} {
+		if !strings.Contains(got, agent) {
+			t.Errorf("show does not print the map's %s seat:\n%s", agent, got)
+		}
 	}
 }
 
