@@ -55,6 +55,9 @@ func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
 	out := make([]Seat, 0, len(agents))
 	for _, a := range agents {
 		c := pool.Seats[a]
+		if a == UnknownSeatAgent {
+			return nil, fmt.Errorf("polecat_pool.seats.%s: that key counts polecats that record no agent, and names no seat", a)
+		}
 		if !known(a) {
 			return nil, fmt.Errorf("polecat_pool.seats.%s: no agent of that name in agents or the built-in presets", a)
 		}
@@ -155,6 +158,31 @@ func (w *Window) OpensAt(t time.Time) time.Time {
 		open = open.AddDate(0, 0, 1)
 	}
 	return open
+}
+
+// UnknownSeatAgent is the key a polecat is counted under when it records no
+// agent and the seat map has no single seat to put it on. It is no seat, so it
+// fills none, and it still counts toward max_total.
+const UnknownSeatAgent = "(unrecorded)"
+
+// UnrecordedAgent is the agent a polecat that records none is counted on: the
+// seat map's only seat, UnknownSeatAgent when the map has several, and the
+// pool's own agent for a pool with no seat map yet. A count under another
+// agent's name would read as that agent's seat taken (gt-2q283), so the
+// ambiguous case gets a key of its own for the caller to report.
+func (p *PolecatPool) UnrecordedAgent() string {
+	if p == nil {
+		return ""
+	}
+	switch len(p.Seats) {
+	case 0:
+		return p.Agent
+	case 1:
+		for agent := range p.Seats {
+			return agent
+		}
+	}
+	return UnknownSeatAgent
 }
 
 // AgentResolver returns the known predicate Seats takes: an agent resolves when

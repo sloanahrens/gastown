@@ -137,7 +137,7 @@ func TestPatrolScanSeatCap(t *testing.T) {
 			for _, s := range tc.sessions {
 				seatEnv(t, tm, s)
 			}
-			h := &patrolScanHost{d: &Daemon{config: &Config{TownRoot: town}, tmux: tm}}
+			h := &patrolScanHost{d: &Daemon{config: &Config{TownRoot: town}, tmux: tm}, agentRecord: noAgentRecord}
 
 			restart := tc.restart
 			if restart == "" {

@@ -2403,3 +2403,27 @@ func TestSpecBudgetForSeatMapKeepsTheOldKeys(t *testing.T) {
 		t.Fatalf("picture = %q", got.Picture())
 	}
 }
+
+// A polecat that records no agent is listed in the tick's notices, sorted, so
+// the operator sees which sessions fill no seat (gt-mukgk). A roster with none
+// says nothing.
+func TestSpecDispatchNoticesPolecatsWithNoRecordedAgent(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-plain", 1, "2026-09-29T10:00:00Z"))
+	f.roster = specRoster{
+		Live:       map[string]int{config.UnknownSeatAgent: 2},
+		Unrecorded: []string{"pearl", "onyx"},
+	}
+	r := runSpecDispatchCycle(f.env())
+	if len(r.Notices) != 1 ||
+		!strings.Contains(r.Notices[0], "2 polecat(s) record no agent") ||
+		!strings.Contains(r.Notices[0], "onyx, pearl") {
+		t.Fatalf("notices = %v, want one naming the two polecats, sorted", r.Notices)
+	}
+
+	f = newFakeSpecTown(cleanSpec("gt-plain", 1, "2026-09-29T10:00:00Z"))
+	f.roster = specRoster{Live: map[string]int{"claude-sonnet": 1}}
+	if r := runSpecDispatchCycle(f.env()); len(r.Notices) != 0 {
+		t.Fatalf("notices = %v, want none when every polecat records its agent", r.Notices)
+	}
+}

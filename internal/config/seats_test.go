@@ -44,6 +44,7 @@ func TestSeatsRejects(t *testing.T) {
 		key  string
 	}{
 		"unknown agent":      {PolecatPool{Seats: map[string]SeatConfig{"nope": {Cap: 1}}}, "polecat_pool.seats.nope"},
+		"the unrecorded key": {PolecatPool{Seats: map[string]SeatConfig{UnknownSeatAgent: {Cap: 1}}}, "polecat_pool.seats." + UnknownSeatAgent},
 		"negative cap":       {PolecatPool{Seats: map[string]SeatConfig{"claude-sonnet": {Cap: -1}}}, "polecat_pool.seats.claude-sonnet.cap"},
 		"bad window":         {PolecatPool{Timezone: "America/Chicago", Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "8pm-8am"}}}, "polecat_pool.seats.claude-sonnet.closed"},
 		"window, no zone":    {PolecatPool{Seats: map[string]SeatConfig{"claude-sonnet": {Cap: 1, Closed: "20:00-08:00"}}}, "polecat_pool.seats.claude-sonnet.closed"},
@@ -300,5 +301,25 @@ func TestWindowAcrossDST(t *testing.T) {
 	second := time.Date(2026, 11, 1, 7, 30, 0, 0, time.UTC) // 01:30 CST
 	if !w.Closed(first) || !w.Closed(second) {
 		t.Errorf("both 01:30s must be closed: %v %v", w.Closed(first), w.Closed(second))
+	}
+}
+
+func TestUnrecordedAgent(t *testing.T) {
+	t.Parallel()
+	seat := SeatConfig{Cap: 1}
+	cases := []struct {
+		name string
+		pool *PolecatPool
+		want string
+	}{
+		{"no pool", nil, ""},
+		{"no seat map keeps the pool agent", &PolecatPool{Agent: "claude-sonnet"}, "claude-sonnet"},
+		{"one seat is where it sits", &PolecatPool{Seats: map[string]SeatConfig{"claude-haiku": seat}}, "claude-haiku"},
+		{"several seats place it on none", &PolecatPool{Seats: map[string]SeatConfig{"claude-haiku": seat, "claude-sonnet": seat}}, UnknownSeatAgent},
+	}
+	for _, c := range cases {
+		if got := c.pool.UnrecordedAgent(); got != c.want {
+			t.Errorf("%s: UnrecordedAgent() = %q, want %q", c.name, got, c.want)
+		}
 	}
 }
