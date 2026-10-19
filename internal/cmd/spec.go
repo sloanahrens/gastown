@@ -311,11 +311,120 @@ func specLiveLandingRequest(notes string) bool {
 
 // showSpec reads one bead in full (bd show), routed by its prefix.
 func showSpec(townRoot, beadID string) (specdispatch.Spec, error) {
-	issue, err := showBead(townRoot, beadID)
+	return showSpecWith(nil, beadID, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
+}
+
+// showSpecWith is showSpec over read, answered from the tick's reads when one
+// of them already read the bead (gt-u8rbh).
+func showSpecWith(reads *specTickReads, beadID string, read func(id string) (*beads.Issue, error)) (specdispatch.Spec, error) {
+	issue, err := reads.show(beadID, func() (*beads.Issue, error) { return read(beadID) })
 	if err != nil {
 		return specdispatch.Spec{}, fmt.Errorf("bead %s not found: %w", beadID, err)
 	}
 	return specFromIssue(issue), nil
+}
+
+// specTickReads holds the beads one tick has read, by id, and counts its bd
+// calls, so a bead the roster, the candidate loop and the held-work read all
+// want costs one call (gt-u8rbh). A tick builds one and drops it, so nothing is
+// served across ticks; the re-read before a sling (specDispatchEnv.ShowFresh)
+// bypasses it. A failed read is not kept. A tick is single-goroutine, so there
+// is no lock. A nil ledger reads through and counts nothing.
+type specTickReads struct {
+	shows map[string]*beads.Issue
+	calls int
+}
+
+func newSpecTickReads() *specTickReads {
+	return &specTickReads{shows: map[string]*beads.Issue{}}
+}
+
+// call counts one bd call the tick issued outside show and the client below.
+func (r *specTickReads) call() {
+	if r != nil {
+		r.calls++
+	}
+}
+
+// Calls is how many bd calls the tick has issued through the ledger.
+func (r *specTickReads) Calls() int {
+	if r == nil {
+		return 0
+	}
+	return r.calls
+}
+
+// show returns bead id from the ledger, or runs read (one bd call) and keeps
+// what it returned.
+func (r *specTickReads) show(id string, read func() (*beads.Issue, error)) (*beads.Issue, error) {
+	if r == nil {
+		return read()
+	}
+	if issue, ok := r.shows[id]; ok {
+		return issue, nil
+	}
+	issue, err := read()
+	r.calls++
+	if err == nil && issue != nil {
+		r.shows[id] = issue
+	}
+	return issue, err
+}
+
+// client is store with the ledger in front of its reads: Show and ShowMultiple
+// answer from beads the tick already read and ask bd only for the rest, and
+// every call that does reach bd is counted.
+func (r *specTickReads) client(store beads.Client) beads.Client {
+	if r == nil {
+		return store
+	}
+	return specTickClient{Client: store, reads: r}
+}
+
+// specTickClient is a beads.Client whose reads go through a specTickReads.
+type specTickClient struct {
+	beads.Client
+	reads *specTickReads
+}
+
+func (c specTickClient) Show(id string) (*beads.Issue, error) {
+	return c.reads.show(id, func() (*beads.Issue, error) { return c.Client.Show(id) })
+}
+
+// ShowMultiple reads only the ids the ledger does not hold. Like the store's
+// own, it returns what it found beside the error of a group that failed.
+func (c specTickClient) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	out := make(map[string]*beads.Issue, len(ids))
+	var missing []string
+	for _, id := range ids {
+		if issue, ok := c.reads.shows[id]; ok {
+			out[id] = issue
+		} else {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) == 0 {
+		return out, nil
+	}
+	found, err := c.Client.ShowMultiple(missing)
+	c.reads.calls++
+	for id, issue := range found {
+		out[id] = issue
+		if issue != nil {
+			c.reads.shows[id] = issue
+		}
+	}
+	return out, err
+}
+
+func (c specTickClient) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	c.reads.calls++
+	return c.Client.List(opts)
+}
+
+func (c specTickClient) Children(parentID string) ([]*beads.Issue, error) {
+	c.reads.calls++
+	return c.Client.Children(parentID)
 }
 
 // specChildren reads a bead's direct children and reduces them to what the
@@ -673,6 +782,10 @@ type specDispatchEnv struct {
 	Hold       func() string
 	Candidates func() specBoardRead
 	Show       func(beadID string) (specdispatch.Spec, error)
+	// ShowFresh is Show that never answers from an earlier read of the tick: the
+	// last-moment re-read before a sling is the check that a submission did not
+	// land in the window, so it asks bd. Nil falls back to Show (gt-u8rbh).
+	ShowFresh func(beadID string) (specdispatch.Spec, error)
 	// Children reads a bead's direct children for the container rule
 	// (gt-gektq). The set is read here and handed to specdispatch, which never
 	// queries.
@@ -712,6 +825,14 @@ type specDispatchEnv struct {
 	// lint, warn holds a refused bead and comments the verdict, refuse also
 	// labels it needs-shape (polecat_pool.shape_gate, gt-cq5gb, gt-f8ppx).
 	ShapeGate string
+}
+
+// showFresh is the read of a bead made at the last moment before its sling.
+func (e specDispatchEnv) showFresh(beadID string) (specdispatch.Spec, error) {
+	if e.ShowFresh != nil {
+		return e.ShowFresh(beadID)
+	}
+	return e.Show(beadID)
 }
 
 // runSpecDispatchCycle is one tick. It never guesses: under the default warn
@@ -976,7 +1097,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// the same predicate the board drew with — the label, the READY TO LAND
 		// block through SubmittedForLanding, and an assignee all hold there. A
 		// read that fails holds too: unknown is not eligible.
-		latest, err := env.Show(id)
+		latest, err := env.showFresh(id)
 		if err != nil {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: %s: re-read failed: %s", id, specStaleReason, firstErrLine(err))})
 			continue
@@ -1135,12 +1256,12 @@ func heldBeadsFrom(store beads.Client, warn func(beadsDir string, err error), be
 // A bead a crashed seat left hooked reads as held here too. The patrol readies
 // that work, which clears the hold, so the cost of being wrong is a delayed
 // dispatch rather than a duplicated session.
-func specHeldBeads(townRoot, rig string) ([]specdispatch.HeldBead, error) {
+func specHeldBeads(reads *specTickReads, townRoot, rig string) ([]specdispatch.HeldBead, error) {
 	if rig == "" {
 		return nil, nil
 	}
 	beadsDir := beads.ResolveBeadsDir(filepath.Join(townRoot, rig))
-	return heldBeadsFrom(beads.NewPinned(beadsDir), warnDuplicateEnrichmentFailed, beadsDir)
+	return heldBeadsFrom(reads.client(beads.NewPinned(beadsDir)), warnDuplicateEnrichmentFailed, beadsDir)
 }
 
 // specFormulaNote names the formula a bead declared, for the tick's dispatched
@@ -1360,6 +1481,7 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 // itself, with the town resolution and the output left to runSpecDispatch, so
 // the tick a seat file stops is the tick a test can run.
 func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
+	start := time.Now()
 	ts, sd, err := specTickTown(townRoot)
 	if err != nil {
 		return specDispatchReport{}, err
@@ -1378,15 +1500,26 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	if err != nil {
 		return specDispatchReport{}, err
 	}
+	// The tick's bd reads, kept for the tick alone (gt-u8rbh).
+	reads := newSpecTickReads()
 	env := specDispatchEnv{
 		Hold: func() string { return dispatch.OperatorHold(townRoot) },
 		Candidates: func() specBoardRead {
-			return specCandidates(townRoot, maxPriority, specReadyBoard)
+			return specCandidates(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
+				reads.call()
+				return specReadyBoard(rigPath)
+			})
 		},
-		Show:     func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
-		Children: func(id string) ([]specdispatch.Child, error) { return specChildren(townRoot, id) },
-		Held:     func(rig string) ([]specdispatch.HeldBead, error) { return specHeldBeads(townRoot, rig) },
-		RigHold:  func(rig string) string { return dispatch.RigHold(townRoot, rig) },
+		Show: func(id string) (specdispatch.Spec, error) {
+			return showSpecWith(reads, id, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
+		},
+		ShowFresh: func(id string) (specdispatch.Spec, error) { return showSpec(townRoot, id) },
+		Children: func(id string) ([]specdispatch.Child, error) {
+			reads.call()
+			return specChildren(townRoot, id)
+		},
+		Held:    func(rig string) ([]specdispatch.HeldBead, error) { return specHeldBeads(reads, townRoot, rig) },
+		RigHold: func(rig string) string { return dispatch.RigHold(townRoot, rig) },
 		RevertInFlight: func(rig string) *specdispatch.Revert {
 			return rigRevertInFlightPinned(townRoot, rig)
 		},
@@ -1395,16 +1528,20 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			// live sessions, in-flight claims, and seats mid-landing. Two
 			// pictures of one pool is how the dispatcher ends up slinging into
 			// a seat the nudge just called free (gt-thy6r).
-			sessions, err := poolSeatSessions(newPoolSessionLister(), townRoot, ts.PolecatPool)
+			sessions, err := specRosterSessions(reads, townRoot, ts.PolecatPool)
 			if err != nil {
 				return specRoster{}, fmt.Errorf("listing polecat seats: %w", err)
 			}
 			return specRosterFrom(sessions, ts), nil
 		},
 		Annotate: func(id, key, text string) error {
+			reads.call()
 			return annotateSpecOnce(beads.New(resolveBeadDirFromTownRoot(townRoot, id)), id, key, text)
 		},
-		AddLabel: func(id, label string) error { return poolBeadLabelAdd(townRoot, id, label) },
+		AddLabel: func(id, label string) error {
+			reads.call()
+			return poolBeadLabelAdd(townRoot, id, label)
+		},
 		BranchOnOrigin: func(rig, branch string) (bool, error) {
 			return polecat.BranchOnOrigin(filepath.Join(townRoot, rig), branch)
 		},
@@ -1424,7 +1561,31 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		MaxPriority: maxPriority,
 		ShapeGate:   ts.PolecatPool.GetShapeGate(),
 	}
-	return runSpecDispatchCycle(env), nil
+	report := runSpecDispatchCycle(env)
+	if report.Hold == "" {
+		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start)))
+	}
+	return report, nil
+}
+
+// specTickCost is the tick's one cost line. The daemon logs every notice, so
+// this is where a tick that outruns its interval shows how many bd calls it
+// spent; the calls inside a sling are the sling's own and not counted.
+func specTickCost(reads *specTickReads, took time.Duration) string {
+	return fmt.Sprintf("tick cost: %d bd call(s) outside the sling path in %s", reads.Calls(), took.Round(time.Millisecond))
+}
+
+// specRosterSessions is the seat picture poolSeatSessions draws, with the
+// polecat-state reads batched per rig and answered from the tick's reads
+// (gt-u8rbh).
+func specRosterSessions(reads *specTickReads, townRoot string, pool *config.PolecatPool) ([]poolSession, error) {
+	batch := newPoolSeatBatch(townRoot,
+		func(rigName string) beads.Client { return reads.client(beads.New(filepath.Join(townRoot, rigName))) },
+		func(bd beads.Client, id string) (*beads.Issue, error) { return reads.client(bd).Show(id) })
+	work := func(ids []string) (map[string]*beads.Issue, error) {
+		return reads.client(beads.New(townRoot)).ShowMultiple(ids)
+	}
+	return poolSeatSessionsWith(newPoolSessionLister(), townRoot, batch.disposition, work, pool)
 }
 
 func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {

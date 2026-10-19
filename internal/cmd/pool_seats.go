@@ -114,6 +114,131 @@ func liveSeatKeys(live []poolSession) map[string]bool {
 	return seats
 }
 
+// poolSeatBatch answers the seat reads of one tick from two batched reads per
+// rig (the polecats' agent beads, the rig's assigned work) where
+// poolPolecatSeatState spends two bd calls on every polecat directory, idle ones
+// included (gt-u8rbh). Each polecat gets the per-seat read's disposition; only
+// the source of the reads differs. A failed batch, and a polecat the batch did
+// not ask for, fall back to the per-seat read, so a failure costs calls and
+// never changes a seat's count. It holds what it read: build one per tick.
+type poolSeatBatch struct {
+	townRoot string
+	store    func(rigName string) beads.Client
+	show     func(bd beads.Client, id string) (*beads.Issue, error)
+	// live is the per-seat read the batch falls back to.
+	live poolSeatReads
+	rigs map[string]*rigSeatBatch
+}
+
+// rigSeatBatch is one rig's batched reads. agents and assigned are nil when the
+// read failed or was not made.
+type rigSeatBatch struct {
+	asked    map[string]bool         // agent bead ids the batch asked for
+	agents   map[string]*beads.Issue // the agent beads that exist among them
+	assigned map[string]*beads.Issue // assignee -> the issue GetAssignedIssue would pick
+}
+
+// assignedStatuses are the statuses GetAssignedIssue considers, in its order of
+// preference.
+var assignedStatuses = []string{string(beads.StatusOpen), string(beads.StatusInProgress), beads.StatusHooked}
+
+// newPoolSeatBatch builds the batch over store, the rig's bead store, and show,
+// the by-id lookup for the hook reference and source-issue hint a seat read
+// follows.
+func newPoolSeatBatch(townRoot string, store func(rigName string) beads.Client, show func(bd beads.Client, id string) (*beads.Issue, error)) *poolSeatBatch {
+	return &poolSeatBatch{townRoot: townRoot, store: store, show: show, live: poolSeatReadsFor(), rigs: map[string]*rigSeatBatch{}}
+}
+
+// disposition is the polecatDispositionFunc the batch answers: the per-seat
+// read over the batched reads.
+func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState, error) {
+	rb := b.rig(rigName)
+	reads := b.live
+	reads.show = b.show
+	if rb.agents != nil {
+		reads.agentBead = rb.agentBead(reads.agentBead)
+	}
+	if rb.assigned != nil {
+		reads.assigned = func(_ assignedIssueLookup, rig, name string) polecatActiveWorkEvidence {
+			return assessPolecatAssignedIssueWork(rb.assigned[rig+"/polecats/"+name])
+		}
+	}
+	return poolPolecatSeatStateWith(b.townRoot, rigName, polecatName, reads)
+}
+
+// rig reads a rig's batches the first time one of its polecats is asked about.
+func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
+	if rb, ok := b.rigs[rigName]; ok {
+		return rb
+	}
+	rb := &rigSeatBatch{}
+	b.rigs[rigName] = rb
+	names, err := listPolecatDirectoryNames(filepath.Join(b.townRoot, rigName))
+	if err != nil || len(names) == 0 {
+		return rb
+	}
+	store := b.store(rigName)
+	prefix := beads.GetPrefixForRig(b.townRoot, rigName)
+	ids := make([]string, 0, len(names))
+	for _, name := range names {
+		ids = append(ids, beads.PolecatBeadIDWithPrefix(prefix, rigName, name))
+	}
+	if agents, err := store.ShowMultiple(ids); err == nil {
+		rb.agents = agents
+		rb.asked = make(map[string]bool, len(ids))
+		for _, id := range ids {
+			rb.asked[id] = true
+		}
+	}
+	if work, err := store.List(beads.ListOptions{Status: strings.Join(assignedStatuses, ","), Priority: -1}); err == nil {
+		rb.assigned = assignedByAssignee(work)
+	}
+	return rb
+}
+
+// assignedByAssignee keys each assignee to the issue GetAssignedIssue picks for
+// it: the first of the most-preferred status.
+func assignedByAssignee(work []*beads.Issue) map[string]*beads.Issue {
+	out := map[string]*beads.Issue{}
+	for _, status := range assignedStatuses {
+		for _, issue := range work {
+			if issue.Status != status || issue.Assignee == "" {
+				continue
+			}
+			if _, taken := out[issue.Assignee]; !taken {
+				out[issue.Assignee] = issue
+			}
+		}
+	}
+	return out
+}
+
+// agentBead is the agent-bead read answered from the batch. An agent bead the
+// batch asked for and did not find does not exist, which beads.GetAgentBead
+// reports as no bead and no error; one it did not ask for goes to live.
+func (rb *rigSeatBatch) agentBead(live func(bd beads.Client, agentID string) (*beads.Issue, *beads.AgentFields, error)) func(bd beads.Client, agentID string) (*beads.Issue, *beads.AgentFields, error) {
+	return func(bd beads.Client, agentID string) (*beads.Issue, *beads.AgentFields, error) {
+		if !rb.asked[agentID] {
+			return live(bd, agentID)
+		}
+		issue, ok := rb.agents[agentID]
+		if !ok {
+			return nil, nil, nil
+		}
+		// The shared agent-bead read, over a store that holds this one issue, so
+		// the bead is validated and parsed exactly as a live read would.
+		return beads.GetAgentBead(heldIssueStore{Client: bd, issue: issue}, agentID)
+	}
+}
+
+// heldIssueStore answers Show with an issue already in hand.
+type heldIssueStore struct {
+	beads.Client
+	issue *beads.Issue
+}
+
+func (s heldIssueStore) Show(string) (*beads.Issue, error) { return s.issue, nil }
+
 // poolOwnsSeats reports whether the pool names a seat for a sessionless polecat
 // to be counted on: a seat map.
 func poolOwnsSeats(pool *config.PolecatPool) bool {

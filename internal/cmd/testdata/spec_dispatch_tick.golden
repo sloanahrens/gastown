@@ -1,0 +1,18 @@
+slung: gt-c1 gt-fmt gt-c2
+candidates: 16
+dispatched: gt-c1: slung to gastown/p on claude-sonnet (seat claude-sonnet 1/2)
+dispatched: gt-fmt: slung to gastown/p on claude-sonnet (seat claude-sonnet 2/2), formula mol-deep-review
+dispatched: gt-c2: slung to gastown/p on deepseek-flash (seat deepseek-flash 1/2)
+skipped: gt-flip: not eligible (status hooked)
+skipped: gt-box: held: container: open child gt-box.1
+skipped: gt-bad1: unshaped: ## Gate
+skipped: gt-bad2: unshaped: ## Gate
+skipped: gt-nofm: unknown formula: mol-gone
+skipped: gt-box2: clean, per-tick limit 3 reached
+skipped: gt-c3: clean, per-tick limit 3 reached
+skipped: gt-second: held: gt-t61ft (held by gastown/polecats/capable) is already hooked to a working seat and names internal/daemon/overrun_guard.go; the hold lifts when that bead closes
+skipped: gt-c4: clean, per-tick limit 3 reached
+skipped: gt-c5: clean, per-tick limit 3 reached
+skipped: gt-c6: clean, per-tick limit 3 reached
+skipped: gt-late: clean, per-tick limit 3 reached
+skipped: gt-last: clean, per-tick limit 3 reached
