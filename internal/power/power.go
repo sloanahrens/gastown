@@ -324,7 +324,8 @@ func (e *engine) workingPolecats(ctx context.Context) ([]string, error) {
 
 // pendingLandings sums the daemon's recorded landing queues from the health
 // report, the same record gt status prints. ok is false when no landing field
-// was read: an unread queue is not an empty one.
+// was read or any one of them could not be: an unread queue is not an empty
+// one, and another rig's "0 pending" does not stand in for it.
 func (e *engine) pendingLandings() (int, bool) {
 	report, err := townhealth.Read(e.o.TownRoot)
 	if err != nil {
@@ -337,11 +338,11 @@ func (e *engine) pendingLandings() (int, bool) {
 		}
 		fields := strings.Fields(f.Value)
 		if len(fields) == 0 {
-			continue
+			return 0, false
 		}
 		n, err := strconv.Atoi(fields[0])
 		if err != nil {
-			continue
+			return 0, false
 		}
 		total += n
 		found = true
