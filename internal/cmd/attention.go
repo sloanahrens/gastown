@@ -104,7 +104,8 @@ unknown key exits 1.
 --disposition is required and records why the item was acked, in
 acks-history.jsonl: needed-human (it needed a human), fixed-by-overseer (the
 overseer fixed it) or noise (it was noise). The Jev replay reads it as the
-item's label.`,
+item's label. A call without it, or with another value, exits 1 and acks
+nothing, so a script that ran "gt attention ack <key>" must add the flag.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runAttentionAck,
 }

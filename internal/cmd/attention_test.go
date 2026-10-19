@@ -469,3 +469,82 @@ func TestAttentionHelpNamesFilesAndRotationSize(t *testing.T) {
 		t.Errorf("attentionRotateSize = %q, want %q for EventsMaxBytes %d", attentionRotateSize, want, attention.EventsMaxBytes)
 	}
 }
+
+// runAttentionAck refuses a missing or unknown --disposition and writes
+// neither acks.json nor acks-history.jsonl. It reads the flag from a package
+// variable and the town from the cwd, so this test cannot run in parallel.
+func TestRunAttentionAckRefusesABadDisposition(t *testing.T) {
+	now := time.Now()
+	town, _ := attentionSet(t, now)
+	t.Chdir(town)
+	wantAcks, err := attention.ReadAcks(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runAck := func(t *testing.T, disposition string) (string, error) {
+		t.Helper()
+		prev := attentionDisposition
+		attentionDisposition = disposition
+		var out bytes.Buffer
+		attentionAckCmd.SetOut(&out)
+		t.Cleanup(func() {
+			attentionDisposition = prev
+			attentionAckCmd.SetOut(nil)
+		})
+		err := runAttentionAck(attentionAckCmd, []string{"esc:hq-3"})
+		return out.String(), err
+	}
+
+	for _, tc := range []struct{ name, disposition string }{
+		{"missing", ""},
+		{"unknown value", "whatever"},
+		{"wrong case", "Noise"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := runAck(t, tc.disposition)
+			if err == nil || !strings.Contains(err.Error(), "disposition must be") {
+				t.Fatalf("runAttentionAck(%q) = %v, want the disposition error", tc.disposition, err)
+			}
+			if out != "" {
+				t.Errorf("a refused ack printed %q", out)
+			}
+			acks, err := attention.ReadAcks(town)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(acks.Acks) != len(wantAcks.Acks) {
+				t.Errorf("acks = %+v, want unchanged %+v", acks, wantAcks)
+			}
+			if hist, _ := attention.ReadAcksHistory(town); len(hist) != 0 {
+				t.Errorf("history = %+v, want none", hist)
+			}
+		})
+	}
+
+	t.Run("valid", func(t *testing.T) {
+		out, err := runAck(t, "noise")
+		if err != nil {
+			t.Fatalf("runAttentionAck: %v", err)
+		}
+		if want := "acked esc:hq-3 (noise)\n"; out != want {
+			t.Errorf("output = %q, want %q", out, want)
+		}
+		hist, err := attention.ReadAcksHistory(town)
+		if err != nil || len(hist) != 1 || hist[0].Disposition != attention.DispositionNoise {
+			t.Errorf("history = %+v, %v, want one noise line", hist, err)
+		}
+	})
+}
+
+// The help text tells a caller written before --disposition was required what
+// to change.
+func TestAttentionAckHelpNamesTheRequiredFlag(t *testing.T) {
+	t.Parallel()
+	long := attentionAckCmd.Long
+	for _, want := range []string{"--disposition is required", "must add the flag"} {
+		if !strings.Contains(long, want) {
+			t.Errorf("ack help does not contain %q", want)
+		}
+	}
+}

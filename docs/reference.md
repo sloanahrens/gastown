@@ -906,7 +906,9 @@ gt attention ack <key> --disposition needed-human  # hide it until it clears
 ```
 
 An ack must say what the item needed: `needed-human`, `fixed-by-overseer` or
-`noise`. `gt attention ack` records it in `acks-history.jsonl`.
+`noise`. `gt attention ack` records it in `acks-history.jsonl`. `--disposition`
+is required: a call without it, or with another value, exits 1 and acks
+nothing, so a script that ran `gt attention ack <key>` must add the flag.
 
 `--follow` prints `HH:MM:SS rule detail`, one line per event; `--json` prints
 the `events.jsonl` line, and `--since DURATION` replays that window first. One
