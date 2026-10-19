@@ -18,8 +18,9 @@ import (
 // What it blocks:
 //
 //  1. A `for` / `while` / `until` block that runs `gt done`, or a read-only
-//     `gt slot` poll, inside a body that closes. Taking and releasing the slot
-//     is bounded work, so `gt slot run` and `gt slot reap` may be repeated.
+//     `gt slot` poll, inside a body that closes. The zsh `repeat` and `foreach`
+//     loops count the same way (the shell this town runs). Taking and releasing
+//     the slot is bounded work, so `gt slot run` and `gt slot reap` may be repeated.
 //  2. A repeat wrapper — `xargs` / `watch` — whose OWN payload runs the gate.
 //     The gate is looked for in that wrapper's arguments, never in the command
 //     line at large, so `… | xargs gofmt -w && gt done` is the ordinary
@@ -104,7 +105,7 @@ func matchesDoneSlotLoop(raw string, tokens, lowerTokens []string) (reason, alte
 }
 
 func matchesDoneSlotLoopDepth(raw string, tokens, lowerTokens []string, depth int) (reason, alternative string) {
-	if doneSlotLoopHasBlockingLoop(tokens, lowerTokens) {
+	if doneSlotLoopHasBlockingLoop(tokens, lowerTokens) || doneSlotLoopHasZshLoop(tokens, lowerTokens) {
 		return doneSlotLoopReason, doneSlotLoopAlternative
 	}
 	if doneSlotLoopHasRepeater(tokens) {
@@ -172,6 +173,85 @@ func doneSlotLoopHasBlockingLoop(tokens, lowerTokens []string) bool {
 		}
 	}
 	return false
+}
+
+// doneSlotLoopHasZshLoop reports whether a zsh `repeat` or `foreach` at a
+// command position runs the gate in its body. zsh closes these with `}` or
+// `end`, not `done`, and a `repeat COUNT gt done` line has no closer at all, so
+// the depth walk above never sees them close (gt-yjep0). Each body is found
+// on its own and judged as the command line it is.
+func doneSlotLoopHasZshLoop(tokens, lowerTokens []string) bool {
+	commandWords := doneSlotLoopSegmentCommandWords(tokens)
+	for i := range lowerTokens {
+		if !doneSlotLoopIsCommandWord(commandWords, i) {
+			continue
+		}
+		var body []string
+		switch lowerTokens[i] {
+		case "repeat":
+			body = doneSlotLoopRepeatBody(tokens, i+2) // i+1 is the COUNT
+		case "foreach":
+			body = doneSlotLoopForeachBody(tokens, lowerTokens, commandWords, i+1) // i+1 is NAME
+		default:
+			continue
+		}
+		if doneSlotLoopExecutesGate(body) {
+			return true
+		}
+	}
+	return false
+}
+
+// doneSlotLoopRepeatBody returns the body of a `repeat COUNT` that starts at
+// tokens[start]: the braced group when one follows, else the words up to the
+// next command separator.
+func doneSlotLoopRepeatBody(tokens []string, start int) []string {
+	if start >= len(tokens) {
+		return nil
+	}
+	if tokens[start] != "{" {
+		end := start
+		for end < len(tokens) && !shellCommandSeparators[tokens[end]] {
+			end++
+		}
+		return tokens[start:end]
+	}
+	depth := 0
+	for k := start; k < len(tokens); k++ {
+		switch tokens[k] {
+		case "{":
+			depth++
+		case "}":
+			depth--
+			if depth == 0 {
+				return tokens[start+1 : k]
+			}
+		}
+	}
+	return tokens[start+1:]
+}
+
+// doneSlotLoopForeachBody returns the body of a `foreach NAME (WORDS) ... end`
+// whose NAME sits at tokens[name]: the words after the list's closing paren up
+// to the `end` that closes it. A foreach with no `end` runs nothing, because
+// the shell rejects it, so it returns nil.
+func doneSlotLoopForeachBody(tokens, lowerTokens []string, commandWords map[int]bool, name int) []string {
+	list := -1
+	for k := name + 1; k < len(tokens) && !shellCommandSeparators[tokens[k]]; k++ {
+		if strings.HasSuffix(tokens[k], ")") {
+			list = k
+			break
+		}
+	}
+	if list < 0 {
+		return nil
+	}
+	for k := list + 1; k < len(tokens); k++ {
+		if lowerTokens[k] == "end" && doneSlotLoopIsCommandWord(commandWords, k) {
+			return tokens[list+1 : k]
+		}
+	}
+	return nil
 }
 
 // doneSlotLoopHasRepeater reports whether a repeat wrapper runs the gate in its
