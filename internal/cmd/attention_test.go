@@ -416,3 +416,27 @@ func TestAttentionAckAppendsHistoryThatSurvivesTheItemClearing(t *testing.T) {
 		t.Errorf("history after refused ack = %+v, want still one line", hist)
 	}
 }
+
+// The help text counts the queue's files and names the rotation size from the
+// code, so adding a file or changing EventsMaxBytes shows up here.
+func TestAttentionHelpNamesFilesAndRotationSize(t *testing.T) {
+	long := attentionCmd.Long
+	files := []string{"state.json", "events.jsonl", "acks.json", "acks-history.jsonl"}
+	for _, f := range files {
+		if !strings.Contains(long, "  "+f+" ") {
+			t.Errorf("help does not list %s", f)
+		}
+	}
+	if !strings.Contains(long, "The queue is four files under") {
+		t.Errorf("help does not say the queue is %d files", len(files))
+	}
+	if !strings.Contains(long, "events.jsonl.1 at\n                 "+attentionRotateSize+".") {
+		t.Errorf("help does not give events.jsonl's rotation size %q", attentionRotateSize)
+	}
+	if !strings.Contains(long, "acks-history.jsonl.1 at\n                 "+attentionRotateSize+".") {
+		t.Errorf("help does not give acks-history.jsonl's rotation size %q", attentionRotateSize)
+	}
+	if want := "1 MB"; attentionRotateSize != want {
+		t.Errorf("attentionRotateSize = %q, want %q for EventsMaxBytes %d", attentionRotateSize, want, attention.EventsMaxBytes)
+	}
+}
