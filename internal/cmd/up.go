@@ -203,7 +203,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 	if changed, err := disableCurrentAgentDND(townRoot); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not reset DND state: %v\n", err)
 	} else if changed {
-		fmt.Fprintf(progressOut, "%s DND was enabled; reset to normal for current agent\n", style.SuccessPrefix)
+		reportDNDReset(progressOut)
 	}
 
 	// Formulas land before any agent starts and cooks one.
@@ -697,6 +697,11 @@ func upProgressWriter(stdout io.Writer, quiet, asJSON bool) io.Writer {
 		return io.Discard
 	}
 	return stdout
+}
+
+// reportDNDReset tells the operator gt up cleared the current agent's DND.
+func reportDNDReset(out io.Writer) {
+	fmt.Fprintf(out, "%s DND was enabled; reset to normal for current agent\n", style.SuccessPrefix)
 }
 
 // startPolecatsWithWork starts polecats that have work attached: a pinned

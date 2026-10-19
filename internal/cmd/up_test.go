@@ -283,7 +283,7 @@ func TestUpJSONStdoutIsOnlyJSON(t *testing.T) {
 			var stdout bytes.Buffer
 			progress := upProgressWriter(&stdout, tt.quiet, tt.json)
 			// The DND-reset line and the parked-polecat line of gt up --restore.
-			_, _ = io.WriteString(progress, "DND was enabled; reset to normal for current agent\n")
+			reportDNDReset(progress)
 			startPolecatsWithWorkUsing(townRoot, rig, progress, hasWork, start)
 
 			if got := stdout.Len() > 0; got != tt.wantLines {
