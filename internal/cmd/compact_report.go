@@ -700,7 +700,10 @@ var weeklyRollupTitle = regexp.MustCompile(`^Weekly Compaction Rollup (\d{4}-\d{
 // send a second rollup for effectively the same week (gt-sqk, follow-up to
 // gt-9t9). Instead, treat any existing rollup whose window overlaps the new
 // one as already covering it — dates are "YYYY-MM-DD" so lexicographic and
-// chronological comparison agree.
+// chronological comparison agree. The overlap is exclusive at the shared
+// boundary day: a rollup sent on D covers D-7..D, and the run exactly seven
+// days later starts on D, so a window that only touches the previous one is
+// not covered (gt-o8skm).
 func findExistingWeeklyRollup(db beads.Client, weekStart, weekEnd string) (string, error) {
 	events, err := closedAuditEvents(db)
 	if err != nil {
@@ -713,7 +716,7 @@ func findExistingWeeklyRollup(db beads.Client, weekStart, weekEnd string) (strin
 			continue
 		}
 		existingStart, existingEnd := m[1], m[2]
-		if weekStart <= existingEnd && existingStart <= weekEnd {
+		if weekStart < existingEnd && existingStart <= weekEnd {
 			return evt.ID, nil
 		}
 	}
