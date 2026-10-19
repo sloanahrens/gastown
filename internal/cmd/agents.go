@@ -652,10 +652,10 @@ func buildCollisionReport(lister collisionSessionLister, reg *session.PrefixRegi
 		Locks: make(map[string]*lock.LockInfo),
 	}
 
-	// Get all tmux sessions
-	// ListSessions already maps "no server running" to nil, nil; any other
-	// error is unknown session state, and treating it as "no sessions" would
-	// report every live lock as orphaned.
+	// ListSessions maps "no server running" to nil, nil (pinned by
+	// tmux.TestListSessionsNoServer); any other error is unknown session
+	// state, and treating it as "no sessions" would report every live lock
+	// as orphaned.
 	sessions, err := lister.ListSessions()
 	if err != nil {
 		return nil, fmt.Errorf("listing tmux sessions: %w", err)
