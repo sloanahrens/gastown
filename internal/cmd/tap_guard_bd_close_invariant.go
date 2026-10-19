@@ -335,7 +335,7 @@ func parseBdCloseSegment(segment []string) (bdCloseInvocation, bool) {
 		return bdCloseInvocation{}, false
 	}
 	sub := bdSubcommandIndex(tokens[1:])
-	if sub < 0 || tokens[1+sub] != "close" {
+	if sub < 0 || !isBdCloseSubcommand(tokens[1+sub]) {
 		return bdCloseInvocation{}, false
 	}
 
@@ -365,6 +365,13 @@ func parseBdCloseSegment(segment []string) (bdCloseInvocation, bool) {
 		}
 	}
 	return invocation, true
+}
+
+// isBdCloseSubcommand reports whether word is a name `bd close` answers to:
+// `bd close --help` lists the aliases close and done, and `bd done gt-x` closes
+// the bead exactly as `bd close gt-x` does.
+func isBdCloseSubcommand(word string) bool {
+	return word == "close" || word == "done"
 }
 
 // bdGlobalOptionsWithValue are bd's global flags that consume the next token
