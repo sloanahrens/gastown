@@ -137,14 +137,7 @@ const (
 // (polecat_pool.max_priority, default 2): a bead numbered higher is backlog the
 // operator keeps. A negative priority is an unscored bead, which is never
 // dispatched.
-//
-// reserved names the labels this tick's seats reserve (Budget.ReservedLabels:
-// polecat_pool.pro_label, "needs-pro" by default). The shared hold rule counts
-// such a label as a hold, because a dispatcher with no seat for it must leave
-// the bead alone — but this dispatcher's reserved seat is the path that label
-// asks for, so a bead carrying one is routed there, not held (gt-lxxo4). Pass
-// nil when there is no such seat: then the rule's hold stands.
-func Eligible(s Spec, maxPriority int, reserved []string) (bool, string) {
+func Eligible(s Spec, maxPriority int) (bool, string) {
 	status := strings.ToLower(strings.TrimSpace(s.Status))
 	switch {
 	case status == "deferred":
@@ -180,32 +173,13 @@ func Eligible(s Spec, maxPriority int, reserved []string) (bool, string) {
 	// the bead off every automatic dispatch path, so the dispatcher must not
 	// re-sling it (gt-lxxo4). Reading the rule here is what keeps the
 	// dispatcher's draw and the sling guard's the same line.
-	// labels drops the seat-reserved ones, so a needs-pro bead reaches the pro
-	// seat instead of being held as the rule holds it for a dispatcher with no
-	// such seat.
-	labels := withoutLabels(s.Labels, reserved)
-	if why := dispatch.DispatchHoldFields(s.Status, labels, s.Assignee, s.Design, s.Notes); why != "" {
+	if why := dispatch.DispatchHoldFields(s.Status, s.Labels, s.Assignee, s.Design, s.Notes); why != "" {
 		return false, "hold: " + why
 	}
 	if s.Priority < 0 || s.Priority > maxPriority {
 		return false, fmt.Sprintf("priority P%d outside the ceiling P%d", s.Priority, maxPriority)
 	}
 	return true, ""
-}
-
-// withoutLabels returns labels with every entry of drop removed, matching as
-// HasLabel does (case- and space-insensitive). The input is never modified.
-func withoutLabels(labels, drop []string) []string {
-	if len(drop) == 0 {
-		return labels
-	}
-	out := make([]string, 0, len(labels))
-	for _, l := range labels {
-		if !hasLabel(drop, l) {
-			out = append(out, l)
-		}
-	}
-	return out
 }
 
 // Order sorts candidates deterministically: priority (P0 first), then
@@ -251,10 +225,6 @@ type Seat struct {
 	// toward Cap, and naming them explains a full seat that shows fewer live
 	// sessions than its number (gt-tldj4).
 	DeadHooked int
-	// Label, when set, reserves the seat for beads carrying it: a bead with
-	// that label is this seat's alone, and a seat without one leaves it alone
-	// (the pro seat's selector, polecat_pool.pro_label).
-	Label string
 }
 
 // AgentLabelPrefix starts the label that pins a bead to one agent's seats:
@@ -271,22 +241,12 @@ func (s Spec) PinnedAgents() []string { return s.labelValues(AgentLabelPrefix) }
 // Free reports whether the seat has room.
 func (s Seat) Free() bool { return s.Agent != "" && s.Live < s.Cap }
 
-// takes reports whether the seat may take spec: a reserving seat takes only
-// its own beads, and a plain seat leaves every reserved bead to the seat that
-// reserved it.
-func (s Seat) takes(spec Spec, b Budget) bool {
-	// A bead pinned to an agent (an agent:<name> label) is that agent's alone: a
-	// seat of any other agent leaves it, whatever else the seat would take.
+// takes reports whether the seat may take spec: a bead pinned to an agent (an
+// agent:<name> label) is that agent's alone, and a seat of any other agent
+// leaves it.
+func (s Seat) takes(spec Spec) bool {
 	if pinned := spec.PinnedAgents(); len(pinned) > 0 && (len(pinned) > 1 || pinned[0] != s.Agent) {
 		return false
-	}
-	if s.Label != "" {
-		return spec.HasLabel(s.Label)
-	}
-	for _, other := range b.Seats {
-		if other.Label != "" && spec.HasLabel(other.Label) {
-			return false
-		}
 	}
 	return true
 }
@@ -298,7 +258,9 @@ func (s Seat) reason() string {
 
 // Budget is the seat picture the seat choice runs on.
 type Budget struct {
-	// Seats in preference order. A spec takes the first free seat.
+	// Seats in the dispatcher's list order. An unlabelled spec draws at random
+	// among the free seats that take it; the order decides only which seat an
+	// agent named twice keeps.
 	Seats []Seat
 	// MaxTotal caps live polecats across every seat, where a Seat's Cap caps
 	// one agent's. 0 is no total cap (polecat_pool.max_total absent).
@@ -313,6 +275,9 @@ type Budget struct {
 	NewestSpawn time.Time
 	MinSpawnGap time.Duration
 	Now         time.Time
+	// Rand drives the draw among free seats. Nil draws from the package
+	// source; a seeded source makes a test's choice reproducible.
+	Rand *rand.Rand
 }
 
 // Picture renders the seats for a report: "claude-sonnet 1/2, ...". A seat with
@@ -336,29 +301,6 @@ func (b Budget) Picture() string {
 		parts = append(parts, fmt.Sprintf("total %d/%d", b.LiveTotal, b.MaxTotal))
 	}
 	return strings.Join(parts, ", ")
-}
-
-// ReservedLabels returns the labels the seats reserve, in seat order and
-// without repeats: a bead carrying one belongs to that seat alone, and so is
-// routed rather than held when Eligible reads the shared hold rule over it.
-func (b Budget) ReservedLabels() []string {
-	var out []string
-	for _, s := range b.Seats {
-		if s.Label == "" {
-			continue
-		}
-		dup := false
-		for _, seen := range out {
-			if strings.EqualFold(seen, s.Label) {
-				dup = true
-				break
-			}
-		}
-		if !dup {
-			out = append(out, s.Label)
-		}
-	}
-	return out
 }
 
 // SetLive fills each seat's Live from a count per agent, and LiveTotal from the
@@ -406,11 +348,11 @@ type SeatChoice struct {
 	Reason string
 }
 
-// ChooseSeat picks the first free seat that may take spec within the budget.
-// It never exceeds a cap: a seat at its cap is not a seat, and a town at its
-// total is a town with no free seat at all. A seat reserved for a label (the
-// pro seat) takes only beads carrying it, and a bead carrying a reserved label
-// is left for that seat — a needs-pro bead is not slung onto the pool's plain
+// ChooseSeat picks a free seat that may take spec within the budget. It never
+// exceeds a cap: a seat at its cap is not a seat, and a town at its total is a
+// town with no free seat at all. An unlabelled bead draws uniformly among the
+// free seats of every model in the mix, so no model is preferred by list
+// order; a bead pinned with an agent:<name> label may take only that agent's
 // seat. A seat existing without room for this bead is a skip, not a refusal:
 // the bead stays ready and the next tick asks again.
 func ChooseSeat(b Budget, spec Spec) SeatChoice {
@@ -430,15 +372,20 @@ func ChooseSeat(b Budget, spec Spec) SeatChoice {
 	if len(pinned) > 1 {
 		return SeatChoice{Skip: true, Reason: fmt.Sprintf("conflicting %s labels (%s): a bead names one agent", AgentLabelPrefix, strings.Join(pinned, ", "))}
 	}
+	open := make([]Seat, 0, len(b.Seats))
 	free := false
 	for _, seat := range b.Seats {
 		if !seat.Free() {
 			continue
 		}
 		free = true
-		if seat.takes(spec, b) {
-			return SeatChoice{Agent: seat.Agent, Reason: seat.reason()}
+		if seat.takes(spec) {
+			open = append(open, seat)
 		}
+	}
+	if len(open) > 0 {
+		seat := open[b.pick(len(open))]
+		return SeatChoice{Agent: seat.Agent, Reason: seat.reason()}
 	}
 	if len(pinned) == 1 {
 		// Never another agent's seat: the label says which model may run the
@@ -454,6 +401,16 @@ func ChooseSeat(b Budget, spec Spec) SeatChoice {
 		return SeatChoice{Skip: true, Reason: "no free seat takes this bead: " + b.Picture()}
 	}
 	return SeatChoice{Skip: true, Reason: "seats full: " + b.Picture()}
+}
+
+// pick draws an index in [0,n) for the seat choice: the budget's own source
+// when it has one, so a test's seed decides the draw, and the package source
+// otherwise.
+func (b Budget) pick(n int) int {
+	if b.Rand != nil {
+		return b.Rand.Intn(n)
+	}
+	return rand.Intn(n)
 }
 
 // Contention retry bounds for a dispatch Dolt aborted with Error 1213.

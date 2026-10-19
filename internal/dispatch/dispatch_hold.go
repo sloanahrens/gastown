@@ -25,12 +25,11 @@ const HumanOnlyLabel = "human-only"
 // dispatchHoldLabels records, kept apart because a reader that has already
 // routed the bead reads only the second one.
 //
-// routingHoldLabels ask for a seat rather than a hold: needs-pro wants a
-// specific runtime, and a dispatcher whose seats include the one that label
-// selects (polecat_pool.pro_label) routes the bead to it instead of reading
-// the label as a hold (gt-lxxo4). A reader with no seat to match must drop
-// these rather than refuse the bead for wearing its own seat's selector
-// (SlingHoldFields).
+// routingHoldLabels ask for a seat rather than a hold: needs-pro asked for the
+// reserved pro seat's runtime (polecat_pool.pro_label, retired in gt-kr91q). No
+// seat matches the label now, so Eligible reads it as a hold; SlingHoldFields
+// still drops it for a sling that is already given its target, so a person's
+// explicit sling of such a bead is not refused for the label alone.
 //
 // humanHoldLabels are the holds no polecat can settle, however the bead came
 // to wear one: the landings the worker left for a person (om gave no verdict,

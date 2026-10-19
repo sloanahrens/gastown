@@ -117,7 +117,7 @@ func TestRunScheduledSlingEntry_SpecDispatchRunIsDispatchable(t *testing.T) {
 		f := &fakeScheduledRunner{createID: "gt-run1", now: time.Now()}
 		d, _ := newScheduledTestDaemon(t, []ScheduledSlingEntry{e}, f)
 		s := specRunOf(t, d, f, e)
-		if ok, why := specdispatch.Eligible(s, config.DefaultSeatRefillMaxPriority, nil); !ok {
+		if ok, why := specdispatch.Eligible(s, config.DefaultSeatRefillMaxPriority); !ok {
 			t.Errorf("%s: priority %d not dispatchable under the default config: %s", name, s.Priority, why)
 		}
 	}
@@ -141,7 +141,7 @@ func TestRunScheduledSlingEntry_SpecDispatchFollowsConfiguredCeiling(t *testing.
 		if want := min(defaultScheduledSlingPriority, ceiling); s.Priority != want {
 			t.Errorf("ceiling %d: priority = %d, want %d", ceiling, s.Priority, want)
 		}
-		if ok, why := specdispatch.Eligible(s, ceiling, nil); !ok {
+		if ok, why := specdispatch.Eligible(s, ceiling); !ok {
 			t.Errorf("ceiling %d: not dispatchable: %s", ceiling, why)
 		}
 	}

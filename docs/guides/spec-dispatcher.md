@@ -175,18 +175,21 @@ A seat is one agent with its own cap. Every agent runs the claude CLI with the
 town's managed settings and guard hooks, so no seat is less guarded than
 another.
 
-Seats, in order:
+Seats:
 
 | Seat | Cap | Takes |
 |---|---|---|
 | `polecat_pool.agent` | `polecat_pool.max_seats`, 2 when unset | every candidate |
-| `polecat_pool.pro_agent` | `polecat_pool.pro_max`, 0 drops the seat | only beads carrying `polecat_pool.pro_label` |
+| `spec_dispatch.hooked_agent` | `spec_dispatch.max_hooked`, off by default | every candidate |
 
-The pro seat is reserved: a bead carrying `pro_label` is slung only there, and
-the pool's own seat leaves it alone. A `spec_dispatch.max_hooked > 0` adds the
-`hooked_agent` seat (default `claude-sonnet`) with that cap — off by default,
-because a seat nobody asked for is a seat the dispatcher must not spend;
-`prefer_hooked` moves it first.
+The `hooked_agent` seat (default `claude-sonnet`) is off unless `max_hooked`
+names a cap above zero, because a seat nobody asked for is a seat the dispatcher
+must not spend. An unlabelled bead draws uniformly at random among the free
+seats, so neither model is preferred by list order; a bead carrying an
+`agent:<name>` label draws only among that agent's seats and waits, rather than
+falling back, when that seat is full. The reserved pro seat
+(`polecat_pool.pro_agent`/`pro_max`/`pro_label`) was retired (gt-kr91q): those
+keys load with a warning and are ignored.
 
 `polecat_pool.max_total`, when set, caps the seats together: the pool's own cap
 is per agent, so two agents each inside their own can still run more polecats
@@ -201,7 +204,9 @@ total the same way, 0 removing it. `gt pool set-second <agent> <n>` sets the
 `hooked_agent` seat's agent and cap in one write, which `gt pool set` cannot: it
 takes only an agent a seat already holds. The dispatcher keeps one
 seat per agent: a second seat on the pool's agent never runs, and `gt pool show`
-prints it as `not run`.
+prints it as `not run`. `prefer_hooked` moves the second seat first in that
+list, which decides only which seat a repeated agent keeps; the draw among free
+seats is random.
 
 Changing the mix is one verb, not five: `gt pool mix <agent>=<n> [<agent>=<n>]`
 writes the seats above together with `polecat_pool.max_total` and

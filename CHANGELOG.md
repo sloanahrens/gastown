@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The reserved pro seat** (gt-kr91q) — `polecat_pool.pro_agent`, `pro_max`
+  and `pro_label` are retired with the seat they configured. A bead reaches a
+  specific model through its `agent:<name>` label; nothing else is reserved.
+  `gt pool show` and `gt pool set` drop the row and the name, `gt pool mix`
+  drops `--keep-pinned` (name the pinned agent in the mix instead), and the
+  dashboard drops the row. A settings file still carrying the keys decodes,
+  warns once per process and ignores them.
+
 - **The steward job runner** (gt-4rizh, gt-m7ffk) — the daemon-side patrol that
   spawned one headless job per landing-queue event, its ledger and monitoring,
   and the plan jobs behind `patrols.steward_plan`. It was already off
@@ -472,6 +480,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of only warned about.
 
 ### Changed
+
+- **The dispatcher draws a free seat at random** (gt-kr91q) — an unlabelled
+  bead now goes to a uniformly random free seat among the models in the mix
+  instead of the first seat in list order, so neither the pool seat nor the
+  second seat is preferred by configuration order. A bead carrying an
+  `agent:<name>` label still draws only among that agent's seats, and a pinned
+  bead whose seat is full waits rather than falling back to another model.
+  `specdispatch.Budget.Rand` injects the source, so a test's seed decides the
+  draw.
 
 - **The seat pool's config keys are renamed** (gt-plk1z) — `polecat_pool`'s
   `overflow_agent` and `max_overflow` are now `agent` and `max_seats`. The

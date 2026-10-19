@@ -41,7 +41,7 @@ func TestSpecCandidatesDropsAMidSubmissionBead(t *testing.T) {
 	}
 	board := func(string) ([]*beads.Issue, error) { return []*beads.Issue{issue}, nil }
 
-	got := specCandidates(townRoot, 2, board, nil)
+	got := specCandidates(townRoot, 2, board)
 	if len(got.Errors) != 0 {
 		t.Fatalf("errors = %v", got.Errors)
 	}

@@ -21,9 +21,6 @@ func TestPolecatPool_SeatRefillPolicy(t *testing.T) {
 			p.GetEmptySeconds() != DefaultSeatRefillEmptySeconds ||
 			p.GetNudgeSeconds() != DefaultSeatRefillNudgeSeconds ||
 			p.GetDispatchEmptySeconds() != DefaultSeatRefillDispatchEmptySeconds ||
-			p.GetProMax() != DefaultSeatRefillProMax ||
-			p.GetProAgent() != DefaultSeatRefillProAgent ||
-			p.GetProLabel() != DefaultSeatRefillProLabel ||
 			p.GetMode() != DefaultSeatRefillMode ||
 			p.GetShapeGate() != DefaultSeatRefillShapeGate {
 			t.Fatal("a nil pool must read as every default")
@@ -46,9 +43,6 @@ func TestPolecatPool_SeatRefillPolicy(t *testing.T) {
 				"empty_seconds": 60,
 				"nudge_seconds": 0,
 				"dispatch_empty_seconds": 30,
-				"pro_max": 0,
-				"pro_agent": "deepseek-reasoner",
-				"pro_label": "hard",
 				"shape_gate": "refuse"
 			}
 		}`
@@ -67,16 +61,11 @@ func TestPolecatPool_SeatRefillPolicy(t *testing.T) {
 			pool.GetNudgeSeconds() != 0 || pool.GetDispatchEmptySeconds() != 30 {
 			t.Errorf("int knobs not loaded: %+v", pool)
 		}
-		if pool.GetProMax() != 0 || pool.GetProAgent() != "deepseek-reasoner" || pool.GetProLabel() != "hard" {
-			t.Errorf("pro seat knobs not loaded: %+v", pool)
-		}
 		if pool.GetShapeGate() != "refuse" {
 			t.Errorf("shape_gate not loaded: %q", pool.GetShapeGate())
 		}
-		// pro_max 0 drops the seat, so the agent and label go unread: an
-		// unset pair is not a config error there.
 		if err := pool.Validate(); err != nil {
-			t.Fatalf("a dropped pro seat must validate: %v", err)
+			t.Fatalf("the loaded pool must validate: %v", err)
 		}
 
 		if err := SaveTownSettings(path, ts); err != nil {
@@ -87,8 +76,7 @@ func TestPolecatPool_SeatRefillPolicy(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, want := range []string{`"max_priority": 3`, `"top_candidates": 5`, `"empty_seconds": 60`,
-			`"nudge_seconds": 0`, `"dispatch_empty_seconds": 30`, `"pro_max": 0`,
-			`"pro_agent": "deepseek-reasoner"`, `"pro_label": "hard"`, `"shape_gate": "refuse"`} {
+			`"nudge_seconds": 0`, `"dispatch_empty_seconds": 30`, `"shape_gate": "refuse"`} {
 			if !strings.Contains(string(saved), want) {
 				t.Errorf("rewrite dropped %s:\n%s", want, saved)
 			}
@@ -154,7 +142,6 @@ func TestPolecatPool_ValidateSeatRefillPolicy(t *testing.T) {
 		{"empty_seconds below zero", &PolecatPool{EmptySeconds: &neg}, "polecat_pool.empty_seconds"},
 		{"nudge_seconds below zero", &PolecatPool{NudgeSeconds: &neg}, "polecat_pool.nudge_seconds"},
 		{"dispatch_empty_seconds below zero", &PolecatPool{DispatchEmptySeconds: &neg}, "polecat_pool.dispatch_empty_seconds"},
-		{"pro_max below zero", &PolecatPool{ProMax: &neg}, "polecat_pool.pro_max"},
 		{"max_total below zero", &PolecatPool{MaxTotal: &neg}, "polecat_pool.max_total"},
 		{"top_candidates zero", &PolecatPool{TopCandidates: &zero}, "polecat_pool.top_candidates"},
 		{"an unknown mode", &PolecatPool{Mode: "ask-the-mayor"}, "polecat_pool.mode"},
@@ -164,10 +151,8 @@ func TestPolecatPool_ValidateSeatRefillPolicy(t *testing.T) {
 		{"refuse validates", &PolecatPool{ShapeGate: "refuse"}, ""},
 		{"zero priority is the P0 ceiling", &PolecatPool{MaxPriority: &zero}, ""},
 		{"nudge_seconds 0 drops the repeat cap", &PolecatPool{NudgeSeconds: &zero}, ""},
-		{"an empty pro agent reads as the default", &PolecatPool{ProMax: &one}, ""},
-		{"a dropped pro seat is still valid", &PolecatPool{ProMax: &zero}, ""},
 		{"max_total 0 is a town with no total cap", &PolecatPool{MaxTotal: &zero}, ""},
-		{"everything at its floor validates", &PolecatPool{MaxPriority: &zero, TopCandidates: &one, EmptySeconds: &zero, NudgeSeconds: &zero, DispatchEmptySeconds: &zero, ProMax: &zero, MaxTotal: &zero}, ""},
+		{"everything at its floor validates", &PolecatPool{MaxPriority: &zero, TopCandidates: &one, EmptySeconds: &zero, NudgeSeconds: &zero, DispatchEmptySeconds: &zero, MaxTotal: &zero}, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

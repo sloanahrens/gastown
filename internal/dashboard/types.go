@@ -335,24 +335,21 @@ type Models struct {
 	Roles []ModelRole `json:"roles,omitempty"`
 }
 
-// ModelSeat is one of the town's three polecat seats: the pool seat
-// (polecat_pool.agent capped by max_seats), the pro seat (polecat_pool.pro_agent
-// capped by pro_max) and the second seat (spec_dispatch hooked_agent capped by
-// max_hooked).
+// ModelSeat is one of the town's two polecat seats: the pool seat
+// (polecat_pool.agent capped by max_seats) and the second seat
+// (spec_dispatch hooked_agent capped by max_hooked).
 type ModelSeat struct {
-	// Seat is "pool", "pro" or "second".
+	// Seat is "pool" or "second".
 	Seat  string `json:"seat"`
 	Agent string `json:"agent,omitempty"`
 	// Cap is the seat's cap. CapDefault marks an open seat whose cap key is
 	// unset — a pool seat with no max_seats, which sling leaves uncapped and
-	// the dispatcher holds to its own default, or a pro seat with no pro_max,
-	// which the dispatcher runs at its default — and the number shown is that
+	// the dispatcher holds to its own default — and the number shown is that
 	// default.
 	Cap        int  `json:"cap,omitempty"`
 	CapDefault bool `json:"cap_default,omitempty"`
-	// Closed is a seat nothing may fill: the pool with no agent, the pro seat
-	// with no polecat_pool section or a pro_max of 0, the second seat with no
-	// max_hooked above zero.
+	// Closed is a seat nothing may fill: the pool with no agent, the second
+	// seat with no max_hooked above zero.
 	Closed bool `json:"closed,omitempty"`
 	// Unknown is a seat whose config could not be read: neither open nor
 	// closed, as far as the page can tell.

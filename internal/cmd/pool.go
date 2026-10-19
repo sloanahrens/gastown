@@ -17,18 +17,14 @@ import (
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
-// gt pool reads and changes the town's three polecat seats: the pool seat
-// (polecat_pool.agent capped by max_seats, in settings/config.json), the pro
-// seat (polecat_pool.pro_agent capped by pro_max, which takes only beads
-// carrying pro_label), and the second seat (spec_dispatch hooked_agent capped
-// by max_hooked, in the daemon patrol config: the "daemon" section of
-// settings/config.json on a two-file town, mayor/daemon.json on a five-file
-// one). Each is a cap-per-agent knob a
-// hand edit gets wrong, and the two seats in the settings file disagree on
-// what a zero means: max_seats of 0 reads as uncapped to sling and as the
-// dispatcher's default cap, so closing the pool seat means removing its keys,
-// while pro_max of 0 is the closed pro seat, since an absent pro_max is the
-// dispatcher's default of 1.
+// gt pool reads and changes the town's two polecat seats: the pool seat
+// (polecat_pool.agent capped by max_seats, in settings/config.json) and the
+// second seat (spec_dispatch hooked_agent capped by max_hooked, in the daemon
+// patrol config: the "daemon" section of settings/config.json on a two-file
+// town, mayor/daemon.json on a five-file one). Each is a cap-per-agent knob a
+// hand edit gets wrong, and max_seats of 0 reads as uncapped to sling and as
+// the dispatcher's default cap, so closing the pool seat means removing its
+// keys rather than writing a zero.
 //
 // gt pool set-second sets the second seat's agent and cap together: set takes
 // only the agent a seat already holds, so the second seat's agent was otherwise
@@ -63,19 +59,15 @@ var poolSetCmd = &cobra.Command{
 	Short: "Set an agent's seat cap; 0 closes the seat",
 	Long: `Set the cap of the seat <agent> holds. n above 0 sets the cap; 0 closes the
 seat. Closing the pool seat removes its keys, because a max_seats of 0 reads as
-uncapped to sling and as the dispatcher's default cap; closing the pro seat
-writes pro_max 0, because an absent pro_max is the dispatcher's default of 1.
+uncapped to sling and as the dispatcher's default cap.
 
-<agent> must be the pool agent (polecat_pool.agent), the pro seat's agent
-(polecat_pool.pro_agent, deepseek-pro when unset), or the second seat's agent
+<agent> must be the pool agent (polecat_pool.agent) or the second seat's agent
 (spec_dispatch hooked_agent, claude-sonnet when unset; the daemon patrol
 config, which is the "daemon" section of settings/config.json on a two-file
-town and mayor/daemon.json on a five-file one). When the pool has no
-agent, an agent holding none of those seats becomes the pool agent; the pro
-seat's agent is never that agent, so naming it sets the pro seat whether or
-not the pro seat is open. Any other agent is refused.
+town and mayor/daemon.json on a five-file one). When the pool has no agent, an
+agent holding neither seat becomes the pool agent. Any other agent is refused.
 
-All three seats take effect at the dispatcher's next tick, which reads them from
+Both seats take effect at the dispatcher's next tick, which reads them from
 the files on every run: no daemon restart or kickstart is needed.
 
 The file is written atomically and the previous copy is kept beside it as
@@ -98,9 +90,9 @@ var poolSetTotalCmd = &cobra.Command{
 	Use:   "set-total <n>",
 	Short: "Cap live polecats across every seat; 0 removes the cap",
 	Long: `Set polecat_pool.max_total, the cap on live polecats across every seat: the
-pool seat, the pro seat and the second seat together. It is the cap beside the
-per-agent ones, for a town whose two agents are each inside their own cap and
-still exceed the number of polecats wanted (5 live where 3 was intended).
+pool seat and the second seat together. It is the cap beside the per-agent
+ones, for a town whose two agents are each inside their own cap and still
+exceed the number of polecats wanted (5 live where 3 was intended).
 
 n above 0 sets the cap; 0 removes the key, because an absent max_total is no
 total cap and a written 0 would say the same thing. The spec dispatcher skips a
@@ -140,10 +132,9 @@ the agent. An n above polecat_pool.max_total is refused, since the town could
 never fill the seat: raise the total with gt pool set-total first.
 
 The dispatcher runs one seat per agent, so an agent that already holds the pool
-seat or the pro seat leaves the second seat idle; gt pool show and this command
-say so.
+seat leaves the second seat idle; gt pool show and this command say so.
 
-The change takes effect at the dispatcher's next tick, like the other two seats:
+The change takes effect at the dispatcher's next tick, like the other seat:
 the dispatcher reads this block on every run, so no daemon restart is needed.
 The patrol config is the "daemon" section of settings/config.json on a two-file
 town and mayor/daemon.json on a five-file one. It is written atomically and the
@@ -168,34 +159,23 @@ func init() {
 	rootCmd.AddCommand(poolCmd)
 }
 
-// poolSeatKey names which of the three seats a change lands on.
+// poolSeatKey names which of the two seats a change lands on.
 type poolSeatKey int
 
 const (
 	poolSeat   poolSeatKey = iota // polecat_pool.agent, max_seats
 	secondSeat                    // spec_dispatch hooked_agent, max_hooked
-	proSeat                       // polecat_pool.pro_agent, pro_max
 )
 
-// poolSeatView is the three seats as the files hold them, and as the
+// poolSeatView is the two seats as the files hold them, and as the
 // dispatcher runs them. seats is specBudgetFromConfig's own list — the call
 // the dispatcher makes each tick — so show cannot print a seat the dispatcher
 // would not run and set cannot name a seat the dispatcher does not give an
-// agent: the order, the defaults and the one-seat-per-agent rule are the
-// dispatcher's, not a second copy's.
+// agent: the defaults and the one-seat-per-agent rule are the dispatcher's,
+// not a second copy's.
 type poolSeatView struct {
 	poolAgent string
 	poolCap   int // max_seats; 0 when the key is absent
-	// proAgent is the agent the pro seat runs (pro_agent, the pool's default
-	// when unset; non-empty even when the pro seat is closed), and proMaxSet
-	// whether the file names pro_max: an absent pro_max is the dispatcher's
-	// default of 1, and 0 the closed pro seat.
-	proAgent  string
-	proMaxSet bool
-	// proOpen is whether specBudgetFromConfig opens the pro seat at all: a
-	// polecat_pool block whose pro_max is above zero. A closed pro seat holds
-	// no agent, even though proAgent is still set.
-	proOpen bool
 	// hookedAgent is the agent the second seat runs, spec_dispatch's default
 	// when hooked_agent is unset. hookedCap is max_hooked; 0 means closed.
 	// preferHooked puts that seat first in the dispatcher's list.
@@ -220,15 +200,11 @@ type poolListedSeat struct {
 
 func poolSeatsOf(ts *config.TownSettings, sd *config.SpecDispatchConfig) poolSeatView {
 	v := poolSeatView{
-		proAgent:    config.DefaultSeatRefillProAgent,
 		hookedAgent: defaultSpecHookedAgent,
 	}
 	if ts != nil && ts.PolecatPool != nil {
 		v.poolAgent = ts.PolecatPool.Agent
 		v.poolCap = ts.PolecatPool.MaxSeats
-		v.proAgent = ts.PolecatPool.GetProAgent()
-		v.proMaxSet = ts.PolecatPool.ProMax != nil
-		v.proOpen = ts.PolecatPool.GetProMax() > 0
 		v.totalCap = ts.PolecatPool.GetMaxTotal()
 		v.totalCapSet = ts.PolecatPool.MaxTotal != nil
 	}
@@ -246,16 +222,11 @@ func poolSeatsOf(ts *config.TownSettings, sd *config.SpecDispatchConfig) poolSea
 }
 
 // seatHeldBy names the seat one of the dispatcher's seats came from: the first
-// seat in the dispatcher's own precedence whose agent it is. A closed pro seat
-// holds no agent, so a second seat that runs the pro agent is the second seat,
-// not the pro seat. Every seat specBudgetFromConfig builds comes from one of
-// these three names, so the fallback is unreachable; the pool seat is what an
-// unnamed seat would be.
+// seat in the dispatcher's own precedence whose agent it is. Every seat
+// specBudgetFromConfig builds comes from one of these two names, so the
+// fallback is unreachable; the pool seat is what an unnamed seat would be.
 func (v poolSeatView) seatHeldBy(agent string) poolSeatKey {
 	for _, k := range v.seatPrecedence() {
-		if k == proSeat && !v.proOpen {
-			continue
-		}
 		if v.agentOn(k) == agent {
 			return k
 		}
@@ -264,15 +235,16 @@ func (v poolSeatView) seatHeldBy(agent string) poolSeatKey {
 }
 
 // seatPrecedence is the order specBudgetFromConfig appends its seats in: the
-// pool seat, the pro seat, then the second seat — the second seat first when
-// prefer_hooked says so. An agent named twice keeps the seat that comes first
-// (its dedup), so this order decides which seat a name holds, for a picture of
-// the dispatcher's list and for a set on that name.
+// pool seat, then the second seat — the second seat first when prefer_hooked
+// says so. An agent named twice keeps the seat that comes first (its dedup),
+// so this order decides which seat a name holds, for a picture of the
+// dispatcher's list and for a set on that name. The draw among free seats is
+// random, so this order does not prefer a seat for dispatch.
 func (v poolSeatView) seatPrecedence() []poolSeatKey {
 	if v.preferHooked {
-		return []poolSeatKey{secondSeat, poolSeat, proSeat}
+		return []poolSeatKey{secondSeat, poolSeat}
 	}
-	return []poolSeatKey{poolSeat, proSeat, secondSeat}
+	return []poolSeatKey{poolSeat, secondSeat}
 }
 
 // shadowedSecondSeat reports an open second seat the dispatcher does not run
@@ -296,8 +268,6 @@ func (v poolSeatView) shadowedSecondSeat() (holder poolSeatKey, shadowed bool) {
 // agent is unset, which no named agent can match.
 func (v poolSeatView) agentOn(k poolSeatKey) string {
 	switch k {
-	case proSeat:
-		return v.proAgent
 	case secondSeat:
 		return v.hookedAgent
 	}
@@ -348,9 +318,9 @@ func renderPoolShow(w io.Writer, townRoot string, v poolSeatView, live poolShowL
 	}
 	fmt.Fprintf(w, "%-13s%s%s\n", "total", v.totalText(), live.totalNote(v.totalCap))
 	if len(v.seats) == 0 {
-		fmt.Fprintln(w, "no open seat: polecat_pool has no agent, the pro seat is closed (no polecat_pool section, or pro_max 0), and spec_dispatch max_hooked is not above 0")
+		fmt.Fprintln(w, "no open seat: polecat_pool has no agent, and spec_dispatch max_hooked is not above 0")
 	}
-	fmt.Fprintf(w, "read: %s (polecat_pool.agent, polecat_pool.max_seats, polecat_pool.pro_agent, polecat_pool.pro_max, polecat_pool.max_total), %s (patrols.spec_dispatch.hooked_agent, max_hooked)\n",
+	fmt.Fprintf(w, "read: %s (polecat_pool.agent, polecat_pool.max_seats, polecat_pool.max_total), %s (patrols.spec_dispatch.hooked_agent, max_hooked)\n",
 		config.TownSettingsPath(townRoot), patrolConfigLocation(townRoot))
 	return nil
 }
@@ -461,8 +431,6 @@ func (v poolSeatView) capText(s poolListedSeat) string {
 	switch {
 	case s.seat == poolSeat && v.poolCap <= 0:
 		return fmt.Sprintf("uncapped for sling, cap %d for the dispatcher (max_seats unset)", s.cap)
-	case s.seat == proSeat && !v.proMaxSet:
-		return fmt.Sprintf("cap %d (pro_max unset: the dispatcher's default)", s.cap)
 	default:
 		return fmt.Sprintf("cap %d", s.cap)
 	}
@@ -470,11 +438,10 @@ func (v poolSeatView) capText(s poolListedSeat) string {
 
 // poolSeatFor picks the seat a set of agent to n lands on, or the refusal
 // naming the seats. An agent's seat is the one the dispatcher gives its name:
-// the first of the dispatcher's three names it is, which is the seat
-// specBudgetFromConfig's dedup keeps when one name holds two of them. The pro
-// agent is always the pro seat, open or closed, so naming it never reaches the
-// line below that opens the pool seat (gt-riazi). An agent holding none of the
-// three opens the pool seat on a cap above 0; closing needs a seat to close.
+// the first of the dispatcher's two names it is, which is the seat
+// specBudgetFromConfig's dedup keeps when one name holds both. An agent
+// holding neither opens the pool seat on a cap above 0; closing needs a seat
+// to close.
 func poolSeatFor(v poolSeatView, agent string, n int) (poolSeatKey, error) {
 	for _, k := range v.seatPrecedence() {
 		if v.agentOn(k) == agent {
@@ -488,8 +455,8 @@ func poolSeatFor(v poolSeatView, agent string, n int) (poolSeatKey, error) {
 	if v.poolAgent != "" {
 		pool = v.poolAgent
 	}
-	return 0, fmt.Errorf("%q holds no seat: the pool seat is %s (polecat_pool.agent), the pro seat is %s (polecat_pool.pro_agent) and the second seat is %s (spec_dispatch hooked_agent)",
-		agent, pool, v.proAgent, v.hookedAgent)
+	return 0, fmt.Errorf("%q holds no seat: the pool seat is %s (polecat_pool.agent) and the second seat is %s (spec_dispatch hooked_agent)",
+		agent, pool, v.hookedAgent)
 }
 
 func runPoolSet(w io.Writer, townRoot, agent string, n int) error {
@@ -506,13 +473,9 @@ func runPoolSet(w io.Writer, townRoot, agent string, n int) error {
 	}
 	stamp := time.Now().UTC().Format("20060102T150405Z")
 	switch seat {
-	case poolSeat, proSeat:
+	case poolSeat:
 		err = writeTownSeats(townRoot, stamp, func(ts *config.TownSettings) error {
-			if seat == proSeat {
-				setProSeat(ts, n)
-			} else {
-				setPoolSeat(ts, agent, n)
-			}
+			setPoolSeat(ts, agent, n)
 			return ts.PolecatPool.Validate()
 		})
 	case secondSeat:
@@ -608,8 +571,6 @@ func checkKnownAgent(townRoot, agent string) error {
 
 func seatName(k poolSeatKey) string {
 	switch k {
-	case proSeat:
-		return "pro seat"
 	case secondSeat:
 		return "second seat"
 	}
@@ -686,18 +647,6 @@ func setPoolSeat(ts *config.TownSettings, agent string, n int) {
 		ts.PolecatPool = &config.PolecatPool{}
 	}
 	ts.PolecatPool.Agent, ts.PolecatPool.MaxSeats = agent, n
-}
-
-// setProSeat sets the pro seat's cap, pro_max, which is the seat's whole
-// state: the seat takes beads carrying pro_label, and pro_agent, pro_label and
-// every other key are left as the file holds them. A zero closes the seat
-// rather than an absent key doing it, because an absent pro_max is the
-// dispatcher's default of 1 (config.PolecatPool.GetProMax).
-func setProSeat(ts *config.TownSettings, n int) {
-	if ts.PolecatPool == nil {
-		ts.PolecatPool = &config.PolecatPool{}
-	}
-	ts.PolecatPool.ProMax = &n
 }
 
 // writePatrolSeats changes the daemon patrol config under the file's lock,

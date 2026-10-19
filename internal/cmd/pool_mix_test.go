@@ -15,7 +15,6 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // The town a mix runs against: two agents the presets can launch, a pool seat
@@ -30,7 +29,7 @@ const poolMixTestSettings = `{
     "deepseek-pro": {"command": "claude", "args": ["--model", "pro"]}
   },
   "role_agents": {"polecat": "claude-sonnet"},
-  "polecat_pool": {"agent": "claude-sonnet", "max_seats": 2, "pro_max": 0}
+  "polecat_pool": {"agent": "claude-sonnet", "max_seats": 2}
 }
 `
 
@@ -244,7 +243,7 @@ func TestPoolMixIsAttachedUnderPool(t *testing.T) {
 	if mix == nil {
 		t.Fatal("gt pool mix is not a subcommand of gt pool")
 	}
-	for _, flag := range []string{"dry-run", "keep-pinned"} {
+	for _, flag := range []string{"dry-run"} {
 		if mix.Flags().Lookup(flag) == nil {
 			t.Errorf("gt pool mix has no --%s", flag)
 		}
@@ -288,40 +287,38 @@ const poolMixTestIncidentPatrol = `{
 `
 
 // TestPoolMixIsTheIncidentFixInOneCommand is the day gt-lwlva describes: two
-// Sonnet plus two flash to four flash, with the reviews pinned to Sonnet left a
-// seat. It took six commands and three silent traps; this is the one.
+// Sonnet plus two flash to two flash plus two Sonnet, with the reviews pinned
+// to Sonnet left a seat. It took six commands and three silent traps; this is
+// the one. The pro seat is retired, so a pinned agent is seated by naming it in
+// the mix.
 func TestPoolMixIsTheIncidentFixInOneCommand(t *testing.T) {
 	t.Parallel()
 	root := poolMixTown(t, poolMixTestIncidentSettings, poolMixTestIncidentPatrol, poolMixTestModels)
-	if _, err := poolMixRun(t, root, []string{"deepseek-flash=4"}, poolMixOptions{keepPinned: true}); err != nil {
-		t.Fatalf("mix deepseek-flash=4 --keep-pinned: %v", err)
+	if _, err := poolMixRun(t, root, []string{"deepseek-flash=2", "claude-sonnet=2"}, poolMixOptions{}); err != nil {
+		t.Fatalf("mix deepseek-flash=2 claude-sonnet=2: %v", err)
 	}
 	pool := poolMixTownSettings(t, root).PolecatPool
-	if pool.Agent != "deepseek-flash" || pool.MaxSeats != 4 {
-		t.Errorf("pool seat = %s cap %d, want deepseek-flash cap 4", pool.Agent, pool.MaxSeats)
+	if pool.Agent != "deepseek-flash" || pool.MaxSeats != 2 {
+		t.Errorf("pool seat = %s cap %d, want deepseek-flash cap 2", pool.Agent, pool.MaxSeats)
 	}
-	if pool.GetMaxTotal() != 5 {
-		t.Errorf("max_total = %d, want 5 (four flash plus the reserved seat)", pool.GetMaxTotal())
-	}
-	if pool.ProAgent != "claude-sonnet" || pool.GetProMax() != 1 || pool.GetProLabel() != "agent:claude-sonnet" {
-		t.Errorf("pro seat = %s cap %d label %s, want claude-sonnet cap 1 label agent:claude-sonnet",
-			pool.ProAgent, pool.GetProMax(), pool.GetProLabel())
+	if pool.GetMaxTotal() != 4 {
+		t.Errorf("max_total = %d, want 4 (the mix's two seats together)", pool.GetMaxTotal())
 	}
 	if got := poolMixTownSettings(t, root).RoleAgents["polecat"]; got != "deepseek-flash" {
 		t.Errorf("role_agents.polecat = %q, want deepseek-flash", got)
 	}
-	if got := poolMixSecondSeat(t, root).MaxHooked; got != 0 {
-		t.Errorf("max_hooked = %d, want 0: the one-agent mix closes the second seat", got)
+	if got := poolMixSecondSeat(t, root).MaxHooked; got != 2 {
+		t.Errorf("max_hooked = %d, want 2: the mix names two agents", got)
 	}
 	seats := poolTestTownBudget(t, root).Seats
 	if len(seats) != 2 {
 		t.Fatalf("the dispatcher runs %d seats, want 2: %v", len(seats), seats)
 	}
-	if seats[0].Agent != "deepseek-flash" || seats[0].Cap != 4 {
-		t.Errorf("first seat = %s cap %d, want deepseek-flash cap 4", seats[0].Agent, seats[0].Cap)
+	if seats[0].Agent != "deepseek-flash" || seats[0].Cap != 2 {
+		t.Errorf("first seat = %s cap %d, want deepseek-flash cap 2", seats[0].Agent, seats[0].Cap)
 	}
-	if seats[1].Agent != "claude-sonnet" || seats[1].Cap != 1 || seats[1].Label != "agent:claude-sonnet" {
-		t.Errorf("reserved seat = %+v, want claude-sonnet cap 1 label agent:claude-sonnet", seats[1])
+	if seats[1].Agent != "claude-sonnet" || seats[1].Cap != 2 {
+		t.Errorf("second seat = %+v, want claude-sonnet cap 2", seats[1])
 	}
 }
 
@@ -380,9 +377,6 @@ func TestPoolMixSetsTheWholeMix(t *testing.T) {
 			if got := ts.RoleAgents["polecat"]; got != tc.wantAgent {
 				t.Errorf("role_agents.polecat = %q, want %q (the pool seat's agent)", got, tc.wantAgent)
 			}
-			if got := ts.PolecatPool.GetProMax(); got != 0 {
-				t.Errorf("pro_max = %d, want 0: a mix with no pinned work to seat closes the pro seat", got)
-			}
 			// The second seat is the mix's second agent, recorded with its cap.
 			sd := poolMixSecondSeat(t, root)
 			if len(tc.args) < 2 && sd.MaxHooked != 0 {
@@ -439,7 +433,7 @@ func TestPoolMixRefusesAPinnedAgentWithoutASeat(t *testing.T) {
 	if err == nil {
 		t.Fatal("mix deepseek-flash=4 with a review pinned to claude-sonnet: want a refusal")
 	}
-	for _, want := range []string{"claude-sonnet", "--keep-pinned", "gt pool mix deepseek-flash=4"} {
+	for _, want := range []string{"claude-sonnet", "gt pool mix deepseek-flash=4 claude-sonnet=4"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q does not name %q", err, want)
 		}
@@ -449,35 +443,24 @@ func TestPoolMixRefusesAPinnedAgentWithoutASeat(t *testing.T) {
 	}
 }
 
-func TestPoolMixKeepPinnedReservesTheProSeat(t *testing.T) {
+// A pinned agent named in the mix gets a seat of its own: the second seat, with
+// the cap the mix gives it.
+func TestPoolMixSeatsAPinnedAgentNamedInTheMix(t *testing.T) {
 	t.Parallel()
 	root := poolMixTown(t, poolMixTestSettings, poolMixTestPinnedPatrol, poolMixTestModels)
-	if _, err := poolMixRun(t, root, []string{"deepseek-flash=4"}, poolMixOptions{keepPinned: true}); err != nil {
-		t.Fatalf("mix --keep-pinned: %v", err)
+	if _, err := poolMixRun(t, root, []string{"deepseek-flash=4", "claude-sonnet=1"}, poolMixOptions{}); err != nil {
+		t.Fatalf("mix seating the pinned agent: %v", err)
 	}
 	ts := poolMixTownSettings(t, root)
-	pool := ts.PolecatPool
-	if pool.ProAgent != "claude-sonnet" || pool.GetProMax() != 1 || pool.GetProLabel() != "agent:claude-sonnet" {
-		t.Errorf("pro seat = %s cap %d label %s, want claude-sonnet cap 1 label agent:claude-sonnet",
-			pool.ProAgent, pool.GetProMax(), pool.GetProLabel())
+	if got := ts.PolecatPool.GetMaxTotal(); got != 5 {
+		t.Errorf("max_total = %d, want 5: the mix's four plus the pinned seat", got)
 	}
-	if got := pool.GetMaxTotal(); got != 5 {
-		t.Errorf("max_total = %d, want 5: the mix's four plus the reserved seat", got)
-	}
-	// The reserved seat reaches the dispatcher carrying the label that selects
-	// the pinned beads.
 	seats := poolTestTownBudget(t, root).Seats
-	var pro *specdispatch.Seat
-	for i, s := range seats {
-		if s.Label == "agent:claude-sonnet" {
-			pro = &seats[i]
-		}
+	if len(seats) != 2 || seats[0].Agent != "deepseek-flash" || seats[0].Cap != 4 {
+		t.Fatalf("the dispatcher runs %+v, want flash cap 4 and the pinned agent's seat", seats)
 	}
-	if pro == nil {
-		t.Fatalf("the dispatcher runs no seat carrying agent:claude-sonnet: %v", seats)
-	}
-	if pro.Agent != "claude-sonnet" || pro.Cap != 1 {
-		t.Errorf("reserved seat = %s cap %d, want claude-sonnet cap 1", pro.Agent, pro.Cap)
+	if seats[1].Agent != "claude-sonnet" || seats[1].Cap != 1 {
+		t.Errorf("pinned agent's seat = %+v, want claude-sonnet cap 1", seats[1])
 	}
 }
 
@@ -501,11 +484,12 @@ func TestPoolMixRefusesALabelPinnedBead(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "deepseek-pro") {
 		t.Fatalf("mix with alpha-1 pinned to deepseek-pro: err = %v, want a refusal naming deepseek-pro", err)
 	}
-	if _, err := poolMixRunWith(t, root, []string{"deepseek-flash=4"}, poolMixOptions{keepPinned: true}, reads); err != nil {
-		t.Fatalf("mix --keep-pinned: %v", err)
+	// Naming the pinned agent in the mix gives it the second seat.
+	if _, err := poolMixRunWith(t, root, []string{"deepseek-flash=4", "deepseek-pro=1"}, poolMixOptions{}, reads); err != nil {
+		t.Fatalf("mix seating the pinned agent: %v", err)
 	}
-	if got := poolMixTownSettings(t, root).PolecatPool.ProAgent; got != "deepseek-pro" {
-		t.Errorf("pro_agent = %q, want deepseek-pro", got)
+	if got := poolMixSecondSeat(t, root).HookedAgent; got != "deepseek-pro" {
+		t.Errorf("hooked_agent = %q, want deepseek-pro", got)
 	}
 }
 
@@ -712,9 +696,9 @@ func TestPoolMixRefusesAnUnknownAgent(t *testing.T) {
 	}
 }
 
-// TestPoolMixRefusesMorePinsThanThereAreSeats is the multi-pin refusal: with
-// two seats and one reserved pro seat, three pinned agents cannot all be
-// seated, and the refusal has to say so.
+// TestPoolMixRefusesMorePinsThanThereAreSeats is the multi-pin refusal: the
+// town runs two seats, so three pinned agents cannot all be seated, and the
+// refusal has to say so.
 func TestPoolMixRefusesMorePinsThanThereAreSeats(t *testing.T) {
 	t.Parallel()
 	root := poolMixTown(t, poolMixTestSettings, poolMixTestPinnedPatrol, poolMixTestModels)
@@ -723,11 +707,11 @@ func TestPoolMixRefusesMorePinsThanThereAreSeats(t *testing.T) {
 	reads.openBeads = func(string) ([]*beads.Issue, error) {
 		return []*beads.Issue{{ID: "alpha-2", Labels: []string{"agent:deepseek-pro"}}}, nil
 	}
-	_, err := poolMixRunWith(t, root, []string{"deepseek-flash=4"}, poolMixOptions{keepPinned: true}, reads)
+	_, err := poolMixRunWith(t, root, []string{"deepseek-flash=4"}, poolMixOptions{}, reads)
 	if err == nil {
-		t.Fatal("two pinned agents and one reserved seat: want a refusal")
+		t.Fatal("two pinned agents and two seats: want a refusal")
 	}
-	for _, want := range []string{"claude-sonnet", "deepseek-pro", "--keep-pinned"} {
+	for _, want := range []string{"claude-sonnet", "deepseek-pro", "gt pool mix"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("refusal %q does not name %q", err, want)
 		}

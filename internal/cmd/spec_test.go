@@ -137,7 +137,7 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 					labeled++
 					continue
 				}
-				if ok, why := specdispatch.Eligible(s, 2, budget.ReservedLabels()); ok {
+				if ok, why := specdispatch.Eligible(s, 2); ok {
 					list = append(list, s)
 				} else if specdispatch.BoardCarried(s) {
 					// specCandidates reports a board-carried refusal rather
@@ -258,9 +258,19 @@ func TestSpecDispatchSlingsInDeterministicOrder(t *testing.T) {
 	if len(r.Dispatched) != 3 {
 		t.Fatalf("report = %+v", r)
 	}
-	// The first seat until its cap (2), then the next seat.
-	if f.slingSeats[0].Agent != "deepseek-flash" || f.slingSeats[1].Agent != "deepseek-flash" || f.slingSeats[2].Agent != "claude-sonnet" {
-		t.Errorf("seats = %+v", f.slingSeats)
+	// The seat draw is random among the mix's free seats, so the agents are
+	// not fixed; no seat may exceed its cap, and every sling takes one.
+	counts := map[string]int{}
+	for _, seat := range f.slingSeats {
+		counts[seat.Agent]++
+	}
+	if counts["deepseek-flash"]+counts["claude-sonnet"] != 3 {
+		t.Errorf("seats = %+v, want three slings on the mix's agents", f.slingSeats)
+	}
+	for agent, n := range counts {
+		if n > 2 {
+			t.Errorf("seat %s took %d slings, past its cap of 2", agent, n)
+		}
 	}
 }
 
@@ -423,38 +433,19 @@ func TestSpecDispatchSlingsAnUnheldBead(t *testing.T) {
 	}
 }
 
-// needs-pro is the pro seat's selector, so the tick routes the bead there
-// instead of reading the shared rule's hold on it; with no seat reserving the
-// label, the hold stands (gt-lxxo4).
-func TestSpecDispatchRoutesNeedsProToItsSeat(t *testing.T) {
+// needs-pro was the pro seat's selector. The reserved seat is retired, so the
+// shared rule's hold on the label stands and the tick dispatches nothing
+// (gt-lxxo4).
+func TestSpecDispatchHoldsNeedsPro(t *testing.T) {
 	t.Parallel()
 	pro := cleanSpec("gt-pro", 1, "2026-09-29T10:00:00Z")
 	pro.Labels = []string{"needs-pro"}
 
-	t.Run("a reserving seat takes it", func(t *testing.T) {
-		t.Parallel()
-		f := newFakeSpecTown(pro)
-		f.seats = []specdispatch.Seat{
-			{Agent: "deepseek-flash", Cap: 2},
-			{Agent: "deepseek-pro", Cap: 1, Label: "needs-pro"},
-		}
-		r := runSpecDispatchCycle(f.env())
-		if len(f.slung) != 1 || f.slung[0] != "gt-pro" {
-			t.Fatalf("slung %v skipped %+v, want the needs-pro bead routed", f.slung, r.Skipped)
-		}
-		if len(f.slingSeats) != 1 || f.slingSeats[0].Agent != "deepseek-pro" {
-			t.Fatalf("seats %+v, want the pro seat", f.slingSeats)
-		}
-	})
-
-	t.Run("no reserving seat holds it", func(t *testing.T) {
-		t.Parallel()
-		f := newFakeSpecTown(pro)
-		r := runSpecDispatchCycle(f.env())
-		if len(f.slung) != 0 || len(r.Dispatched) != 0 {
-			t.Fatalf("slung %v report %+v with no seat reserving needs-pro", f.slung, r)
-		}
-	})
+	f := newFakeSpecTown(pro)
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+		t.Fatalf("slung %v report %+v, want a needs-pro bead held", f.slung, r)
+	}
 }
 
 // A bead whose children are open is a container, so it is held under any gate
@@ -928,7 +919,10 @@ func TestSpecDispatchDryRunShowsTheFormula(t *testing.T) {
 	if len(r.Dispatched) != 1 || len(f.slung) != 0 {
 		t.Fatalf("slung %v; report = %+v", f.slung, r)
 	}
-	if got := r.Dispatched[0].Line; !strings.Contains(got, "would sling to gastown on deepseek-flash (seat deepseek-flash 1/2), formula mol-deep-review") {
+	// The seat draw is random among the mix's free seats, so the line's agent
+	// is not fixed; it names the agent, its seat and the formula.
+	if got := r.Dispatched[0].Line; !strings.HasPrefix(got, "gt-a: would sling to gastown on ") ||
+		!strings.Contains(got, " (seat ") || !strings.HasSuffix(got, "), formula mol-deep-review") {
 		t.Errorf("line = %q", got)
 	}
 }
@@ -1470,39 +1464,21 @@ func TestSpecBudgetFromConfig(t *testing.T) {
 	ts.RoleAgents = map[string]string{"polecat": "deepseek-flash"}
 	ts.PolecatPool = &config.PolecatPool{Agent: "deepseek-flash", MaxSeats: 3, MinSpawnGap: "4m"}
 
-	// The pool's seats: the pool's own seat at max_seats, then the pro seat at
-	// its own cap. No claude-sonnet seat is in the budget (gt-4k3fj.8.8).
+	// The pool's seat at max_seats. No claude-sonnet seat is in the budget
+	// (gt-4k3fj.8.8), and the reserved pro seat is retired: a stale pro_max in
+	// the struct opens no seat.
 	b := specBudgetFromConfig(ts, nil)
-	if got := b.Picture(); got != "deepseek-flash 0/3, deepseek-pro 0/1" || b.MinSpawnGap != 4*time.Minute {
+	if got := b.Picture(); got != "deepseek-flash 0/3" || b.MinSpawnGap != 4*time.Minute {
 		t.Fatalf("defaults = %q gap %v", got, b.MinSpawnGap)
 	}
-	if b.Seats[1].Label != "needs-pro" {
-		t.Errorf("pro seat selector = %q, want needs-pro", b.Seats[1].Label)
-	}
-
-	// The pro seat's keys are the operator's: pro_max caps it (0 drops it
-	// entirely), pro_agent picks the agent, pro_label its selector.
-	ts.PolecatPool.ProMax = intPtr(2)
-	ts.PolecatPool.ProAgent = "deepseek-reasoner"
-	ts.PolecatPool.ProLabel = "hard"
-	b = specBudgetFromConfig(ts, nil)
-	if got := b.Picture(); got != "deepseek-flash 0/3, deepseek-reasoner 0/2" || b.Seats[1].Label != "hard" {
-		t.Fatalf("pro seat = %q selector %q", got, b.Seats[1].Label)
-	}
-	ts.PolecatPool.ProMax = intPtr(0)
-	if got := specBudgetFromConfig(ts, nil).Picture(); got != "deepseek-flash 0/3" {
-		t.Fatalf("pro_max 0 must drop the seat: %q", got)
-	}
-	ts.PolecatPool.ProMax = nil
 
 	// max_seats unset: the dispatcher caps the seat itself rather than
 	// treating the pool's silence as unlimited room.
 	ts.PolecatPool.MaxSeats = 0
-	if got := specBudgetFromConfig(ts, nil).Picture(); got != "deepseek-flash 0/2, deepseek-reasoner 0/1" {
+	if got := specBudgetFromConfig(ts, nil).Picture(); got != "deepseek-flash 0/2" {
 		t.Fatalf("unset max_seats = %q", got)
 	}
 	ts.PolecatPool.MaxSeats = 3
-	ts.PolecatPool.ProAgent, ts.PolecatPool.ProLabel = "", ""
 }
 
 // The hooked seat is off unless spec_dispatch names a cap above zero, even in
@@ -1515,29 +1491,30 @@ func TestSpecBudgetHookedSeatIsOptIn(t *testing.T) {
 
 	enabled := &config.SpecDispatchConfig{Enabled: ptr(true)}
 	for _, sd := range []*config.SpecDispatchConfig{nil, enabled, {Enabled: ptr(true), MaxHooked: -1}} {
-		if got := specBudgetFromConfig(ts, sd).Picture(); got != "deepseek-flash 0/3, deepseek-pro 0/1" {
+		if got := specBudgetFromConfig(ts, sd).Picture(); got != "deepseek-flash 0/3" {
 			t.Errorf("sd %+v: a hooked seat appeared without max_hooked: %q", sd, got)
 		}
 	}
 
-	// An explicit cap adds it after the pool's seats (default agent).
-	if got := specBudgetFromConfig(ts, &config.SpecDispatchConfig{MaxHooked: 1}).Picture(); got != "deepseek-flash 0/3, deepseek-pro 0/1, claude-sonnet 0/1" {
+	// An explicit cap adds it after the pool's seat (default agent).
+	if got := specBudgetFromConfig(ts, &config.SpecDispatchConfig{MaxHooked: 1}).Picture(); got != "deepseek-flash 0/3, claude-sonnet 0/1" {
 		t.Errorf("max_hooked 1 = %q", got)
 	}
 	// prefer_hooked moves it first, and hooked_agent names its agent.
 	sd := &config.SpecDispatchConfig{MaxHooked: 2, PreferHooked: true, HookedAgent: "claude-opus"}
-	if got := specBudgetFromConfig(ts, sd).Picture(); got != "claude-opus 0/2, deepseek-flash 0/3, deepseek-pro 0/1" {
+	if got := specBudgetFromConfig(ts, sd).Picture(); got != "claude-opus 0/2, deepseek-flash 0/3" {
 		t.Errorf("prefer_hooked = %q", got)
 	}
-	// hooked_agent naming an existing seat keeps that seat once.
+	// hooked_agent naming the pool's agent keeps that seat once.
 	sd = &config.SpecDispatchConfig{MaxHooked: 2, HookedAgent: "deepseek-flash"}
-	if got := specBudgetFromConfig(ts, sd).Picture(); got != "deepseek-flash 0/3, deepseek-pro 0/1" {
+	if got := specBudgetFromConfig(ts, sd).Picture(); got != "deepseek-flash 0/3" {
 		t.Errorf("duplicate seat = %q", got)
 	}
 }
 
 // A pool with no agent has no seat for the dispatcher to fill: the
-// pool's own admission point says the same (choosePoolAgent).
+// pool's own admission point says the same (choosePoolAgent). The retired pro
+// seat used to stand in here; it is gone.
 func TestSpecBudgetWithoutAPoolSeat(t *testing.T) {
 	t.Parallel()
 	ts := config.NewTownSettings()
@@ -1545,8 +1522,8 @@ func TestSpecBudgetWithoutAPoolSeat(t *testing.T) {
 		t.Errorf("nil pool = %q, want no seats", got)
 	}
 	ts.PolecatPool = &config.PolecatPool{MaxSeats: 3}
-	if got := specBudgetFromConfig(ts, nil).Picture(); got != "deepseek-pro 0/1" {
-		t.Errorf("pool without an agent = %q", got)
+	if got := specBudgetFromConfig(ts, nil).Picture(); got != "no seats" {
+		t.Errorf("pool without an agent = %q, want no seats", got)
 	}
 }
 
@@ -1833,7 +1810,7 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 		return strings.Join(out, " ")
 	}
 
-	got := specCandidates(townRoot, 2, fakeBoard, nil)
+	got := specCandidates(townRoot, 2, fakeBoard)
 	if len(got.Errors) != 0 {
 		t.Fatalf("errors = %v", got.Errors)
 	}
@@ -1849,7 +1826,7 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 
 	// The ceiling is the operator's (polecat_pool.max_priority): at P4 the
 	// feature and the P4 task are the dispatcher's work too.
-	got = specCandidates(townRoot, 4, fakeBoard, nil)
+	got = specCandidates(townRoot, 4, fakeBoard)
 	if ids := idList(got.Candidates); ids != "gt-bug gt-task gt-feature gt-p4" {
 		t.Errorf("candidates at a P4 ceiling = %q", ids)
 	}
@@ -1873,7 +1850,7 @@ func TestSpecCandidatesSkipsCrewOnlyLabel(t *testing.T) {
 		}, nil
 	}
 
-	got := specCandidates(townRoot, 2, fakeBoard, nil)
+	got := specCandidates(townRoot, 2, fakeBoard)
 	if len(got.Errors) != 0 {
 		t.Fatalf("errors = %v", got.Errors)
 	}
@@ -1912,7 +1889,7 @@ func TestSpecCandidatesSkipsHumanOnlyLabel(t *testing.T) {
 		}, nil
 	}
 
-	got := specCandidates(townRoot, 2, fakeBoard, nil)
+	got := specCandidates(townRoot, 2, fakeBoard)
 	if len(got.Errors) != 0 {
 		t.Fatalf("errors = %v", got.Errors)
 	}
@@ -2043,7 +2020,7 @@ func TestSpecCandidatesCountsTheLabeledFailedFromACapturedBoard(t *testing.T) {
 	t.Parallel()
 	townRoot := specTown(t)
 
-	got := specCandidates(townRoot, 3, capturedSpecBoard(t), nil)
+	got := specCandidates(townRoot, 3, capturedSpecBoard(t))
 	if len(got.Errors) != 0 {
 		t.Fatalf("errors = %v", got.Errors)
 	}
@@ -2076,7 +2053,7 @@ func TestSpecCandidatesSkipsCrewOnlyFromBdJSON(t *testing.T) {
 		return parseSpecReady([]byte(`{"issues":[` + crewed + `,` + twin + `]}`))
 	}
 
-	got := specCandidates(townRoot, 2, board, nil)
+	got := specCandidates(townRoot, 2, board)
 	if len(got.Errors) != 0 {
 		t.Fatalf("errors = %v", got.Errors)
 	}
