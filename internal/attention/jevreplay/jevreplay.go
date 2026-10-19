@@ -1,10 +1,12 @@
 // Package jevreplay replays the attention queue's retained history through
 // the Jev triage and measures it against a proxy for what a human did.
 //
-// The proxy is the only ground truth the queue has: an item a human acked
-// needed them, and an item that cleared without an ack settled on its own.
-// It is a proxy, not a judgment: a human may ack an item they could have
-// ignored, and may let a real problem clear unseen. The report says so.
+// The proxy is the only ground truth the queue has: an acked item is labeled
+// by the disposition the ack recorded (an ack with none, from before
+// dispositions existed, reads as needed-human), and an item that cleared
+// without an ack settled on its own. It is a proxy, not a judgment: a human
+// may ack an item they could have ignored, and may let a real problem clear
+// unseen. The report says so.
 //
 // The package reads a Snapshot and the ack history the caller loaded and
 // writes nothing; the caller owns the Jev client, the files and the cap's

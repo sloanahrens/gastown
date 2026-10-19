@@ -897,8 +897,11 @@ gt attention --all           # include acked items
 gt attention --json          # state.json
 gt attention -f              # stream new transitions as they append
 gt attention --follow --wake-only   # only the events that need a decision
-gt attention ack <key>       # hide an item until its condition clears
+gt attention ack <key> --disposition needed-human  # hide it until it clears
 ```
+
+An ack must say what the item needed: `needed-human`, `fixed-by-overseer` or
+`noise`. `gt attention ack` records it in `acks-history.jsonl`.
 
 `--follow` prints `HH:MM:SS rule detail`, one line per event; `--json` prints
 the `events.jsonl` line, and `--since DURATION` replays that window first. One
@@ -911,10 +914,10 @@ which is a toast and a browser notification while the operator has alerts on.
 Where the dashboard's own alert covers the same condition (red main, an open
 escalation, a polecat stall, a stuck queue), only the attention alert fires.
 
-The queue is three files under `<town>/.runtime/attention/`. The daemon keeps a
-fourth there, `tips.json`: the origin tips the direct-push check has seen, so a
-daemon restart does not drop a push nobody has acked. `gt attention` only ever
-writes `acks.json`:
+The queue is four files under `<town>/.runtime/attention/`. The daemon keeps a
+fifth there, `tips.json`: the origin tips the direct-push check has seen, so a
+daemon restart does not drop a push nobody has acked. `gt attention ack` only
+ever writes `acks.json` and `acks-history.jsonl`:
 
 - `state.json` — the current set, rewritten atomically each daemon heartbeat.
   An item is `{key, kind, severity, rig, bead, sha, summary, first_seen,
@@ -942,6 +945,11 @@ writes `acks.json`:
 - `acks.json` — the acknowledged keys, `{acks: [{key, at}]}`, written by `gt
   attention ack` under a flock. The daemon reads it and never writes it, so
   neither process races the other's file.
+- `acks-history.jsonl` — one line per ack, `{ts, key, kind, rule, disposition}`,
+  appended under the same flock and rotated to `acks-history.jsonl.1` at 1 MB.
+  Unlike `acks.json` it outlives the item, so the Jev attention replay can
+  label a cleared item by what the human did; a line without a `disposition`
+  predates the field and reads as `needed-human`.
 
 The one table of each rule's owner, the human or the overseer, is `ruleOwners`
 in `internal/attention/owner.go`.

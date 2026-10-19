@@ -372,6 +372,20 @@ func TestProxyLabels(t *testing.T) {
 	assert.Equal(t, proxyNone, proxyTier1(standing))
 	assert.Equal(t, proxyNeedsYou, proxyTier1(ackedStanding), "an acked standing item is labeled already")
 	assert.Equal(t, proxyNeedsYou, proxyTier2(cleared, []attention.AckRecord{{TS: t0.Add(time.Minute), Key: "k"}}))
+
+	// A disposition labels the item when the ack carries one.
+	at := func(min int, d attention.Disposition) []attention.AckRecord {
+		return []attention.AckRecord{{TS: t0.Add(time.Duration(min) * time.Minute), Key: "k", Disposition: d}}
+	}
+	assert.Equal(t, proxyNeedsYou, proxyTier2(cleared, at(1, attention.DispositionNeededHuman)))
+	assert.Equal(t, proxyAuto, proxyTier2(cleared, at(1, attention.DispositionFixedByOverseer)))
+	assert.Equal(t, proxyAuto, proxyTier2(cleared, at(1, attention.DispositionNoise)))
+	// A disposition on an ack outside the life still does not label it.
+	assert.Equal(t, proxyAuto, proxyTier2(cleared, at(11, attention.DispositionNeededHuman)))
+	// An old line with no disposition keeps the old reading.
+	assert.Equal(t, proxyNeedsYou, proxyTier2(cleared, at(1, "")))
+	// The disposition wins over an ack acks.json still holds.
+	assert.Equal(t, proxyAuto, proxyTier2(ackedStanding, at(1, attention.DispositionNoise)))
 }
 
 func TestReportSaysTheLabelsAreAProxy(t *testing.T) {

@@ -23,12 +23,13 @@ import (
 )
 
 var (
-	attentionAll      bool
-	attentionJSON     bool
-	attentionFollow   bool
-	attentionWakeOnly bool
-	attentionSince    time.Duration
-	attentionInterval time.Duration
+	attentionAll         bool
+	attentionJSON        bool
+	attentionFollow      bool
+	attentionWakeOnly    bool
+	attentionSince       time.Duration
+	attentionInterval    time.Duration
+	attentionDisposition string
 )
 
 // attentionRotateSize is the size at which events.jsonl and acks-history.jsonl
@@ -56,10 +57,10 @@ The queue is four files under <town>/.runtime/attention/:
   acks.json      the acknowledged keys, {acks: [{key, at}]}. gt attention ack
                  writes it under a flock; the daemon only reads it, so neither
                  process races the other's file.
-  acks-history.jsonl  one line per ack, {ts, key, kind, rule}, appended by
-                 gt attention ack and rotated to acks-history.jsonl.1 at
-                 ` + attentionRotateSize + `. acks.json forgets an ack when its item
-                 clears; this does not.
+  acks-history.jsonl  one line per ack, {ts, key, kind, rule, disposition},
+                 appended by gt attention ack and rotated to acks-history.jsonl.1 at
+                 ` + attentionRotateSize + `. acks.json forgets an ack when its item clears;
+                 this does not.
 
 An ack hides its item until the item clears; the ack is then dropped, so a
 recurrence raises a new item. gt attention never writes state.json or
@@ -85,7 +86,7 @@ Examples:
   gt attention                 # the queue, oldest first
   gt attention --all           # include acked items
   gt attention --json          # state.json
-  gt attention ack esc:hq-123  # acknowledge one item
+  gt attention ack esc:hq-123 --disposition needed-human  # ack, saying why
   gt attention -f              # stream transitions as they append
   gt attention --follow --wake-only   # only the events that need a decision`,
 	Args: cobra.NoArgs,
@@ -94,11 +95,16 @@ Examples:
 
 var attentionAckCmd = &cobra.Command{
 	Use:   "ack <key>",
-	Short: "Acknowledge an item by its key, hiding it until its condition clears",
+	Short: "Acknowledge an item by its key, saying what it needed",
 	Long: `Acknowledge the attention item with the given key, writing it to
 acks.json. The item is hidden from the queue until its condition clears;
 after it clears the ack is dropped and a recurrence raises a new item. An
-unknown key exits 1.`,
+unknown key exits 1.
+
+--disposition is required and records why the item was acked, in
+acks-history.jsonl: needed-human (it needed a human), fixed-by-overseer (the
+overseer fixed it) or noise (it was noise). The Jev replay reads it as the
+item's label.`,
 	Args: cobra.ExactArgs(1),
 	RunE: runAttentionAck,
 }
@@ -110,6 +116,9 @@ func init() {
 	attentionCmd.Flags().DurationVar(&attentionInterval, "interval", time.Second, "Poll interval with --follow")
 	attentionCmd.Flags().BoolVar(&attentionWakeOnly, "wake-only", false, "With --follow, print only events that need a decision (wake=true)")
 	attentionCmd.Flags().DurationVar(&attentionSince, "since", 0, "With --follow, first replay the events from the last DURATION")
+	attentionAckCmd.Flags().StringVar(&attentionDisposition, "disposition", "",
+		"Why you acked: needed-human, fixed-by-overseer or noise")
+	_ = attentionAckCmd.MarkFlagRequired("disposition")
 	attentionCmd.AddCommand(attentionAckCmd)
 	rootCmd.AddCommand(attentionCmd)
 }
@@ -174,10 +183,14 @@ func runAttentionAck(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	if err := ackAttention(townRoot, args[0], time.Now()); err != nil {
+	d, err := attention.ParseDisposition(attentionDisposition)
+	if err != nil {
 		return err
 	}
-	fmt.Fprintf(cmd.OutOrStdout(), "acked %s\n", args[0])
+	if err := ackAttention(townRoot, args[0], time.Now(), d); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "acked %s (%s)\n", args[0], d)
 	return nil
 }
 
@@ -200,7 +213,7 @@ func attentionReport(w io.Writer, all, asJSON bool, view attentionView, now time
 }
 
 // ackAttention records key, refusing a key that is not in the current state.
-func ackAttention(townRoot, key string, now time.Time) error {
+func ackAttention(townRoot, key string, now time.Time, d attention.Disposition) error {
 	state, err := attention.ReadState(townRoot)
 	if err != nil {
 		return err
@@ -209,7 +222,7 @@ func ackAttention(townRoot, key string, now time.Time) error {
 	if !ok {
 		return &ExitCodeError{Code: 1, Err: fmt.Errorf("no attention item with key %q", key)}
 	}
-	return attention.AcknowledgeItem(townRoot, it, now)
+	return attention.AcknowledgeItem(townRoot, it, now, d)
 }
 
 // renderAttention prints the table: a STALE header when the state is old, then

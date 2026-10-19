@@ -136,7 +136,7 @@ func TestAttentionAckWritesAcksAndUnknownKeyExits1(t *testing.T) {
 	now := time.Now()
 	town, _ := attentionSet(t, now)
 
-	if err := ackAttention(town, "esc:hq-3", now); err != nil {
+	if err := ackAttention(town, "esc:hq-3", now, attention.DispositionNeededHuman); err != nil {
 		t.Fatalf("ackAttention: %v", err)
 	}
 	acks, err := attention.ReadAcks(town)
@@ -150,7 +150,7 @@ func TestAttentionAckWritesAcksAndUnknownKeyExits1(t *testing.T) {
 		t.Errorf("existing ack lost: %+v", acks.Acks)
 	}
 
-	err = ackAttention(town, "no:such:key", now)
+	err = ackAttention(town, "no:such:key", now, attention.DispositionNeededHuman)
 	var coded *ExitCodeError
 	if !errors.As(err, &coded) || coded.Code != 1 {
 		t.Fatalf("unknown key error = %v, want ExitCodeError code 1", err)
@@ -384,7 +384,7 @@ func TestAttentionAckAppendsHistoryThatSurvivesTheItemClearing(t *testing.T) {
 	now := time.Now()
 	town, state := attentionSet(t, now)
 
-	if err := ackAttention(town, "red-main:gastown", now); err != nil {
+	if err := ackAttention(town, "red-main:gastown", now, attention.DispositionNoise); err != nil {
 		t.Fatalf("ackAttention: %v", err)
 	}
 	// The item clears: the daemon writes a state without it and prunes.
@@ -407,13 +407,41 @@ func TestAttentionAckAppendsHistoryThatSurvivesTheItemClearing(t *testing.T) {
 	if h.Key != "red-main:gastown" || h.Kind != attention.KindRedMain || h.Rule != attention.RuleRedMain || !h.TS.Equal(now) {
 		t.Errorf("history line = %+v, want key red-main:gastown, kind red-main, rule %s at %v", h, attention.RuleRedMain, now)
 	}
+	if h.Disposition != attention.DispositionNoise {
+		t.Errorf("history disposition = %q, want %q", h.Disposition, attention.DispositionNoise)
+	}
 
 	// A refused ack of an unknown key leaves no line.
-	if err := ackAttention(town, "no:such:key", now); err == nil {
+	if err := ackAttention(town, "no:such:key", now, attention.DispositionNeededHuman); err == nil {
 		t.Fatal("unknown key acked")
 	}
 	if hist, _ = attention.ReadAcksHistory(town); len(hist) != 1 {
 		t.Errorf("history after refused ack = %+v, want still one line", hist)
+	}
+}
+
+// gt attention ack requires --disposition, and the one it is given is written
+// into acks-history.jsonl. ParseDisposition's rejection of other values is
+// tested in internal/attention.
+func TestAttentionAckDispositionFlag(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	town, _ := attentionSet(t, now)
+
+	// The flag is required: cobra refuses the run before ackAttention sees it.
+	if err := attentionAckCmd.ValidateRequiredFlags(); err == nil || !strings.Contains(err.Error(), "disposition") {
+		t.Fatalf("ack without --disposition = %v, want an error naming the flag", err)
+	}
+
+	if err := ackAttention(town, "esc:hq-3", now, attention.DispositionFixedByOverseer); err != nil {
+		t.Fatalf("ackAttention: %v", err)
+	}
+	hist, err := attention.ReadAcksHistory(town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hist) != 1 || hist[0].Disposition != attention.DispositionFixedByOverseer {
+		t.Fatalf("history = %+v, want one line with disposition fixed-by-overseer", hist)
 	}
 }
 
