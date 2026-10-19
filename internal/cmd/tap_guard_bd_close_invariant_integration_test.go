@@ -49,6 +49,22 @@ func TestIntegrationRunTapGuardBdCloseInvariant(t *testing.T) {
 		}
 	})
 
+	// DoneAliasCloseBlocked drives the alias through the guard's real entry
+	// point: `bd done` closes the bead exactly as `bd close` does, so it must
+	// meet the same refusal (gt-ltua8).
+	t.Run("DoneAliasCloseBlocked", func(t *testing.T) {
+		t.Parallel()
+		f := newBdCloseInvariantFixture(t, "polecat/malachite/gt-arno+muck73gu", 3)
+
+		err := f.run(t, "bd done gt-arno")
+		if err == nil {
+			t.Fatal("expected bd done with unmerged commits to be blocked, got nil error")
+		}
+		if exitErr, ok := err.(*SilentExitError); !ok || exitErr.Code != 2 {
+			t.Errorf("expected exit code 2 (BLOCK), got %v", err)
+		}
+	})
+
 	// ZeroCommitsAllowed covers the polecat
 	// "nothing to implement" path: `bd close <id> --reason="no-changes: ..."` on a
 	// branch with no commits of its own must pass, or the guard would block the

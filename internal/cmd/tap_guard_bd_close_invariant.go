@@ -367,9 +367,8 @@ func parseBdCloseSegment(segment []string) (bdCloseInvocation, bool) {
 	return invocation, true
 }
 
-// isBdCloseSubcommand reports whether word is a name `bd close` answers to:
-// `bd close --help` lists the aliases close and done, and `bd done gt-x` closes
-// the bead exactly as `bd close gt-x` does.
+// isBdCloseSubcommand reports whether word is a name `bd close` answers to.
+// Matching only "close" let `bd done` close a bead past the invariant (gt-ltua8).
 func isBdCloseSubcommand(word string) bool {
 	return word == "close" || word == "done"
 }
