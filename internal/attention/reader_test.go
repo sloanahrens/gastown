@@ -350,11 +350,13 @@ func makeReadOnly(t *testing.T, dir string) error {
 			return err
 		}
 	}
+	//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit
 	return os.Chmod(dir, 0o555)
 }
 
 func makeWritable(t *testing.T, dir string) {
 	t.Helper()
+	//testpolicy:allow no-exec-files — the target is the fixture directory: traversal needs its search bit back
 	if err := os.Chmod(dir, 0o755); err != nil && !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("restore queue dir permissions: %v", err)
 	}
