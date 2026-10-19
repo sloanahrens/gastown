@@ -6,8 +6,8 @@
 
 Polecats have three distinct lifecycle layers that operate independently. The
 key design principle: **clean completion retires the live polecat session**.
-The agent identity and landing evidence persist, but completed sessions do not
-return to the idle reuse pool.
+The agent identity and landing evidence persist, and a completed polecat is
+reused only once the workstate gate finds it clean.
 
 ## Operating States
 
@@ -17,7 +17,8 @@ Polecats use these primary operating states:
 |-------|-------------|----------------|
 | **Working** | Actively doing assigned work | Normal operation after `gt sling` |
 | **Idle** | Available before assignment | Spawned or explicitly prepared for work |
-| **Done** | Work completed and session retired | After `gt done` completes successfully |
+| **Submitted** | `gt done` pushed the branch; the bead awaits the landing worker | After `gt done` completes successfully, until the bead lands |
+| **Done** | Work landed and session retired | After the landing worker lands the bead |
 | **Stalled** | Session stopped mid-work | Interrupted, crashed, or timed out without being nudged |
 | **Zombie** | A live tmux session whose worktree directory is gone | A polecat nuked incompletely; `gt polecat list` reports a polecat-named session with an agent bead but no sandbox |
 
@@ -34,17 +35,25 @@ Polecats use these primary operating states:
               │ gt done
               v
          ┌──────────┐
-         │  DONE    │──── branch and bead evidence preserved, session exits
+         │SUBMITTED │──── session exits, bead waits for the landing worker
+         └────┬─────┘
+              │ bead lands
+              v
+         ┌──────────┐
+         │  DONE    │──── branch and bead evidence preserved
          └──────────┘
 ```
 
-No idle reuse in the happy path. Polecats move: IDLE -> WORKING -> DONE.
+Polecats move: IDLE -> WORKING -> SUBMITTED -> DONE. A Done polecat is reused by
+the next `gt sling` only once the workstate gate finds it clean.
 
 **Key distinctions:**
 
 - **Working** = actively executing. Session alive, hook set, doing work.
 - **Idle** = not yet assigned and safe to use.
-- **Done** = work done, session killed, waiting for the landing worker and cleanup.
+- **Submitted** = `gt done` finished, session killed, the hooked bead still carries
+  `gt:ready-to-land`. Not a stall: nothing needs restarting.
+- **Done** = the bead landed; cleanup owns whatever state remains.
 - **Stalled** = supposed to be working, but stopped. The daemon restarts it.
 - **Zombie** = see the table above; a session with no agent bead is foreign, not a zombie.
 
@@ -120,7 +129,7 @@ the polecat — everything else is infrastructure that comes and goes. See
 
 The Claude session is **ephemeral**. It cycles frequently:
 
-- When context fills (via `gt handoff`)
+- When context fills (via `gt handoff --cycle`)
 - On context compaction
 - On crash/timeout
 - After extended work periods
@@ -129,7 +138,7 @@ The Claude session is **ephemeral**. It cycles frequently:
 continues working—only the Claude context refreshes.
 
 ```
-Session 1: work → context fills → handoff
+Session 1: work → context fills → gt handoff --cycle
 Session 2: resume from the hook → gt done
 ```
 
@@ -169,8 +178,8 @@ git checkout -b polecat/<name>/<new-issue>+<timestamp>
 # Start working
 ```
 
-Completed sandboxes are not treated as reusable idle worktrees while unlanded
-work or cleanup state remains attached.
+A submitted sandbox is not a reusable idle worktree while its bead is unlanded
+or cleanup state remains attached.
 
 ### Slot Layer
 
@@ -203,7 +212,7 @@ The slot:
 │                     Work Happens                            │
 │                                                             │
 │  Session cycles happen here:                               │
-│  - gt handoff when context fills                           │
+│  - gt handoff --cycle when context fills                   │
 │  - Compaction triggers respawn                             │
 │  - Crash → daemon restarts the session                     │
 │                                                             │
@@ -235,8 +244,11 @@ The slot:
 **Session cycling**: Normal. Claude restarts, sandbox stays, slot stays.
 
 ```bash
-gt handoff  # Session cycles, polecat continues
+gt handoff --cycle  # Session cycles, polecat continues
 ```
+
+A plain `gt handoff` from a polecat runs `gt done --status DEFERRED` and leaves
+the session to end; only `gt handoff --cycle` respawns it.
 
 **Sandbox setup**: For active work. `gt sling` prepares a fresh branch for the assignment.
 
@@ -272,8 +284,11 @@ Polecats manage their own session lifecycle. External manipulation bypasses veri
 An idle polecat has no hook, no session, and no unlanded work or cleanup state —
 this is **available capacity**.
 
-A **done** polecat has completed work and exited, but unlanded work or cleanup state
-may still be attached. It is not reusable until cleanup resolves that state.
+A **submitted** polecat has run `gt done` and exited while its bead awaits the
+landing worker. It is not reusable until the bead lands.
+
+A **done** polecat's work has landed. The next `gt sling` reuses it only once the
+workstate gate finds it clean; unresolved cleanup state blocks reuse.
 
 A **stalled** polecat has a hook but no session — this is a **failure**:
 - The session crashed and has not been restarted yet
@@ -309,10 +324,10 @@ Sessions cycle for these reasons:
 
 | Trigger | Action | Result |
 |---------|--------|--------|
-| `gt handoff` | Voluntary | Clean cycle to fresh context |
+| `gt handoff --cycle` | Voluntary | Clean cycle to fresh context |
 | Context compaction | Automatic | Forced by Claude Code |
 | Crash/timeout | Failure | Daemon restarts |
-| `gt done` | Completion | Session exits, polecat goes done |
+| `gt done` | Completion | Session exits, polecat goes submitted |
 
 All except `gt done` result in continued work. Only `gt done` signals completion
 and retires the completed polecat session.
