@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -587,21 +588,72 @@ func ensureNewIdentityAbsent(bd beads.Client, newBeadID string) error {
 // fail-closed reading ClassifyHookBead gives it, and a claim the guard no
 // longer holds is refused: rename must not adopt work it cannot show is the
 // renamed polecat's.
-func moveLiveHook(bd beads.Client, hookBead, oldAssignee, newAssignee string) error {
+//
+// The returned issue is the work that followed the name, nil when nothing
+// moved, so a later failure can put the hook back (gt-fkz54).
+func moveLiveHook(bd beads.Client, hookBead, oldAssignee, newAssignee string) (*beads.Issue, error) {
 	work, disposition := classifyHookBeadRef(bd, hookBead)
 	if disposition.Safe {
-		return nil
+		return nil, nil
 	}
 	if work == nil || !polecat.IsHookActiveStatus(work.Status) {
-		return fmt.Errorf("cannot rename: %s", disposition.Blocker)
+		return nil, fmt.Errorf("cannot rename: %s", disposition.Blocker)
 	}
 	transferred, err := bd.TransferIfAssignee(work.ID, oldAssignee, work.Status, newAssignee)
 	if err != nil {
-		return fmt.Errorf("reassigning hook_bead %s to %s: %w", work.ID, newAssignee, err)
+		return nil, fmt.Errorf("reassigning hook_bead %s to %s: %w", work.ID, newAssignee, err)
 	}
 	if !transferred {
-		return fmt.Errorf("cannot rename: hook_bead %s is %s and held by %q, not %s",
+		return nil, fmt.Errorf("cannot rename: hook_bead %s is %s and held by %q, not %s",
 			work.ID, work.Status, work.Assignee, oldAssignee)
+	}
+	return work, nil
+}
+
+// restoreHookAssignee undoes moveLiveHook's transfer when the rename aborts
+// after it. TransferIfAssignee's expected-assignee guard keeps a concurrent
+// holder's claim untouched (gt-fkz54).
+func restoreHookAssignee(bd beads.Client, work *beads.Issue, from, to string) error {
+	if work == nil {
+		return nil
+	}
+	restored, err := bd.TransferIfAssignee(work.ID, from, work.Status, to)
+	if err != nil {
+		return fmt.Errorf("restoring hook_bead %s to %s: %w", work.ID, to, err)
+	}
+	if !restored {
+		return fmt.Errorf("restoring hook_bead %s to %s: no longer held by %s", work.ID, to, from)
+	}
+	return nil
+}
+
+// renameIdentityBeads is rename's beads half: open the new identity, move the
+// live hook, and close the old identity only once both hold. A failed close
+// therefore has to put the hook back, or the work is left assigned to a name
+// whose identity the rename just closed and no open identity holds it
+// (gt-fkz54). When the reverse fails too, the new identity is left open rather
+// than closed, so the name the work is assigned to still has one.
+func renameIdentityBeads(bd beads.Client, oldBeadID, newBeadID, newTitle string, fields *beads.AgentFields, oldAssignee, newAssignee string) error {
+	if _, err := addPolecatIdentity(bd, newBeadID, newTitle, fields); err != nil {
+		return err
+	}
+
+	// The inherited hook describes the new identity only once the work it names
+	// has followed the name.
+	moved, err := moveLiveHook(bd, fields.HookBead, oldAssignee, newAssignee)
+	if err != nil {
+		_ = bd.CloseWithReason("rename failed", newBeadID)
+		return err
+	}
+
+	closeReason := fmt.Sprintf("renamed to %s", newBeadID)
+	if err := bd.CloseWithReason(closeReason, oldBeadID); err != nil {
+		closeErr := fmt.Errorf("closing old identity bead: %w", err)
+		if restoreErr := restoreHookAssignee(bd, moved, newAssignee, oldAssignee); restoreErr != nil {
+			return errors.Join(closeErr, restoreErr)
+		}
+		_ = bd.CloseWithReason("rename failed", newBeadID)
+		return closeErr
 	}
 	return nil
 }
@@ -666,26 +718,10 @@ func runPolecatIdentityRename(cmd *cobra.Command, args []string) error {
 	}
 
 	newTitle := fmt.Sprintf("Polecat %s in %s", newName, rigName)
-	_, err = beads.CreateOrReopenAgentBead(bd, newBeadID, newTitle, newFields)
-	if err != nil {
-		return fmt.Errorf("creating new identity bead: %w", err)
-	}
-
-	// The inherited hook describes the new identity only once the work it names
-	// has followed the name.
-	if err := moveLiveHook(bd, hookBead,
+	if err := renameIdentityBeads(bd, oldBeadID, newBeadID, newTitle, newFields,
 		fmt.Sprintf("%s/polecats/%s", rigName, oldName),
 		fmt.Sprintf("%s/polecats/%s", rigName, newName)); err != nil {
-		_ = bd.CloseWithReason("rename failed", newBeadID)
 		return err
-	}
-
-	// Close old bead with reference to new one
-	closeReason := fmt.Sprintf("renamed to %s", newBeadID)
-	if err := bd.CloseWithReason(closeReason, oldBeadID); err != nil {
-		// Try to clean up new bead
-		_ = bd.CloseWithReason("rename failed", newBeadID)
-		return fmt.Errorf("closing old identity bead: %w", err)
 	}
 
 	fmt.Printf("%s Renamed identity:\n", style.SuccessPrefix)
