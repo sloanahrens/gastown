@@ -401,3 +401,36 @@ func TestOutputRoleDirectivesCappedCommonOnly(t *testing.T) {
 		}
 	}
 }
+
+// A town directive holding only whitespace is absent, not a town source: with a
+// real rig directive beside it the header says Rig, and a rig-only truncation
+// pointer names the rig file alone.
+func TestOutputRoleDirectivesWhitespaceOnlyTownFileIsNotTown(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	townDir := filepath.Join(town, "directives")
+	rigDir := filepath.Join(town, "myrig", "directives")
+	for _, dir := range []string{townDir, rigDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(townDir, "polecat.md"), []byte(" \n\t\n  \n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigFile := filepath.Join(rigDir, "polecat.md")
+	if err := os.WriteFile(rigFile, []byte(strings.Repeat("rig rule line x\n", 400)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var buf bytes.Buffer
+	outputRoleDirectivesCapped(RoleContext{Role: RolePolecat, TownRoot: town, Rig: "myrig"}, &buf, false, true)
+	out := buf.String()
+
+	if !strings.Contains(out, "## Rig Directives") || strings.Contains(out, "Town Directives") || strings.Contains(out, "Town & Rig") {
+		t.Errorf("a whitespace-only town file changed the header from Rig:\n%.200s", out)
+	}
+	if !strings.Contains(out, "read the file(s) above in full: "+rigFile+"_") {
+		t.Errorf("truncation pointer does not name the rig file alone:\n%s", out[len(out)-300:])
+	}
+}

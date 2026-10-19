@@ -517,6 +517,14 @@ func listPolecatSessions(rigs []*rig.Rig, open func(*rig.Rig) polecatSessionList
 	return items
 }
 
+// polecatSessionManagers opens the polecat.SessionManager that gt session list
+// reads for each rig.
+func polecatSessionManagers(t *tmux.Tmux) func(*rig.Rig) polecatSessionLister {
+	return func(r *rig.Rig) polecatSessionLister {
+		return polecat.NewSessionManager(t, r, townRegistry())
+	}
+}
+
 func runSessionList(cmd *cobra.Command, args []string) error {
 	// Find town root
 	townRoot, err := workspace.FindFromCwdOrError()
@@ -552,9 +560,7 @@ func runSessionList(cmd *cobra.Command, args []string) error {
 
 	// Collect sessions from all rigs
 	t := tmux.NewTmux()
-	allSessions := listPolecatSessions(rigs, func(r *rig.Rig) polecatSessionLister {
-		return polecat.NewSessionManager(t, r, townRegistry())
-	})
+	allSessions := listPolecatSessions(rigs, polecatSessionManagers(t))
 
 	// Output
 	if sessionListJSON {
