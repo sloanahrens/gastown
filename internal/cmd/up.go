@@ -192,22 +192,22 @@ func runUp(cmd *cobra.Command, args []string) error {
 	allOK := true
 	var services []ServiceStatus
 
+	// Informational lines go here: stdout is reserved for the --json document,
+	// and --quiet shows only errors.
+	progressOut := upProgressWriter(os.Stdout, upQuiet, upJSON)
+
 	rigs := discoverRigs(townRoot)
 
 	// Safety: bring current agent out of DND on startup so orchestration nudges
 	// are not silently muted after a previous incident/debug session.
 	if changed, err := disableCurrentAgentDND(townRoot); err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: could not reset DND state: %v\n", err)
-	} else if changed && !upQuiet {
-		fmt.Printf("%s DND was enabled; reset to normal for current agent\n", style.SuccessPrefix)
+	} else if changed {
+		reportDNDReset(progressOut)
 	}
 
 	// Formulas land before any agent starts and cooks one.
-	formulaOut := io.Writer(os.Stdout)
-	if upQuiet || upJSON {
-		formulaOut = io.Discard
-	}
-	syncUpFormulas(townRoot, formulaOut, os.Stderr)
+	syncUpFormulas(townRoot, progressOut, os.Stderr)
 
 	// Start Dolt and the daemon in parallel
 	var daemonErr error
@@ -326,7 +326,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 		// 4. Polecats with pinned work (if --restore)
 		for _, rigName := range rigs {
-			polecatsStarted, polecatErrors := startPolecatsWithWork(townRoot, rigName)
+			polecatsStarted, polecatErrors := startPolecatsWithWork(townRoot, rigName, progressOut)
 			for _, name := range polecatsStarted {
 				services = append(services, ServiceStatus{
 					Name:   fmt.Sprintf("Polecat (%s/%s)", rigName, name),
@@ -690,10 +690,24 @@ func parseCrewStartupPreference(pref string, available []string) []string {
 	return result
 }
 
+// upProgressWriter is where gt up writes its informational lines: stdout, or
+// nowhere under --quiet or --json (stdout then carries only the JSON document).
+func upProgressWriter(stdout io.Writer, quiet, asJSON bool) io.Writer {
+	if quiet || asJSON {
+		return io.Discard
+	}
+	return stdout
+}
+
+// reportDNDReset tells the operator gt up cleared the current agent's DND.
+func reportDNDReset(out io.Writer) {
+	fmt.Fprintf(out, "%s DND was enabled; reset to normal for current agent\n", style.SuccessPrefix)
+}
+
 // startPolecatsWithWork starts polecats that have work attached: a pinned
 // handoff bead, or a bead sling hooked or a polecat flow claimed in_progress.
 // Returns list of started polecat names and map of errors.
-func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error) {
+func startPolecatsWithWork(townRoot, rigName string, out io.Writer) ([]string, map[string]error) {
 	// Get polecat session manager
 	_, r, err := getRig(rigName)
 	if err != nil {
@@ -705,7 +719,7 @@ func startPolecatsWithWork(townRoot, rigName string) ([]string, map[string]error
 	start := func(polecatName string) error {
 		return restartPolecatOnSlungAgent(polecatMgr, townRoot, rigName, polecatName, polecat.SessionStartOptions{})
 	}
-	return startPolecatsWithWorkUsing(townRoot, rigName, polecatHasWork, start)
+	return startPolecatsWithWorkUsing(townRoot, rigName, out, polecatHasWork, start)
 }
 
 // polecatHasWork reports whether agentID has work in the rig's bead store: a
@@ -737,7 +751,7 @@ func hasAssignedWork(store beads.Client, agentID string) (bool, error) {
 
 // startPolecatsWithWorkUsing is startPolecatsWithWork with the has-work check
 // and the session start passed in.
-func startPolecatsWithWorkUsing(townRoot, rigName string, hasWork func(polecatPath, agentID string) (bool, error), start func(polecatName string) error) ([]string, map[string]error) {
+func startPolecatsWithWorkUsing(townRoot, rigName string, out io.Writer, hasWork func(polecatPath, agentID string) (bool, error), start func(polecatName string) error) ([]string, map[string]error) {
 	started := []string{}
 	failed := map[string]error{}
 
@@ -767,7 +781,7 @@ func startPolecatsWithWorkUsing(townRoot, rigName string, hasWork func(polecatPa
 		// town restart: the marker is the choke point those stops rely on
 		// (gt-ahik), and starting the session here would undo the stop.
 		if polecatSessionParked(townRoot, rigName, polecatName) {
-			fmt.Printf("  %s %s/%s is parked; not starting it (resume with gt session start)\n",
+			fmt.Fprintf(out, "  %s %s/%s is parked; not starting it (resume with gt session start)\n",
 				style.Dim.Render("○"), rigName, polecatName)
 			continue
 		}

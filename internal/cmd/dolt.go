@@ -19,7 +19,6 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/style"
-	"github.com/steveyegge/gastown/internal/testdb"
 	"github.com/steveyegge/gastown/internal/ui"
 	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -1065,12 +1064,7 @@ func runDoltCleanup(cmd *cobra.Command, args []string) error {
 	if len(orphans) > maxSQLCleanup {
 		fmt.Printf("\n%s Too many orphans (%d) for SQL-based cleanup (max %d).\n",
 			style.Bold.Render("!"), len(orphans), maxSQLCleanup)
-		fmt.Printf("  The server is likely overloaded. SQL cleanup would take hours.\n\n")
-		fmt.Printf("  Instead, stop the server and clean the filesystem:\n\n")
-		fmt.Printf("    gt dolt stop\n")
-		fmt.Printf("    cd %s/.dolt-data && rm -rf %s\n", townRoot, testDatabaseGlobs())
-		fmt.Printf("    gt dolt start\n\n")
-		fmt.Printf("  This is safe — orphan databases have no production data.\n")
+		fmt.Print(tooManyOrphansHint())
 		return fmt.Errorf("too many orphans (%d) for SQL cleanup — see instructions above", len(orphans))
 	}
 
@@ -1369,6 +1363,21 @@ func runDoltList(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// migrateRunningGuard refuses a live migration while the daemon or the Dolt
+// server is up. A dry run makes no changes, so it is never refused.
+func migrateRunningGuard(dryRun, daemonRunning, serverRunning bool) error {
+	if dryRun {
+		return nil
+	}
+	if daemonRunning {
+		return fmt.Errorf("Gas Town daemon is running. Stop it first with: gt daemon stop\n\nThe daemon spawns bd processes that can race with migration.\nStop the daemon, run migration, then restart it.")
+	}
+	if serverRunning {
+		return fmt.Errorf("Dolt server is running. Stop it first with: gt dolt stop")
+	}
+	return nil
+}
+
 func runDoltMigrate(cmd *cobra.Command, args []string) error {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
@@ -1385,14 +1394,13 @@ func runDoltMigrate(cmd *cobra.Command, args []string) error {
 	// run concurrently with migration, race conditions occur between old
 	// old and new backends.
 	daemonRunning, _, _ := daemon.IsRunning(townRoot)
-	if daemonRunning {
-		return fmt.Errorf("Gas Town daemon is running. Stop it first with: gt daemon stop\n\nThe daemon spawns bd processes that can race with migration.\nStop the daemon, run migration, then restart it.")
-	}
 
 	// Check if Dolt server is running - must stop first
 	running, _, _ := doltserver.IsRunning(townRoot)
-	if running {
-		return fmt.Errorf("Dolt server is running. Stop it first with: gt dolt stop")
+
+	// A dry run changes nothing, so it previews while the town is up.
+	if err := migrateRunningGuard(doltMigrateDry, daemonRunning, running); err != nil {
+		return err
 	}
 
 	// Find databases to migrate
@@ -1410,6 +1418,9 @@ func runDoltMigrate(cmd *cobra.Command, args []string) error {
 	}
 
 	if doltMigrateDry {
+		if daemonRunning || running {
+			fmt.Println("Note: the daemon or Dolt server is running; stop them before a real migration.")
+		}
 		fmt.Println("Dry run: no changes made.")
 		return nil
 	}
@@ -1521,12 +1532,17 @@ func runDoltFixMetadata(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-// testDatabaseGlobs is a shell glob per test-database prefix, for the manual
-// cleanup hint.
-func testDatabaseGlobs() string {
-	globs := testdb.Prefixes()
-	for i, p := range globs {
-		globs[i] = p + "*"
-	}
-	return strings.Join(globs, " ")
+// tooManyOrphansHint is the guidance printed when there are too many orphans
+// for SQL cleanup. It suggests no blanket rm -rf: a test-database glob also
+// matches databases an open dolt-hold bead parks, and only the hold-aware
+// gt dolt cleanup listing says which are safe to remove.
+func tooManyOrphansHint() string {
+	return "  The server is likely overloaded. SQL cleanup would take hours.\n\n" +
+		"  Instead, list the orphans while the server is still up (the hold lookup\n" +
+		"  needs it), then stop the server and remove them from the filesystem:\n\n" +
+		"    gt dolt cleanup --dry-run    # lists each orphan and marks the ones HELD by a hold bead\n" +
+		"    gt dolt stop\n" +
+		"    (delete each orphan directory that listing did not mark HELD, by its full name)\n" +
+		"    gt dolt start\n\n" +
+		"  Never remove databases in bulk by glob: a glob also matches held databases.\n"
 }

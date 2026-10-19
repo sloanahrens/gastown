@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -233,7 +235,7 @@ func TestStartPolecatsWithWorkUsingProductionWiring(t *testing.T) {
 		started = append(started, name)
 		return nil
 	}
-	got, failed := startPolecatsWithWorkUsing(townRoot, rig, polecatHasWorkIn(open), start)
+	got, failed := startPolecatsWithWorkUsing(townRoot, rig, io.Discard, polecatHasWorkIn(open), start)
 
 	if len(got) != 1 || got[0] != "busy" || len(started) != 1 || started[0] != "busy" {
 		t.Errorf("started = %v (start called for %v), want only busy", got, started)
@@ -249,5 +251,53 @@ func TestStartPolecatsWithWorkUsingProductionWiring(t *testing.T) {
 	}
 	if !slices.Equal(opened, want) {
 		t.Errorf("store opened at %v, want each polecat's own directory %v", opened, want)
+	}
+}
+
+// gt up --json (and --restore --json) must leave stdout as one JSON document:
+// the DND-reset and parked-polecat lines go through upProgressWriter, which is
+// silent under --json and --quiet (gt-f0gp1).
+func TestUpJSONStdoutIsOnlyJSON(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	const rig = "gastown"
+	if err := os.MkdirAll(filepath.Join(townRoot, rig, "polecats", "garnet"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeDeliberateStopMarker(townRoot, rig, "garnet"); err != nil {
+		t.Fatalf("writeDeliberateStopMarker: %v", err)
+	}
+	hasWork := func(string, string) (bool, error) { return true, nil }
+	start := func(string) error { return errors.New("must not start a parked polecat") }
+
+	for _, tt := range []struct {
+		name        string
+		quiet, json bool
+		wantLines   bool
+	}{
+		{"json", false, true, false},
+		{"quiet", true, false, false},
+		{"text", false, false, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			progress := upProgressWriter(&stdout, tt.quiet, tt.json)
+			// The DND-reset line and the parked-polecat line of gt up --restore.
+			reportDNDReset(progress)
+			startPolecatsWithWorkUsing(townRoot, rig, progress, hasWork, start)
+
+			if got := stdout.Len() > 0; got != tt.wantLines {
+				t.Errorf("progress lines on stdout = %v, want %v; stdout = %q", got, tt.wantLines, stdout.String())
+			}
+			if tt.json {
+				if err := emitUpJSON(&stdout, []ServiceStatus{{Name: "Dolt", OK: true}}); err != nil {
+					t.Fatalf("emitUpJSON: %v", err)
+				}
+				var doc map[string]any
+				if err := json.Unmarshal(stdout.Bytes(), &doc); err != nil {
+					t.Errorf("stdout is not a single JSON document: %v\n%s", err, stdout.String())
+				}
+			}
+		})
 	}
 }

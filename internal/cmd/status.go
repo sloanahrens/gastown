@@ -528,7 +528,7 @@ func renderAgentDetails(w io.Writer, agent townstatus.AgentRuntime, indent strin
 
 	// Line 2: Agent runtime info
 	if agent.AgentInfo != "" {
-		fmt.Printf("%s  agent: %s\n", indent, agent.AgentInfo)
+		fmt.Fprintf(w, "%s  agent: %s\n", indent, agent.AgentInfo)
 	}
 
 	// Line 3: Hook bead (pinned work)
@@ -679,15 +679,17 @@ func formatHookInfo(hookBead, title string, maxLen int) string {
 	return fmt.Sprintf(" → %s", title)
 }
 
-// truncateWithEllipsis shortens a string to maxLen, adding "..." if truncated
+// truncateWithEllipsis shortens a string to maxLen runes, adding "..." if
+// truncated. It cuts on rune boundaries so a multi-byte character is never split.
 func truncateWithEllipsis(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
 	if maxLen < 4 {
-		return s[:maxLen]
+		return string(runes[:max(maxLen, 0)])
 	}
-	return s[:maxLen-3] + "..."
+	return string(runes[:maxLen-3]) + "..."
 }
 
 // detectCurrentDNDStatus returns DND status for the currently resolved role context.
