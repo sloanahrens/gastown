@@ -209,7 +209,7 @@ func TestShouldEmitSessionStart(t *testing.T) {
 			// prime run in the same session looks for them.
 			dir := t.TempDir()
 			if tc.recorded != "" {
-				recordSessionStartEmitted(dir, dir, tc.recorded)
+				recordSessionStartEmitted(dir, tc.recorded)
 			}
 			e := testPrimeHookEnv(dir, nil)
 			if got := e.shouldEmitSessionStart(tc.sessionID, isRuntimeHookInvocationFrom(tc.inputSeen, tc.source)); got != tc.want {
@@ -231,7 +231,7 @@ func TestShouldEmitSessionStart_SpawnerAttributionIsNotEnough(t *testing.T) {
 	dir := t.TempDir()
 	const sessionID = "ba6f760f-05e9-4b5d-a7d5-cabbd43c36e2"
 	env := map[string]string{"GT_SESSION_START_REASON": "daemon-heartbeat", "GT_SESSION_START_CALLER": "daemon"}
-	recordSessionStartEmitted(dir, dir, sessionID)
+	recordSessionStartEmitted(dir, sessionID)
 
 	// The agent's re-prime, in a refinery's session env: the reason survives,
 	// the runtime's own signal does not.
@@ -270,7 +270,7 @@ func TestAgentRePrimeIsNotASecondSessionStart(t *testing.T) {
 		t.Fatal("the SessionStart hook must record the session start")
 	}
 	persistSessionID(worktree, hook.sessionID)
-	recordSessionStartEmitted(worktree, worktree, hook.sessionID) // emitSessionEvent's bookkeeping
+	recordSessionStartEmitted(worktree, hook.sessionID) // emitSessionEvent's bookkeeping
 
 	// 2. The agent's own `gt prime --hook`, from the beacon prompt. Nothing here
 	//    signals a hook: Claude Code gives a Bash call a character device on

@@ -242,27 +242,35 @@ func readRuntimeStateFile(dir, name string) string {
 	return ""
 }
 
-// readRuntimeStateFileSearched reads <name> from the cwd first, then from the
-// town root — the two places a hook invocation writes its session state, so
-// that a prime run from a nested directory still finds what its session wrote.
+// readRuntimeStateFileSearched reads <name> from the cwd first, then from each
+// directory above it below the town root, so that a prime run from a nested
+// directory still finds what its session wrote at the directory the hook ran in.
+// The town root itself is not searched unless it is the cwd: every agent's
+// hook shares it, so what it holds belongs to whichever agent wrote last.
 func readRuntimeStateFileSearched(name string) string {
 	return realPrimeHookEnv().runtimeStateSearched(name)
 }
 
 // runtimeStateSearched is readRuntimeStateFileSearched in e.
 func (e primeHookEnv) runtimeStateSearched(name string) string {
-	// Try cwd first
 	cwd, err := e.getwd()
-	if err == nil {
-		if value := readRuntimeStateFile(cwd, name); value != "" {
-			return value
-		}
+	if err != nil {
+		return ""
+	}
+	if value := readRuntimeStateFile(cwd, name); value != "" {
+		return value
 	}
 
-	// Try town root
+	// Without a town root there is no bound to climb to.
 	townRoot, err := e.findTown()
-	if err == nil && townRoot != "" {
-		if value := readRuntimeStateFile(townRoot, name); value != "" {
+	if err != nil || townRoot == "" {
+		return ""
+	}
+	for dir := filepath.Dir(cwd); dir != townRoot; dir = filepath.Dir(dir) {
+		if !strings.HasPrefix(dir, townRoot+string(filepath.Separator)) {
+			return "" // cwd is outside the town
+		}
+		if value := readRuntimeStateFile(dir, name); value != "" {
 			return value
 		}
 	}
@@ -323,13 +331,10 @@ func sessionStartAlreadyEmitted(sessionID string) bool {
 }
 
 // recordSessionStartEmitted notes that sessionID's session_start is on the
-// record. Written wherever the session ID is persisted — the cwd, and the town
-// root when different — so a later run finds it the way it finds the ID.
-func recordSessionStartEmitted(workDir, townRoot, sessionID string) {
+// record. Written where the session ID is persisted — the cwd — so a later run
+// finds it the way it finds the ID.
+func recordSessionStartEmitted(workDir, sessionID string) {
 	writeRuntimeStateFile(workDir, constants.FileSessionStartEmitted, sessionID)
-	if townRoot != "" && townRoot != workDir {
-		writeRuntimeStateFile(townRoot, constants.FileSessionStartEmitted, sessionID)
-	}
 }
 
 // shouldEmitSessionStart reports whether this `gt prime --hook` run records a
@@ -395,7 +400,7 @@ func emitSessionEvent(ctx RoleContext) {
 	}
 	// Record the start only once it is logged: if the write failed, the session
 	// stays unrecorded and a later run can still put it on the record.
-	recordSessionStartEmitted(ctx.WorkDir, ctx.TownRoot, sessionID)
+	recordSessionStartEmitted(ctx.WorkDir, sessionID)
 }
 
 // sessionStartReason reports why this session started.

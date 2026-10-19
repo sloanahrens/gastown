@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
 
 func TestExtractMoleculeIDFromStep(t *testing.T) {
@@ -767,5 +769,105 @@ func TestMoleculeDepTypeFilterMixed(t *testing.T) {
 	}
 	if len(blockedSteps) != 2 {
 		t.Errorf("blockedSteps=%v, want 2 blocked steps", blockedSteps)
+	}
+}
+
+// TestStepDoneJSONStdoutIsOnlyJSON: gt mol step done --json is read by a
+// program, so stdout holds the one JSON object. The "Closed step" line used to
+// print ahead of it and broke the parse; it now goes to stderr under --json and
+// stays on stdout otherwise.
+func TestStepDoneJSONStdoutIsOnlyJSON(t *testing.T) {
+	t.Parallel()
+
+	newMolecule := func(t *testing.T) (*beadsfake.Fake, *beads.Issue) {
+		t.Helper()
+		fake := beadsfake.New()
+		root, err := fake.Create(beads.CreateOptions{Title: "mol-polecat-work"})
+		if err != nil {
+			t.Fatalf("create molecule root: %v", err)
+		}
+		step, err := fake.Create(beads.CreateOptions{Title: "load-context", Parent: root.ID})
+		if err != nil {
+			t.Fatalf("create step: %v", err)
+		}
+		return fake, step
+	}
+
+	t.Run("json", func(t *testing.T) {
+		t.Parallel()
+		fake, step := newMolecule(t)
+		var stdout, stderr bytes.Buffer
+
+		if _, _, err := completeStep(&stdout, &stderr, fake, step, step.Parent, false, true); err != nil {
+			t.Fatalf("completeStep: %v", err)
+		}
+
+		var got StepDoneResult
+		if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+			t.Fatalf("stdout is not one JSON object: %v\n%s", err, stdout.String())
+		}
+		if got.StepID != step.ID || !got.StepClosed || got.Action != "done" {
+			t.Errorf("result = %+v, want step %s closed with action done", got, step.ID)
+		}
+		if !strings.Contains(stderr.String(), "Closed step "+step.ID) {
+			t.Errorf("stderr = %q, want the Closed step line", stderr.String())
+		}
+	})
+
+	t.Run("text", func(t *testing.T) {
+		t.Parallel()
+		fake, step := newMolecule(t)
+		var stdout, stderr bytes.Buffer
+
+		if _, _, err := completeStep(&stdout, &stderr, fake, step, step.Parent, false, false); err != nil {
+			t.Fatalf("completeStep: %v", err)
+		}
+
+		if !strings.Contains(stdout.String(), "Closed step "+step.ID+": load-context") {
+			t.Errorf("stdout = %q, want the Closed step line", stdout.String())
+		}
+		if stderr.Len() != 0 {
+			t.Errorf("stderr = %q, want nothing", stderr.String())
+		}
+	})
+}
+
+// TestMoleculeCompleteEmptyAgentLeavesPinnedBeads: a role with no agent
+// identity filtered the pinned list by an empty assignee, which lists every
+// pinned bead, and set the first one open — another agent's handoff bead.
+func TestMoleculeCompleteEmptyAgentLeavesPinnedBeads(t *testing.T) {
+	t.Parallel()
+
+	fake := beadsfake.New()
+	other, err := fake.Create(beads.CreateOptions{Title: "handoff", Assignee: "gastown/crew/max"})
+	if err != nil {
+		t.Fatalf("create pinned bead: %v", err)
+	}
+	pinned := string(beads.StatusPinned)
+	if err := fake.Update(other.ID, beads.UpdateOptions{Status: &pinned}); err != nil {
+		t.Fatalf("pin bead: %v", err)
+	}
+
+	agentID := buildAgentIdentity(RoleContext{Role: RoleUnknown, Rig: "gastown"})
+	if agentID != "" {
+		t.Fatalf("precondition: identity of an unknown role = %q, want empty", agentID)
+	}
+	w := &recordingStepWriter{}
+	var out bytes.Buffer
+
+	unpinWork(&out, fake, w, agentID)
+
+	if len(w.calls) != 0 {
+		t.Errorf("writes = %v, want none", w.calls)
+	}
+	if out.Len() != 0 {
+		t.Errorf("output = %q, want none", out.String())
+	}
+
+	// The owner's own identity still unpins its bead.
+	owned := &recordingStepWriter{}
+	unpinWork(&out, fake, owned, "gastown/crew/max")
+	if want := []string{"update " + other.ID + " open"}; !reflect.DeepEqual(owned.calls, want) {
+		t.Errorf("writes for the owner = %v, want %v", owned.calls, want)
 	}
 }

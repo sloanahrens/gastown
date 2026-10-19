@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -221,5 +222,98 @@ func TestShowGitDivergenceWarningBoundsTheFetch(t *testing.T) {
 	}
 	if !strings.Contains(g.fetchSpec, "refs/heads") {
 		t.Errorf("fetch refspec %q does not refresh branch refs", g.fetchSpec)
+	}
+}
+
+// TestMoleculeProgressShowMultipleFailureNotReady: the dependencies of the open
+// steps come from one ShowMultiple read. When it fails, an open step with a
+// blocking dependency must not be listed ready — gt mol status would suggest
+// claiming it — so the read fails the progress instead of defaulting every open
+// step to ready.
+func TestMoleculeProgressShowMultipleFailureNotReady(t *testing.T) {
+	t.Parallel()
+
+	readErr := errors.New("dial tcp 127.0.0.1:3307: connection refused")
+
+	fake := beadsfake.New()
+	root, err := fake.Create(beads.CreateOptions{Title: "mol-polecat-work"})
+	if err != nil {
+		t.Fatalf("create molecule root: %v", err)
+	}
+	first, err := fake.Create(beads.CreateOptions{Title: "load-context", Parent: root.ID})
+	if err != nil {
+		t.Fatalf("create first step: %v", err)
+	}
+	second, err := fake.Create(beads.CreateOptions{Title: "implement", Parent: root.ID})
+	if err != nil {
+		t.Fatalf("create second step: %v", err)
+	}
+	if err := fake.AddDependency(second.ID, first.ID); err != nil {
+		t.Fatalf("add dependency: %v", err)
+	}
+
+	// With the read intact the second step is blocked: the premise.
+	whole, err := getMoleculeProgressInfo(fake, root.ID)
+	if err != nil {
+		t.Fatalf("progress with a working read: %v", err)
+	}
+	if !slices.Contains(whole.BlockedSteps, second.ID) {
+		t.Fatalf("precondition: BlockedSteps = %v, want it to hold %s", whole.BlockedSteps, second.ID)
+	}
+
+	progress, err := getMoleculeProgressInfo(brokenReadClient{Client: fake, showMultiple: true, err: readErr}, root.ID)
+	if err == nil {
+		t.Fatalf("progress = %+v, want an error naming the failed read", progress)
+	}
+	if !strings.Contains(err.Error(), readErr.Error()) {
+		t.Errorf("error = %q, want it to carry %q", err, readErr)
+	}
+	if progress != nil && slices.Contains(progress.ReadySteps, second.ID) {
+		t.Errorf("ReadySteps = %v lists %s, which depends on an open step", progress.ReadySteps, second.ID)
+	}
+}
+
+// TestMoleculeCurrentPinnedStepIsCurrent: a step a hand-off left pinned is held
+// by an agent, so it is the molecule's current step; counting it in the total
+// but in no bucket reported the molecule blocked with no current step.
+func TestMoleculeCurrentPinnedStepIsCurrent(t *testing.T) {
+	t.Parallel()
+
+	fake := beadsfake.New()
+	root, err := fake.Create(beads.CreateOptions{Title: "mol-polecat-work"})
+	if err != nil {
+		t.Fatalf("create molecule root: %v", err)
+	}
+	done, err := fake.Create(beads.CreateOptions{Title: "load-context", Parent: root.ID})
+	if err != nil {
+		t.Fatalf("create closed step: %v", err)
+	}
+	pinned, err := fake.Create(beads.CreateOptions{Title: "implement", Parent: root.ID})
+	if err != nil {
+		t.Fatalf("create pinned step: %v", err)
+	}
+	if err := fake.Close(done.ID); err != nil {
+		t.Fatalf("close step: %v", err)
+	}
+	status := string(beads.StatusPinned)
+	if err := fake.Update(pinned.ID, beads.UpdateOptions{Status: &status}); err != nil {
+		t.Fatalf("pin step: %v", err)
+	}
+
+	handoff := &beads.Issue{
+		ID:    "gt-handoff",
+		Title: "handoff",
+		Description: beads.SetAttachmentFields(&beads.Issue{}, &beads.AttachmentFields{
+			AttachedMolecule: root.ID,
+		}),
+	}
+
+	info := moleculeCurrentFrom(fake, handoff, "gastown/nux")
+
+	if info.Status != "working" {
+		t.Errorf("status = %q, want working", info.Status)
+	}
+	if info.CurrentStepID != pinned.ID {
+		t.Errorf("CurrentStepID = %q, want the pinned step %s", info.CurrentStepID, pinned.ID)
 	}
 }

@@ -189,8 +189,8 @@ func runMoleculeProgress(cmd *cobra.Command, args []string) error {
 	if len(openStepIDs) > 0 {
 		openStepsMap, err = b.ShowMultiple(openStepIDs)
 		if err != nil {
-			// Non-fatal: continue without dependency info (all open steps will be "ready")
-			openStepsMap = make(map[string]*beads.Issue)
+			// Without the dependencies every open step would read as ready.
+			return fmt.Errorf("reading %d open step(s) of %s: %w", len(openStepIDs), rootID, err)
 		}
 	}
 
@@ -560,8 +560,9 @@ func getMoleculeProgressInfo(b beads.Client, moleculeRootID string) (*MoleculePr
 	if len(openStepIDs) > 0 {
 		openStepsMap, err = b.ShowMultiple(openStepIDs)
 		if err != nil {
-			// Non-fatal: continue without dependency info (all open steps will be "ready")
-			openStepsMap = make(map[string]*beads.Issue)
+			// Without the dependencies every open step would read as ready, and
+			// a blocked step would be offered for claiming.
+			return nil, fmt.Errorf("reading %d open step(s) of %s: %w", len(openStepIDs), moleculeRootID, err)
 		}
 	}
 
@@ -1019,11 +1020,16 @@ func moleculeCurrentFrom(b beads.Client, handoff *beads.Issue, target string) Mo
 		case "closed":
 			info.StepsComplete++
 			closedIDs[child.ID] = true
-		case "in_progress":
+		case "in_progress", "pinned", "hooked":
+			// A pinned or hooked step is held by an agent, which is what
+			// in_progress says; leaving it out of every bucket reported the
+			// molecule blocked with no current step.
 			inProgressSteps = append(inProgressSteps, child)
 		case "open":
 			openStepIDs = append(openStepIDs, child.ID)
 		}
+		// blocked and deferred steps stay in no bucket: with nothing else
+		// active or ready the molecule is blocked, which is what they mean.
 	}
 
 	// Fetch full details for open steps to get dependency info.

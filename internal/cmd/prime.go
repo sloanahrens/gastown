@@ -174,7 +174,7 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	}
 
 	if primeHookMode {
-		handlePrimeHookMode(townRoot, cwd)
+		handlePrimeHookMode(cwd)
 		// PreCompact stdout is not model context. The session id was persisted
 		// above; the post-compaction SessionStart (source=compact) re-primes.
 		if primeHookEventName == "PreCompact" {
@@ -481,9 +481,9 @@ func resolvePrimeWorkspace() (cwd, townRoot string, err error) {
 
 // handlePrimeHookMode reads session ID from stdin and persists it.
 // Called when --hook flag is set for LLM runtime hook integration.
-func handlePrimeHookMode(townRoot, cwd string) {
+func handlePrimeHookMode(cwd string) {
 	sessionID, source := readHookSessionID()
-	startPrimeHookSession(townRoot, cwd, sessionID, primeDryRun, signalAgentReady)
+	startPrimeHookSession(cwd, sessionID, primeDryRun, signalAgentReady)
 	primeHookSessionID = sessionID
 
 	// Store source for compact/resume detection in runPrime
@@ -499,14 +499,13 @@ func handlePrimeHookMode(townRoot, cwd string) {
 // persists the session ID and signals the agent ready. A dry run is a preview
 // and does neither, so --hook --dry-run leaves the live tmux session's
 // environment alone. signal is signalAgentReady in production.
-func startPrimeHookSession(townRoot, cwd, sessionID string, dryRun bool, signal func()) {
+func startPrimeHookSession(cwd, sessionID string, dryRun bool, signal func()) {
 	if dryRun {
 		return
 	}
-	persistSessionID(townRoot, sessionID)
-	if cwd != townRoot {
-		persistSessionID(cwd, sessionID)
-	}
+	// Only the agent's own directory: a copy at the town root is shared by
+	// every agent, and the last one to write it would be read back by all.
+	persistSessionID(cwd, sessionID)
 
 	// ZFC: Signal agent readiness via tmux env var (gt-sk5u).
 	// WaitForCommand polls for this instead of probing the process tree.
