@@ -1092,9 +1092,7 @@ func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads
 }
 
 // specHeldStatuses are the statuses that mean a working seat holds the bead:
-// the sling hooks it, and the polecat's claim makes it in_progress. The status
-// only means a seat when an assignee names one; heldBeadsFrom drops the rest
-// (gt-xrog0).
+// the sling hooks it, and the polecat's claim makes it in_progress.
 var specHeldStatuses = []string{beads.StatusHooked, string(beads.StatusInProgress)}
 
 // heldBeadsFrom reduces the beads one store holds to the fields the overlap
