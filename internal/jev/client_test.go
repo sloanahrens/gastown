@@ -193,6 +193,11 @@ func TestChoice_RateLimit(t *testing.T) {
 		{"retry-after seconds", http.Header{"Retry-After": {"3"}}, 3 * time.Second},
 		{"retry-after-ms wins", http.Header{"Retry-After": {"3"}, "Retry-After-Ms": {"250"}}, 250 * time.Millisecond},
 		{"unparseable date", http.Header{"Retry-After": {"Wed, 21 Oct 2026 07:28:00 GMT"}}, 0},
+		{"negative seconds", http.Header{"Retry-After": {"-3"}}, 0},
+		{"infinite seconds", http.Header{"Retry-After": {"+Inf"}}, 0},
+		{"out-of-range seconds", http.Header{"Retry-After": {"1e300"}}, 0},
+		{"infinite ms", http.Header{"Retry-After-Ms": {"Inf"}}, 0},
+		{"out-of-range ms falls back", http.Header{"Retry-After-Ms": {"1e300"}, "Retry-After": {"2"}}, 2 * time.Second},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -271,6 +276,13 @@ func TestChoice_BadResponses(t *testing.T) {
 		{"wrong answer type", `{"answers":{"q":{"type":"noul","noul":0.9}}}`},
 		{"choice not asked", `{"answers":{"q":{"type":"choice","choice":"refunds","probabilities":{},"confidence":1}}}`},
 		{"empty choice", `{"answers":{"q":{"type":"choice","choice":"","probabilities":{},"confidence":1}}}`},
+		{"confidence above 1", `{"answers":{"q":{"type":"choice","choice":"returns","probabilities":{"billing":0,"returns":1,"shipping":0},"confidence":1.5}}}`},
+		{"confidence below 0", `{"answers":{"q":{"type":"choice","choice":"returns","probabilities":{"billing":0,"returns":1,"shipping":0},"confidence":-0.5}}}`},
+		{"option without probability", `{"answers":{"q":{"type":"choice","choice":"returns","probabilities":{"returns":1,"shipping":0},"confidence":1}}}`},
+		{"probability for option not asked", `{"answers":{"q":{"type":"choice","choice":"returns","probabilities":{"billing":0,"returns":1,"shipping":0,"refunds":0},"confidence":1}}}`},
+		{"probabilities do not sum to 1", `{"answers":{"q":{"type":"choice","choice":"returns","probabilities":{"billing":0.5,"returns":0.5,"shipping":0.5},"confidence":1}}}`},
+		{"probability outside 0 to 1", `{"answers":{"q":{"type":"choice","choice":"returns","probabilities":{"billing":1.5,"returns":-0.5,"shipping":0},"confidence":1}}}`},
+		{"choice is not most probable", `{"answers":{"q":{"type":"choice","choice":"billing","probabilities":{"billing":0.1,"returns":0.8,"shipping":0.1},"confidence":1}}}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -296,6 +308,14 @@ func TestChoice_TransportErrorScrubsKey(t *testing.T) {
 	assert.NotContains(t, err.Error(), testKey)
 	assert.Contains(t, err.Error(), "[redacted]")
 	assert.NotErrorIs(t, err, ErrTimeout)
+}
+
+func TestNewClient_NilHTTPClientKeepsDefault(t *testing.T) {
+	t.Parallel()
+	c, err := NewClient(WithKey(testKey), WithHTTPClient(nil))
+
+	require.NoError(t, err)
+	assert.Equal(t, http.DefaultClient, c.httpClient)
 }
 
 func TestWithTimeout_NonPositiveKeepsDefault(t *testing.T) {

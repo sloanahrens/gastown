@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"strconv"
@@ -39,6 +40,10 @@ const (
 
 	// maxMessage caps the server error text carried in a StatusError.
 	maxMessage = 200
+
+	// probabilityTolerance absorbs decimal rounding in the sum of a response's
+	// probabilities, which JSON may deliver as 0.9999999999999999.
+	probabilityTolerance = 1e-6
 )
 
 // Client asks Choice questions of one Jev endpoint.
@@ -53,7 +58,8 @@ type Client struct {
 // Option configures a Client.
 type Option func(*Client)
 
-// WithHTTPClient sets the HTTP client the requests go through.
+// WithHTTPClient sets the HTTP client the requests go through; nil keeps the
+// default client.
 func WithHTTPClient(h *http.Client) Option { return func(c *Client) { c.httpClient = h } }
 
 // WithBaseURL sets the full endpoint URL, for tests.
@@ -81,6 +87,9 @@ func NewClient(opts ...Option) (*Client, error) {
 	c := &Client{httpClient: http.DefaultClient, baseURL: defaultBaseURL, timeout: DefaultTimeout}
 	for _, o := range opts {
 		o(c)
+	}
+	if c.httpClient == nil {
+		c.httpClient = http.DefaultClient
 	}
 	if c.key != "" {
 		return c, nil
@@ -196,7 +205,8 @@ func (c *Client) Choice(ctx context.Context, state any, instructions string, cri
 	return parseAnswer(data, criteria)
 }
 
-// parseAnswer decodes a 2xx body and checks it answers the question asked.
+// parseAnswer decodes a 2xx body and returns ErrBadResponse when it does not
+// answer the question asked with the values Answer documents.
 func parseAnswer(data []byte, criteria map[string]string) (*Answer, error) {
 	var r response
 	if err := json.Unmarshal(data, &r); err != nil {
@@ -209,6 +219,15 @@ func parseAnswer(data []byte, criteria map[string]string) (*Answer, error) {
 	if _, ok := criteria[a.Choice]; !ok {
 		return nil, fmt.Errorf("%w: choice %q is not an option asked", ErrBadResponse, a.Choice)
 	}
+	if a.Confidence < 0 || a.Confidence > 1 {
+		return nil, fmt.Errorf("%w: confidence %v is outside 0 to 1", ErrBadResponse, a.Confidence)
+	}
+	if err := checkProbabilities(a.Probabilities, criteria); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrBadResponse, err)
+	}
+	if a.Probabilities[a.Choice] < highest(a.Probabilities) {
+		return nil, fmt.Errorf("%w: choice %q is not the most probable option", ErrBadResponse, a.Choice)
+	}
 	return &Answer{
 		Choice:        a.Choice,
 		Probabilities: a.Probabilities,
@@ -216,6 +235,39 @@ func parseAnswer(data []byte, criteria map[string]string) (*Answer, error) {
 		Model:         r.Model,
 		Usage:         r.Usage,
 	}, nil
+}
+
+// checkProbabilities checks that probabilities name every option asked and no
+// other, each within 0 to 1, and sum to 1.
+func checkProbabilities(probabilities map[string]float64, criteria map[string]string) error {
+	if len(probabilities) != len(criteria) {
+		return fmt.Errorf("probabilities cover %d options, %d were asked", len(probabilities), len(criteria))
+	}
+	var sum float64
+	for name, p := range probabilities {
+		if _, ok := criteria[name]; !ok {
+			return fmt.Errorf("probability for %q, which was not asked", name)
+		}
+		if p < 0 || p > 1 {
+			return fmt.Errorf("probability for %q is %v, outside 0 to 1", name, p)
+		}
+		sum += p
+	}
+	if math.Abs(sum-1) > probabilityTolerance {
+		return fmt.Errorf("probabilities sum to %v, not 1", sum)
+	}
+	return nil
+}
+
+// highest returns the largest probability in probabilities.
+func highest(probabilities map[string]float64) float64 {
+	best := math.Inf(-1)
+	for _, p := range probabilities {
+		if p > best {
+			best = p
+		}
+	}
+	return best
 }
 
 // transportErr maps a failed round trip to ErrTimeout when the call ran out
@@ -242,8 +294,9 @@ func (c *Client) redact(err error) error {
 	return errors.New(strings.ReplaceAll(err.Error(), c.key, "[redacted]"))
 }
 
-// message extracts a short error text from an error body: the "message" or
-// "error" field of a JSON object when present, else the raw text.
+// message extracts a short error text from an error body: the "message",
+// "error" or "detail" field of a JSON object when present, else the raw text,
+// with the key redacted and the text cut to at most maxMessage bytes.
 func (c *Client) message(data []byte) string {
 	text := strings.TrimSpace(string(data))
 	var obj map[string]any
@@ -265,13 +318,26 @@ func (c *Client) message(data []byte) string {
 }
 
 // retryAfter reads the delay a 429 asks for from retry-after-ms or
-// Retry-After (whole seconds); zero when neither parses.
+// Retry-After (whole seconds); zero when neither is a usable number.
 func retryAfter(h http.Header) time.Duration {
-	if ms, err := strconv.ParseFloat(strings.TrimSpace(h.Get("retry-after-ms")), 64); err == nil && ms >= 0 {
-		return time.Duration(ms * float64(time.Millisecond))
+	if d, ok := parseDelay(h.Get("retry-after-ms"), time.Millisecond); ok {
+		return d
 	}
-	if s, err := strconv.ParseFloat(strings.TrimSpace(h.Get("Retry-After")), 64); err == nil && s >= 0 {
-		return time.Duration(s * float64(time.Second))
+	d, _ := parseDelay(h.Get("Retry-After"), time.Second)
+	return d
+}
+
+// parseDelay reads a non-negative duration written as a count of unit. It
+// reports false for a value that is not finite or that overflows
+// time.Duration, so a malformed header reads as no delay rather than a
+// negative one.
+func parseDelay(s string, unit time.Duration) (time.Duration, bool) {
+	n, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil || math.IsNaN(n) || math.IsInf(n, 0) || n < 0 {
+		return 0, false
 	}
-	return 0
+	if n >= float64(math.MaxInt64)/float64(unit) {
+		return 0, false
+	}
+	return time.Duration(n * float64(unit)), true
 }
