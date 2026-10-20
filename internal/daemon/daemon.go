@@ -437,6 +437,11 @@ type Daemon struct {
 	specSeats    specSeatTracker
 	specSeatHold dispatch.HoldLatch
 
+	// specPatrolHold remembers the patrol config read error the tick bound
+	// last fell back on, so an unreadable block is logged once per distinct
+	// error (spec_dispatch.go, gt-zeqqg).
+	specPatrolHold dispatch.HoldLatch
+
 	// dispatchTicks is the spec_dispatch ticker's recent tick decisions,
 	// oldest first, which townhealth's dispatch field judges to tell a
 	// dispatcher that is off from one that is stalled (gt-xiw7o).
