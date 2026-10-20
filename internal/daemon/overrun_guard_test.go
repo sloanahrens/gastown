@@ -85,6 +85,11 @@ type overrunFake struct {
 	// failOn makes the named step return its error each time it runs.
 	calls  []string
 	failOn map[string]error
+
+	// resetWorktree, when set, is the stop's worktree reset, logged as
+	// "reset-worktree". nil leaves the seam unset, so the call lists of the
+	// stops that do not test the reset stay as they were.
+	resetWorktree func(seat overrunSeat) error
 	// handedBack lists the beads handBack received, with the branch it was given.
 	handedBack []string
 	// pushed lists the bead and branch each push received; agentBeadsReset the
@@ -119,6 +124,17 @@ func (f *overrunFake) step(name string, seat overrunSeat) error {
 }
 
 func (f *overrunFake) seams() overrunSeams {
+	s := f.baseSeams()
+	if f.resetWorktree != nil {
+		s.resetWorktree = func(seat overrunSeat) error {
+			f.calls = append(f.calls, "reset-worktree "+seat.Rig+"/"+seat.Polecat)
+			return f.resetWorktree(seat)
+		}
+	}
+	return s
+}
+
+func (f *overrunFake) baseSeams() overrunSeams {
 	return overrunSeams{
 		now:          func() time.Time { return f.now },
 		workingSeats: func() ([]overrunSeat, error) { return f.seats, nil },

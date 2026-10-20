@@ -59,8 +59,14 @@ const (
 //     clears, then retire the seat — end the pause and stop its record in the
 //     one write — so the polecat name and its worktree can take new work and
 //     nothing reads the sessionless seat as a running seat whose session died.
-//     The kept branch is safe without the park: it is on origin, the bead's
-//     comment names it, and the worktree is not touched.
+//     The kept branch is safe without the park: it is on origin and the bead's
+//     comment names it. When the push is confirmed — origin's head for the
+//     branch, read back with ls-remote, is the worktree's HEAD, and the worktree
+//     holds nothing uncommitted — the release also resets the worktree to
+//     origin's default branch, detached, and deletes the local branch
+//     (resetWorktree), so that once another seat lands the branch the retired
+//     seat does not read as unpushed work. A readback that does not confirm
+//     leaves the worktree as it is.
 //
 // submittedNow is read before step 1 and before step 4: a seat that has
 // submitted (gt done running, or gt:ready-to-land) is not stopped, and a bead
@@ -87,8 +93,9 @@ const (
 // Progress is saved after each step, so a step that fails is logged and
 // retried from the failed step on the next tick, never from the top and never
 // skipping ahead. StoppedAt is written last; with it set the stop does not run
-// again for this sling. It never deletes a branch or a worktree and never
-// nukes a seat.
+// again for this sling. It deletes a local branch only after origin is read
+// back holding that exact commit, never removes a worktree and never nukes a
+// seat.
 func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, elapsed time.Duration) {
 	who := seat.Rig + "/" + seat.Polecat
 	now := s.now()
@@ -361,6 +368,19 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 			return
 		}
 	}
+	// A confirmed push leaves nothing in the worktree that origin lacks, so the
+	// seat is put back to its idle state before its cleanup status is probed.
+	// Only a push this stop made counts (PushedAt); a give-up returned above.
+	// The reset confirms the push itself and does nothing when it cannot, and a
+	// failure is logged rather than retried: the branch is on origin and the
+	// release goes on, as it did before the reset existed.
+	if s.resetWorktree != nil && !st.PushedAt.IsZero() {
+		reset := seat
+		reset.Bead, reset.Branch = st.Bead, st.Branch
+		if err := s.resetWorktree(reset); err != nil {
+			d.logger.Printf("overrun_guard: WARNING: %s: worktree not reset after the push of %s: %v", who, branch, err)
+		}
+	}
 	// The cleanup status the reset above cleared is recorded next, while the
 	// pause still keeps a new sling off the name: without it a later
 	// `gt polecat nuke` refuses the seat it was told to release, for a
@@ -449,6 +469,7 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 	s.finishedOnOrigin = d.overrunFinishedOnOrigin
 	s.resetAgentBead = d.overrunResetAgentBead
 	s.recordCleanup = d.overrunRecordCleanupStatus
+	s.resetWorktree = d.overrunResetWorktree
 	s.retire = func(seat overrunSeat) error {
 		return agentpause.Retire(d.config.TownRoot, seat.Rig, constants.RolePolecat, seat.Polecat, overrunActor)
 	}
@@ -502,6 +523,63 @@ func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
 		}
 		return fmt.Errorf("push %s: %w", branch, err)
 	}
+	return nil
+}
+
+// overrunResetWorktree is the resetWorktree seam: it puts a released seat's
+// worktree back to its idle state, detached at origin's default branch with the
+// kept branch deleted, once the push is confirmed. Confirmed means origin, asked
+// now with ls-remote, holds for the branch exactly the commit the worktree's
+// HEAD is on, and the worktree holds nothing uncommitted and no stash. Anything
+// else — no worktree or branch, a branch already gone, origin unreachable or
+// holding another commit, HEAD off the branch, work at risk — leaves the
+// worktree untouched and returns nil: the push step already stands for the
+// branch, and the seat reads as it did before this reset existed. The delete is
+// forced because the branch is no longer merged into the HEAD the detach
+// leaves; origin holding its tip is what makes that safe.
+func (d *Daemon) overrunResetWorktree(seat overrunSeat) error {
+	who := seat.Rig + "/" + seat.Polecat
+	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
+	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
+	if workDir == "" {
+		return nil
+	}
+	g := d.gitAt(workDir)
+	branch := seat.Branch
+	if branch == "" || branch == "(unknown)" {
+		current, err := g.CurrentBranch()
+		if err != nil {
+			return nil
+		}
+		branch = current
+	}
+	if branch == "" || branch == "HEAD" {
+		return nil
+	}
+	tip, err := g.Rev("refs/heads/" + branch)
+	if err != nil || tip == "" {
+		return nil
+	}
+	if head, err := g.Rev("HEAD"); err != nil || head != tip {
+		d.logger.Printf("overrun_guard: %s: HEAD is not on branch %s; worktree left as it is", who, branch)
+		return nil
+	}
+	if origin := originBranchSHA(g, branch); origin != tip {
+		d.logger.Printf("overrun_guard: %s: origin does not hold %s at %s; worktree left as it is", who, branch, tip)
+		return nil
+	}
+	if status := overrunCleanupStatus(g); status != string(polecat.CleanupClean) {
+		d.logger.Printf("overrun_guard: %s: worktree is %s; left as it is", who, status)
+		return nil
+	}
+	base := g.CleanDefaultBranchBaseRef("origin", g.RemoteDefaultBranch())
+	if err := g.CheckoutDetach(base); err != nil {
+		return fmt.Errorf("detach at %s: %w", base, err)
+	}
+	if err := g.DeleteBranch(branch, true); err != nil {
+		return fmt.Errorf("delete branch %s: %w", branch, err)
+	}
+	d.logger.Printf("overrun_guard: %s: worktree reset to %s, branch %s dropped (origin holds %s)", who, base, branch, tip)
 	return nil
 }
 

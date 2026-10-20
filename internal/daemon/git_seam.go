@@ -43,6 +43,9 @@ type daemonGit interface {
 	ConfigSet(key, value string) error
 	RemoteURL(remote string) (string, error)
 	CurrentBranch() (string, error)
+	// CheckoutDetach detaches HEAD at a ref, for the overrun stop's reset of a
+	// released seat's worktree.
+	CheckoutDetach(ref string) error
 	CommitWithAuthor(message, author string) error
 	// ResetSoft moves the repository's branch to a ref and leaves its index
 	// and working tree alone, so the commits it had above the ref become
