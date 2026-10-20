@@ -77,7 +77,7 @@ func TestSpecDispatchFailureNamesTheBoundTheTickRanUnder(t *testing.T) {
 // one constant (gt-zeqqg).
 func TestSpecSlingsHookedCountsTheSharedMarker(t *testing.T) {
 	t.Parallel()
-	out := strings.Repeat("  ✓ "+dispatch.SlingHookedMarker+"p\n", 3)
+	out := strings.Repeat("  ✓ "+dispatch.SlingHookedLine("p")+"\n", 3)
 	if got := specSlingsHooked([]byte(out)); got != 3 {
 		t.Errorf("slings hooked = %d, want 3", got)
 	}

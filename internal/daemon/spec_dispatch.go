@@ -371,10 +371,11 @@ func (d *Daemon) runSpecDispatchCommand(bound time.Duration, extra ...string) ([
 
 // specSlingsHooked counts the slings a tick's output shows hooked before the
 // report, which is what a tick killed at its bound still prints (gt-bbfpr). A
-// killed tick prints dispatch.SlingHookedMarker once per sling, the line
-// sling.Run prints once it has hooked the bead.
+// killed tick prints one hooked line per sling, the line sling.Run prints once
+// it has hooked the bead; dispatch.CountSlingHooked counts those and not the
+// other "Work attached to" lines `gt sling` and `gt hook` print.
 func specSlingsHooked(out []byte) int {
-	return strings.Count(string(out), dispatch.SlingHookedMarker)
+	return dispatch.CountSlingHooked(out)
 }
 
 // specDetailOwner names this daemon process to the ticks it starts. The tick
