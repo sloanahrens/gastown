@@ -18,8 +18,8 @@ var (
 	// ErrUnauthorized marks an HTTP 401: the key is missing or invalid.
 	ErrUnauthorized = errors.New("jev: unauthorized")
 
-	// ErrBadResponse marks a 2xx response that does not hold a usable Choice
-	// answer for the question asked.
+	// ErrBadResponse marks a 2xx response that does not hold a usable answer
+	// for every question asked.
 	ErrBadResponse = errors.New("jev: unusable response")
 )
 

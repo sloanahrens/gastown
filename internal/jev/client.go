@@ -1,6 +1,10 @@
-// Package jev is the client for TypeSafe's Jev model: it asks one Choice
-// question of POST /v1/systemone and returns the chosen option, the option
-// probabilities, the confidence and the token usage of the call.
+// Package jev is the client for TypeSafe's Jev model: it asks a set of Choice,
+// Noul and Score questions about one state in a single POST /v1/systemone and
+// returns every answer with the call's token usage.
+//
+// A Choice picks one of named options, a Noul answers a yes/no statement with
+// a probability, and a Score places the state on an ordered rubric. One Ask
+// carries all three, paying the state's tokens and the output once.
 //
 // The API key comes from a 0600 key file (see KeyPaths) and appears in
 // neither errors nor logs; the client logs nothing, and request bodies are
@@ -31,9 +35,16 @@ const (
 	// DefaultTimeout bounds one call, connect to last body byte.
 	DefaultTimeout = 30 * time.Second
 
-	// questionID names the one question in each request; the model never
-	// sees it.
+	// questionID names the one question in each Choice request; the model
+	// never sees it.
 	questionID = "q"
+
+	// The question types the vendor API accepts, and the Score rubric width.
+	typeChoice     = "choice"
+	typeNoul       = "noul"
+	typeScore      = "score"
+	minScoreLevels = 2
+	maxScoreLevels = 10
 
 	// maxBody caps how much of a response is read.
 	maxBody = 1 << 20
@@ -143,10 +154,67 @@ type Answer struct {
 	Usage Usage
 }
 
+// Question is one question in an Ask, of type "choice", "noul" or "score".
+type Question struct {
+	// Type is "choice" (asks one of Options), "noul" (asks whether a statement
+	// holds) or "score" (asks which of Levels fits).
+	Type string
+	// Instructions tells the model what to judge.
+	Instructions string
+	// Options maps each choice option's name to its description; a choice
+	// needs at least one.
+	Options map[string]string
+	// Levels describes a score's 2 to 10 rubric levels, low to high; the
+	// answer's Score indexes this slice.
+	Levels []string
+	// True and False describe what a noul's 1 and 0 mean; both empty asks the
+	// bare statement.
+	True, False string
+}
+
+// Answers holds every answer to one Ask, keyed by question id; a map is empty
+// when no question of its type was asked.
+type Answers struct {
+	// Model is the versioned model ID that answered.
+	Model string
+	// Usage is the token usage of the call.
+	Usage Usage
+	// Choice maps each choice id to its answer.
+	Choice map[string]ChoiceAnswer
+	// Noul maps each noul id to the probability that its statement holds.
+	Noul map[string]float64
+	// Score maps each score id to its answer.
+	Score map[string]ScoreAnswer
+}
+
+// ChoiceAnswer is the answer to one choice question.
+type ChoiceAnswer struct {
+	// Choice is the option with the highest probability.
+	Choice string
+	// Probabilities maps every option asked to its probability.
+	Probabilities map[string]float64
+	// Confidence is 0 to 1, derived from how spread Probabilities is.
+	Confidence float64
+}
+
+// ScoreAnswer is the answer to one score question.
+type ScoreAnswer struct {
+	// Score is the chosen level, 0 to len(Levels)-1.
+	Score float64
+	// Confidence is 0 to 1.
+	Confidence float64
+	// Probabilities maps each level label in Legend to its probability.
+	Probabilities map[string]float64
+	// Legend labels the levels Probabilities is keyed by.
+	Legend map[string]string
+}
+
 type question struct {
-	Type         string            `json:"type"`
-	Instructions string            `json:"instructions"`
-	Criteria     map[string]string `json:"criteria"`
+	Type         string `json:"type"`
+	Instructions string `json:"instructions"`
+	// Criteria is a map for choice and noul, a []string for score, and absent
+	// for a noul that describes neither outcome.
+	Criteria any `json:"criteria,omitempty"`
 }
 
 type request struct {
@@ -155,39 +223,80 @@ type request struct {
 	Questions map[string]question `json:"questions"`
 }
 
-type choiceAnswer struct {
+// answer is the wire answer of any type; only the fields its Type names are
+// read. Noul and Score are pointers so a missing value reads as missing, not
+// as zero.
+type answer struct {
 	Type          string             `json:"type"`
 	Choice        string             `json:"choice"`
 	Probabilities map[string]float64 `json:"probabilities"`
 	Confidence    float64            `json:"confidence"`
+	Noul          *float64           `json:"noul"`
+	Score         *float64           `json:"score"`
+	Legend        map[string]string  `json:"legend"`
 }
 
 type response struct {
-	Model   string                  `json:"model"`
-	Answers map[string]choiceAnswer `json:"answers"`
-	Usage   Usage                   `json:"usage"`
+	Model   string            `json:"model"`
+	Answers map[string]answer `json:"answers"`
+	Usage   Usage             `json:"usage"`
 }
 
-// Choice asks which of criteria's options fits state under instructions. The
-// criteria map is option name to description. It makes one HTTP call and
-// never retries: a deadline returns ErrTimeout, a 429 returns a
-// *RateLimitError, a 401 returns ErrUnauthorized, any other non-2xx returns a
-// *StatusError, and a 2xx without a usable answer returns ErrBadResponse.
+// Ask sends one request carrying every question in qs about state and returns
+// every answer keyed by question id. It makes one HTTP call and never retries:
+// a deadline returns ErrTimeout, a 429 returns a *RateLimitError, a 401
+// returns ErrUnauthorized, any other non-2xx returns a *StatusError, and a 2xx
+// that does not answer every question as asked returns ErrBadResponse. The
+// usage ledger records one line per call.
+func (c *Client) Ask(ctx context.Context, state any, qs map[string]Question) (*Answers, error) {
+	if len(qs) == 0 {
+		return nil, errors.New("jev: Ask needs at least one question")
+	}
+	wire, err := wireQuestions(qs)
+	if err != nil {
+		return nil, err
+	}
+	body, err := json.Marshal(request{State: state, Model: Model, Questions: wire})
+	if err != nil {
+		return nil, fmt.Errorf("jev: encode request: %w", err)
+	}
+	data, err := c.post(ctx, body)
+	if err != nil {
+		return nil, err
+	}
+	out, err := parseAnswers(data, qs)
+	if err != nil {
+		return nil, err
+	}
+	c.ledger.record(out.Usage)
+	return out, nil
+}
+
+// Choice asks which of criteria's options fits state under instructions: one
+// choice question, with Ask's errors and ledger line.
 func (c *Client) Choice(ctx context.Context, state any, instructions string, criteria map[string]string) (*Answer, error) {
 	if len(criteria) == 0 {
 		return nil, errors.New("jev: a Choice needs at least one option")
 	}
-	body, err := json.Marshal(request{
-		State: state,
-		Model: Model,
-		Questions: map[string]question{
-			questionID: {Type: "choice", Instructions: instructions, Criteria: criteria},
-		},
+	got, err := c.Ask(ctx, state, map[string]Question{
+		questionID: {Type: typeChoice, Instructions: instructions, Options: criteria},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("jev: encode request: %w", err)
+		return nil, err
 	}
+	a := got.Choice[questionID]
+	return &Answer{
+		Choice:        a.Choice,
+		Probabilities: a.Probabilities,
+		Confidence:    a.Confidence,
+		Model:         got.Model,
+		Usage:         got.Usage,
+	}, nil
+}
 
+// post sends body to the endpoint and returns the 2xx response body, mapping
+// a failed round trip and every non-2xx status to the errors Ask documents.
+func (c *Client) post(ctx context.Context, body []byte) ([]byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.timeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.baseURL, bytes.NewReader(body))
@@ -215,43 +324,154 @@ func (c *Client) Choice(ctx context.Context, state any, instructions string, cri
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
 		return nil, &StatusError{Status: resp.StatusCode, Message: c.message(data)}
 	}
-	ans, err := parseAnswer(data, criteria)
-	if err != nil {
-		return nil, err
-	}
-	c.ledger.record(ans.Usage)
-	return ans, nil
+	return data, nil
 }
 
-// parseAnswer decodes a 2xx body and returns ErrBadResponse when it does not
-// answer the question asked with the values Answer documents.
-func parseAnswer(data []byte, criteria map[string]string) (*Answer, error) {
+// wireQuestions converts qs to the vendor's shape, rejecting a question it
+// cannot carry before any request leaves.
+func wireQuestions(qs map[string]Question) (map[string]question, error) {
+	out := make(map[string]question, len(qs))
+	for id, q := range qs {
+		w, err := wireQuestion(q)
+		if err != nil {
+			return nil, fmt.Errorf("jev: question %q: %w", id, err)
+		}
+		out[id] = w
+	}
+	return out, nil
+}
+
+func wireQuestion(q Question) (question, error) {
+	w := question{Type: q.Type, Instructions: q.Instructions}
+	switch q.Type {
+	case typeChoice:
+		if len(q.Options) == 0 {
+			return question{}, errors.New("a choice needs at least one option")
+		}
+		w.Criteria = q.Options
+	case typeNoul:
+		if criteria := noulCriteria(q.True, q.False); criteria != nil {
+			w.Criteria = criteria
+		}
+	case typeScore:
+		if n := len(q.Levels); n < minScoreLevels || n > maxScoreLevels {
+			return question{}, fmt.Errorf("a score needs %d to %d levels, got %d", minScoreLevels, maxScoreLevels, n)
+		}
+		w.Criteria = q.Levels
+	default:
+		return question{}, fmt.Errorf("unknown type %q", q.Type)
+	}
+	return w, nil
+}
+
+// noulCriteria describes a noul's outcomes, leaving out the empty one and
+// returning nil when neither is described so the wire omits criteria.
+func noulCriteria(trueDesc, falseDesc string) map[string]string {
+	criteria := map[string]string{}
+	if trueDesc != "" {
+		criteria["true"] = trueDesc
+	}
+	if falseDesc != "" {
+		criteria["false"] = falseDesc
+	}
+	if len(criteria) == 0 {
+		return nil
+	}
+	return criteria
+}
+
+// parseAnswers decodes a 2xx body and returns ErrBadResponse unless it answers
+// every question asked, with the type asked and a value that type documents.
+func parseAnswers(data []byte, qs map[string]Question) (*Answers, error) {
 	var r response
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("%w: decode: %v", ErrBadResponse, err)
 	}
-	a, ok := r.Answers[questionID]
-	if !ok || a.Type != "choice" {
-		return nil, fmt.Errorf("%w: no choice answer", ErrBadResponse)
+	out := &Answers{
+		Model:  r.Model,
+		Usage:  r.Usage,
+		Choice: make(map[string]ChoiceAnswer, len(qs)),
+		Noul:   make(map[string]float64, len(qs)),
+		Score:  make(map[string]ScoreAnswer, len(qs)),
 	}
-	if _, ok := criteria[a.Choice]; !ok {
-		return nil, fmt.Errorf("%w: choice %q is not an option asked", ErrBadResponse, a.Choice)
+	for id, q := range qs {
+		a, ok := r.Answers[id]
+		if !ok {
+			return nil, fmt.Errorf("%w: no answer for question %q", ErrBadResponse, id)
+		}
+		if a.Type != q.Type {
+			return nil, fmt.Errorf("%w: question %q was asked %q and answered %q", ErrBadResponse, id, q.Type, a.Type)
+		}
+		switch q.Type {
+		case typeChoice:
+			ca, err := parseChoiceAnswer(a, q.Options)
+			if err != nil {
+				return nil, fmt.Errorf("%w: question %q: %v", ErrBadResponse, id, err)
+			}
+			out.Choice[id] = ca
+		case typeNoul:
+			if a.Noul == nil {
+				return nil, fmt.Errorf("%w: question %q has no noul value", ErrBadResponse, id)
+			}
+			if *a.Noul < 0 || *a.Noul > 1 {
+				return nil, fmt.Errorf("%w: question %q noul %v is outside 0 to 1", ErrBadResponse, id, *a.Noul)
+			}
+			out.Noul[id] = *a.Noul
+		case typeScore:
+			sa, err := parseScoreAnswer(a, len(q.Levels))
+			if err != nil {
+				return nil, fmt.Errorf("%w: question %q: %v", ErrBadResponse, id, err)
+			}
+			out.Score[id] = sa
+		}
+	}
+	return out, nil
+}
+
+// parseChoiceAnswer checks that a choice answer names an option asked, with
+// the most probable probability, and returns it.
+func parseChoiceAnswer(a answer, options map[string]string) (ChoiceAnswer, error) {
+	if _, ok := options[a.Choice]; !ok {
+		return ChoiceAnswer{}, fmt.Errorf("choice %q is not an option asked", a.Choice)
 	}
 	if a.Confidence < 0 || a.Confidence > 1 {
-		return nil, fmt.Errorf("%w: confidence %v is outside 0 to 1", ErrBadResponse, a.Confidence)
+		return ChoiceAnswer{}, fmt.Errorf("confidence %v is outside 0 to 1", a.Confidence)
 	}
-	if err := checkProbabilities(a.Probabilities, criteria); err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrBadResponse, err)
+	if err := checkProbabilities(a.Probabilities, options); err != nil {
+		return ChoiceAnswer{}, err
 	}
 	if a.Probabilities[a.Choice] < highest(a.Probabilities) {
-		return nil, fmt.Errorf("%w: choice %q is not the most probable option", ErrBadResponse, a.Choice)
+		return ChoiceAnswer{}, fmt.Errorf("choice %q is not the most probable option", a.Choice)
 	}
-	return &Answer{
+	return ChoiceAnswer{
 		Choice:        a.Choice,
 		Probabilities: a.Probabilities,
 		Confidence:    a.Confidence,
-		Model:         r.Model,
-		Usage:         r.Usage,
+	}, nil
+}
+
+// parseScoreAnswer checks that a score answer names a level on the rubric and
+// carries a probability distribution over the levels.
+func parseScoreAnswer(a answer, levels int) (ScoreAnswer, error) {
+	if a.Score == nil {
+		return ScoreAnswer{}, errors.New("no score value")
+	}
+	if *a.Score < 0 || *a.Score > float64(levels-1) {
+		return ScoreAnswer{}, fmt.Errorf("score %v is outside 0 to %d", *a.Score, levels-1)
+	}
+	if a.Confidence < 0 || a.Confidence > 1 {
+		return ScoreAnswer{}, fmt.Errorf("confidence %v is outside 0 to 1", a.Confidence)
+	}
+	// A score's probability labels are the model's, not the caller's, so only
+	// their distribution is checked.
+	if err := checkSum(a.Probabilities); err != nil {
+		return ScoreAnswer{}, err
+	}
+	return ScoreAnswer{
+		Score:         *a.Score,
+		Confidence:    a.Confidence,
+		Probabilities: a.Probabilities,
+		Legend:        a.Legend,
 	}, nil
 }
 
@@ -261,11 +481,21 @@ func checkProbabilities(probabilities map[string]float64, criteria map[string]st
 	if len(probabilities) != len(criteria) {
 		return fmt.Errorf("probabilities cover %d options, %d were asked", len(probabilities), len(criteria))
 	}
-	var sum float64
-	for name, p := range probabilities {
+	for name := range probabilities {
 		if _, ok := criteria[name]; !ok {
 			return fmt.Errorf("probability for %q, which was not asked", name)
 		}
+	}
+	return checkSum(probabilities)
+}
+
+// checkSum checks that each probability is within 0 to 1 and the total is 1.
+func checkSum(probabilities map[string]float64) error {
+	if len(probabilities) == 0 {
+		return errors.New("no probabilities")
+	}
+	var sum float64
+	for name, p := range probabilities {
 		if p < 0 || p > 1 {
 			return fmt.Errorf("probability for %q is %v, outside 0 to 1", name, p)
 		}
