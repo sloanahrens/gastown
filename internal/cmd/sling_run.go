@@ -177,6 +177,9 @@ type slingDeps struct {
 	restoreRawFields  func(beadID, townRoot, hookWorkDir string, originalInfo *beadInfo)
 	restorePinned     func(townRoot, beadID, assignee string)
 	restoreHold       func(townRoot, beadID string, hold beadHold)
+	// handBack gives a bead this sling hooked onto an existing seat back to
+	// its pre-sling status and assignee; see handBackHook.
+	handBack func(townRoot, beadID, hookWorkDir, holder string, hold beadHold) bool
 
 	// Nudging the target once the work is hooked.
 	sessionFromPane   func(pane string) string
@@ -274,6 +277,7 @@ func realSlingDeps() *slingDeps {
 		restoreRawFields:  restoreRollbackRawWorkflowFieldsFromCurrent,
 		restorePinned:     restorePinnedBead,
 		restoreHold:       restoreBeadHold,
+		handBack:          handBackHook,
 
 		sessionFromPane:   getSessionFromPane,
 		ensureAgentReady:  ensureAgentReady,

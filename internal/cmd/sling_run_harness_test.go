@@ -302,6 +302,23 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			}
 			h.record("restore hold %s %s %s", id, hold.Status, hold.Assignee)
 		},
+		// The real hand-back is guarded by a read of the bead and an atomic
+		// write on its assignee; the fake mirrors the same guard over h.beads.
+		handBack: func(_, id, _, holder string, hold beadHold) bool {
+			h.mu.Lock()
+			b := h.beads[id]
+			held := b != nil && b.Assignee == holder && (b.Status == "hooked" || b.Status == "in_progress")
+			if held {
+				b.Status, b.Assignee = hold.Status, hold.Assignee
+			}
+			h.mu.Unlock()
+			if !held {
+				h.record("hand back skipped %s", id)
+				return false
+			}
+			h.record("hand back %s %s %s", id, hold.Status, hold.Assignee)
+			return true
+		},
 
 		sessionFromPane:  func(string) string { return "" },
 		ensureAgentReady: func(string) error { return nil },

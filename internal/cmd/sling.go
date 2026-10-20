@@ -782,10 +782,12 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	//
 	// rollbackBeadID stays "" until this sling first writes to the bead, so a
 	// failure before that never burns molecules or releases a hook this sling
-	// did not create. With no polecat spawned, the guard has nothing to own once
-	// the hook has landed.
+	// did not create. It is not only the spawned polecat that owns something
+	// once the hook has landed: the hook is a claim of its own, and a sling
+	// onto a seat that already existed has no spawn to give it back, so a
+	// failure after it leaves the bead hooked or in_progress to a seat that
+	// never runs it — a state the dispatcher never re-slings (gt-moxlb).
 	slingCommitted := false
-	hooked := false
 	rollbackBeadID := ""
 	rollbackReason := ""
 	// restoreOutgoing puts a force-stolen holder's agent-bead state back. The
@@ -806,7 +808,16 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 			restoreOutgoing()
 			restoreOutgoing = nil
 		}
-		if unhooked {
+		// The hook this sling wrote is a claim of its own. A sling that spawned
+		// a polecat gives the bead back with the spawn (rollbackArtifacts); one
+		// that hooked onto a seat that already existed has no spawn to do it,
+		// so it hands the bead back here, to the status and assignee it held
+		// before this sling. The write is guarded on the bead still being
+		// assigned to this sling's target (gt-moxlb): a bead another actor has
+		// taken keeps that actor.
+		handedBack := newPolecatInfo == nil && rollbackBeadID != "" &&
+			r.handBack(townRoot, beadID, hookWorkDir, targetAgent, beadHold{Status: originalStatus, Assignee: originalAssignee})
+		if unhooked && !handedBack {
 			r.restoreHold(townRoot, beadID, beadHold{Status: originalStatus, Assignee: originalAssignee})
 		}
 		unhooked = false
@@ -829,7 +840,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		}
 	}
 	defer func() {
-		if slingCommitted || r.opts.dryRun || (hooked && newPolecatInfo == nil) {
+		if slingCommitted || r.opts.dryRun {
 			return
 		}
 		reason := rollbackReason
@@ -1078,7 +1089,6 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		rollbackReason = "Hook failed"
 		return err
 	}
-	hooked = true
 	r.steps.Step("hook")
 	r.clearOrphanLabels(townRoot, beadID, hookWorkDir)
 
@@ -1420,6 +1430,43 @@ func restoreBeadHold(townRoot, beadID string, hold beadHold) {
 	default:
 		fmt.Printf("  %s Restored bead %s to %s (%s)\n", style.Dim.Render("○"), beadID, hold.Assignee, hold.Status)
 	}
+}
+
+// handBackHook puts a bead this sling hooked back to the status and assignee it
+// held before the sling, but only while it is still assigned to holder — the
+// seat this sling hooked it to (beads.TransferIfAssignee, atomic). A bead
+// another actor has taken in the meantime is left with that actor, and so is
+// one that is no longer held at all (closed, released, or submitted for
+// landing). It reports whether the write landed. The status is the pre-sling
+// one rather than "open", so a bead re-slung out of a pin or another holder's
+// hook goes back to that state instead of into the dispatch pool.
+func handBackHook(townRoot, beadID, hookWorkDir, holder string, hold beadHold) bool {
+	if townRoot == "" || beadID == "" || holder == "" {
+		return false
+	}
+	rel := newPolecatWorkReleaserFn(townRoot, hookWorkDir)
+	if held, _ := heldBy(rel, holder, beadID); !held {
+		return false
+	}
+	status := hold.Status
+	if status == "" {
+		status = "open"
+	}
+	restored, err := rel.RestoreBead(beadID, holder, status, hold.Assignee)
+	switch {
+	case err != nil:
+		fmt.Printf("  %s Could not hand bead %s back from %s: %v\n", style.Dim.Render("Warning:"), beadID, holder, err)
+		return false
+	case !restored:
+		fmt.Printf("  %s Left bead %s with whoever holds it now\n", style.Dim.Render("○"), beadID)
+		return false
+	}
+	assignee := hold.Assignee
+	if assignee == "" {
+		assignee = "(unassigned)"
+	}
+	fmt.Printf("  %s Handed bead %s back to %s (%s)\n", style.Dim.Render("○"), beadID, assignee, status)
+	return true
 }
 
 func restorePinnedBead(townRoot, beadID, assignee string) {
