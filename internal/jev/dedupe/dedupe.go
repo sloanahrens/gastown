@@ -90,11 +90,9 @@ type Pass struct {
 	// CursorPath remembers the last finding a pass asked about.
 	CursorPath string
 
-	// SpentToday reports the USD the pass has spent since local midnight.
-	SpentToday func() (float64, error)
-	// CapUSD is the daily cap: a pass asks nothing more once SpentToday
-	// reaches it.
-	CapUSD float64
+	// Allows says whether the day's Jev spend is still under the cap. The pass
+	// asks it before every Ask.
+	Allows func() (bool, error)
 
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
@@ -149,11 +147,11 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		if err := ctx.Err(); err != nil {
 			return sum, err
 		}
-		spent, err := p.SpentToday()
+		allowed, err := p.Allows()
 		if err != nil {
 			return sum, fmt.Errorf("reading today's spend: %w", err)
 		}
-		if spent >= p.CapUSD {
+		if !allowed {
 			sum.CapReached = true
 			break
 		}
@@ -162,6 +160,7 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			return sum, err
 		}
 		if err := battery.Append(p.LogPath, line); err != nil {
+			err = fmt.Errorf("writing the dedupe log: %w", err)
 			// The answer is paid for. Advance the cursor before reporting,
 			// so the next pass does not ask, and bill, the same finding
 			// again; the lost log line is the lesser failure.

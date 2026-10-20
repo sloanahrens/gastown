@@ -76,8 +76,7 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 		Beads:      rigBeads{b: beads.New(beadsDir)},
 		LogPath:    LogPath(townRoot),
 		CursorPath: CursorPath(townRoot),
-		SpentToday: func() (float64, error) { return town.Spent(time.Now) },
-		CapUSD:     capUSD,
+		Allows:     func() (bool, error) { return town.Allows(time.Now) },
 	}, nil
 }
 
