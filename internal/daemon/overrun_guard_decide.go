@@ -29,6 +29,9 @@ type overrunInput struct {
 	// (overrun_guard_gate.go): the 12 and 20 minute rule measures the rest of
 	// the time, never the gate.
 	GateSpent time.Duration
+	// EscalationSpent is how much of this sling the seat spent waiting on an
+	// open escalation it raised (overrun_guard_escalation.go), the same way.
+	EscalationSpent time.Duration
 }
 
 // decideOverrun returns the action for one seat. A zero SlungAt or one after
@@ -36,16 +39,17 @@ type overrunInput struct {
 // wins over nudge, and fires even when the seat was never nudged. A nudge fires
 // once: Nudged suppresses it on later ticks.
 //
-// The elapsed time it judges is the sling's wall time less GateSpent, so a seat
-// waiting on its own gate runs past both thresholds without a nudge or a stop,
-// and one whose non-gate time passes the stop threshold is stopped even while
-// it is in a gate (gt-vfwuc). A GateSpent past the wall time leaves a negative
-// elapsed, which is under both thresholds: acting on nothing.
+// The elapsed time it judges is the sling's wall time less GateSpent and
+// EscalationSpent, so a seat waiting on its own gate or on an escalation it
+// raised runs past both thresholds without a nudge or a stop, and one whose
+// remaining time passes the stop threshold is stopped even while it is in a
+// gate (gt-vfwuc). Spent time past the wall time leaves a negative elapsed,
+// which is under both thresholds: acting on nothing.
 func decideOverrun(in overrunInput) overrunAction {
 	if in.SlungAt.IsZero() || in.SlungAt.After(in.Now) {
 		return overrunNone
 	}
-	elapsed := in.Now.Sub(in.SlungAt) - in.GateSpent
+	elapsed := in.Now.Sub(in.SlungAt) - in.GateSpent - in.EscalationSpent
 	switch {
 	case elapsed >= in.StopAt:
 		return overrunStop
@@ -114,37 +118,57 @@ func (s overrunState) withGate(slung, now time.Time, inGate bool, maxCharge, max
 	if !s.GateSlingAt.Equal(slung) {
 		s.GateSlingAt, s.GateSpent, s.GateSeenAt = slung, 0, time.Time{}
 	}
-	switch {
-	case inGate && s.GateSeenAt.IsZero():
-		// The first tick that found the gate: nothing before it is charged.
-		s.GateSeenAt = now
-	case inGate && now.After(s.GateSeenAt):
-		s.GateSpent += min(now.Sub(s.GateSeenAt), maxCharge)
-		s.GateSeenAt = now
-	case inGate:
-		// A stamp at or after now is a clock that stepped back. Drop the
-		// stretch rather than charge a negative interval, which would give back
-		// gate time this sling was already credited with; the next tick starts
-		// it again, and what is not charged counts toward the stop (gt-vfwuc).
-		s.GateSeenAt = time.Time{}
-	default:
-		// The gate is over: what it ran past the last tick that saw it open is
-		// not charged, because the guard cannot tell that from work the seat
-		// did after it.
-		s.GateSeenAt = time.Time{}
-	}
-	if s.GateSpent > maxTotal {
-		// The ceiling binds whatever the record held, a state file written
-		// before it existed included.
-		s.GateSpent = maxTotal
-	}
+	s.GateSpent, s.GateSeenAt = chargeWait(s.GateSpent, s.GateSeenAt, now, inGate, maxCharge, maxTotal)
 	return s, s.GateSpent
 }
 
-// sameGate reports whether two records carry the same gate accounting, so a
-// tick writes the state only when one moved.
-func (s overrunState) sameGate(o overrunState) bool {
-	return s.GateSeenAt.Equal(o.GateSeenAt) && s.GateSpent == o.GateSpent && s.GateSlingAt.Equal(o.GateSlingAt)
+// withEscalation is withGate for the seat's own open escalation
+// (overrun_guard_escalation.go): the same banking, kept in its own counters
+// with its own ceiling, so a forgotten escalation cannot hold the clock for good.
+func (s overrunState) withEscalation(slung, now time.Time, waiting bool, maxCharge, maxTotal time.Duration) (overrunState, time.Duration) {
+	if !s.EscalationSlingAt.Equal(slung) {
+		s.EscalationSlingAt, s.EscalationSpent, s.EscalationSeenAt = slung, 0, time.Time{}
+	}
+	s.EscalationSpent, s.EscalationSeenAt = chargeWait(s.EscalationSpent, s.EscalationSeenAt, now, waiting, maxCharge, maxTotal)
+	return s, s.EscalationSpent
+}
+
+// chargeWait folds one tick's reading of one kind of wait into the time banked
+// for it and the last tick that saw it, and returns both. The rules are
+// withGate's: a stretch is charged only across intervals whose both ends were
+// seen in the wait, no tick charges more than maxCharge, and the banked total
+// never passes maxTotal.
+func chargeWait(spent time.Duration, seenAt, now time.Time, inWait bool, maxCharge, maxTotal time.Duration) (time.Duration, time.Time) {
+	switch {
+	case inWait && seenAt.IsZero():
+		// The first tick that found the wait: nothing before it is charged.
+		seenAt = now
+	case inWait && now.After(seenAt):
+		spent += min(now.Sub(seenAt), maxCharge)
+		seenAt = now
+	case inWait:
+		// A stamp at or after now is a clock that stepped back. Drop the
+		// stretch rather than charge a negative interval, which would give back
+		// time this sling was already credited with; the next tick starts it
+		// again, and what is not charged counts toward the stop (gt-vfwuc).
+		seenAt = time.Time{}
+	default:
+		// The wait is over: what it ran past the last tick that saw it open is
+		// not charged, because the guard cannot tell that from work the seat
+		// did after it.
+		seenAt = time.Time{}
+	}
+	// The ceiling binds whatever the record held, a state file written before
+	// it existed included.
+	return min(spent, maxTotal), seenAt
+}
+
+// sameWait reports whether two records carry the same gate and escalation
+// accounting, so a tick writes the state only when one moved.
+func (s overrunState) sameWait(o overrunState) bool {
+	return s.GateSeenAt.Equal(o.GateSeenAt) && s.GateSpent == o.GateSpent && s.GateSlingAt.Equal(o.GateSlingAt) &&
+		s.EscalationSeenAt.Equal(o.EscalationSeenAt) && s.EscalationSpent == o.EscalationSpent &&
+		s.EscalationSlingAt.Equal(o.EscalationSlingAt)
 }
 
 // overrunState is what the guard remembers about one bead between ticks.
@@ -174,6 +198,13 @@ type overrunState struct {
 	GateSlingAt time.Time     `json:"gate_sling_at,omitzero"`
 	GateSpent   time.Duration `json:"gate_spent,omitempty"`
 	GateSeenAt  time.Time     `json:"gate_seen_at,omitzero"`
+
+	// EscalationSlingAt, EscalationSpent and EscalationSeenAt are the same
+	// accounting for the time the seat waits on an escalation it raised
+	// (withEscalation), capped per sling by overrunMaxEscalationTotal.
+	EscalationSlingAt time.Time     `json:"escalation_sling_at,omitzero"`
+	EscalationSpent   time.Duration `json:"escalation_spent,omitempty"`
+	EscalationSeenAt  time.Time     `json:"escalation_seen_at,omitzero"`
 
 	// Rig, Polecat and Branch name the seat the stop acts on; Elapsed is how
 	// long it had held the bead when the stop began, gate time excluded.

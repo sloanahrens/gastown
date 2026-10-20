@@ -55,6 +55,12 @@ func overrunMaxGateCharge(interval time.Duration) time.Duration { return 2 * int
 // host) that keeps a long gate from counting as the seat's own time (gt-vfwuc).
 func overrunMaxGateTotal(stopAfter time.Duration) time.Duration { return 2 * stopAfter }
 
+// overrunMaxEscalationTotal is the ceiling on the escalation time one sling may
+// bank, the gate's shape: twice the stop threshold. An escalation nobody answers
+// is a seat held for a person, and past this ceiling the clock runs again even
+// while the escalation stays open (gt-i1qwy).
+func overrunMaxEscalationTotal(stopAfter time.Duration) time.Duration { return 2 * stopAfter }
+
 // overrunNudgeMessage is what the seat reads at the nudge threshold. It says
 // which time the clock measures, because a seat waiting on its own gate is the
 // one case where a long-running bead is not an overrun (gt-vfwuc).
@@ -114,6 +120,13 @@ type overrunSeams struct {
 	// guard then counts all of its time — the direction that stops. nil means
 	// the same: an unset seam is no exemption.
 	gateRunning func(seat overrunSeat) (bool, error)
+
+	// escalationWaiting reports whether the seat is waiting on an open
+	// escalation it raised for its bead (overrun_guard_escalation.go). The time
+	// it spends there is subtracted from the sling's elapsed time, with its own
+	// ceiling. An error means the escalation state could not be read, and the
+	// guard then counts all of the seat's time. nil means no exemption.
+	escalationWaiting func(seat overrunSeat) (bool, error)
 
 	// The stop's side effects, called in this order by overrunStop:
 	// pause writes the seat's pause marker, stopSession ends its session,
@@ -281,10 +294,11 @@ func (d *Daemon) triggerOverrunGuard() {
 // once per sling, remembered in the bead's state file; past the stop
 // threshold the stop seam runs. A seat on a scheduled sling is never nudged and
 // is judged by scheduled_stop_after alone (zero leaves it alone). The clock it
-// judges is the seat's own time: the time it spends inside its gate is
-// subtracted, and a gate state that cannot be read counts all of its time
-// (overrun_guard_gate.go). In dry-run mode nothing is sent, stopped or
-// written, and the log says what would have happened.
+// judges is the seat's own time: the time it spends inside its gate, or waiting
+// on an escalation it raised, is subtracted, and a state that cannot be read
+// counts all of its time (overrun_guard_gate.go, overrun_guard_escalation.go).
+// In dry-run mode nothing is sent, stopped or written, and the log says what
+// would have happened.
 func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	if !d.isPatrolActive("overrun_guard") {
 		return
@@ -303,8 +317,17 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 	if gateRunning == nil {
 		gateRunning = func(overrunSeat) (bool, error) { return false, nil }
 	}
+	// An unset escalation seam is no exemption, as for the gate.
+	escalationWaiting := s.escalationWaiting
+	if escalationWaiting == nil {
+		escalationWaiting = func(overrunSeat) (bool, error) { return false, nil }
+	}
 	maxGateCharge := overrunMaxGateCharge(overrunGuardInterval(d.patrolConfig))
 	maxGateTotal := overrunMaxGateTotal(stopAfter)
+	maxEscalationTotal := overrunMaxEscalationTotal(stopAfter)
+	// The escalation read is logged once per tick, not once per seat: a failed
+	// read is the same failure for every seat it reaches this cycle.
+	escalationReadFailed := false
 
 	seats, err := s.workingSeats()
 	if err != nil {
@@ -352,16 +375,33 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 			inGate = false
 		}
 		state, gateSpent := state.withGate(slung, now, inGate, maxGateCharge, maxGateTotal)
-		if !dry && !state.sameGate(before) {
-			// The gate accounting outlives the tick: it is saved when it moves,
-			// so the next tick — and a stop that begins later — measures the
-			// same clock.
+
+		// A seat waiting on an escalation it raised is waiting on a person, not
+		// overrunning (overrun_guard_escalation.go). The escalation is read only
+		// outside a gate, which is already exempt, so no stretch is exempt twice.
+		waiting := false
+		if !inGate {
+			waiting, err = escalationWaiting(seat)
+			if err != nil {
+				if !escalationReadFailed {
+					escalationReadFailed = true
+					d.logger.Printf("overrun_guard: %s: cannot read the escalation state for %s, counting all of its time: %v", who, seat.Bead, err)
+				}
+				waiting = false
+			}
+		}
+		state, escalationSpent := state.withEscalation(slung, now, waiting, maxGateCharge, maxEscalationTotal)
+
+		if !dry && !state.sameWait(before) {
+			// The gate and escalation accounting outlives the tick: it is saved
+			// when it moves, so the next tick — and a stop that begins later —
+			// measures the same clock.
 			if err := writeOverrunState(d.config.TownRoot, state); err != nil {
-				d.logger.Printf("overrun_guard: WARNING: %s: gate time on %s not saved (%v) — it is counted again next tick", who, seat.Bead, err)
+				d.logger.Printf("overrun_guard: WARNING: %s: gate or escalation time on %s not saved (%v) — it is counted again next tick", who, seat.Bead, err)
 			}
 		}
 
-		elapsed := now.Sub(slung) - gateSpent
+		elapsed := now.Sub(slung) - gateSpent - escalationSpent
 		if dry && inGate {
 			// A dry run writes nothing, so it has no banked gate time to
 			// subtract: it says what it sees and leaves the verdict to a real
@@ -373,7 +413,7 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 
 		in := overrunInput{
 			Now: now, SlungAt: slung, Nudged: nudged,
-			NudgeAt: nudgeAfter, StopAt: stopAfter, GateSpent: gateSpent,
+			NudgeAt: nudgeAfter, StopAt: stopAfter, GateSpent: gateSpent, EscalationSpent: escalationSpent,
 		}
 		if seat.Scheduled {
 			// Both thresholds at the one limit: the stop wins from there on
@@ -444,11 +484,13 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 func (d *Daemon) overrunProdSeams() overrunSeams {
 	sl := &overrunSlungReader{d: d}
 	gate := newOverrunGateReader(d)
+	escalation := newOverrunEscalationReader(d)
 	return d.overrunStopSeams(overrunSeams{
-		now:          time.Now,
-		workingSeats: d.overrunWorkingSeats,
-		slungAt:      sl.slungAt,
-		gateRunning:  gate.running,
+		now:               time.Now,
+		workingSeats:      d.overrunWorkingSeats,
+		slungAt:           sl.slungAt,
+		gateRunning:       gate.running,
+		escalationWaiting: escalation.waiting,
 		nudge: func(seat overrunSeat, msg string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), overrunNudgeTimeout)
 			defer cancel()
