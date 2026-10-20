@@ -32,6 +32,10 @@ type Item struct {
 	// keeps the rig and head its labels are keyed by — and the scorecard never
 	// reads them.
 	Refs map[string]string
+	// Context is a value per question to tally beside that question's block,
+	// such as the agent a seat ran on. It is printed, never scored or labeled,
+	// and it counts only the lines that gave the question a usable answer.
+	Context map[QuestionID]string
 }
 
 // Labeling is what an adapter finds for one item: each question's label, and

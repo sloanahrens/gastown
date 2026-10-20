@@ -6,6 +6,7 @@ package scorecard
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -185,6 +186,7 @@ func usable(ans Answer, kind string) (value float64, chosen, ok bool) {
 func scoreQuestion(id QuestionID, kind string, items []Item, labels []map[QuestionID]bool) QuestionReport {
 	qr := QuestionReport{ID: string(id), Kind: kind}
 	var samples []sample
+	contextLines := map[string]int{}
 	for i, it := range items {
 		ans, ok := it.Answers[id]
 		if !ok {
@@ -195,6 +197,9 @@ func scoreQuestion(id QuestionID, kind string, items []Item, labels []map[Questi
 			continue
 		}
 		qr.Logged++
+		if c := it.Context[id]; c != "" {
+			contextLines[c]++
+		}
 		label, ok := labels[i][id]
 		if !ok {
 			continue
@@ -227,7 +232,22 @@ func scoreQuestion(id QuestionID, kind string, items []Item, labels []map[Questi
 		qr.MeanScorePositive, qr.MeanScoreNegative = meanByLabel(samples)
 	}
 	qr.Verdict = verdict(qr.Labeled, best, base)
+	qr.Context = contextCounts(contextLines)
 	return qr
+}
+
+// contextCounts lists the context values in value order, or nil when no line
+// carried one.
+func contextCounts(lines map[string]int) []ContextCount {
+	if len(lines) == 0 {
+		return nil
+	}
+	out := make([]ContextCount, 0, len(lines))
+	for v, n := range lines {
+		out = append(out, ContextCount{Value: v, Lines: n})
+	}
+	slices.SortFunc(out, func(a, b ContextCount) int { return cmp.Compare(a.Value, b.Value) })
+	return out
 }
 
 // bestThreshold sweeps every distinct value as a cut, predicting a yes at or
