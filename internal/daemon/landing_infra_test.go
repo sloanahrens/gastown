@@ -573,6 +573,39 @@ func TestIsPatrolEnabledLandingInfraDefaultsOn(t *testing.T) {
 	}
 }
 
+// TestLandingInfraTargetsHonorLandingWorkerRigs: the probe covers only the
+// rigs the landing worker serves. Rig B carries a Forgejo block but is not in
+// landing_worker.rigs, so nothing lands through it and the probe must not
+// watch its instance or runner queue (gt-mbw6s).
+func TestLandingInfraTargetsHonorLandingWorkerRigs(t *testing.T) {
+	t.Parallel()
+	d, _ := daemonWithRecorder(t)
+	f := useGitfake(t, d)
+	d.knownRigsCache, d.knownRigsCacheValid = []string{"A", "B"}, true
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		LandingWorker: &LandingWorkerConfig{Rigs: []string{"A"}},
+	}}
+	for _, rigName := range []string{"A", "B"} {
+		forgejoRigConfig(t, d.config.TownRoot, rigName)
+		f.InitBare(t, filepath.Join(d.config.TownRoot, rigName, ".repo.git"))
+	}
+
+	got := d.landingInfraTargets()
+
+	if len(got) != 1 || got[0].Rig != "A" {
+		t.Errorf("landingInfraTargets() rigs = %v, want only the landing worker's rig A", targetRigs(got))
+	}
+}
+
+// targetRigs names the rigs in a probe target list, for a failure message.
+func targetRigs(tgts []landingInfraTarget) []string {
+	var names []string
+	for _, t := range tgts {
+		names = append(names, t.Rig)
+	}
+	return names
+}
+
 // infraVerdictOf reads one field's verdict from the daemon's own state, the
 // way the health computation will.
 func infraVerdictOf(t *testing.T, d *Daemon, name string, now time.Time) townhealth.Verdict {

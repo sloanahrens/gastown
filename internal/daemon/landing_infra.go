@@ -100,18 +100,20 @@ type landingInfraTarget struct {
 	ViewerTokenPath string
 }
 
-// landingInfraTargets lists the rigs the probe covers: every known rig whose
+// landingInfraTargets lists the rigs the probe covers: every rig the landing
+// worker serves (landingWorkerRigs, the landing_worker.rigs allowlist) whose
 // merge_queue.forgejo block resolves (rig.ResolveForgejoConfig). That is the
 // same block the landing worker lands through, so the probe watches the
 // instance the rig's CI actually gates; a rig without it lands through
-// GitHub and has no CI queue to watch (gt-fn9e6.11).
+// GitHub and has no CI queue to watch (gt-fn9e6.11). A rig outside the
+// allowlist lands through nothing here, so it is not watched either (gt-mbw6s).
 func (d *Daemon) landingInfraTargets() []landingInfraTarget {
 	if d.landingInfraRigs != nil {
 		return d.landingInfraRigs()
 	}
 	tokenDir, dirErr := landingWorkerConfig(d.patrolConfig).ForgejoTokenDir()
 	var out []landingInfraTarget
-	for _, name := range d.getKnownRigs() {
+	for _, name := range landingWorkerRigs(d.patrolConfig, d.getKnownRigs()) {
 		fj := rig.ResolveForgejoConfigIn(d.repoFileOpener(), d.config.TownRoot, name)
 		if fj == nil {
 			continue
