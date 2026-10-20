@@ -10,10 +10,14 @@ import (
 type Report struct {
 	Battery string `json:"battery"`
 	// Since is the window's start; nil means all time.
-	Since        *time.Time       `json:"since,omitempty"`
-	Items        int              `json:"items"`
-	LinesSkipped int              `json:"lines_skipped"`
-	Questions    []QuestionReport `json:"questions"`
+	Since        *time.Time `json:"since,omitempty"`
+	Items        int        `json:"items"`
+	LinesSkipped int        `json:"lines_skipped"`
+	// Context holds the lines a Contextual adapter reported, such as the
+	// finding beads its FAIL labels named. They follow the item counts in the
+	// text report.
+	Context   []string         `json:"context,omitempty"`
+	Questions []QuestionReport `json:"questions"`
 	// Lines is each parsed item's labeling and the rule that set it. The text
 	// report leaves it out; the JSON report names the rule for every line.
 	Lines []LineReport `json:"lines,omitempty"`
@@ -82,6 +86,9 @@ func WriteText(w io.Writer, rep Report) error {
 	}
 	ew.printf("Scorecard for battery %s, %s\n", rep.Battery, window)
 	ew.printf("Items: %d parsed, %d line(s) skipped\n", rep.Items, rep.LinesSkipped)
+	for _, line := range rep.Context {
+		ew.printf("%s\n", line)
+	}
 	if len(rep.Questions) == 0 {
 		ew.printf("\nNo question has a usable answer yet.\n")
 	}

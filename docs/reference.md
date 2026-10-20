@@ -1223,13 +1223,17 @@ root. The adapter implements:
 
 - `Battery()`: the name passed to `--battery`.
 - `LogPath()`: the JSONL log the battery appends to.
-- `Parse(raw) (Item, error)`: one log line as an `Item` (id, time, model, and
-  the answers keyed by question id). An error skips the line and counts it in
-  `lines_skipped`.
+- `Parse(raw) (Item, error)`: one log line as an `Item` (id, time, model, the
+  answers keyed by question id, and any adapter refs it needs to label). An
+  error skips the line and counts it in `lines_skipped`.
 - `Label(ctx, item) (Labeling, error)`: the item's labels, whether it is labeled
   at all, and the rule that set them. An unlabeled item counts as logged but not
   labeled. An error that cannot be read fails the whole report, so a broken
   label source cannot pass as "no labels yet".
+
+An adapter may also implement `Context() []string`, which adds context lines to
+the report: facts gathered while labeling that the metrics do not carry. They
+print under the item counts, and the JSON report carries them as `context`.
 
 Each question is scored by the kind of answer Jev gave. A noul is scored at
 0.5. A choice names its `positive` option, and precision and recall are at the
@@ -1247,7 +1251,7 @@ The best F1 is taken over every distinct value as a cut, predicting yes at or
 above it; a tie keeps the higher cut. `--json` names the rule that labeled each
 line in its `lines` array.
 
-Three batteries are registered. The `fixture` battery reads
+Four batteries are registered. The `fixture` battery reads
 `.runtime/jev/fixture.jsonl` with labels from `fixture-labels.json`, and exists
 so tests can drive the command end to end. No live battery reads it.
 
@@ -1283,6 +1287,14 @@ each item names. An item's labels come from the first rule that applies:
 An item still standing with no disposition is unlabeled, as is one whose life
 the queue files no longer hold. A bead read that fails for any reason other
 than not-found fails the report.
+
+The `landing` battery reads `.runtime/jev/landing.jsonl`. Its labels come from
+each logged bead's notes: the latest `OVERSEER REVIEW <head> PASS|FAIL` line for
+the logged head, read with the parser the risk-path attention item uses. A
+`PASS` sets `needs_review_now` and `risk` false (`landing:review-pass`), a
+`FAIL` sets both true (`landing:review-fail`), and a `WAIVED` or `AUDITED` line,
+or none, leaves the item unlabeled. The finding beads a `FAIL` names are counted
+in the report's context.
 
 The `finding` battery is described next.
 

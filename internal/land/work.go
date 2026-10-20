@@ -235,8 +235,13 @@ func OverseerReviewed(issue *beads.Issue, head string) bool {
 // this head (gt-vsct7.4).
 var overseerReviewLine = regexp.MustCompile(`^OVERSEER REVIEW ([0-9a-f]{7,64}) (?:(PASS|FAIL)\b(?: findings=([A-Za-z0-9._-]+(?:,[A-Za-z0-9._-]+)*)(?:\s|$))?|(WAIVED|AUDITED): +\S)`)
 
-// OverseerReviewFail is the verdict of a review that found a defect.
-const OverseerReviewFail = "FAIL"
+// The verdicts a review line records. FAIL found a defect, PASS cleared the
+// head, and WAIVED and AUDITED say the head was left unreviewed or reviewed
+// another way, each with its reason.
+const (
+	OverseerReviewPass = "PASS"
+	OverseerReviewFail = "FAIL"
+)
 
 // HasOverseerReviewNote reports whether notes answer a risk-path item for
 // head: the latest review line naming exactly head is a PASS, or a WAIVED or
