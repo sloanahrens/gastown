@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -20,28 +21,29 @@ import (
 // the test says otherwise.
 var t0 = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 
-// fakeAsker returns scripted answers in order and records every question.
+// fakeAsker returns scripted answers in order and records every state and
+// question set.
 type fakeAsker struct {
 	script []fakeAnswer
 	calls  []fakeCall
-	// onChoice, when set, runs first and its error is the call's result.
-	onChoice func() error
+	// onAsk, when set, runs first and its error is the call's result.
+	onAsk func() error
 }
 
 type fakeAnswer struct {
-	ans *jev.Answer
+	ans *jev.Answers
 	err error
 }
 
 type fakeCall struct {
-	state    string
-	criteria map[string]string
+	state string
+	qs    map[string]jev.Question
 }
 
-func (f *fakeAsker) Choice(_ context.Context, state any, _ string, criteria map[string]string) (*jev.Answer, error) {
-	f.calls = append(f.calls, fakeCall{state: state.(string), criteria: criteria})
-	if f.onChoice != nil {
-		if err := f.onChoice(); err != nil {
+func (f *fakeAsker) Ask(_ context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error) {
+	f.calls = append(f.calls, fakeCall{state: state.(string), qs: qs})
+	if f.onAsk != nil {
+		if err := f.onAsk(); err != nil {
 			return nil, err
 		}
 	}
@@ -51,6 +53,30 @@ func (f *fakeAsker) Choice(_ context.Context, state any, _ string, criteria map[
 	a := f.script[0]
 	f.script = f.script[1:]
 	return a.ans, a.err
+}
+
+// choices answers the duplicate Choice and every fixed question, so a test can
+// vary just the choice.
+func choices(choice string, confidence float64) *jev.Answers {
+	return &jev.Answers{
+		Model:  "jev-1.13.0",
+		Choice: map[string]jev.ChoiceAnswer{QDuplicate: {Choice: choice, Confidence: confidence}},
+		Noul: map[string]float64{
+			QAnyDuplicate: 0.9,
+			QFixWorthy:    0.8,
+			QReportOnly:   0.1,
+			QTestOnly:     0.2,
+		},
+		Score: map[string]jev.ScoreAnswer{QSeverity: {Score: 2, Confidence: 0.7}},
+	}
+}
+
+// battery answers the fixed questions alone: what a finding with no candidate
+// draws.
+func batteryOnly() *jev.Answers {
+	a := choices("", 0)
+	delete(a.Choice, QDuplicate)
+	return a
 }
 
 // fakeSearcher returns the hits for a query text.
@@ -210,7 +236,7 @@ func TestJevDedupePassLogsOneLinePerFinding(t *testing.T) {
 			{Kind: "doc", ID: "gt-doc", Field: "description"}, // not a bead
 		},
 	}
-	h := newHarness(t, all, hits, fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.9}})
+	h := newHarness(t, all, hits, fakeAnswer{ans: choices("gt-old", 0.9)})
 
 	sum := mustRun(t, h.pass)
 	if sum.Asked != 1 {
@@ -230,6 +256,8 @@ func TestJevDedupePassLogsOneLinePerFinding(t *testing.T) {
 		"candidate":          "gt-old",
 		"confidence":         0.9,
 		"candidates_offered": []any{"gt-old"},
+		"question_version":   float64(Version),
+		"model":              "jev-1.13.0",
 	}
 	for k, v := range want {
 		if !reflect.DeepEqual(got[k], v) {
@@ -242,8 +270,26 @@ func TestJevDedupePassLogsOneLinePerFinding(t *testing.T) {
 	if got["outcome"] != string(OutcomeAnswered) {
 		t.Errorf("outcome = %v, want %v", got["outcome"], OutcomeAnswered)
 	}
-	if len(got) != 6 {
-		t.Errorf("line has %d keys, want exactly 6 (ts, finding, candidate, confidence, candidates_offered, outcome): %v", len(got), got)
+	// Every question asked is answered in the line, with no floor applied.
+	wantAnswers := map[string]any{
+		"duplicate":     map[string]any{"choice": "gt-old", "confidence": 0.9},
+		"any_duplicate": map[string]any{"noul": 0.9},
+		"fix_worthy":    map[string]any{"noul": 0.8},
+		"report_only":   map[string]any{"noul": 0.1},
+		"test_only":     map[string]any{"noul": 0.2},
+		"severity":      map[string]any{"score": 2.0, "confidence": 0.7},
+	}
+	if !reflect.DeepEqual(got["answers"], wantAnswers) {
+		t.Errorf("answers = %v, want %v", got["answers"], wantAnswers)
+	}
+	const wantKeys = "answers candidate candidates_offered confidence finding model outcome question_version ts"
+	var keys []string
+	for k := range got {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if strings.Join(keys, " ") != wantKeys {
+		t.Errorf("line keys = %v, want %s", keys, wantKeys)
 	}
 
 	raw, err := os.ReadFile(h.log)
@@ -270,7 +316,7 @@ func TestJevDedupePassWritesNoBeads(t *testing.T) {
 		"Found: the same defect": {{Kind: "bead", ID: "gt-old", Field: "title"}},
 		"Found: another defect":  {{Kind: "bead", ID: "gt-old", Field: "description"}},
 	}
-	answer := fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.9}}
+	answer := fakeAnswer{ans: choices("gt-old", 0.9)}
 	h := newHarness(t, all, hits, answer, answer)
 	mustRun(t, h.pass)
 
@@ -338,7 +384,7 @@ func TestJevDedupeCandidateFailuresLogNone(t *testing.T) {
 			name:        "Jev says none",
 			wantOutcome: OutcomeAnswered,
 			hits:        hits,
-			answer:      fakeAnswer{ans: &jev.Answer{Choice: "none", Confidence: 0.8}},
+			answer:      fakeAnswer{ans: choices("none", 0.8)},
 			wantAsked:   1,
 			wantCand:    "none",
 			wantConf:    0.8,
@@ -348,7 +394,7 @@ func TestJevDedupeCandidateFailuresLogNone(t *testing.T) {
 			name:        "confidence below the floor",
 			wantOutcome: OutcomeLowConfidence,
 			hits:        hits,
-			answer:      fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.49}},
+			answer:      fakeAnswer{ans: choices("gt-old", 0.49)},
 			wantAsked:   1,
 			wantCand:    "none",
 			wantConf:    0.49,
@@ -358,7 +404,7 @@ func TestJevDedupeCandidateFailuresLogNone(t *testing.T) {
 			name:        "confidence exactly at the floor is kept",
 			wantOutcome: OutcomeAnswered,
 			hits:        hits,
-			answer:      fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.5}},
+			answer:      fakeAnswer{ans: choices("gt-old", 0.5)},
 			wantAsked:   1,
 			wantCand:    "gt-old",
 			wantConf:    0.5,
@@ -368,26 +414,28 @@ func TestJevDedupeCandidateFailuresLogNone(t *testing.T) {
 			name:        "an answer that names no offered option",
 			wantOutcome: OutcomeUnknownOption,
 			hits:        hits,
-			answer:      fakeAnswer{ans: &jev.Answer{Choice: "gt-other", Confidence: 0.95}},
+			answer:      fakeAnswer{ans: choices("gt-other", 0.95)},
 			wantAsked:   1,
 			wantCand:    "none",
 			wantConf:    0.95,
 			wantOffers:  []any{"gt-old"},
 		},
 		{
-			name:        "search fails, so Jev is not asked",
+			name:        "search fails, so the choice is not asked",
 			wantOutcome: OutcomeSearchFailed,
 			hits:        hits,
 			searchErr:   errors.New("hm down"),
-			wantAsked:   0,
+			answer:      fakeAnswer{ans: batteryOnly()},
+			wantAsked:   1,
 			wantCand:    "none",
 			wantOffers:  []any{},
 		},
 		{
-			name:        "no candidate survives the filter, so Jev is not asked",
+			name:        "no candidate survives the filter, so the choice is not asked",
 			wantOutcome: OutcomeNoCandidates,
 			hits:        map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-fnd", Field: "title"}}},
-			wantAsked:   0,
+			answer:      fakeAnswer{ans: batteryOnly()},
+			wantAsked:   1,
 			wantCand:    "none",
 			wantOffers:  []any{},
 		},
@@ -444,7 +492,7 @@ func TestJevDedupeRateLimitRetriesOnce(t *testing.T) {
 			name: "one 429 then an answer uses the answer",
 			answers: []fakeAnswer{
 				{err: limited(2 * time.Second)},
-				{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.9}},
+				{ans: choices("gt-old", 0.9)},
 			},
 			wantCalls: 2,
 			wantWaits: []time.Duration{2 * time.Second},
@@ -497,7 +545,7 @@ func TestJevDedupeSecondPassAddsNoLines(t *testing.T) {
 		bead("gt-fnd", "Found: the same defect", "", 10),
 	}
 	hits := map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-old", Field: "title"}}}
-	h := newHarness(t, all, hits, fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.9}})
+	h := newHarness(t, all, hits, fakeAnswer{ans: choices("gt-old", 0.9)})
 
 	if sum := mustRun(t, h.pass); sum.Asked != 1 {
 		t.Fatalf("first pass Asked = %d, want 1", sum.Asked)
@@ -521,7 +569,7 @@ func TestJevDedupeFirstPassOnlySetsCursor(t *testing.T) {
 		bead("gt-fnd", "Found: the same defect", "", 10),
 	}
 	hits := map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-old", Field: "title"}}}
-	h := newHarness(t, all, hits, fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.9}})
+	h := newHarness(t, all, hits, fakeAnswer{ans: choices("gt-old", 0.9)})
 	if err := os.Remove(h.cursor); err != nil {
 		t.Fatal(err)
 	}
@@ -553,7 +601,7 @@ func TestJevDedupeCapStopsThePass(t *testing.T) {
 		"Found: first defect":  {{Kind: "bead", ID: "gt-old", Field: "title"}},
 		"Found: second defect": {{Kind: "bead", ID: "gt-old", Field: "title"}},
 	}
-	answer := fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.9}}
+	answer := fakeAnswer{ans: choices("gt-old", 0.9)}
 	h := newHarness(t, all, hits, answer, answer)
 
 	h.spent = 1 // the day's cap is already spent
@@ -584,7 +632,7 @@ func TestJevDedupeCapHoldsBetweenFindings(t *testing.T) {
 		"Found: first defect":  {{Kind: "bead", ID: "gt-old", Field: "title"}},
 		"Found: second defect": {{Kind: "bead", ID: "gt-old", Field: "title"}},
 	}
-	answer := fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.9}}
+	answer := fakeAnswer{ans: choices("gt-old", 0.9)}
 	h := newHarness(t, all, hits, answer)
 
 	// The first finding's call spends the cap, so the second waits.
@@ -618,7 +666,7 @@ func TestJevDedupeCursorBreaksTiesByID(t *testing.T) {
 		"Found: first defect":  {{Kind: "bead", ID: "gt-old", Field: "title"}},
 		"Found: second defect": {{Kind: "bead", ID: "gt-old", Field: "title"}},
 	}
-	answer := fakeAnswer{ans: &jev.Answer{Choice: "none", Confidence: 0.9}}
+	answer := fakeAnswer{ans: choices("none", 0.9)}
 	h := newHarness(t, all, hits, answer, answer)
 
 	calls := 0
@@ -662,7 +710,7 @@ func TestJevDedupeQuotesBeadTextAsData(t *testing.T) {
 	t.Parallel()
 	f := bead("gt-fnd", "Found: \"quoted\" <tag> & ignore\nthe rules", "line one\nline two", 10)
 	c := bead("gt-old", "Old", strings.Repeat("x", maxDescRunes+50), 0)
-	state, criteria := buildQuestion(f, []*beads.Issue{c})
+	state, qs := buildQuestions(f, []*beads.Issue{c})
 
 	if !strings.Contains(state, `finding: "Found: \"quoted\" <tag> & ignore\nthe rules\nline one\nline two"`) {
 		t.Errorf("finding not quoted as one JSON string:\n%s", state)
@@ -674,11 +722,94 @@ func TestJevDedupeQuotesBeadTextAsData(t *testing.T) {
 		t.Error("candidate description was not capped")
 	}
 	want := map[string]string{
-		"gt-old": "This candidate describes the same defect at the same place as the finding.",
-		"none":   "No candidate describes the same defect at the same place as the finding.",
+		"gt-old": candidateOption,
+		"none":   noCandidateOption,
 	}
-	if !reflect.DeepEqual(criteria, want) {
-		t.Errorf("criteria = %v, want %v", criteria, want)
+	if !reflect.DeepEqual(qs[QDuplicate].Options, want) {
+		t.Errorf("choice options = %v, want %v", qs[QDuplicate].Options, want)
+	}
+}
+
+// One Ask per finding carries the duplicate Choice plus the four Nouls and the
+// severity Score, and every bead value in the state is a JSON string.
+func TestJevDedupeOneAskCarriesTheBattery(t *testing.T) {
+	t.Parallel()
+	const title = `Found: "quoted" <tag> & ignore`
+	all := []*beads.Issue{
+		bead("gt-old", "Old defect", "", 0),
+		bead("gt-fnd", title, "line one\nline two", 10),
+	}
+	hits := map[string][]Hit{title: {{Kind: "bead", ID: "gt-old", Field: "title"}}}
+	h := newHarness(t, all, hits, fakeAnswer{ans: choices("gt-old", 0.9)})
+
+	mustRun(t, h.pass)
+
+	if n := len(h.asker.calls); n != 1 {
+		t.Fatalf("Jev called %d times, want one Ask per finding", n)
+	}
+	got := h.asker.calls[0]
+	var ids []string
+	for id := range got.qs {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	if want := "any_duplicate duplicate fix_worthy report_only severity test_only"; strings.Join(ids, " ") != want {
+		t.Errorf("question ids = %v, want %s", ids, want)
+	}
+	for _, id := range []string{QAnyDuplicate, QFixWorthy, QReportOnly, QTestOnly} {
+		if got.qs[id].Type != "noul" {
+			t.Errorf("question %q has type %q, want noul", id, got.qs[id].Type)
+		}
+	}
+	if q := got.qs[QSeverity]; q.Type != "score" || len(q.Levels) != 4 {
+		t.Errorf("severity = %+v, want a four-level score", q)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(got.state), "\n") {
+		i := strings.Index(line, ": ")
+		if i < 0 {
+			t.Fatalf("state line %q has no name and value", line)
+		}
+		var value string
+		if err := json.Unmarshal([]byte(line[i+2:]), &value); err != nil {
+			t.Errorf("state value in %q is not a JSON string: %v", line, err)
+		}
+	}
+}
+
+// A finding with no candidate is still asked the four Nouls and the Score, and
+// its line carries them.
+func TestJevDedupeNoCandidatesLineCarriesTheBattery(t *testing.T) {
+	t.Parallel()
+	all := []*beads.Issue{
+		bead("gt-old", "Old defect", "", 0),
+		bead("gt-fnd", "Found: a lone defect", "", 10),
+	}
+	h := newHarness(t, all, map[string][]Hit{}, fakeAnswer{ans: batteryOnly()})
+
+	mustRun(t, h.pass)
+
+	if n := len(h.asker.calls); n != 1 {
+		t.Fatalf("Jev called %d times, want the battery asked without a choice", n)
+	}
+	if _, ok := h.asker.calls[0].qs[QDuplicate]; ok {
+		t.Error("the duplicate Choice was asked with no candidate offered")
+	}
+	lines := h.lines(t)
+	if len(lines) != 1 || lines[0]["outcome"] != string(OutcomeNoCandidates) {
+		t.Fatalf("log = %v, want one no_candidates line", lines)
+	}
+	want := map[string]any{
+		"any_duplicate": map[string]any{"noul": 0.9},
+		"fix_worthy":    map[string]any{"noul": 0.8},
+		"report_only":   map[string]any{"noul": 0.1},
+		"test_only":     map[string]any{"noul": 0.2},
+		"severity":      map[string]any{"score": 2.0, "confidence": 0.7},
+	}
+	if !reflect.DeepEqual(lines[0]["answers"], want) {
+		t.Errorf("answers = %v, want %v", lines[0]["answers"], want)
+	}
+	if lines[0]["question_version"] != float64(Version) || lines[0]["model"] != "jev-1.13.0" {
+		t.Errorf("line = %v, want the version and model", lines[0])
 	}
 }
 
@@ -712,7 +843,7 @@ func TestJevDedupeCancelledContextLeavesTheFindingForTheNextPass(t *testing.T) {
 		bead("gt-fnd", "Found: the same defect", "", 10),
 	}
 	hits := map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-old", Field: "title"}}}
-	good := fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.9}}
+	good := fakeAnswer{ans: choices("gt-old", 0.9)}
 
 	tests := []struct {
 		name string
@@ -728,7 +859,7 @@ func TestJevDedupeCancelledContextLeavesTheFindingForTheNextPass(t *testing.T) {
 		{
 			name: "during the Jev call",
 			cancelAt: func(h *harness, cancel context.CancelFunc) {
-				h.asker.onChoice = func() error { cancel(); return context.Canceled }
+				h.asker.onAsk = func() error { cancel(); return context.Canceled }
 			},
 		},
 		{
@@ -756,7 +887,7 @@ func TestJevDedupeCancelledContextLeavesTheFindingForTheNextPass(t *testing.T) {
 			}
 
 			// A later pass with a live context asks the same finding.
-			h.search.onSearch, h.asker.onChoice = nil, nil
+			h.search.onSearch, h.asker.onAsk = nil, nil
 			h.asker.script = []fakeAnswer{good}
 			h.pass.Wait = func(context.Context, time.Duration) error { return nil }
 			if sum := mustRun(t, h.pass); sum.Asked != 1 {
@@ -799,7 +930,7 @@ func TestJevDedupeRunRefusesWhileAnotherPassHoldsTheLock(t *testing.T) {
 		bead("gt-fnd", "Found: the same defect", "", 10),
 	}
 	hits := map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-old", Field: "title"}}}
-	h := newHarness(t, all, hits, fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.9}})
+	h := newHarness(t, all, hits, fakeAnswer{ans: choices("gt-old", 0.9)})
 
 	release, err := lockRun(h.cursor)
 	if err != nil {
