@@ -16,3 +16,9 @@ const SpecDetailOwnerEnv = "GT_SPEC_DETAIL_OWNER"
 func SpecDetailCachePath(townRoot string) string {
 	return filepath.Join(townRoot, "daemon", "spec_detail_cache.json")
 }
+
+// SpecAnnotatedPath is where a daemon's ticks keep which held beads they have
+// already annotated, beside SpecDetailCachePath and owned the same way.
+func SpecAnnotatedPath(townRoot string) string {
+	return filepath.Join(townRoot, "daemon", "spec_annotated.json")
+}
