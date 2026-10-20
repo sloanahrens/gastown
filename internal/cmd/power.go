@@ -48,7 +48,7 @@ var powerStatusCmd = &cobra.Command{
 	Short: "Report every part and the derived power state",
 	Long:  "Report every part of the town and the state they add up to. This command is read-only.",
 	Args:  cobra.NoArgs,
-	RunE:  runPowerCommand(power.Status),
+	RunE:  runPowerCommand(power.Status, true),
 }
 
 var powerFullCmd = &cobra.Command{
@@ -60,7 +60,7 @@ cleared, and the hold is left in place if a part does not come up.
 
 With --dry-run it prints the commands and waits without running them.`,
 	Args: cobra.NoArgs,
-	RunE: runPowerCommand(power.Full),
+	RunE: runPowerCommand(power.Full, true),
 }
 
 var powerStandbyCmd = &cobra.Command{
@@ -74,7 +74,7 @@ A drain that times out names what still runs and exits 3; nothing is killed.
 With --dry-run it prints every command and the probes without changing
 anything.`,
 	Args: cobra.NoArgs,
-	RunE: runPowerCommand(power.Standby),
+	RunE: runPowerCommand(power.Standby, true),
 }
 
 var powerOffCmd = &cobra.Command{
@@ -89,7 +89,7 @@ needs --force-cloud: the bot and patrol poll Forgejo, so the stack being
 stopped pauses deploys and makes those jobs log read errors. With --dry-run it
 prints every command and changes nothing.`,
 	Args: cobra.NoArgs,
-	RunE: runPowerCommand(power.Off),
+	RunE: runPowerCommand(power.Off, true),
 }
 
 var powerBootHoldCmd = &cobra.Command{
@@ -97,7 +97,7 @@ var powerBootHoldCmd = &cobra.Command{
 	Short: "Write the hold so a reboot lands in standby",
 	Long:  "Write the hold and record a boot standby. This is the login job internal/templates/launchd/com.gastown.power-boot.plist runs.",
 	Args:  cobra.NoArgs,
-	RunE:  runPowerCommand(power.BootHold),
+	RunE:  runPowerCommand(power.BootHold, false),
 }
 
 func init() {
@@ -125,10 +125,12 @@ func init() {
 }
 
 // runPowerCommand resolves the host into power.Options and maps the state's
-// coded exit onto the process exit.
-func runPowerCommand(fn func(context.Context, power.Options) error) func(*cobra.Command, []string) error {
+// coded exit onto the process exit. needsForgejo is false for a state that
+// never touches the Forgejo stack, so a settings file that cannot be read does
+// not stop it.
+func runPowerCommand(fn func(context.Context, power.Options) error, needsForgejo bool) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
-		o, err := powerOptions()
+		o, err := powerOptions(needsForgejo)
 		if err != nil {
 			return powerExit(err)
 		}
@@ -147,7 +149,7 @@ func powerExit(err error) error {
 	return err
 }
 
-func powerOptions() (power.Options, error) {
+func powerOptions(needsForgejo bool) (power.Options, error) {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
 		return power.Options{}, &power.ExitError{Code: power.ExitUsage,
@@ -158,10 +160,13 @@ func powerOptions() (power.Options, error) {
 		return power.Options{}, &power.ExitError{Code: power.ExitUsage,
 			Err: fmt.Errorf("finding the home directory: %w", err)}
 	}
-	forgejoDir, err := config.ForgejoDir(townRoot)
-	if err != nil {
-		return power.Options{}, &power.ExitError{Code: power.ExitUsage,
-			Err: fmt.Errorf("reading forgejo.dir from settings/config.json: %w", err)}
+	forgejoDir := ""
+	if needsForgejo {
+		forgejoDir, err = config.ForgejoDir(townRoot)
+		if err != nil {
+			return power.Options{}, &power.ExitError{Code: power.ExitUsage,
+				Err: fmt.Errorf("reading forgejo.dir from settings/config.json: %w", err)}
+		}
 	}
 	if powerTimeout < 0 {
 		return power.Options{}, &power.ExitError{Code: power.ExitUsage,
