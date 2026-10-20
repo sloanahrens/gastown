@@ -58,7 +58,7 @@ func Build(ctx context.Context, a Adapter, since time.Time) (Report, error) {
 	if err != nil {
 		return Report{}, err
 	}
-	rep := Report{Battery: a.Battery(), Items: len(items), LinesSkipped: skipped}
+	rep := Report{Battery: a.Battery(), Items: len(items), LinesSkipped: skipped, Questions: []QuestionReport{}}
 	if !since.IsZero() {
 		rep.Since = &since
 	}

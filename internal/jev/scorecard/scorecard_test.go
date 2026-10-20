@@ -158,6 +158,10 @@ func TestScorecardBuildWithNoLogIsEmpty(t *testing.T) {
 	if rep.Items != 0 || len(rep.Questions) != 0 {
 		t.Errorf("empty town gave items %d and %d questions, want none", rep.Items, len(rep.Questions))
 	}
+	// A dashboard reads the JSON, so no questions must be [], not null.
+	if rep.Questions == nil {
+		t.Error("empty report has nil Questions, which marshals to null")
+	}
 }
 
 func TestScorecardOpenUnknownBatteryListsRegistered(t *testing.T) {
