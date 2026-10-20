@@ -104,6 +104,7 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"heredoc-written retry script", "cat > /tmp/retry.sh <<'EOF'\nfor i in $(seq 1 300); do gt done; done\nEOF", true},
 		{"heredoc-written script, redirect on the right", "cat <<'EOF' > /tmp/retry.sh\nwhile true; do gt done; sleep 5; done\nEOF", true},
 		{"tee-written script", "tee /tmp/retry.sh <<'EOF'\nuntil gt slot status | grep -q free; do sleep 1; done\nEOF", true},
+		{"heredoc piped into tee", "cat <<'EOF' | tee /tmp/retry.sh\nwhile true; do gt done; sleep 5; done\nEOF", true},
 		{"heredoc-written script with a repeater", "cat > /tmp/retry.sh <<'EOF'\nseq 1 300 | xargs -I{} gt done\nEOF", true},
 
 		// Allowed: `gt done` is the sanctioned path and must never trip this.
@@ -185,8 +186,8 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 64 {
-		t.Errorf("blocked %d of %d cases, want exactly 64", blocked, len(tests))
+	if blocked != 65 {
+		t.Errorf("blocked %d of %d cases, want exactly 65", blocked, len(tests))
 	}
 }
 
