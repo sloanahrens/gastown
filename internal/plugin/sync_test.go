@@ -354,15 +354,16 @@ func writeRigsJSON(t *testing.T, townRoot, rigName, localRepo string) {
 	}
 }
 
-func TestRigCheckoutRoot_UsesLocalRepoOverride(t *testing.T) {
+func TestRigCheckoutRoot_IgnoresLocalRepoOverride(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	override := filepath.Join(t.TempDir(), "elsewhere", "gastown-checkout")
 	writeRigsJSON(t, townRoot, "gastown", override)
 
 	got := rigCheckoutRoot(townRoot, "gastown")
-	if got != override {
-		t.Errorf("rigCheckoutRoot() = %q, want LocalRepo override %q", got, override)
+	want := filepath.Join(townRoot, "gastown")
+	if got != want {
+		t.Errorf("rigCheckoutRoot() = %q, want town checkout %q (LocalRepo %q must not win)", got, want, override)
 	}
 }
 
@@ -414,6 +415,56 @@ func TestFindGastownSource_FallsBackToLegacyLayout(t *testing.T) {
 	}
 	if got.Dir != legacyDir {
 		t.Errorf("FindGastownSource().Dir = %q, want legacy path %q", got.Dir, legacyDir)
+	}
+}
+
+// gt-2l1lr: a developer's --local-repo clone with a root plugins/ directory
+// must not become the sync source while the town's own checkout has plugins.
+func TestFindGastownSourcePrefersTownCheckoutOverLocalRepo(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	localRepo := filepath.Join(t.TempDir(), "personal-gastown")
+	writeRigsJSON(t, townRoot, "gastown", localRepo)
+
+	localPlugins := filepath.Join(localRepo, "plugins")
+	if err := os.MkdirAll(localPlugins, 0755); err != nil {
+		t.Fatal(err)
+	}
+	createTestPlugin(t, localPlugins, "x", "+++\nname = \"x\"\n+++\nbody", nil)
+
+	townPlugins := filepath.Join(townRoot, "gastown", "mayor", "rig", "plugins")
+	if err := os.MkdirAll(townPlugins, 0755); err != nil {
+		t.Fatal(err)
+	}
+	createTestPlugin(t, townPlugins, "y", "+++\nname = \"y\"\n+++\nbody", nil)
+
+	got, err := FindGastownSource(townRoot)
+	if err != nil {
+		t.Fatalf("FindGastownSource() error = %v", err)
+	}
+	if got.Dir != townPlugins {
+		t.Errorf("FindGastownSource().Dir = %q, want town checkout %q, not local repo %q", got.Dir, townPlugins, localPlugins)
+	}
+}
+
+func TestFindGastownSource_FallsBackToLocalRepoWhenTownHasNoPlugins(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	localRepo := filepath.Join(t.TempDir(), "personal-gastown")
+	writeRigsJSON(t, townRoot, "gastown", localRepo)
+
+	localPlugins := filepath.Join(localRepo, "plugins")
+	if err := os.MkdirAll(localPlugins, 0755); err != nil {
+		t.Fatal(err)
+	}
+	createTestPlugin(t, localPlugins, "x", "+++\nname = \"x\"\n+++\nbody", nil)
+
+	got, err := FindGastownSource(townRoot)
+	if err != nil {
+		t.Fatalf("FindGastownSource() error = %v", err)
+	}
+	if got.Dir != localPlugins {
+		t.Errorf("FindGastownSource().Dir = %q, want local repo fallback %q", got.Dir, localPlugins)
 	}
 }
 
