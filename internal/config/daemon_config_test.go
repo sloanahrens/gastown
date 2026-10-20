@@ -151,6 +151,23 @@ func TestDaemonPatrolConfigDecodesRetiredRestartTracker(t *testing.T) {
 	}
 }
 
+// attention.jev_triage is retired (gt-3ey5j): the triage it switched on was
+// replaced by the attention battery, so a daemon.json that still carries the
+// block must keep loading, and the block survives a rewrite verbatim.
+func TestDaemonPatrolConfigDecodesRetiredAttentionJevTriage(t *testing.T) {
+	t.Parallel()
+	block := `{"jev_triage":{"enabled":true,"model":"jev-1.13.0","confidence_floor":0.7,"max_spend_usd":5}}`
+	var cfg DaemonPatrolConfig
+	err := DecodeJSONFile("daemon.json",
+		[]byte(`{"type":"daemon-patrol-config","version":1,"attention":`+block+`}`), &cfg)
+	if err != nil {
+		t.Fatalf("retired attention.jev_triage = %v, want it to decode", err)
+	}
+	if got := string(cfg.Attention); got != block {
+		t.Errorf("attention = %s, want it kept verbatim as %s", got, block)
+	}
+}
+
 // A dolt_server duration that is malformed or not positive reads as the
 // default, like the worktree_cleanup durations: a zero restart_delay would
 // restart with no backoff at all, and an unset knob must not differ from a bad

@@ -1,4 +1,4 @@
-> Status: historical (2026-10). Merged in: gt-sxg5u. Not maintained.
+> Status: historical (2026-10). Merged in: gt-sxg5u. Not maintained. The replay was replaced by `gt jev attention` plus `gt jev scorecard --battery attention` (gt-3ey5j).
 
 # Jev advisory triage: implementation plan
 
