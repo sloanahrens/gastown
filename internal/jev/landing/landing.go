@@ -103,8 +103,8 @@ type Summary struct {
 // Run does one pass. Landings are taken oldest first, and each is logged and
 // the cursor advanced before the next, so a pass stopped partway never asks
 // about a landing twice. A landing whose Ask fails for any reason but an
-// unusable response stops the pass with that error and is asked again by the
-// next one. Run returns ErrBusy when another pass holds the run lock.
+// unusable response, or whose bead read fails for any reason but a missing
+// bead, stops the pass with that error and is asked again by the next one. Run returns ErrBusy when another pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
 	release, err := lockRun(p.CursorPath)
@@ -190,11 +190,16 @@ func after(cur battery.Cursor, landed time.Time, bead string) bool {
 var errUnreadable = errors.New("landing bead or diff unreadable")
 
 // ask builds the state for one landing, asks the battery and returns the line.
-// A bead or a diff that cannot be read returns errUnreadable, and the pass
-// skips the landing. A failure that ctx's end caused returns ctx's error, so
+// A bead that does not exist (beads.ErrNotFound) or a diff that cannot be read
+// returns errUnreadable, and the pass skips the landing. Any other bead read
+// error is infrastructure, such as a Dolt outage: it is returned wrapped, so
+// the pass stops before the cursor moves and the next pass asks again. A failure that ctx's end caused returns ctx's error, so
 // the next pass asks again.
 func (p *Pass) ask(ctx context.Context, rec land.LandingRecord) (Line, error) {
 	b, err := p.Beads.Show(rec.BeadID)
+	if err != nil && !errors.Is(err, beads.ErrNotFound) {
+		return Line{}, fmt.Errorf("reading bead %s: %w", rec.BeadID, err)
+	}
 	if err != nil || b == nil {
 		return Line{}, errUnreadable
 	}
