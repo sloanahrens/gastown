@@ -531,19 +531,64 @@ func (d *Daemon) checkpointDeletesBySpec(workDir, rigName, polecatName string, r
 	return revertwaiver.Note(issue, reverted)
 }
 
-// checkpointedWorkBead returns the work bead the branch in workDir carries: the
-// issue encoded in the seat's polecat branch, which is the bead this
-// checkpoint protects (gt-rp83g). The seat's assigned active bead answers only
-// when the branch names no issue for this seat — a legacy branch, a detached
-// HEAD, or a branch another seat wrote. Resolving by branch keeps a stale or
-// extra assignment from deciding whether the deletion was directed.
+// checkpointedWorkBead returns the work bead that directs this checkpoint's
+// deletions: the one gt done would submit the same branch under. That is the
+// issue encoded in the seat's polecat branch (gt-rp83g), except on stale-branch
+// reuse: a redispatched seat hooked to gt-NEW and checked out on its old gt-OLD
+// branch is submitted under gt-NEW, so the waiver is read from gt-NEW here too
+// (gt-aupx1). The seat's assigned active bead answers alone only when the
+// branch names no issue for this seat — a legacy branch, a detached HEAD, or a
+// branch another seat wrote.
 func (d *Daemon) checkpointedWorkBead(workDir, rigName, polecatName string) (string, error) {
+	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 	if branch, err := d.gitAt(workDir).CurrentBranch(); err == nil {
 		if meta, ok := polecat.ParseBranchName(branch); ok && meta.Issue != "" && meta.Polecat == polecatName {
-			return meta.Issue, nil
+			return d.resolveStaleBranchBead(rigName, assignee, meta.Issue)
 		}
 	}
-	return d.assignedActiveWorkBead(rigName, fmt.Sprintf("%s/polecats/%s", rigName, polecatName))
+	return d.assignedActiveWorkBead(rigName, assignee)
+}
+
+// resolveStaleBranchBead applies gt done's stale-branch guard (hq-l0fj) to the
+// issue a branch names. The branch's issue stands when the seat holds it or a
+// parent of it (a subtask branch gt-abc.1 under hooked gt-abc). Otherwise the
+// seat's single active assignment replaces it. Several assignments, or an
+// assignment list that cannot be read, name no bead: gt done refuses the
+// first and cannot know the second, so the dog waives nothing rather than
+// guess.
+func (d *Daemon) resolveStaleBranchBead(rigName, assignee, branchIssue string) (string, error) {
+	var assigned []string
+	var lastErr error
+	for _, status := range []string{"hooked", "in_progress"} {
+		issues, err := d.assignedWork(rigName, assignee, status)
+		if err != nil {
+			lastErr = fmt.Errorf("bd list --status=%s: %w", status, err)
+			continue
+		}
+		for _, issue := range issues {
+			if issue != nil && issue.ID != "" && !slices.Contains(assigned, issue.ID) {
+				assigned = append(assigned, issue.ID)
+			}
+		}
+		if len(assigned) > 0 {
+			break
+		}
+	}
+	if len(assigned) == 0 {
+		if lastErr != nil {
+			return "", lastErr
+		}
+		return branchIssue, nil
+	}
+	for _, id := range assigned {
+		if branchIssue == id || strings.HasPrefix(branchIssue, id+".") {
+			return branchIssue, nil
+		}
+	}
+	if len(assigned) > 1 {
+		return "", fmt.Errorf("branch issue %s is not held and %s has %d active assignments", branchIssue, assignee, len(assigned))
+	}
+	return assigned[0], nil
 }
 
 // isGitWorktree reports whether the given directory is the root of a git

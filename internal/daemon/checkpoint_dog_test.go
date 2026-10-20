@@ -1207,3 +1207,108 @@ func TestCheckpointDeletesBySpecReadsTheBeadTheBranchCarries(t *testing.T) {
 		})
 	}
 }
+
+// TestCheckpointDeletesBySpecUsesTheHookedBeadOnStaleBranchReuse covers a
+// redispatched seat hooked to gt-new but checked out on its old gt-old branch.
+// gt done submits that tree under the hooked bead, so the dog reads the
+// deletes-by-spec waiver from the hooked bead too: a label on only the old
+// bead waives nothing, and a label on only the hooked bead waives the deletion
+// (gt-aupx1).
+func TestCheckpointDeletesBySpecUsesTheHookedBeadOnStaleBranchReuse(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		oldLabels  []string
+		newLabels  []string
+		wantCommit bool
+	}{
+		{"only the old branch bead is labeled", []string{revertwaiver.Label}, nil, false},
+		{"only the hooked bead is labeled", nil, []string{revertwaiver.Label}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			alerts := &checkpointAlertRecorder{}
+			bd := newWorkBD(t)
+			bd.db.Seed(beads.Issue{ID: "gt-old", Status: "closed", Assignee: "rig/polecats/polecat",
+				Labels: tt.oldLabels, Description: "Delete keep.txt."})
+			bd.db.Seed(beads.Issue{ID: "gt-new", Status: "hooked", Assignee: "rig/polecats/polecat",
+				Labels: tt.newLabels, Description: "Delete keep.txt."})
+			d := &Daemon{
+				logger:                log.New(io.Discard, "", 0),
+				config:                townConfig(t),
+				openWorkBeads:         bd.open,
+				checkpointRevertAlert: alerts.alert,
+			}
+			polecat, g := newCheckpointRevertScenarioOn(t, d, "polecat/polecat/gt-old+mabc123")
+			writeWorkFiles(t, polecat, map[string]string{"keep.txt": "keep\n", "wip.txt": "real work in progress\n"})
+			before := headOf(t, g)
+
+			created := d.checkpointWorktree(polecat, "rig", "polecat")
+			if created != tt.wantCommit {
+				t.Fatalf("checkpointWorktree = %v, want %v", created, tt.wantCommit)
+			}
+			if tt.wantCommit {
+				if len(alerts.calls) != 0 {
+					t.Errorf("a directed deletion raised an escalation: %+v", alerts.calls)
+				}
+				return
+			}
+			if after := headOf(t, g); after != before {
+				t.Errorf("refused checkpoint advanced HEAD to %s, want %s", after, before)
+			}
+			if len(alerts.calls) != 1 {
+				t.Errorf("want exactly one escalation, got %+v", alerts.calls)
+			}
+		})
+	}
+}
+
+// TestResolveStaleBranchBead pins the dog to gt done's stale-branch guard: the
+// branch's issue stands when the seat holds it or its parent, a single other
+// assignment replaces it, and an ambiguous or unreadable assignment list names
+// no bead.
+func TestResolveStaleBranchBead(t *testing.T) {
+	t.Parallel()
+	seat := "rig/polecats/polecat"
+	tests := []struct {
+		name     string
+		branch   string
+		hooked   []string
+		progress []string
+		listErr  error
+		want     string
+		wantErr  bool
+	}{
+		{"no assignment keeps the branch bead", "gt-old", nil, nil, nil, "gt-old", false},
+		{"branch bead is the hooked one", "gt-old", []string{"gt-old"}, nil, nil, "gt-old", false},
+		{"stale branch yields the hooked bead", "gt-old", []string{"gt-new"}, nil, nil, "gt-new", false},
+		{"stale branch yields the in-progress bead", "gt-old", nil, []string{"gt-new"}, nil, "gt-new", false},
+		{"subtask branch keeps its own bead", "gt-abc.1", []string{"gt-abc"}, nil, nil, "gt-abc.1", false},
+		{"branch bead among several assignments", "gt-old", []string{"gt-new", "gt-old"}, nil, nil, "gt-old", false},
+		{"several assignments, none the branch's", "gt-old", []string{"gt-new", "gt-other"}, nil, nil, "", true},
+		{"unreadable assignments name no bead", "gt-old", nil, nil, errors.New("bd down"), "", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bd := newWorkBD(t)
+			bd.listErr = tt.listErr
+			for _, id := range tt.hooked {
+				bd.db.Seed(beads.Issue{ID: id, Status: "hooked", Assignee: seat})
+			}
+			for _, id := range tt.progress {
+				bd.db.Seed(beads.Issue{ID: id, Status: "in_progress", Assignee: seat})
+			}
+			d := &Daemon{logger: log.New(io.Discard, "", 0), config: townConfig(t), openWorkBeads: bd.open}
+
+			got, err := d.resolveStaleBranchBead("rig", seat, tt.branch)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err = %v, want error %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("bead = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
