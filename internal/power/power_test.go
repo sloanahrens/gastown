@@ -1084,3 +1084,37 @@ func TestBootHold(t *testing.T) {
 		t.Errorf("state file = %q, %v; want a boot standby record", data, err)
 	}
 }
+
+// TestWaitUntilBoundsHungProbe: a probe that blocks until its context ends
+// must not hold the wait past its deadline.
+func TestWaitUntilBoundsHungProbe(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	o := f.opts()
+	o.Now = time.Now
+	o.Sleep = func(ctx context.Context, d time.Duration) error {
+		select {
+		case <-time.After(d):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	e := newEngine(o)
+
+	done := make(chan error, 1)
+	go func() {
+		done <- e.waitUntil(context.Background(), "hung probe", 200*time.Millisecond, func(ctx context.Context) bool {
+			<-ctx.Done()
+			return false
+		})
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "timed out waiting for hung probe") {
+			t.Fatalf("error = %v, want a timed-out error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("waitUntil still blocked on a hung probe 5s after its 200ms deadline")
+	}
+}
