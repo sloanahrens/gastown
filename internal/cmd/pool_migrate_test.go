@@ -319,6 +319,11 @@ func TestPoolMigratePatrolOnlyTownWithoutSettingsFile(t *testing.T) {
 	if ts.PolecatPool == nil || ts.PolecatPool.Seats["claude-sonnet"].Cap != 2 {
 		t.Errorf("settings = %+v, want claude-sonnet seat at cap 2\n%s", ts.PolecatPool, out.String())
 	}
+	if fi, err := os.Stat(settings); err != nil {
+		t.Fatalf("stat %s: %v", settings, err)
+	} else if fi.Mode().Perm() != 0o600 {
+		t.Errorf("new settings file mode = %v, want 0600", fi.Mode().Perm())
+	}
 	var pc config.DaemonPatrolConfig
 	if err := config.DecodeJSONFile(patrol, readFile(t, patrol), &pc); err != nil {
 		t.Fatalf("the patrol file still holds the retired keys: %v", err)
@@ -336,6 +341,143 @@ func TestPoolMigratePatrolOnlyTownWithoutSettingsFile(t *testing.T) {
 	out.Reset()
 	if err := runPoolMigrate(&out, root, false, migrateNow); err != nil || strings.TrimSpace(out.String()) != "nothing to migrate" {
 		t.Errorf("second run = %q, %v, want nothing to migrate", out.String(), err)
+	}
+}
+
+// --dry-run on a town with no settings file prints the conversion and creates
+// nothing: no settings file, no backup of the patrol document, no temp file.
+func TestPoolMigrateDryRunWithoutSettingsFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	patrol := config.DaemonPatrolConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(patrol), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	patrolBody := []byte(`{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{"enabled":true,` +
+		`"hooked_agent":"claude-sonnet","max_hooked":2}}}`)
+	if err := os.WriteFile(patrol, patrolBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runPoolMigrate(&out, root, true, migrateNow); err != nil {
+		t.Fatalf("runPoolMigrate --dry-run: %v", err)
+	}
+	for _, want := range []string{"polecat_pool.seats.claude-sonnet.cap 2", "dry run: nothing written"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("the dry run did not print %q:\n%s", want, out.String())
+		}
+	}
+	settings := config.TownSettingsPath(root)
+	if _, err := os.Stat(settings); !os.IsNotExist(err) {
+		t.Errorf("the dry run created the settings file (stat: %v)\n%s", err, out.String())
+	}
+	if !bytes.Equal(readFile(t, patrol), patrolBody) {
+		t.Error("the dry run changed the patrol file")
+	}
+	if n := len(backupsOf(t, patrol)); n != 0 {
+		t.Errorf("the dry run left %d patrol backups, want none", n)
+	}
+}
+
+// A patrol document whose conversion the loaders would refuse writes nothing
+// when there is no settings file to fall back on: the run fails, no file is
+// created, and the patrol document keeps its keys.
+func TestPoolMigrateWithoutSettingsFileRefusalWritesNothing(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	patrol := config.DaemonPatrolConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(patrol), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	patrolBody := []byte(`{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{` +
+		`"hooked_agent":"no-such-agent","max_hooked":2}}}`)
+	if err := os.WriteFile(patrol, patrolBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	err := runPoolMigrate(&out, root, false, migrateNow)
+	if err == nil || !strings.Contains(err.Error(), "would not load") || !strings.Contains(err.Error(), "no-such-agent") {
+		t.Fatalf("runPoolMigrate = %v, want a refusal naming the agent", err)
+	}
+	if _, err := os.Stat(config.TownSettingsPath(root)); !os.IsNotExist(err) {
+		t.Errorf("a refused migration created the settings file (stat: %v)", err)
+	}
+	if !bytes.Equal(readFile(t, patrol), patrolBody) || len(backupsOf(t, patrol)) != 0 {
+		t.Error("a refused migration wrote something")
+	}
+}
+
+// A settings file that cannot be created fails the run before the patrol
+// document is written, so the town keeps the keys it had rather than losing
+// them to a half-run migration.
+func TestPoolMigrateWithoutSettingsFileWriteErrorWritesNothing(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	patrol := config.DaemonPatrolConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(patrol), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	patrolBody := []byte(`{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{` +
+		`"hooked_agent":"claude-sonnet","max_hooked":2}}}`)
+	if err := os.WriteFile(patrol, patrolBody, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	settingsDir := filepath.Dir(config.TownSettingsPath(root))
+	if err := os.MkdirAll(settingsDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(settingsDir, 0o700) })
+
+	var out bytes.Buffer
+	err := runPoolMigrate(&out, root, false, migrateNow)
+	if err == nil || !strings.Contains(err.Error(), config.TownSettingsPath(root)) {
+		t.Fatalf("runPoolMigrate = %v, want the settings creation to fail\n%s", err, out.String())
+	}
+	if !bytes.Equal(readFile(t, patrol), patrolBody) || len(backupsOf(t, patrol)) != 0 {
+		t.Error("a failed creation wrote the patrol document")
+	}
+}
+
+// The existence check runs before the file's lock, so a settings file can
+// appear in between. The link refuses to replace it and the run converts the
+// file that is there, reporting it as an update rather than as a new file.
+func TestConvertMigratedSettingsUpdatesAFileThatAppeared(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "settings.json")
+	appeared := []byte(`{"type":"town-settings","version":1,"role_agents":{"polecat":"claude-haiku"}}`)
+	if err := os.WriteFile(path, appeared, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	created, err := convertMigratedSettings(path, false, func(tree map[string]any) (bool, error) {
+		tree["role_agents"] = map[string]any{}
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("convertMigratedSettings: %v", err)
+	}
+	if created {
+		t.Error("the file was reported as created though it appeared before the link")
+	}
+	if got := readFile(t, path); !strings.Contains(string(got), `"role_agents": {}`) {
+		t.Errorf("the appeared file was not converted:\n%s", got)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm() != 0o644 {
+		t.Errorf("mode = %v, want the appeared file's 0644 kept", fi.Mode().Perm())
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp-") {
+			t.Errorf("a temp file was left behind: %s", e.Name())
+		}
 	}
 }
 

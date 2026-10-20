@@ -156,18 +156,14 @@ func runPoolMigrate(w io.Writer, townRoot string, dryRun bool, now time.Time) er
 		wroteSettings = true
 		return true, nil
 	}
-	if settingsExists {
-		err = config.UpdateRawJSON(settingsPath, convertSettings)
-	} else {
-		err = createMigratedSettings(settingsPath, convertSettings)
-	}
+	createdSettings, err := convertMigratedSettings(settingsPath, settingsExists, convertSettings)
 	if err != nil {
 		return fmt.Errorf("migrating %s: %w", settingsPath, err)
 	}
-	if wroteSettings && settingsExists {
+	if wroteSettings && !createdSettings {
 		fmt.Fprintf(w, "wrote %s (backup %s.bak-%s)\n", config.SourcePathRel(townRoot, settingsPath), filepath.Base(settingsPath), stamp)
 	}
-	if wroteSettings && !settingsExists {
+	if createdSettings {
 		fmt.Fprintf(w, "wrote %s (new file: the town had no settings file)\n", config.SourcePathRel(townRoot, settingsPath))
 	}
 	if plan.patrolChange {
@@ -196,37 +192,74 @@ func newMigrateSettings() map[string]any {
 	return map[string]any{"type": "town-settings", "version": json.Number(strconv.Itoa(config.CurrentTownSettingsVersion))}
 }
 
+// convertMigratedSettings writes the converted settings, creating the file when
+// the town had none and updating it otherwise. The existence check ran before
+// the file's lock was taken, so a file can appear in between: the update then
+// converts what is there, with the backup an update takes, instead of failing.
+// created reports that the file did not exist when it was written.
+func convertMigratedSettings(path string, exists bool, mutate func(tree map[string]any) (bool, error)) (created bool, err error) {
+	if exists {
+		return false, config.UpdateRawJSON(path, mutate)
+	}
+	created, err = createMigratedSettings(path, mutate)
+	if errors.Is(err, os.ErrExist) {
+		return false, config.UpdateRawJSON(path, mutate)
+	}
+	return created, err
+}
+
 // createMigratedSettings is UpdateRawJSON for a settings file that does not
 // exist yet: mutate converts the empty tree, and a change is written as a new
-// file. The file appears whole or not at all, and the link fails rather than
-// replace one that was created since the check.
-func createMigratedSettings(path string, mutate func(tree map[string]any) (bool, error)) error {
+// file. The file appears whole or not at all, and the link fails with os.ErrExist
+// rather than replace one that was created since the check. The file is mode
+// 0600, as an update writes a new config file, and both it and its directory
+// entry are fsynced before the name is handed back.
+func createMigratedSettings(path string, mutate func(tree map[string]any) (bool, error)) (created bool, err error) {
 	tree := newMigrateSettings()
 	changed, err := mutate(tree)
 	if err != nil || !changed {
-		return err
+		return false, err
 	}
 	out, err := json.MarshalIndent(tree, "", "  ")
 	if err != nil {
-		return fmt.Errorf("encoding %s: %w", path, err)
+		return false, fmt.Errorf("encoding %s: %w", path, err)
 	}
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
+		return false, err
 	}
 	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
 	if err != nil {
-		return err
+		return false, err
 	}
-	defer os.Remove(tmp.Name())
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	fail := func(err error) (bool, error) {
+		_ = tmp.Close()
+		return false, err
+	}
 	if _, err := tmp.Write(append(out, '\n')); err != nil {
-		tmp.Close()
-		return err
+		return fail(err)
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
 	}
 	if err := tmp.Close(); err != nil {
-		return err
+		return false, err
 	}
-	return os.Link(tmp.Name(), path)
+	// A link, not a rename: it refuses a file that appeared since the check
+	// instead of replacing it.
+	if err := os.Link(tmpName, path); err != nil {
+		return false, err
+	}
+	if d, err := os.Open(dir); err == nil { //nolint:gosec // G304: directory of an internal config path
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return true, nil
 }
 
 // poolMigratePatrolFile is the file holding the daemon's patrol document when it
