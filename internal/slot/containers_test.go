@@ -153,6 +153,24 @@ func TestClassify(t *testing.T) {
 			reasonIn: "session it reaped for is over",
 		},
 		{
+			name:   "old container whose session's reaper is equally old stays live",
+			holder: GateContainer{ID: "a", Image: "dolt/dolt-sql-server:2.2.0", Name: "suite", Created: now.Add(-40 * time.Minute), Labels: sessionLabels("sess-1")},
+			others: []GateContainer{
+				{ID: "r", Image: "testcontainers/ryuk:0.14.0", Name: "reaper", Created: now.Add(-40 * time.Minute), Labels: sessionLabels("sess-1")},
+			},
+			want:     VerdictLive,
+			reasonIn: "reaper",
+		},
+		{
+			name:   "old reaper with a container of its session is live",
+			holder: GateContainer{ID: "r", Image: "testcontainers/ryuk:0.14.0", Name: "reaper", Created: now.Add(-40 * time.Minute), Labels: sessionLabels("sess-1")},
+			others: []GateContainer{
+				{ID: "a", Image: "dolt/dolt-sql-server:2.2.0", Name: "suite", Created: now.Add(-40 * time.Minute), Labels: sessionLabels("sess-1")},
+			},
+			want:     VerdictLive,
+			reasonIn: "still present",
+		},
+		{
 			name:     "unknown age is not debris",
 			holder:   GateContainer{ID: "a", Image: "dolt/dolt-sql-server:2.2.0", Name: "suite"},
 			want:     VerdictUnknown,
