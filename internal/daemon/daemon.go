@@ -551,6 +551,11 @@ type Daemon struct {
 	rebuildOMBlock       rebuildGTBlock
 	rebuildOMCycleDoneFn func()
 
+	// jevDedupeRunning is the jev_dedupe pass's single-flight guard
+	// (jev_dedupe.go). A pass makes network calls, so it runs on its own
+	// goroutine and the heartbeat never waits for it.
+	jevDedupeRunning atomic.Bool
+
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
 	// predicate, so checkUpgradeRestart holds a restart for it separately, up
@@ -1517,6 +1522,11 @@ var heartbeatSteps = []heartbeatStep{
 	// Keep the installed om at the om origin's main (gt-0f228). lifecycle: an
 	// install changes a binary on the machine, which the town E-stop holds.
 	{name: "rebuild-om", lifecycle: true, run: (*Daemon).triggerRebuildOM},
+
+	// Suggest the bead each new finding duplicates, and log every suggestion
+	// (internal/jev/dedupe). Opt-in, and lifecycle: each pass spends on Jev, so
+	// the town E-stop holds it along with the other paid work.
+	{name: "jev-dedupe", lifecycle: true, run: (*Daemon).triggerJevDedupe},
 
 	// Sweep the tiers `make gate` does not run against origin/main
 	// (gt-vsct7.5). Non-lifecycle: it runs tests and files beads, and an
