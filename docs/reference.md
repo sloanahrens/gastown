@@ -1416,6 +1416,26 @@ the logged head, read with the parser the risk-path attention item uses. A
 or none, leaves the item unlabeled. The finding beads a `FAIL` names are counted
 in the report's context.
 
+The `submission` battery reads `.runtime/jev/submission.jsonl`, the submission
+battery's log. Each line is joined to the om review that judged it: the first
+row in `.runtime/landings/reviews.jsonl` for the same bead, at or after the
+logged `submitted` time and before the bead's next submission. An `approve` row
+sets `will_pass_review` true (`submission:om-approve`), a `request_changes` row
+sets it false (`submission:om-request-changes`), and a line with no row, or a
+row with any other verdict, is unlabeled.
+
+The joined row's attempt names a `MERGE REJECTION` block in the bead's notes,
+and that block's findings set two more labels, by their titles, matched
+case-insensitively:
+
+- a title that holds a missing-test phrase sets `tests_cover_change` false;
+- a title that holds a scope-beyond-the-bead phrase sets `beyond_goal` true.
+
+The two phrase lists are `missingTestPhrases` and `beyondGoalPhrases` in
+`internal/jev/scorecard/submission.go`, and nowhere else. A question no title
+names stays unlabeled on that line. The report's context counts the reviews that
+labeled submissions and the findings those reviews carried.
+
 The `finding` battery is described next.
 
 ##### Finding adapter (`--battery finding`)
