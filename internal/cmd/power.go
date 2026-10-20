@@ -48,7 +48,7 @@ var powerStatusCmd = &cobra.Command{
 	Short: "Report every part and the derived power state",
 	Long:  "Report every part of the town and the state they add up to. This command is read-only.",
 	Args:  cobra.NoArgs,
-	RunE:  runPowerCommand(power.Status, true),
+	RunE:  powerRunE(power.Status, powerOptions),
 }
 
 var powerFullCmd = &cobra.Command{
@@ -60,7 +60,7 @@ cleared, and the hold is left in place if a part does not come up.
 
 With --dry-run it prints the commands and waits without running them.`,
 	Args: cobra.NoArgs,
-	RunE: runPowerCommand(power.Full, true),
+	RunE: powerRunE(power.Full, powerOptions),
 }
 
 var powerStandbyCmd = &cobra.Command{
@@ -74,7 +74,7 @@ A drain that times out names what still runs and exits 3; nothing is killed.
 With --dry-run it prints every command and the probes without changing
 anything.`,
 	Args: cobra.NoArgs,
-	RunE: runPowerCommand(power.Standby, true),
+	RunE: powerRunE(power.Standby, powerOptions),
 }
 
 var powerOffCmd = &cobra.Command{
@@ -89,19 +89,15 @@ needs --force-cloud: the bot and patrol poll Forgejo, so the stack being
 stopped pauses deploys and makes those jobs log read errors. With --dry-run it
 prints every command and changes nothing.`,
 	Args: cobra.NoArgs,
-	RunE: runPowerCommand(power.Off, true),
+	RunE: powerRunE(power.Off, powerOptions),
 }
-
-// powerBootHoldNeedsForgejo is false: boot-hold only writes the hold and the
-// state record, so it must run even when the town settings cannot be decoded.
-const powerBootHoldNeedsForgejo = false
 
 var powerBootHoldCmd = &cobra.Command{
 	Use:   "boot-hold",
 	Short: "Write the hold so a reboot lands in standby",
 	Long:  "Write the hold and record a boot standby. This is the login job internal/templates/launchd/com.gastown.power-boot.plist runs.",
 	Args:  cobra.NoArgs,
-	RunE:  runPowerCommand(power.BootHold, powerBootHoldNeedsForgejo),
+	RunE:  powerRunE(power.BootHold, powerBootHoldOptions),
 }
 
 func init() {
@@ -128,13 +124,12 @@ func init() {
 	rootCmd.AddCommand(powerCmd)
 }
 
-// runPowerCommand resolves the host into power.Options and maps the state's
-// coded exit onto the process exit. needsForgejo is false for a state that
-// never touches the Forgejo stack, so a settings file that cannot be read does
-// not stop it.
-func runPowerCommand(fn func(context.Context, power.Options) error, needsForgejo bool) func(*cobra.Command, []string) error {
+// powerRunE builds a state command's RunE from the function that runs it and
+// the builder that resolves its options, and maps the state's coded exit onto
+// the process exit.
+func powerRunE(fn func(context.Context, power.Options) error, resolve func(*cobra.Command) (power.Options, error)) func(*cobra.Command, []string) error {
 	return func(cmd *cobra.Command, _ []string) error {
-		o, err := powerOptions(needsForgejo)
+		o, err := resolve(cmd)
 		if err != nil {
 			return powerExit(err)
 		}
@@ -153,29 +148,89 @@ func powerExit(err error) error {
 	return err
 }
 
-func powerOptions(needsForgejo bool) (power.Options, error) {
-	townRoot, err := workspace.FindFromCwdOrError()
+// powerOptions resolves the command's town and its settings. Every state
+// except boot-hold reaches the Forgejo stack, so a settings file that cannot be
+// decoded stops the command instead of handing the state a dir it does not
+// have.
+func powerOptions(cmd *cobra.Command) (power.Options, error) {
+	townRoot, err := powerTownRoot(cmd)
 	if err != nil {
-		return power.Options{}, &power.ExitError{Code: power.ExitUsage,
-			Err: fmt.Errorf("not in a Gas Town workspace: %w", err)}
+		return power.Options{}, err
 	}
-	return powerOptionsFor(townRoot, needsForgejo)
+	return powerOptionsFor(townRoot)
 }
 
-// powerOptionsFor is powerOptions for a town already found.
-func powerOptionsFor(townRoot string, needsForgejo bool) (power.Options, error) {
+// powerBootHoldOptions is powerOptions without the town settings. The login
+// job writes only the hold and the state record, so a settings/config.json it
+// cannot decode must not stop a reboot from landing in standby (gt-g4xe9).
+func powerBootHoldOptions(cmd *cobra.Command) (power.Options, error) {
+	townRoot, err := powerTownRoot(cmd)
+	if err != nil {
+		return power.Options{}, err
+	}
+	return powerBootHoldOptionsFor(townRoot)
+}
+
+// powerTownRoot is the town the command acts on: the one a caller pinned on
+// the command's context, else the one its working directory or GT_TOWN_ROOT
+// names.
+func powerTownRoot(cmd *cobra.Command) (string, error) {
+	if townRoot, _ := cmd.Context().Value(powerTownRootKey{}).(string); townRoot != "" {
+		return townRoot, nil
+	}
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return "", &power.ExitError{Code: power.ExitUsage,
+			Err: fmt.Errorf("not in a Gas Town workspace: %w", err)}
+	}
+	return townRoot, nil
+}
+
+// powerTownRootKey carries the town a caller pinned for one command invocation.
+// Tests use withPowerTownRoot to run the real command wiring against a fixture
+// town; production never sets it, so commands resolve their town from the
+// working directory or GT_TOWN_ROOT.
+type powerTownRootKey struct{}
+
+// withPowerTownRoot pins townRoot as the town the command acts on.
+func withPowerTownRoot(ctx context.Context, townRoot string) context.Context {
+	return context.WithValue(ctx, powerTownRootKey{}, townRoot)
+}
+
+// powerOptionsFor resolves a town already found. Every state except boot-hold
+// gets its Forgejo dir here; config.ForgejoDir answers a directory (default
+// ~/forgejo) or an error, never an empty path, so a state that reads the field
+// cannot silently get "". boot-hold uses powerBootHoldOptionsFor, whose name
+// says which state the empty dir belongs to.
+func powerOptionsFor(townRoot string) (power.Options, error) {
+	o, err := powerOptionsBase(townRoot)
+	if err != nil {
+		return power.Options{}, err
+	}
+	forgejoDir, err := config.ForgejoDir(townRoot)
+	if err != nil {
+		return power.Options{}, &power.ExitError{Code: power.ExitUsage,
+			Err: fmt.Errorf("reading forgejo.dir from settings/config.json: %w", err)}
+	}
+	o.ForgejoDir = forgejoDir
+	return o, nil
+}
+
+// powerBootHoldOptionsFor is powerOptionsFor for boot-hold: it leaves
+// ForgejoDir empty, which is safe only because boot-hold writes the hold and
+// the state record and touches no Forgejo part. A state that starts reading
+// ForgejoDir belongs on powerOptionsFor.
+func powerBootHoldOptionsFor(townRoot string) (power.Options, error) {
+	return powerOptionsBase(townRoot)
+}
+
+// powerOptionsBase fills every option except the Forgejo dir, which depends on
+// the town settings.
+func powerOptionsBase(townRoot string) (power.Options, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return power.Options{}, &power.ExitError{Code: power.ExitUsage,
 			Err: fmt.Errorf("finding the home directory: %w", err)}
-	}
-	forgejoDir := ""
-	if needsForgejo {
-		forgejoDir, err = config.ForgejoDir(townRoot)
-		if err != nil {
-			return power.Options{}, &power.ExitError{Code: power.ExitUsage,
-				Err: fmt.Errorf("reading forgejo.dir from settings/config.json: %w", err)}
-		}
 	}
 	if powerTimeout < 0 {
 		return power.Options{}, &power.ExitError{Code: power.ExitUsage,
@@ -188,7 +243,6 @@ func powerOptionsFor(townRoot string, needsForgejo bool) (power.Options, error) 
 	o := power.Options{
 		TownRoot:   townRoot,
 		HomeDir:    home,
-		ForgejoDir: forgejoDir,
 		GTCommand:  gtCommand,
 		DryRun:     powerDryRun,
 		Timeout:    time.Duration(powerTimeout) * time.Second,
