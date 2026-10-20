@@ -125,9 +125,17 @@ type Summary struct {
 
 // Run does one pass. Findings are taken in the order they were created, and
 // each is logged and the cursor advanced before the next, so a pass that is
-// stopped partway never asks about a finding twice.
+// stopped partway never asks about a finding twice. A finding whose question
+// was cut short by ctx is neither logged nor passed: the next pass asks it
+// again. Run returns ErrBusy when another pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
+	release, err := lockRun(p.CursorPath)
+	if err != nil {
+		return sum, err
+	}
+	defer release()
+
 	now := p.now()
 	cur, ok, err := readCursor(p.CursorPath)
 	if err != nil {
@@ -155,7 +163,10 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			sum.CapReached = true
 			break
 		}
-		line := p.ask(ctx, f)
+		line, err := p.ask(ctx, f)
+		if err != nil {
+			return sum, err
+		}
 		if err := appendLine(p.LogPath, line); err != nil {
 			return sum, err
 		}
@@ -212,10 +223,13 @@ func after(cur cursor, created time.Time, id string) bool {
 	return created.After(cur.Time)
 }
 
-// ask builds the one line a finding earns. Every path returns a line: a
-// failed search, a failed call, an unusable answer and a low-confidence answer
-// all log none, so a finding is asked about once whatever Jev does.
-func (p *Pass) ask(ctx context.Context, f *beads.Issue) Line {
+// ask builds the one line a finding earns. A failed search, a failed call, an
+// unusable answer and a low-confidence answer all log none, so a finding is
+// asked about once whatever Jev does; the line's outcome says which of them it
+// was. The one exception is a canceled ctx: a failure that ctx's end caused
+// says nothing about the finding, so ask returns ctx's error and no line, and
+// the next pass asks again.
+func (p *Pass) ask(ctx context.Context, f *beads.Issue) (Line, error) {
 	line := Line{
 		TS:                p.now(),
 		Finding:           f.ID,
@@ -224,11 +238,16 @@ func (p *Pass) ask(ctx context.Context, f *beads.Issue) Line {
 	}
 	hits, err := p.Searcher.Search(ctx, f.Title)
 	if err != nil {
-		return line
+		if cerr := ctx.Err(); cerr != nil {
+			return Line{}, cerr
+		}
+		line.Outcome = OutcomeSearchFailed
+		return line, nil
 	}
 	cands := p.candidates(f, hits)
 	if len(cands) == 0 {
-		return line
+		line.Outcome = OutcomeNoCandidates
+		return line, nil
 	}
 	for _, c := range cands {
 		line.CandidatesOffered = append(line.CandidatesOffered, c.ID)
@@ -236,14 +255,23 @@ func (p *Pass) ask(ctx context.Context, f *beads.Issue) Line {
 
 	ans, err := p.choose(ctx, f, cands)
 	if err != nil {
-		return line
+		if cerr := ctx.Err(); cerr != nil {
+			return Line{}, cerr
+		}
+		line.Outcome = OutcomeAskFailed
+		return line, nil
 	}
 	line.Confidence = ans.Confidence
-	if ans.Choice == noneOption || ans.Confidence < minConfidence || !offered(line.CandidatesOffered, ans.Choice) {
-		return line
+	switch {
+	case ans.Choice != noneOption && !offered(line.CandidatesOffered, ans.Choice):
+		line.Outcome = OutcomeUnknownOption
+	case ans.Confidence < minConfidence:
+		line.Outcome = OutcomeLowConfidence
+	default:
+		line.Outcome = OutcomeAnswered
+		line.Candidate = ans.Choice
 	}
-	line.Candidate = ans.Choice
-	return line
+	return line, nil
 }
 
 // candidates keeps up to maxCandidates beads from the hits, in rank order.

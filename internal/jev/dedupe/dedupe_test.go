@@ -23,6 +23,8 @@ var t0 = time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
 type fakeAsker struct {
 	script []fakeAnswer
 	calls  []fakeCall
+	// onChoice, when set, runs first and its error is the call's result.
+	onChoice func() error
 }
 
 type fakeAnswer struct {
@@ -37,6 +39,11 @@ type fakeCall struct {
 
 func (f *fakeAsker) Choice(_ context.Context, state any, _ string, criteria map[string]string) (*jev.Answer, error) {
 	f.calls = append(f.calls, fakeCall{state: state.(string), criteria: criteria})
+	if f.onChoice != nil {
+		if err := f.onChoice(); err != nil {
+			return nil, err
+		}
+	}
 	if len(f.script) == 0 {
 		return nil, jev.ErrBadResponse
 	}
@@ -50,10 +57,17 @@ type fakeSearcher struct {
 	hits map[string][]Hit
 	err  error
 	n    int
+	// onSearch, when set, runs first and its error is the call's result.
+	onSearch func() error
 }
 
 func (f *fakeSearcher) Search(_ context.Context, text string) ([]Hit, error) {
 	f.n++
+	if f.onSearch != nil {
+		if err := f.onSearch(); err != nil {
+			return nil, err
+		}
+	}
 	return f.hits[text], f.err
 }
 
@@ -224,8 +238,11 @@ func TestJevDedupePassLogsOneLinePerFinding(t *testing.T) {
 	if _, ok := got["ts"].(string); !ok {
 		t.Errorf("line has no ts string: %v", got)
 	}
-	if len(got) != 5 {
-		t.Errorf("line has %d keys, want exactly 5 (ts, finding, candidate, confidence, candidates_offered): %v", len(got), got)
+	if got["outcome"] != string(OutcomeAnswered) {
+		t.Errorf("outcome = %v, want %v", got["outcome"], OutcomeAnswered)
+	}
+	if len(got) != 6 {
+		t.Errorf("line has %d keys, want exactly 6 (ts, finding, candidate, confidence, candidates_offered, outcome): %v", len(got), got)
 	}
 
 	raw, err := os.ReadFile(h.log)
@@ -279,89 +296,99 @@ func TestJevDedupeCandidateFailuresLogNone(t *testing.T) {
 	hits := map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-old", Field: "title"}}}
 
 	tests := []struct {
-		name       string
-		hits       map[string][]Hit
-		searchErr  error
-		answer     fakeAnswer
-		wantAsked  int
-		wantCand   string
-		wantConf   float64
-		wantOffers []any
+		name        string
+		hits        map[string][]Hit
+		searchErr   error
+		answer      fakeAnswer
+		wantAsked   int
+		wantCand    string
+		wantConf    float64
+		wantOutcome Outcome
+		wantOffers  []any
 	}{
 		{
-			name:       "Jev times out",
-			hits:       hits,
-			answer:     fakeAnswer{err: jev.ErrTimeout},
-			wantAsked:  1,
-			wantCand:   "none",
-			wantOffers: []any{"gt-old"},
+			name:        "Jev times out",
+			wantOutcome: OutcomeAskFailed,
+			hits:        hits,
+			answer:      fakeAnswer{err: jev.ErrTimeout},
+			wantAsked:   1,
+			wantCand:    "none",
+			wantOffers:  []any{"gt-old"},
 		},
 		{
-			name:       "Jev sends an unusable answer",
-			hits:       hits,
-			answer:     fakeAnswer{err: jev.ErrBadResponse},
-			wantAsked:  1,
-			wantCand:   "none",
-			wantOffers: []any{"gt-old"},
+			name:        "Jev sends an unusable answer",
+			wantOutcome: OutcomeAskFailed,
+			hits:        hits,
+			answer:      fakeAnswer{err: jev.ErrBadResponse},
+			wantAsked:   1,
+			wantCand:    "none",
+			wantOffers:  []any{"gt-old"},
 		},
 		{
-			name:       "Jev sends a 500",
-			hits:       hits,
-			answer:     fakeAnswer{err: &jev.StatusError{Status: 500}},
-			wantAsked:  1,
-			wantCand:   "none",
-			wantOffers: []any{"gt-old"},
+			name:        "Jev sends a 500",
+			wantOutcome: OutcomeAskFailed,
+			hits:        hits,
+			answer:      fakeAnswer{err: &jev.StatusError{Status: 500}},
+			wantAsked:   1,
+			wantCand:    "none",
+			wantOffers:  []any{"gt-old"},
 		},
 		{
-			name:       "Jev says none",
-			hits:       hits,
-			answer:     fakeAnswer{ans: &jev.Answer{Choice: "none", Confidence: 0.8}},
-			wantAsked:  1,
-			wantCand:   "none",
-			wantConf:   0.8,
-			wantOffers: []any{"gt-old"},
+			name:        "Jev says none",
+			wantOutcome: OutcomeAnswered,
+			hits:        hits,
+			answer:      fakeAnswer{ans: &jev.Answer{Choice: "none", Confidence: 0.8}},
+			wantAsked:   1,
+			wantCand:    "none",
+			wantConf:    0.8,
+			wantOffers:  []any{"gt-old"},
 		},
 		{
-			name:       "confidence below the floor",
-			hits:       hits,
-			answer:     fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.49}},
-			wantAsked:  1,
-			wantCand:   "none",
-			wantConf:   0.49,
-			wantOffers: []any{"gt-old"},
+			name:        "confidence below the floor",
+			wantOutcome: OutcomeLowConfidence,
+			hits:        hits,
+			answer:      fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.49}},
+			wantAsked:   1,
+			wantCand:    "none",
+			wantConf:    0.49,
+			wantOffers:  []any{"gt-old"},
 		},
 		{
-			name:       "confidence exactly at the floor is kept",
-			hits:       hits,
-			answer:     fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.5}},
-			wantAsked:  1,
-			wantCand:   "gt-old",
-			wantConf:   0.5,
-			wantOffers: []any{"gt-old"},
+			name:        "confidence exactly at the floor is kept",
+			wantOutcome: OutcomeAnswered,
+			hits:        hits,
+			answer:      fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.5}},
+			wantAsked:   1,
+			wantCand:    "gt-old",
+			wantConf:    0.5,
+			wantOffers:  []any{"gt-old"},
 		},
 		{
-			name:       "an answer that names no offered option",
-			hits:       hits,
-			answer:     fakeAnswer{ans: &jev.Answer{Choice: "gt-other", Confidence: 0.95}},
-			wantAsked:  1,
-			wantCand:   "none",
-			wantConf:   0.95,
-			wantOffers: []any{"gt-old"},
+			name:        "an answer that names no offered option",
+			wantOutcome: OutcomeUnknownOption,
+			hits:        hits,
+			answer:      fakeAnswer{ans: &jev.Answer{Choice: "gt-other", Confidence: 0.95}},
+			wantAsked:   1,
+			wantCand:    "none",
+			wantConf:    0.95,
+			wantOffers:  []any{"gt-old"},
 		},
 		{
-			name:       "search fails, so Jev is not asked",
-			hits:       hits,
-			searchErr:  errors.New("hm down"),
-			wantAsked:  0,
-			wantCand:   "none",
-			wantOffers: []any{},
+			name:        "search fails, so Jev is not asked",
+			wantOutcome: OutcomeSearchFailed,
+			hits:        hits,
+			searchErr:   errors.New("hm down"),
+			wantAsked:   0,
+			wantCand:    "none",
+			wantOffers:  []any{},
 		},
 		{
-			name:       "no candidate survives the filter, so Jev is not asked",
-			hits:       map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-fnd", Field: "title"}}},
-			wantAsked:  0,
-			wantCand:   "none",
-			wantOffers: []any{},
+			name:        "no candidate survives the filter, so Jev is not asked",
+			wantOutcome: OutcomeNoCandidates,
+			hits:        map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-fnd", Field: "title"}}},
+			wantAsked:   0,
+			wantCand:    "none",
+			wantOffers:  []any{},
 		},
 	}
 	for _, tt := range tests {
@@ -380,6 +407,9 @@ func TestJevDedupeCandidateFailuresLogNone(t *testing.T) {
 			}
 			if got := lines[0]["candidate"]; got != tt.wantCand {
 				t.Errorf("candidate = %v, want %v", got, tt.wantCand)
+			}
+			if got := lines[0]["outcome"]; got != string(tt.wantOutcome) {
+				t.Errorf("outcome = %v, want %v", got, tt.wantOutcome)
 			}
 			if got := lines[0]["confidence"]; got != tt.wantConf {
 				t.Errorf("confidence = %v, want %v", got, tt.wantConf)
@@ -668,5 +698,122 @@ func TestJevDedupeReadRecent(t *testing.T) {
 	}
 	if len(lines) != 2 || lines[0].Finding != "gt-2" || lines[1].Finding != "gt-3" {
 		t.Errorf("ReadRecent(2) = %+v, want the last two lines, oldest first", lines)
+	}
+}
+
+// A pass stopped by its own context (a daemon shutdown, the run budget) says
+// nothing about the finding it was asking: it logs no line and leaves the
+// cursor, so the next pass asks the finding again.
+func TestJevDedupeCancelledContextLeavesTheFindingForTheNextPass(t *testing.T) {
+	t.Parallel()
+	all := []*beads.Issue{
+		bead("gt-old", "Old defect", "", 0),
+		bead("gt-fnd", "Found: the same defect", "", 10),
+	}
+	hits := map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-old", Field: "title"}}}
+	good := fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.9}}
+
+	tests := []struct {
+		name string
+		// cancelAt wires the cancel into the step the context ends in.
+		cancelAt func(h *harness, cancel context.CancelFunc)
+	}{
+		{
+			name: "during the hm search",
+			cancelAt: func(h *harness, cancel context.CancelFunc) {
+				h.search.onSearch = func() error { cancel(); return context.Canceled }
+			},
+		},
+		{
+			name: "during the Jev call",
+			cancelAt: func(h *harness, cancel context.CancelFunc) {
+				h.asker.onChoice = func() error { cancel(); return context.Canceled }
+			},
+		},
+		{
+			name: "while waiting out a 429",
+			cancelAt: func(h *harness, cancel context.CancelFunc) {
+				h.asker.script = []fakeAnswer{{err: &jev.RateLimitError{RetryAfter: time.Second}}}
+				h.pass.Wait = func(ctx context.Context, _ time.Duration) error { cancel(); return ctx.Err() }
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t, all, hits, good)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			tt.cancelAt(h, cancel)
+
+			_, err := h.pass.Run(ctx)
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("Run error = %v, want context.Canceled", err)
+			}
+			if n := len(h.lines(t)); n != 0 {
+				t.Fatalf("log has %d lines after a cancelled pass, want 0", n)
+			}
+
+			// A later pass with a live context asks the same finding.
+			h.search.onSearch, h.asker.onChoice = nil, nil
+			h.asker.script = []fakeAnswer{good}
+			h.pass.Wait = func(context.Context, time.Duration) error { return nil }
+			if sum := mustRun(t, h.pass); sum.Asked != 1 {
+				t.Errorf("next pass Asked = %d, want 1", sum.Asked)
+			}
+			lines := h.lines(t)
+			if len(lines) != 1 || lines[0]["candidate"] != "gt-old" || lines[0]["outcome"] != string(OutcomeAnswered) {
+				t.Errorf("log after the next pass = %v, want one answered line for gt-old", lines)
+			}
+		})
+	}
+}
+
+// A failure that is not the context's end still logs none and moves on, so one
+// bad finding cannot hold the queue.
+func TestJevDedupeFailureWithLiveContextAdvancesTheCursor(t *testing.T) {
+	t.Parallel()
+	all := []*beads.Issue{
+		bead("gt-old", "Old defect", "", 0),
+		bead("gt-fnd", "Found: the same defect", "", 10),
+	}
+	hits := map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-old", Field: "title"}}}
+	h := newHarness(t, all, hits, fakeAnswer{err: &jev.StatusError{Status: 500}})
+
+	mustRun(t, h.pass)
+	mustRun(t, h.pass)
+
+	lines := h.lines(t)
+	if len(lines) != 1 || lines[0]["outcome"] != string(OutcomeAskFailed) || lines[0]["candidate"] != "none" {
+		t.Errorf("log = %v, want one ask_failed none line", lines)
+	}
+}
+
+// A manual pass and the daemon's pass share one cursor, so a pass that finds
+// the other one running stops without touching the log or the cursor.
+func TestJevDedupeRunRefusesWhileAnotherPassHoldsTheLock(t *testing.T) {
+	t.Parallel()
+	all := []*beads.Issue{
+		bead("gt-old", "Old defect", "", 0),
+		bead("gt-fnd", "Found: the same defect", "", 10),
+	}
+	hits := map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-old", Field: "title"}}}
+	h := newHarness(t, all, hits, fakeAnswer{ans: &jev.Answer{Choice: "gt-old", Confidence: 0.9}})
+
+	release, err := lockRun(h.cursor)
+	if err != nil {
+		t.Fatalf("lockRun: %v", err)
+	}
+	_, err = h.pass.Run(context.Background())
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("Run error = %v, want ErrBusy", err)
+	}
+	if n := len(h.asker.calls) + len(h.lines(t)); n != 0 {
+		t.Errorf("a refused pass asked or logged %d times, want 0", n)
+	}
+
+	release()
+	if sum := mustRun(t, h.pass); sum.Asked != 1 {
+		t.Errorf("Asked = %d after the lock was released, want 1", sum.Asked)
 	}
 }

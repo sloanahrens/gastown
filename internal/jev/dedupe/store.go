@@ -13,11 +13,35 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/lock"
+)
+
+// Outcome says how a line's candidate came about. It is one of a fixed set of
+// codes, never free text, so it tells a real "none" from a failure without the
+// log holding an error message.
+type Outcome string
+
+const (
+	// OutcomeAnswered: Jev answered with an offered option (or none) at or
+	// above the confidence floor. Candidate is its choice.
+	OutcomeAnswered Outcome = "answered"
+	// OutcomeNoCandidates: the search found nothing to offer, so Jev was not
+	// asked.
+	OutcomeNoCandidates Outcome = "no_candidates"
+	// OutcomeSearchFailed: the hm search failed, so Jev was not asked.
+	OutcomeSearchFailed Outcome = "search_failed"
+	// OutcomeAskFailed: the Jev call failed (error, timeout, 429 after the
+	// retry, or an unparseable reply).
+	OutcomeAskFailed Outcome = "ask_failed"
+	// OutcomeLowConfidence: Jev answered below the confidence floor.
+	OutcomeLowConfidence Outcome = "low_confidence"
+	// OutcomeUnknownOption: Jev named an option the question did not offer.
+	OutcomeUnknownOption Outcome = "unknown_option"
 )
 
 // Line is one line of the suggestion log: what one finding was offered and
-// what Jev answered. It holds bead IDs and numbers only, never a title, a
-// description, a prompt or key text.
+// what Jev answered. It holds bead IDs, numbers and an outcome code only,
+// never a title, a description, a prompt, an error message or key text.
 type Line struct {
 	// TS is when the answer was logged.
 	TS time.Time `json:"ts"`
@@ -30,6 +54,8 @@ type Line struct {
 	// CandidatesOffered lists the beads the question offered, in the order
 	// the question gave them.
 	CandidatesOffered []string `json:"candidates_offered"`
+	// Outcome tells an answered "none" from a failure that also logs none.
+	Outcome Outcome `json:"outcome"`
 }
 
 // LogPath is the suggestion log, one JSON line per finding.
@@ -139,6 +165,27 @@ func writeCursor(path string, c cursor) error {
 		return fmt.Errorf("saving the dedupe cursor: %w", err)
 	}
 	return nil
+}
+
+// ErrBusy means another pass holds the run lock: a manual pass and the
+// daemon's pass share one cursor, so they take turns.
+var ErrBusy = errors.New("another jev dedupe pass is running")
+
+// lockRun takes the pass's run lock without waiting, and returns the release.
+// The lock sits beside the cursor, so every pass over one cursor contends on
+// it, in this process and in others.
+func lockRun(cursorPath string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(cursorPath), 0o700); err != nil {
+		return nil, fmt.Errorf("creating the dedupe lock directory: %w", err)
+	}
+	release, ok, err := lock.FlockTryAcquire(cursorPath + ".lock")
+	if err != nil {
+		return nil, fmt.Errorf("locking the dedupe pass: %w", err)
+	}
+	if !ok {
+		return nil, ErrBusy
+	}
+	return release, nil
 }
 
 // waitFor pauses for d, or until ctx is done.

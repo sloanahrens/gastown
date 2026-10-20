@@ -31,6 +31,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/jev/dedupe"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -555,6 +556,10 @@ type Daemon struct {
 	// (jev_dedupe.go). A pass makes network calls, so it runs on its own
 	// goroutine and the heartbeat never waits for it.
 	jevDedupeRunning atomic.Bool
+	// jevDedupeOpen builds the pass a run executes. Nil means dedupe.Open,
+	// which wires the live Jev client, hm and the rig's beads; a test sets it
+	// to hand the run a pass over fakes.
+	jevDedupeOpen func(townRoot string, s dedupe.Settings, warnings io.Writer) (*dedupe.Pass, error)
 
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle

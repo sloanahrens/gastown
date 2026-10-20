@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
@@ -57,7 +58,11 @@ func (d *Daemon) runJevDedupe() {
 			USDPerBillionTokens: c.Patrols.JevDedupe.USDPerBillionTokens,
 		}
 	}
-	pass, err := dedupe.Open(d.config.TownRoot, settings, d.logger.Writer())
+	open := d.jevDedupeOpen
+	if open == nil {
+		open = dedupe.Open
+	}
+	pass, err := open(d.config.TownRoot, settings, d.logger.Writer())
 	if err != nil {
 		d.logger.Printf("jev_dedupe: error: %v", err)
 		return
@@ -65,6 +70,10 @@ func (d *Daemon) runJevDedupe() {
 	ctx, cancel := context.WithTimeout(context.Background(), jevDedupeRunBudget)
 	defer cancel()
 	sum, err := pass.Run(ctx)
+	if errors.Is(err, dedupe.ErrBusy) {
+		d.logger.Printf("jev_dedupe: skipped: %v", err)
+		return
+	}
 	if err != nil {
 		d.logger.Printf("jev_dedupe: error: %v", err)
 		return

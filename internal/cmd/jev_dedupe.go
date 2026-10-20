@@ -118,14 +118,19 @@ func printRecentDedupe(w io.Writer, path string, n int) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "TIME\tFINDING\tCANDIDATE\tCONFIDENCE\tOFFERED\n")
+	fmt.Fprintf(tw, "TIME\tFINDING\tCANDIDATE\tCONFIDENCE\tOUTCOME\tOFFERED\n")
 	for _, l := range lines {
 		offered := "none"
 		if len(l.CandidatesOffered) > 0 {
 			offered = strings.Join(l.CandidatesOffered, ", ")
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%.2f\t%s\n",
-			l.TS.Local().Format("2006-01-02 15:04"), l.Finding, l.Candidate, l.Confidence, offered)
+		// A line logged before the outcome field existed has none.
+		outcome := string(l.Outcome)
+		if outcome == "" {
+			outcome = "-"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%.2f\t%s\t%s\n",
+			l.TS.Local().Format("2006-01-02 15:04"), l.Finding, l.Candidate, l.Confidence, outcome, offered)
 	}
 	return tw.Flush()
 }

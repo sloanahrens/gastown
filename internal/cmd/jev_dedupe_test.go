@@ -53,6 +53,32 @@ func TestJevDedupeRecentPrintsTheLastLines(t *testing.T) {
 	}
 }
 
+// A failure that logged none reads differently from an answered none.
+func TestJevDedupeRecentShowsTheOutcome(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := dedupe.LogPath(town)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"ts":"2026-10-19T12:00:00Z","finding":"gt-bad","candidate":"none","confidence":0,"candidates_offered":["gt-old"],"outcome":"ask_failed"}` + "\n" +
+		`{"ts":"2026-10-19T12:01:00Z","finding":"gt-ok","candidate":"none","confidence":0.8,"candidates_offered":["gt-old"],"outcome":"answered"}` + "\n"
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := printRecentDedupe(&out, path, 5); err != nil {
+		t.Fatal(err)
+	}
+	rows := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(rows) != 3 || !strings.Contains(rows[0], "OUTCOME") ||
+		!strings.Contains(rows[1], "gt-bad") || !strings.Contains(rows[1], "ask_failed") ||
+		!strings.Contains(rows[2], "gt-ok") || !strings.Contains(rows[2], "answered") {
+		t.Errorf("output:\n%s", out.String())
+	}
+}
+
 func TestJevDedupeRecentWithNoLog(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer

@@ -72,16 +72,16 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 		Beads:      rigBeads{b: beads.New(beadsDir)},
 		LogPath:    LogPath(townRoot),
 		CursorPath: CursorPath(townRoot),
-		SpentToday: spentToday(townRoot, price),
+		SpentToday: spentToday(townRoot, price, time.Now),
 		CapUSD:     capUSD,
 	}, nil
 }
 
 // spentToday reads what this job has spent since local midnight, priced at
 // usdPerBillion, from the usage ledger.
-func spentToday(townRoot string, usdPerBillion float64) func() (float64, error) {
+func spentToday(townRoot string, usdPerBillion float64, clock func() time.Time) func() (float64, error) {
 	return func() (float64, error) {
-		now := time.Now()
+		now := clock()
 		y, m, d := now.Date()
 		start := time.Date(y, m, d, 0, 0, 0, 0, now.Location())
 		rep, err := jev.ReadSpend(jev.UsageLedgerPath(townRoot), start, now, usdPerBillion)
@@ -95,6 +95,9 @@ func spentToday(townRoot string, usdPerBillion float64) func() (float64, error) 
 // hmSearcher runs hm query for a rig.
 type hmSearcher struct {
 	rig string
+	// run executes hm with args and returns its stdout. Nil runs the hm on the
+	// PATH.
+	run func(ctx context.Context, args ...string) ([]byte, error)
 }
 
 // Search runs `hm query --json` and keeps the fields a pass reads. The text
@@ -102,11 +105,27 @@ type hmSearcher struct {
 func (h hmSearcher) Search(ctx context.Context, text string) ([]Hit, error) {
 	ctx, cancel := context.WithTimeout(ctx, hmTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "hm", "query", "--json",
-		"--rig", h.rig, "--limit", strconv.Itoa(hmSearchLimit), "--", text).Output()
+	run := h.run
+	if run == nil {
+		run = runHM
+	}
+	out, err := run(ctx, "query", "--json",
+		"--rig", h.rig, "--limit", strconv.Itoa(hmSearchLimit), "--", text)
 	if err != nil {
 		return nil, fmt.Errorf("hm query: %w", err)
 	}
+	return parseHits(out)
+}
+
+func runHM(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "hm", args...).Output()
+}
+
+// parseHits decodes hm query --json output. A hit that names no matched chunk
+// (a commit, say, or a bead hm gave no provenance for) keeps an empty Field,
+// and the candidate filter drops it: a pass offers a bead only when it knows
+// the match was on the title or the description.
+func parseHits(out []byte) ([]Hit, error) {
 	var raw []struct {
 		Kind            string `json:"kind"`
 		ID              string `json:"id"`
