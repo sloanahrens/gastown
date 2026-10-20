@@ -550,20 +550,22 @@ func (d *Daemon) checkpointedWorkBead(workDir, rigName, polecatName string) (str
 }
 
 // resolveStaleBranchBead applies gt done's stale-branch guard (hq-l0fj) to the
-// issue a branch names. The branch's issue stands when the seat holds it or a
-// parent of it (a subtask branch gt-abc.1 under hooked gt-abc). Otherwise the
-// seat's single active assignment replaces it. Several assignments, or an
-// assignment list that cannot be read, name no bead: gt done refuses the
-// first and cannot know the second, so the dog waives nothing rather than
-// guess.
+// issue a branch names, sharing that guard's selection with gt done
+// (polecat.SelectAssignedIssue). The branch's issue stands when the seat holds
+// it or a parent of it (a subtask branch gt-abc.1 under hooked gt-abc).
+// Otherwise the seat's single active assignment replaces it.
+//
+// A status list that cannot be read names no bead even when the other status
+// answered: the failed status may be the one holding the branch's issue, so a
+// partial list is not a check that ran (gt-sl0np). Several assignments are
+// equally unknowable. Either way the caller waives nothing and the checkpoint
+// refusal stands.
 func (d *Daemon) resolveStaleBranchBead(rigName, assignee, branchIssue string) (string, error) {
 	var assigned []string
-	var lastErr error
 	for _, status := range []string{"hooked", "in_progress"} {
 		issues, err := d.assignedWork(rigName, assignee, status)
 		if err != nil {
-			lastErr = fmt.Errorf("bd list --status=%s: %w", status, err)
-			continue
+			return "", fmt.Errorf("bd list --status=%s: %w", status, err)
 		}
 		for _, issue := range issues {
 			if issue != nil && issue.ID != "" && !slices.Contains(assigned, issue.ID) {
@@ -574,21 +576,14 @@ func (d *Daemon) resolveStaleBranchBead(rigName, assignee, branchIssue string) (
 			break
 		}
 	}
-	if len(assigned) == 0 {
-		if lastErr != nil {
-			return "", lastErr
-		}
-		return branchIssue, nil
-	}
-	for _, id := range assigned {
-		if branchIssue == id || strings.HasPrefix(branchIssue, id+".") {
-			return branchIssue, nil
-		}
-	}
-	if len(assigned) > 1 {
+	selected, ambiguous := polecat.SelectAssignedIssue(branchIssue, assigned)
+	if ambiguous {
 		return "", fmt.Errorf("branch issue %s is not held and %s has %d active assignments", branchIssue, assignee, len(assigned))
 	}
-	return assigned[0], nil
+	if selected == "" {
+		return branchIssue, nil
+	}
+	return selected, nil
 }
 
 // isGitWorktree reports whether the given directory is the root of a git
