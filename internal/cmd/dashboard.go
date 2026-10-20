@@ -36,6 +36,7 @@ var (
 	dashboardBind                 string
 	dashboardSince                string
 	dashboardSpendCmd             string
+	dashboardJevSpendCmd          string
 	dashboardForgejoRepos         []string
 	dashboardClaudePlanUSD        float64
 	dashboardClaudePlanRenewalDay int
@@ -66,6 +67,14 @@ Host is not a loopback name.
 (default: ~/.claude/tools/deepseek-spend.py --json when that file exists). It
 runs every five minutes while a page is open; with none, the spend panel is
 left out.
+
+--jev-spend-cmd names the command that prints the Jev ledger's spend as JSON
+(default: gt jev spend --json --hours 24 --usd-per-billion-tokens 42). It runs
+every five minutes while a page is open and draws the Jev row of the Cost panel
+beside the DeepSeek and Claude lines: the calls and dollars over the command's
+--hours window, and the caller that cost the most. A command that fails or
+prints anything else shows the row as unavailable and leaves the other spend
+lines alone; an empty value leaves the row out.
 
 --claude-plan-usd prices the plan meter beside it: the Claude weekly and
 five-hour limits, read every minute from the samples the status line appends to
@@ -170,6 +179,7 @@ func init() {
 	dashboardCmd.Flags().StringVar(&dashboardBind, "bind", "127.0.0.1", "Address to bind; loopback only")
 	dashboardCmd.Flags().StringVar(&dashboardSince, "since", "2h", "How far back the feed starts (as gt tail --since)")
 	dashboardCmd.Flags().StringVar(&dashboardSpendCmd, "spend-cmd", "", "Command that prints the DeepSeek spend report as JSON (default: the ~/.claude tool when present)")
+	dashboardCmd.Flags().StringVar(&dashboardJevSpendCmd, "jev-spend-cmd", defaultJevSpendCmd, "Command that prints the Jev ledger's spend as JSON; empty leaves the Jev row out")
 	dashboardCmd.Flags().StringArrayVar(&dashboardForgejoRepos, "forgejo-repo", nil, "Repo (owner/name) the Forgejo panel reads; repeatable (default: every rig cut over to Forgejo)")
 	dashboardCmd.Flags().BoolVar(&dashboardOpen, "open", false, "Open the page in the default browser")
 	dashboardCmd.Flags().Float64Var(&dashboardClaudePlanUSD, "claude-plan-usd", dashboard.ClaudePlanDefaultUSD, "Monthly price of the Claude plan the plan meter's percentages are drawn against")
@@ -191,7 +201,7 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay)
+	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, dashboardJevSpendCmd, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay)
 	if err != nil {
 		return err
 	}
@@ -282,7 +292,7 @@ func dashboardClaudePlanPath(townRoot string) string {
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
 // when the server stops.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, claudePlanUSD float64, claudePlanRenewalDay int) (*dashboard.Hub, func(), error) {
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd, jevSpendCmd string, claudePlanUSD float64, claudePlanRenewalDay int) (*dashboard.Hub, func(), error) {
 	beadReads := openTailBeads(townRoot)
 	rigOfBead := landingRig(townRoot)
 	// The deploy block reads the same repos through the same viewer client as
@@ -364,6 +374,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Machine:    dashboard.SampleMachine,
 		Cloud:      func() *dashboard.Cloud { return cloud.Read(time.Now()) },
 		Spend:      dashboardSpend(resolveSpendCmd(spendCmd)),
+		JevSpend:   dashboardJevSpend(strings.Fields(jevSpendCmd)),
 		OM:         func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:  func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
 		Forgejo:    forgejoFeed,
@@ -608,6 +619,44 @@ func resolveSpendCmd(flagValue string) []string {
 		return nil
 	}
 	return []string{tool, "--json"}
+}
+
+// defaultJevSpendCmd is --jev-spend-cmd's default: the last day of the Jev
+// ledger, priced at a flat rate per billion tokens because the ledger stores
+// tokens and never dollars.
+const defaultJevSpendCmd = "gt jev spend --json --hours 24 --usd-per-billion-tokens 42"
+
+// dashboardJevSpend runs the Jev spend command and folds its JSON into the
+// row, nil when the command fails, times out, or prints anything but the
+// report. A nil argv is no Jev row. It shares the DeepSeek command's timeout
+// and fails apart from it: neither reader sees the other's command.
+func dashboardJevSpend(argv []string) func() *dashboard.JevSpend {
+	return dashboardJevSpendWith(argv, func(ctx context.Context, argv []string) ([]byte, error) {
+		return exec.CommandContext(ctx, argv[0], argv[1:]...).Output()
+	})
+}
+
+// dashboardJevSpendWith is dashboardJevSpend over run, the one place the
+// command is started, so a test stands in for the command without a process.
+func dashboardJevSpendWith(argv []string, run func(ctx context.Context, argv []string) ([]byte, error)) func() *dashboard.JevSpend {
+	if len(argv) == 0 {
+		return nil
+	}
+	window := dashboard.JevSpendWindow(argv)
+	return func() *dashboard.JevSpend {
+		ctx, cancel := context.WithTimeout(context.Background(), dashboardSpendTimeout)
+		defer cancel()
+		out, err := run(ctx, argv)
+		if err != nil {
+			return nil
+		}
+		j, err := dashboard.ParseJevSpend(out)
+		if err != nil {
+			return nil
+		}
+		j.Window = window
+		return j
+	}
 }
 
 // dashboardForgejoReaders wires the readers the viewer's token feeds — the

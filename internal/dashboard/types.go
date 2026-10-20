@@ -127,12 +127,13 @@ type Polecat struct {
 // Read sources, the keys of State.Reads. They name the panes whose reader keeps
 // its last good value when a read fails.
 const (
-	SourceSeats   = "seats"
-	SourceReady   = "ready"
-	SourceMachine = "machine"
-	SourceSpend   = "spend"
-	SourceOM      = "om"
-	SourceQueue   = "queue"
+	SourceSeats    = "seats"
+	SourceReady    = "ready"
+	SourceMachine  = "machine"
+	SourceSpend    = "spend"
+	SourceJevSpend = "jev_spend"
+	SourceOM       = "om"
+	SourceQueue    = "queue"
 )
 
 // readStaleFactor is how many of a poll's own intervals a reading may age
@@ -622,10 +623,14 @@ type State struct {
 	ClaudePlan *ClaudePlan `json:"claude_plan,omitempty"`
 	// Rework is what each om review bar costs in rework, from the landing
 	// worker's review log. It is nil until the reader first reports.
-	Rework    *Rework         `json:"rework,omitempty"`
-	Spend     json.RawMessage `json:"spend,omitempty"`
-	OM        *OM             `json:"om,omitempty"`
-	TierSweep *TierSweep      `json:"tiersweep,omitempty"`
+	Rework *Rework         `json:"rework,omitempty"`
+	Spend  json.RawMessage `json:"spend,omitempty"`
+	// JevSpend is the Jev ledger's calls and dollars over the spend command's
+	// window, read beside the DeepSeek spend. It is nil until the reader first
+	// reports; a failed read keeps the last good value and says so in Reads.
+	JevSpend  *JevSpend  `json:"jev_spend,omitempty"`
+	OM        *OM        `json:"om,omitempty"`
+	TierSweep *TierSweep `json:"tiersweep,omitempty"`
 	// Models is the header strip: the polecat model, the pool's seats against
 	// its cap, and the reviewer's model. It is nil until the reader reports.
 	Models *Models `json:"models,omitempty"`
@@ -674,6 +679,8 @@ type Config struct {
 	Cloud func() *Cloud
 	// Spend returns the DeepSeek spend report as JSON, nil when unavailable.
 	Spend func() json.RawMessage
+	// JevSpend returns the Jev spend row, nil when the read failed.
+	JevSpend func() *JevSpend
 	// OM reads the reviewer's record from disk.
 	OM func() *OM
 	// TierSweep reads the daemon's tier sweeps from the daemon log.
@@ -733,6 +740,7 @@ type Config struct {
 	MachineEvery    time.Duration
 	CloudEvery      time.Duration
 	SpendEvery      time.Duration
+	JevSpendEvery   time.Duration
 	OMEvery         time.Duration
 	TierSweepEvery  time.Duration
 	ForgejoEvery    time.Duration
@@ -770,6 +778,7 @@ func (c *Config) defaults() {
 	def(&c.MachineEvery, 10*time.Second)
 	def(&c.CloudEvery, 60*time.Second)
 	def(&c.SpendEvery, 5*time.Minute)
+	def(&c.JevSpendEvery, 5*time.Minute)
 	def(&c.OMEvery, 60*time.Second)
 	def(&c.TierSweepEvery, 60*time.Second)
 	def(&c.ForgejoEvery, 3*time.Minute)
