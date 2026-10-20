@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -89,4 +90,75 @@ func TestSpecSlingReadFailureStaysTheReadsError(t *testing.T) {
 		t.Errorf("a failed read is reported as a blocker: %v", err)
 	}
 	h.wantNo("spawn")
+}
+
+// The wrapper checks the read a dispatch starts from and no other. executeSling
+// reads the bead again after the spawn to catch a hold written meanwhile
+// (gt-0k7kb); a blocker that opens between the two reads is not that read's
+// question, and refusing there would call the bead's fields unreadable.
+func TestSpecSlingChecksBlockersOnlyOnTheFirstRead(t *testing.T) {
+	t.Parallel()
+	h := newSlingHarness(t)
+	h.addBead(slingBead, beadInfo{})
+	read := h.run.beadInfoInTown
+	reads := 0
+	h.run.beadInfoInTown = refuseOpenBlockers(func(town, id string) (*beadInfo, error) {
+		info, err := read(town, id)
+		reads++
+		if reads > 1 && info != nil {
+			info.Dependencies = []beads.IssueDep{{ID: "gt-frtad", Status: "open", DependencyType: "blocks"}}
+		}
+		return info, err
+	})
+
+	if _, err := h.run.executeSling(executeParams()); err != nil {
+		t.Fatalf("executeSling: %v", err)
+	}
+	if reads < 2 {
+		t.Fatalf("executeSling read the bead %d time(s), want the re-read after the spawn too", reads)
+	}
+	h.wantCalls("spawn", "spawn gastown")
+}
+
+// Existing skip reasons and dispatch order for a bead that is not blocked are
+// byte-identical with and without the wrapper (gt-ewrtm): the same calls in the
+// same order, the same output, and a failed read keeps its own error.
+func TestSpecSlingWrapperLeavesAnUnblockedDispatchUnchanged(t *testing.T) {
+	t.Parallel()
+	closed := []beads.IssueDep{{ID: "gt-done1", Status: "closed", DependencyType: "blocks"}}
+	cases := []struct {
+		name string
+		bead *beadInfo // nil leaves the bead out, so the read fails
+	}{
+		{name: "no dependencies", bead: &beadInfo{}},
+		{name: "closed blocker", bead: &beadInfo{Dependencies: closed}},
+		{name: "unreadable bead"},
+	}
+	run := func(t *testing.T, bead *beadInfo, wrap bool) (log []string, out string, err error) {
+		h := newSlingHarness(t)
+		if bead != nil {
+			h.addBead(slingBead, *bead)
+		}
+		if wrap {
+			h.run.beadInfoInTown = refuseOpenBlockers(h.run.beadInfoInTown)
+		}
+		_, err = h.run.executeSling(executeParams())
+		return h.log(), h.out.String(), err
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			wantLog, wantOut, wantErr := run(t, tc.bead, false)
+			gotLog, gotOut, gotErr := run(t, tc.bead, true)
+			if strings.Join(gotLog, "\n") != strings.Join(wantLog, "\n") {
+				t.Errorf("calls with the wrapper:\n  %s\nwithout:\n  %s", strings.Join(gotLog, "\n  "), strings.Join(wantLog, "\n  "))
+			}
+			if gotOut != wantOut {
+				t.Errorf("output with the wrapper %q, without %q", gotOut, wantOut)
+			}
+			if fmt.Sprint(gotErr) != fmt.Sprint(wantErr) {
+				t.Errorf("error with the wrapper %v, without %v", gotErr, wantErr)
+			}
+		})
+	}
 }

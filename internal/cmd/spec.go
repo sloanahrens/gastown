@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -2027,10 +2028,16 @@ func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specd
 // tick defers the bead and the next board leaves it out until the blocker
 // closes. An operator's gt sling does not run through here, and may still sling
 // a blocked bead on purpose.
+//
+// Only the first read is checked. executeSling reads the bead again after the
+// spawn to see whether a hold was written meanwhile (gt-0k7kb); that read has
+// its own question and its own message, and a blocker refusal there would be
+// reported as a field that "cannot be re-read". Later reads pass through.
 func refuseOpenBlockers(read func(townRoot, beadID string) (*beadInfo, error)) func(townRoot, beadID string) (*beadInfo, error) {
+	var started atomic.Bool
 	return func(townRoot, beadID string) (*beadInfo, error) {
 		info, err := read(townRoot, beadID)
-		if err != nil || info == nil {
+		if started.Swap(true) || err != nil || info == nil {
 			return info, err
 		}
 		if why := specPeerBlocked(beads.UnresolvedBlockerIDs(info.Dependencies)); why != "" {
