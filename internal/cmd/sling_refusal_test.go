@@ -22,12 +22,26 @@ func TestIsSlingRefusal(t *testing.T) {
 		func(string, string) (bool, error) { return true, nil },
 		func(string, string) (bool, string) { return false, "" })
 
+	_, parkedErr := sling.Blocked("/town", "gastown",
+		func(string, string) (bool, error) { return false, nil },
+		func(string, string) (bool, string) { return true, "parked" })
+	_, dockedErr := sling.Blocked("/town", "gastown",
+		func(string, string) (bool, error) { return false, nil },
+		func(string, string) (bool, string) { return true, "docked" })
+
 	cases := []struct {
 		name string
 		err  error
 		want bool
 	}{
 		{"nil", nil, false},
+		{"rig parked", parkedErr, true},
+		{"rig docked", dockedErr, true},
+		// The daemon reads a subprocess's text, where the sentinel is gone; the
+		// text alone must classify the same way (gt-d1wsm).
+		{"rig parked, text only", errors.New(parkedErr.Error()), true},
+		{"rig docked, text only", errors.New(dockedErr.Error()), true},
+		{"rig e-stopped, text only", errors.New(blockedErr.Error()), true},
 		{"duplicate content", sling.DecideDuplicates(sling.Duplicate{ID: "gt-x"}, []sling.DuplicateMatch{{
 			Bead: sling.Duplicate{ID: "gt-y", Status: "hooked", IssueType: "task"}, SharedTests: []string{"TestFoo"},
 		}}).Err(), true},

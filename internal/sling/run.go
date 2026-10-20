@@ -611,7 +611,9 @@ const RawMetadataRollbackReason = "Raw sling metadata failed"
 // ErrRigUnavailable is the sentinel for a rig an e-stop, park or dock refuses a
 // dispatch to (errors.Is). These refusals carry no dispatch refusal marker —
 // the rig, not the bead, is the reason — so this is how a caller tells them
-// apart from a failed sling when deciding whether to print help (gt-fudap).
+// apart from a failed sling when deciding whether to print help (gt-fudap). A
+// caller across a subprocess boundary reads their text instead
+// (dispatch.SlingRefusalLine).
 var ErrRigUnavailable = errors.New("rig unavailable for dispatch")
 
 // rigUnavailableError is Blocked's refusal. It wraps the operator-facing line
@@ -630,14 +632,14 @@ func Blocked(townRoot, rigName string, estopOn func(townRoot, rigName string) (b
 		if err != nil {
 			why = err.Error()
 		}
-		return "e-stop", &rigUnavailableError{msg: fmt.Sprintf("cannot sling to rig %q: %s\nClear it with: gt thaw, or gt thaw --rig %s", rigName, why, rigName)}
+		return "e-stop", &rigUnavailableError{msg: fmt.Sprintf(dispatch.RigUnavailableMarker+"rig %q: %s\nClear it with: gt thaw, or gt thaw --rig %s", rigName, why, rigName)}
 	}
 	if blocked, reason := parked(townRoot, rigName); blocked {
 		undoCmd := "gt rig unpark"
 		if reason == "docked" {
 			undoCmd = "gt rig undock"
 		}
-		return "rig " + reason, &rigUnavailableError{msg: fmt.Sprintf("cannot sling to %s rig %q\n%s %s", reason, rigName, undoCmd, rigName)}
+		return "rig " + reason, &rigUnavailableError{msg: fmt.Sprintf(dispatch.RigUnavailableMarker+"%s rig %q\n%s %s", reason, rigName, undoCmd, rigName)}
 	}
 	return "", nil
 }

@@ -339,7 +339,7 @@ func (r *execScheduledSlingRunner) sling(ctx context.Context, beadID, branch str
 // refusal included — so the answer is read before the run bead that refusal
 // would cost exists. The preview prints the refusal on stdout where the live
 // sling prints it on stderr, so both streams are searched for the marker
-// (dispatch.SlingRefusalReason).
+// (dispatch.SlingRefusalLine).
 func (r *execScheduledSlingRunner) admit(ctx context.Context, e ScheduledSlingEntry) (string, error) {
 	args := []string{"sling", e.Formula, e.Rig, "--dry-run", "--no-boot"}
 	if e.Agent != "" {
@@ -351,7 +351,7 @@ func (r *execScheduledSlingRunner) admit(ctx context.Context, e ScheduledSlingEn
 	cmd.Env = daemonGTEnv(bdMutationRoutingEnv(r.townRoot))
 	util.SetProcessGroup(cmd)
 	stdout, stderr, err := runWith(r.execCmd, cmd)
-	if reason, ok := dispatch.SlingRefusalReason(string(stdout) + "\n" + string(stderr)); ok {
+	if reason, ok := dispatch.SlingRefusalLine(string(stdout) + "\n" + string(stderr)); ok {
 		return reason, nil
 	}
 	if err != nil {
@@ -366,7 +366,7 @@ func (r *execScheduledSlingRunner) admit(ctx context.Context, e ScheduledSlingEn
 // line (sling.StepPrefix, internal/sling/timer.go), falling back to the first
 // line so a failure is never logged as an empty string.
 func slingErrorLine(output string) string {
-	if reason, ok := dispatch.SlingRefusalReason(output); ok {
+	if reason, ok := dispatch.SlingRefusalLine(output); ok {
 		return reason
 	}
 	first := ""
@@ -392,13 +392,14 @@ func (e *scheduledSlingDeferred) Unwrap() error { return e.cause }
 
 // isScheduledSlingRefusal reports whether a failed sling was a refusal rather
 // than a break. The patrol runs `gt sling` as a subprocess, so the refusal
-// marker in its output is the contract (dispatch.SlingRefusalReason); the spec
-// dispatcher classifies the same refusals (isSpecSlingRefusal in internal/cmd).
+// marker in its output is the contract (dispatch.SlingRefusalLine, the predicate
+// internal/cmd's isSlingRefusal shares), so a parked or docked rig defers the
+// entry instead of counting toward its escalation.
 func isScheduledSlingRefusal(err error) bool {
 	if err == nil {
 		return false
 	}
-	_, ok := dispatch.SlingRefusalReason(err.Error())
+	_, ok := dispatch.SlingRefusalLine(err.Error())
 	return ok
 }
 

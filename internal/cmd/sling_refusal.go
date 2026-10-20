@@ -3,7 +3,6 @@ package cmd
 import (
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/dispatch"
@@ -51,7 +50,9 @@ func isSlingUsageError(err error) bool {
 // failed dispatch. A refusal carries either a marker that leads its text — the
 // contract automatic dispatchers already read to defer rather than fail a bead
 // (internal/dispatch/refusal.go) — or, for the guards that keep their reason
-// out of that channel, a sentinel errors.Is finds.
+// out of that channel, a sentinel errors.Is finds. The text half is
+// dispatch.SlingRefusalLine, the predicate the daemon's scheduled-sling patrol
+// reads a subprocess's output with, so the two cannot disagree on a refusal.
 func isSlingRefusal(err error) bool {
 	if err == nil {
 		return false
@@ -59,7 +60,6 @@ func isSlingRefusal(err error) bool {
 	if errors.Is(err, sling.ErrRigUnavailable) || errors.Is(err, errSlingDuplicateContent) {
 		return true
 	}
-	msg := err.Error()
-	return strings.Contains(msg, dispatch.SlingRefusalMarker) ||
-		strings.Contains(msg, dispatch.ReslingRefusalMarker)
+	_, ok := dispatch.SlingRefusalLine(err.Error())
+	return ok
 }

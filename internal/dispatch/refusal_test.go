@@ -2,6 +2,59 @@ package dispatch
 
 import "testing"
 
+func TestSlingRefusalLine(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		text   string
+		want   string
+		wantOK bool
+	}{
+		{
+			name:   "capacity marker, wrapped by cobra",
+			text:   "Error: sling refused: pool: full (2/2)\n",
+			want:   "sling refused: pool: full (2/2)",
+			wantOK: true,
+		},
+		{
+			name:   "re-sling guard",
+			text:   "Error: refusing to re-sling gt-x: its branch survives\n",
+			want:   "refusing to re-sling gt-x: its branch survives",
+			wantOK: true,
+		},
+		{
+			name:   "parked rig, no marker",
+			text:   "[sling] step admission took 1s\nError: cannot sling to parked rig \"x\"\ngt rig unpark x\n",
+			want:   `cannot sling to parked rig "x"`,
+			wantOK: true,
+		},
+		{
+			name:   "docked rig",
+			text:   "cannot sling to docked rig \"x\"\ngt rig undock x",
+			want:   `cannot sling to docked rig "x"`,
+			wantOK: true,
+		},
+		{
+			name:   "e-stopped rig",
+			text:   "Error: cannot sling to rig \"x\": E-stop active\nClear it with: gt thaw\n",
+			want:   `cannot sling to rig "x": E-stop active`,
+			wantOK: true,
+		},
+		{name: "another cannot-sling failure", text: "Error: cannot sling to bead gt-x: not found\n"},
+		{name: "genuine failure", text: "Error: bead gt-x not found\n"},
+		{name: "empty", text: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := SlingRefusalLine(tt.text)
+			if ok != tt.wantOK || got != tt.want {
+				t.Errorf("SlingRefusalLine = %q, %v; want %q, %v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
 func TestSlingRefusalReason(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
