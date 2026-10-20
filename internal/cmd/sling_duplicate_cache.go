@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 
@@ -18,8 +19,8 @@ import (
 // the host was busy and was killed with the tick (gt-l0vlf, after gt-u8rbh cut
 // the repeats inside one tick but not the repeats across ticks).
 //
-// duplicateDetailCache keeps what that show returned, keyed by bead id and the
-// updated_at of the bd list row the tick already has. A bead whose row still
+// duplicateDetailCache keeps what that show returned, keyed by rig, bead id and
+// the updated_at of the bd list row the tick already has. A bead whose row still
 // carries the cached updated_at has the same design and notes, so a tick shows
 // only the beads that changed, and no more than duplicateDetailMissLimit of
 // them: the rest are compared on list text, as a failed show leaves them, with
@@ -36,7 +37,9 @@ const duplicateDetailMissLimit = 40
 var specDetailCache atomic.Pointer[duplicateDetailCache]
 
 // cachedDetail is what one show recovered for a bead, valid while the bead's
-// list row still says UpdatedAt.
+// list row still says UpdatedAt. Its blocking edges are kept without status: a
+// blocker closing does not touch the dependent's updated_at, so the status is
+// read from the pool on every tick (openBlockersIn).
 type cachedDetail struct {
 	UpdatedAt string      `json:"updated_at"`
 	Design    string      `json:"design,omitempty"`
@@ -44,32 +47,31 @@ type cachedDetail struct {
 	Deps      []cachedDep `json:"deps,omitempty"`
 }
 
-// cachedDep is a dependency edge as the show gave it. Status and CloseReason
-// are the target's at the time; a read refreshes them from the pool, because a
-// blocker closing does not touch the dependent's updated_at.
+// cachedDep is a blocking dependency edge, without the target's status.
 type cachedDep struct {
-	ID          string `json:"id"`
-	Type        string `json:"type,omitempty"`
-	Status      string `json:"status,omitempty"`
-	CloseReason string `json:"close_reason,omitempty"`
+	ID   string `json:"id"`
+	Type string `json:"type"`
 }
 
-// duplicateDetailFile is the cache's file.
+// duplicateDetailFile is the cache's file: each rig's pool details by bead id,
+// for the daemon named by Owner.
 type duplicateDetailFile struct {
-	Owner   string                  `json:"owner"`
-	Entries map[string]cachedDetail `json:"entries"`
+	Owner string                             `json:"owner"`
+	Rigs  map[string]map[string]cachedDetail `json:"rigs"`
 }
 
 // duplicateDetailCache is the daemon's design/notes cache for the duplicate
-// check's pool. One value serves one tick: its counters are that tick's.
+// check's pools. One value serves one tick: its counters are that tick's.
 type duplicateDetailCache struct {
 	limit int
 	path  string // "" keeps the cache in memory
 	owner string
 
-	mu      sync.Mutex
-	entries map[string]cachedDetail
-	dirty   bool
+	mu sync.Mutex
+	// rigs holds each rig's entries, keyed by the rig's beads directory, so one
+	// rig's pool fetch prunes only its own beads.
+	rigs  map[string]map[string]cachedDetail
+	dirty bool
 	// The beads this tick showed, and the ones it answered from the cache.
 	fetched map[string]bool
 	cached  map[string]bool
@@ -82,7 +84,7 @@ type duplicateDetailCache struct {
 func newDuplicateDetailCache(path, owner string, limit int) *duplicateDetailCache {
 	return &duplicateDetailCache{
 		limit: limit, path: path, owner: owner,
-		entries: map[string]cachedDetail{},
+		rigs:    map[string]map[string]cachedDetail{},
 		fetched: map[string]bool{}, cached: map[string]bool{}, unread: map[string]bool{},
 	}
 }
@@ -97,10 +99,10 @@ func loadDuplicateDetailCache(path, owner string, limit int) *duplicateDetailCac
 		return c
 	}
 	var f duplicateDetailFile
-	if json.Unmarshal(data, &f) != nil || f.Owner != owner || f.Entries == nil {
+	if json.Unmarshal(data, &f) != nil || f.Owner != owner || f.Rigs == nil {
 		return c
 	}
-	c.entries = f.Entries
+	c.rigs = f.Rigs
 	return c
 }
 
@@ -124,13 +126,13 @@ func (c *duplicateDetailCache) Counts() (fetched, cached, unread int) {
 	return len(c.fetched), len(c.cached), len(c.unread)
 }
 
-// read recovers the detail of every row. A row the cache holds at the row's
-// updated_at is answered from it; the others are shown, up to the limit this
-// tick has left, and the rest come back without a detail, counted in deferred.
-// known is every row of the pool being built: it is where a cached edge's
-// target status is refreshed from. An error is the show's, and the details it
-// returns are the ones the cache answered.
-func (c *duplicateDetailCache) read(store beads.Client, rows []*beads.Issue, known []*beads.Issue) (details map[string]duplicateDetail, deferred int, err error) {
+// read recovers the detail of every row of the pool of the rig at beadsDir. A
+// row the cache holds at the row's updated_at is answered from it; the others
+// are shown, up to the limit this tick has left, and the rest come back without
+// a detail, counted in deferred. known is every row of the pool being built,
+// which is what a cached blocker's status is read from. An error is the show's,
+// and the details it returned are kept.
+func (c *duplicateDetailCache) read(beadsDir string, store beads.Client, rows []*beads.Issue, known []*beads.Issue) (details map[string]duplicateDetail, deferred int, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -138,22 +140,23 @@ func (c *duplicateDetailCache) read(store beads.Client, rows []*beads.Issue, kno
 	for _, row := range known {
 		status[row.ID] = row
 	}
+	entries := c.rigs[beadsDir]
+	if entries == nil {
+		entries = map[string]cachedDetail{}
+		c.rigs[beadsDir] = entries
+	}
 	details = make(map[string]duplicateDetail, len(rows))
 	var missing []*beads.Issue
 	for _, row := range rows {
 		if row.ID == "" {
 			continue
 		}
-		entry, ok := c.entries[row.ID]
+		entry, ok := entries[row.ID]
 		if !ok || row.UpdatedAt == "" || entry.UpdatedAt != row.UpdatedAt {
 			missing = append(missing, row)
 			continue
 		}
-		if c.refresh(&entry, status) {
-			c.entries[row.ID] = entry
-			c.dirty = true
-		}
-		details[row.ID] = entry.detail()
+		details[row.ID] = entry.detail(status)
 		if !c.fetched[row.ID] {
 			c.cached[row.ID] = true
 		}
@@ -190,17 +193,16 @@ func (c *duplicateDetailCache) read(store beads.Client, rows []*beads.Issue, kno
 			if is == nil {
 				continue
 			}
-			detail := duplicateDetail{
+			details[row.ID] = duplicateDetail{
 				Design:       is.Design,
 				Notes:        is.Notes,
 				Blockers:     blockingDepIDs(is.Dependencies),
 				OpenBlockers: beads.UnresolvedBlockerIDs(is.Dependencies),
 			}
-			details[row.ID] = detail
 			if row.UpdatedAt == "" {
 				continue
 			}
-			c.entries[row.ID] = cachedDetail{UpdatedAt: row.UpdatedAt, Design: is.Design, Notes: is.Notes, Deps: cachedDepsOf(is.Dependencies)}
+			entries[row.ID] = cachedDetail{UpdatedAt: row.UpdatedAt, Design: is.Design, Notes: is.Notes, Deps: cachedDepsOf(is.Dependencies)}
 			c.dirty = true
 		}
 	}
@@ -208,33 +210,14 @@ func (c *duplicateDetailCache) read(store beads.Client, rows []*beads.Issue, kno
 	return details, deferred, err
 }
 
-// refresh sets each cached edge's status to its target's as the pool lists it
-// and reports whether any changed. An edge to a bead the pool does not list (a
-// bead of another rig, or one closed before the lookback) keeps the status it
-// was read with.
-func (c *duplicateDetailCache) refresh(entry *cachedDetail, status map[string]*beads.Issue) bool {
-	changed := false
-	for i, dep := range entry.Deps {
-		row, ok := status[beads.ExtractIssueID(dep.ID)]
-		if !ok || (row.Status == dep.Status && row.CloseReason == dep.CloseReason) {
-			continue
-		}
-		if !changed {
-			entry.Deps = append([]cachedDep(nil), entry.Deps...)
-			changed = true
-		}
-		entry.Deps[i].Status, entry.Deps[i].CloseReason = row.Status, row.CloseReason
-	}
-	return changed
-}
-
-// retain drops the entries of beads the pool no longer lists, and saves.
-func (c *duplicateDetailCache) retain(ids map[string]bool) {
+// retain drops the entries of the rig at beadsDir for beads its pool no longer
+// lists, and saves. Other rigs' entries are not its to drop.
+func (c *duplicateDetailCache) retain(beadsDir string, ids map[string]bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for id := range c.entries {
+	for id := range c.rigs[beadsDir] {
 		if !ids[id] {
-			delete(c.entries, id)
+			delete(c.rigs[beadsDir], id)
 			c.dirty = true
 		}
 	}
@@ -248,33 +231,56 @@ func (c *duplicateDetailCache) save() {
 	if c.path == "" || !c.dirty {
 		return
 	}
-	if err := atomicfile.EnsureDirAndWriteJSON(c.path, duplicateDetailFile{Owner: c.owner, Entries: c.entries}); err != nil {
+	// The file holds design and notes text, so only the daemon's user may read it.
+	err := os.MkdirAll(filepath.Dir(c.path), 0o700)
+	if err == nil {
+		err = atomicfile.WriteJSONWithPerm(c.path, duplicateDetailFile{Owner: c.owner, Rigs: c.rigs}, 0o600)
+	}
+	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: spec detail cache not saved: %v\n", err)
 		return
 	}
 	c.dirty = false
 }
 
-func (e cachedDetail) detail() duplicateDetail {
+// detail is the cached detail with its blockers read against status, the pool
+// as it lists now.
+func (e cachedDetail) detail(status map[string]*beads.Issue) duplicateDetail {
 	deps := make([]beads.IssueDep, len(e.Deps))
 	for i, d := range e.Deps {
-		deps[i] = beads.IssueDep{ID: d.ID, DependencyType: d.Type, Status: d.Status, CloseReason: d.CloseReason}
+		deps[i] = beads.IssueDep{ID: d.ID, DependencyType: d.Type}
 	}
 	return duplicateDetail{
 		Design:       e.Design,
 		Notes:        e.Notes,
 		Blockers:     blockingDepIDs(deps),
-		OpenBlockers: beads.UnresolvedBlockerIDs(deps),
+		OpenBlockers: openBlockersIn(deps, status),
 	}
 }
 
-func cachedDepsOf(deps []beads.IssueDep) []cachedDep {
-	if len(deps) == 0 {
-		return nil
+// openBlockersIn is the blocking edges still open in the pool as it lists now.
+// A target the pool does not list is resolved: an open bead of this rig is
+// always listed, so an absent target is closed, or closed before the lookback.
+func openBlockersIn(deps []beads.IssueDep, status map[string]*beads.Issue) []string {
+	listed := make([]beads.IssueDep, 0, len(deps))
+	for _, d := range deps {
+		row, ok := status[d.ID]
+		if !ok {
+			continue
+		}
+		d.Status, d.CloseReason = row.Status, row.CloseReason
+		listed = append(listed, d)
 	}
-	out := make([]cachedDep, len(deps))
-	for i, d := range deps {
-		out[i] = cachedDep{ID: d.ID, Type: d.DependencyType, Status: d.Status, CloseReason: d.CloseReason}
+	return beads.UnresolvedBlockerIDs(listed)
+}
+
+// cachedDepsOf keeps the blocking edges of a show, without their status.
+func cachedDepsOf(deps []beads.IssueDep) []cachedDep {
+	var out []cachedDep
+	for _, d := range deps {
+		if beads.IsBlockingDependencyType(d.DependencyType) {
+			out = append(out, cachedDep{ID: d.ID, Type: d.DependencyType})
+		}
 	}
 	return out
 }

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -554,9 +555,11 @@ func fetchDuplicatePoolFrom(store beads.Client, warn func(beadsDir string, err e
 // and notes through details, which shows only the beads whose list row changed
 // since it last did (gt-l0vlf). A nil details shows every bead of the pool.
 //
-// Both lists are read before either is enriched: a cached edge's target is
-// refreshed from the pool's rows, and a blocker that closed sits in the closed
-// list while the bead it blocks sits in the active one.
+// Both lists are read before either is enriched: a cached blocker's open status
+// is read from the pool's rows, and a blocker that closed sits in the closed
+// list while the bead it blocks sits in the active one. The tick's unread count
+// and any enrichment failure are reported once, however many lists they came
+// from.
 func fetchDuplicatePoolWith(store beads.Client, warn func(beadsDir string, err error), beadsDir string, details *duplicateDetailCache) ([]duplicateCandidate, error) {
 	activeRows, err := listDuplicateRows(store, duplicatePoolStatuses, time.Time{})
 	if err != nil {
@@ -567,14 +570,21 @@ func fetchDuplicatePoolWith(store beads.Client, warn func(beadsDir string, err e
 		return nil, err
 	}
 	known := append(append([]*beads.Issue(nil), activeRows...), closedRows...)
-	active := duplicateCandidatesOf(store, warn, beadsDir, activeRows, details, known)
-	closed := duplicateCandidatesOf(store, warn, beadsDir, closedRows, details, known)
+	active, activeDeferred, activeErr := duplicateCandidatesOf(store, beadsDir, activeRows, details, known)
+	closed, closedDeferred, closedErr := duplicateCandidatesOf(store, beadsDir, closedRows, details, known)
 	if details != nil {
 		listed := make(map[string]bool, len(known))
 		for _, row := range known {
 			listed[row.ID] = true
 		}
-		details.retain(listed)
+		details.retain(beadsDir, listed)
+		if deferred := activeDeferred + closedDeferred; deferred > 0 {
+			warn(beadsDir, fmt.Errorf("design/notes of %d of %d bead(s) not read this tick, over its limit of %d; they are read on the next ticks",
+				deferred, len(known), details.limit))
+		}
+	}
+	if err := errors.Join(activeErr, closedErr); err != nil {
+		warn(beadsDir, err)
 	}
 	return append(active, closed...), nil
 }
@@ -590,7 +600,11 @@ func listDuplicateCandidates(store beads.Client, warn func(beadsDir string, err 
 	if err != nil {
 		return nil, err
 	}
-	return duplicateCandidatesOf(store, warn, beadsDir, rows, nil, nil), nil
+	candidates, _, err := duplicateCandidatesOf(store, beadsDir, rows, nil, nil)
+	if err != nil {
+		warn(beadsDir, err)
+	}
+	return candidates, nil
 }
 
 // listDuplicateRows is the bd list behind a pool read.
@@ -604,9 +618,12 @@ func listDuplicateRows(store beads.Client, statuses []string, closedAfter time.T
 
 // duplicateCandidatesOf reduces listed rows to their comparison fields, with
 // the design/notes enrichment described on listDuplicateCandidates. details,
-// when not nil, is the cache that enrichment reads through and known the rows
-// it refreshes cached blockers from.
-func duplicateCandidatesOf(store beads.Client, warn func(beadsDir string, err error), beadsDir string, rows []*beads.Issue, details *duplicateDetailCache, known []*beads.Issue) []duplicateCandidate {
+// when not nil, is the cache that enrichment reads through for the rig at
+// beadsDir, and known the rows its cached blockers are read against. It returns
+// how many rows the cache left unread for the tick's limit, and the enrichment's
+// error; the candidates are built either way, on list text where the show
+// failed.
+func duplicateCandidatesOf(store beads.Client, beadsDir string, rows []*beads.Issue, details *duplicateDetailCache, known []*beads.Issue) ([]duplicateCandidate, int, error) {
 	ids := make([]string, 0, len(rows))
 	for _, row := range rows {
 		if row.ID != "" {
@@ -624,22 +641,15 @@ func duplicateCandidatesOf(store beads.Client, warn func(beadsDir string, err er
 	// blind to exactly the overlap this check was extended to catch, and the
 	// operator must be able to tell that apart from "no duplicates found".
 	var detailsByID map[string]duplicateDetail
+	var deferred int
 	var detailErr error
 	if details != nil {
-		var deferred int
-		detailsByID, deferred, detailErr = details.read(store, rows, known)
-		if deferred > 0 {
-			warn(beadsDir, fmt.Errorf("design/notes of %d of %d bead(s) not read this tick, over its limit of %d; they are read on the next ticks",
-				deferred, len(ids), details.limit))
-		}
+		detailsByID, deferred, detailErr = details.read(beadsDir, store, rows, known)
 	} else {
 		detailsByID, detailErr = fetchDuplicateDetails(store, ids)
 		if detailErr != nil {
 			detailsByID = nil
 		}
-	}
-	if detailErr != nil {
-		warn(beadsDir, detailErr)
 	}
 
 	candidates := make([]duplicateCandidate, 0, len(rows))
@@ -662,7 +672,7 @@ func duplicateCandidatesOf(store beads.Client, warn func(beadsDir string, err er
 				detail.Design, detail.Notes),
 		})
 	}
-	return candidates
+	return candidates, deferred, detailErr
 }
 
 // readinessOf reduces one listed bead to the fields the readiness question
