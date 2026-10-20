@@ -150,7 +150,7 @@ func TestCapacitySnapshotKeepsOldLiveReservation(t *testing.T) {
 		Rig:       "gastown",
 		Bead:      "gt-live",
 		Operation: "test",
-		CreatedAt: time.Now().Add(-2 * polecatAdmissionReservationTTL),
+		CreatedAt: time.Now().Add(-3 * polecatAdmissionReservationTTL / 2),
 	}
 	data, err := json.Marshal(reservation)
 	if err != nil {
@@ -170,6 +170,39 @@ func TestCapacitySnapshotKeepsOldLiveReservation(t *testing.T) {
 	}
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("live reservation should remain: %v", err)
+	}
+}
+
+func TestCleanupStaleReservationsRemovesLivePIDPastMaxAge(t *testing.T) {
+	t.Parallel()
+	townRoot := setupPolecatCapacityTestTown(t, 1)
+	dir := polecatAdmissionDir(townRoot)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatalf("mkdir reservations: %v", err)
+	}
+	now := time.Now()
+	reservation := polecatAdmissionReservation{
+		ID:        "reused",
+		PID:       os.Getpid(),
+		Rig:       "gastown",
+		Bead:      "gt-reused",
+		Operation: "test",
+		CreatedAt: now.Add(-2 * polecatAdmissionReservationTTL),
+	}
+	data, err := json.Marshal(reservation)
+	if err != nil {
+		t.Fatalf("marshal reservation: %v", err)
+	}
+	path := filepath.Join(dir, "reused.json")
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		t.Fatalf("write reservation: %v", err)
+	}
+
+	if err := cleanupStalePolecatAdmissionReservations(townRoot, now); err != nil {
+		t.Fatalf("cleanup: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("reservation with reused live PID past max age still exists: %v", err)
 	}
 }
 
