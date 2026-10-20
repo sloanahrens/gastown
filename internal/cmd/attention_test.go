@@ -533,3 +533,15 @@ func TestAttentionAckHelpNamesTheRequiredFlag(t *testing.T) {
 		}
 	}
 }
+
+// The jev-replay subcommand is retired (gt-3ey5j): the attention battery and
+// its scorecard adapter replaced the three-way triage it replayed, so
+// `gt attention jev-replay` is an unknown command.
+func TestAttentionJevReplayIsRetired(t *testing.T) {
+	t.Parallel()
+	for _, c := range attentionCmd.Commands() {
+		if c.Name() == "jev-replay" {
+			t.Errorf("gt attention still registers jev-replay")
+		}
+	}
+}

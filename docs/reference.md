@@ -956,9 +956,9 @@ ever writes `acks.json` and `acks-history.jsonl`:
   neither process races the other's file.
 - `acks-history.jsonl` — one line per ack, `{ts, key, kind, rule, disposition}`,
   appended under the same flock and rotated to `acks-history.jsonl.1` at 1 MB.
-  Unlike `acks.json` it outlives the item, so the Jev attention replay can
-  label a cleared item by what the human did; a line without a `disposition`
-  predates the field and reads as `needed-human`.
+  Unlike `acks.json` it outlives the item, so the attention battery's scorecard
+  adapter can label a cleared item by what the human did; a line without a
+  `disposition` predates the field and reads as `needed-human`.
 
 The one table of each rule's owner, the human or the overseer, is `ruleOwners`
 in `internal/attention/owner.go`.
@@ -1146,6 +1146,11 @@ an open item, and an urgency score), and appends one line per item to
 `.runtime/jev/attention.jsonl`. The pass is advisory and log-only: it never
 acks, hides, wakes or changes an item, and it writes nothing under
 `.runtime/attention`.
+
+The attention battery replaced the three-way Jev triage of the attention queue
+and its replay (`gt attention jev-replay`, gt-3ey5j, now retired). Use
+`gt jev attention` for the answers and `gt jev scorecard --battery attention`
+to score them.
 
 Keys live under `patrols.jev_attention` in `daemon.json`. `enabled` defaults to
 false, `max_usd_per_day` to 1, and `usd_per_billion_tokens` is required. The

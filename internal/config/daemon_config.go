@@ -23,6 +23,14 @@ type DaemonPatrolConfig struct {
 	Version   int            `json:"version"`
 	Heartbeat *PatrolConfig  `json:"heartbeat,omitempty"`
 	Patrols   *PatrolsConfig `json:"patrols,omitempty"`
+	// Attention is retired (gt-3ey5j): attention.jev_triage was the planned
+	// switch for the three-way Jev triage of the attention queue, and nothing
+	// read it. The triage and its replay were replaced by the attention
+	// battery and its scorecard adapter (gt jev attention, gt jev scorecard
+	// --battery attention). It is declared so a daemon.json that still
+	// carries the block decodes under strict decoding, and kept verbatim so a
+	// rewrite does not drop operator data. Delete the key by hand.
+	Attention json.RawMessage `json:"attention,omitempty"`
 	// Env holds environment variables to set at startup.
 	// Propagated to all sessions spawned by the daemon and read by gt up.
 	// Example: {"GT_SEAT_REFILL_MAX_PRIORITY": "50"}
