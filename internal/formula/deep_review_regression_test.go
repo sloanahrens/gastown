@@ -150,24 +150,24 @@ func TestDeepReviewReportsDuplicateDefinitions(t *testing.T) {
 
 	for _, want := range []struct{ rule, text string }{
 		{
-			"the slice reviewer checks each predicate or decision its files compute",
-			"For each predicate or decision a slice file computes (a verdict, a status, an eligibility, a `landed`, `pushed` or `idle` judgment)",
+			"the slice reviewer checks each predicate its files compute",
+			"For each predicate the slice computes (a verdict, status, eligibility or `landed`/`pushed`/`idle` judgment)",
 		},
 		{
-			"it greps the base for other code answering the same question",
-			"grep the tree at origin/{{base_branch}} for other code answering the same question",
+			"it greps the base for another package answering differently",
+			"grep origin/{{base_branch}} for another package answering differently",
 		},
 		{
 			"a different definition is a kind, a P2 and a fingerprint shape",
-			"finding of kind `duplicate-definition`, severity P2, fingerprint `<file>:<symbol>:duplicate-definition`",
+			"kind `duplicate-definition`, severity P2, fingerprint `<file>:<symbol>:duplicate-definition`",
 		},
 		{
-			"the claim names both places and how the definitions differ",
-			"claim naming both places and how they differ",
+			"the claim names both places and their difference",
+			"claim naming both places and their difference",
 		},
 		{
-			"the failure scenario is an input on which they disagree",
-			"failure scenario an input on which they disagree",
+			"the failure scenario is an input where they disagree",
+			"failure scenario an input where they disagree",
 		},
 	} {
 		if !strings.Contains(step4, want.text) {
@@ -180,8 +180,8 @@ func TestDeepReviewReportsDuplicateDefinitions(t *testing.T) {
 
 	for _, want := range []struct{ rule, text string }{
 		{
-			"the verifier refutes by showing the definitions agree on every input",
-			"Refute a `duplicate-definition` by showing the definitions agree on every input",
+			"the verifier refutes by showing the two agree on every input",
+			"Refute a `duplicate-definition` by showing the two agree on every input",
 		},
 		{
 			"or by showing one already calls the other",
@@ -194,6 +194,47 @@ func TestDeepReviewReportsDuplicateDefinitions(t *testing.T) {
 	}
 	if !strings.Contains(step5, "at most {{max_verifiers}}") {
 		t.Error("step 5's verifier count changed; the new kind must ride the existing verifiers")
+	}
+
+	step6 := deepReviewRange(t, folded, "**6. File the CONFIRMED findings", "**7. Record the findings")
+	for _, want := range []struct{ rule, text string }{
+		{
+			"the bead's title names the one question both packages decide",
+			"A `duplicate-definition` bead is titled `Consolidate: <question> is decided in <pkg A> and <pkg B>`",
+		},
+		{
+			"its goal is one shared predicate, both call sites named",
+			"`## Goal` one shared predicate naming both call sites",
+		},
+	} {
+		if !strings.Contains(step6, want.text) {
+			t.Errorf("step 6 lacks the duplicate-definition bead shape %q", want.rule)
+		}
+	}
+}
+
+// TestDeepReviewKeepsTheGuidanceItAlreadyHad guards the rework of gt-8ezud: the
+// first attempt bought room for the duplicate-definition kind by deleting
+// guidance steps 1, 6 and 7 already carried, so the lines a reader depends on
+// are pinned here and a later trim fails this test instead of landing.
+func TestDeepReviewKeepsTheGuidanceItAlreadyHad(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	folded := strings.Join(strings.Fields(string(raw)), " ")
+	for _, want := range []struct{ step, text string }{
+		{"1", "The jq reads the bare array and the `BD_MACHINE=1` envelope."},
+		{"1", "(exit 3 is an untrusted input)"},
+		{"6", "(gastown: a guard, Dolt data deletion, process lifecycle or an install script)"},
+		{"7", "An older run's `digest-only` line makes the fingerprint `seen`."},
+		{"7", "severity, whatever that is; the next run verifies it."},
+		{"7", "(findings past capacity, 0 when none)"},
+	} {
+		if !strings.Contains(folded, want.text) {
+			t.Errorf("step %s lost guidance it already carried: %q", want.step, want.text)
+		}
 	}
 }
 
@@ -216,8 +257,8 @@ func TestDeepReviewDiffsEachLandingFromItsBaseCommit(t *testing.T) {
 	}
 	for _, want := range []string{
 		"git diff <landed_commit>^1 <landed_commit>",
-		"a Forgejo-primary landing is a one-parent squash",
-		"`<landed_commit>^1` is its base either way",
+		"a one-parent squash",
+		"`<landed_commit>^1` is its base",
 	} {
 		if !strings.Contains(step, want) {
 			t.Errorf("step 4 lacks %q", want)
