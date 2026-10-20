@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -898,5 +899,214 @@ func TestMailboxLegacyAtomicArchive(t *testing.T) {
 	}
 	if archived[0].ID != "msg-002" {
 		t.Errorf("Archived message ID = %q, want msg-002", archived[0].ID)
+	}
+}
+
+// writeTypesSentinel marks beadsDir as already configured so listFromDir does
+// not spawn bd list for the custom-type setup check.
+func writeTypesSentinel(t *testing.T, beadsDir string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(beadsDir, ".gt-types-configured"), []byte(beads.TypeConfigSentinelValue()+"\n"), 0644); err != nil {
+		t.Fatalf("write types sentinel: %v", err)
+	}
+}
+
+// A failed wisp query must surface: wisp-stored mail lives only in the wisps
+// table, so swallowing the error shows an empty inbox with a nil error.
+func TestListFromDirWispError(t *testing.T) {
+	t.Parallel()
+	beadsDir := t.TempDir()
+	writeTypesSentinel(t, beadsDir)
+
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		switch c.Args[0] {
+		case "list":
+			return "No issues found.\n", "", 0
+		case "sql":
+			return "", "Error: context deadline exceeded: timed out waiting for bd sql\n", 1
+		}
+		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+	}}
+
+	m := NewMailboxWithBeadsDir("gastown/synth", t.TempDir(), beadsDir)
+	m.bd = bd.run
+
+	if _, err := m.List(); err == nil {
+		t.Fatal("List returned nil error for a failed wisp query; wisp mail would read as an empty inbox")
+	} else if !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("List error = %v, want the wisp query failure", err)
+	}
+}
+
+// A database without a wisps table is normal (no wisp has been written yet),
+// and must keep listing as empty rather than failing.
+func TestListFromDirMissingWispTableIsEmpty(t *testing.T) {
+	t.Parallel()
+	beadsDir := t.TempDir()
+	writeTypesSentinel(t, beadsDir)
+
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		switch c.Args[0] {
+		case "list":
+			return "No issues found.\n", "", 0
+		case "sql":
+			return "", "Error 1146 (42S02): Table 'beads.wisps' doesn't exist\n", 1
+		}
+		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+	}}
+
+	m := NewMailboxWithBeadsDir("gastown/synth", t.TempDir(), beadsDir)
+	m.bd = bd.run
+
+	msgs, err := m.List()
+	if err != nil {
+		t.Fatalf("List with no wisps table: %v", err)
+	}
+	if len(msgs) != 0 {
+		t.Fatalf("messages = %d, want 0", len(msgs))
+	}
+}
+
+// One oversized legacy line must not poison the inbox: List used to fail with
+// bufio.ErrTooLong for good, which also left Delete unable to remove it.
+func TestListLegacyLongLine(t *testing.T) {
+	t.Parallel()
+	m := NewMailbox(t.TempDir())
+
+	msg := &Message{
+		ID:        "msg-long",
+		Subject:   "large body",
+		Body:      strings.Repeat("x", 100*1024),
+		Timestamp: time.Now(),
+	}
+	if err := m.Append(msg); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	listed, err := m.List()
+	if err != nil {
+		t.Fatalf("List with a 100KB line: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ID != msg.ID {
+		t.Fatalf("List = %#v, want the 100KB message", listed)
+	}
+
+	if err := m.Delete(msg.ID); err != nil {
+		t.Fatalf("Delete of the 100KB message: %v", err)
+	}
+	after, err := m.List()
+	if err != nil {
+		t.Fatalf("List after delete: %v", err)
+	}
+	if len(after) != 0 {
+		t.Fatalf("messages after delete = %d, want 0", len(after))
+	}
+}
+
+// A failed CC query returns the mail the other queries found and names the
+// failure in a warning, instead of failing the whole list or hiding it.
+func TestListFromDirCCErrorKeepsOtherMail(t *testing.T) {
+	t.Parallel()
+	beadsDir := t.TempDir()
+	writeTypesSentinel(t, beadsDir)
+
+	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
+		switch c.Args[0] {
+		case "list":
+			for _, arg := range c.Args {
+				if strings.HasPrefix(arg, "cc:") {
+					return "", "Error: context deadline exceeded: timed out waiting for bd list\n", 1
+				}
+			}
+			return `[{"id":"direct-1","title":"Direct","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:00Z","labels":["gt:message","from:mayor/"]}]`, "", 0
+		case "sql":
+			return "[]", "", 0
+		}
+		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
+	}}
+
+	var warn bytes.Buffer
+	m := NewMailboxWithBeadsDir("gastown/synth", t.TempDir(), beadsDir)
+	m.bd = bd.run
+	m.warn = &warn
+
+	msgs, err := m.List()
+	if err != nil {
+		t.Fatalf("List error = %v, want the assignee mail with a warning", err)
+	}
+	if len(msgs) != 1 || msgs[0].ID != "direct-1" {
+		t.Fatalf("List = %v, want the one assignee message", msgs)
+	}
+	got := warn.String()
+	if !strings.Contains(got, "CC mail query failed") || !strings.Contains(got, "timed out waiting for bd list") {
+		t.Fatalf("warning = %q, want it to name the CC query failure", got)
+	}
+}
+
+// Archive appends and PurgeArchive rewrites share one archive file. Appends
+// racing a purge must all survive it: every fresh message is still archived
+// once the writers and the purges have finished.
+func TestPurgeArchiveConcurrentArchive(t *testing.T) {
+	t.Parallel()
+	m := NewMailboxWithBeadsDir("gastown/synth", t.TempDir(), t.TempDir())
+
+	old := time.Now().AddDate(0, 0, -30)
+	for i := 0; i < 20; i++ {
+		if err := m.appendToArchive(&Message{ID: fmt.Sprintf("old-%d", i), Timestamp: old}); err != nil {
+			t.Fatalf("seed archive: %v", err)
+		}
+	}
+
+	const writers, perWriter = 4, 60
+	var wg, purger sync.WaitGroup
+	done := make(chan struct{})
+	errs := make(chan error, writers*perWriter+1024)
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				msg := &Message{ID: fmt.Sprintf("fresh-%d-%d", w, i), Timestamp: time.Now()}
+				if err := m.appendToArchive(msg); err != nil {
+					errs <- err
+				}
+			}
+		}(w)
+	}
+	// The purger rewrites the archive until every writer has finished.
+	purger.Add(1)
+	go func() {
+		defer purger.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if _, err := m.PurgeArchive(1); err != nil {
+				errs <- err
+			}
+		}
+	}()
+	wg.Wait()
+	close(done)
+	purger.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent archive or purge: %v", err)
+	}
+
+	left, err := m.ListArchived()
+	if err != nil {
+		t.Fatalf("ListArchived: %v", err)
+	}
+	fresh := 0
+	for _, msg := range left {
+		if strings.HasPrefix(msg.ID, "fresh-") {
+			fresh++
+		}
+	}
+	if fresh != writers*perWriter {
+		t.Fatalf("archived fresh messages = %d, want %d: a purge dropped appended mail", fresh, writers*perWriter)
 	}
 }
