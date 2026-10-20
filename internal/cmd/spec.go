@@ -287,6 +287,9 @@ func specFromIssue(issue *beads.Issue) specdispatch.Spec {
 		Ephemeral:    issue.Ephemeral,
 
 		SubmittedForLanding: specLiveLandingRequest(issue.Notes),
+		// Only a ready-board row can say a count is zero; a bead read any other
+		// way leaves the children read in place (gt-sqx55).
+		NoDependents: issue.DependentCountRead && issue.DependentCount == 0,
 	}
 }
 
@@ -1026,12 +1029,16 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// spending one on the parent duplicates them (gt-gektq). An unreadable
 		// child set is not an empty one — the bead might be a container — so it
 		// is left for the next tick rather than slung.
-		children, err := env.Children(id)
-		if err != nil {
-			report.Errors = append(report.Errors, fmt.Sprintf("%s: cannot read children: %v", id, err))
-			continue
+		// A board row that counts no dependents has no children to read: a
+		// parent-child edge is a dependent, so the count covers them (gt-sqx55).
+		if !full.NoDependents {
+			children, err := env.Children(id)
+			if err != nil {
+				report.Errors = append(report.Errors, fmt.Sprintf("%s: cannot read children: %v", id, err))
+				continue
+			}
+			full.Children = children
 		}
-		full.Children = children
 		if why := specdispatch.OpenChildHold(full); why != "" {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: held: %s", id, why)})
 			continue
@@ -1880,6 +1887,14 @@ func specReadyBoard(rigPath string) ([]*beads.Issue, error) {
 	return parseSpecReady(out)
 }
 
+// specReadyRow is one ready-board row. Its dependent_count is a pointer so a
+// row that omits the key stays apart from one that counts zero (gt-sqx55); the
+// outer field shadows the embedded Issue's field of the same JSON key.
+type specReadyRow struct {
+	*beads.Issue
+	DependentCount *int `json:"dependent_count"`
+}
+
 // parseSpecReady accepts a bare JSON array or an envelope with an "issues"
 // array; empty output is an empty board.
 func parseSpecReady(out []byte) ([]*beads.Issue, error) {
@@ -1887,24 +1902,36 @@ func parseSpecReady(out []byte) ([]*beads.Issue, error) {
 	if trimmed == "" || trimmed == "null" {
 		return nil, nil
 	}
-	var issues []*beads.Issue
+	var rows []specReadyRow
 	if strings.HasPrefix(trimmed, "[") {
-		if err := json.Unmarshal([]byte(trimmed), &issues); err != nil {
+		if err := json.Unmarshal([]byte(trimmed), &rows); err != nil {
 			return nil, fmt.Errorf("parsing bd ready: %w", err)
 		}
-		return issues, nil
+	} else {
+		var env struct {
+			Issues []specReadyRow `json:"issues"`
+			Data   []specReadyRow `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
+			return nil, fmt.Errorf("parsing bd ready: %w", err)
+		}
+		rows = env.Issues
+		if rows == nil {
+			rows = env.Data
+		}
 	}
-	var env struct {
-		Issues []*beads.Issue `json:"issues"`
-		Data   []*beads.Issue `json:"data"`
+	issues := make([]*beads.Issue, 0, len(rows))
+	for _, r := range rows {
+		if r.Issue == nil {
+			continue
+		}
+		if r.DependentCount != nil {
+			r.Issue.DependentCount = *r.DependentCount
+			r.Issue.DependentCountRead = true
+		}
+		issues = append(issues, r.Issue)
 	}
-	if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
-		return nil, fmt.Errorf("parsing bd ready: %w", err)
-	}
-	if env.Issues != nil {
-		return env.Issues, nil
-	}
-	return env.Data, nil
+	return issues, nil
 }
 
 // annotateSpecOnce adds text as a comment unless the bead already carries a
