@@ -2,14 +2,13 @@ package cmd
 
 import (
 	"context"
-	"io"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
-	"github.com/steveyegge/gastown/internal/power"
 )
 
 // townWithMalformedSettings is a town whose settings/config.json fails to
@@ -32,17 +31,15 @@ func townWithMalformedSettings(t *testing.T) string {
 
 // The login job runs boot-hold so a reboot lands in standby. It never touches
 // the Forgejo stack, so a town settings file that fails to decode must not stop
-// it from writing the hold (gt-g4xe9).
-func TestBootHoldWithMalformedSettings(t *testing.T) {
+// it from writing the hold (gt-g4xe9). This runs the command's own RunE, so
+// wiring boot-hold back to the settings-reading builder fails here.
+func TestBootHoldCommandWithMalformedSettings(t *testing.T) {
 	t.Parallel()
 	townRoot := townWithMalformedSettings(t)
 
-	o, err := powerOptionsFor(townRoot, powerBootHoldNeedsForgejo)
-	if err != nil {
-		t.Fatalf("powerOptionsFor: %v", err)
-	}
-	o.Out, o.ErrOut = io.Discard, io.Discard
-	if err := power.BootHold(context.Background(), o); err != nil {
+	cmd := &cobra.Command{}
+	cmd.SetContext(withPowerTownRoot(context.Background(), townRoot))
+	if err := powerBootHoldCmd.RunE(cmd, nil); err != nil {
 		t.Fatalf("boot-hold: %v", err)
 	}
 	if _, err := os.Stat(dispatch.HoldFilePath(townRoot)); err != nil {
@@ -51,15 +48,30 @@ func TestBootHoldWithMalformedSettings(t *testing.T) {
 }
 
 // The states that do reach the Forgejo stack still report a settings file they
-// cannot read.
+// cannot read; boot-hold is the one state that runs without one.
 func TestPowerOptionsForgejoSettingsError(t *testing.T) {
 	t.Parallel()
 	townRoot := townWithMalformedSettings(t)
 
-	if _, err := powerOptionsFor(townRoot, true); err == nil {
-		t.Error("powerOptionsFor(needsForgejo) accepted malformed settings")
+	if _, err := powerOptionsFor(townRoot); err == nil {
+		t.Error("powerOptionsFor accepted malformed settings")
 	}
-	if _, err := powerOptionsFor(townRoot, false); err != nil {
-		t.Errorf("powerOptionsFor(no forgejo): %v", err)
+	if _, err := powerBootHoldOptionsFor(townRoot); err != nil {
+		t.Errorf("powerBootHoldOptionsFor: %v", err)
+	}
+}
+
+// A state on powerOptionsFor always gets a Forgejo dir, so none can read an
+// empty path silently.
+func TestPowerOptionsForgejoDirResolved(t *testing.T) {
+	t.Parallel()
+	townRoot := setupTestTownForConfig(t)
+
+	o, err := powerOptionsFor(townRoot)
+	if err != nil {
+		t.Fatalf("powerOptionsFor: %v", err)
+	}
+	if o.ForgejoDir == "" {
+		t.Error("powerOptionsFor returned an empty ForgejoDir")
 	}
 }
