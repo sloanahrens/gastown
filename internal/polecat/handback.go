@@ -12,6 +12,11 @@ import (
 // pool until a person cuts it smaller and removes the label.
 const NeedsSplitLabel = "needs-split"
 
+// ReworkLabel is the label HandBackRework puts on a bead. It is the label the
+// landing path puts on a rejected branch (land.LabelRework), which dispatch
+// already hands to a polecat without a hold.
+const ReworkLabel = "rework"
+
 // ErrHandBackSkipped is what HandBack wraps when it finds the bead no longer
 // the stopped polecat's to release: closed, or assigned to another polecat. It
 // wrote nothing. The caller treats it as a hand-back that needs no repeat.
@@ -48,6 +53,32 @@ func HandBack(ctx context.Context, w BeadWriter, beadID, assignee, branch string
 // warning to the next reader, such as that the worktree could not be
 // checkpointed and may hold uncommitted work. An empty note adds nothing.
 func HandBackNoted(ctx context.Context, w BeadWriter, beadID, assignee, branch string, elapsed time.Duration, note string) error {
+	text := fmt.Sprintf("polecat stopped after %s; work kept on branch %s. Split the bead, then remove the %s label.",
+		elapsed.Round(time.Second), branch, NeedsSplitLabel)
+	if note != "" {
+		text += " " + note
+	}
+	return handBackLabelled(ctx, w, beadID, assignee, NeedsSplitLabel, text)
+}
+
+// HandBackRework is HandBackNoted for a stopped polecat whose finished work is
+// already on origin: sha is the head of branch there. The bead is not split but
+// sent back to dispatch as rework, and the comment tells the next polecat to
+// reuse the branch and run gt done. The writes, their order and the checks
+// before them are HandBack's, with the label rework in place of needs-split.
+func HandBackRework(ctx context.Context, w BeadWriter, beadID, assignee, branch, sha string, elapsed time.Duration, note string) error {
+	text := fmt.Sprintf("polecat stopped after %s; its finished work at %s is already on origin as branch %s. "+
+		"The next polecat must reuse branch %s and run gt done; do not split the bead.",
+		elapsed.Round(time.Second), sha, branch, branch)
+	if note != "" {
+		text += " " + note
+	}
+	return handBackLabelled(ctx, w, beadID, assignee, ReworkLabel, text)
+}
+
+// handBackLabelled is the hand-back HandBackNoted and HandBackRework share: it
+// releases the bead, puts label on it and adds text as the comment.
+func handBackLabelled(ctx context.Context, w BeadWriter, beadID, assignee, label, text string) error {
 	status, current, err := w.State(ctx, beadID)
 	if err != nil {
 		return fmt.Errorf("hand back %s: read bead: %w", beadID, err)
@@ -64,13 +95,8 @@ func HandBackNoted(ctx context.Context, w BeadWriter, beadID, assignee, branch s
 	if err := w.ClearAssignee(ctx, beadID); err != nil {
 		return fmt.Errorf("hand back %s: clear assignee: %w", beadID, err)
 	}
-	if err := w.AddLabel(ctx, beadID, NeedsSplitLabel); err != nil {
+	if err := w.AddLabel(ctx, beadID, label); err != nil {
 		return fmt.Errorf("hand back %s: add label: %w", beadID, err)
-	}
-	text := fmt.Sprintf("polecat stopped after %s; work kept on branch %s. Split the bead, then remove the %s label.",
-		elapsed.Round(time.Second), branch, NeedsSplitLabel)
-	if note != "" {
-		text += " " + note
 	}
 	if err := w.Comment(ctx, beadID, text); err != nil {
 		return fmt.Errorf("hand back %s: comment: %w", beadID, err)

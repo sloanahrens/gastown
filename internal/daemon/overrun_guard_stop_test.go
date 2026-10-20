@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
@@ -930,5 +931,260 @@ func TestOverrunStopResumeDuringHandBackKeepsNewSling(t *testing.T) {
 	}
 	if !strings.Contains(buf.String(), "seat not released") {
 		t.Errorf("log lacks the abandoned release:\n%s", buf.String())
+	}
+}
+
+// reworkWorld stands for the seat's kept branch: head is the commit the
+// worktree holds, origin the commit origin holds for the branch ("" for none),
+// and checkpointCommits makes the stop's checkpoint commit the dirty worktree,
+// which moves head off whatever origin holds.
+type reworkWorld struct {
+	head, origin      string
+	checkpointCommits bool
+}
+
+// seams is f's seams with the branch model behind checkpoint and
+// finishedOnOrigin and the production hand-back, over store, after the
+// recording one, so a test reads the label and comment the bead ends up with.
+// handBackFails makes the first n hand-backs fail before writing.
+func (w *reworkWorld) seams(f *overrunFake, store *molStore, handBackFails int) overrunSeams {
+	s := f.seams()
+	checkpoint := s.checkpoint
+	s.checkpoint = func(seat overrunSeat) error {
+		if err := checkpoint(seat); err != nil {
+			return err
+		}
+		if w.checkpointCommits {
+			w.head = "c0ffee2"
+		}
+		return nil
+	}
+	s.finishedOnOrigin = func(overrunSeat) string {
+		if w.head != "" && w.head == w.origin {
+			return w.head
+		}
+		return ""
+	}
+	handBack := s.handBack
+	s.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
+		if err := handBack(seat, elapsed, note); err != nil {
+			return err
+		}
+		if handBackFails > 0 {
+			handBackFails--
+			return errors.New("dolt timeout")
+		}
+		return handBackEndingMolecule(context.Background(), store, func(string, ...any) {}, seat, elapsed, note)
+	}
+	return s
+}
+
+// handedBackBead is the work bead and its comments after the stop.
+func handedBackBead(t *testing.T, store *molStore) (*beads.Issue, string) {
+	t.Helper()
+	work, err := store.Show(molWorkBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return work, strings.Join(commentTexts(t, store, molWorkBead), "\n")
+}
+
+// A seat whose gt done ended after the branch reached origin leaves the finished
+// work there: the worktree head is origin's head and the checkpoint had nothing
+// to commit. The bead goes back as rework, not for a split.
+func TestStop_FinishedBranchAlreadyOnOriginIsHandedBackAsRework(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	store := newMolStore(t)
+	w := &reworkWorld{head: "abc1234", origin: "abc1234"}
+
+	d.runOverrunGuard(w.seams(f, store, 0))
+
+	work, comments := handedBackBead(t, store)
+	if work.Status != "open" || work.Assignee != "" {
+		t.Errorf("bead = status %q assignee %q, want open and unassigned", work.Status, work.Assignee)
+	}
+	if !beads.HasLabel(work, polecat.ReworkLabel) || beads.HasLabel(work, polecat.NeedsSplitLabel) {
+		t.Errorf("bead labels %v, want %s and not %s", work.Labels, polecat.ReworkLabel, polecat.NeedsSplitLabel)
+	}
+	for _, part := range []string{"abc1234", stopSeat.Branch, "on origin", "reuse branch " + stopSeat.Branch, "run gt done"} {
+		if !strings.Contains(comments, part) {
+			t.Errorf("comment %q lacks %q", comments, part)
+		}
+	}
+	if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); st.StoppedAt.IsZero() || st.ReworkSHA != "abc1234" {
+		t.Errorf("state %+v, want a finished stop that remembers the rework commit", st)
+	}
+}
+
+// Every stop that cannot show the finished work on origin keeps needs-split.
+func TestStop_UnfinishedOrUnpushedWorkKeepsNeedsSplit(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		world reworkWorld
+		fail  map[string]error
+	}{
+		{name: "uncommitted work, the checkpoint commits it", world: reworkWorld{head: "abc1234", origin: "abc1234", checkpointCommits: true}},
+		{name: "origin holds another commit", world: reworkWorld{head: "abc1234", origin: "9f8e7d6"}},
+		{name: "no branch on origin", world: reworkWorld{head: "abc1234"}},
+		{
+			name: "push refused as non-fast-forward", world: reworkWorld{head: "abc1234", origin: "9f8e7d6"},
+			fail: map[string]error{"push": &overrunPushDivergedError{
+				Branch: stopSeat.Branch, OriginSHA: "9f8e7d6", Err: errors.New("rejected (non-fast-forward)"),
+			}},
+		},
+		{
+			// The head is origin's, but the checkpoint was refused: the worktree
+			// may hold work no commit has.
+			name: "checkpoint given up", world: reworkWorld{head: "abc1234", origin: "abc1234"},
+			fail: map[string]error{"checkpoint": errors.New("checkpoint refused; uncommitted work may remain in the worktree")},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			f := newOverrunFake(20*time.Minute, stopSeat)
+			f.failOn = tc.fail
+			store := newMolStore(t)
+			w := tc.world
+
+			// A refused checkpoint is retried each tick until the stop gives up on it.
+			for i := 0; i < overrunCheckpointMaxAttempts && len(f.handedBack) == 0; i++ {
+				d.runOverrunGuard(w.seams(f, store, 0))
+				f.seats = nil
+				f.now = f.now.Add(time.Minute)
+			}
+
+			if len(f.handedBack) != 1 {
+				t.Fatalf("hand-backs = %q, want one", f.handedBack)
+			}
+			work, comments := handedBackBead(t, store)
+			if !beads.HasLabel(work, polecat.NeedsSplitLabel) || beads.HasLabel(work, polecat.ReworkLabel) {
+				t.Errorf("bead labels %v, want %s and not %s", work.Labels, polecat.NeedsSplitLabel, polecat.ReworkLabel)
+			}
+			if !strings.Contains(comments, "Split the bead") {
+				t.Errorf("comment %q lacks the split instruction", comments)
+			}
+			if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); st.ReworkSHA != "" {
+				t.Errorf("state %+v remembers a rework commit", st)
+			}
+		})
+	}
+}
+
+// The decision is read before the push and saved with it. A hand-back that
+// fails and is repeated on a later tick finds origin holding the seat's head
+// either way (the stop's own push put it there), so the repeat must not read
+// it again: a stop whose work was not on origin stays needs-split, and one whose
+// work was stays rework.
+func TestStop_ReworkDecisionSurvivesARepeatedHandBack(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name         string
+		originBefore string
+		wantLabel    string
+	}{
+		{name: "finished work on origin", originBefore: "abc1234", wantLabel: polecat.ReworkLabel},
+		{name: "work only in the worktree", originBefore: "", wantLabel: polecat.NeedsSplitLabel},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			f := newOverrunFake(20*time.Minute, stopSeat)
+			store := newMolStore(t)
+			w := &reworkWorld{head: "abc1234", origin: tc.originBefore}
+
+			d.runOverrunGuard(w.seams(f, store, 1))
+			if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); !st.StoppedAt.IsZero() {
+				t.Fatal("the stop finished although its hand-back failed")
+			}
+			w.origin = w.head // the stop's push has landed
+			f.seats, f.calls = nil, nil
+			f.now = f.now.Add(time.Minute)
+			d.runOverrunGuard(w.seams(f, store, 0))
+
+			work, _ := handedBackBead(t, store)
+			if !beads.HasLabel(work, tc.wantLabel) || len(work.Labels) != 1 {
+				t.Errorf("bead labels %v after the repeat, want only %s", work.Labels, tc.wantLabel)
+			}
+		})
+	}
+}
+
+// Only a needs-split bead raises the stop's attention item; a rework hand-back
+// is not waiting for an operator.
+func TestCollectOverrunStopped_RaisesNoItemForReworkHandBack(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		world     reworkWorld
+		wantItems int
+	}{
+		{name: "rework", world: reworkWorld{head: "abc1234", origin: "abc1234"}, wantItems: 0},
+		{name: "needs-split", world: reworkWorld{head: "abc1234", origin: "9f8e7d6"}, wantItems: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			f := newOverrunFake(20*time.Minute, stopSeat)
+			store := newMolStore(t)
+			w := tc.world
+			d.runOverrunGuard(w.seams(f, store, 0))
+
+			d.openWorkBeads = func([]string, time.Duration) workBeadReader { return store }
+			d.knownRigsCache, d.knownRigsCacheValid = []string{"gastown"}, true
+			s := &attentionSources{d: d, now: overrunSlung}
+			items, err := s.collectOverrunStopped(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(items) != tc.wantItems {
+				t.Errorf("items = %+v, want %d", items, tc.wantItems)
+			}
+		})
+	}
+}
+
+// The production seam answers the commit only when the worktree's branch head
+// is the one origin holds for the branch.
+func TestOverrunFinishedOnOrigin_NeedsTheSameCommitOnBoth(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	worktree := filepath.Join(d.config.TownRoot, "gastown", "polecats", "capable", "gastown")
+	if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ref := "refs/heads/" + stopSeat.Branch
+	g := &pushStubGit{branch: stopSeat.Branch, sha: "abc123", originRefs: []git.RemoteRef{
+		{Hash: "1111111", Name: ref + "-other"},
+		{Hash: "abc123", Name: ref},
+	}}
+	d.openGitFn = func(string) daemonGit { return g }
+
+	if got := d.overrunFinishedOnOrigin(stopSeat); got != "abc123" {
+		t.Errorf("same commit on both: got %q, want abc123", got)
+	}
+	if len(g.pushes) != 0 {
+		t.Errorf("the look pushed: %q", g.pushes)
+	}
+
+	g.originRefs = []git.RemoteRef{{Hash: "9f8e7d6", Name: ref}}
+	if got := d.overrunFinishedOnOrigin(stopSeat); got != "" {
+		t.Errorf("origin holds another commit: got %q, want none", got)
+	}
+	g.originRefs = []git.RemoteRef{{Hash: "abc123", Name: ref + "-other"}}
+	if got := d.overrunFinishedOnOrigin(stopSeat); got != "" {
+		t.Errorf("no branch on origin: got %q, want none", got)
+	}
+	g.originRefs, g.originErr = []git.RemoteRef{{Hash: "abc123", Name: ref}}, errors.New("unreachable")
+	if got := d.overrunFinishedOnOrigin(stopSeat); got != "" {
+		t.Errorf("origin cannot be asked: got %q, want none", got)
+	}
+	other := stopSeat
+	other.Polecat = "gone"
+	if got := d.overrunFinishedOnOrigin(other); got != "" {
+		t.Errorf("seat with no worktree: got %q, want none", got)
 	}
 }

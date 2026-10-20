@@ -206,6 +206,10 @@ type overrunState struct {
 	PushFailures int    `json:"push_failures,omitempty"`
 	PushGaveUp   bool   `json:"push_gave_up,omitempty"`
 	PushFailure  string `json:"push_failure,omitempty"`
+	// ReworkSHA is the commit the kept branch held on origin before the stop's
+	// own push, when it was the worktree's head too: the finished work was
+	// already there, so the hand-back is rework (overrunStop, step 5).
+	ReworkSHA string `json:"rework_sha,omitempty"`
 
 	StoppedAt time.Time `json:"stopped_at,omitzero"`
 

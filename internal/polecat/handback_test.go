@@ -90,6 +90,40 @@ func TestHandBackNoted_AppendsTheNoteToTheComment(t *testing.T) {
 	}
 }
 
+// A stopped polecat whose finished work is on origin is handed back as rework:
+// the same four writes as HandBack with the rework label, and a comment that
+// names the commit and branch and tells the next polecat to reuse it.
+func TestHandBackRework_LabelsReworkAndTellsTheNextPolecatToReuseTheBranch(t *testing.T) {
+	t.Parallel()
+	w := &fakeBeadWriter{}
+	if err := HandBackRework(context.Background(), w, "gt-abc", stoppedSeat, "polecat/nux/gt-abc+x1", "abc1234", 20*time.Minute, "A note."); err != nil {
+		t.Fatalf("HandBackRework: %v", err)
+	}
+	if len(w.calls) != 4 {
+		t.Fatalf("got %d writes, want 4: %q", len(w.calls), w.calls)
+	}
+	want := []string{"status gt-abc open", "assignee gt-abc", "label gt-abc rework"}
+	if !reflect.DeepEqual(w.calls[:3], want) {
+		t.Errorf("first three writes = %q, want %q", w.calls[:3], want)
+	}
+	comment := w.calls[3]
+	for _, part := range []string{"abc1234", "on origin", "reuse branch polecat/nux/gt-abc+x1", "run gt done", "20m0s", "A note."} {
+		if !strings.Contains(comment, part) {
+			t.Errorf("comment %q lacks %q", comment, part)
+		}
+	}
+	if strings.Contains(comment, NeedsSplitLabel) {
+		t.Errorf("comment %q mentions %s", comment, NeedsSplitLabel)
+	}
+
+	// The checks before the writes are HandBack's: a closed bead is left alone.
+	closed := &fakeBeadWriter{status: "closed"}
+	err := HandBackRework(context.Background(), closed, "gt-abc", stoppedSeat, "b", "abc1234", time.Minute, "")
+	if !errors.Is(err, ErrHandBackSkipped) || len(closed.calls) != 0 {
+		t.Errorf("closed bead: err %v, writes %q, want skipped and none", err, closed.calls)
+	}
+}
+
 // A repeated hand-back reads the bead first: one that was closed, or slung to
 // another polecat after a partial first hand-back, is left alone, while the
 // half-released bead (open, unassigned) is finished.

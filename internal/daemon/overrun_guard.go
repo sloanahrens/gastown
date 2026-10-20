@@ -75,6 +75,10 @@ type overrunSeat struct {
 	// and 20 minute rule. Past it the session is stopped and the bead is not
 	// handed back (overrunScheduledStop).
 	Scheduled bool
+	// ReworkSHA is set only on the seat handed to handBack, when the stopped
+	// seat's finished work was already on origin: the commit both hold for the
+	// kept branch. It turns the hand-back into rework (overrunStop, step 5).
+	ReworkSHA string
 }
 
 // overrunSeams are the guard's reads and side effects. A test sets all of
@@ -124,6 +128,14 @@ type overrunSeams struct {
 	// push / no reset.
 	push           func(seat overrunSeat) error
 	resetAgentBead func(seat overrunSeat) error
+
+	// finishedOnOrigin is read just before push, after the checkpoint: it
+	// returns the commit when the kept branch's head in the worktree is already
+	// origin's head for that branch, "" otherwise (no worktree, no branch, not on
+	// origin, a different commit, origin not reachable). A checkpoint that
+	// committed moved the head off origin's, so the answer also says the
+	// checkpoint had nothing to commit. nil means "" every time.
+	finishedOnOrigin func(seat overrunSeat) string
 
 	// recordCleanup records the released seat's cleanup status on its agent
 	// bead, which resetAgentBead leaves missing, and retire ends the seat's
