@@ -12,7 +12,6 @@ import (
 	"maps"
 	"math"
 	"os"
-	"os/exec"
 	"os/user"
 	"path/filepath"
 	"slices"
@@ -773,7 +772,7 @@ func TestRunJSONLExport_DeadlineKillNamesTableAndTimeout(t *testing.T) {
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 	timeout := jsonlExportTimeoutFor("events")
-	cmd := exec.CommandContext(ctx, "dolt", "sql")
+	cmd := jsonlExportCommand(ctx, false, "", 0, "", "", "select 1", t.TempDir())
 
 	_, err := runJSONLExport(ctx, cmd, "events", timeout)
 	if err == nil {
