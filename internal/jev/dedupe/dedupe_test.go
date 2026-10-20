@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev"
+	"github.com/steveyegge/gastown/internal/jev/battery"
 )
 
 // t0 is the pass's clock. Every bead a test makes is created before it unless
@@ -148,7 +149,7 @@ func newHarness(t *testing.T, all []*beads.Issue, hits map[string][]Hit, answers
 		},
 	}
 	// A cursor from before every bead makes the first pass ask about them all.
-	if err := writeCursor(h.cursor, cursor{Time: t0.Add(-time.Hour)}); err != nil {
+	if err := battery.WriteCursor(h.cursor, battery.Cursor{Time: t0.Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	return h
@@ -535,7 +536,7 @@ func TestJevDedupeFirstPassOnlySetsCursor(t *testing.T) {
 	if _, err := os.Stat(h.log); !os.IsNotExist(err) {
 		t.Errorf("first pass wrote a log, want none: %v", err)
 	}
-	c, ok, err := readCursor(h.cursor)
+	c, ok, err := battery.ReadCursor(h.cursor)
 	if err != nil || !ok || !c.Time.Equal(t0.Add(time.Hour)) {
 		t.Errorf("cursor = %+v (found %v, err %v), want the pass's own time", c, ok, err)
 	}
@@ -688,7 +689,7 @@ func TestJevDedupeReadRecent(t *testing.T) {
 		t.Fatalf("missing log = %v, %v; want empty and no error", lines, err)
 	}
 	for _, id := range []string{"gt-1", "gt-2", "gt-3"} {
-		if err := appendLine(path, Line{TS: t0, Finding: id, Candidate: "none", CandidatesOffered: []string{}}); err != nil {
+		if err := battery.Append(path, Line{TS: t0, Finding: id, Candidate: "none", CandidatesOffered: []string{}}); err != nil {
 			t.Fatal(err)
 		}
 	}
