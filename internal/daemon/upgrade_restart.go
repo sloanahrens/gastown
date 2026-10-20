@@ -463,14 +463,23 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 		return false
 	}
 
-	// Landing workers finish their pass and start no new one from here on.
-	d.upgradeRestartPending.Store(true)
-
 	// Read live, immediately before deciding: never cached across heartbeats.
 	// The read is upgradeHold rather than the isIdleForUpgrade predicate it is
 	// built from: the landing holds carry their own caps and are deliberately
 	// not in the predicate, and the wait's own clock is what the caps read.
-	if hold := d.upgradeHold(now); hold != nil {
+	hold := d.upgradeHold(now)
+	if d.upgradeDrainDeferred(hold) {
+		// A tier sweep that began before the marker is the only hold: landing
+		// passes keep starting until it closes or hits its cap (gt-du6xl).
+		d.deferUpgradeDrain(now)
+		d.noteStuckWait(now, m, own)
+		return false
+	}
+
+	// Landing workers finish their pass and start no new one from here on.
+	d.upgradeRestartPending.Store(true)
+
+	if hold != nil {
 		// One line per heartbeat naming the hold: a heartbeat that finds the
 		// daemon not idle is never silent again (gt-rtbbr).
 		d.logUpgradeWait(hold.name, now)
@@ -576,6 +585,41 @@ func (d *Daemon) noteStuckWait(now time.Time, m *restartPendingMarker, own strin
 			m.Commit, now.Sub(d.upgradeWaitSince).Round(time.Minute), own))
 }
 
+// upgradeDrainDeferred reports whether the wait for hold runs without the
+// drain: hold is the running tier sweep, nothing else holds the restart, and
+// the sweep began before the marker. A sweep that began after the marker keeps
+// the drain, as it always has. The restart waits on the sweep up to
+// tierSweepRestartCap on the marker's clock either way (gt-du6xl).
+func (d *Daemon) upgradeDrainDeferred(hold *daemonWork) bool {
+	if hold == nil || hold.name != tierSweepHoldLabel {
+		return false
+	}
+	// upgradeHold names the sweep ahead of soft work in flight, so any other
+	// hold that is still running must keep the drain on.
+	if d.daemonWorkHold() != nil {
+		return false
+	}
+	// A cycle with no recorded start runs on the marker's clock, as in
+	// tierSweepRestartWait, so it counts as one from before the marker.
+	started := d.tierSweepStartedAt.Load()
+	return started == 0 || time.Unix(0, started).Before(d.upgradeWaitSince)
+}
+
+// deferUpgradeDrain is the wait for a tier sweep that holds a pending restart
+// alone. Landing workers are not drained, so passes keep starting while the
+// sweep runs. The wait line still names the sweep on every heartbeat, and the
+// deferral is logged once per hold (gt-du6xl).
+func (d *Daemon) deferUpgradeDrain(now time.Time) {
+	d.upgradeRestartPending.Store(false)
+	d.upgradeDrainLogged = false
+	if d.upgradeWaitLogged != tierSweepHoldLabel {
+		d.logger.Printf("upgrade-restart: deferring the drain while %s runs; landing passes continue until it closes or hits %s",
+			tierSweepHoldLabel, tierSweepRestartCap)
+	}
+	d.upgradeWaitLogged = tierSweepHoldLabel
+	d.logger.Printf("upgrade-restart: waiting for %s (%dm)", tierSweepHoldLabel, int(now.Sub(d.upgradeWaitSince).Minutes()))
+}
+
 // endUpgradeDrain lets the landing workers start passes again: no restart is
 // pending (marker gone, covered, or already tried without effect).
 func (d *Daemon) endUpgradeDrain() {
@@ -603,7 +647,8 @@ func (d *Daemon) logUpgradeWait(name string, now time.Time) {
 // holds for it while it runs, up to tierSweepRestartCap. New cycles do not
 // start in between unless the last sweep is already past the stale bound
 // (tierSweepDeferForRestart, gt-zvqn8), which is the one case where the
-// restart waits on a sweep that began after the marker did.
+// restart waits on a sweep that began after the marker did. While the sweep is
+// the only hold, upgradeDrainDeferred keeps the landing drain off (gt-du6xl).
 
 // landingPassBead is the bead of a landing pass in flight (the first rig by
 // name when several), or "" when none is working on one.
