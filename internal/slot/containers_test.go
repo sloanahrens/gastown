@@ -171,6 +171,24 @@ func TestClassify(t *testing.T) {
 			reasonIn: "still present",
 		},
 		{
+			name:   "container in a leaked session past the session window is debris",
+			holder: GateContainer{ID: "a", Image: "dolt/dolt-sql-server:2.2.0", Name: "suite", Created: now.Add(-3 * time.Hour), Labels: sessionLabels("sess-1")},
+			others: []GateContainer{
+				{ID: "r", Image: "testcontainers/ryuk:0.14.0", Name: "reaper", Created: now.Add(-3 * time.Hour), Labels: sessionLabels("sess-1")},
+			},
+			want:     VerdictDebris,
+			reasonIn: "no reaper running",
+		},
+		{
+			name:   "reaper in a leaked session past the session window is debris",
+			holder: GateContainer{ID: "r", Image: "testcontainers/ryuk:0.14.0", Name: "reaper", Created: now.Add(-3 * time.Hour), Labels: sessionLabels("sess-1")},
+			others: []GateContainer{
+				{ID: "a", Image: "dolt/dolt-sql-server:2.2.0", Name: "suite", Created: now.Add(-3 * time.Hour), Labels: sessionLabels("sess-1")},
+			},
+			want:     VerdictDebris,
+			reasonIn: "session leaked",
+		},
+		{
 			name:     "unknown age is not debris",
 			holder:   GateContainer{ID: "a", Image: "dolt/dolt-sql-server:2.2.0", Name: "suite"},
 			want:     VerdictUnknown,
@@ -192,6 +210,39 @@ func TestClassify(t *testing.T) {
 			}
 			if blocks := got[0].Blocks(); blocks != (tt.want != VerdictDebris) {
 				t.Fatalf("Blocks() = %v for verdict %q", blocks, tt.want)
+			}
+		})
+	}
+}
+
+// TestClassifyLeakedPairClearsByAge pins both ends of the session bound: a
+// session's container and reaper keep each other live past the container
+// window (gt-2gjwu), but not forever — past four windows every member of the
+// pair is debris, so a leaked session still clears by age (gt-xppn7).
+func TestClassifyLeakedPairClearsByAge(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 21, 17, 0, 0, 0, time.UTC)
+	window := 30 * time.Minute
+	pair := func(created time.Time) []GateContainer {
+		return []GateContainer{
+			{ID: "a", Image: "dolt/dolt-sql-server:2.2.0", Name: "suite", Created: created, Labels: sessionLabels("sess-1")},
+			{ID: "r", Image: "testcontainers/ryuk:0.14.0", Name: "reaper", Created: created, Labels: sessionLabels("sess-1")},
+		}
+	}
+
+	for _, tt := range []struct {
+		name    string
+		created time.Time
+		want    Verdict
+	}{
+		{"within the session window the pair keeps the session live", now.Add(-40 * time.Minute), VerdictLive},
+		{"past the session window every member of the pair is debris", now.Add(-3 * time.Hour), VerdictDebris},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, verdict := range Classify(pair(tt.created), now, window) {
+				if verdict.Verdict != tt.want {
+					t.Fatalf("%s classified %q (%s), want %q", verdict.Container.Display(), verdict.Verdict, verdict.Reason, tt.want)
+				}
 			}
 		})
 	}
