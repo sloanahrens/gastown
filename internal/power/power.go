@@ -280,13 +280,22 @@ func (e *engine) forgejoOK(ctx context.Context) bool {
 	return err == nil && status == http.StatusOK
 }
 
-// composeRunning counts the stack's running services.
+// composeRunning counts the stack's running services; a failed probe reads as
+// none, which suits the status report and the bring-up. Off must tell the two
+// apart and uses composeProbe.
 func (e *engine) composeRunning(ctx context.Context) int {
+	n, _ := e.composeProbe(ctx)
+	return n
+}
+
+// composeProbe counts the stack's running services and returns the probe's
+// error when it could not tell.
+func (e *engine) composeProbe(ctx context.Context) (int, error) {
 	out, err := e.exec(ctx, e.o.ForgejoDir, "docker", "compose", "ps", "--status", "running", "-q")
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return len(nonBlankLines(out))
+	return len(nonBlankLines(out)), nil
 }
 
 func nonBlankLines(s string) []string {

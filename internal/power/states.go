@@ -179,10 +179,15 @@ func Off(ctx context.Context, o Options) error {
 			return err
 		}
 	}
-	if e.composeRunning(ctx) != 0 {
+	running, probeErr := e.composeProbe(ctx)
+	if running != 0 || probeErr != nil {
 		if err := e.run(ctx, o.ForgejoDir, "docker", "compose", "stop"); err != nil {
 			return err
 		}
+	}
+	if probeErr != nil {
+		// The stop went out blind, so nothing confirms the stack is down.
+		return exitError(ExitNotHealthy, "could not read the Forgejo stack (%v): 'docker compose stop' was issued but off is not recorded; re-run 'gt power off' to confirm", probeErr)
 	}
 	if o.WithDolt {
 		e.say("stopping Dolt: bd (including the ~/.claude beads DB) stops working until 'gt power full' or 'gt dolt start'")
