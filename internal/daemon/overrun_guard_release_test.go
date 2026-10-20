@@ -449,6 +449,9 @@ type pushStubGit struct {
 	// originRefs is what ls-remote answers; originErr fails it.
 	originRefs []git.RemoteRef
 	originErr  error
+	// commitTime is what CommitTime answers for the branch head; the zero time
+	// means the commit time cannot be read.
+	commitTime time.Time
 }
 
 func (g *pushStubGit) ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error) {
@@ -456,6 +459,13 @@ func (g *pushStubGit) ListRemoteRefsWithHashes(remote, prefix string) ([]git.Rem
 }
 
 func (g *pushStubGit) CurrentBranch() (string, error) { return g.branch, nil }
+
+func (g *pushStubGit) CommitTime(rev string) (time.Time, error) {
+	if g.commitTime.IsZero() {
+		return time.Time{}, errors.New("no commit time for " + rev)
+	}
+	return g.commitTime, nil
+}
 
 func (g *pushStubGit) Rev(ref string) (string, error) {
 	if ref != "refs/heads/"+g.branch {

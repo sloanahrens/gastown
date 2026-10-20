@@ -75,6 +75,12 @@ type overrunSeat struct {
 	// and 20 minute rule. Past it the session is stopped and the bead is not
 	// handed back (overrunScheduledStop).
 	Scheduled bool
+	// SlingAt dates the sling that gave the seat this bead, when known. The
+	// stop carries it so it can tell a head the seat produced during the run
+	// from one it merely resumed: a rework bead is slung onto a branch already
+	// on origin, and an idle seat there would otherwise read as finished work
+	// (overrunFinishedOnOrigin).
+	SlingAt time.Time
 	// ReworkSHA is set only on the seat handed to handBack, when the stopped
 	// seat's finished work was already on origin: the commit both hold for the
 	// kept branch. It turns the hand-back into rework (overrunStop, step 5).
@@ -131,9 +137,10 @@ type overrunSeams struct {
 
 	// finishedOnOrigin is read just before push, after the checkpoint: it
 	// returns the commit when the kept branch's head in the worktree is already
-	// origin's head for that branch, "" otherwise (no worktree, no branch, not on
-	// origin, a different commit, origin not reachable). A checkpoint that
-	// committed moved the head off origin's, so the answer also says the
+	// origin's head for that branch and the seat produced that head after it was
+	// slung, "" otherwise (no worktree, no branch, not on origin, a different
+	// commit, origin not reachable, a head older than the sling). A checkpoint
+	// that committed moved the head off origin's, so the answer also says the
 	// checkpoint had nothing to commit. nil means "" every time.
 	finishedOnOrigin func(seat overrunSeat) string
 
@@ -410,6 +417,9 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 				d.overrunScheduledStop(s, seat, state, elapsed)
 				continue
 			}
+			// The stop's rework decision needs the sling it is stopping: a head
+			// from before it is the branch the seat resumed, not its work.
+			seat.SlingAt = slung
 			d.overrunStop(s, seat, state, elapsed)
 		}
 	}

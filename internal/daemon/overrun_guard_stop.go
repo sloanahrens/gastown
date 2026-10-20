@@ -41,13 +41,15 @@ const (
 //  5. hand the bead back (status open, assignee cleared, needs-split) so the
 //     roster no longer counts the seat; a bead found closed or re-slung to
 //     another polecat is left alone. When the kept branch's head was already
-//     origin's head for it before step 4's push, and the checkpoint committed
+//     origin's head for it before step 4's push, the checkpoint committed
 //     nothing (so the worktree was clean: a commit would have moved the head),
+//     and the seat committed that head after the sling began (a seat resumed
+//     onto a branch already on origin produced none of it),
 //     the finished work is on origin and the label is rework, not needs-split:
 //     the comment names the commit and tells the next polecat to reuse the
 //     branch and run gt done. Every other stop (a checkpoint that committed or
-//     gave up, a push that was refused or given up, no branch on origin) keeps
-//     needs-split. The molecule the bead carried is ended
+//     gave up, a push that was refused or given up, no branch on origin, a head
+//     older than the sling) keeps needs-split. The molecule the bead carried is ended
 //     with the hand-back (handBackEndingMolecule), so the run leaves none
 //     open. The attention item for the stop is derived from that hand-back
 //     (collectOverrunStopped);
@@ -104,6 +106,9 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	}
 	if st.StopBeganAt.IsZero() {
 		st.Rig, st.Polecat, st.Branch, st.Elapsed = seat.Rig, seat.Polecat, seat.Branch, elapsed
+		// Saved with the stop's first step, so a stop resumed on a later tick
+		// still dates the run its rework decision belongs to.
+		st.SlingAt = seat.SlingAt
 	}
 	// A stop resumed from any saved progress may find the seat taken back, so
 	// StopBeganAt decides, not SessionStoppedAt: a failed clearPause or save
@@ -243,7 +248,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// changes, gives up at once.
 	if st.PushedAt.IsZero() && !st.PushGaveUp && s.push != nil {
 		pushSeat := seat
-		pushSeat.Bead, pushSeat.Branch = st.Bead, st.Branch
+		pushSeat.Bead, pushSeat.Branch, pushSeat.SlingAt = st.Bead, st.Branch, st.SlingAt
 		// Read before the push: afterwards origin holds the head whatever it
 		// held before. A checkpoint that gave up leaves work in the worktree,
 		// which is no finished branch.
@@ -387,7 +392,8 @@ func (d *Daemon) resumeOverrunStops(s overrunSeams) map[string]bool {
 			continue
 		}
 		touched[st.Bead] = true
-		seat := overrunSeat{Rig: st.Rig, Polecat: st.Polecat, Bead: st.Bead, Branch: st.Branch, Scheduled: st.Scheduled}
+		seat := overrunSeat{Rig: st.Rig, Polecat: st.Polecat, Bead: st.Bead, Branch: st.Branch,
+			Scheduled: st.Scheduled, SlingAt: st.SlingAt}
 		if st.Scheduled {
 			d.overrunScheduledStop(s, seat, st, st.Elapsed)
 			continue
@@ -492,8 +498,13 @@ func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
 
 // overrunFinishedOnOrigin is the finishedOnOrigin seam: the commit the seat's
 // kept branch holds in its worktree when origin holds that same commit for the
-// branch, "" otherwise. A seat with no worktree or branch, a branch origin
-// lacks, and an origin that cannot be asked all answer "": the stop then
+// branch and the seat committed it after the sling began, "" otherwise. The
+// sling check is what keeps a rework bead, slung onto the branch the landing
+// worker rejected, from reading as finished work: the seat resumed a head that
+// predates its run, so it has done nothing since, and the stop is an overrun
+// (needs-split, with its attention item) rather than rework. A seat with no
+// worktree or branch, a branch origin lacks, an origin that cannot be asked,
+// and a head whose commit time cannot be read all answer "": the stop then
 // pushes and hands back as it always has.
 func (d *Daemon) overrunFinishedOnOrigin(seat overrunSeat) string {
 	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
@@ -519,6 +530,15 @@ func (d *Daemon) overrunFinishedOnOrigin(seat overrunSeat) string {
 	}
 	if originBranchSHA(g, branch) != sha {
 		return ""
+	}
+	// A head committed before the sling is the branch the seat resumed, not
+	// work this run produced. Only a sling time the caller knows can say that;
+	// without one the head is answered as before.
+	if !seat.SlingAt.IsZero() {
+		at, err := g.CommitTime(sha)
+		if err != nil || !at.After(seat.SlingAt) {
+			return ""
+		}
 	}
 	return sha
 }

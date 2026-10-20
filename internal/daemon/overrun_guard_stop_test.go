@@ -77,6 +77,9 @@ func TestStop_FailedReleaseAfterHandBackKeepsTheStopPending(t *testing.T) {
 	if !st.StoppedAt.IsZero() {
 		t.Error("StoppedAt written although the seat is still parked")
 	}
+	if !st.SlingAt.Equal(overrunSlung) {
+		t.Errorf("SlingAt = %v, want the sling %v saved for the resumed stop", st.SlingAt, overrunSlung)
+	}
 	if !strings.Contains(buf.String(), "seat not retired after the hand-back") {
 		t.Errorf("log lacks the failed release:\n%s", buf.String())
 	}
@@ -1018,6 +1021,86 @@ func TestStop_FinishedBranchAlreadyOnOriginIsHandedBackAsRework(t *testing.T) {
 	}
 }
 
+// A seat slung a rework bead resumes the branch the landing worker rejected, so
+// its worktree head is already origin's head. A seat that committed nothing
+// since it was slung has produced no work: the stop is an overrun, and the bead
+// goes back for a split rather than back as finished work, which the next
+// polecat's stand-down would turn into another wasted session. A head the seat
+// did commit after its sling still goes back as rework.
+func TestOverrunStopIdleReworkSeatIsNotHandedBackAsFinished(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		committed  time.Time
+		wantLabel  string
+		wantRework string
+	}{
+		{
+			name:      "idle on the resumed branch",
+			committed: overrunSlung.Add(-time.Hour),
+			wantLabel: polecat.NeedsSplitLabel,
+		},
+		{
+			name:       "head produced after the sling",
+			committed:  overrunSlung.Add(5 * time.Minute),
+			wantLabel:  polecat.ReworkLabel,
+			wantRework: "abc1234",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, _ := newOverrunDaemon(t, false)
+			f := newOverrunFake(20*time.Minute, stopSeat)
+			store := newMolStore(t)
+			s := f.seams()
+
+			// The production finishedOnOrigin seam reads the seat's worktree:
+			// its branch head is the commit origin holds for the branch (the
+			// rejected branch of a rework bead), committed at tc.committed.
+			worktree := filepath.Join(d.config.TownRoot, "gastown", "polecats", "capable", "gastown")
+			if err := os.MkdirAll(filepath.Join(worktree, ".git"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			g := &pushStubGit{
+				branch: stopSeat.Branch, sha: "abc1234", commitTime: tc.committed,
+				originRefs: []git.RemoteRef{{Hash: "abc1234", Name: "refs/heads/" + stopSeat.Branch}},
+			}
+			d.openGitFn = func(string) daemonGit { return g }
+			s.finishedOnOrigin = d.overrunFinishedOnOrigin
+
+			// The production hand-back over the store, so the label and the
+			// comment are the ones the bead ends up with.
+			handBack := s.handBack
+			s.handBack = func(seat overrunSeat, elapsed time.Duration, note string) error {
+				if err := handBack(seat, elapsed, note); err != nil {
+					return err
+				}
+				return handBackEndingMolecule(context.Background(), store, func(string, ...any) {}, seat, elapsed, note)
+			}
+
+			d.runOverrunGuard(s)
+
+			work, comments := handedBackBead(t, store)
+			other := polecat.ReworkLabel
+			if tc.wantLabel == polecat.ReworkLabel {
+				other = polecat.NeedsSplitLabel
+			}
+			if !beads.HasLabel(work, tc.wantLabel) || beads.HasLabel(work, other) {
+				t.Errorf("bead labels %v, want %s and not %s", work.Labels, tc.wantLabel, other)
+			}
+			if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); st.ReworkSHA != tc.wantRework {
+				t.Errorf("state ReworkSHA = %q, want %q", st.ReworkSHA, tc.wantRework)
+			}
+			if tc.wantRework == "" && !strings.Contains(comments, "Split the bead") {
+				t.Errorf("comment %q lacks the split instruction", comments)
+			}
+			if tc.wantRework != "" && !strings.Contains(comments, "on origin") {
+				t.Errorf("comment %q does not name the finished work on origin", comments)
+			}
+		})
+	}
+}
+
 // Every stop that cannot show the finished work on origin keeps needs-split.
 func TestStop_UnfinishedOrUnpushedWorkKeepsNeedsSplit(t *testing.T) {
 	t.Parallel()
@@ -1186,5 +1269,24 @@ func TestOverrunFinishedOnOrigin_NeedsTheSameCommitOnBoth(t *testing.T) {
 	other.Polecat = "gone"
 	if got := d.overrunFinishedOnOrigin(other); got != "" {
 		t.Errorf("seat with no worktree: got %q, want none", got)
+	}
+
+	// The head must be one the seat committed after its sling: the same commit
+	// on both ends is not finished work when the seat only resumed it.
+	slung := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	g.originRefs, g.originErr = []git.RemoteRef{{Hash: "abc123", Name: ref}}, nil
+	seated := stopSeat
+	seated.SlingAt = slung
+	g.commitTime = slung.Add(-time.Hour)
+	if got := d.overrunFinishedOnOrigin(seated); got != "" {
+		t.Errorf("head committed before the sling: got %q, want none", got)
+	}
+	g.commitTime = slung.Add(time.Minute)
+	if got := d.overrunFinishedOnOrigin(seated); got != "abc123" {
+		t.Errorf("head committed after the sling: got %q, want abc123", got)
+	}
+	g.commitTime = time.Time{}
+	if got := d.overrunFinishedOnOrigin(seated); got != "" {
+		t.Errorf("commit time unknown: got %q, want none", got)
 	}
 }
