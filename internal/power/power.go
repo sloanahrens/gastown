@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/estop"
@@ -336,10 +337,20 @@ func (e *engine) workingPolecats(ctx context.Context) ([]string, error) {
 // pendingLandings sums the daemon's recorded landing queues from the health
 // report, the same record gt status prints. ok is false when no landing field
 // was read or any one of them could not be: an unread queue is not an empty
-// one, and another rig's "0 pending" does not stand in for it.
+// one, and another rig's "0 pending" does not stand in for it. A report the
+// daemon has stopped writing (older than the health stale age) is not read
+// either: its zero is a count from before the daemon stopped, not a drained
+// queue.
 func (e *engine) pendingLandings() (int, bool) {
 	report, err := townhealth.Read(e.o.TownRoot)
 	if err != nil {
+		return 0, false
+	}
+	_, stale, err := config.LoadOperationalConfig(e.o.TownRoot).GetHealthSettings().Resolve()
+	if err != nil {
+		stale = townhealth.DefaultStaleAfter
+	}
+	if townhealth.Effective(report, e.o.Now(), stale) != report.Verdict {
 		return 0, false
 	}
 	total, found := 0, false
