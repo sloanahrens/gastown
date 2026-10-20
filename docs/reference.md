@@ -1210,6 +1210,45 @@ the same keys whether or not the patrol is on:
 | `max_usd_per_day` | The town-wide daily cap the pass checks with `Cap.Allows` before every call. `0` takes the default of 1. |
 | `usd_per_billion_tokens` | Prices the ledger's tokens. Required: a pass without it refuses to run. |
 
+### Scorecard (`gt jev scorecard`)
+
+`gt jev scorecard --battery <name>` scores a battery's log against the labels
+its adapter finds, one block per question. Batteries only log; the scorecard is
+where their answers are judged. Flags are in `gt jev scorecard --help`. The
+command is read-only.
+
+Each battery is an adapter in `internal/jev/scorecard`, registered by name from
+an `init` with `scorecard.Register(name, factory)`; the factory takes the town
+root. The adapter implements:
+
+- `Battery()`: the name passed to `--battery`.
+- `LogPath()`: the JSONL log the battery appends to.
+- `Parse(raw) (Item, error)`: one log line as an `Item` (id, time, model, and
+  the answers keyed by question id). An error skips the line and counts it in
+  `lines_skipped`.
+- `Label(ctx, item) (labels, labeled, error)`: each question's label for the
+  item, and whether the item is labeled at all. An unlabeled item counts as
+  logged but not labeled. An error that cannot be read fails the whole report,
+  so a broken label source cannot pass as "no labels yet".
+
+Each question is scored by the kind of answer Jev gave. A noul is scored at
+0.5. A choice names its `positive` option, and precision and recall are at the
+option it chose, with the threshold sweep over that option's probability. A
+score has no cut at 0.5; it reports the mean score by label and the best cut.
+
+The verdict for each question:
+
+- `not-yet`: fewer than 30 labeled lines.
+- `earning`: on at least 30 labeled lines, the best F1 beats the label base
+  rate (positives over labeled lines) by 0.1 or more.
+- `no-signal`: anything else.
+
+The best F1 is taken over every distinct value as a cut, predicting yes at or
+above it; a tie keeps the higher cut. Only the `fixture` battery is registered
+so far. It reads `.runtime/jev/fixture.jsonl` with labels from
+`fixture-labels.json`, and exists so tests can drive the command end to end. No
+live battery reads it.
+
 ## Beads Commands (bd)
 
 ```bash
