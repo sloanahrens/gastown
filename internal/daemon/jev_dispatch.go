@@ -1,0 +1,84 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	jevdispatch "github.com/steveyegge/gastown/internal/jev/dispatch"
+)
+
+const (
+	// jevDispatchInterval is how often a pass is due. A pass takes the beads
+	// placed on a seat since the last one, so the interval is the most a
+	// placement waits before it is asked about.
+	jevDispatchInterval = 15 * time.Minute
+
+	// jevDispatchRunBudget bounds one pass: the bead list and the Jev calls
+	// for every placement it reaches.
+	jevDispatchRunBudget = 10 * time.Minute
+)
+
+// triggerJevDispatch starts one pass on its own goroutine when the patrol is on
+// and due. The pass makes network calls, so it never runs on the heartbeat. A
+// single-flight guard keeps one pass in flight at a time.
+func (d *Daemon) triggerJevDispatch() {
+	if !d.isPatrolActive("jev_dispatch") {
+		return
+	}
+	now := d.clk().Now()
+	dec := evaluatePatrolDue(d.config.TownRoot, "jev_dispatch", time.Time{}, now, jevDispatchInterval)
+	if !dec.due {
+		return
+	}
+	if !d.jevDispatchRunning.CompareAndSwap(false, true) {
+		return
+	}
+	if dec.warn != "" {
+		d.logger.Printf("jev_dispatch: WARNING: %s — %s", dec.warn, dec.note)
+	}
+	go func() {
+		defer d.jevDispatchRunning.Store(false)
+		d.runJevDispatch()
+		if err := savePatrolLastRun(d.config.TownRoot, "jev_dispatch", d.clk().Now()); err != nil {
+			d.logger.Printf("jev_dispatch: WARNING: cannot persist last-run time (%v)", err)
+		}
+	}()
+}
+
+// runJevDispatch does one pass with the settings in the patrol config. A
+// failure is logged, and the last-run time still advances, so a missing
+// price or an unreadable bead store costs one line per interval rather than
+// one per heartbeat.
+func (d *Daemon) runJevDispatch() {
+	var settings jevdispatch.Settings
+	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevDispatch != nil {
+		settings = jevdispatch.Settings{
+			MaxUSDPerDay:        c.Patrols.JevDispatch.MaxUSDPerDay,
+			USDPerBillionTokens: c.Patrols.JevDispatch.USDPerBillionTokens,
+		}
+	}
+	open := d.jevDispatchOpen
+	if open == nil {
+		open = jevdispatch.Open
+	}
+	pass, err := open(d.config.TownRoot, settings, d.logger.Writer())
+	if err != nil {
+		d.logger.Printf("jev_dispatch: error: %v", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), jevDispatchRunBudget)
+	defer cancel()
+	sum, err := pass.Run(ctx)
+	if errors.Is(err, jevdispatch.ErrBusy) {
+		d.logger.Printf("jev_dispatch: skipped: %v", err)
+		return
+	}
+	if err != nil {
+		d.logger.Printf("jev_dispatch: error: %v", err)
+		return
+	}
+	if sum.Asked > 0 || sum.Failed > 0 || sum.CapReached {
+		d.logger.Printf("jev_dispatch: asked %d beads, %d failed (daily cap reached: %v)", sum.Asked, sum.Failed, sum.CapReached)
+	}
+}

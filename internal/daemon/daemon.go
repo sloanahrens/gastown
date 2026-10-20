@@ -33,6 +33,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	jevattention "github.com/steveyegge/gastown/internal/jev/attention"
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
+	jevdispatch "github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/jev/landing"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/liveness"
@@ -576,6 +577,13 @@ type Daemon struct {
 	// and jevDedupeOpen are for jev_dedupe.
 	jevLandingRunning atomic.Bool
 	jevLandingOpen    func(townRoot string, s landing.Settings, warnings io.Writer) (*landing.Pass, error)
+
+	// jevDispatchRunning is the jev_dispatch pass's single-flight guard
+	// (jev_dispatch.go), for the same reason as jevDedupeRunning.
+	jevDispatchRunning atomic.Bool
+	// jevDispatchOpen builds the pass a run executes. Nil means jevdispatch.Open;
+	// a test sets it to hand the run a pass over fakes.
+	jevDispatchOpen func(townRoot string, s jevdispatch.Settings, warnings io.Writer) (*jevdispatch.Pass, error)
 
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
@@ -1557,6 +1565,11 @@ var heartbeatSteps = []heartbeatStep{
 	// Ask Jev a second opinion on each risk-path landing and log it
 	// (internal/jev/landing). Opt-in and lifecycle, like jev-dedupe.
 	{name: "jev-landing", lifecycle: true, run: (*Daemon).triggerJevLanding},
+
+	// Predict, for each bead just placed on a seat, how it will land, and log
+	// every prediction (internal/jev/dispatch). Opt-in and lifecycle, like
+	// jev-dedupe, and under the same town-wide daily cap.
+	{name: "jev-dispatch", lifecycle: true, run: (*Daemon).triggerJevDispatch},
 
 	// Sweep the tiers `make gate` does not run against origin/main
 	// (gt-vsct7.5). Non-lifecycle: it runs tests and files beads, and an
