@@ -114,6 +114,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.JevSpend != nil {
 		start(h.cfg.JevSpendEvery, h.pollJevSpend)
 	}
+	if h.cfg.JevScorecard != nil {
+		start(h.cfg.JevScorecardEvery, h.pollJevScorecard)
+	}
 	if h.cfg.OM != nil {
 		start(h.cfg.OMEvery, h.pollOM)
 	}
@@ -779,6 +782,23 @@ func (h *Hub) pollJevSpend() {
 	}
 	h.state.JevSpend = j
 	h.readOKLocked(SourceJevSpend, h.cfg.JevSpendEvery)
+	h.publishLocked()
+}
+
+// pollJevScorecard keeps the last good scorecard lines across a failed read.
+// It fails apart from the spend row: neither touches the other's value or
+// status.
+func (h *Hub) pollJevScorecard() {
+	sc := h.cfg.JevScorecard()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if sc == nil {
+		h.readFailedLocked(SourceJevScorecard, h.cfg.JevScorecardEvery)
+		h.publishLocked()
+		return
+	}
+	h.state.JevScorecard = sc
+	h.readOKLocked(SourceJevScorecard, h.cfg.JevScorecardEvery)
 	h.publishLocked()
 }
 

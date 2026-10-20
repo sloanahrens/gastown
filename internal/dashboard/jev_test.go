@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -331,5 +332,196 @@ func TestCostPanelJevRowDrawsWithoutASpendReport(t *testing.T) {
 	})
 	if len(lines) != 2 || !strings.Contains(lines[0].Text, "no spend report") || !strings.HasPrefix(lines[1].Text, "Jev spend · 2 calls · $0.20") {
 		t.Errorf("empty panel drew %q", costTexts(lines))
+	}
+}
+
+// ParseJevScorecard turns one battery's `gt jev scorecard --json` report into
+// its line: the parsed items, the ones a rule labeled, and each question's
+// verdict in the report's order.
+func TestParseJevScorecard(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		report string
+		want   JevBattery
+	}{
+		{"questions and labels", `{"battery":"finding","items":3,"lines_skipped":1,
+ "questions":[{"id":"any_duplicate","kind":"noul","logged":3,"labeled":2,"verdict":"not-yet"},
+              {"id":"fix_worthy","kind":"noul","logged":3,"labeled":2,"verdict":"earning"}],
+ "lines":[{"id":"a","labeled":true},{"id":"b","labeled":false},{"id":"c","labeled":true}]}`,
+			JevBattery{Name: "finding", Lines: 3, Labeled: 2, Questions: []JevQuestion{
+				{ID: "any_duplicate", Verdict: "not-yet"}, {ID: "fix_worthy", Verdict: "earning"}}}},
+		{"no log is an empty report", `{"battery":"landing","items":0,"lines_skipped":0,"questions":[]}`,
+			JevBattery{Name: "landing"}},
+		{"the text report's lines are optional", `{"battery":"dispatch","items":5,
+ "questions":[{"id":"first_try","verdict":"no-signal"}]}`,
+			JevBattery{Name: "dispatch", Lines: 5, Questions: []JevQuestion{{ID: "first_try", Verdict: "no-signal"}}}},
+	}
+	for _, tc := range cases {
+		got, err := ParseJevScorecard([]byte(tc.report))
+		if err != nil {
+			t.Errorf("%s: %v", tc.name, err)
+			continue
+		}
+		if !reflect.DeepEqual(*got, tc.want) {
+			t.Errorf("%s: got %+v, want %+v", tc.name, *got, tc.want)
+		}
+	}
+}
+
+func TestParseJevScorecardRefusesWhatIsNotTheReport(t *testing.T) {
+	t.Parallel()
+
+	for _, out := range []string{"", "   ", "gt: unknown battery", "[]", `{"items":3}`, `{"battery":"finding"}`, `{"battery":`} {
+		if got, err := ParseJevScorecard([]byte(out)); err == nil {
+			t.Errorf("ParseJevScorecard(%q) = %+v, want an error", out, got)
+		}
+	}
+}
+
+func TestJevScorecardWindowReadsTheCommandsSince(t *testing.T) {
+	t.Parallel()
+
+	cases := map[string]string{
+		"gt jev scorecard --json --since 7d": "7d",
+		"gt jev scorecard --since=36h":       "36h",
+		"gt jev scorecard --json":            "",
+		"gt jev scorecard --since":           "",
+	}
+	for cmd, want := range cases {
+		if got := JevScorecardWindow(strings.Fields(cmd)); got != want {
+			t.Errorf("JevScorecardWindow(%q) = %q, want %q", cmd, got, want)
+		}
+	}
+}
+
+// The scorecard read and the spend read fail apart, and a failed scorecard
+// read keeps the last good lines.
+func TestFailedJevScorecardReadKeepsTheLinesAndLeavesTheSpendAlone(t *testing.T) {
+	t.Parallel()
+
+	ok := true
+	h := NewHub(Config{
+		JevSpend: func() *JevSpend { return &JevSpend{Calls: 3, USD: 0.5} },
+		JevScorecard: func() *JevScorecard {
+			if !ok {
+				return nil
+			}
+			return &JevScorecard{Batteries: []JevBattery{{Name: "finding", Lines: 2, Labeled: 1}}}
+		},
+	})
+	h.pollJevSpend()
+	h.pollJevScorecard()
+	if r := h.State().Reads[SourceJevScorecard]; r.Error || r.Stale {
+		t.Fatalf("a good scorecard read is flagged: %+v", r)
+	}
+	ok = false
+	h.pollJevScorecard()
+
+	st := h.State()
+	if st.JevScorecard == nil || len(st.JevScorecard.Batteries) != 1 {
+		t.Errorf("a failed read dropped the last good lines: %+v", st.JevScorecard)
+	}
+	if r := st.Reads[SourceJevScorecard]; !r.Error || !r.Stale {
+		t.Errorf("a failed scorecard read is not flagged error and stale: %+v", r)
+	}
+	if r := st.Reads[SourceJevSpend]; r.Error || r.Stale {
+		t.Errorf("a failed scorecard read marked the spend read: %+v", r)
+	}
+	if st.JevSpend == nil || st.JevSpend.Calls != 3 {
+		t.Errorf("a failed scorecard read changed the spend row: %+v", st.JevSpend)
+	}
+}
+
+func jevScorecardState(read map[string]any) map[string]any {
+	over := map[string]any{
+		"reads": jevRead(nil),
+		"jev_scorecard": map[string]any{"window": "7d", "batteries": []any{
+			map[string]any{"name": "finding", "lines": 212, "labeled": 140, "questions": []any{
+				map[string]any{"id": "fix_worthy", "verdict": "earning"},
+				map[string]any{"id": "any_duplicate", "verdict": "not-yet"}}},
+			map[string]any{"name": "landing", "lines": 0, "labeled": 0},
+			map[string]any{"name": "targets", "lines": 9, "labeled": 0, "questions": []any{
+				map[string]any{"id": "needs_review", "verdict": "no-signal"}}},
+		}},
+	}
+	reads := over["reads"].(map[string]any)
+	reads["jev_scorecard"] = map[string]any{"at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339), "every_sec": 900}
+	for k, v := range read {
+		reads["jev_scorecard"].(map[string]any)[k] = v
+	}
+	return jevState(over)
+}
+
+// Golden: the spend row, then one line per battery, and a dash for the battery
+// without a log.
+func TestCostPanelDrawsOneJevLinePerBattery(t *testing.T) {
+	t.Parallel()
+
+	lines, _ := drawCost(t, jevScorecardState(nil))
+	var got []string
+	for _, l := range lines {
+		if strings.HasPrefix(l.Text, "Jev spend") || strings.HasPrefix(l.Text, "finding") ||
+			strings.HasPrefix(l.Text, "landing") || strings.HasPrefix(l.Text, "targets") {
+			got = append(got, l.Text)
+		}
+	}
+	want := []string{
+		"Jev spend · 14 calls in 24h · $1.75 · top caller overseer (10 calls, $1.50)",
+		"finding 212/140 fix_worthy:earning any_duplicate:not-yet",
+		"landing -",
+		"targets 9/0 needs_review:no-signal",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("Jev lines = %q, want %q", got, want)
+	}
+}
+
+// A scorecard that cannot be read says so on one line and leaves the spend
+// line as it was.
+func TestCostPanelJevScorecardFailureKeepsTheSpendLine(t *testing.T) {
+	t.Parallel()
+
+	healthy, _ := drawCost(t, jevState(map[string]any{"reads": jevRead(nil)}))
+	spend, _ := findLine(healthy, "Jev spend")
+
+	cases := map[string]struct {
+		read map[string]any
+		want string
+	}{
+		"failed": {map[string]any{"error": true, "stale": true}, "Jev scorecard unavailable — the read failed"},
+		"stale":  {map[string]any{"stale": true}, "Jev scorecard unavailable — the read went stale"},
+	}
+	for name, tc := range cases {
+		lines, _ := drawCost(t, jevScorecardState(tc.read))
+		row, ok := findLine(lines, "Jev scorecard")
+		if !ok || row.Text != tc.want || row.Class != "empty" {
+			t.Errorf("%s: row = %+v (found %v), want %q", name, row, ok, tc.want)
+		}
+		if got, _ := findLine(lines, "Jev spend"); got != spend {
+			t.Errorf("%s: spend row = %+v, want %+v", name, got, spend)
+		}
+		if _, ok := findLine(lines, "finding"); ok {
+			t.Errorf("%s: a battery line is drawn from an unreadable scorecard", name)
+		}
+	}
+
+	// Never read: only the failed status, no lines.
+	state := jevState(map[string]any{"reads": jevRead(nil)})
+	state["reads"].(map[string]any)["jev_scorecard"] = map[string]any{"at": time.Now().UTC().Format(time.RFC3339), "every_sec": 900, "error": true, "stale": true}
+	lines, _ := drawCost(t, state)
+	if row, ok := findLine(lines, "Jev scorecard"); !ok || row.Text != "Jev scorecard unavailable — the read failed" {
+		t.Errorf("never-read row = %+v (found %v)", row, ok)
+	}
+}
+
+// No scorecard command, or one that has not answered yet, draws nothing.
+func TestCostPanelJevScorecardAbsentDrawsNothing(t *testing.T) {
+	t.Parallel()
+
+	lines, _ := drawCost(t, jevState(map[string]any{"reads": jevRead(nil)}))
+	if row, ok := findLine(lines, "Jev scorecard"); ok {
+		t.Errorf("a missing scorecard drew %+v", row)
 	}
 }

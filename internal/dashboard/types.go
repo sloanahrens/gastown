@@ -132,8 +132,11 @@ const (
 	SourceMachine  = "machine"
 	SourceSpend    = "spend"
 	SourceJevSpend = "jev_spend"
-	SourceOM       = "om"
-	SourceQueue    = "queue"
+	// SourceJevScorecard is the Jev batteries' scorecard lines, read apart
+	// from the spend row beside them.
+	SourceJevScorecard = "jev_scorecard"
+	SourceOM           = "om"
+	SourceQueue        = "queue"
 )
 
 // readStaleFactor is how many of a poll's own intervals a reading may age
@@ -628,9 +631,13 @@ type State struct {
 	// JevSpend is the Jev ledger's calls and dollars over the spend command's
 	// window, read beside the DeepSeek spend. It is nil until the reader first
 	// reports; a failed read keeps the last good value and says so in Reads.
-	JevSpend  *JevSpend  `json:"jev_spend,omitempty"`
-	OM        *OM        `json:"om,omitempty"`
-	TierSweep *TierSweep `json:"tiersweep,omitempty"`
+	JevSpend *JevSpend `json:"jev_spend,omitempty"`
+	// JevScorecard is each Jev battery's lines, labeled count and question
+	// verdicts, read beside the spend row. It is nil until the reader first
+	// reports; a failed read keeps the last good value and says so in Reads.
+	JevScorecard *JevScorecard `json:"jev_scorecard,omitempty"`
+	OM           *OM           `json:"om,omitempty"`
+	TierSweep    *TierSweep    `json:"tiersweep,omitempty"`
 	// Models is the header strip: the polecat model, the pool's seats against
 	// its cap, and the reviewer's model. It is nil until the reader reports.
 	Models *Models `json:"models,omitempty"`
@@ -681,6 +688,9 @@ type Config struct {
 	Spend func() json.RawMessage
 	// JevSpend returns the Jev spend row, nil when the read failed.
 	JevSpend func() *JevSpend
+	// JevScorecard returns the Jev batteries' scorecard lines, nil when the
+	// read failed.
+	JevScorecard func() *JevScorecard
 	// OM reads the reviewer's record from disk.
 	OM func() *OM
 	// TierSweep reads the daemon's tier sweeps from the daemon log.
@@ -734,31 +744,32 @@ type Config struct {
 
 	Now func() time.Time
 
-	FeedEvery       time.Duration
-	SummaryEvery    time.Duration
-	HealthEvery     time.Duration
-	MachineEvery    time.Duration
-	CloudEvery      time.Duration
-	SpendEvery      time.Duration
-	JevSpendEvery   time.Duration
-	OMEvery         time.Duration
-	TierSweepEvery  time.Duration
-	ForgejoEvery    time.Duration
-	NewsEvery       time.Duration
-	DeploysEvery    time.Duration
-	ReportsEvery    time.Duration
-	QuestionsEvery  time.Duration
-	OverseerEvery   time.Duration
-	DeepReviewEvery time.Duration
-	UsageEvery      time.Duration
-	ClaudePlanEvery time.Duration
-	ReworkEvery     time.Duration
-	EscalationEvery time.Duration
-	DispatchEvery   time.Duration
-	AttentionEvery  time.Duration
-	ModelsEvery     time.Duration
-	QueueEvery      time.Duration
-	TrendEvery      time.Duration
+	FeedEvery         time.Duration
+	SummaryEvery      time.Duration
+	HealthEvery       time.Duration
+	MachineEvery      time.Duration
+	CloudEvery        time.Duration
+	SpendEvery        time.Duration
+	JevSpendEvery     time.Duration
+	JevScorecardEvery time.Duration
+	OMEvery           time.Duration
+	TierSweepEvery    time.Duration
+	ForgejoEvery      time.Duration
+	NewsEvery         time.Duration
+	DeploysEvery      time.Duration
+	ReportsEvery      time.Duration
+	QuestionsEvery    time.Duration
+	OverseerEvery     time.Duration
+	DeepReviewEvery   time.Duration
+	UsageEvery        time.Duration
+	ClaudePlanEvery   time.Duration
+	ReworkEvery       time.Duration
+	EscalationEvery   time.Duration
+	DispatchEvery     time.Duration
+	AttentionEvery    time.Duration
+	ModelsEvery       time.Duration
+	QueueEvery        time.Duration
+	TrendEvery        time.Duration
 
 	RingSize int // feed entries kept for a page that connects late
 }
@@ -779,6 +790,9 @@ func (c *Config) defaults() {
 	def(&c.CloudEvery, 60*time.Second)
 	def(&c.SpendEvery, 5*time.Minute)
 	def(&c.JevSpendEvery, 5*time.Minute)
+	// A scorecard run reads each battery's log and, for some, its beads, so it
+	// is asked less often than the spend row.
+	def(&c.JevScorecardEvery, 15*time.Minute)
 	def(&c.OMEvery, 60*time.Second)
 	def(&c.TierSweepEvery, 60*time.Second)
 	def(&c.ForgejoEvery, 3*time.Minute)

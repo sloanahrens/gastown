@@ -25,6 +25,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/forgejo"
+	"github.com/steveyegge/gastown/internal/jev/scorecard"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/procutil"
 	"github.com/steveyegge/gastown/internal/report"
@@ -41,6 +42,7 @@ var (
 	dashboardSpendCmd             string
 	dashboardJevSpendCmd          string
 	dashboardJevUSDPerBillion     float64
+	dashboardJevScorecardCmd      string
 	dashboardForgejoRepos         []string
 	dashboardClaudePlanUSD        float64
 	dashboardClaudePlanRenewalDay int
@@ -82,6 +84,16 @@ beside the DeepSeek and Claude lines: the calls and dollars over the command's
 --hours window, and the caller that cost the most. A command that fails or
 prints anything else shows the row as unavailable and leaves the other spend
 lines alone; an empty value leaves the row out.
+
+--jev-scorecard-cmd names the command that prints one Jev battery's scorecard as
+JSON (default: gt jev scorecard --json --since 7d). It is split like a shell
+line and run once per registered battery with --battery added, every 15 minutes
+while a page is open. Under the Jev spend row the Cost panel draws one line per
+battery: its lines logged, how many of them are labeled, and each question's
+verdict (earning, not-yet or no-signal), such as
+finding 212/140 fix_worthy:earning any_duplicate:not-yet. A battery with no log
+in the window shows -. A run that fails shows the scorecard as unavailable and
+leaves the spend row alone; an empty value leaves the lines out.
 
 --claude-plan-usd prices the plan meter beside it: the Claude weekly and
 five-hour limits, read every minute from the samples the status line appends to
@@ -188,6 +200,7 @@ func init() {
 	dashboardCmd.Flags().StringVar(&dashboardSpendCmd, "spend-cmd", "", "Command that prints the DeepSeek spend report as JSON (default: the ~/.claude tool when present)")
 	dashboardCmd.Flags().StringVar(&dashboardJevSpendCmd, "jev-spend-cmd", defaultJevSpendCmd, "Command that prints the Jev ledger's spend as JSON; empty leaves the Jev row out")
 	dashboardCmd.Flags().Float64Var(&dashboardJevUSDPerBillion, "jev-usd-per-billion-tokens", defaultJevUSDPerBillionTokens, "Price of Jev's tokens in US dollars per billion, passed to the --jev-spend-cmd command")
+	dashboardCmd.Flags().StringVar(&dashboardJevScorecardCmd, "jev-scorecard-cmd", defaultJevScorecardCmd, "Command that prints a Jev battery's scorecard as JSON, run once per registered battery with --battery added; empty leaves the scorecard lines out")
 	dashboardCmd.Flags().StringArrayVar(&dashboardForgejoRepos, "forgejo-repo", nil, "Repo (owner/name) the Forgejo panel reads; repeatable (default: every rig cut over to Forgejo)")
 	dashboardCmd.Flags().BoolVar(&dashboardOpen, "open", false, "Open the page in the default browser")
 	dashboardCmd.Flags().Float64Var(&dashboardClaudePlanUSD, "claude-plan-usd", dashboard.ClaudePlanDefaultUSD, "Monthly price of the Claude plan the plan meter's percentages are drawn against")
@@ -213,7 +226,11 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay)
+	jevScorecardArgv, err := jevScorecardArgv(dashboardJevScorecardCmd)
+	if err != nil {
+		return err
+	}
+	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, jevScorecardArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay)
 	if err != nil {
 		return err
 	}
@@ -304,7 +321,7 @@ func dashboardClaudePlanPath(townRoot string) string {
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
 // when the server stops.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int) (*dashboard.Hub, func(), error) {
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv, jevScorecardArgv []string, claudePlanUSD float64, claudePlanRenewalDay int) (*dashboard.Hub, func(), error) {
 	beadReads := openTailBeads(townRoot)
 	rigOfBead := landingRig(townRoot)
 	// The deploy block reads the same repos through the same viewer client as
@@ -380,33 +397,34 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 	rework := newDashReworkReader(townRoot).withStages(om.stagesSince)
 	loads := newDashLoads(townRoot, time.Now)
 	return dashboard.NewHub(dashboard.Config{
-		Feed:       feed,
-		Summary:    func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
-		Health:     func() dashboard.Health { return dashboardHealth(townRoot) },
-		Machine:    dashboard.SampleMachine,
-		Cloud:      func() *dashboard.Cloud { return cloud.Read(time.Now()) },
-		Spend:      dashboardSpend(resolveSpendCmd(spendCmd)),
-		JevSpend:   dashboardJevSpend(jevSpendArgv),
-		OM:         func() *dashboard.OM { return om.read(time.Now()) },
-		TierSweep:  func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
-		Forgejo:    forgejoFeed,
-		News:       news,
-		Deploys:    forgejoDeploys,
-		Reports:    func() *dashboard.Reports { return reports.Read(time.Now()) },
-		ReportsDir: dashboardReportsDir(townRoot),
-		Questions:  func() *dashboard.Questions { return questions.read(time.Now()) },
-		Overseer:   func() *dashboard.Overseer { return overseerPane.read(time.Now()) },
-		DeepReview: func() *dashboard.DeepReview { return deepReview.read(time.Now()) },
-		Usage:      func() *dashboard.Usage { return usage.read(time.Now()) },
-		ClaudePlan: func() *dashboard.ClaudePlan { return claudePlan.Read(time.Now()) },
-		Rework:     func() *dashboard.Rework { return rework.read(time.Now()) },
-		Escalation: func() *dashboard.Escalations { return escalations.read(time.Now()) },
-		Dispatch:   om.dispatch,
-		Attention:  dashboard.NewAttentionFollower(townRoot).Read,
-		Models:     models.read,
-		Queue:      func() *dashboard.Queue { return queue.read(time.Now()) },
-		Bead:       queue.detail,
-		RigTheme:   newDashRigThemes(townRoot),
+		Feed:         feed,
+		Summary:      func() dashboard.Summary { return dashboardSummary(townRoot, deploys, recs, seatCache) },
+		Health:       func() dashboard.Health { return dashboardHealth(townRoot) },
+		Machine:      dashboard.SampleMachine,
+		Cloud:        func() *dashboard.Cloud { return cloud.Read(time.Now()) },
+		Spend:        dashboardSpend(resolveSpendCmd(spendCmd)),
+		JevSpend:     dashboardJevSpend(jevSpendArgv),
+		JevScorecard: dashboardJevScorecard(jevScorecardArgv),
+		OM:           func() *dashboard.OM { return om.read(time.Now()) },
+		TierSweep:    func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
+		Forgejo:      forgejoFeed,
+		News:         news,
+		Deploys:      forgejoDeploys,
+		Reports:      func() *dashboard.Reports { return reports.Read(time.Now()) },
+		ReportsDir:   dashboardReportsDir(townRoot),
+		Questions:    func() *dashboard.Questions { return questions.read(time.Now()) },
+		Overseer:     func() *dashboard.Overseer { return overseerPane.read(time.Now()) },
+		DeepReview:   func() *dashboard.DeepReview { return deepReview.read(time.Now()) },
+		Usage:        func() *dashboard.Usage { return usage.read(time.Now()) },
+		ClaudePlan:   func() *dashboard.ClaudePlan { return claudePlan.Read(time.Now()) },
+		Rework:       func() *dashboard.Rework { return rework.read(time.Now()) },
+		Escalation:   func() *dashboard.Escalations { return escalations.read(time.Now()) },
+		Dispatch:     om.dispatch,
+		Attention:    dashboard.NewAttentionFollower(townRoot).Read,
+		Models:       models.read,
+		Queue:        func() *dashboard.Queue { return queue.read(time.Now()) },
+		Bead:         queue.detail,
+		RigTheme:     newDashRigThemes(townRoot),
 		Trend: func() *dashboard.Trend {
 			now := time.Now()
 			stages, rejects := om.trendInputs(trendWindowStart(now))
@@ -697,6 +715,63 @@ func dashboardJevSpendWith(argv []string, run func(ctx context.Context, argv []s
 		}
 		j.Window = window
 		return j
+	}
+}
+
+// defaultJevScorecardCmd is --jev-scorecard-cmd's default: the last week of a
+// battery's log. The scorecard names one battery per run, so the reader adds
+// --battery for each registered battery.
+const defaultJevScorecardCmd = "gt jev scorecard --json --since 7d"
+
+// jevScorecardArgv turns --jev-scorecard-cmd into the argv the dashboard runs,
+// split like a shell line. An empty command is no argv, which leaves the
+// scorecard lines out; an unbalanced quote is an error at startup.
+func jevScorecardArgv(cmd string) ([]string, error) {
+	argv, err := shlex.Split(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("--jev-scorecard-cmd %q: %w", cmd, err)
+	}
+	if len(argv) == 0 {
+		return nil, nil
+	}
+	return argv, nil
+}
+
+// dashboardJevScorecard runs the scorecard command for every registered
+// battery and folds each report into its line. A nil argv is no scorecard
+// lines.
+func dashboardJevScorecard(argv []string) func() *dashboard.JevScorecard {
+	return dashboardJevScorecardWith(argv, scorecard.Registered(), func(ctx context.Context, argv []string) ([]byte, error) {
+		return exec.CommandContext(ctx, argv[0], argv[1:]...).Output()
+	})
+}
+
+// dashboardJevScorecardWith is dashboardJevScorecard over run and the battery
+// names, so a test stands in for the process. The command reads one battery
+// per run, so the read is one run per battery; a battery whose run fails or
+// prints anything but its report fails the whole read, which the hub shows as
+// the scorecard unavailable while the last good lines stay in its state.
+func dashboardJevScorecardWith(argv, batteries []string, run func(ctx context.Context, argv []string) ([]byte, error)) func() *dashboard.JevScorecard {
+	if len(argv) == 0 {
+		return nil
+	}
+	window := dashboard.JevScorecardWindow(argv)
+	return func() *dashboard.JevScorecard {
+		sc := &dashboard.JevScorecard{Batteries: []dashboard.JevBattery{}, Window: window}
+		for _, name := range batteries {
+			ctx, cancel := context.WithTimeout(context.Background(), dashboardSpendTimeout)
+			out, err := run(ctx, append(append([]string{}, argv...), "--battery", name))
+			cancel()
+			if err != nil {
+				return nil
+			}
+			b, err := dashboard.ParseJevScorecard(out)
+			if err != nil || b.Name != name {
+				return nil
+			}
+			sc.Batteries = append(sc.Batteries, *b)
+		}
+		return sc
 	}
 }
 
