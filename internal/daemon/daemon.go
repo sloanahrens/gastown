@@ -31,6 +31,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
+	jevattention "github.com/steveyegge/gastown/internal/jev/attention"
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/liveness"
@@ -560,6 +561,14 @@ type Daemon struct {
 	// which wires the live Jev client, hm and the rig's beads; a test sets it
 	// to hand the run a pass over fakes.
 	jevDedupeOpen func(townRoot string, s dedupe.Settings, warnings io.Writer) (*dedupe.Pass, error)
+
+	// jevAttentionRunning is the jev_attention pass's single-flight guard
+	// (jev_attention.go), kept apart from jev_dedupe's so the two passes run
+	// independently.
+	jevAttentionRunning atomic.Bool
+	// jevAttentionOpen builds the pass a run executes. Nil means
+	// jevattention.Open; a test sets it to hand the run a pass over fakes.
+	jevAttentionOpen func(townRoot string, s jevattention.Settings, warnings io.Writer) (*jevattention.Pass, error)
 
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
@@ -1532,6 +1541,11 @@ var heartbeatSteps = []heartbeatStep{
 	// (internal/jev/dedupe). Opt-in, and lifecycle: each pass spends on Jev, so
 	// the town E-stop holds it along with the other paid work.
 	{name: "jev-dedupe", lifecycle: true, run: (*Daemon).triggerJevDedupe},
+
+	// Ask Jev the attention question set about each new attention item and
+	// log every answer (internal/jev/attention). Opt-in, and lifecycle for the
+	// same reason as jev-dedupe: each pass spends on Jev.
+	{name: "jev-attention", lifecycle: true, run: (*Daemon).triggerJevAttention},
 
 	// Sweep the tiers `make gate` does not run against origin/main
 	// (gt-vsct7.5). Non-lifecycle: it runs tests and files beads, and an

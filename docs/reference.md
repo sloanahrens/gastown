@@ -1136,6 +1136,31 @@ use up the first one's room. `Cap.Allows` is whether today's spend is still
 under `MaxUSDPerDay`. The ledger stores tokens, so `USDPerBillionTokens` is
 required to price them.
 
+### Attention battery
+
+`internal/jev/attention` asks one Jev call per new attention item: five
+questions (needs a person, clears on its own, a routine action fixes it, repeats
+an open item, and an urgency score), and appends one line per item to
+`.runtime/jev/attention.jsonl`. The pass is advisory and log-only: it never
+acks, hides, wakes or changes an item, and it writes nothing under
+`.runtime/attention`.
+
+Keys live under `patrols.jev_attention` in `daemon.json`. `enabled` defaults to
+false, `max_usd_per_day` to 1, and `usd_per_billion_tokens` is required. The
+daily cap is the town-wide one described under Jev Batteries: it counts every
+Jev caller's spend, so other batteries' calls today use up this pass's room.
+The daemon runs a pass every 15 minutes when enabled. The first pass only sets
+the cursor, so it asks about no item raised before it. `gt jev attention
+--recent N` prints the last N lines.
+
+A failed call is held until a later call in the same pass succeeds. Then the
+failure was about the item, so the item is logged with `answers: null` and not
+asked again. If three calls in a row fail the pass stops as an outage: those
+items are not logged, the cursor stays before them, and the next pass asks them
+again. The pass summary and the daemon log count answered items, null-answer
+lines and held calls apart, so a pass where Jev was down does not read like one
+where it answered.
+
 ## Beads Commands (bd)
 
 ```bash

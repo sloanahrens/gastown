@@ -66,6 +66,11 @@ type PatrolsConfig struct {
 	// calls, so only an explicit enabled:true turns it on.
 	JevDedupe *JevDedupeConfig `json:"jev_dedupe,omitempty"`
 
+	// JevAttention asks Jev the question set about each new attention item and
+	// logs every answer (internal/jev/attention). Opt-in, for the same reason
+	// as JevDedupe.
+	JevAttention *JevAttentionConfig `json:"jev_attention,omitempty"`
+
 	// RestartTracker is retired (gt-gqftr): no code read the block. It is
 	// declared, like the other retired keys, so a daemon.json that still
 	// carries it keeps loading under strict decoding and is kept verbatim.
@@ -439,6 +444,20 @@ type ScheduledMaintenanceConfig struct {
 // spend. The pass is off unless Enabled is true, and an enabled pass needs
 // USDPerBillionTokens: the usage ledger stores tokens, not dollars.
 type JevDedupeConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the pass for the day once the job's spend reaches
+	// it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+}
+
+// JevAttentionConfig switches on the attention-item pass and prices its Jev
+// spend. The pass is off unless Enabled is true, and an enabled pass needs
+// USDPerBillionTokens: the usage ledger stores tokens, not dollars.
+type JevAttentionConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// MaxUSDPerDay stops the pass for the day once the job's spend reaches
