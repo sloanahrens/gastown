@@ -19,9 +19,10 @@ var jevAttentionCmd = &cobra.Command{
 	Use:   "attention",
 	Short: "Ask Jev the attention question set about each new item, and log every answer",
 	Long: `Run one pass of the attention battery over the items raised since the last
-pass. For each one, Jev is asked four yes-or-no questions (needs a person,
-clears on its own, a routine action fixes it, repeats an open item) and one
-urgency score, in one call. Every item gets one line in
+pass. For each one, Jev is asked four statements, each as the probability that
+it holds (a person has to act, it clears on its own, a routine action fixes it,
+another open item repeats it), and one urgency score, in one call. Every item
+gets one line in
 <town>/.runtime/jev/attention.jsonl, whatever Jev answers.
 
 The pass is advisory and log-only: it never acks, hides, wakes or changes an
