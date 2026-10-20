@@ -37,7 +37,13 @@ func submissionItem(t *testing.T, a Adapter, bead string, at time.Time) Item {
 // returns the file's path.
 func reviewFile(t *testing.T, rows ...land.ReviewRecord) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), land.ReviewsFileName)
+	// The landings dir must be private: the review log refuses one any other
+	// account can write to, and t.TempDir's numbered subdirectory is 0777 less umask.
+	dir := filepath.Join(t.TempDir(), "landings")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, land.ReviewsFileName)
 	f := &land.ReviewsFile{Path: path}
 	for _, row := range rows {
 		if err := f.Append(row); err != nil {
