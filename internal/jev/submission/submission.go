@@ -228,14 +228,20 @@ var errUnreadable = errors.New("submission commits or diff unreadable")
 
 // ask builds the state for one submission, asks the battery and returns the
 // line. Commits or a diff the clone cannot read return errUnreadable, and the
-// pass skips the submission. A failure that ctx's end caused returns ctx's
-// error, so the next pass asks again.
+// pass skips the submission. So does a submission with no commits on
+// target..head: its head is already reachable from target, so it landed, and
+// its diff against target is the change target has made since, not its own.
+// A failure that ctx's end caused returns ctx's error, so the next pass asks
+// again.
 func (p *Pass) ask(ctx context.Context, sub submission) (Line, error) {
 	subjects, err := p.Git.CommitSubjects(ctx, sub.work.Target, sub.work.Head, maxSubjects)
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return Line{}, cerr
 		}
+		return Line{}, errUnreadable
+	}
+	if len(subjects) == 0 {
 		return Line{}, errUnreadable
 	}
 	out, err := p.Git.Numstat(ctx, sub.work.Target, sub.work.Head)

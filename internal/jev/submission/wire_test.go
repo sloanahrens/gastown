@@ -3,6 +3,7 @@ package submission
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/jev/battery"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -159,5 +161,36 @@ func TestJevSubmissionListerReadsWaitingAndClosedBeads(t *testing.T) {
 	}
 	if strings.Join(ids, " ") != "gt-open gt-hooked gt-both gt-landed" {
 		t.Errorf("Since() = %v, want the actionable waiting beads then the closed ones", ids)
+	}
+}
+
+// A submission that already landed under a --no-ff merge has its head
+// reachable from target, so target..head has no commits. Git still reports a
+// non-empty diff for that range (the changes target gained since), so the pass
+// must skip it before Jev is asked, and log nothing for it.
+func TestAskLandedSubmissionNotScoredOnEmptyDiff(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	landed := r.ready("gt-landed", time.Minute)
+	r.git.subjects["head-gt-landed"] = nil
+	r.git.numstat["head-gt-landed"] = "40\t3\tinternal/other.go\n"
+	r.submissions.issues = []*beads.Issue{landed}
+
+	sum, err := r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Asked != 0 || sum.Skipped != 1 {
+		t.Fatalf("summary = %+v, want 0 asked and 1 skipped", sum)
+	}
+	if n := len(r.asker.asked); n != 0 {
+		t.Errorf("Jev was asked %d times about a landed submission with no commits", n)
+	}
+	if _, err := os.Stat(r.pass.LogPath); !os.IsNotExist(err) {
+		t.Errorf("a landed submission wrote a log: %v", err)
+	}
+	cur, ok, _ := battery.ReadCursor(r.pass.CursorPath)
+	if !ok || cur.ID != "gt-landed" {
+		t.Errorf("cursor = %+v ok=%v, want it past gt-landed", cur, ok)
 	}
 }
