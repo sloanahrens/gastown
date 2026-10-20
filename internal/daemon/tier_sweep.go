@@ -1644,19 +1644,20 @@ func tierSweepOpenBeads(bd tierSweepBeadStore, rig, tier string) (map[string]tie
 // tierSweepFileRed comments on the open bead for name, else files one. The
 // pattern is the red-main owner's fileOrComment (internal/landworker/redmain.go).
 func tierSweepFileRed(d *Daemon, bd tierSweepBeadStore, rig, tier, name, sha string, ts tierSweepTierResult, openID string) {
-	detail := fmt.Sprintf("%s tier RED on main at %s (%d passed, %d failed). Log: %s",
-		tier, shortSHA(sha), ts.Passed, ts.Failed, ts.Log)
+	detail := tierSweepRedDetail(tier, sha, ts)
 	if openID != "" {
 		if err := bd.AddComment(openID, "still red: "+detail); err != nil {
 			d.logger.Printf("tier_sweep: %s: commenting on %s: %v", rig, openID, err)
 		}
 		return
 	}
+	description, acceptance := tierSweepBeadShape(tier, name, sha, ts)
 	if _, err := bd.Create(beads.CreateOptions{
 		Title:       tierSweepBeadPrefix(rig, tier) + name,
 		Labels:      []string{tierSweepRedLabel},
 		Priority:    1,
-		Description: "The daemon's tier sweep found this red on main (gt-vsct7.5). " + detail,
+		Description: description,
+		Acceptance:  acceptance,
 	}); err != nil {
 		d.logger.Printf("tier_sweep: %s: filing a bead for %s %s: %v", rig, tier, name, err)
 	}
