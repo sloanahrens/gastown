@@ -51,3 +51,26 @@ func TestDispatchPlugins_RunsOnlyScriptPlugins(t *testing.T) {
 		t.Errorf("%d script runs started, want none", n)
 	}
 }
+
+// A town whose mayor/rigs.json is missing or invalid still dispatches the
+// plugins that need no rig; only the rig-level scan is lost.
+func TestHandlePlugins_MissingRigsConfigStillDispatchesTownPlugins(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	logs := &lockedBuffer{}
+	bash := newFakeCLIFor(func(cliCall) cliReply { return cliReply{} })
+	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(logs, "", 0), execCmd: bash.run}
+
+	writeTestPlugin(t, townRoot, "test-manual",
+		"+++\nname = \"test-manual\"\ndescription = \"manual gate plugin\"\n\n[gate]\ntype = \"manual\"\n+++\n\n# Instructions\n")
+
+	d.handlePlugins()
+
+	out := logs.String()
+	if !strings.Contains(out, "failed to load rigs config") {
+		t.Errorf("rigs config failure not logged:\n%s", out)
+	}
+	if !strings.Contains(out, "skipping plugin test-manual (gate=manual") {
+		t.Errorf("town plugins not dispatched without a rigs config:\n%s", out)
+	}
+}

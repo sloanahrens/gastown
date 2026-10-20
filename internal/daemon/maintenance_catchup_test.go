@@ -672,3 +672,23 @@ func TestCatchUpGCInterruptedByShutdownIsNotThrottled(t *testing.T) {
 		t.Errorf("gc calls = %v, want a second attempt on the next tick", f.gcCalls)
 	}
 }
+
+// A backup the town held off (a daemon Dolt task owns doltMaintMu) was not
+// tried, so the next tick retries it instead of waiting out the retry gap.
+func TestBackupCatchUpDeferredBackupRetriesNextTick(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+
+	d.doltMaintMu.RLock() // a daemon Dolt task in flight
+	d.runScheduledMaintenance()
+	d.doltMaintMu.RUnlock()
+	if len(f.backupCalls) != 0 {
+		t.Fatalf("backup ran while a Dolt task held the lock: %v", f.backupCalls)
+	}
+
+	d.maint.now = func() time.Time { return catchUpNow.Add(5 * time.Minute) }
+	d.runScheduledMaintenance()
+	if len(f.backupCalls) != 2 {
+		t.Errorf("backup calls = %v, want gt and hq on the tick after the deferral", f.backupCalls)
+	}
+}

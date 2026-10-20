@@ -42,8 +42,8 @@ func TestCountAgentSessionsCountsAgentsOnTheDaemonTmux(t *testing.T) {
 		tm.addSession(name, "claude", time.Time{})
 	}
 	d := &Daemon{tmux: tm}
-	if got := d.countAgentSessions(); got != 2 {
-		t.Errorf("countAgentSessions = %d, want 2 (the personal session is not an agent)", got)
+	if got, err := d.countAgentSessions(); err != nil || got != 2 {
+		t.Errorf("countAgentSessions = %d, %v, want 2 (the personal session is not an agent)", got, err)
 	}
 }
 
@@ -187,5 +187,38 @@ func TestCheckPressureCPUTierDormantWithoutThreshold(t *testing.T) {
 	}
 	if got := d.checkPressure("polecat"); !got.OK {
 		t.Fatalf("OK = false with all tiers disabled: %q", got.Reason)
+	}
+}
+
+// A tmux that cannot be listed is no evidence of an empty town: the session cap
+// holds the spawn and the daemon log says why, instead of counting zero
+// sessions and spawning past the cap.
+func TestCheckPressure_SessionCapListError(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	dir := filepath.Join(townRoot, "settings")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"town-settings","version":1,"operational":{"daemon":{"pressure_max_sessions":3}}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d, logs := newTestDaemon(townRoot)
+	tm := newFakeTmux(newFixedClock())
+	tm.listErr = errors.New("error connecting to /tmp/tmux-501/gt (Connection refused)")
+	d.tmux = tm
+
+	got := d.checkPressure("polecat")
+	if got.OK {
+		t.Fatal("OK = true with tmux unlistable and a session cap set")
+	}
+	for _, s := range []string{"session cap", "Connection refused"} {
+		if !strings.Contains(got.Reason, s) {
+			t.Errorf("Reason %q does not name %q", got.Reason, s)
+		}
+	}
+	if !strings.Contains(logs.String(), "Connection refused") {
+		t.Errorf("daemon log %q does not say why tmux could not be listed", logs.String())
 	}
 }
