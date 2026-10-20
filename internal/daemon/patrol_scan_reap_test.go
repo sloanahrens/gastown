@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -499,13 +501,22 @@ func TestRecoveryBatchBoundGrowsWithPolecats(t *testing.T) {
 	}
 }
 
+// killedGT is a reap host whose gt dies by signal, as exec reports a command
+// the deadline cut off (exit status -1), or exits with code when it is not -1.
+func killedGT(t *testing.T, code int) *patrolScanHost {
+	t.Helper()
+	gt := newFakeCLI(func([]string) cliReply { return cliReply{stderr: "signal: killed", code: code} })
+	return reapHost(t, enabledCleanup("gastown"), nil, gt)
+}
+
 // A batch the bound kills says so in its error, with the bound and the seat
 // count, so the reap line shows why no verdict arrived. A zero bound is already
-// spent, so the run is killed before it answers.
+// spent, so the classification is the command's own death by signal; the
+// deadline that really kills a running gt is in the integration tier
+// (patrol_scan_reap_integration_test.go).
 func TestReapKilledBatchNamesBoundAndSeats(t *testing.T) {
 	t.Parallel()
-	gt := newFakeCLI(func([]string) cliReply { return cliReply{stderr: "signal: killed", code: 1} })
-	h := reapHost(t, enabledCleanup("gastown"), nil, gt)
+	h := killedGT(t, -1)
 
 	b := h.runRecoveryBatchWithin("gastown", 3, 0)
 	if b.err == nil {
@@ -521,11 +532,37 @@ func TestReapKilledBatchNamesBoundAndSeats(t *testing.T) {
 	}
 }
 
+// A kill with the seats unlisted says the count is unknown, not a number.
+func TestReapKilledBatchNamesUnlistedSeats(t *testing.T) {
+	t.Parallel()
+	h := killedGT(t, -1)
+
+	b := h.runRecoveryBatchWithin("gastown", unknownPolecats, 0)
+	if b.err == nil || !strings.Contains(b.err.Error(), "for an unlisted number of polecats") {
+		t.Fatalf("killed batch error %v, want it to name the unlisted seats", b.err)
+	}
+}
+
+// A gt that fails with an exit status of its own is not a kill, even when the
+// deadline had passed by the time it failed.
+func TestReapFailedBatchIsNotAKill(t *testing.T) {
+	t.Parallel()
+	h := killedGT(t, 3)
+
+	b := h.runRecoveryBatchWithin("gastown", 3, 0)
+	if b.err == nil {
+		t.Fatal("a failed batch answered without error")
+	}
+	if strings.Contains(b.err.Error(), "killed after") {
+		t.Fatalf("a failed batch reads as killed: %v", b.err)
+	}
+}
+
 // A killed sweep answers every seat unknown, and the pass does not ask again:
-// one exec for the rig, and each seat's verdict is the batch's error.
+// one sweep for the rig, and each seat's verdict is the batch's error.
 func TestReapKilledBatchReadsEverySeatUnknown(t *testing.T) {
 	t.Parallel()
-	gt := newFakeCLI(func([]string) cliReply { return cliReply{stderr: "signal: killed", code: 1} })
+	gt := newFakeCLI(func([]string) cliReply { return cliReply{stderr: "signal: killed", code: -1} })
 	h := reapHost(t, enabledCleanup("gastown"), nil, gt)
 	h.reapBatches = map[string]reapBatch{"gastown": h.runRecoveryBatchWithin("gastown", 3, 0)}
 
@@ -533,6 +570,9 @@ func TestReapKilledBatchReadsEverySeatUnknown(t *testing.T) {
 		got, err := h.Recovery("gastown", name)
 		if err == nil {
 			t.Fatalf("Recovery(%s) answered %+v after a killed batch, want an error", name, got)
+		}
+		if !strings.Contains(err.Error(), "killed after") {
+			t.Fatalf("Recovery(%s) error %q, want the batch's kill", name, err)
 		}
 		if !reflect.DeepEqual(got, patrolscan.Recovery{}) {
 			t.Fatalf("Recovery(%s) after a killed batch = %+v, want the zero verdict", name, got)
@@ -543,20 +583,76 @@ func TestReapKilledBatchReadsEverySeatUnknown(t *testing.T) {
 	}
 }
 
+// The kill is read off the command's error: an expired deadline alone does not
+// make a command's own failure a kill.
+func TestKilledByDeadline(t *testing.T) {
+	t.Parallel()
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	live := context.Background()
+	signaled := &cliExitError{code: -1}
+
+	for _, tc := range []struct {
+		name string
+		ctx  context.Context
+		err  error
+		want bool
+	}{
+		{"signal death after the deadline", expired, signaled, true},
+		{"wrapped signal death after the deadline", expired, fmt.Errorf("wait: %w", signaled), true},
+		{"context error after the deadline", expired, fmt.Errorf("wait: %w", context.DeadlineExceeded), true},
+		{"own exit status as the deadline passed", expired, &cliExitError{code: 3}, false},
+		{"signal death inside the deadline", live, signaled, false},
+		{"a non-exit error after the deadline", expired, errors.New("start: no such file"), false},
+	} {
+		if got := killedByDeadline(tc.ctx, tc.err); got != tc.want {
+			t.Errorf("%s: killedByDeadline = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
 // The bound's seat count is the rig's polecat worktrees, and a rig with no
 // polecats directory has none.
 func TestReapRigPolecatsCountsSeats(t *testing.T) {
 	t.Parallel()
 	h := reapHost(t, enabledCleanup("gastown"), nil, nil)
-	if got := h.rigPolecats("gastown"); got != 0 {
-		t.Fatalf("a rig with no polecats directory counted %d seats", got)
+	if got, err := h.rigPolecats("gastown"); err != nil || got != 0 {
+		t.Fatalf("a rig with no polecats directory counted %d seats, err %v", got, err)
 	}
 	for _, name := range []string{"agate", "basalt", "marble"} {
 		if err := os.MkdirAll(filepath.Join(h.town(), "gastown", "polecats", name), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if got := h.rigPolecats("gastown"); got != 3 {
-		t.Fatalf("rigPolecats = %d, want 3", got)
+	if got, err := h.rigPolecats("gastown"); err != nil || got != 3 {
+		t.Fatalf("rigPolecats = %d, err %v, want 3", got, err)
+	}
+}
+
+// A rig whose seats cannot be listed is an error, not zero seats, and its
+// sweep runs at the cap bound with the log saying why.
+func TestReapUnlistedSeatsRunAtTheCap(t *testing.T) {
+	t.Parallel()
+	gt := newFakeCLI(func([]string) cliReply { return cliReply{stdout: readGolden(t)} })
+	h := reapHost(t, enabledCleanup("gastown"), nil, gt)
+	var logged strings.Builder
+	h.d.logger = log.New(&logged, "", 0)
+	rigDir := filepath.Join(h.town(), "gastown")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A file where the polecats directory belongs: not absent, unreadable.
+	if err := os.WriteFile(filepath.Join(rigDir, "polecats"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.rigPolecats("gastown"); err == nil {
+		t.Fatal("rigPolecats counted the seats of an unreadable polecats directory")
+	}
+
+	if b := h.runRecoveryBatch("gastown"); b.err != nil {
+		t.Fatalf("the sweep failed: %v", b.err)
+	}
+	if want := "using the " + patrolScanRecoveryBatchCap.String() + " cap"; !strings.Contains(logged.String(), want) {
+		t.Fatalf("log %q, want it to contain %q", logged.String(), want)
 	}
 }
