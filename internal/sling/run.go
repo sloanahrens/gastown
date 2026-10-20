@@ -508,7 +508,7 @@ func Run(ctx context.Context, d *Deps, opts Options) (*Result, error) {
 		return result, fmt.Errorf("failed to hook bead: %w", err)
 	}
 
-	fmt.Fprintf(d.out(), "  %s %s%s\n", style.Bold.Render("✓"), dispatch.SlingHookedMarker, spawnInfo.PolecatName)
+	fmt.Fprintf(d.out(), "  %s %s\n", style.Bold.Render("✓"), dispatch.SlingHookedLine(spawnInfo.PolecatName))
 	// Labels live on the base bead even when a formula wisp was hooked.
 	d.ClearOrphanLabels(townRoot, opts.BeadID, hookWorkDir)
 
