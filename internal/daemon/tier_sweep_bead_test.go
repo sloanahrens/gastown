@@ -165,6 +165,34 @@ func TestTierSweepBead_ReadsOnlyItsOwnUnitsFailures(t *testing.T) {
 	}
 }
 
+// The integration stage runs its docker list untagged after the tagged one,
+// so a bead for a package that failed there re-runs it without -tags: the tag
+// would compile a different file set than the run that failed.
+func TestTierSweepBead_UntaggedDockerUnitKeepsNoBuildTag(t *testing.T) {
+	t.Parallel()
+	logPath := tierSweepWriteTestLog(t, ""+
+		"tier-sweep: integration-docker ./internal/docker ...\n"+
+		"    --- FAIL: TestDockerRun (0.01s)\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"./internal/docker"}, Log: logPath},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	acceptance := bd.created[0].Acceptance
+	if want := "go test -run '^(TestDockerRun)$' -count=1 ./internal/docker"; !strings.Contains(acceptance, want) {
+		t.Errorf("acceptance = %q, want it to carry %q", acceptance, want)
+	}
+	if strings.Contains(acceptance, "-tags") {
+		t.Errorf("acceptance = %q, want no build tag for the untagged docker run", acceptance)
+	}
+}
+
 // A missing or unreadable log still files a shaped bead: the fallback item
 // asks the polecat to read the log and re-run the failing test, and the shape
 // is what the dispatcher needs. Filing must not depend on the log surviving.
@@ -172,7 +200,15 @@ func TestTierSweepBead_MissingLogFallsBack(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct{ name, log string }{
 		{name: "missing file", log: filepath.Join(t.TempDir(), "gone.log")},
-		{name: "no failing test named", log: ""},
+		{name: "no log path", log: ""},
+		// A fail line with no unit marker above it belongs to no unit: the
+		// old whole-log read handed it to every bead, and the -run filter then
+		// matched nothing in that package and passed without running a test.
+		{name: "no unit markers", log: tierSweepWriteTestLog(t, "    --- FAIL: TestOrphan (0.01s)\n")},
+		// Another unit's marker opened the failure; this unit has none.
+		{name: "failure belongs to another unit", log: tierSweepWriteTestLog(t, ""+
+			"tier-sweep: integration ./internal/other ...\n"+
+			"    --- FAIL: TestOtherPackage (0.01s)\n")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -194,8 +230,13 @@ func TestTierSweepBead_MissingLogFallsBack(t *testing.T) {
 			if !strings.Contains(opts.Acceptance, "Read the tier log") || !strings.Contains(opts.Acceptance, "narrow -run filter") {
 				t.Errorf("acceptance = %q, want the fallback item", opts.Acceptance)
 			}
-			if strings.Contains(opts.Acceptance, "go test -run") {
+			// Every command the shape can invent starts with this; the fallback
+			// text mentions no test command at all.
+			if strings.Contains(opts.Acceptance, "go test") {
 				t.Errorf("acceptance = %q, want no invented command", opts.Acceptance)
+			}
+			if strings.Contains(opts.Acceptance, "TestOtherPackage") {
+				t.Errorf("acceptance = %q, want no other unit's test", opts.Acceptance)
 			}
 		})
 	}
@@ -222,5 +263,88 @@ func TestTierSweepBead_ShellTierRunsTheScript(t *testing.T) {
 	}
 	if want := "`GT_TEST_DOCKER=0 bash scripts/test-makefile.sh` passes"; !strings.Contains(opts.Acceptance, want) {
 		t.Errorf("acceptance = %q, want it to carry %q", opts.Acceptance, want)
+	}
+}
+
+// When the sweep could not name a unit it files the reason instead ("no
+// verdict line (exit 1)"). That reason is its own explanation, not a package
+// or a script, so the bead's prose names the tier: a polecat reading "Fix the
+// failure in no verdict line (exit 1)" learns nothing it can act on.
+func TestTierSweepBead_StandInUnitNamesTheTier(t *testing.T) {
+	t.Parallel()
+	for _, unit := range []string{tierSweepNoName, "no verdict line (exit 1)", "no verdict line", "timeout"} {
+		t.Run(unit, func(t *testing.T) {
+			t.Parallel()
+			description, acceptance := tierSweepBeadShape("integration", unit, "abc1234",
+				tierSweepTierResult{Verdict: tierSweepRed, Passed: 0, Failed: 1, Log: "/tmp/integration.log"})
+			opts := beads.CreateOptions{
+				Title:       "tier sweep (gastown): integration: " + unit,
+				Labels:      []string{tierSweepRedLabel},
+				Description: description,
+				Acceptance:  acceptance,
+			}
+			if v := lintTierSweepBead(opts); !v.Clean() {
+				t.Fatalf("the stand-in bead is unshaped: %s\ndescription:\n%s", v.ShapeNote(), description)
+			}
+			if strings.Contains(description, unit) {
+				t.Errorf("description quotes the stand-in %q as a unit:\n%s", unit, description)
+			}
+			if !strings.Contains(description, "the integration tier") {
+				t.Errorf("description does not name the tier in place of the stand-in:\n%s", description)
+			}
+			if !strings.Contains(acceptance, "the integration tier") {
+				t.Errorf("acceptance = %q, want it to name the tier", acceptance)
+			}
+			if strings.Contains(acceptance, "go test") {
+				t.Errorf("acceptance = %q, want no invented command for a stand-in", acceptance)
+			}
+		})
+	}
+}
+
+// The shape reads a bounded prefix of the log: a file that has grown past the
+// limit names nothing beyond it and the bead falls back, rather than the
+// daemon reading an unbounded file to learn the same.
+func TestTierSweepBead_LogReadIsBounded(t *testing.T) {
+	t.Parallel()
+	pad := strings.Repeat("# filler\n", tierSweepLogReadLimit/len("# filler\n")+1)
+	logPath := tierSweepWriteTestLog(t, pad+
+		"tier-sweep: integration ./internal/cmd ...\n"+
+		"    --- FAIL: TestPastTheLimit (0.01s)\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"./internal/cmd"}, Log: logPath},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	opts := bd.created[0]
+	if v := lintTierSweepBead(opts); !v.Clean() {
+		t.Fatalf("the bounded-read bead is unshaped: %s\ndescription:\n%s", v.ShapeNote(), opts.Description)
+	}
+	if strings.Contains(opts.Acceptance, "go test") {
+		t.Errorf("acceptance = %q, want the fallback for a failure past the read limit", opts.Acceptance)
+	}
+}
+
+// A read limit that lands mid fail line must not keep the half it read: a
+// filter naming a truncated test matches nothing and passes without running
+// anything, which is the failure the unit attribution exists to prevent.
+func TestTierSweepBead_BoundedReadKeepsNoPartialLine(t *testing.T) {
+	t.Parallel()
+	const prefix = "tier-sweep: integration ./internal/cmd ...\n"
+	const failLine = "    --- FAIL: TestStraddlesTheLimit (0.01s)\n"
+	// Cut the fail line well past its marker, so the piece the limit keeps
+	// reads as a complete FAIL line for a name cut short.
+	pad := strings.Repeat("#", tierSweepLogReadLimit-len(prefix)-len(failLine)/2-7)
+	logPath := tierSweepWriteTestLog(t, prefix+pad+"\n"+failLine)
+
+	names, tag := tierSweepUnitFailures(logPath, "integration", "./internal/cmd")
+	if len(names) != 0 || tag != "" {
+		t.Fatalf("failures = %v (tag %q), want none from a read cut mid fail line", names, tag)
 	}
 }

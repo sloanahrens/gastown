@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -25,18 +27,33 @@ const (
 	// Size that does not say one worker.
 	tierSweepBeadSize = "One worker, one landing."
 
-	// tierSweepGoBuildTag is the build tag every Go tier the sweep runs is
-	// built with (scripts/tier-sweep.sh runs `go test -tags integration` for
-	// both the integration and the race tier).
+	// tierSweepGoBuildTag is the build tag the tagged Go tiers are built with
+	// (scripts/tier-sweep.sh runs `go test -tags integration` for the tagged
+	// integration list and the race tier).
 	tierSweepGoBuildTag = "integration"
+
+	// tierSweepLogReadLimit caps what the shape reads from a tier log. The
+	// stage output is a marker per unit and five fail lines per failing unit,
+	// so a file past this size is not the log the sweep wrote, and reading it
+	// whole would cost the daemon's memory to learn nothing.
+	tierSweepLogReadLimit = 4 << 20
 )
 
 // tierSweepUnitRE is what a failing unit from a summary line must look like
 // before it is written into a check command: a package path or a repo-relative
-// script path, never a flag. The sweep's stand-in names ("(no failing unit
-// named)", "no verdict line (exit 1)") do not match it and get the fallback
-// item.
-var tierSweepUnitRE = regexp.MustCompile(`^[A-Za-z0-9._/~-]+$`)
+// script path, never a flag. The first character excludes "-" so a string like
+// "-race" cannot pass as a unit. tierSweepUnitIsName adds the "it is a path"
+// half of the test, which the sweep's stand-ins fail.
+var tierSweepUnitRE = regexp.MustCompile(`^[A-Za-z0-9._/][A-Za-z0-9._/~-]*$`)
+
+// tierSweepUnitIsName reports whether unit is a package or script path the
+// script can have run, rather than one of the reasons the sweep writes when it
+// could not name one. Every real unit is "./pkg" or a repo-relative script
+// path and holds a "/"; the stand-ins ("(no failing unit named)", "timeout",
+// "no verdict line (exit 1)") do not.
+func tierSweepUnitIsName(unit string) bool {
+	return tierSweepUnitRE.MatchString(unit) && strings.Contains(unit, "/")
+}
 
 // tierSweepTestNameRE is a top-level Go test name. A subtest's own --- FAIL
 // line repeats the parent's name with a "/" suffix, and a name that is not an
@@ -54,19 +71,20 @@ var tierSweepFailLineRE = regexp.MustCompile(`^\s*--- FAIL: (\S+)`)
 // The names are keyed by marker tier, because the integration stage runs both
 // its package lists under the one daemon log and the same package can fail in
 // the integration and the race tier for different reasons.
-func tierSweepLogUnits(log string) (map[string][]string, []string, bool) {
+//
+// A failing line before any marker is dropped: without the marker there is no
+// saying which unit failed it, and attributing every line to one unit makes a
+// -run filter that matches nothing in that package, which passes vacuously.
+func tierSweepLogUnits(log string) map[string][]string {
 	units := map[string][]string{}
-	var all []string
-	marked := false
 	var current string
 	for _, line := range strings.Split(log, "\n") {
 		if tier, unit, ok := tierSweepLogMarker(line); ok {
-			marked = true
 			current = tier + "\x00" + unit
 			continue
 		}
 		m := tierSweepFailLineRE.FindStringSubmatch(line)
-		if m == nil {
+		if m == nil || current == "" {
 			continue
 		}
 		name := m[1]
@@ -76,12 +94,9 @@ func tierSweepLogUnits(log string) (map[string][]string, []string, bool) {
 		if !tierSweepTestNameRE.MatchString(name) {
 			continue
 		}
-		all = append(all, name)
-		if current != "" {
-			units[current] = append(units[current], name)
-		}
+		units[current] = append(units[current], name)
 	}
-	return units, all, marked
+	return units
 }
 
 // tierSweepLogMarker reads the script's per-unit line,
@@ -109,28 +124,73 @@ func tierSweepLogMarkerTiers(tier string) []string {
 	return []string{tier}
 }
 
-// tierSweepFailedTests reads the tier log and returns the top-level tests
-// unit failed, in log order and deduplicated. A log that cannot be read names
-// none: filing a shaped bead must not depend on the log still existing. A log
-// with no unit markers at all is read whole, so a trimmed or compacted log
-// still names the tests it shows.
-func tierSweepFailedTests(logPath, tier, unit string) []string {
-	if strings.TrimSpace(logPath) == "" {
-		return nil
+// tierSweepMarkerBuildTag is the build tag the script ran a marker tier's
+// packages with. The docker list is run untagged, so a re-run that kept
+// -tags integration would compile a different file set than the run that
+// failed.
+func tierSweepMarkerBuildTag(mtier string) string {
+	if mtier == "integration-docker" {
+		return ""
 	}
-	data, err := os.ReadFile(logPath) //nolint:gosec // G304: the sweep's own log path, recorded by tierSweepWriteLog
+	return tierSweepGoBuildTag
+}
+
+// tierSweepReadLog reads at most tierSweepLogReadLimit bytes of a tier log. A
+// log cut by the limit still names the units it reached; the rest fall back.
+// The cut is moved back to the last newline, because half a fail line names a
+// test that does not exist and a -run filter over it passes without running
+// anything.
+func tierSweepReadLog(path string) (string, error) {
+	f, err := os.Open(path) //nolint:gosec // G304: the sweep's own log path, recorded by tierSweepWriteLog
 	if err != nil {
-		return nil
+		return "", err
 	}
-	units, all, marked := tierSweepLogUnits(string(data))
-	if !marked {
-		return tierSweepUnique(all)
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, tierSweepLogReadLimit+1))
+	if err != nil {
+		return "", err
 	}
-	var names []string
+	if len(data) > tierSweepLogReadLimit {
+		data = data[:tierSweepLogReadLimit]
+		if i := bytes.LastIndexByte(data, '\n'); i >= 0 {
+			data = data[:i+1]
+		} else {
+			data = nil
+		}
+	}
+	return string(data), nil
+}
+
+// tierSweepUnitFailures reads the tier log and returns the top-level tests the
+// tier's runs of unit failed, in log order and deduplicated, with the build
+// tag those runs used. A log that cannot be read names none: filing a shaped
+// bead must not depend on the log still existing. A unit the script ran both
+// tagged and untagged has no single command that re-runs it, so it names none
+// either.
+func tierSweepUnitFailures(logPath, tier, unit string) (names []string, buildTag string) {
+	if strings.TrimSpace(logPath) == "" {
+		return nil, ""
+	}
+	log, err := tierSweepReadLog(logPath)
+	if err != nil {
+		return nil, ""
+	}
+	units := tierSweepLogUnits(log)
+	var tag string
+	tagged := false
 	for _, mtier := range tierSweepLogMarkerTiers(tier) {
-		names = append(names, units[mtier+"\x00"+unit]...)
+		got := units[mtier+"\x00"+unit]
+		if len(got) == 0 {
+			continue
+		}
+		mtag := tierSweepMarkerBuildTag(mtier)
+		if tagged && mtag != tag {
+			return nil, ""
+		}
+		tag, tagged = mtag, true
+		names = append(names, got...)
 	}
-	return tierSweepUnique(names)
+	return tierSweepUnique(names), tag
 }
 
 // tierSweepUnique drops repeats while keeping the log's order.
@@ -159,13 +219,13 @@ func tierSweepUnique(names []string) []string {
 // the container-suite guard refuses it. Empty when no command can be named
 // from what the sweep knows, so the caller falls back to the log.
 func tierSweepCheckCommand(tier, unit string, ts tierSweepTierResult) string {
-	if !tierSweepUnitRE.MatchString(unit) {
+	if !tierSweepUnitIsName(unit) {
 		return ""
 	}
 	if tier == "shell" {
 		return "GT_TEST_DOCKER=0 bash " + unit
 	}
-	names := tierSweepFailedTests(ts.Log, tier, unit)
+	names, tag := tierSweepUnitFailures(ts.Log, tier, unit)
 	if len(names) == 0 {
 		return ""
 	}
@@ -176,11 +236,25 @@ func tierSweepCheckCommand(tier, unit string, ts tierSweepTierResult) string {
 		// so its re-run keeps -race.
 		b.WriteString("-race ")
 	}
-	b.WriteString("-tags " + tierSweepGoBuildTag + " -run '^(")
+	if tag != "" {
+		b.WriteString("-tags " + tag + " ")
+	}
+	b.WriteString("-run '^(")
 	b.WriteString(strings.Join(names, "|"))
 	b.WriteString(")$' -count=1 ")
 	b.WriteString(unit)
 	return b.String()
+}
+
+// tierSweepUnitSubject renders the failing unit for the bead's prose. A
+// stand-in name the sweep writes when it could not name a unit ("no verdict
+// line (exit 1)") is the sweep's own explanation, not a package or script, so
+// the prose names the tier instead of quoting the stand-in as a unit.
+func tierSweepUnitSubject(tier, unit string) string {
+	if tierSweepUnitIsName(unit) {
+		return unit
+	}
+	return "the " + tier + " tier"
 }
 
 // tierSweepAcceptanceItem is the one criterion a polecat ticks: the narrow
@@ -197,7 +271,7 @@ func tierSweepAcceptanceItem(tier, unit string, ts tierSweepTierResult) string {
 	if log != "" {
 		where = " (" + log + ")"
 	}
-	return fmt.Sprintf("- [ ] Read the tier log%s and re-run the failing test in %s with a narrow -run filter until it passes on a worktree rebased onto main.", where, unit)
+	return fmt.Sprintf("- [ ] Read the tier log%s and re-run the failing test in %s with a narrow -run filter until it passes on a worktree rebased onto main.", where, tierSweepUnitSubject(tier, unit))
 }
 
 // tierSweepRedDetail is the one-line detail every sweep bead carries: the
@@ -213,14 +287,15 @@ func tierSweepRedDetail(tier, sha string, ts tierSweepTierResult) string {
 // without the other is a bead half a polecat can finish (gt-1lzy1).
 func tierSweepBeadShape(tier, unit, sha string, ts tierSweepTierResult) (description, acceptance string) {
 	item := tierSweepAcceptanceItem(tier, unit, ts)
+	subject := tierSweepUnitSubject(tier, unit)
 	var b strings.Builder
 	b.WriteString(tierSweepBeadIntro + tierSweepRedDetail(tier, sha, ts) + "\n\n")
 	fmt.Fprintf(&b, "## Goal\n\n"+
-		"Make the %s tier green on main again. %s failed at %s, so the sweep re-files this bead on every landing until the tier passes.\n\n",
-		tier, unit, shortSHA(sha))
-	b.WriteString("## Constraints\n\n" +
-		"- Fix the failure in " + unit + "; the sweep closes this bead by itself once the tier is green.\n" +
-		"- Re-run with the narrow filter below, not the whole package: the polecat test guard refuses an unfiltered run of internal/cmd, internal/daemon and internal/polecat.\n" +
+		"Make the %s tier green on main again. %s is red at %s, so the sweep re-files this bead on every landing until the tier passes.\n\n",
+		tier, subject, shortSHA(sha))
+	b.WriteString("## Constraints\n\n")
+	fmt.Fprintf(&b, "- Fix the failure in %s; the sweep closes this bead by itself once the tier is green.\n", subject)
+	b.WriteString("- Re-run with the narrow filter below, not the whole package: the polecat test guard refuses an unfiltered run of internal/cmd, internal/daemon and internal/polecat.\n" +
 		"- Leave scripts/tier-sweep.sh, its TIER_SWEEP_SKIP list and the sweep's schedule alone.\n\n")
 	b.WriteString("## Out of scope\n\n" +
 		"The other tiers, the sweep's own scheduling, and any change to scripts/tier-sweep.sh.\n\n")
