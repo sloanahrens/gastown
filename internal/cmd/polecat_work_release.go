@@ -19,9 +19,10 @@ type polecatWorkReleaser interface {
 	// released=false with a nil error when the guard no longer held (another
 	// actor re-assigned the bead between the read and the write).
 	ReleaseBead(beadID, expectedAssignee string) (released bool, err error)
-	// RestoreBead sets the bead's status and assignee, guarded like ReleaseBead
-	// on the bead still being assigned to expectedAssignee.
-	RestoreBead(beadID, expectedAssignee, status, assignee string) (restored bool, err error)
+	// RestoreBead sets the bead's status and assignee, guarded on the bead
+	// still being held by expectedAssignee in expectedStatus, so a bead whose
+	// state moved under the caller is left alone.
+	RestoreBead(beadID, expectedAssignee, expectedStatus, status, assignee string) (restored bool, err error)
 	// ResetSlot clears the polecat agent bead's hook_bead and marks it idle.
 	ResetSlot(agentID string) error
 	// Annotate appends a comment to the bead.
@@ -76,16 +77,23 @@ func releasePolecatWork(r polecatWorkReleaser, agentID, beadID string, resetSlot
 // heldBy reports whether beadID is currently held (hooked/in_progress) by
 // agentID, with the reason when it is not.
 func heldBy(r polecatWorkReleaser, agentID, beadID string) (bool, string) {
+	held, _, note := heldByStatus(r, agentID, beadID)
+	return held, note
+}
+
+// heldByStatus is heldBy with the status the read found, so a caller's guarded
+// restore can require the state it checked, not only the assignee.
+func heldByStatus(r polecatWorkReleaser, agentID, beadID string) (held bool, status, note string) {
 	status, assignee, err := r.HookState(beadID)
 	switch {
 	case err != nil:
-		note := fmt.Sprintf("could not read %s: %v", beadID, err)
+		note = fmt.Sprintf("could not read %s: %v", beadID, err)
 		fmt.Printf("  %s Left hooked work %s alone: %s\n", style.Dim.Render("Warning:"), beadID, note)
-		return false, note
+		return false, "", note
 	case assignee != agentID:
-		return false, fmt.Sprintf("assigned to %q, not %s", assignee, agentID)
+		return false, status, fmt.Sprintf("assigned to %q, not %s", assignee, agentID)
 	case !releasableHookStatuses[status]:
-		return false, fmt.Sprintf("status %s is not held", status)
+		return false, status, fmt.Sprintf("status %s is not held", status)
 	}
 	// Work submitted for landing stays with the landing worker: releasing it
 	// would put it back in front of automatic dispatch while its landing is
@@ -94,14 +102,14 @@ func heldBy(r polecatWorkReleaser, agentID, beadID string) (bool, string) {
 		submitted, err := sr.SubmittedForLanding(beadID)
 		switch {
 		case err != nil:
-			return false, fmt.Sprintf("could not check %s for %s: %v", beadID, land.LabelReadyToLand, err)
+			return false, status, fmt.Sprintf("could not check %s for %s: %v", beadID, land.LabelReadyToLand, err)
 		case submitted:
-			note := "submitted for landing (" + land.LabelReadyToLand + "); the landing worker owns it"
+			note = "submitted for landing (" + land.LabelReadyToLand + "); the landing worker owns it"
 			fmt.Printf("  %s Left hooked work %s alone: %s\n", style.Dim.Render("○"), beadID, note)
-			return false, note
+			return false, status, note
 		}
 	}
-	return true, ""
+	return true, status, ""
 }
 
 // landingSubmissionReader is the optional half of a polecatWorkReleaser that
@@ -157,8 +165,8 @@ func (r bdPolecatWorkReleaser) ReleaseBead(beadID, expectedAssignee string) (boo
 	return beads.New(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).ReleaseIfAssignee(beadID, expectedAssignee)
 }
 
-func (r bdPolecatWorkReleaser) RestoreBead(beadID, expectedAssignee, status, assignee string) (bool, error) {
-	return beads.New(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).TransferIfAssignee(beadID, expectedAssignee, status, assignee)
+func (r bdPolecatWorkReleaser) RestoreBead(beadID, expectedAssignee, expectedStatus, status, assignee string) (bool, error) {
+	return beads.TransferIfHeld(beads.New(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)), beadID, expectedAssignee, expectedStatus, status, assignee)
 }
 
 func (r bdPolecatWorkReleaser) ResetSlot(agentID string) error {
@@ -199,7 +207,8 @@ func restoreOriginalHoldIfWorkSurvivesWith(r polecatWorkReleaser, survivingWork 
 	if beadID == "" || orig == nil {
 		return false, nil
 	}
-	if held, _ := heldBy(r, agentID, beadID); !held {
+	held, heldStatus, _ := heldByStatus(r, agentID, beadID)
+	if !held {
 		return false, nil
 	}
 	branch, err := survivingWork(townRoot, beadID)
@@ -216,7 +225,7 @@ func restoreOriginalHoldIfWorkSurvivesWith(r polecatWorkReleaser, survivingWork 
 	if status == "" {
 		status = "open"
 	}
-	restored, rerr := r.RestoreBead(beadID, agentID, status, orig.Assignee)
+	restored, rerr := r.RestoreBead(beadID, agentID, heldStatus, status, orig.Assignee)
 	switch {
 	case rerr != nil:
 		holder := orig.Assignee

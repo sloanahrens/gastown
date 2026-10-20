@@ -40,6 +40,47 @@ func (b *Beads) TransferIfAssignee(id, expected, status, assignee string) (trans
 	return false, err
 }
 
+// TransferIfHeld sets a bead's status and assignee, but only while it is still
+// held by expectedAssignee in expectedStatus (bd --if-assignee and --if-status,
+// one atomic update). The status half keeps a restore from overwriting a bead
+// whose state moved under it — closed, submitted, or taken by another actor
+// (gt-moxlb). transferred=false with a nil error means a guard no longer held.
+func TransferIfHeld(c Client, id, expectedAssignee, expectedStatus, status, assignee string) (transferred bool, err error) {
+	if b, ok := c.(*Beads); ok {
+		return transferIfHeld(b, id, expectedAssignee, expectedStatus, status, assignee)
+	}
+	// A Client that cannot name bd's status guard does the compare in two
+	// steps: the read holds off a bead whose status moved, and
+	// TransferIfAssignee's guard is the atomic half for the assignee.
+	issue, err := c.Show(id)
+	if err != nil {
+		return false, err
+	}
+	if issue.Status != expectedStatus || issue.Assignee != expectedAssignee {
+		return false, nil
+	}
+	return c.TransferIfAssignee(id, expectedAssignee, status, assignee)
+}
+
+// transferIfHeld is the *Beads path: one bd update carrying both guards, so no
+// read can go stale between the compare and the write, and routing follows the
+// issue's prefix the way the other guarded writes do.
+func transferIfHeld(b *Beads, id, expectedAssignee, expectedStatus, status, assignee string) (transferred bool, err error) {
+	if !b.noRoute {
+		if target := b.forIssueID(id); target != b {
+			return transferIfHeld(target, id, expectedAssignee, expectedStatus, status, assignee)
+		}
+	}
+	_, err = b.run("update", id, "--status="+status, "--assignee="+assignee, "--if-assignee="+expectedAssignee, "--if-status="+expectedStatus)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrGuardNotHeld):
+		return false, nil
+	}
+	return false, err
+}
+
 // TransferIfUnassigned sets a bead's status and assignee, but only while the
 // bead is still open and unassigned: the undo of a force re-sling's unhook,
 // which never takes a bead another actor has since hooked (gt-ct2ob).

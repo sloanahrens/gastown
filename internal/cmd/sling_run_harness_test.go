@@ -302,6 +302,12 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			}
 			h.record("restore hold %s %s %s", id, hold.Status, hold.Assignee)
 		},
+		// The real hand-back over the harness beads: only the bd surface
+		// (a read plus a guarded write) is faked, so the guard handBackHook
+		// applies — and not a copy of it — is what the tests exercise.
+		handBack: func(_, id, _, holder string, hold beadHold) bool {
+			return handBackHeld(harnessReleaser{h}, id, holder, hold)
+		},
 
 		sessionFromPane:  func(string) string { return "" },
 		ensureAgentReady: func(string) error { return nil },
@@ -334,6 +340,40 @@ func (h *slingHarness) resolveTarget(target string, opts ResolveTargetOptions) (
 	}
 	return &ResolvedTarget{Agent: target, Pane: "%9"}, nil
 }
+
+// harnessReleaser is the bd surface handBackHook needs, over the harness bead
+// map. HookState is the read and RestoreBead models bd's --if-assignee +
+// --if-status update: it writes only while the bead still matches what the
+// caller read, so a bead another actor took or moved is left alone.
+type harnessReleaser struct{ h *slingHarness }
+
+func (r harnessReleaser) HookState(id string) (string, string, error) {
+	b := r.h.bead(id)
+	if b == nil {
+		return "", "", fmt.Errorf("bead '%s' not found", id)
+	}
+	return b.Status, b.Assignee, nil
+}
+
+func (r harnessReleaser) RestoreBead(id, expected, expectedStatus, status, assignee string) (bool, error) {
+	h := r.h
+	h.mu.Lock()
+	b := h.beads[id]
+	restored := b != nil && b.Assignee == expected && b.Status == expectedStatus
+	if restored {
+		b.Status, b.Assignee = status, assignee
+	}
+	h.mu.Unlock()
+	if !restored {
+		return false, nil
+	}
+	h.record("restore bead %s %s %s", id, status, assignee)
+	return true, nil
+}
+
+func (harnessReleaser) ReleaseBead(_, _ string) (bool, error) { return false, nil }
+func (harnessReleaser) ResetSlot(string) error                { return nil }
+func (harnessReleaser) Annotate(_, _ string) error            { return nil }
 
 // fakeSlingContexts is a rig's sling contexts: none exist, and every lookup
 // and write the sling-context helpers make lands in the call log.

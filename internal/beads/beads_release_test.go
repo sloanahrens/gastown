@@ -64,6 +64,30 @@ func TestReleaseIfAssigneeUsesGuard(t *testing.T) {
 	}
 }
 
+// TransferIfHeld is the failed sling's hand-back: one bd update carrying both
+// the assignee and the status the caller read, so a bead another actor has
+// taken or moved in between is left alone (gt-moxlb).
+func TestTransferIfHeldUsesBothGuards(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX bd stub")
+	}
+	dir := t.TempDir()
+	argsLog := bdGuardStub(t, dir, "13")
+
+	transferred, err := TransferIfHeld(New(dir), "gt-moxlb", "gastown/crew/sloan", "hooked", "hooked", "gastown/polecats/pearl")
+	if err != nil || transferred {
+		t.Fatalf("transferred=%v err=%v, want the guard read as a lost race", transferred, err)
+	}
+	args, _ := os.ReadFile(argsLog)
+	fields := strings.Fields(string(args))
+	for _, want := range []string{"update", "gt-moxlb", "--status=hooked", "--assignee=gastown/polecats/pearl",
+		"--if-assignee=gastown/crew/sloan", "--if-status=hooked"} {
+		if !slices.Contains(fields, want) {
+			t.Fatalf("bd args %q missing the field %q", args, want)
+		}
+	}
+}
+
 // TransferIfUnassigned over *Beads is the failed force re-sling's guarded
 // hand-back: one bd update carrying both preconditions, where the empty
 // --if-assignee is the one bd reads as "still unassigned" (gt-ct2ob).

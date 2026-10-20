@@ -206,6 +206,49 @@ func TestHookBeadWithRetryFailsFastOnBdStderr(t *testing.T) {
 	if calls != 1 {
 		t.Fatalf("bd update invoked %d times, want 1", calls)
 	}
+	if hookWriteLanded(err) {
+		t.Fatal("a hook whose every write failed must not report a landed write")
+	}
+}
+
+// hookThenFailStore lands the first update, then fails every later one with
+// err: bd accepts the hook write and the connection dies before the read-back
+// retry can confirm it.
+type hookThenFailStore struct {
+	slingFake
+	err   error
+	calls int
+}
+
+func (s *hookThenFailStore) Update(id string, opts beads.UpdateOptions) error {
+	s.calls++
+	if s.calls == 1 {
+		return s.slingFake.Update(id, opts)
+	}
+	return s.err
+}
+
+// TestHookWithRetryReportsAWriteThatLanded: when bd accepted the hook write
+// but the step still failed, the error says so, because a rollback must treat
+// the bead as the target's and hand it back only guarded (gt-moxlb).
+func TestHookWithRetryReportsAWriteThatLanded(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-work", Title: "t", Status: "open"})
+	store := &hookThenFailStore{
+		slingFake: slingFake{db},
+		err:       fmt.Errorf("bd update gt-work: Dolt circuit breaker is open: server appears down"),
+	}
+	stores := slingStores{pinned: func(string) slingStore { return store }}
+	verify := func(string) (*beadInfo, error) { return nil, fmt.Errorf("read back failed") }
+
+	err := stores.hookWithRetry(verify, "gt-work", "gastown/polecats/rust", t.TempDir(), nil)
+	if err == nil {
+		t.Fatal("hookWithRetry succeeded, want the read-back failure")
+	}
+	if !hookWriteLanded(err) {
+		t.Fatalf("error %q does not report the landed write", err)
+	}
 }
 
 // TestLoadRigCommandVarsReadsRigRootMergeQueue reproduces gt-me9t: operators
