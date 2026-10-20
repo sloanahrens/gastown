@@ -98,11 +98,14 @@ func runPoolMigrate(w io.Writer, townRoot string, dryRun bool, now time.Time) er
 	settingsPath := config.TownSettingsPath(townRoot)
 	patrolPath := poolMigratePatrolFile(townRoot, settingsPath)
 
+	// A town with no settings file can still hold retired keys in its patrol
+	// document (mayor/daemon.json on its own). Those convert into a new settings
+	// file, so an absent one is an empty tree rather than nothing to migrate.
 	settings, err := config.ReadRawJSON(settingsPath)
+	settingsExists := err == nil
 	switch {
 	case errors.Is(err, os.ErrNotExist):
-		fmt.Fprintln(w, "nothing to migrate")
-		return nil
+		settings = newMigrateSettings()
 	case err != nil:
 		return err
 	}
@@ -137,7 +140,7 @@ func runPoolMigrate(w io.Writer, townRoot string, dryRun bool, now time.Time) er
 	// between the two files leaves the patrol file's keys for the next run,
 	// which finds the seats in place and removes the keys.
 	wroteSettings := false
-	err = config.UpdateRawJSON(settingsPath, func(tree map[string]any) (bool, error) {
+	convertSettings := func(tree map[string]any) (bool, error) {
 		before := cloneJSONTree(tree)
 		if _, err := planPoolMigrate(townRoot, tree, cloneJSONTree(patrol)); err != nil {
 			return false, err
@@ -152,12 +155,20 @@ func runPoolMigrate(w io.Writer, townRoot string, dryRun bool, now time.Time) er
 		}
 		wroteSettings = true
 		return true, nil
-	})
+	}
+	if settingsExists {
+		err = config.UpdateRawJSON(settingsPath, convertSettings)
+	} else {
+		err = createMigratedSettings(settingsPath, convertSettings)
+	}
 	if err != nil {
 		return fmt.Errorf("migrating %s: %w", settingsPath, err)
 	}
-	if wroteSettings {
+	if wroteSettings && settingsExists {
 		fmt.Fprintf(w, "wrote %s (backup %s.bak-%s)\n", config.SourcePathRel(townRoot, settingsPath), filepath.Base(settingsPath), stamp)
+	}
+	if wroteSettings && !settingsExists {
+		fmt.Fprintf(w, "wrote %s (new file: the town had no settings file)\n", config.SourcePathRel(townRoot, settingsPath))
 	}
 	if plan.patrolChange {
 		err = config.UpdateRawJSON(patrolPath, func(tree map[string]any) (bool, error) {
@@ -175,6 +186,45 @@ func runPoolMigrate(w io.Writer, townRoot string, dryRun bool, now time.Time) er
 		fmt.Fprintf(w, "wrote %s (backup %s.bak-%s)\n", config.SourcePathRel(townRoot, patrolPath), filepath.Base(patrolPath), stamp)
 	}
 	return nil
+}
+
+// newMigrateSettings is the settings tree of a town with no settings file: the
+// header the loaders expect, and no keys.
+func newMigrateSettings() map[string]any {
+	return map[string]any{"type": "town-settings", "version": config.CurrentTownSettingsVersion}
+}
+
+// createMigratedSettings is UpdateRawJSON for a settings file that does not
+// exist yet: mutate converts the empty tree, and a change is written as a new
+// file. The file appears whole or not at all, and the link fails rather than
+// replace one that was created since the check.
+func createMigratedSettings(path string, mutate func(tree map[string]any) (bool, error)) error {
+	tree := newMigrateSettings()
+	changed, err := mutate(tree)
+	if err != nil || !changed {
+		return err
+	}
+	out, err := json.MarshalIndent(tree, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding %s: %w", path, err)
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(append(out, '\n')); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Link(tmp.Name(), path)
 }
 
 // poolMigratePatrolFile is the file holding the daemon's patrol document when it
