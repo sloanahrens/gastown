@@ -286,6 +286,29 @@ func TestCostPanelJevFailureAfterAGoodReadKeepsTheLastFigures(t *testing.T) {
 	}
 }
 
+// A read that answered but has gone stale says so, not that it failed, and
+// keeps the last figures the same way.
+func TestCostPanelJevStaleReadSaysStaleAndKeepsTheLastFigures(t *testing.T) {
+	t.Parallel()
+
+	lines, _ := drawCost(t, jevState(map[string]any{"reads": jevRead(map[string]any{"stale": true})}))
+	row, ok := findLine(lines, "Jev spend")
+	if !ok {
+		t.Fatalf("no Jev row in %q", costTexts(lines))
+	}
+	for _, want := range []string{"unavailable — the read went stale", "last good", "14 calls in 24h", "$1.75"} {
+		if !strings.Contains(row.Text, want) {
+			t.Errorf("row %q has no %q", row.Text, want)
+		}
+	}
+	if strings.Contains(row.Text, "the read failed") {
+		t.Errorf("a stale read is worded as a failure: %q", row.Text)
+	}
+	if row.Class != "empty" {
+		t.Errorf("a stale row wears %q, want the dimmed empty class", row.Class)
+	}
+}
+
 // With no Jev command configured there is no reader and no status, and the
 // panel draws no row at all, even with the rest of it empty.
 func TestCostPanelDrawsNoJevRowWithoutAReader(t *testing.T) {
