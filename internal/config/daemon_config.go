@@ -61,6 +61,11 @@ type PatrolsConfig struct {
 	PatrolScan           *PatrolScanConfig           `json:"patrol_scan,omitempty"`
 	EventsPrune          *EventsPruneConfig          `json:"events_prune,omitempty"`
 
+	// JevDedupe asks Jev which existing bead each new finding duplicates and
+	// logs every answer (internal/jev/dedupe). Opt-in: each pass pays for Jev
+	// calls, so only an explicit enabled:true turns it on.
+	JevDedupe *JevDedupeConfig `json:"jev_dedupe,omitempty"`
+
 	// RestartTracker is retired (gt-gqftr): no code read the block. It is
 	// declared, like the other retired keys, so a daemon.json that still
 	// carries it keeps loading under strict decoding and is kept verbatim.
@@ -428,6 +433,20 @@ type ScheduledMaintenanceConfig struct {
 	Mode          string   `json:"mode,omitempty"`
 	GCMinBytes    *int64   `json:"gc_min_bytes,omitempty"`
 	GCGrowthRatio *float64 `json:"gc_growth_ratio,omitempty"`
+}
+
+// JevDedupeConfig switches on the duplicate-finding pass and prices its Jev
+// spend. The pass is off unless Enabled is true, and an enabled pass needs
+// USDPerBillionTokens: the usage ledger stores tokens, not dollars.
+type JevDedupeConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the pass for the day once the job's spend reaches
+	// it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
 }
 
 // EventsPruneConfig bounds the town's raw event log, .events.jsonl, which
