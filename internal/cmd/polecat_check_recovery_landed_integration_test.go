@@ -4,6 +4,7 @@ package cmd
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -100,11 +101,19 @@ func TestIntegrationCheckRecoveryKeepsUnlandedUnpushedWorkInRecovery(t *testing.
 	p := &polecat.Polecat{Name: polecatName, Rig: rigName, State: polecat.StateIdle, ClonePath: repo, Branch: branch, Issue: beadID}
 	status := checkRecoveryForPolecat(db, nil, r, rigName, polecatName, p, false)
 
-	if status.Verdict != polecat.WorkstateVerdictNeedsRecovery || !status.NeedsRecovery {
+	if status.Verdict != polecat.WorkstateVerdictNeedsRecovery || !status.NeedsRecovery || status.SafeToNuke {
 		t.Fatalf("check-recovery(unlanded unpushed work) = %s safe=%v needs=%v; want NEEDS_RECOVERY",
 			status.Verdict, status.SafeToNuke, status.NeedsRecovery)
 	}
-	if status.Reason != "git-unpushed" {
-		t.Fatalf("reason = %q; want git-unpushed", status.Reason)
+	// The seat still holds its hook, which is listed first, so the unpushed
+	// commits are checked among the blockers rather than as the reason.
+	unpushed := false
+	for _, b := range status.Blockers {
+		if strings.Contains(b, "git_state=has_unpushed") {
+			unpushed = true
+		}
+	}
+	if !unpushed {
+		t.Fatalf("blockers = %v; want one reporting the unpushed commits (git_state=has_unpushed)", status.Blockers)
 	}
 }
