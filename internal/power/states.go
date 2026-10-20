@@ -185,10 +185,6 @@ func Off(ctx context.Context, o Options) error {
 			return err
 		}
 	}
-	if probeErr != nil {
-		// The stop went out blind, so nothing confirms the stack is down.
-		return exitError(ExitNotHealthy, "could not read the Forgejo stack (%v): 'docker compose stop' was issued but off is not recorded; re-run 'gt power off' to confirm", probeErr)
-	}
 	if o.WithDolt {
 		e.say("stopping Dolt: bd (including the ~/.claude beads DB) stops working until 'gt power full' or 'gt dolt start'")
 		if err := e.run(ctx, o.TownRoot, o.GTCommand, "dolt", "stop"); err != nil {
@@ -196,6 +192,11 @@ func Off(ctx context.Context, o Options) error {
 		}
 	}
 	e.jobhostDown(ctx)
+	if probeErr != nil {
+		// The stop went out blind, so nothing confirms the stack is down. The
+		// Dolt stop and the jobhost hook above still ran: they do not depend on it.
+		return exitError(ExitNotHealthy, "could not read the Forgejo stack (%v): 'docker compose stop' was issued but off is not recorded; re-run 'gt power off' to confirm", probeErr)
+	}
 	if err := e.record(string(StateOff)); err != nil {
 		return err
 	}
