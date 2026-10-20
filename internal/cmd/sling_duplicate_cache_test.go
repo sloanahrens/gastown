@@ -221,6 +221,64 @@ func TestDuplicateDetailCacheRefreshesBlockerStatus(t *testing.T) {
 	}
 }
 
+// bd adds and removes a dependency without moving the dependent's updated_at,
+// so a cached entry at an unchanged updated_at must still follow the edges: an
+// edge added reads as a blocker on the next tick, an edge removed reads as none,
+// and only the bead whose edges changed is shown.
+func TestDuplicateDetailCacheRereadsBlockersWhenAnEdgeChangesAtAFixedUpdatedAt(t *testing.T) {
+	t.Parallel()
+	db := duplicateGuardFixture(t)
+	path := filepath.Join(t.TempDir(), "cache.json")
+	blockersOf := func(pool []duplicateCandidate, id string) []string {
+		for _, c := range pool {
+			if c.ID == id {
+				return c.Blockers
+			}
+		}
+		t.Fatalf("%s is not in the pool", id)
+		return nil
+	}
+	if got := blockersOf(tickOver(t, newCountingStore(listLikeBD{Client: db}), path, "daemon-1", 40).pool, "gt-p1"); len(got) != 0 {
+		t.Fatalf("gt-p1 blockers = %v before the edge, want none", got)
+	}
+
+	if err := db.AddDependency("gt-p1", "gt-b1"); err != nil {
+		t.Fatal(err)
+	}
+	store := newCountingStore(listLikeBD{Client: db})
+	tick := tickOver(t, store, path, "daemon-1", 40)
+	if got := blockersOf(tick.pool, "gt-p1"); len(got) != 1 || got[0] != "gt-b1" {
+		t.Errorf("gt-p1 blockers = %v after the edge was added, want gt-b1", got)
+	}
+	if got := openBlockersOf(t, tick.pool, "gt-p1"); len(got) != 1 || got[0] != "gt-b1" {
+		t.Errorf("gt-p1 open blockers = %v after the edge was added, want gt-b1", got)
+	}
+	if got := shownIDs(store); len(got) != 1 || got[0] != "gt-p1" {
+		t.Errorf("shown = %v, want only gt-p1, whose edges changed", got)
+	}
+
+	if err := db.RemoveDependency("gt-p3", "gt-b1"); err != nil {
+		t.Fatal(err)
+	}
+	store = newCountingStore(listLikeBD{Client: db})
+	tick = tickOver(t, store, path, "daemon-1", 40)
+	if got := blockersOf(tick.pool, "gt-p3"); len(got) != 0 {
+		t.Errorf("gt-p3 blockers = %v after the edge was removed, want none", got)
+	}
+	if got := openBlockersOf(t, tick.pool, "gt-p3"); len(got) != 0 {
+		t.Errorf("gt-p3 open blockers = %v after the edge was removed, want none", got)
+	}
+	if got := shownIDs(store); len(got) != 1 || got[0] != "gt-p3" {
+		t.Errorf("shown = %v, want only gt-p3, whose edges changed", got)
+	}
+
+	steady := newCountingStore(listLikeBD{Client: db})
+	tickOver(t, steady, path, "daemon-1", 40)
+	if len(steady.multis) != 0 || len(steady.shows) != 0 {
+		t.Errorf("a tick with the edges unchanged showed %v and %v, want nothing", steady.multis, steady.shows)
+	}
+}
+
 // The overlap guard decides and prints what it did before the cache, cold and
 // warm: the golden was written before the change.
 func TestDuplicateGuardDecisionsMatchGoldenThroughTheCache(t *testing.T) {

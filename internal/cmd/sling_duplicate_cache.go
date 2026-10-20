@@ -37,11 +37,19 @@ const duplicateDetailMissLimit = 40
 var specDetailCache atomic.Pointer[duplicateDetailCache]
 
 // cachedDetail is what one show recovered for a bead, valid while the bead's
-// list row still says UpdatedAt. Its blocking edges are kept without status: a
-// blocker closing does not touch the dependent's updated_at, so the status is
-// read from the pool on every tick (openBlockersIn).
+// list row still says UpdatedAt and DepCount. Its blocking edges are kept
+// without status: a blocker closing does not touch the dependent's updated_at,
+// so the status is read from the pool on every tick (openBlockersIn).
+//
+// DepCount is the row's dependency_count when the show ran. bd adds and removes
+// a dependency without moving the dependent's updated_at, so updated_at alone
+// would keep a bead's old edges until it is next edited, and the count is the
+// only sign of an edge change the list row carries. It moves when an edge is
+// added or removed; an edge swapped for another between two ticks leaves it
+// the same, and the entry then lasts until the bead is next edited.
 type cachedDetail struct {
 	UpdatedAt string      `json:"updated_at"`
+	DepCount  int         `json:"dep_count,omitempty"`
 	Design    string      `json:"design,omitempty"`
 	Notes     string      `json:"notes,omitempty"`
 	Deps      []cachedDep `json:"deps,omitempty"`
@@ -127,11 +135,11 @@ func (c *duplicateDetailCache) Counts() (fetched, cached, unread int) {
 }
 
 // read recovers the detail of every row of the pool of the rig at beadsDir. A
-// row the cache holds at the row's updated_at is answered from it; the others
-// are shown, up to the limit this tick has left, and the rest come back without
-// a detail, counted in deferred. known is every row of the pool being built,
-// which is what a cached blocker's status is read from. An error is the show's,
-// and the details it returned are kept.
+// row the cache holds at the row's updated_at and dependency count is answered
+// from it; the others are shown, up to the limit this tick has left, and the
+// rest come back without a detail, counted in deferred. known is every row of
+// the pool being built, which is what a cached blocker's status is read from.
+// An error is the show's, and the details it returned are kept.
 func (c *duplicateDetailCache) read(beadsDir string, store beads.Client, rows []*beads.Issue, known []*beads.Issue) (details map[string]duplicateDetail, deferred int, err error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -152,7 +160,7 @@ func (c *duplicateDetailCache) read(beadsDir string, store beads.Client, rows []
 			continue
 		}
 		entry, ok := entries[row.ID]
-		if !ok || row.UpdatedAt == "" || entry.UpdatedAt != row.UpdatedAt {
+		if !ok || row.UpdatedAt == "" || entry.UpdatedAt != row.UpdatedAt || entry.DepCount != row.DependencyCount {
 			missing = append(missing, row)
 			continue
 		}
@@ -202,7 +210,7 @@ func (c *duplicateDetailCache) read(beadsDir string, store beads.Client, rows []
 			if row.UpdatedAt == "" {
 				continue
 			}
-			entries[row.ID] = cachedDetail{UpdatedAt: row.UpdatedAt, Design: is.Design, Notes: is.Notes, Deps: cachedDepsOf(is.Dependencies)}
+			entries[row.ID] = cachedDetail{UpdatedAt: row.UpdatedAt, DepCount: row.DependencyCount, Design: is.Design, Notes: is.Notes, Deps: cachedDepsOf(is.Dependencies)}
 			c.dirty = true
 		}
 	}
