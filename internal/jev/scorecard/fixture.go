@@ -58,18 +58,21 @@ func (fixture) Parse(raw []byte) (Item, error) {
 	return Item{ID: l.ID, Time: l.TS, Model: l.Model, Answers: l.Answers}, nil
 }
 
-func (f fixture) Label(_ context.Context, item Item) (map[QuestionID]bool, bool, error) {
+func (f fixture) Label(_ context.Context, item Item) (Labeling, error) {
 	data, err := os.ReadFile(FixtureLabelsPath(f.town))
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, false, nil
+		return Labeling{}, nil
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("reading the fixture labels: %w", err)
+		return Labeling{}, fmt.Errorf("reading the fixture labels: %w", err)
 	}
 	var labels map[string]map[QuestionID]bool
 	if err := json.Unmarshal(data, &labels); err != nil {
-		return nil, false, fmt.Errorf("parsing the fixture labels: %w", err)
+		return Labeling{}, fmt.Errorf("parsing the fixture labels: %w", err)
 	}
 	m, ok := labels[item.ID]
-	return m, ok, nil
+	if !ok {
+		return Labeling{}, nil
+	}
+	return Labeling{Labeled: true, Labels: m, Rule: "fixture-labels"}, nil
 }

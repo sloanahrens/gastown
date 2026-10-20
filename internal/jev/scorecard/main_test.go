@@ -4,9 +4,12 @@ import (
 	"os"
 	"testing"
 
-	"github.com/steveyegge/gastown/internal/testutil/unittier"
+	"github.com/steveyegge/gastown/internal/testutil"
 )
 
+// TestMain runs the scorecard under the hermetic harness: the attention adapter
+// reads beads, so this package's tests can reach bd and must not touch live
+// town state.
 func TestMain(m *testing.M) {
-	os.Exit(unittier.Main(m))
+	os.Exit(testutil.HermeticMain(m))
 }

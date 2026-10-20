@@ -64,14 +64,16 @@ func Build(ctx context.Context, a Adapter, since time.Time) (Report, error) {
 	}
 
 	labels := make([]map[QuestionID]bool, len(items))
+	rep.Lines = make([]LineReport, 0, len(items))
 	for i, it := range items {
-		m, labeled, err := a.Label(ctx, it)
+		lab, err := a.Label(ctx, it)
 		if err != nil {
 			return Report{}, fmt.Errorf("labeling item %s: %w", it.ID, err)
 		}
-		if labeled {
-			labels[i] = m
+		if lab.Labeled {
+			labels[i] = lab.Labels
 		}
+		rep.Lines = append(rep.Lines, lineReport(it, lab))
 	}
 
 	kinds := questionKinds(items)

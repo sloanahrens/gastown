@@ -1226,10 +1226,10 @@ root. The adapter implements:
 - `Parse(raw) (Item, error)`: one log line as an `Item` (id, time, model, and
   the answers keyed by question id). An error skips the line and counts it in
   `lines_skipped`.
-- `Label(ctx, item) (labels, labeled, error)`: each question's label for the
-  item, and whether the item is labeled at all. An unlabeled item counts as
-  logged but not labeled. An error that cannot be read fails the whole report,
-  so a broken label source cannot pass as "no labels yet".
+- `Label(ctx, item) (Labeling, error)`: the item's labels, whether it is labeled
+  at all, and the rule that set them. An unlabeled item counts as logged but not
+  labeled. An error that cannot be read fails the whole report, so a broken
+  label source cannot pass as "no labels yet".
 
 Each question is scored by the kind of answer Jev gave. A noul is scored at
 0.5. A choice names its `positive` option, and precision and recall are at the
@@ -1244,10 +1244,45 @@ The verdict for each question:
 - `no-signal`: anything else.
 
 The best F1 is taken over every distinct value as a cut, predicting yes at or
-above it; a tie keeps the higher cut. Only the `fixture` battery is registered
-so far. It reads `.runtime/jev/fixture.jsonl` with labels from
-`fixture-labels.json`, and exists so tests can drive the command end to end. No
-live battery reads it.
+above it; a tie keeps the higher cut. `--json` names the rule that labeled each
+line in its `lines` array.
+
+Two batteries are registered. The `fixture` battery reads
+`.runtime/jev/fixture.jsonl` with labels from `fixture-labels.json`, and exists
+so tests can drive the command end to end. No live battery reads it.
+
+The `attention` battery reads `.runtime/jev/attention.jsonl`, the attention
+battery's log. A line whose call failed, or whose question set is not the one
+the scorecard reads, is skipped. Labels come from the attention queue's retained
+files (`.runtime/attention`: events, acks and the acks history) and the beads
+each item names. An item's labels come from the first rule that applies:
+
+1. **A disposition** a human gave the item in `acks-history.jsonl` while it
+   stood. It labels the item even while the item still stands, and it wins over
+   the rules below. `needed-human` sets `needs_human` true (`ack:needed-human`);
+   `noise` sets `needs_human` false and `clears_on_its_own` true (`ack:noise`);
+   `fixed-by-overseer` sets `routine_action_fixes` true
+   (`ack:fixed-by-overseer`). A line with no disposition does not count here.
+2. **The kind's clearing mechanism**, for an item that has cleared:
+   - `escalation`: its bead was closed with a close reason. A close by the
+     person or the overseer (the `closed_by` address is the human's) sets
+     `needs_human` true (`escalation:closed-by-person`); a close by a producer
+     sets `clears_on_its_own` true (`escalation:cleared-by-producer`).
+   - `risk-path`: the latest `OVERSEER REVIEW <sha>` line on its bead. `FAIL`
+     sets `needs_human` true (`risk-path:review-fail`); `PASS` sets it false
+     (`risk-path:review-pass`). `WAIVED` and `AUDITED` label nothing.
+   - `rejected-twice`: a bead closed as `superseded` sets `needs_human` true
+     (`rejected-twice:superseded`). A bead closed by a landing sets
+     `routine_action_fixes` true when the last landing record names a branch
+     that is not a `crew/` branch (`rejected-twice:landed-routine`).
+3. **The self-clear window** (`cleared-within-15m`): an item that cleared within
+   15 minutes of being raised, with no ack, no note on its bead and no close
+   reason, sets `clears_on_its_own` true. An item whose bead no longer exists
+   counts as having no note.
+
+An item still standing with no disposition is unlabeled, as is one whose life
+the queue files no longer hold. A bead read that fails for any reason other
+than not-found fails the report.
 
 #### Dispatch battery (`gt jev dispatch`)
 
