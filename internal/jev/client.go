@@ -396,31 +396,28 @@ func parseAnswers(data []byte, qs map[string]Question) (*Answers, error) {
 	}
 	for id, q := range qs {
 		a, ok := r.Answers[id]
-		if !ok {
-			return nil, fmt.Errorf("%w: no answer for question %q", ErrBadResponse, id)
-		}
-		if a.Type != q.Type {
-			return nil, fmt.Errorf("%w: question %q was asked %q and answered %q", ErrBadResponse, id, q.Type, a.Type)
+		if !ok || a.Type != q.Type {
+			return nil, answerErr(id, len(qs), fmt.Errorf("no %s answer", q.Type))
 		}
 		switch q.Type {
 		case typeChoice:
 			ca, err := parseChoiceAnswer(a, q.Options)
 			if err != nil {
-				return nil, fmt.Errorf("%w: question %q: %v", ErrBadResponse, id, err)
+				return nil, answerErr(id, len(qs), err)
 			}
 			out.Choice[id] = ca
 		case typeNoul:
 			if a.Noul == nil {
-				return nil, fmt.Errorf("%w: question %q has no noul value", ErrBadResponse, id)
+				return nil, answerErr(id, len(qs), errors.New("no noul value"))
 			}
 			if *a.Noul < 0 || *a.Noul > 1 {
-				return nil, fmt.Errorf("%w: question %q noul %v is outside 0 to 1", ErrBadResponse, id, *a.Noul)
+				return nil, answerErr(id, len(qs), fmt.Errorf("noul %v is outside 0 to 1", *a.Noul))
 			}
 			out.Noul[id] = *a.Noul
 		case typeScore:
 			sa, err := parseScoreAnswer(a, len(q.Levels))
 			if err != nil {
-				return nil, fmt.Errorf("%w: question %q: %v", ErrBadResponse, id, err)
+				return nil, answerErr(id, len(qs), err)
 			}
 			out.Score[id] = sa
 		}
@@ -428,8 +425,20 @@ func parseAnswers(data []byte, qs map[string]Question) (*Answers, error) {
 	return out, nil
 }
 
-// parseChoiceAnswer checks that a choice answer names an option asked, with
-// the most probable probability, and returns it.
+// answerErr returns err as an ErrBadResponse for question id. The id is named
+// only when Ask asked several questions, where it says which answer is bad; a
+// lone question, which is all Choice asks, keeps the text Choice has always
+// returned.
+func answerErr(id string, asked int, err error) error {
+	if asked > 1 {
+		return fmt.Errorf("%w: question %q: %v", ErrBadResponse, id, err)
+	}
+	return fmt.Errorf("%w: %v", ErrBadResponse, err)
+}
+
+// parseChoiceAnswer returns a choice answer that names one of options, whose
+// probabilities cover exactly those options and sum to 1, and whose named
+// option is the most probable.
 func parseChoiceAnswer(a answer, options map[string]string) (ChoiceAnswer, error) {
 	if _, ok := options[a.Choice]; !ok {
 		return ChoiceAnswer{}, fmt.Errorf("choice %q is not an option asked", a.Choice)
@@ -451,7 +460,8 @@ func parseChoiceAnswer(a answer, options map[string]string) (ChoiceAnswer, error
 }
 
 // parseScoreAnswer checks that a score answer names a level on the rubric and
-// carries a probability distribution over the levels.
+// labels every level once, with a probability and a legend entry under the
+// same label.
 func parseScoreAnswer(a answer, levels int) (ScoreAnswer, error) {
 	if a.Score == nil {
 		return ScoreAnswer{}, errors.New("no score value")
@@ -462,8 +472,17 @@ func parseScoreAnswer(a answer, levels int) (ScoreAnswer, error) {
 	if a.Confidence < 0 || a.Confidence > 1 {
 		return ScoreAnswer{}, fmt.Errorf("confidence %v is outside 0 to 1", a.Confidence)
 	}
-	// A score's probability labels are the model's, not the caller's, so only
-	// their distribution is checked.
+	if len(a.Probabilities) != levels {
+		return ScoreAnswer{}, fmt.Errorf("probabilities cover %d levels, %d were asked", len(a.Probabilities), levels)
+	}
+	if len(a.Legend) != levels {
+		return ScoreAnswer{}, fmt.Errorf("legend labels %d levels, %d were asked", len(a.Legend), levels)
+	}
+	for label := range a.Legend {
+		if _, ok := a.Probabilities[label]; !ok {
+			return ScoreAnswer{}, fmt.Errorf("legend label %q has no probability", label)
+		}
+	}
 	if err := checkSum(a.Probabilities); err != nil {
 		return ScoreAnswer{}, err
 	}
