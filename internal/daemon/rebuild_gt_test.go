@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -532,5 +533,53 @@ func TestRebuildGTCycle_ReachedForceClosesTheAlarms(t *testing.T) {
 		if !slices.Contains(clears[0].Fingerprints, key) {
 			t.Errorf("cleared keys %v do not carry %s", clears[0].Fingerprints, key)
 		}
+	}
+}
+
+// TestRebuildGTRequestDuringCycleSurvives pins the request's lifecycle across a
+// cycle: the cycle consumes the request as it starts, so one a landing arms
+// while the cycle runs is still pending when the cycle ends, rather than being
+// erased with the one the cycle served (gt-j1mm4).
+func TestRebuildGTRequestDuringCycleSurvives(t *testing.T) {
+	t.Parallel()
+	d, _ := rebuildGTTown(t)
+	inCycle := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+		once.Do(func() {
+			close(inCycle)
+			<-release
+		})
+		return &version.StaleBinaryInfo{}
+	}
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		if gitSub(c, "branch") {
+			return cliReply{stdout: "main\n"}
+		}
+		return cliReply{}
+	})
+	d.requestRebuildGTInstall()
+	cycleEnd := watchRebuildGTCycle(d)
+
+	var releaseOnce sync.Once
+	releaseCycle := func() { releaseOnce.Do(func() { close(release) }) }
+	// A failed assertion below must not leave the cycle parked on release.
+	t.Cleanup(func() {
+		releaseCycle()
+		awaitRebuildGTIdle(t, d, cycleEnd)
+	})
+
+	d.triggerRebuildGT()
+	<-inCycle
+	if d.rebuildGTRequested.Load() {
+		t.Fatal("the cycle left the request armed while it ran, so a request made now is a no-op")
+	}
+	d.requestRebuildGTInstall()
+	releaseCycle()
+	awaitRebuildGTIdle(t, d, cycleEnd)
+
+	if !d.rebuildGTRequested.Load() {
+		t.Fatal("the cycle's end cleared a request armed while it ran")
 	}
 }
