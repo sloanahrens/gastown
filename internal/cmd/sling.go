@@ -782,14 +782,17 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	//
 	// rollbackBeadID stays "" until this sling first writes to the bead, so a
 	// failure before that never burns molecules or releases a hook this sling
-	// did not create. It is not only the spawned polecat that owns something
-	// once the hook has landed: the hook is a claim of its own, and a sling
-	// onto a seat that already existed has no spawn to give it back, so a
-	// failure after it leaves the bead hooked or in_progress to a seat that
-	// never runs it — a state the dispatcher never re-slings (gt-moxlb).
+	// did not create. It does not cover the hook itself: a sling onto a seat
+	// that already existed has no spawn to give it back (gt-moxlb; the devops
+	// events journal, seq 30687-30689, shows the bead left hooked to the seat).
 	slingCommitted := false
 	rollbackBeadID := ""
 	rollbackReason := ""
+	// hookMayHaveLanded is set once the hook step does not promise the bead is
+	// untouched: it succeeded, or it failed after a write reached bd. From then
+	// on only the guarded hand-back may restore the bead; the unhook restore
+	// would re-take one another sling has unhooked (gt-moxlb).
+	hookMayHaveLanded := false
 	// restoreOutgoing puts a force-stolen holder's agent-bead state back. The
 	// rollback below runs it, so a sling that fails after the clear leaves the
 	// holder it took the bead from as it was (gt-u0zq0). Nil until a clear runs.
@@ -801,7 +804,8 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// spawn rollback does not cover that case: it returns work only to a
 	// polecat that still holds it, and the unhook below is what stops the new
 	// polecat from holding it (gt-ct2ob). restoreHold is guarded, so a bead
-	// another actor has since hooked stays with that actor.
+	// another actor has since hooked stays with that actor; it runs only while
+	// this sling's hook write may not have landed (see hookMayHaveLanded).
 	unhooked := false
 	restoreReassigned := func() {
 		if restoreOutgoing != nil {
@@ -810,14 +814,15 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		}
 		// The hook this sling wrote is a claim of its own. A sling that spawned
 		// a polecat gives the bead back with the spawn (rollbackArtifacts); one
-		// that hooked onto a seat that already existed has no spawn to do it,
-		// so it hands the bead back here, to the status and assignee it held
-		// before this sling. The write is guarded on the bead still being
-		// assigned to this sling's target (gt-moxlb): a bead another actor has
-		// taken keeps that actor.
-		handedBack := newPolecatInfo == nil && rollbackBeadID != "" &&
+		// that hooked onto a seat that already existed hands it back here,
+		// guarded on the bead still being held by the target in the status it
+		// read. Once the hook may have landed that is the only restore, so a
+		// bead it declines is left alone rather than re-taken by the unhook
+		// restore below (gt-moxlb).
+		handBackTried := newPolecatInfo == nil && rollbackBeadID != "" && hookMayHaveLanded
+		if handBackTried {
 			r.handBack(townRoot, beadID, hookWorkDir, targetAgent, beadHold{Status: originalStatus, Assignee: originalAssignee})
-		if unhooked && !handedBack {
+		} else if unhooked {
 			r.restoreHold(townRoot, beadID, beadHold{Status: originalStatus, Assignee: originalAssignee})
 		}
 		unhooked = false
@@ -1087,8 +1092,10 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	r.recordReassignment(townRoot, beadID, originalAssignee, targetAgent, r.requester())
 	if err := r.hook(beadID, targetAgent, hookDir, "", hookFields); err != nil {
 		rollbackReason = "Hook failed"
+		hookMayHaveLanded = hookWriteLanded(err)
 		return err
 	}
+	hookMayHaveLanded = true
 	r.steps.Step("hook")
 	r.clearOrphanLabels(townRoot, beadID, hookWorkDir)
 
@@ -1433,26 +1440,36 @@ func restoreBeadHold(townRoot, beadID string, hold beadHold) {
 }
 
 // handBackHook puts a bead this sling hooked back to the status and assignee it
-// held before the sling, but only while it is still assigned to holder — the
-// seat this sling hooked it to (beads.TransferIfAssignee, atomic). A bead
-// another actor has taken in the meantime is left with that actor, and so is
-// one that is no longer held at all (closed, released, or submitted for
-// landing). It reports whether the write landed. The status is the pre-sling
-// one rather than "open", so a bead re-slung out of a pin or another holder's
-// hook goes back to that state instead of into the dispatch pool.
+// held before the sling, but only while it is still held by holder — the seat
+// this sling hooked it to — in the status the read found (beads.TransferIfHeld,
+// atomic on both). A bead another actor has taken or moved in the meantime is
+// left alone, and so is one no longer held at all (closed, released, or
+// submitted for landing). It reports whether the write landed. The status is
+// the pre-sling one rather than "open", so a bead re-slung out of a pin or
+// another holder's hook goes back to that state instead of into the dispatch
+// pool.
 func handBackHook(townRoot, beadID, hookWorkDir, holder string, hold beadHold) bool {
-	if townRoot == "" || beadID == "" || holder == "" {
+	if townRoot == "" {
 		return false
 	}
-	rel := newPolecatWorkReleaserFn(townRoot, hookWorkDir)
-	if held, _ := heldBy(rel, holder, beadID); !held {
+	return handBackHeld(newPolecatWorkReleaserFn(townRoot, hookWorkDir), beadID, holder, hold)
+}
+
+// handBackHeld is handBackHook over a polecatWorkReleaser, so tests run the
+// real hand-back against a fake bd instead of copying its guard.
+func handBackHeld(rel polecatWorkReleaser, beadID, holder string, hold beadHold) bool {
+	if beadID == "" || holder == "" {
+		return false
+	}
+	held, heldStatus, _ := heldByStatus(rel, holder, beadID)
+	if !held {
 		return false
 	}
 	status := hold.Status
 	if status == "" {
 		status = "open"
 	}
-	restored, err := rel.RestoreBead(beadID, holder, status, hold.Assignee)
+	restored, err := rel.RestoreBead(beadID, holder, heldStatus, status, hold.Assignee)
 	switch {
 	case err != nil:
 		fmt.Printf("  %s Could not hand bead %s back from %s: %v\n", style.Dim.Render("Warning:"), beadID, holder, err)

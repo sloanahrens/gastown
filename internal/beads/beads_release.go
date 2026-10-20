@@ -40,6 +40,27 @@ func (b *Beads) TransferIfAssignee(id, expected, status, assignee string) (trans
 	return false, err
 }
 
+// TransferIfHeld sets a bead's status and assignee, but only while it is still
+// held by expected as expectedStatus (bd --if-assignee and --if-status, one
+// atomic update). The status half keeps a restore from overwriting a bead
+// whose state moved under it — closed, submitted, or taken by another actor
+// (gt-moxlb). transferred=false with a nil error means a guard no longer held.
+func (b *Beads) TransferIfHeld(id, expectedAssignee, expectedStatus, status, assignee string) (transferred bool, err error) {
+	if !b.noRoute {
+		if target := b.forIssueID(id); target != b {
+			return target.TransferIfHeld(id, expectedAssignee, expectedStatus, status, assignee)
+		}
+	}
+	_, err = b.run("update", id, "--status="+status, "--assignee="+assignee, "--if-assignee="+expectedAssignee, "--if-status="+expectedStatus)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, ErrGuardNotHeld):
+		return false, nil
+	}
+	return false, err
+}
+
 // TransferIfUnassigned sets a bead's status and assignee, but only while the
 // bead is still open and unassigned: the undo of a force re-sling's unhook,
 // which never takes a bead another actor has since hooked (gt-ct2ob).

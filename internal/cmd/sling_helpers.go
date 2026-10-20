@@ -1280,6 +1280,21 @@ func hookBeadWithRetryWithTownRoot(beadID, targetAgent, hookDir, townRoot string
 	return slingStores{}.hookWithRetry(hookVerifyFn(townRoot), beadID, targetAgent, hookDir, fields)
 }
 
+// hookWriteLandedError marks a hook step that failed after at least one write
+// reached bd. The bead may already be hooked to the target, so a rollback must
+// hand it back only through a guarded write, never with the pre-hook restore
+// (gt-moxlb).
+type hookWriteLandedError struct{ err error }
+
+func (e *hookWriteLandedError) Error() string { return e.err.Error() }
+func (e *hookWriteLandedError) Unwrap() error { return e.err }
+
+// hookWriteLanded reports whether err says a hook write may have reached bd.
+func hookWriteLanded(err error) bool {
+	var landed *hookWriteLandedError
+	return errors.As(err, &landed)
+}
+
 // hookWithRetry is hookBeadWithRetryWithTownRoot with the hook written to
 // hookDir's database in s's stores (pinned, so the write auto-commits) and
 // each landed write read back by verify (nil: no read-back). A non-nil fields
@@ -1293,6 +1308,15 @@ func (s slingStores) hookWithRetry(verify func(beadID string) (*beadInfo, error)
 
 	hooked := "hooked"
 	var lastErr error
+	// wrote records that an attempt's update was accepted, so the failure the
+	// caller sees does not promise the bead is untouched.
+	wrote := false
+	fail := func(err error) error {
+		if wrote {
+			return &hookWriteLandedError{err}
+		}
+		return err
+	}
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		store := s.pinnedAt(hookDir)
 		opts := beads.UpdateOptions{Status: &hooked, Assignee: &targetAgent}
@@ -1313,7 +1337,7 @@ func (s slingStores) hookWithRetry(verify func(beadID string) (*beadInfo, error)
 			lastErr = err
 			// Fail fast on config/init errors — retrying won't help (gt-2ra)
 			if isSlingConfigError(err) {
-				return fmt.Errorf("hooking bead failed (non-retryable Dolt/beads failure — not retrying): %w\nSafe next action: run `gt dolt status` and `bd show %s` to verify whether a durable hook exists before re-slinging", err, beadID)
+				return fail(fmt.Errorf("hooking bead failed (non-retryable Dolt/beads failure — not retrying): %w\nSafe next action: run `gt dolt status` and `bd show %s` to verify whether a durable hook exists before re-slinging", err, beadID))
 			}
 			if attempt < maxRetries {
 				backoff := slingBackoff(attempt, baseBackoff, maxBackoff)
@@ -1321,8 +1345,9 @@ func (s slingStores) hookWithRetry(verify func(beadID string) (*beadInfo, error)
 				clockwork.NewRealClock().Sleep(backoff)
 				continue
 			}
-			return fmt.Errorf("hooking bead after %d attempts: %w", maxRetries, err)
+			return fail(fmt.Errorf("hooking bead after %d attempts: %w", maxRetries, err))
 		}
+		wrote = true
 
 		if verify == nil {
 			break
@@ -1337,7 +1362,7 @@ func (s slingStores) hookWithRetry(verify func(beadID string) (*beadInfo, error)
 				clockwork.NewRealClock().Sleep(backoff)
 				continue
 			}
-			return fmt.Errorf("verifying hook after %d attempts: %w", maxRetries, lastErr)
+			return fail(fmt.Errorf("verifying hook after %d attempts: %w", maxRetries, lastErr))
 		}
 
 		if verifyInfo.Status != "hooked" || verifyInfo.Assignee != targetAgent {
@@ -1349,7 +1374,7 @@ func (s slingStores) hookWithRetry(verify func(beadID string) (*beadInfo, error)
 				clockwork.NewRealClock().Sleep(backoff)
 				continue
 			}
-			return fmt.Errorf("hook failed after %d attempts: %w", maxRetries, lastErr)
+			return fail(fmt.Errorf("hook failed after %d attempts: %w", maxRetries, lastErr))
 		}
 
 		break

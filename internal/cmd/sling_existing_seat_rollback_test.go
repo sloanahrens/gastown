@@ -21,37 +21,43 @@ func TestSlingOntoExistingSeatHandsBackHookAfterFailure(t *testing.T) {
 		// original is the bead's status and assignee before the sling.
 		original [2]string
 		force    bool
-		// thief is an actor that hooks the bead after this sling's hook write
-		// landed and before the rollback runs; "" means nobody does.
-		thief string
+		// thief is what another actor does to the bead after this sling's hook
+		// write landed and before the rollback runs; nil means nobody does.
+		thief func(b *beadInfo)
 		want  [2]string
 	}{
 		{name: "fresh bead goes back to open and unassigned", original: [2]string{"open", ""},
 			want: [2]string{"open", ""}},
 		{name: "force-stolen bead goes back to its holder", original: [2]string{"hooked", "gastown/polecats/pearl"},
 			force: true, want: [2]string{"hooked", "gastown/polecats/pearl"}},
-		{name: "a bead another actor takes is left with that actor",
-			original: [2]string{"open", ""}, thief: "gastown/polecats/granite",
+		{name: "a bead another actor claims is left with that actor",
+			original: [2]string{"open", ""}, thief: func(b *beadInfo) { b.Status, b.Assignee = "hooked", "gastown/polecats/granite" },
 			want: [2]string{"hooked", "gastown/polecats/granite"}},
+		// Another sling's force unhook leaves open/unassigned, the state the
+		// unhook restore is guarded on; restoring the old holder here would
+		// take the bead back from the sling that unhooked it (gt-moxlb).
+		{name: "a bead another sling unhooks is left alone",
+			original: [2]string{"hooked", "gastown/polecats/pearl"}, force: true,
+			thief: func(b *beadInfo) { b.Status, b.Assignee = "open", "" },
+			want:  [2]string{"open", ""}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			h := newSlingHarness(t)
 			h.addBead(beadID, beadInfo{Status: tc.original[0], Assignee: tc.original[1]})
 			// The hook write lands, then the step that confirms it fails — the
-			// write a failed sling used to leave on the bead.
+			// write a failed sling used to leave on the bead. The typed error is
+			// what hookWithRetry reports once a write reached bd.
 			h.run.hook = func(id, agent, _, _ string, _ *beadFieldUpdates) error {
 				h.mu.Lock()
 				if b := h.beads[id]; b != nil {
 					b.Status, b.Assignee = "hooked", agent
+					if tc.thief != nil {
+						tc.thief(b)
+					}
 				}
 				h.mu.Unlock()
-				if tc.thief != "" {
-					h.mu.Lock()
-					h.beads[id].Assignee = tc.thief
-					h.mu.Unlock()
-				}
-				return errInjected
+				return &hookWriteLandedError{errInjected}
 			}
 
 			// The harness parses no flags: opts is the parsed command line.
@@ -65,11 +71,19 @@ func TestSlingOntoExistingSeatHandsBackHookAfterFailure(t *testing.T) {
 				t.Fatalf("bead = %s/%s, want %s/%s (handed back to its pre-sling state)",
 					got.Status, got.Assignee, tc.want[0], tc.want[1])
 			}
-			if tc.thief != "" {
-				h.wantCalls("hand back", "hand back skipped "+beadID)
-				return
+			// The real hand-back prints and writes through the harness
+			// releaser; a declined one records nothing.
+			if tc.thief != nil {
+				h.wantCalls("restore bead")
+			} else {
+				h.wantCalls("restore bead", "restore bead "+beadID+" "+tc.want[0]+" "+tc.want[1])
 			}
-			h.wantCalls("hand back", "hand back "+beadID+" "+tc.want[0]+" "+tc.want[1])
+			h.wantCalls("restore raw fields", "restore raw fields "+beadID)
+			if tc.force {
+				// The force unhook cleared the outgoing polecat's agent bead;
+				// the same rollback puts it back (gt-u0zq0).
+				h.wantCalls("restore reassigned", "restore reassigned gastown/polecats/pearl")
+			}
 			// No spawn, so the hand-back is the only rollback of the hook.
 			h.wantCalls("rollback")
 		})
@@ -108,9 +122,10 @@ func TestSlingOntoExistingSeatHandBackLeavesTheUnhookRestoreAlone(t *testing.T) 
 	if got := h.bead(beadID); got.Status != "hooked" || got.Assignee != pearl {
 		t.Fatalf("bead = %s/%s, want it back with its holder %s/hooked", got.Status, got.Assignee, pearl)
 	}
-	if got := h.matching("hand back"); len(got) != 1 || got[0] != "hand back skipped "+beadID {
-		t.Fatalf("hand back = %q, want the unhook restore to own this state", got)
-	}
+	// The sling never reaches its hook write, so the unhook restore owns the
+	// state and the hand-back is not tried.
+	h.wantCalls("restore bead")
+	h.wantCalls("restore hold", "restore hold "+beadID+" hooked "+pearl)
 }
 
 // The spawn path keeps its own rollback: a sling that spawns a polecat and
@@ -146,7 +161,7 @@ func TestSlingOntoExistingSeatHandBackLeavesSpawnRollbackAlone(t *testing.T) {
 				t.Fatal("the sling must report the injected hook failure")
 			}
 			h.wantCalls("rollback", "rollback Toast bead="+beadID)
-			h.wantCalls("hand back")
+			h.wantCalls("restore bead")
 		})
 	}
 }

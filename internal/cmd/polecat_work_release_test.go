@@ -55,11 +55,11 @@ func (f *fakeWorkReleaser) ReleaseBead(beadID, expectedAssignee string) (bool, e
 	return true, nil
 }
 
-func (f *fakeWorkReleaser) RestoreBead(beadID, expected, status, assignee string) (bool, error) {
+func (f *fakeWorkReleaser) RestoreBead(beadID, expected, expectedStatus, status, assignee string) (bool, error) {
 	if f.restoreErr != nil {
 		return false, f.restoreErr
 	}
-	if f.beads[beadID][1] != expected {
+	if f.beads[beadID][1] != expected || f.beads[beadID][0] != expectedStatus {
 		return false, nil
 	}
 	f.restored = append(f.restored, beadID)
