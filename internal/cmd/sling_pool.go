@@ -316,7 +316,20 @@ type poolSeatReads struct {
 	agentBead func(bd beads.Client, agentID string) (*beads.Issue, *beads.AgentFields, error)
 	assigned  func(bd assignedIssueLookup, rigName, polecatName string) polecatActiveWorkEvidence
 	show      func(bd beads.Client, id string) (*beads.Issue, error)
+
+	// probe measures a seat's worktree; nil means polecat.ProbeLiveGitStateLocal.
+	probe func(worktreePath string) polecat.LiveGitState
+	// openWorkLanded opens the repository the landed probe reads; nil means
+	// the worktree's own git. Tests set both to a modeled repository.
+	openWorkLanded workLandedOpener
 }
+
+// issueReadFunc is a by-id bead lookup read as a polecat.IssueReader, so the
+// pool's landed evidence reads the bead through the same seam as its other
+// beads reads.
+type issueReadFunc func(id string) (*beads.Issue, error)
+
+func (f issueReadFunc) Show(id string) (*beads.Issue, error) { return f(id) }
 
 func poolSeatReadsFor() poolSeatReads {
 	return poolSeatReads{
@@ -514,8 +527,13 @@ func poolPolecatSeatStateWith(townRoot, rigName, polecatName string, reads poolS
 	// counting (gt-b9ud0, the gt-2nft shape of two pictures of one pool). A
 	// worktree that cannot be resolved is left unprobed, and the recorded hint
 	// stands.
-	if worktree := resolvePolecatWorktree(filepath.Join(rigPath, "polecats"), polecatName, rigName); worktree != "" {
-		polecat.ProbeLiveGitStateLocal(worktree).ApplyFacts(&facts)
+	worktree := resolvePolecatWorktree(filepath.Join(rigPath, "polecats"), polecatName, rigName)
+	if worktree != "" {
+		probe := reads.probe
+		if probe == nil {
+			probe = polecat.ProbeLiveGitStateLocal
+		}
+		probe(worktree).ApplyFacts(&facts)
 	}
 	// The work the seat was dispatched for, read before the hook reference: the
 	// bead the seat holds, read the way the list path reads it
@@ -541,6 +559,11 @@ func poolPolecatSeatStateWith(townRoot, rigName, polecatName string, reads poolS
 	}
 	hd := polecat.ClassifyHookBead(hookBead, hookIssue, hookErr)
 	held := poolSeatWorkFacts(&facts, hd, assigned)
+	// Leftover commits the landing already took are not at risk: the same
+	// landed evidence the list path applies, so a seat reusable there is not
+	// git-unpushed here (gt-wfxa2).
+	applyLiveWorkLandedToWorkstateFacts(&facts, reads.openWorkLanded, worktree,
+		issueReadFunc(func(id string) (*beads.Issue, error) { return reads.show(bd, id) }), hookBead, facts.Branch)
 	// The assignment terminality the classifier accounts that seat with, read
 	// the way the list path reads it (assignedBeadTerminalForInventory: the
 	// live assigned issue, else the recorded hint — the hook itself when the

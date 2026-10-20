@@ -1930,3 +1930,64 @@ func TestRouteUnnamedSlingReadsTheRouterClock(t *testing.T) {
 		}
 	})
 }
+
+// A seat whose leftover commits the landing already took is reusable in `gt
+// polecat list` (reason landed), so the pool must read it the same way and not
+// count it against capacity as git-unpushed (gt-wfxa2). Without the landed
+// head it stays an unpushed seat in both.
+func TestPoolPolecatSeatStateLandedSeatIsReusable(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		landedRef  bool
+		wantSafe   bool
+		wantReason string
+		wantCounts bool
+	}{
+		{name: "landed head holds the seat's commit", landedRef: true, wantSafe: true, wantReason: "landed"},
+		{name: "no landed head", wantReason: "git-unpushed", wantCounts: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			seat := newLandedSeat(t, tt.landedRef)
+			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
+			// The pool resolves the worktree by directory; the probe and the
+			// landed repository are the modeled ones.
+			if err := os.MkdirAll(filepath.Join(town, "gastown", "polecats", "nitro", "gastown"), 0o755); err != nil {
+				t.Fatalf("mkdir worktree: %v", err)
+			}
+			live := polecat.LiveGitState{Branch: landedSeatBranch, Source: polecat.GitStateSourceLive, UnpushedCommits: 1}
+			fields := &beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupClean), Branch: landedSeatBranch}
+			reads := poolSeatReadsAnswering(t, fields, polecatActiveWorkEvidence{})
+			reads.show = func(_ beads.Client, id string) (*beads.Issue, error) { return seatBeads(t).Show(id) }
+			reads.probe = func(string) polecat.LiveGitState { return live }
+			reads.openWorkLanded = seat.open()
+
+			state, err := poolPolecatSeatStateWith(town, "gastown", "nitro", reads)
+			if err != nil {
+				t.Fatalf("poolPolecatSeatStateWith: %v", err)
+			}
+			d := state.Disposition
+			if d.SafeToNuke != tt.wantSafe || d.Reason != tt.wantReason {
+				t.Fatalf("pool disposition = %+v; want safe_to_nuke=%v reason=%q", d, tt.wantSafe, tt.wantReason)
+			}
+
+			// The list path's verdict for the same seat.
+			item := buildPolecatInventoryItem("gastown", "nitro", fields, nil, polecatSessionSet{}, polecatInventoryEnv{
+				WorktreePath:   seat.worktree,
+				IssueSource:    seatBeads(t),
+				openWorkLanded: seat.open(),
+				probe:          func(string, bool) polecat.LiveGitState { return live },
+			})
+			if got := item.Disposition; got.SafeToNuke != d.SafeToNuke || got.Reason != d.Reason || got.ReuseStatus != d.ReuseStatus {
+				t.Fatalf("pool disposition %+v differs from the list's %+v", d, got)
+			}
+
+			if d.CountsTowardCapacity != tt.wantCounts {
+				t.Fatalf("seat counts toward capacity = %v, want %v (%+v)", d.CountsTowardCapacity, tt.wantCounts, d)
+			}
+		})
+	}
+}

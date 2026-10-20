@@ -1937,6 +1937,20 @@ func applyWorkLandedToWorkstateFacts(facts *polecat.WorkstateFacts, open workLan
 	polecat.ApplyWorkLanded(facts, open(worktreePath), store, hookBead, branch)
 }
 
+// applyLiveWorkLandedToWorkstateFacts is applyWorkLandedToWorkstateFacts for a
+// seat whose git facts may or may not have been measured. Landed evidence only
+// clears commits a live probe counted: on recorded or unknown facts there is no
+// measured leftover to explain, and a landed head would waive an unmeasured
+// status. The list path (buildPolecatInventoryItem) and the pool's seat read
+// (poolPolecatSeatStateWith) both call this, so a seat is counted the way the
+// list shows it (gt-wfxa2).
+func applyLiveWorkLandedToWorkstateFacts(facts *polecat.WorkstateFacts, open workLandedOpener, worktreePath string, store polecat.IssueReader, hookBead, branch string) {
+	if facts.GitStateSource != polecat.GitStateSourceLive {
+		return
+	}
+	applyWorkLandedToWorkstateFacts(facts, open, worktreePath, store, hookBead, branch)
+}
+
 // workLandedOpener opens the repository the landed probe reads; tests supply
 // one over a modeled repository.
 type workLandedOpener func(worktreePath string) land.WorkLandedRepo
