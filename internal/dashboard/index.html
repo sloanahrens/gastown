@@ -3209,13 +3209,11 @@ function costClaudePlan(box, c) {
   box.append(line);
 }
 
-// The Jev row of the Cost panel, drawn from the Jev spend report j and the status
-// r of the read that brought it: calls and dollars over the command's window and
-// the caller that cost the most. No report and no status means no Jev command is
-// configured, or it has not answered yet, and nothing is drawn. A read that
-// failed says the row is unavailable instead of drawing a window of no spend, and
-// keeps the last good figures in the same line, dimmed, so the other spend rows
-// are never blanked by it.
+// The Jev row of the Cost panel. A failed or stale read says unavailable rather
+// than drawing a window of no spend, since zero would read as a quiet town; the
+// last good figures stay on the line, dimmed, and no other row is blanked.
+// Neither a report nor a status means no Jev command is configured, or it has
+// not answered yet, so nothing is drawn.
 function costJev(box, j, r) {
   if (!j && !r) return;
   if (!j) { box.append(el("div", "empty", "Jev spend · unavailable — the read failed")); return; }
@@ -3234,11 +3232,11 @@ function costJev(box, j, r) {
 }
 
 // The Cost panel: what the town is spending, in one place. DeepSeek's balance,
-// pace and credit, the Claude plan line and the Jev row under them, the usage scan's estimate
-// and slow runs, the GCP budget alert, and what each om review bar costs in
-// rework. The panel greys with the spend read it is mostly drawn from; a part
-// whose own read has not answered says so on its own line. With neither a spend
-// report nor usage records there is one line and nothing else.
+// pace and credit, the Claude plan line and the Jev row under them, the usage
+// scan's estimate and slow runs, the GCP budget alert, and what each om review
+// bar costs in rework. The panel greys with the spend read it is mostly drawn
+// from; a part whose own read has not answered says so on its own line. With
+// neither a spend report nor usage records there is one line and nothing else.
 function renderCost(s) {
   const box = $("cost"), note = $("costnote");
   box.replaceChildren();
