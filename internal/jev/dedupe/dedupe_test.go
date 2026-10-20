@@ -949,3 +949,99 @@ func TestJevDedupeRunRefusesWhileAnotherPassHoldsTheLock(t *testing.T) {
 		t.Errorf("Asked = %d after the lock was released, want 1", sum.Asked)
 	}
 }
+
+// A candidate whose bead cannot be read says nothing about whether the
+// finding is a duplicate. The pass must not log the run as "no candidates",
+// and the cursor still advances so the finding is not asked again.
+func TestCandidatesShowFailureIsNotLoggedAsNoCandidates(t *testing.T) {
+	t.Parallel()
+	all := []*beads.Issue{
+		bead("gt-old", "Old defect", "", 0),
+		bead("gt-fnd", "Found: the same defect", "", 10),
+	}
+	// Every hit names a bead the store cannot show.
+	hits := map[string][]Hit{"Found: the same defect": {
+		{Kind: "bead", ID: "gt-gone", Field: "title"},
+		{Kind: "bead", ID: "gt-alsogone", Field: "description"},
+	}}
+	h := newHarness(t, all, hits, fakeAnswer{ans: batteryOnly()})
+
+	if sum := mustRun(t, h.pass); sum.Asked != 1 {
+		t.Fatalf("Asked = %d, want 1", sum.Asked)
+	}
+	lines := h.lines(t)
+	if len(lines) != 1 {
+		t.Fatalf("log has %d lines, want 1", len(lines))
+	}
+	if got := lines[0]["outcome"]; got != string(OutcomeReadFailed) {
+		t.Errorf("outcome = %v, want %v: an unreadable candidate is not the same as none", got, OutcomeReadFailed)
+	}
+	if got := lines[0]["candidate"]; got != "none" {
+		t.Errorf("candidate = %v, want none", got)
+	}
+	if got := lines[0]["candidates_offered"]; !reflect.DeepEqual(got, []any{}) {
+		t.Errorf("candidates_offered = %v, want none offered", got)
+	}
+
+	// The finding was answered about, so the next pass leaves it alone.
+	mustRun(t, h.pass)
+	if n := len(h.asker.calls); n != 1 {
+		t.Errorf("Jev asked %d times across two passes, want 1", n)
+	}
+}
+
+// A short write leaves a partial line with no newline. The next append must
+// not merge into it: that would lose both entries when the merged line fails
+// to parse.
+func TestAppendLineAfterAPartialLineKeepsTheNextEntry(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "dedupe.jsonl")
+	partial := `{"ts":"2026-10-19T12:00:00Z","finding":"gt-cut`
+	if err := os.WriteFile(path, []byte(partial), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	next := Line{TS: t0, Finding: "gt-next", Candidate: "none", CandidatesOffered: []string{}}
+	if err := battery.Append(path, next); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	lines, err := ReadRecent(path, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 1 || lines[0].Finding != "gt-next" {
+		t.Fatalf("ReadRecent = %+v, want the new entry intact", lines)
+	}
+	if lines[0].TS != next.TS.UTC() {
+		t.Errorf("new entry ts = %v, want %v", lines[0].TS, next.TS)
+	}
+}
+
+// A paid answer whose log line cannot be written must still advance the
+// cursor: otherwise the same finding is asked, and billed, on every pass.
+func TestRunDoesNotReAskWhenTheLogIsUnwritable(t *testing.T) {
+	t.Parallel()
+	all := []*beads.Issue{
+		bead("gt-old", "Old defect", "", 0),
+		bead("gt-fnd", "Found: the same defect", "", 10),
+	}
+	hits := map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-old", Field: "title"}}}
+	h := newHarness(t, all, hits, fakeAnswer{ans: choices("gt-old", 0.9)})
+
+	// A directory where the log should be makes every append fail.
+	if err := os.Mkdir(h.log, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.pass.Run(context.Background()); err == nil {
+		t.Fatal("Run reported no error with an unwritable log")
+	}
+	if n := len(h.asker.calls); n != 1 {
+		t.Fatalf("first pass asked Jev %d times, want 1", n)
+	}
+
+	// The next pass must not pay for the same finding again.
+	_, _ = h.pass.Run(context.Background())
+	if n := len(h.asker.calls); n != 1 {
+		t.Errorf("Jev asked %d times across two passes, want 1: an unlogged answer was re-billed", n)
+	}
+}

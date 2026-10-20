@@ -23,6 +23,11 @@ const (
 	// OutcomeNoCandidates: the search found nothing to offer, so the Choice
 	// was not asked. The Nouls and the Score are still asked.
 	OutcomeNoCandidates Outcome = "no_candidates"
+	// OutcomeReadFailed: every hit was unreadable (the bead store failed to
+	// show it, or its CreatedAt did not parse), so no candidate was offered
+	// and the Choice was not asked. The Nouls and the Score are still asked.
+	// A line reading no_candidates would claim the search found nothing.
+	OutcomeReadFailed Outcome = "read_failed"
 	// OutcomeSearchFailed: the hm search failed, so no candidate was offered
 	// and the Choice was not asked. The Nouls and the Score are still asked,
 	// and a line with null answers says the call failed too.
