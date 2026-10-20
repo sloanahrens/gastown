@@ -1,0 +1,73 @@
+== gt-c1
+blocked: true
+match: gt-p1 open tests=[TestAlpha] files=[] held=""
+✗ Refusing to sling gt-c1: its content overlaps 1 existing bead(s).
+  Two beads describing one defect from different vantage points share no
+  keywords, but they do name the same failing tests (gt-mcq).
+  Work in flight on that test refuses the sling; unstarted work refuses only
+  when it comes first in dispatch order AND is one the dispatcher would
+  sling, so a cluster of ready beads dispatches one at a time rather than
+  none of them, even when the bead ahead of this one is held.
+
+  gt-p1  open
+      shared test: TestAlpha
+
+Refusing to sling gt-c1: 1 overlapping bead(s) share the test(s) above; re-sling with --force if this is genuinely distinct: gt sling gt-c1 <target> --force
+
+== gt-c2
+blocked: true
+match: gt-p4 open tests=[TestBeta] files=[] held=""
+match: gt-p3 open tests=[TestBeta] files=[] held="blocked by gt-b1"
+✗ Refusing to sling gt-c2: its content overlaps 1 existing bead(s).
+  Two beads describing one defect from different vantage points share no
+  keywords, but they do name the same failing tests (gt-mcq).
+  Work in flight on that test refuses the sling; unstarted work refuses only
+  when it comes first in dispatch order AND is one the dispatcher would
+  sling, so a cluster of ready beads dispatches one at a time rather than
+  none of them, even when the bead ahead of this one is held.
+
+  gt-p4  open
+      shared test: TestBeta
+
+Refusing to sling gt-c2: 1 overlapping bead(s) share the test(s) above; re-sling with --force if this is genuinely distinct: gt sling gt-c2 <target> --force
+
+== gt-c3
+blocked: false
+match: gt-p2 in_progress tests=[] files=[internal/cmd/foo.go] held=""
+⚠ gt-c3 overlaps 1 existing bead(s), none of them in flight or next for the dispatcher.
+  Shared files alone, closed or parked work, unstarted work this bead would
+  reach first, and unstarted work the dispatcher holds for a reason of its
+  own do not block; this sling proceeds.
+
+  gt-p2  in_progress
+      shared file: internal/cmd/foo.go
+
+== gt-c4
+blocked: false
+match: gt-p5 closed tests=[TestGamma] files=[] held=""
+⚠ gt-c4 overlaps 1 existing bead(s), none of them in flight or next for the dispatcher.
+  Shared files alone, closed or parked work, unstarted work this bead would
+  reach first, and unstarted work the dispatcher holds for a reason of its
+  own do not block; this sling proceeds.
+
+  gt-p5  closed 2 hours ago
+      shared test: TestGamma
+
+== gt-c5
+blocked: true
+match: gt-p6 hooked tests=[TestDelta] files=[] held=""
+✗ Refusing to sling gt-c5: its content overlaps 1 existing bead(s).
+  Two beads describing one defect from different vantage points share no
+  keywords, but they do name the same failing tests (gt-mcq).
+  Work in flight on that test refuses the sling; unstarted work refuses only
+  when it comes first in dispatch order AND is one the dispatcher would
+  sling, so a cluster of ready beads dispatches one at a time rather than
+  none of them, even when the bead ahead of this one is held.
+
+  gt-p6  hooked
+      shared test: TestDelta
+
+Refusing to sling gt-c5: 1 overlapping bead(s) share the test(s) above; re-sling with --force if this is genuinely distinct: gt sling gt-c5 <target> --force
+
+== gt-c6
+not checked

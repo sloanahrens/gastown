@@ -729,12 +729,18 @@ type specDispatchReport struct {
 	// LabeledFailed counts the ready beads the tick found carrying
 	// specdispatch.DispatchFailedLabel: they are out of the queue until the
 	// label is cleared, and the health line surfaces the count (gt-q6zoo).
-	LabeledFailed int                 `json:"labeled_failed,omitempty"`
-	Dispatched    []specDispatchEntry `json:"dispatched"`
-	Refused       []specDispatchEntry `json:"refused"`
-	Planning      []specDispatchEntry `json:"planning"`
-	Skipped       []specDispatchEntry `json:"skipped"`
-	Failed        []specDispatchEntry `json:"failed"`
+	LabeledFailed int `json:"labeled_failed,omitempty"`
+	// DetailsFetched, DetailsCached and DetailsUnread count the pool beads
+	// whose design and notes the tick showed, answered from the daemon's
+	// cache, and left for a later tick by the per-tick limit (gt-l0vlf).
+	DetailsFetched int                 `json:"details_fetched,omitempty"`
+	DetailsCached  int                 `json:"details_cached,omitempty"`
+	DetailsUnread  int                 `json:"details_unread,omitempty"`
+	Dispatched     []specDispatchEntry `json:"dispatched"`
+	Refused        []specDispatchEntry `json:"refused"`
+	Planning       []specDispatchEntry `json:"planning"`
+	Skipped        []specDispatchEntry `json:"skipped"`
+	Failed         []specDispatchEntry `json:"failed"`
 	// Notices are lines the tick decided on but no single candidate owns,
 	// logged once each (gt-wgyca).
 	Notices []string `json:"notices,omitempty"`
@@ -1500,6 +1506,9 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	}
 	// The tick's bd reads, kept for the tick alone (gt-u8rbh).
 	reads := newSpecTickReads()
+	// The pool's design and notes, kept across the daemon's ticks (gt-l0vlf).
+	details := specDetailCacheFor(townRoot, os.Getenv(dispatch.SpecDetailOwnerEnv))
+	specDetailCache.Store(details)
 	env := specDispatchEnv{
 		Hold: func() string { return dispatch.OperatorHold(townRoot) },
 		Candidates: func() specBoardRead {
@@ -1562,6 +1571,7 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		ShapeGate:   ts.PolecatPool.GetShapeGate(),
 	}
 	report := runSpecDispatchCycle(env)
+	report.DetailsFetched, report.DetailsCached, report.DetailsUnread = details.Counts()
 	if report.Hold == "" {
 		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start)))
 	}

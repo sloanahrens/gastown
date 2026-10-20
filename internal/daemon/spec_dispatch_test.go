@@ -445,3 +445,51 @@ func TestSpecDispatchSeatsUnreadableEndsTheIdleStreak(t *testing.T) {
 		t.Fatalf("Streak = %d after a tick the seat file stopped, want 0", got)
 	}
 }
+
+// The tick line states how many pool beads' design and notes the tick showed
+// and how many the daemon's cache answered, and how many the per-tick limit
+// left unread; a tick that kept no cache adds nothing (gt-l0vlf).
+func TestSpecDispatchTickLineStatesDetailReads(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		out  string
+		want string
+	}{
+		{"warm", `{"candidates": 2, "details_fetched": 0, "details_cached": 180}`, "; design/notes: 0 fetched, 180 cached"},
+		{"cold", `{"candidates": 2, "details_fetched": 40, "details_cached": 0, "details_unread": 140}`, "; design/notes: 40 fetched, 0 cached, 140 unread"},
+		{"none", `{"candidates": 2}`, ""},
+	} {
+		lines := (&Daemon{}).formatSpecDispatchReport([]byte(tc.out))
+		got := lines[0]
+		if tc.want == "" {
+			if strings.Contains(got, "design/notes") {
+				t.Errorf("%s: tick line %q names design/notes reads though the tick kept no cache", tc.name, got)
+			}
+			continue
+		}
+		if !strings.HasSuffix(got, tc.want) {
+			t.Errorf("%s: tick line %q does not end %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// The tick the daemon starts names the daemon to the cache it keeps between
+// ticks, so a restarted daemon starts it empty (gt-l0vlf).
+func TestSpecDispatchCommandNamesTheCacheOwner(t *testing.T) {
+	t.Parallel()
+	gt := newFakeCLI(nil)
+	d := &Daemon{ctx: t.Context(), config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0), gtPath: "gt", execCmd: gt.run}
+	_, _ = d.runSpecDispatchCommand()
+	calls := gt.recorded()
+	if len(calls) != 1 {
+		t.Fatalf("recorded %d gt calls, want 1", len(calls))
+	}
+	want := dispatch.SpecDetailOwnerEnv + "=" + specDetailOwner
+	for _, kv := range calls[0].env {
+		if kv == want {
+			return
+		}
+	}
+	t.Errorf("tick env lacks %q", want)
+}
