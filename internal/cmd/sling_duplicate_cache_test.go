@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -276,6 +279,94 @@ func TestDuplicateDetailCacheRereadsBlockersWhenAnEdgeChangesAtAFixedUpdatedAt(t
 	tickOver(t, steady, path, "daemon-1", 40)
 	if len(steady.multis) != 0 || len(steady.shows) != 0 {
 		t.Errorf("a tick with the edges unchanged showed %v and %v, want nothing", steady.multis, steady.shows)
+	}
+}
+
+// A cache file written before entries carried dep_count has no count for any of
+// them, which reads as 0. A bead whose edges were all removed since then has a
+// count of 0 too, so the count alone would keep the old edges: an entry that
+// holds edges and no count is shown again, and one that holds none is kept.
+func TestDuplicateDetailCacheRereadsEntriesWrittenBeforeDepCount(t *testing.T) {
+	t.Parallel()
+	db := duplicateGuardFixture(t)
+	path := filepath.Join(t.TempDir(), "cache.json")
+	tickOver(t, newCountingStore(listLikeBD{Client: db}), path, "daemon-1", 40)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var file duplicateDetailFile
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatal(err)
+	}
+	for _, entries := range file.Rigs {
+		for id, entry := range entries {
+			entry.DepCount = 0
+			entries[id] = entry
+		}
+	}
+	legacy, err := json.Marshal(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(legacy), "dep_count") {
+		t.Fatalf("legacy cache file still has dep_count: %s", legacy)
+	}
+	if err := os.WriteFile(path, legacy, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := db.RemoveDependency("gt-p3", "gt-b1"); err != nil {
+		t.Fatal(err)
+	}
+	store := newCountingStore(listLikeBD{Client: db})
+	tick := tickOver(t, store, path, "daemon-1", 40)
+	if got := openBlockersOf(t, tick.pool, "gt-p3"); len(got) != 0 {
+		t.Errorf("gt-p3 open blockers = %v, want none: its only edge was removed after the entry was written", got)
+	}
+	// gt-p3 and gt-p4 hold edges in their entries; the other beads hold none and
+	// a count of 0 matches theirs.
+	got := shownIDs(store)
+	sort.Strings(got)
+	if want := []string{"gt-p3", "gt-p4"}; !slices.Equal(got, want) {
+		t.Errorf("shown = %v, want %v: only entries with edges and no count are untrusted", got, want)
+	}
+}
+
+// A dependency swapped for another leaves the dependent's updated_at and its
+// dependency count as they were, so the list row gives the cache nothing to
+// see. The entry keeps the old edge until the bead is next edited; this pins
+// that limit, so a change to it is a decision and not a surprise.
+func TestDuplicateDetailCacheKeepsAnEdgeSwappedAtAFixedCount(t *testing.T) {
+	t.Parallel()
+	db := duplicateGuardFixture(t)
+	path := filepath.Join(t.TempDir(), "cache.json")
+	tickOver(t, newCountingStore(listLikeBD{Client: db}), path, "daemon-1", 40)
+
+	if err := db.RemoveDependency("gt-p3", "gt-b1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AddDependency("gt-p3", "gt-b2"); err != nil {
+		t.Fatal(err)
+	}
+	store := newCountingStore(listLikeBD{Client: db})
+	tick := tickOver(t, store, path, "daemon-1", 40)
+	if len(store.multis) != 0 || len(store.shows) != 0 {
+		t.Errorf("a swapped edge showed %v and %v, want nothing: the row did not change", store.multis, store.shows)
+	}
+	if got := openBlockersOf(t, tick.pool, "gt-p3"); len(got) != 1 || got[0] != "gt-b1" {
+		t.Errorf("gt-p3 open blockers = %v, want the old edge gt-b1 until the bead is next edited", got)
+	}
+
+	// Editing the bead moves its updated_at, which rereads the edges.
+	if err := db.Update("gt-p3", beads.UpdateOptions{Title: ptr("Beta behind a swapped blocker")}); err != nil {
+		t.Fatal(err)
+	}
+	edited := newCountingStore(listLikeBD{Client: db})
+	tick = tickOver(t, edited, path, "daemon-1", 40)
+	if got := openBlockersOf(t, tick.pool, "gt-p3"); len(got) != 0 {
+		t.Errorf("gt-p3 open blockers = %v after the edit, want none: gt-b2 is closed", got)
 	}
 }
 
