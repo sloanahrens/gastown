@@ -139,9 +139,13 @@ type overrunSeams struct {
 	// returns the commit when the kept branch's head in the worktree is already
 	// origin's head for that branch and the seat produced that head after it was
 	// slung, "" otherwise (no worktree, no branch, not on origin, a different
-	// commit, origin not reachable, a head older than the sling). A checkpoint
-	// that committed moved the head off origin's, so the answer also says the
-	// checkpoint had nothing to commit. nil means "" every time.
+	// commit, origin not reachable, a head whose committer time predates the
+	// sling, a sling time the stop does not know). "Produced" is judged by the
+	// head's committer time, which a rebase or cherry-pick during the run
+	// rewrites: a head the seat merely resumed keeps the time it was pushed
+	// with. A checkpoint that committed moved the head off origin's, so the
+	// answer also says the checkpoint had nothing to commit. nil means ""
+	// every time.
 	finishedOnOrigin func(seat overrunSeat) string
 
 	// recordCleanup records the released seat's cleanup status on its agent

@@ -1240,13 +1240,18 @@ func TestOverrunFinishedOnOrigin_NeedsTheSameCommitOnBoth(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref := "refs/heads/" + stopSeat.Branch
-	g := &pushStubGit{branch: stopSeat.Branch, sha: "abc123", originRefs: []git.RemoteRef{
-		{Hash: "1111111", Name: ref + "-other"},
-		{Hash: "abc123", Name: ref},
-	}}
+	// The head is dated after the seat's sling: the seat produced it.
+	slung := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	seated := stopSeat
+	seated.SlingAt = slung
+	g := &pushStubGit{branch: stopSeat.Branch, sha: "abc123", commitTime: slung.Add(time.Minute),
+		originRefs: []git.RemoteRef{
+			{Hash: "1111111", Name: ref + "-other"},
+			{Hash: "abc123", Name: ref},
+		}}
 	d.openGitFn = func(string) daemonGit { return g }
 
-	if got := d.overrunFinishedOnOrigin(stopSeat); got != "abc123" {
+	if got := d.overrunFinishedOnOrigin(seated); got != "abc123" {
 		t.Errorf("same commit on both: got %q, want abc123", got)
 	}
 	if len(g.pushes) != 0 {
@@ -1254,18 +1259,18 @@ func TestOverrunFinishedOnOrigin_NeedsTheSameCommitOnBoth(t *testing.T) {
 	}
 
 	g.originRefs = []git.RemoteRef{{Hash: "9f8e7d6", Name: ref}}
-	if got := d.overrunFinishedOnOrigin(stopSeat); got != "" {
+	if got := d.overrunFinishedOnOrigin(seated); got != "" {
 		t.Errorf("origin holds another commit: got %q, want none", got)
 	}
 	g.originRefs = []git.RemoteRef{{Hash: "abc123", Name: ref + "-other"}}
-	if got := d.overrunFinishedOnOrigin(stopSeat); got != "" {
+	if got := d.overrunFinishedOnOrigin(seated); got != "" {
 		t.Errorf("no branch on origin: got %q, want none", got)
 	}
 	g.originRefs, g.originErr = []git.RemoteRef{{Hash: "abc123", Name: ref}}, errors.New("unreachable")
-	if got := d.overrunFinishedOnOrigin(stopSeat); got != "" {
+	if got := d.overrunFinishedOnOrigin(seated); got != "" {
 		t.Errorf("origin cannot be asked: got %q, want none", got)
 	}
-	other := stopSeat
+	other := seated
 	other.Polecat = "gone"
 	if got := d.overrunFinishedOnOrigin(other); got != "" {
 		t.Errorf("seat with no worktree: got %q, want none", got)
@@ -1273,10 +1278,7 @@ func TestOverrunFinishedOnOrigin_NeedsTheSameCommitOnBoth(t *testing.T) {
 
 	// The head must be one the seat committed after its sling: the same commit
 	// on both ends is not finished work when the seat only resumed it.
-	slung := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
 	g.originRefs, g.originErr = []git.RemoteRef{{Hash: "abc123", Name: ref}}, nil
-	seated := stopSeat
-	seated.SlingAt = slung
 	g.commitTime = slung.Add(-time.Hour)
 	if got := d.overrunFinishedOnOrigin(seated); got != "" {
 		t.Errorf("head committed before the sling: got %q, want none", got)
@@ -1288,5 +1290,12 @@ func TestOverrunFinishedOnOrigin_NeedsTheSameCommitOnBoth(t *testing.T) {
 	g.commitTime = time.Time{}
 	if got := d.overrunFinishedOnOrigin(seated); got != "" {
 		t.Errorf("commit time unknown: got %q, want none", got)
+	}
+
+	// An unknown sling time cannot show the head was produced by this run, so
+	// it answers needs-split (empty) rather than reviving the old behaviour.
+	g.commitTime = slung.Add(time.Minute)
+	if got := d.overrunFinishedOnOrigin(stopSeat); got != "" {
+		t.Errorf("sling time unknown: got %q, want none", got)
 	}
 }
