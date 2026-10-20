@@ -32,7 +32,8 @@ func UsageLedgerPath(townRoot string) string {
 }
 
 // WithLedger makes the client append one line per answered Choice call to
-// path, creating the directory 0700 and the file 0600.
+// path, creating the directory 0700 and the file 0600, and setting both to
+// those modes if they already exist.
 func WithLedger(path string) Option { return func(c *Client) { c.ledgerPath = path } }
 
 // WithCaller names this client in the usage ledger, for a reader that breaks
@@ -77,19 +78,35 @@ func (l *ledger) warnf(err error) {
 	}
 }
 
-// appendLine writes line and its newline to path in one write, so lines from
-// concurrent clients stay whole.
-func appendLine(path string, line []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+// appendLine writes line and its newline to path under an exclusive lock, so
+// lines from concurrent clients stay whole even when a write is split.
+// MkdirAll and OpenFile keep the mode of an existing directory or file, so the
+// modes are set here too.
+func appendLine(path string, line []byte) (err error) {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(append(line, '\n')); err != nil {
-		_ = f.Close()
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	unlock, err := lockLedger(f)
+	if err != nil {
 		return err
 	}
-	return f.Close()
+	defer unlock()
+	if err := f.Chmod(0o600); err != nil {
+		return err
+	}
+	_, err = f.Write(append(line, '\n'))
+	return err
 }
