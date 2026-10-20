@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -11,16 +12,19 @@ import (
 	"github.com/steveyegge/gastown/internal/jev"
 )
 
-// fakeBeadStore records the query the production lister sends.
+// fakeBeadStore records every query the production lister sends and answers
+// from results, which nil answers with nothing.
 type fakeBeadStore struct {
-	opts  beads.ListOptions
-	calls int
+	opts    []beads.ListOptions
+	results func(beads.ListOptions) []*beads.Issue
 }
 
 func (f *fakeBeadStore) List(o beads.ListOptions) ([]*beads.Issue, error) {
-	f.calls++
-	f.opts = o
-	return nil, nil
+	f.opts = append(f.opts, o)
+	if f.results == nil {
+		return nil, nil
+	}
+	return f.results(o), nil
 }
 
 // keyedClient builds a Jev client that reads the key from a test file, so the
@@ -74,11 +78,19 @@ func TestJevDispatchOpenWiresTheRigListerAndTheCap(t *testing.T) {
 		t.Errorf("cap = %v, want the default %v", p.CapUSD, DefaultMaxUSDPerDay)
 	}
 
-	if _, err := p.Lister.Placed(); err != nil {
+	since := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	if _, err := p.Lister.Placed(since); err != nil {
 		t.Fatalf("Placed: %v", err)
 	}
-	if store.calls != 1 || store.opts.Status != "in_progress,hooked" {
-		t.Errorf("lister asked %d times with status %q, want one ask for in_progress,hooked", store.calls, store.opts.Status)
+	if len(store.opts) != 2 {
+		t.Fatalf("lister asked %d times, want one ask for held beads and one for closed ones", len(store.opts))
+	}
+	if store.opts[0].Status != "in_progress,hooked" {
+		t.Errorf("first ask has status %q, want in_progress,hooked", store.opts[0].Status)
+	}
+	if store.opts[1].Status != "closed" || !store.opts[1].ClosedAfter.Equal(since) {
+		t.Errorf("second ask = status %q, closed after %v; want closed since the cursor %v",
+			store.opts[1].Status, store.opts[1].ClosedAfter, since)
 	}
 
 	// The spend is the town's one ledger, priced at the configured rate and
@@ -113,5 +125,54 @@ func TestJevDispatchOpenKeepsTheConfiguredCap(t *testing.T) {
 	}
 	if p.CapUSD != 2.5 {
 		t.Errorf("cap = %v, want the configured 2.5", p.CapUSD)
+	}
+}
+
+// A placement slung and closed between two passes is returned by Placed. Only
+// the closed read can see it: a bead that finishes inside one quarter-hour
+// interval holds no seat when the pass runs, so without this read the log
+// samples only the placements that happened to be slow.
+func TestPlacedIncludesBeadsClosedSinceLastPass(t *testing.T) {
+	t.Parallel()
+	cursor := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	held := &beads.Issue{
+		ID: "gt-held", Title: "Still working", Status: "in_progress",
+		Description: "attached_at: 2026-10-20T10:05:00Z\n\n## Goal\n\nTake a while.\n",
+	}
+	fast := &beads.Issue{
+		ID: "gt-fast", Title: "Done already", Status: "closed",
+		Description: "attached_at: 2026-10-20T10:01:00Z\n\n## Goal\n\nFinish fast.\n",
+	}
+	store := &fakeBeadStore{results: func(o beads.ListOptions) []*beads.Issue {
+		if o.Status == "closed" {
+			return []*beads.Issue{fast}
+		}
+		return []*beads.Issue{held}
+	}}
+
+	got, err := rigBeads{b: store}.Placed(cursor)
+	if err != nil {
+		t.Fatalf("Placed: %v", err)
+	}
+	var ids []string
+	for _, b := range got {
+		ids = append(ids, b.ID)
+	}
+	if want := []string{"gt-held", "gt-fast"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("Placed = %v, want %v: the held bead and the one closed since the cursor", ids, want)
+	}
+}
+
+// With no cursor yet the pass starts from its own time, so Placed skips the
+// closed read rather than pulling every bead ever closed.
+func TestPlacedSkipsClosedBeadsWithoutACursor(t *testing.T) {
+	t.Parallel()
+	store := &fakeBeadStore{}
+
+	if _, err := (rigBeads{b: store}).Placed(time.Time{}); err != nil {
+		t.Fatalf("Placed: %v", err)
+	}
+	if len(store.opts) != 1 || store.opts[0].Status != "in_progress,hooked" {
+		t.Errorf("asks = %+v, want only the held-bead read before a cursor exists", store.opts)
 	}
 }

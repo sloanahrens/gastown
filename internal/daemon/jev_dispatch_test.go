@@ -123,7 +123,7 @@ func TestJevDispatchConfigDecodesFromDaemonJSON(t *testing.T) {
 // stubPlaced lists the beads a pass reads; the pass only ever reads them.
 type stubPlaced struct{ all []*beads.Issue }
 
-func (s stubPlaced) Placed() ([]*beads.Issue, error) { return s.all, nil }
+func (s stubPlaced) Placed(time.Time) ([]*beads.Issue, error) { return s.all, nil }
 
 // dispatchCountingAsker answers every battery the same way and counts the calls.
 type dispatchCountingAsker struct{ calls int }

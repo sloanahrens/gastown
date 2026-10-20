@@ -89,10 +89,41 @@ type rigBeads struct {
 	b beadLister
 }
 
-// Placed lists the beads a worker holds: in_progress, and hooked, which is the
-// status a sling gives a bead it places.
-func (r rigBeads) Placed() ([]*beads.Issue, error) {
-	return r.b.List(beads.ListOptions{Status: "in_progress,hooked"})
+// Placed lists the beads a pass considers since t: the ones a worker holds
+// (in_progress, and hooked, which is the status a sling gives a bead it
+// places), and the ones closed since t. The second read is what keeps a fast
+// placement in the battery: a bead slung at 10:01 and closed by 10:10 is on no
+// seat when a quarter-hourly pass runs, so only its close shows it was placed.
+// A zero t means no pass has run yet, so there is nothing closed to catch up.
+func (r rigBeads) Placed(t time.Time) ([]*beads.Issue, error) {
+	held, err := r.b.List(beads.ListOptions{Status: "in_progress,hooked"})
+	if err != nil {
+		return nil, err
+	}
+	if t.IsZero() {
+		return held, nil
+	}
+	closed, err := r.b.List(beads.ListOptions{Status: "closed", ClosedAfter: t, Priority: -1, Limit: 0})
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(held)+len(closed))
+	out := make([]*beads.Issue, 0, len(held)+len(closed))
+	for _, issue := range held {
+		if issue == nil {
+			continue
+		}
+		seen[issue.ID] = true
+		out = append(out, issue)
+	}
+	for _, issue := range closed {
+		if issue == nil || seen[issue.ID] {
+			continue
+		}
+		seen[issue.ID] = true
+		out = append(out, issue)
+	}
+	return out, nil
 }
 
 // Ensure the production dependencies satisfy the pass's seams.
