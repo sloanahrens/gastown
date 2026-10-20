@@ -92,12 +92,16 @@ prints every command and changes nothing.`,
 	RunE: runPowerCommand(power.Off, true),
 }
 
+// powerBootHoldNeedsForgejo is false: boot-hold only writes the hold and the
+// state record, so it must run even when the town settings cannot be decoded.
+const powerBootHoldNeedsForgejo = false
+
 var powerBootHoldCmd = &cobra.Command{
 	Use:   "boot-hold",
 	Short: "Write the hold so a reboot lands in standby",
 	Long:  "Write the hold and record a boot standby. This is the login job internal/templates/launchd/com.gastown.power-boot.plist runs.",
 	Args:  cobra.NoArgs,
-	RunE:  runPowerCommand(power.BootHold, false),
+	RunE:  runPowerCommand(power.BootHold, powerBootHoldNeedsForgejo),
 }
 
 func init() {
@@ -155,6 +159,11 @@ func powerOptions(needsForgejo bool) (power.Options, error) {
 		return power.Options{}, &power.ExitError{Code: power.ExitUsage,
 			Err: fmt.Errorf("not in a Gas Town workspace: %w", err)}
 	}
+	return powerOptionsFor(townRoot, needsForgejo)
+}
+
+// powerOptionsFor is powerOptions for a town already found.
+func powerOptionsFor(townRoot string, needsForgejo bool) (power.Options, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return power.Options{}, &power.ExitError{Code: power.ExitUsage,
