@@ -42,6 +42,12 @@ const (
 	attentionBeadTimeout = 30 * time.Second
 	// attentionTimeout bounds one attention tick's collectors.
 	attentionTimeout = 2 * time.Minute
+	// attentionAuditShareDivisor splits that budget: the resolved-FAIL audit
+	// runs before the collectors, under the tick's context, so an audit whose
+	// bd reads stall would otherwise spend the whole budget and leave the
+	// collectors an expired context and the queue a tick stale. It gets one
+	// part and the collectors the rest.
+	attentionAuditShareDivisor = 4
 	// attentionRefusalWindow is how long a gt done refusal stays an item. A
 	// refusal older than this has either been acted on or outlived its
 	// branch; keeping it forever would turn the queue into a history file.
@@ -312,6 +318,13 @@ type attentionSources struct {
 // too: the queue is a report about the town, and an E-stopped town still
 // wants one.
 func (d *Daemon) writeAttention() {
+	d.writeAttentionWith(attentionTimeout, d.attentionSources)
+}
+
+// writeAttentionWith is writeAttention over a tick of the given budget and the
+// reads sources builds, so a test can drive a stalling read against a short
+// budget instead of the real one.
+func (d *Daemon) writeAttentionWith(budget time.Duration, sources func(now time.Time) *attentionSources) {
 	cache := d.lastAttention
 	if cache == nil {
 		cache = &attentionCache{}
@@ -332,10 +345,10 @@ func (d *Daemon) writeAttention() {
 	if err != nil {
 		d.logger.Printf("attention: reading acks: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), attentionTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	now := d.clk().Now()
-	src := d.attentionSources(now)
+	src := sources(now)
 	if cache.reworkNotes != nil {
 		src.reworkNotes = cache.reworkNotes
 	}
@@ -350,12 +363,25 @@ func (d *Daemon) writeAttention() {
 	}
 	src.tips = &tips
 	// The one write of the attention pass runs before the collectors, so a FAIL
-	// whose findings closed leaves the queue on this tick.
-	wrote, err := src.auditResolvedRiskFails(ctx)
+	// whose findings closed leaves the queue on this tick. It runs under its
+	// own share of the tick's budget: its bd reads are unbounded by the number
+	// of landings, and the collectors behind it must still get a live context
+	// (gt-0h4i0).
+	auditShare := budget / attentionAuditShareDivisor
+	auditCtx, auditCancel := context.WithTimeout(ctx, auditShare)
+	wrote, err := src.auditResolvedRiskFails(auditCtx)
+	auditOut := auditCtx.Err()
+	auditCancel()
 	for _, w := range wrote {
 		d.logger.Printf("attention: audited resolved risk-path FAIL %s", w)
 	}
-	if err != nil {
+	switch {
+	case ctx.Err() == nil && errors.Is(auditOut, context.DeadlineExceeded):
+		// The audit ran out of its own share, not the tick's: the collectors
+		// below still have the rest, and the findings it did not reach wait
+		// for the next tick.
+		d.logger.Printf("attention: auditing resolved risk-path FAILs stopped at its %s share of the tick (%d audited): %v", auditShare, len(wrote), err)
+	case err != nil:
 		d.logger.Printf("attention: auditing resolved risk-path FAILs: %v", err)
 	}
 	state := d.attentionTick(ctx, src, prev, acks, now)

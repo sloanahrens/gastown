@@ -3021,6 +3021,20 @@ func (d *Daemon) hasAssignedOpenWork(rigName, assignee string) (bool, error) {
 // that need the bead's own record read it back by ID (beadFinished), which is
 // where its last write comes from.
 func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, error) {
+	ids, err := d.assignedActiveWorkBeads(rigName, assignee, 1)
+	if len(ids) > 0 {
+		return ids[0], nil
+	}
+	return "", err
+}
+
+// assignedActiveWorkBeads lists the IDs of the work beads assigned to the
+// polecat with status hooked or in_progress, hooked first, and stops querying
+// once limit are found. The error is the last failed query's: a caller that
+// needs every assignment reads it as unknown, since the failed status may be
+// the one holding the rest.
+func (d *Daemon) assignedActiveWorkBeads(rigName, assignee string, limit int) ([]string, error) {
+	var ids []string
 	var lastErr error
 	for _, status := range []string{"hooked", "in_progress"} {
 		issues, err := d.assignedWork(rigName, assignee, status)
@@ -3029,12 +3043,15 @@ func (d *Daemon) assignedActiveWorkBead(rigName, assignee string) (string, error
 			continue
 		}
 		for _, issue := range issues {
-			if issue.ID != "" {
-				return issue.ID, nil
+			if issue != nil && issue.ID != "" && !slices.Contains(ids, issue.ID) {
+				ids = append(ids, issue.ID)
 			}
 		}
+		if len(ids) >= limit {
+			break
+		}
 	}
-	return "", lastErr
+	return ids, lastErr
 }
 
 // polecatSpawnGrace is how long after its work bead was hooked a polecat

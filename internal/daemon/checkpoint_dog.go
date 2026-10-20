@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/checkpoint"
 	gtgit "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -486,18 +487,41 @@ func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (bl
 	// the one gt done applies (the label plus a description naming every
 	// reverted path), so the dog and gt done agree on a directed deletion. The
 	// dog stands down without an escalation.
-	if note, waived := d.checkpointDeletesBySpec(workDir, rigName, polecatName, report.Reverted); waived {
-		d.logger.Printf("checkpoint_dog: %s/%s: %s", rigName, polecatName, note)
-		return false, ""
+	//
+	// Reading the bead is the slow part of this guard — a bd list and a show,
+	// each bounded by workBeadReadTimeout — and the polecat goes on working
+	// while they run, so the waiver judges the index as it is after those
+	// reads, not the tree read before them: a commit that landed in the
+	// meantime is decided by what would be committed now, and a tree that
+	// changed under the reads does not inherit a waiver for a different
+	// deletion (gt-0h4i0).
+	reverted := report.Reverted
+	if issue := d.checkpointWaiverBead(workDir, rigName, polecatName); issue != nil {
+		reverts, err := d.revertsNow(g, target)
+		if err != nil {
+			return true, fmt.Sprintf("could not re-inspect the pending checkpoint after reading the deletes-by-spec bead: %v", err)
+		}
+		if len(reverts) == 0 {
+			// The tree stopped reverting while the bead was read: nothing is
+			// left to waive and nothing to refuse.
+			return false, ""
+		}
+		// The refusal below names what is staged now, not the set read
+		// before the bd reads.
+		reverted = reverts
+		if note, waived := revertwaiver.Note(issue, reverts); waived {
+			d.logger.Printf("checkpoint_dog: %s/%s: %s", rigName, polecatName, note)
+			return false, ""
+		}
 	}
 
 	var paths []string
-	for _, f := range report.Reverted {
+	for _, f := range reverted {
 		paths = append(paths, f.Paths...)
 	}
 	reason = fmt.Sprintf(
 		"staged content reverts %d commit(s) already merged to %s, across %d path(s): %s",
-		len(report.Reverted), target, len(paths), strings.Join(paths, ", "))
+		len(reverted), target, len(paths), strings.Join(paths, ", "))
 
 	if alert := d.checkpointRevertAlert; alert != nil {
 		key := fmt.Sprintf("checkpoint_dog:revert-guard:%s/%s", rigName, polecatName)
@@ -511,24 +535,39 @@ func (d *Daemon) checkpointRevertGuard(workDir, rigName, polecatName string) (bl
 	return true, reason
 }
 
-// checkpointDeletesBySpec reports whether the bead the checkpointed branch
-// carries directs the deletions in reverted (revertwaiver.Note), and the note
-// saying so. A bead that cannot be found or read waives nothing: the refusal
-// stands, because a check that could not run must not read as a check that
-// passed.
-func (d *Daemon) checkpointDeletesBySpec(workDir, rigName, polecatName string, reverted []gtgit.RevertedMerge) (string, bool) {
+// checkpointWaiverBead reads the bead whose direction a checkpoint's deletions
+// could follow: the one checkpointedWorkBead names. A bead that cannot be
+// found or read waives nothing — nil — so the refusal stands, because a check
+// that could not run must not read as a check that passed. The caller decides
+// the waiver against the tree staged after this read (revertwaiver.Note).
+func (d *Daemon) checkpointWaiverBead(workDir, rigName, polecatName string) *beads.Issue {
 	if d.config == nil || d.config.TownRoot == "" {
-		return "", false
+		return nil
 	}
 	id, err := d.checkpointedWorkBead(workDir, rigName, polecatName)
 	if err != nil || id == "" {
-		return "", false
+		return nil
 	}
 	issue, err := d.workBeads(d.workBeadsEnv(rigName), workBeadReadTimeout).Show(id)
 	if err != nil {
-		return "", false
+		return nil
 	}
-	return revertwaiver.Note(issue, reverted)
+	return issue
+}
+
+// revertsNow re-reads the index the way checkpointRevertGuard starts: what the
+// tree staged right now would revert of target. It runs after the waiver's bd
+// reads, so the guard decides on the deletion a commit made now would record.
+func (d *Daemon) revertsNow(g daemonGit, target string) ([]gtgit.RevertedMerge, error) {
+	tree, err := g.WriteTree()
+	if err != nil {
+		return nil, fmt.Errorf("git write-tree: %w", err)
+	}
+	report, err := gtgit.DetectRevertedMerges(g, target, tree)
+	if err != nil {
+		return nil, fmt.Errorf("verifying the pending checkpoint against %s: %w", target, err)
+	}
+	return report.Reverted, nil
 }
 
 // checkpointedWorkBead returns the work bead that directs this checkpoint's
@@ -538,7 +577,7 @@ func (d *Daemon) checkpointDeletesBySpec(workDir, rigName, polecatName string, r
 // branch is submitted under gt-NEW, so the waiver is read from gt-NEW here too
 // (gt-aupx1). The seat's assigned active bead answers alone only when the
 // branch names no issue for this seat — a legacy branch, a detached HEAD, or a
-// branch another seat wrote.
+// branch another seat wrote — and only when there is exactly one of them.
 func (d *Daemon) checkpointedWorkBead(workDir, rigName, polecatName string) (string, error) {
 	assignee := fmt.Sprintf("%s/polecats/%s", rigName, polecatName)
 	if branch, err := d.gitAt(workDir).CurrentBranch(); err == nil {
@@ -546,7 +585,28 @@ func (d *Daemon) checkpointedWorkBead(workDir, rigName, polecatName string) (str
 			return d.resolveStaleBranchBead(rigName, assignee, meta.Issue)
 		}
 	}
-	return d.assignedActiveWorkBead(rigName, assignee)
+	return d.soleActiveWorkBead(rigName, assignee)
+}
+
+// soleActiveWorkBead returns the one work bead assigned to the seat with status
+// hooked or in_progress, and "" when the seat holds none or more than one.
+// A polecat_branch_template the package cannot parse leaves the seat's own
+// assignments as the only source, and a seat holding two active beads cannot
+// say which of them the deletions belong to: reading the waiver from an
+// arbitrary one would let a checkpoint through on the wrong bead's authority
+// (gt-0h4i0). A list that cannot be read is an error, never "none", because
+// the failed status may be the one holding the other bead.
+func (d *Daemon) soleActiveWorkBead(rigName, assignee string) (string, error) {
+	ids, err := d.assignedActiveWorkBeads(rigName, assignee, 2)
+	switch {
+	case len(ids) > 1:
+		return "", nil
+	case err != nil:
+		return "", err
+	case len(ids) == 1:
+		return ids[0], nil
+	}
+	return "", nil
 }
 
 // resolveStaleBranchBead applies gt done's stale-branch guard (hq-l0fj) to the

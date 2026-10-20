@@ -1760,3 +1760,52 @@ func TestCollectTierSweepRed_NoRigsWhenThePatrolIsOff(t *testing.T) {
 		t.Errorf("items = %+v, want none: the fixture's sweep patrol is off", items)
 	}
 }
+
+// TestWriteAttentionRiskAuditDoesNotStarveTheCollectors covers gt-0h4i0: the
+// resolved-FAIL audit runs under the tick's context before the collectors, and
+// its bd reads are unbounded by how many risk-path landings there are. An audit
+// whose read will not answer used to spend the whole budget, so the collectors
+// ran on an expired context and the queue went stale. The audit now gets a
+// bounded share, and a collector behind it still answers.
+func TestWriteAttentionRiskAuditDoesNotStarveTheCollectors(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	w := newRiskAuditWorld(f)
+	head := strings.Repeat("a", 40)
+	w.land("gt-abc", head, failNote(head, "gt-fa"))
+	w.status["gt-fa"] = "closed"
+	// The audit's read of the finding never answers: it holds until its own
+	// context ends, the shape of a bd show that has stopped responding.
+	f.src.findingIssue = func(ctx context.Context, _ string) (*beads.Issue, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+
+	// The tick's budget is short so the test does not wait out the real one,
+	// and the one item it must end up carrying is the escalation below.
+	var collectorErr error
+	f.src.escalations = func(ctx context.Context) ([]*beads.Issue, error) {
+		if err := ctx.Err(); err != nil {
+			collectorErr = err
+			return nil, err
+		}
+		return []*beads.Issue{{ID: "gt-esc", Title: "an unhandled escalation"}}, nil
+	}
+
+	f.d.writeAttentionWith(400*time.Millisecond, func(time.Time) *attentionSources { return f.src })
+
+	if collectorErr != nil {
+		t.Fatalf("the collectors ran on an expired context (%v): the audit spent the whole tick", collectorErr)
+	}
+	// The audit running out of its own share reads differently from a failed
+	// read, so the operator can tell a slow bd from a broken one.
+	if got := f.logs.String(); !strings.Contains(got, "stopped at its") {
+		t.Errorf("log = %q, want the audit's share running out named", got)
+	}
+	st, err := attention.ReadState(f.d.config.TownRoot)
+	if err != nil {
+		t.Fatalf("ReadState: %v", err)
+	}
+	itemByKey(t, st, "esc:gt-esc")
+}

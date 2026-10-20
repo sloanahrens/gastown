@@ -17,6 +17,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
 	"github.com/steveyegge/gastown/internal/lock"
@@ -347,5 +348,65 @@ func TestJevDedupeTriggerLogsAFailedOpenOncePerInterval(t *testing.T) {
 	}
 	if n := strings.Count(r.logs.String(), "jev_dedupe: error: no beads directory"); n != 1 {
 		t.Errorf("error logged %d times, want 1: %q", n, r.logs)
+	}
+}
+
+// estoppingAsker answers every question and raises the town E-stop during its
+// first call, standing in for an operator hitting the switch while a pass is
+// billing findings.
+type estoppingAsker struct {
+	t     *testing.T
+	town  string
+	calls int
+}
+
+func (a *estoppingAsker) Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error) {
+	a.calls++
+	if a.calls == 1 {
+		if err := estop.Activate(a.town, estop.TriggerManual, "test E-stop mid-pass"); err != nil {
+			a.t.Fatalf("raise the E-stop: %v", err)
+		}
+	}
+	return (batteryAsker{}).Ask(ctx, state, qs)
+}
+
+// TestJevDedupePassStopsBetweenCallsWhenEstopped covers gt-0h4i0: the E-stop
+// kept a pass from starting, but one already in flight went on paying for every
+// finding it reached. The pass now checks the E-stop between billed calls: the
+// call in flight finishes and is recorded, and the findings behind it wait for a
+// pass run after the E-stop lifts.
+func TestJevDedupePassStopsBetweenCallsWhenEstopped(t *testing.T) {
+	t.Parallel()
+	r := newJevDedupeRig(t)
+	created := time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)
+	var all []*beads.Issue
+	for i, id := range []string{"gt-a", "gt-b", "gt-c"} {
+		all = append(all, &beads.Issue{
+			ID: id, Title: "Found: something", Status: "open",
+			CreatedAt: created.Add(time.Duration(i) * time.Second).Format(time.RFC3339),
+		})
+	}
+	r.pass.Beads = stubDedupeBeads{all: all}
+	asker := &estoppingAsker{t: t, town: r.town}
+	r.pass.Asker = asker
+	if err := os.MkdirAll(filepath.Dir(r.pass.CursorPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cursor := `{"time":"2026-10-20T10:00:00Z"}`
+	if err := os.WriteFile(r.pass.CursorPath, []byte(cursor), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	r.d.runJevDedupe()
+
+	if asker.calls != 1 {
+		t.Errorf("Jev was asked about %d findings, want only the one in flight when the E-stop went up", asker.calls)
+	}
+	lines, err := dedupe.ReadRecent(r.pass.LogPath, 5)
+	if err != nil || len(lines) != 1 || lines[0].Finding != "gt-a" {
+		t.Errorf("log lines = %+v, %v, want the one gt-a line recorded", lines, err)
+	}
+	if !strings.Contains(r.logs.String(), "jev_dedupe: stopped:") {
+		t.Errorf("log = %q, want the pass to say it stopped for the E-stop", r.logs)
 	}
 }

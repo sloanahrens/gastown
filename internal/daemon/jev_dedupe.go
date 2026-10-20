@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/estop"
+	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
 )
 
@@ -69,7 +71,20 @@ func (d *Daemon) runJevDedupe() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), jevDedupeRunBudget)
 	defer cancel()
+	// The E-stop holds the patrol from starting (the step is lifecycle), but a
+	// pass already in flight went on paying until the daily cap or its budget
+	// (gt-0h4i0). The gate checks between billed calls.
+	gate := &estopGatedAsker{
+		Asker:  pass.Asker,
+		cancel: cancel,
+		active: func() bool { return estop.IsActive(d.config.TownRoot) },
+	}
+	pass.Asker = gate
 	sum, err := pass.Run(ctx)
+	if gate.stopped {
+		d.logger.Printf("jev_dedupe: stopped: E-STOP active after asking %d finding(s)", sum.Asked)
+		return
+	}
 	if errors.Is(err, dedupe.ErrBusy) {
 		d.logger.Printf("jev_dedupe: skipped: %v", err)
 		return
@@ -81,4 +96,30 @@ func (d *Daemon) runJevDedupe() {
 	if sum.Asked > 0 || sum.CapReached {
 		d.logger.Printf("jev_dedupe: asked %d findings (daily cap reached: %v)", sum.Asked, sum.CapReached)
 	}
+}
+
+// estopGatedAsker is the E-stop's check between one billed call and the next
+// in a running pass. The pass's own loop asks before the call, so a call in
+// flight finishes and is logged and recorded: ending the pass from the
+// context leaves nothing half-asked that the next pass would bill again. Every
+// later finding is left for a pass run after the E-stop lifts.
+type estopGatedAsker struct {
+	dedupe.Asker
+	// cancel ends the pass's context, which dedupe.Run reads after the call
+	// in flight and reports instead of asking the next finding.
+	cancel context.CancelFunc
+	// active reports whether the town E-stop is up now.
+	active func() bool
+	// stopped is true once the gate has ended the pass. The pass runs on one
+	// goroutine, so this needs no lock.
+	stopped bool
+}
+
+func (a *estopGatedAsker) Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error) {
+	if a.active() {
+		a.stopped = true
+		a.cancel()
+		return nil, context.Canceled
+	}
+	return a.Asker.Ask(ctx, state, qs)
 }

@@ -9,6 +9,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -669,12 +670,27 @@ func newCheckpointRevertScenario(t *testing.T, d *Daemon) (string, gitfake.WorkT
 // worktree's branch named, so a test can pin the bead the branch carries.
 func newCheckpointRevertScenarioOn(t *testing.T, d *Daemon, branch string) (string, gitfake.WorkTree) {
 	t.Helper()
+	return newCheckpointRevertScenarioFiles(t, d, branch)
+}
+
+// newCheckpointRevertScenarioFiles is newCheckpointRevertScenarioOn with more
+// files, each merged in a commit of its own: an extra one is "<name>\n" at the
+// base and "<name>\ntouch <name>\n" once merged, so a test can stage a revert
+// of one merged commit, of several, and move between them. The touched line is
+// unique to its file: a line that survives elsewhere reads as a relocation,
+// not a revert.
+func newCheckpointRevertScenarioFiles(t *testing.T, d *Daemon, branch string, extra ...string) (string, gitfake.WorkTree) {
+	t.Helper()
+	baseFiles := map[string]string{"keep.txt": "keep\n"}
+	for _, name := range extra {
+		baseFiles[name] = name + "\n"
+	}
 	f := useGitfake(t, d)
 	dir := t.TempDir()
 	origin, polecat := filepath.Join(dir, "origin.git"), filepath.Join(dir, "polecat")
 
 	f.InitBare(t, origin)
-	base := f.Commit(t, origin, "main", "base", map[string]string{"keep.txt": "keep\n"})
+	base := f.Commit(t, origin, "main", "base", baseFiles)
 	// The polecat worktree is cut here, at the base commit, on its own branch.
 	f.SetRef(t, origin, "refs/heads/"+branch, base)
 	if err := f.Open(dir).CloneBranch(origin, polecat, branch); err != nil {
@@ -684,6 +700,9 @@ func newCheckpointRevertScenarioOn(t *testing.T, d *Daemon, branch string) (stri
 	// A different polecat's work merges into main while this worktree sits at
 	// the base commit — the gt-wprt/gt-rv8h merges from the incident report.
 	f.Commit(t, origin, "main", "merged: other polecat's work", map[string]string{"keep.txt": "keep\nmain touch\n"})
+	for _, name := range extra {
+		f.Commit(t, origin, "main", "merged: "+name, map[string]string{name: name + "\ntouch " + name + "\n"})
+	}
 
 	// The reused worktree picks up the merge, so its own ancestry already
 	// contains it — exactly what a shared-worktree reset leaves behind.
@@ -1092,13 +1111,142 @@ func TestCheckpointWorktreeDeletesBySpec(t *testing.T) {
 	}
 }
 
-// TestCheckpointDeletesBySpecFailsClosed covers every lookup the deletes-by-spec
-// waiver makes: a missing config, an unreadable work-bead store and a bead that
-// cannot be read all waive nothing, so the refusal and its escalation stand
-// (gt-rp83g).
-func TestCheckpointDeletesBySpecFailsClosed(t *testing.T) {
+// secondWriteTreeFails is a daemonGit whose WriteTree answers once and then
+// fails, the shape of an index that cannot be re-read after the waiver's bd
+// reads. The count is shared across the handles the daemon opens.
+type secondWriteTreeFails struct {
+	daemonGit
+	calls *int
+}
+
+func (g secondWriteTreeFails) WriteTree() (string, error) {
+	*g.calls++
+	if *g.calls > 1 {
+		return "", errors.New("index.lock held")
+	}
+	return g.daemonGit.WriteTree()
+}
+
+// TestCheckpointRevertGuardJudgesTheWaiverAgainstTheTreeAfterTheBeadRead covers
+// gt-0h4i0: the deletes-by-spec bead is read with bd while the polecat goes on
+// working, so the staged set can move under the read. The waiver is judged
+// against the tree staged after it, the refusal names that tree's paths, and a
+// re-read that fails refuses rather than waives.
+func TestCheckpointRevertGuardJudgesTheWaiverAgainstTheTreeAfterTheBeadRead(t *testing.T) {
 	t.Parallel()
-	reverted := []gtgit.RevertedMerge{{Commit: "abc1234", Paths: []string{"keep.txt"}}}
+	const merged = "keep\nmain touch\n"
+	tests := []struct {
+		name string
+		// staged are the files reverted when the guard starts.
+		staged []string
+		// duringRead runs when the guard opens the bead store.
+		duringRead func(t *testing.T, dir string, g gitfake.WorkTree)
+		// failReread makes the second write-tree fail.
+		failReread  bool
+		wantBlocked bool
+		wantReason  []string
+	}{
+		{
+			name:   "the tree stops reverting during the read",
+			staged: []string{"keep.txt"},
+			duringRead: func(t *testing.T, dir string, g gitfake.WorkTree) {
+				writeWorkFiles(t, dir, map[string]string{"keep.txt": merged})
+				if err := g.Add("keep.txt"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:   "a path the bead does not name leaves the tree during the read",
+			staged: []string{"keep.txt", "other.txt"},
+			duringRead: func(t *testing.T, dir string, g gitfake.WorkTree) {
+				writeWorkFiles(t, dir, map[string]string{"other.txt": "other.txt\ntouch other.txt\n"})
+				if err := g.Add("other.txt"); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:   "a path the bead does not name joins the tree during the read",
+			staged: []string{"keep.txt"},
+			duringRead: func(t *testing.T, dir string, g gitfake.WorkTree) {
+				writeWorkFiles(t, dir, map[string]string{"other.txt": "other.txt\n"})
+				if err := g.Add("other.txt"); err != nil {
+					t.Fatal(err)
+				}
+			},
+			wantBlocked: true,
+			wantReason:  []string{"keep.txt", "other.txt"},
+		},
+		{
+			name:        "the re-read fails",
+			staged:      []string{"keep.txt"},
+			failReread:  true,
+			wantBlocked: true,
+			wantReason:  []string{"could not re-inspect the pending checkpoint", "index.lock held"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			alerts := &checkpointAlertRecorder{}
+			bd := newWorkBD(t)
+			bd.db.Seed(beads.Issue{ID: "gt-del", Status: "hooked", Assignee: "rig/polecats/polecat",
+				Labels: []string{"deletes-by-spec"}, Description: "Delete keep.txt."})
+			d := &Daemon{
+				logger:                log.New(io.Discard, "", 0),
+				config:                &Config{TownRoot: t.TempDir()},
+				checkpointRevertAlert: alerts.alert,
+			}
+			polecat, g := newCheckpointRevertScenarioFiles(t, d, "polecat/turquoise/gt-test", "other.txt")
+			if tt.failReread {
+				open, calls := d.openGitFn, new(int)
+				d.openGitFn = func(dir string) daemonGit { return secondWriteTreeFails{open(dir), calls} }
+			}
+			// The bead store opens once, and that is the moment the polecat's
+			// own work moves the index.
+			var once sync.Once
+			d.openWorkBeads = func(env []string, timeout time.Duration) workBeadReader {
+				once.Do(func() {
+					if tt.duringRead != nil {
+						tt.duringRead(t, polecat, g)
+					}
+				})
+				return bd.open(env, timeout)
+			}
+			for _, name := range tt.staged {
+				content := name + "\n"
+				if name == "keep.txt" {
+					content = "keep\n"
+				}
+				writeWorkFiles(t, polecat, map[string]string{name: content})
+				if err := g.Add(name); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			blocked, reason := d.checkpointRevertGuard(polecat, "rig", "polecat")
+			if blocked != tt.wantBlocked {
+				t.Fatalf("checkpointRevertGuard blocked = %v (%q), want %v", blocked, reason, tt.wantBlocked)
+			}
+			for _, want := range tt.wantReason {
+				if !strings.Contains(reason, want) {
+					t.Errorf("reason = %q, want it to name %q", reason, want)
+				}
+			}
+			if len(alerts.calls) > 1 || (len(alerts.calls) == 1 && !blocked) {
+				t.Errorf("escalations = %+v, want one only for a revert that stands", alerts.calls)
+			}
+		})
+	}
+}
+
+// TestCheckpointWaiverBeadFailsClosed covers every lookup the deletes-by-spec
+// waiver makes: a missing config, an unreadable work-bead store and a bead that
+// cannot be read all name no bead, so no waiver can be read from them and the
+// refusal and its escalation stand (gt-rp83g).
+func TestCheckpointWaiverBeadFailsClosed(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name    string
 		config  func(*testing.T) *Config
@@ -1131,14 +1279,43 @@ func TestCheckpointDeletesBySpecFailsClosed(t *testing.T) {
 			}
 			useGitfake(t, d)
 
-			note, waived := d.checkpointDeletesBySpec(t.TempDir(), "rig", "polecat", reverted)
-			if waived != tt.want {
-				t.Fatalf("checkpointDeletesBySpec waived = %v (%q), want %v", waived, note, tt.want)
+			issue := d.checkpointWaiverBead(t.TempDir(), "rig", "polecat")
+			if (issue != nil) != tt.want {
+				t.Fatalf("checkpointWaiverBead = %+v, want a bead: %v", issue, tt.want)
 			}
-			if waived && note == "" {
-				t.Error("a waiver carried no note for the log")
+			if tt.want && issue.ID != "gt-del" {
+				t.Errorf("waiver bead = %q, want gt-del", issue.ID)
 			}
 		})
+	}
+}
+
+// TestCheckpointedWorkBeadCustomBranchTemplateWithTwoActiveAssignmentsNamesNone
+// covers gt-0h4i0: a custom polecat_branch_template gives a branch
+// ParseBranchName does not understand, so the waiver falls back to the seat's
+// active assignments. A seat holding two of them cannot say which bead directs
+// the deletions, and naming either one would let a checkpoint through on the
+// wrong bead's authority.
+func TestCheckpointedWorkBeadCustomBranchTemplateWithTwoActiveAssignmentsNamesNone(t *testing.T) {
+	t.Parallel()
+	bd := newWorkBD(t)
+	bd.db.Seed(beads.Issue{ID: "gt-a", Status: "hooked", Assignee: "rig/polecats/polecat"})
+	bd.db.Seed(beads.Issue{ID: "gt-b", Status: "in_progress", Assignee: "rig/polecats/polecat"})
+	d := &Daemon{
+		logger:        log.New(io.Discard, "", 0),
+		config:        townConfig(t),
+		openWorkBeads: bd.open,
+	}
+	// A custom template's branch: no polecat/ prefix, so the branch names no
+	// issue this package can read.
+	polecat, _ := newCheckpointRevertScenarioOn(t, d, "feature/gt-custom")
+
+	got, err := d.checkpointedWorkBead(polecat, "rig", "polecat")
+	if err != nil {
+		t.Fatalf("checkpointedWorkBead: %v", err)
+	}
+	if got != "" {
+		t.Errorf("checkpointedWorkBead = %q, want no bead: two active assignments and a branch the template does not parse", got)
 	}
 }
 
