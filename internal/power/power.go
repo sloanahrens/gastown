@@ -235,15 +235,29 @@ func (e *engine) exec(ctx context.Context, dir, name string, args ...string) (st
 	return e.o.Run(ctx, dir, name, args...)
 }
 
+// probeTimeoutCap is the longest one probe may run, and probeTimeoutFloor the
+// shortest a probe that starts at or past the deadline gets. Without the cap a
+// probe that hangs (docker info on a wedged engine) holds the wait past its own
+// timeout until the operator presses Ctrl-C.
+const (
+	probeTimeoutCap   = 30 * time.Second
+	probeTimeoutFloor = time.Second
+)
+
 // waitUntil polls probe every three seconds until it reports true, the
-// timeout passes, or ctx ends.
+// timeout passes, or ctx ends. Each probe runs on a context that ends at the
+// wait's deadline, or after probeTimeoutCap if that is sooner, so a hung probe
+// reads as not ready instead of blocking the wait.
 func (e *engine) waitUntil(ctx context.Context, desc string, timeout time.Duration, probe func(context.Context) bool) error {
 	if e.o.DryRun {
 		fmt.Fprintf(e.o.Out, "  [dry-run] wait up to %s for: %s\n", timeout, desc)
 		return nil
 	}
 	deadline := e.o.Now().Add(timeout)
-	for !probe(ctx) {
+	for !e.probeOnce(ctx, deadline, probe) {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !e.o.Now().Before(deadline) {
 			return fmt.Errorf("timed out waiting for %s", desc)
 		}
@@ -253,6 +267,17 @@ func (e *engine) waitUntil(ctx context.Context, desc string, timeout time.Durati
 	}
 	e.say("%s: ok", desc)
 	return nil
+}
+
+// probeOnce runs probe on a context bounded by the wait's deadline.
+func (e *engine) probeOnce(ctx context.Context, deadline time.Time, probe func(context.Context) bool) bool {
+	bound := deadline.Sub(e.o.Now())
+	if bound <= 0 {
+		bound = probeTimeoutFloor
+	}
+	pctx, cancel := context.WithTimeout(ctx, min(bound, probeTimeoutCap))
+	defer cancel()
+	return probe(pctx)
 }
 
 // loaded reports whether launchd knows the job.
