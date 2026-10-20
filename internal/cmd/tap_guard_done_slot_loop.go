@@ -23,7 +23,9 @@ import (
 //     The zsh `repeat` and `foreach` loops (the shell this town runs) are
 //     policed the same way, in every spelling zsh accepts: `repeat N cmd`
 //     (which repeats the whole `&&` / `||` / `|` list), `repeat N do … done`,
-//     `repeat N { … }`, `foreach NAME (…) … end` and `foreach NAME (…) { … }`,
+//     `repeat N { … }`, `foreach NAME (…) … end`, `foreach NAME (…) { … }`,
+//     and the `do`-less `for` forms: `for NAME (…) { … }`, `for NAME in …; { … }`,
+//     `for NAME (…) cmd` and `for NAME in …; cmd` (gt-yx8jn). Each sits
 //     behind a `noglob` / `nocorrect` / `builtin` / `exec` modifier.
 //  2. A repeat wrapper — `xargs` / `watch` — whose OWN payload runs the gate.
 //     The gate is looked for in that wrapper's arguments, never in the command
@@ -197,11 +199,11 @@ func doneSlotLoopHasBlockingLoop(tokens, lowerTokens []string) bool {
 	return false
 }
 
-// doneSlotLoopHasZshLoop reports whether a zsh `repeat` or `foreach` at a
-// command position runs the gate in its body. zsh closes these with `}`, `done`
-// or `end`, and a `repeat COUNT gt done` line has no closer at all, so the depth
-// walk above never sees them close (gt-yjep0). Each body is found on its own
-// and judged as the command line it is.
+// doneSlotLoopHasZshLoop reports whether a zsh `repeat`, `foreach` or `for`
+// without `do` at a command position runs the gate in its body. zsh closes
+// these with `}`, `done` or `end`, and a `repeat COUNT gt done` line has no
+// closer at all, so the depth walk above never sees them close (gt-yjep0,
+// gt-yx8jn). Each body is found on its own and judged as the command line it is.
 func doneSlotLoopHasZshLoop(tokens, lowerTokens []string) bool {
 	commandWords := doneSlotLoopSegmentCommandWords(tokens)
 	for i := range lowerTokens {
@@ -214,6 +216,8 @@ func doneSlotLoopHasZshLoop(tokens, lowerTokens []string) bool {
 			body = doneSlotLoopRepeatBody(tokens, lowerTokens, commandWords, i+2) // i+1 is the COUNT
 		case "foreach":
 			body = doneSlotLoopForeachBody(tokens, lowerTokens, commandWords, i+1) // i+1 is NAME
+		case "for":
+			body = doneSlotLoopZshForBody(tokens, lowerTokens, i+1) // i+1 is NAME
 		default:
 			continue
 		}
@@ -240,11 +244,52 @@ func doneSlotLoopRepeatBody(tokens, lowerTokens []string, commandWords map[int]b
 	case lowerTokens[start] == "do":
 		return doneSlotLoopDoBody(tokens, lowerTokens, commandWords, start)
 	}
+	return doneSlotLoopSublist(tokens, start)
+}
+
+// doneSlotLoopSublist returns the words from tokens[start] up to the next `;`,
+// `&` or `}`: the sublist a zsh short-form loop repeats.
+func doneSlotLoopSublist(tokens []string, start int) []string {
 	end := start
 	for end < len(tokens) && tokens[end] != ";" && tokens[end] != "&" && tokens[end] != "}" {
 		end++
 	}
 	return tokens[start:end]
+}
+
+// doneSlotLoopZshForBody returns the body of a zsh `for NAME` whose NAME sits
+// at tokens[name], in the two shapes that carry no `do`: a braced group, or the
+// short form, which runs one sublist per word. The list ends at the `;` after
+// `in WORDS`, or at the paren of `(WORDS)`. A `do` body belongs to the depth
+// walk, which closes it at its `done`, so it returns nil here.
+func doneSlotLoopZshForBody(tokens, lowerTokens []string, name int) []string {
+	start := -1
+	if name+1 < len(tokens) && lowerTokens[name+1] == "in" {
+		k := name + 2
+		for k < len(tokens) && !shellCommandSeparators[tokens[k]] {
+			k++
+		}
+		if k < len(tokens) && tokens[k] == ";" {
+			start = k + 1
+		}
+	} else {
+		for k := name + 1; k < len(tokens) && !shellCommandSeparators[tokens[k]]; k++ {
+			if strings.HasSuffix(tokens[k], ")") {
+				start = k + 1
+				break
+			}
+		}
+	}
+	if start < 0 || start >= len(tokens) {
+		return nil
+	}
+	switch {
+	case tokens[start] == "{":
+		return doneSlotLoopBracedBody(tokens, start)
+	case lowerTokens[start] == "do":
+		return nil
+	}
+	return doneSlotLoopSublist(tokens, start)
 }
 
 // doneSlotLoopBracedBody returns the words inside the brace group that opens at
