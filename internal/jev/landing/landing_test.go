@@ -37,14 +37,18 @@ func (f *fakeLandings) Since(t time.Time) ([]land.LandingRecord, error) {
 type fakeBeads struct {
 	byID  map[string]*beads.Issue
 	shown []string
+	err   error // returned by every Show when set
 }
 
 func (f *fakeBeads) Show(id string) (*beads.Issue, error) {
 	f.shown = append(f.shown, id)
+	if f.err != nil {
+		return nil, f.err
+	}
 	if b, ok := f.byID[id]; ok {
 		return b, nil
 	}
-	return nil, errors.New("no bead " + id)
+	return nil, fmt.Errorf("no bead %s: %w", id, beads.ErrNotFound)
 }
 
 // fakeGit returns scripted numstat output per head and records every range.
@@ -398,6 +402,50 @@ func TestJevLandingUnreadableBeadOrDiffIsSkipped(t *testing.T) {
 			t.Errorf("cursor at %q, want gt-a", got)
 		}
 	})
+}
+
+// A bead read that fails for any reason but a missing bead stops the pass
+// before the cursor moves, so the next pass asks about the landing again.
+func TestRunStopsOnTransientShowError(t *testing.T) {
+	t.Parallel()
+	r := newRig(t,
+		landed("gt-a", time.Minute, "internal/daemon/x.go"),
+		landed("gt-b", 2*time.Minute, "internal/daemon/y.go"),
+	)
+	outage := errors.New("dolt unreachable")
+	r.beads.err = outage
+
+	sum, err := r.pass.Run(context.Background())
+	if !errors.Is(err, outage) {
+		t.Fatalf("err = %v, want the bead read error", err)
+	}
+	if sum.Skipped != 0 || sum.Asked != 0 {
+		t.Errorf("sum = %+v, want nothing skipped or asked", sum)
+	}
+	if got := cursorBead(t, r.pass.CursorPath); got != "" {
+		t.Errorf("cursor moved to %q, want it unmoved", got)
+	}
+
+	r.beads.err = nil
+	sum, err = r.pass.Run(context.Background())
+	if err != nil || sum.Asked != 2 {
+		t.Errorf("retry sum = %+v, err = %v, want both landings asked", sum, err)
+	}
+}
+
+// A missing bead is skipped without retry and the cursor moves past it.
+func TestRunSkipsMissingBead(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, landed("gt-a", time.Minute, "internal/daemon/x.go"))
+	r.beads.err = fmt.Errorf("showing gt-a: %w", beads.ErrNotFound)
+
+	sum, err := r.pass.Run(context.Background())
+	if err != nil || sum.Skipped != 1 || sum.Asked != 0 {
+		t.Fatalf("sum = %+v, err = %v, want 1 skipped and 0 asked", sum, err)
+	}
+	if got := cursorBead(t, r.pass.CursorPath); got != "gt-a" {
+		t.Errorf("cursor at %q, want gt-a", got)
+	}
 }
 
 // cursorBead returns the bead the pass's cursor last moved to.
