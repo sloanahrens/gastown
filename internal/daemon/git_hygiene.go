@@ -19,6 +19,11 @@ import (
 // gone: it cleared every stash, which drops whatever uncommitted work someone
 // parked there, and it deleted remote branches through `gh api`; the delete is
 // now a git push guarded by the hash the merge check saw.
+//
+// Every sweep here works on refs/heads/* — the local branches, then origin's
+// branches — and fetch --prune on refs/remotes/*. refs/landed/<bead>, which
+// keeps a landed head reachable after its branch is reaped (gt-as9v8), is in
+// no namespace this patrol touches.
 const defaultGitHygieneInterval = 12 * time.Hour
 
 // gitHygieneProtected are branch names the patrol never deletes, besides the

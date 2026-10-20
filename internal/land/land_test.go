@@ -43,6 +43,7 @@ type landFixture struct {
 	realOriginMain func() string
 	realParents    func(commit string) []string
 	realSetMain    func(commit string)
+	realRef        func(dir, ref string) string
 }
 
 const fixtureBranch = "polecat/opal/gt-abc+x1"
@@ -184,6 +185,18 @@ func (f *landFixture) originMain() string {
 		return f.realOriginMain()
 	}
 	return f.git.Ref(f.origin, "refs/heads/main")
+}
+
+// refAt is what ref points at in the repository at dir, "" when it is unset.
+func (f *landFixture) refAt(dir, ref string) string {
+	f.t.Helper()
+	if f.git == nil {
+		if f.realRef == nil {
+			f.t.Fatal("refAt: the fixture has no gitfake and no realRef")
+		}
+		return f.realRef(dir, ref)
+	}
+	return f.git.Ref(dir, ref)
 }
 
 func (f *landFixture) bead() *beads.Issue {
@@ -477,6 +490,45 @@ func landsAndRecords(t *testing.T, f *landFixture) {
 	}
 	if rec.LandedCommit != res.LandedCommit || rec.PatchID != res.PatchID || rec.BeadID != "gt-abc" || rec.Head != f.work.Head || rec.OMScore != 0.9 {
 		t.Errorf("landing record = %+v", rec)
+	}
+	// gt-as9v8: the head the record names stays reachable at
+	// refs/landed/<bead>, in the rig's repository and on origin, so the
+	// landing worker may delete the branch without losing the history a
+	// worktree still holding it answers its own landing with.
+	ref := LandedRef("gt-abc")
+	for _, dir := range []string{f.repo, f.origin} {
+		if got := f.refAt(dir, ref); got != f.work.Head {
+			t.Errorf("%s in %s = %q, want the landed head %q", ref, dir, got, f.work.Head)
+		}
+	}
+}
+
+// A rework of a bead that landed before (after a revert) lands a new head,
+// and refs/landed/<bead> moves to it: the ref answers "is this worktree's
+// work landed?" for the newest landing of the bead, not the first (gt-as9v8).
+func TestLandMovesTheLandedRefOnAReLanding(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	first := f.work.Head
+	if _, err := f.lander().Land(context.Background(), f.work); err != nil {
+		t.Fatalf("first Land: %v", err)
+	}
+	ref := LandedRef("gt-abc")
+
+	// The revert put main back where the first branch forked, and the rework
+	// adds its own file on top of what landed.
+	f.base = f.originMain()
+	f.git.SetRef(t, f.origin, "refs/heads/"+fixtureBranch, f.base)
+	second := f.git.Commit(t, f.origin, fixtureBranch, "feat: add c", map[string]string{"c.txt": "more\n"})
+	f.work.Head = second
+	f.ready(second)
+	if _, err := f.lander().Land(context.Background(), f.work); err != nil {
+		t.Fatalf("second Land: %v", err)
+	}
+	for _, dir := range []string{f.repo, f.origin} {
+		if got := f.refAt(dir, ref); got != second {
+			t.Errorf("%s in %s = %q, want the re-landed head %q (first head %q)", ref, dir, got, second, first)
+		}
 	}
 }
 

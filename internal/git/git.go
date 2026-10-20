@@ -2825,6 +2825,14 @@ func (g *Git) RefExists(ref string) (bool, error) {
 	return true, nil
 }
 
+// UpdateRef points ref (a full ref name) at commit, creating it when it does
+// not exist and moving it whatever it held before (git update-ref), which is
+// how a landing leaves refs/landed/<bead> at the head it landed (gt-as9v8).
+func (g *Git) UpdateRef(ref, commit string) error {
+	_, err := g.run("update-ref", ref, commit)
+	return err
+}
+
 // IsEmpty returns true if the repository has no refs (an empty/unborn repo).
 // This is the case for newly-created repos with no commits.
 func (g *Git) IsEmpty() (bool, error) {

@@ -168,6 +168,26 @@ func (h *handle) DeleteLocalBranchIfAt(branch, expectedHash string) error {
 	return nil
 }
 
+// UpdateRef points a full ref name at commit, creating it when absent and
+// moving it whatever it held before, as git update-ref does: the write a
+// landing leaves at refs/landed/<bead> (gt-as9v8).
+func (h *handle) UpdateRef(ref, commit string) error {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := []string{"update-ref", ref, commit}
+	r, wt, err := h.locate(args...)
+	if err != nil {
+		return err
+	}
+	id, ok := h.resolve(r, wt, commit)
+	if !ok {
+		return unknownRevision(commit, args...)
+	}
+	h.f.copyObjects(r, id)
+	r.refs[ref] = id
+	return nil
+}
+
 func (h *handle) RemoteDefaultBranch() string {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
@@ -320,7 +340,9 @@ func (h *handle) ListRemoteRefsWithHashesTimeout(remote, prefix string, _ time.D
 	}
 	var refs []git.RemoteRef
 	for ref, id := range rr.refs {
-		if strings.HasPrefix(ref, prefix) && (strings.HasPrefix(ref, "refs/heads/") || strings.HasPrefix(ref, "refs/tags/")) {
+		// ls-remote --refs lists every ref under the prefix, whatever its
+		// namespace: refs/landed/<bead> is read back this way (gt-as9v8).
+		if strings.HasPrefix(ref, "refs/") && strings.HasPrefix(ref, prefix) {
 			refs = append(refs, git.RemoteRef{Hash: id, Name: ref})
 		}
 	}

@@ -18,6 +18,7 @@ import (
 // the same behavior.
 type Repo interface {
 	Rev(ref string) (string, error)
+	UpdateRef(ref, commit string) error
 	IsAncestor(ancestor, descendant string) (bool, error)
 	MergeBase(a, b string) (string, error)
 	CommitTime(rev string) (time.Time, error)

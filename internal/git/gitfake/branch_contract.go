@@ -160,6 +160,59 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 		}
 	})
 
+	t.Run("UpdateRef creates a full ref and moves it", func(t *testing.T) {
+		t.Parallel()
+		fx, g := newWtFixture(t, newEnv(t))
+		env := fx.env.(BranchEnv)
+		ref := "refs/landed/gt-abc"
+		if err := g.UpdateRef(ref, fx.base); err != nil {
+			t.Fatalf("UpdateRef: %v", err)
+		}
+		if id, err := g.Rev(ref); err != nil || id != fx.base {
+			t.Errorf("%s after UpdateRef = %s, %v; want %s", ref, id, err, fx.base)
+		}
+		writeFile(t, filepath.Join(fx.clone, "landed.txt"), "landed\n")
+		later := env.CommitWorktree(t, fx.clone, "later")
+		if err := g.UpdateRef(ref, later); err != nil {
+			t.Fatalf("UpdateRef to a new commit: %v", err)
+		}
+		if id, err := g.Rev(ref); err != nil || id != later {
+			t.Errorf("%s after the second UpdateRef = %s, %v; want %s", ref, id, err, later)
+		}
+		if err := g.UpdateRef(ref, "no-such-commit"); err == nil {
+			t.Error("UpdateRef to an unknown commit succeeded")
+		}
+	})
+
+	t.Run("a pushed refs/landed ref is listed, and a lease moves it", func(t *testing.T) {
+		t.Parallel()
+		fx, g := newWtFixture(t, newEnv(t))
+		env := fx.env.(BranchEnv)
+		ref := "refs/landed/gt-abc"
+		if refs, err := g.ListRemoteRefsWithHashes("origin", ref); err != nil || len(refs) != 0 {
+			t.Fatalf("before any push ListRemoteRefsWithHashes = %+v, %v", refs, err)
+		}
+		if err := g.Push("origin", fx.base+":"+ref, false); err != nil {
+			t.Fatalf("Push of %s: %v", ref, err)
+		}
+		refs, err := g.ListRemoteRefsWithHashes("origin", ref)
+		if err != nil || len(refs) != 1 || refs[0].Name != ref || refs[0].Hash != fx.base {
+			t.Fatalf("ListRemoteRefsWithHashes = %+v, %v; want %s at %s", refs, err, ref, fx.base)
+		}
+		writeFile(t, filepath.Join(fx.clone, "landed.txt"), "landed\n")
+		later := env.CommitWorktree(t, fx.clone, "later")
+		if err := g.PushForceWithLease("origin", later+":"+ref, ref, later); err == nil {
+			t.Error("PushForceWithLease with a stale lease moved the ref")
+		}
+		if err := g.PushForceWithLease("origin", later+":"+ref, ref, fx.base); err != nil {
+			t.Fatalf("PushForceWithLease on a matching lease: %v", err)
+		}
+		refs, err = g.ListRemoteRefsWithHashes("origin", ref)
+		if err != nil || len(refs) != 1 || refs[0].Hash != later {
+			t.Errorf("after the lease push ListRemoteRefsWithHashes = %+v, %v; want %s", refs, err, later)
+		}
+	})
+
 	t.Run("refs, branches and the default branch", func(t *testing.T) {
 		t.Parallel()
 		fx, g := newWtFixture(t, newEnv(t))

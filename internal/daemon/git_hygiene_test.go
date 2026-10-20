@@ -170,6 +170,54 @@ func TestRunGitHygiene_CleansMergedAndOrphanedBranches(t *testing.T) {
 	}
 }
 
+// TestRunGitHygiene_KeepsRefsLandedThroughThePrune is gt-as9v8: a landing
+// leaves refs/landed/<bead> at the head it landed, and the sweep's fetch
+// --prune, its local/remote branch passes and its gc must all leave every
+// refs/landed/* alone. The refs are the only thing keeping a landed branch's
+// history reachable once the branch is reaped, so a prune that took them
+// would undo the landing's answer to "is this worktree's work landed?".
+func TestRunGitHygiene_KeepsRefsLandedThroughThePrune(t *testing.T) {
+	t.Parallel()
+	d, feed, logs := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	// A landed head that is not on main: a squash landing writes a commit of
+	// its own, so only the ref keeps the head alive.
+	landed := f.Commit(t, origin, "polecat/gone", "landed work", map[string]string{"b.txt": "b\n"})
+	f.SetRef(t, origin, "refs/landed/gt-abc", landed)
+	f.SetRef(t, origin, "refs/heads/polecat/merged", base)
+
+	repo := filepath.Join(d.config.TownRoot, "r1", "mayor", "rig")
+	f.Clone(t, origin, repo)
+	f.SetRef(t, repo, "refs/landed/gt-abc", landed)
+	f.SetRef(t, repo, "refs/heads/polecat/done", base)
+
+	d.runGitHygiene()
+
+	// The sweep ran: it deleted the merged branches on both sides. Without
+	// this the refs below survive a patrol that did nothing.
+	if got := f.Ref(repo, "refs/heads/polecat/done"); got != "" {
+		t.Errorf("local polecat/done = %q, want the merged branch deleted", got)
+	}
+	if got := f.Ref(origin, "refs/heads/polecat/merged"); got != "" {
+		t.Errorf("origin polecat/merged = %q, want the merged branch deleted", got)
+	}
+	for _, dir := range []string{repo, origin} {
+		if got := f.Ref(dir, "refs/landed/gt-abc"); got != landed {
+			t.Errorf("refs/landed/gt-abc in %s = %q, want the landed head %q", dir, got, landed)
+		}
+	}
+	if strings.Contains(logs.String(), "landed/") {
+		t.Errorf("the hygiene cycle touched refs/landed:\n%s", logs.String())
+	}
+	if len(feed.payloads) != 0 {
+		t.Errorf("feed = %v, want no failed cycle", feed.payloads)
+	}
+}
+
 func TestRunGitHygiene_UnreadableOriginDeletesOnlyMergedBranches(t *testing.T) {
 	t.Parallel()
 	d, _, logs := newGitHygieneDaemon(t, "r1")

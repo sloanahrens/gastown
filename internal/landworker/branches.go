@@ -21,7 +21,9 @@ type RemoteRef struct {
 
 // reapBeadBranches deletes origin's branches for a bead that has just landed:
 // the branch it landed and every earlier attempt for the bead, which no later
-// landing preserves because a rework is pushed to a new branch. The rig
+// landing preserves because a rework is pushed to a new branch. The head that
+// landed stays reachable at refs/landed/<bead>, written by Land before this
+// reap can run (gt-as9v8), so the delete takes no history with it. The rig
 // repository's copy of the branch that landed goes with it, and only that one
 // (deleteLocalBranch, gt-kne58, gt-xpmr7): reaping origin alone left every
 // branch the rig ever pushed in its refs/heads forever, and taking the rig's

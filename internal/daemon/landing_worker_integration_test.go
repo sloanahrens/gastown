@@ -210,6 +210,15 @@ func TestIntegrationLandingWorkerLandsFromTheRigBareRepo(t *testing.T) {
 	if out := lwGit(t, root, "ls-remote", "--heads", origin, "refs/heads/polecat/"); out != "" {
 		t.Fatalf("origin still holds a landed bead's polecat branches: %s", out)
 	}
+	// gt-as9v8: the head that landed stays reachable at refs/landed/<bead> in
+	// the rig's repository and on origin, so the reaped branch's history is
+	// still answerable by ancestry.
+	if got := lwGit(t, bare, "rev-parse", "refs/landed/gt-abc"); got != tip {
+		t.Fatalf("rig repo refs/landed/gt-abc = %s, want the landed head %s", got, tip)
+	}
+	if got := lwGit(t, origin, "rev-parse", "refs/landed/gt-abc"); got != tip {
+		t.Fatalf("origin refs/landed/gt-abc = %s, want the landed head %s", got, tip)
+	}
 	mainTip := lwGit(t, origin, "rev-parse", "refs/heads/main")
 	if lwGit(t, origin, "rev-parse", mainTip+"^2") != tip {
 		t.Fatalf("origin/main %s does not merge the branch tip %s", mainTip, tip)
