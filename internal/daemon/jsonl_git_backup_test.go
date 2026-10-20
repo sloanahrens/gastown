@@ -746,6 +746,85 @@ func TestRecountAfterFilterKeepsCountMetric(t *testing.T) {
 	}
 }
 
+func TestJSONLExportTimeoutFor(t *testing.T) {
+	t.Parallel()
+	for _, table := range append([]string{"issues"}, supplementalTables...) {
+		got := jsonlExportTimeoutFor(table)
+		if table == "issues" {
+			if got != 60*time.Second {
+				t.Errorf("jsonlExportTimeoutFor(%q) = %s, want the unchanged 60s", table, got)
+			}
+			continue
+		}
+		if got <= jsonlExportTimeout {
+			t.Errorf("jsonlExportTimeoutFor(%q) = %s, want longer than the issues bound %s", table, got, jsonlExportTimeout)
+		}
+		if got > 10*time.Minute {
+			t.Errorf("jsonlExportTimeoutFor(%q) = %s, want a bounded value well inside the tick budget", table, got)
+		}
+	}
+}
+
+func TestRunJSONLExport_DeadlineKillNamesTableAndTimeout(t *testing.T) {
+	t.Parallel()
+	// An already-expired deadline fails the run the way a mid-run kill does:
+	// cmd.Run returns an error and ctx.Err() reports DeadlineExceeded.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	timeout := jsonlExportTimeoutFor("events")
+	cmd := jsonlExportCommand(ctx, false, "", 0, "", "", "select 1", t.TempDir())
+
+	_, err := runJSONLExport(ctx, cmd, "events", timeout)
+	if err == nil {
+		t.Fatal("runJSONLExport returned nil for an expired deadline")
+	}
+	for _, want := range []string{"events", "5m0s", "timeout"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %q", err, want)
+		}
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("error %q does not wrap the deadline cause", err)
+	}
+}
+
+func TestJSONLExportFailure(t *testing.T) {
+	t.Parallel()
+	expired, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	cause := errors.New("signal: killed")
+
+	tests := []struct {
+		name       string
+		ctx        context.Context
+		stderr     string
+		wantAll    []string
+		wantAbsent string
+	}{
+		{"deadline kill names table and timeout", expired, "", []string{"events", "5m0s", "signal: killed"}, ""},
+		{"deadline kill keeps stderr", expired, " table locked\n", []string{"5m0s", "signal: killed", "table locked"}, ""},
+		{"plain failure keeps stderr, no timeout blame", context.Background(), "table locked\n", []string{"signal: killed", "table locked"}, "timeout"},
+		{"plain failure without stderr is the bare error", context.Background(), "", []string{"signal: killed"}, "timeout"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := jsonlExportFailure(tt.ctx, cause, tt.stderr, "events", jsonlExportTimeoutFor("events"))
+			for _, want := range tt.wantAll {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not contain %q", err, want)
+				}
+			}
+			if tt.wantAbsent != "" && strings.Contains(err.Error(), tt.wantAbsent) {
+				t.Errorf("error %q contains %q", err, tt.wantAbsent)
+			}
+			if !errors.Is(err, cause) {
+				t.Errorf("error %q does not wrap the cause", err)
+			}
+		})
+	}
+}
+
 func TestJSONLExportCommand_PasswordIsNotInArgv(t *testing.T) {
 	t.Parallel()
 	const secret = "s3cr3t-dolt-password"
