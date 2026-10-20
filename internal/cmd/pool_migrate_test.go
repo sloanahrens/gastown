@@ -653,6 +653,47 @@ func TestMigratePoolKeys(t *testing.T) {
 	}
 }
 
+// The line a pool that names no agent reports, whole: the keys in the order
+// the migration reads them, each value as JSON, and the advice to add a seat
+// only when no seat exists.
+func TestMigratePoolKeysAgentlessReportLine(t *testing.T) {
+	t.Parallel()
+	const remove = "removed polecat_pool."
+	for _, tc := range []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{
+			name: "every retired key, in the fixed order, with values as JSON",
+			doc:  `{"polecat_pool":{"max_overflow":4,"overflow_agent":"","max_seats":3,"agent":""}}`,
+			want: remove + `agent (""), max_seats (3), overflow_agent (""), max_overflow (4): they named no agent, so no seat was made; add one with gt pool set <agent>=<cap>`,
+		},
+		{
+			name: "only the overflow keys",
+			doc:  `{"polecat_pool":{"max_overflow":4}}`,
+			want: remove + `max_overflow (4): they named no agent, so no seat was made; add one with gt pool set <agent>=<cap>`,
+		},
+		{
+			name: "a seat already in the map is not told to add one",
+			doc:  `{"polecat_pool":{"max_overflow":4,"seats":{"claude-haiku":{"cap":2}}}}`,
+			want: remove + `max_overflow (4): they named no agent, so no seat was made`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m, _ := jsonTreeOf(t, []byte(tc.doc)).(map[string]any)
+			lines, err := migratePoolKeys(m, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(lines, []string{tc.want}) {
+				t.Errorf("lines = %q, want %q", lines, []string{tc.want})
+			}
+		})
+	}
+}
+
 // The second seat's keys on their own: max_hooked with no agent runs the
 // dispatcher's default agent, an agent with no cap was a closed seat, and keys
 // that named no seat are removed without making one.
