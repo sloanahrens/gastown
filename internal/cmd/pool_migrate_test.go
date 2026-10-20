@@ -366,6 +366,42 @@ func TestPoolMigratePatrolChangeWithoutSettingsCreatesNoSettings(t *testing.T) {
 	}
 }
 
+// A pool that names no agent still holds retired keys, and removing them is a
+// change: the run reports it and rewrites the file. Otherwise it says there is
+// nothing to migrate and leaves a key the strict loaders refuse, so the daemon
+// start keeps failing (gt-mmae7).
+func TestPoolMigrateAgentlessPoolKeysAreReportedAndRemoved(t *testing.T) {
+	t.Parallel()
+	in := []byte(`{"type":"town-settings","version":1,"polecat_pool":{"max_seats":3}}`)
+	root, path := writeMigrateTown(t, in)
+
+	var out bytes.Buffer
+	if err := runPoolMigrate(&out, root, false, migrateNow); err != nil {
+		t.Fatalf("runPoolMigrate: %v\n%s", err, out.String())
+	}
+	if !strings.Contains(out.String(), "removed polecat_pool.max_seats") {
+		t.Fatalf("the report does not name the removed key:\n%s", out.String())
+	}
+	// The written file leaves the loader that refused it now readable.
+	var ts config.TownSettings
+	if err := config.DecodeJSONFile(path, readFile(t, path), &ts); err != nil {
+		t.Errorf("the rewritten settings file does not load: %v\n%s", err, out.String())
+	}
+	tree, _ := jsonTreeOf(t, readFile(t, path)).(map[string]any)
+	pool, _ := tree["polecat_pool"].(map[string]any)
+	if _, present := pool["max_seats"]; present {
+		t.Errorf("polecat_pool.max_seats survived:\n%s", readFile(t, path))
+	}
+	if n := len(backupsOf(t, path)); n != 1 {
+		t.Errorf("settings file has %d backups, want 1", n)
+	}
+
+	out.Reset()
+	if err := runPoolMigrate(&out, root, false, migrateNow); err != nil || strings.TrimSpace(out.String()) != "nothing to migrate" {
+		t.Errorf("second run = %q, %v, want nothing to migrate", out.String(), err)
+	}
+}
+
 // A conversion whose result the loaders would refuse writes nothing, so a run
 // never leaves a town worse than it found it: an agent the town cannot launch
 // names no seat.
