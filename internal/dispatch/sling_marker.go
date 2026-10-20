@@ -15,7 +15,7 @@ const SlingHookedMarker = "Work attached to "
 // slingHookedGlyph leads the hooked line, after its indent.
 const slingHookedGlyph = "✓"
 
-// ansiSGR matches the colour sequences style.Bold.Render emits on a terminal.
+// ansiSGR matches the color sequences style.Bold.Render emits on a terminal.
 var ansiSGR = regexp.MustCompile(`\x1b\[[0-9;]*m`)
 
 // SlingHookedLine is the text sling.Run prints after the leading glyph, for
