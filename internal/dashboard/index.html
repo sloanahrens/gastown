@@ -3231,6 +3231,26 @@ function costJev(box, j, r) {
   box.append(el("div", "", ["Jev spend"].concat(figures).join(" · ")));
 }
 
+// The Jev batteries under the spend row, one line each: the battery, its lines
+// logged and how many of them are labeled, then each question's verdict as
+// id:verdict. A battery with no log in the window is a dash. A failed or stale
+// read says unavailable in one line instead of drawing last week's verdicts as
+// current; the spend row above it is not touched. Neither a report nor a status
+// means no scorecard command is configured, or it has not answered yet.
+function costJevScorecard(box, sc, r) {
+  if (!sc && !r) return;
+  if (!sc || (r && r.stale)) {
+    box.append(el("div", "empty", "Jev scorecard · unavailable — " + (!sc || (r && r.error) ? "the read failed" : "the read went stale")));
+    return;
+  }
+  for (const b of sc.batteries || []) {
+    const words = b.lines > 0
+      ? [b.name, b.lines + "/" + b.labeled].concat((b.questions || []).map(q => q.id + ":" + q.verdict))
+      : [b.name, "-"];
+    box.append(el("div", "", words.join(" ")));
+  }
+}
+
 // The Cost panel: what the town is spending, in one place. DeepSeek's balance,
 // pace and credit, the Claude plan line and the Jev row under them, the usage
 // scan's estimate and slow runs, the GCP budget alert, and what each om review
@@ -3252,12 +3272,14 @@ function renderCost(s) {
     spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + "; usage still reading…"));
     costClaudePlan(box, s.claude_plan);
     costJev(box, s.jev_spend, readOf(s, "jev_spend"));
+    costJevScorecard(box, s.jev_scorecard, readOf(s, "jev_scorecard"));
     costGCP(box, s.cloud);
     return;
   }
   const spendWords = costSpend(spendBox, d, r);
   costClaudePlan(box, s.claude_plan);
   costJev(box, s.jev_spend, readOf(s, "jev_spend"));
+  costJevScorecard(box, s.jev_scorecard, readOf(s, "jev_scorecard"));
   costGCP(box, s.cloud);
   const usage = costUsage(box, u, s);
   costRework(box, s.rework);
