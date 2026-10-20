@@ -505,6 +505,56 @@ func TestSpecDispatchOpenChildrenHoldTheContainer(t *testing.T) {
 			t.Fatalf("errors = %+v, want one children-read failure", r.Errors)
 		}
 	})
+
+	// containerFromRow draws the candidate from a ready-board row, so the two
+	// cases below run on what the board actually hands the tick: a row whose
+	// dependent_count is zero because bd counts blocks edges only (gt-603wu).
+	containerFromRow := func(t *testing.T, dependentCount int) specdispatch.Spec {
+		t.Helper()
+		desc, err := json.Marshal(specTestDescription)
+		if err != nil {
+			t.Fatal(err)
+		}
+		accept, err := json.Marshal(specTestAcceptance)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rows := fmt.Sprintf(`[{"id":"gt-container","issue_type":"task","status":"open","priority":1,`+
+			`"created_at":"2026-09-29T10:00:00Z","description":%s,"acceptance_criteria":%s,"dependent_count":%d}]`,
+			desc, accept, dependentCount)
+		issues, err := parseSpecReady([]byte(rows))
+		if err != nil || len(issues) != 1 {
+			t.Fatalf("parseSpecReady: %d issues, %v", len(issues), err)
+		}
+		return specFromIssue(issues[0])
+	}
+
+	t.Run("a row that counts no dependents still reads its children", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(containerFromRow(t, 0))
+		f.children["gt-container"] = []specdispatch.Child{{ID: "gt-container.1", Status: "open"}}
+		r := runSpecDispatchCycle(f.env())
+		if len(f.slung) != 0 || len(r.Dispatched) != 0 {
+			t.Fatalf("slung a parent the board row counted childless: slung %v report %+v", f.slung, r)
+		}
+		want := "gt-container: held: container: open child gt-container.1"
+		if len(r.Skipped) != 1 || r.Skipped[0].Line != want {
+			t.Fatalf("skipped = %+v, want %q", r.Skipped, want)
+		}
+	})
+
+	t.Run("a row that counts no dependents still holds an unreadable child set", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(containerFromRow(t, 0))
+		f.childErrs["gt-container"] = errors.New("bd children: boom")
+		r := runSpecDispatchCycle(f.env())
+		if len(f.slung) != 0 {
+			t.Fatalf("slung a bead whose children could not be read: %v", f.slung)
+		}
+		if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "cannot read children") {
+			t.Fatalf("errors = %+v, want one children-read failure", r.Errors)
+		}
+	})
 }
 
 // The pre-dispatch overlap hold (gt-z80p9), replayed from the gt-t61ft /
