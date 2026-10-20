@@ -502,6 +502,28 @@ func TestStandbyDrainTimeoutExits3(t *testing.T) {
 	}
 }
 
+// A polecat inside its spawn grace reads "spawning", not "working", but its
+// session is still coming up: the town is not drained while it boots.
+func TestStandbyTreatsASpawningPolecatAsWork(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	f.setPending(0)
+	f.polecats = []polecatRow{{Rig: "gastown", Name: "furiosa", State: "spawning"}}
+	o, _, errOut := f.optsWithOut()
+	o.Timeout = time.Minute
+	err := Standby(context.Background(), o)
+	if code := codeOf(t, err); code != ExitDrainTimeout {
+		t.Fatalf("exit code = %d, want %d (a spawning polecat must hold the drain)", code, ExitDrainTimeout)
+	}
+	if !strings.Contains(errOut.String(), "gastown/furiosa working") {
+		t.Errorf("drain did not name the spawning polecat:\n%s", errOut)
+	}
+	if estop.IsActive(f.town) {
+		t.Error("a drain held by a spawning polecat must not set the ESTOP")
+	}
+}
+
 func TestStandbyTreatsUnknownLandingQueueAsNotDrained(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)

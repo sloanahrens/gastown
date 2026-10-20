@@ -299,7 +299,9 @@ func nonBlankLines(s string) []string {
 	return out
 }
 
-// workingPolecats lists the town's working polecats as "rig/name".
+// workingPolecats lists the town's polecats with work in flight as "rig/name":
+// a working one, and a spawning one still inside its grace, whose session
+// is not up yet and would otherwise read as drained.
 func (e *engine) workingPolecats(ctx context.Context) ([]string, error) {
 	out, err := e.exec(ctx, e.o.TownRoot, e.o.GTCommand, "polecat", "list", "--all", "--json")
 	if err != nil {
@@ -315,7 +317,7 @@ func (e *engine) workingPolecats(ctx context.Context) ([]string, error) {
 	}
 	var working []string
 	for _, r := range rows {
-		if r.State == "working" {
+		if r.State == "working" || r.State == "spawning" {
 			working = append(working, r.Rig+"/"+r.Name)
 		}
 	}
