@@ -556,7 +556,20 @@ func doneSlotLoopWritesFile(reader string) bool {
 	if doneSlotLoopRedirectsStdout(reader) {
 		return true
 	}
-	word, args := segmentCommandWord(shellTokenize(reader))
+	for _, segment := range splitShellSegments(shellTokenize(reader)) {
+		if doneSlotLoopSegmentWritesFile(segment) {
+			return true
+		}
+	}
+	return false
+}
+
+// doneSlotLoopSegmentWritesFile reports whether one pipeline stage of a heredoc
+// reader line is a `tee FILE` or a `dd of=FILE`. Each stage is judged on its
+// own command word, so `cat <<EOF | tee FILE` counts: the `cat` passes the body
+// through to the `tee` that writes it.
+func doneSlotLoopSegmentWritesFile(segment []string) bool {
+	word, args := segmentCommandWord(segment)
 	switch strings.ToLower(word) {
 	case "tee":
 		for _, arg := range args {
