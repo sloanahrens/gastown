@@ -76,13 +76,13 @@ const (
 // for the branch), the stop gives up on it, and the comment's note says the
 // branch exists only in the worktree, names the path and says why the push
 // failed; step 6 is skipped. The hand-back's needs-split label raises the
-// attention item; a rework hand-back raises none. A resumed stop first checks the pause is still down, before
-// it stops the session and again before step 3, where it also checks that no
-// session runs on the seat; if not, the seat was taken back and the stop ends
-// without a hand-back. Every stop looks
-// again just before step 6, because the push and hand-back can outlast an
-// operator resume and a new sling: a seat taken back by then keeps the bead
-// handed back, and the release is left to its new holder.
+// attention item; a rework hand-back raises none. A resumed stop first checks
+// the pause is still down, before it stops the session and again before step
+// 3, where it also checks that no session runs on the seat; if not, the seat
+// was taken back and the stop ends without a hand-back. Every stop looks again
+// just before step 6, because the push and hand-back can outlast an operator
+// resume and a new sling: a seat taken back by then keeps the bead handed
+// back, and the release is left to its new holder.
 //
 // Progress is saved after each step, so a step that fails is logged and
 // retried from the failed step on the next tick, never from the top and never
@@ -252,10 +252,19 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		pushSeat.Bead, pushSeat.Branch, pushSeat.SlingAt = st.Bead, st.Branch, st.SlingAt
 		// Read before the push: afterwards origin holds the head whatever it
 		// held before. A checkpoint that gave up leaves work in the worktree,
-		// which is no finished branch.
-		onOrigin := ""
-		if s.finishedOnOrigin != nil && !st.CheckpointGaveUp {
-			onOrigin = s.finishedOnOrigin(pushSeat)
+		// which is no finished branch. The answer is saved before the push, so
+		// a save that fails afterwards cannot lose it: the retry pushes again,
+		// but keeps the decision instead of reading an origin the stop's own
+		// push has already changed.
+		if st.ReworkDecidedAt.IsZero() {
+			onOrigin := ""
+			if s.finishedOnOrigin != nil && !st.CheckpointGaveUp {
+				onOrigin = s.finishedOnOrigin(pushSeat)
+			}
+			st.ReworkSHA, st.ReworkDecidedAt = onOrigin, now
+			if !save() {
+				return
+			}
 		}
 		if err := s.push(pushSeat); err != nil {
 			st.PushFailures++
@@ -277,7 +286,6 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 				who, st.Bead, branch, st.PushFailures, err)
 		} else {
 			st.PushedAt = now
-			st.ReworkSHA = onOrigin
 			if !save() {
 				return
 			}
