@@ -271,19 +271,20 @@ func specFromIssue(issue *beads.Issue) specdispatch.Spec {
 		return specdispatch.Spec{}
 	}
 	return specdispatch.Spec{
-		ID:          issue.ID,
-		Title:       issue.Title,
-		Type:        issue.Type,
-		Status:      issue.Status,
-		Assignee:    issue.Assignee,
-		Priority:    issue.Priority,
-		CreatedAt:   issue.CreatedAt,
-		Labels:      issue.Labels,
-		Description: issue.Description,
-		Design:      issue.Design,
-		Notes:       issue.Notes,
-		Acceptance:  issue.AcceptanceCriteria,
-		Ephemeral:   issue.Ephemeral,
+		ID:           issue.ID,
+		Title:        issue.Title,
+		Type:         issue.Type,
+		Status:       issue.Status,
+		Assignee:     issue.Assignee,
+		Priority:     issue.Priority,
+		CreatedAt:    issue.CreatedAt,
+		Labels:       issue.Labels,
+		Description:  issue.Description,
+		Design:       issue.Design,
+		Notes:        issue.Notes,
+		Acceptance:   issue.AcceptanceCriteria,
+		CommentCount: issue.CommentCount,
+		Ephemeral:    issue.Ephemeral,
 
 		SubmittedForLanding: specLiveLandingRequest(issue.Notes),
 	}
@@ -1507,6 +1508,8 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	// The pool's design and notes, kept across the daemon's ticks (gt-l0vlf).
 	details := specDetailCacheFor(townRoot, os.Getenv(dispatch.SpecDetailOwnerEnv))
 	specDetailCache.Store(details)
+	// The held beads already annotated, kept across the daemon's ticks.
+	annotated := loadSpecAnnotated(dispatch.SpecAnnotatedPath(townRoot), os.Getenv(dispatch.SpecDetailOwnerEnv))
 	env := specDispatchEnv{
 		Hold: func() string { return dispatch.OperatorHold(townRoot) },
 		Candidates: func() specBoardRead {
@@ -1514,9 +1517,11 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 				reads.call()
 				return specReadyBoard(rigPath)
 			})
-			return specBoardDesigns(reads, func(rig string) beads.Client {
+			read = specBoardDesigns(reads, func(rig string) beads.Client {
 				return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
 			}, read)
+			annotated.observe(read)
+			return read
 		},
 		Show: func(id string) (specdispatch.Spec, error) {
 			return showSpecWith(reads, id, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
@@ -1546,8 +1551,10 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			return specRosterFrom(sessions, ts), nil
 		},
 		Annotate: func(id, key, text string) error {
-			reads.call()
-			return annotateSpecOnce(beads.New(resolveBeadDirFromTownRoot(townRoot, id)), id, key, text)
+			return annotated.once(id, key, func() (bool, error) {
+				reads.call()
+				return annotateSpecWrote(beads.New(resolveBeadDirFromTownRoot(townRoot, id)), id, key, text)
+			})
 		},
 		AddLabel: func(id, label string) error {
 			return poolBeadLabelAdd(townRoot, id, label)
@@ -1572,6 +1579,7 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		ShapeGate:   ts.PolecatPool.GetShapeGate(),
 	}
 	report := runSpecDispatchCycle(env)
+	annotated.save()
 	report.DetailsFetched, report.DetailsCached, report.DetailsUnread = details.Counts()
 	if report.Hold == "" {
 		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start)))
@@ -1904,14 +1912,23 @@ func parseSpecReady(out []byte) ([]*beads.Issue, error) {
 // annotated once. A comment list that cannot be read is an error, not "no
 // comments": writing on a guess would repeat the note every tick.
 func annotateSpecOnce(b beads.Client, beadID, key, text string) error {
+	_, err := annotateSpecWrote(b, beadID, key, text)
+	return err
+}
+
+// annotateSpecWrote is annotateSpecOnce saying whether it added the comment.
+func annotateSpecWrote(b beads.Client, beadID, key, text string) (bool, error) {
 	comments, err := b.Comments(beadID)
 	if err != nil {
-		return fmt.Errorf("reading comments: %w", err)
+		return false, fmt.Errorf("reading comments: %w", err)
 	}
 	if hasCommentWithPrefix(comments, key) {
-		return nil
+		return false, nil
 	}
-	return b.AddComment(beadID, text)
+	if err := b.AddComment(beadID, text); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func hasCommentWithPrefix(comments []beads.Comment, key string) bool {

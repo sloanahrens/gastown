@@ -237,6 +237,10 @@ type Spec struct {
 	Design      string
 	Notes       string
 	Acceptance  string
+	// CommentCount is the comment_count of the row the spec was read from: the
+	// ready board carries it, so a tick can tell a bead's comments have not
+	// changed without reading them.
+	CommentCount int
 	// SubmittedForLanding marks a bead whose notes carry a live landing
 	// request: a READY TO LAND block that no LANDING RECORD and no MERGE
 	// REJECTION follows. gt done writes that block with the gt:ready-to-land
