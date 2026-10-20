@@ -3,11 +3,13 @@ package jev
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -119,6 +121,67 @@ func TestChoice_NoLedgerLineForAFailedCall(t *testing.T) {
 
 	require.ErrorIs(t, err, ErrUnauthorized)
 	assert.NoFileExists(t, path)
+}
+
+func TestAppendLine_TightensPreexistingModes(t *testing.T) {
+	t.Parallel()
+	dir := filepath.Join(t.TempDir(), "jev")
+	path := filepath.Join(dir, "usage.jsonl")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	//testpolicy:allow no-exec-files — the target is a directory, not a file: the test needs a loose ledger directory to tighten
+	require.NoError(t, os.Chmod(dir, 0o755))
+	require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0o644))
+	require.NoError(t, os.Chmod(path, 0o644))
+
+	require.NoError(t, appendLine(path, []byte(`{"n":1}`)))
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(), "an old 0644 ledger is tightened")
+	dirInfo, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm(), "an old 0755 ledger directory is tightened")
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, "{}\n{\"n\":1}\n", string(data), "the line is appended after the old content")
+}
+
+func TestAppendLine_ConcurrentWritersKeepLinesWhole(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	const writers, perWriter = 8, 20
+	// Lines this long are the ones a single write is most likely to split.
+	pad := strings.Repeat("p", 64<<10)
+
+	var wg sync.WaitGroup
+	for w := range writers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range perWriter {
+				line := fmt.Sprintf(`{"w":%d,"i":%d,"pad":%q}`, w, i, pad)
+				assert.NoError(t, appendLine(path, []byte(line)))
+			}
+		}()
+	}
+	wg.Wait()
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSuffix(string(data), "\n"), "\n")
+	require.Len(t, lines, writers*perWriter)
+	seen := make(map[[2]int]bool)
+	for _, line := range lines {
+		var rec struct {
+			W   int    `json:"w"`
+			I   int    `json:"i"`
+			Pad string `json:"pad"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(line), &rec), "a line was split or interleaved")
+		assert.Equal(t, pad, rec.Pad)
+		seen[[2]int{rec.W, rec.I}] = true
+	}
+	assert.Len(t, seen, writers*perWriter, "every write landed exactly once")
 }
 
 func TestUsageLedgerPath(t *testing.T) {
