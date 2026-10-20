@@ -40,7 +40,14 @@ const (
 //     exists only in the worktree (see below for when the push is given up);
 //  5. hand the bead back (status open, assignee cleared, needs-split) so the
 //     roster no longer counts the seat; a bead found closed or re-slung to
-//     another polecat is left alone. The molecule the bead carried is ended
+//     another polecat is left alone. When the kept branch's head was already
+//     origin's head for it before step 4's push, and the checkpoint committed
+//     nothing (so the worktree was clean: a commit would have moved the head),
+//     the finished work is on origin and the label is rework, not needs-split:
+//     the comment names the commit and tells the next polecat to reuse the
+//     branch and run gt done. Every other stop (a checkpoint that committed or
+//     gave up, a push that was refused or given up, no branch on origin) keeps
+//     needs-split. The molecule the bead carried is ended
 //     with the hand-back (handBackEndingMolecule), so the run leaves none
 //     open. The attention item for the stop is derived from that hand-back
 //     (collectOverrunStopped);
@@ -66,7 +73,7 @@ const (
 // for the branch), the stop gives up on it, and the comment's note says the
 // branch exists only in the worktree, names the path and says why the push
 // failed; step 6 is skipped. The hand-back's needs-split label raises the
-// attention item. A resumed stop first checks the pause is still down, before
+// attention item; a rework hand-back raises none. A resumed stop first checks the pause is still down, before
 // it stops the session and again before step 3, where it also checks that no
 // session runs on the seat; if not, the seat was taken back and the stop ends
 // without a hand-back. Every stop looks
@@ -237,6 +244,13 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	if st.PushedAt.IsZero() && !st.PushGaveUp && s.push != nil {
 		pushSeat := seat
 		pushSeat.Bead, pushSeat.Branch = st.Bead, st.Branch
+		// Read before the push: afterwards origin holds the head whatever it
+		// held before. A checkpoint that gave up leaves work in the worktree,
+		// which is no finished branch.
+		onOrigin := ""
+		if s.finishedOnOrigin != nil && !st.CheckpointGaveUp {
+			onOrigin = s.finishedOnOrigin(pushSeat)
+		}
 		if err := s.push(pushSeat); err != nil {
 			st.PushFailures++
 			st.PushFailure = pushFailureReason(err)
@@ -257,6 +271,7 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 				who, st.Bead, branch, st.PushFailures, err)
 		} else {
 			st.PushedAt = now
+			st.ReworkSHA = onOrigin
 			if !save() {
 				return
 			}
@@ -266,6 +281,9 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 	// 5. Hand the bead back.
 	handed := seat
 	handed.Bead, handed.Branch = st.Bead, branch
+	if !st.CheckpointGaveUp && !st.PushGaveUp {
+		handed.ReworkSHA = st.ReworkSHA
+	}
 	var notes []string
 	if st.CheckpointGaveUp {
 		notes = append(notes, fmt.Sprintf("The worktree could not be checkpointed after %d attempts and may hold uncommitted work; "+
@@ -413,6 +431,7 @@ func (d *Daemon) overrunStopSeams(s overrunSeams) overrunSeams {
 	}
 	s.stopLapsed = d.overrunStopLapsed
 	s.push = d.overrunPushBranch
+	s.finishedOnOrigin = d.overrunFinishedOnOrigin
 	s.resetAgentBead = d.overrunResetAgentBead
 	s.recordCleanup = d.overrunRecordCleanupStatus
 	s.retire = func(seat overrunSeat) error {
@@ -469,6 +488,39 @@ func (d *Daemon) overrunPushBranch(seat overrunSeat) error {
 		return fmt.Errorf("push %s: %w", branch, err)
 	}
 	return nil
+}
+
+// overrunFinishedOnOrigin is the finishedOnOrigin seam: the commit the seat's
+// kept branch holds in its worktree when origin holds that same commit for the
+// branch, "" otherwise. A seat with no worktree or branch, a branch origin
+// lacks, and an origin that cannot be asked all answer "": the stop then
+// pushes and hands back as it always has.
+func (d *Daemon) overrunFinishedOnOrigin(seat overrunSeat) string {
+	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
+	workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig)
+	if workDir == "" {
+		return ""
+	}
+	g := d.gitAt(workDir)
+	branch := seat.Branch
+	if branch == "" {
+		current, err := g.CurrentBranch()
+		if err != nil {
+			return ""
+		}
+		branch = current
+	}
+	if branch == "" || branch == "HEAD" {
+		return ""
+	}
+	sha, err := g.Rev("refs/heads/" + branch)
+	if err != nil || sha == "" {
+		return ""
+	}
+	if originBranchSHA(g, branch) != sha {
+		return ""
+	}
+	return sha
 }
 
 // overrunPushDivergedError is a push origin rejected because it holds history
