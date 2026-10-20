@@ -3240,7 +3240,7 @@ function costJev(box, j, r) {
 function costJevScorecard(box, sc, r) {
   if (!sc && !r) return;
   if (!sc || (r && r.stale)) {
-    box.append(el("div", "empty", "Jev scorecard · unavailable — " + (!sc || (r && r.error) ? "the read failed" : "the read went stale")));
+    box.append(el("div", "empty", "Jev scorecard unavailable — " + (!sc || (r && r.error) ? "the read failed" : "the read went stale")));
     return;
   }
   for (const b of sc.batteries || []) {

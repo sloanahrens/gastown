@@ -490,8 +490,8 @@ func TestCostPanelJevScorecardFailureKeepsTheSpendLine(t *testing.T) {
 		read map[string]any
 		want string
 	}{
-		"failed": {map[string]any{"error": true, "stale": true}, "Jev scorecard · unavailable — the read failed"},
-		"stale":  {map[string]any{"stale": true}, "Jev scorecard · unavailable — the read went stale"},
+		"failed": {map[string]any{"error": true, "stale": true}, "Jev scorecard unavailable — the read failed"},
+		"stale":  {map[string]any{"stale": true}, "Jev scorecard unavailable — the read went stale"},
 	}
 	for name, tc := range cases {
 		lines, _ := drawCost(t, jevScorecardState(tc.read))
@@ -511,7 +511,7 @@ func TestCostPanelJevScorecardFailureKeepsTheSpendLine(t *testing.T) {
 	state := jevState(map[string]any{"reads": jevRead(nil)})
 	state["reads"].(map[string]any)["jev_scorecard"] = map[string]any{"at": time.Now().UTC().Format(time.RFC3339), "every_sec": 900, "error": true, "stale": true}
 	lines, _ := drawCost(t, state)
-	if row, ok := findLine(lines, "Jev scorecard"); !ok || row.Text != "Jev scorecard · unavailable — the read failed" {
+	if row, ok := findLine(lines, "Jev scorecard"); !ok || row.Text != "Jev scorecard unavailable — the read failed" {
 		t.Errorf("never-read row = %+v (found %v)", row, ok)
 	}
 }
