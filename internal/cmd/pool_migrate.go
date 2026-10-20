@@ -411,8 +411,21 @@ func migratePoolKeys(settings map[string]any, hooked *legacySeat, prefer bool) (
 	}
 
 	if pool != nil {
+		// A pool with no agent converts no seat, but its keys are still a
+		// change: report them, or the run says there is nothing to migrate and
+		// leaves a key the loaders refuse. A converted seat's line reports the
+		// keys it took.
+		var unseated []string
 		for _, key := range []string{"agent", "max_seats", "overflow_agent", "max_overflow"} {
-			delete(pool, key)
+			if v, present := pool[key]; present {
+				delete(pool, key)
+				if poolSeat == nil {
+					unseated = append(unseated, fmt.Sprintf("%s (%v)", key, v))
+				}
+			}
+		}
+		if len(unseated) > 0 {
+			lines = append(lines, fmt.Sprintf("removed polecat_pool.%s: they named no pool agent; add a seat with gt pool set <agent>=<cap>", strings.Join(unseated, ", ")))
 		}
 		for _, key := range []string{"pro_agent", "pro_max", "pro_label"} {
 			if v, present := pool[key]; present {
