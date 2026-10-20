@@ -339,6 +339,33 @@ func TestPoolMigratePatrolOnlyTownWithoutSettingsFile(t *testing.T) {
 	}
 }
 
+// A patrol document whose only retired key changes nothing in settings writes
+// no settings file: the removal is reported and the patrol file alone is
+// rewritten.
+func TestPoolMigratePatrolChangeWithoutSettingsCreatesNoSettings(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	patrol := config.DaemonPatrolConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(patrol), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(patrol, []byte(`{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{"prefer_hooked":true}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runPoolMigrate(&out, root, false, migrateNow); err != nil {
+		t.Fatalf("runPoolMigrate: %v\n%s", err, out.String())
+	}
+	if _, err := os.Stat(config.TownSettingsPath(root)); !os.IsNotExist(err) {
+		t.Errorf("a settings file was created though no seat was converted (stat: %v)\n%s", err, out.String())
+	}
+	var pc config.DaemonPatrolConfig
+	if err := config.DecodeJSONFile(patrol, readFile(t, patrol), &pc); err != nil {
+		t.Errorf("the patrol file does not load: %v", err)
+	}
+}
+
 // A conversion whose result the loaders would refuse writes nothing, so a run
 // never leaves a town worse than it found it: an agent the town cannot launch
 // names no seat.

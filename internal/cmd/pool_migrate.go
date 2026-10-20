@@ -189,9 +189,11 @@ func runPoolMigrate(w io.Writer, townRoot string, dryRun bool, now time.Time) er
 }
 
 // newMigrateSettings is the settings tree of a town with no settings file: the
-// header the loaders expect, and no keys.
+// header the loaders expect, and no keys. The version is a json.Number like
+// every number the raw reader decodes, so an unchanged tree compares equal to
+// its copy.
 func newMigrateSettings() map[string]any {
-	return map[string]any{"type": "town-settings", "version": config.CurrentTownSettingsVersion}
+	return map[string]any{"type": "town-settings", "version": json.Number(strconv.Itoa(config.CurrentTownSettingsVersion))}
 }
 
 // createMigratedSettings is UpdateRawJSON for a settings file that does not
