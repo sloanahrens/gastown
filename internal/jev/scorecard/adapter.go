@@ -30,6 +30,19 @@ type Item struct {
 	Answers map[QuestionID]Answer
 }
 
+// Labeling is what an adapter finds for one item: each question's label, and
+// the rule that set them, which the --json report names for the line.
+type Labeling struct {
+	// Labeled is false for an item no rule labels, which counts as logged but
+	// not labeled. Labels and Rule are unset then.
+	Labeled bool
+	// Labels is each question's label. A question absent from it is not
+	// labeled on this item.
+	Labels map[QuestionID]bool
+	// Rule is the stable name of the rule that set Labels.
+	Rule string
+}
+
 // Adapter reads one battery's log and labels its items from the ground truth
 // the battery is judged against.
 type Adapter interface {
@@ -39,9 +52,8 @@ type Adapter interface {
 	LogPath() string
 	// Parse reads one log line, and an error marks the line as skipped.
 	Parse(raw []byte) (Item, error)
-	// Label returns each question's label for item, and whether the item is
-	// labeled at all: an unlabeled item counts as logged, not labeled.
-	Label(ctx context.Context, item Item) (labels map[QuestionID]bool, labeled bool, err error)
+	// Label returns item's labels. An error fails the whole report.
+	Label(ctx context.Context, item Item) (Labeling, error)
 }
 
 // Factory builds an adapter for the town at townRoot.

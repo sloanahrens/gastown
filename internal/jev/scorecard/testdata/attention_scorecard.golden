@@ -1,0 +1,56 @@
+Scorecard for battery attention, all time
+Items: 18 parsed, 0 line(s) skipped
+
+clears_on_its_own (noul)
+  logged 18, labeled 4, positives 4, negatives 0, base rate 100.0%
+  at 0.5: precision n/a, recall 0.0%
+  best F1 1.000 at threshold 0.200
+  calibration (band, labeled n, mean value, label rate):
+    0.0-0.2      0  n/a  n/a
+    0.2-0.4      4  0.200  1.000
+    0.4-0.6      0  n/a  n/a
+    0.6-0.8      0  n/a  n/a
+    0.8-1.0      0  n/a  n/a
+  verdict: not-yet
+
+needs_human (noul)
+  logged 18, labeled 6, positives 4, negatives 2, base rate 66.7%
+  at 0.5: precision 66.7%, recall 100.0%
+  best F1 0.800 at threshold 0.700
+  calibration (band, labeled n, mean value, label rate):
+    0.0-0.2      0  n/a  n/a
+    0.2-0.4      0  n/a  n/a
+    0.4-0.6      0  n/a  n/a
+    0.6-0.8      6  0.700  0.667
+    0.8-1.0      0  n/a  n/a
+  verdict: not-yet
+
+repeats_open_item (noul)
+  logged 18, labeled 0, positives 0, negatives 0, base rate n/a
+  at 0.5: precision n/a, recall n/a
+  best F1 n/a at threshold n/a
+  calibration (band, labeled n, mean value, label rate):
+    0.0-0.2      0  n/a  n/a
+    0.2-0.4      0  n/a  n/a
+    0.4-0.6      0  n/a  n/a
+    0.6-0.8      0  n/a  n/a
+    0.8-1.0      0  n/a  n/a
+  verdict: not-yet
+
+routine_action_fixes (noul)
+  logged 18, labeled 2, positives 2, negatives 0, base rate 100.0%
+  at 0.5: precision n/a, recall 0.0%
+  best F1 1.000 at threshold 0.100
+  calibration (band, labeled n, mean value, label rate):
+    0.0-0.2      2  0.100  1.000
+    0.2-0.4      0  n/a  n/a
+    0.4-0.6      0  n/a  n/a
+    0.6-0.8      0  n/a  n/a
+    0.8-1.0      0  n/a  n/a
+  verdict: not-yet
+
+urgency (score)
+  logged 18, labeled 0, positives 0, negatives 0, base rate n/a
+  mean score: positives n/a, negatives n/a
+  best F1 n/a at threshold n/a
+  verdict: not-yet

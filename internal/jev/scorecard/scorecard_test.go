@@ -170,7 +170,7 @@ func TestScorecardOpenUnknownBatteryListsRegistered(t *testing.T) {
 	if err == nil {
 		t.Fatal("Open of an unknown battery succeeded")
 	}
-	if !strings.Contains(err.Error(), "registered batteries: fixture") {
+	if !strings.Contains(err.Error(), "registered batteries: attention, fixture") {
 		t.Errorf("error %q does not list the registered batteries", err)
 	}
 }
@@ -179,8 +179,8 @@ func TestScorecardOpenUnknownBatteryListsRegistered(t *testing.T) {
 // leaving the item unlabeled.
 type failingLabels struct{ fixture }
 
-func (failingLabels) Label(context.Context, Item) (map[QuestionID]bool, bool, error) {
-	return nil, false, errors.New("bead store unavailable")
+func (failingLabels) Label(context.Context, Item) (Labeling, error) {
+	return Labeling{}, errors.New("bead store unavailable")
 }
 
 func TestScorecardBuildFailsWhenLabelingFails(t *testing.T) {

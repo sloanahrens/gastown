@@ -14,6 +14,29 @@ type Report struct {
 	Items        int              `json:"items"`
 	LinesSkipped int              `json:"lines_skipped"`
 	Questions    []QuestionReport `json:"questions"`
+	// Lines is each parsed item's labeling and the rule that set it. The text
+	// report leaves it out; the JSON report names the rule for every line.
+	Lines []LineReport `json:"lines,omitempty"`
+}
+
+// LineReport is one parsed item's labeling: whether a rule labeled it, which
+// rule, and the labels it set.
+type LineReport struct {
+	ID      string          `json:"id"`
+	Labeled bool            `json:"labeled"`
+	Rule    string          `json:"rule,omitempty"`
+	Labels  map[string]bool `json:"labels,omitempty"`
+}
+
+func lineReport(it Item, lab Labeling) LineReport {
+	lr := LineReport{ID: it.ID, Labeled: lab.Labeled, Rule: lab.Rule}
+	if lab.Labeled {
+		lr.Labels = make(map[string]bool, len(lab.Labels))
+		for id, v := range lab.Labels {
+			lr.Labels[string(id)] = v
+		}
+	}
+	return lr
 }
 
 // QuestionReport is the scorecard for one question. A nil metric is one that
