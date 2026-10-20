@@ -194,6 +194,33 @@ func TestDispatchIdleNamesOnlyTheTopThreeReasons(t *testing.T) {
 	}
 }
 
+// A bead whose formula declaration is bad cannot start however many seats are
+// free, so it is not waiting on the dispatcher.
+func TestDispatchableWaitingIgnoresBadFormula(t *testing.T) {
+	t.Parallel()
+	for _, line := range []string{
+		"gt-abcde: conflicting formula labels: a, b",
+		"gt-abcde: bad formula vars: x",
+		"gt-abcde: bad formula label: y",
+	} {
+		t.Run(line, func(t *testing.T) {
+			t.Parallel()
+			report := idleTick(line)
+			if waiting, reasons := dispatchableWaiting(report); waiting != 0 || len(reasons) != 0 {
+				t.Fatalf("waiting = %d, reasons = %+v; want none", waiting, reasons)
+			}
+			r := newIdleRig(t)
+			r.observe(report, attentionDispatchIdleTicks+3)
+			if st := r.tr.Status(); st.Streak != 0 {
+				t.Fatalf("streak = %d, want 0", st.Streak)
+			}
+			if got := r.items(t); len(got) != 0 {
+				t.Fatalf("raised: %+v", got)
+			}
+		})
+	}
+}
+
 func TestDispatchIdleDoesNotRaise(t *testing.T) {
 	t.Parallel()
 	dispatched := idleTick(overlapLine)
