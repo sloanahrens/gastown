@@ -1309,7 +1309,6 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 	var out []attention.Item
 	reads := map[string]riskRead{}
 	skipped := map[string]bool{}
-	defer func() { s.riskSkipped = skipped }()
 	var firstErr error
 	beadReads, beadFails := 0, 0
 	since := s.now.Add(-attentionRiskPathWindow)
@@ -1384,6 +1383,9 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 			})
 		}
 	}
+	// Recorded only when the pass ran to its end: an early return leaves last
+	// tick's skips in place, so the next tick logs only what it has not logged.
+	s.riskSkipped = skipped
 	if beadReads > 0 && beadFails == beadReads {
 		return nil, fmt.Errorf("every bead read failed, first: %w", firstErr)
 	}
