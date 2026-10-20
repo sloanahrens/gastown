@@ -1502,10 +1502,13 @@ never called from the spec dispatcher's tick or from a sling, so dispatch
 latency is unchanged. It is advisory and log-only: it never edits, labels or
 comments on a bead.
 
-A placement is a bead in `in_progress` or `hooked` whose description carries an
-`attached_at` stamp later than the pass's cursor (`.runtime/jev/dispatch.cursor.json`,
-the stamp with the bead id as tie-break). A bead slung again gets a new stamp
-and a new line. The first pass only starts the cursor.
+A placement is a bead in `in_progress` or `hooked`, or one closed since the
+last pass, whose description carries an `attached_at` stamp later than the
+pass's cursor (`.runtime/jev/dispatch.cursor.json`, the stamp with the bead id
+as tie-break). The closed read keeps a placement that finishes between two
+passes in the battery; without it the log would sample only the slow ones. A
+bead slung again gets a new stamp and a new line. The first pass only starts
+the cursor.
 
 The state quotes the title, the `## Goal`, `## Constraints`, `## Acceptance` and
 `## Size` sections (each cut to 1500 runes), the labels and the agent (the

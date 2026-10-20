@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	// jevDispatchInterval is how often a pass is due. A pass takes the beads
-	// placed on a seat since the last one, so the interval is the most a
-	// placement waits before it is asked about.
+	// jevDispatchInterval is how often a pass is due. A pass takes the
+	// placements made since the last one, including any that closed in
+	// between, so the interval is the most a placement waits before it is
+	// asked about.
 	jevDispatchInterval = 15 * time.Minute
 
 	// jevDispatchRunBudget bounds one pass: the bead list and the Jev calls

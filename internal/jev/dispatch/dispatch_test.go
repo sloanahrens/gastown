@@ -66,15 +66,18 @@ func answers() *jev.Answers {
 	}
 }
 
-// fakeLister lists whatever beads it holds. It has no write, and counts calls.
+// fakeLister lists whatever beads it holds. It has no write, and counts calls
+// and records the cursor time each one was asked for.
 type fakeLister struct {
 	all   []*beads.Issue
 	err   error
 	calls int
+	since []time.Time
 }
 
-func (f *fakeLister) Placed() ([]*beads.Issue, error) {
+func (f *fakeLister) Placed(t time.Time) ([]*beads.Issue, error) {
 	f.calls++
+	f.since = append(f.since, t)
 	return f.all, f.err
 }
 
@@ -205,30 +208,30 @@ func TestJevDispatchPassLogsOneLinePerNewPlacement(t *testing.T) {
 
 	sum := mustRun(t, h.pass)
 
-	if sum.Asked != 2 || sum.Failed != 0 || sum.CapReached || sum.Started {
-		t.Fatalf("summary = %+v, want two beads asked", sum)
+	if sum.Asked != 3 || sum.Failed != 0 || sum.CapReached || sum.Started {
+		t.Fatalf("summary = %+v, want three beads asked", sum)
 	}
 	got := h.lines(t)
-	if len(got) != 2 || got[0]["bead"] != "gt-a" || got[1]["bead"] != "gt-b" {
-		t.Fatalf("log = %v, want gt-a then gt-b, oldest placement first", got)
+	if len(got) != 3 || got[0]["bead"] != "gt-closed" || got[1]["bead"] != "gt-a" || got[2]["bead"] != "gt-b" {
+		t.Fatalf("log = %v, want gt-closed, gt-a then gt-b, oldest placement first", got)
 	}
 	want := []string{"agent", "answers", "attached_at", "bead", "model", "question_version", "ts"}
-	if !reflect.DeepEqual(keys(got[1]), want) {
-		t.Errorf("line keys = %v, want %v", keys(got[1]), want)
+	if !reflect.DeepEqual(keys(got[2]), want) {
+		t.Errorf("line keys = %v, want %v", keys(got[2]), want)
 	}
-	if got[1]["model"] != "jev-test-1" {
-		t.Errorf("model = %v, want the model the API answered with", got[1]["model"])
+	if got[2]["model"] != "jev-test-1" {
+		t.Errorf("model = %v, want the model the API answered with", got[2]["model"])
 	}
-	if got[1]["question_version"] != float64(Version) {
-		t.Errorf("question_version = %v, want %d", got[1]["question_version"], Version)
+	if got[2]["question_version"] != float64(Version) {
+		t.Errorf("question_version = %v, want %d", got[2]["question_version"], Version)
 	}
-	if got[1]["agent"] != "claude-sonnet" || got[0]["agent"] != "" {
-		t.Errorf("agents = %v and %v, want claude-sonnet and none", got[1]["agent"], got[0]["agent"])
+	if got[2]["agent"] != "claude-sonnet" || got[1]["agent"] != "" {
+		t.Errorf("agents = %v and %v, want claude-sonnet and none", got[2]["agent"], got[1]["agent"])
 	}
-	if got[1]["attached_at"] != stamp(20) {
-		t.Errorf("attached_at = %v, want %s", got[1]["attached_at"], stamp(20))
+	if got[2]["attached_at"] != stamp(20) {
+		t.Errorf("attached_at = %v, want %s", got[2]["attached_at"], stamp(20))
 	}
-	ans, _ := got[1]["answers"].(map[string]any)
+	ans, _ := got[2]["answers"].(map[string]any)
 	wantAnswers := []string{"acceptance_tickable", "fits_twenty_minutes", "lands_first_try", "needs_strong_model", "size", "touches_daemon"}
 	if !reflect.DeepEqual(keys(ans), wantAnswers) {
 		t.Fatalf("answer keys = %v, want %v", keys(ans), wantAnswers)
@@ -239,11 +242,14 @@ func TestJevDispatchPassLogsOneLinePerNewPlacement(t *testing.T) {
 	if size, _ := ans["size"].(map[string]any); size["score"] != 1.0 || size["confidence"] != 0.6 {
 		t.Errorf("size = %v, want score 1 at confidence 0.6", ans["size"])
 	}
-	if len(h.asker.states) != 2 {
+	if len(h.asker.states) != 3 {
 		t.Errorf("asked %d times, want once per bead", len(h.asker.states))
 	}
+	if want := []time.Time{t0.Add(-time.Hour)}; !reflect.DeepEqual(h.lister.since, want) {
+		t.Errorf("lister asked since %v, want the cursor %v", h.lister.since, want)
+	}
 	for _, s := range h.asker.states {
-		for _, skipped := range []string{"gt-open", "gt-closed", "gt-unstamped", "gt-garbled", "gt-behind"} {
+		for _, skipped := range []string{"gt-open", "gt-unstamped", "gt-garbled", "gt-behind"} {
 			if strings.Contains(s, skipped) {
 				t.Errorf("asked about %s, which the pass should skip: %s", skipped, s)
 			}

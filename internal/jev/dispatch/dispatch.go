@@ -1,9 +1,9 @@
-// Package dispatch is the advisory dispatch battery. A pass takes the beads
-// placed on a seat since the last pass, asks Jev one battery of questions about
-// each (will it land first try, will it fit twenty minutes, does it need a
-// strong model, and so on), and appends one line per bead to a log. It never
-// edits, labels or comments on a bead: the log is the only thing it writes, and
-// nothing a polecat reads changes.
+// Package dispatch is the advisory dispatch battery. A pass takes the
+// placements made since the last pass, including the ones already closed, asks
+// Jev one battery of questions about each (will it land first try, will it fit
+// twenty minutes, does it need a strong model, and so on), and appends one line
+// per bead to a log. It never edits, labels or comments on a bead: the log is
+// the only thing it writes, and nothing a polecat reads changes.
 //
 // The pass runs on its own, after the fact, reading beads the dispatcher has
 // already placed, so it adds nothing to the dispatcher's tick or to a sling.
@@ -69,11 +69,14 @@ type Asker interface {
 	Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error)
 }
 
-// Lister lists the beads that sit on a seat. A pass only reads them.
+// Lister lists the placements a pass considers. A pass only reads them.
 type Lister interface {
-	// Placed lists every bead whose status says a worker holds it: in_progress
-	// or hooked. It need not filter by time; the pass does.
-	Placed() ([]*beads.Issue, error)
+	// Placed lists the beads placed since t: every bead whose status says a
+	// worker holds it (in_progress or hooked), and every bead closed since t,
+	// which is where a placement finishes when its work lands between two
+	// passes. A bead with neither status is not a placement. It need not
+	// filter by the attached_at stamp; the pass does.
+	Placed(t time.Time) ([]*beads.Issue, error)
 }
 
 // Pass is one run of the dispatch battery, with every dependency injected.
@@ -188,7 +191,7 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	if err != nil {
 		return sum, err
 	}
-	all, err := p.Lister.Placed()
+	all, err := p.Lister.Placed(cur.Time)
 	if err != nil {
 		return sum, fmt.Errorf("listing placed beads: %w", err)
 	}
@@ -274,13 +277,13 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 
 // queuePlacements returns what this pass should ask about, oldest first: every
 // placement after the cursor, and every queued placement the cursor already
-// passed. It drops queue entries for beads no longer on a seat, and reports
-// whether it did. Ties on the stamp break by ID, so the cursor orders
-// placements completely.
+// passed. It drops queue entries for beads the lister no longer calls a
+// placement, and reports whether it did. Ties on the stamp break by ID, so the
+// cursor orders placements completely.
 func queuePlacements(all []*beads.Issue, cur battery.Cursor, queue retries) (todo []placement, dropped bool) {
 	placed := make(map[string]*beads.Issue, len(all))
 	for _, b := range all {
-		if !onSeat(b) {
+		if !placedStatus(b) {
 			continue
 		}
 		if at := attachedAt(b); !at.IsZero() {
@@ -313,10 +316,16 @@ func queuePlacements(all []*beads.Issue, cur battery.Cursor, queue retries) (tod
 	return todo, dropped
 }
 
-// onSeat reports whether a bead's status says a worker holds it: in_progress,
-// or hooked, which is the status a sling gives a bead it places.
-func onSeat(b *beads.Issue) bool {
-	return b.Status == "in_progress" || b.Status == beads.StatusHooked
+// placedStatus reports whether a bead's status says it was placed:
+// in_progress, hooked, which is the status a sling gives a bead it places, or
+// closed, which is where a placement ends when its work lands between two
+// passes.
+func placedStatus(b *beads.Issue) bool {
+	switch beads.IssueStatus(b.Status) {
+	case beads.StatusInProgress, beads.IssueStatusHooked, beads.StatusClosed:
+		return true
+	}
+	return false
 }
 
 // attachedAt is the bead's attached_at stamp, zero when it has none or it does
