@@ -1368,7 +1368,7 @@ The best F1 is taken over every distinct value as a cut, predicting yes at or
 above it; a tie keeps the higher cut. `--json` names the rule that labeled each
 line in its `lines` array.
 
-Five batteries are registered. The `fixture` battery reads
+Seven batteries are registered. The `fixture` battery reads
 `.runtime/jev/fixture.jsonl` with labels from `fixture-labels.json`, and exists
 so tests can drive the command end to end. No live battery reads it.
 
@@ -1435,6 +1435,23 @@ The two phrase lists are `missingTestPhrases` and `beyondGoalPhrases` in
 `internal/jev/scorecard/submission.go`, and nowhere else. A question no title
 names stays unlabeled on that line. The report's context counts the reviews that
 labeled submissions and the findings those reviews carried.
+
+The `targets` battery reads `.runtime/jev/targets.jsonl`. Its labels come from
+the deep-review run bead each line names. Before changing a ledger line shape,
+read the ledger comment at the top of `scripts/deep-review.sh`: it defines the
+`reviewed:`, `finding:`, `queued:` and `p3:` lines, and the adapter parses them
+by hand.
+
+A closed run labels the files its ledger names: a `finding:`, `queued:` or
+`p3:` line sets `likely_defect` and `review_priority` true (`targets:ledger`),
+and a `reviewed:` line with no such line sets both false (`targets:clean`). The
+file a line names is the first token of its fingerprint; a line whose fields do
+not parse is skipped, as the script skips it. A file the ledger does not name
+stays unlabeled, because a missing or unreadable ledger is not evidence that the
+file is clean. A run bead still open, or no longer in the store, labels nothing.
+Each run adds a context line naming the files it scored, the files with
+findings, the files the ledger does not name, and where its first finding ranks
+by Jev's `review_priority` beside its rank in the slice's risk order.
 
 The `finding` battery is described next.
 

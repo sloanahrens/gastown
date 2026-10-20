@@ -1,0 +1,49 @@
+Scorecard for battery targets, all time
+Items: 10 parsed, 2 line(s) skipped
+run gt-run1: 4 files scored, 1 with a finding; the first finding ranks 4 by Jev's review_priority, 3 by the slice's risk order
+run gt-run2: 2 files scored; no finding in the ledger
+run gt-run3: 1 file scored; the run bead is still open, so none is labeled
+run gt-run4: 2 files scored, 1 the ledger does not name; no finding in the ledger
+run gt-run5: 1 file scored; the ledger names none of them, so none is labeled
+
+likely_defect (noul)
+  logged 10, labeled 7, positives 1, negatives 6, base rate 14.3%
+  at 0.5: precision 25.0%, recall 100.0%
+  best F1 0.500 at threshold 0.700
+  calibration (band, labeled n, mean value, label rate):
+    0.0-0.2      0  n/a  n/a
+    0.2-0.4      2  0.250  0.000
+    0.4-0.6      1  0.400  0.000
+    0.6-0.8      2  0.650  0.500
+    0.8-1.0      2  0.850  0.000
+  verdict: not-yet
+
+logic_churn (noul)
+  logged 10, labeled 0, positives 0, negatives 0, base rate n/a
+  at 0.5: precision n/a, recall n/a
+  best F1 n/a at threshold n/a
+  calibration (band, labeled n, mean value, label rate):
+    0.0-0.2      0  n/a  n/a
+    0.2-0.4      0  n/a  n/a
+    0.4-0.6      0  n/a  n/a
+    0.6-0.8      0  n/a  n/a
+    0.8-1.0      0  n/a  n/a
+  verdict: not-yet
+
+review_priority (score)
+  logged 10, labeled 7, positives 1, negatives 6, base rate 14.3%
+  mean score: positives 0.000, negatives 1.167
+  best F1 0.250 at threshold 0.000
+  verdict: not-yet
+
+under_tested (noul)
+  logged 10, labeled 0, positives 0, negatives 0, base rate n/a
+  at 0.5: precision n/a, recall n/a
+  best F1 n/a at threshold n/a
+  calibration (band, labeled n, mean value, label rate):
+    0.0-0.2      0  n/a  n/a
+    0.2-0.4      0  n/a  n/a
+    0.4-0.6      0  n/a  n/a
+    0.6-0.8      0  n/a  n/a
+    0.8-1.0      0  n/a  n/a
+  verdict: not-yet
