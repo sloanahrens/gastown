@@ -24,6 +24,21 @@ A comprehensive catalog of all cleanup-related commands in the gastown/beads eco
 | `gt polecat identity remove <rig> <name>` | Removes a polecat identity |
 | `gt done` | Polecat self-cleaning: pushes branch, marks the bead `gt:ready-to-land`, preserves handoff metadata, kills own session. No landing for `--status ESCALATED\|DEFERRED` |
 
+**What "landed" means to `check-recovery`.** Work is landed when its content is
+on the target or the worktree HEAD is an ancestor of `refs/landed/<bead>` — the
+head a landing keeps there after reaping the branch. A branch's presence on
+origin is never the test. A seat whose work landed is `SAFE_TO_NUKE` with reason
+`landed`; when the bead's LANDING RECORD landed from another head and the
+worktree's content for the files its commits touched differs, the verdict stays
+`NEEDS_RECOVERY` with reason `landed-differs` and a blocker naming the files to
+compare. The proof fails closed: a missing landing record, an unreadable ref or
+object, and a worktree whose commits touch no files are never "landed", and a
+failed read is named in the `git-unpushed` blocker. One predicate,
+`land.WorkLandedOnTarget`, answers for `check-recovery`, `gt polecat list` and
+the reuse gate; its verdict `Reason` is one of `landed-ref`, `landed-target`,
+`landed-record`, `landed-differs`, `unpushed` or `probe-failed`, and file names
+live in a separate `Detail`.
+
 ## Rig-Level Cleanup
 
 | Command | What it does |

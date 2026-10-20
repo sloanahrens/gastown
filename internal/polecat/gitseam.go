@@ -22,6 +22,13 @@ type gitRepo interface {
 	Rev(ref string) (string, error)
 	RefExists(ref string) (bool, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
+	// MergeBase, DiffNameOnly, DiffPathsNameOnly and CommitLandedOnTarget are
+	// what land.WorkLandedOnTarget reads to prove a seat's leftover commits
+	// actually landed (gt-jol0i).
+	MergeBase(a, b string) (string, error)
+	DiffNameOnly(base, head string) ([]string, error)
+	DiffPathsNameOnly(a, b string, paths []string) ([]string, error)
+	CommitLandedOnTarget(remote, target, commit string) bool
 	FirstParentContains(commit, descendant string) (bool, error)
 	Cherry(upstream, head string) (string, error)
 	CountCommitsBehind(ref string) (int, error)

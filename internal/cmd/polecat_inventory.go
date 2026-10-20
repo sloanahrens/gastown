@@ -93,6 +93,9 @@ type polecatInventoryEnv struct {
 	// probe measures WorktreePath; nil means probePolecatWorktree. Tests set
 	// it to canned states so the verdict runs without a repository.
 	probe func(worktreePath string, localOnly bool) polecat.LiveGitState
+	// openWorkLanded opens the repository the landed probe reads; nil means
+	// the worktree's own git. Tests set it to a modeled repository.
+	openWorkLanded workLandedOpener
 	// IssueSource resolves the bead ids this seat's facts depend on: the ones
 	// the active_mr policy looks up (the MR itself and its source issue), and
 	// the bead a hook_bead reference names. Nil — the zero value, and what the
@@ -427,6 +430,12 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 	// (the list path) are the ones that probe.
 	if facts.GitStateSource == polecat.GitStateSourceLive {
 		facts.AssignedBeadTerminal = assignedBeadTerminalForInventory(env.IssueSource, item.Issue, fields, hookBead, hookDisposition)
+	}
+	// The list pays no beads call per seat unless there is leftover work to
+	// explain, which is why this runs only for a seat holding commits; the
+	// check-recovery path, which reads one seat, runs it for the reason too.
+	if facts.GitStateSource == polecat.GitStateSourceLive {
+		applyWorkLandedToWorkstateFacts(&facts, env.openWorkLanded, env.WorktreePath, env.IssueSource, hookBead, item.Branch)
 	}
 	if item.ActiveMR != "" {
 		// The decision is the shared active_mr policy, so what the list shows
