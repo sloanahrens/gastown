@@ -14,6 +14,12 @@
 # no landings, no cursor moved) and landings (the risky landings, no slice).
 # The default, both, is the original single run.
 #
+# In slice mode, once the slice is built, plan runs the review-targeting
+# battery when daemon.patrols.jev_targets.enabled is true: it runs
+# `gt jev review-targets`, which scores each slice file and logs the answers
+# beside the rank. Its output goes to stderr and its exit status is ignored, so
+# the slice is the same whether the battery runs, fails or is off.
+#
 # docs-audit scores every living doc at a ref (README.md, CLAUDE.md, AGENTS.md,
 # .beads/PRIME.md, docs/*.md, docs/concepts, docs/guides, internal/**/README.md;
 # the plans, design, adr and research records are point-in-time and never
@@ -84,7 +90,7 @@ usage() {
 usage:
   deep-review.sh plan --landings FILE --prev-notes FILE --repo DIR
                       [--ref REF] [--slice N] [--slice-bytes N] [--now RFC3339]
-                      [--out DIR] [--mode slice|landings|both]
+                      [--out DIR] [--mode slice|landings|both] [--run BEAD]
   deep-review.sh docs-audit --repo DIR [--ref REF] [--now RFC3339]
                             [--prev-notes FILE] [--out DIR]
   deep-review.sh gate --landings FILE --label LABEL [--repo DIR] [--ref REF]
@@ -115,6 +121,23 @@ def tsok: if type == "string" then ((try ts catch null) // null) else null end;
 '
 
 valid_ts() { jq -n -e --arg t "$1" "$JQ_TS"'($t | tsok) != null' >/dev/null; }
+
+# jev_targets_enabled: true when daemon.patrols.jev_targets.enabled is true.
+# The key lives in settings/config.json's "daemon" section on a two-file town
+# and at the top level of the legacy mayor/daemon.json. Any other state,
+# including a config that does not parse, leaves the battery off: it is
+# opt-in, because every scored file is a paid Jev call.
+jev_targets_enabled() {
+  local town="${GT_TOWN_ROOT:-$HOME/gt}"
+  local host="$town/settings/config.json" legacy="$town/mayor/daemon.json"
+  if [ -f "$host" ] && jq -e 'has("daemon")' "$host" >/dev/null 2>&1; then
+    jq -e '.daemon.patrols.jev_targets.enabled == true' "$host" >/dev/null 2>&1
+  elif [ -f "$legacy" ]; then
+    jq -e '.patrols.jev_targets.enabled == true' "$legacy" >/dev/null 2>&1
+  else
+    return 1
+  fi
+}
 
 cmd_seen() {
   local notes=""
@@ -594,7 +617,7 @@ risky_landings() {
 # risky-landings list and an empty slice. --mode both (the default) is the
 # original single run: the slice is skipped on a quiet day.
 cmd_plan() {
-  local landings="" notes="" repo="" ref="HEAD" slice="$DEFAULT_SLICE" slice_bytes="$DEFAULT_SLICE_BYTES" now="" out="" mode="both"
+  local landings="" notes="" repo="" ref="HEAD" slice="$DEFAULT_SLICE" slice_bytes="$DEFAULT_SLICE_BYTES" now="" out="" mode="both" run=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --landings) landings="${2:-}"; shift 2 || usage ;;
@@ -606,6 +629,7 @@ cmd_plan() {
       --now) now="${2:-}"; shift 2 || usage ;;
       --out) out="${2:-}"; shift 2 || usage ;;
       --mode) mode="${2:-}"; shift 2 || usage ;;
+      --run) run="${2:-}"; shift 2 || usage ;;
       *) usage ;;
     esac
   done
@@ -662,6 +686,14 @@ cmd_plan() {
   echo "slice_files=$(awk 'END { print NR }' "$out/slice.txt")"
   echo "slice_bytes=$(awk -F'\t' '{ s += $4 } END { print s + 0 }' "$out/slice-rows.txt")"
   echo "out=$out"
+
+  # Review-targeting battery. It reads the slice that was just built and the
+  # history that ranked it, writes its own log, and prints to stderr, so plan's
+  # stdout and the slice files do not depend on it.
+  if [ "$mode" = slice ] && [ -n "$run" ] && jev_targets_enabled; then
+    gt jev review-targets --run "$run" --ranked "$out/slice-rows.txt" \
+      --history "$out/history.txt" --repo "$repo" --ref "$ref" >&2 || true
+  fi
 }
 
 # docs-audit: the audit alone. --prev-notes is accepted so a caller can pass

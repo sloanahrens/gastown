@@ -9,7 +9,9 @@
 # (count and age thresholds, the green-sweep gate and the sweep records it
 # refuses, both bd --json shapes, untrusted input), the
 # docs-audit subcommand (dead paths and commands, code_changed, score order,
-# which docs are audited) and plan's docs.txt (slice pairing, stale docs, caps).
+# which docs are audited), plan's docs.txt (slice pairing, stale docs, caps)
+# and plan's review-targeting battery (called only when enabled, and the slice
+# output byte-identical with it on, failing and absent).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -967,6 +969,95 @@ rc="$(plan_rc --mode both --landings "$LANDINGS" --prev-notes "$TMP/none.txt" --
 assert_eq "both mode with landings: the same docs as slice mode" "README.md docs/p1.md docs/q.md docs/p3.md docs/p2.md" "$(joined "$TMP/pl3/docs.txt")"
 rc="$(plan_rc --landings "$LANDINGS" --prev-notes "$TMP/none.txt" --repo "$REPO" --now "$NOW" --out "$TMP/pl4")"
 assert_eq "a tree with no living docs plans none" "0" "$(field docs)"
+
+# ---- plan: review-targeting battery ---------------------------------------
+echo ""
+echo "plan slice: the review-targeting battery changes none of the slice output"
+
+TOWN_ON="$TMP/town-on"
+mkdir -p "$TOWN_ON/mayor"
+printf '{"type":"daemon-patrol-config","version":1,"patrols":{"jev_targets":{"enabled":true,"usd_per_billion_tokens":3}}}\n' > "$TOWN_ON/mayor/daemon.json"
+TOWN_HOST="$TMP/town-host"
+mkdir -p "$TOWN_HOST/settings"
+printf '{"daemon":{"patrols":{"jev_targets":{"enabled":true,"usd_per_billion_tokens":3}}}}\n' > "$TOWN_HOST/settings/config.json"
+TOWN_OFF="$TMP/town-off"
+mkdir -p "$TOWN_OFF/mayor"
+printf '{"type":"daemon-patrol-config","version":1,"patrols":{"jev_targets":{"enabled":false}}}\n' > "$TOWN_OFF/mayor/daemon.json"
+
+GTBIN="$TMP/gt-bin"; mkdir -p "$GTBIN"
+cat > "$GTBIN/gt" <<'G'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${GT_CALLS:-/dev/null}"
+echo "JEV-STDOUT"
+echo "JEV-STDERR" >&2
+exit "${GT_EXIT:-0}"
+G
+chmod +x "$GTBIN/gt"
+
+# A PATH holding everything plan needs except gt, so the absent case is a
+# command that is genuinely not there.
+SHIM="$TMP/shim"; mkdir -p "$SHIM"
+for tool in bash env git jq awk sort cut grep sed tr cat date mkdir mktemp rm dirname basename head tail wc ln; do
+  src="$(command -v "$tool" 2>/dev/null || true)"
+  [ -z "$src" ] || ln -sf "$src" "$SHIM/$tool"
+done
+
+# battery_plan TOWN OUT GT_PATH RUN_BEAD [VAR=value...]: runs plan --mode slice
+# and prints the exit code. A gt on GT_PATH records its arguments.
+battery_plan() {
+  local town="$1" out="$2" gtpath="$3" run="$4"; shift 4
+  local runflag=""
+  [ -z "$run" ] || runflag="--run $run"
+  local rc=0
+  # shellcheck disable=SC2086
+  env GT_TOWN_ROOT="$town" GT_CALLS="$TMP/gt-calls" PATH="$gtpath" "$@" \
+    "$DR" plan --mode slice --prev-notes "$TMP/none.txt" --repo "$REPO" \
+    --now "$NOW" $runflag --out "$out" > "$TMP/plan.out" 2> "$TMP/plan.err" || rc=$?
+  echo "$rc"
+}
+
+# battery_case NAME TOWN OUT GT_PATH RUN_BEAD [VAR=value...]: runs one case
+# and keeps everything it could change: plan's streams, the slice files, and
+# the fake gt's calls.
+battery_case() {
+  local name="$1"; shift
+  : > "$TMP/gt-calls"
+  battery_plan "$@" > "$TMP/rc-$name"
+  cp "$TMP/plan.out" "$TMP/planout-$name"
+  cp "$TMP/plan.err" "$TMP/planerr-$name"
+  cp "$TMP/gt-calls" "$TMP/calls-$name"
+  {
+    grep -v '^out=' "$TMP/planout-$name"
+    printf -- '--slice--\n'; cat "$TMP/bo-$name/slice.txt"
+    printf -- '--rows--\n'; cat "$TMP/bo-$name/slice-rows.txt"
+    printf -- '--reviewed--\n'; cat "$TMP/bo-$name/reviewed-lines.txt"
+    printf -- '--history--\n'; cat "$TMP/bo-$name/history.txt"
+  } > "$TMP/sig-$name"
+}
+
+battery_case off "$TOWN_OFF" "$TMP/bo-off" "$GTBIN:$PATH" gt-run1
+battery_case on "$TOWN_ON" "$TMP/bo-on" "$GTBIN:$PATH" gt-run1
+battery_case fail "$TOWN_ON" "$TMP/bo-fail" "$GTBIN:$PATH" gt-run1 GT_EXIT=9
+battery_case absent "$TOWN_ON" "$TMP/bo-absent" "$SHIM" gt-run1
+battery_case norun "$TOWN_ON" "$TMP/bo-norun" "$GTBIN:$PATH" ""
+battery_case host "$TOWN_HOST" "$TMP/bo-host" "$GTBIN:$PATH" gt-run1
+
+for c in on fail absent norun host; do
+  assert_eq "the slice output is byte-identical with the battery $c" "same" \
+    "$(cmp -s "$TMP/sig-off" "$TMP/sig-$c" && echo same || echo different)"
+done
+assert_eq "not enabled: the battery is never called" "0" "$(wc -l < "$TMP/calls-off" | tr -d ' ')"
+assert_eq "enabled: the battery is called once" "1" "$(wc -l < "$TMP/calls-on" | tr -d ' ')"
+assert_eq "enabled: the call names the run and the slice rows" "gt-run1|$TMP/bo-on/slice-rows.txt" \
+  "$(awk '{ print $4 "|" $6 }' "$TMP/calls-on")"
+assert_eq "enabled in settings/config.json's daemon section: called once" "1" "$(wc -l < "$TMP/calls-host" | tr -d ' ')"
+assert_eq "no --run: the battery is never called" "0" "$(wc -l < "$TMP/calls-norun" | tr -d ' ')"
+assert_eq "the absent PATH really holds no gt" "no" \
+  "$(env PATH="$SHIM" bash -c 'command -v gt >/dev/null && echo yes || echo no')"
+assert_eq "absent: nothing was called" "0" "$(wc -l < "$TMP/calls-absent" | tr -d ' ')"
+assert_eq "the battery's stdout stays out of plan's stdout" "0" "$(grep -c 'JEV-STDOUT' "$TMP/planout-on" || true)"
+assert_eq "the battery's output is reported on stderr" "1" "$(grep -c 'JEV-STDERR' "$TMP/planerr-on" || true)"
+assert_eq "a failing battery leaves plan's exit at 0" "0" "$(cat "$TMP/rc-fail")"
 
 echo ""
 echo "passed: $PASS failed: $FAIL"

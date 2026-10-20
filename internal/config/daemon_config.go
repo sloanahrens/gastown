@@ -81,6 +81,12 @@ type PatrolsConfig struct {
 	// JevDedupe.
 	JevSubmission *JevSubmissionConfig `json:"jev_submission,omitempty"`
 
+	// JevTargets asks Jev to score each file in the deep-review rotation slice
+	// and logs the answers beside the slice's risk rank (internal/jev/targets).
+	// The deep-review script reads it, not the daemon. Opt-in for the same
+	// reason as JevDedupe.
+	JevTargets *JevTargetsConfig `json:"jev_targets,omitempty"`
+
 	// JevDispatch asks Jev to predict, for each bead just placed on a seat,
 	// whether it lands first try, its size and the model it needs, and logs
 	// every answer (internal/jev/dispatch). Opt-in, like JevDedupe.
@@ -504,6 +510,20 @@ type JevSubmissionConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// MaxUSDPerDay stops the pass for the day once the town's Jev spend
+	// reaches it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+}
+
+// JevTargetsConfig switches on the review-targeting battery and prices its Jev
+// spend. The battery is off unless Enabled is true, and an enabled run needs
+// USDPerBillionTokens: the usage ledger stores tokens, not dollars.
+type JevTargetsConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the run for the day once the town's Jev spend
 	// reaches it. Zero takes the default of one dollar.
 	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
 
