@@ -130,6 +130,7 @@ type (
 	JevAttentionConfig         = agentconfig.JevAttentionConfig
 	JevLandingConfig           = agentconfig.JevLandingConfig
 	JevSubmissionConfig        = agentconfig.JevSubmissionConfig
+	JevTargetsConfig           = agentconfig.JevTargetsConfig
 	JevDispatchConfig          = agentconfig.JevDispatchConfig
 	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry

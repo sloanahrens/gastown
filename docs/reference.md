@@ -1270,6 +1270,60 @@ reads the same keys whether or not the patrol is on:
 | `max_usd_per_day` | The town-wide daily cap the pass checks with `Cap.Allows` before every call. `0` takes the default of 1. |
 | `usd_per_billion_tokens` | Prices the ledger's tokens. Required: a pass without it refuses to run. |
 
+### Review-targeting battery (`jev_targets`)
+
+`gt jev review-targets --run <bead> --ranked <rows> --history <file>` asks Jev
+about each file in a deep-review rotation slice and appends one line per file
+to `.runtime/jev/targets.jsonl`. It reads the ranked slice rows
+`scripts/deep-review.sh` writes (tier, last review date, risk score, bytes,
+path, highest risk first) and the history that ranked them
+(`git log --name-only --format=@%s`, which tells each file its recent commit
+subjects). At most 60 files are asked about, in rank order. The battery is
+advisory and log-only: it never reorders, drops or holds up the slice, and the
+log is the only thing it writes.
+
+The log line is `{ts, run, path, tier, risk_score, bytes, model, answers,
+question_version}`. `run` is the deep-review run bead whose slice held the
+file, so the scorecard labels the answers from that run's findings. `answers`
+maps each question id to its answer: `likely_defect`, `logic_churn` and
+`under_tested` each hold a `noul` probability, and `review_priority` holds a
+`score` (0 skip this run, 1 review when the slice has room, 2 review first)
+with its `confidence`. `question_version` is `targets.Version`.
+
+The state Jev reads is the file's path, tier, last review date, risk score,
+line count, its last ten commit subjects and its exported function, method and
+type names (at most 40). Each value is JSON-quoted. The body is read from the
+repository at the ranked ref (`--repo`, `--ref`) for the line count and the
+names, and never sent.
+
+`scripts/deep-review.sh plan --mode slice` calls the command once, after it
+builds the slice, when `patrols.jev_targets.enabled` is true. It passes
+`slice-rows.txt` and `history.txt`, sends the command's output to stderr and
+ignores its exit status, so the slice is the same whether the battery runs,
+fails or is off. The run stops for the day once the town's Jev spend reaches
+`patrols.jev_targets.max_usd_per_day` (default 1) and needs
+`patrols.jev_targets.usd_per_billion_tokens` to price that spend. The
+command reads the keys whether or not the battery is enabled, so a manual run
+works before it is switched on. They live under `patrols.jev_targets` (the
+`daemon` section of `settings/config.json`, the legacy `daemon.json` on an
+unmigrated town):
+
+```json
+"patrols": {
+  "jev_targets": {
+    "enabled": true,
+    "max_usd_per_day": 1.0,
+    "usd_per_billion_tokens": 3.0
+  }
+}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `enabled` | Turns the battery on. Default `false`. |
+| `max_usd_per_day` | The town-wide daily cap the run checks with `Cap.Allows` before every call. `0` takes the default of 1. |
+| `usd_per_billion_tokens` | Prices the ledger's tokens. Required: a run without it refuses to run. |
+
 ### Scorecard (`gt jev scorecard`)
 
 `gt jev scorecard --battery <name>` scores a battery's log against the labels

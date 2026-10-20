@@ -1,0 +1,3 @@
+0	0000-00-00	12.5000	1234	internal/a/one.go
+0	2026-09-01	8.0000	800	internal/b/two.go
+1	2026-10-01	3.2500	90	internal/c/three.go

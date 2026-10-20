@@ -23,7 +23,7 @@ bd list -l {{run_label}} --all --limit 60 --json > /tmp/deep-review-{{issue}}/ru
   git fetch origin {{base_branch}} &&
   bash /tmp/deep-review-{{issue}}/deep-review.sh plan --landings /tmp/deep-review-{{issue}}/landings-all.jsonl \\
     --prev-notes /tmp/deep-review-{{issue}}/prev-notes.txt --repo . --ref origin/{{base_branch}} --mode {{mode}} \\
-    --slice {{slice_files}} --slice-bytes {{slice_bytes}} --out /tmp/deep-review-{{issue}} > /tmp/deep-review-{{issue}}/plan.txt
+    --slice {{slice_files}} --slice-bytes {{slice_bytes}} --run {{issue}} --out /tmp/deep-review-{{issue}} > /tmp/deep-review-{{issue}}/plan.txt
 echo "plan exit: $?"; cat /tmp/deep-review-{{issue}}/plan.txt
 ```
 The jq reads the bare array and the `BD_MACHINE=1` envelope. A non-zero plan exit
@@ -159,7 +159,7 @@ landings reviewed (bead, commit), `unparsed=`, slice files and docs
 read, reviewers and verifiers used, then numbered `filed`, `would file` and
 `queued` lists, `refuted=<n> of <total>` and `unverified=<n>` (findings past
 capacity, 0 when none). When total >= 5 and refuted = 0,
-add the line `UNCHALLENGED: no finding was refuted`.
+add `UNCHALLENGED: no finding was refuted`.
 
 **8. Record the reviews of the risk-path items covered** (live runs only; skip when
 `{{dry_run}}` is `true` or the mode is `slice`). Per landing: `gt bead review <bead> PASS`,
