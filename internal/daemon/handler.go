@@ -17,8 +17,10 @@ import (
 func (d *Daemon) handlePlugins() {
 	rigsConfig, err := d.loadRigsConfig()
 	if err != nil {
-		d.logger.Printf("Handler: failed to load rigs config: %v", err)
-		return
+		// A missing mayor/rigs.json or one bad rig entry costs the rig-level
+		// plugins, not every plugin: town plugins need no rig.
+		d.logger.Printf("Handler: failed to load rigs config, dispatching town plugins only: %v", err)
+		rigsConfig = nil
 	}
 	d.dispatchPlugins(rigsConfig)
 }

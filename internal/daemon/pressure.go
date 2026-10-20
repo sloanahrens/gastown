@@ -96,7 +96,16 @@ func (d *Daemon) checkPressure(_ string) PressureResult {
 
 	// Tier 2: Session concurrency cap
 	if maxSessions > 0 {
-		result.ActiveSessions = d.countAgentSessions()
+		active, err := d.countAgentSessions()
+		if err != nil {
+			// An unlistable tmux is no evidence of an empty town: counting it as
+			// zero sessions would spawn past the cap, so the cap holds the spawn.
+			result.OK = false
+			result.Reason = fmt.Sprintf("session cap: could not count sessions against max %d: %v", maxSessions, err)
+			d.logger.Printf("session pressure: holding the spawn: %v", err)
+			return result
+		}
+		result.ActiveSessions = active
 		if result.ActiveSessions >= maxSessions {
 			result.OK = false
 			result.Reason = fmt.Sprintf("session cap: %d active sessions, max %d", result.ActiveSessions, maxSessions)
@@ -130,11 +139,13 @@ func (d *Daemon) hostCPUIdle() (float64, error) {
 }
 
 // countAgentSessions counts active tmux sessions that belong to Gas Town agents.
-// Uses the town's tmux socket so it only counts sessions for this town.
-func (d *Daemon) countAgentSessions() int {
+// Uses the town's tmux socket so it only counts sessions for this town. A list
+// error is returned, not counted as zero: "no server" already reads as an empty
+// list, so an error is a real tmux failure.
+func (d *Daemon) countAgentSessions() (int, error) {
 	sessions, err := d.tmux.ListSessions()
 	if err != nil {
-		return 0
+		return 0, fmt.Errorf("listing tmux sessions: %w", err)
 	}
 
 	count := 0
@@ -143,7 +154,7 @@ func (d *Daemon) countAgentSessions() int {
 			count++
 		}
 	}
-	return count
+	return count, nil
 }
 
 // isAgentSession returns true if the tmux session name looks like a Gas Town agent.

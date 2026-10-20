@@ -213,7 +213,7 @@ func healthyDoctorProbes() doctorProbes {
 		conns:     func() (int, int, error) { return 12, 1000, nil },
 		databases: func() ([]string, error) { return []string{"hq", "gt"}, nil },
 		orphans:   func() (int, error) { return 0, nil },
-		backupAge: func(string) (time.Duration, bool) { return 10 * time.Minute, true },
+		backupAge: func(string) (time.Duration, bool, error) { return 10 * time.Minute, true, nil },
 		reap:      func() (slot.ReapReport, error) { return slot.ReapReport{}, nil },
 	}
 }
@@ -255,11 +255,11 @@ func TestDoctorDogFindings_EachCheckTrips(t *testing.T) {
 			p.orphans = func() (int, error) { return 21, nil }
 		}, "orphan"},
 		{"stale backup", func(p *doctorProbes) {
-			p.backupAge = func(db string) (time.Duration, bool) {
+			p.backupAge = func(db string) (time.Duration, bool, error) {
 				if db == "gt" {
-					return 3 * time.Hour, true
+					return 3 * time.Hour, true, nil
 				}
-				return time.Minute, true
+				return time.Minute, true, nil
 			}
 		}, "backup gt"},
 		{"reap removal failed", func(p *doctorProbes) {
@@ -286,9 +286,9 @@ func TestDoctorDogFindings_BackupOnlyForServedDatabases(t *testing.T) {
 	t.Parallel()
 	p := healthyDoctorProbes()
 	var asked []string
-	p.backupAge = func(db string) (time.Duration, bool) {
+	p.backupAge = func(db string) (time.Duration, bool, error) {
 		asked = append(asked, db)
-		return time.Minute, true
+		return time.Minute, true, nil
 	}
 	doctorDogFindings(p, defaultDoctorLimits())
 	if strings.Join(asked, ",") != "hq,gt" {
@@ -297,7 +297,7 @@ func TestDoctorDogFindings_BackupOnlyForServedDatabases(t *testing.T) {
 
 	// A served database with no backup yet is not a finding: it may predate
 	// its first night, which is not an outage.
-	p.backupAge = func(string) (time.Duration, bool) { return 0, false }
+	p.backupAge = func(string) (time.Duration, bool, error) { return 0, false, nil }
 	if r := doctorDogFindings(p, defaultDoctorLimits()); len(r.findings) != 0 {
 		t.Errorf("missing backup dirs produced findings: %v", r.findings)
 	}
@@ -361,5 +361,26 @@ func TestDoctorDogFindings_ReapListingErrorIsANoteNotAFinding(t *testing.T) {
 	r = doctorDogFindings(p, defaultDoctorLimits())
 	if len(r.findings) != 0 || len(r.notes) != 1 || !strings.Contains(r.notes[0], "gt-gate-7") {
 		t.Errorf("successful reap should be a note: findings=%v notes=%v", r.findings, r.notes)
+	}
+}
+
+// A backup probe that errors is a finding, as every other failed probe is: an
+// unreadable backup root must not read as a database with nothing to judge.
+func TestDoctorDogFindings_BackupProbeErrorIsFinding(t *testing.T) {
+	t.Parallel()
+	p := healthyDoctorProbes()
+	p.backupAge = func(string) (time.Duration, bool, error) {
+		return 0, false, errors.New("permission denied")
+	}
+	r := doctorDogFindings(p, defaultDoctorLimits())
+	if len(r.findings) != 2 {
+		t.Fatalf("want one finding per served database, got %v", r.findings)
+	}
+	for i, db := range []string{"hq", "gt"} {
+		for _, s := range []string{"backup " + db, "unavailable", "permission denied"} {
+			if !strings.Contains(r.findings[i], s) {
+				t.Errorf("finding %q does not say %q", r.findings[i], s)
+			}
+		}
 	}
 }

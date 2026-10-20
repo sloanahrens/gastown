@@ -79,8 +79,9 @@ type doctorProbes struct {
 	databases func() ([]string, error)
 	// orphans counts databases no rig references (gt dolt cleanup's set).
 	orphans func() (int, error)
-	// backupAge is the age of db's newest nightly backup; false when it has none.
-	backupAge func(db string) (time.Duration, bool)
+	// backupAge is the age of db's newest nightly backup; false when it has
+	// none. An error means the backup root could not be read.
+	backupAge func(db string) (time.Duration, bool, error)
 	// reap removes gate-container debris (gt slot reap).
 	reap func() (slot.ReapReport, error)
 }
@@ -151,7 +152,10 @@ func doctorDogFindings(p doctorProbes, lim doctorLimits) doctorReport {
 		r.findings = append(r.findings, fmt.Sprintf("database list unavailable: %v", err))
 	} else {
 		for _, db := range dbs {
-			if age, ok := p.backupAge(db); ok && age > lim.backupStale {
+			age, ok, err := p.backupAge(db)
+			if err != nil {
+				r.findings = append(r.findings, fmt.Sprintf("backup %s unavailable: %v", db, err))
+			} else if ok && age > lim.backupStale {
 				r.findings = append(r.findings, fmt.Sprintf("backup %s is %v old (threshold %v)", db, age.Round(time.Minute), lim.backupStale))
 			}
 		}
@@ -195,16 +199,18 @@ func doctorDogProbes(townRoot string) doctorProbes {
 			o, err := doltserver.FindOrphanedDatabases(townRoot)
 			return len(o), err
 		},
-		backupAge: func(db string) (time.Duration, bool) {
+		backupAge: func(db string) (time.Duration, bool, error) {
 			root, err := doltbackup.DefaultRoot()
 			if err != nil {
-				return 0, false
+				return 0, false, err
 			}
+			// A missing root or an un-backed-up database is (0, false, nil):
+			// LastFor reports neither as an error.
 			b, ok, err := doltbackup.LastFor(root, db)
 			if err != nil || !ok {
-				return 0, false
+				return 0, false, err
 			}
-			return b.Age(time.Now()), true
+			return b.Age(time.Now()), true, nil
 		},
 		reap: func() (slot.ReapReport, error) { return slot.Reap(townRoot, slot.ReapOptions{}) },
 	}

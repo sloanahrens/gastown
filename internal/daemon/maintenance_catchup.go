@@ -75,7 +75,6 @@ func (d *Daemon) maybeCatchUpBackup(now time.Time) {
 	if !d.maintenanceGCRunning.CompareAndSwap(false, true) {
 		return
 	}
-	d.catchUpAttemptAt.Store(now.UnixNano())
 	age := "none on disk"
 	if ok {
 		age = newest.Age(now).Round(time.Minute).String() + " old"
@@ -86,6 +85,13 @@ func (d *Daemon) maybeCatchUpBackup(now time.Time) {
 		defer d.maintenanceGCRunning.Store(false)
 		res := d.maintenanceBackup(databases)
 		d.logger.Printf("scheduled_maintenance: catch-up backup %s", res.outcome)
+		if res.outcome == gcOutcomeDeferred {
+			// A held Dolt lock or a pause marker means no backup was tried:
+			// the next 5-minute tick retries, so the throttle stays reserved
+			// for a run that completed or failed, as the catch-up gc's is.
+			return
+		}
+		d.catchUpAttemptAt.Store(now.UnixNano())
 	})
 }
 

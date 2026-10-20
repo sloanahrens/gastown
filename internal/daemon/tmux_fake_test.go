@@ -26,6 +26,7 @@ type fakeTmux struct {
 	createdErr  error
 	unavailable bool
 	hasErr      error
+	listErr     error                           // ListSessions fails with this
 	aliveErr    map[string]error                // per session: IsAgentAliveChecked fails with this
 	stalls      map[string][]tmux.ComposerStall // per session, consumed in order; the last repeats
 	stallErr    map[string]error
@@ -82,6 +83,16 @@ func (f *fakeTmux) HasSession(name string) (bool, error) {
 // IsAgentAliveChecked reports whether the pane runs something other than a
 // shell, the fake's stand-in for *tmux.Tmux's process-tree check, or the error
 // the test set for session (a liveness query that could not be answered).
+func (f *fakeTmux) ListSessions() ([]string, error) {
+	f.mu.Lock()
+	err := f.listErr
+	f.mu.Unlock()
+	if err != nil {
+		return nil, err
+	}
+	return f.Server.ListSessions()
+}
+
 func (f *fakeTmux) IsAgentAliveChecked(session string) (bool, error) {
 	f.mu.Lock()
 	err := f.aliveErr[session]
