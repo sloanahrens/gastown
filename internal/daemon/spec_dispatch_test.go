@@ -480,7 +480,7 @@ func TestSpecDispatchCommandNamesTheCacheOwner(t *testing.T) {
 	t.Parallel()
 	gt := newFakeCLI(nil)
 	d := &Daemon{ctx: t.Context(), config: &Config{TownRoot: t.TempDir()}, logger: log.New(io.Discard, "", 0), gtPath: "gt", execCmd: gt.run}
-	_, _ = d.runSpecDispatchCommand()
+	_, _ = d.runSpecDispatchCommand(time.Minute)
 	calls := gt.recorded()
 	if len(calls) != 1 {
 		t.Fatalf("recorded %d gt calls, want 1", len(calls))
@@ -522,15 +522,15 @@ func TestSpecDispatchMaxPerTickReadsThePatrolBlock(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
 	d := &Daemon{config: &Config{TownRoot: townRoot}}
-	if got := d.specDispatchMaxPerTick(); got != 1 {
-		t.Errorf("no patrol block: max_per_tick = %d, want 1", got)
+	if got, err := d.specDispatchMaxPerTick(); err != nil || got != 1 {
+		t.Errorf("no patrol block: max_per_tick = %d, err %v, want 1", got, err)
 	}
 	cfg := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{MaxPerTick: 3}}}
 	if err := SavePatrolConfig(townRoot, cfg); err != nil {
 		t.Fatal(err)
 	}
-	if got := d.specDispatchMaxPerTick(); got != 3 {
-		t.Errorf("max_per_tick = %d, want 3 from the patrol block", got)
+	if got, err := d.specDispatchMaxPerTick(); err != nil || got != 3 {
+		t.Errorf("max_per_tick = %d, err %v, want 3 from the patrol block", got, err)
 	}
 }
 

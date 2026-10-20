@@ -354,7 +354,7 @@ func (d *Daemon) overseerReportSeats() ([]townreport.SeatWork, error) {
 // overseerReportLeft asks the spec dispatcher what it would do now, without
 // slinging, labeling or commenting.
 func (d *Daemon) overseerReportLeft() (townreport.DispatchLeft, error) {
-	out, err := d.runSpecDispatchCommand("--dry-run")
+	out, err := d.runSpecDispatchCommand(d.specDispatchTickBound(), "--dry-run")
 	if err != nil {
 		return townreport.DispatchLeft{}, err
 	}

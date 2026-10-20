@@ -74,7 +74,7 @@ func TestDaemonGTExecSitesCarryTheDaemonIdentity(t *testing.T) {
 	// Scheduled dispatch forks nothing since gt-638go.9; it runs the scheduler
 	// in process, so it contributes no gt call here.
 	d.dispatchQueuedWork()
-	_, _ = d.runSpecDispatchCommand()
+	_, _ = d.runSpecDispatchCommand(time.Minute)
 	_ = d.restartPolecatSession(supervisor.SeatFor("gastown", constants.RolePolecat, "ruby"))
 	r := &execScheduledSlingRunner{townRoot: townRoot, bdPath: "bd", gtPath: "gt", execCmd: gt.run}
 	_ = r.sling(t.Context(), "gt-run1", "", docAuditEntry)

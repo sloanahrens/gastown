@@ -53,12 +53,6 @@ var specDispatchTimeout = 5 * time.Minute
 // worktree and a session.
 const specDispatchSlingAllowance = 5 * time.Minute
 
-// specSlingHookedMarker is the line sling.Run prints once it has hooked the
-// bead (internal/sling/run.go), which the spec dispatcher's sling goes through.
-// A killed tick prints it once per sling before it can print its report, so it
-// is the record of what the tick made.
-const specSlingHookedMarker = "Work attached to "
-
 // specDispatchBound is how long a tick may run when it slings up to perTick
 // beads: timeout for the first sling and the read, plus specDispatchSlingAllowance
 // for each sling past the first. A perTick below one counts as one, so the
@@ -71,23 +65,41 @@ func specDispatchBound(timeout time.Duration, perTick int) time.Duration {
 }
 
 // specDispatchMaxPerTick reads the max_per_tick the tick will run with from the
-// patrol block the tick reads (gt-jdnab). An absent or unreadable block counts
-// as the default of one: the tick reports its own parse error, and the bound
-// stays at the one-sling size.
-func (d *Daemon) specDispatchMaxPerTick() int {
+// patrol block the tick reads (gt-jdnab). An absent block counts as the default
+// of one. A block that cannot be read comes back as one with an error, so the
+// caller can say the bound fell back (gt-zeqqg).
+func (d *Daemon) specDispatchMaxPerTick() (int, error) {
 	if d.config == nil {
-		return 1
+		return 1, nil
 	}
 	pc, err := ReadPatrolConfig(d.config.TownRoot)
-	if err != nil || pc == nil || pc.Patrols == nil || pc.Patrols.SpecDispatch == nil {
-		return 1
+	if err != nil {
+		return 1, err
 	}
-	return pc.Patrols.SpecDispatch.MaxPerTick
+	if pc == nil || pc.Patrols == nil || pc.Patrols.SpecDispatch == nil {
+		return 1, nil
+	}
+	return pc.Patrols.SpecDispatch.MaxPerTick, nil
 }
 
-// specDispatchTickBound is the bound the next tick runs under (gt-bbfpr).
+// specDispatchTickBound is the bound the next tick runs under (gt-bbfpr). A
+// patrol block that cannot be read leaves it at the one-sling size, which the
+// tick's own parse error does not say, so the log says it, once per distinct
+// error (gt-zeqqg).
 func (d *Daemon) specDispatchTickBound() time.Duration {
-	return specDispatchBound(specDispatchTimeout, d.specDispatchMaxPerTick())
+	perTick, err := d.specDispatchMaxPerTick()
+	reason := ""
+	if err != nil {
+		reason = "patrol config unreadable, so the tick bound stays at the one-sling size: " + err.Error()
+	}
+	if d.specPatrolHold.Changed(reason) && d.logger != nil {
+		if reason != "" {
+			d.logger.Printf("spec_dispatch: %s", reason)
+		} else {
+			d.logger.Printf("spec_dispatch: patrol config readable again; tick bound follows max_per_tick")
+		}
+	}
+	return specDispatchBound(specDispatchTimeout, perTick)
 }
 
 // specDispatchInterval returns the configured interval, or 60s.
@@ -218,10 +230,13 @@ func (d *Daemon) runSpecDispatch() {
 		return
 	}
 	start := d.clk().Now()
-	out, err := d.runSpecDispatchCommand()
+	// The bound is read once: the failure line names the bound the tick ran
+	// under, which a second read could change if the config was edited
+	// meanwhile (gt-zeqqg).
+	bound := d.specDispatchTickBound()
+	out, err := d.runSpecDispatchCommand(bound)
 	if err != nil {
 		elapsed := d.clk().Now().Sub(start).Round(time.Second)
-		bound := d.specDispatchTickBound()
 		d.logger.Printf("spec_dispatch: tick failed after %s of its %s bound: %v", elapsed, bound, err)
 		// A tick that stopped before its report printed one hook line per sling
 		// it made, so those lines are the only record of them. The bead is not
@@ -331,14 +346,14 @@ func dispatchRosterSeats(roster string) ([]townhealth.DispatchSeat, bool) {
 }
 
 // runSpecDispatchCommand runs `gt spec dispatch --json` with extra flags; the
-// overseer report adds --dry-run to read the queue without slinging. The bound
-// scales with the max_per_tick the tick reads (specDispatchBound).
+// overseer report adds --dry-run to read the queue without slinging. The caller
+// passes the bound (specDispatchTickBound) so it knows the one the tick ran under.
 //
 // On failure the stdout comes back with the error: a tick killed at its bound
 // has printed its progress before the report it never reached, and that
 // progress is the record of the slings it made (gt-bbfpr).
-func (d *Daemon) runSpecDispatchCommand(extra ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(d.ctx, d.specDispatchTickBound())
+func (d *Daemon) runSpecDispatchCommand(bound time.Duration, extra ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(d.ctx, bound)
 	defer cancel()
 	args := append([]string{"spec", "dispatch", "--json"}, extra...)
 	cmd := exec.CommandContext(ctx, d.gtPath, args...) //nolint:gosec // G204: gtPath resolved at daemon init
@@ -355,9 +370,11 @@ func (d *Daemon) runSpecDispatchCommand(extra ...string) ([]byte, error) {
 }
 
 // specSlingsHooked counts the slings a tick's output shows hooked before the
-// report, which is what a tick killed at its bound still prints (gt-bbfpr).
+// report, which is what a tick killed at its bound still prints (gt-bbfpr). A
+// killed tick prints dispatch.SlingHookedMarker once per sling, the line
+// sling.Run prints once it has hooked the bead.
 func specSlingsHooked(out []byte) int {
-	return strings.Count(string(out), specSlingHookedMarker)
+	return strings.Count(string(out), dispatch.SlingHookedMarker)
 }
 
 // specDetailOwner names this daemon process to the ticks it starts. The tick
