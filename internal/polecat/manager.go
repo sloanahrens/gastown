@@ -3201,7 +3201,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 		// pointer left in that state refuses every new spawn once the rig is at
 		// its directory cap.
 		assessment := AssessActiveMRWithLandedEvidence(m.agentBeads(), ActiveMRInput{ActiveMR: activeMR, SourceIssueHint: sourceHint, RequireGitSafe: true, GitSafe: gitSafe},
-			func() LandedEvidence { return probeWorkLandedOnRef(m.gits, clonePath, facts.Branch, "origin") })
+			func() LandedEvidence { return activeMRLandedEvidence(facts, m.gits, clonePath, facts.Branch) })
 		if assessment.Pending {
 			facts.ActiveMRBlocker = assessment.Reason
 		}
