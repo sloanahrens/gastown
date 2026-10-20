@@ -538,7 +538,7 @@ func TestSpecDispatchMaxPerTickReadsThePatrolBlock(t *testing.T) {
 // before the report it never printed, with the elapsed time and the bound.
 func TestSpecDispatchKilledTickLogsEachSlingItMade(t *testing.T) {
 	t.Parallel()
-	partial := "  ✓ Work attached to hook (status=hooked)\n  ✓ Work attached to hook (status=hooked)\n"
+	partial := "  ✓ Work attached to p\n  ✓ Work attached to p\n"
 	fake := newFakeCLI(func([]string) cliReply { return cliReply{stdout: partial, code: 1, stderr: "signal: killed"} })
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
