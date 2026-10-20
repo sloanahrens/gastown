@@ -397,3 +397,33 @@ func TestDoneSlotLoopZshParenListSemicolonBounds(t *testing.T) {
 		})
 	}
 }
+
+// A quoted paren in a zsh short-form `for ... in` list is a word, not a
+// substitution's paren: the list still ends at its `;`, so the body is read
+// and the loop refused like the same loop without the paren.
+func TestDoneSlotLoopZshShortFormWithAQuotedParenIsRefused(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"double-quoted open paren", `for x in 1 "(" 2; gt done`, true},
+		{"single-quoted open paren", `for x in 1 '(' 2; gt done`, true},
+		{"escaped open paren", `for x in 1 \( 2; gt done`, true},
+		{"quoted close paren", `for x in 1 ")" 2; gt done`, true},
+		{"same loop without a paren", `for x in 1 2; gt done`, true},
+		{"a substitution's separator still stays in the list", `for x in 1 "(" $(echo a; echo b) 2; echo hi; gt done`, false},
+		{"gate after the loop body", `for x in 1 "(" 2; echo hi; gt done`, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tokens := shellTokenize(tt.command)
+			reason, _ := matchesDoneSlotLoop(tt.command, tokens, doneSlotLoopLower(tokens))
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("matchesDoneSlotLoop(%q) blocked=%v (reason %q), want %v", tt.command, got, reason, tt.blocked)
+			}
+		})
+	}
+}

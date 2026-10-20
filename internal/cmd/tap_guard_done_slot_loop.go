@@ -294,11 +294,19 @@ func doneSlotLoopZshForBody(tokens, lowerTokens []string, name int) []string {
 // doneSlotLoopInListEnd returns the index of the `;` that closes the `in WORDS`
 // list starting at tokens[from], or -1 when a different separator ends it or
 // none comes. A separator inside a `$(...)` belongs to the substitution, so it
-// does not end the list (gt-yx8jn review).
+// does not end the list (gt-yx8jn review). A bare `(` or `)` outside any
+// substitution is a quoted or escaped word of the list (the tokenizer strips
+// the quotes), not a substitution's paren, so it leaves the depth at zero.
 func doneSlotLoopInListEnd(tokens []string, from int) int {
 	depth := 0
 	for k := from; k < len(tokens); k++ {
+		if depth == 0 && (tokens[k] == "(" || tokens[k] == ")") {
+			continue
+		}
 		depth += doneSlotLoopParenDelta(tokens[k])
+		if depth < 0 {
+			depth = 0
+		}
 		if depth > 0 || !shellCommandSeparators[tokens[k]] {
 			continue
 		}
