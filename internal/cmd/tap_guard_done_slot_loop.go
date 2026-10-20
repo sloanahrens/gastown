@@ -263,26 +263,16 @@ func doneSlotLoopSublist(tokens []string, start int) []string {
 // `in WORDS`, or at the paren of `(WORDS)`. A `do` body belongs to the depth
 // walk, which closes it at its `done`, so it returns nil here.
 func doneSlotLoopZshForBody(tokens, lowerTokens []string, name int) []string {
-	start := -1
+	var end int
 	if name+1 < len(tokens) && lowerTokens[name+1] == "in" {
-		k := name + 2
-		for k < len(tokens) && !shellCommandSeparators[tokens[k]] {
-			k++
-		}
-		if k < len(tokens) && tokens[k] == ";" {
-			start = k + 1
-		}
+		end = doneSlotLoopInListEnd(tokens, name+2)
 	} else {
-		for k := name + 1; k < len(tokens) && !shellCommandSeparators[tokens[k]]; k++ {
-			if strings.HasSuffix(tokens[k], ")") {
-				start = k + 1
-				break
-			}
-		}
+		end = doneSlotLoopParenListEnd(tokens, name+1)
 	}
-	if start < 0 || start >= len(tokens) {
+	if end < 0 || end+1 >= len(tokens) {
 		return nil
 	}
+	start := end + 1
 	switch {
 	case tokens[start] == "{":
 		return doneSlotLoopBracedBody(tokens, start)
@@ -290,6 +280,52 @@ func doneSlotLoopZshForBody(tokens, lowerTokens []string, name int) []string {
 		return nil
 	}
 	return doneSlotLoopSublist(tokens, start)
+}
+
+// doneSlotLoopInListEnd returns the index of the `;` that closes the `in WORDS`
+// list starting at tokens[from], or -1 when a different separator ends it or
+// none comes. A separator inside a `$(...)` belongs to the substitution, so it
+// does not end the list (gt-yx8jn review).
+func doneSlotLoopInListEnd(tokens []string, from int) int {
+	depth := 0
+	for k := from; k < len(tokens); k++ {
+		depth += doneSlotLoopParenDelta(tokens[k])
+		if depth > 0 || !shellCommandSeparators[tokens[k]] {
+			continue
+		}
+		if tokens[k] == ";" {
+			return k
+		}
+		return -1
+	}
+	return -1
+}
+
+// doneSlotLoopParenListEnd returns the index of the `)` that closes the `(WORDS)`
+// list starting at tokens[from], or -1 when the list never closes. The `)` must
+// bring the parenthesis depth back to zero, so a `)` that closes a substitution
+// inside the list does not end it early (gt-yx8jn review).
+func doneSlotLoopParenListEnd(tokens []string, from int) int {
+	depth := 0
+	for k := from; k < len(tokens); k++ {
+		depth += doneSlotLoopParenDelta(tokens[k])
+		if depth > 0 {
+			continue
+		}
+		if strings.HasSuffix(tokens[k], ")") {
+			return k
+		}
+		if shellCommandSeparators[tokens[k]] {
+			return -1
+		}
+	}
+	return -1
+}
+
+// doneSlotLoopParenDelta returns how far a token moves the parenthesis depth: a
+// `(` opens a level, and so does the `(` of a `$(`, while a `)` closes one.
+func doneSlotLoopParenDelta(token string) int {
+	return strings.Count(token, "(") - strings.Count(token, ")")
 }
 
 // doneSlotLoopBracedBody returns the words inside the brace group that opens at
