@@ -1,8 +1,8 @@
 package cmd
 
 import (
-	"os"
-	"path/filepath"
+	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -24,25 +24,25 @@ func TestDashboardJevSpendCmdFlagDefault(t *testing.T) {
 	}
 }
 
-// writeJevScript writes an executable shell script into a temp dir and returns
-// its path, standing in for the spend command.
-func writeJevScript(t *testing.T, body string) string {
-	t.Helper()
-	path := filepath.Join(t.TempDir(), "jev-spend.sh")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body+"\n"), 0o755); err != nil {
-		t.Fatal(err)
+// fakeJevRun stands in for the process: it records the argv it was asked to
+// run and answers with out and err.
+func fakeJevRun(out string, err error, got *[]string) func(context.Context, []string) ([]byte, error) {
+	return func(_ context.Context, argv []string) ([]byte, error) {
+		if got != nil {
+			*got = argv
+		}
+		return []byte(out), err
 	}
-	return path
 }
 
 func TestDashboardJevSpendFoldsTheCommandsJSON(t *testing.T) {
 	t.Parallel()
 
-	script := writeJevScript(t, `cat <<'EOF'
-{"calls":14,"input_tokens":900,"output_tokens":100,"usd":1.75,"lines_skipped":0,
- "by_caller":{"deacon":{"calls":4,"usd":0.25},"overseer":{"calls":10,"usd":1.5}}}
-EOF`)
-	read := dashboardJevSpend([]string{script, "--json", "--hours", "6"})
+	const report = `{"calls":14,"input_tokens":900,"output_tokens":100,"usd":1.75,"lines_skipped":0,
+ "by_caller":{"deacon":{"calls":4,"usd":0.25},"overseer":{"calls":10,"usd":1.5}}}`
+	argv := strings.Fields(defaultJevSpendCmd)
+	var ran []string
+	read := dashboardJevSpendWith(argv, fakeJevRun(report, nil, &ran))
 	if read == nil {
 		t.Fatal("a configured command has no reader")
 	}
@@ -50,28 +50,40 @@ EOF`)
 	if j == nil {
 		t.Fatal("the command's report read as a failure")
 	}
-	if j.Calls != 14 || j.USD != 1.75 || j.TopCaller != "overseer" || j.TopCallerCalls != 10 || j.TopCallerUSD != 1.5 || j.Window != "6h" {
+	if j.Calls != 14 || j.USD != 1.75 || j.TopCaller != "overseer" || j.TopCallerCalls != 10 || j.TopCallerUSD != 1.5 || j.Window != "24h" {
 		t.Errorf("row = %+v", *j)
+	}
+	if strings.Join(ran, " ") != defaultJevSpendCmd {
+		t.Errorf("ran %q, want the default command %q", ran, defaultJevSpendCmd)
 	}
 }
 
-// A command that fails, is missing, or prints something else reads as nil, the
-// failed read the hub shows as unavailable.
+// A command that fails or prints something else reads as nil, the failed read
+// the hub shows as unavailable.
 func TestDashboardJevSpendFailureReadsAsNil(t *testing.T) {
 	t.Parallel()
 
-	cases := map[string][]string{
-		"exits non-zero":     {writeJevScript(t, `echo '{"calls":1,"usd":1}'; exit 3`)},
-		"prints nothing":     {writeJevScript(t, `true`)},
-		"prints text":        {writeJevScript(t, `echo 'gt: unknown command'`)},
-		"prints no usd":      {writeJevScript(t, `echo '{"calls":1}'`)},
-		"is not a file":      {filepath.Join(t.TempDir(), "no-such-command")},
-		"is not on the PATH": {"gt-no-such-jev-command-xyz", "jev", "spend"},
+	cases := map[string]func(context.Context, []string) ([]byte, error){
+		"exits non-zero": fakeJevRun(`{"calls":1,"usd":1}`, errors.New("exit status 3"), nil),
+		"prints nothing": fakeJevRun("", nil, nil),
+		"prints text":    fakeJevRun("gt: unknown command", nil, nil),
+		"prints no usd":  fakeJevRun(`{"calls":1}`, nil, nil),
+		"times out":      fakeJevRun("", context.DeadlineExceeded, nil),
 	}
-	for name, argv := range cases {
-		if got := dashboardJevSpend(argv)(); got != nil {
+	for name, run := range cases {
+		if got := dashboardJevSpendWith([]string{"gt", "jev", "spend"}, run)(); got != nil {
 			t.Errorf("%s: read %+v, want a failed read", name, *got)
 		}
+	}
+}
+
+// A command that is not on the machine is a failed read, not a panic: the real
+// runner returns the start error.
+func TestDashboardJevSpendMissingCommandReadsAsNil(t *testing.T) {
+	t.Parallel()
+
+	if got := dashboardJevSpend([]string{"gt-no-such-jev-command-xyz", "jev", "spend"})(); got != nil {
+		t.Errorf("a missing command read %+v, want a failed read", *got)
 	}
 }
 
@@ -81,20 +93,5 @@ func TestDashboardJevSpendEmptyCommandIsNoReader(t *testing.T) {
 
 	if dashboardJevSpend(strings.Fields("  ")) != nil {
 		t.Error("an empty --jev-spend-cmd still has a reader")
-	}
-}
-
-// The Jev command and the DeepSeek command are separate readers: a Jev command
-// that fails leaves the DeepSeek one reading.
-func TestDashboardJevSpendFailureLeavesTheDeepSeekReader(t *testing.T) {
-	t.Parallel()
-
-	deepseek := dashboardSpend([]string{writeJevScript(t, `echo '{"balance":12}'`)})
-	jev := dashboardJevSpend([]string{writeJevScript(t, `exit 1`)})
-	if jev() != nil {
-		t.Error("the failing Jev command read")
-	}
-	if got := deepseek(); string(got) == "" {
-		t.Error("the DeepSeek reader went blank beside a failing Jev command")
 	}
 }

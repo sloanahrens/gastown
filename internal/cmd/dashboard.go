@@ -631,6 +631,14 @@ const defaultJevSpendCmd = "gt jev spend --json --hours 24 --usd-per-billion-tok
 // report. A nil argv is no Jev row. It shares the DeepSeek command's timeout
 // and fails apart from it: neither reader sees the other's command.
 func dashboardJevSpend(argv []string) func() *dashboard.JevSpend {
+	return dashboardJevSpendWith(argv, func(ctx context.Context, argv []string) ([]byte, error) {
+		return exec.CommandContext(ctx, argv[0], argv[1:]...).Output()
+	})
+}
+
+// dashboardJevSpendWith is dashboardJevSpend over run, the one place the
+// command is started, so a test stands in for the command without a process.
+func dashboardJevSpendWith(argv []string, run func(ctx context.Context, argv []string) ([]byte, error)) func() *dashboard.JevSpend {
 	if len(argv) == 0 {
 		return nil
 	}
@@ -638,7 +646,7 @@ func dashboardJevSpend(argv []string) func() *dashboard.JevSpend {
 	return func() *dashboard.JevSpend {
 		ctx, cancel := context.WithTimeout(context.Background(), dashboardSpendTimeout)
 		defer cancel()
-		out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).Output()
+		out, err := run(ctx, argv)
 		if err != nil {
 			return nil
 		}
