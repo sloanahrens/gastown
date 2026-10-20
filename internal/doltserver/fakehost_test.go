@@ -34,13 +34,16 @@ type fakeHost struct {
 	// hangs holds commands (keyed like answers) that never answer until the
 	// channel is closed, so a caller that runs them can only return by
 	// timing out (hangOn).
-	hangs   map[string]chan struct{}
-	calls   [][]string
-	signals []fakeSignal
-	slept   time.Duration
-	now     time.Time
-	nextPID int
-	started []*exec.Cmd
+	hangs map[string]chan struct{}
+	// hungEntered has a value for each hung command once it has started, so
+	// a test can tell that the hang was reached (awaitHung).
+	hungEntered map[string]chan struct{}
+	calls       [][]string
+	signals     []fakeSignal
+	slept       time.Duration
+	now         time.Time
+	nextPID     int
+	started     []*exec.Cmd
 	// onStart, when set, runs for each process start with the new PID.
 	onStart func(pid int, cmd *exec.Cmd)
 	// startExited, when set, makes every start return a child that has
@@ -96,6 +99,7 @@ func newFakeHost() *fakeHost {
 		reachableFrom: map[string]time.Time{},
 		answers:       map[string][]fakeReply{},
 		hangs:         map[string]chan struct{}{},
+		hungEntered:   map[string]chan struct{}{},
 		now:           fakeEpoch,
 		nextPID:       1 << 22, // above any real PID, so never this test process
 	}
@@ -237,7 +241,27 @@ func (f *fakeHost) hangOn(key string) chan struct{} {
 	defer f.mu.Unlock()
 	release := make(chan struct{})
 	f.hangs[key] = release
+	f.hungEntered[key] = make(chan struct{}, 1)
 	return release
+}
+
+// awaitHung fails the test unless the command keyed by key was started and is
+// still hung. A test that scripts a hang and then passes on the fallback has
+// proved nothing if the key never matched a command the adapter ran, since an
+// unscripted command also fails and also sends the caller to its fallback.
+func (f *fakeHost) awaitHung(t *testing.T, key string) {
+	t.Helper()
+	f.mu.Lock()
+	entered := f.hungEntered[key]
+	f.mu.Unlock()
+	if entered == nil {
+		t.Fatalf("awaitHung(%q): no hang scripted for that key", key)
+	}
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the command %q was never started: the hang did not take effect, so the test did not exercise the probe deadline", key)
+	}
 }
 
 // run answers the process queries the adapter makes (ps and lsof, from the
@@ -246,9 +270,15 @@ func (f *fakeHost) hangOn(key string) chan struct{} {
 func (f *fakeHost) run(c hostCall) ([]byte, []byte, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, append([]string(nil), c.Args...))
-	hang := f.hangs[strings.Join(c.Args, " ")]
+	key := strings.Join(c.Args, " ")
+	hang := f.hangs[key]
+	entered := f.hungEntered[key]
 	f.mu.Unlock()
 	if hang != nil {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
 		<-hang // never answers until the test releases it
 		return nil, nil, fakeExit(1)
 	}
