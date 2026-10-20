@@ -292,6 +292,80 @@ func TestPoolMigrateNothingToMigrate(t *testing.T) {
 	}
 }
 
+// A five-file town with no settings file converts its patrol document and writes
+// the settings file its second seat goes in (gt-oh50w).
+func TestPoolMigratePatrolOnlyTownWithoutSettingsFile(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	patrol := config.DaemonPatrolConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(patrol), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	patrolBody := `{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{"enabled":true,` +
+		`"hooked_agent":"claude-sonnet","max_hooked":2,"max_per_tick":1}}}`
+	if err := os.WriteFile(patrol, []byte(patrolBody), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runPoolMigrate(&out, root, false, migrateNow); err != nil {
+		t.Fatalf("runPoolMigrate: %v\n%s", err, out.String())
+	}
+	settings := config.TownSettingsPath(root)
+	var ts config.TownSettings
+	if err := config.DecodeJSONFile(settings, readFile(t, settings), &ts); err != nil {
+		t.Fatalf("the new settings file does not load: %v\n%s", err, out.String())
+	}
+	if ts.PolecatPool == nil || ts.PolecatPool.Seats["claude-sonnet"].Cap != 2 {
+		t.Errorf("settings = %+v, want claude-sonnet seat at cap 2\n%s", ts.PolecatPool, out.String())
+	}
+	var pc config.DaemonPatrolConfig
+	if err := config.DecodeJSONFile(patrol, readFile(t, patrol), &pc); err != nil {
+		t.Fatalf("the patrol file still holds the retired keys: %v", err)
+	}
+	if n := len(backupsOf(t, patrol)); n != 1 {
+		t.Errorf("patrol file has %d backups, want 1", n)
+	}
+	if n := len(backupsOf(t, settings)); n != 0 {
+		t.Errorf("settings file has %d backups, want none: there was no file to back up", n)
+	}
+	if !strings.Contains(out.String(), "new file") {
+		t.Errorf("the report does not say the settings file is new:\n%s", out.String())
+	}
+
+	out.Reset()
+	if err := runPoolMigrate(&out, root, false, migrateNow); err != nil || strings.TrimSpace(out.String()) != "nothing to migrate" {
+		t.Errorf("second run = %q, %v, want nothing to migrate", out.String(), err)
+	}
+}
+
+// A patrol document whose only retired key changes nothing in settings writes
+// no settings file: the removal is reported and the patrol file alone is
+// rewritten.
+func TestPoolMigratePatrolChangeWithoutSettingsCreatesNoSettings(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	patrol := config.DaemonPatrolConfigPath(root)
+	if err := os.MkdirAll(filepath.Dir(patrol), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(patrol, []byte(`{"type":"daemon-patrol-config","version":1,"patrols":{"spec_dispatch":{"prefer_hooked":true}}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var out bytes.Buffer
+	if err := runPoolMigrate(&out, root, false, migrateNow); err != nil {
+		t.Fatalf("runPoolMigrate: %v\n%s", err, out.String())
+	}
+	if _, err := os.Stat(config.TownSettingsPath(root)); !os.IsNotExist(err) {
+		t.Errorf("a settings file was created though no seat was converted (stat: %v)\n%s", err, out.String())
+	}
+	var pc config.DaemonPatrolConfig
+	if err := config.DecodeJSONFile(patrol, readFile(t, patrol), &pc); err != nil {
+		t.Errorf("the patrol file does not load: %v", err)
+	}
+}
+
 // A conversion whose result the loaders would refuse writes nothing, so a run
 // never leaves a town worse than it found it: an agent the town cannot launch
 // names no seat.
