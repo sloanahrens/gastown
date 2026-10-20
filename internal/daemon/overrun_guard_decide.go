@@ -181,6 +181,10 @@ type overrunState struct {
 	Polecat string        `json:"polecat,omitempty"`
 	Branch  string        `json:"branch,omitempty"`
 	Elapsed time.Duration `json:"elapsed,omitempty"`
+	// SlingAt dates the sling the stop began on, so a stop resumed on a later
+	// tick still tells a head the seat produced from the branch it resumed
+	// (overrunFinishedOnOrigin).
+	SlingAt time.Time `json:"sling_at,omitzero"`
 
 	// StopBeganAt is when the pause marker went down, SessionStoppedAt when
 	// the session was confirmed gone, CheckpointedAt when the worktree
