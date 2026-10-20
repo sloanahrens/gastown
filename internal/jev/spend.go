@@ -24,8 +24,8 @@ type SpendReport struct {
 	InputTokens  int     `json:"input_tokens"`
 	OutputTokens int     `json:"output_tokens"`
 	USD          float64 `json:"usd"`
-	// LinesSkipped counts the lines that were not a readable record, so a
-	// caller can tell a quiet window from a ledger that no longer parses.
+	// LinesSkipped counts the lines the report could not price, so a caller
+	// can tell a quiet window from a ledger that no longer parses.
 	LinesSkipped int                    `json:"lines_skipped"`
 	ByCaller     map[string]CallerSpend `json:"by_caller"`
 }
@@ -50,8 +50,10 @@ func ReadSpend(path string, from, to time.Time, usdPerBillion float64) (SpendRep
 		if text := strings.TrimSpace(line); text != "" {
 			var rec LedgerRecord
 			// A write cut short leaves a partial line, and a hand-edited one
-			// can lose its stamp; neither names a call the window can price.
-			if err := json.Unmarshal([]byte(text), &rec); err != nil || rec.TS.IsZero() {
+			// can lose its stamp or carry a negative count; none of them
+			// names a call the window can price.
+			if err := json.Unmarshal([]byte(text), &rec); err != nil || rec.TS.IsZero() ||
+				rec.InputTokens < 0 || rec.OutputTokens < 0 {
 				rep.LinesSkipped++
 			} else if !rec.TS.Before(from) && !rec.TS.After(to) {
 				rep.add(rec, usdPerBillion)

@@ -76,6 +76,27 @@ func TestSpendLedgerSkipsMalformedLines(t *testing.T) {
 	assert.Equal(t, float64(2), rep.USD)
 }
 
+func TestSpendLedgerSkipsNegativeTokenCounts(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
+	path := writeSpendLedger(t, t.TempDir(),
+		ledgerLine(now, "a", 3, 4),
+		ledgerLine(now, "b", -10, 5),
+		ledgerLine(now, "c", 5, -10),
+		ledgerLine(now, "d", -1, -1),
+	)
+
+	rep, err := ReadSpend(path, now.Add(-time.Hour), now, 1e9)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, rep.Calls)
+	assert.Equal(t, 3, rep.InputTokens)
+	assert.Equal(t, 4, rep.OutputTokens)
+	assert.Equal(t, float64(7), rep.USD)
+	assert.Equal(t, 3, rep.LinesSkipped)
+	assert.Equal(t, map[string]CallerSpend{"a": {Calls: 1, USD: 7}}, rep.ByCaller)
+}
+
 func TestSpendLedgerGroupsAnEmptyCaller(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)
