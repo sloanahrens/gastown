@@ -40,3 +40,52 @@ func SlingRefusalReason(stderr string) (string, bool) {
 // and an operator resumes it with --branch or discards it with --force. For
 // an automatic dispatcher it is still a deferral, never a failed attempt.
 const ReslingRefusalMarker = "refusing to re-sling"
+
+// RigUnavailableMarker leads the line sling prints when an e-stop, park or dock
+// refuses a dispatch to a rig (sling.Blocked): `cannot sling to rig "x": …`,
+// `cannot sling to parked rig "x"`, `cannot sling to docked rig "x"`. Like
+// ReslingRefusalMarker it is not the town at capacity, and it carries no
+// SlingRefusalMarker — the rig, not the bead, is the reason — so an automatic
+// dispatcher reading a subprocess's output finds it by this text. The bead is
+// fine: the dispatcher defers until the operator clears the state.
+const RigUnavailableMarker = "cannot sling to "
+
+// rigUnavailableNouns are the words between RigUnavailableMarker and the quoted
+// rig name: the e-stop line names the rig alone, park and dock name the state.
+var rigUnavailableNouns = []string{`rig "`, `parked rig "`, `docked rig "`}
+
+// SlingRefusalLine extracts a refusal of any kind from a failed sling's output
+// or error text, reporting false for every other failure. It is the one
+// predicate an automatic dispatcher uses to tell "not this sling's to take"
+// from "this sling failed": the SlingRefusalMarker guards, the re-sling guard
+// (ReslingRefusalMarker) and a rig that is e-stopped, parked or docked
+// (RigUnavailableMarker). The line is returned from the marker on, as
+// SlingRefusalReason does, so it is the guard's own sentence.
+//
+// internal/cmd also recognizes two typed refusals through errors.Is
+// (sling.ErrRigUnavailable, the duplicate-content guard). A subprocess's caller
+// cannot see a type, so the rig one is matched here by its text.
+func SlingRefusalLine(text string) (string, bool) {
+	for _, line := range strings.Split(text, "\n") {
+		if i := refusalIndex(line); i >= 0 {
+			return strings.TrimSpace(line[i:]), true
+		}
+	}
+	return "", false
+}
+
+// refusalIndex is where the earliest refusal marker starts in line, or -1.
+func refusalIndex(line string) int {
+	first := -1
+	note := func(i int) {
+		if i >= 0 && (first < 0 || i < first) {
+			first = i
+		}
+	}
+	note(strings.Index(line, SlingRefusalMarker))
+	note(strings.Index(line, ReslingRefusalMarker))
+	for _, noun := range rigUnavailableNouns {
+		note(strings.Index(line, RigUnavailableMarker+noun))
+	}
+	return first
+}

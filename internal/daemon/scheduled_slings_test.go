@@ -855,6 +855,35 @@ func TestRunScheduledSlings_ADeferralLeavesTheFailureCountAlone(t *testing.T) {
 	}
 }
 
+// TestScheduledSlingParkedRigDefers: sling.Blocked refuses a parked or docked
+// rig with a line that carries no "sling refused:" marker, and the patrol sees
+// only that text. It is a deferral — logged, the failure counter untouched, no
+// escalation however many ticks it lasts — as the e-stop on the same entry is
+// (gt-d1wsm).
+func TestScheduledSlingParkedRigDefers(t *testing.T) {
+	t.Parallel()
+	const refusal = `gt sling gt-x: exit status 1: Error: cannot sling to parked rig "x"`
+	f := &fakeScheduledRunner{createID: "gt-x", slingErr: errors.New(refusal), now: time.Now()}
+	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	for range scheduledSlingEscalateAfter + 1 {
+		d.runScheduledSlings()
+	}
+	if got := d.scheduledSlingFailures["doc-audit"]; got != 0 {
+		t.Errorf("scheduledSlingFailures = %d, want 0 for a parked rig", got)
+	}
+	if len(*esc) != 0 {
+		t.Errorf("a parked rig must never escalate, got %v", *esc)
+	}
+	if !strings.Contains(logs.String(), "deferred: "+refusal) {
+		t.Errorf("want a deferral logged, log:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "failure ") {
+		t.Errorf("a parked rig is not a failure; log:\n%s", logs.String())
+	}
+}
+
 func TestSlingErrorLineKeepsTheRefusalLine(t *testing.T) {
 	t.Parallel()
 	stderr := "[sling] step admission took 1s (total 1s)\n" +
@@ -935,6 +964,11 @@ func TestExecScheduledSlingRunner_AdmitReadsTheDryRunRoute(t *testing.T) {
 		"refused seat pool": {
 			stdout: "Would spawn fresh polecat in rig 'gastown'\n  sling refused: polecat pool full (2/2 seats); raise polecat_pool.seats.claude-sonnet.cap to spawn\n",
 			reason: "sling refused: polecat pool full (2/2 seats); raise polecat_pool.seats.claude-sonnet.cap to spawn",
+		},
+		"parked rig": {
+			stderr: "Error: cannot sling to parked rig \"gastown\"\ngt rig unpark gastown\n",
+			cmdErr: errors.New("exit status 1"),
+			reason: `cannot sling to parked rig "gastown"`,
 		},
 		"seat free": {
 			stdout: "Would spawn fresh polecat in rig 'gastown'\nWould cook formula: mol-doc-audit\n",
