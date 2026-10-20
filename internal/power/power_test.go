@@ -1046,10 +1046,7 @@ func TestBootHold(t *testing.T) {
 func TestWaitUntilBoundsHungProbe(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)
-	o := f.opts()
-	o.Now = time.Now
-	o.Sleep = func(ctx context.Context, _ time.Duration) error { return ctx.Err() }
-	e := newEngine(o)
+	e := newEngine(f.opts())
 
 	guard, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -1067,5 +1064,28 @@ func TestWaitUntilBoundsHungProbe(t *testing.T) {
 		}
 	case <-guard.Done():
 		t.Fatal("waitUntil still blocked on a hung probe 5s after its 200ms deadline")
+	}
+}
+
+// TestWaitUntilStopsWhenContextEnds: a context that ends during a wait stops
+// the wait with the context's error, and the probe is not run again.
+func TestWaitUntilStopsWhenContextEnds(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	e := newEngine(f.opts())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	probes := 0
+	err := e.waitUntil(ctx, "cancelled wait", time.Minute, func(context.Context) bool {
+		probes++
+		cancel()
+		return false
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context.Canceled", err)
+	}
+	if probes != 1 {
+		t.Fatalf("probes = %d, want 1", probes)
 	}
 }
