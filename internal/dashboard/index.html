@@ -3209,8 +3209,32 @@ function costClaudePlan(box, c) {
   box.append(line);
 }
 
+// The Jev row of the Cost panel, drawn from the Jev spend report j and the status
+// r of the read that brought it: calls and dollars over the command's window and
+// the caller that cost the most. No report and no status means no Jev command is
+// configured, or it has not answered yet, and nothing is drawn. A read that
+// failed says the row is unavailable instead of drawing a window of no spend, and
+// keeps the last good figures in the same line, dimmed, so the other spend rows
+// are never blanked by it.
+function costJev(box, j, r) {
+  if (!j && !r) return;
+  if (!j) { box.append(el("div", "empty", "Jev spend · unavailable — the read failed")); return; }
+  const figures = [
+    j.calls + (j.calls === 1 ? " call" : " calls") + (j.window ? " in " + j.window : ""),
+    money(j.usd),
+    j.top_caller ? "top caller " + j.top_caller + " (" + j.top_caller_calls + (j.top_caller_calls === 1 ? " call, " : " calls, ") + money(j.top_caller_usd) + ")" : null,
+  ].filter(Boolean);
+  if (r && r.stale) {
+    const why = r.error ? "the read failed" : "the read went stale";
+    const line = el("div", "empty", "Jev spend · unavailable — " + why + (r.ageSec != null ? " · last good " + fmtDur(r.ageSec) + " ago: " : " · last good: ") + figures.join(" · "));
+    box.append(line);
+    return;
+  }
+  box.append(el("div", "", ["Jev spend"].concat(figures).join(" · ")));
+}
+
 // The Cost panel: what the town is spending, in one place. DeepSeek's balance,
-// pace and credit, the Claude plan line under them, the usage scan's estimate
+// pace and credit, the Claude plan line and the Jev row under them, the usage scan's estimate
 // and slow runs, the GCP budget alert, and what each om review bar costs in
 // rework. The panel greys with the spend read it is mostly drawn from; a part
 // whose own read has not answered says so on its own line. With neither a spend
@@ -3229,11 +3253,13 @@ function renderCost(s) {
     // plan line with it, since its own reader owes the panel nothing.
     spendBox.append(el("div", "empty", (r ? "unavailable — the spend read failed" : "no spend report") + "; usage still reading…"));
     costClaudePlan(box, s.claude_plan);
+    costJev(box, s.jev_spend, readOf(s, "jev_spend"));
     costGCP(box, s.cloud);
     return;
   }
   const spendWords = costSpend(spendBox, d, r);
   costClaudePlan(box, s.claude_plan);
+  costJev(box, s.jev_spend, readOf(s, "jev_spend"));
   costGCP(box, s.cloud);
   const usage = costUsage(box, u, s);
   costRework(box, s.rework);

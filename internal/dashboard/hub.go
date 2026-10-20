@@ -111,6 +111,9 @@ func (h *Hub) Run(ctx context.Context) {
 	if h.cfg.Spend != nil {
 		start(h.cfg.SpendEvery, h.pollSpend)
 	}
+	if h.cfg.JevSpend != nil {
+		start(h.cfg.JevSpendEvery, h.pollJevSpend)
+	}
 	if h.cfg.OM != nil {
 		start(h.cfg.OMEvery, h.pollOM)
 	}
@@ -759,6 +762,23 @@ func (h *Hub) pollSpend() {
 	}
 	h.state.Spend = sp
 	h.readOKLocked(SourceSpend, h.cfg.SpendEvery)
+	h.publishLocked()
+}
+
+// pollJevSpend keeps the last good Jev row across a failed read, like the
+// DeepSeek spend beside it. The two reads fail apart: neither touches the
+// other's value or status.
+func (h *Hub) pollJevSpend() {
+	j := h.cfg.JevSpend()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if j == nil {
+		h.readFailedLocked(SourceJevSpend, h.cfg.JevSpendEvery)
+		h.publishLocked()
+		return
+	}
+	h.state.JevSpend = j
+	h.readOKLocked(SourceJevSpend, h.cfg.JevSpendEvery)
 	h.publishLocked()
 }
 
