@@ -184,8 +184,7 @@ func newJevDedupeRig(t *testing.T) *jevDedupeRig {
 		Beads:      stubDedupeBeads{},
 		LogPath:    dedupe.LogPath(town),
 		CursorPath: dedupe.CursorPath(town),
-		SpentToday: func() (float64, error) { return 0, nil },
-		CapUSD:     1,
+		Allows:     func() (bool, error) { return true, nil },
 		Now:        func() time.Time { return time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC) },
 	}
 	r.d.jevDedupeOpen = func(_ string, s dedupe.Settings, _ io.Writer) (*dedupe.Pass, error) {

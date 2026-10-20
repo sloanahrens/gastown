@@ -166,8 +166,7 @@ func newHarness(t *testing.T, all []*beads.Issue, hits map[string][]Hit, answers
 		Beads:      h.beads,
 		LogPath:    h.log,
 		CursorPath: h.cursor,
-		SpentToday: func() (float64, error) { return h.spent, nil },
-		CapUSD:     1,
+		Allows:     func() (bool, error) { return h.spent < 1, nil },
 		Now:        func() time.Time { return t0.Add(time.Hour) },
 		Wait: func(_ context.Context, d time.Duration) error {
 			h.waits = append(h.waits, d)
@@ -637,12 +636,9 @@ func TestJevDedupeCapHoldsBetweenFindings(t *testing.T) {
 
 	// The first finding's call spends the cap, so the second waits.
 	calls := 0
-	h.pass.SpentToday = func() (float64, error) {
+	h.pass.Allows = func() (bool, error) {
 		calls++
-		if calls == 1 {
-			return 0, nil
-		}
-		return 1, nil
+		return calls == 1, nil
 	}
 	sum := mustRun(t, h.pass)
 	if sum.Asked != 1 || !sum.CapReached {
@@ -650,6 +646,27 @@ func TestJevDedupeCapHoldsBetweenFindings(t *testing.T) {
 	}
 	if n := len(h.lines(t)); n != 1 {
 		t.Errorf("log has %d lines, want 1", n)
+	}
+}
+
+// A log line that cannot be written names the dedupe log in the error, so the
+// daemon's log says which battery failed.
+func TestJevDedupeLogWriteFailureNamesTheDedupeLog(t *testing.T) {
+	t.Parallel()
+	all := []*beads.Issue{
+		bead("gt-old", "Old defect", "", 0),
+		bead("gt-a", "Found: first defect", "", 10),
+	}
+	hits := map[string][]Hit{
+		"Found: first defect": {{Kind: "bead", ID: "gt-old", Field: "title"}},
+	}
+	answer := fakeAnswer{ans: choices("gt-old", 0.9)}
+	h := newHarness(t, all, hits, answer)
+	h.pass.LogPath = t.TempDir() // a directory cannot be opened as the log
+
+	_, err := h.pass.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "writing the dedupe log") {
+		t.Errorf("Run error = %v, want it to name the dedupe log", err)
 	}
 }
 
@@ -670,18 +687,15 @@ func TestJevDedupeCursorBreaksTiesByID(t *testing.T) {
 	h := newHarness(t, all, hits, answer, answer)
 
 	calls := 0
-	h.pass.SpentToday = func() (float64, error) {
+	h.pass.Allows = func() (bool, error) {
 		calls++
-		if calls == 1 {
-			return 0, nil
-		}
-		return 1, nil
+		return calls == 1, nil
 	}
 	if sum := mustRun(t, h.pass); sum.Asked != 1 {
 		t.Fatalf("first pass Asked = %d, want 1", sum.Asked)
 	}
 
-	h.pass.SpentToday = func() (float64, error) { return 0, nil }
+	h.pass.Allows = func() (bool, error) { return true, nil }
 	mustRun(t, h.pass)
 
 	var asked []string
