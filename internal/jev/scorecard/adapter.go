@@ -28,6 +28,10 @@ type Item struct {
 	Time    time.Time
 	Model   string
 	Answers map[QuestionID]Answer
+	// Refs holds the adapter's own values from the line — the landing adapter
+	// keeps the rig and head its labels are keyed by — and the scorecard never
+	// reads them.
+	Refs map[string]string
 }
 
 // Labeling is what an adapter finds for one item: each question's label, and
@@ -54,6 +58,13 @@ type Adapter interface {
 	Parse(raw []byte) (Item, error)
 	// Label returns item's labels. An error fails the whole report.
 	Label(ctx context.Context, item Item) (Labeling, error)
+}
+
+// Contextual is an Adapter that also reports context lines for the report:
+// facts gathered while labeling that the per-question metrics do not carry.
+// Build reads Context once, after labeling.
+type Contextual interface {
+	Context() []string
 }
 
 // Factory builds an adapter for the town at townRoot.

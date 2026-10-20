@@ -76,6 +76,10 @@ func Build(ctx context.Context, a Adapter, since time.Time) (Report, error) {
 		rep.Lines = append(rep.Lines, lineReport(it, lab))
 	}
 
+	if c, ok := a.(Contextual); ok {
+		rep.Context = c.Context()
+	}
+
 	kinds := questionKinds(items)
 	ids := make([]QuestionID, 0, len(kinds))
 	for id := range kinds {
