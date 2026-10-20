@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
 )
 
@@ -19,10 +20,12 @@ const (
 	// OutcomeAnswered: Jev answered with an offered option (or none) at or
 	// above the confidence floor. Candidate is its choice.
 	OutcomeAnswered Outcome = "answered"
-	// OutcomeNoCandidates: the search found nothing to offer, so Jev was not
-	// asked.
+	// OutcomeNoCandidates: the search found nothing to offer, so the Choice
+	// was not asked. The Nouls and the Score are still asked.
 	OutcomeNoCandidates Outcome = "no_candidates"
-	// OutcomeSearchFailed: the hm search failed, so Jev was not asked.
+	// OutcomeSearchFailed: the hm search failed, so no candidate was offered
+	// and the Choice was not asked. The Nouls and the Score are still asked,
+	// and a line with null answers says the call failed too.
 	OutcomeSearchFailed Outcome = "search_failed"
 	// OutcomeAskFailed: the Jev call failed (error, timeout, 429 after the
 	// retry, or an unparseable reply).
@@ -50,6 +53,44 @@ type Line struct {
 	CandidatesOffered []string `json:"candidates_offered"`
 	// Outcome tells an answered "none" from a failure that also logs none.
 	Outcome Outcome `json:"outcome"`
+	// Answers maps each question id asked to Jev's raw answer, with no floor
+	// applied. It is null when the call failed.
+	Answers map[string]Answer `json:"answers"`
+	// QuestionVersion is Version when the line was logged.
+	QuestionVersion int `json:"question_version"`
+	// Model is the versioned Jev model that answered, empty when the call
+	// failed.
+	Model string `json:"model"`
+}
+
+// Answer is Jev's answer to one question. A noul sets Noul; a score sets Score
+// and Confidence; a choice sets Choice and Confidence.
+type Answer struct {
+	// Choice is the option a choice question picked.
+	Choice *string `json:"choice,omitempty"`
+	// Noul is the probability, 0 to 1, that the question's statement holds.
+	Noul *float64 `json:"noul,omitempty"`
+	// Score is the chosen level, 0 to len(levels)-1.
+	Score *float64 `json:"score,omitempty"`
+	// Confidence is Jev's confidence in a choice or a score, 0 to 1.
+	Confidence *float64 `json:"confidence,omitempty"`
+}
+
+// answersFrom reads every question's answer out of one Ask result.
+func answersFrom(got *jev.Answers) map[string]Answer {
+	out := make(map[string]Answer, len(got.Choice)+len(got.Noul)+len(got.Score))
+	for id, c := range got.Choice {
+		choice, conf := c.Choice, c.Confidence
+		out[id] = Answer{Choice: &choice, Confidence: &conf}
+	}
+	for id, p := range got.Noul {
+		out[id] = Answer{Noul: &p}
+	}
+	for id, s := range got.Score {
+		score, conf := s.Score, s.Confidence
+		out[id] = Answer{Score: &score, Confidence: &conf}
+	}
+	return out
 }
 
 // LogPath is the suggestion log, one JSON line per finding.

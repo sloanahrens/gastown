@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/jev"
 )
 
 // hmJSON is the shape `hm query --json` prints: a bead hit matched on its
@@ -77,7 +76,7 @@ func TestJevDedupeCandidatesFromHMOutput(t *testing.T) {
 		bead("gt-fnd", "Found: x", "", 10),
 	}
 	h := newHarness(t, all, map[string][]Hit{"Found: x": hits},
-		fakeAnswer{ans: &jev.Answer{Choice: "gt-a", Confidence: 0.9}})
+		fakeAnswer{ans: choices("gt-a", 0.9)})
 
 	mustRun(t, h.pass)
 

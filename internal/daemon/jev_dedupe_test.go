@@ -125,9 +125,33 @@ func (noHits) Search(context.Context, string) ([]dedupe.Hit, error) { return nil
 // failAsker fails the test if a pass reaches Jev.
 type failAsker struct{ t *testing.T }
 
-func (f failAsker) Choice(context.Context, any, string, map[string]string) (*jev.Answer, error) {
+func (f failAsker) Ask(context.Context, any, map[string]jev.Question) (*jev.Answers, error) {
 	f.t.Error("the daemon test reached Jev")
 	return nil, errors.New("unexpected Jev call")
+}
+
+// batteryAsker answers every question asked, so a pass logs its line without
+// Jev.
+type batteryAsker struct{}
+
+func (batteryAsker) Ask(_ context.Context, _ any, qs map[string]jev.Question) (*jev.Answers, error) {
+	out := &jev.Answers{
+		Model:  "jev-1.13.0",
+		Choice: map[string]jev.ChoiceAnswer{},
+		Noul:   map[string]float64{},
+		Score:  map[string]jev.ScoreAnswer{},
+	}
+	for id, q := range qs {
+		switch q.Type {
+		case "choice":
+			out.Choice[id] = jev.ChoiceAnswer{Choice: "none", Confidence: 0.9}
+		case "noul":
+			out.Noul[id] = 0.5
+		case "score":
+			out.Score[id] = jev.ScoreAnswer{Score: 1, Confidence: 0.5}
+		}
+	}
+	return out, nil
 }
 
 // jevDedupeRig is an enabled daemon over a temp town whose passes open through
@@ -250,11 +274,12 @@ func TestJevDedupeTriggerHonorsDisabledPatrols(t *testing.T) {
 	}
 }
 
-// A pass that reaches a finding logs one line for it and says so, and the run
-// asks nothing of Jev when the search offers no candidate.
+// A pass that reaches a finding logs one line for it and says so, with the
+// battery logged even when the search offers no candidate.
 func TestJevDedupeRunReportsTheFindingsAsked(t *testing.T) {
 	t.Parallel()
 	r := newJevDedupeRig(t)
+	r.pass.Asker = batteryAsker{}
 	created := time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)
 	r.pass.Beads = stubDedupeBeads{all: []*beads.Issue{{
 		ID: "gt-new", Title: "Found: something", Status: "open", CreatedAt: created.Format(time.RFC3339),

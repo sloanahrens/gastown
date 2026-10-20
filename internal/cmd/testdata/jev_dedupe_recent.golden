@@ -1,0 +1,4 @@
+TIME               FINDING   CANDIDATE  CONFIDENCE  OUTCOME        OFFERED       ANY-DUPLICATE  FIX-WORTHY  REPORT-ONLY  TEST-ONLY  SEVERITY  VERSION
+2026-10-20 19:15Z  gt-aaaaa  gt-old     0.83        answered       gt-old, gt-x  0.87           0.92        0.04         0.11       3 (0.72)  v1 jev-1.13.0
+2026-10-20 19:30Z  gt-bbbbb  none       0.00        no_candidates  none          0.00           0.55        1.00         0.00       1 (0.60)  v1 jev-1.13.0
+2026-10-20 19:45Z  gt-ccccc  none       0.00        ask_failed     gt-old        -              -           -            -          -         v1

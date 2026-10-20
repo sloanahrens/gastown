@@ -2,54 +2,68 @@ package cmd
 
 import (
 	"bytes"
+	"flag"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
 )
 
-// writeDedupeLog writes one log line per finding ID, oldest first.
-func writeDedupeLog(t *testing.T, town string, findings ...string) string {
+var updateJevDedupeGolden = flag.Bool("update-jev-dedupe-golden", false, "rewrite testdata/jev_dedupe_recent.golden")
+
+const jevDedupeGoldenPath = "jev_dedupe_recent.golden"
+
+// dedupeLog is four logged findings: one from before the battery existed, a
+// full answer set, a no-candidate line with the Nouls and Score but no Choice,
+// and a failed call with null answers.
+const dedupeLog = `{"ts":"2026-10-20T19:00:00Z","finding":"gt-old","candidate":"gt-old","confidence":0.91,"candidates_offered":["gt-old","gt-x"],"outcome":"answered"}
+{"ts":"2026-10-20T19:15:00Z","finding":"gt-aaaaa","candidate":"gt-old","confidence":0.83,"candidates_offered":["gt-old","gt-x"],"outcome":"answered","answers":{"duplicate":{"choice":"gt-old","confidence":0.83},"any_duplicate":{"noul":0.87},"fix_worthy":{"noul":0.92},"report_only":{"noul":0.04},"test_only":{"noul":0.11},"severity":{"score":3,"confidence":0.72}},"question_version":1,"model":"jev-1.13.0"}
+{"ts":"2026-10-20T19:30:00Z","finding":"gt-bbbbb","candidate":"none","confidence":0,"candidates_offered":[],"outcome":"no_candidates","answers":{"any_duplicate":{"noul":0},"fix_worthy":{"noul":0.55},"report_only":{"noul":1},"test_only":{"noul":0},"severity":{"score":1,"confidence":0.6}},"question_version":1,"model":"jev-1.13.0"}
+{"ts":"2026-10-20T19:45:00Z","finding":"gt-ccccc","candidate":"none","confidence":0,"candidates_offered":["gt-old"],"outcome":"ask_failed","answers":null,"question_version":1,"model":""}
+`
+
+func writeDedupeLog(t *testing.T, town, body string) string {
 	t.Helper()
 	path := dedupe.LogPath(town)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	var b strings.Builder
-	for i, f := range findings {
-		b.WriteString(`{"ts":"` + time.Date(2026, 10, 19, 12, i, 0, 0, time.UTC).Format(time.RFC3339) +
-			`","finding":"` + f + `","candidate":"gt-old","confidence":0.91,"candidates_offered":["gt-old","gt-x"]}` + "\n")
-	}
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return path
 }
 
-func TestJevDedupeRecentPrintsTheLastLines(t *testing.T) {
+// --recent 3 prints a header and the last three lines, oldest first, in a
+// fixed layout that shows every answer.
+func TestJevDedupeRecentGolden(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	writeDedupeLog(t, town, "gt-one", "gt-two", "gt-three")
+	path := writeDedupeLog(t, town, dedupeLog)
 
 	var out bytes.Buffer
-	if err := printRecentDedupe(&out, dedupe.LogPath(town), 2); err != nil {
+	if err := printRecentDedupe(&out, path, 3); err != nil {
 		t.Fatal(err)
 	}
-	got := out.String()
-	if !strings.Contains(got, "FINDING") || !strings.Contains(got, "CANDIDATE") {
-		t.Errorf("no header row in:\n%s", got)
-	}
-	if strings.Contains(got, "gt-one") {
-		t.Errorf("printed a line older than the last 2:\n%s", got)
-	}
-	for _, want := range []string{"gt-two", "gt-three", "0.91", "gt-old, gt-x"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("output missing %q:\n%s", want, got)
+
+	golden := filepath.Join("testdata", jevDedupeGoldenPath)
+	if *updateJevDedupeGolden {
+		if err := os.WriteFile(golden, out.Bytes(), 0o644); err != nil {
+			t.Fatal(err)
 		}
+	}
+	want, err := os.ReadFile(golden)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.String() != string(want) {
+		t.Errorf("output differs from %s (rewrite with -update-jev-dedupe-golden):\n%s\nwant:\n%s", golden, out.String(), want)
+	}
+	if rows := strings.Split(strings.TrimSpace(out.String()), "\n"); len(rows) != 4 {
+		t.Errorf("printed %d rows, want a header and three lines", len(rows))
 	}
 }
 

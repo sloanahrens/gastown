@@ -22,8 +22,10 @@ var jevDedupeCmd = &cobra.Command{
 	Long: `Run one pass of the duplicate check over the findings filed since the last
 pass. A finding is a bead titled "Found:" or labeled review-deep or om-followup.
 For each one, Jev is offered up to five candidate beads from hm query and is
-asked which, if any, the finding duplicates. Every finding gets one line in
-<town>/.runtime/jev/dedupe.jsonl, whatever Jev answers.
+asked, in one call, which candidate the finding duplicates plus four Nouls
+(any duplicate, fix worthy, report only, test only) and a severity Score. A
+finding with no candidate is asked the Nouls and the Score alone. Every finding
+gets one line in <town>/.runtime/jev/dedupe.jsonl, whatever Jev answers.
 
 The pass is advisory: it never edits, labels, comments on, closes or links a
 bead. It stops for the day once its Jev spend reaches
@@ -107,7 +109,8 @@ func jevDedupeSettings(townRoot string) (dedupe.Settings, error) {
 	}, nil
 }
 
-// printRecentDedupe prints the last n log lines, oldest first, one per row.
+// printRecentDedupe prints the last n log lines, oldest first, one per row:
+// the choice, the four noul probabilities, then the severity level.
 func printRecentDedupe(w io.Writer, path string, n int) error {
 	lines, err := dedupe.ReadRecent(path, n)
 	if err != nil {
@@ -118,7 +121,7 @@ func printRecentDedupe(w io.Writer, path string, n int) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(tw, "TIME\tFINDING\tCANDIDATE\tCONFIDENCE\tOUTCOME\tOFFERED\n")
+	fmt.Fprintf(tw, "TIME\tFINDING\tCANDIDATE\tCONFIDENCE\tOUTCOME\tOFFERED\tANY-DUPLICATE\tFIX-WORTHY\tREPORT-ONLY\tTEST-ONLY\tSEVERITY\tVERSION\n")
 	for _, l := range lines {
 		offered := "none"
 		if len(l.CandidatesOffered) > 0 {
@@ -129,8 +132,46 @@ func printRecentDedupe(w io.Writer, path string, n int) error {
 		if outcome == "" {
 			outcome = "-"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%.2f\t%s\t%s\n",
-			l.TS.Local().Format("2006-01-02 15:04"), l.Finding, l.Candidate, l.Confidence, outcome, offered)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%.2f\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			l.TS.UTC().Format("2006-01-02 15:04Z"), l.Finding, l.Candidate, l.Confidence, outcome, offered,
+			dedupeNoulCell(l.Answers[dedupe.QAnyDuplicate]),
+			dedupeNoulCell(l.Answers[dedupe.QFixWorthy]),
+			dedupeNoulCell(l.Answers[dedupe.QReportOnly]),
+			dedupeNoulCell(l.Answers[dedupe.QTestOnly]),
+			dedupeSeverityCell(l.Answers[dedupe.QSeverity]),
+			dedupeVersionCell(l.QuestionVersion, l.Model))
 	}
 	return tw.Flush()
+}
+
+// dedupeNoulCell is a noul answer's probability, or "-" when the line has
+// none.
+func dedupeNoulCell(a dedupe.Answer) string {
+	if a.Noul == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.2f", *a.Noul)
+}
+
+// dedupeSeverityCell is the severity level and Jev's confidence in it, or "-".
+func dedupeSeverityCell(a dedupe.Answer) string {
+	if a.Score == nil {
+		return "-"
+	}
+	if a.Confidence == nil {
+		return fmt.Sprintf("%.0f", *a.Score)
+	}
+	return fmt.Sprintf("%.0f (%.2f)", *a.Score, *a.Confidence)
+}
+
+// dedupeVersionCell is the question version and the model that answered, or
+// "-" for a line logged before either existed.
+func dedupeVersionCell(version int, model string) string {
+	if version == 0 && model == "" {
+		return "-"
+	}
+	if model == "" {
+		return fmt.Sprintf("v%d", version)
+	}
+	return fmt.Sprintf("v%d %s", version, model)
 }
