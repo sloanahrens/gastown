@@ -434,9 +434,7 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 	// The list pays no beads call per seat unless there is leftover work to
 	// explain, which is why this runs only for a seat holding commits; the
 	// check-recovery path, which reads one seat, runs it for the reason too.
-	if facts.GitStateSource == polecat.GitStateSourceLive {
-		applyWorkLandedToWorkstateFacts(&facts, env.openWorkLanded, env.WorktreePath, env.IssueSource, hookBead, item.Branch)
-	}
+	applyLiveWorkLandedToWorkstateFacts(&facts, env.openWorkLanded, env.WorktreePath, env.IssueSource, hookBead, item.Branch)
 	if item.ActiveMR != "" {
 		// The decision is the shared active_mr policy, so what the list shows
 		// agrees with the reuse gate (Manager.ReuseDecisionForPolecat) and with
