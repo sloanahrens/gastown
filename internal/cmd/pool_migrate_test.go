@@ -428,6 +428,7 @@ func TestPoolMigrateWithoutSettingsFileWriteErrorWritesNothing(t *testing.T) {
 	if err := os.MkdirAll(settingsDir, 0o500); err != nil {
 		t.Fatal(err)
 	}
+	//testpolicy:allow no-exec-files — the target is the settings directory: the search bit comes back so the temp tree can be removed
 	t.Cleanup(func() { _ = os.Chmod(settingsDir, 0o700) })
 
 	var out bytes.Buffer
