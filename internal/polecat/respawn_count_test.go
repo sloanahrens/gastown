@@ -283,84 +283,96 @@ func TestRespawnMigrationRemovesTheEmptyWitnessDir(t *testing.T) {
 // read-modify-write and leaves both files exactly as they were. Merging what
 // could be read and deleting the rest would drop the counts that did not parse
 // — the bead-budget reset the migration exists to prevent (gt-la690).
+//
+// The corrupt legacy file behaves differently on purpose — the reset moves that
+// one aside (TestResetBeadRespawnCountQuarantinesCorruptLegacyFile) — so its
+// refusals are asserted in TestRespawnCorruptLegacyStateRefusesWriters.
 func TestRespawnCorruptStateDeletesNothing(t *testing.T) {
 	t.Parallel()
+	townRoot := t.TempDir()
 
-	newState := func() *beadRespawnState {
-		return &beadRespawnState{Beads: map[string]*beadRespawnRecord{
-			"bead-1": {BeadID: "bead-1", Count: 2},
-		}}
+	if err := os.MkdirAll(filepath.Dir(respawnStatePath(townRoot)), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(respawnStatePath(townRoot), []byte(`{"beads":{"bead-1":{"count":3`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	writeRespawnStateFile(t, legacyRespawnStatePath(townRoot), &beadRespawnState{Beads: map[string]*beadRespawnRecord{
+		"bead-1": {BeadID: "bead-1", Count: 2},
+	}})
+
+	before := map[string][]byte{}
+	for _, path := range []string{respawnStatePath(townRoot), legacyRespawnStatePath(townRoot)} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[path] = data
 	}
 
-	// resetRefuses: the reset moves a corrupt legacy file aside, so it is the
-	// one path that does not refuse on it (gt-jw3ed).
-	cases := map[string]struct {
-		plant        func(t *testing.T, townRoot string)
-		resetRefuses bool
-	}{
-		"corrupt new file": {
-			plant: func(t *testing.T, townRoot string) {
-				if err := os.MkdirAll(filepath.Dir(respawnStatePath(townRoot)), 0755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(respawnStatePath(townRoot), []byte(`{"beads":{"bead-1":{"count":3`), 0600); err != nil {
-					t.Fatal(err)
-				}
-				writeRespawnStateFile(t, legacyRespawnStatePath(townRoot), newState())
-			},
-			resetRefuses: true,
-		},
-		"corrupt legacy file": {
-			plant: func(t *testing.T, townRoot string) {
-				writeRespawnStateFile(t, respawnStatePath(townRoot), newState())
-				if err := os.MkdirAll(filepath.Dir(legacyRespawnStatePath(townRoot)), 0755); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(legacyRespawnStatePath(townRoot), []byte(`{"beads":{"bead-1":{"count":3`), 0600); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
+	if _, err := loadBeadRespawnState(townRoot); err == nil {
+		t.Error("loadBeadRespawnState = nil error, want a parse error")
+	}
+	if _, err := RecordBeadRespawn(townRoot, "bead-1"); err == nil {
+		t.Error("RecordBeadRespawn = nil error, want a refusal")
+	}
+	if err := ResetBeadRespawnCount(townRoot, "bead-1"); err == nil {
+		t.Error("ResetBeadRespawnCount = nil error, want a refusal")
 	}
 
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			townRoot := t.TempDir()
-			tc.plant(t, townRoot)
-			before := map[string][]byte{}
-			for _, path := range []string{respawnStatePath(townRoot), legacyRespawnStatePath(townRoot)} {
-				data, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				before[path] = data
-			}
+	for path, want := range before {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s was deleted: %v", path, err)
+		}
+		if string(got) != string(want) {
+			t.Errorf("%s was rewritten: got %s, want %s", path, got, want)
+		}
+	}
+}
 
-			if _, err := loadBeadRespawnState(townRoot); err == nil {
-				t.Error("loadBeadRespawnState = nil error, want a parse error")
-			}
-			if _, err := RecordBeadRespawn(townRoot, "bead-1"); err == nil {
-				t.Error("RecordBeadRespawn = nil error, want a refusal")
-			}
-			// The reset's recovery from a corrupt legacy file is asserted in
-			// TestResetBeadRespawnCountQuarantinesCorruptLegacyFile.
-			if tc.resetRefuses {
-				if err := ResetBeadRespawnCount(townRoot, "bead-1"); err == nil {
-					t.Error("ResetBeadRespawnCount = nil error, want a refusal")
-				}
-			}
+// TestRespawnCorruptLegacyStateRefusesWriters: readers and writers other than
+// the reset refuse a corrupt legacy file and edit neither file, keeping its
+// bytes for the manual recovery the quarantine exists to allow (gt-la690).
+func TestRespawnCorruptLegacyStateRefusesWriters(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
 
-			for path, want := range before {
-				got, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatalf("%s was deleted: %v", path, err)
-				}
-				if string(got) != string(want) {
-					t.Errorf("%s was rewritten: got %s, want %s", path, got, want)
-				}
-			}
-		})
+	writeRespawnStateFile(t, respawnStatePath(townRoot), &beadRespawnState{Beads: map[string]*beadRespawnRecord{
+		"bead-1": {BeadID: "bead-1", Count: 2},
+	}})
+	legacy := legacyRespawnStatePath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(legacy), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, []byte(`{"beads":{"bead-1":{"count":3`), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	before := map[string][]byte{}
+	for _, path := range []string{respawnStatePath(townRoot), legacy} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[path] = data
+	}
+
+	if _, err := loadBeadRespawnState(townRoot); err == nil {
+		t.Error("loadBeadRespawnState = nil error, want a parse error")
+	}
+	if _, err := RecordBeadRespawn(townRoot, "bead-1"); err == nil {
+		t.Error("RecordBeadRespawn = nil error, want a refusal")
+	}
+
+	for path, want := range before {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("%s was deleted: %v", path, err)
+		}
+		if string(got) != string(want) {
+			t.Errorf("%s was rewritten: got %s, want %s", path, got, want)
+		}
 	}
 }
 
@@ -416,6 +428,87 @@ func TestResetBeadRespawnCountQuarantinesCorruptLegacyFile(t *testing.T) {
 	}
 	if rec := state.Beads["bead-2"]; rec == nil || rec.Count != 2 {
 		t.Errorf("bead-2 record = %+v, want its count of 2 kept", rec)
+	}
+}
+
+// TestResetBeadRespawnCountReportsAFailedQuarantine: when the corrupt legacy
+// file cannot be moved, the reset fails and changes nothing — the file keeps
+// its bytes, the bead keeps its count — and the error names both the parse
+// failure and the failed move, so the operator knows the town is still blocked
+// and why (gt-601lm).
+func TestResetBeadRespawnCountReportsAFailedQuarantine(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	live := &beadRespawnState{Beads: map[string]*beadRespawnRecord{
+		"bead-1": {BeadID: "bead-1", Count: 2},
+	}}
+	writeRespawnStateFile(t, respawnStatePath(townRoot), live)
+	legacy := legacyRespawnStatePath(townRoot)
+	truncated := []byte(`{"beads":{"bead-1":{"count":3`)
+	if err := os.MkdirAll(filepath.Dir(legacy), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, truncated, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A read-only witness directory makes the rename fail the way a full or
+	// read-only filesystem does, which is the failure this branch reports.
+	witnessDir := filepath.Dir(legacy)
+	//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit
+	if err := os.Chmod(witnessDir, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		//testpolicy:allow no-exec-files — the target is the fixture directory: traversal needs its search bit back
+		_ = os.Chmod(witnessDir, 0o755)
+	})
+
+	err := ResetBeadRespawnCount(townRoot, "bead-1")
+	if err == nil {
+		t.Fatal("ResetBeadRespawnCount = nil error, want the failed quarantine reported")
+	}
+	for _, want := range []string{"parsing respawn state", "moving corrupt respawn state aside"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("ResetBeadRespawnCount error = %v, want it to name %q", err, want)
+		}
+	}
+
+	if got, rerr := os.ReadFile(legacy); rerr != nil || string(got) != string(truncated) {
+		t.Errorf("corrupt legacy file = %q (err %v), want its bytes untouched", got, rerr)
+	}
+	if aside, _ := filepath.Glob(legacy + ".corrupt-*"); len(aside) != 0 {
+		t.Errorf("quarantined files = %v, want none when the move failed", aside)
+	}
+	state, rerr := readBeadRespawnStateFile(respawnStatePath(townRoot))
+	if rerr != nil {
+		t.Fatalf("live state: %v", rerr)
+	}
+	if rec := state.Beads["bead-1"]; rec == nil || rec.Count != 2 {
+		t.Errorf("bead-1 record = %+v, want its count of 2 left alone", rec)
+	}
+}
+
+// TestQuarantineLegacyRespawnStateToleratesAnAlreadyGoneFile: someone else can
+// remove the corrupt file between the read that found it and the rename. The
+// reset wants it gone, so a missing file is success with nothing to report
+// rather than an error that leaves the town blocked a second time (gt-601lm).
+func TestQuarantineLegacyRespawnStateToleratesAnAlreadyGoneFile(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	legacy := legacyRespawnStatePath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(legacy), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	aside, err := quarantineLegacyRespawnState(townRoot)
+	if err != nil {
+		t.Fatalf("quarantineLegacyRespawnState on a missing file: %v", err)
+	}
+	if aside != "" {
+		t.Errorf("aside = %q, want empty when there was nothing to move", aside)
+	}
+	if moved, _ := filepath.Glob(legacy + ".corrupt-*"); len(moved) != 0 {
+		t.Errorf("quarantined files = %v, want none", moved)
 	}
 }
 
