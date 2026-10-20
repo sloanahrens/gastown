@@ -195,6 +195,39 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 // it must reach the rule for every role and every cwd (the incident ran from a
 // polecat sandbox, but a scripted retry is never the sanctioned path for
 // anyone).
+// A heredoc piped into a stage that writes no file hands its body over as data,
+// even when the body holds a gate loop. Only `tee FILE` / `dd of=FILE` stages
+// make `cat <<EOF | …` a file write (gt-c7jiy). Judged through
+// evaluateDangerousCommand, which strips the heredoc bodies the way the hook
+// does; the table above calls the matcher on the raw text.
+func TestDoneSlotLoopHeredocPipedIntoNonWriter(t *testing.T) {
+	t.Parallel()
+	const body = "while true; do gt done; sleep 5; done\nEOF"
+	tests := []struct {
+		name    string
+		reader  string
+		blocked bool
+	}{
+		{"tee FILE writes the body", "cat <<'EOF' | tee /tmp/retry.sh", true},
+		{"tee with a flag and a FILE writes the body", "cat <<'EOF' | tee -a /tmp/retry.sh", true},
+		{"dd of= writes the body", "cat <<'EOF' | dd of=/tmp/retry.sh", true},
+		{"grep reads the body as data", "cat <<'EOF' | grep gate", false},
+		{"tee with no file writes nothing", "cat <<'EOF' | tee", false},
+		{"tee with only flags writes nothing", "cat <<'EOF' | tee -a", false},
+		{"dd with no of= writes nothing", "cat <<'EOF' | dd bs=1k", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			command := tt.reader + "\n" + body
+			reason, _ := evaluateDangerousCommand(command, 0, noTownSession)
+			if got := reason == doneSlotLoopReason; got != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, blocked=%v, want %v", command, reason, got, tt.blocked)
+			}
+		})
+	}
+}
+
 func TestDoneSlotLoopReachesGuard(t *testing.T) {
 	t.Parallel()
 	const incident = `for i in $(seq 1 300); do if gt slot status | grep -q free; then gt done; fi; done`
