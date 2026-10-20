@@ -234,6 +234,151 @@ func TestUpgradeWaitsForARunningTierSweepUpToTheCap(t *testing.T) {
 	})
 }
 
+// gt-du6xl: a running tier sweep that is the only hold does not drain the
+// landing workers, so landings keep passing for the sweep's length. The drain
+// starts when the sweep closes or hits its cap, and a hold by a landing pass or
+// a post-land run drains as it always has.
+func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
+	t.Parallel()
+
+	t.Run("a sweep from before the marker holds without draining", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.tierSweepRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(time.Minute)) {
+			t.Fatal("restarted under a running tier sweep before the cap")
+		}
+		if d.upgradeRestartPending.Load() {
+			t.Fatal("landing workers were drained while only the tier sweep held the restart")
+		}
+		if got := strings.Count(logs.String(), "deferring the drain while the tier sweep that is running runs"); got != 1 {
+			t.Fatalf("deferral line logged %d times, want once per hold:\n%s", got, logs.String())
+		}
+		if got := strings.Count(logs.String(), "waiting for the tier sweep that is running"); got != 2 {
+			t.Fatalf("sweep wait line logged %d times, want once per heartbeat:\n%s", got, logs.String())
+		}
+		if strings.Contains(logs.String(), "draining: no new landing pass") {
+			t.Fatalf("drain line logged while the drain was deferred:\n%s", logs.String())
+		}
+
+		// The sweep closes: the restart goes, and the drain was on for it.
+		d.tierSweepRunning.Store(false)
+		if !d.checkUpgradeRestart(now.Add(2 * time.Minute)) {
+			t.Fatal("a closed tier sweep must not hold the restart")
+		}
+		if !strings.Contains(logs.String(), "the tier sweep closed; restarting") {
+			t.Fatalf("no release line for the closed sweep:\n%s", logs.String())
+		}
+	})
+
+	t.Run("the drain starts at the cap while the sweep still runs", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.tierSweepRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a running tier sweep before the cap")
+		}
+		if !d.checkUpgradeRestart(now.Add(tierSweepRestartCap)) {
+			t.Fatal("a sweep still running at the cap must not hold the restart further")
+		}
+		if !strings.Contains(logs.String(), "cutting the sweep short") {
+			t.Fatalf("no cut-short line at the cap:\n%s", logs.String())
+		}
+	})
+
+	t.Run("a landing pass that starts during the sweep drains", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.tierSweepRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a running tier sweep before the cap")
+		}
+		// A landing pass starts while the sweep runs, as the deferral allows.
+		d.landingPasses.Add(1)
+		d.landingStates.setBead("gastown", "gt-x", now)
+		if d.checkUpgradeRestart(now.Add(time.Minute)) {
+			t.Fatal("restarted under a landing pass")
+		}
+		if !d.upgradeRestartPending.Load() {
+			t.Fatal("a landing pass hold must drain the landing workers")
+		}
+		if got := strings.Count(logs.String(), "upgrade-restart: draining: no new landing pass until restart"); got != 1 {
+			t.Fatalf("drain start line logged %d times, want once:\n%s", got, logs.String())
+		}
+		if !strings.Contains(logs.String(), "waiting for landing pass gt-x") {
+			t.Fatalf("landing pass not named:\n%s", logs.String())
+		}
+	})
+
+	t.Run("a sweep that began after the marker keeps the drain", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		// A cycle from before the marker starts the wait, then closes.
+		d.tierSweepRunning.Store(true)
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a running tier sweep before the cap")
+		}
+		d.tierSweepRunning.Store(false)
+
+		// A new cycle starts after the marker: it is not the one the wait
+		// deferred for, so the drain goes on.
+		later := now.Add(time.Minute)
+		d.tierSweepStartedAt.Store(later.UnixNano())
+		d.tierSweepRunning.Store(true)
+		if d.checkUpgradeRestart(later) {
+			t.Fatal("restarted under a sweep that began after the marker")
+		}
+		if !d.upgradeRestartPending.Load() {
+			t.Fatal("a sweep that began after the marker must drain the landing workers")
+		}
+	})
+
+	t.Run("a post-land run still drains beside a sweep", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.tierSweepRunning.Store(true)
+		d.postLandRuns.Add(1)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		if d.checkUpgradeRestart(time.Now()) {
+			t.Fatal("restarted under a post-land run inside its cap")
+		}
+		if !d.upgradeRestartPending.Load() {
+			t.Fatal("a post-land run hold must drain the landing workers")
+		}
+	})
+}
+
 // gt-oucgn: a maintenance gc cycle in flight holds a pending upgrade restart —
 // a shutdown cancels the gc call's context, so the restart aborts the call with
 // nothing recorded and the database stays due — but only up to the gc's own
