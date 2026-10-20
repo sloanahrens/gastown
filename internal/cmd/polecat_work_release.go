@@ -166,7 +166,7 @@ func (r bdPolecatWorkReleaser) ReleaseBead(beadID, expectedAssignee string) (boo
 }
 
 func (r bdPolecatWorkReleaser) RestoreBead(beadID, expectedAssignee, expectedStatus, status, assignee string) (bool, error) {
-	return beads.New(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)).TransferIfHeld(beadID, expectedAssignee, expectedStatus, status, assignee)
+	return beads.TransferIfHeld(beads.New(beads.ResolveHookDir(r.townRoot, beadID, r.hookWorkDir)), beadID, expectedAssignee, expectedStatus, status, assignee)
 }
 
 func (r bdPolecatWorkReleaser) ResetSlot(agentID string) error {

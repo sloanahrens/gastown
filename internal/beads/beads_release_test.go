@@ -74,7 +74,7 @@ func TestTransferIfHeldUsesBothGuards(t *testing.T) {
 	dir := t.TempDir()
 	argsLog := bdGuardStub(t, dir, "13")
 
-	transferred, err := New(dir).TransferIfHeld("gt-moxlb", "gastown/crew/sloan", "hooked", "hooked", "gastown/polecats/pearl")
+	transferred, err := TransferIfHeld(New(dir), "gt-moxlb", "gastown/crew/sloan", "hooked", "hooked", "gastown/polecats/pearl")
 	if err != nil || transferred {
 		t.Fatalf("transferred=%v err=%v, want the guard read as a lost race", transferred, err)
 	}
