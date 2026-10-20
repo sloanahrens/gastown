@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev/targets"
 )
 
@@ -29,6 +30,23 @@ func (f *fakeRunLedger) Read(bead string) (runBead, error) {
 		return runBead{}, f.err
 	}
 	return f.byBead[bead], nil
+}
+
+// scriptedStore serves scripted beads, and ErrNotFound for any other id.
+type scriptedStore struct {
+	issues map[string]*beads.Issue
+	err    error
+}
+
+func (s *scriptedStore) Show(id string) (*beads.Issue, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	issue, ok := s.issues[id]
+	if !ok {
+		return nil, beads.ErrNotFound
+	}
+	return issue, nil
 }
 
 func targetsItem(run, path string) Item {
@@ -152,11 +170,127 @@ func TestTargetsLedgerLineFile(t *testing.T) {
 	}
 }
 
+func TestTargetsReviewedFile(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		line string
+		file string
+		ok   bool
+	}{
+		{
+			name: "a reviewed line names its file",
+			line: "reviewed: 2026-10-19 internal/c/c.go",
+			file: "internal/c/c.go",
+			ok:   true,
+		},
+		{name: "a reviewed line with no path is malformed", line: "reviewed: 2026-10-19"},
+		{name: "a reviewed line with a bad date is malformed", line: "reviewed: 2026-13-45 internal/c/c.go"},
+		{name: "a reviewed line with no date is malformed", line: "reviewed: internal/c/c.go"},
+		{name: "a cursor line is not a reviewed line", line: "cursor: 2026-10-19T08:00:00Z internal/c/c.go"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			file, ok := reviewedFile(tc.line)
+			if ok != tc.ok || file != tc.file {
+				t.Errorf("reviewedFile(%q) = %q, %v, want %q, %v", tc.line, file, ok, tc.file, tc.ok)
+			}
+		})
+	}
+}
+
+// scriptLedgerShapes returns each ledger line template the header block of
+// scripts/deep-review.sh defines, keyed by line name.
+func scriptLedgerShapes(src string) map[string]string {
+	shapes := map[string]string{}
+	in := false
+	for _, line := range strings.Split(src, "\n") {
+		if strings.HasPrefix(line, "# Ledger lines") {
+			in = true
+			continue
+		}
+		if !in {
+			continue
+		}
+		if strings.HasPrefix(line, "# --prev-notes") {
+			break
+		}
+		if !strings.HasPrefix(line, "#") {
+			break
+		}
+		body, ok := strings.CutPrefix(line, "#   ")
+		if !ok || strings.HasPrefix(body, " ") {
+			continue // a continuation line, indented past the shape
+		}
+		name, tmpl, ok := strings.Cut(body, ": ")
+		if !ok {
+			continue
+		}
+		shapes[name] = tmpl
+	}
+	return shapes
+}
+
+// TestTargetsParserMirrorsTheScriptLedger checks the hand-written parser
+// accepts an instance of each ledger shape scripts/deep-review.sh's header
+// defines: a shape the script changes fails here.
+func TestTargetsParserMirrorsTheScriptLedger(t *testing.T) {
+	t.Parallel()
+	src, err := os.ReadFile(filepath.Join("..", "..", "..", "scripts", "deep-review.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	shapes := scriptLedgerShapes(string(src))
+	values := map[string]string{
+		"<YYYY-MM-DD>":            "2026-10-18",
+		"<path>":                  "internal/a/a.go",
+		"<fingerprint>":           "internal/a/a.go:Do:missing-guard",
+		"<bead id | digest-only>": "gt-f1",
+		"<P1|P2|P3>":              "P2",
+		"<file:line>":             "internal/a/a.go:12",
+		"<claim>":                 "the guard is missing",
+	}
+	cases := []struct {
+		shape string
+		parse func(string) (string, bool)
+	}{
+		{"reviewed", reviewedFile},
+		{"finding", ledgerLineFile},
+		{"queued", ledgerLineFile},
+		{"p3", ledgerLineFile},
+	}
+	for _, tc := range cases {
+		t.Run(tc.shape, func(t *testing.T) {
+			t.Parallel()
+			tmpl, ok := shapes[tc.shape]
+			if !ok {
+				t.Fatalf("scripts/deep-review.sh no longer defines a %s ledger line", tc.shape)
+			}
+			example := tc.shape + ": " + tmpl
+			for placeholder, value := range values {
+				example = strings.ReplaceAll(example, placeholder, value)
+			}
+			if strings.Contains(example, "<") {
+				t.Fatalf("the %s shape %q holds a placeholder this test does not fill", tc.shape, tmpl)
+			}
+			file, ok := tc.parse(example)
+			if !ok || file != "internal/a/a.go" {
+				t.Errorf("parse %q = %q, %v, want internal/a/a.go", example, file, ok)
+			}
+		})
+	}
+}
+
 func TestTargetsLabelReadsTheRunLedger(t *testing.T) {
 	t.Parallel()
 	notes := strings.Join([]string{
 		"cursor: 2026-10-19T08:00:00Z internal/d/d.go",
 		"reviewed: 2026-10-19 internal/a/a.go",
+		"reviewed: 2026-10-19 internal/b/b.go",
+		"reviewed: 2026-10-19 internal/c/c.go",
+		"reviewed: 2026-10-19 internal/d/d.go",
+		"reviewed: 2026-10-19 internal/e/e.go",
 		"finding: internal/c/c.go:Check:wrong-branch gt-f1",
 		"queued: internal/e/e.go:Run:missing-guard P2 internal/e/e.go:14 the guard is missing",
 		"p3: 2026-10-18 internal/b/b.go:Fetch:doc-drift internal/b/b.go:9 the comment lies",
@@ -173,8 +307,9 @@ func TestTargetsLabelReadsTheRunLedger(t *testing.T) {
 		{name: "a finding line names the file", bead: closed, path: "internal/c/c.go", labeled: true, found: true},
 		{name: "a queued line names the file", bead: closed, path: "internal/e/e.go", labeled: true, found: true},
 		{name: "a p3 line names the file", bead: closed, path: "internal/b/b.go", labeled: true, found: true},
-		{name: "a file no line names is clean", bead: closed, path: "internal/d/d.go", labeled: true},
+		{name: "a reviewed file with no finding line is clean", bead: closed, path: "internal/d/d.go", labeled: true},
 		{name: "a file only a malformed line names is clean", bead: closed, path: "internal/a/a.go", labeled: true},
+		{name: "a file the ledger does not name stays unlabeled", bead: closed, path: "internal/z/z.go"},
 		{
 			name: "an open run labels nothing",
 			bead: runBead{Found: true, Status: "open", Notes: notes},
@@ -183,6 +318,16 @@ func TestTargetsLabelReadsTheRunLedger(t *testing.T) {
 		{
 			name: "a hooked run labels nothing",
 			bead: runBead{Found: true, Status: "hooked", Notes: notes},
+			path: "internal/c/c.go",
+		},
+		{
+			name: "a closed run with empty notes labels nothing",
+			bead: runBead{Found: true, Status: "closed"},
+			path: "internal/c/c.go",
+		},
+		{
+			name: "a closed run whose notes hold no ledger line labels nothing",
+			bead: runBead{Found: true, Status: "closed", Notes: "garbage\nfinding: nope"},
 			path: "internal/c/c.go",
 		},
 		{name: "a run bead no longer in the store labels nothing", bead: runBead{}, path: "internal/c/c.go"},
@@ -273,7 +418,127 @@ func TestTargetsBatteryIsRegistered(t *testing.T) {
 	}
 }
 
-// targetsLog is the fixture log: three runs, one of them still open, one line
+// targetTown writes a town whose gt- prefix routes to a gastown rig.
+func targetTown(t *testing.T) string {
+	t.Helper()
+	town := t.TempDir()
+	if err := beads.WriteRoutes(filepath.Join(town, ".beads"), []beads.Route{{Prefix: "gt-", Path: "gastown"}}); err != nil {
+		t.Fatal(err)
+	}
+	return town
+}
+
+func TestTargetsTownRunsReadsEachRigsStore(t *testing.T) {
+	t.Parallel()
+	town := targetTown(t)
+	store := &scriptedStore{issues: map[string]*beads.Issue{
+		"gt-run1": {ID: "gt-run1", Status: "closed", Notes: "reviewed: 2026-10-19 internal/a/a.go"},
+		"hq-run1": {ID: "hq-run1", Status: "open"},
+	}}
+	var dirs []string
+	runs := &townRuns{town: town, stores: map[string]beadShower{}, store: func(dir string) beadShower {
+		dirs = append(dirs, dir)
+		return store
+	}}
+
+	got, err := runs.Read("gt-run1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := runBead{Found: true, Status: "closed", Notes: "reviewed: 2026-10-19 internal/a/a.go"}
+	if got != want {
+		t.Errorf("Read(gt-run1) = %+v, want %+v", got, want)
+	}
+	if wantDir := filepath.Join(town, "gastown", ".beads"); len(dirs) != 1 || dirs[0] != wantDir {
+		t.Errorf("opened %q, want the gastown store %q", dirs, wantDir)
+	}
+
+	if _, err := runs.Read("hq-run1"); err != nil {
+		t.Fatal(err)
+	}
+	if wantDir := filepath.Join(town, ".beads"); len(dirs) != 2 || dirs[1] != wantDir {
+		t.Errorf("opened %q, want the town store %q second", dirs, wantDir)
+	}
+
+	// Each rig's store opens once, and every read of that rig reuses it.
+	for _, bead := range []string{"gt-run1", "hq-run1"} {
+		if _, err := runs.Read(bead); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(dirs) != 2 {
+		t.Errorf("opened %q, want one store per rig", dirs)
+	}
+
+	got, err = runs.Read("gt-gone")
+	if err != nil || got != (runBead{}) {
+		t.Errorf("Read(gt-gone) = %+v, %v, want an unlabeled missing bead", got, err)
+	}
+}
+
+func TestTargetsTownRunsFailsOnAStoreError(t *testing.T) {
+	t.Parallel()
+	runs := &townRuns{town: targetTown(t), stores: map[string]beadShower{}, store: func(string) beadShower {
+		return &scriptedStore{err: errors.New("bead store unavailable")}
+	}}
+	_, err := runs.Read("gt-run1")
+	if err == nil || !strings.Contains(err.Error(), "bead store unavailable") {
+		t.Fatalf("Read error = %v, want the store failure", err)
+	}
+}
+
+// TestTargetsBatteryLabelsThroughTheTownStores drives the registered factory
+// end to end: the adapter it builds reads each run bead through the store of
+// the rig its id routes to.
+func TestTargetsBatteryLabelsThroughTheTownStores(t *testing.T) {
+	t.Parallel()
+	town := targetTown(t)
+	store := &scriptedStore{issues: map[string]*beads.Issue{
+		"gt-run1": {ID: "gt-run1", Status: "closed", Notes: strings.Join([]string{
+			"reviewed: 2026-10-19 internal/a/a.go",
+			"finding: internal/b/b.go:Do:bad gt-f1",
+		}, "\n")},
+	}}
+	a, err := Open(TargetsBattery, town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runs := a.(*targetsAdapter).runs.(*townRuns)
+	var dirs []string
+	runs.store = func(dir string) beadShower {
+		dirs = append(dirs, dir)
+		return store
+	}
+
+	cases := []struct {
+		path    string
+		labeled bool
+		found   bool
+	}{
+		{path: "internal/b/b.go", labeled: true, found: true},
+		{path: "internal/a/a.go", labeled: true},
+		{path: "internal/z/z.go"},
+	}
+	for _, tc := range cases {
+		lab, err := a.Label(context.Background(), targetsItem("gt-run1", tc.path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if lab.Labeled != tc.labeled {
+			t.Fatalf("%s labeled = %v, want %v", tc.path, lab.Labeled, tc.labeled)
+		}
+		if tc.labeled && lab.Labels[targets.QLikelyDefect] != tc.found {
+			t.Errorf("%s likely_defect = %v, want %v", tc.path, lab.Labels[targets.QLikelyDefect], tc.found)
+		}
+	}
+	wantDir := filepath.Join(town, "gastown", ".beads")
+	if len(dirs) != 1 || dirs[0] != wantDir {
+		t.Errorf("opened %q, want the gastown store %q once", dirs, wantDir)
+	}
+}
+
+// targetsLog is the fixture log: five runs, one of them still open, one whose
+// ledger names only some of its files, one whose ledger is empty, one line
 // from another question set and one line that does not parse. The lines of a
 // run are in the slice's risk order.
 var targetsLog = []string{
@@ -285,11 +550,15 @@ var targetsLog = []string{
 	`{"ts":"2026-10-19T09:10:01Z","run":"gt-run2","path":"internal/f/f.go","tier":0,"risk_score":4.0,"bytes":400,"model":"jev-1.13.0","answers":{"likely_defect":{"noul":0.8},"logic_churn":{"noul":0.6},"under_tested":{"noul":0.9},"review_priority":{"score":0,"confidence":0.5}},"question_version":1}`,
 	`{"ts":"2026-10-19T09:20:00Z","run":"gt-run3","path":"internal/g/g.go","tier":0,"risk_score":3.2,"bytes":300,"model":"jev-1.13.0","answers":{"likely_defect":{"noul":0.5},"logic_churn":{"noul":0.4},"under_tested":{"noul":0.3},"review_priority":{"score":2,"confidence":0.5}},"question_version":1}`,
 	`{"ts":"2026-10-19T09:20:01Z","run":"gt-run3","path":"internal/h/h.go","question_version":99}`,
+	`{"ts":"2026-10-19T09:30:00Z","run":"gt-run4","path":"internal/h/h.go","tier":0,"risk_score":2.6,"bytes":260,"model":"jev-1.13.0","answers":{"likely_defect":{"noul":0.2},"logic_churn":{"noul":0.1},"under_tested":{"noul":0.6},"review_priority":{"score":1,"confidence":0.4}},"question_version":1}`,
+	`{"ts":"2026-10-19T09:30:01Z","run":"gt-run4","path":"internal/i/i.go","tier":0,"risk_score":2.1,"bytes":210,"model":"jev-1.13.0","answers":{"likely_defect":{"noul":0.3},"logic_churn":{"noul":0.4},"under_tested":{"noul":0.2},"review_priority":{"score":0,"confidence":0.4}},"question_version":1}`,
+	`{"ts":"2026-10-19T09:40:00Z","run":"gt-run5","path":"internal/j/j.go","tier":0,"risk_score":1.4,"bytes":140,"model":"jev-1.13.0","answers":{"likely_defect":{"noul":0.6},"logic_churn":{"noul":0.5},"under_tested":{"noul":0.3},"review_priority":{"score":2,"confidence":0.5}},"question_version":1}`,
 	`not json`,
 }
 
-// targetsRunBeads is the fixture's run beads: one closed with a finding, one
-// closed with none, one still open.
+// targetsRunBeads is the fixture's run beads: closed runs with a finding, with
+// none, with a ledger that names only some files, and with an empty ledger, and
+// one run still open.
 var targetsRunBeads = map[string]runBead{
 	"gt-run1": {
 		Found:  true,
@@ -297,12 +566,21 @@ var targetsRunBeads = map[string]runBead{
 		Notes: strings.Join([]string{
 			"cursor: 2026-10-19T08:00:00Z internal/d/d.go",
 			"reviewed: 2026-10-19 internal/a/a.go",
+			"reviewed: 2026-10-19 internal/b/b.go",
+			"reviewed: 2026-10-19 internal/c/c.go",
+			"reviewed: 2026-10-19 internal/d/d.go",
 			"finding: internal/c/c.go:Check:wrong-branch gt-f1",
 			"queued: internal/a/a.go:Do:bad P4 internal/a/a.go:1 the severity is not one",
 		}, "\n"),
 	},
-	"gt-run2": {Found: true, Status: "closed", Notes: "reviewed: 2026-10-19 internal/e/e.go"},
+	"gt-run2": {
+		Found:  true,
+		Status: "closed",
+		Notes:  "reviewed: 2026-10-19 internal/e/e.go\nreviewed: 2026-10-19 internal/f/f.go",
+	},
 	"gt-run3": {Found: true, Status: "open", Notes: "finding: internal/g/g.go:Run:bad gt-f2"},
+	"gt-run4": {Found: true, Status: "closed", Notes: "reviewed: 2026-10-19 internal/h/h.go"},
+	"gt-run5": {Found: true, Status: "closed"},
 }
 
 // TestTargetsScorecardPrintsPerQuestionBlocks drives the adapter with fake run
@@ -324,13 +602,15 @@ func TestTargetsScorecardPrintsPerQuestionBlocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rep.Items != 7 || rep.LinesSkipped != 2 {
-		t.Fatalf("items %d skipped %d, want 7 and 2", rep.Items, rep.LinesSkipped)
+	if rep.Items != 10 || rep.LinesSkipped != 2 {
+		t.Fatalf("items %d skipped %d, want 10 and 2", rep.Items, rep.LinesSkipped)
 	}
 	wantContext := []string{
 		"run gt-run1: 4 files scored, 1 with a finding; the first finding ranks 4 by Jev's review_priority, 3 by the slice's risk order",
 		"run gt-run2: 2 files scored; no finding in the ledger",
 		"run gt-run3: 1 file scored; the run bead is still open, so none is labeled",
+		"run gt-run4: 2 files scored, 1 the ledger does not name; no finding in the ledger",
+		"run gt-run5: 1 file scored; the ledger names none of them, so none is labeled",
 	}
 	if len(rep.Context) != len(wantContext) {
 		t.Fatalf("context = %q, want %q", rep.Context, wantContext)

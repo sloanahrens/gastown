@@ -27,19 +27,21 @@ const (
 	ruleTargetsClean  = "targets:clean"
 )
 
-// The ledger line prefixes scripts/deep-review.sh's formula writes into a run
-// bead's notes.
+// The ledger line prefixes scripts/deep-review.sh's header defines; the run
+// formula appends one line per shape to the run bead's notes. Before changing
+// one, read that header.
 const (
-	findingPrefix = "finding: "
-	queuedPrefix  = "queued: "
-	p3Prefix      = "p3: "
+	reviewedPrefix = "reviewed: "
+	findingPrefix  = "finding: "
+	queuedPrefix   = "queued: "
+	p3Prefix       = "p3: "
 )
 
 func init() {
 	Register(TargetsBattery, func(townRoot string) Adapter {
 		return &targetsAdapter{
 			log:  targets.LogPath(townRoot),
-			runs: &townRuns{town: townRoot, stores: map[string]*beads.Beads{}},
+			runs: &townRuns{town: townRoot, stores: map[string]beadShower{}},
 		}
 	})
 }
@@ -64,17 +66,20 @@ type runLedger interface {
 // routes to, one store per rig.
 type townRuns struct {
 	town   string
-	stores map[string]*beads.Beads
+	stores map[string]beadShower
+	// store opens a rig's beads store. Nil opens the bd-backed store, the
+	// production reader; a test swaps it to script a town.
+	store func(dir string) beadShower
 }
 
 func (t *townRuns) Read(bead string) (runBead, error) {
-	rig := beads.GetRigNameForPrefix(t.town, beads.ExtractPrefix(bead))
-	if rig == "" {
-		rig = "hq" // a town-level bead lives in the town's own store
+	rig := "hq" // a town-level or unrouted bead lives in the town's own store
+	if name := beads.GetRigNameForPrefix(t.town, beads.ExtractPrefix(bead)); name != "" {
+		rig = name
 	}
 	store, ok := t.stores[rig]
 	if !ok {
-		store = beads.New(doltserver.FindRigBeadsDir(t.town, rig))
+		store = t.open(rig)
 		t.stores[rig] = store
 	}
 	issue, err := store.Show(bead)
@@ -87,9 +92,17 @@ func (t *townRuns) Read(bead string) (runBead, error) {
 	return runBead{Found: true, Status: issue.Status, Notes: issue.Notes}, nil
 }
 
+func (t *townRuns) open(rig string) beadShower {
+	dir := doltserver.FindRigBeadsDir(t.town, rig)
+	if t.store != nil {
+		return t.store(dir)
+	}
+	return beads.New(dir)
+}
+
 // targetsAdapter labels each logged slice file from the run bead its line
 // names: the run's finding, queued and p3 ledger lines name the files the
-// review read and found something in.
+// review found something in, and its reviewed lines name the files it read.
 type targetsAdapter struct {
 	log  string
 	runs runLedger
@@ -106,6 +119,7 @@ type targetsAdapter struct {
 type scoredFile struct {
 	path     string
 	found    bool
+	reviewed bool
 	priority *float64
 }
 
@@ -149,10 +163,11 @@ func (a *targetsAdapter) Parse(raw []byte) (Item, error) {
 	}, nil
 }
 
-// Label labels a closed run's every logged file once its ledger is final: a
-// file a finding, queued or p3 line names is a defect, every other file in the
-// slice is clean. A run still open has not finished recording, so it labels
-// nothing.
+// Label labels a closed run's logged file from its final ledger: a finding,
+// queued or p3 line names a defect, and a reviewed line with no such line names
+// a file the run read and left clean. A file the ledger does not name stays
+// unlabeled, because a missing or unreadable ledger is not evidence of a clean
+// file. A run still open has not finished recording, so it labels nothing.
 func (a *targetsAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	run := item.Refs[refRun]
 	if run == "" {
@@ -162,9 +177,9 @@ func (a *targetsAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	if err != nil {
 		return Labeling{}, fmt.Errorf("reading run %s: %w", run, err)
 	}
-	found := led.files[item.ID]
-	a.record(run, item, found)
-	if !led.closed {
+	found, reviewed := led.files[item.ID], led.reviewed[item.ID]
+	a.record(run, item, found, reviewed)
+	if !led.closed || (!found && !reviewed) {
 		return Labeling{}, nil
 	}
 	rule := ruleTargetsClean
@@ -202,8 +217,8 @@ func (a *targetsAdapter) ledger(run string) (ledger, error) {
 }
 
 // record keeps one scored file for its run's summary.
-func (a *targetsAdapter) record(run string, item Item, found bool) {
-	f := scoredFile{path: item.ID, found: found}
+func (a *targetsAdapter) record(run string, item Item, found, reviewed bool) {
+	f := scoredFile{path: item.ID, found: found, reviewed: reviewed}
 	if ans, ok := item.Answers[targets.QReviewPriority]; ok {
 		f.priority = ans.Score
 	}
@@ -219,9 +234,9 @@ func (a *targetsAdapter) record(run string, item Item, found bool) {
 }
 
 // Context reports each run once the labeling is done: the files it scored, the
-// files with findings, and where its first finding ranks by Jev's
-// review_priority beside its rank in the slice's own risk order, so the two
-// rankings can be compared.
+// files with findings, the files its ledger does not name, and where its first
+// finding ranks by Jev's review_priority beside its rank in the slice's own
+// risk order, so the two rankings can be compared.
 func (a *targetsAdapter) Context() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -237,26 +252,49 @@ func (a *targetsAdapter) Context() []string {
 type ledger struct {
 	found  bool
 	closed bool
-	// files holds each file a valid ledger line names.
+	// files holds each file a finding, queued or p3 line names.
 	files map[string]bool
+	// reviewed holds each file a reviewed line names.
+	reviewed map[string]bool
 }
 
-// parseLedger reads a run bead's finding, queued and p3 lines. A line whose
-// fields do not parse is skipped, as scripts/deep-review.sh skips it: refusing
-// the whole ledger would lose the findings it does hold, and a parser that
-// rejects the line cannot recover its finding either way.
+// parseLedger reads a run bead's reviewed, finding, queued and p3 lines. A line
+// whose fields do not parse is skipped, as scripts/deep-review.sh skips it:
+// refusing the whole ledger would lose the findings it does hold, and a parser
+// that rejects the line cannot recover its finding either way.
 func parseLedger(b runBead) ledger {
 	l := ledger{
-		found:  b.Found,
-		closed: b.Found && strings.EqualFold(strings.TrimSpace(b.Status), "closed"),
-		files:  map[string]bool{},
+		found:    b.Found,
+		closed:   b.Found && strings.EqualFold(strings.TrimSpace(b.Status), "closed"),
+		files:    map[string]bool{},
+		reviewed: map[string]bool{},
 	}
 	for _, raw := range strings.Split(b.Notes, "\n") {
-		if file, ok := ledgerLineFile(strings.TrimSpace(raw)); ok {
+		line := strings.TrimSpace(raw)
+		if file, ok := reviewedFile(line); ok {
+			l.reviewed[file] = true
+		}
+		if file, ok := ledgerLineFile(line); ok {
 			l.files[file] = true
 		}
 	}
 	return l
+}
+
+// reviewedFile returns the file a reviewed line names.
+func reviewedFile(line string) (string, bool) {
+	rest, ok := strings.CutPrefix(line, reviewedPrefix)
+	if !ok {
+		return "", false
+	}
+	fields := strings.Fields(rest)
+	if len(fields) < 2 {
+		return "", false
+	}
+	if _, err := time.Parse("2006-01-02", fields[0]); err != nil {
+		return "", false
+	}
+	return fields[1], true
 }
 
 // ledgerLineFile returns the file a finding, queued or p3 line names. The file
@@ -316,7 +354,6 @@ func priorityField(sev string) bool {
 	return sev == "P1" || sev == "P2" || sev == "P3"
 }
 
-// runSummary is one run's context line.
 func runSummary(run string, led ledger, files []scoredFile) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "run %s: %s scored", run, fileCount(len(files)))
@@ -328,27 +365,46 @@ func runSummary(run string, led ledger, files []scoredFile) string {
 		b.WriteString("; the run bead is still open, so none is labeled")
 		return b.String()
 	}
-	first, findings := 0, 0
-	for i, f := range files {
-		if f.found {
-			findings++
-			if first == 0 {
-				first = i + 1
-			}
-		}
-	}
-	switch findings {
-	case 0:
-		b.WriteString("; no finding in the ledger")
+	findings, unnamed, first := tally(files)
+	switch {
+	case findings == 0 && unnamed == len(files):
+		b.WriteString("; the ledger names none of them, so none is labeled")
 		return b.String()
-	case 1:
+	case findings == 0:
+		fmt.Fprintf(&b, "%s; no finding in the ledger", unnamedClause(unnamed))
+		return b.String()
+	case findings == 1:
 		b.WriteString(", 1 with a finding")
 	default:
 		fmt.Fprintf(&b, ", %d with findings", findings)
 	}
-	fmt.Fprintf(&b, "; the first finding ranks %d by Jev's review_priority, %d by the slice's risk order",
-		priorityRank(files), first)
+	fmt.Fprintf(&b, "%s; the first finding ranks %d by Jev's review_priority, %d by the slice's risk order",
+		unnamedClause(unnamed), priorityRank(files), first)
 	return b.String()
+}
+
+// tally counts the files with a finding and the files the ledger names neither
+// way, and returns the 1-based risk-order position of the first finding.
+func tally(files []scoredFile) (findings, unnamed, first int) {
+	for i, f := range files {
+		switch {
+		case f.found:
+			findings++
+			if first == 0 {
+				first = i + 1
+			}
+		case !f.reviewed:
+			unnamed++
+		}
+	}
+	return findings, unnamed, first
+}
+
+func unnamedClause(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(", %d the ledger does not name", n)
 }
 
 // priorityRank is the 1-based rank, in Jev's review_priority order, of the
