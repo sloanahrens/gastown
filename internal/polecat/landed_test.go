@@ -5,7 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // landedRepo is a clone with an origin behind it, in a gitfake world, so
@@ -306,4 +308,31 @@ func TestProbeWorkLandedOnRef(t *testing.T) {
 			t.Fatalf("ProbeWorkLandedOnRef = %+v, want unverified without an origin", got)
 		}
 	})
+}
+
+// TestActiveMRUsesSameLandedPredicate: a seat whose HEAD is the head
+// refs/landed/<bead> holds, with its MR closed and RequireGitSafe set, is not
+// held by its active_mr. ApplyWorkLanded already reads that as landed, so the
+// dangling-active_mr gate must read the same verdict rather than probing branch
+// tips, which never saw the landing (gt-5bzd3).
+func TestActiveMRUsesSameLandedPredicate(t *testing.T) {
+	t.Parallel()
+	w, repoPath, head, db := landedSeatRig(t)
+	w.SetRef(t, repoPath, land.LandedRef("gt-seat"), head)
+	db.Seed(beads.Issue{ID: "mr-seat", Title: "mr", Status: "closed"})
+
+	const branch = "polecat/nitro/gt-seat+x1"
+	facts := WorkstateFacts{UnpushedCommits: 1}
+	ApplyWorkLanded(&facts, w.repo(repoPath), db, "", branch)
+	if !facts.WorkLanded {
+		t.Fatalf("ApplyWorkLanded reason = %q; want landed", facts.WorkLandedReason)
+	}
+
+	in := ActiveMRInput{ActiveMR: "mr-seat", SourceIssueHint: "gt-seat", RequireGitSafe: true, GitSafe: false}
+	got := AssessActiveMRWithLandedEvidence(db, in, func() LandedEvidence {
+		return activeMRLandedEvidence(facts, w.opener(), repoPath, branch)
+	})
+	if got.Pending {
+		t.Fatalf("active_mr assessment = %+v; want cleared, the landed verdict ApplyWorkLanded recorded", got)
+	}
 }

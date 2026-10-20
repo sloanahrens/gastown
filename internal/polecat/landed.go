@@ -70,6 +70,18 @@ func probeWorkLandedOnRef(gits gitOpener, clonePath, branch, remote string) Land
 	return LandedEvidence{}
 }
 
+// activeMRLandedEvidence is the landed evidence the dangling-active_mr gate asks
+// for a seat (gt-5bzd3). The verdict ApplyWorkLanded recorded on facts is the
+// answer check-recovery and the reuse gate's nuke check already act on, so the
+// gate takes it first; the submitted-tip probe only adds proofs when that
+// verdict is not landed. facts must already carry ApplyWorkLanded's verdict.
+func activeMRLandedEvidence(facts WorkstateFacts, gits gitOpener, clonePath, branch string) LandedEvidence {
+	if facts.WorkLanded {
+		return LandedEvidence{Verified: true, Ref: facts.WorkLandedReason}
+	}
+	return probeWorkLandedOnRef(gits, clonePath, branch, "origin")
+}
+
 // refCarriesOwnWork reports whether head is a pointer to work of its own, as
 // opposed to a pointer into integration's own line of development.
 //
