@@ -1468,6 +1468,188 @@ func TestAttentionRiskPathKeepsItemsWhenTheReadFails(t *testing.T) {
 	}
 }
 
+// gt-pqpq8: one failed bd show skips that bead alone. The landing whose read
+// failed keeps the item it had, a bead that reads back with a PASS for its head
+// raises nothing, and the collector returns no error, so the kind is not carried
+// forward for the whole pass.
+func TestAttentionRiskPathSkipsOneFailedBeadRead(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	headA, headB := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) {
+		return []land.LandingRecord{
+			{BeadID: "gt-a", Head: headA, RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)},
+			{BeadID: "gt-b", Head: headB, RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)},
+		}, nil
+	}
+	f.src.riskIssue = func(_ context.Context, _, id string) (*beads.Issue, error) {
+		if id == "gt-a" {
+			return nil, context.DeadlineExceeded
+		}
+		return &beads.Issue{ID: id, Priority: 2, Notes: land.OverseerReviewMarker + " " + headB + " PASS"}, nil
+	}
+	itemA := attention.Item{Key: "risk:gt-a:" + sha12(headA), Kind: attention.KindRiskPath,
+		Severity: attention.SeverityLow, Rig: attentionRig, Bead: "gt-a", SHA: headA, Summary: "gt-a landed"}
+	f.src.prev = attention.State{Updated: now, Items: []attention.Item{itemA}}
+
+	items, err := f.src.collectRiskPaths(context.Background())
+	if err != nil {
+		t.Fatalf("collector: %v, want no error for one failed bead read", err)
+	}
+	if len(items) != 1 || items[0].Key != itemA.Key {
+		t.Errorf("items = %+v, want gt-a's previous item kept and the PASS of gt-b raising none", items)
+	}
+}
+
+// gt-pqpq8: a failed read with no previous item raises nothing and does not
+// abort the pass; the other bead still raises its item. A bead that keeps
+// failing is logged once, when it starts failing, not on every tick.
+func TestAttentionRiskPathLogsAFailedBeadOnceAndRaisesNothingForIt(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) {
+		return []land.LandingRecord{
+			{BeadID: "gt-a", Head: strings.Repeat("a", 40), RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)},
+			{BeadID: "gt-b", Head: strings.Repeat("b", 40), RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)},
+		}, nil
+	}
+	f.src.riskIssue = func(_ context.Context, _, id string) (*beads.Issue, error) {
+		if id == "gt-a" {
+			return nil, errors.New("bd show: timeout")
+		}
+		return &beads.Issue{ID: id, Priority: 2}, nil
+	}
+
+	for range 3 {
+		items := f.collect(t, f.src.collectRiskPaths)
+		if len(items) != 1 || items[0].Bead != "gt-b" {
+			t.Fatalf("items = %+v, want only gt-b's item while gt-a's read fails", items)
+		}
+	}
+	if n := strings.Count(f.logs.String(), "skipping gt-a"); n != 1 {
+		t.Errorf("gt-a logged %d times over three ticks, want once:\n%s", n, f.logs.String())
+	}
+}
+
+// gt-pqpq8: the collector returns an error only when every bead read failed, so
+// the kind is carried forward as a failed collector's is: the previous items
+// survive the pass.
+func TestAttentionRiskPathErrorsWhenEveryBeadReadFails(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	headA := strings.Repeat("a", 40)
+	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) {
+		return []land.LandingRecord{
+			{BeadID: "gt-a", Head: headA, RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)},
+			{BeadID: "gt-b", Head: strings.Repeat("b", 40), RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)},
+		}, nil
+	}
+	f.src.riskIssue = func(context.Context, string, string) (*beads.Issue, error) {
+		return nil, errors.New("bd show: timeout")
+	}
+	itemA := attention.Item{Key: "risk:gt-a:" + sha12(headA), Kind: attention.KindRiskPath,
+		Severity: attention.SeverityLow, Rig: attentionRig, Bead: "gt-a", SHA: headA, Summary: "gt-a landed"}
+	prev := attention.State{Updated: now, Items: []attention.Item{itemA}}
+	f.src.prev = prev
+
+	if _, err := f.src.collectRiskPaths(context.Background()); err == nil {
+		t.Fatal("collector returned no error, want one when every bead read failed")
+	}
+	collectors := []attentionCollector{{kind: attention.KindRiskPath, collect: f.src.collectRiskPaths}}
+	observed := collectAttention(context.Background(), prev, collectors, func(string, ...any) {})
+	if len(observed) != 1 || observed[0].Key != itemA.Key {
+		t.Errorf("observed = %+v, want the previous item kept when every read failed", observed)
+	}
+}
+
+// gt-pqpq8: a count short by a failed bead read is not published, so the review
+// backlog cannot clear a standing item on it. The count returns once a tick
+// reads every bead.
+func TestAttentionRiskPathWithholdsTheCountOnAPartialRead(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	headA := strings.Repeat("a", 40)
+	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) {
+		return []land.LandingRecord{
+			{BeadID: "gt-a", Head: headA, RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)},
+			{BeadID: "gt-b", Head: strings.Repeat("b", 40), RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)},
+		}, nil
+	}
+	f.src.riskIssue = func(_ context.Context, _, id string) (*beads.Issue, error) {
+		if id == "gt-a" {
+			return nil, errors.New("bd show: timeout")
+		}
+		return &beads.Issue{ID: id, Priority: 2}, nil
+	}
+	f.src.prev = attention.State{Updated: now, Items: []attention.Item{{
+		Key: "risk:gt-a:" + sha12(headA), Kind: attention.KindRiskPath,
+		Severity: attention.SeverityLow, Rig: attentionRig, Bead: "gt-a", SHA: headA, Summary: "gt-a landed",
+	}}}
+
+	items, err := f.src.collectRiskPaths(context.Background())
+	if err != nil {
+		t.Fatalf("collector: %v, want no error for one failed bead read", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("items = %+v, want gt-a's kept item and gt-b's new item", items)
+	}
+	if f.src.riskCounted {
+		t.Errorf("riskCounted = true after a partial read, want the count withheld")
+	}
+	if f.src.riskOpen != len(items) {
+		t.Errorf("riskOpen = %d, want the %d items observed", f.src.riskOpen, len(items))
+	}
+
+	f.src.riskIssue = func(_ context.Context, _, id string) (*beads.Issue, error) {
+		return &beads.Issue{ID: id, Priority: 2}, nil
+	}
+	items, err = f.src.collectRiskPaths(context.Background())
+	if err != nil {
+		t.Fatalf("collector after the read recovered: %v", err)
+	}
+	if !f.src.riskCounted || f.src.riskOpen != len(items) || len(items) != 2 {
+		t.Errorf("after a full read: riskCounted = %v, riskOpen = %d, items = %d; want the count published for two items",
+			f.src.riskCounted, f.src.riskOpen, len(items))
+	}
+}
+
+// gt-pqpq8: a context that ends during a failed read returns the context's
+// error, not a skip, and publishes no count.
+func TestAttentionRiskPathStopsWhenTheContextEndsDuringAFailedRead(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 2, 12, 0, 0, 0, time.UTC)
+	f := newAttentionFixture(t, now)
+	f.src.riskLandings = func(string, time.Time) ([]land.LandingRecord, error) {
+		return []land.LandingRecord{
+			{BeadID: "gt-a", Head: strings.Repeat("a", 40), RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)},
+			{BeadID: "gt-b", Head: strings.Repeat("b", 40), RiskPaths: []string{"internal/daemon/attention.go"}, LandedAt: now.Add(-time.Hour)},
+		}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reads := 0
+	f.src.riskIssue = func(context.Context, string, string) (*beads.Issue, error) {
+		reads++
+		cancel()
+		return nil, errors.New("bd show: killed")
+	}
+
+	_, err := f.src.collectRiskPaths(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("collector error = %v, want context.Canceled", err)
+	}
+	if reads != 1 {
+		t.Errorf("bd shows = %d, want the pass to stop after the cancelled read", reads)
+	}
+	if f.src.riskCounted {
+		t.Errorf("riskCounted = true after the context ended, want the count withheld")
+	}
+}
+
 // A failed ls-remote emits no items and keeps the previous tick's.
 func TestAttentionDirectPushKeepsItemsWhenTheReadFails(t *testing.T) {
 	t.Parallel()

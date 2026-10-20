@@ -170,6 +170,9 @@ type attentionCache struct {
 	repeatedAt map[string]time.Time
 	// backlogSamples is the review-backlog rule's one-hour count history.
 	backlogSamples []backlogSample
+	// riskSkipped is the work beads the risk-path collector skipped last tick
+	// because their read failed, so a bead still failing is not logged again.
+	riskSkipped map[string]bool
 }
 
 // reworkNote is one rework bead's cached rejection count, keyed by the
@@ -267,6 +270,9 @@ type attentionSources struct {
 	// carried across ticks by the daemon. It is memory only, so after a restart
 	// the rise is measured from the first tick. collectReviewBacklog updates it.
 	backlogSamples []backlogSample
+	// riskSkipped is the work beads collectRiskPaths skipped on the last tick
+	// because their read failed, carried across ticks by the daemon.
+	riskSkipped map[string]bool
 
 	// reworkNotes is the rejection-count cache, carried across ticks by the
 	// daemon.
@@ -337,6 +343,7 @@ func (d *Daemon) writeAttention() {
 	src.dockerProbeFails = cache.dockerProbeFails
 	src.repeatedAt = cache.repeatedAt
 	src.backlogSamples = cache.backlogSamples
+	src.riskSkipped = cache.riskSkipped
 	tips, err := readDirectPushTips(d.config.TownRoot)
 	if err != nil {
 		d.logger.Printf("attention: reading %s: %v", tipsFileName, err)
@@ -352,7 +359,7 @@ func (d *Daemon) writeAttention() {
 		d.logger.Printf("attention: auditing resolved risk-path FAILs: %v", err)
 	}
 	state := d.attentionTick(ctx, src, prev, acks, now)
-	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, repeatedAt: src.repeatedAt, backlogSamples: src.backlogSamples}
+	d.lastAttention = &attentionCache{state: state, reworkNotes: src.reworkNotes, diskWarnBeats: src.diskWarnBeats, dockerProbeFails: src.dockerProbeFails, repeatedAt: src.repeatedAt, backlogSamples: src.backlogSamples, riskSkipped: src.riskSkipped}
 	if len(src.tips.Rigs) == 0 {
 		return
 	}
@@ -1290,10 +1297,20 @@ func (s *attentionSources) collectPolecatStall(ctx context.Context) ([]attention
 // Like the other landing collectors it reads only the rigs whose landing
 // worker is on (attentionLandingRigs): a town with landings disabled has no
 // landing picture to report, and this item is part of that picture.
+//
+// A bead read that fails (a slow or failed bd show) skips that bead alone: the
+// rest of the window is still judged, and the landing whose read failed keeps
+// the item it already had, so a failed read never clears a review that is owed
+// (gt-pqpq8). The collector returns an error only when every bead read failed or
+// the context is done, which is what collectAttention carries forward. A bead
+// that keeps failing is logged when it starts failing, not on every tick.
 func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.Item, error) {
 	s.riskOpen, s.riskCounted = 0, false
 	var out []attention.Item
-	beadsFor := map[string]*beads.Issue{}
+	reads := map[string]riskRead{}
+	skipped := map[string]bool{}
+	var firstErr error
+	beadReads, beadFails := 0, 0
 	since := s.now.Add(-attentionRiskPathWindow)
 	for _, rig := range s.landingRigs() {
 		if err := ctx.Err(); err != nil {
@@ -1307,15 +1324,35 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 			if rec.BeadID == "" || rec.Head == "" || len(rec.RiskPaths) == 0 {
 				continue
 			}
+			key := "risk:" + rec.BeadID + ":" + sha12(rec.Head)
 			cacheKey := rig + "\x00" + rec.BeadID
-			issue, ok := beadsFor[cacheKey]
+			read, ok := reads[cacheKey]
 			if !ok {
-				issue, err = s.riskIssue(ctx, rig, rec.BeadID)
+				issue, err := s.riskIssue(ctx, rig, rec.BeadID)
+				read = riskRead{issue: issue, err: err}
+				reads[cacheKey] = read
+				beadReads++
 				if err != nil {
-					return nil, fmt.Errorf("%s: %w", rec.BeadID, err)
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return nil, ctxErr
+					}
+					beadFails++
+					if firstErr == nil {
+						firstErr = fmt.Errorf("%s: %w", rec.BeadID, err)
+					}
+					skipped[cacheKey] = true
+					if !s.riskSkipped[cacheKey] {
+						s.d.logger.Printf("attention: collector risk-path: skipping %s this tick: %v", rec.BeadID, err)
+					}
 				}
-				beadsFor[cacheKey] = issue
 			}
+			if read.err != nil {
+				if it, ok := attention.Find(s.prev, key); ok {
+					out = append(out, it)
+				}
+				continue
+			}
+			issue := read.issue
 			if issue == nil {
 				continue
 			}
@@ -1332,7 +1369,7 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 				}
 			}
 			out = append(out, attention.Item{
-				Key:  "risk:" + rec.BeadID + ":" + sha12(rec.Head),
+				Key:  key,
 				Kind: attention.KindRiskPath,
 				Severity: attention.RiskPathSeverity(attention.RiskPathEvidence{
 					Failed:   verdict == land.OverseerReviewFail,
@@ -1346,11 +1383,24 @@ func (s *attentionSources) collectRiskPaths(ctx context.Context) ([]attention.It
 			})
 		}
 	}
-	// Published only when every rig read: a failed rig returned above, and a
-	// read short by a landing is an error from attentionRiskLandings, not a
-	// count the backlog rule could clear a standing item on (gt-8mm0g).
-	s.riskOpen, s.riskCounted = len(out), true
+	// Recorded only when the pass ran to its end: an early return leaves last
+	// tick's skips in place, so the next tick logs only what it has not logged.
+	s.riskSkipped = skipped
+	if beadReads > 0 && beadFails == beadReads {
+		return nil, fmt.Errorf("every bead read failed, first: %w", firstErr)
+	}
+	// Published only when every rig and every bead read: a failed rig returned
+	// above, and a count short by a bead whose read failed is not one the
+	// backlog rule may clear a standing item on (gt-8mm0g).
+	s.riskOpen, s.riskCounted = len(out), beadFails == 0
 	return out, nil
+}
+
+// riskRead is one work bead's read as collectRiskPaths holds it for the tick:
+// the issue, or the error that failed the read.
+type riskRead struct {
+	issue *beads.Issue
+	err   error
 }
 
 // collectTierSweepRed raises one item per rig and tier whose last sweep
