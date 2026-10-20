@@ -1136,6 +1136,22 @@ use up the first one's room. `Cap.Allows` is whether today's spend is still
 under `MaxUSDPerDay`. The ledger stores tokens, so `USDPerBillionTokens` is
 required to price them.
 
+### Attention battery
+
+`internal/jev/attention` asks one Jev call per new attention item: five
+questions (needs a person, clears on its own, a routine action fixes it, repeats
+an open item, and an urgency score), and appends one line per item to
+`.runtime/jev/attention.jsonl`. The pass is advisory and log-only: it never
+acks, hides, wakes or changes an item, and it writes nothing under
+`.runtime/attention`.
+
+Keys live under `patrols.jev_attention` in `daemon.json`. `enabled` defaults to
+false, `max_usd_per_day` to 1, and `usd_per_billion_tokens` is required. The
+daemon runs a pass every 15 minutes when enabled. A failed call logs
+`answers: null` and the item is not asked again. The first pass only sets the
+cursor, so it asks about no item raised before it. `gt jev attention --recent N`
+prints the last N lines.
+
 ## Beads Commands (bd)
 
 ```bash
