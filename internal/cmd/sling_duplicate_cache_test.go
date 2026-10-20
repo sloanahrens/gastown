@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -436,9 +435,6 @@ func TestDuplicateDetailCacheUnwritableFileCostsOnlyTheCache(t *testing.T) {
 // alone, and the directory the daemon creates for it is too.
 func TestDuplicateDetailCacheFileIsOwnerOnly(t *testing.T) {
 	t.Parallel()
-	if runtime.GOOS == "windows" {
-		t.Skip("file mode bits are not POSIX permissions on Windows")
-	}
 	db := duplicateGuardFixture(t)
 	dir := filepath.Join(t.TempDir(), "daemon")
 	path := filepath.Join(dir, "spec_detail_cache.json")
