@@ -5452,6 +5452,7 @@ func TestFindDoltServerOnPort_FallsBackWhenLsofHangs(t *testing.T) {
 	if pid := h.findDoltServerOnPort(4598); pid != 4242 {
 		t.Errorf("findDoltServerOnPort = %d, want the PID ss reports: a hung lsof must not end the search", pid)
 	}
+	f.awaitHung(t, "lsof -i :4598 -sTCP:LISTEN -t")
 }
 
 // A probe that cannot answer must not be read as "nothing holds the socket".
@@ -5469,6 +5470,7 @@ func TestCleanStaleSocket_LeavesTheSocketWhenTheProbeHangs(t *testing.T) {
 	defer close(release)
 
 	h.cleanStaleSocket(socketPath)
+	f.awaitHung(t, "lsof "+socketPath)
 	if _, err := os.Stat(socketPath); err != nil {
 		t.Errorf("a probe that timed out removed the socket: %v", err)
 	}
