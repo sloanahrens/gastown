@@ -13,8 +13,8 @@ import (
 
 // isIdleForUpgrade reports whether restarting the daemon now would kill no
 // in-flight work: no script plugin, compactor, boot triage, scheduled
-// slings or patrol watchdog run, no landing-worker pass, no
-// scheduled_maintenance gc cycle, and no
+// slings or patrol watchdog run, no landing-worker pass, no jev_dedupe pass,
+// no scheduled_maintenance gc cycle, and no
 // install holding install-gt.lock. The Dolt goroutines are not counted: they
 // are short or restartable. Post-landing runs and tier sweep cycles are not
 // here either: checkUpgradeRestart holds a bounded wait for each instead
@@ -137,6 +137,12 @@ func (d *Daemon) daemonWorkHolds() []*daemonWork {
 	}
 	if d.patrolScanRunning.Load() {
 		holds = append(holds, &daemonWork{name: "a patrol scan"})
+	}
+	// A restart kills the Jev call in flight before its line is recorded, and
+	// the next pass asks and bills that finding again (gt-0h4i0). The pass
+	// reruns from the new daemon, so it is soft work.
+	if d.jevDedupeRunning.Load() {
+		holds = append(holds, &daemonWork{name: "a jev_dedupe pass"})
 	}
 	for _, hold := range holds {
 		if hold.hard {

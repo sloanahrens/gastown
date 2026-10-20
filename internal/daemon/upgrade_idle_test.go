@@ -139,3 +139,30 @@ func TestInstallLockHeldProbe(t *testing.T) {
 		_ = l.Unlock()
 	})
 }
+
+// TestDaemonWorkHoldsIncludesARunningJevDedupePass covers gt-0h4i0: an upgrade
+// restart killed the Jev call a jev_dedupe pass had in flight before its line
+// was recorded, and the next pass asked — and billed — that finding again. The
+// pass is soft work: it reruns from the new daemon, so it holds the restart only
+// up to housekeepingRestartCap.
+func TestDaemonWorkHoldsIncludesARunningJevDedupePass(t *testing.T) {
+	t.Parallel()
+	d := idleTestDaemon(t)
+	d.jevDedupeRunning.Store(true)
+
+	hold := d.daemonWorkHold()
+	if hold == nil || hold.name != "a jev_dedupe pass" {
+		t.Fatalf("daemonWorkHold() = %+v, want the jev_dedupe pass", hold)
+	}
+	if hold.hard {
+		t.Error("a jev_dedupe pass is soft work: the next daemon's pass re-asks its findings")
+	}
+	if got := d.daemonWorkHolds(); len(got) != 1 || got[0].name != "a jev_dedupe pass" {
+		t.Errorf("daemonWorkHolds() = %+v, want just the jev_dedupe pass", got)
+	}
+
+	d.jevDedupeRunning.Store(false)
+	if hold := d.daemonWorkHold(); hold != nil {
+		t.Errorf("daemonWorkHold() = %+v, want none once the pass has ended", hold)
+	}
+}
