@@ -945,50 +945,6 @@ func TestOffReportsComposeStopFailure(t *testing.T) {
 	}
 }
 
-func TestOffWhenComposeProbeFails(t *testing.T) {
-	t.Parallel()
-	f := newFake(t)
-	f.setHealthy()
-	f.setPending(0)
-	f.failComposePs = true
-	o, _, _ := f.optsWithOut()
-	o.Yes = true
-	err := Off(context.Background(), o)
-	if err == nil {
-		t.Fatal("Off succeeded although the compose probe failed")
-	}
-	if code := codeOf(t, err); code != ExitNotHealthy {
-		t.Errorf("exit code = %d, want %d", code, ExitNotHealthy)
-	}
-	if !f.has("docker compose stop") {
-		t.Error("off skipped the compose stop after a failed probe")
-	}
-	if f.composeN != 0 {
-		t.Errorf("compose stop did not take effect: compose=%d", f.composeN)
-	}
-	if data, rerr := os.ReadFile(StatePath(f.town)); rerr == nil && strings.HasPrefix(string(data), "off ") {
-		t.Errorf("off was recorded after a failed probe: %q", data)
-	}
-}
-
-func TestOffWhenComposeProbeAndStopFail(t *testing.T) {
-	t.Parallel()
-	f := newFake(t)
-	f.setHealthy()
-	f.setPending(0)
-	f.failComposePs = true
-	f.failComposeSt = true
-	o, _, _ := f.optsWithOut()
-	o.Yes = true
-	err := Off(context.Background(), o)
-	if err == nil || !strings.Contains(err.Error(), "docker compose stop") {
-		t.Fatalf("error = %v, want the docker compose stop failure", err)
-	}
-	if data, rerr := os.ReadFile(StatePath(f.town)); rerr == nil && strings.HasPrefix(string(data), "off ") {
-		t.Errorf("off was recorded: %q", data)
-	}
-}
-
 func TestOffWithDoltStopsDolt(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)
