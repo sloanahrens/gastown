@@ -1210,6 +1210,66 @@ the same keys whether or not the patrol is on:
 | `max_usd_per_day` | The town-wide daily cap the pass checks with `Cap.Allows` before every call. `0` takes the default of 1. |
 | `usd_per_billion_tokens` | Prices the ledger's tokens. Required: a pass without it refuses to run. |
 
+### Submission battery (`jev_submission`)
+
+`gt jev submission` asks Jev about each gastown work bead submitted for landing:
+a bead with a READY TO LAND block whose `Submitted` time is past the pass's
+cursor, read from the beads still carrying `gt:ready-to-land` and the beads
+closed since the cursor. The closed read is what keeps a fast landing in the
+log: the landing worker removes the label when it lands the bead. It asks six
+questions in one call and appends one line per submission to
+`.runtime/jev/submission.jsonl`. The
+pass is advisory and log-only: it adds no bead comment, no attention item and
+nothing under `.runtime/landings`, and it never holds up a landing. Read the
+log with `gt jev submission --recent N`.
+
+The log line is `{ts, bead, branch, head, target, submitted, agent, answers,
+question_version, model}`. `answers` maps each question id to its answer:
+`tests_cover_change`, `beyond_goal`, `commits_match_change`,
+`touches_town_machinery` and `will_pass_review` each hold a `noul` probability,
+and `risk` holds a `score` (the landing battery's four levels) with its
+`confidence`. `question_version` is `submission.Version` and changes whenever a
+question or a rubric level does; `model` is the model ID the API returned.
+`agent` is the bead's `agent:` label, else its `agent=` attached var. The log
+holds ids, times, numbers and answers, never prompt, title or diff text.
+
+The state Jev reads is the bead's title, its `## Goal` and `## Acceptance`
+sections (each cut to 1500 runes), the commit subjects on `target..head` (at
+most 20) and the changed paths from `git diff --numstat target..head` with
+added and removed counts (at most 80 files). Each value is JSON-quoted. No diff
+content is sent.
+
+The commits and the stat come from a bare clone the pass owns at
+`.runtime/jev/repos/gastown.git`. The first pass creates it from the rig
+registry's `git_url`; every pass fetches `refs/heads/*` into it. The pass never
+runs git in the rig's `mayor/rig` checkout or any town worktree. A fetch that
+fails skips the pass with a logged warning and leaves the cursor unmoved.
+
+The first pass sets the cursor to its own time and asks nothing. A submission
+the clone cannot read, or that Jev returns an unusable response for, is skipped
+with no line and counted as skipped; any other failure stops the pass, leaves
+the cursor, and is retried next pass.
+
+The daemon patrol `jev_submission` runs the pass every 15 minutes, off the
+heartbeat. It is off unless `daemon.json` enables it, and `gt jev submission`
+reads the same keys whether or not the patrol is on:
+
+```json
+"patrols": {
+  "jev_submission": {
+    "enabled": true,
+    "max_usd_per_day": 1.0,
+    "usd_per_billion_tokens": 3.0
+  }
+}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `enabled` | Turns the patrol on. Default `false`. |
+| `max_usd_per_day` | The town-wide daily cap the pass checks with `Cap.Allows` before every call. `0` takes the default of 1. |
+| `usd_per_billion_tokens` | Prices the ledger's tokens. Required: a pass without it refuses to run. |
+
 ### Scorecard (`gt jev scorecard`)
 
 `gt jev scorecard --battery <name>` scores a battery's log against the labels

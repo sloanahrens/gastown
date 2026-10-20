@@ -1,0 +1,277 @@
+package submission
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"io/fs"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/jev"
+	"github.com/steveyegge/gastown/internal/jev/battery"
+	"github.com/steveyegge/gastown/internal/land"
+)
+
+// DefaultMaxUSDPerDay is the daily cap when the config names none. The cap is
+// town-wide: it counts every Jev caller in the usage ledger, not this job
+// alone.
+const DefaultMaxUSDPerDay = 1.0
+
+const (
+	// gitTimeout bounds one commit or diff read in the clone.
+	gitTimeout = time.Minute
+	// fetchTimeout bounds the clone's fetch, which carries a whole rig's
+	// branches.
+	fetchTimeout = 5 * time.Minute
+)
+
+// Settings is the operator's configuration for the pass, read from
+// patrols.jev_submission.
+type Settings struct {
+	// MaxUSDPerDay is the daily cap. Zero takes DefaultMaxUSDPerDay.
+	MaxUSDPerDay float64
+	// USDPerBillionTokens prices the ledger's tokens. It is required: the
+	// ledger stores tokens, never dollars.
+	USDPerBillionTokens float64
+}
+
+// beadLister is the part of *beads.Beads the pass's lister uses. It is an
+// interface so a test can see the query the production lister sends without a
+// Dolt server.
+type beadLister interface {
+	List(beads.ListOptions) ([]*beads.Issue, error)
+}
+
+// Open wires the production pass for a town: the Jev client writing to the
+// usage ledger under the Caller name, the rig's beads, the bare clone and the
+// cap read from the same ledger. warnings receives the ledger's own warnings
+// and may be nil.
+func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
+	capUSD := s.MaxUSDPerDay
+	if capUSD == 0 {
+		capUSD = DefaultMaxUSDPerDay
+	}
+	town := battery.Cap{Ledger: jev.UsageLedgerPath(townRoot), MaxUSDPerDay: capUSD, USDPerBillionTokens: s.USDPerBillionTokens}
+	if err := town.Validate(); err != nil {
+		return nil, fmt.Errorf("jev_submission: %w", err)
+	}
+
+	client, err := jev.NewClient(
+		jev.WithLedger(jev.UsageLedgerPath(townRoot)),
+		jev.WithCaller(Caller),
+		jev.WithWarnings(warnings),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("opening the Jev client: %w", err)
+	}
+
+	beadsDir := doltserver.FindRigBeadsDir(townRoot, RigName)
+	if beadsDir == "" {
+		return nil, fmt.Errorf("no beads directory for rig %s", RigName)
+	}
+	origin, err := rigOriginURL(townRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Pass{
+		Asker:       client,
+		Submissions: rigBeads{b: beads.New(beadsDir)},
+		Git:         newBareGit(ClonePath(townRoot), origin),
+		LogPath:     LogPath(townRoot),
+		CursorPath:  CursorPath(townRoot),
+		Allows:      func() (bool, error) { return town.Allows(time.Now) },
+	}, nil
+}
+
+// rigOriginURL is the URL the pass clones from: the rig registry's git_url,
+// the same place every other part of the town fetches the rig from.
+func rigOriginURL(townRoot string) (string, error) {
+	cfg, err := config.LoadRigsConfig(constants.MayorRigsPath(townRoot))
+	if err != nil {
+		return "", fmt.Errorf("reading the rig registry: %w", err)
+	}
+	entry, ok := cfg.Rigs[RigName]
+	if !ok || strings.TrimSpace(entry.GitURL) == "" {
+		return "", fmt.Errorf("rig %s has no git_url in the rig registry", RigName)
+	}
+	return entry.GitURL, nil
+}
+
+// ClonePath is the bare clone the pass owns: created on its first run and
+// fetched by every pass after that.
+func ClonePath(townRoot string) string {
+	return filepath.Join(townRoot, constants.DirRuntime, "jev", "repos", RigName+".git")
+}
+
+// rigBeads lists a rig's submitted work beads through the beads client. It
+// never writes.
+type rigBeads struct {
+	b beadLister
+}
+
+// Since lists the beads that could carry a submission since t: the ones still
+// waiting to land, and the ones closed since t. The second read is what keeps
+// a fast landing in the battery: the landing worker removes the ready label
+// when it lands the bead, so a submission that lands between two passes is
+// only visible on the closed side.
+func (r rigBeads) Since(t time.Time) ([]*beads.Issue, error) {
+	waiting, err := r.b.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1, Limit: 0})
+	if err != nil {
+		return nil, err
+	}
+	closed, err := r.b.List(beads.ListOptions{Status: "closed", ClosedAfter: t, Priority: -1, Limit: 0})
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(waiting)+len(closed))
+	out := make([]*beads.Issue, 0, len(waiting)+len(closed))
+	for _, issue := range waiting {
+		if issue == nil || !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() {
+			continue
+		}
+		seen[issue.ID] = true
+		out = append(out, issue)
+	}
+	for _, issue := range closed {
+		if issue == nil || seen[issue.ID] {
+			continue
+		}
+		out = append(out, issue)
+	}
+	return out, nil
+}
+
+// gitRunner runs one git command in dir and returns its standard output. The
+// pass only ever hands it its own clone, never a town worktree; tests record
+// the dir to prove it.
+type gitRunner func(ctx context.Context, dir string, args ...string) (string, error)
+
+// runGit is the production gitRunner.
+func runGit(ctx context.Context, dir string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("git %s in %s: %w: %s",
+			strings.Join(args, " "), dir, err, strings.TrimSpace(errb.String()))
+	}
+	return out.String(), nil
+}
+
+// bareGit is the pass's own bare clone. Every command runs -C dir, so the
+// pass never touches the rig's repository or any worktree cut from it.
+type bareGit struct {
+	dir     string
+	origin  string
+	timeout time.Duration
+	run     gitRunner
+}
+
+// newBareGit is the production clone: dir is the clone path and origin is the
+// URL it is created from.
+func newBareGit(dir, origin string) *bareGit {
+	return &bareGit{dir: dir, origin: origin, timeout: gitTimeout, run: runGit}
+}
+
+// Sync creates the clone when it is missing and fetches refs/heads/* into it,
+// force-updating every branch so a rebased or force-pushed submission reads as
+// it is now.
+func (g *bareGit) Sync(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
+	defer cancel()
+
+	if err := os.MkdirAll(g.dir, 0o700); err != nil {
+		return fmt.Errorf("creating the clone directory: %w", err)
+	}
+	if _, err := os.Stat(filepath.Join(g.dir, "HEAD")); errors.Is(err, fs.ErrNotExist) {
+		if _, err := g.run(ctx, g.dir, "init", "--bare", "--quiet"); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return fmt.Errorf("reading the clone: %w", err)
+	}
+
+	cur, err := g.run(ctx, g.dir, "config", "--get", "remote.origin.url")
+	cur = strings.TrimSpace(cur)
+	switch {
+	case err != nil || cur == "":
+		if _, err := g.run(ctx, g.dir, "remote", "add", "origin", g.origin); err != nil {
+			return err
+		}
+	case cur != g.origin:
+		if _, err := g.run(ctx, g.dir, "remote", "set-url", "origin", g.origin); err != nil {
+			return err
+		}
+	}
+	if _, err := g.run(ctx, g.dir, "fetch", "--prune", "--quiet", "origin", "+refs/heads/*:refs/heads/*"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// CommitSubjects returns the subjects on target..head, newest first, at most
+// limit. A ref that starts with "-" is refused before git runs, so a READY TO
+// LAND block cannot pass git an option.
+func (g *bareGit) CommitSubjects(ctx context.Context, target, head string, limit int) ([]string, error) {
+	if err := checkRefs(target, head); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, g.timeout)
+	defer cancel()
+	args := []string{"log", "--format=%s"}
+	if limit > 0 {
+		args = append(args, fmt.Sprintf("-n%d", limit))
+	}
+	args = append(args, target+".."+head)
+	out, err := g.run(ctx, g.dir, args...)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(out) == "" {
+		return nil, nil
+	}
+	return strings.Split(strings.TrimSuffix(out, "\n"), "\n"), nil
+}
+
+// Numstat returns `git diff --numstat target..head`, refusing a ref that
+// starts with "-" for the same reason as CommitSubjects.
+func (g *bareGit) Numstat(ctx context.Context, target, head string) (string, error) {
+	if err := checkRefs(target, head); err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(ctx, g.timeout)
+	defer cancel()
+	out, err := g.run(ctx, g.dir, "diff", "--numstat", "--no-renames", target+".."+head)
+	if err != nil {
+		return "", err
+	}
+	return out, nil
+}
+
+// checkRefs refuses a ref git would read as an option.
+func checkRefs(refs ...string) error {
+	for _, ref := range refs {
+		if strings.HasPrefix(ref, "-") {
+			return fmt.Errorf("refusing %q: a ref may not start with -", ref)
+		}
+	}
+	return nil
+}
+
+// Ensure the production dependencies satisfy the pass's seams.
+var (
+	_ Asker       = (*jev.Client)(nil)
+	_ Submissions = rigBeads{}
+	_ Git         = (*bareGit)(nil)
+)

@@ -128,31 +128,31 @@ func printRecentLanding(w io.Writer, path string, n int) error {
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\tv%d %s\n",
 			l.TS.UTC().Format("2006-01-02 15:04Z"), l.Bead, agent,
-			riskCell(l.Answers[landing.QRisk]),
-			noulCell(l.Answers[landing.QNeedsReviewNow]),
-			noulCell(l.Answers[landing.QTouchesTownMachinery]),
-			noulCell(l.Answers[landing.QBeyondGoal]),
-			noulCell(l.Answers[landing.QTestsCoverChange]),
+			riskCell(l.Answers[landing.QRisk].Score, l.Answers[landing.QRisk].Confidence),
+			noulCell(l.Answers[landing.QNeedsReviewNow].Noul),
+			noulCell(l.Answers[landing.QTouchesTownMachinery].Noul),
+			noulCell(l.Answers[landing.QBeyondGoal].Noul),
+			noulCell(l.Answers[landing.QTestsCoverChange].Noul),
 			l.QuestionVersion, l.Model)
 	}
 	return tw.Flush()
 }
 
 // noulCell is a noul answer's probability, or "-" when the line has none.
-func noulCell(a landing.Answer) string {
-	if a.Noul == nil {
+func noulCell(noul *float64) string {
+	if noul == nil {
 		return "-"
 	}
-	return fmt.Sprintf("%.2f", *a.Noul)
+	return fmt.Sprintf("%.2f", *noul)
 }
 
 // riskCell is the risk score and Jev's confidence in it, or "-".
-func riskCell(a landing.Answer) string {
-	if a.Score == nil {
+func riskCell(score, confidence *float64) string {
+	if score == nil {
 		return "-"
 	}
-	if a.Confidence == nil {
-		return fmt.Sprintf("%.0f", *a.Score)
+	if confidence == nil {
+		return fmt.Sprintf("%.0f", *score)
 	}
-	return fmt.Sprintf("%.0f (%.2f)", *a.Score, *a.Confidence)
+	return fmt.Sprintf("%.0f (%.2f)", *score, *confidence)
 }
