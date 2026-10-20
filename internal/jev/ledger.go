@@ -15,8 +15,8 @@ import (
 // group its lines.
 const defaultCaller = "jev"
 
-// LedgerRecord is one line of the usage ledger: what one answered Choice call
-// spent, and nothing of the question or answer.
+// LedgerRecord is one line of the usage ledger: what one answered call spent,
+// and nothing of the questions or answers.
 type LedgerRecord struct {
 	// TS is when the call returned.
 	TS           time.Time `json:"ts"`
@@ -31,9 +31,9 @@ func UsageLedgerPath(townRoot string) string {
 	return filepath.Join(townRoot, constants.DirRuntime, "jev", "usage.jsonl")
 }
 
-// WithLedger makes the client append one line per answered Choice call to
-// path, creating the directory 0700 and the file 0600, and setting both to
-// those modes if they already exist.
+// WithLedger makes the client append one line per answered Ask call to path,
+// creating the directory 0700 and the file 0600, and setting both to those
+// modes if they already exist.
 func WithLedger(path string) Option { return func(c *Client) { c.ledgerPath = path } }
 
 // WithCaller names this client in the usage ledger, for a reader that breaks
@@ -44,8 +44,8 @@ func WithCaller(name string) Option { return func(c *Client) { c.caller = name }
 func WithWarnings(w io.Writer) Option { return func(c *Client) { c.warnings = w } }
 
 // ledger appends one JSON line per answered call. The write is best-effort: a
-// failure warns and leaves the Choice result alone, because a full disk must
-// not cost the caller its answer.
+// failure warns and never fails the call, so a full disk cannot cost the
+// caller its answer.
 type ledger struct {
 	path     string
 	caller   string
