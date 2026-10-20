@@ -164,13 +164,21 @@ func extractOverlapRefs(parts ...string) contentRefs {
 	refs := extractContentRefs(parts...)
 	files := make([]string, 0, len(refs.Files))
 	for _, path := range refs.Files {
-		if strings.HasPrefix(path, planDocPrefix) {
+		if isPlanDocPath(path) {
 			continue
 		}
 		files = append(files, path)
 	}
 	refs.Files = files
 	return refs
+}
+
+// isPlanDocPath reports whether a normalized file ref names a plan document,
+// whatever prefix the prose spelled it with: normalizeFileToken keeps a home
+// path ("~/gt/docs/plans/x.md") and an absolute one ("/Users/me/gt/docs/plans/x.md")
+// whole, so the plan tree is matched at a directory boundary anywhere in it.
+func isPlanDocPath(path string) bool {
+	return strings.HasPrefix(path, planDocPrefix) || strings.Contains(path, "/"+planDocPrefix)
 }
 
 // normalizeFileToken reduces one prose token to a repo-relative file path, or

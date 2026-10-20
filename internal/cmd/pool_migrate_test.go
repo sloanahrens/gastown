@@ -845,3 +845,37 @@ func TestPoolMigrateRefusesAWrongTypedCap(t *testing.T) {
 		})
 	}
 }
+
+// An explicit max_seats of zero is no cap: the migration falls back to
+// max_overflow as it does for an absent max_seats, so the operator's cap does
+// not shrink to the default of 2.
+func TestMigratePoolKeysExplicitZeroMaxSeatsFallsBackToMaxOverflow(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		doc  string
+		want int
+	}{
+		{"zero max_seats takes max_overflow", `{"polecat_pool":{"agent":"a","max_seats":0,"max_overflow":5}}`, 5},
+		{"negative max_seats takes max_overflow", `{"polecat_pool":{"agent":"a","max_seats":-1,"max_overflow":5}}`, 5},
+		{"zero max_seats and no max_overflow keeps the default", `{"polecat_pool":{"agent":"a","max_seats":0}}`, poolMigrateDefaultSeatCap},
+		{"zero max_seats and zero max_overflow keeps the default", `{"polecat_pool":{"agent":"a","max_seats":0,"max_overflow":0}}`, poolMigrateDefaultSeatCap},
+		{"a positive max_seats wins over max_overflow", `{"polecat_pool":{"agent":"a","max_seats":3,"max_overflow":5}}`, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m, ok := jsonTreeOf(t, []byte(tc.doc)).(map[string]any)
+			if !ok {
+				t.Fatalf("%s is not an object", tc.doc)
+			}
+			if _, err := migratePoolKeys(m, nil, false); err != nil {
+				t.Fatal(err)
+			}
+			pool := m["polecat_pool"].(map[string]any)
+			seat := pool["seats"].(map[string]any)["a"].(map[string]any)
+			if got, _ := intOf(seat["cap"]); got != tc.want {
+				t.Errorf("seats.a.cap = %d, want %d", got, tc.want)
+			}
+		})
+	}
+}

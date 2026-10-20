@@ -399,9 +399,13 @@ func migratePoolKeys(settings map[string]any, hooked *legacySeat, prefer bool) (
 		if agent == "" {
 			agent = stringOf(pool["overflow_agent"])
 		}
+		// A max_seats of zero or below is no cap, so it falls through to
+		// max_overflow exactly as an absent one does.
 		capacity, hasCap := intOf(pool["max_seats"])
-		if !hasCap {
-			capacity, hasCap = intOf(pool["max_overflow"])
+		if !hasCap || capacity <= 0 {
+			if overflow, ok := intOf(pool["max_overflow"]); ok {
+				capacity, hasCap = overflow, true
+			}
 		}
 		if agent != "" {
 			from := fmt.Sprintf("polecat_pool.agent %q, max_seats %d", agent, capacity)

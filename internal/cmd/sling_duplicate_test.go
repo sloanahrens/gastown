@@ -1718,3 +1718,27 @@ func TestListDuplicateCandidatesCarriesIssueType(t *testing.T) {
 		t.Errorf("candidate %s IssueType = %q, want epic", got[0].ID, got[0].IssueType)
 	}
 }
+
+// A plan document is filtered however the prose spells its path: repo-relative,
+// home-relative or absolute. A code path named beside it still counts.
+func TestExtractOverlapRefsFiltersEveryPlanPathSpelling(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		text      string
+		wantFiles []string
+	}{
+		{"repo-relative", "docs/plans/x.md", []string{}},
+		{"home-relative", "~/gt/docs/plans/x.md", []string{}},
+		{"absolute", "/Users/someone/gt/docs/plans/x.md", []string{}},
+		{"rig-relative", "gastown/docs/plans/2026-10/x.md", []string{}},
+		{"absolute beside a code path", "/Users/someone/gt/docs/plans/x.md and internal/cmd/sling.go", []string{"internal/cmd/sling.go"}},
+		{"absolute sibling directory still counts", "/Users/someone/gt/docs/plans-archive/x.md", []string{"Users/someone/gt/docs/plans-archive/x.md"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			assertStrings(t, "files", extractOverlapRefs(tt.text).Files, tt.wantFiles)
+		})
+	}
+}
