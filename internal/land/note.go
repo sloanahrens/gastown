@@ -443,6 +443,59 @@ func (r LandingRecord) CloseReason() string {
 		NoteField(r.Target), NoteField(r.Target), r.LandedCommit, r.LandedCommit, r.PatchID)
 }
 
+// ParseLandingRecord returns the last LANDING RECORD block in notes, and
+// whether the block names a landed commit. The last, because a reworked bead
+// carries one block per landing and only the newest says what its branch
+// landed as.
+func ParseLandingRecord(notes string) (LandingRecord, bool) {
+	idx := strings.LastIndex(notes, LandingNoteMarker+"\n")
+	if idx < 0 {
+		return LandingRecord{}, false
+	}
+	var rec LandingRecord
+	body := notes[idx+len(LandingNoteMarker)+1:]
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			break
+		}
+		key, value, ok := strings.Cut(line, ":")
+		if !ok {
+			break
+		}
+		value = strings.TrimSpace(value)
+		switch strings.TrimSpace(key) {
+		case "landed_commit":
+			rec.LandedCommit = value
+		case "patch_id":
+			rec.PatchID = value
+		case "target":
+			rec.Target = value
+		case "base":
+			rec.Base = value
+		case "branch":
+			rec.Branch = value
+		case "head":
+			rec.Head = value
+		case "gate_result":
+			rec.GateResult = value
+		case "om_verdict":
+			rec.OMVerdict = value
+		case "om_score":
+			rec.OMScore, _ = strconv.ParseFloat(value, 64)
+		case "route":
+			rec.Route = value
+		case "landed_at":
+			if landedAt, err := time.Parse(time.RFC3339, value); err == nil {
+				rec.LandedAt = landedAt
+			}
+		case "agent":
+			rec.Agent = value
+		}
+	}
+	return rec, rec.LandedCommit != ""
+}
+
 func shortSHA(sha string) string {
 	if len(sha) > 8 {
 		return sha[:8]

@@ -27,6 +27,7 @@ type Repo interface {
 	CommitMessages(base, head string) ([]git.CommitMessage, error)
 	CommitLineStatsInRange(revRange string, limit int) ([]git.CommitLineStats, error)
 	DiffNameOnly(base, head string) ([]string, error)
+	DiffPathsNameOnly(a, b string, paths []string) ([]string, error)
 	ShowFileAtRev(ref, path string) (string, error)
 	PatchID(base, head string) (string, error)
 	PatchIDZeroContext(base, head string) (string, error)
@@ -71,6 +72,7 @@ type Repo interface {
 	IsRepo() bool
 	IsEmpty() (bool, error)
 	DefaultBranch() string
+	RemoteDefaultBranch() string
 	RefExists(ref string) (bool, error)
 	CommonDir() (string, error)
 }
@@ -283,6 +285,40 @@ func (h *handle) DiffNameOnly(base, head string) ([]string, error) {
 	}
 	for p := range from {
 		if _, ok := to[p]; !ok {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// DiffPathsNameOnly is *git.Git's direct two-ref diff restricted to paths:
+// DiffNameOnly's merge-base range is the wrong comparison for "does this
+// tree equal that commit's for the files I touched".
+func (h *handle) DiffPathsNameOnly(a, b string, paths []string) ([]string, error) {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := append([]string{"diff", "--name-only", "--no-renames", a, b, "--"}, paths...)
+	r, wt, err := h.locate(args...)
+	if err != nil {
+		return nil, err
+	}
+	from, ok := h.resolve(r, wt, a)
+	if !ok {
+		return nil, unknownRevision(a, args...)
+	}
+	to, ok := h.resolve(r, wt, b)
+	if !ok {
+		return nil, unknownRevision(b, args...)
+	}
+	fromTree, toTree := h.f.treeOf(from), h.f.treeOf(to)
+	want := make(map[string]bool, len(paths))
+	for _, p := range paths {
+		want[clean(p)] = true
+	}
+	var out []string
+	for p := range want {
+		if fromTree[p] != toTree[p] {
 			out = append(out, p)
 		}
 	}

@@ -1883,6 +1883,23 @@ func (g *Git) DiffNameOnly(base, head string) ([]string, error) {
 	return splitGitPathLines(strings.TrimSpace(out)), nil
 }
 
+// DiffPathsNameOnly returns the subset of paths whose content differs between
+// a and b. The diff is direct (two refs compared as they stand), not
+// DiffNameOnly's merge-base range: a landing comparison asks whether this
+// worktree's content equals the landed head's, and a shared ancestor answers
+// nothing about that.
+func (g *Git) DiffPathsNameOnly(a, b string, paths []string) ([]string, error) {
+	args := append([]string{"diff", "--name-only", "--no-renames", a, b, "--"}, paths...)
+	out, err := g.run(args...)
+	if err != nil {
+		return nil, err
+	}
+	if out == "" {
+		return nil, nil
+	}
+	return splitGitPathLines(strings.TrimSpace(out)), nil
+}
+
 // GitStatus represents the status of the working directory.
 type GitStatus struct {
 	Clean     bool

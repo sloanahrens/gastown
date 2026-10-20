@@ -84,6 +84,14 @@ type WorkstateInput struct {
 	AssignedBeadTerminal           bool
 	MRSubmitted                    bool
 	MQLookupFailed                 bool
+	// WorkLanded reports that the commits this worktree holds are already
+	// landed on the target, so the measured unpushed-commits refusal does not
+	// describe work in flight (gt-jol0i).
+	WorkLanded bool
+	// WorkLandedDiffReason names a landing that is not this worktree's: the
+	// bead landed from another head and these files differ. It replaces the
+	// git-unpushed reason, which cannot say what to compare.
+	WorkLandedDiffReason string
 }
 
 // WorkstateDisposition is the canonical polecat lifecycle decision. It is pure
@@ -334,8 +342,16 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 	if in.StashCount > 0 {
 		block("git-stash", gitStashBlocker(in), true)
 	}
-	if in.UnpushedCommits > 0 {
-		block("git-unpushed", gitUnpushedBlocker(in), true)
+	// Landed work is not work in flight: the commits are the ones the landing
+	// already took, which the branch's disappearance from origin is what made
+	// them look unpushed (gt-jol0i). A worktree that disagrees with the
+	// landing keeps the refusal and names the files instead.
+	if in.UnpushedCommits > 0 && !in.WorkLanded {
+		reason := "git-unpushed"
+		if in.WorkLandedDiffReason != "" {
+			reason = in.WorkLandedDiffReason
+		}
+		block(reason, gitUnpushedBlocker(in), true)
 	}
 	activeMRBlocks := in.ActiveMRBlocker != ""
 	if activeMRBlocks {
@@ -384,7 +400,7 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 			return d
 		} else if !in.HasSubmittableWork || in.MQNotRequired {
 			d.MQStatus = "not_required"
-		} else if in.MRSubmitted || in.AssignedBeadTerminal {
+		} else if in.MRSubmitted || in.AssignedBeadTerminal || in.WorkLanded {
 			// A terminal assigned bead is submission evidence, exactly like a
 			// found MR bead: the work is finished or intentionally superseded,
 			// so there is nothing left to enqueue. This preserves the
@@ -393,6 +409,10 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 			// classifier path — a superseded branch is always "ahead", so
 			// commits-ahead can never discriminate; source-issue terminality
 			// is the signal (gt-nkyy).
+			//
+			// Landed work is the same evidence one step stronger: it is on the
+			// target already, so the commits that look unsubmitted are the
+			// landing's own (gt-jol0i).
 			d.MQStatus = "submitted"
 		} else {
 			d.Verdict = WorkstateVerdictNeedsMQSubmit
@@ -410,6 +430,11 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 	d.Reusable = true
 	d.SafeToNuke = true
 	d.Reason = "reusable"
+	if in.WorkLanded {
+		// Say which evidence cleared the seat: "reusable" beside a worktree
+		// holding commits reads as if nothing had been measured.
+		d.Reason = "landed"
+	}
 	if strings.HasPrefix(in.Branch, "polecat/") {
 		d.ReuseStatus = "idle-preserved"
 	} else {
@@ -631,6 +656,14 @@ type WorkstateFacts struct {
 	MQNotRequired        bool
 	MRSubmitted          bool
 	MQLookupFailed       bool
+	// WorkLanded reports that the commits this worktree holds are already
+	// landed on the target, so the measured unpushed-commits refusal does not
+	// describe work in flight (gt-jol0i).
+	WorkLanded bool
+	// WorkLandedDiffReason names a landing that is not this worktree's: the
+	// bead landed from another head and these files differ. It replaces the
+	// git-unpushed reason, which cannot say what to compare.
+	WorkLandedDiffReason string
 }
 
 // WorkTerminal reports whether any work ref the polecat can hold — its assigned
@@ -684,6 +717,8 @@ func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
 		GitDirtyReason:                 f.GitDirtyReason,
 		StashCount:                     f.StashCount,
 		UnpushedCommits:                f.UnpushedCommits,
+		WorkLanded:                     f.WorkLanded,
+		WorkLandedDiffReason:           f.WorkLandedDiffReason,
 		GitCheckFailed:                 f.GitCheckFailed,
 		GitCheckFailedReason:           f.GitCheckFailedReason,
 		GitStateSource:                 f.GitStateSource,

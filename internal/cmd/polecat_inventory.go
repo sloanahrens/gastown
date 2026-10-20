@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -427,6 +429,29 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 	// (the list path) are the ones that probe.
 	if facts.GitStateSource == polecat.GitStateSourceLive {
 		facts.AssignedBeadTerminal = assignedBeadTerminalForInventory(env.IssueSource, item.Issue, fields, hookBead, hookDisposition)
+	}
+	// The list pays no beads call per seat unless there is leftover work to
+	// explain, which is why this runs only for a seat holding commits; the
+	// check-recovery path, which reads one seat, runs it for the reason too.
+	if facts.GitStateSource == polecat.GitStateSourceLive && facts.UnpushedCommits > 0 &&
+		env.WorktreePath != "" && env.IssueSource != nil {
+		beadID := hookBead
+		if beadID == "" {
+			if meta, ok := polecat.ParseBranchName(item.Branch); ok {
+				beadID = meta.Issue
+			}
+		}
+		if beadID != "" {
+			var issue *beads.Issue
+			if got, err := env.IssueSource.Show(beadID); err == nil {
+				issue = got
+			}
+			landed, reason := land.WorkLandedOnTarget(git.NewGit(env.WorktreePath), "", "", beadID, issue)
+			facts.WorkLanded = landed
+			if !landed {
+				facts.WorkLandedDiffReason = reason
+			}
+		}
 	}
 	if item.ActiveMR != "" {
 		// The decision is the shared active_mr policy, so what the list shows
