@@ -340,7 +340,9 @@ func (h *handle) ListRemoteRefsWithHashesTimeout(remote, prefix string, _ time.D
 	}
 	var refs []git.RemoteRef
 	for ref, id := range rr.refs {
-		if strings.HasPrefix(ref, prefix) && (strings.HasPrefix(ref, "refs/heads/") || strings.HasPrefix(ref, "refs/tags/")) {
+		// ls-remote --refs lists every ref under the prefix, whatever its
+		// namespace: refs/landed/<bead> is read back this way (gt-as9v8).
+		if strings.HasPrefix(ref, "refs/") && strings.HasPrefix(ref, prefix) {
 			refs = append(refs, git.RemoteRef{Hash: id, Name: ref})
 		}
 	}

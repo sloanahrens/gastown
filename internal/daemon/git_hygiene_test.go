@@ -197,6 +197,14 @@ func TestRunGitHygiene_KeepsRefsLandedThroughThePrune(t *testing.T) {
 
 	d.runGitHygiene()
 
+	// The sweep ran: it deleted the merged branches on both sides. Without
+	// this the refs below survive a patrol that did nothing.
+	if got := f.Ref(repo, "refs/heads/polecat/done"); got != "" {
+		t.Errorf("local polecat/done = %q, want the merged branch deleted", got)
+	}
+	if got := f.Ref(origin, "refs/heads/polecat/merged"); got != "" {
+		t.Errorf("origin polecat/merged = %q, want the merged branch deleted", got)
+	}
 	for _, dir := range []string{repo, origin} {
 		if got := f.Ref(dir, "refs/landed/gt-abc"); got != landed {
 			t.Errorf("refs/landed/gt-abc in %s = %q, want the landed head %q", dir, got, landed)

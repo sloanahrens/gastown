@@ -88,6 +88,11 @@ type Repo interface {
 	// the merge candidate is the worker's own branch and every retry rebuilds
 	// it.
 	Push(remote, refspec string, force bool) error
+	// PushForceWithLease and ListRemoteRefsWithHashes are how refs/landed/<bead>
+	// is moved on the remote: read what it holds, then overwrite exactly that
+	// value (gt-as9v8).
+	PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error
+	ListRemoteRefsWithHashes(remote, prefix string) ([]git.RemoteRef, error)
 	VerifyPushedCommit(remote, branch, commit string) error
 	// VerifyPushedCommitReachableFromPushTarget is the read-back a shared
 	// target needs: another actor's landing may have advanced the tip between
@@ -2051,26 +2056,57 @@ func LandedRef(beadID string) string {
 }
 
 // writeLandedRef points refs/landed/<bead> at the head the landing record
-// names, in the rig's own repository and on the remote. The push is forced
-// and the local update unconditional: refs/landed/ is the landing worker's
-// namespace alone, and a re-landing of the same bead (a rework after a
-// revert) moves the ref to the newer head.
+// names, in the rig's own repository and on the remote. refs/landed/ is the
+// landing worker's namespace alone, so the local update is unconditional. The
+// push is a plain one while the remote has no ref or already holds this head;
+// when the remote holds another head (a re-landing of the same bead after a
+// revert) the move is logged and made with a lease on the value just read, so
+// a ref some other writer moved in between is refused rather than clobbered.
 //
-// A record that names no head is logged and left without a ref: there is no
-// commit to answer ancestry with, and failing the record over it would wedge
-// a landed bead's repair forever.
+// Every failure is returned. record runs this before the landings file and
+// the close, so a landing whose ref could not be written stays unrecorded and
+// the next pass finishes it (completeUnrecordedLanding), instead of closing
+// the bead on a landing nothing can answer by ancestry. A record that names
+// no head is a caller bug, not a landing without a ref.
 func (l *Lander) writeLandedRef(g Repo, rec LandingRecord) error {
-	if rec.Head == "" {
-		l.logf("%s: the landing record names no head; leaving %s unset", rec.BeadID, LandedRef(rec.BeadID))
-		return nil
-	}
 	ref := LandedRef(rec.BeadID)
+	if rec.Head == "" {
+		return fmt.Errorf("setting %s: the landing record names no head", ref)
+	}
 	if err := g.UpdateRef(ref, rec.Head); err != nil {
 		return fmt.Errorf("setting %s: %w", ref, err)
 	}
 	remote := l.remote()
-	if err := g.Push(remote, rec.Head+":"+ref, true); err != nil {
-		return fmt.Errorf("pushing %s to %s: %w", ref, remote, err)
+	held, err := remoteRefTip(g, remote, ref)
+	if err != nil {
+		return fmt.Errorf("reading %s on %s: %w", ref, remote, err)
+	}
+	refspec := rec.Head + ":" + ref
+	if held == "" || held == rec.Head {
+		if err := g.Push(remote, refspec, false); err != nil {
+			return fmt.Errorf("pushing %s to %s: %w", ref, remote, err)
+		}
+		return nil
+	}
+	l.logf("%s: repairing %s on %s from %s to %s", rec.BeadID, ref, remote, shortSHA(held), shortSHA(rec.Head))
+	if err := g.PushForceWithLease(remote, refspec, ref, held); err != nil {
+		return fmt.Errorf("moving %s on %s from %s: %w", ref, remote, shortSHA(held), err)
 	}
 	return nil
+}
+
+// remoteRefTip is the commit remote holds at the full ref name, "" when it
+// holds none. ls-remote matches its pattern as a path suffix, so the listing
+// is filtered to the exact name.
+func remoteRefTip(g Repo, remote, ref string) (string, error) {
+	refs, err := g.ListRemoteRefsWithHashes(remote, ref)
+	if err != nil {
+		return "", err
+	}
+	for _, r := range refs {
+		if r.Name == ref {
+			return r.Hash, nil
+		}
+	}
+	return "", nil
 }
