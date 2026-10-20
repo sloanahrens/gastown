@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -11,10 +12,12 @@ import (
 	"os/signal"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/google/shlex"
 	"github.com/spf13/cobra"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -37,6 +40,7 @@ var (
 	dashboardSince                string
 	dashboardSpendCmd             string
 	dashboardJevSpendCmd          string
+	dashboardJevUSDPerBillion     float64
 	dashboardForgejoRepos         []string
 	dashboardClaudePlanUSD        float64
 	dashboardClaudePlanRenewalDay int
@@ -69,8 +73,11 @@ runs every five minutes while a page is open; with none, the spend panel is
 left out.
 
 --jev-spend-cmd names the command that prints the Jev ledger's spend as JSON
-(default: gt jev spend --json --hours 24 --usd-per-billion-tokens 42). It runs
-every five minutes while a page is open and draws the Jev row of the Cost panel
+(default: gt jev spend --json --hours 24). The command is split like a shell
+line, so quote a path that holds a space. The ledger stores tokens and never
+dollars, so --jev-usd-per-billion-tokens (default 42) prices them: it is
+appended to the command as --usd-per-billion-tokens unless the command already
+names one. The command runs every five minutes while a page is open and draws the Jev row of the Cost panel
 beside the DeepSeek and Claude lines: the calls and dollars over the command's
 --hours window, and the caller that cost the most. A command that fails or
 prints anything else shows the row as unavailable and leaves the other spend
@@ -180,6 +187,7 @@ func init() {
 	dashboardCmd.Flags().StringVar(&dashboardSince, "since", "2h", "How far back the feed starts (as gt tail --since)")
 	dashboardCmd.Flags().StringVar(&dashboardSpendCmd, "spend-cmd", "", "Command that prints the DeepSeek spend report as JSON (default: the ~/.claude tool when present)")
 	dashboardCmd.Flags().StringVar(&dashboardJevSpendCmd, "jev-spend-cmd", defaultJevSpendCmd, "Command that prints the Jev ledger's spend as JSON; empty leaves the Jev row out")
+	dashboardCmd.Flags().Float64Var(&dashboardJevUSDPerBillion, "jev-usd-per-billion-tokens", defaultJevUSDPerBillionTokens, "Price of Jev's tokens in US dollars per billion, passed to the --jev-spend-cmd command")
 	dashboardCmd.Flags().StringArrayVar(&dashboardForgejoRepos, "forgejo-repo", nil, "Repo (owner/name) the Forgejo panel reads; repeatable (default: every rig cut over to Forgejo)")
 	dashboardCmd.Flags().BoolVar(&dashboardOpen, "open", false, "Open the page in the default browser")
 	dashboardCmd.Flags().Float64Var(&dashboardClaudePlanUSD, "claude-plan-usd", dashboard.ClaudePlanDefaultUSD, "Monthly price of the Claude plan the plan meter's percentages are drawn against")
@@ -201,7 +209,11 @@ func runDashboard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return err
 	}
-	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, dashboardJevSpendCmd, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay)
+	jevArgv, err := jevSpendArgv(dashboardJevSpendCmd, dashboardJevUSDPerBillion)
+	if err != nil {
+		return err
+	}
+	hub, closeSources, err := newDashboardHub(townRoot, cutoff, loc, dashboardSpendCmd, jevArgv, dashboardClaudePlanUSD, dashboardClaudePlanRenewalDay)
 	if err != nil {
 		return err
 	}
@@ -292,7 +304,7 @@ func dashboardClaudePlanPath(townRoot string) string {
 // newDashboardHub wires a hub to the readers gt tail -f uses. The returned
 // function releases the connections the feed holds open; the caller runs it
 // when the server stops.
-func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd, jevSpendCmd string, claudePlanUSD float64, claudePlanRenewalDay int) (*dashboard.Hub, func(), error) {
+func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spendCmd string, jevSpendArgv []string, claudePlanUSD float64, claudePlanRenewalDay int) (*dashboard.Hub, func(), error) {
 	beadReads := openTailBeads(townRoot)
 	rigOfBead := landingRig(townRoot)
 	// The deploy block reads the same repos through the same viewer client as
@@ -374,7 +386,7 @@ func newDashboardHub(townRoot string, cutoff time.Time, loc *time.Location, spen
 		Machine:    dashboard.SampleMachine,
 		Cloud:      func() *dashboard.Cloud { return cloud.Read(time.Now()) },
 		Spend:      dashboardSpend(resolveSpendCmd(spendCmd)),
-		JevSpend:   dashboardJevSpend(strings.Fields(jevSpendCmd)),
+		JevSpend:   dashboardJevSpend(jevSpendArgv),
 		OM:         func() *dashboard.OM { return om.read(time.Now()) },
 		TierSweep:  func() *dashboard.TierSweep { return tierSweeps.read(time.Now()) },
 		Forgejo:    forgejoFeed,
@@ -622,9 +634,38 @@ func resolveSpendCmd(flagValue string) []string {
 }
 
 // defaultJevSpendCmd is --jev-spend-cmd's default: the last day of the Jev
-// ledger, priced at a flat rate per billion tokens because the ledger stores
-// tokens and never dollars.
-const defaultJevSpendCmd = "gt jev spend --json --hours 24 --usd-per-billion-tokens 42"
+// ledger. Its price comes from --jev-usd-per-billion-tokens, because the ledger
+// stores tokens and never dollars.
+const defaultJevSpendCmd = "gt jev spend --json --hours 24"
+
+// defaultJevUSDPerBillionTokens is --jev-usd-per-billion-tokens's default, the
+// $42 per billion the Jev attention design prices a call at.
+const defaultJevUSDPerBillionTokens = 42
+
+// jevSpendArgv turns --jev-spend-cmd into the argv the dashboard runs: the
+// command split like a shell line, so a quoted path with a space stays one
+// word, plus --usd-per-billion-tokens unless the command names its own price.
+// An empty command is no argv, which leaves the Jev row out. A command with an
+// unbalanced quote, or a price the spend command would refuse, is an error at
+// startup rather than a row that silently reads as unavailable.
+func jevSpendArgv(cmd string, usdPerBillion float64) ([]string, error) {
+	argv, err := shlex.Split(cmd)
+	if err != nil {
+		return nil, fmt.Errorf("--jev-spend-cmd %q: %w", cmd, err)
+	}
+	if len(argv) == 0 {
+		return nil, nil
+	}
+	for _, a := range argv {
+		if a == "--usd-per-billion-tokens" || strings.HasPrefix(a, "--usd-per-billion-tokens=") {
+			return argv, nil
+		}
+	}
+	if !(usdPerBillion > 0 && !math.IsInf(usdPerBillion, 0) && !math.IsNaN(usdPerBillion)) {
+		return nil, fmt.Errorf("--jev-usd-per-billion-tokens must be finite and above zero, not %v", usdPerBillion)
+	}
+	return append(argv, "--usd-per-billion-tokens", strconv.FormatFloat(usdPerBillion, 'f', -1, 64)), nil
+}
 
 // dashboardJevSpend runs the Jev spend command and folds its JSON into the
 // row, nil when the command fails, times out, or prints anything but the
