@@ -234,9 +234,11 @@ func debrisLogger(w io.Writer) func(ContainerVerdict) {
 // a ryuk reaper for its session is still running — a reaper's lifetime is its
 // session's, which is why the town's debris criterion is "older than the
 // window AND its reaper is gone" (gt-ul1k). A reaper older than the window is
-// itself debris: it is the last thing to exit a session, so one that outlived
-// its session leaked, and leaving it would reproduce exactly the deadlock this
-// classification exists to clear.
+// itself debris when no container of its session remains: it is the last thing
+// to exit a session, so one that outlived its session leaked, and leaving it
+// would reproduce exactly the deadlock this classification exists to clear.
+// While a container of its session remains, its age says nothing: it started
+// with the session, so it is as old as the session's containers (gt-2gjwu).
 //
 // Owner labels outrank all of that (gt-ehlga, see owner_labels.go): a
 // container whose labeled owner process on this host is certainly gone is
@@ -253,8 +255,20 @@ func (p ownerProbe) classify(containers []GateContainer, now time.Time, window t
 		window = StaleContainerWindow
 	}
 
-	// liveReapers maps session id to the reaper keeping that session alive.
-	// Only a young reaper counts: an old one is a leak, not a signal.
+	// hasContainer marks the sessions that still have a non-reaper container.
+	hasContainer := make(map[string]bool)
+	for _, c := range containers {
+		if !c.IsReaper() {
+			if id := c.SessionID(); id != "" {
+				hasContainer[id] = true
+			}
+		}
+	}
+
+	// liveReapers maps session id to the reaper keeping that session alive. A
+	// reaper starts with its session, so it is at least as old as that session's
+	// containers: past the window it is live while a container of its session
+	// remains, and only a lone old reaper is a leak.
 	liveReapers := make(map[string]string)
 	for _, c := range containers {
 		if !c.IsReaper() {
@@ -264,7 +278,7 @@ func (p ownerProbe) classify(containers []GateContainer, now time.Time, window t
 		if id == "" {
 			continue
 		}
-		if age, ok := c.Age(now); ok && age < window {
+		if age, ok := c.Age(now); ok && (age < window || hasContainer[id]) {
 			liveReapers[id] = c.Display()
 		}
 	}
@@ -283,6 +297,10 @@ func (p ownerProbe) classify(containers []GateContainer, now time.Time, window t
 		case age < window:
 			out = append(out, ContainerVerdict{Container: c, Verdict: VerdictLive,
 				Reason: fmt.Sprintf("age %s is under the %s staleness window", age.Round(time.Second), window)})
+		case c.IsReaper() && hasContainer[c.SessionID()]:
+			out = append(out, ContainerVerdict{Container: c, Verdict: VerdictLive,
+				Reason: fmt.Sprintf("reaper age %s exceeds the %s staleness window but a container of its session is still present",
+					age.Round(time.Second), window)})
 		case c.IsReaper():
 			out = append(out, ContainerVerdict{Container: c, Verdict: VerdictDebris,
 				Reason: fmt.Sprintf("reaper age %s exceeds the %s staleness window, so the session it reaped for is over",
