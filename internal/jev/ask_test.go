@@ -188,6 +188,9 @@ func TestAsk_BadResponses(t *testing.T) {
 		{"score without a value", scoreAsk, `{"answers":{"q":{"type":"score","confidence":0.5,"probabilities":{"low":0.5,"mid":0.5,"high":0}}}}`},
 		{"score probabilities do not sum to 1", scoreAsk, `{"answers":{"q":{"type":"score","score":1,"confidence":0.5,"probabilities":{"low":0.2,"mid":0.3,"high":0.4}}}}`},
 		{"score confidence outside 0 to 1", scoreAsk, `{"answers":{"q":{"type":"score","score":1,"confidence":1.5,"probabilities":{"low":0.5,"mid":0.5,"high":0}}}}`},
+		{"score probabilities cover fewer levels", scoreAsk, `{"answers":{"q":{"type":"score","score":1,"confidence":0.5,"legend":{"low":"a","mid":"b","high":"c"},"probabilities":{"low":0.5,"mid":0.5}}}}`},
+		{"score without a legend", scoreAsk, `{"answers":{"q":{"type":"score","score":1,"confidence":0.5,"probabilities":{"low":0.5,"mid":0.5,"high":0}}}}`},
+		{"score legend label without a probability", scoreAsk, `{"answers":{"q":{"type":"score","score":1,"confidence":0.5,"legend":{"low":"a","mid":"b","top":"c"},"probabilities":{"low":0.5,"mid":0.5,"high":0}}}}`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -198,6 +201,15 @@ func TestAsk_BadResponses(t *testing.T) {
 			require.ErrorIs(t, err, ErrBadResponse)
 		})
 	}
+}
+
+func TestAsk_BadAnswerNamesItsQuestionWhenSeveralAreAsked(t *testing.T) {
+	t.Parallel()
+	c := newTestClient(t, &respond{body: `{"answers":{"team":{"type":"choice","choice":"refunds","probabilities":{"billing":0,"returns":1,"shipping":0},"confidence":1},"refund":{"type":"noul","noul":0.5},"urgency":{"type":"score","score":1,"confidence":0.5,"legend":{"0":"a","1":"b","2":"c","3":"d","4":"e"},"probabilities":{"0":0.2,"1":0.2,"2":0.2,"3":0.2,"4":0.2}}}}`})
+
+	_, err := c.Ask(context.Background(), shoeState, askQuestions)
+
+	require.EqualError(t, err, ErrBadResponse.Error()+`: question "team": choice "refunds" is not an option asked`)
 }
 
 func TestAsk_WithLedgerWritesOneLinePerCall(t *testing.T) {

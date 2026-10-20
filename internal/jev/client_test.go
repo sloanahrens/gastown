@@ -295,6 +295,29 @@ func TestChoice_BadResponses(t *testing.T) {
 	}
 }
 
+func TestChoice_BadResponseMessagesAreUnchanged(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"no answers", `{"answers":{}}`, "no choice answer"},
+		{"wrong answer type", `{"answers":{"q":{"type":"noul","noul":0.9}}}`, "no choice answer"},
+		{"choice not asked", `{"answers":{"q":{"type":"choice","choice":"refunds","probabilities":{"billing":0,"returns":1,"shipping":0},"confidence":1}}}`, `choice "refunds" is not an option asked`},
+		{"not most probable", `{"answers":{"q":{"type":"choice","choice":"billing","probabilities":{"billing":0.1,"returns":0.8,"shipping":0.1},"confidence":1}}}`, `choice "billing" is not the most probable option`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newTestClient(t, &respond{body: tt.body})
+
+			_, err := c.Choice(context.Background(), "s", "q?", shoeCriteria)
+
+			require.EqualError(t, err, ErrBadResponse.Error()+": "+tt.want)
+		})
+	}
+}
+
 func TestChoice_TransportErrorScrubsKey(t *testing.T) {
 	t.Parallel()
 	boom := roundTripFunc(func(*http.Request) (*http.Response, error) {
