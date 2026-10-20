@@ -128,6 +128,7 @@ type (
 	EventsPruneConfig          = agentconfig.EventsPruneConfig
 	JevDedupeConfig            = agentconfig.JevDedupeConfig
 	JevAttentionConfig         = agentconfig.JevAttentionConfig
+	JevLandingConfig           = agentconfig.JevLandingConfig
 	ScheduledSlingsConfig      = agentconfig.ScheduledSlingsConfig
 	ScheduledSlingEntry        = agentconfig.ScheduledSlingEntry
 	LandingWorkerConfig        = agentconfig.LandingWorkerConfig
@@ -301,6 +302,13 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.JevAttention.Enabled
+	}
+	// jev_landing is opt-in for the same reason.
+	if patrol == "jev_landing" {
+		if config == nil || config.Patrols == nil || config.Patrols.JevLanding == nil {
+			return false
+		}
+		return config.Patrols.JevLanding.Enabled
 	}
 	// rebuild_om is opt-in: it swaps the om binary the landing worker execs,
 	// so only an explicit enabled:true turns it on (gt-0f228).

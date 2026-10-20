@@ -1,0 +1,4 @@
+TIME               BEAD      AGENT         RISK      REVIEW-NOW  MACHINERY  BEYOND-GOAL  TESTS  VERSION
+2026-10-20 19:16Z  gt-aaaaa  claude-haiku  3 (0.72)  0.83        0.91       0.07         0.66   v1 jev-1.13.0
+2026-10-20 19:31Z  gt-bbbbb  -             0 (0.99)  0.10        0.00       1.00         0.50   v2 jev-1.14.0
+2026-10-20 19:46Z  gt-ccccc  claude-haiku  -         -           -          -            -      v2 jev-1.14.0

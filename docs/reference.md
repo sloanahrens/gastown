@@ -1161,6 +1161,55 @@ again. The pass summary and the daemon log count answered items, null-answer
 lines and held calls apart, so a pass where Jev was down does not read like one
 where it answered.
 
+### Landing battery (`jev_landing`)
+
+`gt jev landing` asks Jev a second opinion on each gastown landing whose record
+has `risk_paths`. It reads `.runtime/landings/gastown.jsonl` past its cursor,
+asks five questions about each landing in one call, and appends one line to
+`.runtime/jev/landing.jsonl`. The line is advisory and log-only: it adds no bead
+comment and no attention item. Read it with `gt jev landing --recent N`.
+
+The log line is `{ts, bead, rig, head, landed_at, agent, answers,
+question_version, model}`. `answers` maps each question id to its answer:
+`needs_review_now`, `touches_town_machinery`, `beyond_goal` and
+`tests_cover_change` each hold a `noul` probability, and `risk` holds a `score`
+(0 docs or text only, 1 one package with tests, 2 across packages or without
+tests, 3 town machinery or what other agents read) with its `confidence`.
+`question_version` is `landing.Version` and changes whenever a question or a
+rubric level does; `model` is the model ID the API returned. The log holds ids,
+numbers and answers, never prompt or diff text.
+
+The state Jev reads is the bead's title and `## Goal` section (cut to 1200
+runes), `risk_paths`, `om_verdict`, `om_score`, `gate_result`, `agent`, and the
+changed files from `git diff --numstat base..head` as paths with added and
+removed counts (first 60 files). Each value is JSON-quoted. No diff content is
+sent.
+
+The first pass sets the cursor to its own time and asks nothing. A landing whose
+bead or diff cannot be read, or that Jev returns an unusable response for, is
+skipped with no line and counted as skipped in the daemon log; any other
+failure stops the pass, leaves the cursor, and is retried next pass.
+
+The daemon patrol `jev_landing` runs the pass every 15 minutes, off the
+heartbeat. It is off unless `daemon.json` enables it, and `gt jev landing` reads
+the same keys whether or not the patrol is on:
+
+```json
+"patrols": {
+  "jev_landing": {
+    "enabled": true,
+    "max_usd_per_day": 1.0,
+    "usd_per_billion_tokens": 3.0
+  }
+}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `enabled` | Turns the patrol on. Default `false`. |
+| `max_usd_per_day` | The town-wide daily cap the pass checks with `Cap.Allows` before every call. `0` takes the default of 1. |
+| `usd_per_billion_tokens` | Prices the ledger's tokens. Required: a pass without it refuses to run. |
+
 ## Beads Commands (bd)
 
 ```bash
