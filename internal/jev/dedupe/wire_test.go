@@ -2,14 +2,18 @@ package dedupe
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/jev"
 )
 
 // hmJSON is the shape `hm query --json` prints: a bead hit matched on its
@@ -165,6 +169,68 @@ func TestJevDedupeOpenRejectsBadSettings(t *testing.T) {
 			_, err := Open(t.TempDir(), tt.s, nil)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Errorf("Open error = %v, want one naming %s", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// keyedClient builds a Jev client that reads the key from a test file, so the
+// test proves Open's own options are enough and needs no key in the
+// environment.
+func keyedClient(t *testing.T) func(...jev.Option) (*jev.Client, error) {
+	t.Helper()
+	keyFile := filepath.Join(t.TempDir(), "jev.env")
+	if err := os.WriteFile(keyFile, []byte(jev.EnvKey+"=test-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return func(opts ...jev.Option) (*jev.Client, error) {
+		return jev.NewClient(append(opts, jev.WithKeyPaths(keyFile))...)
+	}
+}
+
+// Open wires the pass's Allows to the town's one ledger: another caller's
+// spend today counts against dedupe's room, priced at the configured rate.
+func TestJevDedupeOpenAllowsCountsAnotherCallersSpend(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		otherTokens int
+		s           Settings
+		want        bool
+	}{
+		{name: "no ledger yet", s: Settings{USDPerBillionTokens: 4}, want: true},
+		{name: "another caller under the default cap", otherTokens: 100_000_000, s: Settings{USDPerBillionTokens: 4}, want: true},
+		{name: "another caller at the default cap", otherTokens: 250_000_000, s: Settings{USDPerBillionTokens: 4}, want: false},
+		{name: "a configured cap lifts the room", otherTokens: 250_000_000, s: Settings{MaxUSDPerDay: 2.5, USDPerBillionTokens: 4}, want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(town, RigName, ".beads"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if tt.otherTokens > 0 {
+				ledger := jev.UsageLedgerPath(town)
+				if err := os.MkdirAll(filepath.Dir(ledger), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				rec, err := json.Marshal(jev.LedgerRecord{TS: time.Now(), Caller: "jev-dispatch", InputTokens: tt.otherTokens})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(ledger, append(rec, '\n'), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			p, err := open(town, tt.s, nil, keyedClient(t))
+			if err != nil {
+				t.Fatalf("open: %v", err)
+			}
+			got, err := p.Allows()
+			if err != nil || got != tt.want {
+				t.Errorf("Allows = %v, %v, want %v and no error", got, err, tt.want)
 			}
 		})
 	}

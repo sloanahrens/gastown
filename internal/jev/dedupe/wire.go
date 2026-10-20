@@ -16,8 +16,8 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/battery"
 )
 
-// DefaultMaxUSDPerDay is the daily cap when the config names none. The cap is
-// town-wide: it counts every Jev caller in the usage ledger, not this job alone.
+// DefaultMaxUSDPerDay is the daily cap when the config names none. What the
+// cap counts is battery.Cap's to say.
 const DefaultMaxUSDPerDay = 1.0
 
 // hmSearchLimit is how many hits one hm query asks for before the candidate
@@ -42,6 +42,12 @@ type Settings struct {
 // spend read from the same ledger. warnings receives the ledger's own
 // warnings and may be nil.
 func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
+	return open(townRoot, s, warnings, jev.NewClient)
+}
+
+// open is Open with the Jev client's constructor passed in, so a test can
+// supply a key without one in the environment.
+func open(townRoot string, s Settings, warnings io.Writer, newClient func(...jev.Option) (*jev.Client, error)) (*Pass, error) {
 	price := s.USDPerBillionTokens
 	if !(price > 0 && !math.IsInf(price, 0)) {
 		return nil, fmt.Errorf("jev_dedupe.usd_per_billion_tokens is required and must be above zero, not %v", price)
@@ -54,7 +60,7 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 		return nil, fmt.Errorf("jev_dedupe.max_usd_per_day must be above zero, not %v", capUSD)
 	}
 
-	client, err := jev.NewClient(
+	client, err := newClient(
 		jev.WithLedger(jev.UsageLedgerPath(townRoot)),
 		jev.WithCaller(Caller),
 		jev.WithWarnings(warnings),
