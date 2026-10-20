@@ -501,34 +501,31 @@ func TestRecoveryBatchBoundGrowsWithPolecats(t *testing.T) {
 	}
 }
 
-// slowGT is a reap host whose gt takes run to answer and then replies as exec
-// does for a command the deadline cut off (exit status -1, the signal death),
-// or with the exit status code when code is not -1. The wait is real, so a
-// bound shorter than run is a deadline that passes while the command runs.
-func slowGT(t *testing.T, run time.Duration, code int) *patrolScanHost {
+// killedGT is a reap host whose gt dies by signal, as exec reports a command
+// the deadline cut off (exit status -1), or exits with code when it is not -1.
+func killedGT(t *testing.T, code int) *patrolScanHost {
 	t.Helper()
-	gt := newFakeCLI(func([]string) cliReply {
-		time.Sleep(run)
-		return cliReply{stderr: "signal: killed", code: code}
-	})
+	gt := newFakeCLI(func([]string) cliReply { return cliReply{stderr: "signal: killed", code: code} })
 	return reapHost(t, enabledCleanup("gastown"), nil, gt)
 }
 
 // A batch the bound kills says so in its error, with the bound and the seat
-// count, so the reap line shows why no verdict arrived. The gt here is still
-// running when a short real deadline passes, and dies by signal.
+// count, so the reap line shows why no verdict arrived. A zero bound is already
+// spent, so the classification is the command's own death by signal; the
+// deadline that really kills a running gt is in the integration tier
+// (patrol_scan_reap_integration_test.go).
 func TestReapKilledBatchNamesBoundAndSeats(t *testing.T) {
 	t.Parallel()
-	h := slowGT(t, 100*time.Millisecond, -1)
+	h := killedGT(t, -1)
 
-	b := h.runRecoveryBatchWithin("gastown", 3, 20*time.Millisecond)
+	b := h.runRecoveryBatchWithin("gastown", 3, 0)
 	if b.err == nil {
 		t.Fatal("a killed batch answered without error")
 	}
 	if b.byName != nil {
 		t.Fatalf("a killed batch carried verdicts %+v", b.byName)
 	}
-	for _, want := range []string{"killed after", "at the 20ms bound for 3 polecats"} {
+	for _, want := range []string{"killed after", "at the 0s bound for 3 polecats"} {
 		if !strings.Contains(b.err.Error(), want) {
 			t.Fatalf("killed batch error %q, want it to contain %q", b.err, want)
 		}
@@ -538,34 +535,26 @@ func TestReapKilledBatchNamesBoundAndSeats(t *testing.T) {
 // A kill with the seats unlisted says the count is unknown, not a number.
 func TestReapKilledBatchNamesUnlistedSeats(t *testing.T) {
 	t.Parallel()
-	h := slowGT(t, 100*time.Millisecond, -1)
+	h := killedGT(t, -1)
 
-	b := h.runRecoveryBatchWithin("gastown", unknownPolecats, 20*time.Millisecond)
+	b := h.runRecoveryBatchWithin("gastown", unknownPolecats, 0)
 	if b.err == nil || !strings.Contains(b.err.Error(), "for an unlisted number of polecats") {
 		t.Fatalf("killed batch error %v, want it to name the unlisted seats", b.err)
 	}
 }
 
-// A gt that fails with an exit status of its own is not a kill, whether the
-// deadline has passed by then or not.
+// A gt that fails with an exit status of its own is not a kill, even when the
+// deadline had passed by the time it failed.
 func TestReapFailedBatchIsNotAKill(t *testing.T) {
 	t.Parallel()
-	for name, bound := range map[string]time.Duration{
-		"inside the bound":      time.Minute,
-		"after the bound ended": 20 * time.Millisecond,
-	} {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			h := slowGT(t, 100*time.Millisecond, 3)
+	h := killedGT(t, 3)
 
-			b := h.runRecoveryBatchWithin("gastown", 3, bound)
-			if b.err == nil {
-				t.Fatal("a failed batch answered without error")
-			}
-			if strings.Contains(b.err.Error(), "killed after") {
-				t.Fatalf("a failed batch reads as killed: %v", b.err)
-			}
-		})
+	b := h.runRecoveryBatchWithin("gastown", 3, 0)
+	if b.err == nil {
+		t.Fatal("a failed batch answered without error")
+	}
+	if strings.Contains(b.err.Error(), "killed after") {
+		t.Fatalf("a failed batch reads as killed: %v", b.err)
 	}
 }
 
@@ -573,12 +562,9 @@ func TestReapFailedBatchIsNotAKill(t *testing.T) {
 // one sweep for the rig, and each seat's verdict is the batch's error.
 func TestReapKilledBatchReadsEverySeatUnknown(t *testing.T) {
 	t.Parallel()
-	gt := newFakeCLI(func([]string) cliReply {
-		time.Sleep(100 * time.Millisecond)
-		return cliReply{stderr: "signal: killed", code: -1}
-	})
+	gt := newFakeCLI(func([]string) cliReply { return cliReply{stderr: "signal: killed", code: -1} })
 	h := reapHost(t, enabledCleanup("gastown"), nil, gt)
-	h.reapBatches = map[string]reapBatch{"gastown": h.runRecoveryBatchWithin("gastown", 3, 20*time.Millisecond)}
+	h.reapBatches = map[string]reapBatch{"gastown": h.runRecoveryBatchWithin("gastown", 3, 0)}
 
 	for _, name := range []string{"agate", "basalt", "marble"} {
 		got, err := h.Recovery("gastown", name)
