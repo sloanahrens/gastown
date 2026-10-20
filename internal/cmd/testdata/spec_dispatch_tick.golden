@@ -3,7 +3,7 @@ candidates: 16
 dispatched: gt-c1: slung to gastown/p on claude-sonnet (seat claude-sonnet 1/2)
 dispatched: gt-fmt: slung to gastown/p on claude-sonnet (seat claude-sonnet 2/2), formula mol-deep-review
 dispatched: gt-c2: slung to gastown/p on deepseek-flash (seat deepseek-flash 1/2)
-skipped: gt-flip: not eligible (status hooked)
+skipped: gt-flip: the ready board read is stale: status hooked
 skipped: gt-box: held: container: open child gt-box.1
 skipped: gt-bad1: unshaped: ## Gate
 skipped: gt-bad2: unshaped: ## Gate

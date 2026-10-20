@@ -55,10 +55,11 @@ func (c *countingStore) GetAssignedIssue(assignee string) (*beads.Issue, error) 
 }
 
 // TestSpecDispatchTickReadsEachBeadOnce runs the golden's sixteen candidates
-// through the tick's reads over a counting store: a bead the roster already read
-// is not read again by the candidate loop, the held-work read costs one batched
-// call, and the only beads read twice are the ones slung, whose last-moment
-// re-read is meant to ask bd. The tick's decisions are the golden's (gt-u8rbh).
+// through the tick's reads over a counting store: the candidate loop reads no
+// bead, since each candidate's spec is its board row (gt-bqj8q). A bead the
+// roster already read is not read again, the held-work read costs one batched
+// call, and each bead that reaches the last-moment re-read before its sling is
+// read once there. The tick's decisions are the golden's (gt-u8rbh).
 func TestSpecDispatchTickReadsEachBeadOnce(t *testing.T) {
 	t.Parallel()
 	f := specGoldenTown()
@@ -85,8 +86,15 @@ func TestSpecDispatchTickReadsEachBeadOnce(t *testing.T) {
 	env.PerTick = 3
 	env.ShapeGate = specdispatch.ShapeGateWarn
 	read := func(id string) (*beads.Issue, error) { return store.Show(id) }
-	env.Show = func(id string) (specdispatch.Spec, error) { return showSpecWith(reads, id, read) }
-	env.ShowFresh = func(id string) (specdispatch.Spec, error) { return showSpecWith(nil, id, read) }
+	env.Show = func(id string) (specdispatch.Spec, error) {
+		t.Errorf("candidate loop read %s singly; its spec is the board row", id)
+		return specdispatch.Spec{}, errors.New("unexpected candidate read")
+	}
+	fresh := map[string]int{}
+	env.ShowFresh = func(id string) (specdispatch.Spec, error) {
+		fresh[id]++
+		return showSpecWith(nil, id, read)
+	}
 	env.Held = func(string) ([]specdispatch.HeldBead, error) {
 		return heldBeadsFrom(reads.client(store), func(string, error) {}, t.TempDir())
 	}
@@ -95,33 +103,25 @@ func TestSpecDispatchTickReadsEachBeadOnce(t *testing.T) {
 	if got, want := renderSpecTick(f.slung, r), readSpecTickGolden(t); got != want {
 		t.Fatalf("tick differs from testdata/spec_dispatch_tick.golden:\n--- got\n%s--- want\n%s", got, want)
 	}
-	slung := map[string]bool{}
 	for _, id := range f.slung {
-		slung[id] = true
+		if fresh[id] != 1 {
+			t.Errorf("slung bead %s re-read %d times before its sling, want 1", id, fresh[id])
+		}
 	}
+	// gt-c4 is the roster's read, made before the loop; every other bead the
+	// tick read is one of its last-moment re-reads.
 	for id, n := range store.shows {
-		want := 1
-		if slung[id] {
-			want = 2 // the candidate read, then the re-read before the sling
+		want := fresh[id]
+		if id == "gt-c4" {
+			want++
 		}
 		if n != want {
 			t.Errorf("bead %s read %d times, want %d", id, n, want)
 		}
 	}
-	if n := len(store.shows); n != 16 {
-		t.Errorf("read %d beads singly, want the 16 candidates", n)
-	}
-	// The held beads are read in the one batched call, and nothing the loop
-	// already read is asked for again.
+	// The held beads are read in the one batched call.
 	if len(store.multis) != 1 {
 		t.Errorf("held-work batches = %v, want one", store.multis)
-	}
-	for _, ids := range store.multis {
-		for _, id := range ids {
-			if _, singly := store.shows[id]; singly {
-				t.Errorf("bead %s read singly and again in a batch %v", id, ids)
-			}
-		}
 	}
 }
 
