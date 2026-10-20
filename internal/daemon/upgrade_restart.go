@@ -467,8 +467,9 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	// The read is upgradeHold rather than the isIdleForUpgrade predicate it is
 	// built from: the landing holds carry their own caps and are deliberately
 	// not in the predicate, and the wait's own clock is what the caps read.
-	hold := d.upgradeHold(now)
-	if d.upgradeDrainDeferred(hold) {
+	work := d.daemonWorkHold()
+	hold := d.upgradeHold(now, work)
+	if d.upgradeDrainDeferred(hold, work) {
 		// A tier sweep that began before the marker is the only hold: landing
 		// passes keep starting until it closes or hits its cap (gt-du6xl).
 		d.deferUpgradeDrain(now)
@@ -507,18 +508,21 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 // hold that was already running when the marker appeared does not add a
 // heartbeat to the wait.
 //
+// work is the caller's one daemonWorkHold read for this decision, so the hold
+// returned here and the drain decision made from it see the same daemon state.
+//
 // A maintenance gc cycle holds a restart like hard work, but bounded by the
 // gc's own clock rather than the marker's (maintenanceGCRestartCap): its
 // context comes from the daemon's, so a restart inside the cycle aborts the
 // call, and a stuck gc must not hold an install forever (gt-oucgn).
-func (d *Daemon) upgradeHold(now time.Time) *daemonWork {
+func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 	waited := now.Sub(d.upgradeWaitSince)
 
 	// daemonWorkHold is hard-first, so a hard hold is returned here, unbounded,
 	// even when soft work is in flight alongside it. The gc's clock is told
 	// whether it is, so it does not run while a hard hold is what defers the
 	// restart.
-	hold := d.daemonWorkHold()
+	hold := work
 	hardHeld := hold != nil && hold.hard
 	gcWaited, gcRunning := d.maintenanceGCUpgradeHold(now, hardHeld)
 	if hardHeld {
@@ -586,17 +590,18 @@ func (d *Daemon) noteStuckWait(now time.Time, m *restartPendingMarker, own strin
 }
 
 // upgradeDrainDeferred reports whether the wait for hold runs without the
-// drain: hold is the running tier sweep, nothing else holds the restart, and
-// the sweep began before the marker. A sweep that began after the marker keeps
+// drain: hold is the running tier sweep, nothing else holds the restart (work,
+// the daemonWorkHold read hold was decided from, is nil), and the sweep began
+// before the marker. A sweep that began after the marker keeps
 // the drain, as it always has. The restart waits on the sweep up to
 // tierSweepRestartCap on the marker's clock either way (gt-du6xl).
-func (d *Daemon) upgradeDrainDeferred(hold *daemonWork) bool {
+func (d *Daemon) upgradeDrainDeferred(hold, work *daemonWork) bool {
 	if hold == nil || hold.name != tierSweepHoldLabel {
 		return false
 	}
 	// upgradeHold names the sweep ahead of soft work in flight, so any other
 	// hold that is still running must keep the drain on.
-	if d.daemonWorkHold() != nil {
+	if work != nil {
 		return false
 	}
 	// A cycle with no recorded start runs on the marker's clock, as in
@@ -613,7 +618,7 @@ func (d *Daemon) deferUpgradeDrain(now time.Time) {
 	d.upgradeRestartPending.Store(false)
 	d.upgradeDrainLogged = false
 	if d.upgradeWaitLogged != tierSweepHoldLabel {
-		d.logger.Printf("upgrade-restart: deferring the drain while %s runs; landing passes continue until it closes or hits %s",
+		d.logger.Printf("upgrade-restart: landing passes continue while %s holds the restart; the drain starts when it closes or after %s",
 			tierSweepHoldLabel, tierSweepRestartCap)
 	}
 	d.upgradeWaitLogged = tierSweepHoldLabel
