@@ -245,8 +245,9 @@ func (f *fakeHost) hangOn(key string) chan struct{} {
 	return release
 }
 
-// awaitHung fails the test unless the command keyed by key was started and is
-// still hung. A test that scripts a hang and then passes on the fallback has
+// awaitHung returns once the command keyed by key has started and hung; a key
+// that no command ever matches blocks until the test binary's timeout fails
+// the run. A test that scripts a hang and then passes on the fallback has
 // proved nothing if the key never matched a command the adapter ran, since an
 // unscripted command also fails and also sends the caller to its fallback.
 func (f *fakeHost) awaitHung(t *testing.T, key string) {
@@ -257,11 +258,7 @@ func (f *fakeHost) awaitHung(t *testing.T, key string) {
 	if entered == nil {
 		t.Fatalf("awaitHung(%q): no hang scripted for that key", key)
 	}
-	select {
-	case <-entered:
-	case <-time.After(10 * time.Second):
-		t.Fatalf("the command %q was never started: the hang did not take effect, so the test did not exercise the probe deadline", key)
-	}
+	<-entered
 }
 
 // run answers the process queries the adapter makes (ps and lsof, from the
