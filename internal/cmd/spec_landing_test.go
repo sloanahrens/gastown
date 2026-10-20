@@ -152,7 +152,8 @@ func TestSpecDispatchHoldsABeadThatChangesBeforeTheSling(t *testing.T) {
 			t.Parallel()
 			clean := cleanSpec("gt-race", 1, "2026-09-30T11:00:00Z")
 			f := newFakeSpecTown(clean)
-			f.showSeq["gt-race"] = []specRead{{spec: clean}, {spec: tc.change(clean)}}
+			// The board row is clean; the one bd read is the re-read before the sling.
+			f.showSeq["gt-race"] = []specRead{{spec: tc.change(clean)}}
 
 			r := runSpecDispatchCycle(f.env())
 			if len(f.slung) != 0 || len(r.Dispatched) != 0 {
@@ -171,7 +172,7 @@ func TestSpecDispatchSlingsABeadTheReReadStillAdmits(t *testing.T) {
 	t.Parallel()
 	clean := cleanSpec("gt-still", 1, "2026-09-30T11:00:00Z")
 	f := newFakeSpecTown(clean)
-	f.showSeq["gt-still"] = []specRead{{spec: clean}, {spec: clean}}
+	f.showSeq["gt-still"] = []specRead{{spec: clean}}
 
 	r := runSpecDispatchCycle(f.env())
 	if len(f.slung) != 1 || f.slung[0] != "gt-still" || len(r.Dispatched) != 1 || len(r.Skipped) != 0 {
@@ -186,7 +187,7 @@ func TestSpecDispatchHoldsWhenTheReReadFails(t *testing.T) {
 	t.Parallel()
 	clean := cleanSpec("gt-blind", 1, "2026-09-30T11:00:00Z")
 	f := newFakeSpecTown(clean)
-	f.showSeq["gt-blind"] = []specRead{{spec: clean}, {err: errors.New("beads database unreachable")}}
+	f.showSeq["gt-blind"] = []specRead{{err: errors.New("beads database unreachable")}}
 
 	r := runSpecDispatchCycle(f.env())
 	if len(f.slung) != 0 || len(r.Dispatched) != 0 {

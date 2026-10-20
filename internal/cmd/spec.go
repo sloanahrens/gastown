@@ -904,12 +904,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 
 	for _, c := range read.Candidates {
 		id := c.Spec.ID
-		full, err := env.Show(id)
-		if err != nil {
-			report.Errors = append(report.Errors, fmt.Sprintf("%s: %v", id, err))
-			continue
-		}
-		// The ready board is a snapshot; re-check the fresh bead.
+		// The spec is the board row the candidate was drawn from, so the loop
+		// spends no read per candidate (gt-bqj8q). The last-moment re-read
+		// before the sling is what catches a bead that changed since the board.
+		full := c.Spec
 		if ok, why := specdispatch.Eligible(full, env.MaxPriority); !ok {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: not eligible (%s)", id, why)})
 			continue
@@ -1512,10 +1510,13 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	env := specDispatchEnv{
 		Hold: func() string { return dispatch.OperatorHold(townRoot) },
 		Candidates: func() specBoardRead {
-			return specCandidates(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
+			read := specCandidates(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
 				reads.call()
 				return specReadyBoard(rigPath)
 			})
+			return specBoardDesigns(reads, func(rig string) beads.Client {
+				return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
+			}, read)
 		},
 		Show: func(id string) (specdispatch.Spec, error) {
 			return showSpecWith(reads, id, func(id string) (*beads.Issue, error) { return showBead(townRoot, id) })
@@ -1764,6 +1765,60 @@ func specCandidates(townRoot string, maxPriority int, board specBoard) specBoard
 		read.Candidates = append(read.Candidates, specCandidate{Spec: s, Rig: rigOf[s.ID]})
 	}
 	read.LabeledFailed = len(labeled)
+	return read
+}
+
+// specBoardDesigns fills the design a board row may leave out. bd omits an
+// empty design from the ready row, so a row without one is either a bead with
+// no design or one the row dropped, and the rig's own store answers which. The
+// candidates that need it are read with one ShowMultiple per rig, never one
+// show per candidate (gt-bqj8q). A candidate whose design cannot be read is
+// dropped with its error: the design is part of the spec the lint reads, so
+// the bead waits for the next tick rather than dispatching without it.
+func specBoardDesigns(reads *specTickReads, storeFor func(rig string) beads.Client, read specBoardRead) specBoardRead {
+	var rigs []string
+	byRig := map[string][]int{}
+	for i, c := range read.Candidates {
+		if c.Spec.Design != "" {
+			continue
+		}
+		if _, seen := byRig[c.Rig]; !seen {
+			rigs = append(rigs, c.Rig)
+		}
+		byRig[c.Rig] = append(byRig[c.Rig], i)
+	}
+	dropped := map[int]bool{}
+	for _, rig := range rigs {
+		idx := byRig[rig]
+		ids := make([]string, 0, len(idx))
+		for _, i := range idx {
+			ids = append(ids, read.Candidates[i].Spec.ID)
+		}
+		issues, err := reads.client(storeFor(rig)).ShowMultiple(ids)
+		for _, i := range idx {
+			id := read.Candidates[i].Spec.ID
+			if issue := issues[id]; issue != nil {
+				read.Candidates[i].Spec.Design = issue.Design
+				continue
+			}
+			dropped[i] = true
+			reason := "not found"
+			if err != nil {
+				reason = firstErrLine(err)
+			}
+			read.Errors = append(read.Errors, fmt.Sprintf("%s: cannot read design: %s", id, reason))
+		}
+	}
+	if len(dropped) == 0 {
+		return read
+	}
+	kept := make([]specCandidate, 0, len(read.Candidates)-len(dropped))
+	for i, c := range read.Candidates {
+		if !dropped[i] {
+			kept = append(kept, c)
+		}
+	}
+	read.Candidates = kept
 	return read
 }
 
