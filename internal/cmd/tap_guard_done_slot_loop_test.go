@@ -65,6 +65,10 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"zsh for in-list, short-form gt done", "for f in a b; gt done", true},
 		{"zsh for short form, gt done after an && list", "for f (a b) make lint && gt done", true},
 		{"zsh for short form slot poll", "for r (gastown beads) gt slot status", true},
+		{"zsh for paren list do block closed", "for f (a b) do gt done; done", true},
+		{"zsh for in-list gate after a pipe inside a substitution", "for f in $(git diff | head -3); gt done", true},
+		{"zsh for paren list gate after a pipe inside a substitution", "for f ($(git diff | head -3)) gt done", true},
+		{"zsh for paren list with a substitution before the gate", "for f (a $(seq 3) b) gt done", true},
 
 		// A keyword that follows then/do/else or an opening brace or paren
 		// starts a loop as surely as one that starts the line (deep-review
@@ -127,6 +131,9 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		{"zsh for in-list braced, closed before a sanctioned gt done", "for f in a b; { echo hi }; gt done", false},
 		{"zsh for short form with no gate command", "for f (a b) echo hi; gt done", false},
 		{"zsh for in-list short form with no gate command", "for f in a b; echo hi; gt done", false},
+		{"zsh for in-list with no body after the list", "for f in a b;", false},
+		{"zsh for paren list with no body", "for f (a b)", false},
+		{"zsh for paren list never closed", "for f (a b gt done", false},
 		{"noglob with a sanctioned gt done", "noglob gt done", false},
 		{"noglob repeat that never runs the gate", "noglob repeat 3 gofmt -l", false},
 		{"seq with no gate command", "seq 1 5", false},
@@ -178,8 +185,8 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 60 {
-		t.Errorf("blocked %d of %d cases, want exactly 60", blocked, len(tests))
+	if blocked != 64 {
+		t.Errorf("blocked %d of %d cases, want exactly 64", blocked, len(tests))
 	}
 }
 
