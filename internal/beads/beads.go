@@ -345,6 +345,10 @@ type Issue struct {
 	DependencyCount int `json:"dependency_count,omitempty"`
 	DependentCount  int `json:"dependent_count,omitempty"`
 	BlockedByCount  int `json:"blocked_by_count,omitempty"`
+	// DependentCountRead is set by the ready-board decode when the row carried
+	// dependent_count, so a zero there is a count and not a missing key
+	// (gt-sqx55). It is not part of the JSON.
+	DependentCountRead bool `json:"-"`
 
 	// Detailed dependency info from show output
 	Dependencies []IssueDep `json:"dependencies,omitempty"`

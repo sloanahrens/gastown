@@ -165,3 +165,95 @@ func TestSpecTickCandidateLoopReadsNothing(t *testing.T) {
 		}
 	}
 }
+
+// A ready-board row that counts zero dependents is told apart from one that
+// omits the count: only the zero marks the candidate childless, so only it
+// skips the children read (gt-sqx55).
+func TestSpecFromBoardRowMarksOnlyAZeroDependentCount(t *testing.T) {
+	t.Parallel()
+	rows := `[{"id":"gt-zero","issue_type":"task","status":"open","dependent_count":0},` +
+		`{"id":"gt-absent","issue_type":"task","status":"open"},` +
+		`{"id":"gt-two","issue_type":"task","status":"open","dependent_count":2}]`
+	issues, err := parseSpecReady([]byte(rows))
+	if err != nil {
+		t.Fatalf("parseSpecReady: %v", err)
+	}
+	want := map[string]bool{"gt-zero": true, "gt-absent": false, "gt-two": false}
+	if len(issues) != len(want) {
+		t.Fatalf("parsed %d rows, want %d", len(issues), len(want))
+	}
+	for _, issue := range issues {
+		if got := specFromIssue(issue).NoDependents; got != want[issue.ID] {
+			t.Errorf("%s: NoDependents = %v, want %v", issue.ID, got, want[issue.ID])
+		}
+	}
+	if issues[2].DependentCount != 2 {
+		t.Errorf("gt-two DependentCount = %d, want the row's 2", issues[2].DependentCount)
+	}
+
+	// The envelope form carries the count the same way.
+	env := `{"issues":[{"id":"gt-env","issue_type":"task","status":"open","dependent_count":0}]}`
+	enveloped, err := parseSpecReady([]byte(env))
+	if err != nil || len(enveloped) != 1 || !specFromIssue(enveloped[0]).NoDependents {
+		t.Errorf("enveloped zero count = %v, %v; want one childless row", enveloped, err)
+	}
+
+	// A bead read by id, not off the board, never claims a zero count.
+	if specFromIssue(&beads.Issue{ID: "gt-show"}).NoDependents {
+		t.Error("a bead with no board row reads as childless")
+	}
+}
+
+// The children read runs for every candidate whose board row counts a
+// dependent or omits the count, and for no candidate whose row counts zero.
+// A parent that still has an open child is held by the read it gets, so the
+// read is not skipped where it matters (gt-sqx55).
+func TestSpecTickReadsChildrenOnlyWhereTheBoardCountsDependents(t *testing.T) {
+	t.Parallel()
+	childless := []string{"gt-k1", "gt-k2", "gt-k3"}
+	var specs []specdispatch.Spec
+	for _, id := range childless {
+		s := cleanSpec(id, 2, "2026-09-29T10:00:00Z")
+		s.NoDependents = true
+		specs = append(specs, s)
+	}
+	specs = append(specs,
+		cleanSpec("gt-parent", 2, "2026-09-29T10:00:00Z"),
+		cleanSpec("gt-unknown", 2, "2026-09-29T10:00:00Z"),
+	)
+	f := newFakeSpecTown(specs...)
+	f.children["gt-parent"] = []specdispatch.Child{{ID: "gt-parent.1", Status: "open"}}
+	env := f.env()
+	env.ShapeGate = specdispatch.ShapeGateWarn
+	env.PerTick = 10
+	children := env.Children
+	childReads := map[string]int{}
+	env.Children = func(id string) ([]specdispatch.Child, error) {
+		childReads[id]++
+		return children(id)
+	}
+	r := runSpecDispatchCycle(env)
+
+	for _, id := range childless {
+		if n := childReads[id]; n != 0 {
+			t.Errorf("%s: children read %d times, want none for a row that counts zero dependents", id, n)
+		}
+	}
+	for _, id := range []string{"gt-parent", "gt-unknown"} {
+		if n := childReads[id]; n != 1 {
+			t.Errorf("%s: children read %d times, want 1", id, n)
+		}
+	}
+	dispatched := map[string]bool{}
+	for _, d := range r.Dispatched {
+		dispatched[d.Bead] = true
+	}
+	if dispatched["gt-parent"] {
+		t.Error("gt-parent was slung past its open child")
+	}
+	for _, id := range append(childless, "gt-unknown") {
+		if !dispatched[id] {
+			t.Errorf("%s was not slung, want it dispatched", id)
+		}
+	}
+}
