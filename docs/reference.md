@@ -1247,7 +1247,7 @@ The best F1 is taken over every distinct value as a cut, predicting yes at or
 above it; a tie keeps the higher cut. `--json` names the rule that labeled each
 line in its `lines` array.
 
-Two batteries are registered. The `fixture` battery reads
+Three batteries are registered. The `fixture` battery reads
 `.runtime/jev/fixture.jsonl` with labels from `fixture-labels.json`, and exists
 so tests can drive the command end to end. No live battery reads it.
 
@@ -1283,6 +1283,45 @@ each item names. An item's labels come from the first rule that applies:
 An item still standing with no disposition is unlabeled, as is one whose life
 the queue files no longer hold. A bead read that fails for any reason other
 than not-found fails the report.
+
+The `finding` battery is described next.
+
+##### Finding adapter (`--battery finding`)
+
+`internal/jev/scorecard/finding.go` scores the log `gt jev dedupe` writes
+(`.runtime/jev/dedupe.jsonl`). Each line is labeled from its finding bead, read
+through the beads store, by the bead's close reason (case-insensitive). A bead
+still open, or no longer in the store, leaves the line logged but unlabeled.
+`--json` names the rule as the close reason's class: `close:landed`,
+`close:no-changes`, `close:superseded-duplicate-wontfix` or, when none of those
+applies, `close:names-candidate`.
+
+| Close reason | Labels |
+|--------------|--------|
+| starts with `landed` | `fix_worthy` true, `report_only` false, `any_duplicate` false |
+| starts with `no-changes` | `fix_worthy` false, `report_only` true |
+| says `superseded`, `duplicate`, `dup of`, `dupe`, `wontfix`, `won't fix`, `wont fix` or `will not fix` | `fix_worthy` false |
+| names a candidate the line offered, as a whole bead id | `any_duplicate` true |
+| any other reason | no label |
+
+`any_duplicate` is false only for a `landed` or `no-changes` reason that names
+no candidate and has no duplicate wording. A reason that says duplicate or
+superseded without naming an offered candidate leaves it unlabeled, because the
+duplicate may be one the search did not offer.
+
+The `duplicate` Choice is labeled whenever `any_duplicate` is. It is correct
+when it chose a candidate the reason names, or `none` when the reason names no
+candidate. The adapter reads the Choice's chosen option as its positive option
+and its confidence as the probability, so the question's precision is how often
+the chosen option was right and its calibration bands read confidence against
+that rate.
+
+The `severity` Score is labeled only for a `landed` reason that carries a
+`landed_commit:` (or `commit_sha:`) line. The label is the commit's lines added
+plus removed against its first parent: under 50 is false, over 300 is true, and
+50 to 300 is unlabeled. A commit the rig repo no longer holds leaves it
+unlabeled; a repo that cannot be read fails the report. `test_only` has no
+label.
 
 #### Dispatch battery (`gt jev dispatch`)
 

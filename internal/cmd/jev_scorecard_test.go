@@ -134,11 +134,11 @@ func TestScorecardSinceNarrowsItems(t *testing.T) {
 func TestScorecardUnknownBatteryListsRegistered(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
-	err := jevScorecardWithFlags(context.Background(), &out, t.TempDir(), "finding", "", false, time.Now())
+	err := jevScorecardWithFlags(context.Background(), &out, t.TempDir(), "no-such-battery", "", false, time.Now())
 	if err == nil {
 		t.Fatal("an unknown battery exited cleanly")
 	}
-	if !strings.Contains(err.Error(), `"finding"`) || !strings.Contains(err.Error(), "fixture") {
+	if !strings.Contains(err.Error(), `"no-such-battery"`) || !strings.Contains(err.Error(), "finding, fixture") {
 		t.Errorf("error %q does not name the battery and list the registered ones", err)
 	}
 }
