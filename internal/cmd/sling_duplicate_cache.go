@@ -47,12 +47,26 @@ var specDetailCache atomic.Pointer[duplicateDetailCache]
 // only sign of an edge change the list row carries. It moves when an edge is
 // added or removed; an edge swapped for another between two ticks leaves it
 // the same, and the entry then lasts until the bead is next edited.
+//
+// An entry written before DepCount existed has no dep_count, which reads as 0.
+// It is told apart by its edges: the count includes every edge the kept blocking
+// ones came from, so an entry with edges and a count of 0 is one of those, and
+// current treats it as stale rather than as a bead whose edges were all removed.
 type cachedDetail struct {
 	UpdatedAt string      `json:"updated_at"`
 	DepCount  int         `json:"dep_count,omitempty"`
 	Design    string      `json:"design,omitempty"`
 	Notes     string      `json:"notes,omitempty"`
 	Deps      []cachedDep `json:"deps,omitempty"`
+}
+
+// current reports whether the entry still describes the bead row: the same
+// updated_at and dependency count, and a count that covers the edges kept.
+func (e cachedDetail) current(row *beads.Issue) bool {
+	if row.UpdatedAt == "" || e.UpdatedAt != row.UpdatedAt || e.DepCount != row.DependencyCount {
+		return false
+	}
+	return e.DepCount > 0 || len(e.Deps) == 0
 }
 
 // cachedDep is a blocking dependency edge, without the target's status.
@@ -160,7 +174,7 @@ func (c *duplicateDetailCache) read(beadsDir string, store beads.Client, rows []
 			continue
 		}
 		entry, ok := entries[row.ID]
-		if !ok || row.UpdatedAt == "" || entry.UpdatedAt != row.UpdatedAt || entry.DepCount != row.DependencyCount {
+		if !ok || !entry.current(row) {
 			missing = append(missing, row)
 			continue
 		}
