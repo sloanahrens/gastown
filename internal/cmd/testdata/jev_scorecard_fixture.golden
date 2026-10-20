@@ -1,0 +1,32 @@
+Scorecard for battery fixture, all time
+Items: 4 parsed, 1 line(s) skipped
+
+needs (noul)
+  logged 4, labeled 3, positives 1, negatives 2, base rate 33.3%
+  at 0.5: precision 50.0%, recall 100.0%
+  best F1 1.000 at threshold 0.900
+  calibration (band, labeled n, mean value, label rate):
+    0.0-0.2      0  n/a  n/a
+    0.2-0.4      1  0.200  0.000
+    0.4-0.6      0  n/a  n/a
+    0.6-0.8      1  0.700  0.000
+    0.8-1.0      1  0.900  1.000
+  verdict: not-yet
+
+route (choice)
+  logged 4, labeled 3, positives 1, negatives 2, base rate 33.3%
+  at the chosen option: precision 50.0%, recall 100.0%
+  best F1 1.000 at threshold 0.800
+  calibration (band, labeled n, mean value, label rate):
+    0.0-0.2      0  n/a  n/a
+    0.2-0.4      1  0.300  0.000
+    0.4-0.6      0  n/a  n/a
+    0.6-0.8      1  0.600  0.000
+    0.8-1.0      1  0.800  1.000
+  verdict: not-yet
+
+urgency (score)
+  logged 4, labeled 3, positives 1, negatives 2, base rate 33.3%
+  mean score: positives 3.000, negatives 0.500
+  best F1 1.000 at threshold 3.000
+  verdict: not-yet
