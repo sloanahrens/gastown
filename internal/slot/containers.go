@@ -233,12 +233,14 @@ func debrisLogger(w io.Writer) func(ContainerVerdict) {
 // A container is live while it is younger than window, and after that only if
 // a ryuk reaper for its session is still running — a reaper's lifetime is its
 // session's, which is why the town's debris criterion is "older than the
-// window AND its reaper is gone" (gt-ul1k). A reaper older than the window is
-// itself debris when no container of its session remains: it is the last thing
-// to exit a session, so one that outlived its session leaked, and leaving it
-// would reproduce exactly the deadlock this classification exists to clear.
-// While a container of its session remains, its age says nothing: it started
-// with the session, so it is as old as the session's containers (gt-2gjwu).
+// window AND its reaper is gone" (gt-ul1k). A reaper starts with its session,
+// so past the window it stays live while a container of its session remains,
+// and so does that container (gt-2gjwu). That mutual support stops at four
+// windows: past that the session is debris whatever its members' ages, so a
+// crashed suite's container-and-reaper pair still clears by age instead of
+// keeping each other live forever (gt-xppn7). A reaper of any age with no
+// container of its session left is debris: it is the last thing to exit a
+// session, so one that outlived its session leaked.
 //
 // Owner labels outrank all of that (gt-ehlga, see owner_labels.go): a
 // container whose labeled owner process on this host is certainly gone is
@@ -255,6 +257,12 @@ func (p ownerProbe) classify(containers []GateContainer, now time.Time, window t
 		window = StaleContainerWindow
 	}
 
+	// sessionWindow bounds how long a container and its session's reaper may
+	// keep each other live after the container window has passed: long enough
+	// that a running suite is never reaped mid-run, finite so that a leaked
+	// pair still clears by age (gt-xppn7).
+	sessionWindow := 4 * window
+
 	// hasContainer marks the sessions that still have a non-reaper container.
 	hasContainer := make(map[string]bool)
 	for _, c := range containers {
@@ -268,7 +276,8 @@ func (p ownerProbe) classify(containers []GateContainer, now time.Time, window t
 	// liveReapers maps session id to the reaper keeping that session alive. A
 	// reaper starts with its session, so it is at least as old as that session's
 	// containers: past the window it is live while a container of its session
-	// remains, and only a lone old reaper is a leak.
+	// remains, up to the session window. Past that, or with no container of its
+	// session left, it is a leak.
 	liveReapers := make(map[string]string)
 	for _, c := range containers {
 		if !c.IsReaper() {
@@ -278,7 +287,7 @@ func (p ownerProbe) classify(containers []GateContainer, now time.Time, window t
 		if id == "" {
 			continue
 		}
-		if age, ok := c.Age(now); ok && (age < window || hasContainer[id]) {
+		if age, ok := c.Age(now); ok && (age < window || (hasContainer[id] && age < sessionWindow)) {
 			liveReapers[id] = c.Display()
 		}
 	}
@@ -297,10 +306,14 @@ func (p ownerProbe) classify(containers []GateContainer, now time.Time, window t
 		case age < window:
 			out = append(out, ContainerVerdict{Container: c, Verdict: VerdictLive,
 				Reason: fmt.Sprintf("age %s is under the %s staleness window", age.Round(time.Second), window)})
-		case c.IsReaper() && hasContainer[c.SessionID()]:
+		case c.IsReaper() && hasContainer[c.SessionID()] && age < sessionWindow:
 			out = append(out, ContainerVerdict{Container: c, Verdict: VerdictLive,
 				Reason: fmt.Sprintf("reaper age %s exceeds the %s staleness window but a container of its session is still present",
 					age.Round(time.Second), window)})
+		case c.IsReaper() && hasContainer[c.SessionID()]:
+			out = append(out, ContainerVerdict{Container: c, Verdict: VerdictDebris,
+				Reason: fmt.Sprintf("reaper age %s exceeds the %s session window with a container of its session still present, so the session leaked",
+					age.Round(time.Second), sessionWindow)})
 		case c.IsReaper():
 			out = append(out, ContainerVerdict{Container: c, Verdict: VerdictDebris,
 				Reason: fmt.Sprintf("reaper age %s exceeds the %s staleness window, so the session it reaped for is over",
