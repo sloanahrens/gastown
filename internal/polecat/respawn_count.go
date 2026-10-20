@@ -53,6 +53,20 @@ func emptyBeadRespawnState() *beadRespawnState {
 	return &beadRespawnState{Beads: make(map[string]*beadRespawnRecord)}
 }
 
+// corruptRespawnStateError is a state file that was read but does not parse, as
+// against one that could not be read: only the first is a file `gt sling
+// respawn-reset` may move aside (gt-jw3ed).
+type corruptRespawnStateError struct {
+	path string
+	err  error
+}
+
+func (e *corruptRespawnStateError) Error() string {
+	return fmt.Sprintf("parsing respawn state %s: %v", e.path, e.err)
+}
+
+func (e *corruptRespawnStateError) Unwrap() error { return e.err }
+
 // readBeadRespawnStateFile returns the state in path, or nil when the file is
 // not there. A file that cannot be read or parsed is an error, an empty state
 // being what re-arms every bead's respawn budget at once — the town-wide
@@ -67,7 +81,7 @@ func readBeadRespawnStateFile(path string) (*beadRespawnState, error) {
 	}
 	var state beadRespawnState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil, fmt.Errorf("parsing respawn state %s: %w", path, err)
+		return nil, &corruptRespawnStateError{path: path, err: err}
 	}
 	if state.Beads == nil {
 		state.Beads = make(map[string]*beadRespawnRecord)
@@ -79,7 +93,8 @@ func readBeadRespawnStateFile(path string) (*beadRespawnState, error) {
 // witness/ file while it is still there: a bead must never read as never
 // respawned just because the read happened before the migration's first write.
 // A missing file is an empty state; one that cannot be read or parsed is an
-// error (gt-u3hc1).
+// error (gt-u3hc1). A legacy file that does not parse names the command that
+// moves it aside, the only way out short of deleting it by hand (gt-jw3ed).
 func loadBeadRespawnState(townRoot string) (*beadRespawnState, error) {
 	state, err := readBeadRespawnStateFile(beadRespawnStateFile(townRoot))
 	if err != nil {
@@ -90,10 +105,35 @@ func loadBeadRespawnState(townRoot string) (*beadRespawnState, error) {
 	}
 	legacy, err := readBeadRespawnStateFile(legacyBeadRespawnStateFile(townRoot))
 	if err != nil {
+		if corruptLegacyRespawnState(townRoot, err) != nil {
+			return nil, fmt.Errorf("%w; `gt sling respawn-reset <bead-id>` moves it aside", err)
+		}
 		return nil, err
 	}
 	mergeBeadRespawnStates(state, legacy)
 	return state, nil
+}
+
+// corruptLegacyRespawnState returns err's corrupt-file error when it is the
+// legacy witness/ file that failed to parse, nil for anything else.
+func corruptLegacyRespawnState(townRoot string, err error) *corruptRespawnStateError {
+	var corrupt *corruptRespawnStateError
+	if errors.As(err, &corrupt) && corrupt.path == legacyBeadRespawnStateFile(townRoot) {
+		return corrupt
+	}
+	return nil
+}
+
+// quarantineLegacyRespawnState renames the unparseable legacy file aside, next
+// to itself, and returns where it went. The file is kept rather than deleted:
+// its counts are unreadable but an operator may still recover them by hand.
+func quarantineLegacyRespawnState(townRoot string) (string, error) {
+	legacy := legacyBeadRespawnStateFile(townRoot)
+	aside := fmt.Sprintf("%s.corrupt-%s", legacy, time.Now().UTC().Format("20060102T150405.000000000Z"))
+	if err := os.Rename(legacy, aside); err != nil {
+		return "", fmt.Errorf("moving corrupt respawn state aside: %w", err)
+	}
+	return aside, nil
 }
 
 // mergeBeadRespawnStates folds src into dst per bead, keeping the larger count
@@ -277,6 +317,11 @@ func RecordBeadRespawn(workDir, beadID string) (int, error) {
 
 // ResetBeadRespawnCount resets the respawn counter for beadID to zero.
 // Used by `gt sling respawn-reset` to allow re-dispatch after investigation.
+//
+// It is the one path that moves a corrupt legacy witness/ file aside and goes
+// on: every other caller refuses on it, which blocks every bead until the file
+// is gone, so an operator who runs the reset has chosen to lose its counts.
+// A corrupt file at the live location is still refused (gt-jw3ed).
 func ResetBeadRespawnCount(workDir, beadID string) error {
 	respawnMu.Lock()
 	defer respawnMu.Unlock()
@@ -290,6 +335,14 @@ func ResetBeadRespawnCount(workDir, beadID string) error {
 	defer unlock()
 
 	state, err := loadBeadRespawnState(townRoot)
+	if corrupt := corruptLegacyRespawnState(townRoot, err); corrupt != nil {
+		aside, qerr := quarantineLegacyRespawnState(townRoot)
+		if qerr != nil {
+			return fmt.Errorf("%w; %v", err, qerr)
+		}
+		fmt.Fprintf(os.Stderr, "Warning: %v; moved it to %s\n", corrupt, aside)
+		state, err = loadBeadRespawnState(townRoot)
+	}
 	if err != nil {
 		return err
 	}

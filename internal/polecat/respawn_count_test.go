@@ -2,8 +2,11 @@ package polecat
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -289,32 +292,42 @@ func TestRespawnCorruptStateDeletesNothing(t *testing.T) {
 		}}
 	}
 
-	cases := map[string]func(t *testing.T, townRoot string){
-		"corrupt new file": func(t *testing.T, townRoot string) {
-			if err := os.MkdirAll(filepath.Dir(respawnStatePath(townRoot)), 0755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(respawnStatePath(townRoot), []byte(`{"beads":{"bead-1":{"count":3`), 0600); err != nil {
-				t.Fatal(err)
-			}
-			writeRespawnStateFile(t, legacyRespawnStatePath(townRoot), newState())
+	// resetRefuses: the reset moves a corrupt legacy file aside, so it is the
+	// one path that does not refuse on it (gt-jw3ed).
+	cases := map[string]struct {
+		plant        func(t *testing.T, townRoot string)
+		resetRefuses bool
+	}{
+		"corrupt new file": {
+			plant: func(t *testing.T, townRoot string) {
+				if err := os.MkdirAll(filepath.Dir(respawnStatePath(townRoot)), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(respawnStatePath(townRoot), []byte(`{"beads":{"bead-1":{"count":3`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				writeRespawnStateFile(t, legacyRespawnStatePath(townRoot), newState())
+			},
+			resetRefuses: true,
 		},
-		"corrupt legacy file": func(t *testing.T, townRoot string) {
-			writeRespawnStateFile(t, respawnStatePath(townRoot), newState())
-			if err := os.MkdirAll(filepath.Dir(legacyRespawnStatePath(townRoot)), 0755); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(legacyRespawnStatePath(townRoot), []byte(`{"beads":{"bead-1":{"count":3`), 0600); err != nil {
-				t.Fatal(err)
-			}
+		"corrupt legacy file": {
+			plant: func(t *testing.T, townRoot string) {
+				writeRespawnStateFile(t, respawnStatePath(townRoot), newState())
+				if err := os.MkdirAll(filepath.Dir(legacyRespawnStatePath(townRoot)), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(legacyRespawnStatePath(townRoot), []byte(`{"beads":{"bead-1":{"count":3`), 0600); err != nil {
+					t.Fatal(err)
+				}
+			},
 		},
 	}
 
-	for name, corrupt := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
-			corrupt(t, townRoot)
+			tc.plant(t, townRoot)
 			before := map[string][]byte{}
 			for _, path := range []string{respawnStatePath(townRoot), legacyRespawnStatePath(townRoot)} {
 				data, err := os.ReadFile(path)
@@ -330,8 +343,12 @@ func TestRespawnCorruptStateDeletesNothing(t *testing.T) {
 			if _, err := RecordBeadRespawn(townRoot, "bead-1"); err == nil {
 				t.Error("RecordBeadRespawn = nil error, want a refusal")
 			}
-			if err := ResetBeadRespawnCount(townRoot, "bead-1"); err == nil {
-				t.Error("ResetBeadRespawnCount = nil error, want a refusal")
+			// The reset's recovery from a corrupt legacy file is asserted in
+			// TestResetBeadRespawnCountQuarantinesCorruptLegacyFile.
+			if tc.resetRefuses {
+				if err := ResetBeadRespawnCount(townRoot, "bead-1"); err == nil {
+					t.Error("ResetBeadRespawnCount = nil error, want a refusal")
+				}
 			}
 
 			for path, want := range before {
@@ -344,6 +361,61 @@ func TestRespawnCorruptStateDeletesNothing(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// TestResetBeadRespawnCountQuarantinesCorruptLegacyFile: a truncated legacy
+// file blocks every bead and every writer refuses on it, so `gt sling
+// respawn-reset` is the way out: it moves the file aside, resets the bead and
+// leaves the live counts of the others alone. The refusal on the way in names
+// that command (gt-jw3ed).
+func TestResetBeadRespawnCountQuarantinesCorruptLegacyFile(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRespawnStateFile(t, respawnStatePath(townRoot), &beadRespawnState{Beads: map[string]*beadRespawnRecord{
+		"bead-1": {BeadID: "bead-1", Count: config.DefaultRecoveryMaxBeadRespawns},
+		"bead-2": {BeadID: "bead-2", Count: 2},
+	}})
+	truncated := []byte(`{"beads":{"bead-1":{"count":3`)
+	legacy := legacyRespawnStatePath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(legacy), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacy, truncated, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadBeadRespawnState(townRoot)
+	if err == nil || !strings.Contains(err.Error(), "gt sling respawn-reset") {
+		t.Errorf("loadBeadRespawnState error = %v, want one naming gt sling respawn-reset", err)
+	}
+	if !ShouldBlockRespawn(townRoot, "bead-3") {
+		t.Fatal("ShouldBlockRespawn = false on a corrupt legacy file, want true until the reset runs")
+	}
+
+	if err := ResetBeadRespawnCount(townRoot, "bead-1"); err != nil {
+		t.Fatalf("ResetBeadRespawnCount on a corrupt legacy file: %v", err)
+	}
+
+	if _, err := os.Stat(legacy); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("corrupt legacy file still in place: %v", err)
+	}
+	aside, err := filepath.Glob(legacy + ".corrupt-*")
+	if err != nil || len(aside) != 1 {
+		t.Fatalf("quarantined files = %v (err %v), want exactly one", aside, err)
+	}
+	if got, err := os.ReadFile(aside[0]); err != nil || string(got) != string(truncated) {
+		t.Errorf("quarantined file = %q (err %v), want the original bytes", got, err)
+	}
+	if ShouldBlockRespawn(townRoot, "bead-1") {
+		t.Error("ShouldBlockRespawn(bead-1) = true after the reset, want false")
+	}
+	state, err := loadBeadRespawnState(townRoot)
+	if err != nil {
+		t.Fatalf("loadBeadRespawnState after the reset: %v", err)
+	}
+	if rec := state.Beads["bead-2"]; rec == nil || rec.Count != 2 {
+		t.Errorf("bead-2 record = %+v, want its count of 2 kept", rec)
 	}
 }
 
