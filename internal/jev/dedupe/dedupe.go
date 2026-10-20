@@ -119,7 +119,9 @@ type Summary struct {
 // each is logged and the cursor advanced before the next, so a pass that is
 // stopped partway never asks about a finding twice. A finding whose question
 // was cut short by ctx is neither logged nor passed: the next pass asks it
-// again. Run returns ErrBusy when another pass holds the run lock.
+// again. A finding whose answer was paid for is passed even when its log line
+// cannot be written, so the next pass does not bill it again. Run returns
+// ErrBusy when another pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
 	release, err := lockRun(p.CursorPath)
@@ -160,6 +162,12 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			return sum, err
 		}
 		if err := battery.Append(p.LogPath, line); err != nil {
+			// The answer is paid for. Advance the cursor before reporting,
+			// so the next pass does not ask, and bill, the same finding
+			// again; the lost log line is the lesser failure.
+			if cerr := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: beads.ParseIssueTime(f.CreatedAt), ID: f.ID}); cerr != nil {
+				return sum, errors.Join(err, cerr)
+			}
 			return sum, err
 		}
 		sum.Asked++
@@ -218,11 +226,11 @@ func after(cur battery.Cursor, created time.Time, id string) bool {
 // ask builds the one line a finding earns. Every finding is asked the battery
 // of Nouls and the severity Score, and the duplicate Choice too when the
 // search offered a candidate. A failed search, a failed call, an unusable
-// answer and a low-confidence answer all log none, so a finding is asked about
-// once whatever Jev does; the line's outcome says which of them it was. The
-// one exception is a canceled ctx: a failure that ctx's end caused says
-// nothing about the finding, so ask returns ctx's error and no line, and the
-// next pass asks again.
+// answer, a low-confidence answer and a candidate set that could not be read
+// all log none, so a finding is asked about once whatever Jev does; the
+// line's outcome says which of them it was. The one exception is a canceled
+// ctx: a failure that ctx's end caused says nothing about the finding, so ask
+// returns ctx's error and no line, and the next pass asks again.
 func (p *Pass) ask(ctx context.Context, f *beads.Issue) (Line, error) {
 	line := Line{
 		TS:                p.now(),
@@ -236,8 +244,9 @@ func (p *Pass) ask(ctx context.Context, f *beads.Issue) (Line, error) {
 		return Line{}, ctx.Err()
 	}
 	var cands []*beads.Issue
+	var unreadable bool
 	if searchErr == nil {
-		cands = p.candidates(f, hits)
+		cands, unreadable = p.candidates(f, hits)
 	}
 	for _, c := range cands {
 		line.CandidatesOffered = append(line.CandidatesOffered, c.ID)
@@ -261,6 +270,9 @@ func (p *Pass) ask(ctx context.Context, f *beads.Issue) (Line, error) {
 	case err != nil:
 		line.Outcome = OutcomeAskFailed
 		return line, nil
+	case len(cands) == 0 && unreadable:
+		line.Outcome = OutcomeReadFailed
+		return line, nil
 	case len(cands) == 0:
 		line.Outcome = OutcomeNoCandidates
 		return line, nil
@@ -283,11 +295,12 @@ func (p *Pass) ask(ctx context.Context, f *beads.Issue) (Line, error) {
 // candidates keeps up to maxCandidates beads from the hits, in rank order.
 // It drops the finding itself, any bead created after the finding, and any
 // hit that matched on something other than the title or description, such as
-// a comment or a close reason. A bead it cannot read is dropped too.
-func (p *Pass) candidates(f *beads.Issue, hits []Hit) []*beads.Issue {
+// a comment or a close reason. A bead it cannot read is dropped too, and
+// unreadable reports that one was, so the pass can tell a failed read from a
+// search that found nothing.
+func (p *Pass) candidates(f *beads.Issue, hits []Hit) (out []*beads.Issue, unreadable bool) {
 	created := beads.ParseIssueTime(f.CreatedAt)
 	seen := map[string]bool{f.ID: true}
-	var out []*beads.Issue
 	for _, h := range hits {
 		if len(out) == maxCandidates {
 			break
@@ -298,15 +311,20 @@ func (p *Pass) candidates(f *beads.Issue, hits []Hit) []*beads.Issue {
 		seen[h.ID] = true
 		b, err := p.Beads.Show(h.ID)
 		if err != nil || b == nil {
+			unreadable = true
 			continue
 		}
 		bc := beads.ParseIssueTime(b.CreatedAt)
-		if bc.IsZero() || bc.After(created) {
+		if bc.IsZero() {
+			unreadable = true
+			continue
+		}
+		if bc.After(created) {
 			continue
 		}
 		out = append(out, b)
 	}
-	return out
+	return out, unreadable
 }
 
 // askJev asks the battery about one finding. A 429 gets one retry, after the
