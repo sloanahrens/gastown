@@ -129,28 +129,42 @@ func recoveryBatchBound(polecats int) time.Duration {
 }
 
 // rigPolecats counts the rig's polecat seats for the batch bound. A rig whose
-// seats cannot be listed counts as none: the bound is only a deadline, and the
-// sweep's own read decides the verdicts.
-func (h *patrolScanHost) rigPolecats(rig string) int {
+// seats cannot be listed has no count to size a bound by, and says so in the
+// error.
+func (h *patrolScanHost) rigPolecats(rig string) (int, error) {
 	names, err := h.Polecats(rig)
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return len(names)
+	return len(names), nil
 }
 
 func (h *patrolScanHost) runRecoveryBatch(rig string) reapBatch {
 	if h.d.gtPath == "" {
 		return reapBatch{err: fmt.Errorf("%w: no gt binary resolved", errNoDaemonStarter)}
 	}
-	polecats := h.rigPolecats(rig)
+	polecats, err := h.rigPolecats(rig)
+	if err != nil {
+		// A bound sized for no seats would be the shortest one and kill a
+		// sweep over a large rig; with the seat count unknown the sweep gets
+		// the longest bound, and the log says why.
+		if h.d.logger != nil {
+			h.d.logger.Printf("patrol_scan: %s: reap: listing polecat seats for the batch bound failed, using the %s cap: %v",
+				rig, patrolScanRecoveryBatchCap, err)
+		}
+		return h.runRecoveryBatchWithin(rig, unknownPolecats, patrolScanRecoveryBatchCap)
+	}
 	return h.runRecoveryBatchWithin(rig, polecats, recoveryBatchBound(polecats))
 }
 
+// unknownPolecats is the seat count of a rig whose seats could not be listed.
+const unknownPolecats = -1
+
 // runRecoveryBatchWithin runs the rig's sweep under bound, the deadline
-// recoveryBatchBound gave a rig of polecats seats. A run the deadline kills
-// names its elapsed time, bound and seat count in its error, which is the line
-// the reap pass writes for every seat the batch could not answer.
+// recoveryBatchBound gave a rig of polecats seats (unknownPolecats when the
+// seats could not be listed). A run the deadline kills names its elapsed time,
+// bound and seat count in its error, which is the line the reap pass writes for
+// every seat the batch could not answer.
 func (h *patrolScanHost) runRecoveryBatchWithin(rig string, polecats int, bound time.Duration) reapBatch {
 	ctx, cancel := context.WithTimeout(h.d.ctxOrBackground(), bound)
 	defer cancel()
@@ -162,9 +176,13 @@ func (h *patrolScanHost) runRecoveryBatchWithin(rig string, polecats int, bound 
 	started := time.Now()
 	stdout, stderr, err := h.d.runCmd(cmd)
 	if err != nil {
-		if ctx.Err() == context.DeadlineExceeded {
-			return reapBatch{err: fmt.Errorf("gt polecat check-recovery-batch %s: killed after %s at the %s bound for %d polecats: %w: %s",
-				rig, time.Since(started).Round(time.Second), bound, polecats, err, lastLine(string(stderr)))}
+		if killedByDeadline(ctx, err) {
+			seats := fmt.Sprintf("%d polecats", polecats)
+			if polecats == unknownPolecats {
+				seats = "an unlisted number of polecats"
+			}
+			return reapBatch{err: fmt.Errorf("gt polecat check-recovery-batch %s: killed after %s at the %s bound for %s: %w: %s",
+				rig, time.Since(started).Round(time.Second), bound, seats, err, lastLine(string(stderr)))}
 		}
 		return reapBatch{err: fmt.Errorf("gt polecat check-recovery-batch %s: %w: %s", rig, err, lastLine(string(stderr)))}
 	}
@@ -173,6 +191,22 @@ func (h *patrolScanHost) runRecoveryBatchWithin(rig string, polecats int, bound 
 		return reapBatch{err: err}
 	}
 	return batch
+}
+
+// killedByDeadline reports whether err is the deadline of ctx ending the
+// command: the deadline has passed and the command's own error says it was cut
+// off, as a context error or as a death by signal (ExitCode -1). A command that
+// failed with an exit status of its own as the deadline passed was not killed,
+// and its error is the answer.
+func killedByDeadline(ctx context.Context, err error) bool {
+	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var coded interface{ ExitCode() int }
+	return errors.As(err, &coded) && coded.ExitCode() == -1
 }
 
 // recoveryStatusJSON is the slice of `gt polecat check-recovery-batch --json`
