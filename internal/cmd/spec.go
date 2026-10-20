@@ -1907,7 +1907,9 @@ func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specd
 		return "", fmt.Errorf("cannot resolve rig %q beads database for %s", c.Rig, c.Spec.ID)
 	}
 	params := specSlingParams(townRoot, targetBeadsDir, resolveFormula("", false, townRoot, c.Rig), c, resumeBranch, seat)
-	result, err := executeSling(params)
+	d := realSlingDeps()
+	d.beadInfoInTown = refuseOpenBlockers(d.beadInfoInTown)
+	result, err := d.executeSling(params)
 	if err != nil {
 		return "", err
 	}
@@ -1915,4 +1917,26 @@ func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specd
 		return "", errors.New("sling returned no result")
 	}
 	return result.PolecatName, nil
+}
+
+// refuseOpenBlockers wraps the bead read a dispatch starts from so the spec
+// dispatcher's sling refuses a bead that has a blocking dependency open. The
+// ready board it drew the bead from is a snapshot, and a tick that runs for
+// minutes can sling a bead whose blocker was added after the board was read
+// (gt-ewrtm). The read is the one the sling guards already make, so the check
+// costs no bd call. The refusal leads with the sling-refusal marker, so the
+// tick defers the bead and the next board leaves it out until the blocker
+// closes. An operator's gt sling does not run through here, and may still sling
+// a blocked bead on purpose.
+func refuseOpenBlockers(read func(townRoot, beadID string) (*beadInfo, error)) func(townRoot, beadID string) (*beadInfo, error) {
+	return func(townRoot, beadID string) (*beadInfo, error) {
+		info, err := read(townRoot, beadID)
+		if err != nil || info == nil {
+			return info, err
+		}
+		if why := specPeerBlocked(beads.UnresolvedBlockerIDs(info.Dependencies)); why != "" {
+			return nil, fmt.Errorf("%s %s is %s", dispatch.SlingRefusalMarker, beadID, why)
+		}
+		return info, nil
+	}
 }
