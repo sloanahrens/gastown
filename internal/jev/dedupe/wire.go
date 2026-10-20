@@ -13,9 +13,11 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/jev"
+	"github.com/steveyegge/gastown/internal/jev/battery"
 )
 
-// DefaultMaxUSDPerDay is the daily cap when the config names none.
+// DefaultMaxUSDPerDay is the daily cap when the config names none. The cap is
+// town-wide: it counts every Jev caller in the usage ledger, not this job alone.
 const DefaultMaxUSDPerDay = 1.0
 
 // hmSearchLimit is how many hits one hm query asks for before the candidate
@@ -66,30 +68,17 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 		return nil, fmt.Errorf("no beads directory for rig %s", RigName)
 	}
 
+	town := battery.Cap{Ledger: jev.UsageLedgerPath(townRoot), MaxUSDPerDay: capUSD, USDPerBillionTokens: price}
+
 	return &Pass{
 		Asker:      client,
 		Searcher:   hmSearcher{rig: RigName},
 		Beads:      rigBeads{b: beads.New(beadsDir)},
 		LogPath:    LogPath(townRoot),
 		CursorPath: CursorPath(townRoot),
-		SpentToday: spentToday(townRoot, price, time.Now),
+		SpentToday: func() (float64, error) { return town.Spent(time.Now) },
 		CapUSD:     capUSD,
 	}, nil
-}
-
-// spentToday reads what this job has spent since local midnight, priced at
-// usdPerBillion, from the usage ledger.
-func spentToday(townRoot string, usdPerBillion float64, clock func() time.Time) func() (float64, error) {
-	return func() (float64, error) {
-		now := clock()
-		y, m, d := now.Date()
-		start := time.Date(y, m, d, 0, 0, 0, 0, now.Location())
-		rep, err := jev.ReadSpend(jev.UsageLedgerPath(townRoot), start, now, usdPerBillion)
-		if err != nil {
-			return 0, err
-		}
-		return rep.ByCaller[Caller].USD, nil
-	}
 }
 
 // hmSearcher runs hm query for a rig.

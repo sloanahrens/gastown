@@ -4,10 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
-	"os"
-	"path/filepath"
 	"reflect"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -171,47 +168,5 @@ func TestJevDedupeOpenRejectsBadSettings(t *testing.T) {
 				t.Errorf("Open error = %v, want one naming %s", err, tt.wantErr)
 			}
 		})
-	}
-}
-
-// spentToday sums this job's ledger lines since local midnight and no one
-// else's.
-func TestJevDedupeSpentTodayPricesOnlyThisJobsLinesSinceMidnight(t *testing.T) {
-	t.Parallel()
-	town := t.TempDir()
-	now := time.Date(2026, 10, 20, 15, 0, 0, 0, time.Local)
-	midnight := time.Date(2026, 10, 20, 0, 0, 0, 0, time.Local)
-	rec := func(ts time.Time, caller string, in, out int) string {
-		return `{"ts":"` + ts.Format(time.RFC3339) + `","caller":"` + caller +
-			`","input_tokens":` + strconv.Itoa(in) + `,"output_tokens":` + strconv.Itoa(out) + `}`
-	}
-	ledger := jev.UsageLedgerPath(town)
-	if err := os.MkdirAll(filepath.Dir(ledger), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	body := strings.Join([]string{
-		rec(midnight.Add(-time.Minute), Caller, 5_000_000, 0), // yesterday
-		rec(midnight, Caller, 300_000_000, 100_000_000),       // today, this job
-		rec(now.Add(-time.Hour), "other-job", 900_000_000, 0), // today, another job
-	}, "\n") + "\n"
-	if err := os.WriteFile(ledger, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := spentToday(town, 2, func() time.Time { return now })()
-	if err != nil {
-		t.Fatalf("spentToday: %v", err)
-	}
-	// 400M tokens at 2 USD per billion.
-	if math.Abs(got-0.8) > 1e-9 {
-		t.Errorf("spent = %v, want 0.8", got)
-	}
-}
-
-func TestJevDedupeSpentTodayWithNoLedgerIsZero(t *testing.T) {
-	t.Parallel()
-	got, err := spentToday(t.TempDir(), 2, time.Now)()
-	if err != nil || got != 0 {
-		t.Errorf("spentToday = %v, %v, want 0 and no error", got, err)
 	}
 }

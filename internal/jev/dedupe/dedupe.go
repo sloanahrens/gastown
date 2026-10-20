@@ -21,6 +21,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev"
+	"github.com/steveyegge/gastown/internal/jev/battery"
 )
 
 const (
@@ -137,13 +138,13 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	defer release()
 
 	now := p.now()
-	cur, ok, err := readCursor(p.CursorPath)
+	cur, ok, err := battery.ReadCursor(p.CursorPath)
 	if err != nil {
 		return sum, err
 	}
 	if !ok {
 		sum.Started = true
-		return sum, writeCursor(p.CursorPath, cursor{Time: now})
+		return sum, battery.WriteCursor(p.CursorPath, battery.Cursor{Time: now})
 	}
 
 	all, err := p.Beads.Since(cur.Time)
@@ -167,11 +168,11 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		if err != nil {
 			return sum, err
 		}
-		if err := appendLine(p.LogPath, line); err != nil {
+		if err := battery.Append(p.LogPath, line); err != nil {
 			return sum, err
 		}
 		sum.Asked++
-		if err := writeCursor(p.CursorPath, cursor{Time: beads.ParseIssueTime(f.CreatedAt), ID: f.ID}); err != nil {
+		if err := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: beads.ParseIssueTime(f.CreatedAt), ID: f.ID}); err != nil {
 			return sum, err
 		}
 	}
@@ -181,7 +182,7 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 // pending keeps the findings after the cursor, oldest first. A finding is a
 // bead titled "Found:" or labeled review-deep or om-followup. Ties on the
 // creation time break by ID, so the cursor orders findings completely.
-func pending(all []*beads.Issue, cur cursor) []*beads.Issue {
+func pending(all []*beads.Issue, cur battery.Cursor) []*beads.Issue {
 	var out []*beads.Issue
 	for _, b := range all {
 		created := beads.ParseIssueTime(b.CreatedAt)
@@ -216,7 +217,7 @@ func isFinding(b *beads.Issue) bool {
 
 // after reports whether a bead created at created with id sorts after the
 // cursor.
-func after(cur cursor, created time.Time, id string) bool {
+func after(cur battery.Cursor, created time.Time, id string) bool {
 	if created.Equal(cur.Time) {
 		return id > cur.ID
 	}

@@ -1,19 +1,13 @@
 package dedupe
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"errors"
-	"fmt"
-	"io/fs"
-	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
-	"github.com/steveyegge/gastown/internal/lock"
+	"github.com/steveyegge/gastown/internal/jev/battery"
 )
 
 // Outcome says how a line's candidate came about. It is one of a fixed set of
@@ -68,103 +62,14 @@ func CursorPath(townRoot string) string {
 	return filepath.Join(townRoot, constants.DirRuntime, "jev", "dedupe.cursor.json")
 }
 
-// cursor is the last finding asked about: its creation time, and its ID to
-// break a tie on that time.
-type cursor struct {
-	Time time.Time `json:"time"`
-	ID   string    `json:"id,omitempty"`
-}
-
-// appendLine appends one line to the log, creating the directory 0700 and
-// the file 0600.
-func appendLine(path string, l Line) error {
-	line, err := json.Marshal(l)
-	if err != nil {
-		return fmt.Errorf("encoding the dedupe log line: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("creating the dedupe log directory: %w", err)
-	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
-	if err != nil {
-		return fmt.Errorf("opening the dedupe log: %w", err)
-	}
-	if _, err := f.Write(append(line, '\n')); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("writing the dedupe log: %w", err)
-	}
-	return f.Close()
-}
-
 // ReadRecent returns the last n lines of the log, oldest first. A missing log
 // is empty, not an error, and a line that does not parse is skipped.
 func ReadRecent(path string, n int) ([]Line, error) {
-	f, err := os.Open(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("opening the dedupe log: %w", err)
-	}
-	defer func() { _ = f.Close() }()
-
 	var lines []Line
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for sc.Scan() {
-		text := strings.TrimSpace(sc.Text())
-		if text == "" {
-			continue
-		}
-		var l Line
-		if err := json.Unmarshal([]byte(text), &l); err != nil {
-			continue
-		}
-		lines = append(lines, l)
-	}
-	if err := sc.Err(); err != nil {
-		return nil, fmt.Errorf("reading the dedupe log: %w", err)
-	}
-	if n < len(lines) {
-		lines = lines[len(lines)-n:]
+	if err := battery.ReadRecent(path, n, &lines); err != nil {
+		return nil, err
 	}
 	return lines, nil
-}
-
-// readCursor returns the saved cursor, and false when there is none yet.
-func readCursor(path string) (cursor, bool, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return cursor{}, false, nil
-	}
-	if err != nil {
-		return cursor{}, false, fmt.Errorf("reading the dedupe cursor: %w", err)
-	}
-	var c cursor
-	if err := json.Unmarshal(data, &c); err != nil {
-		return cursor{}, false, fmt.Errorf("parsing the dedupe cursor %s: %w", path, err)
-	}
-	return c, true, nil
-}
-
-// writeCursor saves the cursor through a temporary file, so a crash never
-// leaves a half-written cursor that would make a pass ask twice.
-func writeCursor(path string, c cursor) error {
-	data, err := json.Marshal(c)
-	if err != nil {
-		return fmt.Errorf("encoding the dedupe cursor: %w", err)
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("creating the dedupe cursor directory: %w", err)
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		return fmt.Errorf("writing the dedupe cursor: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("saving the dedupe cursor: %w", err)
-	}
-	return nil
 }
 
 // ErrBusy means another pass holds the run lock: a manual pass and the
@@ -175,17 +80,11 @@ var ErrBusy = errors.New("another jev dedupe pass is running")
 // The lock sits beside the cursor, so every pass over one cursor contends on
 // it, in this process and in others.
 func lockRun(cursorPath string) (func(), error) {
-	if err := os.MkdirAll(filepath.Dir(cursorPath), 0o700); err != nil {
-		return nil, fmt.Errorf("creating the dedupe lock directory: %w", err)
-	}
-	release, ok, err := lock.FlockTryAcquire(cursorPath + ".lock")
-	if err != nil {
-		return nil, fmt.Errorf("locking the dedupe pass: %w", err)
-	}
-	if !ok {
+	release, err := battery.Lock(cursorPath + ".lock")
+	if errors.Is(err, battery.ErrBusy) {
 		return nil, ErrBusy
 	}
-	return release, nil
+	return release, err
 }
 
 // waitFor pauses for d, or until ctx is done.

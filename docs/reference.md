@@ -1123,6 +1123,19 @@ the same.
 daemon.log is local time and bd JSON is UTC; the window is tz-aware, so a line
 stamped just inside it counts in either zone.
 
+### Jev Batteries
+
+A Jev battery asks Jev one question per item and logs the answer. What every
+battery shares lives in `internal/jev/battery`: the daily cap, the JSONL log
+(`Append`, `ReadRecent`), the `{time, id}` cursor and the run lock.
+
+The daily cap is one town-wide cap across every Jev caller. `Cap.Spent` reads
+the usage ledger (`.runtime/jev/usage.jsonl`) and sums everything stamped since
+local midnight whatever the line's `caller`, so a second battery's calls today
+use up the first one's room. `Cap.Allows` is whether today's spend is still
+under `MaxUSDPerDay`. The ledger stores tokens, so `USDPerBillionTokens` is
+required to price them.
+
 ## Beads Commands (bd)
 
 ```bash
