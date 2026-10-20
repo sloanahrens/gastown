@@ -30,7 +30,14 @@ head a landing keeps there after reaping the branch. A branch's presence on
 origin is never the test. A seat whose work landed is `SAFE_TO_NUKE` with reason
 `landed`; when the bead's LANDING RECORD landed from another head and the
 worktree's content for the files its commits touched differs, the verdict stays
-`NEEDS_RECOVERY` and the reason names the files to compare.
+`NEEDS_RECOVERY` with reason `landed-differs` and a blocker naming the files to
+compare. The proof fails closed: a missing landing record, an unreadable ref or
+object, and a worktree whose commits touch no files are never "landed", and a
+failed read is named in the `git-unpushed` blocker. One predicate,
+`land.WorkLandedOnTarget`, answers for `check-recovery`, `gt polecat list` and
+the reuse gate; its verdict `Reason` is one of `landed-ref`, `landed-target`,
+`landed-record`, `landed-differs`, `unpushed` or `probe-failed`, and file names
+live in a separate `Detail`.
 
 ## Rig-Level Cleanup
 

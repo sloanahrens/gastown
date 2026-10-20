@@ -29,7 +29,6 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
-	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/runtime"
 	"github.com/steveyegge/gastown/internal/session"
@@ -3184,7 +3183,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	// The reuse gate must clear a landed seat for the same reason check-recovery
 	// does, or it refuses a seat the reaper will not remove and nobody reuses
 	// (gt-jol0i).
-	applyWorkLandedFacts(g, m.beads, &facts)
+	ApplyWorkLanded(&facts, g, m.beads, facts.HookBead, facts.Branch)
 	// gt-7kr: missing/unknown cleanup_status must fail closed to NEEDS_RECOVERY,
 	// never be silently promoted to clean. A narrow local git check (no dirty
 	// files, no stash, no unpushed commits) is not proof of safety by itself —
@@ -3234,38 +3233,6 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 // bead's live state, through the same ClassifyHookBead policy the recovery
 // report and the nuke gate use (gt-eqiid). The lookup stays here because this
 // package owns its beads handle.
-// applyWorkLandedFacts records whether a seat's leftover commits are the ones
-// its bead landed, so the reuse gate clears a landed seat the same way
-// check-recovery does (gt-jol0i). The bead is the seat's hook, or the bead its
-// branch name encodes once the hook is cleared.
-func applyWorkLandedFacts(g gitRepo, store polecatBeads, facts *WorkstateFacts) {
-	// A seat with no leftover commits has nothing landing evidence could
-	// clear, and the probe costs a bead read.
-	if g == nil || facts.UnpushedCommits == 0 {
-		return
-	}
-	beadID := strings.TrimSpace(facts.HookBead)
-	if beadID == "" {
-		if meta, ok := ParseBranchName(facts.Branch); ok {
-			beadID = meta.Issue
-		}
-	}
-	if beadID == "" {
-		return
-	}
-	var issue *beads.Issue
-	if store != nil {
-		if got, err := store.Show(beadID); err == nil {
-			issue = got
-		}
-	}
-	landed, reason := land.WorkLandedOnTarget(g, "", "", beadID, issue)
-	facts.WorkLanded = landed
-	if !landed {
-		facts.WorkLandedDiffReason = reason
-	}
-}
-
 func (m *Manager) hookBeadSafeForWorkstate(hookBead string) HookBeadDisposition {
 	if hookBead == "" {
 		return HookBeadDisposition{Safe: true}

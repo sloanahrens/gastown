@@ -3,6 +3,8 @@ package polecat
 import (
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // Landed work is not work in flight: the commits that look unpushed are the
@@ -34,28 +36,54 @@ func TestDecideWorkstateLandedWorkIsSafeToNuke(t *testing.T) {
 }
 
 // The bead landed from another head and this worktree disagrees: the refusal
-// stays, naming the files an operator must compare.
+// stays under a short reason code, and the blocker names the files an operator
+// must compare.
 func TestDecideWorkstateNamesFilesWhenTheLandingDiffers(t *testing.T) {
 	t.Parallel()
-	const reason = "landed from another head; worktree differs in b.txt, c.txt"
+	const detail = "landed from another head; worktree differs in b.txt, c.txt"
 	in := NewWorkstateInput(WorkstateFacts{
-		State:                StateIdle,
-		CleanupStatus:        CleanupClean,
-		Branch:               "polecat/opal/gt-abc+x1",
-		GitStateSource:       GitStateSourceLive,
-		UnpushedCommits:      2,
-		WorkLandedDiffReason: reason,
+		State:            StateIdle,
+		CleanupStatus:    CleanupClean,
+		Branch:           "polecat/opal/gt-abc+x1",
+		GitStateSource:   GitStateSourceLive,
+		UnpushedCommits:  2,
+		WorkLandedReason: land.WorkLandedDiffers,
+		WorkLandedDetail: detail,
 	})
 
 	d := DecideWorkstate(in)
 	if d.Verdict != WorkstateVerdictNeedsRecovery || !d.NeedsRecovery {
 		t.Fatalf("DecideWorkstate(differing content) = %+v; want NEEDS_RECOVERY", d)
 	}
-	if d.Reason != reason {
-		t.Fatalf("reason = %q; want %q", d.Reason, reason)
+	if d.Reason != land.WorkLandedDiffers {
+		t.Fatalf("reason = %q; want the short code %q", d.Reason, land.WorkLandedDiffers)
 	}
-	if blockers := strings.Join(d.Blockers, "; "); !strings.Contains(blockers, "unpushed_commits=2") {
-		t.Fatalf("blockers = %q; want the measured unpushed count kept", blockers)
+	blockers := strings.Join(d.Blockers, "; ")
+	if !strings.Contains(blockers, "unpushed_commits=2") || !strings.Contains(blockers, "b.txt, c.txt") {
+		t.Fatalf("blockers = %q; want the measured unpushed count and the differing files", blockers)
+	}
+}
+
+// A landed probe that failed keeps the plain git-unpushed refusal — failing
+// closed — and the blocker says why the evidence is missing.
+func TestDecideWorkstateKeepsTheRefusalWhenTheLandedProbeFailed(t *testing.T) {
+	t.Parallel()
+	in := NewWorkstateInput(WorkstateFacts{
+		State:            StateIdle,
+		CleanupStatus:    CleanupClean,
+		Branch:           "polecat/opal/gt-abc+x1",
+		GitStateSource:   GitStateSourceLive,
+		UnpushedCommits:  1,
+		WorkLandedReason: land.WorkProbeFailed,
+		WorkLandedDetail: "read bead gt-abc: connection refused",
+	})
+
+	d := DecideWorkstate(in)
+	if d.Verdict != WorkstateVerdictNeedsRecovery || d.Reason != "git-unpushed" {
+		t.Fatalf("DecideWorkstate(failed probe) = %+v; want NEEDS_RECOVERY git-unpushed", d)
+	}
+	if blockers := strings.Join(d.Blockers, "; "); !strings.Contains(blockers, "connection refused") {
+		t.Fatalf("blockers = %q; want the probe failure named", blockers)
 	}
 }
 

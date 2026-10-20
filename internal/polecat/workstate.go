@@ -1,6 +1,10 @@
 package polecat
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/steveyegge/gastown/internal/land"
+)
 
 const (
 	WorkstateVerdictWorking       = "WORKING"
@@ -88,10 +92,13 @@ type WorkstateInput struct {
 	// landed on the target, so the measured unpushed-commits refusal does not
 	// describe work in flight (gt-jol0i).
 	WorkLanded bool
-	// WorkLandedDiffReason names a landing that is not this worktree's: the
-	// bead landed from another head and these files differ. It replaces the
-	// git-unpushed reason, which cannot say what to compare.
-	WorkLandedDiffReason string
+	// WorkLandedReason is the land.WorkLandedVerdict token behind WorkLanded
+	// and WorkLandedDetail its human text. A landing that is not this
+	// worktree's (land.WorkLandedDiffers) replaces the git-unpushed reason,
+	// which cannot say what to compare; a probe that failed adds its cause to
+	// the blocker.
+	WorkLandedReason string
+	WorkLandedDetail string
 }
 
 // WorkstateDisposition is the canonical polecat lifecycle decision. It is pure
@@ -347,11 +354,7 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 	// them look unpushed (gt-jol0i). A worktree that disagrees with the
 	// landing keeps the refusal and names the files instead.
 	if in.UnpushedCommits > 0 && !in.WorkLanded {
-		reason := "git-unpushed"
-		if in.WorkLandedDiffReason != "" {
-			reason = in.WorkLandedDiffReason
-		}
-		block(reason, gitUnpushedBlocker(in), true)
+		block(gitUnpushedReason(in), gitUnpushedBlocker(in), true)
 	}
 	activeMRBlocks := in.ActiveMRBlocker != ""
 	if activeMRBlocks {
@@ -479,7 +482,22 @@ func gitStashBlocker(in WorkstateInput) string {
 }
 
 func gitUnpushedBlocker(in WorkstateInput) string {
-	return "git_state=has_unpushed unpushed_commits=" + itoa(in.UnpushedCommits)
+	blocker := "git_state=has_unpushed unpushed_commits=" + itoa(in.UnpushedCommits)
+	if in.WorkLandedDetail != "" {
+		blocker += "; " + in.WorkLandedDetail
+	}
+	return blocker
+}
+
+// gitUnpushedReason is the reason code of the unpushed-commits refusal. A bead
+// that landed from another head gets its own code so the reader knows to
+// compare files; every other case, including a landed probe that failed, keeps
+// the plain git-unpushed code.
+func gitUnpushedReason(in WorkstateInput) string {
+	if in.WorkLandedReason == land.WorkLandedDiffers {
+		return land.WorkLandedDiffers
+	}
+	return "git-unpushed"
 }
 
 // preservedCommitsBlocker is the line a terminal-bead seat carries beside the
@@ -660,10 +678,13 @@ type WorkstateFacts struct {
 	// landed on the target, so the measured unpushed-commits refusal does not
 	// describe work in flight (gt-jol0i).
 	WorkLanded bool
-	// WorkLandedDiffReason names a landing that is not this worktree's: the
-	// bead landed from another head and these files differ. It replaces the
-	// git-unpushed reason, which cannot say what to compare.
-	WorkLandedDiffReason string
+	// WorkLandedReason is the land.WorkLandedVerdict token behind WorkLanded
+	// and WorkLandedDetail its human text. A landing that is not this
+	// worktree's (land.WorkLandedDiffers) replaces the git-unpushed reason,
+	// which cannot say what to compare; a probe that failed adds its cause to
+	// the blocker.
+	WorkLandedReason string
+	WorkLandedDetail string
 }
 
 // WorkTerminal reports whether any work ref the polecat can hold — its assigned
@@ -718,7 +739,8 @@ func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
 		StashCount:                     f.StashCount,
 		UnpushedCommits:                f.UnpushedCommits,
 		WorkLanded:                     f.WorkLanded,
-		WorkLandedDiffReason:           f.WorkLandedDiffReason,
+		WorkLandedReason:               f.WorkLandedReason,
+		WorkLandedDetail:               f.WorkLandedDetail,
 		GitCheckFailed:                 f.GitCheckFailed,
 		GitCheckFailedReason:           f.GitCheckFailedReason,
 		GitStateSource:                 f.GitStateSource,

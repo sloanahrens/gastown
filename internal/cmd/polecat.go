@@ -1669,7 +1669,7 @@ func checkRecoveryForPolecat(bd recoveryBeads, preloadedAgentBeads map[string]*b
 		facts.AssignedBeadTerminal = beadTerminal
 		loadGitState()
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
-		applyWorkLandedToWorkstateFacts(land.WorkLandedOnTarget, bd, &facts, p.ClonePath, p.Branch)
+		applyWorkLandedToWorkstateFacts(&facts, nil, p.ClonePath, bd, facts.HookBead, p.Branch)
 		input = polecat.NewWorkstateInput(facts)
 	} else {
 		// Use cleanup_status from agent bead, then overlay direct git and MQ facts.
@@ -1743,7 +1743,7 @@ func checkRecoveryForPolecat(bd recoveryBeads, preloadedAgentBeads map[string]*b
 		// instead of duplicating (and drifting from) that policy here.
 		loadGitState()
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
-		applyWorkLandedToWorkstateFacts(land.WorkLandedOnTarget, bd, &facts, p.ClonePath, p.Branch)
+		applyWorkLandedToWorkstateFacts(&facts, nil, p.ClonePath, bd, facts.HookBead, p.Branch)
 		// gt-ivvgu: this diagnostic used to call ResolveIgnoreCleanupStatus
 		// directly with hand-computed predicates (partialSpawn,
 		// worktreeStructurallyMissing, hookDisposition.Safe,
@@ -1922,46 +1922,26 @@ func applyHookDispositionToWorkstateFacts(facts *polecat.WorkstateFacts, hookBea
 	facts.HookBeadSubmitted = d.Submitted
 }
 
-// workLandedProbe is land.WorkLandedOnTarget's signature, so callers and
-// tests supply the probe instead of reaching for a package variable.
-type workLandedProbe func(g land.WorkLandedRepo, head, target, beadID string, issue *beads.Issue) (bool, string)
-
-// applyWorkLandedToWorkstateFacts records the landing evidence for a seat's
-// leftover commits (gt-jol0i). The bead is the seat's hook, or — once the hook
-// is cleared — the bead its branch name encodes.
-//
-// Only the bead read is fallible in a way that matters: an unreadable bead
-// loses the LANDING RECORD arm, while the refs/landed ancestry arm answers
-// from git alone. Both answers fail closed to no evidence.
-func applyWorkLandedToWorkstateFacts(probe workLandedProbe, bd recoveryBeads, facts *polecat.WorkstateFacts, clonePath, branch string) {
-	// A seat with no leftover commits has nothing landing evidence could
-	// clear, and the probe costs a bead read the batch path would pay per
-	// seat.
-	if clonePath == "" || facts.UnpushedCommits == 0 {
+// applyWorkLandedToWorkstateFacts records the landing evidence for the leftover
+// commits of the worktree at worktreePath (gt-jol0i). Bead choice and the
+// landed probe live in polecat.ApplyWorkLanded, which the reuse gate calls too;
+// this only opens the worktree, so every caller of the verdict asks one
+// predicate.
+func applyWorkLandedToWorkstateFacts(facts *polecat.WorkstateFacts, open workLandedOpener, worktreePath string, store polecat.IssueReader, hookBead, branch string) {
+	if worktreePath == "" {
 		return
 	}
-	beadID := strings.TrimSpace(facts.HookBead)
-	if beadID == "" {
-		if meta, ok := polecat.ParseBranchName(branch); ok {
-			beadID = meta.Issue
-		}
+	if open == nil {
+		open = openWorkLandedGit
 	}
-	if beadID == "" {
-		return
-	}
-	var issue *beads.Issue
-	if bd != nil {
-		if got, err := bd.Show(beadID); err == nil {
-			issue = got
-		}
-	}
-	landed, reason := probe(git.NewGit(clonePath), "", "", beadID, issue)
-	if landed {
-		facts.WorkLanded = true
-		return
-	}
-	facts.WorkLandedDiffReason = reason
+	polecat.ApplyWorkLanded(facts, open(worktreePath), store, hookBead, branch)
 }
+
+// workLandedOpener opens the repository the landed probe reads; tests supply
+// one over a modeled repository.
+type workLandedOpener func(worktreePath string) land.WorkLandedRepo
+
+func openWorkLandedGit(worktreePath string) land.WorkLandedRepo { return git.NewGit(worktreePath) }
 
 func applyGitStateToWorkstateFacts(facts *polecat.WorkstateFacts, worktreePath string, gitState *GitState, gitErr error) {
 	// claude-41j.1 D9: the git facts applied here are a live measurement, and

@@ -1,6 +1,7 @@
 package land
 
 import (
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -43,6 +44,59 @@ func (w *landedWorld) recordNote(head string) string {
 
 func (w *landedWorld) worktree() gitfake.Repo { return w.git.Open(w.repo) }
 
+// failing wraps a repository and fails the one read a test names, so a probe
+// failure is asserted to fail closed rather than assumed to.
+type failing struct {
+	WorkLandedRepo
+	refExists, revLanded, isAncestor, mergeBase, diffNames, diffPaths error
+	noTouchedFiles                                                    bool
+}
+
+func (f failing) RefExists(ref string) (bool, error) {
+	if f.refExists != nil {
+		return false, f.refExists
+	}
+	return f.WorkLandedRepo.RefExists(ref)
+}
+
+func (f failing) Rev(ref string) (string, error) {
+	if f.revLanded != nil && strings.HasPrefix(ref, "refs/landed/") {
+		return "", f.revLanded
+	}
+	return f.WorkLandedRepo.Rev(ref)
+}
+
+func (f failing) IsAncestor(a, d string) (bool, error) {
+	if f.isAncestor != nil {
+		return false, f.isAncestor
+	}
+	return f.WorkLandedRepo.IsAncestor(a, d)
+}
+
+func (f failing) MergeBase(a, b string) (string, error) {
+	if f.mergeBase != nil {
+		return "", f.mergeBase
+	}
+	return f.WorkLandedRepo.MergeBase(a, b)
+}
+
+func (f failing) DiffNameOnly(base, head string) ([]string, error) {
+	if f.diffNames != nil {
+		return nil, f.diffNames
+	}
+	if f.noTouchedFiles {
+		return nil, nil
+	}
+	return f.WorkLandedRepo.DiffNameOnly(base, head)
+}
+
+func (f failing) DiffPathsNameOnly(a, b string, paths []string) ([]string, error) {
+	if f.diffPaths != nil {
+		return nil, f.diffPaths
+	}
+	return f.WorkLandedRepo.DiffPathsNameOnly(a, b, paths)
+}
+
 // TestWorkLandedOnTargetRefsLandedAncestry is the seat case of gt-jol0i: the
 // worktree holds an earlier point of a branch another seat carried on and the
 // landing kept at refs/landed/<bead>, so ancestry answers where branch
@@ -52,14 +106,11 @@ func TestWorkLandedOnTargetRefsLandedAncestry(t *testing.T) {
 	w := newLandedWorld(t)
 	w.git.SetRef(t, w.repo, LandedRef("gt-abc"), w.later)
 
-	landed, reason := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", nil)
-	if !landed || reason != "landed" {
-		t.Fatalf("WorkLandedOnTarget(earlier of the landed branch) = %v, %q; want true, landed", landed, reason)
-	}
-
-	landed, reason = WorkLandedOnTarget(w.worktree(), w.later, "", "gt-abc", nil)
-	if !landed || reason != "landed" {
-		t.Fatalf("WorkLandedOnTarget(the landed head itself) = %v, %q; want true, landed", landed, reason)
+	for name, head := range map[string]string{"earlier point of the landed branch": w.earlier, "the landed head itself": w.later} {
+		v := WorkLandedOnTarget(w.worktree(), head, "", "gt-abc", nil)
+		if !v.Landed || v.Reason != WorkLandedByRef || v.Detail != "" {
+			t.Fatalf("WorkLandedOnTarget(%s) = %+v; want landed %s", name, v, WorkLandedByRef)
+		}
 	}
 }
 
@@ -70,9 +121,9 @@ func TestWorkLandedOnTargetRejectsAnUnrelatedLandedHead(t *testing.T) {
 	w := newLandedWorld(t)
 	w.git.SetRef(t, w.repo, LandedRef("gt-abc"), w.base)
 
-	landed, reason := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", nil)
-	if landed || reason != "" {
-		t.Fatalf("WorkLandedOnTarget(landed head at base) = %v, %q; want false, no reason", landed, reason)
+	v := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", nil)
+	if v.Landed || v.Reason != WorkUnpushed {
+		t.Fatalf("WorkLandedOnTarget(landed head at base) = %+v; want not landed, %s", v, WorkUnpushed)
 	}
 }
 
@@ -83,14 +134,14 @@ func TestWorkLandedOnTargetMatchesTheLandingRecordContent(t *testing.T) {
 	w := newLandedWorld(t)
 	issue := &beads.Issue{ID: "gt-abc", Status: "closed", Notes: w.recordNote(w.later)}
 
-	landed, reason := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", issue)
-	if !landed || reason != "landed" {
-		t.Fatalf("WorkLandedOnTarget(earlier point, equal content) = %v, %q; want true, landed", landed, reason)
+	v := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", issue)
+	if !v.Landed || v.Reason != WorkLandedByRecord {
+		t.Fatalf("WorkLandedOnTarget(earlier point, equal content) = %+v; want landed %s", v, WorkLandedByRecord)
 	}
 }
 
-// The bead landed, but the content is not this worktree's: say which files an
-// operator must compare before discarding it.
+// The bead landed, but the content is not this worktree's: the file names are
+// the Detail an operator compares, and the Reason stays a short token.
 func TestWorkLandedOnTargetNamesFilesTheLandingRecordDisagreesOn(t *testing.T) {
 	t.Parallel()
 	w := newLandedWorld(t)
@@ -100,12 +151,12 @@ func TestWorkLandedOnTargetNamesFilesTheLandingRecordDisagreesOn(t *testing.T) {
 	w.git.SetRef(t, w.repo, "refs/remotes/origin/"+landedFixtureBranch, other)
 
 	issue := &beads.Issue{ID: "gt-abc", Status: "closed", Notes: w.recordNote(other)}
-	landed, reason := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", issue)
-	if landed {
-		t.Fatalf("WorkLandedOnTarget(differing content) = true; want false")
+	v := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", issue)
+	if v.Landed || v.Reason != WorkLandedDiffers {
+		t.Fatalf("WorkLandedOnTarget(differing content) = %+v; want not landed, %s", v, WorkLandedDiffers)
 	}
-	if !strings.Contains(reason, "landed from another head") || !strings.Contains(reason, "b.txt") {
-		t.Fatalf("reason = %q; want it to name b.txt", reason)
+	if !strings.Contains(v.Detail, "landed from another head") || !strings.Contains(v.Detail, "b.txt") {
+		t.Fatalf("detail = %q; want it to name b.txt", v.Detail)
 	}
 }
 
@@ -116,22 +167,9 @@ func TestWorkLandedOnTargetRefusesAnOpenBeadWithNoEvidence(t *testing.T) {
 	w := newLandedWorld(t)
 	issue := &beads.Issue{ID: "gt-abc", Status: "open", Notes: w.recordNote(w.later)}
 
-	landed, reason := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", issue)
-	if landed || reason != "" {
-		t.Fatalf("WorkLandedOnTarget(open bead, no landing) = %v, %q; want false, no reason", landed, reason)
-	}
-}
-
-// A closed bead with no LANDING RECORD is not evidence either: closing is a
-// statement about the issue, not about this worktree's content.
-func TestWorkLandedOnTargetRefusesAClosedBeadWithoutARecord(t *testing.T) {
-	t.Parallel()
-	w := newLandedWorld(t)
-	issue := &beads.Issue{ID: "gt-abc", Status: "closed"}
-
-	landed, reason := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", issue)
-	if landed || reason != "" {
-		t.Fatalf("WorkLandedOnTarget(closed bead, no record) = %v, %q; want false, no reason", landed, reason)
+	v := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", issue)
+	if v.Landed || v.Reason != WorkUnpushed {
+		t.Fatalf("WorkLandedOnTarget(open bead, no landing) = %+v; want not landed, %s", v, WorkUnpushed)
 	}
 }
 
@@ -143,10 +181,154 @@ func TestWorkLandedOnTargetSeesTheCommitOnTheTarget(t *testing.T) {
 	w.git.SetRef(t, w.origin, "refs/heads/main", w.earlier)
 	w.git.SetRef(t, w.repo, "refs/remotes/origin/main", w.earlier)
 
-	landed, reason := WorkLandedOnTarget(w.worktree(), w.earlier, "", "", nil)
-	if !landed || reason != "landed" {
-		t.Fatalf("WorkLandedOnTarget(HEAD on origin/main) = %v, %q; want true, landed", landed, reason)
+	v := WorkLandedOnTarget(w.worktree(), w.earlier, "", "", nil)
+	if !v.Landed || v.Reason != WorkLandedByTarget {
+		t.Fatalf("WorkLandedOnTarget(HEAD on origin/main) = %+v; want landed %s", v, WorkLandedByTarget)
 	}
+}
+
+// Every way the proof can be missing returns not-landed with a Reason, never a
+// landed answer: a missing record, an unreadable ref, an unreadable object, a
+// failed comparison, and a worktree with no files to compare.
+func TestWorkLandedOnTargetFailsClosed(t *testing.T) {
+	t.Parallel()
+	boom := errors.New("boom")
+
+	tests := []struct {
+		name       string
+		issue      func(w *landedWorld) *beads.Issue
+		landedRef  bool
+		wrap       func(r WorkLandedRepo) WorkLandedRepo
+		wantReason string
+		wantDetail string
+	}{
+		{
+			name:       "closed bead without a landing record",
+			issue:      func(*landedWorld) *beads.Issue { return &beads.Issue{ID: "gt-abc", Status: "closed"} },
+			wantReason: WorkUnpushed,
+			wantDetail: "no landing record",
+		},
+		{
+			name:       "bead not read",
+			wantReason: WorkUnpushed,
+			wantDetail: "bead not read",
+		},
+		{
+			name:       "landed ref exists but will not resolve",
+			landedRef:  true,
+			wrap:       func(r WorkLandedRepo) WorkLandedRepo { return failing{WorkLandedRepo: r, revLanded: boom} },
+			wantReason: WorkProbeFailed,
+			wantDetail: "refs/landed/gt-abc",
+		},
+		{
+			name:       "landed ref presence cannot be checked",
+			wrap:       func(r WorkLandedRepo) WorkLandedRepo { return failing{WorkLandedRepo: r, refExists: boom} },
+			wantReason: WorkProbeFailed,
+			wantDetail: "refs/landed/gt-abc",
+		},
+		{
+			name:       "ancestry check errors",
+			landedRef:  true,
+			wrap:       func(r WorkLandedRepo) WorkLandedRepo { return failing{WorkLandedRepo: r, isAncestor: boom} },
+			wantReason: WorkProbeFailed,
+			wantDetail: "compare HEAD",
+		},
+		{
+			name:       "landing record names a commit this repository lacks",
+			issue:      closedWithRecord("no-such-commit"),
+			wantReason: WorkProbeFailed,
+			wantDetail: "names no commit",
+		},
+		{
+			name:       "merge-base fails",
+			issue:      closedWithRecordAtLater,
+			wrap:       func(r WorkLandedRepo) WorkLandedRepo { return failing{WorkLandedRepo: r, mergeBase: boom} },
+			wantReason: WorkProbeFailed,
+			wantDetail: "merge-base",
+		},
+		{
+			name:       "touched-file listing fails",
+			issue:      closedWithRecordAtLater,
+			wrap:       func(r WorkLandedRepo) WorkLandedRepo { return failing{WorkLandedRepo: r, diffNames: boom} },
+			wantReason: WorkProbeFailed,
+			wantDetail: "touched",
+		},
+		{
+			name:       "content comparison fails",
+			issue:      closedWithRecordAtLater,
+			wrap:       func(r WorkLandedRepo) WorkLandedRepo { return failing{WorkLandedRepo: r, diffPaths: boom} },
+			wantReason: WorkProbeFailed,
+			wantDetail: "compare worktree",
+		},
+		{
+			name:       "no touched files is not a match",
+			issue:      closedWithRecordAtLater,
+			wrap:       func(r WorkLandedRepo) WorkLandedRepo { return failing{WorkLandedRepo: r, noTouchedFiles: true} },
+			wantReason: WorkUnpushed,
+			wantDetail: "touch no files",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			w := newLandedWorld(t)
+			if tt.landedRef {
+				w.git.SetRef(t, w.repo, LandedRef("gt-abc"), w.later)
+			}
+			var issue *beads.Issue
+			if tt.issue != nil {
+				issue = tt.issue(w)
+			}
+			var repo WorkLandedRepo = w.worktree()
+			if tt.wrap != nil {
+				repo = tt.wrap(repo)
+			}
+
+			v := WorkLandedOnTarget(repo, w.earlier, "", "gt-abc", issue)
+			if v.Landed {
+				t.Fatalf("WorkLandedOnTarget() = %+v; a failed or missing proof must not read as landed", v)
+			}
+			if v.Reason != tt.wantReason {
+				t.Fatalf("reason = %q; want %q (detail %q)", v.Reason, tt.wantReason, v.Detail)
+			}
+			if !strings.Contains(v.Detail, tt.wantDetail) {
+				t.Fatalf("detail = %q; want it to mention %q", v.Detail, tt.wantDetail)
+			}
+		})
+	}
+}
+
+// A failed read in one arm does not hide a proof another arm makes: the ref
+// cannot be read, but the closed bead's record matches the worktree.
+func TestWorkLandedOnTargetAProvenArmWinsOverAFailedOne(t *testing.T) {
+	t.Parallel()
+	w := newLandedWorld(t)
+	w.git.SetRef(t, w.repo, LandedRef("gt-abc"), w.later)
+	repo := failing{WorkLandedRepo: w.worktree(), revLanded: errors.New("boom")}
+
+	v := WorkLandedOnTarget(repo, w.earlier, "", "gt-abc", closedWithRecordAtLater(w))
+	if !v.Landed || v.Reason != WorkLandedByRecord {
+		t.Fatalf("WorkLandedOnTarget() = %+v; want the record arm to prove it", v)
+	}
+}
+
+// A repository that cannot be read at all is a failed probe, not a landed one.
+func TestWorkLandedOnTargetWithoutARepositoryIsAFailedProbe(t *testing.T) {
+	t.Parallel()
+	v := WorkLandedOnTarget(nil, "", "", "gt-abc", nil)
+	if v.Landed || v.Reason != WorkProbeFailed {
+		t.Fatalf("WorkLandedOnTarget(nil repo) = %+v; want %s", v, WorkProbeFailed)
+	}
+}
+
+func closedWithRecord(head string) func(*landedWorld) *beads.Issue {
+	return func(w *landedWorld) *beads.Issue {
+		return &beads.Issue{ID: "gt-abc", Status: "closed", Notes: w.recordNote(head)}
+	}
+}
+
+func closedWithRecordAtLater(w *landedWorld) *beads.Issue {
+	return closedWithRecord(w.later)(w)
 }
 
 // ParseLandingRecord reads the newest block: a reworked bead carries one per
