@@ -96,6 +96,39 @@ func TestSpecBoardDesignsReadsOncePerRig(t *testing.T) {
 	}
 }
 
+// A failed batched read drops the candidates it was meant to fill, naming the
+// read's own error, and leaves the candidates whose row carries a design alone.
+// The dropped bead waits for the next tick (gt-bqj8q).
+func TestSpecBoardDesignsDropsCandidatesWhenTheBatchFails(t *testing.T) {
+	t.Parallel()
+	db := beadsfake.New()
+	db.Seed(beads.Issue{ID: "gt-c1", Design: "c1 design"})
+	store := newCountingStore(db)
+	store.failBatch = true
+	storeFor := func(string) beads.Client { return store }
+
+	read := specBoardRead{Candidates: []specCandidate{
+		{Spec: specdispatch.Spec{ID: "gt-c1"}, Rig: "alpha"},
+		{Spec: specdispatch.Spec{ID: "gt-c2", Design: "row design"}, Rig: "alpha"},
+	}}
+	reads := newSpecTickReads()
+	got := specBoardDesigns(reads, storeFor, read)
+
+	ids := make([]string, 0, len(got.Candidates))
+	for _, c := range got.Candidates {
+		ids = append(ids, c.Spec.ID)
+	}
+	if want := []string{"gt-c2"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("candidates = %v, want %v", ids, want)
+	}
+	if len(got.Errors) != 1 || got.Errors[0] != "gt-c1: cannot read design: bd show: boom" {
+		t.Errorf("errors = %v, want gt-c1 dropped with the batch's error", got.Errors)
+	}
+	if reads.Calls() != 1 {
+		t.Errorf("tick cost counts %d calls, want the one batch", reads.Calls())
+	}
+}
+
 // The candidate loop reads no bead however many candidates the board holds, so
 // its reads do not grow with N. Each bead the tick slings still gets its
 // last-moment re-read before the sling (gt-bqj8q).
