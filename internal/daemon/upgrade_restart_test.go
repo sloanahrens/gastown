@@ -252,13 +252,15 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
 
 		now := time.Now()
+		// The sweep began before the marker's wait clock starts at now.
+		d.tierSweepStartedAt.Store(now.Add(-time.Minute).UnixNano())
 		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(time.Minute)) {
 			t.Fatal("restarted under a running tier sweep before the cap")
 		}
 		if d.upgradeRestartPending.Load() {
 			t.Fatal("landing workers were drained while only the tier sweep held the restart")
 		}
-		if got := strings.Count(logs.String(), "deferring the drain while the tier sweep that is running runs"); got != 1 {
+		if got := strings.Count(logs.String(), "landing passes continue while"); got != 1 {
 			t.Fatalf("deferral line logged %d times, want once per hold:\n%s", got, logs.String())
 		}
 		if got := strings.Count(logs.String(), "waiting for the tier sweep that is running"); got != 2 {
@@ -289,11 +291,19 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
 
 		now := time.Now()
+		// The sweep began before the marker's wait clock starts at now.
+		d.tierSweepStartedAt.Store(now.Add(-time.Minute).UnixNano())
 		if d.checkUpgradeRestart(now) {
 			t.Fatal("restarted under a running tier sweep before the cap")
 		}
+		if d.upgradeRestartPending.Load() {
+			t.Fatal("landing workers were drained before the cap while only the tier sweep held the restart")
+		}
 		if !d.checkUpgradeRestart(now.Add(tierSweepRestartCap)) {
 			t.Fatal("a sweep still running at the cap must not hold the restart further")
+		}
+		if !d.upgradeRestartPending.Load() {
+			t.Fatal("the drain did not start at the cap while the sweep still ran")
 		}
 		if !strings.Contains(logs.String(), "cutting the sweep short") {
 			t.Fatalf("no cut-short line at the cap:\n%s", logs.String())
@@ -311,6 +321,8 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
 
 		now := time.Now()
+		// The sweep began before the marker's wait clock starts at now.
+		d.tierSweepStartedAt.Store(now.Add(-time.Minute).UnixNano())
 		if d.checkUpgradeRestart(now) {
 			t.Fatal("restarted under a running tier sweep before the cap")
 		}
