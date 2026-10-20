@@ -22,6 +22,11 @@ import (
 
 const polecatAdmissionReservationTTL = 30 * time.Minute
 
+// polecatAdmissionReservationMaxAge bounds how long a reservation with a live
+// PID is kept. The reservation records no process start time, so a crashed
+// writer's PID reused by a long-lived process looks alive indefinitely.
+const polecatAdmissionReservationMaxAge = 2 * polecatAdmissionReservationTTL
+
 var acquirePolecatAdmissionFn = acquirePolecatAdmission
 
 type polecatCapacitySnapshot struct {
@@ -605,7 +610,7 @@ func cleanupStalePolecatAdmissionReservations(townRoot string, now time.Time) er
 			continue
 		}
 		age := now.Sub(reservation.CreatedAt)
-		if processAlive(reservation.PID) {
+		if age < polecatAdmissionReservationMaxAge && processAlive(reservation.PID) {
 			continue
 		}
 		if age < polecatAdmissionReservationTTL {
