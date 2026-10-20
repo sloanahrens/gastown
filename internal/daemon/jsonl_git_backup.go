@@ -52,6 +52,12 @@ const (
 	// recognizable, while a lock a live git process just created is not.
 	gitIndexLockGracePeriod = 2 * time.Minute
 
+	// jsonlSupplementalExportTimeout bounds one supplemental table's export.
+	// events is the largest table, and a loaded host killed it at the 60 s
+	// issues bound (gt-e38w6). Five minutes gives it room while a wedged dolt
+	// still cannot hold a 15-minute tick for long.
+	jsonlSupplementalExportTimeout = 5 * time.Minute
+
 	defaultSpikeThreshold = 0.50 // 50% delta triggers halt (was 20%, too sensitive for bulk ops)
 
 	// defaultEscalationTimeout is the per-attempt timeout for the gt escalate
@@ -536,6 +542,42 @@ func jsonlExportCommand(ctx context.Context, useServer bool, host string, port i
 	return cmd
 }
 
+// jsonlExportTimeoutFor returns how long one table's export may run before it is
+// killed. issues keeps the short jsonlExportTimeout; every supplemental table,
+// events above all, gets jsonlSupplementalExportTimeout.
+func jsonlExportTimeoutFor(table string) time.Duration {
+	if table == "issues" {
+		return jsonlExportTimeout
+	}
+	return jsonlSupplementalExportTimeout
+}
+
+// runJSONLExport runs cmd, which was built on ctx, and returns its stdout. A run
+// ctx's deadline killed names the table and the timeout, because the bare
+// "signal: killed" the process reports says neither.
+func runJSONLExport(ctx context.Context, cmd *exec.Cmd, table string, timeout time.Duration) ([]byte, error) {
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	if err := cmd.Run(); err != nil {
+		return nil, jsonlExportFailure(ctx, err, stderr.String(), table, timeout)
+	}
+	return stdout.Bytes(), nil
+}
+
+// jsonlExportFailure shapes a failed export's error: the table and timeout when
+// ctx's deadline killed it, and the process's stderr whenever it wrote any.
+func jsonlExportFailure(ctx context.Context, err error, stderr, table string, timeout time.Duration) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		err = fmt.Errorf("%s export killed after the %s timeout: %w", table, timeout, err)
+	}
+	if errMsg := strings.TrimSpace(stderr); errMsg != "" {
+		return fmt.Errorf("%w: %s", err, errMsg)
+	}
+	return err
+}
+
 // exportTableToJsonl runs a query and writes the result as JSONL to {dir}/{table}.jsonl,
 // continuing in {table}.2.jsonl, {table}.3.jsonl, ... when it outgrows one shard.
 // Connects to the running Dolt server via --host/--port to get current committed data,
@@ -546,8 +588,10 @@ func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir 
 	if err != nil {
 		return 0, err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), jsonlExportTimeout)
+	timeout := jsonlExportTimeoutFor(table)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	start := time.Now()
 
 	// Prefer querying the running server (accurate, up-to-date data) over embedded
 	// mode (reads on-disk state which may lag behind server commits).
@@ -572,26 +616,24 @@ func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir 
 
 	cmd := jsonlExportCommand(ctx, useServer, host, port, user, password, query, dataDir)
 
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	if err := cmd.Run(); err != nil {
-		errMsg := strings.TrimSpace(stderr.String())
-		if errMsg != "" {
-			return 0, fmt.Errorf("%s: %s", err, errMsg)
-		}
+	out, err := runJSONLExport(ctx, cmd, table, timeout)
+	if err != nil {
 		return 0, err
 	}
 
 	var result struct {
 		Rows []json.RawMessage `json:"rows"`
 	}
-	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+	if err := json.Unmarshal(out, &result); err != nil {
 		return 0, fmt.Errorf("parsing dolt output: %w", err)
 	}
 
-	return writeTableShards(dir, table, result.Rows, jsonlShardMaxBytes)
+	n, err := writeTableShards(dir, table, result.Rows, jsonlShardMaxBytes)
+	if err != nil {
+		return 0, err
+	}
+	d.logger.Printf("jsonl_git_backup: %s: exported %d rows in %s (timeout %s)", table, n, time.Since(start).Round(time.Millisecond), timeout)
+	return n, nil
 }
 
 // jsonlShardMaxBytes is where a table's export moves on to its next shard.
