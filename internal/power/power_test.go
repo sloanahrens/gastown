@@ -503,24 +503,50 @@ func TestStandbyDrainTimeoutExits3(t *testing.T) {
 }
 
 // A polecat inside its spawn grace reads "spawning", not "working", but its
-// session is still coming up: the town is not drained while it boots.
+// session is still coming up: the town is not drained while it boots. Once the
+// grace expires the inventory reads the same dead session as "stalled", which
+// is not work in flight: the drain proceeds and standby sets the ESTOP. Both
+// sides of that boundary are pinned here, so widening the spawn check to every
+// non-working state cannot pass and freeze standby on a town of stalled seats.
 func TestStandbyTreatsASpawningPolecatAsWork(t *testing.T) {
 	t.Parallel()
-	f := newFake(t)
-	f.setHealthy()
-	f.setPending(0)
-	f.polecats = []polecatRow{{Rig: "gastown", Name: "furiosa", State: "spawning"}}
-	o, _, errOut := f.optsWithOut()
-	o.Timeout = time.Minute
-	err := Standby(context.Background(), o)
-	if code := codeOf(t, err); code != ExitDrainTimeout {
-		t.Fatalf("exit code = %d, want %d (a spawning polecat must hold the drain)", code, ExitDrainTimeout)
+	tests := []struct {
+		name  string
+		state string
+		holds bool
+	}{
+		{name: "inside the grace holds the drain", state: "spawning", holds: true},
+		{name: "past the grace drains", state: "stalled", holds: false},
 	}
-	if !strings.Contains(errOut.String(), "gastown/furiosa working") {
-		t.Errorf("drain did not name the spawning polecat:\n%s", errOut)
-	}
-	if estop.IsActive(f.town) {
-		t.Error("a drain held by a spawning polecat must not set the ESTOP")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFake(t)
+			f.setHealthy()
+			f.setPending(0)
+			f.polecats = []polecatRow{{Rig: "gastown", Name: "furiosa", State: tt.state}}
+			o, _, errOut := f.optsWithOut()
+			o.Timeout = time.Minute
+			err := Standby(context.Background(), o)
+			if !tt.holds {
+				if err != nil {
+					t.Fatalf("Standby: %v (a %s polecat is not work in flight)", err, tt.state)
+				}
+				if !estop.IsActive(f.town) {
+					t.Error("standby did not set the ESTOP on a drained town")
+				}
+				return
+			}
+			if code := codeOf(t, err); code != ExitDrainTimeout {
+				t.Fatalf("exit code = %d, want %d (a %s polecat must hold the drain)", code, ExitDrainTimeout, tt.state)
+			}
+			if !strings.Contains(errOut.String(), "gastown/furiosa working") {
+				t.Errorf("drain did not name the %s polecat:\n%s", tt.state, errOut)
+			}
+			if estop.IsActive(f.town) {
+				t.Errorf("a drain held by a %s polecat must not set the ESTOP", tt.state)
+			}
+		})
 	}
 }
 
