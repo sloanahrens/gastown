@@ -596,6 +596,39 @@ func TestStandbyTreatsUnparseableLandingFieldAsNotDrained(t *testing.T) {
 	}
 }
 
+// TestPendingLandingsStaleZeroNotDrained pins the stale report: once the
+// daemon stops writing the health file, its last "0 pending" is a count from
+// before it stopped, not a drained queue. The queue is then unread, so
+// standby times out before it sets the ESTOP.
+func TestPendingLandingsStaleZeroNotDrained(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	err := townhealth.Write(f.town, townhealth.Report{
+		At:      f.now.Add(-townhealth.DefaultStaleAfter - time.Minute),
+		Verdict: townhealth.Green,
+		Fields: []townhealth.Field{
+			{Name: townhealth.FieldLanding, Rig: "gastown", Tag: townhealth.Recorded, Verdict: townhealth.Green, Value: "0 pending"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, _, _ := f.optsWithOut()
+	e := &engine{o: o}
+	if n, ok := e.pendingLandings(); ok {
+		t.Errorf("pendingLandings = (%d, true) for a stale report, want ok=false", n)
+	}
+	o.Timeout = time.Minute
+	err = Standby(context.Background(), o)
+	if code := codeOf(t, err); code != ExitDrainTimeout {
+		t.Fatalf("exit code = %d, want %d", code, ExitDrainTimeout)
+	}
+	if _, statErr := os.Stat(estop.FilePath(f.town)); !os.IsNotExist(statErr) {
+		t.Errorf("ESTOP was set from a stale landing count (stat err = %v)", statErr)
+	}
+}
+
 func TestStandbyWaitsForDoltGC(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)
