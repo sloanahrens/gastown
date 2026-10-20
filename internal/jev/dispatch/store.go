@@ -60,6 +60,12 @@ func CursorPath(townRoot string) string {
 	return filepath.Join(townRoot, constants.DirRuntime, "jev", "dispatch.cursor.json")
 }
 
+// RetryPath is the file that remembers the placements a pass could not get an
+// answer for, and how many passes have failed to answer each.
+func RetryPath(townRoot string) string {
+	return filepath.Join(townRoot, constants.DirRuntime, "jev", "dispatch.retries.json")
+}
+
 // ReadRecent returns the last n lines of the log, oldest first. A missing log
 // is empty, not an error, and a line that does not parse is skipped.
 func ReadRecent(path string, n int) ([]Line, error) {

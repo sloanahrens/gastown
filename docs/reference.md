@@ -1274,8 +1274,20 @@ Each pass appends one line per bead to `.runtime/jev/dispatch.jsonl`:
 `{ts, bead, attached_at, agent, answers, question_version, model}`. `answers`
 holds the five probabilities and `size: {score, confidence}`; `model` is the
 versioned model the API answered with, so a model upgrade shows in a scorecard.
-A bead whose question fails gets no line and is not asked again.
 `gt jev dispatch --recent N` prints the last N lines.
+
+A question that fails logs no line, and its cause never reaches the log. The
+placement goes into `.runtime/jev/dispatch.retries.json` with an attempt count
+and is asked again on the next pass, so a single transient failure costs time,
+not the prediction. A placement that fails three times is given up, and the
+daemon log names the bead and the cause.
+
+A failure that means Jev was out of reach — a timeout, a lost connection, a 401,
+a 5xx, a 429 that outlived its retry — is not the bead's fault. The pass stops
+at that placement and reports it, spending no attempt and dropping nothing, so
+an outage of any length leaves every pending bead for the next pass. Only a
+request Jev refused on its own terms (a 4xx other than 401) or answered
+unusably counts against a bead.
 
 The daemon patrol `jev_dispatch` (heartbeat step `jev-dispatch`) is off unless
 `daemon.json` sets it on, and runs every 15 minutes:

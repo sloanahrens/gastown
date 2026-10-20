@@ -10,9 +10,14 @@
 // Nothing in internal/specdispatch, internal/cmd/spec.go or the sling code
 // refers to this package.
 //
-// The pass owns no I/O beyond its log and cursor. The caller supplies the Jev
-// client, the bead list and the spend, so a test can run a pass with fakes and
-// no network. Open wires the production versions.
+// The pass owns no I/O beyond its log, its cursor and its retry queue. The
+// caller supplies the Jev client, the bead list and the spend, so a test can
+// run a pass with fakes and no network. Open wires the production versions.
+//
+// A question Jev cannot answer is never dropped on its first failure. A
+// failure the bead's own request caused is queued and asked again next pass,
+// up to maxAttempts; a failure that means Jev was out of reach stops the pass
+// where it is, so an outage costs no attempts and loses no placement.
 package dispatch
 
 import (
@@ -80,6 +85,9 @@ type Pass struct {
 	LogPath string
 	// CursorPath remembers the last placement a pass asked about.
 	CursorPath string
+	// RetryPath remembers the placements whose question failed and how many
+	// passes have failed to answer each, so the next pass asks them again.
+	RetryPath string
 
 	// SpentToday reports the USD spent by every Jev caller since local
 	// midnight.
@@ -99,9 +107,15 @@ type Pass struct {
 type Summary struct {
 	// Asked is the number of beads that got a log line this pass.
 	Asked int
-	// Failed is the number of beads whose question failed. They get no line
-	// and are not asked again: the cursor passes them.
+	// Failed is the number of beads whose question failed this pass. They get
+	// no line. Each is queued for the next pass unless it is Final.
 	Failed int
+	// Failures is why each of them failed, in the order the pass met them. The
+	// log line holds no cause, so this is where a caller shows one.
+	Failures []Failure
+	// GivenUp is how many of the failures were their last: those beads had
+	// already failed maxAttempts times and are not asked again.
+	GivenUp int
 	// CapReached is true when the pass stopped because the day's cap was
 	// spent. The beads it did not reach wait for the next pass.
 	CapReached bool
@@ -110,19 +124,50 @@ type Summary struct {
 	Started bool
 }
 
-// placement is one bead's placement on a seat.
+// Failure is one placement whose question failed this pass.
+type Failure struct {
+	// Bead is the placement's bead.
+	Bead string
+	// Attempts is how many passes have failed to get an answer for it, this
+	// one included.
+	Attempts int
+	// Err is why the ask failed. It never reaches the dispatch log.
+	Err error
+	// Final is true when the pass has given up: the placement reached
+	// maxAttempts failures and is not asked again.
+	Final bool
+}
+
+// placement is one bead's placement on a seat: its bead, the stamp the
+// dispatcher gave it, and, when an earlier pass already failed to ask about
+// it, how many attempts have failed so far.
 type placement struct {
 	issue      *beads.Issue
 	attachedAt time.Time
+	// queued is true when the cursor has already passed this placement and it
+	// waits in the retry queue. Asking it must not move the cursor.
+	queued bool
+	// attempts is how many passes have already failed to answer it.
+	attempts int
 }
 
 // Run does one pass. Placements are taken in the order they were stamped, and
 // each is logged and the cursor advanced before the next, so a pass that is
 // stopped partway never asks about a placement twice. A bead whose question was
 // cut short by ctx is neither logged nor passed: the next pass asks it again.
+//
+// A question that fails because of the bead's own request is queued in the
+// retry file with its attempt count and asked again next pass, until it has
+// failed maxAttempts times. A question that fails any other way means Jev could
+// not be reached: the pass stops at that placement, which stays queued or, for
+// a new placement, behind the unmoved cursor, and returns the cause.
+//
 // Run returns ErrBusy when another pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
+	if p.RetryPath == "" {
+		return sum, errors.New("the pass has no retry path")
+	}
 	release, err := lockRun(p.CursorPath)
 	if err != nil {
 		return sum, err
@@ -139,11 +184,22 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		return sum, battery.WriteCursor(p.CursorPath, battery.Cursor{Time: now})
 	}
 
+	queue, err := readRetries(p.RetryPath)
+	if err != nil {
+		return sum, err
+	}
 	all, err := p.Lister.Placed()
 	if err != nil {
 		return sum, fmt.Errorf("listing placed beads: %w", err)
 	}
-	for _, pl := range pending(all, cur) {
+	todo, dropped := queuePlacements(all, cur, queue)
+	if dropped {
+		if err := writeRetries(p.RetryPath, queue); err != nil {
+			return sum, err
+		}
+	}
+
+	for _, pl := range todo {
 		if err := ctx.Err(); err != nil {
 			return sum, err
 		}
@@ -155,13 +211,15 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			sum.CapReached = true
 			break
 		}
+
 		ans, err := p.choose(ctx, pl.issue)
-		if err != nil {
-			if cerr := ctx.Err(); cerr != nil {
-				return sum, cerr
-			}
-			sum.Failed++
-		} else {
+		if cerr := ctx.Err(); cerr != nil {
+			return sum, cerr
+		}
+		key := retryKey(pl.issue.ID, pl.attachedAt)
+
+		switch {
+		case err == nil:
 			line := Line{
 				TS:              p.now(),
 				Bead:            pl.issue.ID,
@@ -175,36 +233,90 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 				return sum, err
 			}
 			sum.Asked++
+			if pl.queued {
+				delete(queue, key)
+				if err := writeRetries(p.RetryPath, queue); err != nil {
+					return sum, err
+				}
+			}
+		case !beadFault(err):
+			// Jev is out of reach. Stop here rather than spend an attempt on
+			// every placement behind this one, and drop nothing: the cursor
+			// still points before this placement, or its queue entry stands.
+			return sum, fmt.Errorf("asking about %s: %w", pl.issue.ID, err)
+		default:
+			attempts := pl.attempts + 1
+			f := Failure{Bead: pl.issue.ID, Attempts: attempts, Err: err}
+			if attempts >= maxAttempts {
+				delete(queue, key)
+				f.Final = true
+				sum.GivenUp++
+			} else {
+				queue[key] = attempts
+			}
+			sum.Failures = append(sum.Failures, f)
+			sum.Failed++
+			// The queue is saved before the cursor moves past the placement, so
+			// a crash between the two re-asks it rather than dropping it.
+			if err := writeRetries(p.RetryPath, queue); err != nil {
+				return sum, err
+			}
 		}
-		if err := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: pl.attachedAt, ID: pl.issue.ID}); err != nil {
-			return sum, err
+
+		if !pl.queued {
+			if err := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: pl.attachedAt, ID: pl.issue.ID}); err != nil {
+				return sum, err
+			}
 		}
 	}
 	return sum, nil
 }
 
-// pending keeps the placements after the cursor, oldest first. A bead counts
-// when a worker holds it and its description carries an attached_at stamp.
-// Ties on the stamp break by ID, so the cursor orders placements completely.
-func pending(all []*beads.Issue, cur battery.Cursor) []placement {
-	var out []placement
+// queuePlacements returns what this pass should ask about, oldest first: every
+// placement after the cursor, and every queued placement the cursor already
+// passed. It drops queue entries for beads no longer on a seat, and reports
+// whether it did. Ties on the stamp break by ID, so the cursor orders
+// placements completely.
+func queuePlacements(all []*beads.Issue, cur battery.Cursor, queue retries) (todo []placement, dropped bool) {
+	placed := make(map[string]*beads.Issue, len(all))
 	for _, b := range all {
-		if b.Status != "in_progress" && b.Status != beads.StatusHooked {
+		if !onSeat(b) {
 			continue
 		}
-		at := attachedAt(b)
-		if at.IsZero() || !after(cur, at, b.ID) {
-			continue
+		if at := attachedAt(b); !at.IsZero() {
+			placed[retryKey(b.ID, at)] = b
 		}
-		out = append(out, placement{issue: b, attachedAt: at})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if !out[i].attachedAt.Equal(out[j].attachedAt) {
-			return out[i].attachedAt.Before(out[j].attachedAt)
+	for key := range queue {
+		if _, ok := placed[key]; !ok {
+			delete(queue, key)
+			dropped = true
 		}
-		return out[i].issue.ID < out[j].issue.ID
+	}
+	for key, b := range placed {
+		at := attachedAt(b)
+		if after(cur, at, b.ID) {
+			todo = append(todo, placement{issue: b, attachedAt: at})
+			continue
+		}
+		// Behind the cursor, so a queue entry is the only reason to ask again.
+		if attempts, ok := queue[key]; ok {
+			todo = append(todo, placement{issue: b, attachedAt: at, queued: true, attempts: attempts})
+		}
+	}
+	sort.Slice(todo, func(i, j int) bool {
+		if !todo[i].attachedAt.Equal(todo[j].attachedAt) {
+			return todo[i].attachedAt.Before(todo[j].attachedAt)
+		}
+		return todo[i].issue.ID < todo[j].issue.ID
 	})
-	return out
+	return todo, dropped
+}
+
+// onSeat reports whether a bead's status says a worker holds it: in_progress,
+// or hooked, which is the status a sling gives a bead it places.
+func onSeat(b *beads.Issue) bool {
+	return b.Status == "in_progress" || b.Status == beads.StatusHooked
 }
 
 // attachedAt is the bead's attached_at stamp, zero when it has none or it does

@@ -78,7 +78,15 @@ func (d *Daemon) runJevDispatch() {
 		d.logger.Printf("jev_dispatch: error: %v", err)
 		return
 	}
+	for _, f := range sum.Failures {
+		if f.Final {
+			d.logger.Printf("jev_dispatch: %s failed %d times, giving up: %v", f.Bead, f.Attempts, f.Err)
+			continue
+		}
+		d.logger.Printf("jev_dispatch: %s failed, retrying next pass: %v", f.Bead, f.Err)
+	}
 	if sum.Asked > 0 || sum.Failed > 0 || sum.CapReached {
-		d.logger.Printf("jev_dispatch: asked %d beads, %d failed (daily cap reached: %v)", sum.Asked, sum.Failed, sum.CapReached)
+		d.logger.Printf("jev_dispatch: asked %d beads, %d failed, %d given up (daily cap reached: %v)",
+			sum.Asked, sum.Failed, sum.GivenUp, sum.CapReached)
 	}
 }

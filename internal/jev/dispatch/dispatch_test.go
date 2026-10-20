@@ -109,6 +109,7 @@ type harness struct {
 	waits  []time.Duration
 	log    string
 	cursor string
+	retry  string
 }
 
 // newHarness is one pass over fakes whose cursor sits before every placement.
@@ -120,12 +121,14 @@ func newHarness(t *testing.T, all []*beads.Issue, script ...fakeResult) *harness
 		lister: &fakeLister{all: all},
 		log:    filepath.Join(dir, "dispatch.jsonl"),
 		cursor: filepath.Join(dir, "dispatch.cursor.json"),
+		retry:  filepath.Join(dir, "dispatch.retries.json"),
 	}
 	h.pass = &Pass{
 		Asker:      h.asker,
 		Lister:     h.lister,
 		LogPath:    h.log,
 		CursorPath: h.cursor,
+		RetryPath:  h.retry,
 		SpentToday: func() (float64, error) { return 0, nil },
 		CapUSD:     1,
 		Now:        func() time.Time { return t0.Add(time.Hour) },
@@ -524,24 +527,116 @@ func TestJevDispatchPassRetriesOneRateLimit(t *testing.T) {
 	}
 }
 
-// A failed question logs nothing and the cursor passes the bead, so a bead
-// Jev cannot answer is not asked every interval.
-func TestJevDispatchPassCountsAFailureAndMovesOn(t *testing.T) {
+// A question the bead's own request made fail logs nothing, keeps its cause,
+// and is asked again next pass: one failure never costs the prediction.
+func TestJevDispatchPassRetriesABeadFaultNextPass(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, []*beads.Issue{placed("gt-a", 10, specBody), placed("gt-b", 20, specBody)},
-		fakeResult{err: jev.ErrBadResponse})
+		fakeResult{err: &jev.StatusError{Status: 413, Message: "state too large"}})
 
 	sum := mustRun(t, h.pass)
 
-	if sum.Asked != 1 || sum.Failed != 1 {
+	if sum.Asked != 1 || sum.Failed != 1 || sum.GivenUp != 0 {
 		t.Fatalf("summary = %+v, want one failed and one asked", sum)
 	}
-	got := h.lines(t)
-	if len(got) != 1 || got[0]["bead"] != "gt-b" {
+	if len(sum.Failures) != 1 || sum.Failures[0].Bead != "gt-a" || sum.Failures[0].Attempts != 1 ||
+		sum.Failures[0].Final || sum.Failures[0].Err == nil || !strings.Contains(sum.Failures[0].Err.Error(), "too large") {
+		t.Errorf("failures = %+v, want gt-a's cause and its first attempt", sum.Failures)
+	}
+	if got := h.lines(t); len(got) != 1 || got[0]["bead"] != "gt-b" {
 		t.Errorf("log = %v, want a line for gt-b only", got)
 	}
-	if again := mustRun(t, h.pass); again.Asked != 0 || again.Failed != 0 {
-		t.Errorf("second pass = %+v, want nothing", again)
+
+	// The next pass asks the queued bead again, and it gets its line.
+	sum = mustRun(t, h.pass)
+	got := h.lines(t)
+	if sum.Asked != 1 || sum.Failed != 0 || len(got) != 2 || got[1]["bead"] != "gt-a" {
+		t.Fatalf("second pass summary %+v, log %v, want gt-a answered", sum, got)
+	}
+	if _, err := os.Stat(h.retry); !os.IsNotExist(err) {
+		t.Errorf("the retry queue outlived its last entry: %v", err)
+	}
+	if third := mustRun(t, h.pass); third.Asked != 0 || third.Failed != 0 {
+		t.Errorf("third pass = %+v, want nothing", third)
+	}
+}
+
+// A bead that keeps failing is given up after maxAttempts asks, with its cause
+// still reported, so one bead cannot hold the queue forever.
+func TestJevDispatchPassGivesUpAfterMaxAttempts(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, []*beads.Issue{placed("gt-a", 10, specBody)},
+		fakeResult{err: jev.ErrBadResponse}, fakeResult{err: jev.ErrBadResponse}, fakeResult{err: jev.ErrBadResponse})
+
+	for pass := 1; pass <= maxAttempts; pass++ {
+		sum := mustRun(t, h.pass)
+		wantFinal := pass == maxAttempts
+		if sum.Failed != 1 || len(sum.Failures) != 1 || sum.Failures[0].Attempts != pass || sum.Failures[0].Final != wantFinal {
+			t.Fatalf("pass %d summary = %+v, want attempt %d final=%v", pass, sum, pass, wantFinal)
+		}
+		if wantFinal && sum.GivenUp != 1 {
+			t.Errorf("pass %d did not record the give-up: %+v", pass, sum)
+		}
+	}
+	if got := h.lines(t); len(got) != 0 {
+		t.Errorf("log = %v, want no line for a bead that never answered", got)
+	}
+	if again := mustRun(t, h.pass); again.Asked != 0 || again.Failed != 0 || len(h.asker.states) != maxAttempts {
+		t.Errorf("pass after the give-up = %+v after %d asks, want nothing", again, len(h.asker.states))
+	}
+}
+
+// A failure that means Jev was out of reach stops the pass where it is: the
+// cursor does not move, no attempt is counted, and nothing behind it is asked
+// or lost. The whole queue waits for a Jev that answers.
+func TestJevDispatchPassStopsOnATransientFailure(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, []*beads.Issue{placed("gt-a", 10, specBody), placed("gt-b", 20, specBody)},
+		fakeResult{err: jev.ErrTimeout})
+
+	_, err := h.pass.Run(context.Background())
+
+	if !errors.Is(err, jev.ErrTimeout) || !strings.Contains(err.Error(), "gt-a") {
+		t.Fatalf("err = %v, want the bead and the timeout", err)
+	}
+	if len(h.asker.states) != 1 {
+		t.Errorf("asked %d beads, want the pass to stop at the first", len(h.asker.states))
+	}
+	if got := h.lines(t); len(got) != 0 {
+		t.Errorf("log = %v, want none", got)
+	}
+	cur, _, _ := battery.ReadCursor(h.cursor)
+	if !cur.Time.Equal(t0.Add(-time.Hour)) {
+		t.Errorf("cursor moved to %+v on a failure that blamed no bead", cur)
+	}
+	if _, err := os.Stat(h.retry); !os.IsNotExist(err) {
+		t.Errorf("an outage queued a bead as its own fault: %v", err)
+	}
+
+	// When Jev answers again, both beads are asked for the first time.
+	h.asker.script = nil
+	sum := mustRun(t, h.pass)
+	if sum.Asked != 2 || sum.Failed != 0 || len(h.asker.states) != 3 {
+		t.Errorf("recovery pass = %+v after %d asks, want both beads asked once", sum, len(h.asker.states))
+	}
+}
+
+// A queued bead that leaves its seat before the retry is dropped: there is
+// nothing left to predict.
+func TestJevDispatchPassDropsAQueuedBeadThatLeftItsSeat(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, []*beads.Issue{placed("gt-a", 10, specBody)},
+		fakeResult{err: &jev.StatusError{Status: 400, Message: "no"}})
+	mustRun(t, h.pass)
+
+	h.lister.all = nil
+	sum := mustRun(t, h.pass)
+
+	if sum.Asked != 0 || sum.Failed != 0 {
+		t.Errorf("summary = %+v, want nothing to ask", sum)
+	}
+	if _, err := os.Stat(h.retry); !os.IsNotExist(err) {
+		t.Errorf("the queue kept a bead no longer on a seat: %v", err)
 	}
 }
 

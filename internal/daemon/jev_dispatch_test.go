@@ -125,10 +125,10 @@ type stubPlaced struct{ all []*beads.Issue }
 
 func (s stubPlaced) Placed() ([]*beads.Issue, error) { return s.all, nil }
 
-// countingAsker answers every battery the same way and counts the calls.
-type countingAsker struct{ calls int }
+// dispatchCountingAsker answers every battery the same way and counts the calls.
+type dispatchCountingAsker struct{ calls int }
 
-func (c *countingAsker) Ask(_ context.Context, _ any, _ map[string]jev.Question) (*jev.Answers, error) {
+func (c *dispatchCountingAsker) Ask(_ context.Context, _ any, _ map[string]jev.Question) (*jev.Answers, error) {
 	c.calls++
 	return &jev.Answers{
 		Model: "jev-test-1",
@@ -150,7 +150,7 @@ type jevDispatchRig struct {
 	opened int
 	got    jevdispatch.Settings
 	pass   *jevdispatch.Pass
-	asker  *countingAsker
+	asker  *dispatchCountingAsker
 }
 
 func newJevDispatchRig(t *testing.T) *jevDispatchRig {
@@ -160,7 +160,7 @@ func newJevDispatchRig(t *testing.T) *jevDispatchRig {
 		town:  town,
 		logs:  &bytes.Buffer{},
 		clock: clockwork.NewFakeClockAt(time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)),
-		asker: &countingAsker{},
+		asker: &dispatchCountingAsker{},
 	}
 	r.d = &Daemon{
 		config: &Config{TownRoot: town},
@@ -175,6 +175,7 @@ func newJevDispatchRig(t *testing.T) *jevDispatchRig {
 		Lister:     stubPlaced{},
 		LogPath:    jevdispatch.LogPath(town),
 		CursorPath: jevdispatch.CursorPath(town),
+		RetryPath:  jevdispatch.RetryPath(town),
 		SpentToday: func() (float64, error) { return 0, nil },
 		CapUSD:     1,
 		Now:        func() time.Time { return time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC) },
@@ -293,6 +294,29 @@ func TestJevDispatchRunReportsTheBeadsAsked(t *testing.T) {
 	if err != nil || len(lines) != 1 || lines[0].Bead != "gt-new" || lines[0].Model != "jev-test-1" {
 		t.Errorf("log lines = %+v, %v, want one line for gt-new", lines, err)
 	}
+}
+
+// A question Jev cannot answer is reported with its cause: the log line never
+// carries one, so the daemon log is where a swallowed failure shows.
+func TestJevDispatchRunLogsWhyAQuestionFailed(t *testing.T) {
+	t.Parallel()
+	r := newJevDispatchRig(t)
+	r.placeBead(t)
+	r.pass.Asker = dispatchFailingAsker{err: &jev.StatusError{Status: 413, Message: "state too large"}}
+
+	r.d.runJevDispatch()
+
+	if !strings.Contains(r.logs.String(), "gt-new failed, retrying next pass") ||
+		!strings.Contains(r.logs.String(), "state too large") {
+		t.Errorf("log = %q, want the bead and the cause", r.logs)
+	}
+}
+
+// dispatchFailingAsker fails every battery with one error.
+type dispatchFailingAsker struct{ err error }
+
+func (f dispatchFailingAsker) Ask(context.Context, any, map[string]jev.Question) (*jev.Answers, error) {
+	return nil, f.err
 }
 
 // The pass is under the shared cap: another battery's spend today, read from

@@ -18,31 +18,15 @@ var jevDispatchRecent int
 var jevDispatchCmd = &cobra.Command{
 	Use:   "dispatch",
 	Short: "Predict how each bead just placed on a seat will land, and log every prediction",
-	Long: `Run one pass of the dispatch battery over the beads placed on a seat since
-the last pass: a bead that is in_progress or hooked and whose description carries
-an attached_at stamp later than the pass's cursor. For each one, Jev is asked
-whether a polecat will land it on its first merge attempt, whether one worker
-finishes it in twenty minutes, whether every acceptance item can be run or shown
-in the worktree, whether it needs a reasoning model, whether it touches the
-daemon, and how big it is. Every bead gets one line in
-<town>/.runtime/jev/dispatch.jsonl.
-
-The pass is advisory: it never edits, labels or comments on a bead, and it is
-not part of the spec dispatcher's tick or of a sling. It stops for the day once
-the town's Jev spend, every caller counted, reaches
-patrols.jev_dispatch.max_usd_per_day (default 1), and it needs
-patrols.jev_dispatch.usd_per_billion_tokens to price that spend. The config keys
-are read whether or not the daemon's patrol is enabled, so a manual pass works
-before the patrol is switched on.
-
-The first pass only starts the cursor at its own time, so it asks about no bead
-that was placed before it.
+	Long: `Ask Jev the dispatch battery about the beads placed on a seat since the last
+pass, and append one prediction per bead to the town's dispatch log. Advisory
+and log-only: it never edits, labels or comments on a bead. A question that
+fails is asked again on the next pass until it has failed three times.
 
 --recent N prints the last N lines of the log instead of running a pass.
 
-Examples:
-  gt jev dispatch
-  gt jev dispatch --recent 20`,
+The state, the log line, the cursor and the patrol config keys are in
+docs/reference.md under "Dispatch battery".`,
 	Args: cobra.NoArgs,
 	RunE: runJevDispatch,
 }
@@ -82,14 +66,25 @@ func runJevDispatchPass(out, errw io.Writer, townRoot string) error {
 	if err != nil {
 		return err
 	}
-	switch {
-	case sum.Started:
-		fmt.Fprintln(out, "jev dispatch: first pass; cursor set to now, no beads asked")
-	case sum.CapReached:
-		fmt.Fprintf(out, "jev dispatch: asked %d beads, %d failed; the daily cap was reached, the rest wait for the next pass\n", sum.Asked, sum.Failed)
-	default:
-		fmt.Fprintf(out, "jev dispatch: asked %d beads, %d failed\n", sum.Asked, sum.Failed)
+	for _, f := range sum.Failures {
+		if f.Final {
+			fmt.Fprintf(errw, "jev dispatch: %s failed %d times, giving up: %v\n", f.Bead, f.Attempts, f.Err)
+			continue
+		}
+		fmt.Fprintf(errw, "jev dispatch: %s failed, retrying next pass: %v\n", f.Bead, f.Err)
 	}
+	if sum.Started {
+		fmt.Fprintln(out, "jev dispatch: first pass; cursor set to now, no beads asked")
+		return nil
+	}
+	msg := fmt.Sprintf("jev dispatch: asked %d beads, %d failed", sum.Asked, sum.Failed)
+	if sum.GivenUp > 0 {
+		msg += fmt.Sprintf(", %d given up", sum.GivenUp)
+	}
+	if sum.CapReached {
+		msg += "; the daily cap was reached, the rest wait for the next pass"
+	}
+	fmt.Fprintln(out, msg)
 	return nil
 }
 

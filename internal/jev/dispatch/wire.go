@@ -26,10 +26,25 @@ type Settings struct {
 	USDPerBillionTokens float64
 }
 
+// beadLister is the part of *beads.Beads the pass's lister uses. It is an
+// interface so a test can see the query the production lister sends without a
+// Dolt server.
+type beadLister interface {
+	List(beads.ListOptions) ([]*beads.Issue, error)
+}
+
 // Open wires the production pass for a town: the Jev client writing to the
 // usage ledger under the Caller name, the rig's beads, and the spend read from
 // the same ledger. warnings receives the ledger's own warnings and may be nil.
 func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
+	return open(townRoot, s, warnings, jev.NewClient, func(dir string) beadLister { return beads.New(dir) })
+}
+
+// open is Open with the Jev client and the bead store's constructors injected,
+// so a test can check the wiring without a key file in the environment or a
+// Dolt server.
+func open(townRoot string, s Settings, warnings io.Writer,
+	newClient func(...jev.Option) (*jev.Client, error), listerOf func(string) beadLister) (*Pass, error) {
 	price := s.USDPerBillionTokens
 	if !(price > 0 && !math.IsInf(price, 0)) {
 		return nil, fmt.Errorf("jev_dispatch.usd_per_billion_tokens is required and must be above zero, not %v", price)
@@ -42,7 +57,7 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 		return nil, fmt.Errorf("jev_dispatch.max_usd_per_day must be above zero, not %v", capUSD)
 	}
 
-	client, err := jev.NewClient(
+	client, err := newClient(
 		jev.WithLedger(jev.UsageLedgerPath(townRoot)),
 		jev.WithCaller(Caller),
 		jev.WithWarnings(warnings),
@@ -60,9 +75,10 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 
 	return &Pass{
 		Asker:      client,
-		Lister:     rigBeads{b: beads.New(beadsDir)},
+		Lister:     rigBeads{b: listerOf(beadsDir)},
 		LogPath:    LogPath(townRoot),
 		CursorPath: CursorPath(townRoot),
+		RetryPath:  RetryPath(townRoot),
 		SpentToday: func() (float64, error) { return town.Spent(time.Now) },
 		CapUSD:     capUSD,
 	}, nil
@@ -70,7 +86,7 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 
 // rigBeads reads a rig's beads through the beads client. It never writes.
 type rigBeads struct {
-	b *beads.Beads
+	b beadLister
 }
 
 // Placed lists the beads a worker holds: in_progress, and hooked, which is the
