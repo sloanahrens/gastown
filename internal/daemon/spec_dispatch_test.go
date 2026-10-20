@@ -493,3 +493,97 @@ func TestSpecDispatchCommandNamesTheCacheOwner(t *testing.T) {
 	}
 	t.Errorf("tick env lacks %q", want)
 }
+
+// The bound is the one-sling bound plus an allowance for each sling past the
+// first, so a tick slinging three beads gets more time than one slinging one,
+// and never a zero bound (gt-bbfpr).
+func TestSpecDispatchBoundScalesWithMaxPerTick(t *testing.T) {
+	t.Parallel()
+	const timeout = 5 * time.Minute
+	one := specDispatchBound(timeout, 1)
+	if one != timeout {
+		t.Errorf("bound for one sling = %v, want %v", one, timeout)
+	}
+	if got := specDispatchBound(timeout, 0); got != one {
+		t.Errorf("bound for max_per_tick 0 = %v, want the one-sling bound %v", got, one)
+	}
+	three := specDispatchBound(timeout, 3)
+	if three <= one {
+		t.Errorf("bound for 3 slings = %v, want more than the bound for 1 (%v)", three, one)
+	}
+	if want := timeout + 2*specDispatchSlingAllowance; three != want {
+		t.Errorf("bound for 3 slings = %v, want %v", three, want)
+	}
+}
+
+// The tick's bound reads max_per_tick from the patrol block the tick reads, and
+// an absent block counts as one sling (gt-bbfpr).
+func TestSpecDispatchMaxPerTickReadsThePatrolBlock(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	d := &Daemon{config: &Config{TownRoot: townRoot}}
+	if got := d.specDispatchMaxPerTick(); got != 1 {
+		t.Errorf("no patrol block: max_per_tick = %d, want 1", got)
+	}
+	cfg := &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{MaxPerTick: 3}}}
+	if err := SavePatrolConfig(townRoot, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if got := d.specDispatchMaxPerTick(); got != 3 {
+		t.Errorf("max_per_tick = %d, want 3 from the patrol block", got)
+	}
+}
+
+// A tick killed after it slinged logs one dispatched line per sling it hooked
+// before the report it never printed, with the elapsed time and the bound.
+func TestSpecDispatchKilledTickLogsEachSlingItMade(t *testing.T) {
+	t.Parallel()
+	partial := "  ✓ Work attached to hook (status=hooked)\n  ✓ Work attached to hook (status=hooked)\n"
+	fake := newFakeCLI(func([]string) cliReply { return cliReply{stdout: partial, code: 1, stderr: "signal: killed"} })
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+
+	d.runSpecDispatch()
+
+	got := lines()
+	if n := countContaining(got, "spec_dispatch: dispatched:", "hooked before the tick failed"); n != 2 {
+		t.Errorf("dispatched lines = %d, want one per sling hooked (2): %v", n, got)
+	}
+	bound := specDispatchBound(specDispatchTimeout, 1).String() + " bound"
+	if n := countContaining(got, "spec_dispatch: tick failed after", bound, "signal: killed"); n != 1 {
+		t.Errorf("failure line with elapsed time and bound = %d, want one: %v", n, got)
+	}
+}
+
+// A tick killed before it hooked any sling logs the failure with the elapsed
+// time and the bound, and no dispatched line.
+func TestSpecDispatchKilledTickBeforeAnySlingLogsNoDispatch(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func([]string) cliReply { return cliReply{code: 1, stderr: "signal: killed"} })
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+
+	d.runSpecDispatch()
+
+	got := lines()
+	if n := countContaining(got, "dispatched:"); n != 0 {
+		t.Errorf("dispatched lines = %d, want none: %v", n, got)
+	}
+	if n := countContaining(got, "spec_dispatch: tick failed after", specDispatchBound(specDispatchTimeout, 1).String()+" bound"); n != 1 {
+		t.Errorf("failure line with elapsed time and bound = %d, want one: %v", n, got)
+	}
+}
+
+// specDispatchFake is a daemon whose tick runs against fake, in a town with no
+// patrol block, so the bound is the one-sling bound.
+func specDispatchFake(t *testing.T, fake *fakeCLI, logger *log.Logger) *Daemon {
+	t.Helper()
+	return &Daemon{
+		config:       &Config{TownRoot: t.TempDir()},
+		ctx:          context.Background(),
+		logger:       logger,
+		gtPath:       "gt",
+		execCmd:      fake.run,
+		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(true)}}},
+	}
+}
