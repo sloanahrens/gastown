@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -43,6 +44,9 @@ type Mailbox struct {
 
 	// bd runs bd for the beads-mode methods; nil is the bd on PATH.
 	bd bdRunner
+
+	// warn receives non-fatal read warnings; nil is os.Stderr.
+	warn io.Writer
 }
 
 // NewMailbox creates a mailbox for the given JSONL path (legacy mode).
@@ -185,7 +189,7 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 	}()
 	go func() {
 		defer wg.Done()
-		cc.messages = m.queryIssueMessagesByCC(beadsDir, identities)
+		cc.messages, cc.err = m.queryIssueMessagesByCC(beadsDir, identities)
 	}()
 	go func() {
 		defer wg.Done()
@@ -199,6 +203,13 @@ func (m *Mailbox) listFromDir(beadsDir string) ([]*Message, error) {
 	// A missing wisps table means no wisp was written yet; any other failure is returned.
 	if wisps.err != nil && !isMissingWispTable(wisps.err) {
 		return nil, wisps.err
+	}
+
+	// CC mail is secondary to the mail addressed to this identity: a failed CC
+	// query returns what the other queries found and says so, rather than
+	// hiding every message behind one slow bd call (gt-3ueel).
+	if cc.err != nil {
+		m.warnf("Warning: CC mail query failed for %s, the list may be missing CC'd messages: %v\n", m.identity, cc.err)
 	}
 
 	// Deduplicate messages across queries (assignee + CC + wisps may overlap).
@@ -254,8 +265,12 @@ func (m *Mailbox) queryIssueMessagesByAssignee(beadsDir string, identities []str
 	return messages, nil
 }
 
-func (m *Mailbox) queryIssueMessagesByCC(beadsDir string, identities []string) []BeadsMessage {
+// queryIssueMessagesByCC returns the CC'd messages it could read. A failed
+// identity does not stop the others; the first failure is returned beside the
+// partial result.
+func (m *Mailbox) queryIssueMessagesByCC(beadsDir string, identities []string) ([]BeadsMessage, error) {
 	var messages []BeadsMessage
+	var firstErr error
 	for _, id := range identities {
 		args := []string{"list",
 			"--label", "gt:message",
@@ -267,16 +282,27 @@ func (m *Mailbox) queryIssueMessagesByCC(beadsDir string, identities []string) [
 		ctx, cancel := bdReadCtx()
 		stdout, err := runBdCommand(ctx, m.bd, args, m.workDir, beadsDir)
 		cancel()
-		if err != nil {
-			continue
+		if err == nil {
+			var msgs []BeadsMessage
+			if msgs, err = parseBeadsListOutput(stdout); err == nil {
+				messages = append(messages, msgs...)
+				continue
+			}
 		}
-		msgs, err := parseBeadsListOutput(stdout)
-		if err != nil {
-			continue
+		if firstErr == nil {
+			firstErr = err
 		}
-		messages = append(messages, msgs...)
 	}
-	return messages
+	return messages, firstErr
+}
+
+// warnf writes a non-fatal read warning to the mailbox's warning writer.
+func (m *Mailbox) warnf(format string, args ...any) {
+	w := m.warn
+	if w == nil {
+		w = os.Stderr
+	}
+	_, _ = fmt.Fprintf(w, format, args...)
 }
 
 func parseBeadsListOutput(stdout []byte) ([]BeadsMessage, error) {

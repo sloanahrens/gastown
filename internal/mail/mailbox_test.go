@@ -1,6 +1,7 @@
 package mail
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -1002,37 +1003,110 @@ func TestListLegacyLongLine(t *testing.T) {
 	}
 }
 
-// Archive and PurgeArchive must both take the archive lock. That lock is what
-// keeps an append from landing between a purge's read and its rewrite. The test
-// makes the lock unacquirable with a dangling symlink into a directory that does
-// not exist, so the lock file cannot be opened. Each operation must then fail on
-// the lock instead of running unlocked.
-func TestPurgeArchiveConcurrentArchive(t *testing.T) {
+// A failed CC query returns the mail the other queries found and names the
+// failure in a warning, instead of failing the whole list or hiding it.
+func TestListFromDirCCErrorKeepsOtherMail(t *testing.T) {
 	t.Parallel()
 	beadsDir := t.TempDir()
-	m := NewMailboxWithBeadsDir("gastown/synth", t.TempDir(), beadsDir)
-	missing := filepath.Join(t.TempDir(), "missing", "archive.lock")
-	if err := os.Symlink(missing, m.ArchivePath()+".lock"); err != nil {
-		t.Fatalf("block archive lock: %v", err)
-	}
+	writeTypesSentinel(t, beadsDir)
 
-	fresh := time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)
 	bd := &bdScript{answer: func(c bdCall) (string, string, int) {
 		switch c.Args[0] {
-		case "show":
-			return fmt.Sprintf(`[{"id":%q,"title":"msg","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":%q}]`,
-				c.Args[1], fresh), "", 0
-		case "close":
-			return "", "", 0
+		case "list":
+			for _, arg := range c.Args {
+				if strings.HasPrefix(arg, "cc:") {
+					return "", "Error: context deadline exceeded: timed out waiting for bd list\n", 1
+				}
+			}
+			return `[{"id":"direct-1","title":"Direct","description":"","status":"open","priority":2,"assignee":"gastown/synth","created_at":"2026-06-12T12:00:00Z","labels":["gt:message","from:mayor/"]}]`, "", 0
+		case "sql":
+			return "[]", "", 0
 		}
 		return "", "unexpected bd args: " + strings.Join(c.Args, " "), 1
 	}}
-	m.bd = bd.run
 
-	if err := m.Archive("race-archive"); err == nil || !strings.Contains(err.Error(), "acquiring archive lock") {
-		t.Errorf("Archive with the archive lock unavailable: err = %v, want an archive lock error", err)
+	var warn bytes.Buffer
+	m := NewMailboxWithBeadsDir("gastown/synth", t.TempDir(), beadsDir)
+	m.bd = bd.run
+	m.warn = &warn
+
+	msgs, err := m.List()
+	if err != nil {
+		t.Fatalf("List error = %v, want the assignee mail with a warning", err)
 	}
-	if _, err := m.PurgeArchive(1); err == nil || !strings.Contains(err.Error(), "acquiring archive lock") {
-		t.Errorf("PurgeArchive with the archive lock unavailable: err = %v, want an archive lock error", err)
+	if len(msgs) != 1 || msgs[0].ID != "direct-1" {
+		t.Fatalf("List = %v, want the one assignee message", msgs)
+	}
+	got := warn.String()
+	if !strings.Contains(got, "CC mail query failed") || !strings.Contains(got, "timed out waiting for bd list") {
+		t.Fatalf("warning = %q, want it to name the CC query failure", got)
+	}
+}
+
+// Archive appends and PurgeArchive rewrites share one archive file. Appends
+// racing a purge must all survive it: every fresh message is still archived
+// once the writers and the purges have finished.
+func TestPurgeArchiveConcurrentArchive(t *testing.T) {
+	t.Parallel()
+	m := NewMailboxWithBeadsDir("gastown/synth", t.TempDir(), t.TempDir())
+
+	old := time.Now().AddDate(0, 0, -30)
+	for i := 0; i < 20; i++ {
+		if err := m.appendToArchive(&Message{ID: fmt.Sprintf("old-%d", i), Timestamp: old}); err != nil {
+			t.Fatalf("seed archive: %v", err)
+		}
+	}
+
+	const writers, perWriter = 4, 60
+	var wg, purger sync.WaitGroup
+	done := make(chan struct{})
+	errs := make(chan error, writers*perWriter+1024)
+	for w := 0; w < writers; w++ {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < perWriter; i++ {
+				msg := &Message{ID: fmt.Sprintf("fresh-%d-%d", w, i), Timestamp: time.Now()}
+				if err := m.appendToArchive(msg); err != nil {
+					errs <- err
+				}
+			}
+		}(w)
+	}
+	// The purger rewrites the archive until every writer has finished.
+	purger.Add(1)
+	go func() {
+		defer purger.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+			}
+			if _, err := m.PurgeArchive(1); err != nil {
+				errs <- err
+			}
+		}
+	}()
+	wg.Wait()
+	close(done)
+	purger.Wait()
+	close(errs)
+	for err := range errs {
+		t.Errorf("concurrent archive or purge: %v", err)
+	}
+
+	left, err := m.ListArchived()
+	if err != nil {
+		t.Fatalf("ListArchived: %v", err)
+	}
+	fresh := 0
+	for _, msg := range left {
+		if strings.HasPrefix(msg.ID, "fresh-") {
+			fresh++
+		}
+	}
+	if fresh != writers*perWriter {
+		t.Fatalf("archived fresh messages = %d, want %d: a purge dropped appended mail", fresh, writers*perWriter)
 	}
 }
