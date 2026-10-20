@@ -692,3 +692,43 @@ func TestBackupCatchUpDeferredBackupRetriesNextTick(t *testing.T) {
 		t.Errorf("backup calls = %v, want gt and hq on the tick after the deferral", f.backupCalls)
 	}
 }
+
+// A deferral the next tick retries is logged once per reason per retry gap,
+// not on every 5-minute tick, and a backup that runs forgets it.
+func TestBackupCatchUpDeferralLogIsThrottled(t *testing.T) {
+	t.Parallel()
+	d, f := catchUpDaemon(t)
+	var buf lockedBuffer
+	d.logger = log.New(&buf, "", 0)
+	deferrals := func() int { return strings.Count(buf.String(), "catch-up backup deferred") }
+	tick := func(after time.Duration) {
+		d.maint.now = func() time.Time { return catchUpNow.Add(after) }
+		d.runScheduledMaintenance()
+	}
+
+	d.doltMaintMu.RLock() // a daemon Dolt task in flight
+	for _, after := range []time.Duration{0, 5 * time.Minute, 10 * time.Minute} {
+		tick(after)
+	}
+	if n := deferrals(); n != 1 {
+		t.Errorf("%d deferral lines over three ticks, want 1:\n%s", n, buf.String())
+	}
+	tick(maintenanceCatchUpRetry)
+	if n := deferrals(); n != 2 {
+		t.Errorf("%d deferral lines after the retry gap, want 2:\n%s", n, buf.String())
+	}
+	d.doltMaintMu.RUnlock()
+	if len(f.backupCalls) != 0 {
+		t.Fatalf("backup ran while a Dolt task held the lock: %v", f.backupCalls)
+	}
+
+	// The held lock lifts: the backup runs and the next hold is logged on its
+	// first tick, not after the previous reason's gap.
+	tick(maintenanceCatchUpRetry + 5*time.Minute)
+	if len(f.backupCalls) != 2 {
+		t.Fatalf("backup calls = %v, want gt and hq once the lock lifted", f.backupCalls)
+	}
+	if why := d.catchUpDeferWhy; why != "" {
+		t.Errorf("deferral %q still remembered after the backup ran", why)
+	}
+}

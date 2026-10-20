@@ -287,6 +287,13 @@ type Daemon struct {
 	// minutes, and sharing catchUpAttemptAt would let it starve the backup
 	// catch-up.
 	catchUpGCAttemptAt atomic.Int64
+	// catchUpDeferMu guards the two fields below: the last catch-up backup
+	// deferral logged and when. A held lock keeps the deferral true on every
+	// 5-minute tick, so a reason is logged once per maintenanceCatchUpRetry
+	// instead of on every tick.
+	catchUpDeferMu       sync.Mutex
+	catchUpDeferWhy      string
+	catchUpDeferLoggedAt time.Time
 	// maintenanceGCFinishedAt is the UnixNano time a gc cycle completed or
 	// failed (0 = none pending). The loop goroutine folds it into
 	// lastMaintenanceRun; a deferred cycle never sets it.

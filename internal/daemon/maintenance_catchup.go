@@ -59,7 +59,7 @@ func (d *Daemon) maybeCatchUpBackup(now time.Time) {
 		return
 	}
 	if quiet, why := d.catchUpQuiet(); !quiet {
-		d.logger.Printf("scheduled_maintenance: catch-up backup deferred: %s", why)
+		d.logCatchUpDeferral(now, why)
 		return
 	}
 	if external, why := s.gcExternal(d); external {
@@ -84,15 +84,41 @@ func (d *Daemon) maybeCatchUpBackup(now time.Time) {
 	s.dispatch(func() {
 		defer d.maintenanceGCRunning.Store(false)
 		res := d.maintenanceBackup(databases)
-		d.logger.Printf("scheduled_maintenance: catch-up backup %s", res.outcome)
 		if res.outcome == gcOutcomeDeferred {
 			// A held Dolt lock or a pause marker means no backup was tried:
 			// the next 5-minute tick retries, so the throttle stays reserved
 			// for a run that completed or failed, as the catch-up gc's is.
+			// Only the retry is unthrottled; the line saying so is logged once
+			// per reason per retry gap.
+			d.logCatchUpDeferral(now, res.reason)
 			return
 		}
+		d.clearCatchUpDeferral()
+		d.logger.Printf("scheduled_maintenance: catch-up backup %s", res.outcome)
 		d.catchUpAttemptAt.Store(now.UnixNano())
 	})
+}
+
+// logCatchUpDeferral logs why the catch-up backup waits, once per reason per
+// maintenanceCatchUpRetry. A deferral retries on every 5-minute tick by design,
+// so a hold that lasts hours would otherwise write a line per tick; a changed
+// reason is a new fact and is logged at once.
+func (d *Daemon) logCatchUpDeferral(now time.Time, why string) {
+	d.catchUpDeferMu.Lock()
+	defer d.catchUpDeferMu.Unlock()
+	if why == d.catchUpDeferWhy && now.Sub(d.catchUpDeferLoggedAt) < maintenanceCatchUpRetry {
+		return
+	}
+	d.catchUpDeferWhy, d.catchUpDeferLoggedAt = why, now
+	d.logger.Printf("scheduled_maintenance: catch-up backup deferred: %s", why)
+}
+
+// clearCatchUpDeferral forgets the last logged deferral, so the next hold is
+// logged on its first tick instead of waiting out the previous one's gap.
+func (d *Daemon) clearCatchUpDeferral() {
+	d.catchUpDeferMu.Lock()
+	d.catchUpDeferWhy = ""
+	d.catchUpDeferMu.Unlock()
 }
 
 // catchUpUnknown reports a backup age the check could not read. That is not

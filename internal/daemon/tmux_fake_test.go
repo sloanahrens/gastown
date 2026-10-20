@@ -80,9 +80,6 @@ func (f *fakeTmux) HasSession(name string) (bool, error) {
 	return f.Server.HasSession(name)
 }
 
-// IsAgentAliveChecked reports whether the pane runs something other than a
-// shell, the fake's stand-in for *tmux.Tmux's process-tree check, or the error
-// the test set for session (a liveness query that could not be answered).
 func (f *fakeTmux) ListSessions() ([]string, error) {
 	f.mu.Lock()
 	err := f.listErr
@@ -93,6 +90,9 @@ func (f *fakeTmux) ListSessions() ([]string, error) {
 	return f.Server.ListSessions()
 }
 
+// IsAgentAliveChecked reports whether the pane runs something other than a
+// shell, the fake's stand-in for *tmux.Tmux's process-tree check, or the error
+// the test set for session (a liveness query that could not be answered).
 func (f *fakeTmux) IsAgentAliveChecked(session string) (bool, error) {
 	f.mu.Lock()
 	err := f.aliveErr[session]

@@ -1,9 +1,11 @@
 package daemon
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -72,5 +74,46 @@ func TestHandlePlugins_MissingRigsConfigStillDispatchesTownPlugins(t *testing.T)
 	}
 	if !strings.Contains(out, "skipping plugin test-manual (gate=manual") {
 		t.Errorf("town plugins not dispatched without a rigs config:\n%s", out)
+	}
+}
+
+// writeTestScriptPlugin writes a town-level cooldown plugin with a run.sh, the
+// shape the daemon executes itself.
+func writeTestScriptPlugin(t *testing.T, townRoot, name string) {
+	t.Helper()
+	writeTestPlugin(t, townRoot, name,
+		"+++\nname = \""+name+"\"\ndescription = \"script plugin\"\n\n[gate]\ntype = \"cooldown\"\n\n[execution]\ntype = \"script\"\ntimeout = \"5s\"\n+++\n\n# Instructions\n")
+	if err := os.WriteFile(filepath.Join(townRoot, "plugins", name, "run.sh"), []byte("exit 0\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile run.sh: %v", err)
+	}
+}
+
+// With no rigs config (handlePlugins passes nil when mayor/rigs.json cannot be
+// loaded) a due town script plugin still starts: the nil config costs the
+// rig-level scan, not the run. The fake cancels the daemon's context during
+// the run, so the run is an abort and records nothing.
+func TestDispatchPlugins_NilRigsConfigStillStartsTownScriptPlugin(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	logs := &lockedBuffer{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bash := newFakeCLIFor(func(cliCall) cliReply {
+		cancel() // the daemon stopped mid-run: an abort writes no run record
+		return cliReply{code: 1}
+	})
+	d := &Daemon{config: &Config{TownRoot: townRoot}, logger: log.New(logs, "", 0), ctx: ctx, execCmd: bash.run}
+
+	writeTestScriptPlugin(t, townRoot, "town-script")
+
+	d.dispatchPlugins(nil)
+	d.scripts.wait()
+
+	calls := bash.recorded()
+	if len(calls) != 1 || calls[0].name != "bash" || !slices.Equal(calls[0].args, []string{"run.sh"}) {
+		t.Fatalf("ran %+v, want one `bash run.sh`", calls)
+	}
+	if !strings.Contains(logs.String(), "running script plugin town-script directly") {
+		t.Errorf("script start not logged:\n%s", logs.String())
 	}
 }
