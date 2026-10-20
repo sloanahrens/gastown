@@ -1272,28 +1272,31 @@ func TestResolveStaleBranchBead(t *testing.T) {
 	t.Parallel()
 	seat := "rig/polecats/polecat"
 	tests := []struct {
-		name     string
-		branch   string
-		hooked   []string
-		progress []string
-		listErr  error
-		want     string
-		wantErr  bool
+		name       string
+		branch     string
+		hooked     []string
+		progress   []string
+		failStatus string
+		want       string
+		wantErr    bool
 	}{
-		{"no assignment keeps the branch bead", "gt-old", nil, nil, nil, "gt-old", false},
-		{"branch bead is the hooked one", "gt-old", []string{"gt-old"}, nil, nil, "gt-old", false},
-		{"stale branch yields the hooked bead", "gt-old", []string{"gt-new"}, nil, nil, "gt-new", false},
-		{"stale branch yields the in-progress bead", "gt-old", nil, []string{"gt-new"}, nil, "gt-new", false},
-		{"subtask branch keeps its own bead", "gt-abc.1", []string{"gt-abc"}, nil, nil, "gt-abc.1", false},
-		{"branch bead among several assignments", "gt-old", []string{"gt-new", "gt-old"}, nil, nil, "gt-old", false},
-		{"several assignments, none the branch's", "gt-old", []string{"gt-new", "gt-other"}, nil, nil, "", true},
-		{"unreadable assignments name no bead", "gt-old", nil, nil, errors.New("bd down"), "", true},
+		{"no assignment keeps the branch bead", "gt-old", nil, nil, "", "gt-old", false},
+		{"branch bead is the hooked one", "gt-old", []string{"gt-old"}, nil, "", "gt-old", false},
+		{"stale branch yields the hooked bead", "gt-old", []string{"gt-new"}, nil, "", "gt-new", false},
+		{"stale branch yields the in-progress bead", "gt-old", nil, []string{"gt-new"}, "", "gt-new", false},
+		{"subtask branch keeps its own bead", "gt-abc.1", []string{"gt-abc"}, nil, "", "gt-abc.1", false},
+		{"branch bead among several assignments", "gt-old", []string{"gt-new", "gt-old"}, nil, "", "gt-old", false},
+		{"several assignments, none the branch's", "gt-old", []string{"gt-new", "gt-other"}, nil, "", "", true},
+		{"unreadable assignments name no bead", "gt-old", nil, nil, "hooked", "", true},
+		{"unreadable hooked list is not padded out by in-progress results", "gt-old", nil, []string{"gt-new"}, "hooked", "", true},
+		{"unreadable hooked list is not padded out by the branch's own in-progress bead", "gt-old", nil, []string{"gt-old"}, "hooked", "", true},
+		{"unreadable in-progress list after an empty hooked list", "gt-old", nil, nil, "in_progress", "", true},
+		{"in-progress list is not read when the hooked list answers", "gt-old", []string{"gt-new"}, nil, "in_progress", "gt-new", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			bd := newWorkBD(t)
-			bd.listErr = tt.listErr
 			for _, id := range tt.hooked {
 				bd.db.Seed(beads.Issue{ID: id, Status: "hooked", Assignee: seat})
 			}
@@ -1301,6 +1304,11 @@ func TestResolveStaleBranchBead(t *testing.T) {
 				bd.db.Seed(beads.Issue{ID: id, Status: "in_progress", Assignee: seat})
 			}
 			d := &Daemon{logger: log.New(io.Discard, "", 0), config: townConfig(t), openWorkBeads: bd.open}
+			if tt.failStatus != "" {
+				d.openWorkBeads = func(env []string, timeout time.Duration) workBeadReader {
+					return statusFailReader{workBeadReader: bd.open(env, timeout), status: tt.failStatus, err: errors.New("bd down")}
+				}
+			}
 
 			got, err := d.resolveStaleBranchBead("rig", seat, tt.branch)
 			if (err != nil) != tt.wantErr {
@@ -1311,4 +1319,20 @@ func TestResolveStaleBranchBead(t *testing.T) {
 			}
 		})
 	}
+}
+
+// statusFailReader fails the list for one status and answers every other read
+// through the wrapped reader, so a test can inject the partial answer a real
+// bd returns when one query fails.
+type statusFailReader struct {
+	workBeadReader
+	status string
+	err    error
+}
+
+func (r statusFailReader) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	if opts.Status == r.status {
+		return nil, r.err
+	}
+	return r.workBeadReader.List(opts)
 }

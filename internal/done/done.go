@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -1010,7 +1009,7 @@ func Run(opts Options) error {
 	// If issue ID not set by flag or branch name, query for hooked beads
 	// assigned to this agent (hq-l6mm5: direct bead tracking).
 	if r.issueID == "" && r.sender != "" {
-		if hookIssue, ambiguous := selectAssignedIssue("", loadAssignedIssueIDs()); hookIssue != "" {
+		if hookIssue, ambiguous := polecat.SelectAssignedIssue("", loadAssignedIssueIDs()); hookIssue != "" {
 			r.issueID = hookIssue
 		} else if ambiguous {
 			return failRun(fmt.Errorf("multiple active assignments found for %s; cannot infer issue from hook. Use --issue to disambiguate", r.sender))
@@ -1024,7 +1023,7 @@ func Run(opts Options) error {
 	// does — still wins, and subtask branches of the hooked bead (e.g. gt-abc.1
 	// under hooked gt-abc) are left alone.
 	if staleBranchGuardApplies(issue, info.Issue, r.sender) {
-		if hookIssue, ambiguous := selectAssignedIssue(info.Issue, loadAssignedIssueIDs()); isStaleBranchIssue(info.Issue, hookIssue) {
+		if hookIssue, ambiguous := polecat.SelectAssignedIssue(info.Issue, loadAssignedIssueIDs()); polecat.IsStaleBranchIssue(info.Issue, hookIssue) {
 			style.PrintWarning("branch %q embeds issue %s but your hooked bead is %s — submitting for %s (stale branch reuse?)", r.branch, info.Issue, hookIssue, hookIssue)
 			fmt.Printf("  Fresh branches must be named polecat/<name>/<bead-id>+<suffix> for the bead you are working.\n")
 			fmt.Printf("  Use --issue to override if the branch-derived id is actually correct.\n\n")
@@ -2020,48 +2019,6 @@ func ensureAgentBeadExists(bd beads.Client, id string, ctx Agent) {
 	}
 }
 
-// isStaleBranchIssue reports whether a branch-derived issue id should be
-// overridden by the agent's hooked bead (hq-l0fj stale-branch guard).
-// True when both ids exist, they differ, and the branch id is not a subtask
-// of the hooked bead (e.g. branch gt-abc.1 under hooked gt-abc is fine).
-func isStaleBranchIssue(branchIssue, hookedIssue string) bool {
-	if branchIssue == "" || hookedIssue == "" {
-		return false
-	}
-	return branchIssue != hookedIssue && !strings.HasPrefix(branchIssue, hookedIssue+".")
-}
-
-// selectAssignedIssue returns the one authoritative assignment to use for
-// done attribution. Ambiguous assignment state is deliberately not guessed.
-func selectAssignedIssue(branchIssue string, assigned []string) (string, bool) {
-	unique := make(map[string]bool, len(assigned))
-	for _, id := range assigned {
-		if id != "" {
-			unique[id] = true
-		}
-	}
-	ids := make([]string, 0, len(unique))
-	for id := range unique {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-
-	if len(ids) == 0 {
-		return "", false
-	}
-	if branchIssue != "" {
-		for _, id := range ids {
-			if branchIssue == id || strings.HasPrefix(branchIssue, id+".") {
-				return "", false
-			}
-		}
-	}
-	if len(ids) > 1 {
-		return "", true
-	}
-	return ids[0], false
-}
-
 // findAssignedBeadsForAgent queries the same assignment locations as gt hook,
 // in the same order: the caller's own workdir, then the rig's mayor/rig
 // directory, then the town .beads store. The assigned work bead is
@@ -2181,7 +2138,7 @@ func assignedIssueIDs(assigned []*beads.Issue) []string {
 // gt-pftz in the close path). Hooked wins over in_progress when both exist.
 // Returns empty string if no assignment bead is found.
 func FindHookedBeadForAgent(bd beads.Client, agentID string) string {
-	issueID, _ := selectAssignedIssue("", assignedIssueIDs(queryAssignedBeads(bd, agentID)))
+	issueID, _ := polecat.SelectAssignedIssue("", assignedIssueIDs(queryAssignedBeads(bd, agentID)))
 	return issueID
 }
 
