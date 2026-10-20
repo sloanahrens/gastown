@@ -1295,6 +1295,9 @@ An adapter may also implement `Context() []string`, which adds context lines to
 the report: facts gathered while labeling that the metrics do not carry. They
 print under the item counts, and the JSON report carries them as `context`.
 
+An item may also carry `Context`: a value per question, printed beside that
+question's block and counted over its logged lines, never scored or labeled.
+
 Each question is scored by the kind of answer Jev gave. A noul is scored at
 0.5. A choice names its `positive` option, and precision and recall are at the
 option it chose, with the threshold sweep over that option's probability. A
@@ -1311,9 +1314,12 @@ The best F1 is taken over every distinct value as a cut, predicting yes at or
 above it; a tie keeps the higher cut. `--json` names the rule that labeled each
 line in its `lines` array.
 
-Four batteries are registered. The `fixture` battery reads
+Five batteries are registered. The `fixture` battery reads
 `.runtime/jev/fixture.jsonl` with labels from `fixture-labels.json`, and exists
 so tests can drive the command end to end. No live battery reads it.
+
+The `dispatch` battery reads `.runtime/jev/dispatch.jsonl`, and its labels are
+described under the dispatch battery below.
 
 The `attention` battery reads `.runtime/jev/attention.jsonl`, the attention
 battery's log. A line whose call failed, or whose question set is not the one
@@ -1434,6 +1440,32 @@ at that placement and reports it, spending no attempt and dropping nothing, so
 an outage of any length leaves every pending bead for the next pass. Only a
 request Jev refused on its own terms (a 4xx other than 401) or answered
 unusably counts against a bead.
+
+`gt jev scorecard --battery dispatch` scores that log. Each line is one
+placement, stamped with its `attached_at`. The five Noul questions are scored as
+noul and `size` as a score. Labels come from three sources, and a question with
+no rule for a placement is unlabeled and left out of its counts:
+
+- `lands_first_try`: the bead's first attempt in
+  `.runtime/landings/reviews.jsonl`. approve is true unless the landing refused
+  it (`rejected`), and request_changes is false. With no review, a bead closed
+  as landed is true.
+- `fits_twenty_minutes`: the bead's `.runtime/overrun-guard/<bead>.json`. A
+  record with `stopped_at` is false. A bead closed as superseded, or labeled
+  `needs-split`, is false. A record still pending leaves it unlabeled. With
+  neither and a landed bead, it is true.
+- The bead itself, from the rig's beads: a bead closed with a landing close
+  reason is landed.
+
+The `--json` report names the rules that labeled each line, joined with `+`:
+`review:approve`, `review:refused`, `review:request-changes`,
+`landed:no-review`, `overrun:stopped`, `closed:superseded`, `label:needs-split`
+and `landed`.
+
+The seat's agent prints beside `needs_strong_model` as context. The adapter only
+reads the rig's beads and never writes. A source that cannot be read fails the
+report, and a bead the store no longer has is unlabeled. Lines are not yet split
+by `question_version`, and only version 1 exists.
 
 The daemon patrol `jev_dispatch` (heartbeat step `jev-dispatch`) is off unless
 `daemon.json` sets it on, and runs every 15 minutes:

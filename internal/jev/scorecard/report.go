@@ -3,6 +3,7 @@ package scorecard
 import (
 	"fmt"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -65,7 +66,16 @@ type QuestionReport struct {
 	// MeanScorePositive and MeanScoreNegative are set for score questions only.
 	MeanScorePositive *float64 `json:"mean_score_positive,omitempty"`
 	MeanScoreNegative *float64 `json:"mean_score_negative,omitempty"`
-	Verdict           string   `json:"verdict"`
+	// Context counts the Item.Context values on the question's logged lines.
+	// It is printed beside the question and never scored.
+	Context []ContextCount `json:"context,omitempty"`
+	Verdict string         `json:"verdict"`
+}
+
+// ContextCount is how many of a question's logged lines carry one context value.
+type ContextCount struct {
+	Value string `json:"value"`
+	Lines int    `json:"lines"`
 }
 
 // Bin is one calibration band: the labeled lines whose value falls in [Lo, Hi).
@@ -104,6 +114,9 @@ func WriteText(w io.Writer, rep Report) error {
 		case KindScore:
 			ew.printf("  mean score: positives %s, negatives %s\n", num(q.MeanScorePositive), num(q.MeanScoreNegative))
 		}
+		if len(q.Context) > 0 {
+			ew.printf("  context, not scored: %s\n", contextText(q.Context))
+		}
 		ew.printf("  best F1 %s at threshold %s\n", num(q.BestF1), num(q.BestThreshold))
 		if len(q.Calibration) > 0 {
 			ew.printf("  calibration (band, labeled n, mean value, label rate):\n")
@@ -127,6 +140,19 @@ func (e *errWriter) printf(format string, args ...any) {
 	if e.err == nil {
 		_, e.err = fmt.Fprintf(e.w, format, args...)
 	}
+}
+
+// contextText lists the context values as "alpha 3 lines, beta 1 line".
+func contextText(counts []ContextCount) string {
+	parts := make([]string, 0, len(counts))
+	for _, c := range counts {
+		unit := "lines"
+		if c.Lines == 1 {
+			unit = "line"
+		}
+		parts = append(parts, fmt.Sprintf("%s %d %s", c.Value, c.Lines, unit))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func pct(v *float64) string {
