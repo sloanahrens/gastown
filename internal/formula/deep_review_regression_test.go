@@ -116,6 +116,156 @@ func TestDeepReviewFailsALandingOnlyOnItsOwnLines(t *testing.T) {
 	}
 }
 
+// deepReviewRange returns the folded text between two step headings, so a test
+// can scope a rule to the step that states it without deepReviewStep's fixed
+// end at step 9.
+func deepReviewRange(t *testing.T, folded, from, to string) string {
+	t.Helper()
+	_, rest, ok := strings.Cut(folded, from)
+	if !ok {
+		t.Fatalf("deep-review-run lacks a step opening %q", from)
+	}
+	step, _, ok := strings.Cut(rest, to)
+	if !ok {
+		t.Fatalf("the step opening %q does not run to %q", from, to)
+	}
+	return step
+}
+
+// TestDeepReviewReportsDuplicateDefinitions guards gt-8ezud: one question ("is
+// this worktree's work landed?") was computed three ways in three packages and
+// each per-caller fix moved the others, so a slice reviewer also asks whether
+// another package decides the same thing differently, and the verifier refutes
+// the finding only when the definitions agree or one already calls the other.
+// The kind rides the existing reviewers and verifiers; it adds neither.
+func TestDeepReviewReportsDuplicateDefinitions(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	folded := strings.Join(strings.Fields(string(raw)), " ")
+	step4 := deepReviewRange(t, folded, "**4. Review (at most", "**5. Verify")
+	step5 := deepReviewRange(t, folded, "**5. Verify (one subagent per three findings", "**6. File the CONFIRMED findings")
+
+	for _, want := range []struct{ rule, text string }{
+		{
+			"the slice reviewer checks each predicate its files compute",
+			"For each predicate the slice computes (a verdict, status, eligibility or `landed`/`pushed`/`idle` judgment)",
+		},
+		{
+			"it greps the base for another package answering differently",
+			"grep origin/{{base_branch}} for another package answering differently",
+		},
+		{
+			"a different definition is a kind, a P2 and a fingerprint shape",
+			"kind `duplicate-definition`, severity P2, fingerprint `<file>:<symbol>:duplicate-definition`",
+		},
+		{
+			"the claim names both places and their difference",
+			"claim naming both places and their difference",
+		},
+		{
+			"the failure scenario is an input where they disagree",
+			"failure scenario an input where they disagree",
+		},
+	} {
+		if !strings.Contains(step4, want.text) {
+			t.Errorf("step 4 lacks the duplicate-definition rule %q", want.rule)
+		}
+	}
+	if !strings.Contains(step4, "{{max_reviewers}} subagents") {
+		t.Error("step 4's reviewer count changed; the new kind must ride the existing reviewers")
+	}
+
+	for _, want := range []struct{ rule, text string }{
+		{
+			"the verifier refutes by showing the two agree on every input",
+			"Refute a `duplicate-definition` by showing the two agree on every input",
+		},
+		{
+			"or by showing one already calls the other",
+			"or one already calls the other",
+		},
+	} {
+		if !strings.Contains(step5, want.text) {
+			t.Errorf("step 5 lacks the duplicate-definition refutation %q", want.rule)
+		}
+	}
+	if !strings.Contains(step5, "at most {{max_verifiers}}") {
+		t.Error("step 5's verifier count changed; the new kind must ride the existing verifiers")
+	}
+
+	step6 := deepReviewRange(t, folded, "**6. File the CONFIRMED findings", "**7. Record the findings")
+	for _, want := range []struct{ rule, text string }{
+		{
+			"the bead's title names the one question both packages decide",
+			"A `duplicate-definition` bead is titled `Consolidate: <question> is decided in <pkg A> and <pkg B>`",
+		},
+		{
+			"its goal is one shared predicate, both call sites named",
+			"`## Goal` one shared predicate naming both call sites",
+		},
+	} {
+		if !strings.Contains(step6, want.text) {
+			t.Errorf("step 6 lacks the duplicate-definition bead shape %q", want.rule)
+		}
+	}
+}
+
+// TestDeepReviewKeepsTheGuidanceItAlreadyHad guards the rework of gt-8ezud: the
+// first attempt bought room for the duplicate-definition kind by deleting
+// guidance steps 1, 6 and 7 already carried, so the lines a reader depends on
+// are pinned here and a later trim fails this test instead of landing.
+func TestDeepReviewKeepsTheGuidanceItAlreadyHad(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	folded := strings.Join(strings.Fields(string(raw)), " ")
+	for _, want := range []struct{ step, text string }{
+		{"1", "The jq reads the bare array and the `BD_MACHINE=1` envelope."},
+		{"1", "(exit 3 is an untrusted input)"},
+		{"6", "(gastown: a guard, Dolt data deletion, process lifecycle or an install script)"},
+		{"7", "An older run's `digest-only` line makes the fingerprint `seen`."},
+		{"7", "severity, whatever that is; the next run verifies it."},
+		{"7", "(findings past capacity, 0 when none)"},
+	} {
+		if !strings.Contains(folded, want.text) {
+			t.Errorf("step %s lost guidance it already carried: %q", want.step, want.text)
+		}
+	}
+}
+
+// TestDeepReviewDiffsEachLandingFromItsBaseCommit guards gt-8ezud: a
+// Forgejo-primary landing is a one-parent squash, so the formula must not
+// describe land commits as merges whose first parent is main. The diff base
+// stays <landed_commit>^1 either way.
+func TestDeepReviewDiffsEachLandingFromItsBaseCommit(t *testing.T) {
+	t.Parallel()
+	raw, err := GetEmbeddedFormulaContent("deep-review-run")
+	if err != nil {
+		t.Fatalf("GetEmbeddedFormulaContent: %v", err)
+	}
+	folded := strings.Join(strings.Fields(string(raw)), " ")
+	step := deepReviewRange(t, folded, "**4. Review (at most", "**5. Verify")
+	for _, stale := range []string{"land commits are merges", "the first parent is main"} {
+		if strings.Contains(step, stale) {
+			t.Errorf("step 4 still describes a landing as a merge (%q)", stale)
+		}
+	}
+	for _, want := range []string{
+		"git diff <landed_commit>^1 <landed_commit>",
+		"a one-parent squash",
+		"`<landed_commit>^1` is its base",
+	} {
+		if !strings.Contains(step, want) {
+			t.Errorf("step 4 lacks %q", want)
+		}
+	}
+}
+
 // TestDeepReviewRunsOnAnyRig guards gt-23w8z: a rig other than gastown is
 // reviewed by naming its landings file and the gastown checkout's script, so
 // the run formula hardcodes neither, and a sling that sets neither var renders
