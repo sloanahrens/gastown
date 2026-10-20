@@ -157,6 +157,15 @@ type overrunSeams struct {
 	recordCleanup func(seat overrunSeat) error
 	retire        func(seat overrunSeat) error
 
+	// resetWorktree runs in the release step, before recordCleanup, only for a
+	// stop whose push step succeeded: it confirms the push by reading origin's
+	// head for the branch back and, when that is the worktree's HEAD, detaches
+	// the worktree at origin's default branch and deletes the local branch, so
+	// the retired seat does not read as unpushed work once the branch lands. An
+	// unconfirmed push is not an error: it leaves the worktree as it is. An
+	// error is logged and the release goes on. nil means no reset.
+	resetWorktree func(seat overrunSeat) error
+
 	// comment adds one comment to the seat's bead: the scheduled stop's
 	// record. nil means no comment.
 	comment func(seat overrunSeat, text string) error
