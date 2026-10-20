@@ -540,20 +540,41 @@ func resetDuplicatePoolCache() {
 
 // fetchDuplicatePool reads the live and recently-closed beads of one rig.
 func fetchDuplicatePool(beadsDir string) ([]duplicateCandidate, error) {
-	return fetchDuplicatePoolFrom(slingStores{}.pinnedAt(beadsDir), warnDuplicateEnrichmentFailed, beadsDir)
+	return fetchDuplicatePoolWith(slingStores{}.pinnedAt(beadsDir), warnDuplicateEnrichmentFailed, beadsDir, specDetailCache.Load())
 }
 
 // fetchDuplicatePoolFrom is fetchDuplicatePool read from store, with a
 // failed design/notes enrichment reported to warn. The pool is cached for
 // duplicatePoolTTL, so warn fires once per fetch, not once per sling.
 func fetchDuplicatePoolFrom(store beads.Client, warn func(beadsDir string, err error), beadsDir string) ([]duplicateCandidate, error) {
-	active, err := listDuplicateCandidates(store, warn, beadsDir, duplicatePoolStatuses, time.Time{})
+	return fetchDuplicatePoolWith(store, warn, beadsDir, nil)
+}
+
+// fetchDuplicatePoolWith is fetchDuplicatePoolFrom reading each bead's design
+// and notes through details, which shows only the beads whose list row changed
+// since it last did (gt-l0vlf). A nil details shows every bead of the pool.
+//
+// Both lists are read before either is enriched: a cached edge's target is
+// refreshed from the pool's rows, and a blocker that closed sits in the closed
+// list while the bead it blocks sits in the active one.
+func fetchDuplicatePoolWith(store beads.Client, warn func(beadsDir string, err error), beadsDir string, details *duplicateDetailCache) ([]duplicateCandidate, error) {
+	activeRows, err := listDuplicateRows(store, duplicatePoolStatuses, time.Time{})
 	if err != nil {
 		return nil, err
 	}
-	closed, err := listDuplicateCandidates(store, warn, beadsDir, []string{"closed"}, time.Now().Add(-duplicateLookback))
+	closedRows, err := listDuplicateRows(store, []string{"closed"}, time.Now().Add(-duplicateLookback))
 	if err != nil {
 		return nil, err
+	}
+	known := append(append([]*beads.Issue(nil), activeRows...), closedRows...)
+	active := duplicateCandidatesOf(store, warn, beadsDir, activeRows, details, known)
+	closed := duplicateCandidatesOf(store, warn, beadsDir, closedRows, details, known)
+	if details != nil {
+		listed := make(map[string]bool, len(known))
+		for _, row := range known {
+			listed[row.ID] = true
+		}
+		details.retain(listed)
 	}
 	return append(active, closed...), nil
 }
@@ -565,11 +586,27 @@ func fetchDuplicatePoolFrom(store beads.Client, warn func(beadsDir string, err e
 // rows that were never closed, so live and closed work take separate list
 // queries; neither can be folded into the other.
 func listDuplicateCandidates(store beads.Client, warn func(beadsDir string, err error), beadsDir string, statuses []string, closedAfter time.Time) ([]duplicateCandidate, error) {
+	rows, err := listDuplicateRows(store, statuses, closedAfter)
+	if err != nil {
+		return nil, err
+	}
+	return duplicateCandidatesOf(store, warn, beadsDir, rows, nil, nil), nil
+}
+
+// listDuplicateRows is the bd list behind a pool read.
+func listDuplicateRows(store beads.Client, statuses []string, closedAfter time.Time) ([]*beads.Issue, error) {
 	rows, err := store.List(beads.ListOptions{Status: strings.Join(statuses, ","), Priority: -1, ClosedAfter: closedAfter})
 	if err != nil {
 		return nil, fmt.Errorf("listing %s beads: %w", strings.Join(statuses, ","), err)
 	}
+	return rows, nil
+}
 
+// duplicateCandidatesOf reduces listed rows to their comparison fields, with
+// the design/notes enrichment described on listDuplicateCandidates. details,
+// when not nil, is the cache that enrichment reads through and known the rows
+// it refreshes cached blockers from.
+func duplicateCandidatesOf(store beads.Client, warn func(beadsDir string, err error), beadsDir string, rows []*beads.Issue, details *duplicateDetailCache, known []*beads.Issue) []duplicateCandidate {
 	ids := make([]string, 0, len(rows))
 	for _, row := range rows {
 		if row.ID != "" {
@@ -586,9 +623,22 @@ func listDuplicateCandidates(store beads.Client, warn func(beadsDir string, err 
 	// The degrade is reported, though: a pool without design/notes text is
 	// blind to exactly the overlap this check was extended to catch, and the
 	// operator must be able to tell that apart from "no duplicates found".
-	details, detailErr := fetchDuplicateDetails(store, ids)
+	var detailsByID map[string]duplicateDetail
+	var detailErr error
+	if details != nil {
+		var deferred int
+		detailsByID, deferred, detailErr = details.read(store, rows, known)
+		if deferred > 0 {
+			warn(beadsDir, fmt.Errorf("design/notes of %d of %d bead(s) not read this tick, over its limit of %d; they are read on the next ticks",
+				deferred, len(ids), details.limit))
+		}
+	} else {
+		detailsByID, detailErr = fetchDuplicateDetails(store, ids)
+		if detailErr != nil {
+			detailsByID = nil
+		}
+	}
 	if detailErr != nil {
-		details = nil
 		warn(beadsDir, detailErr)
 	}
 
@@ -597,7 +647,7 @@ func listDuplicateCandidates(store beads.Client, warn func(beadsDir string, err 
 		if row.ID == "" {
 			continue
 		}
-		detail := details[row.ID]
+		detail := detailsByID[row.ID]
 		candidates = append(candidates, duplicateCandidate{
 			ID:        row.ID,
 			Title:     row.Title,
@@ -612,7 +662,7 @@ func listDuplicateCandidates(store beads.Client, warn func(beadsDir string, err 
 				detail.Design, detail.Notes),
 		})
 	}
-	return candidates, nil
+	return candidates
 }
 
 // readinessOf reduces one listed bead to the fields the readiness question
@@ -659,7 +709,7 @@ func readinessOfBeadInfo(info *beadInfo) sling.Readiness {
 // running on list-only text. It writes to stderr so it cannot corrupt a
 // caller's stdout report.
 func warnDuplicateEnrichmentFailed(beadsDir string, err error) {
-	fmt.Fprintf(os.Stderr, "%s duplicate check degraded for %s: design/notes enrichment failed, comparing title/description only: %v\n",
+	fmt.Fprintf(os.Stderr, "%s duplicate check degraded for %s: design/notes enrichment incomplete, comparing title/description only where it is: %v\n",
 		style.Dim.Render("Warning:"), beadsDir, err)
 }
 

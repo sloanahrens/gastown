@@ -75,14 +75,20 @@ type specDispatchTickReport struct {
 	// LabeledFailed is the tick's count of ready beads held out of the queue
 	// by the spec-dispatch-failed label, which the health field surfaces
 	// (gt-q6zoo).
-	LabeledFailed int                     `json:"labeled_failed"`
-	Dispatched    []specDispatchTickEntry `json:"dispatched"`
-	Refused       []specDispatchTickEntry `json:"refused"`
-	Planning      []specDispatchTickEntry `json:"planning"`
-	Skipped       []specDispatchTickEntry `json:"skipped"`
-	Failed        []specDispatchTickEntry `json:"failed"`
-	Notices       []string                `json:"notices"`
-	Errors        []string                `json:"errors"`
+	LabeledFailed int `json:"labeled_failed"`
+	// DetailsFetched, DetailsCached and DetailsUnread are the tick's reads of
+	// the pool beads' design and notes: shown by bd, answered from the cache,
+	// and left for a later tick by the per-tick limit (gt-l0vlf).
+	DetailsFetched int                     `json:"details_fetched"`
+	DetailsCached  int                     `json:"details_cached"`
+	DetailsUnread  int                     `json:"details_unread"`
+	Dispatched     []specDispatchTickEntry `json:"dispatched"`
+	Refused        []specDispatchTickEntry `json:"refused"`
+	Planning       []specDispatchTickEntry `json:"planning"`
+	Skipped        []specDispatchTickEntry `json:"skipped"`
+	Failed         []specDispatchTickEntry `json:"failed"`
+	Notices        []string                `json:"notices"`
+	Errors         []string                `json:"errors"`
 }
 
 // triggerSpecDispatch starts one tick on its own goroutine unless one is
@@ -280,7 +286,7 @@ func (d *Daemon) runSpecDispatchCommand(extra ...string) ([]byte, error) {
 	args := append([]string{"spec", "dispatch", "--json"}, extra...)
 	cmd := exec.CommandContext(ctx, d.gtPath, args...) //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = d.config.TownRoot
-	cmd.Env = daemonGTEnv(os.Environ())
+	cmd.Env = append(daemonGTEnv(os.Environ()), dispatch.SpecDetailOwnerEnv+"="+specDetailOwner)
 	stdout, stderr, err := d.runCmd(cmd)
 	if err != nil {
 		if msg := strings.TrimSpace(string(stderr)); msg != "" {
@@ -290,6 +296,12 @@ func (d *Daemon) runSpecDispatchCommand(extra ...string) ([]byte, error) {
 	}
 	return stdout, nil
 }
+
+// specDetailOwner names this daemon process to the ticks it starts. The tick
+// keeps the pool's design and notes text in a file between ticks, and the file
+// is this daemon's alone: a restarted daemon has another owner and finds the
+// file empty (gt-l0vlf).
+var specDetailOwner = fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
 
 // parseSpecDispatchReport reads a tick's report out of its output. The sling
 // path prints progress to stdout before the JSON, so the report is the last
@@ -341,6 +353,12 @@ func (d *Daemon) formatSpecDispatchReport(out []byte) []string {
 func specDispatchTickLine(r specDispatchTickReport) string {
 	line := fmt.Sprintf("tick: %d candidate(s), roster %s, %d dispatched, %d refused, %d planning, %d skipped, %d failed, %d held by the failed label",
 		r.Candidates, r.Roster, len(r.Dispatched), len(r.Refused), len(r.Planning), len(r.Skipped), len(r.Failed), r.LabeledFailed)
+	if r.DetailsFetched > 0 || r.DetailsCached > 0 || r.DetailsUnread > 0 {
+		line += fmt.Sprintf("; design/notes: %d fetched, %d cached", r.DetailsFetched, r.DetailsCached)
+		if r.DetailsUnread > 0 {
+			line += fmt.Sprintf(", %d unread", r.DetailsUnread)
+		}
+	}
 	if len(r.Skipped) == 0 {
 		return line
 	}
