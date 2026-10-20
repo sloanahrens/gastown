@@ -213,7 +213,11 @@ type overrunState struct {
 	// ReworkSHA is the commit the kept branch held on origin before the stop's
 	// own push, when it was the worktree's head too: the finished work was
 	// already there, so the hand-back is rework (overrunStop, step 5).
-	ReworkSHA string `json:"rework_sha,omitempty"`
+	// ReworkDecidedAt is when that was read (before the push); the answer is
+	// saved with it, so a save that fails after the push cannot lose it, and a
+	// retry keeps the decision instead of reading the pushed origin.
+	ReworkSHA       string    `json:"rework_sha,omitempty"`
+	ReworkDecidedAt time.Time `json:"rework_decided_at,omitzero"`
 
 	StoppedAt time.Time `json:"stopped_at,omitzero"`
 

@@ -1196,6 +1196,69 @@ func TestStop_ReworkDecisionSurvivesARepeatedHandBack(t *testing.T) {
 	}
 }
 
+// The rework decision is saved before the push. A save that fails after the
+// push leaves the branch on origin but not the push stamp, so the next tick
+// pushes again; it must keep the saved decision rather than read origin after
+// the stop's own push and turn a needs-split hand-back into rework.
+func TestStop_ReworkDecisionSavedBeforeThePushOutlivesAFailedPostPushSave(t *testing.T) {
+	t.Parallel()
+	d, _ := newOverrunDaemon(t, false)
+	f := newOverrunFake(20*time.Minute, stopSeat)
+	store := newMolStore(t)
+	w := &reworkWorld{head: "abc1234"} // origin holds nothing: the push is its first copy
+	s := w.seams(f, store, 0)
+
+	path, err := overrunStatePath(d.config.TownRoot, "gt-aaa11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	aside := path + ".aside"
+	push := s.push
+	failSave := true
+	s.push = func(seat overrunSeat) error {
+		if !failSave {
+			return push(seat)
+		}
+		failSave = false
+		// Let the push land, then make the save that follows it fail: a
+		// directory where the state file goes. The state saved before the
+		// push is kept aside and put back once the tick returns.
+		err := push(seat)
+		if rerr := os.Rename(path, aside); rerr != nil {
+			t.Fatal(rerr)
+		}
+		if merr := os.Mkdir(path, 0o755); merr != nil {
+			t.Fatal(merr)
+		}
+		return err
+	}
+
+	d.runOverrunGuard(s)
+	if st, _ := readOverrunState(d.config.TownRoot, "gt-aaa11"); !st.StoppedAt.IsZero() {
+		t.Fatal("the stop finished although its save after the push failed")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(aside, path); err != nil {
+		t.Fatal(err)
+	}
+	w.origin = w.head // the first tick's push reached origin
+	f.seats, f.calls = nil, nil
+	f.now = f.now.Add(time.Minute)
+	d.runOverrunGuard(s)
+
+	work, _ := handedBackBead(t, store)
+	if !beads.HasLabel(work, polecat.NeedsSplitLabel) || beads.HasLabel(work, polecat.ReworkLabel) {
+		t.Errorf("bead labels %v, want only %s: the decision was read again after the stop's own push",
+			work.Labels, polecat.NeedsSplitLabel)
+	}
+	if len(f.pushed) != 2 {
+		t.Errorf("pushes = %q, want the retry to push again (PushedAt was not saved)", f.pushed)
+	}
+}
+
 // Only a needs-split bead raises the stop's attention item; a rework hand-back
 // is not waiting for an operator.
 func TestCollectOverrunStopped_RaisesNoItemForReworkHandBack(t *testing.T) {
