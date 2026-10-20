@@ -375,7 +375,10 @@ func (e *engine) pendingLandings() (int, bool) {
 	if err != nil {
 		stale = townhealth.DefaultStaleAfter
 	}
-	if townhealth.Effective(report, e.o.Now(), stale) != report.Verdict {
+	// Reject a stale report on its age: Effective() reports unknown for one,
+	// so comparing its result to the recorded verdict sees nothing when that
+	// verdict was already unknown (gt-ylgp4).
+	if e.o.Now().Sub(report.At) >= stale {
 		return 0, false
 	}
 	total, found := 0, false
