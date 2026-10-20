@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -283,6 +284,34 @@ func TestAttentionJevReplayRecordsUsageInTheTownLedger(t *testing.T) {
 		assert.False(t, rec.TS.IsZero())
 	}
 	assert.Empty(t, warnings.String())
+}
+
+// TestAttentionJevReplayCommandWiresItsClientToTheTown runs the command's
+// wiring with a stub client factory, so the closure the command hands the
+// replay is exercised: the factory gets the town root and the command's
+// stderr, and the replay's report reaches the command's stdout.
+func TestAttentionJevReplayCommandWiresItsClientToTheTown(t *testing.T) {
+	t.Parallel()
+	town := jevReplayTown(t)
+	c, _ := jevServer(t)
+	var gotTown string
+	var gotWarn io.Writer
+	newClient := func(townRoot string, warn io.Writer, _ ...jev.Option) (*jev.Client, error) {
+		gotTown, gotWarn = townRoot, warn
+		return c, nil
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&stdout)
+	cmd.SetErr(&stderr)
+	cmd.SetContext(context.Background())
+	opts := jevreplay.Options{Floor: 0.7, MaxSpendUSD: 5, USDPerBillionTokens: 42}
+	require.NoError(t, attentionJevReplayIn(cmd, town, opts, "", newClient))
+
+	assert.Equal(t, town, gotTown, "the client is built for the town being replayed")
+	assert.Equal(t, &stderr, gotWarn, "ledger warnings go to the command's stderr")
+	assert.Contains(t, stdout.String(), "TP 2, FP 0, FN 0, TN 2")
 }
 
 func TestAttentionJevReplayIsHiddenUnderAttention(t *testing.T) {
