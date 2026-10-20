@@ -41,6 +41,12 @@ type tailOnce struct{ last string }
 // line prints without one, which is what a failed read does too.
 const tailTitleCacheSize = 512
 
+// tailMissingCacheSize bounds the not-found ids one run remembers. A bead
+// deleted a moment after it was created is asked about once per journal record
+// that names it, and every ask is a bd show that fails slowly, so the ids are
+// remembered; the oldest is dropped when the cache is full.
+const tailMissingCacheSize = 1024
+
 // tailBeads resolves the two bead facts gt tail prints beside an events line:
 // the title of a create, close, status change or dependency line, and the
 // verdict a comment or a note carries. It is the run's one door to bd — a
@@ -55,7 +61,10 @@ const tailTitleCacheSize = 512
 // tailBeads for as long as it serves. So a read that failed is NOT cached — a
 // transient failure must not blank that bead's title for the rest of the
 // process — and the cache evicts the least recently used id rather than
-// freezing once it is full (gt-2czgm).
+// freezing once it is full (gt-2czgm). One failure is cached: a bead bd
+// answered "not found" for (beads.ErrNotFound) is gone, so it is remembered in
+// a bounded set and never asked about again. Any other failure — a timeout, an
+// outage — is retried as above.
 type tailBeads struct {
 	show func(rig, id string) (*beads.Issue, error)
 	max  int
@@ -72,6 +81,10 @@ type tailBeads struct {
 	// two bd shows, and the second line prints without a title, which is what
 	// a failed read does too.
 	fetching map[string]bool
+	// missing is the ids bd said do not exist; missingOrder is their arrival
+	// order, so the oldest is the one dropped when the set is full.
+	missing      map[string]bool
+	missingOrder []string
 }
 
 // newTailBeads wraps show with the process-lifetime title cache.
@@ -82,24 +95,52 @@ func newTailBeads(show func(rig, id string) (*beads.Issue, error)) *tailBeads {
 		titles:   map[string]string{},
 		used:     map[string]uint64{},
 		fetching: map[string]bool{},
+		missing:  map[string]bool{},
 	}
 }
 
-// issue reads one bead now, with no caching: the caller wants what the bead
-// says at this moment (its notes, its comments).
+// issue reads one bead now: the caller wants what the bead says at this moment
+// (its notes, its comments), so a bead that exists is never cached. A bead bd
+// reported as not found is: it answers nil without a bd show from then on.
 func (b *tailBeads) issue(rig, id string) *beads.Issue {
 	if b == nil || b.show == nil || id == "" {
 		return nil
 	}
+	b.mu.Lock()
+	gone := b.missing[id]
+	b.mu.Unlock()
+	if gone {
+		return nil
+	}
 	issue, err := b.show(rig, id)
 	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			b.remember(id)
+		}
 		return nil
 	}
 	return issue
 }
 
+// remember records an id bd reported as not found, dropping the oldest one
+// when the set is full.
+func (b *tailBeads) remember(id string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.missing[id] {
+		return
+	}
+	if len(b.missingOrder) >= tailMissingCacheSize {
+		delete(b.missing, b.missingOrder[0])
+		b.missingOrder = b.missingOrder[1:]
+	}
+	b.missing[id] = true
+	b.missingOrder = append(b.missingOrder, id)
+}
+
 // title reads one bead's title, caching a successful read until it is evicted.
-// A read that failed caches nothing, so the next ask retries it. A read
+// A read that failed caches nothing, so the next ask retries it — except a
+// not-found, which issue remembers. A read
 // already in flight answers "" rather than starting a second one: the sources
 // poll concurrently, and the town scan must not fan one bead's read out into
 // one per source.
@@ -108,6 +149,10 @@ func (b *tailBeads) title(rig, id string) string {
 		return ""
 	}
 	b.mu.Lock()
+	if b.missing[id] {
+		b.mu.Unlock()
+		return ""
+	}
 	if title, ok := b.titles[id]; ok {
 		b.clock++
 		b.used[id] = b.clock
@@ -161,7 +206,7 @@ func (b *tailBeads) cache(id, title string) {
 // bead the reader needs to recognize.
 func (b *tailBeads) lineTitle(l tailLine) string {
 	id, ok := tailTitleBeadID(l)
-	if !ok {
+	if !ok || l.Deleted {
 		return ""
 	}
 	return b.title(l.Rig, id)
@@ -460,6 +505,14 @@ func (s *eventsSource) Poll() []tailLine {
 			return out
 		}
 		s.failed.clear()
+		// A bead deleted in this page is gone by the time the page is read, so
+		// none of its records is annotated: every bd show for it would miss.
+		deleted := map[string]bool{}
+		for _, r := range page.Records {
+			if r.Op == "delete" {
+				deleted[r.IssueID] = true
+			}
+		}
 		for _, r := range page.Records {
 			at, ok := parseJournalTS(r.TS)
 			if backlog && ok && at.Before(s.cutoff) {
@@ -480,6 +533,11 @@ func (s *eventsSource) Poll() []tailLine {
 				text += " ts=" + r.TS
 			}
 			line := s.line(at, "%s", text)
+			if deleted[r.IssueID] {
+				line.Deleted = true
+				out = append(out, line)
+				continue
+			}
 			line.Verdict = s.verdictText(r.Op, r.IssueID)
 			if line.Verdict == "" {
 				// The verdict is the more specific of the two, so a comment
