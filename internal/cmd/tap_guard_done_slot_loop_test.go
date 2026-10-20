@@ -347,16 +347,41 @@ func jsonQuote(s string) string {
 
 // zsh accepts a `;` between the closing paren of `for NAME (WORDS)` and its
 // body, so the body after that `;` must be read as the loop body (gt-0a957).
+// Every case fails on the code before that fix, which started the body read at
+// the `;` and saw no words behind it.
 func TestDoneSlotLoopZshParenListSemicolon(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{"short-form gt done", "for f (a b); gt done"},
+		{"braced gt done", "for f (a b); { gt done }"},
+		{"gate after an && list", "for f (a b); make lint && gt done"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokens := shellTokenize(tt.command)
+			reason, _ := matchesDoneSlotLoop(tt.command, tokens, doneSlotLoopLower(tokens))
+			if reason == "" {
+				t.Errorf("matchesDoneSlotLoop(%q) blocked=false, want true", tt.command)
+			}
+		})
+	}
+}
+
+// The `;` skip must not change the verdict for any other shape of the same
+// line. These cases pass on the pre-fix code too, so they pin the boundary
+// rather than the regression: a `do` body still belongs to the depth walk, and
+// a gate after a body that closes — or after no body at all — runs outside the
+// loop.
+func TestDoneSlotLoopZshParenListSemicolonBounds(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name    string
 		command string
 		blocked bool
 	}{
-		{"semicolon before a short-form gt done", "for f (a b); gt done", true},
-		{"semicolon before a braced gt done", "for f (a b); { gt done }", true},
-		{"semicolon before a gate after an && list", "for f (a b); make lint && gt done", true},
 		{"semicolon before a do block stays with the depth walk", "for f (a b); do gt done; done", true},
 		{"semicolon before a body with no gate command", "for f (a b); echo hi; gt done", false},
 		{"semicolon before a braced body closed before gt done", "for f (a b); { echo hi }; gt done", false},
