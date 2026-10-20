@@ -629,6 +629,110 @@ func TestPendingLandingsStaleZeroNotDrained(t *testing.T) {
 	}
 }
 
+// writeHealthConfig writes the town's settings/config.json with health set
+// to the given JSON object.
+func writeHealthConfig(t *testing.T, town, health string) {
+	t.Helper()
+	dir := filepath.Join(town, "settings")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"type":"town-settings","version":1,"operational":{"health":` + health + `}}`
+	if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPendingLandingsStaleUnknownVerdictNotDrained pins a stale report whose
+// recorded verdict was already unknown: Effective() then returns unknown too,
+// so comparing the two cannot see the staleness and the last landing count
+// would read as drained.
+func TestPendingLandingsStaleUnknownVerdictNotDrained(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	err := townhealth.Write(f.town, townhealth.Report{
+		At:      f.now.Add(-townhealth.DefaultStaleAfter - time.Minute),
+		Verdict: townhealth.VerdictUnknown,
+		Fields: []townhealth.Field{
+			{Name: townhealth.FieldDolt, Tag: townhealth.Unknown, Verdict: townhealth.VerdictUnknown, Value: "?"},
+			{Name: townhealth.FieldLanding, Rig: "gastown", Tag: townhealth.Recorded, Verdict: townhealth.Green, Value: "0 pending"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, _, _ := f.optsWithOut()
+	e := &engine{o: o}
+	if n, ok := e.pendingLandings(); ok {
+		t.Errorf("pendingLandings = (%d, true) for a stale report recorded unknown, want ok=false", n)
+	}
+}
+
+// TestPendingLandingsUsesConfiguredStaleAge pins the operator's stale_after:
+// a report the compiled default would call stale is read inside the
+// configured window, and one past the window is not.
+func TestPendingLandingsUsesConfiguredStaleAge(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		age    time.Duration
+		wantOK bool
+	}{
+		{"inside the configured window", 15 * time.Minute, true},
+		{"past the configured window", 45 * time.Minute, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFake(t)
+			f.setHealthy()
+			writeHealthConfig(t, f.town, `{"stale_after":"30m"}`)
+			err := townhealth.Write(f.town, townhealth.Report{
+				At:      f.now.Add(-tc.age),
+				Verdict: townhealth.Green,
+				Fields: []townhealth.Field{
+					{Name: townhealth.FieldLanding, Rig: "gastown", Tag: townhealth.Recorded, Verdict: townhealth.Green, Value: "0 pending"},
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			o, _, _ := f.optsWithOut()
+			e := &engine{o: o}
+			if _, ok := e.pendingLandings(); ok != tc.wantOK {
+				t.Errorf("pendingLandings ok = %v, want %v", ok, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestPendingLandingsBrokenStaleAgeFallsBackToDefault pins the fallback: an
+// unparseable stale_after must apply the compiled default, not a zero window
+// that would call every report stale.
+func TestPendingLandingsBrokenStaleAgeFallsBackToDefault(t *testing.T) {
+	t.Parallel()
+	f := newFake(t)
+	f.setHealthy()
+	writeHealthConfig(t, f.town, `{"stale_after":"soon"}`)
+	err := townhealth.Write(f.town, townhealth.Report{
+		At:      f.now.Add(-5 * time.Minute),
+		Verdict: townhealth.Green,
+		Fields: []townhealth.Field{
+			{Name: townhealth.FieldLanding, Rig: "gastown", Tag: townhealth.Recorded, Verdict: townhealth.Green, Value: "0 pending"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	o, _, _ := f.optsWithOut()
+	e := &engine{o: o}
+	n, ok := e.pendingLandings()
+	if !ok || n != 0 {
+		t.Errorf("pendingLandings = (%d, %v), want (0, true): the default stale age must apply", n, ok)
+	}
+}
+
 func TestStandbyWaitsForDoltGC(t *testing.T) {
 	t.Parallel()
 	f := newFake(t)
