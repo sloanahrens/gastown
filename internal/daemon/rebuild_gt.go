@@ -209,13 +209,20 @@ func (d *Daemon) triggerRebuildGT() {
 		// (gt-v0t6k).
 		defer d.noteRebuildGTCycleDone()
 		defer d.rebuildGTRunning.Store(false)
+		// The cycle consumes the request as it starts, so one armed while it
+		// runs sets the flag for the next heartbeat; clearing at the end
+		// would erase that request too (gt-j1mm4).
+		armed := d.rebuildGTRequested.Swap(false)
 		if !d.runRebuildGT() {
 			// Nothing accomplished: leave the gate open so the next
-			// heartbeat retries (the script's exit 3), and leave a request
-			// armed so a not-quiet deferral does not lose it.
+			// heartbeat retries (the script's exit 3), and put back the
+			// request this cycle consumed so a not-quiet deferral does not
+			// lose it.
+			if armed {
+				d.rebuildGTRequested.Store(true)
+			}
 			return
 		}
-		d.rebuildGTRequested.Store(false)
 		if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now()); err != nil {
 			d.logger.Printf("rebuild_gt: WARNING: cannot persist last-run time (%v)", err)
 		}
@@ -232,8 +239,9 @@ func (d *Daemon) noteRebuildGTCycleDone() {
 }
 
 // requestRebuildGTInstall arms the sticky request that makes the next
-// rebuild_gt heartbeat due regardless of the patrol's interval. A cycle clears
-// it only on a verdict, so a deferral keeps the install pending; arming an
+// rebuild_gt heartbeat due regardless of the patrol's interval. A cycle takes
+// it when it starts and puts it back if it defers, so a deferral keeps the
+// install pending and a request made mid-cycle survives it; arming an
 // already-armed request is a no-op, which is what keeps the log one line per
 // drain rather than one per landing pass (gt-3qmv4.1).
 func (d *Daemon) requestRebuildGTInstall() {
