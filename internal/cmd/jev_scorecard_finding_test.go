@@ -79,8 +79,8 @@ func findingFixtureBeads() findingFakeBeads {
 
 // The finding scorecard prints one block per question, labeled from the beads'
 // close reasons. The fake diffs make the fix for gt-f2 large (400 lines) and the one for gt-f3 small (10).
-// This test swaps the adapter opener, so it does not run in parallel.
 func TestScorecardFindingGolden(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
 	logPath := dedupe.LogPath(town)
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
@@ -90,18 +90,16 @@ func TestScorecardFindingGolden(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	orig := openScorecardAdapter
-	t.Cleanup(func() { openScorecardAdapter = orig })
-	openScorecardAdapter = func(name, townRoot string) (scorecard.Adapter, error) {
+	open := func(name, townRoot string) (scorecard.Adapter, error) {
 		if name != scorecard.FindingBattery {
-			return orig(name, townRoot)
+			return scorecard.Open(name, townRoot)
 		}
 		return scorecard.NewFinding(townRoot, findingFixtureBeads(), findingFakeDiffs{"0123abc": 400, "0456def": 10}), nil
 	}
 
 	var out bytes.Buffer
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
-	if err := jevScorecardWithFlags(context.Background(), &out, town, scorecard.FindingBattery, "", false, now); err != nil {
+	if err := jevScorecardWithOpener(context.Background(), &out, town, scorecard.FindingBattery, "", false, now, open); err != nil {
 		t.Fatal(err)
 	}
 

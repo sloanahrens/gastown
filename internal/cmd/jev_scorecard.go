@@ -64,18 +64,22 @@ func runJevScorecard(cmd *cobra.Command, _ []string) error {
 	return jevScorecardWithFlags(cmd.Context(), cmd.OutOrStdout(), townRoot, jevScorecardBattery, jevScorecardSince, jevScorecardJSON, time.Now())
 }
 
-// openScorecardAdapter builds a battery's adapter. A test swaps it to put fakes
-// behind an adapter that reads the rig's beads.
-var openScorecardAdapter = scorecard.Open
-
 // jevScorecardWithFlags resolves the window and the battery, then prints the
 // report for the town at townRoot.
 func jevScorecardWithFlags(ctx context.Context, w io.Writer, townRoot, battery, since string, asJSON bool, now time.Time) error {
+	return jevScorecardWithOpener(ctx, w, townRoot, battery, since, asJSON, now, scorecard.Open)
+}
+
+// jevScorecardWithOpener is jevScorecardWithFlags with the adapter opener
+// passed in, so a test can put fakes behind an adapter that reads the rig's
+// beads.
+func jevScorecardWithOpener(ctx context.Context, w io.Writer, townRoot, battery, since string, asJSON bool, now time.Time,
+	open func(battery, townRoot string) (scorecard.Adapter, error)) error {
 	from, err := parseSince(since, now)
 	if err != nil {
 		return err
 	}
-	a, err := openScorecardAdapter(battery, townRoot)
+	a, err := open(battery, townRoot)
 	if err != nil {
 		return err
 	}
