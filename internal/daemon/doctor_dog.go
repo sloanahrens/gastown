@@ -151,13 +151,24 @@ func doctorDogFindings(p doctorProbes, lim doctorLimits) doctorReport {
 	if dbs, err := p.databases(); err != nil {
 		r.findings = append(r.findings, fmt.Sprintf("database list unavailable: %v", err))
 	} else {
+		// One failure shared by every database (an unreadable backup root) is
+		// one finding naming them all, not one per database.
+		var errOrder []string
+		failed := map[string][]string{}
 		for _, db := range dbs {
 			age, ok, err := p.backupAge(db)
 			if err != nil {
-				r.findings = append(r.findings, fmt.Sprintf("backup %s unavailable: %v", db, err))
+				msg := err.Error()
+				if _, seen := failed[msg]; !seen {
+					errOrder = append(errOrder, msg)
+				}
+				failed[msg] = append(failed[msg], db)
 			} else if ok && age > lim.backupStale {
 				r.findings = append(r.findings, fmt.Sprintf("backup %s is %v old (threshold %v)", db, age.Round(time.Minute), lim.backupStale))
 			}
+		}
+		for _, msg := range errOrder {
+			r.findings = append(r.findings, fmt.Sprintf("backup %s unavailable: %s", strings.Join(failed[msg], ", "), msg))
 		}
 	}
 

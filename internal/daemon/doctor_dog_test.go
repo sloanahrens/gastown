@@ -373,14 +373,31 @@ func TestDoctorDogFindings_BackupProbeErrorIsFinding(t *testing.T) {
 		return 0, false, errors.New("permission denied")
 	}
 	r := doctorDogFindings(p, defaultDoctorLimits())
+	if len(r.findings) != 1 {
+		t.Fatalf("want one finding for the shared failure, got %v", r.findings)
+	}
+	for _, s := range []string{"backup hq, gt", "unavailable", "permission denied"} {
+		if !strings.Contains(r.findings[0], s) {
+			t.Errorf("finding %q does not say %q", r.findings[0], s)
+		}
+	}
+}
+
+// Failures that differ per database stay separate findings: only identical
+// errors (an unreadable backup root) collapse into one.
+func TestDoctorDogFindings_DistinctBackupErrorsStaySeparate(t *testing.T) {
+	t.Parallel()
+	p := healthyDoctorProbes()
+	p.backupAge = func(db string) (time.Duration, bool, error) {
+		return 0, false, errors.New("cannot read " + db)
+	}
+	r := doctorDogFindings(p, defaultDoctorLimits())
 	if len(r.findings) != 2 {
-		t.Fatalf("want one finding per served database, got %v", r.findings)
+		t.Fatalf("want one finding per distinct error, got %v", r.findings)
 	}
 	for i, db := range []string{"hq", "gt"} {
-		for _, s := range []string{"backup " + db, "unavailable", "permission denied"} {
-			if !strings.Contains(r.findings[i], s) {
-				t.Errorf("finding %q does not say %q", r.findings[i], s)
-			}
+		if !strings.Contains(r.findings[i], "backup "+db+" unavailable: cannot read "+db) {
+			t.Errorf("finding %d = %q", i, r.findings[i])
 		}
 	}
 }
