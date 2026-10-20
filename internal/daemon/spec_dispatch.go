@@ -53,10 +53,11 @@ var specDispatchTimeout = 5 * time.Minute
 // worktree and a session.
 const specDispatchSlingAllowance = 5 * time.Minute
 
-// specSlingHookedMarker is the line the sling path prints once it has hooked
-// the bead (internal/cmd/sling.go). A killed tick prints it once per sling
-// before it can print its report, so it is the record of what the tick made.
-const specSlingHookedMarker = "Work attached to hook (status=hooked)"
+// specSlingHookedMarker is the line sling.Run prints once it has hooked the
+// bead (internal/sling/run.go), which the spec dispatcher's sling goes through.
+// A killed tick prints it once per sling before it can print its report, so it
+// is the record of what the tick made.
+const specSlingHookedMarker = "Work attached to "
 
 // specDispatchBound is how long a tick may run when it slings up to perTick
 // beads: timeout for the first sling and the read, plus specDispatchSlingAllowance
