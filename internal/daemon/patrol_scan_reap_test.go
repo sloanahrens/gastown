@@ -5,6 +5,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -476,5 +477,86 @@ func TestReapIdleSinceMalformedTimestampIsAnError(t *testing.T) {
 	h := reapHost(t, enabledCleanup("gastown"), bd, nil)
 	if _, err := h.IdleSince("gastown", "onyx"); err == nil {
 		t.Fatal("IdleSince accepted a malformed timestamp")
+	}
+}
+
+// The bound grows with the rig's seats, so a larger rig gets the longer sweep,
+// and no rig gets more than the cap.
+func TestRecoveryBatchBoundGrowsWithPolecats(t *testing.T) {
+	t.Parallel()
+	if two, eight := recoveryBatchBound(2), recoveryBatchBound(8); eight <= two {
+		t.Fatalf("bound for 8 polecats is %s, want more than the %s for 2", eight, two)
+	}
+	for _, n := range []int{-1, 0, 2, 8, 50, 1000} {
+		got := recoveryBatchBound(n)
+		if got < patrolScanRecoveryBatchBase || got > patrolScanRecoveryBatchCap {
+			t.Fatalf("recoveryBatchBound(%d) = %s, want within [%s, %s]",
+				n, got, patrolScanRecoveryBatchBase, patrolScanRecoveryBatchCap)
+		}
+	}
+	if got := recoveryBatchBound(1000); got != patrolScanRecoveryBatchCap {
+		t.Fatalf("recoveryBatchBound(1000) = %s, want the cap %s", got, patrolScanRecoveryBatchCap)
+	}
+}
+
+// A batch the bound kills says so in its error, with the bound and the seat
+// count, so the reap line shows why no verdict arrived. A zero bound is already
+// spent, so the run is killed before it answers.
+func TestReapKilledBatchNamesBoundAndSeats(t *testing.T) {
+	t.Parallel()
+	gt := newFakeCLI(func([]string) cliReply { return cliReply{stderr: "signal: killed", code: 1} })
+	h := reapHost(t, enabledCleanup("gastown"), nil, gt)
+
+	b := h.runRecoveryBatchWithin("gastown", 3, 0)
+	if b.err == nil {
+		t.Fatal("a killed batch answered without error")
+	}
+	if b.byName != nil {
+		t.Fatalf("a killed batch carried verdicts %+v", b.byName)
+	}
+	for _, want := range []string{"killed after", "at the 0s bound for 3 polecats"} {
+		if !strings.Contains(b.err.Error(), want) {
+			t.Fatalf("killed batch error %q, want it to contain %q", b.err, want)
+		}
+	}
+}
+
+// A killed sweep answers every seat unknown, and the pass does not ask again:
+// one exec for the rig, and each seat's verdict is the batch's error.
+func TestReapKilledBatchReadsEverySeatUnknown(t *testing.T) {
+	t.Parallel()
+	gt := newFakeCLI(func([]string) cliReply { return cliReply{stderr: "signal: killed", code: 1} })
+	h := reapHost(t, enabledCleanup("gastown"), nil, gt)
+	h.reapBatches = map[string]reapBatch{"gastown": h.runRecoveryBatchWithin("gastown", 3, 0)}
+
+	for _, name := range []string{"agate", "basalt", "marble"} {
+		got, err := h.Recovery("gastown", name)
+		if err == nil {
+			t.Fatalf("Recovery(%s) answered %+v after a killed batch, want an error", name, got)
+		}
+		if !reflect.DeepEqual(got, patrolscan.Recovery{}) {
+			t.Fatalf("Recovery(%s) after a killed batch = %+v, want the zero verdict", name, got)
+		}
+	}
+	if calls := gt.recorded(); len(calls) != 1 {
+		t.Fatalf("the killed rig made %d sweep execs, want the one that was killed: %+v", len(calls), calls)
+	}
+}
+
+// The bound's seat count is the rig's polecat worktrees, and a rig with no
+// polecats directory has none.
+func TestReapRigPolecatsCountsSeats(t *testing.T) {
+	t.Parallel()
+	h := reapHost(t, enabledCleanup("gastown"), nil, nil)
+	if got := h.rigPolecats("gastown"); got != 0 {
+		t.Fatalf("a rig with no polecats directory counted %d seats", got)
+	}
+	for _, name := range []string{"agate", "basalt", "marble"} {
+		if err := os.MkdirAll(filepath.Join(h.town(), "gastown", "polecats", name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := h.rigPolecats("gastown"); got != 3 {
+		t.Fatalf("rigPolecats = %d, want 3", got)
 	}
 }

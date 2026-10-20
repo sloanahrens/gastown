@@ -22,9 +22,18 @@ import (
 // check-recovery's, never rebuilt here (design Revision 1, gt-kqzns).
 
 const (
-	// patrolScanRecoveryBatchTimeout bounds one `gt polecat check-recovery-batch`.
-	// It reads every polecat in the rig and probes each worktree's git state.
-	patrolScanRecoveryBatchTimeout = 120 * time.Second
+	// patrolScanRecoveryBatchBase is the part of the bound on one `gt polecat
+	// check-recovery-batch` that does not depend on the rig's size.
+	patrolScanRecoveryBatchBase = 120 * time.Second
+
+	// patrolScanRecoveryBatchPerPolecat is what each polecat in the rig adds to
+	// that bound. The batch reads every polecat and probes each worktree's git
+	// state, so its cost grows with the seat count.
+	patrolScanRecoveryBatchPerPolecat = 15 * time.Second
+
+	// patrolScanRecoveryBatchCap is the longest one batch may run, however many
+	// seats the rig holds, so a wedged sweep cannot hold the tick indefinitely.
+	patrolScanRecoveryBatchCap = 10 * time.Minute
 
 	// patrolScanReapTimeout bounds one `gt polecat nuke`: the 3 minutes a
 	// restart gets, since a nuke preserves the branch to origin first.
@@ -110,19 +119,53 @@ func (h *patrolScanHost) recoveryBatch(rig string) (reapBatch, error) {
 	return b, b.err
 }
 
+// recoveryBatchBound is the time one check-recovery-batch run gets in a rig of
+// polecats seats: the base, plus the allowance per polecat, never more than the
+// cap.
+func recoveryBatchBound(polecats int) time.Duration {
+	polecats = max(polecats, 0)
+	bound := patrolScanRecoveryBatchBase + time.Duration(polecats)*patrolScanRecoveryBatchPerPolecat
+	return min(bound, patrolScanRecoveryBatchCap)
+}
+
+// rigPolecats counts the rig's polecat seats for the batch bound. A rig whose
+// seats cannot be listed counts as none: the bound is only a deadline, and the
+// sweep's own read decides the verdicts.
+func (h *patrolScanHost) rigPolecats(rig string) int {
+	names, err := h.Polecats(rig)
+	if err != nil {
+		return 0
+	}
+	return len(names)
+}
+
 func (h *patrolScanHost) runRecoveryBatch(rig string) reapBatch {
 	if h.d.gtPath == "" {
 		return reapBatch{err: fmt.Errorf("%w: no gt binary resolved", errNoDaemonStarter)}
 	}
-	ctx, cancel := context.WithTimeout(h.d.ctxOrBackground(), patrolScanRecoveryBatchTimeout)
+	polecats := h.rigPolecats(rig)
+	return h.runRecoveryBatchWithin(rig, polecats, recoveryBatchBound(polecats))
+}
+
+// runRecoveryBatchWithin runs the rig's sweep under bound, the deadline
+// recoveryBatchBound gave a rig of polecats seats. A run the deadline kills
+// names its elapsed time, bound and seat count in its error, which is the line
+// the reap pass writes for every seat the batch could not answer.
+func (h *patrolScanHost) runRecoveryBatchWithin(rig string, polecats int, bound time.Duration) reapBatch {
+	ctx, cancel := context.WithTimeout(h.d.ctxOrBackground(), bound)
 	defer cancel()
 	// --reconcile-cleanup is the only write check-recovery has; the tick
 	// writes nothing but the removal, so it is never passed.
 	cmd := exec.CommandContext(ctx, h.d.gtPath, "polecat", "check-recovery-batch", rig, "--json") //nolint:gosec // G204: gtPath resolved at daemon init
 	cmd.Dir = h.town()
 	cmd.Env = daemonGTEnv(os.Environ())
+	started := time.Now()
 	stdout, stderr, err := h.d.runCmd(cmd)
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return reapBatch{err: fmt.Errorf("gt polecat check-recovery-batch %s: killed after %s at the %s bound for %d polecats: %w: %s",
+				rig, time.Since(started).Round(time.Second), bound, polecats, err, lastLine(string(stderr)))}
+		}
 		return reapBatch{err: fmt.Errorf("gt polecat check-recovery-batch %s: %w: %s", rig, err, lastLine(string(stderr)))}
 	}
 	batch, err := parseRecoveryBatch(rig, stdout)
