@@ -34,9 +34,11 @@ type host struct {
 	// run runs a command to completion and returns what it wrote. A failure
 	// that should read as an exit status implements interface{ ExitCode() int }.
 	run func(c hostCall) (stdout, stderr []byte, err error)
-	// probeTimeout bounds probe; zero means probeTimeoutDefault. A test
-	// shortens it so a hung-probe case returns in milliseconds.
-	probeTimeout time.Duration
+	// probeTimeout returns the deadline for the probe whose argv is given;
+	// nil, or a result of zero or less, means probeTimeoutDefault. A test
+	// shortens it for the probe that hangs on purpose only, so a probe that
+	// must answer is never timed out by a scheduling stall.
+	probeTimeout func(argv []string) time.Duration
 	// start starts a long-running process (the sql-server) and returns it.
 	start func(cmd *exec.Cmd) (*startedProcess, error)
 	// alive reports whether pid is a running process.
@@ -180,9 +182,11 @@ const probeTimeoutDefault = 5 * time.Second
 // there. A probe that exceeds the deadline returns an error, so its caller
 // falls back or leaves state alone rather than acting on a half answer.
 func (h *host) probe(name string, args ...string) ([]byte, error) {
-	timeout := h.probeTimeout
-	if timeout <= 0 {
-		timeout = probeTimeoutDefault
+	timeout := probeTimeoutDefault
+	if h.probeTimeout != nil {
+		if d := h.probeTimeout(append([]string{name}, args...)); d > 0 {
+			timeout = d
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()

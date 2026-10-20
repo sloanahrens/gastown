@@ -5443,7 +5443,6 @@ func TestFindDoltServerOnPort_FallsBackWhenLsofHangs(t *testing.T) {
 	t.Parallel()
 	f := newFakeHost()
 	h := f.host()
-	h.probeTimeout = 25 * time.Millisecond
 	f.on("ss -tlnp sport = :4598", fakeReply{
 		stdout: `LISTEN 0 128 *:4598 *:* users:(("dolt",pid=4242,fd=7))`,
 	})
@@ -5466,7 +5465,6 @@ func TestCleanStaleSocket_LeavesTheSocketWhenTheProbeHangs(t *testing.T) {
 	}
 	f := newFakeHost()
 	h := f.host()
-	h.probeTimeout = 25 * time.Millisecond
 	release := f.hangOn("lsof " + socketPath)
 	defer close(release)
 

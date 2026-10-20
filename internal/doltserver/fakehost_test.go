@@ -119,7 +119,24 @@ func (f *fakeHost) host() *host {
 		sleep:        f.sleep,
 		bdArgs:       func(_, args []string) []string { return args },
 		doltEndpoint: f.doltEndpoint,
+		probeTimeout: f.probeTimeout,
 	}
+}
+
+// hungProbeTimeout is the deadline a probe scripted to hang gets: it only has
+// to pass, so it is as short as a timer allows. A probe that answers keeps
+// the default deadline and cannot time out from a scheduling stall.
+const hungProbeTimeout = time.Millisecond
+
+// probeTimeout gives a probe scripted with hangOn hungProbeTimeout and every
+// other probe the default (zero).
+func (f *fakeHost) probeTimeout(argv []string) time.Duration {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.hangs[strings.Join(argv, " ")] != nil {
+		return hungProbeTimeout
+	}
+	return 0
 }
 
 // writeTownDoltSettings writes operational.dolt into townRoot's
