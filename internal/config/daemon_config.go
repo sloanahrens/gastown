@@ -76,6 +76,11 @@ type PatrolsConfig struct {
 	// JevDedupe.
 	JevLanding *JevLandingConfig `json:"jev_landing,omitempty"`
 
+	// JevSubmission asks Jev about each branch submitted for landing and logs
+	// the answers (internal/jev/submission). Opt-in for the same reason as
+	// JevDedupe.
+	JevSubmission *JevSubmissionConfig `json:"jev_submission,omitempty"`
+
 	// JevDispatch asks Jev to predict, for each bead just placed on a seat,
 	// whether it lands first try, its size and the model it needs, and logs
 	// every answer (internal/jev/dispatch). Opt-in, like JevDedupe.
@@ -482,6 +487,20 @@ type JevAttentionConfig struct {
 // The pass is off unless Enabled is true, and an enabled pass needs
 // USDPerBillionTokens: the usage ledger stores tokens, not dollars.
 type JevLandingConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the pass for the day once the town's Jev spend
+	// reaches it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+}
+
+// JevSubmissionConfig switches on the submission battery and prices its Jev
+// spend. The pass is off unless Enabled is true, and an enabled pass needs
+// USDPerBillionTokens: the usage ledger stores tokens, not dollars.
+type JevSubmissionConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// MaxUSDPerDay stops the pass for the day once the town's Jev spend

@@ -35,6 +35,7 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
 	jevdispatch "github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/jev/landing"
+	"github.com/steveyegge/gastown/internal/jev/submission"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -577,6 +578,12 @@ type Daemon struct {
 	// and jevDedupeOpen are for jev_dedupe.
 	jevLandingRunning atomic.Bool
 	jevLandingOpen    func(townRoot string, s landing.Settings, warnings io.Writer) (*landing.Pass, error)
+
+	// jevSubmissionRunning and jevSubmissionOpen are the jev_submission
+	// pass's single-flight guard and test seam (jev_submission.go), as
+	// jevLandingRunning and jevLandingOpen are for jev_landing.
+	jevSubmissionRunning atomic.Bool
+	jevSubmissionOpen    func(townRoot string, s submission.Settings, warnings io.Writer) (*submission.Pass, error)
 
 	// jevDispatchRunning is the jev_dispatch pass's single-flight guard
 	// (jev_dispatch.go), for the same reason as jevDedupeRunning.
@@ -1565,6 +1572,10 @@ var heartbeatSteps = []heartbeatStep{
 	// Ask Jev a second opinion on each risk-path landing and log it
 	// (internal/jev/landing). Opt-in and lifecycle, like jev-dedupe.
 	{name: "jev-landing", lifecycle: true, run: (*Daemon).triggerJevLanding},
+
+	// Ask Jev about each branch submitted for landing and log every answer
+	// (internal/jev/submission). Opt-in and lifecycle, like jev-dedupe.
+	{name: "jev-submission", lifecycle: true, run: (*Daemon).triggerJevSubmission},
 
 	// Predict, for each bead just placed on a seat, how it will land, and log
 	// every prediction (internal/jev/dispatch). Opt-in and lifecycle, like
