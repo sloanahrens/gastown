@@ -4,6 +4,7 @@ import (
 	"compress/gzip"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1583,5 +1584,107 @@ func TestTailDeploysObserveReleasesLockDuringGit(t *testing.T) {
 	}
 	if snap := track.snapshot(); snap.Waiting != 0 || snap.Landed != 1 {
 		t.Fatalf("snapshot = %+v; want the bead deployed", snap)
+	}
+}
+
+// TestTailBeads_NotFoundIsRemembered: a bead bd reported as not found is not
+// asked about again by issue or title, while a timeout stays retryable.
+func TestTailBeads_NotFoundIsRemembered(t *testing.T) {
+	t.Parallel()
+	store := &fakeTailStore{errs: map[string]error{
+		"gt-gone":  fmt.Errorf("show gt-gone: %w", beads.ErrNotFound),
+		"gt-slow":  errors.New("bd show: timed out"),
+		"gt-gone2": beads.ErrNotFound,
+	}}
+	b := newTailBeads(store.show)
+
+	for i := 0; i < 3; i++ {
+		if got := b.issue("gastown", "gt-gone"); got != nil {
+			t.Fatalf("issue = %v, want nil", got)
+		}
+		if got := b.title("gastown", "gt-gone"); got != "" {
+			t.Fatalf("title = %q, want empty", got)
+		}
+	}
+	if n := store.readsFor("gt-gone"); n != 1 {
+		t.Fatalf("gt-gone read %d times, want 1", n)
+	}
+
+	for i := 0; i < 3; i++ {
+		b.issue("gastown", "gt-slow")
+		b.title("gastown", "gt-slow")
+	}
+	if n := store.readsFor("gt-slow"); n != 6 {
+		t.Fatalf("gt-slow read %d times, want 6 (a timeout is retried)", n)
+	}
+
+	// title first, then issue: the miss title found is shared with pollIssue.
+	b.title("gastown", "gt-gone2")
+	b.issue("gastown", "gt-gone2")
+	if n := store.readsFor("gt-gone2"); n != 1 {
+		t.Fatalf("gt-gone2 read %d times, want 1", n)
+	}
+}
+
+// TestTailBeads_NotFoundCacheIsBounded: the set drops its oldest id when full,
+// so a run never grows past tailMissingCacheSize.
+func TestTailBeads_NotFoundCacheIsBounded(t *testing.T) {
+	t.Parallel()
+	store := &fakeTailStore{errs: map[string]error{}}
+	for i := 0; i <= tailMissingCacheSize; i++ {
+		store.errs[fmt.Sprintf("gt-%d", i)] = beads.ErrNotFound
+	}
+	b := newTailBeads(store.show)
+	for i := 0; i <= tailMissingCacheSize; i++ {
+		b.issue("gastown", fmt.Sprintf("gt-%d", i))
+	}
+	if len(b.missing) != tailMissingCacheSize {
+		t.Fatalf("remembered %d ids, want %d", len(b.missing), tailMissingCacheSize)
+	}
+	b.issue("gastown", "gt-0") // the oldest was dropped, so it is asked again
+	if n := store.readsFor("gt-0"); n != 2 {
+		t.Fatalf("gt-0 read %d times, want 2", n)
+	}
+	b.issue("gastown", fmt.Sprintf("gt-%d", tailMissingCacheSize)) // the newest is still remembered
+	if n := store.readsFor(fmt.Sprintf("gt-%d", tailMissingCacheSize)); n != 1 {
+		t.Fatalf("newest id read %d times, want 1", n)
+	}
+}
+
+// TestEventsSource_DeletedInPageIsNotRead: a journal page that creates,
+// updates, comments on and deletes one bead makes no bd show for it, and its
+// lines carry no title; a bead the page leaves alone is still read.
+func TestEventsSource_DeletedInPageIsNotRead(t *testing.T) {
+	t.Parallel()
+	store := &fakeTailStore{issues: map[string]*beads.Issue{
+		"gt-gone": {ID: "gt-gone", Title: "a throwaway"},
+		"gt-live": {ID: "gt-live", Title: "a kept bead", Comments: []beads.Comment{{Text: "pushed: x"}}},
+	}}
+	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
+		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "create", IssueID: "gt-gone", Status: "open"},
+		{Seq: 2, TS: "2026-09-30T13:50:01Z", Op: "update", IssueID: "gt-gone", Status: "in_progress"},
+		{Seq: 3, TS: "2026-09-30T13:50:02Z", Op: "comment", IssueID: "gt-gone"},
+		{Seq: 4, TS: "2026-09-30T13:50:03Z", Op: "create", IssueID: "gt-live", Status: "open"},
+		{Seq: 5, TS: "2026-09-30T13:50:04Z", Op: "comment", IssueID: "gt-live"},
+		{Seq: 6, TS: "2026-09-30T13:50:05Z", Op: "delete", IssueID: "gt-gone"},
+	}}
+	beadReads := newTailBeads(store.show)
+	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: beadReads}
+	lines := s.Poll()
+	if len(lines) != 6 {
+		t.Fatalf("lines = %q", texts(lines))
+	}
+	view := newTailView(tailTestLoc, tailViewOptions{beads: beadReads, now: fixedNow})
+	for _, l := range lines {
+		rendered := view.renderLine(l)
+		if strings.Contains(l.Text, "gt-gone") && (strings.Contains(rendered, "a throwaway") || l.Comment != "" || l.Verdict != "" || l.Submit != "") {
+			t.Fatalf("gt-gone line was annotated: %q %+v", rendered, l)
+		}
+	}
+	if n := store.readsFor("gt-gone"); n != 0 {
+		t.Fatalf("gt-gone read %d times, want 0", n)
+	}
+	if n := store.readsFor("gt-live"); n == 0 {
+		t.Fatal("gt-live was never read")
 	}
 }

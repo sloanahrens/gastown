@@ -798,6 +798,9 @@ type tailLine struct {
 	Submit  string
 	Plain   bool
 	Class   tailClass
+	// Deleted marks an events line whose bead the same journal page deletes:
+	// the bead is gone, so the line is never given a title.
+	Deleted bool
 }
 
 // tailSource is one read-only input to the stream. Poll returns the lines
