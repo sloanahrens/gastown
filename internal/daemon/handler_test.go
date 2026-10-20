@@ -83,7 +83,7 @@ func writeTestScriptPlugin(t *testing.T, townRoot, name string) {
 	t.Helper()
 	writeTestPlugin(t, townRoot, name,
 		"+++\nname = \""+name+"\"\ndescription = \"script plugin\"\n\n[gate]\ntype = \"cooldown\"\n\n[execution]\ntype = \"script\"\ntimeout = \"5s\"\n+++\n\n# Instructions\n")
-	if err := os.WriteFile(filepath.Join(townRoot, "plugins", name, "run.sh"), []byte("exit 0\n"), 0o755); err != nil {
+	if err := os.WriteFile(filepath.Join(townRoot, "plugins", name, "run.sh"), []byte("exit 0\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile run.sh: %v", err)
 	}
 }
