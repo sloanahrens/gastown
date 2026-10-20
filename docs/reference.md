@@ -1249,6 +1249,57 @@ so far. It reads `.runtime/jev/fixture.jsonl` with labels from
 `fixture-labels.json`, and exists so tests can drive the command end to end. No
 live battery reads it.
 
+#### Dispatch battery (`gt jev dispatch`)
+
+`internal/jev/dispatch` predicts, for each bead just placed on a seat, whether
+it lands on the first merge attempt, fits twenty minutes, has tickable
+acceptance, needs a reasoning model and touches the daemon, and scores its size
+on a three-level rubric. It reads beads after the fact in its own pass and is
+never called from the spec dispatcher's tick or from a sling, so dispatch
+latency is unchanged. It is advisory and log-only: it never edits, labels or
+comments on a bead.
+
+A placement is a bead in `in_progress` or `hooked` whose description carries an
+`attached_at` stamp later than the pass's cursor (`.runtime/jev/dispatch.cursor.json`,
+the stamp with the bead id as tie-break). A bead slung again gets a new stamp
+and a new line. The first pass only starts the cursor.
+
+The state quotes the title, the `## Goal`, `## Constraints`, `## Acceptance` and
+`## Size` sections (each cut to 1500 runes), the labels and the agent (the
+`agent:` label, else the `agent=` entry in `attached_vars`), each as a JSON
+string. Raise `Version` in `questions.go` with any change to a question; every
+line carries it.
+
+Each pass appends one line per bead to `.runtime/jev/dispatch.jsonl`:
+`{ts, bead, attached_at, agent, answers, question_version, model}`. `answers`
+holds the five probabilities and `size: {score, confidence}`; `model` is the
+versioned model the API answered with, so a model upgrade shows in a scorecard.
+`gt jev dispatch --recent N` prints the last N lines.
+
+A question that fails logs no line, and its cause never reaches the log. The
+placement goes into `.runtime/jev/dispatch.retries.json` with an attempt count
+and is asked again on the next pass, so a single transient failure costs time,
+not the prediction. A placement that fails three times is given up, and the
+daemon log names the bead and the cause.
+
+A failure that means Jev was out of reach — a timeout, a lost connection, a 401,
+a 5xx, a 429 that outlived its retry — is not the bead's fault. The pass stops
+at that placement and reports it, spending no attempt and dropping nothing, so
+an outage of any length leaves every pending bead for the next pass. Only a
+request Jev refused on its own terms (a 4xx other than 401) or answered
+unusably counts against a bead.
+
+The daemon patrol `jev_dispatch` (heartbeat step `jev-dispatch`) is off unless
+`daemon.json` sets it on, and runs every 15 minutes:
+
+```json
+{"patrols": {"jev_dispatch": {"enabled": true, "max_usd_per_day": 1, "usd_per_billion_tokens": 4}}}
+```
+
+`usd_per_billion_tokens` is required; `max_usd_per_day` defaults to 1 and is
+the town-wide cap above, so the dedupe and dispatch batteries draw on one day's
+room. `gt jev dispatch` reads the same keys whether or not the patrol is on.
+
 ## Beads Commands (bd)
 
 ```bash
