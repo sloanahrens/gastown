@@ -160,6 +160,30 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 		}
 	})
 
+	t.Run("UpdateRef creates a full ref and moves it", func(t *testing.T) {
+		t.Parallel()
+		fx, g := newWtFixture(t, newEnv(t))
+		env := fx.env.(BranchEnv)
+		ref := "refs/landed/gt-abc"
+		if err := g.UpdateRef(ref, fx.base); err != nil {
+			t.Fatalf("UpdateRef: %v", err)
+		}
+		if id, err := g.Rev(ref); err != nil || id != fx.base {
+			t.Errorf("%s after UpdateRef = %s, %v; want %s", ref, id, err, fx.base)
+		}
+		writeFile(t, filepath.Join(fx.clone, "landed.txt"), "landed\n")
+		later := env.CommitWorktree(t, fx.clone, "later")
+		if err := g.UpdateRef(ref, later); err != nil {
+			t.Fatalf("UpdateRef to a new commit: %v", err)
+		}
+		if id, err := g.Rev(ref); err != nil || id != later {
+			t.Errorf("%s after the second UpdateRef = %s, %v; want %s", ref, id, err, later)
+		}
+		if err := g.UpdateRef(ref, "no-such-commit"); err == nil {
+			t.Error("UpdateRef to an unknown commit succeeded")
+		}
+	})
+
 	t.Run("refs, branches and the default branch", func(t *testing.T) {
 		t.Parallel()
 		fx, g := newWtFixture(t, newEnv(t))

@@ -51,6 +51,9 @@ var _ Beads = beads.Client(nil)
 type Repo interface {
 	FetchRefspecWithTimeout(remote, refspec string, timeout time.Duration) error
 	Rev(ref string) (string, error)
+	// UpdateRef points a full ref name at commit, creating or moving it: the
+	// local half of refs/landed/<bead> (gt-as9v8).
+	UpdateRef(ref, commit string) error
 	IsAncestor(ancestor, descendant string) (bool, error)
 	// MergeBase is the best common ancestor of a and b, and it fails when the
 	// two share none (git merge-base exits 1 with no output): the point a
@@ -1275,7 +1278,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	}
 	l.logf("%s: landed %s on %s/%s (patch-id %s)", w.BeadID, shortSHA(merged), remote, w.Target, shortSHA(patchID))
 
-	if err := l.record(w, res); err != nil {
+	if err := l.record(g, w, res); err != nil {
 		return res, &RecordError{Result: res, Err: err}
 	}
 	// The landing is recorded, so the feed runs after it and cannot change it
@@ -1318,6 +1321,11 @@ func (l *Lander) repairRecord(g Repo, w Work) (*Result, error) {
 	l.logf("%s: already landed as %s; finishing its record", w.BeadID, shortSHA(rec.LandedCommit))
 	res := &Result{LandedCommit: rec.LandedCommit, PatchID: rec.PatchID, Base: rec.Base,
 		Verdict: Verdict{Verdict: rec.OMVerdict, Score: rec.OMScore}, RiskPaths: rec.RiskPaths}
+	// A repair finishes the same write the landing started, ref first, so a
+	// crash after the landings file leaves the ref too (gt-as9v8).
+	if err := l.writeLandedRef(g, rec); err != nil {
+		return res, &RecordError{Result: *res, Err: err}
+	}
 	if err := l.recordBead(w, rec); err != nil {
 		return res, &RecordError{Result: *res, Err: err}
 	}
@@ -1455,7 +1463,7 @@ func (l *Lander) completeUnrecordedLanding(g Repo, issue *beads.Issue, w Work) (
 		RiskPathReviewSkippedBy: skippedBy,
 		GateNote:                "not recorded: this landing merged on the target before its pass could record the gate result (gt-mdet3)"}
 	l.logf("%s: %s merged %s on %s/%s but its record was never written; finishing the landing", w.BeadID, remote, shortSHA(merged), remote, w.Target)
-	if err := l.record(w, *res); err != nil {
+	if err := l.record(g, w, *res); err != nil {
 		return res, &RecordError{Result: *res, Err: err}
 	}
 	return res, nil
@@ -1970,10 +1978,14 @@ func gateRecord(res Result) string {
 	return strings.Join(append([]string{res.Gate.Summary()}, res.Gate.Warnings()...), "; ")
 }
 
-// record writes the landing: the rig's landings file first (the record that
-// survives any bd failure), then the bead's LANDING RECORD block, then the
-// close carrying landed_commit and patch_id.
-func (l *Lander) record(w Work, res Result) error {
+// record writes the landing: refs/landed/<bead>, then the rig's landings
+// file (the record that survives any bd failure), then the bead's LANDING
+// RECORD block, then the close carrying landed_commit and patch_id. The ref
+// precedes the file because the file marks the bead done for the
+// leftover-branch sweep: a crash between them leaves a kept branch the ref
+// answers ancestry for, never a swept branch nothing proves landed
+// (gt-as9v8).
+func (l *Lander) record(g Repo, w Work, res Result) error {
 	route := l.Route
 	if route == "" {
 		route = "daemon"
@@ -1984,6 +1996,9 @@ func (l *Lander) record(w Work, res Result) error {
 		GateResult: gateRecord(res), OMVerdict: res.Verdict.Verdict, OMScore: res.Verdict.Score,
 		Route: route, Agent: w.Agent, LandedAt: l.now().UTC(), RiskPaths: res.RiskPaths,
 		RiskPathReviewSkippedBy: res.RiskPathReviewSkippedBy,
+	}
+	if err := l.writeLandedRef(g, rec); err != nil {
+		return err
 	}
 	if err := l.Landings.Append(rec); err != nil {
 		return fmt.Errorf("landings file: %w", err)
@@ -2025,5 +2040,37 @@ func (l *Lander) recordBead(w Work, rec LandingRecord) error {
 	}
 	// The work is closed, so the workflow that carried it ends here too.
 	l.closeAttachedMolecule(w.BeadID)
+	return nil
+}
+
+// LandedRef is the ref a landing leaves for its bead: the head that landed,
+// kept after the polecat branch is deleted so a worktree still holding the
+// branch stays answerable by ancestry (gt-as9v8).
+func LandedRef(beadID string) string {
+	return "refs/landed/" + beadID
+}
+
+// writeLandedRef points refs/landed/<bead> at the head the landing record
+// names, in the rig's own repository and on the remote. The push is forced
+// and the local update unconditional: refs/landed/ is the landing worker's
+// namespace alone, and a re-landing of the same bead (a rework after a
+// revert) moves the ref to the newer head.
+//
+// A record that names no head is logged and left without a ref: there is no
+// commit to answer ancestry with, and failing the record over it would wedge
+// a landed bead's repair forever.
+func (l *Lander) writeLandedRef(g Repo, rec LandingRecord) error {
+	if rec.Head == "" {
+		l.logf("%s: the landing record names no head; leaving %s unset", rec.BeadID, LandedRef(rec.BeadID))
+		return nil
+	}
+	ref := LandedRef(rec.BeadID)
+	if err := g.UpdateRef(ref, rec.Head); err != nil {
+		return fmt.Errorf("setting %s: %w", ref, err)
+	}
+	remote := l.remote()
+	if err := g.Push(remote, rec.Head+":"+ref, true); err != nil {
+		return fmt.Errorf("pushing %s to %s: %w", ref, remote, err)
+	}
 	return nil
 }

@@ -86,6 +86,13 @@ func newRealLandFixture(t *testing.T) *landFixture {
 	// has to carry the object with it.
 	f.realSetMain = func(commit string) { gitT(t, f.repo, "push", "-q", "origin", commit+":refs/heads/main") }
 	f.realOriginMain = func() string { return gitT(t, f.origin, "rev-parse", "refs/heads/main") }
+	f.realRef = func(dir, ref string) string {
+		out, err := exec.Command("git", "-C", dir, "rev-parse", "--verify", "--quiet", ref).Output()
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(out))
+	}
 	f.realParents = func(commit string) []string {
 		return strings.Fields(gitT(t, f.origin, "rev-list", "--parents", "-n", "1", commit))[1:]
 	}
