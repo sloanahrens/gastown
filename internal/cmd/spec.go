@@ -1768,9 +1768,9 @@ func specCandidates(townRoot string, maxPriority int, board specBoard) specBoard
 	return read
 }
 
-// specBoardDesigns fills the design a board row may leave out. bd omits an
-// empty design from the ready row, so a row without one is either a bead with
-// no design or one the row dropped, and the rig's own store answers which. The
+// specBoardDesigns fills the design a board row may leave out. A row without
+// one is either a bead with no design or one the row dropped, and the rig's
+// own store answers which. The
 // candidates that need it are read with one ShowMultiple per rig, never one
 // show per candidate (gt-bqj8q). A candidate whose design cannot be read is
 // dropped with its error: the design is part of the spec the lint reads, so
