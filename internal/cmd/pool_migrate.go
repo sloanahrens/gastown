@@ -447,18 +447,29 @@ func migratePoolKeys(settings map[string]any, hooked *legacySeat, prefer bool) (
 		// A pool with no agent converts no seat, but its keys are still a
 		// change: report them, or the run says there is nothing to migrate and
 		// leaves a key the loaders refuse. A converted seat's line reports the
-		// keys it took.
+		// keys it took. Values print as JSON, so an empty agent reads "" and
+		// not a bare gap, and the keys come in the fixed order of this list.
 		var unseated []string
 		for _, key := range []string{"agent", "max_seats", "overflow_agent", "max_overflow"} {
 			if v, present := pool[key]; present {
 				delete(pool, key)
 				if poolSeat == nil {
-					unseated = append(unseated, fmt.Sprintf("%s (%v)", key, v))
+					shown, err := json.Marshal(v)
+					if err != nil {
+						shown = []byte(fmt.Sprintf("%v", v))
+					}
+					unseated = append(unseated, fmt.Sprintf("%s (%s)", key, shown))
 				}
 			}
 		}
 		if len(unseated) > 0 {
-			lines = append(lines, fmt.Sprintf("removed polecat_pool.%s: they named no pool agent; add a seat with gt pool set <agent>=<cap>", strings.Join(unseated, ", ")))
+			line := fmt.Sprintf("removed polecat_pool.%s: they named no agent, so no seat was made", strings.Join(unseated, ", "))
+			// A seat already in the map runs polecats, so telling the
+			// operator to add one would mislead.
+			if !hasSeats(settings) {
+				line += "; add one with gt pool set <agent>=<cap>"
+			}
+			lines = append(lines, line)
 		}
 		for _, key := range []string{"pro_agent", "pro_max", "pro_label"} {
 			if v, present := pool[key]; present {
