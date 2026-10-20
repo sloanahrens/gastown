@@ -23,8 +23,10 @@ import (
 const polecatAdmissionReservationTTL = 30 * time.Minute
 
 // polecatAdmissionReservationMaxAge bounds how long a reservation with a live
-// PID is kept. The reservation records no process start time, so a crashed
-// writer's PID reused by a long-lived process looks alive indefinitely.
+// PID is kept when its holder cannot be told apart from a process that reused
+// the PID: one written without a start time, or whose start time cannot be
+// read now. A reservation that recorded its holder's start time is kept for as
+// long as that same process lives, however old it is.
 const polecatAdmissionReservationMaxAge = 2 * polecatAdmissionReservationTTL
 
 var acquirePolecatAdmissionFn = acquirePolecatAdmission
@@ -138,8 +140,12 @@ func (s *polecatCapacitySnapshot) addPendingMR() {
 }
 
 type polecatAdmissionReservation struct {
-	ID        string    `json:"id"`
-	PID       int       `json:"pid"`
+	ID  string `json:"id"`
+	PID int    `json:"pid"`
+	// PIDStart is the holder's process start time (see processStart). A recycled
+	// PID starts at another time, so a match proves the holder is the process
+	// that took the reservation.
+	PIDStart  string    `json:"pid_start,omitempty"`
 	Rig       string    `json:"rig,omitempty"`
 	Bead      string    `json:"bead,omitempty"`
 	Operation string    `json:"operation"`
@@ -544,6 +550,7 @@ func writePolecatAdmissionReservation(townRoot, rigName, beadID, operation strin
 	reservation := polecatAdmissionReservation{
 		ID:        id,
 		PID:       os.Getpid(),
+		PIDStart:  processStart(os.Getpid()),
 		Rig:       rigName,
 		Bead:      beadID,
 		Operation: operation,
@@ -610,7 +617,7 @@ func cleanupStalePolecatAdmissionReservations(townRoot string, now time.Time) er
 			continue
 		}
 		age := now.Sub(reservation.CreatedAt)
-		if age < polecatAdmissionReservationMaxAge && processAlive(reservation.PID) {
+		if processAlive(reservation.PID) && reservationHolderCurrent(reservation, age) {
 			continue
 		}
 		if age < polecatAdmissionReservationTTL {
@@ -619,6 +626,19 @@ func cleanupStalePolecatAdmissionReservations(townRoot string, now time.Time) er
 		_ = os.Remove(filepath.Join(dir, reservation.ID+".json"))
 	}
 	return nil
+}
+
+// reservationHolderCurrent reports whether the live process at the
+// reservation's PID is still the one that took it. With a recorded start time
+// that is an exact answer; without one, or when the start cannot be read now,
+// the reservation is trusted only up to polecatAdmissionReservationMaxAge.
+func reservationHolderCurrent(reservation polecatAdmissionReservation, age time.Duration) bool {
+	if reservation.PIDStart != "" {
+		if start := processStart(reservation.PID); start != "" {
+			return start == reservation.PIDStart
+		}
+	}
+	return age < polecatAdmissionReservationMaxAge
 }
 
 func cleanupStalePolecatAdmissionReservationsWithLock(townRoot string, now time.Time) error {
