@@ -279,10 +279,57 @@ func TestJevAttentionRunStopsAtTheCap(t *testing.T) {
 
 	d.runJevAttention()
 
-	if !strings.Contains(logs.String(), "daily cap reached: true") {
+	if !strings.Contains(logs.String(), "the daily cap was reached") {
 		t.Errorf("log = %q, want the cap named", logs)
 	}
 	if _, err := os.Stat(jevattention.LogPath(town)); !os.IsNotExist(err) {
 		t.Errorf("a capped pass wrote a log line: %v", err)
+	}
+}
+
+// failAsk fails every call, as Jev does in an outage.
+type failAsk struct{}
+
+func (failAsk) Ask(context.Context, any, map[string]jev.Question) (*jev.Answers, error) {
+	return nil, jev.ErrTimeout
+}
+
+// A pass where every call fails does not log like one where Jev answered: the
+// daemon log says the pass stopped and no item was answered.
+func TestJevAttentionRunLogsAnOutageApartFromAnswers(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	logs := &bytes.Buffer{}
+	cursor := jevattention.CursorPath(town)
+	if err := battery.WriteCursor(cursor, battery.Cursor{Time: time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	var items []attention.Item
+	for _, k := range []string{"a", "b", "c"} {
+		items = append(items, attention.Item{Key: k, FirstSeen: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)})
+	}
+	d := &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(logs, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{JevAttention: &JevAttentionConfig{Enabled: true, USDPerBillionTokens: 3}},
+		},
+		jevAttentionOpen: func(string, jevattention.Settings, io.Writer) (*jevattention.Pass, error) {
+			return &jevattention.Pass{
+				Asker:      failAsk{},
+				State:      func() (attention.State, error) { return attention.State{Items: items}, nil },
+				LogPath:    jevattention.LogPath(town),
+				CursorPath: cursor,
+				SpentToday: func() (float64, error) { return 0, nil },
+				CapUSD:     1,
+			}, nil
+		},
+	}
+
+	d.runJevAttention()
+
+	got := logs.String()
+	if !strings.Contains(got, "0 items answered") || !strings.Contains(got, "stopped after 3 failed calls") {
+		t.Errorf("log = %q, want the outage named and no items answered", got)
 	}
 }

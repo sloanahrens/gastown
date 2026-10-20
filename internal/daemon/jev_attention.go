@@ -77,7 +77,7 @@ func (d *Daemon) runJevAttention() {
 		d.logger.Printf("jev_attention: error: %v", err)
 		return
 	}
-	if sum.Asked > 0 || sum.CapReached {
-		d.logger.Printf("jev_attention: asked %d items (daily cap reached: %v)", sum.Asked, sum.CapReached)
+	if sum.Asked > 0 || sum.Failed > 0 || sum.Held > 0 || sum.CapReached {
+		d.logger.Printf("jev_attention: %s", sum.Report())
 	}
 }

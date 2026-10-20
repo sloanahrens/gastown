@@ -79,14 +79,7 @@ func runJevAttentionPass(out, errw io.Writer, townRoot string) error {
 	if err != nil {
 		return err
 	}
-	switch {
-	case sum.Started:
-		fmt.Fprintln(out, "jev attention: first pass; cursor set to now, no items asked")
-	case sum.CapReached:
-		fmt.Fprintf(out, "jev attention: asked %d items; the daily cap was reached, the rest wait for the next pass\n", sum.Asked)
-	default:
-		fmt.Fprintf(out, "jev attention: asked %d items\n", sum.Asked)
-	}
+	fmt.Fprintf(out, "jev attention: %s\n", sum.Report())
 	return nil
 }
 

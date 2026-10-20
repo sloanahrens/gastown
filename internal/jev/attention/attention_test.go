@@ -287,8 +287,9 @@ func TestJevAttentionStateQuotesEveryValueAndCapsOthers(t *testing.T) {
 	}
 }
 
-// A call that fails logs null answers and still moves the cursor, so the item
-// is asked once. The next item is still asked.
+// A call that fails while a later call succeeds is about its item: it logs
+// null answers and moves the cursor, so the item is asked once. The summary
+// counts it as failed, not asked.
 func TestJevAttentionFailedAskLogsNullAnswers(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, []attention.Item{
@@ -303,8 +304,8 @@ func TestJevAttentionFailedAskLogsNullAnswers(t *testing.T) {
 
 	sum := mustRun(t, h.pass)
 
-	if sum.Asked != 2 {
-		t.Fatalf("Asked = %d, want 2: a failed call still logs its item", sum.Asked)
+	if sum.Asked != 1 || sum.Failed != 1 || sum.Held != 0 || sum.Halted {
+		t.Fatalf("summary %+v, want 1 asked and 1 failed", sum)
 	}
 	lines := h.lines(t)
 	if lines[0]["answers"] != nil || lines[0]["model"] != "" {
@@ -400,5 +401,172 @@ func TestJevAttentionOpenNeedsAPrice(t *testing.T) {
 	_, err := Open(t.TempDir(), Settings{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "usd_per_billion_tokens") {
 		t.Errorf("Open error = %v, want the missing price named", err)
+	}
+}
+
+// Calls that keep failing are an outage, not a fact about the items: the pass
+// stops after maxConsecutiveFailures, logs nothing, leaves the cursor, and
+// reports itself halted with nothing asked. Once Jev answers, the next pass
+// asks the same items.
+func TestJevAttentionOutageHaltsWithoutBurningItems(t *testing.T) {
+	t.Parallel()
+	var items []attention.Item
+	for i := 1; i <= 5; i++ {
+		items = append(items, item(fmt.Sprintf("item-%d", i), i, fmt.Sprintf("summary %d", i)))
+	}
+	down := true
+	h := newHarness(t, items, func(string) (*jev.Answers, error) {
+		if down {
+			return nil, jev.ErrTimeout
+		}
+		return answersFor(0.5, 1), nil
+	})
+
+	sum := mustRun(t, h.pass)
+
+	if sum.Asked != 0 || sum.Failed != 0 || sum.Held != maxConsecutiveFailures || !sum.Halted {
+		t.Fatalf("summary %+v, want nothing asked and a halt with %d held", sum, maxConsecutiveFailures)
+	}
+	if len(h.asker.states) != maxConsecutiveFailures {
+		t.Errorf("%d calls after the outage began, want the pass to stop at %d", len(h.asker.states), maxConsecutiveFailures)
+	}
+	if n := len(h.lines(t)); n != 0 {
+		t.Errorf("log has %d lines from an outage, want none", n)
+	}
+	cur, _, _ := battery.ReadCursor(h.cursor)
+	if !cur.Time.Equal(t0.Add(-time.Hour)) {
+		t.Errorf("cursor moved to %v during an outage", cur.Time)
+	}
+	if r := sum.Report(); strings.Contains(r, "5 items") || !strings.Contains(r, "0 items answered") || !strings.Contains(r, "stopped after 3 failed calls") {
+		t.Errorf("Report = %q, want an outage that does not read as asked items", r)
+	}
+
+	down = false
+	sum = mustRun(t, h.pass)
+
+	if sum.Asked != 5 || sum.Failed != 0 {
+		t.Errorf("recovery summary %+v, want all 5 items asked", sum)
+	}
+	if got := keysOf(h.lines(t)); !reflect.DeepEqual(got, []string{"item-1", "item-2", "item-3", "item-4", "item-5"}) {
+		t.Errorf("logged keys %v after recovery, want every item once in order", got)
+	}
+}
+
+// Fewer failures than the limit at the end of a pass are held too: no later
+// call showed they were about the items, so the next pass asks them again.
+func TestJevAttentionTrailingFailuresAreHeld(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, []attention.Item{
+		item("ok", 1, "first"),
+		item("fails", 2, "second"),
+	}, func(state string) (*jev.Answers, error) {
+		if strings.Contains(state, `summary: "second"`) {
+			return nil, jev.ErrTimeout
+		}
+		return answersFor(0.5, 1), nil
+	})
+
+	sum := mustRun(t, h.pass)
+
+	if sum.Asked != 1 || sum.Failed != 0 || sum.Held != 1 || sum.Halted {
+		t.Fatalf("summary %+v, want 1 asked and 1 held", sum)
+	}
+	if got := keysOf(h.lines(t)); !reflect.DeepEqual(got, []string{"ok"}) {
+		t.Errorf("logged keys %v, want only the answered item", got)
+	}
+	cur, _, _ := battery.ReadCursor(h.cursor)
+	if cur.ID != "ok" {
+		t.Errorf("cursor at %q, want it on the last answered item", cur.ID)
+	}
+}
+
+func TestJevAttentionReportNamesFailuresApartFromAnswers(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		sum  Summary
+		want []string
+	}{
+		{"started", Summary{Started: true}, []string{"first pass"}},
+		{"answered", Summary{Asked: 2}, []string{"2 items answered"}},
+		{"failed and held", Summary{Asked: 1, Failed: 2, Held: 1}, []string{"1 items answered", "2 logged with null answers", "1 failed calls left"}},
+		{"capped", Summary{Asked: 1, CapReached: true}, []string{"daily cap was reached"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := tt.sum.Report()
+			for _, w := range tt.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("Report = %q, want it to contain %q", got, w)
+				}
+			}
+		})
+	}
+}
+
+// A pass finding another pass's lock stops with ErrBusy before it reads the
+// queue or calls Jev, and leaves the cursor and log alone.
+func TestJevAttentionBusyPassAsksNothing(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, []attention.Item{item("red", 1, "main is red")},
+		func(string) (*jev.Answers, error) { return answersFor(0.5, 1), nil })
+	release, err := battery.Lock(h.cursor + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	_, err = h.pass.Run(context.Background())
+
+	if !errors.Is(err, ErrBusy) {
+		t.Fatalf("Run error = %v, want ErrBusy", err)
+	}
+	if len(h.asker.states) != 0 || len(h.lines(t)) != 0 {
+		t.Errorf("a busy pass made %d calls and %d log lines", len(h.asker.states), len(h.lines(t)))
+	}
+}
+
+// Open wires the production pass: the files sit under the town's runtime
+// directory, the cap defaults to a dollar, and the spend it reads is the
+// town's usage ledger, so another caller's calls count against the pass.
+func TestJevAttentionOpenWiresTheTownFiles(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+
+	pass, err := open(town, Settings{USDPerBillionTokens: 1000}, nil, jev.WithKey("test-key"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	if pass.LogPath != LogPath(town) || pass.CursorPath != CursorPath(town) {
+		t.Errorf("paths %q and %q, want the town's log and cursor", pass.LogPath, pass.CursorPath)
+	}
+	if pass.CapUSD != DefaultMaxUSDPerDay {
+		t.Errorf("CapUSD = %v, want the default %v", pass.CapUSD, DefaultMaxUSDPerDay)
+	}
+	if pass.Asker == nil || pass.State == nil {
+		t.Fatal("Open left the Asker or the state reader unset")
+	}
+	if spent, err := pass.SpentToday(); err != nil || spent != 0 {
+		t.Errorf("SpentToday on an empty ledger = %v, %v, want 0", spent, err)
+	}
+
+	// One million input tokens at 1000 USD per billion is one dollar, spent
+	// by a caller other than the attention battery.
+	ledger := jev.UsageLedgerPath(town)
+	if err := os.MkdirAll(filepath.Dir(ledger), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line, _ := json.Marshal(map[string]any{"ts": time.Now().UTC(), "caller": "jev-dedupe", "input_tokens": 1_000_000, "output_tokens": 0})
+	if err := os.WriteFile(ledger, append(line, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	spent, err := pass.SpentToday()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spent < pass.CapUSD*0.99 {
+		t.Errorf("SpentToday = %v with another caller's dollar in the ledger, want the town-wide spend", spent)
 	}
 }

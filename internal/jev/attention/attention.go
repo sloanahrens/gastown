@@ -39,6 +39,11 @@ const (
 	maxSummaryRunes = 500
 	maxFieldRunes   = 200
 
+	// maxConsecutiveFailures is how many calls in a row may fail before a pass
+	// stops. A run of failures is an outage, not a property of the items, so
+	// the pass leaves them for the next pass rather than logging them null.
+	maxConsecutiveFailures = 3
+
 	// DefaultMaxUSDPerDay is the daily cap when the config names none. The cap
 	// is town-wide: it counts every Jev caller in the usage ledger.
 	DefaultMaxUSDPerDay = 1.0
@@ -86,8 +91,17 @@ type Pass struct {
 
 // Summary says what one pass did.
 type Summary struct {
-	// Asked is the number of items that got a log line this pass.
+	// Asked is the number of items whose call returned answers.
 	Asked int
+	// Failed is the number of items logged with null answers because their
+	// call failed while a later item's call succeeded.
+	Failed int
+	// Held is the number of failed calls the pass left unlogged, with the
+	// cursor before them, so the next pass asks those items again.
+	Held int
+	// Halted is true when the pass stopped after maxConsecutiveFailures
+	// failed calls in a row.
+	Halted bool
 	// CapReached is true when the pass stopped because the day's cap was
 	// spent. The items it did not reach wait for the next pass.
 	CapReached bool
@@ -96,10 +110,40 @@ type Summary struct {
 	Started bool
 }
 
+// Report is the one-line account of a pass that the command prints and the
+// daemon logs. Failed calls are named apart from answered ones, so a pass
+// where Jev was down does not read like one where it answered.
+func (s Summary) Report() string {
+	if s.Started {
+		return "first pass; cursor set to now, no items asked"
+	}
+	out := fmt.Sprintf("%d items answered", s.Asked)
+	if s.Failed > 0 {
+		out += fmt.Sprintf(", %d logged with null answers after a failed call", s.Failed)
+	}
+	if s.Held > 0 {
+		out += fmt.Sprintf(", %d failed calls left for the next pass", s.Held)
+	}
+	if s.Halted {
+		out += fmt.Sprintf("; stopped after %d failed calls in a row", maxConsecutiveFailures)
+	}
+	if s.CapReached {
+		out += "; the daily cap was reached, the rest wait for the next pass"
+	}
+	return out
+}
+
 // Run does one pass. Items are taken in the order they were first seen, and
 // each is logged and the cursor advanced before the next, so a pass that is
-// stopped partway never asks about an item twice. An item whose question was
-// cut short by ctx is neither logged nor passed: the next pass asks it again.
+// stopped partway never asks about an item twice.
+//
+// A failed call is held, not logged, until a later call in the pass succeeds:
+// then the failure was about its item, and it is logged with null answers and
+// passed, so a single item Jev cannot answer does not block the queue. If the
+// calls keep failing the cause is an outage, not the items: the pass stops at
+// maxConsecutiveFailures and the held items stay behind the cursor for the
+// next pass. An item whose call was cut short by ctx is never logged or
+// passed either.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
 	release, err := lockRun(p.CursorPath)
@@ -122,6 +166,14 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	if err != nil {
 		return sum, fmt.Errorf("reading the attention queue: %w", err)
 	}
+	// held is the run of failed calls since the last success, in order.
+	var held []heldItem
+	record := func(h heldItem) error {
+		if err := battery.Append(p.LogPath, h.line); err != nil {
+			return err
+		}
+		return battery.WriteCursor(p.CursorPath, battery.Cursor{Time: h.item.FirstSeen, ID: h.item.Key})
+	}
 	for _, it := range pending(st.Items, cur) {
 		if err := ctx.Err(); err != nil {
 			return sum, err
@@ -135,24 +187,47 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			break
 		}
 		line, err := p.ask(ctx, st, it)
+		if errors.Is(err, errCallFailed) {
+			held = append(held, heldItem{item: it, line: line})
+			if len(held) == maxConsecutiveFailures {
+				sum.Halted = true
+				break
+			}
+			continue
+		}
 		if err != nil {
 			return sum, err
 		}
-		if err := battery.Append(p.LogPath, line); err != nil {
+		for _, h := range held {
+			if err := record(h); err != nil {
+				return sum, err
+			}
+			sum.Failed++
+		}
+		held = nil
+		if err := record(heldItem{item: it, line: line}); err != nil {
 			return sum, err
 		}
 		sum.Asked++
-		if err := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: it.FirstSeen, ID: it.Key}); err != nil {
-			return sum, err
-		}
 	}
+	sum.Held = len(held)
 	return sum, nil
 }
 
-// ask builds the one line an item earns. A failed call logs null answers, so
-// an item is asked about once whatever Jev does. The one exception is a
-// canceled ctx: a failure that ctx's end caused says nothing about the item,
-// so ask returns ctx's error and no line, and the next pass asks again.
+// heldItem is an item whose call failed, with the null-answers line it would
+// be logged under.
+type heldItem struct {
+	item attention.Item
+	line Line
+}
+
+// errCallFailed marks a Jev call that failed for a reason other than ctx's end.
+var errCallFailed = errors.New("jev call failed")
+
+// ask builds the line an item earns. A failed call returns the line with null
+// answers and an error wrapping errCallFailed; Run decides whether to log it.
+// A failure that a canceled ctx caused says nothing about the item, so ask
+// returns ctx's error and no line instead.
 func (p *Pass) ask(ctx context.Context, st attention.State, it attention.Item) (Line, error) {
 	line := Line{
 		TS:              p.now(),
@@ -170,7 +245,7 @@ func (p *Pass) ask(ctx context.Context, st attention.State, it attention.Item) (
 		if cerr := ctx.Err(); cerr != nil {
 			return Line{}, cerr
 		}
-		return line, nil
+		return line, fmt.Errorf("%w: %v", errCallFailed, err)
 	}
 	line.Model = got.Model
 	urgency := got.Score[QUrgency]
@@ -284,6 +359,12 @@ func (p *Pass) now() time.Time {
 // town's state file, and the spend read from the same ledger. warnings
 // receives the ledger's own warnings and may be nil.
 func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
+	return open(townRoot, s, warnings)
+}
+
+// open is Open with extra client options, which a test uses to supply a key
+// without reading the operator's key file.
+func open(townRoot string, s Settings, warnings io.Writer, extra ...jev.Option) (*Pass, error) {
 	price := s.USDPerBillionTokens
 	if !(price > 0 && !math.IsInf(price, 0)) {
 		return nil, fmt.Errorf("jev_attention.usd_per_billion_tokens is required and must be above zero, not %v", price)
@@ -296,11 +377,11 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 		return nil, fmt.Errorf("jev_attention.max_usd_per_day must be above zero, not %v", capUSD)
 	}
 
-	client, err := jev.NewClient(
+	client, err := jev.NewClient(append([]jev.Option{
 		jev.WithLedger(jev.UsageLedgerPath(townRoot)),
 		jev.WithCaller(Caller),
 		jev.WithWarnings(warnings),
-	)
+	}, extra...)...)
 	if err != nil {
 		return nil, fmt.Errorf("opening the Jev client: %w", err)
 	}
