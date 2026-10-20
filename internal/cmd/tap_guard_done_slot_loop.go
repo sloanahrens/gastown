@@ -264,7 +264,8 @@ func doneSlotLoopSublist(tokens []string, start int) []string {
 // walk, which closes it at its `done`, so it returns nil here.
 func doneSlotLoopZshForBody(tokens, lowerTokens []string, name int) []string {
 	var end int
-	if name+1 < len(tokens) && lowerTokens[name+1] == "in" {
+	isIn := name+1 < len(tokens) && lowerTokens[name+1] == "in"
+	if isIn {
 		end = doneSlotLoopInListEnd(tokens, name+2)
 	} else {
 		end = doneSlotLoopParenListEnd(tokens, name+1)
@@ -273,6 +274,14 @@ func doneSlotLoopZshForBody(tokens, lowerTokens []string, name int) []string {
 		return nil
 	}
 	start := end + 1
+	if !isIn && tokens[start] == ";" {
+		// `for f (a b); CMD` is valid zsh: the `;` after the closing paren only
+		// separates the list from its body (gt-0a957).
+		start++
+		if start >= len(tokens) {
+			return nil
+		}
+	}
 	switch {
 	case tokens[start] == "{":
 		return doneSlotLoopBracedBody(tokens, start)

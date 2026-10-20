@@ -310,3 +310,31 @@ func jsonQuote(s string) string {
 	}
 	return string(b)
 }
+
+// zsh accepts a `;` between the closing paren of `for NAME (WORDS)` and its
+// body, so the body after that `;` must be read as the loop body (gt-0a957).
+func TestDoneSlotLoopZshParenListSemicolon(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"semicolon before a short-form gt done", "for f (a b); gt done", true},
+		{"semicolon before a braced gt done", "for f (a b); { gt done }", true},
+		{"semicolon before a gate after an && list", "for f (a b); make lint && gt done", true},
+		{"semicolon before a do block stays with the depth walk", "for f (a b); do gt done; done", true},
+		{"semicolon before a body with no gate command", "for f (a b); echo hi; gt done", false},
+		{"semicolon before a braced body closed before gt done", "for f (a b); { echo hi }; gt done", false},
+		{"semicolon with no body after it", "for f (a b);", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokens := shellTokenize(tt.command)
+			reason, _ := matchesDoneSlotLoop(tt.command, tokens, doneSlotLoopLower(tokens))
+			if got := reason != ""; got != tt.blocked {
+				t.Errorf("matchesDoneSlotLoop(%q) blocked=%v (reason %q), want %v", tt.command, got, reason, tt.blocked)
+			}
+		})
+	}
+}
