@@ -296,6 +296,55 @@ func TestConflictAdapterLabelsATargetThatAdvancedAfterFork(t *testing.T) {
 	}
 }
 
+// TestConflictAdapterReadsEachRejectionsOwnTip pins the exact tips each
+// conflict rejection is read against. A label only says the OR of the tips
+// held the other's landing, so a stale merge tip read alongside the rejection's
+// own tip would pass the label cases; the tip list does not.
+func TestConflictAdapterReadsEachRejectionsOwnTip(t *testing.T) {
+	t.Parallel()
+	const stale, own = "aaaa111", "bbbb222"
+	cases := []struct {
+		name string
+		log  string
+		want []string
+	}{
+		{
+			name: "a rejection's own tip replaces the earlier merge's tip",
+			log:  mergeLine("gt-a", "1a2b3c", stale, "cand1") + rejectLineTip("gt-a", "conflict", own),
+			want: []string{own},
+		},
+		{
+			name: "a rejection without its own tip takes the last merge's tip",
+			log:  mergeLine("gt-a", "1a2b3c", stale, "cand1") + rejectLine("gt-a", "conflict"),
+			want: []string{stale},
+		},
+		{
+			name: "a merge with no tip clears the one before it",
+			log:  mergeLine("gt-a", "1a2b3c", stale, "cand1") + "2026/10/21 10:00:30 landing_worker: [land] gt-a: merged 9f8e7d onto main as cand2\n" + rejectLine("gt-a", "conflict"),
+			want: nil,
+		},
+		{
+			name: "a rejection with no tip and no earlier merge names nothing",
+			log:  rejectLine("gt-a", "conflict"),
+			want: nil,
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeDaemonLog(t, town, c.log)
+			a := newConflictAdapter(town, nil)
+			if err := a.loadRejections(); err != nil {
+				t.Fatal(err)
+			}
+			if got := a.rejections["gt-a"]; !reflect.DeepEqual(got, c.want) {
+				t.Errorf("tips = %v, want %v", got, c.want)
+			}
+		})
+	}
+}
+
 // A pair where neither bead landed and nothing was rejected labels nothing, and
 // never opens the clone, because it has nothing to read there.
 func TestConflictAdapterLeavesAnUnlandedPairAloneWithoutTheClone(t *testing.T) {
