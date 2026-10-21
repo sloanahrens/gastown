@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log"
 	"os"
@@ -70,13 +71,13 @@ func TestFormatSpecDispatchReport(t *testing.T) {
 	// holding out of the queue: a tick that dispatched nothing but left two
 	// beads stuck must say so in the daemon log, not only in the health field
 	// (om, gt-q6zoo attempt 1).
-	if got := (&Daemon{}).formatSpecDispatchReport([]byte(`{"candidates": 3, "labeled_failed": 2}`)); !strings.Contains(got[0], "2 held by the failed label") {
+	if got := (&Daemon{}).formatSpecDispatchReport(wireOut(`{"candidates": 3, "labeled_failed": 2}`)); !strings.Contains(got[0], "2 held by the failed label") {
 		t.Errorf("tick line = %q, want it to carry the 2 beads held by the label", got[0])
 	}
-	if got := (&Daemon{}).formatSpecDispatchReport([]byte(`{"notices":["gastown: ignoring stale revert: revert of gt-cul has been building for 31m"]}`)); len(got) != 2 || got[1] != "note: gastown: ignoring stale revert: revert of gt-cul has been building for 31m" {
+	if got := (&Daemon{}).formatSpecDispatchReport(wireOut(`{"notices":["gastown: ignoring stale revert: revert of gt-cul has been building for 31m"]}`)); len(got) != 2 || got[1] != "note: gastown: ignoring stale revert: revert of gt-cul has been building for 31m" {
 		t.Errorf("notices = %v", got)
 	}
-	if got := (&Daemon{}).formatSpecDispatchReport([]byte(`{"hold":"town ESTOP active"}`)); len(got) != 1 || got[0] != "held: town ESTOP active" {
+	if got := (&Daemon{}).formatSpecDispatchReport(wireOut(`{"hold":"town ESTOP active"}`)); len(got) != 1 || got[0] != "held: town ESTOP active" {
 		t.Errorf("hold = %v", got)
 	}
 	if got := (&Daemon{}).formatSpecDispatchReport([]byte("garbage")); !strings.Contains(got[0], "unparseable") {
@@ -89,7 +90,7 @@ func TestFormatSpecDispatchReport(t *testing.T) {
 // stayed ready (gt-gzav5).
 func TestFormatSpecDispatchReportNamesSkippedBeads(t *testing.T) {
 	t.Parallel()
-	out := []byte(`{"candidates": 4, "skipped": [
+	out := wireOut(`{"candidates": 4, "skipped": [
 		{"bead": "gt-a", "line": "gt-a: unshaped: ## Goal, acceptance"},
 		{"bead": "gt-b", "line": "gt-b: no seat: claude-sonnet 2/2 live"},
 		{"bead": "gt-c", "line": "gt-c: clean, per-tick limit 1 reached"},
@@ -115,7 +116,7 @@ func TestFormatSpecDispatchReportNamesSkippedBeads(t *testing.T) {
 // (gt-gzav5).
 func TestFormatSpecDispatchReportCapsSkippedBeads(t *testing.T) {
 	t.Parallel()
-	out := []byte(`{"candidates": 8, "skipped": [
+	out := wireOut(`{"candidates": 8, "skipped": [
 		{"bead": "gt-a", "line": "gt-a: no seat: full"},
 		{"bead": "gt-b", "line": "gt-b: no seat: full"},
 		{"bead": "gt-c", "line": "gt-c: no seat: full"},
@@ -143,7 +144,7 @@ func TestFormatSpecDispatchReportCapsSkippedBeads(t *testing.T) {
 // which said neither which bead was deferred nor why (gt-gi3f9, gt-4wcqd).
 func TestFormatSpecDispatchReportLogsDeferralsOutsideTheCap(t *testing.T) {
 	t.Parallel()
-	out := []byte(`{"candidates": 8,
+	out := wireOut(`{"candidates": 8,
 		"skipped": [
 			{"bead": "gt-a", "line": "gt-a: no seat: full"},
 			{"bead": "gt-b", "line": "gt-b: no seat: full"},
@@ -193,7 +194,7 @@ func TestSpecDispatchTickLogsAFailedSling(t *testing.T) {
 	const report = `{"candidates": 1, "failed": [
 		{"bead": "gt-z", "line": "gt-z: dispatch failed, left unassigned: Error 1213 after 4 attempts; excluded from the queue until label x is cleared"}
 	]}`
-	fake := newFakeCLI(func([]string) cliReply { return cliReply{stdout: report} })
+	fake := newFakeCLI(func([]string) cliReply { return cliReply{stdout: string(wireOut(report))} })
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
 
@@ -217,7 +218,7 @@ func TestSpecDispatchDryRunDecidesWithoutSlinging(t *testing.T) {
 	const report = `{"candidates": 2,
 		"dispatched": [{"bead": "gt-a", "line": "gt-a: would sling to gastown on claude-sonnet (free seat)"}],
 		"skipped": [{"bead": "gt-b", "line": "gt-b: no seat: claude-sonnet 1/1 live"}]}`
-	fake := newFakeCLI(func([]string) cliReply { return cliReply{stdout: report} })
+	fake := newFakeCLI(func([]string) cliReply { return cliReply{stdout: string(wireOut(report))} })
 	logger, _ := lineLogger()
 	d := specDispatchFake(t, fake, logger)
 
@@ -231,7 +232,7 @@ func TestSpecDispatchDryRunDecidesWithoutSlinging(t *testing.T) {
 	if len(left.Next) != 2 || left.Next[0].Bead != "gt-a" || len(left.Held) != 0 {
 		t.Errorf("LEFT next = %+v held = %+v, want gt-a and the seatless gt-b next, nothing held", left.Next, left.Held)
 	}
-	joined := strings.Join((&Daemon{}).formatSpecDispatchReport([]byte(report)), "\n")
+	joined := strings.Join((&Daemon{}).formatSpecDispatchReport(wireOut(report)), "\n")
 	for _, unwanted := range []string{"deferred:", "failed:"} {
 		if strings.Contains(joined, unwanted) {
 			t.Errorf("dry-run report logs %q:\n%s", unwanted, joined)
@@ -244,7 +245,7 @@ func TestSpecDispatchDryRunDecidesWithoutSlinging(t *testing.T) {
 // still names it without a second warning (gt-gzav5).
 func TestFormatSpecDispatchReportWarnsOnceAboutUnshaped(t *testing.T) {
 	t.Parallel()
-	out := []byte(`{"candidates": 2, "skipped": [
+	out := wireOut(`{"candidates": 2, "skipped": [
 		{"bead": "gt-a", "line": "gt-a: unshaped: ## Gate, ## Size"},
 		{"bead": "gt-b", "line": "gt-b: no seat: claude-sonnet 2/2 live"}
 	]}`)
@@ -572,7 +573,7 @@ func TestSpecDispatchTickLineStatesDetailReads(t *testing.T) {
 		{"cold", `{"candidates": 2, "details_fetched": 40, "details_cached": 0, "details_unread": 140}`, "; design/notes: 40 fetched, 0 cached, 140 unread"},
 		{"none", `{"candidates": 2}`, ""},
 	} {
-		lines := (&Daemon{}).formatSpecDispatchReport([]byte(tc.out))
+		lines := (&Daemon{}).formatSpecDispatchReport(wireOut(tc.out))
 		got := lines[0]
 		if tc.want == "" {
 			if strings.Contains(got, "design/notes") {
@@ -710,7 +711,7 @@ func TestSpecDispatchTickLogsItsDuration(t *testing.T) {
 		"candidates_ns": 30000000000, "sling_ns": 5000000000}`
 	fake := newFakeCLI(func([]string) cliReply {
 		clock.Advance(40 * time.Second)
-		return cliReply{stdout: report}
+		return cliReply{stdout: string(wireOut(report))}
 	})
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
@@ -733,7 +734,7 @@ func TestSpecDispatchRosterFailureLogsItsDuration(t *testing.T) {
 	const report = `{"candidates": 0, "roster_ns": 3000000000, "errors": ["roster unreadable, not dispatching: no tmux server"]}`
 	fake := newFakeCLI(func([]string) cliReply {
 		clock.Advance(4 * time.Second)
-		return cliReply{stdout: report}
+		return cliReply{stdout: string(wireOut(report))}
 	})
 	logger, lines := lineLogger()
 	d := specDispatchFake(t, fake, logger)
@@ -760,5 +761,62 @@ func TestSpecDispatchHeldTickLogsNoDuration(t *testing.T) {
 
 	if n := countContaining(lines(), "tick took"); n != 0 {
 		t.Errorf("tick took lines = %d for a held tick, want none: %v", n, lines())
+	}
+}
+
+// wireOut completes a fragment of a tick's JSON with the keys the dispatcher
+// always writes, so a test states only the fields it is about. A fragment that
+// is not a JSON object is returned as it is, and the parse reports it.
+func wireOut(fragment string) []byte {
+	var fields map[string]any
+	if err := json.Unmarshal([]byte(fragment), &fields); err != nil {
+		return []byte(fragment)
+	}
+	if _, ok := fields["roster"]; !ok {
+		fields["roster"] = ""
+	}
+	if _, ok := fields["candidates"]; !ok {
+		fields["candidates"] = 0
+	}
+	for _, k := range []string{"dispatched", "refused", "planning", "skipped", "failed"} {
+		if _, ok := fields[k]; !ok {
+			fields[k] = nil
+		}
+	}
+	out, _ := json.Marshal(fields)
+	return out
+}
+
+// A report missing one of the keys the dispatcher always writes is an error,
+// not a report whose field reads as its zero value. The full report is the
+// control: it parses.
+func TestParseSpecDispatchReportRequiresTheAlwaysWrittenKeys(t *testing.T) {
+	t.Parallel()
+	const full = `{"roster": "claude-sonnet 1/2", "candidates": 1, "dispatched": null, "refused": null, "planning": null, "skipped": null, "failed": null}`
+	for _, tc := range []struct {
+		name    string
+		out     string
+		wantErr string
+	}{
+		{"the full report parses", full, ""},
+		{"no roster", strings.Replace(full, `"roster": "claude-sonnet 1/2", `, "", 1), "roster"},
+		{"no candidates", strings.Replace(full, `"candidates": 1, `, "", 1), "candidates"},
+		{"no failed list", strings.Replace(full, `, "failed": null`, "", 1), "failed"},
+		{"no skipped list", strings.Replace(full, `"skipped": null, `, "", 1), "skipped"},
+		{"a tick line before the report", "sling progress\n" + full, ""},
+		{"not an object", `["roster"]`, "parse"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := parseSpecDispatchReport([]byte(tc.out))
+			switch {
+			case tc.wantErr == "" && err != nil:
+				t.Fatalf("parse: %v, want success", err)
+			case tc.wantErr == "parse" && err == nil:
+				t.Fatal("parse succeeded, want an error")
+			case tc.wantErr != "" && tc.wantErr != "parse" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)):
+				t.Errorf("parse error = %v, want it to name the missing %q", err, tc.wantErr)
+			}
+		})
 	}
 }

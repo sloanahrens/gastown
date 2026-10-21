@@ -122,21 +122,23 @@ type specDispatchTickEntry struct {
 	Line string `json:"line"`
 }
 
-// specDispatchTickReport is the slice of the tick's JSON the daemon logs.
+// specDispatchTickReport is the slice of the tick's JSON the daemon logs. Its
+// tags mirror the dispatcher's report struct. Decoding ignores omitempty, so
+// the keys it requires are checked in parseSpecDispatchReport instead.
 type specDispatchTickReport struct {
-	Hold       string `json:"hold"`
+	Hold       string `json:"hold,omitempty"`
 	Roster     string `json:"roster"`
 	Candidates int    `json:"candidates"`
 	// LabeledFailed is the tick's count of ready beads held out of the queue
 	// by the spec-dispatch-failed label, which the health field surfaces
 	// (gt-q6zoo).
-	LabeledFailed int `json:"labeled_failed"`
+	LabeledFailed int `json:"labeled_failed,omitempty"`
 	// DetailsFetched, DetailsCached and DetailsUnread are the tick's reads of
 	// the pool beads' design and notes: shown by bd, answered from the cache,
 	// and left for a later tick by the per-tick limit (gt-l0vlf).
-	DetailsFetched int                     `json:"details_fetched"`
-	DetailsCached  int                     `json:"details_cached"`
-	DetailsUnread  int                     `json:"details_unread"`
+	DetailsFetched int                     `json:"details_fetched,omitempty"`
+	DetailsCached  int                     `json:"details_cached,omitempty"`
+	DetailsUnread  int                     `json:"details_unread,omitempty"`
 	Dispatched     []specDispatchTickEntry `json:"dispatched"`
 	Refused        []specDispatchTickEntry `json:"refused"`
 	Planning       []specDispatchTickEntry `json:"planning"`
@@ -144,14 +146,14 @@ type specDispatchTickReport struct {
 	Failed         []specDispatchTickEntry `json:"failed"`
 	// Deferred is the sling-stage part of Skipped, logged one line per entry
 	// rather than only inside the tick line's capped skip list (gt-4wcqd).
-	Deferred []specDispatchTickEntry `json:"deferred"`
-	Notices  []string                `json:"notices"`
-	Errors   []string                `json:"errors"`
+	Deferred []specDispatchTickEntry `json:"deferred,omitempty"`
+	Notices  []string                `json:"notices,omitempty"`
+	Errors   []string                `json:"errors,omitempty"`
 	// The tick's phase times, for the 'tick took' line (gt-bqch0).
-	RosterNs     time.Duration `json:"roster_ns"`
-	BoardNs      time.Duration `json:"board_ns"`
-	CandidatesNs time.Duration `json:"candidates_ns"`
-	SlingNs      time.Duration `json:"sling_ns"`
+	RosterNs     time.Duration `json:"roster_ns,omitempty"`
+	BoardNs      time.Duration `json:"board_ns,omitempty"`
+	CandidatesNs time.Duration `json:"candidates_ns,omitempty"`
+	SlingNs      time.Duration `json:"sling_ns,omitempty"`
 }
 
 // triggerSpecDispatch starts one tick on its own goroutine unless one is
@@ -432,14 +434,34 @@ func specSlingsHooked(out []byte) int {
 // file empty (gt-l0vlf).
 var specDetailOwner = fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
 
+// specDispatchRequiredKeys are the report keys the dispatcher always writes:
+// the ones its report struct (internal/cmd/spec.go) tags without omitempty.
+// Decoding leaves a missing key at its zero value, so a report without one
+// would read as an empty roster or a tick with no decisions. It is an error
+// instead.
+var specDispatchRequiredKeys = []string{"roster", "candidates", "dispatched", "refused", "planning", "skipped", "failed"}
+
 // parseSpecDispatchReport reads a tick's report out of its output. The sling
 // path prints progress to stdout before the JSON, so the report is the last
-// JSON object in the output.
+// JSON object in the output. A report missing a required key is an error.
 func parseSpecDispatchReport(out []byte) (specDispatchTickReport, error) {
 	var r specDispatchTickReport
 	text := strings.TrimSpace(string(out))
 	if i := strings.LastIndex(text, "\n{"); i >= 0 {
 		text = text[i+1:]
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &keys); err != nil {
+		return r, err
+	}
+	var missing []string
+	for _, k := range specDispatchRequiredKeys {
+		if _, ok := keys[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) > 0 {
+		return r, fmt.Errorf("report lacks %s", strings.Join(missing, ", "))
 	}
 	err := json.Unmarshal([]byte(text), &r)
 	return r, err
