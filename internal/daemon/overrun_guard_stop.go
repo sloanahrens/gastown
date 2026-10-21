@@ -369,11 +369,10 @@ func (d *Daemon) overrunStop(s overrunSeams, seat overrunSeat, st overrunState, 
 		}
 	}
 	// A confirmed push leaves nothing in the worktree that origin lacks, so the
-	// seat is put back to its idle state before its cleanup status is probed.
-	// Only a push this stop made counts (PushedAt); a give-up returned above.
-	// The reset confirms the push itself and does nothing when it cannot, and a
-	// failure is logged rather than retried: the branch is on origin and the
-	// release goes on, as it did before the reset existed.
+	// seat goes idle before its cleanup status is probed. PushedAt is set only
+	// by a push this stop made; a give-up returned above. The reset rechecks the
+	// push itself, so a branch origin lacks leaves the worktree alone. A failure
+	// is logged, not retried, since the branch is already on origin.
 	if s.resetWorktree != nil && !st.PushedAt.IsZero() {
 		reset := seat
 		reset.Bead, reset.Branch = st.Bead, st.Branch
