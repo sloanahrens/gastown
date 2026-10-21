@@ -296,30 +296,24 @@ type GastownSource struct {
 // FindGastownSource locates the gastown source repo's plugins directory and
 // reports which rule chose it.
 //
-// The town's own checkout is probed first: <town>/gastown/mayor/rig/plugins,
-// then the legacy <town>/gastown/crew/den/plugins and <town>/gastown/plugins
-// layouts. Only when none of those holds plugins does the search fall back to
-// the LocalRepo reference clone named in mayor/rigs.json, probed with the same
-// three layouts.
-//
-// The working directory is never a candidate. Resolving from it let a stale
-// clone's checkout decide which plugin files the town got: a dog running from
-// a Sep-17 checkout pushed that commit's destructive compactor-dog default
-// over ~/gt/plugins (gt-nc7q). A LocalRepo clone is a developer's personal
-// copy and can be just as stale, so it only answers when the town has no
-// source at all. Pass --source to name a directory explicitly.
+// The town's own checkout answers first, then the LocalRepo clone named in
+// mayor/rigs.json, and the working directory never does: a stale copy in
+// either of those places once decided which plugins the town got (gt-2l1lr,
+// gt-nc7q).
 func FindGastownSource(townRoot string) (GastownSource, error) {
 	townGastown := rigCheckoutRoot(townRoot, "gastown")
-	if source, ok := findPluginsUnder(townGastown); ok {
-		return source, nil
-	}
+	probed := []string{townGastown}
 	if local := localRepoOverride(townRoot, "gastown"); local != "" && local != townGastown {
-		if source, ok := findPluginsUnder(local); ok {
+		probed = append(probed, local)
+	}
+
+	for _, root := range probed {
+		if source, ok := findPluginsUnder(root); ok {
 			return source, nil
 		}
 	}
 
-	return GastownSource{}, fmt.Errorf("no plugin source under %s; use --source to specify", townGastown)
+	return GastownSource{}, fmt.Errorf("no plugin source under %s; use --source to specify", strings.Join(probed, " or "))
 }
 
 // findPluginsUnder probes one gastown checkout root for a plugins directory,
