@@ -149,10 +149,17 @@ func TestJevSpendNeverReadCarriesOnlyTheFailure(t *testing.T) {
 }
 
 func jevState(over map[string]any) map[string]any {
+	return jevStateAt(time.Now(), over)
+}
+
+// jevStateAt is the Jev state with the Claude plan read at now. A comparison of
+// two draws passes one now to both: the plan's reset text is read off the clock,
+// so two builds at different instants can differ on a row the test leaves alone.
+func jevStateAt(now time.Time, over map[string]any) map[string]any {
 	s := map[string]any{
 		"spend":       map[string]any{"balance": 12.5, "live": map[string]any{"ok": true}},
 		"jev_spend":   map[string]any{"calls": 14, "usd": 1.75, "window": "24h", "top_caller": "overseer", "top_caller_calls": 10, "top_caller_usd": 1.5},
-		"claude_plan": claudePlan(time.Now(), nil),
+		"claude_plan": claudePlan(now, nil),
 	}
 	for k, v := range over {
 		if v == nil {
@@ -240,8 +247,16 @@ func TestCostPanelJevRowWordsASingleCallAndNoCallers(t *testing.T) {
 func TestCostPanelJevFailureIsUnavailableAndLeavesTheOtherRows(t *testing.T) {
 	t.Parallel()
 
-	without, _ := drawCost(t, jevState(map[string]any{"jev_spend": nil}))
-	failed, _ := drawCost(t, jevState(map[string]any{
+	checkJevFailureLeavesTheOtherRows(t, time.Now())
+}
+
+// checkJevFailureLeavesTheOtherRows draws the panel with and without a failed Jev
+// read, both from one now, and compares everything but the Jev row.
+func checkJevFailureLeavesTheOtherRows(t *testing.T, now time.Time) {
+	t.Helper()
+
+	without, _ := drawCost(t, jevStateAt(now, map[string]any{"jev_spend": nil}))
+	failed, _ := drawCost(t, jevStateAt(now, map[string]any{
 		"jev_spend": nil,
 		"reads":     jevRead(map[string]any{"error": true, "stale": true}),
 	}))
@@ -266,6 +281,28 @@ func TestCostPanelJevFailureIsUnavailableAndLeavesTheOtherRows(t *testing.T) {
 			t.Errorf("row %d changed: %+v vs %+v", i, rest[i], without[i])
 		}
 	}
+}
+
+// The Claude plan line reads its reset time off the clock, and the reset moves
+// at a minute boundary. Two builds either side of one would differ on that line,
+// so the failed-row check would fail on the rows it leaves alone. Both draws of
+// the check take one instant, so the check holds on the boundary itself.
+func TestCostPanelJevFailureRowsAgreeAcrossAMinuteBoundary(t *testing.T) {
+	t.Parallel()
+
+	boundary := time.Date(2026, 10, 20, 12, 30, 0, 0, time.Local)
+	before, after := boundary.Add(-time.Millisecond), boundary.Add(time.Millisecond)
+
+	drawnBefore, _ := drawCost(t, jevStateAt(before, nil))
+	drawnAfter, _ := drawCost(t, jevStateAt(after, nil))
+	planBefore, _ := findLine(drawnBefore, "Claude plan")
+	planAfter, _ := findLine(drawnAfter, "Claude plan")
+	if planBefore.Text == planAfter.Text {
+		t.Fatalf("the plan line reads %q on both sides of the boundary, so the boundary proves nothing", planBefore.Text)
+	}
+
+	checkJevFailureLeavesTheOtherRows(t, before)
+	checkJevFailureLeavesTheOtherRows(t, after)
 }
 
 // A failed read after a good one says unavailable and keeps the last figures.
@@ -434,7 +471,7 @@ func TestFailedJevScorecardReadKeepsTheLinesAndLeavesTheSpendAlone(t *testing.T)
 	}
 }
 
-func jevScorecardState(read map[string]any) map[string]any {
+func jevScorecardState(now time.Time, read map[string]any) map[string]any {
 	over := map[string]any{
 		"reads": jevRead(nil),
 		"jev_scorecard": map[string]any{"window": "7d", "batteries": []any{
@@ -451,7 +488,7 @@ func jevScorecardState(read map[string]any) map[string]any {
 	for k, v := range read {
 		reads["jev_scorecard"].(map[string]any)[k] = v
 	}
-	return jevState(over)
+	return jevStateAt(now, over)
 }
 
 // Golden: the spend row, then one line per battery, and a dash for the battery
@@ -459,7 +496,7 @@ func jevScorecardState(read map[string]any) map[string]any {
 func TestCostPanelDrawsOneJevLinePerBattery(t *testing.T) {
 	t.Parallel()
 
-	lines, _ := drawCost(t, jevScorecardState(nil))
+	lines, _ := drawCost(t, jevScorecardState(time.Now(), nil))
 	var got []string
 	for _, l := range lines {
 		if strings.HasPrefix(l.Text, "Jev spend") || strings.HasPrefix(l.Text, "finding") ||
@@ -483,7 +520,8 @@ func TestCostPanelDrawsOneJevLinePerBattery(t *testing.T) {
 func TestCostPanelJevScorecardFailureKeepsTheSpendLine(t *testing.T) {
 	t.Parallel()
 
-	healthy, _ := drawCost(t, jevState(map[string]any{"reads": jevRead(nil)}))
+	now := time.Now()
+	healthy, _ := drawCost(t, jevStateAt(now, map[string]any{"reads": jevRead(nil)}))
 	spend, _ := findLine(healthy, "Jev spend")
 
 	cases := map[string]struct {
@@ -494,7 +532,7 @@ func TestCostPanelJevScorecardFailureKeepsTheSpendLine(t *testing.T) {
 		"stale":  {map[string]any{"stale": true}, "Jev scorecard unavailable — the read went stale"},
 	}
 	for name, tc := range cases {
-		lines, _ := drawCost(t, jevScorecardState(tc.read))
+		lines, _ := drawCost(t, jevScorecardState(now, tc.read))
 		row, ok := findLine(lines, "Jev scorecard")
 		if !ok || row.Text != tc.want || row.Class != "empty" {
 			t.Errorf("%s: row = %+v (found %v), want %q", name, row, ok, tc.want)
@@ -508,7 +546,7 @@ func TestCostPanelJevScorecardFailureKeepsTheSpendLine(t *testing.T) {
 	}
 
 	// Never read: only the failed status, no lines.
-	state := jevState(map[string]any{"reads": jevRead(nil)})
+	state := jevStateAt(now, map[string]any{"reads": jevRead(nil)})
 	state["reads"].(map[string]any)["jev_scorecard"] = map[string]any{"at": time.Now().UTC().Format(time.RFC3339), "every_sec": 900, "error": true, "stale": true}
 	lines, _ := drawCost(t, state)
 	if row, ok := findLine(lines, "Jev scorecard"); !ok || row.Text != "Jev scorecard unavailable — the read failed" {
