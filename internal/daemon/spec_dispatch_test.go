@@ -192,6 +192,12 @@ func TestDispatchRosterSeats(t *testing.T) {
 		// A seat carrying the dead-hooked breakdown Picture renders still reads
 		// as its count (gt-tldj4).
 		{"claude-sonnet 1/2, deepseek-flash 3/3 (1 dead-hooked)", []townhealth.DispatchSeat{{Live: 1, Cap: 2}, {Live: 3, Cap: 3}}, false},
+		// A seat carrying two parenthetical notes, a dead-hooked count and a
+		// closed window, still reads as its count (gt-rredd).
+		{"claude-haiku 1/1, deepseek-flash 1/1 (1 dead-hooked) (closed until 08:00)", []townhealth.DispatchSeat{{Live: 1, Cap: 1}, {Live: 1, Cap: 1}}, false},
+		// A comma inside a note does not split the seat it belongs to.
+		{"deepseek-flash 1/1 (closed 20:00-08:00, 1 dead-hooked)", []townhealth.DispatchSeat{{Live: 1, Cap: 1}}, false},
+		{"deepseek-flash 1/1 (closed 20:00-08:00, 1 dead-hooked), claude-sonnet 0/2 (closed until 08:00)", []townhealth.DispatchSeat{{Live: 1, Cap: 1}, {Live: 0, Cap: 2}}, false},
 		{"no seats", nil, false},
 		// A roster the daemon cannot read in full must not read as a full
 		// town, so each unreadable shape is reported rather than dropped
@@ -199,6 +205,9 @@ func TestDispatchRosterSeats(t *testing.T) {
 		{"", nil, true},
 		{"claude-sonnet 1/2, junk", nil, true},
 		{"claude-sonnet x/2", nil, true},
+		// A seat whose only text is notes has no count to read (gt-rredd).
+		{"(1 dead-hooked) (closed until 08:00)", nil, true},
+		{"deepseek-flash (1 dead-hooked) (closed until 08:00)", nil, true},
 	} {
 		got, unreadable := dispatchRosterSeats(tc.roster)
 		if !reflect.DeepEqual(got, tc.want) || unreadable != tc.wantUnreadable {

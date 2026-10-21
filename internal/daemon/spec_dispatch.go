@@ -319,12 +319,12 @@ func dispatchRosterSeats(roster string) ([]townhealth.DispatchSeat, bool) {
 		return nil, false
 	}
 	var out []townhealth.DispatchSeat
-	for _, part := range strings.Split(roster, ",") {
+	for _, part := range splitRosterSeats(roster) {
 		part = strings.TrimSpace(part)
-		// A seat may carry the dead-hooked breakdown Picture renders —
-		// "agent live/cap (N dead-hooked)" (gt-tldj4) — which is not part of
-		// the count parsed here.
-		if i := strings.LastIndexByte(part, '('); i >= 0 && strings.HasSuffix(part, ")") {
+		// A seat may carry any number of parenthetical notes after its count:
+		// the dead-hooked breakdown Picture renders (gt-tldj4) and the closed
+		// window (gt-rredd). None of them is part of the count parsed here.
+		if i := strings.IndexByte(part, '('); i >= 0 {
 			part = strings.TrimSpace(part[:i])
 		}
 		i := strings.LastIndexByte(part, ' ')
@@ -343,6 +343,30 @@ func dispatchRosterSeats(roster string) ([]townhealth.DispatchSeat, bool) {
 		out = append(out, townhealth.DispatchSeat{Live: l, Cap: c})
 	}
 	return out, false
+}
+
+// splitRosterSeats splits a roster on the commas that separate its seats. A
+// comma inside a parenthetical note ("closed 20:00-08:00, 1 dead-hooked") does
+// not separate seats (gt-rredd).
+func splitRosterSeats(roster string) []string {
+	var parts []string
+	depth, start := 0, 0
+	for i, r := range roster {
+		switch r {
+		case '(':
+			depth++
+		case ')':
+			if depth > 0 {
+				depth--
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, roster[start:i])
+				start = i + 1
+			}
+		}
+	}
+	return append(parts, roster[start:])
 }
 
 // runSpecDispatchCommand runs `gt spec dispatch --json` with extra flags; the
