@@ -43,6 +43,7 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/rework"
 	"github.com/steveyegge/gastown/internal/jev/stale"
 	"github.com/steveyegge/gastown/internal/jev/submission"
+	jevthrash "github.com/steveyegge/gastown/internal/jev/thrash"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/notify"
@@ -657,6 +658,13 @@ type Daemon struct {
 	// jevDispatchOpen builds the pass a run executes. Nil means jevdispatch.Open;
 	// a test sets it to hand the run a pass over fakes.
 	jevDispatchOpen func(townRoot string, s jevdispatch.Settings, warnings io.Writer) (*jevdispatch.Pass, error)
+
+	// jevThrashRunning is the jev_thrash pass's single-flight guard
+	// (jev_thrash.go), for the same reason as jevDispatchRunning.
+	jevThrashRunning atomic.Bool
+	// jevThrashOpen builds the pass a run executes. Nil means jevthrash.Open;
+	// a test sets it to hand the run a pass over fakes.
+	jevThrashOpen func(townRoot string, s jevthrash.Settings, warnings io.Writer) (*jevthrash.Pass, error)
 
 	// jevConflictRunning is the jev_conflict pass's single-flight guard
 	// (jev_conflict.go), and jevConflictOpen builds the pass a run executes.
@@ -1693,6 +1701,13 @@ var heartbeatSteps = []heartbeatStep{
 	// every prediction (internal/jev/dispatch). Opt-in and lifecycle, like
 	// jev-dedupe, and under the same town-wide daily cap.
 	{name: "jev-dispatch", lifecycle: true, run: (*Daemon).triggerJevDispatch},
+
+	// Ask Jev, for each bead just placed on a seat, whether the polecat will be
+	// respawned on it and whether the overrun guard will stop it, and log both
+	// answers (internal/jev/thrash). Opt-in and lifecycle, like jev-dispatch,
+	// and under the same town-wide daily cap. It reads placements and writes
+	// only its own log.
+	{name: "jev-thrash", lifecycle: true, run: (*Daemon).triggerJevThrash},
 
 	// Ask Jev whether each bead just placed would touch the same files and
 	// function as the beads in flight beside it, and log every answer
