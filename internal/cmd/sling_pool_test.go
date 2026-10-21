@@ -2079,7 +2079,7 @@ func TestSnapshotOccupied(t *testing.T) {
 		{name: "landing/gastown/nux", agent: "claude-sonnet", rig: "gastown", polecat: "nux", landing: true},
 		{name: "pool-claim/abc", agent: "claude-haiku"}, // the ledger appends the claims of the moment itself
 	}
-	got, err := snapshotOccupied(snapshot, func() sessionLister { return lister }, func() time.Time { return now })()
+	got, err := snapshotOccupied(poolSeatSnapshot{sessions: snapshot, at: now}, func() sessionLister { return lister }, func() time.Time { return now })()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2093,8 +2093,97 @@ func TestSnapshotOccupied(t *testing.T) {
 		t.Fatalf("occupied = %v, want %v", names, want)
 	}
 	lister.err = errors.New("tmux down")
-	if _, err := snapshotOccupied(snapshot, func() sessionLister { return lister }, func() time.Time { return now })(); err == nil {
+	if _, err := snapshotOccupied(poolSeatSnapshot{sessions: snapshot, at: now}, func() sessionLister { return lister }, func() time.Time { return now })(); err == nil {
 		t.Fatal("a failed session listing must fail the read, not count the snapshot alone")
+	}
+}
+
+// A cap-1 pool whose only live session is an idle-pr-open seat: the roster
+// reads the seat free, and the snapshot a spec sling decides from must too. It
+// counted every live session, so the budget freed the seat and the sling
+// refused it with "pool: full", every tick until the session ended.
+func TestSnapshotOccupiedReleasesTheSeatsTheRosterReleased(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	rosterAt := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	now := func() time.Time { return rosterAt.Add(time.Minute) }
+	lister := &fakeLister{
+		sessions: map[string]map[string]string{
+			"gt-diamond": {"GT_ROLE": "gastown/polecats/diamond", "GT_AGENT": "claude-haiku"},
+		},
+		created: map[string]time.Time{"gt-diamond": rosterAt.Add(-time.Hour)},
+	}
+	disposition := func(rigName, polecatName string) (poolSeatState, error) {
+		return poolSeatState{Disposition: polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictPendingMR, ReuseStatus: "idle-pr-open"}}, nil
+	}
+	pool := seatPool("claude-haiku", 1)
+	snap, err := poolSeatSnapshotWith(lister, town, disposition, nil, pool, func() time.Time { return rosterAt })
+	if err != nil {
+		t.Fatalf("roster: %v", err)
+	}
+	if len(snap.sessions) != 0 {
+		t.Fatalf("the roster counts an idle-pr-open seat free, got %+v", snap.sessions)
+	}
+
+	got, err := snapshotOccupied(snap, func() sessionLister { return lister }, now)()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := poolSeatCount("claude-haiku", got); n != 0 {
+		t.Fatalf("the spec snapshot counts the idle-pr-open seat occupied (%d), %+v", n, got)
+	}
+
+	r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return beadsfake.New() })
+	r.pool = func() *config.PolecatPool { return pool }
+	r.sessions = func() sessionLister { return lister }
+	r.now = now
+	agent, reason, err := r.routeWith("claude-haiku", true, snapshotOccupied(snap, func() sessionLister { return lister }, now))
+	if err != nil || agent != "claude-haiku" {
+		t.Fatalf("a spec sling is refused the seat the roster freed: agent %q, reason %q, err %v", agent, reason, err)
+	}
+
+	// A session that is new since the roster is not the one it released, even
+	// on the same seat: it counts.
+	lister.created["gt-diamond"] = rosterAt.Add(time.Second)
+	got, err = snapshotOccupied(snap, func() sessionLister { return lister }, now)()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := poolSeatCount("claude-haiku", got); n != 1 {
+		t.Fatalf("a session created after the roster counts, got %d: %+v", n, got)
+	}
+}
+
+// The recorder notes the seats the one seat-free predicate releases, and no
+// seat whose state could not be read.
+func TestReleasedSeatRecorder(t *testing.T) {
+	t.Parallel()
+	states := map[string]func() (poolSeatState, error){
+		"idle": func() (poolSeatState, error) {
+			return poolSeatState{Disposition: polecat.WorkstateDisposition{ReuseStatus: "idle-pr-open"}}, nil
+		},
+		"preserved": func() (poolSeatState, error) {
+			return poolSeatState{Disposition: polecat.WorkstateDisposition{CommitsPreservedOnBranch: true}}, nil
+		},
+		"working": func() (poolSeatState, error) { return poolSeatState{}, nil },
+		"unread":  func() (poolSeatState, error) { return poolSeatState{}, errors.New("bd down") },
+	}
+	recorder, released := releasedSeatRecorder(func(rigName, polecatName string) (poolSeatState, error) {
+		return states[polecatName]()
+	})
+	for name := range states {
+		if _, err := recorder("gastown", name); (err != nil) != (name == "unread") {
+			t.Fatalf("%s: the recorder must pass the read through, err %v", name, err)
+		}
+	}
+	got := released()
+	want := map[string]bool{"gastown/idle": true, "gastown/preserved": true}
+	if len(got) != len(want) || !got["gastown/idle"] || !got["gastown/preserved"] {
+		t.Fatalf("released = %v, want %v", got, want)
+	}
+	if rec, rel := releasedSeatRecorder(nil); rec != nil || len(rel()) != 0 {
+		t.Fatal("no disposition records nothing and stays nil, a caller that fails open")
 	}
 }
 
@@ -2108,7 +2197,7 @@ func TestRouteWithSnapshotAdmitsOneOfTwoConcurrentSlings(t *testing.T) {
 	db := beadsfake.New()
 	lister := &fakeLister{sessions: map[string]map[string]string{}}
 	now := func() time.Time { return time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC) }
-	occupied := snapshotOccupied(nil, func() sessionLister { return lister }, now)
+	occupied := snapshotOccupied(poolSeatSnapshot{}, func() sessionLister { return lister }, now)
 	type outcome struct {
 		agent string
 		err   error

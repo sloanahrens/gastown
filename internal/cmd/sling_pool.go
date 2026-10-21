@@ -476,7 +476,13 @@ func polecatSeatOccupied(disposition polecatDispositionFunc, rigName, polecatNam
 	if disposition == nil {
 		return true
 	}
-	state, err := disposition(rigName, polecatName)
+	return poolSeatStateOccupied(disposition(rigName, polecatName))
+}
+
+// poolSeatStateOccupied is polecatSeatOccupied over a state already read: the
+// one seat-free predicate, which the roster's release recorder
+// (releasedSeatRecorder) shares with the read that drops the seat.
+func poolSeatStateOccupied(state poolSeatState, err error) bool {
 	if err != nil {
 		return true
 	}
@@ -1254,22 +1260,82 @@ func (r *poolRouter) occupied() func() ([]poolSession, error) {
 	}
 }
 
+// poolSeatSnapshot is the seat picture of one spec dispatch tick: the roster's
+// occupied seats, the seats its read released, and when it was read.
+type poolSeatSnapshot struct {
+	// sessions are the roster's occupied seats.
+	sessions []poolSession
+	// released names the seats ("rig/polecat") whose session the roster's
+	// polecat-state read found no longer spending one (polecatSeatOccupied):
+	// an idle-pr-open seat, or one holding only preserved commits.
+	released map[string]bool
+	// at is when the roster was read. A session created after it is not the
+	// one the roster released.
+	at time.Time
+}
+
+// releasedAt reports whether s is a session the roster released: its seat was
+// released, and the session already existed when the roster read it. A session
+// whose creation time is unknown reads as created now, so it counts.
+func (p poolSeatSnapshot) releasedAt(s poolSession) bool {
+	return s.rig != "" && s.polecat != "" && p.released[s.rig+"/"+s.polecat] && s.created.Before(p.at)
+}
+
+// releasedSeatRecorder wraps a disposition so every seat it reports free
+// (poolSeatStateOccupied, the predicate polecatSeatOccupied reads) is noted.
+// The roster reads a tick's seats through it, and the slings of that tick
+// count the same seats free (snapshotOccupied) without another bd read.
+func releasedSeatRecorder(disposition polecatDispositionFunc) (polecatDispositionFunc, func() map[string]bool) {
+	var mu sync.Mutex
+	released := map[string]bool{}
+	if disposition == nil {
+		return nil, func() map[string]bool { return released }
+	}
+	recorder := func(rigName, polecatName string) (poolSeatState, error) {
+		state, err := disposition(rigName, polecatName)
+		if !poolSeatStateOccupied(state, err) {
+			mu.Lock()
+			released[rigName+"/"+polecatName] = true
+			mu.Unlock()
+		}
+		return state, err
+	}
+	return recorder, func() map[string]bool {
+		mu.Lock()
+		defer mu.Unlock()
+		out := make(map[string]bool, len(released))
+		for k := range released {
+			out[k] = true
+		}
+		return out
+	}
+}
+
 // snapshotOccupied is the occupancy read of a sling the spec dispatcher runs:
-// the live polecat sessions of the moment (a tmux listing, no bd read; every
-// live session counts, the conservative side of polecatSeatOccupied) plus the
-// seats the tick's roster snapshot holds that no session accounts for (dead-
-// hooked and mid-landing seats). The snapshot's own live sessions and claims
-// are dropped: the listing replaces the former and the ledger appends the
-// claims of the moment under the decision lock (gt-t8q5).
-func snapshotOccupied(snapshot []poolSession, lister func() sessionLister, now func() time.Time) func() ([]poolSession, error) {
+// the live polecat sessions of the moment (a tmux listing, no bd read) less the
+// seats the tick's roster released, plus the seats the roster holds that no
+// session accounts for (dead-hooked and mid-landing seats). A released seat is
+// free here as it is in the roster and the pool router: counting it occupied
+// would refuse a seat the budget frees, every tick, until its session ended.
+// A session that is new since the roster is not a released one and counts.
+// The snapshot's own live sessions and claims are dropped: the listing
+// replaces the former and the ledger appends the claims of the moment under the
+// decision lock (gt-t8q5).
+func snapshotOccupied(snapshot poolSeatSnapshot, lister func() sessionLister, now func() time.Time) func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
-		live, err := listPolecatSessionsWith(lister(), nil, now())
+		listed, err := listPolecatSessionsWith(lister(), nil, now())
 		if err != nil {
 			return nil, &poolOccupancyError{sessions: true, err: err}
 		}
+		live := listed[:0:0]
+		for _, s := range listed {
+			if !snapshot.releasedAt(s) {
+				live = append(live, s)
+			}
+		}
 		seats := liveSeatKeys(live)
 		out := live
-		for _, s := range snapshot {
+		for _, s := range snapshot.sessions {
 			if !s.deadHooked && !s.landing {
 				continue
 			}
