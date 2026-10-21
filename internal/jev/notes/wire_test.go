@@ -9,16 +9,127 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/agentlog"
 )
 
+// The memory directory is the project directory agentlog names for the town
+// root, under the config dir the caller resolved.
 func TestMemoryDirNamesTheProjectFromTheTownRoot(t *testing.T) {
 	t.Parallel()
-	got := MemoryDir("/Users/sloan", "/Users/sloan/gt")
-	if want := "/Users/sloan/.claude/projects/-Users-sloan-gt/memory"; got != want {
-		t.Errorf("MemoryDir = %q, want %q", got, want)
+	got, err := memoryDir("/cfg", "/Users/sloan/gt")
+	if want := "/cfg/projects/-Users-sloan-gt/memory"; err != nil || got != want {
+		t.Errorf("memoryDir = %q, %v; want %q, nil", got, err, want)
 	}
-	if got, want := HandbookPath("/Users/sloan"), "/Users/sloan/.claude/commands/gastown.md"; got != want {
-		t.Errorf("HandbookPath = %q, want %q", got, want)
+	if got, want := handbookPath("/Users/sloan"), "/Users/sloan/.claude/commands/gastown.md"; got != want {
+		t.Errorf("handbookPath = %q, want %q", got, want)
+	}
+}
+
+// A non-ASCII letter in the town root stays in the project directory name: the
+// hash is agentlog's, so the notes pass and the transcript reader name the same
+// directory.
+func TestMemoryDirHashesNonASCIILikeAgentlog(t *testing.T) {
+	t.Parallel()
+	const town = "/town/gt-café"
+	got, err := memoryDir("/cfg", town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := agentlog.ClaudeProjectDirIn("/cfg", town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(project, "memory"); got != want {
+		t.Errorf("memoryDir = %q, want agentlog's %q", got, want)
+	}
+}
+
+// getenvFor is the environment the pass reads, with CLAUDE_CONFIG_DIR set to
+// configDir when it is not empty.
+func getenvFor(configDir string) func(string) string {
+	return func(key string) string {
+		if key == "CLAUDE_CONFIG_DIR" {
+			return configDir
+		}
+		return ""
+	}
+}
+
+// writeNote puts a markdown note at path.
+func writeNote(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("note"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// noteNames returns the names of the files listed, which names the directory
+// they came from.
+func noteNames(files []File) []string {
+	var names []string
+	for _, f := range files {
+		names = append(names, f.Name)
+	}
+	return names
+}
+
+// With CLAUDE_CONFIG_DIR set, the pass reads the memory directory under that
+// config dir — the one its sessions write to — and leaves ~/.claude's alone.
+// Before the fix the two disagreed, so the pass silently read nothing (gt-zrwgh).
+func TestListNotesHonorsClaudeConfigDir(t *testing.T) {
+	t.Parallel()
+	configDir, home, town := t.TempDir(), t.TempDir(), "/town/gt"
+
+	mem, err := memoryDir(configDir, town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live := filepath.Join(mem, "live-note.md")
+	writeNote(t, live)
+
+	stale, err := memoryDir(filepath.Join(home, ".claude"), town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeNote(t, filepath.Join(stale, "stale-note.md"))
+
+	// The handbook is the operator's, not the town's config: it stays under
+	// home and is still read.
+	writeNote(t, handbookPath(home))
+
+	files, err := listNotes(getenvFor(configDir), func() (string, error) { return home, nil }, town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := noteNames(files), []string{"gastown.md", "live-note.md"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("files = %v, want %v", got, want)
+	}
+	if len(files) == 2 && files[1].Path != live {
+		t.Errorf("note path = %q, want %q", files[1].Path, live)
+	}
+}
+
+// With CLAUDE_CONFIG_DIR unset, the memory directory is the home directory's
+// ~/.claude one.
+func TestListNotesFallsBackToHome(t *testing.T) {
+	t.Parallel()
+	home, town := t.TempDir(), "/town/gt"
+	mem, err := memoryDir(filepath.Join(home, ".claude"), town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeNote(t, filepath.Join(mem, "home-note.md"))
+
+	files, err := listNotes(getenvFor(""), func() (string, error) { return home, nil }, town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := noteNames(files), []string{"home-note.md"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("files = %v, want %v", got, want)
 	}
 }
 
@@ -26,14 +137,17 @@ func TestMemoryDirNamesTheProjectFromTheTownRoot(t *testing.T) {
 // order, and nothing else.
 func TestListFiles(t *testing.T) {
 	t.Parallel()
-	home, town := t.TempDir(), "/town/gt"
-	mem := MemoryDir(home, town)
+	configDir, home, town := t.TempDir(), t.TempDir(), "/town/gt"
+	mem, err := memoryDir(configDir, town)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for path, body := range map[string]string{
 		filepath.Join(mem, "b-note.md"):       "b",
 		filepath.Join(mem, "a-note.md"):       "a",
 		filepath.Join(mem, "notes.txt"):       "not markdown",
 		filepath.Join(mem, "sub", "inner.md"): "in a subdirectory",
-		HandbookPath(home):                    "handbook",
+		handbookPath(home):                    "handbook",
 	} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)
@@ -42,7 +156,7 @@ func TestListFiles(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	files, err := ListFiles(home, town)
+	files, err := listFiles(configDir, home, town)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +172,7 @@ func TestListFiles(t *testing.T) {
 // Neither directory existing is no files, not an error.
 func TestListFilesWithNothingThere(t *testing.T) {
 	t.Parallel()
-	files, err := ListFiles(t.TempDir(), "/town/gt")
+	files, err := listFiles(t.TempDir(), t.TempDir(), "/town/gt")
 	if err != nil || len(files) != 0 {
 		t.Errorf("ListFiles = %v, %v; want none", files, err)
 	}

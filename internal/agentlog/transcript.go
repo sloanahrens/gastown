@@ -121,6 +121,17 @@ func ClaudeProjectDirFor(workDir string) (string, error) {
 	return claudeProjectDirFor(workDir)
 }
 
+// ClaudeProjectDirIn returns the Claude Code project directory for workDir
+// under the config dir configDir, with the same name ClaudeProjectDirFor gives
+// it. Callers pass the config dir they resolved, so a test can name its own.
+func ClaudeProjectDirIn(configDir, workDir string) (string, error) {
+	hash, err := claudeProjectHashFor(workDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(configDir, claudeProjectsSubdir, hash), nil
+}
+
 // ProjectDirsFor returns every Claude Code project directory LatestTranscript
 // searches for workDir, in search order. It is the one place a caller learns
 // where a seat's transcripts can sit, so a reader can allow exactly those
