@@ -243,7 +243,11 @@ func (a *submissionAdapter) Prefetch(_ context.Context, items []Item) {
 	if !ok {
 		return
 	}
-	for id, issue := range all.ShowAll(submission.RigName, itemIDs(items)) {
+	got, err := all.ShowAll(submission.RigName, itemIDs(items))
+	if err != nil {
+		warnf("reading the submitted beads in a batch: %v", err)
+	}
+	for id, issue := range got {
 		if a.beadNotes == nil {
 			a.beadNotes = map[string]string{}
 		}

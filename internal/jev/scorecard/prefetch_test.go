@@ -79,7 +79,10 @@ func TestShowAllBatchesDedupesAndFallsBack(t *testing.T) {
 	ids = append(ids, "", "--flag", "gt-missing")
 	store := &batchBeads{issues: issues}
 
-	got := showAll(store, ids)
+	got, err := showAll(store, ids)
+	if err != nil {
+		t.Errorf("showAll: %v", err)
+	}
 	if len(got) != 250 {
 		t.Errorf("showAll found %d beads, want 250", len(got))
 	}
@@ -97,12 +100,12 @@ func TestShowAllBatchesDedupesAndFallsBack(t *testing.T) {
 		t.Errorf("showAll read %d beads one at a time", len(store.shows))
 	}
 
-	if got := showAll(struct{}{}, ids); got != nil {
-		t.Errorf("a reader that cannot batch gave %d beads, want none", len(got))
+	if got, err := showAll(struct{}{}, ids); got != nil || err != nil {
+		t.Errorf("a reader that cannot batch gave %d beads and error %v, want none", len(got), err)
 	}
 	failing := &batchBeads{issues: issues, batchErr: errors.New("bd down")}
-	if got := showAll(failing, ids); len(got) != 0 {
-		t.Errorf("a failed batch gave %d beads, want none", len(got))
+	if got, err := showAll(failing, ids); len(got) != 0 || err == nil || !strings.Contains(err.Error(), "bd down") {
+		t.Errorf("a failed batch gave %d beads and error %v, want none and the batch error", len(got), err)
 	}
 }
 
@@ -283,7 +286,7 @@ type batchNotes struct {
 	issues  map[string]*beads.Issue
 }
 
-func (b *batchNotes) ShowAll(_ string, ids []string) map[string]*beads.Issue {
+func (b *batchNotes) ShowAll(_ string, ids []string) (map[string]*beads.Issue, error) {
 	b.batches++
 	out := map[string]*beads.Issue{}
 	for _, id := range ids {
@@ -291,7 +294,7 @@ func (b *batchNotes) ShowAll(_ string, ids []string) map[string]*beads.Issue {
 			out[id] = issue
 		}
 	}
-	return out
+	return out, nil
 }
 
 func TestLandingPrefetchReadsNotesInOneBatchPerRig(t *testing.T) {
@@ -394,14 +397,14 @@ func (s *staleBatch) Show(_, bead string) (*beads.Issue, error) {
 	return nil, beads.ErrNotFound
 }
 
-func (s *staleBatch) ShowAll(_ string, ids []string) map[string]*beads.Issue {
+func (s *staleBatch) ShowAll(_ string, ids []string) (map[string]*beads.Issue, error) {
 	out := map[string]*beads.Issue{}
 	for _, id := range ids {
 		if issue, ok := s.issues[id]; ok {
 			out[id] = issue
 		}
 	}
-	return out
+	return out, nil
 }
 
 func TestAttentionPrefetchFillsTheBeadCache(t *testing.T) {
@@ -465,7 +468,10 @@ func TestShowAllListsFirstAndBatchesTheRest(t *testing.T) {
 	ids = append(ids, "hq-wisp-1", "gt-missing")
 	showOnly := &wispOnlyBatch{listingBeads: store, wisp: wisp}
 
-	got := showAll(showOnly, ids)
+	got, err := showAll(showOnly, ids)
+	if err != nil {
+		t.Errorf("showAll: %v", err)
+	}
 	if len(got) != 251 || got["hq-wisp-1"] == nil {
 		t.Errorf("showAll found %d beads, want the 250 listed and the wisp", len(got))
 	}
@@ -475,8 +481,9 @@ func TestShowAllListsFirstAndBatchesTheRest(t *testing.T) {
 	if len(showOnly.batches) != 1 || len(showOnly.batches[0]) != 2 {
 		t.Errorf("show batches = %v, want one batch of the 2 ids the lists missed", showOnly.batches)
 	}
-	if len(store.shows) != 0 {
-		t.Errorf("beads read one at a time: %v", store.shows)
+	// The one show is the check of the lists against a show.
+	if len(store.shows) != 1 {
+		t.Errorf("beads read one at a time: %v, want the one check read", store.shows)
 	}
 }
 
@@ -516,7 +523,10 @@ func TestShowAllListsAClientThroughListByIDs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := showAll(fake, []string{a.ID, b.ID, "gt-missing"})
+	got, err := showAll(fake, []string{a.ID, b.ID, "gt-missing"})
+	if err != nil {
+		t.Errorf("showAll: %v", err)
+	}
 	if len(got) != 2 || got[a.ID] == nil || got[b.ID] == nil || got[b.ID].Status != "closed" {
 		t.Errorf("showAll over a Client = %v, want both held beads, whatever their status", got)
 	}

@@ -14,7 +14,9 @@ type Report struct {
 	Since *time.Time `json:"since,omitempty"`
 	Items int        `json:"items"`
 	// Labeled is how many items a rule labeled: the count of Lines whose
-	// Labeled is set, kept apart so a report without its Lines still has it.
+	// Labeled is set, kept apart so a report without its Lines still has it. It
+	// is always printed, 0 included: a reader that ignores unknown keys is
+	// unaffected, and one that wants the count never has to guess an absent key.
 	Labeled      int `json:"labeled"`
 	LinesSkipped int `json:"lines_skipped"`
 	// LogMissing is set when the battery has no log yet. The report is then

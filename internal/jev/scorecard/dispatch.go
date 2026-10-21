@@ -104,7 +104,11 @@ func (a *dispatchAdapter) Prefetch(_ context.Context, items []Item) {
 		}
 		a.beads = b
 	}
-	a.shown = showAll(a.beads, itemIDs(items))
+	shown, err := showAll(a.beads, itemIDs(items))
+	if err != nil {
+		warnf("reading the placed beads in a batch: %v", err)
+	}
+	a.shown = shown
 }
 
 func newDispatchAdapter(town string, openBeads func() (beadReader, error)) *dispatchAdapter {
@@ -211,7 +215,8 @@ func (a *dispatchAdapter) loadReviews() error {
 // store is opened on the first call, so a scorecard over an empty log never
 // touches it.
 func (a *dispatchAdapter) showBead(id string) (*beads.Issue, error) {
-	if issue, ok := a.shown[id]; ok {
+	// shown holds only beads the batch found, never a nil.
+	if issue := a.shown[id]; issue != nil {
 		return issue, nil
 	}
 	if a.beads == nil {

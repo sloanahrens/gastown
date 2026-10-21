@@ -188,7 +188,11 @@ func (a *staleAdapter) Prefetch(_ context.Context, items []Item) {
 		byRig[l.Rig] = append(byRig[l.Rig], l.Bead)
 	}
 	for rig, ids := range byRig {
-		for id, issue := range all.ShowAll(rig, ids) {
+		got, err := all.ShowAll(rig, ids)
+		if err != nil {
+			warnf("reading %s's beads in a batch: %v", rig, err)
+		}
+		for id, issue := range got {
 			a.cache[rig+"/"+id] = issue
 		}
 	}

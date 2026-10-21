@@ -144,12 +144,29 @@ func TestIntegrationRigDiffsPrefetchMatchesPerCommit(t *testing.T) {
 	}
 
 	sizes := &diffSizes{}
-	batched := rigDiffs{town: town, sizes: sizes}
+	// Every git call is counted: the prefetch is two for all the commits, and the
+	// answers for the commits it sized make none.
+	var calls int
+	batched := rigDiffs{town: town, sizes: sizes, run: func(ctx context.Context, stdin string, args ...string) ([]byte, error) {
+		calls++
+		cmd := exec.CommandContext(ctx, "git", args...)
+		if stdin != "" {
+			cmd.Stdin = strings.NewReader(stdin)
+		}
+		return cmd.Output()
+	}}
 	batched.PrefetchLines(ctx, commits)
+	if calls != 2 {
+		t.Errorf("PrefetchLines made %d git calls for %d commits, want 2", calls, len(commits))
+	}
 	for _, c := range commits {
 		if got := ask(batched, c); got != want[c] {
 			t.Errorf("ChangedLines(%s) after PrefetchLines = %+v, per-commit path = %+v", c, got, want[c])
 		}
+	}
+	// Only the root commit is left to git: the log has no parent to size it by.
+	if calls != 2+2 {
+		t.Errorf("after the answers, git was called %d times in all, want the prefetch's 2 and the root commit's own 2", calls)
 	}
 	for _, c := range []string{grow, merge, binary, empty, grow[:9], merge[:7]} {
 		if _, ok := sizes.lines[c]; !ok {

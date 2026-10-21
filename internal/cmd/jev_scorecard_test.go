@@ -191,7 +191,8 @@ func writeTestselLog(t *testing.T, town string, n, pkgs int) {
 func TestScorecardTestselJSONLeavesItemRowsOutUnlessAsked(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	writeTestselLog(t, town, 300, 30)
+	// The live log: 142 changes of about 63 packages each, 8946 items in a week.
+	writeTestselLog(t, town, 142, 63)
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 
 	var lean, full bytes.Buffer
@@ -202,7 +203,7 @@ func TestScorecardTestselJSONLeavesItemRowsOutUnlessAsked(t *testing.T) {
 		t.Fatal(err)
 	}
 	if lean.Len() > 100*1024 {
-		t.Errorf("the testsel --json report is %d bytes for %d items, want under 100 KB", lean.Len(), 9000)
+		t.Errorf("the testsel --json report is %d bytes for %d items, want under 100 KB", lean.Len(), 142*63)
 	}
 
 	var leanRep, fullRep scorecard.Report
@@ -224,8 +225,8 @@ func TestScorecardTestselJSONLeavesItemRowsOutUnlessAsked(t *testing.T) {
 			labeled++
 		}
 	}
-	if leanRep.Items != 9000 || leanRep.Labeled != labeled || fullRep.Labeled != labeled || labeled == 0 {
-		t.Errorf("totals: lean items %d labeled %d, full labeled %d, rows labeled %d; want 9000 items and one labeled count",
+	if leanRep.Items != 142*63 || leanRep.Labeled != labeled || fullRep.Labeled != labeled || labeled == 0 {
+		t.Errorf("totals: lean items %d labeled %d, full labeled %d, rows labeled %d; want 8946 items and one labeled count",
 			leanRep.Items, leanRep.Labeled, fullRep.Labeled, labeled)
 	}
 	if len(leanRep.Questions) != len(fullRep.Questions) || len(leanRep.Context) != len(fullRep.Context) {

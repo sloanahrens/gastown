@@ -2,6 +2,9 @@ package scorecard
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -14,7 +17,8 @@ import (
 //
 // Prefetch is best effort and returns nothing: whatever it could not load,
 // Label reads on its own and fails on as it always did. A Prefetch that
-// gets it wrong therefore costs time, never a label.
+// gets it wrong therefore costs time, never a label. It says on stderr what it
+// could not batch (warnf).
 type Prefetcher interface {
 	Prefetch(ctx context.Context, items []Item)
 }
@@ -46,7 +50,13 @@ const showChunk = 100
 // and so does an id no batch found or a call that failed: the caller reads
 // those one at a time, which gives back the exact error or not-found answer a
 // single read does.
-func showAll(r any, ids []string) map[string]*beads.Issue {
+//
+// The error is the batch calls that failed, joined, or a list that did not
+// agree with a show; the map is still whatever could be read, and the caller
+// says so with warnf and goes on. The list is checked against a show of one id
+// because bd list prints fewer fields than bd show, and an adapter that read a
+// field the list leaves out would label from an empty one.
+func showAll(r any, ids []string) (map[string]*beads.Issue, error) {
 	var list func([]string) (map[string]*beads.Issue, error)
 	switch v := r.(type) {
 	case beadLister:
@@ -57,7 +67,7 @@ func showAll(r any, ids []string) map[string]*beads.Issue {
 	canList := list != nil
 	batcher, canBatch := r.(beadBatcher)
 	if !canList && !canBatch {
-		return nil
+		return nil, nil
 	}
 	seen := make(map[string]bool, len(ids))
 	var want []string
@@ -71,10 +81,14 @@ func showAll(r any, ids []string) map[string]*beads.Issue {
 		want = append(want, id)
 	}
 	found := make(map[string]*beads.Issue, len(want))
+	var errs []error
 	readChunks := func(ids []string, read func([]string) (map[string]*beads.Issue, error)) {
 		for len(ids) > 0 {
 			n := min(showChunk, len(ids))
-			got, _ := read(ids[:n])
+			got, err := read(ids[:n])
+			if err != nil {
+				errs = append(errs, err)
+			}
 			for id, issue := range got {
 				if issue != nil {
 					found[id] = issue
@@ -85,6 +99,10 @@ func showAll(r any, ids []string) map[string]*beads.Issue {
 	}
 	if canList {
 		readChunks(want, list)
+		if err := checkListAgainstShow(r, found, want); err != nil {
+			errs = append(errs, err)
+			clear(found)
+		}
 	}
 	if canBatch {
 		var rest []string
@@ -95,7 +113,79 @@ func showAll(r any, ids []string) map[string]*beads.Issue {
 		}
 		readChunks(rest, batcher.ShowMultiple)
 	}
-	return found
+	return found, errors.Join(errs...)
+}
+
+// checkListAgainstShow reads one listed bead the one-at-a-time way and compares
+// the fields the adapters label from. The bead is the listed one with the most
+// of those fields set, so a field the list leaves out shows as a difference
+// whenever any listed bead has it. It returns nil when no bead was listed or
+// the reader cannot show.
+func checkListAgainstShow(r any, listed map[string]*beads.Issue, order []string) error {
+	shower, ok := r.(beadShower)
+	if !ok {
+		return nil
+	}
+	var probe *beads.Issue
+	best := -1
+	for _, id := range order {
+		issue := listed[id]
+		if issue == nil {
+			continue
+		}
+		if n := labelFieldsSet(issue); n > best {
+			probe, best = issue, n
+		}
+	}
+	if probe == nil {
+		return nil
+	}
+	shown, err := shower.Show(probe.ID)
+	if err != nil {
+		return fmt.Errorf("checking bd list against bd show for %s: %w", probe.ID, err)
+	}
+	if field := firstLabelFieldDiff(probe, shown); field != "" {
+		return fmt.Errorf("bd list and bd show disagree on the %s of %s", field, probe.ID)
+	}
+	return nil
+}
+
+// labelFields are the bead fields an adapter labels from: Status, CloseReason,
+// Notes and Description. An adapter that reads another has to add it here.
+func labelFields(i *beads.Issue) [4][2]string {
+	return [4][2]string{{"status", i.Status}, {"close reason", i.CloseReason}, {"notes", i.Notes}, {"description", i.Description}}
+}
+
+func labelFieldsSet(i *beads.Issue) int {
+	n := 0
+	for _, f := range labelFields(i) {
+		if f[1] != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// firstLabelFieldDiff names the first labeling field on which a and b differ,
+// or "" when none does. A nil b differs on status.
+func firstLabelFieldDiff(a, b *beads.Issue) string {
+	if b == nil {
+		return "status"
+	}
+	fa, fb := labelFields(a), labelFields(b)
+	for i := range fa {
+		if fa[i][1] != fb[i][1] {
+			return fa[i][0]
+		}
+	}
+	return ""
+}
+
+// warnf tells the operator on stderr that a batch read did not work and the
+// report went on one read at a time. It is stderr so a --json report on stdout
+// stays parseable.
+func warnf(format string, args ...any) {
+	fmt.Fprintf(os.Stderr, "gt jev scorecard: "+format+"\n", args...)
 }
 
 // itemIDs lists the ids of items.
