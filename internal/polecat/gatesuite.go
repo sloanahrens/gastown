@@ -296,14 +296,48 @@ func InvocationFromCommand(split SplitFunc, command string) (Invocation, bool) {
 		return Invocation{}, false
 	}
 	inv := Invocation{Program: strings.ToLower(filepath.Base(args[0]))}
-	for _, arg := range args[1:] {
+	rest := args[1:]
+	for i := 0; i < len(rest); i++ {
+		arg := rest[i]
 		if strings.HasPrefix(arg, "-") {
+			if invocationProgram(inv.Program, "make") && makeOptionTakesNext(arg, rest[i+1:]) {
+				i++
+			}
 			continue
 		}
 		inv.Target = strings.ToLower(filepath.Base(arg))
 		break
 	}
 	return inv, true
+}
+
+// makeOptionTakesNext reports whether a make option consumes the word after it
+// as its value ("make -C sub test", "make -j 4 test"), so that word is not the
+// goal. -j takes one only when it is a number, as GNU make reads it; -j test
+// leaves test as the goal. The attached forms ("-j4", "-Csub") carry their value
+// in the same word and take none.
+func makeOptionTakesNext(opt string, after []string) bool {
+	switch opt {
+	case "-C", "-f", "-I", "-o", "-W",
+		"--directory", "--file", "--makefile", "--include-dir", "--old-file", "--assume-old", "--what-if", "--assume-new", "--new-file":
+		return len(after) > 0
+	case "-j", "--jobs":
+		return len(after) > 0 && isDigits(after[0])
+	}
+	return false
+}
+
+// isDigits reports whether s is a non-empty run of ASCII digits.
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // InvocationIndex returns the index of the program token the target follows, or
