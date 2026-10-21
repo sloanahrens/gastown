@@ -365,3 +365,47 @@ func progressLine(typ, ts string, block map[string]any) string {
 	})
 	return string(b)
 }
+
+// TestJevProgressPassStopsBetweenCallsWhenEstopped covers gt-dlnkz: the E-stop
+// kept a pass from starting, but one already in flight went on paying for every
+// queued nudge. The call in flight finishes and is logged; the nudges behind it
+// are dropped, as a stopped pass's are.
+func TestJevProgressPassStopsBetweenCallsWhenEstopped(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	var buf bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(&buf, "", 0),
+	}
+	transcript := writeProgressTranscript(t, town)
+	for _, bead := range []string{"gt-a", "gt-b", "gt-c"} {
+		d.jevProgressQueue.Push(progress.Nudge{
+			Rig: "gastown", Polecat: "capable", Bead: bead,
+			Session: "gt-capable", At: progressNow.Add(-time.Minute), Transcript: transcript,
+		})
+	}
+	asker := &estoppingAsker{t: t, town: town}
+	d.jevProgressOpen = func(townRoot string, q *progress.Queue, _ progress.Settings, _ io.Writer) (*progress.Pass, error) {
+		return &progress.Pass{
+			Asker:    asker,
+			Queue:    q,
+			TownRoot: townRoot,
+			LogPath:  progress.LogPath(townRoot),
+			Allows:   func() (bool, error) { return true, nil },
+			Now:      func() time.Time { return progressNow },
+			Issue: func(rig, id string) (*beads.Issue, error) {
+				return &beads.Issue{ID: id, Title: "Polecat progress battery"}, nil
+			},
+		}, nil
+	}
+
+	d.runJevProgress()
+
+	if asker.calls != 1 {
+		t.Errorf("Jev was asked about %d nudges, want only the one in flight when the E-stop went up", asker.calls)
+	}
+	if !strings.Contains(buf.String(), "jev_progress: stopped: E-STOP active") {
+		t.Errorf("log = %q, want the pass to say it stopped for the E-stop", buf.String())
+	}
+}

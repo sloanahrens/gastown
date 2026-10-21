@@ -218,3 +218,49 @@ func waitJevLogtriageIdle(t *testing.T, d *Daemon) {
 		runtime.Gosched()
 	}
 }
+
+// TestJevLogtriagePassStopsBetweenCallsWhenEstopped covers gt-dlnkz: the E-stop
+// kept a pass from starting, but one already in flight went on paying for every
+// group it reached. The call in flight finishes and is recorded; the groups
+// behind it are carried to a pass run after the E-stop lifts.
+func TestJevLogtriagePassStopsBetweenCallsWhenEstopped(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	daemonLog := logtriage.DaemonLogPath(town)
+	if err := os.MkdirAll(filepath.Dir(daemonLog), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	lines := "2026/10/21 03:31:35 spec_dispatch: tick: 57 candidate(s), 2 refused, 0 planning\n" +
+		"2026/10/21 03:32:01 landing_worker: gt-rpdhw: merge failed at 77b9028a after 3s\n" +
+		"2026/10/21 03:34:00 kernel: WARNING: disk nearly full\n"
+	if err := os.WriteFile(daemonLog, []byte(lines), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	asker := &estoppingAsker{t: t, town: town}
+	logs := &bytes.Buffer{}
+	d := &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(logs, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{JevLogtriage: &JevLogtriageConfig{Enabled: true}},
+		},
+		jevLogtriageOpen: func(string, logtriage.Settings, io.Writer) (*logtriage.Pass, error) {
+			return &logtriage.Pass{
+				Asker:      asker,
+				DaemonLog:  daemonLog,
+				LogPath:    logtriage.LogPath(town),
+				CursorPath: logtriage.CursorPath(town),
+				Allows:     func() (bool, error) { return true, nil },
+			}, nil
+		},
+	}
+
+	d.runJevLogtriage()
+
+	if asker.calls != 1 {
+		t.Errorf("Jev was asked about %d groups, want only the one in flight when the E-stop went up", asker.calls)
+	}
+	if !strings.Contains(logs.String(), "jev_logtriage: stopped: E-STOP active") {
+		t.Errorf("log = %q, want the pass to say it stopped for the E-stop", logs)
+	}
+}
