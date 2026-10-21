@@ -19,9 +19,10 @@ import (
 // write or a crash left a partial line there: the new line starts on its own
 // line, so the partial one stays unusable and the new one still parses.
 //
-// The tail check and the write run under an exclusive lock on a sibling
-// .flock file, so no other Append can land between them: a concurrent writer
-// mid-line would otherwise have its line split by ours.
+// The tail check and the write run under an exclusive flock on the log itself,
+// so no other Append can land between them: a concurrent writer mid-line
+// would otherwise look like a partial line left by a crash, and ours would
+// split its line.
 func Append(path string, v any) error {
 	line, err := json.Marshal(v)
 	if err != nil {
@@ -30,7 +31,14 @@ func Append(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("creating the log directory: %w", err)
 	}
-	unlock, err := lock.FlockAcquire(path + ".flock")
+	// Create the log before locking it: FlockAcquire would make a missing
+	// log 0644, and the log is 0600.
+	created, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("creating the log: %w", err)
+	}
+	_ = created.Close()
+	unlock, err := lock.FlockAcquire(path)
 	if err != nil {
 		return fmt.Errorf("locking the log: %w", err)
 	}

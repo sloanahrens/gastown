@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -180,17 +179,26 @@ func TestBatteryLogReadRecentMissingSkipsBadLinesAndRejectsBadTarget(t *testing.
 func TestBatteryLogAppendWaitsForTheLogLock(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "log.jsonl")
-	release, ok, err := lock.FlockTryAcquire(path + ".flock")
+	const before = `{"n":0}` + "\n"
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release, ok, err := lock.FlockTryAcquire(path)
 	if err != nil || !ok {
 		t.Fatalf("taking the log lock = %v, %v, want held", ok, err)
 	}
 
 	done := make(chan error, 1)
 	go func() { done <- Append(path, row{N: 1}) }()
-	// Append blocks on the held lock before it creates the log, so nothing
-	// is written until release. This check cannot fail for a correct Append.
-	if _, err := os.Stat(path); err == nil {
-		t.Fatal("the log was created while another holder had the log lock")
+	// A correct Append blocks on the held lock and returns only after release.
+	// Without the lock it returns at once, which this window catches.
+	select {
+	case err := <-done:
+		t.Fatalf("Append returned while another holder had the log lock: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if got, _ := os.ReadFile(path); string(got) != before {
+		t.Fatalf("the log changed while another holder had the lock: %q", got)
 	}
 
 	release()
@@ -198,48 +206,51 @@ func TestBatteryLogAppendWaitsForTheLogLock(t *testing.T) {
 		t.Fatalf("Append after the lock was released: %v", err)
 	}
 	var got []row
-	if err := ReadRecent(path, 5, &got); err != nil || len(got) != 1 || got[0].N != 1 {
-		t.Errorf("log = %+v, %v, want the one appended line", got, err)
+	if err := ReadRecent(path, 5, &got); err != nil || len(got) != 2 || got[0].N != 0 || got[1].N != 1 {
+		t.Errorf("log = %+v, %v, want the seeded line then the appended one", got, err)
 	}
 }
 
-func TestBatteryLogConcurrentAppendsAfterAPartialLineKeepEveryLine(t *testing.T) {
+func TestBatteryLogAppendWaitsForAnInFlightLine(t *testing.T) {
 	t.Parallel()
+	// A writer that has put part of its line on disk holds the log lock until
+	// the rest is written. An Append that did not wait would read that part as
+	// a crash's partial line, and its newline would split the writer's line.
 	path := filepath.Join(t.TempDir(), "log.jsonl")
-	if err := os.WriteFile(path, []byte(`{"n":0`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"n":5`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-
-	const writers = 32
-	var wg sync.WaitGroup
-	errs := make(chan error, writers)
-	for i := 1; i <= writers; i++ {
-		wg.Add(1)
-		go func(n int) {
-			defer wg.Done()
-			errs <- Append(path, row{N: n})
-		}(i)
+	release, ok, err := lock.FlockTryAcquire(path)
+	if err != nil || !ok {
+		t.Fatalf("taking the log lock = %v, %v, want held", ok, err)
 	}
-	wg.Wait()
-	close(errs)
-	for err := range errs {
-		if err != nil {
-			t.Fatalf("Append: %v", err)
-		}
+
+	done := make(chan error, 1)
+	go func() { done <- Append(path, row{N: 1}) }()
+	select {
+	case err := <-done:
+		t.Fatalf("Append returned while a writer's line was in flight: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`,"s":"x"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("Append after the lock was released: %v", err)
 	}
 
 	var got []row
-	if err := ReadRecent(path, writers+1, &got); err != nil {
-		t.Fatalf("ReadRecent: %v", err)
-	}
-	seen := make(map[int]bool, len(got))
-	for _, r := range got {
-		seen[r.N] = true
-	}
-	for i := 1; i <= writers; i++ {
-		if !seen[i] {
-			t.Errorf("line %d was lost or split; read %d parseable lines", i, len(got))
-		}
+	if err := ReadRecent(path, 5, &got); err != nil || len(got) != 2 || got[0].N != 5 || got[0].S != "x" || got[1].N != 1 {
+		t.Errorf("log = %+v, %v, want the in-flight line whole, then the appended one", got, err)
 	}
 }
 
