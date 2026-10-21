@@ -42,12 +42,14 @@ const (
 	refConflictOther = "conflict_other"
 )
 
-// landMergeRe and landRejectRe read the landing worker's lines in the daemon
-// log, the record the dashboard's Landings panel reads. A merge line names the
-// target tip the merge was built on; a rejection line names the kind.
+// landMergeRe, landRejectRe and landRejectTipRe read the landing worker's
+// lines in the daemon log, the record the dashboard's Landings panel reads. A
+// merge line names the target tip the merge was built on; a conflict rejection
+// line names the kind and, since gt-0nvhe, that rejection's own target tip.
 var (
-	landMergeRe  = regexp.MustCompile(`landing_worker: \[land\] (\S+): merged (?:[0-9a-f]+ onto \S+ \(([0-9a-f]+)\))?`)
-	landRejectRe = regexp.MustCompile(`landing_worker: \[land\] (\S+): rejected \((\w+)\):`)
+	landMergeRe     = regexp.MustCompile(`landing_worker: \[land\] (\S+): merged (?:[0-9a-f]+ onto \S+ \(([0-9a-f]+)\))?`)
+	landRejectRe    = regexp.MustCompile(`landing_worker: \[land\] (\S+): rejected \((\w+)\):`)
+	landRejectTipRe = regexp.MustCompile(` \(target tip ([0-9a-f]+)\)$`)
 )
 
 // conflictRepo is the part of the submission battery's bare clone the adapter
@@ -342,7 +344,10 @@ func (a *conflictAdapter) clone(ctx context.Context) (conflictRepo, error) {
 }
 
 // loadRejections reads the conflict rejections from the daemon log once. A
-// rejection names the target tip of the merge before it for the same bead. A
+// rejection names the target tip it was built on. A log line written before
+// the tip moved onto the rejection line names only the bead, and that
+// rejection's tip is the last merge line for it; a conflict writes no merge
+// line of its own, so such a tip is the earlier attempt's (gt-0nvhe). A
 // missing log holds none.
 func (a *conflictAdapter) loadRejections() error {
 	if a.rejectionsRead {
@@ -375,7 +380,9 @@ func (a *conflictAdapter) loadRejections() error {
 			continue
 		}
 		if m := landRejectRe.FindStringSubmatch(line); m != nil && m[2] == string(land.RejectConflict) {
-			if tip := tips[m[1]]; tip != "" {
+			if tm := landRejectTipRe.FindStringSubmatch(line); tm != nil {
+				a.rejections[m[1]] = append(a.rejections[m[1]], tm[1])
+			} else if tip := tips[m[1]]; tip != "" {
 				a.rejections[m[1]] = append(a.rejections[m[1]], tip)
 			}
 		}

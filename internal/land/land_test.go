@@ -559,6 +559,26 @@ func TestLandConflictIsARejectionWithFiles(t *testing.T) {
 	conflictIsARejection(t, newLandFixture(t))
 }
 
+// TestConflictRejectionLogsItsTargetTip: a conflicted merge writes no merge
+// line, so the rejection line has to name the tip the conflict was built on for
+// the conflict scorecard to attribute the pair (gt-0nvhe).
+func TestConflictRejectionLogsItsTargetTip(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	f.base = f.pushMain("b.txt", "main's b\n")
+	var landLog strings.Builder
+	l := f.lander()
+	l.Out = &landLog
+	_, err := l.Land(context.Background(), f.work)
+	rej := f.assertRejected(t, err, RejectConflict, LabelRework)
+	if rej.TargetTip != f.base {
+		t.Errorf("TargetTip = %q, want the target tip %q", rej.TargetTip, f.base)
+	}
+	if want := "(target tip " + f.base + ")"; !strings.Contains(landLog.String(), want) {
+		t.Errorf("landing log lacks %q:\n%s", want, landLog.String())
+	}
+}
+
 // conflictIsARejection lands a branch that conflicts with main. The
 // integration tier runs it over real git.
 func conflictIsARejection(t *testing.T, f *landFixture) {

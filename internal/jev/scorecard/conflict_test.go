@@ -189,6 +189,37 @@ func TestConflictAdapterLabelsAPair(t *testing.T) {
 			want: Labeling{},
 		},
 		{
+			name: "a conflict on the first attempt names its target tip",
+			commits: []map[string]string{
+				{"base.txt": "base"},
+				{"b.go": "b"},
+				{"a.go": "a"},
+			},
+			landings: map[string]int{"gt-b": 1, "gt-a": 2},
+			log: func(sha []string) string {
+				// The first attempt conflicted, so it wrote no merge line: the
+				// rejection line's own tip is all the record holds.
+				return rejectLineTip("gt-a", "conflict", sha[2])
+			},
+			want: Labeling{Labeled: true, Labels: map[QuestionID]bool{qSameFiles: true}, Rule: ruleConflictRejectedAfterLanding},
+		},
+		{
+			name: "a conflict after an earlier merge reads its own tip, not the stale merge tip",
+			commits: []map[string]string{
+				{"base.txt": "base"},
+				{"b.go": "b"},
+				{"a.go": "a"},
+			},
+			landings: map[string]int{"gt-b": 1, "gt-a": 2},
+			log: func(sha []string) string {
+				// gt-a's earlier attempt merged onto the base, before gt-b
+				// landed there. This attempt conflicts on the tip that holds
+				// gt-b, and only the rejection line names it.
+				return mergeLine("gt-a", sha[2], sha[0], "cand1") + rejectLineTip("gt-a", "conflict", sha[2])
+			},
+			want: Labeling{Labeled: true, Labels: map[QuestionID]bool{qSameFiles: true}, Rule: ruleConflictRejectedAfterLanding},
+		},
+		{
 			name: "a rejection of another kind is not a conflict",
 			commits: []map[string]string{
 				{"base.txt": "base"},
@@ -359,4 +390,10 @@ func mergeLine(bead, head, tip, cand string) string {
 // rejectLine is the landing worker's rejection line for bead, of kind.
 func rejectLine(bead, kind string) string {
 	return fmt.Sprintf("2026/10/21 10:01:00 landing_worker: [land] %s: rejected (%s): merging conflicts in 1 file\n", bead, kind)
+}
+
+// rejectLineTip is the landing worker's rejection line for a conflict, carrying
+// the target tip the merge was built on.
+func rejectLineTip(bead, kind, tip string) string {
+	return fmt.Sprintf("2026/10/21 10:01:00 landing_worker: [land] %s: rejected (%s): merging conflicts in 1 file (target tip %s)\n", bead, kind, tip)
 }
