@@ -38,20 +38,27 @@ func init() {
 }
 
 func runHooksOverride(cmd *cobra.Command, args []string) error {
+	return hooksOverrideWith(hooks.EnvHome(), openInEditor, args)
+}
+
+// hooksOverrideWith edits the override for args[0] in home, opening the chosen
+// file with openEditor. Home and editor are parameters so a test can name a
+// sandbox home and a recording opener (gt-arz8h).
+func hooksOverrideWith(home hooks.Home, openEditor func(string) error, args []string) error {
 	normalized, ok := hooks.NormalizeTarget(args[0])
 	if !ok {
 		return fmt.Errorf("invalid target %q; valid targets are roles (crew, polecats; alias: polecat) or rig/role (gastown/crew, beads/polecats, etc.)", args[0])
 	}
 	target := normalized
 
-	cfg, err := hooks.LoadOverride(target)
+	cfg, err := home.LoadOverride(target)
 	if err != nil {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("loading override config for %q: %w", target, err)
 		}
 		// File doesn't exist yet - create empty
 		cfg = &hooks.HooksConfig{}
-		if err := hooks.SaveOverride(target, cfg); err != nil {
+		if err := home.SaveOverride(target, cfg); err != nil {
 			return fmt.Errorf("creating override config: %w", err)
 		}
 		fmt.Printf("Created empty override config for %s\n", target)
@@ -66,14 +73,16 @@ func runHooksOverride(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Open in editor
-	path := hooks.OverridePath(target)
-	if err := openInEditor(path); err != nil {
+	// Open the file the read cascade loaded, not the primary path: with
+	// GT_HOME set, saving the primary path would shadow the override in
+	// effect (gt-arz8h).
+	path := home.OverrideEditPath(target)
+	if err := openEditor(path); err != nil {
 		return err
 	}
 
 	// Validate after editing
-	if _, err := hooks.LoadOverride(target); err != nil {
+	if _, err := home.LoadOverride(target); err != nil {
 		return fmt.Errorf("warning: override config has errors after editing: %w", err)
 	}
 

@@ -1357,6 +1357,42 @@ func TestConfigHomeCascade(t *testing.T) {
 	}
 }
 
+// TestOverrideEditPath pins gt-arz8h: the editor target is the override the
+// read cascade finds, and the primary path only when none exists anywhere.
+func TestOverrideEditPath(t *testing.T) {
+	t.Parallel()
+	gtHome, userHome := t.TempDir(), t.TempDir()
+	home := configHome{gtHome: gtHome, home: userHome}
+	primary := filepath.Join(gtHome, ".gt", "hooks-overrides", "crew.json")
+	fallback := filepath.Join(userHome, ".gt", "hooks-overrides", "crew.json")
+
+	if got := home.overrideEditPath("crew"); got != primary {
+		t.Errorf("no override: overrideEditPath() = %q, want primary %q", got, primary)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(fallback), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fallback, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := home.overrideEditPath("crew"); got != fallback {
+		t.Errorf("fallback-only override: overrideEditPath() = %q, want %q", got, fallback)
+	}
+
+	if err := home.saveOverride("crew", &HooksConfig{}); err != nil {
+		t.Fatal(err)
+	}
+	if got := home.overrideEditPath("crew"); got != primary {
+		t.Errorf("primary override: overrideEditPath() = %q, want %q", got, primary)
+	}
+
+	wantRig := filepath.Join(gtHome, ".gt", "hooks-overrides", "gastown__crew.json")
+	if got := home.overrideEditPath("gastown/crew"); got != wantRig {
+		t.Errorf("rig/role: overrideEditPath() = %q, want %q", got, wantRig)
+	}
+}
+
 // TestComputeExpectedNudgeDrainIsPolecatOnly pins the gt-drwph wiring: the
 // polecats role drains its nudge queue after every tool call, because the
 // UserPromptSubmit drain never fires while a polecat runs tool turns and the
