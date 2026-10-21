@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -2066,5 +2067,44 @@ func TestPoolRouterReadsSeatsThroughTheBatch(t *testing.T) {
 	}
 	if calls := reads.Calls(); calls != 4 {
 		t.Fatalf("bd calls = %d, want 4 (agent beads and assigned work, once per rig)", calls)
+	}
+}
+
+// snapshotOccupied is the occupancy read of a dispatched sling: the live
+// sessions of the moment plus the dead-hooked and mid-landing seats of the
+// tick's roster snapshot, and nothing read per polecat directory.
+func TestSnapshotOccupied(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	lister := &fakeLister{sessions: map[string]map[string]string{
+		"gt-capable": {"GT_ROLE": "gastown/polecats/capable", "GT_AGENT": "claude-haiku"},
+		"gt-dag":     {"GT_ROLE": "gastown/polecats/dag", "GT_AGENT": "deepseek-flash"},
+		"gt-crew":    {"GT_ROLE": "gastown/crew/sloan"},
+	}}
+	snapshot := []poolSession{
+		{name: "gt-capable", agent: "claude-haiku", rig: "gastown", polecat: "capable"}, // live then and now: the listing wins
+		{name: "gt-old", agent: "claude-sonnet", rig: "gastown", polecat: "old"},        // live then, gone now: dropped
+		{name: "dead/devops/mariner", agent: "deepseek-flash", rig: "devops", polecat: "mariner", deadHooked: true},
+		{name: "dead/gastown/dag", agent: "deepseek-flash", rig: "gastown", polecat: "dag", deadHooked: true}, // its seat is live now: dropped
+		{name: "landing/gastown/nux", agent: "claude-sonnet"},
+		{name: "pool-claim/abc", agent: "claude-haiku"}, // the ledger appends the claims of the moment itself
+	}
+	got, err := snapshotOccupied(snapshot, func() sessionLister { return lister }, func() time.Time { return now })()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, s := range got {
+		names = append(names, s.name)
+	}
+	sort.Strings(names)
+	want := []string{"dead/devops/mariner", "gt-capable", "gt-dag", "landing/gastown/nux"}
+	if strings.Join(names, " ") != strings.Join(want, " ") {
+		t.Fatalf("occupied = %v, want %v", names, want)
+	}
+	if lister.err = errors.New("tmux down"); true {
+		if _, err := snapshotOccupied(snapshot, func() sessionLister { return lister }, func() time.Time { return now })(); err == nil {
+			t.Fatal("a failed session listing must fail the read, not count the snapshot alone")
+		}
 	}
 }

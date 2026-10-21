@@ -1,3 +1,5 @@
+> Status: approved 2026-10-21 (Sloan, claude-rh7). Implemented by gt-ckz0r (landed), gt-t7k92, gt-uoez5, gt-aiby1, be-gf9, be-yn5 and the crew landing gt-bcmlj.
+
 # Spec dispatcher throughput
 
 Date: 2026-10-21. Owner: Sloan's load session (handoff bead claude-rh7). Status: approved design.

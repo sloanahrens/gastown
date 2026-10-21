@@ -136,6 +136,9 @@ type SlingSpawnOptions struct {
 	BaseBranch    string // Override base branch for polecat worktree (e.g., "develop", "release/v2")
 	ResumeBranch  string // Resume an existing branch (e.g. PR head) instead of creating polecat/<name>/<bead>+<ts>
 	SkipAdmission bool   // Caller already holds a polecat admission reservation
+	// occupied is the seat occupancy read the pool decision uses; nil is the
+	// router's full read. The spec dispatcher sets it to its roster snapshot.
+	occupied func() ([]poolSession, error)
 	// Name is the exact polecat a named sling targets (gt sling <bead>
 	// <rig>/<name>). Set, it is reused or — with Create — created by that
 	// name, or the sling is refused; the pool never substitutes another
@@ -698,7 +701,7 @@ func SpawnPolecatForSling(rigName string, opts SlingSpawnOptions) (*SpawnedPolec
 			return nil, fmt.Errorf("not in a Gas Town workspace: %w", err)
 		}
 	}
-	spawnInfo, err := realSlingSeatSpawn().spawn(townRoot, rigName, opts)
+	spawnInfo, err := realSlingSeatSpawnWith(opts.occupied).spawn(townRoot, rigName, opts)
 	if err != nil {
 		return nil, err
 	}
@@ -726,6 +729,13 @@ type slingSeatSpawn struct {
 }
 
 func realSlingSeatSpawn() slingSeatSpawn {
+	return realSlingSeatSpawnWith(nil)
+}
+
+// realSlingSeatSpawnWith is realSlingSeatSpawn with the occupancy read the
+// pool decision uses. nil is the router's own full read (a hand-run gt
+// sling); the spec dispatcher passes snapshotOccupied over its roster.
+func realSlingSeatSpawnWith(occupied func() ([]poolSession, error)) slingSeatSpawn {
 	// One store per spawn, never one per process: the daemon dispatches
 	// concurrently inside a single process, and a shared store would let one
 	// dispatch's release drop a seat another is still standing on (gt-t8q5).
@@ -733,7 +743,11 @@ func realSlingSeatSpawn() slingSeatSpawn {
 	return slingSeatSpawn{
 		backpressure: checkSlingBackpressure,
 		resolvePool: func(townRoot, requested string) (agent, reason string, err error) {
-			return poolRouterFor(townRoot, store).route(requested, true)
+			r := poolRouterFor(townRoot, store)
+			if occupied == nil {
+				return r.route(requested, true)
+			}
+			return r.routeWith(requested, true, occupied)
 		},
 		releaseSeat: store.release,
 		prepare:     prepareSlingPolecat,

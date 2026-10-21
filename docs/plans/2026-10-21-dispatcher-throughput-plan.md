@@ -1,3 +1,5 @@
+> Status: active 2026-10-21 (claude-rh7). Tasks 1-6 filed as gt-ckz0r, gt-t7k92, gt-uoez5, gt-aiby1, be-gf9 + be-yn5, gt-bcmlj.
+
 # Spec Dispatcher Throughput Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.

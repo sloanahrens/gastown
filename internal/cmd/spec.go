@@ -67,7 +67,7 @@ import (
 const (
 	specDispatchActor       = "daemon/spec-dispatch"
 	specDispatchNotePrefix  = "spec-dispatch: "
-	defaultSpecMaxPerTick   = 1
+	defaultSpecMaxPerTick   = 0 // 0: as many as there are free seats
 	specLintExitRefused     = 1
 	specLintExitNeedsPlan   = 2
 	specDispatchCallerLabel = "spec-dispatch"
@@ -331,6 +331,7 @@ func showSpecWith(reads *specTickReads, beadID string, read func(id string) (*be
 // It lives for one tick; the pre-sling re-read (specDispatchEnv.ShowFresh)
 // bypasses it. A nil ledger reads through and counts nothing.
 type specTickReads struct {
+	mu    sync.Mutex
 	shows map[string]*beads.Issue
 	calls int
 }
@@ -342,7 +343,9 @@ func newSpecTickReads() *specTickReads {
 // call counts one bd call the tick issued outside show and the client below.
 func (r *specTickReads) call() {
 	if r != nil {
+		r.mu.Lock()
 		r.calls++
+		r.mu.Unlock()
 	}
 }
 
@@ -351,6 +354,8 @@ func (r *specTickReads) Calls() int {
 	if r == nil {
 		return 0
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.calls
 }
 
@@ -745,8 +750,10 @@ type specDispatchReport struct {
 	Failed         []specDispatchEntry `json:"failed"`
 	// Notices are lines the tick decided on but no single candidate owns,
 	// logged once each (gt-wgyca).
-	Notices []string `json:"notices,omitempty"`
-	Errors  []string `json:"errors,omitempty"`
+	Notices      []string      `json:"notices,omitempty"`
+	SlingsRun    int           `json:"slings_run,omitempty"`
+	SlowestSling time.Duration `json:"slowest_sling_ns,omitempty"`
+	Errors       []string      `json:"errors,omitempty"`
 }
 
 type specDispatchEntry struct {
@@ -765,6 +772,10 @@ type specCandidate struct {
 	// sling; the zero value is a bead that declares none (gt-j5cr2). The tick
 	// fills it from the fresh read, before the seat is chosen.
 	Run specdispatch.FormulaRun
+	// order is the candidate's position among the slings of its tick, set
+	// when the tick collects it; the slings run concurrently, so it is what
+	// keeps a record of them in candidate order.
+	order int
 }
 
 // specRoster is the live polecat picture the budget is built from: the seats
@@ -896,10 +907,15 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// The read's own skips are the board-carried refusals: the tick and the
 	// dry run print them beside the ones the tick finds itself (gt-k1g3e).
 	report.Skipped = append(report.Skipped, read.Skipped...)
+	// The tick slings at most perTick candidates. The config ceiling wins when
+	// set; otherwise the bound is the free seats the roster shows, so a tick
+	// fills the pool instead of three seats of nine (2026-10-21: max_per_tick
+	// 3 bound 10 of 32 daytime ticks while seats turned over every 7 minutes).
 	perTick := env.PerTick
 	if perTick <= 0 {
-		perTick = defaultSpecMaxPerTick
+		perTick = budget.FreeSeats()
 	}
+	var pending []specPendingSling
 	// One notice per rig per tick: the revert record is the rig's, not a
 	// candidate's, so a rig with several red-main beads still logs it once
 	// (gt-wgyca).
@@ -1047,7 +1063,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			continue
 		}
 
-		if len(report.Dispatched) >= perTick {
+		if len(pending)+len(report.Dispatched) >= perTick {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %d reached", id, specdispatch.SkipPerTickLimit, perTick)})
 			continue
 		}
@@ -1119,80 +1135,150 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: %s: %s", id, specStaleReason, why)})
 			continue
 		}
-
-		var polecat string
-		attempts, err := specdispatch.RetryOnContention(specdispatch.RetryAttempts, env.Sleep, rand.New(rand.NewSource(env.Now().UnixNano())), func() error { //nolint:gosec // G404: backoff jitter
-			var slingErr error
-			polecat, slingErr = env.Sling(c, resume, seat)
-			return slingErr
-		})
-		if err != nil {
-			if isSpecOverlapRefusal(err) {
-				// The content-overlap guard refuses work in flight, and an
-				// unstarted peer only while that peer is ahead of this bead in
-				// dispatch order and is one the dispatcher would sling. Either
-				// way the refusal lifts on its own: the peer is slung (and this
-				// bead is then held against work in flight), or it closes. The
-				// bead stays ready and the next tick retries it, rather than
-				// leaving a label for an operator to clear by hand (gt-q6zoo,
-				// gt-nlkba).
-				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: sling deferred, content overlap holds it (work in flight, or unstarted work the dispatcher would sling first): %s", id, firstErrLine(err))})
-				continue
-			}
-			if isSpecSlingRefusal(err) {
-				// Capacity, not failure: the pool or the merge queue said
-				// not now. The bead stays ready.
-				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Agent: seat.Agent, Line: fmt.Sprintf("%s: sling deferred: %s", id, firstErrLine(err))})
-				continue
-			}
-			why := firstErrLine(err)
-			if specdispatch.IsSerializationFailure(err) {
-				why = fmt.Sprintf("%v after %d attempts: %s", specdispatch.ErrRetriesExhausted, attempts, why)
-			}
-			excluded := fmt.Sprintf("excluded from the queue until label %s is cleared", specdispatch.DispatchFailedLabel)
-			failLine := fmt.Sprintf("%s: dispatch failed, left unassigned: %s; %s", id, why, excluded)
-			entry.Line = failLine
-			report.Failed = append(report.Failed, entry)
-			// The label takes the bead out of the candidate set, so a sling
-			// that fails for a reason other than capacity does not spawn and
-			// roll back a polecat every tick. Removing it retries. Only a
-			// failure that cannot clear itself is labeled; an overlap is
-			// deferred above instead (gt-q6zoo).
-			if err := env.AddLabel(id, specdispatch.DispatchFailedLabel); err != nil {
-				report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", id, err))
-			}
-			// The note is its own key: annotateSpecOnce skips a note whose key
-			// a comment already starts with, so a shorter key would hide a
-			// retry's different reason while the same one is still written
-			// once (gt-zkqtn). A bead that already carries a note from before
-			// this key was widened holds the same text (prefix plus failLine),
-			// so the same reason is still written once; only a different
-			// reason adds a second note.
-			note := specDispatchNotePrefix + failLine
-			if err := env.Annotate(id, note, note); err != nil {
-				report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
-			}
-			continue
-		}
-		entry.Polecat = polecat
-		entry.Line = fmt.Sprintf("%s: slung to %s/%s on %s (%s)", id, c.Rig, polecat, seat.Agent, seat.Reason)
-		entry.Line += specFormulaNote(c.Run) + specResumeNote(resume, gone)
-		if attempts > 1 {
-			entry.Line += fmt.Sprintf(" after %d attempts", attempts)
-		}
-		if shapeNote != "" {
-			entry.Line += "; " + shapeNote
-		}
-		report.Dispatched = append(report.Dispatched, entry)
+		// Collected now, slung below: the seat is taken on the budget at once
+		// so the next candidate's choice sees it, and the slings of one tick
+		// run together instead of one after another (the sling, not the
+		// reads, was the tick: 45-70 s each in series, 2026-10-21).
+		c.order = len(pending)
+		pending = append(pending, specPendingSling{c: c, id: id, seat: seat, resume: resume, gone: gone, shapeNote: shapeNote, entry: entry})
 		budget.Bump(seat.Agent, budget.Now)
-		if gone != "" {
-			note := fmt.Sprintf("%s%s: resume branch %s is gone from origin; dispatched fresh (gt-gzhin.3)", specDispatchNotePrefix, id, gone)
-			if err := env.Annotate(id, note, note); err != nil {
-				report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", id, err))
+	}
+	specRunPendingSlings(env, pending, &report)
+	return report
+}
+
+// specPendingSling is a candidate the tick has decided to sling: its seat is
+// chosen and counted on the budget; the last-moment re-read and the sling
+// itself are still to run.
+type specPendingSling struct {
+	c         specCandidate
+	id        string
+	seat      specdispatch.SeatChoice
+	resume    string
+	gone      string
+	shapeNote string
+	entry     specDispatchEntry
+}
+
+// specSlingOutcome is what one sling produced, applied to the report in
+// candidate order after every sling of the tick has returned. The writes a
+// sling owes the bead (the failed label, the notes) are collected here and
+// made on the tick's goroutine, so the report and the bead writes keep the
+// candidate order and the env's writers are never called concurrently.
+type specSlingOutcome struct {
+	kind  specSlingKind
+	entry specDispatchEntry
+	label string      // a label to add to the bead, when set
+	notes [][2]string // Annotate key, text pairs
+	took  time.Duration
+}
+
+type specSlingKind int
+
+const (
+	specSlingDispatched specSlingKind = iota
+	specSlingSkipped
+	specSlingFailed
+)
+
+// specRunPendingSlings runs the tick's slings concurrently, one goroutine per
+// pending candidate, and applies their outcomes in candidate order. Two
+// slings cannot take one seat: each writes its in-flight claim under the pool
+// decision lock before its session exists (gt-t8q5), and the occupancy each
+// one reads is the tick's snapshot plus the live sessions and claims of the
+// moment (snapshotOccupied).
+func specRunPendingSlings(env specDispatchEnv, pending []specPendingSling, report *specDispatchReport) {
+	if len(pending) == 0 {
+		return
+	}
+	outcomes := make([]specSlingOutcome, len(pending))
+	var wg sync.WaitGroup
+	for i := range pending {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			outcomes[i] = specSlingOne(env, pending[i])
+		}(i)
+	}
+	wg.Wait()
+	var slowest time.Duration
+	for _, o := range outcomes {
+		if o.took > slowest {
+			slowest = o.took
+		}
+		switch o.kind {
+		case specSlingDispatched:
+			report.Dispatched = append(report.Dispatched, o.entry)
+		case specSlingSkipped:
+			report.Skipped = append(report.Skipped, o.entry)
+		case specSlingFailed:
+			report.Failed = append(report.Failed, o.entry)
+		}
+		if o.label != "" {
+			if err := env.AddLabel(o.entry.Bead, o.label); err != nil {
+				report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", o.entry.Bead, err))
+			}
+		}
+		for _, n := range o.notes {
+			if err := env.Annotate(o.entry.Bead, n[0], n[1]); err != nil {
+				report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", o.entry.Bead, err))
 			}
 		}
 	}
-	return report
+	report.SlingsRun = len(pending)
+	report.SlowestSling = slowest
+}
+
+// specSlingOne is one sling with its contention retries; the last-moment
+// re-read already passed on the tick goroutine. It calls nothing that writes
+// the bead; the outcome says what the tick should write.
+func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
+	start := env.Now()
+	id, c, seat, entry := p.id, p.c, p.seat, p.entry
+	done := func(o specSlingOutcome) specSlingOutcome {
+		o.took = env.Now().Sub(start)
+		return o
+	}
+	var polecat string
+	attempts, err := specdispatch.RetryOnContention(specdispatch.RetryAttempts, env.Sleep, rand.New(rand.NewSource(env.Now().UnixNano())), func() error { //nolint:gosec // G404: backoff jitter
+		var slingErr error
+		polecat, slingErr = env.Sling(c, p.resume, seat)
+		return slingErr
+	})
+	if err != nil {
+		if isSpecOverlapRefusal(err) {
+			entry.Line = fmt.Sprintf("%s: sling deferred, content overlap holds it (work in flight, or unstarted work the dispatcher would sling first): %s", id, firstErrLine(err))
+			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
+		}
+		if isSpecSlingRefusal(err) {
+			entry.Line = fmt.Sprintf("%s: sling deferred: %s", id, firstErrLine(err))
+			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
+		}
+		why := firstErrLine(err)
+		if specdispatch.IsSerializationFailure(err) {
+			why = fmt.Sprintf("%v after %d attempts: %s", specdispatch.ErrRetriesExhausted, attempts, why)
+		}
+		excluded := fmt.Sprintf("excluded from the queue until label %s is cleared", specdispatch.DispatchFailedLabel)
+		failLine := fmt.Sprintf("%s: dispatch failed, left unassigned: %s; %s", id, why, excluded)
+		entry.Line = failLine
+		note := specDispatchNotePrefix + failLine
+		return done(specSlingOutcome{kind: specSlingFailed, entry: entry, label: specdispatch.DispatchFailedLabel, notes: [][2]string{{note, note}}})
+	}
+	entry.Polecat = polecat
+	entry.Line = fmt.Sprintf("%s: slung to %s/%s on %s (%s)", id, c.Rig, polecat, seat.Agent, seat.Reason)
+	entry.Line += specFormulaNote(c.Run) + specResumeNote(p.resume, p.gone)
+	if attempts > 1 {
+		entry.Line += fmt.Sprintf(" after %d attempts", attempts)
+	}
+	if p.shapeNote != "" {
+		entry.Line += "; " + p.shapeNote
+	}
+	o := specSlingOutcome{kind: specSlingDispatched, entry: entry}
+	if p.gone != "" {
+		note := fmt.Sprintf("%s%s: resume branch %s is gone from origin; dispatched fresh (gt-gzhin.3)", specDispatchNotePrefix, id, p.gone)
+		o.notes = append(o.notes, [2]string{note, note})
+	}
+	return done(o)
 }
 
 // heldRead is one rig's held-bead read, memoized for the tick so a rig with
@@ -1510,6 +1596,8 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	if sd != nil && sd.MaxPerTick > 0 {
 		perTick = sd.MaxPerTick
 	}
+	// The roster's sessions, kept for the slings of this tick.
+	var snapshot atomic.Pointer[[]poolSession]
 	if slingActor == "" {
 		slingActor = specDispatchActor
 	}
@@ -1567,6 +1655,10 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			if err != nil {
 				return specRoster{}, fmt.Errorf("listing polecat seats: %w", err)
 			}
+			// Kept for the slings: each one's seat decision reads this
+			// snapshot plus the live sessions and claims of its moment
+			// (snapshotOccupied) instead of every polecat directory again.
+			snapshot.Store(&sessions)
 			return specRosterFrom(sessions, ts), nil
 		},
 		Annotate: annotations.annotate,
@@ -1580,7 +1672,11 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			return verifyFormulaExists(formula, filepath.Join(townRoot, rig), townRoot)
 		},
 		Sling: func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (string, error) {
-			return slingSpec(townRoot, c, resumeBranch, seat)
+			var occupied func() ([]poolSession, error)
+			if sessions := snapshot.Load(); sessions != nil {
+				occupied = snapshotOccupied(*sessions, newPoolSessionLister, time.Now)
+			}
+			return slingSpec(townRoot, c, resumeBranch, seat, occupied)
 		},
 		Sleep:    time.Sleep,
 		Now:      time.Now,
@@ -1596,15 +1692,19 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	annotations.save()
 	report.DetailsFetched, report.DetailsCached, report.DetailsUnread = details.Counts()
 	if report.Hold == "" {
-		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start)))
+		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start), report.SlingsRun, report.SlowestSling))
 	}
 	return report, nil
 }
 
 // specTickCost is the tick's one cost line. It counts the reads the tick makes
 // itself. The sling path, the pre-sling re-read and the writes are not counted.
-func specTickCost(reads *specTickReads, took time.Duration) string {
-	return fmt.Sprintf("tick cost: %d bd read call(s) outside the sling path in %s", reads.Calls(), took.Round(time.Millisecond))
+func specTickCost(reads *specTickReads, took time.Duration, slings int, slowest time.Duration) string {
+	line := fmt.Sprintf("tick cost: %d bd read call(s) outside the sling path in %s", reads.Calls(), took.Round(time.Millisecond))
+	if slings > 0 {
+		line += fmt.Sprintf("; %d sling(s) in parallel, slowest %s", slings, slowest.Round(time.Millisecond))
+	}
+	return line
 }
 
 // specRosterSessions is the seat picture poolSeatSessions draws, with its
@@ -1987,7 +2087,9 @@ func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, resume
 // slingSpec dispatches one clean spec through the shared rig-dispatch path.
 // The agent is explicit, so it wins over the bead's route:* labels in the
 // pool; the pool still enforces its own caps and may refuse.
-func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (string, error) {
+// slingSpec slings one candidate. occupied, when set, is the seat occupancy
+// read the pool decision uses (the tick's snapshot); nil reads the town.
+func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice, occupied func() ([]poolSession, error)) (string, error) {
 	targetBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, c.Rig)
 	if !ok {
 		return "", fmt.Errorf("cannot resolve rig %q beads database for %s", c.Rig, c.Spec.ID)
@@ -1995,6 +2097,13 @@ func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specd
 	params := specSlingParams(townRoot, targetBeadsDir, resolveFormula("", false, townRoot, c.Rig), c, resumeBranch, seat)
 	d := realSlingDeps()
 	d.beadInfoInTown = refuseOpenBlockers(d.beadInfoInTown)
+	if occupied != nil {
+		spawn := d.spawnPolecat
+		d.spawnPolecat = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+			opts.occupied = occupied
+			return spawn(rigName, opts)
+		}
+	}
 	result, err := d.executeSling(params)
 	if err != nil {
 		return "", err
