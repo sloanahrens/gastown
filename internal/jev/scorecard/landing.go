@@ -187,10 +187,11 @@ func (a *landingAdapter) Parse(raw []byte) (Item, error) {
 // needs_review_now and risk false: the overseer read the diff and let it stand.
 // A FAIL labels both true: the diff should have been read before the wake, and
 // the landing was at least level 2 risk. A WAIVED or AUDITED line leaves the
-// head without a PASS or FAIL, and no line yet is unlabeled, and so is a landing
-// whose bead no longer exists in its rig. A rig with no beads directory fails
-// the report, like any other failure to read the notes: it would otherwise
-// leave every landing of that rig unlabeled with a clean exit. A FAIL's finding beads are collected for Context.
+// head without a PASS or FAIL, and no line yet is unlabeled, and so is a
+// landing whose bead no longer exists in its rig. A rig with no beads
+// directory fails the report, like any other failure to read the notes: it
+// would otherwise leave every landing of that rig unlabeled with a clean exit.
+// A FAIL's finding beads are collected for Context.
 func (a *landingAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	rig := item.Refs[refRig]
 	if rig == "" {
