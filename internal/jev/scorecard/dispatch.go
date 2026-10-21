@@ -13,6 +13,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	gtdispatch "github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
@@ -329,7 +330,8 @@ func isSuperseded(issue *beads.Issue) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(issue.CloseReason)), "superseded")
 }
 
-// hasNeedsSplit is a bead carrying the needs-split label.
+// hasNeedsSplit is a bead carrying the needs-split label, typed by hand in any
+// case. It reads the dispatcher's HasLabel so the hold and the score agree.
 func hasNeedsSplit(issue *beads.Issue) bool {
-	return issue != nil && beads.HasLabel(issue, needsSplitLabel)
+	return issue != nil && gtdispatch.HasLabel(issue.Labels, needsSplitLabel)
 }

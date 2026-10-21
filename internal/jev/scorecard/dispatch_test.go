@@ -539,6 +539,21 @@ func TestScorecardDispatchReadFailuresFailReport(t *testing.T) {
 	}
 }
 
+// The dispatcher holds a hand-typed Needs-Split as it holds needs-split, so a
+// landed bead carrying that label must not score as fitting twenty minutes.
+func TestScorecardDispatchNeedsSplitIgnoresCase(t *testing.T) {
+	t.Parallel()
+	landed := &beads.Issue{Status: "closed", CloseReason: "Landed on main\nlanded_commit: abc123", Labels: []string{"Needs-Split"}}
+	got, rules := dispatchLabels(nil, false, landed, overrunNone)
+	want := map[QuestionID]bool{qLandsFirstTry: true, qFitsTwentyMinutes: false}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("dispatchLabels = %v, want %v", got, want)
+	}
+	if got, want := strings.Join(rules, "+"), "landed:no-review+label:needs-split"; got != want {
+		t.Errorf("rules = %q, want %q", got, want)
+	}
+}
+
 // failingBeadStore is a bead store whose every lookup fails.
 type failingBeadStore struct{}
 
