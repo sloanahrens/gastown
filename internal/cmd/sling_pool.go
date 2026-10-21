@@ -1275,16 +1275,16 @@ type poolSeatSnapshot struct {
 }
 
 // releasedAt reports whether s is a session the roster released: its seat was
-// released, and the session already existed when the roster read it. A session
-// whose creation time is unknown reads as created now, so it counts.
+// released and the session existed when the roster read it. A zero creation
+// time is an unknown one and does not count as released.
 func (p poolSeatSnapshot) releasedAt(s poolSession) bool {
-	return s.rig != "" && s.polecat != "" && p.released[s.rig+"/"+s.polecat] && s.created.Before(p.at)
+	return s.rig != "" && s.polecat != "" && p.released[s.rig+"/"+s.polecat] &&
+		!s.created.IsZero() && s.created.Before(p.at)
 }
 
-// releasedSeatRecorder wraps a disposition so every seat it reports free
-// (poolSeatStateOccupied, the predicate polecatSeatOccupied reads) is noted.
-// The roster reads a tick's seats through it, and the slings of that tick
-// count the same seats free (snapshotOccupied) without another bd read.
+// releasedSeatRecorder wraps a disposition and notes every seat it reports free
+// (poolSeatStateOccupied), so the tick's slings count the same seats free
+// (snapshotOccupied) without another bd read.
 func releasedSeatRecorder(disposition polecatDispositionFunc) (polecatDispositionFunc, func() map[string]bool) {
 	var mu sync.Mutex
 	released := map[string]bool{}
@@ -1312,15 +1312,11 @@ func releasedSeatRecorder(disposition polecatDispositionFunc) (polecatDispositio
 }
 
 // snapshotOccupied is the occupancy read of a sling the spec dispatcher runs:
-// the live polecat sessions of the moment (a tmux listing, no bd read) less the
-// seats the tick's roster released, plus the seats the roster holds that no
-// session accounts for (dead-hooked and mid-landing seats). A released seat is
-// free here as it is in the roster and the pool router: counting it occupied
-// would refuse a seat the budget frees, every tick, until its session ended.
-// A session that is new since the roster is not a released one and counts.
-// The snapshot's own live sessions and claims are dropped: the listing
-// replaces the former and the ledger appends the claims of the moment under the
-// decision lock (gt-t8q5).
+// the live polecat sessions (a tmux listing, no bd read) less the seats the
+// tick's roster released, plus the roster's dead-hooked and mid-landing seats
+// that no session accounts for. A session new since the roster counts. The
+// snapshot's own live sessions and claims are dropped: the listing replaces the
+// former and the ledger appends the latter under the decision lock (gt-t8q5).
 func snapshotOccupied(snapshot poolSeatSnapshot, lister func() sessionLister, now func() time.Time) func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
 		listed, err := listPolecatSessionsWith(lister(), nil, now())

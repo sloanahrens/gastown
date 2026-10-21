@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"sort"
 	"strings"
@@ -2153,6 +2154,16 @@ func TestSnapshotOccupiedReleasesTheSeatsTheRosterReleased(t *testing.T) {
 	if n := poolSeatCount("claude-haiku", got); n != 1 {
 		t.Fatalf("a session created after the roster counts, got %d: %+v", n, got)
 	}
+
+	// A zero creation time is unknown, not old: the session counts.
+	lister.created["gt-diamond"] = time.Time{}
+	got, err = snapshotOccupied(snap, func() sessionLister { return lister }, now)()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := poolSeatCount("claude-haiku", got); n != 1 {
+		t.Fatalf("a session with a zero creation time counts, got %d: %+v", n, got)
+	}
 }
 
 // The recorder notes the seats the one seat-free predicate releases, and no
@@ -2179,7 +2190,7 @@ func TestReleasedSeatRecorder(t *testing.T) {
 	}
 	got := released()
 	want := map[string]bool{"gastown/idle": true, "gastown/preserved": true}
-	if len(got) != len(want) || !got["gastown/idle"] || !got["gastown/preserved"] {
+	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("released = %v, want %v", got, want)
 	}
 	if rec, rel := releasedSeatRecorder(nil); rec != nil || len(rel()) != 0 {
