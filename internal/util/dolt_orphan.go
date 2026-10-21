@@ -324,9 +324,12 @@ func ReapOrphanDoltServers(orphans []DoltOrphanServer) []DoltOrphanReapResult {
 }
 
 // liveDoltConfigDirs returns the set of beads-bd-tests-* directories
-// currently referenced by a live dolt sql-server's --config path (town
-// server included — it is never itself under a test temp dir, but excluding
-// it isn't necessary since the prefix match already scopes this).
+// currently referenced by a live dolt sql-server, through its --config path
+// or its data dir (doltProcessDataDir, the same resolution the orphan
+// classifier uses, so a server started with --data-dir and no --config still
+// owns its dir). The town server is included — it is never itself under a
+// test temp dir, but excluding it isn't necessary since the prefix match
+// already scopes this.
 func liveDoltConfigDirs(snapshot func() ([]doltProcEntry, error)) (map[string]bool, error) {
 	entries, err := snapshot()
 	if err != nil {
@@ -339,23 +342,34 @@ func liveDoltConfigDirs(snapshot func() ([]doltProcEntry, error)) (map[string]bo
 			continue
 		}
 		cfg := doltSQLServerConfigPath(e.Args)
-		if cfg == "" {
-			continue
+		var owned []string
+		if cfg != "" {
+			owned = append(owned, filepath.Dir(cfg))
 		}
-		dir := filepath.Dir(cfg)
-		for dir != "/" && dir != "." {
-			if strings.HasPrefix(filepath.Base(dir), beadsTestTempDirPrefix) {
-				dirs[dir] = true
-				break
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
+		if dataDir := doltProcessDataDir(e.Args, cfg); dataDir != "" {
+			owned = append(owned, dataDir)
+		}
+		for _, dir := range owned {
+			markBeadsTestDir(dirs, dir)
 		}
 	}
 	return dirs, nil
+}
+
+// markBeadsTestDir adds to dirs the nearest beads-bd-tests-* ancestor of dir
+// (dir itself included), if there is one.
+func markBeadsTestDir(dirs map[string]bool, dir string) {
+	for dir != "/" && dir != "." {
+		if strings.HasPrefix(filepath.Base(dir), beadsTestTempDirPrefix) {
+			dirs[dir] = true
+			return
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return
+		}
+		dir = parent
+	}
 }
 
 // FindStaleBeadsTestTempDirs finds beads-bd-tests-* directories under the OS
