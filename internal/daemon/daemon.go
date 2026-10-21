@@ -36,6 +36,7 @@ import (
 	jevdispatch "github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/jev/drift"
 	"github.com/steveyegge/gastown/internal/jev/landing"
+	"github.com/steveyegge/gastown/internal/jev/logtriage"
 	"github.com/steveyegge/gastown/internal/jev/progress"
 	"github.com/steveyegge/gastown/internal/jev/stale"
 	"github.com/steveyegge/gastown/internal/jev/submission"
@@ -605,6 +606,12 @@ type Daemon struct {
 	// jevLandingOpen are for jev_landing.
 	jevDriftRunning atomic.Bool
 	jevDriftOpen    func(townRoot string, s drift.Settings, warnings io.Writer) (*drift.Pass, error)
+
+	// jevLogtriageRunning and jevLogtriageOpen are the jev_logtriage pass's
+	// single-flight guard and test seam (jev_logtriage.go), as jevDriftRunning
+	// and jevDriftOpen are for jev_drift.
+	jevLogtriageRunning atomic.Bool
+	jevLogtriageOpen    func(townRoot string, s logtriage.Settings, warnings io.Writer) (*logtriage.Pass, error)
 
 	// jevDispatchRunning is the jev_dispatch pass's single-flight guard
 	// (jev_dispatch.go), for the same reason as jevDedupeRunning.
@@ -1620,6 +1627,11 @@ var heartbeatSteps = []heartbeatStep{
 	// stale, and log every answer (internal/jev/drift). Opt-in and lifecycle,
 	// like jev-dedupe.
 	{name: "jev-drift", lifecycle: true, run: (*Daemon).triggerJevDrift},
+
+	// Ask Jev about each group of the daemon log's warning and error lines
+	// every fifteen minutes, and log every answer (internal/jev/logtriage).
+	// Opt-in and lifecycle, like jev-dedupe.
+	{name: "jev-logtriage", lifecycle: true, run: (*Daemon).triggerJevLogtriage},
 
 	// Predict, for each bead just placed on a seat, how it will land, and log
 	// every prediction (internal/jev/dispatch). Opt-in and lifecycle, like
