@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -179,6 +180,61 @@ func TestFormatSpecDispatchReportLogsDeferralsOutsideTheCap(t *testing.T) {
 	}
 	if n := strings.Count(joined, "deferred: gt-h:"); n != 1 {
 		t.Errorf("deferral logged %d times, want once", n)
+	}
+}
+
+// A sling that fails after its retries reaches the daemon log as one 'failed:'
+// line naming the bead and the reason, and no 'deferred:' line: the tick line
+// carries only the count, so that line is how an operator sees what the failed
+// label is holding (gt-4wcqd).
+func TestSpecDispatchTickLogsAFailedSling(t *testing.T) {
+	t.Parallel()
+	const report = `{"candidates": 1, "failed": [
+		{"bead": "gt-z", "line": "gt-z: dispatch failed, left unassigned: Error 1213 after 4 attempts; excluded from the queue until label x is cleared"}
+	]}`
+	fake := newFakeCLI(func([]string) cliReply { return cliReply{stdout: report} })
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+
+	d.runSpecDispatch()
+
+	got := lines()
+	if n := countContaining(got, "spec_dispatch: failed: gt-z", "Error 1213 after 4 attempts"); n != 1 {
+		t.Errorf("failed lines = %d, want one naming the bead and the reason: %v", n, got)
+	}
+	if n := countContaining(got, "deferred:"); n != 0 {
+		t.Errorf("deferred lines = %d, want none: a failed sling is not a deferral: %v", n, got)
+	}
+}
+
+// A dry run decides without slinging: the daemon asks the tick for --dry-run,
+// reads the beads it would sling as next, and logs neither a 'deferred:' nor a
+// 'failed:' line, because it takes those from the report's deferred and failed
+// lists and a dry run has none (gt-4wcqd).
+func TestSpecDispatchDryRunDecidesWithoutSlinging(t *testing.T) {
+	t.Parallel()
+	const report = `{"candidates": 2,
+		"dispatched": [{"bead": "gt-a", "line": "gt-a: would sling to gastown on claude-sonnet (free seat)"}],
+		"skipped": [{"bead": "gt-b", "line": "gt-b: no seat: claude-sonnet 1/1 live"}]}`
+	fake := newFakeCLI(func([]string) cliReply { return cliReply{stdout: report} })
+	logger, _ := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+
+	left, err := d.overseerReportLeft()
+	if err != nil {
+		t.Fatalf("overseerReportLeft: %v", err)
+	}
+	if got := fake.argvs("spec", "dispatch"); len(got) != 1 || !slices.Contains(got[0], "--dry-run") {
+		t.Errorf("dry run argv = %v, want one tick asking for --dry-run", got)
+	}
+	if len(left.Next) != 2 || left.Next[0].Bead != "gt-a" || len(left.Held) != 0 {
+		t.Errorf("LEFT next = %+v held = %+v, want gt-a and the seatless gt-b next, nothing held", left.Next, left.Held)
+	}
+	joined := strings.Join((&Daemon{}).formatSpecDispatchReport([]byte(report)), "\n")
+	for _, unwanted := range []string{"deferred:", "failed:"} {
+		if strings.Contains(joined, unwanted) {
+			t.Errorf("dry-run report logs %q:\n%s", unwanted, joined)
+		}
 	}
 }
 
