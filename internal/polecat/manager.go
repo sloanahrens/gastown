@@ -3192,7 +3192,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	// reintroduce a gitSafe-implies-clean shortcut for CleanupUnknown. This
 	// snapshot is consumed both by AssessActiveMR below and, identically
 	// re-derived from the same finalized facts, inside NewWorkstateInput.
-	gitSafe := !facts.GitCheckFailed && !facts.GitDirty && facts.StashCount == 0 && facts.UnpushedCommits == 0
+	gitSafe := facts.GitSafe()
 	sourceTerminal := sourceHint != "" && m.assignedBeadTerminal(sourceHint)
 	if activeMR != "" {
 		// The landed probe is lazy: it runs only for an active_mr that already

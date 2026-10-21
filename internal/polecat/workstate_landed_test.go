@@ -104,3 +104,36 @@ func TestDecideWorkstateUnlandedUnpushedWorkStillNeedsRecovery(t *testing.T) {
 		t.Fatalf("DecideWorkstate(unlanded unpushed work) = %+v; want NEEDS_RECOVERY git-unpushed", d)
 	}
 }
+
+// A landed seat whose commits still read as unpushed is not cleanup-unknown:
+// the landing took those commits, so the unpushed refusal is skipped for it and
+// the shared git-safe predicate the ignore gate reads agrees (gt-v2muu). The
+// same facts without landed evidence stay refused.
+func TestDecideWorkstateLandedWithUnpushedCommitsIsNotCleanupUnknown(t *testing.T) {
+	t.Parallel()
+	base := WorkstateFacts{
+		State:              StateIdle,
+		Branch:             "polecat/opal/gt-abc+x1",
+		GitStateSource:     GitStateSourceLive,
+		AgentBeadRead:      true,
+		HookBeadSafe:       true,
+		UnpushedCommits:    2,
+		MQCheckRequired:    true,
+		HasSubmittableWork: true,
+	}
+
+	landed := base
+	landed.WorkLanded = true
+	d := DecideWorkstate(NewWorkstateInput(landed))
+	if d.Verdict != WorkstateVerdictSafeToNuke || d.Reason != "landed" {
+		t.Fatalf("DecideWorkstate(landed, empty cleanup_status) = %+v; want SAFE_TO_NUKE landed", d)
+	}
+
+	unlanded := DecideWorkstate(NewWorkstateInput(base))
+	if unlanded.Verdict != WorkstateVerdictNeedsRecovery {
+		t.Fatalf("DecideWorkstate(unlanded, empty cleanup_status) = %+v; want NEEDS_RECOVERY", unlanded)
+	}
+	if blockers := strings.Join(unlanded.Blockers, "; "); !strings.Contains(blockers, "unpushed_commits=2") {
+		t.Fatalf("blockers = %q; want the unlanded unpushed commits named", blockers)
+	}
+}
