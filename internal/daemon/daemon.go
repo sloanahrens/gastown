@@ -2738,6 +2738,9 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// operator parked — gt agent pause, or the deliberate stop gt session
 	// stop records (gt-fojqs) — has a dead session on purpose.
 	seat := supervisor.SeatIn(d.prefixRegistry(), rigName, constants.RolePolecat, polecatName)
+	// The name is computed here, not at the tmux check below, because the
+	// parked branch asks tmux whether the seat still has a session.
+	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(rigName), polecatName)
 	// A seat that reaches any outcome other than a logged skip has left the
 	// skip state; its next skip is news and is logged again.
 	skipped := false
@@ -2749,17 +2752,23 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	rec, err := intent.Read(d.config.TownRoot, supervisor.IntentSeat(seat))
 	if err != nil || rec.Held() {
 		skipped = true
-		// A park past the pool's release window no longer holds its pool seat;
-		// say so once. The pool decides it through the same read and predicate
-		// (parkedStale in internal/cmd), so the two never disagree. The polecat
-		// is still not restarted: the park stays until an operator recovers it.
+		// A park past the pool's release window no longer holds its pool seat,
+		// but only when its session is gone: the pool counts a live session
+		// first and releases the seat only of a stale park it finds dead
+		// (parkedStale in internal/cmd). A live session under a stale park
+		// still holds the seat, so this line says released only where the
+		// pool's own release does. A tmux read that fails is not proof the
+		// session ended, so it keeps the plain parked line too. The polecat is
+		// still not restarted: the park stays until an operator recovers it.
 		now := time.Now()
 		if parked, st, perr := agentpause.IsPaused(d.config.TownRoot, rigName, constants.RolePolecat, polecatName); err == nil && perr == nil && parked && agentpause.ParkedStale(st, now) {
-			age := parkedAge(now.Sub(st.PausedAt))
-			d.crashSkipLog.logAs(d.logger.Printf, rigName+"/"+polecatName, "parked-released",
-				fmt.Sprintf("Skipping crash detection for %s/%s: parked %s ago (%s); seat released; recover with gt polecat check-recovery %s/%s",
-					rigName, polecatName, age, rec.HoldReason(), rigName, polecatName))
-			return
+			if alive, serr := d.tmux.HasSession(sessionName); serr == nil && !alive {
+				age := parkedAge(now.Sub(st.PausedAt))
+				d.crashSkipLog.logAs(d.logger.Printf, rigName+"/"+polecatName, "parked-released",
+					fmt.Sprintf("Skipping crash detection for %s/%s: parked %s ago (%s); seat released; recover with gt polecat check-recovery %s/%s",
+						rigName, polecatName, age, rec.HoldReason(), rigName, polecatName))
+				return
+			}
 		}
 		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: agent is parked (%s)",
 			rigName, polecatName, rec.HoldReason())
@@ -2786,9 +2795,6 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 			return
 		}
 	}
-
-	// Build the expected tmux session name
-	sessionName := session.PolecatSessionName(d.prefixRegistry().PrefixForRig(rigName), polecatName)
 
 	// Check if tmux session exists
 	sessionAlive, err := d.tmux.HasSession(sessionName)

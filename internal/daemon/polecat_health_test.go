@@ -1075,3 +1075,64 @@ func TestCheckPolecatHealth_StaleParkIsLoggedAsReleased(t *testing.T) {
 		}
 	}
 }
+
+// TestCheckPolecatHealth_StaleParkWithLiveSessionIsNotReleased is gt-jhohc:
+// the pool releases a stale park's seat only when the seat has no session —
+// it counts a live session first — so a stale park whose session is still
+// alive holds its seat, and the daemon must not log it as released. The
+// control at the end is the same seat once the session dies: the release line
+// appears, so the check is on the session and not on the park alone.
+func TestCheckPolecatHealth_StaleParkWithLiveSessionIsNotReleased(t *testing.T) {
+	t.Parallel()
+	bd := hookedWorkBD(t, "gt-xyz", time.Hour)
+
+	townRoot := t.TempDir()
+	var logBuf strings.Builder
+	tm := newFakeTmux(newFixedClock())
+	tm.addSession("myr-mycat", "claude", time.Now())
+	d := &Daemon{
+		config:           &Config{TownRoot: townRoot},
+		logger:           log.New(&logBuf, "", 0),
+		tmux:             tm,
+		notifier:         notifyfake.New(),
+		openWorkBeads:    bd.open,
+		execCmd:          bd.run,
+		prefixRegistryFn: myrPrefixes,
+	}
+
+	if err := agentpause.Pause(townRoot, "myr", constants.RolePolecat, "mycat", "overrun (20 minute rule)", "overrun-guard", ""); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	seat := intent.Seat{Rig: "myr", Role: constants.RolePolecat, Name: "mycat"}
+	if _, err := intent.Update(townRoot, seat, func(r *intent.Record) error {
+		r.PausedAt = time.Now().UTC().Add(-31 * time.Minute)
+		return nil
+	}); err != nil {
+		t.Fatalf("intent.Update: %v", err)
+	}
+
+	d.checkPolecatHealth("myr", "mycat")
+
+	got := logBuf.String()
+	if strings.Contains(got, "CRASH DETECTED") {
+		t.Errorf("a stale park must not trigger CRASH DETECTED, got: %q", got)
+	}
+	if strings.Contains(got, "seat released") {
+		t.Errorf("a live session holds the seat, so the daemon must not log it released: %q", got)
+	}
+	if !strings.Contains(got, "agent is parked (parked: overrun (20 minute rule))") {
+		t.Errorf("expected the plain parked line, got: %q", got)
+	}
+
+	// The session dies: the pool releases the seat now, and the daemon says
+	// so.
+	if err := tm.KillSession("myr-mycat"); err != nil {
+		t.Fatalf("KillSession: %v", err)
+	}
+	d.checkPolecatHealth("myr", "mycat")
+
+	got = logBuf.String()
+	if n := strings.Count(got, "seat released"); n != 1 {
+		t.Errorf("got %d release lines once the session died, want 1: %q", n, got)
+	}
+}
