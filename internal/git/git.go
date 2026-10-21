@@ -1584,7 +1584,23 @@ type CommitSummary struct {
 // commits as FirstParentPatchIDs, so a patch-id can be matched to the commit it
 // came from and that commit can be named to a reader.
 func (g *Git) FirstParentCommitSummaries(base, head string) ([]CommitSummary, error) {
-	out, err := g.run("log", "--first-parent", "--format=%H%x00%an%x00%ae%x00%s", base+".."+head)
+	return g.commitSummaries([]string{"--first-parent"}, base, head)
+}
+
+// FullRangeCommitSummaries lists every commit in base..head, newest first, with
+// each commit's author and subject. Unlike FirstParentCommitSummaries it follows
+// the second parent of a merge, so a commit another author brought in through a
+// merge is listed with its own author.
+func (g *Git) FullRangeCommitSummaries(base, head string) ([]CommitSummary, error) {
+	return g.commitSummaries(nil, base, head)
+}
+
+// commitSummaries runs git log over base..head with the given walk flags and
+// parses one CommitSummary per line.
+func (g *Git) commitSummaries(walkFlags []string, base, head string) ([]CommitSummary, error) {
+	args := append([]string{"log"}, walkFlags...)
+	args = append(args, "--format=%H%x00%an%x00%ae%x00%s", base+".."+head)
+	out, err := g.run(args...)
 	if err != nil {
 		return nil, err
 	}

@@ -15,6 +15,7 @@ type divergedPushGit interface {
 	PatchID(base, head string) (string, error)
 	FirstParentPatchIDs(base, head string) ([]git.PatchIDCommit, error)
 	FirstParentCommitSummaries(base, head string) ([]git.CommitSummary, error)
+	FullRangeCommitSummaries(base, head string) ([]git.CommitSummary, error)
 	PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error
 }
 
@@ -133,10 +134,22 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 	}
 
 	refused := len(missing) > 0 && !rangeIdentical
+
+	// The rework check reads every commit in origin's range, not just the
+	// first-parent chain: a seat-authored merge can carry another author's
+	// commit on its second parent, and the lease push would drop it from the
+	// branch. Only a divergence that would otherwise be refused needs the walk.
+	var originRange []git.CommitSummary
+	if refused && rework.rejectedHead != "" {
+		originRange, err = g.FullRangeCommitSummaries(originBase, originSHA)
+		if err != nil {
+			return false, "", fmt.Errorf("full commit summaries of origin range %s..%s: %w", originBase, originSHA, err)
+		}
+	}
 	switch {
-	case refused && rework.allows(originSHA, originSummaries):
+	case refused && rework.allows(originSHA, originRange):
 		diagnosis = fmt.Sprintf("rework of the rejected submission, content changed (origin=%s is the head the rejection named, its %d commit(s) are all %s's; local=%s carries the rework)",
-			ShortSHA(originSHA), len(originSummaries), rework.seatAuthor, ShortSHA(localSHA))
+			ShortSHA(originSHA), len(originRange), rework.seatAuthor, ShortSHA(localSHA))
 	case refused:
 		return false, divergenceRefusal(originSHA, localSHA, missing, originSummaries), nil
 	case len(originIDs) == 0:

@@ -103,7 +103,9 @@ func reworkPushFor(issue *beads.Issue, seatAuthor, seatEmail string) reworkPush 
 
 // allows reports whether origin's tip may be overwritten under the lease: the
 // tip is the rejected head, and every commit in origin's range is this seat's
-// by both name and email. Origin's range must hold at least one commit, so an
+// by both name and email. origin must list the full range, merged-in commits
+// included; a first-parent listing would miss another author's commit on a
+// merge's second parent. Origin's range must hold at least one commit, so an
 // empty range is never read as "all of it is this seat's".
 func (r reworkPush) allows(originSHA string, origin []git.CommitSummary) bool {
 	if r.rejectedHead == "" || r.seatAuthor == "" || r.seatEmail == "" || !land.HeadsEqual(originSHA, r.rejectedHead) {

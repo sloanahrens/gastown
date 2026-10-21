@@ -42,6 +42,11 @@ type fakeDivergedPushGit struct {
 	summaries    map[[2]string][]gitpkg.CommitSummary
 	summariesErr error
 
+	// fullSummaries backs FullRangeCommitSummaries: every commit in a range,
+	// merged-in ones included, keyed by the same [base, head] pair.
+	fullSummaries    map[[2]string][]gitpkg.CommitSummary
+	fullSummariesErr error
+
 	leaseErr   error
 	leaseCalls int
 	leaseArgs  []string
@@ -109,6 +114,13 @@ func (f *fakeDivergedPushGit) FirstParentCommitSummaries(base, head string) ([]g
 		return nil, f.summariesErr
 	}
 	return f.summaries[[2]string{base, head}], nil
+}
+
+func (f *fakeDivergedPushGit) FullRangeCommitSummaries(base, head string) ([]gitpkg.CommitSummary, error) {
+	if f.fullSummariesErr != nil {
+		return nil, f.fullSummariesErr
+	}
+	return f.fullSummaries[[2]string{base, head}], nil
 }
 
 func (f *fakeDivergedPushGit) PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error {
@@ -516,15 +528,15 @@ const (
 // author at email, and local's one commit carries a different patch-id: a
 // rework that changed the content. The origin commit's sha is originTip itself.
 func reworkFakeGit(originTip, author, email string) *fakeDivergedPushGit {
+	commits := []gitpkg.CommitSummary{{SHA: originTip, Author: author, Email: email, Subject: "feat: the rejected submission"}}
 	return &fakeDivergedPushGit{
 		revs: map[string]string{"origin/feature": originTip, "HEAD": reworkTestLocal},
 		patchIDLists: map[[2]string][]string{
 			{"base", originTip}:       {"p-origin"},
 			{"base", reworkTestLocal}: {"p-local"},
 		},
-		summaries: map[[2]string][]gitpkg.CommitSummary{
-			{"base", originTip}: {{SHA: originTip, Author: author, Email: email, Subject: "feat: the rejected submission"}},
-		},
+		summaries:     map[[2]string][]gitpkg.CommitSummary{{"base", originTip}: commits},
+		fullSummaries: map[[2]string][]gitpkg.CommitSummary{{"base", originTip}: commits},
 	}
 }
 
@@ -563,6 +575,51 @@ func TestRecoverDivergedPush_ReworkWithForeignCommitRefuses(t *testing.T) {
 	}
 	if !strings.Contains(diagnosis, "real divergence") {
 		t.Errorf("diagnosis = %q, want the divergence refusal", diagnosis)
+	}
+	if f.leaseCalls != 0 {
+		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)
+	}
+}
+
+// The rejected head is a seat-authored merge: its first-parent chain (the merge
+// and its first parent) is all the seat's, and only the full range shows the
+// other author's commit on the second parent. Overwriting origin would drop it.
+func TestRecoverDivergedPush_ReworkMergeWithForeignSecondParentRefuses(t *testing.T) {
+	t.Parallel()
+	f := reworkFakeGit(reworkTestRejected, reworkTestSeat, reworkTestEmail)
+	f.summaries[[2]string{"base", reworkTestRejected}] = []gitpkg.CommitSummary{
+		{SHA: reworkTestRejected, Author: reworkTestSeat, Email: reworkTestEmail, Subject: "Merge branch 'side'"},
+		{SHA: "p1", Author: reworkTestSeat, Email: reworkTestEmail, Subject: "feat: the first parent"},
+	}
+	f.fullSummaries[[2]string{"base", reworkTestRejected}] = []gitpkg.CommitSummary{
+		{SHA: reworkTestRejected, Author: reworkTestSeat, Email: reworkTestEmail, Subject: "Merge branch 'side'"},
+		{SHA: "s1", Author: "Sloan Ahrens", Email: reworkTestEmail, Subject: "fix: the foreign commit"},
+		{SHA: "p1", Author: reworkTestSeat, Email: reworkTestEmail, Subject: "feat: the first parent"},
+	}
+	rework := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", rework)
+	if recovered {
+		t.Fatal("a foreign commit reachable only through a merge's second parent must not be overwritten")
+	}
+	if err != nil {
+		t.Fatalf("refusal is a diagnosis, not an error: %v", err)
+	}
+	if !strings.Contains(diagnosis, "real divergence") {
+		t.Errorf("diagnosis = %q, want the divergence refusal", diagnosis)
+	}
+	if f.leaseCalls != 0 {
+		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)
+	}
+}
+
+func TestRecoverDivergedPush_ReworkFullRangeErrorAborts(t *testing.T) {
+	t.Parallel()
+	f := reworkFakeGit(reworkTestRejected, reworkTestSeat, reworkTestEmail)
+	f.fullSummariesErr = errors.New("log failed")
+	rework := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
+	recovered, _, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", rework)
+	if recovered || err == nil || !strings.Contains(err.Error(), "full commit summaries") {
+		t.Errorf("recovered=%v err=%v, want an abort naming the full-range listing", recovered, err)
 	}
 	if f.leaseCalls != 0 {
 		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)
