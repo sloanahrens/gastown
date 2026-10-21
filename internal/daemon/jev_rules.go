@@ -1,0 +1,90 @@
+package daemon
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	jevrules "github.com/steveyegge/gastown/internal/jev/rules"
+)
+
+const (
+	// jevRulesInterval is how often a pass is due. A pass takes the submissions
+	// made since the last one, so the interval is the most a submission waits
+	// before it is asked about.
+	jevRulesInterval = 15 * time.Minute
+
+	// jevRulesRunBudget bounds one pass: the submission lists and the Jev calls
+	// for every submission it reaches.
+	jevRulesRunBudget = 10 * time.Minute
+)
+
+// triggerJevRules starts one pass on its own goroutine when the patrol is on
+// and due. The pass makes network calls, so it never runs on the heartbeat. A
+// single-flight guard keeps one pass in flight at a time.
+func (d *Daemon) triggerJevRules() {
+	if !d.isPatrolActive("jev_rules") {
+		return
+	}
+	now := d.clk().Now()
+	dec := evaluatePatrolDue(d.config.TownRoot, "jev_rules", time.Time{}, now, jevRulesInterval)
+	if !dec.due {
+		return
+	}
+	if !d.jevRulesRunning.CompareAndSwap(false, true) {
+		return
+	}
+	if dec.warn != "" {
+		d.logger.Printf("jev_rules: WARNING: %s — %s", dec.warn, dec.note)
+	}
+	go func() {
+		defer d.jevRulesRunning.Store(false)
+		d.runJevRules()
+		if err := savePatrolLastRun(d.config.TownRoot, "jev_rules", d.clk().Now()); err != nil {
+			d.logger.Printf("jev_rules: WARNING: cannot persist last-run time (%v)", err)
+		}
+	}()
+}
+
+// runJevRules does one pass with the settings in the patrol config and the
+// rigs the town knows. A failure is logged, and the last-run time still
+// advances, so a missing price or an unreadable bead store costs one line per
+// interval rather than one per heartbeat.
+func (d *Daemon) runJevRules() {
+	settings := jevrules.Settings{Rigs: d.getKnownRigs()}
+	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevRules != nil {
+		settings.MaxUSDPerDay = c.Patrols.JevRules.MaxUSDPerDay
+		settings.USDPerBillionTokens = c.Patrols.JevRules.USDPerBillionTokens
+	}
+	open := d.jevRulesOpen
+	if open == nil {
+		open = jevrules.Open
+	}
+	pass, err := open(d.config.TownRoot, settings, d.logger.Writer())
+	if err != nil {
+		d.logger.Printf("jev_rules: error: %v", err)
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), jevRulesRunBudget)
+	defer cancel()
+	// The E-stop gate stops a pass already in flight between billed calls.
+	gate := newEstopGate(d.config.TownRoot, pass.Asker, cancel)
+	pass.Asker = gate
+	sum, err := pass.Run(ctx)
+	if gate.stopped {
+		d.logger.Printf("jev_rules: stopped: E-STOP active after asking %d session(s)", sum.Asked)
+		return
+	}
+	if errors.Is(err, jevrules.ErrBusy) {
+		d.logger.Printf("jev_rules: skipped: %v", err)
+		return
+	}
+	if err != nil {
+		d.logger.Printf("jev_rules: error: %v", err)
+		return
+	}
+	if sum.Asked > 0 || sum.Unanswered > 0 || sum.Refused > 0 || sum.CapReached {
+		d.logger.Printf("jev_rules: asked %d session(s), %d unanswered, %d refused by the containment check (daily cap reached: %v)",
+			sum.Asked, sum.Unanswered, sum.Refused, sum.CapReached)
+	}
+}
