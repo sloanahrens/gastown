@@ -1345,17 +1345,24 @@ Each section gets one Jev call with three questions. `doc_now_stale` and
 holds the changed paths with counts, up to 3000 runes of diff hunks, and the
 section's path, heading and text, each value JSON-quoted.
 
-Each line is `{ts, bead, rig, head, landed_at, agent, sections,
+Each line is `{ts, bead, rig, head, landed_at, agent, sections, unanswered,
 question_version, model}`. `sections` holds one entry per section that got an
-answer, each `{doc, heading, answers}`. The log holds paths, headings, numbers
-and answers, never diff or doc text. A landing whose diff names no
-docs-relevant change gets a line with an empty `sections` list. A landing whose
-diff or docs cannot be read, or whose every section returns an unusable
-response, is skipped with no line. A spend cap reached mid-landing stops the
-pass without writing that landing, so the next pass asks it again in full.
+answer, each `{doc, heading, answers}`. `unanswered` counts the sections Jev
+gave an unusable response for, and the pass does not ask them again. The log
+holds paths, headings, numbers and answers, never diff or doc text. A landing
+whose diff names no docs-relevant change gets a line with an empty `sections`
+list.
+
+A git read that fails for any reason other than a refused ref stops the pass
+with the cursor on that landing, so the next pass reads it again. A landing
+whose refs or doc paths the pass refuses before git runs, or whose every section
+returns an unusable response, is skipped with no line. A spend cap reached
+mid-landing stops the pass without writing that landing, so the next pass asks
+it again in full.
 
 The daemon patrol `jev_drift` runs the pass every 15 minutes, off the heartbeat.
-It is off unless `daemon.json` enables it:
+It is off unless `daemon.json` enables it, and it reads the same three keys as
+`jev_submission` above, under `jev_drift`:
 
 ```json
 "patrols": {
@@ -1366,12 +1373,6 @@ It is off unless `daemon.json` enables it:
   }
 }
 ```
-
-| Key | Meaning |
-|-----|---------|
-| `enabled` | Turns the patrol on. Default `false`. |
-| `max_usd_per_day` | The town-wide daily cap the pass checks with `Cap.Allows` before every call. `0` takes the default of 1. |
-| `usd_per_billion_tokens` | Prices the ledger's tokens. Required: a pass without it refuses to run. |
 
 ### Review-targeting battery (`jev_targets`)
 

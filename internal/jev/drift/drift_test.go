@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -99,15 +100,20 @@ func (f *fakeRepo) ReadDoc(_ context.Context, _, path string) (string, error) {
 }
 
 // fakeAsker answers every Ask with answers, or fails with err, and records every
-// state it was sent.
+// state it was sent. Its first unusable Asks get an unusable response instead.
 type fakeAsker struct {
-	answers *jev.Answers
-	err     error
-	states  []string
+	answers  *jev.Answers
+	err      error
+	unusable int
+	states   []string
 }
 
 func (f *fakeAsker) Ask(_ context.Context, state any, _ map[string]jev.Question) (*jev.Answers, error) {
 	f.states = append(f.states, state.(string))
+	if f.unusable > 0 {
+		f.unusable--
+		return nil, jev.ErrBadResponse
+	}
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -492,14 +498,56 @@ func TestJevDriftLandingWithoutDocsRelevantChangeGetsALineWithNoSections(t *test
 
 // TestJevDriftSkipsAnUnreadableDiff: a landing whose diff cannot be read is
 // passed over with no line, and the cursor moves past it.
-func TestJevDriftSkipsAnUnreadableDiff(t *testing.T) {
+// TestJevDriftReadFailureStopsThePass: a git read that fails for a reason other
+// than a refused ref stops the pass with the cursor on the failing landing, so
+// the next pass reads it again and the landings behind it wait.
+func TestJevDriftReadFailureStopsThePass(t *testing.T) {
 	t.Parallel()
 	bad := landed("gt-bad", time.Minute)
 	good := landed("gt-good", 2*time.Minute)
 	r := newRig(t, bad, good)
 	r.serve(good, "1\t1\tinternal/cmd/jev_landing.go\n", recentFlagPatch)
-	badErr := map[string]error{bad.Head: errors.New("bad object")}
-	r.pass.Git = &perRecordErr{Repo: r.git, errs: badErr}
+	r.serve(bad, "1\t1\tinternal/cmd/jev_landing.go\n", recentFlagPatch)
+	flaky := &perRecordErr{Repo: r.git, errs: map[string]error{bad.Head: errors.New("bad object")}}
+	r.pass.Git = flaky
+	if err := battery.WriteCursor(r.cursor, battery.Cursor{Time: t0}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.pass.Run(context.Background()); err == nil || errors.Is(err, errSkip) {
+		t.Fatalf("err = %v, want the read failure to stop the pass", err)
+	}
+	if lines := readLines(t, r.logPath); len(lines) != 0 {
+		t.Errorf("log = %+v, want nothing before the failing landing", lines)
+	}
+	cur, _, _ := battery.ReadCursor(r.cursor)
+	if !cur.Time.Equal(t0) {
+		t.Errorf("cursor = %+v, want it unmoved", cur)
+	}
+
+	flaky.errs = nil
+	sum, err := r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Asked != 2 || sum.Skipped != 0 {
+		t.Errorf("summary = %+v, want the next pass to ask both landings", sum)
+	}
+	lines := readLines(t, r.logPath)
+	if len(lines) != 2 || lines[0].Bead != "gt-bad" || lines[1].Bead != "gt-good" {
+		t.Errorf("log = %+v, want gt-bad then gt-good", lines)
+	}
+}
+
+// TestJevDriftRefusedRefSkipsTheLanding: a landing whose refs the pass refuses
+// to hand to git gets no line, and the landings behind it are still asked.
+func TestJevDriftRefusedRefSkipsTheLanding(t *testing.T) {
+	t.Parallel()
+	bad := landed("gt-bad", time.Minute)
+	good := landed("gt-good", 2*time.Minute)
+	r := newRig(t, bad, good)
+	r.serve(good, "1\t1\tinternal/cmd/jev_landing.go\n", recentFlagPatch)
+	refused := fmt.Errorf("%w: %q", ErrBadRef, bad.Head)
+	r.pass.Git = &perRecordErr{Repo: r.git, errs: map[string]error{bad.Head: refused}}
 	if err := battery.WriteCursor(r.cursor, battery.Cursor{Time: t0}); err != nil {
 		t.Fatal(err)
 	}
@@ -517,6 +565,35 @@ func TestJevDriftSkipsAnUnreadableDiff(t *testing.T) {
 	cur, _, _ := battery.ReadCursor(r.cursor)
 	if cur.ID != "gt-good" {
 		t.Errorf("cursor = %+v, want it past gt-good", cur)
+	}
+}
+
+// TestJevDriftPartialAnswersCountTheUnanswered: when Jev gives an unusable
+// response for one of a landing's sections, the line still holds the answered
+// section and says how many it left unanswered.
+func TestJevDriftPartialAnswersCountTheUnanswered(t *testing.T) {
+	t.Parallel()
+	rec := landed("gt-partial", 2*time.Minute)
+	r := newRig(t, rec)
+	r.git.docs["docs/reference.md"] = "# Ref\n\n## Recent\n\nUse `gt jev landing --recent N`.\n\n## Last\n\nAlso --recent here.\n"
+	r.asker.unusable = 1
+	r.serve(rec, "1\t1\tinternal/cmd/jev_landing.go\n", recentFlagPatch)
+	if err := battery.WriteCursor(r.cursor, battery.Cursor{Time: t0}); err != nil {
+		t.Fatal(err)
+	}
+	sum, err := r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Asked != 1 {
+		t.Fatalf("summary = %+v, want the landing logged", sum)
+	}
+	lines := readLines(t, r.logPath)
+	if len(lines) != 1 {
+		t.Fatalf("log = %+v, want one line", lines)
+	}
+	if got := lines[0]; got.Unanswered != 1 || len(got.Sections) != 1 || got.Sections[0].Heading != "Last" {
+		t.Errorf("line = %+v, want the second section answered and one unanswered", got)
 	}
 }
 
@@ -744,11 +821,36 @@ func TestJevDriftIdentifiersReadOnlyChangedLines(t *testing.T) {
 
 func TestJevDriftCloneRepoRefusesOptionRefs(t *testing.T) {
 	t.Parallel()
-	if err := checkRefs("-x", "main"); err == nil {
-		t.Error("checkRefs accepted a ref that starts with -")
+	for _, bad := range []string{"-x", "main..x", "main:docs", "main x", ""} {
+		if err := checkRefs(bad); !errors.Is(err, ErrBadRef) {
+			t.Errorf("checkRefs(%q) = %v, want ErrBadRef", bad, err)
+		}
 	}
-	if err := checkRefs("refs/heads/main", "abc123"); err != nil {
+	if err := checkRefs("refs/heads/main", "abc123", "refs/heads/feature+1"); err != nil {
 		t.Errorf("checkRefs refused a plain ref: %v", err)
+	}
+}
+
+// TestJevDriftCloneRepoRefusesBadDocPaths: ReadDoc takes only paths under
+// docs/, and refuses before git runs, so a bad path never reaches the clone.
+func TestJevDriftCloneRepoRefusesBadDocPaths(t *testing.T) {
+	t.Parallel()
+	var r cloneRepo
+	for _, path := range []string{"README.md", "docs/../mayor/rig/x.md", "-docs/x.md"} {
+		if _, err := r.ReadDoc(context.Background(), "refs/heads/main", path); !errors.Is(err, ErrBadRef) {
+			t.Errorf("ReadDoc(%q) = %v, want ErrBadRef", path, err)
+		}
+	}
+}
+
+// TestJevDriftRankTiesGoToTheEarlierSection: sections the same score in one
+// doc rank by their place in it, whatever order rank is handed them in.
+func TestJevDriftRankTiesGoToTheEarlierSection(t *testing.T) {
+	t.Parallel()
+	secs := splitSections("docs/x.md", "## First\n\nNames --recent here.\n\n## Second\n\nAlso --recent here.\n")
+	got := rank([]string{"--recent"}, []Section{secs[1], secs[0]})
+	if len(got) != 2 || got[0].Heading != "First" || got[1].Heading != "Second" {
+		t.Errorf("rank = %+v, want First then Second", got)
 	}
 }
 

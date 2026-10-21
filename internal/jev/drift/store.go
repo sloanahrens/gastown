@@ -51,6 +51,10 @@ type Line struct {
 	// Sections holds one entry per doc section that got an answer. It is empty
 	// when no doc section names anything the landing's diff touches.
 	Sections []SectionAnswers `json:"sections"`
+	// Unanswered counts the sections Jev gave an unusable response for. The
+	// pass does not ask them again, so a line with a count above zero answers
+	// only the sections in Sections.
+	Unanswered int `json:"unanswered"`
 	// QuestionVersion is Version when the line was logged.
 	QuestionVersion int `json:"question_version"`
 	// Model is the versioned Jev model that answered.

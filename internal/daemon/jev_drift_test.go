@@ -2,16 +2,22 @@ package daemon
 
 import (
 	"bytes"
+	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/jev/battery"
 	"github.com/steveyegge/gastown/internal/jev/drift"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 func TestJevDriftPatrolIsOptIn(t *testing.T) {
@@ -125,4 +131,151 @@ func TestJevDriftConfigDecodesFromDaemonJSON(t *testing.T) {
 	if c == nil || !c.Enabled || c.MaxUSDPerDay != 2.5 || c.USDPerBillionTokens != 3 {
 		t.Errorf("jev_drift = %+v, want enabled with a 2.5 cap at 3 USD per billion tokens", c)
 	}
+}
+
+// With the patrol on and no last run on record, the trigger starts one pass on
+// its own goroutine, the pass runs to its end, and the last-run time is saved.
+func TestJevDriftTriggerRunsThePassWhenOn(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	logs := &bytes.Buffer{}
+	var opened atomic.Bool
+	d := &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(logs, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{JevDrift: &JevDriftConfig{Enabled: true}},
+		},
+		jevDriftOpen: func(string, drift.Settings, io.Writer) (*drift.Pass, error) {
+			opened.Store(true)
+			return nil, errors.New("boom")
+		},
+	}
+
+	d.triggerJevDrift()
+	// The guard is taken before the goroutine starts and released last, after
+	// the last-run time is saved, so a released guard means the pass is over.
+	for d.jevDriftRunning.Load() {
+		time.Sleep(time.Millisecond)
+	}
+
+	if !opened.Load() {
+		t.Fatal("the due pass was never opened")
+	}
+	if !strings.Contains(logs.String(), "jev_drift: error: boom") {
+		t.Errorf("log = %q, want the open failure under jev_drift", logs)
+	}
+	if _, found, _ := loadPatrolLastRun(town, "jev_drift"); !found {
+		t.Error("no last-run time was saved after the pass")
+	}
+}
+
+// A pass already in flight blocks the trigger: nothing is opened or logged.
+func TestJevDriftTriggerSingleFlight(t *testing.T) {
+	t.Parallel()
+	logs := &bytes.Buffer{}
+	var opened atomic.Bool
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(logs, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{JevDrift: &JevDriftConfig{Enabled: true}},
+		},
+		jevDriftOpen: func(string, drift.Settings, io.Writer) (*drift.Pass, error) {
+			opened.Store(true)
+			return nil, nil
+		},
+	}
+	d.jevDriftRunning.Store(true)
+
+	d.triggerJevDrift()
+
+	if opened.Load() {
+		t.Error("a second pass was opened while one was in flight")
+	}
+	if logs.Len() != 0 {
+		t.Errorf("the trigger logged while a pass was in flight: %s", logs)
+	}
+}
+
+// A pass that finds another pass holding the run lock logs that it skipped and
+// asks nothing.
+func TestJevDriftRunLogsABusyLockAsSkipped(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	release, err := battery.Lock(drift.CursorPath(town) + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	logs := &bytes.Buffer{}
+	d := &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(logs, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{JevDrift: &JevDriftConfig{Enabled: true}},
+		},
+		jevDriftOpen: func(string, drift.Settings, io.Writer) (*drift.Pass, error) {
+			return &drift.Pass{CursorPath: drift.CursorPath(town)}, nil
+		},
+	}
+
+	d.runJevDrift()
+
+	if !strings.Contains(logs.String(), "jev_drift: skipped: another jev drift pass is running") {
+		t.Errorf("log = %q, want the busy pass logged as skipped", logs)
+	}
+}
+
+// A pass that skips a landing logs its summary: the landings asked, the ones
+// skipped and whether the cap was reached.
+func TestJevDriftRunLogsTheSummary(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	t0 := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	if err := battery.WriteCursor(drift.CursorPath(town), battery.Cursor{Time: t0}); err != nil {
+		t.Fatal(err)
+	}
+	logs := &bytes.Buffer{}
+	d := &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(logs, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{JevDrift: &JevDriftConfig{Enabled: true}},
+		},
+		jevDriftOpen: func(string, drift.Settings, io.Writer) (*drift.Pass, error) {
+			return &drift.Pass{
+				Landings:   jevDriftLandings{{BeadID: "gt-refused", Rig: drift.RigName, Head: "h", Base: "b", LandedAt: t0.Add(time.Minute)}},
+				Git:        jevDriftRefusingRepo{},
+				LogPath:    drift.LogPath(town),
+				CursorPath: drift.CursorPath(town),
+				Allows:     func() (bool, error) { return true, nil },
+			}, nil
+		},
+	}
+
+	d.runJevDrift()
+
+	if want := "jev_drift: asked 0 landings, skipped 1 (daily cap reached: false)"; !strings.Contains(logs.String(), want) {
+		t.Errorf("log = %q, want %q", logs, want)
+	}
+}
+
+// jevDriftLandings lists the records it holds, whatever cursor it is asked from.
+type jevDriftLandings []land.LandingRecord
+
+func (f jevDriftLandings) Since(time.Time) ([]land.LandingRecord, error) {
+	return f, nil
+}
+
+// jevDriftRefusingRepo syncs fine and refuses every landing's refs, so each landing is
+// skipped with no line.
+type jevDriftRefusingRepo struct {
+	drift.Repo
+}
+
+func (jevDriftRefusingRepo) Sync(context.Context) error { return nil }
+
+func (jevDriftRefusingRepo) Numstat(_ context.Context, _, head string) (string, error) {
+	return "", fmt.Errorf("%w: %q", drift.ErrBadRef, head)
 }

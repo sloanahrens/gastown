@@ -42,6 +42,8 @@ type Section struct {
 	Heading string
 	// Text is the section's lines, cut to maxSectionRunes.
 	Text string
+	// at is the section's place among its doc's sections, from the top.
+	at int
 	// score counts the diff identifiers the section contains.
 	score int
 }
@@ -56,7 +58,7 @@ func splitSections(doc, text string) []Section {
 	flush := func() {
 		body := strings.TrimSpace(strings.Join(lines, "\n"))
 		if body != "" {
-			out = append(out, Section{Doc: doc, Heading: heading, Text: truncate(body, maxSectionRunes)})
+			out = append(out, Section{Doc: doc, Heading: heading, Text: truncate(body, maxSectionRunes), at: len(out)})
 		}
 		lines = nil
 	}
@@ -119,11 +121,14 @@ func rank(terms []string, secs []Section) []Section {
 			hits = append(hits, s)
 		}
 	}
-	sort.SliceStable(hits, func(i, j int) bool {
+	sort.Slice(hits, func(i, j int) bool {
 		if hits[i].score != hits[j].score {
 			return hits[i].score > hits[j].score
 		}
-		return hits[i].Doc < hits[j].Doc
+		if hits[i].Doc != hits[j].Doc {
+			return hits[i].Doc < hits[j].Doc
+		}
+		return hits[i].at < hits[j].at
 	})
 	if len(hits) > maxSections {
 		hits = hits[:maxSections]

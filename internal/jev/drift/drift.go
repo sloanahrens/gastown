@@ -107,9 +107,9 @@ type Pass struct {
 type Summary struct {
 	// Asked is the number of landings that got a log line this pass.
 	Asked int
-	// Skipped is the number of landings passed over with no line: their diff
-	// could not be read, the docs at the target could not be read, or Jev
-	// returned an unusable response for every section they named.
+	// Skipped is the number of landings passed over with no line: their refs
+	// were refused, or Jev returned an unusable response for every section
+	// they named.
 	Skipped int
 	// CapReached is true when the pass stopped because the day's cap was
 	// spent. The landings it did not reach wait for the next pass, and the
@@ -124,19 +124,21 @@ type Summary struct {
 // nothing: the landings behind the failure wait for the next pass.
 var ErrFetch = errors.New("the bare clone could not be fetched")
 
-// errUnreadable means a landing's diff or docs could not be read, so the pass
-// has no state to ask about. The read is not retried: one such landing must
-// not hold up the ones behind it.
-var errUnreadable = errors.New("landing diff or docs unreadable")
+// errSkip means a landing has no state the pass can ask about, so it gets no
+// line and the pass moves on. That is the case when its refs are refused, a
+// deterministic failure the next pass would hit again, and when Jev gives no
+// usable answer for any section it names.
+var errSkip = errors.New("landing has no usable state to ask about")
 
 // errCapReached means the day's spend reached the cap before a call.
 var errCapReached = errors.New("the daily jev cap is spent")
 
 // Run does one pass. Landings are taken oldest first, and each is logged and
 // the cursor advanced before the next, so a pass stopped partway never asks
-// about a landing twice. A landing whose Ask fails for any reason but an
-// unusable response stops the pass with that error and is asked again by the
-// next one. Run returns ErrBusy when another pass holds the run lock.
+// about a landing twice. A landing whose diff, docs or Ask fails for any
+// reason but a refused ref or an unusable response stops the pass with that
+// error, and the next pass reads it again. Run returns ErrBusy when another
+// pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
 	release, err := lockRun(p.CursorPath)
@@ -176,7 +178,7 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		case errors.Is(err, errCapReached):
 			sum.CapReached = true
 			return sum, nil
-		case errors.Is(err, errUnreadable):
+		case errors.Is(err, errSkip):
 			sum.Skipped++
 		case err != nil:
 			return sum, err
@@ -228,20 +230,21 @@ func after(cur battery.Cursor, landed time.Time, bead string) bool {
 func (p *Pass) ask(ctx context.Context, rec land.LandingRecord, docs map[string]*docCache) (Line, error) {
 	stat, err := p.Git.Numstat(ctx, rec.Base, rec.Head)
 	if err != nil {
-		return Line{}, unreadable(ctx)
+		return Line{}, readErr(err)
 	}
 	patch, err := p.Git.Patch(ctx, rec.Base, rec.Head)
 	if err != nil {
-		return Line{}, unreadable(ctx)
+		return Line{}, readErr(err)
 	}
 	files := parseNumstat(stat)
 
 	var answers []SectionAnswers
+	unanswered := 0
 	model := ""
 	if strings.TrimSpace(patch) != "" {
 		secs, err := p.closest(ctx, rec, patch, docs)
 		if err != nil {
-			return Line{}, unreadable(ctx)
+			return Line{}, readErr(err)
 		}
 		hunks := truncate(patch, maxHunkRunes)
 		for _, s := range secs {
@@ -250,6 +253,7 @@ func (p *Pass) ask(ctx context.Context, rec land.LandingRecord, docs map[string]
 			}
 			got, err := p.Asker.Ask(ctx, buildState(files, hunks, s), Questions())
 			if errors.Is(err, jev.ErrBadResponse) {
+				unanswered++
 				continue
 			}
 			if err != nil {
@@ -259,7 +263,7 @@ func (p *Pass) ask(ctx context.Context, rec land.LandingRecord, docs map[string]
 			answers = append(answers, SectionAnswers{Doc: s.Doc, Heading: s.Heading, Answers: answersFrom(got)})
 		}
 		if len(secs) > 0 && len(answers) == 0 {
-			return Line{}, errUnreadable
+			return Line{}, errSkip
 		}
 	}
 	if answers == nil {
@@ -273,6 +277,7 @@ func (p *Pass) ask(ctx context.Context, rec land.LandingRecord, docs map[string]
 		LandedAt:        rec.LandedAt,
 		Agent:           rec.Agent,
 		Sections:        answers,
+		Unanswered:      unanswered,
 		QuestionVersion: Version,
 		Model:           model,
 	}, nil
@@ -312,13 +317,14 @@ func (p *Pass) allowed() error {
 	return nil
 }
 
-// unreadable returns ctx's error when the context ended, so the pass retries
-// the landing next time; any other read failure is errUnreadable.
-func unreadable(ctx context.Context) error {
-	if cerr := ctx.Err(); cerr != nil {
-		return cerr
+// readErr passes a read failure up, so the pass stops with its cursor on the
+// landing and the next pass reads it again: a git error can be transient. A
+// refused ref or path is the same every time, so that landing is skipped.
+func readErr(err error) error {
+	if errors.Is(err, ErrBadRef) {
+		return errSkip
 	}
-	return errUnreadable
+	return err
 }
 
 // target is the branch a landing lands on, defaultTarget when the record names
@@ -330,8 +336,10 @@ func target(rec land.LandingRecord) string {
 	return rec.Target
 }
 
-// docCache holds one revision's doc files, read once per pass. A load that
-// fails leaves the cache empty, so the next landing reads again.
+// docCache holds one revision's doc files. A pass reads each revision once:
+// the clone is synced once before the first landing, so every landing in the
+// pass sees the same docs. A load that fails stops the pass, so the cache is
+// never asked to load again in the same pass.
 type docCache struct {
 	git    Repo
 	rev    string

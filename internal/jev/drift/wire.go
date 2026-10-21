@@ -3,6 +3,7 @@ package drift
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -132,14 +133,27 @@ func (r cloneRepo) ReadDoc(ctx context.Context, rev, path string) (string, error
 	if err := checkRefs(rev); err != nil {
 		return "", err
 	}
+	if !strings.HasPrefix(path, "docs/") || strings.Contains(path, "..") {
+		return "", fmt.Errorf("%w: doc path %q", ErrBadRef, path)
+	}
 	return r.c.Run(ctx, "show", rev+":"+path)
 }
 
-// checkRefs refuses a ref git would read as an option.
+// ErrBadRef means a ref or path the pass would hand to git is not one it reads.
+// The same landing names it every time, so the pass skips that landing rather
+// than retrying it.
+var ErrBadRef = errors.New("refused ref or path")
+
+// refRe matches a branch name or commit id: letters, digits and . _ / + -, not
+// starting with -, so git never reads it as an option.
+var refRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._/+-]*$`)
+
+// checkRefs refuses a ref outside refRe, and one with "..", which git reads as
+// a range.
 func checkRefs(refs ...string) error {
 	for _, ref := range refs {
-		if strings.HasPrefix(ref, "-") {
-			return fmt.Errorf("refusing %q: a ref may not start with -", ref)
+		if !refRe.MatchString(ref) || strings.Contains(ref, "..") {
+			return fmt.Errorf("%w: %q", ErrBadRef, ref)
 		}
 	}
 	return nil
