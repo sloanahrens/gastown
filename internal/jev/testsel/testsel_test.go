@@ -243,8 +243,8 @@ func TestJevTestselPassWritesOneLineForALanding(t *testing.T) {
 
 	run := pass.Start(context.Background(), Landing{Bead: "gt-fixture", Rig: "gastown", Base: "base", Head: "head", Dir: "dir"})
 	err := run.Finish([]land.PackageResult{
-		{Package: "example.test/fixture/lib", Passed: true},
-		{Package: "example.test/fixture/deep", Passed: false},
+		{Package: "example.test/fixture/lib", Passed: true, Elapsed: 3 * time.Second},
+		{Package: "example.test/fixture/deep", Passed: false, Elapsed: 1500 * time.Millisecond},
 		{Package: "example.test/fixture/util", Passed: true},
 	})
 	if err != nil {
@@ -289,6 +289,12 @@ func TestJevTestselPassWritesOneLineForALanding(t *testing.T) {
 	}
 	if got.GatePackages != 3 || got.Gate["deep"] || !got.Gate["lib"] {
 		t.Errorf("gate = %v over %d packages", got.Gate, got.GatePackages)
+	}
+	// util was reported without a duration, so it is absent rather than 0: the
+	// scorecard must not read it as a package that cost no gate time.
+	wantSeconds := map[string]float64{"lib": 3, "deep": 1.5}
+	if !reflect.DeepEqual(got.GateSeconds, wantSeconds) {
+		t.Errorf("gate_seconds = %v, want %v", got.GateSeconds, wantSeconds)
 	}
 }
 

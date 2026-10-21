@@ -4,6 +4,7 @@ import (
 	"context"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/forgejo"
 )
@@ -27,8 +28,8 @@ func TestCandidateGatePackagesReadsTheGateJobLog(t *testing.T) {
 	}
 
 	want := []PackageResult{
-		{Package: "example.test/a", Passed: true},
-		{Package: "example.test/b", Passed: false},
+		{Package: "example.test/a", Passed: true, Elapsed: 100 * time.Millisecond},
+		{Package: "example.test/b", Passed: false, Elapsed: 200 * time.Millisecond},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Packages = %+v, want %+v", got, want)
@@ -65,9 +66,9 @@ func TestParseGoTestOutputReadsAForgejoJobLog(t *testing.T) {
 	got := parseGoTestOutput(log)
 
 	want := []PackageResult{
-		{Package: "example.test/a", Passed: true},
+		{Package: "example.test/a", Passed: true, Elapsed: 412 * time.Millisecond},
 		{Package: "example.test/b", Passed: true},
-		{Package: "example.test/d", Passed: false},
+		{Package: "example.test/d", Passed: false, Elapsed: 200 * time.Millisecond},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseGoTestOutput = %+v, want %+v", got, want)
@@ -91,8 +92,8 @@ func TestCandidateGatePackagesReadsTimestampedLines(t *testing.T) {
 	}
 
 	want := []PackageResult{
-		{Package: "example.test/a", Passed: true},
-		{Package: "example.test/b", Passed: false},
+		{Package: "example.test/a", Passed: true, Elapsed: 100 * time.Millisecond},
+		{Package: "example.test/b", Passed: false, Elapsed: 200 * time.Millisecond},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Packages = %+v, want %+v", got, want)

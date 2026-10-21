@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -74,6 +75,10 @@ type StepResult struct {
 type PackageResult struct {
 	Package string
 	Passed  bool
+	// Elapsed is the wall time go test reported for the package, 0 when the
+	// line carried none ("(cached)"). The test-selection scorecard prices a
+	// skipped package in gate minutes from it (gt-1d8u0).
+	Elapsed time.Duration
 }
 
 // gateTailLines bounds the output a rejection note carries.
@@ -540,9 +545,9 @@ var packageLineRE = regexp.MustCompile(`^(ok|FAIL)\s+(\S+)(\s|$)`)
 var failedTestRE = regexp.MustCompile(`^\s*--- FAIL: (\S+)(?: \(([0-9.]+)s\))?`)
 
 // parseGoTestOutput reads go test's text output: each package's summary line,
-// ok or FAIL. It reads a Forgejo job log as well as a local step's output: the
-// log API prefixes every line with a timestamp, which packageLineRE's start
-// anchor would otherwise never get past (gt-6hp28).
+// ok or FAIL, and the wall time it reported. It reads a Forgejo job log as well
+// as a local step's output: the log API prefixes every line with a timestamp,
+// which packageLineRE's start anchor would otherwise never get past (gt-6hp28).
 func parseGoTestOutput(out string) []PackageResult {
 	var pkgs []PackageResult
 	for _, line := range strings.Split(out, "\n") {
@@ -551,9 +556,31 @@ func parseGoTestOutput(out string) []PackageResult {
 		if m == nil {
 			continue
 		}
-		pkgs = append(pkgs, PackageResult{Package: m[2], Passed: m[1] == "ok"})
+		pkgs = append(pkgs, PackageResult{
+			Package: m[2],
+			Passed:  m[1] == "ok",
+			Elapsed: packageElapsed(line),
+		})
 	}
 	return pkgs
+}
+
+// packageElapsedRE matches the duration on a package's summary line. go test
+// prints "(cached)" in its place for a cached package, which no duration
+// matches.
+var packageElapsedRE = regexp.MustCompile(`\s([0-9.]+)s\s*$`)
+
+// packageElapsed is the duration a package's summary line carries, or 0.
+func packageElapsed(line string) time.Duration {
+	m := packageElapsedRE.FindStringSubmatch(line)
+	if m == nil {
+		return 0
+	}
+	secs, err := strconv.ParseFloat(m[1], 64)
+	if err != nil {
+		return 0
+	}
+	return time.Duration(secs*float64(time.Second) + 0.5)
 }
 
 // parseShellTierFailures is the scripts the tier sweep's summary line named,

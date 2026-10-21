@@ -159,6 +159,10 @@ type Line struct {
 	// Gate maps each package the gate reported on to whether it passed. It is
 	// absent when the gate reported none.
 	Gate map[string]bool `json:"gate,omitempty"`
+	// GateSeconds maps each package the gate reported a duration for to the
+	// wall time its tests took. A package the gate reported without a duration
+	// ("(cached)") is absent, so the scorecard prices only what it timed.
+	GateSeconds map[string]float64 `json:"gate_seconds,omitempty"`
 	// Reason says why Jev was not asked, when it was not: too_large, tree_wide,
 	// nothing_to_ask, cap_unreadable, cap_reached, unreadable_tree, ask_failed.
 	Reason string `json:"reason,omitempty"`
@@ -309,8 +313,16 @@ func (r *Run) Finish(results []land.PackageResult) error {
 	if len(results) > 0 {
 		line.Gate = make(map[string]bool, len(results))
 		for _, res := range results {
-			if dir, ok := r.dirByIP[res.Package]; ok {
-				line.Gate[dir] = res.Passed
+			dir, ok := r.dirByIP[res.Package]
+			if !ok {
+				continue
+			}
+			line.Gate[dir] = res.Passed
+			if res.Elapsed > 0 {
+				if line.GateSeconds == nil {
+					line.GateSeconds = make(map[string]float64, len(results))
+				}
+				line.GateSeconds[dir] = res.Elapsed.Seconds()
 			}
 		}
 	}

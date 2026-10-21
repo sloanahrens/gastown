@@ -1452,14 +1452,17 @@ The log is `.runtime/jev/testsel.jsonl`, one line per landing:
  "would_skip":{"0.2":["internal/cmd"],"0.3":["internal/cmd"],"0.5":["internal/cmd"]},
  "miss":{"0.2":[],"0.3":[],"0.5":[]},
  "ungraded":{"0.2":[],"0.3":[],"0.5":[]},
- "gate_packages":212,"gate":{"internal/cmd":true},"question_version":1,"model":"…"}
+ "gate_packages":212,"gate":{"internal/cmd":true},
+ "gate_seconds":{"internal/cmd":31.4},"question_version":1,"model":"…"}
 ```
 
 `would_skip` holds the asked packages whose `noul` is below the threshold. `miss`
 holds the would-skip packages the gate reported as `FAIL`. `ungraded` holds the
 would-skip packages the gate reported no result for. Those are neither a miss nor
 a pass: nothing was graded. `gate`
-is absent when the candidate's CI job log had no package lines to read. `reason` is
+is absent when the candidate's CI job log had no package lines to read.
+`gate_seconds` holds each package the gate timed, so the scorecard can price a
+skip; a package the gate reported `(cached)` is absent. `reason` is
 set when Jev was not asked: `too_large`, `tree_wide`, `nothing_to_ask`,
 `cap_unreadable` (the spend ledger could not be read, so the cap is unknown),
 `cap_reached`, `unreadable_tree` or `ask_failed`.
@@ -1494,9 +1497,9 @@ The gate's result for that package labels it:
 
 The report prints one summary line per threshold, 0.2, 0.3 and 0.5, beside the
 per-question block: the asked packages the battery would skip at it (`noul` below
-the threshold), how many of those were ungraded, and how many the gate failed
-(MISS). Gate minutes saved print `n/a`: the gate's package results carry no
-durations, so the log cannot price a skip in minutes.
+the threshold), how many of those were ungraded, how many the gate failed (MISS),
+and the gate minutes those packages took (`gate_seconds` summed). A threshold
+whose would-skip packages were all untimed prints `n/a`.
 
 ### Review-targeting battery (`jev_targets`)
 

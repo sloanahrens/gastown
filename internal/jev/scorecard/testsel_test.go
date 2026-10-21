@@ -15,15 +15,16 @@ import (
 var updateTestselGolden = flag.Bool("update-testsel-golden", false, "rewrite testdata/testsel.golden")
 
 // testselFixtureLog is the test-selection log the golden report reads. Line A
-// has a failed package the battery would skip at 0.5, so it is a MISS there.
-// Line B has no gate results, so it is logged and never labeled. Line C is from
-// another question set and is skipped whole. Line D has a package it would skip
-// at 0.3 that the gate failed, and one it would skip with no gate result.
+// has a failed package the battery would skip at 0.5, so it is a MISS there, and
+// a duration for every package the gate reported. Line B has no gate results, so
+// it is logged and never labeled. Line C is from another question set and is
+// skipped whole. Line D has a package it would skip at 0.3 that the gate failed,
+// and one it would skip with no gate result (and so no duration either).
 var testselFixtureLog = []string{
-	`{"ts":"2026-10-18T00:00:00Z","bead":"gt-a","rig":"gastown","head":"h1","changed":["internal/land"],"always_run":["internal/land"],"asked":["internal/cmd","internal/daemon","internal/land"],"noul":{"internal/cmd":0.1,"internal/daemon":0.9,"internal/land":0.4},"would_skip":{},"miss":{},"ungraded":{},"gate_packages":3,"gate":{"internal/cmd":true,"internal/daemon":true,"internal/land":false},"question_version":1,"model":"m1"}`,
+	`{"ts":"2026-10-18T00:00:00Z","bead":"gt-a","rig":"gastown","head":"h1","changed":["internal/land"],"always_run":["internal/land"],"asked":["internal/cmd","internal/daemon","internal/land"],"noul":{"internal/cmd":0.1,"internal/daemon":0.9,"internal/land":0.4},"would_skip":{},"miss":{},"ungraded":{},"gate_packages":3,"gate":{"internal/cmd":true,"internal/daemon":true,"internal/land":false},"gate_seconds":{"internal/cmd":30,"internal/daemon":60,"internal/land":90},"question_version":1,"model":"m1"}`,
 	`{"ts":"2026-10-19T00:00:00Z","bead":"gt-b","rig":"gastown","head":"h2","changed":["internal/jev"],"always_run":["internal/jev"],"asked":["internal/cmd","internal/daemon"],"noul":{"internal/cmd":0.6,"internal/daemon":0.05},"would_skip":{},"miss":{},"ungraded":{},"gate_packages":0,"question_version":1,"model":"m1"}`,
 	`{"ts":"2026-10-19T12:00:00Z","bead":"gt-c","rig":"gastown","head":"h3","asked":["internal/cmd"],"noul":{"internal/cmd":0.2},"gate":{"internal/cmd":true},"question_version":0,"model":"m0"}`,
-	`{"ts":"2026-10-20T00:00:00Z","bead":"gt-d","rig":"gastown","head":"h4","changed":["internal/cmd"],"always_run":["internal/cmd"],"asked":["internal/land","internal/cmd"],"noul":{"internal/cmd":0.2,"internal/land":0.1},"gate_packages":1,"gate":{"internal/cmd":false},"question_version":1,"model":"m1"}`,
+	`{"ts":"2026-10-20T00:00:00Z","bead":"gt-d","rig":"gastown","head":"h4","changed":["internal/cmd"],"always_run":["internal/cmd"],"asked":["internal/land","internal/cmd"],"noul":{"internal/cmd":0.2,"internal/land":0.1},"gate_packages":1,"gate":{"internal/cmd":false},"gate_seconds":{"internal/cmd":120},"question_version":1,"model":"m1"}`,
 }
 
 // TestTestselScorecardPrintsPerPackageBlockAndSummary is the testsel battery's
@@ -130,6 +131,53 @@ func TestTestselLabelFromGateResult(t *testing.T) {
 			}
 			if tc.labeled && lab.Labels[testselAffects] != tc.affects {
 				t.Errorf("affects label %v, want %v", lab.Labels[testselAffects], tc.affects)
+			}
+		})
+	}
+}
+
+// TestTestselSummaryPricesSkipsInGateMinutes checks the summary line's minutes
+// figure: a would-skip package's own gate duration prices the skip, and a line
+// that timed nothing prints n/a rather than a false 0.
+func TestTestselSummaryPricesSkipsInGateMinutes(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{
+			name: "a timed package prices its skip",
+			line: `{"ts":"2026-10-20T00:00:00Z","bead":"gt-x","rig":"gastown","asked":["internal/cmd"],"noul":{"internal/cmd":0.1},"gate":{"internal/cmd":true},"gate_seconds":{"internal/cmd":90},"question_version":1}`,
+			want: "gate minutes saved 1.5",
+		},
+		{
+			name: "a line that timed nothing reads n/a",
+			line: `{"ts":"2026-10-20T00:00:00Z","bead":"gt-x","rig":"gastown","asked":["internal/cmd"],"noul":{"internal/cmd":0.1},"gate":{"internal/cmd":true},"question_version":1}`,
+			want: "gate minutes saved n/a",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := newTestselAdapter("unused")
+			items, err := a.ParseLines([]byte(tc.line))
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, item := range items {
+				if _, err := a.Label(context.Background(), item); err != nil {
+					t.Fatal(err)
+				}
+			}
+			lines := a.Context()
+			if len(lines) != len(testsel.Thresholds) {
+				t.Fatalf("summary lines = %v, want one per threshold", lines)
+			}
+			for _, line := range lines {
+				if !strings.Contains(line, tc.want) {
+					t.Errorf("summary line %q, want %q", line, tc.want)
+				}
 			}
 		})
 	}
