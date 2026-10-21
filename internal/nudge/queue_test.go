@@ -1467,4 +1467,84 @@ func TestRequeueKeepsUnenqueuedNudges(t *testing.T) {
 	if pending, _ := Pending(townRoot, session); pending != MaxQueueDepth {
 		t.Errorf("Pending = %d, want %d (the preserved nudges must not be re-injected)", pending, MaxQueueDepth)
 	}
+
+	// The preserved copies are the only remaining copy, so they must be on disk.
+	kept := unqueuedMessages(t, townRoot, session)
+	if len(kept) != len(drained) {
+		t.Fatalf("UnqueuedDir holds %d nudge(s), want %d", len(kept), len(drained))
+	}
+	for i, msg := range kept {
+		if msg != drained[i].Message {
+			t.Errorf("kept[%d] = %q, want %q", i, msg, drained[i].Message)
+		}
+	}
+
+	// One full queue fails the batch for the same reason; say it once.
+	if n := strings.Count(err.Error(), "is full"); n != 1 {
+		t.Errorf("error names the full queue %d times, want 1: %v", n, err)
+	}
+}
+
+// TestRequeuePartialFailureKeepsOrder: when the queue fills partway through a
+// batch, the nudges that did go back keep their timestamps and the refused
+// ones are preserved, so a later nudge cannot overtake a refused earlier one
+// (gt-isb0g).
+func TestRequeuePartialFailureKeepsOrder(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	session := "gt-test-requeue-partial"
+
+	for i := 0; i < MaxQueueDepth-1; i++ {
+		if err := Enqueue(townRoot, session, QueuedNudge{Sender: "sender", Message: "fill"}); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+
+	now := time.Now()
+	drained := []QueuedNudge{
+		{Sender: "a", Message: "first", Timestamp: now.Add(-2 * time.Second)},
+		{Sender: "b", Message: "second", Timestamp: now.Add(-time.Second)},
+		{Sender: "c", Message: "third", Timestamp: now},
+	}
+	unqueued, err := Requeue(townRoot, session, drained)
+	if err == nil {
+		t.Fatal("Requeue returned nil error after the queue filled mid-batch")
+	}
+	if len(unqueued) != 2 || unqueued[0].Message != "second" || unqueued[1].Message != "third" {
+		t.Fatalf("Requeue returned %d unqueued nudge(s), want [second third]", len(unqueued))
+	}
+
+	// The one that fit is the earliest, and it is the only one in the queue.
+	if pending, _ := Pending(townRoot, session); pending != MaxQueueDepth {
+		t.Errorf("Pending = %d, want %d", pending, MaxQueueDepth)
+	}
+	if kept := unqueuedMessages(t, townRoot, session); len(kept) != 2 || kept[0] != "second" || kept[1] != "third" {
+		t.Errorf("UnqueuedDir = %v, want [second third]", kept)
+	}
+}
+
+// unqueuedMessages returns the messages preserved under UnqueuedDir, oldest
+// timestamp first.
+func unqueuedMessages(t *testing.T, townRoot, session string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(UnqueuedDir(townRoot, session))
+	if err != nil {
+		t.Fatalf("read unqueued dir: %v", err)
+	}
+	var out []string
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(UnqueuedDir(townRoot, session), entry.Name()))
+		if err != nil {
+			t.Fatalf("read %s: %v", entry.Name(), err)
+		}
+		var n QueuedNudge
+		if err := json.Unmarshal(data, &n); err != nil {
+			t.Fatalf("unmarshal %s: %v", entry.Name(), err)
+		}
+		out = append(out, n.Message)
+	}
+	return out
 }

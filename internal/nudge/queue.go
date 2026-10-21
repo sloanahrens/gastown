@@ -60,9 +60,10 @@ const (
 	// leaves the queue, so an expiry always leaves a record.
 	expiredDirName = "expired"
 
-	// expiredTraceRetention bounds that record's lifetime. The expiry is also
-	// mailed out, so the file is a debugging aid rather than the only copy;
-	// without a bound the directory would grow for the life of a session.
+	// expiredTraceRetention bounds that record's lifetime, and the lifetime of
+	// the unqueued copies beside it. The expiry is also mailed out, so its file
+	// is a debugging aid rather than the only copy; without a bound the
+	// directory would grow for the life of a session.
 	expiredTraceRetention = 7 * 24 * time.Hour
 
 	// expirySourceDrain and expirySourceRequeue are the ExpiryEvent.Source
@@ -74,6 +75,12 @@ const (
 	// drainer (gt-9le0e).
 	expirySourcePrune = "prune"
 )
+
+// unqueuedDirName is the subdirectory of a session queue that holds drained
+// nudges which could not be put back in the queue. Drain already removed their
+// queue entry, so this file is the only copy left, and it is what an operator
+// recovers the nudge from.
+const unqueuedDirName = "unqueued"
 
 // nudgeConfig loads nudge-specific thresholds from town settings.
 func nudgeConfig(townRoot string) *config.NudgeThresholds {
@@ -234,10 +241,15 @@ func enqueue(townRoot, session string, nudge QueuedNudge, observe func(ExpiryEve
 // number of retries cannot repeat at the poll interval.
 //
 // Drained nudges are the only copy, so one failed enqueue does not stop the
-// rest (gt-isb0g). Requeue tries every nudge and returns the ones it could not
-// put back, with their incremented Attempts, alongside an error joining the
-// failures. It never re-injects them itself; the caller reports the count and
-// decides what to keep.
+// rest. Requeue tries every nudge, copies each one it cannot put back into
+// UnqueuedDir, and returns those nudges (with their incremented Attempts)
+// alongside an error joining the distinct enqueue failures. It never
+// re-injects them itself.
+//
+// FIFO order comes from each nudge's Timestamp, which names its queue file, not
+// from the order of the enqueue calls. A nudge that fails cannot therefore be
+// overtaken by a later one that succeeds within the same batch, and a batch
+// that fails together reports one joined error rather than one per nudge.
 func Requeue(townRoot, session string, nudges []QueuedNudge) ([]QueuedNudge, error) {
 	return requeue(townRoot, session, nudges, ExpiryObserver)
 }
@@ -246,6 +258,7 @@ func requeue(townRoot, session string, nudges []QueuedNudge, observe func(Expiry
 	var (
 		unqueued []QueuedNudge
 		errs     []error
+		seen     = make(map[string]bool, len(nudges))
 	)
 	cfg := nudgeConfig(townRoot)
 	maxAttempts := cfg.MaxDeliveryAttemptsV()
@@ -275,11 +288,48 @@ func requeue(townRoot, session string, nudges []QueuedNudge, observe func(Expiry
 		}
 
 		if err := enqueue(townRoot, session, n, observe); err != nil {
+			preserveUnqueued(townRoot, session, n)
 			unqueued = append(unqueued, n)
-			errs = append(errs, err)
+			// A queue that is full rejects the whole batch with the same
+			// message; keep one copy of each distinct failure.
+			if key := err.Error(); !seen[key] {
+				seen[key] = true
+				errs = append(errs, err)
+			}
 		}
 	}
 	return unqueued, errors.Join(errs...)
+}
+
+// UnqueuedDir is the directory holding the drained nudges Requeue could not
+// put back for session, one JSON file per nudge named by its timestamp.
+func UnqueuedDir(townRoot, session string) string {
+	return filepath.Join(queueDir(townRoot, session), unqueuedDirName)
+}
+
+// preserveUnqueued copies a nudge Requeue could not enqueue into UnqueuedDir.
+// A failed copy is reported but does not change the outcome: the caller still
+// names the nudge as not re-queued.
+func preserveUnqueued(townRoot, session string, n QueuedNudge) {
+	if n.Timestamp.IsZero() {
+		n.Timestamp = time.Now()
+	}
+	dir := UnqueuedDir(townRoot, session)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: creating unqueued nudge dir %s: %v\n", dir, err)
+		return
+	}
+	pruneTraces(dir)
+
+	data, err := json.MarshalIndent(n, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: marshaling unqueued nudge: %v\n", err)
+		return
+	}
+	path := filepath.Join(dir, fmt.Sprintf("%d-%s.json", n.Timestamp.UnixNano(), randomSuffix()))
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: preserving unqueued nudge: %v\n", err)
+	}
 }
 
 // Drain reads and removes all queued nudges for a session, returning them
@@ -513,7 +563,7 @@ func writeExpiredTrace(townRoot, session string, n QueuedNudge) (string, error) 
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", fmt.Errorf("creating expired nudge dir: %w", err)
 	}
-	pruneExpiredTraces(dir)
+	pruneTraces(dir)
 
 	data, err := json.MarshalIndent(n, "", "  ")
 	if err != nil {
@@ -526,9 +576,10 @@ func writeExpiredTrace(townRoot, session string, n QueuedNudge) (string, error) 
 	return path, nil
 }
 
-// pruneExpiredTraces removes traces older than expiredTraceRetention. Failures
-// are ignored: the next expiry retries, and a leftover file only costs disk.
-func pruneExpiredTraces(dir string) {
+// pruneTraces removes preserved-nudge files older than expiredTraceRetention.
+// Failures are ignored: the next write retries, and a leftover file only costs
+// disk.
+func pruneTraces(dir string) {
 	now := time.Now()
 	entries, err := os.ReadDir(dir)
 	if err != nil {

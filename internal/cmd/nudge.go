@@ -150,8 +150,8 @@ func watchAndDeliver(t *tmux.Tmux, townRoot, sessionName string) {
 	newNudgeDelivery(t, townRoot).Watch(context.Background(), sessionName)
 }
 
-func requeueDrainedNudges(townRoot, sessionName, source string, drained []nudge.QueuedNudge) []nudge.QueuedNudge {
-	return deliver.Requeue(os.Stderr, townRoot, sessionName, source, drained)
+func requeueDrainedNudges(townRoot, sessionName, source string, drained []nudge.QueuedNudge) {
+	deliver.Requeue(os.Stderr, townRoot, sessionName, source, drained)
 }
 
 // validNudgeModes is the set of allowed --mode values.
