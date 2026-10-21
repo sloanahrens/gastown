@@ -79,6 +79,12 @@ type Pass struct {
 	Now func() time.Time
 }
 
+// SkippedFile is one file a run passed over with no line, and the reason.
+type SkippedFile struct {
+	Path   string
+	Reason string
+}
+
 // Summary says what one run did.
 type Summary struct {
 	// Files is the number of rows the run considered, after MaxFiles.
@@ -90,6 +96,9 @@ type Summary struct {
 	// a file the battery never read would judge something else, so no line is
 	// written, and one such file does not hold up the ones behind it.
 	Skipped int
+	// SkippedFiles names each skipped file and why, in rank order, so a caller
+	// can tell a run that skipped files from one that finished.
+	SkippedFiles []SkippedFile
 	// CapReached is true when the run stopped because the town's Jev spend for
 	// the day had reached its cap. The files it did not reach wait for the next
 	// run.
@@ -178,6 +187,7 @@ func (p *Pass) Run(ctx context.Context, run string, rows []Row, hist History) (S
 		switch {
 		case errors.Is(err, errUnreadable), errors.Is(err, jev.ErrBadResponse):
 			sum.Skipped++
+			sum.SkippedFiles = append(sum.SkippedFiles, SkippedFile{Path: row.Path, Reason: err.Error()})
 		case err != nil:
 			return sum, err
 		default:
