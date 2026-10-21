@@ -59,6 +59,60 @@ func addDescendants(parentPID int, childMap map[int][]int, pids map[int]bool) {
 	}
 }
 
+// sweepDeps is everything the orphan and zombie sweeps read from the machine
+// or do to it. liveSweepDeps wires the real implementations; the exported
+// sweep entry points pass that value in, and tests pass a canned one, so no
+// test runs ps or tmux, reads state files, or sends a real signal.
+type sweepDeps struct {
+	snapshot   func() ([]processEntry, error)
+	tmuxPanes  func() map[int]bool
+	tmuxProbe  func() error
+	townRoot   func(pid int) string
+	isIDE      func(pid int) bool
+	processTTY func(pid int) (string, error)
+	signal     func(pid int, sig syscall.Signal) error
+	loadState  func(file string) map[int]signalState
+	saveState  func(file string, state map[int]signalState) error
+}
+
+// liveSweepDeps returns the sweep dependencies for a real town.
+func liveSweepDeps() sweepDeps {
+	return sweepDeps{
+		snapshot:  psSnapshot,
+		tmuxPanes: getTmuxSessionPIDs,
+		tmuxProbe: func() error { return tmux.BuildCommand("list-sessions").Run() },
+		townRoot:  resolveTownRoot,
+		isIDE:     isIDEClaudeProcess,
+		processTTY: func(pid int) (string, error) {
+			out, err := exec.Command("ps", "-o", "tty=", "-p", strconv.Itoa(pid)).Output()
+			return strings.TrimSpace(string(out)), err
+		},
+		signal:    syscall.Kill,
+		loadState: loadSignalState,
+		saveState: saveSignalState,
+	}
+}
+
+// sweepPaneGuard returns the tmux pane set a sweep protects. Both sweeps and
+// the TOCTOU re-check call it, so they share one empty-set policy: when the
+// set is empty the scan saw no Gas Town pane at all (tmux down, an unreadable
+// socket dir, no server), a TTY-less claude cannot be told apart from one a
+// live session owns, and the sweep signals nothing.
+//
+// The error is non-nil only when tmux itself is unreachable. An empty set
+// with tmux up returns (nil, nil): there is nothing to protect and nothing to
+// sweep.
+func sweepPaneGuard(d sweepDeps) (map[int]bool, error) {
+	pids := d.tmuxPanes()
+	if len(pids) > 0 {
+		return pids, nil
+	}
+	if err := d.tmuxProbe(); err != nil {
+		return nil, fmt.Errorf("tmux not available: %w", err)
+	}
+	return nil, nil
+}
+
 // getTmuxSessionPIDs returns a set of PIDs belonging to ANY tmux session
 // across ALL tmux sockets on this machine.
 //
@@ -210,16 +264,6 @@ func saveSignalState(filename string, state map[int]signalState) error {
 
 // orphanStateFile is the filename for orphan process tracking state.
 const orphanStateFile = "gastown-orphan-state"
-
-// loadOrphanState reads the orphan state file.
-func loadOrphanState() map[int]signalState {
-	return loadSignalState(orphanStateFile)
-}
-
-// saveOrphanState writes the orphan state file.
-func saveOrphanState(state map[int]signalState) error {
-	return saveSignalState(orphanStateFile, state)
-}
 
 // getProcessCwd returns the current working directory of a process.
 // On Linux, reads /proc/<pid>/cwd. On macOS and other Unix, uses lsof.
@@ -530,11 +574,21 @@ type OrphanedProcess struct {
 // Additionally, processes must be older than minOrphanAge seconds to be considered
 // orphaned. This prevents race conditions with newly spawned processes.
 func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
+	return findOrphanedClaudeProcesses(liveSweepDeps())
+}
+
+func findOrphanedClaudeProcesses(d sweepDeps) ([]OrphanedProcess, error) {
 	// Get PIDs belonging to valid Gas Town tmux sessions.
 	// These should not be killed even if they show TTY "?" during startup.
-	protectedPIDs := getTmuxSessionPIDs()
+	protectedPIDs, err := sweepPaneGuard(d)
+	if err != nil {
+		return nil, err
+	}
+	if len(protectedPIDs) == 0 {
+		return nil, nil // refuse: no pane PIDs, so nothing is provably stranded
+	}
 
-	entries, err := psSnapshot()
+	entries, err := d.snapshot()
 	if err != nil {
 		return nil, err
 	}
@@ -543,7 +597,7 @@ func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 	for _, c := range unownedCandidates(entries, protectedPIDs) {
 		// Skip IDE extension processes (VS Code, Cursor, etc.).
 		// These have TTY "?" but are legitimate — controlled by the IDE.
-		if isIDEClaudeProcess(c.PID) {
+		if d.isIDE(c.PID) {
 			continue
 		}
 
@@ -551,7 +605,7 @@ func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 		// Only kill orphaned Claude processes whose cwd is under a Gas Town
 		// workspace root. This prevents killing user's Claude Code instances
 		// running in repos outside ~/gt/ (or wherever the workspace is).
-		townRoot := resolveTownRoot(c.PID)
+		townRoot := d.townRoot(c.PID)
 		if townRoot == "" {
 			continue
 		}
@@ -595,23 +649,24 @@ type ZombieProcess struct {
 // us (gt-h1tq — deacon patrol runs this scan automatically, so without the
 // ownership test it signaled the same headless `om review` backends).
 func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
-	// Get ALL valid PIDs (panes + their children) from active tmux sessions
-	validPIDs := getTmuxSessionPIDs()
+	return findZombieClaudeProcesses(liveSweepDeps())
+}
 
-	// SAFETY CHECK: If no valid PIDs found, tmux might be down or no sessions exist.
-	// Returning empty is safer than marking all Claude processes as zombies.
+func findZombieClaudeProcesses(d sweepDeps) ([]ZombieProcess, error) {
+	// Get ALL valid PIDs (panes + their children) from active tmux sessions.
+	// SAFETY CHECK: an empty set refuses, since returning empty is safer than
+	// marking all Claude processes as zombies. sweepPaneGuard reports an
+	// error when tmux is down; with tmux up and no gt-*/hq-* sessions it
+	// returns no set, which is a valid state, not a reason to sweep.
+	validPIDs, err := sweepPaneGuard(d)
+	if err != nil {
+		return nil, err
+	}
 	if len(validPIDs) == 0 {
-		// Check if tmux is even running
-		if err := tmux.BuildCommand("list-sessions").Run(); err != nil {
-			return nil, fmt.Errorf("tmux not available: %w", err)
-		}
-		// tmux is running but no gt-*/hq-* sessions - that's a valid state,
-		// but we can't safely determine zombies without reference sessions.
-		// Return empty rather than marking everything as zombie.
 		return nil, nil
 	}
 
-	entries, err := psSnapshot()
+	entries, err := d.snapshot()
 	if err != nil {
 		return nil, err
 	}
@@ -620,7 +675,7 @@ func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 	for _, c := range unownedCandidates(entries, validPIDs) {
 		// Skip IDE extension processes (VS Code, Cursor, etc.).
 		// These have TTY "?" but are legitimate — controlled by the IDE.
-		if isIDEClaudeProcess(c.PID) {
+		if d.isIDE(c.PID) {
 			continue
 		}
 
@@ -628,7 +683,7 @@ func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 		// Only kill zombie Claude processes whose cwd is under a Gas Town
 		// workspace root. This prevents killing user's Claude Code instances
 		// running in repos outside ~/gt/.
-		townRoot := resolveTownRoot(c.PID)
+		townRoot := d.townRoot(c.PID)
 		if townRoot == "" {
 			continue
 		}
@@ -650,16 +705,6 @@ func FindZombieClaudeProcesses() ([]ZombieProcess, error) {
 // zombieStateFile is the filename for zombie process tracking state.
 const zombieStateFile = "gastown-zombie-state"
 
-// loadZombieState reads the zombie state file.
-func loadZombieState() map[int]signalState {
-	return loadSignalState(zombieStateFile)
-}
-
-// saveZombieState writes the zombie state file.
-func saveZombieState(state map[int]signalState) error {
-	return saveSignalState(zombieStateFile, state)
-}
-
 // ZombieCleanupResult describes what happened to a zombie process.
 type ZombieCleanupResult struct {
 	Process ZombieProcess
@@ -675,12 +720,16 @@ type ZombieCleanupResult struct {
 //  2. Next cycle, still alive after grace period → SIGKILL
 //  3. Next cycle, still alive after SIGKILL → log as unkillable
 func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
-	zombies, err := FindZombieClaudeProcesses()
+	return cleanupZombieClaudeProcesses(liveSweepDeps())
+}
+
+func cleanupZombieClaudeProcesses(d sweepDeps) ([]ZombieCleanupResult, error) {
+	zombies, err := findZombieClaudeProcesses(d)
 	if err != nil {
 		return nil, err
 	}
 
-	state := loadZombieState()
+	state := d.loadState(zombieStateFile)
 	now := time.Now()
 
 	var results []ZombieCleanupResult
@@ -714,7 +763,7 @@ func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
 		}
 
 		if s.Signal == "SIGTERM" && elapsed >= float64(sigkillGracePeriod) {
-			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			if err := d.signal(pid, syscall.SIGKILL); err != nil {
 				if err != syscall.ESRCH {
 					lastErr = fmt.Errorf("SIGKILL PID %d: %w", pid, err)
 				}
@@ -743,11 +792,11 @@ func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
 		// TOCTOU guard: re-verify this process is still a zombie before signaling.
 		// Between FindZombieClaudeProcesses() and now, the process may have
 		// joined a tmux session or been adopted by an active session.
-		if !isProcessStillOrphaned(zombie.PID) {
+		if !isProcessStillOrphaned(d, zombie.PID) {
 			continue
 		}
 
-		if err := syscall.Kill(zombie.PID, syscall.SIGTERM); err != nil {
+		if err := d.signal(zombie.PID, syscall.SIGTERM); err != nil {
 			if err != syscall.ESRCH {
 				lastErr = fmt.Errorf("SIGTERM PID %d: %w", zombie.PID, err)
 			}
@@ -760,7 +809,7 @@ func CleanupZombieClaudeProcesses() ([]ZombieCleanupResult, error) {
 		})
 	}
 
-	if err := saveZombieState(state); err != nil {
+	if err := d.saveState(zombieStateFile, state); err != nil {
 		if lastErr == nil {
 			lastErr = fmt.Errorf("saving zombie state: %w", err)
 		}
@@ -800,13 +849,17 @@ func orphanRecord(pid int, byPID map[int]OrphanedProcess) OrphanedProcess {
 //
 // Returns the list of cleanup results and any error encountered.
 func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
-	orphans, err := FindOrphanedClaudeProcesses()
+	return cleanupOrphanedClaudeProcesses(liveSweepDeps())
+}
+
+func cleanupOrphanedClaudeProcesses(d sweepDeps) ([]CleanupResult, error) {
+	orphans, err := findOrphanedClaudeProcesses(d)
 	if err != nil {
 		return nil, err
 	}
 
 	// Load previous state
-	state := loadOrphanState()
+	state := d.loadState(orphanStateFile)
 	now := time.Now()
 
 	var results []CleanupResult
@@ -845,7 +898,7 @@ func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
 
 		if s.Signal == "SIGTERM" && elapsed >= float64(sigkillGracePeriod) {
 			// Sent SIGTERM but still alive after grace period - escalate to SIGKILL
-			if err := syscall.Kill(pid, syscall.SIGKILL); err != nil {
+			if err := d.signal(pid, syscall.SIGKILL); err != nil {
 				if err != syscall.ESRCH {
 					lastErr = fmt.Errorf("SIGKILL PID %d: %w", pid, err)
 				}
@@ -875,12 +928,12 @@ func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
 		// TOCTOU guard: re-verify this process is still orphaned before signaling.
 		// Between FindOrphanedClaudeProcesses() and now, the process may have
 		// joined a tmux session or acquired a TTY.
-		if !isProcessStillOrphaned(orphan.PID) {
+		if !isProcessStillOrphaned(d, orphan.PID) {
 			continue
 		}
 
 		// New orphan - send SIGTERM
-		if err := syscall.Kill(orphan.PID, syscall.SIGTERM); err != nil {
+		if err := d.signal(orphan.PID, syscall.SIGTERM); err != nil {
 			if err != syscall.ESRCH {
 				lastErr = fmt.Errorf("SIGTERM PID %d: %w", orphan.PID, err)
 			}
@@ -894,7 +947,7 @@ func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
 	}
 
 	// Save updated state
-	if err := saveOrphanState(state); err != nil {
+	if err := d.saveState(orphanStateFile, state); err != nil {
 		if lastErr == nil {
 			lastErr = fmt.Errorf("saving orphan state: %w", err)
 		}
@@ -907,14 +960,13 @@ func CleanupOrphanedClaudeProcesses() ([]CleanupResult, error) {
 // Used for TOCTOU re-verification immediately before sending signals.
 // Returns true if the process still has no controlling terminal and is not
 // in any active tmux session (i.e., still safe to signal).
-func isProcessStillOrphaned(pid int) bool {
+func isProcessStillOrphaned(d sweepDeps, pid int) bool {
 	// Re-check the process TTY via ps
-	out, err := exec.Command("ps", "-o", "tty=", "-p", strconv.Itoa(pid)).Output()
+	tty, err := d.processTTY(pid)
 	if err != nil {
 		return false // Process may have exited - not orphaned anymore
 	}
 
-	tty := strings.TrimSpace(string(out))
 	if tty == "" {
 		return false // Process gone
 	}
@@ -924,7 +976,12 @@ func isProcessStillOrphaned(pid int) bool {
 		return false
 	}
 
-	// Re-check against current tmux session PIDs
-	protectedPIDs := getTmuxSessionPIDs()
+	// Re-check against current tmux session PIDs. The same empty-set refusal
+	// as the sweeps applies here, so the re-check cannot signal what the
+	// sweep was told to refuse.
+	protectedPIDs, err := sweepPaneGuard(d)
+	if err != nil || len(protectedPIDs) == 0 {
+		return false
+	}
 	return !protectedPIDs[pid]
 }
