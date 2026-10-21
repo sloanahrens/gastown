@@ -468,27 +468,42 @@ func (d *Daemon) rebuildGTNonBinaryRange(repoRoot, from, to string) (nonBinary, 
 	return true, true
 }
 
+// rebuildGTLogFormat puts the record separator, then the commit hash, at the
+// head of each commit's record in the listing rebuildGTBinaryAffectingCount
+// reads.
+const rebuildGTLogFormat = "--format=%x1f%H"
+
 // rebuildGTBinaryAffectingCount counts the commits in from..to that change a
-// path `make build` reads, so a backlog of documentation is not drift. ok is
-// false when git could not answer.
+// path `make build` reads, so a backlog of documentation is not drift. Each
+// commit's paths are classified by buildpaths.AffectsBuild, the predicate
+// `gt stale` counts with, so markdown under an embed directory is drift just
+// as it is there (gt-9euk3). ok is false when git could not answer.
 func (d *Daemon) rebuildGTBinaryAffectingCount(repoRoot, from, to string) (int, bool) {
 	if from == "" || to == "" {
 		return 0, false
 	}
-	// The excludes mirror rebuildGTNonBinaryPath. They cannot carry its embed
-	// directories back in — a git exclude always wins — but that only makes
-	// this count read low for an embed's markdown, and the alarm it feeds is
-	// advisory where the skip is not.
-	out, err := d.rebuildGTGit(repoRoot, "rev-list", "--count", from+".."+to, "--", ".",
-		":(exclude)docs/**", ":(exclude)*.md", ":(exclude)*_test.go", ":(exclude)**/testdata/**")
+	out, err := d.rebuildGTGit(repoRoot, "log", rebuildGTLogFormat, "--name-only", "--diff-merges=first-parent", from+".."+to)
 	if err != nil {
 		return 0, false
 	}
-	n, err := strconv.Atoi(strings.TrimSpace(out))
-	if err != nil {
-		return 0, false
+	return rebuildGTCountAffectingRecords(out), true
+}
+
+// rebuildGTCountAffectingRecords counts the records of a rebuildGTLogFormat
+// listing in which at least one path is binary-affecting. Each record is the
+// commit hash on its first line, then the paths the commit changed.
+func rebuildGTCountAffectingRecords(out string) int {
+	affecting := 0
+	for _, record := range strings.Split(out, "\x1f") {
+		for _, path := range strings.Split(record, "\n")[1:] {
+			// An empty line is not a path, and AffectsBuild("") is true.
+			if path = strings.TrimSpace(path); path != "" && buildpaths.AffectsBuild(path) {
+				affecting++
+				break
+			}
+		}
 	}
-	return n, true
+	return affecting
 }
 
 // rebuildGTSyncOutcome is how the pre-install sync of the source checkout ended.
@@ -763,9 +778,9 @@ func (d *Daemon) rebuildGTAlert(key, message string) error {
 
 // rebuildGTDrift escalates on the outcome that matters — the binary falling
 // behind origin/main — before any skip reason is decided. The count is of
-// binary-affecting commits only, so a backlog of documentation, markdown, test
-// sources and testdata never escalates: it is not a binary anybody is running
-// behind (gt-3qmv4.3). A count that could not be taken is not 0: it could be 1
+// binary-affecting commits only, so a backlog of documentation, markdown outside
+// the embed directories, test sources and testdata never escalates: it is not a
+// binary anybody is running behind (gt-3qmv4.3). A count that could not be taken is not 0: it could be 1
 // commit or 1000, so it escalates too (gt-oqbw).
 func (d *Daemon) rebuildGTDrift(repoRoot string, info *version.StaleBinaryInfo) {
 	if !info.IsStale {
