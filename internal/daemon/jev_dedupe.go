@@ -96,14 +96,9 @@ func (d *Daemon) runJevDedupe() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), jevDedupeRunBudget)
 	defer cancel()
-	// The E-stop holds the patrol from starting (the step is lifecycle), but a
-	// pass already in flight went on paying until the daily cap or its budget
-	// (gt-0h4i0). The gate checks between billed calls.
-	gate := &estopGatedAsker{
-		Asker:  pass.Asker,
-		cancel: cancel,
-		active: func() bool { return estop.IsActive(d.config.TownRoot) },
-	}
+	// The E-stop holds the patrol from starting (the step is lifecycle); the
+	// gate stops a pass already in flight between billed calls.
+	gate := newEstopGate(d.config.TownRoot, pass.Asker, cancel)
 	pass.Asker = gate
 	sum, err := pass.Run(ctx)
 	if gate.stopped {
@@ -123,28 +118,48 @@ func (d *Daemon) runJevDedupe() {
 	}
 }
 
+// jevAsker is the one Ask call every Jev pass's Asker interface declares, so
+// a single gate serves all of them.
+type jevAsker interface {
+	Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error)
+}
+
 // estopGatedAsker is the E-stop's check between one billed call and the next
 // in a running pass. The pass's own loop asks before the call, so a call in
 // flight finishes and is logged and recorded: ending the pass from the
 // context leaves nothing half-asked that the next pass would bill again. Every
-// later finding is left for a pass run after the E-stop lifts.
+// later item is left for a pass run after the E-stop lifts (gt-0h4i0,
+// gt-tevxz).
 type estopGatedAsker struct {
-	dedupe.Asker
-	// cancel ends the pass's context, which dedupe.Run reads after the call
-	// in flight and reports instead of asking the next finding.
+	inner jevAsker
+	// cancel ends the pass's context, which each pass's Run reads after the
+	// call in flight and reports instead of asking the next item.
 	cancel context.CancelFunc
 	// active reports whether the town E-stop is up now.
 	active func() bool
-	// stopped is true once the gate has ended the pass. The pass runs on one
+	// stopped is true once the gate has ended the pass. It stays true, and
+	// every later Ask is refused, so a Run that did not honor the cancellation
+	// cannot bill again if the E-stop lifts mid-pass. The pass runs on one
 	// goroutine, so this needs no lock.
 	stopped bool
 }
 
+// newEstopGate gates inner on the town E-stop, ending the pass through cancel.
+func newEstopGate(townRoot string, inner jevAsker, cancel context.CancelFunc) *estopGatedAsker {
+	return &estopGatedAsker{
+		inner:  inner,
+		cancel: cancel,
+		active: func() bool { return estop.IsActive(townRoot) },
+	}
+}
+
 func (a *estopGatedAsker) Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error) {
-	if a.active() {
+	if !a.stopped && a.active() {
 		a.stopped = true
 		a.cancel()
+	}
+	if a.stopped {
 		return nil, context.Canceled
 	}
-	return a.Asker.Ask(ctx, state, qs)
+	return a.inner.Ask(ctx, state, qs)
 }
