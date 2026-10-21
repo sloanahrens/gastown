@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/slot"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // newTierSweepDaemon is a daemon over a temp town whose rigs.json lists rigs,
@@ -91,6 +92,7 @@ type tierSweepFakeBeads struct {
 	created  []beads.CreateOptions
 	comments []string
 	closed   []string
+	updated  map[string]beads.UpdateOptions
 }
 
 func (b *tierSweepFakeBeads) Create(opts beads.CreateOptions) (*beads.Issue, error) {
@@ -100,6 +102,14 @@ func (b *tierSweepFakeBeads) Create(opts beads.CreateOptions) (*beads.Issue, err
 
 func (b *tierSweepFakeBeads) AddComment(id, text string) error {
 	b.comments = append(b.comments, id+": "+text)
+	return nil
+}
+
+func (b *tierSweepFakeBeads) Update(id string, opts beads.UpdateOptions) error {
+	if b.updated == nil {
+		b.updated = map[string]beads.UpdateOptions{}
+	}
+	b.updated[id] = opts
 	return nil
 }
 
@@ -2116,5 +2126,81 @@ func TestTierSweepSweptLineGivesAnUnrunTierNoVerdict(t *testing.T) {
 	want := "tier_sweep: gastown: swept tipb0001 (shell GREEN, integration , race RED) in 4m0s"
 	if got != want {
 		t.Errorf("swept line = %q, want %q", got, want)
+	}
+}
+
+// A still-red bead filed before the shape fix (gt-uzkic, gt-1lzy1) has prose
+// and no acceptance, so the dispatcher's lint refuses it and never slots it.
+// The next red run rewrites it to the shape while no polecat holds it (gt-hang2).
+func TestTierSweepFileRed_ReshapesAnUnshapedOpenBead(t *testing.T) {
+	t.Parallel()
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+	title := tierSweepBeadPrefix("gastown", "integration") + "./internal/x"
+	bd.open = []*beads.Issue{{
+		ID:          "gt-old",
+		Title:       title,
+		Labels:      []string{tierSweepRedLabel},
+		Description: "The integration tier went red. Please look.",
+	}}
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"./internal/x"}},
+	}
+	d.tierSweepRecordBeads("gastown", "abc123", red)
+
+	if len(bd.created) != 0 {
+		t.Errorf("created = %+v, want the open bead reshaped instead of a new one", bd.created)
+	}
+	if len(bd.comments) != 1 || !strings.HasPrefix(bd.comments[0], "gt-old: still red") {
+		t.Errorf("comments = %v, want the still-red comment kept", bd.comments)
+	}
+	upd, ok := bd.updated["gt-old"]
+	if !ok || upd.Description == nil || upd.Acceptance == nil {
+		t.Fatalf("gt-old was not reshaped: updated = %+v", bd.updated)
+	}
+	v := lintTierSweepBead(beads.CreateOptions{
+		Title:       title,
+		Labels:      []string{tierSweepRedLabel},
+		Description: *upd.Description,
+		Acceptance:  *upd.Acceptance,
+	})
+	if !v.Clean() {
+		t.Fatalf("the reshaped bead fails the lint: %s\ndescription:\n%s", v.ShapeNote(), *upd.Description)
+	}
+}
+
+// A bead already in shape keeps its text, and a bead a polecat has claimed is
+// left to its owner even when its text is unshaped.
+func TestTierSweepFileRed_LeavesShapedAndClaimedBeadsAlone(t *testing.T) {
+	t.Parallel()
+	d, _, _, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	ts := tierSweepTierResult{Verdict: tierSweepRed, Failed: 1, FailedNames: []string{"./internal/x"}}
+	shapedDesc, shapedAcc := tierSweepBeadShape("integration", "./internal/x", "abc123", ts,
+		specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"})
+	bd := &byStatusBeads{byStatus: map[string][]*beads.Issue{
+		"open": {{
+			ID:                 "gt-shaped",
+			Title:              tierSweepBeadPrefix("gastown", "integration") + "./internal/x",
+			Labels:             []string{tierSweepRedLabel},
+			Description:        shapedDesc,
+			AcceptanceCriteria: shapedAcc,
+		}},
+		"in_progress": {{
+			ID:          "gt-claimed",
+			Title:       tierSweepBeadPrefix("gastown", "integration") + "./internal/y",
+			Labels:      []string{tierSweepRedLabel},
+			Description: "A polecat is working this.",
+		}},
+	}}
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Failed: 2, FailedNames: []string{"./internal/x", "./internal/y"}},
+	}
+	d.tierSweepRecordBeads("gastown", "abc123", red)
+
+	if len(bd.updated) != 0 {
+		t.Errorf("updated = %+v, want no rewrite of a shaped or claimed bead", bd.updated)
 	}
 }

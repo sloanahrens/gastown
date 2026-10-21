@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
@@ -348,4 +349,47 @@ func tierSweepBeadShape(tier, unit, sha string, ts tierSweepTierResult, tmpl spe
 		parts = append(parts, "## "+name+"\n\n"+body)
 	}
 	return tierSweepBeadIntro + tierSweepRedDetail(tier, sha, ts) + "\n\n" + strings.Join(parts, "\n\n") + "\n", item
+}
+
+// tierSweepReshapeOpen rewrites the open sweep bead for a unit that a red run
+// found still red, when the dispatcher's lint refuses its text for a missing
+// section or acceptance. A bead filed before the shape fix (gt-1lzy1) is
+// prose-only, so the dispatcher holds it forever (gt-hang2). A bead a polecat
+// has claimed is left to its owner, and a bead already in shape keeps its text.
+func (d *Daemon) tierSweepReshapeOpen(bd tierSweepBeadStore, rig, tier, name, sha string, ts tierSweepTierResult, open tierSweepUnitBead) {
+	if open.issue == nil {
+		return
+	}
+	is := open.issue
+	spec := specdispatch.Spec{
+		Title:       is.Title,
+		Type:        is.Type,
+		Labels:      is.Labels,
+		Description: is.Description,
+		Acceptance:  is.AcceptanceCriteria,
+	}
+	tmpl := d.tierSweepTemplate()
+	if !tierSweepUnshaped(spec, tmpl) {
+		return
+	}
+	description, acceptance := tierSweepBeadShape(tier, name, sha, ts, tmpl)
+	if err := bd.Update(open.id, beads.UpdateOptions{Description: &description, Acceptance: &acceptance}); err != nil {
+		d.logger.Printf("tier_sweep: %s: reshaping %s (%s %s): %v", rig, open.id, tier, name, err)
+	}
+}
+
+// tierSweepUnshaped reports whether the dispatcher's lint would refuse spec for
+// a section it needs or its acceptance. A refusal on anything else (a Size
+// that does not say one worker, or a bead that is not a work bead) is left
+// for the dispatcher to report, since rewriting the sweep's text does not fix it.
+func tierSweepUnshaped(spec specdispatch.Spec, tmpl specdispatch.Template) bool {
+	if specdispatch.NotWorkBead(spec) != "" {
+		return false
+	}
+	for _, r := range specdispatch.Lint(spec, tmpl).Refusals {
+		if r.Field == "acceptance" || strings.HasPrefix(r.Field, "## ") {
+			return true
+		}
+	}
+	return false
 }
