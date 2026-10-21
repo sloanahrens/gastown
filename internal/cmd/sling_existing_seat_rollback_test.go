@@ -2,8 +2,98 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
+
+// lostReplyStore is a hook store whose connection dies mid-write: Update
+// either applies the write and then reports the dead connection (commit), or
+// reports it without touching the bead. Reads keep answering, as they do once
+// the caller reconnects.
+type lostReplyStore struct {
+	slingFake
+	h      *slingHarness
+	commit bool
+}
+
+func (s *lostReplyStore) Show(id string) (*beads.Issue, error) {
+	b := s.h.bead(id)
+	if b == nil {
+		return nil, fmt.Errorf("bead '%s' not found", id)
+	}
+	return &beads.Issue{ID: id, Title: b.Title, Status: b.Status, Assignee: b.Assignee, Description: b.Description}, nil
+}
+
+func (s *lostReplyStore) Update(id string, opts beads.UpdateOptions) error {
+	if s.commit {
+		s.h.mu.Lock()
+		if b := s.h.beads[id]; b != nil {
+			if opts.Status != nil {
+				b.Status = *opts.Status
+			}
+			if opts.Assignee != nil {
+				b.Assignee = *opts.Assignee
+			}
+			if opts.Description != nil {
+				b.Description = *opts.Description
+			}
+		}
+		s.h.mu.Unlock()
+	}
+	return fmt.Errorf("bd update %s: connection refused", id)
+}
+
+// A hook write whose reply was lost is read as not landed unless the bead is
+// re-read: bd commits the update, the connection dies before the reply, and
+// the next attempt fails fast on the dead connection. For a seat that already
+// existed the hand-back was then skipped, leaving the bead hooked to a crew
+// seat that never ran it (gt-lanz0).
+func TestSlingOntoExistingSeatRollsBackALostHookReply(t *testing.T) {
+	t.Parallel()
+	const beadID = "gt-abc"
+	const seat = "gastown/crew/sloan"
+
+	for _, tc := range []struct {
+		name string
+		// commit is whether bd applied the write before the reply was lost.
+		commit bool
+		// wantHandBack is whether the rollback must hand the bead back.
+		wantHandBack bool
+	}{
+		{name: "a write that committed and lost its reply is handed back", commit: true, wantHandBack: true},
+		{name: "a write that never landed leaves the bead alone"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.addBead(beadID, beadInfo{Status: "open"})
+			store := &lostReplyStore{slingFake: slingFake{beadsfake.New()}, h: h, commit: tc.commit}
+			stores := slingStores{pinned: func(string) slingStore { return store }}
+			// The hook runs the real hookWithRetry, so the re-read that tells a
+			// landed write from an unlanded one is the code under test.
+			h.run.hook = func(id, agent, hookDir, _ string, fields *beadFieldUpdates) error {
+				return stores.hookWithRetry(nil, id, agent, hookDir, fields)
+			}
+
+			if err := h.sling(beadID, seat); err == nil {
+				t.Fatal("the sling must report the lost hook reply")
+			}
+			if got := h.bead(beadID); got.Status != "open" || got.Assignee != "" {
+				t.Fatalf("bead = %s/%s, want it left open and unassigned", got.Status, got.Assignee)
+			}
+			if tc.wantHandBack {
+				h.wantCalls("restore bead", "restore bead "+beadID+" open ")
+			} else {
+				h.wantNo("restore bead")
+			}
+			h.wantCalls("restore raw fields", "restore raw fields "+beadID)
+			h.wantCalls("rollback")
+		})
+	}
+}
 
 // A sling that hooks a bead onto a seat that already existed (no polecat
 // spawned) and then fails leaves the bead as it was before the sling. The hook
