@@ -760,6 +760,22 @@ func (h configHome) overridePath(target string) string {
 	return filepath.Join(h.primaryDir(), "hooks-overrides", safe+".json")
 }
 
+// OverrideEditPath returns the override file `gt hooks override` should open:
+// the one the cascading read finds, so an edit lands on the override in effect,
+// else the primary write target for a new override (gt-arz8h).
+func OverrideEditPath(target string) string { return envConfigHome().overrideEditPath(target) }
+
+func (h configHome) overrideEditPath(target string) string {
+	safe := strings.ReplaceAll(target, "/", "__")
+	for _, dir := range h.configDirs() {
+		path := filepath.Join(dir, "hooks-overrides", safe+".json")
+		if _, err := os.Stat(path); err == nil {
+			return path
+		}
+	}
+	return h.overridePath(target)
+}
+
 // OverridesDir returns the path to the overrides directory in the primary dir.
 func OverridesDir() string { return envConfigHome().overridesDir() }
 
@@ -1141,6 +1157,11 @@ func EnvHome() Home { return Home{envConfigHome()} }
 // GT_HOME unset.
 func HomeAt(home string) Home { return Home{configHome{home: home}} }
 
+// HomeAtWithGT returns the Home a user with GT_HOME=gtHome and home directory
+// home would get, so a caller can exercise the read cascade without the
+// environment.
+func HomeAtWithGT(gtHome, home string) Home { return Home{configHome{gtHome: gtHome, home: home}} }
+
 // SyncManagedClaudeSettings is the package-level SyncManagedClaudeSettings
 // against this Home.
 func (h Home) SyncManagedClaudeSettings(target Target, dryRun bool) (SyncResult, error) {
@@ -1154,3 +1175,14 @@ func (h Home) ComputeExpected(target string) (*HooksConfig, error) {
 
 // SaveBase is the package-level SaveBase against this Home.
 func (h Home) SaveBase(cfg *HooksConfig) error { return h.h.saveBase(cfg) }
+
+// LoadOverride is the package-level LoadOverride against this Home.
+func (h Home) LoadOverride(target string) (*HooksConfig, error) { return h.h.loadOverride(target) }
+
+// SaveOverride is the package-level SaveOverride against this Home.
+func (h Home) SaveOverride(target string, cfg *HooksConfig) error {
+	return h.h.saveOverride(target, cfg)
+}
+
+// OverrideEditPath is the package-level OverrideEditPath against this Home.
+func (h Home) OverrideEditPath(target string) string { return h.h.overrideEditPath(target) }
