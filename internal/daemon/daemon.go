@@ -2752,14 +2752,10 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	rec, err := intent.Read(d.config.TownRoot, supervisor.IntentSeat(seat))
 	if err != nil || rec.Held() {
 		skipped = true
-		// A park past the pool's release window no longer holds its pool seat,
-		// but only when its session is gone: the pool counts a live session
-		// first and releases the seat only of a stale park it finds dead
-		// (parkedStale in internal/cmd). A live session under a stale park
-		// still holds the seat, so this line says released only where the
-		// pool's own release does. A tmux read that fails is not proof the
-		// session ended, so it keeps the plain parked line too. The polecat is
-		// still not restarted: the park stays until an operator recovers it.
+		// The pool releases a stale park's seat only when its session is gone
+		// (parkedStale in internal/cmd), so this says released only there; an
+		// unanswered tmux read is no proof, and the park itself stays until an
+		// operator recovers it.
 		now := time.Now()
 		if parked, st, perr := agentpause.IsPaused(d.config.TownRoot, rigName, constants.RolePolecat, polecatName); err == nil && perr == nil && parked && agentpause.ParkedStale(st, now) {
 			if alive, serr := d.tmux.HasSession(sessionName); serr == nil && !alive {
