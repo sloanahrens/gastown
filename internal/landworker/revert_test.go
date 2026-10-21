@@ -3,11 +3,13 @@ package landworker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -425,6 +427,59 @@ func TestRevertLandedKeepsTheHolderOfAHumanOnlyCulprit(t *testing.T) {
 	cul, _ := h.bd.Show("gt-cul")
 	if cul.Status != string(beads.StatusOpen) || cul.Assignee != "gastown/polecats/opal" || !beads.HasLabel(cul, land.LabelRework) {
 		t.Fatalf("culprit %+v; want open, still held by its crew, rework", cul)
+	}
+}
+
+// culpritRead answers Show for one bead from the fixture: an error, or no
+// issue at all, as a store can do, and reads every other bead from the fake.
+type culpritRead struct {
+	*beadsfake.Fake
+	culprit string
+	err     error
+}
+
+func (c *culpritRead) Show(id string) (*beads.Issue, error) {
+	if id == c.culprit {
+		return nil, c.err
+	}
+	return c.Fake.Show(id)
+}
+
+// A culprit that cannot be read keeps its holder: the holder is not known to
+// be wrong, so the revert reopens the bead without unassigning it.
+func TestRevertLandedKeepsTheHolderWhenTheCulpritReadFails(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{name: "the read fails", err: errors.New("dolt is down")},
+		{name: "the read finds no issue", err: nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newRevertHarness(t, greenSHA)
+			id := seedRevertBead(t, h)
+			// After the revert bead is filed: filing it reads the culprit.
+			h.r.Beads = &culpritRead{Fake: h.bd, culprit: "gt-cul", err: tc.err}
+			var logs []string
+			h.r.Logf = func(format string, args ...any) { logs = append(logs, fmt.Sprintf(format, args...)) }
+
+			h.r.RevertLanded(context.Background(), land.Work{BeadID: id}, land.Result{LandedCommit: "abababab"})
+
+			cul, err := h.bd.Show("gt-cul")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cul.Status != string(beads.StatusOpen) || cul.Assignee != "gastown/polecats/opal" || !beads.HasLabel(cul, land.LabelRework) {
+				t.Fatalf("culprit %+v; want open, still held, rework", cul)
+			}
+			if tc.err != nil && !slices.ContainsFunc(logs, func(l string) bool {
+				return strings.Contains(l, "reading gt-cul for its holder: "+tc.err.Error())
+			}) {
+				t.Errorf("logs %q, want the failed read reported", logs)
+			}
+		})
 	}
 }
 
