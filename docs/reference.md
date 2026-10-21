@@ -1419,6 +1419,31 @@ reads the same keys as `jev_drift`, under `jev_logtriage`:
 }
 ```
 
+`gt jev scorecard --battery logtriage` scores the log in `internal/jev/scorecard/logtriage.go`.
+Each line is one group, one item on the five questions. The labels come from what
+the town raised in the hour after the group's last daemon line, and the rule that
+sets them is named in `--json`:
+
+- an attention event in `events.jsonl` that is not `self_healed`, or an escalation
+  bead, raised in that hour, whose text has the group's `category` word or a bead
+  id from its samples as a whole word: `needs_action` true and `is_routine_noise` false
+  (`logtriage:follow-up-within-hour`). An escalation's text is its title.
+- an escalation of that kind also labels `severity`: true (a page) when the
+  escalation is `critical` or `high`, false (a review) when it is `medium`, `low`
+  or unset. The scorecard judges a score by the mean score of each label.
+- a `self_healed` attention event that shares the subject: `auto_remediable` true
+  (`logtriage:self-healed`). It does not set `needs_action` on its own.
+- no such follow-up: `needs_action` false (`logtriage:no-follow-up-within-hour`).
+  `auto_remediable` is left unlabeled unless a self-healed event matched.
+- a group whose last line is less than an hour old is logged but unlabeled, since
+  its window is still open. So is a group with no timestamp, and a group with no
+  `category` and no bead id in its samples. A cleared event never counts.
+- a matching event or escalation whose time cannot be read leaves the group
+  unlabeled, unless a readable follow-up in the hour sets the label.
+
+The scorecard reads the events and the escalation beads once per run. It opens no
+Jev call.
+
 ### Test-selection battery (`jev_testsel`)
 
 The landing gate runs every Go package. The test-selection battery asks Jev which
