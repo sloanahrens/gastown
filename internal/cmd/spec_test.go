@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -88,6 +89,10 @@ type fakeSpecTown struct {
 	notes          map[string][]string
 	labels         map[string][]string
 	sleeps         int
+	slingRecords   []specSlingRecord
+	// mu guards the fields the tick's concurrent slings touch (the show
+	// sequence, the sling record, sleeps); the rest run on the tick goroutine.
+	mu sync.Mutex
 	// seats overrides the tick's budget seats; nil is the default pool, which
 	// reserves no label and so holds a needs-pro bead (gt-lxxo4).
 	seats []specdispatch.Seat
@@ -105,6 +110,15 @@ var specTestNow = time.Date(2026, 9, 30, 12, 0, 0, 0, time.UTC)
 type specRead struct {
 	spec specdispatch.Spec
 	err  error
+}
+
+// specSlingRecord is one sling the fake saw, kept in candidate order.
+type specSlingRecord struct {
+	order  int
+	id     string
+	seat   specdispatch.SeatChoice
+	resume string
+	run    specdispatch.FormulaRun
 }
 
 func newFakeSpecTown(specs ...specdispatch.Spec) *fakeSpecTown {
@@ -156,6 +170,8 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			return specBoardRead{Candidates: out, LabeledFailed: labeled, Skipped: skipped}
 		},
 		Show: func(id string) (specdispatch.Spec, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
 			if seq := f.showSeq[id]; len(seq) > 0 {
 				r := seq[0]
 				if len(seq) > 1 {
@@ -217,22 +233,31 @@ func (f *fakeSpecTown) env() specDispatchEnv {
 			return nil
 		},
 		Sling: func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (string, error) {
+			f.mu.Lock()
+			defer f.mu.Unlock()
 			if errs := f.slingErrs[c.Spec.ID]; len(errs) > 0 {
 				f.slingErrs[c.Spec.ID] = errs[1:]
 				if errs[0] != nil {
 					return "", errs[0]
 				}
 			}
-			f.slung = append(f.slung, c.Spec.ID)
-			f.slingSeats = append(f.slingSeats, seat)
-			f.slungResume = append(f.slungResume, resumeBranch)
-			f.slungRuns = append(f.slungRuns, c.Run)
+			// The tick's slings run concurrently; the record keeps candidate
+			// order through c.order so the assertions on it stay exact.
+			f.slingRecords = append(f.slingRecords, specSlingRecord{order: c.order, id: c.Spec.ID, seat: seat, resume: resumeBranch, run: c.Run})
+			sort.SliceStable(f.slingRecords, func(i, j int) bool { return f.slingRecords[i].order < f.slingRecords[j].order })
+			f.slung, f.slingSeats, f.slungResume, f.slungRuns = nil, nil, nil, nil
+			for _, rec := range f.slingRecords {
+				f.slung = append(f.slung, rec.id)
+				f.slingSeats = append(f.slingSeats, rec.seat)
+				f.slungResume = append(f.slungResume, rec.resume)
+				f.slungRuns = append(f.slungRuns, rec.run)
+			}
 			s := f.specs[c.Spec.ID]
 			s.Status, s.Assignee = "hooked", "gastown/polecats/p"
 			f.specs[c.Spec.ID] = s
 			return "p", nil
 		},
-		Sleep:    func(time.Duration) { f.sleeps++ },
+		Sleep:    func(time.Duration) { f.mu.Lock(); f.sleeps++; f.mu.Unlock() },
 		Now:      func() time.Time { return specTestNow },
 		Template: specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"},
 		Budget:   budget,
@@ -590,11 +615,16 @@ func TestSpecDispatchHoldsASecondFilingOfHeldWork(t *testing.T) {
 
 	t.Run("a candidate no held bead names a path of still slings", func(t *testing.T) {
 		t.Parallel()
+		other := cleanSpec("gt-other", 2, "2026-09-29T10:04:00Z")
+		other.Title = "notify: the cli retries a refused send"
+		other.Description = specTestDescription + "\n\ninternal/notify/send.go retries once on a refused send."
 		f := newFakeSpecTown(
 			secondFiling("gt-wikw1", "2026-09-29T10:03:45Z"),
-			secondFiling("gt-other", "2026-09-29T10:04:00Z"),
+			other,
 		)
-		// What the seats hold names paths these candidates do not.
+		// What the seats hold names paths these candidates do not, and the
+		// two candidates name different files: the one that slings first
+		// does not hold the other (the same-tick overlap hold).
 		f.held["gastown"] = []specdispatch.HeldBead{{ID: "gt-t61ft", Paths: []string{"internal/notify/cli.go"}}}
 		env := f.env()
 		env.PerTick = 2

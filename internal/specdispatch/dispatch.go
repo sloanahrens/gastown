@@ -525,3 +525,23 @@ func backoff(attempt int, jitter *rand.Rand) time.Duration {
 
 // ErrRetriesExhausted wraps the final contention failure.
 var ErrRetriesExhausted = errors.New("dispatch lost to Dolt contention on every attempt")
+
+// FreeSeats is how many polecats the tick may still sling: the open seats'
+// cap minus their live count, bounded by max_total when it is set. It is the
+// tick's default per-tick limit, so a tick fills the pool rather than a
+// fixed number of seats.
+func (b Budget) FreeSeats() int {
+	free := 0
+	for _, s := range b.Seats {
+		if s.FreeAt(b.Now) {
+			free += s.Cap - s.Live
+		}
+	}
+	if b.MaxTotal > 0 && b.MaxTotal-b.LiveTotal < free {
+		free = b.MaxTotal - b.LiveTotal
+	}
+	if free < 0 {
+		return 0
+	}
+	return free
+}

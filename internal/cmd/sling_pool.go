@@ -77,6 +77,9 @@ type poolSession struct {
 	// (gt-t7k92). poolHeldCount, poolSeatCount and the roster's Live skip it;
 	// the roster lists it apart so a seat that stopped counting is still visible.
 	parkedStale bool
+	// landing marks a seat mid-landing: its polecat ran gt done and the
+	// landing worker has not closed its bead (poolLandingSessions).
+	landing bool
 }
 
 // poolHeldCount counts the sessions that hold a pool seat: every session but a
@@ -1247,6 +1250,34 @@ func (r *poolRouter) occupied() func() ([]poolSession, error) {
 	}
 }
 
+// snapshotOccupied is the occupancy read of a sling the spec dispatcher runs:
+// the live polecat sessions of the moment (a tmux listing, no bd read; every
+// live session counts, the conservative side of polecatSeatOccupied) plus the
+// seats the tick's roster snapshot holds that no session accounts for (dead-
+// hooked and mid-landing seats). The snapshot's own live sessions and claims
+// are dropped: the listing replaces the former and the ledger appends the
+// claims of the moment under the decision lock (gt-t8q5).
+func snapshotOccupied(snapshot []poolSession, lister func() sessionLister, now func() time.Time) func() ([]poolSession, error) {
+	return func() ([]poolSession, error) {
+		live, err := listPolecatSessionsWith(lister(), nil, now())
+		if err != nil {
+			return nil, &poolOccupancyError{sessions: true, err: err}
+		}
+		seats := liveSeatKeys(live)
+		out := live
+		for _, s := range snapshot {
+			if !s.deadHooked && !s.landing {
+				continue
+			}
+			if s.rig != "" && s.polecat != "" && seats[s.rig+"/"+s.polecat] {
+				continue
+			}
+			out = append(out, s)
+		}
+		return out, nil
+	}
+}
+
 // route decides the route. live distinguishes a sling that will spawn from a
 // dry run: only a live sling claims a seat.
 //
@@ -1257,11 +1288,17 @@ func (r *poolRouter) occupied() func() ([]poolSession, error) {
 // its seat to land still holds it, so a second sling admits into a full pool
 // only when the pool has room (gt-3o7zk).
 func (r *poolRouter) route(requested string, live bool) (agent, reason string, err error) {
+	return r.routeWith(requested, live, r.occupied())
+}
+
+// routeWith is route over a given occupancy read. The spec dispatcher passes
+// snapshotOccupied over the roster it already read, so a dispatched sling
+// spends no seat reads of its own; route passes the router's full read.
+func (r *poolRouter) routeWith(requested string, live bool, occupied func() ([]poolSession, error)) (agent, reason string, err error) {
 	pool := r.pool()
 	if pool == nil {
 		return "", "", nil
 	}
-	occupied := r.occupied()
 	// No release of a previous claim before counting: the store is this
 	// spawn's, and a spawn makes one decision. A claim from an earlier spawn
 	// was dropped by StartSession or the rollback that ended it, and

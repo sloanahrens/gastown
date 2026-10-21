@@ -168,7 +168,7 @@ func TestSpecTickReads(t *testing.T) {
 		t.Errorf("nil ledger counted %d calls", none.Calls())
 	}
 	want := "tick cost: 4 bd read call(s) outside the sling path in 1.234s"
-	if line := specTickCost(reads, 1234*time.Millisecond); line != want {
+	if line := specTickCost(reads, 1234*time.Millisecond, 0, 0); line != want {
 		t.Errorf("specTickCost = %q, want %q", line, want)
 	}
 }
