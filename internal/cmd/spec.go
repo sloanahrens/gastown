@@ -1064,7 +1064,11 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		}
 
 		if len(pending)+len(report.Dispatched) >= perTick {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %d reached", id, specdispatch.SkipPerTickLimit, perTick)})
+			limit := fmt.Sprintf("%s %d reached", specdispatch.SkipPerTickLimit, perTick)
+			if perTick == 0 {
+				limit = specdispatch.SkipNoSeat + " no free seat this tick"
+			}
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s", id, limit)})
 			continue
 		}
 		if hold := env.RigHold(c.Rig); hold != "" {
@@ -1142,6 +1146,11 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		c.order = len(pending)
 		pending = append(pending, specPendingSling{c: c, id: id, seat: seat, resume: resume, gone: gone, shapeNote: shapeNote, entry: entry})
 		budget.Bump(seat.Agent, budget.Now)
+		// The slings run together, so a later candidate of this tick that
+		// names the same files is held now, as it was when the earlier sling
+		// finished first and had hooked its bead (the content-overlap hold,
+		// gt-z80p9).
+		specNotePendingHeld(heldReads, c.Rig, id, seat.Agent, full)
 	}
 	specRunPendingSlings(env, pending, &report)
 	return report
@@ -1294,6 +1303,23 @@ type heldRead struct {
 // so the candidate waits for the next tick rather than duplicating a seat
 // (gt-z80p9). A candidate naming no path cannot be caught this way, so it never
 // pays for the read.
+// specNotePendingHeld adds a candidate the tick is about to sling to the
+// rig's held set, with the files its text names, so the candidates after it
+// in the same tick are held on the same overlap the seats' hooked beads
+// cause. A rig whose held read failed stays failed.
+func specNotePendingHeld(reads map[string]heldRead, rig, id, agent string, full specdispatch.Spec) {
+	paths := extractOverlapRefs(full.Title, full.Description, full.Design, full.Notes).Files
+	if len(paths) == 0 {
+		return
+	}
+	read := reads[rig]
+	if read.err != nil {
+		return
+	}
+	read.beads = append(read.beads, specdispatch.HeldBead{ID: id, Assignee: "this tick's sling on " + agent, Paths: paths})
+	reads[rig] = read
+}
+
 func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads map[string]heldRead) (string, error) {
 	paths := extractOverlapRefs(full.Title, full.Description, full.Design, full.Notes).Files
 	if len(paths) == 0 {
@@ -2086,9 +2112,9 @@ func specSlingParams(townRoot, beadsDir, formula string, c specCandidate, resume
 
 // slingSpec dispatches one clean spec through the shared rig-dispatch path.
 // The agent is explicit, so it wins over the bead's route:* labels in the
-// pool; the pool still enforces its own caps and may refuse.
-// slingSpec slings one candidate. occupied, when set, is the seat occupancy
-// read the pool decision uses (the tick's snapshot); nil reads the town.
+// pool; the pool still enforces its own caps and may refuse. occupied, when
+// set, is the seat occupancy read the pool decision uses (the tick's
+// snapshot); nil reads the town.
 func slingSpec(townRoot string, c specCandidate, resumeBranch string, seat specdispatch.SeatChoice, occupied func() ([]poolSession, error)) (string, error) {
 	targetBeadsDir, ok := beads.ResolveRepoAliasBeadsDir(townRoot, c.Rig)
 	if !ok {

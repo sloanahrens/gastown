@@ -615,11 +615,16 @@ func TestSpecDispatchHoldsASecondFilingOfHeldWork(t *testing.T) {
 
 	t.Run("a candidate no held bead names a path of still slings", func(t *testing.T) {
 		t.Parallel()
+		other := cleanSpec("gt-other", 2, "2026-09-29T10:04:00Z")
+		other.Title = "notify: the cli retries a refused send"
+		other.Description = specTestDescription + "\n\ninternal/notify/send.go retries once on a refused send."
 		f := newFakeSpecTown(
 			secondFiling("gt-wikw1", "2026-09-29T10:03:45Z"),
-			secondFiling("gt-other", "2026-09-29T10:04:00Z"),
+			other,
 		)
-		// What the seats hold names paths these candidates do not.
+		// What the seats hold names paths these candidates do not, and the
+		// two candidates name different files: the one that slings first
+		// does not hold the other (the same-tick overlap hold).
 		f.held["gastown"] = []specdispatch.HeldBead{{ID: "gt-t61ft", Paths: []string{"internal/notify/cli.go"}}}
 		env := f.env()
 		env.PerTick = 2

@@ -77,6 +77,9 @@ type poolSession struct {
 	// (gt-t7k92). poolHeldCount, poolSeatCount and the roster's Live skip it;
 	// the roster lists it apart so a seat that stopped counting is still visible.
 	parkedStale bool
+	// landing marks a seat mid-landing: its polecat ran gt done and the
+	// landing worker has not closed its bead (poolLandingSessions).
+	landing bool
 }
 
 // poolHeldCount counts the sessions that hold a pool seat: every session but a
@@ -1263,7 +1266,7 @@ func snapshotOccupied(snapshot []poolSession, lister func() sessionLister, now f
 		seats := liveSeatKeys(live)
 		out := live
 		for _, s := range snapshot {
-			if !strings.HasPrefix(s.name, "dead/") && !strings.HasPrefix(s.name, "landing/") {
+			if !s.deadHooked && !s.landing {
 				continue
 			}
 			if s.rig != "" && s.polecat != "" && seats[s.rig+"/"+s.polecat] {

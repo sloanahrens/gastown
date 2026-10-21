@@ -2086,7 +2086,7 @@ func TestSnapshotOccupied(t *testing.T) {
 		{name: "gt-old", agent: "claude-sonnet", rig: "gastown", polecat: "old"},        // live then, gone now: dropped
 		{name: "dead/devops/mariner", agent: "deepseek-flash", rig: "devops", polecat: "mariner", deadHooked: true},
 		{name: "dead/gastown/dag", agent: "deepseek-flash", rig: "gastown", polecat: "dag", deadHooked: true}, // its seat is live now: dropped
-		{name: "landing/gastown/nux", agent: "claude-sonnet"},
+		{name: "landing/gastown/nux", agent: "claude-sonnet", rig: "gastown", polecat: "nux", landing: true},
 		{name: "pool-claim/abc", agent: "claude-haiku"}, // the ledger appends the claims of the moment itself
 	}
 	got, err := snapshotOccupied(snapshot, func() sessionLister { return lister }, func() time.Time { return now })()
@@ -2102,9 +2102,58 @@ func TestSnapshotOccupied(t *testing.T) {
 	if strings.Join(names, " ") != strings.Join(want, " ") {
 		t.Fatalf("occupied = %v, want %v", names, want)
 	}
-	if lister.err = errors.New("tmux down"); true {
-		if _, err := snapshotOccupied(snapshot, func() sessionLister { return lister }, func() time.Time { return now })(); err == nil {
-			t.Fatal("a failed session listing must fail the read, not count the snapshot alone")
+	lister.err = errors.New("tmux down")
+	if _, err := snapshotOccupied(snapshot, func() sessionLister { return lister }, func() time.Time { return now })(); err == nil {
+		t.Fatal("a failed session listing must fail the read, not count the snapshot alone")
+	}
+}
+
+// Two slings of one tick decide their seats concurrently over the tick's
+// snapshot: the in-flight claim each writes under the decision lock is what
+// keeps them off one seat, so a single-seat pool admits exactly one.
+func TestRouteWithSnapshotAdmitsOneOfTwoConcurrentSlings(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	db := beadsfake.New()
+	lister := &fakeLister{sessions: map[string]map[string]string{}}
+	now := func() time.Time { return time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC) }
+	occupied := snapshotOccupied(nil, func() sessionLister { return lister }, now)
+	type outcome struct {
+		agent string
+		err   error
+	}
+	results := make([]outcome, 2)
+	var start, done sync.WaitGroup
+	start.Add(1)
+	done.Add(2)
+	for i := range results {
+		go func(i int) {
+			defer done.Done()
+			r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return db })
+			r.pool = func() *config.PolecatPool { return seatPool("claude-haiku", 1) }
+			r.sessions = func() sessionLister { return lister }
+			r.now = now
+			start.Wait()
+			agent, _, err := r.routeWith("claude-haiku", true, occupied)
+			results[i] = outcome{agent: agent, err: err}
+		}(i)
+	}
+	start.Done()
+	done.Wait()
+	admitted, refused := 0, 0
+	for _, o := range results {
+		var bp *poolBackpressureError
+		switch {
+		case o.err == nil && o.agent == "claude-haiku":
+			admitted++
+		case errors.As(o.err, &bp):
+			refused++
+		default:
+			t.Fatalf("unexpected outcome %+v", o)
 		}
+	}
+	if admitted != 1 || refused != 1 {
+		t.Fatalf("admitted %d refused %d over a one-seat pool, want 1 and 1: %+v", admitted, refused, results)
 	}
 }

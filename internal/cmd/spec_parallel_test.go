@@ -159,3 +159,29 @@ func TestSpecTickCostNamesTheParallelSlings(t *testing.T) {
 		t.Fatalf("cost line = %q, want %q", got, want)
 	}
 }
+
+// Two candidates of one tick naming the same file: the second is held on the
+// first, as it was when the slings ran one after another and the first had
+// hooked its bead before the second was read.
+func TestSpecDispatchHoldsAnOverlappingCandidateOfTheSameTick(t *testing.T) {
+	t.Parallel()
+	const guard = "internal/daemon/overrun_guard.go"
+	filing := func(id, created string) specdispatch.Spec {
+		s := cleanSpec(id, 2, created)
+		s.Title = "overrun guard nudge uses wait-idle under a 30s context"
+		s.Description = specTestDescription + "\n\nToday " + guard + " (~254) calls Nudge with a 30 s context."
+		return s
+	}
+	f := nineSeatTown(t, 0)
+	f.specs["gt-first"] = filing("gt-first", "2026-09-29T10:03:45Z")
+	f.specs["gt-second"] = filing("gt-second", "2026-09-29T10:04:00Z")
+	env := f.env()
+	env.PerTick = 0
+	r := runSpecDispatchCycle(env)
+	if got := strings.Join(f.slung, " "); got != "gt-first" {
+		t.Fatalf("slung %q, want only the first filing", got)
+	}
+	if len(r.Skipped) != 1 || !strings.Contains(r.Skipped[0].Line, "gt-second: held: gt-first (held by this tick's sling on ") || !strings.Contains(r.Skipped[0].Line, guard) {
+		t.Fatalf("skipped = %+v, want the second held on the first with the shared file", r.Skipped)
+	}
+}

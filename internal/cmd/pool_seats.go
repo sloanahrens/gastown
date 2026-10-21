@@ -567,7 +567,7 @@ func poolLandingSessions(townRoot string, pool *config.PolecatPool, work poolSea
 		// created is left zero on purpose: a landing seat is not a spawn, and
 		// the spec dispatcher's stagger (min_spawn_gap) must not arm from a
 		// submission.
-		out = append(out, poolSession{name: "landing/" + c.rig + "/" + c.name, agent: c.agent})
+		out = append(out, poolSession{name: "landing/" + c.rig + "/" + c.name, agent: c.agent, rig: c.rig, polecat: c.name, landing: true})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out, nil
