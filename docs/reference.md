@@ -1407,7 +1407,7 @@ The best F1 is taken over every distinct value as a cut, predicting yes at or
 above it; a tie keeps the higher cut. `--json` names the rule that labeled each
 line in its `lines` array.
 
-Seven batteries are registered. The `fixture` battery reads
+Eight batteries are registered. The `fixture` battery reads
 `.runtime/jev/fixture.jsonl` with labels from `fixture-labels.json`, and exists
 so tests can drive the command end to end. No live battery reads it.
 
@@ -1657,6 +1657,25 @@ is off the guard queues nothing:
 
 `usd_per_billion_tokens` is required. `max_usd_per_day` is optional and draws on
 the same town-wide cap as the other batteries.
+
+`gt jev scorecard --battery progress` scores that log. Each line is one nudge,
+stamped with its `nudge_at`, and a line younger than 30 minutes is unlabeled.
+The labels come from the bead's `LANDING RECORD` note and the overrun guard's
+`.runtime/overrun-guard/<bead>.json`:
+
+- `making_progress` true, and `remaining` true (done or nearly done), when the
+  bead's landing record falls within 20 minutes after the nudge
+  (`progress:landed-in-window`).
+- `making_progress` false when the overrun guard stopped the seat at or after
+  the nudge (`progress:stopped-by-overrun`). A landing in the window wins over a
+  stop.
+- `blocked_on_environment` true when the overrun record charged gate time seen
+  at or after the nudge (`progress:gate-wait`). Network waits are not recorded,
+  so no rule labels them.
+
+`looping`, `drifted_from_bead` and `remaining` set to barely started are not
+labeled: no record names a restart or a repeated command, and the guard's stop
+keeps no reason text. The rules are in `internal/jev/scorecard/progress.go`.
 
 ### Stale-bead battery (`jev_stale`)
 
