@@ -176,7 +176,7 @@ type slingDeps struct {
 	rollbackArtifacts func(spawn *SpawnedPolecatInfo, townRoot, beadID, hookWorkDir string)
 	restoreRawFields  func(beadID, townRoot, hookWorkDir string, originalInfo *beadInfo)
 	restorePinned     func(townRoot, beadID, assignee string)
-	restoreHold       func(townRoot, beadID string, hold beadHold)
+	restoreHold       func(townRoot, beadID string, hold beadHold) bool
 	// handBack gives a bead this sling hooked onto an existing seat back to
 	// its pre-sling status and assignee; see handBackHook.
 	handBack func(townRoot, beadID, hookWorkDir, holder string, hold beadHold) bool

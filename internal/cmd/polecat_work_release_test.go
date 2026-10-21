@@ -16,9 +16,12 @@ import (
 // (exit 13 -> released=false, nil). raceTo re-assigns the bead to another
 // agent right after the first read, to model a concurrent re-sling.
 type fakeWorkReleaser struct {
-	beads      map[string][2]string
-	readErr    error
-	raceTo     string
+	beads   map[string][2]string
+	readErr error
+	raceTo  string
+	// raceStatus moves the bead to this status right after the first read,
+	// the drift a status-guarded write declines on.
+	raceStatus string
 	restoreErr error
 	resetErr   error
 	released   []string
@@ -37,6 +40,10 @@ func (f *fakeWorkReleaser) HookState(beadID string) (string, string, error) {
 	}
 	if f.raceTo != "" {
 		f.beads[beadID] = [2]string{b[0], f.raceTo}
+	}
+	if f.raceStatus != "" {
+		f.beads[beadID] = [2]string{f.raceStatus, b[1]}
+		f.raceStatus = "" // one drift: the read after the decline sees it settled
 	}
 	return b[0], b[1], nil
 }
@@ -351,6 +358,37 @@ func TestRestoreOriginalHoldReportsAFailedRestore(t *testing.T) {
 				t.Fatalf("comment = %q (present %v), want comment present = %v", rel.annotated["gt-abc"], commented, tc.wantComment)
 			}
 		})
+	}
+}
+
+// TestRestoreOriginalHoldDeclinedRestoreLeavesTheBeadToRelease covers gt-idly3:
+// a restore the status guard declines (the bead drifted between two held
+// states, the assignee unchanged) restored nothing, so it reports handled=false
+// and the rollback's release runs instead of leaving the bead in_progress on
+// the polecat being removed.
+func TestRestoreOriginalHoldDeclinedRestoreLeavesTheBeadToRelease(t *testing.T) {
+	t.Parallel()
+	const me = "gastown/polecats/basalt"
+	rel := &fakeWorkReleaser{beads: map[string][2]string{"gt-abc": {"hooked", me}}, raceStatus: "in_progress"}
+	surviving := func(string, string) (string, error) { return "polecat/basalt/gt-abc+mu5wzd6q", nil }
+
+	handled, err := restoreOriginalHoldIfWorkSurvivesWith(rel, surviving, "/town", me, "gt-abc", &beadHold{Status: "hooked", Assignee: me})
+
+	if err != nil {
+		t.Fatalf("err = %v, want none: a decline is not a failure", err)
+	}
+	if handled {
+		t.Fatal("handled = true for a restore the guard declined; the bead would skip release")
+	}
+	if len(rel.restored) != 0 {
+		t.Fatalf("restored = %v, want nothing written", rel.restored)
+	}
+	// The sling rollback's next step, run as it runs it on handled=false.
+	if out := releasePolecatWork(rel, me, "gt-abc", false); !out.Released {
+		t.Fatalf("release did not run on the declined bead: %q", out.SkipNote)
+	}
+	if got := rel.beads["gt-abc"]; got != [2]string{"open", ""} {
+		t.Fatalf("bead = %v, want open and unassigned", got)
 	}
 }
 
