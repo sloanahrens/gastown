@@ -141,10 +141,14 @@ func listPackages(ctx context.Context, dir string) ([]Package, error) {
 }
 
 // goListPackage is the part of one `go list -json` object the battery reads.
+// go list reports the test imports apart from the build's, so they are read
+// separately and merged in packagesOf.
 type goListPackage struct {
-	ImportPath string
-	Imports    []string
-	Module     *goListModule
+	ImportPath   string
+	Imports      []string
+	TestImports  []string
+	XTestImports []string
+	Module       *goListModule
 }
 
 // goListModule is the module a listed package belongs to.
@@ -154,7 +158,9 @@ type goListModule struct {
 }
 
 // packagesOf turns go list's main-module packages into Packages, with dirs
-// relative to the module root and in-module imports named by dir.
+// relative to the module root and in-module imports named by dir. A package's
+// test imports count as its imports: a change to a package its tests import
+// can change what those tests verify.
 func packagesOf(listed []goListPackage) []Package {
 	if len(listed) == 0 {
 		return nil
@@ -173,9 +179,13 @@ func packagesOf(listed []goListPackage) []Package {
 	for _, p := range listed {
 		dir, _ := dirOf(p.ImportPath)
 		var imports []string
-		for _, imp := range p.Imports {
-			if d, ok := dirOf(imp); ok {
-				imports = append(imports, d)
+		seen := make(map[string]bool)
+		for _, list := range [][]string{p.Imports, p.TestImports, p.XTestImports} {
+			for _, imp := range list {
+				if d, ok := dirOf(imp); ok && !seen[d] {
+					seen[d] = true
+					imports = append(imports, d)
+				}
 			}
 		}
 		pkgs = append(pkgs, Package{Dir: dir, ImportPath: p.ImportPath, Imports: imports})

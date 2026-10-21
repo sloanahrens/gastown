@@ -2,8 +2,8 @@
 // full gate runs every Go package. For each landing, this battery splits the
 // packages into those the code decides must run and those it asks Jev about,
 // then logs what the gate found beside the answer. Nothing is skipped: the
-// gate runs everything as it always has, and the log is the only thing the
-// battery writes.
+// gate runs everything as it always has. The battery writes its log line and
+// the Jev usage ledger, and nothing else.
 //
 // The pass does I/O only through its log and its tree reader. The caller
 // supplies the Jev asker and the spend check, so a test runs a pass with fakes
@@ -40,6 +40,11 @@ const (
 
 	// maxFiles caps the changed files listed in the state.
 	maxFiles = 200
+
+	// defaultAskTimeout bounds the one Jev call a landing makes. Finish waits
+	// for that call before the landing can be decided, so a call that never
+	// answers must end here and log ask_failed.
+	defaultAskTimeout = 2 * time.Minute
 )
 
 // Thresholds are the cut-offs a would-skip set is computed at. A package is
@@ -53,7 +58,8 @@ type Package struct {
 	Dir string
 	// ImportPath is the package's full import path.
 	ImportPath string
-	// Imports are the in-module packages it imports directly, by Dir.
+	// Imports are the in-module packages it imports directly, by Dir. Its test
+	// files' imports are included.
 	Imports []string
 }
 
@@ -61,8 +67,8 @@ type Package struct {
 // asked. The rules are applied in code: nothing here is a model's judgement.
 type Plan struct {
 	// AlwaysRun are the packages the gate must run whatever Jev says: a changed
-	// package, a package that directly imports a changed one, or every package
-	// when a tree-wide input changed.
+	// package, a package whose code or tests directly import a changed one, or
+	// every package when a tree-wide input changed.
 	AlwaysRun []string
 	// Ask are the packages Jev is asked about. Empty when TreeWide is set.
 	Ask []string
@@ -145,13 +151,16 @@ type Line struct {
 	// Miss maps each threshold to the would-skip packages the gate reported as
 	// failed. A miss is the case the battery exists to find.
 	Miss map[string][]string `json:"miss"`
+	// Ungraded maps each threshold to the would-skip packages the gate reported
+	// no result for. They are neither a miss nor a pass: nothing was graded.
+	Ungraded map[string][]string `json:"ungraded"`
 	// GatePackages is how many package results the gate reported.
 	GatePackages int `json:"gate_packages"`
 	// Gate maps each package the gate reported on to whether it passed. It is
 	// absent when the gate reported none.
 	Gate map[string]bool `json:"gate,omitempty"`
 	// Reason says why Jev was not asked, when it was not: too_large, tree_wide,
-	// nothing_to_ask, cap_reached, unreadable_tree, ask_failed.
+	// nothing_to_ask, cap_unreadable, cap_reached, unreadable_tree, ask_failed.
 	Reason string `json:"reason,omitempty"`
 	// QuestionVersion is Version when the line was logged.
 	QuestionVersion int `json:"question_version"`
@@ -188,6 +197,9 @@ type Pass struct {
 
 	// MaxStateRunes overrides maxStateRunes. Zero means the default.
 	MaxStateRunes int
+
+	// AskTimeout bounds the Jev call. Zero means defaultAskTimeout.
+	AskTimeout time.Duration
 
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
@@ -264,11 +276,17 @@ func (r *Run) judge(ctx context.Context) {
 		return
 	}
 	allowed, err := r.pass.Allows()
-	if err != nil || !allowed {
+	if err != nil {
+		r.line.Reason = "cap_unreadable"
+		return
+	}
+	if !allowed {
 		r.line.Reason = "cap_reached"
 		return
 	}
-	got, err := r.pass.Asker.Ask(ctx, state, questions(plan.Ask))
+	askCtx, cancel := context.WithTimeout(ctx, r.pass.askTimeout())
+	defer cancel()
+	got, err := r.pass.Asker.Ask(askCtx, state, questions(plan.Ask))
 	if err != nil {
 		r.line.Reason = "ask_failed"
 		return
@@ -286,6 +304,7 @@ func (r *Run) Finish(results []land.PackageResult) error {
 	line.TS = r.now()
 	line.WouldSkip = make(map[string][]string, len(Thresholds))
 	line.Miss = make(map[string][]string, len(Thresholds))
+	line.Ungraded = make(map[string][]string, len(Thresholds))
 	line.GatePackages = len(results)
 	if len(results) > 0 {
 		line.Gate = make(map[string]bool, len(results))
@@ -299,18 +318,24 @@ func (r *Run) Finish(results []land.PackageResult) error {
 		key := formatThreshold(t)
 		skip := []string{}
 		miss := []string{}
+		ungraded := []string{}
 		for _, dir := range line.Asked {
 			noul, ok := line.Noul[dir]
 			if !ok || noul >= t {
 				continue
 			}
 			skip = append(skip, dir)
-			if passed, reported := line.Gate[dir]; reported && !passed {
+			passed, reported := line.Gate[dir]
+			switch {
+			case !reported:
+				ungraded = append(ungraded, dir)
+			case !passed:
 				miss = append(miss, dir)
 			}
 		}
 		line.WouldSkip[key] = skip
 		line.Miss[key] = miss
+		line.Ungraded[key] = ungraded
 	}
 	return battery.Append(r.pass.LogPath, line)
 }
@@ -320,6 +345,13 @@ func (p *Pass) reader() treeReader {
 		return gitTree{}
 	}
 	return p.tree
+}
+
+func (p *Pass) askTimeout() time.Duration {
+	if p.AskTimeout == 0 {
+		return defaultAskTimeout
+	}
+	return p.AskTimeout
 }
 
 func (r *Run) now() time.Time {

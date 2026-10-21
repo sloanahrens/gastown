@@ -155,3 +155,34 @@ func TestIntegrationJevTestselPassWritesOneLineForAFixtureDiff(t *testing.T) {
 		t.Errorf("gate = %v over %d packages", got.Gate, got.GatePackages)
 	}
 }
+
+// TestIntegrationJevTestselListPackagesCountsATestOnlyImport runs the real go
+// list over a module whose app package imports lib only from its test file. The
+// battery must read that import, or a change to lib would leave app unrun.
+func TestIntegrationJevTestselListPackagesCountsATestOnlyImport(t *testing.T) {
+	dir := t.TempDir()
+	files := map[string]string{
+		"go.mod":          "module example.test/fixture\n\ngo 1.22\n",
+		"lib/lib.go":      "package lib\n\nfunc Value() int { return 1 }\n",
+		"app/app.go":      "package app\n",
+		"app/app_test.go": "package app\n\nimport (\n\t\"testing\"\n\n\t\"example.test/fixture/lib\"\n)\n\nfunc TestValue(t *testing.T) { _ = lib.Value() }\n",
+	}
+	for name, body := range files {
+		path := filepath.Join(dir, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	pkgs, err := listPackages(context.Background(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := Decide(pkgs, []string{"lib"}, false)
+	if want := []string{"app", "lib"}; !reflect.DeepEqual(plan.AlwaysRun, want) {
+		t.Errorf("always_run = %v, want %v: app imports lib from its test file", plan.AlwaysRun, want)
+	}
+}

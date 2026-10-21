@@ -291,9 +291,10 @@ func TestJevTestselPassWritesOneLineForALanding(t *testing.T) {
 func TestJevTestselFinishMarksAFailedWouldSkipPackageAsMiss(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		results []land.PackageResult
-		miss    map[string][]string
+		name     string
+		results  []land.PackageResult
+		miss     map[string][]string
+		ungraded map[string][]string
 	}{
 		{
 			name: "a failed would-skip package is a miss",
@@ -303,14 +304,18 @@ func TestJevTestselFinishMarksAFailedWouldSkipPackageAsMiss(t *testing.T) {
 				{Package: "x/c", Passed: false},
 			},
 			// c scores 0.6, so it is not would-skip at any threshold here.
-			miss: map[string][]string{"0.2": {"a"}, "0.3": {"a"}, "0.5": {"a"}},
+			miss:     map[string][]string{"0.2": {"a"}, "0.3": {"a"}, "0.5": {"a"}},
+			ungraded: map[string][]string{"0.2": {}, "0.3": {}, "0.5": {}},
 		},
 		{
-			name: "a would-skip package the gate did not report is not a miss",
+			// b scores 0.25, so it is would-skip at 0.3 and 0.5, and the gate
+			// reported nothing for it: it is ungraded there, never a miss.
+			name: "a would-skip package the gate did not report is ungraded, not a miss",
 			results: []land.PackageResult{
 				{Package: "x/a", Passed: true},
 			},
-			miss: map[string][]string{"0.2": {}, "0.3": {}, "0.5": {}},
+			miss:     map[string][]string{"0.2": {}, "0.3": {}, "0.5": {}},
+			ungraded: map[string][]string{"0.2": {}, "0.3": {"b"}, "0.5": {"b"}},
 		},
 	}
 	for _, tt := range tests {
@@ -335,8 +340,79 @@ func TestJevTestselFinishMarksAFailedWouldSkipPackageAsMiss(t *testing.T) {
 			if !reflect.DeepEqual(got.Miss, tt.miss) {
 				t.Errorf("miss = %v, want %v", got.Miss, tt.miss)
 			}
+			if !reflect.DeepEqual(got.Ungraded, tt.ungraded) {
+				t.Errorf("ungraded = %v, want %v", got.Ungraded, tt.ungraded)
+			}
 		})
 	}
+}
+
+// A package whose tests import a changed package is always-run, though its
+// build does not import it. go list reports the test imports apart from the
+// build's, so this covers both.
+func TestJevTestselTestOnlyImportMakesAnAlwaysRunImporter(t *testing.T) {
+	t.Parallel()
+	mod := &goListModule{Path: "example.test/fixture", Main: true}
+	pkgs := packagesOf([]goListPackage{
+		{ImportPath: "example.test/fixture/app", Imports: []string{"fmt"}, TestImports: []string{"example.test/fixture/lib"}, Module: mod},
+		{ImportPath: "example.test/fixture/deep", Imports: []string{"fmt"}, XTestImports: []string{"example.test/fixture/lib", "example.test/fixture/util"}, Module: mod},
+	})
+	if want := []string{"lib"}; !reflect.DeepEqual(pkgs[0].Imports, want) {
+		t.Errorf("app imports = %v, want the test-only %v", pkgs[0].Imports, want)
+	}
+	if want := []string{"lib", "util"}; !reflect.DeepEqual(pkgs[1].Imports, want) {
+		t.Errorf("deep imports = %v, want the external test's %v once each", pkgs[1].Imports, want)
+	}
+	plan := Decide(pkgs, []string{"lib"}, false)
+	if want := []string{"app", "deep"}; !reflect.DeepEqual(plan.AlwaysRun, want) {
+		t.Errorf("always_run = %v, want %v", plan.AlwaysRun, want)
+	}
+}
+
+// Jev's Ask never answers: the pass gives up after the ask timeout, logs
+// ask_failed, and Finish returns instead of holding the landing.
+func TestJevTestselHungAskTimesOutAndLogsAskFailed(t *testing.T) {
+	t.Parallel()
+	pass := newPass(t, hungAsker{}, fixtureTree())
+	pass.AskTimeout = 20 * time.Millisecond
+
+	// Finish returning at all is the check: a hung Ask would hold this test
+	// until go test's own deadline.
+	run := pass.Start(context.Background(), Landing{Bead: "gt-hung", Rig: "gastown"})
+	if err := run.Finish(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readLines(t, pass.LogPath)[0].Reason; got != "ask_failed" {
+		t.Errorf("reason = %q, want ask_failed", got)
+	}
+}
+
+// A ledger that cannot be read is not a spent cap: the line says so.
+func TestJevTestselUnreadableCapLogsCapUnreadable(t *testing.T) {
+	t.Parallel()
+	asker := &recordingAsker{noul: func(string) float64 { return 0.5 }}
+	pass := newPass(t, asker, fixtureTree())
+	pass.Allows = func() (bool, error) { return false, errors.New("ledger unreadable") }
+
+	run := pass.Start(context.Background(), Landing{Bead: "gt-ledger", Rig: "gastown"})
+	if err := run.Finish(nil); err != nil {
+		t.Fatal(err)
+	}
+
+	got := readLines(t, pass.LogPath)[0]
+	if asker.calls != 0 || got.Reason != "cap_unreadable" {
+		t.Errorf("calls = %d, reason = %q; want no call and cap_unreadable", asker.calls, got.Reason)
+	}
+}
+
+// hungAsker blocks until its context ends, as a Jev call that never answers
+// does, and reports the context's error.
+type hungAsker struct{}
+
+func (hungAsker) Ask(ctx context.Context, _ any, _ map[string]jev.Question) (*jev.Answers, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
 }
 
 // A state over the cap logs too_large and asks nothing.
