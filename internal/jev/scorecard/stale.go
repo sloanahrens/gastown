@@ -194,10 +194,16 @@ func (a *staleAdapter) bead(rig, id string) (*beads.Issue, error) {
 }
 
 // reshaped reports whether a bead's description changed after the line asked
-// about it. A line with no hash was logged before the field existed, so it
-// cannot show a change.
+// about it. A line that carries no hash was logged before the field existed,
+// and a bead with no description now gives no text to compare — a read that
+// dropped the description reads the same as one that removed it — so neither
+// shows a change. A bead asked about bare and described since does, because
+// its line records the hash of the empty text.
 func reshaped(line stale.Line, issue *beads.Issue) bool {
-	return line.DescHash != "" && stale.HashDescription(issue.Description) != line.DescHash
+	if line.DescHash == "" || strings.TrimSpace(issue.Description) == "" {
+		return false
+	}
+	return stale.HashDescription(issue.Description) != line.DescHash
 }
 
 // hasAnyPrefix reports whether s starts with any of the prefixes.
