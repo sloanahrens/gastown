@@ -3242,21 +3242,16 @@ function costJev(box, j, r) {
   box.append(el("div", "", ["Jev spend"].concat(figures).join(" · ")));
 }
 
-// The JEV panel, under the Tier sweeps and folded until opened. Its title line
-// carries the totals over every battery and a chip per verdict, each chip's
-// meaning on the title's tooltip; a table under it gives each battery a row:
-// its name, lines logged and labeled lines, then its questions as chips. The
-// not-yet questions fold behind their count, since a battery has far more of
-// those than of the verdicts worth reading at a glance. A battery with no log
-// in the window is a dash row. A failed or stale read says unavailable on the
-// title line and draws no rows, since the last window's verdicts would pass as
-// current. A read that lost only some batteries draws the rest, names the lost
-// ones on the title line, and shows a lost battery's last good row marked
+// The JEV panel, under the Tier sweeps and folded until opened. The title line
+// carries the totals and a chip per verdict; each battery is a table row, its
+// not-yet questions folded behind their count. A failed or stale read says
+// unavailable on the title line and draws no rows, since the last window's
+// verdicts would pass as current. A read that lost only some batteries draws the
+// rest, names the lost ones, and shows a lost battery's last good row marked
 // stale, or its name alone. Neither a report nor a status means no scorecard
 // command is configured, or it has not answered yet, so the panel stays hidden.
-// The verdict chips are earning green, no-signal amber, not-yet dim,
-// from the tokens every other panel colours with so both themes read them. Each
-// verdict's sentence is what the operator hovers the title line for.
+// The chips take the tokens every other panel colours with, so both themes read
+// them; the title's tooltip gives each verdict's meaning.
 const JV_VERDICTS = ["earning", "no-signal", "not-yet"];
 const JV_CLASS = {earning: "jv-earning", "no-signal": "jv-nosignal", "not-yet": "jv-notyet"};
 const JV_MEANING = {
@@ -3302,10 +3297,11 @@ function jevRow(b) {
     return tr;
   }
   const qs = b.questions || [];
-  // Any verdict this page does not colour folds with not-yet rather than being
-  // dropped, so a scorecard that grows a verdict still shows its questions.
-  const shown = qs.filter(q => q.verdict === "earning" || q.verdict === "no-signal");
-  const pending = qs.filter(q => q.verdict !== "earning" && q.verdict !== "no-signal");
+  // Only not-yet folds, the verdict the title counts under that name. A verdict
+  // this page does not know stays shown, dim, so a scorecard that grows one
+  // neither hides its questions nor inflates the fold's count.
+  const shown = qs.filter(q => q.verdict !== "not-yet");
+  const pending = qs.filter(q => q.verdict === "not-yet");
   for (const q of shown) cell.append(jevQuestionChip(q));
   if (pending.length) {
     const more = el("div", "jvmore");
