@@ -213,16 +213,22 @@ func (d *Daemon) triggerRebuildGT() {
 		// runs sets the flag for the next heartbeat; clearing at the end
 		// would erase that request too (gt-j1mm4).
 		armed := d.rebuildGTRequested.Swap(false)
-		if !d.runRebuildGT() {
-			// Nothing accomplished: leave the gate open so the next
-			// heartbeat retries (the script's exit 3), and put back the
-			// request this cycle consumed so a not-quiet deferral does not
-			// lose it.
-			if armed {
+		accomplished := false
+		// Put back the request this cycle consumed unless it accomplished its
+		// work, so a deferral, a panic or a Goexit does not lose it. Registered
+		// after the guard clears, so it runs before the guard does: the next
+		// heartbeat sees the request (gt-tgs81).
+		defer func() {
+			if armed && !accomplished {
 				d.rebuildGTRequested.Store(true)
 			}
+		}()
+		if !d.runRebuildGT() {
+			// Nothing accomplished: leave the gate open so the next
+			// heartbeat retries (the script's exit 3).
 			return
 		}
+		accomplished = true
 		if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now()); err != nil {
 			d.logger.Printf("rebuild_gt: WARNING: cannot persist last-run time (%v)", err)
 		}
@@ -240,8 +246,9 @@ func (d *Daemon) noteRebuildGTCycleDone() {
 
 // requestRebuildGTInstall arms the sticky request that makes the next
 // rebuild_gt heartbeat due regardless of the patrol's interval. A cycle takes
-// it when it starts and puts it back if it defers, so a deferral keeps the
-// install pending and a request made mid-cycle survives it; arming an
+// it when it starts and puts it back unless the cycle accomplishes its work,
+// so a deferral or an exit keeps the install pending and a request made
+// mid-cycle survives it; arming an
 // already-armed request is a no-op, which is what keeps the log one line per
 // drain rather than one per landing pass (gt-3qmv4.1).
 func (d *Daemon) requestRebuildGTInstall() {
@@ -623,9 +630,10 @@ func (d *Daemon) rebuildGTInstall(ctx context.Context, cycle *dogCycle, repoRoot
 
 	// A run the cycle's own budget killed, or one a signal killed, never printed
 	// its RESULT line: the fields read here describe no install at all, and
-	// taking them as a verdict would clear rebuildGTRequested and hold the hour
-	// over work that never happened. Deferring keeps the request armed and the
-	// next heartbeat retries. This is not an install-gt failure to escalate:
+	// taking them as a verdict would hold the hour over work that never
+	// happened. Deferring returns the request this cycle consumed (see the
+	// cycle goroutine in triggerRebuildGT) and the next heartbeat retries. This
+	// is not an install-gt failure to escalate:
 	// the kill is the daemon's own clock, and the starvation block below is what
 	// escalates a binary that stays uninstalled (gt-oyrav).
 	if ctx.Err() != nil || code < 0 {
