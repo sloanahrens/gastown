@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1989,5 +1990,48 @@ func TestPoolPolecatSeatStateLandedSeatIsReusable(t *testing.T) {
 				t.Fatalf("seat counts toward capacity = %v, want %v (%+v)", d.CountsTowardCapacity, tt.wantCounts, d)
 			}
 		})
+	}
+}
+
+// A landed lookup that fails is not evidence of a landing: the seat stays
+// git-unpushed in the pool and the list, and the blocker names the failed read
+// so the reader can tell it from a bead that was read and is still open
+// (gt-0laxm).
+func TestPoolPolecatSeatStateLandedLookupFailureStaysUnpushed(t *testing.T) {
+	t.Parallel()
+	seat := newLandedSeat(t, false)
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	if err := os.MkdirAll(filepath.Join(town, "gastown", "polecats", "nitro", "gastown"), 0o755); err != nil {
+		t.Fatalf("mkdir worktree: %v", err)
+	}
+	lookupErr := errors.New("bd show: connection refused")
+	live := polecat.LiveGitState{Branch: landedSeatBranch, Source: polecat.GitStateSourceLive, UnpushedCommits: 1}
+	fields := &beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupClean), Branch: landedSeatBranch}
+	reads := poolSeatReadsAnswering(t, fields, polecatActiveWorkEvidence{})
+	reads.show = func(beads.Client, string) (*beads.Issue, error) { return nil, lookupErr }
+	reads.probe = func(string) polecat.LiveGitState { return live }
+	reads.openWorkLanded = seat.open()
+
+	state, err := poolPolecatSeatStateWith(town, "gastown", "nitro", reads)
+	if err != nil {
+		t.Fatalf("poolPolecatSeatStateWith: %v", err)
+	}
+	d := state.Disposition
+	if d.SafeToNuke || d.Reason != "git-unpushed" || !d.CountsTowardCapacity {
+		t.Fatalf("pool disposition = %+v; want unsafe git-unpushed counting toward capacity", d)
+	}
+	if !slices.ContainsFunc(d.Blockers, func(b string) bool { return strings.Contains(b, "read bead gt-seat") }) {
+		t.Fatalf("pool blockers = %q; want the failed landed read named", d.Blockers)
+	}
+
+	item := buildPolecatInventoryItem("gastown", "nitro", fields, nil, polecatSessionSet{}, polecatInventoryEnv{
+		WorktreePath:   seat.worktree,
+		IssueSource:    issueReadFunc(func(string) (*beads.Issue, error) { return nil, lookupErr }),
+		openWorkLanded: seat.open(),
+		probe:          func(string, bool) polecat.LiveGitState { return live },
+	})
+	if got := item.Disposition; got.SafeToNuke != d.SafeToNuke || got.Reason != d.Reason || !slices.Equal(got.Blockers, d.Blockers) {
+		t.Fatalf("pool disposition %+v differs from the list's %+v", d, got)
 	}
 }
