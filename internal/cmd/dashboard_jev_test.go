@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"math"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
@@ -241,7 +243,7 @@ func TestDashboardJevScorecardRunsOncePerBattery(t *testing.T) {
 		"landing": `{"battery":"landing","items":0,"questions":[]}`,
 	}
 	var ran [][]string
-	read := dashboardJevScorecardWith(strings.Fields("gt jev scorecard --json --since 7d"), []string{"finding", "landing"}, fakeJevScorecardRun(reports, "", &ran))
+	read := dashboardJevScorecardWith(strings.Fields("gt jev scorecard --json --since 7d"), []string{"finding", "landing"}, time.Minute, fakeJevScorecardRun(reports, "", &ran))
 	if read == nil {
 		t.Fatal("a configured command has no reader")
 	}
@@ -267,9 +269,10 @@ func TestDashboardJevScorecardRunsOncePerBattery(t *testing.T) {
 	}
 }
 
-// One run that fails, prints text, or reports another battery fails the read,
-// the scorecard unavailable the hub shows; the spend reader is not involved.
-func TestDashboardJevScorecardFailureReadsAsNil(t *testing.T) {
+// A run that fails, prints text, or reports another battery drops only its own
+// line: the other battery still draws and the lost one is named. The spend
+// reader is not involved.
+func TestDashboardJevScorecardFailureDropsOnlyThatBattery(t *testing.T) {
 	t.Parallel()
 
 	good := `{"battery":"finding","items":1,"questions":[]}`
@@ -278,12 +281,104 @@ func TestDashboardJevScorecardFailureReadsAsNil(t *testing.T) {
 		"prints text":    fakeJevScorecardRun(map[string]string{"finding": good, "landing": "gt: unknown battery"}, "", nil),
 		"prints another": fakeJevScorecardRun(map[string]string{"finding": good, "landing": good}, "", nil),
 		"prints nothing": fakeJevScorecardRun(map[string]string{"finding": good}, "", nil),
-		"times out":      func(context.Context, []string) ([]byte, error) { return nil, context.DeadlineExceeded },
+		"times out": func(_ context.Context, argv []string) ([]byte, error) {
+			if argv[len(argv)-1] == "landing" {
+				return nil, context.DeadlineExceeded
+			}
+			return []byte(good), nil
+		},
 	}
 	for name, run := range cases {
-		if got := dashboardJevScorecardWith([]string{"gt", "jev", "scorecard"}, []string{"finding", "landing"}, run)(); got != nil {
-			t.Errorf("%s: read %+v, want a failed read", name, *got)
+		got := dashboardJevScorecardWith([]string{"gt", "jev", "scorecard"}, []string{"finding", "landing"}, time.Minute, run)()
+		if got == nil {
+			t.Errorf("%s: one good battery read as a failed read", name)
+			continue
 		}
+		if !reflect.DeepEqual(got.Unavailable, []string{"landing"}) || len(got.Batteries) != 2 ||
+			got.Batteries[0].Failed || !got.Batteries[1].Failed || got.Batteries[1].Kept {
+			t.Errorf("%s: scorecard = %+v, want finding drawn and landing a placeholder", name, *got)
+		}
+		if got.Totals.Batteries != 1 || got.Totals.Lines != 1 {
+			t.Errorf("%s: Totals = %+v, want only finding counted", name, got.Totals)
+		}
+	}
+}
+
+// With five batteries, one that fails and one that times out leave the other
+// three lines and name the two.
+func TestDashboardJevScorecardOneFailingOneTimingOutAmongFive(t *testing.T) {
+	t.Parallel()
+
+	report := func(name string) string {
+		return `{"battery":"` + name + `","items":3,"questions":[]}`
+	}
+	run := func(ctx context.Context, argv []string) ([]byte, error) {
+		switch name := argv[len(argv)-1]; name {
+		case "dispatch":
+			return nil, errors.New("exit status 1")
+		case "drift":
+			<-ctx.Done()
+			return nil, ctx.Err()
+		default:
+			return []byte(report(name)), nil
+		}
+	}
+	batteries := []string{"finding", "dispatch", "submission", "drift", "testsel"}
+	got := dashboardJevScorecardWith([]string{"gt", "jev", "scorecard"}, batteries, 20*time.Millisecond, run)()
+	if got == nil {
+		t.Fatal("three good batteries read as a failed read")
+	}
+	var drawn []string
+	for _, b := range got.Batteries {
+		if !b.Failed {
+			drawn = append(drawn, b.Name)
+		}
+	}
+	if want := []string{"finding", "submission", "testsel"}; !reflect.DeepEqual(drawn, want) {
+		t.Errorf("drawn batteries = %q, want %q", drawn, want)
+	}
+	if want := []string{"dispatch", "drift"}; !reflect.DeepEqual(got.Unavailable, want) {
+		t.Errorf("Unavailable = %q, want %q", got.Unavailable, want)
+	}
+	if got.Totals.Batteries != 3 || got.Totals.Lines != 9 {
+		t.Errorf("Totals = %+v, want the three good batteries", got.Totals)
+	}
+}
+
+// When every battery fails there is nothing to draw, so the read fails whole
+// and the hub shows the scorecard unavailable.
+func TestDashboardJevScorecardEveryBatteryFailingReadsAsNil(t *testing.T) {
+	t.Parallel()
+
+	run := func(context.Context, []string) ([]byte, error) { return nil, context.DeadlineExceeded }
+	if got := dashboardJevScorecardWith([]string{"gt"}, []string{"finding", "landing"}, time.Minute, run)(); got != nil {
+		t.Errorf("read %+v, want a failed read", *got)
+	}
+}
+
+// The scorecard read has its own timeout: the slowest battery answers in about
+// 32s, past the spend command's 25s, and each run is bounded by that timeout.
+func TestDashboardJevScorecardTimeoutIsApartFromTheSpendTimeout(t *testing.T) {
+	t.Parallel()
+
+	if dashboardJevScorecardTimeout != 60*time.Second {
+		t.Errorf("dashboardJevScorecardTimeout = %v, want 60s", dashboardJevScorecardTimeout)
+	}
+	if dashboardJevScorecardTimeout <= dashboardSpendTimeout {
+		t.Errorf("the scorecard timeout %v is not above the spend timeout %v", dashboardJevScorecardTimeout, dashboardSpendTimeout)
+	}
+	var left time.Duration
+	run := func(ctx context.Context, argv []string) ([]byte, error) {
+		d, ok := ctx.Deadline()
+		if !ok {
+			t.Error("a scorecard run has no deadline")
+		}
+		left = time.Until(d)
+		return nil, errors.New("stop")
+	}
+	dashboardJevScorecardWith([]string{"gt"}, []string{"finding"}, dashboardJevScorecardTimeout, run)()
+	if left <= dashboardSpendTimeout || left > dashboardJevScorecardTimeout {
+		t.Errorf("a run had %v left, want between the spend timeout and %v", left, dashboardJevScorecardTimeout)
 	}
 }
 
@@ -305,7 +400,7 @@ func TestDashboardJevScorecardAsksForEveryRegisteredBattery(t *testing.T) {
 		asked = append(asked, argv[len(argv)-1])
 		return nil, errors.New("stop")
 	}
-	dashboardJevScorecardWith([]string{"gt"}, scorecard.Registered(), run)()
+	dashboardJevScorecardWith([]string{"gt"}, scorecard.Registered(), time.Minute, run)()
 	if len(asked) == 0 || asked[0] != scorecard.Registered()[0] {
 		t.Errorf("asked %q, want the registered batteries %q", asked, scorecard.Registered())
 	}

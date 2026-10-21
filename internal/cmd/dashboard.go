@@ -92,8 +92,11 @@ while a page is open. The JEV panel, under the Tier sweeps, draws one line per
 battery: its lines logged, how many of them are labeled, and each question's
 verdict (earning, not-yet or no-signal), such as
 finding 212/140 fix_worthy:earning any_duplicate:not-yet. A battery with no log
-in the window shows -. A run that fails shows the panel's title as unavailable
-and leaves the Cost panel's spend row alone; an empty value leaves the panel out.
+in the window shows -. Each run has 60 seconds. A battery whose run fails, times
+out or prints another battery's report drops only its own line (its last good
+line stays, marked stale) and the title names it as unavailable; only when every
+battery fails does the title read unavailable on its own. The Cost panel's spend
+row is left alone; an empty value leaves the panel out.
 
 --claude-plan-usd prices the plan meter beside it: the Claude weekly and
 five-hour limits, read every minute from the samples the status line appends to
@@ -634,6 +637,11 @@ func dashboardReadyToLand(townRoot string) (int, *time.Time, map[string]bool, er
 
 const dashboardSpendTimeout = 25 * time.Second
 
+// dashboardJevScorecardTimeout bounds one battery's scorecard run. It is not
+// dashboardSpendTimeout: the slowest battery takes about 32s to answer, past
+// the spend command's 25s, and a run that outlives this loses only its own line.
+const dashboardJevScorecardTimeout = 60 * time.Second
+
 // resolveSpendCmd is the command that prints the spend report: the flag's, or
 // the ~/.claude tool when it exists, or nothing.
 func resolveSpendCmd(flagValue string) []string {
@@ -741,39 +749,59 @@ func jevScorecardArgv(cmd string) ([]string, error) {
 // battery and folds each report into its line. A nil argv is no scorecard
 // lines.
 func dashboardJevScorecard(argv []string) func() *dashboard.JevScorecard {
-	return dashboardJevScorecardWith(argv, scorecard.Registered(), func(ctx context.Context, argv []string) ([]byte, error) {
+	return dashboardJevScorecardWith(argv, scorecard.Registered(), dashboardJevScorecardTimeout, func(ctx context.Context, argv []string) ([]byte, error) {
 		return exec.CommandContext(ctx, argv[0], argv[1:]...).Output()
 	})
 }
 
-// dashboardJevScorecardWith is dashboardJevScorecard over run and the battery
-// names, so a test stands in for the process. The command reads one battery
-// per run, so the read is one run per battery; a battery whose run fails or
-// prints anything but its report fails the whole read, which the hub shows as
-// the scorecard unavailable while the last good lines stay in its state.
-func dashboardJevScorecardWith(argv, batteries []string, run func(ctx context.Context, argv []string) ([]byte, error)) func() *dashboard.JevScorecard {
+// dashboardJevScorecardWith is dashboardJevScorecard over run, the battery
+// names and each run's timeout, so a test stands in for the process. The
+// command reads one battery per run, one after another. A battery whose run
+// fails, times out or prints anything but its own report loses only its line:
+// it stays in the result as a Failed placeholder, which the hub puts its last
+// good line back over. Only when every battery fails is the read nil, which the
+// hub shows as the scorecard unavailable.
+func dashboardJevScorecardWith(argv, batteries []string, timeout time.Duration, run func(ctx context.Context, argv []string) ([]byte, error)) func() *dashboard.JevScorecard {
 	if len(argv) == 0 {
 		return nil
 	}
 	window := dashboard.JevScorecardWindow(argv)
 	return func() *dashboard.JevScorecard {
 		sc := &dashboard.JevScorecard{Batteries: []dashboard.JevBattery{}, Window: window}
+		failed := 0
 		for _, name := range batteries {
-			ctx, cancel := context.WithTimeout(context.Background(), dashboardSpendTimeout)
-			out, err := run(ctx, append(append([]string{}, argv...), "--battery", name))
-			cancel()
+			b, err := readJevBattery(argv, name, timeout, run)
 			if err != nil {
-				return nil
-			}
-			b, err := dashboard.ParseJevScorecard(out)
-			if err != nil || b.Name != name {
-				return nil
+				failed++
+				b = &dashboard.JevBattery{Name: name, Failed: true}
 			}
 			sc.Batteries = append(sc.Batteries, *b)
+		}
+		if failed > 0 && failed == len(batteries) {
+			return nil
 		}
 		sc.Tally()
 		return sc
 	}
+}
+
+// readJevBattery runs the scorecard command for one battery under its own
+// timeout and parses the report, refusing one that names another battery.
+func readJevBattery(argv []string, name string, timeout time.Duration, run func(ctx context.Context, argv []string) ([]byte, error)) (*dashboard.JevBattery, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := run(ctx, append(append([]string{}, argv...), "--battery", name))
+	if err != nil {
+		return nil, err
+	}
+	b, err := dashboard.ParseJevScorecard(out)
+	if err != nil {
+		return nil, err
+	}
+	if b.Name != name {
+		return nil, fmt.Errorf("jev scorecard: asked for %q, got %q", name, b.Name)
+	}
+	return b, nil
 }
 
 // dashboardForgejoReaders wires the readers the viewer's token feeds — the

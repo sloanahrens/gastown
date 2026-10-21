@@ -786,6 +786,8 @@ func (h *Hub) pollJevSpend() {
 }
 
 // pollJevScorecard keeps the last good scorecard lines across a failed read.
+// A read that lost only some batteries keeps each lost battery's last good
+// line, marked Failed and Kept, and leaves the others as the read drew them.
 // It fails apart from the spend row: neither touches the other's value or
 // status.
 func (h *Hub) pollJevScorecard() {
@@ -797,9 +799,35 @@ func (h *Hub) pollJevScorecard() {
 		h.publishLocked()
 		return
 	}
+	keepLastGoodJevBatteries(h.state.JevScorecard, sc)
 	h.state.JevScorecard = sc
 	h.readOKLocked(SourceJevScorecard, h.cfg.JevScorecardEvery)
 	h.publishLocked()
+}
+
+// keepLastGoodJevBatteries puts prev's line back for every battery that sc
+// reports failed, so one battery's failed read does not blank its line. A
+// battery prev never read stays a placeholder. sc is retallied.
+func keepLastGoodJevBatteries(prev, sc *JevScorecard) {
+	if prev == nil {
+		return
+	}
+	last := map[string]JevBattery{}
+	for _, b := range prev.Batteries {
+		if !b.Failed || b.Kept {
+			last[b.Name] = b
+		}
+	}
+	for i, b := range sc.Batteries {
+		if !b.Failed {
+			continue
+		}
+		if old, ok := last[b.Name]; ok {
+			old.Failed, old.Kept = true, true
+			sc.Batteries[i] = old
+		}
+	}
+	sc.Tally()
 }
 
 // pollSummary keeps the last good seats and ready-to-land readings across a

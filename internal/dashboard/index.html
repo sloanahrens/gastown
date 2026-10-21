@@ -3238,7 +3238,9 @@ function costJev(box, j, r) {
 // worded, as on the title line), then each
 // question's verdict as id:verdict. A battery with no log in the window is a
 // dash. A failed or stale read says unavailable on the title line and draws no
-// lines, since last week's verdicts would pass as current. Neither a report nor
+// lines, since last week's verdicts would pass as current. A read that lost
+// only some batteries draws the rest, names the lost ones on the title line,
+// and shows a lost battery's last good line marked stale, or its name alone. Neither a report nor
 // a status means no scorecard command is configured, or it has not answered
 // yet, so the panel stays hidden.
 function renderJev(s) {
@@ -3255,12 +3257,21 @@ function renderJev(s) {
     return;
   }
   const t = sc.totals || {};
-  note.textContent = [(t.batteries || 0) + (t.batteries === 1 ? " battery" : " batteries"), (t.lines || 0) + " lines", (t.labeled || 0) + " labeled", (t.earning || 0) + " earning", (t.no_signal || 0) + " no-signal"].join(" · ");
+  const lost = sc.unavailable || [];
+  const parts = [(t.batteries || 0) + (t.batteries === 1 ? " battery" : " batteries"), (t.lines || 0) + " lines", (t.labeled || 0) + " labeled", (t.earning || 0) + " earning", (t.no_signal || 0) + " no-signal"];
+  if (lost.length) parts.push(lost.length + " unavailable: " + lost.join(", "));
+  note.textContent = parts.join(" · ");
+  if (lost.length) note.className = "r warnc";
   for (const b of sc.batteries || []) {
+    if (b.failed && !b.kept) {
+      box.append(el("div", "empty", b.name + " unavailable"));
+      continue;
+    }
     const words = b.lines > 0
       ? [b.name, b.lines + " lines", b.labeled + " labeled"].concat((b.questions || []).map(q => q.id + ":" + q.verdict))
       : [b.name, "-"];
-    box.append(el("div", "", words.join(" ")));
+    if (b.failed) words.push("(stale: the read failed)");
+    box.append(el("div", b.failed ? "empty" : "", words.join(" ")));
   }
 }
 

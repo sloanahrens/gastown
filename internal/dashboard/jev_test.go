@@ -471,6 +471,106 @@ func TestFailedJevScorecardReadKeepsTheLinesAndLeavesTheSpendAlone(t *testing.T)
 	}
 }
 
+// A read that lost one battery keeps that battery's last good line and leaves
+// the others as the read drew them; a battery never read stays a placeholder.
+// A later good read clears the marks.
+func TestHubKeepsEachBatterysLastGoodLineAcrossItsOwnFailedRead(t *testing.T) {
+	t.Parallel()
+
+	reads := [][]JevBattery{
+		{{Name: "finding", Lines: 2, Labeled: 1}, {Name: "landing", Lines: 5}},
+		{{Name: "finding", Lines: 3, Labeled: 2}, {Name: "landing", Failed: true}},
+		{{Name: "finding", Failed: true}, {Name: "landing", Lines: 7}},
+		{{Name: "finding", Lines: 4}, {Name: "landing", Lines: 8}},
+	}
+	next := 0
+	h := NewHub(Config{JevScorecard: func() *JevScorecard {
+		sc := &JevScorecard{Batteries: append([]JevBattery(nil), reads[next]...)}
+		next++
+		sc.Tally()
+		return sc
+	}})
+	poll := func() []JevBattery {
+		h.pollJevScorecard()
+		return h.State().JevScorecard.Batteries
+	}
+
+	poll()
+	got := poll()
+	if want := (JevBattery{Name: "landing", Lines: 5, Failed: true, Kept: true}); !reflect.DeepEqual(got[1], want) {
+		t.Errorf("landing after its failed read = %+v, want its last good line %+v", got[1], want)
+	}
+	if got[0].Lines != 3 || got[0].Failed {
+		t.Errorf("finding was touched by landing's failed read: %+v", got[0])
+	}
+	if sc := h.State().JevScorecard; !reflect.DeepEqual(sc.Unavailable, []string{"landing"}) || sc.Totals.Lines != 8 || sc.Totals.Batteries != 2 {
+		t.Errorf("scorecard = %+v, want landing named unavailable and its kept line counted", sc)
+	}
+
+	got = poll()
+	if got[0].Lines != 3 || got[0].Labeled != 2 || !got[0].Kept || got[1].Lines != 7 || got[1].Failed {
+		t.Errorf("after finding's failed read: %+v", got)
+	}
+
+	got = poll()
+	if got[0].Lines != 4 || got[0].Failed || got[1].Lines != 8 || got[1].Failed {
+		t.Errorf("a good read did not clear the marks: %+v", got)
+	}
+	if r := h.State().Reads[SourceJevScorecard]; r.Error || r.Stale {
+		t.Errorf("a partial read flagged the whole source: %+v", r)
+	}
+}
+
+// A battery the hub never read a good line for stays a bare placeholder.
+func TestHubLeavesAPlaceholderForABatteryItNeverRead(t *testing.T) {
+	t.Parallel()
+
+	h := NewHub(Config{JevScorecard: func() *JevScorecard {
+		sc := &JevScorecard{Batteries: []JevBattery{{Name: "finding", Lines: 1}, {Name: "landing", Failed: true}}}
+		sc.Tally()
+		return sc
+	}})
+	h.pollJevScorecard()
+	h.pollJevScorecard()
+	got := h.State().JevScorecard.Batteries
+	if want := (JevBattery{Name: "landing", Failed: true}); !reflect.DeepEqual(got[1], want) {
+		t.Errorf("landing = %+v, want %+v", got[1], want)
+	}
+}
+
+// The JEV panel draws the batteries a partial read kept, names the lost ones on
+// the title line, and marks a lost line stale or unavailable.
+func TestJevPanelNamesTheBatteriesTheReadLost(t *testing.T) {
+	t.Parallel()
+
+	s := jevScorecardState(time.Now(), nil)
+	sc := s["jev_scorecard"].(map[string]any)
+	sc["batteries"] = []any{
+		map[string]any{"name": "finding", "lines": 212, "labeled": 140},
+		map[string]any{"name": "dispatch", "lines": 4, "labeled": 1, "failed": true, "kept": true},
+		map[string]any{"name": "drift", "failed": true},
+	}
+	sc["unavailable"] = []any{"dispatch", "drift"}
+	sc["totals"] = map[string]any{"batteries": 2, "lines": 216, "labeled": 141}
+
+	lines, note, _ := drawJev(t, s)
+	var got []string
+	for _, l := range lines {
+		got = append(got, l.Text)
+	}
+	want := []string{
+		"finding 212 lines 140 labeled",
+		"dispatch 4 lines 1 labeled (stale: the read failed)",
+		"drift unavailable",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("JEV lines = %q, want %q", got, want)
+	}
+	if wantNote := "2 batteries · 216 lines · 141 labeled · 0 earning · 0 no-signal · 2 unavailable: dispatch, drift"; note.Text != wantNote {
+		t.Errorf("JEV title line = %q, want %q", note.Text, wantNote)
+	}
+}
+
 // jevScorecardState is the JEV panel's read of three batteries: finding, with
 // two questions; landing, with no log; and targets, with one question. The
 // totals are what Tally makes of them, which TestJevScorecardTallyCountsTheTitleLine
