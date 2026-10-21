@@ -1072,3 +1072,89 @@ func TestRunDoesNotReAskWhenTheLogIsUnwritable(t *testing.T) {
 		t.Errorf("Jev asked %d times across two passes, want 1: an unlogged answer was re-billed", n)
 	}
 }
+
+// When the cursor cannot be written either, Run reports both failures. The
+// caller has to see the cursor one: unlike the lost line, it means the next
+// pass asks, and bills, the finding again.
+func TestRunReportsBothErrorsWhenTheLogAndCursorWritesFail(t *testing.T) {
+	t.Parallel()
+	all := []*beads.Issue{
+		bead("gt-old", "Old defect", "", 0),
+		bead("gt-fnd", "Found: the same defect", "", 10),
+	}
+	hits := map[string][]Hit{"Found: the same defect": {{Kind: "bead", ID: "gt-old", Field: "title"}}}
+	h := newHarness(t, all, hits, fakeAnswer{ans: choices("gt-old", 0.9)})
+
+	// A directory where the log should be makes every append fail.
+	if err := os.Mkdir(h.log, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// Break the cursor mid-pass, after Run has read it, so the run reaches the
+	// join. A regular file where the cursor's directory should be makes the
+	// cursor write fail.
+	blocked := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.asker.onAsk = func() error {
+		h.pass.CursorPath = filepath.Join(blocked, "dedupe.cursor.json")
+		return nil
+	}
+
+	_, err := h.pass.Run(context.Background())
+	if err == nil {
+		t.Fatal("Run reported no error with both writes failing")
+	}
+	for _, want := range []string{"writing the dedupe log", "creating the state directory"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Run error = %v, want it to name %q", err, want)
+		}
+	}
+	if n := len(h.asker.calls); n != 1 {
+		t.Errorf("Jev asked %d times, want 1: the pass kept spending after the log write failed", n)
+	}
+	// The real cursor was never touched, so the next pass asks the finding
+	// again: that is the failure the joined error carries.
+	cur, ok, err := battery.ReadCursor(h.cursor)
+	if err != nil || !ok {
+		t.Fatalf("ReadCursor = %v, %v, want the original cursor", cur, err)
+	}
+	if want := t0.Add(-time.Hour); !cur.Time.Equal(want) {
+		t.Errorf("cursor = %v, want it still at %v", cur.Time, want)
+	}
+}
+
+// A read failure among hits that were otherwise filtered out is still a read
+// failure. The bead that could not be read might have been the duplicate, so
+// the line must not claim the search had nothing to offer.
+func TestCandidatesMixedUnreadableAndFilteredHitsLogReadFailed(t *testing.T) {
+	t.Parallel()
+	all := []*beads.Issue{
+		bead("gt-old", "Old defect", "", 0),
+		bead("gt-fnd", "Found: the same defect", "", 10),
+		bead("gt-later", "Later defect", "", 20),
+	}
+	// One commit hit and one comment match are filtered out, one bead was
+	// created after the finding, and one bead cannot be shown at all.
+	hits := map[string][]Hit{"Found: the same defect": {
+		{Kind: "commit", ID: "abc1234"},
+		{Kind: "bead", ID: "gt-gone", Field: "title"},
+		{Kind: "bead", ID: "gt-old", Field: "comment:2"},
+		{Kind: "bead", ID: "gt-later", Field: "title"},
+	}}
+	h := newHarness(t, all, hits, fakeAnswer{ans: batteryOnly()})
+
+	if sum := mustRun(t, h.pass); sum.Asked != 1 {
+		t.Fatalf("Asked = %d, want 1", sum.Asked)
+	}
+	lines := h.lines(t)
+	if len(lines) != 1 {
+		t.Fatalf("log has %d lines, want 1", len(lines))
+	}
+	if got := lines[0]["outcome"]; got != string(OutcomeReadFailed) {
+		t.Errorf("outcome = %v, want %v: a filtered hit does not make an unreadable one find nothing", got, OutcomeReadFailed)
+	}
+	if got := lines[0]["candidates_offered"]; !reflect.DeepEqual(got, []any{}) {
+		t.Errorf("candidates_offered = %v, want none offered", got)
+	}
+}
