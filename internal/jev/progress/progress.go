@@ -184,9 +184,12 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			sum.Dropped += len(nudges) - i
 			return sum, err
 		}
+		// An append that fails ends the pass. Every later line would fail the
+		// same way, so asking about them would spend Jev on answers that are
+		// never logged.
 		if err := battery.Append(p.LogPath, line); err != nil {
 			sum.Dropped += len(nudges) - i
-			return sum, err
+			return sum, fmt.Errorf("appending to the progress log: %w", err)
 		}
 		if line.Answers != nil {
 			sum.Asked++
@@ -212,26 +215,25 @@ func (p *Pass) ask(ctx context.Context, n Nudge) (Line, error) {
 		QuestionVersion: Version,
 	}
 
+	// The transcript is checked before the bead is read, so a nudge whose
+	// transcript cannot be read never reaches the bead store.
+	path, reason := p.transcriptPath(n.Transcript)
+	if reason != "" {
+		line.Reason = reason
+		return line, nil
+	}
+	events, clipped, err := readWindow(path, now.Add(-transcriptWindow))
+	if err != nil {
+		line.Reason = ReasonTranscriptUnreadable
+		return line, nil
+	}
 	issue, err := p.Issue(n.Rig, n.Bead)
 	if err != nil || issue == nil {
 		line.Reason = ReasonBeadUnreadable
 		return line, nil
 	}
-	if n.Transcript == "" {
-		line.Reason = ReasonNoTranscript
-		return line, nil
-	}
-	if !within(p.TownRoot, n.Transcript) {
-		line.Reason = ReasonOutsideTown
-		return line, nil
-	}
-	events, err := readWindow(n.Transcript, now.Add(-transcriptWindow))
-	if err != nil {
-		line.Reason = ReasonTranscriptUnreadable
-		return line, nil
-	}
 
-	got, err := p.Asker.Ask(ctx, buildState(issue, events), Questions())
+	got, err := p.Asker.Ask(ctx, buildState(issue, events, clipped), Questions())
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return line, cerr
@@ -255,8 +257,29 @@ func (p *Pass) now() time.Time {
 	return p.Now()
 }
 
+// transcriptPath returns the transcript's path with its symlinks resolved, or
+// the reason a nudge cannot be read from it. The containment check runs on the
+// resolved paths, both sides: a symlink inside the town can point outside it,
+// and a town root that is itself a symlink (macOS temp dirs, for one) must
+// still match. A root that cannot be resolved refuses every transcript.
+func (p *Pass) transcriptPath(transcript string) (string, string) {
+	if transcript == "" {
+		return "", ReasonNoTranscript
+	}
+	resolved, err := filepath.EvalSymlinks(transcript)
+	if err != nil {
+		return "", ReasonTranscriptUnreadable
+	}
+	root, err := filepath.EvalSymlinks(p.TownRoot)
+	if err != nil || !within(root, resolved) {
+		return "", ReasonOutsideTown
+	}
+	return resolved, ""
+}
+
 // within reports whether path lies under root. Both are cleaned first, so a
-// path that climbs out with .. is refused.
+// path that climbs out with .. is refused. It is lexical: callers pass
+// resolved paths.
 func within(root, path string) bool {
 	rel, err := filepath.Rel(filepath.Clean(root), filepath.Clean(path))
 	if err != nil || filepath.IsAbs(rel) {

@@ -23,10 +23,14 @@ func (d *Daemon) enqueueJevProgress(seat overrunSeat, at time.Time) {
 	if !d.isPatrolActive("jev_progress") {
 		return
 	}
+	latest := d.jevProgressLatest
+	if latest == nil {
+		latest = agentlog.LatestTranscript
+	}
 	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
 	var transcript string
 	if workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig); workDir != "" {
-		if path, err := agentlog.LatestTranscript(workDir); err == nil {
+		if path, err := latest(workDir); err == nil {
 			transcript = path
 		}
 	}
@@ -82,14 +86,17 @@ func (d *Daemon) runJevProgress() {
 	pass, err := open(d.config.TownRoot, &d.jevProgressQueue, settings, d.logger.Writer())
 	if err != nil {
 		dropped := len(d.jevProgressQueue.Drain())
-		d.logger.Printf("jev_progress: error: %v (dropped %d nudges)", err, dropped)
+		d.logger.Printf("jev_progress: could not open the pass: %v (dropped %d nudges)", err, dropped)
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), jevProgressRunBudget)
 	defer cancel()
 	sum, err := pass.Run(ctx)
 	if err != nil {
-		d.logger.Printf("jev_progress: error: %v (dropped %d nudges)", err, sum.Dropped)
+		// A stopped pass logs what it reached before it stopped, so its line
+		// never reads like a clean pass that dropped nothing.
+		d.logger.Printf("jev_progress: pass stopped: %v (asked %d, unanswered %d, dropped %d)",
+			err, sum.Asked, sum.Unanswered, sum.Dropped)
 		return
 	}
 	if sum.Asked > 0 || sum.Unanswered > 0 || sum.Dropped > 0 || sum.CapReached {

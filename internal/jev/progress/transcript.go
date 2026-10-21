@@ -20,7 +20,7 @@ const (
 
 	// tailBytes bounds how much of the transcript the pass reads: the end of
 	// the file, where the window is. A window longer than this is cut at the
-	// start, which the state does not mark.
+	// start, and the state marks it with WindowClipped.
 	tailBytes = 8 << 20
 
 	// fieldRunes caps each tool call's input and each tool result. Assistant
@@ -50,11 +50,14 @@ type Event struct {
 // State is what the battery reads: the bead's title and acceptance, then the
 // window's events, oldest first. The newest events survive the cap.
 type State struct {
-	BeadTitle      string  `json:"bead_title"`
-	BeadAcceptance string  `json:"bead_acceptance"`
-	WindowMinutes  int     `json:"window_minutes"`
-	EventsDropped  int     `json:"events_dropped"`
-	Events         []Event `json:"events"`
+	BeadTitle      string `json:"bead_title"`
+	BeadAcceptance string `json:"bead_acceptance"`
+	WindowMinutes  int    `json:"window_minutes"`
+	// WindowClipped is true when the window reaches back past the tail the
+	// pass read, so events from its start are missing.
+	WindowClipped bool    `json:"window_clipped"`
+	EventsDropped int     `json:"events_dropped"`
+	Events        []Event `json:"events"`
 }
 
 // transcriptBlock is one content block of a transcript line. Only the fields
@@ -69,45 +72,71 @@ type transcriptBlock struct {
 }
 
 // readWindow returns the events in the Claude Code transcript at path from
-// since on, oldest first. It reads the tail of the file only. A line that does
-// not parse, or that has no timestamp, is skipped.
-func readWindow(path string, since time.Time) ([]Event, error) {
+// since on, oldest first, and whether the window reaches back past the tail
+// it read. It reads the tail of the file only. A line that does not parse, or
+// that has no timestamp, is skipped.
+func readWindow(path string, since time.Time) ([]Event, bool, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	var start int64
 	if fi.Size() > tailBytes {
 		start = fi.Size() - tailBytes
 	}
 	if _, err := f.Seek(start, io.SeekStart); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	r := bufio.NewReader(f)
-	if start > 0 {
+	// probe is set when the tail was cut. The first timestamped line in it
+	// decides whether the window starts before the cut: transcript times only
+	// grow, so if that line is still inside the window, the lines before the
+	// seek are too.
+	probe := start > 0
+	clipped := false
+	if probe {
 		// The seek landed mid-line: that partial line is not the window's.
 		if _, err := r.ReadBytes('\n'); err != nil && !errors.Is(err, io.EOF) {
-			return nil, err
+			return nil, false, err
 		}
 	}
 	var out []Event
 	for {
 		line, err := r.ReadBytes('\n')
 		if len(bytes.TrimSpace(line)) > 0 {
+			if ts, ok := lineTime(line); ok && probe {
+				probe = false
+				clipped = !ts.Before(since)
+			}
 			out = append(out, parseLine(line, since)...)
 		}
 		if errors.Is(err, io.EOF) {
-			return out, nil
+			// A tail with no timestamped line, one long line for instance, cannot
+			// show where the window starts, so it is marked as clipped.
+			return out, clipped || probe, nil
 		}
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
+}
+
+// lineTime returns the timestamp of one transcript line, and false when the
+// line does not parse or has none.
+func lineTime(line []byte) (time.Time, bool) {
+	var tl struct {
+		Timestamp string `json:"timestamp"`
+	}
+	if json.Unmarshal(line, &tl) != nil {
+		return time.Time{}, false
+	}
+	ts, err := time.Parse(time.RFC3339Nano, tl.Timestamp)
+	return ts, err == nil
 }
 
 // parseLine returns the events one transcript line holds, if it is inside the
@@ -179,11 +208,12 @@ func clip(s string) string {
 // buildState returns the state for one nudge: the bead's title and acceptance,
 // and the window's events. When the state would pass the token cap, the oldest
 // events are dropped until it fits.
-func buildState(issue *beads.Issue, events []Event) State {
+func buildState(issue *beads.Issue, events []Event, clipped bool) State {
 	st := State{
 		BeadTitle:      truncate(issue.Title, truncateRunes),
 		BeadAcceptance: truncate(land.CriteriaText(issue), truncateRunes),
 		WindowMinutes:  int(transcriptWindow / time.Minute),
+		WindowClipped:  clipped,
 		Events:         events,
 	}
 	if st.Events == nil {

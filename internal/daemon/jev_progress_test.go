@@ -213,6 +213,103 @@ func TestJevProgressTriggerWaitsForAQueuedNudge(t *testing.T) {
 	}
 }
 
+// The guard's nudge finds the seat's worktree and asks for its live transcript,
+// and queues the nudge with that path. A seat with no worktree asks for nothing
+// and queues its nudge with no transcript, so its line logs no_transcript. The
+// lookup is a seam, so the test does not reach the Claude config dir.
+func TestJevProgressEnqueueFindsTheSeatTranscript(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	worktree := filepath.Join(town, "gastown", "polecats", "capable", "gastown")
+	if err := os.MkdirAll(worktree, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(worktree, ".git"), []byte("gitdir: elsewhere\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	transcript := filepath.Join(town, "claude", "session.jsonl")
+
+	d, _ := newOverrunDaemon(t, false)
+	d.config.TownRoot = town
+	d.patrolConfig.Patrols.JevProgress = &JevProgressConfig{Enabled: true}
+	var looked []string
+	d.jevProgressLatest = func(workDir string) (string, error) {
+		looked = append(looked, workDir)
+		return transcript, nil
+	}
+	now := time.Now()
+	d.enqueueJevProgress(overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-hurgx"}, now)
+	d.enqueueJevProgress(overrunSeat{Rig: "gastown", Polecat: "ghost", Bead: "gt-hurgx"}, now)
+
+	if len(looked) != 1 || looked[0] != worktree {
+		t.Fatalf("transcript lookups = %v, want one lookup in the seat's worktree %s", looked, worktree)
+	}
+	got := d.jevProgressQueue.Drain()
+	if len(got) != 2 {
+		t.Fatalf("queue holds %d nudges, want 2", len(got))
+	}
+	if got[0].Transcript != transcript {
+		t.Errorf("seat transcript = %q, want %q", got[0].Transcript, transcript)
+	}
+	if got[1].Transcript != "" {
+		t.Errorf("a seat with no worktree got transcript %q, want none", got[1].Transcript)
+	}
+}
+
+// A pass that stops partway logs its counts under its own line, so the log
+// never reads like a clean pass that dropped nothing.
+func TestJevProgressStoppedPassLogsItsCounts(t *testing.T) {
+	t.Parallel()
+	rt := &progressJev{}
+	town := t.TempDir()
+	var buf bytes.Buffer
+	d := &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(&buf, "", 0),
+	}
+	transcript := writeProgressTranscript(t, town)
+	d.jevProgressQueue.Push(progress.Nudge{
+		Rig: "gastown", Polecat: "capable", Bead: "gt-hurgx",
+		Session: "gt-capable", At: progressNow.Add(-time.Minute), Transcript: transcript,
+	})
+	// A regular file where the log's directory should be makes the append fail.
+	blocker := filepath.Join(town, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	d.jevProgressOpen = func(townRoot string, q *progress.Queue, _ progress.Settings, _ io.Writer) (*progress.Pass, error) {
+		client, err := jev.NewClient(
+			jev.WithHTTPClient(&http.Client{Transport: rt}),
+			jev.WithBaseURL("https://jev.test/v1/systemone"),
+			jev.WithKey("test-key"),
+		)
+		if err != nil {
+			return nil, err
+		}
+		return &progress.Pass{
+			Asker:    client,
+			Queue:    q,
+			TownRoot: townRoot,
+			LogPath:  filepath.Join(blocker, "progress.jsonl"),
+			Allows:   func() (bool, error) { return true, nil },
+			Now:      func() time.Time { return progressNow },
+			Issue: func(rig, id string) (*beads.Issue, error) {
+				return &beads.Issue{ID: id, Title: "Polecat progress battery"}, nil
+			},
+		}, nil
+	}
+
+	d.runJevProgress()
+
+	got := buf.String()
+	if !strings.Contains(got, "jev_progress: pass stopped:") || !strings.Contains(got, "(asked 0, unanswered 0, dropped 1)") {
+		t.Errorf("log = %q, want a pass-stopped line with its counts", got)
+	}
+	if strings.Contains(got, "daily cap reached") {
+		t.Errorf("a stopped pass logged the clean-pass line: %q", got)
+	}
+}
+
 // progressNow is the clock the pass test runs on.
 var progressNow = time.Date(2026, 10, 21, 0, 30, 0, 0, time.UTC)
 

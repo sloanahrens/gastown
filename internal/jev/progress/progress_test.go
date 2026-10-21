@@ -307,6 +307,141 @@ func TestJevProgressUnreadableNudgesLogReasonAndContinue(t *testing.T) {
 	}
 }
 
+// A symlink inside the town that points outside it is refused: the containment
+// check runs on the resolved path, so the target is never opened.
+func TestJevProgressSymlinkOutOfTownIsRefused(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	target := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(target, []byte(line("assistant", "2026-10-21T00:25:00Z", textBlock("escaped"))+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(town, ".claude-town", "projects", "polecat", "linked.jsonl")
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	q := &Queue{}
+	q.Push(nudgeFor(link))
+	asker := &fakeAsker{ans: fixtureAnswers()}
+
+	if _, err := newPass(t, town, asker, q).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if asker.calls != 0 {
+		t.Errorf("Ask calls = %d, want 0: a transcript outside the town must not be read", asker.calls)
+	}
+	lines := readLog(t, LogPath(town))
+	if len(lines) != 1 || lines[0].Reason != ReasonOutsideTown {
+		t.Fatalf("log = %+v, want one line with reason %s", lines, ReasonOutsideTown)
+	}
+}
+
+// A town root that is itself a symlink still matches its transcripts: both
+// sides are resolved before the check.
+func TestJevProgressTownUnderASymlinkStillMatches(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	townLink := filepath.Join(t.TempDir(), "gt")
+	if err := os.Symlink(town, townLink); err != nil {
+		t.Fatal(err)
+	}
+	path := writeTranscript(t, town, line("assistant", "2026-10-21T00:25:00Z", textBlock("working")))
+	q := &Queue{}
+	q.Push(nudgeFor(path))
+	asker := &fakeAsker{ans: fixtureAnswers()}
+
+	if _, err := newPass(t, townLink, asker, q).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if asker.calls != 1 {
+		t.Errorf("Ask calls = %d, want 1: a transcript under a symlinked town root is in the town", asker.calls)
+	}
+}
+
+// A progress log that cannot be appended to ends the pass. The nudge whose line
+// failed and every nudge after it count as dropped, and Run reports the error.
+func TestJevProgressLogFailureStopsThePassAndCountsDrops(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	blocker := filepath.Join(town, "blocker")
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	path := writeTranscript(t, town, line("assistant", "2026-10-21T00:25:00Z", textBlock("working")))
+	q := &Queue{}
+	q.Push(nudgeFor(path))
+	q.Push(nudgeFor(path))
+	asker := &fakeAsker{ans: fixtureAnswers()}
+	p := newPass(t, town, asker, q)
+	p.LogPath = filepath.Join(blocker, "progress.jsonl")
+
+	sum, err := p.Run(context.Background())
+	if err == nil {
+		t.Fatalf("Run returned no error for an unwritable log; summary = %+v", sum)
+	}
+	if sum.Dropped != 2 || sum.Asked != 0 || sum.Unanswered != 0 {
+		t.Errorf("summary = %+v, want 2 dropped and nothing counted", sum)
+	}
+}
+
+// bulkLines returns n transcript lines of about a kilobyte each, stamped at ts.
+// A few thousand of them are enough to push a transcript past the tail the
+// pass reads.
+func bulkLines(ts string, n int) []string {
+	long := strings.Repeat("y", 1000)
+	out := make([]string, n)
+	for i := range out {
+		out[i] = line("assistant", ts, textBlock(long))
+	}
+	return out
+}
+
+// A window whose start lies before the tail the pass reads is marked clipped:
+// the events from its start are missing, and the state says so.
+func TestJevProgressWindowClippedWhenTheTailMissesItsStart(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := writeTranscript(t, town, bulkLines("2026-10-21T00:25:00Z", tailBytes/1000+1000)...)
+	q := &Queue{}
+	q.Push(nudgeFor(path))
+	asker := &fakeAsker{ans: fixtureAnswers()}
+
+	if _, err := newPass(t, town, asker, q).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st := asker.state.(State)
+	if !st.WindowClipped {
+		t.Error("window_clipped = false, want true: the window starts before the tail")
+	}
+}
+
+// A file longer than the tail whose tail already starts before the window is
+// not clipped: every event in the window is in the tail.
+func TestJevProgressWindowNotClippedWhenTheTailStartsBeforeIt(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	old := bulkLines("2026-10-21T00:05:00Z", tailBytes/1000+1000)
+	recent := line("assistant", "2026-10-21T00:25:00Z", textBlock("recent"))
+	path := writeTranscript(t, town, append(old, recent)...)
+	q := &Queue{}
+	q.Push(nudgeFor(path))
+	asker := &fakeAsker{ans: fixtureAnswers()}
+
+	if _, err := newPass(t, town, asker, q).Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	st := asker.state.(State)
+	if st.WindowClipped {
+		t.Error("window_clipped = true, want false: the tail covers the whole window")
+	}
+	if len(st.Events) != 1 || st.Events[0].Text != "recent" {
+		t.Errorf("events = %+v, want the one recent event", st.Events)
+	}
+}
+
 // A bead that cannot be read logs its nudge with null answers and does not
 // reach Jev.
 func TestJevProgressBeadUnreadableLogsReason(t *testing.T) {
