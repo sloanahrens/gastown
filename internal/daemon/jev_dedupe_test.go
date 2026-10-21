@@ -443,3 +443,43 @@ func TestJevDedupePassStopsBetweenCallsWhenEstopped(t *testing.T) {
 		t.Errorf("log = %q, want the pass to say it stopped for the E-stop", r.logs)
 	}
 }
+
+// gateCountingAsker counts the calls that reach it.
+type gateCountingAsker struct{ calls int }
+
+func (a *gateCountingAsker) Ask(context.Context, any, map[string]jev.Question) (*jev.Answers, error) {
+	a.calls++
+	return &jev.Answers{}, nil
+}
+
+// Once the gate has seen the E-stop it refuses every later call, so a Run that
+// ignores the cancelled context cannot bill again if the E-stop lifts mid-pass.
+func TestEstopGateStaysStoppedWhenTheEstopLifts(t *testing.T) {
+	t.Parallel()
+	inner := &gateCountingAsker{}
+	up := false
+	cancelled := 0
+	gate := &estopGatedAsker{
+		inner:  inner,
+		cancel: func() { cancelled++ },
+		active: func() bool { return up },
+	}
+
+	if _, err := gate.Ask(context.Background(), nil, nil); err != nil {
+		t.Fatalf("Ask with no E-stop: %v", err)
+	}
+	up = true
+	if _, err := gate.Ask(context.Background(), nil, nil); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Ask under the E-stop = %v, want context.Canceled", err)
+	}
+	up = false
+	if _, err := gate.Ask(context.Background(), nil, nil); !errors.Is(err, context.Canceled) {
+		t.Errorf("Ask after the E-stop lifted = %v, want context.Canceled", err)
+	}
+	if !gate.stopped {
+		t.Error("gate.stopped = false after the E-stop")
+	}
+	if inner.calls != 1 || cancelled != 1 {
+		t.Errorf("inner calls = %d, cancels = %d, want 1 and 1", inner.calls, cancelled)
+	}
+}
