@@ -597,11 +597,9 @@ func (d *Daemon) noteStuckWait(now time.Time, m *restartPendingMarker, own strin
 //
 // Soft daemon work in flight does not keep the drain on: upgradeHold names the
 // sweep ahead of it, and a plugin run, a dispatch tick, a scan or a paid pass
-// has no landing pass to protect. Counting it as a hold left the deferral
-// almost never firing, one such pass being in flight at most heartbeats, so a
-// sweep drained landings for its whole length anyway (gt-9vjw8). Hard work
-// still keeps the drain, and upgradeHold returns any hard hold before the
-// sweep, so a hold that names the sweep is already the hard-free case.
+// has no landing pass to protect (gt-9vjw8). Hard work still keeps the drain,
+// and upgradeHold returns any hard hold before the sweep, so a hold that names
+// the sweep is already the hard-free case.
 func (d *Daemon) upgradeDrainDeferred(hold *daemonWork) bool {
 	if hold == nil || hold.name != tierSweepHoldLabel {
 		return false
@@ -695,8 +693,10 @@ func (d *Daemon) landingPassBead() string {
 // requested: nil when none is requested or the daemon is no longer idle, and
 // otherwise the normal shutdown (which leaves Dolt running) plus
 // ErrRestartForUpgrade for Run to return, which the caller maps to exit code
-// 75. Run-loop goroutine only.
-func (d *Daemon) exitForUpgradeIfRequested(state *State) error {
+// 75. now is the clock of the decision that requested the restart, so the
+// durations this commit writes are measured on the marker's wait clock rather
+// than mixing in a second clock. Run-loop goroutine only.
+func (d *Daemon) exitForUpgradeIfRequested(state *State, now time.Time) error {
 	if !d.upgradeRestartRequested.Load() {
 		return nil
 	}
@@ -706,7 +706,7 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State) error {
 		// one was removed): there is nothing to restart onto, so end the
 		// drain instead of holding the landing workers for a heartbeat.
 		d.upgradeRestartRequested.Store(false)
-		d.endUpgradeDrain(time.Now())
+		d.endUpgradeDrain(now)
 		return nil
 	}
 	// The idle read behind the request raced the landing worker's own
@@ -718,7 +718,7 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State) error {
 	// drain is still on, so this pass is the last one (gt-3cbee).
 	if d.landingPasses.Load() > 0 {
 		d.upgradeRestartRequested.Store(false)
-		d.logUpgradeWait(landingHoldName(d.landingPassBead()), time.Now())
+		d.logUpgradeWait(landingHoldName(d.landingPassBead()), now)
 		return nil
 	}
 	if err := stampRestartAttempt(d.config.TownRoot, own); err != nil {
@@ -729,7 +729,7 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State) error {
 	// A drain that is on ends with this restart: name the time it cost before
 	// the restart lines, so the log of an upgrade says how long landings were
 	// held and on what (gt-9vjw8).
-	d.reportDrainHeld(time.Now())
+	d.reportDrainHeld(now)
 	d.logger.Printf("upgrade-restart: idle; restarting from %s to pick up %s", own, m.Commit)
 	d.logger.Println("Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary")
 	_ = d.shutdown(state)
@@ -739,7 +739,9 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State) error {
 // restartOnDrainedLanding is the run loop's response to a landing worker
 // waking it at the end of a drained pass: the pass was the last thing a
 // pending restart waited for, so check now and restart if idle (gt-fzwcd).
+// One clock serves both the check and the commit.
 func (d *Daemon) restartOnDrainedLanding(state *State) error {
-	d.checkUpgradeRestart(time.Now())
-	return d.exitForUpgradeIfRequested(state)
+	now := time.Now()
+	d.checkUpgradeRestart(now)
+	return d.exitForUpgradeIfRequested(state, now)
 }

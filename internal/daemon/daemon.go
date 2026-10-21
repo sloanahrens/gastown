@@ -1335,7 +1335,7 @@ func (d *Daemon) Run() (err error) {
 	// Initial heartbeat
 	d.heartbeat(state)
 	startupComplete = true
-	if err := d.exitForUpgradeIfRequested(state); err != nil {
+	if err := d.exitForUpgradeIfRequested(state, time.Now()); err != nil {
 		return err
 	}
 
@@ -1485,7 +1485,7 @@ func (d *Daemon) Run() (err error) {
 
 		case <-timer.C:
 			d.heartbeat(state)
-			if err := d.exitForUpgradeIfRequested(state); err != nil {
+			if err := d.exitForUpgradeIfRequested(state, time.Now()); err != nil {
 				return err
 			}
 
