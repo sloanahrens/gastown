@@ -2044,19 +2044,9 @@ func TestPoolPolecatSeatStateLandedLookupFailureStaysUnpushed(t *testing.T) {
 // each of the six. The idle polecats hold no seat, so the count is empty.
 func TestPoolRouterReadsSeatsThroughTheBatch(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	writeTestRigsConfig(t, town, "gastown", "longeye")
-	db := beadsfake.New()
-	for _, rig := range []string{"gastown", "longeye"} {
-		for _, name := range []string{"p01", "p02", "p03"} {
-			writeTownPolecatDir(t, town, rig, name)
-			seedPolecatAgentBead(db, town, rig, name, "")
-		}
-	}
+	town, db := seatBatchTown(t)
 	reads := newSpecTickReads()
-	r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return reads.client(db) })
-	r.pool = func() *config.PolecatPool { return seatPool(claimAgent, 2) }
-	r.sessions = func() sessionLister { return &fakeLister{sessions: map[string]map[string]string{}} }
+	r := seatBatchRouter(town, db, reads, &fakeLister{sessions: map[string]map[string]string{}})
 
 	got, err := r.occupied()()
 	if err != nil {
@@ -2155,5 +2145,91 @@ func TestRouteWithSnapshotAdmitsOneOfTwoConcurrentSlings(t *testing.T) {
 	}
 	if admitted != 1 || refused != 1 {
 		t.Fatalf("admitted %d refused %d over a one-seat pool, want 1 and 1: %+v", admitted, refused, results)
+	}
+}
+
+// seatBatchTown is two rigs of three idle polecat directories each, every one
+// with its agent bead and no hook.
+func seatBatchTown(t *testing.T) (string, *beadsfake.Fake) {
+	t.Helper()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown", "longeye")
+	db := beadsfake.New()
+	for _, rig := range []string{"gastown", "longeye"} {
+		for _, name := range []string{"p01", "p02", "p03"} {
+			writeTownPolecatDir(t, town, rig, name)
+			seedPolecatAgentBead(db, town, rig, name, "")
+		}
+	}
+	return town, db
+}
+
+// seatBatchRouter is the router over db, with its bd reads counted by reads and
+// its sessions listed by lister.
+func seatBatchRouter(town string, db *beadsfake.Fake, reads *specTickReads, lister sessionLister) *poolRouter {
+	r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return reads.client(db) })
+	r.pool = func() *config.PolecatPool { return seatPool(claimAgent, 2) }
+	r.sessions = func() sessionLister { return lister }
+	return r
+}
+
+// TestPoolRouterCountsSeatHoldersThroughTheBatch is the seat picture with one
+// polecat holding its seat on a live session. The router counts it from the
+// same batched reads the idle polecats cost (gt-rcktb).
+func TestPoolRouterCountsSeatHoldersThroughTheBatch(t *testing.T) {
+	t.Parallel()
+	town, db := seatBatchTown(t)
+	reads := newSpecTickReads()
+	lister := &fakeLister{sessions: map[string]map[string]string{
+		"gt-p01": {"GT_ROLE": "gastown/polecats/p01", "GT_AGENT": claimAgent},
+	}}
+	r := seatBatchRouter(town, db, reads, lister)
+
+	got, err := r.occupied()()
+	if err != nil {
+		t.Fatalf("occupied: %v", err)
+	}
+	if len(got) != 1 || got[0].rig != "gastown" || got[0].polecat != "p01" {
+		t.Fatalf("seat holders = %+v, want gastown/p01 alone", got)
+	}
+	if calls := reads.Calls(); calls != 4 {
+		t.Fatalf("bd calls = %d, want 4 (agent beads and assigned work, once per rig)", calls)
+	}
+}
+
+// TestPoolRouterSeatBatchLivesOneDecision pins how long the batch's reads hold.
+// A router answers from the reads it made, so a second occupancy read on the
+// same router does not see a hook set since. The next decision's router reads
+// the rig again and counts the polecat whose hook changed (gt-rcktb).
+func TestPoolRouterSeatBatchLivesOneDecision(t *testing.T) {
+	t.Parallel()
+	town, db := seatBatchTown(t)
+	reads := newSpecTickReads()
+	lister := &fakeLister{sessions: map[string]map[string]string{}}
+	first := seatBatchRouter(town, db, reads, lister)
+
+	if got, err := first.occupied()(); err != nil || len(got) != 0 {
+		t.Fatalf("first decision = %+v, %v; want no seats", got, err)
+	}
+	firstCalls := reads.Calls()
+
+	// p02 takes a hook on work in progress after the first decision read the rig.
+	db.Seed(beads.Issue{ID: "gt-p02-work", Status: string(beads.StatusInProgress), Assignee: "gastown/polecats/p02"})
+	seedPolecatAgentBead(db, town, "gastown", "p02", "gt-p02-work")
+
+	if got, err := first.occupied()(); err != nil || len(got) != 0 {
+		t.Fatalf("same router = %+v, %v; want no seats from the batch it read", got, err)
+	}
+	if calls := reads.Calls(); calls != firstCalls {
+		t.Fatalf("same router re-read the rig: bd calls = %d, want %d", calls, firstCalls)
+	}
+
+	next := seatBatchRouter(town, db, reads, lister)
+	got, err := next.occupied()()
+	if err != nil {
+		t.Fatalf("next decision: %v", err)
+	}
+	if len(got) != 1 || got[0].rig != "gastown" || got[0].polecat != "p02" || !got[0].deadHooked {
+		t.Fatalf("next decision = %+v, want gastown/p02 as a dead-hooked seat", got)
 	}
 }
