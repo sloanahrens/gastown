@@ -511,8 +511,8 @@ func TestJevDriftReadFailureStopsThePass(t *testing.T) {
 	r := newRig(t, bad, good)
 	r.serve(good, "1\t1\tinternal/cmd/jev_landing.go\n", recentFlagPatch)
 	r.serve(bad, "1\t1\tinternal/cmd/jev_landing.go\n", recentFlagPatch)
-	flaky := &perRecordErr{Repo: r.git, errs: map[string]error{bad.Head: errors.New("bad object")}}
-	r.pass.Git = flaky
+	badRecord := &perRecordErr{Repo: r.git, errs: map[string]error{bad.Head: errors.New("bad object")}}
+	r.pass.Git = badRecord
 	if err := battery.WriteCursor(r.cursor, battery.Cursor{Time: t0}); err != nil {
 		t.Fatal(err)
 	}
@@ -527,7 +527,7 @@ func TestJevDriftReadFailureStopsThePass(t *testing.T) {
 		t.Errorf("cursor = %+v, want it unmoved", cur)
 	}
 
-	flaky.errs = nil
+	badRecord.errs = nil
 	sum, err := r.pass.Run(context.Background())
 	if err != nil {
 		t.Fatal(err)
