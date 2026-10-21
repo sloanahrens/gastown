@@ -400,6 +400,45 @@ func TestMaintenanceGCExternal(t *testing.T) {
 	}
 }
 
+func TestLoopbackHostAgreesWithRemoteVerdict(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		host  string
+		local bool
+	}{
+		{"", true},
+		{"127.0.0.1", true},
+		{"localhost", true},
+		{"::1", true},
+		{"[::1]", true},
+		{"localhost.", true},
+		{"192.0.2.1", false},
+	} {
+		mgr := &DoltServerManager{config: &DoltServerConfig{Enabled: true, Host: tc.host}}
+		if got := isLoopbackHost(tc.host); got != tc.local {
+			t.Errorf("isLoopbackHost(%q) = %v, want %v", tc.host, got, tc.local)
+		}
+		if got := !mgr.isRemote(); got != tc.local {
+			t.Errorf("isRemote(%q) verdict local = %v, want %v", tc.host, got, tc.local)
+		}
+	}
+}
+
+func TestMaintenanceGCLoopbackAliasIsNotExternal(t *testing.T) {
+	t.Parallel()
+	for _, host := range []string{"127.0.0.1", "::1", "[::1]", "localhost", "localhost.", "LOCALHOST"} {
+		d := &Daemon{
+			config:     &Config{TownRoot: t.TempDir()},
+			logger:     log.New(io.Discard, "", 0),
+			doltServer: &DoltServerManager{config: &DoltServerConfig{Enabled: true}},
+		}
+		writeManagedDoltConfig(t, d.config.TownRoot, fmt.Sprintf("listener:\n  host: %q\n  port: 3307\n", host))
+		if ext, why := d.maintenanceGCExternal(); ext {
+			t.Errorf("loopback alias %q reported external: %s", host, why)
+		}
+	}
+}
+
 func TestDoltGCFullRefusesInvalidNameBeforeConnecting(t *testing.T) {
 	t.Parallel()
 	d, _ := gcTestDaemon(t)
