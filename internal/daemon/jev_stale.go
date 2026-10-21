@@ -41,7 +41,9 @@ func (d *Daemon) triggerJevStale() {
 	}
 	go func() {
 		defer d.jevStaleRunning.Store(false)
-		d.runJevStale()
+		if !d.runJevStale() {
+			return
+		}
 		if err := savePatrolLastRun(d.config.TownRoot, "jev_stale", d.clk().Now()); err != nil {
 			d.logger.Printf("jev_stale: WARNING: cannot persist last-run time (%v)", err)
 		}
@@ -49,10 +51,13 @@ func (d *Daemon) triggerJevStale() {
 }
 
 // runJevStale does one pass over the operational rigs with the settings in the
-// patrol config. A failure is logged, and the last-run time still advances, so
-// a missing price or a down hm costs one line a week rather than one per
+// patrol config. It reports false when the E-stop ended the pass: that week is
+// not spent, so the next heartbeat after the E-stop clears runs the pass again,
+// and the log keeps it from asking about the same beads twice. Any other end,
+// including a failure, reports true and the last-run time advances, so a
+// missing price or a down hm costs one line a week rather than one per
 // heartbeat.
-func (d *Daemon) runJevStale() {
+func (d *Daemon) runJevStale() bool {
 	var settings stale.Settings
 	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevStale != nil {
 		settings = stale.Settings{
@@ -67,7 +72,7 @@ func (d *Daemon) runJevStale() {
 	pass, err := open(d.config.TownRoot, d.getPatrolRigs("jev_stale"), settings, d.logger.Writer())
 	if err != nil {
 		d.logger.Printf("jev_stale: error: %v", err)
-		return
+		return true
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), jevStaleRunBudget)
 	defer cancel()
@@ -83,20 +88,21 @@ func (d *Daemon) runJevStale() {
 	sum, err := pass.Run(ctx)
 	if gate.stopped {
 		d.logger.Printf("jev_stale: stopped: E-STOP active after asking %d bead(s)", sum.Asked)
-		return
+		return false
 	}
 	if errors.Is(err, stale.ErrBusy) {
 		d.logger.Printf("jev_stale: skipped: %v", err)
-		return
+		return true
 	}
 	if err != nil {
 		d.logger.Printf("jev_stale: error: %v", err)
-		return
+		return true
 	}
 	if sum.Asked > 0 || sum.Unanswered > 0 || sum.Deferred > 0 || sum.CapReached || sum.UnreadRigs > 0 {
 		d.logger.Printf("jev_stale: asked %d beads, %d unanswered, %d deferred, %d rigs unread (daily cap reached: %v)",
 			sum.Asked, sum.Unanswered, sum.Deferred, sum.UnreadRigs, sum.CapReached)
 	}
+	return true
 }
 
 // staleEstopGatedAsker is the E-stop's check between one billed call and the

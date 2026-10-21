@@ -281,6 +281,43 @@ func TestJevStalePassStopsBetweenCallsWhenEstopped(t *testing.T) {
 	}
 }
 
+// An E-stop that ends a pass does not spend the week: no last-run is recorded,
+// so the next trigger after the E-stop clears runs the pass, and the bead the
+// stop cut short is the one it asks about.
+func TestJevStaleEstopLeavesTheWeekUnspent(t *testing.T) {
+	t.Parallel()
+	r := newJevStaleRig(t)
+	r.pass.Beads = staleBeads{open: []*beads.Issue{staleBead("gt-a"), staleBead("gt-b")}}
+	r.asker.onAsk = func() {
+		if r.asker.calls == 1 {
+			if err := estop.Activate(r.town, "test", "stop the stale read"); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	r.d.triggerJevStale()
+	waitJevStaleIdle(t, r.d)
+
+	if _, found, _ := loadPatrolLastRun(r.town, "jev_stale"); found {
+		t.Fatal("an E-stopped pass recorded its last run")
+	}
+	if err := estop.Deactivate(r.town, false); err != nil {
+		t.Fatal(err)
+	}
+	r.asker.onAsk = nil
+
+	r.d.triggerJevStale()
+	waitJevStaleIdle(t, r.d)
+
+	if r.opened != 2 || r.asker.calls != 2 {
+		t.Errorf("opened %d passes with %d calls, want the second pass to ask the one bead left", r.opened, r.asker.calls)
+	}
+	if _, found, _ := loadPatrolLastRun(r.town, "jev_stale"); !found {
+		t.Error("no last-run record after the pass that finished")
+	}
+}
+
 // A run that finds the lock held logs it as skipped, not as a failure.
 func TestJevStaleRunLogsABusyLockAsSkipped(t *testing.T) {
 	t.Parallel()
