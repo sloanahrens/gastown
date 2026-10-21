@@ -2,9 +2,11 @@ package land
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"os"
@@ -77,11 +79,14 @@ func ReadRecentSubmissionRecords(path string, n int) ([]SubmissionRecord, error)
 	return recs, nil
 }
 
-// TrimSubmissionRecords rewrites the log at path without the records keep
-// rejects, and returns how many it dropped. A kept line is copied byte for
-// byte, and a line that does not parse is kept, so the record shape never
-// changes. The rewrite holds the log's lock, the one Append takes, so no
-// record lands between the read and the rename.
+// TrimSubmissionRecords drops the records keep rejects from the log at path,
+// and returns how many it dropped. A kept line is copied byte for byte, and a
+// line that does not parse is kept, so the record shape never changes.
+//
+// The log is rewritten in place, under the lock Append takes. Every reader and
+// writer locks the log's own inode, so the lock excludes all of them only while
+// the log stays that inode. A rename over the log would leave an Append that
+// had already opened the old inode holding a lock nobody else takes.
 func TrimSubmissionRecords(path string, keep func(SubmissionRecord) bool) (int, error) {
 	// FlockAcquire creates a missing lock file at 0644, and the log is 0600,
 	// so a missing log is left alone before the lock is taken.
@@ -94,50 +99,47 @@ func TrimSubmissionRecords(path string, keep func(SubmissionRecord) bool) (int, 
 	}
 	defer unlock()
 
-	in, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
 	if errors.Is(err, fs.ErrNotExist) {
 		return 0, nil
 	}
 	if err != nil {
 		return 0, fmt.Errorf("opening %s: %w", path, err)
 	}
-	defer func() { _ = in.Close() }()
+	defer func() { _ = f.Close() }()
 
-	out, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".trim-*")
-	if err != nil {
-		return 0, fmt.Errorf("creating the trimmed log: %w", err)
-	}
-	defer func() { _ = os.Remove(out.Name()) }()
-
+	// The whole log is read before a byte is written back, so the rewrite
+	// never overwrites a line it has not read. Lines have no length cap: a
+	// record over a scanner's limit would stop the trim, and the log could
+	// then never shrink.
+	var kept bytes.Buffer
 	dropped := 0
-	w := bufio.NewWriter(out)
-	sc := bufio.NewScanner(in)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for sc.Scan() {
-		line := sc.Text()
-		var rec SubmissionRecord
-		if strings.TrimSpace(line) != "" && json.Unmarshal([]byte(line), &rec) == nil && !keep(rec) {
-			dropped++
-			continue
+	r := bufio.NewReader(f)
+	for {
+		line, err := r.ReadBytes('\n')
+		if len(line) > 0 {
+			var rec SubmissionRecord
+			if len(bytes.TrimSpace(line)) > 0 && json.Unmarshal(line, &rec) == nil && !keep(rec) {
+				dropped++
+			} else {
+				kept.Write(line)
+			}
 		}
-		if _, err := w.WriteString(line + "\n"); err != nil {
-			_ = out.Close()
-			return 0, fmt.Errorf("writing the trimmed log: %w", err)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return 0, fmt.Errorf("reading %s: %w", path, err)
 		}
 	}
-	if err := sc.Err(); err != nil {
-		_ = out.Close()
-		return 0, fmt.Errorf("reading %s: %w", path, err)
+	if dropped == 0 {
+		return 0, nil
 	}
-	if err := w.Flush(); err != nil {
-		_ = out.Close()
+	if _, err := f.WriteAt(kept.Bytes(), 0); err != nil {
 		return 0, fmt.Errorf("writing the trimmed log: %w", err)
 	}
-	if err := out.Close(); err != nil {
-		return 0, fmt.Errorf("writing the trimmed log: %w", err)
-	}
-	if err := os.Rename(out.Name(), path); err != nil {
-		return 0, fmt.Errorf("replacing %s: %w", path, err)
+	if err := f.Truncate(int64(kept.Len())); err != nil {
+		return 0, fmt.Errorf("trimming %s: %w", path, err)
 	}
 	return dropped, nil
 }

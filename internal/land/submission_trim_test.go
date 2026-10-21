@@ -91,3 +91,36 @@ func TestTrimSubmissionRecordsLeavesAMissingLogAlone(t *testing.T) {
 		t.Errorf("trimming a missing log created %d files", len(entries))
 	}
 }
+
+// A line over the scanner's limit is kept byte for byte, and the record after it
+// is still trimmed, so one long record cannot stop the log from shrinking.
+func TestTrimSubmissionRecordsCopiesALineOverTheScannerLimit(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), SubmissionsSeenFile)
+	if err := battery.Append(path, SubmissionRecord{Bead: "gt-long", Head: "h", Numstat: strings.Repeat("x", 2<<20)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := battery.Append(path, SubmissionRecord{Bead: "gt-drop", Head: "h"}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	long := strings.SplitAfter(string(before), "\n")[0]
+
+	dropped, err := TrimSubmissionRecords(path, func(rec SubmissionRecord) bool { return rec.Bead != "gt-drop" })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dropped != 1 {
+		t.Errorf("dropped = %d, want 1", dropped)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != long {
+		t.Errorf("trimmed log is %d bytes, want the %d-byte long record alone", len(after), len(long))
+	}
+}

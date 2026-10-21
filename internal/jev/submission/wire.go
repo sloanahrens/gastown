@@ -128,8 +128,8 @@ type rigBeads struct {
 	b beadLister
 	// records is the first-sight log, land.SubmissionsSeenPath in production.
 	records string
-	// warnings receives a line for each record whose bead cannot be read, and
-	// for a log the window cannot hold. Nil drops them.
+	// warnings receives a line for each record whose bead cannot be read. Nil
+	// drops them.
 	warnings io.Writer
 }
 
@@ -141,7 +141,9 @@ type rigBeads struct {
 // When the log is longer than recordWindow, Since first trims it of the records
 // no pass can still ask about: those seen before t whose bead is not waiting at
 // the head they name. A waiting bead keeps its record, because the dedupe below
-// still needs it.
+// still needs it. If the trimmed log is still longer than the window, Since
+// returns an error: reading only the newest records would drop a waiting
+// bead's record and ask that bead a second time.
 func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 	waiting, err := r.b.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1, Limit: 0})
 	if err != nil {
@@ -161,22 +163,28 @@ func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 		listed = append(listed, Entry{Issue: issue, Work: w, Seen: w.Submitted})
 	}
 
-	recs, err := land.ReadRecentSubmissionRecords(r.records, recordWindow)
+	// One record past the window tells a log that fits from one that does not:
+	// only a log longer than the window is trimmed, so a log of exactly
+	// recordWindow records is not rewritten on every pass.
+	recs, err := land.ReadRecentSubmissionRecords(r.records, recordWindow+1)
 	if err != nil {
 		return nil, err
 	}
-	if len(recs) == recordWindow {
+	if len(recs) > recordWindow {
 		keep := func(rec land.SubmissionRecord) bool {
 			return !rec.SeenAt.Before(t) || waitingKeys[land.SubmissionKey(rec.Bead, rec.Head)]
 		}
 		if _, err := land.TrimSubmissionRecords(r.records, keep); err != nil {
-			r.warnf("jev submission: trimming %s: %v\n", r.records, err)
+			return nil, fmt.Errorf("jev submission: trimming %s: %w", r.records, err)
 		}
-		if recs, err = land.ReadRecentSubmissionRecords(r.records, recordWindow); err != nil {
+		if recs, err = land.ReadRecentSubmissionRecords(r.records, recordWindow+1); err != nil {
 			return nil, err
 		}
-		if len(recs) == recordWindow {
-			r.warnf("jev submission: %s holds more than %d records the pass may still ask about, so the oldest are not read\n", r.records, recordWindow)
+		// A window that is still full cannot show every record the dedupe
+		// needs. Reading on without them would ask a waiting bead twice, so
+		// the pass fails instead.
+		if len(recs) > recordWindow {
+			return nil, fmt.Errorf("jev submission: %s holds more than %d records the pass may still ask about; the pass cannot read them all", r.records, recordWindow)
 		}
 	}
 
