@@ -22,7 +22,7 @@ import (
 // The fixture log's lines. Two tick lines and two merge lines share a key,
 // the warning stands alone, and the last line has no word the pass reads.
 const (
-	lineTick1  = "2026/10/21 03:31:35 spec_dispatch: tick: 57 candidate(s), 0 refused, 0 planning"
+	lineTick1  = "2026/10/21 03:31:35 spec_dispatch: tick: 57 candidate(s), 2 refused, 0 planning"
 	lineTick2  = "2026/10/21 03:31:50 spec_dispatch: tick: 58 candidate(s), 1 refused, 0 planning"
 	lineMerge1 = "2026/10/21 03:32:01 landing_worker: gt-rpdhw: merge failed at 77b9028a after 3s"
 	lineMerge2 = "2026/10/21 03:33:12 landing_worker: gt-4mtmy: merge failed at 34cd71ae after 14s"
@@ -538,5 +538,104 @@ func TestJevLogtriageQuestionSet(t *testing.T) {
 	}
 	if Version != 1 {
 		t.Errorf("Version = %d, want 1 until a question changes", Version)
+	}
+}
+
+// TestJevLogtriageMatchedOn runs the filter over the daemon's own summary lines.
+// A summary whose counts are all zero keeps nothing; the same summary with a
+// count above zero keeps the line under the keyword that holds that count.
+func TestJevLogtriageMatchedOn(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name, line, want string
+	}{
+		{
+			name: "patrol summary with every count zero",
+			line: "2026/10/21 11:32:44 patrol_scan: devops: checked 7 polecat(s): 0 restarted, 0 refused, 0 unknown, 0 molecule(s) closed, 0 reopened, 0 error(s), 0 reaped, 0 would-reap, 0 blocked",
+			want: "",
+		},
+		{
+			name: "landing pass with 0 failed",
+			line: "2026/10/21 03:32:10 landing_worker: gastown: pass: 1 landed, 0 repaired, 0 rejected, 0 skipped, 0 failed",
+			want: "",
+		},
+		{
+			name: "patrol summary with refused above zero",
+			line: "2026/10/21 11:32:44 patrol_scan: devops: checked 7 polecat(s): 0 restarted, 2 refused, 0 unknown, 0 error(s), 0 blocked",
+			want: "refused",
+		},
+		{
+			name: "landing pass with failed above zero",
+			line: "2026/10/21 03:32:10 landing_worker: gastown: pass: 1 landed, 0 repaired, 0 rejected, 0 skipped, 1 failed",
+			want: "failed",
+		},
+		{
+			name: "error count zero, timeout count above zero",
+			line: "2026/10/21 03:32:10 dispatch: 0 error(s), 3 timeout",
+			want: "timeout",
+		},
+		{
+			name: "WARNING: anywhere in the line",
+			line: lineWarn,
+			want: "warning",
+		},
+		{
+			name: "warning at the start of the message",
+			line: "2026/10/21 03:36:00 warning: slow query",
+			want: "warning",
+		},
+		{
+			name: "warning mid-message in lower case",
+			line: "2026/10/21 03:36:00 dolt: warning: slow query",
+			want: "",
+		},
+		{
+			name: "error at the start of the message",
+			line: "2026/10/21 03:35:00 error: component cd crashed",
+			want: "error",
+		},
+		{
+			name: "a keyword with no count before it",
+			line: "2026/10/21 03:37:00 jsonl_git_backup: push failed",
+			want: "failed",
+		},
+		{
+			name: "a zero inside a bead id is not a count",
+			line: "2026/10/21 03:37:00 polecat gt-r0 refused",
+			want: "refused",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := matchedOn(tc.line); got != tc.want {
+				t.Errorf("matchedOn(%q) = %q, want %q", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestJevLogtriageMatchedOnIsLogged: a zero-count summary is not read, so it
+// asks nothing, and each logged group names the keyword that kept it.
+func TestJevLogtriageMatchedOnIsLogged(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	fx.logLines(
+		"2026/10/21 03:32:10 landing_worker: gastown: pass: 1 landed, 0 repaired, 0 rejected, 0 skipped, 0 failed",
+		lineMerge1, lineWarn)
+
+	sum := fx.run()
+	if sum.Matched != 2 || sum.Groups != 2 || len(fx.jev.requests) != 2 {
+		t.Fatalf("summary = %+v with %d calls, want 2 matched in 2 groups asked", sum, len(fx.jev.requests))
+	}
+	byKey := map[string]Line{}
+	for _, l := range fx.triage() {
+		byKey[l.Key] = l
+	}
+	if got := byKey[keyMerge].MatchedOn; got != "failed" {
+		t.Errorf("merge matched_on = %q, want failed", got)
+	}
+	if got := byKey[keyWarn].MatchedOn; got != "warning" {
+		t.Errorf("warning matched_on = %q, want warning", got)
 	}
 }

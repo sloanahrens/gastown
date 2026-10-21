@@ -52,6 +52,9 @@ type Line struct {
 	// Samples are the first MaxSamples lines of the group, as the daemon wrote
 	// them, each cut to maxSampleRunes.
 	Samples []string `json:"samples"`
+	// MatchedOn is the keyword that kept the group's first line, so the
+	// filter can be audited against the lines it kept.
+	MatchedOn string `json:"matched_on"`
 	// Answers maps each question id to its answer. Null when the group was not
 	// asked, and Reason says why.
 	Answers map[string]Answer `json:"answers"`
@@ -75,14 +78,15 @@ type Cursor struct {
 	Pending []pendingGroup `json:"pending,omitempty"`
 }
 
-// pendingGroup is a group carried to the next pass: its count, time range and
-// first samples so far.
+// pendingGroup is a group carried to the next pass: its count, time range,
+// first samples and keyword so far.
 type pendingGroup struct {
-	Key     string    `json:"key"`
-	Count   int       `json:"count"`
-	First   time.Time `json:"first"`
-	Last    time.Time `json:"last"`
-	Samples []string  `json:"samples"`
+	Key       string    `json:"key"`
+	Count     int       `json:"count"`
+	First     time.Time `json:"first"`
+	Last      time.Time `json:"last"`
+	Samples   []string  `json:"samples"`
+	MatchedOn string    `json:"matched_on"`
 }
 
 // answersFrom reads every question's answer out of one Ask result.
