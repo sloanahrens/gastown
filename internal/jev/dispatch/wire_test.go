@@ -132,9 +132,10 @@ func TestJevDispatchOpenKeepsTheConfiguredCap(t *testing.T) {
 		t.Fatalf("open: %v", err)
 	}
 
-	// A dollar spent today is the default cap, but it is under the 2.5 cap
-	// the settings name.
-	writeSpend(t, town, 250_000_000, "jev-dedupe")
+	// A dollar fifty spent today is over the default one-dollar cap, so a pass
+	// reading the default would stop here, but it is under the 2.5 the settings
+	// name.
+	writeSpend(t, town, 375_000_000, "jev-dedupe")
 	ok, err := p.Allows()
 	if err != nil {
 		t.Fatalf("Allows: %v", err)

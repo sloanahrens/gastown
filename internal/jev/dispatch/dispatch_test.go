@@ -513,6 +513,35 @@ func TestJevDispatchPassStopsAtTheDailyCap(t *testing.T) {
 	}
 }
 
+// A spend the pass cannot read stops it at that placement, as an unreachable
+// Jev does: nothing is asked, nothing is logged, and the cursor stays put so
+// the next pass asks the same bead.
+func TestJevDispatchPassStopsWhenTheCapCannotBeRead(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, []*beads.Issue{placed("gt-a", 10, specBody), placed("gt-b", 20, specBody)})
+	unreadable := errors.New("ledger unreadable")
+	h.pass.Allows = func() (bool, error) { return false, unreadable }
+
+	sum, err := h.pass.Run(context.Background())
+
+	if !errors.Is(err, unreadable) || !strings.Contains(err.Error(), "reading today's spend") {
+		t.Fatalf("Run error = %v, want the ledger's cause under reading today's spend", err)
+	}
+	if sum.Asked != 0 || sum.CapReached {
+		t.Errorf("summary = %+v, want nothing asked and no cap reached", sum)
+	}
+	if len(h.asker.states) != 0 {
+		t.Errorf("asked %d times with the spend unreadable, want none", len(h.asker.states))
+	}
+	if got := h.lines(t); len(got) != 0 {
+		t.Errorf("log = %v, want no line", got)
+	}
+	cur, ok, err := battery.ReadCursor(h.cursor)
+	if err != nil || !ok || !cur.Time.Equal(t0.Add(-time.Hour)) {
+		t.Errorf("cursor = %+v, %v, %v; want the untouched cursor at t0-1h", cur, ok, err)
+	}
+}
+
 func TestJevDispatchPassRetriesOneRateLimit(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, []*beads.Issue{placed("gt-a", 10, specBody)},
