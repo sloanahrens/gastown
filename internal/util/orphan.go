@@ -59,10 +59,13 @@ func addDescendants(parentPID int, childMap map[int][]int, pids map[int]bool) {
 	}
 }
 
-// sweepDeps is everything the orphan and zombie sweeps read from the machine
-// or do to it. liveSweepDeps wires the real implementations; the exported
-// sweep entry points pass that value in, and tests pass a canned one, so no
-// test runs ps or tmux, reads state files, or sends a real signal.
+// sweepDeps is every way the orphan and zombie sweeps reach the machine:
+// each field shells out (ps, tmux, lsof), sends a signal, or touches the state
+// files. liveSweepDeps wires the real implementations; the exported sweep
+// entry points pass that value in, and tests pass a canned one, so no test
+// runs ps, tmux or lsof, reads the real state files, or sends a real signal.
+// The state files are injected rather than reached through an env override
+// because the test policy forbids t.Setenv in unit tests.
 type sweepDeps struct {
 	snapshot   func() ([]processEntry, error)
 	tmuxPanes  func() map[int]bool
@@ -573,6 +576,11 @@ type OrphanedProcess struct {
 //
 // Additionally, processes must be older than minOrphanAge seconds to be considered
 // orphaned. This prevents race conditions with newly spawned processes.
+//
+// With no tmux pane PIDs at all — tmux unreachable, an unreadable socket
+// directory, or no server — every TTY-less claude looks stranded, so the scan
+// refuses and returns nothing (gt-4ah8h). The zombie sweep and the cleanup
+// TOCTOU re-check share that refusal through sweepPaneGuard.
 func FindOrphanedClaudeProcesses() ([]OrphanedProcess, error) {
 	return findOrphanedClaudeProcesses(liveSweepDeps())
 }
