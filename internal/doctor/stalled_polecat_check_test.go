@@ -8,8 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git/gitfake"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
@@ -26,9 +27,9 @@ func (f *fakeSessionChecker) HasSession(name string) (bool, error) {
 
 // fakePolecatGit implements polecatGit for testing.
 //
-// defaultBranch is "" unless a test opts in, which makes branchLandedOnDefault
-// decline to narrow anything — the pre-gt-4vbn behaviour, so tests that are not
-// about supersession read the same before and after the fix.
+// It answers land.WorkLandedRepo from canned fields: targetPreserved is whether
+// the commit is on origin's default branch, and nothing else proves a landing,
+// so tests that are not about supersession read as unlanded.
 type fakePolecatGit struct {
 	branch        string
 	branchErr     error
@@ -40,7 +41,7 @@ type fakePolecatGit struct {
 	fetchErr        error
 	targetPreserved bool
 	targetStatusErr error
-	targetsAsked    []string
+	targetsAsked    []string // "remote/target" as CommitLandedOnTarget was asked
 	fetchCalls      int
 	pushErr         error
 	pushCalls       []string
@@ -61,9 +62,20 @@ func (f *fakePolecatGit) FetchDefaultBranchWithTimeout(remote string, timeout ti
 	return f.fetchErr
 }
 
-func (f *fakePolecatGit) BranchTargetStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error) {
-	f.targetsAsked = targets
-	return git.BranchPreservationStatus{Preserved: f.targetPreserved}, f.targetStatusErr
+func (f *fakePolecatGit) CommitLandedOnTarget(remote, target, commit string) bool {
+	f.targetsAsked = append(f.targetsAsked, remote+"/"+target)
+	return f.targetPreserved && f.targetStatusErr == nil
+}
+
+func (f *fakePolecatGit) Rev(string) (string, error)            { return "head", nil }
+func (f *fakePolecatGit) RefExists(string) (bool, error)        { return false, nil }
+func (f *fakePolecatGit) IsAncestor(a, d string) (bool, error)  { return false, nil }
+func (f *fakePolecatGit) MergeBase(a, b string) (string, error) { return "", errors.New("not faked") }
+func (f *fakePolecatGit) DiffNameOnly(b, h string) ([]string, error) {
+	return nil, errors.New("not faked")
+}
+func (f *fakePolecatGit) DiffPathsNameOnly(a, b string, p []string) ([]string, error) {
+	return nil, errors.New("not faked")
 }
 
 func (f *fakePolecatGit) Push(remote, branch string, force bool) error {
@@ -90,12 +102,21 @@ func checkFor(t *testing.T, f *fakePolecatGit, beadStatus func(townRoot, beadID 
 	townRoot := t.TempDir()
 	makePolecatDir(t, townRoot, "testrig", "furiosa")
 
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
 	check.gitForTest = func(string) polecatGit { return f }
 	check.beadStatus = beadStatus
 
 	return check, check.Run(&CheckContext{TownRoot: townRoot, RigName: "testrig"})
+}
+
+// newTestCheck is NewStalledPolecatCheck with the bead read stubbed out: a
+// test town has no bd, and an unreadable bead would turn every "nothing proves
+// it landed" verdict into a probe failure.
+func newTestCheck() *StalledPolecatCheck {
+	check := NewStalledPolecatCheck()
+	check.beadIssue = func(string, string) (*beads.Issue, error) { return nil, nil }
+	return check
 }
 
 // openBeads is the injected lookup for tests that are not about supersession.
@@ -127,7 +148,7 @@ func TestStalledPolecatCheck_EmptyTownRoot(t *testing.T) {
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir}
 
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
@@ -140,7 +161,7 @@ func TestStalledPolecatCheck_NoPolecats(t *testing.T) {
 	tmpDir := t.TempDir()
 	ctx := &CheckContext{TownRoot: tmpDir, RigName: "testrig"}
 
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
@@ -150,7 +171,7 @@ func TestStalledPolecatCheck_NoPolecats(t *testing.T) {
 
 func TestStalledPolecatCheck_FixNoStalled(t *testing.T) {
 	t.Parallel()
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	// Fix with no stalled polecats should be a no-op
 	if err := check.Fix(&CheckContext{TownRoot: t.TempDir()}); err != nil {
 		t.Errorf("Fix() with no stalled polecats returned error: %v", err)
@@ -162,7 +183,7 @@ func TestStalledPolecatCheck_SessionLivenessErrorIsSkipped(t *testing.T) {
 	tmpDir := t.TempDir()
 	makePolecatDir(t, tmpDir, "testrig", "furiosa")
 
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	check.sessionCheckerForTest = &fakeSessionChecker{err: errors.New("tmux: no server running")}
 
 	ctx := &CheckContext{TownRoot: tmpDir, RigName: "testrig"}
@@ -200,7 +221,7 @@ func TestStalledPolecatCheck_UnknownDoesNotMaskConfirmedStall(t *testing.T) {
 	makePolecatDir(t, tmpDir, "testrig", "furiosa")
 	makePolecatDir(t, tmpDir, "testrig", "slate")
 
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
 	check.gitForTest = func(clonePath string) polecatGit {
 		if strings.Contains(clonePath, "furiosa") {
@@ -225,7 +246,7 @@ func TestStalledPolecatCheck_UnknownDoesNotMaskConfirmedStall(t *testing.T) {
 
 func TestStalledPolecatCheck_ResolveClonePath_NoDir(t *testing.T) {
 	t.Parallel()
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	path := check.resolveClonePath(t.TempDir(), "testrig", "furiosa")
 	if path != "" {
 		t.Errorf("resolveClonePath() = %q, want empty for nonexistent", path)
@@ -323,7 +344,7 @@ func TestStalledPolecatCheck_ContentCheckErrorStillWarns(t *testing.T) {
 
 func TestStalledPolecatCheck_BranchSupersededByTerminalBead(t *testing.T) {
 	t.Parallel()
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	branch := polecat.FormatGeneratedBranchName("furiosa", "gt-999", "abc123")
 
 	tests := []struct {
@@ -393,7 +414,7 @@ func TestStalledPolecatCheck_ClosedBeadDoesNotMaskConfirmedStall(t *testing.T) {
 	makePolecatDir(t, tmpDir, "testrig", "furiosa")
 	makePolecatDir(t, tmpDir, "testrig", "slate")
 
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
 	check.gitForTest = func(clonePath string) polecatGit {
 		if strings.Contains(clonePath, "furiosa") {
@@ -447,7 +468,7 @@ func TestStalledPolecatCheck_Fix_RefusesToResurrectLandedContent(t *testing.T) {
 		defaultBranch:   "main",
 		targetPreserved: false,
 	}
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
 	check.gitForTest = func(string) polecatGit { return f }
 	check.beadStatus = openBeads
@@ -484,7 +505,7 @@ func TestStalledPolecatCheck_Fix_PushesStillAtRiskBranch(t *testing.T) {
 		unpushedCount: 1,
 		defaultBranch: "main",
 	}
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
 	check.gitForTest = func(string) polecatGit { return f }
 	check.beadStatus = openBeads
@@ -513,7 +534,7 @@ func TestStalledPolecatCheck_Fix_RefusesToResurrectClosedBead(t *testing.T) {
 		unpushedCount: 1,
 		defaultBranch: "main",
 	}
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
 	check.gitForTest = func(string) polecatGit { return f }
 	check.beadStatus = func(_, _ string) (string, bool) { return "open", true }
@@ -612,7 +633,7 @@ func (f *stalledFixture) onOrigin(t *testing.T, branch string) bool {
 
 func (f *stalledFixture) run(t *testing.T, beadStatus func(string, string) (string, bool)) (*StalledPolecatCheck, *CheckResult) {
 	t.Helper()
-	check := NewStalledPolecatCheck()
+	check := newTestCheck()
 	// No tmux and no bd: the fixture's polecat has no session, and the tests
 	// that need a bead answer inject it.
 	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
@@ -703,6 +724,142 @@ func TestStalledPolecatCheck_FixDoesNotResurrectSupersededBranch(t *testing.T) {
 	}
 	if f.onOrigin(t, f.branch) {
 		t.Errorf("Fix() pushed a superseded branch back to origin")
+	}
+}
+
+// --- the shared landed-work predicate (gt-wlc9d) ---
+
+// TestStalledPolecatCheck_VerdictReasonReachesTheDetail drives the check with
+// each verdict land.WorkLandedOnTarget can give: only a proof clears the
+// branch, and a verdict that is not a plain "unpushed" names its Reason token
+// in the line the operator reads.
+func TestStalledPolecatCheck_VerdictReasonReachesTheDetail(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		verdict    land.WorkLandedVerdict
+		wantStatus CheckStatus
+		wantInLine string
+	}{
+		{"landed by ref", land.WorkLandedVerdict{Landed: true, Reason: land.WorkLandedByRef}, StatusOK, ""},
+		{"landed by record", land.WorkLandedVerdict{Landed: true, Reason: land.WorkLandedByRecord}, StatusOK, ""},
+		{"unpushed", land.WorkLandedVerdict{Reason: land.WorkUnpushed, Detail: "bead not read"}, StatusWarning, "no remote"},
+		{"landed differs", land.WorkLandedVerdict{Reason: land.WorkLandedDiffers, Detail: "work.txt"}, StatusWarning, "[landed-differs: work.txt]"},
+		{"probe failed", land.WorkLandedVerdict{Reason: land.WorkProbeFailed, Detail: "read HEAD: boom"}, StatusWarning, "[probe-failed: read HEAD: boom]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakePolecatGit{branch: "polecat/furiosa/gt-abc+abc123", unpushedCount: 1, defaultBranch: "main"}
+			townRoot := t.TempDir()
+			makePolecatDir(t, townRoot, "testrig", "furiosa")
+			check := newTestCheck()
+			check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
+			check.gitForTest = func(string) polecatGit { return f }
+			check.beadStatus = openBeads
+			check.workLanded = func(land.WorkLandedRepo, string, string, string, *beads.Issue) land.WorkLandedVerdict {
+				return tt.verdict
+			}
+
+			result := check.Run(&CheckContext{TownRoot: townRoot, RigName: "testrig"})
+			if result.Status != tt.wantStatus {
+				t.Fatalf("Status = %v, want %v (details: %v)", result.Status, tt.wantStatus, result.Details)
+			}
+			if tt.wantInLine != "" && (len(result.Details) == 0 || !strings.Contains(result.Details[0], tt.wantInLine)) {
+				t.Errorf("Details = %v, want the first line to contain %q", result.Details, tt.wantInLine)
+			}
+		})
+	}
+}
+
+// TestStalledPolecatCheck_AsksThePredicateAboutTheBranchsBead pins what the
+// check hands land.WorkLandedOnTarget: the bead its branch name encodes, and
+// that bead as read, so the refs/landed and LANDING RECORD arms can run.
+func TestStalledPolecatCheck_AsksThePredicateAboutTheBranchsBead(t *testing.T) {
+	t.Parallel()
+	f := &fakePolecatGit{
+		branch:        polecat.FormatGeneratedBranchName("furiosa", "gt-ask1", "abc123"),
+		unpushedCount: 1,
+		defaultBranch: "main",
+	}
+	townRoot := t.TempDir()
+	makePolecatDir(t, townRoot, "testrig", "furiosa")
+	issue := &beads.Issue{ID: "gt-ask1", Status: "closed"}
+	check := newTestCheck()
+	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
+	check.gitForTest = func(string) polecatGit { return f }
+	check.beadStatus = openBeads
+	check.beadIssue = func(_, id string) (*beads.Issue, error) {
+		if id != "gt-ask1" {
+			t.Errorf("read bead %q, want gt-ask1", id)
+		}
+		return issue, nil
+	}
+	var gotBead string
+	var gotIssue *beads.Issue
+	check.workLanded = func(_ land.WorkLandedRepo, _, _, beadID string, i *beads.Issue) land.WorkLandedVerdict {
+		gotBead, gotIssue = beadID, i
+		return land.WorkLandedVerdict{Landed: true, Reason: land.WorkLandedByRecord}
+	}
+
+	if result := check.Run(&CheckContext{TownRoot: townRoot, RigName: "testrig"}); result.Status != StatusOK {
+		t.Fatalf("Status = %v, want OK (details: %v)", result.Status, result.Details)
+	}
+	if gotBead != "gt-ask1" || gotIssue != issue {
+		t.Errorf("predicate asked about (%q, %v), want (gt-ask1, the bead as read)", gotBead, gotIssue)
+	}
+}
+
+// TestStalledPolecatCheck_UnreadableBeadIsAProbeFailure: when the bead cannot be
+// read the LANDING RECORD arm did not run, so the report says the check was
+// incomplete rather than that nothing proves the work landed.
+func TestStalledPolecatCheck_UnreadableBeadIsAProbeFailure(t *testing.T) {
+	t.Parallel()
+	f := &fakePolecatGit{
+		branch:        polecat.FormatGeneratedBranchName("furiosa", "gt-ask2", "abc123"),
+		unpushedCount: 1,
+		defaultBranch: "main",
+	}
+	townRoot := t.TempDir()
+	makePolecatDir(t, townRoot, "testrig", "furiosa")
+	check := newTestCheck()
+	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
+	check.gitForTest = func(string) polecatGit { return f }
+	check.beadStatus = openBeads
+	check.beadIssue = func(string, string) (*beads.Issue, error) { return nil, errors.New("dolt down") }
+
+	result := check.Run(&CheckContext{TownRoot: townRoot, RigName: "testrig"})
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want Warning — an unreadable bead must not clear the branch", result.Status)
+	}
+	if len(result.Details) == 0 || !strings.Contains(result.Details[0], "[probe-failed: read bead gt-ask2: dolt down]") {
+		t.Errorf("Details = %v, want the probe failure named", result.Details)
+	}
+}
+
+// TestStalledPolecatCheck_SquashLandedBranchReadsAsLanded runs the real
+// predicate over real git. The landing squashed the branch into a commit that
+// is not its ancestor and shares no patch with it; only refs/landed/<bead>
+// ties the two, and the check used to see nothing there. An unlanded branch in
+// the same world still warns.
+func TestStalledPolecatCheck_SquashLandedBranchReadsAsLanded(t *testing.T) {
+	t.Parallel()
+	f := newStalledFixture(t, "testrig", "test-squash", "gt-sq1")
+
+	f.gf.Commit(t, f.bare, "main", "gt-sq1: squashed", map[string]string{"work.txt": "polecat work, squashed\n", "extra.txt": "x\n"})
+	check, result := f.run(t, openBeads)
+	if result.Status != StatusWarning || len(check.stalledPolecats) != 1 {
+		t.Fatalf("Status = %v, stalled = %+v; want Warning — a squash with no refs/landed is not provably landed (details: %v)", result.Status, check.stalledPolecats, result.Details)
+	}
+
+	head, err := f.gf.OpenBranchRepo(f.clonePath).Rev("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.gf.SetRef(t, f.clonePath, land.LandedRef(f.issue), head)
+
+	check, result = f.run(t, openBeads)
+	if result.Status != StatusOK || len(check.stalledPolecats) != 0 {
+		t.Fatalf("Status = %v, stalled = %+v; want OK — refs/landed/%s holds the branch head (details: %v)", result.Status, check.stalledPolecats, f.issue, result.Details)
 	}
 }
 
