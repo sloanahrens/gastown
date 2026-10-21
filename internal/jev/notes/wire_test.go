@@ -3,6 +3,7 @@ package notes
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -104,6 +105,36 @@ func TestCloneRepoHasKeyRefusesAnUnsafeKey(t *testing.T) {
 	}
 	if len(c.calls) != 0 {
 		t.Errorf("git ran for a refused key: %v", c.calls)
+	}
+}
+
+// exitFailure is a failed command whose exit status survives a %w wrap, as the
+// *exec.ExitError Clone.Run wraps does.
+type exitFailure int
+
+func (e exitFailure) Error() string { return fmt.Sprintf("exit status %d", int(e)) }
+func (e exitFailure) ExitCode() int { return int(e) }
+
+// git grep exits 1 for no match and 2 for a real failure. submission.Clone.Run
+// wraps either with %w, so HasKey reads the code through the wrap: the 1 is
+// false, not an error, and every other exit stays a failure.
+func TestCloneRepoHasKeyReadsTheWrappedExitStatus(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		code    int
+		wantErr bool
+	}{
+		{code: 1},
+		{code: 2, wantErr: true},
+	} {
+		c := &fakeClone{err: fmt.Errorf("git grep in /clone: %w: ", exitFailure(tt.code))}
+		ok, err := (cloneRepo{c: c}).HasKey(context.Background(), "jev_stale")
+		if ok {
+			t.Errorf("exit %d: HasKey = true, want false", tt.code)
+		}
+		if gotErr := err != nil; gotErr != tt.wantErr {
+			t.Errorf("exit %d: error = %v, want error: %v", tt.code, err, tt.wantErr)
+		}
 	}
 }
 
