@@ -485,7 +485,16 @@ func parseProcessTable(out string) []processEntry {
 // exactly the orphan case the daemon exists to clean up.
 func (e processEntry) hasLiveParent(live map[int]string) bool {
 	comm, ok := live[e.PPID]
-	return e.PPID > 1 && ok && comm != "tmux"
+	return e.PPID > 1 && ok && !isTmuxServerComm(comm)
+}
+
+// isTmuxServerComm matches the tmux server under both comm spellings. Linux
+// retitles the server "tmux: server", and ps field-splitting can deliver it
+// as plain "tmux:"; an exact "tmux" match would miss both and hide a
+// stranded pane survivor behind a server that owns unrelated sessions
+// (gt-7fnz7).
+func isTmuxServerComm(comm string) bool {
+	return comm == "tmux" || strings.HasPrefix(comm, "tmux:")
 }
 
 // unownedCandidate is a process table row that passed the cheap filters, with

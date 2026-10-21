@@ -149,6 +149,27 @@ func TestUnownedCandidates_StrandedTmuxSurvivor(t *testing.T) {
 	}
 }
 
+// TestUnownedCandidatesSkipsLinuxTmuxServerParent is the gt-7fnz7
+// regression: Linux retitles the tmux server "tmux: server", which reaches
+// the scan as "tmux: server" or — split on the space by the ps field
+// parser — "tmux:". An exact "tmux" match counted either spelling as a live
+// parent, hiding the stranded TTY-less pane survivor of gt-tbtx on Linux.
+func TestUnownedCandidatesSkipsLinuxTmuxServerParent(t *testing.T) {
+	t.Parallel()
+	for _, comm := range []string{"tmux", "tmux:", "tmux: server"} {
+		t.Run(comm, func(t *testing.T) {
+			t.Parallel()
+			entries := []processEntry{
+				{PID: 50, PPID: 1, TTY: "??", Comm: comm, Etime: "05:00:00"},
+				{PID: 210, PPID: 50, TTY: "??", Comm: "claude", Etime: "01:00:00"},
+			}
+			if _, ok := candidatePIDs(unownedCandidates(entries, nil))[210]; !ok {
+				t.Errorf("PID 210 with parent comm %q: want candidate", comm)
+			}
+		})
+	}
+}
+
 // TestUnownedCandidates_LiveParentChain documents the cascade: a claude whose
 // parent is itself a candidate is not signaled while the parent is; the
 // parent is signaled this cycle and the child reparents to launchd, so the
