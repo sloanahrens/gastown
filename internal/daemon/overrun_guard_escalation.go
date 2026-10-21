@@ -41,23 +41,34 @@ func newOverrunEscalationReader(d *Daemon) *overrunEscalationReader {
 // its bead: its record says it stopped on one and the escalation is still open
 // (patrolscan.SeatEscalationHold). A live seat that raised an escalation and kept
 // working is waiting on no one, so its time still counts.
+//
+// The rig's escalations are read first, once per cycle, and a seat with no open
+// escalation of its own naming its bead is answered from them: it cannot be
+// waiting whatever its record says, so its agent bead is not read. Only a seat
+// with such an escalation pays for the record read.
 // An error means the record or the escalations could not be read. The caller then
 // counts all of the seat's time, the direction that stops rather than lets a seat
 // run unbounded.
 func (r *overrunEscalationReader) waiting(seat overrunSeat) (bool, error) {
 	h := &patrolScanHost{d: r.d}
+	raised, ok := r.raised[seat.Rig]
+	if !ok {
+		escalations, err := h.PolecatEscalations(seat.Rig)
+		raised = overrunRaised{escalations: escalations, err: err}
+		r.raised[seat.Rig] = raised
+	}
+	if raised.err != nil {
+		return false, raised.err
+	}
+	if patrolscan.SeatEscalationVerdict(seat.Rig, seat.Polecat, seat.Bead, raised.escalations).Verdict != patrolscan.EscalationPending {
+		return false, nil
+	}
 	rec, err := h.AgentRecord(seat.Rig, seat.Polecat)
 	if err != nil {
 		return false, err
 	}
 	verdict, err := patrolscan.SeatEscalationHold(rec, seat.Rig, seat.Polecat, seat.Bead, func() ([]patrolscan.Escalation, error) {
-		raised, ok := r.raised[seat.Rig]
-		if !ok {
-			escalations, err := h.PolecatEscalations(seat.Rig)
-			raised = overrunRaised{escalations: escalations, err: err}
-			r.raised[seat.Rig] = raised
-		}
-		return raised.escalations, raised.err
+		return raised.escalations, nil
 	})
 	if err != nil {
 		return false, err
