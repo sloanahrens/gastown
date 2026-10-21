@@ -1194,3 +1194,48 @@ func TestCheckPolecatHealth_StaleParkSessionReadErrorKeepsParkedLine(t *testing.
 		t.Errorf("got %d release lines once the read answered, want 1: %q", n, got)
 	}
 }
+
+// TestCheckPolecatHealth_StaleFreezeWithDeadSessionKeepsParkedLine: a seat the
+// supervisor froze keeps its pool seat however old the freeze is, so with its
+// session gone the daemon still logs the plain held line, never the release.
+func TestCheckPolecatHealth_StaleFreezeWithDeadSessionKeepsParkedLine(t *testing.T) {
+	t.Parallel()
+	bd := hookedWorkBD(t, "gt-xyz", time.Hour)
+
+	townRoot := t.TempDir()
+	var logBuf strings.Builder
+	tm := newFakeTmux(newFixedClock())
+	d := &Daemon{
+		config:           &Config{TownRoot: townRoot},
+		logger:           log.New(&logBuf, "", 0),
+		tmux:             tm,
+		notifier:         notifyfake.New(),
+		openWorkBeads:    bd.open,
+		execCmd:          bd.run,
+		prefixRegistryFn: myrPrefixes,
+	}
+
+	seat := intent.Seat{Rig: "myr", Role: constants.RolePolecat, Name: "mycat"}
+	if _, err := intent.Update(townRoot, seat, func(r *intent.Record) error {
+		r.Frozen = true
+		r.Reason = "restart budget exhausted"
+		r.PausedBy = "supervisor"
+		r.PausedAt = time.Now().UTC().Add(-31 * time.Minute)
+		return nil
+	}); err != nil {
+		t.Fatalf("intent.Update: %v", err)
+	}
+
+	d.checkPolecatHealth("myr", "mycat")
+
+	got := logBuf.String()
+	if strings.Contains(got, "seat released") {
+		t.Errorf("a supervisor freeze must keep its seat, so the daemon must not log it released: %q", got)
+	}
+	if strings.Contains(got, "CRASH DETECTED") {
+		t.Errorf("a frozen seat must not trigger CRASH DETECTED, got: %q", got)
+	}
+	if !strings.Contains(got, "agent is parked (frozen: restart budget exhausted)") {
+		t.Errorf("expected the plain held line for the freeze, got: %q", got)
+	}
+}
