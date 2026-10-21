@@ -616,3 +616,27 @@ func assertPerm(t *testing.T, path string, want os.FileMode) {
 		t.Errorf("%s mode = %o, want %o", path, got, want)
 	}
 }
+
+// A merge-blocks blocker the pool no longer lists — closed before the lookback —
+// has no close reason to read, and a merge-blocks edge resolves only on one
+// starting "Merged in ". It stays unresolved rather than reading as resolved
+// and clearing the peer to be dispatched; a plain blocker the pool dropped
+// still reads as resolved (gt-idly3).
+func TestOpenBlockersInKeepsAnAbsentMergeBlocksEdgeUnresolved(t *testing.T) {
+	t.Parallel()
+	deps := []beads.IssueDep{
+		{ID: "gt-merge", DependencyType: "merge-blocks"},
+		{ID: "gt-plain", DependencyType: "blocks"},
+		{ID: "gt-listed", DependencyType: "merge-blocks"},
+		{ID: "gt-listed-open", DependencyType: "blocks"},
+	}
+	status := map[string]*beads.Issue{
+		"gt-listed":      {ID: "gt-listed", Status: "closed", CloseReason: "Merged in abc123"},
+		"gt-listed-open": {ID: "gt-listed-open", Status: "open"},
+	}
+	got := openBlockersIn(deps, status)
+	want := []string{"gt-merge", "gt-listed-open"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("openBlockersIn = %v, want %v", got, want)
+	}
+}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -283,11 +284,18 @@ func (e cachedDetail) detail(status map[string]*beads.Issue) duplicateDetail {
 // openBlockersIn is the blocking edges still open in the pool as it lists now.
 // A target the pool does not list is resolved: an open bead of this rig is
 // always listed, so an absent target is closed, or closed before the lookback.
+// A merge-blocks edge is the exception: it resolves only on a close reason
+// starting "Merged in ", which the pool no longer shows for an absent target,
+// so its status is unknown and it stays unresolved (gt-idly3).
 func openBlockersIn(deps []beads.IssueDep, status map[string]*beads.Issue) []string {
 	listed := make([]beads.IssueDep, 0, len(deps))
 	for _, d := range deps {
 		row, ok := status[d.ID]
 		if !ok {
+			if strings.EqualFold(strings.TrimSpace(d.DependencyType), "merge-blocks") {
+				d.Status, d.CloseReason = "", ""
+				listed = append(listed, d)
+			}
 			continue
 		}
 		d.Status, d.CloseReason = row.Status, row.CloseReason

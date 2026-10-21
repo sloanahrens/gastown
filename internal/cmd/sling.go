@@ -806,11 +806,12 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// another actor has since hooked stays with that actor; it runs only while
 	// this sling's hook write may not have landed (see hookMayHaveLanded).
 	unhooked := false
-	// handBackDeclined is set when the hand-back left the bead alone because
-	// another actor holds it or it is submitted for landing. The raw-field and
-	// pinned restores write without a guard, so they must not run over a bead
-	// this sling no longer holds (gt-moxlb).
-	handBackDeclined := false
+	// restoreDeclined is set when the guarded restore of the bead (the
+	// hand-back, or the unhook restore) left it alone because another actor
+	// holds it or it is submitted for landing. The raw-field and pinned
+	// restores write without a guard, so they must not run over a bead this
+	// sling no longer holds (gt-moxlb, gt-idly3).
+	restoreDeclined := false
 	restoreReassigned := func() {
 		if restoreOutgoing != nil {
 			restoreOutgoing()
@@ -825,9 +826,9 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		// restore below (gt-moxlb).
 		handBackTried := newPolecatInfo == nil && rollbackBeadID != "" && hookMayHaveLanded
 		if handBackTried {
-			handBackDeclined = !r.handBack(townRoot, beadID, hookWorkDir, targetAgent, beadHold{Status: originalStatus, Assignee: originalAssignee})
+			restoreDeclined = !r.handBack(townRoot, beadID, hookWorkDir, targetAgent, beadHold{Status: originalStatus, Assignee: originalAssignee})
 		} else if unhooked {
-			r.restoreHold(townRoot, beadID, beadHold{Status: originalStatus, Assignee: originalAssignee})
+			restoreDeclined = !r.restoreHold(townRoot, beadID, beadHold{Status: originalStatus, Assignee: originalAssignee})
 		}
 		unhooked = false
 	}
@@ -842,7 +843,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		if rollbackBeadID == "" {
 			return // this sling has not written to the bead: nothing to restore
 		}
-		if handBackDeclined {
+		if restoreDeclined {
 			return
 		}
 		r.restoreRawFields(beadID, townRoot, hookWorkDir, info)
@@ -1429,21 +1430,26 @@ func restoreRollbackRawWorkflowFieldsFromCurrent(beadID, townRoot, hookWorkDir s
 // failed before the new holder took the work, which no spawn rollback gives
 // back once the force block has left the bead unhooked (gt-ct2ob). The write
 // is guarded on the bead still being open and unassigned, so one another actor
-// has since hooked is left with that actor.
-func restoreBeadHold(townRoot, beadID string, hold beadHold) {
+// has since hooked is left with that actor. It reports false when the write did
+// not land (declined or failed), so the caller's unguarded restores do not run
+// over a bead this sling no longer holds (gt-idly3); with no hold to restore
+// nothing was declined and it reports true.
+func restoreBeadHold(townRoot, beadID string, hold beadHold) bool {
 	if townRoot == "" || beadID == "" || hold.Status == "" {
-		return
+		return true
 	}
 	dir := beads.ResolveHookDir(townRoot, beadID, "")
 	restored, err := beads.TransferIfUnassigned(pinnedBd(dir), beadID, hold.Status, hold.Assignee)
 	switch {
 	case err != nil:
 		fmt.Printf("  %s Could not restore bead %s to %s (%s): %v\n", style.Dim.Render("Warning:"), beadID, hold.Assignee, hold.Status, err)
+		return false
 	case !restored:
 		fmt.Printf("  %s Left bead %s with whoever holds it now\n", style.Dim.Render("○"), beadID)
-	default:
-		fmt.Printf("  %s Restored bead %s to %s (%s)\n", style.Dim.Render("○"), beadID, hold.Assignee, hold.Status)
+		return false
 	}
+	fmt.Printf("  %s Restored bead %s to %s (%s)\n", style.Dim.Render("○"), beadID, hold.Assignee, hold.Status)
+	return true
 }
 
 // handBackHook puts a bead this sling hooked back to the status and assignee it
@@ -1498,11 +1504,21 @@ func restorePinnedBead(townRoot, beadID, assignee string) {
 	if townRoot == "" || beadID == "" {
 		return
 	}
-	dir := beads.ResolveHookDir(townRoot, beadID, "")
-	pinned := beads.StatusPinned
-	if err := pinnedBd(dir).Update(beadID, beads.UpdateOptions{Status: &pinned, Assignee: &assignee}); err != nil {
+	restorePinnedOn(pinnedBd(beads.ResolveHookDir(townRoot, beadID, "")), beadID, assignee)
+}
+
+// restorePinnedOn puts the pin back, guarded on the bead being open and
+// unassigned, the state the rollback's release leaves it in. A bead another
+// actor has claimed or closed since is left alone rather than overwritten
+// (gt-idly3).
+func restorePinnedOn(c beads.Client, beadID, assignee string) {
+	restored, err := beads.TransferIfUnassigned(c, beadID, string(beads.StatusPinned), assignee)
+	switch {
+	case err != nil:
 		fmt.Printf("  %s Could not restore pinned state for bead %s: %v\n", style.Dim.Render("Warning:"), beadID, err)
-	} else {
+	case !restored:
+		fmt.Printf("  %s Left bead %s with whoever holds it now\n", style.Dim.Render("○"), beadID)
+	default:
 		fmt.Printf("  %s Restored pinned state for bead %s\n", style.Dim.Render("○"), beadID)
 	}
 }

@@ -244,6 +244,13 @@ func restoreOriginalHoldIfWorkSurvivesWith(r polecatWorkReleaser, survivingWork 
 			holder = "(unassigned)"
 		}
 		fmt.Printf("  %s Restored %s to %s/%s: %s\n", style.Dim.Render("○"), beadID, status, holder, reason)
+	default:
+		// The guard declined: the bead moved (status drift between two held
+		// states, or another actor's claim) after the read. Nothing was
+		// restored, so the caller's release still runs; it is guarded on the
+		// assignee, so a bead another actor now holds is left alone.
+		fmt.Printf("  %s Could not restore %s to its original holder: it changed since it was read\n", style.Dim.Render("○"), beadID)
+		return false, nil
 	}
 	return true, nil
 }

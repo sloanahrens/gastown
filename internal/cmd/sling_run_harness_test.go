@@ -288,7 +288,7 @@ func newSlingHarness(t *testing.T) *slingHarness {
 		// (beads.TransferIfUnassigned), so the fake mirrors that guard: a bead
 		// another actor has taken is left alone, which is what a lost race
 		// looks like from here.
-		restoreHold: func(_, id string, hold beadHold) {
+		restoreHold: func(_, id string, hold beadHold) bool {
 			h.mu.Lock()
 			b := h.beads[id]
 			applied := b != nil && b.Status == "open" && b.Assignee == ""
@@ -298,9 +298,10 @@ func newSlingHarness(t *testing.T) *slingHarness {
 			h.mu.Unlock()
 			if !applied {
 				h.record("restore hold skipped %s", id)
-				return
+				return false
 			}
 			h.record("restore hold %s %s %s", id, hold.Status, hold.Assignee)
+			return true
 		},
 		// The real hand-back over the harness beads: only the bd surface
 		// (a read plus a guarded write) is faked, so the guard handBackHook

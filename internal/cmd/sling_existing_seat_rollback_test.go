@@ -348,3 +348,88 @@ func TestSlingOntoExistingSeatHandBackLeavesSpawnRollbackAlone(t *testing.T) {
 		})
 	}
 }
+
+// A --force sling of a pinned bead onto an existing seat restores the pin only
+// through the guarded hand-back. When that declines — another actor claimed the
+// bead or closed it after this sling's hook landed — the unguarded pin restore
+// must not run over their state (gt-idly3).
+func TestSlingForcedPinnedOntoExistingSeatDeclinedHandBackKeepsThePinRestoreOff(t *testing.T) {
+	t.Parallel()
+	const beadID = "gt-abc"
+	const seat = "gastown/crew/sloan"
+
+	for _, tc := range []struct {
+		name  string
+		thief func(b *beadInfo)
+		want  [2]string
+	}{
+		{name: "a bead another actor claims", thief: func(b *beadInfo) { b.Status, b.Assignee = "hooked", "gastown/polecats/granite" },
+			want: [2]string{"hooked", "gastown/polecats/granite"}},
+		{name: "a bead closed since the hook", thief: func(b *beadInfo) { b.Status = "closed" },
+			want: [2]string{"closed", seat}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.addBead(beadID, beadInfo{Status: "pinned", Assignee: "gastown/crew/other"})
+			h.run.opts.force = true
+			h.run.hook = func(id, agent, _, _ string, _ *beadFieldUpdates) error {
+				h.mu.Lock()
+				if b := h.beads[id]; b != nil {
+					b.Status, b.Assignee = "hooked", agent
+					tc.thief(b)
+				}
+				h.mu.Unlock()
+				return &hookWriteLandedError{errInjected}
+			}
+
+			if err := h.sling(beadID, seat); err == nil {
+				t.Fatal("the sling must report the injected hook failure")
+			}
+			got := h.bead(beadID)
+			if got.Status != tc.want[0] || got.Assignee != tc.want[1] {
+				t.Fatalf("bead = %s/%s, want %s/%s left as the other actor has it", got.Status, got.Assignee, tc.want[0], tc.want[1])
+			}
+			h.wantNo("restore pinned")
+		})
+	}
+}
+
+// The pin restore writes only over the open, unassigned bead the rollback's
+// release leaves; a bead another actor claimed or closed since is theirs
+// (gt-idly3).
+func TestRestorePinnedOnLeavesABeadAnotherActorHolds(t *testing.T) {
+	t.Parallel()
+	const owner = "gastown/crew/sloan"
+
+	for _, tc := range []struct {
+		name    string
+		current beads.Issue
+		want    [2]string
+	}{
+		{name: "the released bead gets its pin back", current: beads.Issue{Status: "open"},
+			want: [2]string{"pinned", owner}},
+		{name: "a bead another actor claimed is left alone",
+			current: beads.Issue{Status: "hooked", Assignee: "gastown/polecats/granite"},
+			want:    [2]string{"hooked", "gastown/polecats/granite"}},
+		{name: "a closed bead is not reopened as pinned", current: beads.Issue{Status: "closed"},
+			want: [2]string{"closed", ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			db := beadsfake.New()
+			tc.current.ID = "gt-abc"
+			db.Seed(tc.current)
+
+			restorePinnedOn(db, "gt-abc", owner)
+
+			got, err := db.Show("gt-abc")
+			if err != nil {
+				t.Fatalf("show: %v", err)
+			}
+			if got.Status != tc.want[0] || got.Assignee != tc.want[1] {
+				t.Fatalf("bead = %s/%s, want %s/%s", got.Status, got.Assignee, tc.want[0], tc.want[1])
+			}
+		})
+	}
+}
