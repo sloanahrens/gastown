@@ -5,6 +5,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -122,6 +123,15 @@ type row struct {
 	S string `json:"s,omitempty"`
 }
 
+// settle yields the processor so a goroutine that is not blocked can finish.
+// The test policy bans timers in unit tests; a goroutine blocked on a lock
+// stays blocked however long this yields.
+func settle() {
+	for range 1000 {
+		runtime.Gosched()
+	}
+}
+
 func TestBatteryLogAppendModesAndReadRecent(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "sub", "log.jsonl")
@@ -191,11 +201,12 @@ func TestBatteryLogAppendWaitsForTheLogLock(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- Append(path, row{N: 1}) }()
 	// A correct Append blocks on the held lock and returns only after release.
-	// Without the lock it returns at once, which this window catches.
+	// Without the lock it finishes during settle.
+	settle()
 	select {
 	case err := <-done:
 		t.Fatalf("Append returned while another holder had the log lock: %v", err)
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 	if got, _ := os.ReadFile(path); string(got) != before {
 		t.Fatalf("the log changed while another holder had the lock: %q", got)
@@ -227,10 +238,11 @@ func TestBatteryLogAppendWaitsForAnInFlightLine(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() { done <- Append(path, row{N: 1}) }()
+	settle()
 	select {
 	case err := <-done:
 		t.Fatalf("Append returned while a writer's line was in flight: %v", err)
-	case <-time.After(200 * time.Millisecond):
+	default:
 	}
 
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
