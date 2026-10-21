@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -241,5 +242,75 @@ func TestScorecardBestThresholdKeepsHigherCutOnTie(t *testing.T) {
 	}
 	if _, _, ok := bestThreshold(nil); ok {
 		t.Error("bestThreshold of no samples reported a threshold")
+	}
+}
+
+// A missing log is still an empty report, but the report says so, so it is
+// not read as a battery that logged nothing.
+func TestScorecardBuildFlagsMissingLog(t *testing.T) {
+	t.Parallel()
+	missing := buildFixture(t, t.TempDir(), time.Time{})
+	if !missing.LogMissing {
+		t.Error("a missing log is not flagged LogMissing")
+	}
+	var out strings.Builder
+	if err := WriteText(&out, missing); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), "No log yet") {
+		t.Errorf("text report of a missing log does not say so:\n%s", out.String())
+	}
+
+	town := t.TempDir()
+	writeFixture(t, town, FixtureLines, FixtureLabels)
+	if buildFixture(t, town, time.Time{}).LogMissing {
+		t.Error("a present log is flagged LogMissing")
+	}
+}
+
+// A label whose item has no usable answer for the question is counted, not
+// dropped: here one item answers in the wrong shape and one has no answer.
+func TestScorecardCountsLabelsWithoutUsableAnswer(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	lines := []string{
+		`{"ts":"2026-10-18T09:00:00Z","id":"a","answers":{"needs":{"noul":0.9}}}`,
+		`{"ts":"2026-10-18T10:00:00Z","id":"b","answers":{"needs":{"choice":"yes","probabilities":{"yes":0.5},"positive":"yes"}}}`,
+		`{"ts":"2026-10-18T11:00:00Z","id":"c","answers":{"route":{"noul":0.4}}}`,
+		`{"ts":"2026-10-18T12:00:00Z","id":"d","answers":{"needs":{"noul":0.2}}}`,
+	}
+	labels := map[string]map[QuestionID]bool{
+		"a": {"needs": true},
+		"b": {"needs": true},
+		"c": {"needs": true},
+		"d": {"needs": false},
+	}
+	writeFixture(t, town, lines, labels)
+
+	rep := buildFixture(t, town, time.Time{})
+	q := question(t, rep, "needs")
+	if q.Labeled != 2 || q.Unmatched != 2 {
+		t.Errorf("needs labeled %d, unmatched %d; want labeled 2, unmatched 2 (b wrong shape, c no answer)", q.Labeled, q.Unmatched)
+	}
+	if q.Logged != 2 {
+		t.Errorf("needs logged %d, want 2: an unusable answer is not logged", q.Logged)
+	}
+}
+
+// The fixture's labels file is part of the setup, so a missing one is a
+// failure, not a set of unlabeled items.
+func TestScorecardFixtureMissingLabelsFails(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeFixture(t, town, FixtureLines, FixtureLabels)
+	if err := os.Remove(FixtureLabelsPath(town)); err != nil {
+		t.Fatal(err)
+	}
+	a, err := Open(FixtureBattery, town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Build(context.Background(), a, time.Time{}); err == nil || !strings.Contains(err.Error(), "fixture labels") {
+		t.Fatalf("Build error = %v, want the missing fixture labels", err)
 	}
 }

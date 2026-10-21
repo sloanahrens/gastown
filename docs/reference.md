@@ -1574,7 +1574,8 @@ unmigrated town):
 `gt jev scorecard --battery <name>` scores a battery's log against the labels
 its adapter finds, one block per question. Batteries only log; the scorecard is
 where their answers are judged. Flags are in `gt jev scorecard --help`. The
-command is read-only.
+command is read-only. A battery with no log yet gives an empty report with
+`log_missing` set (`No log yet` in the text), and exits 0.
 
 Each battery is an adapter in `internal/jev/scorecard`, registered by name from
 an `init` with `scorecard.Register(name, factory)`; the factory takes the town
@@ -1590,8 +1591,9 @@ root. The adapter implements:
   drift line answers each doc section it names.
 - `Label(ctx, item) (Labeling, error)`: the item's labels, whether it is labeled
   at all, and the rule that set them. An unlabeled item counts as logged but not
-  labeled. An error that cannot be read fails the whole report, so a broken
-  label source cannot pass as "no labels yet".
+  labeled. A label on an item with no usable answer to the question counts as
+  `unmatched` and is not scored. An error that cannot be read fails the whole
+  report, so a broken label source cannot pass as "no labels yet".
 
 An adapter may also implement `Context() []string`, which adds context lines to
 the report: facts gathered while labeling that the metrics do not carry. They

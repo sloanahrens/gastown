@@ -14,6 +14,9 @@ type Report struct {
 	Since        *time.Time `json:"since,omitempty"`
 	Items        int        `json:"items"`
 	LinesSkipped int        `json:"lines_skipped"`
+	// LogMissing is set when the battery has no log yet. The report is then
+	// empty, which is the normal state before a battery's first line.
+	LogMissing bool `json:"log_missing,omitempty"`
 	// Context holds the lines a Contextual adapter reported, such as the
 	// finding beads its FAIL labels named. They follow the item counts in the
 	// text report.
@@ -51,6 +54,9 @@ type QuestionReport struct {
 	Kind    string `json:"kind"`
 	Logged  int    `json:"logged"`
 	Labeled int    `json:"labeled"`
+	// Unmatched counts the labeled lines with no usable answer to the
+	// question, so they could not be scored. It is printed only when set.
+	Unmatched int `json:"unmatched,omitempty"`
 	// Positives and Negatives count the labeled lines by their label.
 	Positives int      `json:"positives"`
 	Negatives int      `json:"negatives"`
@@ -96,6 +102,9 @@ func WriteText(w io.Writer, rep Report) error {
 	}
 	ew.printf("Scorecard for battery %s, %s\n", rep.Battery, window)
 	ew.printf("Items: %d parsed, %d line(s) skipped\n", rep.Items, rep.LinesSkipped)
+	if rep.LogMissing {
+		ew.printf("No log yet: the battery has written no lines.\n")
+	}
 	for _, line := range rep.Context {
 		ew.printf("%s\n", line)
 	}
@@ -106,6 +115,9 @@ func WriteText(w io.Writer, rep Report) error {
 		ew.printf("\n%s (%s)\n", q.ID, q.Kind)
 		ew.printf("  logged %d, labeled %d, positives %d, negatives %d, base rate %s\n",
 			q.Logged, q.Labeled, q.Positives, q.Negatives, pct(q.BaseRate))
+		if q.Unmatched > 0 {
+			ew.printf("  labeled with no usable answer, not scored: %d\n", q.Unmatched)
+		}
 		switch q.Kind {
 		case KindNoul:
 			ew.printf("  at 0.5: precision %s, recall %s\n", pct(q.Precision), pct(q.Recall))
