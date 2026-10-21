@@ -479,6 +479,7 @@ type tierSweepBeadStore interface {
 	Create(opts beads.CreateOptions) (*beads.Issue, error)
 	AddComment(id, text string) error
 	List(opts beads.ListOptions) ([]*beads.Issue, error)
+	Update(id string, opts beads.UpdateOptions) error
 	CloseWithReason(reason string, ids ...string) error
 }
 
@@ -1600,7 +1601,7 @@ func (d *Daemon) tierSweepRecordBeads(rig, sha string, results map[string]tierSw
 			names = []string{tierSweepNoName}
 		}
 		for _, name := range names {
-			tierSweepFileRed(d, bd, rig, tier, name, sha, ts, existing[name].id)
+			tierSweepFileRed(d, bd, rig, tier, name, sha, ts, existing[name])
 		}
 	}
 }
@@ -1610,6 +1611,9 @@ type tierSweepUnitBead struct {
 	id string
 	// claimed is true when a polecat holds the bead (in progress or hooked).
 	claimed bool
+	// issue is the bead as the list read it, so a red run can tell whether
+	// its text is in shape.
+	issue *beads.Issue
 }
 
 // tierSweepOpenBeads maps the failing unit each unlanded sweep bead for rig and
@@ -1633,7 +1637,7 @@ func tierSweepOpenBeads(bd tierSweepBeadStore, rig, tier string) (map[string]tie
 			}
 			if name, ok := strings.CutPrefix(is.Title, prefix); ok && name != "" {
 				if _, seen := out[name]; !seen {
-					out[name] = tierSweepUnitBead{id: is.ID, claimed: status != "open"}
+					out[name] = tierSweepUnitBead{id: is.ID, claimed: status != "open", issue: is}
 				}
 			}
 		}
@@ -1643,11 +1647,14 @@ func tierSweepOpenBeads(bd tierSweepBeadStore, rig, tier string) (map[string]tie
 
 // tierSweepFileRed comments on the open bead for name, else files one. The
 // pattern is the red-main owner's fileOrComment (internal/landworker/redmain.go).
-func tierSweepFileRed(d *Daemon, bd tierSweepBeadStore, rig, tier, name, sha string, ts tierSweepTierResult, openID string) {
+func tierSweepFileRed(d *Daemon, bd tierSweepBeadStore, rig, tier, name, sha string, ts tierSweepTierResult, open tierSweepUnitBead) {
 	detail := tierSweepRedDetail(tier, sha, ts)
-	if openID != "" {
-		if err := bd.AddComment(openID, "still red: "+detail); err != nil {
-			d.logger.Printf("tier_sweep: %s: commenting on %s: %v", rig, openID, err)
+	if open.id != "" {
+		if err := bd.AddComment(open.id, "still red: "+detail); err != nil {
+			d.logger.Printf("tier_sweep: %s: commenting on %s: %v", rig, open.id, err)
+		}
+		if !open.claimed {
+			d.tierSweepReshapeOpen(bd, rig, tier, name, sha, ts, open)
 		}
 		return
 	}
