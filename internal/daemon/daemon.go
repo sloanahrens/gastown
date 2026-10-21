@@ -35,6 +35,7 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
 	jevdispatch "github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/jev/landing"
+	"github.com/steveyegge/gastown/internal/jev/progress"
 	"github.com/steveyegge/gastown/internal/jev/submission"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/liveness"
@@ -603,6 +604,14 @@ type Daemon struct {
 	// jevDispatchOpen builds the pass a run executes. Nil means jevdispatch.Open;
 	// a test sets it to hand the run a pass over fakes.
 	jevDispatchOpen func(townRoot string, s jevdispatch.Settings, warnings io.Writer) (*jevdispatch.Pass, error)
+
+	// jevProgressQueue holds the nudges the overrun guard delivered and the
+	// progress pass has not yet asked about (jev_progress.go). jevProgressRunning
+	// is the pass's single-flight guard. jevProgressOpen builds the pass a run
+	// executes; nil means progress.Open, and a test sets it to use fakes.
+	jevProgressQueue   progress.Queue
+	jevProgressRunning atomic.Bool
+	jevProgressOpen    func(townRoot string, q *progress.Queue, s progress.Settings, warnings io.Writer) (*progress.Pass, error)
 
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
@@ -1593,6 +1602,12 @@ var heartbeatSteps = []heartbeatStep{
 	// every prediction (internal/jev/dispatch). Opt-in and lifecycle, like
 	// jev-dedupe, and under the same town-wide daily cap.
 	{name: "jev-dispatch", lifecycle: true, run: (*Daemon).triggerJevDispatch},
+
+	// Ask Jev whether each polecat the overrun guard nudged is making progress,
+	// and log every answer (internal/jev/progress). Opt-in and lifecycle, like
+	// jev-dedupe. It runs on the heartbeat that finds a nudge queued, not on an
+	// interval, so the answer lands while the seat is still inside its clock.
+	{name: "jev-progress", lifecycle: true, run: (*Daemon).triggerJevProgress},
 
 	// Sweep the tiers `make gate` does not run against origin/main
 	// (gt-vsct7.5). Non-lifecycle: it runs tests and files beads, and an

@@ -1611,6 +1611,47 @@ The daemon patrol `jev_dispatch` (heartbeat step `jev-dispatch`) is off unless
 the town-wide cap above, so the dedupe and dispatch batteries draw on one day's
 room. `gt jev dispatch` reads the same keys whether or not the patrol is on.
 
+### Progress battery (`jev_progress`)
+
+When the overrun guard nudges a polecat at its nudge threshold (12 minutes by
+default), the nudge is queued. The progress pass runs on the next heartbeat that
+finds a nudge queued, so the answer lands while the seat is still inside its
+clock. The pass reads the seat's transcript for the last 15 minutes and asks five
+questions in one call: `making_progress`, `looping`, `blocked_on_environment` and
+`drifted_from_bead`, each a `noul` probability, and `remaining`, a `score` over
+`done`, `nearly done`, `halfway` and `barely started`. It appends one line to
+`.runtime/jev/progress.jsonl`: `{ts, rig, polecat, bead, session, nudge_at,
+model, answers, question_version}`.
+
+A nudge that cannot be asked logs null `answers` and a `reason` instead. The
+reasons are `no_transcript`, `transcript_unreadable` (missing or unreadable),
+`outside_town` (the transcript is not under the town root, and is never opened),
+`bead_unreadable`, `bad_response` (Jev returned nothing usable) and `ask_failed`.
+The pass goes on to the next nudge after each.
+
+The battery is log-only. It never nudges, stops, messages or comments on a seat,
+and the guard's decisions never read the log. The state Jev reads is the bead's
+title and acceptance, then the window's events: assistant text in full, each tool
+call's input and each tool result cut to 400 characters, and every value passed
+through the report's credential scrub. The state is capped at 20,000 tokens,
+estimated at four bytes a token; when it is over, the oldest events go first and
+`events_dropped` counts them. The pass reads only the last 8 MB of a transcript,
+so a window longer than that is cut at its start, unmarked.
+
+The queue lives in the daemon's memory and holds 256 nudges. A nudge is not held
+for a later pass: a pass that finds the town's daily cap spent, or cannot open,
+drops the nudges it has, and logs how many.
+
+The daemon patrol `jev_progress` is off unless `daemon.json` enables it. While it
+is off the guard queues nothing:
+
+```json
+{"patrols": {"jev_progress": {"enabled": true, "max_usd_per_day": 1, "usd_per_billion_tokens": 4}}}
+```
+
+`usd_per_billion_tokens` is required, and `max_usd_per_day` defaults to 1 and
+draws on the same town-wide cap as the other batteries.
+
 ## Beads Commands (bd)
 
 ```bash
