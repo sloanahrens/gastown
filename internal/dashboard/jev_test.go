@@ -525,9 +525,9 @@ func TestJevPanelDrawsOneLinePerBatteryUnderItsTotals(t *testing.T) {
 		got = append(got, l.Text)
 	}
 	want := []string{
-		"finding 212/140 fix_worthy:earning any_duplicate:not-yet",
+		"finding 212 lines 140 labeled fix_worthy:earning any_duplicate:not-yet",
 		"landing -",
-		"targets 9/0 needs_review:no-signal",
+		"targets 9 lines 0 labeled needs_review:no-signal",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("JEV lines = %q, want %q", got, want)
