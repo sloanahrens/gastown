@@ -177,8 +177,7 @@ func newJevDispatchRig(t *testing.T) *jevDispatchRig {
 		LogPath:    jevdispatch.LogPath(town),
 		CursorPath: jevdispatch.CursorPath(town),
 		RetryPath:  jevdispatch.RetryPath(town),
-		SpentToday: func() (float64, error) { return 0, nil },
-		CapUSD:     1,
+		Allows:     func() (bool, error) { return true, nil },
 		Now:        func() time.Time { return time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC) },
 	}
 	r.d.jevDispatchOpen = func(_ string, s jevdispatch.Settings, _ io.Writer) (*jevdispatch.Pass, error) {
@@ -339,7 +338,7 @@ func TestJevDispatchRunStopsUnderTheSharedCap(t *testing.T) {
 		t.Fatal(err)
 	}
 	town := battery.Cap{Ledger: ledger, MaxUSDPerDay: 1, USDPerBillionTokens: 1}
-	r.pass.SpentToday = func() (float64, error) { return town.Spent(func() time.Time { return now }) }
+	r.pass.Allows = func() (bool, error) { return town.Allows(func() time.Time { return now }) }
 
 	r.d.runJevDispatch()
 

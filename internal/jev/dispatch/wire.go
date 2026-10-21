@@ -79,8 +79,7 @@ func open(townRoot string, s Settings, warnings io.Writer,
 		LogPath:    LogPath(townRoot),
 		CursorPath: CursorPath(townRoot),
 		RetryPath:  RetryPath(townRoot),
-		SpentToday: func() (float64, error) { return town.Spent(time.Now) },
-		CapUSD:     capUSD,
+		Allows:     func() (bool, error) { return town.Allows(time.Now) },
 	}, nil
 }
 
