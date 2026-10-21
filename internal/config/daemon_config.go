@@ -122,6 +122,12 @@ type PatrolsConfig struct {
 	// (internal/jev/stale). It acts on nothing. Opt-in, like JevDedupe.
 	JevStale *JevStaleConfig `json:"jev_stale,omitempty"`
 
+	// JevNotes asks Jev, once a week, whether each memory note and the operator
+	// handbook still describes the town, and logs every answer beside a
+	// mechanical label (internal/jev/notes). It edits no note. Opt-in, like
+	// JevDedupe.
+	JevNotes *JevNotesConfig `json:"jev_notes,omitempty"`
+
 	// JevLogtriage asks Jev about each group of the daemon log's warning and
 	// error lines, every fifteen minutes, and logs every answer
 	// (internal/jev/logtriage). It acts on nothing. Opt-in, like JevDedupe.
@@ -616,6 +622,20 @@ type JevStaleConfig struct {
 
 	// MaxUSDPerDay stops the read for the day once the town's Jev spend
 	// reaches it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+}
+
+// JevNotesConfig switches on the notes read and prices its Jev spend. The read
+// is off unless Enabled is true, and an enabled read needs USDPerBillionTokens:
+// the usage ledger stores tokens, not dollars.
+type JevNotesConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the read for the day once the town's Jev spend, every
+	// caller counted, reaches it. Zero takes the default of one dollar.
 	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
 
 	// USDPerBillionTokens prices input and output tokens alike.
