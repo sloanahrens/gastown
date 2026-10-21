@@ -286,6 +286,26 @@ func jevReply(outcome string) string {
 }`, outcome)
 }
 
+// replyTo is a transport that records each request body and answers with
+// reply, so the test drives the real client without listening on a port.
+type replyTo struct {
+	reply    string
+	requests [][]byte
+}
+
+func (rt *replyTo) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	rt.requests = append(rt.requests, body)
+	rec := httptest.NewRecorder()
+	_, _ = io.WriteString(rec, rt.reply)
+	resp := rec.Result()
+	resp.Request = req
+	return resp, nil
+}
+
 // One Jev call carries every question the battery asks, the state holds the
 // MR notes, and the outcome's answer reaches the line whatever order Jev sends
 // its probabilities in: the same values in two orders give the same answer.
@@ -300,18 +320,12 @@ func TestJevSubmissionAskCarriesTheNewQuestions(t *testing.T) {
 	for _, order := range orders {
 		t.Run(order.name, func(t *testing.T) {
 			t.Parallel()
-			var requests [][]byte
-			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-				body, err := io.ReadAll(req.Body)
-				if err != nil {
-					t.Error(err)
-					return
-				}
-				requests = append(requests, body)
-				_, _ = io.WriteString(w, jevReply(order.probabilities))
-			}))
-			t.Cleanup(srv.Close)
-			client, err := jev.NewClient(jev.WithBaseURL(srv.URL), jev.WithKey("test-key"))
+			rt := &replyTo{reply: jevReply(order.probabilities)}
+			client, err := jev.NewClient(
+				jev.WithBaseURL("http://jev.invalid/v1/systemone"),
+				jev.WithKey("test-key"),
+				jev.WithHTTPClient(&http.Client{Transport: rt}),
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -327,14 +341,14 @@ func TestJevSubmissionAskCarriesTheNewQuestions(t *testing.T) {
 				t.Fatalf("summary = %+v, want the submission asked", sum)
 			}
 
-			if len(requests) != 1 {
-				t.Fatalf("Jev was called %d times, want one call for the whole battery", len(requests))
+			if len(rt.requests) != 1 {
+				t.Fatalf("Jev was called %d times, want one call for the whole battery", len(rt.requests))
 			}
 			var sent struct {
 				State     string                     `json:"state"`
 				Questions map[string]json.RawMessage `json:"questions"`
 			}
-			if err := json.Unmarshal(requests[0], &sent); err != nil {
+			if err := json.Unmarshal(rt.requests[0], &sent); err != nil {
 				t.Fatal(err)
 			}
 			if len(sent.Questions) != len(Questions()) {
