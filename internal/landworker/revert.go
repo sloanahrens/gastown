@@ -246,8 +246,23 @@ func (r *RedMain) maybeRevert(ctx context.Context, pl PostLand, b blame) string 
 		return "no revert: the culprit is itself a revert"
 	}
 	if id := r.openRevert(pl.BeadID); id != "" {
-		r.setRevertInFlight(pl.BeadID, id)
-		return fmt.Sprintf("revert of %s already open as %s", pl.BeadID, id)
+		switch r.requeueStranded(id) {
+		case strandedQueued:
+			r.setRevertInFlight(pl.BeadID, id)
+			return fmt.Sprintf("revert of %s already open as %s", pl.BeadID, id)
+		case strandedRequeued:
+			r.setRevertInFlight(pl.BeadID, id)
+			return fmt.Sprintf("revert of %s open as %s was not queued; queued it", pl.BeadID, id)
+		case strandedUnknown:
+			// Holding the red-main beads would be a guess about a bead this
+			// run cannot read: free them, and the next red run reads again.
+			r.clearRevertInFlight()
+			return fmt.Sprintf("no revert: %s cannot be read, so it is neither queued nor replaced", id)
+		case strandedFailed:
+			r.clearRevertInFlight()
+			return fmt.Sprintf("no revert: %s is open but not queued, and repairing it failed", id)
+		}
+		// strandedClosed: the stranded bead is gone, so a revert is filed anew.
 	}
 	// The cancellation guard comes before the diff read: a run the stop cut
 	// short spends no git read on an attribution it will not act on
@@ -271,8 +286,9 @@ func (r *RedMain) maybeRevert(ctx context.Context, pl PostLand, b blame) string 
 		return fmt.Sprintf("no revert: building it failed (%v)", land.NoteField(err.Error()))
 	}
 	id, err := r.fileRevert(rec, branch, head)
-	// A non-empty id means the revert bead exists and is queued, whether or
-	// not the last step of filing it failed.
+	// A non-empty id means the revert bead exists and is queued. A bead
+	// whose queueing failed is not in flight: the next red run finds it open
+	// and finishes queueing it (requeueStranded).
 	if id != "" {
 		r.setRevertInFlight(pl.BeadID, id)
 	} else {
@@ -392,7 +408,9 @@ func (r *RedMain) openRevert(culprit string) string {
 
 // fileRevert creates the revert's work bead and hands it to the landing
 // worker, which lands it through Land like any other work. The ready label
-// goes on last, so the worker never sees the bead without its request.
+// goes on last, so the worker never sees the bead without its request. The id
+// comes back only once the bead is queued: when a write after the create
+// fails, the bead exists but waits for requeueStranded, and the error names it.
 func (r *RedMain) fileRevert(rec land.LandingRecord, branch, head string) (string, error) {
 	is, err := r.Beads.Create(beads.CreateOptions{
 		Title:    RevertTitle(r.Rig, rec.BeadID),
@@ -407,12 +425,99 @@ func (r *RedMain) fileRevert(rec land.LandingRecord, branch, head string) (strin
 	}
 	work := land.Work{Branch: branch, Head: head, Target: rec.Target, Submitted: time.Now().UTC()}
 	if err := r.Beads.AppendNotes(is.ID, land.FormatReadyNote(work)+"\n\n"+FormatRevertNote(rec)); err != nil {
-		return is.ID, err
+		return "", fmt.Errorf("%s created but not queued: %w", is.ID, err)
 	}
-	if err := r.Beads.Update(is.ID, beads.UpdateOptions{AddLabels: []string{land.LabelReadyToLand}}); err != nil {
-		return is.ID, err
+	if err := r.queueRevert(is.ID); err != nil {
+		return "", fmt.Errorf("%s created but not queued: %w", is.ID, err)
 	}
 	return is.ID, nil
+}
+
+// queueRevert puts the ready label on a revert bead, the only write that makes
+// the landing worker see it.
+func (r *RedMain) queueRevert(id string) error {
+	return r.Beads.Update(id, beads.UpdateOptions{AddLabels: []string{land.LabelReadyToLand}})
+}
+
+// strandedOutcome is what requeueStranded did with an open revert bead.
+type strandedOutcome int
+
+const (
+	// strandedQueued: the bead is queued, or past queueing (landing,
+	// rejected); nothing to do.
+	strandedQueued strandedOutcome = iota
+	// strandedRequeued: the bead had its request but not its label, and has
+	// the label now.
+	strandedRequeued
+	// strandedFailed: the bead is stranded and could not be repaired.
+	strandedFailed
+	// strandedUnknown: the bead or its landing record could not be read, so
+	// neither queueing it nor replacing it is this run's call.
+	strandedUnknown
+	// strandedClosed: the bead never got its request, so the branch and head
+	// it would land are unknown; it is closed and the revert filed anew.
+	strandedClosed
+)
+
+// revertPastQueueing reports a revert bead the red-main owner must not queue
+// again: the ready label is its request in the worker's hands, and the two
+// refusal labels are the worker's answer to it.
+func revertPastQueueing(is *beads.Issue) bool {
+	return beads.HasLabel(is, land.LabelReadyToLand) || beads.HasLabel(is, land.LabelRework) || beads.HasLabel(is, land.LabelNeedsHuman)
+}
+
+// requeueStranded finishes filing an open revert bead a failed write left
+// unqueued (fileRevert), so red main gets its revert instead of an "already
+// open" bead the landing worker never sees. A bead a rejection or a landing
+// has moved on (rework or needs-human label, a landing record) is left alone,
+// since its missing label is the worker's doing.
+func (r *RedMain) requeueStranded(id string) strandedOutcome {
+	is, err := r.Beads.Show(id)
+	if err != nil || is == nil {
+		// Reading a bead this run cannot see is not evidence it is queued:
+		// counting it as queued holds the red-main beads on a guess, which
+		// is the stranding this repair exists to end (gt-th4gu).
+		r.logf("reading the open revert %s: %v", id, err)
+		return strandedUnknown
+	}
+	if revertPastQueueing(is) {
+		return strandedQueued
+	}
+	// A landed bead is past queueing: the worker records the landing and then
+	// closes the bead, and a crash between the two leaves it open without the
+	// ready label. The landings file answers "did this land?" as data; the
+	// notes only say it in prose.
+	if r.Landings != nil {
+		if _, found, err := r.Landings.LatestForBead(id); err != nil {
+			r.logf("reading the landing record of the open revert %s: %v", id, err)
+			return strandedUnknown
+		} else if found {
+			return strandedQueued
+		}
+	}
+	if _, ok := land.ParseReadyNote(is.Notes); ok {
+		if err := r.queueRevert(id); err != nil {
+			r.logf("queueing the stranded revert %s: %v", id, err)
+			return strandedFailed
+		}
+		return strandedRequeued
+	}
+	// The request note was never written, so there is no branch or head to
+	// queue and the bead only blocks the next revert by its title. Only a
+	// bead with the ready label can be claimed (the worker lists by it), so
+	// re-reading right before the close is what keeps a bead some other
+	// writer queued meanwhile from being closed under the worker.
+	if now, err := r.Beads.Show(id); err != nil || now == nil {
+		r.logf("re-reading the unqueued revert %s before closing it: %v", id, err)
+		return strandedUnknown
+	} else if revertPastQueueing(now) || beads.IssueStatus(strings.TrimSpace(now.Status)).IsTerminal() {
+		return strandedQueued
+	}
+	if err := r.Beads.CloseWithReason("the revert was never queued: its request was not written, so a new revert bead replaces it", id); err != nil {
+		r.logf("closing the unqueued revert %s: %v", id, err)
+		return strandedFailed
+	}
+	return strandedClosed
 }
 
 // revertOf reads the bead a landing worker just landed or rejected and
