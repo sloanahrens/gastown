@@ -76,8 +76,9 @@ func staleID(l stale.Line) string {
 }
 
 // Parse reads one stale line. A bead that could not be asked has no answers,
-// and one from an older question set cannot be compared with this one, so both
-// are skipped and counted.
+// one from an older question set cannot be compared with this one, and one about
+// a rig, molecule or other non-work bead was logged before the pass read only
+// work beads, so all three are skipped and counted.
 func (a *staleAdapter) Parse(raw []byte) (Item, error) {
 	var l stale.Line
 	if err := json.Unmarshal(raw, &l); err != nil {
@@ -85,6 +86,9 @@ func (a *staleAdapter) Parse(raw []byte) (Item, error) {
 	}
 	if l.Rig == "" || l.Bead == "" || l.TS.IsZero() {
 		return Item{}, errors.New("stale line needs a rig, a bead and a ts")
+	}
+	if !stale.IsWorkType(l.Type) {
+		return Item{}, fmt.Errorf("stale line is about a %q bead, the scorecard reads task, bug and feature", l.Type)
 	}
 	if l.QuestionVersion != stale.Version {
 		return Item{}, fmt.Errorf("stale line asked question set %d, the scorecard reads %d", l.QuestionVersion, stale.Version)
