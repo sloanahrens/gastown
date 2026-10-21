@@ -431,11 +431,11 @@ func (d *Daemon) clearCoveredRestartMarker(now time.Time) {
 func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	m, own, ok := d.loadMarkerForUpgrade()
 	if !ok {
-		d.endUpgradeDrain()
+		d.endUpgradeDrain(now)
 		return false
 	}
 	if d.clearCoveredMarker(m, own, now) {
-		d.endUpgradeDrain()
+		d.endUpgradeDrain(now)
 		return false
 	}
 
@@ -452,7 +452,7 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	}
 
 	if d.restartHadNoEffect(m, own) {
-		d.endUpgradeDrain()
+		d.endUpgradeDrain(now)
 		if !d.upgradeWaitEscalated {
 			d.upgradeWaitEscalated = true
 			d.logger.Printf("upgrade-restart: restarted from %s for %s but now running %s; not restarting again", m.AttemptedFrom, m.Commit, own)
@@ -469,8 +469,8 @@ func (d *Daemon) checkUpgradeRestart(now time.Time) bool {
 	// not in the predicate, and the wait's own clock is what the caps read.
 	work := d.daemonWorkHold()
 	hold := d.upgradeHold(now, work)
-	if d.upgradeDrainDeferred(hold, work) {
-		// A tier sweep that began before the marker is the only hold: landing
+	if d.upgradeDrainDeferred(hold) {
+		// A tier sweep that began before the marker is the hold: landing
 		// passes keep starting until it closes or hits its cap (gt-du6xl).
 		d.deferUpgradeDrain(now)
 		d.noteStuckWait(now, m, own)
@@ -590,18 +590,20 @@ func (d *Daemon) noteStuckWait(now time.Time, m *restartPendingMarker, own strin
 }
 
 // upgradeDrainDeferred reports whether the wait for hold runs without the
-// drain: hold is the running tier sweep, nothing else holds the restart (work,
-// the daemonWorkHold read hold was decided from, is nil), and the sweep began
-// before the marker. A sweep that began after the marker keeps
-// the drain, as it always has. The restart waits on the sweep up to
-// tierSweepRestartCap on the marker's clock either way (gt-du6xl).
-func (d *Daemon) upgradeDrainDeferred(hold, work *daemonWork) bool {
+// drain: hold is the running tier sweep and the sweep began before the marker.
+// A sweep that began after the marker keeps the drain, as it always has. The
+// restart waits on the sweep up to tierSweepRestartCap on the marker's clock
+// either way (gt-du6xl).
+//
+// Soft daemon work in flight does not keep the drain on: upgradeHold names the
+// sweep ahead of it, and a plugin run, a dispatch tick, a scan or a paid pass
+// has no landing pass to protect. Counting it as a hold left the deferral
+// almost never firing, one such pass being in flight at most heartbeats, so a
+// sweep drained landings for its whole length anyway (gt-9vjw8). Hard work
+// still keeps the drain, and upgradeHold returns any hard hold before the
+// sweep, so a hold that names the sweep is already the hard-free case.
+func (d *Daemon) upgradeDrainDeferred(hold *daemonWork) bool {
 	if hold == nil || hold.name != tierSweepHoldLabel {
-		return false
-	}
-	// upgradeHold names the sweep ahead of soft work in flight, so any other
-	// hold that is still running must keep the drain on.
-	if work != nil {
 		return false
 	}
 	// A cycle with no recorded start runs on the marker's clock, as in
@@ -610,13 +612,15 @@ func (d *Daemon) upgradeDrainDeferred(hold, work *daemonWork) bool {
 	return started == 0 || time.Unix(0, started).Before(d.upgradeWaitSince)
 }
 
-// deferUpgradeDrain is the wait for a tier sweep that holds a pending restart
-// alone. Landing workers are not drained, so passes keep starting while the
-// sweep runs. The wait line still names the sweep on every heartbeat, and the
-// deferral is logged once per hold (gt-du6xl).
+// deferUpgradeDrain is the wait for a tier sweep that upgradeHold named ahead
+// of any soft work in flight. Landing workers are not drained, so passes keep
+// starting while the sweep runs. The wait line still names the sweep on every
+// heartbeat, and the deferral is logged once per hold (gt-du6xl). A drain that
+// was already on — a landing pass or other hold had it going — ends here, and
+// its end line says for how long it held landings (gt-9vjw8).
 func (d *Daemon) deferUpgradeDrain(now time.Time) {
 	d.upgradeRestartPending.Store(false)
-	d.upgradeDrainLogged = false
+	d.reportDrainHeld(now)
 	if d.upgradeWaitLogged != tierSweepHoldLabel {
 		d.logger.Printf("upgrade-restart: landing passes continue while %s holds the restart; the drain starts when it closes or after %s",
 			tierSweepHoldLabel, tierSweepRestartCap)
@@ -626,12 +630,29 @@ func (d *Daemon) deferUpgradeDrain(now time.Time) {
 }
 
 // endUpgradeDrain lets the landing workers start passes again: no restart is
-// pending (marker gone, covered, or already tried without effect).
-func (d *Daemon) endUpgradeDrain() {
+// pending (marker gone, covered, or already tried without effect). A drain that
+// was on ends here and reports how long it held landings (gt-9vjw8).
+func (d *Daemon) endUpgradeDrain(now time.Time) {
 	d.upgradeRestartPending.Store(false)
+	d.reportDrainHeld(now)
 	d.upgradeWaitLogged = ""
-	d.upgradeDrainLogged = false
 	d.resetUpgradeGCHold()
+}
+
+// reportDrainHeld writes the one line a drain leaves behind when it ends: how
+// long it held landings and the last hold its wait lines named, so an operator
+// reading the log alone can tell what the delay cost and what it waited for
+// (gt-9vjw8). No drain, no line; the bookkeeping is cleared either way. The
+// hold is upgradeDrainWait rather than upgradeWaitLogged, which upgradeHold
+// clears on the heartbeat that goes ahead with the restart.
+func (d *Daemon) reportDrainHeld(now time.Time) {
+	if d.upgradeDrainLogged {
+		d.logger.Printf("upgrade-restart: the drain held landing passes for %s, last waiting for %s",
+			now.Sub(d.upgradeDrainSince).Round(time.Second), d.upgradeDrainWait)
+	}
+	d.upgradeDrainLogged = false
+	d.upgradeDrainSince = time.Time{}
+	d.upgradeDrainWait = ""
 }
 
 // logUpgradeWait says what a pending restart is waiting on: the drain starting
@@ -641,9 +662,11 @@ func (d *Daemon) endUpgradeDrain() {
 func (d *Daemon) logUpgradeWait(name string, now time.Time) {
 	if !d.upgradeDrainLogged {
 		d.upgradeDrainLogged = true
+		d.upgradeDrainSince = now
 		d.logger.Printf("upgrade-restart: draining: no new landing pass until restart")
 	}
 	d.upgradeWaitLogged = name
+	d.upgradeDrainWait = name
 	d.logger.Printf("upgrade-restart: waiting for %s (%dm)", name, int(now.Sub(d.upgradeWaitSince).Minutes()))
 }
 
@@ -652,8 +675,9 @@ func (d *Daemon) logUpgradeWait(name string, now time.Time) {
 // holds for it while it runs, up to tierSweepRestartCap. New cycles do not
 // start in between unless the last sweep is already past the stale bound
 // (tierSweepDeferForRestart, gt-zvqn8), which is the one case where the
-// restart waits on a sweep that began after the marker did. While the sweep is
-// the only hold, upgradeDrainDeferred keeps the landing drain off (gt-du6xl).
+// restart waits on a sweep that began after the marker did. While a sweep that
+// began before the marker is what the restart waits on, upgradeDrainDeferred
+// keeps the landing drain off (gt-du6xl, gt-9vjw8).
 
 // landingPassBead is the bead of a landing pass in flight (the first rig by
 // name when several), or "" when none is working on one.
@@ -682,7 +706,7 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State) error {
 		// one was removed): there is nothing to restart onto, so end the
 		// drain instead of holding the landing workers for a heartbeat.
 		d.upgradeRestartRequested.Store(false)
-		d.endUpgradeDrain()
+		d.endUpgradeDrain(time.Now())
 		return nil
 	}
 	// The idle read behind the request raced the landing worker's own
@@ -702,6 +726,10 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State) error {
 		d.upgradeRestartRequested.Store(false)
 		return nil
 	}
+	// A drain that is on ends with this restart: name the time it cost before
+	// the restart lines, so the log of an upgrade says how long landings were
+	// held and on what (gt-9vjw8).
+	d.reportDrainHeld(time.Now())
 	d.logger.Printf("upgrade-restart: idle; restarting from %s to pick up %s", own, m.Commit)
 	d.logger.Println("Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary")
 	_ = d.shutdown(state)
