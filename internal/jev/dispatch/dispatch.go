@@ -57,9 +57,6 @@ const (
 	// maxRetryWait caps how long a 429's Retry-After can hold a pass.
 	maxRetryWait = 30 * time.Second
 
-	// agentLabelPrefix starts the label that pins a bead to one agent.
-	agentLabelPrefix = specdispatch.AgentLabelPrefix
-
 	// agentVar is the attached_vars key that names the seat's agent.
 	agentVar = "agent"
 )
@@ -343,13 +340,17 @@ func after(cur battery.Cursor, at time.Time, id string) bool {
 	return at.After(cur.Time)
 }
 
-// agentOf is the agent the bead is for: the first agent: label if it has one,
-// else the agent var the dispatcher stamped with the placement, else empty.
+// agentOf is the agent the bead is for: the agent its agent: label pins, else
+// the agent var the dispatcher stamped with the placement, else empty. The
+// label is read the way the dispatcher reads it (PinnedAgents), so the state
+// names the agent the dispatcher seats. A bead that wears several agent:
+// labels names none, as the dispatcher seats no such bead (ChooseSeat).
 func agentOf(b *beads.Issue) string {
-	for _, l := range b.Labels {
-		if name, ok := strings.CutPrefix(l, agentLabelPrefix); ok && name != "" {
-			return name
+	if pinned := (specdispatch.Spec{Labels: b.Labels}).PinnedAgents(); len(pinned) > 0 {
+		if len(pinned) > 1 {
+			return ""
 		}
+		return pinned[0]
 	}
 	if fields := beads.ParseAttachmentFields(b); fields != nil {
 		for _, v := range fields.AttachedVars {
