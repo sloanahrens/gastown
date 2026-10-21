@@ -626,14 +626,124 @@ git commit -m "rebuild_gt: a landing's install request waits out a 30 minute win
 ### Task 5: Bond writes in few statements (bead e, beads rig)
 
 **Files:** (beads repo, `~/gt/beads`; read from its `origin/main`)
-- Modify: `cmd/bd/template.go:650-760` (`cloneSubgraphInto`) and the store method(s) it calls per row
-- Test: the store's test package next to the dolt store tests
+- Modify: `cmd/bd/template.go:668-764` (`cloneSubgraphInto`), `cmd/bd/mol_port.go:47-67` (`molWriter`, `storeMolWriter`)
+- Test: `cmd/bd/template_clone_writer_test.go` (new, no build tags)
+
+**Why it costs 7.6 s.** `cloneSubgraphInto` writes through `molWriter`, one row per call: `w.CreateIssue` per issue (`template.go:720`) and `w.AddDependency` per edge (`:741`, `:754`). Each `doltTransaction.CreateIssue` builds a fresh `issueops.NewBatchContext` (4+ config queries on the regular connection, `transaction.go:439`, `issueops/create.go:37-51`) and then runs about 9-10 single-row statements for the wisp on the second connection (`create.go:108-208`); each `AddDependency` runs two `isActiveWisp` probes, the type and cycle checks, the existing-edge read, the insert, the `is_blocked` recompute and the event (`transaction.go:830-900`, `issueops/dependencies.go:173-357`). Nine wisps and sixteen edges are roughly 250 round trips; at 30 ms each under load that is the 7.6 s. `storage.Transaction.CreateIssues` (`storage.go:933`, `transaction.go:460-507`) already builds one batch context, writes the deps carried on the issues through `PersistDependenciesWithOptionsResult`, and reconciles child counters and `is_blocked` once for the whole slice.
 
 **Interfaces:**
-- Consumes: `transact(..., "bd: clone template subgraph", ...)` (`template.go:654`), the regular and ignored-table transactions (`internal/storage/dolt/transaction.go:194-284`).
-- Produces: a multi-row insert path for wisps and wisp dependencies inside the one bond transaction; a statement counter in the test.
+- Consumes: `storage.Transaction.CreateIssues(issues []*types.Issue, ...)` as implemented at `internal/storage/dolt/transaction.go:460` (read its exact signature and how it carries dependencies on the issue: the `Dependencies` field `PersistDependenciesWithOptionsResult` at `create.go:835` reads).
+- Produces: `molWriter.CreateIssues(issues []*types.Issue) error` (forwarded by `storeMolWriter`); `cloneSubgraphInto` makes one `CreateIssues` call carrying the parent-child, `needs` and attach edges on the issues, and no `CreateIssue`/`AddDependency` calls.
 
-_This task's concrete steps are filled in from the beads lookup (facts-1 report: the per-row insert calls, any existing batch method, the test server helper and statement-count tooling). Until then the task is not filed._
+- [ ] **Step 1: Write the failing test with a counting fake writer**
+
+```go
+// template_clone_writer_test.go
+package main
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	"github.com/steveyegge/beads/internal/types"
+)
+
+// countingMolWriter is mol_bond_compound_label_test.go's recordingMolWriter
+// plus the batch verb and call counts.
+type countingMolWriter struct {
+	recordingMolWriter
+	createIssue, createIssues, addDependency int
+}
+
+func (w *countingMolWriter) CreateIssue(ctx context.Context, i *types.Issue, actor string) error {
+	w.createIssue++
+	return w.recordingMolWriter.CreateIssue(ctx, i, actor)
+}
+
+func (w *countingMolWriter) CreateIssues(ctx context.Context, is []*types.Issue, actor string) error {
+	w.createIssues++
+	for _, i := range is {
+		if err := w.recordingMolWriter.CreateIssue(ctx, i, actor); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (w *countingMolWriter) AddDependency(ctx context.Context, d *types.Dependency, actor string) error {
+	w.addDependency++
+	return w.recordingMolWriter.AddDependency(ctx, d, actor)
+}
+
+// eightStepSubgraph is the shape cook gives mol-polecat-work: a root, eight
+// steps as its children, and a needs chain between consecutive steps.
+func eightStepSubgraph() *TemplateSubgraph {
+	root := &types.Issue{ID: "tpl-root", Title: "root", IssueType: types.TypeEpic}
+	sub := &TemplateSubgraph{Root: root, Issues: []*types.Issue{root}, IssueMap: map[string]*types.Issue{root.ID: root}, Phase: "vapor"}
+	var prev string
+	for n := 1; n <= 8; n++ {
+		id := fmt.Sprintf("tpl-step-%d", n)
+		step := &types.Issue{ID: id, Title: fmt.Sprintf("step %d", n), IssueType: types.TypeTask}
+		sub.Issues = append(sub.Issues, step)
+		sub.IssueMap[id] = step
+		sub.Dependencies = append(sub.Dependencies, &types.Dependency{IssueID: id, DependsOnID: root.ID, Type: types.DepParentChild})
+		if prev != "" {
+			sub.Dependencies = append(sub.Dependencies, &types.Dependency{IssueID: id, DependsOnID: prev, Type: types.DepBlocks})
+		}
+		prev = id
+	}
+	return sub
+}
+
+func TestCloneSubgraphWritesOneBatch(t *testing.T) {
+	w := &countingMolWriter{}
+	res, err := cloneSubgraphInto(context.Background(), w, eightStepSubgraph(), CloneOptions{Ephemeral: true, Actor: "tester", ParentID: "gt-target"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.createIssues != 1 || w.createIssue != 0 || w.addDependency != 0 {
+		t.Fatalf("writer calls: CreateIssues=%d CreateIssue=%d AddDependency=%d, want 1/0/0", w.createIssues, w.createIssue, w.addDependency)
+	}
+	if res.Created != 9 || len(w.created) != 9 {
+		t.Fatalf("issues written = %d (result %d), want 9", len(w.created), res.Created)
+	}
+	deps := 0
+	for _, i := range w.created {
+		deps += len(i.Dependencies)
+	}
+	if deps != 16 {
+		t.Fatalf("dependencies carried on the issues = %d, want 16 (8 parent-child, 7 blocks, 1 attach to gt-target)", deps)
+	}
+}
+```
+
+The dependency type constants and `IssueType` values come from `internal/types` (read `types.Dependency` and the constants `cook.go:680-685` uses for the parent-child and needs edges). If `ParentID` is not how the attach target reaches `cloneSubgraphInto` (read `template.go:748-757` for the field it uses), set that field instead. `recordingMolWriter.CreateIssue` assigns `cmp-1` to an empty ID; give each cloned issue a distinct ID in the fake if the clone leaves IDs empty for the store to generate (the counting wrapper can number them).
+
+- [ ] **Step 2: Run it to verify it fails**
+
+Run: `go test ./cmd/bd -run TestCloneSubgraphWritesOneBatch -count=1`
+Expected: FAIL: `molWriter` has no `CreateIssues`, or `CreateIssues=0 CreateIssue=9 AddDependency=16`.
+
+- [ ] **Step 3: Implement**
+
+`mol_port.go`: add `CreateIssues(ctx context.Context, issues []*types.Issue, actor string) error` to `molWriter`; `storeMolWriter.CreateIssues` forwards to `w.tx.CreateIssues(ctx, issues, actor)` (`storage.Transaction`, `storage.go:933`; `doltTransaction.CreateIssues`, `transaction.go:460`). Every other `molWriter` implementation (grep `molWriter` in `cmd/bd`, including `recordingMolWriter` in the tests) gets the method, looping over `CreateIssue`.
+
+`template.go` `cloneSubgraphInto`: keep the issue-building loop (`:676-725`) but collect the issues in a slice instead of writing each; build the dependency rows (`:728-757`) onto each source issue's `Dependencies` the way `PersistDependenciesWithOptionsResult` expects; then one `w.CreateIssues(issues)`. The attach edge to the target issue (`:748-757`) is carried on the root wisp. Keep the ID map and the return values as they are.
+
+- [ ] **Step 4: Run the tests**
+
+Run: `go test ./cmd/bd -run 'TestCloneSubgraph|TestMol' -count=1` and, where Docker is available, `go test -tags 'cgo integration' ./cmd/bd -run 'TestCloneSubgraph|TestIntegrationMol|bond' -count=1`.
+Expected: PASS; the integration bond tests see the same molecule shape (root, 8 steps, 16 edges, attach to the target).
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add cmd/bd/template.go cmd/bd/mol_port.go cmd/bd/template_clone_writer_test.go
+git commit -m "mol bond: write the cloned subgraph in one CreateIssues call instead of one call per row"
+```
+
+**Follow-up bead (5b, after 5a is measured):** the per-wisp statements inside `CreateIssuesInTxWithContext` (ID generation with a collision `SELECT` per candidate, the cross-table collision `SELECT`, the existence `SELECT`, the event `INSERT`) are still one row at a time. If a measured bond is still over 1 s, 5b batches the ID collision checks into one `SELECT id FROM wisps WHERE id IN (...)` plus one on `issues`, and skips the existence check for IDs that query cleared. Filed only with the measurement.
 
 ---
 
