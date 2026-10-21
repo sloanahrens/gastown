@@ -828,6 +828,12 @@ func TestAgentOfRefusesSeveralAgentLabels(t *testing.T) {
 		{name: "several labels beat the attached var", labels: []string{"agent:flint", "agent:opal"}, desc: `attached_vars: ["agent=kestrel"]`, want: ""},
 		{name: "one label", labels: []string{"agent:flint"}, want: "flint"},
 		{name: "no label takes the attached var", desc: `attached_vars: ["agent=kestrel"]`, want: "kestrel"},
+		// The dispatcher reads agent: labels trimmed and case-insensitively, so
+		// the record names the agent it seats.
+		{name: "label prefix in capitals", labels: []string{"AGENT:flint"}, want: "flint"},
+		{name: "label with surrounding space", labels: []string{" agent:flint "}, want: "flint"},
+		{name: "label value padded", labels: []string{"agent: flint "}, want: "flint"},
+		{name: "blank label value names none", labels: []string{"agent:  "}, desc: `attached_vars: ["agent=kestrel"]`, want: ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -55,11 +55,9 @@ const (
 	// maxFiles caps the changed files listed in the state.
 	maxFiles = 80
 
-	// agentLabelPrefix starts the label that pins a bead to one agent, and
 	// agentVar is the attached_vars key the dispatcher stamps with the seat's
 	// agent.
-	agentLabelPrefix = specdispatch.AgentLabelPrefix
-	agentVar         = "agent"
+	agentVar = "agent"
 )
 
 // Asker asks one multi-question Ask. *jev.Client satisfies it.
@@ -392,17 +390,17 @@ func mrNotes(notes string) string {
 	return truncate(strings.TrimSpace(notes), maxNotesRunes)
 }
 
-// agentOf is the agent the bead names: the first agent: label if it has one,
-// else the agent attached var, else empty. A bead that wears several agent:
-// labels names none, as the dispatcher seats no such bead (ChooseSeat).
+// agentOf is the agent the bead names: the agent its agent: label pins, else
+// the agent attached var, else empty. The label is read the way the dispatcher
+// reads it (PinnedAgents), so the record names the agent the dispatcher seats.
+// A bead that wears several agent: labels, or a blank one, names none, as the
+// dispatcher seats no such bead (ChooseSeat).
 func agentOf(b *beads.Issue) string {
-	if len(specdispatch.Spec{Labels: b.Labels}.PinnedAgents()) > 1 {
-		return ""
-	}
-	for _, l := range b.Labels {
-		if name, ok := strings.CutPrefix(l, agentLabelPrefix); ok && name != "" {
-			return name
+	if pinned := (specdispatch.Spec{Labels: b.Labels}).PinnedAgents(); len(pinned) > 0 {
+		if len(pinned) > 1 {
+			return ""
 		}
+		return pinned[0]
 	}
 	if fields := beads.ParseAttachmentFields(b); fields != nil {
 		for _, v := range fields.AttachedVars {
