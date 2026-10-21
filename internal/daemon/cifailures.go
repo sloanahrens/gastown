@@ -21,8 +21,10 @@ const LabelFlakyTest = "flaky-test"
 // test failing on two different beads inside it is the daemon's to escalate.
 const ciFailureWindow = 24 * time.Hour
 
-// ciFailureRetention is how long the ledger keeps a record.
-const ciFailureRetention = 7 * 24 * time.Hour
+// ciFailureRetention is how long the ledger keeps a record. It covers the
+// cause battery's fourteen-day will_recur window; failcause.CIFailureRetention
+// must match it.
+const ciFailureRetention = 14 * 24 * time.Hour
 
 // ciFailure is one line of the ledger: one failing (package, test) of one
 // bead's candidate, or one unparsed failure that named no test.

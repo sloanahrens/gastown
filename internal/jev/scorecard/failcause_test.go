@@ -124,6 +124,19 @@ func TestFailcauseIsUnlabeledBeforeTheWindowCloses(t *testing.T) {
 	}
 }
 
+// A ledger written ten days after the judging still holds every record the
+// fourteen-day window could hold, so a window closed with no repeat is quiet.
+func TestFailcauseLabelsAQuietWindowTheLedgerKept(t *testing.T) {
+	t.Parallel()
+	ledger := ciLedger(t, judgedAt.Add(10*24*time.Hour), ciFailure("gt-abc", judgedAt))
+
+	got := labelOne(t, ledger, judgedAt.Add(failcause.WillRecurWindow+24*time.Hour), "gt-abc")
+
+	if !got.Labeled || got.Labels[qWillRecur] != false || got.Rule != ruleFailcauseQuiet {
+		t.Errorf("Labeling = %+v, want will_recur false by %s", got, ruleFailcauseQuiet)
+	}
+}
+
 // Past the window with no repeat, the negative label needs proof the ledger
 // kept the whole window: its last write must come strictly before the judging
 // plus the ledger's retention. A later write may have pruned a repeat.

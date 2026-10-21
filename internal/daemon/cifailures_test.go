@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/jev/failcause"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -326,6 +327,20 @@ func TestCITestWatchPrunesTheLedger(t *testing.T) {
 	recs := readLedger(t, w.ciTestWatch.Ledger)
 	if len(recs) != 1 || recs[0].Bead != "gt-new" {
 		t.Errorf("ledger = %v, want only the record inside the retention", recs)
+	}
+}
+
+// A failure must stay in the ledger for the whole will_recur window, or the
+// cause battery cannot see a repeat that lands near the window's end.
+func TestCITestWatchKeepsAFailureForTheWillRecurWindow(t *testing.T) {
+	t.Parallel()
+	w := newWatch(t)
+	w.fail("gt-old", test("github.com/x/a", "TestAlpha"))
+	w.now = w.now.Add(failcause.WillRecurWindow - time.Hour)
+	w.fail("gt-new", test("github.com/x/b", "TestBeta"))
+	recs := readLedger(t, w.ciTestWatch.Ledger)
+	if len(recs) != 2 {
+		t.Errorf("ledger = %v, want the failure still inside the will_recur window", recs)
 	}
 }
 
