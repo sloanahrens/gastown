@@ -124,19 +124,19 @@ type specDispatchTickEntry struct {
 
 // specDispatchTickReport is the slice of the tick's JSON the daemon logs.
 type specDispatchTickReport struct {
-	Hold       string `json:"hold"`
+	Hold       string `json:"hold,omitempty"`
 	Roster     string `json:"roster"`
 	Candidates int    `json:"candidates"`
 	// LabeledFailed is the tick's count of ready beads held out of the queue
 	// by the spec-dispatch-failed label, which the health field surfaces
 	// (gt-q6zoo).
-	LabeledFailed int `json:"labeled_failed"`
+	LabeledFailed int `json:"labeled_failed,omitempty"`
 	// DetailsFetched, DetailsCached and DetailsUnread are the tick's reads of
 	// the pool beads' design and notes: shown by bd, answered from the cache,
 	// and left for a later tick by the per-tick limit (gt-l0vlf).
-	DetailsFetched int                     `json:"details_fetched"`
-	DetailsCached  int                     `json:"details_cached"`
-	DetailsUnread  int                     `json:"details_unread"`
+	DetailsFetched int                     `json:"details_fetched,omitempty"`
+	DetailsCached  int                     `json:"details_cached,omitempty"`
+	DetailsUnread  int                     `json:"details_unread,omitempty"`
 	Dispatched     []specDispatchTickEntry `json:"dispatched"`
 	Refused        []specDispatchTickEntry `json:"refused"`
 	Planning       []specDispatchTickEntry `json:"planning"`
@@ -144,14 +144,14 @@ type specDispatchTickReport struct {
 	Failed         []specDispatchTickEntry `json:"failed"`
 	// Deferred is the sling-stage part of Skipped, logged one line per entry
 	// rather than only inside the tick line's capped skip list (gt-4wcqd).
-	Deferred []specDispatchTickEntry `json:"deferred"`
-	Notices  []string                `json:"notices"`
-	Errors   []string                `json:"errors"`
+	Deferred []specDispatchTickEntry `json:"deferred,omitempty"`
+	Notices  []string                `json:"notices,omitempty"`
+	Errors   []string                `json:"errors,omitempty"`
 	// The tick's phase times, for the 'tick took' line (gt-bqch0).
-	RosterNs     time.Duration `json:"roster_ns"`
-	BoardNs      time.Duration `json:"board_ns"`
-	CandidatesNs time.Duration `json:"candidates_ns"`
-	SlingNs      time.Duration `json:"sling_ns"`
+	RosterNs     time.Duration `json:"roster_ns,omitempty"`
+	BoardNs      time.Duration `json:"board_ns,omitempty"`
+	CandidatesNs time.Duration `json:"candidates_ns,omitempty"`
+	SlingNs      time.Duration `json:"sling_ns,omitempty"`
 }
 
 // triggerSpecDispatch starts one tick on its own goroutine unless one is
