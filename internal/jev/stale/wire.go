@@ -21,9 +21,21 @@ import (
 // cap counts is battery.Cap's to say.
 const DefaultMaxUSDPerDay = 1.0
 
-// closeLanded is the close reason the landing worker writes on a bead whose
+// closeLanded is the close reason the molecule close writes on a bead whose
 // change landed.
 const closeLanded = "landed"
+
+// closeLandedOn starts the close reason the landing worker writes on a bead
+// whose change landed: "Landed on <target>", then the landing record.
+const closeLandedOn = "Landed on"
+
+// IsLandedReason reports whether a close reason is a landing's: the bare word
+// the molecule close writes, or the landing record's "Landed on <target>". The
+// stale pass and the scorecard both ask this, so they agree on what landed.
+func IsLandedReason(reason string) bool {
+	reason = strings.TrimSpace(reason)
+	return strings.EqualFold(reason, closeLanded) || strings.HasPrefix(reason, closeLandedOn)
+}
 
 // hmSearchLimit is how many hits one hm query asks for.
 const hmSearchLimit = 3 * MaxLanded
@@ -154,13 +166,18 @@ func (t townBeads) Landed(rig string, since time.Time) ([]*beads.Issue, error) {
 	if err != nil {
 		return nil, err
 	}
+	return landedAmong(closed), nil
+}
+
+// landedAmong keeps the closed beads whose close reason is a landing's.
+func landedAmong(closed []*beads.Issue) []*beads.Issue {
 	var out []*beads.Issue
 	for _, c := range closed {
-		if strings.TrimSpace(c.CloseReason) == closeLanded {
+		if IsLandedReason(c.CloseReason) {
 			out = append(out, c)
 		}
 	}
-	return out, nil
+	return out
 }
 
 func (t townBeads) rig(rig string) (*beads.Beads, error) {
