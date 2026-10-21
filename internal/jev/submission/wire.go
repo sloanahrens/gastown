@@ -50,6 +50,7 @@ type Settings struct {
 // Dolt server.
 type beadLister interface {
 	List(beads.ListOptions) ([]*beads.Issue, error)
+	Show(id string) (*beads.Issue, error)
 }
 
 // Open wires the production pass for a town: the Jev client writing to the
@@ -86,7 +87,7 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 
 	return &Pass{
 		Asker:       client,
-		Submissions: rigBeads{b: beads.New(beadsDir)},
+		Submissions: rigBeads{b: beads.New(beadsDir), records: land.SubmissionsSeenPath(townRoot), warnings: warnings},
 		Git:         newBareGit(ClonePath(townRoot), origin),
 		LogPath:     LogPath(townRoot),
 		CursorPath:  CursorPath(townRoot),
@@ -114,40 +115,71 @@ func ClonePath(townRoot string) string {
 	return filepath.Join(townRoot, constants.DirRuntime, "jev", "repos", RigName+".git")
 }
 
-// rigBeads lists a rig's submitted work beads through the beads client. It
-// never writes.
+// rigBeads reads a rig's submissions: the first-sight records the landing
+// worker wrote, and the waiting work beads that have none. It never writes.
 type rigBeads struct {
 	b beadLister
+	// records is the first-sight log, land.SubmissionsSeenPath in production.
+	records string
+	// warnings receives a line for each record whose bead cannot be read. Nil
+	// drops them.
+	warnings io.Writer
 }
 
-// Since lists the beads that could carry a submission since t: the ones still
-// waiting to land, and the ones closed since t. The second read is what keeps
-// a fast landing in the battery: the landing worker removes the ready label
-// when it lands the bead, so a submission that lands between two passes is
-// only visible on the closed side.
-func (r rigBeads) Since(t time.Time) ([]*beads.Issue, error) {
+// Since returns the submissions from t on: each first-sight record, then each
+// waiting bead that no record names at its head. A record whose bead cannot be
+// read is reported and left out, so one bad read does not stop the pass for
+// the submissions behind it.
+func (r rigBeads) Since(t time.Time) ([]Entry, error) {
+	recs, err := land.ReadSubmissionRecords(r.records)
+	if err != nil {
+		return nil, err
+	}
+	recorded := make(map[string]bool, len(recs))
+	var out []Entry
+	for _, rec := range recs {
+		if recorded[land.SubmissionKey(rec.Bead, rec.Head)] {
+			continue
+		}
+		recorded[land.SubmissionKey(rec.Bead, rec.Head)] = true
+		if rec.SeenAt.Before(t) {
+			continue
+		}
+		issue, err := r.b.Show(rec.Bead)
+		if errors.Is(err, beads.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			if r.warnings != nil {
+				fmt.Fprintf(r.warnings, "jev submission: skipping %s at %s: reading the bead: %v\n", rec.Bead, rec.Head, err)
+			}
+			continue
+		}
+		out = append(out, Entry{
+			Issue: issue,
+			Work: land.Work{
+				BeadID: rec.Bead, Rig: rec.Rig, Branch: rec.Branch, Head: rec.Head,
+				Target: rec.Target, Submitted: rec.Submitted,
+			},
+			Seen:     rec.SeenAt,
+			Subjects: rec.Subjects,
+			Numstat:  rec.Numstat,
+		})
+	}
+
 	waiting, err := r.b.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1, Limit: 0})
 	if err != nil {
 		return nil, err
 	}
-	closed, err := r.b.List(beads.ListOptions{Status: "closed", ClosedAfter: t, Priority: -1, Limit: 0})
-	if err != nil {
-		return nil, err
-	}
-	seen := make(map[string]bool, len(waiting)+len(closed))
-	out := make([]*beads.Issue, 0, len(waiting)+len(closed))
 	for _, issue := range waiting {
 		if issue == nil || !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() {
 			continue
 		}
-		seen[issue.ID] = true
-		out = append(out, issue)
-	}
-	for _, issue := range closed {
-		if issue == nil || seen[issue.ID] {
+		w, err := land.WorkFromBead(issue, RigName)
+		if err != nil || recorded[land.SubmissionKey(issue.ID, w.Head)] {
 			continue
 		}
-		out = append(out, issue)
+		out = append(out, Entry{Issue: issue, Work: w, Seen: w.Submitted})
 	}
 	return out, nil
 }

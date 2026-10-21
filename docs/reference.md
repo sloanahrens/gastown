@@ -1232,12 +1232,12 @@ the same keys whether or not the patrol is on:
 
 ### Submission battery (`jev_submission`)
 
-`gt jev submission` asks Jev about each gastown work bead submitted for landing:
-a bead with a READY TO LAND block whose `Submitted` time is past the pass's
-cursor, read from the beads still carrying `gt:ready-to-land` and the beads
-closed since the cursor. The closed read is what keeps a fast landing in the
-log: the landing worker removes the label when it lands the bead. It asks six
-questions in one call and appends one line per submission to
+`gt jev submission` asks Jev about each gastown work bead submitted for landing.
+The pass reads the first-sight records the landing worker wrote (see below), past
+the cursor by seen time, and each waiting bead with a READY TO LAND block that no
+record names at its head. The records are what keep a fast landing in the log:
+the landing worker removes the label and prunes the branch when it lands the
+bead. It asks six questions in one call and appends one line per submission to
 `.runtime/jev/submission.jsonl`. The
 pass is advisory and log-only: it adds no bead comment, no attention item and
 nothing under `.runtime/landings`, and it never holds up a landing. Read the
@@ -1259,16 +1259,35 @@ most 20) and the changed paths from `git diff --numstat target..head` with
 added and removed counts (at most 80 files). Each value is JSON-quoted. No diff
 content is sent.
 
-The commits and the stat come from a bare clone the pass owns at
-`.runtime/jev/repos/gastown.git`. The first pass creates it from the rig
-registry's `git_url`; every pass fetches `refs/heads/*` into it. The pass never
-runs git in the rig's `mayor/rig` checkout or any town worktree. A fetch that
-fails skips the pass with a logged warning and leaves the cursor unmoved.
+A submission whose record holds its commits is asked from them, and the pass
+never touches the clone for it. Any other submission, a record with no subjects
+or a waiting bead with no record, reads its commits and stat from a bare clone
+the pass owns at `.runtime/jev/repos/gastown.git`. The pass creates the clone
+from the rig registry's `git_url` the first time it needs one and fetches
+`refs/heads/*` into it before each such read. The pass never runs git in the
+rig's `mayor/rig` checkout or any town worktree. A fetch that fails stops the
+pass and leaves the cursor unmoved.
 
 The first pass sets the cursor to its own time and asks nothing. A submission
 the clone cannot read, or that Jev returns an unusable response for, is skipped
 with no line and counted as skipped; any other failure stops the pass, leaves
 the cursor, and is retried next pass.
+
+The landing worker writes `.runtime/jev/submissions-seen.jsonl`, one line per
+submission the first time it sees a bead's READY TO LAND block at a head:
+one `land.SubmissionRecord` as JSON.
+`subjects` (at most 20, newest first) and `numstat` (at most 80 lines) are read
+from the rig's own clone, `.repo.git`, which the polecat worktrees share, so the
+write makes no fetch and no network call. A clone that lacks the commits writes
+the line with no subjects and logs the read error, and the battery reads its own
+clone for it. A stat that cannot be read drops the subjects too, so a line holds
+both or neither. The write
+happens before the worker lands the bead, so a landing that prunes the branch
+still leaves the submission for the battery to ask about. A write that fails is
+logged once per run of failures and never holds up a landing. The file is
+append-only, 0600 in a 0700 directory. The first run after the log is added
+starts it empty, so waiting beads with no record are asked from the label until
+records appear.
 
 The daemon patrol `jev_submission` runs the pass every 15 minutes, off the
 heartbeat. It is off unless `daemon.json` enables it, and `gt jev submission`

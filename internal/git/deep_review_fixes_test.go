@@ -348,3 +348,20 @@ func TestRuntimeArtifactPathspecs_ReadsEachRootOnce(t *testing.T) {
 	}
 	s.noUnscripted(t)
 }
+
+// DiffNumstat keeps renames off, so a moved file reads as a delete and an add,
+// and a binary file keeps its "-" counts.
+func TestDiffNumstatNoRenames(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"diff --numstat --no-renames main..feature": ok("3\t1\tinternal/x.go\n-\t-\tlogo.png\n"),
+	})
+	got, err := newTestGit(t, s).DiffNumstat("main", "feature")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "3\t1\tinternal/x.go\n-\t-\tlogo.png"; got != want {
+		t.Fatalf("DiffNumstat = %q, want %q", got, want)
+	}
+	s.noUnscripted(t)
+}
