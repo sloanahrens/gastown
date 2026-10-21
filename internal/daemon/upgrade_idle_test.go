@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gofrs/flock"
@@ -164,5 +165,46 @@ func TestDaemonWorkHoldsIncludesARunningJevDedupePass(t *testing.T) {
 	d.jevDedupeRunning.Store(false)
 	if hold := d.daemonWorkHold(); hold != nil {
 		t.Errorf("daemonWorkHold() = %+v, want none once the pass has ended", hold)
+	}
+}
+
+// TestDaemonWorkHoldsIncludesTheOtherJevPasses covers gt-tevxz: an upgrade
+// restart killed the Jev call a jev_attention, jev_landing, jev_submission or
+// jev_dispatch pass had in flight before its line was recorded, and the next
+// pass asked — and billed — that item again. Each is soft work, as jev_dedupe's
+// is, and holds the restart only up to housekeepingRestartCap.
+func TestDaemonWorkHoldsIncludesTheOtherJevPasses(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		flag func(*Daemon) *atomic.Bool
+	}{
+		{"jev_attention", func(d *Daemon) *atomic.Bool { return &d.jevAttentionRunning }},
+		{"jev_landing", func(d *Daemon) *atomic.Bool { return &d.jevLandingRunning }},
+		{"jev_submission", func(d *Daemon) *atomic.Bool { return &d.jevSubmissionRunning }},
+		{"jev_dispatch", func(d *Daemon) *atomic.Bool { return &d.jevDispatchRunning }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := idleTestDaemon(t)
+			want := "a " + tc.name + " pass"
+			tc.flag(d).Store(true)
+
+			hold := d.daemonWorkHold()
+			if hold == nil || hold.name != want {
+				t.Fatalf("daemonWorkHold() = %+v, want %q", hold, want)
+			}
+			if hold.hard {
+				t.Errorf("%s is soft work: the next daemon's pass re-asks its items", tc.name)
+			}
+			if got := d.daemonWorkHolds(); len(got) != 1 || got[0].name != want {
+				t.Errorf("daemonWorkHolds() = %+v, want just %q", got, want)
+			}
+
+			tc.flag(d).Store(false)
+			if hold := d.daemonWorkHold(); hold != nil {
+				t.Errorf("daemonWorkHold() = %+v, want none once the pass has ended", hold)
+			}
+		})
 	}
 }

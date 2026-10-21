@@ -341,3 +341,58 @@ func TestJevAttentionRunLogsAnOutageApartFromAnswers(t *testing.T) {
 		t.Errorf("log = %q, want the outage named and no items answered", got)
 	}
 }
+
+// TestJevAttentionPassStopsBetweenCallsWhenEstopped covers gt-tevxz: the E-stop
+// kept a pass from starting, but one already in flight went on paying for every
+// item it reached. The pass now checks the E-stop between billed calls: the call
+// in flight finishes and is recorded, and the items behind it wait for a pass
+// run after the E-stop lifts.
+func TestJevAttentionPassStopsBetweenCallsWhenEstopped(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	logs := &bytes.Buffer{}
+	cursor := jevattention.CursorPath(town)
+	if err := battery.WriteCursor(cursor, battery.Cursor{Time: time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	var events []attention.Event
+	for _, k := range []string{"a", "b", "c"} {
+		events = append(events, attention.Event{
+			TS:    time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+			Key:   k,
+			State: attention.EventNew,
+		})
+	}
+	asker := &estoppingAsker{t: t, town: town}
+	d := &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(logs, "", 0),
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{JevAttention: &JevAttentionConfig{Enabled: true, USDPerBillionTokens: 3}},
+		},
+		jevAttentionOpen: func(string, jevattention.Settings, io.Writer) (*jevattention.Pass, error) {
+			return &jevattention.Pass{
+				Asker:      asker,
+				State:      func() (attention.State, error) { return attention.State{}, nil },
+				Events:     func() ([]attention.Event, error) { return events, nil },
+				LogPath:    jevattention.LogPath(town),
+				CursorPath: cursor,
+				SpentToday: func() (float64, error) { return 0, nil },
+				CapUSD:     1,
+			}, nil
+		},
+	}
+
+	d.runJevAttention()
+
+	if asker.calls != 1 {
+		t.Errorf("Jev was asked about %d items, want only the one in flight when the E-stop went up", asker.calls)
+	}
+	lines, err := jevattention.ReadRecent(jevattention.LogPath(town), 5)
+	if err != nil || len(lines) != 1 || lines[0].Key != "a" {
+		t.Errorf("log lines = %+v, %v, want the one line for item a recorded", lines, err)
+	}
+	if !strings.Contains(logs.String(), "jev_attention: stopped:") {
+		t.Errorf("log = %q, want the pass to say it stopped for the E-stop", logs)
+	}
+}

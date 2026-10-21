@@ -402,3 +402,33 @@ func TestJevLandingTriggerLogsAFailedOpenOncePerInterval(t *testing.T) {
 		t.Errorf("error logged %d times, want 1: %q", n, r.logs)
 	}
 }
+
+// TestJevLandingPassStopsBetweenCallsWhenEstopped covers gt-tevxz: the E-stop
+// kept a pass from starting, but one already in flight went on paying for every
+// landing it reached. The call in flight finishes and is recorded; the landings
+// behind it wait for a pass run after the E-stop lifts.
+func TestJevLandingPassStopsBetweenCallsWhenEstopped(t *testing.T) {
+	t.Parallel()
+	r := newJevLandingRig(t)
+	r.seedCursor(t, time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC))
+	r.pass.Landings = stubLandings{recs: []land.LandingRecord{
+		riskLanding("gt-a", time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)),
+		riskLanding("gt-b", time.Date(2026, 10, 20, 11, 1, 0, 0, time.UTC)),
+		riskLanding("gt-c", time.Date(2026, 10, 20, 11, 2, 0, 0, time.UTC)),
+	}}
+	asker := &estoppingAsker{t: t, town: r.town}
+	r.pass.Asker = asker
+
+	r.d.runJevLanding()
+
+	if asker.calls != 1 {
+		t.Errorf("Jev was asked about %d landings, want only the one in flight when the E-stop went up", asker.calls)
+	}
+	lines, err := landing.ReadRecent(r.pass.LogPath, 5)
+	if err != nil || len(lines) != 1 || lines[0].Bead != "gt-a" {
+		t.Errorf("log lines = %+v, %v, want the one gt-a line recorded", lines, err)
+	}
+	if !strings.Contains(r.logs.String(), "jev_landing: stopped:") {
+		t.Errorf("log = %q, want the pass to say it stopped for the E-stop", r.logs)
+	}
+}
