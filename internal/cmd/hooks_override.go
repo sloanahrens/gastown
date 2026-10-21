@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 
@@ -37,8 +38,30 @@ func init() {
 	hooksOverrideCmd.Flags().BoolVar(&hooksOverrideShow, "show", false, "Print current override config to stdout")
 }
 
+// hooksOverrideEnv is the home and editor one invocation of gt hooks override
+// runs against.
+type hooksOverrideEnv struct {
+	home   hooks.Home
+	editor func(string) error
+}
+
+// hooksOverrideEnvKey carries the home and editor a caller pinned for one
+// invocation. Tests use withHooksOverrideEnv to run the command's own RunE
+// against a sandbox home and a recording opener; production never sets it, so
+// the environment supplies both (gt-arsyc).
+type hooksOverrideEnvKey struct{}
+
+// withHooksOverrideEnv pins home and editor as the pair runHooksOverride uses.
+func withHooksOverrideEnv(ctx context.Context, home hooks.Home, editor func(string) error) context.Context {
+	return context.WithValue(ctx, hooksOverrideEnvKey{}, hooksOverrideEnv{home: home, editor: editor})
+}
+
 func runHooksOverride(cmd *cobra.Command, args []string) error {
-	return hooksOverrideWith(hooks.EnvHome(), openInEditor, args)
+	home, editor := hooks.EnvHome(), openInEditor
+	if env, ok := cmd.Context().Value(hooksOverrideEnvKey{}).(hooksOverrideEnv); ok {
+		home, editor = env.home, env.editor
+	}
+	return hooksOverrideWith(home, editor, args)
 }
 
 // hooksOverrideWith edits the override for args[0] in home, opening the chosen
