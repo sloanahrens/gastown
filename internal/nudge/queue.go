@@ -13,6 +13,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -231,11 +232,21 @@ func enqueue(townRoot, session string, nudge QueuedNudge, observe func(ExpiryEve
 //
 // Retries are additionally spaced by RequeueBackoff so that even the bounded
 // number of retries cannot repeat at the poll interval.
-func Requeue(townRoot, session string, nudges []QueuedNudge) error {
+//
+// Drained nudges are the only copy, so one failed enqueue does not stop the
+// rest (gt-isb0g). Requeue tries every nudge and returns the ones it could not
+// put back, with their incremented Attempts, alongside an error joining the
+// failures. It never re-injects them itself; the caller reports the count and
+// decides what to keep.
+func Requeue(townRoot, session string, nudges []QueuedNudge) ([]QueuedNudge, error) {
 	return requeue(townRoot, session, nudges, ExpiryObserver)
 }
 
-func requeue(townRoot, session string, nudges []QueuedNudge, observe func(ExpiryEvent)) error {
+func requeue(townRoot, session string, nudges []QueuedNudge, observe func(ExpiryEvent)) ([]QueuedNudge, error) {
+	var (
+		unqueued []QueuedNudge
+		errs     []error
+	)
 	cfg := nudgeConfig(townRoot)
 	maxAttempts := cfg.MaxDeliveryAttemptsV()
 	backoff := cfg.RequeueBackoffD()
@@ -264,10 +275,11 @@ func requeue(townRoot, session string, nudges []QueuedNudge, observe func(Expiry
 		}
 
 		if err := enqueue(townRoot, session, n, observe); err != nil {
-			return err
+			unqueued = append(unqueued, n)
+			errs = append(errs, err)
 		}
 	}
-	return nil
+	return unqueued, errors.Join(errs...)
 }
 
 // Drain reads and removes all queued nudges for a session, returning them

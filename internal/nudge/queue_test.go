@@ -1110,7 +1110,7 @@ func TestRequeueDefersRetryUntilBackoffElapses(t *testing.T) {
 		t.Fatalf("Drain got %d nudges, want 1", len(drained))
 	}
 
-	if err := Requeue(townRoot, session, drained); err != nil {
+	if _, err := Requeue(townRoot, session, drained); err != nil {
 		t.Fatalf("Requeue: %v", err)
 	}
 
@@ -1167,7 +1167,7 @@ func TestRequeueDropsNudgeAfterMaxAttempts(t *testing.T) {
 
 	failedAttempts := 0
 	for i := 0; i < maxAttempts+5; i++ {
-		if err := Requeue(townRoot, session, cur); err != nil {
+		if _, err := Requeue(townRoot, session, cur); err != nil {
 			t.Fatalf("Requeue round %d: %v", i, err)
 		}
 
@@ -1370,7 +1370,7 @@ func TestRequeueReportsExpiredNudge(t *testing.T) {
 	session := "gt-test-requeue-expired"
 	observe, got := observeExpiries()
 
-	if err := requeue(townRoot, session, []QueuedNudge{{
+	if _, err := requeue(townRoot, session, []QueuedNudge{{
 		Sender:    "witness",
 		Message:   "gt-abc needs a decision",
 		Timestamp: time.Now().Add(-time.Hour),
@@ -1427,5 +1427,44 @@ func TestExpiredTracesPrunedAfterRetention(t *testing.T) {
 	}
 	if _, err := os.Stat(fresh); err != nil {
 		t.Errorf("fresh trace %s was pruned: %v", fresh, err)
+	}
+}
+
+// TestRequeueKeepsUnenqueuedNudges: a full queue refuses every requeue, and the
+// drained nudges are the only copy, so Requeue must hand them back rather than
+// drop the slice with a bare error (gt-isb0g).
+func TestRequeueKeepsUnenqueuedNudges(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	session := "gt-test-requeue-full"
+
+	for i := 0; i < MaxQueueDepth; i++ {
+		if err := Enqueue(townRoot, session, QueuedNudge{Sender: "sender", Message: "fill"}); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+
+	drained := []QueuedNudge{
+		{Sender: "a", Message: "first", Timestamp: time.Now().Add(-2 * time.Second)},
+		{Sender: "b", Message: "second", Timestamp: time.Now().Add(-time.Second)},
+		{Sender: "c", Message: "third", Timestamp: time.Now()},
+	}
+	unqueued, err := Requeue(townRoot, session, drained)
+	if err == nil {
+		t.Fatal("Requeue into a full queue returned nil error")
+	}
+	if len(unqueued) != len(drained) {
+		t.Fatalf("Requeue returned %d nudge(s), want %d", len(unqueued), len(drained))
+	}
+	for i, n := range unqueued {
+		if n.Message != drained[i].Message {
+			t.Errorf("unqueued[%d] = %q, want %q (order preserved)", i, n.Message, drained[i].Message)
+		}
+		if n.Attempts != 1 {
+			t.Errorf("unqueued[%d].Attempts = %d, want 1", i, n.Attempts)
+		}
+	}
+	if pending, _ := Pending(townRoot, session); pending != MaxQueueDepth {
+		t.Errorf("Pending = %d, want %d (the preserved nudges must not be re-injected)", pending, MaxQueueDepth)
 	}
 }

@@ -327,3 +327,27 @@ func TestDeliveryWatcherExitsOnEmptyQueue(t *testing.T) {
 	clk.Advance(time.Second) // one poll, not the whole minute
 	<-done
 }
+
+// TestRequeueNamesHowManyNudgesWereNotRequeued: when the queue is full the
+// nudges cannot go back, and the report says how many were lost (gt-isb0g).
+func TestRequeueNamesHowManyNudgesWereNotRequeued(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	session := "gt-test-requeue-report"
+	for i := 0; i < nudge.MaxQueueDepth; i++ {
+		if err := nudge.Enqueue(townRoot, session, nudge.QueuedNudge{Sender: "s", Message: "fill"}); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+	drained := []nudge.QueuedNudge{{Sender: "a", Message: "one"}, {Sender: "b", Message: "two"}}
+
+	var stderr bytes.Buffer
+	unqueued := Requeue(&stderr, townRoot, session, "test", drained)
+
+	if len(unqueued) != 2 {
+		t.Errorf("Requeue returned %d nudge(s), want 2", len(unqueued))
+	}
+	if want := "2 of 2 nudge(s) not re-queued"; !strings.Contains(stderr.String(), want) {
+		t.Errorf("stderr = %q, want it to contain %q", stderr.String(), want)
+	}
+}

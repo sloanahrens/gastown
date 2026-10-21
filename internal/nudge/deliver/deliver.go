@@ -429,9 +429,13 @@ func (d *Delivery) Watch(ctx context.Context, sessionName string) {
 }
 
 // Requeue puts nudges whose delivery failed back on sessionName's queue,
-// reporting a failure to stderr under source.
-func Requeue(stderr io.Writer, townRoot, sessionName, source string, drained []nudge.QueuedNudge) {
-	if err := nudge.Requeue(townRoot, sessionName, drained); err != nil {
-		fmt.Fprintf(stderr, "%s: requeue for %s failed: %v\n", source, sessionName, err)
+// reporting a failure to stderr under source. It returns the nudges that could
+// not be put back, which are on no queue any more (gt-isb0g).
+func Requeue(stderr io.Writer, townRoot, sessionName, source string, drained []nudge.QueuedNudge) []nudge.QueuedNudge {
+	unqueued, err := nudge.Requeue(townRoot, sessionName, drained)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: requeue for %s failed, %d of %d nudge(s) not re-queued: %v\n",
+			source, sessionName, len(unqueued), len(drained), err)
 	}
+	return unqueued
 }
