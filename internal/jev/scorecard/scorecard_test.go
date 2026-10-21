@@ -2,11 +2,8 @@ package scorecard
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,17 +13,7 @@ import (
 // no entry in labels is unlabeled.
 func writeFixture(t *testing.T, town string, lines []string, labels map[string]map[QuestionID]bool) {
 	t.Helper()
-	if err := os.MkdirAll(filepath.Dir(FixtureLogPath(town)), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(FixtureLogPath(town), []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	data, err := json.Marshal(labels)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(FixtureLabelsPath(town), data, 0o600); err != nil {
+	if err := WriteFixture(town, lines, labels); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -55,27 +42,10 @@ func question(t *testing.T, rep Report, id string) QuestionReport {
 	return QuestionReport{}
 }
 
-// fixtureLines holds four items that answer a noul, a choice and a score, and
-// one line that does not parse.
-var fixtureLines = []string{
-	`{"ts":"2026-10-18T09:00:00Z","id":"fx-1","answers":{"needs":{"noul":0.9},"route":{"choice":"yes","probabilities":{"yes":0.8,"no":0.2},"positive":"yes"},"urgency":{"score":3}}}`,
-	`{"ts":"2026-10-18T10:00:00Z","id":"fx-2","answers":{"needs":{"noul":0.2},"route":{"choice":"no","probabilities":{"yes":0.3,"no":0.7},"positive":"yes"},"urgency":{"score":0}}}`,
-	`{"ts":"2026-10-18T11:00:00Z","id":"fx-3","answers":{"needs":{"noul":0.7},"route":{"choice":"yes","probabilities":{"yes":0.6,"no":0.4},"positive":"yes"},"urgency":{"score":1}}}`,
-	`{"ts":"2026-10-18T12:00:00Z","id":"fx-4","answers":{"needs":{"noul":0.6},"route":{"choice":"no","probabilities":{"yes":0.4,"no":0.6},"positive":"yes"},"urgency":{"score":2}}}`,
-	`not json`,
-}
-
-var fixtureLabels = map[string]map[QuestionID]bool{
-	"fx-1": {"needs": true, "route": true, "urgency": true},
-	"fx-2": {"needs": false, "route": false, "urgency": false},
-	"fx-3": {"needs": false, "route": false, "urgency": false},
-	// fx-4 has no label entry, so it is logged but not labeled.
-}
-
 func TestScorecardBuildCountsAndMetrics(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	writeFixture(t, town, fixtureLines, fixtureLabels)
+	writeFixture(t, town, FixtureLines, FixtureLabels)
 
 	rep := buildFixture(t, town, time.Time{})
 	if rep.Items != 4 || rep.LinesSkipped != 1 {
@@ -140,7 +110,7 @@ func TestScorecardBuildCountsAndMetrics(t *testing.T) {
 func TestScorecardBuildSinceDropsOlderItems(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	writeFixture(t, town, fixtureLines, fixtureLabels)
+	writeFixture(t, town, FixtureLines, FixtureLabels)
 
 	since := time.Date(2026, 10, 18, 10, 30, 0, 0, time.UTC)
 	rep := buildFixture(t, town, since)
@@ -203,7 +173,7 @@ func (failingLabels) Label(context.Context, Item) (Labeling, error) {
 func TestScorecardBuildFailsWhenLabelingFails(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
-	writeFixture(t, town, fixtureLines, fixtureLabels)
+	writeFixture(t, town, FixtureLines, FixtureLabels)
 
 	_, err := Build(context.Background(), failingLabels{fixture{town: town}}, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "bead store unavailable") {
