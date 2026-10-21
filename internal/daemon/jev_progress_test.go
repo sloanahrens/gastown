@@ -251,8 +251,11 @@ func TestJevProgressEnqueueFindsTheSeatTranscript(t *testing.T) {
 	if got[0].Transcript != transcript {
 		t.Errorf("seat transcript = %q, want %q", got[0].Transcript, transcript)
 	}
-	if got[1].Transcript != "" {
-		t.Errorf("a seat with no worktree got transcript %q, want none", got[1].Transcript)
+	if got[0].Worktree != worktree {
+		t.Errorf("seat worktree = %q, want %q: the pass allows that worktree's projects directories", got[0].Worktree, worktree)
+	}
+	if got[1].Transcript != "" || got[1].Worktree != "" {
+		t.Errorf("a seat with no worktree got transcript %q worktree %q, want neither", got[1].Transcript, got[1].Worktree)
 	}
 }
 

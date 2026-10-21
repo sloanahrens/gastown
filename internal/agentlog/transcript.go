@@ -121,6 +121,14 @@ func ClaudeProjectDirFor(workDir string) (string, error) {
 	return claudeProjectDirFor(workDir)
 }
 
+// ProjectDirsFor returns every Claude Code project directory LatestTranscript
+// searches for workDir, in search order. It is the one place a caller learns
+// where a seat's transcripts can sit, so a reader can allow exactly those
+// directories and no others.
+func ProjectDirsFor(workDir string) ([]string, error) {
+	return claudeProjectDirsFor(workDir)
+}
+
 // LatestTranscript returns the most recently modified transcript (JSONL) for
 // workDir across every root that can hold one, or "" when none does.
 //

@@ -564,3 +564,149 @@ func TestJevProgressQuestionSet(t *testing.T) {
 		t.Errorf("remaining levels = %v", got)
 	}
 }
+
+const (
+	capableWorktree = "/work/gastown/polecats/capable"
+	otherWorktree   = "/work/gastown/polecats/furiosa"
+)
+
+// seatProjects is a ProjectDirs that gives each worktree the one projects
+// directory it is keyed to, and none for a worktree it does not name.
+func seatProjects(dirs map[string]string) func(string) ([]string, error) {
+	return func(worktree string) ([]string, error) {
+		if d, ok := dirs[worktree]; ok {
+			return []string{d}, nil
+		}
+		return nil, nil
+	}
+}
+
+// seatNudge is a nudge from the capable seat, whose transcript the progress
+// pass finds from the capable worktree.
+func seatNudge(transcript string) Nudge {
+	n := nudgeFor(transcript)
+	n.Worktree = capableWorktree
+	return n
+}
+
+// writeTranscriptIn writes lines as a transcript in dir, and returns its path.
+func writeTranscriptIn(t *testing.T, dir string, lines ...string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(path, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// A transcript in the nudged seat's own Claude projects directory, which sits
+// outside the town root, is read and reaches the asker.
+func TestJevProgressTranscriptInSeatProjectsDirIsRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	projects := t.TempDir()
+	path := writeTranscriptIn(t, projects, line("assistant", "2026-10-21T00:25:00Z", textBlock("working")))
+	q := &Queue{}
+	q.Push(seatNudge(path))
+	asker := &fakeAsker{ans: fixtureAnswers()}
+	p := newPass(t, town, asker, q)
+	p.ProjectDirs = seatProjects(map[string]string{capableWorktree: projects})
+
+	if _, err := p.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if asker.calls != 1 {
+		t.Errorf("Ask calls = %d, want 1: a transcript in the seat's projects directory is read", asker.calls)
+	}
+	lines := readLog(t, LogPath(town))
+	if len(lines) != 1 || lines[0].Reason != "" || lines[0].Answers == nil {
+		t.Fatalf("log = %+v, want one line with answers", lines)
+	}
+}
+
+// A transcript in another seat's projects directory is refused, even though
+// that directory is a Claude projects directory of the same config dir.
+func TestJevProgressTranscriptInAnotherSeatsProjectsDirIsRefused(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	capableDir := t.TempDir()
+	otherDir := t.TempDir()
+	path := writeTranscriptIn(t, otherDir, line("assistant", "2026-10-21T00:25:00Z", textBlock("not mine")))
+	q := &Queue{}
+	q.Push(seatNudge(path))
+	asker := &fakeAsker{ans: fixtureAnswers()}
+	p := newPass(t, town, asker, q)
+	p.ProjectDirs = seatProjects(map[string]string{capableWorktree: capableDir, otherWorktree: otherDir})
+
+	if _, err := p.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if asker.calls != 0 {
+		t.Errorf("Ask calls = %d, want 0: another seat's projects directory is not the nudged seat's", asker.calls)
+	}
+	lines := readLog(t, LogPath(town))
+	if len(lines) != 1 || lines[0].Reason != ReasonOutsideTown {
+		t.Fatalf("log = %+v, want one line with reason %s", lines, ReasonOutsideTown)
+	}
+}
+
+// A transcript under $HOME, outside the town root and outside every projects
+// directory the seat searches, is refused.
+func TestJevProgressTranscriptUnderHomeOutsideRootsIsRefused(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	projects := t.TempDir()
+	home := t.TempDir()
+	path := writeTranscriptIn(t, filepath.Join(home, "notes"), line("assistant", "2026-10-21T00:25:00Z", textBlock("home")))
+	q := &Queue{}
+	q.Push(seatNudge(path))
+	asker := &fakeAsker{ans: fixtureAnswers()}
+	p := newPass(t, town, asker, q)
+	p.ProjectDirs = seatProjects(map[string]string{capableWorktree: projects})
+
+	if _, err := p.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if asker.calls != 0 {
+		t.Errorf("Ask calls = %d, want 0: a transcript under $HOME outside both roots must not be read", asker.calls)
+	}
+	lines := readLog(t, LogPath(town))
+	if len(lines) != 1 || lines[0].Reason != ReasonOutsideTown {
+		t.Fatalf("log = %+v, want one line with reason %s", lines, ReasonOutsideTown)
+	}
+}
+
+// A symlink inside the seat's projects directory that points outside every
+// allowed root is refused: the containment check runs on the resolved path.
+func TestJevProgressSymlinkOutOfProjectsDirIsRefused(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	projects := t.TempDir()
+	target := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(target, []byte(line("assistant", "2026-10-21T00:25:00Z", textBlock("escaped"))+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(projects, "linked.jsonl")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	q := &Queue{}
+	q.Push(seatNudge(link))
+	asker := &fakeAsker{ans: fixtureAnswers()}
+	p := newPass(t, town, asker, q)
+	p.ProjectDirs = seatProjects(map[string]string{capableWorktree: projects})
+
+	if _, err := p.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if asker.calls != 0 {
+		t.Errorf("Ask calls = %d, want 0: a symlink out of the projects directory must not be read", asker.calls)
+	}
+	lines := readLog(t, LogPath(town))
+	if len(lines) != 1 || lines[0].Reason != ReasonOutsideTown {
+		t.Fatalf("log = %+v, want one line with reason %s", lines, ReasonOutsideTown)
+	}
+}
