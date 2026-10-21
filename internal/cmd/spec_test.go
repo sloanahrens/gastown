@@ -2623,3 +2623,36 @@ func TestSpecDispatchNoticesPolecatsWithNoRecordedAgent(t *testing.T) {
 		t.Fatalf("notices = %v, want none when every polecat records its agent", r.Notices)
 	}
 }
+
+// TestSpecRosterFrom_ParkedStaleSeatIsListedNotCounted is gt-t7k92 on the
+// roster: a released parked seat is not in Live, and the page names it next to
+// the dead-hooked seat that still is.
+func TestSpecRosterFrom_ParkedStaleSeatIsListedNotCounted(t *testing.T) {
+	t.Parallel()
+	ts := config.NewTownSettings()
+	ts.PolecatPool = &config.PolecatPool{Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 3}}}
+	sessions := []poolSession{
+		{name: "live/ember", agent: "deepseek-flash"},
+		{name: "dead/gastown/jade", agent: "deepseek-flash", deadHooked: true},
+		{name: "dead/gastown/mariner", agent: "deepseek-flash", parkedStale: true},
+	}
+	r := specRosterFrom(sessions, ts)
+	if r.Live["deepseek-flash"] != 2 || r.DeadHooked["deepseek-flash"] != 1 || r.ParkedStale["deepseek-flash"] != 1 {
+		t.Fatalf("roster = live %v, dead-hooked %v, parked-stale %v, want 2, 1 and 1", r.Live, r.DeadHooked, r.ParkedStale)
+	}
+	live := poolShowLive{live: r.Live, dead: r.DeadHooked, parked: r.ParkedStale, parkedTotal: 1, total: 2, ok: true}
+	text := live.seatCount("deepseek-flash", 3)
+	for _, want := range []string{"2/3", "(1 dead-hooked)", "(1 parked-stale)"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("seat count %q does not contain %q", text, want)
+		}
+	}
+	cap := 3
+	if total := live.totalCount(&cap); total != "2/3 (1 parked-stale)" {
+		t.Errorf("total count = %q, want %q", total, "2/3 (1 parked-stale)")
+	}
+	live.parkedTotal = 0
+	if total := live.totalCount(&cap); total != "2/3" {
+		t.Errorf("total count with nothing released = %q, want %q", total, "2/3")
+	}
+}

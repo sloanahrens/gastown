@@ -22,12 +22,21 @@ type logLatch struct {
 // same text.
 func (l *logLatch) logf(logger func(format string, args ...interface{}), key, format string, args ...interface{}) {
 	line := fmt.Sprintf(format, args...)
+	l.logAs(logger, key, line, line)
+}
+
+// logAs logs line unless key's last logged state carries the same fingerprint.
+// It serves a line that carries a changing figure (an age): the fingerprint
+// names the state, so the line is logged when the state starts and not each
+// time the figure moves. A fingerprint cannot equal a line logf logged
+// unless the two are the same text.
+func (l *logLatch) logAs(logger func(format string, args ...interface{}), key, fingerprint, line string) {
 	l.mu.Lock()
 	if l.last == nil {
 		l.last = map[string]string{}
 	}
-	same := l.last[key] == line
-	l.last[key] = line
+	same := l.last[key] == fingerprint
+	l.last[key] = fingerprint
 	if l.seen == nil {
 		l.seen = map[string]bool{}
 	}

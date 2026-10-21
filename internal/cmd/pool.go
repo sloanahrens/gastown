@@ -215,6 +215,9 @@ func (l poolShowLive) seatCount(agent string, cap int) string {
 	if n := deadHookedCount(l.dead[agent]); n != "" {
 		count += " (" + n + ")"
 	}
+	if n := parkedStaleCount(l.parked[agent]); n != "" {
+		count += " (" + n + ")"
+	}
 	return count
 }
 
@@ -224,11 +227,18 @@ func (l poolShowLive) totalCount(max *int) string {
 	if max != nil {
 		cap = *max
 	}
+	// The released parked seats are outside the total, so the line names them:
+	// a total that dropped for a seat released and not for a polecat finished
+	// would otherwise read the same (gt-t7k92).
+	released := ""
+	if n := parkedStaleCount(l.parkedTotal); n != "" {
+		released = " (" + n + ")"
+	}
 	switch {
 	case l.ok && cap > 0:
-		return fmt.Sprintf("%d/%d", l.total, cap)
+		return fmt.Sprintf("%d/%d", l.total, cap) + released
 	case l.ok:
-		return fmt.Sprintf("%d live", l.total)
+		return fmt.Sprintf("%d live", l.total) + released
 	case cap > 0:
 		return fmt.Sprintf("cap %d", cap)
 	default:
@@ -415,10 +425,14 @@ func printPoolSeatChanges(w io.Writer, before map[string]config.SeatConfig, chan
 // (gt-bc9b6). A picture that could not be read is no count at all: the page
 // prints the caps without one rather than inventing an occupancy.
 type poolShowLive struct {
-	live  map[string]int
-	dead  map[string]int
-	total int
-	ok    bool
+	live map[string]int
+	dead map[string]int
+	// parked counts, per agent, the released parked seats, which are not in live.
+	parked map[string]int
+	// parkedTotal is the sum of parked: the released seats the total leaves out.
+	parkedTotal int
+	total       int
+	ok          bool
 }
 
 func poolLiveFor(townRoot string) poolShowLive {
@@ -448,9 +462,12 @@ func poolLiveForWith(townRoot string, readSeats func(pool *config.PolecatPool) (
 		return poolShowLive{}
 	}
 	r := specRosterFrom(sessions, ts)
-	out := poolShowLive{live: r.Live, dead: r.DeadHooked, ok: true}
+	out := poolShowLive{live: r.Live, dead: r.DeadHooked, parked: r.ParkedStale, ok: true}
 	for _, n := range r.Live {
 		out.total += n
+	}
+	for _, n := range r.ParkedStale {
+		out.parkedTotal += n
 	}
 	return out
 }

@@ -776,6 +776,10 @@ type specRoster struct {
 	// DeadHooked counts, per agent, the seats inside Live that no tmux session
 	// holds: a crashed polecat waiting for its supervised restart (gt-tldj4).
 	DeadHooked map[string]int
+	// ParkedStale counts, per agent, the parked seats with no session that have
+	// been parked past agentpause.ParkedSeatRelease. They are not in Live: the seat is
+	// released, and the count says so (gt-t7k92).
+	ParkedStale map[string]int
 	// Unrecorded names the polecats counted under config.UnknownSeatAgent
 	// because they record no agent and the seat map has several seats.
 	Unrecorded []string
@@ -1375,13 +1379,14 @@ func specBudgetFromSeats(ts *config.TownSettings, now time.Time, known func(agen
 // in-flight seat claims, seats mid-landing, and dead-hooked seats) per agent.
 // A dead-hooked seat also counts in DeadHooked, so the picture can say why a
 // full seat shows fewer live sessions than its number (gt-tldj4); it has no
-// spawn time, so it never arms the stagger.
+// spawn time, so it never arms the stagger. A parkedStale seat is not counted
+// in Live; it is counted in ParkedStale (gt-t7k92).
 //
 // A polecat that records no agent is counted on the seat map's only seat, and
 // under config.UnknownSeatAgent when the map has several: the tick lists it
 // (Unrecorded) and never counts it on a seat it may not hold (gt-mukgk).
 func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster {
-	r := specRoster{Live: map[string]int{}, DeadHooked: map[string]int{}}
+	r := specRoster{Live: map[string]int{}, DeadHooked: map[string]int{}, ParkedStale: map[string]int{}}
 	var unrecorded string
 	if ts != nil {
 		unrecorded = ts.PolecatPool.UnrecordedAgent()
@@ -1393,6 +1398,10 @@ func specRosterFrom(sessions []poolSession, ts *config.TownSettings) specRoster 
 		}
 		if agent == config.UnknownSeatAgent {
 			r.Unrecorded = append(r.Unrecorded, s.name)
+		}
+		if s.parkedStale {
+			r.ParkedStale[agent]++
+			continue
 		}
 		r.Live[agent]++
 		if s.deadHooked {

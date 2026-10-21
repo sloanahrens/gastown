@@ -20,6 +20,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beadsql"
 	agentconfig "github.com/steveyegge/gastown/internal/config"
@@ -2705,6 +2706,16 @@ func listPolecatWorktrees(polecatsDir string) ([]string, error) {
 	return polecats, nil
 }
 
+// parkedAge renders how long a seat has been parked: whole minutes under an
+// hour, hours and minutes after.
+func parkedAge(d time.Duration) string {
+	m := int(d.Minutes())
+	if m < 60 {
+		return fmt.Sprintf("%dm", m)
+	}
+	return fmt.Sprintf("%dh%dm", m/60, m%60)
+}
+
 // checkPolecatHealth checks a single polecat's session health.
 // If the polecat has work-on-hook but the tmux session is dead, it's restarted.
 func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
@@ -2725,6 +2736,18 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	rec, err := intent.Read(d.config.TownRoot, supervisor.IntentSeat(seat))
 	if err != nil || rec.Held() {
 		skipped = true
+		// A park past the pool's release window no longer holds its pool seat;
+		// say so once. The pool decides it through the same read and predicate
+		// (parkedStale in internal/cmd), so the two never disagree. The polecat
+		// is still not restarted: the park stays until an operator recovers it.
+		now := time.Now()
+		if parked, st, perr := agentpause.IsPaused(d.config.TownRoot, rigName, constants.RolePolecat, polecatName); err == nil && perr == nil && parked && agentpause.ParkedStale(st, now) {
+			age := parkedAge(now.Sub(st.PausedAt))
+			d.crashSkipLog.logAs(d.logger.Printf, rigName+"/"+polecatName, "parked-released",
+				fmt.Sprintf("Skipping crash detection for %s/%s: parked %s ago (%s); seat released; recover with gt polecat check-recovery %s/%s",
+					rigName, polecatName, age, rec.HoldReason(), rigName, polecatName))
+			return
+		}
 		d.crashSkipLog.logf(d.logger.Printf, rigName+"/"+polecatName, "Skipping crash detection for %s/%s: agent is parked (%s)",
 			rigName, polecatName, rec.HoldReason())
 		return

@@ -111,6 +111,20 @@ func readMarker(path string) (bool, *State, error) {
 	}, nil
 }
 
+// ParkedSeatRelease is how long a parked polecat with no session keeps its pool
+// seat. The overrun guard parks the seat it stops and crash detection skips a
+// parked seat, so nothing restarts it: without a release it held a seat for 23
+// hours (gt-t7k92). The pool's count (internal/cmd) and the daemon's skip line
+// (internal/daemon) both read it through ParkedStale.
+const ParkedSeatRelease = 30 * time.Minute
+
+// ParkedStale reports whether st is a park older than ParkedSeatRelease at now.
+// A nil state, a state that is not a pause, and a park time that is unset all
+// read false: the seat keeps counting, as it did before the release.
+func ParkedStale(st *State, now time.Time) bool {
+	return st != nil && st.Paused && !st.PausedAt.IsZero() && now.Sub(st.PausedAt) > ParkedSeatRelease
+}
+
 // Pause parks the agent: it sets the seat's intent record to desired=park
 // with the operator's reason, keeping every other field (the supervisor's
 // restart budget, the incarnation) as it was.

@@ -1015,3 +1015,63 @@ func TestCheckPolecatHealth_SkipsSubmittedWork(t *testing.T) {
 		}
 	})
 }
+
+// TestCheckPolecatHealth_StaleParkIsLoggedAsReleased is gt-t7k92 on the
+// daemon's side: a park older than the pool's release window is still not a
+// crash and is still not restarted, but the skip line says the seat is
+// released and names the recovery, and it is logged once however many passes
+// see it.
+func TestCheckPolecatHealth_StaleParkIsLoggedAsReleased(t *testing.T) {
+	t.Parallel()
+	bd := hookedWorkBD(t, "gt-xyz", time.Hour)
+
+	townRoot := t.TempDir()
+	var logBuf strings.Builder
+	d := &Daemon{
+		config:        &Config{TownRoot: townRoot},
+		logger:        log.New(&logBuf, "", 0),
+		tmux:          newFakeTmux(newFixedClock()),
+		notifier:      notifyfake.New(),
+		openWorkBeads: bd.open,
+		execCmd:       bd.run,
+	}
+
+	if err := agentpause.Pause(townRoot, "myr", constants.RolePolecat, "mycat", "overrun (20 minute rule)", "overrun-guard", ""); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	seat := intent.Seat{Rig: "myr", Role: constants.RolePolecat, Name: "mycat"}
+	if _, err := intent.Update(townRoot, seat, func(r *intent.Record) error {
+		r.PausedAt = time.Now().UTC().Add(-31*time.Minute - 5*time.Second)
+		return nil
+	}); err != nil {
+		t.Fatalf("intent.Update: %v", err)
+	}
+
+	d.checkPolecatHealth("myr", "mycat")
+	d.checkPolecatHealth("myr", "mycat")
+	// The age is the figure that changes between passes: a minute later the
+	// line would read "parked 32m", and the latch must still hold it back.
+	if _, err := intent.Update(townRoot, seat, func(r *intent.Record) error {
+		r.PausedAt = time.Now().UTC().Add(-32*time.Minute - 5*time.Second)
+		return nil
+	}); err != nil {
+		t.Fatalf("intent.Update: %v", err)
+	}
+	d.checkPolecatHealth("myr", "mycat")
+
+	got := logBuf.String()
+	if strings.Contains(got, "CRASH DETECTED") {
+		t.Errorf("a stale park must not trigger CRASH DETECTED, got: %q", got)
+	}
+	if n := strings.Count(got, "parked 31m"); n != 1 {
+		t.Errorf("got %d \"parked 31m\" lines over two passes, want 1: %q", n, got)
+	}
+	if n := strings.Count(got, "seat released"); n != 1 {
+		t.Errorf("got %d release lines over three passes with the age moving from 31m to 32m, want 1: %q", n, got)
+	}
+	for _, want := range []string{"overrun (20 minute rule)", "seat released", "gt polecat check-recovery myr/mycat"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("log does not contain %q: %q", want, got)
+		}
+	}
+}
