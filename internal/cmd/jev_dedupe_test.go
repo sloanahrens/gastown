@@ -93,6 +93,79 @@ func TestJevDedupeRecentShowsTheOutcome(t *testing.T) {
 	}
 }
 
+// The golden above prints the last three lines, so the first line of the log
+// is only checked here: it predates the battery, so its four noul cells, its
+// severity and its version all read "-", while its outcome is still shown.
+func TestJevDedupeRecentShowsThePreBatteryLine(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := writeDedupeLog(t, town, dedupeLog)
+
+	var out bytes.Buffer
+	if err := printRecentDedupe(&out, path, 4); err != nil {
+		t.Fatal(err)
+	}
+	rows := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(rows) != 5 {
+		t.Fatalf("printed %d rows, want a header and four lines:\n%s", len(rows), out.String())
+	}
+	fields := strings.Fields(rows[1])
+	if !strings.Contains(rows[1], "gt-old") || !strings.Contains(rows[1], "answered") {
+		t.Errorf("row = %q, want the gt-old line with its outcome", rows[1])
+	}
+	if cells := fields[len(fields)-6:]; strings.Join(cells, " ") != "- - - - - -" {
+		t.Errorf("battery cells = %v, want four noul cells, severity and version all \"-\"", cells)
+	}
+}
+
+// A line logged before the outcome field existed prints "-" for its outcome.
+func TestJevDedupeRecentShowsAnOutcomeFreeLineAsDash(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	body := `{"ts":"2026-10-18T08:00:00Z","finding":"gt-early","candidate":"none","confidence":0,"candidates_offered":[]}` + "\n"
+	path := writeDedupeLog(t, town, body)
+
+	var out bytes.Buffer
+	if err := printRecentDedupe(&out, path, 1); err != nil {
+		t.Fatal(err)
+	}
+	rows := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(rows) != 2 {
+		t.Fatalf("printed %d rows, want a header and one line:\n%s", len(rows), out.String())
+	}
+	// The row starts with the date and time, which are two fields, so the
+	// finding is field 2, the candidate 3, the confidence 4 and the outcome 5.
+	fields := strings.Fields(rows[1])
+	if len(fields) < 6 || fields[2] != "gt-early" || fields[5] != "-" {
+		t.Errorf("row = %q, want gt-early with its outcome as \"-\"", rows[1])
+	}
+}
+
+// dedupeVersionCell covers each branch: a line from before the battery, a
+// failed call that logged a version but no model, and an answered line that
+// logged both.
+func TestDedupeVersionCell(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		version int
+		model   string
+		want    string
+	}{
+		{name: "pre-battery line has neither", version: 0, model: "", want: "-"},
+		{name: "failed call has a version only", version: 1, model: "", want: "v1"},
+		{name: "answered line has both", version: 1, model: "jev-1.13.0", want: "v1 jev-1.13.0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := dedupeVersionCell(tt.version, tt.model); got != tt.want {
+				t.Errorf("dedupeVersionCell(%d, %q) = %q, want %q", tt.version, tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestJevDedupeRecentWithNoLog(t *testing.T) {
 	t.Parallel()
 	var out bytes.Buffer
