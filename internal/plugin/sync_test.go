@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -465,6 +466,64 @@ func TestFindGastownSource_FallsBackToLocalRepoWhenTownHasNoPlugins(t *testing.T
 	}
 	if got.Dir != localPlugins {
 		t.Errorf("FindGastownSource().Dir = %q, want local repo fallback %q", got.Dir, localPlugins)
+	}
+}
+
+// gt-ll0ar: the error must name every root that was probed, so a reader who
+// has a plugin source in the LocalRepo clone is not told to look only at the
+// town checkout.
+func TestFindGastownSource_ErrorNamesEveryProbedRoot(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	townGastown := filepath.Join(townRoot, "gastown")
+	localRepo := filepath.Join(t.TempDir(), "personal-gastown")
+	writeRigsJSON(t, townRoot, "gastown", localRepo)
+
+	_, err := FindGastownSource(townRoot)
+	if err == nil {
+		t.Fatal("FindGastownSource() error = nil, want error when no source exists")
+	}
+	for _, want := range []string{townGastown, localRepo, "--source"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
+	}
+}
+
+func TestFindGastownSource_ErrorNamesTownRootOnce(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	townGastown := filepath.Join(townRoot, "gastown")
+	// The registered LocalRepo is the town checkout itself: no second probe.
+	writeRigsJSON(t, townRoot, "gastown", townGastown)
+
+	_, err := FindGastownSource(townRoot)
+	if err == nil {
+		t.Fatal("FindGastownSource() error = nil, want error when no source exists")
+	}
+	if got := strings.Count(err.Error(), townGastown); got != 1 {
+		t.Errorf("error %q names %q %d times, want once", err, townGastown, got)
+	}
+}
+
+func TestFindGastownSource_LocalRepoFallbackUsesLegacyLayouts(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	localRepo := filepath.Join(t.TempDir(), "personal-gastown")
+	writeRigsJSON(t, townRoot, "gastown", localRepo)
+
+	legacyDir := filepath.Join(localRepo, "crew", "den", "plugins")
+	if err := os.MkdirAll(legacyDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	createTestPlugin(t, legacyDir, "old-plugin", "+++\nname = \"old-plugin\"\n+++\nbody", nil)
+
+	got, err := FindGastownSource(townRoot)
+	if err != nil {
+		t.Fatalf("FindGastownSource() error = %v", err)
+	}
+	if got.Dir != legacyDir {
+		t.Errorf("FindGastownSource().Dir = %q, want local repo legacy layout %q", got.Dir, legacyDir)
 	}
 }
 
