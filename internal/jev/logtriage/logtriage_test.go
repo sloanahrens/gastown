@@ -604,6 +604,26 @@ func TestJevLogtriageMatchedOn(t *testing.T) {
 			line: "2026/10/21 03:37:00 polecat gt-r0 refused",
 			want: "refused",
 		},
+		{
+			name: "a comma-grouped count above zero",
+			line: "2026/10/21 03:37:00 dispatch: 1,000 refused",
+			want: "refused",
+		},
+		{
+			name: "a comma-grouped count of zero",
+			line: "2026/10/21 03:37:00 dispatch: 0,000 refused",
+			want: "",
+		},
+		{
+			name: "warning inside a count above zero",
+			line: "2026/10/21 03:37:00 patrol_scan: checked 7 polecat(s): 2 warning(s)",
+			want: "warning",
+		},
+		{
+			name: "warning inside a zero count",
+			line: "2026/10/21 03:37:00 patrol_scan: checked 7 polecat(s): 0 warning(s)",
+			want: "",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -637,5 +657,39 @@ func TestJevLogtriageMatchedOnIsLogged(t *testing.T) {
 	}
 	if got := byKey[keyWarn].MatchedOn; got != "warning" {
 		t.Errorf("warning matched_on = %q, want warning", got)
+	}
+}
+
+// TestJevLogtriagePendingGroupWithoutMatchedOn: a group carried in a cursor
+// written before matched_on existed still logs the keyword that kept its first
+// line.
+func TestJevLogtriagePendingGroupWithoutMatchedOn(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	fx.logLines(lineWarn)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := fx.pass.Run(ctx); err != nil {
+		t.Fatalf("Run = %v, want the deadline to defer the group", err)
+	}
+	var cur Cursor
+	if _, err := battery.ReadState(fx.pass.CursorPath, &cur); err != nil {
+		t.Fatal(err)
+	}
+	if len(cur.Pending) != 1 {
+		t.Fatalf("cursor carries %d pending groups, want 1", len(cur.Pending))
+	}
+	cur.Pending[0].MatchedOn = ""
+	if err := battery.WriteState(fx.pass.CursorPath, cur); err != nil {
+		t.Fatal(err)
+	}
+
+	fx.run()
+	lines := fx.triage()
+	if len(lines) != 1 || lines[0].Key != keyWarn {
+		t.Fatalf("triage log = %+v, want the deferred warning group", lines)
+	}
+	if got := lines[0].MatchedOn; got != "warning" {
+		t.Errorf("matched_on = %q, want warning", got)
 	}
 }

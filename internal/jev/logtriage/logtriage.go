@@ -48,11 +48,14 @@ const (
 
 // keywords are the words that make a daemon line one the pass reads, tried in
 // this order. They match without regard to case, except warning, which
-// matchedOn holds to the start of a message or to WARNING:.
+// matchedOn holds to the start of a message, to WARNING:, or to a count above
+// zero.
 var keywords = []string{"warning", "error", "failed", "refused", "timeout", "crash", "panic"}
 
 // reCountBefore matches a whole count at the end of the text before a keyword.
-var reCountBefore = regexp.MustCompile(`\b(\d+)\s+$`)
+// A count may carry thousands separators, so 1,000 is one count, and a count
+// is not the tail of a longer number.
+var reCountBefore = regexp.MustCompile(`(?:^|[^\w,])(\d{1,3}(?:,\d{3})+|\d+)\s+$`)
 
 // Asker asks one multi-question Ask. *jev.Client satisfies it.
 type Asker interface {
@@ -132,11 +135,17 @@ func (g *group) add(line string, at time.Time) {
 }
 
 // seedGroups starts a pass's groups from the ones the last pass carried over,
-// so their lines read now add to the counts they already hold.
+// so their lines read now add to the counts they already hold. A group carried
+// from a cursor written before matched_on existed has none, so its keyword is
+// read from its first sample, the line that kept it.
 func seedGroups(pending []pendingGroup) map[string]*group {
 	groups := make(map[string]*group, len(pending))
 	for _, p := range pending {
-		groups[p.Key] = &group{key: p.Key, count: p.Count, first: p.First, last: p.Last, samples: p.Samples, matchedOn: p.MatchedOn}
+		kw := p.MatchedOn
+		if kw == "" && len(p.Samples) > 0 {
+			kw = matchedOn(p.Samples[0])
+		}
+		groups[p.Key] = &group{key: p.Key, count: p.Count, first: p.First, last: p.Last, samples: p.Samples, matchedOn: kw}
 	}
 	return groups
 }
@@ -351,38 +360,60 @@ func (p *Pass) now() time.Time {
 // matchedOn returns the first keyword that keeps a daemon line, or "" when none
 // does. A keyword preceded by a count keeps the line only when the count is
 // above zero, so a routine summary of zero counts is dropped. warning keeps a
-// line only at the start of its message or as WARNING:.
+// line at the start of its message, as WARNING:, or after a count above zero,
+// and nothing else.
 func matchedOn(line string) string {
 	msg := messageOf(line)
 	lower := strings.ToLower(msg)
 	for _, kw := range keywords {
 		if kw == "warning" {
-			if strings.HasPrefix(lower, kw) || strings.Contains(line, "WARNING:") {
+			if strings.HasPrefix(lower, kw) || strings.Contains(line, "WARNING:") || occurs(lower, kw, aboveZero) {
 				return kw
 			}
 			continue
 		}
-		if countedKeywordKept(lower, kw) {
+		if occurs(lower, kw, notZero) {
 			return kw
 		}
 	}
 	return ""
 }
 
-// countedKeywordKept reports whether some occurrence of kw in lower, the
-// lower-cased message, is not preceded by a zero count.
-func countedKeywordKept(lower, kw string) bool {
+// occurs reports whether keep accepts some occurrence of kw in lower, the
+// lower-cased message. keep takes the count in front of the occurrence, or ""
+// when none is.
+func occurs(lower, kw string, keep func(count string) bool) bool {
 	for from := 0; ; {
 		i := strings.Index(lower[from:], kw)
 		if i < 0 {
 			return false
 		}
 		i += from
-		if m := reCountBefore.FindStringSubmatch(lower[:i]); m == nil || strings.Trim(m[1], "0") != "" {
+		if keep(countBefore(lower[:i])) {
 			return true
 		}
 		from = i + len(kw)
 	}
+}
+
+// countBefore is the count that ends s, with its thousands separators removed,
+// or "" when s does not end in one.
+func countBefore(s string) string {
+	m := reCountBefore.FindStringSubmatch(s)
+	if m == nil {
+		return ""
+	}
+	return strings.ReplaceAll(m[1], ",", "")
+}
+
+// notZero keeps an occurrence with no count in front of it, or a count above zero.
+func notZero(count string) bool {
+	return count == "" || aboveZero(count)
+}
+
+// aboveZero keeps an occurrence with a count above zero in front of it.
+func aboveZero(count string) bool {
+	return strings.Trim(count, "0") != ""
 }
 
 // messageOf is the line after the daemon's timestamp prefix, or the whole line
