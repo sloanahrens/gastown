@@ -109,7 +109,7 @@ func TestIntegrationCheckRecoveryKeepsUnlandedUnpushedWorkInRecovery(t *testing.
 	// commits are checked among the blockers rather than as the reason.
 	unpushed := false
 	for _, b := range status.Blockers {
-		if strings.Contains(b, "git_state=has_unpushed") {
+		if strings.HasPrefix(b, "git_state=has_unpushed ") {
 			unpushed = true
 		}
 	}
