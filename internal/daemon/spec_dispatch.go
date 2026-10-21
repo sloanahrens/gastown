@@ -347,6 +347,12 @@ func dispatchRosterSeats(roster string) ([]townhealth.DispatchSeat, bool) {
 	var out []townhealth.DispatchSeat
 	for _, part := range splitRosterSeats(roster) {
 		part = strings.TrimSpace(part)
+		// The town-total segment Picture appends ("total 2/10") caps the whole
+		// town, not one seat: counting it as a seat reads a full town as having
+		// a free seat (gt-penmy).
+		if strings.HasPrefix(part, "total ") {
+			continue
+		}
 		// A seat may carry any number of parenthetical notes after its count:
 		// the dead-hooked breakdown Picture renders (gt-tldj4) and the closed
 		// window (gt-rredd). None of them is part of the count parsed here.
