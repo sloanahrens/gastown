@@ -245,8 +245,9 @@ type Daemon struct {
 
 	// jsonlTableExportFn replaces exportTableToJsonl in tests, so
 	// exportDatabaseToJsonl's handling of a failing table can be driven without
-	// running dolt; nil is the real export.
-	jsonlTableExportFn func(table string, q beadsql.Query, dir, dataDir string) (int, error)
+	// running dolt; nil is the real export. budget is the time the export has
+	// been given, the shared supplemental bound included.
+	jsonlTableExportFn func(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error)
 
 	// dogFeedFn records a dog cycle's failed outcome in the town feed. Nil
 	// writes the real feed; tests capture the event instead.
@@ -408,6 +409,11 @@ type Daemon struct {
 	// jsonlLocalPhaseTimeout overrides gitLocalPhaseTimeout, the budget for one
 	// backup tick's local git staging; tests set it to a spent phase.
 	jsonlLocalPhaseTimeout time.Duration
+
+	// jsonlSupplementalTimeout overrides jsonlSupplementalExportTimeout, the
+	// bound on one database's supplemental tables together; tests set it to a
+	// short bound instead of exporting six tables over a real five minutes.
+	jsonlSupplementalTimeout time.Duration
 
 	// scheduledSlingFailures counts consecutive failures per entry name; the
 	// third escalates once, success resets. Touched only by the patrol goroutine.
@@ -580,6 +586,14 @@ type Daemon struct {
 	// which wires the live Jev client, hm and the rig's beads; a test sets it
 	// to hand the run a pass over fakes.
 	jevDedupeOpen func(townRoot string, s dedupe.Settings, warnings io.Writer) (*dedupe.Pass, error)
+	// jevDedupeRunMu guards lastJevDedupeRun, which the pass's goroutine writes
+	// while the heartbeat reads it.
+	jevDedupeRunMu sync.Mutex
+	// lastJevDedupeRun is the completion time of the last pass this process
+	// ran, which can be newer than the persisted record when the write failed,
+	// and stands in for it when the write left no record at all. Zero until the
+	// first pass completes.
+	lastJevDedupeRun time.Time
 
 	// jevAttentionRunning is the jev_attention pass's single-flight guard
 	// (jev_attention.go), kept apart from jev_dedupe's so the two passes run

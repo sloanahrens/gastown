@@ -52,10 +52,12 @@ const (
 	// recognizable, while a lock a live git process just created is not.
 	gitIndexLockGracePeriod = 2 * time.Minute
 
-	// jsonlSupplementalExportTimeout bounds one supplemental table's export.
-	// events is the largest table, and a loaded host killed it at the 60 s
-	// issues bound (gt-e38w6). Five minutes gives it room while a wedged dolt
-	// still cannot hold a 15-minute tick for long.
+	// jsonlSupplementalExportTimeout bounds one database's whole supplemental
+	// export — the six non-issues tables together, not each table on its own:
+	// per table, a wedged dolt held the backup cycle and its doltMaintMu read
+	// lock for half an hour, past the 15-minute tick (gt-4nqej). Five minutes
+	// gives events, the largest table, the room the 60 s issues bound did not
+	// (gt-e38w6).
 	jsonlSupplementalExportTimeout = 5 * time.Minute
 
 	defaultSpikeThreshold = 0.50 // 50% delta triggers halt (was 20%, too sensitive for bulk ops)
@@ -488,7 +490,7 @@ func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) 
 	}
 
 	// 1. Export issues table (with scrub filter).
-	n, err := exportTable("issues", backupIssuesQuery(db, scrub), dbDir, dataDir)
+	n, err := exportTable("issues", backupIssuesQuery(db, scrub), dbDir, dataDir, jsonlExportTimeout)
 	if err != nil {
 		return 0, fmt.Errorf("issues: %w", err)
 	}
@@ -496,10 +498,20 @@ func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) 
 
 	// 2. Export supplemental tables (no scrub, full export). A failing table
 	// does not stop the others, but its rows are missing from total, which must
-	// not pass for a full export.
+	// not pass for a full export. The six share one budget per database: each
+	// gets what is left of it, and once it is spent the rest are not attempted,
+	// so a dolt that stops answering costs the cycle one bound (gt-4nqej).
 	var tableErrs []string
+	deadline := d.clk().Now().Add(d.jsonlSupplementalExportBudget())
 	for _, table := range supplementalTables {
-		tn, err := exportTable(table, beadsql.BackupTable(db, table), dbDir, dataDir)
+		budget := deadline.Sub(d.clk().Now())
+		if budget <= 0 {
+			d.logger.Printf("jsonl_git_backup: %s/%s: not attempted — the %s supplemental export budget for the database is spent",
+				db, table, d.jsonlSupplementalExportBudget())
+			tableErrs = append(tableErrs, fmt.Sprintf("%s: not attempted, the supplemental export budget was spent", table))
+			continue
+		}
+		tn, err := exportTable(table, beadsql.BackupTable(db, table), dbDir, dataDir, budget)
 		if err != nil {
 			d.logger.Printf("jsonl_git_backup: %s/%s: export failed: %v", db, table, err)
 			tableErrs = append(tableErrs, fmt.Sprintf("%s: %v", table, err))
@@ -542,12 +554,12 @@ func jsonlExportCommand(ctx context.Context, useServer bool, host string, port i
 	return cmd
 }
 
-// jsonlExportTimeoutFor returns how long one table's export may run before it is
-// killed. issues keeps the short jsonlExportTimeout; every supplemental table,
-// events above all, gets jsonlSupplementalExportTimeout.
-func jsonlExportTimeoutFor(table string) time.Duration {
-	if table == "issues" {
-		return jsonlExportTimeout
+// jsonlSupplementalExportBudget is how long one database's supplemental tables
+// may take together: jsonlSupplementalExportTimeout, or the bound a test set
+// (jsonlSupplementalTimeout).
+func (d *Daemon) jsonlSupplementalExportBudget() time.Duration {
+	if d.jsonlSupplementalTimeout != 0 {
+		return d.jsonlSupplementalTimeout
 	}
 	return jsonlSupplementalExportTimeout
 }
@@ -582,14 +594,15 @@ func jsonlExportFailure(ctx context.Context, err error, stderr, table string, ti
 // continuing in {table}.2.jsonl, {table}.3.jsonl, ... when it outgrows one shard.
 // Connects to the running Dolt server via --host/--port to get current committed data,
 // falling back to embedded mode (cmd.Dir=dataDir) if no server config is available.
-// Returns the number of records exported.
-func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir string) (int, error) {
+// budget is the whole time this table's export may run; the caller hands the
+// issues table jsonlExportTimeout and each supplemental table what is left of
+// its database's shared bound. Returns the number of records exported.
+func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir string, budget time.Duration) (int, error) {
 	query, err := q.Inline()
 	if err != nil {
 		return 0, err
 	}
-	timeout := jsonlExportTimeoutFor(table)
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 	start := time.Now()
 
@@ -616,7 +629,7 @@ func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir 
 
 	cmd := jsonlExportCommand(ctx, useServer, host, port, user, password, query, dataDir)
 
-	out, err := runJSONLExport(ctx, cmd, table, timeout)
+	out, err := runJSONLExport(ctx, cmd, table, budget)
 	if err != nil {
 		return 0, err
 	}
@@ -632,7 +645,7 @@ func (d *Daemon) exportTableToJsonl(table string, q beadsql.Query, dir, dataDir 
 	if err != nil {
 		return 0, err
 	}
-	d.logger.Printf("jsonl_git_backup: %s: exported %d rows in %s (timeout %s)", table, n, time.Since(start).Round(time.Millisecond), timeout)
+	d.logger.Printf("jsonl_git_backup: %s: exported %d rows in %s (timeout %s)", table, n, time.Since(start).Round(time.Millisecond), budget)
 	return n, nil
 }
 

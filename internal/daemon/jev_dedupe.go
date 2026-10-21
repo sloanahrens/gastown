@@ -29,7 +29,7 @@ func (d *Daemon) triggerJevDedupe() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "jev_dedupe", time.Time{}, now, jevDedupeInterval)
+	dec := evaluatePatrolDue(d.config.TownRoot, "jev_dedupe", d.jevDedupeLastRun(), now, jevDedupeInterval)
 	if !dec.due {
 		return
 	}
@@ -42,10 +42,35 @@ func (d *Daemon) triggerJevDedupe() {
 	go func() {
 		defer d.jevDedupeRunning.Store(false)
 		d.runJevDedupe()
-		if err := savePatrolLastRun(d.config.TownRoot, "jev_dedupe", d.clk().Now()); err != nil {
-			d.logger.Printf("jev_dedupe: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordJevDedupeRun(d.clk().Now())
 	}()
+}
+
+// recordJevDedupeRun records the completion time of the pass that just
+// finished, in memory and on disk.
+//
+// The in-memory time is set even when the write fails: with no record on disk
+// every heartbeat reads the patrol as due and opens another pass, each reaching
+// hm and the Jev findings its cursor has not paid for yet (gt-4nqej). A restart
+// then reads the missing record as "run the pass", the safe direction for a
+// patrol.
+func (d *Daemon) recordJevDedupeRun(at time.Time) {
+	d.jevDedupeRunMu.Lock()
+	d.lastJevDedupeRun = at
+	d.jevDedupeRunMu.Unlock()
+
+	if err := savePatrolLastRun(d.config.TownRoot, "jev_dedupe", at); err != nil {
+		d.logger.Printf("jev_dedupe: WARNING: cannot persist last-run time (%v) — "+
+			"the next daemon start will run the pass again", err)
+	}
+}
+
+// jevDedupeLastRun returns the completion time of the last pass this process
+// ran, zero until the first one completes.
+func (d *Daemon) jevDedupeLastRun() time.Time {
+	d.jevDedupeRunMu.Lock()
+	defer d.jevDedupeRunMu.Unlock()
+	return d.lastJevDedupeRun
 }
 
 // runJevDedupe does one pass with the settings in the patrol config. A

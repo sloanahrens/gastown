@@ -362,6 +362,28 @@ func TestRunOverrunGuard_DryRunInAGateLogsNoStop(t *testing.T) {
 	}
 }
 
+// The same holds for an escalation wait, read from the live escalation state: a
+// dry run banks no escalation time either, so a seat the live guard exempts
+// must not read as past the stop threshold on every dry tick (gt-4nqej).
+func TestRunOverrunGuard_DryRunWaitingOnAnEscalationLogsNoStop(t *testing.T) {
+	t.Parallel()
+	d, buf := newOverrunDaemon(t, true)
+	f := newOverrunFake(35*time.Minute, overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-esc01"})
+	f.escalationWaiting = func(overrunSeat) (bool, error) { return true, nil }
+
+	d.runOverrunGuard(f.seams())
+
+	if strings.Contains(buf.String(), "would stop") || strings.Contains(buf.String(), "would nudge") {
+		t.Errorf("dry run reported an action for a seat waiting on its escalation:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "waiting on an escalation") {
+		t.Errorf("dry run did not report the escalation wait:\n%s", buf.String())
+	}
+	if st, err := readOverrunState(d.config.TownRoot, "gt-esc01"); err != nil || !st.sameWait(overrunState{}) {
+		t.Errorf("dry run wrote wait state %+v (err %v), want none", st, err)
+	}
+}
+
 // The nudge names the clock it is on, because a seat waiting inside its own
 // gate is the one case where a long-running bead is not an overrun (gt-vfwuc).
 func TestOverrunNudgeMessageNamesGateTime(t *testing.T) {

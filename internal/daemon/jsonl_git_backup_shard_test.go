@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/notify/notifyfake"
@@ -692,7 +693,7 @@ func TestSyncJsonlGitBackupCountsAndCommitsEveryShard(t *testing.T) {
 		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, GitRepo: gitRepo, Databases: []string{"hq"}},
 	}}
 	rows := map[string]int{"issues": issues, "comments": comments}
-	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string) (int, error) {
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
 		if table == "events" {
 			return writeTableShards(dir, table, eventRows, 3000)
 		}
@@ -748,7 +749,7 @@ func TestSyncJsonlGitBackupHaltsWhenAShardCannotBeRead(t *testing.T) {
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
 		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, GitRepo: gitRepo, Databases: []string{"hq"}},
 	}}
-	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string) (int, error) {
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
 		writeNLines(t, filepath.Join(dir, table+".jsonl"), 1)
 		return 1, nil
 	}

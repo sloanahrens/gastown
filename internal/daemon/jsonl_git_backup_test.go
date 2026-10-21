@@ -20,6 +20,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/steveyegge/gastown/internal/beadsql"
 	"github.com/steveyegge/gastown/internal/events"
 	gtgit "github.com/steveyegge/gastown/internal/git"
@@ -746,22 +748,27 @@ func TestRecountAfterFilterKeepsCountMetric(t *testing.T) {
 	}
 }
 
-func TestJSONLExportTimeoutFor(t *testing.T) {
+// TestJSONLSupplementalExportBudget pins the supplemental bound to one shared
+// budget per database rather than a timeout per table: six tables at five
+// minutes each held a database for half an hour, well past a 15-minute tick
+// (gt-4nqej).
+func TestJSONLSupplementalExportBudget(t *testing.T) {
 	t.Parallel()
-	for _, table := range append([]string{"issues"}, supplementalTables...) {
-		got := jsonlExportTimeoutFor(table)
-		if table == "issues" {
-			if got != 60*time.Second {
-				t.Errorf("jsonlExportTimeoutFor(%q) = %s, want the unchanged 60s", table, got)
-			}
-			continue
-		}
-		if got <= jsonlExportTimeout {
-			t.Errorf("jsonlExportTimeoutFor(%q) = %s, want longer than the issues bound %s", table, got, jsonlExportTimeout)
-		}
-		if got > 10*time.Minute {
-			t.Errorf("jsonlExportTimeoutFor(%q) = %s, want a bounded value well inside the tick budget", table, got)
-		}
+	d := &Daemon{}
+	if got := d.jsonlSupplementalExportBudget(); got != jsonlSupplementalExportTimeout {
+		t.Errorf("default budget = %s, want %s", got, jsonlSupplementalExportTimeout)
+	}
+	if jsonlSupplementalExportTimeout <= jsonlExportTimeout {
+		t.Errorf("supplemental budget = %s, want more than the issues bound %s for the largest table (events)",
+			jsonlSupplementalExportTimeout, jsonlExportTimeout)
+	}
+	if jsonlSupplementalExportTimeout >= defaultJsonlGitBackupInterval {
+		t.Errorf("supplemental budget = %s, want a bounded value well inside the %s tick",
+			jsonlSupplementalExportTimeout, defaultJsonlGitBackupInterval)
+	}
+	d.jsonlSupplementalTimeout = time.Minute
+	if got := d.jsonlSupplementalExportBudget(); got != time.Minute {
+		t.Errorf("budget with an override = %s, want the test's 1m", got)
 	}
 }
 
@@ -771,7 +778,7 @@ func TestRunJSONLExport_DeadlineKillNamesTableAndTimeout(t *testing.T) {
 	// cmd.Run returns an error and ctx.Err() reports DeadlineExceeded.
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
-	timeout := jsonlExportTimeoutFor("events")
+	timeout := jsonlSupplementalExportTimeout
 	cmd := jsonlExportCommand(ctx, false, "", 0, "", "", "select 1", t.TempDir())
 
 	_, err := runJSONLExport(ctx, cmd, "events", timeout)
@@ -809,7 +816,7 @@ func TestJSONLExportFailure(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := jsonlExportFailure(tt.ctx, cause, tt.stderr, "events", jsonlExportTimeoutFor("events"))
+			err := jsonlExportFailure(tt.ctx, cause, tt.stderr, "events", jsonlSupplementalExportTimeout)
 			for _, want := range tt.wantAll {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("error %q does not contain %q", err, want)
@@ -3083,9 +3090,9 @@ func exportAlertFailures(t *testing.T, reason string) (listed []string, failed m
 // tableRowsFake returns a jsonlTableExportFn that writes rows[table] lines to
 // {dir}/{table}.jsonl, and fails the tables in failing without touching their
 // file, as exportTableToJsonl does when dolt errors or times out.
-func tableRowsFake(t *testing.T, rows map[string]int, failing map[string]bool) func(string, beadsql.Query, string, string) (int, error) {
+func tableRowsFake(t *testing.T, rows map[string]int, failing map[string]bool) func(string, beadsql.Query, string, string, time.Duration) (int, error) {
 	t.Helper()
-	return func(table string, _ beadsql.Query, dir, _ string) (int, error) {
+	return func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
 		if failing[table] {
 			return 0, errors.New("signal: killed: context deadline exceeded")
 		}
@@ -3134,6 +3141,50 @@ func TestExportDatabaseToJsonlSupplementalSuccess(t *testing.T) {
 	}
 	if want := 30 + 10 + 60; n != want {
 		t.Errorf("total = %d, want %d", n, want)
+	}
+}
+
+// TestExportDatabaseToJsonlSupplementalBudgetIsPerDatabase: the six
+// supplemental tables share one bound per database, so a table that stalls on
+// its whole budget leaves the rest unattempted. Before the fix each table had
+// its own timeout, and a dolt that stopped answering held one database — and
+// the cycle's doltMaintMu read lock — for half an hour (gt-4nqej).
+func TestExportDatabaseToJsonlSupplementalBudgetIsPerDatabase(t *testing.T) {
+	t.Parallel()
+	const budget = time.Minute
+	d, _ := backupTestDaemon(t)
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
+	d.clock = clk
+	d.jsonlSupplementalTimeout = budget
+	var attempted []string
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, _ string, _ string, got time.Duration) (int, error) {
+		attempted = append(attempted, table)
+		if got <= 0 {
+			t.Errorf("%s exported with a spent budget (%s)", table, got)
+		}
+		if table == "issues" {
+			return 0, nil
+		}
+		if len(attempted) == 2 {
+			// The first supplemental table stalls for its whole budget, the way
+			// a dolt that stops answering does.
+			clk.Advance(got)
+			return 0, errors.New("signal: killed: context deadline exceeded")
+		}
+		t.Errorf("%s was exported after the database's supplemental budget was spent", table)
+		return 0, nil
+	}
+
+	n, err := d.exportDatabaseToJsonl("hq", t.TempDir(), t.TempDir(), false)
+	if err == nil {
+		t.Fatalf("exportDatabaseToJsonl = (%d, nil), want an error for the tables left unexported", n)
+	}
+	if !strings.Contains(err.Error(), "not attempted") {
+		t.Errorf("error = %q, want the tables the spent budget left unattempted", err)
+	}
+	want := []string{"issues", supplementalTables[0]}
+	if !slices.Equal(attempted, want) {
+		t.Errorf("export attempted %v, want %v — the six tables share one budget per database", attempted, want)
 	}
 }
 
@@ -3243,7 +3294,7 @@ func TestSyncJsonlGitBackupSupplementalFailureDoesNotCommitFreshIssues(t *testin
 	}}
 	// hq's issues export is a 3-row mass drop and its events export fails; gt
 	// exports fully, so the cycle is a partial failure that reaches the commit.
-	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string) (int, error) {
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
 		if filepath.Base(dir) == "hq" && table == "events" {
 			return 0, errors.New("signal: killed: context deadline exceeded")
 		}
@@ -3313,7 +3364,7 @@ func TestSyncJsonlGitBackupIssuesFailureIsReported(t *testing.T) {
 		JsonlGitBackup: &JsonlGitBackupConfig{Enabled: true, GitRepo: gitRepo, Databases: []string{"hq", "gt"}},
 	}}
 	// hq's issues export fails; gt exports fully, so the cycle still commits.
-	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string) (int, error) {
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, dir, _ string, _ time.Duration) (int, error) {
 		if filepath.Base(dir) == "hq" && table == "issues" {
 			return 0, errors.New("signal: killed: context deadline exceeded")
 		}
