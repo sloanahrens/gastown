@@ -623,7 +623,7 @@ git commit -m "rebuild_gt: a landing's install request waits out a 30 minute win
 
 ---
 
-### Task 5: Bond writes in few statements (bead e, beads rig)
+### Task 5: Bond writes in few statements (beads rig: be-gf9 then be-yn5)
 
 **Files:** (beads repo, `~/gt/beads`; read from its `origin/main`)
 - Modify: `cmd/bd/template.go:668-764` (`cloneSubgraphInto`), `cmd/bd/mol_port.go:47-67` (`molWriter`, `storeMolWriter`)
@@ -631,8 +631,10 @@ git commit -m "rebuild_gt: a landing's install request waits out a 30 minute win
 
 **Why it costs 7.6 s.** `cloneSubgraphInto` writes through `molWriter`, one row per call: `w.CreateIssue` per issue (`template.go:720`) and `w.AddDependency` per edge (`:741`, `:754`). Each `doltTransaction.CreateIssue` builds a fresh `issueops.NewBatchContext` (4+ config queries on the regular connection, `transaction.go:439`, `issueops/create.go:37-51`) and then runs about 9-10 single-row statements for the wisp on the second connection (`create.go:108-208`); each `AddDependency` runs two `isActiveWisp` probes, the type and cycle checks, the existing-edge read, the insert, the `is_blocked` recompute and the event (`transaction.go:830-900`, `issueops/dependencies.go:173-357`). Nine wisps and sixteen edges are roughly 250 round trips; at 30 ms each under load that is the 7.6 s. `storage.Transaction.CreateIssues` (`storage.go:933`, `transaction.go:460-507`) already builds one batch context, writes the deps carried on the issues through `PersistDependenciesWithOptionsResult`, and reconciles child counters and `is_blocked` once for the whole slice.
 
+**Blocker found by the first polecat (hq-wisp-qtcf0):** the store assigns IDs during `CreateIssues`, so edges between issues of one batch are empty at build time. Resolution: be-gf9 (store layer) makes `CreateIssuesInTxWithContext` assign IDs for empty-ID issues before the first insert and resolve dependency ends written as `batch:<index>` to those IDs; be-yn5 builds the clone on that contract (in-batch edges as `batch:` refs, attach edge `batch:<root>` -> target, `NewEpicID` read from the assigned IDs). The test below is be-yn5's; be-gf9's tests are a pure resolver test, a sqlmock ID-assignment test and a dolt-container round trip.
+
 **Interfaces:**
-- Consumes: `storage.Transaction.CreateIssues(issues []*types.Issue, ...)` as implemented at `internal/storage/dolt/transaction.go:460` (read its exact signature and how it carries dependencies on the issue: the `Dependencies` field `PersistDependenciesWithOptionsResult` at `create.go:835` reads).
+- Consumes: be-gf9's contract; `storage.Transaction.CreateIssues(issues []*types.Issue, ...)` as implemented at `internal/storage/dolt/transaction.go:460` (read its exact signature and how it carries dependencies on the issue: the `Dependencies` field `PersistDependenciesWithOptionsResult` at `create.go:835` reads).
 - Produces: `molWriter.CreateIssues(issues []*types.Issue) error` (forwarded by `storeMolWriter`); `cloneSubgraphInto` makes one `CreateIssues` call carrying the parent-child, `needs` and attach edges on the issues, and no `CreateIssue`/`AddDependency` calls.
 
 - [ ] **Step 1: Write the failing test with a counting fake writer**
@@ -785,7 +787,8 @@ Steps (each with its own test cycle; commit after each):
 | 2 | gastown | 1 | pool: release a parked, sessionless seat after 30 minutes; crash detection logs the release |
 | 3 | gastown | 1 | check-recovery-batch: report done/idle seats with no session from the preloaded agent bead |
 | 4 | gastown | 2 | rebuild_gt: coalesce landing-requested installs to one per 30 minutes; gt:install-now bypasses |
-| 5 | beads | — | bd mol bond --ephemeral: write the molecule in few statements |
+| 5a | beads | — | be-gf9: CreateIssues resolves batch:<index> dependency ends, IDs assigned before insert |
+| 5b | beads | 5a | be-yn5: bd mol bond writes the cloned molecule in one CreateIssues call |
 | 6 | gastown (crew) | 1 | spec dispatch: tick snapshot into slings, slings in parallel up to free seats |
 
 Each bead: `## Goal`, `## Constraints` (files above; no behaviour change beyond the task), `## Out of scope` (the other tasks), `## Gate` (`go test ./internal/cmd ./internal/daemon -count=1`; the owner's live measurement is recorded on claude-rh7 after the landing), `## Size` (one worker, one landing), `## Acceptance` (the task's tests by name, passing).
