@@ -1,6 +1,7 @@
 package submission
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -111,6 +112,8 @@ type recordingLister struct {
 	calls   []beads.ListOptions
 	waiting []*beads.Issue
 	byID    map[string]*beads.Issue
+	// failing names beads whose read fails with the error given.
+	failing map[string]error
 }
 
 func (r *recordingLister) List(opts beads.ListOptions) ([]*beads.Issue, error) {
@@ -119,6 +122,9 @@ func (r *recordingLister) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 }
 
 func (r *recordingLister) Show(id string) (*beads.Issue, error) {
+	if err := r.failing[id]; err != nil {
+		return nil, err
+	}
 	if issue, ok := r.byID[id]; ok {
 		return issue, nil
 	}
@@ -184,6 +190,38 @@ func TestJevSubmissionListerReadsRecordsThenUnrecordedWaitingBeads(t *testing.T)
 	}
 	if got[1].Work.Head != "h-second" || !got[1].Seen.Equal(since.Add(4*time.Minute)) || got[1].Subjects != nil {
 		t.Errorf("waiting entry = %+v, want the new head at its submission time with no record subjects", got[1])
+	}
+}
+
+// A record whose bead cannot be read is reported and left out, and the records
+// behind it are still listed, so one bad read does not stop the pass.
+func TestJevSubmissionListerSkipsARecordWhoseBeadCannotBeRead(t *testing.T) {
+	t.Parallel()
+	since := t0.Add(-time.Hour)
+	records := filepath.Join(t.TempDir(), land.SubmissionsSeenFile)
+	for _, rec := range []land.SubmissionRecord{
+		{SeenAt: since.Add(time.Minute), Bead: "gt-broken", Head: "h-broken", Target: "main"},
+		{SeenAt: since.Add(2 * time.Minute), Bead: "gt-fine", Head: "h-fine", Target: "main"},
+	} {
+		if err := battery.Append(records, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rec := &recordingLister{
+		byID:    map[string]*beads.Issue{"gt-fine": {ID: "gt-fine", Status: "closed"}},
+		failing: map[string]error{"gt-broken": errors.New("dolt: connection reset")},
+	}
+	var warnings bytes.Buffer
+
+	got, err := rigBeads{b: rec, records: records, warnings: &warnings}.Since(since)
+	if err != nil {
+		t.Fatalf("Since() error = %v, want the pass to go on", err)
+	}
+	if len(got) != 1 || got[0].Issue.ID != "gt-fine" {
+		t.Fatalf("Since() = %+v, want only gt-fine", got)
+	}
+	if !strings.Contains(warnings.String(), "gt-broken") || !strings.Contains(warnings.String(), "connection reset") {
+		t.Errorf("warnings = %q, want the skipped bead and its error", warnings.String())
 	}
 }
 

@@ -1275,11 +1275,13 @@ the cursor, and is retried next pass.
 
 The landing worker writes `.runtime/jev/submissions-seen.jsonl`, one line per
 submission the first time it sees a bead's READY TO LAND block at a head:
-`{seen_at, bead, rig, branch, head, target, submitted, subjects, numstat}`.
+one `land.SubmissionRecord` as JSON.
 `subjects` (at most 20, newest first) and `numstat` (at most 80 lines) are read
 from the rig's own clone, `.repo.git`, which the polecat worktrees share, so the
 write makes no fetch and no network call. A clone that lacks the commits writes
-the line with no subjects, and the battery reads its own clone for it. The write
+the line with no subjects and logs the read error, and the battery reads its own
+clone for it. A stat that cannot be read drops the subjects too, so a line holds
+both or neither. The write
 happens before the worker lands the bead, so a landing that prunes the branch
 still leaves the submission for the battery to ask about. A write that fails is
 logged once per run of failures and never holds up a landing. The file is

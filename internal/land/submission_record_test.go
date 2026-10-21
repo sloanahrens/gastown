@@ -18,6 +18,7 @@ type fakeSubmissionGit struct {
 	messages map[string][]git.CommitMessage
 	numstat  map[string]string
 	err      error
+	numErr   error
 	logged   []string
 }
 
@@ -31,6 +32,9 @@ func (f *fakeSubmissionGit) CommitMessages(base, head string) ([]git.CommitMessa
 
 func (f *fakeSubmissionGit) DiffNumstat(base, head string) (string, error) {
 	f.logged = append(f.logged, "numstat "+base+".."+head)
+	if f.numErr != nil {
+		return "", f.numErr
+	}
 	return f.numstat[head], nil
 }
 
@@ -168,11 +172,77 @@ func TestSubmissionRecorderCapsSubjectsAndNumstat(t *testing.T) {
 	}
 
 	got := readRecords(t, path)[0]
-	if len(got.Subjects) != submissionSubjectLimit || (len(got.Subjects) > 0 && got.Subjects[0] != "commit 0") {
-		t.Errorf("subjects = %q, want the newest %d", got.Subjects, submissionSubjectLimit)
+	if len(got.Subjects) != submissionSubjectLimit {
+		t.Fatalf("subjects = %q, want %d of them", got.Subjects, submissionSubjectLimit)
+	}
+	if got.Subjects[0] != "commit 0" {
+		t.Errorf("first subject = %q, want the newest commit", got.Subjects[0])
 	}
 	if n := strings.Count(got.Numstat, "\n") + 1; n != submissionNumstatLimit {
 		t.Errorf("numstat holds %d lines, want %d", n, submissionNumstatLimit)
+	}
+}
+
+// A clone that cannot read the commits writes no subjects and says so through
+// Warn, so the daemon log shows why the battery will read its own clone.
+func TestSubmissionRecorderWarnsWhenTheCloneCannotReadTheCommits(t *testing.T) {
+	t.Parallel()
+	g := &fakeSubmissionGit{err: errors.New("bad revision 'h1'")}
+	rec, path := newRecorder(t, g)
+	var warned []string
+	rec.Warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+
+	if _, err := rec.Record(recordWork("gt-a", "h1")); err != nil {
+		t.Fatal(err)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], "gt-a") || !strings.Contains(warned[0], "bad revision") {
+		t.Errorf("warnings = %q, want one naming the bead and the read error", warned)
+	}
+	if recs := readRecords(t, path); len(recs) != 1 || len(recs[0].Subjects) != 0 {
+		t.Errorf("records = %+v, want one record with no subjects", recs)
+	}
+}
+
+// A stat that cannot be read drops the subjects with it: a record holds
+// subjects with their stat or neither, so the battery never asks about commits
+// against a diff it does not have.
+func TestSubmissionRecorderDropsSubjectsWhenTheStatCannotBeRead(t *testing.T) {
+	t.Parallel()
+	g := &fakeSubmissionGit{
+		messages: map[string][]git.CommitMessage{"h1": {{Message: "fix: a"}}},
+		numErr:   errors.New("bad object"),
+	}
+	rec, path := newRecorder(t, g)
+	var warned []string
+	rec.Warn = func(format string, args ...any) { warned = append(warned, fmt.Sprintf(format, args...)) }
+
+	if wrote, err := rec.Record(recordWork("gt-a", "h1")); err != nil || !wrote {
+		t.Fatalf("Record = %v, %v; want a record written", wrote, err)
+	}
+	recs := readRecords(t, path)
+	if len(recs) != 1 || len(recs[0].Subjects) != 0 || recs[0].Numstat != "" {
+		t.Errorf("records = %+v, want no subjects and no stat", recs)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], "stat") {
+		t.Errorf("warnings = %q, want one naming the stat", warned)
+	}
+}
+
+// The commits are read against the landing remote's target, the ref the
+// landing merges onto, so a rig whose landing remote is not origin reads its
+// own target.
+func TestSubmissionRecorderReadsTheLandingRemoteTarget(t *testing.T) {
+	t.Parallel()
+	g := &fakeSubmissionGit{messages: map[string][]git.CommitMessage{"h1": {{Message: "fix: a"}}}}
+	rec, _ := newRecorder(t, g)
+	rec.Remote = "upstream"
+
+	if _, err := rec.Record(recordWork("gt-a", "h1")); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"messages upstream/main..h1", "numstat upstream/main..h1"}
+	if strings.Join(g.logged, " | ") != strings.Join(want, " | ") {
+		t.Errorf("git reads = %v, want %v", g.logged, want)
 	}
 }
 

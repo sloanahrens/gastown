@@ -87,7 +87,7 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 
 	return &Pass{
 		Asker:       client,
-		Submissions: rigBeads{b: beads.New(beadsDir), records: land.SubmissionsSeenPath(townRoot)},
+		Submissions: rigBeads{b: beads.New(beadsDir), records: land.SubmissionsSeenPath(townRoot), warnings: warnings},
 		Git:         newBareGit(ClonePath(townRoot), origin),
 		LogPath:     LogPath(townRoot),
 		CursorPath:  CursorPath(townRoot),
@@ -121,10 +121,15 @@ type rigBeads struct {
 	b beadLister
 	// records is the first-sight log, land.SubmissionsSeenPath in production.
 	records string
+	// warnings receives a line for each record whose bead cannot be read. Nil
+	// drops them.
+	warnings io.Writer
 }
 
 // Since returns the submissions from t on: each first-sight record, then each
-// waiting bead that no record names at its head.
+// waiting bead that no record names at its head. A record whose bead cannot be
+// read is reported and left out, so one bad read does not stop the pass for
+// the submissions behind it.
 func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 	recs, err := land.ReadSubmissionRecords(r.records)
 	if err != nil {
@@ -145,7 +150,10 @@ func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 			continue
 		}
 		if err != nil {
-			return nil, fmt.Errorf("reading %s: %w", rec.Bead, err)
+			if r.warnings != nil {
+				fmt.Fprintf(r.warnings, "jev submission: skipping %s at %s: reading the bead: %v\n", rec.Bead, rec.Head, err)
+			}
+			continue
 		}
 		out = append(out, Entry{
 			Issue: issue,

@@ -93,6 +93,9 @@ type SubmissionRecorder struct {
 	Remote string
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
+	// Warn reports a clone read that failed, so a record written without its
+	// commits is visible in the daemon log. Nil drops the report.
+	Warn func(format string, args ...any)
 
 	keys   map[string]bool
 	loaded bool
@@ -130,12 +133,18 @@ func (r *SubmissionRecorder) Record(w Work) (bool, error) {
 		Submitted: w.Submitted,
 	}
 	base := r.remote() + "/" + w.Target
-	if msgs, err := r.Git.CommitMessages(base, w.Head); err == nil {
-		rec.Subjects = commitSubjects(msgs)
-		if len(rec.Subjects) > 0 {
-			if out, err := r.Git.DiffNumstat(base, w.Head); err == nil {
-				rec.Numstat = firstLines(out, submissionNumstatLimit)
-			}
+	msgs, err := r.Git.CommitMessages(base, w.Head)
+	if err != nil {
+		r.warnf("%s: first-sight record written without commits, the battery reads its own clone: %v", w.BeadID, err)
+	} else if subjects := commitSubjects(msgs); len(subjects) > 0 {
+		out, err := r.Git.DiffNumstat(base, w.Head)
+		if err != nil {
+			// A record holds subjects with their stat or neither, so the
+			// battery never asks about commits against a diff it lacks.
+			r.warnf("%s: first-sight record written without commits, the stat could not be read: %v", w.BeadID, err)
+		} else {
+			rec.Subjects = subjects
+			rec.Numstat = firstLines(out, submissionNumstatLimit)
 		}
 	}
 	if err := battery.Append(r.Path, rec); err != nil {
@@ -150,6 +159,12 @@ func (r *SubmissionRecorder) remote() string {
 		return "origin"
 	}
 	return r.Remote
+}
+
+func (r *SubmissionRecorder) warnf(format string, args ...any) {
+	if r.Warn != nil {
+		r.Warn(format, args...)
+	}
 }
 
 func (r *SubmissionRecorder) now() time.Time {

@@ -681,7 +681,12 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		},
 		// The first-sight record the submission battery asks from, read from the
 		// clone this worker lands through (gt-l7ciu).
-		FirstSight: &land.SubmissionRecorder{Path: land.SubmissionsSeenPath(townRoot), Git: git.NewGit(repo), Remote: landingRemote},
+		FirstSight: &land.SubmissionRecorder{
+			Path: land.SubmissionsSeenPath(townRoot), Git: git.NewGit(repo), Remote: landingRemote,
+			Warn: func(format string, args ...any) {
+				d.logger.Printf("landing_worker: %s: %s", rigName, fmt.Sprintf(format, args...))
+			},
+		},
 	}, nil
 }
 
