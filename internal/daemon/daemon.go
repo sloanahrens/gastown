@@ -40,6 +40,7 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/landing"
 	"github.com/steveyegge/gastown/internal/jev/logtriage"
 	"github.com/steveyegge/gastown/internal/jev/progress"
+	"github.com/steveyegge/gastown/internal/jev/rework"
 	"github.com/steveyegge/gastown/internal/jev/stale"
 	"github.com/steveyegge/gastown/internal/jev/submission"
 	"github.com/steveyegge/gastown/internal/land"
@@ -643,6 +644,12 @@ type Daemon struct {
 	// and jevDriftOpen are for jev_drift.
 	jevLogtriageRunning atomic.Bool
 	jevLogtriageOpen    func(townRoot string, s logtriage.Settings, warnings io.Writer) (*logtriage.Pass, error)
+
+	// jevReworkRunning and jevReworkOpen are the jev_rework pass's
+	// single-flight guard and test seam (jev_rework.go), as
+	// jevLogtriageRunning and jevLogtriageOpen are for jev_logtriage.
+	jevReworkRunning atomic.Bool
+	jevReworkOpen    func(townRoot string, s rework.Settings, warnings io.Writer) (*rework.Pass, error)
 
 	// jevDispatchRunning is the jev_dispatch pass's single-flight guard
 	// (jev_dispatch.go), for the same reason as jevDedupeRunning.
@@ -1675,6 +1682,12 @@ var heartbeatSteps = []heartbeatStep{
 	// every fifteen minutes, and log every answer (internal/jev/logtriage).
 	// Opt-in and lifecycle, like jev-dedupe.
 	{name: "jev-logtriage", lifecycle: true, run: (*Daemon).triggerJevLogtriage},
+
+	// Ask Jev, for each om review that refused a landing, why it failed and
+	// whether the landing will need a rework commit, and log both answers
+	// (internal/jev/rework). Opt-in and lifecycle, like jev-dedupe: the pass
+	// changes no landing.
+	{name: "jev-rework", lifecycle: true, run: (*Daemon).triggerJevRework},
 
 	// Predict, for each bead just placed on a seat, how it will land, and log
 	// every prediction (internal/jev/dispatch). Opt-in and lifecycle, like
