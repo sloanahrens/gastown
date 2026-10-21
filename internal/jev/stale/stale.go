@@ -285,10 +285,14 @@ func (p *Pass) offerLanded(ctx context.Context, c candidate, lands []*beads.Issu
 				byID[l.ID] = l
 			}
 			var out []*beads.Issue
+			seen := make(map[string]bool, MaxLanded)
 			for _, id := range ids {
-				if l, ok := byID[id]; ok && len(out) < MaxLanded {
-					out = append(out, l)
+				l, ok := byID[id]
+				if !ok || seen[id] || len(out) == MaxLanded {
+					continue
 				}
+				seen[id] = true
+				out = append(out, l)
 			}
 			if len(out) > 0 {
 				return out

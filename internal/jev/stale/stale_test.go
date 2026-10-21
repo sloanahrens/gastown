@@ -315,7 +315,7 @@ func TestJevStaleOffersLandedInHMRankOrder(t *testing.T) {
 			landedIssue("land-1", 1), landedIssue("land-2", 2), landedIssue("land-7", 7), landedIssue("land-9", 9),
 		}},
 	}
-	search := fakeSearcher{ids: []string{"land-7", "gt-other", "land-2", "gone", "land-9"}}
+	search := fakeSearcher{ids: []string{"land-7", "gt-other", "land-2", "gone", "land-9", "land-7"}}
 	p := newPass(t, asker, search, b, "gastown")
 
 	if _, err := p.Run(context.Background()); err != nil {
