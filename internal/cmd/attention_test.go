@@ -361,6 +361,38 @@ func TestAttentionFollowSinceReplaysRecentHistoryOnly(t *testing.T) {
 	}
 }
 
+func TestAttentionReplayIncludesRotatedFile(t *testing.T) {
+	t.Parallel()
+	town := attentionTown(t)
+	now := time.Now()
+	before := raised(attention.RuleRedMain, "red-main:before", "before rotation")
+	before.TS = now.Add(-20 * time.Minute)
+	appendAttention(t, town, before)
+
+	// The writer's rotation: the line above moves to events.jsonl.1 and the
+	// next line lands in a fresh events.jsonl.
+	if err := os.Rename(attention.EventsPath(town), attention.RotatedEventsPath(town)); err != nil {
+		t.Fatal(err)
+	}
+	after := raised(attention.RuleEscalation, "esc:hq-2", "after rotation")
+	after.TS = now.Add(-5 * time.Minute)
+	appendAttention(t, town, after)
+
+	h := startFollow(t, town, followOptions{since: time.Hour, now: now})
+	h.poll()
+	out := h.finish()
+
+	if !strings.Contains(out, "before rotation") {
+		t.Errorf("--since skipped the event in events.jsonl.1:\n%s", out)
+	}
+	if !strings.Contains(out, "after rotation") {
+		t.Errorf("--since skipped the event in events.jsonl:\n%s", out)
+	}
+	if strings.Index(out, "before rotation") > strings.Index(out, "after rotation") {
+		t.Errorf("--since replayed the rotated file out of order:\n%s", out)
+	}
+}
+
 func TestAttentionFollowFlagsNeedFollow(t *testing.T) {
 	t.Parallel()
 	if err := checkFollowFlags(false, true, 0); err == nil || !strings.Contains(err.Error(), "--follow") {

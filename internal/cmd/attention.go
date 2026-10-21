@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -325,7 +326,7 @@ func attentionFollowEvents(ctx context.Context, w io.Writer, townRoot string, ti
 	}
 	defer func() { _ = tail.Close() }()
 	if opts.since > 0 {
-		history, err := attentionHistory(path, tail.Offset())
+		history, err := attentionHistory(attention.RotatedEventsPath(townRoot), path, tail.Offset())
 		if err != nil {
 			return err
 		}
@@ -346,9 +347,16 @@ func attentionFollowEvents(ctx context.Context, w io.Writer, townRoot string, ti
 	}
 }
 
-// attentionHistory returns the complete lines in the first end bytes of path:
-// what the file held when the tail opened, so replay and follow do not overlap.
-func attentionHistory(path string, end int64) ([]string, error) {
+// attentionHistory returns the complete lines the retained log held when the
+// tail opened: all of rotated, then the first end bytes of path. A missing
+// file is empty. The rotated file comes first, as attention.Read reads it, so
+// a --since window that spans a rotation replays both halves. The offset stops
+// replay from overlapping what follow prints.
+func attentionHistory(rotated, path string, end int64) ([]string, error) {
+	old, err := os.ReadFile(rotated) //nolint:gosec // G304: a path built from the town root
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
 	data, err := os.ReadFile(path) //nolint:gosec // G304: a path built from the town root
 	if err != nil {
 		return nil, err
@@ -356,7 +364,8 @@ func attentionHistory(path string, end int64) ([]string, error) {
 	if int64(len(data)) > end {
 		data = data[:end]
 	}
-	return strings.Split(string(data), "\n"), nil
+	lines := strings.Split(string(old), "\n")
+	return append(lines, strings.Split(string(data), "\n")...), nil
 }
 
 // printAttentionLines prints each line that parses as an event, passes the
