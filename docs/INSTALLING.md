@@ -469,7 +469,10 @@ restarts itself once idle. It never kills the daemon. Exit codes: 0 installed
 or already current, 1 failed and rolled back, 2 refused (mayor/rig dirty,
 diverged or not forward), 3 busy (retry). The daemon's `rebuild_gt` job calls
 the same script as a backstop, whenever the installed binary falls behind main
-and the town is quiet. Do not copy binaries by hand, run `go install`, or
+and the town is quiet. A landing's install request waits until 30 minutes
+after the last install (set `daemon.patrols.rebuild_gt.min_interval`, a Go
+duration, to change it) so a burst of landings costs one build and restart;
+a bead labeled `gt:install-now` skips the wait. Do not copy binaries by hand, run `go install`, or
 use `make install-local` in a town: none of them restarts the daemon or rolls
 back.
 

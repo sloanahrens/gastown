@@ -495,6 +495,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **`rebuild_gt` coalesces landing-requested installs** (gt-aiby1) — a
+  landing's install request now waits until 30 minutes have passed since the
+  last accomplished install (the `rebuild_gt` record in `patrol_last_run.json`), so a
+  burst of landings costs one build and one upgrade restart rather than one
+  each. The request stays armed while it waits and logs one
+  `rebuild_gt: install requested <age> after the last install; waiting for the
+  <window> window` line. A bead labeled `gt:install-now` bypasses the window,
+  and a deferred install-now request keeps its bypass for the retry. The
+  patrol's own interval (`patrols.rebuild_gt.interval`, default 1h) is
+  unchanged. The window is set by the new optional
+  `daemon.patrols.rebuild_gt.min_interval` (a Go duration such as `"45m"`; an
+  unset, invalid or non-positive value means the 30 minute default).
+
 - **The dispatcher draws a free seat at random** (gt-kr91q) — an unlabelled
   bead now goes to a uniformly random free seat among the models in the mix
   instead of the first seat in list order, so neither the pool seat nor the

@@ -838,6 +838,38 @@ func TestRebuildGTInstallNowTravelsWithItsRequest(t *testing.T) {
 	}
 }
 
+// TestRebuildGTDeferredInstallNowKeepsItsBypass pins the put-back: a
+// gt:install-now request a gate deferred goes back as install-now, so the
+// retry installs inside the window the label skips instead of waiting it out.
+func TestRebuildGTDeferredInstallNowKeepsItsBypass(t *testing.T) {
+	t.Parallel()
+	d, cli := rebuildGTWindowTown(t)
+	// An install five minutes ago: a plain request would be held.
+	if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now().Add(-5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	d.rebuildGTGateFn = func() (string, bool) { return "a gate suite holds a slot (gastown/landing)", true }
+	d.requestRebuildGTInstallNow()
+	end := watchRebuildGTCycle(d)
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, end)
+
+	if got := len(installCalls(cli)); got != 0 {
+		t.Fatalf("installs while the gate held the slot = %d, want 0", got)
+	}
+	if armed, installNow := d.rebuildGTPendingRequest(); !armed || !installNow {
+		t.Fatalf("deferred request is armed=%v install-now=%v, want true/true", armed, installNow)
+	}
+
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	end = watchRebuildGTCycle(d)
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, end)
+	if got := len(installCalls(cli)); got != 1 {
+		t.Fatalf("installs after the gate cleared = %d, want 1 (bypass kept)", got)
+	}
+}
+
 // TestRebuildGTRequestSurvivesAnExitingCycle pins the request when the cycle
 // exits without returning: runtime.Goexit runs the cycle's deferred calls the
 // way a panic would, and the request the cycle consumed must still be pending

@@ -251,7 +251,7 @@ func (d *Daemon) triggerRebuildGT() {
 		// The cycle consumes the request as it starts, so one armed while it
 		// runs sets the flag for the next heartbeat; clearing at the end
 		// would erase that request too (gt-j1mm4).
-		consumed, _ := d.takeRebuildGTRequest()
+		consumed, consumedInstallNow := d.takeRebuildGTRequest()
 		accomplished := false
 		// Put back the request this cycle consumed unless it accomplished its
 		// work, so a deferral, a panic or a Goexit does not lose it. Registered
@@ -259,7 +259,7 @@ func (d *Daemon) triggerRebuildGT() {
 		// heartbeat sees the request (gt-tgs81).
 		defer func() {
 			if consumed && !accomplished {
-				d.putBackRebuildGTRequest()
+				d.putBackRebuildGTRequest(consumedInstallNow)
 			}
 		}()
 		if !d.runRebuildGT() {
@@ -346,13 +346,18 @@ func (d *Daemon) takeRebuildGTRequest() (armed, installNow bool) {
 }
 
 // putBackRebuildGTRequest re-arms a request a cycle consumed without
-// accomplishing its work, as a plain one: an install-now request is served by
-// one cycle or not at all, and a deferral went to the back of the window with
-// everything else. The lock keeps a request armed meanwhile from losing the
-// bypass it carries.
-func (d *Daemon) putBackRebuildGTRequest() {
+// accomplishing its work, keeping the bypass it carried: a gt:install-now
+// request asked for the install at once, and a deferral (a busy gate, a held
+// lock) must not push it behind the install window the label skips. A plain
+// request goes back plain. The lock keeps a request armed meanwhile from
+// losing the bypass it carries, and a bypass armed on top of the put-back
+// request is left in place.
+func (d *Daemon) putBackRebuildGTRequest(installNow bool) {
 	d.rebuildGTRequestMu.Lock()
 	defer d.rebuildGTRequestMu.Unlock()
+	if installNow {
+		d.rebuildGTInstallNow.Store(true)
+	}
 	d.rebuildGTRequested.Store(true)
 }
 
