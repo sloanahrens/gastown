@@ -117,9 +117,12 @@ type Summary struct {
 // each is logged and the cursor advanced before the next, so a pass that is
 // stopped partway never asks about a finding twice. A finding whose question
 // was cut short by ctx is neither logged nor passed: the next pass asks it
-// again. A finding whose answer was paid for is passed even when its log line
-// cannot be written, so the next pass does not bill it again. Run returns
-// ErrBusy when another pass holds the run lock.
+// again. A finding whose answer was paid for is cursored past even when its
+// log line cannot be written, so the next pass does not bill it again; the
+// pass stops there rather than buy answers a broken log cannot record, and
+// still returns the append error so the lost line is not silent. When the
+// cursor write fails too, both errors are returned and the next pass asks the
+// finding again. Run returns ErrBusy when another pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
 	release, err := lockRun(p.CursorPath)
@@ -161,10 +164,14 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		}
 		if err := battery.Append(p.LogPath, line); err != nil {
 			err = fmt.Errorf("writing the dedupe log: %w", err)
-			// The answer is paid for. Advance the cursor before reporting,
-			// so the next pass does not ask, and bill, the same finding
-			// again; the lost log line is the lesser failure.
+			// The answer is paid for, so advance the cursor before reporting:
+			// the next pass must not ask, and bill, the same finding again.
+			// The pass stops here rather than buy answers a broken log cannot
+			// record; the error still reaches the caller, so the lost line is
+			// not silent.
 			if cerr := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: beads.ParseIssueTime(f.CreatedAt), ID: f.ID}); cerr != nil {
+				// The cursor did not move, so the next pass asks, and bills,
+				// this finding again: both failures reach the caller.
 				return sum, errors.Join(err, cerr)
 			}
 			return sum, err
@@ -270,6 +277,8 @@ func (p *Pass) ask(ctx context.Context, f *beads.Issue) (Line, error) {
 		line.Outcome = OutcomeAskFailed
 		return line, nil
 	case len(cands) == 0 && unreadable:
+		// A hit that could not be read might have been the duplicate, so the
+		// line says the read failed even when other hits were filtered out.
 		line.Outcome = OutcomeReadFailed
 		return line, nil
 	case len(cands) == 0:
@@ -294,9 +303,10 @@ func (p *Pass) ask(ctx context.Context, f *beads.Issue) (Line, error) {
 // candidates keeps up to maxCandidates beads from the hits, in rank order.
 // It drops the finding itself, any bead created after the finding, and any
 // hit that matched on something other than the title or description, such as
-// a comment or a close reason. A bead it cannot read is dropped too, and
-// unreadable reports that one was, so the pass can tell a failed read from a
-// search that found nothing.
+// a comment or a close reason; a hit dropped for its kind or field is filtered
+// out, not unreadable. A bead it cannot read is dropped too, and unreadable
+// reports that one was, so the pass can tell a failed read from a search that
+// found nothing.
 func (p *Pass) candidates(f *beads.Issue, hits []Hit) (out []*beads.Issue, unreadable bool) {
 	created := beads.ParseIssueTime(f.CreatedAt)
 	seen := map[string]bool{f.ID: true}

@@ -12,8 +12,9 @@ import (
 )
 
 // Outcome says how a line's candidate came about. It is one of a fixed set of
-// codes, never free text, so it tells a real "none" from a failure without the
-// log holding an error message.
+// codes, never free text, so a log's reader (the --recent table, an operator
+// grep) tells a real "none" from a failure without the log holding an error
+// message. A pass never branches on an outcome.
 type Outcome string
 
 const (
@@ -23,10 +24,12 @@ const (
 	// OutcomeNoCandidates: the search found nothing to offer, so the Choice
 	// was not asked. The Nouls and the Score are still asked.
 	OutcomeNoCandidates Outcome = "no_candidates"
-	// OutcomeReadFailed: every hit was unreadable (the bead store failed to
-	// show it, or its CreatedAt did not parse), so no candidate was offered
-	// and the Choice was not asked. The Nouls and the Score are still asked.
-	// A line reading no_candidates would claim the search found nothing.
+	// OutcomeReadFailed: at least one hit that could have been offered could
+	// not be read (the bead store failed to show it, or its CreatedAt did not
+	// parse) and no candidate was offered, so the Choice was not asked. Hits
+	// filtered out alongside it do not change the label: the read failure is
+	// what left the Choice unasked. The Nouls and the Score are still asked. A
+	// line reading no_candidates would claim the search found nothing.
 	OutcomeReadFailed Outcome = "read_failed"
 	// OutcomeSearchFailed: the hm search failed, so no candidate was offered
 	// and the Choice was not asked. The Nouls and the Score are still asked,
