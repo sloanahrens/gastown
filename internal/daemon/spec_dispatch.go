@@ -142,8 +142,11 @@ type specDispatchTickReport struct {
 	Planning       []specDispatchTickEntry `json:"planning"`
 	Skipped        []specDispatchTickEntry `json:"skipped"`
 	Failed         []specDispatchTickEntry `json:"failed"`
-	Notices        []string                `json:"notices"`
-	Errors         []string                `json:"errors"`
+	// Deferred is the sling-stage part of Skipped, logged one line per entry
+	// rather than only inside the tick line's capped skip list (gt-4wcqd).
+	Deferred []specDispatchTickEntry `json:"deferred"`
+	Notices  []string                `json:"notices"`
+	Errors   []string                `json:"errors"`
 }
 
 // triggerSpecDispatch starts one tick on its own goroutine unless one is
@@ -423,7 +426,9 @@ func parseSpecDispatchReport(out []byte) (specDispatchTickReport, error) {
 
 // formatSpecDispatchReport renders a tick's JSON as log lines. The tick line
 // names every skipped bead with its reason, and a bead skipped unshaped warns
-// once, on the first tick that sees it (gt-gzav5).
+// once, on the first tick that sees it (gt-gzav5). A sling-stage deferral is
+// also logged on its own 'deferred:' line, outside the tick line's cap, so a
+// deferral past the cap still reads with its bead and reason (gt-4wcqd).
 func (d *Daemon) formatSpecDispatchReport(out []byte) []string {
 	r, err := parseSpecDispatchReport(out)
 	if err != nil {
@@ -436,7 +441,7 @@ func (d *Daemon) formatSpecDispatchReport(out []byte) []string {
 	for _, group := range []struct {
 		name    string
 		entries []specDispatchTickEntry
-	}{{"dispatched", r.Dispatched}, {"refused", r.Refused}, {"planning", r.Planning}, {"failed", r.Failed}} {
+	}{{"dispatched", r.Dispatched}, {"refused", r.Refused}, {"planning", r.Planning}, {"failed", r.Failed}, {"deferred", r.Deferred}} {
 		for _, e := range group.entries {
 			lines = append(lines, group.name+": "+e.Line)
 		}

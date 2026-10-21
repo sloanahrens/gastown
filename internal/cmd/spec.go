@@ -748,6 +748,12 @@ type specDispatchReport struct {
 	Planning       []specDispatchEntry `json:"planning"`
 	Skipped        []specDispatchEntry `json:"skipped"`
 	Failed         []specDispatchEntry `json:"failed"`
+	// Deferred is the sling-stage part of Skipped: the candidates the tick
+	// chose a seat for and whose sling was then deferred (content overlap, a
+	// pool backpressure refusal). The entries stay in Skipped too, so the tick
+	// line and its cap count them as before; the daemon logs each one on its
+	// own 'deferred:' line, where the cap cannot truncate it (gt-4wcqd).
+	Deferred []specDispatchEntry `json:"deferred,omitempty"`
 	// Notices are lines the tick decided on but no single candidate owns,
 	// logged once each (gt-wgyca).
 	Notices      []string      `json:"notices,omitempty"`
@@ -1220,6 +1226,10 @@ func specRunPendingSlings(env specDispatchEnv, pending []specPendingSling, repor
 			report.Dispatched = append(report.Dispatched, o.entry)
 		case specSlingSkipped:
 			report.Skipped = append(report.Skipped, o.entry)
+			// The tick line caps its skipped list, so a deferral can land in the
+			// unnamed tail; the daemon logs this list one line per entry, so
+			// every deferral's bead and reason stay readable (gt-4wcqd).
+			report.Deferred = append(report.Deferred, o.entry)
 		case specSlingFailed:
 			report.Failed = append(report.Failed, o.entry)
 		}

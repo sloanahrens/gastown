@@ -136,6 +136,52 @@ func TestFormatSpecDispatchReportCapsSkippedBeads(t *testing.T) {
 	}
 }
 
+// A sling-stage deferral past the tick line's cap is still logged with its bead
+// and reason: the tick line names six skips and counts the rest as "+N more",
+// which said neither which bead was deferred nor why (gt-gi3f9, gt-4wcqd).
+func TestFormatSpecDispatchReportLogsDeferralsOutsideTheCap(t *testing.T) {
+	t.Parallel()
+	out := []byte(`{"candidates": 8,
+		"skipped": [
+			{"bead": "gt-a", "line": "gt-a: no seat: full"},
+			{"bead": "gt-b", "line": "gt-b: no seat: full"},
+			{"bead": "gt-c", "line": "gt-c: no seat: full"},
+			{"bead": "gt-d", "line": "gt-d: no seat: full"},
+			{"bead": "gt-e", "line": "gt-e: no seat: full"},
+			{"bead": "gt-f", "line": "gt-f: no seat: full"},
+			{"bead": "gt-g", "line": "gt-g: no seat: full"},
+			{"bead": "gt-h", "line": "gt-h: sling deferred, content overlap holds it (work in flight): shares TestX"}
+		],
+		"deferred": [
+			{"bead": "gt-h", "line": "gt-h: sling deferred, content overlap holds it (work in flight): shares TestX"}
+		],
+		"failed": [
+			{"bead": "gt-z", "line": "gt-z: dispatch failed, left unassigned: Error 1213 after 4 attempts; excluded from the queue until label x is cleared"}
+		]}`)
+	lines := (&Daemon{}).formatSpecDispatchReport(out)
+	joined := strings.Join(lines, "\n")
+	for _, want := range []string{
+		"deferred: gt-h: sling deferred, content overlap holds it (work in flight): shares TestX",
+		"failed: gt-z: dispatch failed, left unassigned: Error 1213 after 4 attempts",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing %q in:\n%s", want, joined)
+		}
+	}
+	// The tick line is unchanged: it still caps its skip list and counts the
+	// tail, so the deferral is not named there, only on its own line.
+	tick := lines[0]
+	if !strings.Contains(tick, " +2 more") {
+		t.Errorf("tick line %q lost its cap count", tick)
+	}
+	if strings.Contains(tick, "gt-h (") {
+		t.Errorf("tick line %q names gt-h; the cap and its count must be unchanged", tick)
+	}
+	if n := strings.Count(joined, "deferred: gt-h:"); n != 1 {
+		t.Errorf("deferral logged %d times, want once", n)
+	}
+}
+
 // An unshaped bead stays ready and is held again every tick, so its warning
 // lands once — naming the missing headings — and the next tick's tick line
 // still names it without a second warning (gt-gzav5).
