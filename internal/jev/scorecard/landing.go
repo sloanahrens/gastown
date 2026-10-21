@@ -64,18 +64,40 @@ func (t *townNotes) Notes(rig, bead string) (string, error) {
 // Show reads one bead from its rig's beads store. A rig whose beads directory
 // does not exist has no bead to find, so it reads as not found.
 func (t *townNotes) Show(rig, bead string) (*beads.Issue, error) {
-	b, ok := t.stores[rig]
-	if !ok {
-		dir := doltserver.FindRigBeadsDir(t.town, rig)
-		if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
-			return nil, fmt.Errorf("no beads directory for rig %s: %w", rig, beads.ErrNotFound)
-		} else if err != nil {
-			return nil, fmt.Errorf("reading the beads directory for rig %s: %w", rig, err)
-		}
-		b = beads.New(dir)
-		t.stores[rig] = b
+	b, err := t.store(rig)
+	if err != nil {
+		return nil, err
 	}
 	return b.Show(bead)
+}
+
+// List reads the rig's beads matching opts. A rig with no beads directory has
+// no beads to list, so it lists none.
+func (t *townNotes) List(rig string, opts beads.ListOptions) ([]*beads.Issue, error) {
+	b, err := t.store(rig)
+	if errors.Is(err, beads.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return b.List(opts)
+}
+
+// store returns the rig's beads store, opened on first use.
+func (t *townNotes) store(rig string) (*beads.Beads, error) {
+	if b, ok := t.stores[rig]; ok {
+		return b, nil
+	}
+	dir := doltserver.FindRigBeadsDir(t.town, rig)
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("no beads directory for rig %s: %w", rig, beads.ErrNotFound)
+	} else if err != nil {
+		return nil, fmt.Errorf("reading the beads directory for rig %s: %w", rig, err)
+	}
+	b := beads.New(dir)
+	t.stores[rig] = b
+	return b, nil
 }
 
 // landingAdapter labels each logged landing from the overseer's review of the

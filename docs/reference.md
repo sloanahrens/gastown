@@ -1514,6 +1514,9 @@ root. The adapter implements:
 - `Parse(raw) (Item, error)`: one log line as an `Item` (id, time, model, the
   answers keyed by question id, and any adapter refs it needs to label). An
   error skips the line and counts it in `lines_skipped`.
+- `ParseLines(raw) ([]Item, error)`, for an adapter whose line answers more than
+  one item. The scorecard reads such a line through it in place of `Parse`; a
+  drift line answers each doc section it names.
 - `Label(ctx, item) (Labeling, error)`: the item's labels, whether it is labeled
   at all, and the rule that set them. An unlabeled item counts as logged but not
   labeled. An error that cannot be read fails the whole report, so a broken
@@ -1883,6 +1886,31 @@ is never labeled: the log keeps no copy of the description the question was
 asked about, and the bead's update and close times do not show whether a
 description changed. Its logged answers still appear in the report, with no
 labels.
+
+`gt jev scorecard --battery drift` scores the drift log against the docs' history
+on `refs/heads/main`, read from the bare clone the submission battery owns. A
+drift line answers each doc section it names, so each section is one item. The
+scorecard does not fetch the clone: the drift pass's sync keeps it current. The
+rules are in `internal/jev/scorecard/drift.go`. The window is 30 days after the
+ask, from just after the ask's instant through the 30th day:
+
+- a commit on the docs branch within the window touches the section:
+  `doc_now_stale` true (`drift:docs-edit`). The section's lines are those from
+  its heading to the next heading in the doc before the commit. A hunk whose old
+  lines fall in them touches it, and so does a hunk that adds the heading line.
+- a bead closed as landed within the window, with a close reason `landed` or
+  `Landed on ...`, whose title or description names the doc file:
+  `doc_now_stale` true (`drift:docs-bead-landed`). The rule names the file, not
+  the section.
+- no such commit or bead, and the window has passed: `doc_now_stale` false
+  (`drift:no-edit-30d`). Inside the window with neither, the section is unlabeled.
+- `drift_kind` is labeled only when a commit touched the section. It is true when
+  the kind Jev picked is one the touching hunks name (`drift:kind-in-edit`). A
+  `--flag` names a flag, a `gt <command>` phrase a command, and a snake_case or
+  kebab-case name a config key. A hunk that names none is a `behavior`. `none`
+  and `unclear` are never right for an edit. The probability scored is the one
+  Jev gave the option it picked.
+- `needs_new_section` is never labeled.
 
 ## Beads Commands (bd)
 

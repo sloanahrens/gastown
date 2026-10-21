@@ -64,6 +64,13 @@ type Adapter interface {
 	Label(ctx context.Context, item Item) (Labeling, error)
 }
 
+// Expander is an Adapter whose log line answers more than one item, such as a
+// drift line that answers each doc section it names. The scorecard reads such a
+// line through ParseLines in place of Parse, and an error skips the whole line.
+type Expander interface {
+	ParseLines(raw []byte) ([]Item, error)
+}
+
 // Contextual is an Adapter that also reports context lines for the report:
 // facts gathered while labeling that the per-question metrics do not carry.
 // Build reads Context once, after labeling.
