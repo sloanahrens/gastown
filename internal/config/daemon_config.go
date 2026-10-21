@@ -145,6 +145,12 @@ type PatrolsConfig struct {
 	// (internal/jev/logtriage). It acts on nothing. Opt-in, like JevDedupe.
 	JevLogtriage *JevLogtriageConfig `json:"jev_logtriage,omitempty"`
 
+	// JevRework asks Jev, for each om review that refused a landing, why it
+	// failed and whether the landing will need a rework commit, and logs both
+	// answers (internal/jev/rework). It changes no landing. Opt-in for the
+	// same reason as JevDedupe.
+	JevRework *JevReworkConfig `json:"jev_rework,omitempty"`
+
 	// RestartTracker is retired (gt-gqftr): no code read the block. It is
 	// declared, like the other retired keys, so a daemon.json that still
 	// carries it keeps loading under strict decoding and is kept verbatim.
@@ -662,6 +668,20 @@ type JevNotesConfig struct {
 
 	// MaxUSDPerDay stops the read for the day once the town's Jev spend, every
 	// caller counted, reaches it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+}
+
+// JevReworkConfig switches on the refused-review cause battery and prices its
+// Jev spend. The pass is off unless Enabled is true, and an enabled pass needs
+// USDPerBillionTokens: the usage ledger stores tokens, not dollars.
+type JevReworkConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the pass for the day once the town's Jev spend
+	// reaches it. Zero takes the default of one dollar.
 	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
 
 	// USDPerBillionTokens prices input and output tokens alike.

@@ -2105,6 +2105,50 @@ scorecard's `internal/jev/scorecard/failcause.go`:
 
 `cause` has no mechanical label. It is logged for a person to read.
 
+### Refused-review cause battery (`jev_rework`)
+
+When a landing's om review refuses the work, the battery reads the refusal's
+findings from the work bead's MERGE REJECTION block for that attempt (cut to
+3000 characters) and the files the refused head changed against its target, and
+asks Jev two questions: the noul `reworked_to_land`, whether the landing will
+need a rework commit before it lands, and the choice `cause` over
+`tests_missing`, `scope_creep`, `logic_error`, `wrong_file`, `docs_stale`,
+`convention` and `unclear`. It appends one line per refusal to
+`.runtime/jev/rework.jsonl`: `{ts, refused, rig, bead, attempt, head, verdict,
+score, answers, model, question_version}`. `refused` is when the landing logged
+the review, which is where the scorecard's label starts. The findings are never
+logged. A refusal
+whose bead or rejection block cannot be read is skipped for good, and so is one
+whose Jev call gets no usable reply. Any other Jev failure stops the pass, so the
+next one asks again.
+
+A refusal is a review the landing refused the work on: `request_changes`, or an
+approval whose findings blocked it. A pass reads refusals in order and moves its
+cursor past each one before the next, so a refusal is asked about once. The
+pass reads the logs, the beads and the rig's repository, and changes no landing.
+The patrol is off unless `daemon.json` enables it:
+
+```json
+{"patrols": {"jev_rework": {"enabled": true, "max_usd_per_day": 1, "usd_per_billion_tokens": 4}}}
+```
+
+`usd_per_billion_tokens` is required. `max_usd_per_day` is optional and draws on
+the same town-wide cap as the other batteries.
+
+`gt jev scorecard --battery rework` labels `reworked_to_land` from the rig's
+landings file, in the scorecard's `internal/jev/scorecard/rework.go`, by the
+first landing of the bead after the refusal's own time:
+
+- that landing is the refused head: `reworked_to_land` false, since the work
+  landed without a rework commit (`rework:same-head-landed`).
+- that landing is another head: `reworked_to_land` true, since the bead landed
+  only after a later submission (`rework:reworked-before-landing`).
+- the bead has not landed since the refusal, or the rejection block named no
+  head: unlabeled.
+
+`cause` has no mechanical label. It is logged so a person can read which kinds
+of work fail most.
+
 ## Beads Commands (bd)
 
 ```bash

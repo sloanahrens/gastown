@@ -132,6 +132,7 @@ type (
 	JevSubmissionConfig        = agentconfig.JevSubmissionConfig
 	JevDriftConfig             = agentconfig.JevDriftConfig
 	JevLogtriageConfig         = agentconfig.JevLogtriageConfig
+	JevReworkConfig            = agentconfig.JevReworkConfig
 	JevTestselConfig           = agentconfig.JevTestselConfig
 	JevFailcauseConfig         = agentconfig.JevFailcauseConfig
 	JevTargetsConfig           = agentconfig.JevTargetsConfig
@@ -334,6 +335,13 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.JevDrift.Enabled
+	}
+	// jev_rework is opt-in for the same reason.
+	if patrol == "jev_rework" {
+		if config == nil || config.Patrols == nil || config.Patrols.JevRework == nil {
+			return false
+		}
+		return config.Patrols.JevRework.Enabled
 	}
 	// jev_logtriage is opt-in for the same reason.
 	if patrol == "jev_logtriage" {
