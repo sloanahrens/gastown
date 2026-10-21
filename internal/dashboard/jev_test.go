@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -769,6 +770,22 @@ func jevNoteChips(t *testing.T, dom *pageDOM) []jevDrawn {
 	return chips
 }
 
+// jevFoldTitle reads the tooltip on row's not-yet chip.
+func jevFoldTitle(t *testing.T, dom *pageDOM, row int) string {
+	t.Helper()
+	v, err := dom.vm.RunString(fmt.Sprintf(`(function () {
+  var td = __byId["jev"].children[0].children[1].children[%d].children[3];
+  for (var i = 0; i < td.children.length; i++) {
+    if (td.children[i].tagName === "BUTTON") return td.children[i].title;
+  }
+  return null;
+})()`, row))
+	if err != nil {
+		t.Fatalf("reading a not-yet chip's tooltip: %v", err)
+	}
+	return v.String()
+}
+
 // jevClickFold clicks row's not-yet chip and reports whether the row's folded
 // list is hidden afterwards.
 func jevClickFold(t *testing.T, dom *pageDOM, row int) bool {
@@ -916,16 +933,51 @@ func TestJevPanelFoldsNotYetQuestionsUntilOpened(t *testing.T) {
 		t.Fatalf("finding's not-yet questions are not folded: %+v", more)
 	}
 
+	const show, hide = "show this battery's not-yet questions", "hide this battery's not-yet questions"
+	if got := jevFoldTitle(t, dom, 0); got != show {
+		t.Errorf("the folded chip's tooltip = %q, want %q", got, show)
+	}
 	if hidden := jevClickFold(t, dom, 0); hidden {
 		t.Error("clicking the not-yet chip did not open the fold")
+	}
+	if got := jevFoldTitle(t, dom, 0); got != hide {
+		t.Errorf("the opened chip's tooltip = %q, want %q", got, hide)
 	}
 	rows, _, _ = drawJevIn(t, dom, jevScorecardState(time.Now(), nil))
 	if more := rows[0].Cells[3].Kids[2]; more.Hidden {
 		t.Error("the fold folded itself back on the next draw")
 	}
+	if got := jevFoldTitle(t, dom, 0); got != hide {
+		t.Errorf("the redrawn open chip's tooltip = %q, want %q", got, hide)
+	}
 
 	if hidden := jevClickFold(t, dom, 0); !hidden {
 		t.Error("clicking the not-yet chip again did not fold the list")
+	}
+	if got := jevFoldTitle(t, dom, 0); got != show {
+		t.Errorf("the refolded chip's tooltip = %q, want %q", got, show)
+	}
+}
+
+// A verdict the page does not know is shown beside the earning and no-signal
+// questions in the dim colour, not folded: the title counts only not-yet under
+// that name, so the fold's count must match it.
+func TestJevPanelShowsAnUnknownVerdictInsteadOfFoldingIt(t *testing.T) {
+	t.Parallel()
+
+	s := jevScorecardState(time.Now(), nil)
+	s["jev_scorecard"].(map[string]any)["batteries"] = []any{
+		map[string]any{"name": "drift", "lines": 40, "questions": []any{
+			map[string]any{"id": "new_one", "verdict": "borderline"},
+			map[string]any{"id": "sections_stable", "verdict": "not-yet"}}},
+	}
+	rows, _, _ := drawJev(t, s)
+	kids := rows[0].Cells[3].Kids
+	if got, want := jevTexts(kids), []string{"new_one", "+1 not yet", "sections_stable"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("a battery with an unknown verdict drew %q, want %q", got, want)
+	}
+	if got, want := kids[0].Class, "jvchip jv-notyet"; got != want {
+		t.Errorf("the unknown verdict's chip wears %q, want %q", got, want)
 	}
 }
 
@@ -1036,20 +1088,33 @@ func TestJevPanelSitsAfterTierSweepsAndFoldsUntilOpened(t *testing.T) {
 	}
 }
 
-// The verdict colours are the page's own tokens, so the chips read the same in
-// every theme the page carries.
-func TestJevChipsTakeThePagesColourTokens(t *testing.T) {
+// Every class the page gives a verdict chip has a colour rule drawn from a
+// token the page defines, so a verdict added to JV_CLASS without a rule, or with
+// a rule naming a missing token, draws an uncoloured chip.
+func TestJevChipClassesHaveColourRulesFromDefinedTokens(t *testing.T) {
 	t.Parallel()
 
+	v, err := newPageDOM(t).vm.RunString(`JSON.stringify(JV_CLASS)`)
+	if err != nil {
+		t.Fatalf("reading JV_CLASS: %v", err)
+	}
+	var classes map[string]string
+	if err := json.Unmarshal([]byte(v.String()), &classes); err != nil {
+		t.Fatalf("reading JV_CLASS: %v", err)
+	}
+	if len(classes) == 0 {
+		t.Fatal("JV_CLASS names no verdict")
+	}
+
 	page := string(indexHTML)
-	for _, want := range []string{
-		".jv-earning{color:var(--green)}",
-		".jv-nosignal{color:var(--amber)}",
-		".jv-notyet{color:var(--dim)}",
-		".jvname{white-space:nowrap}",
-	} {
-		if !strings.Contains(page, want) {
-			t.Errorf("index.html's style has no %q", want)
+	for verdict, class := range classes {
+		rule := regexp.MustCompile(`\.` + regexp.QuoteMeta(class) + `\{color:var\((--[a-z-]+)\)\}`).FindStringSubmatch(page)
+		if rule == nil {
+			t.Errorf("verdict %q wears %q, which index.html's style gives no colour from a token", verdict, class)
+			continue
+		}
+		if !strings.Contains(page, rule[1]+":#") {
+			t.Errorf("verdict %q wears %q, whose colour %s the page never defines", verdict, class, rule[1])
 		}
 	}
 }
