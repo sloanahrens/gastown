@@ -1,8 +1,8 @@
 Scorecard for battery testsel, all time
 Items: 7 parsed, 1 line(s) skipped
-would skip at 0.2: 3 package(s), 2 ungraded, MISS 0, gate minutes saved n/a
-would skip at 0.3: 4 package(s), 2 ungraded, MISS 1, gate minutes saved n/a
-would skip at 0.5: 5 package(s), 2 ungraded, MISS 2, gate minutes saved n/a
+would skip at 0.2: 3 package(s), 2 ungraded, MISS 0, gate minutes saved 0.5
+would skip at 0.3: 4 package(s), 2 ungraded, MISS 1, gate minutes saved 2.5
+would skip at 0.5: 5 package(s), 2 ungraded, MISS 2, gate minutes saved 4.0
 
 affects_tests (noul)
   logged 7, labeled 4, positives 2, negatives 2, base rate 50.0%

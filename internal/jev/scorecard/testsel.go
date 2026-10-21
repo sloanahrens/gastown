@@ -23,10 +23,13 @@ const testselAffects QuestionID = "affects_tests"
 
 // Refs the testsel adapter keeps in Item.Refs. refGate is unset when the gate
 // reported no result for the package, so Label leaves it unlabeled.
+// refGateSeconds is the gate's wall time for the package, in seconds, and is
+// unset when the gate timed none.
 const (
-	refGate    = "gate"
-	gatePassed = "passed"
-	gateFailed = "failed"
+	refGate        = "gate"
+	refGateSeconds = "gate_seconds"
+	gatePassed     = "passed"
+	gateFailed     = "failed"
 )
 
 // ruleTestselGate names the rule that labels a package from its gate result.
@@ -45,17 +48,23 @@ type testselLine struct {
 	Model           string             `json:"model"`
 	Noul            map[string]float64 `json:"noul"`
 	Gate            map[string]bool    `json:"gate"`
+	GateSeconds     map[string]float64 `json:"gate_seconds"`
 	QuestionVersion int                `json:"question_version"`
 }
 
 // testselCut is the summary of one threshold: the asked packages the battery
-// would skip at it, how many of those the gate reported no result for, and how
-// many the gate failed (a MISS).
+// would skip at it, how many of those the gate reported no result for, how many
+// the gate failed (a MISS), and the gate time those packages took.
 type testselCut struct {
 	threshold float64
 	skip      int
 	ungraded  int
 	miss      int
+	// saved is the summed gate time of the would-skip packages, in seconds.
+	saved float64
+	// timed is how many would-skip packages carried a duration. The minutes
+	// figure is n/a when none did: nothing in the log was timed.
+	timed int
 }
 
 // testselAdapter labels each asked package from the gate's result for it, and
@@ -120,6 +129,9 @@ func (a *testselAdapter) ParseLines(raw []byte) ([]Item, error) {
 				item.Refs[refGate] = gatePassed
 			}
 		}
+		if secs, timed := l.GateSeconds[dir]; timed {
+			item.Refs[refGateSeconds] = strconv.FormatFloat(secs, 'f', -1, 64)
+		}
 		items = append(items, item)
 	}
 	return items, nil
@@ -148,6 +160,12 @@ func (a *testselAdapter) tally(item Item, gate string) {
 	if !ok || ans.Noul == nil {
 		return
 	}
+	secs, timed := 0.0, false
+	if raw, ok := item.Refs[refGateSeconds]; ok {
+		if v, err := strconv.ParseFloat(raw, 64); err == nil {
+			secs, timed = v, true
+		}
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.asked++
@@ -157,6 +175,10 @@ func (a *testselAdapter) tally(item Item, gate string) {
 			continue
 		}
 		c.skip++
+		if timed {
+			c.saved += secs
+			c.timed++
+		}
 		switch gate {
 		case "":
 			c.ungraded++
@@ -167,8 +189,9 @@ func (a *testselAdapter) tally(item Item, gate string) {
 }
 
 // Context reports one summary line per threshold, and clears the tally so the
-// next build starts fresh. Gate minutes saved are n/a: the gate's package
-// results carry no durations, so the log cannot price a skip in minutes.
+// next build starts fresh. Gate minutes saved are the summed gate time of the
+// would-skip packages, and n/a when the log timed none of them (a line from
+// before the gate reported durations).
 func (a *testselAdapter) Context() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -177,10 +200,19 @@ func (a *testselAdapter) Context() []string {
 	}
 	lines := make([]string, 0, len(a.cuts))
 	for i, c := range a.cuts {
-		lines = append(lines, fmt.Sprintf("would skip at %s: %d package(s), %d ungraded, MISS %d, gate minutes saved n/a",
-			strconv.FormatFloat(c.threshold, 'f', -1, 64), c.skip, c.ungraded, c.miss))
+		lines = append(lines, fmt.Sprintf("would skip at %s: %d package(s), %d ungraded, MISS %d, gate minutes saved %s",
+			strconv.FormatFloat(c.threshold, 'f', -1, 64), c.skip, c.ungraded, c.miss, savedMinutes(c)))
 		a.cuts[i] = testselCut{threshold: c.threshold}
 	}
 	a.asked = 0
 	return lines
+}
+
+// savedMinutes is a cut's gate time in minutes, one decimal, or n/a when no
+// would-skip package carried a duration.
+func savedMinutes(c testselCut) string {
+	if c.timed == 0 {
+		return "n/a"
+	}
+	return strconv.FormatFloat(c.saved/60, 'f', 1, 64)
 }
