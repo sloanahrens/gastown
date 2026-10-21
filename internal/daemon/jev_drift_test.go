@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -153,11 +154,7 @@ func TestJevDriftTriggerRunsThePassWhenOn(t *testing.T) {
 	}
 
 	d.triggerJevDrift()
-	// The guard is taken before the goroutine starts and released last, after
-	// the last-run time is saved, so a released guard means the pass is over.
-	for d.jevDriftRunning.Load() {
-		time.Sleep(time.Millisecond)
-	}
+	waitJevDriftIdle(t, d)
 
 	if !opened.Load() {
 		t.Fatal("the due pass was never opened")
@@ -167,6 +164,21 @@ func TestJevDriftTriggerRunsThePassWhenOn(t *testing.T) {
 	}
 	if _, found, _ := loadPatrolLastRun(town, "jev_drift"); !found {
 		t.Error("no last-run time was saved after the pass")
+	}
+}
+
+// waitJevDriftIdle waits for the single-flight guard to be released. The guard
+// is released last, after the last-run time is saved, so a released guard
+// means the pass is over.
+func waitJevDriftIdle(t *testing.T, d *Daemon) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	for d.jevDriftRunning.Load() {
+		if ctx.Err() != nil {
+			t.Fatal("jev_drift pass did not finish")
+		}
+		runtime.Gosched()
 	}
 }
 
