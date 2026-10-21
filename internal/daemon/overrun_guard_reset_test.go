@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -169,7 +168,7 @@ func TestOverrunResetWorktree_NeedsOriginToHoldTheBranchTip(t *testing.T) {
 			w.f.RemoveRemote(t, w.work, "origin")
 		}},
 		{"the worktree holds uncommitted work", func(t *testing.T, w *resetWorld) {
-			if err := w.git().(daemonGit).Push("origin", w.tip+":refs/heads/"+stopSeat.Branch, false); err != nil {
+			if err := w.git().Push("origin", w.tip+":refs/heads/"+stopSeat.Branch, false); err != nil {
 				t.Fatal(err)
 			}
 			writeWorkFiles(t, w.work, map[string]string{"dirty.txt": "unsaved\n"})
@@ -214,10 +213,10 @@ func TestStop_FailedWorktreeResetStillReleasesTheSeat(t *testing.T) {
 	d.runOverrunGuard(f.seams())
 
 	want := []string{"pause gastown/capable", "stop gastown/capable", "checkpoint gastown/capable", "push gastown/capable",
-		"hand-back gastown/capable", "recheck gastown/capable", "reset-agent-bead gastown/capable",
+		"hand-back gastown/capable", "reset-agent-bead gastown/capable",
 		"reset-worktree gastown/capable", "record-cleanup gastown/capable", "retire gastown/capable"}
-	if !reflect.DeepEqual(slices.DeleteFunc(slices.Clone(f.calls), func(c string) bool { return strings.HasPrefix(c, "recheck") }),
-		slices.DeleteFunc(slices.Clone(want), func(c string) bool { return strings.HasPrefix(c, "recheck") })) {
+	calls := slices.DeleteFunc(slices.Clone(f.calls), func(c string) bool { return strings.HasPrefix(c, "recheck") })
+	if !slices.Equal(calls, want) {
 		t.Errorf("calls = %q, want %q", f.calls, want)
 	}
 	if !strings.Contains(buf.String(), "worktree not reset after the push of "+stopSeat.Branch+": checkout refused") {
