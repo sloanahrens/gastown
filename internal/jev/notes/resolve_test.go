@@ -281,6 +281,37 @@ func TestResolveSkipsAnUninstalledBinary(t *testing.T) {
 	}
 }
 
+// A subcommand the root help names, whose own help cannot be had, gives no
+// evidence below it: the walk stops there, the subcommand it matched counts as
+// checked, and nothing past it is a missing token. testHelp has no help for gt
+// dolt, which the root help lists.
+func TestResolveStopsTheWalkWhenASubcommandHasNoHelp(t *testing.T) {
+	t.Parallel()
+	r := &Resolver{Repo: testRepo(), Help: testHelp()}
+	res := Result{}
+	if err := r.resolveCommand(context.Background(), Command{Bin: "gt", Words: []string{"dolt", "frobnicate"}}, &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Checked != 1 || len(res.Missing) != 0 {
+		t.Errorf("result = %+v, want the named subcommand checked and nothing missing", res)
+	}
+}
+
+// An empty tree is no evidence either way: a clone that lists no files says
+// nothing about the paths a text names, so a text that names only paths is
+// unlabeled rather than stale.
+func TestResolveSkipsPathsWhenTheTreeIsEmpty(t *testing.T) {
+	t.Parallel()
+	r := &Resolver{Repo: &fakeRepo{}, Help: testHelp()}
+	got, err := r.Resolve(context.Background(), Extract("See `internal/jev/stale/stale.go` and `docs/reference.md`."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Label != "" || got.Checked != 0 || len(got.Missing) != 0 {
+		t.Errorf("result = %+v, want nothing checked and no label", got)
+	}
+}
+
 // One read of the tree, one --help per command and one grep per key segment
 // serve every file in a pass.
 func TestResolverCachesItsReads(t *testing.T) {

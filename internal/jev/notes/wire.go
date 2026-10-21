@@ -121,7 +121,26 @@ func ListFiles(home, townRoot string) ([]File, error) {
 // through. *submission.Clone satisfies it.
 type gitClone interface {
 	Sync(ctx context.Context) error
+	// Run returns the command's error wrapped so errors.As reaches the exit
+	// status it carries; submission.Clone wraps it with %w. HasKey reads git
+	// grep's "no match" exit from it.
 	Run(ctx context.Context, args ...string) (string, error)
+}
+
+// exitCoder is the exit status of a failed command. An error that reports one,
+// such as the *exec.ExitError Clone.Run wraps, satisfies it.
+type exitCoder interface {
+	ExitCode() int
+}
+
+// exitCode returns a failed command's exit status, read from the error chain,
+// and whether the error carries one.
+func exitCode(err error) (int, bool) {
+	var exit exitCoder
+	if errors.As(err, &exit) {
+		return exit.ExitCode(), true
+	}
+	return 0, false
 }
 
 // cloneRepo reads the rig's main tree from the submission battery's bare clone.
@@ -151,8 +170,7 @@ func (r cloneRepo) HasKey(ctx context.Context, key string) (bool, error) {
 		return false, fmt.Errorf("refused config key %q", key)
 	}
 	_, err := r.c.Run(ctx, "grep", "-q", "-E", "-e", `"`+key+`(,[A-Za-z0-9]+)*"`, mainRef, "--", "*.go")
-	var exit *exec.ExitError
-	if errors.As(err, &exit) && exit.ExitCode() == 1 {
+	if code, ok := exitCode(err); ok && code == 1 {
 		return false, nil
 	}
 	return err == nil, err

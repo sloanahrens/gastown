@@ -4,6 +4,7 @@ package notes
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,9 +18,15 @@ type gitDir string
 
 func (g gitDir) Sync(context.Context) error { return nil }
 
+// Run wraps a failure the way submission.Clone.Run does, with the
+// *exec.ExitError behind a %w, so the pass reads git's exit status through the
+// wrap it meets in production.
 func (g gitDir) Run(ctx context.Context, args ...string) (string, error) {
 	out, err := exec.CommandContext(ctx, "git", append([]string{"-C", string(g)}, args...)...).Output()
-	return string(out), err
+	if err != nil {
+		return string(out), fmt.Errorf("git %s: %w", strings.Join(args, " "), err)
+	}
+	return string(out), nil
 }
 
 // TestIntegrationCloneRepoReadsMainFromRealGit: the tree lists the files at

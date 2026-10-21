@@ -90,8 +90,8 @@ type helpDoc struct {
 // Resolve checks each token a text names. A path is missing from the main
 // tree, a subcommand or flag is absent from its binary's --help. A path under
 // a top-level directory neither in the tree nor conventional, a command of an
-// uninstalled binary, and a flag of a command whose help lists no flags are not
-// checked at all.
+// uninstalled binary, a flag of a command whose help lists no flags, and any
+// path when the tree lists no files at all are not checked at all.
 func (r *Resolver) Resolve(ctx context.Context, t Tokens) (Result, error) {
 	var res Result
 	if t.Empty() {
@@ -101,17 +101,22 @@ func (r *Resolver) Resolve(ctx context.Context, t Tokens) (Result, error) {
 		if err := r.loadTree(ctx); err != nil {
 			return res, err
 		}
-		for _, p := range t.Paths {
-			root, _, _ := strings.Cut(p, "/")
-			// A dot directory (.beads, .claude, .runtime) is per-workspace
-			// state a note names by where it sits in some checkout, not a
-			// path in the tree.
-			if strings.HasPrefix(root, ".") || !r.roots[root] && !conventionalRoots[root] {
-				continue
-			}
-			res.Checked++
-			if !r.tree[p] {
-				res.Missing = append(res.Missing, Token{Kind: KindPath, Text: p})
+		// An empty tree is no evidence either way, like unavailable help: a
+		// clone that lists no files says nothing about the paths a text
+		// names, so none of them is called missing.
+		if len(r.tree) > 0 {
+			for _, p := range t.Paths {
+				root, _, _ := strings.Cut(p, "/")
+				// A dot directory (.beads, .claude, .runtime) is per-workspace
+				// state a note names by where it sits in some checkout, not a
+				// path in the tree.
+				if strings.HasPrefix(root, ".") || !r.roots[root] && !conventionalRoots[root] {
+					continue
+				}
+				res.Checked++
+				if !r.tree[p] {
+					res.Missing = append(res.Missing, Token{Kind: KindPath, Text: p})
+				}
 			}
 		}
 	}
