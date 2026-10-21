@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -611,13 +612,14 @@ func TestClaudePlanCloseoutSurvivesAGap(t *testing.T) {
 	}{
 		{
 			// Every reading the tail still holds came after its reset, so the
-			// week's own last reading is gone and the oldest one left stands in.
+			// week's last reading is gone. The reading after the reset is the next
+			// week's, so the carried week records 0 rather than that value.
 			name: "the tail has outgrown the week's readings",
 			samples: []string{
 				planLine(planDate(2026, time.October, 14), 4, 12, open),
 				planLine(claudePlanNow, 4, 14, open),
 			},
-			wantPct: 12,
+			wantPct: 0,
 		},
 		{
 			// A reading from before the reset survives, so it is the week's last.
@@ -674,6 +676,113 @@ func TestClaudePlanCloseoutSurvivesAGap(t *testing.T) {
 			r.Read(claudePlanNow)
 			if again := planWeeksFile(t, path); len(again) != len(rows) {
 				t.Errorf("a second poll left %d rows, want the %d the first wrote: %+v", len(again), len(rows), again)
+			}
+		})
+	}
+}
+
+// Every week a poll missed is closed, oldest first, each at the last reading the
+// tail holds from before its reset; the carry stops at the history's last week.
+func TestClaudePlanReaderCarriesEveryMissedWeek(t *testing.T) {
+	t.Parallel()
+
+	open := planDate(2026, time.October, 19).Unix()
+	path := claudePlanFile(t,
+		planLine(planDate(2026, time.September, 26), 3, 50, planDate(2026, time.September, 28).Unix()),
+		planLine(planDate(2026, time.October, 14), 4, 12, open),
+		planLine(claudePlanNow, 4, 14, open),
+	)
+	if err := appendClaudePlanWeeks(claudePlanWeeksPath(path), []ClaudePlanWeek{
+		planWeek(planDate(2026, time.September, 21), 70),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	r := NewClaudePlanReader(path, 200)
+	r.Read(claudePlanNow)
+	want := []ClaudePlanWeek{
+		planWeek(planDate(2026, time.September, 21), 70),
+		planWeek(planDate(2026, time.September, 28), 50),
+		planWeek(planDate(2026, time.October, 5), 50),
+		planWeek(planDate(2026, time.October, 12), 50),
+	}
+	if got := planWeeksFile(t, path); !reflect.DeepEqual(got, want) {
+		t.Errorf("the history holds %+v, want %+v", got, want)
+	}
+
+	r.Read(claudePlanNow)
+	if again := planWeeksFile(t, path); len(again) != len(want) {
+		t.Errorf("a second poll left %d rows, want the %d the first wrote", len(again), len(want))
+	}
+}
+
+// The carry closes only the weeks it can measure: a window whose reset has not
+// passed, a window a sample already names, and a window the history records
+// stay as they are.
+func TestClaudePlanCarryGuards(t *testing.T) {
+	t.Parallel()
+
+	oct := func(d int) time.Time { return planDate(2026, time.October, d) }
+	for _, tt := range []struct {
+		name    string
+		history []ClaudePlanWeek
+		samples []string
+		want    []ClaudePlanWeek
+	}{
+		{
+			// Nothing is recorded yet, so there is no hole to fill.
+			name: "an empty history carries nothing",
+			samples: []string{
+				planLine(oct(14), 4, 12, oct(19).Unix()),
+				planLine(claudePlanNow, 4, 14, oct(19).Unix()),
+			},
+		},
+		{
+			// The newest window's reset is still ahead, so only the week before it
+			// closes; the reset ahead is never recorded.
+			name:    "a reset still ahead is not closed",
+			history: []ClaudePlanWeek{planWeek(oct(5), 66)},
+			samples: []string{
+				planLine(oct(14), 4, 12, oct(26).Unix()),
+				planLine(claudePlanNow, 4, 14, oct(26).Unix()),
+			},
+			want: []ClaudePlanWeek{planWeek(oct(5), 66), planWeek(oct(12), 0)},
+		},
+		{
+			// A sample names the week, so its own last reading is recorded and the
+			// carry does not replace it.
+			name:    "a week a sample names keeps the sample's reading",
+			history: []ClaudePlanWeek{planWeek(oct(5), 66)},
+			samples: []string{
+				planLine(oct(11), 3, 33, oct(12).Unix()),
+				planLine(oct(14), 4, 40, oct(12).Unix()),
+				planLine(claudePlanNow, 4, 14, oct(19).Unix()),
+			},
+			want: []ClaudePlanWeek{planWeek(oct(5), 66), planWeek(oct(12), 40)},
+		},
+		{
+			// The history already records the week, so the poll adds no second row.
+			name:    "a week the history records is not carried again",
+			history: []ClaudePlanWeek{planWeek(oct(5), 66), planWeek(oct(12), 70)},
+			samples: []string{
+				planLine(oct(14), 4, 12, oct(19).Unix()),
+				planLine(claudePlanNow, 4, 14, oct(19).Unix()),
+			},
+			want: []ClaudePlanWeek{planWeek(oct(5), 66), planWeek(oct(12), 70)},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := claudePlanFile(t, tt.samples...)
+			if len(tt.history) > 0 {
+				if err := appendClaudePlanWeeks(claudePlanWeeksPath(path), tt.history); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			NewClaudePlanReader(path, 200).Read(claudePlanNow)
+			if got := planWeeksFile(t, path); !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("the history holds %+v, want %+v", got, tt.want)
 			}
 		})
 	}
