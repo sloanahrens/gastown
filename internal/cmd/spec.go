@@ -1622,8 +1622,8 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	if sd != nil && sd.MaxPerTick > 0 {
 		perTick = sd.MaxPerTick
 	}
-	// The roster's sessions, kept for the slings of this tick.
-	var snapshot atomic.Pointer[[]poolSession]
+	// The roster's seat picture, kept for the slings of this tick.
+	var snapshot atomic.Pointer[poolSeatSnapshot]
 	if slingActor == "" {
 		slingActor = specDispatchActor
 	}
@@ -1677,15 +1677,15 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			// live sessions, in-flight claims, and seats mid-landing. Two
 			// pictures of one pool is how the dispatcher ends up slinging into
 			// a seat the nudge just called free (gt-thy6r).
-			sessions, err := specRosterSessions(reads, townRoot, ts.PolecatPool)
+			seats, err := specRosterSnapshot(reads, townRoot, ts.PolecatPool)
 			if err != nil {
 				return specRoster{}, fmt.Errorf("listing polecat seats: %w", err)
 			}
 			// Kept for the slings: each one's seat decision reads this
 			// snapshot plus the live sessions and claims of its moment
 			// (snapshotOccupied) instead of every polecat directory again.
-			snapshot.Store(&sessions)
-			return specRosterFrom(sessions, ts), nil
+			snapshot.Store(&seats)
+			return specRosterFrom(seats.sessions, ts), nil
 		},
 		Annotate: annotations.annotate,
 		AddLabel: func(id, label string) error {
@@ -1699,8 +1699,8 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		},
 		Sling: func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (string, error) {
 			var occupied func() ([]poolSession, error)
-			if sessions := snapshot.Load(); sessions != nil {
-				occupied = snapshotOccupied(*sessions, newPoolSessionLister, time.Now)
+			if seats := snapshot.Load(); seats != nil {
+				occupied = snapshotOccupied(*seats, newPoolSessionLister, time.Now)
 			}
 			return slingSpec(townRoot, c, resumeBranch, seat, occupied)
 		},
@@ -1733,15 +1733,19 @@ func specTickCost(reads *specTickReads, took time.Duration, slings int, slowest 
 	return line
 }
 
-// specRosterSessions is the seat picture poolSeatSessions draws, with its
-// polecat-state reads batched per rig and read through the tick's ledger.
-func specRosterSessions(reads *specTickReads, townRoot string, pool *config.PolecatPool) ([]poolSession, error) {
-	return specRosterSessionsWith(reads, townRoot, pool, newPoolSessionLister(), func(dir string) beads.Client { return beads.New(dir) })
+// specRosterSnapshot is the seat picture poolSeatSessions draws, with its
+// polecat-state reads batched per rig and read through the tick's ledger, and
+// the seats that read released kept beside it for the tick's slings
+// (snapshotOccupied).
+func specRosterSnapshot(reads *specTickReads, townRoot string, pool *config.PolecatPool) (poolSeatSnapshot, error) {
+	return specRosterSnapshotWith(reads, townRoot, pool, newPoolSessionLister(), func(dir string) beads.Client { return beads.New(dir) }, time.Now)
 }
 
-// specRosterSessionsWith is specRosterSessions with the session lister and the
-// store for a directory passed in, so a test can run this wiring over a fake.
-func specRosterSessionsWith(reads *specTickReads, townRoot string, pool *config.PolecatPool, lister sessionLister, storeFor func(dir string) beads.Client) ([]poolSession, error) {
+// specRosterSnapshotWith is specRosterSnapshot with the session lister, the
+// store for a directory and the clock passed in, so a test can run this wiring
+// over a fake. The time it began is taken before any session is listed, so a
+// session created after it counts as new.
+func specRosterSnapshotWith(reads *specTickReads, townRoot string, pool *config.PolecatPool, lister sessionLister, storeFor func(dir string) beads.Client, now func() time.Time) (poolSeatSnapshot, error) {
 	store := func(dir string) beads.Client { return reads.client(storeFor(dir)) }
 	batch := newPoolSeatBatch(townRoot,
 		func(rigName string) beads.Client { return store(filepath.Join(townRoot, rigName)) },
@@ -1749,7 +1753,19 @@ func specRosterSessionsWith(reads *specTickReads, townRoot string, pool *config.
 	work := func(ids []string) (map[string]*beads.Issue, error) {
 		return store(townRoot).ShowMultiple(ids)
 	}
-	return poolSeatSessionsWith(lister, townRoot, batch.disposition, work, pool)
+	return poolSeatSnapshotWith(lister, townRoot, batch.disposition, work, pool, now)
+}
+
+// poolSeatSnapshotWith reads poolSeatSessionsWith through a recorder of the
+// seats the disposition releases, so a tick's slings can count them free too.
+func poolSeatSnapshotWith(lister sessionLister, townRoot string, disposition polecatDispositionFunc, work poolSeatWorkFunc, pool *config.PolecatPool, now func() time.Time) (poolSeatSnapshot, error) {
+	at := now()
+	recorded, released := releasedSeatRecorder(disposition)
+	sessions, err := poolSeatSessionsWith(lister, townRoot, recorded, work, pool)
+	if err != nil {
+		return poolSeatSnapshot{}, err
+	}
+	return poolSeatSnapshot{sessions: sessions, released: released(), at: at}, nil
 }
 
 func printSpecDispatchReport(cmd *cobra.Command, r specDispatchReport) {

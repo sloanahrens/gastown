@@ -190,10 +190,11 @@ func TestSpecRosterSessionsWiringCountsItsReads(t *testing.T) {
 
 	store := newCountingStore(db)
 	reads := newSpecTickReads()
-	got, err := specRosterSessionsWith(reads, town, pool, lister, func(string) beads.Client { return store })
+	snap, err := specRosterSnapshotWith(reads, town, pool, lister, func(string) beads.Client { return store }, time.Now)
 	if err != nil {
 		t.Fatalf("roster: %v", err)
 	}
+	got := snap.sessions
 
 	sortSeats := func(s []poolSession) {
 		sort.Slice(s, func(i, j int) bool { return s[i].name < s[j].name })
