@@ -64,6 +64,10 @@ func Build(ctx context.Context, a Adapter, since time.Time) (Report, error) {
 		rep.Since = &since
 	}
 
+	if p, ok := a.(Prefetcher); ok {
+		p.Prefetch(ctx, items)
+	}
+
 	labels := make([]map[QuestionID]bool, len(items))
 	rep.Lines = make([]LineReport, 0, len(items))
 	for i, it := range items {
@@ -73,6 +77,7 @@ func Build(ctx context.Context, a Adapter, since time.Time) (Report, error) {
 		}
 		if lab.Labeled {
 			labels[i] = lab.Labels
+			rep.Labeled++
 		}
 		rep.Lines = append(rep.Lines, lineReport(it, lab))
 	}

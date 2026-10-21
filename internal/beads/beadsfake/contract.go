@@ -595,6 +595,11 @@ func contractListFilters(t *testing.T, s *scope) {
 	s.want(t, "List{CreatedAfter:before create}", got, err, ca.ID, cb.ID)
 	got, err = s.List(beads.ListOptions{Priority: beads.PriorityP4, CreatedAfter: createdAt.Add(time.Hour)})
 	s.want(t, "List{CreatedAfter:after create}", got, err)
+
+	// IDs keeps only the named issues, whatever their status, and leaves out
+	// an id the store does not hold.
+	got, err = s.List(beads.ListOptions{Status: "all", IDs: []string{b.ID, cl.ID, "gt-nosuchid"}})
+	s.want(t, "List{IDs}", got, err, b.ID, cl.ID)
 }
 
 // contractEvents pins event issues: EventKind makes an issue_type "event"

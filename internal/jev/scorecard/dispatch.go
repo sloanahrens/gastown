@@ -85,6 +85,26 @@ type dispatchAdapter struct {
 	// later). A bead in it with no first-attempt verdict has an unknown first try.
 	reworked      map[string]bool
 	reviewsLoaded bool
+	// shown holds the beads Prefetch read in one batch, by id. showBead reads a
+	// bead missing from it the one-at-a-time way.
+	shown map[string]*beads.Issue
+}
+
+// Prefetch reads every placed bead in one batch. A scorecard over an empty log
+// never opens the store, so it opens nothing here either.
+func (a *dispatchAdapter) Prefetch(_ context.Context, items []Item) {
+	a.shown = nil
+	if len(items) == 0 {
+		return
+	}
+	if a.beads == nil {
+		b, err := a.openBeads()
+		if err != nil {
+			return
+		}
+		a.beads = b
+	}
+	a.shown = showAll(a.beads, itemIDs(items))
 }
 
 func newDispatchAdapter(town string, openBeads func() (beadReader, error)) *dispatchAdapter {
@@ -191,6 +211,9 @@ func (a *dispatchAdapter) loadReviews() error {
 // store is opened on the first call, so a scorecard over an empty log never
 // touches it.
 func (a *dispatchAdapter) showBead(id string) (*beads.Issue, error) {
+	if issue, ok := a.shown[id]; ok {
+		return issue, nil
+	}
 	if a.beads == nil {
 		b, err := a.openBeads()
 		if err != nil {

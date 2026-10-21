@@ -716,6 +716,9 @@ type ListOptions struct {
 	ClosedAfter time.Time
 	// CreatedAfter, when set, keeps only issues created at or after it.
 	CreatedAfter time.Time
+	// IDs, when set, keeps only the issues with these ids (bd list --id).
+	// Issues only, not wisps.
+	IDs []string
 }
 
 // CreateOptions specifies options for creating an issue.
@@ -1998,6 +2001,9 @@ func (b *Beads) listIssues(opts ListOptions) ([]*Issue, error) {
 	if !opts.CreatedAfter.IsZero() {
 		args = append(args, "--created-after="+opts.CreatedAfter.UTC().Format(time.RFC3339))
 	}
+	if len(opts.IDs) > 0 {
+		args = append(args, "--id="+strings.Join(opts.IDs, ","))
+	}
 	if opts.Limit > 0 {
 		args = append(args, fmt.Sprintf("--limit=%d", opts.Limit))
 	} else {
@@ -2924,6 +2930,30 @@ func (b *Beads) Show(id string) (*Issue, error) {
 	}
 
 	return issues[0], nil
+}
+
+// ListByIDs reads the issues with the given ids from c in one `bd list --id`
+// query, whatever their status, and returns them by id. An id the
+// store does not hold is left out, and so is a wisp: the query reads the issues
+// table, and does not follow an id's prefix to another store the way Show does.
+//
+// It is a query, not a per-id read, so it costs a fraction of ShowMultiple on a
+// long list (bd show builds each issue's comments and dependencies one at a
+// time; bd list does not). The issues it returns carry the fields bd list
+// prints, which leave out the dependency and comment bodies bd show adds.
+func ListByIDs(c Client, ids []string) (map[string]*Issue, error) {
+	if len(ids) == 0 {
+		return map[string]*Issue{}, nil
+	}
+	issues, err := c.List(ListOptions{Status: "all", IDs: ids})
+	if err != nil {
+		return nil, err
+	}
+	byID := make(map[string]*Issue, len(issues))
+	for _, issue := range issues {
+		byID[issue.ID] = issue
+	}
+	return byID, nil
 }
 
 // Children returns the direct children of parentID: issues (or wisps) linked

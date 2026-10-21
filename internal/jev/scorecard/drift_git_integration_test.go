@@ -108,3 +108,67 @@ func TestIntegrationDocGitEditsReadTheDocsHistory(t *testing.T) {
 		t.Errorf("second edit time = %v", edits[1].Time)
 	}
 }
+
+// RunInput lets repoGit take the batched path, as the bare clone does.
+func (g repoGit) RunInput(ctx context.Context, input string, args ...string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", g.dir}, args...)...)
+	cmd.Env = fixtureGitEnv()
+	cmd.Stdin = strings.NewReader(input)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("git %s: %w", args[0], err)
+	}
+	return string(out), nil
+}
+
+// The two-call read of a doc's history returns the edits the call-per-edit read
+// does, over a history that adds the doc, edits it, deletes it, adds it back,
+// drops its final newline and merges a side branch.
+func TestIntegrationDocGitBatchedEditsMatchOneByOne(t *testing.T) {
+	t.Parallel()
+	day := func(n int) time.Time { return time.Date(2026, 8, n, 0, 0, 0, 0, time.UTC) }
+	dir := fixtureRepo(t, []fixtureCommit{
+		{at: day(1), files: map[string]string{"docs/reference.md": driftReferenceV1, "docs/other.md": "other\n"}},
+		{at: day(2), files: map[string]string{"docs/other.md": "other, edited\n"}},
+		{at: day(3), files: map[string]string{"docs/reference.md": driftReferenceV2}},
+		{at: day(4), files: map[string]string{"docs/reference.md": driftReferenceV2 + "no trailing newline"}},
+		{at: day(5), files: map[string]string{"docs/reference.md": driftReferenceV1}},
+	})
+	git := repoGit{dir: dir}
+	run := func(args ...string) {
+		t.Helper()
+		full := append([]string{"-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false"}, args...)
+		if _, err := git.Run(context.Background(), full...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	run("rm", "-q", "docs/reference.md")
+	run("commit", "-q", "-m", "drop the doc")
+	if err := os.WriteFile(filepath.Join(dir, "docs/reference.md"), []byte(driftReferenceV2), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	run("add", "-A")
+	run("commit", "-q", "-m", "bring the doc back")
+
+	ctx := context.Background()
+	d := docGit{git: git}
+	want, err := d.editsOneByOne(ctx, "docs/reference.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.Edits(ctx, "docs/reference.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(want) < 5 {
+		t.Fatalf("the fixture gave %d edits, want at least 5", len(want))
+	}
+	if len(got) != len(want) {
+		t.Fatalf("batched edits = %d, call-per-edit edits = %d", len(got), len(want))
+	}
+	for i := range want {
+		if !got[i].Time.Equal(want[i].Time) || got[i].Before != want[i].Before || got[i].Patch != want[i].Patch {
+			t.Errorf("edit %d differs\n batched: %+v\n per-edit: %+v", i, got[i], want[i])
+		}
+	}
+}

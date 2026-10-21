@@ -175,6 +175,25 @@ func (a *staleAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, "+")}, nil
 }
 
+// Prefetch reads every bead the parsed lines name in one call per rig, so bead
+// finds them cached. A bead the batch did not return is read one at a time.
+func (a *staleAdapter) Prefetch(_ context.Context, items []Item) {
+	all, ok := a.issues.(rigShowAller)
+	if !ok {
+		return
+	}
+	byRig := map[string][]string{}
+	for _, it := range items {
+		l := a.lines[it.ID]
+		byRig[l.Rig] = append(byRig[l.Rig], l.Bead)
+	}
+	for rig, ids := range byRig {
+		for id, issue := range all.ShowAll(rig, ids) {
+			a.cache[rig+"/"+id] = issue
+		}
+	}
+}
+
 // bead reads the bead a line names, once per rig and id. A bead that no longer
 // exists reads as nil; any other read error fails the report.
 func (a *staleAdapter) bead(rig, id string) (*beads.Issue, error) {

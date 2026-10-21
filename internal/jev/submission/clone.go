@@ -2,6 +2,7 @@ package submission
 
 import (
 	"context"
+	"os"
 )
 
 // Clone is the bare clone the submission battery owns, opened for another
@@ -34,4 +35,12 @@ func (c *Clone) Run(ctx context.Context, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.g.timeout)
 	defer cancel()
 	return c.g.run(ctx, c.g.dir, args...)
+}
+
+// RunInput is Run with input on git's standard input, for a command such as
+// cat-file --batch that reads many objects in one call.
+func (c *Clone) RunInput(ctx context.Context, input string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.g.timeout)
+	defer cancel()
+	return runGitInput(ctx, os.Environ(), c.g.dir, input, args...)
 }

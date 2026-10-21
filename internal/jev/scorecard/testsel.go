@@ -85,6 +85,10 @@ func newTestselAdapter(log string) *testselAdapter {
 	return a
 }
 
+// BulkyLines marks the battery: it logs one item per asked package, thousands
+// in a week, so the --json report leaves its item rows out unless asked.
+func (a *testselAdapter) BulkyLines() {}
+
 func (a *testselAdapter) Battery() string { return TestselBattery }
 func (a *testselAdapter) LogPath() string { return a.log }
 

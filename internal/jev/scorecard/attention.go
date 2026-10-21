@@ -170,6 +170,21 @@ func (a *attentionAdapter) load() error {
 	return nil
 }
 
+// Prefetch reads every bead the parsed lines name in one batch, so bead finds
+// them cached. A bead the batch did not return is read one at a time.
+func (a *attentionAdapter) Prefetch(_ context.Context, items []Item) {
+	var ids []string
+	for _, it := range items {
+		ids = append(ids, a.lines[it.ID].Bead)
+	}
+	for id, issue := range showAll(a.beads, ids) {
+		if a.beadCache == nil {
+			a.beadCache = map[string]*beads.Issue{}
+		}
+		a.beadCache[id] = issue
+	}
+}
+
 // bead reads the bead an item names, once per id. A bead that no longer exists
 // reads as nil, so a label that depends on it is not made; any other read error
 // fails the report.
