@@ -1118,6 +1118,17 @@ type poolRouter struct {
 // bd (each polecat's own state, and the work beads a landing seat is confirmed
 // with), and the seat claim of the spawn asking.
 func poolRouterFor(townRoot string, store *poolSeatClaimStore) *poolRouter {
+	return poolRouterForWith(townRoot, store, func(dir string) beads.Client { return beads.New(dir) })
+}
+
+// poolRouterForWith is poolRouterFor with the store for a directory passed in,
+// so a test can run the router over a fake. The seat reads go through one
+// poolSeatBatch: two bd calls per rig, however many polecat directories the rig
+// holds, where the per-seat read spent two on every one (gt-ckz0r).
+func poolRouterForWith(townRoot string, store *poolSeatClaimStore, storeFor func(dir string) beads.Client) *poolRouter {
+	batch := newPoolSeatBatch(townRoot,
+		func(rigName string) beads.Client { return storeFor(filepath.Join(townRoot, rigName)) },
+		func(bd beads.Client, id string) (*beads.Issue, error) { return bd.Show(id) })
 	return &poolRouter{
 		townRoot: townRoot,
 		pool: func() *config.PolecatPool {
@@ -1127,13 +1138,11 @@ func poolRouterFor(townRoot string, store *poolSeatClaimStore) *poolRouter {
 			}
 			return ts.PolecatPool
 		},
-		sessions: newPoolSessionLister,
-		disposition: func(rigName, polecatName string) (poolSeatState, error) {
-			return poolPolecatSeatState(townRoot, rigName, polecatName)
-		},
-		work:  poolSeatWorkFor(townRoot),
-		seats: poolSeatLedgerFor(townRoot, store),
-		now:   time.Now,
+		sessions:    newPoolSessionLister,
+		disposition: batch.disposition,
+		work:        poolSeatWorkFor(townRoot),
+		seats:       poolSeatLedgerFor(townRoot, store),
+		now:         time.Now,
 	}
 }
 
@@ -1198,6 +1207,16 @@ func poolUncountedFallback(pool *config.PolecatPool, requested string, now time.
 	return "", "the default agent"
 }
 
+// occupied is the count the pool decides from: the live sessions and the seats
+// mid-landing, read through this router's sources and the pool as it is read
+// now. route passes it to begin, not calling it, because begin runs it under the
+// seat-decision lock, which is where the count has to be taken (gt-8o35b).
+func (r *poolRouter) occupied() func() ([]poolSession, error) {
+	return func() ([]poolSession, error) {
+		return poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.work, r.pool(), r.now)
+	}
+}
+
 // route decides the route. live distinguishes a sling that will spawn from a
 // dry run: only a live sling claims a seat.
 //
@@ -1212,11 +1231,7 @@ func (r *poolRouter) route(requested string, live bool) (agent, reason string, e
 	if pool == nil {
 		return "", "", nil
 	}
-	// Passed to begin, not called here: begin runs it under the seat-decision
-	// lock, which is where the count has to be taken (gt-8o35b).
-	occupied := func() ([]poolSession, error) {
-		return poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.work, pool, r.now)
-	}
+	occupied := r.occupied()
 	// No release of a previous claim before counting: the store is this
 	// spawn's, and a spawn makes one decision. A claim from an earlier spawn
 	// was dropped by StartSession or the rollback that ended it, and

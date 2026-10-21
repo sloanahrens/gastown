@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
@@ -2033,5 +2034,37 @@ func TestPoolPolecatSeatStateLandedLookupFailureStaysUnpushed(t *testing.T) {
 	})
 	if got := item.Disposition; got.SafeToNuke != d.SafeToNuke || got.Reason != d.Reason || !slices.Equal(got.Blockers, d.Blockers) {
 		t.Fatalf("pool disposition %+v differs from the list's %+v", d, got)
+	}
+}
+
+// TestPoolRouterReadsSeatsThroughTheBatch is the sling's seat picture over two
+// rigs of three idle polecat directories each. The router reads them through
+// the rig batch: two bd calls per rig, where the per-seat read spent two on
+// each of the six. The idle polecats hold no seat, so the count is empty.
+func TestPoolRouterReadsSeatsThroughTheBatch(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown", "longeye")
+	db := beadsfake.New()
+	for _, rig := range []string{"gastown", "longeye"} {
+		for _, name := range []string{"p01", "p02", "p03"} {
+			writeTownPolecatDir(t, town, rig, name)
+			seedPolecatAgentBead(db, town, rig, name, "")
+		}
+	}
+	reads := newSpecTickReads()
+	r := poolRouterForWith(town, newPoolSeatClaimStore(), func(string) beads.Client { return reads.client(db) })
+	r.pool = func() *config.PolecatPool { return seatPool(claimAgent, 2) }
+	r.sessions = func() sessionLister { return &fakeLister{sessions: map[string]map[string]string{}} }
+
+	got, err := r.occupied()()
+	if err != nil {
+		t.Fatalf("occupied: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("idle polecats with no session hold no seat, got %+v", got)
+	}
+	if calls := reads.Calls(); calls != 4 {
+		t.Fatalf("bd calls = %d, want 4 (agent beads and assigned work, once per rig)", calls)
 	}
 }
