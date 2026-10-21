@@ -400,15 +400,19 @@ func migratePoolKeys(settings map[string]any, hooked *legacySeat, prefer bool) (
 			agent = stringOf(pool["overflow_agent"])
 		}
 		// A max_seats of zero or below is no cap, so it falls through to
-		// max_overflow exactly as an absent one does.
+		// max_overflow exactly as an absent one does. capKey names the key the
+		// capacity was read from, so the report does not call an overflow cap
+		// a max_seats one.
+		capKey := "max_seats"
 		capacity, hasCap := intOf(pool["max_seats"])
 		if !hasCap || capacity <= 0 {
 			if overflow, ok := intOf(pool["max_overflow"]); ok {
 				capacity, hasCap = overflow, true
+				capKey = "max_overflow"
 			}
 		}
 		if agent != "" {
-			from := fmt.Sprintf("polecat_pool.agent %q, max_seats %d", agent, capacity)
+			from := fmt.Sprintf("polecat_pool.agent %q, %s %d", agent, capKey, capacity)
 			if !hasCap || capacity <= 0 {
 				capacity = poolMigrateDefaultSeatCap
 				from = fmt.Sprintf("polecat_pool.agent %q (max_seats unset: the dispatcher's default of %d)", agent, capacity)
