@@ -1347,8 +1347,13 @@ It is off unless `daemon.json` enables it, and it reads the same three keys as
 `internal/jev/logtriage` asks Jev about the town daemon's warning and error
 lines. Every 15 minutes a pass reads `daemon/daemon.log` from its cursor and
 keeps the lines containing `warning`, `error`, `failed`, `refused`, `timeout`,
-`crash` or `panic`, in any case. It groups them by pattern key: the line with
-its times, bead ids, hashes, durations and numbers replaced by placeholders.
+`crash` or `panic`, in any case. Two rules narrow that. A keyword preceded by a
+count keeps the line only when the count is above zero, so `0 refused`,
+`0 failed` and `0 error(s)` do not match. `warning` keeps the line only at the
+start of its message or as `WARNING:`. It groups the kept lines by pattern key:
+the line with its times, bead ids, hashes, durations and numbers replaced by
+placeholders. Each group records the keyword that kept its first line as
+`matched_on`.
 
 Each group gets one Jev call with five questions. `is_routine_noise`,
 `needs_action` and `auto_remediable` are `noul` probabilities. `severity` is a
@@ -1357,8 +1362,8 @@ ten parts of the town. The state holds the group's key, count, first and last
 time, and up to three sample lines, each JSON-quoted.
 
 Each group appends one line to `.runtime/jev/logtriage.jsonl`:
-`{ts, key, count, first, last, samples, answers, question_version, model,
-reason}`. The samples are the daemon's own lines, so the triage log is as
+`{ts, key, count, first, last, samples, matched_on, answers, question_version,
+model, reason}`. The samples are the daemon's own lines, so the triage log is as
 sensitive as the daemon log it came from. The battery is log-only: it raises no
 attention item, suppresses no line and pages no one.
 

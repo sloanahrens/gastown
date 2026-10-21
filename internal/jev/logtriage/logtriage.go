@@ -19,6 +19,7 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -45,9 +46,13 @@ const (
 	logTimeWidth  = len(logTimeLayout)
 )
 
-// keywords are the words that make a daemon line one the pass reads. They
-// match without regard to case.
+// keywords are the words that make a daemon line one the pass reads, tried in
+// this order. They match without regard to case, except warning, which
+// matchedOn holds to the start of a message or to WARNING:.
 var keywords = []string{"warning", "error", "failed", "refused", "timeout", "crash", "panic"}
+
+// reCountBefore matches a whole count at the end of the text before a keyword.
+var reCountBefore = regexp.MustCompile(`\b(\d+)\s+$`)
 
 // Asker asks one multi-question Ask. *jev.Client satisfies it.
 type Asker interface {
@@ -101,11 +106,12 @@ type Summary struct {
 
 // group is the lines one pattern key holds in a pass.
 type group struct {
-	key     string
-	count   int
-	first   time.Time
-	last    time.Time
-	samples []string
+	key       string
+	count     int
+	first     time.Time
+	last      time.Time
+	samples   []string
+	matchedOn string
 }
 
 // add counts one line into the group, keeping its time range and the first
@@ -130,7 +136,7 @@ func (g *group) add(line string, at time.Time) {
 func seedGroups(pending []pendingGroup) map[string]*group {
 	groups := make(map[string]*group, len(pending))
 	for _, p := range pending {
-		groups[p.Key] = &group{key: p.Key, count: p.Count, first: p.First, last: p.Last, samples: p.Samples}
+		groups[p.Key] = &group{key: p.Key, count: p.Count, first: p.First, last: p.Last, samples: p.Samples, matchedOn: p.MatchedOn}
 	}
 	return groups
 }
@@ -139,7 +145,7 @@ func seedGroups(pending []pendingGroup) map[string]*group {
 func pendingFrom(groups []*group) []pendingGroup {
 	var out []pendingGroup
 	for _, g := range groups {
-		out = append(out, pendingGroup{Key: g.key, Count: g.count, First: g.first, Last: g.last, Samples: g.samples})
+		out = append(out, pendingGroup{Key: g.key, Count: g.count, First: g.first, Last: g.last, Samples: g.samples, MatchedOn: g.matchedOn})
 	}
 	return out
 }
@@ -280,14 +286,15 @@ func (p *Pass) scan(groups map[string]*group, cur Cursor) (int, Cursor, error) {
 		}
 		pos += int64(len(raw))
 		text := strings.TrimRight(string(raw), "\r\n")
-		if !matches(text) {
+		kw := matchedOn(text)
+		if kw == "" {
 			continue
 		}
 		matched++
 		key := PatternKey(text)
 		g := groups[key]
 		if g == nil {
-			g = &group{key: key}
+			g = &group{key: key, matchedOn: kw}
 			groups[key] = g
 		}
 		g.add(text, parseLogTime(text))
@@ -308,6 +315,7 @@ func (p *Pass) ask(ctx context.Context, g *group, now time.Time) (Line, error) {
 		Last:            g.last,
 		Samples:         g.samples,
 		QuestionVersion: Version,
+		MatchedOn:       g.matchedOn,
 	}
 	state := groupState{
 		Key:     g.key,
@@ -340,15 +348,50 @@ func (p *Pass) now() time.Time {
 	return p.Now()
 }
 
-// matches reports whether a daemon line holds one of the keywords.
-func matches(line string) bool {
-	lower := strings.ToLower(line)
+// matchedOn returns the first keyword that keeps a daemon line, or "" when none
+// does. A keyword preceded by a count keeps the line only when the count is
+// above zero, so a routine summary of zero counts is dropped. warning keeps a
+// line only at the start of its message or as WARNING:.
+func matchedOn(line string) string {
+	msg := messageOf(line)
+	lower := strings.ToLower(msg)
 	for _, kw := range keywords {
-		if strings.Contains(lower, kw) {
-			return true
+		if kw == "warning" {
+			if strings.HasPrefix(lower, kw) || strings.Contains(line, "WARNING:") {
+				return kw
+			}
+			continue
+		}
+		if countedKeywordKept(lower, kw) {
+			return kw
 		}
 	}
-	return false
+	return ""
+}
+
+// countedKeywordKept reports whether some occurrence of kw in lower, the
+// lower-cased message, is not preceded by a zero count.
+func countedKeywordKept(lower, kw string) bool {
+	for from := 0; ; {
+		i := strings.Index(lower[from:], kw)
+		if i < 0 {
+			return false
+		}
+		i += from
+		if m := reCountBefore.FindStringSubmatch(lower[:i]); m == nil || strings.Trim(m[1], "0") != "" {
+			return true
+		}
+		from = i + len(kw)
+	}
+}
+
+// messageOf is the line after the daemon's timestamp prefix, or the whole line
+// when it has none.
+func messageOf(line string) string {
+	if parseLogTime(line).IsZero() {
+		return line
+	}
+	return strings.TrimSpace(line[logTimeWidth:])
 }
 
 // parseLogTime reads the daemon's timestamp prefix, zero when the line has none.
