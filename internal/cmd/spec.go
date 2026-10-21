@@ -911,7 +911,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// before the sling is what catches a bead that changed since the board.
 		full := c.Spec
 		if ok, why := specdispatch.Eligible(full, env.MaxPriority); !ok {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: not eligible (%s)", id, why)})
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s (%s)", id, specdispatch.SkipNotEligible, why)})
 			continue
 		}
 		// A bead may declare the formula that runs it. A declaration the tick
@@ -925,7 +925,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		}
 		if run.Declared() {
 			if err := env.FormulaExists(c.Rig, run.Formula); err != nil {
-				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: unknown formula: %s", id, run.Formula)})
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s: %s", id, specdispatch.SkipUnknownFormula, run.Formula)})
 				continue
 			}
 		}
@@ -942,7 +942,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Notices = append(report.Notices, fmt.Sprintf("%s: ignoring stale revert: %s", c.Rig, staleWhy))
 		}
 		if why := specdispatch.RedMainHold(full, rv); why != "" {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: held: %s", id, why)})
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
 			continue
 		}
 		shapeNote := ""
@@ -1018,7 +1018,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			report.Errors = append(report.Errors, err.Error())
 			continue
 		} else if why != "" {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: held: %s", id, why)})
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
 			continue
 		}
 
@@ -1039,16 +1039,16 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		}
 		full.Children = children
 		if why := specdispatch.OpenChildHold(full); why != "" {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: held: %s", id, why)})
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s%s", id, specdispatch.SkipHeld, why)})
 			continue
 		}
 
 		if len(report.Dispatched) >= perTick {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: clean, per-tick limit %d reached", id, perTick)})
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %d reached", id, specdispatch.SkipPerTickLimit, perTick)})
 			continue
 		}
 		if hold := env.RigHold(c.Rig); hold != "" {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: rig hold: %s", id, hold)})
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %s", id, specdispatch.SkipRigHold, hold)})
 			continue
 		}
 		// Re-read the clock at the choice, per candidate: the board read and the
@@ -1058,7 +1058,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		budget.Now = env.Now()
 		seat := specdispatch.ChooseSeat(budget, full)
 		if seat.Skip {
-			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: no seat: %s", id, seat.Reason)})
+			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %s", id, specdispatch.SkipNoSeat, seat.Reason)})
 			continue
 		}
 		// A bead readied again after its holder died carries the branch its
@@ -1761,7 +1761,7 @@ func specCandidates(townRoot string, maxPriority int, board specBoard) specBoard
 			// rather than leaving the bead an unexplained absence (gt-k1g3e).
 			if ok, why := specdispatch.Eligible(s, maxPriority); !ok {
 				if specdispatch.BoardCarried(s) {
-					read.Skipped = append(read.Skipped, specDispatchEntry{Bead: s.ID, Rig: name, Line: fmt.Sprintf("%s: not eligible (%s)", s.ID, why)})
+					read.Skipped = append(read.Skipped, specDispatchEntry{Bead: s.ID, Rig: name, Line: fmt.Sprintf("%s: %s (%s)", s.ID, specdispatch.SkipNotEligible, why)})
 				}
 				continue
 			}

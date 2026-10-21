@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // idleTick is a tick report with one free seat and the given skipped lines.
@@ -365,5 +366,50 @@ func TestDispatchIdleTrackerReadsTheTickJSON(t *testing.T) {
 	st := tr.Status()
 	if st.Streak != 1 || st.Waiting != 1 || len(st.Reasons) != 1 || !st.At.Equal(at) {
 		t.Errorf("status = %+v, want a streak of 1 with one waiting bead", st)
+	}
+}
+
+// The reasons spec dispatch writes for a bead out of reach, built by the code
+// that writes them, are never counted as waiting: a reworded reason that the
+// not-dispatchable list no longer matched would turn each into a standoff.
+func TestDispatchableWaitingIgnoresReasonsSpecDispatchWrites(t *testing.T) {
+	t.Parallel()
+	_, formulaErr := specdispatch.FormulaRunOf(specdispatch.Spec{Labels: []string{"formula:a", "formula:b"}})
+	if formulaErr == nil {
+		t.Fatal("conflicting formula labels raised no error")
+	}
+	_, labelErr := specdispatch.FormulaRunOf(specdispatch.Spec{Labels: []string{specdispatch.FormulaLabelPrefix}})
+	if labelErr == nil {
+		t.Fatal("an empty formula label raised no error")
+	}
+	_, varsErr := specdispatch.FormulaRunOf(specdispatch.Spec{
+		Labels:      []string{"formula:a"},
+		Description: "## Goal\nG\n\n## Formula vars\noops\n",
+	})
+	if varsErr == nil {
+		t.Fatal("a bad formula var line raised no error")
+	}
+	container := specdispatch.OpenChildHold(specdispatch.Spec{
+		Children: []specdispatch.Child{{ID: "gt-aaaaa", Status: "open"}},
+	})
+	if container == "" {
+		t.Fatal("an open child raised no container hold")
+	}
+	unshaped := (specdispatch.Verdict{Route: specdispatch.RouteRefuse, Field: "## Goal"}).UnshapedReason()
+	for name, reason := range map[string]string{
+		"conflicting formula labels": formulaErr.Error(),
+		"bad formula label":          labelErr.Error(),
+		"bad formula vars":           varsErr.Error(),
+		"container":                  specdispatch.SkipHeld + container,
+		"unshaped":                   unshaped,
+		"not eligible":               specdispatch.SkipNotEligible + " (crew-only)",
+		"unknown formula":            specdispatch.SkipUnknownFormula + ": nope",
+		"no seat":                    specdispatch.SkipNoSeat + " claude-sonnet 2/2",
+		"rig hold":                   specdispatch.SkipRigHold + " paused",
+		"per-tick limit":             specdispatch.SkipPerTickLimit + " 2 reached",
+	} {
+		if dispatchableSkip(reason) {
+			t.Errorf("%s: %q counts as dispatchable", name, reason)
+		}
 	}
 }
