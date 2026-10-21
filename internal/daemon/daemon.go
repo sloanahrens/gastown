@@ -33,6 +33,7 @@ import (
 	gitpkg "github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/intent"
 	jevattention "github.com/steveyegge/gastown/internal/jev/attention"
+	jevconflict "github.com/steveyegge/gastown/internal/jev/conflict"
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
 	jevdispatch "github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/jev/drift"
@@ -649,6 +650,12 @@ type Daemon struct {
 	// jevDispatchOpen builds the pass a run executes. Nil means jevdispatch.Open;
 	// a test sets it to hand the run a pass over fakes.
 	jevDispatchOpen func(townRoot string, s jevdispatch.Settings, warnings io.Writer) (*jevdispatch.Pass, error)
+
+	// jevConflictRunning is the jev_conflict pass's single-flight guard
+	// (jev_conflict.go), and jevConflictOpen builds the pass a run executes.
+	// Nil means jevconflict.Open; a test sets it to hand the run fakes.
+	jevConflictRunning atomic.Bool
+	jevConflictOpen    func(townRoot string, s jevconflict.Settings, warnings io.Writer) (*jevconflict.Pass, error)
 
 	// jevProgressQueue holds the nudges the overrun guard delivered and the
 	// progress pass has not yet asked about (jev_progress.go). jevProgressRunning
@@ -1673,6 +1680,13 @@ var heartbeatSteps = []heartbeatStep{
 	// every prediction (internal/jev/dispatch). Opt-in and lifecycle, like
 	// jev-dedupe, and under the same town-wide daily cap.
 	{name: "jev-dispatch", lifecycle: true, run: (*Daemon).triggerJevDispatch},
+
+	// Ask Jev whether each bead just placed would touch the same files and
+	// function as the beads in flight beside it, and log every answer
+	// (internal/jev/conflict). Opt-in and lifecycle, like jev-dispatch, and
+	// under the same town-wide daily cap. It reads placements and writes only
+	// its own log, so dispatch is the same with it on or off.
+	{name: "jev-conflict", lifecycle: true, run: (*Daemon).triggerJevConflict},
 
 	// Ask Jev whether each polecat the overrun guard nudged is making progress,
 	// and log every answer (internal/jev/progress). Opt-in and lifecycle, like

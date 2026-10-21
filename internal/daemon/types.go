@@ -135,6 +135,7 @@ type (
 	JevTestselConfig           = agentconfig.JevTestselConfig
 	JevTargetsConfig           = agentconfig.JevTargetsConfig
 	JevDispatchConfig          = agentconfig.JevDispatchConfig
+	JevConflictConfig          = agentconfig.JevConflictConfig
 	JevProgressConfig          = agentconfig.JevProgressConfig
 	JevStaleConfig             = agentconfig.JevStaleConfig
 	JevNotesConfig             = agentconfig.JevNotesConfig
@@ -354,6 +355,13 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.JevDispatch.Enabled
+	}
+	// jev_conflict is opt-in for the same reason.
+	if patrol == "jev_conflict" {
+		if config == nil || config.Patrols == nil || config.Patrols.JevConflict == nil {
+			return false
+		}
+		return config.Patrols.JevConflict.Enabled
 	}
 	// jev_progress is opt-in for the same reason.
 	if patrol == "jev_progress" {
