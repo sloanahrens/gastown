@@ -3,6 +3,7 @@ package landworker
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -597,5 +598,256 @@ func TestParseRevertNoteReadsTheLastBlock(t *testing.T) {
 	}
 	if _, _, ok := ParseRevertNote("REVERT OF\nculprit: gt-a"); ok {
 		t.Fatal("a block without the landed commit parsed")
+	}
+}
+
+// failingWrites fails the writes a test names, once the bead exists: the
+// create goes through, so the bead is stranded in whatever state the failed
+// write left it.
+type failingWrites struct {
+	RedMainBeads
+	failLabel bool
+	failNotes bool
+	failClose bool
+	// failShow fails the read of a revert bead, the culprit's own read
+	// unaffected: a store that cannot be asked what an open revert is.
+	failShow bool
+	// beforeShow runs before each read, with how many times that id has been
+	// read so far: it stands in for another writer moving the bead mid-repair.
+	beforeShow func(reads int, id string)
+	reads      map[string]int
+}
+
+func (f *failingWrites) Show(id string) (*beads.Issue, error) {
+	if f.reads == nil {
+		f.reads = map[string]int{}
+	}
+	f.reads[id]++
+	if f.beforeShow != nil {
+		f.beforeShow(f.reads[id], id)
+	}
+	is, err := f.RedMainBeads.Show(id)
+	if f.failShow && err == nil && is != nil && beads.HasLabel(is, LabelRevert) {
+		return nil, errors.New("dolt: connection reset")
+	}
+	return is, err
+}
+
+func (f *failingWrites) Update(id string, opts beads.UpdateOptions) error {
+	if f.failLabel && slices.Contains(opts.AddLabels, land.LabelReadyToLand) {
+		return errors.New("dolt: connection reset")
+	}
+	return f.RedMainBeads.Update(id, opts)
+}
+
+func (f *failingWrites) AppendNotes(id, note string) error {
+	if f.failNotes {
+		return errors.New("dolt: connection reset")
+	}
+	return f.RedMainBeads.AppendNotes(id, note)
+}
+
+func (f *failingWrites) CloseWithReason(reason string, ids ...string) error {
+	if f.failClose {
+		return errors.New("dolt: connection reset")
+	}
+	return f.RedMainBeads.CloseWithReason(reason, ids...)
+}
+
+// gt-th4gu: a failed ready-label write left the revert bead open and
+// unqueued, the id was counted as queued, and every later red run reported it
+// "already open" while the landing worker never saw it.
+func TestRedMainDoesNotCountARevertWhoseLabelWriteFailed(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	h.r.Beads = &failingWrites{RedMainBeads: h.bd, failLabel: true}
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+
+	rv := h.revertBeads(t)
+	if len(rv) != 1 || beads.HasLabel(rv[0], land.LabelReadyToLand) {
+		t.Fatalf("revert beads %+v; want the one created, without the ready label", rv)
+	}
+	if st, _ := h.state.Load(); st.Revert != nil {
+		t.Fatalf("state %+v; an unqueued revert is not in flight", st)
+	}
+	if s := h.lastStatus(); !strings.Contains(s, "no revert: filing it failed") || !strings.Contains(s, rv[0].ID+" created but not queued") {
+		t.Fatalf("status %q; want the failed filing named", s)
+	}
+}
+
+func TestRedMainRequeuesARevertWhoseLabelWriteFailed(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	failing := &failingWrites{RedMainBeads: h.bd, failLabel: true}
+	h.r.Beads = failing
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+
+	// Red again, writes working: the stranded bead is queued, not skipped as
+	// already open, and no second bead is filed.
+	failing.failLabel = false
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+	rv := h.revertBeads(t)
+	if len(h.reverts) != 1 || len(rv) != 1 || !beads.HasLabel(rv[0], land.LabelReadyToLand) {
+		t.Fatalf("reverts %v, beads %+v; want the stranded bead queued and no second one", h.reverts, rv)
+	}
+	if work, err := land.WorkFromBead(rv[0], "gastown"); err != nil || work.Head != revertSHA {
+		t.Fatalf("landing request %+v (%v)", work, err)
+	}
+	if st, _ := h.state.Load(); st.Revert == nil || st.Revert.Bead != rv[0].ID {
+		t.Fatalf("state %+v; want the requeued revert in flight as %s", st, rv[0].ID)
+	}
+	if s := h.lastStatus(); !strings.Contains(s, "was not queued; queued it") {
+		t.Fatalf("status %q", s)
+	}
+}
+
+func TestRedMainClearsTheFlightWhenARevertCannotBeRequeued(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	failing := &failingWrites{RedMainBeads: h.bd, failLabel: true}
+	h.r.Beads = failing
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+
+	if st, _ := h.state.Load(); st.Revert != nil {
+		t.Fatalf("state %+v; a revert that cannot be queued is not in flight", st)
+	}
+	if s := h.lastStatus(); !strings.Contains(s, "open but not queued, and repairing it failed") {
+		t.Fatalf("status %q", s)
+	}
+}
+
+// gt-th4gu review: a store that cannot be read is not a bead that is queued.
+// Counting it as queued holds the red-main beads on a guess, so the flight is
+// cleared and the next red run reads again.
+func TestRedMainClearsTheFlightWhenAnOpenRevertCannotBeRead(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	failing := &failingWrites{RedMainBeads: h.bd, failLabel: true}
+	h.r.Beads = failing
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+
+	failing.failLabel, failing.failShow = false, true
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+
+	if st, _ := h.state.Load(); st.Revert != nil {
+		t.Fatalf("state %+v; a revert that cannot be read is not in flight", st)
+	}
+	if len(h.reverts) != 1 || len(h.revertBeads(t)) != 1 {
+		t.Fatalf("reverts %v, beads %+v; want no second revert filed on a bead that cannot be read", h.reverts, h.revertBeads(t))
+	}
+	if s := h.lastStatus(); !strings.Contains(s, "cannot be read, so it is neither queued nor replaced") {
+		t.Fatalf("status %q", s)
+	}
+}
+
+// A revert the worker landed between recording it and closing the bead is
+// past queueing: its landing record says so, and it is never landed twice.
+func TestRedMainLeavesALandedRevertBeadOpenPastItsClose(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	id := seedRevertBead(t, h)
+	// The crash between the landing record and the close.
+	_ = h.bd.Update(id, beads.UpdateOptions{RemoveLabels: []string{land.LabelReadyToLand}})
+	h.files.recs = append(h.files.recs, land.LandingRecord{BeadID: id, Rig: "gastown", Branch: RevertBranch("gt-cul", redSHA), Target: "main", LandedCommit: revertSHA})
+
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+
+	rv, _ := h.bd.Show(id)
+	if beads.HasLabel(rv, land.LabelReadyToLand) || rv.Status == string(beads.StatusClosed) {
+		t.Fatalf("revert %+v; a landed bead must not be requeued or closed", rv)
+	}
+	if s := h.lastStatus(); !strings.Contains(s, "already open as "+id) {
+		t.Fatalf("status %q; a landed revert is behind the landing worker, not stranded", s)
+	}
+}
+
+// The close replaces a bead nothing can claim: a revert some other writer
+// queued between the read and the close is left to the landing worker.
+func TestRedMainDoesNotCloseAnUnrequestedRevertQueuedMeanwhile(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	failing := &failingWrites{RedMainBeads: h.bd, failNotes: true}
+	h.r.Beads = failing
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+	rv := h.revertBeads(t)
+	if len(rv) != 1 {
+		t.Fatalf("revert beads %+v", rv)
+	}
+	id := rv[0].ID
+
+	// The second read in the repair is the one before the close: by then
+	// another writer has put the ready label on the bead.
+	failing.failNotes = true
+	failing.reads = map[string]int{}
+	failing.beforeShow = func(reads int, got string) {
+		if got == id && reads == 2 {
+			_ = h.bd.Update(id, beads.UpdateOptions{AddLabels: []string{land.LabelReadyToLand}})
+		}
+	}
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+
+	now, _ := h.bd.Show(id)
+	if now.Status == string(beads.StatusClosed) || !beads.HasLabel(now, land.LabelReadyToLand) {
+		t.Fatalf("revert %+v; a bead queued meanwhile must be left for the landing worker", now)
+	}
+	if len(h.reverts) != 1 {
+		t.Fatalf("reverts %v; no second revert next to the queued bead", h.reverts)
+	}
+}
+
+// A bead whose request note was never written has no branch or head to
+// queue: it is closed and a new revert replaces it.
+func TestRedMainReplacesARevertBeadThatNeverGotItsRequest(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	failing := &failingWrites{RedMainBeads: h.bd, failNotes: true}
+	h.r.Beads = failing
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+	failing.failNotes = false
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+
+	var queued []*beads.Issue
+	for _, is := range h.revertBeads(t) {
+		if beads.HasLabel(is, land.LabelReadyToLand) && is.Status != string(beads.StatusClosed) {
+			queued = append(queued, is)
+		}
+	}
+	if len(queued) != 1 {
+		t.Fatalf("queued revert beads %+v; want one replacing the stranded bead", queued)
+	}
+	if st, _ := h.state.Load(); st.Revert == nil || st.Revert.Bead != queued[0].ID {
+		t.Fatalf("state %+v; want the replacement in flight", st)
+	}
+}
+
+// A revert a rejection took the ready label off is the worker's to settle,
+// not a stranded one.
+func TestRedMainLeavesARejectedRevertBeadAlone(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	id := seedRevertBead(t, h)
+	_ = h.bd.Update(id, beads.UpdateOptions{AddLabels: []string{land.LabelRework}, RemoveLabels: []string{land.LabelReadyToLand}})
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+
+	rv, _ := h.bd.Show(id)
+	if beads.HasLabel(rv, land.LabelReadyToLand) || !strings.Contains(h.lastStatus(), "already open as "+id) {
+		t.Fatalf("revert %+v, status %q; a rejected revert must not be requeued", rv, h.lastStatus())
+	}
+}
+
+func TestRedMainClearsTheFlightWhenAnUnrequestedRevertBeadCannotBeClosed(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	failing := &failingWrites{RedMainBeads: h.bd, failNotes: true, failClose: true}
+	h.r.Beads = failing
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+	h.red(context.Background(), PostLand{BeadID: "gt-cul", Commit: redSHA, Target: "main"})
+
+	if len(h.reverts) != 1 || len(h.revertBeads(t)) != 1 {
+		t.Fatalf("reverts %v, beads %+v; want no second revert while the first cannot be closed", h.reverts, h.revertBeads(t))
+	}
+	if st, _ := h.state.Load(); st.Revert != nil {
+		t.Fatalf("state %+v; an unqueued revert is not in flight", st)
 	}
 }
