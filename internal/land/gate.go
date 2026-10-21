@@ -540,10 +540,13 @@ var packageLineRE = regexp.MustCompile(`^(ok|FAIL)\s+(\S+)(\s|$)`)
 var failedTestRE = regexp.MustCompile(`^\s*--- FAIL: (\S+)(?: \(([0-9.]+)s\))?`)
 
 // parseGoTestOutput reads go test's text output: each package's summary line,
-// ok or FAIL.
+// ok or FAIL. It reads a Forgejo job log as well as a local step's output: the
+// log API prefixes every line with a timestamp, which packageLineRE's start
+// anchor would otherwise never get past (gt-6hp28).
 func parseGoTestOutput(out string) []PackageResult {
 	var pkgs []PackageResult
 	for _, line := range strings.Split(out, "\n") {
+		line = forgejoTimestampRE.ReplaceAllString(strings.TrimSuffix(line, "\r"), "")
 		m := packageLineRE.FindStringSubmatch(line)
 		if m == nil {
 			continue
