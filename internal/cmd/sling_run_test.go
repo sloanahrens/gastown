@@ -489,6 +489,59 @@ func TestSlingForcedSpawnRollbackKeepsAnotherHoldersWork(t *testing.T) {
 	}
 }
 
+// TestSlingForcedSpawnRollbackDeclinedUnhookRestoreLeavesTheRawFields
+// (gt-idly3): when the guarded unhook restore declines because another actor
+// holds the bead, the unguarded raw-field restore must not run over that
+// actor's bead either.
+func TestSlingForcedSpawnRollbackDeclinedUnhookRestoreLeavesTheRawFields(t *testing.T) {
+	t.Parallel()
+	const holder = "gastown/polecats/Nux"
+	for _, tc := range []struct {
+		name  string
+		thief func(b *beadInfo)
+		want  [2]string
+	}{
+		{name: "a bead another actor hooks", thief: func(b *beadInfo) { b.Status, b.Assignee = "hooked", "gastown/polecats/Rusty" },
+			want: [2]string{"hooked", "gastown/polecats/Rusty"}},
+		{name: "a bead closed since the unhook", thief: func(b *beadInfo) { b.Status = "closed" },
+			want: [2]string{"closed", ""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.addBead(slingBead, beadInfo{Status: "hooked", Assignee: holder})
+			h.run.opts.force = true
+			h.run.resolveTarget = func(string, ResolveTargetOptions) (*ResolvedTarget, error) {
+				spawn := h.newSpawn("gastown")
+				return &ResolvedTarget{Agent: spawn.AgentID(), WorkDir: spawn.ClonePath, NewPolecatInfo: spawn}, nil
+			}
+			h.run.unhook = func(_, id string) error {
+				h.mu.Lock()
+				h.beads[id].Status, h.beads[id].Assignee = "open", ""
+				h.mu.Unlock()
+				return nil
+			}
+			h.run.instantiateFormula = func(context.Context, string, string, string, string, string, []string) (*FormulaOnBeadResult, error) {
+				h.mu.Lock()
+				tc.thief(h.beads[slingBead])
+				h.mu.Unlock()
+				return nil, errors.New("formula has no steps")
+			}
+			wantSlingErr(t, h.sling(slingBead, "gastown/polecats/Toast"), "formula has no steps")
+			h.wantCalls("restore hold", "restore hold skipped "+slingBead)
+			h.wantNo("restore raw fields")
+			h.wantNo("restore pinned")
+			got, err := h.info(slingBead)
+			if err != nil {
+				t.Fatalf("info: %v", err)
+			}
+			if got.Status != tc.want[0] || got.Assignee != tc.want[1] {
+				t.Errorf("bead ended %s to %q, want %s to %q left as the other actor has it", got.Status, got.Assignee, tc.want[0], tc.want[1])
+			}
+		})
+	}
+}
+
 // TestSlingForcedPinnedRollbackRestoresThePin: a forced sling of a pinned
 // bead that fails after writing puts the pin back.
 func TestSlingForcedPinnedRollbackRestoresThePin(t *testing.T) {

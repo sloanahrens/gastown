@@ -70,10 +70,15 @@ func (e cachedDetail) current(row *beads.Issue) bool {
 	return e.DepCount > 0 || len(e.Deps) == 0
 }
 
-// cachedDep is a blocking dependency edge, without the target's status.
+// cachedDep is a blocking dependency edge, without the target's status. Merged
+// is the one status fact kept: a merge-blocks target was seen closed with a
+// "Merged in " reason. The pool stops listing a closed bead after its lookback
+// and takes the reason with it, so this is what lets the edge read as resolved
+// once the target is gone (gt-p0595).
 type cachedDep struct {
-	ID   string `json:"id"`
-	Type string `json:"type"`
+	ID     string `json:"id"`
+	Type   string `json:"type"`
+	Merged bool   `json:"merged,omitempty"`
 }
 
 // duplicateDetailFile is the cache's file: each rig's pool details by bead id,
@@ -179,7 +184,11 @@ func (c *duplicateDetailCache) read(beadsDir string, store beads.Client, rows []
 			missing = append(missing, row)
 			continue
 		}
-		details[row.ID] = entry.detail(status)
+		detail, learned := entry.detail(status)
+		details[row.ID] = detail
+		if learned {
+			c.dirty = true
+		}
 		if !c.fetched[row.ID] {
 			c.cached[row.ID] = true
 		}
@@ -267,33 +276,56 @@ func (c *duplicateDetailCache) save() {
 }
 
 // detail is the cached detail with its blockers read against status, the pool
-// as it lists now.
-func (e cachedDetail) detail(status map[string]*beads.Issue) duplicateDetail {
+// as it lists now. learned reports that a merge-blocks target showed its merge
+// in the pool, which is recorded on the entry's edge (the slice is shared with
+// the stored entry) so the edge still reads resolved after the pool drops the
+// target; the caller marks the cache dirty.
+func (e cachedDetail) detail(status map[string]*beads.Issue) (d duplicateDetail, learned bool) {
 	deps := make([]beads.IssueDep, len(e.Deps))
-	for i, d := range e.Deps {
-		deps[i] = beads.IssueDep{ID: d.ID, DependencyType: d.Type}
+	for i, dep := range e.Deps {
+		deps[i] = beads.IssueDep{ID: dep.ID, DependencyType: dep.Type}
+		if row, ok := status[dep.ID]; ok && !dep.Merged && mergedBlocker(dep.Type, row.Status, row.CloseReason) {
+			e.Deps[i].Merged = true
+			dep.Merged = true
+			learned = true
+		}
+		if dep.Merged {
+			deps[i].Status, deps[i].CloseReason = "closed", mergedClosePrefix
+		}
 	}
 	return duplicateDetail{
 		Design:       e.Design,
 		Notes:        e.Notes,
 		Blockers:     blockingDepIDs(deps),
 		OpenBlockers: openBlockersIn(deps, status),
-	}
+	}, learned
+}
+
+// mergedClosePrefix starts the close reason of a bead whose work landed.
+const mergedClosePrefix = "Merged in "
+
+// mergedBlocker reports whether a dependency of type depType on a target in
+// status with closeReason is a merge-blocks edge whose target landed.
+func mergedBlocker(depType, status, closeReason string) bool {
+	return strings.EqualFold(strings.TrimSpace(depType), "merge-blocks") &&
+		strings.EqualFold(strings.TrimSpace(status), "closed") &&
+		strings.HasPrefix(closeReason, mergedClosePrefix)
 }
 
 // openBlockersIn is the blocking edges still open in the pool as it lists now.
 // A target the pool does not list is resolved: an open bead of this rig is
 // always listed, so an absent target is closed, or closed before the lookback.
 // A merge-blocks edge is the exception: it resolves only on a close reason
-// starting "Merged in ", which the pool no longer shows for an absent target,
-// so its status is unknown and it stays unresolved (gt-idly3).
+// starting "Merged in ", which the pool no longer shows for an absent target.
+// Such an edge keeps the status its caller read: a merge the cache saw
+// (cachedDep.Merged) resolves it, and one it never saw stays unresolved
+// (gt-idly3, gt-p0595).
 func openBlockersIn(deps []beads.IssueDep, status map[string]*beads.Issue) []string {
 	listed := make([]beads.IssueDep, 0, len(deps))
 	for _, d := range deps {
 		row, ok := status[d.ID]
 		if !ok {
 			if strings.EqualFold(strings.TrimSpace(d.DependencyType), "merge-blocks") {
-				d.Status, d.CloseReason = "", ""
 				listed = append(listed, d)
 			}
 			continue
@@ -309,7 +341,7 @@ func cachedDepsOf(deps []beads.IssueDep) []cachedDep {
 	var out []cachedDep
 	for _, d := range deps {
 		if beads.IsBlockingDependencyType(d.DependencyType) {
-			out = append(out, cachedDep{ID: d.ID, Type: d.DependencyType})
+			out = append(out, cachedDep{ID: d.ID, Type: d.DependencyType, Merged: mergedBlocker(d.DependencyType, d.Status, d.CloseReason)})
 		}
 	}
 	return out
