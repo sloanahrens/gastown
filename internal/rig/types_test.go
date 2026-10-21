@@ -27,6 +27,91 @@ func mkLinkedWorktree(t *testing.T, path, gitDir string) {
 	}
 }
 
+// mkDanglingWorktree makes path look like a git worktree whose gitdir is gone:
+// the .git file points at a directory that does not exist.
+func mkDanglingWorktree(t *testing.T, path string) {
+	t.Helper()
+	gitDir := filepath.Join(t.TempDir(), "deleted", "worktrees", "mayor")
+	mkLinkedWorktree(t, path, gitDir)
+}
+
+func TestIsWorkTreeRoot(t *testing.T) {
+	t.Parallel()
+
+	t.Run("clone is a working tree", func(t *testing.T) {
+		t.Parallel()
+
+		clone := filepath.Join(t.TempDir(), "clone")
+		mkClone(t, clone)
+
+		if !IsWorkTreeRoot(clone) {
+			t.Errorf("IsWorkTreeRoot(%q) = false, want true", clone)
+		}
+	})
+
+	t.Run("linked worktree with its gitdir is a working tree", func(t *testing.T) {
+		t.Parallel()
+
+		rigPath := filepath.Join(t.TempDir(), "gastown")
+		bareDir := filepath.Join(rigPath, ".repo.git", "worktrees", "mayor")
+		if err := os.MkdirAll(bareDir, 0755); err != nil {
+			t.Fatalf("creating bare git dir: %v", err)
+		}
+		wt := filepath.Join(rigPath, "mayor", "rig")
+		mkLinkedWorktree(t, wt, bareDir)
+
+		if !IsWorkTreeRoot(wt) {
+			t.Errorf("IsWorkTreeRoot(%q) = false, want true", wt)
+		}
+	})
+
+	// The regression: a .git file whose gitdir was deleted is a dangling
+	// pointer, not a working tree. Git cannot read anything through it.
+	t.Run("dangling linked worktree pointer is not a working tree", func(t *testing.T) {
+		t.Parallel()
+
+		wt := filepath.Join(t.TempDir(), "gastown", "mayor", "rig")
+		mkDanglingWorktree(t, wt)
+
+		if IsWorkTreeRoot(wt) {
+			t.Errorf("IsWorkTreeRoot(%q) = true, want false: its gitdir does not exist", wt)
+		}
+	})
+
+	t.Run("clone whose .git is a symlinked directory is a working tree", func(t *testing.T) {
+		t.Parallel()
+
+		store := filepath.Join(t.TempDir(), "store")
+		if err := os.MkdirAll(filepath.Join(store, ".git"), 0755); err != nil {
+			t.Fatalf("creating git dir: %v", err)
+		}
+		clone := filepath.Join(t.TempDir(), "clone")
+		if err := os.MkdirAll(clone, 0755); err != nil {
+			t.Fatalf("creating clone: %v", err)
+		}
+		if err := os.Symlink(filepath.Join(store, ".git"), filepath.Join(clone, ".git")); err != nil {
+			t.Fatalf("linking .git: %v", err)
+		}
+
+		if !IsWorkTreeRoot(clone) {
+			t.Errorf("IsWorkTreeRoot(%q) = false, want true: git follows a symlinked .git", clone)
+		}
+	})
+
+	t.Run("directory without .git is not a working tree", func(t *testing.T) {
+		t.Parallel()
+
+		dir := filepath.Join(t.TempDir(), "plain")
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatalf("creating dir: %v", err)
+		}
+
+		if IsWorkTreeRoot(dir) {
+			t.Errorf("IsWorkTreeRoot(%q) = true, want false", dir)
+		}
+	})
+}
+
 func TestBeadsPath_AlwaysReturnsRigRoot(t *testing.T) {
 	t.Parallel()
 
@@ -224,6 +309,32 @@ func TestRepoPath(t *testing.T) {
 		if err := os.MkdirAll(filepath.Join(rigPath, ".repo.git"), 0755); err != nil {
 			t.Fatalf("creating bare repo: %v", err)
 		}
+
+		r := Rig{Name: "gastown", Path: rigPath}
+		if got := r.RepoPath(); got != "" {
+			t.Errorf("RepoPath() = %q, want %q", got, "")
+		}
+	})
+
+	t.Run("dangling mayor clone is skipped for the refinery clone", func(t *testing.T) {
+		t.Parallel()
+
+		rigPath := filepath.Join(t.TempDir(), "gastown")
+		mkDanglingWorktree(t, filepath.Join(rigPath, "mayor", "rig"))
+		mkClone(t, filepath.Join(rigPath, "refinery", "rig"))
+
+		r := Rig{Name: "gastown", Path: rigPath}
+		want := filepath.Join(rigPath, "refinery", "rig")
+		if got := r.RepoPath(); got != want {
+			t.Errorf("RepoPath() = %q, want %q (a dangling mayor clone is not a repository)", got, want)
+		}
+	})
+
+	t.Run("dangling mayor clone alone returns empty", func(t *testing.T) {
+		t.Parallel()
+
+		rigPath := filepath.Join(t.TempDir(), "gastown")
+		mkDanglingWorktree(t, filepath.Join(rigPath, "mayor", "rig"))
 
 		r := Rig{Name: "gastown", Path: rigPath}
 		if got := r.RepoPath(); got != "" {
