@@ -393,8 +393,12 @@ func mrNotes(notes string) string {
 }
 
 // agentOf is the agent the bead names: the first agent: label if it has one,
-// else the agent attached var, else empty.
+// else the agent attached var, else empty. A bead that wears several agent:
+// labels names none, as the dispatcher seats no such bead (ChooseSeat).
 func agentOf(b *beads.Issue) string {
+	if len(specdispatch.Spec{Labels: b.Labels}.PinnedAgents()) > 1 {
+		return ""
+	}
 	for _, l := range b.Labels {
 		if name, ok := strings.CutPrefix(l, agentLabelPrefix); ok && name != "" {
 			return name

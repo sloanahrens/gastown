@@ -812,3 +812,30 @@ func TestJevSubmissionRecordWithoutSubjectsFallsBackToTheClone(t *testing.T) {
 		t.Errorf("state = %q, want the clone's subject", r.asker.states[0])
 	}
 }
+
+// A bead that wears more than one agent: label has no agent in the record,
+// because the dispatcher seats no such bead. A bead with no agent: label still
+// takes the agent its attached vars name.
+func TestAgentOfRefusesSeveralAgentLabels(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		labels []string
+		desc   string
+		want   string
+	}{
+		{name: "several labels", labels: []string{"agent:flint", "agent:opal"}, want: ""},
+		{name: "several labels beat the attached var", labels: []string{"agent:flint", "agent:opal"}, desc: `attached_vars: ["agent=kestrel"]`, want: ""},
+		{name: "one label", labels: []string{"agent:flint"}, want: "flint"},
+		{name: "no label takes the attached var", desc: `attached_vars: ["agent=kestrel"]`, want: "kestrel"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			issue := &beads.Issue{ID: "gt-a", Labels: tc.labels, Description: tc.desc}
+			if got := agentOf(issue); got != tc.want {
+				t.Errorf("agentOf(%v) = %q, want %q", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
