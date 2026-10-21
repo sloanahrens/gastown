@@ -576,42 +576,87 @@ func TestJevSubmissionCapStopsThePass(t *testing.T) {
 	}
 }
 
-// A backlog larger than the window drains through Run: each submission is asked
-// once, the cursor moves past the last of them, and a second pass asks nothing.
-func TestRunAdvancesTheCursorPastABacklogLargerThanTheWindow(t *testing.T) {
+// A backlog larger than the window drains through Run over several passes, each
+// taking at most backlogLimit submissions, and a day-cap stop partway through one
+// leaves the rest for the next. Two waiting beads sit in the backlog: one whose
+// record is the newest, and one with no record whose READY TO LAND block is
+// stamped last. Each submission is asked exactly once, those two included, and
+// the cursor ends past the last of them.
+func TestRunDrainsABacklogLargerThanTheWindowOverSeveralPasses(t *testing.T) {
 	t.Parallel()
+	const backlog = 2*backlogLimit + 300
+	const capStop = 100
+
 	r := newRig(t)
 	records := filepath.Join(t.TempDir(), land.SubmissionsSeenFile)
 	known := map[string]*beads.Issue{}
-	for i := range recordWindow + 1 {
-		id := fmt.Sprintf("gt-new-%d", i)
+	record := func(id string, at time.Time) {
+		t.Helper()
 		rec := land.SubmissionRecord{
-			SeenAt: t0.Add(time.Duration(i+1) * time.Second), Bead: id, Rig: RigName,
+			SeenAt: at, Bead: id, Rig: RigName,
 			Branch: "polecat/opal/" + id, Head: "head-" + id, Target: "main",
 			Subjects: []string{"fix: do the thing (" + id + ")"}, Numstat: "10\t2\tinternal/x.go\n",
 		}
 		if err := battery.Append(records, rec); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for i := range backlog {
+		id := fmt.Sprintf("gt-new-%d", i)
+		record(id, t0.Add(time.Duration(i+1)*time.Second))
 		known[id] = &beads.Issue{ID: id, Status: "closed"}
 	}
-	r.pass.Submissions = rigBeads{b: &recordingLister{byID: known}, records: records}
 
+	// gt-held waits at the head its record names. Its block was stamped first,
+	// so a pass that listed it from the bead would ask it before its record's
+	// turn, and then ask it again at the record.
+	last := t0.Add(time.Duration(backlog+1) * time.Second)
+	held := &beads.Issue{ID: "gt-held", Status: "open", Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(land.Work{
+		Branch: "polecat/opal/gt-held", Head: "head-gt-held", Target: "main", Submitted: t0.Add(time.Second),
+	})}
+	record("gt-held", last)
+	known["gt-held"] = held
+	// gt-late has no record, and its block is stamped after every record.
+	late := &beads.Issue{ID: "gt-late", Status: "open", Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(land.Work{
+		Branch: "polecat/opal/gt-late", Head: "head-gt-late", Target: "main", Submitted: last.Add(time.Hour),
+	})}
+	r.git.subjects["head-gt-late"] = []string{"fix: do the other thing (gt-late)"}
+	r.pass.Submissions = rigBeads{b: &recordingLister{waiting: []*beads.Issue{held, late}, byID: known}, records: records}
+
+	// The first pass stops at the day's cap after capStop asks.
+	checks := 0
+	r.pass.Allows = func() (bool, error) {
+		checks++
+		return checks <= capStop, nil
+	}
 	sum, err := r.pass.Run(context.Background())
 	if err != nil {
-		t.Fatalf("first pass over a backlog larger than the window: %v", err)
+		t.Fatalf("capped pass: %v", err)
 	}
-	if sum.Asked != recordWindow+1 {
-		t.Fatalf("first pass asked %d, want all %d", sum.Asked, recordWindow+1)
+	if !sum.CapReached || sum.Asked != capStop {
+		t.Fatalf("capped pass = %+v, want the cap reached after %d asks", sum, capStop)
 	}
-	cur, _, err := battery.ReadCursor(r.pass.CursorPath)
-	if err != nil {
-		t.Fatal(err)
+
+	r.pass.Allows = func() (bool, error) { return true, nil }
+	total := capStop
+	for pass := 2; ; pass++ {
+		if pass > 10 {
+			t.Fatal("the backlog was still not drained after 10 passes")
+		}
+		sum, err := r.pass.Run(context.Background())
+		if err != nil {
+			t.Fatalf("pass %d: %v", pass, err)
+		}
+		if sum.Asked > backlogLimit+1 {
+			t.Fatalf("pass %d asked %d, want at most backlogLimit (%d)", pass, sum.Asked, backlogLimit)
+		}
+		if sum.Asked == 0 {
+			break
+		}
+		total += sum.Asked
 	}
-	if want := t0.Add(time.Duration(recordWindow+1) * time.Second); !cur.Time.Equal(want) {
-		t.Fatalf("cursor = %v, want it moved to the last submission at %v", cur.Time, want)
-	}
-	lines, err := ReadRecent(r.pass.LogPath, recordWindow+1)
+
+	lines, err := ReadRecent(r.pass.LogPath, 2*backlog)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -624,16 +669,20 @@ func TestRunAdvancesTheCursorPastABacklogLargerThanTheWindow(t *testing.T) {
 			t.Errorf("%s asked %d times, want once", id, n)
 		}
 	}
-	if len(asked) != recordWindow+1 {
-		t.Fatalf("log holds %d submissions, want %d", len(asked), recordWindow+1)
+	if want := backlog + 2; len(asked) != want || total != want {
+		t.Fatalf("log holds %d submissions and the passes asked %d, want %d of each", len(asked), total, want)
 	}
-
-	sum, err = r.pass.Run(context.Background())
+	for _, id := range []string{"gt-held", "gt-late"} {
+		if asked[id] != 1 {
+			t.Errorf("waiting bead %s asked %d times, want once", id, asked[id])
+		}
+	}
+	cur, _, err := battery.ReadCursor(r.pass.CursorPath)
 	if err != nil {
-		t.Fatalf("second pass: %v", err)
+		t.Fatal(err)
 	}
-	if sum.Asked != 0 {
-		t.Fatalf("second pass asked %d, want none: the backlog was already drained", sum.Asked)
+	if want := last.Add(time.Hour); !cur.Time.Equal(want) {
+		t.Fatalf("cursor = %v, want it past the last submission at %v", cur.Time, want)
 	}
 }
 
