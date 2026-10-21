@@ -163,7 +163,7 @@ func TestLandingLabelFailsWhenTheNotesCannotBeRead(t *testing.T) {
 
 func TestLandingLabelLeavesAMissingBeadUnlabeled(t *testing.T) {
 	t.Parallel()
-	missing := fmt.Errorf("no beads directory for rig gastown: %w", beads.ErrNotFound)
+	missing := fmt.Errorf("bead gt-a: %w", beads.ErrNotFound)
 	a := &landingAdapter{notes: &fakeLandingNotes{err: missing}}
 	lab, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
 	if err != nil {
@@ -171,6 +171,27 @@ func TestLandingLabelLeavesAMissingBeadUnlabeled(t *testing.T) {
 	}
 	if lab.Labeled || lab.Labels != nil || lab.Rule != "" {
 		t.Errorf("labeling = %+v, want none", lab)
+	}
+}
+
+// TestLandingBuildFailsWhenTheRigHasNoBeadsDirectory drives the real notes
+// reader over a town with no rig directories: every landing of such a rig
+// would read as unlabeled, so the report fails rather than exit clean.
+func TestLandingBuildFailsWhenTheRigHasNoBeadsDirectory(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	logPath := landing.LogPath(town)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte(landingLog[0]+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := &landingAdapter{log: logPath, notes: &townNotes{town: town, stores: map[string]*beads.Beads{}}}
+
+	_, err := Build(context.Background(), a, time.Time{})
+	if err == nil || !errors.Is(err, errNoRigBeads) {
+		t.Fatalf("Build error = %v, want the missing rig beads directory", err)
 	}
 }
 
