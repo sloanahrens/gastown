@@ -104,6 +104,37 @@ func identifiers(patch string) []string {
 	return out
 }
 
+// The drift_kind options a diff's changed lines can name. behavior is the kind
+// of an edit that names none of the others.
+const (
+	KindCommand   = "command"
+	KindFlag      = "flag"
+	KindConfigKey = "config_key"
+	KindBehavior  = "behavior"
+)
+
+// EditKinds returns the drift_kind options the changed lines of a diff name: a
+// flag, a command or a config key. A flag is not also a config key. An edit that
+// names none is a behavior change.
+func EditKinds(changed string) map[string]bool {
+	kinds := map[string]bool{}
+	for _, l := range strings.Split(changed, "\n") {
+		if flagRe.MatchString(l) {
+			kinds[KindFlag] = true
+		}
+		if cmdRe.MatchString(l) {
+			kinds[KindCommand] = true
+		}
+		if keyRe.MatchString(flagRe.ReplaceAllString(l, "")) {
+			kinds[KindConfigKey] = true
+		}
+	}
+	if len(kinds) == 0 {
+		kinds[KindBehavior] = true
+	}
+	return kinds
+}
+
 // rank scores each section by the identifiers it contains, keeps the ones
 // with a match and returns the best maxSections. Ties go to the section that
 // sorts first by doc path, then by its place in the doc, so a rerun picks the

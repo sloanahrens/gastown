@@ -2,7 +2,11 @@ package scorecard
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -18,23 +22,254 @@ const driftDoc = "# Doc\n\n## Drift battery\n\nText.\n"
 // driftAsk is the instant the drift answers in these tests were logged.
 var driftAsk = time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC)
 
-// fakeDocs serves each doc's edits from memory.
+// fakeDocs serves each doc's edits from memory, or fails with err.
 type fakeDocs struct {
 	edits map[string][]docEdit
+	err   error
 }
 
 func (f fakeDocs) Edits(_ context.Context, doc string) ([]docEdit, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	return f.edits[doc], nil
 }
 
-// fakeDriftBeads serves each rig's beads from memory. It returns every bead, so
-// the window is the adapter's to apply, as it is for the real store's listing.
+// fakeDriftBeads serves each rig's beads from memory, or fails with err. It
+// returns every bead, so the window is the adapter's to apply, as it is for the
+// real store's listing.
 type fakeDriftBeads struct {
 	byRig map[string][]*beads.Issue
+	err   error
 }
 
 func (f fakeDriftBeads) List(rig string, _ beads.ListOptions) ([]*beads.Issue, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	return f.byRig[rig], nil
+}
+
+var updateDriftGolden = flag.Bool("update-drift-golden", false, "rewrite testdata/drift.golden")
+
+// driftReferenceV1 is the doc the fixture history starts from: a drift section
+// and a scorecard section.
+const driftReferenceV1 = `# Reference
+
+## Drift battery
+
+The battery asks Jev about each section.
+
+## Scorecard
+
+The scorecard reads each log.
+`
+
+// driftReferenceV2 adds a flag to the drift section, which is the edit the
+// fixture's drift answers are checked against.
+const driftReferenceV2 = `# Reference
+
+## Drift battery
+
+The battery asks Jev about each section.
+Pass ` + "`--recent`" + ` to widen the window.
+
+## Scorecard
+
+The scorecard reads each log.
+`
+
+// driftFixtureEdits is the fixture history the golden report reads, as the docs
+// reader returns it: the commit that adds the doc, then the one that adds the
+// flag to the drift section. The second edit's hunk is the insertion after line
+// 5 of V1, the line git's zero-context diff would give.
+var driftFixtureEdits = map[string][]docEdit{
+	"docs/reference.md": {
+		{
+			Time:  time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
+			Patch: "@@ -0,0 +1,9 @@\n+# Reference\n+\n+## Drift battery\n+\n+The battery asks Jev about each section.\n+\n+## Scorecard\n+\n+The scorecard reads each log.\n",
+		},
+		{
+			Time:   time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC),
+			Before: driftReferenceV1,
+			Patch:  "@@ -5,0 +6 @@\n+Pass `--recent` to widen the window.\n",
+		},
+	},
+}
+
+// driftFixtureLog is the drift log the golden report reads. Its ask times and
+// the fixture history put each section in one of the labeled states.
+var driftFixtureLog = []string{
+	// The drift section's edit touches it, and its flag is the one the edit names.
+	`{"ts":"2026-09-01T00:00:00Z","bead":"gt-a","rig":"gastown","question_version":1,"model":"m1","sections":[{"doc":"docs/reference.md","heading":"Drift battery","answers":{"doc_now_stale":{"noul":0.9},"drift_kind":{"choice":"flag","probabilities":{"flag":0.8,"command":0.1,"config_key":0.05,"behavior":0.05}}}}]}`,
+	// Nothing edits the scorecard section, and its window has passed.
+	`{"ts":"2026-09-01T00:00:00Z","bead":"gt-b","rig":"gastown","question_version":1,"model":"m1","sections":[{"doc":"docs/reference.md","heading":"Scorecard","answers":{"doc_now_stale":{"noul":0.2}}}]}`,
+	// Asked inside its window; the bead landed in the window names the doc, so
+	// the section counts as stale even though no commit touched it.
+	`{"ts":"2026-10-15T00:00:00Z","bead":"gt-c","rig":"gastown","question_version":1,"model":"m1","sections":[{"doc":"docs/reference.md","heading":"Drift battery","answers":{"doc_now_stale":{"noul":0.6},"drift_kind":{"choice":"command","probabilities":{"command":0.7,"flag":0.2,"behavior":0.1}}}}]}`,
+	// The same edit as gt-a, picked as a command, which the edit does not name.
+	`{"ts":"2026-09-01T00:00:00Z","bead":"gt-d","rig":"gastown","question_version":1,"model":"m1","sections":[{"doc":"docs/reference.md","heading":"Drift battery","answers":{"doc_now_stale":{"noul":0.7},"drift_kind":{"choice":"command","probabilities":{"command":0.7,"flag":0.2,"behavior":0.1}}}}]}`,
+	// A line from another question set is skipped whole.
+	`{"ts":"2026-09-01T00:00:00Z","bead":"gt-e","rig":"gastown","question_version":0,"sections":[]}`,
+	// A landing that names no docs-relevant section has no item.
+	`{"ts":"2026-09-02T00:00:00Z","bead":"gt-f","rig":"gastown","question_version":1,"model":"m1","sections":[]}`,
+}
+
+// TestDriftScorecardPrintsPerQuestionBlocks is the drift battery's golden test.
+// It reads the fixture log and the fixture history through the adapter, so the
+// default tier exercises the report path. The git reader has its own test in
+// the integration tier.
+func TestDriftScorecardPrintsPerQuestionBlocks(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	logPath := drift.LogPath(town)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(logPath, []byte(strings.Join(driftFixtureLog, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// gt-c's bead landed inside its window and names the doc, so the bead rule
+	// labels it stale even though no commit touched its section.
+	landed := &beads.Issue{
+		ID:          "gt-z",
+		Title:       "docs: refresh docs/reference.md",
+		Status:      statusClosed,
+		CloseReason: "Landed on main (abc123)",
+		ClosedAt:    time.Date(2026, 10, 18, 0, 0, 0, 0, time.UTC).Format(time.RFC3339),
+	}
+	a := newDriftAdapter(logPath,
+		fakeDriftBeads{byRig: map[string][]*beads.Issue{"gastown": {landed}}},
+		fakeDocs{edits: driftFixtureEdits},
+		func() time.Time { return time.Date(2026, 10, 21, 0, 0, 0, 0, time.UTC) },
+	)
+
+	rep, err := Build(context.Background(), a, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Items != 4 || rep.LinesSkipped != 1 {
+		t.Fatalf("items %d skipped %d, want 4 and 1", rep.Items, rep.LinesSkipped)
+	}
+
+	var out strings.Builder
+	if err := WriteText(&out, rep); err != nil {
+		t.Fatal(err)
+	}
+	got := out.String()
+	goldenPath := filepath.Join("testdata", "drift.golden")
+	if *updateDriftGolden {
+		if err := os.MkdirAll("testdata", 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(goldenPath, []byte(got), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want, err := os.ReadFile(goldenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != string(want) {
+		t.Errorf("output differs from %s (rewrite with -update-drift-golden):\n%s\nwant:\n%s", goldenPath, got, want)
+	}
+}
+
+// TestDriftLabelFailsWhenTheLabelCannotRead checks that a label whose history,
+// bead listing or close time cannot be read is an error. A read that failed
+// must not label the section as if it had looked.
+func TestDriftLabelFailsWhenTheLabelCannotRead(t *testing.T) {
+	t.Parallel()
+	day := 24 * time.Hour
+	now := driftAsk.Add(40 * day)
+	badClose := &beads.Issue{
+		ID:          "gt-bad",
+		Title:       "docs: refresh docs/reference.md",
+		Status:      statusClosed,
+		CloseReason: "Landed on main (abc123)",
+		ClosedAt:    "yesterday",
+	}
+	cases := []struct {
+		name    string
+		docs    fakeDocs
+		beads   fakeDriftBeads
+		wantErr string
+	}{
+		{
+			name:    "the doc's history cannot be read",
+			docs:    fakeDocs{err: errors.New("git log failed")},
+			wantErr: "reading the history of docs/reference.md",
+		},
+		{
+			name:    "the rig's beads cannot be listed",
+			beads:   fakeDriftBeads{err: errors.New("bd list failed")},
+			wantErr: "listing closed beads in gastown",
+		},
+		{
+			name:    "a closed bead's close time does not parse",
+			beads:   fakeDriftBeads{byRig: map[string][]*beads.Issue{"gastown": {badClose}}},
+			wantErr: "close time \"yesterday\" that does not parse",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := newDriftAdapter("", &tc.beads, tc.docs, func() time.Time { return now })
+			_, err := a.Label(context.Background(), driftItem(driftAsk, "Drift battery", ""))
+			if err == nil {
+				t.Fatal("Label returned no error, want one")
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %v, want it to contain %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestDriftLabelBeadNamesWholeDocPath checks that the bead rule names the doc
+// only as a whole path: a longer path that ends in the doc's path does not name
+// it, and a full stop after the path does.
+func TestDriftLabelBeadNamesWholeDocPath(t *testing.T) {
+	t.Parallel()
+	day := 24 * time.Hour
+	closed := func(title string) *beads.Issue {
+		return &beads.Issue{
+			ID:          "gt-x",
+			Title:       title,
+			Status:      statusClosed,
+			CloseReason: "Landed on main (abc123)",
+			ClosedAt:    driftAsk.Add(5 * day).Format(time.RFC3339Nano),
+		}
+	}
+	cases := []struct {
+		name  string
+		title string
+		stale bool
+		rule  string
+	}{
+		{name: "a path ending the title names the doc", title: "docs: refresh docs/reference.md", stale: true, rule: ruleDriftBeadLanded},
+		{name: "a full stop after the path names the doc", title: "docs: refresh docs/reference.md.", stale: true, rule: ruleDriftBeadLanded},
+		{name: "a longer directory that ends in the doc's path does not", title: "docs: fix old/docs/reference.md", stale: false, rule: ruleDriftNoEdit},
+		{name: "a longer file name that starts with the doc's path does not", title: "docs: fix docs/reference.md.bak", stale: false, rule: ruleDriftNoEdit},
+		{name: "a longer extension does not", title: "docs: fix docs/reference.mdx", stale: false, rule: ruleDriftNoEdit},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := fakeDriftBeads{byRig: map[string][]*beads.Issue{"gastown": {closed(tc.title)}}}
+			a := newDriftAdapter("", b, fakeDocs{}, func() time.Time { return driftAsk.Add(40 * day) })
+			lab, err := a.Label(context.Background(), driftItem(driftAsk, "Drift battery", ""))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := lab.Labels[qDocNowStale]; got != tc.stale {
+				t.Errorf("doc_now_stale = %v, want %v", got, tc.stale)
+			}
+			if lab.Rule != tc.rule {
+				t.Errorf("rule = %q, want %q", lab.Rule, tc.rule)
+			}
+		})
+	}
 }
 
 // driftItem is the item a drift line makes for one section. An empty kind

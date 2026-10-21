@@ -51,24 +51,9 @@ const (
 	qDriftKind   QuestionID = drift.QDriftKind
 )
 
-// The identifier kinds the drift battery's drift_kind options name. behavior is
-// the kind of an edit that names none of the others.
-const (
-	kindCommand   = "command"
-	kindFlag      = "flag"
-	kindConfigKey = "config_key"
-	kindBehavior  = "behavior"
-)
-
-// Identifier patterns, the same shapes the drift battery names a diff's
-// identifiers by. They are copies because the drift package keeps its own
-// unexported; a change there must change these.
+// Diff and heading patterns. driftHunkRe matches a hunk header, capturing the
+// old start and count; the count is absent when it is 1.
 var (
-	driftFlagRe = regexp.MustCompile(`--[a-z][a-z0-9-]*[a-z0-9]`)
-	driftKeyRe  = regexp.MustCompile(`\b[a-z][a-z0-9]*(?:[_-][a-z0-9]+)+\b`)
-	driftCmdRe  = regexp.MustCompile(`\bgt [a-z][a-z-]*(?: [a-z][a-z-]*)?`)
-	// driftHunkRe matches a hunk header, capturing the old start and count. The
-	// count is absent when it is 1.
 	driftHunkRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+\d+(?:,\d+)? @@`)
 	// driftHeadingRe matches an ATX heading, the same shape the drift battery
 	// splits its sections on.
@@ -307,7 +292,7 @@ func (a *driftAdapter) Label(ctx context.Context, item Item) (Labeling, error) {
 		labels[qDocNowStale] = true
 		rules = append(rules, ruleDriftDocEdit)
 		if picked := item.Answers[qDriftKind].Choice; picked != "" {
-			labels[qDriftKind] = editKinds(changed)[picked]
+			labels[qDriftKind] = drift.EditKinds(changed)[picked]
 			rules = append(rules, ruleDriftKindInEdit)
 		}
 	} else {
@@ -364,7 +349,9 @@ func inDriftWindow(t, ask time.Time) bool {
 }
 
 // beadLanded reports whether a landed bead closed in the window after the ask
-// names the item's doc in its title or description.
+// names the item's doc in its title or description. A closed bead whose close
+// time does not parse is an error, not a bead that did not land: the rule could
+// not check it.
 func (a *driftAdapter) beadLanded(item Item) (bool, error) {
 	issues, err := a.closedIn(item.Refs[refRig])
 	if err != nil {
@@ -373,17 +360,28 @@ func (a *driftAdapter) beadLanded(item Item) (bool, error) {
 	doc := item.Refs[refDoc]
 	for _, is := range issues {
 		closedAt, err := time.Parse(time.RFC3339Nano, is.ClosedAt)
-		if err != nil || !inDriftWindow(closedAt, item.Time) {
+		if err != nil {
+			return false, fmt.Errorf("closed bead %s has a close time %q that does not parse: %w", is.ID, is.ClosedAt, err)
+		}
+		if !inDriftWindow(closedAt, item.Time) {
 			continue
 		}
 		if !isLandedReason(strings.TrimSpace(is.CloseReason)) {
 			continue
 		}
-		if strings.Contains(is.Title+"\n"+is.Description, doc) {
+		if namesDoc(is.Title+"\n"+is.Description, doc) {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+// namesDoc reports whether text names doc as a whole path. A longer path that
+// holds doc, such as old/docs/a.md or docs/a.md.bak, does not name it, and a
+// full stop or comma after the path does.
+func namesDoc(text, doc string) bool {
+	re := regexp.MustCompile(`(^|[^\w./-])` + regexp.QuoteMeta(doc) + `($|[^\w./-]|\.($|\s))`)
+	return re.MatchString(text)
 }
 
 // closedIn returns the rig's closed beads closed at or after the earliest ask,
@@ -525,26 +523,4 @@ func headingText(line string) (string, bool) {
 		return "", false
 	}
 	return strings.TrimSpace(strings.TrimLeft(line, "#")), true
-}
-
-// editKinds returns the kinds of identifier the changed lines name: flags,
-// commands and config keys. A flag is not also a config key. An edit that names
-// none is a behavior change.
-func editKinds(changed string) map[string]bool {
-	kinds := map[string]bool{}
-	for _, l := range strings.Split(changed, "\n") {
-		if driftFlagRe.MatchString(l) {
-			kinds[kindFlag] = true
-		}
-		if driftCmdRe.MatchString(l) {
-			kinds[kindCommand] = true
-		}
-		if driftKeyRe.MatchString(driftFlagRe.ReplaceAllString(l, "")) {
-			kinds[kindConfigKey] = true
-		}
-	}
-	if len(kinds) == 0 {
-		kinds[kindBehavior] = true
-	}
-	return kinds
 }

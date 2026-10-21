@@ -1899,9 +1899,11 @@ ask, from just after the ask's instant through the 30th day:
   its heading to the next heading in the doc before the commit. A hunk whose old
   lines fall in them touches it, and so does a hunk that adds the heading line.
 - a bead closed as landed within the window, with a close reason `landed` or
-  `Landed on ...`, whose title or description names the doc file:
-  `doc_now_stale` true (`drift:docs-bead-landed`). The rule names the file, not
-  the section.
+  `Landed on ...`, whose title or description names the doc file as a whole path
+  (`old/docs/a.md` does not name `docs/a.md`): `doc_now_stale` true
+  (`drift:docs-bead-landed`). The rule names the file, not the section. A rig
+  with no beads directory, or a closed bead whose close time does not parse,
+  fails the report rather than labeling the section.
 - no such commit or bead, and the window has passed: `doc_now_stale` false
   (`drift:no-edit-30d`). Inside the window with neither, the section is unlabeled.
 - `drift_kind` is labeled only when a commit touched the section. It is true when

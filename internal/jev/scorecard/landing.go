@@ -71,13 +71,11 @@ func (t *townNotes) Show(rig, bead string) (*beads.Issue, error) {
 	return b.Show(bead)
 }
 
-// List reads the rig's beads matching opts. A rig with no beads directory has
-// no beads to list, so it lists none.
+// List reads the rig's beads matching opts. A rig with no beads directory fails
+// the listing rather than listing none: a rule that reads an empty list would
+// label as if it had looked.
 func (t *townNotes) List(rig string, opts beads.ListOptions) ([]*beads.Issue, error) {
 	b, err := t.store(rig)
-	if errors.Is(err, beads.ErrNotFound) {
-		return nil, nil
-	}
 	if err != nil {
 		return nil, err
 	}
