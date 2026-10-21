@@ -107,7 +107,6 @@ Recommendation for the follow-up: wire the 35-check fast subset into a patrol (c
 | `rig-name-mismatch` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |
 | `rig-routes-jsonl` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |
 | `rig-settings` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |
-| `role-config-valid` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |
 | `routes-config` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |
 | `routing-mode` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |
 | `runtime-gitignore` | Config | occasional | Configuration/installation-drift check; the underlying file only changes when a human or `gt upgrade` edits it, so boot/upgrade/session-gc coverage is sufficient. |
