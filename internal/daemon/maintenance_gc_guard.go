@@ -113,12 +113,30 @@ func (d *Daemon) maintenanceGCExternal() (bool, string) {
 	return false, ""
 }
 
+// isLoopbackHost is the one local-or-remote verdict for a Dolt host. The
+// daemon's isRemote and the maintenance GC guard both read it. An empty host,
+// localhost (any case, with or without a trailing dot), a loopback IP literal
+// (bracketed or not), or a name that resolves only to loopback is local. A name
+// that does not resolve is not local.
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
+	h := strings.TrimSuffix(strings.Trim(strings.ToLower(host), "[]"), ".")
+	switch h {
+	case "", "localhost":
 		return true
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback()
+	}
+	addrs, err := net.LookupHost(h)
+	if err != nil {
+		return false
+	}
+	for _, addr := range addrs {
+		if ip := net.ParseIP(addr); ip != nil && ip.IsLoopback() {
+			return true
+		}
+	}
+	return false
 }
 
 // --- skipped-window streak ------------------------------------------------------
