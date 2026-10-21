@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
 	"github.com/steveyegge/gastown/internal/jev/drift"
 	"github.com/steveyegge/gastown/internal/land"
@@ -320,43 +321,110 @@ func (jevDriftDocsRepo) ReadDoc(context.Context, string, string) (string, error)
 	return jevDriftTwoSectionDoc, nil
 }
 
+// jevDriftMixedRepo serves the docs landing's diff and refuses every other
+// landing's refs, so a pass both skips a landing and asks about one.
+type jevDriftMixedRepo struct {
+	jevDriftDocsRepo
+}
+
+func (jevDriftMixedRepo) Numstat(_ context.Context, _, head string) (string, error) {
+	if head != "h" {
+		return "", fmt.Errorf("%w: %q", drift.ErrBadRef, head)
+	}
+	return "1\t1\tinternal/cmd/jev_landing.go\n", nil
+}
+
+func (jevDriftMixedRepo) Patch(_ context.Context, _, head string) (string, error) {
+	if head != "h" {
+		return "", fmt.Errorf("%w: %q", drift.ErrBadRef, head)
+	}
+	return jevDriftRenamePatch, nil
+}
+
+// jevDriftCountingAsker counts the asks and passes each to the next asker, so
+// the control case measures the same fixture without an E-stop.
+type jevDriftCountingAsker struct {
+	inner jevAsker
+	calls int
+}
+
+func (a *jevDriftCountingAsker) Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error) {
+	a.calls++
+	return a.inner.Ask(ctx, state, qs)
+}
+
 // TestJevDriftPassStopsBetweenCallsWhenEstopped covers gt-dlnkz: the E-stop
 // kept a pass from starting, but one already in flight went on paying for every
 // doc section it reached. The call in flight finishes; the section behind it
-// waits for a pass run after the E-stop lifts.
+// waits for a pass run after the E-stop lifts. The control case raises no
+// E-stop, so the one call in the E-stop case is the stop's doing and not the
+// fixture's (gt-l40jb).
 func TestJevDriftPassStopsBetweenCallsWhenEstopped(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
 	t0 := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
-	if err := battery.WriteCursor(drift.CursorPath(town), battery.Cursor{Time: t0}); err != nil {
-		t.Fatal(err)
+	landings := jevDriftLandings{
+		{BeadID: "gt-bad", Rig: drift.RigName, Head: "bad", Base: "b", LandedAt: t0.Add(time.Minute)},
+		{BeadID: "gt-a", Rig: drift.RigName, Head: "h", Base: "b", LandedAt: t0.Add(2 * time.Minute)},
 	}
-	asker := &estoppingAsker{t: t, town: town}
-	logs := &bytes.Buffer{}
-	d := &Daemon{
-		config: &Config{TownRoot: town},
-		logger: log.New(logs, "", 0),
-		patrolConfig: &DaemonPatrolConfig{
-			Patrols: &PatrolsConfig{JevDrift: &JevDriftConfig{Enabled: true}},
+	for _, tc := range []struct {
+		name      string
+		asker     func(t *testing.T, town string) (jevAsker, func() int)
+		wantCalls int
+		wantLog   string
+	}{
+		{
+			name: "E-stop raised in the first call",
+			asker: func(t *testing.T, town string) (jevAsker, func() int) {
+				a := &estoppingAsker{t: t, town: town}
+				return a, func() int { return a.calls }
+			},
+			wantCalls: 1,
+			wantLog:   "jev_drift: stopped: E-STOP active after asking 0 landing(s), skipped 1",
 		},
-		jevDriftOpen: func(string, drift.Settings, io.Writer) (*drift.Pass, error) {
-			return &drift.Pass{
-				Asker:      asker,
-				Landings:   jevDriftLandings{{BeadID: "gt-a", Rig: drift.RigName, Head: "h", Base: "b", LandedAt: t0.Add(time.Minute)}},
-				Git:        jevDriftDocsRepo{},
-				LogPath:    drift.LogPath(town),
-				CursorPath: drift.CursorPath(town),
-				Allows:     func() (bool, error) { return true, nil },
-			}, nil
+		{
+			name: "control, no E-stop",
+			asker: func(*testing.T, string) (jevAsker, func() int) {
+				a := &jevDriftCountingAsker{inner: batteryAsker{}}
+				return a, func() int { return a.calls }
+			},
+			wantCalls: 2,
+			wantLog:   "jev_drift: asked 1 landings, skipped 1 (daily cap reached: false)",
 		},
-	}
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if err := battery.WriteCursor(drift.CursorPath(town), battery.Cursor{Time: t0}); err != nil {
+				t.Fatal(err)
+			}
+			asker, calls := tc.asker(t, town)
+			logs := &bytes.Buffer{}
+			d := &Daemon{
+				config: &Config{TownRoot: town},
+				logger: log.New(logs, "", 0),
+				patrolConfig: &DaemonPatrolConfig{
+					Patrols: &PatrolsConfig{JevDrift: &JevDriftConfig{Enabled: true}},
+				},
+				jevDriftOpen: func(string, drift.Settings, io.Writer) (*drift.Pass, error) {
+					return &drift.Pass{
+						Asker:      asker,
+						Landings:   landings,
+						Git:        jevDriftMixedRepo{},
+						LogPath:    drift.LogPath(town),
+						CursorPath: drift.CursorPath(town),
+						Allows:     func() (bool, error) { return true, nil },
+					}, nil
+				},
+			}
 
-	d.runJevDrift()
+			d.runJevDrift()
 
-	if asker.calls != 1 {
-		t.Errorf("Jev was asked about %d sections, want only the one in flight when the E-stop went up", asker.calls)
-	}
-	if !strings.Contains(logs.String(), "jev_drift: stopped: E-STOP active") {
-		t.Errorf("log = %q, want the pass to say it stopped for the E-stop", logs)
+			if got := calls(); got != tc.wantCalls {
+				t.Errorf("Jev was asked about %d sections, want %d", got, tc.wantCalls)
+			}
+			if !strings.Contains(logs.String(), tc.wantLog) {
+				t.Errorf("log = %q, want %q", logs, tc.wantLog)
+			}
+		})
 	}
 }

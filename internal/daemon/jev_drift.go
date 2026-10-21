@@ -76,7 +76,10 @@ func (d *Daemon) runJevDrift() {
 	pass.Asker = gate
 	sum, err := pass.Run(ctx)
 	if gate.stopped {
-		d.logger.Printf("jev_drift: stopped: E-STOP active after asking %d landing(s)", sum.Asked)
+		// The gate canceled the pass itself, so the lines below are for a pass
+		// that ran to its end. The skipped count stays on this line, or a
+		// stopped pass reads like a clean one that skipped nothing (gt-l40jb).
+		d.logger.Printf("jev_drift: stopped: E-STOP active after asking %d landing(s), skipped %d", sum.Asked, sum.Skipped)
 		return
 	}
 	if errors.Is(err, drift.ErrBusy) {
