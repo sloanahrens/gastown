@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -327,7 +328,17 @@ func resolveBdCloseInvariantScope(payloadCwd string, proc guardProcess) (bdClose
 	}
 
 	g := git.NewGit(cwd)
-	branch, target, ok := closeTimeBranchTarget(g, townRoot, rigName)
+	// The branch's own bead carries the base_branch its work lands on. Only a
+	// bead the branch was cut for is looked up: that is the only bead the
+	// guard judges (branchNamesBead), and a bead it cannot read falls back to
+	// the rig default.
+	var bead *beads.Issue
+	if current, err := g.CurrentBranch(); err == nil {
+		if id := branchBeadID(current); id != "" {
+			bead, _ = beads.New(cwd).Show(id)
+		}
+	}
+	branch, target, ok := closeTimeBranchTarget(g, townRoot, rigName, bead)
 	if !ok {
 		return bdCloseInvariantScope{}, false
 	}

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 )
 
@@ -33,7 +34,7 @@ func TestIntegrationDoneCloseTimeInvariantSkipReason(t *testing.T) {
 
 		// townRoot/rigName don't resolve to a real rig config, so the wrapper
 		// falls back to defaultBranch "main" — which matches the repo above.
-		got := doneCloseTimeInvariantSkipReason(dir, filepath.Join(dir, "no-such-town"), "no-such-rig", "gt-6hmz")
+		got := doneCloseTimeInvariantSkipReason(dir, filepath.Join(dir, "no-such-town"), "no-such-rig", &beads.Issue{ID: "gt-6hmz"})
 		if got != "" {
 			t.Errorf("expected close allowed with zero commits ahead of main, got skip reason %q", got)
 		}
@@ -53,7 +54,7 @@ func TestIntegrationDoneCloseTimeInvariantSkipReason(t *testing.T) {
 		testRunGit(t, dir, "add", ".")
 		testRunGit(t, dir, "commit", "-m", "initial")
 
-		got := doneCloseTimeInvariantSkipReason(dir, filepath.Join(dir, "no-such-town"), "no-such-rig", "gt-6hmz")
+		got := doneCloseTimeInvariantSkipReason(dir, filepath.Join(dir, "no-such-town"), "no-such-rig", &beads.Issue{ID: "gt-6hmz"})
 		if got != "" {
 			t.Errorf("expected close allowed when on the default branch, got skip reason %q", got)
 		}
@@ -123,9 +124,81 @@ func TestIntegrationDoneCloseTimeInvariantSkipReason(t *testing.T) {
 			t.Fatal("test setup invalid: expected local stale main to diverge from the branch")
 		}
 
-		got := doneCloseTimeInvariantSkipReason(work, filepath.Join(tmp, "no-such-town"), "no-such-rig", "gt-6hmz")
+		got := doneCloseTimeInvariantSkipReason(work, filepath.Join(tmp, "no-such-town"), "no-such-rig", &beads.Issue{ID: "gt-6hmz"})
 		if got != "" {
 			t.Errorf("expected close allowed comparing against origin/main (zero polecat commits), got skip reason %q — wrapper likely compared against stale local main instead", got)
+		}
+	})
+}
+
+// TestIntegrationCloseTimeBranchTargetHonoursBaseBranch: a bead whose base_branch is
+// develop is judged against origin/develop, the branch the submit path lands
+// it on, so a branch cut from origin/develop closes cleanly even though it
+// carries develop-only commits. A bead with no base_branch still resolves to
+// the rig default, and the same branch stays refused against origin/main.
+func TestIntegrationCloseTimeBranchTargetHonoursBaseBranch(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	seed := filepath.Join(tmp, "seed")
+	work := filepath.Join(tmp, "work")
+	noTown := filepath.Join(tmp, "no-such-town")
+
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
+	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.name", "Test")
+	testRunGit(t, seed, "commit", "--allow-empty", "-m", "initial")
+	testRunGit(t, seed, "remote", "add", "origin", remote)
+	testRunGit(t, seed, "push", "origin", "main")
+	testRunGit(t, seed, "checkout", "-b", "develop")
+	if err := os.WriteFile(filepath.Join(seed, "develop.txt"), []byte("develop\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "develop work")
+	testRunGit(t, seed, "push", "origin", "develop")
+
+	testRunGit(t, tmp, "clone", remote, work)
+	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.name", "Test")
+	testRunGit(t, work, "checkout", "-b", "polecat/basalt/gt-6hmz+abc", "origin/develop")
+
+	developBead := &beads.Issue{ID: "gt-6hmz", Description: `formula_vars: ["base_branch=develop"]`}
+	plainBead := &beads.Issue{ID: "gt-6hmz"}
+
+	t.Run("BaseBranchResolvesTarget", func(t *testing.T) {
+		t.Parallel()
+		branch, target, ok := closeTimeBranchTarget(git.NewGit(work), noTown, "no-such-rig", developBead)
+		if !ok {
+			t.Fatal("closeTimeBranchTarget ok = false, want true")
+		}
+		if branch != "polecat/basalt/gt-6hmz+abc" {
+			t.Errorf("branch = %q, want the polecat branch", branch)
+		}
+		if target != "origin/develop" {
+			t.Errorf("target = %q, want origin/develop", target)
+		}
+	})
+
+	t.Run("DevelopOnlyCommitsAllowClose", func(t *testing.T) {
+		t.Parallel()
+		if got := doneCloseTimeInvariantSkipReason(work, noTown, "no-such-rig", developBead); got != "" {
+			t.Errorf("expected close allowed against origin/develop, got skip reason %q", got)
+		}
+	})
+
+	t.Run("NoBaseBranchFallsBackToDefault", func(t *testing.T) {
+		t.Parallel()
+		_, target, ok := closeTimeBranchTarget(git.NewGit(work), noTown, "no-such-rig", plainBead)
+		if !ok {
+			t.Fatal("closeTimeBranchTarget ok = false, want true")
+		}
+		if target != "origin/main" {
+			t.Errorf("target = %q, want origin/main", target)
+		}
+		if got := doneCloseTimeInvariantSkipReason(work, noTown, "no-such-rig", plainBead); got == "" {
+			t.Error("expected close refused against origin/main, where the develop commit is not landed")
 		}
 	})
 }
