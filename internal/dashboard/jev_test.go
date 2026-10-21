@@ -2,6 +2,7 @@ package dashboard
 
 import (
 	"encoding/json"
+	"fmt"
 	"reflect"
 	"strconv"
 	"strings"
@@ -404,7 +405,14 @@ func TestParseJevScorecard(t *testing.T) {
               {"id":"fix_worthy","kind":"noul","logged":3,"labeled":2,"verdict":"earning"}],
  "lines":[{"id":"a","labeled":true},{"id":"b","labeled":false},{"id":"c","labeled":true}]}`,
 			JevBattery{Name: "finding", Lines: 3, Labeled: 2, Questions: []JevQuestion{
-				{ID: "any_duplicate", Verdict: "not-yet"}, {ID: "fix_worthy", Verdict: "earning"}}}},
+				{ID: "any_duplicate", Verdict: "not-yet", Labeled: 2}, {ID: "fix_worthy", Verdict: "earning", Labeled: 2}}}},
+		{"the chip's figures", `{"battery":"landing","items":9,"labeled":7,
+ "questions":[{"id":"first_try","kind":"noul","logged":9,"labeled":7,"positives":3,"negatives":4,"base_rate":0.25,"precision":0.625,"recall":0.5,"verdict":"earning"}]}`,
+			JevBattery{Name: "landing", Lines: 9, Labeled: 7, Questions: []JevQuestion{
+				{ID: "first_try", Verdict: "earning", Labeled: 7, BaseRate: jevFloat(0.25), Precision: jevFloat(0.625)}}}},
+		{"a null figure is absent", `{"battery":"drift","items":4,
+ "questions":[{"id":"noise","kind":"noul","logged":4,"labeled":1,"base_rate":null,"precision":null,"recall":null,"verdict":"not-yet"}]}`,
+			JevBattery{Name: "drift", Lines: 4, Questions: []JevQuestion{{ID: "noise", Verdict: "not-yet", Labeled: 1}}}},
 		{"the labeled total stands in for rows the report left out", `{"battery":"testsel","items":9000,"labeled":6000,"lines_omitted":true,
  "questions":[{"id":"affects_tests","verdict":"earning"}]}`,
 			JevBattery{Name: "testsel", Lines: 9000, Labeled: 6000, Questions: []JevQuestion{{ID: "affects_tests", Verdict: "earning"}}}},
@@ -600,8 +608,35 @@ func TestHubLeavesAPlaceholderForABatteryItNeverRead(t *testing.T) {
 	}
 }
 
-// The JEV panel draws the batteries a partial read kept, names the lost ones on
-// the title line, and marks a lost line stale or unavailable.
+// jevFloat is a scorecard figure for a want value.
+func jevFloat(v float64) *float64 { return &v }
+
+// jevDrawn is one element a JEV row's questions cell holds: a question's chip,
+// the fold's chip button, or the folded list of not-yet chips.
+type jevDrawn struct {
+	Tag    string     `json:"tag"`
+	Class  string     `json:"class"`
+	Text   string     `json:"text"`
+	Title  string     `json:"title"`
+	Hidden bool       `json:"hidden"`
+	Kids   []jevDrawn `json:"kids"`
+}
+
+// jevCellDrawn is one cell of a JEV row, with what its questions cell holds.
+type jevCellDrawn struct {
+	Class string     `json:"class"`
+	Text  string     `json:"text"`
+	Kids  []jevDrawn `json:"kids"`
+}
+
+// jevRowDrawn is one row of the JEV table.
+type jevRowDrawn struct {
+	Class string         `json:"class"`
+	Cells []jevCellDrawn `json:"cells"`
+}
+
+// The JEV panel draws the batteries a partial read kept as table rows, names the
+// lost ones on the title line, and marks a lost line stale or unavailable.
 func TestJevPanelNamesTheBatteriesTheReadLost(t *testing.T) {
 	t.Parallel()
 
@@ -615,39 +650,39 @@ func TestJevPanelNamesTheBatteriesTheReadLost(t *testing.T) {
 	sc["unavailable"] = []any{"dispatch", "drift"}
 	sc["totals"] = map[string]any{"batteries": 2, "lines": 216, "labeled": 141}
 
-	lines, note, _ := drawJev(t, s)
-	var got []string
-	for _, l := range lines {
-		got = append(got, l.Text)
-	}
+	rows, note, _ := drawJev(t, s)
+	got := jevRowTexts(rows)
 	want := []string{
-		"finding 212 lines 140 labeled",
-		"dispatch 4 lines 1 labeled (stale: the read failed)",
-		"drift unavailable",
+		"dispatch41 (stale: the read failed)",
+		"drift--unavailable",
+		"finding212140",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("JEV lines = %q, want %q", got, want)
+		t.Errorf("JEV rows = %q, want %q", got, want)
 	}
-	if wantNote := "2 batteries · 216 lines · 141 labeled · 0 earning · 0 no-signal · 2 unavailable: dispatch, drift"; note.Text != wantNote {
+	if wantNote := "2 batteries · 216 lines · 141 labeled 0 earning 0 no-signal 0 not-yet · 2 unavailable: dispatch, drift"; note.Text != wantNote {
 		t.Errorf("JEV title line = %q, want %q", note.Text, wantNote)
+	}
+	if note.Class != "r warnc" {
+		t.Errorf("a title line naming lost batteries wears %q, want the amber class", note.Class)
 	}
 }
 
 // jevScorecardState is the JEV panel's read of three batteries: finding, with
-// two questions; landing, with no log; and targets, with one question. The
-// totals are what Tally makes of them, which TestJevScorecardTallyCountsTheTitleLine
-// pins.
+// an earning and a not-yet question; landing, with no log; and targets, with
+// one no-signal question. The totals are what Tally makes of them, which
+// TestJevScorecardTallyCountsTheTitleLine pins.
 func jevScorecardState(now time.Time, read map[string]any) map[string]any {
 	over := map[string]any{
 		"reads": jevRead(nil),
 		"jev_scorecard": map[string]any{"window": "7d", "batteries": []any{
 			map[string]any{"name": "finding", "lines": 212, "labeled": 140, "questions": []any{
-				map[string]any{"id": "fix_worthy", "verdict": "earning"},
-				map[string]any{"id": "any_duplicate", "verdict": "not-yet"}}},
+				map[string]any{"id": "fix_worthy", "verdict": "earning", "labeled": 140, "base_rate": 0.5, "precision": 0.75},
+				map[string]any{"id": "any_duplicate", "verdict": "not-yet", "labeled": 40}}},
 			map[string]any{"name": "landing", "lines": 0, "labeled": 0},
 			map[string]any{"name": "targets", "lines": 9, "labeled": 0, "questions": []any{
-				map[string]any{"id": "needs_review", "verdict": "no-signal"}}},
-		}, "totals": map[string]any{"batteries": 3, "lines": 221, "labeled": 140, "earning": 1, "no_signal": 1}},
+				map[string]any{"id": "needs_review", "verdict": "no-signal", "labeled": 9, "base_rate": 0.111}}},
+		}, "totals": map[string]any{"batteries": 3, "lines": 221, "labeled": 140, "earning": 1, "no_signal": 1, "not_yet": 1}},
 	}
 	reads := over["reads"].(map[string]any)
 	reads["jev_scorecard"] = map[string]any{"at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339), "every_sec": 900}
@@ -657,45 +692,258 @@ func jevScorecardState(now time.Time, read map[string]any) map[string]any {
 	return jevStateAt(now, over)
 }
 
-// drawJev runs renderJev over s and reads back the JEV panel's lines, its title
+// jevTableJS reads the panel's table back as rows of cells, each cell with what
+// it holds. A panel that drew no table reads as no rows.
+const jevTableJS = `JSON.stringify((function () {
+  var box = __byId["jev"], t = box.children[0], rows = [];
+  if (!t || t.tagName !== "TABLE") return rows;
+  for (var i = 0; i < t.children.length; i++) {
+    var g = t.children[i];
+    if (g.tagName === "THEAD") continue;
+    for (var j = 0; j < g.children.length; j++) {
+      var tr = g.children[j], cells = [];
+      for (var k = 0; k < tr.children.length; k++) {
+        var td = tr.children[k], kids = [];
+        for (var m = 0; m < td.children.length; m++) {
+          var c = td.children[m], sub = [];
+          for (var n = 0; n < c.children.length; n++) {
+            var d = c.children[n];
+            sub.push({tag: d.tagName, class: d.className, text: d.textContent, title: d.title, hidden: !!d.hidden, kids: []});
+          }
+          kids.push({tag: c.tagName, class: c.className, text: c.textContent, title: c.title, hidden: !!c.hidden, kids: sub});
+        }
+        cells.push({class: td.className, text: td.textContent, kids: kids});
+      }
+      rows.push({class: tr.className, cells: cells});
+    }
+  }
+  return rows;
+})())`
+
+// drawJev runs renderJev over s and reads back the JEV panel's rows, its title
 // line and the panel itself.
-func drawJev(t *testing.T, s map[string]any) (lines []costLine, note, sec drawn) {
+func drawJev(t *testing.T, s map[string]any) (rows []jevRowDrawn, note, sec drawn) {
 	t.Helper()
-	dom := newPageDOM(t)
+	return drawJevIn(t, newPageDOM(t), s)
+}
+
+// drawJevIn is drawJev on a page the caller keeps, so a test can click what the
+// panel drew and read it again.
+func drawJevIn(t *testing.T, dom *pageDOM, s map[string]any) (rows []jevRowDrawn, note, sec drawn) {
+	t.Helper()
 	dom.call(t, "renderJev", s)
-	v, err := dom.vm.RunString(`JSON.stringify(__byId["jev"].children.map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
+	v, err := dom.vm.RunString(jevTableJS)
 	if err != nil {
 		t.Fatalf("reading the JEV panel: %v", err)
 	}
-	if err := json.Unmarshal([]byte(v.String()), &lines); err != nil {
+	if err := json.Unmarshal([]byte(v.String()), &rows); err != nil {
 		t.Fatalf("reading the JEV panel: %v", err)
 	}
-	return lines, dom.element(t, "jevnote"), dom.element(t, "jevsec")
+	return rows, dom.element(t, "jevnote"), dom.element(t, "jevsec")
 }
 
-// The JEV panel draws one line per battery, and its title line the totals over
-// all of them.
-func TestJevPanelDrawsOneLinePerBatteryUnderItsTotals(t *testing.T) {
+// jevRowTexts is each row's text: its cells side by side, as the table reads.
+func jevRowTexts(rows []jevRowDrawn) []string {
+	var out []string
+	for _, r := range rows {
+		var s string
+		for _, c := range r.Cells {
+			s += c.Text
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+// jevNoteChips reads the title line's chips in the order it drew them.
+func jevNoteChips(t *testing.T, dom *pageDOM) []jevDrawn {
+	t.Helper()
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["jevnote"].children.filter(c => c.className && c.className.indexOf("jvchip") === 0).map(c => ({tag: c.tagName, class: c.className, text: c.textContent, title: c.title})))`)
+	if err != nil {
+		t.Fatalf("reading the JEV title line's chips: %v", err)
+	}
+	var chips []jevDrawn
+	if err := json.Unmarshal([]byte(v.String()), &chips); err != nil {
+		t.Fatalf("reading the JEV title line's chips: %v", err)
+	}
+	return chips
+}
+
+// jevClickFold clicks row's not-yet chip and reports whether the row's folded
+// list is hidden afterwards.
+func jevClickFold(t *testing.T, dom *pageDOM, row int) bool {
+	t.Helper()
+	v, err := dom.vm.RunString(fmt.Sprintf(`(function () {
+  var td = __byId["jev"].children[0].children[1].children[%d].children[3], btn = null, more = null;
+  for (var i = 0; i < td.children.length; i++) {
+    if (td.children[i].tagName === "BUTTON") btn = td.children[i];
+    if (td.children[i].className === "jvmore") more = td.children[i];
+  }
+  __click(btn);
+  return !!more.hidden;
+})()`, row))
+	if err != nil {
+		t.Fatalf("clicking a not-yet chip: %v", err)
+	}
+	return v.ToBoolean()
+}
+
+// jevTexts is the text of the elements one questions cell holds.
+func jevTexts(kids []jevDrawn) []string {
+	var out []string
+	for _, k := range kids {
+		out = append(out, k.Text)
+	}
+	return out
+}
+
+// The JEV panel draws one table row per battery, its name and counts then its
+// questions as chips: the earning and no-signal ones shown, the not-yet ones
+// folded behind a count chip. The rows are in name order.
+func TestJevPanelDrawsOneRowPerBatteryInNameOrder(t *testing.T) {
 	t.Parallel()
 
-	lines, note, sec := drawJev(t, jevScorecardState(time.Now(), nil))
+	s := jevScorecardState(time.Now(), nil)
+	s["jev_scorecard"].(map[string]any)["batteries"] = []any{
+		map[string]any{"name": "targets", "lines": 9, "questions": []any{
+			map[string]any{"id": "needs_review", "verdict": "no-signal"}}},
+		map[string]any{"name": "finding", "lines": 212, "labeled": 140, "questions": []any{
+			map[string]any{"id": "fix_worthy", "verdict": "earning"},
+			map[string]any{"id": "any_duplicate", "verdict": "not-yet"}}},
+		map[string]any{"name": "landing"},
+	}
+
+	rows, note, sec := drawJev(t, s)
 	if sec.Hidden {
 		t.Error("the JEV panel is hidden under a readable scorecard")
 	}
-	var got []string
-	for _, l := range lines {
-		got = append(got, l.Text)
+	if len(rows) != 3 {
+		t.Fatalf("the panel drew %d rows, want one per battery", len(rows))
 	}
-	want := []string{
-		"finding 212 lines 140 labeled fix_worthy:earning any_duplicate:not-yet",
-		"landing -",
-		"targets 9 lines 0 labeled needs_review:no-signal",
+	for i, want := range []string{"finding", "landing", "targets"} {
+		if got := rows[i].Cells[0].Text; got != want {
+			t.Errorf("row %d is %q, want %q: the rows are not in name order", i, got, want)
+		}
 	}
-	if !reflect.DeepEqual(got, want) {
-		t.Errorf("JEV lines = %q, want %q", got, want)
+
+	finding := rows[0].Cells
+	if finding[1].Text != "212" || finding[2].Text != "140" {
+		t.Errorf("finding's counts = %q, %q, want 212 and 140", finding[1].Text, finding[2].Text)
 	}
-	if wantNote := "3 batteries · 221 lines · 140 labeled · 1 earning · 1 no-signal"; note.Text != wantNote {
+	if got, want := finding[3].Class, "jvq"; got != want {
+		t.Errorf("finding's questions cell wears %q, want %q", got, want)
+	}
+	if got, want := jevTexts(finding[3].Kids), []string{"fix_worthy", "+1 not yet", "any_duplicate"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("finding's chips = %q, want %q", got, want)
+	}
+
+	// A battery with no log in the window is a dash row and holds no chips.
+	landing := rows[1].Cells
+	if landing[1].Text != "-" || landing[2].Text != "-" || len(landing[3].Kids) != 0 {
+		t.Errorf("a battery with no log drew %+v, want a dash row", landing)
+	}
+
+	// The three verdicts are chips beside the totals, green, amber and dim.
+	if got, want := (jevRowTexts(rows))[2], "targets90needs_review"; got != want {
+		t.Errorf("targets' row = %q, want %q", got, want)
+	}
+	if wantNote := "3 batteries · 221 lines · 140 labeled 1 earning 1 no-signal 1 not-yet"; note.Text != wantNote {
 		t.Errorf("JEV title line = %q, want %q", note.Text, wantNote)
+	}
+}
+
+// The title line's verdict counts are chips coloured from the page's tokens,
+// and its tooltip says what each verdict means.
+func TestJevTitleLineCountsTheVerdictsAsChips(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	_, note, _ := drawJevIn(t, dom, jevScorecardState(time.Now(), nil))
+	chips := jevNoteChips(t, dom)
+	want := []struct{ text, class, title string }{
+		{"1 earning", "jvchip jv-earning", "enough labels and a signal"},
+		{"1 no-signal", "jvchip jv-nosignal", "enough labels, nothing beyond the base rate"},
+		{"1 not-yet", "jvchip jv-notyet", "under 30 labels"},
+	}
+	if len(chips) != len(want) {
+		t.Fatalf("the title line drew %d chips, want %d: %+v", len(chips), len(want), chips)
+	}
+	for i, w := range want {
+		if chips[i].Text != w.text || chips[i].Class != w.class || chips[i].Title != w.title {
+			t.Errorf("title chip %d = %+v, want %q in %q saying %q", i, chips[i], w.text, w.class, w.title)
+		}
+	}
+	for _, w := range want {
+		if !strings.Contains(note.Title, w.title) {
+			t.Errorf("the title line's tooltip %q does not say %q", note.Title, w.title)
+		}
+	}
+}
+
+// A question's chip carries the figures the scorecard reported for it, and none
+// of the ones it left out.
+func TestJevQuestionChipCarriesTheReportsFigures(t *testing.T) {
+	t.Parallel()
+
+	rows, _, _ := drawJev(t, jevScorecardState(time.Now(), nil))
+	finding := rows[0].Cells[3].Kids
+	if got, want := finding[0].Title, "labeled 140 · base rate 50.0% · precision at 0.5 75.0%"; got != want {
+		t.Errorf("the earning chip's tooltip = %q, want %q", got, want)
+	}
+	if got, want := finding[1].Class, "jvchip jv-notyet jvfold"; got != want {
+		t.Errorf("the fold chip wears %q, want %q", got, want)
+	}
+	if got, want := finding[2].Kids[0].Title, "labeled 40"; got != want {
+		t.Errorf("the not-yet chip's tooltip = %q, want %q: the report gives it no base rate", got, want)
+	}
+	if got, want := rows[2].Cells[3].Kids[0].Title, "labeled 9 · base rate 11.1%"; got != want {
+		t.Errorf("the no-signal chip's tooltip = %q, want %q", got, want)
+	}
+}
+
+// A row's not-yet questions stay folded until its chip is clicked, the fold
+// shows how many there are, and the choice survives the draw that follows.
+func TestJevPanelFoldsNotYetQuestionsUntilOpened(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	rows, _, _ := drawJevIn(t, dom, jevScorecardState(time.Now(), nil))
+	if fold := rows[0].Cells[3].Kids[1]; len(fold.Kids) != 0 {
+		t.Errorf("the fold chip holds the questions instead of the list: %+v", fold)
+	}
+	more := rows[0].Cells[3].Kids[2]
+	if more.Class != "jvmore" || !more.Hidden || more.Text != "any_duplicate" {
+		t.Fatalf("finding's not-yet questions are not folded: %+v", more)
+	}
+
+	if hidden := jevClickFold(t, dom, 0); hidden {
+		t.Error("clicking the not-yet chip did not open the fold")
+	}
+	rows, _, _ = drawJevIn(t, dom, jevScorecardState(time.Now(), nil))
+	if more := rows[0].Cells[3].Kids[2]; more.Hidden {
+		t.Error("the fold folded itself back on the next draw")
+	}
+
+	if hidden := jevClickFold(t, dom, 0); !hidden {
+		t.Error("clicking the not-yet chip again did not fold the list")
+	}
+}
+
+// A battery whose every question is not-yet shows the count alone, without the
+// plus that says other questions are shown beside it.
+func TestJevPanelShowsTheCountAloneWhenEveryQuestionIsNotYet(t *testing.T) {
+	t.Parallel()
+
+	s := jevScorecardState(time.Now(), nil)
+	s["jev_scorecard"].(map[string]any)["batteries"] = []any{
+		map[string]any{"name": "drift", "lines": 40, "questions": []any{
+			map[string]any{"id": "sections_stable", "verdict": "not-yet"},
+			map[string]any{"id": "doc_follows", "verdict": "not-yet"}}},
+	}
+	rows, _, _ := drawJev(t, s)
+	kids := rows[0].Cells[3].Kids
+	if len(kids) != 2 || kids[0].Text != "2 not yet" || kids[1].Class != "jvmore" || len(kids[1].Kids) != 2 {
+		t.Errorf("a battery with only not-yet questions drew %+v, want \"2 not yet\" over its two chips", kids)
 	}
 }
 
@@ -732,12 +980,12 @@ func TestJevPanelFailureSaysUnavailableOnItsTitle(t *testing.T) {
 		"stale":  {map[string]any{"stale": true}, "unavailable — the read went stale", "r warnc"},
 	}
 	for name, tc := range cases {
-		lines, note, _ := drawJev(t, jevScorecardState(now, tc.read))
+		rows, note, _ := drawJev(t, jevScorecardState(now, tc.read))
 		if note.Text != tc.want || note.Class != tc.class {
 			t.Errorf("%s: title line = %q (class %q), want %q (class %q)", name, note.Text, note.Class, tc.want, tc.class)
 		}
-		if len(lines) != 0 {
-			t.Errorf("%s: drew %q from an unreadable scorecard", name, costTexts(lines))
+		if len(rows) != 0 {
+			t.Errorf("%s: drew %v from an unreadable scorecard", name, jevRowTexts(rows))
 		}
 		cost, _ := drawCost(t, jevScorecardState(now, tc.read))
 		if got, _ := findLine(cost, "Jev spend"); got != spend {
@@ -788,18 +1036,36 @@ func TestJevPanelSitsAfterTierSweepsAndFoldsUntilOpened(t *testing.T) {
 	}
 }
 
+// The verdict colours are the page's own tokens, so the chips read the same in
+// every theme the page carries.
+func TestJevChipsTakeThePagesColourTokens(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	for _, want := range []string{
+		".jv-earning{color:var(--green)}",
+		".jv-nosignal{color:var(--amber)}",
+		".jv-notyet{color:var(--dim)}",
+		".jvname{white-space:nowrap}",
+	} {
+		if !strings.Contains(page, want) {
+			t.Errorf("index.html's style has no %q", want)
+		}
+	}
+}
+
 // The title line's totals are the sums Tally makes over the batteries: lines
-// and labeled lines, and the questions earning and no-signal.
+// and labeled lines, and the questions carrying each verdict.
 func TestJevScorecardTallyCountsTheTitleLine(t *testing.T) {
 	t.Parallel()
 
 	sc := JevScorecard{Batteries: []JevBattery{
 		{Name: "finding", Lines: 212, Labeled: 140, Questions: []JevQuestion{{ID: "fix_worthy", Verdict: "earning"}, {ID: "any_duplicate", Verdict: "not-yet"}}},
 		{Name: "landing"},
-		{Name: "targets", Lines: 9, Questions: []JevQuestion{{ID: "needs_review", Verdict: "no-signal"}}},
+		{Name: "targets", Lines: 9, Questions: []JevQuestion{{ID: "needs_review", Verdict: "no-signal"}, {ID: "noise", Verdict: "not-yet"}}},
 	}}
 	sc.Tally()
-	if want := (JevTotals{Batteries: 3, Lines: 221, Labeled: 140, Earning: 1, NoSignal: 1}); sc.Totals != want {
+	if want := (JevTotals{Batteries: 3, Lines: 221, Labeled: 140, Earning: 1, NoSignal: 1, NotYet: 2}); sc.Totals != want {
 		t.Errorf("Totals = %+v, want %+v", sc.Totals, want)
 	}
 }

@@ -100,14 +100,15 @@ type JevScorecard struct {
 }
 
 // JevTotals sums the batteries for the JEV panel's title line: how many
-// batteries, their lines and labeled lines, and how many questions earned a
-// verdict of earning or no-signal.
+// batteries, their lines and labeled lines, and how many questions carry each
+// verdict.
 type JevTotals struct {
 	Batteries int `json:"batteries"`
 	Lines     int `json:"lines"`
 	Labeled   int `json:"labeled"`
 	Earning   int `json:"earning"`
 	NoSignal  int `json:"no_signal"`
+	NotYet    int `json:"not_yet"`
 }
 
 // Tally sets Totals and Unavailable from Batteries. The reader calls it once a
@@ -133,6 +134,8 @@ func (sc *JevScorecard) Tally() {
 				t.Earning++
 			case "no-signal":
 				t.NoSignal++
+			case "not-yet":
+				t.NotYet++
 			}
 		}
 	}
@@ -154,10 +157,18 @@ type JevBattery struct {
 	Kept   bool `json:"kept,omitempty"`
 }
 
-// JevQuestion is a question's verdict: earning, not-yet or no-signal.
+// JevQuestion is a question's verdict: earning, not-yet or no-signal, with the
+// scorecard's own figures for the chip's tooltip. A figure the report leaves
+// out, or prints as null, is absent rather than zero.
 type JevQuestion struct {
 	ID      string `json:"id"`
 	Verdict string `json:"verdict"`
+	// Labeled is how many of the battery's labeled lines carried an answer to
+	// this question; a question with none prints nothing there.
+	Labeled int `json:"labeled,omitempty"`
+	// BaseRate and Precision are fractions; Precision is at 0.5.
+	BaseRate  *float64 `json:"base_rate,omitempty"`
+	Precision *float64 `json:"precision,omitempty"`
 }
 
 // ParseJevScorecard folds the JSON `gt jev scorecard --json` prints for one
@@ -175,8 +186,11 @@ func ParseJevScorecard(out []byte) (*JevBattery, error) {
 		Items     *int   `json:"items"`
 		Labeled   *int   `json:"labeled"`
 		Questions []struct {
-			ID      string `json:"id"`
-			Verdict string `json:"verdict"`
+			ID        string   `json:"id"`
+			Verdict   string   `json:"verdict"`
+			Labeled   int      `json:"labeled"`
+			BaseRate  *float64 `json:"base_rate"`
+			Precision *float64 `json:"precision"`
 		} `json:"questions"`
 		Lines []struct {
 			Labeled bool `json:"labeled"`
@@ -201,7 +215,7 @@ func ParseJevScorecard(out []byte) (*JevBattery, error) {
 		}
 	}
 	for _, q := range rep.Questions {
-		b.Questions = append(b.Questions, JevQuestion{ID: q.ID, Verdict: q.Verdict})
+		b.Questions = append(b.Questions, JevQuestion{ID: q.ID, Verdict: q.Verdict, Labeled: q.Labeled, BaseRate: q.BaseRate, Precision: q.Precision})
 	}
 	return b, nil
 }

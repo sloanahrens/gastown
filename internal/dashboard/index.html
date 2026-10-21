@@ -158,6 +158,16 @@ section.collapsed>h2{border-bottom:0}
 .ltable td.n,.ltable th.n{padding-left:14px}
 .ltable td:nth-child(2){overflow-wrap:anywhere}
 .good{color:var(--green)}.warnc{color:var(--amber)}.badc{color:var(--red)}
+/* The JEV panel's chips. A chip is inline-block, so a battery's questions wrap
+   inside their cell; the battery name is nowrap, so a name never splits. */
+.jvtable td{vertical-align:top}
+.jvname{white-space:nowrap}
+.jvchip{display:inline-block;border:1px solid currentColor;border-radius:999px;padding:0 7px;margin:1px 4px 1px 0;font:inherit;font-size:11px;line-height:16px;white-space:nowrap;background:none}
+.jv-earning{color:var(--green)}.jv-nosignal{color:var(--amber)}.jv-notyet{color:var(--dim)}
+button.jvfold{cursor:pointer}
+button.jvfold:hover{color:var(--text)}
+.jvmore{margin-top:2px}
+.jvstale td{color:var(--dim)}
 .sweepico{font-weight:700}
 #alertsctl{cursor:pointer;background:none;font:inherit;font-size:12px;color:var(--dim);border:1px solid var(--line);border-radius:999px;padding:2px 10px}
 #alertsctl.on{color:var(--teal);border-color:var(--teal)}
@@ -3233,16 +3243,94 @@ function costJev(box, j, r) {
 }
 
 // The JEV panel, under the Tier sweeps and folded until opened. Its title line
-// carries the totals over every battery; each battery's line sits under it: the
-// battery, its lines logged and how many of them are labeled (each count
-// worded, as on the title line), then each question's verdict as id:verdict. A
-// battery with no log in the window is a dash. A failed or stale read says
-// unavailable on the title line and draws no lines, since the last window's
-// verdicts would pass as current. A read that lost only some batteries draws
-// the rest, names the lost ones on the title line, and shows a lost battery's
-// last good line marked stale, or its name alone. Neither a report nor a status
-// means no scorecard command is configured, or it has not answered yet, so the
-// panel stays hidden.
+// carries the totals over every battery and a chip per verdict, each chip's
+// meaning on the title's tooltip; a table under it gives each battery a row:
+// its name, lines logged and labeled lines, then its questions as chips. The
+// not-yet questions fold behind their count, since a battery has far more of
+// those than of the verdicts worth reading at a glance. A battery with no log
+// in the window is a dash row. A failed or stale read says unavailable on the
+// title line and draws no rows, since the last window's verdicts would pass as
+// current. A read that lost only some batteries draws the rest, names the lost
+// ones on the title line, and shows a lost battery's last good row marked
+// stale, or its name alone. Neither a report nor a status means no scorecard
+// command is configured, or it has not answered yet, so the panel stays hidden.
+// The verdict chips are earning green, no-signal amber, not-yet dim,
+// from the tokens every other panel colours with so both themes read them. Each
+// verdict's sentence is what the operator hovers the title line for.
+const JV_VERDICTS = ["earning", "no-signal", "not-yet"];
+const JV_CLASS = {earning: "jv-earning", "no-signal": "jv-nosignal", "not-yet": "jv-notyet"};
+const JV_MEANING = {
+  earning: "enough labels and a signal",
+  "no-signal": "enough labels, nothing beyond the base rate",
+  "not-yet": "under 30 labels",
+};
+// The batteries whose not-yet questions the operator opened. The panel is drawn
+// again on every event, so a row that folded itself back would lose the place
+// the operator had opened it at.
+const jevOpened = new Set();
+
+function jevPct(v) { return (v * 100).toFixed(1) + "%"; }
+
+function jevChip(verdict, text, title) {
+  const c = el("span", "jvchip " + (JV_CLASS[verdict] || "jv-notyet"), text);
+  if (title) c.title = title;
+  return c;
+}
+
+// jevQuestionChip draws one question. Its tooltip carries the figures the
+// scorecard reported for it, and only those: an older report omits them.
+function jevQuestionChip(q) {
+  const bits = [];
+  if (q.labeled) bits.push("labeled " + q.labeled);
+  if (q.base_rate != null) bits.push("base rate " + jevPct(q.base_rate));
+  if (q.precision != null) bits.push("precision at 0.5 " + jevPct(q.precision));
+  return jevChip(q.verdict, q.id, bits.join(" · "));
+}
+
+// jevRow draws one battery: its name and counts, then its questions as chips. A
+// battery with no log in the window is a dash row; a kept or lost line says so
+// in the questions cell.
+function jevRow(b) {
+  const tr = el("tr", b.failed ? "jvstale" : "");
+  tr.append(el("td", "jvname", b.name));
+  const has = b.lines > 0;
+  tr.append(el("td", "n", has ? String(b.lines) : "-"), el("td", "n", has ? String(b.labeled || 0) : "-"));
+  const cell = el("td", "jvq");
+  tr.append(cell);
+  if (b.failed && !b.kept) {
+    cell.append(el("span", "empty", "unavailable"));
+    return tr;
+  }
+  const qs = b.questions || [];
+  // Any verdict this page does not colour folds with not-yet rather than being
+  // dropped, so a scorecard that grows a verdict still shows its questions.
+  const shown = qs.filter(q => q.verdict === "earning" || q.verdict === "no-signal");
+  const pending = qs.filter(q => q.verdict !== "earning" && q.verdict !== "no-signal");
+  for (const q of shown) cell.append(jevQuestionChip(q));
+  if (pending.length) {
+    const more = el("div", "jvmore");
+    more.hidden = !jevOpened.has(b.name);
+    for (const q of pending) more.append(jevQuestionChip(q));
+    // The plus says the row is showing fewer questions than the battery has.
+    const fold = el("button", "jvchip jv-notyet jvfold", (shown.length ? "+" : "") + pending.length + " not yet");
+    fold.type = "button";
+    const word = () => { fold.title = (jevOpened.has(b.name) ? "hide" : "show") + " this battery's not-yet questions"; };
+    word();
+    fold.onclick = () => {
+      if (jevOpened.has(b.name)) jevOpened.delete(b.name); else jevOpened.add(b.name);
+      more.hidden = !jevOpened.has(b.name);
+      word();
+    };
+    cell.append(fold, more);
+  }
+  if (b.failed) cell.append(el("span", "empty", " (stale: the read failed)"));
+  return tr;
+}
+
+// renderJev draws the JEV panel: the totals as the title line, three verdict
+// counts as chips beside it, then one table row per battery in name order, its
+// earning and no-signal questions as chips and the not-yet ones folded. The
+// counts come from the server's Tally, so the page never adds them up.
 function renderJev(s) {
   const sec = $("jevsec"), box = $("jev"), note = $("jevnote");
   const sc = s.jev_scorecard, r = readOf(s, "jev_scorecard");
@@ -3258,21 +3346,27 @@ function renderJev(s) {
   }
   const t = sc.totals || {};
   const lost = sc.unavailable || [];
-  const parts = [(t.batteries || 0) + (t.batteries === 1 ? " battery" : " batteries"), (t.lines || 0) + " lines", (t.labeled || 0) + " labeled", (t.earning || 0) + " earning", (t.no_signal || 0) + " no-signal"];
-  if (lost.length) parts.push(lost.length + " unavailable: " + lost.join(", "));
-  note.textContent = parts.join(" · ");
-  if (lost.length) note.className = "r warnc";
-  for (const b of sc.batteries || []) {
-    if (b.failed && !b.kept) {
-      box.append(el("div", "empty", b.name + " unavailable"));
-      continue;
-    }
-    const words = b.lines > 0
-      ? [b.name, b.lines + " lines", b.labeled + " labeled"].concat((b.questions || []).map(q => q.id + ":" + q.verdict))
-      : [b.name, "-"];
-    if (b.failed) words.push("(stale: the read failed)");
-    box.append(el("div", b.failed ? "empty" : "", words.join(" ")));
+  note.append(document.createTextNode([(t.batteries || 0) + (t.batteries === 1 ? " battery" : " batteries"), (t.lines || 0) + " lines", (t.labeled || 0) + " labeled"].join(" · ")));
+  const counts = {earning: t.earning || 0, "no-signal": t.no_signal || 0, "not-yet": t.not_yet || 0};
+  for (const v of JV_VERDICTS) note.append(document.createTextNode(" "), jevChip(v, counts[v] + " " + v, JV_MEANING[v]));
+  note.title = JV_VERDICTS.map(v => v + ": " + JV_MEANING[v] + ".").join(" ");
+  if (lost.length) {
+    note.append(document.createTextNode(" · " + lost.length + " unavailable: " + lost.join(", ")));
+    note.className = "r warnc";
   }
+
+  const table = el("table", "jvtable");
+  const head = el("tr");
+  head.append(el("th", "", "battery"), el("th", "n", "lines"), el("th", "n", "labeled"), el("th", "", "questions"));
+  const thead = document.createElement("thead"); thead.append(head); table.append(thead);
+  const body = document.createElement("tbody"); table.append(body);
+  box.append(table);
+
+  const batteries = (sc.batteries || []).slice().sort((a, b) => {
+    const x = a.name || "", y = b.name || "";
+    return x < y ? -1 : x > y ? 1 : 0;
+  });
+  for (const b of batteries) body.append(jevRow(b));
 }
 
 // The Cost panel: what the town is spending, in one place. DeepSeek's balance,
