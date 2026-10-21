@@ -521,6 +521,46 @@ func TestHubKeepsEachBatterysLastGoodLineAcrossItsOwnFailedRead(t *testing.T) {
 	}
 }
 
+// A kept line is dropped to the battery's name once its last good read is older
+// than jevKeptMaxAge; a good read in between restarts the clock.
+func TestHubDropsAKeptLineOlderThanItsAgeBound(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	reads := []bool{true, false, false, false}
+	next := 0
+	h := NewHub(Config{
+		Now: func() time.Time { return now },
+		JevScorecard: func() *JevScorecard {
+			ok := reads[next]
+			next++
+			sc := &JevScorecard{Batteries: []JevBattery{{Name: "landing", Lines: 5}}}
+			if !ok {
+				sc.Batteries[0] = JevBattery{Name: "landing", Failed: true}
+			}
+			sc.Tally()
+			return sc
+		},
+	})
+	poll := func() JevBattery {
+		h.pollJevScorecard()
+		return h.State().JevScorecard.Batteries[0]
+	}
+
+	poll()
+	now = now.Add(jevKeptMaxAge)
+	if got := poll(); !got.Kept || got.Lines != 5 {
+		t.Errorf("a line exactly at its bound = %+v, want it kept", got)
+	}
+	now = now.Add(time.Second)
+	if got := poll(); got.Kept || got.Lines != 0 || !got.Failed {
+		t.Errorf("a line past its bound = %+v, want the name alone", got)
+	}
+	if got := poll(); got.Kept {
+		t.Errorf("an expired line came back on a later failed read: %+v", got)
+	}
+}
+
 // A battery the hub never read a good line for stays a bare placeholder.
 func TestHubLeavesAPlaceholderForABatteryItNeverRead(t *testing.T) {
 	t.Parallel()
