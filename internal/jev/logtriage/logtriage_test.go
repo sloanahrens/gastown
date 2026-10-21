@@ -1,0 +1,476 @@
+package logtriage
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/jev"
+	"github.com/steveyegge/gastown/internal/jev/battery"
+)
+
+// The fixture log's lines. Two tick lines and two merge lines share a key,
+// the warning stands alone, and the last line has no word the pass reads.
+const (
+	lineTick1  = "2026/10/21 03:31:35 spec_dispatch: tick: 57 candidate(s), 0 refused, 0 planning"
+	lineTick2  = "2026/10/21 03:31:50 spec_dispatch: tick: 58 candidate(s), 1 refused, 0 planning"
+	lineMerge1 = "2026/10/21 03:32:01 landing_worker: gt-rpdhw: merge failed at 77b9028a after 3s"
+	lineMerge2 = "2026/10/21 03:33:12 landing_worker: gt-4mtmy: merge failed at 34cd71ae after 14s"
+	lineWarn   = "2026/10/21 03:34:00 kernel: WARNING: disk nearly full"
+	lineQuiet  = "2026/10/21 03:34:01 jsonl_git_backup: events: exported 2786 rows in 306ms"
+
+	keyTick  = "<time> spec_dispatch: tick: <n> candidate(s), <n> refused, <n> planning"
+	keyMerge = "<time> landing_worker: <id>: merge failed at <hash> after <dur>"
+	keyWarn  = "<time> kernel: WARNING: disk nearly full"
+)
+
+// jevReply answers the five questions for one group: routine, a severity of
+// watch and the expected_noise category.
+const jevReply = `{
+  "model": "jev-1.13.0",
+  "answers": {
+    "is_routine_noise": {"type": "noul", "noul": 0.9},
+    "needs_action": {"type": "noul", "noul": 0.1},
+    "auto_remediable": {"type": "noul", "noul": 0.2},
+    "severity": {"type": "score", "score": 1, "confidence": 0.7,
+      "legend": {"info": "Routine.", "watch": "Note it.", "review": "Look soon.", "page": "Act now."},
+      "probabilities": {"info": 0.1, "watch": 0.6, "review": 0.2, "page": 0.1}},
+    "category": {"type": "choice", "choice": "expected_noise", "confidence": 0.8,
+      "probabilities": {"dolt": 0.02, "landing": 0.02, "dispatch": 0.02, "polecat": 0.02, "gate": 0.02,
+        "network": 0.02, "config": 0.02, "daemon_bug": 0.02, "expected_noise": 0.82, "unclear": 0.02}}
+  },
+  "usage": {"input_tokens": 100, "output_tokens": 20}
+}`
+
+// fakeJev is a transport that records each request body and answers with
+// body and status, so the test drives the real Jev client without a port.
+type fakeJev struct {
+	status   int
+	body     string
+	requests [][]byte
+}
+
+func (f *fakeJev) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	f.requests = append(f.requests, body)
+	rec := httptest.NewRecorder()
+	if f.status != 0 {
+		rec.WriteHeader(f.status)
+	}
+	_, _ = io.WriteString(rec, f.body)
+	resp := rec.Result()
+	resp.Request = req
+	return resp, nil
+}
+
+func newJevClient(t *testing.T, f *fakeJev) *jev.Client {
+	t.Helper()
+	c, err := jev.NewClient(jev.WithBaseURL("http://jev.invalid/v1/systemone"), jev.WithKey("test-key"),
+		jev.WithHTTPClient(&http.Client{Transport: f}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return c
+}
+
+// fixture is a town's daemon log, triage log and cursor under one temp dir.
+type fixture struct {
+	t    *testing.T
+	pass *Pass
+	jev  *fakeJev
+}
+
+func newFixture(t *testing.T) *fixture {
+	t.Helper()
+	dir := t.TempDir()
+	f := &fakeJev{body: jevReply}
+	fx := &fixture{t: t, jev: f}
+	fx.pass = &Pass{
+		Asker:      newJevClient(t, f),
+		DaemonLog:  DaemonLogPath(dir),
+		LogPath:    LogPath(dir),
+		CursorPath: CursorPath(dir),
+		Allows:     func() (bool, error) { return true, nil },
+		Now:        func() time.Time { return time.Date(2026, 10, 21, 3, 40, 0, 0, time.UTC) },
+	}
+	return fx
+}
+
+// appendLog adds text to the daemon log as it is, so a test can end a line
+// without its newline.
+func (fx *fixture) appendLog(text string) {
+	fx.t.Helper()
+	path := fx.pass.DaemonLog
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		fx.t.Fatal(err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o644)
+	if err != nil {
+		fx.t.Fatal(err)
+	}
+	defer func() { _ = f.Close() }()
+	if _, err := f.WriteString(text); err != nil {
+		fx.t.Fatal(err)
+	}
+}
+
+// logLines appends the lines to the daemon log, each with its newline.
+func (fx *fixture) logLines(lines ...string) {
+	fx.t.Helper()
+	fx.appendLog(strings.Join(lines, "\n") + "\n")
+}
+
+// triage reads every line the triage log holds.
+func (fx *fixture) triage() []Line {
+	fx.t.Helper()
+	var lines []Line
+	if err := battery.ReadRecent(fx.pass.LogPath, math.MaxInt, &lines); err != nil {
+		fx.t.Fatal(err)
+	}
+	return lines
+}
+
+// run does one pass and fails the test on an error.
+func (fx *fixture) run() Summary {
+	fx.t.Helper()
+	sum, err := fx.pass.Run(context.Background())
+	if err != nil {
+		fx.t.Fatalf("Run: %v", err)
+	}
+	return sum
+}
+
+// groupLines returns n groups of letter-named components, group i holding i+1
+// lines, so the largest groups are the last ones.
+func groupLines(n int) []string {
+	var out []string
+	for i := range n {
+		name := string(rune('a'+i/26)) + string(rune('a'+i%26))
+		for range i + 1 {
+			out = append(out, fmt.Sprintf("2026/10/21 03:31:34 error: component %s crashed", name))
+		}
+	}
+	return out
+}
+
+// TestJevLogtriagePassGroupsTheFixtureLog is the acceptance fixture through the
+// real Jev client: the warning and error lines group by key with their counts,
+// the quiet line is never read, and each group's line carries five answers.
+func TestJevLogtriagePassGroupsTheFixtureLog(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	fx.logLines(lineTick1, lineMerge1, lineQuiet, lineWarn, lineTick2, lineMerge2)
+
+	sum := fx.run()
+	if sum.Matched != 5 || sum.Groups != 3 || sum.Asked != 3 || sum.Unanswered != 0 || sum.Dropped != 0 {
+		t.Fatalf("summary = %+v, want 5 matched, 3 groups, 3 asked", sum)
+	}
+	if len(fx.jev.requests) != 3 {
+		t.Fatalf("made %d Jev calls, want one per group", len(fx.jev.requests))
+	}
+
+	byKey := map[string]Line{}
+	for _, l := range fx.triage() {
+		byKey[l.Key] = l
+	}
+	if got := byKey[keyTick].Count; got != 2 {
+		t.Errorf("tick count = %d, want 2", got)
+	}
+	if got := byKey[keyMerge].Count; got != 2 {
+		t.Errorf("merge count = %d, want 2", got)
+	}
+	if got := byKey[keyWarn].Count; got != 1 {
+		t.Errorf("warning count = %d, want 1", got)
+	}
+	tick := byKey[keyTick]
+	if !tick.First.Equal(time.Date(2026, 10, 21, 3, 31, 35, 0, time.Local)) ||
+		!tick.Last.Equal(time.Date(2026, 10, 21, 3, 31, 50, 0, time.Local)) {
+		t.Errorf("tick range = %v to %v, want 03:31:35 to 03:31:50", tick.First, tick.Last)
+	}
+	if len(tick.Samples) != 2 || tick.Samples[0] != lineTick1 || tick.Samples[1] != lineTick2 {
+		t.Errorf("tick samples = %q, want its two lines in file order", tick.Samples)
+	}
+
+	for key, l := range byKey {
+		if l.Reason != "" || l.Model != "jev-1.13.0" || l.QuestionVersion != Version {
+			t.Errorf("%s: reason %q model %q version %d, want an answered line", key, l.Reason, l.Model, l.QuestionVersion)
+		}
+		assertFiveAnswers(t, key, l.Answers)
+	}
+
+	var samples []string
+	for _, body := range fx.jev.requests {
+		var req struct {
+			State struct {
+				Samples []string `json:"samples"`
+			} `json:"state"`
+			Questions map[string]json.RawMessage `json:"questions"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Fatal(err)
+		}
+		if len(req.Questions) != 5 {
+			t.Errorf("request asks %d questions, want the five", len(req.Questions))
+		}
+		samples = append(samples, req.State.Samples...)
+	}
+	if !strings.Contains(strings.Join(samples, "\n"), "1 refused") {
+		t.Errorf("requests quote samples %q, want the tick group's own lines", samples)
+	}
+}
+
+// assertFiveAnswers checks that a line holds every question's answer with the
+// right shape: three nouls, a severity score and a category choice.
+func assertFiveAnswers(t *testing.T, key string, got map[string]Answer) {
+	t.Helper()
+	for _, id := range []string{QRoutineNoise, QNeedsAction, QAutoRemediate} {
+		if a := got[id]; a.Noul == nil {
+			t.Errorf("%s: %s has no noul answer", key, id)
+		}
+	}
+	if a := got[QSeverity]; a.Score == nil || a.Confidence == nil || *a.Score != 1 {
+		t.Errorf("%s: severity = %+v, want score 1 with a confidence", key, a)
+	}
+	if a := got[QCategory]; a.Choice != "expected_noise" || len(a.Probabilities) != 10 {
+		t.Errorf("%s: category = %+v, want expected_noise over ten options", key, a)
+	}
+	if n := len(got); n != 5 {
+		t.Errorf("%s: %d answers, want 5", key, n)
+	}
+}
+
+// TestJevLogtriageSecondPassAsksNothingTwice: lines already read are not read
+// again, and a line appended later is the only one a pass asks about.
+func TestJevLogtriageSecondPassAsksNothingTwice(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	fx.logLines(lineTick1)
+	fx.run()
+	fx.jev.requests = nil
+
+	fx.logLines(lineWarn)
+	sum := fx.run()
+	if sum.Matched != 1 || sum.Asked != 1 || len(fx.jev.requests) != 1 {
+		t.Errorf("pass after one new line = %+v with %d calls, want one line asked", sum, len(fx.jev.requests))
+	}
+	if n := len(fx.triage()); n != 2 {
+		t.Errorf("triage log has %d lines, want one per group asked", n)
+	}
+}
+
+// TestJevLogtriageCursorSkipsAPartialLine: a line the daemon has not finished
+// writing waits for its newline, and is read whole by the next pass.
+func TestJevLogtriageCursorSkipsAPartialLine(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	fx.appendLog("2026/10/21 03:34:00 kernel: WARNING: disk near")
+	if sum := fx.run(); sum.Matched != 0 {
+		t.Fatalf("pass over a partial line matched %d, want 0", sum.Matched)
+	}
+
+	fx.appendLog("ly full\n")
+	if sum := fx.run(); sum.Matched != 1 || sum.Asked != 1 {
+		t.Errorf("pass after the newline = %+v, want the whole line asked", sum)
+	}
+	if lines := fx.triage(); len(lines) != 1 || lines[0].Key != "<time> kernel: WARNING: disk nearly full" {
+		t.Errorf("triage log = %+v, want the whole line's group", lines)
+	}
+}
+
+// TestJevLogtriageCapsGroupsLargestFirst: the pass asks about at most
+// MaxGroupsPerPass groups, the largest, and counts the rest as dropped.
+func TestJevLogtriageCapsGroupsLargestFirst(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	fx.logLines(groupLines(MaxGroupsPerPass + 5)...)
+
+	sum := fx.run()
+	if sum.Groups != MaxGroupsPerPass+5 || sum.Asked != MaxGroupsPerPass || sum.Dropped != 5 {
+		t.Fatalf("summary = %+v, want %d groups, %d asked, 5 dropped", sum, MaxGroupsPerPass+5, MaxGroupsPerPass)
+	}
+	if len(fx.jev.requests) != MaxGroupsPerPass {
+		t.Errorf("made %d calls, want %d", len(fx.jev.requests), MaxGroupsPerPass)
+	}
+	for _, l := range fx.triage() {
+		if l.Count < 6 {
+			t.Errorf("logged a group of %d lines, want only the largest 50 (counts 6 and up)", l.Count)
+		}
+	}
+}
+
+// TestJevLogtriageCapStopsTheCallsWhenSpent: a cap that runs out mid-pass ends
+// the asks there, logs what it asked, and drops the rest without reading them
+// again.
+func TestJevLogtriageCapStopsTheCallsWhenSpent(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	fx.logLines(groupLines(5)...)
+	// The first check is the pass's own, then one per group: two groups fit.
+	allowed := []bool{true, true, true, false}
+	fx.pass.Allows = func() (bool, error) {
+		ok := allowed[0]
+		if len(allowed) > 1 {
+			allowed = allowed[1:]
+		}
+		return ok, nil
+	}
+
+	sum := fx.run()
+	if sum.Asked != 2 || sum.Dropped != 3 || !sum.CapReached || len(fx.jev.requests) != 2 {
+		t.Errorf("summary = %+v with %d calls, want 2 asked, 3 dropped, cap reached", sum, len(fx.jev.requests))
+	}
+	if _, err := os.Stat(fx.pass.CursorPath); err != nil {
+		t.Errorf("cursor not written after a capped pass: %v", err)
+	}
+}
+
+// TestJevLogtriageNothingReadWhenCapIsSpentAtStart: a pass that starts with
+// the cap spent reads nothing, and the cursor stays where it was so the lines
+// wait for the next pass.
+func TestJevLogtriageNothingReadWhenCapIsSpentAtStart(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	fx.logLines(lineWarn)
+	fx.pass.Allows = func() (bool, error) { return false, nil }
+
+	sum := fx.run()
+	if !sum.CapReached || sum.Matched != 0 || len(fx.jev.requests) != 0 {
+		t.Errorf("summary = %+v with %d calls, want the cap reached and nothing read", sum, len(fx.jev.requests))
+	}
+	if _, err := os.Stat(fx.pass.CursorPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("cursor exists after a pass that read nothing: %v", err)
+	}
+	if _, err := os.Stat(fx.pass.LogPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("triage log exists after a pass that asked nothing: %v", err)
+	}
+}
+
+// TestJevLogtriageFailedAskLogsItsReason: a call that got no usable reply logs
+// its reason and no answers, and the lines are not asked again.
+func TestJevLogtriageFailedAskLogsItsReason(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		status int
+		body   string
+		reason string
+	}{
+		{"server error", http.StatusInternalServerError, `{"error":"down"}`, ReasonAskFailed},
+		{"unusable reply", http.StatusOK, `{"answers":{}}`, ReasonBadResponse},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fx := newFixture(t)
+			fx.jev.status, fx.jev.body = tc.status, tc.body
+			fx.logLines(lineWarn)
+
+			sum := fx.run()
+			if sum.Asked != 0 || sum.Unanswered != 1 {
+				t.Fatalf("summary = %+v, want one unanswered group", sum)
+			}
+			lines := fx.triage()
+			if len(lines) != 1 || lines[0].Reason != tc.reason || lines[0].Answers != nil {
+				t.Errorf("line = %+v, want reason %q and no answers", lines, tc.reason)
+			}
+			if again := fx.run(); again.Matched != 0 {
+				t.Errorf("second pass matched %d, want the failed lines not read again", again.Matched)
+			}
+		})
+	}
+}
+
+// TestJevLogtriageCancelWritesNothing: a pass cancelled before it asks leaves
+// no triage line and no cursor, so the same lines are read whole next time.
+func TestJevLogtriageCancelWritesNothing(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	fx.logLines(lineWarn)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := fx.pass.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run = %v, want context.Canceled", err)
+	}
+	if len(fx.jev.requests) != 0 {
+		t.Errorf("a cancelled pass made %d calls", len(fx.jev.requests))
+	}
+	if _, err := os.Stat(fx.pass.CursorPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("cursor written by a cancelled pass: %v", err)
+	}
+	if _, err := os.Stat(fx.pass.LogPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("triage line written by a cancelled pass: %v", err)
+	}
+}
+
+// TestJevLogtriageMissingLogIsEmpty: a town with no daemon log yet has nothing
+// to triage and is not an error.
+func TestJevLogtriageMissingLogIsEmpty(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	sum := fx.run()
+	if sum.Matched != 0 || len(fx.jev.requests) != 0 {
+		t.Errorf("summary = %+v with %d calls, want an empty pass", sum, len(fx.jev.requests))
+	}
+}
+
+// TestJevLogtriageLockRefusesASecondPass: a pass that finds the run lock held
+// returns ErrBusy and reads nothing.
+func TestJevLogtriageLockRefusesASecondPass(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	fx.logLines(lineWarn)
+	release, err := battery.Lock(fx.pass.CursorPath + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	if _, err := fx.pass.Run(context.Background()); !errors.Is(err, ErrBusy) {
+		t.Errorf("Run = %v, want ErrBusy", err)
+	}
+	if len(fx.jev.requests) != 0 {
+		t.Errorf("a busy pass made %d calls", len(fx.jev.requests))
+	}
+}
+
+// TestJevLogtriageQuestionSet pins the question ids, types, levels and the
+// category options the scorecard reads.
+func TestJevLogtriageQuestionSet(t *testing.T) {
+	t.Parallel()
+	qs := Questions()
+	wantTypes := map[string]string{
+		QRoutineNoise: "noul", QNeedsAction: "noul", QAutoRemediate: "noul",
+		QSeverity: "score", QCategory: "choice",
+	}
+	if len(qs) != len(wantTypes) {
+		t.Errorf("%d questions, want %d", len(qs), len(wantTypes))
+	}
+	for id, typ := range wantTypes {
+		if qs[id].Type != typ {
+			t.Errorf("%s type = %q, want %q", id, qs[id].Type, typ)
+		}
+	}
+	if got := strings.Join(qs[QSeverity].Levels, ","); got != "info,watch,review,page" {
+		t.Errorf("severity levels = %s, want info,watch,review,page", got)
+	}
+	if n := len(qs[QCategory].Options); n != 10 {
+		t.Errorf("category has %d options, want 10", n)
+	}
+	if Version != 1 {
+		t.Errorf("Version = %d, want 1 until a question changes", Version)
+	}
+}

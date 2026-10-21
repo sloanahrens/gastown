@@ -1374,6 +1374,51 @@ It is off unless `daemon.json` enables it, and it reads the same three keys as
 }
 ```
 
+### Daemon-log triage battery (`jev_logtriage`)
+
+`internal/jev/logtriage` asks Jev about the town daemon's warning and error
+lines. Every 15 minutes a pass reads `daemon/daemon.log` from its cursor and
+keeps the lines containing `warning`, `error`, `failed`, `refused`, `timeout`,
+`crash` or `panic`, in any case. It groups them by pattern key: the line with
+its times, bead ids, hashes, durations and numbers replaced by placeholders.
+
+Each group gets one Jev call with five questions. `is_routine_noise`,
+`needs_action` and `auto_remediable` are `noul` probabilities. `severity` is a
+`score` over `info`, `watch`, `review` and `page`. `category` is a `choice` over
+ten parts of the town. The state holds the group's key, count, first and last
+time, and up to three sample lines, each JSON-quoted.
+
+Each group appends one line to `.runtime/jev/logtriage.jsonl`:
+`{ts, key, count, first, last, samples, answers, question_version, model,
+reason}`. The samples are the daemon's own lines, so the triage log is as
+sensitive as the daemon log it came from. The battery is log-only: it raises no
+attention item, suppresses no line and pages no one.
+
+A pass asks about the 50 largest groups, ties by key. The rest are counted as
+dropped and their lines are not read again. The cursor is a byte offset plus the
+file's inode, so a rotated log starts again at its first line. A last line still
+missing its newline waits for the next pass. With no cursor yet, the first pass
+reads from the start of the log. A call that gets no usable reply logs a reason
+and no answers, and its lines are not asked again. If the day's cap runs out
+partway through a pass, the groups it did not reach are dropped. A pass that
+starts with the cap spent reads nothing.
+
+Rotation is detected by inode on Unix only. Elsewhere, a rotated log is caught
+only when it shrinks below the cursor's offset.
+
+The daemon patrol `jev_logtriage` is off unless `daemon.json` enables it. It
+reads the same keys as `jev_drift`, under `jev_logtriage`:
+
+```json
+"patrols": {
+  "jev_logtriage": {
+    "enabled": true,
+    "max_usd_per_day": 1.0,
+    "usd_per_billion_tokens": 3.0
+  }
+}
+```
+
 ### Test-selection battery (`jev_testsel`)
 
 The landing gate runs every Go package. The test-selection battery asks Jev which

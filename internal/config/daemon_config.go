@@ -122,6 +122,11 @@ type PatrolsConfig struct {
 	// (internal/jev/stale). It acts on nothing. Opt-in, like JevDedupe.
 	JevStale *JevStaleConfig `json:"jev_stale,omitempty"`
 
+	// JevLogtriage asks Jev about each group of the daemon log's warning and
+	// error lines, every fifteen minutes, and logs every answer
+	// (internal/jev/logtriage). It acts on nothing. Opt-in, like JevDedupe.
+	JevLogtriage *JevLogtriageConfig `json:"jev_logtriage,omitempty"`
+
 	// RestartTracker is retired (gt-gqftr): no code read the block. It is
 	// declared, like the other retired keys, so a daemon.json that still
 	// carries it keeps loading under strict decoding and is kept verbatim.
@@ -554,6 +559,20 @@ type JevDriftConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// MaxUSDPerDay stops the pass for the day once the town's Jev spend
+	// reaches it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+}
+
+// JevLogtriageConfig switches on the daemon-log triage battery and prices its
+// Jev spend. The battery is off unless Enabled is true, and an enabled one needs
+// USDPerBillionTokens: the usage ledger stores tokens, not dollars.
+type JevLogtriageConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the battery for the day once the town's Jev spend
 	// reaches it. Zero takes the default of one dollar.
 	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
 
