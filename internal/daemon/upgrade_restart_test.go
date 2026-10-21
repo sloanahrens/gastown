@@ -280,6 +280,113 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		}
 	})
 
+	// gt-9vjw8: a dispatch tick, a scan or a paid pass is in flight at most
+	// heartbeats, so counting it as a hold defeated the deferral in practice.
+	// Soft work neither needs nor keeps the drain.
+	t.Run("soft daemon work in flight does not stop the deferral", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.tierSweepRunning.Store(true)
+		d.specDispatchRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		d.tierSweepStartedAt.Store(now.Add(-time.Minute).UnixNano())
+		if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(time.Minute)) {
+			t.Fatal("restarted under a running tier sweep before the cap")
+		}
+		if d.upgradeRestartPending.Load() {
+			t.Fatal("a soft dispatch tick drained the landing workers beside the sweep")
+		}
+		if got := strings.Count(logs.String(), "landing passes continue while"); got != 1 {
+			t.Fatalf("deferral line logged %d times, want once per hold:\n%s", got, logs.String())
+		}
+		if strings.Contains(logs.String(), "draining: no new landing pass") {
+			t.Fatalf("drain line logged with only soft work and the sweep in flight:\n%s", logs.String())
+		}
+	})
+
+	// gt-9vjw8: the drain end rests with one line naming what it cost and what
+	// it was waiting for, so the restart's log no longer needs the whole wait.
+	t.Run("a drain that ends names how long landings were held", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		d.tierSweepRunning.Store(true)
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		d.tierSweepStartedAt.Store(now.Add(-time.Minute).UnixNano())
+		// A landing pass holds the restart first, so the drain goes on.
+		d.landingPasses.Add(1)
+		d.landingStates.setBead("gastown", "gt-x", now)
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a landing pass")
+		}
+		if !d.upgradeRestartPending.Load() {
+			t.Fatal("a landing pass hold must drain the landing workers")
+		}
+
+		// Three minutes later the pass is over and only the sweep holds: the
+		// drain ends with the time it held landings and the last hold it named.
+		d.landingStates.endPass("gastown")
+		d.landingPasses.Add(-1)
+		if d.checkUpgradeRestart(now.Add(3 * time.Minute)) {
+			t.Fatal("restarted under a running tier sweep before the cap")
+		}
+		if d.upgradeRestartPending.Load() {
+			t.Fatal("the drain stayed on with only the sweep holding")
+		}
+		want := "upgrade-restart: the drain held landing passes for 3m0s, last waiting for landing pass gt-x"
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("drain end line missing or wrong, want %q:\n%s", want, logs.String())
+		}
+	})
+
+	t.Run("the restart names how long the drain held landings", func(t *testing.T) {
+		d := upgradeTestDaemon(t)
+		var logs strings.Builder
+		d.logger = log.New(&logs, "", 0)
+		captureEscalations(d)
+		withOwnCommit(d, "aaa")
+		fakeHistory(t, d, "aaa", "bbb")
+		writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+		now := time.Now()
+		d.landingPasses.Add(1)
+		d.landingStates.setBead("gastown", "gt-x", now)
+		if d.checkUpgradeRestart(now) {
+			t.Fatal("restarted under a landing pass")
+		}
+		d.landingStates.endPass("gastown")
+		d.landingPasses.Add(-1)
+		if !d.checkUpgradeRestart(now.Add(time.Minute)) {
+			t.Fatal("must restart once no pass is in flight")
+		}
+		state := &State{Running: true}
+		if err := d.exitForUpgradeIfRequested(state); !errors.Is(err, ErrRestartForUpgrade) {
+			t.Fatalf("err = %v, want ErrRestartForUpgrade", err)
+		}
+		restart := strings.Index(logs.String(), "upgrade-restart: idle; restarting")
+		held := strings.Index(logs.String(), "upgrade-restart: the drain held landing passes for ")
+		if held < 0 {
+			t.Fatalf("no drain end line before the restart:\n%s", logs.String())
+		}
+		if restart < 0 || held > restart {
+			t.Fatalf("the drain end line must precede the restart line:\n%s", logs.String())
+		}
+		if !strings.Contains(logs.String(), "last waiting for landing pass gt-x") {
+			t.Fatalf("the drain end line does not name the hold:\n%s", logs.String())
+		}
+	})
+
 	t.Run("the drain starts at the cap while the sweep still runs", func(t *testing.T) {
 		d := upgradeTestDaemon(t)
 		var logs strings.Builder

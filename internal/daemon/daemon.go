@@ -391,8 +391,10 @@ type Daemon struct {
 	upgradeGCCallStart   int64     // UnixNano start of the gc call upgradeGCHoldSince times (0 = none)
 	upgradeGCBeat        time.Time // the last heartbeat that read the gc hold
 	upgradeWaitEscalated bool
-	upgradeWaitLogged    string // the hold the last wait line named (tierSweepHoldLabel while a sweep holds it)
-	upgradeDrainLogged   bool   // the once-per-marker drain line has been logged
+	upgradeWaitLogged    string    // the hold the last wait line named (tierSweepHoldLabel while a sweep holds it)
+	upgradeDrainLogged   bool      // the once-per-marker drain line has been logged
+	upgradeDrainSince    time.Time // when the drain line was written, so its end can say how long landings were held (zero = no drain)
+	upgradeDrainWait     string    // the last hold a wait line named while the drain was on, for the drain end line
 
 	// scheduledSlingsRunning is the single-flight guard for the scheduled_slings
 	// patrol, on its own goroutine so a slow sling never
