@@ -1713,7 +1713,7 @@ applies, `close:names-candidate`.
 |--------------|--------|
 | starts with `landed` | `fix_worthy` true, `report_only` false, `any_duplicate` false |
 | starts with `no-changes` | `fix_worthy` false, `report_only` true |
-| says `superseded`, `duplicate`, `dup of`, `dupe`, `wontfix`, `won't fix`, `wont fix` or `will not fix` | `fix_worthy` false |
+| contains a not-fix-worthy word (the list is `notFixWorthyWords` in `internal/jev/scorecard/finding.go`) | `fix_worthy` false |
 | names a candidate the line offered, as a whole bead id | `any_duplicate` true |
 | any other reason | no label |
 
