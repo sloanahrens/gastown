@@ -233,11 +233,11 @@ func TestJevAttentionAsksAClearedRaiseWithoutLiveFields(t *testing.T) {
 // Each raise of a key is asked, and a cleared transition between them is not.
 func TestJevAttentionAsksEveryRaiseOfAKey(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t, []attention.Item{item("flaky", 1, "first raise")},
+	h := newHarness(t, []attention.Item{item("twice", 1, "first raise")},
 		func(string) (*jev.Answers, error) { return answersFor(0.5, 1), nil })
 	h.appendEvents(t,
-		attention.Event{TS: t0.Add(3 * time.Minute), Class: attention.KindRedMain, Severity: attention.SeverityHigh, Text: "cleared", Key: "flaky", State: attention.EventCleared},
-		attention.Event{TS: t0.Add(5 * time.Minute), Class: attention.KindRedMain, Severity: attention.SeverityHigh, Text: "second raise", Key: "flaky", State: attention.EventNew},
+		attention.Event{TS: t0.Add(3 * time.Minute), Class: attention.KindRedMain, Severity: attention.SeverityHigh, Text: "cleared", Key: "twice", State: attention.EventCleared},
+		attention.Event{TS: t0.Add(5 * time.Minute), Class: attention.KindRedMain, Severity: attention.SeverityHigh, Text: "second raise", Key: "twice", State: attention.EventNew},
 	)
 
 	sum := mustRun(t, h.pass)
@@ -246,14 +246,14 @@ func TestJevAttentionAsksEveryRaiseOfAKey(t *testing.T) {
 		t.Fatalf("summary %+v with %d calls, want two raises asked", sum, len(h.asker.states))
 	}
 	lines := h.lines(t)
-	if got := keysOf(lines); !reflect.DeepEqual(got, []string{"flaky", "flaky"}) {
+	if got := keysOf(lines); !reflect.DeepEqual(got, []string{"twice", "twice"}) {
 		t.Errorf("log keys = %v, want the key once per raise", got)
 	}
 	if lines[1]["first_seen"] == lines[0]["first_seen"] {
 		t.Errorf("both raises logged the same first_seen %v", lines[0]["first_seen"])
 	}
 	cur, _, _ := battery.ReadCursor(h.cursor)
-	if cur.ID != "flaky" || !cur.Time.Equal(t0.Add(5*time.Minute)) {
+	if cur.ID != "twice" || !cur.Time.Equal(t0.Add(5*time.Minute)) {
 		t.Errorf("cursor = %+v, want the second raise's time and key", cur)
 	}
 	if sum := mustRun(t, h.pass); sum.Asked != 0 {
