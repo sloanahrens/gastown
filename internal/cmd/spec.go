@@ -1516,7 +1516,10 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	details := specDetailCacheFor(townRoot, os.Getenv(dispatch.SpecDetailOwnerEnv))
 	specDetailCache.Store(details)
 	// The held beads already annotated, kept across the daemon's ticks.
-	annotated := loadSpecAnnotated(dispatch.SpecAnnotatedPath(townRoot), os.Getenv(dispatch.SpecDetailOwnerEnv))
+	annotations := newSpecAnnotatedTick(townRoot, os.Getenv(dispatch.SpecDetailOwnerEnv), func(id string) beads.Client {
+		reads.call()
+		return beads.New(resolveBeadDirFromTownRoot(townRoot, id))
+	})
 	env := specDispatchEnv{
 		Hold: func() string { return dispatch.OperatorHold(townRoot) },
 		Candidates: func() specBoardRead {
@@ -1527,7 +1530,7 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			read = specBoardDesigns(reads, func(rig string) beads.Client {
 				return beads.NewPinned(beads.ResolveBeadsDir(filepath.Join(townRoot, rig)))
 			}, read)
-			annotated.observe(read)
+			annotations.observe(read)
 			return read
 		},
 		Show: func(id string) (specdispatch.Spec, error) {
@@ -1557,12 +1560,7 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 			}
 			return specRosterFrom(sessions, ts), nil
 		},
-		Annotate: func(id, key, text string) error {
-			return annotated.once(id, key, func() (bool, error) {
-				reads.call()
-				return annotateSpecWrote(beads.New(resolveBeadDirFromTownRoot(townRoot, id)), id, key, text)
-			})
-		},
+		Annotate: annotations.annotate,
 		AddLabel: func(id, label string) error {
 			return poolBeadLabelAdd(townRoot, id, label)
 		},
@@ -1586,7 +1584,7 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		ShapeGate:   ts.PolecatPool.GetShapeGate(),
 	}
 	report := runSpecDispatchCycle(env)
-	annotated.save()
+	annotations.save()
 	report.DetailsFetched, report.DetailsCached, report.DetailsUnread = details.Counts()
 	if report.Hold == "" {
 		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start)))

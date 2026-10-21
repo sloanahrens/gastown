@@ -8,17 +8,20 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/steveyegge/gastown/internal/atomicfile"
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 )
 
 // A bead the dispatcher holds (unshaped, refused, planning) is annotated once,
 // and annotateSpecOnce finds out whether the note is already there by reading
 // the bead's comments: one bd call per held bead per tick, nearly all of them
 // finding the note present. specAnnotated remembers, for each bead and note
-// key, the comment_count the ready board showed when the note was found or
-// written. While the board still shows that count no comment has been added
-// since, so the note is still there and the read is skipped.
+// key, the comment_count at which the note was last known present. While the
+// board still shows that count no comment has been added since, so the note is
+// still there and the read is skipped.
 //
 // The memory lasts as long as the daemon does (the owner is the one the detail
 // cache uses), and a missing, unreadable or foreign file is an empty memory:
@@ -33,6 +36,11 @@ type specAnnotatedFile struct {
 }
 
 type specAnnotated struct {
+	// mu guards the maps, the way the detail cache guards its own: one caller
+	// drives the memory today, and a second one costs a slow read rather than
+	// a map race (gt-fpxlb).
+	mu sync.Mutex
+
 	path  string // "" keeps the memory for this tick only
 	owner string
 
@@ -46,7 +54,7 @@ type specAnnotated struct {
 	dirty    bool
 }
 
-// loadSpecAnnotated is the memory path kept for the daemon named by owner. A
+// loadSpecAnnotated loads the memory at path for the daemon named by owner. A
 // tick no daemon started (owner "") keeps nothing between runs.
 func loadSpecAnnotated(path, owner string) *specAnnotated {
 	a := &specAnnotated{owner: owner, seen: map[string]map[string]int{}, counts: map[string]int{}}
@@ -66,8 +74,37 @@ func loadSpecAnnotated(path, owner string) *specAnnotated {
 	return a
 }
 
+// specAnnotatedTick is one tick's annotation memory, wired to the three points
+// the dispatcher drives it at: the board read it observes, the Annotate call,
+// and the save at the tick's end. The tick and its tests share this value, so a
+// test runs the wiring the tick runs rather than a copy of it (gt-fpxlb).
+type specAnnotatedTick struct {
+	observe  func(specBoardRead)
+	annotate func(beadID, key, text string) error
+	save     func()
+}
+
+// newSpecAnnotatedTick loads the memory the town's annotated path keeps for the
+// daemon named by owner, and wires it to a tick. storeFor is the store a note
+// is read and written through; it is asked only when the memory does not hold
+// the note.
+func newSpecAnnotatedTick(townRoot, owner string, storeFor func(beadID string) beads.Client) *specAnnotatedTick {
+	a := loadSpecAnnotated(dispatch.SpecAnnotatedPath(townRoot), owner)
+	return &specAnnotatedTick{
+		observe: a.observe,
+		annotate: func(beadID, key, text string) error {
+			return a.once(beadID, key, func() (bool, error) {
+				return annotateSpecWrote(storeFor(beadID), beadID, key, text)
+			})
+		},
+		save: a.save,
+	}
+}
+
 // observe takes the comment_count of every candidate of the tick's board read.
 func (a *specAnnotated) observe(read specBoardRead) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	for _, c := range read.Candidates {
 		a.counts[c.Spec.ID] = c.Spec.CommentCount
 	}
@@ -78,6 +115,8 @@ func (a *specAnnotated) observe(read specBoardRead) {
 // board shows now. annotate reports whether it wrote the note; either way the
 // note is there afterwards, and is remembered at the count that includes it.
 func (a *specAnnotated) once(beadID, key string, annotate func() (wrote bool, err error)) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	count, known := a.counts[beadID]
 	digest := specKeyDigest(key)
 	if n, ok := a.seen[beadID][digest]; known && ok && n == count {
@@ -97,6 +136,15 @@ func (a *specAnnotated) once(beadID, key string, annotate func() (wrote bool, er
 	if a.seen[beadID] == nil {
 		a.seen[beadID] = map[string]int{}
 	}
+	// Comments only append, so every key already remembered for this bead is
+	// still present at the count this note was found or written at: raising
+	// them keeps a second key from leaving the first one's entry behind the
+	// board's count, which would read its comments again next tick (gt-fpxlb).
+	for d, n := range a.seen[beadID] {
+		if n < count {
+			a.seen[beadID][d] = count
+		}
+	}
 	a.seen[beadID][digest] = count
 	a.dirty = true
 	return nil
@@ -104,6 +152,8 @@ func (a *specAnnotated) once(beadID, key string, annotate func() (wrote bool, er
 
 // save writes the memory, dropped to the beads the tick's board listed.
 func (a *specAnnotated) save() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if a.path == "" {
 		return
 	}
