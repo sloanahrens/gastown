@@ -1,8 +1,10 @@
 package submission
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -121,6 +123,11 @@ func ClonePath(townRoot string) string {
 // its read stays flat as submissions accumulate.
 const recordWindow = 500
 
+// backlogLimit is how many submissions a pass takes from a backlog that fills
+// the window after the trim. The rest wait for the next pass, which trims what
+// this one asked about and takes the next backlogLimit.
+const backlogLimit = recordWindow
+
 // rigBeads reads a rig's submissions: the first-sight records the landing
 // worker wrote, and the waiting work beads that have none. Its only write is
 // trimming the first-sight log, and only when the log is longer than the
@@ -143,8 +150,10 @@ type rigBeads struct {
 // no pass can still ask about: those seen before t whose bead is not waiting at
 // the head they name. A waiting bead keeps its record, because the dedupe below
 // still needs it. If the trimmed log is still longer than the window, a backlog
-// is waiting, and Since reads the whole log: reading only the newest records
-// would drop a waiting bead's record and ask that bead a second time.
+// is waiting: reading only the newest records would drop a waiting bead's
+// record and ask that bead a second time, so Since streams the whole log but
+// returns only the oldest backlogLimit submissions. Run drains those and moves
+// the cursor, and the next pass takes the following ones.
 func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 	waiting, err := r.b.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1, Limit: 0})
 	if err != nil {
@@ -171,6 +180,11 @@ func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
+	// deferred holds the waiting beads whose record a backlog left for a later
+	// pass, and cut is the seen time the backlog read stopped at, zero when it
+	// did not stop.
+	var deferred map[string]bool
+	var cut time.Time
 	if len(recs) > recordWindow {
 		keep := func(rec land.SubmissionRecord) bool {
 			return !rec.SeenAt.Before(t) || waitingKeys[land.SubmissionKey(rec.Bead, rec.Head)]
@@ -182,10 +196,10 @@ func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 			return nil, err
 		}
 		// A window still full after the trim is a backlog. The records past
-		// the window are the ones the dedupe needs, so the whole log is read,
-		// and Run drains the backlog oldest first, moving the cursor as it goes.
+		// the window are the ones the dedupe needs, so the whole log is
+		// streamed, and only the oldest backlogLimit submissions are kept.
 		if len(recs) > recordWindow {
-			if recs, err = land.ReadSubmissionRecords(r.records); err != nil {
+			if recs, deferred, cut, err = readBacklog(r.records, t, waitingKeys, backlogLimit); err != nil {
 				return nil, err
 			}
 		}
@@ -222,11 +236,72 @@ func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 	}
 
 	for _, e := range listed {
-		if !recorded[land.SubmissionKey(e.Issue.ID, e.Work.Head)] {
-			out = append(out, e)
+		key := land.SubmissionKey(e.Issue.ID, e.Work.Head)
+		// Past the cut, an entry waits for a later pass: the cursor moving to
+		// it now would skip the records the backlog read left out.
+		if recorded[key] || deferred[key] || (!cut.IsZero() && e.Seen.After(cut)) {
+			continue
 		}
+		out = append(out, e)
 	}
 	return out, nil
+}
+
+// readBacklog streams the whole first-sight log and keeps the oldest limit
+// distinct submissions seen at or after t, plus every record of a waiting bead,
+// so the log is never held whole. Records seen at the same time as the last one
+// kept are kept too, so the cursor's tie order on the bead id never skips one.
+// When it stops short of the log's end, cut is the seen time it stopped at, and
+// deferred names the waiting beads whose record lies past it: their record is
+// asked on a later pass, so listing the bead now would ask it twice.
+//
+// The log is read without its lock, as ReadRecentSubmissionRecords reads it: a
+// partly written last line does not parse and is skipped. Lines have no length
+// cap, so a long record cannot stop the read.
+func readBacklog(path string, t time.Time, waitingKeys map[string]bool, limit int) (recs []land.SubmissionRecord, deferred map[string]bool, cut time.Time, err error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil, time.Time{}, nil
+	}
+	if err != nil {
+		return nil, nil, time.Time{}, fmt.Errorf("opening %s: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	deferred = map[string]bool{}
+	taken := map[string]bool{}
+	var last time.Time
+	r := bufio.NewReader(f)
+	for {
+		line, rerr := r.ReadBytes('\n')
+		var rec land.SubmissionRecord
+		if len(bytes.TrimSpace(line)) > 0 && json.Unmarshal(line, &rec) == nil {
+			key := land.SubmissionKey(rec.Bead, rec.Head)
+			switch {
+			case rec.SeenAt.Before(t):
+				// Only a waiting bead's old record matters, to the dedupe.
+				if waitingKeys[key] {
+					recs = append(recs, rec)
+				}
+			case taken[key]:
+			case len(taken) < limit || rec.SeenAt.Equal(last):
+				taken[key] = true
+				last = rec.SeenAt
+				recs = append(recs, rec)
+			default:
+				cut = last
+				if waitingKeys[key] {
+					deferred[key] = true
+				}
+			}
+		}
+		if errors.Is(rerr, io.EOF) {
+			return recs, deferred, cut, nil
+		}
+		if rerr != nil {
+			return nil, nil, time.Time{}, fmt.Errorf("reading %s: %w", path, rerr)
+		}
+	}
 }
 
 func (r rigBeads) warnf(format string, args ...any) {

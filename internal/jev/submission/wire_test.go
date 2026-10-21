@@ -318,10 +318,10 @@ func TestJevSubmissionListerLeavesALogOfTheWindowSizeUntrimmed(t *testing.T) {
 	}
 }
 
-// A backlog longer than the window is drained, not refused: every record at or
-// after the cursor is listed once, and the waiting bead whose record is the
-// oldest, before the cursor, is not listed again. The window cannot show that
-// record, so the whole log is read.
+// A backlog longer than the window is drained, not refused: the oldest
+// backlogLimit records at or after the cursor are listed once each, and the
+// waiting bead whose record is the oldest, before the cursor, is not listed
+// again. The window cannot show that record, so the whole log is streamed.
 func TestJevSubmissionListerDrainsABacklogLargerThanTheWindow(t *testing.T) {
 	t.Parallel()
 	since := t0.Add(-time.Hour)
@@ -356,11 +356,61 @@ func TestJevSubmissionListerDrainsABacklogLargerThanTheWindow(t *testing.T) {
 		}
 		listed[e.Issue.ID] = true
 	}
-	if len(got) != recordWindow+1 {
-		t.Fatalf("Since() listed %d entries, want all %d records at or after the cursor", len(got), recordWindow+1)
+	if len(got) != backlogLimit {
+		t.Fatalf("Since() listed %d entries, want the oldest %d records at or after the cursor", len(got), backlogLimit)
+	}
+	if !listed["gt-new-0"] || listed[fmt.Sprintf("gt-new-%d", backlogLimit)] {
+		t.Error("Since() did not list the oldest records and stop at the limit")
 	}
 	if listed["gt-held"] {
 		t.Error("the waiting bead whose record predates the cursor was listed again")
+	}
+}
+
+// A backlog past the limit leaves the newest records, and the waiting beads
+// stamped after them, for a later pass. A waiting bead whose record is among the
+// ones left is not listed from its READY TO LAND block, even when that block is
+// older than the records listed: the pass would ask it now and again at its
+// record.
+func TestJevSubmissionListerLeavesTheRestOfABacklogForALaterPass(t *testing.T) {
+	t.Parallel()
+	since := t0.Add(-time.Hour)
+	records := filepath.Join(t.TempDir(), land.SubmissionsSeenFile)
+	known := map[string]*beads.Issue{}
+	for i := range backlogLimit + 5 {
+		id := fmt.Sprintf("gt-new-%d", i)
+		rec := land.SubmissionRecord{SeenAt: since.Add(time.Duration(i+1) * time.Second), Bead: id, Head: "h-new", Target: "main"}
+		if err := battery.Append(records, rec); err != nil {
+			t.Fatal(err)
+		}
+		known[id] = &beads.Issue{ID: id, Status: "closed"}
+	}
+	end := since.Add(time.Duration(backlogLimit+10) * time.Second)
+	if err := battery.Append(records, land.SubmissionRecord{SeenAt: end, Bead: "gt-held", Head: "h-held", Target: "main"}); err != nil {
+		t.Fatal(err)
+	}
+	waiting := func(id string, submitted time.Time) *beads.Issue {
+		return &beads.Issue{ID: id, Status: "open", Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(land.Work{
+			Branch: "polecat/x/" + id, Head: "h-" + id[len("gt-"):], Target: "main", Submitted: submitted,
+		})}
+	}
+	// gt-held's block is older than every record, gt-late's is newer than all.
+	held, late := waiting("gt-held", since.Add(time.Second)), waiting("gt-late", end.Add(time.Hour))
+	known["gt-held"] = held
+
+	got, err := rigBeads{b: &recordingLister{waiting: []*beads.Issue{held, late}, byID: known}, records: records}.Since(since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	listed := map[string]bool{}
+	for _, e := range got {
+		listed[e.Issue.ID] = true
+	}
+	if len(got) != backlogLimit {
+		t.Fatalf("Since() listed %d entries, want %d", len(got), backlogLimit)
+	}
+	if listed["gt-held"] || listed["gt-late"] {
+		t.Errorf("Since() listed gt-held=%v gt-late=%v, want both left for a later pass", listed["gt-held"], listed["gt-late"])
 	}
 }
 
