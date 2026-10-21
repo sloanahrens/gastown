@@ -647,8 +647,8 @@ func TestRunDrainsABacklogLargerThanTheWindowOverSeveralPasses(t *testing.T) {
 		if err != nil {
 			t.Fatalf("pass %d: %v", pass, err)
 		}
-		if sum.Asked > backlogLimit+1 {
-			t.Fatalf("pass %d asked %d, want at most backlogLimit (%d)", pass, sum.Asked, backlogLimit)
+		if sum.Asked > backlogLimit+2 {
+			t.Fatalf("pass %d asked %d, want at most backlogLimit (%d) plus the two waiting beads", pass, sum.Asked, backlogLimit)
 		}
 		if sum.Asked == 0 {
 			break
