@@ -142,28 +142,46 @@ func TestPassRecordsTheTipWhenTheBranchMovedPastTheReadyHead(t *testing.T) {
 
 // A record already on file writes nothing, so it does not end a run of failed
 // writes: the failure is logged once across passes, not once per pass.
-func TestPassFirstSightFailureRunSpansARecordOnFile(t *testing.T) {
+func TestPassFirstSightFailureRunSpansRecordsOnFile(t *testing.T) {
 	t.Parallel()
-	h := newHarness(t)
-	h.seedReadyAt(t, "gt-a", 2, "2026-09-30T10:00:00Z")
-	h.seedReadyAt(t, "gt-b", 2, "2026-09-30T11:00:00Z")
-	h.lander.fn = func(int, land.Work) (land.Result, error) {
-		return land.Result{}, fmt.Errorf("%w: waiting on the gate", land.ErrNotReady)
-	}
-	h.w.FirstSight = &keyedFirstSight{failing: map[string]bool{"gt-a": true}, onFile: map[string]bool{"gt-b": true}}
-	var logs []string
-	h.w.Logf = func(format string, args ...any) { logs = append(logs, format) }
-
-	h.w.Pass(context.Background())
-	h.w.Pass(context.Background())
-
-	failures := 0
-	for _, l := range logs {
-		if strings.Contains(l, "recording the submission") {
-			failures++
+	for _, tc := range []struct {
+		name    string
+		order   []string // the landing order, first to last
+		failing []string
+		onFile  []string
+	}{
+		{name: "a record on file after the failing bead", order: []string{"gt-a", "gt-b"}, failing: []string{"gt-a"}, onFile: []string{"gt-b"}},
+		{name: "a record on file between two failing beads", order: []string{"gt-a", "gt-b", "gt-c"}, failing: []string{"gt-a", "gt-c"}, onFile: []string{"gt-b"}},
+	} {
+		h := newHarness(t)
+		for i, id := range tc.order {
+			h.seedReadyAt(t, id, 2, fmt.Sprintf("2026-09-30T1%d:00:00Z", i))
 		}
-	}
-	if failures != 1 {
-		t.Errorf("logged the record failure %d times across two passes, want once for the run", failures)
+		h.lander.fn = func(int, land.Work) (land.Result, error) {
+			return land.Result{}, fmt.Errorf("%w: waiting on the gate", land.ErrNotReady)
+		}
+		fs := &keyedFirstSight{failing: map[string]bool{}, onFile: map[string]bool{}}
+		for _, id := range tc.failing {
+			fs.failing[id] = true
+		}
+		for _, id := range tc.onFile {
+			fs.onFile[id] = true
+		}
+		h.w.FirstSight = fs
+		var logs []string
+		h.w.Logf = func(format string, args ...any) { logs = append(logs, format) }
+
+		h.w.Pass(context.Background())
+		h.w.Pass(context.Background())
+
+		failures := 0
+		for _, l := range logs {
+			if strings.Contains(l, "recording the submission") {
+				failures++
+			}
+		}
+		if failures != 1 {
+			t.Errorf("%s: logged the record failure %d times across two passes, want once for the run", tc.name, failures)
+		}
 	}
 }
