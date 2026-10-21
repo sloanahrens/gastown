@@ -3310,8 +3310,13 @@ func TestIntegrationFullRangeCommitSummariesListsAMergedInForeignCommit(t *testi
 			foreign = c.Author + " <" + c.Email + ">"
 		}
 	}
-	if want := []string{"Merge side", "fix: side", "feat: first parent"}; len(subjects) != 3 || !slices.Equal(subjects[:1], want[:1]) || !slices.Contains(subjects, want[1]) || !slices.Contains(subjects, want[2]) {
-		t.Fatalf("full-range subjects = %q, want the merge, the foreign commit and the first parent", subjects)
+	// The merge lists first; the two commits under it share a timestamp, so
+	// their order is not pinned.
+	if len(subjects) != 3 || subjects[0] != "Merge side" {
+		t.Fatalf("full-range subjects = %q, want the merge first and two commits under it", subjects)
+	}
+	if got, want := slices.Sorted(slices.Values(subjects[1:])), []string{"feat: first parent", "fix: side"}; !slices.Equal(got, want) {
+		t.Fatalf("full-range subjects under the merge = %q, want %q (the foreign commit and the first parent)", got, want)
 	}
 	if foreign != "other <other@test.com>" {
 		t.Errorf("foreign commit author = %q, want other <other@test.com>", foreign)
