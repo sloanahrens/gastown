@@ -122,7 +122,9 @@ type specDispatchTickEntry struct {
 	Line string `json:"line"`
 }
 
-// specDispatchTickReport is the slice of the tick's JSON the daemon logs.
+// specDispatchTickReport is the slice of the tick's JSON the daemon logs. Its
+// tags mirror the dispatcher's report struct. Decoding ignores omitempty, so
+// the keys it requires are checked in parseSpecDispatchReport instead.
 type specDispatchTickReport struct {
 	Hold       string `json:"hold,omitempty"`
 	Roster     string `json:"roster"`
@@ -432,14 +434,34 @@ func specSlingsHooked(out []byte) int {
 // file empty (gt-l0vlf).
 var specDetailOwner = fmt.Sprintf("%d.%d", os.Getpid(), time.Now().UnixNano())
 
+// specDispatchRequiredKeys are the report keys the dispatcher always writes:
+// the ones its report struct (internal/cmd/spec.go) tags without omitempty.
+// Decoding leaves a missing key at its zero value, so a report without one
+// would read as an empty roster or a tick with no decisions. It is an error
+// instead.
+var specDispatchRequiredKeys = []string{"roster", "candidates", "dispatched", "refused", "planning", "skipped", "failed"}
+
 // parseSpecDispatchReport reads a tick's report out of its output. The sling
 // path prints progress to stdout before the JSON, so the report is the last
-// JSON object in the output.
+// JSON object in the output. A report missing a required key is an error.
 func parseSpecDispatchReport(out []byte) (specDispatchTickReport, error) {
 	var r specDispatchTickReport
 	text := strings.TrimSpace(string(out))
 	if i := strings.LastIndex(text, "\n{"); i >= 0 {
 		text = text[i+1:]
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(text), &keys); err != nil {
+		return r, err
+	}
+	var missing []string
+	for _, k := range specDispatchRequiredKeys {
+		if _, ok := keys[k]; !ok {
+			missing = append(missing, k)
+		}
+	}
+	if len(missing) > 0 {
+		return r, fmt.Errorf("report lacks %s", strings.Join(missing, ", "))
 	}
 	err := json.Unmarshal([]byte(text), &r)
 	return r, err

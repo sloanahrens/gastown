@@ -579,7 +579,7 @@ func TestWriteTownHealth_DispatchField(t *testing.T) {
 // tickReport parses one tick's JSON the way the ticker's output is read.
 func tickReport(t *testing.T, json string) specDispatchTickReport {
 	t.Helper()
-	r, err := parseSpecDispatchReport([]byte(json))
+	r, err := parseSpecDispatchReport(wireOut(json))
 	if err != nil {
 		t.Fatalf("parse %s: %v", json, err)
 	}
