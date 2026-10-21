@@ -18,8 +18,7 @@
 // failure the bead's own request caused is queued and asked again next pass,
 // up to maxAttempts; a failure that means Jev could not answer for the beads
 // this pass — an outage, or a refusal of the account rather than the request —
-// stops the pass where it is, so an outage costs no attempts and loses no
-// placement.
+// stops the pass where it is, so neither costs an attempt or loses a placement.
 package dispatch
 
 import (

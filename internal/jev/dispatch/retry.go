@@ -90,11 +90,9 @@ func beadFault(err error) bool {
 	return errors.Is(err, jev.ErrBadResponse)
 }
 
-// accountRefusal reports whether a 4xx answers for the account rather than for
-// this request: 402 Payment Required and 403 Forbidden refuse, or would refuse,
-// every request the key makes, so a placement that fails under them says
-// nothing about the bead. Counting such a failure would spend the placement's
-// maxAttempts on an account or billing problem and give it up for good.
+// accountRefusal reports whether a 4xx is the account's refusal (402 or 403)
+// rather than the request's. Such a failure says nothing about the bead, so it
+// must not spend the placement's maxAttempts.
 func accountRefusal(status int) bool {
 	return status == http.StatusPaymentRequired || status == http.StatusForbidden
 }
