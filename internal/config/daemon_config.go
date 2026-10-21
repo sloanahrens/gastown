@@ -100,6 +100,12 @@ type PatrolsConfig struct {
 	// every answer (internal/jev/dispatch). Opt-in, like JevDedupe.
 	JevDispatch *JevDispatchConfig `json:"jev_dispatch,omitempty"`
 
+	// JevProgress asks Jev whether a polecat the overrun guard nudged is making
+	// progress, from the last fifteen minutes of its transcript, and logs every
+	// answer (internal/jev/progress). It acts on nothing. Opt-in, like
+	// JevDedupe.
+	JevProgress *JevProgressConfig `json:"jev_progress,omitempty"`
+
 	// RestartTracker is retired (gt-gqftr): no code read the block. It is
 	// declared, like the other retired keys, so a daemon.json that still
 	// carries it keeps loading under strict decoding and is kept verbatim.
@@ -515,6 +521,20 @@ type JevLandingConfig struct {
 // spend. The pass is off unless Enabled is true, and an enabled pass needs
 // USDPerBillionTokens: the usage ledger stores tokens, not dollars.
 type JevSubmissionConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the pass for the day once the town's Jev spend
+	// reaches it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+}
+
+// JevProgressConfig switches on the polecat progress battery and prices its Jev
+// spend. The battery is off unless Enabled is true, and an enabled pass needs
+// USDPerBillionTokens: the usage ledger stores tokens, not dollars.
+type JevProgressConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// MaxUSDPerDay stops the pass for the day once the town's Jev spend

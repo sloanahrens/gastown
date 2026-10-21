@@ -104,6 +104,10 @@ type overrunSeams struct {
 	slungAt func(bead, rig, polecat string) (time.Time, bool)
 	// nudge delivers msg to the seat's session.
 	nudge func(seat overrunSeat, msg string) error
+	// nudged is told each nudge that was delivered, and when, so the progress
+	// battery can ask about the seat (jev_progress.go). It is called only after
+	// nudge succeeds, and nil means nothing is asked.
+	nudged func(seat overrunSeat, at time.Time)
 
 	// submittedNow re-reads, at the moment of acting, whether the seat has
 	// submitted its work: gt done is running (a fresh exiting heartbeat) or the
@@ -445,6 +449,9 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 				}
 				continue
 			}
+			if s.nudged != nil {
+				s.nudged(seat, now)
+			}
 			state.NudgedAt = now
 			if err := writeOverrunState(d.config.TownRoot, state); err != nil {
 				d.logger.Printf("overrun_guard: WARNING: %s nudged on %s but state not saved (%v) — it may be nudged again", who, seat.Bead, err)
@@ -491,6 +498,7 @@ func (d *Daemon) overrunProdSeams() overrunSeams {
 		slungAt:           sl.slungAt,
 		gateRunning:       gate.running,
 		escalationWaiting: escalation.waiting,
+		nudged:            d.enqueueJevProgress,
 		nudge: func(seat overrunSeat, msg string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), overrunNudgeTimeout)
 			defer cancel()

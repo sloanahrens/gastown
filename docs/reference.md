@@ -1611,6 +1611,53 @@ The daemon patrol `jev_dispatch` (heartbeat step `jev-dispatch`) is off unless
 the town-wide cap above, so the dedupe and dispatch batteries draw on one day's
 room. `gt jev dispatch` reads the same keys whether or not the patrol is on.
 
+### Progress battery (`jev_progress`)
+
+When the overrun guard nudges a polecat at its nudge threshold, the nudge is
+queued. The progress pass runs on the next heartbeat that finds a nudge queued,
+so the answer lands while the seat is still inside its clock. The pass reads the
+seat's transcript for the window before the nudge and asks five questions in one
+call: `making_progress`, `looping`, `blocked_on_environment` and
+`drifted_from_bead`, each a `noul` probability, and `remaining`, a `score` over
+`done`, `nearly done`, `halfway` and `barely started`. It appends one line to
+`.runtime/jev/progress.jsonl`: `{ts, rig, polecat, bead, session, nudge_at,
+model, answers, question_version}`.
+
+A nudge that cannot be asked logs null `answers` and a `reason` instead. The
+reasons are `no_transcript`, `transcript_unreadable` (missing or unreadable),
+`outside_town` (the transcript is not under the town root, and is never opened),
+`bead_unreadable`, `bad_response` (Jev returned nothing usable) and `ask_failed`.
+The pass goes on to the next nudge after each. A line that cannot be appended
+to the log ends the pass: the nudges it did not reach are dropped, and the
+daemon logs the pass as stopped with its counts.
+
+The battery is log-only. It never nudges, stops, messages or comments on a seat,
+and the guard's decisions never read the log. The state Jev reads is the bead's
+title and acceptance, then the window's events: assistant text in full, each tool
+call's input and each tool result cut to a fixed length, and every value passed
+through the report's credential scrub. The state has a token budget, estimated
+from its JSON size; when it is over, the oldest events go first and
+`events_dropped` counts them. The pass reads only the end of a transcript. When
+the window reaches back past what it read, the state carries
+`window_clipped: true`, so the events from its start are known to be missing.
+
+A transcript is opened only after its symlinks are resolved and the real path is
+under the town root.
+
+The queue lives in the daemon's memory and is bounded. A nudge is not held for a
+later pass: a pass that finds the town's daily cap spent, or cannot open, drops
+the nudges it has, and logs how many.
+
+The daemon patrol `jev_progress` is off unless `daemon.json` enables it. While it
+is off the guard queues nothing:
+
+```json
+{"patrols": {"jev_progress": {"enabled": true, "max_usd_per_day": 1, "usd_per_billion_tokens": 4}}}
+```
+
+`usd_per_billion_tokens` is required. `max_usd_per_day` is optional and draws on
+the same town-wide cap as the other batteries.
+
 ## Beads Commands (bd)
 
 ```bash
