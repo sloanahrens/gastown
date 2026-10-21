@@ -17,6 +17,7 @@ package failcause
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -44,6 +45,23 @@ const (
 	// when a question id, its text, its options or a level changes.
 	Version = 1
 )
+
+// ErrCapReached reports that the day's Jev spend left no room for another ask,
+// so the failing tests after the stop were not judged.
+var ErrCapReached = errors.New("the day's Jev spend cap was reached")
+
+// ErrSpendUnreadable reports that the day's Jev spend could not be read, so no
+// failing test was judged: an unreadable cap cannot be spent against.
+var ErrSpendUnreadable = errors.New("the day's Jev spend could not be read")
+
+// judgeSlots lets one judgement ask Jev at a time in the process. Every
+// judgement reads the day's spend and then spends against it, so two at once
+// can both read a cap under budget and both cross it. A red verdict that
+// arrives while another is being judged waits its turn on a goroutine holding
+// nothing but its own Landing, so the paid calls are what the slot bounds; the
+// landing never waits, because the judging is off its goroutine either way
+// (gt-xlv27).
+var judgeSlots = make(chan struct{}, 1)
 
 // Landing is a red candidate verdict the battery judges: the bead whose
 // candidate it gated, the rig, and the gate's failure excerpt.
@@ -78,11 +96,12 @@ type Asker interface {
 	Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error)
 }
 
-// Judge asks Jev about each Go test the landing's excerpt names as failing, and
-// appends one line per test. When the excerpt names no test, or the spend cap
-// is reached, Judge logs nothing and asks nothing. A Jev call that gets no
-// usable reply ends the judging with an error and no line for that test: an
-// outage leaves no record behind, so the next red verdict is judged afresh.
+// Judge asks Jev about each Go test the landing's excerpt names as failing,
+// appending one line per test and leaving the tests after a spend stop
+// unjudged and unwritten, which ErrCapReached or ErrSpendUnreadable reports. An
+// excerpt naming no test asks and writes nothing, and a Jev call with no usable
+// reply ends the judging with an error and no line for that test, so an outage
+// leaves no record behind and the next red verdict is judged afresh.
 func (p *Pass) Judge(ctx context.Context, l Landing) error {
 	tests := land.ParseTestFailures(l.Tail)
 	if len(tests) == 0 {
@@ -93,10 +112,10 @@ func (p *Pass) Judge(ctx context.Context, l Landing) error {
 	for _, t := range tests {
 		allowed, err := p.Allows()
 		if err != nil {
-			return fmt.Errorf("reading today's spend: %w", err)
+			return fmt.Errorf("%w: %w", ErrSpendUnreadable, err)
 		}
 		if !allowed {
-			return nil
+			return ErrCapReached
 		}
 		got, err := p.ask(ctx, state{
 			Rig:     l.Rig,
@@ -186,8 +205,8 @@ func truncate(s string, n int) string {
 
 // Shadow is the rig's candidate gate with the battery beside it. Run returns
 // the gate's result exactly as the gate produced it. A red verdict with an
-// excerpt is handed to the battery, which runs in the background unless Async
-// is set to run it inline.
+// excerpt is handed to the battery, which runs in the background, one
+// judgement at a time, unless Async is set to run it inline.
 type Shadow struct {
 	// Gate is the rig's candidate gate, already wrapped by any battery that
 	// sits beside this one.
@@ -196,7 +215,8 @@ type Shadow struct {
 	Pass *Pass
 	// Rig is the rig the landing belongs to.
 	Rig string
-	// Logf reports a failure of the battery. It never changes the landing.
+	// Logf reports what the battery could not do, a failed judgement or a spend
+	// stop. It never changes the landing.
 	Logf func(format string, args ...any)
 	// Async runs the judging. Nil runs it on its own goroutine, so the landing
 	// does not wait on Jev; a test sets it to run inline.
@@ -214,7 +234,14 @@ func (s Shadow) Run(ctx context.Context, wt land.Repo, dir string, w land.Work, 
 	// may outlive it, so it runs on a context that cannot be canceled.
 	judgeCtx := context.WithoutCancel(ctx)
 	s.run(func() {
-		if err := s.Pass.Judge(judgeCtx, l); err != nil {
+		err := s.Pass.Judge(judgeCtx, l)
+		switch {
+		case err == nil:
+		case errors.Is(err, ErrCapReached):
+			s.logf("%s: %v, so the remaining failing tests were not judged", w.BeadID, err)
+		case errors.Is(err, ErrSpendUnreadable):
+			s.logf("%s: %v, so no failing test was judged", w.BeadID, err)
+		default:
 			s.logf("%s: the failing-test cause was not logged: %v", w.BeadID, err)
 		}
 	})
@@ -227,12 +254,19 @@ func (s Shadow) Discard(ctx context.Context, w land.Work, res land.CandidateResu
 	s.Gate.Discard(ctx, w, res)
 }
 
+// run hands the judging to Async, or starts it on a goroutine holding the one
+// judge slot. Async owns the scheduling, which is how a test runs the judging
+// inline.
 func (s Shadow) run(call func()) {
-	if s.Async == nil {
-		go call()
+	if s.Async != nil {
+		s.Async(call)
 		return
 	}
-	s.Async(call)
+	go func() {
+		judgeSlots <- struct{}{}
+		defer func() { <-judgeSlots }()
+		call()
+	}()
 }
 
 func (s Shadow) logf(format string, args ...any) {
