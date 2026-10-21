@@ -797,6 +797,10 @@ func TestStalledPolecatCheck_AsksThePredicateAboutTheBranchsBead(t *testing.T) {
 	var gotBead string
 	var gotIssue *beads.Issue
 	check.workLanded = func(_ land.WorkLandedRepo, _, _, beadID string, i *beads.Issue) land.WorkLandedVerdict {
+		if i == nil {
+			// The refs/landed and target arms did not prove it, so the bead is read.
+			return land.WorkLandedVerdict{Reason: land.WorkUnpushed, Detail: "bead not read"}
+		}
 		gotBead, gotIssue = beadID, i
 		return land.WorkLandedVerdict{Landed: true, Reason: land.WorkLandedByRecord}
 	}
@@ -833,6 +837,114 @@ func TestStalledPolecatCheck_UnreadableBeadIsAProbeFailure(t *testing.T) {
 	}
 	if len(result.Details) == 0 || !strings.Contains(result.Details[0], "[probe-failed: read bead gt-ask2: dolt down]") {
 		t.Errorf("Details = %v, want the probe failure named", result.Details)
+	}
+}
+
+// TestStalledPolecatCheck_ReadsNoBeadWhenALandedArmProves: the bead is only
+// needed by the LANDING RECORD arm, so a branch the refs/landed or target arm
+// proves landed never reads it.
+func TestStalledPolecatCheck_ReadsNoBeadWhenALandedArmProves(t *testing.T) {
+	t.Parallel()
+	f := &fakePolecatGit{
+		branch:        polecat.FormatGeneratedBranchName("furiosa", "gt-ask3", "abc123"),
+		unpushedCount: 1,
+		defaultBranch: "main",
+	}
+	townRoot := t.TempDir()
+	makePolecatDir(t, townRoot, "testrig", "furiosa")
+	check := newTestCheck()
+	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
+	check.gitForTest = func(string) polecatGit { return f }
+	check.beadStatus = openBeads
+	reads := 0
+	check.beadIssue = func(string, string) (*beads.Issue, error) {
+		reads++
+		return nil, nil
+	}
+	check.workLanded = func(land.WorkLandedRepo, string, string, string, *beads.Issue) land.WorkLandedVerdict {
+		return land.WorkLandedVerdict{Landed: true, Reason: land.WorkLandedByRef}
+	}
+
+	if result := check.Run(&CheckContext{TownRoot: townRoot, RigName: "testrig"}); result.Status != StatusOK {
+		t.Fatalf("Status = %v, want OK (details: %v)", result.Status, result.Details)
+	}
+	if reads != 0 {
+		t.Errorf("read the bead %d time(s), want 0 when refs/landed already proves the branch landed", reads)
+	}
+}
+
+// TestStalledPolecatCheck_MissingBeadIsNotAProbeFailure: a town with no beads
+// database has no LANDING RECORD to read. That is absence, so the unpushed
+// branch warns without a probe-failed note on its line.
+func TestStalledPolecatCheck_MissingBeadIsNotAProbeFailure(t *testing.T) {
+	t.Parallel()
+	f := newStalledFixture(t, "testrig", "test-gone", "gt-gone1")
+
+	check := newTestCheck()
+	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
+	check.beadStatus = openBeads
+	check.beadIssue = lookupBead
+	result := check.Run(f.ctx())
+
+	if result.Status != StatusWarning || len(check.stalledPolecats) != 1 {
+		t.Fatalf("Status = %v, stalled = %+v; want Warning for the unpushed branch (details: %v)", result.Status, check.stalledPolecats, result.Details)
+	}
+	for _, d := range result.Details {
+		if strings.Contains(d, "probe-failed") {
+			t.Errorf("Details = %v, want no probe-failed note for a missing beads database", result.Details)
+		}
+	}
+}
+
+// landingRecordRun runs the check over the fixture's real git with the bead
+// closed and carrying rec as its LANDING RECORD.
+func landingRecordRun(t *testing.T, f *stalledFixture, rec land.LandingRecord) *CheckResult {
+	t.Helper()
+	check := newTestCheck()
+	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
+	check.beadStatus = openBeads
+	check.beadIssue = func(string, string) (*beads.Issue, error) {
+		return &beads.Issue{ID: f.issue, Status: "closed", Notes: rec.NoteBlock()}, nil
+	}
+	return check.Run(f.ctx())
+}
+
+// TestStalledPolecatCheck_LandingRecordReadsAsLandedOverRealGit runs the
+// LANDING RECORD arm through real git: the work landed on main as a commit with
+// the same file contents, and the record names it. The branch reads as landed.
+func TestStalledPolecatCheck_LandingRecordReadsAsLandedOverRealGit(t *testing.T) {
+	t.Parallel()
+	f := newStalledFixture(t, "testrig", "test-rec", "gt-rec1")
+	head, err := f.gf.OpenBranchRepo(f.clonePath).Rev("HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.reimplementOnMain(t)
+	landed, err := bareGit(f.gf, f.bare).Rev("refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := landingRecordRun(t, f, land.LandingRecord{Head: head, LandedCommit: landed, Branch: f.branch})
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %v, want OK — the landing record names main's commit with the branch's contents (details: %v)", result.Status, result.Details)
+	}
+}
+
+// TestStalledPolecatCheck_LandingRecordDifferingReadsAsDiffers runs the same
+// arm where the record names a head whose file the branch changed. The branch
+// is not the landed content, so it warns and names the file.
+func TestStalledPolecatCheck_LandingRecordDifferingReadsAsDiffers(t *testing.T) {
+	t.Parallel()
+	f := newStalledFixture(t, "testrig", "test-differ", "gt-rec2")
+	seed, err := bareGit(f.gf, f.bare).Rev("refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result := landingRecordRun(t, f, land.LandingRecord{Head: seed, LandedCommit: seed, Branch: f.branch})
+	if result.Status != StatusWarning || len(result.Details) == 0 || !strings.Contains(result.Details[0], "[landed-differs:") || !strings.Contains(result.Details[0], "work.txt") {
+		t.Fatalf("Status = %v, Details = %v; want Warning naming landed-differs for work.txt", result.Status, result.Details)
 	}
 }
 

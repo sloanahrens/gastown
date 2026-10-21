@@ -1,7 +1,9 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -267,26 +269,27 @@ func (c *StalledPolecatCheck) landedVerdict(pg polecatGit, townRoot, branch stri
 	_ = pg.FetchDefaultBranchWithTimeout("origin", fetchTimeout) // best-effort: stale evidence over-flags, it cannot mask real risk
 
 	var beadID string
-	var issue *beads.Issue
-	var readErr error
 	if meta, ok := polecat.ParseBranchName(branch); ok {
 		beadID = meta.Issue
-	}
-	if beadID != "" && c.beadIssue != nil {
-		issue, readErr = c.beadIssue(townRoot, beadID)
 	}
 	workLanded := c.workLanded
 	if workLanded == nil {
 		workLanded = land.WorkLandedOnTarget
 	}
-	// The branch is the worktree's current branch, so "" reads its HEAD.
-	v := workLanded(pg, "", "", beadID, issue)
-	if !v.Landed && v.Reason == land.WorkUnpushed && readErr != nil {
+	// The branch is the worktree's current branch, so "" reads its HEAD. The
+	// first ask carries no bead: only the LANDING RECORD arm reads one, so the
+	// bead is read only when the other arms did not already prove landing.
+	v := workLanded(pg, "", "", beadID, nil)
+	if v.Landed || v.Reason != land.WorkUnpushed || beadID == "" || c.beadIssue == nil {
+		return v
+	}
+	issue, err := c.beadIssue(townRoot, beadID)
+	if err != nil {
 		// The LANDING RECORD arm could not run, so "nothing proves it" would
 		// overstate what was checked.
-		v = land.WorkLandedVerdict{Reason: land.WorkProbeFailed, Detail: fmt.Sprintf("read bead %s: %v", beadID, readErr)}
+		return land.WorkLandedVerdict{Reason: land.WorkProbeFailed, Detail: fmt.Sprintf("read bead %s: %v", beadID, err)}
 	}
-	return v
+	return workLanded(pg, "", "", beadID, issue)
 }
 
 // landedNote is what a verdict adds to a report line: nothing for a plain "no
@@ -365,19 +368,27 @@ func lookupBeadStatus(townRoot, beadID string) (string, bool) {
 }
 
 // lookupBead reads a bead the way lookupBeadStatus does and returns it whole,
-// for the landing-record arm of land.WorkLandedOnTarget. A town with no beads
-// database, or a bead bd cannot show, is an error.
+// for the landing-record arm of land.WorkLandedOnTarget. A missing beads
+// database or bead is absence, so it reads as nil with no error; a bead bd
+// cannot answer for is an error.
 func lookupBead(townRoot, beadID string) (*beads.Issue, error) {
 	if townRoot == "" || beadID == "" {
 		return nil, fmt.Errorf("no town root or bead id")
 	}
 	beadsDir := beads.ResolveBeadsDir(townRoot)
 	if _, err := os.Stat(beadsDir); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
 		return nil, err
 	}
 
 	env := beads.EnvForSubprocessMode(os.Environ(), beadsDir, beads.ReadOnlyRouting)
-	return beads.NewPlain(townRoot, env).WithTimeout(beadStatusTimeout).Show(beadID)
+	issue, err := beads.NewPlain(townRoot, env).WithTimeout(beadStatusTimeout).Show(beadID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return nil, nil
+	}
+	return issue, err
 }
 
 // findRigs returns the list of rig names to check.
