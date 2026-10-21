@@ -62,6 +62,7 @@ type gitRepo interface {
 	CheckUncommittedWorkLocal() (*git.UncommittedWorkStatus, error)
 	BranchPushedToRemote(localBranch, remote string) (bool, int, error)
 	BranchPreservationStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error)
+	BranchPreservationStatusLocal(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error)
 	BranchTargetStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error)
 	RefPreservedByRef(head, ref string) (git.BranchPreservationStatus, error)
 }

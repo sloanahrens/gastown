@@ -49,11 +49,12 @@ type LiveGitState struct {
 // a failed check is itself a fact, and callers must fail closed on it rather
 // than silently falling back to a recorded value (see RecordedCleanupBlocks).
 //
-// It reads the branch's preservation from the remote (one network round trip).
+// It reads the branch's preservation from the remote: one network round trip,
+// and a second when the count is zero, to judge the comparison itself.
 // A caller measuring one worktree should use it; a caller measuring every seat
 // in the town should use ProbeLiveGitStateLocal.
 func ProbeLiveGitState(worktreePath string) LiveGitState {
-	return probeLiveGitState(gitOpener{}, worktreePath, gitRepo.CheckUncommittedWork)
+	return probeLiveGitState(gitOpener{}, worktreePath, gitRepo.CheckUncommittedWork, livePreservation)
 }
 
 // ProbeLiveGitStateLocal is ProbeLiveGitState without the network round trip:
@@ -79,15 +80,27 @@ func ProbeLiveGitState(worktreePath string) LiveGitState {
 // git.BranchPreservationStatusLocal for the boundary and for the callers that
 // need the live probe instead.
 func ProbeLiveGitStateLocal(worktreePath string) LiveGitState {
-	return probeLiveGitState(gitOpener{}, worktreePath, gitRepo.CheckUncommittedWorkLocal)
+	return probeLiveGitState(gitOpener{}, worktreePath, gitRepo.CheckUncommittedWorkLocal, localPreservation)
+}
+
+// livePreservation and localPreservation read a branch's preservation the way
+// the reuse gate does (Manager.workstateInputForPolecat): against origin with
+// no MR target refs. They exist for probeLiveGitState to ask whether the
+// comparison could be judged at all, at the same fidelity as its count.
+func livePreservation(g gitRepo, branch string) (git.BranchPreservationStatus, error) {
+	return g.BranchPreservationStatus(branch, "origin", nil)
+}
+
+func localPreservation(g gitRepo, branch string) (git.BranchPreservationStatus, error) {
+	return g.BranchPreservationStatusLocal(branch, "origin", nil)
 }
 
 // probeLiveGitState is the shared body of the two probes. The worktree check,
 // the branch read, and the unknown/answered classification are identical; only
-// how the unpushed-commit count is derived differs, and that is the single
-// parameter, so the two fidelity levels cannot drift into disagreeing about
-// what a probe measures.
-func probeLiveGitState(gits gitOpener, worktreePath string, checkUncommittedWork func(gitRepo) (*git.UncommittedWorkStatus, error)) LiveGitState {
+// how the unpushed-commit count and its comparison are derived differs, and
+// those are the two parameters, so the two fidelity levels cannot drift into
+// disagreeing about what a probe measures.
+func probeLiveGitState(gits gitOpener, worktreePath string, checkUncommittedWork func(gitRepo) (*git.UncommittedWorkStatus, error), preservation func(gitRepo, string) (git.BranchPreservationStatus, error)) LiveGitState {
 	if !isWorktreeRoot(gits, worktreePath) {
 		// See IsWorktreeRoot: without this the upward resolution below would
 		// measure the enclosing repository (the rig root, for a leftover
@@ -107,6 +120,15 @@ func probeLiveGitState(gits gitOpener, worktreePath string, checkUncommittedWork
 	status, err := checkUncommittedWork(g)
 	if err != nil {
 		return liveGitUnknown(worktreePath, "checking worktree state", err)
+	}
+	if status.UnpushedCommits == 0 && branch != "" {
+		// Zero is also what CheckUncommittedWork reports when no comparison ref
+		// resolves (unpushedCommits reads that as nothing to preserve). The
+		// reuse gate fails closed there, so this probe must too: ask the
+		// comparison itself, and an unjudgeable branch is unknown, not clean.
+		if _, err := preservation(g, branch); err != nil {
+			return liveGitUnknown(worktreePath, "comparing unpushed commits", err)
+		}
 	}
 
 	state := LiveGitState{

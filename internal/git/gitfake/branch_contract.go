@@ -58,6 +58,7 @@ type BranchRepo interface {
 	CheckUncommittedWorkLocal() (*git.UncommittedWorkStatus, error)
 	BranchPushedToRemote(localBranch, remote string) (bool, int, error)
 	BranchPreservationStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error)
+	BranchPreservationStatusLocal(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error)
 	BranchTargetStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error)
 	RefPreservedByRef(head, ref string) (git.BranchPreservationStatus, error)
 }
@@ -633,6 +634,9 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 		bp, err := pc.BranchPreservationStatus("", "origin", nil)
 		if err != nil || !bp.Preserved {
 			t.Errorf("detached at a pushed tip = %+v, %v", bp, err)
+		}
+		if lbp, err := pc.BranchPreservationStatusLocal("", "origin", nil); err != nil || !lbp.Preserved {
+			t.Errorf("local: detached at a pushed tip = %+v, %v", lbp, err)
 		}
 		if ls, err := pc.CheckUncommittedWorkLocal(); err != nil || ls.UnpushedCommits != 0 {
 			t.Errorf("CheckUncommittedWorkLocal = %+v, %v", ls, err)

@@ -125,15 +125,19 @@ func (h *handle) checkUncommittedWork(local bool) (*git.UncommittedWorkStatus, e
 var errNoComparisonRefs = errors.New("no comparison refs resolved")
 
 func (h *handle) BranchPreservationStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error) {
-	return h.lockedPreservation(localBranch, remote, targets, true)
+	return h.lockedPreservation(localBranch, remote, targets, true, false)
+}
+
+func (h *handle) BranchPreservationStatusLocal(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error) {
+	return h.lockedPreservation(localBranch, remote, targets, true, true)
 }
 
 func (h *handle) BranchTargetStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error) {
-	return h.lockedPreservation(localBranch, remote, targets, false)
+	return h.lockedPreservation(localBranch, remote, targets, false, false)
 }
 
 func (h *handle) BranchPushedToRemote(localBranch, remote string) (bool, int, error) {
-	status, err := h.lockedPreservation(localBranch, remote, nil, true)
+	status, err := h.lockedPreservation(localBranch, remote, nil, true, false)
 	if err != nil {
 		return false, 0, err
 	}
@@ -150,14 +154,14 @@ func (h *handle) RefPreservedByRef(head, ref string) (git.BranchPreservationStat
 	return h.refAgainstRef(r, wt, head, ref)
 }
 
-func (h *handle) lockedPreservation(localBranch, remote string, targets []string, includeExact bool) (git.BranchPreservationStatus, error) {
+func (h *handle) lockedPreservation(localBranch, remote string, targets []string, includeExact, local bool) (git.BranchPreservationStatus, error) {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
 	r, wt, err := h.locate("rev-parse", "HEAD")
 	if err != nil {
 		return git.BranchPreservationStatus{}, err
 	}
-	return h.preservation(r, wt, localBranch, remote, targets, includeExact, false)
+	return h.preservation(r, wt, localBranch, remote, targets, includeExact, local)
 }
 
 // refAgainstRef is git.Git's preservationOfRefAgainstRef: head is preserved
