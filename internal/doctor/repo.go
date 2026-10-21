@@ -34,9 +34,9 @@ type Repo interface {
 	ConfigSet(key, value string) error
 
 	BranchPushedToRemote(localBranch, remote string) (bool, int, error)
-	// IsAncestor, CommitLandedOnTarget, DiffNameOnly and DiffPathsNameOnly (with
-	// Rev, RefExists, MergeBase and RemoteDefaultBranch) are land.WorkLandedRepo,
-	// what land.WorkLandedOnTarget reads.
+	// IsAncestor, CommitLandedOnTarget, DiffNameOnly and DiffPathsNameOnly are
+	// added for land.WorkLandedRepo, what land.WorkLandedOnTarget reads; Rev,
+	// RefExists, MergeBase and RemoteDefaultBranch were already here.
 	IsAncestor(ancestor, descendant string) (bool, error)
 	CommitLandedOnTarget(remote, target, commit string) bool
 	DiffNameOnly(base, head string) ([]string, error)
