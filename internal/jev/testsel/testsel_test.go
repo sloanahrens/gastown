@@ -172,10 +172,10 @@ func TestJevTestselTreeWideInput(t *testing.T) {
 
 func TestJevTestselAnyTreeWideReadsBothSidesOfARename(t *testing.T) {
 	t.Parallel()
-	if anyTreeWide("M\tlib/lib.go\nM\tdocs/x.md") {
+	if anyTreeWide("M\x00lib/lib.go\x00M\x00docs/x.md\x00") {
 		t.Error("a change to ordinary files read as tree-wide")
 	}
-	if !anyTreeWide("R100\tgo.mod\tnew/go.mod") {
+	if !anyTreeWide("R100\x00go.mod\x00new/go.mod\x00") {
 		t.Error("a rename away from go.mod was not read as tree-wide")
 	}
 }

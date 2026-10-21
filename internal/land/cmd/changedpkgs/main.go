@@ -1,7 +1,7 @@
 // Command changedpkgs prints the Go packages a branch changed, one "./dir"
 // per line, for `make presubmit` (gt-ssyxd). It reads
-// `git diff --name-status -M <base>...HEAD`, so a branch is judged by its own
-// commits, never by what landed on the base after it branched.
+// `git diff --name-status -z -M <base>...HEAD`, so a branch is judged by its
+// own commits, never by what landed on the base after it branched.
 //
 // -guards prints instead the arguments for a second `go test` run over the
 // tree-wide guard tests the branch's changed paths trigger (gt-ydzwb),
@@ -34,7 +34,7 @@ func main() {
 	}
 	repoRoot := string(root[:len(root)-1])
 
-	diff := exec.Command("git", "diff", "--name-status", "-M", *base+"...HEAD")
+	diff := exec.Command("git", "diff", "--name-status", "-z", "-M", *base+"...HEAD")
 	diff.Stderr = os.Stderr
 	out, err := diff.Output()
 	if err != nil {

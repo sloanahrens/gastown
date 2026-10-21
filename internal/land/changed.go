@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// ChangedPackages maps `git diff --name-status -M` output to the Go package
+// ChangedPackages maps `git diff --name-status -z -M` output to the Go package
 // directories whose tests the change can affect, sorted and relative to the
 // repo root ("internal/land", never "./internal/land").
 //
@@ -95,33 +95,56 @@ func anyJudged(g treeWideGuard, files []string) bool {
 	return false
 }
 
-// eachChange calls fn once per `git diff --name-status -M` line with the
+// ChangedPaths returns every path `git diff --name-status -z` names, both
+// sides of a rename or copy, cleaned and slash-separated. A tree-wide guard
+// reads the same records the package and guard selection read.
+func ChangedPaths(nameStatus string) []string {
+	var paths []string
+	eachChange(nameStatus, func(_ string, now, gone []string) {
+		paths = append(paths, now...)
+		paths = append(paths, gone...)
+	})
+	return paths
+}
+
+// eachChange calls fn once per `git diff --name-status -z` record with the
 // paths that exist after the change and the paths it removed: a guard that
 // judges the tree as it will stand reads the first, a guard that ratchets a
 // baseline down reads the second.
 //
 // A copy names only its destination, because its source is unchanged. A
 // rename names both sides and a deletion only the removed path.
+//
+// With -z, git writes each field NUL-terminated and never quotes a name, so a
+// path holding a non-ASCII byte, a tab or a quote arrives as written. Without
+// -z git quotes such a path ("caf\303\251.go") and the .go suffix is lost.
 func eachChange(nameStatus string, fn func(status string, now, gone []string)) {
-	for _, line := range strings.Split(nameStatus, "\n") {
-		fields := strings.Split(strings.TrimRight(line, "\r"), "\t")
-		if len(fields) < 2 {
+	// Fields alternate: a status (M, A, D, R100, C75 ...), then one path, or
+	// old and new for a rename or copy. A dangling status with no path is
+	// dropped; a trailing NUL leaves an empty field, skipped the same way.
+	fields := strings.Split(nameStatus, "\x00")
+	for i := 0; i < len(fields); {
+		status := fields[i]
+		n := 1
+		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
+			n = 2
+		}
+		if status == "" || i+n >= len(fields) {
+			i++
 			continue
 		}
-		// fields[0] is the status (M, A, D, R100, C75 ...); the rest are
-		// paths: one, or old and new for a rename or copy.
-		paths := make([]string, 0, len(fields)-1)
-		for _, f := range fields[1:] {
+		paths := make([]string, 0, n)
+		for _, f := range fields[i+1 : i+1+n] {
 			paths = append(paths, path.Clean(filepath.ToSlash(f)))
 		}
-		status, last := fields[0], paths[len(paths)-1:]
+		i += 1 + n
 		switch {
 		case strings.HasPrefix(status, "D"):
 			fn(status, nil, paths)
 		case strings.HasPrefix(status, "R"):
-			fn(status, last, paths[:len(paths)-1])
+			fn(status, paths[1:], paths[:1])
 		case strings.HasPrefix(status, "C"):
-			fn(status, last, nil)
+			fn(status, paths[1:], nil)
 		default:
 			fn(status, paths, nil)
 		}

@@ -78,7 +78,7 @@ func (gitTree) Read(ctx context.Context, dir, base, head string) (treeState, err
 	if strings.HasPrefix(base, "-") || strings.HasPrefix(head, "-") {
 		return treeState{}, fmt.Errorf("refusing diff of refs %q..%q: a ref may not start with -", base, head)
 	}
-	nameStatus, err := gitOut(ctx, dir, "diff", "--name-status", "-M", base, head)
+	nameStatus, err := gitOut(ctx, dir, "diff", "--name-status", "-z", "-M", base, head)
 	if err != nil {
 		return treeState{}, err
 	}
@@ -220,14 +220,12 @@ func parseNumstat(out string) ([]fileChange, string) {
 	return files, stat
 }
 
-// anyTreeWide reports whether any path in `git diff --name-status` output is a
-// tree-wide input. Both sides of a rename count.
+// anyTreeWide reports whether any path in `git diff --name-status -z` output is
+// a tree-wide input. Both sides of a rename count.
 func anyTreeWide(nameStatus string) bool {
-	for _, line := range strings.Split(nameStatus, "\n") {
-		for _, path := range strings.Split(strings.TrimRight(line, "\r"), "\t")[1:] {
-			if TreeWideInput(filepath.ToSlash(path)) {
-				return true
-			}
+	for _, p := range land.ChangedPaths(nameStatus) {
+		if TreeWideInput(p) {
+			return true
 		}
 	}
 	return false

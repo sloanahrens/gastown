@@ -34,50 +34,50 @@ func TestChangedPackages(t *testing.T) {
 		want []string
 	}{
 		{"empty diff", "", nil},
-		{"one modified go file", "M\tinternal/land/gate.go\n", []string{"internal/land"}},
-		{"test file counts", "M\tinternal/land/gate_test.go\n", []string{"internal/land"}},
+		{"one modified go file", "M\x00internal/land/gate.go\x00", []string{"internal/land"}},
+		{"test file counts", "M\x00internal/land/gate_test.go\x00", []string{"internal/land"}},
 		{
 			"two files one package, sorted and deduplicated",
-			"M\tinternal/land/gate.go\nA\tinternal/cmd/done.go\nM\tinternal/land/changed.go\n",
+			"M\x00internal/land/gate.go\x00A\x00internal/cmd/done.go\x00M\x00internal/land/changed.go\x00",
 			[]string{"internal/cmd", "internal/land"},
 		},
 		{
 			"rename across packages names both sides",
-			"R095\tinternal/oldhome/a.go\tinternal/newhome/a.go\n",
+			"R095\x00internal/oldhome/a.go\x00internal/newhome/a.go\x00",
 			[]string{"internal/newhome", "internal/oldhome"},
 		},
 		{
 			"rename within a package",
-			"R100\tinternal/land/a.go\tinternal/land/b.go\n",
+			"R100\x00internal/land/a.go\x00internal/land/b.go\x00",
 			[]string{"internal/land"},
 		},
 		{
 			// A copy leaves its source untouched, so only the destination's
 			// package is retested.
 			"copy names only the destination",
-			"C075\tinternal/land/a.go\tinternal/newhome/a.go\n",
+			"C075\x00internal/land/a.go\x00internal/newhome/a.go\x00",
 			[]string{"internal/newhome"},
 		},
 		{
 			"deleted package is dropped",
-			"D\tinternal/gone/x.go\nD\tinternal/gone/x_test.go\n",
+			"D\x00internal/gone/x.go\x00D\x00internal/gone/x_test.go\x00",
 			nil,
 		},
 		{
 			"deleted file in a surviving package is kept",
-			"D\tinternal/oldhome/b.go\n",
+			"D\x00internal/oldhome/b.go\x00",
 			[]string{"internal/oldhome"},
 		},
 		{
 			"rename out of a deleted package keeps only the new side",
-			"R100\tinternal/gone/a.go\tinternal/newhome/a.go\n",
+			"R100\x00internal/gone/a.go\x00internal/newhome/a.go\x00",
 			[]string{"internal/newhome"},
 		},
-		{"markdown names nothing", "M\tdocs/testing.md\nM\tREADME.md\n", nil},
-		{"makefile and scripts name nothing", "M\tMakefile\nA\tscripts/x.sh\n", nil},
+		{"markdown names nothing", "M\x00docs/testing.md\x00M\x00README.md\x00", nil},
+		{"makefile and scripts name nothing", "M\x00Makefile\x00A\x00scripts/x.sh\x00", nil},
 		{
 			"testdata maps to the owning package",
-			"A\tinternal/land/testdata/case/input.txt\n",
+			"A\x00internal/land/testdata/case/input.txt\x00",
 			[]string{"internal/land"},
 		},
 		{
@@ -85,12 +85,12 @@ func TestChangedPackages(t *testing.T) {
 			// is internal/testpolicy — not the fixture directory itself, which
 			// `go test` cannot build (gt-f1ynu).
 			"a go fixture under testdata maps to the owning package",
-			"M\tinternal/testpolicy/testdata/docker/qualified/x_test.go\n",
+			"M\x00internal/testpolicy/testdata/docker/qualified/x_test.go\x00",
 			[]string{"internal/testpolicy"},
 		},
 		{
 			"an underscored directory is a fixture directory too",
-			"M\tinternal/land/_build/gen.go\n",
+			"M\x00internal/land/_build/gen.go\x00",
 			[]string{"internal/land"},
 		},
 		{
@@ -98,23 +98,34 @@ func TestChangedPackages(t *testing.T) {
 			// the fixture directory itself must never be handed to `go test`,
 			// which cannot build it (gt-f1ynu).
 			"a testdata fixture with no enclosing package is skipped",
-			"M\tplugins/foo/testdata/x.go\n",
+			"M\x00plugins/foo/testdata/x.go\x00",
 			nil,
 		},
 		{
 			"embedded file maps to the owning package",
-			"M\tinternal/formula/formulas/mol-x.formula.toml\n",
+			"M\x00internal/formula/formulas/mol-x.formula.toml\x00",
 			[]string{"internal/formula"},
 		},
 		{
 			"non-go file in a directory under no package",
-			"M\tplugins/foo/run.sh\n",
+			"M\x00plugins/foo/run.sh\x00",
 			nil,
 		},
-		{"go.mod names nothing", "M\tgo.mod\nM\tgo.sum\n", nil},
-		{"malformed and blank lines are skipped", "\nM\n  \nM\tinternal/cmd/x.go\n", []string{"internal/cmd"}},
-		{"crlf line endings", "M\tinternal/cmd/x.go\r\n", []string{"internal/cmd"}},
-		{"dot-slash paths are cleaned", "M\t./internal/cmd/x.go\n", []string{"internal/cmd"}},
+		{"go.mod names nothing", "M\x00go.mod\x00M\x00go.sum\x00", nil},
+		{"blank fields and a dangling status are skipped", "\x00M\x00internal/cmd/x.go\x00M", []string{"internal/cmd"}},
+		{"dot-slash paths are cleaned", "M\x00./internal/cmd/x.go\x00", []string{"internal/cmd"}},
+		{
+			// git -z writes the name as it is: the non-ASCII byte is not
+			// quoted to octal, so the .go suffix survives to name the package.
+			"non-ASCII added file names its package",
+			"A\x00internal/cmd/café_test.go\x00",
+			[]string{"internal/cmd"},
+		},
+		{
+			"tab and quote in a name are not separators",
+			"M\x00internal/cmd/tab\tname\"q\".go\x00",
+			[]string{"internal/cmd"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -137,29 +148,38 @@ var guardTriggers = []struct {
 	pkg     string
 	trigger string
 }{
-	{"internal/testpolicy", "M\tinternal/land/gate_test.go\n"},
-	{"internal/cmdtree", "M\tinternal/templates/roles/polecat.md.tmpl\n"},
-	{"internal/cmd", "M\tMakefile\n"},
-	{"internal/bdgate", "M\tinternal/session/lifecycle.go\n"},
-	{"internal/polecat", "M\tinternal/daemon/patrol.go\n"},
-	{"internal/beads", "M\tinternal/plugin/dispatch.go\n"},
-	{"internal/beads/beadsfake", "A\tinternal/newpkg/new.go\n"},
-	{"internal/beadsql", "M\tinternal/daemon/patrol.go\n"},
-	{"internal/config", "M\tcmd/gt/main.go\n"},
-	{"internal/townconfig", "M\tcmd/gt/main.go\n"},
-	{"internal/guardlint", "M\tinternal/daemon/patrol.go\n"},
-	{"internal/rig", "M\tinternal/daemon/patrol.go\n"},
-	{"internal/tmux", "M\tinternal/daemon/patrol.go\n"},
-	{"internal/doltserver", "M\tinternal/daemon/patrol.go\n"},
-	{"internal/deps", "M\tinternal/daemon/patrol.go\n"},
-	{"internal/testdb", "M\tinternal/daemon/patrol.go\n"},
-	{"internal/testutil", "M\tinternal/daemon/patrol.go\n"},
-	{"internal/land", "M\t.om.json\n"},
+	{"internal/testpolicy", "M\x00internal/land/gate_test.go\x00"},
+	{"internal/cmdtree", "M\x00internal/templates/roles/polecat.md.tmpl\x00"},
+	{"internal/cmd", "M\x00Makefile\x00"},
+	{"internal/bdgate", "M\x00internal/session/lifecycle.go\x00"},
+	{"internal/polecat", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/beads", "M\x00internal/plugin/dispatch.go\x00"},
+	{"internal/beads/beadsfake", "A\x00internal/newpkg/new.go\x00"},
+	{"internal/beadsql", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/config", "M\x00cmd/gt/main.go\x00"},
+	{"internal/townconfig", "M\x00cmd/gt/main.go\x00"},
+	{"internal/guardlint", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/rig", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/tmux", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/doltserver", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/deps", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/testdb", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/testutil", "M\x00internal/daemon/patrol.go\x00"},
+	{"internal/land", "M\x00.om.json\x00"},
 }
 
 // unguarded is a changed path no guard reads: a doc outside every guard's
 // inputs, so a branch holding only this one triggers nothing.
-const unguarded = "M\tdocs/testing.md\n"
+const unguarded = "M\x00docs/testing.md\x00"
+
+func TestChangedPaths(t *testing.T) {
+	t.Parallel()
+	got := ChangedPaths("R100\x00internal/a\x00internal/b\x00D\x00internal/gone.go\x00C075\x00x/src.go\x00x/dst.go\x00M\x00./y.go\x00")
+	want := []string{"internal/b", "internal/a", "internal/gone.go", "x/dst.go", "y.go"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ChangedPaths = %q, want %q", got, want)
+	}
+}
 
 func TestGuardSelects(t *testing.T) {
 	t.Parallel()
@@ -215,26 +235,26 @@ func TestGuardSelectsRemovals(t *testing.T) {
 		{
 			// A guard that reads a path directly fails when the path is gone.
 			"deleting a session start file selects bdgate",
-			"D\tinternal/crew/manager.go\n",
+			"D\x00internal/crew/manager.go\x00",
 			"internal/bdgate",
 		},
 		{
 			// The lists testpolicy ratchets go stale when a listed package's
 			// last test file goes with it.
 			"deleting a test file selects testpolicy",
-			"D\tinternal/land/old_test.go\n",
+			"D\x00internal/land/old_test.go\x00",
 			"internal/testpolicy",
 		},
 		{
 			"deleting a doc selects nothing",
-			"D\tdocs/old.md\n",
+			"D\x00docs/old.md\x00",
 			"",
 		},
 		{
 			// A guard that ratchets a baseline down fails on the rename away:
 			// the file it counted no longer exists.
 			"renaming away from agent prose selects cmdtree",
-			"R100\tinternal/templates/roles/polecat.md.tmpl\tinternal/templates/roles/polecat.txt\n",
+			"R100\x00internal/templates/roles/polecat.md.tmpl\x00internal/templates/roles/polecat.txt\x00",
 			"internal/cmdtree",
 		},
 	}
@@ -262,7 +282,7 @@ func TestGuardSelectsRemovals(t *testing.T) {
 func TestGuardSelectsSkipsMissingPackages(t *testing.T) {
 	t.Parallel()
 	hasGo := func(string) bool { return false }
-	if got := GuardSelects("M\tinternal/templates/roles/polecat.md.tmpl\n", hasGo); got != nil {
+	if got := GuardSelects("M\x00internal/templates/roles/polecat.md.tmpl\x00", hasGo); got != nil {
 		t.Errorf("GuardSelects = %v, want nil when the guard package holds no Go", got)
 	}
 }
