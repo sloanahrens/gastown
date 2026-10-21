@@ -501,15 +501,24 @@ func (d *Daemon) exportDatabaseToJsonl(db, gitRepo, dataDir string, scrub bool) 
 	// not pass for a full export. The six share one budget per database: each
 	// gets what is left of it, and once it is spent the rest are not attempted,
 	// so a dolt that stops answering costs the cycle one bound (gt-4nqej).
+	// Each table that is still to come keeps a floor of that budget back, so a
+	// table that is slow but succeeds cannot leave the later ones unattempted
+	// every cycle.
 	var tableErrs []string
-	deadline := d.clk().Now().Add(d.jsonlSupplementalExportBudget())
-	for _, table := range supplementalTables {
-		budget := deadline.Sub(d.clk().Now())
-		if budget <= 0 {
+	suppBudget := d.jsonlSupplementalExportBudget()
+	deadline := d.clk().Now().Add(suppBudget)
+	floor := suppBudget / time.Duration(2*len(supplementalTables))
+	for i, table := range supplementalTables {
+		remaining := deadline.Sub(d.clk().Now())
+		if remaining <= 0 {
 			d.logger.Printf("jsonl_git_backup: %s/%s: not attempted — the %s supplemental export budget for the database is spent",
-				db, table, d.jsonlSupplementalExportBudget())
+				db, table, suppBudget)
 			tableErrs = append(tableErrs, fmt.Sprintf("%s: not attempted, the supplemental export budget was spent", table))
 			continue
+		}
+		budget := remaining - floor*time.Duration(len(supplementalTables)-i-1)
+		if budget < floor {
+			budget = min(floor, remaining)
 		}
 		tn, err := exportTable(table, beadsql.BackupTable(db, table), dbDir, dataDir, budget)
 		if err != nil {

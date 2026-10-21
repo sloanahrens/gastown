@@ -3145,10 +3145,11 @@ func TestExportDatabaseToJsonlSupplementalSuccess(t *testing.T) {
 }
 
 // TestExportDatabaseToJsonlSupplementalBudgetIsPerDatabase: the six
-// supplemental tables share one bound per database, so a table that stalls on
-// its whole budget leaves the rest unattempted. Before the fix each table had
-// its own timeout, and a dolt that stopped answering held one database — and
-// the cycle's doltMaintMu read lock — for half an hour (gt-4nqej).
+// supplemental tables share one bound per database, so a dolt that stops
+// answering costs the cycle that bound and no more. Before the fix each table
+// had its own timeout, and such a dolt held one database — and the cycle's
+// doltMaintMu read lock — for half an hour (gt-4nqej). Every table still gets
+// its floor, so each is attempted, but together they cannot outrun the bound.
 func TestExportDatabaseToJsonlSupplementalBudgetIsPerDatabase(t *testing.T) {
 	t.Parallel()
 	const budget = time.Minute
@@ -3157,34 +3158,70 @@ func TestExportDatabaseToJsonlSupplementalBudgetIsPerDatabase(t *testing.T) {
 	d.clock = clk
 	d.jsonlSupplementalTimeout = budget
 	var attempted []string
+	var stalled time.Duration
 	d.jsonlTableExportFn = func(table string, _ beadsql.Query, _ string, _ string, got time.Duration) (int, error) {
-		attempted = append(attempted, table)
 		if got <= 0 {
 			t.Errorf("%s exported with a spent budget (%s)", table, got)
 		}
 		if table == "issues" {
 			return 0, nil
 		}
-		if len(attempted) == 2 {
-			// The first supplemental table stalls for its whole budget, the way
-			// a dolt that stops answering does.
-			clk.Advance(got)
-			return 0, errors.New("signal: killed: context deadline exceeded")
-		}
-		t.Errorf("%s was exported after the database's supplemental budget was spent", table)
-		return 0, nil
+		attempted = append(attempted, table)
+		// Every table stalls for its whole budget, the way a dolt that stops
+		// answering does.
+		clk.Advance(got)
+		stalled += got
+		return 0, errors.New("signal: killed: context deadline exceeded")
 	}
 
 	n, err := d.exportDatabaseToJsonl("hq", t.TempDir(), t.TempDir(), false)
 	if err == nil {
-		t.Fatalf("exportDatabaseToJsonl = (%d, nil), want an error for the tables left unexported", n)
+		t.Fatalf("exportDatabaseToJsonl = (%d, nil), want an error for the tables that stalled", n)
 	}
-	if !strings.Contains(err.Error(), "not attempted") {
-		t.Errorf("error = %q, want the tables the spent budget left unattempted", err)
+	if stalled > budget {
+		t.Errorf("the tables held the export for %s, past the %s budget shared by the database", stalled, budget)
 	}
-	want := []string{"issues", supplementalTables[0]}
-	if !slices.Equal(attempted, want) {
-		t.Errorf("export attempted %v, want %v — the six tables share one budget per database", attempted, want)
+	if !slices.Equal(attempted, supplementalTables) {
+		t.Errorf("export attempted %v, want every table %v", attempted, supplementalTables)
+	}
+}
+
+// TestExportDatabaseToJsonlSlowTableLeavesTheRestTheirFloor: a table that is
+// slow but succeeds must not spend the whole budget and leave the later tables
+// unattempted — cycle after cycle, since the order never changes and the slow
+// table is always the same one. Each table still to come keeps a floor.
+func TestExportDatabaseToJsonlSlowTableLeavesTheRestTheirFloor(t *testing.T) {
+	t.Parallel()
+	const budget = time.Minute
+	d, _ := backupTestDaemon(t)
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
+	d.clock = clk
+	d.jsonlSupplementalTimeout = budget
+	var attempted []string
+	d.jsonlTableExportFn = func(table string, _ beadsql.Query, _ string, _ string, got time.Duration) (int, error) {
+		if table == "issues" {
+			return 1, nil
+		}
+		attempted = append(attempted, table)
+		if got <= 0 {
+			t.Errorf("%s exported with a spent budget (%s)", table, got)
+		}
+		if table == supplementalTables[0] {
+			// Succeeds, but only after using everything it was given.
+			clk.Advance(got)
+		}
+		return 1, nil
+	}
+
+	n, err := d.exportDatabaseToJsonl("hq", t.TempDir(), t.TempDir(), false)
+	if err != nil {
+		t.Fatalf("exportDatabaseToJsonl: %v — the tables after a slow success were starved", err)
+	}
+	if want := 1 + len(supplementalTables); n != want {
+		t.Errorf("total = %d, want %d", n, want)
+	}
+	if !slices.Equal(attempted, supplementalTables) {
+		t.Errorf("export attempted %v, want every table %v", attempted, supplementalTables)
 	}
 }
 

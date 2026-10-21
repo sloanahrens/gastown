@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,12 @@ import (
 // from the last-run time recorded here.
 
 const patrolLastRunFileName = "patrol_last_run.json"
+
+// errPatrolLastRunCorrupt marks a last-run file that was read but is not valid
+// JSON. It is the one load failure an in-memory completion time cannot explain
+// away: a write that could not create a record leaves the file missing or its
+// directory unusable, never garbled.
+var errPatrolLastRunCorrupt = errors.New("corrupt last-run file")
 
 // patrolLastRunWriteMu guards the read-modify-write of the shared file, so two
 // patrols recording a run at once cannot drop each other's entry.
@@ -52,7 +59,7 @@ func loadPatrolLastRun(townRoot, patrol string) (time.Time, bool, error) {
 
 	var state patrolLastRunState
 	if err := json.Unmarshal(data, &state); err != nil {
-		return time.Time{}, false, fmt.Errorf("parse %s: %w", patrolLastRunFileName, err)
+		return time.Time{}, false, fmt.Errorf("parse %s: %w: %w", patrolLastRunFileName, errPatrolLastRunCorrupt, err)
 	}
 
 	lastRun, ok := state.LastRun[patrol]
@@ -74,7 +81,8 @@ type patrolDueDecision struct {
 	// than from a comparison. A broken record runs the patrol *and* says so:
 	// silent skipping is the failure being fixed, and a run without a word
 	// would hide a corrupt state file behind a patrol that looks merely on
-	// schedule.
+	// schedule. A corrupt file also warns when an in-memory completion time
+	// decided the comparison instead.
 	warn string
 }
 
@@ -93,10 +101,18 @@ func evaluatePatrolDue(townRoot, patrol string, inMemory, now time.Time, interva
 	// create one. Without the second half a town whose daemon directory cannot
 	// be written would read "due" on every check and re-run the patrol there,
 	// once per check, for as long as it stayed broken (jev_dedupe's passes make
-	// network calls, gt-4nqej). Nothing is warned here: the failed write was
-	// logged when it happened, and the read failure is that same failure seen
-	// again.
+	// network calls, gt-4nqej). A read failure of that kind is the failed write
+	// seen again, and was logged when it happened, so nothing is warned.
+	//
+	// A corrupt file is not that failure: it is a broken record in its own
+	// right, and every caller that passes an in-memory time would otherwise
+	// lose the warning. The in-memory time still decides whether the patrol is
+	// due; the warning rides with the decision.
+	var corruptWarn string
 	if !inMemory.IsZero() && inMemory.After(lastRun) {
+		if errors.Is(err, errPatrolLastRunCorrupt) {
+			corruptWarn = fmt.Sprintf("last-run state unreadable (%v)", err)
+		}
 		lastRun, found, err = inMemory, true, nil
 	}
 
@@ -113,9 +129,9 @@ func evaluatePatrolDue(townRoot, patrol string, inMemory, now time.Time, interva
 
 	elapsed := now.Sub(lastRun).Round(time.Minute)
 	if elapsed >= interval {
-		return patrolDueDecision{due: true, note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval)}
+		return patrolDueDecision{due: true, note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval), warn: corruptWarn}
 	}
-	return patrolDueDecision{note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval)}
+	return patrolDueDecision{note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval), warn: corruptWarn}
 }
 
 // shortPatrolCheckTick returns a check cadence for a due-ness-gated patrol
