@@ -25,12 +25,144 @@ func tierSweepWriteTestLog(t *testing.T, body string) string {
 // lintTierSweepBead is the same check `gt spec lint` runs: the built-in
 // template's sections, the acceptance items and the Size.
 func lintTierSweepBead(opts beads.CreateOptions) specdispatch.Verdict {
+	return lintTierSweepBeadAgainst(opts, specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"})
+}
+
+// lintTierSweepBeadAgainst lints the bead against tmpl, the template the
+// dispatcher would read for the operator's configured path.
+func lintTierSweepBeadAgainst(opts beads.CreateOptions, tmpl specdispatch.Template) specdispatch.Verdict {
 	return specdispatch.Lint(specdispatch.Spec{
 		Title:       opts.Title,
 		Labels:      opts.Labels,
 		Description: opts.Description,
 		Acceptance:  opts.Acceptance,
-	}, specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"})
+	}, tmpl)
+}
+
+// tierSweepWriteTemplate writes a spec template with the given "## " sections
+// and points the daemon's patrol block at it, the way an operator's
+// patrols.spec_dispatch.template does. It returns the template's path.
+func tierSweepWriteTemplate(t *testing.T, d *Daemon, sections ...string) string {
+	t.Helper()
+	var body strings.Builder
+	body.WriteString("# Spec template\n\n")
+	for _, s := range sections {
+		body.WriteString("## " + s + "\n\nThe operator's text.\n\n")
+	}
+	path := filepath.Join(t.TempDir(), "spec-template.md")
+	if err := os.WriteFile(path, []byte(body.String()), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := SavePatrolConfig(d.config.TownRoot, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		SpecDispatch: &SpecDispatchConfig{Template: path},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// The shape a sweep bead carries is the shape the dispatcher's configured
+// template asks for: an operator who adds a section gets a bead that carries
+// it, so the lint passes rather than holding the bead unshaped (gt-uzkic).
+func TestTierSweepBeadShapeUsesTheConfiguredTemplate(t *testing.T) {
+	t.Parallel()
+	logPath := tierSweepWriteTestLog(t, ""+
+		"tier-sweep: integration ./internal/cmd ...\n"+
+		"    --- FAIL: TestCommandTreeWalkIsReadOnly (0.12s)\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+	tmplPath := tierSweepWriteTemplate(t, d, "Goal", "Constraints", "Out of scope", "Gate", "Size", "Testing")
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 32, Failed: 1, FailedNames: []string{"./internal/cmd"}, Log: logPath},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	opts := bd.created[0]
+	tmpl := specdispatch.LoadTemplate(tmplPath)
+	if v := lintTierSweepBeadAgainst(opts, tmpl); !v.Clean() {
+		t.Fatalf("the bead fails the configured template's lint: %s\ndescription:\n%s", v.ShapeNote(), opts.Description)
+	}
+	if !strings.Contains(opts.Description, "## Testing\n") {
+		t.Errorf("description lacks the template's ## Testing section:\n%s", opts.Description)
+	}
+	// A section the sweep does not know still says what it covers, so it
+	// reads as the bead's own text rather than a stock placeholder.
+	testingBody := tierSweepSectionText(opts.Description, "Testing")
+	if !strings.Contains(testingBody, "./internal/cmd") {
+		t.Errorf("## Testing body = %q, want it to name the failing package", testingBody)
+	}
+}
+
+// tierSweepSectionText returns the body under one "## " heading of desc.
+func tierSweepSectionText(desc, heading string) string {
+	return specdispatch.Sections(desc)[strings.ToLower(heading)]
+}
+
+// A configured template that cannot be read is no reason to hold the sweep:
+// the bead falls back to the built-in five sections, and that shape still
+// passes the built-in lint.
+func TestTierSweepBeadShapeFallsBackWhenTheTemplateIsMissing(t *testing.T) {
+	t.Parallel()
+	logPath := tierSweepWriteTestLog(t, ""+
+		"tier-sweep: integration ./internal/cmd ...\n"+
+		"    --- FAIL: TestCommandTreeWalkIsReadOnly (0.12s)\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+	if err := SavePatrolConfig(d.config.TownRoot, &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		SpecDispatch: &SpecDispatchConfig{Template: filepath.Join(t.TempDir(), "absent.md")},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 32, Failed: 1, FailedNames: []string{"./internal/cmd"}, Log: logPath},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	if v := lintTierSweepBead(bd.created[0]); !v.Clean() {
+		t.Fatalf("the fallback bead fails the built-in lint: %s\ndescription:\n%s", v.ShapeNote(), bd.created[0].Description)
+	}
+}
+
+// A patrol block that does not parse is the other read that can fail. The
+// tick stops on that block, so the sweep only has to file a bead that passes
+// the built-in lint and does not panic or drop the filing (gt-uzkic).
+func TestTierSweepBeadShapeFallsBackWhenThePatrolBlockIsUnreadable(t *testing.T) {
+	t.Parallel()
+	logPath := tierSweepWriteTestLog(t, ""+
+		"tier-sweep: integration ./internal/cmd ...\n"+
+		"    --- FAIL: TestCommandTreeWalkIsReadOnly (0.12s)\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+	if err := os.WriteFile(PatrolConfigFile(d.config.TownRoot), []byte("{ not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadPatrolConfig(d.config.TownRoot); err == nil {
+		t.Fatal("ReadPatrolConfig accepted the unparseable patrol block; the test does not reach the unreadable branch")
+	}
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 32, Failed: 1, FailedNames: []string{"./internal/cmd"}, Log: logPath},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	opts := bd.created[0]
+	if v := lintTierSweepBead(opts); !v.Clean() {
+		t.Fatalf("the bead fails the built-in lint: %s\ndescription:\n%s", v.ShapeNote(), opts.Description)
+	}
+	if got := specdispatch.Sections(opts.Description)["acceptance"]; got != opts.Acceptance {
+		t.Errorf("acceptance field and description disagree:\nfield: %q\nsection: %q", opts.Acceptance, got)
+	}
 }
 
 // A red-tier bead is born shaped: its description carries every section the
@@ -276,7 +408,8 @@ func TestTierSweepBead_StandInUnitNamesTheTier(t *testing.T) {
 		t.Run(unit, func(t *testing.T) {
 			t.Parallel()
 			description, acceptance := tierSweepBeadShape("integration", unit, "abc1234",
-				tierSweepTierResult{Verdict: tierSweepRed, Passed: 0, Failed: 1, Log: "/tmp/integration.log"})
+				tierSweepTierResult{Verdict: tierSweepRed, Passed: 0, Failed: 1, Log: "/tmp/integration.log"},
+				specdispatch.Template{Sections: specdispatch.DefaultSections, Source: "built-in"})
 			opts := beads.CreateOptions{
 				Title:       "tier sweep (gastown): integration: " + unit,
 				Labels:      []string{tierSweepRedLabel},

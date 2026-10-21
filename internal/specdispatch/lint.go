@@ -125,6 +125,17 @@ func DefaultTemplatePath() string {
 	return filepath.Join(home, ".claude", "docs", "agents", "spec-template.md")
 }
 
+// ResolveTemplatePath is the one resolver for the spec template path: the
+// configured path when the operator set one, else DefaultTemplatePath. The
+// dispatcher and the tier sweep both load their template through it, so they
+// lint against one shape.
+func ResolveTemplatePath(configured string) string {
+	if configured != "" {
+		return configured
+	}
+	return DefaultTemplatePath()
+}
+
 // LoadTemplate reads the required sections from the template file. A missing
 // or unreadable file, or one with no "## " headings, falls back to
 // DefaultSections; Source says which one was used so a report can name it.
