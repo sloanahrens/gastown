@@ -7,7 +7,8 @@
 // writes.
 //
 // A bead is asked about at most once in 30 days, read from the log's own
-// lines, so a second pass inside that window asks nothing. The caller supplies
+// lines, so a second pass inside that window asks nothing. A call that got no
+// reply does not count, so the next pass asks that bead again. The caller supplies
 // the bead reads, the hm search and the Jev client, so a test runs a pass with
 // fakes and no network. Open wires the production versions.
 package stale
