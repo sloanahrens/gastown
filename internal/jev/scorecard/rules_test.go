@@ -219,3 +219,24 @@ func TestRulesUnreadableStandDownStaysUnlabeled(t *testing.T) {
 		t.Errorf("labeling = %+v with an unreadable stand-down time, want unlabeled", lab)
 	}
 }
+
+// TestRulesMissingBeadKeepsARevertGuardLabel checks a bead the store does not
+// hold still takes a revert-guard label: the refusal ledger names it, so the
+// session broke a rule whatever its comments say.
+func TestRulesMissingBeadKeepsARevertGuardLabel(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := attention.AppendRefusal(town, attention.Refusal{
+		TS: rulesDoneAt.Add(2 * time.Minute), Bead: "gt-x", Rig: "gastown", Worker: "bullet",
+		Head: "abc1234", Kind: attention.KindRevertGuard, Summary: "reverts a merged commit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), nil)
+	a.comments = func(string, string) ([]beads.Comment, error) { return nil, beads.ErrNotFound }
+
+	lab := labelRules(t, a, rulesRaw(t, "gt-x"))
+	if !lab.Labeled || !lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesRevertGuard {
+		t.Errorf("labeling = %+v for a missing bead with a refusal, want broke true from %s", lab, ruleRulesRevertGuard)
+	}
+}

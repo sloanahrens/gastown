@@ -135,13 +135,15 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 		return Labeling{}, err
 	}
 	comments, err := a.comments(line.Rig, line.Bead)
-	if errors.Is(err, beads.ErrNotFound) {
-		return Labeling{}, nil
-	}
-	if err != nil {
+	// A bead the store does not hold has no comments to read, so its stand-down
+	// records are unreadable, not absent.
+	unreadable := errors.Is(err, beads.ErrNotFound)
+	if err != nil && !unreadable {
 		return Labeling{}, fmt.Errorf("reading the comments of %s: %w", line.Bead, err)
 	}
-	a.sessionsRead++
+	if !unreadable {
+		a.sessionsRead++
+	}
 
 	end := line.DoneAt.Add(ruleWindow)
 	var sources []string
@@ -151,7 +153,6 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 			break
 		}
 	}
-	unreadable := false
 	for _, c := range comments {
 		if !strings.HasPrefix(c.Text, reworkStandDownPrefix) {
 			continue
