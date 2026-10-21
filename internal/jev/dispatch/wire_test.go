@@ -74,8 +74,8 @@ func TestJevDispatchOpenWiresTheRigListerAndTheCap(t *testing.T) {
 	if p.LogPath != LogPath(town) || p.CursorPath != CursorPath(town) || p.RetryPath != RetryPath(town) {
 		t.Errorf("paths = %q, %q, %q, want the town's log, cursor and retry queue", p.LogPath, p.CursorPath, p.RetryPath)
 	}
-	if p.CapUSD != DefaultMaxUSDPerDay {
-		t.Errorf("cap = %v, want the default %v", p.CapUSD, DefaultMaxUSDPerDay)
+	if ok, err := p.Allows(); err != nil || !ok {
+		t.Errorf("Allows on an empty ledger = %v, %v, want true", ok, err)
 	}
 
 	since := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
@@ -94,37 +94,53 @@ func TestJevDispatchOpenWiresTheRigListerAndTheCap(t *testing.T) {
 	}
 
 	// The spend is the town's one ledger, priced at the configured rate and
-	// counted whatever caller wrote it.
+	// counted whatever caller wrote it: a dollar spent by another caller
+	// reaches the default one-dollar cap and stops the pass.
+	writeSpend(t, town, 250_000_000, "jev-dedupe")
+	ok, err := p.Allows()
+	if err != nil {
+		t.Fatalf("Allows: %v", err)
+	}
+	if ok {
+		t.Error("Allows = true with 0.25B tokens at 4 USD per billion spent, want false at the default cap")
+	}
+}
+
+// writeSpend puts one record in the town's usage ledger.
+func writeSpend(t *testing.T, town string, inputTokens int, caller string) {
+	t.Helper()
 	ledger := jev.UsageLedgerPath(town)
 	if err := os.MkdirAll(filepath.Dir(ledger), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	rec, err := json.Marshal(jev.LedgerRecord{TS: time.Now(), Caller: "jev-dedupe", InputTokens: 250_000_000})
+	rec, err := json.Marshal(jev.LedgerRecord{TS: time.Now(), Caller: caller, InputTokens: inputTokens})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(ledger, append(rec, '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	spent, err := p.SpentToday()
-	if err != nil {
-		t.Fatalf("SpentToday: %v", err)
-	}
-	if spent != 1 {
-		t.Errorf("SpentToday = %v, want 0.25B tokens at 4 USD per billion to cost 1", spent)
-	}
 }
 
 // An explicit cap wins over the default.
 func TestJevDispatchOpenKeepsTheConfiguredCap(t *testing.T) {
 	t.Parallel()
-	p, err := open(townWithBeads(t), Settings{MaxUSDPerDay: 2.5, USDPerBillionTokens: 3}, nil,
+	town := townWithBeads(t)
+	p, err := open(town, Settings{MaxUSDPerDay: 2.5, USDPerBillionTokens: 4}, nil,
 		keyedClient(t), func(string) beadLister { return &fakeBeadStore{} })
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	if p.CapUSD != 2.5 {
-		t.Errorf("cap = %v, want the configured 2.5", p.CapUSD)
+
+	// A dollar spent today is the default cap, but it is under the 2.5 cap
+	// the settings name.
+	writeSpend(t, town, 250_000_000, "jev-dedupe")
+	ok, err := p.Allows()
+	if err != nil {
+		t.Fatalf("Allows: %v", err)
+	}
+	if !ok {
+		t.Error("Allows = false with a dollar spent under the configured 2.5 cap, want true")
 	}
 }
 

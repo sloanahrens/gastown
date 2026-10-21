@@ -103,8 +103,7 @@ func TestJevAttentionRunPassesTheConfiguredSettings(t *testing.T) {
 				State:      func() (attention.State, error) { return attention.State{}, nil },
 				LogPath:    jevattention.LogPath(town),
 				CursorPath: jevattention.CursorPath(town),
-				SpentToday: func() (float64, error) { return 0, nil },
-				CapUSD:     s.MaxUSDPerDay,
+				Allows:     func() (bool, error) { return true, nil },
 			}, nil
 		},
 	}
@@ -171,8 +170,7 @@ func newJevAttentionRig(t *testing.T) *jevAttentionRig {
 			Events:     func() ([]attention.Event, error) { return nil, nil },
 			LogPath:    jevattention.LogPath(town),
 			CursorPath: jevattention.CursorPath(town),
-			SpentToday: func() (float64, error) { return 0, nil },
-			CapUSD:     s.MaxUSDPerDay,
+			Allows:     func() (bool, error) { return true, nil },
 		}, nil
 	}
 	return r
@@ -274,8 +272,7 @@ func TestJevAttentionRunStopsAtTheCap(t *testing.T) {
 				},
 				LogPath:    jevattention.LogPath(town),
 				CursorPath: cursor,
-				SpentToday: func() (float64, error) { return 1, nil },
-				CapUSD:     1,
+				Allows:     func() (bool, error) { return false, nil },
 			}, nil
 		},
 	}
@@ -328,8 +325,7 @@ func TestJevAttentionRunLogsAnOutageApartFromAnswers(t *testing.T) {
 				Events:     func() ([]attention.Event, error) { return events, nil },
 				LogPath:    jevattention.LogPath(town),
 				CursorPath: cursor,
-				SpentToday: func() (float64, error) { return 0, nil },
-				CapUSD:     1,
+				Allows:     func() (bool, error) { return true, nil },
 			}, nil
 		},
 	}

@@ -111,8 +111,7 @@ func newHarness(t *testing.T, items []attention.Item, answer func(string) (*jev.
 		Events:     func() ([]attention.Event, error) { return attention.ReadEvents(h.town) },
 		LogPath:    h.log,
 		CursorPath: h.cursor,
-		SpentToday: func() (float64, error) { return h.spent, nil },
-		CapUSD:     1,
+		Allows:     func() (bool, error) { return h.spent < 1, nil },
 		Now:        func() time.Time { return t0.Add(time.Hour) },
 		Warn:       h.warn,
 	}
@@ -672,14 +671,11 @@ func TestJevAttentionOpenWiresTheTownFiles(t *testing.T) {
 	if pass.LogPath != LogPath(town) || pass.CursorPath != CursorPath(town) {
 		t.Errorf("paths %q and %q, want the town's log and cursor", pass.LogPath, pass.CursorPath)
 	}
-	if pass.CapUSD != DefaultMaxUSDPerDay {
-		t.Errorf("CapUSD = %v, want the default %v", pass.CapUSD, DefaultMaxUSDPerDay)
-	}
 	if pass.Asker == nil || pass.State == nil {
 		t.Fatal("Open left the Asker or the state reader unset")
 	}
-	if spent, err := pass.SpentToday(); err != nil || spent != 0 {
-		t.Errorf("SpentToday on an empty ledger = %v, %v, want 0", spent, err)
+	if ok, err := pass.Allows(); err != nil || !ok {
+		t.Errorf("Allows on an empty ledger = %v, %v, want true", ok, err)
 	}
 
 	// One million input tokens at 1000 USD per billion is one dollar, spent
@@ -692,11 +688,11 @@ func TestJevAttentionOpenWiresTheTownFiles(t *testing.T) {
 	if err := os.WriteFile(ledger, append(line, '\n'), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	spent, err := pass.SpentToday()
+	ok, err := pass.Allows()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if spent < pass.CapUSD*0.99 {
-		t.Errorf("SpentToday = %v with another caller's dollar in the ledger, want the town-wide spend", spent)
+	if ok {
+		t.Error("Allows = true with another caller's dollar in the ledger, want false at the default cap")
 	}
 }

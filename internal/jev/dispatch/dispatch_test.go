@@ -132,8 +132,7 @@ func newHarness(t *testing.T, all []*beads.Issue, script ...fakeResult) *harness
 		LogPath:    h.log,
 		CursorPath: h.cursor,
 		RetryPath:  h.retry,
-		SpentToday: func() (float64, error) { return 0, nil },
-		CapUSD:     1,
+		Allows:     func() (bool, error) { return true, nil },
 		Now:        func() time.Time { return t0.Add(time.Hour) },
 		Wait: func(_ context.Context, d time.Duration) error {
 			h.waits = append(h.waits, d)
@@ -494,11 +493,8 @@ func TestJevDispatchQuestionsAreTheBattery(t *testing.T) {
 func TestJevDispatchPassStopsAtTheDailyCap(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t, []*beads.Issue{placed("gt-a", 10, specBody), placed("gt-b", 20, specBody), placed("gt-c", 30, specBody)})
-	h.pass.SpentToday = func() (float64, error) {
-		if len(h.asker.states) >= 1 {
-			return 1, nil // the first call used up the day
-		}
-		return 0.4, nil
+	h.pass.Allows = func() (bool, error) {
+		return len(h.asker.states) < 1, nil // the first call used up the day
 	}
 
 	sum := mustRun(t, h.pass)
@@ -511,7 +507,7 @@ func TestJevDispatchPassStopsAtTheDailyCap(t *testing.T) {
 		t.Errorf("cursor at %q, want gt-a so the rest wait for the next pass", cur.ID)
 	}
 
-	h.pass.SpentToday = func() (float64, error) { return 0, nil }
+	h.pass.Allows = func() (bool, error) { return true, nil }
 	if sum := mustRun(t, h.pass); sum.Asked != 2 {
 		t.Errorf("next pass summary = %+v, want the two beads left", sum)
 	}
