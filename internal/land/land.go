@@ -267,7 +267,12 @@ type Rejection struct {
 	// Rework is false when only a human can lift the refusal (no_merge), and
 	// past MaxReworkAttempts whatever the kind was: the loop, not the refusal,
 	// is what the ceiling stops.
-	Rework    bool
+	Rework bool
+	// TargetTip is the target commit the merge was built on, set on a conflict.
+	// The rejection line carries it because a conflicted merge writes no merge
+	// line, and the conflict scorecard reads a rejection's target from that
+	// line (gt-0nvhe).
+	TargetTip string
 	RecordErr error
 }
 
@@ -1646,7 +1651,7 @@ func mergeWork(wt Repo, w Work, base string) (mergeOutcome, error) {
 		files, filesErr := wt.GetConflictingFiles()
 		_ = wt.AbortMerge()
 		if filesErr == nil && len(files) > 0 {
-			return mergeOutcome{Rejection: &Rejection{Kind: RejectConflict, Rework: true, Conflicting: files,
+			return mergeOutcome{Rejection: &Rejection{Kind: RejectConflict, Rework: true, Conflicting: files, TargetTip: base,
 				Reason: fmt.Sprintf("merging %s into %s conflicts in %d file(s); rebase onto %s and resolve", shortSHA(w.Head), w.Target, len(files), w.Target)}}, nil
 		}
 		empty := hasAutoSave && filesErr == nil && mergeChangesNothing(wt, w, base, msg)
@@ -1914,7 +1919,14 @@ func (l *Lander) reject(issue *beads.Issue, w Work, rej *Rejection, verdict *Ver
 		note.Findings = verdict.Findings
 		note.Receipt = &Receipt{Score: verdict.Score}
 	}
-	l.logf("%s: rejected (%s): %s", w.BeadID, rej.Kind, reason)
+	// The target tip rides the rejection line itself: a conflicted merge writes
+	// no merge line, so this is the only record of what the conflict was built
+	// on (gt-0nvhe).
+	line := fmt.Sprintf("%s: rejected (%s): %s", w.BeadID, rej.Kind, reason)
+	if rej.TargetTip != "" {
+		line += fmt.Sprintf(" (target tip %s)", rej.TargetTip)
+	}
+	l.logf("%s", line)
 	if !repeat {
 		if err := l.Beads.AppendNotes(w.BeadID, FormatRejectionNote(note)); err != nil {
 			rej.RecordErr = fmt.Errorf("appending the rejection note: %w", err)
