@@ -5,7 +5,9 @@ import (
 	"errors"
 	"math"
 	"reflect"
+	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -223,9 +225,12 @@ func TestJevScorecardArgv(t *testing.T) {
 // fakeJevScorecardRun answers each battery's run with its own report, keyed by
 // the --battery value, and records the argv it saw.
 func fakeJevScorecardRun(reports map[string]string, failOn string, ran *[][]string) func(context.Context, []string) ([]byte, error) {
+	var mu sync.Mutex
 	return func(_ context.Context, argv []string) ([]byte, error) {
 		if ran != nil {
+			mu.Lock()
 			*ran = append(*ran, argv)
+			mu.Unlock()
 		}
 		name := argv[len(argv)-1]
 		if name == failOn {
@@ -260,9 +265,13 @@ func TestDashboardJevScorecardRunsOncePerBattery(t *testing.T) {
 	if b := sc.Batteries[1]; b.Name != "landing" || b.Lines != 0 {
 		t.Errorf("landing line = %+v", b)
 	}
-	if len(ran) != 2 || strings.Join(ran[0], " ") != "gt jev scorecard --json --since 7d --battery finding" ||
-		strings.Join(ran[1], " ") != "gt jev scorecard --json --since 7d --battery landing" {
-		t.Errorf("ran %q", ran)
+	var lines []string
+	for _, argv := range ran {
+		lines = append(lines, strings.Join(argv, " "))
+	}
+	sort.Strings(lines)
+	if want := []string{"gt jev scorecard --json --since 7d --battery finding", "gt jev scorecard --json --since 7d --battery landing"}; !reflect.DeepEqual(lines, want) {
+		t.Errorf("ran %q, want %q", lines, want)
 	}
 	if want := (dashboard.JevTotals{Batteries: 2, Lines: 2, Labeled: 1, Earning: 1}); sc.Totals != want {
 		t.Errorf("Totals = %+v, want %+v", sc.Totals, want)
@@ -395,18 +404,61 @@ func TestDashboardJevScorecardEmptyCommandIsNoReader(t *testing.T) {
 func TestDashboardJevScorecardAsksForEveryRegisteredBattery(t *testing.T) {
 	t.Parallel()
 
+	var mu sync.Mutex
 	var asked []string
 	run := func(_ context.Context, argv []string) ([]byte, error) {
+		mu.Lock()
 		asked = append(asked, argv[len(argv)-1])
+		mu.Unlock()
 		return nil, errors.New("stop")
 	}
 	dashboardJevScorecardWith([]string{"gt"}, scorecard.Registered(), time.Minute, run)()
-	if len(asked) == 0 || asked[0] != scorecard.Registered()[0] {
-		t.Errorf("asked %q, want the registered batteries %q", asked, scorecard.Registered())
+	sort.Strings(asked)
+	if want := scorecard.Registered(); !reflect.DeepEqual(asked, want) {
+		t.Errorf("asked %q, want the registered batteries %q", asked, want)
 	}
 	for _, name := range asked {
 		if name == scorecard.FixtureBattery {
 			t.Errorf("the dashboard asked for the test-only %q battery: %q", name, asked)
 		}
+	}
+}
+
+// The runs go out together: each one waits until every battery has started, so
+// a read that ran them one after another would stall and time the battery out.
+func TestDashboardJevScorecardRunsBatteriesTogether(t *testing.T) {
+	t.Parallel()
+
+	batteries := []string{"dispatch", "drift", "finding", "landing"}
+	var started sync.WaitGroup
+	started.Add(len(batteries))
+	allStarted := make(chan struct{})
+	go func() {
+		started.Wait()
+		close(allStarted)
+	}()
+	run := func(ctx context.Context, argv []string) ([]byte, error) {
+		name := argv[len(argv)-1]
+		started.Done()
+		select {
+		case <-allStarted:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		return []byte(`{"battery":"` + name + `","items":1,"questions":[]}`), nil
+	}
+	got := dashboardJevScorecardWith([]string{"gt", "jev", "scorecard"}, batteries, 5*time.Second, run)()
+	if got == nil {
+		t.Fatal("the batteries read as a failed read")
+	}
+	if len(got.Unavailable) != 0 {
+		t.Errorf("Unavailable = %q, want none: the batteries did not run together", got.Unavailable)
+	}
+	var names []string
+	for _, b := range got.Batteries {
+		names = append(names, b.Name)
+	}
+	if !reflect.DeepEqual(names, batteries) {
+		t.Errorf("battery order = %q, want %q", names, batteries)
 	}
 }
