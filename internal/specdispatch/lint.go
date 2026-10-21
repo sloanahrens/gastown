@@ -256,10 +256,6 @@ type Spec struct {
 	// parent-child edges. The container rule reads them through OpenChildHold;
 	// nothing in this package queries (gt-gektq).
 	Children []Child
-	// NoDependents marks a candidate whose ready-board row counted zero
-	// dependents. Parent-child edges count as dependents, so there are no
-	// children to read and the caller skips the read (gt-sqx55).
-	NoDependents bool
 }
 
 // HasLabel reports whether the spec carries label, ignoring case and space.
