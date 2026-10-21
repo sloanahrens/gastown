@@ -15,11 +15,12 @@ import (
 
 // FixtureBattery is the fixture adapter's name. It reads only fixture files
 // under the town's runtime directory, which no real battery writes, so tests
-// can drive the scorecard end to end.
+// can drive the scorecard end to end. It is test-only, so the battery listings
+// and the dashboard never offer it.
 const FixtureBattery = "fixture"
 
 func init() {
-	Register(FixtureBattery, func(townRoot string) Adapter { return fixture{town: townRoot} })
+	RegisterTestOnly(FixtureBattery, func(townRoot string) Adapter { return fixture{town: townRoot} })
 }
 
 // FixtureLogPath is the fixture log under townRoot.

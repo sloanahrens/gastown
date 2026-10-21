@@ -170,8 +170,25 @@ func TestScorecardOpenUnknownBatteryListsRegistered(t *testing.T) {
 	if err == nil {
 		t.Fatal("Open of an unknown battery succeeded")
 	}
-	if !strings.Contains(err.Error(), "registered batteries: attention, dispatch, drift, finding, fixture, landing, logtriage, progress, stale, submission, targets") {
+	if !strings.Contains(err.Error(), "registered batteries: attention, dispatch, drift, finding, landing, logtriage, progress, stale, submission, targets") {
 		t.Errorf("error %q does not list the registered batteries", err)
+	}
+	if strings.Contains(err.Error(), FixtureBattery) {
+		t.Errorf("error %q lists the test-only %q battery", err, FixtureBattery)
+	}
+}
+
+// The fixture battery opens by name for the tests that drive it, and the
+// battery listings leave it out.
+func TestRegisterTestOnlyOpensButIsNotListed(t *testing.T) {
+	t.Parallel()
+	if _, err := Open(FixtureBattery, t.TempDir()); err != nil {
+		t.Fatalf("Open(%q): %v", FixtureBattery, err)
+	}
+	for _, name := range Registered() {
+		if name == FixtureBattery {
+			t.Errorf("Registered lists the test-only %q battery", name)
+		}
 	}
 }
 

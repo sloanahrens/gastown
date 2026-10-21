@@ -88,12 +88,12 @@ lines alone; an empty value leaves the row out.
 --jev-scorecard-cmd names the command that prints one Jev battery's scorecard as
 JSON (default: gt jev scorecard --json --since 7d). It is split like a shell
 line and run once per registered battery with --battery added, every 15 minutes
-while a page is open. Under the Jev spend row the Cost panel draws one line per
+while a page is open. The JEV panel, under the Tier sweeps, draws one line per
 battery: its lines logged, how many of them are labeled, and each question's
 verdict (earning, not-yet or no-signal), such as
 finding 212/140 fix_worthy:earning any_duplicate:not-yet. A battery with no log
-in the window shows -. A run that fails shows the scorecard as unavailable and
-leaves the spend row alone; an empty value leaves the lines out.
+in the window shows -. A run that fails shows the panel's title as unavailable
+and leaves the Cost panel's spend row alone; an empty value leaves the panel out.
 
 --claude-plan-usd prices the plan meter beside it: the Claude weekly and
 five-hour limits, read every minute from the samples the status line appends to
@@ -771,6 +771,7 @@ func dashboardJevScorecardWith(argv, batteries []string, run func(ctx context.Co
 			}
 			sc.Batteries = append(sc.Batteries, *b)
 		}
+		sc.Tally()
 		return sc
 	}
 }

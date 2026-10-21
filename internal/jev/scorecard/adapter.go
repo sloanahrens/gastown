@@ -82,32 +82,53 @@ type Contextual interface {
 type Factory func(townRoot string) Adapter
 
 // registry is written only from init functions, so reads need no lock.
-var registry = map[string]Factory{}
+var registry = map[string]registration{}
+
+// registration is one battery's factory and whether the battery listings leave
+// it out.
+type registration struct {
+	factory  Factory
+	testOnly bool
+}
 
 // Register makes a battery available to the scorecard under name. It panics on
 // a duplicate name, which is a programming error.
 func Register(name string, f Factory) {
+	addRegistration(name, registration{factory: f})
+}
+
+// RegisterTestOnly makes a battery Open can build by name, but that Registered
+// leaves out, so the unknown-battery error and the dashboard's per-battery reads
+// never name it. It is for a battery that reads fixtures no real one writes.
+func RegisterTestOnly(name string, f Factory) {
+	addRegistration(name, registration{factory: f, testOnly: true})
+}
+
+func addRegistration(name string, r registration) {
 	if _, dup := registry[name]; dup {
 		panic(fmt.Sprintf("scorecard: battery %q registered twice", name))
 	}
-	registry[name] = f
+	registry[name] = r
 }
 
 // Open builds the adapter registered under name for the town at townRoot. An
 // unknown name is an error that lists the registered batteries.
 func Open(name, townRoot string) (Adapter, error) {
-	f, ok := registry[name]
+	r, ok := registry[name]
 	if !ok {
 		return nil, fmt.Errorf("unknown battery %q; registered batteries: %s", name, strings.Join(Registered(), ", "))
 	}
-	return f(townRoot), nil
+	return r.factory(townRoot), nil
 }
 
-// Registered lists the registered battery names in name order.
+// Registered lists the registered battery names in name order, leaving out the
+// test-only ones.
 func Registered() []string {
 	names := make([]string, 0, len(registry))
-	for name := range registry {
-		names = append(names, name)
+	for name, r := range registry {
+		if !r.testOnly {
+			names = append(names, name)
+		}
 	}
 	sort.Strings(names)
 	return names

@@ -471,6 +471,10 @@ func TestFailedJevScorecardReadKeepsTheLinesAndLeavesTheSpendAlone(t *testing.T)
 	}
 }
 
+// jevScorecardState is the JEV panel's read of three batteries: finding, with
+// two questions; landing, with no log; and targets, with one question. The
+// totals are what Tally makes of them, which TestJevScorecardTallyCountsTheTitleLine
+// pins.
 func jevScorecardState(now time.Time, read map[string]any) map[string]any {
 	over := map[string]any{
 		"reads": jevRead(nil),
@@ -481,7 +485,7 @@ func jevScorecardState(now time.Time, read map[string]any) map[string]any {
 			map[string]any{"name": "landing", "lines": 0, "labeled": 0},
 			map[string]any{"name": "targets", "lines": 9, "labeled": 0, "questions": []any{
 				map[string]any{"id": "needs_review", "verdict": "no-signal"}}},
-		}},
+		}, "totals": map[string]any{"batteries": 3, "lines": 221, "labeled": 140, "earning": 1, "no_signal": 1}},
 	}
 	reads := over["reads"].(map[string]any)
 	reads["jev_scorecard"] = map[string]any{"at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339), "every_sec": 900}
@@ -491,33 +495,66 @@ func jevScorecardState(now time.Time, read map[string]any) map[string]any {
 	return jevStateAt(now, over)
 }
 
-// Golden: the spend row, then one line per battery, and a dash for the battery
-// without a log.
-func TestCostPanelDrawsOneJevLinePerBattery(t *testing.T) {
+// drawJev runs renderJev over s and reads back the JEV panel's lines, its title
+// line and the panel itself.
+func drawJev(t *testing.T, s map[string]any) (lines []costLine, note, sec drawn) {
+	t.Helper()
+	dom := newPageDOM(t)
+	dom.call(t, "renderJev", s)
+	v, err := dom.vm.RunString(`JSON.stringify(__byId["jev"].children.map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
+	if err != nil {
+		t.Fatalf("reading the JEV panel: %v", err)
+	}
+	if err := json.Unmarshal([]byte(v.String()), &lines); err != nil {
+		t.Fatalf("reading the JEV panel: %v", err)
+	}
+	return lines, dom.element(t, "jevnote"), dom.element(t, "jevsec")
+}
+
+// The JEV panel draws one line per battery, and its title line the totals over
+// all of them.
+func TestJevPanelDrawsOneLinePerBatteryUnderItsTotals(t *testing.T) {
 	t.Parallel()
 
-	lines, _ := drawCost(t, jevScorecardState(time.Now(), nil))
+	lines, note, sec := drawJev(t, jevScorecardState(time.Now(), nil))
+	if sec.Hidden {
+		t.Error("the JEV panel is hidden under a readable scorecard")
+	}
 	var got []string
 	for _, l := range lines {
-		if strings.HasPrefix(l.Text, "Jev spend") || strings.HasPrefix(l.Text, "finding") ||
-			strings.HasPrefix(l.Text, "landing") || strings.HasPrefix(l.Text, "targets") {
-			got = append(got, l.Text)
-		}
+		got = append(got, l.Text)
 	}
 	want := []string{
-		"Jev spend · 14 calls in 24h · $1.75 · top caller overseer (10 calls, $1.50)",
 		"finding 212/140 fix_worthy:earning any_duplicate:not-yet",
 		"landing -",
 		"targets 9/0 needs_review:no-signal",
 	}
 	if !reflect.DeepEqual(got, want) {
-		t.Errorf("Jev lines = %q, want %q", got, want)
+		t.Errorf("JEV lines = %q, want %q", got, want)
+	}
+	if wantNote := "3 batteries · 221 lines · 140 labeled · 1 earning · 1 no-signal"; note.Text != wantNote {
+		t.Errorf("JEV title line = %q, want %q", note.Text, wantNote)
 	}
 }
 
-// A scorecard that cannot be read says so on one line and leaves the spend
-// line as it was.
-func TestCostPanelJevScorecardFailureKeepsTheSpendLine(t *testing.T) {
+// The Cost panel keeps the Jev spend row and draws none of the scorecard.
+func TestCostPanelKeepsOnlyTheJevSpendRow(t *testing.T) {
+	t.Parallel()
+
+	lines, _ := drawCost(t, jevScorecardState(time.Now(), nil))
+	if _, ok := findLine(lines, "Jev spend"); !ok {
+		t.Fatalf("no Jev spend row in %q", costTexts(lines))
+	}
+	for _, prefix := range []string{"finding", "landing", "targets", "Jev scorecard"} {
+		if row, ok := findLine(lines, prefix); ok {
+			t.Errorf("the Cost panel draws a scorecard line %+v", row)
+		}
+	}
+}
+
+// A scorecard that cannot be read says so on the JEV title line and draws no
+// battery lines, and the Cost panel's spend row is left as it was.
+func TestJevPanelFailureSaysUnavailableOnItsTitle(t *testing.T) {
 	t.Parallel()
 
 	now := time.Now()
@@ -525,41 +562,82 @@ func TestCostPanelJevScorecardFailureKeepsTheSpendLine(t *testing.T) {
 	spend, _ := findLine(healthy, "Jev spend")
 
 	cases := map[string]struct {
-		read map[string]any
-		want string
+		read  map[string]any
+		want  string
+		class string
 	}{
-		"failed": {map[string]any{"error": true, "stale": true}, "Jev scorecard unavailable — the read failed"},
-		"stale":  {map[string]any{"stale": true}, "Jev scorecard unavailable — the read went stale"},
+		"failed": {map[string]any{"error": true, "stale": true}, "unavailable — the read failed", "r badc"},
+		"stale":  {map[string]any{"stale": true}, "unavailable — the read went stale", "r warnc"},
 	}
 	for name, tc := range cases {
-		lines, _ := drawCost(t, jevScorecardState(now, tc.read))
-		row, ok := findLine(lines, "Jev scorecard")
-		if !ok || row.Text != tc.want || row.Class != "empty" {
-			t.Errorf("%s: row = %+v (found %v), want %q", name, row, ok, tc.want)
+		lines, note, _ := drawJev(t, jevScorecardState(now, tc.read))
+		if note.Text != tc.want || note.Class != tc.class {
+			t.Errorf("%s: title line = %q (class %q), want %q (class %q)", name, note.Text, note.Class, tc.want, tc.class)
 		}
-		if got, _ := findLine(lines, "Jev spend"); got != spend {
+		if len(lines) != 0 {
+			t.Errorf("%s: drew %q from an unreadable scorecard", name, costTexts(lines))
+		}
+		cost, _ := drawCost(t, jevScorecardState(now, tc.read))
+		if got, _ := findLine(cost, "Jev spend"); got != spend {
 			t.Errorf("%s: spend row = %+v, want %+v", name, got, spend)
-		}
-		if _, ok := findLine(lines, "finding"); ok {
-			t.Errorf("%s: a battery line is drawn from an unreadable scorecard", name)
 		}
 	}
 
-	// Never read: only the failed status, no lines.
+	// Never read: the failed status on the title line, no lines.
 	state := jevStateAt(now, map[string]any{"reads": jevRead(nil)})
 	state["reads"].(map[string]any)["jev_scorecard"] = map[string]any{"at": time.Now().UTC().Format(time.RFC3339), "every_sec": 900, "error": true, "stale": true}
-	lines, _ := drawCost(t, state)
-	if row, ok := findLine(lines, "Jev scorecard"); !ok || row.Text != "Jev scorecard unavailable — the read failed" {
-		t.Errorf("never-read row = %+v (found %v)", row, ok)
+	_, note, sec := drawJev(t, state)
+	if note.Text != "unavailable — the read failed" || sec.Hidden {
+		t.Errorf("never-read title line = %q (hidden %v)", note.Text, sec.Hidden)
 	}
 }
 
-// No scorecard command, or one that has not answered yet, draws nothing.
-func TestCostPanelJevScorecardAbsentDrawsNothing(t *testing.T) {
+// No scorecard command, or one that has not answered yet, leaves the panel out.
+func TestJevPanelAbsentIsHidden(t *testing.T) {
 	t.Parallel()
 
-	lines, _ := drawCost(t, jevState(map[string]any{"reads": jevRead(nil)}))
-	if row, ok := findLine(lines, "Jev scorecard"); ok {
-		t.Errorf("a missing scorecard drew %+v", row)
+	_, _, sec := drawJev(t, jevState(map[string]any{"reads": jevRead(nil)}))
+	if !sec.Hidden {
+		t.Error("a missing scorecard shows the JEV panel")
+	}
+}
+
+// The JEV panel sits after Tier sweeps, starts folded until it is opened, and
+// is drawn on every render.
+func TestJevPanelSitsAfterTierSweepsAndFoldsUntilOpened(t *testing.T) {
+	t.Parallel()
+
+	page := string(indexHTML)
+	at := strings.Index(page, `<section id="jevsec" data-default-collapsed hidden><h2>JEV · <span class="r" id="jevnote"></span></h2><div class="body" id="jev"></div></section>`)
+	if at < 0 {
+		t.Fatal("index.html has no JEV panel")
+	}
+	if tier := strings.Index(page, `<section><h2><span class="sweepico" id="tiersweepico"></span>Tier sweeps`); tier < 0 || tier > at {
+		t.Error("the JEV panel is not after Tier sweeps")
+	}
+	if setup := pageFunc(t, "setupCollapse"); !strings.Contains(setup, `apply(saved[name] === undefined ? sec.hasAttribute("data-default-collapsed") : !!saved[name]);`) {
+		t.Error("setupCollapse does not fold a data-default-collapsed pane until it has been opened")
+	}
+	if all := pageFunc(t, "renderAll"); !strings.Contains(all, "renderJev(state)") {
+		t.Error("renderAll does not draw the JEV panel")
+	}
+	if cost := pageFunc(t, "renderCost"); strings.Contains(cost, "costJevScorecard") {
+		t.Error("renderCost still draws the scorecard lines")
+	}
+}
+
+// The title line's totals are the sums Tally makes over the batteries: lines
+// and labeled lines, and the questions earning and no-signal.
+func TestJevScorecardTallyCountsTheTitleLine(t *testing.T) {
+	t.Parallel()
+
+	sc := JevScorecard{Batteries: []JevBattery{
+		{Name: "finding", Lines: 212, Labeled: 140, Questions: []JevQuestion{{ID: "fix_worthy", Verdict: "earning"}, {ID: "any_duplicate", Verdict: "not-yet"}}},
+		{Name: "landing"},
+		{Name: "targets", Lines: 9, Questions: []JevQuestion{{ID: "needs_review", Verdict: "no-signal"}}},
+	}}
+	sc.Tally()
+	if want := (JevTotals{Batteries: 3, Lines: 221, Labeled: 140, Earning: 1, NoSignal: 1}); sc.Totals != want {
+		t.Errorf("Totals = %+v, want %+v", sc.Totals, want)
 	}
 }

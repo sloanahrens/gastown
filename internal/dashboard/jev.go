@@ -91,6 +91,38 @@ func JevSpendWindow(argv []string) string {
 type JevScorecard struct {
 	Batteries []JevBattery `json:"batteries"`
 	Window    string       `json:"window,omitempty"`
+	// Totals is the JEV panel's title line, summed over Batteries by Tally.
+	Totals JevTotals `json:"totals"`
+}
+
+// JevTotals sums the batteries for the JEV panel's title line: how many
+// batteries, their lines and labeled lines, and how many questions earned a
+// verdict of earning or no-signal.
+type JevTotals struct {
+	Batteries int `json:"batteries"`
+	Lines     int `json:"lines"`
+	Labeled   int `json:"labeled"`
+	Earning   int `json:"earning"`
+	NoSignal  int `json:"no_signal"`
+}
+
+// Tally sets Totals from Batteries. The reader calls it once a read has every
+// battery's line, so the page never counts them itself.
+func (sc *JevScorecard) Tally() {
+	t := JevTotals{Batteries: len(sc.Batteries)}
+	for _, b := range sc.Batteries {
+		t.Lines += b.Lines
+		t.Labeled += b.Labeled
+		for _, q := range b.Questions {
+			switch q.Verdict {
+			case "earning":
+				t.Earning++
+			case "no-signal":
+				t.NoSignal++
+			}
+		}
+	}
+	sc.Totals = t
 }
 
 // JevBattery is one battery's line: how many lines its log holds in the
