@@ -1629,30 +1629,9 @@ The `attention` battery reads `.runtime/jev/attention.jsonl`, the attention
 battery's log. A line whose call failed, or whose question set is not the one
 the scorecard reads, is skipped. Labels come from the attention queue's retained
 files (`.runtime/attention`: events, acks and the acks history) and the beads
-each item names. An item's labels come from the first rule that applies:
-
-1. **A disposition** a human gave the item in `acks-history.jsonl` while it
-   stood. It labels the item even while the item still stands, and it wins over
-   the rules below. `needed-human` sets `needs_human` true (`ack:needed-human`);
-   `noise` sets `needs_human` false and `clears_on_its_own` true (`ack:noise`);
-   `fixed-by-overseer` sets `routine_action_fixes` true
-   (`ack:fixed-by-overseer`). A line with no disposition does not count here.
-2. **The kind's clearing mechanism**, for an item that has cleared:
-   - `escalation`: its bead was closed with a close reason. A close by the
-     person or the overseer (the `closed_by` address is the human's) sets
-     `needs_human` true (`escalation:closed-by-person`); a close by a producer
-     sets `clears_on_its_own` true (`escalation:cleared-by-producer`).
-   - `risk-path`: the latest `OVERSEER REVIEW <sha>` line on its bead. `FAIL`
-     sets `needs_human` true (`risk-path:review-fail`); `PASS` sets it false
-     (`risk-path:review-pass`). `WAIVED` and `AUDITED` label nothing.
-   - `rejected-twice`: a bead closed as `superseded` sets `needs_human` true
-     (`rejected-twice:superseded`). A bead closed by a landing sets
-     `routine_action_fixes` true when the last landing record names a branch
-     that is not a `crew/` branch (`rejected-twice:landed-routine`).
-3. **The self-clear window** (`cleared-within-15m`): an item that cleared within
-   15 minutes of being raised, with no ack, no note on its bead and no close
-   reason, sets `clears_on_its_own` true. An item whose bead no longer exists
-   counts as having no note.
+each item names. An item's first matching rule labels it; the rules in the
+order they apply, the labels each sets and the rule id `--json` reports are in
+`internal/jev/scorecard/attention.go`.
 
 An item still standing with no disposition is unlabeled, as is one whose life
 the queue files no longer hold. A bead read that fails for any reason other
