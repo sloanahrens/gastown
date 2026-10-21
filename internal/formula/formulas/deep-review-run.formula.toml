@@ -158,8 +158,8 @@ skip keeps later runs off its file. The digest has:
 landings reviewed (bead, commit), `unparsed=`, slice files and docs
 read, reviewers and verifiers used, then numbered `filed`, `would file` and
 `queued` lists, `refuted=<n> of <total>` and `unverified=<n>` (findings past
-capacity, 0 when none). When total >= 5 and refuted = 0,
-add `UNCHALLENGED: no finding was refuted`.
+capacity, 0 when none). When `total`>=5 and `refuted`=0,
+add the line `UNCHALLENGED: no finding was refuted`.
 
 **8. Record the reviews of the risk-path items covered** (live runs only; skip when
 `{{dry_run}}` is `true` or the mode is `slice`). Per landing: `gt bead review <bead> PASS`,
