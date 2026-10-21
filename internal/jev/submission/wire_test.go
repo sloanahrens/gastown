@@ -274,6 +274,8 @@ func TestAskLandedSubmissionNotScoredOnEmptyDiff(t *testing.T) {
 	r.git.subjects["head-gt-landed"] = nil
 	r.git.numstat["head-gt-landed"] = "40\t3\tinternal/other.go\n"
 	r.submissions.issues = []*beads.Issue{landed}
+	var warnings bytes.Buffer
+	r.pass.Warnings = &warnings
 
 	sum, err := r.pass.Run(context.Background())
 	if err != nil {
@@ -281,6 +283,9 @@ func TestAskLandedSubmissionNotScoredOnEmptyDiff(t *testing.T) {
 	}
 	if sum.Asked != 0 || sum.Skipped != 1 {
 		t.Fatalf("summary = %+v, want 0 asked and 1 skipped", sum)
+	}
+	if got := warnings.String(); !strings.Contains(got, "gt-landed") || !strings.Contains(got, "already landed") || strings.Contains(got, "unreadable") {
+		t.Errorf("warnings = %q, want the skipped bead named as landed, not unreadable", got)
 	}
 	if n := len(r.asker.asked); n != 0 {
 		t.Errorf("Jev was asked %d times about a landed submission with no commits", n)
@@ -414,5 +419,63 @@ func TestJevSubmissionAskCarriesTheNewQuestions(t *testing.T) {
 				t.Errorf("outcome probabilities = %v, want all four options with complete at 0.7", outcome.Probabilities)
 			}
 		})
+	}
+}
+
+// A branch merged with --no-ff into target has its head reachable from target.
+// With real git, target..head holds no commits while the diff over the same
+// range is not empty (target gained a commit after the merge), so readClone
+// must report errNoCommits and not hand that diff on. A branch still ahead of
+// target reads normally.
+func TestJevSubmissionRealGitEmptyRangeIsLanded(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	dir := t.TempDir()
+	git := func(args ...string) string {
+		t.Helper()
+		out, err := runGit(ctx, dir, append([]string{
+			"-c", "user.name=t", "-c", "user.email=t@example.com", "-c", "commit.gpgsign=false",
+		}, args...)...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return strings.TrimSpace(out)
+	}
+	commit := func(file, subject string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, file), []byte(subject+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		git("add", file)
+		git("commit", "--quiet", "-m", subject)
+	}
+	git("init", "--quiet", "-b", "main")
+	commit("base.txt", "base")
+	git("checkout", "--quiet", "-b", "landed")
+	commit("landed.txt", "fix: landed work")
+	landedHead := git("rev-parse", "HEAD")
+	git("checkout", "--quiet", "-b", "ahead", "main")
+	commit("ahead.txt", "fix: still ahead")
+	aheadHead := git("rev-parse", "HEAD")
+	git("checkout", "--quiet", "main")
+	git("merge", "--quiet", "--no-ff", "-m", "land landed", "landed")
+	commit("later.txt", "feat: later work on main")
+
+	p := &Pass{Git: &bareGit{dir: dir, timeout: time.Minute, run: runGit}}
+
+	if stat, err := p.Git.Numstat(ctx, "main", landedHead); err != nil || !strings.Contains(stat, "later.txt") {
+		t.Fatalf("numstat over the landed range = %q, %v; want the later change on main", stat, err)
+	}
+	_, _, err := p.readClone(ctx, land.Work{Target: "main", Head: landedHead})
+	if !errors.Is(err, errNoCommits) || errors.Is(err, errUnreadable) {
+		t.Errorf("readClone(landed) error = %v, want errNoCommits and not errUnreadable", err)
+	}
+
+	subjects, stat, err := p.readClone(ctx, land.Work{Target: "main", Head: aheadHead})
+	if err != nil {
+		t.Fatalf("readClone(ahead): %v", err)
+	}
+	if len(subjects) != 1 || subjects[0] != "fix: still ahead" || !strings.Contains(stat, "ahead.txt") {
+		t.Errorf("readClone(ahead) = %v, %q; want its one commit and its diff", subjects, stat)
 	}
 }

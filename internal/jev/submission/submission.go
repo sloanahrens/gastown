@@ -203,7 +203,7 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		}
 		line, err := p.ask(ctx, e, fetch)
 		switch {
-		case errors.Is(err, errUnreadable), errors.Is(err, jev.ErrBadResponse):
+		case errors.Is(err, errUnreadable), errors.Is(err, errNoCommits), errors.Is(err, jev.ErrBadResponse):
 			if p.Warnings != nil {
 				fmt.Fprintf(p.Warnings, "jev submission: skipping %s at %s: %v\n", e.Issue.ID, e.Work.Head, err)
 			}
@@ -258,13 +258,20 @@ func after(cur battery.Cursor, seen time.Time, bead string) bool {
 // with the cause, which the pass logs.
 var errUnreadable = errors.New("submission commits or diff unreadable")
 
+// errNoCommits means the clone read target..head and found no commits on it:
+// the head is already reachable from target, so the submission landed. The
+// pass skips it like an unreadable one, but its own cause keeps the log from
+// reporting a landed submission as a read failure.
+var errNoCommits = errors.New("no commits on the submission's range")
+
 // ask builds the state for one entry, asks the battery and returns the line.
 // The commits and stat come from the entry's record when it holds subjects;
 // otherwise they come from the bare clone, which fetch syncs on first use.
 // Commits or a diff the clone cannot read return errUnreadable, and the pass
-// skips the entry. So does an entry with no commits on target..head: its head
-// is already reachable from target, so it landed, and its diff against target
-// is the change target has made since, not its own. A failure that ctx's end
+// skips the entry. An entry with no commits on target..head returns
+// errNoCommits and is skipped too: its head is already reachable from target,
+// so it landed, and its diff against target is the change target has made
+// since, not its own. A failure that ctx's end
 // caused returns ctx's error, so the next pass asks again.
 func (p *Pass) ask(ctx context.Context, e Entry, fetch func(context.Context) error) (Line, error) {
 	subjects, numstat := e.Subjects, e.Numstat
@@ -298,8 +305,8 @@ func (p *Pass) ask(ctx context.Context, e Entry, fetch func(context.Context) err
 }
 
 // readClone reads a submission's commits and stat from the bare clone. Its
-// errors are errUnreadable wrapping the cause, except a ctx end, which is
-// ctx's error.
+// errors are errUnreadable wrapping the cause, or errNoCommits for an empty
+// range, except a ctx end, which is ctx's error.
 func (p *Pass) readClone(ctx context.Context, w land.Work) ([]string, string, error) {
 	subjects, err := p.Git.CommitSubjects(ctx, w.Target, w.Head, maxSubjects)
 	if err != nil {
@@ -309,7 +316,7 @@ func (p *Pass) readClone(ctx context.Context, w land.Work) ([]string, string, er
 		return nil, "", fmt.Errorf("%w: reading the commits: %w", errUnreadable, err)
 	}
 	if len(subjects) == 0 {
-		return nil, "", fmt.Errorf("%w: no commits on %s..%s", errUnreadable, w.Target, w.Head)
+		return nil, "", fmt.Errorf("%w: %s..%s is empty, so the head already landed", errNoCommits, w.Target, w.Head)
 	}
 	out, err := p.Git.Numstat(ctx, w.Target, w.Head)
 	if err != nil {
