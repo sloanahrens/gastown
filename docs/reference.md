@@ -1924,11 +1924,11 @@ The patrol is off unless `daemon.json` enables it:
 `usd_per_billion_tokens` is required. `max_usd_per_day` is optional and draws on
 the same town-wide cap as the other batteries.
 
-`gt jev scorecard --battery stale` scores that log against each bead as it stands
-at scorecard time. A line whose bead no longer exists is unlabeled. A line whose `type` is not `task`,
-`bug` or `feature` (an earlier pass asked about rig and molecule beads) is
-discarded and counted as a skipped line. The rules
-are in `internal/jev/scorecard/stale.go`:
+`gt jev scorecard --battery stale` scores that log against each bead as it
+stands at scorecard time. A line whose bead no longer exists is unlabeled. A
+line whose `type` is not `task`, `bug` or `feature` (an earlier pass asked
+about rig and molecule beads) is discarded and counted as a skipped line. The
+rules are in `internal/jev/scorecard/stale.go`:
 
 - closed as `wontfix`, `obsolete` or `no longer ...`: `obsolete` true
   (`stale:closed-obsolete`).
