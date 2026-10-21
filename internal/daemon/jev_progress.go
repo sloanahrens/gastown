@@ -28,10 +28,11 @@ func (d *Daemon) enqueueJevProgress(seat overrunSeat, at time.Time) {
 		latest = agentlog.LatestTranscript
 	}
 	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
-	var transcript string
+	var transcript, worktree string
 	if workDir := resolvePolecatWorktree(polecatsDir, seat.Polecat, seat.Rig); workDir != "" {
 		if path, err := latest(workDir); err == nil {
 			transcript = path
+			worktree = workDir
 		}
 	}
 	n := progress.Nudge{
@@ -41,6 +42,7 @@ func (d *Daemon) enqueueJevProgress(seat overrunSeat, at time.Time) {
 		Session:    session.PolecatSessionName(d.prefixRegistry().PrefixForRig(seat.Rig), seat.Polecat),
 		At:         at,
 		Transcript: transcript,
+		Worktree:   worktree,
 	}
 	if !d.jevProgressQueue.Push(n) {
 		d.logger.Printf("jev_progress: queue full, dropped the nudge to %s/%s on %s", seat.Rig, seat.Polecat, seat.Bead)

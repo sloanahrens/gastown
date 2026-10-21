@@ -1864,7 +1864,7 @@ model, answers, question_version}`.
 
 A nudge that cannot be asked logs null `answers` and a `reason` instead. The
 reasons are `no_transcript`, `transcript_unreadable` (missing or unreadable),
-`outside_town` (the transcript is not under the town root, and is never opened),
+`outside_town` (the transcript is not under an allowed root, and is never opened),
 `bead_unreadable`, `bad_response` (Jev returned nothing usable) and `ask_failed`.
 The pass goes on to the next nudge after each. A line that cannot be appended
 to the log ends the pass: the nudges it did not reach are dropped, and the
@@ -1881,7 +1881,10 @@ the window reaches back past what it read, the state carries
 `window_clipped: true`, so the events from its start are known to be missing.
 
 A transcript is opened only after its symlinks are resolved and the real path is
-under the town root.
+under an allowed root. The allowed roots are the town root and the Claude projects
+directories the daemon searches for the nudged seat's worktree, under the config
+dir and under `~/.claude` (`projects/<hash>` for that worktree). Another seat's
+projects directory is not allowed, and nothing above the projects directories is.
 
 The queue lives in the daemon's memory and is bounded. A nudge is not held for a
 later pass: a pass that finds the town's daily cap spent, or cannot open, drops

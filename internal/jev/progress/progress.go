@@ -20,6 +20,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentlog"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
@@ -61,6 +62,9 @@ type Nudge struct {
 	// Transcript is the seat's most recent transcript, or "" when the lookup
 	// found none.
 	Transcript string
+	// Worktree is the seat's worktree the transcript was found from. The pass
+	// allows the Claude projects directories for it, and no other seat's.
+	Worktree string
 }
 
 // MaxQueued bounds the queue. A pass that cannot run (no price, the cap spent,
@@ -126,9 +130,12 @@ type Pass struct {
 	// ReasonBeadUnreadable.
 	Issue func(rig, id string) (*beads.Issue, error)
 
-	// TownRoot bounds the transcripts the pass reads: one outside it is never
-	// opened.
+	// TownRoot bounds the transcripts the pass reads, with the seat's Claude
+	// projects directories: one outside both is never opened.
 	TownRoot string
+	// ProjectDirs lists the Claude projects directories a worktree's transcripts
+	// can sit in. Nil means agentlog.ProjectDirsFor.
+	ProjectDirs func(worktree string) ([]string, error)
 	// LogPath is the log every asked nudge appends to.
 	LogPath string
 
@@ -217,7 +224,7 @@ func (p *Pass) ask(ctx context.Context, n Nudge) (Line, error) {
 
 	// The transcript is checked before the bead is read, so a nudge whose
 	// transcript cannot be read never reaches the bead store.
-	path, reason := p.transcriptPath(n.Transcript)
+	path, reason := p.transcriptPath(n)
 	if reason != "" {
 		line.Reason = reason
 		return line, nil
@@ -259,22 +266,63 @@ func (p *Pass) now() time.Time {
 
 // transcriptPath returns the transcript's path with its symlinks resolved, or
 // the reason a nudge cannot be read from it. The containment check runs on the
-// resolved paths, both sides: a symlink inside the town can point outside it,
-// and a town root that is itself a symlink (macOS temp dirs, for one) must
-// still match. A root that cannot be resolved refuses every transcript.
-func (p *Pass) transcriptPath(transcript string) (string, string) {
-	if transcript == "" {
+// resolved paths, both sides: a symlink can point out of an allowed root, and
+// a root that is itself a symlink (macOS temp dirs, for one) must still match.
+// A town root that cannot be resolved refuses every transcript.
+func (p *Pass) transcriptPath(n Nudge) (string, string) {
+	if n.Transcript == "" {
 		return "", ReasonNoTranscript
 	}
-	resolved, err := filepath.EvalSymlinks(transcript)
+	resolved, err := filepath.EvalSymlinks(n.Transcript)
 	if err != nil {
 		return "", ReasonTranscriptUnreadable
 	}
-	root, err := filepath.EvalSymlinks(p.TownRoot)
-	if err != nil || !within(root, resolved) {
+	roots, err := p.allowedRoots(n.Worktree)
+	if err != nil || !withinAny(roots, resolved) {
 		return "", ReasonOutsideTown
 	}
 	return resolved, ""
+}
+
+// allowedRoots returns the resolved directories a transcript may sit under: the
+// town root, and the Claude projects directories the nudged seat's worktree
+// searches. Another seat's projects directory is not among them. A projects
+// directory that does not exist holds no transcript, so it is left out.
+func (p *Pass) allowedRoots(worktree string) ([]string, error) {
+	town, err := filepath.EvalSymlinks(p.TownRoot)
+	if err != nil {
+		return nil, err
+	}
+	roots := []string{town}
+	if worktree == "" {
+		return roots, nil
+	}
+	projects := p.ProjectDirs
+	if projects == nil {
+		projects = agentlog.ProjectDirsFor
+	}
+	dirs, err := projects(worktree)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range dirs {
+		r, err := filepath.EvalSymlinks(d)
+		if err != nil {
+			continue
+		}
+		roots = append(roots, r)
+	}
+	return roots, nil
+}
+
+// withinAny reports whether path lies under one of roots.
+func withinAny(roots []string, path string) bool {
+	for _, root := range roots {
+		if within(root, path) {
+			return true
+		}
+	}
+	return false
 }
 
 // within reports whether path lies under root. Both are cleaned first, so a
