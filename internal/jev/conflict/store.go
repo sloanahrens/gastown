@@ -152,11 +152,8 @@ func beadFault(err error) bool {
 }
 
 // accountRefusal reports whether a 4xx answers for the account rather than for
-// this request: 402 Payment Required and 403 Forbidden refuse, or would refuse,
-// every request the key makes, so a pair that fails under them says nothing
-// about the beads. Counting such a failure would spend the pair's maxAttempts
-// on an account or billing problem and give the pair up for good; holding the
-// cursor instead asks it again once the account can answer.
+// the request: 402 and 403 refuse every request the key makes, so counting them
+// against a pair would give it up for an account problem.
 func accountRefusal(status int) bool {
 	return status == http.StatusPaymentRequired || status == http.StatusForbidden
 }
