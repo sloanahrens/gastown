@@ -640,3 +640,74 @@ func TestOpenBlockersInKeepsAnAbsentMergeBlocksEdgeUnresolved(t *testing.T) {
 		t.Fatalf("openBlockersIn = %v, want %v", got, want)
 	}
 }
+
+// A merge-blocks target that showed its merge while the pool listed it keeps
+// the edge resolved after the pool drops it: the cache records the merge on the
+// edge, since the close reason leaves with the bead. An edge whose merge was
+// never seen stays unresolved (gt-p0595).
+func TestDuplicateDetailCacheKeepsAMergedMergeBlocksEdgeResolvedAfterThePoolDropsIt(t *testing.T) {
+	t.Parallel()
+	db := duplicateGuardFixture(t)
+	for _, id := range []string{"gt-m1", "gt-m2"} {
+		db.Seed(beads.Issue{ID: id, Type: "task", Title: "merge blocker " + id, Status: "open", Priority: 3,
+			Description: "Nothing shared.", CreatedAt: "2026-10-15T09:08:00Z", UpdatedAt: "2026-10-18T09:08:00Z"})
+	}
+	for _, dep := range [][2]string{{"gt-p3", "gt-m1"}, {"gt-p4", "gt-m2"}} {
+		if err := db.AddTypedDependency(dep[0], dep[1], "merge-blocks"); err != nil {
+			t.Fatalf("AddTypedDependency %v: %v", dep, err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "cache.json")
+	tick := tickOver(t, newCountingStore(listLikeBD{Client: db}), path, "daemon-1", 40)
+	if got := openBlockersOf(t, tick.pool, "gt-p4"); !slices.Equal(got, []string{"gt-m2"}) {
+		t.Fatalf("gt-p4 open blockers = %v while gt-m2 is open, want gt-m2", got)
+	}
+
+	// Both targets close inside the lookback; gt-m1 landed, gt-m2 closed unmerged.
+	closedAt := time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	for id, reason := range map[string]string{"gt-m1": "Merged in abc123", "gt-m2": "rejected: superseded"} {
+		db.Seed(beads.Issue{ID: id, Type: "task", Title: "merge blocker " + id, Status: "closed", ClosedAt: closedAt,
+			CloseReason: reason, Description: "Nothing shared.", CreatedAt: "2026-10-15T09:08:00Z", UpdatedAt: closedAt})
+	}
+	tick = tickOver(t, newCountingStore(listLikeBD{Client: db}), path, "daemon-1", 40)
+	if got := openBlockersOf(t, tick.pool, "gt-p3"); !slices.Equal(got, []string{"gt-b1"}) {
+		t.Fatalf("gt-p3 open blockers = %v after gt-m1 merged, want only gt-b1", got)
+	}
+
+	// Past the lookback the pool no longer lists either target.
+	old := time.Now().Add(-100 * time.Hour).UTC().Format(time.RFC3339)
+	for id, reason := range map[string]string{"gt-m1": "Merged in abc123", "gt-m2": "rejected: superseded"} {
+		db.Seed(beads.Issue{ID: id, Type: "task", Title: "merge blocker " + id, Status: "closed", ClosedAt: old,
+			CloseReason: reason, Description: "Nothing shared.", CreatedAt: "2026-10-15T09:08:00Z", UpdatedAt: old})
+	}
+	store := newCountingStore(listLikeBD{Client: db})
+	tick = tickOver(t, store, path, "daemon-1", 40)
+	if got := openBlockersOf(t, tick.pool, "gt-p3"); !slices.Equal(got, []string{"gt-b1"}) {
+		t.Errorf("gt-p3 open blockers = %v once gt-m1 left the pool, want only gt-b1: its merge was seen", got)
+	}
+	if got := openBlockersOf(t, tick.pool, "gt-p4"); !slices.Equal(got, []string{"gt-m2"}) {
+		t.Errorf("gt-p4 open blockers = %v once gt-m2 left the pool, want gt-m2: it never showed a merge", got)
+	}
+	if got := shownIDs(store); len(got) != 0 {
+		t.Errorf("shown = %v, want none: the merge is answered from the cache", got)
+	}
+}
+
+// A merged edge round-trips through the cache file, and one a show already
+// found merged is recorded without the pool's help.
+func TestCachedDepsOfRecordsAMergedMergeBlocksTarget(t *testing.T) {
+	t.Parallel()
+	got := cachedDepsOf([]beads.IssueDep{
+		{ID: "gt-landed", DependencyType: "merge-blocks", Status: "closed", CloseReason: "Merged in abc123"},
+		{ID: "gt-rejected", DependencyType: "merge-blocks", Status: "closed", CloseReason: "rejected: superseded"},
+		{ID: "gt-plain", DependencyType: "blocks", Status: "closed", CloseReason: "Merged in abc123"},
+	})
+	want := []cachedDep{
+		{ID: "gt-landed", Type: "merge-blocks", Merged: true},
+		{ID: "gt-rejected", Type: "merge-blocks"},
+		{ID: "gt-plain", Type: "blocks"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("cachedDepsOf = %+v, want %+v", got, want)
+	}
+}
