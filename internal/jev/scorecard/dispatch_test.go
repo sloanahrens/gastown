@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -98,11 +99,12 @@ func TestScorecardDispatchLabelsJoinRules(t *testing.T) {
 	split := &beads.Issue{Status: "open", Labels: []string{"needs-split"}}
 
 	cases := []struct {
-		name    string
-		review  *land.ReviewRecord
-		issue   *beads.Issue
-		overrun overrunRecord
-		want    map[QuestionID]bool
+		name     string
+		review   *land.ReviewRecord
+		reworked bool
+		issue    *beads.Issue
+		overrun  overrunRecord
+		want     map[QuestionID]bool
 	}{
 		{
 			name:   "approved on the first attempt lands; open, so fits is unlabeled",
@@ -165,11 +167,16 @@ func TestScorecardDispatchLabelsJoinRules(t *testing.T) {
 			name: "a bead the store no longer has, with no review or record, is unlabeled",
 			want: map[QuestionID]bool{},
 		},
+		{
+			name:     "a bead closed as landed with only a rework verdict has an unknown first try",
+			reworked: true, issue: landed,
+			want: map[QuestionID]bool{qFitsTwentyMinutes: true},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got, _ := dispatchLabels(tc.review, tc.issue, tc.overrun)
+			got, _ := dispatchLabels(tc.review, tc.reworked, tc.issue, tc.overrun)
 			if !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("dispatchLabels = %v, want %v", got, tc.want)
 			}
@@ -202,7 +209,7 @@ func TestScorecardDispatchRuleNames(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			_, rules := dispatchLabels(tc.review, tc.issue, tc.overrun)
+			_, rules := dispatchLabels(tc.review, false, tc.issue, tc.overrun)
 			if got := strings.Join(rules, "+"); got != tc.want {
 				t.Errorf("rules = %q, want %q", got, tc.want)
 			}
@@ -396,4 +403,145 @@ func TestScorecardDispatchEmptyLogNeverOpensStore(t *testing.T) {
 	if rep.Items != 0 || opened {
 		t.Errorf("items %d, store opened %v; want an empty report and no store", rep.Items, opened)
 	}
+}
+
+// The scorecard's question ids must be the keys the log writes, or the
+// battery's answers are read as unlabeled with no error. The keys are the
+// JSON names of the writer's Answers.
+func TestScorecardDispatchQuestionIDsMatchLogKeys(t *testing.T) {
+	t.Parallel()
+	data, err := json.Marshal(dispatch.Answers{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var answers map[string]json.RawMessage
+	if err := json.Unmarshal(data, &answers); err != nil {
+		t.Fatal(err)
+	}
+	var logKeys []string
+	for k := range answers {
+		logKeys = append(logKeys, k)
+	}
+	var ids []string
+	for _, id := range []QuestionID{qLandsFirstTry, qFitsTwentyMinutes, qAcceptanceTickable, qNeedsStrongModel, qTouchesDaemon, qSize} {
+		ids = append(ids, string(id))
+	}
+	sort.Strings(logKeys)
+	sort.Strings(ids)
+	if !reflect.DeepEqual(ids, logKeys) {
+		t.Errorf("question ids = %v, want the log's answer keys %v", ids, logKeys)
+	}
+}
+
+// isLanded reads the close reason the landing worker writes. This pins it to
+// that producer, so a change to the wording fails here rather than silently
+// unlabeling every landed bead.
+func TestScorecardDispatchLandedMatchesLandingCloseReason(t *testing.T) {
+	t.Parallel()
+	reason := land.LandingRecord{Target: "main", LandedCommit: "abc123", PatchID: "p1"}.CloseReason()
+	if !isLanded(&beads.Issue{Status: closedStatus, CloseReason: reason}) {
+		t.Errorf("isLanded(%q) = false, want true for the landing worker's own close reason", reason)
+	}
+	if isLanded(&beads.Issue{Status: "open", CloseReason: reason}) {
+		t.Errorf("isLanded on an open bead = true, want false")
+	}
+}
+
+// A bead whose verdicts start at attempt 2 has a first try the log does not
+// show, so it must not read as a first-try landing when it lands.
+func TestScorecardDispatchReworkedBeadFirstTryIsUnlabeled(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeDispatchFixture(t, town, nil, nil, []land.ReviewRecord{
+		{BeadID: "gt-r1", Attempt: 2, Verdict: "approve", At: time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)},
+	}, nil)
+	store := dispatchBeadStore{
+		"gt-r1": {ID: "gt-r1", Status: "closed", CloseReason: "Landed on main\nlanded_commit: 1111"},
+	}
+	a := dispatchAdapterFor(town, store)
+	got, err := a.Label(context.Background(), Item{ID: "gt-r1"})
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	if _, ok := got.Labels[qLandsFirstTry]; ok {
+		t.Errorf("lands_first_try labeled %v on a bead with no attempt-1 verdict, want unlabeled", got.Labels[qLandsFirstTry])
+	}
+	if got.Labels[qFitsTwentyMinutes] != true {
+		t.Errorf("fits_twenty_minutes = %v, want true for a landed bead with no overrun", got.Labels[qFitsTwentyMinutes])
+	}
+}
+
+// Each read the adapter makes can fail. A failure must fail the report, never
+// leave the line unlabeled.
+func TestScorecardDispatchReadFailuresFailReport(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)
+	line := dispatch.Line{Bead: "gt-b1", AttachedAt: at, Answers: dispatchAnswers(0.5)}
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, town string) beadReader
+		want  string
+	}{
+		{
+			name: "an overrun record that cannot be read",
+			setup: func(t *testing.T, town string) beadReader {
+				writeDispatchFixture(t, town, []dispatch.Line{line}, nil, nil, nil)
+				if err := os.MkdirAll(filepath.Join(town, ".runtime", "overrun-guard", "gt-b1.json"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return dispatchBeadStore{}
+			},
+			want: "reading the overrun record",
+		},
+		{
+			name: "an overrun record that does not parse",
+			setup: func(t *testing.T, town string) beadReader {
+				writeDispatchFixture(t, town, []dispatch.Line{line}, nil, nil, map[string]string{"gt-b1": `{"stopped_at":`})
+				return dispatchBeadStore{}
+			},
+			want: "parsing the overrun record",
+		},
+		{
+			name: "a bead store that fails on a lookup",
+			setup: func(t *testing.T, town string) beadReader {
+				writeDispatchFixture(t, town, []dispatch.Line{line}, nil, nil, nil)
+				return failingBeadStore{}
+			},
+			want: "showing bead gt-b1",
+		},
+		{
+			name: "a review log that cannot be read",
+			setup: func(t *testing.T, town string) beadReader {
+				writeDispatchFixture(t, town, []dispatch.Line{line}, nil, nil, nil)
+				path := land.TownReviewsFile(town).Path
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+				return dispatchBeadStore{}
+			},
+			want: "reading the review log",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			store := tc.setup(t, town)
+			a := newDispatchAdapter(town, func() (beadReader, error) { return store, nil })
+			_, err := Build(context.Background(), a, time.Time{})
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("Build error = %v, want one containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// failingBeadStore is a bead store whose every lookup fails.
+type failingBeadStore struct{}
+
+func (failingBeadStore) Show(string) (*beads.Issue, error) {
+	return nil, errors.New("dolt unreachable")
 }
