@@ -879,3 +879,39 @@ func TestMigratePoolKeysExplicitZeroMaxSeatsFallsBackToMaxOverflow(t *testing.T)
 		})
 	}
 }
+
+// The report names the key a seat's cap was read from, so a cap taken from
+// max_overflow is not reported as max_seats (gt-upi7n).
+func TestMigratePoolKeysProvenanceNamesTheCapKey(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		doc  string
+		want string
+	}{
+		{"max_seats names its own cap", `{"polecat_pool":{"agent":"a","max_seats":3,"max_overflow":5}}`, `polecat_pool.agent "a", max_seats 3 -> polecat_pool.seats.a.cap 3`},
+		{"zero max_seats reports the max_overflow cap", `{"polecat_pool":{"agent":"a","max_seats":0,"max_overflow":5}}`, `polecat_pool.agent "a", max_overflow 5 -> polecat_pool.seats.a.cap 5`},
+		{"absent max_seats reports the max_overflow cap", `{"polecat_pool":{"agent":"a","max_overflow":5}}`, `polecat_pool.agent "a", max_overflow 5 -> polecat_pool.seats.a.cap 5`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			m, ok := jsonTreeOf(t, []byte(tc.doc)).(map[string]any)
+			if !ok {
+				t.Fatalf("%s is not an object", tc.doc)
+			}
+			lines, err := migratePoolKeys(m, nil, false)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, line := range lines {
+				if strings.Contains(line, tc.want) {
+					found = true
+				}
+			}
+			if !found {
+				t.Errorf("no report line %q in %q", tc.want, lines)
+			}
+		})
+	}
+}

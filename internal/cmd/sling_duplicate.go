@@ -177,6 +177,9 @@ func extractOverlapRefs(parts ...string) contentRefs {
 // whatever prefix the prose spelled it with: normalizeFileToken keeps a home
 // path ("~/gt/docs/plans/x.md") and an absolute one ("/Users/me/gt/docs/plans/x.md")
 // whole, so the plan tree is matched at a directory boundary anywhere in it.
+// The match is wider than those two spellings on purpose: a rig-relative ref
+// ("gastown/docs/plans/x.md") names the same tree. The cost is that any path
+// with a docs/plans/ directory in it is read as plan context too (gt-upi7n).
 func isPlanDocPath(path string) bool {
 	return strings.HasPrefix(path, planDocPrefix) || strings.Contains(path, "/"+planDocPrefix)
 }

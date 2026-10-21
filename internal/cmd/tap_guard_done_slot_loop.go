@@ -297,6 +297,9 @@ func doneSlotLoopZshForBody(tokens, lowerTokens []string, name int) []string {
 // does not end the list (gt-yx8jn review). A bare `(` or `)` outside any
 // substitution is a quoted or escaped word of the list (the tokenizer strips
 // the quotes), not a substitution's paren, so it leaves the depth at zero.
+// The tokenizer cannot say which spelling a paren had, but a valid list cannot
+// hold a bare unquoted paren outside a substitution, so every such paren is a
+// quoted or escaped word (gt-upi7n).
 func doneSlotLoopInListEnd(tokens []string, from int) int {
 	depth := 0
 	for k := from; k < len(tokens); k++ {
