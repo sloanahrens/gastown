@@ -75,15 +75,26 @@ func writeRetries(path string, q retries) error {
 }
 
 // beadFault reports whether err blames the bead's request rather than the
-// pass's reach: Jev refused this request (a 4xx other than 401) or accepted it
-// and answered unusably. Only a bead fault counts an attempt against the bead;
-// any other failure — a timeout, a lost connection, a 429 that outlived its
-// retry, a 401, a 5xx — stops the pass where it is, so an outage costs no
-// attempts and drops nothing.
+// pass's reach: Jev refused this request (a 4xx other than 401 and the account
+// refusals) or accepted it and answered unusably. Only a bead fault counts an
+// attempt against the bead; any other failure — a timeout, a lost connection,
+// a 429 that outlived its retry, a 401, a 402 or 403 for the account, a 5xx —
+// stops the pass where it is, so an outage costs no attempts and drops nothing.
 func beadFault(err error) bool {
 	var se *jev.StatusError
 	if errors.As(err, &se) {
-		return se.Status >= 400 && se.Status < 500 && se.Status != http.StatusUnauthorized
+		return se.Status >= 400 && se.Status < 500 &&
+			se.Status != http.StatusUnauthorized &&
+			!accountRefusal(se.Status)
 	}
 	return errors.Is(err, jev.ErrBadResponse)
+}
+
+// accountRefusal reports whether a 4xx answers for the account rather than for
+// this request: 402 Payment Required and 403 Forbidden refuse, or would refuse,
+// every request the key makes, so a placement that fails under them says
+// nothing about the bead. Counting such a failure would spend the placement's
+// maxAttempts on an account or billing problem and give it up for good.
+func accountRefusal(status int) bool {
+	return status == http.StatusPaymentRequired || status == http.StatusForbidden
 }

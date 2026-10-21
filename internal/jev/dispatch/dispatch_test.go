@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -644,6 +646,73 @@ func TestJevDispatchPassGivesUpAfterMaxAttempts(t *testing.T) {
 	}
 	if again := mustRun(t, h.pass); again.Asked != 0 || again.Failed != 0 || len(h.asker.states) != maxAttempts {
 		t.Errorf("pass after the give-up = %+v after %d asks, want nothing", again, len(h.asker.states))
+	}
+}
+
+// An account refusal (402, 403) is no bead fault: however many passes it
+// refuses, the placement is never given up, the pass stops with the cause, and
+// the cursor holds before the placement. Once the account answers, the
+// placement is asked and its line is written.
+func TestJevDispatchPassAccountRefusalHoldsThePlacement(t *testing.T) {
+	t.Parallel()
+	for _, status := range []int{http.StatusPaymentRequired, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			t.Parallel()
+			// One pass more than maxAttempts: a count that ends a bead fault
+			// must not touch an account refusal. The script is spent after
+			// these, so the next pass gets a plain answer.
+			script := make([]fakeResult, maxAttempts+1)
+			for i := range script {
+				script[i] = fakeResult{err: &jev.StatusError{Status: status}}
+			}
+			h := newHarness(t, []*beads.Issue{placed("gt-a", 10, specBody), placed("gt-b", 20, specBody)}, script...)
+
+			for pass := 1; pass <= maxAttempts+1; pass++ {
+				_, err := h.pass.Run(context.Background())
+				if err == nil || !strings.Contains(err.Error(), "gt-a") || !strings.Contains(err.Error(), fmt.Sprintf("http %d", status)) {
+					t.Fatalf("pass %d: err = %v, want the pass stopped at gt-a with the %d", pass, err, status)
+				}
+				if _, statErr := os.Stat(h.retry); !os.IsNotExist(statErr) {
+					t.Fatalf("pass %d: the retry queue exists (%v); a %d must spend no attempt", pass, statErr, status)
+				}
+				cur, _, _ := battery.ReadCursor(h.cursor)
+				if !cur.Time.Equal(t0.Add(-time.Hour)) {
+					t.Fatalf("pass %d: cursor = %+v; it must hold before gt-a", pass, cur)
+				}
+			}
+
+			sum := mustRun(t, h.pass)
+			if sum.Asked != 2 || sum.Failed != 0 || sum.GivenUp != 0 {
+				t.Errorf("after the account answered: summary = %+v, want both placements asked and none given up", sum)
+			}
+		})
+	}
+}
+
+// beadFault tells a refusal of the request from everything else. Only a
+// refusal of the request, or an answer that cannot be used, counts an attempt.
+func TestJevDispatchBeadFaultClassifiesStatuses(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"400 bad request", &jev.StatusError{Status: http.StatusBadRequest}, true},
+		{"413 too large", &jev.StatusError{Status: http.StatusRequestEntityTooLarge}, true},
+		{"402 payment required", &jev.StatusError{Status: http.StatusPaymentRequired}, false},
+		{"403 forbidden", &jev.StatusError{Status: http.StatusForbidden}, false},
+		{"401 unauthorized", jev.ErrUnauthorized, false},
+		{"500 server error", &jev.StatusError{Status: http.StatusInternalServerError}, false},
+		{"unusable answer", jev.ErrBadResponse, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			if got := beadFault(c.err); got != c.want {
+				t.Errorf("beadFault(%v) = %v, want %v", c.err, got, c.want)
+			}
+		})
 	}
 }
 

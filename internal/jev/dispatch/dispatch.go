@@ -16,8 +16,10 @@
 //
 // A question Jev cannot answer is never dropped on its first failure. A
 // failure the bead's own request caused is queued and asked again next pass,
-// up to maxAttempts; a failure that means Jev was out of reach stops the pass
-// where it is, so an outage costs no attempts and loses no placement.
+// up to maxAttempts; a failure that means Jev could not answer for the beads
+// this pass — an outage, or a refusal of the account rather than the request —
+// stops the pass where it is, so an outage costs no attempts and loses no
+// placement.
 package dispatch
 
 import (
@@ -156,8 +158,9 @@ type placement struct {
 // A question that fails because of the bead's own request is queued in the
 // retry file with its attempt count and asked again next pass, until it has
 // failed maxAttempts times. A question that fails any other way means Jev could
-// not be reached: the pass stops at that placement, which stays queued or, for
-// a new placement, behind the unmoved cursor, and returns the cause.
+// not be reached or refused the account (402, 403): the pass stops at that
+// placement, which stays queued or, for a new placement, behind the unmoved
+// cursor, and returns the cause.
 //
 // Run returns ErrBusy when another pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
@@ -237,9 +240,10 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 				}
 			}
 		case !beadFault(err):
-			// Jev is out of reach. Stop here rather than spend an attempt on
-			// every placement behind this one, and drop nothing: the cursor
-			// still points before this placement, or its queue entry stands.
+			// Jev is out of reach or refused the account. Stop here rather than
+			// spend an attempt on every placement behind this one, and drop
+			// nothing: the cursor still points before this placement, or its
+			// queue entry stands.
 			return sum, fmt.Errorf("asking about %s: %w", pl.issue.ID, err)
 		default:
 			attempts := pl.attempts + 1
