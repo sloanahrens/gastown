@@ -477,14 +477,26 @@ func (w *Worker) recordFirstSight(issue *beads.Issue) {
 	if err != nil {
 		return
 	}
-	if _, err := w.FirstSight.Record(work); err != nil {
+	w.recordSubmission(work)
+}
+
+// recordSubmission writes the first-sight record of work. A record already on
+// file is no write, so it does not end a run of failures.
+func (w *Worker) recordSubmission(work land.Work) {
+	if w.FirstSight == nil {
+		return
+	}
+	wrote, err := w.FirstSight.Record(work)
+	if err != nil {
 		if !w.firstSightFailing {
-			w.logf("%s: recording the submission for the jev battery: %v", issue.ID, err)
+			w.logf("%s: recording the submission for the jev battery: %v", work.BeadID, err)
 		}
 		w.firstSightFailing = true
 		return
 	}
-	w.firstSightFailing = false
+	if wrote {
+		w.firstSightFailing = false
+	}
 }
 
 // process resolves what to land for issue and lands it.
@@ -537,6 +549,11 @@ func (w *Worker) process(ctx context.Context, issue *beads.Issue, rep *Report) {
 	}
 	if tip != work.Head && !strings.HasPrefix(tip, work.Head) {
 		w.logf("%s: %s moved from the submitted %s to %s; landing the tip", issue.ID, work.Branch, short(work.Head), short(tip))
+		// The battery reads the commits of the head this landing takes, so
+		// that head gets its own first-sight record before the landing.
+		moved := work
+		moved.Head = tip
+		w.recordSubmission(moved)
 	}
 	work.Head = tip
 	work.Agent = w.seatAgent(work.Worker)
