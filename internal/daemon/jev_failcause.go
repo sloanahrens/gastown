@@ -20,10 +20,18 @@ func (d *Daemon) jevFailcauseCandidate(rigName string, gate land.Candidate) land
 			USDPerBillionTokens: c.Patrols.JevFailcause.USDPerBillionTokens,
 		}
 	}
-	pass, err := failcause.Open(d.config.TownRoot, settings, d.logger.Writer())
+	open := d.jevFailcauseOpen
+	if open == nil {
+		open = failcause.Open
+	}
+	pass, err := open(d.config.TownRoot, settings, d.logger.Writer())
 	if err != nil {
 		d.logger.Printf("jev_failcause: error: %v; the cause battery is off for %s", err, rigName)
 		return gate
 	}
+	// The battery judges on a context that cannot be canceled, so the E-stop
+	// gate cannot cancel a call in flight. It refuses each Ask after the
+	// E-stop instead, and the judging ends on that refusal.
+	pass.Asker = newEstopGate(d.config.TownRoot, pass.Asker, func() {})
 	return failcause.Shadow{Gate: gate, Pass: pass, Rig: rigName, Logf: d.logger.Printf}
 }
