@@ -10,20 +10,24 @@ import (
 // liveProbe and localProbe are ProbeLiveGitState and ProbeLiveGitStateLocal
 // over w's repositories.
 func liveProbe(w *world, dir string) LiveGitState {
-	return probeLiveGitState(w.opener(), dir, gitRepo.CheckUncommittedWork)
+	return probeLiveGitState(w.opener(), dir, gitRepo.CheckUncommittedWork, livePreservation)
 }
 
 func localProbe(w *world, dir string) LiveGitState {
-	return probeLiveGitState(w.opener(), dir, gitRepo.CheckUncommittedWorkLocal)
+	return probeLiveGitState(w.opener(), dir, gitRepo.CheckUncommittedWorkLocal, localPreservation)
 }
 
-// initLiveGitRepo is a repository on main with one commit, in a new world.
+// initLiveGitRepo is a clone of an origin with main and one commit, checked
+// out on main, in a new world. A polecat's clone always has an origin.
 func initLiveGitRepo(t *testing.T) (*world, string) {
 	t.Helper()
 	w := newWorld()
-	dir := t.TempDir()
-	w.InitRepo(t, dir)
-	w.Commit(t, dir, "main", "initial", map[string]string{"README.md": "# Test\n"})
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin")
+	dir := filepath.Join(root, "work")
+	w.InitBare(t, origin)
+	w.Commit(t, origin, "main", "initial", map[string]string{"README.md": "# Test\n"})
+	w.Clone(t, origin, dir)
 	w.checkout(t, dir)
 	return w, dir
 }
@@ -113,6 +117,70 @@ func TestProbeLiveGitState(t *testing.T) {
 			t.Fatalf("isWorktreeRoot(%q) = false, want true", rigRoot)
 		}
 	})
+}
+
+// TestProbeLiveGitStateWithoutAComparisonRefIsUnknown is the gt-sg75r case: a
+// branch that no comparison ref resolves for (no exact remote branch, no
+// upstream, no origin default branch) cannot be judged. The reuse gate reads
+// that as unknown, and the list probe must too, not as Live with zero unpushed.
+func TestProbeLiveGitStateWithoutAComparisonRefIsUnknown(t *testing.T) {
+	t.Parallel()
+	w := newWorld()
+	dir := t.TempDir()
+	w.InitRepo(t, dir)
+	w.Commit(t, dir, "main", "initial", map[string]string{"README.md": "# Test\n"})
+	w.checkout(t, dir)
+	branch := "polecat/gt-sg75r+unjudged"
+	if err := w.repo(dir).CheckoutNewBranch(branch, "HEAD"); err != nil {
+		t.Fatal(err)
+	}
+	w.writeAndCommit(t, dir, "work", map[string]string{"feature.txt": "unpushed\n"})
+
+	if _, err := w.repo(dir).BranchPreservationStatus(branch, "origin", nil); err == nil {
+		t.Fatalf("BranchPreservationStatus(%s) resolved a comparison ref; the fixture does not model the case", branch)
+	}
+	probes := []struct {
+		name string
+		got  LiveGitState
+	}{
+		{"live", liveProbe(w, dir)},
+		{"local", localProbe(w, dir)},
+	}
+	for _, p := range probes {
+		if p.got.Source != GitStateSourceUnknown {
+			t.Fatalf("%s probe Source = %q with UnpushedCommits %d, want %q: an unjudged branch must not read as Live with zero unpushed",
+				p.name, p.got.Source, p.got.UnpushedCommits, GitStateSourceUnknown)
+		}
+		if !strings.Contains(p.got.FailedReason, "comparing unpushed commits") {
+			t.Fatalf("%s probe FailedReason = %q, want it to name the failed comparison", p.name, p.got.FailedReason)
+		}
+	}
+}
+
+// TestProbeLiveGitStateWithAnExactRemoteBranchCountsUnpushed: the exact remote
+// branch is a comparison ref, so a branch with a local commit past it still
+// reports the real count rather than falling back to unknown.
+func TestProbeLiveGitStateWithAnExactRemoteBranchCountsUnpushed(t *testing.T) {
+	t.Parallel()
+	repo := initLandedRepo(t)
+	repo.startLandedBranch(t, "polecat/gt-sg75r+pushed")
+	repo.commit(t, "more.txt", "not pushed\n", "local only")
+
+	probes := []struct {
+		name string
+		got  LiveGitState
+	}{
+		{"live", liveProbe(repo.w, repo.work)},
+		{"local", localProbe(repo.w, repo.work)},
+	}
+	for _, p := range probes {
+		if p.got.Source != GitStateSourceLive {
+			t.Fatalf("%s probe Source = %q (reason %q), want %q", p.name, p.got.Source, p.got.FailedReason, GitStateSourceLive)
+		}
+		if p.got.UnpushedCommits != 1 {
+			t.Fatalf("%s probe UnpushedCommits = %d, want 1 for the one local commit past the pushed branch", p.name, p.got.UnpushedCommits)
+		}
+	}
 }
 
 // TestDecideWorkstateRedrivesGitFromLiveProbe is the claude-41j.1 D9 table.
