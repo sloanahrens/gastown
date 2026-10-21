@@ -151,6 +151,13 @@ type PatrolsConfig struct {
 	// same reason as JevDedupe.
 	JevRework *JevReworkConfig `json:"jev_rework,omitempty"`
 
+	// JevThrash asks Jev, for each bead just placed on a seat, whether the
+	// polecat will be respawned on it and whether the overrun guard will stop
+	// it for running long, and logs both answers (internal/jev/thrash). It
+	// changes no bead. Opt-in and under the same town-wide daily cap as
+	// JevDispatch.
+	JevThrash *JevThrashConfig `json:"jev_thrash,omitempty"`
+
 	// RestartTracker is retired (gt-gqftr): no code read the block. It is
 	// declared, like the other retired keys, so a daemon.json that still
 	// carries it keeps loading under strict decoding and is kept verbatim.
@@ -706,6 +713,20 @@ type JevTargetsConfig struct {
 // The pass is off unless Enabled is true, and an enabled pass needs
 // USDPerBillionTokens: the usage ledger stores tokens, not dollars.
 type JevDispatchConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the pass for the day once the town's Jev spend, every
+	// caller counted, reaches it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+}
+
+// JevThrashConfig switches on the thrash battery and prices its Jev spend. The
+// pass is off unless Enabled is true, and an enabled pass needs
+// USDPerBillionTokens: the usage ledger stores tokens, not dollars.
+type JevThrashConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// MaxUSDPerDay stops the pass for the day once the town's Jev spend, every
