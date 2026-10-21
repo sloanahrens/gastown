@@ -583,3 +583,80 @@ func TestRebuildGTRequestDuringCycleSurvives(t *testing.T) {
 		t.Fatal("the cycle's end cleared a request armed while it ran")
 	}
 }
+
+// rebuildGTLogListing renders the `git log` listing rebuildGTBinaryAffectingCount
+// reads: one record per commit, each carrying the paths that commit changed.
+func rebuildGTLogListing(commits ...[]string) string {
+	var b strings.Builder
+	for i, paths := range commits {
+		b.WriteString("\x1f" + strconv.Itoa(i+1) + "\n\n")
+		for _, p := range paths {
+			b.WriteString(p + "\n")
+		}
+	}
+	return b.String()
+}
+
+// TestRebuildGTDrift_CountsEmbeddedMarkdownBacklog pins agreement with `gt
+// stale`: markdown under an embed directory is compiled into the binary, so a
+// backlog of commits that touch only that markdown is binary-affecting and
+// escalates above the ceiling. The pathspec count read it as 0 (gt-9euk3).
+func TestRebuildGTDrift_CountsEmbeddedMarkdownBacklog(t *testing.T) {
+	t.Parallel()
+	d, rec := daemonWithRecorder(t)
+	commits := make([][]string, rebuildGTMaxCommitsBehind+1)
+	for i := range commits {
+		commits[i] = []string{"internal/templates/polecat-CLAUDE.md"}
+	}
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "log"):
+			return cliReply{stdout: rebuildGTLogListing(commits...)}
+		case gitSub(c, "rev-list"):
+			// What the old pathspec excludes counted for this range.
+			return cliReply{stdout: "0\n"}
+		}
+		return cliReply{}
+	})
+
+	d.rebuildGTDrift(d.config.TownRoot, nonBinaryStale(len(commits), "cafecafe"))
+
+	esc := rec.Escalations()
+	if len(esc) != 1 || esc[0].Escalation.Fingerprint != alertKeyRebuildGTDrift {
+		t.Fatalf("escalations = %+v, want one under %s", esc, alertKeyRebuildGTDrift)
+	}
+	if want := "binary is " + strconv.Itoa(len(commits)) + " commits behind"; !strings.Contains(esc[0].Escalation.Reason, want) {
+		t.Errorf("reason = %q, want it to contain %q", esc[0].Escalation.Reason, want)
+	}
+}
+
+// TestRebuildGTDrift_CountsNoCommitOutsideTheBuildPaths pins the other half: a
+// backlog whose commits touch only documentation, markdown outside the embed
+// directories, test sources and testdata counts 0, however long it is (gt-9euk3).
+func TestRebuildGTDrift_CountsNoCommitOutsideTheBuildPaths(t *testing.T) {
+	t.Parallel()
+	d, rec := daemonWithRecorder(t)
+	commits := make([][]string, rebuildGTMaxCommitsBehind+5)
+	for i := range commits {
+		switch i % 3 {
+		case 0:
+			commits[i] = []string{"docs/design/architecture.md"}
+		case 1:
+			commits[i] = []string{"README.md", "internal/daemon/rebuild_gt_test.go"}
+		default:
+			commits[i] = []string{"internal/daemon/testdata/fixture.txt"}
+		}
+	}
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		if gitSub(c, "log") {
+			return cliReply{stdout: rebuildGTLogListing(commits...)}
+		}
+		return cliReply{}
+	})
+
+	d.rebuildGTDrift(d.config.TownRoot, nonBinaryStale(len(commits), "cafecafe"))
+
+	if esc := rec.Escalations(); len(esc) != 0 {
+		t.Errorf("a backlog outside the build paths escalated: %+v", esc)
+	}
+}

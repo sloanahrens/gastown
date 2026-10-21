@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"log"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -242,19 +243,28 @@ func TestRebuildGTDrift_CountsOnlyBinaryAffectingCommits(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name      string
-		count     string
+		affecting int
 		wantDrift bool
 	}{
-		{"under the ceiling", "3\n", false},
-		{"over the ceiling", "21\n", true},
+		{"under the ceiling", 3, false},
+		{"over the ceiling", 21, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
+			// 40 commits behind, of which tc.affecting touch a build path and
+			// the rest are documentation.
+			commits := make([][]string, 40)
+			for i := range commits {
+				commits[i] = []string{"docs/design/architecture.md"}
+				if i < tc.affecting {
+					commits[i] = []string{"internal/daemon/rebuild_gt.go"}
+				}
+			}
 			d, rec := daemonWithRecorder(t)
 			withRebuildGTCli(t, d, func(c cliCall) cliReply {
-				if gitSub(c, "rev-list") {
-					return cliReply{stdout: tc.count}
+				if gitSub(c, "log") {
+					return cliReply{stdout: rebuildGTLogListing(commits...)}
 				}
 				return cliReply{}
 			})
@@ -266,13 +276,13 @@ func TestRebuildGTDrift_CountsOnlyBinaryAffectingCommits(t *testing.T) {
 				if len(esc) != 1 || esc[0].Escalation.Fingerprint != alertKeyRebuildGTDrift {
 					t.Fatalf("escalations = %+v, want one under %s", esc, alertKeyRebuildGTDrift)
 				}
-				if !strings.Contains(esc[0].Escalation.Reason, "21 commits behind") {
-					t.Errorf("reason = %q, want the binary-affecting count", esc[0].Escalation.Reason)
+				if want := strconv.Itoa(tc.affecting) + " commits behind"; !strings.Contains(esc[0].Escalation.Reason, want) {
+					t.Errorf("reason = %q, want the binary-affecting count (%q)", esc[0].Escalation.Reason, want)
 				}
 				return
 			}
 			if len(esc) != 0 {
-				t.Errorf("3 binary-affecting commits out of 40 escalated: %+v", esc)
+				t.Errorf("%d binary-affecting commits out of 40 escalated: %+v", tc.affecting, esc)
 			}
 		})
 	}
