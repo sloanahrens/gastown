@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -27,7 +27,9 @@ const beadStatusTimeout = 15 * time.Second
 //
 // The trigger — dead session, branch absent from origin — is the population
 // that has always been right; the discriminator is what was missing (gt-4vbn).
-// Work already on the default branch under any SHA is confirmed superseded.
+// Work land.WorkLandedOnTarget proves landed (on the default branch under any
+// SHA, a squash recorded in refs/landed, or a landing record) is confirmed
+// superseded.
 // A terminal bead behind the branch is a weaker signal: closing an issue (e.g.
 // a "no-changes" reclose after a zombie reset re-dispatches it) proves nothing
 // about whether THIS branch's content survives anywhere, so it only stands
@@ -40,6 +42,12 @@ type StalledPolecatCheck struct {
 	sessionCheckerForTest polecatSessionChecker             // nil → real tmux
 	gitForTest            func(clonePath string) polecatGit // nil → ctx.git
 	beadStatus            func(townRoot, beadID string) (string, bool)
+
+	// workLanded answers "is this branch's content already on the default
+	// branch"; beadIssue reads the bead its LANDING RECORD arm needs. Tests
+	// inject both; nil beadIssue reads no bead.
+	workLanded func(g land.WorkLandedRepo, head, target, beadID string, issue *beads.Issue) land.WorkLandedVerdict
+	beadIssue  func(townRoot, beadID string) (*beads.Issue, error)
 }
 
 // polecatSessionChecker abstracts the tmux liveness check this check needs,
@@ -52,11 +60,10 @@ type polecatSessionChecker interface {
 // inject a failure without a real git repo in a bad state. Push is part of the
 // interface because Fix's decision NOT to push is the behavior under test.
 type polecatGit interface {
+	land.WorkLandedRepo
 	CurrentBranch() (string, error)
 	BranchPushedToRemote(localBranch, remote string) (bool, int, error)
-	RemoteDefaultBranch() string
 	FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error
-	BranchTargetStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error)
 	Push(remote, branch string, force bool) error
 }
 
@@ -76,6 +83,7 @@ type stalledPolecatInfo struct {
 	branch        string
 	unpushedCount int
 	clonePath     string
+	landed        land.WorkLandedVerdict
 }
 
 // NewStalledPolecatCheck creates a new stalled polecat check.
@@ -89,6 +97,8 @@ func NewStalledPolecatCheck() *StalledPolecatCheck {
 			},
 		},
 		beadStatus: lookupBeadStatus,
+		workLanded: land.WorkLandedOnTarget,
+		beadIssue:  lookupBead,
 	}
 }
 
@@ -166,7 +176,8 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 			// Content confirmed on the default branch is checked first because
 			// it is the strong, independent signal: it proves the same content
 			// exists in custody regardless of what anyone did to the bead.
-			if c.branchLandedOnDefault(pg, branch) {
+			verdict := c.landedVerdict(pg, ctx.TownRoot, branch)
+			if verdict.Landed {
 				continue
 			}
 			// A closed/tombstoned bead is only a weak, indirect signal — the
@@ -182,8 +193,8 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 					issue = meta.Issue
 				}
 				needsReview = append(needsReview, fmt.Sprintf(
-					"CLOSED-BUT-UNVERIFIED: %s/%s — branch %s has %d commit(s) on no remote behind closed bead %s; content not confirmed on the default branch, review before deleting",
-					rigName, polecatName, branch, unpushedCount, issue))
+					"CLOSED-BUT-UNVERIFIED: %s/%s — branch %s has %d commit(s) on no remote behind closed bead %s; content not confirmed on the default branch, review before deleting%s",
+					rigName, polecatName, branch, unpushedCount, issue, landedNote(verdict)))
 				continue
 			}
 
@@ -193,6 +204,7 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 				branch:        branch,
 				unpushedCount: unpushedCount,
 				clonePath:     clonePath,
+				landed:        verdict,
 			})
 		}
 	}
@@ -202,8 +214,8 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 	if len(stalled) > 0 {
 		details := make([]string, len(stalled))
 		for i, s := range stalled {
-			details[i] = fmt.Sprintf("STALLED: %s/%s — branch %s has %d commit(s) on no remote",
-				s.rigName, s.name, s.branch, s.unpushedCount)
+			details[i] = fmt.Sprintf("STALLED: %s/%s — branch %s has %d commit(s) on no remote%s",
+				s.rigName, s.name, s.branch, s.unpushedCount, landedNote(s.landed))
 		}
 		if len(needsReview) > 0 || len(unknown) > 0 {
 			details = append(details, "")
@@ -242,23 +254,52 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// branchLandedOnDefault reports whether the branch's content is already on the
+// landedVerdict answers whether the branch's content is already on the
 // remote default branch, which makes it superseded rather than lost whichever
-// SHA carried it (gt-4vbn).
+// SHA carried it (gt-4vbn). The verdict is land.WorkLandedOnTarget's, the one
+// predicate every other consumer of "landed" uses (gt-wlc9d).
 //
 // The refresh is load-bearing: a dead polecat's clone stops fetching, so the
 // content it is being judged against can postdate its last fetch. Without the
 // refresh the check would keep reporting landed work as unlanded forever —
 // the failure it exists to remove.
-func (c *StalledPolecatCheck) branchLandedOnDefault(pg polecatGit, branch string) bool {
-	defaultBranch := pg.RemoteDefaultBranch()
-	if defaultBranch == "" {
-		return false
-	}
+func (c *StalledPolecatCheck) landedVerdict(pg polecatGit, townRoot, branch string) land.WorkLandedVerdict {
 	_ = pg.FetchDefaultBranchWithTimeout("origin", fetchTimeout) // best-effort: stale evidence over-flags, it cannot mask real risk
 
-	status, err := pg.BranchTargetStatus(branch, "origin", []string{"origin/" + defaultBranch})
-	return err == nil && status.Preserved
+	var beadID string
+	var issue *beads.Issue
+	var readErr error
+	if meta, ok := polecat.ParseBranchName(branch); ok {
+		beadID = meta.Issue
+	}
+	if beadID != "" && c.beadIssue != nil {
+		issue, readErr = c.beadIssue(townRoot, beadID)
+	}
+	workLanded := c.workLanded
+	if workLanded == nil {
+		workLanded = land.WorkLandedOnTarget
+	}
+	// The branch is the worktree's current branch, so "" reads its HEAD.
+	v := workLanded(pg, "", "", beadID, issue)
+	if !v.Landed && v.Reason == land.WorkUnpushed && readErr != nil {
+		// The LANDING RECORD arm could not run, so "nothing proves it" would
+		// overstate what was checked.
+		v = land.WorkLandedVerdict{Reason: land.WorkProbeFailed, Detail: fmt.Sprintf("read bead %s: %v", beadID, readErr)}
+	}
+	return v
+}
+
+// landedNote is what a verdict adds to a report line: nothing for a plain "no
+// evidence it landed", the Reason token and Detail when the proof differed or
+// could not run, so the operator sees why the branch was not cleared.
+func landedNote(v land.WorkLandedVerdict) string {
+	if v.Landed || v.Reason == "" || v.Reason == land.WorkUnpushed {
+		return ""
+	}
+	if v.Detail != "" {
+		return fmt.Sprintf(" [%s: %s]", v.Reason, v.Detail)
+	}
+	return fmt.Sprintf(" [%s]", v.Reason)
 }
 
 // branchSupersededByTerminalBead reports whether the bead encoded in the branch
@@ -301,7 +342,7 @@ func (c *StalledPolecatCheck) Fix(ctx *CheckContext) error {
 	var lastErr error
 	for _, s := range c.stalledPolecats {
 		g := c.gitFor(ctx, s.clonePath)
-		if c.branchSupersededByTerminalBead(ctx.TownRoot, s.branch) || c.branchLandedOnDefault(g, s.branch) {
+		if c.branchSupersededByTerminalBead(ctx.TownRoot, s.branch) || c.landedVerdict(g, ctx.TownRoot, s.branch).Landed {
 			continue
 		}
 		if err := g.Push("origin", s.branch, false); err != nil {
@@ -316,20 +357,27 @@ func (c *StalledPolecatCheck) Fix(ctx *CheckContext) error {
 // is a doctor scan that must finish. Any failure reports ok=false, which
 // callers treat as unknown rather than as an answer.
 func lookupBeadStatus(townRoot, beadID string) (string, bool) {
-	if townRoot == "" || beadID == "" {
-		return "", false
-	}
-	beadsDir := beads.ResolveBeadsDir(townRoot)
-	if _, err := os.Stat(beadsDir); err != nil {
-		return "", false
-	}
-
-	env := beads.EnvForSubprocessMode(os.Environ(), beadsDir, beads.ReadOnlyRouting)
-	issue, err := beads.NewPlain(townRoot, env).WithTimeout(beadStatusTimeout).Show(beadID)
+	issue, err := lookupBead(townRoot, beadID)
 	if err != nil || issue == nil {
 		return "", false
 	}
 	return issue.Status, true
+}
+
+// lookupBead reads a bead the way lookupBeadStatus does and returns it whole,
+// for the landing-record arm of land.WorkLandedOnTarget. A town with no beads
+// database, or a bead bd cannot show, is an error.
+func lookupBead(townRoot, beadID string) (*beads.Issue, error) {
+	if townRoot == "" || beadID == "" {
+		return nil, fmt.Errorf("no town root or bead id")
+	}
+	beadsDir := beads.ResolveBeadsDir(townRoot)
+	if _, err := os.Stat(beadsDir); err != nil {
+		return nil, err
+	}
+
+	env := beads.EnvForSubprocessMode(os.Environ(), beadsDir, beads.ReadOnlyRouting)
+	return beads.NewPlain(townRoot, env).WithTimeout(beadStatusTimeout).Show(beadID)
 }
 
 // findRigs returns the list of rig names to check.

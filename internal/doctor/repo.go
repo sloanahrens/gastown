@@ -34,7 +34,13 @@ type Repo interface {
 	ConfigSet(key, value string) error
 
 	BranchPushedToRemote(localBranch, remote string) (bool, int, error)
-	BranchTargetStatus(localBranch, remote string, targets []string) (git.BranchPreservationStatus, error)
+	// IsAncestor, CommitLandedOnTarget, DiffNameOnly and DiffPathsNameOnly (with
+	// Rev, RefExists, MergeBase and RemoteDefaultBranch) are land.WorkLandedRepo,
+	// what land.WorkLandedOnTarget reads.
+	IsAncestor(ancestor, descendant string) (bool, error)
+	CommitLandedOnTarget(remote, target, commit string) bool
+	DiffNameOnly(base, head string) ([]string, error)
+	DiffPathsNameOnly(a, b string, paths []string) ([]string, error)
 	FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error
 	RemoteDefaultBranch() string
 	Push(remote, branch string, force bool) error
