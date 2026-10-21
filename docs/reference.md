@@ -1814,6 +1814,27 @@ The daemon patrol `jev_dispatch` (heartbeat step `jev-dispatch`) is off unless
 the town-wide cap above, so the dedupe and dispatch batteries draw on one day's
 room. `gt jev dispatch` reads the same keys whether or not the patrol is on.
 
+### Conflict battery (`jev_conflict`)
+
+The daemon patrol `jev_conflict` (heartbeat step `jev-conflict`) is off unless
+`daemon.json` sets it on, and runs every 15 minutes:
+
+```json
+{"patrols": {"jev_conflict": {"enabled": true, "max_usd_per_day": 1, "usd_per_billion_tokens": 4}}}
+```
+
+For each bead placed since the last pass, the pass pairs it with the beads that
+were in flight when it was placed, at most five, and asks Jev about each pair
+once. The answers are `same_files` and `same_function`, both `noul`, and `risk`,
+a `score` from 0 (no shared package) to 3 (the same function). Each pair appends
+one line to `.runtime/jev/conflict.jsonl`. The pass changes no bead and no
+dispatch decision, and it shares the town-wide cap with the other Jev batteries.
+
+`gt jev scorecard --battery conflict` labels a pair positive when one bead's
+conflict rejection was built on a target that held the other's landing, or when
+the two landings changed a file in common. It labels a pair negative when both
+landed and changed no file in common. The rest are unlabeled.
+
 ### Progress battery (`jev_progress`)
 
 When the overrun guard nudges a polecat at its nudge threshold, the nudge is
