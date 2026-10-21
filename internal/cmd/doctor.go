@@ -344,6 +344,7 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewStaleAgentBeadsCheck())
 	d.Register(doctor.NewAgentBeadsShadowCheck())
 	d.Register(doctor.NewRigBeadsCheck())
+	d.Register(doctor.NewOrphanedRoleOverridesCheck())
 
 	// Config architecture checks
 	d.Register(doctor.NewSettingsCheck())
