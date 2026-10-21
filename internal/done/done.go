@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/role"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/slot"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/templates"
@@ -1530,7 +1531,17 @@ func runDoneLocalGate(r *doneRun, head string) error {
 	// no consumer reads this polecat as hung (gt-azmw).
 	stopHeartbeat := polecat.StartExitingHeartbeatKeepAlive(r.townRoot, r.heartbeatSession, "gt done", r.issueID)
 	ctx, cancel := context.WithTimeout(context.Background(), doneLocalGateBudget)
+	// A presubmit slot caps how many of these gates run townwide. Its wait is
+	// spent from the same budget as the gate, so a long queue shortens the run
+	// rather than extending it.
+	releaseSlot, err := acquirePresubmitSlot(ctx, r)
+	if err != nil {
+		cancel()
+		stopHeartbeat()
+		return doneExit(doneExitGateUnavailable, "no presubmit slot could be taken ("+err.Error()+"); this is not a verdict on your change, so re-run gt done once, and escalate (gt escalate -s medium) if it repeats", err)
+	}
 	res := gate.Run(ctx, r.cwd)
+	releaseSlot()
 	cancel()
 	stopHeartbeat()
 	if res.Err != nil {
@@ -1541,6 +1552,24 @@ func runDoneLocalGate(r *doneRun, head string) error {
 	}
 	fmt.Printf("%s Local gate passed: %s\n", style.Bold.Render("✓"), res.Summary())
 	return nil
+}
+
+// acquirePresubmitSlot takes one of the town's presubmit slots for r, waiting
+// no longer than ctx has left, and returns the release to call once the gate
+// has run. ctx always carries the gate budget's deadline here.
+func acquirePresubmitSlot(ctx context.Context, r *doneRun) (func(), error) {
+	var timeout time.Duration
+	if deadline, ok := ctx.Deadline(); ok {
+		timeout = time.Until(deadline)
+		if timeout <= 0 {
+			return nil, context.DeadlineExceeded
+		}
+	}
+	h, err := slot.AcquirePresubmit(r.townRoot, r.sender, timeout, slot.PresubmitSize(r.townRoot))
+	if err != nil {
+		return nil, err
+	}
+	return func() { _ = h.Release() }, nil
 }
 
 // pushBranchForLanding pushes head to remote/<branch> under a lease on the

@@ -732,3 +732,38 @@ func TestOverseerReviewBacklogThresholds(t *testing.T) {
 		t.Errorf("parsed overseer section = %+v", o)
 	}
 }
+
+// TestPresubmitPool_Defaults: an unset presubmit_pool is two presubmits
+// townwide, and a value below one falls back to that default rather than
+// parking every gt done behind a zero-slot gate.
+func TestPresubmitPool_Defaults(t *testing.T) {
+	t.Parallel()
+
+	var nilDaemon *DaemonThresholds
+	if got := nilDaemon.PresubmitPoolV(); got != DefaultPresubmitPool {
+		t.Errorf("nil daemon: PresubmitPoolV() = %d, want %d", got, DefaultPresubmitPool)
+	}
+	if got := (&DaemonThresholds{}).PresubmitPoolV(); got != 2 {
+		t.Errorf("unset: PresubmitPoolV() = %d, want 2", got)
+	}
+	for _, v := range []int{0, -1} {
+		d := &DaemonThresholds{PresubmitPool: &v}
+		if got := d.PresubmitPoolV(); got != DefaultPresubmitPool {
+			t.Errorf("presubmit_pool=%d: PresubmitPoolV() = %d, want the default %d", v, got, DefaultPresubmitPool)
+		}
+	}
+}
+
+// TestPresubmitPool_Override: presubmit_pool in the daemon section sets the
+// pool size, and the key decodes from settings JSON as the bead names it.
+func TestPresubmitPool_Override(t *testing.T) {
+	t.Parallel()
+
+	var op OperationalConfig
+	if err := json.Unmarshal([]byte(`{"daemon": {"presubmit_pool": 3}}`), &op); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := op.GetDaemonConfig().PresubmitPoolV(); got != 3 {
+		t.Errorf("PresubmitPoolV() = %d, want 3", got)
+	}
+}

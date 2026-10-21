@@ -423,6 +423,11 @@ type DaemonThresholds struct {
 	// PressureMaxSessions is the maximum number of concurrent agent tmux
 	// sessions before new non-infrastructure spawns are deferred. Disabled by default (0 = unlimited).
 	PressureMaxSessions *int `json:"pressure_max_sessions,omitempty"`
+
+	// PresubmitPool is how many polecat presubmits (gt done's local gate) may
+	// run at once townwide. A presubmit past the cap waits for a free slot
+	// rather than loading the host beside the others (default 2).
+	PresubmitPool *int `json:"presubmit_pool,omitempty"`
 }
 
 // MailThresholds configures mail system thresholds.
