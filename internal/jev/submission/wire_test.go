@@ -90,6 +90,37 @@ func TestJevSubmissionGitRunsOnlyInItsOwnClone(t *testing.T) {
 	}
 }
 
+// gitEnv drops the variables that pick a repository and keeps the rest.
+func TestJevSubmissionGitEnvDropsRepositoryVariables(t *testing.T) {
+	t.Parallel()
+	got := gitEnv([]string{
+		"PATH=/usr/bin", "GIT_DIR=/elsewhere/.git", "GIT_WORK_TREE=/elsewhere",
+		"GIT_INDEX_FILE=/elsewhere/index", "GIT_SSH_COMMAND=ssh -i key", "HOME=/home/x",
+	})
+	want := []string{"PATH=/usr/bin", "GIT_SSH_COMMAND=ssh -i key", "HOME=/home/x"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("gitEnv = %v, want %v", got, want)
+	}
+}
+
+// runGit reads the repository -C names even when the caller carries a GIT_DIR
+// that points elsewhere, as a process started from a git hook does.
+func TestJevSubmissionRunGitIgnoresCallerGitDir(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := runGit(context.Background(), dir, "init", "--bare", "--quiet"); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "not-a-repo"))
+
+	out, err := runGit(context.Background(), dir, "rev-parse", "--is-bare-repository")
+	if err != nil {
+		t.Fatalf("runGit with a foreign GIT_DIR: %v", err)
+	}
+	if strings.TrimSpace(out) != "true" {
+		t.Errorf("rev-parse = %q, want it to read the clone at dir", out)
+	}
+}
+
 // A ref that starts with "-" is refused before git runs: a READY TO LAND
 // block must not be able to pass git an option.
 func TestJevSubmissionRefusesOptionRefs(t *testing.T) {

@@ -532,6 +532,8 @@ func TestJevSubmissionUnreadableSubmissionIsSkippedAndPassed(t *testing.T) {
 	r := newRig(t)
 	r.submissions.issues = []*beads.Issue{r.ready("gt-a", time.Minute)}
 	r.git.err = errors.New("bad object")
+	var warnings strings.Builder
+	r.pass.Warnings = &warnings
 
 	sum, err := r.pass.Run(context.Background())
 	if err != nil {
@@ -539,6 +541,9 @@ func TestJevSubmissionUnreadableSubmissionIsSkippedAndPassed(t *testing.T) {
 	}
 	if sum.Asked != 0 || sum.Skipped != 1 {
 		t.Fatalf("summary = %+v, want 0 asked and 1 skipped", sum)
+	}
+	if got := warnings.String(); !strings.Contains(got, "gt-a") || !strings.Contains(got, "bad object") {
+		t.Errorf("warnings = %q, want the skipped bead and the git error", got)
 	}
 	if _, err := os.Stat(r.pass.LogPath); !os.IsNotExist(err) {
 		t.Errorf("a skipped submission wrote a log: %v", err)

@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -122,6 +123,10 @@ type Pass struct {
 
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
+
+	// Warnings receives a line for each submission the pass skips, naming the
+	// cause. Nil drops them.
+	Warnings io.Writer
 }
 
 // Summary says what one pass did.
@@ -199,6 +204,9 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		line, err := p.ask(ctx, e, fetch)
 		switch {
 		case errors.Is(err, errUnreadable), errors.Is(err, jev.ErrBadResponse):
+			if p.Warnings != nil {
+				fmt.Fprintf(p.Warnings, "jev submission: skipping %s at %s: %v\n", e.Issue.ID, e.Work.Head, err)
+			}
 			sum.Skipped++
 		case err != nil:
 			return sum, err
@@ -246,7 +254,8 @@ func after(cur battery.Cursor, seen time.Time, bead string) bool {
 
 // errUnreadable means a submission's commits or diff could not be read, so
 // the pass has no state to ask about. The read is not retried: one such
-// submission must not hold up the ones behind it.
+// submission must not hold up the ones behind it. The returned error wraps it
+// with the cause, which the pass logs.
 var errUnreadable = errors.New("submission commits or diff unreadable")
 
 // ask builds the state for one entry, asks the battery and returns the line.
@@ -289,24 +298,25 @@ func (p *Pass) ask(ctx context.Context, e Entry, fetch func(context.Context) err
 }
 
 // readClone reads a submission's commits and stat from the bare clone. Its
-// errors are errUnreadable, except a ctx end, which is ctx's error.
+// errors are errUnreadable wrapping the cause, except a ctx end, which is
+// ctx's error.
 func (p *Pass) readClone(ctx context.Context, w land.Work) ([]string, string, error) {
 	subjects, err := p.Git.CommitSubjects(ctx, w.Target, w.Head, maxSubjects)
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, "", cerr
 		}
-		return nil, "", errUnreadable
+		return nil, "", fmt.Errorf("%w: reading the commits: %w", errUnreadable, err)
 	}
 	if len(subjects) == 0 {
-		return nil, "", errUnreadable
+		return nil, "", fmt.Errorf("%w: no commits on %s..%s", errUnreadable, w.Target, w.Head)
 	}
 	out, err := p.Git.Numstat(ctx, w.Target, w.Head)
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return nil, "", cerr
 		}
-		return nil, "", errUnreadable
+		return nil, "", fmt.Errorf("%w: reading the diff: %w", errUnreadable, err)
 	}
 	return subjects, out, nil
 }
