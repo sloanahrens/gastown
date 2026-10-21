@@ -24,6 +24,7 @@ type Hub struct {
 	slung    map[string]time.Time // bead -> when a dispatch line named it
 	gating   map[string]bool      // beads the landing worker is gating right now
 	polecats []Polecat
+	jevGood  map[string]time.Time // battery -> when its line last read good
 
 	// cloudAt is the last cloud read and cloudMissing whether that machine had
 	// no cloud patrol, which is what re-reads one at the slow interval only.
@@ -58,12 +59,13 @@ type Sub struct {
 func NewHub(cfg Config) *Hub {
 	cfg.defaults()
 	return &Hub{
-		cfg:    cfg,
-		subs:   map[*Sub]struct{}{},
-		slung:  map[string]time.Time{},
-		gating: map[string]bool{},
-		wake:   make(chan struct{}),
-		alerts: NewAlerter(cfg.Now),
+		cfg:     cfg,
+		subs:    map[*Sub]struct{}{},
+		slung:   map[string]time.Time{},
+		gating:  map[string]bool{},
+		jevGood: map[string]time.Time{},
+		wake:    make(chan struct{}),
+		alerts:  NewAlerter(cfg.Now),
 	}
 }
 
@@ -799,33 +801,43 @@ func (h *Hub) pollJevScorecard() {
 		h.publishLocked()
 		return
 	}
-	keepLastGoodJevBatteries(h.state.JevScorecard, sc)
+	keepLastGoodJevBatteries(h.state.JevScorecard, sc, h.jevGood, h.cfg.Now())
 	h.state.JevScorecard = sc
 	h.readOKLocked(SourceJevScorecard, h.cfg.JevScorecardEvery)
 	h.publishLocked()
 }
 
+// jevKeptMaxAge is how old a kept battery line may be, counted from the last
+// good read of its battery, before the page drops it to the name alone. An
+// hour is four default polls, so a verdict nobody has re-read that long is no
+// longer the battery's current one.
+const jevKeptMaxAge = time.Hour
+
 // keepLastGoodJevBatteries puts prev's line back for every battery that sc
-// reports failed, so one battery's failed read does not blank its line. A
-// battery prev never read stays a placeholder. sc is retallied.
-func keepLastGoodJevBatteries(prev, sc *JevScorecard) {
-	if prev == nil {
-		return
-	}
+// reports failed, so one battery's failed read does not blank its line, unless
+// that line is older than jevKeptMaxAge at now. A battery prev never read stays
+// a placeholder. goodAt records each battery's last good read and is updated
+// from sc. sc is retallied.
+func keepLastGoodJevBatteries(prev, sc *JevScorecard, goodAt map[string]time.Time, now time.Time) {
 	last := map[string]JevBattery{}
-	for _, b := range prev.Batteries {
-		if !b.Failed || b.Kept {
-			last[b.Name] = b
+	if prev != nil {
+		for _, b := range prev.Batteries {
+			if !b.Failed || b.Kept {
+				last[b.Name] = b
+			}
 		}
 	}
 	for i, b := range sc.Batteries {
 		if !b.Failed {
+			goodAt[b.Name] = now
 			continue
 		}
-		if old, ok := last[b.Name]; ok {
-			old.Failed, old.Kept = true, true
-			sc.Batteries[i] = old
+		old, ok := last[b.Name]
+		if !ok || now.Sub(goodAt[b.Name]) > jevKeptMaxAge {
+			continue
 		}
+		old.Failed, old.Kept = true, true
+		sc.Batteries[i] = old
 	}
 	sc.Tally()
 }
