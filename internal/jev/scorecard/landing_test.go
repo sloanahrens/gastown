@@ -164,10 +164,12 @@ func TestLandingLabelFailsWhenTheNotesCannotBeRead(t *testing.T) {
 
 // TestLandingLabelLeavesAMissingBeadUnlabeled drives the real notes store over
 // a rig that has a beads directory, with bd stubbed on PATH to answer not
-// found, so the bead's absence comes through the store rather than a fake. It
-// sets PATH, so it does not run in parallel.
+// found, so the bead's absence comes through the store rather than a fake.
+//
+//testpolicy:allow parallel — t.Setenv puts the bd stub first on PATH, and a parallel test would share that PATH
 func TestLandingLabelLeavesAMissingBeadUnlabeled(t *testing.T) {
 	if runtime.GOOS == "windows" {
+		//testpolicy:allow no-skip — the bd stub is a POSIX shell script, which Windows cannot run
 		t.Skip("POSIX bd stub")
 	}
 	town := t.TempDir()
@@ -176,9 +178,11 @@ func TestLandingLabelLeavesAMissingBeadUnlabeled(t *testing.T) {
 	}
 	binDir := t.TempDir()
 	// Exit 20 is bd's own not-found status; beads reads it as ErrNotFound.
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nexit 20\n"), 0o755); err != nil {
+	//testpolicy:allow no-exec-files — the test is the process boundary: beads execs bd, and this stub is the bd it finds on PATH
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nexit 20\n"), 0o755); err != nil { //nolint:gosec // G306: the bd stub must be executable
 		t.Fatal(err)
 	}
+	//testpolicy:allow no-env — the stub reaches beads only through PATH, which is process-wide; the test restores it at cleanup
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
 	a := &landingAdapter{notes: &townNotes{town: town, stores: map[string]*beads.Beads{}}}
