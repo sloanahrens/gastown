@@ -105,8 +105,43 @@ type landingAdapter struct {
 	log   string
 	notes landingNotes
 
-	mu       sync.Mutex
-	findings map[string]bool
+	// findings gathers the finding beads Label sees, for Context.
+	findings findingTally
+}
+
+// findingTally is the finding beads the FAIL lines named, each once. Label adds
+// to it as it walks the items and Context drains it, so one Build reports the
+// findings of its own labeling and no earlier one.
+type findingTally struct {
+	mu  sync.Mutex
+	ids map[string]bool
+}
+
+func (t *findingTally) add(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.ids == nil {
+		t.ids = map[string]bool{}
+	}
+	for _, id := range ids {
+		t.ids[id] = true
+	}
+}
+
+// drain returns the sorted ids and empties the tally.
+func (t *findingTally) drain() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	ids := make([]string, 0, len(t.ids))
+	for id := range t.ids {
+		ids = append(ids, id)
+	}
+	t.ids = nil
+	slices.Sort(ids)
+	return ids
 }
 
 func (a *landingAdapter) Battery() string { return LandingBattery }
@@ -147,14 +182,18 @@ func (a *landingAdapter) Parse(raw []byte) (Item, error) {
 // needs_review_now and risk false: the overseer read the diff and let it stand.
 // A FAIL labels both true: the diff should have been read before the wake, and
 // the landing was at least level 2 risk. A WAIVED or AUDITED line leaves the
-// head without a PASS or FAIL, and no line yet is unlabeled. A FAIL's finding
-// beads are collected for Context.
+// head without a PASS or FAIL, and no line yet is unlabeled, and so is a landing
+// whose bead no longer exists. Any other failure to read the notes fails the
+// report. A FAIL's finding beads are collected for Context.
 func (a *landingAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	rig := item.Refs[refRig]
 	if rig == "" {
 		rig = landing.RigName
 	}
 	notes, err := a.notes.Notes(rig, item.ID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return Labeling{}, nil
+	}
 	if err != nil {
 		return Labeling{}, fmt.Errorf("reading %s's notes: %w", item.ID, err)
 	}
@@ -169,7 +208,7 @@ func (a *landingAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	rule := ruleLandingReviewPass
 	if failed {
 		rule = ruleLandingReviewFail
-		a.count(land.OverseerReviewFindings(notes, item.Refs[refHead]))
+		a.findings.add(land.OverseerReviewFindings(notes, item.Refs[refHead]))
 	}
 	return Labeling{
 		Labeled: true,
@@ -181,34 +220,12 @@ func (a *landingAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	}, nil
 }
 
-// count adds the finding beads a FAIL line named to the report's context.
-func (a *landingAdapter) count(ids []string) {
-	if len(ids) == 0 {
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.findings == nil {
-		a.findings = map[string]bool{}
-	}
-	for _, id := range ids {
-		a.findings[id] = true
-	}
-}
-
 // Context reports the finding beads the FAIL lines named, each once, and
 // clears the tally so the next build starts fresh.
 func (a *landingAdapter) Context() []string {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	ids := make([]string, 0, len(a.findings))
-	for id := range a.findings {
-		ids = append(ids, id)
-	}
-	a.findings = nil
+	ids := a.findings.drain()
 	if len(ids) == 0 {
 		return nil
 	}
-	slices.Sort(ids)
 	return []string{fmt.Sprintf("FAIL review notes named %d finding bead(s): %s", len(ids), strings.Join(ids, ", "))}
 }
