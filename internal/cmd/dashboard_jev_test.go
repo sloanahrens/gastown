@@ -278,6 +278,29 @@ func TestDashboardJevScorecardRunsOncePerBattery(t *testing.T) {
 	}
 }
 
+// The reader keeps each question's figures so the panel's chip can say what the
+// scorecard scored, and a figure the report leaves null stays absent.
+func TestDashboardJevScorecardKeepsTheQuestionsFigures(t *testing.T) {
+	t.Parallel()
+
+	report := `{"battery":"finding","items":9,"labeled":7,"questions":[{"id":"fix_worthy","kind":"noul","logged":9,"labeled":7,"base_rate":0.25,"precision":0.625,"verdict":"earning"},{"id":"noise","kind":"noul","logged":9,"labeled":2,"base_rate":null,"precision":null,"verdict":"not-yet"}]}`
+	read := dashboardJevScorecardWith(strings.Fields("gt jev scorecard --json"), []string{"finding"}, time.Minute, fakeJevScorecardRun(map[string]string{"finding": report}, "", nil))
+	sc := read()
+	if sc == nil {
+		t.Fatal("the report read as a failure")
+	}
+	qs := sc.Batteries[0].Questions
+	if len(qs) != 2 {
+		t.Fatalf("questions = %+v, want two", qs)
+	}
+	if q := qs[0]; q.Labeled != 7 || q.BaseRate == nil || *q.BaseRate != 0.25 || q.Precision == nil || *q.Precision != 0.625 {
+		t.Errorf("fix_worthy = %+v, want the report's figures", q)
+	}
+	if q := qs[1]; q.Labeled != 2 || q.BaseRate != nil || q.Precision != nil {
+		t.Errorf("noise = %+v, want a null base rate and precision left absent", q)
+	}
+}
+
 // A run that fails, prints text, or reports another battery drops only its own
 // line: the other battery still draws and the lost one is named. The spend
 // reader is not involved.
