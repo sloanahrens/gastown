@@ -24,6 +24,7 @@ func (g *slotProbeGate) Run(_ context.Context, _ string) land.GateResult {
 // gt done's local gate runs while it holds a presubmit slot, and the slot is
 // released once the gate has finished.
 func TestRunDoneLocalGateHoldsPresubmitSlot(t *testing.T) {
+	t.Parallel()
 	h := newSubmitHarness(t)
 	h.r.sender = "gastown/polecats/refuge"
 	probe := &slotProbeGate{townRoot: h.townRoot}
@@ -54,6 +55,7 @@ func TestRunDoneLocalGateHoldsPresubmitSlot(t *testing.T) {
 // A presubmit wait is spent from the gate budget: once that budget is gone
 // the gate does not start and no slot is taken.
 func TestAcquirePresubmitSlotRefusesSpentBudget(t *testing.T) {
+	t.Parallel()
 	h := newSubmitHarness(t)
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()

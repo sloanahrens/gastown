@@ -10,6 +10,7 @@ import (
 // A third presubmit waits while two are held, and is granted the slot the
 // moment one of the holders releases it.
 func TestAcquirePresubmitThirdWaitsForRelease(t *testing.T) {
+	t.Parallel()
 	tg := newTestGate(t)
 	town := t.TempDir()
 	const role = "gastown/polecats/alpha"
@@ -56,6 +57,7 @@ func TestAcquirePresubmitThirdWaitsForRelease(t *testing.T) {
 
 // A wait past PresubmitWaitLogAfter is logged, and only once.
 func TestAcquirePresubmitLogsLongWaitOnce(t *testing.T) {
+	t.Parallel()
 	tg := newTestGate(t)
 	town := t.TempDir()
 
@@ -89,6 +91,7 @@ func TestAcquirePresubmitLogsLongWaitOnce(t *testing.T) {
 // A wait counts against the caller's timeout: a held pool times out at the
 // cap the caller gave, not after some other default.
 func TestAcquirePresubmitTimesOutAtCap(t *testing.T) {
+	t.Parallel()
 	tg := newTestGate(t)
 	town := t.TempDir()
 
@@ -118,6 +121,7 @@ func TestAcquirePresubmitTimesOutAtCap(t *testing.T) {
 // container-gate acquire is not blocked by presubmits holding every presubmit
 // slot.
 func TestPresubmitDoesNotTakeContainerGateSlot(t *testing.T) {
+	t.Parallel()
 	tg := newTestGate(t)
 	town := t.TempDir()
 
@@ -141,6 +145,7 @@ func TestPresubmitDoesNotTakeContainerGateSlot(t *testing.T) {
 
 // StatusPresubmit names each held slot's holder and frees the slot on release.
 func TestStatusPresubmitReportsHolders(t *testing.T) {
+	t.Parallel()
 	tg := newTestGate(t)
 	town := t.TempDir()
 	const role = "gastown/polecats/alpha"
