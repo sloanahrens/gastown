@@ -939,13 +939,24 @@ func TestPoolDeadHookedSessions_SupervisorFreezeHoldsSeatPastThirtyMinutes(t *te
 	town := t.TempDir()
 	writeTestRigsConfig(t, town, "gastown")
 	writeTownPolecatDir(t, town, "gastown", "mariner")
+	frozenAt := time.Now().UTC().Add(-time.Hour)
+	// The record the supervisor writes when the budget runs out
+	// (supervisor.go restart path), not the Frozen flag alone.
 	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "mariner"}, town,
 		intent.Record{
-			Frozen:   true,
-			Reason:   "restart budget exhausted",
-			PausedBy: "supervisor",
-			PausedAt: time.Now().UTC().Add(-time.Hour),
+			Frozen:     true,
+			Restarts:   []time.Time{frozenAt, frozenAt, frozenAt},
+			Actor:      "supervisor",
+			UpdatedAt:  frozenAt,
+			Reason:     "restart budget exhausted: 3 restarts in 1h0m0s (last: crashed)",
+			PausedBy:   "supervisor",
+			PausedAt:   frozenAt,
+			LastAction: &intent.Action{Verb: "restart", Reason: "crashed", Actor: "supervisor", Outcome: "refused", At: frozenAt},
 		})
+	// Control: an operator park of the same age is released, so the freeze
+	// flag, not the age or the pause stamp, is what spares the first seat.
+	writeTownPolecatDir(t, town, "gastown", "flint")
+	parkSeatAgo(t, town, "gastown", "flint", time.Hour)
 	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 1}}}
 	hooked := func(_, _ string) (poolSeatState, error) {
 		return poolSeatState{
@@ -958,10 +969,14 @@ func TestPoolDeadHookedSessions_SupervisorFreezeHoldsSeatPastThirtyMinutes(t *te
 	if err != nil {
 		t.Fatalf("poolSeatSessionsWith: %v", err)
 	}
+	stale := 0
 	for _, s := range sessions {
 		if s.parkedStale {
-			t.Fatalf("supervisor-frozen seat released as parked-stale: %+v", s)
+			stale++
 		}
+	}
+	if stale != 1 {
+		t.Fatalf("parked-stale seats = %d, want 1: only the operator park is released (%+v)", stale, sessions)
 	}
 	if n := poolHeldCount(sessions); n != 1 {
 		t.Fatalf("poolHeldCount = %d, want 1: a frozen seat still holds its seat (%+v)", n, sessions)
