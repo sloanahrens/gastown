@@ -577,4 +577,13 @@ func TestStaleScorecardDiscardsLinesAboutNonWorkBeads(t *testing.T) {
 	if rep.Items != 1 || rep.LinesSkipped != 2 {
 		t.Fatalf("items %d skipped %d, want 1 and 2", rep.Items, rep.LinesSkipped)
 	}
+	// The skipped lines are not items: only the work bead's line is reported.
+	if len(rep.Lines) != 1 || rep.Lines[0].ID != "gastown/gt-g4@"+ask.Format(time.RFC3339Nano) {
+		t.Errorf("lines %+v, want only the work bead's line", rep.Lines)
+	}
+	// All three lines carry the same answer, so a skipped line reaching a
+	// question would show up as extra logged lines.
+	if got := question(t, rep, stale.QObsolete).Logged; got != 1 {
+		t.Errorf("obsolete logged %d, want 1: skipped lines are not scored", got)
+	}
 }
