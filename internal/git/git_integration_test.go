@@ -3268,7 +3268,7 @@ func TestIntegrationRuntimeArtifactPathspecsUnbornHeadKeepsOutput(t *testing.T) 
 // A seat-authored merge M whose second parent S is another author's commit: the
 // first-parent listing shows only M and its first parent P, the full-range one
 // also shows S with its own author.
-func TestFullRangeCommitSummariesListsAMergedInForeignCommit(t *testing.T) {
+func TestIntegrationFullRangeCommitSummariesListsAMergedInForeignCommit(t *testing.T) {
 	t.Parallel()
 	dir := initTestRepo(t)
 	g := NewGit(dir)
