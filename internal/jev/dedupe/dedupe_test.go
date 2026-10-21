@@ -71,11 +71,12 @@ func choices(choice string, confidence float64) *jev.Answers {
 	}
 }
 
-// battery answers the fixed questions alone: what a finding with no candidate
-// draws.
+// batteryOnly answers the questions a finding with no candidate draws: the
+// fixed ones, without the duplicate Choice or any_duplicate.
 func batteryOnly() *jev.Answers {
 	a := choices("", 0)
 	delete(a.Choice, QDuplicate)
+	delete(a.Noul, QAnyDuplicate)
 	return a
 }
 
@@ -375,6 +376,15 @@ func TestJevDedupeCandidateFailuresLogNone(t *testing.T) {
 			wantOutcome: OutcomeAskFailed,
 			hits:        hits,
 			answer:      fakeAnswer{err: &jev.StatusError{Status: 500}},
+			wantAsked:   1,
+			wantCand:    "none",
+			wantOffers:  []any{"gt-old"},
+		},
+		{
+			name:        "Jev returns no answers and no error",
+			wantOutcome: OutcomeAskFailed,
+			hits:        hits,
+			answer:      fakeAnswer{},
 			wantAsked:   1,
 			wantCand:    "none",
 			wantOffers:  []any{"gt-old"},
@@ -790,8 +800,9 @@ func TestJevDedupeOneAskCarriesTheBattery(t *testing.T) {
 	}
 }
 
-// A finding with no candidate is still asked the four Nouls and the Score, and
-// its line carries them.
+// A finding with no candidate is still asked the three fixed Nouls and the
+// Score, and its line carries them. any_duplicate has no candidate to judge,
+// so it is not asked.
 func TestJevDedupeNoCandidatesLineCarriesTheBattery(t *testing.T) {
 	t.Parallel()
 	all := []*beads.Issue{
@@ -808,16 +819,18 @@ func TestJevDedupeNoCandidatesLineCarriesTheBattery(t *testing.T) {
 	if _, ok := h.asker.calls[0].qs[QDuplicate]; ok {
 		t.Error("the duplicate Choice was asked with no candidate offered")
 	}
+	if _, ok := h.asker.calls[0].qs[QAnyDuplicate]; ok {
+		t.Error("any_duplicate was asked with no candidate offered")
+	}
 	lines := h.lines(t)
 	if len(lines) != 1 || lines[0]["outcome"] != string(OutcomeNoCandidates) {
 		t.Fatalf("log = %v, want one no_candidates line", lines)
 	}
 	want := map[string]any{
-		"any_duplicate": map[string]any{"noul": 0.9},
-		"fix_worthy":    map[string]any{"noul": 0.8},
-		"report_only":   map[string]any{"noul": 0.1},
-		"test_only":     map[string]any{"noul": 0.2},
-		"severity":      map[string]any{"score": 2.0, "confidence": 0.7},
+		"fix_worthy":  map[string]any{"noul": 0.8},
+		"report_only": map[string]any{"noul": 0.1},
+		"test_only":   map[string]any{"noul": 0.2},
+		"severity":    map[string]any{"score": 2.0, "confidence": 0.7},
 	}
 	if !reflect.DeepEqual(lines[0]["answers"], want) {
 		t.Errorf("answers = %v, want %v", lines[0]["answers"], want)

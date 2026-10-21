@@ -13,7 +13,8 @@ const (
 	// asked only when the search offered a candidate.
 	QDuplicate = "duplicate"
 	// QAnyDuplicate is the noul companion to the Choice: whether any offered
-	// candidate is a duplicate. It is asked even when none was offered.
+	// candidate is a duplicate. It is asked only when the search offered a
+	// candidate, because with none the question has nothing to judge.
 	QAnyDuplicate = "any_duplicate"
 	// QFixWorthy is whether one worker's fix bead would land the defect.
 	QFixWorthy = "fix_worthy"
@@ -53,9 +54,10 @@ var severityLevels = []string{
 	"breaks town machinery: the daemon, landing, the guards or dolt",
 }
 
-// Questions returns the battery asked about every finding: the four Nouls and
-// the severity Score. The duplicate Choice is separate, because its options
-// are the candidates a search offered.
+// Questions returns the full battery: the four Nouls and the severity Score.
+// buildQuestions drops any_duplicate when no candidate was offered. The
+// duplicate Choice is separate, because its options are the candidates a
+// search offered.
 func Questions() map[string]jev.Question {
 	return map[string]jev.Question{
 		QAnyDuplicate: {
