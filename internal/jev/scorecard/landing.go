@@ -18,6 +18,11 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
+// errNoRigBeads is a rig whose beads directory does not exist. It wraps
+// beads.ErrNotFound, so Show reads it as no bead to find, and Label tells it
+// from a bead missing in a rig that has a directory.
+var errNoRigBeads = fmt.Errorf("no beads directory: %w", beads.ErrNotFound)
+
 // LandingBattery is the landing adapter's name: the --battery value.
 const LandingBattery = "landing"
 
@@ -89,7 +94,7 @@ func (t *townNotes) store(rig string) (*beads.Beads, error) {
 	}
 	dir := doltserver.FindRigBeadsDir(t.town, rig)
 	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
-		return nil, fmt.Errorf("no beads directory for rig %s: %w", rig, beads.ErrNotFound)
+		return nil, fmt.Errorf("rig %s: %w", rig, errNoRigBeads)
 	} else if err != nil {
 		return nil, fmt.Errorf("reading the beads directory for rig %s: %w", rig, err)
 	}
@@ -183,15 +188,16 @@ func (a *landingAdapter) Parse(raw []byte) (Item, error) {
 // A FAIL labels both true: the diff should have been read before the wake, and
 // the landing was at least level 2 risk. A WAIVED or AUDITED line leaves the
 // head without a PASS or FAIL, and no line yet is unlabeled, and so is a landing
-// whose bead no longer exists. Any other failure to read the notes fails the
-// report. A FAIL's finding beads are collected for Context.
+// whose bead no longer exists in its rig. A rig with no beads directory fails
+// the report, like any other failure to read the notes: it would otherwise
+// leave every landing of that rig unlabeled with a clean exit. A FAIL's finding beads are collected for Context.
 func (a *landingAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	rig := item.Refs[refRig]
 	if rig == "" {
 		rig = landing.RigName
 	}
 	notes, err := a.notes.Notes(rig, item.ID)
-	if errors.Is(err, beads.ErrNotFound) {
+	if errors.Is(err, beads.ErrNotFound) && !errors.Is(err, errNoRigBeads) {
 		return Labeling{}, nil
 	}
 	if err != nil {
