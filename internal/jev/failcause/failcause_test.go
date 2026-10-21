@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -179,21 +181,44 @@ func TestJudgeBadReplyLeavesNoLine(t *testing.T) {
 	}
 }
 
-// A reached spend cap asks nothing and writes nothing.
+// A reached spend cap asks nothing, writes nothing, and says so, so the
+// shadow can tell a battery stopped by spend from a verdict with no test in its
+// excerpt.
 func TestJudgeCapReachedAsksNothing(t *testing.T) {
 	t.Parallel()
 	f := &fakeJev{body: jevReply}
 	p := newPass(t, f)
 	p.Allows = func() (bool, error) { return false, nil }
 
-	if err := p.Judge(context.Background(), Landing{Bead: "gt-abc", Rig: "gastown", Tail: fixtureTail(t)}); err != nil {
-		t.Fatalf("Judge: %v", err)
+	err := p.Judge(context.Background(), Landing{Bead: "gt-abc", Rig: "gastown", Tail: fixtureTail(t)})
+	if !errors.Is(err, ErrCapReached) {
+		t.Fatalf("Judge = %v, want ErrCapReached", err)
 	}
 	if len(f.requests) != 0 {
 		t.Errorf("made %d Jev calls with the cap reached, want none", len(f.requests))
 	}
 	if _, statErr := os.Stat(p.LogPath); !errors.Is(statErr, fs.ErrNotExist) {
 		t.Errorf("the log exists with the cap reached (stat err %v), want no line", statErr)
+	}
+}
+
+// A spend ledger that cannot be read stops the judging with its error, and no
+// line is written for the test that was never judged.
+func TestJudgeSpendReadFailureIsAnError(t *testing.T) {
+	t.Parallel()
+	f := &fakeJev{body: jevReply}
+	p := newPass(t, f)
+	p.Allows = func() (bool, error) { return false, errors.New("the ledger is locked") }
+
+	err := p.Judge(context.Background(), Landing{Bead: "gt-abc", Rig: "gastown", Tail: fixtureTail(t)})
+	if !errors.Is(err, ErrSpendUnreadable) || !strings.Contains(err.Error(), "the ledger is locked") {
+		t.Fatalf("Judge = %v, want ErrSpendUnreadable carrying the ledger's failure", err)
+	}
+	if errors.Is(err, ErrCapReached) {
+		t.Error("a spend ledger failure reads as the cap being reached, want the two told apart")
+	}
+	if len(f.requests) != 0 {
+		t.Errorf("made %d Jev calls on an unreadable ledger, want none", len(f.requests))
 	}
 }
 
@@ -360,6 +385,211 @@ func TestShadowDefaultsToBackground(t *testing.T) {
 	pending[0]()
 	if len(f.requests) != 1 {
 		t.Errorf("the queued judgement made %d calls, want 1", len(f.requests))
+	}
+}
+
+// The shadow says which stop ended the judging, in its own words for each, so
+// the two read apart in the daemon log. Neither changes the verdict.
+func TestShadowSaysWhyTheJudgingStopped(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		allows func() (bool, error)
+		want   []string
+	}{
+		"cap reached": {func() (bool, error) { return false, nil },
+			[]string{"the day's Jev spend cap was reached", "remaining failing tests were not judged"}},
+		"ledger error": {func() (bool, error) { return false, errors.New("the ledger is locked") },
+			[]string{"the day's Jev spend could not be read", "no failing test was judged", "the ledger is locked"}},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			red := land.CandidateResult{State: land.CandidateFailed, Tail: fixtureTail(t)}
+			f := &fakeJev{body: jevReply}
+			p := newPass(t, f)
+			p.Allows = tc.allows
+			var logged []string
+			s := Shadow{
+				Gate:  &fakeGate{res: red},
+				Pass:  p,
+				Rig:   "gastown",
+				Async: func(call func()) { call() },
+				Logf:  func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) },
+			}
+
+			got := s.Run(context.Background(), nil, t.TempDir(), land.Work{BeadID: "gt-abc"}, "abc123")
+
+			if !reflect.DeepEqual(got, red) {
+				t.Errorf("Run returned %+v, want the gate's %+v", got, red)
+			}
+			if len(logged) != 1 {
+				t.Fatalf("logged %d lines, want the one stop reported: %v", len(logged), logged)
+			}
+			for _, want := range append(tc.want, "gt-abc") {
+				if !strings.Contains(logged[0], want) {
+					t.Errorf("logged %q, want %q in it", logged[0], want)
+				}
+			}
+		})
+	}
+}
+
+// A judgement that fails is reported through Logf, naming the bead and the
+// battery, and the verdict still comes back untouched.
+func TestShadowReportsAFailedJudgement(t *testing.T) {
+	t.Parallel()
+	red := land.CandidateResult{State: land.CandidateFailed, Tail: fixtureTail(t)}
+	var logged []string
+	s := Shadow{
+		Gate:  &fakeGate{res: red},
+		Pass:  newPass(t, &fakeJev{status: http.StatusServiceUnavailable, body: `{"error":"down"}`}),
+		Rig:   "gastown",
+		Async: func(call func()) { call() },
+		Logf:  func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) },
+	}
+
+	got := s.Run(context.Background(), nil, t.TempDir(), land.Work{BeadID: "gt-abc"}, "abc123")
+
+	if !reflect.DeepEqual(got, red) {
+		t.Errorf("Run returned %+v, want the gate's %+v", got, red)
+	}
+	if len(logged) != 1 {
+		t.Fatalf("logged %d lines, want the one failure reported: %v", len(logged), logged)
+	}
+	for _, want := range []string{"jev_failcause:", "gt-abc", "not logged"} {
+		if !strings.Contains(logged[0], want) {
+			t.Errorf("logged %q, want %q in it", logged[0], want)
+		}
+	}
+}
+
+// A shadow with no Logf stays quiet rather than panicking on a failed
+// judgement.
+func TestShadowWithoutLogfReportsNothing(t *testing.T) {
+	t.Parallel()
+	red := land.CandidateResult{State: land.CandidateFailed, Tail: fixtureTail(t)}
+	s := Shadow{
+		Gate:  &fakeGate{res: red},
+		Pass:  newPass(t, &fakeJev{status: http.StatusServiceUnavailable, body: `{"error":"down"}`}),
+		Rig:   "gastown",
+		Async: func(call func()) { call() },
+	}
+
+	if got := s.Run(context.Background(), nil, t.TempDir(), land.Work{BeadID: "gt-abc"}, "abc123"); !reflect.DeepEqual(got, red) {
+		t.Errorf("Run returned %+v, want the gate's %+v", got, red)
+	}
+}
+
+// oneAtATime is an Asker that holds every call until the test releases it and
+// records any moment two calls are in flight together. A call answers both
+// questions, except the ones bad names, which answer nothing usable.
+type oneAtATime struct {
+	started chan struct{}
+	release chan struct{}
+
+	mu       sync.Mutex
+	inFlight int
+	overlap  bool
+	done     int
+	calls    int
+	bad      map[int]bool
+}
+
+func (a *oneAtATime) Ask(context.Context, any, map[string]jev.Question) (*jev.Answers, error) {
+	a.mu.Lock()
+	a.inFlight++
+	if a.inFlight > 1 {
+		a.overlap = true
+	}
+	n := a.calls
+	a.calls++
+	a.mu.Unlock()
+
+	a.started <- struct{}{}
+	<-a.release
+
+	a.mu.Lock()
+	a.inFlight--
+	a.done++
+	a.mu.Unlock()
+
+	got := &jev.Answers{
+		Model:  "jev-1.13.0",
+		Noul:   map[string]float64{QWillRecur: 0.8},
+		Choice: map[string]jev.ChoiceAnswer{QCause: {Choice: "test_bug", Probabilities: map[string]float64{"test_bug": 1}}},
+	}
+	if a.bad[n] {
+		got.Noul = nil
+	}
+	return got, nil
+}
+
+func (a *oneAtATime) finished() (done int, overlap bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.done, a.overlap
+}
+
+// One judgement asks Jev at a time: a red verdict that arrives while another is
+// being judged waits for the slot instead of asking beside it, and is judged
+// once the slot frees rather than dropped.
+func TestShadowJudgesOneVerdictAtATime(t *testing.T) {
+	t.Parallel()
+	// The first judgement is held in Jev while the test hears for the second,
+	// so a second ask arriving inside that window is the overlap this test is
+	// about. The window only has to outlast a goroutine that is already ready.
+	quiet, quietCancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer quietCancel()
+	// The waits for what a serialized battery must do are generous, so a
+	// regression fails as a message rather than as a package timeout.
+	patience, patienceCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer patienceCancel()
+
+	// The second judgement answers nothing usable, so its error report is the
+	// signal that it ran to the end: nothing this test started is still going
+	// when it returns.
+	asker := &oneAtATime{started: make(chan struct{}), release: make(chan struct{}), bad: map[int]bool{1: true}}
+	p := newPass(t, &fakeJev{body: jevReply})
+	p.Asker = asker
+	reported := make(chan struct{}, 1)
+	s := Shadow{
+		Gate: &fakeGate{res: land.CandidateResult{State: land.CandidateFailed, Tail: fixtureTail(t)}},
+		Pass: p,
+		Rig:  "gastown",
+		Logf: func(string, ...any) { reported <- struct{}{} },
+	}
+
+	s.Run(context.Background(), nil, t.TempDir(), land.Work{BeadID: "gt-one"}, "abc123")
+	s.Run(context.Background(), nil, t.TempDir(), land.Work{BeadID: "gt-two"}, "abc123")
+
+	select {
+	case <-asker.started: // the first judgement is in Jev, holding the slot
+	case <-patience.Done():
+		t.Fatal("neither judgement reached Jev")
+	}
+	select {
+	case <-asker.started:
+		t.Fatal("a second judgement asked Jev while the first was still asking, want one at a time")
+	case <-quiet.Done(): // expected: the second waits for the slot
+	}
+	asker.release <- struct{}{}
+	select {
+	case <-asker.started: // the second judgement begins once the first is done
+	case <-patience.Done():
+		t.Fatal("the second judgement never ran: the wait must queue it, not drop it")
+	}
+	asker.release <- struct{}{}
+	select {
+	case <-reported:
+	case <-patience.Done():
+		t.Fatal("the second judgement never finished")
+	}
+
+	if _, overlap := asker.finished(); overlap {
+		t.Error("two judgements asked Jev at once, want one at a time")
+	}
+	if lines := readLines(t, p.LogPath); len(lines) != 1 {
+		t.Errorf("the log holds %d lines, want the one line the answering judgement wrote", len(lines))
 	}
 }
 
