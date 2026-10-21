@@ -372,11 +372,11 @@ func (v Verdict) UnshapedReason() string {
 	}
 	if len(fields) == 0 {
 		if v.Field == "" {
-			return "unshaped"
+			return SkipUnshaped
 		}
 		fields = append(fields, v.Field)
 	}
-	return "unshaped: " + strings.Join(fields, ", ")
+	return SkipUnshaped + ": " + strings.Join(fields, ", ")
 }
 
 // Line renders the one-line report for a bead: "<id>: spec lint ok",

@@ -56,9 +56,9 @@ func OpenChildHold(s Spec) string {
 	}
 	var reason string
 	if len(open) == 1 {
-		reason = "container: open child " + named[0]
+		reason = SkipContainer + " open child " + named[0]
 	} else {
-		reason = fmt.Sprintf("container: %d open children: %s", len(open), strings.Join(named, ", "))
+		reason = fmt.Sprintf("%s %d open children: %s", SkipContainer, len(open), strings.Join(named, ", "))
 	}
 	if more > 0 {
 		reason += fmt.Sprintf(" (+%d more)", more)

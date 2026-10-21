@@ -72,7 +72,7 @@ func ParseFormulaVars(body string) ([]string, error) {
 		key, value, ok := strings.Cut(line, "=")
 		key = strings.TrimSpace(key)
 		if !ok || key == "" {
-			return nil, fmt.Errorf("bad formula vars: %s", line)
+			return nil, fmt.Errorf("%s: %s", SkipBadFormulaVars, line)
 		}
 		if _, seen := values[key]; !seen {
 			order = append(order, key)
@@ -98,10 +98,10 @@ func FormulaRunOf(s Spec) (FormulaRun, error) {
 		return FormulaRun{}, nil
 	}
 	if len(names) > 1 {
-		return FormulaRun{}, fmt.Errorf("conflicting formula labels: %s", strings.Join(names, ", "))
+		return FormulaRun{}, fmt.Errorf("%s: %s", SkipConflictingFormulaLabels, strings.Join(names, ", "))
 	}
 	if names[0] == "" {
-		return FormulaRun{}, fmt.Errorf("bad formula label: %s", FormulaLabelPrefix)
+		return FormulaRun{}, fmt.Errorf("%s: %s", SkipBadFormulaLabel, FormulaLabelPrefix)
 	}
 	run := FormulaRun{Formula: names[0]}
 	vars, err := ParseFormulaVars(Sections(s.Description)[formulaVarsSection])

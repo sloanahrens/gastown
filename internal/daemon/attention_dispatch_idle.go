@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/attention"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // The idle-dispatcher rule (gt-wil0h): dispatch.idle holds while the spec
@@ -201,16 +202,16 @@ func dispatchableWaiting(r specDispatchTickReport) (int, []dispatchIdleReason) {
 // is not holding back: it cannot be started until a person or a seat of its
 // class changes. They match the reason text spec dispatch writes.
 var notDispatchableReasons = []string{
-	"unshaped",
-	"not eligible",
-	"unknown formula",
-	"bad formula vars",
-	"conflicting formula labels",
-	"bad formula label",
-	"held: container",
-	"no seat:",
-	"rig hold:",
-	"clean, per-tick limit",
+	specdispatch.SkipUnshaped,
+	specdispatch.SkipNotEligible,
+	specdispatch.SkipUnknownFormula,
+	specdispatch.SkipBadFormulaVars,
+	specdispatch.SkipConflictingFormulaLabels,
+	specdispatch.SkipBadFormulaLabel,
+	specdispatch.SkipHeld + specdispatch.SkipContainer,
+	specdispatch.SkipNoSeat,
+	specdispatch.SkipRigHold,
+	specdispatch.SkipPerTickLimit,
 }
 
 func dispatchableSkip(reason string) bool {
