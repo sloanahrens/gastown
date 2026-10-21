@@ -695,10 +695,8 @@ func (f WorkstateFacts) WorkTerminal() bool {
 	return f.AssignedBeadTerminal || f.ActiveMRSourceTerminal || f.HookBeadTerminal
 }
 
-// GitSafe reports whether the git probe succeeded and found nothing at risk.
-// Unpushed commits are not at risk once WorkLanded is set: the landing took
-// them, the same rule the unpushed refusal in decideWorkstate applies (gt-jol0i).
-// The manager's reuse gate and NewWorkstateInput both derive gitSafe here (gt-v2muu).
+// GitSafe reports whether the git probe succeeded and found nothing at risk,
+// counting unpushed commits the landing already took as safe (gt-jol0i).
 func (f WorkstateFacts) GitSafe() bool {
 	return !f.GitCheckFailed && !f.GitDirty && f.StashCount == 0 && (f.UnpushedCommits == 0 || f.WorkLanded)
 }
