@@ -1978,6 +1978,68 @@ ask, from just after the ask's instant through the 30th day:
   Jev gave the option it picked.
 - `needs_new_section` is never labeled.
 
+### Notes battery (`jev_notes`)
+
+The daemon patrol `jev_notes` (heartbeat step `jev-notes`) runs once a week over
+the operator's memory notes and handbook: the `*.md` files in
+`~/.claude/projects/<town root with non-alphanumerics as "-">/memory/` and
+`~/.claude/commands/gastown.md`, read-only. Per file it asks Jev one call: the
+noul `still_describes_the_town` and `names_something_removed`, and the choice
+`kind` over `path`, `command`, `flag`, `config_key`, `process`, `none` and
+`unclear`. The state holds the file name, its modified date, today's date and
+the text, capped at 12000 characters. It appends one line per file to
+`.runtime/jev/notes.jsonl`: `{ts, source, file, hash, label, checked, missing,
+unresolved, model, answers, question_version}`, with a `reason` and null
+`answers` when the file could not be asked. `hash` is the SHA-256 of the file;
+the log never holds its text.
+
+A file is asked again only when its hash changes or 30 days pass, read from the
+log's lines. A file whose call got no reply (`ask_failed`) does not count. A pass
+asks at most 400 files and draws on the town-wide daily cap. The patrol edits and
+deletes no note. The E-stop holds it, and stops a running pass between calls.
+
+The pass also writes the mechanical label, with no Jev call. It takes the
+backticked tokens of the file (inline spans, and the command lines of fenced
+blocks) that look like:
+
+- a repo path: relative, two or more segments, under a top-level directory of the
+  rig's `refs/heads/main` tree or one of `internal`, `cmd`, `docs`, `pkg`,
+  `scripts`, `templates`, `formulas`; a path under a dot directory is never
+  checked. The tree is read from the bare clone the submission battery owns. A
+  `:line` suffix is dropped. A note about another repository that uses one of
+  those directory names reads as `stale`.
+- a `gt`, `bd` or `hm` invocation: its leading subcommand words and its `--flags`,
+  checked against the installed binary's `--help`. A word after a command whose
+  usage takes arguments is an argument, not a subcommand. A binary that is not
+  installed, or that prints one usage for every `--help` (`hm`), is checked only
+  at its root.
+- a config key: snake_case, or dotted snake_case, found quoted in a Go source on
+  `main`.
+
+`label` is `stale` when a path is missing from the tree or a subcommand or flag
+is absent from `--help` (`missing` lists them), `current` when at least one token
+was checked and all resolved, and empty otherwise. A config key found nowhere is
+listed in `unresolved`; it keeps the file from `current` but does not make it
+`stale`.
+
+The patrol is off unless `daemon.json` enables it:
+
+```json
+{"patrols": {"jev_notes": {"enabled": true, "max_usd_per_day": 1, "usd_per_billion_tokens": 4}}}
+```
+
+`usd_per_billion_tokens` is required.
+
+`gt jev scorecard --battery notes` scores the log against the `label` on each
+line, with no further reads. The rules are in `internal/jev/scorecard/notes.go`:
+
+- `stale`: `still_describes_the_town` false and `names_something_removed` true
+  (`notes:stale-token`). `kind` is true when the option Jev picked is the kind of
+  a missing token (`path`, `command` or `flag`).
+- `current`: `still_describes_the_town` true and `names_something_removed` false
+  (`notes:all-tokens-resolve`). `kind` is true only when Jev picked `none`.
+- no label: the file is logged and unlabeled.
+
 ## Beads Commands (bd)
 
 ```bash

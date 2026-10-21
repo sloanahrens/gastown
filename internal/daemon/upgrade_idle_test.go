@@ -187,6 +187,7 @@ func TestDaemonWorkHoldsIncludesTheOtherJevPasses(t *testing.T) {
 		{"jev_drift", func(d *Daemon) *atomic.Bool { return &d.jevDriftRunning }},
 		{"jev_logtriage", func(d *Daemon) *atomic.Bool { return &d.jevLogtriageRunning }},
 		{"jev_progress", func(d *Daemon) *atomic.Bool { return &d.jevProgressRunning }},
+		{"jev_notes", func(d *Daemon) *atomic.Bool { return &d.jevNotesRunning }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()

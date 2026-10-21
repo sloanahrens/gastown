@@ -156,6 +156,7 @@ func (d *Daemon) daemonWorkHolds() []*daemonWork {
 		{&d.jevDriftRunning, "jev_drift"},
 		{&d.jevLogtriageRunning, "jev_logtriage"},
 		{&d.jevProgressRunning, "jev_progress"},
+		{&d.jevNotesRunning, "jev_notes"},
 	} {
 		if pass.running.Load() {
 			holds = append(holds, &daemonWork{name: "a " + pass.name + " pass"})

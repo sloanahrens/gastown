@@ -668,6 +668,12 @@ type Daemon struct {
 	jevStaleRunning atomic.Bool
 	jevStaleOpen    func(townRoot string, rigs []string, s stale.Settings, warnings io.Writer) (*stale.Pass, error)
 
+	// jevNotesRunning is the jev_notes read's single-flight guard
+	// (jev_notes.go). jevNotesOpen builds the pass a run executes; nil means
+	// jevnotes.Open, and a test sets it to use fakes.
+	jevNotesRunning atomic.Bool
+	jevNotesOpen    jevNotesOpener
+
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
 	// predicate, so checkUpgradeRestart holds a restart for it separately, up
@@ -1678,6 +1684,12 @@ var heartbeatSteps = []heartbeatStep{
 	// and log every answer (internal/jev/stale). Opt-in and lifecycle, like
 	// jev-dedupe.
 	{name: "jev-stale", lifecycle: true, run: (*Daemon).triggerJevStale},
+
+	// Ask Jev whether each memory note and the operator handbook still
+	// describes the town, once a week, and log every answer beside a
+	// mechanical label (internal/jev/notes). Opt-in and lifecycle, like
+	// jev-dedupe.
+	{name: "jev-notes", lifecycle: true, run: (*Daemon).triggerJevNotes},
 
 	// Sweep the tiers `make gate` does not run against origin/main
 	// (gt-vsct7.5). Non-lifecycle: it runs tests and files beads, and an
