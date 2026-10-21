@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
+	"github.com/steveyegge/gastown/internal/jev/submission"
 )
 
 // t0 is the clock every test starts from.
@@ -289,6 +291,97 @@ func TestPassSkipsEmptyFiles(t *testing.T) {
 	}
 	if sum.Asked != 1 || sum.Unread != 1 {
 		t.Errorf("summary = %+v, want 1 asked and 1 unread", sum)
+	}
+}
+
+// flakyTree fails its first tree read and serves the fixture's after it, the
+// way a transient clone failure hits the first file of a pass and no other.
+type flakyTree struct {
+	*fakeRepo
+	failures int
+}
+
+func (f *flakyTree) Tree(ctx context.Context) ([]string, error) {
+	if f.failures > 0 {
+		f.failures--
+		return nil, errors.New("git ls-tree: bad object")
+	}
+	return f.fakeRepo.Tree(ctx)
+}
+
+// logFiles names the files the log has lines for, oldest first.
+func logFiles(lines []Line) []string {
+	var names []string
+	for _, l := range lines {
+		names = append(names, l.File)
+	}
+	return names
+}
+
+// A label read that fails on one file does not abandon the batch behind it: the
+// pass asks the later files, and the failed file earns no line, so the next
+// pass asks it again. Before the fix Run returned at the first failure and
+// every file behind it waited a week for a pass that counted as done.
+func TestRunKeepsGoingAfterAnUnreadableMemoryFile(t *testing.T) {
+	t.Parallel()
+	r := newRig(t, fixtureNotes())
+	r.pass.Repo = &flakyTree{fakeRepo: testRepo(), failures: 1}
+
+	sum, err := r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run = %v, want the pass to go on after an unreadable file", err)
+	}
+	if sum.Failed != 1 || sum.Asked != 2 || sum.Deferred != 0 {
+		t.Errorf("summary = %+v, want 1 failed and 2 asked", sum)
+	}
+	if want := []string{"prose.md", "stale.md"}; !reflect.DeepEqual(logFiles(r.lines(t)), want) {
+		t.Errorf("log = %v, want %v: the files behind the failure were abandoned", logFiles(r.lines(t)), want)
+	}
+	if got := len(r.asker.states); got != 2 {
+		t.Errorf("asked %d files, want the 2 behind the failure", got)
+	}
+
+	// The failed file has no line, so the next pass asks it.
+	if _, err := r.pass.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"prose.md", "stale.md", "current.md"}; !reflect.DeepEqual(logFiles(r.lines(t)), want) {
+		t.Errorf("log after the second pass = %v, want %v", logFiles(r.lines(t)), want)
+	}
+}
+
+// A fetch into the submission battery's shared clone waits out that battery's
+// run lock instead of racing it: two fetches into one clone fail each other,
+// and that failure lost the whole week's pass. Before the fix the fetch ran
+// under no lock at all.
+func TestNotesFetchTakesTheSubmissionLock(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	r := newRig(t, map[string]string{"current.md": currentNote})
+	r.pass.Repo = lockedRepo{
+		repo: r.repo,
+		lock: func(ctx context.Context) (func(), error) { return submission.WaitRunLock(ctx, town) },
+	}
+
+	hold, err := battery.Lock(submission.CursorPath(town) + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := r.pass.Run(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run with the submission lock held = %v, want the wait to end with the ctx", err)
+	}
+	if r.repo.synced != 0 {
+		t.Errorf("the pass fetched while the submission lock was held")
+	}
+
+	// Once the battery lets go, the same pass fetches and finishes.
+	hold()
+	sum, err := r.pass.Run(context.Background())
+	if err != nil || sum.Asked != 1 || r.repo.synced != 1 {
+		t.Errorf("Run after the holder finished = %+v, %v with %d fetch(es); want the fetch to go ahead",
+			sum, err, r.repo.synced)
 	}
 }
 

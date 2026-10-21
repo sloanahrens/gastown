@@ -96,9 +96,9 @@ func (d *Daemon) runJevNotes() bool {
 		d.logger.Printf("jev_notes: error: %v", err)
 		return true
 	}
-	if sum.Asked > 0 || sum.Unanswered > 0 || sum.Deferred > 0 || sum.CapReached || sum.Unread > 0 {
-		d.logger.Printf("jev_notes: asked %d files, %d unanswered, %d deferred, %d unread (daily cap reached: %v)",
-			sum.Asked, sum.Unanswered, sum.Deferred, sum.Unread, sum.CapReached)
+	if sum.Asked > 0 || sum.Unanswered > 0 || sum.Deferred > 0 || sum.CapReached || sum.Unread > 0 || sum.Failed > 0 {
+		d.logger.Printf("jev_notes: asked %d files, %d unanswered, %d deferred, %d unread, %d failed (daily cap reached: %v)",
+			sum.Asked, sum.Unanswered, sum.Deferred, sum.Unread, sum.Failed, sum.CapReached)
 	}
 	return true
 }

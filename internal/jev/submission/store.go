@@ -1,6 +1,7 @@
 package submission
 
 import (
+	"context"
 	"errors"
 	"path/filepath"
 	"time"
@@ -105,4 +106,29 @@ func lockRun(cursorPath string) (func(), error) {
 		return nil, ErrBusy
 	}
 	return release, err
+}
+
+// lockPoll is how long a waiter sleeps between attempts at the run lock.
+const lockPoll = 100 * time.Millisecond
+
+// WaitRunLock takes the run lock a submission pass holds, waiting for its
+// holder to let go instead of reporting ErrBusy, and returns the release. A
+// battery that only fetches the shared clone takes it around its fetch: the
+// pass fetches under it, and two fetches into one clone fail each other.
+func WaitRunLock(ctx context.Context, townRoot string) (func(), error) {
+	path := CursorPath(townRoot) + ".lock"
+	for {
+		release, err := battery.Lock(path)
+		if err == nil {
+			return release, nil
+		}
+		if !errors.Is(err, battery.ErrBusy) {
+			return nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(lockPoll):
+		}
+	}
 }

@@ -40,11 +40,12 @@ type Settings struct {
 }
 
 // Open wires the production pass for a town: the Jev client writing to the
-// usage ledger under the Caller name, the submission battery's bare clone, the
-// installed binaries' --help and the cap read from the same ledger. The files
-// are the memory directory's markdown under the Claude config dir the sessions
-// run with and the operator handbook under the home directory. warnings receives
-// the ledger's own warnings and may be nil.
+// usage ledger under the Caller name, the submission battery's bare clone,
+// fetched under that battery's own run lock, the installed binaries' --help and
+// the cap read from the same ledger. The files are the memory directory's
+// markdown under the Claude config dir the sessions run with and the operator
+// handbook under the home directory. warnings receives the ledger's own
+// warnings and may be nil.
 func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	capUSD := s.MaxUSDPerDay
 	if capUSD == 0 {
@@ -68,8 +69,11 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	}
 
 	return &Pass{
-		Asker:   client,
-		Repo:    cloneRepo{c: clone},
+		Asker: client,
+		Repo: lockedRepo{
+			repo: cloneRepo{c: clone},
+			lock: func(ctx context.Context) (func(), error) { return submission.WaitRunLock(ctx, townRoot) },
+		},
 		Help:    execHelp{},
 		Files:   func() ([]File, error) { return listNotes(os.Getenv, os.UserHomeDir, townRoot) },
 		LogPath: LogPath(townRoot),
@@ -125,9 +129,17 @@ func listFiles(configDir, home, townRoot string) ([]File, error) {
 		return nil, fmt.Errorf("reading %s: %w", dir, err)
 	}
 	for _, e := range entries {
-		if e.Type().IsRegular() && strings.HasSuffix(e.Name(), ".md") {
-			files = append(files, File{Source: SourceMemory, Name: e.Name(), Path: filepath.Join(dir, e.Name())})
+		if !strings.HasSuffix(e.Name(), ".md") {
+			continue
 		}
+		path := filepath.Join(dir, e.Name())
+		// Follow a link, as the handbook path below does: the operator may keep
+		// a note elsewhere and link it in. A link with no target, or to
+		// something that is not a file, is not a note.
+		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+			continue
+		}
+		files = append(files, File{Source: SourceMemory, Name: e.Name(), Path: path})
 	}
 	handbook := handbookPath(home)
 	if info, err := os.Stat(handbook); err == nil && info.Mode().IsRegular() {
@@ -161,6 +173,35 @@ func exitCode(err error) (int, bool) {
 		return exit.ExitCode(), true
 	}
 	return 0, false
+}
+
+// lockedRepo fetches the submission battery's bare clone under that battery's
+// own run lock. The clone is shared: the submission pass holds the lock while
+// it fetches, so a fetch that skipped the lock would fail that pass's Sync and
+// lose its work.
+type lockedRepo struct {
+	repo Repo
+	// lock takes the submission battery's run lock, waiting for its holder.
+	lock func(ctx context.Context) (func(), error)
+}
+
+// Sync waits for the submission battery's run lock, then fetches.
+func (r lockedRepo) Sync(ctx context.Context) error {
+	release, err := r.lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return r.repo.Sync(ctx)
+}
+
+// Tree reads the clone's tree. A read never writes the clone, so it takes no
+// lock.
+func (r lockedRepo) Tree(ctx context.Context) ([]string, error) { return r.repo.Tree(ctx) }
+
+// HasKey reads the clone the same way.
+func (r lockedRepo) HasKey(ctx context.Context, key string) (bool, error) {
+	return r.repo.HasKey(ctx, key)
 }
 
 // cloneRepo reads the rig's main tree from the submission battery's bare clone.
@@ -222,5 +263,6 @@ func (execHelp) Help(ctx context.Context, bin string, path ...string) (string, e
 var (
 	_ Asker  = (*jev.Client)(nil)
 	_ Repo   = cloneRepo{}
+	_ Repo   = lockedRepo{}
 	_ Helper = execHelp{}
 )
