@@ -3,6 +3,9 @@ package cmd
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -162,21 +165,111 @@ func TestSlingOntoExistingSeatHandsBackHookAfterFailure(t *testing.T) {
 					got.Status, got.Assignee, tc.want[0], tc.want[1])
 			}
 			// The real hand-back prints and writes through the harness
-			// releaser; a declined one records nothing.
+			// releaser; a declined one records nothing. The raw-field restore
+			// writes without a guard, so a declined hand-back skips it: the
+			// bead's attachment fields are the actor's who holds it now.
 			if tc.thief != nil {
 				h.wantCalls("restore bead")
+				h.wantNo("restore raw fields")
 			} else {
 				h.wantCalls("restore bead", "restore bead "+beadID+" "+tc.want[0]+" "+tc.want[1])
+				h.wantCalls("restore raw fields", "restore raw fields "+beadID)
 			}
-			h.wantCalls("restore raw fields", "restore raw fields "+beadID)
 			if tc.force {
 				// The force unhook cleared the outgoing polecat's agent bead;
 				// the same rollback puts it back (gt-u0zq0).
 				h.wantCalls("restore reassigned", "restore reassigned gastown/polecats/pearl")
 			}
-			// No spawn, so the hand-back is the only rollback of the hook.
+			// No spawn, so the hand-back is the only rollback of the hook: no
+			// spawn rollback runs and no molecule is burned.
 			h.wantCalls("rollback")
+			h.wantNo("burn wisp")
 		})
+	}
+}
+
+// A bead submitted for landing belongs to the landing worker, so the hand-back
+// leaves it alone even though the seat still holds it in the status the read
+// found (gt-moxlb).
+func TestHandBackHeldLeavesABeadSubmittedForLanding(t *testing.T) {
+	t.Parallel()
+	const beadID = "gt-abc"
+	const seat = "gastown/crew/sloan"
+
+	for _, tc := range []struct {
+		name      string
+		submitted bool
+		err       error
+		want      bool
+	}{
+		{name: "a bead not yet submitted is handed back", want: true},
+		{name: "a bead submitted for landing is left alone", submitted: true},
+		{name: "a bead whose submission cannot be read is left alone", err: errInjected},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.addBead(beadID, beadInfo{Status: "hooked", Assignee: seat})
+			rel := submissionReleaser{harnessReleaser: harnessReleaser{h}, submitted: tc.submitted, err: tc.err}
+
+			if got := handBackHeld(rel, beadID, seat, beadHold{Status: "open"}); got != tc.want {
+				t.Fatalf("handBackHeld = %v, want %v", got, tc.want)
+			}
+			want := [2]string{"hooked", seat}
+			if tc.want {
+				want = [2]string{"open", ""}
+				h.wantCalls("restore bead", "restore bead "+beadID+" open ")
+			} else {
+				h.wantNo("restore bead")
+			}
+			if b := h.bead(beadID); b.Status != want[0] || b.Assignee != want[1] {
+				t.Fatalf("bead = %s/%s, want %s/%s", b.Status, b.Assignee, want[0], want[1])
+			}
+		})
+	}
+}
+
+// submissionReleaser is the harness releaser with the optional landing read
+// the real releaser has, so the hand-back's submitted guard runs.
+type submissionReleaser struct {
+	harnessReleaser
+	submitted bool
+	err       error
+}
+
+func (r submissionReleaser) SubmittedForLanding(string) (bool, error) { return r.submitted, r.err }
+
+// The hand-back needs a town root to reach bd. Without one it cannot run, and
+// it says so instead of leaving the bead hooked to the seat in silence
+// (gt-moxlb).
+//
+//testpolicy:allow parallel — swaps os.Stdout to read the one line handBackHook prints
+func TestHandBackHookWarnsWithoutATownRoot(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	stdout := os.Stdout
+	//testpolicy:allow no-global-swap — the warning goes to the process stdout; the pipe reads it
+	os.Stdout = w
+	t.Cleanup(func() {
+		//testpolicy:allow no-global-swap — restores the os.Stdout swapped above
+		os.Stdout = stdout
+		r.Close()
+	})
+
+	handedBack := handBackHook("", "gt-abc", "", "gastown/crew/sloan", beadHold{Status: "open"})
+	w.Close()
+	out, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("reading stdout: %v", err)
+	}
+	if handedBack {
+		t.Error("handBackHook reported a hand-back with no town root")
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "gt-abc") || !strings.Contains(lines[0], "no town root") {
+		t.Errorf("handBackHook printed %q, want one warning line naming gt-abc and the missing town root", out)
 	}
 }
 

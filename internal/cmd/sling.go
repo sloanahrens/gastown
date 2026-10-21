@@ -783,8 +783,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// rollbackBeadID stays "" until this sling first writes to the bead, so a
 	// failure before that never burns molecules or releases a hook this sling
 	// did not create. It does not cover the hook itself: a sling onto a seat
-	// that already existed has no spawn to give it back (gt-moxlb; the devops
-	// events journal, seq 30687-30689, shows the bead left hooked to the seat).
+	// that already existed has no spawn to give it back (gt-moxlb).
 	slingCommitted := false
 	rollbackBeadID := ""
 	rollbackReason := ""
@@ -807,6 +806,11 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 	// another actor has since hooked stays with that actor; it runs only while
 	// this sling's hook write may not have landed (see hookMayHaveLanded).
 	unhooked := false
+	// handBackDeclined is set when the hand-back left the bead alone because
+	// another actor holds it or it is submitted for landing. The raw-field and
+	// pinned restores write without a guard, so they must not run over a bead
+	// this sling no longer holds (gt-moxlb).
+	handBackDeclined := false
 	restoreReassigned := func() {
 		if restoreOutgoing != nil {
 			restoreOutgoing()
@@ -821,7 +825,7 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		// restore below (gt-moxlb).
 		handBackTried := newPolecatInfo == nil && rollbackBeadID != "" && hookMayHaveLanded
 		if handBackTried {
-			r.handBack(townRoot, beadID, hookWorkDir, targetAgent, beadHold{Status: originalStatus, Assignee: originalAssignee})
+			handBackDeclined = !r.handBack(townRoot, beadID, hookWorkDir, targetAgent, beadHold{Status: originalStatus, Assignee: originalAssignee})
 		} else if unhooked {
 			r.restoreHold(townRoot, beadID, beadHold{Status: originalStatus, Assignee: originalAssignee})
 		}
@@ -837,6 +841,9 @@ func (r *slingRun) run(ctx context.Context, cmd *cobra.Command, args []string) (
 		restoreReassigned()
 		if rollbackBeadID == "" {
 			return // this sling has not written to the bead: nothing to restore
+		}
+		if handBackDeclined {
+			return
 		}
 		r.restoreRawFields(beadID, townRoot, hookWorkDir, info)
 		// Under --force, rollback's unhook can clear a pinned bead's original state.
@@ -1450,6 +1457,7 @@ func restoreBeadHold(townRoot, beadID string, hold beadHold) {
 // pool.
 func handBackHook(townRoot, beadID, hookWorkDir, holder string, hold beadHold) bool {
 	if townRoot == "" {
+		fmt.Printf("  %s Could not hand bead %s back from %s: no town root\n", style.Dim.Render("Warning:"), beadID, holder)
 		return false
 	}
 	return handBackHeld(newPolecatWorkReleaserFn(townRoot, hookWorkDir), beadID, holder, hold)
