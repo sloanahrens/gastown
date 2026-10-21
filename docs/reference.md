@@ -1374,6 +1374,76 @@ It is off unless `daemon.json` enables it, and it reads the same three keys as
 }
 ```
 
+### Test-selection battery (`jev_testsel`)
+
+The landing gate runs every Go package. The test-selection battery asks Jev which
+packages a landing's diff cannot affect, and logs that beside what the gate found.
+It is shadow only: the gate runs everything, as before. The battery writes its log
+line and the Jev usage ledger for its one call, and nothing else (gt-bp9qd).
+
+It runs when the landing worker starts a rig's candidate gate, not on a ticker.
+The pass starts before the gate and is finished after the gate's verdict, so Jev
+answers while CI runs. A failure at any step logs a line with a `reason` and
+never fails the landing. The pass reads the merged tree in the landing's work
+clone: `git diff` from the merged commit's first parent, and `go list ./...`.
+
+The code decides first, and Jev is asked about the rest:
+
+- **always run**: a changed package, a package whose code or tests directly import
+  a changed package, or every package when `go.mod`, `go.sum`, `Makefile`, `.forgejo/`,
+  `.github/` or any `testdata/` changed (`reason` `tree_wide`, nothing asked).
+- **asked**: every other package, in one call, one `noul` per package: could this
+  change affect behavior that the package's tests verify?
+
+A package that reaches a changed package only through another package is asked.
+Those are the packages a direct-import rule would skip, so they are the ones the
+battery grades.
+
+The state holds the diff stat, the changed files with their counts, the changed
+packages, and each package with its in-module imports, its test files' imports
+included. It never holds diff text. It is capped at about 20k tokens; a larger
+tree logs `too_large` and asks nothing. The Jev call is bounded at two minutes; a
+call that runs past that logs `ask_failed`, so a hung call never holds a landing.
+
+The log is `.runtime/jev/testsel.jsonl`, one line per landing:
+
+```json
+{"bead":"gt-x","rig":"gastown","head":"…","changed":["internal/land"],
+ "always_run":["internal/land","internal/daemon"],"asked":["internal/cmd"],
+ "noul":{"internal/cmd":0.12},
+ "would_skip":{"0.2":["internal/cmd"],"0.3":["internal/cmd"],"0.5":["internal/cmd"]},
+ "miss":{"0.2":[],"0.3":[],"0.5":[]},
+ "ungraded":{"0.2":[],"0.3":[],"0.5":[]},
+ "gate_packages":212,"gate":{"internal/cmd":true},"question_version":1,"model":"…"}
+```
+
+`would_skip` holds the asked packages whose `noul` is below the threshold. `miss`
+holds the would-skip packages the gate reported as `FAIL`. `ungraded` holds the
+would-skip packages the gate reported no result for. Those are neither a miss nor
+a pass: nothing was graded. `gate`
+is absent when the candidate's CI job log had no package lines to read. `reason` is
+set when Jev was not asked: `too_large`, `tree_wide`, `nothing_to_ask`,
+`cap_unreadable` (the spend ledger could not be read, so the cap is unknown),
+`cap_reached`, `unreadable_tree` or `ask_failed`.
+
+`patrols.jev_testsel` in `daemon.json`:
+
+```json
+"patrols": {
+  "jev_testsel": {
+    "enabled": true,
+    "max_usd_per_day": 1.0,
+    "usd_per_billion_tokens": 3.0
+  }
+}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `enabled` | Turns the battery on. Default `false`. |
+| `max_usd_per_day` | The town-wide daily cap every Jev battery shares. `0` takes the default of 1. |
+| `usd_per_billion_tokens` | Prices the ledger's tokens. Required: without it the battery logs an error and the gate runs unwrapped. |
+
 ### Review-targeting battery (`jev_targets`)
 
 `gt jev review-targets --run <bead> --ranked <rows> --history <file>` asks Jev
