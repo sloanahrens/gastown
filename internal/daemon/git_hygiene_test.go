@@ -448,6 +448,43 @@ func TestRunGitHygiene_DeletesAnOrphanWhoseWorkIsOnAnIntegrationBranch(t *testin
 	}
 }
 
+// An integration branch created before its first child lands sits at main's
+// tip, so the merged test calls it merged on both sides. Reaping it leaves the
+// next child with no branch to target, and it lands on main instead (gt-t9vl4).
+func TestCleanRigRepoKeepsIntegrationBranchAtMainTip(t *testing.T) {
+	t.Parallel()
+	d, _, _ := newGitHygieneDaemon(t, "r1")
+	f := useGitfake(t, d)
+
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	f.InitBare(t, origin)
+	base := f.Commit(t, origin, "main", "seed", map[string]string{"a.txt": "a\n"})
+	f.SetRef(t, origin, "refs/heads/integration/epic", base)
+	f.SetRef(t, origin, "refs/heads/polecat/merged", base)
+
+	bare := filepath.Join(d.config.TownRoot, "r1", ".repo.git")
+	f.InitBare(t, bare)
+	f.AddRemote(t, bare, "origin", origin)
+	f.SetRef(t, bare, "refs/heads/main", base)
+	f.SetRef(t, bare, "refs/heads/integration/epic", base)
+	f.SetRef(t, bare, "refs/heads/polecat/merged", base)
+
+	d.cleanRigRepo(bare)
+
+	// The sweep ran: a merged polecat branch is still deleted on both sides.
+	if got := f.Ref(bare, "refs/heads/polecat/merged"); got != "" {
+		t.Errorf("local polecat/merged = %q, want the merged branch deleted", got)
+	}
+	if got := f.Ref(origin, "refs/heads/polecat/merged"); got != "" {
+		t.Errorf("origin polecat/merged = %q, want the merged branch deleted", got)
+	}
+	for _, dir := range []string{bare, origin} {
+		if got := f.Ref(dir, "refs/heads/integration/epic"); got != base {
+			t.Errorf("integration/epic in %s = %q, want the branch kept at main's tip %s", dir, got, base)
+		}
+	}
+}
+
 // The check reads the bases through this repository's remote-tracking refs, so
 // it cannot depend on the cycle's fetch having written them: a failed fetch is
 // logged and the cleanup goes on, and cherry then fails on a missing base, which

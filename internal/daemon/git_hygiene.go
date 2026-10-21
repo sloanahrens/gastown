@@ -30,13 +30,20 @@ const defaultGitHygieneInterval = 12 * time.Hour
 // default and checked-out branches.
 var gitHygieneProtected = map[string]bool{"main": true, "master": true, "refinery-patrol": true}
 
+// gitHygieneIntegrationPrefix names the branches a child lands on
+// (beads.DetectIntegrationBranch). A fresh one sits at main's tip until the
+// first child lands, so IsAncestor calls it merged; the patrol never deletes
+// one, local or remote, because the next child would find no branch to target
+// and land on main instead (gt-t9vl4).
+const gitHygieneIntegrationPrefix = "integration/"
+
 // gitHygieneLocalOrphanPrefixes name the local agent branches deleted once
 // origin no longer has them and they hold no commit whose patch origin lacks.
-var gitHygieneLocalOrphanPrefixes = []string{"polecat/", "dog/", "fix/", "pr-", "integration/", "worktree-agent-"}
+var gitHygieneLocalOrphanPrefixes = []string{"polecat/", "dog/", "fix/", "pr-", "worktree-agent-"}
 
 // gitHygieneRemotePrefixes name the origin branches deleted once merged into
 // the default branch.
-var gitHygieneRemotePrefixes = []string{"polecat/", "fix/", "pr-", "integration/", "worktree-agent-"}
+var gitHygieneRemotePrefixes = []string{"polecat/", "fix/", "pr-", "worktree-agent-"}
 
 // gitHygieneResult counts one repository's cleanup.
 type gitHygieneResult struct {
@@ -157,7 +164,8 @@ func (d *Daemon) cleanRigRepo(repo string) gitHygieneResult {
 	def := g.RemoteDefaultBranch()
 	cur, _ := g.CurrentBranch()
 	keep := func(b string) bool {
-		return b == "" || b == def || b == cur || gitHygieneProtected[b] || strings.HasPrefix(b, "merge/")
+		return b == "" || b == def || b == cur || gitHygieneProtected[b] ||
+			strings.HasPrefix(b, "merge/") || strings.HasPrefix(b, gitHygieneIntegrationPrefix)
 	}
 
 	// origin's branches, from ls-remote. When origin cannot be read, no
@@ -248,7 +256,7 @@ func (d *Daemon) cleanRigRepo(repo string) gitHygieneResult {
 func hygieneBases(g daemonGit, def string, onRemote map[string]string) ([]string, error) {
 	var integration []string
 	for name := range onRemote {
-		if strings.HasPrefix(name, "integration/") {
+		if strings.HasPrefix(name, gitHygieneIntegrationPrefix) {
 			integration = append(integration, name)
 		}
 	}
