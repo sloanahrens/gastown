@@ -1526,7 +1526,9 @@ func runPolecatCheckRecovery(cmd *cobra.Command, args []string) error {
 // rig within one process, sharing a single bulk agent-bead fetch and a single
 // bulk merge-request fetch across all of them (gt-b839, follow-up to gt-ct3)
 // instead of paying for both, per polecat, the way N independent
-// 'gt polecat check-recovery' subprocess invocations would.
+// 'gt polecat check-recovery' subprocess invocations would. A seat the sweep
+// can settle from its preloaded agent bead and the one session read pays none
+// of the per-polecat probes.
 func runPolecatCheckRecoveryBatch(cmd *cobra.Command, args []string) error {
 	rigName := args[0]
 
@@ -1560,6 +1562,13 @@ func runPolecatCheckRecoveryBatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("listing polecats in %s: %w", rigName, err)
 	}
 
+	// One session read for the whole sweep. A failed read proves no seat
+	// session-less, so every polecat then gets the full check.
+	sessions, sessionErr := loadPolecatSessionSet(townRegistry(), newPoolSessionLister())
+	if sessionErr != nil {
+		fmt.Fprintf(os.Stderr, "warning: failed to list tmux sessions: %v — every seat gets the full check\n", sessionErr)
+	}
+
 	statuses := make([]RecoveryStatus, 0, len(polecatNames))
 	for _, polecatName := range polecatNames {
 		p, err := mgr.Get(polecatName)
@@ -1568,6 +1577,12 @@ func runPolecatCheckRecoveryBatch(cmd *cobra.Command, args []string) error {
 			// mid-sweep) — not this sweep's job to report on a polecat that no
 			// longer exists.
 			continue
+		}
+		if sessionErr == nil {
+			if idle, ok := recoveryBatchShortcut(sessions, agentBeadsByID, polecatBeadIDForRig(r, rigName, polecatName), rigName, polecatName, p); ok {
+				statuses = append(statuses, idle)
+				continue
+			}
 		}
 		statuses = append(statuses, checkRecoveryForPolecat(bd, agentBeadsByID, r, rigName, polecatName, p, polecatCheckRecoveryBatchReconcile))
 	}
@@ -1583,6 +1598,85 @@ func runPolecatCheckRecoveryBatch(cmd *cobra.Command, args []string) error {
 		fmt.Fprintln(os.Stdout)
 	}
 	return nil
+}
+
+// recoveryBatchShortcut answers a polecat from the batch's preloaded agent bead
+// and its one session read, without the per-directory bd and git probes. It
+// reports false for every seat that needs the full check. Only the preloaded map
+// is consulted, never recoveryAgentBead's per-ID fallback: that read is the bd
+// call this shortcut exists to avoid.
+func recoveryBatchShortcut(sessions polecatSessionSet, preloaded map[string]*beads.Issue, agentBeadID, rigName, polecatName string, p *polecat.Polecat) (RecoveryStatus, bool) {
+	// p.Issue is the canonical hooked work in the direct-tracking model, where
+	// the agent bead's hook_bead is already empty while a work bead is assigned.
+	if p.Issue != "" {
+		return RecoveryStatus{}, false
+	}
+	fields := recoveryBatchFields(preloaded, agentBeadID)
+	_, hasSession := sessions.lookup(rigName, polecatName)
+	if !recoveryBatchIdle(fields, hasSession) {
+		return RecoveryStatus{}, false
+	}
+	return idleRecoveryStatus(rigName, polecatName, p, fields), true
+}
+
+// recoveryBatchIdle reports whether the agent bead alone clears the seat: it
+// was preloaded, nothing is on the hook, no session is alive, the agent state is
+// done or idle, and the recorded cleanup status is clean with no active MR and
+// no failed push or MR. A bead recording anything else, or no cleanup status,
+// goes to the full check, which probes the worktree.
+func recoveryBatchIdle(fields *beads.AgentFields, hasSession bool) bool {
+	if fields == nil || hasSession || fields.HookBead != "" {
+		return false
+	}
+	if !polecat.CleanupStatus(fields.CleanupStatus).IsSafe() || fields.ActiveMR != "" || fields.PushFailed || fields.MRFailed {
+		return false
+	}
+	state := beads.AgentState(fields.AgentState)
+	return state == beads.AgentStateDone || state == beads.AgentStateIdle
+}
+
+// recoveryBatchFields answers an agent bead's parsed fields from the batch's
+// preloaded map, nil when the map does not hold the id. A nil answer sends the
+// polecat through the full check: the bulk list is open beads plus wisps, so a
+// closed agent bead is simply absent, and "not preloaded" must not read as
+// "nothing to recover".
+func recoveryBatchFields(preloaded map[string]*beads.Issue, agentBeadID string) *beads.AgentFields {
+	issue, ok := preloaded[agentBeadID]
+	if !ok || issue == nil {
+		return nil
+	}
+	fields := beads.ParseAgentFields(issue.Description)
+	if fields == nil {
+		return nil
+	}
+	fields.AgentState = beads.ResolveAgentState(issue.Description, issue.AgentState)
+	return fields
+}
+
+// idleRecoveryStatus is the check-recovery report for a seat recoveryBatchIdle
+// cleared: the one the full check gives an idle, clean polecat, with a reason
+// that names the agent bead so a reader can tell which path answered.
+func idleRecoveryStatus(rig, name string, p *polecat.Polecat, fields *beads.AgentFields) RecoveryStatus {
+	branch := p.Branch
+	if branch == "" {
+		branch = fields.Branch
+	}
+	return RecoveryStatus{
+		Rig:                  rig,
+		Polecat:              name,
+		CleanupStatus:        polecat.CleanupStatus(fields.CleanupStatus),
+		CleanupStatusSource:  polecat.CleanupStatusSourceRecorded,
+		Verdict:              polecat.WorkstateVerdictSafeToNuke,
+		Reason:               "idle-from-agent-bead",
+		Reusable:             true,
+		SafeToNuke:           true,
+		NeedsRecovery:        false,
+		CountsTowardCapacity: false,
+		ReuseStatus:          "idle-" + fields.CleanupStatus,
+		Branch:               branch,
+		Issue:                p.Issue,
+		MQStatus:             "not_required",
+	}
 }
 
 // checkRecoveryForPolecat computes one polecat's RecoveryStatus. It is the
