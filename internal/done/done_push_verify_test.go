@@ -215,7 +215,7 @@ func TestLandBranchPushProceedsWhenOriginAlreadyHasTheCommit(t *testing.T) {
 	pushCalls := 0
 	push := func() error {
 		pushCalls++
-		return pushBranchToOrigin(repo, "origin", t.TempDir(), "gastown", doneTestBranch, "feature1", "origin/main")
+		return pushBranchToOrigin(repo, "origin", t.TempDir(), "gastown", doneTestBranch, "feature1", "origin/main", reworkPush{})
 	}
 	recovered, err := landBranchPush(push, verify, noSleep, pushLandingRetryDelays)
 	if err != nil || !recovered {
@@ -235,7 +235,7 @@ func TestLandBranchPushRejectingRemoteStillFails(t *testing.T) {
 	townRoot := t.TempDir()
 	recovered, err := landBranchPush(
 		func() error {
-			return pushBranchToOrigin(repo, "origin", townRoot, "gastown", doneTestBranch, "feature1", "origin/main")
+			return pushBranchToOrigin(repo, "origin", townRoot, "gastown", doneTestBranch, "feature1", "origin/main", reworkPush{})
 		},
 		func() error { return verifyPushLanded(repo, "origin", townRoot, "gastown", doneTestBranch, "feature1") },
 		noSleep,
@@ -255,7 +255,7 @@ func TestLandBranchPushRejectingRemoteStillFails(t *testing.T) {
 func TestLandingPushUsesTheConfiguredRemote(t *testing.T) {
 	t.Parallel()
 	repo := newFakeDoneRepo()
-	if err := pushBranchToOrigin(repo, "forgejo", t.TempDir(), "gastown", doneTestBranch, "feature1", "origin/main"); err != nil {
+	if err := pushBranchToOrigin(repo, "forgejo", t.TempDir(), "gastown", doneTestBranch, "feature1", "origin/main", reworkPush{}); err != nil {
 		t.Fatalf("pushBranchToOrigin = %v, want nil", err)
 	}
 	if len(repo.pushRemotes) != 1 || repo.pushRemotes[0] != "forgejo" {

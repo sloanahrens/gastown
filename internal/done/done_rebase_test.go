@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	gitpkg "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 func writeRepoFile(t *testing.T, dir, name, content string) {
@@ -35,6 +36,11 @@ type fakeDivergedPushGit struct {
 	// reads the commit half.
 	patchIDLists map[[2]string][]string
 	patchIDsErr  error
+
+	// summaries backs FirstParentCommitSummaries: the author and subject of
+	// each commit in a range, keyed by the same [base, head] pair.
+	summaries    map[[2]string][]gitpkg.CommitSummary
+	summariesErr error
 
 	leaseErr   error
 	leaseCalls int
@@ -84,11 +90,25 @@ func (f *fakeDivergedPushGit) FirstParentPatchIDs(base, head string) ([]gitpkg.P
 	if ids == nil {
 		return nil, nil
 	}
+	// The commit behind each id is the summary at the same index when the test
+	// gave one, so a refusal can be checked against a real sha and subject.
+	summaries := f.summaries[[2]string{base, head}]
 	pairs := make([]gitpkg.PatchIDCommit, len(ids))
 	for i, id := range ids {
-		pairs[i] = gitpkg.PatchIDCommit{PatchID: id, Commit: fmt.Sprintf("commit-%d", i)}
+		commit := fmt.Sprintf("commit-%d", i)
+		if i < len(summaries) {
+			commit = summaries[i].SHA
+		}
+		pairs[i] = gitpkg.PatchIDCommit{PatchID: id, Commit: commit}
 	}
 	return pairs, nil
+}
+
+func (f *fakeDivergedPushGit) FirstParentCommitSummaries(base, head string) ([]gitpkg.CommitSummary, error) {
+	if f.summariesErr != nil {
+		return nil, f.summariesErr
+	}
+	return f.summaries[[2]string{base, head}], nil
 }
 
 func (f *fakeDivergedPushGit) PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error {
@@ -100,7 +120,7 @@ func (f *fakeDivergedPushGit) PushForceWithLease(remote, refspec, branchRef, exp
 func TestRecoverDivergedPush_FetchFailsAborts(t *testing.T) {
 	t.Parallel()
 	f := &fakeDivergedPushGit{fetchErr: errors.New("network unreachable")}
-	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
 	if recovered {
 		t.Error("must not recover when the pre-comparison fetch fails")
 	}
@@ -120,7 +140,7 @@ func TestRecoverDivergedPush_OriginMissingBranch(t *testing.T) {
 	f := &fakeDivergedPushGit{
 		revErrs: map[string]error{"origin/feature": errors.New("unknown revision")},
 	}
-	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
 	if recovered {
 		t.Error("must not recover when origin has no ref for the branch")
 	}
@@ -155,7 +175,7 @@ func TestRecoverDivergedPush_PatchIdenticalRecovers(t *testing.T) {
 			{"base2", "localSHA"}: {"p1"},
 		},
 	}
-	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -190,7 +210,7 @@ func TestRecoverDivergedPush_RealDivergenceRefuses(t *testing.T) {
 			{"base", "localSHA"}: {"patchB"},
 		},
 	}
-	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -232,7 +252,7 @@ func TestRecoverDivergedPush_ReworkRedispatchRecovers(t *testing.T) {
 			{"base", "localSHA"}: {"p1", "p2", "p3-fix"},
 		},
 	}
-	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -268,7 +288,7 @@ func TestRecoverDivergedPush_SquashedButIdenticalRecovers(t *testing.T) {
 			{"base", "localSHA"}: {"p1p2-squashed"},
 		},
 	}
-	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -300,7 +320,7 @@ func TestRecoverDivergedPush_OriginCommitNotLocallyHeldRefuses(t *testing.T) {
 			{"base", "localSHA"}: {"p1", "p3-fix"},
 		},
 	}
-	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -331,7 +351,7 @@ func TestRecoverDivergedPush_OriginHasNoCommitsOfItsOwn(t *testing.T) {
 			{"base", "localSHA"}: {"p1"},
 		},
 	}
-	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -363,7 +383,7 @@ func TestRecoverDivergedPush_MissingRangePatchIDIsNotIdentity(t *testing.T) {
 			{"base", "localSHA"}: {"p2"},
 		},
 	}
-	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -384,7 +404,7 @@ func TestRecoverDivergedPush_PatchIDsErrorAborts(t *testing.T) {
 		},
 		patchIDsErr: errors.New("git log failed"),
 	}
-	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
 	if recovered {
 		t.Error("must not recover when the commit comparison itself failed")
 	}
@@ -399,7 +419,7 @@ func TestRecoverDivergedPush_PatchIDsErrorAborts(t *testing.T) {
 	}
 }
 
-func TestPatchIDsMissingFrom(t *testing.T) {
+func TestMissingCommits(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name        string
@@ -438,9 +458,16 @@ func TestPatchIDsMissingFrom(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := patchIDsMissingFrom(tt.want, tt.have)
+			var want []gitpkg.PatchIDCommit
+			for i, id := range tt.want {
+				want = append(want, gitpkg.PatchIDCommit{PatchID: id, Commit: fmt.Sprintf("commit-%d", i)})
+			}
+			var got []string
+			for _, p := range missingCommits(want, tt.have) {
+				got = append(got, p.PatchID)
+			}
 			if strings.Join(got, ",") != strings.Join(tt.wantMissing, ",") {
-				t.Errorf("patchIDsMissingFrom = %v, want %v", got, tt.wantMissing)
+				t.Errorf("missingCommits = %v, want %v", got, tt.wantMissing)
 			}
 		})
 	}
@@ -463,7 +490,7 @@ func TestRecoverDivergedPush_LeaseFails(t *testing.T) {
 		},
 		leaseErr: errors.New("stale info"),
 	}
-	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main")
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
 	if recovered {
 		t.Fatal("recovered must be false when the leased push itself fails")
 	}
@@ -475,5 +502,160 @@ func TestRecoverDivergedPush_LeaseFails(t *testing.T) {
 	}
 	if f.leaseCalls != 1 {
 		t.Errorf("expected 1 lease attempt, got %d", f.leaseCalls)
+	}
+}
+
+const (
+	reworkTestRejected = "aaaa1111bbbb2222cccc3333dddd4444eeee5555"
+	reworkTestLocal    = "ffff0000111122223333444455556666777788889"
+	reworkTestSeat     = "capable"
+	reworkTestEmail    = "seat@test.com"
+)
+
+// reworkFakeGit is a divergence where origin's tip is one commit, written by
+// author at email, and local's one commit carries a different patch-id: a
+// rework that changed the content. The origin commit's sha is originTip itself.
+func reworkFakeGit(originTip, author, email string) *fakeDivergedPushGit {
+	return &fakeDivergedPushGit{
+		revs: map[string]string{"origin/feature": originTip, "HEAD": reworkTestLocal},
+		patchIDLists: map[[2]string][]string{
+			{"base", originTip}:       {"p-origin"},
+			{"base", reworkTestLocal}: {"p-local"},
+		},
+		summaries: map[[2]string][]gitpkg.CommitSummary{
+			{"base", originTip}: {{SHA: originTip, Author: author, Email: email, Subject: "feat: the rejected submission"}},
+		},
+	}
+}
+
+func TestRecoverDivergedPush_ReworkOfRejectedHeadPushesUnderLease(t *testing.T) {
+	t.Parallel()
+	f := reworkFakeGit(reworkTestRejected, reworkTestSeat, reworkTestEmail)
+	rework := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", rework)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !recovered {
+		t.Fatalf("rework of the rejected head must push; diagnosis: %s", diagnosis)
+	}
+	if !strings.Contains(diagnosis, "rework of the rejected submission") {
+		t.Errorf("diagnosis = %q, want the rework reason", diagnosis)
+	}
+	if f.leaseCalls != 1 {
+		t.Fatalf("lease calls = %d, want 1", f.leaseCalls)
+	}
+	if got := f.leaseArgs[3]; got != reworkTestRejected {
+		t.Errorf("lease pinned to %q, want the observed origin tip %q", got, reworkTestRejected)
+	}
+}
+
+func TestRecoverDivergedPush_ReworkWithForeignCommitRefuses(t *testing.T) {
+	t.Parallel()
+	f := reworkFakeGit(reworkTestRejected, "Sloan Ahrens", reworkTestEmail)
+	rework := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", rework)
+	if recovered {
+		t.Fatal("origin holding another author's commit must not be overwritten")
+	}
+	if err != nil {
+		t.Fatalf("refusal is a diagnosis, not an error: %v", err)
+	}
+	if !strings.Contains(diagnosis, "real divergence") {
+		t.Errorf("diagnosis = %q, want the divergence refusal", diagnosis)
+	}
+	if f.leaseCalls != 0 {
+		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)
+	}
+}
+
+func TestRecoverDivergedPush_ReworkAfterOriginMovedRefuses(t *testing.T) {
+	t.Parallel()
+	const moved = "9999aaaabbbbccccddddeeeeffff000011112222"
+	f := reworkFakeGit(moved, reworkTestSeat, reworkTestEmail)
+	rework := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", rework)
+	if recovered {
+		t.Fatal("origin's tip moved after the rejection, so it is not the rejected submission")
+	}
+	if err != nil {
+		t.Fatalf("refusal is a diagnosis, not an error: %v", err)
+	}
+	if !strings.Contains(diagnosis, "real divergence") {
+		t.Errorf("diagnosis = %q, want the divergence refusal", diagnosis)
+	}
+	if f.leaseCalls != 0 {
+		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)
+	}
+}
+
+func TestRecoverDivergedPush_RefusalNamesPatchIDCommits(t *testing.T) {
+	t.Parallel()
+	f := reworkFakeGit(reworkTestRejected, "Sloan Ahrens", reworkTestEmail)
+	_, diagnosis, _ := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
+	if !strings.Contains(diagnosis, "the ids below are patch-ids") {
+		t.Errorf("diagnosis = %q, want it to say the ids are patch-ids", diagnosis)
+	}
+	want := "patch-id p-origin = commit aaaa1111 feat: the rejected submission"
+	if !strings.Contains(diagnosis, want) {
+		t.Errorf("diagnosis = %q, want the mapping line %q", diagnosis, want)
+	}
+}
+
+func TestRecoverDivergedPush_RefusalSaysWhenACommitHasNoSubject(t *testing.T) {
+	t.Parallel()
+	f := reworkFakeGit(reworkTestRejected, "Sloan Ahrens", reworkTestEmail)
+	// The patch-id walk sees origin's commit, the summary walk does not.
+	f.summaries = nil
+	_, diagnosis, _ := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
+	want := "patch-id p-origin = commit commit-0 (no subject: the commit is not in origin's summary listing)"
+	if !strings.Contains(diagnosis, want) {
+		t.Errorf("diagnosis = %q, want the explicit line %q", diagnosis, want)
+	}
+}
+
+func TestReworkPushAllows(t *testing.T) {
+	t.Parallel()
+	seatOnly := []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: reworkTestEmail}}
+	seat := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
+	tests := []struct {
+		name   string
+		rework reworkPush
+		origin string
+		commit []gitpkg.CommitSummary
+		want   bool
+	}{
+		{name: "zero value never allows", origin: reworkTestRejected, commit: seatOnly},
+		{name: "seat commits over the rejected head", rework: seat, origin: reworkTestRejected, commit: seatOnly, want: true},
+		{name: "abbreviated rejected head matches", rework: reworkPush{rejectedHead: reworkTestRejected[:8], seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}, origin: reworkTestRejected, commit: seatOnly, want: true},
+		{name: "origin tip is not the rejected head", rework: seat, origin: reworkTestLocal, commit: seatOnly},
+		{name: "foreign author on origin", rework: seat, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: "Sloan Ahrens", Email: reworkTestEmail}}},
+		{name: "seat name from another mailbox", rework: seat, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: "other@test.com"}}},
+		{name: "one foreign commit among seat commits", rework: seat, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: "c1", Author: reworkTestSeat, Email: reworkTestEmail}, {SHA: reworkTestRejected, Author: "Sloan Ahrens", Email: reworkTestEmail}}},
+		{name: "empty origin range is not all seat's", rework: seat, origin: reworkTestRejected},
+		{name: "no seat author", rework: reworkPush{rejectedHead: reworkTestRejected, seatEmail: reworkTestEmail}, origin: reworkTestRejected, commit: seatOnly},
+		{name: "no seat email fails closed", rework: reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat}, origin: reworkTestRejected, commit: seatOnly},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.rework.allows(tt.origin, tt.commit); got != tt.want {
+				t.Errorf("allows = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestReworkPushForNilIssueIsEmpty(t *testing.T) {
+	t.Parallel()
+	if got := reworkPushFor(nil, reworkTestSeat, reworkTestEmail); got != (reworkPush{}) {
+		t.Errorf("reworkPushFor(nil) = %+v, want the zero value", got)
+	}
+}
+
+func TestReworkPushForNoSeatEmailIsEmpty(t *testing.T) {
+	t.Parallel()
+	issue := reworkBead([]string{land.LabelRework}, reworkStandDownNote("", "feature", reworkTestRejected))
+	if got := reworkPushFor(issue, reworkTestSeat, ""); got != (reworkPush{}) {
+		t.Errorf("reworkPushFor with no seat email = %+v, want the zero value", got)
 	}
 }

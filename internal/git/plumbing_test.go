@@ -406,3 +406,45 @@ func TestCommitAuthorSubjectUnknownCommit(t *testing.T) {
 	}
 	s.noUnscripted(t)
 }
+
+// Each commit line is "<sha>NUL<author>NUL<email>NUL<subject>", newest first.
+// The subject may hold colons and spaces; an empty range has no summaries.
+func TestFirstParentCommitSummariesParsesAuthorEmailAndSubject(t *testing.T) {
+	t.Parallel()
+	const format = "log --first-parent --format=%H%x00%an%x00%ae%x00%s"
+	const out = "bbb\x00capable\x00seat@test.com\x00feat: second, with a colon: here\naaa\x00Sloan Ahrens\x00sloan@test.com\x00fix: first\n"
+	s := newScripted(map[string]reply{
+		format + " a..b": ok(out),
+		format + " h..h": ok(""),
+	})
+	g := newTestGit(t, s)
+	got, err := g.FirstParentCommitSummaries("a", "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []CommitSummary{
+		{SHA: "bbb", Author: "capable", Email: "seat@test.com", Subject: "feat: second, with a colon: here"},
+		{SHA: "aaa", Author: "Sloan Ahrens", Email: "sloan@test.com", Subject: "fix: first"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("FirstParentCommitSummaries = %+v, want %+v", got, want)
+	}
+	if summaries, err := g.FirstParentCommitSummaries("h", "h"); err != nil || len(summaries) != 0 {
+		t.Errorf("empty range: FirstParentCommitSummaries = %v, %v", summaries, err)
+	}
+}
+
+func TestAuthorEmailReadsTheWorktreeIdentity(t *testing.T) {
+	t.Parallel()
+	s := newScripted(map[string]reply{
+		"config --get user.email": ok("seat@test.com\n"),
+	})
+	g := newTestGit(t, s)
+	got, err := g.AuthorEmail()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "seat@test.com" {
+		t.Errorf("AuthorEmail = %q, want seat@test.com", got)
+	}
+}

@@ -27,6 +27,7 @@ type doneRepo interface {
 	VerifyPushedCommit(remote, branch, commit string) error
 	PushRemoteBranchTip(remote, branch string) (string, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
+	AuthorEmail() (string, error)
 }
 
 var _ doneRepo = (*git.Git)(nil)

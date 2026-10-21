@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -65,4 +66,56 @@ func reworkUnchangedHeadRefusal(issueID, head string) string {
 	b.WriteString("Otherwise a new commit is needed: change the content so it answers the\n")
 	b.WriteString("findings, then re-run gt done.")
 	return b.String()
+}
+
+// reworkPush is the rejected-landing context a push needs to tell a rework from
+// divergence. The zero value means the bead is not in rework, or its live
+// rejection names no head, and recoverDivergedPush keeps its plain rules.
+type reworkPush struct {
+	// rejectedHead is the head the live MERGE REJECTION note names: the commit
+	// the landing worker refused.
+	rejectedHead string
+	// seatAuthor and seatEmail are the git identity this seat's commits carry:
+	// the agent name the session sets as GIT_AUTHOR_NAME, and the worktree's
+	// user.email. Both must match, so a commit under the same name from another
+	// mailbox is not read as this seat's. Git author fields are self-asserted,
+	// so this rules out accidents rather than a deliberate forgery; the lease
+	// pinned to the rejected head is what limits the overwrite.
+	seatAuthor string
+	seatEmail  string
+}
+
+// reworkPushFor reads the rework context off a work bead. It is empty unless
+// the bead carries the rework label and its rejection names a head, and it is
+// empty for a seat with no author name or email, because nothing can then be
+// matched as this seat's own.
+func reworkPushFor(issue *beads.Issue, seatAuthor, seatEmail string) reworkPush {
+	seatAuthor, seatEmail = strings.TrimSpace(seatAuthor), strings.TrimSpace(seatEmail)
+	if issue == nil || seatAuthor == "" || seatEmail == "" || !beads.HasLabel(issue, land.LabelRework) {
+		return reworkPush{}
+	}
+	head, ok := land.RejectedHead(issue.Notes)
+	if !ok {
+		return reworkPush{}
+	}
+	return reworkPush{rejectedHead: head, seatAuthor: seatAuthor, seatEmail: seatEmail}
+}
+
+// allows reports whether origin's tip may be overwritten under the lease: the
+// tip is the rejected head, and every commit in origin's range is this seat's
+// by both name and email. Origin's range must hold at least one commit, so an
+// empty range is never read as "all of it is this seat's".
+func (r reworkPush) allows(originSHA string, origin []git.CommitSummary) bool {
+	if r.rejectedHead == "" || r.seatAuthor == "" || r.seatEmail == "" || !land.HeadsEqual(originSHA, r.rejectedHead) {
+		return false
+	}
+	if len(origin) == 0 {
+		return false
+	}
+	for _, c := range origin {
+		if c.Author != r.seatAuthor || c.Email != r.seatEmail {
+			return false
+		}
+	}
+	return true
 }
