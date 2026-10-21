@@ -1,15 +1,21 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 )
 
 // OrphanedRoleOverridesCheck reports role override files that no runtime path
-// reads. Role definitions come from the binary's embedded defaults, so a
-// <town>/roles/*.toml or <rig>/roles/*.toml file has no effect; the check
-// names those files so they can be deleted instead of silently lingering.
+// reads, so an operator can delete them instead of leaving dead config in the
+// town. Role definitions come from the binary's embedded defaults
+// (config.loadBuiltinRoleDefinition); the loader that read <town>/roles and
+// <rig>/roles was retired in gt-7mthw. TestRoleOverridesHaveNoReader pins that
+// premise: a reader reintroduced without narrowing this check would make
+// doctor tell users to delete live config.
 type OrphanedRoleOverridesCheck struct {
 	BaseCheck
 }
@@ -25,23 +31,53 @@ func NewOrphanedRoleOverridesCheck() *OrphanedRoleOverridesCheck {
 	}
 }
 
-// Run lists the role override files under the town and under each rig.
+// Run lists the role override files under the town and under each registered
+// rig.
 func (c *OrphanedRoleOverridesCheck) Run(ctx *CheckContext) *CheckResult {
-	var orphans []string
+	// A registry that cannot be read leaves the rig-level overrides unknown;
+	// rigs-json owns reporting why, and this check must not read the gap as
+	// clean.
+	rigs, err := discoverRigs(ctx.TownRoot)
+	if err != nil {
+		return &CheckResult{
+			Name:     c.Name(),
+			Status:   StatusSkipped,
+			Message:  fmt.Sprintf("Could not read the rig registry: %v", err),
+			Category: c.Category(),
+		}
+	}
 
-	orphans = append(orphans, roleOverrideFiles(filepath.Join(ctx.TownRoot, "roles"))...)
+	dirs := []string{filepath.Join(ctx.TownRoot, "roles")}
+	for _, rig := range rigs {
+		dirs = append(dirs, filepath.Join(ctx.TownRoot, rig, "roles"))
+	}
+	sort.Strings(dirs)
 
-	// Discover rigs by looking for directories with rig.json
-	if entries, err := os.ReadDir(ctx.TownRoot); err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			rigName := entry.Name()
-			if _, err := os.Stat(filepath.Join(ctx.TownRoot, rigName, "rig.json")); err != nil {
-				continue
-			}
-			orphans = append(orphans, roleOverrideFiles(filepath.Join(ctx.TownRoot, rigName, "roles"))...)
+	var orphans, unreadable []string
+	for _, dir := range dirs {
+		files, err := roleOverrideFiles(dir)
+		if err != nil {
+			unreadable = append(unreadable, fmt.Sprintf("%s: %v", dir, err))
+			continue
+		}
+		orphans = append(orphans, files...)
+	}
+	sort.Strings(orphans)
+
+	if len(unreadable) > 0 {
+		// An unreadable dir hides orphans rather than proving there are none,
+		// so the result is inconclusive even when other dirs were clean.
+		message := fmt.Sprintf("%d role override path(s) could not be read", len(unreadable))
+		if len(orphans) > 0 {
+			message += fmt.Sprintf("; %d orphaned file(s) found in the directories that could be read", len(orphans))
+		}
+		return &CheckResult{
+			Name:     c.Name(),
+			Status:   StatusSkipped,
+			Message:  message,
+			Details:  append(append([]string{}, unreadable...), orphans...),
+			FixHint:  "Make these directories readable, then re-run gt doctor",
+			Category: c.Category(),
 		}
 	}
 
@@ -64,12 +100,16 @@ func (c *OrphanedRoleOverridesCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// roleOverrideFiles returns the *.toml files directly inside dir, or nil if
-// dir cannot be read.
-func roleOverrideFiles(dir string) []string {
+// roleOverrideFiles returns the .toml files directly inside dir. A missing dir
+// yields none; any other read error is returned so the caller can report the
+// answer as unknown instead of empty.
+func roleOverrideFiles(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var files []string
 	for _, entry := range entries {
@@ -77,5 +117,5 @@ func roleOverrideFiles(dir string) []string {
 			files = append(files, filepath.Join(dir, entry.Name()))
 		}
 	}
-	return files
+	return files, nil
 }
