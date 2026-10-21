@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestTranscriptTailReadsInsideTown checks the exported reader returns the
@@ -60,5 +61,37 @@ func TestTranscriptTailRefusesOutsideTown(t *testing.T) {
 	}
 	if _, err := TranscriptTail(town, filepath.Join(town, "no-worktree"), path, 100); !errors.Is(err, ErrOutsideTown) {
 		t.Fatalf("err = %v, want ErrOutsideTown", err)
+	}
+}
+
+// TestTranscriptStartReadsFirstTimestamp checks the start is the first
+// timestamped line's, read past a line with no timestamp, and that a transcript
+// with none reads as the zero time.
+func TestTranscriptStartReadsFirstTimestamp(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := filepath.Join(town, "session.jsonl")
+	lines := strings.Join([]string{
+		`{"type":"summary","summary":"earlier work"}`,
+		`{"type":"assistant","timestamp":"2026-10-21T17:00:01Z","message":{"content":[{"type":"text","text":"hi"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := TranscriptStart(town, town, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := time.Date(2026, 10, 21, 17, 0, 1, 0, time.UTC); !got.Equal(want) {
+		t.Errorf("start = %v, want %v", got, want)
+	}
+
+	bare := filepath.Join(town, "bare.jsonl")
+	if err := os.WriteFile(bare, []byte(`{"type":"summary"}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := TranscriptStart(town, town, bare); err != nil || !got.IsZero() {
+		t.Errorf("start of a transcript with no timestamp = %v, %v; want the zero time", got, err)
 	}
 }

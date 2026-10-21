@@ -26,6 +26,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"sort"
 	"strings"
 	"time"
@@ -53,6 +54,13 @@ var errRefused = errors.New("the containment check refused the transcript")
 
 // errNoTranscript means the seat has no worktree, or no transcript in it.
 var errNoTranscript = errors.New("no transcript for the seat")
+
+// errOtherSession means the seat's newest transcript begins after the
+// submission, so it belongs to a session that started after the one submitted.
+var errOtherSession = errors.New("the newest transcript begins after the submission")
+
+// errNoStart means the newest transcript has no timestamp to place it in time.
+var errNoStart = errors.New("the transcript has no timestamp")
 
 // Asker asks one battery. *jev.Client satisfies it.
 type Asker interface {
@@ -94,7 +102,9 @@ type Pass struct {
 	Locate func(rig, polecat string) string
 	// Latest returns the newest transcript of a worktree's seat. A pass reads it
 	// at pass time, not at submission time, so a seat respawned in the gap
-	// between the two may yield the newer session's transcript.
+	// between the two yields the newer session's transcript. That transcript
+	// begins after the submission, and the pass gives the submission a line
+	// with Reason ReasonOtherSession rather than judge the wrong session.
 	Latest func(worktree string) (string, error)
 	// TownRoot bounds the transcripts the progress reader will open.
 	TownRoot string
@@ -218,6 +228,9 @@ func (p *Pass) ask(ctx context.Context, d Done) (Line, error) {
 	case errors.Is(err, errNoTranscript):
 		line.Reason = ReasonNoTranscript
 		return line, nil
+	case errors.Is(err, errOtherSession):
+		line.Reason = ReasonOtherSession
+		return line, nil
 	case err != nil:
 		line.Reason = ReasonTranscriptUnreadable
 		return line, nil
@@ -237,15 +250,35 @@ func (p *Pass) ask(ctx context.Context, d Done) (Line, error) {
 		return line, ctx.Err()
 	case errors.Is(err, jev.ErrBadResponse):
 		line.Reason = ReasonBadResponse
+	case refusesRequest(err):
+		line.Reason = ReasonRequestRefused
 	default:
 		return line, err
 	}
 	return line, nil
 }
 
+// refusesRequest reports whether Jev refused this one request as malformed or
+// too large. Such a refusal comes back for the same excerpt every time, so a
+// pass that halted on it would never get past the submission. Every other error
+// is about Jev or the key and halts the pass, so the next pass asks again.
+func refusesRequest(err error) bool {
+	var se *jev.StatusError
+	if !errors.As(err, &se) {
+		return false
+	}
+	switch se.Status {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
+}
+
 // excerpt returns the tail of d's session transcript. A seat with no worktree or
-// no transcript returns errNoTranscript; the containment check's refusal comes
-// back as progress.ErrOutsideTown.
+// no transcript returns errNoTranscript. A transcript that begins after the
+// submission returns errOtherSession, and one with no timestamp returns
+// errNoStart. The containment check's refusal comes back as
+// progress.ErrOutsideTown.
 func (p *Pass) excerpt(d Done) (string, error) {
 	worktree := p.Locate(d.Rig, d.Polecat)
 	if worktree == "" {
@@ -254,6 +287,19 @@ func (p *Pass) excerpt(d Done) (string, error) {
 	path, err := p.Latest(worktree)
 	if err != nil {
 		return "", fmt.Errorf("%w: %v", errNoTranscript, err)
+	}
+	if path == "" {
+		return "", errNoTranscript
+	}
+	start, err := progress.TranscriptStart(p.TownRoot, worktree, path)
+	if err != nil {
+		return "", err
+	}
+	if start.IsZero() {
+		return "", errNoStart
+	}
+	if start.After(d.SubmittedAt) {
+		return "", errOtherSession
 	}
 	return progress.TranscriptTail(p.TownRoot, worktree, path, excerptRunes)
 }

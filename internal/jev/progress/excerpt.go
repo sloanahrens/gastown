@@ -1,7 +1,11 @@
 package progress
 
 import (
+	"bufio"
+	"encoding/json"
 	"errors"
+	"io"
+	"os"
 	"strings"
 	"time"
 )
@@ -10,6 +14,50 @@ import (
 // check refuses: outside the town and the seat's own Claude projects
 // directories, or reached through a symlink that leaves them.
 var ErrOutsideTown = errors.New("transcript is outside the town")
+
+// startScanLines bounds how many lines TranscriptStart reads looking for the
+// first timestamp.
+const startScanLines = 100
+
+// TranscriptStart returns the time of the first timestamped line of the
+// transcript at path, read through the same containment check as
+// TranscriptTail. It returns the zero time when none of the first lines carries
+// a timestamp.
+func TranscriptStart(townRoot, worktree, path string) (time.Time, error) {
+	p := &Pass{TownRoot: townRoot}
+	resolved, reason := p.transcriptPath(Nudge{Transcript: path, Worktree: worktree})
+	switch reason {
+	case "":
+	case ReasonOutsideTown:
+		return time.Time{}, ErrOutsideTown
+	default:
+		return time.Time{}, errors.New("transcript cannot be read: " + reason)
+	}
+	f, err := os.Open(resolved)
+	if err != nil {
+		return time.Time{}, err
+	}
+	defer func() { _ = f.Close() }()
+	r := bufio.NewReader(f)
+	for i := 0; i < startScanLines; i++ {
+		line, err := r.ReadBytes('\n')
+		var rec struct {
+			Timestamp string `json:"timestamp"`
+		}
+		if json.Unmarshal(line, &rec) == nil {
+			if ts, perr := time.Parse(time.RFC3339Nano, rec.Timestamp); perr == nil {
+				return ts, nil
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return time.Time{}, err
+		}
+	}
+	return time.Time{}, nil
+}
 
 // TranscriptTail returns the last maxRunes runes of the activity in the
 // transcript at path, the seat at worktree's transcript. It reads through the

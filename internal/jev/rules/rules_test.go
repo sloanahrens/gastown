@@ -263,3 +263,96 @@ func TestRulesOptionOrder(t *testing.T) {
 		t.Errorf("rule_kind offers %d options, want 6", n)
 	}
 }
+
+// TestRulesStartedAfterSubmissionGetsReasonLine checks a seat whose newest
+// transcript begins after the submission gets a line with a reason and no
+// answers: that transcript belongs to a later session, so Jev is not asked.
+func TestRulesStartedAfterSubmissionGetsReasonLine(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	transcript := writeTranscript(t, town, "session.jsonl", cleanTranscript)
+	asker := &fakeAsker{}
+	p := newPass(t, town, asker, transcript)
+	startPass(t, p)
+	// The transcript starts at 17:00, so a submission at 16:50 came before it.
+	p.Lister = fixedLister{dones: []Done{submitted("gt-early", fixedNow.Add(-40*time.Minute))}}
+
+	sum, err := p.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if asker.calls != 0 {
+		t.Errorf("Jev was asked %d time(s) about a later session's transcript, want none", asker.calls)
+	}
+	if sum.Unanswered != 1 {
+		t.Errorf("unanswered = %d, want 1", sum.Unanswered)
+	}
+	lines := parseLines(t, logLines(t, p.LogPath))
+	if len(lines) != 1 || lines[0].Reason != ReasonOtherSession || lines[0].Answers != nil {
+		t.Errorf("log = %+v, want one line with reason %s and no answers", lines, ReasonOtherSession)
+	}
+}
+
+// refuseFirst refuses its first call with err and answers every later call
+// through inner.
+type refuseFirst struct {
+	inner *fakeAsker
+	err   error
+	calls int
+}
+
+func (r *refuseFirst) Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error) {
+	r.calls++
+	if r.calls == 1 {
+		return nil, r.err
+	}
+	return r.inner.Ask(ctx, state, qs)
+}
+
+// TestRulesRefusedRequestGetsReasonLineAndPassMoves checks Jev refusing one
+// request as malformed gives that session a reason line, and the pass asks the
+// next submission. Halting on it would leave the cursor before it for good.
+func TestRulesRefusedRequestGetsReasonLineAndPassMoves(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	transcript := writeTranscript(t, town, "session.jsonl", pushTranscript)
+	asker := &refuseFirst{inner: &fakeAsker{}, err: &jev.StatusError{Status: 400, Message: "malformed"}}
+	p := newPass(t, town, asker, transcript)
+	startPass(t, p)
+	p.Lister = fixedLister{dones: []Done{
+		submitted("gt-a", fixedNow.Add(-3*time.Minute)),
+		submitted("gt-b", fixedNow.Add(-2*time.Minute)),
+	}}
+
+	sum, err := p.Run(context.Background())
+	if err != nil {
+		t.Fatalf("a refused request halted the pass: %v", err)
+	}
+	if sum.Asked != 1 || sum.Unanswered != 1 {
+		t.Errorf("asked %d and unanswered %d, want 1 and 1", sum.Asked, sum.Unanswered)
+	}
+	lines := parseLines(t, logLines(t, p.LogPath))
+	if len(lines) != 2 || lines[0].Bead != "gt-a" || lines[0].Reason != ReasonRequestRefused ||
+		lines[1].Bead != "gt-b" || lines[1].Answers == nil {
+		t.Errorf("log = %+v, want gt-a with reason %s and gt-b answered", lines, ReasonRequestRefused)
+	}
+}
+
+// TestRulesServerErrorHaltsThePass checks a 5xx from Jev is an outage, not a
+// fault in one request: the pass stops with the cursor before the submission.
+func TestRulesServerErrorHaltsThePass(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	transcript := writeTranscript(t, town, "session.jsonl", pushTranscript)
+	asker := &fakeAsker{err: &jev.StatusError{Status: 503, Message: "unavailable"}}
+	p := newPass(t, town, asker, transcript)
+	startPass(t, p)
+	p.Lister = fixedLister{dones: []Done{submitted("gt-a", fixedNow.Add(-3*time.Minute))}}
+
+	if _, err := p.Run(context.Background()); err == nil {
+		t.Fatal("pass with Jev answering 503 returned no error")
+	}
+	if n := len(logLines(t, p.LogPath)); n != 0 {
+		t.Errorf("log has %d lines after an outage, want none", n)
+	}
+}

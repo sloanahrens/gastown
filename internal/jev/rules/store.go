@@ -48,7 +48,13 @@ type Line struct {
 const (
 	ReasonNoTranscript         = "no_transcript"
 	ReasonTranscriptUnreadable = "transcript_unreadable"
-	ReasonBadResponse          = "bad_response"
+	// ReasonOtherSession means the seat's newest transcript began after the
+	// submission, so it is a later session's, and this one was not read.
+	ReasonOtherSession = "other_session"
+	ReasonBadResponse  = "bad_response"
+	// ReasonRequestRefused means Jev refused this session's request as
+	// malformed or too large.
+	ReasonRequestRefused = "request_refused"
 )
 
 // LogPath is the rules log, one JSON line per finished session.
