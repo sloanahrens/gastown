@@ -1587,7 +1587,10 @@ func pushBranchForLanding(r *doneRun, sourceBD beads.Client, sourceIssue *beads.
 		return err
 	}
 	fmt.Printf("Pushing branch to %s...\n", remote)
-	rework := reworkPushFor(sourceIssue, r.polecatName)
+	// An unreadable user.email leaves seatEmail empty, which turns the rework
+	// push off, so the divergence refusal stands.
+	seatEmail, _ := r.deps.repo.AuthorEmail()
+	rework := reworkPushFor(sourceIssue, r.polecatName, seatEmail)
 	var lastPushErr error
 	attempt := func() error {
 		lastPushErr = pushBranchToOrigin(r.deps.repo, remote, r.townRoot, r.rigName, r.branch, head, baseRef, rework)

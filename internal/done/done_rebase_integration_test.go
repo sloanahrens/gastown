@@ -404,7 +404,7 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkOfRejectedHead(t *testing.
 	}
 
 	recovered, diagnosis, err := recoverDivergedPush(g, "origin", "feature:feature", "feature", "origin/main",
-		reworkPush{rejectedHead: rejected, seatAuthor: reworkTestSeat})
+		reworkPush{rejectedHead: rejected, seatAuthor: reworkTestSeat, seatEmail: "test@test.com"})
 	if err != nil {
 		t.Fatalf("recoverDivergedPush: %v (diagnosis: %s)", err, diagnosis)
 	}
@@ -414,5 +414,65 @@ func TestIntegrationRecoverDivergedPush_RealRepoReworkOfRejectedHead(t *testing.
 	local := gitpkgRev(t, work, "HEAD")
 	if got := gitpkgRev(t, remote, "feature"); got != local {
 		t.Errorf("origin feature = %s, want the rework %s", got, local)
+	}
+}
+
+// The same rework shape, but origin's submission was authored by someone other
+// than the seat. The rework refuses, and origin's tip must be left where it
+// was: the refusal may not reach the lease push. (gt-dq6p8)
+func TestIntegrationRecoverDivergedPush_RealRepoReworkRefusesForeignAuthor(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	remote := filepath.Join(tmp, "remote.git")
+	testRunGit(t, tmp, "init", "--bare", "--initial-branch", "main", remote)
+
+	seed := filepath.Join(tmp, "seed")
+	testRunGit(t, tmp, "init", "--initial-branch", "main", seed)
+	testRunGit(t, seed, "config", "user.email", "test@test.com")
+	testRunGit(t, seed, "config", "user.name", "Test")
+	writeRepoFile(t, seed, "README.md", "# initial\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "initial")
+	testRunGit(t, seed, "remote", "add", "origin", remote)
+	testRunGit(t, seed, "push", "origin", "main")
+
+	// The rejected submission was written by the operator, not the seat.
+	testRunGit(t, seed, "checkout", "-b", "feature")
+	writeRepoFile(t, seed, "feature.txt", "first attempt\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "--author=Sloan Ahrens <test@test.com>", "-m", "feat: first attempt")
+	testRunGit(t, seed, "push", "origin", "feature:feature")
+	rejected := gitpkgRev(t, seed, "HEAD")
+
+	testRunGit(t, seed, "checkout", "main")
+	writeRepoFile(t, seed, "main-new.txt", "advance\n")
+	testRunGit(t, seed, "add", ".")
+	testRunGit(t, seed, "commit", "-m", "advance main")
+	testRunGit(t, seed, "push", "origin", "main")
+
+	work := filepath.Join(tmp, "work")
+	testRunGit(t, tmp, "clone", remote, work)
+	testRunGit(t, work, "config", "user.email", "test@test.com")
+	testRunGit(t, work, "config", "user.name", "Test")
+	testRunGit(t, work, "checkout", "-b", "feature", "origin/feature")
+	testRunGit(t, work, "rebase", "origin/main")
+	writeRepoFile(t, work, "feature.txt", "reworked\n")
+	testRunGit(t, work, "add", ".")
+	testRunGit(t, work, "commit", "--amend", "--no-edit")
+
+	g := gitpkg.NewGit(work)
+	recovered, diagnosis, err := recoverDivergedPush(g, "origin", "feature:feature", "feature", "origin/main",
+		reworkPush{rejectedHead: rejected, seatAuthor: reworkTestSeat, seatEmail: "test@test.com"})
+	if err != nil {
+		t.Fatalf("recoverDivergedPush: %v (diagnosis: %s)", err, diagnosis)
+	}
+	if recovered {
+		t.Fatalf("a foreign author's commit on origin must not be overwritten; diagnosis: %s", diagnosis)
+	}
+	if !strings.Contains(diagnosis, "real divergence") {
+		t.Errorf("diagnosis = %q, want the divergence refusal", diagnosis)
+	}
+	if got := gitpkgRev(t, remote, "feature"); got != rejected {
+		t.Errorf("origin feature = %s, want it untouched at %s", got, rejected)
 	}
 }

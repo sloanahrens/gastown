@@ -201,7 +201,13 @@ func divergenceRefusal(originSHA, localSHA string, missing []git.PatchIDCommit, 
 		ShortSHA(originSHA), ShortSHA(localSHA), len(missing))
 	b.WriteString("the ids below are patch-ids (git patch-id --stable), not commit shas; each names the origin commit it came from:")
 	for _, p := range missing {
-		c := subjects[p.Commit]
+		c, ok := subjects[p.Commit]
+		if !ok {
+			// The patch-id walk and the summary walk disagreed about this commit.
+			// Say so, rather than printing a mapping with no subject.
+			fmt.Fprintf(&b, "\n  patch-id %s = commit %s (no subject: the commit is not in origin's summary listing)", p.PatchID, ShortSHA(p.Commit))
+			continue
+		}
 		fmt.Fprintf(&b, "\n  patch-id %s = commit %s %s", p.PatchID, ShortSHA(p.Commit), c.Subject)
 	}
 	return b.String()

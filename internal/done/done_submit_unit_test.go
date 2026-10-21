@@ -55,6 +55,10 @@ type fakeDoneRepo struct {
 	dropPushed bool
 	// patchIDs are FirstParentPatchIDs answers keyed by the range's tip.
 	patchIDs map[string][]string
+	// summaries are FirstParentCommitSummaries answers keyed by the range's tip.
+	summaries map[string][]git.CommitSummary
+	// authorEmail is the worktree's user.email; empty reads as unset.
+	authorEmail string
 
 	// preservedByDefault makes a branch origin does not have read as pushed
 	// when HEAD is an ancestor of the default branch, as the real git does.
@@ -206,7 +210,16 @@ func (f *fakeDoneRepo) FirstParentPatchIDs(base, head string) ([]git.PatchIDComm
 }
 
 func (f *fakeDoneRepo) FirstParentCommitSummaries(base, head string) ([]git.CommitSummary, error) {
-	return nil, nil
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.summaries[head], nil
+}
+
+func (f *fakeDoneRepo) AuthorEmail() (string, error) {
+	if f.authorEmail == "" {
+		return "", errors.New("user.email is not set")
+	}
+	return f.authorEmail, nil
 }
 
 // PushForceWithLease pushes HEAD to the branch named by refspec's

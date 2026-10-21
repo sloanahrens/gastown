@@ -1570,10 +1570,12 @@ func (g *Git) FirstParentPatchIDs(base, head string) ([]PatchIDCommit, error) {
 	return pairs, nil
 }
 
-// CommitSummary is one commit's full sha, author name and subject line.
+// CommitSummary is one commit's full sha, author name and email, and subject
+// line.
 type CommitSummary struct {
 	SHA     string
 	Author  string
+	Email   string
 	Subject string
 }
 
@@ -1582,7 +1584,7 @@ type CommitSummary struct {
 // commits as FirstParentPatchIDs, so a patch-id can be matched to the commit it
 // came from and that commit can be named to a reader.
 func (g *Git) FirstParentCommitSummaries(base, head string) ([]CommitSummary, error) {
-	out, err := g.run("log", "--first-parent", "--format=%H%x00%an%x00%s", base+".."+head)
+	out, err := g.run("log", "--first-parent", "--format=%H%x00%an%x00%ae%x00%s", base+".."+head)
 	if err != nil {
 		return nil, err
 	}
@@ -1595,10 +1597,17 @@ func (g *Git) FirstParentCommitSummaries(base, head string) ([]CommitSummary, er
 		if !ok {
 			continue
 		}
-		author, subject, _ := strings.Cut(rest, "\x00")
-		summaries = append(summaries, CommitSummary{SHA: sha, Author: author, Subject: subject})
+		author, rest, _ := strings.Cut(rest, "\x00")
+		email, subject, _ := strings.Cut(rest, "\x00")
+		summaries = append(summaries, CommitSummary{SHA: sha, Author: author, Email: email, Subject: subject})
 	}
 	return summaries, nil
+}
+
+// AuthorEmail returns the user.email this worktree's commits are authored with.
+// It is an error when none is set.
+func (g *Git) AuthorEmail() (string, error) {
+	return g.run("config", "--get", "user.email")
 }
 
 // NotesAdd attaches content as a note on commit under the given notes ref,

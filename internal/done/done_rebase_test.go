@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	gitpkg "github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 func writeRepoFile(t *testing.T, dir, name, content string) {
@@ -508,12 +509,13 @@ const (
 	reworkTestRejected = "aaaa1111bbbb2222cccc3333dddd4444eeee5555"
 	reworkTestLocal    = "ffff0000111122223333444455556666777788889"
 	reworkTestSeat     = "capable"
+	reworkTestEmail    = "seat@test.com"
 )
 
 // reworkFakeGit is a divergence where origin's tip is one commit, written by
-// author, and local's one commit carries a different patch-id: a rework that
-// changed the content. The origin commit's sha is originTip itself.
-func reworkFakeGit(originTip, author string) *fakeDivergedPushGit {
+// author at email, and local's one commit carries a different patch-id: a
+// rework that changed the content. The origin commit's sha is originTip itself.
+func reworkFakeGit(originTip, author, email string) *fakeDivergedPushGit {
 	return &fakeDivergedPushGit{
 		revs: map[string]string{"origin/feature": originTip, "HEAD": reworkTestLocal},
 		patchIDLists: map[[2]string][]string{
@@ -521,15 +523,15 @@ func reworkFakeGit(originTip, author string) *fakeDivergedPushGit {
 			{"base", reworkTestLocal}: {"p-local"},
 		},
 		summaries: map[[2]string][]gitpkg.CommitSummary{
-			{"base", originTip}: {{SHA: originTip, Author: author, Subject: "feat: the rejected submission"}},
+			{"base", originTip}: {{SHA: originTip, Author: author, Email: email, Subject: "feat: the rejected submission"}},
 		},
 	}
 }
 
 func TestRecoverDivergedPush_ReworkOfRejectedHeadPushesUnderLease(t *testing.T) {
 	t.Parallel()
-	f := reworkFakeGit(reworkTestRejected, reworkTestSeat)
-	rework := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat}
+	f := reworkFakeGit(reworkTestRejected, reworkTestSeat, reworkTestEmail)
+	rework := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
 	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", rework)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -550,8 +552,8 @@ func TestRecoverDivergedPush_ReworkOfRejectedHeadPushesUnderLease(t *testing.T) 
 
 func TestRecoverDivergedPush_ReworkWithForeignCommitRefuses(t *testing.T) {
 	t.Parallel()
-	f := reworkFakeGit(reworkTestRejected, "Sloan Ahrens")
-	rework := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat}
+	f := reworkFakeGit(reworkTestRejected, "Sloan Ahrens", reworkTestEmail)
+	rework := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
 	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", rework)
 	if recovered {
 		t.Fatal("origin holding another author's commit must not be overwritten")
@@ -570,8 +572,8 @@ func TestRecoverDivergedPush_ReworkWithForeignCommitRefuses(t *testing.T) {
 func TestRecoverDivergedPush_ReworkAfterOriginMovedRefuses(t *testing.T) {
 	t.Parallel()
 	const moved = "9999aaaabbbbccccddddeeeeffff000011112222"
-	f := reworkFakeGit(moved, reworkTestSeat)
-	rework := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat}
+	f := reworkFakeGit(moved, reworkTestSeat, reworkTestEmail)
+	rework := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
 	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", rework)
 	if recovered {
 		t.Fatal("origin's tip moved after the rejection, so it is not the rejected submission")
@@ -589,7 +591,7 @@ func TestRecoverDivergedPush_ReworkAfterOriginMovedRefuses(t *testing.T) {
 
 func TestRecoverDivergedPush_RefusalNamesPatchIDCommits(t *testing.T) {
 	t.Parallel()
-	f := reworkFakeGit(reworkTestRejected, "Sloan Ahrens")
+	f := reworkFakeGit(reworkTestRejected, "Sloan Ahrens", reworkTestEmail)
 	_, diagnosis, _ := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
 	if !strings.Contains(diagnosis, "the ids below are patch-ids") {
 		t.Errorf("diagnosis = %q, want it to say the ids are patch-ids", diagnosis)
@@ -600,9 +602,22 @@ func TestRecoverDivergedPush_RefusalNamesPatchIDCommits(t *testing.T) {
 	}
 }
 
+func TestRecoverDivergedPush_RefusalSaysWhenACommitHasNoSubject(t *testing.T) {
+	t.Parallel()
+	f := reworkFakeGit(reworkTestRejected, "Sloan Ahrens", reworkTestEmail)
+	// The patch-id walk sees origin's commit, the summary walk does not.
+	f.summaries = nil
+	_, diagnosis, _ := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", reworkPush{})
+	want := "patch-id p-origin = commit commit-0 (no subject: the commit is not in origin's summary listing)"
+	if !strings.Contains(diagnosis, want) {
+		t.Errorf("diagnosis = %q, want the explicit line %q", diagnosis, want)
+	}
+}
+
 func TestReworkPushAllows(t *testing.T) {
 	t.Parallel()
-	seatOnly := []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat}}
+	seatOnly := []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: reworkTestEmail}}
+	seat := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
 	tests := []struct {
 		name   string
 		rework reworkPush
@@ -611,13 +626,15 @@ func TestReworkPushAllows(t *testing.T) {
 		want   bool
 	}{
 		{name: "zero value never allows", origin: reworkTestRejected, commit: seatOnly},
-		{name: "seat commits over the rejected head", rework: reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat}, origin: reworkTestRejected, commit: seatOnly, want: true},
-		{name: "abbreviated rejected head matches", rework: reworkPush{rejectedHead: reworkTestRejected[:8], seatAuthor: reworkTestSeat}, origin: reworkTestRejected, commit: seatOnly, want: true},
-		{name: "origin tip is not the rejected head", rework: reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat}, origin: reworkTestLocal, commit: seatOnly},
-		{name: "foreign author on origin", rework: reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat}, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: "Sloan Ahrens"}}},
-		{name: "one foreign commit among seat commits", rework: reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat}, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: "c1", Author: reworkTestSeat}, {SHA: reworkTestRejected, Author: "Sloan Ahrens"}}},
-		{name: "empty origin range is not all seat's", rework: reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat}, origin: reworkTestRejected},
-		{name: "no seat author", rework: reworkPush{rejectedHead: reworkTestRejected}, origin: reworkTestRejected, commit: seatOnly},
+		{name: "seat commits over the rejected head", rework: seat, origin: reworkTestRejected, commit: seatOnly, want: true},
+		{name: "abbreviated rejected head matches", rework: reworkPush{rejectedHead: reworkTestRejected[:8], seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}, origin: reworkTestRejected, commit: seatOnly, want: true},
+		{name: "origin tip is not the rejected head", rework: seat, origin: reworkTestLocal, commit: seatOnly},
+		{name: "foreign author on origin", rework: seat, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: "Sloan Ahrens", Email: reworkTestEmail}}},
+		{name: "seat name from another mailbox", rework: seat, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: reworkTestRejected, Author: reworkTestSeat, Email: "other@test.com"}}},
+		{name: "one foreign commit among seat commits", rework: seat, origin: reworkTestRejected, commit: []gitpkg.CommitSummary{{SHA: "c1", Author: reworkTestSeat, Email: reworkTestEmail}, {SHA: reworkTestRejected, Author: "Sloan Ahrens", Email: reworkTestEmail}}},
+		{name: "empty origin range is not all seat's", rework: seat, origin: reworkTestRejected},
+		{name: "no seat author", rework: reworkPush{rejectedHead: reworkTestRejected, seatEmail: reworkTestEmail}, origin: reworkTestRejected, commit: seatOnly},
+		{name: "no seat email fails closed", rework: reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat}, origin: reworkTestRejected, commit: seatOnly},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -630,7 +647,15 @@ func TestReworkPushAllows(t *testing.T) {
 
 func TestReworkPushForNilIssueIsEmpty(t *testing.T) {
 	t.Parallel()
-	if got := reworkPushFor(nil, reworkTestSeat); got != (reworkPush{}) {
+	if got := reworkPushFor(nil, reworkTestSeat, reworkTestEmail); got != (reworkPush{}) {
 		t.Errorf("reworkPushFor(nil) = %+v, want the zero value", got)
+	}
+}
+
+func TestReworkPushForNoSeatEmailIsEmpty(t *testing.T) {
+	t.Parallel()
+	issue := reworkBead([]string{land.LabelRework}, reworkStandDownNote("", "feature", reworkTestRejected))
+	if got := reworkPushFor(issue, reworkTestSeat, ""); got != (reworkPush{}) {
+		t.Errorf("reworkPushFor with no seat email = %+v, want the zero value", got)
 	}
 }
