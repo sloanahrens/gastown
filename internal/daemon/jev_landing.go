@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/jev/landing"
 )
 
@@ -68,7 +69,20 @@ func (d *Daemon) runJevLanding() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), jevLandingRunBudget)
 	defer cancel()
+	// The E-stop holds the patrol from starting, but a pass already in flight
+	// went on paying until the daily cap or its budget (gt-tevxz). The gate
+	// checks between billed calls, as jev_dedupe's does (gt-0h4i0).
+	gate := &estopGatedAsker{
+		Asker:  pass.Asker,
+		cancel: cancel,
+		active: func() bool { return estop.IsActive(d.config.TownRoot) },
+	}
+	pass.Asker = gate
 	sum, err := pass.Run(ctx)
+	if gate.stopped {
+		d.logger.Printf("jev_landing: stopped: E-STOP active after asking %d landing(s)", sum.Asked)
+		return
+	}
 	if errors.Is(err, landing.ErrBusy) {
 		d.logger.Printf("jev_landing: skipped: %v", err)
 		return

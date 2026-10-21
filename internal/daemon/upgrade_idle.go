@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gofrs/flock"
 
@@ -13,8 +14,9 @@ import (
 
 // isIdleForUpgrade reports whether restarting the daemon now would kill no
 // in-flight work: no script plugin, compactor, boot triage, scheduled
-// slings or patrol watchdog run, no landing-worker pass, no jev_dedupe pass,
-// no scheduled_maintenance gc cycle, and no
+// slings or patrol watchdog run, no landing-worker pass, no paid Jev pass
+// (jev_dedupe, jev_attention, jev_landing, jev_submission, jev_dispatch), no
+// scheduled_maintenance gc cycle, and no
 // install holding install-gt.lock. The Dolt goroutines are not counted: they
 // are short or restartable. Post-landing runs and tier sweep cycles are not
 // here either: checkUpgradeRestart holds a bounded wait for each instead
@@ -140,9 +142,21 @@ func (d *Daemon) daemonWorkHolds() []*daemonWork {
 	}
 	// A restart kills the Jev call in flight before its line is recorded, and
 	// the next pass asks and bills that finding again (gt-0h4i0). The pass
-	// reruns from the new daemon, so it is soft work.
-	if d.jevDedupeRunning.Load() {
-		holds = append(holds, &daemonWork{name: "a jev_dedupe pass"})
+	// reruns from the new daemon, so it is soft work. The other paid passes
+	// lose the same call the same way (gt-tevxz).
+	for _, pass := range []struct {
+		running *atomic.Bool
+		name    string
+	}{
+		{&d.jevDedupeRunning, "jev_dedupe"},
+		{&d.jevAttentionRunning, "jev_attention"},
+		{&d.jevLandingRunning, "jev_landing"},
+		{&d.jevSubmissionRunning, "jev_submission"},
+		{&d.jevDispatchRunning, "jev_dispatch"},
+	} {
+		if pass.running.Load() {
+			holds = append(holds, &daemonWork{name: "a " + pass.name + " pass"})
+		}
 	}
 	for _, hold := range holds {
 		if hold.hard {

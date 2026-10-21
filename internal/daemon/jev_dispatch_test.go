@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -389,4 +390,39 @@ func TestJevDispatchIsALifecycleHeartbeatStep(t *testing.T) {
 		}
 	}
 	t.Error("jev-dispatch is not in the daemon's heartbeat steps")
+}
+
+// TestJevDispatchPassStopsBetweenCallsWhenEstopped covers gt-tevxz: the E-stop
+// kept a pass from starting, but one already in flight went on paying for every
+// bead it reached. The call in flight finishes and is recorded; the beads
+// behind it wait for a pass run after the E-stop lifts.
+func TestJevDispatchPassStopsBetweenCallsWhenEstopped(t *testing.T) {
+	t.Parallel()
+	r := newJevDispatchRig(t)
+	var placed []*beads.Issue
+	for i, id := range []string{"gt-a", "gt-b", "gt-c"} {
+		placed = append(placed, &beads.Issue{
+			ID: id, Title: "Do a thing", Status: "in_progress",
+			Description: fmt.Sprintf("attached_at: 2026-10-20T11:0%d:00Z\n\n## Goal\n\nDo a thing.\n", i),
+		})
+	}
+	r.pass.Lister = stubPlaced{all: placed}
+	if err := battery.WriteCursor(r.pass.CursorPath, battery.Cursor{Time: time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)}); err != nil {
+		t.Fatal(err)
+	}
+	asker := &estoppingAsker{t: t, town: r.town}
+	r.pass.Asker = asker
+
+	r.d.runJevDispatch()
+
+	if asker.calls != 1 {
+		t.Errorf("Jev was asked about %d beads, want only the one in flight when the E-stop went up", asker.calls)
+	}
+	lines, err := jevdispatch.ReadRecent(r.pass.LogPath, 5)
+	if err != nil || len(lines) != 1 || lines[0].Bead != "gt-a" {
+		t.Errorf("log lines = %+v, %v, want the one gt-a line recorded", lines, err)
+	}
+	if !strings.Contains(r.logs.String(), "jev_dispatch: stopped:") {
+		t.Errorf("log = %q, want the pass to say it stopped for the E-stop", r.logs)
+	}
 }
