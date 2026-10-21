@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -95,10 +94,9 @@ func (fixture) Parse(raw []byte) (Item, error) {
 }
 
 func (f fixture) Label(_ context.Context, item Item) (Labeling, error) {
+	// A missing labels file is an error, not unlabeled items: the fixture's
+	// setup writes it, so its absence is a broken test, not an empty battery.
 	data, err := os.ReadFile(FixtureLabelsPath(f.town))
-	if errors.Is(err, fs.ErrNotExist) {
-		return Labeling{}, nil
-	}
 	if err != nil {
 		return Labeling{}, fmt.Errorf("reading the fixture labels: %w", err)
 	}

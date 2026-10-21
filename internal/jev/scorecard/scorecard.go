@@ -53,13 +53,13 @@ type sample struct {
 
 // Build reads the adapter's log, keeps the items stamped at or after since (a
 // zero since keeps all), and reports each question. A line that does not parse
-// is skipped and counted; a missing log is an empty report.
+// is skipped and counted; a missing log is an empty report that says so.
 func Build(ctx context.Context, a Adapter, since time.Time) (Report, error) {
-	items, skipped, err := readItems(a.LogPath(), parseLines(a), since)
+	items, skipped, found, err := readItems(a.LogPath(), parseLines(a), since)
 	if err != nil {
 		return Report{}, err
 	}
-	rep := Report{Battery: a.Battery(), Items: len(items), LinesSkipped: skipped, Questions: []QuestionReport{}}
+	rep := Report{Battery: a.Battery(), Items: len(items), LinesSkipped: skipped, LogMissing: !found, Questions: []QuestionReport{}}
 	if !since.IsZero() {
 		rep.Since = &since
 	}
@@ -108,18 +108,18 @@ func parseLines(a Adapter) func([]byte) ([]Item, error) {
 	}
 }
 
-func readItems(path string, parse func([]byte) ([]Item, error), since time.Time) ([]Item, int, error) {
+// readItems returns the items in the log at path. found is false when there is
+// no log at all, which is not an error.
+func readItems(path string, parse func([]byte) ([]Item, error), since time.Time) (items []Item, skipped int, found bool, err error) {
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, 0, nil
+		return nil, 0, false, nil
 	}
 	if err != nil {
-		return nil, 0, fmt.Errorf("opening the log: %w", err)
+		return nil, 0, false, fmt.Errorf("opening the log: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
-	var items []Item
-	skipped := 0
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
@@ -140,9 +140,9 @@ func readItems(path string, parse func([]byte) ([]Item, error), since time.Time)
 		}
 	}
 	if err := sc.Err(); err != nil {
-		return nil, 0, fmt.Errorf("reading the log: %w", err)
+		return nil, 0, false, fmt.Errorf("reading the log: %w", err)
 	}
-	return items, skipped, nil
+	return items, skipped, true, nil
 }
 
 // questionKinds maps each question to the kind of its first usable answer. A
@@ -205,20 +205,22 @@ func scoreQuestion(id QuestionID, kind string, items []Item, labels []map[Questi
 	var samples []sample
 	contextLines := map[string]int{}
 	for i, it := range items {
-		ans, ok := it.Answers[id]
-		if !ok {
-			continue
-		}
+		label, labeled := labels[i][id]
+		ans, answered := it.Answers[id]
 		value, chosen, ok := usable(ans, kind)
-		if !ok {
+		if !answered || !ok {
+			// A label with nothing to score it against is a disagreement
+			// between the log and the adapter, so it is counted.
+			if labeled {
+				qr.Unmatched++
+			}
 			continue
 		}
 		qr.Logged++
 		if c := it.Context[id]; c != "" {
 			contextLines[c]++
 		}
-		label, ok := labels[i][id]
-		if !ok {
+		if !labeled {
 			continue
 		}
 		qr.Labeled++
