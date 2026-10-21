@@ -56,10 +56,17 @@ const WillRecurWindow = 14 * 24 * time.Hour
 // CIFailureRetention is how long the CI-failure ledger keeps a record. The
 // ledger rewrites itself on each write and drops anything older, so a
 // retention shorter than WillRecurWindow means a later write can remove a
-// repeat the window would have counted. The scorecard's coverage check depends
-// on this value. The daemon's writer uses the same constant; a test in the
-// daemon package holds the two together.
+// repeat the window would have counted. The daemon's writer uses the same
+// constant; a test in the daemon package holds the two together.
 const CIFailureRetention = 14 * 24 * time.Hour
+
+// CIFailureRetentionFloor is the shortest retention the ledger has ever kept.
+// Writes made before the ledger kept the full window pruned at this age, so
+// the scorecard's coverage check bounds the last write by it, not by
+// CIFailureRetention: a write prunes records older than itself less its
+// retention, and no write can have pruned a repeat after a judging unless it
+// came after that judging plus this floor.
+const CIFailureRetentionFloor = 7 * 24 * time.Hour
 
 // CIFailureLedgerPath is the town's CI-failure ledger, one JSON line per
 // failing test of each red candidate verdict. The daemon's landing worker

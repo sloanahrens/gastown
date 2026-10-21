@@ -124,11 +124,12 @@ func TestFailcauseIsUnlabeledBeforeTheWindowCloses(t *testing.T) {
 	}
 }
 
-// A ledger written ten days after the judging still holds every record the
-// fourteen-day window could hold, so a window closed with no repeat is quiet.
+// A ledger last written six days after the judging still holds every record the
+// fourteen-day window could hold under any retention, so a window closed with
+// no repeat is quiet.
 func TestFailcauseLabelsAQuietWindowTheLedgerKept(t *testing.T) {
 	t.Parallel()
-	ledger := ciLedger(t, judgedAt.Add(10*24*time.Hour), ciFailure("gt-abc", judgedAt))
+	ledger := ciLedger(t, judgedAt.Add(6*24*time.Hour), ciFailure("gt-abc", judgedAt))
 
 	got := labelOne(t, ledger, judgedAt.Add(failcause.WillRecurWindow+24*time.Hour), "gt-abc")
 
@@ -139,11 +140,12 @@ func TestFailcauseLabelsAQuietWindowTheLedgerKept(t *testing.T) {
 
 // Past the window with no repeat, the negative label needs proof the ledger
 // kept the whole window: its last write must come strictly before the judging
-// plus the ledger's retention. A later write may have pruned a repeat.
+// plus the shortest retention the ledger has kept. A later write may have
+// pruned a repeat.
 func TestFailcauseNegativeNeedsALedgerThatKeptTheWindow(t *testing.T) {
 	t.Parallel()
 	closed := judgedAt.Add(failcause.WillRecurWindow + 24*time.Hour)
-	boundary := judgedAt.Add(failcause.CIFailureRetention)
+	boundary := judgedAt.Add(failcause.CIFailureRetentionFloor)
 
 	covered := ciLedger(t, boundary.Add(-time.Second), ciFailure("gt-abc", judgedAt))
 	if got := labelOne(t, covered, closed, "gt-abc"); !got.Labeled || got.Labels[qWillRecur] != false {
@@ -161,6 +163,21 @@ func TestFailcauseNegativeNeedsALedgerThatKeptTheWindow(t *testing.T) {
 	pruned := ciLedger(t, boundary.Add(time.Hour), ciFailure("gt-abc", judgedAt))
 	if got := labelOne(t, pruned, closed, "gt-abc"); got.Labeled {
 		t.Errorf("a ledger written after the window's coverage: Labeling = %+v, want unlabeled", got)
+	}
+}
+
+// Before the ledger kept the full window, it pruned at seven days. A repeat on
+// another bead one day after the judging, then a write ten days after it that
+// pruned the repeat, must not read as quiet: the ledger's last write is later
+// than the shortest retention allows.
+func TestFailcauseWriteUnderTheOldRetentionIsNotQuiet(t *testing.T) {
+	t.Parallel()
+	ledger := ciLedger(t, judgedAt.Add(10*24*time.Hour), ciFailure("gt-abc", judgedAt))
+
+	got := labelOne(t, ledger, judgedAt.Add(failcause.WillRecurWindow+24*time.Hour), "gt-abc")
+
+	if got.Labeled {
+		t.Errorf("Labeling = %+v, want unlabeled: a write ten days on may have pruned a repeat", got)
 	}
 }
 
