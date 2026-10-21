@@ -1237,7 +1237,7 @@ The pass reads the first-sight records the landing worker wrote (see below), pas
 the cursor by seen time, and each waiting bead with a READY TO LAND block that no
 record names at its head. The records are what keep a fast landing in the log:
 the landing worker removes the label and prunes the branch when it lands the
-bead. It asks six questions in one call and appends one line per submission to
+bead. It asks ten questions in one call and appends one line per submission to
 `.runtime/jev/submission.jsonl`. The
 pass is advisory and log-only: it adds no bead comment, no attention item and
 nothing under `.runtime/landings`, and it never holds up a landing. Read the
@@ -1246,17 +1246,23 @@ log with `gt jev submission --recent N`.
 The log line is `{ts, bead, branch, head, target, submitted, agent, answers,
 question_version, model}`. `answers` maps each question id to its answer:
 `tests_cover_change`, `beyond_goal`, `commits_match_change`,
-`touches_town_machinery` and `will_pass_review` each hold a `noul` probability,
-and `risk` holds a `score` (the landing battery's four levels) with its
-`confidence`. `question_version` is `submission.Version` and changes whenever a
-question or a rubric level does; `model` is the model ID the API returned.
-`agent` is the bead's `agent:` label, else its `agent=` attached var. The log
-holds ids, times, numbers and answers, never prompt, title or diff text.
+`touches_town_machinery`, `will_pass_review`, `claims_verified`,
+`verification_applies` and `boxes_credible` each hold a `noul` probability,
+`risk` holds a `score` (the landing battery's four levels) with its
+`confidence`, and `outcome` holds a `choice` over `complete`, `partial`,
+`blocked` and `unclear`: its `choice`, every option's `probabilities`, and
+`positive` (`complete`). `question_version` is `submission.Version` and changes
+whenever a question or a rubric level does; `model` is the model ID the API
+returned. `agent` is the bead's `agent:` label, else its `agent=` attached var.
+The log holds ids, times, numbers and answers, never prompt, title or diff text.
 
-The state Jev reads is the bead's title, its `## Goal` and `## Acceptance`
-sections (each cut to 1500 runes), the commit subjects on `target..head` (at
-most 20) and the changed paths from `git diff --numstat target..head` with
-added and removed counts (at most 80 files). Each value is JSON-quoted. No diff
+The state Jev reads is the bead's title, its `## Goal`, `## Acceptance` and MR
+notes. The sections are each cut to 1500 runes. The MR notes are the bead's
+notes from its last READY TO LAND block on, cut to 4000 runes, so an earlier
+attempt's rejection stays out. The state also carries the commit subjects on
+`target..head` (at most 20) and the changed paths from `git diff --numstat
+target..head` with added and removed counts (at most 80 files). Each value is
+JSON-quoted. No diff
 content is sent.
 
 A submission whose record holds its commits is asked from them, and the pass
@@ -1472,8 +1478,23 @@ case-insensitively:
 
 The two phrase lists are `missingTestPhrases` and `beyondGoalPhrases` in
 `internal/jev/scorecard/submission.go`, and nowhere else. A question no title
-names stays unlabeled on that line. The report's context counts the reviews that
-labeled submissions and the findings those reviews carried.
+names stays unlabeled on that line.
+
+That block's kind also sets labels. A `gate` refusal sets `boxes_credible` false
+(`submission:gate-rejected`). A `review` refusal whose findings include a major
+or critical sets `claims_verified` false (`submission:om-major`). A `conflict`
+refusal sets none of the four new questions.
+
+An approval the first attempt landed sets `claims_verified`, `boxes_credible`
+and `outcome` true (`submission:first-try-landing`). That needs three things:
+the joined row is the first attempt, the bead's `LANDING RECORD` names the
+submission's head, and no rejection block sits on that attempt. The outcome
+label is true for `complete`, the choice's positive option. A line that
+matches none of these leaves the four questions unlabeled.
+
+A line's `rule` names every rule that set a label, space-separated. The report's
+context counts the reviews that labeled submissions and the findings those
+reviews carried.
 
 The `targets` battery reads `.runtime/jev/targets.jsonl`. Its labels come from
 the deep-review run bead each line names. Before changing a ledger line shape,

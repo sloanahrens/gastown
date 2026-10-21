@@ -47,12 +47,16 @@ var (
 	}
 )
 
-// Rules the submission adapter names in the --json report's lines. Each names
-// the om verdict that set will_pass_review; the two finding labels ride the
-// same line.
+// Rules the submission adapter names in the --json report's lines. The first
+// two name the om verdict that set will_pass_review. The rest name the
+// rejection or landing that set the other labels; a line can carry several,
+// space-separated.
 const (
 	ruleSubmissionApprove        = "submission:om-approve"
 	ruleSubmissionRequestChanges = "submission:om-request-changes"
+	ruleSubmissionGateRejected   = "submission:gate-rejected"
+	ruleSubmissionOmMajor        = "submission:om-major"
+	ruleSubmissionFirstTry       = "submission:first-try-landing"
 )
 
 // refSubmitted is the Item ref that holds a submission's submitted time.
@@ -75,9 +79,12 @@ func init() {
 // submissionAdapter labels each logged submission from the om review that
 // judged it: the first review row for the bead at or after the logged
 // submitted time and before the bead's next submission. A row's approve or
-// request_changes verdict sets will_pass_review, and the MERGE REJECTION block
-// for the row's attempt, read from the bead's notes, sets tests_cover_change
-// and beyond_goal when its findings name a missing test or scope beyond the bead.
+// request_changes verdict sets will_pass_review. The MERGE REJECTION block for
+// the row's attempt, read from the bead's notes, sets tests_cover_change and
+// beyond_goal from its findings, boxes_credible false when the gate refused it,
+// and claims_verified false when om refused it on a major. An approval the
+// first attempt landed, with its LANDING RECORD on the bead, sets claims_verified,
+// boxes_credible and the outcome choice's positive option.
 type submissionAdapter struct {
 	log     string
 	reviews *land.ReviewsFile
@@ -101,6 +108,7 @@ func (a *submissionAdapter) LogPath() string { return a.log }
 type submissionLine struct {
 	TS        time.Time             `json:"ts"`
 	Bead      string                `json:"bead"`
+	Head      string                `json:"head"`
 	Submitted time.Time             `json:"submitted"`
 	Model     string                `json:"model"`
 	Answers   map[QuestionID]Answer `json:"answers"`
@@ -123,7 +131,10 @@ func (a *submissionAdapter) Parse(raw []byte) (Item, error) {
 		Time:    line.TS,
 		Model:   line.Model,
 		Answers: line.Answers,
-		Refs:    map[string]string{refSubmitted: line.Submitted.Format(time.RFC3339Nano)},
+		Refs: map[string]string{
+			refSubmitted: line.Submitted.Format(time.RFC3339Nano),
+			refHead:      line.Head,
+		},
 	}, nil
 }
 
@@ -146,14 +157,14 @@ func (a *submissionAdapter) Label(_ context.Context, item Item) (Labeling, error
 	}
 
 	labels := map[QuestionID]bool{}
-	var rule string
+	var rules []string
 	switch row.Verdict {
 	case land.VerdictApprove:
 		labels[QuestionID(submission.QWillPassReview)] = true
-		rule = ruleSubmissionApprove
+		rules = append(rules, ruleSubmissionApprove)
 	case land.VerdictRequestChanges:
 		labels[QuestionID(submission.QWillPassReview)] = false
-		rule = ruleSubmissionRequestChanges
+		rules = append(rules, ruleSubmissionRequestChanges)
 	default:
 		return Labeling{}, nil
 	}
@@ -168,8 +179,33 @@ func (a *submissionAdapter) Label(_ context.Context, item Item) (Labeling, error
 		for id, v := range submissionFindingLabels(rej.Findings) {
 			labels[id] = v
 		}
+		// A conflict refusal says nothing about the claims or the boxes, so it
+		// leaves them unlabeled.
+		switch rej.Kind {
+		case string(land.RejectGate):
+			labels[QuestionID(submission.QBoxesCredible)] = false
+			rules = append(rules, ruleSubmissionGateRejected)
+		case string(land.RejectReview):
+			if land.BlocksLanding(rej.Findings) {
+				labels[QuestionID(submission.QClaimsVerified)] = false
+				rules = append(rules, ruleSubmissionOmMajor)
+			}
+		}
+	} else if row.Verdict == land.VerdictApprove && row.Attempt == 1 && landedAs(notes, item.Refs[refHead]) {
+		labels[QuestionID(submission.QClaimsVerified)] = true
+		labels[QuestionID(submission.QBoxesCredible)] = true
+		labels[QuestionID(submission.QOutcome)] = true
+		rules = append(rules, ruleSubmissionFirstTry)
 	}
-	return Labeling{Labeled: true, Labels: labels, Rule: rule}, nil
+	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, " ")}, nil
+}
+
+// landedAs reports whether notes carry the LANDING RECORD of head, the newest
+// record naming head and a landed commit. A submission nothing landed has no
+// record for its head.
+func landedAs(notes, head string) bool {
+	rec, ok := land.ParseLandingRecord(notes)
+	return ok && head != "" && rec.Head == head
 }
 
 // loadReviews reads the whole review log once, grouped by bead.

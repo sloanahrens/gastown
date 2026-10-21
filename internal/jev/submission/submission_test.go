@@ -107,8 +107,15 @@ func goodAnswers() *jev.Answers {
 			QCommitsMatchChange:   0.9,
 			QTouchesTownMachinery: 0.2,
 			QWillPassReview:       0.8,
+			QClaimsVerified:       0.9,
+			QVerificationApplies:  0.6,
+			QBoxesCredible:        0.7,
 		},
 		Score: map[string]jev.ScoreAnswer{QRisk: {Score: 1, Confidence: 0.6}},
+		Choice: map[string]jev.ChoiceAnswer{QOutcome: {
+			Choice:        OutcomeComplete,
+			Probabilities: map[string]float64{OutcomeComplete: 0.7, "partial": 0.2, "blocked": 0.05, "unclear": 0.05},
+		}},
 	}
 }
 
@@ -251,7 +258,7 @@ func TestJevSubmissionLineShape(t *testing.T) {
 		l.Agent != "claude-haiku" || l.QuestionVersion != Version || l.Model != "jev-1.13.0" {
 		t.Errorf("line = %+v", l)
 	}
-	if len(l.Answers) != 6 {
+	if len(l.Answers) != 10 {
 		t.Fatalf("answers = %+v, want one per question", l.Answers)
 	}
 	if n := l.Answers[QWillPassReview].Noul; n == nil || *n != 0.8 {
@@ -259,6 +266,12 @@ func TestJevSubmissionLineShape(t *testing.T) {
 	}
 	if a := l.Answers[QRisk]; a.Score == nil || *a.Score != 1 || a.Confidence == nil || *a.Confidence != 0.6 || a.Noul != nil {
 		t.Errorf("risk = %+v, want score 1 at 0.6", a)
+	}
+	if a := l.Answers[QClaimsVerified]; a.Noul == nil || *a.Noul != 0.9 {
+		t.Errorf("claims_verified = %+v", a)
+	}
+	if a := l.Answers[QOutcome]; a.Choice != OutcomeComplete || a.Positive != OutcomeComplete || a.Probabilities[OutcomeComplete] != 0.7 || a.Noul != nil {
+		t.Errorf("outcome = %+v, want complete at 0.7 with complete positive", a)
 	}
 	for _, leak := range []string{"Do the thing.", "internal/x.go", "@@"} {
 		if strings.Contains(string(raw), leak) {
@@ -312,7 +325,7 @@ func TestJevSubmissionStateHoldsOnlyTheListedFields(t *testing.T) {
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	want := "bead_acceptance bead_goal bead_title commit_subjects files_changed"
+	want := "bead_acceptance bead_goal bead_title commit_subjects files_changed mr_notes"
 	if strings.Join(names, " ") != want {
 		t.Errorf("fields = %v, want %s", names, want)
 	}
@@ -404,6 +417,57 @@ func TestJevSubmissionStateCapsSectionsSubjectsAndFiles(t *testing.T) {
 	}
 	if len(files) != maxFiles {
 		t.Errorf("files_changed holds %d, want %d", len(files), maxFiles)
+	}
+}
+
+// The MR notes the state quotes start at the live READY TO LAND block: an
+// earlier attempt's rejection stays out, and the notes after the block reach
+// the state.
+func TestJevSubmissionMRNotesStartAtTheLiveReadyBlock(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	issue := r.ready("gt-a", time.Minute)
+	earlier := land.FormatRejectionNote(land.RejectionNote{
+		Attempt: 1, Reason: "earlier-rejection-reason", Branch: "b", Target: "main", MR: "gt-a",
+	})
+	issue.Notes = earlier + "\n" + issue.Notes + "\nverification: go test ./internal/x passed"
+	r.submissions.issues = []*beads.Issue{issue}
+
+	if _, err := r.pass.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var notes string
+	if err := json.Unmarshal(stateFields(t, r.asker.states[0])["mr_notes"], &notes); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(notes, land.ReadyNoteMarker+"\n") {
+		t.Errorf("mr_notes = %q, want it to start at the READY TO LAND block", notes)
+	}
+	if strings.Contains(notes, "earlier-rejection-reason") {
+		t.Errorf("mr_notes carries an earlier attempt's rejection: %q", notes)
+	}
+	if !strings.HasSuffix(notes, "verification: go test ./internal/x passed") {
+		t.Errorf("mr_notes = %q, want the notes after the block", notes)
+	}
+}
+
+// The MR notes are cut to 4000 runes, the one cap on the state's free text.
+func TestJevSubmissionMRNotesAreCapped(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	issue := r.ready("gt-a", time.Minute)
+	issue.Notes += "\n" + strings.Repeat("n", 2*maxNotesRunes)
+	r.submissions.issues = []*beads.Issue{issue}
+
+	if _, err := r.pass.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	var notes string
+	if err := json.Unmarshal(stateFields(t, r.asker.states[0])["mr_notes"], &notes); err != nil {
+		t.Fatal(err)
+	}
+	if n := len([]rune(notes)); n != maxNotesRunes+1 {
+		t.Errorf("mr_notes is %d runes, want %d and an ellipsis", n, maxNotesRunes)
 	}
 }
 

@@ -45,6 +45,9 @@ const (
 	// maxSectionRunes caps the bead's goal and acceptance quoted in the state.
 	maxSectionRunes = 1500
 
+	// maxNotesRunes caps the MR notes quoted in the state.
+	maxNotesRunes = 4000
+
 	// maxSubjects caps the commit subjects listed in the state.
 	maxSubjects = 20
 
@@ -338,7 +341,7 @@ func parseNumstat(out string) []fileChange {
 
 // buildState returns the state for one submission: one "field: value" line
 // per field, each value JSON-quoted so the model reads it as data. It holds
-// the bead's title, its Goal and Acceptance sections, the commit subjects and
+// the bead's title, its Goal, Acceptance and MR notes, the commit subjects and
 // the changed paths with counts, and never diff content.
 func buildState(issue *beads.Issue, subjects []string, files []fileChange) string {
 	sections := specdispatch.Sections(beads.StripAttachmentFields(issue.Description))
@@ -356,9 +359,20 @@ func buildState(issue *beads.Issue, subjects []string, files []fileChange) strin
 	field("bead_title", truncate(issue.Title, maxSectionRunes))
 	field("bead_goal", truncate(sections["goal"], maxSectionRunes))
 	field("bead_acceptance", truncate(land.CriteriaText(issue), maxSectionRunes))
+	field("mr_notes", mrNotes(issue.Notes))
 	field("commit_subjects", subjects)
 	field("files_changed", files)
 	return b.String()
+}
+
+// mrNotes is the MR notes of the live submission: the notes from its READY TO
+// LAND block on, which carry whatever the polecat and the landing wrote after
+// it. Earlier rejections are the previous attempts' notes and are left out.
+func mrNotes(notes string) string {
+	if idx := strings.LastIndex(notes, land.ReadyNoteMarker+"\n"); idx >= 0 {
+		notes = notes[idx:]
+	}
+	return truncate(strings.TrimSpace(notes), maxNotesRunes)
 }
 
 // agentOf is the agent the bead names: the first agent: label if it has one,

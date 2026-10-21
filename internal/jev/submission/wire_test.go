@@ -3,7 +3,12 @@ package submission
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +17,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -253,5 +259,128 @@ func TestAskLandedSubmissionNotScoredOnEmptyDiff(t *testing.T) {
 	cur, ok, _ := battery.ReadCursor(r.pass.CursorPath)
 	if !ok || cur.ID != "gt-landed" {
 		t.Errorf("cursor = %+v ok=%v, want it past gt-landed", cur, ok)
+	}
+}
+
+// jevReply is a Jev reply to the battery's questions. Its outcome probabilities
+// are the JSON object given, so one reply can carry its keys in any order.
+func jevReply(outcome string) string {
+	return fmt.Sprintf(`{
+  "model": "jev-1.13.0",
+  "answers": {
+    "tests_cover_change": {"type": "noul", "noul": 0.7},
+    "beyond_goal": {"type": "noul", "noul": 0.1},
+    "commits_match_change": {"type": "noul", "noul": 0.9},
+    "touches_town_machinery": {"type": "noul", "noul": 0.2},
+    "will_pass_review": {"type": "noul", "noul": 0.8},
+    "claims_verified": {"type": "noul", "noul": 0.9},
+    "verification_applies": {"type": "noul", "noul": 0.6},
+    "boxes_credible": {"type": "noul", "noul": 0.7},
+    "risk": {"type": "score", "score": 1, "confidence": 0.6,
+      "legend": {"0": "docs", "1": "one package", "2": "across packages", "3": "town machinery"},
+      "probabilities": {"0": 0.1, "1": 0.6, "2": 0.2, "3": 0.1}},
+    "outcome": {"type": "choice", "choice": "complete", "confidence": 0.7,
+      "probabilities": %s}
+  },
+  "usage": {"input_tokens": 100, "output_tokens": 20}
+}`, outcome)
+}
+
+// replyTo is a transport that records each request body and answers with
+// reply, so the test drives the real client without listening on a port.
+type replyTo struct {
+	reply    string
+	requests [][]byte
+}
+
+func (rt *replyTo) RoundTrip(req *http.Request) (*http.Response, error) {
+	body, err := io.ReadAll(req.Body)
+	if err != nil {
+		return nil, err
+	}
+	rt.requests = append(rt.requests, body)
+	rec := httptest.NewRecorder()
+	_, _ = io.WriteString(rec, rt.reply)
+	resp := rec.Result()
+	resp.Request = req
+	return resp, nil
+}
+
+// One Jev call carries every question the battery asks, the state holds the
+// MR notes, and the outcome's answer reaches the line whatever order Jev sends
+// its probabilities in: the same values in two orders give the same answer.
+func TestJevSubmissionAskCarriesTheNewQuestions(t *testing.T) {
+	t.Parallel()
+	orders := []struct {
+		name, probabilities string
+	}{
+		{"sorted keys", `{"blocked": 0.05, "complete": 0.7, "partial": 0.2, "unclear": 0.05}`},
+		{"reversed keys", `{"unclear": 0.05, "partial": 0.2, "complete": 0.7, "blocked": 0.05}`},
+	}
+	for _, order := range orders {
+		t.Run(order.name, func(t *testing.T) {
+			t.Parallel()
+			rt := &replyTo{reply: jevReply(order.probabilities)}
+			client, err := jev.NewClient(
+				jev.WithBaseURL("http://jev.invalid/v1/systemone"),
+				jev.WithKey("test-key"),
+				jev.WithHTTPClient(&http.Client{Transport: rt}),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			r := newRig(t)
+			r.pass.Asker = client
+			r.submissions.issues = []*beads.Issue{r.ready("gt-a", time.Minute)}
+			sum, err := r.pass.Run(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum.Asked != 1 {
+				t.Fatalf("summary = %+v, want the submission asked", sum)
+			}
+
+			if len(rt.requests) != 1 {
+				t.Fatalf("Jev was called %d times, want one call for the whole battery", len(rt.requests))
+			}
+			var sent struct {
+				State     string                     `json:"state"`
+				Questions map[string]json.RawMessage `json:"questions"`
+			}
+			if err := json.Unmarshal(rt.requests[0], &sent); err != nil {
+				t.Fatal(err)
+			}
+			if len(sent.Questions) != len(Questions()) {
+				t.Errorf("request asks %d questions, want %d", len(sent.Questions), len(Questions()))
+			}
+			for _, id := range []string{QClaimsVerified, QVerificationApplies, QBoxesCredible, QOutcome} {
+				if _, ok := sent.Questions[id]; !ok {
+					t.Errorf("request does not ask %s", id)
+				}
+			}
+			if _, ok := stateFields(t, sent.State)["mr_notes"]; !ok {
+				t.Errorf("state holds no mr_notes field:\n%s", sent.State)
+			}
+
+			lines := readLines(t, r.pass.LogPath)
+			if len(lines) != 1 {
+				t.Fatalf("log holds %d lines, want 1", len(lines))
+			}
+			got := lines[0].Answers
+			if n := got[QClaimsVerified].Noul; n == nil || *n != 0.9 {
+				t.Errorf("claims_verified = %+v, want noul 0.9", got[QClaimsVerified])
+			}
+			if n := got[QBoxesCredible].Noul; n == nil || *n != 0.7 {
+				t.Errorf("boxes_credible = %+v, want noul 0.7", got[QBoxesCredible])
+			}
+			outcome := got[QOutcome]
+			if outcome.Choice != OutcomeComplete || outcome.Positive != OutcomeComplete {
+				t.Errorf("outcome = %+v, want complete with complete positive", outcome)
+			}
+			if outcome.Probabilities[OutcomeComplete] != 0.7 || len(outcome.Probabilities) != 4 {
+				t.Errorf("outcome probabilities = %v, want all four options with complete at 0.7", outcome.Probabilities)
+			}
+		})
 	}
 }
