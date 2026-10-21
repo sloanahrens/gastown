@@ -75,6 +75,7 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 		LogPath:    LogPath(townRoot),
 		CursorPath: CursorPath(townRoot),
 		Allows:     func() (bool, error) { return town.Allows(time.Now) },
+		Warnings:   warnings,
 	}
 	if _, err := exec.LookPath("hm"); err == nil {
 		p.Ranker = hmRanker{}
@@ -82,9 +83,16 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	return p, nil
 }
 
+// gitClone is the part of the submission battery's bare clone the pass reads
+// through. *submission.Clone satisfies it; a test can hand in any git dir.
+type gitClone interface {
+	Sync(ctx context.Context) error
+	Run(ctx context.Context, args ...string) (string, error)
+}
+
 // cloneRepo reads the rig from the submission battery's bare clone.
 type cloneRepo struct {
-	c *submission.Clone
+	c gitClone
 }
 
 // Sync fetches the clone's branches.
@@ -115,12 +123,15 @@ func (r cloneRepo) ListDocs(ctx context.Context, rev string) ([]string, error) {
 	if err := checkRefs(rev); err != nil {
 		return nil, err
 	}
-	out, err := r.c.Run(ctx, "ls-tree", "-r", "--name-only", rev, "--", "docs")
+	// -z keeps every path verbatim and NUL-terminated. Without it git quotes a
+	// path with non-ASCII or control bytes, so the quoted name would not end in
+	// .md and the file would drop out of every pass without a trace.
+	out, err := r.c.Run(ctx, "ls-tree", "-r", "-z", "--name-only", rev, "--", "docs")
 	if err != nil {
 		return nil, err
 	}
 	var paths []string
-	for _, p := range strings.Split(strings.TrimSpace(out), "\n") {
+	for _, p := range strings.Split(out, "\x00") {
 		if strings.HasSuffix(p, ".md") {
 			paths = append(paths, p)
 		}

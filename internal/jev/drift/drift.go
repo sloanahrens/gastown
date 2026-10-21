@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
@@ -101,6 +102,10 @@ type Pass struct {
 
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
+
+	// Warnings receives a note when the ranker fails and the pass falls back
+	// to grepping every doc. Nil writes nothing.
+	Warnings io.Writer
 }
 
 // Summary says what one pass did.
@@ -296,7 +301,13 @@ func (p *Pass) closest(ctx context.Context, rec land.LandingRecord, patch string
 		return nil, err
 	}
 	if p.Ranker != nil {
-		if paths, err := p.Ranker.Closest(ctx, patch); err == nil && len(paths) > 0 {
+		paths, err := p.Ranker.Closest(ctx, patch)
+		switch {
+		case err != nil:
+			if p.Warnings != nil {
+				fmt.Fprintf(p.Warnings, "jev_drift: ranker failed, searching every doc: %v\n", err)
+			}
+		case len(paths) > 0:
 			if secs := rank(terms, c.sectionsOf(paths)); len(secs) > 0 {
 				return secs, nil
 			}

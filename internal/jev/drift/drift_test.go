@@ -454,13 +454,15 @@ func TestJevDriftRankerNamesTheDocsFirst(t *testing.T) {
 }
 
 // TestJevDriftRankerFailureFallsBackToGrep: a ranker that fails leaves the
-// pass to search the docs itself.
+// pass to search the docs itself, and the pass says why on its warnings.
 func TestJevDriftRankerFailureFallsBackToGrep(t *testing.T) {
 	t.Parallel()
 	rec := landed("gt-hmdown", 2*time.Minute)
 	r := newRig(t, rec)
 	r.serve(rec, "1\t1\tinternal/cmd/jev_landing.go\n", recentFlagPatch)
 	r.pass.Ranker = fakeRanker{err: errors.New("hm: not indexed")}
+	var warnings strings.Builder
+	r.pass.Warnings = &warnings
 	if err := battery.WriteCursor(r.cursor, battery.Cursor{Time: t0}); err != nil {
 		t.Fatal(err)
 	}
@@ -470,6 +472,9 @@ func TestJevDriftRankerFailureFallsBackToGrep(t *testing.T) {
 	lines := readLines(t, r.logPath)
 	if len(lines) != 1 || len(lines[0].Sections) != 1 {
 		t.Fatalf("log = %+v, want one section from the grep fallback", lines)
+	}
+	if !strings.Contains(warnings.String(), "hm: not indexed") {
+		t.Errorf("warnings = %q, want the ranker's failure named", warnings.String())
 	}
 }
 
@@ -496,8 +501,6 @@ func TestJevDriftLandingWithoutDocsRelevantChangeGetsALineWithNoSections(t *test
 	}
 }
 
-// TestJevDriftSkipsAnUnreadableDiff: a landing whose diff cannot be read is
-// passed over with no line, and the cursor moves past it.
 // TestJevDriftReadFailureStopsThePass: a git read that fails for a reason other
 // than a refused ref stops the pass with the cursor on the failing landing, so
 // the next pass reads it again and the landings behind it wait.
@@ -840,6 +843,30 @@ func TestJevDriftCloneRepoRefusesBadDocPaths(t *testing.T) {
 		if _, err := r.ReadDoc(context.Background(), "refs/heads/main", path); !errors.Is(err, ErrBadRef) {
 			t.Errorf("ReadDoc(%q) = %v, want ErrBadRef", path, err)
 		}
+	}
+}
+
+// cannedClone answers every Run with out, the way git would print it.
+type cannedClone struct {
+	out string
+}
+
+func (c cannedClone) Sync(context.Context) error { return nil }
+
+func (c cannedClone) Run(context.Context, ...string) (string, error) { return c.out, nil }
+
+// TestJevDriftListDocsSplitsNULDelimitedPaths: ls-tree -z ends each path with
+// NUL, so a name with a space or a non-ASCII byte arrives whole, and a
+// non-Markdown entry is left out.
+func TestJevDriftListDocsSplitsNULDelimitedPaths(t *testing.T) {
+	t.Parallel()
+	r := cloneRepo{c: cannedClone{out: "docs/café.md\x00docs/a b.md\x00docs/notes.txt\x00"}}
+	got, err := r.ListDocs(context.Background(), "refs/heads/main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := "docs/café.md,docs/a b.md"; strings.Join(got, ",") != want {
+		t.Errorf("ListDocs = %v, want %s", got, want)
 	}
 }
 
