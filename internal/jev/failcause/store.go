@@ -59,7 +59,7 @@ const WillRecurWindow = 14 * 24 * time.Hour
 // repeat the window would have counted. The scorecard's coverage check depends
 // on this value. The daemon's writer uses the same constant; a test in the
 // daemon package holds the two together.
-const CIFailureRetention = 7 * 24 * time.Hour
+const CIFailureRetention = 14 * 24 * time.Hour
 
 // CIFailureLedgerPath is the town's CI-failure ledger, one JSON line per
 // failing test of each red candidate verdict. The daemon's landing worker

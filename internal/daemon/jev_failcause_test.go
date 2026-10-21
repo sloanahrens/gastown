@@ -119,4 +119,7 @@ func TestCIFailureLedgerMatchesTheCauseBattery(t *testing.T) {
 	if ciFailureRetention != failcause.CIFailureRetention {
 		t.Errorf("the daemon keeps the ledger for %s, the cause battery assumes %s", ciFailureRetention, failcause.CIFailureRetention)
 	}
+	if ciFailureRetention < failcause.WillRecurWindow {
+		t.Errorf("the daemon keeps the ledger for %s, shorter than the %s will_recur window", ciFailureRetention, failcause.WillRecurWindow)
+	}
 }
