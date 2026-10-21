@@ -3,6 +3,7 @@ package scorecard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"maps"
 	"os"
@@ -213,6 +214,21 @@ func TestStaleLabelRules(t *testing.T) {
 				t.Errorf("rule = %q, want %q", lab.Rule, tc.rule)
 			}
 		})
+	}
+}
+
+// TestTownNotesReadsAMissingRigAsNotFound checks that a rig with no beads
+// directory reads as not found and opens no store, so the read never falls back
+// to whatever beads database the working directory holds.
+func TestTownNotesReadsAMissingRigAsNotFound(t *testing.T) {
+	t.Parallel()
+	tn := &townNotes{town: t.TempDir(), stores: map[string]*beads.Beads{}}
+	_, err := tn.Show("gastown", "gt-gone")
+	if !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("Show of a rig with no beads directory = %v, want not found", err)
+	}
+	if len(tn.stores) != 0 {
+		t.Errorf("a rig with no beads directory opened %d store(s)", len(tn.stores))
 	}
 }
 
