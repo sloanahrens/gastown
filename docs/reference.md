@@ -1183,11 +1183,11 @@ where it answered.
 
 ### Landing battery (`jev_landing`)
 
-`gt jev landing` asks Jev a second opinion on each gastown landing whose record
-has `risk_paths`. It reads `.runtime/landings/gastown.jsonl` past its cursor,
-asks five questions about each landing in one call, and appends one line to
-`.runtime/jev/landing.jsonl`. The line is advisory and log-only: it adds no bead
-comment and no attention item. Read it with `gt jev landing --recent N`.
+Before running or changing the pass, read `gt jev landing --help`: it states
+what the five questions cover, that the first pass only starts the cursor, and
+what `--recent` does. The pass reads the landings in
+`.runtime/landings/gastown.jsonl` past its cursor and appends one line per
+landing to `.runtime/jev/landing.jsonl`.
 
 The log line is `{ts, bead, rig, head, landed_at, agent, answers,
 question_version, model}`. `answers` maps each question id to its answer:
@@ -1205,15 +1205,13 @@ changed files from `git diff --numstat base..head` as paths with added and
 removed counts (first 60 files). Each value is JSON-quoted. No diff content is
 sent.
 
-The first pass sets the cursor to its own time and asks nothing. A landing whose
-bead or diff cannot be read, or that Jev returns an unusable response for, is
-skipped with no line and counted as skipped in the daemon log; any other
-failure stops the pass, leaves the cursor, and is retried next pass.
+A landing whose bead or diff cannot be read, or that Jev returns an unusable
+response for, is skipped with no line and counted as skipped in the daemon log;
+any other failure stops the pass, leaves the cursor, and is retried next pass.
 
 The daemon patrol `jev_landing` runs the pass every 15 minutes, off the
 heartbeat. It is off unless `patrols.jev_landing.enabled` is true in
-`daemon.json`. The cap and pricing keys are in `gt jev landing --help`; the
-command reads them whether or not the patrol is on.
+`daemon.json`.
 
 ### Submission battery (`jev_submission`)
 
