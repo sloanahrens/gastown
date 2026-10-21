@@ -96,10 +96,10 @@ func (a *failcauseAdapter) Parse(raw []byte) (Item, error) {
 // repeat of the test on a different bead within fourteen days of the judging
 // is true, whatever the ledger holds now, since a record that was written
 // cannot be unwritten. Past the window with no repeat, will_recur is false,
-// but only when the ledger provably kept every record the window could hold:
-// its last write came no later than the judging plus the ledger's retention.
-// A later write could have pruned a repeat, so that case is unlabeled, and so
-// is any test whose window is still open.
+// but only when the ledger's last write came strictly before the judging plus
+// the ledger's retention: then no write can have pruned a record the window
+// could hold. A write at that instant or later may have pruned a repeat, so
+// that case is unlabeled, and so is any test whose window is still open.
 func (a *failcauseAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	line, ok := a.lines[item.ID]
 	if !ok {
@@ -116,7 +116,12 @@ func (a *failcauseAdapter) Label(_ context.Context, item Item) (Labeling, error)
 	if a.now().Before(end) {
 		return Labeling{}, nil
 	}
-	if !a.ledgerOK || a.ledger.Modified.After(start.Add(failcause.CIFailureRetention)) {
+	// The last write must be strictly before the boundary. A write exactly at
+	// it cannot have pruned a record after start, but the ledger holds only an
+	// mtime: the daemon takes its clock, then queues on the ledger lock, then
+	// rewrites, and a filesystem may floor the timestamp, so a recorded instant
+	// at the boundary cannot be told from a write that came after it.
+	if !a.ledgerOK || !a.ledger.Modified.Before(start.Add(failcause.CIFailureRetention)) {
 		return Labeling{}, nil
 	}
 	return Labeling{Labeled: true, Labels: map[QuestionID]bool{qWillRecur: false}, Rule: ruleFailcauseQuiet}, nil
