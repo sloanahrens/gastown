@@ -373,8 +373,7 @@ func TestJevAttentionPassStopsBetweenCallsWhenEstopped(t *testing.T) {
 				Events:     func() ([]attention.Event, error) { return events, nil },
 				LogPath:    jevattention.LogPath(town),
 				CursorPath: cursor,
-				SpentToday: func() (float64, error) { return 0, nil },
-				CapUSD:     1,
+				Allows:     func() (bool, error) { return true, nil },
 			}, nil
 		},
 	}
