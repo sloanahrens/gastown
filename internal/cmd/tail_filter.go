@@ -36,6 +36,12 @@ var tailRoutineDaemon = regexp.MustCompile(`^(` +
 // "error(s)" is not one: patrol_scan prints it in every summary.
 var tailFailure = regexp.MustCompile(`(?i)\b(failed|panic)\b|error:|timed out`)
 
+// tailHaltOrRefusal rescues a routine-prefixed daemon line that stops the
+// daemon from doing its work. The backup's HALTING lines and the checkpoint
+// dog's refusal carry no failure word, so they are matched by their own
+// markers: the HALTING tag, and the refusal's "refusing checkpoint in" opening.
+var tailHaltOrRefusal = regexp.MustCompile(`\bHALTING\b|^checkpoint_dog: refusing checkpoint in `)
+
 // tailVisible reports whether the default view shows l. --all and --verbose
 // skip it. A townhealth line that repeats the last one shown is hidden by the
 // view's latch, not here: this only says whether the line is the kind the
@@ -51,7 +57,7 @@ func tailVisible(l tailLine) bool {
 		}
 		return !tailAgentBeadOpen(f)
 	case tailKindDaemon:
-		return !tailRoutineDaemon.MatchString(l.Text) || tailFailure.MatchString(l.Text)
+		return !tailRoutineDaemon.MatchString(l.Text) || tailFailure.MatchString(l.Text) || tailHaltOrRefusal.MatchString(l.Text)
 	}
 	return true
 }
