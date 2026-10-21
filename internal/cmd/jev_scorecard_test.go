@@ -18,35 +18,11 @@ var updateJevScorecardGolden = flag.Bool("update-jev-scorecard-golden", false, "
 
 const jevScorecardGoldenPath = "jev_scorecard_fixture.golden"
 
-// scorecardFixtureLog is four labeled-or-not items answering a noul, a choice
-// and a score, and one line that does not parse.
-var scorecardFixtureLog = []string{
-	`{"ts":"2026-10-18T09:00:00Z","id":"fx-1","answers":{"needs":{"noul":0.9},"route":{"choice":"yes","probabilities":{"yes":0.8,"no":0.2},"positive":"yes"},"urgency":{"score":3}}}`,
-	`{"ts":"2026-10-18T10:00:00Z","id":"fx-2","answers":{"needs":{"noul":0.2},"route":{"choice":"no","probabilities":{"yes":0.3,"no":0.7},"positive":"yes"},"urgency":{"score":0}}}`,
-	`{"ts":"2026-10-18T11:00:00Z","id":"fx-3","answers":{"needs":{"noul":0.7},"route":{"choice":"yes","probabilities":{"yes":0.6,"no":0.4},"positive":"yes"},"urgency":{"score":1}}}`,
-	`{"ts":"2026-10-18T12:00:00Z","id":"fx-4","answers":{"needs":{"noul":0.6},"route":{"choice":"no","probabilities":{"yes":0.4,"no":0.6},"positive":"yes"},"urgency":{"score":2}}}`,
-	`not json`,
-}
-
-// scorecardFixtureLabels leaves fx-4 out, so it is logged but not labeled.
-const scorecardFixtureLabels = `{
-  "fx-1": {"needs": true, "route": true, "urgency": true},
-  "fx-2": {"needs": false, "route": false, "urgency": false},
-  "fx-3": {"needs": false, "route": false, "urgency": false}
-}`
-
-// writeScorecardFixture puts the fixture log and labels under town, the layout
-// the fixture adapter reads.
+// writeScorecardFixture puts the scorecard package's fixture under town, the
+// layout the fixture adapter reads.
 func writeScorecardFixture(t *testing.T, town string) {
 	t.Helper()
-	logPath := scorecard.FixtureLogPath(town)
-	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(logPath, []byte(strings.Join(scorecardFixtureLog, "\n")+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(scorecard.FixtureLabelsPath(town), []byte(scorecardFixtureLabels), 0o600); err != nil {
+	if err := scorecard.WriteFixture(town, scorecard.FixtureLines, scorecard.FixtureLabels); err != nil {
 		t.Fatal(err)
 	}
 }
