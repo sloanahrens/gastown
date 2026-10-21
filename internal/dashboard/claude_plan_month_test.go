@@ -597,8 +597,8 @@ func TestClaudePlanReaderKeepsTheMonthsTheSeriesHasForgotten(t *testing.T) {
 
 // A poll that first meets a reset after the tail has grown past the readings
 // that named the week before it still closes that week: its bounds are the
-// newest reset less a week, and its last percentage the reading the tail holds
-// nearest it, so a reset nothing polled across leaves no hole in the month
+// newest reset less a week, and its last percentage the newest reading from
+// before its reset, so a reset nothing polled across leaves no hole in the month
 // (gt-qt4os).
 func TestClaudePlanCloseoutSurvivesAGap(t *testing.T) {
 	t.Parallel()
@@ -716,9 +716,9 @@ func TestClaudePlanReaderCarriesEveryMissedWeek(t *testing.T) {
 	}
 }
 
-// The carry closes only the weeks it can measure: a window whose reset has not
-// passed, a window a sample already names, and a window the history records
-// stay as they are.
+// The carry leaves a window alone when its reset has not passed, when a sample
+// already names it, or when the history already records it; with an empty
+// history it carries nothing.
 func TestClaudePlanCarryGuards(t *testing.T) {
 	t.Parallel()
 
