@@ -10,12 +10,18 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 // Append adds v to the log at path as one JSON line, creating the directory
 // 0700 and the file 0600. When the file does not end in a newline, a short
 // write or a crash left a partial line there: the new line starts on its own
 // line, so the partial one stays unusable and the new one still parses.
+//
+// The tail check and the write run under an exclusive lock on a sibling
+// .flock file, so no other Append can land between them: a concurrent writer
+// mid-line would otherwise have its line split by ours.
 func Append(path string, v any) error {
 	line, err := json.Marshal(v)
 	if err != nil {
@@ -24,14 +30,18 @@ func Append(path string, v any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return fmt.Errorf("creating the log directory: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
+	unlock, err := lock.FlockAcquire(path + ".flock")
+	if err != nil {
+		return fmt.Errorf("locking the log: %w", err)
+	}
+	defer unlock()
+	partial, err := endsMidLine(path)
+	if err != nil {
+		return fmt.Errorf("reading the log's tail: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return fmt.Errorf("opening the log: %w", err)
-	}
-	partial, err := endsMidLine(f)
-	if err != nil {
-		_ = f.Close()
-		return fmt.Errorf("reading the log's tail: %w", err)
 	}
 	buf := append(line, '\n')
 	if partial {
@@ -44,9 +54,18 @@ func Append(path string, v any) error {
 	return f.Close()
 }
 
-// endsMidLine reports whether f is non-empty and its last byte is not a
-// newline, which is what a short write leaves behind.
-func endsMidLine(f *os.File) (bool, error) {
+// endsMidLine reports whether the log at path is non-empty and its last byte
+// is not a newline, which is what a short write leaves behind. A missing log
+// is not mid-line.
+func endsMidLine(path string) (bool, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
 	if err != nil {
 		return false, err

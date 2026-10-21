@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/jev"
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 func ledgerRec(ts time.Time, caller string, in, out int) string {
@@ -171,6 +173,72 @@ func TestBatteryLogReadRecentMissingSkipsBadLinesAndRejectsBadTarget(t *testing.
 	for _, bad := range []any{&notSlice, got, nil} {
 		if err := ReadRecent(path, 2, bad); err == nil {
 			t.Errorf("ReadRecent into %T succeeded, want an error", bad)
+		}
+	}
+}
+
+func TestBatteryLogAppendWaitsForTheLogLock(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "log.jsonl")
+	release, ok, err := lock.FlockTryAcquire(path + ".flock")
+	if err != nil || !ok {
+		t.Fatalf("taking the log lock = %v, %v, want held", ok, err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- Append(path, row{N: 1}) }()
+	// Append blocks on the held lock before it creates the log, so nothing
+	// is written until release. This check cannot fail for a correct Append.
+	if _, err := os.Stat(path); err == nil {
+		t.Fatal("the log was created while another holder had the log lock")
+	}
+
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("Append after the lock was released: %v", err)
+	}
+	var got []row
+	if err := ReadRecent(path, 5, &got); err != nil || len(got) != 1 || got[0].N != 1 {
+		t.Errorf("log = %+v, %v, want the one appended line", got, err)
+	}
+}
+
+func TestBatteryLogConcurrentAppendsAfterAPartialLineKeepEveryLine(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "log.jsonl")
+	if err := os.WriteFile(path, []byte(`{"n":0`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	const writers = 32
+	var wg sync.WaitGroup
+	errs := make(chan error, writers)
+	for i := 1; i <= writers; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			errs <- Append(path, row{N: n})
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	var got []row
+	if err := ReadRecent(path, writers+1, &got); err != nil {
+		t.Fatalf("ReadRecent: %v", err)
+	}
+	seen := make(map[int]bool, len(got))
+	for _, r := range got {
+		seen[r.N] = true
+	}
+	for i := 1; i <= writers; i++ {
+		if !seen[i] {
+			t.Errorf("line %d was lost or split; read %d parseable lines", i, len(got))
 		}
 	}
 }
