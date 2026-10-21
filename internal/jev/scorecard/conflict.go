@@ -261,20 +261,23 @@ func (a *conflictAdapter) rejectedAfter(ctx context.Context, bead string, landed
 	return false, nil
 }
 
-// landedFiles returns the files a bead's landing changed, from its base to its
-// head in the bare clone. A bead is read once.
+// landedFiles returns the files a bead's landing changed, from its fork point
+// to its head in the bare clone. The range is three-dot: the record's base is
+// the target tip at land time, which can hold landings made after this bead
+// forked, and a two-dot diff reads those as this bead's own changes reversed
+// (gt-wu2ab). A bead is read once.
 func (a *conflictAdapter) landedFiles(ctx context.Context, bead string, rec *land.LandingRecord) (map[string]bool, error) {
 	if files, ok := a.files[bead]; ok {
 		return files, nil
 	}
 	if !safeRef(rec.Base) || !safeRef(rec.Head) {
-		return nil, fmt.Errorf("landing of %s names refs the clone will not read: %q..%q", bead, rec.Base, rec.Head)
+		return nil, fmt.Errorf("landing of %s names refs the clone will not read: %q...%q", bead, rec.Base, rec.Head)
 	}
 	repo, err := a.clone(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out, err := repo.Run(ctx, "diff", "--name-only", "--no-renames", rec.Base+".."+rec.Head)
+	out, err := repo.Run(ctx, "diff", "--name-only", "--no-renames", rec.Base+"..."+rec.Head)
 	if err != nil {
 		return nil, fmt.Errorf("listing the files of %s: %w", bead, err)
 	}
