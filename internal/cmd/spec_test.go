@@ -1503,6 +1503,64 @@ func TestSpecDispatchFailureNamesTheExclusion(t *testing.T) {
 	}
 }
 
+// A sling-stage deferral is the reason a chosen candidate did not go out, and
+// the tick line caps its skip list, so a deferral in the tail read as "+N more"
+// and neither the bead nor the reason survived in the log (gt-gi3f9). The
+// report carries the sling-stage part of Skipped on its own so the daemon can
+// log one line per deferral, while Skipped stays exactly as it was, so the tick
+// line counts and truncates as before (gt-4wcqd).
+func TestSpecDispatchDeferralIsReportedOutsideTheSkipList(t *testing.T) {
+	t.Parallel()
+	overlap := sling.DecideDuplicates(
+		sling.Duplicate{ID: "gt-a", Status: "open", CreatedAt: "2026-10-15T12:00:00Z"},
+		[]sling.DuplicateMatch{{
+			Bead:        sling.Duplicate{ID: "gt-b", Status: "open", CreatedAt: "2026-10-15T09:00:00Z"},
+			SharedTests: []string{"TestSpecDispatch"},
+		}}).Err()
+
+	t.Run("a deferred sling is reported beside the unchanged skip", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+		f.slingErrs["gt-a"] = []error{overlap}
+		r := runSpecDispatchCycle(f.env())
+		if len(r.Deferred) != 1 || r.Deferred[0].Bead != "gt-a" || !strings.Contains(r.Deferred[0].Line, "content overlap") {
+			t.Fatalf("deferred = %+v, want gt-a's overlap deferral with its reason", r.Deferred)
+		}
+		if len(r.Skipped) != 1 || r.Skipped[0].Line != r.Deferred[0].Line {
+			t.Errorf("skipped = %+v, want the deferral still listed unchanged so the tick line reads as before", r.Skipped)
+		}
+	})
+
+	t.Run("a failed sling is not a deferral", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+		// The contention retries give up, so this is a dispatch failure: it is
+		// logged under failed, and no deferred line repeats it (gt-4wcqd).
+		f.slingErrs["gt-a"] = []error{
+			errors.New("Error 1213: serialization failure"),
+			errors.New("Error 1213: serialization failure"),
+			errors.New("Error 1213: serialization failure"),
+			errors.New("Error 1213: serialization failure"),
+		}
+		r := runSpecDispatchCycle(f.env())
+		if len(r.Failed) != 1 || len(r.Deferred) != 0 {
+			t.Fatalf("failed = %+v deferred = %+v, want one failure and no deferral", r.Failed, r.Deferred)
+		}
+	})
+
+	t.Run("a dry run reports neither", func(t *testing.T) {
+		t.Parallel()
+		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+		f.slingErrs["gt-a"] = []error{overlap}
+		env := f.env()
+		env.DryRun = true
+		r := runSpecDispatchCycle(env)
+		if len(r.Deferred) != 0 || len(r.Failed) != 0 || len(r.Dispatched) != 1 {
+			t.Fatalf("dry run = %+v, want one would-sling and nothing deferred or failed", r)
+		}
+	})
+}
+
 // Clearing the label retries the bead. When the retry fails for another reason,
 // the bead carries both notes, and the same reason failing again adds none
 // (gt-zkqtn).
