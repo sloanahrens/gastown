@@ -182,12 +182,7 @@ func drawCostAt(t *testing.T, now time.Time, s map[string]any) []costLine {
 
 	dom := newPageDOM(t)
 	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
-	dom.call(t, "renderCost", s)
-	raw := pageExpr(t, dom, `JSON.stringify(__byId["cost"].children.map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
-	var lines []costLine
-	if err := json.Unmarshal([]byte(raw), &lines); err != nil {
-		t.Fatalf("reading the Cost panel: %v", err)
-	}
+	lines, _ := drawCostOn(t, dom, s)
 	return lines
 }
 

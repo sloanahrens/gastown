@@ -128,7 +128,13 @@ type costLine struct {
 // drawCost runs renderCost over s and reads back the panel's lines and caption.
 func drawCost(t *testing.T, s map[string]any) (lines []costLine, note drawn) {
 	t.Helper()
-	dom := newPageDOM(t)
+	return drawCostOn(t, newPageDOM(t), s)
+}
+
+// drawCostOn runs renderCost over s on dom, a page the caller has already set
+// up, and reads back the panel's lines and caption.
+func drawCostOn(t *testing.T, dom *pageDOM, s map[string]any) (lines []costLine, note drawn) {
+	t.Helper()
 	dom.call(t, "renderCost", s)
 	v, err := dom.vm.RunString(`JSON.stringify(__byId["cost"].children.map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
 	if err != nil {
