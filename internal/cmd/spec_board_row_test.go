@@ -186,15 +186,17 @@ func TestSpecFromBoardRowReadsBothShapes(t *testing.T) {
 // Every candidate gets the children read, whatever its board row counted: bd
 // counts only blocks edges there, so a parent whose only children are
 // parent-child edges carries a zero and must still be held on its open child
-// (gt-603wu).
+// (gt-603wu). The read count is pinned to the candidate count, one each: a
+// candidate that skips the read and a read for a bead that is not a candidate
+// both fail (gt-cjt1p).
 func TestSpecTickReadsChildrenForEveryCandidate(t *testing.T) {
 	t.Parallel()
 	childless := []string{"gt-k1", "gt-k2", "gt-k3"}
+	candidates := append(append([]string{}, childless...), "gt-parent")
 	var specs []specdispatch.Spec
-	for _, id := range childless {
+	for _, id := range candidates {
 		specs = append(specs, cleanSpec(id, 2, "2026-09-29T10:00:00Z"))
 	}
-	specs = append(specs, cleanSpec("gt-parent", 2, "2026-09-29T10:00:00Z"))
 	f := newFakeSpecTown(specs...)
 	f.children["gt-parent"] = []specdispatch.Child{{ID: "gt-parent.1", Status: "open"}}
 	env := f.env()
@@ -208,10 +210,13 @@ func TestSpecTickReadsChildrenForEveryCandidate(t *testing.T) {
 	}
 	r := runSpecDispatchCycle(env)
 
-	for _, id := range append(childless, "gt-parent") {
+	for _, id := range candidates {
 		if n := childReads[id]; n != 1 {
 			t.Errorf("%s: children read %d times, want 1", id, n)
 		}
+	}
+	if len(childReads) != len(candidates) {
+		t.Errorf("children read for %d beads (%v), want the %d candidates only", len(childReads), childReads, len(candidates))
 	}
 	dispatched := map[string]bool{}
 	for _, d := range r.Dispatched {
