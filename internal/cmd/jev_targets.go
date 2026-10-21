@@ -109,6 +109,16 @@ func runJevTargetsPass(out, errw io.Writer, townRoot string, req targets.RunRequ
 	if err != nil {
 		return err
 	}
+	return reportJevTargets(out, errw, sum)
+}
+
+// reportJevTargets prints what a run did, names each skipped file on errw and
+// fails a run that skipped every file it reached, so a caller checking the
+// exit status does not read a run that logged nothing as a success.
+func reportJevTargets(out, errw io.Writer, sum targets.Summary) error {
+	for _, sk := range sum.SkippedFiles {
+		fmt.Fprintf(errw, "jev review-targets: skipped %s: %s\n", sk.Path, sk.Reason)
+	}
 	switch {
 	case sum.Files == 0:
 		fmt.Fprintln(out, "jev review-targets: the slice is empty; nothing asked")
@@ -117,6 +127,9 @@ func runJevTargetsPass(out, errw io.Writer, townRoot string, req targets.RunRequ
 			sum.Asked, sum.Files-sum.Asked-sum.Skipped)
 	default:
 		fmt.Fprintf(out, "jev review-targets: asked %d files, skipped %d\n", sum.Asked, sum.Skipped)
+	}
+	if sum.Asked == 0 && sum.Skipped > 0 {
+		return fmt.Errorf("every file was skipped (%d); the log gained no line", sum.Skipped)
 	}
 	return nil
 }

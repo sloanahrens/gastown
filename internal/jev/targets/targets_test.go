@@ -209,6 +209,10 @@ func TestJevTargetsSkipsAnUnreadableFile(t *testing.T) {
 	if sum.Files != 2 || sum.Asked != 1 || sum.Skipped != 1 {
 		t.Errorf("summary = %+v, want one asked and one skipped", sum)
 	}
+	if len(sum.SkippedFiles) != 1 || sum.SkippedFiles[0].Path != "internal/a/one.go" ||
+		!strings.Contains(sum.SkippedFiles[0].Reason, "unreadable") {
+		t.Errorf("skipped files = %+v, want the unreadable file named with its reason", sum.SkippedFiles)
+	}
 	if got := strings.Count(readTestFile(t, r.pass.LogPath), "\n"); got != 1 {
 		t.Errorf("log holds %d lines, want 1", got)
 	}
