@@ -1893,9 +1893,14 @@ most recent landed beads in the rig.
 
 A bead is asked at most once in 30 days; the pass reads that from the log, so a
 second pass inside the window asks nothing. A bead whose call got no reply
-(`ask_failed`) does not count, so the next pass asks it again. Beads labeled
-`human-only` or `handoff`, epics and wisps are never asked. A rig whose beads
-cannot be read is skipped and counted in the daemon log.
+(`ask_failed`) does not count, so the next pass asks it again.
+
+The battery reads work beads only: type `task`, `bug` or `feature`. It never
+asks about rig, molecule, agent, role, epic or wisp beads, any other type
+(including the ones the beads package marks infrastructure), a crew seat's bead
+(an ID containing `-crew-<name>`), or a bead labeled `human-only`, `handoff`,
+`needs-human` or `gt:needs-human`. A rig whose beads cannot be read is skipped
+and counted in the daemon log.
 
 The battery is log-only: it never changes a bead's status, labels, priority or
 comments. The E-stop holds the patrol and stops a running pass between Jev calls;
@@ -1912,7 +1917,9 @@ The patrol is off unless `daemon.json` enables it:
 the same town-wide cap as the other batteries.
 
 `gt jev scorecard --battery stale` scores that log against each bead as it stands
-at scorecard time. A line whose bead no longer exists is unlabeled. The rules
+at scorecard time. A line whose bead no longer exists is unlabeled. A line whose `type` is not `task`,
+`bug` or `feature` (an earlier pass asked about rig and molecule beads) is
+discarded and counted as a skipped line. The rules
 are in `internal/jev/scorecard/stale.go`:
 
 - closed as `wontfix`, `obsolete` or `no longer ...`: `obsolete` true

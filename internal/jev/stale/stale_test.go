@@ -216,20 +216,43 @@ func TestJevStaleLogsTheDescriptionHashNotTheText(t *testing.T) {
 	}
 }
 
-// Human-only, handoff, epic, wisp and non-open beads are never asked about.
-func TestJevStaleSkipsHumanOnlyHandoffEpicAndWisps(t *testing.T) {
+// Only task, bug and feature beads are asked about. Rig, molecule, agent, wisp
+// and epic beads, a crew seat's bead, and beads labeled for a human or a
+// handoff are never asked, however long they have sat.
+func TestJevStaleReadsOnlyWorkBeads(t *testing.T) {
 	t.Parallel()
-	human := openBead("gt-human", 30)
-	human.Labels = []string{"human-only"}
-	handoff := openBead("gt-handoff", 30)
-	handoff.Labels = []string{"handoff"}
-	epic := openBead("gt-epic", 30)
-	epic.Type = "epic"
+	typed := func(id, issueType string) *beads.Issue {
+		b := openBead(id, 30)
+		b.Type = issueType
+		return b
+	}
+	labeled := func(id, label string) *beads.Issue {
+		b := openBead(id, 30)
+		b.Labels = []string{label}
+		return b
+	}
 	wisp := openBead("gt-wisp", 30)
 	wisp.Ephemeral = true
+	skipped := []*beads.Issue{
+		typed("gt-rig-gastown", "rig"),
+		typed("gt-37k", "molecule"),
+		typed("gt-agent", "agent"),
+		typed("gt-epic", "epic"),
+		typed("gt-role", "role"),
+		typed("gt-untyped", ""),
+		wisp,
+		openBead("gt-crew-sloan", 30),
+		labeled("gt-human", "human-only"),
+		labeled("gt-handoff", "handoff"),
+		labeled("gt-needs", "needs-human"),
+		labeled("gt-gtneeds", "gt:needs-human"),
+	}
+	old := typed("gt-old", "task")
+	bug := typed("gt-bug", "bug")
+	feature := typed("gt-feature", "feature")
 	asker := &fixedAsker{ans: answers()}
 	b := fakeBeads{open: map[string][]*beads.Issue{
-		"gastown": {human, handoff, epic, wisp, openBead("gt-plain", 30)},
+		"gastown": append(append([]*beads.Issue{}, skipped...), old, bug, feature),
 	}}
 	p := newPass(t, asker, nil, b, "gastown")
 
@@ -238,11 +261,39 @@ func TestJevStaleSkipsHumanOnlyHandoffEpicAndWisps(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if sum.Asked != 1 {
-		t.Errorf("asked %d beads, want only the plain one", sum.Asked)
+	if sum.Asked != 3 {
+		t.Errorf("asked %d beads, want the task, the bug and the feature", sum.Asked)
 	}
-	if lines := readLog(t, p.LogPath); len(lines) != 1 || lines[0].Bead != "gt-plain" {
-		t.Errorf("log = %+v, want only gt-plain", lines)
+	got := map[string]string{}
+	for _, l := range readLog(t, p.LogPath) {
+		got[l.Bead] = l.Type
+	}
+	want := map[string]string{"gt-old": "task", "gt-bug": "bug", "gt-feature": "feature"}
+	if len(got) != len(want) {
+		t.Fatalf("log beads = %v, want %v", got, want)
+	}
+	for id, typ := range want {
+		if got[id] != typ {
+			t.Errorf("log beads = %v, want %v", got, want)
+			break
+		}
+	}
+}
+
+// A bead whose ID merely contains the crew marker without a name after it, or
+// that is a work bead with "crew" in a word, is still work.
+func TestJevStaleCrewSeatIDNeedsANameAfterTheMarker(t *testing.T) {
+	t.Parallel()
+	for id, want := range map[string]bool{
+		"gt-crew-sloan":       true,
+		"gt-crew-sloan-topic": true,
+		"gt-crew-":            false,
+		"gt-crewcut":          false,
+		"gt-6k7ht":            false,
+	} {
+		if got := isCrewSeat(id); got != want {
+			t.Errorf("isCrewSeat(%q) = %v, want %v", id, got, want)
+		}
 	}
 }
 

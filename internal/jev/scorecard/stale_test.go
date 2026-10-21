@@ -360,10 +360,19 @@ func TestStaleParseSkipsWhatCannotBeCompared(t *testing.T) {
 	unasked.Reason = stale.ReasonAskFailed
 	oldVersion := staleLine("gt-p3", 2, ask, map[string]stale.Answer{stale.QObsolete: nounAnswer(0.1)})
 	oldVersion.QuestionVersion = stale.Version + 1
+	rigLine := staleLine("gt-rig-gastown", 2, ask, map[string]stale.Answer{stale.QObsolete: nounAnswer(0.1)})
+	rigLine.Type = "rig"
+	moleculeLine := staleLine("gt-37k", 2, ask, map[string]stale.Answer{stale.QObsolete: nounAnswer(0.1)})
+	moleculeLine.Type = "molecule"
+	untypedLine := staleLine("gt-p4", 2, ask, map[string]stale.Answer{stale.QObsolete: nounAnswer(0.1)})
+	untypedLine.Type = ""
 
 	for name, line := range map[string]stale.Line{
 		"a line whose call failed":         unasked,
 		"a line from another question set": oldVersion,
+		"a line about a rig bead":          rigLine,
+		"a line about a molecule bead":     moleculeLine,
+		"a line with no type":              untypedLine,
 	} {
 		raw, err := json.Marshal(line)
 		if err != nil {
@@ -495,5 +504,45 @@ func TestStaleScorecardPrintsPerQuestionBlocks(t *testing.T) {
 	}
 	if got != string(want) {
 		t.Errorf("output differs from %s (rewrite with -update-stale-golden):\n%s\nwant:\n%s", goldenPath, got, want)
+	}
+}
+
+// A log the pass wrote before it read only work beads holds lines about rig and
+// molecule beads. The report discards them: they are skipped lines, not items,
+// and no question is scored on them.
+func TestStaleScorecardDiscardsLinesAboutNonWorkBeads(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	logPath := stale.LogPath(town)
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ask := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	ans := map[string]stale.Answer{stale.QObsolete: nounAnswer(0.8)}
+	work := staleLine("gt-g4", 2, ask, ans)
+	rig := staleLine("gt-rig-gastown", 2, ask, ans)
+	rig.Type = "rig"
+	molecule := staleLine("gt-37k", 2, ask, ans)
+	molecule.Type = "molecule"
+	var lines []string
+	for _, l := range []stale.Line{rig, work, molecule} {
+		raw, err := json.Marshal(l)
+		if err != nil {
+			t.Fatal(err)
+		}
+		lines = append(lines, string(raw))
+	}
+	if err := os.WriteFile(logPath, []byte(strings.Join(lines, "\n")+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a := newFakeStaleAdapter(staleFixtureBeads())
+	a.log = logPath
+
+	rep, err := Build(context.Background(), a, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep.Items != 1 || rep.LinesSkipped != 2 {
+		t.Fatalf("items %d skipped %d, want 1 and 2", rep.Items, rep.LinesSkipped)
 	}
 }

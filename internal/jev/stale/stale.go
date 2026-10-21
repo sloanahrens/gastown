@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -56,12 +57,38 @@ const (
 	hmTimeout = time.Minute
 )
 
-// Label names that keep a bead out of the read.
-const (
-	labelHumanOnly = "human-only"
-	labelHandoff   = "handoff"
-	typeEpic       = "epic"
-)
+// skipLabels keep a bead out of the read: a bead a human owns or a handoff note
+// is not work that can be obsolete.
+var skipLabels = []string{"human-only", "handoff", "needs-human", "gt:needs-human"}
+
+// workTypes are the issue types the pass reads. Every other type (rig,
+// molecule, agent, epic, wisp, and whatever the beads package marks
+// infrastructure) is bookkeeping, not work a landed change could supersede. An
+// allowlist keeps a type added later out of the read until it is named here.
+var workTypes = []string{"task", "bug", "feature"}
+
+// crewSeatMarker is inside the ID of a crew seat's own task bead
+// ("<prefix>-crew-<name>").
+const crewSeatMarker = "-crew-"
+
+// IsWorkType reports whether an issue type is one the pass reads: task, bug or
+// feature. The scorecard asks it too, so it discards the lines an earlier pass
+// logged for rig, molecule and other bookkeeping beads.
+func IsWorkType(issueType string) bool {
+	t := strings.ToLower(strings.TrimSpace(issueType))
+	for _, w := range workTypes {
+		if t == w {
+			return true
+		}
+	}
+	return false
+}
+
+// isCrewSeat reports whether a bead ID names a crew seat's task bead.
+func isCrewSeat(id string) bool {
+	i := strings.LastIndex(id, crewSeatMarker)
+	return i >= 0 && i+len(crewSeatMarker) < len(id)
+}
 
 // Asker asks one battery of questions about one state. *jev.Client satisfies
 // it.
@@ -221,11 +248,11 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	return sum, nil
 }
 
-// eligible reports whether a bead is one the pass reads: an open issue, not a
-// wisp, not an epic, not labeled for a human or a handoff, and untouched for
-// StaleAfter.
+// eligible reports whether a bead is one the pass reads: an open work bead
+// (task, bug or feature), not a wisp, not a crew seat's bead, not labeled for a
+// human or a handoff, and untouched for StaleAfter.
 func (p *Pass) eligible(rig string, b *beads.Issue, now time.Time) (candidate, bool) {
-	if b == nil || b.Ephemeral || b.Type == typeEpic || hasAny(b.Labels, labelHumanOnly, labelHandoff) {
+	if b == nil || b.Ephemeral || !IsWorkType(b.Type) || isCrewSeat(b.ID) || hasAny(b.Labels, skipLabels...) {
 		return candidate{}, false
 	}
 	updated := beads.ParseIssueTime(b.UpdatedAt)
