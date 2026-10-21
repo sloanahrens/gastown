@@ -5,12 +5,14 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/jev"
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 func ledgerRec(ts time.Time, caller string, in, out int) string {
@@ -121,6 +123,15 @@ type row struct {
 	S string `json:"s,omitempty"`
 }
 
+// settle yields the processor so a goroutine that is not blocked can finish.
+// The test policy bans timers in unit tests; a goroutine blocked on a lock
+// stays blocked however long this yields.
+func settle() {
+	for range 1000 {
+		runtime.Gosched()
+	}
+}
+
 func TestBatteryLogAppendModesAndReadRecent(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "sub", "log.jsonl")
@@ -172,6 +183,86 @@ func TestBatteryLogReadRecentMissingSkipsBadLinesAndRejectsBadTarget(t *testing.
 		if err := ReadRecent(path, 2, bad); err == nil {
 			t.Errorf("ReadRecent into %T succeeded, want an error", bad)
 		}
+	}
+}
+
+func TestBatteryLogAppendWaitsForTheLogLock(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "log.jsonl")
+	const before = `{"n":0}` + "\n"
+	if err := os.WriteFile(path, []byte(before), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release, ok, err := lock.FlockTryAcquire(path)
+	if err != nil || !ok {
+		t.Fatalf("taking the log lock = %v, %v, want held", ok, err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- Append(path, row{N: 1}) }()
+	// A correct Append blocks on the held lock and returns only after release.
+	// Without the lock it finishes during settle.
+	settle()
+	select {
+	case err := <-done:
+		t.Fatalf("Append returned while another holder had the log lock: %v", err)
+	default:
+	}
+	if got, _ := os.ReadFile(path); string(got) != before {
+		t.Fatalf("the log changed while another holder had the lock: %q", got)
+	}
+
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("Append after the lock was released: %v", err)
+	}
+	var got []row
+	if err := ReadRecent(path, 5, &got); err != nil || len(got) != 2 || got[0].N != 0 || got[1].N != 1 {
+		t.Errorf("log = %+v, %v, want the seeded line then the appended one", got, err)
+	}
+}
+
+func TestBatteryLogAppendWaitsForAnInFlightLine(t *testing.T) {
+	t.Parallel()
+	// A writer that has put part of its line on disk holds the log lock until
+	// the rest is written. An Append that did not wait would read that part as
+	// a crash's partial line, and its newline would split the writer's line.
+	path := filepath.Join(t.TempDir(), "log.jsonl")
+	if err := os.WriteFile(path, []byte(`{"n":5`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	release, ok, err := lock.FlockTryAcquire(path)
+	if err != nil || !ok {
+		t.Fatalf("taking the log lock = %v, %v, want held", ok, err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- Append(path, row{N: 1}) }()
+	settle()
+	select {
+	case err := <-done:
+		t.Fatalf("Append returned while a writer's line was in flight: %v", err)
+	default:
+	}
+
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(`,"s":"x"}` + "\n"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if err := <-done; err != nil {
+		t.Fatalf("Append after the lock was released: %v", err)
+	}
+
+	var got []row
+	if err := ReadRecent(path, 5, &got); err != nil || len(got) != 2 || got[0].N != 5 || got[0].S != "x" || got[1].N != 1 {
+		t.Errorf("log = %+v, %v, want the in-flight line whole, then the appended one", got, err)
 	}
 }
 
