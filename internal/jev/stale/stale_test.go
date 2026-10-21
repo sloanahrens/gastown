@@ -337,15 +337,19 @@ func TestJevStaleReadsOnlyWorkBeads(t *testing.T) {
 	}
 }
 
-// A bead whose ID merely contains the crew marker without a name after it, or
-// that is a work bead with "crew" in a word, is still work.
-func TestJevStaleCrewSeatIDNeedsANameAfterTheMarker(t *testing.T) {
+// Only a crew marker in a session position makes a seat's bead. A bead whose
+// ID merely contains the marker later on is still work, whether or not a name
+// follows it, and so is one with "crew" in a word.
+func TestJevStaleCrewSeatIDOnlyCountsInSessionPosition(t *testing.T) {
 	t.Parallel()
 	for id, want := range map[string]bool{
 		"gt-crew-sloan":       true,
 		"gt-crew-sloan-topic": true,
+		"hq-crew-max":         true,
 		"gt-crew-":            false,
 		"gt-crewcut":          false,
+		"gt-fix-crew-1":       false,
+		"gt-wisp-crew-x":      false,
 		"gt-6k7ht":            false,
 	} {
 		if got := isCrewSeat(id); got != want {
