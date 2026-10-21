@@ -1315,6 +1315,16 @@ func (s slingStores) hookWithRetry(verify func(beadID string) (*beadInfo, error)
 		if wrote {
 			return &hookWriteLandedError{err}
 		}
+		// A write whose reply was lost is indistinguishable from one that
+		// never ran: bd commits the update, the connection dies before the
+		// reply, and the attempt after it fails fast. Read the bead back
+		// before calling the hook unlanded — hooked to this seat means the
+		// write landed, and the rollback must hand it back guarded rather
+		// than leave it booked to a seat that never runs it (gt-lanz0).
+		if info, readErr := s.pinnedAt(hookDir).Show(beadID); readErr == nil &&
+			info.Status == hooked && info.Assignee == targetAgent {
+			return &hookWriteLandedError{err}
+		}
 		return err
 	}
 	for attempt := 1; attempt <= maxRetries; attempt++ {
