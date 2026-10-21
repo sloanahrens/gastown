@@ -23,16 +23,18 @@ const (
 	ruleStaleClosedObsolete   = "stale:closed-obsolete"
 	ruleStaleClosedSuperseded = "stale:closed-superseded"
 	ruleStaleLanded           = "stale:landed"
+	ruleStaleReshaped         = "stale:reshaped"
 	ruleStalePriorityRaised   = "stale:priority-raised"
 	ruleStalePriorityLowered  = "stale:priority-lowered"
 )
 
 // The question ids the stale battery logs, named by the stale package.
 const (
-	qObsolete    QuestionID = stale.QObsolete
-	qSuperseded  QuestionID = stale.QSuperseded
-	qWorthDoing  QuestionID = stale.QWorthDoing
-	qPriorityFit QuestionID = stale.QPriorityFit
+	qObsolete     QuestionID = stale.QObsolete
+	qSuperseded   QuestionID = stale.QSuperseded
+	qWorthDoing   QuestionID = stale.QWorthDoing
+	qNeedsReshape QuestionID = stale.QNeedsReshape
+	qPriorityFit  QuestionID = stale.QPriorityFit
 )
 
 func init() {
@@ -111,13 +113,14 @@ func (a *staleAdapter) Parse(raw []byte) (Item, error) {
 //  2. closed as superseded or duplicate sets superseded true;
 //  3. landed sets worth_doing true and obsolete and superseded false. A landed
 //     bead's close reason is either the bare word "landed" or the landing
-//     record's "Landed on ..." reason;
+//     record's "Landed on ..." reason. If its description changed since the ask,
+//     it also sets needs_reshaping true (stale:reshaped);
 //  4. a priority changed since the ask sets priority_fit: raised is true (the
 //     bead should rank higher), lowered is false (it should rank lower).
 //
 // A bead still open with its priority unchanged is unlabeled, and so is a bead
-// that no longer exists. needs_reshaping is never labeled: the log keeps no copy
-// of the description the question was asked about, so no rule can see a reshape.
+// that no longer exists. A line logged before the description hash existed is
+// never labeled needs_reshaping, because it cannot show a change.
 func (a *staleAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	line, ok := a.lines[item.ID]
 	if !ok {
@@ -141,6 +144,10 @@ func (a *staleAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 			labels[qObsolete] = false
 			labels[qSuperseded] = false
 			rules = append(rules, ruleStaleLanded)
+			if reshaped(line, issue) {
+				labels[qNeedsReshape] = true
+				rules = append(rules, ruleStaleReshaped)
+			}
 		case hasAnyPrefix(strings.ToLower(reason), "wontfix", "obsolete", "no longer"):
 			labels[qObsolete] = true
 			rules = append(rules, ruleStaleClosedObsolete)
@@ -180,6 +187,13 @@ func (a *staleAdapter) bead(rig, id string) (*beads.Issue, error) {
 	}
 	a.cache[key] = issue
 	return issue, nil
+}
+
+// reshaped reports whether a bead's description changed after the line asked
+// about it. A line with no hash was logged before the field existed, so it
+// cannot show a change.
+func reshaped(line stale.Line, issue *beads.Issue) bool {
+	return line.DescHash != "" && stale.HashDescription(issue.Description) != line.DescHash
 }
 
 // hasAnyPrefix reports whether s starts with any of the prefixes.

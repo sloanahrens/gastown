@@ -1881,8 +1881,10 @@ first, up to 500 beads a run, and asks Jev one call per bead: the noul
 `obsolete`, `superseded`, `worth_doing` and `needs_reshaping`, and the score
 `priority_fit` over `much lower`, `lower`, `right` and `higher`. It appends one
 line per bead to `.runtime/jev/stale.jsonl`: `{ts, rig, bead, type, priority,
-updated_at, landed_offered, model, answers, question_version}`, with a `reason`
-and null `answers` when the bead could not be asked.
+updated_at, desc_hash, landed_offered, model, answers, question_version}`, with a
+`reason` and null `answers` when the bead could not be asked. `desc_hash` is the
+SHA-256, in hex, of the bead's description when it was asked about: the log never
+holds the description's text. A line logged before the field existed has none.
 
 `landed_offered` lists the beads the question could weigh against `superseded`:
 the ten closest, in `hm query` rank order, among beads closed as `landed` in the
@@ -1919,16 +1921,16 @@ are in `internal/jev/scorecard/stale.go`:
   (`stale:closed-superseded`).
 - landed, either the close reason `landed` or a landing record's `Landed on ...`:
   `worth_doing` true, and `obsolete` and `superseded` false (`stale:landed`).
+  When the description's hash no longer matches `desc_hash`, `needs_reshaping`
+  is also true (`stale:reshaped`). A line with no `desc_hash` is never labeled
+  `needs_reshaping`.
 - priority changed since the ask: `priority_fit` true when it was raised (a
   lower P number), false when it was lowered (`stale:priority-raised`,
   `stale:priority-lowered`). The log does not record who changed it, so any
   change counts.
 
-A bead still open with its priority unchanged is unlabeled. `needs_reshaping`
-is never labeled: the log keeps no copy of the description the question was
-asked about, and the bead's update and close times do not show whether a
-description changed. Its logged answers still appear in the report, with no
-labels.
+A bead still open with its priority unchanged is unlabeled. Its logged answers
+still appear in the report, with no labels.
 
 `gt jev scorecard --battery drift` scores the drift log against the docs' history
 on `refs/heads/main`, read from the bare clone the submission battery owns. A
