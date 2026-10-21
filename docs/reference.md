@@ -2096,9 +2096,11 @@ scorecard's `internal/jev/scorecard/failcause.go`:
   `will_recur` true (`failcause:recurred-within-14d`). This label does not wait
   for the window to close.
 - the window has closed with no such failure, and the ledger's last write came
-  strictly before the judging plus the ledger's 14-day retention: `will_recur`
-  false (`failcause:quiet-14d`). A later write prunes records older than the
-  retention, so a longer gap can hide a repeat. A write recorded exactly at
+  strictly before the judging plus the ledger's 7-day retention, the shortest
+  it has ever kept: `will_recur` false (`failcause:quiet-14d`). A later write
+  prunes records older than the retention it was written under, and the ledger
+  kept 7 days before it kept the full window, so a longer gap can hide a
+  repeat. A write recorded exactly at
   the boundary stays unlabeled too: that time is the file's mtime, which the
   filesystem can floor, not the clock the daemon pruned by.
 - otherwise unlabeled: the window is open, or the ledger is missing.
