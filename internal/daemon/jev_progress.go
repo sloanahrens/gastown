@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentlog"
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/jev/progress"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -93,7 +94,22 @@ func (d *Daemon) runJevProgress() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), jevProgressRunBudget)
 	defer cancel()
+	// The E-stop holds the patrol from starting, but a pass already in flight
+	// went on paying for every queued nudge (gt-dlnkz). The gate checks
+	// between billed calls, as jev_dedupe's does (gt-0h4i0). The nudges the
+	// stop cut short were drained already and are dropped, as a stopped pass's
+	// are.
+	gate := &estopGatedAsker{
+		Asker:  pass.Asker,
+		cancel: cancel,
+		active: func() bool { return estop.IsActive(d.config.TownRoot) },
+	}
+	pass.Asker = gate
 	sum, err := pass.Run(ctx)
+	if gate.stopped {
+		d.logger.Printf("jev_progress: stopped: E-STOP active after asking %d nudge(s) (dropped %d)", sum.Asked, sum.Dropped)
+		return
+	}
 	if err != nil {
 		// A stopped pass logs what it reached before it stopped, so its line
 		// never reads like a clean pass that dropped nothing.

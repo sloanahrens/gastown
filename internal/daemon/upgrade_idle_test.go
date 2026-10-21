@@ -171,8 +171,9 @@ func TestDaemonWorkHoldsIncludesARunningJevDedupePass(t *testing.T) {
 // TestDaemonWorkHoldsIncludesTheOtherJevPasses covers gt-tevxz: an upgrade
 // restart killed the Jev call a jev_attention, jev_landing, jev_submission or
 // jev_dispatch pass had in flight before its line was recorded, and the next
-// pass asked — and billed — that item again. Each is soft work, as jev_dedupe's
-// is, and holds the restart only up to housekeepingRestartCap.
+// pass asked — and billed — that item again; gt-dlnkz adds jev_drift,
+// jev_logtriage and jev_progress. Each is soft work, as jev_dedupe's is, and
+// holds the restart only up to housekeepingRestartCap.
 func TestDaemonWorkHoldsIncludesTheOtherJevPasses(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -183,6 +184,9 @@ func TestDaemonWorkHoldsIncludesTheOtherJevPasses(t *testing.T) {
 		{"jev_landing", func(d *Daemon) *atomic.Bool { return &d.jevLandingRunning }},
 		{"jev_submission", func(d *Daemon) *atomic.Bool { return &d.jevSubmissionRunning }},
 		{"jev_dispatch", func(d *Daemon) *atomic.Bool { return &d.jevDispatchRunning }},
+		{"jev_drift", func(d *Daemon) *atomic.Bool { return &d.jevDriftRunning }},
+		{"jev_logtriage", func(d *Daemon) *atomic.Bool { return &d.jevLogtriageRunning }},
+		{"jev_progress", func(d *Daemon) *atomic.Bool { return &d.jevProgressRunning }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
