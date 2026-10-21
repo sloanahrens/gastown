@@ -1638,14 +1638,18 @@ row with any other verdict, is unlabeled.
 
 The joined row's attempt names a `MERGE REJECTION` block in the bead's notes,
 and that block's findings set two more labels, by their titles, matched
-case-insensitively:
+case-insensitively at a word start and through its inflection (`no test` matches
+`no testing` and `no tests`, but not the `no test` inside `piano test`):
 
 - a title that holds a missing-test phrase sets `tests_cover_change` false;
 - a title that holds a scope-beyond-the-bead phrase sets `beyond_goal` true.
 
 The two phrase lists are `missingTestPhrases` and `beyondGoalPhrases` in
 `internal/jev/scorecard/submission.go`, and nowhere else. A question no title
-names stays unlabeled on that line.
+names stays unlabeled on that line. A `request_changes` row whose attempt has no
+block in the notes adds `submission:no-rejection-block` to the line's rule, so
+a review whose findings could not be read differs from one that had none. The
+bead's notes are read once per report, however many submissions it has.
 
 That block's kind also sets labels. A `gate` refusal sets `boxes_credible` false
 (`submission:gate-rejected`). A `review` refusal whose findings include a major
@@ -1653,9 +1657,10 @@ or critical sets `claims_verified` false (`submission:om-major`). A `conflict`
 refusal sets none of the four new questions.
 
 An approval the first attempt landed sets `claims_verified`, `boxes_credible`
-and `outcome` true (`submission:first-try-landing`). That needs three things:
-the joined row is the first attempt, the bead's `LANDING RECORD` names the
-submission's head, and no rejection block sits on that attempt. The outcome
+and `outcome` true (`submission:first-try-landing`). That needs four things:
+the joined row's verdict is `approve`, the row is the first attempt, the bead's
+`LANDING RECORD` names the submission's head, and no rejection block sits on
+that attempt. The outcome
 label is true for `complete`, the choice's positive option. A line that
 matches none of these leaves the four questions unlabeled.
 

@@ -7,6 +7,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -291,6 +292,129 @@ func TestSubmissionFindingLabelsReadsBothPhraseLists(t *testing.T) {
 				t.Errorf("labels for %q = %v, want %v", tc.title, got, tc.want)
 			}
 		})
+	}
+}
+
+// TestSubmissionFindingLabelsMatchesWordsButNotPartsOfWords checks that a
+// phrase inside a longer word does not label and that its inflection does.
+func TestSubmissionFindingLabelsMatchesWordsButNotPartsOfWords(t *testing.T) {
+	t.Parallel()
+	for _, title := range []string{
+		"Reads the unrequested_fields column",
+		"Fixes the piano test helper",
+		"Sorts the untesteddata rows",
+	} {
+		if got := submissionFindingLabels([]land.Finding{{Title: title}}); len(got) != 0 {
+			t.Errorf("labels for %q = %v, want none", title, got)
+		}
+	}
+	inflected := []struct {
+		title string
+		want  map[QuestionID]bool
+	}{
+		{"Adds no testing for the parser", map[QuestionID]bool{QuestionID(submission.QTestsCoverChange): false}},
+		{"The new branch is untested", map[QuestionID]bool{QuestionID(submission.QTestsCoverChange): false}},
+		{"Covers the out of scopes table", map[QuestionID]bool{QuestionID(submission.QBeyondGoal): true}},
+		{
+			"No tests, and out of scope: reshapes the daemon.",
+			map[QuestionID]bool{
+				QuestionID(submission.QTestsCoverChange): false,
+				QuestionID(submission.QBeyondGoal):       true,
+			},
+		},
+	}
+	for _, tc := range inflected {
+		if got := submissionFindingLabels([]land.Finding{{Title: tc.title}}); !maps.Equal(got, tc.want) {
+			t.Errorf("labels for %q = %v, want %v", tc.title, got, tc.want)
+		}
+	}
+}
+
+// TestSubmissionLabelNamesARequestChangesWithNoRejectionBlock checks that a
+// request_changes verdict whose block is missing carries its own rule, and an
+// approval with no block does not.
+func TestSubmissionLabelNamesARequestChangesWithNoRejectionBlock(t *testing.T) {
+	t.Parallel()
+	otherAttempt := land.FormatRejectionNote(land.RejectionNote{
+		Attempt: 1, Kind: string(land.RejectReview), Reason: "refused", Branch: "b", Target: "main", MR: "gt-a",
+	})
+	cases := []struct {
+		name    string
+		verdict string
+		attempt int
+		notes   string
+		rule    string
+	}{
+		{"no block at all", land.VerdictRequestChanges, 1, "a note with no block", ruleSubmissionRequestChanges + " " + ruleSubmissionNoBlock},
+		{"only another attempt's block", land.VerdictRequestChanges, 2, otherAttempt, ruleSubmissionRequestChanges + " " + ruleSubmissionNoBlock},
+		{"the block of its own attempt", land.VerdictRequestChanges, 1, otherAttempt, ruleSubmissionRequestChanges},
+		{"an approval needs no block", land.VerdictApprove, 2, "a note with no block", ruleSubmissionApprove},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := &submissionAdapter{
+				reviews: &land.ReviewsFile{Path: reviewFile(t, review("gt-a", tc.attempt, tc.verdict, submissionAt(10, 30)))},
+				notes:   &fakeLandingNotes{byBead: map[string]string{"gt-a": tc.notes}},
+			}
+			lab, err := a.Label(context.Background(), submissionItem(t, a, "gt-a", submissionAt(10, 0)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lab.Rule != tc.rule {
+				t.Errorf("rule = %q, want %q", lab.Rule, tc.rule)
+			}
+		})
+	}
+}
+
+// TestSubmissionLabelReadsABeadsNotesOnce checks that two labeled submissions
+// of one bead read its notes from the store a single time.
+func TestSubmissionLabelReadsABeadsNotesOnce(t *testing.T) {
+	t.Parallel()
+	notes := &fakeLandingNotes{byBead: map[string]string{"gt-a": "", "gt-b": ""}}
+	a := &submissionAdapter{
+		reviews: &land.ReviewsFile{Path: reviewFile(t,
+			review("gt-a", 1, land.VerdictRequestChanges, submissionAt(10, 30)),
+			review("gt-a", 2, land.VerdictApprove, submissionAt(12, 30)),
+			review("gt-b", 1, land.VerdictApprove, submissionAt(10, 30)),
+		)},
+		notes: notes,
+	}
+	items := []Item{
+		submissionItem(t, a, "gt-a", submissionAt(10, 0)),
+		submissionItem(t, a, "gt-a", submissionAt(12, 0)),
+		submissionItem(t, a, "gt-b", submissionAt(10, 0)),
+	}
+	for _, it := range items {
+		if _, err := a.Label(context.Background(), it); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []string{submission.RigName + "/gt-a", submission.RigName + "/gt-b"}
+	if !slices.Equal(notes.reads, want) {
+		t.Errorf("notes reads = %v, want %v", notes.reads, want)
+	}
+}
+
+// TestSubmissionContextDropsTheCachedNotes checks that the report boundary
+// clears the notes cache, so the next build reads them again.
+func TestSubmissionContextDropsTheCachedNotes(t *testing.T) {
+	t.Parallel()
+	notes := &fakeLandingNotes{byBead: map[string]string{"gt-a": ""}}
+	a := &submissionAdapter{
+		reviews: &land.ReviewsFile{Path: reviewFile(t, review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30)))},
+		notes:   notes,
+	}
+	for range 2 {
+		if _, err := a.Label(context.Background(), submissionItem(t, a, "gt-a", submissionAt(10, 0))); err != nil {
+			t.Fatal(err)
+		}
+		a.Context()
+	}
+	want := []string{submission.RigName + "/gt-a", submission.RigName + "/gt-a"}
+	if !slices.Equal(notes.reads, want) {
+		t.Errorf("notes reads = %v, want one per report, %v", notes.reads, want)
 	}
 }
 
