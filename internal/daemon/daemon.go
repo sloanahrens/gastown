@@ -37,6 +37,7 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
 	jevdispatch "github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/jev/drift"
+	"github.com/steveyegge/gastown/internal/jev/failcause"
 	"github.com/steveyegge/gastown/internal/jev/landing"
 	"github.com/steveyegge/gastown/internal/jev/logtriage"
 	"github.com/steveyegge/gastown/internal/jev/progress"
@@ -652,6 +653,11 @@ type Daemon struct {
 	// jevLogtriageRunning and jevLogtriageOpen are for jev_logtriage.
 	jevReworkRunning atomic.Bool
 	jevReworkOpen    func(townRoot string, s rework.Settings, warnings io.Writer) (*rework.Pass, error)
+
+	// jevFailcauseOpen builds the cause battery's pass for a rig's candidate
+	// gate (jev_failcause.go). Nil means failcause.Open; a test sets it to use
+	// a fake asker.
+	jevFailcauseOpen func(townRoot string, s failcause.Settings, warnings io.Writer) (*failcause.Pass, error)
 
 	// jevDispatchRunning is the jev_dispatch pass's single-flight guard
 	// (jev_dispatch.go), for the same reason as jevDedupeRunning.
