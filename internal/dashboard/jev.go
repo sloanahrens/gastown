@@ -93,6 +93,10 @@ type JevScorecard struct {
 	Window    string       `json:"window,omitempty"`
 	// Totals is the JEV panel's title line, summed over Batteries by Tally.
 	Totals JevTotals `json:"totals"`
+	// Unavailable names the batteries whose newest read failed, in Batteries'
+	// order, set by Tally. Each is either a placeholder with no line or a
+	// kept last good line.
+	Unavailable []string `json:"unavailable,omitempty"`
 }
 
 // JevTotals sums the batteries for the JEV panel's title line: how many
@@ -106,11 +110,21 @@ type JevTotals struct {
 	NoSignal  int `json:"no_signal"`
 }
 
-// Tally sets Totals from Batteries. The reader calls it once a read has every
-// battery's line, so the page never counts them itself.
+// Tally sets Totals and Unavailable from Batteries. The reader calls it once a
+// read has run every battery, and the hub again after it has put last good
+// lines back, so the page never counts them itself. A failed battery with no
+// line is left out of Totals.Batteries; a kept last good line counts.
 func (sc *JevScorecard) Tally() {
-	t := JevTotals{Batteries: len(sc.Batteries)}
+	t := JevTotals{}
+	sc.Unavailable = nil
 	for _, b := range sc.Batteries {
+		if b.Failed {
+			sc.Unavailable = append(sc.Unavailable, b.Name)
+			if !b.Kept {
+				continue
+			}
+		}
+		t.Batteries++
 		t.Lines += b.Lines
 		t.Labeled += b.Labeled
 		for _, q := range b.Questions {
@@ -133,6 +147,11 @@ type JevBattery struct {
 	Lines     int           `json:"lines"`
 	Labeled   int           `json:"labeled"`
 	Questions []JevQuestion `json:"questions,omitempty"`
+	// Failed marks a battery whose newest read failed. Kept says the line is
+	// then the last good one; a Failed battery that is not Kept has no line
+	// and only its name is real.
+	Failed bool `json:"failed,omitempty"`
+	Kept   bool `json:"kept,omitempty"`
 }
 
 // JevQuestion is a question's verdict: earning, not-yet or no-signal.
