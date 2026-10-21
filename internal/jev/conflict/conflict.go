@@ -14,7 +14,8 @@
 // crash between the two can repeat a line but never asks a pair a second time
 // in a later pass. A pair whose question fails because of the beads' own text
 // is retried on a later pass, up to maxAttempts; any other failure means Jev
-// could not be reached, and the pass stops where it is.
+// could not answer for the beads this pass — an outage, or a refusal of the
+// account rather than the request — and the pass stops where it is.
 package conflict
 
 import (
@@ -94,7 +95,8 @@ type Summary struct {
 	Asked int
 	// Failed is the number of pairs whose question failed this pass because of
 	// the beads' own text. Each is asked again on a later pass, unless it is
-	// one of GivenUp.
+	// one of GivenUp. An account-level refusal is not a bead fault and fails
+	// the pass instead.
 	Failed int
 	// GivenUp is how many pairs reached maxAttempts failures and are not asked
 	// again.
