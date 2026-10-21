@@ -448,6 +448,11 @@ func psSnapshot() ([]processEntry, error) {
 
 // parseProcessTable parses `ps -eo pid,ppid,tty,comm,etime` output, skipping
 // the header and any row that does not parse.
+//
+// comm is the only column that can contain a space — Linux retitles the tmux
+// server "tmux: server", and a macOS executable path can sit in a directory
+// with one — while etime never does. So the comm is everything between the
+// TTY and the trailing etime, not just the fourth field (gt-pmp22).
 func parseProcessTable(out string) []processEntry {
 	var entries []processEntry
 	for _, line := range strings.Split(out, "\n") {
@@ -467,8 +472,8 @@ func parseProcessTable(out string) []processEntry {
 			PID:   pid,
 			PPID:  ppid,
 			TTY:   fields[2],
-			Comm:  fields[3],
-			Etime: fields[4],
+			Comm:  strings.Join(fields[3:len(fields)-1], " "),
+			Etime: fields[len(fields)-1],
 		})
 	}
 	return entries
@@ -488,13 +493,14 @@ func (e processEntry) hasLiveParent(live map[int]string) bool {
 	return e.PPID > 1 && ok && !isTmuxServerComm(comm)
 }
 
-// isTmuxServerComm matches the tmux server under both comm spellings. Linux
-// retitles the server "tmux: server", and ps field-splitting can deliver it
-// as plain "tmux:"; an exact "tmux" match would miss both and hide a
-// stranded pane survivor behind a server that owns unrelated sessions
-// (gt-7fnz7).
+// isTmuxServerComm matches the tmux server by its exact comm spellings: macOS
+// reports "tmux" and Linux retitles the server "tmux: server". A "tmux:"
+// prefix match would also swallow the client ("tmux: client") and any
+// process whose comm merely starts with those bytes, and the server is the
+// only tmux process whose identity says nothing about who owns its children
+// (gt-7fnz7, gt-pmp22).
 func isTmuxServerComm(comm string) bool {
-	return comm == "tmux" || strings.HasPrefix(comm, "tmux:")
+	return comm == "tmux" || comm == "tmux: server"
 }
 
 // unownedCandidate is a process table row that passed the cheap filters, with

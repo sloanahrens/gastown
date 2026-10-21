@@ -58,18 +58,22 @@ func TestParseProcessTable(t *testing.T) {
     1     0 ??       launchd  10-00:00:00
   420    1  ??       claude   01:02:03
   500   420 ttys001  claude   00:05:00
+   50     1 ??       tmux: server   05:00:00
 
   not-a-pid     1 ?? claude 00:01:00
   600     1 ??       claude
 `
 	entries := parseProcessTable(out)
-	if len(entries) != 3 {
-		t.Fatalf("parseProcessTable() returned %d entries, want 3: %+v", len(entries), entries)
+	if len(entries) != 4 {
+		t.Fatalf("parseProcessTable() returned %d entries, want 4: %+v", len(entries), entries)
 	}
 	want := []processEntry{
 		{PID: 1, PPID: 0, TTY: "??", Comm: "launchd", Etime: "10-00:00:00"},
 		{PID: 420, PPID: 1, TTY: "??", Comm: "claude", Etime: "01:02:03"},
 		{PID: 500, PPID: 420, TTY: "ttys001", Comm: "claude", Etime: "00:05:00"},
+		// Linux retitles the tmux server with a space in its comm: the whole
+		// title survives and the etime column stays where it belongs.
+		{PID: 50, PPID: 1, TTY: "??", Comm: "tmux: server", Etime: "05:00:00"},
 	}
 	for i, w := range want {
 		if entries[i] != w {
@@ -150,21 +154,34 @@ func TestUnownedCandidates_StrandedTmuxSurvivor(t *testing.T) {
 }
 
 // TestUnownedCandidatesSkipsLinuxTmuxServerParent is the gt-7fnz7
-// regression: Linux retitles the tmux server "tmux: server", which reaches
-// the scan as "tmux: server" or — split on the space by the ps field
-// parser — "tmux:". An exact "tmux" match counted either spelling as a live
-// parent, hiding the stranded TTY-less pane survivor of gt-tbtx on Linux.
+// regression: Linux retitles the tmux server "tmux: server", so an exact
+// "tmux" match hid the stranded TTY-less pane survivor of gt-tbtx on Linux.
+// Each case starts from raw ps output, so the parser's handling of the
+// retitled comm is exercised rather than assumed. The client case pins the
+// match to the server: a prefix match counted "tmux: client" as the server
+// too, but a client is an ordinary live parent (gt-pmp22).
 func TestUnownedCandidatesSkipsLinuxTmuxServerParent(t *testing.T) {
 	t.Parallel()
-	for _, comm := range []string{"tmux", "tmux:", "tmux: server"} {
-		t.Run(comm, func(t *testing.T) {
+	tests := []struct {
+		name          string
+		parentComm    string
+		wantCandidate bool
+	}{
+		{"macOS comm", "tmux", true},
+		{"Linux retitled comm", "tmux: server", true},
+		{"tmux client", "tmux: client", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			entries := []processEntry{
-				{PID: 50, PPID: 1, TTY: "??", Comm: comm, Etime: "05:00:00"},
-				{PID: 210, PPID: 50, TTY: "??", Comm: "claude", Etime: "01:00:00"},
-			}
-			if _, ok := candidatePIDs(unownedCandidates(entries, nil))[210]; !ok {
-				t.Errorf("PID 210 with parent comm %q: want candidate", comm)
+			entries := parseProcessTable(psTable(
+				"   50     1 ??       "+tt.parentComm+"   05:00:00",
+				"  210    50 ??       claude   01:00:00",
+			))
+			_, ok := candidatePIDs(unownedCandidates(entries, nil))[210]
+			if ok != tt.wantCandidate {
+				t.Errorf("PID 210 with parent comm %q: candidate = %v, want %v",
+					tt.parentComm, ok, tt.wantCandidate)
 			}
 		})
 	}
