@@ -136,7 +136,7 @@ func (a *staleAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	if strings.TrimSpace(issue.Status) == statusClosed {
 		reason := strings.TrimSpace(issue.CloseReason)
 		switch {
-		case isLandedReason(reason):
+		case stale.IsLandedReason(reason):
 			labels[qWorthDoing] = true
 			labels[qObsolete] = false
 			labels[qSuperseded] = false
@@ -180,12 +180,6 @@ func (a *staleAdapter) bead(rig, id string) (*beads.Issue, error) {
 	}
 	a.cache[key] = issue
 	return issue, nil
-}
-
-// isLandedReason reports whether a close reason is a landing's: the bare word
-// the stale pass offers as landed, or the landing record's reason.
-func isLandedReason(reason string) bool {
-	return strings.EqualFold(reason, "landed") || strings.HasPrefix(reason, "Landed on")
 }
 
 // hasAnyPrefix reports whether s starts with any of the prefixes.

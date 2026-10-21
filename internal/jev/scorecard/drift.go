@@ -12,6 +12,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev/drift"
+	"github.com/steveyegge/gastown/internal/jev/stale"
 	"github.com/steveyegge/gastown/internal/jev/submission"
 )
 
@@ -366,7 +367,7 @@ func (a *driftAdapter) beadLanded(item Item) (bool, error) {
 		if !inDriftWindow(closedAt, item.Time) {
 			continue
 		}
-		if !isLandedReason(strings.TrimSpace(is.CloseReason)) {
+		if !stale.IsLandedReason(is.CloseReason) {
 			continue
 		}
 		if namesDoc(is.Title+"\n"+is.Description, doc) {
