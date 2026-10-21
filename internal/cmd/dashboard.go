@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -755,27 +756,38 @@ func dashboardJevScorecard(argv []string) func() *dashboard.JevScorecard {
 }
 
 // dashboardJevScorecardWith is dashboardJevScorecard over run, the battery
-// names and each run's timeout, so a test stands in for the process. The
-// command reads one battery per run, one after another. A battery whose run
-// fails, times out or prints anything but its own report loses only its line:
-// it stays in the result as a Failed placeholder, which the hub puts its last
-// good line back over. Only when every battery fails is the read nil, which the
-// hub shows as the scorecard unavailable.
+// names and each run's timeout, so a test stands in for the process. The runs
+// go out together, so the read takes as long as its slowest battery, not the
+// sum of them. A battery whose run fails, times out or prints anything but its
+// own report loses only its line: it stays in the result as a Failed
+// placeholder, which the hub puts its last good line back over. Only when every
+// battery fails is the read nil, which the hub shows as the scorecard
+// unavailable.
 func dashboardJevScorecardWith(argv, batteries []string, timeout time.Duration, run func(ctx context.Context, argv []string) ([]byte, error)) func() *dashboard.JevScorecard {
 	if len(argv) == 0 {
 		return nil
 	}
 	window := dashboard.JevScorecardWindow(argv)
 	return func() *dashboard.JevScorecard {
-		sc := &dashboard.JevScorecard{Batteries: []dashboard.JevBattery{}, Window: window}
+		sc := &dashboard.JevScorecard{Batteries: make([]dashboard.JevBattery, len(batteries)), Window: window}
+		var wg sync.WaitGroup
+		for i, name := range batteries {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				b, err := readJevBattery(argv, name, timeout, run)
+				if err != nil {
+					b = &dashboard.JevBattery{Name: name, Failed: true}
+				}
+				sc.Batteries[i] = *b
+			}()
+		}
+		wg.Wait()
 		failed := 0
-		for _, name := range batteries {
-			b, err := readJevBattery(argv, name, timeout, run)
-			if err != nil {
+		for _, b := range sc.Batteries {
+			if b.Failed {
 				failed++
-				b = &dashboard.JevBattery{Name: name, Failed: true}
 			}
-			sc.Batteries = append(sc.Batteries, *b)
 		}
 		if failed > 0 && failed == len(batteries) {
 			return nil
