@@ -92,6 +92,7 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 		LogPath:     LogPath(townRoot),
 		CursorPath:  CursorPath(townRoot),
 		Allows:      func() (bool, error) { return town.Allows(time.Now) },
+		Warnings:    warnings,
 	}, nil
 }
 
@@ -189,9 +190,44 @@ func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 // the dir to prove it.
 type gitRunner func(ctx context.Context, dir string, args ...string) (string, error)
 
-// runGit is the production gitRunner.
+// repoEnvVars are the variables that point git at a repository other than the
+// one -C names. A caller running inside a hook or a worktree session can carry
+// them, and they would send the pass's commands into that repository.
+var repoEnvVars = map[string]bool{
+	"GIT_DIR":                          true,
+	"GIT_WORK_TREE":                    true,
+	"GIT_INDEX_FILE":                   true,
+	"GIT_COMMON_DIR":                   true,
+	"GIT_OBJECT_DIRECTORY":             true,
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES": true,
+	"GIT_NAMESPACE":                    true,
+	"GIT_PREFIX":                       true,
+}
+
+// gitEnv is environ without the variables that pick a repository. The rest,
+// such as the ssh command or credential helpers a fetch needs, pass through.
+func gitEnv(environ []string) []string {
+	out := make([]string, 0, len(environ))
+	for _, kv := range environ {
+		name, _, _ := strings.Cut(kv, "=")
+		if repoEnvVars[name] {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+// runGit is the production gitRunner. It runs git without the caller's
+// repository-selecting environment.
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
+	return runGitEnv(ctx, os.Environ(), dir, args...)
+}
+
+// runGitEnv runs git in dir with environ as the caller's environment.
+func runGitEnv(ctx context.Context, environ []string, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = gitEnv(environ)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
