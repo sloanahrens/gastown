@@ -1444,6 +1444,22 @@ set when Jev was not asked: `too_large`, `tree_wide`, `nothing_to_ask`,
 | `max_usd_per_day` | The town-wide daily cap every Jev battery shares. `0` takes the default of 1. |
 | `usd_per_billion_tokens` | Prices the ledger's tokens. Required: without it the battery logs an error and the gate runs unwrapped. |
 
+`gt jev scorecard --battery testsel` scores the log in `internal/jev/scorecard/testsel.go`.
+A line answers each package Jev was asked about, so each asked package is one item
+on the `affects_tests` question (`noul`: could the change affect the package's tests).
+The gate's result for that package labels it:
+
+- the gate reported the package `FAIL`: affected, `affects_tests` true (`testsel:gate-result`).
+- the gate reported it `ok`: not affected, `affects_tests` false (`testsel:gate-result`).
+- the gate reported no result for the package, or the line's `gate` is absent:
+  logged but unlabeled. Nothing was graded.
+
+The report prints one summary line per threshold, 0.2, 0.3 and 0.5, beside the
+per-question block: the asked packages the battery would skip at it (`noul` below
+the threshold), how many of those were ungraded, and how many the gate failed
+(MISS). Gate minutes saved print `n/a`: the gate's package results carry no
+durations, so the log cannot price a skip in minutes.
+
 ### Review-targeting battery (`jev_targets`)
 
 `gt jev review-targets --run <bead> --ranked <rows> --history <file>` asks Jev
