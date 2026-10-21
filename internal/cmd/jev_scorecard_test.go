@@ -138,8 +138,12 @@ func TestScorecardUnknownBatteryListsRegistered(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unknown battery exited cleanly")
 	}
-	if !strings.Contains(err.Error(), `"no-such-battery"`) || !strings.Contains(err.Error(), "finding, fixture") {
+	if !strings.Contains(err.Error(), `"no-such-battery"`) || !strings.Contains(err.Error(), "finding, landing") {
 		t.Errorf("error %q does not name the battery and list the registered ones", err)
+	}
+	// The test-only fixture battery is not offered to the operator.
+	if strings.Contains(err.Error(), scorecard.FixtureBattery) {
+		t.Errorf("error %q lists the test-only %q battery", err, scorecard.FixtureBattery)
 	}
 }
 

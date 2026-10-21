@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/steveyegge/gastown/internal/dashboard"
 	"github.com/steveyegge/gastown/internal/jev/scorecard"
 )
 
@@ -261,6 +262,9 @@ func TestDashboardJevScorecardRunsOncePerBattery(t *testing.T) {
 		strings.Join(ran[1], " ") != "gt jev scorecard --json --since 7d --battery landing" {
 		t.Errorf("ran %q", ran)
 	}
+	if want := (dashboard.JevTotals{Batteries: 2, Lines: 2, Labeled: 1, Earning: 1}); sc.Totals != want {
+		t.Errorf("Totals = %+v, want %+v", sc.Totals, want)
+	}
 }
 
 // One run that fails, prints text, or reports another battery fails the read,
@@ -304,5 +308,10 @@ func TestDashboardJevScorecardAsksForEveryRegisteredBattery(t *testing.T) {
 	dashboardJevScorecardWith([]string{"gt"}, scorecard.Registered(), run)()
 	if len(asked) == 0 || asked[0] != scorecard.Registered()[0] {
 		t.Errorf("asked %q, want the registered batteries %q", asked, scorecard.Registered())
+	}
+	for _, name := range asked {
+		if name == scorecard.FixtureBattery {
+			t.Errorf("the dashboard asked for the test-only %q battery: %q", name, asked)
+		}
 	}
 }
