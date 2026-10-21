@@ -755,25 +755,32 @@ func (h configHome) basePath() string {
 func OverridePath(target string) string { return envConfigHome().overridePath(target) }
 
 func (h configHome) overridePath(target string) string {
-	// Replace "/" with "__" for filesystem safety (e.g., "gastown/crew" -> "gastown__crew")
-	safe := strings.ReplaceAll(target, "/", "__")
-	return filepath.Join(h.primaryDir(), "hooks-overrides", safe+".json")
+	return overrideFileIn(h.primaryDir(), target)
 }
 
-// OverrideEditPath returns the override file `gt hooks override` should open:
-// the one the cascading read finds, so an edit lands on the override in effect,
-// else the primary write target for a new override (gt-arz8h).
-func OverrideEditPath(target string) string { return envConfigHome().overrideEditPath(target) }
-
-func (h configHome) overrideEditPath(target string) string {
+// overrideFileIn returns the override file for target under the config dir dir.
+func overrideFileIn(dir, target string) string {
+	// Replace "/" with "__" for filesystem safety (e.g., "gastown/crew" -> "gastown__crew")
 	safe := strings.ReplaceAll(target, "/", "__")
+	return filepath.Join(dir, "hooks-overrides", safe+".json")
+}
+
+// overrideEditPath returns the override file `gt hooks override` should open:
+// the one the cascading read finds, so an edit lands on the override in effect,
+// else the primary write target for a new override (gt-arz8h). A stat failure
+// other than not-exist is returned rather than read as a missing override.
+func (h configHome) overrideEditPath(target string) (string, error) {
 	for _, dir := range h.configDirs() {
-		path := filepath.Join(dir, "hooks-overrides", safe+".json")
-		if _, err := os.Stat(path); err == nil {
-			return path
+		path := overrideFileIn(dir, target)
+		_, err := os.Stat(path)
+		if err == nil {
+			return path, nil
+		}
+		if !os.IsNotExist(err) {
+			return "", err
 		}
 	}
-	return h.overridePath(target)
+	return h.overridePath(target), nil
 }
 
 // OverridesDir returns the path to the overrides directory in the primary dir.
@@ -1184,5 +1191,8 @@ func (h Home) SaveOverride(target string, cfg *HooksConfig) error {
 	return h.h.saveOverride(target, cfg)
 }
 
-// OverrideEditPath is the package-level OverrideEditPath against this Home.
-func (h Home) OverrideEditPath(target string) string { return h.h.overrideEditPath(target) }
+// OverrideEditPath returns the override file `gt hooks override` should open
+// for this Home (gt-arz8h).
+func (h Home) OverrideEditPath(target string) (string, error) {
+	return h.h.overrideEditPath(target)
+}

@@ -1366,8 +1366,8 @@ func TestOverrideEditPath(t *testing.T) {
 	primary := filepath.Join(gtHome, ".gt", "hooks-overrides", "crew.json")
 	fallback := filepath.Join(userHome, ".gt", "hooks-overrides", "crew.json")
 
-	if got := home.overrideEditPath("crew"); got != primary {
-		t.Errorf("no override: overrideEditPath() = %q, want primary %q", got, primary)
+	if got, err := home.overrideEditPath("crew"); err != nil || got != primary {
+		t.Errorf("no override: overrideEditPath() = %q, %v; want primary %q", got, err, primary)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(fallback), 0o755); err != nil {
@@ -1376,20 +1376,40 @@ func TestOverrideEditPath(t *testing.T) {
 	if err := os.WriteFile(fallback, []byte("{}"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if got := home.overrideEditPath("crew"); got != fallback {
-		t.Errorf("fallback-only override: overrideEditPath() = %q, want %q", got, fallback)
+	if got, err := home.overrideEditPath("crew"); err != nil || got != fallback {
+		t.Errorf("fallback-only override: overrideEditPath() = %q, %v; want %q", got, err, fallback)
 	}
 
 	if err := home.saveOverride("crew", &HooksConfig{}); err != nil {
 		t.Fatal(err)
 	}
-	if got := home.overrideEditPath("crew"); got != primary {
-		t.Errorf("primary override: overrideEditPath() = %q, want %q", got, primary)
+	if got, err := home.overrideEditPath("crew"); err != nil || got != primary {
+		t.Errorf("primary override: overrideEditPath() = %q, %v; want %q", got, err, primary)
 	}
 
 	wantRig := filepath.Join(gtHome, ".gt", "hooks-overrides", "gastown__crew.json")
-	if got := home.overrideEditPath("gastown/crew"); got != wantRig {
-		t.Errorf("rig/role: overrideEditPath() = %q, want %q", got, wantRig)
+	if got, err := home.overrideEditPath("gastown/crew"); err != nil || got != wantRig {
+		t.Errorf("rig/role: overrideEditPath() = %q, %v; want %q", got, err, wantRig)
+	}
+}
+
+// TestOverrideEditPathSurfacesStatError pins that a stat failure other than
+// not-exist is returned, not read as "no override here". A regular file where
+// the overrides directory belongs makes every stat below it fail with ENOTDIR.
+func TestOverrideEditPathSurfacesStatError(t *testing.T) {
+	t.Parallel()
+	gtHome := t.TempDir()
+	home := configHome{gtHome: gtHome, home: t.TempDir()}
+	blocker := filepath.Join(gtHome, ".gt", "hooks-overrides")
+	if err := os.MkdirAll(filepath.Dir(blocker), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(blocker, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := home.overrideEditPath("crew"); err == nil {
+		t.Errorf("overrideEditPath() = %q, nil; want the stat error", got)
 	}
 }
 

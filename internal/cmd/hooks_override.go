@@ -76,7 +76,10 @@ func hooksOverrideWith(home hooks.Home, openEditor func(string) error, args []st
 	// Open the file the read cascade loaded, not the primary path: with
 	// GT_HOME set, saving the primary path would shadow the override in
 	// effect (gt-arz8h).
-	path := home.OverrideEditPath(target)
+	path, err := home.OverrideEditPath(target)
+	if err != nil {
+		return fmt.Errorf("locating override config for %q: %w", target, err)
+	}
 	if err := openEditor(path); err != nil {
 		return err
 	}
