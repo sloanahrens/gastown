@@ -81,8 +81,11 @@ func TestJevFailcauseCandidateNeedsAPriceAndKeepsTheGate(t *testing.T) {
 // An enabled, priced battery wraps the gate in its shadow, which judges the red
 // verdicts and returns the gate's result. The Jev key comes from a throwaway
 // config home, never the operator's.
+//
+//testpolicy:allow parallel — XDG_CONFIG_HOME is process-wide, and pointing it at the throwaway home here would point every parallel test's Jev client there too
 func TestJevFailcauseCandidateWrapsWhenPriced(t *testing.T) {
 	config := t.TempDir()
+	//testpolicy:allow no-env — the Jev client reads its key from XDG_CONFIG_HOME, so the throwaway config home must reach the whole process
 	t.Setenv("XDG_CONFIG_HOME", config)
 	if err := os.MkdirAll(filepath.Join(config, "gt"), 0o700); err != nil {
 		t.Fatal(err)
