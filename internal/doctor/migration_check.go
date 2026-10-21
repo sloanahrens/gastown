@@ -76,29 +76,9 @@ func (c *DoltMetadataCheck) Run(ctx *CheckContext) *CheckResult {
 	rigsPath := filepath.Join(ctx.TownRoot, "mayor", "rigs.json")
 	rigs := c.loadRigs(rigsPath)
 	for rigName := range rigs {
-		// Resolve the expected DB name: some rigs use their prefix as the
-		// database name (e.g., "lc" for laneassist) rather than the rig name.
-		// Check both rig name and prefix in .dolt-data/. (gt-85w7)
-		// The registry's dolt_database, when recorded, is the rig's database
-		// (gt-y3pgh.11).
-		expectedDB := rigName
-		prefix := config.GetRigPrefix(ctx.TownRoot, rigName)
-		if reg := townconfig.RegistryDatabase(ctx.TownRoot, rigName); reg != "" {
-			if _, err := os.Stat(filepath.Join(doltDataDir, reg)); os.IsNotExist(err) {
-				continue // The registry's database is not on this server
-			}
-			expectedDB = reg
-		} else if _, err := os.Stat(filepath.Join(doltDataDir, rigName)); os.IsNotExist(err) {
-			// Rig name not found — check if prefix-named DB exists. An empty
-			// prefix (rigs.json unreadable) names no database, and a stat of
-			// the data dir itself would read as one.
-			if prefix == "" {
-				continue
-			}
-			if _, err := os.Stat(filepath.Join(doltDataDir, prefix)); os.IsNotExist(err) {
-				continue // No database under either name
-			}
-			expectedDB = prefix
+		expectedDB, onServer := expectedRigDatabase(ctx.TownRoot, rigName)
+		if !onServer {
+			continue // No database under any of the rig's names
 		}
 
 		beadsDir := c.findRigBeadsDir(ctx.TownRoot, rigName)
@@ -156,6 +136,31 @@ func (c *DoltMetadataCheck) Fix(ctx *CheckContext) error {
 	return nil
 }
 
+// expectedRigDatabase names the database a rig's metadata.json must hold and
+// reports whether that database is on the server. The registry's dolt_database,
+// when recorded, is the rig's database (gt-y3pgh.11); otherwise the rig name,
+// or, for rigs that use their prefix as the database name (e.g. "lc" for
+// laneassist), the prefix when only that directory exists in .dolt-data/
+// (gt-85w7). Run and Fix both resolve through here.
+func expectedRigDatabase(townRoot, rigName string) (db string, onServer bool) {
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(townRoot, ".dolt-data", name))
+		return !os.IsNotExist(err)
+	}
+	if reg := townconfig.RegistryDatabase(townRoot, rigName); reg != "" {
+		return reg, exists(reg)
+	}
+	if exists(rigName) {
+		return rigName, true
+	}
+	// An empty prefix (rigs.json unreadable) names no database, and a stat of
+	// the data dir itself would read as one.
+	if prefix := config.GetRigPrefix(townRoot, rigName); prefix != "" && exists(prefix) {
+		return prefix, true
+	}
+	return rigName, false
+}
+
 // hasDoltMetadata checks if a beads directory has proper dolt server config.
 func (c *DoltMetadataCheck) hasDoltMetadata(beadsDir, expectedDB string) bool {
 	metadataPath := filepath.Join(beadsDir, "metadata.json")
@@ -195,19 +200,11 @@ func (c *DoltMetadataCheck) writeDoltMetadata(townRoot, rigName string) error {
 		_ = json.Unmarshal(data, &existing)
 	}
 
-	// Resolve the correct database name. Some rigs use their prefix as the
-	// DB name (e.g., "lc" for laneassist). Preserve existing dolt_database
-	// if it matches a known prefix; otherwise fall back to rig name. (gt-85w7)
-	// The registry's dolt_database, when recorded, is the rig's (gt-y3pgh.11).
-	dbName := rigName
-	if reg := townconfig.RegistryDatabase(townRoot, rigName); reg != "" {
-		dbName = reg
-	} else if existingDB, ok := existing["dolt_database"].(string); ok && existingDB != "" {
-		// Preserve the existing DB name if it's a known prefix
-		prefix := config.GetRigPrefix(townRoot, rigName)
-		if existingDB == prefix {
-			dbName = existingDB
-		}
+	// Write the name Run compares against, so one Fix makes the next Run
+	// pass. A rig with no database on the server falls back to its name.
+	dbName, onServer := expectedRigDatabase(townRoot, rigName)
+	if !onServer {
+		dbName = rigName
 	}
 
 	// Set dolt server fields

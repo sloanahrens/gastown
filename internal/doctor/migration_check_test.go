@@ -474,3 +474,112 @@ func TestGetServerAddr_NoPortWithoutEndpoint(t *testing.T) {
 		t.Errorf("getServerAddr() = %q, true; want no address", addr)
 	}
 }
+
+// setupRigsJSONWithPrefix writes mayor/rigs.json with one rig carrying a beads prefix.
+func setupRigsJSONWithPrefix(t *testing.T, townRoot, rigName, prefix string) {
+	t.Helper()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := `{"version":1,"rigs":{"` + rigName + `":{"git_url":"https://example.com/` + rigName +
+		`.git","added_at":"2025-01-01T00:00:00Z","beads":{"repo":"local","prefix":"` + prefix + `"}}}}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func readRigDoltDatabase(t *testing.T, beadsDir string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatal(err)
+	}
+	db, _ := meta["dolt_database"].(string)
+	return db
+}
+
+func TestDoltMetadataFixConverges(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		dataDirs []string // directories under .dolt-data/
+		existing string   // dolt_database already in metadata.json ("" = none)
+		wantDB   string
+	}{
+		{"prefix database only, no value", []string{"hq", "lc"}, "", "lc"},
+		{"prefix database only, rig name value", []string{"hq", "lc"}, "laneassist", "lc"},
+		{"rig database only, no value", []string{"hq", "laneassist"}, "", "laneassist"},
+		{"both databases, prefix value", []string{"hq", "laneassist", "lc"}, "lc", "laneassist"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			for _, db := range tt.dataDirs {
+				setupDoltDB(t, townRoot, db)
+			}
+			setupRigsJSONWithPrefix(t, townRoot, "laneassist", "lc")
+			setupRigMetadata(t, townRoot, "hq", "hq")
+			setupRigMetadata(t, townRoot, "laneassist", tt.existing)
+			beadsDir := filepath.Join(townRoot, "laneassist", "mayor", "rig", ".beads")
+			// Server mode unset, so Run flags the rig whatever the name says.
+			meta := filepath.Join(beadsDir, "metadata.json")
+			if err := os.WriteFile(meta, []byte(`{"backend":"dolt","dolt_database":"`+tt.existing+`"}`), 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			check := NewDoltMetadataCheck()
+			ctx := &CheckContext{TownRoot: townRoot}
+			if res := check.Run(ctx); res.Status != StatusWarning {
+				t.Fatalf("before Fix: status = %v, want warning (%v)", res.Status, res.Details)
+			}
+			if err := check.Fix(ctx); err != nil {
+				t.Fatalf("Fix: %v", err)
+			}
+			if got := readRigDoltDatabase(t, beadsDir); got != tt.wantDB {
+				t.Errorf("dolt_database after Fix = %q, want %q", got, tt.wantDB)
+			}
+			if res := check.Run(ctx); res.Status != StatusOK {
+				t.Errorf("after Fix: status = %v, want OK (%v)", res.Status, res.Details)
+			}
+		})
+	}
+}
+
+func TestDoltMetadataFixKeepsMatchingDatabase(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	setupDoltDB(t, townRoot, "hq")
+	setupDoltDB(t, townRoot, "lc")
+	setupRigsJSONWithPrefix(t, townRoot, "laneassist", "lc")
+	setupRigMetadata(t, townRoot, "hq", "hq")
+	beadsDir := filepath.Join(townRoot, "laneassist", "mayor", "rig", ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	// dolt_mode is missing, so Run flags the rig; dolt_database already matches.
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"),
+		[]byte(`{"backend":"dolt","dolt_database":"lc"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewDoltMetadataCheck()
+	ctx := &CheckContext{TownRoot: townRoot}
+	if res := check.Run(ctx); res.Status != StatusWarning {
+		t.Fatalf("before Fix: status = %v, want warning", res.Status)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if got := readRigDoltDatabase(t, beadsDir); got != "lc" {
+		t.Errorf("dolt_database after Fix = %q, want lc unchanged", got)
+	}
+	if res := check.Run(ctx); res.Status != StatusOK {
+		t.Errorf("after Fix: status = %v, want OK (%v)", res.Status, res.Details)
+	}
+}
