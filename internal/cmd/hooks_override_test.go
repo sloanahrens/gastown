@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/hooks"
 )
 
@@ -67,5 +69,32 @@ func TestHooksOverrideCreatesInPrimaryDir(t *testing.T) {
 	}
 	if _, err := os.Stat(want); err != nil {
 		t.Errorf("override was not created at the primary path: %v", err)
+	}
+}
+
+// TestHooksOverrideCommandOpensLoadedOverride runs the command's own RunE, so
+// the hop from an invocation to the editor is covered: editedPath stubs both
+// Home and opener, and a RunE handed the wrong Home, or a no-op opener, would
+// still pass it (gt-arsyc).
+func TestHooksOverrideCommandOpensLoadedOverride(t *testing.T) {
+	t.Parallel()
+	gtHome, userHome := t.TempDir(), t.TempDir()
+	home := hooks.HomeAtWithGT(gtHome, userHome)
+
+	loaded := filepath.Join(userHome, ".gt", "hooks-overrides", "crew.json")
+	writeOverride(t, loaded)
+
+	var opened string
+	cmd := &cobra.Command{}
+	cmd.SetContext(withHooksOverrideEnv(context.Background(), home, func(path string) error {
+		opened = path
+		return nil
+	}))
+
+	if err := hooksOverrideCmd.RunE(cmd, []string{"crew"}); err != nil {
+		t.Fatalf("gt hooks override crew: %v", err)
+	}
+	if opened != loaded {
+		t.Errorf("editor opened %q, want the loaded override %q", opened, loaded)
 	}
 }
