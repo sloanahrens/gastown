@@ -137,8 +137,9 @@ func TestTestselLabelFromGateResult(t *testing.T) {
 }
 
 // TestTestselSummaryPricesSkipsInGateMinutes checks the summary line's minutes
-// figure: a would-skip package's own gate duration prices the skip, and a line
-// that timed nothing prints n/a rather than a false 0.
+// figure: a would-skip package's own gate duration prices the skip, a cut that
+// timed only some of its packages says how many, and a line that timed nothing
+// prints n/a rather than a false 0.
 func TestTestselSummaryPricesSkipsInGateMinutes(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -150,6 +151,11 @@ func TestTestselSummaryPricesSkipsInGateMinutes(t *testing.T) {
 			name: "a timed package prices its skip",
 			line: `{"ts":"2026-10-20T00:00:00Z","bead":"gt-x","rig":"gastown","asked":["internal/cmd"],"noul":{"internal/cmd":0.1},"gate":{"internal/cmd":true},"gate_seconds":{"internal/cmd":90},"question_version":1}`,
 			want: "gate minutes saved 1.5",
+		},
+		{
+			name: "a partly timed cut flags how many it summed",
+			line: `{"ts":"2026-10-20T00:00:00Z","bead":"gt-x","rig":"gastown","asked":["internal/cmd","internal/git"],"noul":{"internal/cmd":0.1,"internal/git":0.1},"gate":{"internal/cmd":true,"internal/git":true},"gate_seconds":{"internal/cmd":90},"question_version":1}`,
+			want: "gate minutes saved 1.5 (1 of 2 timed)",
 		},
 		{
 			name: "a line that timed nothing reads n/a",

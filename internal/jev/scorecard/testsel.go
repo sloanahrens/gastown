@@ -190,8 +190,9 @@ func (a *testselAdapter) tally(item Item, gate string) {
 
 // Context reports one summary line per threshold, and clears the tally so the
 // next build starts fresh. Gate minutes saved are the summed gate time of the
-// would-skip packages, and n/a when the log timed none of them (a line from
-// before the gate reported durations).
+// would-skip packages, n/a when the log timed none of them (a line from
+// before the gate reported durations), and flagged with the timed count when it
+// timed only some.
 func (a *testselAdapter) Context() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -209,10 +210,15 @@ func (a *testselAdapter) Context() []string {
 }
 
 // savedMinutes is a cut's gate time in minutes, one decimal, or n/a when no
-// would-skip package carried a duration.
+// would-skip package carried a duration. When only some did, the figure is a
+// floor and says how many it summed: "1.5 (2 of 3 timed)".
 func savedMinutes(c testselCut) string {
 	if c.timed == 0 {
 		return "n/a"
 	}
-	return strconv.FormatFloat(c.saved/60, 'f', 1, 64)
+	mins := strconv.FormatFloat(c.saved/60, 'f', 1, 64)
+	if c.timed < c.skip {
+		return fmt.Sprintf("%s (%d of %d timed)", mins, c.timed, c.skip)
+	}
+	return mins
 }
