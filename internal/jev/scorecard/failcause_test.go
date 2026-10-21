@@ -125,18 +125,27 @@ func TestFailcauseIsUnlabeledBeforeTheWindowCloses(t *testing.T) {
 }
 
 // Past the window with no repeat, the negative label needs proof the ledger
-// kept the whole window: its last write must come no later than the judging
+// kept the whole window: its last write must come strictly before the judging
 // plus the ledger's retention. A later write may have pruned a repeat.
 func TestFailcauseNegativeNeedsALedgerThatKeptTheWindow(t *testing.T) {
 	t.Parallel()
 	closed := judgedAt.Add(failcause.WillRecurWindow + 24*time.Hour)
+	boundary := judgedAt.Add(failcause.CIFailureRetention)
 
-	covered := ciLedger(t, judgedAt.Add(failcause.CIFailureRetention), ciFailure("gt-abc", judgedAt))
+	covered := ciLedger(t, boundary.Add(-time.Second), ciFailure("gt-abc", judgedAt))
 	if got := labelOne(t, covered, closed, "gt-abc"); !got.Labeled || got.Labels[qWillRecur] != false {
 		t.Errorf("covered ledger: Labeling = %+v, want will_recur false", got)
 	}
 
-	pruned := ciLedger(t, judgedAt.Add(failcause.CIFailureRetention+time.Hour), ciFailure("gt-abc", judgedAt))
+	// An mtime at the boundary is a proxy, not proof of a write before it: the
+	// daemon can queue on the ledger lock and rewrite after taking its clock,
+	// and a filesystem can floor the timestamp. The label is withheld.
+	atBoundary := ciLedger(t, boundary, ciFailure("gt-abc", judgedAt))
+	if got := labelOne(t, atBoundary, closed, "gt-abc"); got.Labeled {
+		t.Errorf("a ledger whose last write is at the boundary: Labeling = %+v, want unlabeled", got)
+	}
+
+	pruned := ciLedger(t, boundary.Add(time.Hour), ciFailure("gt-abc", judgedAt))
 	if got := labelOne(t, pruned, closed, "gt-abc"); got.Labeled {
 		t.Errorf("a ledger written after the window's coverage: Labeling = %+v, want unlabeled", got)
 	}
