@@ -393,26 +393,92 @@ func TestJevLogtriageFailedAskLogsItsReason(t *testing.T) {
 	}
 }
 
-// TestJevLogtriageCancelWritesNothing: a pass cancelled before it asks leaves
-// no triage line and no cursor, so the same lines are read whole next time.
-func TestJevLogtriageCancelWritesNothing(t *testing.T) {
+// cancelDuring is an Asker whose nth call ends the pass's context during the
+// call, as a budget running out mid-request would.
+type cancelDuring struct {
+	asker  Asker
+	n      int
+	calls  int
+	cancel context.CancelFunc
+}
+
+func (c *cancelDuring) Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error) {
+	c.calls++
+	if c.calls == c.n {
+		c.cancel()
+		return nil, ctx.Err()
+	}
+	return c.asker.Ask(ctx, state, qs)
+}
+
+// TestJevLogtriageDeadlineKeepsAnswers: a deadline that ends a pass partway
+// keeps the answers it has and carries the groups it did not reach. The next
+// pass asks those groups and adds the lines they gain in between to their
+// counts.
+func TestJevLogtriageDeadlineKeepsAnswers(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	fx.logLines(lineTick1, lineMerge1, lineQuiet, lineWarn, lineTick2, lineMerge2)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	jevAsker := fx.pass.Asker
+	fx.pass.Asker = &cancelDuring{asker: jevAsker, n: 3, cancel: cancel}
+
+	sum, err := fx.pass.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run = %v, want the deadline to end the pass without an error", err)
+	}
+	if sum.Asked != 2 || sum.Deferred != 1 || len(fx.jev.requests) != 2 {
+		t.Fatalf("summary = %+v with %d calls, want 2 asked and 1 deferred", sum, len(fx.jev.requests))
+	}
+	answered := map[string]bool{}
+	for _, l := range fx.triage() {
+		answered[l.Key] = true
+	}
+	if len(answered) != 2 || !answered[keyMerge] || !answered[keyTick] || answered[keyWarn] {
+		t.Fatalf("triage log holds groups %v, want the two answered ones and not the deferred warning", answered)
+	}
+
+	fx.pass.Asker = jevAsker
+	fx.logLines("2026/10/21 03:35:00 kernel: WARNING: disk nearly full")
+	fx.jev.requests = nil
+	sum = fx.run()
+	if sum.Asked != 1 || sum.Deferred != 0 || len(fx.jev.requests) != 1 {
+		t.Fatalf("next pass summary = %+v with %d calls, want the deferred group asked alone", sum, len(fx.jev.requests))
+	}
+	lines := fx.triage()
+	if last := lines[len(lines)-1]; last.Key != keyWarn || last.Count != 2 || len(last.Samples) != 2 {
+		t.Errorf("next pass logged %s with %d lines and %d samples, want the warning with its two lines", last.Key, last.Count, len(last.Samples))
+	}
+}
+
+// TestJevLogtriageCancelDefersTheGroups: a pass whose context is done before it
+// asks reads its lines, writes no triage line, and carries every group to the
+// next pass, which asks them.
+func TestJevLogtriageCancelDefersTheGroups(t *testing.T) {
 	t.Parallel()
 	fx := newFixture(t)
 	fx.logLines(lineWarn)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := fx.pass.Run(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("Run = %v, want context.Canceled", err)
+	sum, err := fx.pass.Run(ctx)
+	if err != nil {
+		t.Fatalf("Run = %v, want no error from a deadline", err)
 	}
-	if len(fx.jev.requests) != 0 {
-		t.Errorf("a cancelled pass made %d calls", len(fx.jev.requests))
-	}
-	if _, err := os.Stat(fx.pass.CursorPath); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("cursor written by a cancelled pass: %v", err)
+	if sum.Asked != 0 || sum.Deferred != 1 || len(fx.jev.requests) != 0 {
+		t.Errorf("summary = %+v with %d calls, want the one group deferred", sum, len(fx.jev.requests))
 	}
 	if _, err := os.Stat(fx.pass.LogPath); !errors.Is(err, os.ErrNotExist) {
-		t.Errorf("triage line written by a cancelled pass: %v", err)
+		t.Errorf("triage line written by a pass that asked nothing: %v", err)
+	}
+
+	sum = fx.run()
+	if sum.Asked != 1 || len(fx.jev.requests) != 1 {
+		t.Fatalf("next pass summary = %+v with %d calls, want the deferred group asked", sum, len(fx.jev.requests))
+	}
+	if lines := fx.triage(); len(lines) != 1 || lines[0].Key != keyWarn || lines[0].Count != 1 {
+		t.Errorf("triage log = %+v, want the deferred warning group", lines)
 	}
 }
 
