@@ -382,6 +382,40 @@ func TestFindingNumstatLines(t *testing.T) {
 	}
 }
 
+// A commit name that is not bare hex never reaches git, where it could read as
+// an option. The guard runs before the repo lookup, so no rig repo is needed.
+func TestRigDiffsRefusesNonHexCommit(t *testing.T) {
+	t.Parallel()
+	out := filepath.Join(t.TempDir(), "out")
+	_, err := rigDiffs{town: t.TempDir()}.ChangedLines(context.Background(), "--output="+out)
+	if err == nil || !strings.Contains(err.Error(), "not a hex object name") {
+		t.Errorf("ChangedLines(option-shaped name) error = %v, want the hex-name refusal", err)
+	}
+	if _, statErr := os.Stat(out); statErr == nil {
+		t.Errorf("git wrote %s for an option-shaped commit name", out)
+	}
+}
+
+// The candidates a line offered travel on its Item, so a later adapter labels
+// the item the same way the adapter that parsed it would.
+func TestFindingLabelReadsCandidatesFromItem(t *testing.T) {
+	t.Parallel()
+	parsed := newFinding(findingBeads{}, findingDiffs{})
+	item := findingItem(t, parsed, "gt-f1", "gt-c1", "gt-c1", "gt-c2")
+
+	fresh := newFinding(findingBeads{issues: map[string]*beads.Issue{"gt-f1": closedBead("gt-f1", "see gt-c1")}}, findingDiffs{})
+	lab, err := fresh.Label(context.Background(), item)
+	if err != nil {
+		t.Fatalf("Label: %v", err)
+	}
+	if !lab.Labeled || lab.Rule != ruleNamesCandidate {
+		t.Fatalf("labeled %v rule %q, want labeled by %q", lab.Labeled, lab.Rule, ruleNamesCandidate)
+	}
+	if !lab.Labels[dedupe.QAnyDuplicate] || !lab.Labels[dedupe.QDuplicate] {
+		t.Errorf("labels = %v, want any_duplicate and a correct duplicate Choice", lab.Labels)
+	}
+}
+
 // The registered adapter reads the dedupe log under the town.
 func TestFindingRegisteredLogPath(t *testing.T) {
 	t.Parallel()

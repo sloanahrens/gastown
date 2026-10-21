@@ -33,12 +33,17 @@ const (
 )
 
 // A fix whose landed diff is under smallDiffLines changed lines is small, and
-// one over largeDiffLines is large. A diff between the two is neither, so it
-// leaves the severity Score unlabeled.
+// one over largeDiffLines is large. A diff of smallDiffLines through
+// largeDiffLines lines, both ends included, is neither, so it leaves the
+// severity Score unlabeled.
 const (
 	smallDiffLines = 50
 	largeDiffLines = 300
 )
+
+// refOffered is the Item.Refs key for the candidates a line offered, joined by
+// spaces. A bead id holds no space, so the join splits back exactly.
+const refOffered = "offered"
 
 // gitTimeout bounds one git call for a landed diff.
 const gitTimeout = time.Minute
@@ -69,7 +74,7 @@ var ErrNoCommit = errors.New("commit not in the repo")
 // NewFinding builds the finding adapter over a bead reader and a diff sizer.
 // The registered adapter uses the rig's beads and git repo; a test passes fakes.
 func NewFinding(townRoot string, b BeadReader, d DiffSizer) Adapter {
-	return &finding{town: townRoot, beads: b, diffs: d, offered: map[string][]string{}}
+	return &finding{town: townRoot, beads: b, diffs: d}
 }
 
 // finding labels the dedupe log's lines from the finding bead's close reason.
@@ -77,10 +82,6 @@ type finding struct {
 	town  string
 	beads BeadReader
 	diffs DiffSizer
-	// offered holds each parsed line's candidates, which an Item has no field
-	// for. Parse fills it and Label reads it, so the adapter is used by one
-	// report at a time.
-	offered map[string][]string
 }
 
 func (finding) Battery() string   { return FindingBattery }
@@ -89,7 +90,7 @@ func (f finding) LogPath() string { return dedupe.LogPath(f.town) }
 // Parse reads one dedupe log line. A choice answer sets its Positive to the
 // option it chose and its probability to the line's confidence, so the
 // Choice's precision is how often what it chose was right.
-func (f *finding) Parse(raw []byte) (Item, error) {
+func (finding) Parse(raw []byte) (Item, error) {
 	var line dedupe.Line
 	if err := json.Unmarshal(raw, &line); err != nil {
 		return Item{}, err
@@ -97,7 +98,10 @@ func (f *finding) Parse(raw []byte) (Item, error) {
 	if line.Finding == "" || line.TS.IsZero() {
 		return Item{}, errors.New("dedupe line needs a finding and a ts")
 	}
-	item := Item{ID: line.Finding, Time: line.TS, Model: line.Model, Answers: map[QuestionID]Answer{}}
+	item := Item{
+		ID: line.Finding, Time: line.TS, Model: line.Model, Answers: map[QuestionID]Answer{},
+		Refs: map[string]string{refOffered: strings.Join(line.CandidatesOffered, " ")},
+	}
 	for id, a := range line.Answers {
 		switch {
 		case a.Noul != nil:
@@ -112,12 +116,7 @@ func (f *finding) Parse(raw []byte) (Item, error) {
 			item.Answers[QuestionID(id)] = ans
 		}
 	}
-	f.offered[offeredKey(item)] = line.CandidatesOffered
 	return item, nil
-}
-
-func offeredKey(item Item) string {
-	return item.ID + "@" + strconv.FormatInt(item.Time.UnixNano(), 10)
 }
 
 // Label reads the finding bead and labels the line from its close reason. A
@@ -135,7 +134,7 @@ func (f *finding) Label(ctx context.Context, item Item) (Labeling, error) {
 	}
 
 	r := parseCloseReason(issue.CloseReason)
-	named := namedCandidates(issue.CloseReason, f.offered[offeredKey(item)])
+	named := namedCandidates(issue.CloseReason, strings.Fields(item.Refs[refOffered]))
 	labels := map[QuestionID]bool{}
 	rule := ""
 	switch {
@@ -213,6 +212,7 @@ type closeReason struct {
 
 var (
 	commitLine = regexp.MustCompile(`(?im)^\s*(?:landed_commit|commit_sha):\s*([0-9a-f]{7,40})\s*$`)
+	commitName = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 
 	notFixWorthyWords = []string{"superseded", "duplicate", "dup of", "dupe", "wontfix", "won't fix", "wont fix", "will not fix"}
 )
@@ -303,6 +303,11 @@ func (r rigBeads) Show(id string) (*beads.Issue, error) {
 type rigDiffs struct{ town string }
 
 func (r rigDiffs) ChangedLines(ctx context.Context, commit string) (int, error) {
+	// A name that is not bare hex could read as a git option, so it never
+	// reaches the command line.
+	if !commitName.MatchString(commit) {
+		return 0, fmt.Errorf("commit %q is not a hex object name", commit)
+	}
 	repo := rigRepo(filepath.Join(r.town, dedupe.RigName))
 	if repo == "" {
 		return 0, fmt.Errorf("rig %s has no git repo (neither .repo.git nor mayor/rig)", dedupe.RigName)
@@ -310,15 +315,16 @@ func (r rigDiffs) ChangedLines(ctx context.Context, commit string) (int, error) 
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 
-	// cat-file exits 1 for an object the repo does not hold, and 128 for a
-	// repo it cannot read, which must fail the report.
-	err := exec.CommandContext(ctx, "git", "-C", repo, "cat-file", "-e", commit+"^{commit}").Run()
+	// rev-parse exits 1 for a commit the repo does not hold, and 128 for a
+	// repo it cannot read, which must fail the report. cat-file -e exits 128
+	// for both, so it cannot tell them apart.
+	err := exec.CommandContext(ctx, "git", "-C", repo, "rev-parse", "--verify", "--quiet", commit+"^{commit}").Run()
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 1 {
 		return 0, ErrNoCommit
 	}
 	if err != nil {
-		return 0, fmt.Errorf("git cat-file %s: %w", commit, err)
+		return 0, fmt.Errorf("git rev-parse %s: %w", commit, err)
 	}
 	out, err := exec.CommandContext(ctx, "git", "-C", repo,
 		"diff", "--numstat", "--no-renames", commit+"^.."+commit).Output()
