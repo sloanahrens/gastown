@@ -122,6 +122,11 @@ type Lock struct {
 	// staleness from what the lock recorded rather than from which processes
 	// this host happens to be running.
 	table processTable
+	// afterSnapshot runs once a lock has been judged stale from a read taken
+	// outside the flock and before reclaimStale takes it. It is the window a
+	// concurrent Acquire can rewrite the lock in, which is what lets a test
+	// drive that interleaving instead of hoping to hit it.
+	afterSnapshot func()
 }
 
 // New creates a Lock for the given worker directory.
@@ -187,6 +192,49 @@ func (l *Lock) Release() error {
 	return nil
 }
 
+// sameHolder reports whether b records the same write as a: a lock a peer
+// rewrote since a was read differs in at least the acquisition time.
+func (a *LockInfo) sameHolder(b *LockInfo) bool {
+	return a.PID == b.PID && a.Start == b.Start && a.SessionID == b.SessionID &&
+		a.Hostname == b.Hostname && a.AcquiredAt.Equal(b.AcquiredAt)
+}
+
+// reclaimStale removes the lock file that seen was read from and judged stale,
+// provided it still holds seen. seen was read without the flock Acquire holds,
+// so by now a concurrent Acquire may have removed the stale lock and written a
+// live one, and an unconditional remove would delete that live lock and leave
+// one identity with two agents. The file is therefore read again under the
+// flock, and removed only if it is unchanged.
+//
+// removed reports that this call removed the file. fresh is the lock now on
+// disk when it differs from seen, for the caller to judge afresh; it is nil
+// when the file was removed or was already gone.
+func (l *Lock) reclaimStale(seen *LockInfo) (fresh *LockInfo, removed bool, err error) {
+	if l.afterSnapshot != nil {
+		l.afterSnapshot()
+	}
+	unlock, err := flockAcquire(l.lockPath + ".flock")
+	if err != nil {
+		return nil, false, fmt.Errorf("acquiring coordination lock: %w", err)
+	}
+	defer unlock()
+
+	cur, err := l.Read()
+	if errors.Is(err, ErrNotLocked) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if !seen.sameHolder(cur) {
+		return cur, false, nil
+	}
+	if err := l.Release(); err != nil {
+		return nil, false, err
+	}
+	return nil, true, nil
+}
+
 // Read reads the current lock info without modifying it.
 func (l *Lock) Read() (*LockInfo, error) {
 	data, err := os.ReadFile(l.lockPath)
@@ -218,11 +266,15 @@ func (l *Lock) Check() error {
 		return err
 	}
 
-	// Check if stale
-	if info.holderGone(l.table) {
+	// Check if stale. A lock a concurrent Acquire rewrote while we were
+	// deciding comes back from reclaimStale to be judged afresh.
+	for info.holderGone(l.table) {
 		// Clean up stale lock (best-effort cleanup)
-		_ = l.Release()
-		return nil
+		fresh, _, err := l.reclaimStale(info)
+		if err != nil || fresh == nil {
+			return nil
+		}
+		info = fresh
 	}
 
 	// Check if it's us
@@ -357,6 +409,12 @@ func CleanStaleLocks(root string) (int, error) {
 // cleanStaleLocks is CleanStaleLocks asking sessions for the active tmux
 // sessions and table for the process table, once the lock scan has succeeded.
 func cleanStaleLocks(root string, sessions func() []string, table processTable) (int, error) {
+	return sweepStaleLocks(root, sessions, table, nil)
+}
+
+// sweepStaleLocks is cleanStaleLocks with afterSnapshot, when set, called with
+// the worker directory between judging its lock stale and removing it.
+func sweepStaleLocks(root string, sessions func() []string, table processTable, afterSnapshot func(workerDir string)) (int, error) {
 	locks, err := FindAllLocks(root)
 	if err != nil {
 		return 0, err
@@ -378,8 +436,14 @@ func cleanStaleLocks(root string, sessions func() []string, table processTable) 
 				continue
 			}
 			// Both PID dead AND no session = truly stale
+			// The scan and the session list are both older than the flock,
+			// so the removal re-checks the lock under it.
 			lock := New(workerDir)
-			if err := lock.Release(); err == nil {
+			lock.table = table
+			if afterSnapshot != nil {
+				lock.afterSnapshot = func() { afterSnapshot(workerDir) }
+			}
+			if _, removed, err := lock.reclaimStale(info); err == nil && removed {
 				cleaned++
 			}
 		}
