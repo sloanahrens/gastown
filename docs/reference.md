@@ -1279,24 +1279,9 @@ starts it empty, so waiting beads with no record are asked from the label until
 records appear.
 
 The daemon patrol `jev_submission` runs the pass every 15 minutes, off the
-heartbeat. It is off unless `daemon.json` enables it, and `gt jev submission`
-reads the same keys whether or not the patrol is on:
-
-```json
-"patrols": {
-  "jev_submission": {
-    "enabled": true,
-    "max_usd_per_day": 1.0,
-    "usd_per_billion_tokens": 3.0
-  }
-}
-```
-
-| Key | Meaning |
-|-----|---------|
-| `enabled` | Turns the patrol on. Default `false`. |
-| `max_usd_per_day` | The town-wide daily cap the pass checks with `Cap.Allows` before every call. `0` takes the default of 1. |
-| `usd_per_billion_tokens` | Prices the ledger's tokens. Required: a pass without it refuses to run. |
+heartbeat. It is off unless `patrols.jev_submission.enabled` is true in
+`daemon.json`. The cap and pricing keys are in `gt jev submission --help`; the
+command reads them whether or not the patrol is on.
 
 ### Drift battery (`jev_drift`)
 
