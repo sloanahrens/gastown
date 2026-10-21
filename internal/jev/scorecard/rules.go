@@ -18,8 +18,8 @@ const RulesBattery = "rules"
 
 // ruleWindow is how long after a finished session a guard record counts
 // against it. A line younger than the window stays unlabeled, since a record
-// may still be coming, and once the window has passed with no record the line
-// is labeled not broken.
+// may still be coming, and once the window has passed with no record, and every
+// source was readable, the line is labeled not broken.
 const ruleWindow = 20 * time.Minute
 
 // The rules that label a rules line, by the name --json reports.
@@ -115,8 +115,10 @@ func (a *rulesAdapter) Parse(raw []byte) (Item, error) {
 // Label finds the labels for one logged session. A session younger than the
 // window is unlabeled. Otherwise, a guard record for its bead inside the window
 // after the submission labels it broke_standing_rule true. A window that has
-// passed with no record labels it false. The rule that set the label is named
-// with each source that matched, joined by "+".
+// passed with no record labels it false, but only when every source was read:
+// a bead the store does not hold, or a stand-down comment whose time cannot be
+// read, leaves the session unlabeled, since the record may be there. The rule
+// that set the label is named with each source that matched, joined by "+".
 //
 // Only broke_standing_rule is labeled. rule_kind has no guard record that
 // names a kind, so it is never labeled here.
@@ -133,6 +135,9 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 		return Labeling{}, err
 	}
 	comments, err := a.comments(line.Rig, line.Bead)
+	if errors.Is(err, beads.ErrNotFound) {
+		return Labeling{}, nil
+	}
 	if err != nil {
 		return Labeling{}, fmt.Errorf("reading the comments of %s: %w", line.Bead, err)
 	}
@@ -146,18 +151,26 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 			break
 		}
 	}
+	unreadable := false
 	for _, c := range comments {
-		at, err := time.Parse(time.RFC3339Nano, c.CreatedAt)
-		if err != nil {
+		if !strings.HasPrefix(c.Text, reworkStandDownPrefix) {
 			continue
 		}
-		if strings.HasPrefix(c.Text, reworkStandDownPrefix) && inRuleWindow(at, line.DoneAt, end) {
+		at, err := time.Parse(time.RFC3339Nano, c.CreatedAt)
+		if err != nil {
+			unreadable = true
+			continue
+		}
+		if inRuleWindow(at, line.DoneAt, end) {
 			sources = append(sources, ruleRulesStandDown)
 			break
 		}
 	}
 
 	if len(sources) == 0 {
+		if unreadable {
+			return Labeling{}, nil
+		}
 		return Labeling{Labeled: true, Labels: map[QuestionID]bool{qBrokeStandingRule: false}, Rule: ruleRulesNoRecord}, nil
 	}
 	return Labeling{Labeled: true, Labels: map[QuestionID]bool{qBrokeStandingRule: true}, Rule: strings.Join(sources, "+")}, nil
@@ -194,15 +207,12 @@ func inRuleWindow(at, from, end time.Time) bool {
 }
 
 // beadComments reads a bead's comments from its rig's store. A bead the store
-// does not hold has no comments.
+// does not hold returns beads.ErrNotFound, so Label leaves its session
+// unlabeled rather than reading it as having no record.
 func beadComments(stores *townNotes, rig, bead string) ([]beads.Comment, error) {
 	b, err := stores.store(rig)
 	if err != nil {
 		return nil, err
 	}
-	cs, err := b.Comments(bead)
-	if errors.Is(err, beads.ErrNotFound) {
-		return nil, nil
-	}
-	return cs, err
+	return b.Comments(bead)
 }

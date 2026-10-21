@@ -190,3 +190,32 @@ func TestRulesIsRegistered(t *testing.T) {
 		t.Errorf("Registered() = %v, want %q listed", Registered(), RulesBattery)
 	}
 }
+
+// TestRulesUnknownBeadStaysUnlabeled checks a bead the store does not hold is
+// left unlabeled, not labeled not broken: its guard records cannot be read.
+func TestRulesUnknownBeadStaysUnlabeled(t *testing.T) {
+	t.Parallel()
+	a := rulesAdapterAt(t.TempDir(), rulesDoneAt.Add(25*time.Minute), nil)
+	a.comments = func(string, string) ([]beads.Comment, error) { return nil, beads.ErrNotFound }
+
+	if lab := labelRules(t, a, rulesRaw(t, "gt-x")); lab.Labeled {
+		t.Errorf("labeling = %+v for a bead the store does not hold, want unlabeled", lab)
+	}
+}
+
+// TestRulesUnreadableStandDownStaysUnlabeled checks a stand-down comment whose
+// time cannot be read leaves the session unlabeled: it may be inside the window.
+func TestRulesUnreadableStandDownStaysUnlabeled(t *testing.T) {
+	t.Parallel()
+	comments := map[string][]beads.Comment{
+		"gt-x": {{
+			Text:      "DONE_CLOSE_SKIPPED: head unchanged since the rejection",
+			CreatedAt: "not a time",
+		}},
+	}
+	a := rulesAdapterAt(t.TempDir(), rulesDoneAt.Add(25*time.Minute), comments)
+
+	if lab := labelRules(t, a, rulesRaw(t, "gt-x")); lab.Labeled {
+		t.Errorf("labeling = %+v with an unreadable stand-down time, want unlabeled", lab)
+	}
+}
