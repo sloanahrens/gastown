@@ -82,7 +82,8 @@ func thrashLine(t *testing.T, bead string, willRespawn, needsSplit float64) Item
 }
 
 // The adapter labels will_respawn from the count file and needs_split from the
-// overrun record, and a bead with neither file is unlabeled.
+// overrun record, a record without a stop being a negative as a count below the
+// threshold is. A bead with neither file is unlabeled.
 func TestThrashLabelsFromTheRespawnCountsAndOverrunRecords(t *testing.T) {
 	t.Parallel()
 	town := thrashTown(t)
@@ -96,7 +97,7 @@ func TestThrashLabelsFromTheRespawnCountsAndOverrunRecords(t *testing.T) {
 		labels  map[QuestionID]bool
 		labeled bool
 	}{
-		{"gt-a", map[QuestionID]bool{qWillRespawn: true}, true},
+		{"gt-a", map[QuestionID]bool{qWillRespawn: true, qNeedsSplit: false}, true},
 		{"gt-b", map[QuestionID]bool{qWillRespawn: false}, true},
 		{"gt-c", map[QuestionID]bool{qNeedsSplit: true}, true},
 		{"gt-d", nil, false},
@@ -115,7 +116,9 @@ func TestThrashLabelsFromTheRespawnCountsAndOverrunRecords(t *testing.T) {
 	}
 }
 
-// A broken respawn file or overrun record labels nothing and is not an error.
+// A broken respawn file or overrun record labels nothing and is not an error,
+// and Context names each broken file so the report does not read it as a bead
+// with no data.
 func TestThrashLabelsIgnoreBrokenFiles(t *testing.T) {
 	t.Parallel()
 	town := thrashTown(t)
@@ -129,6 +132,57 @@ func TestThrashLabelsIgnoreBrokenFiles(t *testing.T) {
 	}
 	if got.Labeled || len(got.Labels) != 0 {
 		t.Errorf("labels %+v from broken files, want none", got)
+	}
+	if got, want := a.Context(), []string{
+		"bead-respawn-counts.json is unreadable: will_respawn is left unlabeled",
+		"overrun-guard records are unreadable: needs_split is left unlabeled on 1 line(s)",
+	}; !reflect.DeepEqual(got, want) {
+		t.Errorf("context = %q, want %q", got, want)
+	}
+}
+
+// A town with neither file reports no broken files: a missing file is normal.
+func TestThrashMissingFilesAreNotReported(t *testing.T) {
+	t.Parallel()
+	a := &thrashAdapter{town: thrashTown(t)}
+
+	got, err := a.Label(context.Background(), thrashLine(t, "gt-a", 0.5, 0.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Labeled {
+		t.Errorf("labeled %+v with no files on record", got)
+	}
+	if lines := a.Context(); len(lines) != 0 {
+		t.Errorf("context = %q, want none for missing files", lines)
+	}
+}
+
+// The respawn counts are reread when the file changes, so a report that
+// outlives a rewrite labels from the new counts.
+func TestThrashRespawnCountsRereadWhenTheFileChanges(t *testing.T) {
+	t.Parallel()
+	town := thrashTown(t)
+	writeRespawnCounts(t, town, map[string]int{"gt-a": 1})
+	a := &thrashAdapter{town: town}
+
+	first, err := a.Label(context.Background(), thrashLine(t, "gt-a", 0.5, 0.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := first.Labels[qWillRespawn]; got {
+		t.Fatalf("count 1 labeled will_respawn %v, want false", got)
+	}
+
+	// A second bead changes the file's size, so the rewrite is seen even when
+	// the mtime resolution is coarse.
+	writeRespawnCounts(t, town, map[string]int{"gt-a": 2, "gt-z": 1})
+	second, err := a.Label(context.Background(), thrashLine(t, "gt-a", 0.5, 0.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := second.Labels[qWillRespawn]; !got {
+		t.Errorf("count 2 after the rewrite labeled will_respawn %v, want true", got)
 	}
 }
 

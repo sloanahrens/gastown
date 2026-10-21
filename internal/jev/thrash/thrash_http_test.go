@@ -1,5 +1,3 @@
-//go:build integration
-
 package thrash
 
 import (
@@ -17,15 +15,21 @@ import (
 	"github.com/steveyegge/gastown/internal/jev/battery"
 )
 
-// httpJev is an httptest Jev. It answers both questions with fixed
+// httpJev is an in-process Jev. It answers both questions with fixed
 // probabilities, except that a request whose state holds POISON gets a 400, the
-// way Jev refuses a bead's own request.
+// way Jev refuses a bead's own request. It is a RoundTripper, so no socket opens.
 type httpJev struct {
 	mu     sync.Mutex
 	bodies []string
 }
 
-func (f *httpJev) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+func (f *httpJev) RoundTrip(r *http.Request) (*http.Response, error) {
+	rec := httptest.NewRecorder()
+	f.serve(rec, r)
+	return rec.Result(), nil
+}
+
+func (f *httpJev) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	f.mu.Lock()
 	f.bodies = append(f.bodies, string(body))
@@ -49,15 +53,15 @@ func (f *httpJev) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// TestIntegrationThrashPassAgainstJevHTTP runs a pass through the real Jev
-// client against an httptest server: each placement logs one line with both
-// answers, and a bead the server refuses is skipped without holding the pass.
-func TestIntegrationThrashPassAgainstJevHTTP(t *testing.T) {
+// TestThrashPassAgainstJevHTTP runs a pass through the real Jev client: each
+// placement logs one line with both answers, and a bead Jev refuses is skipped
+// without holding the pass.
+func TestThrashPassAgainstJevHTTP(t *testing.T) {
+	t.Parallel()
 	fake := &httpJev{}
-	srv := httptest.NewServer(fake)
-	t.Cleanup(srv.Close)
 	client, err := jev.NewClient(
-		jev.WithBaseURL(srv.URL), jev.WithKey("test-key"),
+		jev.WithBaseURL("http://jev.test"), jev.WithKey("test-key"),
+		jev.WithHTTPClient(&http.Client{Transport: fake}),
 		jev.WithLedger(filepath.Join(t.TempDir(), "usage.jsonl")), jev.WithCaller(Caller),
 	)
 	if err != nil {

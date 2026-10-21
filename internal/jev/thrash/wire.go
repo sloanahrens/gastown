@@ -99,7 +99,8 @@ func (r rigBeads) Placed(t time.Time) ([]*beads.Issue, error) {
 	if t.IsZero() {
 		return held, nil
 	}
-	closed, err := r.b.List(beads.ListOptions{Status: "closed", ClosedAfter: t, Priority: -1, Limit: 0})
+	// Limit 0 is unlimited: bd's default of 50 would drop closed placements.
+	closed, err := r.b.List(beads.ListOptions{Status: "closed", ClosedAfter: t, Limit: 0})
 	if err != nil {
 		return nil, err
 	}

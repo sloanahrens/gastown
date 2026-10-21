@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,15 +37,31 @@ const (
 const respawnThreshold = 2
 
 // thrashAdapter labels the thrash log from two files the town already keeps:
-// the bead respawn counts and the overrun guard's records. Both are read-only,
-// and a file that is missing or does not parse labels nothing rather than
-// failing the report.
+// the bead respawn counts and the overrun guard's records. Both are read-only.
+// A file that is missing labels nothing. A file that is there but does not
+// read or parse also labels nothing, and Context reports it, so the report
+// shows the gap instead of reading it as a bead with no data.
 type thrashAdapter struct {
 	town string
 
-	// counts is the respawn count per bead, read once on the first Label.
-	counts       map[string]int
-	countsLoaded bool
+	// counts caches the respawn counts file, reread when it changes.
+	counts countsCache
+
+	// respawnBroken is true when the last Label found the respawn counts file
+	// unreadable. overrunBroken counts the lines whose overrun record was
+	// unreadable. Context reports both.
+	respawnBroken bool
+	overrunBroken int
+}
+
+// countsCache holds the parsed respawn counts and the file state it was read
+// at, so a Label reads the file again only after it changes.
+type countsCache struct {
+	loaded bool
+	size   int64
+	mod    time.Time
+	counts map[string]int
+	err    error
 }
 
 func (a *thrashAdapter) Battery() string { return ThrashBattery }
@@ -76,37 +94,80 @@ func (a *thrashAdapter) Parse(raw []byte) (Item, error) {
 }
 
 // Label sets will_respawn from the bead's respawn count and needs_split from
-// the overrun guard's stop. A bead with neither source on file is unlabeled.
-// needs_split is labeled only when a stop is on record: a record without one
-// is pending, and no file says a bead ran long without a stop, so that is
-// left unlabeled too.
+// the overrun guard's record. A count below respawnThreshold and a record
+// without a stop are both negatives, so a bead on either file is labeled.
+// A bead with neither file is unlabeled. A bead still running when it is
+// labeled reads as a negative until its guard stops it, as a first run does
+// for will_respawn.
 func (a *thrashAdapter) Label(_ context.Context, item Item) (Labeling, error) {
-	if !a.countsLoaded {
-		a.counts = readRespawnCounts(a.town)
-		a.countsLoaded = true
-	}
 	labels := map[QuestionID]bool{}
 	var rules []string
-	if n, ok := a.counts[item.ID]; ok {
+
+	counts, err := a.respawnCounts()
+	a.respawnBroken = err != nil
+	if n, ok := counts[item.ID]; ok {
 		labels[qWillRespawn] = n >= respawnThreshold
 		rules = append(rules, "respawn-count")
 	}
-	if overrunGuardStopped(a.town, item.ID) {
-		labels[qNeedsSplit] = true
-		rules = append(rules, "overrun-stop")
+
+	stopped, onRecord, err := overrunGuardRecord(a.town, item.ID)
+	if err != nil {
+		a.overrunBroken++
 	}
+	if onRecord {
+		labels[qNeedsSplit] = stopped
+		if stopped {
+			rules = append(rules, "overrun-stop")
+		} else {
+			rules = append(rules, "overrun-no-stop")
+		}
+	}
+
 	if len(labels) == 0 {
 		return Labeling{}, nil
 	}
 	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, "+")}, nil
 }
 
-// readRespawnCounts returns each bead's respawn count from
-// bead-respawn-counts.json. A missing or unparsable file is no counts.
-func readRespawnCounts(town string) map[string]int {
-	data, err := os.ReadFile(filepath.Join(constants.TownRuntimePath(town), "bead-respawn-counts.json")) //nolint:gosec // G304: path from trusted townRoot
+// Context reports the files a label could not read. A missing file is normal
+// and is not reported.
+func (a *thrashAdapter) Context() []string {
+	var lines []string
+	if a.respawnBroken {
+		lines = append(lines, "bead-respawn-counts.json is unreadable: will_respawn is left unlabeled")
+	}
+	if a.overrunBroken > 0 {
+		lines = append(lines, fmt.Sprintf("overrun-guard records are unreadable: needs_split is left unlabeled on %d line(s)", a.overrunBroken))
+	}
+	return lines
+}
+
+// respawnCounts returns each bead's respawn count. A missing file is no counts
+// and no error. The file is reread whenever its size or mtime moves, so a
+// report that outlives a rewrite labels from the new counts. An error means the
+// file exists and cannot be read or parsed.
+func (a *thrashAdapter) respawnCounts() (map[string]int, error) {
+	path := filepath.Join(constants.TownRuntimePath(a.town), "bead-respawn-counts.json")
+	info, err := os.Stat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, err
+	}
+	c := &a.counts
+	if !c.loaded || info.Size() != c.size || !info.ModTime().Equal(c.mod) {
+		c.counts, c.err = readRespawnCounts(path)
+		c.size, c.mod, c.loaded = info.Size(), info.ModTime(), true
+	}
+	return c.counts, c.err
+}
+
+// readRespawnCounts parses bead-respawn-counts.json at path.
+func readRespawnCounts(path string) (map[string]int, error) {
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path from trusted townRoot
+	if err != nil {
+		return nil, err
 	}
 	var state struct {
 		Beads map[string]struct {
@@ -114,27 +175,32 @@ func readRespawnCounts(town string) map[string]int {
 		} `json:"beads"`
 	}
 	if err := json.Unmarshal(data, &state); err != nil {
-		return nil
+		return nil, err
 	}
 	counts := make(map[string]int, len(state.Beads))
 	for id, rec := range state.Beads {
 		counts[id] = rec.Count
 	}
-	return counts
+	return counts, nil
 }
 
-// overrunGuardStopped reports whether the overrun guard's record for bead
-// carries a stop. A missing, unreadable or unparsable record is not a stop.
-func overrunGuardStopped(town, bead string) bool {
+// overrunGuardRecord reads the overrun guard's record for bead. onRecord is
+// false when there is no record, which leaves needs_split unlabeled. Otherwise
+// stopped says whether the record carries a stop. An error means the record
+// exists and cannot be read or parsed.
+func overrunGuardRecord(town, bead string) (stopped, onRecord bool, err error) {
 	data, err := os.ReadFile(filepath.Join(constants.TownRuntimePath(town), "overrun-guard", bead+".json")) //nolint:gosec // G304: bead id is checked by Parse
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, false, nil
+	}
 	if err != nil {
-		return false
+		return false, false, err
 	}
 	var rec struct {
 		StoppedAt time.Time `json:"stopped_at"`
 	}
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return false
+		return false, false, err
 	}
-	return !rec.StoppedAt.IsZero()
+	return !rec.StoppedAt.IsZero(), true, nil
 }
