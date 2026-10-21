@@ -89,6 +89,17 @@ func TestTierSweepBeadShapeUsesTheConfiguredTemplate(t *testing.T) {
 	if !strings.Contains(opts.Description, "## Testing\n") {
 		t.Errorf("description lacks the template's ## Testing section:\n%s", opts.Description)
 	}
+	// A section the sweep does not know still says what it covers, so it
+	// reads as the bead's own text rather than a stock placeholder.
+	testingBody := tierSweepSectionText(opts.Description, "Testing")
+	if !strings.Contains(testingBody, "integration tier") {
+		t.Errorf("## Testing body = %q, want it to name the failing tier", testingBody)
+	}
+}
+
+// tierSweepSectionText returns the body under one "## " heading of desc.
+func tierSweepSectionText(desc, heading string) string {
+	return specdispatch.Sections(desc)[strings.ToLower(heading)]
 }
 
 // A configured template that cannot be read is no reason to hold the sweep:
@@ -117,6 +128,40 @@ func TestTierSweepBeadShapeFallsBackWhenTheTemplateIsMissing(t *testing.T) {
 	}
 	if v := lintTierSweepBead(bd.created[0]); !v.Clean() {
 		t.Fatalf("the fallback bead fails the built-in lint: %s\ndescription:\n%s", v.ShapeNote(), bd.created[0].Description)
+	}
+}
+
+// A patrol block that does not parse is the other read that can fail. The
+// tick stops on that block, so the sweep only has to file a bead that passes
+// the built-in lint and does not panic or drop the filing (gt-uzkic).
+func TestTierSweepBeadShapeFallsBackWhenThePatrolBlockIsUnreadable(t *testing.T) {
+	t.Parallel()
+	logPath := tierSweepWriteTestLog(t, ""+
+		"tier-sweep: integration ./internal/cmd ...\n"+
+		"    --- FAIL: TestCommandTreeWalkIsReadOnly (0.12s)\n")
+	d, _, bd, _ := newTierSweepDaemon(t, atHour(time.Now(), 15), "gastown")
+	d.tierSweepSeams.beads = func(string) tierSweepBeadStore { return bd }
+	if err := os.WriteFile(PatrolConfigFile(d.config.TownRoot), []byte("{ not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadPatrolConfig(d.config.TownRoot); err == nil {
+		t.Fatal("ReadPatrolConfig accepted the unparseable patrol block; the test does not reach the unreadable branch")
+	}
+
+	red := map[string]tierSweepTierResult{
+		"integration": {Verdict: tierSweepRed, Passed: 32, Failed: 1, FailedNames: []string{"./internal/cmd"}, Log: logPath},
+	}
+	d.tierSweepRecordBeads("gastown", "abc1234", red)
+
+	if len(bd.created) != 1 {
+		t.Fatalf("created = %+v, want one bead", bd.created)
+	}
+	opts := bd.created[0]
+	if v := lintTierSweepBead(opts); !v.Clean() {
+		t.Fatalf("the bead fails the built-in lint: %s\ndescription:\n%s", v.ShapeNote(), opts.Description)
+	}
+	if got := specdispatch.Sections(opts.Description)["acceptance"]; got != opts.Acceptance {
+		t.Errorf("acceptance field and description disagree:\nfield: %q\nsection: %q", opts.Acceptance, got)
 	}
 }
 

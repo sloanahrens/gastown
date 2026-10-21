@@ -286,9 +286,12 @@ func tierSweepRedDetail(tier, sha string, ts tierSweepTierResult) string {
 
 // tierSweepTemplate is the spec template the dispatcher lints against: the
 // patrol block's template field, else the operator's default file, read by the
-// same loader the dispatcher uses (gt-uzkic). A patrol block that cannot be
-// read leaves the default path in place, and LoadTemplate falls back to the
-// built-in sections, so filing a bead never fails on its shape.
+// same loader the dispatcher uses (gt-uzkic). The patrol block is read through
+// ReadPatrolConfig, the reader the dispatcher's tick uses too. A block that
+// cannot be read leaves the default path in place, and LoadTemplate falls back
+// to the built-in sections, so filing a bead never fails on its shape. The
+// tick itself stops on an unreadable block and dispatches nothing, so the
+// fallback never files a bead a running dispatcher would hold.
 func (d *Daemon) tierSweepTemplate() specdispatch.Template {
 	configured := ""
 	if d.config != nil {
@@ -319,7 +322,7 @@ func tierSweepSectionBody(section, tier, subject, sha, item string) string {
 	case "acceptance":
 		return item
 	default:
-		return "The check in ## Acceptance covers this section."
+		return fmt.Sprintf("The ## Acceptance check covers %s on the %s tier. This section has no other ask.", subject, tier)
 	}
 }
 
