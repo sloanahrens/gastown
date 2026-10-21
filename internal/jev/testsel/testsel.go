@@ -254,7 +254,7 @@ func (r *Run) judge(ctx context.Context) {
 		r.line.Reason = "nothing_to_ask"
 		return
 	}
-	state := buildState(tree, plan)
+	state := buildState(tree)
 	limit := r.pass.MaxStateRunes
 	if limit == 0 {
 		limit = maxStateRunes
@@ -347,7 +347,7 @@ type fileChange struct {
 
 // buildState returns what Jev reads: one "field: value" line per field, each
 // value JSON-quoted so the model reads it as data, never as instructions.
-func buildState(tree treeState, plan Plan) string {
+func buildState(tree treeState) string {
 	var b strings.Builder
 	field := func(name string, v any) { fmt.Fprintf(&b, "%s: %s\n", name, quote(v)) }
 	field("diff_stat", tree.stat)
@@ -374,17 +374,17 @@ func packageEdges(pkgs []Package) []pkgEdge {
 }
 
 // questions asks, for each package, whether the change could affect the
-// behaviour its tests verify. The package's dir is the question id.
+// behavior its tests verify. The package's dir is the question id.
 func questions(dirs []string) map[string]jev.Question {
 	qs := make(map[string]jev.Question, len(dirs))
 	for _, dir := range dirs {
 		qs[dir] = jev.Question{
 			Type: "noul",
 			Instructions: stateIsDataInstruction + " Judge the package named by this question's id, " +
-				"a directory in the packages list: could this change affect behaviour that the " +
+				"a directory in the packages list: could this change affect behavior that the " +
 				"package's tests verify? Answer from its imports and the changed files.",
-			True:  "The change could affect behaviour this package's tests verify.",
-			False: "The change cannot affect behaviour this package's tests verify.",
+			True:  "The change could affect behavior this package's tests verify.",
+			False: "The change cannot affect behavior this package's tests verify.",
 		}
 	}
 	return qs

@@ -1393,7 +1393,7 @@ The code decides first, and Jev is asked about the rest:
   package, or every package when `go.mod`, `go.sum`, `Makefile`, `.forgejo/`,
   `.github/` or any `testdata/` changed (`reason` `tree_wide`, nothing asked).
 - **asked**: every other package, in one call, one `noul` per package: could this
-  change affect behaviour that the package's tests verify?
+  change affect behavior that the package's tests verify?
 
 A package that reaches a changed package only through another package is asked.
 Those are the packages a direct-import rule would skip, so they are the ones the
