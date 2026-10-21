@@ -303,6 +303,11 @@ func TestDispatchRosterSeats(t *testing.T) {
 		{"deepseek-flash 1/1 (closed 20:00-08:00, 1 dead-hooked)", []townhealth.DispatchSeat{{Live: 1, Cap: 1}}, false},
 		{"deepseek-flash 1/1 (closed 20:00-08:00, 1 dead-hooked), claude-sonnet 0/2 (closed until 08:00)", []townhealth.DispatchSeat{{Live: 1, Cap: 1}, {Live: 0, Cap: 2}}, false},
 		{"no seats", nil, false},
+		// The town-total segment caps the town, not a seat: a full town's
+		// roster reads as its seats only, so no free seat is counted (gt-penmy).
+		{"claude-sonnet 2/2, total 2/10", []townhealth.DispatchSeat{{Live: 2, Cap: 2}}, false},
+		{"claude-sonnet 2/2, deepseek-flash 1/2, total 3/10", []townhealth.DispatchSeat{{Live: 2, Cap: 2}, {Live: 1, Cap: 2}}, false},
+		{"total 2/10", nil, false},
 		// A roster the daemon cannot read in full must not read as a full
 		// town, so each unreadable shape is reported rather than dropped
 		// (gt-xiw7o).
