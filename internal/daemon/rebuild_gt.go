@@ -42,6 +42,12 @@ const (
 	// starved the install (gt-kox0).
 	defaultRebuildGTInterval = time.Hour
 
+	// defaultRebuildGTMinInterval is the least time between two installs a
+	// landing's plain request may force, measured from the last accomplished
+	// cycle: more than one build-and-restart per 30 minutes cut dispatch ticks
+	// mid-sling (gt-aiby1).
+	defaultRebuildGTMinInterval = 30 * time.Minute
+
 	// rebuildGTInstallThreshold is how many commits behind the binary must be
 	// to be due. One merged commit not in force is a live defect, not a
 	// rounding error: this job is the backstop for landings nobody installed.
@@ -182,6 +188,13 @@ func rebuildGTInterval(config *DaemonPatrolConfig) time.Duration {
 	return defaultRebuildGTInterval
 }
 
+func rebuildGTMinInterval(config *DaemonPatrolConfig) time.Duration {
+	if config == nil || config.Patrols == nil {
+		return defaultRebuildGTMinInterval
+	}
+	return config.Patrols.RebuildGT.MinIntervalOrDefault(defaultRebuildGTMinInterval)
+}
+
 // triggerRebuildGT runs one rebuild_gt cycle on its own goroutine when the
 // job is due: an install builds the whole binary and can wait minutes for a
 // container-gate slot, so inline it would stall the heartbeat.
@@ -190,12 +203,37 @@ func (d *Daemon) triggerRebuildGT() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "rebuild_gt", time.Time{}, now, rebuildGTInterval(d.patrolConfig))
+	armed, installNow := d.rebuildGTPendingRequest()
+	// One read of the last-run record serves both decisions below: whether the
+	// patrol's interval is due, and whether a request is inside the install
+	// window. A second read could see a different record and hold a request on
+	// state the due decision never saw.
+	lastRun, found, loadErr := loadPatrolLastRun(d.config.TownRoot, "rebuild_gt")
+	dec := patrolDueFromLastRun(lastRun, found, loadErr, "", now, rebuildGTInterval(d.patrolConfig))
 	// A request armed by a landing pass makes the job due on its own: an
 	// install is the point of the drain signal, and the interval it would
 	// otherwise wait out is what leaves the merge inert (gt-3qmv4.1).
-	if !dec.due && !d.rebuildGTRequested.Load() {
+	if !dec.due && !armed {
 		return
+	}
+	// A plain request waits out the install window: landings drain in bursts,
+	// and one build per burst is the point (gt-aiby1). A gt:install-now
+	// landing bypasses it, and the interval-due path is unchanged.
+	//
+	// The window runs from the last accomplished cycle, which
+	// savePatrolLastRun records. A record that cannot be read makes the due
+	// decision run the job (silent skipping is the failure gt-ima2 fixed), so
+	// !dec.due means the record was read: this check can never hold a request
+	// on state it did not see. A request held inside the window stays armed
+	// and logs once per wait.
+	if armed && !installNow && !dec.due {
+		window := rebuildGTMinInterval(d.patrolConfig)
+		if now.Sub(lastRun) < window {
+			if d.rebuildGTWindowLogged.CompareAndSwap(false, true) {
+				d.logger.Printf("rebuild_gt: install requested %s after the last install; waiting for the %s window", now.Sub(lastRun).Round(time.Second), window)
+			}
+			return
+		}
 	}
 	if !d.rebuildGTRunning.CompareAndSwap(false, true) {
 		return
@@ -203,6 +241,7 @@ func (d *Daemon) triggerRebuildGT() {
 	if dec.due && dec.warn != "" {
 		d.logger.Printf("rebuild_gt: WARNING: %s — %s", dec.warn, dec.note)
 	}
+	d.rebuildGTWindowLogged.Store(false)
 	go func() {
 		// Registered first so it runs last, after the guard clears: a test
 		// woken by it reads the cycle's own end, not an earlier cycle's
@@ -212,15 +251,15 @@ func (d *Daemon) triggerRebuildGT() {
 		// The cycle consumes the request as it starts, so one armed while it
 		// runs sets the flag for the next heartbeat; clearing at the end
 		// would erase that request too (gt-j1mm4).
-		armed := d.rebuildGTRequested.Swap(false)
+		consumed, consumedInstallNow := d.takeRebuildGTRequest()
 		accomplished := false
 		// Put back the request this cycle consumed unless it accomplished its
 		// work, so a deferral, a panic or a Goexit does not lose it. Registered
 		// after the guard clears, so it runs before the guard does: the next
 		// heartbeat sees the request (gt-tgs81).
 		defer func() {
-			if armed && !accomplished {
-				d.rebuildGTRequested.Store(true)
+			if consumed && !accomplished {
+				d.putBackRebuildGTRequest(consumedInstallNow)
 			}
 		}()
 		if !d.runRebuildGT() {
@@ -252,18 +291,74 @@ func (d *Daemon) noteRebuildGTCycleDone() {
 // already-armed request is a no-op, which is what keeps the log one line per
 // drain rather than one per landing pass (gt-3qmv4.1).
 func (d *Daemon) requestRebuildGTInstall() {
-	if d.rebuildGTRequested.CompareAndSwap(false, true) {
+	if d.armRebuildGTRequest(false) {
 		d.logger.Printf("rebuild_gt: install requested: queue drained after landing")
 	}
 }
 
 // requestRebuildGTInstallNow arms the same request for a bead the operator
 // labeled gt:install-now: its landing asks for the install at once, so the
-// request is not held back for the queue to drain (gt-3qmv4.2).
+// request is not held back for the queue to drain (gt-3qmv4.2), nor for the
+// minimum install interval a plain landing request waits out (gt-aiby1).
 func (d *Daemon) requestRebuildGTInstallNow() {
-	if d.rebuildGTRequested.CompareAndSwap(false, true) {
+	if d.armRebuildGTRequest(true) {
 		d.logger.Printf("rebuild_gt: install requested: a %s bead landed", landworker.LabelInstallNow)
 	}
+}
+
+// rebuildGTPendingRequest reports the pending request: whether one is armed,
+// and whether it bypasses the install window. The two are read together, so a
+// request arriving concurrently is never seen half-set.
+func (d *Daemon) rebuildGTPendingRequest() (armed, installNow bool) {
+	d.rebuildGTRequestMu.Lock()
+	defer d.rebuildGTRequestMu.Unlock()
+	return d.rebuildGTRequested.Load(), d.rebuildGTInstallNow.Load()
+}
+
+// armRebuildGTRequest arms the request, upgrading one that is already pending
+// to an install-now one when this landing carried the label: the operator
+// asked for the install at once, and the pending request has not run yet.
+// Reports whether this call armed the request, so the log stays one line per
+// drain.
+//
+// An install-now marker is only ever stored beside an armed request, under the
+// same lock the cycle takes the pair with, so it cannot be left behind for a
+// later plain request to inherit.
+func (d *Daemon) armRebuildGTRequest(installNow bool) (armed bool) {
+	d.rebuildGTRequestMu.Lock()
+	defer d.rebuildGTRequestMu.Unlock()
+	if installNow {
+		d.rebuildGTInstallNow.Store(true)
+	}
+	return d.rebuildGTRequested.CompareAndSwap(false, true)
+}
+
+// takeRebuildGTRequest consumes the pending request as a cycle starts, both
+// flags in one critical section: a request arriving while the cycle runs must
+// not lose the bypass it carried to this cycle's clear, nor leave one behind
+// once this request's bypass has been served.
+func (d *Daemon) takeRebuildGTRequest() (armed, installNow bool) {
+	d.rebuildGTRequestMu.Lock()
+	defer d.rebuildGTRequestMu.Unlock()
+	armed = d.rebuildGTRequested.Swap(false)
+	installNow = d.rebuildGTInstallNow.Swap(false)
+	return armed, armed && installNow
+}
+
+// putBackRebuildGTRequest re-arms a request a cycle consumed without
+// accomplishing its work, keeping the bypass it carried: a gt:install-now
+// request asked for the install at once, and a deferral (a busy gate, a held
+// lock) must not push it behind the install window the label skips. A plain
+// request goes back plain. The lock keeps a request armed meanwhile from
+// losing the bypass it carries, and a bypass armed on top of the put-back
+// request is left in place.
+func (d *Daemon) putBackRebuildGTRequest(installNow bool) {
+	d.rebuildGTRequestMu.Lock()
+	defer d.rebuildGTRequestMu.Unlock()
+	if installNow {
+		d.rebuildGTInstallNow.Store(true)
+	}
+	d.rebuildGTRequested.Store(true)
 }
 
 // runRebuildGT is one cycle. It reports whether the cycle reached a verdict

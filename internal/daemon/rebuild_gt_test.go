@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -308,9 +309,10 @@ func TestRebuildGTCycle_KilledInstallRetriesNextHeartbeat(t *testing.T) {
 		}
 		return cliReply{}
 	})
-	// A cycle reached its verdict just now: only the drain request makes the
-	// job due again, so the request is what the kill decides.
-	if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now()); err != nil {
+	// A cycle reached its verdict inside the patrol interval but past the
+	// install window: only the drain request makes the job due again, so the
+	// request is what the kill decides.
+	if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now().Add(-45*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	d.requestRebuildGTInstall()
@@ -630,6 +632,241 @@ func TestRebuildGTRequestDuringDeferredCycleSurvives(t *testing.T) {
 	}
 	if !d.rebuildGTRequested.Load() {
 		t.Fatal("a deferred cycle lost the request it consumed and the one armed while it ran")
+	}
+}
+
+// TestRebuildGTCoalescesInstallsWithinMinInterval pins the install window: a
+// landing's request installs once, and a second request inside the window
+// leaves the request armed without a second build, while a gt:install-now
+// landing bypasses the window and a request past it installs (gt-aiby1).
+func TestRebuildGTCoalescesInstallsWithinMinInterval(t *testing.T) {
+	t.Parallel()
+	d, _ := rebuildGTTown(t)
+	clk := newFixedClock()
+	d.clock = clk
+	var logs lockedBuffer
+	d.logger = log.New(&logs, "", 0)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "branch"):
+			return cliReply{stdout: "main\n"}
+		case gitSub(c, "rev-parse"):
+			return cliReply{stdout: "abc1234567890\n"}
+		case gitSub(c, "log"):
+			return cliReply{stdout: "abc1234 the commit that was inert\n"}
+		case c.name == "bash":
+			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
+		}
+		return cliReply{}
+	})
+	installs := func() int { return len(installCalls(cli)) }
+
+	// The first landing's request installs.
+	d.requestRebuildGTInstall()
+	end := watchRebuildGTCycle(d)
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, end)
+	if got := installs(); got != 1 {
+		t.Fatalf("installs after the first landing = %d, want 1", got)
+	}
+
+	// Ten minutes later a second landing is coalesced into the window: no
+	// build, and the request stays armed for the window's end.
+	clk.Advance(10 * time.Minute)
+	d.requestRebuildGTInstall()
+	d.triggerRebuildGT()
+	if got := installs(); got != 1 {
+		t.Fatalf("installs after 10 min = %d, want 1 (coalesced)", got)
+	}
+	if !d.rebuildGTRequested.Load() {
+		t.Fatal("the held request was dropped")
+	}
+	// One line per wait: a second heartbeat inside the same window adds none.
+	d.triggerRebuildGT()
+	waitLine := "rebuild_gt: install requested 10m0s after the last install; waiting for the 30m0s window"
+	if n := strings.Count(logs.String(), waitLine); n != 1 {
+		t.Fatalf("window wait lines = %d, want 1:\n%s", n, logs.String())
+	}
+
+	// A gt:install-now landing bypasses the window.
+	d.requestRebuildGTInstallNow()
+	end = watchRebuildGTCycle(d)
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, end)
+	if got := installs(); got != 2 {
+		t.Fatalf("installs after install-now = %d, want 2", got)
+	}
+
+	// Past the window the plain request installs without a bypass.
+	clk.Advance(31 * time.Minute)
+	d.requestRebuildGTInstall()
+	end = watchRebuildGTCycle(d)
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, end)
+	if got := installs(); got != 3 {
+		t.Fatalf("installs after 31 min = %d, want 3", got)
+	}
+}
+
+// rebuildGTWindowTown is a rebuild_gt daemon on a fixed clock whose cycle
+// installs on demand: a stale binary, a quiet gate, and a fake CLI answering
+// the calls one install makes.
+func rebuildGTWindowTown(t *testing.T) (*Daemon, *fakeCLI) {
+	t.Helper()
+	d, _ := rebuildGTTown(t)
+	d.clock = newFixedClock()
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo { return staleInfo(3) }
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		switch {
+		case gitSub(c, "branch"):
+			return cliReply{stdout: "main\n"}
+		case gitSub(c, "rev-parse"):
+			return cliReply{stdout: "abc1234567890\n"}
+		case gitSub(c, "log"):
+			return cliReply{stdout: "abc1234 the commit that was inert\n"}
+		case c.name == "bash":
+			return cliReply{stdout: "install-gt: RESULT installed abc1234567890 beefbeef -\n"}
+		}
+		return cliReply{}
+	})
+	return d, cli
+}
+
+// TestRebuildGTMinIntervalEdge pins the window's edge: a request one second
+// inside the window waits, and one exactly at it installs — the window is a
+// duration to be reached, not an exclusive bound on the last install.
+func TestRebuildGTMinIntervalEdge(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		age   time.Duration
+		want  int
+		armed bool
+	}{
+		{name: "one second inside the window", age: defaultRebuildGTMinInterval - time.Second, want: 0, armed: true},
+		{name: "exactly at the window", age: defaultRebuildGTMinInterval, want: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d, cli := rebuildGTWindowTown(t)
+			if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now().Add(-tc.age)); err != nil {
+				t.Fatal(err)
+			}
+			d.requestRebuildGTInstall()
+			end := watchRebuildGTCycle(d)
+			d.triggerRebuildGT()
+			awaitRebuildGTIdle(t, d, end)
+
+			if got := len(installCalls(cli)); got != tc.want {
+				t.Errorf("installs = %d, want %d", got, tc.want)
+			}
+			if got := d.rebuildGTRequested.Load(); got != tc.armed {
+				t.Errorf("request armed = %v, want %v", got, tc.armed)
+			}
+		})
+	}
+}
+
+// TestRebuildGTUnreadableLastRunInstalls pins the window's failed-read
+// branch: a last-run record that cannot be read makes the job due (the
+// interval path's documented choice over silent skipping), so the requested
+// install runs rather than being held on state nothing could compare. The
+// unreadable state is reported, once.
+func TestRebuildGTUnreadableLastRunInstalls(t *testing.T) {
+	t.Parallel()
+	d, cli := rebuildGTWindowTown(t)
+	var logs lockedBuffer
+	d.logger = log.New(&logs, "", 0)
+	path := patrolLastRunPath(d.config.TownRoot)
+	mkdirs(t, filepath.Dir(path))
+	writeFile(t, path, "{not json")
+
+	d.requestRebuildGTInstall()
+	end := watchRebuildGTCycle(d)
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, end)
+
+	if got := len(installCalls(cli)); got != 1 {
+		t.Fatalf("installs = %d, want 1: an unreadable window must not hold the request", got)
+	}
+	if d.rebuildGTRequested.Load() {
+		t.Error("the request stayed armed after the install")
+	}
+	if !strings.Contains(logs.String(), "last-run state unreadable") {
+		t.Errorf("the unreadable state was not reported:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "waiting for the") {
+		t.Errorf("the window held a request on state it could not read:\n%s", logs.String())
+	}
+}
+
+// TestRebuildGTInstallNowTravelsWithItsRequest pins the request pair: the
+// gt:install-now marker is armed and consumed with the request it belongs to,
+// so a plain request can never inherit a bypass, and a bypass can never
+// outlive the request that carried it.
+func TestRebuildGTInstallNowTravelsWithItsRequest(t *testing.T) {
+	t.Parallel()
+	d, _ := rebuildGTTown(t)
+
+	d.requestRebuildGTInstall()
+	if armed, installNow := d.takeRebuildGTRequest(); !armed || installNow {
+		t.Fatalf("plain request consumed as armed=%v install-now=%v, want true/false", armed, installNow)
+	}
+	if d.rebuildGTRequested.Load() || d.rebuildGTInstallNow.Load() {
+		t.Fatal("consuming a request left a flag behind")
+	}
+
+	d.requestRebuildGTInstallNow()
+	if armed, installNow := d.takeRebuildGTRequest(); !armed || !installNow {
+		t.Fatalf("install-now request consumed as armed=%v install-now=%v, want true/true", armed, installNow)
+	}
+
+	// An install-now landing upgrades a plain request still pending, and the
+	// next plain request after it is plain again.
+	d.requestRebuildGTInstall()
+	d.requestRebuildGTInstallNow()
+	if armed, installNow := d.takeRebuildGTRequest(); !armed || !installNow {
+		t.Fatalf("upgraded request consumed as armed=%v install-now=%v, want true/true", armed, installNow)
+	}
+	d.requestRebuildGTInstall()
+	if armed, installNow := d.takeRebuildGTRequest(); !armed || installNow {
+		t.Fatalf("plain request after install-now consumed as armed=%v install-now=%v, want true/false", armed, installNow)
+	}
+}
+
+// TestRebuildGTDeferredInstallNowKeepsItsBypass pins the put-back: a
+// gt:install-now request a gate deferred goes back as install-now, so the
+// retry installs inside the window the label skips instead of waiting it out.
+func TestRebuildGTDeferredInstallNowKeepsItsBypass(t *testing.T) {
+	t.Parallel()
+	d, cli := rebuildGTWindowTown(t)
+	// An install five minutes ago: a plain request would be held.
+	if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now().Add(-5*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	d.rebuildGTGateFn = func() (string, bool) { return "a gate suite holds a slot (gastown/landing)", true }
+	d.requestRebuildGTInstallNow()
+	end := watchRebuildGTCycle(d)
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, end)
+
+	if got := len(installCalls(cli)); got != 0 {
+		t.Fatalf("installs while the gate held the slot = %d, want 0", got)
+	}
+	if armed, installNow := d.rebuildGTPendingRequest(); !armed || !installNow {
+		t.Fatalf("deferred request is armed=%v install-now=%v, want true/true", armed, installNow)
+	}
+
+	d.rebuildGTGateFn = func() (string, bool) { return "", false }
+	end = watchRebuildGTCycle(d)
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, end)
+	if got := len(installCalls(cli)); got != 1 {
+		t.Fatalf("installs after the gate cleared = %d, want 1 (bypass kept)", got)
 	}
 }
 

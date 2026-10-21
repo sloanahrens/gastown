@@ -120,6 +120,35 @@ func TestDaemonPatrolConfigDecodesRebuildOM(t *testing.T) {
 	}
 }
 
+// TestPatrolMinIntervalDecodesAndDefaults pins the optional key a patrol that
+// coalesces forced runs reads: strict decoding accepts it, an absent or
+// unusable value yields the patrol's own fallback, and a nil patrol yields it
+// too.
+func TestPatrolMinIntervalDecodesAndDefaults(t *testing.T) {
+	t.Parallel()
+	var cfg DaemonPatrolConfig
+	body := `{"patrols":{"rebuild_gt":{"enabled":true,"interval":"1h","min_interval":"45m"}}}`
+	if err := DecodeJSONFile("daemon.json", []byte(body), &cfg); err != nil {
+		t.Fatalf("patrols.rebuild_gt = %v", err)
+	}
+	if got := cfg.Patrols.RebuildGT.MinIntervalOrDefault(30 * time.Minute); got != 45*time.Minute {
+		t.Errorf("configured min_interval = %v, want 45m", got)
+	}
+
+	fallback := 30 * time.Minute
+	for _, p := range []*PatrolConfig{
+		nil,
+		{},
+		{MinInterval: "not a duration"},
+		{MinInterval: "-5m"},
+		{MinInterval: "0s"},
+	} {
+		if got := p.MinIntervalOrDefault(fallback); got != fallback {
+			t.Errorf("%+v: min_interval = %v, want the fallback %v", p, got, fallback)
+		}
+	}
+}
+
 func TestDaemonPatrolConfigRejectsUnknownPatrolKeys(t *testing.T) {
 	t.Parallel()
 	for _, body := range []string{

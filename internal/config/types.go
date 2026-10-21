@@ -511,6 +511,24 @@ type PatrolConfig struct {
 	Interval string   `json:"interval,omitempty"` // e.g., "5m"
 	Agent    string   `json:"agent,omitempty"`    // agent that runs this patrol
 	Rigs     []string `json:"rigs,omitempty"`     // rigs this patrol manages (empty = all)
+	// MinInterval is the least time between two runs asked for on demand.
+	// It is a floor on forced runs, not a schedule: the interval above is the
+	// schedule. A patrol whose forced runs can be batched reads this to
+	// coalesce them; an empty or invalid value leaves that patrol's own
+	// default in force. A run the patrol decides on its own is unaffected.
+	MinInterval string `json:"min_interval,omitempty"`
+}
+
+// MinIntervalOrDefault returns the patrol's minimum interval between forced
+// runs, or fallback when the key is unset or is not a positive duration. It is
+// safe on a nil PatrolConfig, so a caller need not test the pointer itself.
+func (p *PatrolConfig) MinIntervalOrDefault(fallback time.Duration) time.Duration {
+	if p != nil {
+		if d, err := time.ParseDuration(p.MinInterval); err == nil && d > 0 {
+			return d
+		}
+	}
+	return fallback
 }
 
 // CurrentDaemonPatrolConfigVersion is the current schema version for DaemonPatrolConfig.
