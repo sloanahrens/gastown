@@ -348,20 +348,20 @@ func dispatchRosterSeats(roster string) ([]townhealth.DispatchSeat, bool) {
 	parts := splitRosterSeats(roster)
 	for n, part := range parts {
 		part = strings.TrimSpace(part)
-		// The town-total segment Picture appends ("total 2/10") caps the whole
-		// town, not one seat: counting it as a seat reads a full town as having
-		// a free seat (gt-penmy). Picture appends it last and only after a
-		// seat, and its count covers every seat's, so a "total" segment
-		// anywhere else, or a last one counting fewer live than the seats
-		// before it, is a seat named total (gt-38gsb). The last segment is
-		// taken as the total only if it has the total's shape: a malformed one
-		// is an unreadable roster, not a segment to drop.
+		// Picture appends the town total ("total 2/10") last, after a seat,
+		// only under a positive cap, and its live count covers every seat's.
+		// Only such a segment is the total, which caps the town and so is not
+		// a seat (gt-penmy); any other "total" segment is a seat named total
+		// (gt-38gsb). A last segment shaped like the total but malformed is an
+		// unreadable roster. A seat named total that sorts last with live at
+		// or above the seats' sum cannot be told from the total by the text,
+		// and is read as the total.
 		if n > 0 && n == len(parts)-1 && strings.HasPrefix(part, "total ") {
 			total, ok := parseRosterCount(strings.TrimPrefix(part, "total "))
 			if !ok {
 				return nil, true
 			}
-			if total.Live >= seatLiveSum(out) {
+			if total.Cap > 0 && total.Live >= seatLiveSum(out) {
 				continue
 			}
 		}
