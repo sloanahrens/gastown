@@ -141,7 +141,7 @@ func TestScorecardOpenUnknownBatteryListsRegistered(t *testing.T) {
 	if err == nil {
 		t.Fatal("Open of an unknown battery succeeded")
 	}
-	if !strings.Contains(err.Error(), "registered batteries: attention, dispatch, drift, finding, landing, logtriage, notes, progress, stale, submission, targets") {
+	if !strings.Contains(err.Error(), "registered batteries: attention, conflict, dispatch, drift, finding, landing, logtriage, notes, progress, stale, submission, targets") {
 		t.Errorf("error %q does not list the registered batteries", err)
 	}
 	if strings.Contains(err.Error(), FixtureBattery) {
