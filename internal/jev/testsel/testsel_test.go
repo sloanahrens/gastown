@@ -3,6 +3,7 @@ package testsel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -552,5 +553,31 @@ func TestJevTestselShadowKeepsTheGatesVerdict(t *testing.T) {
 	}
 	if n := len(readLines(t, pass.LogPath)); n != 2 {
 		t.Errorf("log has %d lines, want one per landing", n)
+	}
+}
+
+// A gate job log that was read but holds no package lines leaves the line with
+// gate_packages 0; the shadow says why in one log line naming the bead, so the
+// zero is not silent (gt-6hp28).
+func TestShadowLogsWhenTheGateLogHoldsNoPackageLines(t *testing.T) {
+	t.Parallel()
+	verdict := land.CandidateResult{State: land.CandidatePassed, Branch: "land/gt-empty", SHA: "head", Pushed: true}
+	pass := newPass(t, &recordingAsker{noul: func(string) float64 { return 0.1 }}, fixtureTree())
+	var logged []string
+	shadow := Shadow{
+		Gate:    &fakeGate{res: verdict},
+		Results: &fakePackages{},
+		Pass:    pass,
+		Rig:     "gastown",
+		Logf:    func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) },
+	}
+
+	shadow.Run(context.Background(), nil, "dir", land.Work{BeadID: "gt-empty"}, "head")
+
+	if len(logged) != 1 || !strings.Contains(logged[0], "gt-empty") || !strings.Contains(logged[0], "no ok or FAIL package lines") {
+		t.Errorf("logged %q, want one line naming gt-empty and the missing package lines", logged)
+	}
+	if line := readLines(t, pass.LogPath)[0]; line.GatePackages != 0 {
+		t.Errorf("gate_packages = %d, want 0", line.GatePackages)
 	}
 }

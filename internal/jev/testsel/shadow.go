@@ -39,6 +39,9 @@ func (s Shadow) Run(ctx context.Context, wt land.Repo, dir string, w land.Work, 
 		if err != nil {
 			s.logf("%s: the gate's per-package results could not be read: %v", w.BeadID, err)
 		}
+		if err == nil && len(pkgs) == 0 {
+			s.logf("%s: the gate job log was read but holds no ok or FAIL package lines, so no package can be graded", w.BeadID)
+		}
 		results = pkgs
 	}
 	if err := run.Finish(results); err != nil {
