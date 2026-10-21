@@ -2824,22 +2824,26 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 //
 // Anything else is not held and crash detection goes on as before: another
 // exit type, a seat that never escalated, or a record that could not be read.
-// The escalation read is the tick's own rule (patrolscan.SeatEscalationVerdict
-// over the escalations the seat raised), so the two sites cannot disagree
-// about which seat is waiting on a decision.
+// The rule is the tick's own (patrolscan.SeatEscalationHold), shared with the
+// overrun guard, so the sites cannot disagree about which seat is waiting on a
+// decision.
 func (d *Daemon) seatHeldOnEscalation(rigName, polecatName, hookBead string) (bool, string) {
 	h := &patrolScanHost{d: d}
 	rec, err := h.AgentRecord(rigName, polecatName)
-	if err != nil || !rec.StoppedOnEscalated() {
+	if err != nil {
 		return false, ""
 	}
-	raised, err := h.PolecatEscalations(rigName)
+	v, err := patrolscan.SeatEscalationHold(rec, rigName, polecatName, hookBead, func() ([]patrolscan.Escalation, error) {
+		return h.PolecatEscalations(rigName)
+	})
+	if err == nil && v.Verdict == patrolscan.EscalationNotStopped {
+		return false, ""
+	}
 	if err != nil {
 		// An unreadable read is the tick's Unknown too: nothing is restarted or
 		// reported as a crash on a guess.
 		return true, "exit ESCALATED and its escalations could not be read: " + err.Error()
 	}
-	v := patrolscan.SeatEscalationVerdict(rigName, polecatName, hookBead, raised)
 	if v.Verdict == patrolscan.EscalationResolved {
 		return true, fmt.Sprintf("exit ESCALATED and %s for %s is closed; patrol_scan resumes the seat", v.ID, hookBead)
 	}

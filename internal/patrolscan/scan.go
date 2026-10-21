@@ -231,6 +231,10 @@ const (
 	// EscalationUnnamed: no escalation the seat raised names the bead. Nothing
 	// proves the blocker spent, so the seat is left skipped.
 	EscalationUnnamed EscalationVerdict = "unnamed"
+	// EscalationNotStopped: the seat's record is not the ESCALATED stop, so it
+	// is waiting on no escalation whatever it has raised (SeatEscalationHold).
+	// SeatEscalationVerdict never answers it.
+	EscalationNotStopped EscalationVerdict = "not-stopped"
 )
 
 // SeatEscalation is the verdict on the escalations one seat raised for one
@@ -282,6 +286,29 @@ func SeatEscalationVerdict(rig, name, bead string, raised []Escalation) SeatEsca
 	}
 	return SeatEscalation{Verdict: EscalationUnnamed,
 		Detail: "agent_state stuck: exit ESCALATED and no escalation of the seat's names " + bead}
+}
+
+// SeatEscalationHold is the one answer to "is this seat waiting on an
+// escalation": the seat's record says it stopped on one (StoppedOnEscalated),
+// and the verdict over the escalations it raised for bead says what became of
+// it. The tick, the daemon's crash detector and the overrun guard all read it,
+// so the three cannot disagree. A live seat that raised an escalation and kept
+// working is not held, and its escalations are not read: an open escalation
+// alone does not make a seat a waiter.
+//
+// A record that is not the ESCALATED stop answers EscalationNotStopped. The
+// escalations are read only for a stopped seat, so an error means a stopped
+// seat whose escalations could not be read, and each caller picks its own
+// fail-closed direction.
+func SeatEscalationHold(rec AgentRecord, rig, name, bead string, readRaised func() ([]Escalation, error)) (SeatEscalation, error) {
+	if !rec.StoppedOnEscalated() {
+		return SeatEscalation{Verdict: EscalationNotStopped}, nil
+	}
+	raised, err := readRaised()
+	if err != nil {
+		return SeatEscalation{}, err
+	}
+	return SeatEscalationVerdict(rig, name, bead, raised), nil
 }
 
 // escalationNamesBead reports whether one escalation names bead: its
@@ -902,11 +929,12 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 			// will pick up (gt-4hduq). A seat whose bead closed never arrives
 			// here — the tick reaches it with no work and clears it there
 			// (finishedExitEvidence).
-			raised, err := s.env.PolecatEscalations(rig)
+			v, err := SeatEscalationHold(agent, rig, name, work.ID, func() ([]Escalation, error) {
+				return s.env.PolecatEscalations(rig)
+			})
 			if err != nil {
 				return unknown("escalations unreadable", err)
 			}
-			v := SeatEscalationVerdict(rig, name, work.ID, raised)
 			if v.Verdict != EscalationResolved {
 				return skip(v.Detail)
 			}

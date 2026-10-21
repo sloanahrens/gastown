@@ -7,15 +7,32 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/done"
 )
 
+// seedOverrunAgent stores gastown/polecats/<name>'s agent bead in the state and
+// exit type the test names; stopped-on-escalation is stuck beside ESCALATED.
+func seedOverrunAgent(bd *workBD, townRoot, name, state, exit string) {
+	bd.db.Seed(beads.Issue{
+		ID: beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, "gastown"), "gastown", name),
+		Description: beads.FormatAgentDescription(name, &beads.AgentFields{
+			RoleType: constants.RolePolecat, Rig: "gastown", AgentState: state, ExitType: exit,
+		}),
+	})
+}
+
 // The tie between a seat and the escalations it raised is the one the stuck-seat
-// tick reads (patrolscan.SeatEscalationVerdict). This pins what the guard reads
-// from it: an open escalation the seat raised that names its bead holds the
-// clock, and nothing else does.
+// tick reads (patrolscan.SeatEscalationHold). This pins what the guard reads
+// from it: an open escalation the seat raised that names its bead, while the
+// seat's record says it stopped on it, holds the clock, and nothing else does.
 func TestOverrunGuardEscalationWaiting(t *testing.T) {
 	t.Parallel()
 	bd := newWorkBD(t)
+	townRoot := t.TempDir()
+	for _, name := range []string{"capable", "titled", "closer", "other", "sloan", "furiosa"} {
+		seedOverrunAgent(bd, townRoot, name, "stuck", done.ExitEscalated)
+	}
 	escalation := func(id, raiser, related, title, status string) beads.Issue {
 		return beads.Issue{ID: id, Status: status, Title: title, Labels: []string{"gt:escalation"},
 			Description: beads.FormatEscalationDescription(title, &beads.EscalationFields{
@@ -27,7 +44,7 @@ func TestOverrunGuardEscalationWaiting(t *testing.T) {
 	bd.db.Seed(escalation("hq-wisp-closed", "gastown/polecats/closer", "gt-esc1", "gt-esc1: answered", "closed"))
 	bd.db.Seed(escalation("hq-wisp-other-bead", "gastown/polecats/other", "gt-esc2", "gt-esc2: a decision", "open"))
 	bd.db.Seed(escalation("hq-wisp-other-role", "gastown/crew/sloan", "gt-esc1", "gt-esc1: a decision", "open"))
-	d := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: bd.open}
+	d := &Daemon{config: &Config{TownRoot: townRoot}, openWorkBeads: bd.open}
 	r := newOverrunEscalationReader(d)
 
 	tests := []struct {
@@ -54,11 +71,74 @@ func TestOverrunGuardEscalationWaiting(t *testing.T) {
 	// A failed read is an error, which the guard turns into counting all of the
 	// seat's time.
 	failing := newWorkBD(t)
+	failingRoot := t.TempDir()
+	seedOverrunAgent(failing, failingRoot, "capable", "stuck", done.ExitEscalated)
 	failing.listErr = errors.New("bd list: connection refused")
-	dFailing := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: failing.open}
+	dFailing := &Daemon{config: &Config{TownRoot: failingRoot}, openWorkBeads: failing.open}
 	got, err := newOverrunEscalationReader(dFailing).waiting(overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-esc1"})
 	if err == nil || got {
 		t.Errorf("waiting after a failed read = %v, %v; want false and an error", got, err)
+	}
+
+	// An unreadable agent record is the same error: the guard counts all of the
+	// seat's time rather than guess it is stopped.
+	norecord := newWorkBD(t)
+	norecord.showErr = errors.New("bd show: connection refused")
+	dNoRecord := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: norecord.open}
+	got, err = newOverrunEscalationReader(dNoRecord).waiting(overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-esc1"})
+	if err == nil || got {
+		t.Errorf("waiting after a failed record read = %v, %v; want false and an error", got, err)
+	}
+}
+
+// A live seat that raised an escalation and kept working is not waiting on it:
+// gt escalate names the seat and its hooked bead, so the escalation alone ties
+// to the seat, but only a record stopped on ESCALATED (stuck beside exit
+// ESCALATED) makes it a waiter, as in seatHeldOnEscalation and the tick. Read as
+// waiting, its time was banked and it was neither nudged at 12 minutes nor
+// stopped at 20.
+func TestOverrunGuardEscalationLiveSeatIsNotWaiting(t *testing.T) {
+	t.Parallel()
+	seat := overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-esc1"}
+	tests := []struct {
+		name        string
+		state, exit string
+		want        bool
+	}{
+		{"working, no exit", "working", "", false},
+		{"working with a stale ESCALATED exit", "working", done.ExitEscalated, false},
+		{"stuck on another exit", "stuck", done.ExitDeferred, false},
+		{"stuck on ESCALATED", "stuck", done.ExitEscalated, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			bd := newWorkBD(t)
+			townRoot := t.TempDir()
+			seedOverrunAgent(bd, townRoot, "capable", tt.state, tt.exit)
+			title := "gt-esc1: a decision"
+			bd.db.Seed(beads.Issue{ID: "hq-wisp-open", Status: "open", Title: title, Labels: []string{"gt:escalation"},
+				Description: beads.FormatEscalationDescription(title, &beads.EscalationFields{
+					Severity: "high", EscalatedBy: "gastown/polecats/capable", RelatedBead: "gt-esc1"}),
+			})
+			d, _ := newOverrunDaemon(t, false)
+			d.config.TownRoot = townRoot
+			d.openWorkBeads = bd.open
+			f := newOverrunFake(0, seat)
+			f.escalationWaiting = newOverrunEscalationReader(d).waiting
+
+			got, err := newOverrunEscalationReader(d).waiting(seat)
+			if err != nil || got != tt.want {
+				t.Fatalf("waiting = %v, %v; want %v, nil", got, err, tt.want)
+			}
+
+			// Twelve minutes of wall time: a live seat is nudged as it would be
+			// with no escalation; a stopped one is waiting on a person.
+			tickOverrunGuard(d, f, 12, time.Minute)
+			if nudged := len(f.nudges) == 1; nudged == tt.want {
+				t.Errorf("nudges after 12 minutes = %v, want a nudge only when the seat is not waiting", f.nudges)
+			}
+		})
 	}
 }
 
