@@ -94,8 +94,8 @@ func doneCloseTimeInvariantSkipReason(cwd, townRoot, rigName string, issue *bead
 // closeTimeBranchTarget resolves the branch under test (the cwd's current
 // branch) and the ref to compare its commit count against: the resolved
 // origin/upstream ref of the bead's base_branch (the branch the submit path
-// lands it on), or of the rig's default branch when the bead sets none.
-// issue may be nil.
+// lands it on), or of the rig's default branch when the bead sets none or its
+// base_branch does not resolve (see closeTimeTargetRef). issue may be nil.
 //
 // Shared by gt done's self-close path and the bd-close-invariant PreToolUse
 // guard (gt-arno) so the two agree on which branch is being judged and what
@@ -129,17 +129,39 @@ func closeTimeBranchTarget(g *git.Git, townRoot, rigName string, issue *beads.Is
 	// routinely stale, and comparing against it directly overcounts commits
 	// the polecat never authored — refusing no_merge/review_only/report-only
 	// closes that legitimately have zero polecat commits (gt-6hmz
-	// om-editorial finding 1). Fall back to the local branch only when the
-	// origin ref itself doesn't resolve (e.g. no remote configured).
-	base := done.BaseBranchOf(issue)
+	// om-editorial finding 1). closeTimeTargetRef falls back to the local
+	// default branch only when no origin ref resolves (e.g. no remote).
+	target = closeTimeTargetRef(g, done.BaseBranchOf(issue), defaultBranch)
+	return branch, target, true
+}
+
+// closeTimeRefResolver is the narrow interface closeTimeTargetRef needs to
+// turn a branch name into a remote-tracking ref. *git.Git satisfies it.
+type closeTimeRefResolver interface {
+	CleanBaseRef(remote, defaultBranch, target string) string
+	RefExists(ref string) (bool, error)
+}
+
+// closeTimeTargetRef picks the ref the close-time check compares against.
+// base is the bead's base_branch ("" when it sets none); it is compared
+// against origin/<base>. A base the origin does not carry falls back to
+// origin/<defaultBranch>, the ref a bead with no base_branch resolves to.
+// A local branch named base is never compared against: a polecat's local copy
+// is routinely stale. The local defaultBranch is the last resort, for when no
+// origin ref resolves (e.g. no remote configured).
+func closeTimeTargetRef(refs closeTimeRefResolver, base, defaultBranch string) string {
 	if base == "" {
 		base = defaultBranch
 	}
-	target = base
-	if originRef := g.CleanBaseRef("origin", base, ""); originRef != "" {
-		if exists, err := g.RefExists(originRef); err == nil && exists {
-			target = originRef
+	candidates := []string{base}
+	if base != defaultBranch {
+		candidates = append(candidates, defaultBranch)
+	}
+	for _, candidate := range candidates {
+		originRef := refs.CleanBaseRef("origin", candidate, "")
+		if exists, err := refs.RefExists(originRef); err == nil && exists {
+			return originRef
 		}
 	}
-	return branch, target, true
+	return defaultBranch
 }

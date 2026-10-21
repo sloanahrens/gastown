@@ -110,3 +110,52 @@ func TestHasOperatorOverridePrefix(t *testing.T) {
 		}
 	}
 }
+
+// fakeCloseTimeRefs resolves origin refs against a fixed set of existing
+// remote-tracking refs, standing in for *git.Git in the unit tier.
+type fakeCloseTimeRefs struct {
+	existing map[string]bool
+}
+
+func (f fakeCloseTimeRefs) CleanBaseRef(remote, defaultBranch, target string) string {
+	if target == "" {
+		target = defaultBranch
+	}
+	return remote + "/" + target
+}
+
+func (f fakeCloseTimeRefs) RefExists(ref string) (bool, error) {
+	return f.existing[ref], nil
+}
+
+// TestCloseTimeBranchTargetHonoursBaseBranch: a bead whose base_branch is
+// develop is compared against origin/develop, the branch the submit path
+// lands it on. A bead with no base_branch resolves to origin/<rig default>.
+// A base_branch the origin does not carry falls back to origin/<default>,
+// never to a local branch of that name.
+func TestCloseTimeBranchTargetHonoursBaseBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		base     string
+		existing []string
+		want     string
+	}{
+		{"BaseBranchResolvesToOrigin", "develop", []string{"origin/develop", "origin/main"}, "origin/develop"},
+		{"NoBaseBranchResolvesToDefault", "", []string{"origin/main"}, "origin/main"},
+		{"MissingBaseBranchFallsBackToOriginDefault", "develop", []string{"origin/main"}, "origin/main"},
+		{"DefaultBaseBranchMissingFromOrigin", "", nil, "main"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			refs := fakeCloseTimeRefs{existing: map[string]bool{}}
+			for _, ref := range tc.existing {
+				refs.existing[ref] = true
+			}
+			if got := closeTimeTargetRef(refs, tc.base, "main"); got != tc.want {
+				t.Errorf("closeTimeTargetRef(base=%q) = %q, want %q", tc.base, got, tc.want)
+			}
+		})
+	}
+}

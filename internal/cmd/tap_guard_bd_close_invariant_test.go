@@ -1,10 +1,13 @@
 package cmd
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 // TestParseBdCloseInvocations pins the command shape recognition: which
@@ -651,6 +654,52 @@ func TestReadBdCloseReasonFile_Bounded(t *testing.T) {
 		}
 		if got, ok := readBdCloseReasonFile(p); !ok || got != "cancel: x" {
 			t.Errorf("got (%q, %v), want (cancel: x, true)", got, ok)
+		}
+	})
+}
+
+// TestCloseInvariantBranchBead: the guard reads the bead its branch was cut
+// for, so the target follows that bead's base_branch. A branch naming no bead
+// skips the lookup, and a failed lookup yields nil so the target falls back to
+// the rig default.
+func TestCloseInvariantBranchBead(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/basalt/gt-6hmz+abc"
+	bead := &beads.Issue{ID: "gt-6hmz", Description: `formula_vars: ["base_branch=develop"]`}
+
+	t.Run("ReadsTheBranchBead", func(t *testing.T) {
+		t.Parallel()
+		var asked []string
+		show := func(id string) (*beads.Issue, error) {
+			asked = append(asked, id)
+			return bead, nil
+		}
+		if got := closeInvariantBranchBead(branch, show); got != bead {
+			t.Errorf("closeInvariantBranchBead = %v, want the branch's bead", got)
+		}
+		if !reflect.DeepEqual(asked, []string{"gt-6hmz"}) {
+			t.Errorf("show called with %v, want [gt-6hmz]", asked)
+		}
+	})
+
+	t.Run("NoBeadOnBranchSkipsLookup", func(t *testing.T) {
+		t.Parallel()
+		show := func(id string) (*beads.Issue, error) {
+			t.Errorf("show called with %q for a branch naming no bead", id)
+			return nil, nil
+		}
+		if got := closeInvariantBranchBead("main", show); got != nil {
+			t.Errorf("closeInvariantBranchBead = %v, want nil", got)
+		}
+	})
+
+	t.Run("LookupFailureFallsBackToNil", func(t *testing.T) {
+		t.Parallel()
+		show := func(id string) (*beads.Issue, error) {
+			return bead, errors.New("bd show failed")
+		}
+		if got := closeInvariantBranchBead(branch, show); got != nil {
+			t.Errorf("closeInvariantBranchBead = %v, want nil on lookup failure", got)
 		}
 	})
 }
