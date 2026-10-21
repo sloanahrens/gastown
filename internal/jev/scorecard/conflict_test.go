@@ -259,6 +259,43 @@ func TestConflictAdapterLabelsAPair(t *testing.T) {
 	}
 }
 
+// A bead that forked before another landed stays disjoint from it when the
+// landing record's base has advanced to a tip holding the other's work: the
+// file set is the bead's own change from its fork point, and a diff against the
+// base reads the target's changes since the fork backwards, as this bead's
+// (gt-wu2ab).
+func TestConflictAdapterLabelsATargetThatAdvancedAfterFork(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	repo, sha := linearHistory([]map[string]string{
+		{"base.txt": "base"},
+		{"a.go": "a"}, // gt-o's landing
+	})
+	// gt-b forked at the root, so gt-o's commit is not in its history.
+	b := repo.fork(t, sha[0], map[string]string{"b.go": "b"})
+	f, err := land.RigLandingsFile(town, conflict.RigName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	appendLanding(t, f, "gt-o", sha[0], sha[1])
+	// gt-b merged onto the tip gt-o left, so its base holds gt-o's landing.
+	appendLanding(t, f, "gt-b", sha[1], b)
+
+	a := newConflictAdapter(town, func() (conflictRepo, error) { return repo, nil })
+	item, err := a.Parse(conflictLine(t, "gt-b", "gt-o", 0.5, 0.5, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.Label(context.Background(), item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Labeling{Labeled: true, Labels: map[QuestionID]bool{qSameFiles: false}, Rule: ruleConflictDisjointFiles}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("label = %+v, want %+v", got, want)
+	}
+}
+
 // A pair where neither bead landed and nothing was rejected labels nothing, and
 // never opens the clone, because it has nothing to read there.
 func TestConflictAdapterLeavesAnUnlandedPairAloneWithoutTheClone(t *testing.T) {
@@ -281,64 +318,142 @@ func TestConflictAdapterLeavesAnUnlandedPairAloneWithoutTheClone(t *testing.T) {
 	}
 }
 
-// linearRepo stands in for the bare clone with a linear main branch. Its
-// commits are oldest first, and each one's diff from the commit before it is
-// the files it changed. Ancestry on a line of commits is the earlier of the two.
+// linearRepo stands in for the bare clone with a main branch that runs in a
+// line unless a test forks a commit off an earlier one. Each commit carries the
+// full tree it leaves, so a diff reads either two trees as they stand or, for a
+// three-dot range, the head against the two commits' merge base.
 type linearRepo struct {
-	order []string
-	files map[string]string
+	order  []string
+	parent map[string]string            // commit -> its parent, "" for a root
+	tree   map[string]map[string]string // commit -> path -> content
 }
 
-func (r linearRepo) Sync(context.Context) error { return nil }
+func (r *linearRepo) Sync(context.Context) error { return nil }
 
-func (r linearRepo) Run(_ context.Context, args ...string) (string, error) {
-	index := func(sha string) (int, error) {
-		for i, c := range r.order {
-			if c == sha {
-				return i, nil
-			}
-		}
-		return 0, fmt.Errorf("no commit %s", sha)
-	}
+func (r *linearRepo) Run(_ context.Context, args ...string) (string, error) {
 	switch args[0] {
 	case "diff":
-		// The range is base..head, and the diff is what head changed.
-		_, head, _ := strings.Cut(args[len(args)-1], "..")
-		return r.files[head], nil
+		base, head, threeDot, err := r.rangeOf(args[len(args)-1])
+		if err != nil {
+			return "", err
+		}
+		if threeDot {
+			if base, err = r.mergeBase(base, head); err != nil {
+				return "", err
+			}
+		}
+		return r.changed(base, head), nil
 	case "merge-base":
-		a, err := index(args[1])
+		mb, err := r.mergeBase(args[1], args[2])
 		if err != nil {
 			return "", err
 		}
-		b, err := index(args[2])
-		if err != nil {
-			return "", err
-		}
-		return r.order[min(a, b)] + "\n", nil
+		return mb + "\n", nil
 	case "rev-parse":
-		if _, err := index(strings.TrimSuffix(args[len(args)-1], "^{commit}")); err != nil {
+		sha := strings.TrimSuffix(args[len(args)-1], "^{commit}")
+		if _, err := r.index(sha); err != nil {
 			return "", err
 		}
-		return strings.TrimSuffix(args[len(args)-1], "^{commit}") + "\n", nil
+		return sha + "\n", nil
 	}
 	return "", fmt.Errorf("unexpected git %s", args[0])
 }
 
+func (r *linearRepo) index(sha string) (int, error) {
+	for i, c := range r.order {
+		if c == sha {
+			return i, nil
+		}
+	}
+	return 0, fmt.Errorf("no commit %s", sha)
+}
+
+// rangeOf splits a diff range, base..head or base...head, and says which form
+// it was.
+func (r *linearRepo) rangeOf(spec string) (base, head string, threeDot bool, err error) {
+	sep := ".."
+	if strings.Contains(spec, "...") {
+		sep, threeDot = "...", true
+	}
+	base, head, _ = strings.Cut(spec, sep)
+	for _, c := range []string{base, head} {
+		if _, err := r.index(c); err != nil {
+			return "", "", false, err
+		}
+	}
+	return base, head, threeDot, nil
+}
+
+// mergeBase is the newest commit both can reach, an error when they share none.
+func (r *linearRepo) mergeBase(a, b string) (string, error) {
+	reach := map[string]bool{}
+	for c := a; c != ""; c = r.parent[c] {
+		reach[c] = true
+	}
+	for c := b; c != ""; c = r.parent[c] {
+		if reach[c] {
+			return c, nil
+		}
+	}
+	return "", fmt.Errorf("no merge base of %s and %s", a, b)
+}
+
+// changed lists the paths whose content differs between two commits' trees.
+func (r *linearRepo) changed(from, to string) string {
+	var names []string
+	for path, content := range r.tree[to] {
+		if r.tree[from][path] != content {
+			names = append(names, path)
+		}
+	}
+	for path := range r.tree[from] {
+		if _, ok := r.tree[to][path]; !ok {
+			names = append(names, path)
+		}
+	}
+	sort.Strings(names)
+	return strings.Join(names, "\n")
+}
+
+// fork adds a commit off an earlier one, standing in for a branch that forked
+// before the commits after its parent landed.
+func (r *linearRepo) fork(t *testing.T, parent string, changed map[string]string) string {
+	t.Helper()
+	if _, err := r.index(parent); err != nil {
+		t.Fatal(err)
+	}
+	sha := fmt.Sprintf("c%d", len(r.order))
+	r.order = append(r.order, sha)
+	r.parent[sha] = parent
+	r.tree[sha] = writeFiles(r.tree[parent], changed)
+	return sha
+}
+
 // linearHistory makes a linear repo from the files each commit changed, and
 // returns it with the commit names c0, c1, ... in order.
-func linearHistory(commits []map[string]string) (linearRepo, []string) {
-	r := linearRepo{files: map[string]string{}}
+func linearHistory(commits []map[string]string) (*linearRepo, []string) {
+	r := &linearRepo{parent: map[string]string{}, tree: map[string]map[string]string{}}
+	prev := ""
 	for i, changed := range commits {
 		sha := fmt.Sprintf("c%d", i)
 		r.order = append(r.order, sha)
-		var names []string
-		for path := range changed {
-			names = append(names, path)
-		}
-		sort.Strings(names)
-		r.files[sha] = strings.Join(names, "\n")
+		r.parent[sha] = prev
+		r.tree[sha] = writeFiles(r.tree[prev], changed)
+		prev = sha
 	}
 	return r, r.order
+}
+
+// writeFiles copies a tree with the given paths written over it.
+func writeFiles(tree, changed map[string]string) map[string]string {
+	out := make(map[string]string, len(tree)+len(changed))
+	for path, content := range tree {
+		out[path] = content
+	}
+	for path, content := range changed {
+		out[path] = content
+	}
+	return out
 }
 
 // writeLandings records each bead's landing: its head is the commit it named,
@@ -354,18 +469,24 @@ func writeLandings(t *testing.T, town string, sha []string, landings map[string]
 		if i > 0 {
 			base = sha[i-1]
 		}
-		if err := f.Append(land.LandingRecord{
-			BeadID:       bead,
-			Rig:          conflict.RigName,
-			Branch:       "polecat/x/" + bead,
-			Head:         sha[i],
-			Base:         base,
-			Target:       "main",
-			LandedCommit: sha[i],
-			LandedAt:     time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC),
-		}); err != nil {
-			t.Fatal(err)
-		}
+		appendLanding(t, f, bead, base, sha[i])
+	}
+}
+
+// appendLanding records one bead's landing from base to head.
+func appendLanding(t *testing.T, f *land.LandingsFile, bead, base, head string) {
+	t.Helper()
+	if err := f.Append(land.LandingRecord{
+		BeadID:       bead,
+		Rig:          conflict.RigName,
+		Branch:       "polecat/x/" + bead,
+		Head:         head,
+		Base:         base,
+		Target:       "main",
+		LandedCommit: head,
+		LandedAt:     time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
 	}
 }
 
