@@ -168,6 +168,7 @@ func newJevAttentionRig(t *testing.T) *jevAttentionRig {
 		r.got = s
 		return &jevattention.Pass{
 			State:      func() (attention.State, error) { return attention.State{}, nil },
+			Events:     func() ([]attention.Event, error) { return nil, nil },
 			LogPath:    jevattention.LogPath(town),
 			CursorPath: jevattention.CursorPath(town),
 			SpentToday: func() (float64, error) { return 0, nil },
@@ -263,11 +264,13 @@ func TestJevAttentionRunStopsAtTheCap(t *testing.T) {
 		jevAttentionOpen: func(string, jevattention.Settings, io.Writer) (*jevattention.Pass, error) {
 			return &jevattention.Pass{
 				Asker: noAsk{t},
-				State: func() (attention.State, error) {
-					return attention.State{Items: []attention.Item{{
-						Key:       "red",
-						FirstSeen: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
-					}}}, nil
+				State: func() (attention.State, error) { return attention.State{}, nil },
+				Events: func() ([]attention.Event, error) {
+					return []attention.Event{{
+						TS:    time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+						Key:   "red",
+						State: attention.EventNew,
+					}}, nil
 				},
 				LogPath:    jevattention.LogPath(town),
 				CursorPath: cursor,
@@ -304,9 +307,13 @@ func TestJevAttentionRunLogsAnOutageApartFromAnswers(t *testing.T) {
 	if err := battery.WriteCursor(cursor, battery.Cursor{Time: time.Date(2026, 10, 20, 11, 0, 0, 0, time.UTC)}); err != nil {
 		t.Fatal(err)
 	}
-	var items []attention.Item
+	var events []attention.Event
 	for _, k := range []string{"a", "b", "c"} {
-		items = append(items, attention.Item{Key: k, FirstSeen: time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)})
+		events = append(events, attention.Event{
+			TS:    time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC),
+			Key:   k,
+			State: attention.EventNew,
+		})
 	}
 	d := &Daemon{
 		config: &Config{TownRoot: town},
@@ -317,7 +324,8 @@ func TestJevAttentionRunLogsAnOutageApartFromAnswers(t *testing.T) {
 		jevAttentionOpen: func(string, jevattention.Settings, io.Writer) (*jevattention.Pass, error) {
 			return &jevattention.Pass{
 				Asker:      failAsk{},
-				State:      func() (attention.State, error) { return attention.State{Items: items}, nil },
+				State:      func() (attention.State, error) { return attention.State{}, nil },
+				Events:     func() ([]attention.Event, error) { return events, nil },
 				LogPath:    jevattention.LogPath(town),
 				CursorPath: cursor,
 				SpentToday: func() (float64, error) { return 0, nil },

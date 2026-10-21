@@ -1,12 +1,12 @@
 // Package attention is the advisory Jev battery for the attention queue. A
-// pass takes each item raised since the last pass, asks Jev the question set
-// about it (questions.go), and appends one line to a log. It never acks,
-// hides, wakes or changes an item, and it writes nothing under
-// .runtime/attention: the log is the only thing it writes.
+// pass takes each raise since the last pass, asks Jev the question set about
+// it (questions.go), and appends one line to a log. It never acks, hides, wakes
+// or changes an item, and it writes nothing under .runtime/attention: the log
+// is the only thing it writes.
 //
 // The pass owns no I/O beyond its log and cursor. The caller supplies the Jev
-// client, the queue read and the spend, so a test can run a pass with fakes
-// and no network. Open wires the production versions.
+// client, the event and queue reads and the spend, so a test can run a pass
+// with fakes and no network. Open wires the production versions.
 package attention
 
 import (
@@ -71,12 +71,16 @@ type Settings struct {
 // Pass is one run of the attention battery, with every dependency injected.
 type Pass struct {
 	Asker Asker
-	// State reads the attention queue. Open reads the town's state.json.
+	// State reads the attention queue for the items still open at pass time.
+	// Open reads the town's state.json.
 	State func() (attention.State, error)
+	// Events reads the transitions a pass asks about. Open reads the town's
+	// events.jsonl, the current file only.
+	Events func() ([]attention.Event, error)
 
 	// LogPath is the log every answer appends to.
 	LogPath string
-	// CursorPath remembers the last item a pass asked about.
+	// CursorPath remembers the last raise a pass asked about.
 	CursorPath string
 
 	// SpentToday reports the USD the pass has spent since local midnight.
@@ -87,23 +91,25 @@ type Pass struct {
 
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
+	// Warn receives the pass's warnings. Nil discards them.
+	Warn io.Writer
 }
 
 // Summary says what one pass did.
 type Summary struct {
-	// Asked is the number of items whose call returned answers.
+	// Asked is the number of raises whose call returned answers.
 	Asked int
-	// Failed is the number of items logged with null answers because their
-	// call failed while a later item's call succeeded.
+	// Failed is the number of raises logged with null answers because their
+	// call failed while a later raise's call succeeded.
 	Failed int
 	// Held is the number of failed calls the pass left unlogged, with the
-	// cursor before them, so the next pass asks those items again.
+	// cursor before them, so the next pass asks those raises again.
 	Held int
 	// Halted is true when the pass stopped after maxConsecutiveFailures
 	// failed calls in a row.
 	Halted bool
 	// CapReached is true when the pass stopped because the day's cap was
-	// spent. The items it did not reach wait for the next pass.
+	// spent. The raises it did not reach wait for the next pass.
 	CapReached bool
 	// Started is true when the pass found no cursor and only set one, so it
 	// asked about nothing. The first pass starts from its own time.
@@ -133,17 +139,17 @@ func (s Summary) Report() string {
 	return out
 }
 
-// Run does one pass. Items are taken in the order they were first seen, and
-// each is logged and the cursor advanced before the next, so a pass that is
-// stopped partway never asks about an item twice.
+// Run does one pass. Raises are taken in the order the event log records them,
+// and each is logged and the cursor advanced before the next, so a pass that is
+// stopped partway never asks about a raise twice.
 //
 // A failed call is held, not logged, until a later call in the pass succeeds:
-// then the failure was about its item, and it is logged with null answers and
-// passed, so a single item Jev cannot answer does not block the queue. If the
+// then the failure was about its raise, and it is logged with null answers and
+// passed, so a single raise Jev cannot answer does not block the queue. If the
 // calls keep failing the cause is an outage, not the items: the pass stops at
-// maxConsecutiveFailures and the held items stay behind the cursor for the
-// next pass. An item whose call was cut short by ctx is never logged or
-// passed either.
+// maxConsecutiveFailures and the held raises stay behind the cursor for the
+// next pass. A raise whose call was cut short by ctx is never logged or passed
+// either.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
 	release, err := lockRun(p.CursorPath)
@@ -166,15 +172,20 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	if err != nil {
 		return sum, fmt.Errorf("reading the attention queue: %w", err)
 	}
+	events, err := p.Events()
+	if err != nil {
+		return sum, fmt.Errorf("reading the attention events: %w", err)
+	}
+	p.warnBehindLog(cur, events)
 	// held is the run of failed calls since the last success, in order.
-	var held []heldItem
-	record := func(h heldItem) error {
+	var held []heldRaise
+	record := func(h heldRaise) error {
 		if err := battery.Append(p.LogPath, h.line); err != nil {
 			return err
 		}
-		return battery.WriteCursor(p.CursorPath, battery.Cursor{Time: h.item.FirstSeen, ID: h.item.Key})
+		return battery.WriteCursor(p.CursorPath, battery.Cursor{Time: h.ev.TS, ID: h.ev.Key})
 	}
-	for _, it := range pending(st.Items, cur) {
+	for _, ev := range pending(events, cur) {
 		if err := ctx.Err(); err != nil {
 			return sum, err
 		}
@@ -186,9 +197,9 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			sum.CapReached = true
 			break
 		}
-		line, err := p.ask(ctx, st, it)
+		line, err := p.ask(ctx, st, ev)
 		if errors.Is(err, errCallFailed) {
-			held = append(held, heldItem{item: it, line: line})
+			held = append(held, heldRaise{ev: ev, line: line})
 			if len(held) == maxConsecutiveFailures {
 				sum.Halted = true
 				break
@@ -205,7 +216,7 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			sum.Failed++
 		}
 		held = nil
-		if err := record(heldItem{item: it, line: line}); err != nil {
+		if err := record(heldRaise{ev: ev, line: line}); err != nil {
 			return sum, err
 		}
 		sum.Asked++
@@ -214,33 +225,38 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	return sum, nil
 }
 
-// heldItem is an item whose call failed, with the null-answers line it would
+// heldRaise is a raise whose call failed, with the null-answers line it would
 // be logged under.
-type heldItem struct {
-	item attention.Item
+type heldRaise struct {
+	ev   attention.Event
 	line Line
 }
 
 // errCallFailed marks a Jev call that failed for a reason other than ctx's end.
 var errCallFailed = errors.New("jev call failed")
 
-// ask builds the line an item earns. A failed call returns the line with null
+// ask builds the line a raise earns. A failed call returns the line with null
 // answers and an error wrapping errCallFailed; Run decides whether to log it.
-// A failure that a canceled ctx caused says nothing about the item, so ask
+// A failure that a canceled ctx caused says nothing about the raise, so ask
 // returns ctx's error and no line instead.
-func (p *Pass) ask(ctx context.Context, st attention.State, it attention.Item) (Line, error) {
+func (p *Pass) ask(ctx context.Context, st attention.State, ev attention.Event) (Line, error) {
 	line := Line{
 		TS:              p.now(),
-		Key:             it.Key,
-		Kind:            it.Kind,
-		Severity:        it.Severity,
-		Rig:             it.Rig,
-		Bead:            it.Bead,
-		SHA:             it.SHA,
-		FirstSeen:       it.FirstSeen,
+		Key:             ev.Key,
+		Kind:            ev.Class,
+		Severity:        ev.Severity,
+		FirstSeen:       ev.TS,
 		QuestionVersion: QuestionVersion,
 	}
-	got, err := p.Asker.Ask(ctx, BuildState(it, others(st.Items, it.Key)), Questions())
+	var live *attention.Item
+	var rest []attention.Item
+	if it, ok := attention.Find(st, ev.Key); ok {
+		live = &it
+		rest = others(st.Items, ev.Key)
+		line.Rig, line.Bead, line.SHA = it.Rig, it.Bead, it.SHA
+	}
+	line.Live = live != nil
+	got, err := p.Asker.Ask(ctx, BuildState(ev, live, rest), Questions())
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return Line{}, cerr
@@ -259,32 +275,43 @@ func (p *Pass) ask(ctx context.Context, st attention.State, it attention.Item) (
 	return line, nil
 }
 
-// pending keeps the items after the cursor, oldest first. Ties on the first
-// seen time break by key, so the cursor orders items completely.
-func pending(items []attention.Item, cur battery.Cursor) []attention.Item {
-	var out []attention.Item
-	for _, it := range items {
-		if it.FirstSeen.IsZero() || !after(cur, it.FirstSeen, it.Key) {
+// pending keeps the new raises after the cursor, oldest first. A cleared
+// transition asks nothing. Ties on the time break by key, so the cursor orders
+// raises completely.
+func pending(events []attention.Event, cur battery.Cursor) []attention.Event {
+	var out []attention.Event
+	for _, ev := range events {
+		if ev.State != attention.EventNew || ev.TS.IsZero() || !after(cur, ev.TS, ev.Key) {
 			continue
 		}
-		out = append(out, it)
+		out = append(out, ev)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if !out[i].FirstSeen.Equal(out[j].FirstSeen) {
-			return out[i].FirstSeen.Before(out[j].FirstSeen)
+		if !out[i].TS.Equal(out[j].TS) {
+			return out[i].TS.Before(out[j].TS)
 		}
 		return out[i].Key < out[j].Key
 	})
 	return out
 }
 
-// after reports whether an item first seen at seen with key sorts after the
-// cursor.
+// after reports whether a raise at seen with key sorts after the cursor.
 func after(cur battery.Cursor, seen time.Time, key string) bool {
 	if seen.Equal(cur.Time) {
 		return key > cur.ID
 	}
 	return seen.After(cur.Time)
+}
+
+// warnBehindLog says when the cursor is older than the first line of the
+// event log. The lines between them were rotated away unasked, so the pass
+// continues from the start of the current file.
+func (p *Pass) warnBehindLog(cur battery.Cursor, events []attention.Event) {
+	if p.Warn == nil || len(events) == 0 || !events[0].TS.After(cur.Time) {
+		return
+	}
+	fmt.Fprintf(p.Warn, "jev attention: the cursor at %s is older than the first line of events.jsonl (%s); continuing from the start of the file\n",
+		cur.Time.Format(time.RFC3339), events[0].TS.Format(time.RFC3339))
 }
 
 // others returns up to maxOthers items other than the one with key, in the
@@ -303,23 +330,35 @@ func others(items []attention.Item, key string) []attention.Item {
 	return out
 }
 
-// BuildState returns the state for one item: the item's values and the other
-// open items' keys and summaries, each value a JSON string on its own line, so
-// a value with quotes, newlines or instruction-like text stays inside its
-// quotes.
-func BuildState(it attention.Item, rest []attention.Item) string {
+// BuildState returns the state for one raise: the event's values, then whether
+// the item is still open and, when it is, its rig, bead and SHA and the other
+// open items. Each value is a JSON string on its own line, so a value with
+// quotes, newlines or instruction-like text stays inside its quotes.
+func BuildState(ev attention.Event, live *attention.Item, rest []attention.Item) string {
 	var b strings.Builder
 	b.WriteString("attention item\n")
 	field := func(name, value string, max int) {
 		fmt.Fprintf(&b, "%s: %s\n", name, quote(truncate(value, max)))
 	}
-	field("key", it.Key, maxFieldRunes)
-	field("kind", string(it.Kind), maxFieldRunes)
-	field("severity", string(it.Severity), maxFieldRunes)
-	field("rig", it.Rig, maxFieldRunes)
-	field("bead", it.Bead, maxFieldRunes)
-	field("sha", it.SHA, maxFieldRunes)
-	field("summary", it.Summary, maxSummaryRunes)
+	handled := string(ev.Handled)
+	if handled == "" {
+		handled = string(attention.HandledInfo)
+	}
+	field("key", ev.Key, maxFieldRunes)
+	field("kind", string(ev.Class), maxFieldRunes)
+	field("severity", string(ev.Severity), maxFieldRunes)
+	field("summary", ev.Text, maxSummaryRunes)
+	field("rule", ev.Rule, maxFieldRunes)
+	field("handled", handled, maxFieldRunes)
+	fmt.Fprintf(&b, "wake: %t\n", ev.Wake)
+	fmt.Fprintf(&b, "live: %t\n", live != nil)
+	var rig, bead, sha string
+	if live != nil {
+		rig, bead, sha = live.Rig, live.Bead, live.SHA
+	}
+	field("rig", rig, maxFieldRunes)
+	field("bead", bead, maxFieldRunes)
+	field("sha", sha, maxFieldRunes)
 	fmt.Fprintf(&b, "other open items: %d\n", len(rest))
 	for _, o := range rest {
 		fmt.Fprintf(&b, "other %s: %s\n", quote(o.Key), quote(truncate(o.Summary, maxSummaryRunes)))
@@ -356,8 +395,9 @@ func (p *Pass) now() time.Time {
 
 // Open wires the production pass for a town: the Jev client writing to the
 // usage ledger under the Caller name, the attention queue read from the
-// town's state file, and the spend read from the same ledger. warnings
-// receives the ledger's own warnings and may be nil.
+// town's state file, the raises read from its event log, and the spend read
+// from the same ledger. warnings receives the pass's warnings and the ledger's
+// own, and may be nil.
 func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	return open(townRoot, s, warnings)
 }
@@ -391,9 +431,11 @@ func open(townRoot string, s Settings, warnings io.Writer, extra ...jev.Option) 
 	return &Pass{
 		Asker:      client,
 		State:      func() (attention.State, error) { return attention.ReadState(townRoot) },
+		Events:     func() ([]attention.Event, error) { return attention.ReadEvents(townRoot) },
 		LogPath:    LogPath(townRoot),
 		CursorPath: CursorPath(townRoot),
 		SpentToday: func() (float64, error) { return town.Spent(time.Now) },
 		CapUSD:     capUSD,
+		Warn:       warnings,
 	}, nil
 }
