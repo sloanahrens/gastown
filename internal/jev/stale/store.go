@@ -1,6 +1,8 @@
 package stale
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"path/filepath"
 	"time"
@@ -32,8 +34,9 @@ type Answer struct {
 }
 
 // Line is one line of the stale log: what Jev answered about one bead. It holds
-// IDs, times, numbers and answers only, never a title or a description. A bead
-// that could not be asked has null answers and a Reason.
+// IDs, times, numbers, answers and a hash of the description, never a title or
+// the description's text. A bead that could not be asked has null answers and a
+// Reason.
 type Line struct {
 	// TS is when the line was logged. A bead is not asked again until AskAgain
 	// has passed since this time.
@@ -46,6 +49,10 @@ type Line struct {
 	Priority int    `json:"priority"`
 	// UpdatedAt is when the bead was last written.
 	UpdatedAt time.Time `json:"updated_at"`
+	// DescHash is HashDescription of the bead's description when it was asked
+	// about. The scorecard compares it with the description as it stands later,
+	// to see a reshape. Empty on a line logged before the field existed.
+	DescHash string `json:"desc_hash,omitempty"`
 	// LandedOffered lists the landed beads the question offered, in the order
 	// it gave them.
 	LandedOffered []string `json:"landed_offered"`
@@ -72,6 +79,13 @@ func answersFrom(got *jev.Answers) map[string]Answer {
 		out[id] = Answer{Score: &score, Confidence: &conf}
 	}
 	return out
+}
+
+// HashDescription is the hash a log line keeps of a bead's description: its
+// SHA-256 in hex. The log holds the hash, never the text.
+func HashDescription(desc string) string {
+	sum := sha256.Sum256([]byte(desc))
+	return hex.EncodeToString(sum[:])
 }
 
 // LogPath is the stale log, one JSON line per bead asked about.

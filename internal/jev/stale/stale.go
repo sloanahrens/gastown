@@ -250,6 +250,7 @@ func (p *Pass) ask(ctx context.Context, c candidate, lands []*beads.Issue, now t
 		Type:            c.issue.Type,
 		Priority:        c.issue.Priority,
 		UpdatedAt:       c.updated,
+		DescHash:        HashDescription(c.issue.Description),
 		LandedOffered:   idsOf(offered),
 		QuestionVersion: Version,
 	}

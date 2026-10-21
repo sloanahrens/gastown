@@ -217,6 +217,97 @@ func TestStaleLabelRules(t *testing.T) {
 	}
 }
 
+// TestStaleNeedsReshapingRule checks the reshape rule: a landed bead whose
+// description changed after the ask sets needs_reshaping true, and any other
+// line stays unlabeled for it. The hash is taken of the description at the ask.
+func TestStaleNeedsReshapingRule(t *testing.T) {
+	t.Parallel()
+	ask := time.Date(2026, 10, 1, 9, 0, 0, 0, time.UTC)
+	answers := map[string]stale.Answer{
+		stale.QNeedsReshape: nounAnswer(0.6),
+	}
+	const askedDesc = "Add the flag to gt done."
+	const reshapedDesc = "Add the flag to gt done, and the docs."
+	cases := []struct {
+		name     string
+		descHash string // the hash the line carries; empty is a pre-field line
+		bead     *beads.Issue
+		labeled  bool
+		labels   map[QuestionID]bool
+		rule     string
+	}{
+		{
+			name:     "a landed bead whose description changed sets needs_reshaping true",
+			descHash: stale.HashDescription(askedDesc),
+			bead:     &beads.Issue{Status: "closed", CloseReason: "landed", Priority: 2, Description: reshapedDesc},
+			labeled:  true,
+			labels:   map[QuestionID]bool{qWorthDoing: true, qObsolete: false, qSuperseded: false, qNeedsReshape: true},
+			rule:     ruleStaleLanded + "+" + ruleStaleReshaped,
+		},
+		{
+			name:     "a landed bead whose description did not change gets no needs_reshaping label",
+			descHash: stale.HashDescription(askedDesc),
+			bead:     &beads.Issue{Status: "closed", CloseReason: "landed", Priority: 2, Description: askedDesc},
+			labeled:  true,
+			labels:   map[QuestionID]bool{qWorthDoing: true, qObsolete: false, qSuperseded: false},
+			rule:     ruleStaleLanded,
+		},
+		{
+			name:     "a line logged before the hash field exists gets no needs_reshaping label",
+			descHash: "",
+			bead:     &beads.Issue{Status: "closed", CloseReason: "landed", Priority: 2, Description: reshapedDesc},
+			labeled:  true,
+			labels:   map[QuestionID]bool{qWorthDoing: true, qObsolete: false, qSuperseded: false},
+			rule:     ruleStaleLanded,
+		},
+		{
+			name:     "a changed description on a bead still open is unlabeled",
+			descHash: stale.HashDescription(askedDesc),
+			bead:     &beads.Issue{Status: "open", Priority: 2, Description: reshapedDesc},
+		},
+		{
+			name:     "a changed description on a bead closed for another reason is unlabeled",
+			descHash: stale.HashDescription(askedDesc),
+			bead:     &beads.Issue{Status: "closed", CloseReason: "done by hand", Priority: 2, Description: reshapedDesc},
+		},
+		{
+			name:     "a landed bead whose description changed and was raised gets all three rules",
+			descHash: stale.HashDescription(askedDesc),
+			bead:     &beads.Issue{Status: "closed", CloseReason: "landed", Priority: 1, Description: reshapedDesc},
+			labeled:  true,
+			labels:   map[QuestionID]bool{qWorthDoing: true, qObsolete: false, qSuperseded: false, qNeedsReshape: true, qPriorityFit: true},
+			rule:     ruleStaleLanded + "+" + ruleStaleReshaped + "+" + ruleStalePriorityRaised,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := newFakeStaleAdapter(map[string]*beads.Issue{"gt-s1": tc.bead})
+			line := staleLine("gt-s1", 2, ask, answers)
+			line.DescHash = tc.descHash
+			lab, err := labelStale(t, a, line)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lab.Labeled != tc.labeled {
+				t.Fatalf("labeled = %v, want %v", lab.Labeled, tc.labeled)
+			}
+			if !tc.labeled {
+				if lab.Labels != nil || lab.Rule != "" {
+					t.Errorf("unlabeled line carries labels %v and rule %q", lab.Labels, lab.Rule)
+				}
+				return
+			}
+			if !maps.Equal(lab.Labels, tc.labels) {
+				t.Errorf("labels = %v, want %v", lab.Labels, tc.labels)
+			}
+			if lab.Rule != tc.rule {
+				t.Errorf("rule = %q, want %q", lab.Rule, tc.rule)
+			}
+		})
+	}
+}
+
 // TestTownNotesReadsAMissingRigAsNotFound checks that a rig with no beads
 // directory reads as not found, for a bead and for a listing, and opens no
 // store, so the read never falls back to whatever beads database the working

@@ -188,6 +188,34 @@ func TestJevStalePassLogsOneLinePerStaleBead(t *testing.T) {
 	}
 }
 
+// The pass logs the hash of the bead's description, and never the text.
+func TestJevStaleLogsTheDescriptionHashNotTheText(t *testing.T) {
+	t.Parallel()
+	const desc = "Keep the description hash on the stale line."
+	bead := openBead("gt-old", 20)
+	bead.Description = desc
+	b := fakeBeads{open: map[string][]*beads.Issue{"gastown": {bead}}}
+	p := newPass(t, &fixedAsker{ans: answers()}, nil, b, "gastown")
+
+	if _, err := p.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lines := readLog(t, p.LogPath)
+	if len(lines) != 1 {
+		t.Fatalf("log has %d lines, want 1", len(lines))
+	}
+	if got, want := lines[0].DescHash, HashDescription(desc); got != want {
+		t.Errorf("desc_hash = %q, want the hash of the description %q", got, want)
+	}
+	raw, err := os.ReadFile(p.LogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), desc) {
+		t.Errorf("the stale log holds the description text:\n%s", raw)
+	}
+}
+
 // Human-only, handoff, epic, wisp and non-open beads are never asked about.
 func TestJevStaleSkipsHumanOnlyHandoffEpicAndWisps(t *testing.T) {
 	t.Parallel()
