@@ -165,10 +165,28 @@ func TestConflictAdapterLabelsAPair(t *testing.T) {
 			},
 			landings: map[string]int{"gt-b": 1, "gt-a": 2},
 			log: func(sha []string) string {
-				// The conflict was against the base, which does not hold gt-b.
+				// The conflict was against the base, which does not hold gt-b. The
+				// rejection cannot be attributed to this pair, so the pair stays
+				// unlabeled: a conflict happened, and calling the beads disjoint
+				// would be a wrong negative.
 				return mergeLine("gt-a", sha[2], sha[0], "cand1") + rejectLine("gt-a", "conflict")
 			},
-			want: Labeling{Labeled: true, Labels: map[QuestionID]bool{qSameFiles: false}, Rule: ruleConflictDisjointFiles},
+			want: Labeling{},
+		},
+		{
+			name: "rejected against a tip the clone does not hold",
+			commits: []map[string]string{
+				{"base.txt": "base"},
+				{"b.go": "b"},
+				{"a.go": "a"},
+			},
+			landings: map[string]int{"gt-b": 1, "gt-a": 2},
+			log: func(sha []string) string {
+				// The tip was never fetched into the clone, so ancestry settles
+				// nothing and the pair stays unlabeled.
+				return mergeLine("gt-a", sha[2], "deadbeef", "cand1") + rejectLine("gt-a", "conflict")
+			},
+			want: Labeling{},
 		},
 		{
 			name: "a rejection of another kind is not a conflict",

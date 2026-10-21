@@ -7,11 +7,19 @@ import "github.com/steveyegge/gastown/internal/jev"
 // scorecard. Raise it with any change to the text below.
 const Version = 1
 
-// The question ids. They are the keys of a log line's answers.
+// The question ids. They are the keys of a log line's answers. They are
+// exported so the scorecard adapter labels the same keys the log writes
+// instead of keeping its own copy that could drift.
 const (
-	qSameFiles    = "same_files"
-	qSameFunction = "same_function"
-	qRisk         = "risk"
+	QuestionSameFiles    = "same_files"
+	QuestionSameFunction = "same_function"
+	QuestionRisk         = "risk"
+)
+
+const (
+	qSameFiles    = QuestionSameFiles
+	qSameFunction = QuestionSameFunction
+	qRisk         = QuestionRisk
 )
 
 // The vendor's names for the two question types the battery asks.

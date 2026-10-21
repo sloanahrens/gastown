@@ -166,6 +166,11 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		return sum, fmt.Errorf("listing placed beads: %w", err)
 	}
 
+	// held is set when a pair failed for the beads' own text and has attempts
+	// left. The rest of the pass still asks the pairs it can, but the cursor
+	// must not move past a placement that holds one, so the next pass reaches
+	// it again.
+	held := false
 	for _, pl := range placementsAfter(all, cur) {
 		if err := ctx.Err(); err != nil {
 			return sum, err
@@ -199,9 +204,11 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 					if err := battery.WriteState(p.PairsPath, st); err != nil {
 						return sum, err
 					}
-					// The cursor stays before this placement, so the next pass
-					// reaches the pair again.
-					return sum, nil
+					// The cursor holds before this placement, so the next pass
+					// reaches the pair again; the pairs this pass can still ask
+					// are asked below.
+					held = true
+					continue
 				}
 				delete(st.Attempts, key)
 				st.Done[key] = newer(pl, other)
@@ -231,6 +238,9 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			if err := battery.WriteState(p.PairsPath, st); err != nil {
 				return sum, err
 			}
+		}
+		if held {
+			continue
 		}
 		if err := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: pl.at, ID: pl.issue.ID}); err != nil {
 			return sum, err

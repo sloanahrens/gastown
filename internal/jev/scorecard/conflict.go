@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/guard"
 	"github.com/steveyegge/gastown/internal/jev/conflict"
 	"github.com/steveyegge/gastown/internal/jev/submission"
 	"github.com/steveyegge/gastown/internal/land"
@@ -20,14 +21,12 @@ import (
 // scores the log the conflict pass writes.
 const ConflictBattery = "conflict"
 
-// The question ids the conflict battery logs. They must match the ids in
-// internal/jev/conflict/questions.go, which does not export them.
-// TestScorecardConflictQuestionIDsMatchLogKeys fails when they drift from the
-// answer keys the log writes.
+// The question ids the conflict battery logs, taken from the battery so the
+// adapter cannot label a key the log never writes.
 const (
-	qSameFiles    QuestionID = "same_files"
-	qSameFunction QuestionID = "same_function"
-	qRisk         QuestionID = "risk"
+	qSameFiles    QuestionID = conflict.QuestionSameFiles
+	qSameFunction QuestionID = conflict.QuestionSameFunction
+	qRisk         QuestionID = conflict.QuestionRisk
 )
 
 // Rules the conflict adapter names in the --json report's lines.
@@ -133,8 +132,12 @@ func (a *conflictAdapter) Parse(raw []byte) (Item, error) {
 // Label says whether the pair touched the same files. It is positive when
 // either bead's conflict rejection was built on a target that already held the
 // other's landing, or when both landed and their changed files meet. It is
-// negative when both landed and share no file. Otherwise it is unlabeled, and
-// so is the same_function question, which no landing shows.
+// negative when both landed and share no file, unless one of them was rejected
+// for a conflict that cannot be pinned on the other bead: a rejection the
+// ancestry test cannot attribute is evidence of a conflict with *something*,
+// and calling the pair disjoint on it would be a wrong negative. Otherwise the
+// pair is unlabeled, and so is the same_function question, which no landing
+// shows.
 func (a *conflictAdapter) Label(ctx context.Context, item Item) (Labeling, error) {
 	bead, other := item.Refs[refConflictBead], item.Refs[refConflictOther]
 	landedBead, err := a.landingOf(bead)
@@ -163,6 +166,11 @@ func (a *conflictAdapter) Label(ctx context.Context, item Item) (Labeling, error
 	if rejected {
 		rules = append(rules, ruleConflictRejectedAfterLanding)
 	}
+	// A conflict rejection that the ancestry test did not attribute to the
+	// other bead still rules out a negative label, because it says the bead did
+	// conflict with something. In the negative branch below it is always one
+	// the test could not attribute.
+	rejectedSomewhere := a.hasRejection(bead) || a.hasRejection(other)
 
 	shared := false
 	if landedBead != nil && landedOther != nil {
@@ -188,7 +196,7 @@ func (a *conflictAdapter) Label(ctx context.Context, item Item) (Labeling, error
 	switch {
 	case rejected || shared:
 		return Labeling{Labeled: true, Labels: map[QuestionID]bool{qSameFiles: true}, Rule: strings.Join(rules, "+")}, nil
-	case landedBead != nil && landedOther != nil:
+	case landedBead != nil && landedOther != nil && !rejectedSomewhere:
 		return Labeling{Labeled: true, Labels: map[QuestionID]bool{qSameFiles: false}, Rule: ruleConflictDisjointFiles}, nil
 	}
 	return Labeling{}, nil
@@ -218,20 +226,34 @@ func (a *conflictAdapter) landingOf(bead string) (*land.LandingRecord, error) {
 	return &rec, nil
 }
 
+// hasRejection reports whether the daemon log holds any conflict rejection of
+// bead. On its own it settles nothing — the rejection may name a third bead —
+// but it is enough to stop a pair being labeled disjoint.
+func (a *conflictAdapter) hasRejection(bead string) bool {
+	return len(a.rejections[bead]) > 0
+}
+
 // rejectedAfter reports whether one of bead's conflict rejections was built on
 // a target that already held landed's commit. landed is nil when the other bead
-// never landed, which settles nothing.
+// never landed, which settles nothing. A rejection whose target the clone
+// cannot trace settles nothing either; the caller then leaves the pair
+// unlabeled, because a conflict it cannot attribute is still no sign of a
+// disjoint pair.
 func (a *conflictAdapter) rejectedAfter(ctx context.Context, bead string, landed *land.LandingRecord) (bool, error) {
 	if landed == nil || landed.LandedCommit == "" {
 		return false, nil
 	}
 	for _, tip := range a.rejections[bead] {
-		ok, err := a.isAncestor(ctx, landed.LandedCommit, tip)
+		res, err := a.isAncestor(ctx, landed.LandedCommit, tip)
 		if err != nil {
 			return false, err
 		}
-		if ok {
+		switch {
+		case res.IsPass():
 			return true, nil
+		case res.IsUnknown():
+			// A later rejection of the same bead may still attribute the pair.
+			continue
 		}
 	}
 	return false, nil
@@ -266,23 +288,38 @@ func (a *conflictAdapter) landedFiles(ctx context.Context, bead string, rec *lan
 
 // isAncestor reports whether commit anc is an ancestor of desc. The merge base of
 // the two is anc exactly when it is.
-func (a *conflictAdapter) isAncestor(ctx context.Context, anc, desc string) (bool, error) {
+//
+// The answer is three-way. Pass and Fail are answers the clone reached.
+// Unknown says it could not decide: it does not hold a commit the two name (a
+// target tip from a landing it never fetched, a rejection older than its
+// history) or the two histories have no merge base. The caller leaves the pair
+// unlabeled on Unknown, so a commit the clone cannot trace never becomes a
+// negative label. An error means the clone itself would not open or sync, and
+// fails the pass.
+func (a *conflictAdapter) isAncestor(ctx context.Context, anc, desc string) (guard.Result, error) {
 	if !safeRef(anc) || !safeRef(desc) {
-		return false, fmt.Errorf("refusing ancestry of refs %q and %q", anc, desc)
+		return guard.Result{}, fmt.Errorf("refusing ancestry of refs %q and %q", anc, desc)
 	}
 	repo, err := a.clone(ctx)
 	if err != nil {
-		return false, err
+		return guard.Result{}, err
 	}
-	base, err := repo.Run(ctx, "merge-base", anc, desc)
+	full := make([]string, 0, 2)
+	for _, ref := range []string{anc, desc} {
+		out, err := repo.Run(ctx, "rev-parse", "--verify", ref+"^{commit}")
+		if err != nil {
+			return guard.Unknown(fmt.Errorf("resolving %s: %w", ref, err)), nil
+		}
+		full = append(full, strings.TrimSpace(out))
+	}
+	base, err := repo.Run(ctx, "merge-base", full[0], full[1])
 	if err != nil {
-		return false, fmt.Errorf("merge base of %s and %s: %w", anc, desc, err)
+		return guard.Unknown(fmt.Errorf("merge base of %s and %s: %w", anc, desc, err)), nil
 	}
-	full, err := repo.Run(ctx, "rev-parse", "--verify", anc+"^{commit}")
-	if err != nil {
-		return false, fmt.Errorf("resolving %s: %w", anc, err)
+	if strings.TrimSpace(base) == full[0] {
+		return guard.Pass(), nil
 	}
-	return strings.TrimSpace(base) == strings.TrimSpace(full), nil
+	return guard.Fail(fmt.Sprintf("%s is not an ancestor of %s", anc, desc)), nil
 }
 
 // clone opens the bare clone on first use and fetches its branches once, so the

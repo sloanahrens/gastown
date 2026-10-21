@@ -1833,7 +1833,10 @@ dispatch decision, and it shares the town-wide cap with the other Jev batteries.
 `gt jev scorecard --battery conflict` labels a pair positive when one bead's
 conflict rejection was built on a target that held the other's landing, or when
 the two landings changed a file in common. It labels a pair negative when both
-landed and changed no file in common. The rest are unlabeled.
+landed and changed no file in common, and neither was rejected for a conflict
+it cannot attribute to the other bead. The rest are unlabeled: a rejection the
+clone cannot trace, such as one built on a tip it does not hold, settles
+nothing.
 
 ### Progress battery (`jev_progress`)
 

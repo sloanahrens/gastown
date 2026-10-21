@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -68,6 +69,76 @@ func TestJevConflictTriggerRunsNothingWhenOff(t *testing.T) {
 	}
 }
 
+// With the patrol on and due, the trigger runs one pass on its goroutine,
+// which asks the pairs and records the completion time when it is done.
+func TestJevConflictTriggerRunsDuePass(t *testing.T) {
+	t.Parallel()
+	r := newConflictRig(t)
+	now := r.d.clk().Now()
+
+	r.d.triggerJevConflict()
+	waitJevConflictIdle(t, r.d)
+
+	if r.opened != 1 {
+		t.Errorf("pass opened %d times, want 1", r.opened)
+	}
+	if r.asker.calls != 3 {
+		t.Errorf("asked %d pairs, want 3", r.asker.calls)
+	}
+	if !strings.Contains(r.logs.String(), "jev_conflict: asked 3 pairs") {
+		t.Errorf("log = %q, want the pass summary", r.logs)
+	}
+	last, found, err := loadPatrolLastRun(r.town, "jev_conflict")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("the trigger ran a pass but wrote no last-run record")
+	}
+	if !last.Equal(now) {
+		t.Errorf("last run = %s, want the clock's %s", last, now)
+	}
+}
+
+// With the patrol on but a pass recorded inside the interval, the trigger starts
+// nothing and logs nothing.
+func TestJevConflictTriggerSkipsWhenNotDue(t *testing.T) {
+	t.Parallel()
+	r := newConflictRig(t)
+	if err := savePatrolLastRun(r.town, "jev_conflict", r.d.clk().Now().Add(-time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+
+	r.d.triggerJevConflict()
+
+	if r.d.jevConflictRunning.Load() {
+		t.Error("the single-flight guard was taken for a pass that is not due")
+	}
+	if r.opened != 0 {
+		t.Errorf("opened %d passes, want none before the interval is up", r.opened)
+	}
+	if r.asker.calls != 0 {
+		t.Errorf("asked %d pairs, want none before the interval is up", r.asker.calls)
+	}
+	if r.logs.Len() != 0 {
+		t.Errorf("the trigger logged with the pass not due: %s", r.logs)
+	}
+}
+
+// waitJevConflictIdle waits for the trigger's pass goroutine to finish, which
+// it signals by clearing the single-flight guard after recording the run.
+func waitJevConflictIdle(t *testing.T, d *Daemon) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	for d.jevConflictRunning.Load() {
+		if ctx.Err() != nil {
+			t.Fatal("jev_conflict pass did not finish")
+		}
+		runtime.Gosched()
+	}
+}
+
 // An enabled patrol with no price refuses to run and says why.
 func TestJevConflictRunNeedsAPrice(t *testing.T) {
 	t.Parallel()
@@ -114,11 +185,12 @@ func inFlightBeads() []*beads.Issue {
 // conflictRig is an enabled daemon over a temp town whose conflict passes open
 // through a fake, so no pass reaches Jev or the rig's beads.
 type conflictRig struct {
-	d     *Daemon
-	town  string
-	logs  *bytes.Buffer
-	asker *conflictCountingAsker
-	pass  *jevconflict.Pass
+	d      *Daemon
+	town   string
+	logs   *bytes.Buffer
+	asker  *conflictCountingAsker
+	pass   *jevconflict.Pass
+	opened int
 }
 
 func newConflictRig(t *testing.T) *conflictRig {
@@ -147,6 +219,7 @@ func newConflictRig(t *testing.T) *conflictRig {
 		Now:        func() time.Time { return time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC) },
 	}
 	r.d.jevConflictOpen = func(string, jevconflict.Settings, io.Writer) (*jevconflict.Pass, error) {
+		r.opened++
 		return r.pass, nil
 	}
 	if err := battery.WriteCursor(r.pass.CursorPath, battery.Cursor{Time: time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC)}); err != nil {

@@ -310,6 +310,40 @@ func TestPassRetriesABeadFaultThenGivesUp(t *testing.T) {
 	}
 }
 
+// A pair that fails for the beads' own text holds the cursor before its
+// placement, but it does not block the pairs the same pass can still ask.
+func TestPassBeadFaultDoesNotBlockLaterPlacements(t *testing.T) {
+	t.Parallel()
+	asker := &fakeAsker{fail: func(state string) error {
+		if strings.Contains(state, "Title of gt-b") {
+			return &jev.StatusError{Status: http.StatusBadRequest}
+		}
+		return nil
+	}}
+	all := []*beads.Issue{placed("gt-a", 10, 0), placed("gt-b", 20, 0), placed("gt-c", 30, 0)}
+	p := newPass(t, all, asker, t0)
+
+	sum, err := p.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// gt-b's two pairs fail; gt-c+gt-a does not, and is asked in this same pass.
+	if sum.Asked != 1 || sum.Failed != 2 {
+		t.Errorf("summary = %+v, want 1 asked and 2 failed", sum)
+	}
+	got := readLog(t, p.LogPath)
+	if len(got) != 1 || got[0].Bead != "gt-c" || got[0].Other != "gt-a" {
+		t.Errorf("log = %+v, want the one gt-c+gt-a line", got)
+	}
+	cur, _, err := battery.ReadCursor(p.CursorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.ID != "gt-a" {
+		t.Errorf("cursor = %+v; it must hold before gt-b, whose pairs are retried", cur)
+	}
+}
+
 // An outage stops the pass with an error, and costs the pair no attempt, so it
 // is asked in full once Jev is back.
 func TestPassOutageStopsWithoutAnAttempt(t *testing.T) {
