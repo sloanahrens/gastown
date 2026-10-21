@@ -83,11 +83,22 @@ func TestOverrunGuardEscalationWaiting(t *testing.T) {
 	// An unreadable agent record is the same error: the guard counts all of the
 	// seat's time rather than guess it is stopped.
 	norecord := newWorkBD(t)
+	norecord.db.Seed(escalation("hq-wisp-open", "gastown/polecats/capable", "gt-esc1", "gt-esc1: a decision", "open"))
 	norecord.showErr = errors.New("bd show: connection refused")
 	dNoRecord := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: norecord.open}
 	got, err = newOverrunEscalationReader(dNoRecord).waiting(overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-esc1"})
 	if err == nil || got {
 		t.Errorf("waiting after a failed record read = %v, %v; want false and an error", got, err)
+	}
+
+	// A seat no open escalation ties to is answered without its agent bead: the
+	// record read that fails here is never made.
+	untied := newWorkBD(t)
+	untied.showErr = errors.New("bd show: connection refused")
+	dUntied := &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: untied.open}
+	got, err = newOverrunEscalationReader(dUntied).waiting(overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-esc1"})
+	if err != nil || got {
+		t.Errorf("waiting with no escalation and an unreadable record = %v, %v; want false, nil", got, err)
 	}
 }
 
