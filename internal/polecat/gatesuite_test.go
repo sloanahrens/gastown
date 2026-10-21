@@ -201,6 +201,12 @@ func TestInvocationPresent_Gmake(t *testing.T) {
 		{"a targetless make matches gmake too", []string{"gmake", "test"}, Invocation{Program: "make"}, true},
 		{"another program keeps the exact word", []string{"cmake", "test"}, Invocation{Program: "make", Target: "test"}, false},
 		{"a gmake token does not match another program", []string{"gmake", "test"}, Invocation{Program: "pytest", Target: "test"}, false},
+		{"a configured gmake with a flag before the goal", []string{"gmake", "-j4", "test"}, Invocation{Program: "gmake", Target: "test"}, true},
+		{"a configured gmake with a separate -j value", []string{"gmake", "-j", "4", "test"}, Invocation{Program: "gmake", Target: "test"}, true},
+		{"a configured gmake matches a live make", []string{"make", "test"}, Invocation{Program: "gmake", Target: "test"}, true},
+		{"a configured gmake matches a live make with flags", []string{"make", "-j4", "test"}, Invocation{Program: "gmake", Target: "test"}, true},
+		{"a configured gmake targetless matches a live make", []string{"make", "test"}, Invocation{Program: "gmake"}, true},
+		{"a configured gmake does not match another target", []string{"gmake", "-j4", "build"}, Invocation{Program: "gmake", Target: "test"}, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

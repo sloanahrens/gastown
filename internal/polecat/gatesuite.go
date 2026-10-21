@@ -348,7 +348,7 @@ func InvocationIndex(tokens []string, program, target string) int {
 		if !invocationProgram(tokens[i], program) {
 			continue
 		}
-		if program == "make" {
+		if isMakeName(program) {
 			for _, tok := range tokens[i+1:] {
 				if isTokenSeparator(tok) {
 					break
@@ -369,11 +369,20 @@ func InvocationIndex(tokens []string, program, target string) int {
 // invocationProgram reports whether tok names program in an argv. make is also
 // reached as gmake, the name GNU make carries on macOS, so a seat running
 // "gmake test" is running the rig's configured "make test" and its goals are
-// read the same way through either name (gt-y1zks, gt-gy5ro). Any other program
-// keeps the exact word. Both sides are InvocationTokens' reading, already
-// lowercased basenames, so no path needs stripping here.
+// read the same way through either name, whichever side names it (gt-y1zks,
+// gt-gy5ro, gt-r54vy). Any other program keeps the exact word. Both sides are
+// InvocationTokens' reading, already lowercased basenames, so no path needs
+// stripping here.
 func invocationProgram(tok, program string) bool {
-	return tok == program || (program == "make" && tok == "gmake")
+	if isMakeName(program) {
+		return isMakeName(tok)
+	}
+	return tok == program
+}
+
+// isMakeName reports whether name is a spelling of GNU make.
+func isMakeName(name string) bool {
+	return name == "make" || name == "gmake"
 }
 
 // isTokenSeparator reports whether tok ends one command and begins the next, so
