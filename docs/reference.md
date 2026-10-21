@@ -1937,8 +1937,10 @@ are in `internal/jev/scorecard/stale.go`:
 - landed, either the close reason `landed` or a landing record's `Landed on ...`:
   `worth_doing` true, and `obsolete` and `superseded` false (`stale:landed`).
   When the description's hash no longer matches `desc_hash`, `needs_reshaping`
-  is also true (`stale:reshaped`). A line with no `desc_hash` is never labeled
-  `needs_reshaping`.
+  is also true (`stale:reshaped`). A line with no `desc_hash`, and a bead whose
+  description is empty now, are never labeled `needs_reshaping`: neither shows
+  text to compare. A bead asked about with no description and given one since
+  is labeled, because its `desc_hash` is the hash of the empty text.
 - priority changed since the ask: `priority_fit` true when it was raised (a
   lower P number), false when it was lowered (`stale:priority-raised`,
   `stale:priority-lowered`). The log does not record who changed it, so any
