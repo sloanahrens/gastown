@@ -53,6 +53,24 @@ func writeOverrun(t *testing.T, town, bead string, stopped bool) {
 	writeRawFixture(t, filepath.Join(constants.TownRuntimePath(town), "overrun-guard", bead+".json"), data)
 }
 
+// writeOverrunStamps writes the overrun guard's record for bead carrying the
+// given stop stamps; a zero stamp is left out, as the guard's omitzero does.
+func writeOverrunStamps(t *testing.T, town, bead string, began, stopped time.Time) {
+	t.Helper()
+	rec := map[string]any{"bead": bead}
+	if !began.IsZero() {
+		rec["stop_began_at"] = began
+	}
+	if !stopped.IsZero() {
+		rec["stopped_at"] = stopped
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeRawFixture(t, filepath.Join(constants.TownRuntimePath(town), "overrun-guard", bead+".json"), data)
+}
+
 func writeRawFixture(t *testing.T, path string, data []byte) {
 	t.Helper()
 	if err := os.WriteFile(path, data, 0o600); err != nil {
@@ -113,6 +131,53 @@ func TestThrashLabelsFromTheRespawnCountsAndOverrunRecords(t *testing.T) {
 		if !reflect.DeepEqual(got.Labels, tc.labels) {
 			t.Errorf("%s: labels %v, want %v", tc.bead, got.Labels, tc.labels)
 		}
+	}
+}
+
+// A stop the guard has begun but not finished is the guard's normal in-progress
+// form, and its outcome is not known yet, so needs_split is left unlabeled, as
+// the dispatch battery leaves fits_twenty_minutes. A finished stop is a
+// positive and a record with neither stamp a negative.
+func TestThrashPendingStopLeavesNeedsSplitUnlabeled(t *testing.T) {
+	t.Parallel()
+	town := thrashTown(t)
+	began := time.Date(2026, 10, 21, 9, 50, 0, 0, time.UTC)
+	stopped := time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC)
+	writeOverrunStamps(t, town, "gt-pending", began, time.Time{})
+	writeOverrunStamps(t, town, "gt-done", began, stopped)
+	writeOverrunStamps(t, town, "gt-bare", time.Time{}, time.Time{})
+	a := &thrashAdapter{town: town}
+
+	cases := []struct {
+		bead    string
+		labels  map[QuestionID]bool
+		labeled bool
+	}{
+		{"gt-pending", nil, false},
+		{"gt-done", map[QuestionID]bool{qNeedsSplit: true}, true},
+		{"gt-bare", map[QuestionID]bool{qNeedsSplit: false}, true},
+	}
+	for _, tc := range cases {
+		got, err := a.Label(context.Background(), thrashLine(t, tc.bead, 0.5, 0.5))
+		if err != nil {
+			t.Fatalf("%s: %v", tc.bead, err)
+		}
+		if got.Labeled != tc.labeled {
+			t.Errorf("%s: labeled %v, want %v", tc.bead, got.Labeled, tc.labeled)
+		}
+		if !reflect.DeepEqual(got.Labels, tc.labels) {
+			t.Errorf("%s: labels %v, want %v", tc.bead, got.Labels, tc.labels)
+		}
+	}
+
+	// With a respawn count the pending bead still labels will_respawn alone.
+	writeRespawnCounts(t, town, map[string]int{"gt-pending": 2})
+	got, err := a.Label(context.Background(), thrashLine(t, "gt-pending", 0.5, 0.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[QuestionID]bool{qWillRespawn: true}; !reflect.DeepEqual(got.Labels, want) {
+		t.Errorf("pending with a count: labels %v, want %v", got.Labels, want)
 	}
 }
 

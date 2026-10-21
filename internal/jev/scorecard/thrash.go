@@ -96,6 +96,8 @@ func (a *thrashAdapter) Parse(raw []byte) (Item, error) {
 // Label sets will_respawn from the bead's respawn count and needs_split from
 // the overrun guard's record. A count below respawnThreshold and a record
 // without a stop are both negatives, so a bead on either file is labeled.
+// A record whose stop has begun but not finished leaves needs_split unlabeled,
+// as the dispatch battery does, because the guard has decided to stop the bead.
 // A bead with neither file is unlabeled. A bead still running when it is
 // labeled reads as a negative until its guard stops it, as a first run does
 // for will_respawn.
@@ -110,17 +112,19 @@ func (a *thrashAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 		rules = append(rules, "respawn-count")
 	}
 
-	stopped, onRecord, err := overrunGuardRecord(a.town, item.ID)
+	stop, err := overrunGuardRecord(a.town, item.ID)
 	if err != nil {
 		a.overrunBroken++
 	}
-	if onRecord {
-		labels[qNeedsSplit] = stopped
-		if stopped {
-			rules = append(rules, "overrun-stop")
-		} else {
-			rules = append(rules, "overrun-no-stop")
-		}
+	switch stop {
+	case stopDone:
+		labels[qNeedsSplit] = true
+		rules = append(rules, "overrun-stop")
+	case stopNone:
+		labels[qNeedsSplit] = false
+		rules = append(rules, "overrun-no-stop")
+	case stopInProgress:
+		rules = append(rules, "overrun-stop-pending")
 	}
 
 	if len(labels) == 0 {
@@ -184,23 +188,45 @@ func readRespawnCounts(path string) (map[string]int, error) {
 	return counts, nil
 }
 
-// overrunGuardRecord reads the overrun guard's record for bead. onRecord is
-// false when there is no record, which leaves needs_split unlabeled. Otherwise
-// stopped says whether the record carries a stop. An error means the record
-// exists and cannot be read or parsed.
-func overrunGuardRecord(town, bead string) (stopped, onRecord bool, err error) {
+// overrunStop is how far the overrun guard got with a bead's stop.
+type overrunStop int
+
+const (
+	// stopAbsent: the bead has no record.
+	stopAbsent overrunStop = iota
+	// stopNone: a record that carries neither stop stamp.
+	stopNone
+	// stopInProgress: stop_began_at is set and stopped_at is not. The guard
+	// writes stopped_at last and retries its checkpoint and push steps across
+	// ticks, so this is its normal form while a stop runs.
+	stopInProgress
+	// stopDone: a record with stopped_at.
+	stopDone
+)
+
+// overrunGuardRecord reads the overrun guard's record for bead and says how far
+// its stop got. stopAbsent leaves needs_split unlabeled. An error means the
+// record exists and cannot be read or parsed.
+func overrunGuardRecord(town, bead string) (overrunStop, error) {
 	data, err := os.ReadFile(filepath.Join(constants.TownRuntimePath(town), "overrun-guard", bead+".json")) //nolint:gosec // G304: bead id is checked by Parse
 	if errors.Is(err, fs.ErrNotExist) {
-		return false, false, nil
+		return stopAbsent, nil
 	}
 	if err != nil {
-		return false, false, err
+		return stopAbsent, err
 	}
 	var rec struct {
-		StoppedAt time.Time `json:"stopped_at"`
+		StopBeganAt time.Time `json:"stop_began_at"`
+		StoppedAt   time.Time `json:"stopped_at"`
 	}
 	if err := json.Unmarshal(data, &rec); err != nil {
-		return false, false, err
+		return stopAbsent, err
 	}
-	return !rec.StoppedAt.IsZero(), true, nil
+	switch {
+	case !rec.StoppedAt.IsZero():
+		return stopDone, nil
+	case !rec.StopBeganAt.IsZero():
+		return stopInProgress, nil
+	}
+	return stopNone, nil
 }
