@@ -18,13 +18,16 @@ import (
 const SubmissionBattery = "submission"
 
 // The phrase lists the submission adapter reads a rejection's findings with.
-// Each finding title is matched case-insensitively against the lists. A title
+// Each finding title is matched case-insensitively against the lists, an entry
+// matching only as a whole word or its inflection: "no test" matches "no
+// testing" and "no tests", but not the "no test" inside "piano test". A title
 // that holds a missingTestPhrases entry labels tests_cover_change false, and a
 // title that holds a beyondGoalPhrases entry labels beyond_goal true. Every
 // entry is checked by TestSubmissionFindingLabelsReadsBothPhraseLists.
 var (
 	missingTestPhrases = []string{
 		"no test",
+		"no tests",
 		"without a test",
 		"without tests",
 		"missing test",
@@ -49,15 +52,36 @@ var (
 
 // Rules the submission adapter names in the --json report's lines. The first
 // two name the om verdict that set will_pass_review. The rest name the
-// rejection or landing that set the other labels; a line can carry several,
-// space-separated.
+// rejection or landing that set the other labels, or, for
+// submission:no-rejection-block, the missing block a request_changes verdict
+// should have left; a line can carry several, space-separated.
 const (
 	ruleSubmissionApprove        = "submission:om-approve"
 	ruleSubmissionRequestChanges = "submission:om-request-changes"
 	ruleSubmissionGateRejected   = "submission:gate-rejected"
 	ruleSubmissionOmMajor        = "submission:om-major"
 	ruleSubmissionFirstTry       = "submission:first-try-landing"
+	ruleSubmissionNoBlock        = "submission:no-rejection-block"
 )
+
+var (
+	missingTestRE = phraseRE(missingTestPhrases)
+	beyondGoalRE  = phraseRE(beyondGoalPhrases)
+)
+
+// phraseRE compiles phrases into one case-insensitive expression that matches
+// any of them at the start of a word, with the inflectional ending its last
+// word may take. A phrase therefore matches its plural and its past and
+// continuous forms — "no testing" and "no tests" as well as "no test" — but
+// never inside a longer word: "piano test" and
+// "unrequested_fields" match neither list.
+func phraseRE(phrases []string) *regexp.Regexp {
+	quoted := make([]string, len(phrases))
+	for i, p := range phrases {
+		quoted[i] = regexp.QuoteMeta(p)
+	}
+	return regexp.MustCompile(`(?i)\b(?:` + strings.Join(quoted, "|") + `)(?:s|es|ed|d|ing)?\b`)
+}
 
 // refSubmitted is the Item ref that holds a submission's submitted time.
 const refSubmitted = "submitted"
@@ -97,6 +121,9 @@ type submissionAdapter struct {
 	// rows is the review log, loaded on the first label and kept per bead in
 	// file order.
 	rows map[string][]land.ReviewRecord
+	// beadNotes caches each bead's notes, so a bead with several submissions is
+	// read from the beads store once per report.
+	beadNotes map[string]string
 	// joined and findings tally the labeled reviews for Context.
 	joined, findings int
 }
@@ -171,9 +198,9 @@ func (a *submissionAdapter) Label(_ context.Context, item Item) (Labeling, error
 	a.joined++
 	a.findings += row.Findings
 
-	notes, err := a.notes.Notes(submission.RigName, item.ID)
+	notes, err := a.notesFor(item.ID)
 	if err != nil {
-		return Labeling{}, fmt.Errorf("reading %s's notes: %w", item.ID, err)
+		return Labeling{}, err
 	}
 	if rej, ok := rejectionForAttempt(notes, row.Attempt); ok {
 		for id, v := range submissionFindingLabels(rej.Findings) {
@@ -191,13 +218,39 @@ func (a *submissionAdapter) Label(_ context.Context, item Item) (Labeling, error
 				rules = append(rules, ruleSubmissionOmMajor)
 			}
 		}
-	} else if row.Verdict == land.VerdictApprove && row.Attempt == 1 && landedAs(notes, item.Refs[refHead]) {
-		labels[QuestionID(submission.QClaimsVerified)] = true
-		labels[QuestionID(submission.QBoxesCredible)] = true
-		labels[QuestionID(submission.QOutcome)] = true
-		rules = append(rules, ruleSubmissionFirstTry)
+	} else {
+		switch row.Verdict {
+		case land.VerdictRequestChanges:
+			// A request_changes verdict leaves a block on its attempt. Without
+			// one the findings could not be read, which is not the same as none.
+			rules = append(rules, ruleSubmissionNoBlock)
+		case land.VerdictApprove:
+			if row.Attempt == 1 && landedAs(notes, item.Refs[refHead]) {
+				labels[QuestionID(submission.QClaimsVerified)] = true
+				labels[QuestionID(submission.QBoxesCredible)] = true
+				labels[QuestionID(submission.QOutcome)] = true
+				rules = append(rules, ruleSubmissionFirstTry)
+			}
+		}
 	}
 	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, " ")}, nil
+}
+
+// notesFor reads bead's notes once and keeps them for the bead's other
+// submissions.
+func (a *submissionAdapter) notesFor(bead string) (string, error) {
+	if notes, ok := a.beadNotes[bead]; ok {
+		return notes, nil
+	}
+	notes, err := a.notes.Notes(submission.RigName, bead)
+	if err != nil {
+		return "", fmt.Errorf("reading %s's notes: %w", bead, err)
+	}
+	if a.beadNotes == nil {
+		a.beadNotes = map[string]string{}
+	}
+	a.beadNotes[bead] = notes
+	return notes, nil
 }
 
 // landedAs reports whether notes carry the LANDING RECORD of head, the newest
@@ -279,33 +332,23 @@ func rejectionForAttempt(notes string, attempt int) (land.RejectionNote, bool) {
 func submissionFindingLabels(findings []land.Finding) map[QuestionID]bool {
 	labels := map[QuestionID]bool{}
 	for _, f := range findings {
-		title := strings.ToLower(f.Title)
-		if containsAnyPhrase(title, missingTestPhrases) {
+		if missingTestRE.MatchString(f.Title) {
 			labels[QuestionID(submission.QTestsCoverChange)] = false
 		}
-		if containsAnyPhrase(title, beyondGoalPhrases) {
+		if beyondGoalRE.MatchString(f.Title) {
 			labels[QuestionID(submission.QBeyondGoal)] = true
 		}
 	}
 	return labels
 }
 
-// containsAnyPhrase reports whether text holds one of phrases.
-func containsAnyPhrase(text string, phrases []string) bool {
-	for _, p := range phrases {
-		if strings.Contains(text, p) {
-			return true
-		}
-	}
-	return false
-}
-
 // Context reports how many labeled reviews the submissions joined and the
-// findings those reviews carried, and clears the tally so the next build starts
-// fresh.
+// findings those reviews carried, and clears the tally and the notes cached for
+// it so the next build starts fresh.
 func (a *submissionAdapter) Context() []string {
 	joined, findings := a.joined, a.findings
 	a.joined, a.findings = 0, 0
+	a.beadNotes = nil
 	if joined == 0 {
 		return nil
 	}
