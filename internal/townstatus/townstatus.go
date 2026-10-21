@@ -417,13 +417,7 @@ func Gather(opts Options) (TownStatus, error) {
 
 			rigWg.Wait()
 
-			activeHooks := 0
-			for _, hook := range rs.Hooks {
-				if hook.HasWork {
-					activeHooks++
-				}
-			}
-			rigActiveHooks[idx] = activeHooks
+			rigActiveHooks[idx] = countActiveHooks(rs.Agents)
 
 			status.Rigs[idx] = rs
 		}(i, r)
@@ -450,6 +444,20 @@ func Gather(opts Options) (TownStatus, error) {
 	status.Summary.RigCount = len(rigs)
 
 	return status, nil
+}
+
+// countActiveHooks counts the agents with pinned work. It uses the same
+// definition as AgentRuntime.HasWork (an agent bead with a HookBead) rather
+// than the handoff-bead hooks, which only exist in detailed mode, so the
+// count is the same in fast mode.
+func countActiveHooks(agents []AgentRuntime) int {
+	active := 0
+	for _, a := range agents {
+		if a.HasWork {
+			active++
+		}
+	}
+	return active
 }
 
 // CountRunningAgents returns how many agents in s have a running session,

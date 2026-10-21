@@ -114,6 +114,109 @@ func TestDiscoverRigAgents_MissingSessionNotRunning(t *testing.T) {
 	t.Fatal("crew agent not found in results")
 }
 
+// TestCountActiveHooks_FastModeCountsAgentBeadHook: fast mode has no
+// handoff-bead hooks, so ActiveHooks has to come from the agent beads the run
+// prefetched. A polecat whose agent bead carries a HookBead counts, and an
+// agent without one does not.
+func TestCountActiveHooks_FastModeCountsAgentBeadHook(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeTestRoutes(t, townRoot, []beads.Route{
+		{Prefix: "mr-", Path: "myrig/mayor/rig"},
+	})
+	prefix := beads.GetPrefixForRig(townRoot, "myrig")
+
+	r := &rig.Rig{
+		Name:     "myrig",
+		Path:     filepath.Join(townRoot, "myrig"),
+		Polecats: []string{"alpha"},
+	}
+	allAgentBeads := map[string]*beads.Issue{
+		beads.PolecatBeadIDWithPrefix(prefix, "myrig", "alpha"): {
+			ID:         beads.PolecatBeadIDWithPrefix(prefix, "myrig", "alpha"),
+			AgentState: "working",
+			HookBead:   "mr-hook-1",
+		},
+		beads.CrewBeadIDWithPrefix(prefix, "myrig", "max"): {
+			ID:         beads.CrewBeadIDWithPrefix(prefix, "myrig", "max"),
+			AgentState: "idle",
+		},
+	}
+	allHookBeads := map[string]*beads.Issue{
+		"mr-hook-1": {ID: "mr-hook-1", Title: "Pinned"},
+	}
+
+	agents := discoverRigAgents(testRegistry(), map[string]bool{}, r, []string{"max"}, allAgentBeads, allHookBeads, nil, true)
+	if got := countActiveHooks(agents); got != 1 {
+		t.Fatalf("countActiveHooks() = %d, want 1 (alpha holds a hook, max does not)", got)
+	}
+}
+
+// TestCountActiveHooks_AgreesWithAgentHasWork: ActiveHooks counts the same
+// agents AgentRuntime.HasWork reports, for every shape of agent-bead prefetch
+// and whether or not mail is skipped (the fast/detailed split).
+func TestCountActiveHooks_AgreesWithAgentHasWork(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeTestRoutes(t, townRoot, []beads.Route{
+		{Prefix: "mr-", Path: "myrig/mayor/rig"},
+	})
+	prefix := beads.GetPrefixForRig(townRoot, "myrig")
+	alphaID := beads.PolecatBeadIDWithPrefix(prefix, "myrig", "alpha")
+	bravoID := beads.PolecatBeadIDWithPrefix(prefix, "myrig", "bravo")
+	maxID := beads.CrewBeadIDWithPrefix(prefix, "myrig", "max")
+
+	cases := []struct {
+		name      string
+		agentBead map[string]*beads.Issue
+		want      int
+	}{
+		{
+			name:      "no agent beads prefetched",
+			agentBead: map[string]*beads.Issue{},
+			want:      0,
+		},
+		{
+			name: "one polecat hooked",
+			agentBead: map[string]*beads.Issue{
+				alphaID: {ID: alphaID, HookBead: "mr-hook-1"},
+			},
+			want: 1,
+		},
+		{
+			name: "polecat and crew hooked, one polecat idle",
+			agentBead: map[string]*beads.Issue{
+				alphaID: {ID: alphaID, HookBead: "mr-hook-1"},
+				bravoID: {ID: bravoID},
+				maxID:   {ID: maxID, HookBead: "mr-hook-2"},
+			},
+			want: 2,
+		},
+	}
+
+	for _, tc := range cases {
+		for _, skipMail := range []bool{true, false} {
+			r := &rig.Rig{
+				Name:     "myrig",
+				Path:     filepath.Join(townRoot, "myrig"),
+				Polecats: []string{"alpha", "bravo"},
+			}
+			agents := discoverRigAgents(testRegistry(), map[string]bool{}, r, []string{"max"}, tc.agentBead, map[string]*beads.Issue{}, nil, skipMail)
+
+			hasWork := 0
+			for _, a := range agents {
+				if a.HasWork {
+					hasWork++
+				}
+			}
+			if got := countActiveHooks(agents); got != hasWork || got != tc.want {
+				t.Fatalf("%s (skipMail=%v): countActiveHooks() = %d, AgentRuntime.HasWork count = %d, want both %d",
+					tc.name, skipMail, got, hasWork, tc.want)
+			}
+		}
+	}
+}
+
 // TestReadGateSlotHolderSkipsDockerProbe pins gt-a8kx at its regression site.
 // gateSlotHolder feeds the status line from every `gt status` and every
 // --watch tick and carries nothing but the holder, so it must stay a flock
