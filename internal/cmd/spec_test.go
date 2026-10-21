@@ -1517,6 +1517,9 @@ func TestSpecDispatchDeferralIsReportedOutsideTheSkipList(t *testing.T) {
 			Bead:        sling.Duplicate{ID: "gt-b", Status: "open", CreatedAt: "2026-10-15T09:00:00Z"},
 			SharedTests: []string{"TestSpecDispatch"},
 		}}).Err()
+	if !errors.Is(overlap, errSlingDuplicateContent) {
+		t.Fatalf("fixture: %v is not the overlap sentinel", overlap)
+	}
 
 	t.Run("a deferred sling is reported beside the unchanged skip", func(t *testing.T) {
 		t.Parallel()
