@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -190,6 +191,41 @@ func TestEvaluatePatrolDueUsesInMemoryWhenNewer(t *testing.T) {
 	dec := evaluatePatrolDue(townRoot, "main_branch_test", inMemory, now, 30*time.Minute)
 	if dec.due {
 		t.Error("expected due=false: the in-memory completion is 1 minute old, well inside the 30m interval")
+	}
+}
+
+// TestEvaluatePatrolDueWarnsOfCorruptRecordBesideInMemoryTime: an in-memory
+// completion decides whether the patrol is due, but it must not swallow the
+// warning for a last-run file that is garbled. Only the failure the in-memory
+// time explains — a record that could not be created — goes unwarned.
+func TestEvaluatePatrolDueWarnsOfCorruptRecordBesideInMemoryTime(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	path := patrolLastRunPath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("create daemon dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0644); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+
+	for _, tc := range []struct {
+		name     string
+		inMemory time.Time
+		interval time.Duration
+		wantDue  bool
+	}{
+		{"inside the interval", now.Add(-time.Minute), 15 * time.Minute, false},
+		{"past the interval", now.Add(-time.Hour), 15 * time.Minute, true},
+	} {
+		dec := evaluatePatrolDue(townRoot, "compactor_dog", tc.inMemory, now, tc.interval)
+		if dec.due != tc.wantDue {
+			t.Errorf("%s: due = %v, want %v: the in-memory time decides (%s)", tc.name, dec.due, tc.wantDue, dec.note)
+		}
+		if !strings.Contains(dec.warn, "unreadable") {
+			t.Errorf("%s: warn = %q, want the corrupt file reported", tc.name, dec.warn)
+		}
 	}
 }
 

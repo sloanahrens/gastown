@@ -278,6 +278,40 @@ func TestJevDedupeFailedSaveSuppressesTheRerun(t *testing.T) {
 	}
 }
 
+// A failed save plus a restart reruns the pass inside the interval: the
+// in-memory time that held the interval died with the process, and the disk has
+// no record to stand in for it. That is the intended direction for a patrol
+// (recordJevDedupeRun) — a missing record reads as "run the pass" — so the
+// test pins it rather than leave it as a comment.
+func TestJevDedupeFailedSaveThenRestartRerunsThePass(t *testing.T) {
+	t.Parallel()
+	r := newJevDedupeRig(t)
+	if err := os.WriteFile(filepath.Join(r.town, "daemon"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r.d.triggerJevDedupe()
+	waitJevDedupeIdle(t, r.d)
+	if r.opened != 1 {
+		t.Fatalf("pass opened %d times, want 1", r.opened)
+	}
+
+	// A new process over the same town and clock: nothing in memory, and the
+	// failed save left nothing on disk.
+	restarted := &Daemon{
+		config:        r.d.config,
+		logger:        r.d.logger,
+		clock:         r.clock,
+		patrolConfig:  r.d.patrolConfig,
+		jevDedupeOpen: r.d.jevDedupeOpen,
+	}
+	restarted.triggerJevDedupe()
+	waitJevDedupeIdle(t, restarted)
+	if r.opened != 2 {
+		t.Errorf("pass opened %d times after the restart, want 2 — no record survived the failed save", r.opened)
+	}
+}
+
 // A trigger that arrives while a pass is in flight is turned away.
 func TestJevDedupeTriggerSkipsWhileAPassIsRunning(t *testing.T) {
 	t.Parallel()
