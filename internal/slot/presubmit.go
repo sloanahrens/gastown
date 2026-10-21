@@ -14,11 +14,9 @@ import (
 	"github.com/steveyegge/gastown/internal/procid"
 )
 
-// The presubmit pool caps how many polecats run gt done's local gate at once
-// townwide. Each presubmit is `make presubmit` on the host, and three or five
-// of them side by side pushed host idle to 0-2% and bd reads from 0.3 s to
-// 5-12 s. It is a pool of its own, not the container-gate pool: a presubmit
-// never takes a landing slot, and a landing never waits behind a presubmit.
+// The presubmit pool caps how many gt done local gates run at once townwide.
+// It is a pool of its own, not the container-gate pool: a presubmit never takes
+// a landing slot, and a landing never waits behind a presubmit.
 //
 // Like the container pool it is a set of kernel-released flocks, so a holder
 // that dies releases its slot without any reclaim path. The owner file beside
