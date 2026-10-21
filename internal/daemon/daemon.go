@@ -34,6 +34,7 @@ import (
 	jevattention "github.com/steveyegge/gastown/internal/jev/attention"
 	"github.com/steveyegge/gastown/internal/jev/dedupe"
 	jevdispatch "github.com/steveyegge/gastown/internal/jev/dispatch"
+	"github.com/steveyegge/gastown/internal/jev/drift"
 	"github.com/steveyegge/gastown/internal/jev/landing"
 	"github.com/steveyegge/gastown/internal/jev/progress"
 	"github.com/steveyegge/gastown/internal/jev/stale"
@@ -598,6 +599,12 @@ type Daemon struct {
 	// jevLandingRunning and jevLandingOpen are for jev_landing.
 	jevSubmissionRunning atomic.Bool
 	jevSubmissionOpen    func(townRoot string, s submission.Settings, warnings io.Writer) (*submission.Pass, error)
+
+	// jevDriftRunning and jevDriftOpen are the jev_drift pass's single-flight
+	// guard and test seam (jev_drift.go), as jevLandingRunning and
+	// jevLandingOpen are for jev_landing.
+	jevDriftRunning atomic.Bool
+	jevDriftOpen    func(townRoot string, s drift.Settings, warnings io.Writer) (*drift.Pass, error)
 
 	// jevDispatchRunning is the jev_dispatch pass's single-flight guard
 	// (jev_dispatch.go), for the same reason as jevDedupeRunning.
@@ -1608,6 +1615,11 @@ var heartbeatSteps = []heartbeatStep{
 	// Ask Jev about each branch submitted for landing and log every answer
 	// (internal/jev/submission). Opt-in and lifecycle, like jev-dedupe.
 	{name: "jev-submission", lifecycle: true, run: (*Daemon).triggerJevSubmission},
+
+	// Ask Jev whether each landing left the doc sections closest to its diff
+	// stale, and log every answer (internal/jev/drift). Opt-in and lifecycle,
+	// like jev-dedupe.
+	{name: "jev-drift", lifecycle: true, run: (*Daemon).triggerJevDrift},
 
 	// Predict, for each bead just placed on a seat, how it will land, and log
 	// every prediction (internal/jev/dispatch). Opt-in and lifecycle, like
