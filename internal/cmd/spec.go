@@ -1458,10 +1458,11 @@ func specTickTown(townRoot string) (*config.TownSettings, *config.SpecDispatchCo
 // spec_dispatch template field, else the operator's default file. Lint and
 // dispatch both use it so they check one shape.
 func specTemplatePath(sd *config.SpecDispatchConfig) string {
-	if sd != nil && sd.Template != "" {
-		return sd.Template
+	configured := ""
+	if sd != nil {
+		configured = sd.Template
 	}
-	return specdispatch.DefaultTemplatePath()
+	return specdispatch.ResolveTemplatePath(configured)
 }
 
 func runSpecDispatch(cmd *cobra.Command, _ []string) error {

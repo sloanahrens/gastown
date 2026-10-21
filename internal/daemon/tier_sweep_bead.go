@@ -6,7 +6,10 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/specdispatch"
 )
 
 // The bead the tier sweep files for a red tier is born shaped: the spec
@@ -281,27 +284,65 @@ func tierSweepRedDetail(tier, sha string, ts tierSweepTierResult) string {
 		tier, shortSHA(sha), ts.Passed, ts.Failed, ts.Log)
 }
 
+// tierSweepTemplate is the spec template the dispatcher lints against: the
+// patrol block's template field, else the operator's default file, read by the
+// same loader the dispatcher uses (gt-uzkic). A patrol block that cannot be
+// read leaves the default path in place, and LoadTemplate falls back to the
+// built-in sections, so filing a bead never fails on its shape.
+func (d *Daemon) tierSweepTemplate() specdispatch.Template {
+	configured := ""
+	if d.config != nil {
+		if pc, err := ReadPatrolConfig(d.config.TownRoot); err == nil && pc != nil && pc.Patrols != nil && pc.Patrols.SpecDispatch != nil {
+			configured = pc.Patrols.SpecDispatch.Template
+		}
+	}
+	return specdispatch.LoadTemplate(specdispatch.ResolveTemplatePath(configured))
+}
+
+// tierSweepSectionBody is the body the sweep writes under one section of the
+// spec template. A section the sweep does not know points at the acceptance
+// check, so the lint reads it as non-empty.
+func tierSweepSectionBody(section, tier, subject, sha, item string) string {
+	switch strings.ToLower(section) {
+	case "goal":
+		return fmt.Sprintf("Make the %s tier green on main again. %s is red at %s, so the sweep re-files this bead on every landing until the tier passes.", tier, subject, shortSHA(sha))
+	case "constraints":
+		return fmt.Sprintf("- Fix the failure in %s; the sweep closes this bead by itself once the tier is green.\n", subject) +
+			"- Re-run with the narrow filter below, not the whole package: the polecat test guard refuses an unfiltered run of internal/cmd, internal/daemon and internal/polecat.\n" +
+			"- Leave scripts/tier-sweep.sh, its TIER_SWEEP_SKIP list and the sweep's schedule alone."
+	case "out of scope":
+		return "The other tiers, the sweep's own scheduling, and any change to scripts/tier-sweep.sh."
+	case "gate":
+		return "make gate, plus the check in ## Acceptance."
+	case "size":
+		return tierSweepBeadSize
+	case "acceptance":
+		return item
+	default:
+		return "The check in ## Acceptance covers this section."
+	}
+}
+
 // tierSweepBeadShape returns the description the dispatcher's shape lint reads
 // and the acceptance block for the bead's field. Both carry the same items:
 // gt done reads the field and `gt spec lint` reads the description, so one
 // without the other is a bead half a polecat can finish (gt-1lzy1).
-func tierSweepBeadShape(tier, unit, sha string, ts tierSweepTierResult) (description, acceptance string) {
+//
+// The sections come from tmpl, the template the dispatcher lints against, in
+// its order, so a template that adds or renames a section still yields a bead
+// that passes the lint (gt-uzkic). The Acceptance section always closes the
+// description unless the template names it itself.
+func tierSweepBeadShape(tier, unit, sha string, ts tierSweepTierResult, tmpl specdispatch.Template) (description, acceptance string) {
 	item := tierSweepAcceptanceItem(tier, unit, ts)
 	subject := tierSweepUnitSubject(tier, unit)
-	var b strings.Builder
-	b.WriteString(tierSweepBeadIntro + tierSweepRedDetail(tier, sha, ts) + "\n\n")
-	fmt.Fprintf(&b, "## Goal\n\n"+
-		"Make the %s tier green on main again. %s is red at %s, so the sweep re-files this bead on every landing until the tier passes.\n\n",
-		tier, subject, shortSHA(sha))
-	b.WriteString("## Constraints\n\n")
-	fmt.Fprintf(&b, "- Fix the failure in %s; the sweep closes this bead by itself once the tier is green.\n", subject)
-	b.WriteString("- Re-run with the narrow filter below, not the whole package: the polecat test guard refuses an unfiltered run of internal/cmd, internal/daemon and internal/polecat.\n" +
-		"- Leave scripts/tier-sweep.sh, its TIER_SWEEP_SKIP list and the sweep's schedule alone.\n\n")
-	b.WriteString("## Out of scope\n\n" +
-		"The other tiers, the sweep's own scheduling, and any change to scripts/tier-sweep.sh.\n\n")
-	b.WriteString("## Gate\n\n" +
-		"make gate, plus the check in ## Acceptance.\n\n")
-	b.WriteString("## Size\n\n" + tierSweepBeadSize + "\n\n")
-	b.WriteString("## Acceptance\n\n" + item + "\n")
-	return b.String(), item
+	names := append([]string(nil), tmpl.Sections...)
+	if !slices.ContainsFunc(names, func(n string) bool { return strings.EqualFold(n, "acceptance") }) {
+		names = append(names, "Acceptance")
+	}
+	parts := make([]string, 0, len(names))
+	for _, name := range names {
+		body := tierSweepSectionBody(name, tier, subject, sha, item)
+		parts = append(parts, "## "+name+"\n\n"+body)
+	}
+	return tierSweepBeadIntro + tierSweepRedDetail(tier, sha, ts) + "\n\n" + strings.Join(parts, "\n\n") + "\n", item
 }
