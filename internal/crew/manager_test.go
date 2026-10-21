@@ -541,6 +541,62 @@ func TestManagerAddPrefersMayorCloneOverBareRepo(t *testing.T) {
 	}
 }
 
+// A mayor/rig whose .git points at a deleted gitdir is not a clone: crew must
+// take the remotes from .repo.git instead of opening the dead directory.
+func TestManagerAddIgnoresDanglingMayorCloneForBareRepo(t *testing.T) {
+	t.Parallel()
+	f := gitfake.New()
+	tmpDir := t.TempDir()
+
+	rigPath := filepath.Join(tmpDir, "test-rig")
+	if err := os.MkdirAll(rigPath, 0755); err != nil {
+		t.Fatalf("failed to create rig dir: %v", err)
+	}
+
+	forkRepoPath := filepath.Join(tmpDir, "fork.git")
+	staleRepoPath := filepath.Join(tmpDir, "stale.git")
+	f.InitBare(t, forkRepoPath)
+	f.InitBare(t, staleRepoPath)
+	bareRepoPath := filepath.Join(rigPath, ".repo.git")
+	f.InitBare(t, bareRepoPath)
+	if _, err := f.Open(bareRepoPath).(gitfake.CrewRepo).AddRemote("origin", forkRepoPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// The mayor clone still has a stale origin, but its gitdir was deleted
+	// afterwards: .git is a dangling pointer, so the directory is not a clone.
+	mayorRigPath := filepath.Join(rigPath, "mayor", "rig")
+	f.Clone(t, staleRepoPath, mayorRigPath)
+	dotGit := filepath.Join(mayorRigPath, ".git")
+	if err := os.RemoveAll(dotGit); err != nil {
+		t.Fatalf("failed to remove mayor clone's .git: %v", err)
+	}
+	deletedGitDir := filepath.Join(tmpDir, "deleted", "worktrees", "mayor")
+	if err := os.WriteFile(dotGit, []byte("gitdir: "+deletedGitDir+"\n"), 0644); err != nil {
+		t.Fatalf("failed to write dangling .git: %v", err)
+	}
+
+	r := &rig.Rig{
+		Name:   "test-rig",
+		Path:   rigPath,
+		GitURL: forkRepoPath,
+	}
+	mgr := fakeManager(t, f, r)
+
+	worker, err := mgr.Add("danglingclone", false)
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+
+	originURL, err := f.Open(worker.ClonePath).RemoteURL("origin")
+	if err != nil {
+		t.Fatalf("failed to get crew origin URL: %v", err)
+	}
+	if originURL != forkRepoPath {
+		t.Errorf("crew origin = %q, want %q (from .repo.git, not the dangling mayor clone)", originURL, forkRepoPath)
+	}
+}
+
 func TestManagerRenameValidatesNewName(t *testing.T) {
 	t.Parallel()
 	f := gitfake.New()

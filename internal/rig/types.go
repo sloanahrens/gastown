@@ -7,6 +7,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/git"
 )
 
 // Rig represents a managed repository in the workspace.
@@ -144,13 +145,23 @@ func (r *Rig) BareRepoPath() string {
 // IsWorkTreeRoot reports whether path is the root of a git working tree.
 //
 // Both regular clones (.git directory) and linked worktrees (.git file pointing
-// at the shared git directory) qualify, so a plain os.Stat is enough for both.
+// at the shared git directory) qualify. A linked worktree whose gitdir was
+// deleted is a dangling pointer, not a working tree: git reads nothing through
+// it, so it does not qualify. This is the predicate the polecat worktree check
+// uses (git.IsWorktreeRootFast), so the two agree on what a worktree is.
 // Bare repositories do not qualify — they have no working tree to inspect — and
 // neither does a directory that merely sits inside some other repository, which
 // is the case that matters here: the town root is itself git-tracked, so
 // `git -C <rig>` succeeds by upward search and reports the town repository,
 // not the rig's.
 func IsWorkTreeRoot(path string) bool {
-	_, err := os.Stat(filepath.Join(path, ".git"))
-	return err == nil
+	info, err := os.Stat(filepath.Join(path, ".git"))
+	if err != nil {
+		return false
+	}
+	if info.IsDir() {
+		return true
+	}
+	isRoot, _ := git.IsWorktreeRootFast(path)
+	return isRoot
 }
