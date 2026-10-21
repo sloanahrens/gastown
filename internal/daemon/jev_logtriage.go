@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/jev/logtriage"
 )
 
@@ -73,11 +72,7 @@ func (d *Daemon) runJevLogtriage() {
 	// The E-stop holds the patrol from starting, but a pass already in flight
 	// went on paying for every group it reached (gt-dlnkz). The gate checks
 	// between billed calls, as jev_dedupe's does (gt-0h4i0).
-	gate := &estopGatedAsker{
-		Asker:  pass.Asker,
-		cancel: cancel,
-		active: func() bool { return estop.IsActive(d.config.TownRoot) },
-	}
+	gate := newEstopGate(d.config.TownRoot, pass.Asker, cancel)
 	pass.Asker = gate
 	sum, err := pass.Run(ctx)
 	if gate.stopped {

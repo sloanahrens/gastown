@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/agentlog"
-	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/jev/progress"
 	"github.com/steveyegge/gastown/internal/session"
 )
@@ -99,11 +98,7 @@ func (d *Daemon) runJevProgress() {
 	// between billed calls, as jev_dedupe's does (gt-0h4i0). The nudges the
 	// stop cut short were drained already and are dropped, as a stopped pass's
 	// are.
-	gate := &estopGatedAsker{
-		Asker:  pass.Asker,
-		cancel: cancel,
-		active: func() bool { return estop.IsActive(d.config.TownRoot) },
-	}
+	gate := newEstopGate(d.config.TownRoot, pass.Asker, cancel)
 	pass.Asker = gate
 	sum, err := pass.Run(ctx)
 	if gate.stopped {
