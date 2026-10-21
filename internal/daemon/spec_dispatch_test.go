@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -696,5 +697,45 @@ func specDispatchFake(t *testing.T, fake *fakeCLI, logger *log.Logger) *Daemon {
 		gtPath:       "gt",
 		execCmd:      fake.run,
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(true)}}},
+	}
+}
+
+// A tick that decided something logs one 'tick took' line: the tick's length as
+// the daemon timed it, then the phases the tick reported. The fake clock moves
+// inside the tick, as a real tick takes time (gt-bqch0).
+func TestSpecDispatchTickLogsItsDuration(t *testing.T) {
+	t.Parallel()
+	clock := clockwork.NewFakeClockAt(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
+	const report = `{"candidates": 3, "roster_ns": 1000000000, "board_ns": 2000000000,
+		"candidates_ns": 30000000000, "sling_ns": 5000000000}`
+	fake := newFakeCLI(func([]string) cliReply {
+		clock.Advance(40 * time.Second)
+		return cliReply{stdout: report}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	d.clock = clock
+
+	d.runSpecDispatch()
+
+	const want = "spec_dispatch: tick took 40s (roster 1s, board 2s, candidates 3 30s, sling 5s)"
+	if n := countContaining(lines(), want); n != 1 {
+		t.Errorf("tick took lines = %d, want one %q: %v", n, want, lines())
+	}
+}
+
+// A held tick decided nothing and runs no phase, so it logs no 'tick took' line.
+func TestSpecDispatchHeldTickLogsNoDuration(t *testing.T) {
+	t.Parallel()
+	fake := newFakeCLI(func([]string) cliReply {
+		return cliReply{stdout: `{"hold": "town parked by the operator"}`}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+
+	d.runSpecDispatch()
+
+	if n := countContaining(lines(), "tick took"); n != 0 {
+		t.Errorf("tick took lines = %d for a held tick, want none: %v", n, lines())
 	}
 }

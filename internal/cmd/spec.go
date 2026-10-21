@@ -759,7 +759,13 @@ type specDispatchReport struct {
 	Notices      []string      `json:"notices,omitempty"`
 	SlingsRun    int           `json:"slings_run,omitempty"`
 	SlowestSling time.Duration `json:"slowest_sling_ns,omitempty"`
-	Errors       []string      `json:"errors,omitempty"`
+	// The phase times of the tick, read on the tick's clock; the daemon logs
+	// them on its 'tick took' line. A held tick runs no phase, so none is set.
+	RosterTook     time.Duration `json:"roster_ns,omitempty"`
+	BoardTook      time.Duration `json:"board_ns,omitempty"`
+	CandidatesTook time.Duration `json:"candidates_ns,omitempty"`
+	SlingTook      time.Duration `json:"sling_ns,omitempty"`
+	Errors         []string      `json:"errors,omitempty"`
 }
 
 type specDispatchEntry struct {
@@ -882,7 +888,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		report.Hold = hold
 		return report
 	}
+	rosterAt := env.Now()
 	roster, err := env.Roster()
+	report.RosterTook = env.Now().Sub(rosterAt)
 	if err != nil {
 		// A roster that cannot be counted is not an empty one: dispatching on
 		// it could exceed every cap.
@@ -906,7 +914,9 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 			len(roster.Unrecorded), config.UnknownSeatAgent, strings.Join(roster.Unrecorded, ", ")))
 	}
 
+	boardAt := env.Now()
 	read := env.Candidates()
+	report.BoardTook = env.Now().Sub(boardAt)
 	report.Errors = append(report.Errors, read.Errors...)
 	report.Candidates = len(read.Candidates)
 	report.LabeledFailed = read.LabeledFailed
@@ -930,6 +940,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// every candidate of that rig is compared against (gt-z80p9).
 	heldReads := map[string]heldRead{}
 
+	candidatesAt := env.Now()
 	for _, c := range read.Candidates {
 		id := c.Spec.ID
 		// The spec is the board row the candidate was drawn from, so the loop
@@ -1158,7 +1169,10 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// gt-z80p9).
 		specNotePendingHeld(heldReads, c.Rig, id, seat.Agent, full)
 	}
+	report.CandidatesTook = env.Now().Sub(candidatesAt)
+	slingAt := env.Now()
 	specRunPendingSlings(env, pending, &report)
+	report.SlingTook = env.Now().Sub(slingAt)
 	return report
 }
 

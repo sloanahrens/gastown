@@ -147,6 +147,11 @@ type specDispatchTickReport struct {
 	Deferred []specDispatchTickEntry `json:"deferred"`
 	Notices  []string                `json:"notices"`
 	Errors   []string                `json:"errors"`
+	// The tick's phase times, for the 'tick took' line (gt-bqch0).
+	RosterNs     time.Duration `json:"roster_ns"`
+	BoardNs      time.Duration `json:"board_ns"`
+	CandidatesNs time.Duration `json:"candidates_ns"`
+	SlingNs      time.Duration `json:"sling_ns"`
 }
 
 // triggerSpecDispatch starts one tick on its own goroutine unless one is
@@ -252,6 +257,9 @@ func (d *Daemon) runSpecDispatch() {
 		d.dispatchIdle.Reset()
 		return
 	}
+	// The 'tick took' line is logged for a tick that decided something; a held
+	// tick runs no phase, so it has no timing to name.
+	took := ""
 	if r, perr := parseSpecDispatchReport(out); perr == nil {
 		now := d.clk().Now()
 		// A held tick decided nothing and carries no roster, so it observes no
@@ -262,6 +270,7 @@ func (d *Daemon) runSpecDispatch() {
 		} else {
 			d.dispatchIdle.Observe(r, now)
 			d.recordDispatchTick(r, now)
+			took = specDispatchTookLine(r, now.Sub(start))
 		}
 	} else {
 		// A report nothing can read says nothing about the town: the run of
@@ -271,6 +280,18 @@ func (d *Daemon) runSpecDispatch() {
 	for _, line := range d.formatSpecDispatchReport(out) {
 		d.logger.Printf("spec_dispatch: %s", line)
 	}
+	if took != "" {
+		d.logger.Printf("spec_dispatch: %s", took)
+	}
+}
+
+// specDispatchTookLine is the one line a tick that decided something logs
+// about its own length: the whole tick as the daemon timed it, then the
+// phases the tick reported, so a slow tick is attributed to a phase (gt-bqch0).
+func specDispatchTookLine(r specDispatchTickReport, took time.Duration) string {
+	return fmt.Sprintf("tick took %s (roster %s, board %s, candidates %d %s, sling %s)",
+		took.Round(time.Millisecond), r.RosterNs.Round(time.Millisecond), r.BoardNs.Round(time.Millisecond),
+		r.Candidates, r.CandidatesNs.Round(time.Millisecond), r.SlingNs.Round(time.Millisecond))
 }
 
 // recordDispatchTick appends one tick's decision to the history townhealth's

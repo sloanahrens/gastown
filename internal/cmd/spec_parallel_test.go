@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -157,6 +158,59 @@ func TestSpecTickCostNamesTheParallelSlings(t *testing.T) {
 	want := "tick cost: 0 bd read call(s) outside the sling path in 1.5s; 3 sling(s) in parallel, slowest 900ms"
 	if got != want {
 		t.Fatalf("cost line = %q, want %q", got, want)
+	}
+}
+
+// The tick times each phase on its own clock, so the daemon's 'tick took' line
+// can name the phase a slow tick spent its time in (gt-bqch0). The clock here
+// moves a second per read, so every phase that runs reads a positive time.
+func TestSpecDispatchReportsItsPhaseTimes(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 2, "2026-09-29T10:00:00Z"))
+	env := f.env()
+	var mu sync.Mutex
+	now := specTestNow
+	env.Now = func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		t := now
+		now = now.Add(time.Second)
+		return t
+	}
+
+	r := runSpecDispatchCycle(env)
+
+	if len(r.Dispatched) != 1 {
+		t.Fatalf("dispatched %d, want the one clean candidate slung", len(r.Dispatched))
+	}
+	for name, took := range map[string]time.Duration{
+		"roster": r.RosterTook, "board": r.BoardTook, "candidates": r.CandidatesTook, "sling": r.SlingTook,
+	} {
+		if took <= 0 {
+			t.Errorf("%s phase = %v, want a positive time on a clock that moves", name, took)
+		}
+	}
+}
+
+// A held tick runs no phase, so its report carries no phase times, and the
+// JSON leaves the keys out for the parsers that predate them.
+func TestSpecDispatchHeldTickOmitsItsPhaseTimes(t *testing.T) {
+	t.Parallel()
+	f := newFakeSpecTown(cleanSpec("gt-a", 2, "2026-09-29T10:00:00Z"))
+	f.hold = "town parked by the operator"
+	r := runSpecDispatchCycle(f.env())
+
+	if r.Hold == "" {
+		t.Fatal("report is not held, want the operator hold")
+	}
+	out, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"roster_ns", "board_ns", "candidates_ns", "sling_ns"} {
+		if strings.Contains(string(out), `"`+key+`"`) {
+			t.Errorf("held report JSON carries %s: %s", key, out)
+		}
 	}
 }
 
