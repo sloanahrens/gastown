@@ -196,7 +196,19 @@ func enqueue(townRoot, session string, nudge QueuedNudge, observe func(ExpiryEve
 	filename := fmt.Sprintf("%d-%s.json", nudge.Timestamp.UnixNano(), randomSuffix())
 	path := filepath.Join(dir, filename)
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	// Write to a temp name, then rename into place. A drainer in another
+	// process claims any *.json it sees and deletes one that fails to parse, so
+	// writing the final name in place exposes an empty file to it and the nudge
+	// is lost. The ".tmp" suffix is outside the ".json" match every reader uses,
+	// and rename within one directory is atomic: a reader sees the complete
+	// file or none.
+	tmpPath := path + ".tmp"
+	if err := os.WriteFile(tmpPath, data, 0644); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("writing nudge to queue: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
 		return fmt.Errorf("writing nudge to queue: %w", err)
 	}
 

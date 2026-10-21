@@ -2,8 +2,11 @@ package nudge
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -579,6 +582,138 @@ func TestConcurrentEnqueueNoDuplicateLoss(t *testing.T) {
 	}
 	if len(nudges) != count {
 		t.Errorf("Drain returned %d, want %d", len(nudges), count)
+	}
+}
+
+// TestEnqueueNeverExposesAPartialFile races one enqueuer against a drain loop.
+// Drain deletes a queue file that fails to parse, so an enqueue that writes the
+// final name in place loses any nudge the drainer claims mid-write.
+func TestEnqueueNeverExposesAPartialFile(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	session := "gt-test-partial"
+
+	const count = 200
+	// Padding widens the create-to-filled window of an in-place write.
+	pad := strings.Repeat("x", 256<<10)
+
+	done := make(chan struct{})
+	enqueueErr := make(chan error, 1)
+	go func() {
+		defer close(done)
+		for i := 0; i < count; i++ {
+			n := QueuedNudge{Sender: "sender", Message: fmt.Sprintf("%d:%s", i, pad)}
+			// The drain loop keeps the queue shallow, but retry on a full
+			// queue so the test asserts on loss, not on the depth cap.
+			for {
+				err := Enqueue(townRoot, session, n)
+				if err == nil {
+					break
+				}
+				if !strings.Contains(err.Error(), "is full") {
+					enqueueErr <- err
+					return
+				}
+				runtime.Gosched()
+			}
+		}
+	}()
+
+	var mu sync.Mutex
+	seen := make(map[int]int)
+	collect := func(nudges []QueuedNudge) {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, n := range nudges {
+			idx, _, _ := strings.Cut(n.Message, ":")
+			i, err := strconv.Atoi(idx)
+			if err != nil {
+				t.Errorf("drained nudge with malformed message %q", idx)
+				continue
+			}
+			seen[i]++
+		}
+	}
+
+	// Several drainers spin on the directory so one is almost always in the
+	// gap between the writer creating the file and filling it.
+	var drainers sync.WaitGroup
+	for d := 0; d < 4; d++ {
+		drainers.Add(1)
+		go func() {
+			defer drainers.Done()
+			for finished := false; !finished; {
+				select {
+				case <-done:
+					finished = true
+				default:
+				}
+				nudges, err := Drain(townRoot, session)
+				if err != nil {
+					t.Errorf("Drain: %v", err)
+					return
+				}
+				collect(nudges)
+			}
+		}()
+	}
+	drainers.Wait()
+	select {
+	case err := <-enqueueErr:
+		t.Fatalf("Enqueue: %v", err)
+	default:
+	}
+	// One more drain picks up whatever landed after the last loop pass.
+	nudges, err := Drain(townRoot, session)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	collect(nudges)
+
+	for i := 0; i < count; i++ {
+		if seen[i] != 1 {
+			t.Errorf("nudge %d drained %d times, want exactly once", i, seen[i])
+		}
+	}
+
+	// No temp file may be left behind, and none may match the queue glob.
+	entries, err := os.ReadDir(queueDir(townRoot, session))
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		t.Errorf("queue dir holds %q after every nudge drained", e.Name())
+	}
+}
+
+// TestEnqueueTempNameIsNotQueued pins the second half of the contract: while an
+// enqueue is mid-flight its temp file is invisible to Pending and Drain.
+func TestEnqueueTempNameIsNotQueued(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	session := "gt-test-tmpname"
+
+	dir := queueDir(townRoot, session)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	tmp := filepath.Join(dir, "1-abcd.json.tmp")
+	if err := os.WriteFile(tmp, []byte(`{"sender":"s","message":"m"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	if pending, _ := Pending(townRoot, session); pending != 0 {
+		t.Errorf("Pending = %d, want 0 for a temp file", pending)
+	}
+	nudges, err := Drain(townRoot, session)
+	if err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if len(nudges) != 0 {
+		t.Errorf("Drain returned %d nudges from a temp file, want 0", len(nudges))
+	}
+	if _, err := os.Stat(tmp); err != nil {
+		t.Errorf("temp file touched by Drain: %v", err)
 	}
 }
 
