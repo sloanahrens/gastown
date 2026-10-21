@@ -64,6 +64,15 @@ func TestIntegrationPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 		t.Fatalf("mkdir leftover: %v", err)
 	}
 
+	// A clean worktree with no origin: no remote branch, no upstream and no
+	// origin default branch resolve, so nothing judges the branch as preserved.
+	// The probe must fail closed rather than read it as clean (gt-sg75r).
+	noOriginWorktree := t.TempDir()
+	runGitCmd(t, noOriginWorktree, "init", "-b", "polecat/topaz")
+	runGitCmd(t, noOriginWorktree, "config", "user.email", "test@test.com")
+	runGitCmd(t, noOriginWorktree, "config", "user.name", "Test User")
+	runGitCmd(t, noOriginWorktree, "commit", "--allow-empty", "-m", "initial")
+
 	tests := []struct {
 		name             string
 		worktreePath     string
@@ -112,6 +121,17 @@ func TestIntegrationPolecatListReuseVerdictRedrivesFromLiveGit(t *testing.T) {
 			wantReason:       "git-check-failed",
 			wantGitStateSrc:  polecat.GitStateSourceUnknown,
 			wantGitReasonHas: "not a git worktree root",
+		},
+		{
+			// gt-sg75r: a branch with no comparison ref is unjudgeable, so it is
+			// unknown and fails closed even though its worktree is clean.
+			name:             "a clean worktree with no comparison ref fails closed with git_state=unknown",
+			worktreePath:     noOriginWorktree,
+			cleanupStatus:    string(polecat.CleanupClean),
+			wantVerdict:      polecat.WorkstateVerdictNeedsRecovery,
+			wantReason:       "git-check-failed",
+			wantGitStateSrc:  polecat.GitStateSourceUnknown,
+			wantGitReasonHas: "git_state=unknown",
 		},
 		{
 			name:            "no probe target leaves the recorded hint authoritative",
