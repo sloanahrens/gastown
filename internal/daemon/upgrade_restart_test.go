@@ -308,6 +308,18 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		if strings.Contains(logs.String(), "draining: no new landing pass") {
 			t.Fatalf("drain line logged with only soft work and the sweep in flight:\n%s", logs.String())
 		}
+
+		// The sweep's cap still bounds the wait with soft work in flight: at
+		// tierSweepRestartCap the sweep is cut short and the restart goes.
+		if !d.checkUpgradeRestart(now.Add(tierSweepRestartCap)) {
+			t.Fatal("soft work in flight must not hold the restart past the sweep's cap")
+		}
+		if !d.upgradeRestartPending.Load() {
+			t.Fatal("the drain did not start at the cap with soft work in flight")
+		}
+		if !strings.Contains(logs.String(), "cutting the sweep short") {
+			t.Fatalf("no cut-short line at the cap:\n%s", logs.String())
+		}
 	})
 
 	// gt-9vjw8: the drain end rests with one line naming what it cost and what
@@ -371,7 +383,7 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 			t.Fatal("must restart once no pass is in flight")
 		}
 		state := &State{Running: true}
-		if err := d.exitForUpgradeIfRequested(state); !errors.Is(err, ErrRestartForUpgrade) {
+		if err := d.exitForUpgradeIfRequested(state, now.Add(time.Minute)); !errors.Is(err, ErrRestartForUpgrade) {
 			t.Fatalf("err = %v, want ErrRestartForUpgrade", err)
 		}
 		restart := strings.Index(logs.String(), "upgrade-restart: idle; restarting")
@@ -381,6 +393,9 @@ func TestUpgradeSweepAloneDoesNotDrainLandings(t *testing.T) {
 		}
 		if restart < 0 || held > restart {
 			t.Fatalf("the drain end line must precede the restart line:\n%s", logs.String())
+		}
+		if !strings.Contains(logs.String(), "the drain held landing passes for 1m0s") {
+			t.Fatalf("the drain end line does not measure the wait on the decision's clock:\n%s", logs.String())
 		}
 		if !strings.Contains(logs.String(), "last waiting for landing pass gt-x") {
 			t.Fatalf("the drain end line does not name the hold:\n%s", logs.String())
@@ -1094,7 +1109,7 @@ func TestUpgradeNewerMarkerIdleRequestsRestartAndStampsAttempt(t *testing.T) {
 		t.Fatalf("marker after the request = %+v, want attempted_from unset until the commit", m)
 	}
 	// The run loop commits the request: that is where the attempt is stamped.
-	if err := d.exitForUpgradeIfRequested(&State{Running: true}); !errors.Is(err, ErrRestartForUpgrade) {
+	if err := d.exitForUpgradeIfRequested(&State{Running: true}, time.Now()); !errors.Is(err, ErrRestartForUpgrade) {
 		t.Fatalf("commit err = %v, want ErrRestartForUpgrade", err)
 	}
 	m, err := readRestartMarker(d.config.TownRoot)
@@ -1295,7 +1310,7 @@ func TestUpgradeUnknownAncestryIsNotCovered(t *testing.T) {
 		t.Fatal("unknown ancestry must not count as covered; idle daemon should restart")
 	}
 	// The commit writes attempted_from; that is what the next daemon reads.
-	if err := d.exitForUpgradeIfRequested(&State{Running: true}); !errors.Is(err, ErrRestartForUpgrade) {
+	if err := d.exitForUpgradeIfRequested(&State{Running: true}, time.Now()); !errors.Is(err, ErrRestartForUpgrade) {
 		t.Fatalf("commit err = %v, want ErrRestartForUpgrade", err)
 	}
 	if !markerExists(t, d) {
@@ -1518,7 +1533,7 @@ func TestExitForUpgradeIfRequested(t *testing.T) {
 			}
 			state := &State{Running: true}
 
-			err := d.exitForUpgradeIfRequested(state)
+			err := d.exitForUpgradeIfRequested(state, time.Now())
 
 			if got := errors.Is(err, ErrRestartForUpgrade); got != tc.wantErr || (!tc.wantErr && err != nil) {
 				t.Fatalf("err = %v, want ErrRestartForUpgrade=%v", err, tc.wantErr)
@@ -1608,7 +1623,7 @@ func TestUpgradeRestartDefersForALandingStartedAfterTheIdleRead(t *testing.T) {
 	d.landingStates.setBead("gastown", "gt-x", time.Now())
 
 	state := &State{Running: true}
-	if err := d.exitForUpgradeIfRequested(state); err != nil {
+	if err := d.exitForUpgradeIfRequested(state, time.Now()); err != nil {
 		t.Fatalf("err = %v, want nil: the restart must wait for the pass", err)
 	}
 	if !state.Running {
@@ -1627,7 +1642,7 @@ func TestUpgradeRestartDefersForALandingStartedAfterTheIdleRead(t *testing.T) {
 	if !d.checkUpgradeRestart(time.Now().Add(time.Minute)) {
 		t.Fatal("the restart must go ahead once the pass ends")
 	}
-	if err := d.exitForUpgradeIfRequested(state); !errors.Is(err, ErrRestartForUpgrade) {
+	if err := d.exitForUpgradeIfRequested(state, time.Now().Add(time.Minute)); !errors.Is(err, ErrRestartForUpgrade) {
 		t.Fatalf("err = %v, want ErrRestartForUpgrade", err)
 	}
 	if state.Running {
@@ -1650,7 +1665,7 @@ func TestUpgradeRestartCommitsWithNoLandingInFlight(t *testing.T) {
 		t.Fatal("an idle daemon with a pending marker must request the restart")
 	}
 	state := &State{Running: true}
-	if err := d.exitForUpgradeIfRequested(state); !errors.Is(err, ErrRestartForUpgrade) {
+	if err := d.exitForUpgradeIfRequested(state, time.Now()); !errors.Is(err, ErrRestartForUpgrade) {
 		t.Fatalf("err = %v, want ErrRestartForUpgrade", err)
 	}
 	if state.Running {
