@@ -424,6 +424,67 @@ func TestLoopbackHostAgreesWithRemoteVerdict(t *testing.T) {
 	}
 }
 
+func TestIsLoopbackHostNameBranch(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		addrs []string
+		err   error
+		local bool
+	}{
+		{"resolves to ipv4 loopback", []string{"127.0.0.1"}, nil, true},
+		{"resolves to ipv6 loopback", []string{"::1"}, nil, true},
+		{"any loopback address counts", []string{"192.0.2.1", "127.0.0.1"}, nil, true},
+		{"resolves only to remote", []string{"192.0.2.1"}, nil, false},
+		{"does not resolve", nil, errors.New("no such host"), false},
+		{"resolves to no usable address", []string{"not-an-ip"}, nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			lookup := func(string) ([]string, error) { return tc.addrs, tc.err }
+			if got := isLoopbackHostBy("dolt.example", lookup); got != tc.local {
+				t.Errorf("isLoopbackHostBy(name) = %v, want %v", got, tc.local)
+			}
+		})
+	}
+}
+
+func TestIsLoopbackHostDoesNotLookUpLiterals(t *testing.T) {
+	t.Parallel()
+	lookup := func(host string) ([]string, error) {
+		t.Errorf("lookup ran for literal host %q", host)
+		return nil, nil
+	}
+	for _, host := range []string{"", "localhost", "LOCALHOST", "localhost.", "127.0.0.1", "::1", "[::1]"} {
+		if !isLoopbackHostBy(host, lookup) {
+			t.Errorf("isLoopbackHostBy(%q) = false", host)
+		}
+	}
+}
+
+func TestBoundedLookupHostAppliesItsDeadline(t *testing.T) {
+	t.Parallel()
+	const timeout = 50 * time.Millisecond
+	var sawDeadline bool
+	lookup := func(ctx context.Context, host string) ([]string, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return nil, errors.New("lookup context carries no deadline")
+		}
+		if left := time.Until(deadline); left <= 0 || left > timeout {
+			return nil, fmt.Errorf("lookup deadline %v is outside the %v bound", left, timeout)
+		}
+		sawDeadline = true
+		return nil, context.DeadlineExceeded
+	}
+	if _, err := boundedLookupHost(timeout, lookup, "dolt.invalid"); err == nil {
+		t.Error("a timed-out lookup reported no error")
+	}
+	if !sawDeadline {
+		t.Error("lookup ran without a bounded deadline")
+	}
+}
+
 func TestMaintenanceGCLoopbackAliasIsNotExternal(t *testing.T) {
 	t.Parallel()
 	for _, host := range []string{"127.0.0.1", "::1", "[::1]", "localhost", "localhost.", "LOCALHOST"} {

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -113,12 +114,37 @@ func (d *Daemon) maintenanceGCExternal() (bool, string) {
 	return false, ""
 }
 
+// isLoopbackHostLookupTimeout bounds the name lookup in isLoopbackHost. The
+// guard runs on the daemon's maintenance path, so an unreachable resolver must
+// not hold it for the system resolver's own retry budget.
+const isLoopbackHostLookupTimeout = 2 * time.Second
+
+// lookupHostName resolves a host name to its addresses.
+type lookupHostName func(ctx context.Context, host string) ([]string, error)
+
+// boundedLookupHost runs one lookup under timeout, so a stalled resolver
+// cannot hold the maintenance path.
+func boundedLookupHost(timeout time.Duration, lookup lookupHostName, host string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return lookup(ctx, host)
+}
+
 // isLoopbackHost is the one local-or-remote verdict for a Dolt host. The
 // daemon's isRemote and the maintenance GC guard both read it. An empty host,
 // localhost (any case, with or without a trailing dot), a loopback IP literal
-// (bracketed or not), or a name that resolves only to loopback is local. A name
-// that does not resolve is not local.
+// (bracketed or not), or a name with at least one loopback address is local;
+// a name that does not resolve is not local. The lookup is bounded by
+// isLoopbackHostLookupTimeout.
 func isLoopbackHost(host string) bool {
+	return isLoopbackHostBy(host, func(host string) ([]string, error) {
+		return boundedLookupHost(isLoopbackHostLookupTimeout, net.DefaultResolver.LookupHost, host)
+	})
+}
+
+// isLoopbackHostBy is isLoopbackHost with the name lookup supplied, so a test
+// can drive the name branch without DNS.
+func isLoopbackHostBy(host string, lookup func(host string) ([]string, error)) bool {
 	h := strings.TrimSuffix(strings.Trim(strings.ToLower(host), "[]"), ".")
 	switch h {
 	case "", "localhost":
@@ -127,7 +153,7 @@ func isLoopbackHost(host string) bool {
 	if ip := net.ParseIP(h); ip != nil {
 		return ip.IsLoopback()
 	}
-	addrs, err := net.LookupHost(h)
+	addrs, err := lookup(h)
 	if err != nil {
 		return false
 	}
