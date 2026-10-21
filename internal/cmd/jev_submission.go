@@ -19,13 +19,15 @@ var jevSubmissionCmd = &cobra.Command{
 	Use:   "submission",
 	Short: "Ask Jev about each branch submitted for landing, and log every answer",
 	Long: `Run one pass of the submission battery over the gastown work beads submitted
-for landing since the last pass. For each one, Jev answers six questions about
-the bead's title, Goal and Acceptance sections, the commit subjects on
+for landing since the last pass. For each one, Jev answers ten questions about
+the bead's title, Goal, Acceptance and MR notes, the commit subjects on
 target..head and the changed paths with their line counts (never diff text):
 whether tests cover the change, whether it goes beyond the goal, whether the
 commit subjects match the change, whether it touches town machinery, whether a
-careful reviewer would approve it, and a 0-3 risk score. Every submission gets
-one line in <town>/.runtime/jev/submission.jsonl.
+careful reviewer would approve it, whether the MR notes' verification was run
+and applies to the boxes, whether the ticked boxes are credible, how the work
+ended, and a 0-3 risk score. Every submission gets one line in
+<town>/.runtime/jev/submission.jsonl.
 
 The commits and the diff stat come from a bare clone the pass owns at
 <town>/.runtime/jev/repos/gastown.git, created on its first run from the rig's

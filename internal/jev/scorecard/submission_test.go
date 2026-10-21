@@ -465,3 +465,129 @@ func TestSubmissionScorecardPrintsPerQuestionBlocks(t *testing.T) {
 		t.Errorf("output differs from %s (rewrite with -update-submission-golden):\n%s\nwant:\n%s", goldenPath, got, want)
 	}
 }
+
+// submissionItemAtHead is submissionItem for a line that names head.
+func submissionItemAtHead(t *testing.T, a Adapter, bead, head string, at time.Time) Item {
+	t.Helper()
+	raw := `{"ts":"` + at.Format(time.RFC3339) + `","bead":"` + bead + `","head":"` + head +
+		`","submitted":"` + at.Format(time.RFC3339) + `"}`
+	it, err := a.Parse([]byte(raw))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return it
+}
+
+// TestSubmissionLabelRulesForTheClaimsBoxesAndOutcome checks which of the four
+// new questions each review and bead-note state labels, and that the rule
+// names every rule that set a label.
+func TestSubmissionLabelRulesForTheClaimsBoxesAndOutcome(t *testing.T) {
+	t.Parallel()
+	const head = "head-a"
+	landed := func(landedHead string) string {
+		return land.LandingRecord{
+			BeadID: "gt-a", Branch: "polecat/x/gt-a+1", Head: landedHead, Target: "main",
+			LandedCommit: "c0ffee", LandedAt: submissionAt(10, 40),
+		}.NoteBlock()
+	}
+	rejection := func(attempt int, kind string, severity string) string {
+		n := land.RejectionNote{Attempt: attempt, Kind: kind, Reason: "refused", Branch: "polecat/x/gt-a+1", Target: "main", MR: "gt-a"}
+		if severity != "" {
+			n.Findings = []land.Finding{{ID: "gt-f1", Severity: severity, Path: "a.go", Line: 3, Title: "Wrong branch"}}
+		}
+		return land.FormatRejectionNote(n)
+	}
+	gateAttempt1 := rejection(1, string(land.RejectGate), "")
+	conflictAttempt1 := rejection(1, string(land.RejectConflict), "")
+
+	cases := []struct {
+		name  string
+		rows  []land.ReviewRecord
+		notes string
+		want  map[string]bool
+		rule  string
+	}{
+		{
+			name:  "a first-try landing labels the claims, the boxes and the outcome",
+			rows:  []land.ReviewRecord{review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30))},
+			notes: landed(head),
+			want: map[string]bool{
+				submission.QWillPassReview: true, submission.QClaimsVerified: true,
+				submission.QBoxesCredible: true, submission.QOutcome: true,
+			},
+			rule: ruleSubmissionApprove + " " + ruleSubmissionFirstTry,
+		},
+		{
+			name:  "a landing of another head is not this submission's first try",
+			rows:  []land.ReviewRecord{review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30))},
+			notes: landed("head-other"),
+			want:  map[string]bool{submission.QWillPassReview: true},
+			rule:  ruleSubmissionApprove,
+		},
+		{
+			name:  "an approval with no landing record is not a first try",
+			rows:  []land.ReviewRecord{review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30))},
+			notes: "a note with no landing",
+			want:  map[string]bool{submission.QWillPassReview: true},
+			rule:  ruleSubmissionApprove,
+		},
+		{
+			name:  "a landing on a later attempt is not a first try",
+			rows:  []land.ReviewRecord{review("gt-a", 2, land.VerdictApprove, submissionAt(10, 30))},
+			notes: gateAttempt1 + "\n" + landed(head),
+			want:  map[string]bool{submission.QWillPassReview: true},
+			rule:  ruleSubmissionApprove,
+		},
+		{
+			name:  "a gate refusal labels the boxes not credible",
+			rows:  []land.ReviewRecord{review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30))},
+			notes: gateAttempt1,
+			want:  map[string]bool{submission.QWillPassReview: true, submission.QBoxesCredible: false},
+			rule:  ruleSubmissionApprove + " " + ruleSubmissionGateRejected,
+		},
+		{
+			name:  "an om refusal on a major labels the claims unverified",
+			rows:  []land.ReviewRecord{review("gt-a", 2, land.VerdictRequestChanges, submissionAt(10, 30))},
+			notes: rejection(2, string(land.RejectReview), "major"),
+			want:  map[string]bool{submission.QWillPassReview: false, submission.QClaimsVerified: false},
+			rule:  ruleSubmissionRequestChanges + " " + ruleSubmissionOmMajor,
+		},
+		{
+			name:  "an om refusal on minors alone labels no claim",
+			rows:  []land.ReviewRecord{review("gt-a", 2, land.VerdictRequestChanges, submissionAt(10, 30))},
+			notes: rejection(2, string(land.RejectReview), "minor"),
+			want:  map[string]bool{submission.QWillPassReview: false},
+			rule:  ruleSubmissionRequestChanges,
+		},
+		{
+			name:  "a conflict refusal leaves the claims, the boxes and the outcome unlabeled",
+			rows:  []land.ReviewRecord{review("gt-a", 1, land.VerdictApprove, submissionAt(10, 30))},
+			notes: conflictAttempt1 + "\n" + landed(head),
+			want:  map[string]bool{submission.QWillPassReview: true},
+			rule:  ruleSubmissionApprove,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			a := &submissionAdapter{
+				reviews: &land.ReviewsFile{Path: reviewFile(t, tc.rows...)},
+				notes:   &fakeLandingNotes{byBead: map[string]string{"gt-a": tc.notes}},
+			}
+			lab, err := a.Label(context.Background(), submissionItemAtHead(t, a, "gt-a", head, submissionAt(10, 0)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := map[QuestionID]bool{}
+			for id, v := range tc.want {
+				want[QuestionID(id)] = v
+			}
+			if !maps.Equal(lab.Labels, want) {
+				t.Errorf("labels = %v, want %v", lab.Labels, want)
+			}
+			if lab.Rule != tc.rule {
+				t.Errorf("rule = %q, want %q", lab.Rule, tc.rule)
+			}
+		})
+	}
+}

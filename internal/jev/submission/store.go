@@ -11,7 +11,7 @@ import (
 )
 
 // Answer is Jev's answer to one question. A noul sets Noul; the score sets
-// Score and Confidence.
+// Score and Confidence; a choice sets Choice, Probabilities and Positive.
 type Answer struct {
 	// Noul is the probability, 0 to 1, that the question's statement holds.
 	Noul *float64 `json:"noul,omitempty"`
@@ -19,6 +19,12 @@ type Answer struct {
 	Score *float64 `json:"score,omitempty"`
 	// Confidence is Jev's confidence in a score, 0 to 1.
 	Confidence *float64 `json:"confidence,omitempty"`
+	// Choice is the option Jev picked.
+	Choice string `json:"choice,omitempty"`
+	// Probabilities maps every option of a choice to its probability.
+	Probabilities map[string]float64 `json:"probabilities,omitempty"`
+	// Positive names the choice option that counts as a yes.
+	Positive string `json:"positive,omitempty"`
 }
 
 // Line is one line of the submission log: what Jev answered about one
@@ -51,13 +57,16 @@ type Line struct {
 
 // answersFrom reads every question's answer out of one Ask result.
 func answersFrom(got *jev.Answers) map[string]Answer {
-	out := make(map[string]Answer, len(got.Noul)+len(got.Score))
+	out := make(map[string]Answer, len(got.Noul)+len(got.Score)+len(got.Choice))
 	for id, p := range got.Noul {
 		out[id] = Answer{Noul: &p}
 	}
 	for id, s := range got.Score {
 		score, conf := s.Score, s.Confidence
 		out[id] = Answer{Score: &score, Confidence: &conf}
+	}
+	for id, c := range got.Choice {
+		out[id] = Answer{Choice: c.Choice, Probabilities: c.Probabilities, Positive: choicePositive[id]}
 	}
 	return out
 }

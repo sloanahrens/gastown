@@ -802,6 +802,13 @@ func hasMajorFinding(findings []Finding) bool {
 	return blockingSeverity(findings) != ""
 }
 
+// BlocksLanding reports whether findings carry a major or critical, the
+// severities om refuses work on. It is hasMajorFinding for readers outside
+// this package.
+func BlocksLanding(findings []Finding) bool {
+	return hasMajorFinding(findings)
+}
+
 // blockingSeverity names the severity of the finding that refuses the work
 // whatever its score: critical when there is one, major otherwise, and "" when
 // there is neither (gt-oi4je). Info, or a string this review does not know, is
