@@ -479,27 +479,9 @@ func (g *CandidateGate) runFor(parent context.Context, sha string) (forgejo.Acti
 func (g *CandidateGate) jobLog(parent context.Context, wf GateWorkflow, run forgejo.ActionRun) (string, bool, error) {
 	ctx, cancel := context.WithTimeout(parent, g.callTimeout())
 	defer cancel()
-	jobs, err := g.Client.ListRunJobs(ctx, g.Owner, g.RepoName, run.ID)
+	jobID, err := g.gateJobID(ctx, wf, run)
 	if err != nil {
 		return "", false, err
-	}
-	jobID := int64(0)
-	for _, job := range jobs {
-		if job.Name == wf.Job {
-			jobID = job.ID
-			break
-		}
-	}
-	if jobID == 0 {
-		for _, job := range jobs {
-			if job.Status == candidateJobFailure {
-				jobID = job.ID
-				break
-			}
-		}
-	}
-	if jobID == 0 {
-		return "", false, fmt.Errorf("run %d has no job %q and no failed job", run.ID, wf.Job)
 	}
 	log, err := g.Client.JobLogsTail(ctx, g.Owner, g.RepoName, jobID, candidateTailBytes)
 	if err != nil {
@@ -521,6 +503,52 @@ func (g *CandidateGate) jobLog(parent context.Context, wf GateWorkflow, run forg
 		}
 	}
 	return log, whole, nil
+}
+
+// gateJobID is the job in run whose log the gate reads: the one named wf.Job,
+// else the first failed job.
+func (g *CandidateGate) gateJobID(ctx context.Context, wf GateWorkflow, run forgejo.ActionRun) (int64, error) {
+	jobs, err := g.Client.ListRunJobs(ctx, g.Owner, g.RepoName, run.ID)
+	if err != nil {
+		return 0, err
+	}
+	for _, job := range jobs {
+		if job.Name == wf.Job {
+			return job.ID, nil
+		}
+	}
+	for _, job := range jobs {
+		if job.Status == candidateJobFailure {
+			return job.ID, nil
+		}
+	}
+	return 0, fmt.Errorf("run %d has no job %q and no failed job", run.ID, wf.Job)
+}
+
+// Packages reads the per-package ok or FAIL lines of the gate job's log for
+// res's commit, up to the full-log cap. It is read only: no verdict depends on
+// it. The test-selection shadow battery reads it beside the gate (gt-bp9qd).
+// dir is the gated tree, where the gate workflow is read from.
+func (g *CandidateGate) Packages(parent context.Context, dir string, res CandidateResult) ([]PackageResult, error) {
+	wf, err := LoadGateWorkflow(dir, g.workflow())
+	if err != nil {
+		return nil, err
+	}
+	run, err := g.runFor(parent, res.SHA)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(parent, g.callTimeout())
+	defer cancel()
+	jobID, err := g.gateJobID(ctx, wf, run)
+	if err != nil {
+		return nil, err
+	}
+	log, err := g.Client.JobLogsTail(ctx, g.Owner, g.RepoName, jobID, candidateFullLogBytes)
+	if err != nil {
+		return nil, err
+	}
+	return parseGoTestOutput(log), nil
 }
 
 // failureExcerpt is the rework note's excerpt of a gate job log: the failure

@@ -131,6 +131,7 @@ type (
 	JevLandingConfig           = agentconfig.JevLandingConfig
 	JevSubmissionConfig        = agentconfig.JevSubmissionConfig
 	JevDriftConfig             = agentconfig.JevDriftConfig
+	JevTestselConfig           = agentconfig.JevTestselConfig
 	JevTargetsConfig           = agentconfig.JevTargetsConfig
 	JevDispatchConfig          = agentconfig.JevDispatchConfig
 	JevProgressConfig          = agentconfig.JevProgressConfig
@@ -329,6 +330,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.JevDrift.Enabled
+	}
+	// jev_testsel is opt-in for the same reason. It is read at each landing's
+	// gate, not on a ticker.
+	if patrol == "jev_testsel" {
+		if config == nil || config.Patrols == nil || config.Patrols.JevTestsel == nil {
+			return false
+		}
+		return config.Patrols.JevTestsel.Enabled
 	}
 	// jev_dispatch is opt-in for the same reason.
 	if patrol == "jev_dispatch" {
