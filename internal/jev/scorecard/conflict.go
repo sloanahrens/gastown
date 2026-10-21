@@ -262,10 +262,9 @@ func (a *conflictAdapter) rejectedAfter(ctx context.Context, bead string, landed
 }
 
 // landedFiles returns the files a bead's landing changed, from its fork point
-// to its head in the bare clone. The range is three-dot: the record's base is
-// the target tip at land time, which can hold landings made after this bead
-// forked, and a two-dot diff reads those as this bead's own changes reversed
-// (gt-wu2ab). A bead is read once.
+// to its head in the bare clone: the range is three-dot because the record's
+// base is the target tip at land time, which can hold landings made after the
+// bead forked (gt-wu2ab). A bead is read once.
 func (a *conflictAdapter) landedFiles(ctx context.Context, bead string, rec *land.LandingRecord) (map[string]bool, error) {
 	if files, ok := a.files[bead]; ok {
 		return files, nil
