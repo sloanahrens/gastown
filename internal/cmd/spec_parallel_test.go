@@ -162,20 +162,41 @@ func TestSpecTickCostNamesTheParallelSlings(t *testing.T) {
 }
 
 // The tick times each phase on its own clock, so the daemon's 'tick took' line
-// can name the phase a slow tick spent its time in (gt-bqch0). The clock here
-// moves a second per read, so every phase that runs reads a positive time.
+// can name the phase a slow tick spent its time in (gt-bqch0). The clock stands
+// still except inside each phase's one read, which moves it by a known step, so
+// every phase reports exactly the time its read took.
 func TestSpecDispatchReportsItsPhaseTimes(t *testing.T) {
 	t.Parallel()
 	f := newFakeSpecTown(cleanSpec("gt-a", 2, "2026-09-29T10:00:00Z"))
 	env := f.env()
 	var mu sync.Mutex
 	now := specTestNow
+	advance := func(d time.Duration) {
+		mu.Lock()
+		defer mu.Unlock()
+		now = now.Add(d)
+	}
 	env.Now = func() time.Time {
 		mu.Lock()
 		defer mu.Unlock()
-		t := now
-		now = now.Add(time.Second)
-		return t
+		return now
+	}
+	roster, board, children, sling := env.Roster, env.Candidates, env.Children, env.Sling
+	env.Roster = func() (specRoster, error) {
+		advance(2 * time.Second)
+		return roster()
+	}
+	env.Candidates = func() specBoardRead {
+		advance(3 * time.Second)
+		return board()
+	}
+	env.Children = func(id string) ([]specdispatch.Child, error) {
+		advance(5 * time.Second)
+		return children(id)
+	}
+	env.Sling = func(c specCandidate, resumeBranch string, seat specdispatch.SeatChoice) (string, error) {
+		advance(7 * time.Second)
+		return sling(c, resumeBranch, seat)
 	}
 
 	r := runSpecDispatchCycle(env)
@@ -183,11 +204,15 @@ func TestSpecDispatchReportsItsPhaseTimes(t *testing.T) {
 	if len(r.Dispatched) != 1 {
 		t.Fatalf("dispatched %d, want the one clean candidate slung", len(r.Dispatched))
 	}
-	for name, took := range map[string]time.Duration{
-		"roster": r.RosterTook, "board": r.BoardTook, "candidates": r.CandidatesTook, "sling": r.SlingTook,
-	} {
-		if took <= 0 {
-			t.Errorf("%s phase = %v, want a positive time on a clock that moves", name, took)
+	want := map[string]struct{ got, want time.Duration }{
+		"roster":     {r.RosterTook, 2 * time.Second},
+		"board":      {r.BoardTook, 3 * time.Second},
+		"candidates": {r.CandidatesTook, 5 * time.Second},
+		"sling":      {r.SlingTook, 7 * time.Second},
+	}
+	for name, p := range want {
+		if p.got != p.want {
+			t.Errorf("%s phase = %v, want %v", name, p.got, p.want)
 		}
 	}
 }

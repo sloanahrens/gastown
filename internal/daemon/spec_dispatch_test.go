@@ -724,6 +724,29 @@ func TestSpecDispatchTickLogsItsDuration(t *testing.T) {
 	}
 }
 
+// A tick whose roster cannot be read dispatches nothing, but it still ran the
+// roster phase: its 'tick took' line names that phase's time, so a slow
+// failing roster read is attributed to the roster (gt-co7sr).
+func TestSpecDispatchRosterFailureLogsItsDuration(t *testing.T) {
+	t.Parallel()
+	clock := clockwork.NewFakeClockAt(time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC))
+	const report = `{"candidates": 0, "roster_ns": 3000000000, "errors": ["roster unreadable, not dispatching: no tmux server"]}`
+	fake := newFakeCLI(func([]string) cliReply {
+		clock.Advance(4 * time.Second)
+		return cliReply{stdout: report}
+	})
+	logger, lines := lineLogger()
+	d := specDispatchFake(t, fake, logger)
+	d.clock = clock
+
+	d.runSpecDispatch()
+
+	const want = "spec_dispatch: tick took 4s (roster 3s, board 0s, candidates 0 0s, sling 0s)"
+	if n := countContaining(lines(), want); n != 1 {
+		t.Errorf("tick took lines = %d, want one %q: %v", n, want, lines())
+	}
+}
+
 // A held tick decided nothing and runs no phase, so it logs no 'tick took' line.
 func TestSpecDispatchHeldTickLogsNoDuration(t *testing.T) {
 	t.Parallel()
