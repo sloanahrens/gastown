@@ -36,6 +36,7 @@ import (
 	jevdispatch "github.com/steveyegge/gastown/internal/jev/dispatch"
 	"github.com/steveyegge/gastown/internal/jev/landing"
 	"github.com/steveyegge/gastown/internal/jev/progress"
+	"github.com/steveyegge/gastown/internal/jev/stale"
 	"github.com/steveyegge/gastown/internal/jev/submission"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/liveness"
@@ -616,6 +617,12 @@ type Daemon struct {
 	// nudge is queued. Nil means agentlog.LatestTranscript; a test sets it so
 	// the lookup does not reach the Claude config dir.
 	jevProgressLatest func(workDir string) (string, error)
+
+	// jevStaleRunning is the jev_stale read's single-flight guard
+	// (jev_stale.go). jevStaleOpen builds the pass a run executes; nil means
+	// stale.Open, and a test sets it to use fakes.
+	jevStaleRunning atomic.Bool
+	jevStaleOpen    func(townRoot string, rigs []string, s stale.Settings, warnings io.Writer) (*stale.Pass, error)
 
 	// tierSweepRunning is the tier_sweep job's single-flight guard
 	// (tier_sweep.go). A cycle runs on its own goroutine outside the idle
@@ -1612,6 +1619,11 @@ var heartbeatSteps = []heartbeatStep{
 	// jev-dedupe. It runs on the heartbeat that finds a nudge queued, not on an
 	// interval, so the answer lands while the seat is still inside its clock.
 	{name: "jev-progress", lifecycle: true, run: (*Daemon).triggerJevProgress},
+
+	// Ask Jev about each open bead untouched for fourteen days, once a week,
+	// and log every answer (internal/jev/stale). Opt-in and lifecycle, like
+	// jev-dedupe.
+	{name: "jev-stale", lifecycle: true, run: (*Daemon).triggerJevStale},
 
 	// Sweep the tiers `make gate` does not run against origin/main
 	// (gt-vsct7.5). Non-lifecycle: it runs tests and files beads, and an

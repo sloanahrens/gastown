@@ -1658,6 +1658,42 @@ is off the guard queues nothing:
 `usd_per_billion_tokens` is required. `max_usd_per_day` is optional and draws on
 the same town-wide cap as the other batteries.
 
+### Stale-bead battery (`jev_stale`)
+
+The daemon patrol `jev_stale` (heartbeat step `jev-stale`) runs once a week over
+every operational rig. It takes each open bead untouched for 14 days, oldest
+first, up to 500 beads a run, and asks Jev one call per bead: the noul
+`obsolete`, `superseded`, `worth_doing` and `needs_reshaping`, and the score
+`priority_fit` over `much lower`, `lower`, `right` and `higher`. It appends one
+line per bead to `.runtime/jev/stale.jsonl`: `{ts, rig, bead, type, priority,
+updated_at, landed_offered, model, answers, question_version}`, with a `reason`
+and null `answers` when the bead could not be asked.
+
+`landed_offered` lists the beads the question could weigh against `superseded`:
+the ten closest, in `hm query` rank order, among beads closed as `landed` in the
+last 30 days. With no `hm` on the PATH, or a failed search, it lists the ten
+most recent landed beads in the rig.
+
+A bead is asked at most once in 30 days; the pass reads that from the log, so a
+second pass inside the window asks nothing. A bead whose call got no reply
+(`ask_failed`) does not count, so the next pass asks it again. Beads labeled
+`human-only` or `handoff`, epics and wisps are never asked. A rig whose beads
+cannot be read is skipped and counted in the daemon log.
+
+The battery is log-only: it never changes a bead's status, labels, priority or
+comments. The E-stop holds the patrol and stops a running pass between Jev calls;
+a pass the E-stop stopped does not count as the week's run, so the next pass
+runs once the E-stop clears.
+
+The patrol is off unless `daemon.json` enables it:
+
+```json
+{"patrols": {"jev_stale": {"enabled": true, "max_usd_per_day": 1, "usd_per_billion_tokens": 4}}}
+```
+
+`usd_per_billion_tokens` is required. `max_usd_per_day` is optional and draws on
+the same town-wide cap as the other batteries.
+
 ## Beads Commands (bd)
 
 ```bash
