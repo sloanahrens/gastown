@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/promote"
 )
@@ -446,13 +447,22 @@ func (r *RedMain) RevertLanded(_ context.Context, work land.Work, res land.Resul
 	if err := r.Beads.AddComment(culprit, msg); err != nil {
 		r.logf("commenting on %s: %v", culprit, err)
 	}
-	open, unassigned := string(beads.StatusOpen), ""
-	if err := r.Beads.Update(culprit, beads.UpdateOptions{
+	open := string(beads.StatusOpen)
+	update := beads.UpdateOptions{
 		Status:    &open,
-		Assignee:  &unassigned,
 		AddLabels: []string{land.LabelRework},
 		Force:     true,
-	}); err != nil {
+	}
+	// A human-only culprit keeps its holder, as a rejection does: only a
+	// person can produce its branch (gt-me800). An unreadable culprit keeps
+	// its assignee too, since the holder is not known to be wrong.
+	if cul, err := r.Beads.Show(culprit); err != nil {
+		r.logf("reading %s for its holder: %v", culprit, err)
+	} else if cul != nil && !beads.HasLabel(cul, dispatch.HumanOnlyLabel) {
+		unassigned := ""
+		update.Assignee = &unassigned
+	}
+	if err := r.Beads.Update(culprit, update); err != nil {
 		r.logf("reopening %s for rework: %v", culprit, err)
 	}
 	r.status(fmt.Sprintf("main reverted %s's landing %s as %s; %s reopened for rework", culprit, short(landed), short(res.LandedCommit), culprit))

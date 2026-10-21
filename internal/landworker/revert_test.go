@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -406,6 +407,23 @@ func TestRevertLandedReopensTheCulpritForRework(t *testing.T) {
 	}
 	if cs, _ := h.bd.Comments("gt-cul"); len(cs) != 1 {
 		t.Fatalf("culprit commented twice: %+v", cs)
+	}
+}
+
+// A human-only culprit keeps its holder through a revert: only a person can
+// produce its branch, so the crew that holds it reads the rework.
+func TestRevertLandedKeepsTheHolderOfAHumanOnlyCulprit(t *testing.T) {
+	t.Parallel()
+	h := newRevertHarness(t, greenSHA)
+	if err := h.bd.Update("gt-cul", beads.UpdateOptions{AddLabels: []string{dispatch.HumanOnlyLabel}}); err != nil {
+		t.Fatal(err)
+	}
+	id := seedRevertBead(t, h)
+	h.r.RevertLanded(context.Background(), land.Work{BeadID: id}, land.Result{LandedCommit: "abababab"})
+
+	cul, _ := h.bd.Show("gt-cul")
+	if cul.Status != string(beads.StatusOpen) || cul.Assignee != "gastown/polecats/opal" || !beads.HasLabel(cul, land.LabelRework) {
+		t.Fatalf("culprit %+v; want open, still held by its crew, rework", cul)
 	}
 }
 
