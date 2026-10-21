@@ -245,8 +245,12 @@ func claudePlanWindowInstants(samples []ClaudePlanSample) []int64 {
 // history is never appended to, since every window in the samples would look new.
 func (r *ClaudePlanReader) claudePlanWeeks(samples []ClaudePlanSample, now time.Time) ([]ClaudePlanWeek, error) {
 	history, readErr := readClaudePlanWeeks(r.historyPath)
+	weeks := claudePlanWeeksFromSamples(samples)
+	if carried, ok := claudePlanCarriedWeek(samples, weeks, history, now); ok {
+		weeks = append(weeks, carried)
+	}
 	var fresh []ClaudePlanWeek
-	for _, w := range claudePlanWeeksFromSamples(samples) {
+	for _, w := range weeks {
 		if claudePlanHasWeek(history, w) {
 			continue
 		}
@@ -262,6 +266,64 @@ func (r *ClaudePlanReader) claudePlanWeeks(samples []ClaudePlanSample, now time.
 		return history, readErr
 	}
 	return history, errors.Join(readErr, appendClaudePlanWeeks(r.historyPath, fresh))
+}
+
+// claudePlanCarriedWeek is the window the tail no longer names: the week before
+// the newest one the samples name, when its reset has passed and the history
+// stops short of it. Readings age out of the bounded tail read, so a poll that
+// first meets a reset a week or more after its last one otherwise never closes
+// the week in between and the month loses it (gt-qt4os).
+//
+// An empty history carries nothing: with no recorded week there is no hole to
+// fill, only a series that may have started inside the week.
+func claudePlanCarriedWeek(samples []ClaudePlanSample, weeks, history []ClaudePlanWeek, now time.Time) (ClaudePlanWeek, bool) {
+	if len(weeks) == 0 || len(history) == 0 {
+		return ClaudePlanWeek{}, false
+	}
+	resetsAt := weeks[len(weeks)-1].ResetsAt - claudePlanWeekSecs
+	if resetsAt > now.Unix() ||
+		claudePlanHasWeek(weeks, ClaudePlanWeek{ResetsAt: resetsAt}) ||
+		claudePlanHasWeek(history, ClaudePlanWeek{ResetsAt: resetsAt}) {
+		return ClaudePlanWeek{}, false
+	}
+	var recorded int64
+	for _, w := range history {
+		recorded = max(recorded, w.ResetsAt)
+	}
+	if recorded >= resetsAt {
+		return ClaudePlanWeek{}, false
+	}
+	return ClaudePlanWeek{
+		StartAt:  resetsAt - claudePlanWeekSecs,
+		ResetsAt: resetsAt,
+		FinalPct: claudePlanReadingAround(samples, resetsAt),
+	}, true
+}
+
+// claudePlanReadingAround is the percentage of the newest reading at or before
+// instant, and of the oldest reading when every reading came after it, so a
+// window the tail has emptied still closes at the reading nearest it.
+func claudePlanReadingAround(samples []ClaudePlanSample, instant int64) float64 {
+	var before, after *ClaudePlanSample
+	for i := range samples {
+		s := &samples[i]
+		if s.T <= instant {
+			if before == nil || s.T > before.T {
+				before = s
+			}
+			continue
+		}
+		if after == nil || s.T < after.T {
+			after = s
+		}
+	}
+	if before != nil {
+		return before.SevenDay
+	}
+	if after != nil {
+		return after.SevenDay
+	}
+	return 0
 }
 
 // claudePlanHasWeek reports whether weeks holds the window.

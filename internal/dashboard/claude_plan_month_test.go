@@ -593,3 +593,88 @@ func TestClaudePlanReaderKeepsTheMonthsTheSeriesHasForgotten(t *testing.T) {
 		t.Errorf("avg_weekly_pct = %v, want the mean of the history's 95 and the open 14", p.AvgWeeklyPct)
 	}
 }
+
+// A poll that first meets a reset after the tail has grown past the readings
+// that named the week before it still closes that week: its bounds are the
+// newest reset less a week, and its last percentage the reading the tail holds
+// nearest it, so a reset nothing polled across leaves no hole in the month
+// (gt-qt4os).
+func TestClaudePlanCloseoutSurvivesAGap(t *testing.T) {
+	t.Parallel()
+
+	open := planDate(2026, time.October, 19).Unix()
+	carried := planDate(2026, time.October, 12)
+	for _, tt := range []struct {
+		name    string
+		samples []string
+		wantPct float64
+	}{
+		{
+			// Every reading the tail still holds came after its reset, so the
+			// week's own last reading is gone and the oldest one left stands in.
+			name: "the tail has outgrown the week's readings",
+			samples: []string{
+				planLine(planDate(2026, time.October, 14), 4, 12, open),
+				planLine(claudePlanNow, 4, 14, open),
+			},
+			wantPct: 12,
+		},
+		{
+			// A reading from before the reset survives, so it is the week's last.
+			name: "a reading from before the reset survives",
+			samples: []string{
+				planLine(planDate(2026, time.October, 4), 3, 80, planDate(2026, time.October, 5).Unix()),
+				planLine(planDate(2026, time.October, 14), 4, 12, open),
+				planLine(claudePlanNow, 4, 14, open),
+			},
+			wantPct: 80,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			path := claudePlanFile(t, tt.samples...)
+			if err := appendClaudePlanWeeks(claudePlanWeeksPath(path), []ClaudePlanWeek{
+				planWeek(planDate(2026, time.September, 28), 70),
+				planWeek(planDate(2026, time.October, 5), 66),
+			}); err != nil {
+				t.Fatal(err)
+			}
+
+			r := NewClaudePlanReader(path, 200)
+			p := r.Read(claudePlanNow)
+			if p.Unavailable {
+				t.Fatalf("the poll read an unavailable meter: %+v", p)
+			}
+
+			want := ClaudePlanWeek{
+				StartAt:  carried.Add(-claudePlanWeekDays * 24 * time.Hour).Unix(),
+				ResetsAt: carried.Unix(),
+				FinalPct: tt.wantPct,
+			}
+			rows := planWeeksFile(t, path)
+			got, ok := ClaudePlanWeek{}, false
+			for _, w := range rows {
+				if claudePlanSameWindow(w.ResetsAt, want.ResetsAt) {
+					got, ok = w, true
+				}
+			}
+			if !ok {
+				t.Fatalf("the history holds no week for the reset the tail outgrew, want %+v: %+v", want, rows)
+			}
+			if got != want {
+				t.Errorf("the carried week is %+v, want %+v", got, want)
+			}
+			// The month counts it: the two recorded weeks, the carried one and
+			// the open week.
+			if p.WeeksCounted != 4 {
+				t.Errorf("month_weeks = %d, want the carried week counted with the other three", p.WeeksCounted)
+			}
+
+			// The next poll finds the carry recorded and adds it no second time.
+			r.Read(claudePlanNow)
+			if again := planWeeksFile(t, path); len(again) != len(rows) {
+				t.Errorf("a second poll left %d rows, want the %d the first wrote: %+v", len(again), len(rows), again)
+			}
+		})
+	}
+}
