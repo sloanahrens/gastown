@@ -8,6 +8,7 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -161,10 +162,26 @@ func TestLandingLabelFailsWhenTheNotesCannotBeRead(t *testing.T) {
 	}
 }
 
+// TestLandingLabelLeavesAMissingBeadUnlabeled drives the real notes store over
+// a rig that has a beads directory, with bd stubbed on PATH to answer not
+// found, so the bead's absence comes through the store rather than a fake. It
+// sets PATH, so it does not run in parallel.
 func TestLandingLabelLeavesAMissingBeadUnlabeled(t *testing.T) {
-	t.Parallel()
-	missing := fmt.Errorf("bead gt-a: %w", beads.ErrNotFound)
-	a := &landingAdapter{notes: &fakeLandingNotes{err: missing}}
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX bd stub")
+	}
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(town, landing.RigName, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	// Exit 20 is bd's own not-found status; beads reads it as ErrNotFound.
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nexit 20\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	a := &landingAdapter{notes: &townNotes{town: town, stores: map[string]*beads.Beads{}}}
 	lab, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
 	if err != nil {
 		t.Fatalf("Label error = %v, want a missing bead to read as unlabeled", err)
