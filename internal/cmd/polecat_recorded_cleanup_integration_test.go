@@ -4,7 +4,6 @@ package cmd
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,32 +12,27 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 )
 
-// initInventoryGitWorktree builds a real one-commit repo so the list path's
-// live probe has something to measure, the same way a polecat worktree does.
+// initInventoryGitWorktree builds a real polecat worktree so the list path's
+// live probe has something to measure: a clone of an origin that carries main,
+// checked out on the polecat's branch at main's tip. The origin is the
+// comparison ref the probe judges the branch against; a repo with no origin
+// reads as unknown, not clean (gt-sg75r).
 func initInventoryGitWorktree(t *testing.T) string {
 	t.Helper()
-	dir := t.TempDir()
-	for _, args := range [][]string{
-		{"init", "-b", "polecat/topaz"},
-		{"config", "user.email", "test@test.com"},
-		{"config", "user.name", "Test User"},
-	} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin")
+	dir := filepath.Join(root, "work")
+	runGitCmd(t, root, "init", "--bare", "-b", "main", origin)
+	runGitCmd(t, root, "clone", origin, dir)
+	runGitCmd(t, dir, "config", "user.email", "test@test.com")
+	runGitCmd(t, dir, "config", "user.name", "Test User")
 	if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("# Test\n"), 0644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	for _, args := range [][]string{{"add", "."}, {"commit", "-m", "initial"}} {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = dir
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v: %s", args, err, out)
-		}
-	}
+	runGitCmd(t, dir, "add", ".")
+	runGitCmd(t, dir, "commit", "-m", "initial")
+	runGitCmd(t, dir, "push", "origin", "main")
+	runGitCmd(t, dir, "checkout", "-b", "polecat/topaz")
 	return dir
 }
 
