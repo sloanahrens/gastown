@@ -1,0 +1,179 @@
+package stale
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"io"
+	"math"
+	"os/exec"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/doltserver"
+	"github.com/steveyegge/gastown/internal/jev"
+	"github.com/steveyegge/gastown/internal/jev/battery"
+)
+
+// DefaultMaxUSDPerDay is the daily cap when the config names none. What the
+// cap counts is battery.Cap's to say.
+const DefaultMaxUSDPerDay = 1.0
+
+// closeLanded is the close reason the landing worker writes on a bead whose
+// change landed.
+const closeLanded = "landed"
+
+// hmSearchLimit is how many hits one hm query asks for.
+const hmSearchLimit = 3 * MaxLanded
+
+// Settings is the operator's configuration for the pass, read from
+// patrols.jev_stale.
+type Settings struct {
+	// MaxUSDPerDay is the daily cap. Zero takes DefaultMaxUSDPerDay.
+	MaxUSDPerDay float64
+	// USDPerBillionTokens prices the ledger's tokens. It is required: the
+	// ledger stores tokens, never dollars.
+	USDPerBillionTokens float64
+}
+
+// Open wires the production pass for a town: the Jev client writing to the
+// usage ledger under the Caller name, the hm search when hm is installed, the
+// beads of each rig, and the spend read from the same ledger. warnings
+// receives the ledger's own warnings and may be nil.
+func Open(townRoot string, rigs []string, s Settings, warnings io.Writer) (*Pass, error) {
+	price := s.USDPerBillionTokens
+	if !(price > 0 && !math.IsInf(price, 0)) {
+		return nil, fmt.Errorf("jev_stale.usd_per_billion_tokens is required and must be above zero, not %v", price)
+	}
+	capUSD := s.MaxUSDPerDay
+	if capUSD == 0 {
+		capUSD = DefaultMaxUSDPerDay
+	}
+	if !(capUSD > 0 && !math.IsInf(capUSD, 0)) {
+		return nil, fmt.Errorf("jev_stale.max_usd_per_day must be above zero, not %v", capUSD)
+	}
+
+	client, err := jev.NewClient(
+		jev.WithLedger(jev.UsageLedgerPath(townRoot)),
+		jev.WithCaller(Caller),
+		jev.WithWarnings(warnings),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("opening the Jev client: %w", err)
+	}
+
+	town := battery.Cap{Ledger: jev.UsageLedgerPath(townRoot), MaxUSDPerDay: capUSD, USDPerBillionTokens: price}
+
+	var searcher Searcher
+	if _, err := exec.LookPath("hm"); err == nil {
+		searcher = hmSearcher{}
+	}
+
+	return &Pass{
+		Asker:    client,
+		Searcher: searcher,
+		Beads:    townBeads{townRoot: townRoot},
+		Rigs:     rigs,
+		LogPath:  LogPath(townRoot),
+		Allows:   func() (bool, error) { return town.Allows(time.Now) },
+	}, nil
+}
+
+// hmSearcher runs hm query for a rig.
+type hmSearcher struct {
+	// run executes hm with args and returns its stdout. Nil runs the hm on the
+	// PATH.
+	run func(ctx context.Context, args ...string) ([]byte, error)
+}
+
+// Search runs `hm query --json` and returns the bead IDs among its hits, best
+// first. The text follows a -- so a title that begins with a dash is not read
+// as a flag.
+func (h hmSearcher) Search(ctx context.Context, rig, text string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, hmTimeout)
+	defer cancel()
+	run := h.run
+	if run == nil {
+		run = runHM
+	}
+	out, err := run(ctx, "query", "--json",
+		"--rig", rig, "--limit", strconv.Itoa(hmSearchLimit), "--", text)
+	if err != nil {
+		return nil, fmt.Errorf("hm query: %w", err)
+	}
+	return parseHitIDs(out)
+}
+
+func runHM(ctx context.Context, args ...string) ([]byte, error) {
+	return exec.CommandContext(ctx, "hm", args...).Output()
+}
+
+// parseHitIDs decodes hm query --json output and keeps the bead hits, in the
+// order hm ranked them.
+func parseHitIDs(out []byte) ([]string, error) {
+	var raw []struct {
+		Kind string `json:"kind"`
+		ID   string `json:"id"`
+	}
+	if err := json.Unmarshal(out, &raw); err != nil {
+		return nil, fmt.Errorf("hm query: decoding hits: %w", err)
+	}
+	ids := make([]string, 0, len(raw))
+	for _, r := range raw {
+		if r.Kind == "bead" && r.ID != "" {
+			ids = append(ids, r.ID)
+		}
+	}
+	return ids, nil
+}
+
+// townBeads reads each rig's beads through the beads client. It never writes.
+type townBeads struct {
+	townRoot string
+}
+
+// Open lists a rig's open beads. A rig with no beads directory is an error for
+// that rig alone.
+func (t townBeads) Open(rig string) ([]*beads.Issue, error) {
+	b, err := t.rig(rig)
+	if err != nil {
+		return nil, err
+	}
+	return b.List(beads.ListOptions{Status: "open"})
+}
+
+// Landed lists a rig's beads closed as landed at or after since.
+func (t townBeads) Landed(rig string, since time.Time) ([]*beads.Issue, error) {
+	b, err := t.rig(rig)
+	if err != nil {
+		return nil, err
+	}
+	closed, err := b.List(beads.ListOptions{Status: "closed", ClosedAfter: since})
+	if err != nil {
+		return nil, err
+	}
+	var out []*beads.Issue
+	for _, c := range closed {
+		if strings.TrimSpace(c.CloseReason) == closeLanded {
+			out = append(out, c)
+		}
+	}
+	return out, nil
+}
+
+func (t townBeads) rig(rig string) (*beads.Beads, error) {
+	dir := doltserver.FindRigBeadsDir(t.townRoot, rig)
+	if dir == "" {
+		return nil, fmt.Errorf("no beads directory for rig %s", rig)
+	}
+	return beads.New(dir), nil
+}
+
+// Ensure the production dependencies satisfy the pass's seams.
+var (
+	_ Asker    = (*jev.Client)(nil)
+	_ Searcher = hmSearcher{}
+	_ Beads    = townBeads{}
+)
