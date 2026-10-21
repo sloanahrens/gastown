@@ -390,9 +390,13 @@ func TestRebuildGTRequestedInstallRetriesPastTheInterval(t *testing.T) {
 		}
 		return cliReply{}
 	})
-	// A cycle reached its verdict just now: the interval has not elapsed, so
-	// only the drain request can make the job run.
-	if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now()); err != nil {
+	// A cycle reached its verdict inside the patrol interval but past the
+	// install window: the interval has not elapsed and the window has, so
+	// only the drain request can make the job run. A verdict recorded just
+	// now would hold the request for the window instead (gt-aiby1), which is
+	// the coalescing under test elsewhere, so the seed is the oldest instant
+	// at which the request is still the only thing making the job run.
+	if err := savePatrolLastRun(d.config.TownRoot, "rebuild_gt", d.clk().Now().Add(-45*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
 	d.requestRebuildGTInstall()

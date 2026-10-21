@@ -116,12 +116,21 @@ func evaluatePatrolDue(townRoot, patrol string, inMemory, now time.Time, interva
 		lastRun, found, err = inMemory, true, nil
 	}
 
+	return patrolDueFromLastRun(lastRun, found, err, corruptWarn, now, interval)
+}
+
+// patrolDueFromLastRun is evaluatePatrolDue's decision over a record the
+// caller has already read. A caller that reads the record for a second purpose
+// as well — rebuild_gt holds a request for a minimum interval before a forced
+// run — decides both from one read, so the two cannot disagree about whether
+// the state was readable.
+func patrolDueFromLastRun(lastRun time.Time, found bool, loadErr error, warn string, now time.Time, interval time.Duration) patrolDueDecision {
 	switch {
-	case err != nil:
+	case loadErr != nil:
 		return patrolDueDecision{
 			due:  true,
 			note: "running the check because the last-run state cannot be read",
-			warn: fmt.Sprintf("last-run state unreadable (%v)", err),
+			warn: fmt.Sprintf("last-run state unreadable (%v)", loadErr),
 		}
 	case !found:
 		return patrolDueDecision{due: true, note: "no last-run record"}
@@ -129,9 +138,9 @@ func evaluatePatrolDue(townRoot, patrol string, inMemory, now time.Time, interva
 
 	elapsed := now.Sub(lastRun).Round(time.Minute)
 	if elapsed >= interval {
-		return patrolDueDecision{due: true, note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval), warn: corruptWarn}
+		return patrolDueDecision{due: true, note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval), warn: warn}
 	}
-	return patrolDueDecision{note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval), warn: corruptWarn}
+	return patrolDueDecision{note: fmt.Sprintf("last run %s ago, interval %v", elapsed, interval), warn: warn}
 }
 
 // shortPatrolCheckTick returns a check cadence for a due-ness-gated patrol

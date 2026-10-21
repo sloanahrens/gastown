@@ -563,6 +563,19 @@ type Daemon struct {
 	rebuildGTRunning   atomic.Bool
 	rebuildGTRequested atomic.Bool
 	rebuildGTBlock     rebuildGTBlock
+	// rebuildGTRequestMu makes rebuildGTRequested and rebuildGTInstallNow one
+	// request rather than two flags: a gt:install-now marker is armed and
+	// consumed with the request it belongs to, so it can neither be lost with
+	// a request a cycle is taking nor be left behind for a later plain one.
+	rebuildGTRequestMu sync.Mutex
+	// rebuildGTInstallNow marks the pending request as one a gt:install-now
+	// landing made: it skips the minimum install interval a plain landing's
+	// request waits out.
+	rebuildGTInstallNow atomic.Bool
+	// rebuildGTWindowLogged is the latch on the "waiting for the window" log
+	// line, so one held request logs once rather than once per heartbeat; a
+	// cycle that runs resets it.
+	rebuildGTWindowLogged atomic.Bool
 
 	// rebuildGTCycleDoneFn, when non-nil, is called on the cycle's own
 	// goroutine as it ends, after rebuildGTRunning clears. Test seam
