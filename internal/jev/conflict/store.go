@@ -136,13 +136,27 @@ func newer(a, b placement) time.Time {
 }
 
 // beadFault reports whether err blames the bead's request rather than the
-// pass's reach: Jev refused this request (a 4xx other than 401) or accepted it
-// and answered unusably. Only a bead fault counts an attempt against the pair;
-// any other failure stops the pass where it is, so an outage costs no attempts.
+// pass's reach: Jev refused this request, or accepted it and answered
+// unusably. A refusal of the credential (401) or of the account (402 and 403)
+// is about the pass's reach, not the beads. Only a bead fault counts an
+// attempt against the pair; any other failure stops the pass where it is, so
+// an outage costs no attempts.
 func beadFault(err error) bool {
 	var se *jev.StatusError
 	if errors.As(err, &se) {
-		return se.Status >= 400 && se.Status < 500 && se.Status != http.StatusUnauthorized
+		return se.Status >= 400 && se.Status < 500 &&
+			se.Status != http.StatusUnauthorized &&
+			!accountRefusal(se.Status)
 	}
 	return errors.Is(err, jev.ErrBadResponse)
+}
+
+// accountRefusal reports whether a 4xx answers for the account rather than for
+// this request: 402 Payment Required and 403 Forbidden refuse, or would refuse,
+// every request the key makes, so a pair that fails under them says nothing
+// about the beads. Counting such a failure would spend the pair's maxAttempts
+// on an account or billing problem and give the pair up for good; holding the
+// cursor instead asks it again once the account can answer.
+func accountRefusal(status int) bool {
+	return status == http.StatusPaymentRequired || status == http.StatusForbidden
 }
