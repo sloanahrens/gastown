@@ -47,6 +47,13 @@ const (
 // ErrBusy means another pass holds the run lock.
 var ErrBusy = errors.New("another jev rules pass is running")
 
+// errRefused means the containment check refused a session's transcript, so
+// the session gets no line.
+var errRefused = errors.New("the containment check refused the transcript")
+
+// errNoTranscript means the seat has no worktree, or no transcript in it.
+var errNoTranscript = errors.New("no transcript for the seat")
+
 // Asker asks one battery. *jev.Client satisfies it.
 type Asker interface {
 	Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error)
@@ -166,11 +173,13 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			break
 		}
 
-		line, logged, err := p.ask(ctx, d)
-		if err != nil {
+		line, err := p.ask(ctx, d)
+		switch {
+		case errors.Is(err, errRefused):
+			sum.Refused++
+		case err != nil:
 			return sum, fmt.Errorf("asking about %s: %w", d.Bead, err)
-		}
-		if logged {
+		default:
 			if err := battery.Append(p.LogPath, line); err != nil {
 				return sum, err
 			}
@@ -179,8 +188,6 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			} else {
 				sum.Unanswered++
 			}
-		} else {
-			sum.Refused++
 		}
 		if err := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: d.SubmittedAt, ID: d.Bead}); err != nil {
 			return sum, err
@@ -190,12 +197,11 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 }
 
 // ask reads one submission's transcript excerpt and asks the battery about it.
-// It returns logged=false with no error when the containment check refuses the
-// transcript: such a submission gets no line. A failure about the session
-// itself returns a line with a reason. Only a context that ended, or
-// Jev out of reach, returns an error, so the pass stops with the cursor before
-// this submission.
-func (p *Pass) ask(ctx context.Context, d Done) (Line, bool, error) {
+// A transcript the containment check refuses returns errRefused, and the
+// submission gets no line. A failure about the session itself returns a line
+// with a reason and no error. Only a context that ended, or Jev out of reach,
+// returns an error, so the pass stops with the cursor before this submission.
+func (p *Pass) ask(ctx context.Context, d Done) (Line, error) {
 	line := Line{
 		TS:              p.now(),
 		Rig:             d.Rig,
@@ -205,44 +211,51 @@ func (p *Pass) ask(ctx context.Context, d Done) (Line, bool, error) {
 		QuestionVersion: Version,
 	}
 
-	worktree := p.Locate(d.Rig, d.Polecat)
-	if worktree == "" {
-		line.Reason = ReasonNoTranscript
-		return line, true, nil
-	}
-	path, err := p.Latest(worktree)
-	if err != nil {
-		line.Reason = ReasonNoTranscript
-		return line, true, nil
-	}
-	excerpt, err := progress.TranscriptTail(p.TownRoot, worktree, path, excerptRunes)
+	excerpt, err := p.excerpt(d)
 	switch {
 	case errors.Is(err, progress.ErrOutsideTown):
-		return line, false, nil
+		return Line{}, errRefused
+	case errors.Is(err, errNoTranscript):
+		line.Reason = ReasonNoTranscript
+		return line, nil
 	case err != nil:
 		line.Reason = ReasonTranscriptUnreadable
-		return line, true, nil
+		return line, nil
 	case strings.TrimSpace(excerpt) == "":
 		line.Reason = ReasonNoTranscript
-		return line, true, nil
+		return line, nil
 	}
 	sum := sha256.Sum256([]byte(excerpt))
 	line.ExcerptSHA256 = hex.EncodeToString(sum[:])
 
 	got, err := p.Asker.Ask(ctx, State{Excerpt: excerpt}, Questions())
-	if err != nil {
-		if cerr := ctx.Err(); cerr != nil {
-			return line, false, cerr
-		}
-		if errors.Is(err, jev.ErrBadResponse) {
-			line.Reason = ReasonBadResponse
-			return line, true, nil
-		}
-		return line, false, err
+	switch {
+	case err == nil:
+		line.Answers = answersFrom(got)
+		line.Model = got.Model
+	case ctx.Err() != nil:
+		return line, ctx.Err()
+	case errors.Is(err, jev.ErrBadResponse):
+		line.Reason = ReasonBadResponse
+	default:
+		return line, err
 	}
-	line.Answers = answersFrom(got)
-	line.Model = got.Model
-	return line, true, nil
+	return line, nil
+}
+
+// excerpt returns the tail of d's session transcript. A seat with no worktree or
+// no transcript returns errNoTranscript; the containment check's refusal comes
+// back as progress.ErrOutsideTown.
+func (p *Pass) excerpt(d Done) (string, error) {
+	worktree := p.Locate(d.Rig, d.Polecat)
+	if worktree == "" {
+		return "", errNoTranscript
+	}
+	path, err := p.Latest(worktree)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errNoTranscript, err)
+	}
+	return progress.TranscriptTail(p.TownRoot, worktree, path, excerptRunes)
 }
 
 // answersFrom reads the battery's answers out of one Ask result.
