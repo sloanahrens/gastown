@@ -936,6 +936,12 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 				return unknown("escalations unreadable", err)
 			}
 			if v.Verdict != EscalationResolved {
+				// Detail is "" for not-stopped. This branch already read the
+				// record as the ESCALATED stop, so that answer should not come
+				// back, but a held seat must still say why it was skipped.
+				if v.Detail == "" {
+					return skip("agent_state stuck: exit ESCALATED, escalation verdict " + string(v.Verdict))
+				}
 				return skip(v.Detail)
 			}
 			recovery, released = ExitEscalated, v.ID
