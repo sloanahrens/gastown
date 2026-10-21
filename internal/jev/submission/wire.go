@@ -117,7 +117,8 @@ func ClonePath(townRoot string) string {
 }
 
 // recordWindow is how many of the newest first-sight records a pass reads. A
-// pass never reads more, so its read stays flat as submissions accumulate.
+// pass reads more only when a backlog still fills the window after the trim, so
+// its read stays flat as submissions accumulate.
 const recordWindow = 500
 
 // rigBeads reads a rig's submissions: the first-sight records the landing
@@ -141,9 +142,9 @@ type rigBeads struct {
 // When the log is longer than recordWindow, Since first trims it of the records
 // no pass can still ask about: those seen before t whose bead is not waiting at
 // the head they name. A waiting bead keeps its record, because the dedupe below
-// still needs it. If the trimmed log is still longer than the window, Since
-// returns an error: reading only the newest records would drop a waiting
-// bead's record and ask that bead a second time.
+// still needs it. If the trimmed log is still longer than the window, a backlog
+// is waiting, and Since reads the whole log: reading only the newest records
+// would drop a waiting bead's record and ask that bead a second time.
 func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 	waiting, err := r.b.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1, Limit: 0})
 	if err != nil {
@@ -180,11 +181,13 @@ func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 		if recs, err = land.ReadRecentSubmissionRecords(r.records, recordWindow+1); err != nil {
 			return nil, err
 		}
-		// A window that is still full cannot show every record the dedupe
-		// needs. Reading on without them would ask a waiting bead twice, so
-		// the pass fails instead.
+		// A window still full after the trim is a backlog. The records past
+		// the window are the ones the dedupe needs, so the whole log is read,
+		// and Run drains the backlog oldest first, moving the cursor as it goes.
 		if len(recs) > recordWindow {
-			return nil, fmt.Errorf("jev submission: %s holds more than %d records the pass may still ask about; the pass cannot read them all", r.records, recordWindow)
+			if recs, err = land.ReadSubmissionRecords(r.records); err != nil {
+				return nil, err
+			}
 		}
 	}
 

@@ -318,10 +318,11 @@ func TestJevSubmissionListerLeavesALogOfTheWindowSizeUntrimmed(t *testing.T) {
 	}
 }
 
-// When the trimmed log still holds more records than the window, the pass fails
-// rather than read a window that misses a waiting bead's record: reading on
-// would ask that bead a second time.
-func TestJevSubmissionListerFailsWhenTheTrimmedLogOverflowsTheWindow(t *testing.T) {
+// A backlog longer than the window is drained, not refused: every record at or
+// after the cursor is listed once, and the waiting bead whose record is the
+// oldest, before the cursor, is not listed again. The window cannot show that
+// record, so the whole log is read.
+func TestJevSubmissionListerDrainsABacklogLargerThanTheWindow(t *testing.T) {
 	t.Parallel()
 	since := t0.Add(-time.Hour)
 	records := filepath.Join(t.TempDir(), land.SubmissionsSeenFile)
@@ -331,19 +332,35 @@ func TestJevSubmissionListerFailsWhenTheTrimmedLogOverflowsTheWindow(t *testing.
 	if err := battery.Append(records, held); err != nil {
 		t.Fatal(err)
 	}
-	for i := range recordWindow {
-		rec := land.SubmissionRecord{SeenAt: since.Add(time.Duration(i+1) * time.Second), Bead: fmt.Sprintf("gt-new-%d", i), Head: "h-new", Target: "main"}
+	known := map[string]*beads.Issue{}
+	for i := range recordWindow + 1 {
+		id := fmt.Sprintf("gt-new-%d", i)
+		rec := land.SubmissionRecord{SeenAt: since.Add(time.Duration(i+1) * time.Second), Bead: id, Head: "h-new", Target: "main"}
 		if err := battery.Append(records, rec); err != nil {
 			t.Fatal(err)
 		}
+		known[id] = &beads.Issue{ID: id, Status: "closed"}
 	}
 	heldIssue := &beads.Issue{ID: "gt-held", Status: "open", Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(land.Work{
 		Branch: "polecat/x/gt-held", Head: "h-held", Target: "main", Submitted: since.Add(-time.Hour),
 	})}
 
-	_, err := rigBeads{b: &recordingLister{waiting: []*beads.Issue{heldIssue}}, records: records}.Since(since)
-	if err == nil {
-		t.Fatal("Since() read a window that cannot show every record the dedupe needs")
+	got, err := rigBeads{b: &recordingLister{waiting: []*beads.Issue{heldIssue}, byID: known}, records: records}.Since(since)
+	if err != nil {
+		t.Fatalf("Since() on a backlog larger than the window: %v", err)
+	}
+	listed := map[string]bool{}
+	for _, e := range got {
+		if listed[e.Issue.ID] {
+			t.Errorf("%s listed twice", e.Issue.ID)
+		}
+		listed[e.Issue.ID] = true
+	}
+	if len(got) != recordWindow+1 {
+		t.Fatalf("Since() listed %d entries, want all %d records at or after the cursor", len(got), recordWindow+1)
+	}
+	if listed["gt-held"] {
+		t.Error("the waiting bead whose record predates the cursor was listed again")
 	}
 }
 

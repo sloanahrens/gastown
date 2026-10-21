@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -572,6 +573,67 @@ func TestJevSubmissionCapStopsThePass(t *testing.T) {
 	cur, _, _ := battery.ReadCursor(r.pass.CursorPath)
 	if !cur.Time.Equal(t0) {
 		t.Errorf("a capped pass moved the cursor to %v", cur.Time)
+	}
+}
+
+// A backlog larger than the window drains through Run: each submission is asked
+// once, the cursor moves past the last of them, and a second pass asks nothing.
+func TestRunAdvancesTheCursorPastABacklogLargerThanTheWindow(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	records := filepath.Join(t.TempDir(), land.SubmissionsSeenFile)
+	known := map[string]*beads.Issue{}
+	for i := range recordWindow + 1 {
+		id := fmt.Sprintf("gt-new-%d", i)
+		rec := land.SubmissionRecord{
+			SeenAt: t0.Add(time.Duration(i+1) * time.Second), Bead: id, Rig: RigName,
+			Branch: "polecat/opal/" + id, Head: "head-" + id, Target: "main",
+			Subjects: []string{"fix: do the thing (" + id + ")"}, Numstat: "10\t2\tinternal/x.go\n",
+		}
+		if err := battery.Append(records, rec); err != nil {
+			t.Fatal(err)
+		}
+		known[id] = &beads.Issue{ID: id, Status: "closed"}
+	}
+	r.pass.Submissions = rigBeads{b: &recordingLister{byID: known}, records: records}
+
+	sum, err := r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatalf("first pass over a backlog larger than the window: %v", err)
+	}
+	if sum.Asked != recordWindow+1 {
+		t.Fatalf("first pass asked %d, want all %d", sum.Asked, recordWindow+1)
+	}
+	cur, _, err := battery.ReadCursor(r.pass.CursorPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := t0.Add(time.Duration(recordWindow+1) * time.Second); !cur.Time.Equal(want) {
+		t.Fatalf("cursor = %v, want it moved to the last submission at %v", cur.Time, want)
+	}
+	lines, err := ReadRecent(r.pass.LogPath, recordWindow+1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asked := map[string]int{}
+	for _, l := range lines {
+		asked[l.Bead]++
+	}
+	for id, n := range asked {
+		if n != 1 {
+			t.Errorf("%s asked %d times, want once", id, n)
+		}
+	}
+	if len(asked) != recordWindow+1 {
+		t.Fatalf("log holds %d submissions, want %d", len(asked), recordWindow+1)
+	}
+
+	sum, err = r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second pass: %v", err)
+	}
+	if sum.Asked != 0 {
+		t.Fatalf("second pass asked %d, want none: the backlog was already drained", sum.Asked)
 	}
 }
 
