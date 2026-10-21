@@ -76,6 +76,23 @@ func (t *townNotes) Show(rig, bead string) (*beads.Issue, error) {
 	return b.Show(bead)
 }
 
+// ShowAll reads several of a rig's beads in as few calls as it can. A rig whose
+// store cannot be opened, a bead it does not hold and a failed call all leave
+// the bead out of the result, for the caller to read one at a time. The error
+// says which batch read failed; the result still holds what was read.
+func (t *townNotes) ShowAll(rig string, ids []string) (map[string]*beads.Issue, error) {
+	b, err := t.store(rig)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s's beads: %w", rig, err)
+	}
+	return showAll(b, ids)
+}
+
+// rigShowAller reads several of a rig's beads at once. townNotes is one.
+type rigShowAller interface {
+	ShowAll(rig string, ids []string) (map[string]*beads.Issue, error)
+}
+
 // List reads the rig's beads matching opts. A rig with no beads directory fails
 // the listing rather than listing none: a rule that reads an empty list would
 // label as if it had looked.
@@ -112,6 +129,41 @@ type landingAdapter struct {
 
 	// findings gathers the finding beads Label sees, for Context.
 	findings findingTally
+
+	// batched holds the notes Prefetch read in one batch per rig, by rig and
+	// bead. Label reads a bead missing from it the one-at-a-time way.
+	batched map[string]string
+}
+
+// Prefetch reads the notes of every landed bead in one call per rig.
+func (a *landingAdapter) Prefetch(_ context.Context, items []Item) {
+	a.batched = nil
+	all, ok := a.notes.(rigShowAller)
+	if !ok {
+		return
+	}
+	byRig := map[string][]string{}
+	for _, it := range items {
+		byRig[landingRig(it)] = append(byRig[landingRig(it)], it.ID)
+	}
+	a.batched = map[string]string{}
+	for rig, ids := range byRig {
+		got, err := all.ShowAll(rig, ids)
+		if err != nil {
+			warnf("reading %s's landed beads in a batch: %v", rig, err)
+		}
+		for id, issue := range got {
+			a.batched[rig+"/"+id] = issue.Notes
+		}
+	}
+}
+
+// landingRig is the rig a landing item's bead lives in.
+func landingRig(item Item) string {
+	if rig := item.Refs[refRig]; rig != "" {
+		return rig
+	}
+	return landing.RigName
 }
 
 // findingTally is the finding beads the FAIL lines named, each once. Label adds
@@ -193,16 +245,17 @@ func (a *landingAdapter) Parse(raw []byte) (Item, error) {
 // would otherwise leave every landing of that rig unlabeled with a clean exit.
 // A FAIL's finding beads are collected for Context.
 func (a *landingAdapter) Label(_ context.Context, item Item) (Labeling, error) {
-	rig := item.Refs[refRig]
-	if rig == "" {
-		rig = landing.RigName
-	}
-	notes, err := a.notes.Notes(rig, item.ID)
-	if errors.Is(err, beads.ErrNotFound) && !errors.Is(err, errNoRigBeads) {
-		return Labeling{}, nil
-	}
-	if err != nil {
-		return Labeling{}, fmt.Errorf("reading %s's notes: %w", item.ID, err)
+	rig := landingRig(item)
+	notes, batched := a.batched[rig+"/"+item.ID]
+	if !batched {
+		var err error
+		notes, err = a.notes.Notes(rig, item.ID)
+		if errors.Is(err, beads.ErrNotFound) && !errors.Is(err, errNoRigBeads) {
+			return Labeling{}, nil
+		}
+		if err != nil {
+			return Labeling{}, fmt.Errorf("reading %s's notes: %w", item.ID, err)
+		}
 	}
 	verdict, ok := land.OverseerReviewVerdict(notes, item.Refs[refHead])
 	if !ok {

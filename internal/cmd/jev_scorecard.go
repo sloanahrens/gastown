@@ -19,6 +19,7 @@ var (
 	jevScorecardBattery string
 	jevScorecardSince   string
 	jevScorecardJSON    bool
+	jevScorecardLines   bool
 )
 
 var jevScorecardCmd = &cobra.Command{
@@ -38,7 +39,9 @@ no-signal otherwise. The command is read-only.
 --battery is required. An unknown name is an error that lists the registered
 batteries. --since keeps only the lines stamped in the window ending now, given
 as Nd for days or a Go duration such as 36h. --json prints the same report as
-JSON.
+JSON. The testsel battery asks about every package of every change, so its
+--json report leaves out the per-item rows (the totals stay); --lines prints
+them.
 
 Examples:
   gt jev scorecard --battery fixture
@@ -52,6 +55,7 @@ func init() {
 	f.StringVar(&jevScorecardBattery, "battery", "", "Battery to score (required)")
 	f.StringVar(&jevScorecardSince, "since", "", "Score only lines from this window ending now: Nd or a Go duration (default: all time)")
 	f.BoolVar(&jevScorecardJSON, "json", false, "Print the report as JSON")
+	f.BoolVar(&jevScorecardLines, "lines", false, "With --json, print every item's labeling for a battery that leaves them out by default")
 	_ = jevScorecardCmd.MarkFlagRequired("battery")
 	jevCmd.AddCommand(jevScorecardCmd)
 }
@@ -61,19 +65,19 @@ func runJevScorecard(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("finding the town root: %w", err)
 	}
-	return jevScorecardWithFlags(cmd.Context(), cmd.OutOrStdout(), townRoot, jevScorecardBattery, jevScorecardSince, jevScorecardJSON, time.Now())
+	return jevScorecardWithFlags(cmd.Context(), cmd.OutOrStdout(), townRoot, jevScorecardBattery, jevScorecardSince, jevScorecardJSON, jevScorecardLines, time.Now())
 }
 
 // jevScorecardWithFlags resolves the window and the battery, then prints the
 // report for the town at townRoot.
-func jevScorecardWithFlags(ctx context.Context, w io.Writer, townRoot, battery, since string, asJSON bool, now time.Time) error {
-	return jevScorecardWithOpener(ctx, w, townRoot, battery, since, asJSON, now, scorecard.Open)
+func jevScorecardWithFlags(ctx context.Context, w io.Writer, townRoot, battery, since string, asJSON, withLines bool, now time.Time) error {
+	return jevScorecardWithOpener(ctx, w, townRoot, battery, since, asJSON, withLines, now, scorecard.Open)
 }
 
 // jevScorecardWithOpener is jevScorecardWithFlags with the adapter opener
 // passed in, so a test can put fakes behind an adapter that reads the rig's
 // beads.
-func jevScorecardWithOpener(ctx context.Context, w io.Writer, townRoot, battery, since string, asJSON bool, now time.Time,
+func jevScorecardWithOpener(ctx context.Context, w io.Writer, townRoot, battery, since string, asJSON, withLines bool, now time.Time,
 	open func(battery, townRoot string) (scorecard.Adapter, error)) error {
 	from, err := parseSince(since, now)
 	if err != nil {
@@ -88,6 +92,9 @@ func jevScorecardWithOpener(ctx context.Context, w io.Writer, townRoot, battery,
 		return err
 	}
 	if asJSON {
+		if _, bulky := a.(scorecard.Bulky); bulky && !withLines {
+			rep.Lines, rep.LinesOmitted = nil, true
+		}
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		return enc.Encode(rep)

@@ -99,7 +99,7 @@ func TestScorecardFindingGolden(t *testing.T) {
 
 	var out bytes.Buffer
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
-	if err := jevScorecardWithOpener(context.Background(), &out, town, scorecard.FindingBattery, "", false, now, open); err != nil {
+	if err := jevScorecardWithOpener(context.Background(), &out, town, scorecard.FindingBattery, "", false, false, now, open); err != nil {
 		t.Fatal(err)
 	}
 

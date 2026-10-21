@@ -92,14 +92,22 @@ type townClone struct {
 
 // Run runs git in the town's bare clone.
 func (c *townClone) Run(ctx context.Context, args ...string) (string, error) {
-	if c.clone == nil {
-		clone, err := submission.OpenClone(c.town)
-		if err != nil {
-			return "", err
-		}
-		c.clone = clone
+	if err := c.open(); err != nil {
+		return "", err
 	}
 	return c.clone.Run(ctx, args...)
+}
+
+func (c *townClone) open() error {
+	if c.clone != nil {
+		return nil
+	}
+	clone, err := submission.OpenClone(c.town)
+	if err != nil {
+		return err
+	}
+	c.clone = clone
+	return nil
 }
 
 // docEdit is one commit on the docs branch that changed a doc file.
@@ -125,6 +133,15 @@ type docGit struct {
 // Edits returns each commit on the docs branch that changed doc, oldest first,
 // with the doc's text before it and its diff.
 func (g docGit) Edits(ctx context.Context, doc string) ([]docEdit, error) {
+	if git, ok := g.git.(inputGit); ok {
+		return g.editsBatched(ctx, git, doc)
+	}
+	return g.editsOneByOne(ctx, doc)
+}
+
+// editsOneByOne is Edits with three git calls per edit. It is the path for a
+// git that cannot take input, and the reference editsBatched must agree with.
+func (g docGit) editsOneByOne(ctx context.Context, doc string) ([]docEdit, error) {
 	log, err := g.git.Run(ctx, "log", "--reverse", "--no-merges", "--format=%H%x00%P%x00%ct", docTarget, "--", doc)
 	if err != nil {
 		return nil, err

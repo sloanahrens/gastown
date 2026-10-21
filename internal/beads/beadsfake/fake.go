@@ -12,6 +12,7 @@ package beadsfake
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -262,6 +263,7 @@ func (f *Fake) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 			opts.Assignee != "" && is.Assignee != opts.Assignee,
 			opts.NoAssignee && is.Assignee != "",
 			opts.IssueType != "" && is.Type != opts.IssueType,
+			len(opts.IDs) > 0 && !slices.Contains(opts.IDs, is.ID),
 			!opts.ClosedAfter.IsZero() && !closedAtOrAfter(is, opts.ClosedAfter),
 			!opts.CreatedAfter.IsZero() && !createdAtOrAfter(is, opts.CreatedAfter):
 			continue

@@ -389,6 +389,12 @@ func TestParseJevScorecard(t *testing.T) {
  "lines":[{"id":"a","labeled":true},{"id":"b","labeled":false},{"id":"c","labeled":true}]}`,
 			JevBattery{Name: "finding", Lines: 3, Labeled: 2, Questions: []JevQuestion{
 				{ID: "any_duplicate", Verdict: "not-yet"}, {ID: "fix_worthy", Verdict: "earning"}}}},
+		{"the labeled total stands in for rows the report left out", `{"battery":"testsel","items":9000,"labeled":6000,"lines_omitted":true,
+ "questions":[{"id":"affects_tests","verdict":"earning"}]}`,
+			JevBattery{Name: "testsel", Lines: 9000, Labeled: 6000, Questions: []JevQuestion{{ID: "affects_tests", Verdict: "earning"}}}},
+		{"the labeled total is the one the report states", `{"battery":"finding","items":2,"labeled":1,
+ "questions":[],"lines":[{"id":"a","labeled":true},{"id":"b","labeled":false}]}`,
+			JevBattery{Name: "finding", Lines: 2, Labeled: 1}},
 		{"no log is an empty report", `{"battery":"landing","items":0,"lines_skipped":0,"questions":[]}`,
 			JevBattery{Name: "landing"}},
 		{"the text report's lines are optional", `{"battery":"dispatch","items":5,

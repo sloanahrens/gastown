@@ -351,8 +351,16 @@ func runGit(ctx context.Context, dir string, args ...string) (string, error) {
 
 // runGitEnv runs git in dir with environ as the caller's environment.
 func runGitEnv(ctx context.Context, environ []string, dir string, args ...string) (string, error) {
+	return runGitInput(ctx, environ, dir, "", args...)
+}
+
+// runGitInput is runGitEnv with input on git's standard input.
+func runGitInput(ctx context.Context, environ []string, dir, input string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
 	cmd.Env = gitEnv(environ)
+	if input != "" {
+		cmd.Stdin = strings.NewReader(input)
+	}
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {

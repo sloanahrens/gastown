@@ -11,9 +11,14 @@ import (
 type Report struct {
 	Battery string `json:"battery"`
 	// Since is the window's start; nil means all time.
-	Since        *time.Time `json:"since,omitempty"`
-	Items        int        `json:"items"`
-	LinesSkipped int        `json:"lines_skipped"`
+	Since *time.Time `json:"since,omitempty"`
+	Items int        `json:"items"`
+	// Labeled is how many items a rule labeled: the count of Lines whose
+	// Labeled is set, kept apart so a report without its Lines still has it. It
+	// is always printed, 0 included: a reader that ignores unknown keys is
+	// unaffected, and one that wants the count never has to guess an absent key.
+	Labeled      int `json:"labeled"`
+	LinesSkipped int `json:"lines_skipped"`
 	// LogMissing is set when the battery has no log yet. The report is then
 	// empty, which is the normal state before a battery's first line.
 	LogMissing bool `json:"log_missing,omitempty"`
@@ -25,6 +30,9 @@ type Report struct {
 	// Lines is each parsed item's labeling and the rule that set it. The text
 	// report leaves it out; the JSON report names the rule for every line.
 	Lines []LineReport `json:"lines,omitempty"`
+	// LinesOmitted is set when the report leaves Lines out on purpose, as for a
+	// Bulky battery; --lines prints them.
+	LinesOmitted bool `json:"lines_omitted,omitempty"`
 }
 
 // LineReport is one parsed item's labeling: whether a rule labeled it, which

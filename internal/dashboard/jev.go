@@ -173,6 +173,7 @@ func ParseJevScorecard(out []byte) (*JevBattery, error) {
 	var rep struct {
 		Battery   string `json:"battery"`
 		Items     *int   `json:"items"`
+		Labeled   *int   `json:"labeled"`
 		Questions []struct {
 			ID      string `json:"id"`
 			Verdict string `json:"verdict"`
@@ -188,9 +189,15 @@ func ParseJevScorecard(out []byte) (*JevBattery, error) {
 		return nil, errors.New("jev scorecard: the report has no battery or items")
 	}
 	b := &JevBattery{Name: rep.Battery, Lines: *rep.Items}
-	for _, l := range rep.Lines {
-		if l.Labeled {
-			b.Labeled++
+	// A report without its rows still carries the total; an older one has only
+	// the rows.
+	if rep.Labeled != nil {
+		b.Labeled = *rep.Labeled
+	} else {
+		for _, l := range rep.Lines {
+			if l.Labeled {
+				b.Labeled++
+			}
 		}
 	}
 	for _, q := range rep.Questions {

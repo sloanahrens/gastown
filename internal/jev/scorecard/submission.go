@@ -236,6 +236,25 @@ func (a *submissionAdapter) Label(_ context.Context, item Item) (Labeling, error
 	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, " ")}, nil
 }
 
+// Prefetch reads the notes of every submitted bead in one call, so notesFor
+// finds them cached. Context drops them with the rest of the build's state.
+func (a *submissionAdapter) Prefetch(_ context.Context, items []Item) {
+	all, ok := a.notes.(rigShowAller)
+	if !ok {
+		return
+	}
+	got, err := all.ShowAll(submission.RigName, itemIDs(items))
+	if err != nil {
+		warnf("reading the submitted beads in a batch: %v", err)
+	}
+	for id, issue := range got {
+		if a.beadNotes == nil {
+			a.beadNotes = map[string]string{}
+		}
+		a.beadNotes[id] = issue.Notes
+	}
+}
+
 // notesFor reads bead's notes once and keeps them for the bead's other
 // submissions.
 func (a *submissionAdapter) notesFor(bead string) (string, error) {

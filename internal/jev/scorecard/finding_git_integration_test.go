@@ -74,3 +74,106 @@ func TestIntegrationRigDiffsChangedLines(t *testing.T) {
 		t.Errorf("ChangedLines(missing commit) error = %v, want ErrNoCommit", err)
 	}
 }
+
+// PrefetchLines sizes the commits of a window in two git calls, and ChangedLines
+// then answers for each exactly as the call-per-commit path does: the changed
+// lines against the first parent for an ordinary commit and a merge, abbreviated
+// names, ErrNoCommit for a commit the repo lacks, and the same failure for a
+// root commit.
+func TestIntegrationRigDiffsPrefetchMatchesPerCommit(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	town := t.TempDir()
+	repo := filepath.Join(town, dedupe.RigName, "mayor", "rig")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name, text string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(repo, name), []byte(text), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitIn(t, repo, "init", "-q", "-b", "main")
+	write("a.txt", "1\n2\n3\n")
+	gitIn(t, repo, "add", "-A")
+	gitIn(t, repo, "commit", "-q", "-m", "root")
+	root := gitIn(t, repo, "rev-parse", "HEAD")
+	write("a.txt", "1\n2\n3\n4\n5\n")
+	gitIn(t, repo, "commit", "-q", "-am", "grow")
+	grow := gitIn(t, repo, "rev-parse", "HEAD")
+	gitIn(t, repo, "checkout", "-q", "-b", "side")
+	write("b.txt", "x\ny\nz\nw\n")
+	gitIn(t, repo, "add", "-A")
+	gitIn(t, repo, "commit", "-q", "-m", "side work")
+	gitIn(t, repo, "checkout", "-q", "main")
+	write("a.txt", "1\n2\n3\n4\n5\n6\n")
+	gitIn(t, repo, "commit", "-q", "-am", "main work")
+	gitIn(t, repo, "merge", "-q", "--no-ff", "-m", "merge side", "side")
+	merge := gitIn(t, repo, "rev-parse", "HEAD")
+	write("bin.dat", "\x00\x01\x02")
+	gitIn(t, repo, "add", "-A")
+	gitIn(t, repo, "commit", "-q", "-m", "binary")
+	binary := gitIn(t, repo, "rev-parse", "HEAD")
+	gitIn(t, repo, "commit", "-q", "--allow-empty", "-m", "empty")
+	empty := gitIn(t, repo, "rev-parse", "HEAD")
+
+	commits := []string{grow, merge, binary, empty, root, grow[:9], merge[:7], "0123abc4567def"}
+	// The sizes the call-per-commit path reports are the reference.
+	plain := rigDiffs{town: town}
+	type answer struct {
+		n   int
+		err string
+	}
+	ask := func(d rigDiffs, commit string) answer {
+		n, err := d.ChangedLines(ctx, commit)
+		if err != nil {
+			if errors.Is(err, ErrNoCommit) {
+				return answer{err: "no commit"}
+			}
+			return answer{err: "failed"}
+		}
+		return answer{n: n}
+	}
+	want := map[string]answer{}
+	for _, c := range commits {
+		want[c] = ask(plain, c)
+	}
+	if want[grow] != (answer{n: 2}) || want[merge].n == 0 || want[root].err != "failed" {
+		t.Fatalf("the reference answers are not the fixture's: %+v", want)
+	}
+
+	sizes := &diffSizes{}
+	// Every git call is counted: the prefetch is two for all the commits, and the
+	// answers for the commits it sized make none.
+	var calls int
+	batched := rigDiffs{town: town, sizes: sizes, run: func(ctx context.Context, stdin string, args ...string) ([]byte, error) {
+		calls++
+		cmd := exec.CommandContext(ctx, "git", args...)
+		if stdin != "" {
+			cmd.Stdin = strings.NewReader(stdin)
+		}
+		return cmd.Output()
+	}}
+	batched.PrefetchLines(ctx, commits)
+	if calls != 2 {
+		t.Errorf("PrefetchLines made %d git calls for %d commits, want 2", calls, len(commits))
+	}
+	for _, c := range commits {
+		if got := ask(batched, c); got != want[c] {
+			t.Errorf("ChangedLines(%s) after PrefetchLines = %+v, per-commit path = %+v", c, got, want[c])
+		}
+	}
+	// Only the root commit is left to git: the log has no parent to size it by.
+	if calls != 2+2 {
+		t.Errorf("after the answers, git was called %d times in all, want the prefetch's 2 and the root commit's own 2", calls)
+	}
+	for _, c := range []string{grow, merge, binary, empty, grow[:9], merge[:7]} {
+		if _, ok := sizes.lines[c]; !ok {
+			t.Errorf("PrefetchLines left %s to a git call of its own", c)
+		}
+	}
+	if !sizes.absent["0123abc4567def"] {
+		t.Errorf("PrefetchLines did not record the missing commit as absent")
+	}
+}

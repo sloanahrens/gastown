@@ -50,7 +50,7 @@ const gitTimeout = time.Minute
 
 func init() {
 	Register(FindingBattery, func(townRoot string) Adapter {
-		return NewFinding(townRoot, rigBeads{town: townRoot}, rigDiffs{town: townRoot})
+		return NewFinding(townRoot, rigBeads{town: townRoot}, rigDiffs{town: townRoot, sizes: &diffSizes{}})
 	})
 }
 
@@ -77,11 +77,54 @@ func NewFinding(townRoot string, b BeadReader, d DiffSizer) Adapter {
 	return &finding{town: townRoot, beads: b, diffs: d}
 }
 
+// diffPrefetcher is a DiffSizer that can size many commits in one pass, so the
+// ChangedLines that follow answer from what it read.
+type diffPrefetcher interface {
+	PrefetchLines(ctx context.Context, commits []string)
+}
+
 // finding labels the dedupe log's lines from the finding bead's close reason.
 type finding struct {
 	town  string
 	beads BeadReader
 	diffs DiffSizer
+
+	// issues holds the beads Prefetch read in one batch, by id. Label reads a
+	// bead missing from it the one-at-a-time way.
+	issues map[string]*beads.Issue
+}
+
+// Prefetch reads every finding bead in one batch, then sizes every landed
+// commit their close reasons name in one pass, so Label makes no call per item.
+func (f *finding) Prefetch(ctx context.Context, items []Item) {
+	issues, err := showAll(f.beads, itemIDs(items))
+	if err != nil {
+		warnf("reading the finding beads in a batch: %v", err)
+	}
+	f.issues = issues
+	dp, ok := f.diffs.(diffPrefetcher)
+	if !ok {
+		return
+	}
+	var commits []string
+	for _, issue := range f.issues {
+		if issue.Status != "closed" {
+			continue
+		}
+		if r := parseCloseReason(issue.CloseReason); r.landed && r.commit != "" {
+			commits = append(commits, r.commit)
+		}
+	}
+	dp.PrefetchLines(ctx, commits)
+}
+
+// show reads one finding bead, from the batch when Prefetch read it.
+func (f *finding) show(id string) (*beads.Issue, error) {
+	// issues holds only beads the batch found, never a nil.
+	if issue := f.issues[id]; issue != nil {
+		return issue, nil
+	}
+	return f.beads.Show(id)
 }
 
 func (finding) Battery() string   { return FindingBattery }
@@ -122,7 +165,7 @@ func (finding) Parse(raw []byte) (Item, error) {
 // Label reads the finding bead and labels the line from its close reason. A
 // bead still open, or one that no longer exists, leaves the line unlabeled.
 func (f *finding) Label(ctx context.Context, item Item) (Labeling, error) {
-	issue, err := f.beads.Show(item.ID)
+	issue, err := f.show(item.ID)
 	if errors.Is(err, beads.ErrNotFound) {
 		return Labeling{}, nil
 	}
@@ -299,14 +342,166 @@ func (r rigBeads) Show(id string) (*beads.Issue, error) {
 	return beads.New(dir).Show(id)
 }
 
-// rigDiffs sizes a landed commit in the finding rig's git repo.
-type rigDiffs struct{ town string }
+// ShowMultiple reads several finding beads in one call. A bead the rig does not
+// hold is left out of the result.
+func (r rigBeads) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	dir := doltserver.FindRigBeadsDir(r.town, dedupe.RigName)
+	if dir == "" {
+		return nil, fmt.Errorf("no beads directory for rig %s", dedupe.RigName)
+	}
+	return beads.New(dir).ShowMultiple(ids)
+}
+
+// ListByIDs reads several finding beads in one query. A bead the rig does not
+// hold is left out of the result.
+func (r rigBeads) ListByIDs(ids []string) (map[string]*beads.Issue, error) {
+	dir := doltserver.FindRigBeadsDir(r.town, dedupe.RigName)
+	if dir == "" {
+		return nil, fmt.Errorf("no beads directory for rig %s", dedupe.RigName)
+	}
+	return beads.ListByIDs(beads.New(dir), ids)
+}
+
+// rigDiffs sizes a landed commit in the finding rig's git repo. Its sizes, when
+// set, hold what PrefetchLines read; without them every commit costs two git
+// calls.
+//
+// rigDiffs is passed by value, so sizes is a pointer: PrefetchLines fills the
+// diffSizes the adapter's copy points to, and every copy then reads from it.
+type rigDiffs struct {
+	town  string
+	sizes *diffSizes
+	// run runs git with stdin and returns its stdout; nil means the git on
+	// PATH. A test counts the calls through it.
+	run func(ctx context.Context, stdin string, args ...string) ([]byte, error)
+}
+
+// git runs git with args and stdin, and returns its stdout.
+func (r rigDiffs) git(ctx context.Context, stdin string, args ...string) ([]byte, error) {
+	if r.run != nil {
+		return r.run(ctx, stdin, args...)
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	if stdin != "" {
+		cmd.Stdin = strings.NewReader(stdin)
+	}
+	return cmd.Output()
+}
+
+// diffSizes is the commits PrefetchLines sized, by the name the close reason
+// gave. A commit in absent is one the repo does not hold. A commit in neither
+// map was not prefetched, or git could not answer for it, and ChangedLines
+// asks git about it directly.
+type diffSizes struct {
+	lines  map[string]int
+	absent map[string]bool
+}
+
+// prefetchChunk bounds how many commits go on one git command line.
+const prefetchChunk = 200
+
+// PrefetchLines sizes commits with two git calls per prefetchChunk of them: one
+// cat-file --batch-check that finds which the repo holds, and one log --numstat
+// over those. It records nothing for a commit it cannot answer for, which
+// ChangedLines then asks git about by itself and reports as it always did; it
+// says on stderr when a git call failed, since that costs two calls per commit.
+func (r rigDiffs) PrefetchLines(ctx context.Context, commits []string) {
+	repo := rigRepo(filepath.Join(r.town, dedupe.RigName))
+	if repo == "" || r.sizes == nil {
+		return
+	}
+	var names []string
+	seen := map[string]bool{}
+	for _, c := range commits {
+		if commitName.MatchString(c) && !seen[c] {
+			seen[c] = true
+			names = append(names, c)
+		}
+	}
+	read := diffSizes{lines: map[string]int{}, absent: map[string]bool{}}
+	for len(names) > 0 {
+		n := min(prefetchChunk, len(names))
+		if err := r.prefetchChunk(ctx, repo, names[:n], &read); err != nil {
+			warnf("sizing %d landed commits in a batch: %v", n, err)
+		}
+		names = names[n:]
+	}
+	*r.sizes = read
+}
+
+// prefetchChunk sizes names into into, and returns the git failure that left
+// some of them unanswered.
+func (r rigDiffs) prefetchChunk(ctx context.Context, repo string, names []string, into *diffSizes) error {
+	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	defer cancel()
+
+	var in strings.Builder
+	for _, name := range names {
+		in.WriteString(name + "^{commit}\n")
+	}
+	out, err := r.git(ctx, in.String(), "-C", repo, "cat-file", "--batch-check=%(objectname) %(objecttype)")
+	if err != nil {
+		return fmt.Errorf("git cat-file --batch-check: %w", err)
+	}
+	answers := strings.Split(strings.TrimRight(string(out), "\n"), "\n")
+	if len(answers) != len(names) {
+		return fmt.Errorf("git cat-file --batch-check answered %d of %d names", len(answers), len(names))
+	}
+
+	var held []string
+	byFull := map[string][]string{}
+	for i, answer := range answers {
+		switch fields := strings.Fields(answer); {
+		case len(fields) == 2 && fields[1] == "commit":
+			if _, dup := byFull[fields[0]]; !dup {
+				held = append(held, fields[0])
+			}
+			byFull[fields[0]] = append(byFull[fields[0]], names[i])
+		case strings.HasSuffix(answer, " missing"):
+			into.absent[names[i]] = true
+		}
+	}
+	if len(held) == 0 {
+		return nil
+	}
+
+	// --diff-merges=first-parent is the first-parent diff the single call asks
+	// for with commit^..commit. The header starts with \x01, which no numstat
+	// line does, and splitLogBlocks cuts only where a line starts with it.
+	args := append([]string{"-C", repo, "log", "--no-walk=unsorted", "--numstat", "--no-renames",
+		"--diff-merges=first-parent", "--format=%x01%H %P"}, held...)
+	logOut, err := r.git(ctx, "", args...)
+	if err != nil {
+		return fmt.Errorf("git log --numstat: %w", err)
+	}
+	for _, block := range splitLogBlocks(string(logOut)) {
+		head, body, _ := strings.Cut(block, "\n")
+		fields := strings.Fields(head)
+		// A root commit has no parent to diff against: the single call fails on
+		// it, and so must the report.
+		if len(fields) < 2 {
+			continue
+		}
+		for _, name := range byFull[fields[0]] {
+			into.lines[name] = numstatLines(body)
+		}
+	}
+	return nil
+}
 
 func (r rigDiffs) ChangedLines(ctx context.Context, commit string) (int, error) {
 	// A name that is not bare hex could read as a git option, so it never
 	// reaches the command line.
 	if !commitName.MatchString(commit) {
 		return 0, fmt.Errorf("commit %q is not a hex object name", commit)
+	}
+	if r.sizes != nil {
+		if n, ok := r.sizes.lines[commit]; ok {
+			return n, nil
+		}
+		if r.sizes.absent[commit] {
+			return 0, ErrNoCommit
+		}
 	}
 	repo := rigRepo(filepath.Join(r.town, dedupe.RigName))
 	if repo == "" {
@@ -318,7 +513,7 @@ func (r rigDiffs) ChangedLines(ctx context.Context, commit string) (int, error) 
 	// rev-parse exits 1 for a commit the repo does not hold, and 128 for a
 	// repo it cannot read, which must fail the report. cat-file -e exits 128
 	// for both, so it cannot tell them apart.
-	err := exec.CommandContext(ctx, "git", "-C", repo, "rev-parse", "--verify", "--quiet", commit+"^{commit}").Run()
+	_, err := r.git(ctx, "", "-C", repo, "rev-parse", "--verify", "--quiet", commit+"^{commit}")
 	var exit *exec.ExitError
 	if errors.As(err, &exit) && exit.ExitCode() == 1 {
 		return 0, ErrNoCommit
@@ -326,8 +521,8 @@ func (r rigDiffs) ChangedLines(ctx context.Context, commit string) (int, error) 
 	if err != nil {
 		return 0, fmt.Errorf("git rev-parse %s: %w", commit, err)
 	}
-	out, err := exec.CommandContext(ctx, "git", "-C", repo,
-		"diff", "--numstat", "--no-renames", commit+"^.."+commit).Output()
+	out, err := r.git(ctx, "", "-C", repo,
+		"diff", "--numstat", "--no-renames", commit+"^.."+commit)
 	if err != nil {
 		return 0, fmt.Errorf("git diff %s: %w", commit, err)
 	}
