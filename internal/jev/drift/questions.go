@@ -43,12 +43,12 @@ func Questions() map[string]jev.Question {
 				"doc_section describes. Pick none when the section describes nothing the change " +
 				"touches, and unclear when the state does not show it.",
 			Options: map[string]string{
-				"command":    "A command or subcommand the section documents.",
-				"flag":       "A flag the section documents.",
-				"config_key": "A config key the section documents.",
-				"behavior":   "Behavior the section describes.",
-				"none":       "Nothing the change touches is in the section.",
-				"unclear":    "The state does not show what the section describes.",
+				KindCommand:   "A command or subcommand the section documents.",
+				KindFlag:      "A flag the section documents.",
+				KindConfigKey: "A config key the section documents.",
+				KindBehavior:  "Behavior the section describes.",
+				"none":        "Nothing the change touches is in the section.",
+				"unclear":     "The state does not show what the section describes.",
 			},
 		},
 	}

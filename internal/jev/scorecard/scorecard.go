@@ -55,7 +55,7 @@ type sample struct {
 // zero since keeps all), and reports each question. A line that does not parse
 // is skipped and counted; a missing log is an empty report.
 func Build(ctx context.Context, a Adapter, since time.Time) (Report, error) {
-	items, skipped, err := readItems(a.LogPath(), a.Parse, since)
+	items, skipped, err := readItems(a.LogPath(), parseLines(a), since)
 	if err != nil {
 		return Report{}, err
 	}
@@ -93,7 +93,22 @@ func Build(ctx context.Context, a Adapter, since time.Time) (Report, error) {
 	return rep, nil
 }
 
-func readItems(path string, parse func([]byte) (Item, error), since time.Time) ([]Item, int, error) {
+// parseLines reads a line into its items: an Expander's ParseLines, or the one
+// item its Parse returns.
+func parseLines(a Adapter) func([]byte) ([]Item, error) {
+	if e, ok := a.(Expander); ok {
+		return e.ParseLines
+	}
+	return func(raw []byte) ([]Item, error) {
+		it, err := a.Parse(raw)
+		if err != nil {
+			return nil, err
+		}
+		return []Item{it}, nil
+	}
+}
+
+func readItems(path string, parse func([]byte) ([]Item, error), since time.Time) ([]Item, int, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return nil, 0, nil
@@ -112,15 +127,17 @@ func readItems(path string, parse func([]byte) (Item, error), since time.Time) (
 		if len(raw) == 0 {
 			continue
 		}
-		it, err := parse(raw)
+		its, err := parse(raw)
 		if err != nil {
 			skipped++
 			continue
 		}
-		if !since.IsZero() && it.Time.Before(since) {
-			continue
+		for _, it := range its {
+			if !since.IsZero() && it.Time.Before(since) {
+				continue
+			}
+			items = append(items, it)
 		}
-		items = append(items, it)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, 0, fmt.Errorf("reading the log: %w", err)
