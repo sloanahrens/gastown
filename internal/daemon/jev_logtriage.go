@@ -78,8 +78,8 @@ func (d *Daemon) runJevLogtriage() {
 		d.logger.Printf("jev_logtriage: error: %v", err)
 		return
 	}
-	if sum.Asked > 0 || sum.Unanswered > 0 || sum.Dropped > 0 || sum.CapReached {
-		d.logger.Printf("jev_logtriage: asked %d groups, %d unanswered, %d dropped from %d matched lines (daily cap reached: %v)",
-			sum.Asked, sum.Unanswered, sum.Dropped, sum.Matched, sum.CapReached)
+	if sum.Asked > 0 || sum.Unanswered > 0 || sum.Deferred > 0 || sum.Dropped > 0 || sum.CapReached {
+		d.logger.Printf("jev_logtriage: asked %d groups, %d unanswered, %d deferred to the next pass, %d dropped from %d matched lines (daily cap reached: %v)",
+			sum.Asked, sum.Unanswered, sum.Deferred, sum.Dropped, sum.Matched, sum.CapReached)
 	}
 }

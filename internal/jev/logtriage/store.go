@@ -66,10 +66,23 @@ type Line struct {
 
 // Cursor is how far into the daemon log a pass has read. Inode names the file
 // it read, so a rotated log restarts at its first line; Offset is the byte
-// after the last complete line the pass consumed.
+// after the last complete line the pass consumed. Pending holds the groups a
+// pass's deadline ended before it asked about them, since their lines are
+// consumed and cannot be read again.
 type Cursor struct {
-	Inode  uint64 `json:"inode"`
-	Offset int64  `json:"offset"`
+	Inode   uint64         `json:"inode"`
+	Offset  int64          `json:"offset"`
+	Pending []pendingGroup `json:"pending,omitempty"`
+}
+
+// pendingGroup is a group carried to the next pass: its count, time range and
+// first samples so far.
+type pendingGroup struct {
+	Key     string    `json:"key"`
+	Count   int       `json:"count"`
+	First   time.Time `json:"first"`
+	Last    time.Time `json:"last"`
+	Samples []string  `json:"samples"`
 }
 
 // answersFrom reads every question's answer out of one Ask result.

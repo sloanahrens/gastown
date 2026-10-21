@@ -86,6 +86,9 @@ type Summary struct {
 	// Unanswered is the number of groups that got a line with a reason and no
 	// answers.
 	Unanswered int
+	// Deferred is the number of groups the pass's deadline ended before it asked
+	// about them. The next pass merges their lines into its own groups.
+	Deferred int
 	// Dropped is the number of groups the pass did not log: those past
 	// MaxGroupsPerPass, and those the day's cap stopped it before. Their lines
 	// are read once and not asked about again.
@@ -122,6 +125,25 @@ func (g *group) add(line string, at time.Time) {
 	}
 }
 
+// seedGroups starts a pass's groups from the ones the last pass carried over,
+// so their lines read now add to the counts they already hold.
+func seedGroups(pending []pendingGroup) map[string]*group {
+	groups := make(map[string]*group, len(pending))
+	for _, p := range pending {
+		groups[p.Key] = &group{key: p.Key, count: p.Count, first: p.First, last: p.Last, samples: p.Samples}
+	}
+	return groups
+}
+
+// pendingFrom carries the groups a deadline ended before asking, nil when none.
+func pendingFrom(groups []*group) []pendingGroup {
+	var out []pendingGroup
+	for _, g := range groups {
+		out = append(out, pendingGroup{Key: g.key, Count: g.count, First: g.first, Last: g.last, Samples: g.samples})
+	}
+	return out
+}
+
 // groupState is the state one group's question is asked about. Every value is
 // data, quoted in JSON.
 type groupState struct {
@@ -132,11 +154,12 @@ type groupState struct {
 	Samples []string `json:"samples"`
 }
 
-// Run does one pass. The lines are read, grouped and asked in one go, and the
-// log lines and the cursor are written only once every group has been asked,
-// so a context canceled partway asks the same lines again next pass and
-// writes nothing twice. Run returns ErrBusy when another pass holds the run
-// lock.
+// Run does one pass. The lines are read, grouped and asked, and the answers
+// collected are written with the cursor. When the context ends partway (the
+// pass's budget runs out), the answers so far are still written, and the
+// groups not yet asked are carried in the cursor, so the next pass asks them
+// with the lines it reads then. Run returns ErrBusy when another pass holds
+// the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
 	release, err := lockRun(p.CursorPath)
@@ -158,13 +181,12 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	if _, err := battery.ReadState(p.CursorPath, &cur); err != nil {
 		return sum, err
 	}
-	groups, end, err := p.scan(cur)
+	groups := seedGroups(cur.Pending)
+	matched, end, err := p.scan(groups, cur)
 	if err != nil {
 		return sum, err
 	}
-	for _, g := range groups {
-		sum.Matched += g.count
-	}
+	sum.Matched = matched
 	sum.Groups = len(groups)
 
 	ordered := orderGroups(groups)
@@ -175,9 +197,11 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 
 	now := p.now()
 	var lines []Line
+	var deferred []*group
 	for i, g := range ordered {
-		if err := ctx.Err(); err != nil {
-			return sum, err
+		if ctx.Err() != nil {
+			deferred = ordered[i:]
+			break
 		}
 		allowed, err := p.Allows()
 		if err != nil {
@@ -190,7 +214,8 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		}
 		line, err := p.ask(ctx, g, now)
 		if err != nil {
-			return sum, err
+			deferred = ordered[i:]
+			break
 		}
 		if line.Reason != "" {
 			sum.Unanswered++
@@ -199,37 +224,39 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		}
 		lines = append(lines, line)
 	}
+	sum.Deferred = len(deferred)
 
 	for _, line := range lines {
 		if err := battery.Append(p.LogPath, line); err != nil {
 			return sum, fmt.Errorf("writing the triage log: %w", err)
 		}
 	}
+	end.Pending = pendingFrom(deferred)
 	if err := battery.WriteState(p.CursorPath, end); err != nil {
 		return sum, err
 	}
 	return sum, nil
 }
 
-// scan reads the daemon log from the cursor to its last complete line and
-// groups the matching lines by pattern key. The file's inode and the cursor's
-// offset decide where the read starts: a rotated file, or one shorter than the
-// offset, starts at its first line. A last line with no newline yet is not
-// read, so the next pass reads it whole.
-func (p *Pass) scan(cur Cursor) (map[string]*group, Cursor, error) {
-	groups := map[string]*group{}
+// scan reads the daemon log from the cursor to its last complete line and adds
+// the matching lines to groups, by pattern key, and returns how many it
+// matched. The file's inode and the cursor's offset decide where the read
+// starts: a rotated file, or one shorter than the offset, starts at its first
+// line. A last line with no newline yet is not read, so the next pass reads it
+// whole.
+func (p *Pass) scan(groups map[string]*group, cur Cursor) (int, Cursor, error) {
 	f, err := os.Open(p.DaemonLog)
 	if errors.Is(err, fs.ErrNotExist) {
-		return groups, cur, nil
+		return 0, cur, nil
 	}
 	if err != nil {
-		return nil, cur, fmt.Errorf("opening the daemon log: %w", err)
+		return 0, cur, fmt.Errorf("opening the daemon log: %w", err)
 	}
 	defer func() { _ = f.Close() }()
 
 	fi, err := f.Stat()
 	if err != nil {
-		return nil, cur, fmt.Errorf("reading the daemon log: %w", err)
+		return 0, cur, fmt.Errorf("reading the daemon log: %w", err)
 	}
 	id := fileID(fi)
 	var start int64
@@ -237,24 +264,26 @@ func (p *Pass) scan(cur Cursor) (map[string]*group, Cursor, error) {
 		start = cur.Offset
 	}
 	if _, err := f.Seek(start, io.SeekStart); err != nil {
-		return nil, cur, fmt.Errorf("seeking the daemon log: %w", err)
+		return 0, cur, fmt.Errorf("seeking the daemon log: %w", err)
 	}
 
 	br := bufio.NewReaderSize(f, 64*1024)
 	pos := start
+	matched := 0
 	for {
 		raw, err := br.ReadBytes('\n')
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return nil, cur, fmt.Errorf("reading the daemon log: %w", err)
+			return 0, cur, fmt.Errorf("reading the daemon log: %w", err)
 		}
 		pos += int64(len(raw))
 		text := strings.TrimRight(string(raw), "\r\n")
 		if !matches(text) {
 			continue
 		}
+		matched++
 		key := PatternKey(text)
 		g := groups[key]
 		if g == nil {
@@ -263,13 +292,13 @@ func (p *Pass) scan(cur Cursor) (map[string]*group, Cursor, error) {
 		}
 		g.add(text, parseLogTime(text))
 	}
-	return groups, Cursor{Inode: id, Offset: pos}, nil
+	return matched, Cursor{Inode: id, Offset: pos}, nil
 }
 
 // ask asks one group's question set in one Jev call and builds its line. A
 // call that got an unusable reply or no reply at all logs a reason and no
-// answers; the lines are not read again. Only a canceled context returns an
-// error, so the pass stops and nothing is written.
+// answers; the lines are not read again. Only a done context returns an error,
+// and the caller carries the group to the next pass.
 func (p *Pass) ask(ctx context.Context, g *group, now time.Time) (Line, error) {
 	line := Line{
 		TS:              now,
