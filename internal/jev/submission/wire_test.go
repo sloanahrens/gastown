@@ -231,6 +231,60 @@ func TestJevSubmissionListerReadsRecordsThenUnrecordedWaitingBeads(t *testing.T)
 	}
 }
 
+// A log longer than the read window is trimmed of the records no pass can still
+// ask about: each seen before the cursor whose bead is not waiting at its head.
+// The waiting bead's old record survives the trim, so the bead is still not
+// asked twice, and the record past the cursor is asked once.
+func TestJevSubmissionListerTrimsRecordsNoPassCanAskAbout(t *testing.T) {
+	t.Parallel()
+	since := t0.Add(-time.Hour)
+	records := filepath.Join(t.TempDir(), land.SubmissionsSeenFile)
+	for i := range recordWindow {
+		rec := land.SubmissionRecord{SeenAt: since.Add(-time.Duration(i+1) * time.Second), Bead: fmt.Sprintf("gt-done-%d", i), Head: "h-done", Target: "main"}
+		if err := battery.Append(records, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, rec := range []land.SubmissionRecord{
+		{SeenAt: since.Add(-time.Hour), Bead: "gt-held", Head: "h-held", Target: "main"},
+		{SeenAt: since.Add(time.Minute), Bead: "gt-new", Head: "h-new", Target: "main"},
+	} {
+		if err := battery.Append(records, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	held := &beads.Issue{ID: "gt-held", Status: "open", Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(land.Work{
+		Branch: "polecat/x/gt-held", Head: "h-held", Target: "main", Submitted: since.Add(-time.Hour),
+	})}
+	rec := &recordingLister{
+		waiting: []*beads.Issue{held},
+		byID:    map[string]*beads.Issue{"gt-new": {ID: "gt-new", Status: "closed"}},
+	}
+
+	got, err := rigBeads{b: rec, records: records}.Since(since)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, e := range got {
+		ids = append(ids, e.Issue.ID)
+	}
+	if strings.Join(ids, " ") != "gt-new" {
+		t.Fatalf("Since() = %v, want only the record past the cursor", ids)
+	}
+	kept, err := land.ReadSubmissionRecords(records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var beadsKept []string
+	for _, k := range kept {
+		beadsKept = append(beadsKept, k.Bead)
+	}
+	if strings.Join(beadsKept, " ") != "gt-held gt-new" {
+		t.Fatalf("log after the trim holds %v, want the waiting bead's record and the one past the cursor", beadsKept)
+	}
+}
+
 // A record whose bead cannot be read is reported and left out, and the records
 // behind it are still listed, so one bad read does not stop the pass.
 func TestJevSubmissionListerSkipsARecordWhoseBeadCannotBeRead(t *testing.T) {

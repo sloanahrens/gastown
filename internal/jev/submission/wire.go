@@ -116,14 +116,20 @@ func ClonePath(townRoot string) string {
 	return filepath.Join(townRoot, constants.DirRuntime, "jev", "repos", RigName+".git")
 }
 
+// recordWindow is how many of the newest first-sight records a pass reads. A
+// pass never reads more, so its read stays flat as submissions accumulate.
+const recordWindow = 500
+
 // rigBeads reads a rig's submissions: the first-sight records the landing
-// worker wrote, and the waiting work beads that have none. It never writes.
+// worker wrote, and the waiting work beads that have none. Its only write is
+// trimming the first-sight log, and only when the log is longer than the
+// read window.
 type rigBeads struct {
 	b beadLister
 	// records is the first-sight log, land.SubmissionsSeenPath in production.
 	records string
-	// warnings receives a line for each record whose bead cannot be read. Nil
-	// drops them.
+	// warnings receives a line for each record whose bead cannot be read, and
+	// for a log the window cannot hold. Nil drops them.
 	warnings io.Writer
 }
 
@@ -131,11 +137,49 @@ type rigBeads struct {
 // waiting bead that no record names at its head. A record whose bead cannot be
 // read is reported and left out, so one bad read does not stop the pass for
 // the submissions behind it.
+//
+// When the log is longer than recordWindow, Since first trims it of the records
+// no pass can still ask about: those seen before t whose bead is not waiting at
+// the head they name. A waiting bead keeps its record, because the dedupe below
+// still needs it.
 func (r rigBeads) Since(t time.Time) ([]Entry, error) {
-	recs, err := land.ReadSubmissionRecords(r.records)
+	waiting, err := r.b.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1, Limit: 0})
 	if err != nil {
 		return nil, err
 	}
+	waitingKeys := make(map[string]bool, len(waiting))
+	var listed []Entry
+	for _, issue := range waiting {
+		if issue == nil || !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() {
+			continue
+		}
+		w, err := land.WorkFromBead(issue, RigName)
+		if err != nil {
+			continue
+		}
+		waitingKeys[land.SubmissionKey(issue.ID, w.Head)] = true
+		listed = append(listed, Entry{Issue: issue, Work: w, Seen: w.Submitted})
+	}
+
+	recs, err := land.ReadRecentSubmissionRecords(r.records, recordWindow)
+	if err != nil {
+		return nil, err
+	}
+	if len(recs) == recordWindow {
+		keep := func(rec land.SubmissionRecord) bool {
+			return !rec.SeenAt.Before(t) || waitingKeys[land.SubmissionKey(rec.Bead, rec.Head)]
+		}
+		if _, err := land.TrimSubmissionRecords(r.records, keep); err != nil {
+			r.warnf("jev submission: trimming %s: %v\n", r.records, err)
+		}
+		if recs, err = land.ReadRecentSubmissionRecords(r.records, recordWindow); err != nil {
+			return nil, err
+		}
+		if len(recs) == recordWindow {
+			r.warnf("jev submission: %s holds more than %d records the pass may still ask about, so the oldest are not read\n", r.records, recordWindow)
+		}
+	}
+
 	recorded := make(map[string]bool, len(recs))
 	var out []Entry
 	for _, rec := range recs {
@@ -151,9 +195,7 @@ func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 			continue
 		}
 		if err != nil {
-			if r.warnings != nil {
-				fmt.Fprintf(r.warnings, "jev submission: skipping %s at %s: reading the bead: %v\n", rec.Bead, rec.Head, err)
-			}
+			r.warnf("jev submission: skipping %s at %s: reading the bead: %v\n", rec.Bead, rec.Head, err)
 			continue
 		}
 		out = append(out, Entry{
@@ -168,21 +210,18 @@ func (r rigBeads) Since(t time.Time) ([]Entry, error) {
 		})
 	}
 
-	waiting, err := r.b.List(beads.ListOptions{Label: land.LabelReadyToLand, Priority: -1, Limit: 0})
-	if err != nil {
-		return nil, err
-	}
-	for _, issue := range waiting {
-		if issue == nil || !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() {
-			continue
+	for _, e := range listed {
+		if !recorded[land.SubmissionKey(e.Issue.ID, e.Work.Head)] {
+			out = append(out, e)
 		}
-		w, err := land.WorkFromBead(issue, RigName)
-		if err != nil || recorded[land.SubmissionKey(issue.ID, w.Head)] {
-			continue
-		}
-		out = append(out, Entry{Issue: issue, Work: w, Seen: w.Submitted})
 	}
 	return out, nil
+}
+
+func (r rigBeads) warnf(format string, args ...any) {
+	if r.warnings != nil {
+		fmt.Fprintf(r.warnings, format, args...)
+	}
 }
 
 // gitRunner runs one git command in dir and returns its standard output. The

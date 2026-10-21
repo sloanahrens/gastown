@@ -1,8 +1,13 @@
 package land
 
 import (
+	"bufio"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -10,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/jev/battery"
+	"github.com/steveyegge/gastown/internal/lock"
 )
 
 const (
@@ -57,11 +63,83 @@ func SubmissionsSeenPath(townRoot string) string {
 // ReadSubmissionRecords returns every record in the log at path, oldest first.
 // A missing log is empty, and a line that does not parse is skipped.
 func ReadSubmissionRecords(path string) ([]SubmissionRecord, error) {
+	return ReadRecentSubmissionRecords(path, math.MaxInt)
+}
+
+// ReadRecentSubmissionRecords returns the newest n records in the log at path,
+// oldest first. A missing log is empty, and a line that does not parse is
+// skipped before the n are taken.
+func ReadRecentSubmissionRecords(path string, n int) ([]SubmissionRecord, error) {
 	var recs []SubmissionRecord
-	if err := battery.ReadRecent(path, math.MaxInt, &recs); err != nil {
+	if err := battery.ReadRecent(path, n, &recs); err != nil {
 		return nil, err
 	}
 	return recs, nil
+}
+
+// TrimSubmissionRecords rewrites the log at path without the records keep
+// rejects, and returns how many it dropped. A kept line is copied byte for
+// byte, and a line that does not parse is kept, so the record shape never
+// changes. The rewrite holds the log's lock, the one Append takes, so no
+// record lands between the read and the rename.
+func TrimSubmissionRecords(path string, keep func(SubmissionRecord) bool) (int, error) {
+	// FlockAcquire creates a missing lock file at 0644, and the log is 0600,
+	// so a missing log is left alone before the lock is taken.
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	unlock, err := lock.FlockAcquire(path)
+	if err != nil {
+		return 0, fmt.Errorf("locking %s: %w", path, err)
+	}
+	defer unlock()
+
+	in, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("opening %s: %w", path, err)
+	}
+	defer func() { _ = in.Close() }()
+
+	out, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".trim-*")
+	if err != nil {
+		return 0, fmt.Errorf("creating the trimmed log: %w", err)
+	}
+	defer func() { _ = os.Remove(out.Name()) }()
+
+	dropped := 0
+	w := bufio.NewWriter(out)
+	sc := bufio.NewScanner(in)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		var rec SubmissionRecord
+		if strings.TrimSpace(line) != "" && json.Unmarshal([]byte(line), &rec) == nil && !keep(rec) {
+			dropped++
+			continue
+		}
+		if _, err := w.WriteString(line + "\n"); err != nil {
+			_ = out.Close()
+			return 0, fmt.Errorf("writing the trimmed log: %w", err)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		_ = out.Close()
+		return 0, fmt.Errorf("reading %s: %w", path, err)
+	}
+	if err := w.Flush(); err != nil {
+		_ = out.Close()
+		return 0, fmt.Errorf("writing the trimmed log: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return 0, fmt.Errorf("writing the trimmed log: %w", err)
+	}
+	if err := os.Rename(out.Name(), path); err != nil {
+		return 0, fmt.Errorf("replacing %s: %w", path, err)
+	}
+	return dropped, nil
 }
 
 // SubmissionKey names one submission by its bead and head, so a resubmission at
