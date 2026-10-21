@@ -1306,7 +1306,7 @@ func submitForLanding(r *doneRun) error {
 	if err := r.deps.pushSubmodules(baseRef); err != nil {
 		return err
 	}
-	if err := pushBranchForLanding(r, sub.sourceBD, head, baseRef); err != nil {
+	if err := pushBranchForLanding(r, sub.sourceBD, sub.sourceIssue, head, baseRef); err != nil {
 		return err
 	}
 	r.cleanupStatus = cleanupStatusAfterSuccessfulPush(r.cleanupStatus)
@@ -1581,15 +1581,16 @@ func acquirePresubmitSlot(ctx context.Context, r *doneRun) (func(), error) {
 // The remote is the rig's configured landing remote (gt-fn9e6.9), not an
 // assumed origin. Its resolution can fail closed; submitForLanding reaches it
 // first (gt-fn9e6.18).
-func pushBranchForLanding(r *doneRun, sourceBD beads.Client, head, baseRef string) error {
+func pushBranchForLanding(r *doneRun, sourceBD beads.Client, sourceIssue *beads.Issue, head, baseRef string) error {
 	remote, err := r.resolveLandingRemote()
 	if err != nil {
 		return err
 	}
 	fmt.Printf("Pushing branch to %s...\n", remote)
+	rework := reworkPushFor(sourceIssue, r.polecatName)
 	var lastPushErr error
 	attempt := func() error {
-		lastPushErr = pushBranchToOrigin(r.deps.repo, remote, r.townRoot, r.rigName, r.branch, head, baseRef)
+		lastPushErr = pushBranchToOrigin(r.deps.repo, remote, r.townRoot, r.rigName, r.branch, head, baseRef, rework)
 		return lastPushErr
 	}
 	firstErr := attempt()
@@ -1926,8 +1927,9 @@ func describePushVerificationFailure(g doneRepo, remote, branch, commit string, 
 // an ancestor of head, the change-sets are compared first
 // (recoverDivergedPush): a rebase or a rework on top of the remote's commits is
 // pushed over under the lease, and real divergence is refused (gt-bf5x,
-// gt-i0z3).
-func pushBranchToOrigin(g doneRepo, remote, townRoot, rigName, branch, head, baseRef string) error {
+// gt-i0z3). rework carries a rejected landing's head and this seat's name, so a
+// rework that changes content over the rejected submission is pushed too.
+func pushBranchToOrigin(g doneRepo, remote, townRoot, rigName, branch, head, baseRef string, rework reworkPush) error {
 	expected, err := g.PushRemoteBranchTip(remote, branch)
 	if err != nil {
 		return fmt.Errorf("reading %s/%s before the push: %w", remote, branch, err)
@@ -1938,7 +1940,7 @@ func pushBranchToOrigin(g doneRepo, remote, townRoot, rigName, branch, head, bas
 	refspec := "refs/heads/" + branch + ":refs/heads/" + branch
 	if expected != "" {
 		if contained, ancErr := g.IsAncestor(expected, head); ancErr != nil || !contained {
-			recovered, diagnosis, recoverErr := recoverDivergedPush(g, remote, refspec, branch, baseRef)
+			recovered, diagnosis, recoverErr := recoverDivergedPush(g, remote, refspec, branch, baseRef, rework)
 			switch {
 			case recovered:
 				fmt.Printf("%s Replaced %s/%s: %s\n", style.Bold.Render("✓"), remote, branch, diagnosis)

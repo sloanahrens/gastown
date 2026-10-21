@@ -205,6 +205,10 @@ func (f *fakeDoneRepo) FirstParentPatchIDs(base, head string) ([]git.PatchIDComm
 	return out, nil
 }
 
+func (f *fakeDoneRepo) FirstParentCommitSummaries(base, head string) ([]git.CommitSummary, error) {
+	return nil, nil
+}
+
 // PushForceWithLease pushes HEAD to the branch named by refspec's
 // destination, refusing when origin's tip is not the lease.
 func (f *fakeDoneRepo) PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error {

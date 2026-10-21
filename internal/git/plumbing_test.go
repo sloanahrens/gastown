@@ -406,3 +406,29 @@ func TestCommitAuthorSubjectUnknownCommit(t *testing.T) {
 	}
 	s.noUnscripted(t)
 }
+
+// Each commit line is "<sha>NUL<author>NUL<subject>", newest first. The subject
+// may hold colons and spaces; an empty range has no summaries.
+func TestFirstParentCommitSummariesParsesAuthorAndSubject(t *testing.T) {
+	t.Parallel()
+	const out = "bbb\x00capable\x00feat: second, with a colon: here\naaa\x00Sloan Ahrens\x00fix: first\n"
+	s := newScripted(map[string]reply{
+		"log --first-parent --format=%H%x00%an%x00%s a..b": ok(out),
+		"log --first-parent --format=%H%x00%an%x00%s h..h": ok(""),
+	})
+	g := newTestGit(t, s)
+	got, err := g.FirstParentCommitSummaries("a", "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []CommitSummary{
+		{SHA: "bbb", Author: "capable", Subject: "feat: second, with a colon: here"},
+		{SHA: "aaa", Author: "Sloan Ahrens", Subject: "fix: first"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("FirstParentCommitSummaries = %+v, want %+v", got, want)
+	}
+	if summaries, err := g.FirstParentCommitSummaries("h", "h"); err != nil || len(summaries) != 0 {
+		t.Errorf("empty range: FirstParentCommitSummaries = %v, %v", summaries, err)
+	}
+}

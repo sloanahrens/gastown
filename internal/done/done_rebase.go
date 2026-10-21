@@ -14,6 +14,7 @@ type divergedPushGit interface {
 	MergeBase(a, b string) (string, error)
 	PatchID(base, head string) (string, error)
 	FirstParentPatchIDs(base, head string) ([]git.PatchIDCommit, error)
+	FirstParentCommitSummaries(base, head string) ([]git.CommitSummary, error)
 	PushForceWithLease(remote, refspec, branchRef, expectedSHA string) error
 }
 
@@ -59,10 +60,16 @@ type divergedPushGit interface {
 // range the two functions agree commit-for-commit, so this changes nothing
 // there (gt-5wp5).
 //
+// A third shape is safe to lease-over only for a bead in rework: origin's tip
+// is the rejected head and holds only this seat's commits (see reworkPush). A
+// content-changing rework alters patch-ids, so the comparison above would call
+// it divergence; that tip is the refused submission, so overwriting it is the
+// point of the rework (gt-dq6p8).
+//
 // Returns recovered=true only when the leased push actually landed.
 // diagnosis is set whenever the comparison could be made, for inclusion in
 // error/alarm messages either way.
-func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target string) (recovered bool, diagnosis string, err error) {
+func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target string, rework reworkPush) (recovered bool, diagnosis string, err error) {
 	// A failed push doesn't itself update the local remote-tracking ref, so
 	// without a fresh fetch here origin/<branch> could still be whatever was
 	// last observed — stale enough to misjudge the comparison below (this is
@@ -98,10 +105,14 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 	if err != nil {
 		return false, "", fmt.Errorf("patch-ids of local range %s..%s: %w", localBase, localSHA, err)
 	}
+	originSummaries, err := g.FirstParentCommitSummaries(originBase, originSHA)
+	if err != nil {
+		return false, "", fmt.Errorf("commit summaries of origin range %s..%s: %w", originBase, originSHA, err)
+	}
 	originIDs := patchIDsOf(originPairs)
 	localIDs := patchIDsOf(localPairs)
 
-	missing := patchIDsMissingFrom(originIDs, localIDs)
+	missing := missingCommits(originPairs, localIDs)
 
 	// Whole-range equality is the only signal that survives a squash/amend:
 	// the patch-id of "A then B" is not the patch-id of "A and B squashed", so
@@ -121,10 +132,13 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 		}
 	}
 
+	refused := len(missing) > 0 && !rangeIdentical
 	switch {
-	case len(missing) > 0 && !rangeIdentical:
-		return false, fmt.Sprintf("origin=%s local=%s — origin has %d commit(s) whose changes are absent locally (%s) — real divergence, not just a rebase; nothing pushed so that work is not clobbered",
-			ShortSHA(originSHA), ShortSHA(localSHA), len(missing), strings.Join(missing, ", ")), nil
+	case refused && rework.allows(originSHA, originSummaries):
+		diagnosis = fmt.Sprintf("rework of the rejected submission, content changed (origin=%s is the head the rejection named, its %d commit(s) are all %s's; local=%s carries the rework)",
+			ShortSHA(originSHA), len(originSummaries), rework.seatAuthor, ShortSHA(localSHA))
+	case refused:
+		return false, divergenceRefusal(originSHA, localSHA, missing, originSummaries), nil
 	case len(originIDs) == 0:
 		diagnosis = fmt.Sprintf("no origin work at risk: origin/%s (%s) carries no commits of its own against %s (origin=%s local=%s)",
 			branch, ShortSHA(originSHA), target, ShortSHA(originSHA), ShortSHA(localSHA))
@@ -154,24 +168,43 @@ func patchIDsOf(pairs []git.PatchIDCommit) []string {
 	return ids
 }
 
-// patchIDsMissingFrom returns the patch-ids present in want but not in have,
-// as a multiset difference: a change applied twice on the origin side needs
-// two matching entries locally to count as accounted for. An empty result
-// means every change want carries is also in have.
-func patchIDsMissingFrom(want, have []string) []string {
+// missingCommits returns the origin commits whose patch-id is absent from have.
+// It is a multiset difference, so a change applied twice on origin needs two
+// matches locally, and each result keeps its commit for the refusal to name.
+func missingCommits(want []git.PatchIDCommit, have []string) []git.PatchIDCommit {
 	unmatched := make(map[string]int, len(have))
 	for _, id := range have {
 		unmatched[id]++
 	}
-	var missing []string
-	for _, id := range want {
-		if unmatched[id] > 0 {
-			unmatched[id]--
+	var missing []git.PatchIDCommit
+	for _, p := range want {
+		if unmatched[p.PatchID] > 0 {
+			unmatched[p.PatchID]--
 			continue
 		}
-		missing = append(missing, id)
+		missing = append(missing, p)
 	}
 	return missing
+}
+
+// divergenceRefusal is the message for origin holding changes local does not.
+// A patch-id hashes a diff, not a commit, so each id is named with the origin
+// commit it came from; a reader would otherwise look for a commit that does
+// not exist (gt-dq6p8).
+func divergenceRefusal(originSHA, localSHA string, missing []git.PatchIDCommit, origin []git.CommitSummary) string {
+	subjects := make(map[string]git.CommitSummary, len(origin))
+	for _, c := range origin {
+		subjects[c.SHA] = c
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "origin=%s local=%s — origin has %d commit(s) whose changes are absent locally — real divergence, not just a rebase; nothing pushed so that work is not clobbered\n",
+		ShortSHA(originSHA), ShortSHA(localSHA), len(missing))
+	b.WriteString("the ids below are patch-ids (git patch-id --stable), not commit shas; each names the origin commit it came from:")
+	for _, p := range missing {
+		c := subjects[p.Commit]
+		fmt.Fprintf(&b, "\n  patch-id %s = commit %s %s", p.PatchID, ShortSHA(p.Commit), c.Subject)
+	}
+	return b.String()
 }
 
 func ShortSHA(sha string) string {
