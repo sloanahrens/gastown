@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -368,6 +369,65 @@ func TestJevStaleAskFailureLogsNullAnswers(t *testing.T) {
 	}
 	if again, _ := p.Run(context.Background()); again.Unanswered != 0 || len(asker.states) != 1 {
 		t.Errorf("a failed bead was asked again within thirty days")
+	}
+}
+
+// A Jev call that got no reply logs ask_failed, and the next pass asks the bead
+// again: a transient outage does not hold it out for thirty days.
+func TestJevStaleTransientFailureIsAskedAgain(t *testing.T) {
+	t.Parallel()
+	asker := &fixedAsker{err: errors.New("jev: connection reset")}
+	b := fakeBeads{open: map[string][]*beads.Issue{"gastown": {openBead("gt-old", 20)}}}
+	p := newPass(t, asker, nil, b, "gastown")
+
+	if _, err := p.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lines := readLog(t, p.LogPath)
+	if len(lines) != 1 || lines[0].Answers != nil || lines[0].Reason != ReasonAskFailed {
+		t.Fatalf("line = %+v, want null answers with ask_failed", lines)
+	}
+
+	asker.err = nil
+	asker.ans = answers()
+	again, err := p.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.Asked != 1 || len(asker.states) != 2 {
+		t.Errorf("second pass = %+v after %d calls, want the bead asked", again, len(asker.states))
+	}
+}
+
+// hm query runs with the rig, the hit limit and the text after a --, so a title
+// that begins with a dash is read as text, not as a flag. Its hits come back in
+// rank order, and a failed run is an error the pass can fall back from.
+func TestJevStaleHMSearchRunsWithTextAfterDashes(t *testing.T) {
+	t.Parallel()
+	var got []string
+	h := hmSearcher{run: func(_ context.Context, args ...string) ([]byte, error) {
+		got = args
+		return []byte(`[{"kind":"bead","id":"land-2"},{"kind":"bead","id":"land-1"}]`), nil
+	}}
+
+	ids, err := h.Search(context.Background(), "gastown", "-n title")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"query", "--json", "--rig", "gastown", "--limit", strconv.Itoa(hmSearchLimit), "--", "-n title"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("hm argv = %q, want %q", got, want)
+	}
+	if want := []string{"land-2", "land-1"}; !reflect.DeepEqual(ids, want) {
+		t.Errorf("ids = %v, want %v in rank order", ids, want)
+	}
+
+	failing := hmSearcher{run: func(context.Context, ...string) ([]byte, error) {
+		return nil, errors.New("exit status 1")
+	}}
+	if _, err := failing.Search(context.Background(), "gastown", "x"); err == nil {
+		t.Error("a failed hm run returned no error")
 	}
 }
 

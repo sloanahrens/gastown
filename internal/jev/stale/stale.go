@@ -371,8 +371,10 @@ func searchText(b *beads.Issue) string {
 }
 
 // askedSince is the set of beads a pass has logged at or after since, keyed by
-// askKey. A line logged at all counts, answered or not, so a failing bead is
-// not asked again on every pass.
+// askKey. A line counts when Jev answered, or replied with something the pass
+// could not read (bad_response), so a bad reply is not asked again on every
+// pass. A line whose call got no reply (ask_failed) does not count: a transient
+// outage must not hold a bead out for thirty days, so the next pass asks it.
 func askedSince(logPath string, since time.Time) (map[string]bool, error) {
 	var lines []Line
 	if err := battery.ReadRecent(logPath, math.MaxInt, &lines); err != nil {
@@ -380,7 +382,7 @@ func askedSince(logPath string, since time.Time) (map[string]bool, error) {
 	}
 	out := make(map[string]bool)
 	for _, l := range lines {
-		if !l.TS.Before(since) {
+		if !l.TS.Before(since) && l.Reason != ReasonAskFailed {
 			out[askKey(l.Rig, l.Bead)] = true
 		}
 	}
