@@ -322,7 +322,7 @@ func tierSweepSectionBody(section, tier, subject, sha, item string) string {
 	case "acceptance":
 		return item
 	default:
-		return fmt.Sprintf("The ## Acceptance check covers %s on the %s tier. This section has no other ask.", subject, tier)
+		return fmt.Sprintf("The ## Acceptance check covers %s. This section has no other ask.", subject)
 	}
 }
 

@@ -92,8 +92,8 @@ func TestTierSweepBeadShapeUsesTheConfiguredTemplate(t *testing.T) {
 	// A section the sweep does not know still says what it covers, so it
 	// reads as the bead's own text rather than a stock placeholder.
 	testingBody := tierSweepSectionText(opts.Description, "Testing")
-	if !strings.Contains(testingBody, "integration tier") {
-		t.Errorf("## Testing body = %q, want it to name the failing tier", testingBody)
+	if !strings.Contains(testingBody, "./internal/cmd") {
+		t.Errorf("## Testing body = %q, want it to name the failing package", testingBody)
 	}
 }
 
