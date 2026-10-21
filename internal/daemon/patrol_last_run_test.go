@@ -192,3 +192,32 @@ func TestEvaluatePatrolDueUsesInMemoryWhenNewer(t *testing.T) {
 		t.Error("expected due=false: the in-memory completion is 1 minute old, well inside the 30m interval")
 	}
 }
+
+// TestEvaluatePatrolDueUsesInMemoryWhenTheRecordIsMissing covers the write that
+// leaves no record at all: the file cannot be created, so the next check sees a
+// missing record rather than a stale one. A completion this process remembers
+// still stands in for it, or every check would read the patrol as due and run
+// it again — for jev_dedupe, a pass that reaches hm and Jev (gt-4nqej).
+func TestEvaluatePatrolDueUsesInMemoryWhenTheRecordIsMissing(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	// The record's directory is a regular file, so no record can be created.
+	if err := os.WriteFile(filepath.Join(townRoot, "daemon"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+
+	dec := evaluatePatrolDue(townRoot, "jev_dedupe", now.Add(-time.Minute), now, 15*time.Minute)
+	if dec.due {
+		t.Errorf("due=true one minute into a 15m interval: the in-memory completion must stand in for the missing record (%s)", dec.note)
+	}
+	if dec.warn != "" {
+		t.Errorf("warn = %q, want none: the failed write was logged when it happened", dec.warn)
+	}
+
+	// With no completion to remember there is nothing to go on, so the patrol
+	// still runs rather than going silent on state it cannot read.
+	if dec := evaluatePatrolDue(townRoot, "jev_dedupe", time.Time{}, now, 15*time.Minute); !dec.due {
+		t.Error("due=false with no record on disk and no in-memory completion")
+	}
+}

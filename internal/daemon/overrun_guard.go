@@ -414,6 +414,16 @@ func (d *Daemon) runOverrunGuard(s overrunSeams) {
 				who, seat.Bead, elapsed.Round(time.Second))
 			continue
 		}
+		if dry && waiting && escalationSpent < maxEscalationTotal {
+			// A dry run banks no escalation time either, so without this a seat
+			// the live guard exempts as waiting on a person reads as past the
+			// stop threshold on every dry tick (gt-4nqej). Past the ceiling the
+			// live guard lets the clock run again, so the thresholds below
+			// decide there.
+			d.logger.Printf("overrun_guard: dry run: %s is waiting on an escalation it raised on %s after %s wall — its clock does not run",
+				who, seat.Bead, elapsed.Round(time.Second))
+			continue
+		}
 
 		in := overrunInput{
 			Now: now, SlungAt: slung, Nudged: nudged,

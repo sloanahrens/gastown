@@ -81,10 +81,25 @@ type patrolDueDecision struct {
 // evaluatePatrolDue decides whether a patrol should run now, given its
 // persisted last-run time on disk. inMemory is the latest completion this
 // process itself recorded (which can be newer than the disk record when a
-// previous write failed); pass the zero time.Time when the caller keeps no
-// in-memory record of its own.
+// previous write failed, and can be the only record when the write left no
+// readable file behind at all); pass the zero time.Time when the caller keeps
+// no in-memory record of its own.
 func evaluatePatrolDue(townRoot, patrol string, inMemory, now time.Time, interval time.Duration) patrolDueDecision {
 	lastRun, found, err := loadPatrolLastRun(townRoot, patrol)
+
+	// A cycle this process ran outranks the file: it can be newer than the
+	// record when the write failed, and — the load above having left lastRun
+	// zero — it stands in for the record entirely when the write could not
+	// create one. Without the second half a town whose daemon directory cannot
+	// be written would read "due" on every check and re-run the patrol there,
+	// once per check, for as long as it stayed broken (jev_dedupe's passes make
+	// network calls, gt-4nqej). Nothing is warned here: the failed write was
+	// logged when it happened, and the read failure is that same failure seen
+	// again.
+	if !inMemory.IsZero() && inMemory.After(lastRun) {
+		lastRun, found, err = inMemory, true, nil
+	}
+
 	switch {
 	case err != nil:
 		return patrolDueDecision{
@@ -94,13 +109,6 @@ func evaluatePatrolDue(townRoot, patrol string, inMemory, now time.Time, interva
 		}
 	case !found:
 		return patrolDueDecision{due: true, note: "no last-run record"}
-	}
-
-	// A cycle this process ran can be newer than the file when the write
-	// failed; take the later of the two so a known completion is not
-	// repeated on the next check.
-	if inMemory.After(lastRun) {
-		lastRun = inMemory
 	}
 
 	elapsed := now.Sub(lastRun).Round(time.Minute)
