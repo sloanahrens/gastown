@@ -260,6 +260,47 @@ func TestTownServerPIDsUsesForbiddenTownRoot(t *testing.T) {
 	}
 }
 
+// TestLiveDoltConfigDirsHonorsDataDir: a live server started with --data-dir
+// and no --config owns its beads-bd-tests-* dir, as the orphan classifier
+// already treats it, so the stale sweep must not return it for removal.
+func TestLiveDoltConfigDirsHonorsDataDir(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	liveDir := filepath.Join(tmpDir, "beads-bd-tests-data")
+	if err := os.MkdirAll(filepath.Join(liveDir, "dolt"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(liveDir, old, old); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := func() ([]doltProcEntry, error) {
+		return []doltProcEntry{
+			{PID: 10, PPID: 1, Etime: "01:00:00", Args: "dolt sql-server --data-dir " + filepath.Join(liveDir, "dolt")},
+			{PID: 11, PPID: 1, Etime: "01:00:00", Args: "dolt sql-server --data-dir=" + liveDir},
+		}, nil
+	}
+
+	dirs, err := liveDoltConfigDirs(snapshot)
+	if err != nil {
+		t.Fatalf("liveDoltConfigDirs() error = %v", err)
+	}
+	if !dirs[liveDir] {
+		t.Errorf("liveDoltConfigDirs() = %v, want it to contain %q", dirs, liveDir)
+	}
+
+	stale, err := findStaleBeadsTestTempDirs(tmpDir, snapshot)
+	if err != nil {
+		t.Fatalf("findStaleBeadsTestTempDirs() error = %v", err)
+	}
+	for _, s := range stale {
+		if s == liveDir {
+			t.Errorf("findStaleBeadsTestTempDirs() returned %q, which a live --data-dir server still uses", liveDir)
+		}
+	}
+}
+
 // TestFindStaleBeadsTestTempDirs reads a scripted process table, so it also
 // asserts that a directory a live dolt sql-server still uses is kept.
 func TestFindStaleBeadsTestTempDirs(t *testing.T) {
