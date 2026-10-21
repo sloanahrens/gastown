@@ -216,6 +216,63 @@ func TestJevStaleLogsTheDescriptionHashNotTheText(t *testing.T) {
 	}
 }
 
+// An empty description still gets the hash of the empty text, so a description
+// written later reads as a reshape rather than as a line logged before the field
+// existed.
+func TestJevStaleLogsTheDescriptionHashOfAnEmptyDescription(t *testing.T) {
+	t.Parallel()
+	b := fakeBeads{open: map[string][]*beads.Issue{"gastown": {openBead("gt-old", 20)}}}
+	p := newPass(t, &fixedAsker{ans: answers()}, nil, b, "gastown")
+
+	if _, err := p.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	lines := readLog(t, p.LogPath)
+	if len(lines) != 1 {
+		t.Fatalf("log has %d lines, want 1", len(lines))
+	}
+	if got, want := lines[0].DescHash, HashDescription(""); got != want {
+		t.Errorf("desc_hash = %q, want the hash of the empty description %q; an empty value reads as a line logged before the field existed", got, want)
+	}
+}
+
+// A bead that could not be asked still gets the hash of its description on its
+// line, whichever reason kept the answers away.
+func TestJevStaleUnaskableLinesKeepTheDescriptionHash(t *testing.T) {
+	t.Parallel()
+	const desc = "Keep the description hash even when Jev does not answer."
+	for _, tc := range []struct {
+		name   string
+		askErr error
+		reason string
+	}{
+		{name: "bad response", askErr: jev.ErrBadResponse, reason: ReasonBadResponse},
+		{name: "no reply", askErr: errors.New("jev: connection reset"), reason: ReasonAskFailed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			bead := openBead("gt-old", 20)
+			bead.Description = desc
+			b := fakeBeads{open: map[string][]*beads.Issue{"gastown": {bead}}}
+			p := newPass(t, &fixedAsker{err: tc.askErr}, nil, b, "gastown")
+
+			if _, err := p.Run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			lines := readLog(t, p.LogPath)
+			if len(lines) != 1 {
+				t.Fatalf("log has %d lines, want 1", len(lines))
+			}
+			if lines[0].Answers != nil || lines[0].Reason != tc.reason {
+				t.Errorf("line = %+v, want null answers with %s", lines[0], tc.reason)
+			}
+			if got, want := lines[0].DescHash, HashDescription(desc); got != want {
+				t.Errorf("desc_hash = %q, want the hash of the description %q", got, want)
+			}
+		})
+	}
+}
+
 // Only task, bug and feature beads are asked about. Rig, molecule, agent, wisp
 // and epic beads, a crew seat's bead, and beads labeled for a human or a
 // handoff are never asked, however long they have sat.
