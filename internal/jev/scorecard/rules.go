@@ -69,8 +69,8 @@ type rulesAdapter struct {
 	// refusals is the revert guard's ledger, read once on the first label.
 	refusals     []attention.Refusal
 	refusalsRead bool
-	// beadsRead counts the beads whose comments Label read.
-	beadsRead int
+	// sessionsRead counts the sessions whose bead comments Label read.
+	sessionsRead int
 }
 
 func (a *rulesAdapter) Battery() string { return RulesBattery }
@@ -136,7 +136,7 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	if err != nil {
 		return Labeling{}, fmt.Errorf("reading the comments of %s: %w", line.Bead, err)
 	}
-	a.beadsRead++
+	a.sessionsRead++
 
 	end := line.DoneAt.Add(ruleWindow)
 	var sources []string
@@ -167,8 +167,8 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 // has no record. The report prints these lines beside the metrics.
 func (a *rulesAdapter) Context() []string {
 	return []string{
-		fmt.Sprintf("rules: guard sources read: revert-guard refusals (refusals.jsonl), %d record(s); rework stand-down comments, %d bead(s)",
-			len(a.refusals), a.beadsRead),
+		fmt.Sprintf("rules: guard sources read: revert-guard refusals (refusals.jsonl), %d record(s); rework stand-down comments, for %d session(s)",
+			len(a.refusals), a.sessionsRead),
 		"rules: BLOCKED mail is not read: no code path writes a record for it",
 		fmt.Sprintf("rules: %s not-yet: no guard record names the rule a session broke", qRuleKind),
 	}
