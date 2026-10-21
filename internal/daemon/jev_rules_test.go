@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"testing"
+	"time"
 
 	"github.com/jonboulle/clockwork"
 
@@ -19,7 +20,7 @@ func newRulesDaemon(t *testing.T, enabled bool, open func(string, jevrules.Setti
 	return &Daemon{
 		config: &Config{TownRoot: t.TempDir()},
 		logger: log.New(&bytes.Buffer{}, "", 0),
-		clock:  clockwork.NewFakeClock(),
+		clock:  clockwork.NewFakeClockAt(time.Date(2026, 10, 21, 17, 30, 0, 0, time.UTC)),
 		patrolConfig: &DaemonPatrolConfig{Patrols: &PatrolsConfig{JevRules: &JevRulesConfig{
 			Enabled: enabled, MaxUSDPerDay: 2.5, USDPerBillionTokens: 3,
 		}}},
