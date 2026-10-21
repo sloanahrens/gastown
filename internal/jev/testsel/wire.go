@@ -78,7 +78,7 @@ func (gitTree) Read(ctx context.Context, dir, base, head string) (treeState, err
 	if strings.HasPrefix(base, "-") || strings.HasPrefix(head, "-") {
 		return treeState{}, fmt.Errorf("refusing diff of refs %q..%q: a ref may not start with -", base, head)
 	}
-	nameStatus, err := gitOut(ctx, dir, "diff", "--name-status", "-z", "-M", base, head)
+	nameStatus, err := gitOut(ctx, dir, land.NameStatusArgs(base, head)...)
 	if err != nil {
 		return treeState{}, err
 	}
@@ -90,11 +90,19 @@ func (gitTree) Read(ctx context.Context, dir, base, head string) (treeState, err
 	if err != nil {
 		return treeState{}, err
 	}
+	changed, err := land.ChangedPackages(nameStatus, func(d string) bool { return land.PackageDirHasGo(dir, d) })
+	if err != nil {
+		return treeState{}, err
+	}
+	treeWide, err := anyTreeWide(nameStatus)
+	if err != nil {
+		return treeState{}, err
+	}
 	files, stat := parseNumstat(numstat)
 	return treeState{
 		pkgs:     pkgs,
-		changed:  land.ChangedPackages(nameStatus, func(d string) bool { return land.PackageDirHasGo(dir, d) }),
-		treeWide: anyTreeWide(nameStatus),
+		changed:  changed,
+		treeWide: treeWide,
 		stat:     stat,
 		files:    files,
 	}, nil
@@ -221,14 +229,18 @@ func parseNumstat(out string) ([]fileChange, string) {
 }
 
 // anyTreeWide reports whether any path in `git diff --name-status -z` output is
-// a tree-wide input. Both sides of a rename count.
-func anyTreeWide(nameStatus string) bool {
-	for _, p := range land.ChangedPaths(nameStatus) {
+// a tree-wide input. Both sides of a rename or copy count.
+func anyTreeWide(nameStatus string) (bool, error) {
+	paths, err := land.ChangedPaths(nameStatus)
+	if err != nil {
+		return false, err
+	}
+	for _, p := range paths {
 		if TreeWideInput(p) {
-			return true
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 // Ensure the production dependencies satisfy the pass's seams.

@@ -126,16 +126,56 @@ func TestChangedPackages(t *testing.T) {
 			"M\x00internal/cmd/tab\tname\"q\".go\x00",
 			[]string{"internal/cmd"},
 		},
+		{
+			// The record is cut short: its path never arrived, so it names
+			// nothing rather than the "." an empty path cleans to.
+			"a truncated rename record names nothing",
+			"R100\x00internal/cmd/a.go\x00",
+			nil,
+		},
+		{
+			"a truncated record after a whole one keeps the whole one",
+			"M\x00internal/cmd/x.go\x00R100\x00internal/cmd/a.go\x00",
+			[]string{"internal/cmd"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got := ChangedPackages(tt.diff, hasGo)
+			got, err := ChangedPackages(tt.diff, hasGo)
+			if err != nil {
+				t.Fatalf("ChangedPackages: %v", err)
+			}
 			if len(got) == 0 && len(tt.want) == 0 {
 				return
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ChangedPackages = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// Output without -z separates fields with tabs and ends lines with newlines,
+// and git quotes a non-ASCII name in it. The NUL reader cannot find the paths
+// in that, so it must refuse the output, not select nothing.
+func TestChangedPackagesRejectsOutputWithoutNUL(t *testing.T) {
+	t.Parallel()
+	hasGo := func(string) bool { return true }
+	for name, diff := range map[string]string{
+		"quoted non-ASCII added file": "A\tinternal/cmd/caf\\303\\251_test.go\n",
+		"plain modified file":         "M\tinternal/land/gate.go\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got, err := ChangedPackages(diff, hasGo); err == nil {
+				t.Errorf("ChangedPackages(%q) = %v, want an error", diff, got)
+			}
+			if _, err := GuardSelects(diff, hasGo); err == nil {
+				t.Errorf("GuardSelects(%q) returned no error", diff)
+			}
+			if _, err := ChangedPaths(diff); err == nil {
+				t.Errorf("ChangedPaths(%q) returned no error", diff)
 			}
 		})
 	}
@@ -174,8 +214,12 @@ const unguarded = "M\x00docs/testing.md\x00"
 
 func TestChangedPaths(t *testing.T) {
 	t.Parallel()
-	got := ChangedPaths("R100\x00internal/a\x00internal/b\x00D\x00internal/gone.go\x00C075\x00x/src.go\x00x/dst.go\x00M\x00./y.go\x00")
-	want := []string{"internal/b", "internal/a", "internal/gone.go", "x/dst.go", "y.go"}
+	got, err := ChangedPaths("R100\x00internal/a\x00internal/b\x00D\x00internal/gone.go\x00C075\x00x/src.go\x00x/dst.go\x00M\x00./y.go\x00")
+	if err != nil {
+		t.Fatalf("ChangedPaths: %v", err)
+	}
+	// A copy's source is named too: the tree-wide check reads both sides.
+	want := []string{"internal/a", "internal/b", "internal/gone.go", "x/src.go", "x/dst.go", "y.go"}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("ChangedPaths = %q, want %q", got, want)
 	}
@@ -185,16 +229,19 @@ func TestGuardSelects(t *testing.T) {
 	t.Parallel()
 	hasGo := func(string) bool { return true }
 
-	if got := GuardSelects(unguarded, hasGo); got != nil {
-		t.Errorf("GuardSelects(%q) = %v, want nil", unguarded, got)
+	if got, err := GuardSelects(unguarded, hasGo); err != nil || got != nil {
+		t.Errorf("GuardSelects(%q) = %v, %v, want nil", unguarded, got, err)
 	}
-	if got := GuardSelects("", hasGo); got != nil {
-		t.Errorf("GuardSelects(empty) = %v, want nil", got)
+	if got, err := GuardSelects("", hasGo); err != nil || got != nil {
+		t.Errorf("GuardSelects(empty) = %v, %v, want nil", got, err)
 	}
 	for _, tc := range guardTriggers {
 		t.Run(tc.pkg, func(t *testing.T) {
 			t.Parallel()
-			got := GuardSelects(tc.trigger, hasGo)
+			got, err := GuardSelects(tc.trigger, hasGo)
+			if err != nil {
+				t.Fatalf("GuardSelects(%q): %v", tc.trigger, err)
+			}
 			for _, s := range got {
 				if s.Package == tc.pkg {
 					if len(s.Tests) == 0 {
@@ -261,8 +308,12 @@ func TestGuardSelectsRemovals(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
+			sel, err := GuardSelects(tt.diff, hasGo)
+			if err != nil {
+				t.Fatalf("GuardSelects(%q): %v", tt.diff, err)
+			}
 			var pkgs []string
-			for _, s := range GuardSelects(tt.diff, hasGo) {
+			for _, s := range sel {
 				pkgs = append(pkgs, s.Package)
 			}
 			sort.Strings(pkgs)
@@ -282,8 +333,8 @@ func TestGuardSelectsRemovals(t *testing.T) {
 func TestGuardSelectsSkipsMissingPackages(t *testing.T) {
 	t.Parallel()
 	hasGo := func(string) bool { return false }
-	if got := GuardSelects("M\x00internal/templates/roles/polecat.md.tmpl\x00", hasGo); got != nil {
-		t.Errorf("GuardSelects = %v, want nil when the guard package holds no Go", got)
+	if got, err := GuardSelects("M\x00internal/templates/roles/polecat.md.tmpl\x00", hasGo); err != nil || got != nil {
+		t.Errorf("GuardSelects = %v, %v, want nil when the guard package holds no Go", got, err)
 	}
 }
 

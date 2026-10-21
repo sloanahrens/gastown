@@ -1,6 +1,7 @@
 package land
 
 import (
+	"errors"
 	"os"
 	"path"
 	"path/filepath"
@@ -8,9 +9,17 @@ import (
 	"strings"
 )
 
+// NameStatusArgs is the `git diff` argument list every name-status reader
+// runs: -z, so git writes each path as it is and never octal-quotes a
+// non-ASCII name (gt-fz8xk). The revs go after it.
+func NameStatusArgs(revs ...string) []string {
+	return append([]string{"diff", "--name-status", "-z", "-M"}, revs...)
+}
+
 // ChangedPackages maps `git diff --name-status -z -M` output to the Go package
 // directories whose tests the change can affect, sorted and relative to the
-// repo root ("internal/land", never "./internal/land").
+// repo root ("internal/land", never "./internal/land"). It returns an error
+// for output that is not NUL-separated, rather than selecting nothing.
 //
 // A .go file names its own directory, unless it sits in one the go tool skips
 // (testdata, or a name beginning with "." or "_"): a .go file there is a
@@ -28,9 +37,9 @@ import (
 //
 // hasGo reports whether a repo-relative directory holds a non-test or test
 // .go file; tests replace it, PackageDirHasGo is the real one.
-func ChangedPackages(nameStatus string, hasGo func(dir string) bool) []string {
+func ChangedPackages(nameStatus string, hasGo func(dir string) bool) ([]string, error) {
 	seen := map[string]bool{}
-	eachChange(nameStatus, func(_ string, now, gone []string) {
+	err := eachChange(nameStatus, func(_, now, gone []string) {
 		for _, files := range [][]string{now, gone} {
 			for _, file := range files {
 				if dir := owningPackage(file, hasGo); dir != "" {
@@ -39,12 +48,15 @@ func ChangedPackages(nameStatus string, hasGo func(dir string) bool) []string {
 			}
 		}
 	})
+	if err != nil {
+		return nil, err
+	}
 	dirs := make([]string, 0, len(seen))
 	for d := range seen {
 		dirs = append(dirs, d)
 	}
 	sort.Strings(dirs)
-	return dirs
+	return dirs, nil
 }
 
 // GuardSelect names the tree-wide guard tests one package contributes to
@@ -57,9 +69,9 @@ type GuardSelect struct {
 // GuardSelects returns the tree-wide guard tests whose inputs nameStatus
 // changed, sorted by package. A branch that changes no guard's input returns
 // nil.
-func GuardSelects(nameStatus string, hasGo func(dir string) bool) []GuardSelect {
+func GuardSelects(nameStatus string, hasGo func(dir string) bool) ([]GuardSelect, error) {
 	triggered := map[string]bool{}
-	eachChange(nameStatus, func(_ string, now, gone []string) {
+	err := eachChange(nameStatus, func(_, now, gone []string) {
 		for _, g := range treeWideGuards {
 			if triggered[g.pkg] || !hasGo(g.pkg) {
 				continue
@@ -69,12 +81,15 @@ func GuardSelects(nameStatus string, hasGo func(dir string) bool) []GuardSelect 
 			}
 		}
 	})
+	if err != nil {
+		return nil, err
+	}
 	tests := map[string][]string{}
 	for _, g := range treeWideGuards {
 		tests[g.pkg] = append(tests[g.pkg], g.tests...)
 	}
 	if len(triggered) == 0 {
-		return nil
+		return nil, nil
 	}
 	sel := make([]GuardSelect, 0, len(triggered))
 	for pkg := range triggered {
@@ -83,7 +98,7 @@ func GuardSelects(nameStatus string, hasGo func(dir string) bool) []GuardSelect 
 		sel = append(sel, GuardSelect{Package: pkg, Tests: names})
 	}
 	sort.Slice(sel, func(i, j int) bool { return sel[i].Package < sel[j].Package })
-	return sel
+	return sel, nil
 }
 
 func anyJudged(g treeWideGuard, files []string) bool {
@@ -98,57 +113,85 @@ func anyJudged(g treeWideGuard, files []string) bool {
 // ChangedPaths returns every path `git diff --name-status -z` names, both
 // sides of a rename or copy, cleaned and slash-separated. A tree-wide guard
 // reads the same records the package and guard selection read.
-func ChangedPaths(nameStatus string) []string {
+func ChangedPaths(nameStatus string) ([]string, error) {
 	var paths []string
-	eachChange(nameStatus, func(_ string, now, gone []string) {
-		paths = append(paths, now...)
-		paths = append(paths, gone...)
+	err := eachChange(nameStatus, func(names, _, _ []string) {
+		paths = append(paths, names...)
 	})
-	return paths
+	if err != nil {
+		return nil, err
+	}
+	return paths, nil
 }
 
-// eachChange calls fn once per `git diff --name-status -z` record with the
-// paths that exist after the change and the paths it removed: a guard that
-// judges the tree as it will stand reads the first, a guard that ratchets a
-// baseline down reads the second.
+// errNotNUL is returned for name-status output that has tab or newline
+// separators and no NUL: `git diff --name-status` without -z. Read as NUL
+// records it names no path, so package selection would fail open and select
+// nothing; the caller fails instead (gt-fz8xk).
+var errNotNUL = errors.New("name-status output is not NUL-separated: run git diff with -z")
+
+// eachChange calls fn once per `git diff --name-status -z` record with every
+// path the record names, the paths that exist after the change and the paths
+// it removed: a guard that judges the tree as it will stand reads the second,
+// a guard that ratchets a baseline down reads the third.
 //
-// A copy names only its destination, because its source is unchanged. A
-// rename names both sides and a deletion only the removed path.
+// A copy's source is unchanged, so only its destination is now or gone, but
+// the source is still in names. A rename names both sides and a deletion only
+// the removed path.
 //
 // With -z, git writes each field NUL-terminated and never quotes a name, so a
 // path holding a non-ASCII byte, a tab or a quote arrives as written. Without
 // -z git quotes such a path ("caf\303\251.go") and the .go suffix is lost.
-func eachChange(nameStatus string, fn func(status string, now, gone []string)) {
+func eachChange(nameStatus string, fn func(names, now, gone []string)) error {
+	if !strings.Contains(nameStatus, "\x00") && strings.ContainsAny(nameStatus, "\t\n") {
+		return errNotNUL
+	}
 	// Fields alternate: a status (M, A, D, R100, C75 ...), then one path, or
-	// old and new for a rename or copy. A dangling status with no path is
-	// dropped; a trailing NUL leaves an empty field, skipped the same way.
+	// old and new for a rename or copy. An empty status is skipped: a trailing
+	// NUL leaves one. A record cut short, with no path or an empty one, ends
+	// the scan: no later record can be read past it.
 	fields := strings.Split(nameStatus, "\x00")
 	for i := 0; i < len(fields); {
 		status := fields[i]
+		if status == "" {
+			i++
+			continue
+		}
 		n := 1
 		if strings.HasPrefix(status, "R") || strings.HasPrefix(status, "C") {
 			n = 2
 		}
-		if status == "" || i+n >= len(fields) {
-			i++
-			continue
+		if i+n >= len(fields) || !completePaths(fields[i+1:i+1+n]) {
+			break
 		}
-		paths := make([]string, 0, n)
+		names := make([]string, 0, n)
 		for _, f := range fields[i+1 : i+1+n] {
-			paths = append(paths, path.Clean(filepath.ToSlash(f)))
+			names = append(names, path.Clean(filepath.ToSlash(f)))
 		}
 		i += 1 + n
 		switch {
 		case strings.HasPrefix(status, "D"):
-			fn(status, nil, paths)
+			fn(names, nil, names)
 		case strings.HasPrefix(status, "R"):
-			fn(status, paths[1:], paths[:1])
+			fn(names, names[1:], names[:1])
 		case strings.HasPrefix(status, "C"):
-			fn(status, paths[1:], nil)
+			fn(names, names[1:], nil)
 		default:
-			fn(status, paths, nil)
+			fn(names, names, nil)
 		}
 	}
+	return nil
+}
+
+// completePaths reports whether every path field of a record is present and
+// non-empty.
+func completePaths(paths []string) bool {
+	for _, p := range paths {
+		if p == "" {
+			return false
+		}
+	}
+	return true
 }
 
 // owningPackage is the package directory file belongs to, or "".
