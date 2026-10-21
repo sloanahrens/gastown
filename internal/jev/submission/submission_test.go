@@ -20,17 +20,28 @@ import (
 // t0 is the cursor every test starts from; submissions are stamped after it.
 var t0 = time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 
-// fakeSubmissions returns the issues it holds and records the cursor it was
-// asked from.
+// fakeSubmissions returns the entries it holds, then each issue it holds as a
+// waiting entry carrying the issue's READY TO LAND block, and records the
+// cursor it was asked from.
 type fakeSubmissions struct {
-	issues []*beads.Issue
-	err    error
-	since  []time.Time
+	issues  []*beads.Issue
+	entries []Entry
+	err     error
+	since   []time.Time
 }
 
-func (f *fakeSubmissions) Since(t time.Time) ([]*beads.Issue, error) {
+func (f *fakeSubmissions) Since(t time.Time) ([]Entry, error) {
 	f.since = append(f.since, t)
-	return f.issues, f.err
+	out := append([]Entry(nil), f.entries...)
+	for _, issue := range f.issues {
+		w, ok := land.ParseReadyNote(issue.Notes)
+		if !ok {
+			continue
+		}
+		w.BeadID = issue.ID
+		out = append(out, Entry{Issue: issue, Work: w, Seen: w.Submitted})
+	}
+	return out, f.err
 }
 
 // fakeGit returns scripted subjects and numstat per head and records every
@@ -437,14 +448,16 @@ func TestJevSubmissionFetchFailureLeavesTheCursorUnmoved(t *testing.T) {
 		t.Errorf("cursor = %+v ok=%v err=%v, want it at t0", cur, ok, err)
 	}
 
-	// A first pass whose fetch fails writes no cursor, so the pass that
-	// succeeds is still the one that starts it.
+	// A first pass asks nothing, so it needs no clone and a failing fetch does
+	// not stop it from starting.
 	_ = os.Remove(r.pass.CursorPath)
-	if _, err := r.pass.Run(context.Background()); !errors.Is(err, ErrFetch) {
-		t.Fatalf("err = %v, want ErrFetch", err)
+	synced := r.git.synced
+	sum, err := r.pass.Run(context.Background())
+	if err != nil || !sum.Started {
+		t.Fatalf("first pass = %+v, %v; want it started with no fetch", sum, err)
 	}
-	if _, ok, _ := battery.ReadCursor(r.pass.CursorPath); ok {
-		t.Error("a first pass whose fetch failed wrote a cursor")
+	if r.git.synced != synced {
+		t.Errorf("a first pass fetched the clone %d more times, want none", r.git.synced-synced)
 	}
 }
 
@@ -550,5 +563,72 @@ func TestJevSubmissionAsksAboutTheLastReadyBlock(t *testing.T) {
 	lines := readLines(t, r.pass.LogPath)
 	if len(lines) != 1 || lines[0].Head != "head-gt-a" || !lines[0].Submitted.Equal(t0.Add(time.Minute)) {
 		t.Fatalf("log lines = %+v, want the newer block", lines)
+	}
+}
+
+// A submission whose record holds its commits is asked from them. The clone is
+// never read or fetched, so a branch the landing pruned still earns its line.
+func TestJevSubmissionAsksFromTheRecordWhenTheCloneCannotRead(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	issue := r.ready("gt-a", time.Minute)
+	delete(r.git.subjects, "head-gt-a")
+	r.git.syncErr = errors.New("could not resolve host")
+	r.git.err = errors.New("bad object")
+	r.submissions.entries = []Entry{{
+		Issue: issue,
+		Work: land.Work{
+			BeadID: "gt-a", Branch: "polecat/opal/gt-a", Head: "head-gt-a", Target: "main",
+			Submitted: t0.Add(time.Minute),
+		},
+		Seen:     t0.Add(2 * time.Minute),
+		Subjects: []string{"fix: do the thing (gt-a)"},
+		Numstat:  "10\t2\tinternal/x.go",
+	}}
+
+	sum, err := r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Asked != 1 || sum.Skipped != 0 {
+		t.Fatalf("summary = %+v, want the record asked", sum)
+	}
+	if r.git.synced != 0 || len(r.git.ranges) != 0 {
+		t.Errorf("a record with subjects read the clone: synced %d, ranges %v", r.git.synced, r.git.ranges)
+	}
+	state := r.asker.states[0]
+	if !strings.Contains(state, `commit_subjects: ["fix: do the thing (gt-a)"]`) || !strings.Contains(state, `"internal/x.go"`) {
+		t.Errorf("state = %q, want the record's subjects and numstat", state)
+	}
+	cur, _, _ := battery.ReadCursor(r.pass.CursorPath)
+	if !cur.Time.Equal(t0.Add(2*time.Minute)) || cur.ID != "gt-a" {
+		t.Errorf("cursor = %+v, want it at the record's seen time", cur)
+	}
+}
+
+// A record that holds no subjects, because the landing worker's clone lacked
+// the commits, is asked from the pass's own clone, which is synced first.
+func TestJevSubmissionRecordWithoutSubjectsFallsBackToTheClone(t *testing.T) {
+	t.Parallel()
+	r := newRig(t)
+	issue := r.ready("gt-a", time.Minute)
+	r.submissions.entries = []Entry{{
+		Issue: issue,
+		Work: land.Work{
+			BeadID: "gt-a", Branch: "polecat/opal/gt-a", Head: "head-gt-a", Target: "main",
+			Submitted: t0.Add(time.Minute),
+		},
+		Seen: t0.Add(2 * time.Minute),
+	}}
+
+	sum, err := r.pass.Run(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Asked != 1 || r.git.synced != 1 {
+		t.Fatalf("summary = %+v, synced %d times; want the clone read once and the entry asked", sum, r.git.synced)
+	}
+	if !strings.Contains(r.asker.states[0], `"fix: do the thing (gt-a)"`) {
+		t.Errorf("state = %q, want the clone's subject", r.asker.states[0])
 	}
 }

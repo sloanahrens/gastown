@@ -110,10 +110,22 @@ func TestJevSubmissionConfigDecodesFromDaemonJSON(t *testing.T) {
 	}
 }
 
-// stubSubmissions lists the beads a pass reads.
+// stubSubmissions lists the submissions a pass reads: each bead it holds, as a
+// waiting entry at its READY TO LAND block, with no record subjects.
 type stubSubmissions struct{ issues []*beads.Issue }
 
-func (s stubSubmissions) Since(time.Time) ([]*beads.Issue, error) { return s.issues, nil }
+func (s stubSubmissions) Since(time.Time) ([]submission.Entry, error) {
+	var out []submission.Entry
+	for _, issue := range s.issues {
+		w, ok := land.ParseReadyNote(issue.Notes)
+		if !ok {
+			continue
+		}
+		w.BeadID = issue.ID
+		out = append(out, submission.Entry{Issue: issue, Work: w, Seen: w.Submitted})
+	}
+	return out, nil
+}
 
 // stubSubmissionGit reads a placeholder commit and diff: the daemon test is
 // about when a pass runs and what it logs, not about the state it builds.

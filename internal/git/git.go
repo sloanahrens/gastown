@@ -3529,6 +3529,13 @@ func (g *Git) DiffStat(rangeSpec string) (string, error) {
 	return g.run("diff", "--stat", rangeSpec)
 }
 
+// DiffNumstat returns `git diff --numstat --no-renames base..head`: one
+// "added<TAB>removed<TAB>path" line per changed file, with "-" counts for a
+// binary file.
+func (g *Git) DiffNumstat(base, head string) (string, error) {
+	return g.run("diff", "--numstat", "--no-renames", base+".."+head)
+}
+
 // For example, CommitsAhead("main", "feature") returns how many commits
 // are on feature that are not on main.
 func (g *Git) CommitsAhead(base, branch string) (int, error) {

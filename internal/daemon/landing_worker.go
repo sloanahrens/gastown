@@ -679,6 +679,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		AgentBeadID: func(polecat string) string {
 			return beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, rigName), rigName, polecat)
 		},
+		// The first-sight record the submission battery asks from, read from the
+		// clone this worker lands through (gt-l7ciu).
+		FirstSight: &land.SubmissionRecorder{Path: land.SubmissionsSeenPath(townRoot), Git: git.NewGit(repo), Remote: landingRemote},
 	}, nil
 }
 

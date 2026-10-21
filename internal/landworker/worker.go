@@ -62,6 +62,14 @@ type Remote interface {
 	DeleteLocalBranch(branch, expectedHash string) (bool, error)
 }
 
+// FirstSight records a submission the first time the worker sees it, before
+// the worker lands anything. *land.SubmissionRecorder is the production one.
+type FirstSight interface {
+	Record(w land.Work) (bool, error)
+}
+
+var _ FirstSight = (*land.SubmissionRecorder)(nil)
+
 // Lander lands one piece of work; *land.Lander is the production one.
 type Lander interface {
 	Land(ctx context.Context, w land.Work) (land.Result, error)
@@ -144,6 +152,10 @@ type Worker struct {
 	// Reverts finishes the red-main owner's reverts (*RedMain): told of each
 	// new landing and each rework rejection. nil skips it.
 	Reverts RevertHooks
+	// FirstSight records each waiting submission the first time the worker
+	// sees it, so the submission battery still asks about one that lands
+	// within its interval and whose branch is then pruned. nil skips it.
+	FirstSight FirstSight
 	// WatchTarget is the branch the worker watches for commits that reached
 	// it without a landing (a direct push); each pass that finds one runs
 	// the post-landing command for it. The leftover sweep also reads it as
@@ -213,6 +225,9 @@ type Worker struct {
 	// sweepLogged are the leftover branches the sweep has already reported
 	// this run: one line per branch, not one per hour.
 	sweepLogged map[string]bool
+	// firstSightFailing is true while the last first-sight write failed, so
+	// a failing log is reported once, not once per pass.
+	firstSightFailing bool
 }
 
 // RevertHooks is the red-main owner's side of an automatic revert.
@@ -385,6 +400,9 @@ func (w *Worker) landReady(ctx context.Context) Report {
 		if issue == nil || !beads.IssueStatus(strings.TrimSpace(issue.Status)).IsActionable() || !beads.HasLabel(issue, land.LabelReadyToLand) {
 			continue
 		}
+		// Before the landing, which is what removes the label: a submission
+		// that lands within the battery's interval must already be recorded.
+		w.recordFirstSight(issue)
 		if _, pending := w.pendingRepair[issue.ID]; pending {
 			continue
 		}
@@ -445,6 +463,28 @@ func workFromRecord(rec land.LandingRecord, issue *beads.Issue) land.Work {
 		work.Worker = polecatFromAssignee(issue.Assignee)
 	}
 	return work
+}
+
+// recordFirstSight writes the first-sight record of a waiting submission. A
+// bead with no READY TO LAND block has no submission to record: process
+// reports it. A failed write is logged once for each run of failures and never
+// holds up the landing.
+func (w *Worker) recordFirstSight(issue *beads.Issue) {
+	if w.FirstSight == nil {
+		return
+	}
+	work, err := land.WorkFromBead(issue, w.Rig)
+	if err != nil {
+		return
+	}
+	if _, err := w.FirstSight.Record(work); err != nil {
+		if !w.firstSightFailing {
+			w.logf("%s: recording the submission for the jev battery: %v", issue.ID, err)
+		}
+		w.firstSightFailing = true
+		return
+	}
+	w.firstSightFailing = false
 }
 
 // process resolves what to land for issue and lands it.

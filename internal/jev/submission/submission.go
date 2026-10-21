@@ -1,15 +1,19 @@
 // Package submission is the advisory battery on work waiting to land. A pass
-// takes the gastown work beads submitted since the last pass, asks Jev one
-// battery about each, and appends one line per submission to a log that
+// takes the gastown submissions since the last pass, asks Jev one battery about
+// each, and appends one line per submission to a log that
 // `gt jev submission --recent` prints. It never comments on a bead, files an
 // attention item, blocks a landing or writes under .runtime/landings: the log
 // is the only thing it writes.
 //
-// The pass reads a bare clone it owns, at ClonePath, so it never runs git in a
-// town worktree and never contends with a landing for the rig's repository.
+// A submission comes from the first-sight record the landing worker wrote, so
+// it is asked about whether or not it has landed. A record with no commits is
+// read from a bare clone the pass owns, at ClonePath, so the pass never runs
+// git in a town worktree and never contends with a landing for the rig's
+// repository.
 //
-// The pass owns no I/O beyond its log and cursor. The caller supplies the bead
-// list, the git reads and the Jev client, so a test runs a pass with fakes.
+// The pass owns no I/O beyond its log and cursor. The caller supplies the
+// submissions, the git reads and the Jev client, so a test runs a pass with
+// fakes.
 // Open wires the production versions.
 package submission
 
@@ -59,17 +63,38 @@ type Asker interface {
 	Ask(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error)
 }
 
-// Submissions lists the work beads that carry a submission since t: those
-// still waiting to land, and those closed since t. A pass only reads them.
+// Submissions lists what a pass may ask about from cursor time t on: the
+// first-sight records the landing worker wrote since then, and each waiting
+// work bead that has no record. A pass only reads them.
 type Submissions interface {
-	Since(t time.Time) ([]*beads.Issue, error)
+	Since(t time.Time) ([]Entry, error)
+}
+
+// Entry is one submission a pass can ask about.
+type Entry struct {
+	// Issue is the work bead. The state reads its title, goal, acceptance and
+	// agent from it.
+	Issue *beads.Issue
+	// Work is the landing request: the branch, head, target and submission
+	// time the line records.
+	Work land.Work
+	// Seen is when the pass orders the entry: a record's first sight, or for a
+	// waiting bead with no record, its submission time.
+	Seen time.Time
+	// Subjects and Numstat are what the landing worker read from its clone at
+	// first sight. Nil Subjects means the record holds none, and the pass reads
+	// its own clone instead.
+	Subjects []string
+	Numstat  string
 }
 
 // Git reads a submission's commits and diff stat from the bare clone the pass
-// owns. Every command it runs runs in that clone, never in a town worktree.
+// owns, for an entry whose record holds no commits. Every command it runs runs
+// in that clone, never in a town worktree.
 type Git interface {
 	// Sync creates the clone on the first run and fetches refs/heads/* into
-	// it. Its failure skips the pass and leaves the cursor unmoved.
+	// it. It runs only when an entry needs the clone, and its failure stops
+	// the pass and leaves the cursor unmoved.
 	Sync(ctx context.Context) error
 	// CommitSubjects returns the subjects on target..head, at most limit.
 	CommitSubjects(ctx context.Context, target, head string, limit int) ([]string, error)
@@ -119,11 +144,11 @@ type Summary struct {
 // the cursor does not move.
 var ErrFetch = errors.New("the bare clone could not be fetched")
 
-// Run does one pass. Submissions are taken oldest first, and each is logged
-// and the cursor advanced before the next, so a pass stopped partway never
-// asks about a submission twice. A submission whose Ask fails for any reason
-// but an unusable response stops the pass with that error and is asked again
-// by the next one. Run returns ErrBusy when another pass holds the run lock.
+// Run does one pass. Entries are taken oldest first, and each is logged and the
+// cursor advanced before the next, so a pass stopped partway never asks about
+// a submission twice. An entry whose Ask fails for any reason but an unusable
+// response stops the pass with that error and is asked again by the next one.
+// Run returns ErrBusy when another pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
 	release, err := lockRun(p.CursorPath)
@@ -131,10 +156,6 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		return sum, err
 	}
 	defer release()
-
-	if err := p.Git.Sync(ctx); err != nil {
-		return sum, fmt.Errorf("%w: %w", ErrFetch, err)
-	}
 
 	cur, ok, err := battery.ReadCursor(p.CursorPath)
 	if err != nil {
@@ -149,7 +170,18 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	if err != nil {
 		return sum, fmt.Errorf("listing submissions since %s: %w", cur.Time.Format(time.RFC3339), err)
 	}
-	for _, sub := range pending(all, cur) {
+	synced := false
+	fetch := func(ctx context.Context) error {
+		if synced {
+			return nil
+		}
+		if err := p.Git.Sync(ctx); err != nil {
+			return fmt.Errorf("%w: %w", ErrFetch, err)
+		}
+		synced = true
+		return nil
+	}
+	for _, e := range pending(all, cur) {
 		if err := ctx.Err(); err != nil {
 			return sum, err
 		}
@@ -161,7 +193,7 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			sum.CapReached = true
 			break
 		}
-		line, err := p.ask(ctx, sub)
+		line, err := p.ask(ctx, e, fetch)
 		switch {
 		case errors.Is(err, errUnreadable), errors.Is(err, jev.ErrBadResponse):
 			sum.Skipped++
@@ -173,52 +205,40 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 			}
 			sum.Asked++
 		}
-		if err := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: sub.work.Submitted, ID: sub.issue.ID}); err != nil {
+		if err := battery.WriteCursor(p.CursorPath, battery.Cursor{Time: e.Seen, ID: e.Issue.ID}); err != nil {
 			return sum, err
 		}
 	}
 	return sum, nil
 }
 
-// submission is one work bead and the landing request its notes carry.
-type submission struct {
-	issue *beads.Issue
-	work  land.Work
-}
-
-// pending keeps the submissions after the cursor, oldest first. A bead whose
-// READY TO LAND block carries no Submitted stamp has no place in the order,
-// so it is not asked: every block gt done writes carries one. Ties on the
-// submission time break by bead ID, so the cursor orders submissions
-// completely.
-func pending(all []*beads.Issue, cur battery.Cursor) []submission {
-	var out []submission
-	for _, issue := range all {
-		if issue == nil {
+// pending keeps the entries after the cursor, oldest first, and drops an entry
+// with no issue or no place in the order: a bead whose submission time is
+// zero is not asked. Ties on the seen time break by bead ID, so the cursor
+// orders entries completely.
+func pending(all []Entry, cur battery.Cursor) []Entry {
+	var out []Entry
+	for _, e := range all {
+		if e.Issue == nil || e.Seen.IsZero() || !after(cur, e.Seen, e.Issue.ID) {
 			continue
 		}
-		w, ok := land.ParseReadyNote(issue.Notes)
-		if !ok || w.Submitted.IsZero() || !after(cur, w.Submitted, issue.ID) {
-			continue
-		}
-		out = append(out, submission{issue: issue, work: w})
+		out = append(out, e)
 	}
 	sort.Slice(out, func(i, j int) bool {
-		if !out[i].work.Submitted.Equal(out[j].work.Submitted) {
-			return out[i].work.Submitted.Before(out[j].work.Submitted)
+		if !out[i].Seen.Equal(out[j].Seen) {
+			return out[i].Seen.Before(out[j].Seen)
 		}
-		return out[i].issue.ID < out[j].issue.ID
+		return out[i].Issue.ID < out[j].Issue.ID
 	})
 	return out
 }
 
-// after reports whether a submission at submitted for bead sorts after the
-// cursor.
-func after(cur battery.Cursor, submitted time.Time, bead string) bool {
-	if submitted.Equal(cur.Time) {
+// after reports whether an entry seen at seen for bead sorts after the cursor.
+func after(cur battery.Cursor, seen time.Time, bead string) bool {
+	if seen.Equal(cur.Time) {
 		return bead > cur.ID
 	}
-	return submitted.After(cur.Time)
+	return seen.After(cur.Time)
 }
 
 // errUnreadable means a submission's commits or diff could not be read, so
@@ -226,48 +246,66 @@ func after(cur battery.Cursor, submitted time.Time, bead string) bool {
 // submission must not hold up the ones behind it.
 var errUnreadable = errors.New("submission commits or diff unreadable")
 
-// ask builds the state for one submission, asks the battery and returns the
-// line. Commits or a diff the clone cannot read return errUnreadable, and the
-// pass skips the submission. So does a submission with no commits on
-// target..head: its head is already reachable from target, so it landed, and
-// its diff against target is the change target has made since, not its own.
-// A failure that ctx's end caused returns ctx's error, so the next pass asks
-// again.
-func (p *Pass) ask(ctx context.Context, sub submission) (Line, error) {
-	subjects, err := p.Git.CommitSubjects(ctx, sub.work.Target, sub.work.Head, maxSubjects)
-	if err != nil {
-		if cerr := ctx.Err(); cerr != nil {
-			return Line{}, cerr
-		}
-		return Line{}, errUnreadable
-	}
+// ask builds the state for one entry, asks the battery and returns the line.
+// The commits and stat come from the entry's record when it holds subjects;
+// otherwise they come from the bare clone, which fetch syncs on first use.
+// Commits or a diff the clone cannot read return errUnreadable, and the pass
+// skips the entry. So does an entry with no commits on target..head: its head
+// is already reachable from target, so it landed, and its diff against target
+// is the change target has made since, not its own. A failure that ctx's end
+// caused returns ctx's error, so the next pass asks again.
+func (p *Pass) ask(ctx context.Context, e Entry, fetch func(context.Context) error) (Line, error) {
+	subjects, numstat := e.Subjects, e.Numstat
 	if len(subjects) == 0 {
-		return Line{}, errUnreadable
-	}
-	out, err := p.Git.Numstat(ctx, sub.work.Target, sub.work.Head)
-	if err != nil {
-		if cerr := ctx.Err(); cerr != nil {
-			return Line{}, cerr
+		if err := fetch(ctx); err != nil {
+			return Line{}, err
 		}
-		return Line{}, errUnreadable
+		var err error
+		subjects, numstat, err = p.readClone(ctx, e.Work)
+		if err != nil {
+			return Line{}, err
+		}
 	}
 
-	got, err := p.Asker.Ask(ctx, buildState(sub.issue, subjects, parseNumstat(out)), Questions())
+	got, err := p.Asker.Ask(ctx, buildState(e.Issue, subjects, parseNumstat(numstat)), Questions())
 	if err != nil {
 		return Line{}, err
 	}
 	return Line{
 		TS:              p.now(),
-		Bead:            sub.issue.ID,
-		Branch:          sub.work.Branch,
-		Head:            sub.work.Head,
-		Target:          sub.work.Target,
-		Submitted:       sub.work.Submitted,
-		Agent:           agentOf(sub.issue),
+		Bead:            e.Issue.ID,
+		Branch:          e.Work.Branch,
+		Head:            e.Work.Head,
+		Target:          e.Work.Target,
+		Submitted:       e.Work.Submitted,
+		Agent:           agentOf(e.Issue),
 		Answers:         answersFrom(got),
 		QuestionVersion: Version,
 		Model:           got.Model,
 	}, nil
+}
+
+// readClone reads a submission's commits and stat from the bare clone. Its
+// errors are errUnreadable, except a ctx end, which is ctx's error.
+func (p *Pass) readClone(ctx context.Context, w land.Work) ([]string, string, error) {
+	subjects, err := p.Git.CommitSubjects(ctx, w.Target, w.Head, maxSubjects)
+	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, "", cerr
+		}
+		return nil, "", errUnreadable
+	}
+	if len(subjects) == 0 {
+		return nil, "", errUnreadable
+	}
+	out, err := p.Git.Numstat(ctx, w.Target, w.Head)
+	if err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, "", cerr
+		}
+		return nil, "", errUnreadable
+	}
+	return subjects, out, nil
 }
 
 // fileChange is one changed file and its line counts. A binary file counts 0.

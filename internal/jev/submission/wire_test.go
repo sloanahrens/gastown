@@ -105,62 +105,85 @@ func TestJevSubmissionRefusesOptionRefs(t *testing.T) {
 	}
 }
 
-// recordingLister records each query and answers waiting/closed by the
-// filter it carries.
+// recordingLister records each query, answers the label query with waiting
+// and resolves beads by ID through Show.
 type recordingLister struct {
 	calls   []beads.ListOptions
 	waiting []*beads.Issue
-	closed  []*beads.Issue
+	byID    map[string]*beads.Issue
 }
 
 func (r *recordingLister) List(opts beads.ListOptions) ([]*beads.Issue, error) {
 	r.calls = append(r.calls, opts)
-	if opts.Label != "" {
-		return r.waiting, nil
-	}
-	return r.closed, nil
+	return r.waiting, nil
 }
 
-// The production lister asks for the ready-to-land label and for the beads
-// closed since the cursor, keeps only actionable waiting beads, and returns a
-// bead once when both reads see it.
-func TestJevSubmissionListerReadsWaitingAndClosedBeads(t *testing.T) {
+func (r *recordingLister) Show(id string) (*beads.Issue, error) {
+	if issue, ok := r.byID[id]; ok {
+		return issue, nil
+	}
+	return nil, beads.ErrNotFound
+}
+
+// The lister reads the first-sight records since the cursor, then lists the
+// waiting beads that no record names. A record older than the cursor, or one
+// whose bead is gone, yields nothing; a waiting bead with a record at its head
+// yields nothing, but at a new head it is listed again.
+func TestJevSubmissionListerReadsRecordsThenUnrecordedWaitingBeads(t *testing.T) {
 	t.Parallel()
 	since := t0.Add(-time.Hour)
+	records := filepath.Join(t.TempDir(), land.SubmissionsSeenFile)
+	for _, rec := range []land.SubmissionRecord{
+		{SeenAt: since.Add(-time.Minute), Bead: "gt-old", Head: "h-old", Target: "main"},
+		{SeenAt: since.Add(time.Minute), Bead: "gt-recorded", Head: "h-rec", Target: "main", Subjects: []string{"fix: it (gt-recorded)"}, Numstat: "1\t1\tx.go"},
+		{SeenAt: since.Add(2 * time.Minute), Bead: "gt-gone", Head: "h-gone", Target: "main"},
+		{SeenAt: since.Add(-2 * time.Minute), Bead: "gt-resub", Head: "h-first", Target: "main"},
+	} {
+		if err := battery.Append(records, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ready := func(id, head string) *beads.Issue {
+		return &beads.Issue{ID: id, Status: "open", Labels: []string{land.LabelReadyToLand}, Notes: land.FormatReadyNote(land.Work{
+			Branch: "polecat/x/" + id, Head: head, Target: "main", Submitted: since.Add(4 * time.Minute),
+		})}
+	}
+	deferred := ready("gt-deferred", "h-d")
+	deferred.Status = string(beads.StatusDeferred)
 	rec := &recordingLister{
 		waiting: []*beads.Issue{
 			{ID: "gt-open", Status: "open"},
-			{ID: "gt-hooked", Status: beads.StatusHooked},
-			{ID: "gt-deferred", Status: string(beads.StatusDeferred)},
-			{ID: "gt-both", Status: "open"},
+			ready("gt-old", "h-old"),
+			ready("gt-recorded", "h-rec"),
+			ready("gt-resub", "h-second"),
+			deferred,
 			nil,
 		},
-		closed: []*beads.Issue{
-			{ID: "gt-landed", Status: "closed"},
-			{ID: "gt-both", Status: "closed"},
-			nil,
+		byID: map[string]*beads.Issue{
+			"gt-recorded": {ID: "gt-recorded", Status: "closed"},
+			"gt-old":      {ID: "gt-old", Status: "closed"},
 		},
 	}
 
-	got, err := rigBeads{b: rec}.Since(since)
+	got, err := rigBeads{b: rec, records: records}.Since(since)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rec.calls) != 2 {
-		t.Fatalf("made %d list calls, want 2", len(rec.calls))
-	}
-	if rec.calls[0].Label != land.LabelReadyToLand {
-		t.Errorf("first call Label = %q, want %q", rec.calls[0].Label, land.LabelReadyToLand)
-	}
-	if rec.calls[1].Status != "closed" || !rec.calls[1].ClosedAfter.Equal(since) {
-		t.Errorf("second call = %+v, want the beads closed since %v", rec.calls[1], since)
+	if len(rec.calls) != 1 || rec.calls[0].Label != land.LabelReadyToLand {
+		t.Errorf("list calls = %+v, want one read of the ready-to-land label", rec.calls)
 	}
 	var ids []string
-	for _, issue := range got {
-		ids = append(ids, issue.ID)
+	for _, e := range got {
+		ids = append(ids, e.Issue.ID)
 	}
-	if strings.Join(ids, " ") != "gt-open gt-hooked gt-both gt-landed" {
-		t.Errorf("Since() = %v, want the actionable waiting beads then the closed ones", ids)
+	if strings.Join(ids, " ") != "gt-recorded gt-resub" {
+		t.Fatalf("Since() = %v, want the recorded submission then the resubmitted one", ids)
+	}
+	if !got[0].Seen.Equal(since.Add(time.Minute)) || got[0].Work.Head != "h-rec" || got[0].Numstat != "1\t1\tx.go" || len(got[0].Subjects) != 1 {
+		t.Errorf("recorded entry = %+v, want the record's seen time, head, subjects and numstat", got[0])
+	}
+	if got[1].Work.Head != "h-second" || !got[1].Seen.Equal(since.Add(4*time.Minute)) || got[1].Subjects != nil {
+		t.Errorf("waiting entry = %+v, want the new head at its submission time with no record subjects", got[1])
 	}
 }
 
