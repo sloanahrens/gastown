@@ -226,6 +226,13 @@ container suite verified at `gt done` asks for it in its own command
 slot for it. The session's own exported value is deliberately not an input: the slot
 decision and the environment the suite reads are one fact (gt-0hbm).
 
+**Presubmits are capped townwide.** Each `gt done` runs its local gate on the host, and
+three to five at once starved it (2026-10-20: host idle 0-2%, `bd` reads from 0.3 s to
+5-12 s). A presubmit pool of its own caps them at `operational.daemon.presubmit_pool`
+(default `2`). A `gt done` past the cap waits for a free slot inside the gate's 60-minute
+budget, logs one line once the wait passes 60 s, and shows in `gt slot status` under
+"Presubmit pool". It never takes a container-gate slot, and a landing never waits on it.
+
 **Whole-tree runs are capped (gt-dhcmp).** A whole-tree test run is the heaviest thing a
 seat starts, and several at once starve the landing gate: on 2026-10-03 whole-suite runs
 from several seats pushed one landing's gate to 5m02s against a 26-39s norm. The

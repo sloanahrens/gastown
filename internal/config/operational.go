@@ -71,6 +71,10 @@ const (
 	DefaultContainerGateYieldToGate     = true
 	DefaultContainerGateMaxGateYield    = 30 * time.Minute
 	DefaultContainerGateMaxFullSuites   = 1
+
+	// DefaultPresubmitPool is how many gt done presubmits may run at once
+	// townwide (operational.daemon.presubmit_pool).
+	DefaultPresubmitPool = 2
 )
 
 // Dolt defaults.
@@ -447,6 +451,16 @@ func (d *DaemonThresholds) PressureMaxSessionsV() int {
 		return *d.PressureMaxSessions
 	}
 	return DefaultPressureMaxSessions
+}
+
+// PresubmitPoolV returns the configured or default number of presubmit slots.
+// A value below 1 falls back to the default: a zero pool would park every
+// gt done behind a gate that can never start.
+func (d *DaemonThresholds) PresubmitPoolV() int {
+	if d != nil && d.PresubmitPool != nil && *d.PresubmitPool >= 1 {
+		return *d.PresubmitPool
+	}
+	return DefaultPresubmitPool
 }
 
 // --- Overseer accessors ---

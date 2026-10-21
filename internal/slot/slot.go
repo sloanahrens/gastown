@@ -372,6 +372,14 @@ type Handle struct {
 	role       string
 	acquiredAt time.Time
 	released   bool
+
+	// ownerPath is the owner file this hold publishes and removes on release;
+	// empty means the container-gate slot's (SlotOwnerPath(townRoot, Index)).
+	ownerPath string
+	// presubmit marks a hold on the presubmit pool (AcquirePresubmit). Its
+	// release records a presubmit slot_hold event, not a container-gate ring
+	// entry, and it does not touch the container-gate reentrant marker.
+	presubmit bool
 }
 
 // Acquire blocks until the container-gate slot is available (or timeout
@@ -445,8 +453,16 @@ func (h *Handle) release(exitCode *int) error {
 	g := h.gate
 
 	held := g.clock.Since(h.acquiredAt)
-	_ = os.Remove(SlotOwnerPath(h.townRoot, h.Index))
+	ownerPath := h.ownerPath
+	if ownerPath == "" {
+		ownerPath = SlotOwnerPath(h.townRoot, h.Index)
+	}
+	_ = os.Remove(ownerPath)
 	h.unlock()
+	if h.presubmit {
+		emitPresubmitHold(g.probeOut, h.townRoot, h.role, h.Index, held)
+		return nil
+	}
 	disarmReentrant(g.env)
 
 	// Telemetry is best-effort and runs after the lock is gone: a caller

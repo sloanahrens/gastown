@@ -208,9 +208,35 @@ func runSlotStatus(cmd *cobra.Command, _ []string) error {
 		return printSlotStatusJSON(cmd, rep, history)
 	}
 
+	presubmit, err := slot.StatusPresubmit(townRoot, slot.PresubmitSize(townRoot))
+	if err != nil {
+		return fmt.Errorf("checking presubmit pool: %w", err)
+	}
+
 	printSlotStatusText(cmd, rep)
+	printPresubmitStatusText(cmd, presubmit)
 	printSlotHistory(cmd, rep, history)
 	return nil
+}
+
+// printPresubmitStatusText renders the presubmit pool: how many of its slots
+// are held and by whom. gt done's local gate takes one of them before it runs,
+// so a held slot is a polecat waiting on or running a presubmit.
+func printPresubmitStatusText(cmd *cobra.Command, rep slot.Report) {
+	out := cmd.OutOrStdout()
+	fmt.Fprintf(out, "Presubmit pool: %d/%d held\n", rep.HeldCount, rep.Total)
+	for _, st := range rep.Slots {
+		label := "free"
+		if st.Held {
+			if st.Owner != nil {
+				label = fmt.Sprintf("held by %s (pid %d, since %s, age %s)", st.Owner.Role, st.Owner.PID,
+					st.Owner.AcquiredAt.Format(time.RFC3339), time.Since(st.Owner.AcquiredAt).Round(time.Second))
+			} else {
+				label = "held (owner metadata unavailable)"
+			}
+		}
+		fmt.Fprintf(out, "  presubmit slot %d: %s\n", st.Index, label)
+	}
 }
 
 func printSlotStatusText(cmd *cobra.Command, rep slot.Report) {
