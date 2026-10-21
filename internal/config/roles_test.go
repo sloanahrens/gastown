@@ -1,8 +1,6 @@
 package config
 
 import (
-	"os"
-	"strings"
 	"testing"
 	"time"
 )
@@ -68,18 +66,6 @@ func TestLoadBuiltinRoleDefinition_UnknownRole(t *testing.T) {
 	_, err := loadBuiltinRoleDefinition("nonexistent")
 	if err == nil {
 		t.Error("expected error for unknown role, got nil")
-	}
-}
-
-func TestLoadRoleDefinition_UnknownRole(t *testing.T) {
-	t.Parallel()
-	_, err := LoadRoleDefinition("/tmp/town", "", "nonexistent")
-	if err == nil {
-		t.Error("expected error for unknown role, got nil")
-	}
-	// Should have a clear error message, not a cryptic embed error
-	if !strings.Contains(err.Error(), "unknown role") {
-		t.Errorf("error should mention 'unknown role', got: %v", err)
 	}
 }
 
@@ -208,89 +194,5 @@ func TestDuration_UnmarshalText(t *testing.T) {
 				t.Errorf("Duration = %v, want %v", d.Duration, tt.expected)
 			}
 		})
-	}
-}
-
-func TestLoadRoleDefinition_InvalidTownOverride(t *testing.T) {
-	t.Parallel()
-	// Create a temp directory with an invalid TOML override
-	townRoot := t.TempDir()
-	rolesDir := townRoot + "/roles"
-	if err := os.MkdirAll(rolesDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write invalid TOML
-	if err := os.WriteFile(rolesDir+"/polecat.toml", []byte("this is not valid [[ toml"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := LoadRoleDefinition(townRoot, "", "polecat")
-	if err == nil {
-		t.Fatal("expected error for invalid TOML override, got nil")
-	}
-	if !strings.Contains(err.Error(), "town-level role override") {
-		t.Errorf("error should mention 'town-level role override', got: %v", err)
-	}
-}
-
-func TestLoadRoleDefinition_InvalidRigOverride(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	rigPath := t.TempDir()
-	rolesDir := rigPath + "/roles"
-	if err := os.MkdirAll(rolesDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write invalid TOML at rig level
-	if err := os.WriteFile(rolesDir+"/polecat.toml", []byte("bad = [toml"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err := LoadRoleDefinition(townRoot, rigPath, "polecat")
-	if err == nil {
-		t.Fatal("expected error for invalid TOML rig override, got nil")
-	}
-	if !strings.Contains(err.Error(), "rig-level role override") {
-		t.Errorf("error should mention 'rig-level role override', got: %v", err)
-	}
-}
-
-func TestLoadRoleDefinition_ValidOverride(t *testing.T) {
-	t.Parallel()
-	townRoot := t.TempDir()
-	rolesDir := townRoot + "/roles"
-	if err := os.MkdirAll(rolesDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	// Write a valid override that changes the nudge
-	override := `nudge = "custom nudge for polecat"` + "\n"
-	if err := os.WriteFile(rolesDir+"/polecat.toml", []byte(override), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	def, err := LoadRoleDefinition(townRoot, "", "polecat")
-	if err != nil {
-		t.Fatalf("unexpected error for valid override: %v", err)
-	}
-	if def.Nudge != "custom nudge for polecat" {
-		t.Errorf("Nudge = %q, want %q", def.Nudge, "custom nudge for polecat")
-	}
-}
-
-func TestLoadRoleDefinition_NoOverrideFiles(t *testing.T) {
-	t.Parallel()
-	// Use temp dirs with no roles/ subdirectory - should succeed with defaults only
-	townRoot := t.TempDir()
-	rigPath := t.TempDir()
-
-	def, err := LoadRoleDefinition(townRoot, rigPath, "polecat")
-	if err != nil {
-		t.Fatalf("unexpected error when no override files exist: %v", err)
-	}
-	if def.Role != "polecat" {
-		t.Errorf("Role = %q, want %q", def.Role, "polecat")
 	}
 }

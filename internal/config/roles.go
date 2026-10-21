@@ -4,8 +4,6 @@ package config
 import (
 	"embed"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -127,61 +125,6 @@ func RigRoles() []string {
 	return []string{"polecat", "crew"}
 }
 
-// isValidRoleName checks if the given name is a known role.
-func isValidRoleName(name string) bool {
-	for _, r := range AllRoles() {
-		if r == name {
-			return true
-		}
-	}
-	return false
-}
-
-// LoadRoleDefinition loads role configuration with override resolution.
-// Resolution order (later overrides earlier):
-//  1. Built-in defaults (embedded in binary)
-//  2. Town-level overrides (<town>/roles/<role>.toml)
-//  3. Rig-level overrides (<rig>/roles/<role>.toml)
-//
-// Each layer merges with (not replaces) the previous. Users only specify
-// fields they want to change.
-func LoadRoleDefinition(townRoot, rigPath, roleName string) (*RoleDefinition, error) {
-	// Validate role name
-	if !isValidRoleName(roleName) {
-		return nil, fmt.Errorf("unknown role %q - valid roles: %v", roleName, AllRoles())
-	}
-
-	// 1. Load built-in defaults
-	def, err := loadBuiltinRoleDefinition(roleName)
-	if err != nil {
-		return nil, fmt.Errorf("loading built-in role %s: %w", roleName, err)
-	}
-
-	// 2. Apply town-level overrides if present
-	townOverridePath := filepath.Join(townRoot, "roles", roleName+".toml")
-	if override, err := loadRoleOverride(townOverridePath); err != nil {
-		if !os.IsNotExist(err) {
-			return nil, fmt.Errorf("town-level role override %s: %w", townOverridePath, err)
-		}
-	} else {
-		mergeRoleDefinition(def, override)
-	}
-
-	// 3. Apply rig-level overrides if present (only for rig-scoped roles)
-	if rigPath != "" {
-		rigOverridePath := filepath.Join(rigPath, "roles", roleName+".toml")
-		if override, err := loadRoleOverride(rigOverridePath); err != nil {
-			if !os.IsNotExist(err) {
-				return nil, fmt.Errorf("rig-level role override %s: %w", rigOverridePath, err)
-			}
-		} else {
-			mergeRoleDefinition(def, override)
-		}
-	}
-
-	return def, nil
-}
-
 // loadBuiltinRoleDefinition loads a role definition from embedded defaults.
 func loadBuiltinRoleDefinition(roleName string) (*RoleDefinition, error) {
 	data, err := defaultRolesFS.ReadFile("roles/" + roleName + ".toml")
@@ -195,91 +138,6 @@ func loadBuiltinRoleDefinition(roleName string) (*RoleDefinition, error) {
 	}
 
 	return &def, nil
-}
-
-// loadRoleOverride loads a role override from a file path.
-// Returns nil, nil if file doesn't exist.
-func loadRoleOverride(path string) (*RoleDefinition, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, err // Signal no override exists
-		}
-		return nil, fmt.Errorf("reading %s: %w", path, err)
-	}
-
-	var def RoleDefinition
-	if err := toml.Unmarshal(data, &def); err != nil {
-		return nil, fmt.Errorf("parsing %s: %w", path, err)
-	}
-
-	return &def, nil
-}
-
-// mergeRoleDefinition merges override into base.
-// Only non-zero values in override are applied.
-func mergeRoleDefinition(base, override *RoleDefinition) {
-	if override == nil {
-		return
-	}
-
-	// Role and Scope are immutable
-	// (can't change a crew member to a polecat via override)
-
-	// Session config
-	if override.Session.Pattern != "" {
-		base.Session.Pattern = override.Session.Pattern
-	}
-	if override.Session.WorkDir != "" {
-		base.Session.WorkDir = override.Session.WorkDir
-	}
-	// NeedsPreSync can only be enabled via override, not disabled.
-	// This is intentional: if a role's builtin requires pre-sync (e.g., refinery),
-	// disabling it would break the role's assumptions about workspace state.
-	if override.Session.NeedsPreSync {
-		base.Session.NeedsPreSync = true
-	}
-	if override.Session.StartCommand != "" {
-		base.Session.StartCommand = override.Session.StartCommand
-	}
-
-	// Env vars (merge, don't replace)
-	if override.Env != nil {
-		if base.Env == nil {
-			base.Env = make(map[string]string)
-		}
-		for k, v := range override.Env {
-			base.Env[k] = v
-		}
-	}
-
-	// Health config
-	if override.Health.PingTimeout.Duration != 0 {
-		base.Health.PingTimeout = override.Health.PingTimeout
-	}
-	if override.Health.ConsecutiveFailures != 0 {
-		base.Health.ConsecutiveFailures = override.Health.ConsecutiveFailures
-	}
-	if override.Health.KillCooldown.Duration != 0 {
-		base.Health.KillCooldown = override.Health.KillCooldown
-	}
-	if override.Health.StuckThreshold.Duration != 0 {
-		base.Health.StuckThreshold = override.Health.StuckThreshold
-	}
-	if override.Health.HungSessionThreshold.Duration != 0 {
-		base.Health.HungSessionThreshold = override.Health.HungSessionThreshold
-	}
-	if override.Health.SelfProbeBudget.Duration != 0 {
-		base.Health.SelfProbeBudget = override.Health.SelfProbeBudget
-	}
-
-	// Prompts
-	if override.Nudge != "" {
-		base.Nudge = override.Nudge
-	}
-	if override.PromptTemplate != "" {
-		base.PromptTemplate = override.PromptTemplate
-	}
 }
 
 // ExpandPattern expands placeholders in a pattern string.
