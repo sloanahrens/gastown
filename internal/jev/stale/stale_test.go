@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -471,19 +470,35 @@ func TestJevStaleQuestionsTreatTheStateAsData(t *testing.T) {
 	}
 }
 
-// The production client, against an httptest Jev endpoint: one bead is one
-// request whose body holds the bead and the five question ids, and its line
-// holds the five answers.
+// cannedEndpoint is a transport that answers every request with resp and keeps
+// the body it was sent. It stands in for the Jev endpoint, so no test opens a
+// socket.
+type cannedEndpoint struct {
+	resp string
+	req  []byte
+}
+
+func (c *cannedEndpoint) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.req, _ = io.ReadAll(r.Body)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(c.resp)),
+		Request:    r,
+	}, nil
+}
+
+// The production client, against a canned endpoint: one bead is one request
+// whose body holds the bead and the five question ids, and its line holds the
+// five answers.
 func TestJevStaleAskOverHTTPLogsFiveAnswers(t *testing.T) {
 	t.Parallel()
-	var body []byte
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, askResponse)
-	}))
-	t.Cleanup(srv.Close)
-	client, err := jev.NewClient(jev.WithBaseURL(srv.URL), jev.WithKey("test-key"))
+	endpoint := &cannedEndpoint{resp: askResponse}
+	client, err := jev.NewClient(
+		jev.WithHTTPClient(&http.Client{Transport: endpoint}),
+		jev.WithBaseURL("https://jev.test/v1/systemone"),
+		jev.WithKey("test-key"),
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +510,7 @@ func TestJevStaleAskOverHTTPLogsFiveAnswers(t *testing.T) {
 	}
 
 	for _, q := range []string{QObsolete, QSuperseded, QWorthDoing, QNeedsReshape, QPriorityFit, "Title gt-old"} {
-		if !strings.Contains(string(body), q) {
+		if !strings.Contains(string(endpoint.req), q) {
 			t.Errorf("request body lacks %q", q)
 		}
 	}
