@@ -115,18 +115,35 @@ func TestWorkersRunOnEveryTickWhileAPageIsOpen(t *testing.T) {
 		defer close(stopped)
 		h.work(ctx, ticks, time.Minute, func() {
 			runs.Add(1)
-			ran <- struct{}{}
+			select {
+			case ran <- struct{}{}:
+			case <-ctx.Done(): // a failed test stops listening for runs
+			}
 		})
 	}()
+	t.Cleanup(func() { cancel(); <-stopped })
 
 	// A send returning means the worker has taken the tick, not that it has run
 	// it: the worker checks its context after taking a tick and drops the tick if
 	// the context has already ended. So each tick is run to completion (the
 	// worker reports it on ran) before the next is sent, and the context is
-	// cancelled only after the last one. No sleeps, no timing.
+	// cancelled only after the last one. The deadline below is a failure guard: it
+	// fires only when the worker has stopped taking or running ticks, so a passing
+	// run never waits on it and no pass depends on timing.
+	const stuck = 5 * time.Second
 	for i := 0; i < 5; i++ {
-		ticks <- now
-		<-ran
+		select {
+		case ticks <- now:
+		//testpolicy:allow no-sleep — failure-only watchdog: a passing run never reaches it
+		case <-time.After(stuck):
+			t.Fatalf("worker did not take tick %d within %v", i+1, stuck)
+		}
+		select {
+		case <-ran:
+		//testpolicy:allow no-sleep — failure-only watchdog: a passing run never reaches it
+		case <-time.After(stuck):
+			t.Fatalf("worker took tick %d but did not run it within %v", i+1, stuck)
+		}
 	}
 	cancel()
 	<-stopped
