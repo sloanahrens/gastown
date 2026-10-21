@@ -247,7 +247,8 @@ type response struct {
 // a deadline returns ErrTimeout, a 429 returns a *RateLimitError, a 401
 // returns ErrUnauthorized, any other non-2xx returns a *StatusError, and a 2xx
 // that does not answer every question as asked returns ErrBadResponse. The
-// usage ledger records one line per call.
+// usage ledger records one line per call whose 2xx reply decodes, bad answers
+// included.
 func (c *Client) Ask(ctx context.Context, state any, qs map[string]Question) (*Answers, error) {
 	if len(qs) == 0 {
 		return nil, errors.New("jev: Ask needs at least one question")
@@ -265,10 +266,13 @@ func (c *Client) Ask(ctx context.Context, state any, qs map[string]Question) (*A
 		return nil, err
 	}
 	out, err := parseAnswers(data, qs)
-	if err != nil {
+	if out == nil {
 		return nil, err
 	}
 	c.ledger.record(out.Usage)
+	if err != nil {
+		return nil, err
+	}
 	return out, nil
 }
 
@@ -382,6 +386,9 @@ func noulCriteria(trueDesc, falseDesc string) map[string]string {
 
 // parseAnswers decodes a 2xx body and returns ErrBadResponse unless it answers
 // every question asked, with the type asked and a value that type documents.
+// A body that decodes comes back with its Usage even when its answers are bad,
+// so the call's tokens are still billed to the ledger; a body that does not
+// decode returns nil.
 func parseAnswers(data []byte, qs map[string]Question) (*Answers, error) {
 	var r response
 	if err := json.Unmarshal(data, &r); err != nil {
@@ -397,27 +404,27 @@ func parseAnswers(data []byte, qs map[string]Question) (*Answers, error) {
 	for id, q := range qs {
 		a, ok := r.Answers[id]
 		if !ok || a.Type != q.Type {
-			return nil, answerErr(id, len(qs), fmt.Errorf("no %s answer", q.Type))
+			return out, answerErr(id, len(qs), fmt.Errorf("no %s answer", q.Type))
 		}
 		switch q.Type {
 		case typeChoice:
 			ca, err := parseChoiceAnswer(a, q.Options)
 			if err != nil {
-				return nil, answerErr(id, len(qs), err)
+				return out, answerErr(id, len(qs), err)
 			}
 			out.Choice[id] = ca
 		case typeNoul:
 			if a.Noul == nil {
-				return nil, answerErr(id, len(qs), errors.New("no noul value"))
+				return out, answerErr(id, len(qs), errors.New("no noul value"))
 			}
 			if *a.Noul < 0 || *a.Noul > 1 {
-				return nil, answerErr(id, len(qs), fmt.Errorf("noul %v is outside 0 to 1", *a.Noul))
+				return out, answerErr(id, len(qs), fmt.Errorf("noul %v is outside 0 to 1", *a.Noul))
 			}
 			out.Noul[id] = *a.Noul
 		case typeScore:
 			sa, err := parseScoreAnswer(a, len(q.Levels))
 			if err != nil {
-				return nil, answerErr(id, len(qs), err)
+				return out, answerErr(id, len(qs), err)
 			}
 			out.Score[id] = sa
 		}

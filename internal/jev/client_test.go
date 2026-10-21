@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -293,6 +294,24 @@ func TestChoice_BadResponses(t *testing.T) {
 			require.ErrorIs(t, err, ErrBadResponse)
 		})
 	}
+}
+
+func TestAskRecordsUsageOnBadAnswer(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "usage.jsonl")
+	body := `{"answers":{"q":{"type":"choice","choice":"refunds","probabilities":{},"confidence":1}},"usage":{"input_tokens":120,"output_tokens":7}}`
+	c := newTestClient(t, &respond{body: body}, WithLedger(path), WithCaller("ask test"))
+
+	_, err := c.Ask(context.Background(), shoeState, map[string]Question{
+		questionID: {Type: typeChoice, Instructions: "Which team?", Options: shoeCriteria},
+	})
+
+	require.ErrorIs(t, err, ErrBadResponse)
+	lines := ledgerLines(t, path)
+	require.Len(t, lines, 1, "a billed call whose answer is bad is still one ledger line")
+	assert.Equal(t, "ask test", lines[0].Caller)
+	assert.Equal(t, 120, lines[0].InputTokens)
+	assert.Equal(t, 7, lines[0].OutputTokens)
 }
 
 func TestChoice_BadResponseMessagesAreUnchanged(t *testing.T) {
