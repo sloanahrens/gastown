@@ -56,6 +56,11 @@ type State struct {
 	// PausedBy identifies who paused the agent (e.g. "human", "supervisor").
 	PausedBy string `json:"paused_by,omitempty"`
 
+	// Frozen is true when the supervisor froze the seat on an exhausted
+	// restart budget. A freeze is not a park: it holds the seat until
+	// `gt agent resume` clears it, so it is never released as stale.
+	Frozen bool `json:"frozen,omitempty"`
+
 	// PriorAgentState is the agent bead's agent_state at the moment of
 	// pause (e.g. "working", "idle"), captured because the bead is now a
 	// display mirror only. `gt agent resume` restores this value rather
@@ -106,6 +111,7 @@ func readMarker(path string) (bool, *State, error) {
 		Reason:          rec.Reason,
 		PausedAt:        rec.PausedAt,
 		PausedBy:        rec.PausedBy,
+		Frozen:          rec.Frozen,
 		PriorAgentState: rec.PriorAgentState,
 		Address:         AddressFromMarkerPath(path),
 	}, nil
@@ -120,9 +126,10 @@ const ParkedSeatRelease = 30 * time.Minute
 
 // ParkedStale reports whether st is a park older than ParkedSeatRelease at now.
 // A nil state, a state that is not a pause, and a park time that is unset all
-// read false: the seat keeps counting, as it did before the release.
+// read false: the seat keeps counting, as it did before the release. So does a
+// supervisor freeze, however old: the release is for operator parks only.
 func ParkedStale(st *State, now time.Time) bool {
-	return st != nil && st.Paused && !st.PausedAt.IsZero() && now.Sub(st.PausedAt) > ParkedSeatRelease
+	return st != nil && st.Paused && !st.Frozen && !st.PausedAt.IsZero() && now.Sub(st.PausedAt) > ParkedSeatRelease
 }
 
 // Pause parks the agent: it sets the seat's intent record to desired=park

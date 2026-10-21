@@ -929,6 +929,45 @@ func TestPoolDeadHookedSessions_ParkedSeatReleasesAfterThirtyMinutes(t *testing.
 	}
 }
 
+// TestPoolDeadHookedSessions_SupervisorFreezeHoldsSeatPastThirtyMinutes: a
+// seat the supervisor froze on an exhausted restart budget has no session and
+// still holds its hooked bead. An hour-old freeze is not a stale park: it stays
+// dead-hooked and counted, so the pool does not admit a polecat over the cap
+// (gt-0rvkw).
+func TestPoolDeadHookedSessions_SupervisorFreezeHoldsSeatPastThirtyMinutes(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "mariner")
+	writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "mariner"}, town,
+		intent.Record{
+			Frozen:   true,
+			Reason:   "restart budget exhausted",
+			PausedBy: "supervisor",
+			PausedAt: time.Now().UTC().Add(-time.Hour),
+		})
+	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 1}}}
+	hooked := func(_, _ string) (poolSeatState, error) {
+		return poolSeatState{
+			Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true},
+			HookHeld:    true,
+		}, nil
+	}
+
+	sessions, err := poolSeatSessionsWith(&fakeLister{}, town, hooked, nil, pool)
+	if err != nil {
+		t.Fatalf("poolSeatSessionsWith: %v", err)
+	}
+	for _, s := range sessions {
+		if s.parkedStale {
+			t.Fatalf("supervisor-frozen seat released as parked-stale: %+v", s)
+		}
+	}
+	if n := poolHeldCount(sessions); n != 1 {
+		t.Fatalf("poolHeldCount = %d, want 1: a frozen seat still holds its seat (%+v)", n, sessions)
+	}
+}
+
 // TestPoolCounts_SkipParkedStaleSeat: the pool's own tallies skip a released
 // seat, the per-agent count and the max_total one alike, so no admission path
 // has to filter the sessions first (gt-t7k92).

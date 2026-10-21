@@ -69,11 +69,57 @@ func TestParkedStale(t *testing.T) {
 		{"parked 29 minutes", &State{Paused: true, PausedAt: now.Add(-29 * time.Minute)}, false},
 		{"no park time", &State{Paused: true}, false},
 		{"not paused", &State{Paused: false, PausedAt: now.Add(-time.Hour)}, false},
+		{"supervisor freeze 31 minutes", &State{Paused: true, Frozen: true, PausedBy: "supervisor", PausedAt: now.Add(-31 * time.Minute)}, false},
 	}
 	for _, c := range cases {
 		if got := ParkedStale(c.st, now); got != c.want {
 			t.Errorf("%s: ParkedStale = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestParkedStaleSparesSupervisorFreeze: a seat frozen by the supervisor and a
+// seat parked by an operator, both 31 minutes old, read the same pause through
+// IsPaused. Only the park is released; the freeze still holds its seat (gt-0rvkw).
+func TestParkedStaleSparesSupervisorFreeze(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	at := time.Now().UTC().Add(-31 * time.Minute)
+	freeze := intent.Seat{Rig: "gastown", Role: "polecat", Name: "flint"}
+	if _, err := intent.Update(town, freeze, func(r *intent.Record) error {
+		r.Frozen = true
+		r.Reason = "restart budget exhausted"
+		r.PausedBy = "supervisor"
+		r.PausedAt = at
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	park := intent.Seat{Rig: "gastown", Role: "polecat", Name: "jade"}
+	if _, err := intent.Update(town, park, func(r *intent.Record) error {
+		r.Desired = intent.DesiredPark
+		r.Reason = "operator"
+		r.PausedBy = "human"
+		r.PausedAt = at
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	now := time.Now()
+	paused, st, err := IsPaused(town, "gastown", "polecat", "flint")
+	if err != nil || !paused {
+		t.Fatalf("frozen seat: paused=%v err=%v; want paused", paused, err)
+	}
+	if ParkedStale(st, now) {
+		t.Errorf("frozen seat released as stale after 31 minutes; a supervisor freeze must keep its seat")
+	}
+	paused, st, err = IsPaused(town, "gastown", "polecat", "jade")
+	if err != nil || !paused {
+		t.Fatalf("parked seat: paused=%v err=%v; want paused", paused, err)
+	}
+	if !ParkedStale(st, now) {
+		t.Errorf("operator park 31 minutes old not released as stale")
 	}
 }
 
