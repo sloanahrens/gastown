@@ -26,7 +26,8 @@ type Line struct {
 	Rig  string `json:"rig"`
 	Bead string `json:"bead"`
 	SHA  string `json:"sha"`
-	// FirstSeen is when the item was raised.
+	// FirstSeen is when the item was raised: the time of the "new" transition
+	// the line asks about, so each raise of a key has its own line.
 	FirstSeen time.Time `json:"first_seen"`
 	// Answers is what Jev answered, or null when the call failed.
 	Answers *Answers `json:"answers"`
@@ -35,6 +36,10 @@ type Line struct {
 	// Model is the versioned model ID that answered, empty when the call
 	// failed.
 	Model string `json:"model"`
+	// Live is whether the item was still open in state.json when the pass
+	// asked. When it was not, Rig, Bead and SHA are empty and the question
+	// has no other open items beside it.
+	Live bool `json:"live"`
 }
 
 // Answers holds one item's answers to the question set.

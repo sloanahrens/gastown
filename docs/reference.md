@@ -1147,12 +1147,16 @@ required to price them.
 
 ### Attention battery
 
-`internal/jev/attention` asks one Jev call per new attention item: five
-questions (needs a person, clears on its own, a routine action fixes it, repeats
-an open item, and an urgency score), and appends one line per item to
-`.runtime/jev/attention.jsonl`. The pass is advisory and log-only: it never
-acks, hides, wakes or changes an item, and it writes nothing under
-`.runtime/attention`.
+`internal/jev/attention` asks one Jev call per raise: each `new` transition in
+the attention queue's event log (`.runtime/attention/events.jsonl`) past the
+cursor, whether or not the item still stands. Each call asks five questions
+(needs a person, clears on its own, a routine action fixes it, repeats an open
+item, and an urgency score), and the pass appends one line per raise to
+`.runtime/jev/attention.jsonl`. The line's `live` says whether `state.json` still
+held the item when the pass asked. A raise that cleared first is asked with
+`live: false`, no rig, bead or SHA, and no other open items beside it. The pass
+is advisory and log-only: it never acks, hides, wakes or changes an item, and it
+writes nothing under `.runtime/attention`.
 
 The attention battery replaced the three-way Jev triage of the attention queue
 and its replay (`gt attention jev-replay`, gt-3ey5j, now retired). Use
@@ -1164,8 +1168,10 @@ false, `max_usd_per_day` to 1, and `usd_per_billion_tokens` is required. The
 daily cap is the town-wide one described under Jev Batteries: it counts every
 Jev caller's spend, so other batteries' calls today use up this pass's room.
 The daemon runs a pass every 15 minutes when enabled. The first pass only sets
-the cursor, so it asks about no item raised before it. `gt jev attention
---recent N` prints the last N lines.
+the cursor, so it asks about no raise before it. The pass reads only the current
+`events.jsonl`: a cursor older than that file's first line logs one warning and
+the pass continues from the file's start. `gt jev attention --recent N` prints
+the last N lines.
 
 A failed call is held until a later call in the same pass succeeds. Then the
 failure was about the item, so the item is logged with `answers: null` and not

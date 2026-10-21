@@ -1,6 +1,7 @@
 package attention
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -64,39 +65,74 @@ func item(key string, minute int, summary string) attention.Item {
 	}
 }
 
+// raiseOf is the "new" transition an item's raise writes to events.jsonl.
+func raiseOf(it attention.Item) attention.Event {
+	return attention.Event{
+		TS:       it.FirstSeen,
+		Class:    it.Kind,
+		Severity: it.Severity,
+		Text:     it.Summary,
+		Key:      it.Key,
+		State:    attention.EventNew,
+		Handled:  attention.HandledInfo,
+	}
+}
+
 // harness is one pass over fakes, with its files in a temp directory and a
-// cursor set so that items first seen before t0-1h are behind it.
+// cursor set so that raises first seen before t0-1h are behind it. The events
+// log is a real events.jsonl in the temp directory, read back by the pass.
 type harness struct {
 	pass   *Pass
 	asker  *fakeAsker
 	items  []attention.Item
 	spent  float64
+	town   string
 	log    string
 	cursor string
+	warn   *bytes.Buffer
 }
 
+// newHarness starts a pass over the items: each item is open in state.json and
+// has a raise in events.jsonl at its first-seen time.
 func newHarness(t *testing.T, items []attention.Item, answer func(string) (*jev.Answers, error)) *harness {
 	t.Helper()
 	dir := t.TempDir()
 	h := &harness{
 		asker:  &fakeAsker{answer: answer},
 		items:  items,
+		town:   dir,
 		log:    filepath.Join(dir, "attention.jsonl"),
 		cursor: filepath.Join(dir, "attention.cursor.json"),
+		warn:   &bytes.Buffer{},
 	}
 	h.pass = &Pass{
 		Asker:      h.asker,
 		State:      func() (attention.State, error) { return attention.State{Items: h.items}, nil },
+		Events:     func() ([]attention.Event, error) { return attention.ReadEvents(h.town) },
 		LogPath:    h.log,
 		CursorPath: h.cursor,
 		SpentToday: func() (float64, error) { return h.spent, nil },
 		CapUSD:     1,
 		Now:        func() time.Time { return t0.Add(time.Hour) },
+		Warn:       h.warn,
 	}
+	var raises []attention.Event
+	for _, it := range items {
+		raises = append(raises, raiseOf(it))
+	}
+	h.appendEvents(t, raises...)
 	if err := battery.WriteCursor(h.cursor, battery.Cursor{Time: t0.Add(-time.Hour)}); err != nil {
 		t.Fatal(err)
 	}
 	return h
+}
+
+// appendEvents adds transitions to the harness's events.jsonl.
+func (h *harness) appendEvents(t *testing.T, evs ...attention.Event) {
+	t.Helper()
+	if err := attention.AppendEvents(h.town, evs); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // lines reads the log back as generic maps, so a test sees every key.
@@ -159,6 +195,100 @@ func TestJevAttentionPassLogsOneLinePerNewItem(t *testing.T) {
 	}
 	if cur.ID != "red-b" || !cur.Time.Equal(t0.Add(2*time.Minute)) {
 		t.Errorf("cursor = %+v, want red-b at t0+2m", cur)
+	}
+}
+
+// A raise whose item cleared before the pass is still asked. Its line says
+// live=false, and its state quotes no rig and no other open items.
+func TestJevAttentionAsksAClearedRaiseWithoutLiveFields(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, []attention.Item{item("open-a", 2, "still open"), item("open-b", 3, "also open")},
+		func(string) (*jev.Answers, error) { return answersFor(0.9, 2), nil })
+	h.appendEvents(t, raiseOf(item("cleared", 1, "cleared before the pass")))
+
+	sum := mustRun(t, h.pass)
+
+	if sum.Asked != 3 {
+		t.Fatalf("Asked = %d, want all three raises asked", sum.Asked)
+	}
+	lines := h.lines(t)
+	if got := keysOf(lines); !reflect.DeepEqual(got, []string{"cleared", "open-a", "open-b"}) {
+		t.Fatalf("log keys = %v, want every raise oldest first", got)
+	}
+	if lines[0]["live"] != false || lines[0]["rig"] != "" || lines[0]["answers"] == nil {
+		t.Errorf("cleared raise line = %v, want live false, no rig and answers", lines[0])
+	}
+	if lines[1]["live"] != true || lines[1]["rig"] != "gastown" {
+		t.Errorf("open raise line = %v, want live true and the rig", lines[1])
+	}
+	cleared := h.asker.states[0]
+	if !strings.Contains(cleared, "live: false\n") || !strings.Contains(cleared, "other open items: 0\n") || strings.Contains(cleared, `other "open-a"`) {
+		t.Errorf("cleared raise was quoted with others:\n%s", cleared)
+	}
+	open := h.asker.states[1]
+	if !strings.Contains(open, "live: true\n") || !strings.Contains(open, "other open items: 1\n") || !strings.Contains(open, `other "open-b"`) {
+		t.Errorf("open raise was not quoted with its live context:\n%s", open)
+	}
+}
+
+// Each raise of a key is asked, and a cleared transition between them is not.
+func TestJevAttentionAsksEveryRaiseOfAKey(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, []attention.Item{item("flaky", 1, "first raise")},
+		func(string) (*jev.Answers, error) { return answersFor(0.5, 1), nil })
+	h.appendEvents(t,
+		attention.Event{TS: t0.Add(3 * time.Minute), Class: attention.KindRedMain, Severity: attention.SeverityHigh, Text: "cleared", Key: "flaky", State: attention.EventCleared},
+		attention.Event{TS: t0.Add(5 * time.Minute), Class: attention.KindRedMain, Severity: attention.SeverityHigh, Text: "second raise", Key: "flaky", State: attention.EventNew},
+	)
+
+	sum := mustRun(t, h.pass)
+
+	if sum.Asked != 2 || len(h.asker.states) != 2 {
+		t.Fatalf("summary %+v with %d calls, want two raises asked", sum, len(h.asker.states))
+	}
+	lines := h.lines(t)
+	if got := keysOf(lines); !reflect.DeepEqual(got, []string{"flaky", "flaky"}) {
+		t.Errorf("log keys = %v, want the key once per raise", got)
+	}
+	if lines[1]["first_seen"] == lines[0]["first_seen"] {
+		t.Errorf("both raises logged the same first_seen %v", lines[0]["first_seen"])
+	}
+	cur, _, _ := battery.ReadCursor(h.cursor)
+	if cur.ID != "flaky" || !cur.Time.Equal(t0.Add(5*time.Minute)) {
+		t.Errorf("cursor = %+v, want the second raise's time and key", cur)
+	}
+	if sum := mustRun(t, h.pass); sum.Asked != 0 {
+		t.Errorf("second pass asked %d raises, want none", sum.Asked)
+	}
+}
+
+// A cursor older than the first line of events.jsonl warns once and the pass
+// continues from the start of the file.
+func TestJevAttentionWarnsWhenTheCursorIsBehindTheLog(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, nil, func(string) (*jev.Answers, error) { return answersFor(0.5, 1), nil })
+	h.appendEvents(t, raiseOf(item("late", 1, "first line after the cursor")))
+
+	sum := mustRun(t, h.pass)
+
+	if sum.Asked != 1 {
+		t.Errorf("Asked = %d, want the pass to continue from the file start", sum.Asked)
+	}
+	if n := strings.Count(h.warn.String(), "\n"); n != 1 || !strings.Contains(h.warn.String(), "older than the first line of events.jsonl") {
+		t.Errorf("warnings = %q, want one line naming the gap", h.warn.String())
+	}
+}
+
+// A first line at or before the cursor is no gap, so nothing is warned.
+func TestJevAttentionNoWarningWhenTheLogReachesTheCursor(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t, []attention.Item{item("behind", -120, "raised before the cursor"), item("after", 1, "after")},
+		func(string) (*jev.Answers, error) { return answersFor(0.5, 1), nil })
+
+	mustRun(t, h.pass)
+
+	if h.warn.Len() != 0 {
+		t.Errorf("warnings = %q, want none", h.warn.String())
 	}
 }
 
@@ -231,7 +361,7 @@ func TestJevAttentionLineShape(t *testing.T) {
 	mustRun(t, h.pass)
 
 	got := h.lines(t)[0]
-	wantKeys := []string{"ts", "key", "kind", "severity", "rig", "bead", "sha", "first_seen", "answers", "question_version", "model"}
+	wantKeys := []string{"ts", "key", "kind", "severity", "rig", "bead", "sha", "first_seen", "answers", "question_version", "model", "live"}
 	var gotKeys []string
 	for k := range got {
 		gotKeys = append(gotKeys, k)
