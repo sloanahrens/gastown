@@ -67,7 +67,7 @@ func TestCommandGateRunsStepsInOrderInDir(t *testing.T) {
 		t.Fatalf("argv = %q, want %q", got, want)
 	}
 	pk := res.Steps[2].Packages
-	if len(pk) != 2 || pk[0] != (PackageResult{Package: "github.com/x/a", Passed: true, Elapsed: 100 * time.Millisecond}) {
+	if len(pk) != 2 || pk[0] != (PackageResult{Package: "github.com/x/a", Passed: true, Elapsed: 100 * time.Millisecond, Timed: true}) {
 		t.Fatalf("packages = %+v", pk)
 	}
 }

@@ -243,8 +243,8 @@ func TestJevTestselPassWritesOneLineForALanding(t *testing.T) {
 
 	run := pass.Start(context.Background(), Landing{Bead: "gt-fixture", Rig: "gastown", Base: "base", Head: "head", Dir: "dir"})
 	err := run.Finish([]land.PackageResult{
-		{Package: "example.test/fixture/lib", Passed: true, Elapsed: 3 * time.Second},
-		{Package: "example.test/fixture/deep", Passed: false, Elapsed: 1500 * time.Millisecond},
+		{Package: "example.test/fixture/lib", Passed: true, Elapsed: 3 * time.Second, Timed: true},
+		{Package: "example.test/fixture/deep", Passed: false, Elapsed: 1500 * time.Millisecond, Timed: true},
 		{Package: "example.test/fixture/util", Passed: true},
 	})
 	if err != nil {
@@ -295,6 +295,25 @@ func TestJevTestselPassWritesOneLineForALanding(t *testing.T) {
 	wantSeconds := map[string]float64{"lib": 3, "deep": 1.5}
 	if !reflect.DeepEqual(got.GateSeconds, wantSeconds) {
 		t.Errorf("gate_seconds = %v, want %v", got.GateSeconds, wantSeconds)
+	}
+}
+
+// A package the gate timed at zero is on the line at 0, not left off as if the
+// gate had reported no duration for it, so the scorecard counts it as timed
+// and prices no minutes for it (gt-t92f5).
+func TestJevTestselFinishKeepsAZeroDurationTimed(t *testing.T) {
+	t.Parallel()
+	asker := &recordingAsker{noul: func(string) float64 { return 0.5 }}
+	pass := newPass(t, asker, fixtureTree())
+
+	run := pass.Start(context.Background(), Landing{Bead: "gt-zero", Rig: "gastown"})
+	if err := run.Finish([]land.PackageResult{{Package: "example.test/fixture/deep", Passed: true, Timed: true}}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := readLines(t, pass.LogPath)[0]
+	if secs, timed := got.GateSeconds["deep"]; !timed || secs != 0 {
+		t.Errorf("gate_seconds = %v, want deep timed at 0", got.GateSeconds)
 	}
 }
 

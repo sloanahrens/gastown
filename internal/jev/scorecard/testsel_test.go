@@ -158,6 +158,11 @@ func TestTestselSummaryPricesSkipsInGateMinutes(t *testing.T) {
 			want: "gate minutes saved 1.5 (1 of 2 timed)",
 		},
 		{
+			name: "a package timed at zero still counts as timed",
+			line: `{"ts":"2026-10-20T00:00:00Z","bead":"gt-x","rig":"gastown","asked":["internal/cmd"],"noul":{"internal/cmd":0.1},"gate":{"internal/cmd":true},"gate_seconds":{"internal/cmd":0},"question_version":1}`,
+			want: "gate minutes saved 0.0",
+		},
+		{
 			name: "a line that timed nothing reads n/a",
 			line: `{"ts":"2026-10-20T00:00:00Z","bead":"gt-x","rig":"gastown","asked":["internal/cmd"],"noul":{"internal/cmd":0.1},"gate":{"internal/cmd":true},"question_version":1}`,
 			want: "gate minutes saved n/a",

@@ -318,7 +318,7 @@ func (r *Run) Finish(results []land.PackageResult) error {
 				continue
 			}
 			line.Gate[dir] = res.Passed
-			if res.Elapsed > 0 {
+			if res.Timed {
 				if line.GateSeconds == nil {
 					line.GateSeconds = make(map[string]float64, len(results))
 				}

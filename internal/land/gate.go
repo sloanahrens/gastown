@@ -75,10 +75,13 @@ type StepResult struct {
 type PackageResult struct {
 	Package string
 	Passed  bool
-	// Elapsed is the wall time go test reported for the package, 0 when the
-	// line carried none ("(cached)"). The test-selection scorecard prices a
-	// skipped package in gate minutes from it (gt-1d8u0).
+	// Elapsed is the wall time go test reported for the package; Timed says
+	// whether the line carried one at all. A cached package's line carries
+	// "(cached)" instead, but a fast one reports "0.000s": Timed separates
+	// that zero from no duration, so the test-selection scorecard prices it
+	// as no gate minutes rather than as untimed (gt-1d8u0, gt-t92f5).
 	Elapsed time.Duration
+	Timed   bool
 }
 
 // gateTailLines bounds the output a rejection note carries.
@@ -556,10 +559,12 @@ func parseGoTestOutput(out string) []PackageResult {
 		if m == nil {
 			continue
 		}
+		elapsed, timed := packageElapsed(line)
 		pkgs = append(pkgs, PackageResult{
 			Package: m[2],
 			Passed:  m[1] == "ok",
-			Elapsed: packageElapsed(line),
+			Elapsed: elapsed,
+			Timed:   timed,
 		})
 	}
 	return pkgs
@@ -570,17 +575,18 @@ func parseGoTestOutput(out string) []PackageResult {
 // place for a cached package, which no duration matches.
 var packageElapsedRE = regexp.MustCompile(`\s([0-9.]+)s(\s|$)`)
 
-// packageElapsed is the duration a package's summary line carries, or 0.
-func packageElapsed(line string) time.Duration {
+// packageElapsed is the duration a package's summary line carries, and whether
+// it carried one: "(cached)" carries none, "0.000s" carries zero.
+func packageElapsed(line string) (time.Duration, bool) {
 	m := packageElapsedRE.FindStringSubmatch(line)
 	if m == nil {
-		return 0
+		return 0, false
 	}
 	secs, err := strconv.ParseFloat(m[1], 64)
 	if err != nil {
-		return 0
+		return 0, false
 	}
-	return time.Duration(secs*float64(time.Second) + 0.5)
+	return time.Duration(secs*float64(time.Second) + 0.5), true
 }
 
 // parseShellTierFailures is the scripts the tier sweep's summary line named,
