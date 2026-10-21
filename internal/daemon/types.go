@@ -130,6 +130,7 @@ type (
 	JevAttentionConfig         = agentconfig.JevAttentionConfig
 	JevLandingConfig           = agentconfig.JevLandingConfig
 	JevSubmissionConfig        = agentconfig.JevSubmissionConfig
+	JevDriftConfig             = agentconfig.JevDriftConfig
 	JevTargetsConfig           = agentconfig.JevTargetsConfig
 	JevDispatchConfig          = agentconfig.JevDispatchConfig
 	JevProgressConfig          = agentconfig.JevProgressConfig
@@ -321,6 +322,13 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.JevSubmission.Enabled
+	}
+	// jev_drift is opt-in for the same reason.
+	if patrol == "jev_drift" {
+		if config == nil || config.Patrols == nil || config.Patrols.JevDrift == nil {
+			return false
+		}
+		return config.Patrols.JevDrift.Enabled
 	}
 	// jev_dispatch is opt-in for the same reason.
 	if patrol == "jev_dispatch" {

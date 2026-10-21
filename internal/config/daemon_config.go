@@ -89,6 +89,11 @@ type PatrolsConfig struct {
 	// JevDedupe.
 	JevSubmission *JevSubmissionConfig `json:"jev_submission,omitempty"`
 
+	// JevDrift asks Jev whether each landing left the doc sections closest to
+	// its diff stale, and logs the answers (internal/jev/drift). Opt-in for the
+	// same reason as JevDedupe.
+	JevDrift *JevDriftConfig `json:"jev_drift,omitempty"`
+
 	// JevTargets asks Jev to score each file in the deep-review rotation slice
 	// and logs the answers beside the slice's risk rank (internal/jev/targets).
 	// The deep-review script reads it, not the daemon. Opt-in for the same
@@ -527,6 +532,20 @@ type JevLandingConfig struct {
 // spend. The pass is off unless Enabled is true, and an enabled pass needs
 // USDPerBillionTokens: the usage ledger stores tokens, not dollars.
 type JevSubmissionConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the pass for the day once the town's Jev spend
+	// reaches it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+}
+
+// JevDriftConfig switches on the drift battery and prices its Jev spend. The
+// pass is off unless Enabled is true, and an enabled pass needs
+// USDPerBillionTokens: the usage ledger stores tokens, not dollars.
+type JevDriftConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// MaxUSDPerDay stops the pass for the day once the town's Jev spend

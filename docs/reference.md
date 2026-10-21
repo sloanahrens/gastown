@@ -1315,6 +1315,65 @@ reads the same keys whether or not the patrol is on:
 | `max_usd_per_day` | The town-wide daily cap the pass checks with `Cap.Allows` before every call. `0` takes the default of 1. |
 | `usd_per_billion_tokens` | Prices the ledger's tokens. Required: a pass without it refuses to run. |
 
+### Drift battery (`jev_drift`)
+
+`internal/jev/drift` asks Jev whether each landing left the docs behind. A pass
+takes every landing since its cursor, risk path or not, and for each one reads
+the doc sections closest to the landing's diff. It asks Jev once per section and
+appends one line per landing to `.runtime/jev/drift.jsonl`. The pass is advisory
+and log-only: it edits no doc, files no bead, adds no attention item and never
+holds up a landing.
+
+The pass reads the diff with `git diff --numstat` and a zero-context `git diff`
+over `base..head`, leaving out Markdown and `_test.go` files. It reads the docs
+at the landing's target branch, `refs/heads/<target>`, from the bare clone the
+submission battery owns at `.runtime/jev/repos/gastown.git`. It never reads
+`mayor/rig` or a town worktree. The pass syncs that clone once, before its first
+landing, and a failed sync stops the pass with the cursor unmoved.
+
+Sections are chosen in one of two ways. When `hm` is on the PATH, the pass runs
+`hm context --diff - --json` and takes the doc paths its hits name, and it
+searches those docs first. When hm is missing, its reply names no doc with a
+matching section, or the call fails, the pass greps every `docs/**/*.md` for the
+diff's identifiers: flags such as `--recent`, snake_case or kebab-case names such
+as `jev_drift`, and `gt <command>` phrases. Only the changed lines count. Each
+section is cut to 1500 runes, and at most five sections are asked per landing.
+
+Each section gets one Jev call with three questions. `doc_now_stale` and
+`needs_new_section` are `noul` probabilities. `drift_kind` is a `choice` over
+`command`, `flag`, `config_key`, `behavior`, `none` and `unclear`. The state
+holds the changed paths with counts, up to 3000 runes of diff hunks, and the
+section's path, heading and text, each value JSON-quoted.
+
+Each line is `{ts, bead, rig, head, landed_at, agent, sections, unanswered,
+question_version, model}`. `sections` holds one entry per section that got an
+answer, each `{doc, heading, answers}`. `unanswered` counts the sections Jev
+gave an unusable response for, and the pass does not ask them again. The log
+holds paths, headings, numbers and answers, never diff or doc text. A landing
+whose diff names no docs-relevant change gets a line with an empty `sections`
+list.
+
+A git read that fails for any reason other than a refused ref stops the pass
+with the cursor on that landing, so the next pass reads it again. A landing
+whose refs or doc paths the pass refuses before git runs, or whose every section
+returns an unusable response, is skipped with no line. A spend cap reached
+mid-landing stops the pass without writing that landing, so the next pass asks
+it again in full.
+
+The daemon patrol `jev_drift` runs the pass every 15 minutes, off the heartbeat.
+It is off unless `daemon.json` enables it, and it reads the same three keys as
+`jev_submission` above, under `jev_drift`:
+
+```json
+"patrols": {
+  "jev_drift": {
+    "enabled": true,
+    "max_usd_per_day": 1.0,
+    "usd_per_billion_tokens": 3.0
+  }
+}
+```
+
 ### Review-targeting battery (`jev_targets`)
 
 `gt jev review-targets --run <bead> --ranked <rows> --history <file>` asks Jev
