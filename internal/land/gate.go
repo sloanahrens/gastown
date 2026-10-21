@@ -565,10 +565,10 @@ func parseGoTestOutput(out string) []PackageResult {
 	return pkgs
 }
 
-// packageElapsedRE matches the duration on a package's summary line. go test
-// prints "(cached)" in its place for a cached package, which no duration
-// matches.
-var packageElapsedRE = regexp.MustCompile(`\s([0-9.]+)s\s*$`)
+// packageElapsedRE matches the duration on a package's summary line, which may
+// be followed by a coverage report (-cover). go test prints "(cached)" in its
+// place for a cached package, which no duration matches.
+var packageElapsedRE = regexp.MustCompile(`\s([0-9.]+)s(\s|$)`)
 
 // packageElapsed is the duration a package's summary line carries, or 0.
 func packageElapsed(line string) time.Duration {

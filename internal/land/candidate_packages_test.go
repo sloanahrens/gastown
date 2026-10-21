@@ -61,7 +61,8 @@ func TestParseGoTestOutputReadsAForgejoJobLog(t *testing.T) {
 		"2026-10-21T14:03:42.5Z ?   \texample.test/c\t[no test files]\r\n" +
 		"2026-10-21T14:03:43.3456789Z --- FAIL: TestX (0.01s)\r\n" +
 		"2026-10-21T14:03:44.4567890Z FAIL\r\n" +
-		"2026-10-21T14:03:44.5678901Z FAIL\texample.test/d\t0.2s\r\n"
+		"2026-10-21T14:03:44.5678901Z FAIL\texample.test/d\t0.2s\r\n" +
+		"2026-10-21T14:03:45.6789012Z ok  \texample.test/e\t0.3s\tcoverage: 12.3% of statements\r\n"
 
 	got := parseGoTestOutput(log)
 
@@ -69,6 +70,7 @@ func TestParseGoTestOutputReadsAForgejoJobLog(t *testing.T) {
 		{Package: "example.test/a", Passed: true, Elapsed: 412 * time.Millisecond},
 		{Package: "example.test/b", Passed: true},
 		{Package: "example.test/d", Passed: false, Elapsed: 200 * time.Millisecond},
+		{Package: "example.test/e", Passed: true, Elapsed: 300 * time.Millisecond},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseGoTestOutput = %+v, want %+v", got, want)
