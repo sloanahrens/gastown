@@ -122,11 +122,6 @@ type Lock struct {
 	// staleness from what the lock recorded rather than from which processes
 	// this host happens to be running.
 	table processTable
-	// afterSnapshot runs once a lock has been judged stale from a read taken
-	// outside the flock and before reclaimStale takes it. It is the window a
-	// concurrent Acquire can rewrite the lock in, which is what lets a test
-	// drive that interleaving instead of hoping to hit it.
-	afterSnapshot func()
 }
 
 // New creates a Lock for the given worker directory.
@@ -210,9 +205,6 @@ func (a *LockInfo) sameHolder(b *LockInfo) bool {
 // disk when it differs from seen, for the caller to judge afresh; it is nil
 // when the file was removed or was already gone.
 func (l *Lock) reclaimStale(seen *LockInfo) (fresh *LockInfo, removed bool, err error) {
-	if l.afterSnapshot != nil {
-		l.afterSnapshot()
-	}
 	unlock, err := flockAcquire(l.lockPath + ".flock")
 	if err != nil {
 		return nil, false, fmt.Errorf("acquiring coordination lock: %w", err)
@@ -256,7 +248,8 @@ func (l *Lock) Read() (*LockInfo, error) {
 // Check checks if the worker is locked by another agent.
 // Returns nil if unlocked or locked by us.
 // Returns ErrLocked if locked by another live process.
-// Automatically cleans up stale locks.
+// Automatically cleans up stale locks; a stale lock that cannot be examined
+// or removed is returned as an error rather than read as "not locked".
 func (l *Lock) Check() error {
 	info, err := l.Read()
 	if err != nil {
@@ -269,10 +262,12 @@ func (l *Lock) Check() error {
 	// Check if stale. A lock a concurrent Acquire rewrote while we were
 	// deciding comes back from reclaimStale to be judged afresh.
 	for info.holderGone(l.table) {
-		// Clean up stale lock (best-effort cleanup)
 		fresh, _, err := l.reclaimStale(info)
-		if err != nil || fresh == nil {
-			return nil
+		if err != nil {
+			return fmt.Errorf("cleaning up stale lock: %w", err)
+		}
+		if fresh == nil {
+			return nil // removed, or already gone
 		}
 		info = fresh
 	}
@@ -409,12 +404,6 @@ func CleanStaleLocks(root string) (int, error) {
 // cleanStaleLocks is CleanStaleLocks asking sessions for the active tmux
 // sessions and table for the process table, once the lock scan has succeeded.
 func cleanStaleLocks(root string, sessions func() []string, table processTable) (int, error) {
-	return sweepStaleLocks(root, sessions, table, nil)
-}
-
-// sweepStaleLocks is cleanStaleLocks with afterSnapshot, when set, called with
-// the worker directory between judging its lock stale and removing it.
-func sweepStaleLocks(root string, sessions func() []string, table processTable, afterSnapshot func(workerDir string)) (int, error) {
 	locks, err := FindAllLocks(root)
 	if err != nil {
 		return 0, err
@@ -428,6 +417,7 @@ func sweepStaleLocks(root string, sessions func() []string, table processTable, 
 	}
 
 	cleaned := 0
+	var failed []error
 	for workerDir, info := range locks {
 		if info.holderGone(table) {
 			// Writer is gone, but check if session still exists
@@ -440,16 +430,22 @@ func sweepStaleLocks(root string, sessions func() []string, table processTable, 
 			// so the removal re-checks the lock under it.
 			lock := New(workerDir)
 			lock.table = table
-			if afterSnapshot != nil {
-				lock.afterSnapshot = func() { afterSnapshot(workerDir) }
-			}
-			if _, removed, err := lock.reclaimStale(info); err == nil && removed {
+			fresh, removed, err := lock.reclaimStale(info)
+			switch {
+			case err != nil:
+				// One worker the sweep cannot repair does not stop it
+				// repairing the rest; the failure is reported to the caller.
+				failed = append(failed, fmt.Errorf("removing stale lock in %s: %w", workerDir, err))
+			case fresh != nil:
+				// A concurrent Acquire rewrote the stale lock with its own:
+				// that lock is live, so the sweep leaves it standing.
+			case removed:
 				cleaned++
 			}
 		}
 	}
 
-	return cleaned, nil
+	return cleaned, errors.Join(failed...)
 }
 
 // activeTmuxSessions returns a list of active tmux session identifiers on the

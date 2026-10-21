@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -978,34 +979,131 @@ func TestLock_CheckCleansUpStaleLock(t *testing.T) {
 	}
 }
 
-// TestStaleLockRemovalSparesLockRewrittenAfterSnapshot: a stale verdict comes
+// acquireOnRead is a process table that acquires the lock for the worker the
+// first time it is asked about pid, then reports pid from base. The staleness
+// verdict reads the table between the lock scan and the removal, so the
+// Acquire lands in exactly the window a concurrent process can rewrite the
+// stale lock in — on every run, not by luck.
+type acquireOnRead struct {
+	base    processTable
+	pid     int
+	acquire func()
+	once    *sync.Once
+}
+
+func (a acquireOnRead) read(pid int) (string, bool) {
+	if pid == a.pid {
+		a.once.Do(a.acquire)
+	}
+	return a.base(pid)
+}
+
+// TestCheckReportsStaleLockItCannotRemove: Check used to read a failed
+// cleanup as "not locked", so the caller acted on an identity whose lock was
+// still on disk. The failure is returned instead.
+func TestCheckReportsStaleLockItCannotRemove(t *testing.T) {
+	t.Parallel()
+	workerDir := filepath.Join(t.TempDir(), "worker")
+	runtimeDir := filepath.Join(workerDir, ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(LockInfo{PID: 999999999, AcquiredAt: testEpoch, SessionID: "dead-session"})
+	lockPath := filepath.Join(runtimeDir, "agent.lock")
+	if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+	// A directory where the flock file belongs makes the removal's flock fail.
+	if err := os.Mkdir(lockPath+".flock", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	l := New(workerDir)
+	l.table = scriptedProcesses{}.read
+	err := l.Check()
+	if err == nil {
+		t.Fatal("Check() = nil, want an error for the stale lock it could not remove")
+	}
+	if !strings.Contains(err.Error(), "agent.lock") {
+		t.Errorf("Check() error = %v, want it to name the lock it could not remove", err)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Errorf("stale lock removed despite the failed cleanup: %v", statErr)
+	}
+}
+
+// TestCleanStaleLocksReportsLockItCannotRemove: a lock the sweep cannot remove
+// is reported rather than silently counted as clean, and one worker it cannot
+// repair does not stop it repairing the rest.
+func TestCleanStaleLocksReportsLockItCannotRemove(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	writeStale := func(name string) string {
+		t.Helper()
+		runtimeDir := filepath.Join(tmpDir, name, ".runtime")
+		if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal(LockInfo{PID: 999999999, AcquiredAt: testEpoch, SessionID: "dead-session"})
+		lockPath := filepath.Join(runtimeDir, "agent.lock")
+		if err := os.WriteFile(lockPath, data, 0644); err != nil {
+			t.Fatal(err)
+		}
+		return lockPath
+	}
+
+	// A directory where the flock file belongs makes this worker's removal fail.
+	stuckPath := writeStale("stuck-worker")
+	if err := os.Mkdir(stuckPath+".flock", 0755); err != nil {
+		t.Fatal(err)
+	}
+	cleanablePath := writeStale("cleanable-worker")
+
+	cleaned, err := cleanStaleLocks(tmpDir, func() []string { return nil }, scriptedProcesses{}.read)
+	if err == nil {
+		t.Fatal("cleanStaleLocks() = nil error, want an error for the lock it could not remove")
+	}
+	if !strings.Contains(err.Error(), "stuck-worker") {
+		t.Errorf("cleanStaleLocks() error = %v, want it to name the worker it could not clean", err)
+	}
+	if cleaned != 1 {
+		t.Errorf("cleanStaleLocks() cleaned %d, want 1", cleaned)
+	}
+	if _, statErr := os.Stat(stuckPath); statErr != nil {
+		t.Errorf("stuck lock removed despite the failed cleanup: %v", statErr)
+	}
+	if _, statErr := os.Stat(cleanablePath); !os.IsNotExist(statErr) {
+		t.Errorf("cleanable lock still exists (stat error %v)", statErr)
+	}
+}
+
+// TestStaleLockRemovalSparesLockRewrittenBeforeFlock: a stale verdict comes
 // from a read taken without the flock, so an Acquire for the same worker can
 // remove that stale lock and write its own live one before the remover gets
 // there. The remover has to find the live lock and leave it; deleting it
 // leaves one identity with a running agent and no lock on disk, and a third
-// Acquire then succeeds beside it. The Acquire is injected at the
-// snapshot-to-remove seam so the interleaving is the same on every run.
-func TestStaleLockRemovalSparesLockRewrittenAfterSnapshot(t *testing.T) {
+// Acquire then succeeds beside it.
+func TestStaleLockRemovalSparesLockRewrittenBeforeFlock(t *testing.T) {
 	t.Parallel()
+	const deadPID = 999999999
 	holder := scriptedProcesses{os.Getpid(): "1700000000.12"}
 
 	tests := []struct {
 		name string
-		// remove judges the stale lock in workerDir and removes it, calling
-		// seam between the verdict and the removal.
-		remove func(t *testing.T, workerDir string, seam func())
+		// remove judges the stale lock in workerDir and removes it, reading
+		// the process table through table.
+		remove func(t *testing.T, workerDir string, table processTable)
 	}{
-		{"sweep", func(t *testing.T, workerDir string, seam func()) {
-			cleaned, err := sweepStaleLocks(filepath.Dir(workerDir), func() []string { return nil }, holder.read,
-				func(string) { seam() })
+		{"sweep", func(t *testing.T, workerDir string, table processTable) {
+			cleaned, err := cleanStaleLocks(filepath.Dir(workerDir), func() []string { return nil }, table)
 			if err != nil || cleaned != 0 {
-				t.Errorf("sweepStaleLocks = %d, %v; want 0, nil", cleaned, err)
+				t.Errorf("cleanStaleLocks = %d, %v; want 0, nil", cleaned, err)
 			}
 		}},
-		{"check", func(t *testing.T, workerDir string, seam func()) {
+		{"check", func(t *testing.T, workerDir string, table processTable) {
 			l := New(workerDir)
-			l.table = holder.read
-			l.afterSnapshot = seam
+			l.table = table
 			if err := l.Check(); err != nil {
 				t.Errorf("Check() = %v, want nil (the rewritten lock is ours)", err)
 			}
@@ -1019,19 +1117,21 @@ func TestStaleLockRemovalSparesLockRewrittenAfterSnapshot(t *testing.T) {
 			if err := os.MkdirAll(runtimeDir, 0755); err != nil {
 				t.Fatal(err)
 			}
-			data, _ := json.Marshal(LockInfo{PID: 999999999, AcquiredAt: testEpoch, SessionID: "dead-session"})
-			lockPath := filepath.Join(runtimeDir, "agent.lock")
-			if err := os.WriteFile(lockPath, data, 0644); err != nil {
+			data, _ := json.Marshal(LockInfo{PID: deadPID, AcquiredAt: testEpoch, SessionID: "dead-session"})
+			if err := os.WriteFile(filepath.Join(runtimeDir, "agent.lock"), data, 0644); err != nil {
 				t.Fatal(err)
 			}
 
-			tt.remove(t, workerDir, func() {
+			var once sync.Once
+			table := acquireOnRead{base: holder.read, pid: deadPID, once: &once, acquire: func() {
 				acquirer := New(workerDir)
 				acquirer.table = holder.read
 				if err := acquirer.Acquire("live-session"); err != nil {
 					t.Errorf("injected Acquire() = %v", err)
 				}
-			})
+			}}
+
+			tt.remove(t, workerDir, table.read)
 
 			info, err := New(workerDir).Read()
 			if err != nil {
