@@ -1651,6 +1651,62 @@ func TestTailBeads_NotFoundCacheIsBounded(t *testing.T) {
 	}
 }
 
+// TestTailBeads_NotFoundIsAskedAgainAfterTheWindow: a not-found answer is
+// trusted for tailMissingTTL, then the bead is read again, so a bead bd could
+// not read yet gets its title once it can be read.
+func TestTailBeads_NotFoundIsAskedAgainAfterTheWindow(t *testing.T) {
+	t.Parallel()
+	store := &fakeTailStore{errs: map[string]error{"gt-late": beads.ErrNotFound}}
+	b := newTailBeads(store.show)
+	clock := time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC)
+	b.now = func() time.Time { return clock }
+
+	if got := b.title("gastown", "gt-late"); got != "" {
+		t.Fatalf("title = %q, want empty", got)
+	}
+	clock = clock.Add(tailMissingTTL - time.Second)
+	b.title("gastown", "gt-late")
+	if n := store.readsFor("gt-late"); n != 1 {
+		t.Fatalf("gt-late read %d times inside the window, want 1", n)
+	}
+
+	clock = clock.Add(2 * time.Second)
+	delete(store.errs, "gt-late")
+	store.issues = map[string]*beads.Issue{"gt-late": {ID: "gt-late", Title: "now readable"}}
+	if got := b.title("gastown", "gt-late"); got != "now readable" {
+		t.Fatalf("title = %q, want %q once the window has passed", got, "now readable")
+	}
+	if n := store.readsFor("gt-late"); n != 2 {
+		t.Fatalf("gt-late read %d times, want 2", n)
+	}
+}
+
+// TestEventsSource_NotFoundBeadIsReadOnceAcrossPolls: a journal that keeps
+// naming a bead bd reports as not found makes one bd show for it in the whole
+// run. pollIssue's per-poll map is cleared every poll, so it is the not-found
+// cache that answers the later polls.
+func TestEventsSource_NotFoundBeadIsReadOnceAcrossPolls(t *testing.T) {
+	t.Parallel()
+	store := &fakeTailStore{errs: map[string]error{"gt-gone": beads.ErrNotFound}}
+	j := &fakeTailJournal{config: "true", records: []beads.EventRecord{
+		{Seq: 1, TS: "2026-09-30T13:50:00Z", Op: "comment", IssueID: "gt-gone"},
+		{Seq: 2, TS: "2026-09-30T13:50:01Z", Op: "update", IssueID: "gt-gone", Status: "in_progress"},
+	}}
+	s := &eventsSource{rig: "gastown", journal: j, cutoff: at("2026-09-30T13:45:00Z"), now: fixedNow, beads: newTailBeads(store.show)}
+	s.Poll()
+	j.records = append(j.records, beads.EventRecord{Seq: 3, TS: "2026-09-30T13:50:02Z", Op: "comment", IssueID: "gt-gone"})
+	lines := s.Poll()
+	if len(lines) != 1 {
+		t.Fatalf("second poll lines = %q, want the one new comment", texts(lines))
+	}
+	if lines[0].Comment != "" || lines[0].Verdict != "" {
+		t.Fatalf("gt-gone line was annotated: %+v", lines[0])
+	}
+	if n := store.readsFor("gt-gone"); n != 1 {
+		t.Fatalf("gt-gone read %d times across two polls, want 1", n)
+	}
+}
+
 // TestEventsSource_DeletedInPageIsNotRead: a journal page that creates,
 // updates, comments on and deletes one bead makes no bd show for it, and its
 // lines carry no title; a bead the page leaves alone is still read.
