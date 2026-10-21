@@ -39,25 +39,16 @@ func TestSpecDispatchSlingsFreeSeatsInParallel(t *testing.T) {
 	env := f.env()
 	env.PerTick = 0 // the free seats: nine
 	// Every sling waits until all nine have started: a serial tick would
-	// never get past the first one. The wait is bounded so a regression
-	// fails instead of hanging.
+	// never get past the first one and the test would hang at the barrier,
+	// which the test binary's own deadline reports (the unit tier allows no
+	// timer in a test).
 	const want = 9
-	var mu sync.Mutex
-	started := 0
-	allStarted := make(chan struct{})
+	var barrier sync.WaitGroup
+	barrier.Add(want)
 	inner := env.Sling
 	env.Sling = func(c specCandidate, resume string, seat specdispatch.SeatChoice) (string, error) {
-		mu.Lock()
-		started++
-		if started == want {
-			close(allStarted)
-		}
-		mu.Unlock()
-		select {
-		case <-allStarted:
-		case <-time.After(5 * time.Second):
-			return "", errors.New("the other slings never started: the tick is slinging in series")
-		}
+		barrier.Done()
+		barrier.Wait()
 		return inner(c, resume, seat)
 	}
 	r := runSpecDispatchCycle(env)
