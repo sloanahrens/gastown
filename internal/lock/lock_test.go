@@ -977,3 +977,70 @@ func TestLock_CheckCleansUpStaleLock(t *testing.T) {
 		t.Error("Check() should have removed stale lock file")
 	}
 }
+
+// TestStaleLockRemovalSparesLockRewrittenAfterSnapshot: a stale verdict comes
+// from a read taken without the flock, so an Acquire for the same worker can
+// remove that stale lock and write its own live one before the remover gets
+// there. The remover has to find the live lock and leave it; deleting it
+// leaves one identity with a running agent and no lock on disk, and a third
+// Acquire then succeeds beside it. The Acquire is injected at the
+// snapshot-to-remove seam so the interleaving is the same on every run.
+func TestStaleLockRemovalSparesLockRewrittenAfterSnapshot(t *testing.T) {
+	t.Parallel()
+	holder := scriptedProcesses{os.Getpid(): "1700000000.12"}
+
+	tests := []struct {
+		name string
+		// remove judges the stale lock in workerDir and removes it, calling
+		// seam between the verdict and the removal.
+		remove func(t *testing.T, workerDir string, seam func())
+	}{
+		{"sweep", func(t *testing.T, workerDir string, seam func()) {
+			cleaned, err := sweepStaleLocks(filepath.Dir(workerDir), func() []string { return nil }, holder.read,
+				func(string) { seam() })
+			if err != nil || cleaned != 0 {
+				t.Errorf("sweepStaleLocks = %d, %v; want 0, nil", cleaned, err)
+			}
+		}},
+		{"check", func(t *testing.T, workerDir string, seam func()) {
+			l := New(workerDir)
+			l.table = holder.read
+			l.afterSnapshot = seam
+			if err := l.Check(); err != nil {
+				t.Errorf("Check() = %v, want nil (the rewritten lock is ours)", err)
+			}
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			workerDir := filepath.Join(t.TempDir(), "worker")
+			runtimeDir := filepath.Join(workerDir, ".runtime")
+			if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			data, _ := json.Marshal(LockInfo{PID: 999999999, AcquiredAt: testEpoch, SessionID: "dead-session"})
+			lockPath := filepath.Join(runtimeDir, "agent.lock")
+			if err := os.WriteFile(lockPath, data, 0644); err != nil {
+				t.Fatal(err)
+			}
+
+			tt.remove(t, workerDir, func() {
+				acquirer := New(workerDir)
+				acquirer.table = holder.read
+				if err := acquirer.Acquire("live-session"); err != nil {
+					t.Errorf("injected Acquire() = %v", err)
+				}
+			})
+
+			info, err := New(workerDir).Read()
+			if err != nil {
+				t.Fatalf("the live lock is gone: Read() = %v", err)
+			}
+			if info.PID != os.Getpid() || info.SessionID != "live-session" {
+				t.Errorf("lock = pid %d session %q, want pid %d session %q",
+					info.PID, info.SessionID, os.Getpid(), "live-session")
+			}
+		})
+	}
+}
