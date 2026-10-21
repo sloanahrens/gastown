@@ -222,9 +222,9 @@ func after(cur battery.Cursor, created time.Time, id string) bool {
 	return created.After(cur.Time)
 }
 
-// ask builds the one line a finding earns. Every finding is asked the battery
-// of Nouls and the severity Score, and the duplicate Choice too when the
-// search offered a candidate. A failed search, a failed call, an unusable
+// ask builds the one line a finding earns. Every finding is asked the Nouls
+// and the severity Score, and the duplicate Choice and any_duplicate too when
+// the search offered a candidate. A failed search, a failed call, an unusable
 // answer, a low-confidence answer and a candidate set that could not be read
 // all log none, so a finding is asked about once whatever Jev does; the
 // line's outcome says which of them it was. The one exception is a canceled
@@ -331,7 +331,7 @@ func (p *Pass) candidates(f *beads.Issue, hits []Hit) (out []*beads.Issue, unrea
 func (p *Pass) askJev(ctx context.Context, state any, qs map[string]jev.Question) (*jev.Answers, error) {
 	got, err := p.Asker.Ask(ctx, state, qs)
 	if !errors.Is(err, jev.ErrRateLimited) {
-		return got, err
+		return answered(got, err)
 	}
 	var wait time.Duration
 	var rl *jev.RateLimitError
@@ -341,13 +341,23 @@ func (p *Pass) askJev(ctx context.Context, state any, qs map[string]jev.Question
 	if err := p.wait(ctx, wait); err != nil {
 		return nil, err
 	}
-	return p.Asker.Ask(ctx, state, qs)
+	return answered(p.Asker.Ask(ctx, state, qs))
+}
+
+// answered turns an Ask that returned neither answers nor an error into
+// ErrBadResponse, so ask never dereferences nil answers.
+func answered(got *jev.Answers, err error) (*jev.Answers, error) {
+	if err == nil && got == nil {
+		return nil, jev.ErrBadResponse
+	}
+	return got, err
 }
 
 // buildQuestions returns the state and the question set for one finding. The
 // state quotes the finding and each candidate, one per line, so the model
-// reads each value as data. The duplicate Choice is asked only when the
-// search offered a candidate; the Nouls and the Score are asked every time.
+// reads each value as data. The duplicate Choice and any_duplicate are asked
+// only when the search offered a candidate; the other Nouls and the Score are
+// asked every time.
 func buildQuestions(f *beads.Issue, cands []*beads.Issue) (string, map[string]jev.Question) {
 	var b strings.Builder
 	fmt.Fprintf(&b, "finding: %s\n", quote(excerpt(f)))
@@ -359,6 +369,8 @@ func buildQuestions(f *beads.Issue, cands []*beads.Issue) (string, map[string]je
 	qs := Questions()
 	if len(ids) > 0 {
 		qs[QDuplicate] = duplicateChoice(ids)
+	} else {
+		delete(qs, QAnyDuplicate)
 	}
 	return b.String(), qs
 }
