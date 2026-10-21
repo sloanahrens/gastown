@@ -28,8 +28,8 @@ func TestCandidateGatePackagesReadsTheGateJobLog(t *testing.T) {
 	}
 
 	want := []PackageResult{
-		{Package: "example.test/a", Passed: true, Elapsed: 100 * time.Millisecond},
-		{Package: "example.test/b", Passed: false, Elapsed: 200 * time.Millisecond},
+		{Package: "example.test/a", Passed: true, Elapsed: 100 * time.Millisecond, Timed: true},
+		{Package: "example.test/b", Passed: false, Elapsed: 200 * time.Millisecond, Timed: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Packages = %+v, want %+v", got, want)
@@ -67,10 +67,27 @@ func TestParseGoTestOutputReadsAForgejoJobLog(t *testing.T) {
 	got := parseGoTestOutput(log)
 
 	want := []PackageResult{
-		{Package: "example.test/a", Passed: true, Elapsed: 412 * time.Millisecond},
+		{Package: "example.test/a", Passed: true, Elapsed: 412 * time.Millisecond, Timed: true},
 		{Package: "example.test/b", Passed: true},
-		{Package: "example.test/d", Passed: false, Elapsed: 200 * time.Millisecond},
-		{Package: "example.test/e", Passed: true, Elapsed: 300 * time.Millisecond},
+		{Package: "example.test/d", Passed: false, Elapsed: 200 * time.Millisecond, Timed: true},
+		{Package: "example.test/e", Passed: true, Elapsed: 300 * time.Millisecond, Timed: true},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("parseGoTestOutput = %+v, want %+v", got, want)
+	}
+}
+
+// go test prints "0.000s" for a package whose tests finished in under half a
+// millisecond. The parser keeps that apart from "(cached)", which carries no
+// duration: a zero is timed, so the scorecard prices it as no gate minutes
+// rather than as a package it never timed (gt-t92f5).
+func TestParseGoTestOutputKeepsAZeroDurationTimed(t *testing.T) {
+	t.Parallel()
+	got := parseGoTestOutput("ok  \texample.test/fast\t0.000s\nok  \texample.test/cached\t(cached)\n")
+
+	want := []PackageResult{
+		{Package: "example.test/fast", Passed: true, Timed: true},
+		{Package: "example.test/cached", Passed: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("parseGoTestOutput = %+v, want %+v", got, want)
@@ -94,8 +111,8 @@ func TestCandidateGatePackagesReadsTimestampedLines(t *testing.T) {
 	}
 
 	want := []PackageResult{
-		{Package: "example.test/a", Passed: true, Elapsed: 100 * time.Millisecond},
-		{Package: "example.test/b", Passed: false, Elapsed: 200 * time.Millisecond},
+		{Package: "example.test/a", Passed: true, Elapsed: 100 * time.Millisecond, Timed: true},
+		{Package: "example.test/b", Passed: false, Elapsed: 200 * time.Millisecond, Timed: true},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("Packages = %+v, want %+v", got, want)
