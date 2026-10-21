@@ -4153,6 +4153,8 @@ func TestHostPort(t *testing.T) {
 		{"127.0.0.1", 3307, "127.0.0.1:3307"},
 		{"10.0.0.5", 13306, "10.0.0.5:13306"},
 		{"db.internal", 3307, "db.internal:3307"},
+		{"::1", 3307, "[::1]:3307"},
+		{"2001:db8::5", 13306, "[2001:db8::5]:13306"},
 	}
 	for _, tt := range tests {
 		c := &Config{Host: tt.host, Port: tt.port}

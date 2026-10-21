@@ -119,6 +119,26 @@ func TestBuildDoltDSNFromConfig_RemoteHostPreserved(t *testing.T) {
 	}
 }
 
+func TestBuildDoltDSNFromConfig_IPv6HostBracketed(t *testing.T) {
+	t.Parallel()
+	cfg := &doltserver.Config{User: "root", Host: "::1", Port: 3307}
+	got := buildDoltDSNFromConfigVia(noSocket, cfg, "hq", dsnOpts{ParseTime: true})
+	want := "root@tcp([::1]:3307)/hq?parseTime=true"
+	if got != want {
+		t.Errorf("got\n  %s\nwant\n  %s", got, want)
+	}
+}
+
+func TestBuildDoltDSNFromConfig_IPv4HostUnchanged(t *testing.T) {
+	t.Parallel()
+	cfg := &doltserver.Config{User: "root", Host: "127.0.0.1", Port: 3307}
+	got := buildDoltDSNFromConfigVia(noSocket, cfg, "hq", dsnOpts{ParseTime: true})
+	want := "root@tcp(127.0.0.1:3307)/hq?parseTime=true"
+	if got != want {
+		t.Errorf("got\n  %s\nwant\n  %s", got, want)
+	}
+}
+
 func TestBuildDoltDSNFromConfig_LocalHostFallbackPreserved(t *testing.T) {
 	t.Parallel()
 	cfg := &doltserver.Config{User: "root", Host: "localhost", Port: 13306}

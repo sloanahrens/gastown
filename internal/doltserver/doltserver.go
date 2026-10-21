@@ -453,12 +453,13 @@ func (c *Config) EffectiveHost() string {
 }
 
 // HostPort returns "host:port", defaulting host to "127.0.0.1" when empty.
+// IPv6 literals are bracketed ("[::1]:3307") so the port is unambiguous.
 func (c *Config) HostPort() string {
 	host := c.Host
 	if host == "" {
 		host = "127.0.0.1"
 	}
-	return fmt.Sprintf("%s:%d", host, c.Port)
+	return net.JoinHostPort(host, strconv.Itoa(c.Port))
 }
 
 // buildDoltSQLCmd constructs a non-interactive dolt sql command that always
