@@ -3,6 +3,7 @@ package dashboard
 import (
 	"encoding/json"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +172,25 @@ func jevStateAt(now time.Time, over map[string]any) map[string]any {
 	return s
 }
 
+// drawCostAt draws the Cost panel on a page whose clock stands at now. Every
+// draw loads its own page, and a page's clock starts at the real instant it
+// loads, so two draws a second apart disagree on a row that reads its age off
+// the clock ("newest sample 0s ago" against "1s ago"). Pinning each page to one
+// now makes the draws of a comparison agree whatever the wall clock does.
+func drawCostAt(t *testing.T, now time.Time, s map[string]any) []costLine {
+	t.Helper()
+
+	dom := newPageDOM(t)
+	pageExpr(t, dom, "__epoch = "+strconv.FormatInt(now.UnixMilli(), 10))
+	dom.call(t, "renderCost", s)
+	raw := pageExpr(t, dom, `JSON.stringify(__byId["cost"].children.map(c => ({class: c.className, text: c.textContent, title: c.title})))`)
+	var lines []costLine
+	if err := json.Unmarshal([]byte(raw), &lines); err != nil {
+		t.Fatalf("reading the Cost panel: %v", err)
+	}
+	return lines
+}
+
 func jevRead(extra map[string]any) map[string]any {
 	r := map[string]any{"at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339), "every_sec": 300}
 	for k, v := range extra {
@@ -251,12 +271,13 @@ func TestCostPanelJevFailureIsUnavailableAndLeavesTheOtherRows(t *testing.T) {
 }
 
 // checkJevFailureLeavesTheOtherRows draws the panel with and without a failed Jev
-// read, both from one now, and compares everything but the Jev row.
+// read, both from one now (the state's and the page's clock), and compares
+// everything but the Jev row.
 func checkJevFailureLeavesTheOtherRows(t *testing.T, now time.Time) {
 	t.Helper()
 
-	without, _ := drawCost(t, jevStateAt(now, map[string]any{"jev_spend": nil}))
-	failed, _ := drawCost(t, jevStateAt(now, map[string]any{
+	without := drawCostAt(t, now, jevStateAt(now, map[string]any{"jev_spend": nil}))
+	failed := drawCostAt(t, now, jevStateAt(now, map[string]any{
 		"jev_spend": nil,
 		"reads":     jevRead(map[string]any{"error": true, "stale": true}),
 	}))
@@ -293,8 +314,8 @@ func TestCostPanelJevFailureRowsAgreeAcrossAMinuteBoundary(t *testing.T) {
 	boundary := time.Date(2026, 10, 20, 12, 30, 0, 0, time.Local)
 	before, after := boundary.Add(-time.Millisecond), boundary.Add(time.Millisecond)
 
-	drawnBefore, _ := drawCost(t, jevStateAt(before, nil))
-	drawnAfter, _ := drawCost(t, jevStateAt(after, nil))
+	drawnBefore := drawCostAt(t, before, jevStateAt(before, nil))
+	drawnAfter := drawCostAt(t, after, jevStateAt(after, nil))
 	planBefore, _ := findLine(drawnBefore, "Claude plan")
 	planAfter, _ := findLine(drawnAfter, "Claude plan")
 	if planBefore.Text == planAfter.Text {
