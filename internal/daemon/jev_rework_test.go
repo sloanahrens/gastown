@@ -14,6 +14,7 @@ import (
 	"github.com/jonboulle/clockwork"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
 	"github.com/steveyegge/gastown/internal/jev/rework"
@@ -195,8 +196,11 @@ func newJevReworkRig(t *testing.T) *jevReworkRig {
 		Allows:     func() (bool, error) { return dayCap.Allows(clock.Now) },
 		Now:        func() time.Time { return time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC) },
 	}
+	// Each pass gets its own copy, as the daemon's open does: a run wraps the
+	// pass's Asker in its E-stop gate, and a reused pass would keep that gate.
 	r.d.jevReworkOpen = func(string, rework.Settings, io.Writer) (*rework.Pass, error) {
-		return r.pass, nil
+		p := *r.pass
+		return &p, nil
 	}
 	// The cursor starts before the refusal, so the first run has it pending.
 	if err := battery.WriteCursor(r.pass.CursorPath, battery.Cursor{
@@ -232,5 +236,56 @@ func TestJevReworkRunAsksEachRefusalOnce(t *testing.T) {
 	}
 	if len(lines) != 1 || lines[0].Bead != "gt-abc" || lines[0].Head != reworkFailedHead {
 		t.Errorf("log lines = %+v, want one for gt-abc at %s", lines, reworkFailedHead)
+	}
+}
+
+// An E-stop raised before a pass asks stops it before its first billed call,
+// logs that it stopped, and leaves the refusal for the next pass.
+func TestJevReworkRunStopsAtEStop(t *testing.T) {
+	t.Parallel()
+	r := newJevReworkRig(t)
+	if err := estop.Activate(r.town, estop.TriggerManual, "test E-stop before the pass"); err != nil {
+		t.Fatal(err)
+	}
+
+	r.d.runJevRework()
+
+	if r.asker.n != 0 {
+		t.Errorf("made %d Jev calls under an E-stop, want 0", r.asker.n)
+	}
+	if !strings.Contains(r.logs.String(), "jev_rework: stopped: E-STOP active after asking 0 refusal(s)") {
+		t.Errorf("log = %q, want the stop named", r.logs)
+	}
+	if _, err := os.Stat(r.pass.LogPath); !os.IsNotExist(err) {
+		t.Errorf("an E-stopped pass wrote %s", r.pass.LogPath)
+	}
+
+	if err := estop.Deactivate(r.town, false); err != nil {
+		t.Fatal(err)
+	}
+	r.d.runJevRework()
+	if r.asker.n != 1 {
+		t.Errorf("the pass after the E-stop made %d Jev calls, want 1", r.asker.n)
+	}
+}
+
+// A pass that finds another pass holding the run lock logs that it was
+// skipped and asks nothing.
+func TestJevReworkRunSkipsWhenAnotherPassHoldsTheLock(t *testing.T) {
+	t.Parallel()
+	r := newJevReworkRig(t)
+	release, err := battery.Lock(r.pass.CursorPath + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	r.d.runJevRework()
+
+	if r.asker.n != 0 {
+		t.Errorf("made %d Jev calls under a held lock, want 0", r.asker.n)
+	}
+	if !strings.Contains(r.logs.String(), "jev_rework: skipped:") {
+		t.Errorf("log = %q, want the skip named", r.logs)
 	}
 }

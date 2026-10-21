@@ -101,7 +101,9 @@ func (a *reworkAdapter) Parse(raw []byte) (Item, error) {
 // a rework commit, and any other head landing is true, since the bead landed
 // only after a later submission. A bead that has not landed yet is unlabeled:
 // the answer is still open. So is a refusal whose rejection block named no
-// head, since no landing can be compared with it.
+// head, since no landing can be compared with it. So is a first landing that
+// names no head: it cannot be told from the refused head, so it is not labeled
+// as a later one.
 func (a *reworkAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	line, ok := a.lines[item.ID]
 	if !ok {
@@ -115,7 +117,7 @@ func (a *reworkAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 		return Labeling{}, err
 	}
 	first, ok := firstLandingAfter(recs, line)
-	if !ok {
+	if !ok || first.Head == "" {
 		return Labeling{}, nil
 	}
 	if first.Head == line.Head {

@@ -332,6 +332,48 @@ func TestJevOutageLogsNothing(t *testing.T) {
 	}
 }
 
+// A Jev reply that leaves out the cause answer is unusable: the refusal is
+// skipped for good, with no line, and a later pass does not ask it again.
+func TestUnusableJevReplyIsSkippedForGood(t *testing.T) {
+	t.Parallel()
+	f := &fakeJev{body: `{"model":"jev-1.13.0","answers":{"reworked_to_land":{"type":"noul","noul":0.82}},"usage":{"input_tokens":900,"output_tokens":120}}`}
+	p := newPass(t, f, fixtureRigs(t), fixtureFail())
+
+	sum, err := p.Run(context.Background())
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if sum.Skipped != 1 || sum.Asked != 0 {
+		t.Errorf("Run = %+v, want the refusal skipped and none asked", sum)
+	}
+	if _, err := os.Stat(p.LogPath); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("an unusable reply wrote %s", p.LogPath)
+	}
+
+	f.body = jevReply
+	sum, err = p.Run(context.Background())
+	if err != nil {
+		t.Fatalf("second Run: %v", err)
+	}
+	if sum.Asked != 0 || len(f.requests) != 1 {
+		t.Errorf("the pass after the skip asked %d refusals in %d Jev calls, want none in 1", sum.Asked, len(f.requests))
+	}
+}
+
+// A rig name that is not one path element never reaches the town's paths.
+func TestTownRigsRefusesAPathRigName(t *testing.T) {
+	t.Parallel()
+	rigs := &townRigs{townRoot: t.TempDir()}
+	for _, rig := range []string{"", ".", "..", "../gastown", `gas\town`, "a/b"} {
+		if _, err := rigs.Notes(rig, "gt-abc"); err == nil || !strings.Contains(err.Error(), "invalid rig name") {
+			t.Errorf("Notes(%q) error = %v, want an invalid rig name", rig, err)
+		}
+		if _, err := rigs.Numstat(context.Background(), rig, "main", "abc123"); err == nil || !strings.Contains(err.Error(), "invalid rig name") {
+			t.Errorf("Numstat(%q) error = %v, want an invalid rig name", rig, err)
+		}
+	}
+}
+
 // A cap already reached asks nothing and writes nothing.
 func TestCapReachedLogsNothing(t *testing.T) {
 	t.Parallel()

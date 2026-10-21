@@ -2118,8 +2118,9 @@ need a rework commit before it lands, and the choice `cause` over
 score, answers, model, question_version}`. `refused` is when the landing logged
 the review, which is where the scorecard's label starts. The findings are never
 logged. A refusal
-whose bead or rejection block cannot be read is skipped for good, and a Jev call
-that gets no usable reply stops the pass, so the next one asks again.
+whose bead or rejection block cannot be read is skipped for good, and so is one
+whose Jev call gets no usable reply. Any other Jev failure stops the pass, so the
+next one asks again.
 
 A refusal is a review the landing refused the work on: `request_changes`, or an
 approval whose findings blocked it. A pass reads refusals in order and moves its

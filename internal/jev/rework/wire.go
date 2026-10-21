@@ -109,7 +109,19 @@ func (t *townRigs) Numstat(ctx context.Context, rig, target, head string) (strin
 	return diff.Numstat(ctx, target, head)
 }
 
+// checkRig refuses a rig name that is not one path element. The name comes from
+// the review log and is joined into the town's paths.
+func checkRig(rig string) error {
+	if rig == "" || strings.ContainsAny(rig, `/\`) || rig == "." || rig == ".." {
+		return fmt.Errorf("invalid rig name %q", rig)
+	}
+	return nil
+}
+
 func (t *townRigs) client(rig string) (*beads.Beads, error) {
+	if err := checkRig(rig); err != nil {
+		return nil, err
+	}
 	if b, ok := t.beadsClients[rig]; ok {
 		return b, nil
 	}
@@ -126,6 +138,9 @@ func (t *townRigs) client(rig string) (*beads.Beads, error) {
 }
 
 func (t *townRigs) differ(rig string) (gitDiffer, error) {
+	if err := checkRig(rig); err != nil {
+		return gitDiffer{}, err
+	}
 	if d, ok := t.differs[rig]; ok {
 		return d, nil
 	}

@@ -158,6 +158,20 @@ func TestReworkLeavesAHeadlessRefusalUnlabeled(t *testing.T) {
 	}
 }
 
+// A first landing that names no head cannot be told from the refused head, so
+// the refusal stays unlabeled rather than reading as a later head.
+func TestReworkLeavesAHeadlessLandingUnlabeled(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	landedWith(t, town, "gt-abc", "", refusedAt.Add(time.Hour))
+
+	got := labelRework(t, town, reworkLine(t, "gt-abc", refusedHead))
+
+	if got.Labeled {
+		t.Errorf("Labeling = %+v, want unlabeled", got)
+	}
+}
+
 // The registered factory builds an adapter over the town's own files, and the
 // battery is named in the registered list.
 func TestReworkBatteryIsRegistered(t *testing.T) {
