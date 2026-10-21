@@ -1,7 +1,7 @@
 // Command changedpkgs prints the Go packages a branch changed, one "./dir"
 // per line, for `make presubmit` (gt-ssyxd). It reads
-// `git diff --name-status -M <base>...HEAD`, so a branch is judged by its own
-// commits, never by what landed on the base after it branched.
+// `git diff --name-status -z -M <base>...HEAD`, so a branch is judged by its
+// own commits, never by what landed on the base after it branched.
 //
 // -guards prints instead the arguments for a second `go test` run over the
 // tree-wide guard tests the branch's changed paths trigger (gt-ydzwb),
@@ -34,7 +34,7 @@ func main() {
 	}
 	repoRoot := string(root[:len(root)-1])
 
-	diff := exec.Command("git", "diff", "--name-status", "-M", *base+"...HEAD")
+	diff := exec.Command("git", land.NameStatusArgs(*base+"...HEAD")...)
 	diff.Stderr = os.Stderr
 	out, err := diff.Output()
 	if err != nil {
@@ -44,10 +44,20 @@ func main() {
 	hasGo := func(d string) bool { return land.PackageDirHasGo(repoRoot, d) }
 
 	if *guards {
-		printGuards(land.GuardSelects(string(out), hasGo))
+		sel, err := land.GuardSelects(string(out), hasGo)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "changedpkgs:", err)
+			os.Exit(1)
+		}
+		printGuards(sel)
 		return
 	}
-	for _, dir := range land.ChangedPackages(string(out), hasGo) {
+	dirs, err := land.ChangedPackages(string(out), hasGo)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "changedpkgs:", err)
+		os.Exit(1)
+	}
+	for _, dir := range dirs {
 		fmt.Println("./" + dir)
 	}
 }
