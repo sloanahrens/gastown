@@ -221,8 +221,13 @@ func gitEnv(environ []string) []string {
 // runGit is the production gitRunner. It runs git without the caller's
 // repository-selecting environment.
 func runGit(ctx context.Context, dir string, args ...string) (string, error) {
+	return runGitEnv(ctx, os.Environ(), dir, args...)
+}
+
+// runGitEnv runs git in dir with environ as the caller's environment.
+func runGitEnv(ctx context.Context, environ []string, dir string, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = gitEnv(os.Environ())
+	cmd.Env = gitEnv(environ)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {

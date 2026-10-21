@@ -106,13 +106,14 @@ func TestJevSubmissionGitEnvDropsRepositoryVariables(t *testing.T) {
 // runGit reads the repository -C names even when the caller carries a GIT_DIR
 // that points elsewhere, as a process started from a git hook does.
 func TestJevSubmissionRunGitIgnoresCallerGitDir(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if _, err := runGit(context.Background(), dir, "init", "--bare", "--quiet"); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("GIT_DIR", filepath.Join(t.TempDir(), "not-a-repo"))
+	foreign := append(os.Environ(), "GIT_DIR="+filepath.Join(t.TempDir(), "not-a-repo"))
 
-	out, err := runGit(context.Background(), dir, "rev-parse", "--is-bare-repository")
+	out, err := runGitEnv(context.Background(), foreign, dir, "rev-parse", "--is-bare-repository")
 	if err != nil {
 		t.Fatalf("runGit with a foreign GIT_DIR: %v", err)
 	}
