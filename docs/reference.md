@@ -1350,7 +1350,9 @@ keeps the lines containing `warning`, `error`, `failed`, `refused`, `timeout`,
 `crash` or `panic`, in any case. Two rules narrow that. A keyword preceded by a
 count keeps the line only when the count is above zero, so `0 refused`,
 `0 failed` and `0 error(s)` do not match. `warning` keeps the line only at the
-start of its message or as `WARNING:`. It groups the kept lines by pattern key:
+start of its message, as `WARNING:`, or after a count above zero such as
+`2 warning(s)`. A count may carry thousands separators, so `1,000 refused`
+matches. It groups the kept lines by pattern key:
 the line with its times, bead ids, hashes, durations and numbers replaced by
 placeholders. Each group records the keyword that kept its first line as
 `matched_on`.
