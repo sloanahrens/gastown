@@ -434,6 +434,33 @@ func TestFirstParentCommitSummariesParsesAuthorEmailAndSubject(t *testing.T) {
 	}
 }
 
+// The full-range listing is the first-parent one without --first-parent, so
+// git log follows a merge's second parent.
+func TestFullRangeCommitSummariesParsesWithoutFirstParent(t *testing.T) {
+	t.Parallel()
+	const format = "log --format=%H%x00%an%x00%ae%x00%s"
+	const out = "mmm\x00capable\x00seat@test.com\x00Merge branch 'side'\nsss\x00Sloan Ahrens\x00sloan@test.com\x00fix: side\n"
+	s := newScripted(map[string]reply{
+		format + " a..b": ok(out),
+		format + " h..h": ok(""),
+	})
+	g := newTestGit(t, s)
+	got, err := g.FullRangeCommitSummaries("a", "b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []CommitSummary{
+		{SHA: "mmm", Author: "capable", Email: "seat@test.com", Subject: "Merge branch 'side'"},
+		{SHA: "sss", Author: "Sloan Ahrens", Email: "sloan@test.com", Subject: "fix: side"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("FullRangeCommitSummaries = %+v, want %+v", got, want)
+	}
+	if summaries, err := g.FullRangeCommitSummaries("h", "h"); err != nil || len(summaries) != 0 {
+		t.Errorf("empty range: FullRangeCommitSummaries = %v, %v", summaries, err)
+	}
+}
+
 func TestAuthorEmailReadsTheWorktreeIdentity(t *testing.T) {
 	t.Parallel()
 	s := newScripted(map[string]reply{

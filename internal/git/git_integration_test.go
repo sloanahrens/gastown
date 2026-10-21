@@ -3264,3 +3264,66 @@ func TestIntegrationRuntimeArtifactPathspecsUnbornHeadKeepsOutput(t *testing.T) 
 		t.Errorf("RuntimeArtifactPathspecs with an unborn HEAD = %q, want no pathspec", got)
 	}
 }
+
+// A seat-authored merge M whose second parent S is another author's commit: the
+// first-parent listing shows only M and its first parent P, the full-range one
+// also shows S with its own author.
+func TestIntegrationFullRangeCommitSummariesListsAMergedInForeignCommit(t *testing.T) {
+	t.Parallel()
+	dir := initTestRepo(t)
+	g := NewGit(dir)
+	step := func(args ...string) string {
+		t.Helper()
+		out, err := fixtureGit(dir, args...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	commitAs := func(name, file, msg string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(dir, file), []byte(msg+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		step("add", file)
+		step("commit", "--author="+name+" <"+name+"@test.com>", "-m", msg)
+	}
+	main := step("rev-parse", "--abbrev-ref", "HEAD")
+	base := step("rev-parse", "HEAD")
+
+	step("checkout", "-b", "side")
+	commitAs("other", "side.txt", "fix: side")
+	step("checkout", "-b", "feature", main)
+	commitAs("seat", "feature.txt", "feat: first parent")
+	step("-c", "user.name=seat", "-c", "user.email=seat@test.com", "merge", "--no-ff", "-m", "Merge side", "side")
+	head := step("rev-parse", "HEAD")
+
+	full, err := g.FullRangeCommitSummaries(base, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var subjects []string
+	foreign := ""
+	for _, c := range full {
+		subjects = append(subjects, c.Subject)
+		if c.Subject == "fix: side" {
+			foreign = c.Author + " <" + c.Email + ">"
+		}
+	}
+	if want := []string{"Merge side", "fix: side", "feat: first parent"}; len(subjects) != 3 || !slices.Equal(subjects[:1], want[:1]) || !slices.Contains(subjects, want[1]) || !slices.Contains(subjects, want[2]) {
+		t.Fatalf("full-range subjects = %q, want the merge, the foreign commit and the first parent", subjects)
+	}
+	if foreign != "other <other@test.com>" {
+		t.Errorf("foreign commit author = %q, want other <other@test.com>", foreign)
+	}
+
+	first, err := g.FirstParentCommitSummaries(base, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range first {
+		if c.Subject == "fix: side" {
+			t.Errorf("first-parent listing must not reach the second parent, got %+v", first)
+		}
+	}
+}

@@ -215,6 +215,12 @@ func (f *fakeDoneRepo) FirstParentCommitSummaries(base, head string) ([]git.Comm
 	return f.summaries[head], nil
 }
 
+// FullRangeCommitSummaries answers with the same listing as the first-parent
+// one: the in-memory repo's histories are linear, so the two walks agree.
+func (f *fakeDoneRepo) FullRangeCommitSummaries(base, head string) ([]git.CommitSummary, error) {
+	return f.FirstParentCommitSummaries(base, head)
+}
+
 func (f *fakeDoneRepo) AuthorEmail() (string, error) {
 	if f.authorEmail == "" {
 		return "", errors.New("user.email is not set")
