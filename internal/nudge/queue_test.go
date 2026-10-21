@@ -2,6 +2,7 @@ package nudge
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -372,8 +373,8 @@ func TestEnqueueQueueDepthLimit(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when queue is full")
 	}
-	if !strings.Contains(err.Error(), "is full") {
-		t.Errorf("got error %q, want to contain 'is full'", err.Error())
+	if !errors.Is(err, ErrQueueFull) {
+		t.Errorf("got error %q, want ErrQueueFull", err.Error())
 	}
 
 	// Verify pending count is at max
@@ -454,8 +455,8 @@ func TestEnqueueStillRejectsWhenFullOfLiveNudges(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when queue is genuinely full of live nudges")
 	}
-	if !strings.Contains(err.Error(), "is full") {
-		t.Errorf("got error %q, want to contain 'is full'", err.Error())
+	if !errors.Is(err, ErrQueueFull) {
+		t.Errorf("got error %q, want ErrQueueFull", err.Error())
 	}
 }
 
@@ -610,7 +611,7 @@ func TestEnqueueNeverExposesAPartialFile(t *testing.T) {
 				if err == nil {
 					break
 				}
-				if !strings.Contains(err.Error(), "is full") {
+				if !errors.Is(err, ErrQueueFull) {
 					enqueueErr <- err
 					return
 				}
@@ -714,6 +715,41 @@ func TestEnqueueTempNameIsNotQueued(t *testing.T) {
 	}
 	if _, err := os.Stat(tmp); err != nil {
 		t.Errorf("temp file touched by Drain: %v", err)
+	}
+}
+
+// TestDrainReapsStaleTempFiles: an enqueue that crashed between write and
+// rename leaves a .json.tmp behind. Drain removes it once it is past the stale
+// threshold and leaves a fresh one, which a live enqueue may still be writing.
+func TestDrainReapsStaleTempFiles(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	session := "gt-test-tmpreap"
+
+	dir := queueDir(townRoot, session)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(dir, "1-dead.json.tmp")
+	fresh := filepath.Join(dir, "2-live.json.tmp")
+	for _, p := range []string{stale, fresh} {
+		if err := os.WriteFile(p, []byte(`{"sender":"s"`), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	old := time.Now().Add(-10 * time.Minute)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Drain(townRoot, session); err != nil {
+		t.Fatalf("Drain: %v", err)
+	}
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Errorf("stale temp file still present: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh temp file removed: %v", err)
 	}
 }
 

@@ -129,6 +129,10 @@ type ExpiryEvent struct {
 // internal/mail imports internal/nudge, not the reverse (gt-oexm).
 var ExpiryObserver func(ExpiryEvent)
 
+// ErrQueueFull is returned, wrapped, by Enqueue when the session's queue holds
+// MaxQueueDepth live nudges. Match it with errors.Is, not on the message text.
+var ErrQueueFull = errors.New("queue depth cap reached")
+
 // queueDir returns the nudge queue directory for a given session.
 // Path: <townRoot>/.runtime/nudge_queue/<session>/
 func queueDir(townRoot, session string) string {
@@ -172,7 +176,7 @@ func enqueue(townRoot, session string, nudge QueuedNudge, observe func(ExpiryEve
 		pruneExpired(townRoot, session, observe)
 		pending, _ = Pending(townRoot, session)
 		if pending >= maxDepth {
-			return fmt.Errorf("nudge queue for %s is full (%d/%d pending)", session, pending, maxDepth)
+			return fmt.Errorf("nudge queue for %s is full (%d/%d pending): %w", session, pending, maxDepth, ErrQueueFull)
 		}
 	}
 
@@ -365,6 +369,15 @@ func drain(townRoot, session string, observe func(ExpiryEvent)) ([]QueuedNudge, 
 	staleThreshold := nudgeConfig(townRoot).StaleClaimThresholdD()
 	now := time.Now()
 	for _, entry := range entries {
+		// An enqueue that died between writing its temp file and renaming it
+		// leaves a ".json.tmp" no reader matches. Past the same threshold no
+		// live enqueue can still be writing it, so remove it.
+		if strings.HasSuffix(entry.Name(), ".json.tmp") {
+			if info, err := entry.Info(); err == nil && now.Sub(info.ModTime()) > staleThreshold {
+				_ = os.Remove(filepath.Join(dir, entry.Name()))
+			}
+			continue
+		}
 		if !strings.Contains(entry.Name(), ".claimed") {
 			continue
 		}
