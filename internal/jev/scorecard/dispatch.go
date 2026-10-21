@@ -30,6 +30,8 @@ func init() {
 
 // The question ids the dispatch battery logs. They must match the ids in
 // internal/jev/dispatch/questions.go, which does not export them.
+// TestScorecardDispatchQuestionIDsMatchLogKeys fails when they drift from the
+// answer keys the log writes.
 const (
 	qLandsFirstTry      QuestionID = "lands_first_try"
 	qFitsTwentyMinutes  QuestionID = "fits_twenty_minutes"
@@ -77,8 +79,11 @@ type dispatchAdapter struct {
 	town      string
 	openBeads func() (beadReader, error)
 
-	beads         beadReader
-	reviews       map[string]land.ReviewRecord
+	beads   beadReader
+	reviews map[string]land.ReviewRecord
+	// reworked is a bead with a verdict from a rework attempt (attempt 2 or
+	// later). A bead in it with no first-attempt verdict has an unknown first try.
+	reworked      map[string]bool
 	reviewsLoaded bool
 }
 
@@ -150,7 +155,7 @@ func (a *dispatchAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 	if r, ok := a.reviews[item.ID]; ok {
 		review = &r
 	}
-	labels, rules := dispatchLabels(review, issue, overrun)
+	labels, rules := dispatchLabels(review, a.reworked[item.ID], issue, overrun)
 	if len(labels) == 0 {
 		return Labeling{}, nil
 	}
@@ -158,14 +163,19 @@ func (a *dispatchAdapter) Label(_ context.Context, item Item) (Labeling, error) 
 }
 
 // loadReviews reads the town's om verdicts and keeps each bead's first
-// attempt, the verdict the battery asks about.
+// attempt, the verdict the battery asks about. It also marks each bead with a
+// rework verdict, so a missing first attempt is not read as a first-try landing.
 func (a *dispatchAdapter) loadReviews() error {
 	recs, err := land.TownReviewsFile(a.town).Since(time.Time{})
 	if err != nil {
 		return fmt.Errorf("reading the review log: %w", err)
 	}
 	a.reviews = map[string]land.ReviewRecord{}
+	a.reworked = map[string]bool{}
 	for _, r := range recs {
+		if r.Attempt > 1 {
+			a.reworked[r.BeadID] = true
+		}
 		if r.Attempt != 1 {
 			continue
 		}
@@ -227,12 +237,13 @@ func readOverrun(town, bead string) (overrunRecord, error) {
 //
 // lands_first_try: the first attempt's verdict. approve is true unless the
 // landing refused it anyway (Rejected), and request_changes is false. With no
-// review, a bead closed as landed is true.
+// review, a bead closed as landed is true, unless reworked says the bead has a
+// verdict from a later attempt, so its first try is unknown.
 //
 // fits_twenty_minutes: a stopped overrun record, or a bead closed as superseded
 // or labeled needs-split, is false. A pending overrun record leaves it
 // unlabeled. With neither, a bead closed as landed is true.
-func dispatchLabels(review *land.ReviewRecord, issue *beads.Issue, overrun overrunRecord) (map[QuestionID]bool, []string) {
+func dispatchLabels(review *land.ReviewRecord, reworked bool, issue *beads.Issue, overrun overrunRecord) (map[QuestionID]bool, []string) {
 	labels := map[QuestionID]bool{}
 	var rules []string
 	landed := isLanded(issue)
@@ -247,7 +258,7 @@ func dispatchLabels(review *land.ReviewRecord, issue *beads.Issue, overrun overr
 	case review != nil && review.Verdict == reviewRequestChanges:
 		labels[qLandsFirstTry] = false
 		rules = append(rules, "review:request-changes")
-	case review == nil && landed:
+	case review == nil && landed && !reworked:
 		labels[qLandsFirstTry] = true
 		rules = append(rules, "landed:no-review")
 	}
@@ -271,7 +282,9 @@ func dispatchLabels(review *land.ReviewRecord, issue *beads.Issue, overrun overr
 }
 
 // isLanded is a bead closed by a landing: the landing worker's close carries
-// the landed commit in its reason.
+// the landed commit in its reason. The prefixes are the ones
+// land.LandingRecord.CloseReason writes; TestScorecardDispatchLandedMatchesLandingCloseReason
+// fails when the wording moves.
 func isLanded(issue *beads.Issue) bool {
 	if issue == nil || issue.Status != closedStatus {
 		return false
