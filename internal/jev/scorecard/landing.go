@@ -52,16 +52,21 @@ type townNotes struct {
 }
 
 func (t *townNotes) Notes(rig, bead string) (string, error) {
+	issue, err := t.Show(rig, bead)
+	if err != nil {
+		return "", err
+	}
+	return issue.Notes, nil
+}
+
+// Show reads one bead from its rig's beads store.
+func (t *townNotes) Show(rig, bead string) (*beads.Issue, error) {
 	b, ok := t.stores[rig]
 	if !ok {
 		b = beads.New(doltserver.FindRigBeadsDir(t.town, rig))
 		t.stores[rig] = b
 	}
-	issue, err := b.Show(bead)
-	if err != nil {
-		return "", err
-	}
-	return issue.Notes, nil
+	return b.Show(bead)
 }
 
 // landingAdapter labels each logged landing from the overseer's review of the

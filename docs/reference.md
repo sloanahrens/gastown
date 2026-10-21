@@ -1713,6 +1713,27 @@ The patrol is off unless `daemon.json` enables it:
 `usd_per_billion_tokens` is required. `max_usd_per_day` is optional and draws on
 the same town-wide cap as the other batteries.
 
+`gt jev scorecard --battery stale` scores that log against each bead as it stands
+at scorecard time. A line whose bead no longer exists is unlabeled. The rules
+are in `internal/jev/scorecard/stale.go`:
+
+- closed as `wontfix`, `obsolete` or `no longer ...`: `obsolete` true
+  (`stale:closed-obsolete`).
+- closed as `superseded ...` or `duplicate ...`: `superseded` true
+  (`stale:closed-superseded`).
+- landed, either the close reason `landed` or a landing record's `Landed on ...`:
+  `worth_doing` true, and `obsolete` and `superseded` false (`stale:landed`).
+- priority changed since the ask: `priority_fit` true when it was raised (a
+  lower P number), false when it was lowered (`stale:priority-raised`,
+  `stale:priority-lowered`). The log does not record who changed it, so any
+  change counts.
+
+A bead still open with its priority unchanged is unlabeled. `needs_reshaping`
+is never labeled: the log keeps no copy of the description the question was
+asked about, and the bead's update and close times do not show whether a
+description changed. Its logged answers still appear in the report, with no
+labels.
+
 ## Beads Commands (bd)
 
 ```bash
