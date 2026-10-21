@@ -428,10 +428,15 @@ func (d *Delivery) Watch(ctx context.Context, sessionName string) {
 	fmt.Fprintf(d.Stderr, "idle-watcher: gave up waiting for %s to go idle after %s; nudge stays queued for the next watcher or a manual drain\n", sessionName, timeout)
 }
 
-// Requeue puts nudges whose delivery failed back on sessionName's queue,
-// reporting a failure to stderr under source.
+// Requeue puts nudges whose delivery failed back on sessionName's queue.
+// Nudges the queue refused are preserved under nudge.UnqueuedDir and reported
+// to stderr under source, with how many of the drained batch did not go back
+// and where the copies are.
 func Requeue(stderr io.Writer, townRoot, sessionName, source string, drained []nudge.QueuedNudge) {
-	if err := nudge.Requeue(townRoot, sessionName, drained); err != nil {
-		fmt.Fprintf(stderr, "%s: requeue for %s failed: %v\n", source, sessionName, err)
+	unqueued, err := nudge.Requeue(townRoot, sessionName, drained)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: requeue for %s failed, %d of %d nudge(s) not re-queued, kept in %s: %v\n",
+			source, sessionName, len(unqueued), len(drained),
+			nudge.UnqueuedDir(townRoot, sessionName), err)
 	}
 }

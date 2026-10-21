@@ -327,3 +327,82 @@ func TestDeliveryWatcherExitsOnEmptyQueue(t *testing.T) {
 	clk.Advance(time.Second) // one poll, not the whole minute
 	<-done
 }
+
+// TestRequeueAllNudgesGoBack: the ordinary case — nothing was refused, so
+// nothing is reported (gt-isb0g).
+func TestRequeueAllNudgesGoBack(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	session := "gt-test-requeue-clean"
+	drained := []nudge.QueuedNudge{{Sender: "a", Message: "one"}, {Sender: "b", Message: "two"}}
+
+	var stderr bytes.Buffer
+	Requeue(&stderr, townRoot, session, "test", drained)
+
+	if got := stderr.String(); got != "" {
+		t.Errorf("stderr = %q, want no report when every nudge went back", got)
+	}
+	if pending, err := nudge.Pending(townRoot, session); err != nil {
+		t.Fatalf("Pending: %v", err)
+	} else if pending != len(drained) {
+		t.Errorf("Pending = %d, want %d", pending, len(drained))
+	}
+}
+
+// TestRequeueNamesHowManyNudgesWereNotRequeued: when the queue is full the
+// nudges cannot go back, and the report says how many were not re-queued and
+// where the preserved copies are (gt-isb0g).
+func TestRequeueNamesHowManyNudgesWereNotRequeued(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	session := "gt-test-requeue-full"
+	for i := 0; i < nudge.MaxQueueDepth; i++ {
+		if err := nudge.Enqueue(townRoot, session, nudge.QueuedNudge{Sender: "s", Message: "fill"}); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+	drained := []nudge.QueuedNudge{{Sender: "a", Message: "one"}, {Sender: "b", Message: "two"}}
+
+	var stderr bytes.Buffer
+	Requeue(&stderr, townRoot, session, "test", drained)
+
+	report := stderr.String()
+	if want := "2 of 2 nudge(s) not re-queued"; !strings.Contains(report, want) {
+		t.Errorf("stderr = %q, want it to contain %q", report, want)
+	}
+	if want := nudge.UnqueuedDir(townRoot, session); !strings.Contains(report, want) {
+		t.Errorf("stderr = %q, want it to name the preserved copies at %q", report, want)
+	}
+}
+
+// TestRequeueNamesOnlyTheNudgesThatDidNotGoBack: the batch fills the queue
+// partway through, so the report distinguishes the nudge that went back from
+// the one that did not (gt-isb0g).
+func TestRequeueNamesOnlyTheNudgesThatDidNotGoBack(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	session := "gt-test-requeue-partial"
+	for i := 0; i < nudge.MaxQueueDepth-1; i++ {
+		if err := nudge.Enqueue(townRoot, session, nudge.QueuedNudge{Sender: "s", Message: "fill"}); err != nil {
+			t.Fatalf("Enqueue %d: %v", i, err)
+		}
+	}
+	now := time.Now()
+	drained := []nudge.QueuedNudge{
+		{Sender: "a", Message: "one", Timestamp: now.Add(-time.Second)},
+		{Sender: "b", Message: "two", Timestamp: now},
+	}
+
+	var stderr bytes.Buffer
+	Requeue(&stderr, townRoot, session, "test", drained)
+
+	report := stderr.String()
+	if want := "1 of 2 nudge(s) not re-queued"; !strings.Contains(report, want) {
+		t.Errorf("stderr = %q, want it to contain %q", report, want)
+	}
+	if pending, err := nudge.Pending(townRoot, session); err != nil {
+		t.Fatalf("Pending: %v", err)
+	} else if pending != nudge.MaxQueueDepth {
+		t.Errorf("Pending = %d, want %d (the first nudge went back)", pending, nudge.MaxQueueDepth)
+	}
+}
