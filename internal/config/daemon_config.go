@@ -99,6 +99,12 @@ type PatrolsConfig struct {
 	// Opt-in for the same reason as JevDedupe.
 	JevTestsel *JevTestselConfig `json:"jev_testsel,omitempty"`
 
+	// JevFailcause asks Jev, for each Go test a candidate gate fails, whether
+	// it will fail again within fourteen days and what cause fits its failure
+	// excerpt, and logs both answers (internal/jev/failcause). Shadow only: the
+	// verdict is untouched. Opt-in for the same reason as JevDedupe.
+	JevFailcause *JevFailcauseConfig `json:"jev_failcause,omitempty"`
+
 	// JevTargets asks Jev to score each file in the deep-review rotation slice
 	// and logs the answers beside the slice's risk rank (internal/jev/targets).
 	// The deep-review script reads it, not the daemon. Opt-in for the same
@@ -596,6 +602,20 @@ type JevLogtriageConfig struct {
 // Jev spend. The battery is off unless Enabled is true, and an enabled one needs
 // USDPerBillionTokens: the usage ledger stores tokens, not dollars.
 type JevTestselConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the battery for the day once the town's Jev spend
+	// reaches it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+}
+
+// JevFailcauseConfig switches on the failing-test cause battery and prices its
+// Jev spend. The battery is off unless Enabled is true, and an enabled one needs
+// USDPerBillionTokens: the usage ledger stores tokens, not dollars.
+type JevFailcauseConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// MaxUSDPerDay stops the battery for the day once the town's Jev spend

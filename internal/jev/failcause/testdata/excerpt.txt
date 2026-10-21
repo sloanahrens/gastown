@@ -1,0 +1,6 @@
+=== RUN   TestRenderTable
+    render_test.go:88: want 3 rows, got 2
+--- FAIL: TestRenderTable (0.02s)
+FAIL	github.com/steveyegge/gastown/internal/render	0.214s
+FAIL
+make: *** [Makefile:41: gate] Error 1
