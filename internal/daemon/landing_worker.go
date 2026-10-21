@@ -515,7 +515,7 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 	if err != nil {
 		return nil, err
 	}
-	lander.Candidate = d.jevTestselCandidate(rigName, candidate)
+	lander.Candidate = d.jevFailcauseCandidate(rigName, d.jevTestselCandidate(rigName, candidate))
 	lander.Merger = merger
 	// The follow-up feed files beads nobody is waiting on, so it runs only for
 	// a rig whose own settings turn it on (gt-s01pn).

@@ -2064,6 +2064,45 @@ line, with no further reads. The rules are in `internal/jev/scorecard/notes.go`:
   (`notes:all-tokens-resolve`). `kind` is true only when Jev picked `none`.
 - no label: the file is logged and unlabeled.
 
+### Failing-test cause battery (`jev_failcause`)
+
+When a landing's candidate gate goes red on a Go test, the battery reads the
+gate's failure excerpt (the same excerpt the rework note carries, cut to 3000
+characters) and asks Jev once per failing test: the noul `will_recur`, whether
+the test will fail again on another landing within 14 days, and the choice
+`cause` over `shared_state`, `timing_assumption`, `host_environment`,
+`test_bug`, `product_regression` and `unclear`. It appends one line per failing
+test to `.runtime/jev/failcause.jsonl`: `{ts, rig, bead, package, test, answers,
+model, question_version}`. The excerpt is never logged. A Jev call that gets no
+usable reply writes no line, so the next red verdict is judged afresh.
+
+The battery is shadow only. It wraps the rig's candidate gate, returns the
+gate's result untouched, and judges in the background, so a landing never waits
+on Jev. Nothing is retried, skipped or excused, and no answer feeds back into
+the landing. The patrol is off unless `daemon.json` enables it:
+
+```json
+{"patrols": {"jev_failcause": {"enabled": true, "max_usd_per_day": 1, "usd_per_billion_tokens": 4}}}
+```
+
+`usd_per_billion_tokens` is required. `max_usd_per_day` is optional and draws on
+the same town-wide cap as the other batteries.
+
+`gt jev scorecard --battery failcause` labels `will_recur` from
+`.runtime/ci-failures.jsonl`, the ledger the landing worker writes, in the
+scorecard's `internal/jev/scorecard/failcause.go`:
+
+- the same test failed on a different bead within 14 days of the judging:
+  `will_recur` true (`failcause:recurred-within-14d`). This label does not wait
+  for the window to close.
+- the window has closed with no such failure, and the ledger's last write came
+  no later than the judging plus the ledger's 7-day retention: `will_recur`
+  false (`failcause:quiet-14d`). A later write prunes records older than the
+  retention, so a longer gap can hide a repeat; that case stays unlabeled.
+- otherwise unlabeled: the window is open, or the ledger is missing.
+
+`cause` has no mechanical label. It is logged for a person to read.
+
 ## Beads Commands (bd)
 
 ```bash

@@ -133,6 +133,7 @@ type (
 	JevDriftConfig             = agentconfig.JevDriftConfig
 	JevLogtriageConfig         = agentconfig.JevLogtriageConfig
 	JevTestselConfig           = agentconfig.JevTestselConfig
+	JevFailcauseConfig         = agentconfig.JevFailcauseConfig
 	JevTargetsConfig           = agentconfig.JevTargetsConfig
 	JevDispatchConfig          = agentconfig.JevDispatchConfig
 	JevConflictConfig          = agentconfig.JevConflictConfig
@@ -348,6 +349,14 @@ func IsPatrolEnabled(config *DaemonPatrolConfig, patrol string) bool {
 			return false
 		}
 		return config.Patrols.JevTestsel.Enabled
+	}
+	// jev_failcause is opt-in for the same reason. It is read at each red
+	// candidate verdict, not on a ticker.
+	if patrol == "jev_failcause" {
+		if config == nil || config.Patrols == nil || config.Patrols.JevFailcause == nil {
+			return false
+		}
+		return config.Patrols.JevFailcause.Enabled
 	}
 	// jev_dispatch is opt-in for the same reason.
 	if patrol == "jev_dispatch" {
