@@ -55,8 +55,15 @@ type fakeDoneRepo struct {
 	dropPushed bool
 	// patchIDs are FirstParentPatchIDs answers keyed by the range's tip.
 	patchIDs map[string][]string
-	// summaries are FirstParentCommitSummaries answers keyed by the range's tip.
+	// summaries are FirstParentCommitSummaries answers keyed by the range's tip:
+	// the merge and its first parents, never a second parent's commits.
 	summaries map[string][]git.CommitSummary
+	// fullSummaries are FullRangeCommitSummaries answers keyed by the range's
+	// tip: every commit in the range, a merge's second-parent ones included. It
+	// is a separate map, not a fallback to summaries, so a test can model a
+	// seat-authored merge whose second parent carries another author's commit
+	// and catch the path reading the first-parent listing instead.
+	fullSummaries map[string][]git.CommitSummary
 	// authorEmail is the worktree's user.email; empty reads as unset.
 	authorEmail string
 
@@ -86,12 +93,13 @@ type fakeDoneRepo struct {
 
 func newFakeDoneRepo() *fakeDoneRepo {
 	return &fakeDoneRepo{
-		head:      "feature1",
-		ancestors: map[string]bool{"main1": true, "feature1": true},
-		ahead:     1,
-		origin:    map[string]string{"main": "main1"},
-		reachable: map[string]map[string]bool{},
-		patchIDs:  map[string][]string{},
+		head:          "feature1",
+		ancestors:     map[string]bool{"main1": true, "feature1": true},
+		ahead:         1,
+		origin:        map[string]string{"main": "main1"},
+		reachable:     map[string]map[string]bool{},
+		patchIDs:      map[string][]string{},
+		fullSummaries: map[string][]git.CommitSummary{},
 	}
 }
 
@@ -215,10 +223,15 @@ func (f *fakeDoneRepo) FirstParentCommitSummaries(base, head string) ([]git.Comm
 	return f.summaries[head], nil
 }
 
-// FullRangeCommitSummaries answers with the same listing as the first-parent
-// one: the in-memory repo's histories are linear, so the two walks agree.
+// FullRangeCommitSummaries answers from its own map. A test that takes the
+// full-range path records what that walk returns; the first-parent listing is
+// not substituted for it, or the fake could not tell the two walks apart. An
+// unrecorded range reads as empty, which reworkPush.allows treats as "not this
+// seat's", never as agreement.
 func (f *fakeDoneRepo) FullRangeCommitSummaries(base, head string) ([]git.CommitSummary, error) {
-	return f.FirstParentCommitSummaries(base, head)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.fullSummaries[head], nil
 }
 
 func (f *fakeDoneRepo) AuthorEmail() (string, error) {

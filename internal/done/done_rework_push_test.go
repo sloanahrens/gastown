@@ -34,9 +34,12 @@ func reworkWiringHarness(t *testing.T, author, email string) *submitHarness {
 	h.repo.origin[doneTestBranch] = reworkWiringRejected
 	h.repo.patchIDs[reworkWiringRejected] = []string{"p-origin"}
 	h.repo.patchIDs[reworkWiringLocal] = []string{"p-local"}
-	h.repo.summaries = map[string][]git.CommitSummary{
-		reworkWiringRejected: {{SHA: reworkWiringRejected, Author: author, Email: email, Subject: "feat: the rejected submission"}},
-	}
+	rejected := []git.CommitSummary{{SHA: reworkWiringRejected, Author: author, Email: email, Subject: "feat: the rejected submission"}}
+	h.repo.summaries = map[string][]git.CommitSummary{reworkWiringRejected: rejected}
+	// The rejected head is a linear one-commit range here, so both walks agree.
+	// They are recorded apart: the case that tells them apart is
+	// TestSubmitReworkForeignSecondParentRefusesFromBead.
+	h.repo.fullSummaries = map[string][]git.CommitSummary{reworkWiringRejected: rejected}
 	h.bd.Seed(beads.Issue{
 		ID: "bd-source", Title: "the work", Type: "task", Status: string(beads.StatusHooked),
 		Labels: []string{land.LabelRework},
@@ -69,6 +72,32 @@ func TestSubmitReworkForeignAuthorOnOriginRefusesFromBead(t *testing.T) {
 	for _, p := range h.repo.pushes {
 		if strings.Contains(p, "lease="+reworkWiringRejected) {
 			t.Errorf("lease push ran over the foreign author's commit: %q", p)
+		}
+	}
+	if got := h.repo.origin[doneTestBranch]; got != reworkWiringRejected {
+		t.Errorf("origin %s = %s, want it untouched at %s", doneTestBranch, got, reworkWiringRejected)
+	}
+}
+
+// TestSubmitReworkForeignSecondParentRefusesFromBead: the rejected head is a
+// seat-authored merge. Its first-parent chain is all the seat's, but its second
+// parent carries another author's commit, so the full-range walk is what
+// refuses the overwrite. The fake records the two walks separately, so a path
+// that read the first-parent listing would land this push and fail the test.
+func TestSubmitReworkForeignSecondParentRefusesFromBead(t *testing.T) {
+	t.Parallel()
+	h := reworkWiringHarness(t, reworkWiringSeat, reworkWiringEmail)
+	h.repo.fullSummaries[reworkWiringRejected] = []git.CommitSummary{
+		{SHA: reworkWiringRejected, Author: reworkWiringSeat, Email: reworkWiringEmail, Subject: "Merge branch 'side'"},
+		{SHA: "s1", Author: "Sloan Ahrens", Email: reworkWiringEmail, Subject: "fix: the foreign commit"},
+		{SHA: "p1", Author: reworkWiringSeat, Email: reworkWiringEmail, Subject: "feat: the first parent"},
+	}
+	if err := h.submit(); err == nil {
+		t.Fatal("submit succeeded over a foreign commit reachable only through the merge's second parent")
+	}
+	for _, p := range h.repo.pushes {
+		if strings.Contains(p, "lease="+reworkWiringRejected) {
+			t.Errorf("lease push ran over the foreign commit: %q", p)
 		}
 	}
 	if got := h.repo.origin[doneTestBranch]; got != reworkWiringRejected {
