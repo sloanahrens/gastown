@@ -153,6 +153,7 @@ func (d *Daemon) daemonWorkHolds() []*daemonWork {
 		{&d.jevLandingRunning, "jev_landing"},
 		{&d.jevSubmissionRunning, "jev_submission"},
 		{&d.jevDispatchRunning, "jev_dispatch"},
+		{&d.jevConflictRunning, "jev_conflict"},
 		{&d.jevDriftRunning, "jev_drift"},
 		{&d.jevLogtriageRunning, "jev_logtriage"},
 		{&d.jevProgressRunning, "jev_progress"},

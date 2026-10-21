@@ -110,6 +110,12 @@ type PatrolsConfig struct {
 	// every answer (internal/jev/dispatch). Opt-in, like JevDedupe.
 	JevDispatch *JevDispatchConfig `json:"jev_dispatch,omitempty"`
 
+	// JevConflict asks Jev, for each bead just placed while others were in
+	// flight, whether the two will touch the same files and the same function,
+	// and logs every answer (internal/jev/conflict). It changes no dispatch.
+	// Opt-in, like JevDispatch, and under the same town-wide daily cap.
+	JevConflict *JevConflictConfig `json:"jev_conflict,omitempty"`
+
 	// JevProgress asks Jev whether a polecat the overrun guard nudged is making
 	// progress, from the last fifteen minutes of its transcript, and logs every
 	// answer (internal/jev/progress). It acts on nothing. Opt-in, like
@@ -660,6 +666,20 @@ type JevTargetsConfig struct {
 // The pass is off unless Enabled is true, and an enabled pass needs
 // USDPerBillionTokens: the usage ledger stores tokens, not dollars.
 type JevDispatchConfig struct {
+	Enabled bool `json:"enabled"`
+
+	// MaxUSDPerDay stops the pass for the day once the town's Jev spend, every
+	// caller counted, reaches it. Zero takes the default of one dollar.
+	MaxUSDPerDay float64 `json:"max_usd_per_day,omitempty"`
+
+	// USDPerBillionTokens prices input and output tokens alike.
+	USDPerBillionTokens float64 `json:"usd_per_billion_tokens,omitempty"`
+}
+
+// JevConflictConfig switches on the conflict battery and prices its Jev spend.
+// The pass is off unless Enabled is true, and an enabled pass needs
+// USDPerBillionTokens: the usage ledger stores tokens, not dollars.
+type JevConflictConfig struct {
 	Enabled bool `json:"enabled"`
 
 	// MaxUSDPerDay stops the pass for the day once the town's Jev spend, every
