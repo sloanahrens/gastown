@@ -1,6 +1,9 @@
 package dispatch
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // SlingRefusalMarker is the leading text of every refusal `gt sling` prints for
 // a bead that is fine and simply not the sling's to take: the merge queue over
@@ -25,12 +28,9 @@ const SlingRefusalMarker = "sling refused:"
 // path's "spawning polecat: " wrapping are dropped and the reason is the
 // guard's own sentence.
 func SlingRefusalReason(stderr string) (string, bool) {
-	for _, line := range strings.Split(stderr, "\n") {
-		if i := strings.Index(line, SlingRefusalMarker); i >= 0 {
-			return strings.TrimSpace(line[i:]), true
-		}
-	}
-	return "", false
+	return firstRefusal(stderr, func(line string) int {
+		return strings.Index(line, SlingRefusalMarker)
+	})
 }
 
 // ReslingRefusalMarker leads sling's refusal to re-sling a bead whose dead
@@ -50,24 +50,36 @@ const ReslingRefusalMarker = "refusing to re-sling"
 // fine: the dispatcher defers until the operator clears the state.
 const RigUnavailableMarker = "cannot sling to "
 
-// rigUnavailableNouns are the words between RigUnavailableMarker and the quoted
-// rig name: the e-stop line names the rig alone, park and dock name the state.
-var rigUnavailableNouns = []string{`rig "`, `parked rig "`, `docked rig "`}
+// rigUnavailableLine matches the sentence sling.Blocked prints, with the
+// sentence captured. The sentence must lead the line or follow a wrapper's
+// ": " (cobra's "Error: ", the spawn path's "spawning polecat: ", the dry-run's
+// "gt sling --dry-run: exit status 1: "), and the rig's quoted name must end it
+// (a colon, or the end of the line). So a bead title or a log line that quotes
+// the sentence mid-line is not a refusal, and the wrapped forms still are.
+var rigUnavailableLine = regexp.MustCompile(
+	`(?:^|: )(` + regexp.QuoteMeta(RigUnavailableMarker) + `(?:(?:parked|docked) )?rig "(?:[^"\\]|\\.)*"(?::|$))`,
+)
 
 // SlingRefusalLine extracts a refusal of any kind from a failed sling's output
 // or error text, reporting false for every other failure. It is the one
 // predicate an automatic dispatcher uses to tell "not this sling's to take"
 // from "this sling failed": the SlingRefusalMarker guards, the re-sling guard
 // (ReslingRefusalMarker) and a rig that is e-stopped, parked or docked
-// (RigUnavailableMarker). The line is returned from the marker on, as
+// (rigUnavailableLine). The line is returned from the marker on, as
 // SlingRefusalReason does, so it is the guard's own sentence.
 //
 // internal/cmd also recognizes two typed refusals through errors.Is
 // (sling.ErrRigUnavailable, the duplicate-content guard). A subprocess's caller
 // cannot see a type, so the rig one is matched here by its text.
 func SlingRefusalLine(text string) (string, bool) {
+	return firstRefusal(text, refusalIndex)
+}
+
+// firstRefusal returns the refusal on the first line of text that start finds
+// one on, from where it starts, trimmed. It reports false when no line has one.
+func firstRefusal(text string, start func(line string) int) (string, bool) {
 	for _, line := range strings.Split(text, "\n") {
-		if i := refusalIndex(line); i >= 0 {
+		if i := start(line); i >= 0 {
 			return strings.TrimSpace(line[i:]), true
 		}
 	}
@@ -84,8 +96,8 @@ func refusalIndex(line string) int {
 	}
 	note(strings.Index(line, SlingRefusalMarker))
 	note(strings.Index(line, ReslingRefusalMarker))
-	for _, noun := range rigUnavailableNouns {
-		note(strings.Index(line, RigUnavailableMarker+noun))
+	if m := rigUnavailableLine.FindStringSubmatchIndex(line); m != nil {
+		note(m[2])
 	}
 	return first
 }
