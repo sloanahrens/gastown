@@ -798,6 +798,14 @@ func ClaudeConfigDir() (string, error) {
 	return claudeConfigDir(os.Getenv, os.UserHomeDir)
 }
 
+// ClaudeConfigDirFrom resolves the Claude Code configuration directory from
+// getenv and userHomeDir. ClaudeConfigDir is ClaudeConfigDirFrom with the
+// process environment; callers that carry the environment as an argument use it
+// so a test can name its own.
+func ClaudeConfigDirFrom(getenv func(string) string, userHomeDir func() (string, error)) (string, error) {
+	return claudeConfigDir(getenv, userHomeDir)
+}
+
 func claudeConfigDir(getenv func(string) string, userHomeDir func() (string, error)) (string, error) {
 	if dir := getenv("CLAUDE_CONFIG_DIR"); dir != "" {
 		return dir, nil

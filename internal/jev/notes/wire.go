@@ -8,11 +8,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentlog"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
 	"github.com/steveyegge/gastown/internal/jev/submission"
@@ -41,8 +42,9 @@ type Settings struct {
 // Open wires the production pass for a town: the Jev client writing to the
 // usage ledger under the Caller name, the submission battery's bare clone, the
 // installed binaries' --help and the cap read from the same ledger. The files
-// are the memory directory's markdown and the operator handbook, both under the
-// operator's home. warnings receives the ledger's own warnings and may be nil.
+// are the memory directory's markdown under the Claude config dir the sessions
+// run with and the operator handbook under the home directory. warnings receives
+// the ledger's own warnings and may be nil.
 func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	capUSD := s.MaxUSDPerDay
 	if capUSD == 0 {
@@ -52,11 +54,6 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	if err := town.Validate(); err != nil {
 		return nil, fmt.Errorf("jev_notes: %w", err)
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, fmt.Errorf("finding the home directory: %w", err)
-	}
-
 	client, err := jev.NewClient(
 		jev.WithLedger(jev.UsageLedgerPath(townRoot)),
 		jev.WithCaller(Caller),
@@ -74,32 +71,55 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 		Asker:   client,
 		Repo:    cloneRepo{c: clone},
 		Help:    execHelp{},
-		Files:   func() ([]File, error) { return ListFiles(home, townRoot) },
+		Files:   func() ([]File, error) { return listNotes(os.Getenv, os.UserHomeDir, townRoot) },
 		LogPath: LogPath(townRoot),
 		Allows:  func() (bool, error) { return town.Allows(time.Now) },
 	}, nil
 }
 
-// nonAlnumRe matches the characters Claude Code replaces with "-" in a project
-// directory's name.
-var nonAlnumRe = regexp.MustCompile(`[^A-Za-z0-9]`)
-
-// MemoryDir is the memory directory of the sessions run from townRoot, under
-// the home directory home.
-func MemoryDir(home, townRoot string) string {
-	return filepath.Join(home, ".claude", "projects", nonAlnumRe.ReplaceAllString(townRoot, "-"), "memory")
+// listNotes lists the markdown note files the pass reads. It resolves the Claude
+// config dir from getenv and userHome, the way each session resolves the dir it
+// writes to: a town with CLAUDE_CONFIG_DIR set reads its own memory, not
+// ~/.claude's.
+func listNotes(getenv func(string) string, userHome func() (string, error), townRoot string) ([]File, error) {
+	configDir, err := config.ClaudeConfigDirFrom(getenv, userHome)
+	if err != nil {
+		return nil, fmt.Errorf("finding the Claude config dir: %w", err)
+	}
+	home, err := userHome()
+	if err != nil {
+		return nil, fmt.Errorf("finding the home directory: %w", err)
+	}
+	return listFiles(configDir, home, townRoot)
 }
 
-// HandbookPath is the operator handbook under the home directory home.
-func HandbookPath(home string) string {
+// memoryDir is the memory directory of the sessions run from townRoot, under
+// the Claude config dir configDir. agentlog names the project directory, so
+// this reads the directory the sessions write to.
+func memoryDir(configDir, townRoot string) (string, error) {
+	project, err := agentlog.ClaudeProjectDirIn(configDir, townRoot)
+	if err != nil {
+		return "", fmt.Errorf("finding the memory directory: %w", err)
+	}
+	return filepath.Join(project, "memory"), nil
+}
+
+// handbookPath is the operator handbook under the home directory home. The
+// handbook is the operator's /gastown command in the slash-commands checkout,
+// not per-town session config, so it stays under home when CLAUDE_CONFIG_DIR
+// moves the memory directory.
+func handbookPath(home string) string {
 	return filepath.Join(home, ".claude", "commands", "gastown.md")
 }
 
-// ListFiles lists the markdown files in the memory directory and the handbook.
+// listFiles lists the markdown files in the memory directory and the handbook.
 // A missing directory or handbook is no files, not an error.
-func ListFiles(home, townRoot string) ([]File, error) {
+func listFiles(configDir, home, townRoot string) ([]File, error) {
 	var files []File
-	dir := MemoryDir(home, townRoot)
+	dir, err := memoryDir(configDir, townRoot)
+	if err != nil {
+		return nil, err
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("reading %s: %w", dir, err)
@@ -109,7 +129,7 @@ func ListFiles(home, townRoot string) ([]File, error) {
 			files = append(files, File{Source: SourceMemory, Name: e.Name(), Path: filepath.Join(dir, e.Name())})
 		}
 	}
-	handbook := HandbookPath(home)
+	handbook := handbookPath(home)
 	if info, err := os.Stat(handbook); err == nil && info.Mode().IsRegular() {
 		files = append(files, File{Source: SourceHandbook, Name: filepath.Base(handbook), Path: handbook})
 	}
