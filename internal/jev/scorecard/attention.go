@@ -142,7 +142,7 @@ func (a *attentionAdapter) Label(ctx context.Context, item Item) (Labeling, erro
 	if lab, ok := mechanismLabeling(rec.Kind, line.SHA, issue); ok {
 		return lab, nil
 	}
-	if rec.ClearedAt.Sub(rec.FirstSeen) <= selfClearWindow && !a.acked(rec) && quiet(issue) {
+	if rec.ClearedAt.Sub(rec.FirstSeen) <= selfClearWindow && !a.acked(rec) && quiet(line, issue) {
 		return Labeling{Labeled: true, Labels: map[QuestionID]bool{jevattention.QClearsOnItsOwn: true}, Rule: ruleClearedWithinWindow}, nil
 	}
 	return Labeling{}, nil
@@ -285,17 +285,17 @@ func mechanismLabeling(kind attention.Kind, sha string, issue *beads.Issue) (Lab
 		switch {
 		case ok && verdict == land.OverseerReviewFail:
 			return Labeling{Labeled: true, Labels: map[QuestionID]bool{jevattention.QNeedsHuman: true}, Rule: ruleRiskPathFail}, true
-		case ok && verdict == "PASS":
+		case ok && verdict == land.OverseerReviewPass:
 			return Labeling{Labeled: true, Labels: map[QuestionID]bool{jevattention.QNeedsHuman: false}, Rule: ruleRiskPathPass}, true
 		}
 		return Labeling{}, false
 
 	case attention.KindRejectedTwice:
 		reason := strings.TrimSpace(issue.CloseReason)
-		if strings.HasPrefix(strings.ToLower(reason), "superseded") {
+		if hasReasonPrefix(reason, "superseded") {
 			return Labeling{Labeled: true, Labels: map[QuestionID]bool{jevattention.QNeedsHuman: true}, Rule: ruleRejectedSuperseded}, true
 		}
-		if strings.HasPrefix(reason, "Landed on") {
+		if hasReasonPrefix(reason, "Landed on") {
 			// A landing from a crew branch is a person's rework; one from a
 			// polecat branch is the routine route fixing it.
 			branch := landedBranch(issue.Notes)
@@ -327,9 +327,22 @@ func landedBranch(notes string) string {
 	return branch
 }
 
-// quiet reports whether the item's bead carries no note and no close reason,
-// the two things a person or the overseer leaves when they deal with an item.
-// An item with no bead is quiet.
-func quiet(issue *beads.Issue) bool {
-	return issue == nil || (strings.TrimSpace(issue.Notes) == "" && strings.TrimSpace(issue.CloseReason) == "")
+// hasReasonPrefix reports whether a close reason starts with prefix, ignoring
+// case: a person writes "Superseded by ..." as readily as "superseded by ...",
+// and "Landed on" is matched the same way so neither prefix is the stricter.
+func hasReasonPrefix(reason, prefix string) bool {
+	return strings.HasPrefix(strings.ToLower(reason), strings.ToLower(prefix))
+}
+
+// quiet reports whether nothing shows that a person or the overseer dealt with
+// the item: its bead carries no note and no close reason, the two things they
+// leave. That needs a bead to read. A line that names none is quiet only when
+// the item was open when the pass asked, so it truly had none; a line written
+// after the item cleared carries no bead whatever the item had. A bead the line
+// names but that no longer exists says nothing either, so neither is quiet.
+func quiet(line jevattention.Line, issue *beads.Issue) bool {
+	if line.Bead == "" {
+		return line.Live
+	}
+	return issue != nil && strings.TrimSpace(issue.Notes) == "" && strings.TrimSpace(issue.CloseReason) == ""
 }

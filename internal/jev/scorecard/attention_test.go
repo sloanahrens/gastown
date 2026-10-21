@@ -43,6 +43,9 @@ type attentionCase struct {
 	// noEvents leaves the life out of the queue's events, so only the battery
 	// line says it existed.
 	noEvents bool
+	// notLive writes the battery line as one asked after the item cleared,
+	// which carries no bead.
+	notLive bool
 	// want is the labels the adapter must set, nil when it must leave the item
 	// unlabeled; wantRule names the rule that sets them.
 	want     map[string]bool
@@ -115,9 +118,19 @@ func attentionCases() []attentionCase {
 		{name: "a bead with a note is not quiet", kind: attention.KindEscalation,
 			key: "esc:hq-16", bead: "hq-16", clear: 5 * time.Minute,
 			issue: &beads.Issue{ID: "hq-16", Status: "closed", Notes: "looked at it"}},
-		{name: "an escalation whose bead is gone clears on its own inside 15 minutes", kind: attention.KindEscalation,
-			key: "esc:hq-17", bead: "hq-17", clear: 5 * time.Minute,
-			want: map[string]bool{"clears_on_its_own": true}, wantRule: "cleared-within-15m"},
+		{name: "an escalation whose bead is gone is left unlabeled", kind: attention.KindEscalation,
+			key: "esc:hq-17", bead: "hq-17", clear: 5 * time.Minute},
+		{name: "a line written after the item cleared has no bead and is left unlabeled", kind: attention.KindEscalation,
+			key: "esc:hq-18", clear: 5 * time.Minute, notLive: true},
+		{name: "a superseded reason is matched whatever its case", kind: attention.KindRejectedTwice,
+			key: "rework:gt-w19", bead: "gt-w19", clear: 3 * time.Hour,
+			issue: &beads.Issue{ID: "gt-w19", Status: "closed", CloseReason: "Superseded by gt-w20"},
+			want:  map[string]bool{"needs_human": true}, wantRule: "rejected-twice:superseded"},
+		{name: "a landed reason is matched whatever its case", kind: attention.KindRejectedTwice,
+			key: "rework:gt-w21", bead: "gt-w21", clear: 3 * time.Hour,
+			issue: &beads.Issue{ID: "gt-w21", Status: "closed", CloseReason: "landed on main",
+				Notes: "LANDING RECORD\nbranch: polecat/furiosa/gt-w21+x9"},
+			want: map[string]bool{"routine_action_fixes": true}, wantRule: "rejected-twice:landed-routine"},
 		{name: "a life the queue no longer holds is left unlabeled", kind: attention.KindHostMem,
 			key: "host-mem:gone", clear: time.Minute, noEvents: true},
 	}
@@ -155,7 +168,7 @@ func writeAttentionTown(t *testing.T, town string, cases []attentionCase) {
 		}
 		lines = append(lines, jevattention.Line{
 			TS: raised.Add(2 * time.Minute), Key: c.key, Kind: c.kind, Bead: c.bead, SHA: c.sha,
-			FirstSeen: raised, QuestionVersion: jevattention.QuestionVersion, Model: "test-model",
+			FirstSeen: raised, Live: !c.notLive, QuestionVersion: jevattention.QuestionVersion, Model: "test-model",
 			Answers: &jevattention.Answers{
 				NeedsHuman: 0.7, ClearsOnItsOwn: 0.2, RoutineActionFixes: 0.1, RepeatsOpenItem: 0,
 				Urgency: jevattention.Urgency{Score: 1, Confidence: 0.8},
