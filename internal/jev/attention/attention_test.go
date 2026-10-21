@@ -663,7 +663,8 @@ func TestJevAttentionOpenWiresTheTownFiles(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 
-	pass, err := open(town, Settings{USDPerBillionTokens: 1000}, nil, jev.WithKey("test-key"))
+	const price = 1000
+	pass, err := open(town, Settings{USDPerBillionTokens: price}, nil, jev.WithKey("test-key"))
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -678,21 +679,34 @@ func TestJevAttentionOpenWiresTheTownFiles(t *testing.T) {
 		t.Errorf("Allows on an empty ledger = %v, %v, want true", ok, err)
 	}
 
-	// One million input tokens at 1000 USD per billion is one dollar, spent
-	// by a caller other than the attention battery.
+	// Spend written by another caller counts against the pass. A token under
+	// the default cap allows a call and the cap itself refuses one, so the
+	// pair pins the unset cap to DefaultMaxUSDPerDay; a dollar alone would
+	// pass under any smaller cap.
 	ledger := jev.UsageLedgerPath(town)
 	if err := os.MkdirAll(filepath.Dir(ledger), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	line, _ := json.Marshal(map[string]any{"ts": time.Now().UTC(), "caller": "jev-dedupe", "input_tokens": 1_000_000, "output_tokens": 0})
-	if err := os.WriteFile(ledger, append(line, '\n'), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	ok, err := pass.Allows()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if ok {
-		t.Error("Allows = true with another caller's dollar in the ledger, want false at the default cap")
+	capTokens := int(DefaultMaxUSDPerDay * 1e9 / price)
+	for _, tt := range []struct {
+		name   string
+		tokens int
+		allows bool
+	}{
+		{name: "under the default cap", tokens: capTokens - 1, allows: true},
+		{name: "at the default cap", tokens: capTokens, allows: false},
+	} {
+		line, _ := json.Marshal(map[string]any{"ts": time.Now().UTC(), "caller": "jev-dedupe", "input_tokens": tt.tokens, "output_tokens": 0})
+		if err := os.WriteFile(ledger, append(line, '\n'), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ok, err := pass.Allows()
+		if err != nil {
+			t.Fatalf("%s: Allows: %v", tt.name, err)
+		}
+		if ok != tt.allows {
+			t.Errorf("%s: Allows = %v with %d tokens spent, want %v (default cap %v USD)",
+				tt.name, ok, tt.tokens, tt.allows, DefaultMaxUSDPerDay)
+		}
 	}
 }
