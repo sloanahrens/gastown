@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -594,6 +595,30 @@ func TestLandingInfraTargetsHonorLandingWorkerRigs(t *testing.T) {
 
 	if len(got) != 1 || got[0].Rig != "A" {
 		t.Errorf("landingInfraTargets() rigs = %v, want only the landing worker's rig A", targetRigs(got))
+	}
+}
+
+// TestLandingInfraTargetsEmptyAllowlistWatchesEveryForgejoRig: with no
+// landing_worker.rigs allowlist, every known rig is served, so the probe covers
+// each rig whose Forgejo block resolves. Rig C has no Forgejo block and lands
+// through GitHub, so it is still not watched (gt-mbw6s).
+func TestLandingInfraTargetsEmptyAllowlistWatchesEveryForgejoRig(t *testing.T) {
+	t.Parallel()
+	d, _ := daemonWithRecorder(t)
+	f := useGitfake(t, d)
+	d.knownRigsCache, d.knownRigsCacheValid = []string{"A", "B", "C"}, true
+	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{
+		LandingWorker: &LandingWorkerConfig{},
+	}}
+	for _, rigName := range []string{"A", "B"} {
+		forgejoRigConfig(t, d.config.TownRoot, rigName)
+		f.InitBare(t, filepath.Join(d.config.TownRoot, rigName, ".repo.git"))
+	}
+
+	got := d.landingInfraTargets()
+
+	if want := []string{"A", "B"}; !slices.Equal(targetRigs(got), want) {
+		t.Errorf("landingInfraTargets() rigs = %v, want %v with no allowlist", targetRigs(got), want)
 	}
 }
 
