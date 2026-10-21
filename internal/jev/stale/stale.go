@@ -67,9 +67,9 @@ var skipLabels = []string{"human-only", "handoff", "needs-human", "gt:needs-huma
 // allowlist keeps a type added later out of the read until it is named here.
 var workTypes = []string{"task", "bug", "feature"}
 
-// crewSeatMarker is inside the ID of a crew seat's own task bead
+// crewSeatMarker starts the second segment of a crew seat's own task bead ID
 // ("<prefix>-crew-<name>").
-const crewSeatMarker = "-crew-"
+const crewSeatMarker = "crew-"
 
 // IsWorkType reports whether an issue type is one the pass reads: task, bug or
 // feature. The scorecard asks it too, so it discards the lines an earlier pass
@@ -84,10 +84,13 @@ func IsWorkType(issueType string) bool {
 	return false
 }
 
-// isCrewSeat reports whether a bead ID names a crew seat's task bead.
+// isCrewSeat reports whether a bead ID names a crew seat's task bead,
+// "<prefix>-crew-<name>". Only a marker in a session position counts: a work
+// bead whose ID merely contains "crew-" (a sub-ID like gt-fix-crew-1) is still
+// read, as it is in gt handoff's session-name check.
 func isCrewSeat(id string) bool {
-	i := strings.LastIndex(id, crewSeatMarker)
-	return i >= 0 && i+len(crewSeatMarker) < len(id)
+	_, rest, ok := strings.Cut(id, "-")
+	return ok && strings.HasPrefix(rest, crewSeatMarker) && len(rest) > len(crewSeatMarker)
 }
 
 // Asker asks one battery of questions about one state. *jev.Client satisfies
