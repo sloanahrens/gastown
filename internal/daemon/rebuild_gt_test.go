@@ -3,6 +3,7 @@ package daemon
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -581,6 +582,82 @@ func TestRebuildGTRequestDuringCycleSurvives(t *testing.T) {
 
 	if !d.rebuildGTRequested.Load() {
 		t.Fatal("the cycle's end cleared a request armed while it ran")
+	}
+}
+
+// TestRebuildGTRequestDuringDeferredCycleSurvives pins the deferral path with a
+// request made mid-cycle: a cycle that defers (a gate holds the slot) hands the
+// request it consumed back, and one a landing arms while it runs is still
+// pending when the deferred cycle ends (gt-tgs81).
+func TestRebuildGTRequestDuringDeferredCycleSurvives(t *testing.T) {
+	t.Parallel()
+	d, _ := rebuildGTTown(t)
+	inCycle := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+		once.Do(func() {
+			close(inCycle)
+			<-release
+		})
+		return staleInfo(3)
+	}
+	d.rebuildGTGateFn = func() (string, bool) { return "a gate suite holds a slot (gastown/landing)", true }
+	cli := withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		if gitSub(c, "branch") {
+			return cliReply{stdout: "main\n"}
+		}
+		return cliReply{}
+	})
+	d.requestRebuildGTInstall()
+	cycleEnd := watchRebuildGTCycle(d)
+
+	var releaseOnce sync.Once
+	releaseCycle := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		releaseCycle()
+		awaitRebuildGTIdle(t, d, cycleEnd)
+	})
+
+	d.triggerRebuildGT()
+	<-inCycle
+	d.requestRebuildGTInstall()
+	releaseCycle()
+	awaitRebuildGTIdle(t, d, cycleEnd)
+
+	if installs := installCalls(cli); len(installs) != 0 {
+		t.Errorf("built while a gate held the slot: %v", installs)
+	}
+	if !d.rebuildGTRequested.Load() {
+		t.Fatal("a deferred cycle lost the request it consumed and the one armed while it ran")
+	}
+}
+
+// TestRebuildGTRequestSurvivesAnExitingCycle pins the request when the cycle
+// exits without returning: runtime.Goexit runs the cycle's deferred calls the
+// way a panic would, and the request the cycle consumed must still be pending
+// for the next heartbeat rather than lost with the goroutine (gt-tgs81).
+func TestRebuildGTRequestSurvivesAnExitingCycle(t *testing.T) {
+	t.Parallel()
+	d, _ := rebuildGTTown(t)
+	d.rebuildGTStaleFn = func(string) *version.StaleBinaryInfo {
+		runtime.Goexit()
+		return nil
+	}
+	withRebuildGTCli(t, d, func(c cliCall) cliReply {
+		if gitSub(c, "branch") {
+			return cliReply{stdout: "main\n"}
+		}
+		return cliReply{}
+	})
+	d.requestRebuildGTInstall()
+	cycleEnd := watchRebuildGTCycle(d)
+
+	d.triggerRebuildGT()
+	awaitRebuildGTIdle(t, d, cycleEnd)
+
+	if !d.rebuildGTRequested.Load() {
+		t.Fatal("a cycle that exited without deferring lost the request it consumed")
 	}
 }
 
