@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev/landing"
 	"github.com/steveyegge/gastown/internal/land"
 )
@@ -157,6 +158,41 @@ func TestLandingLabelFailsWhenTheNotesCannotBeRead(t *testing.T) {
 	_, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
 	if err == nil || !strings.Contains(err.Error(), "bead store unavailable") {
 		t.Fatalf("Label error = %v, want the store failure", err)
+	}
+}
+
+func TestLandingLabelLeavesAMissingBeadUnlabeled(t *testing.T) {
+	t.Parallel()
+	missing := fmt.Errorf("no beads directory for rig gastown: %w", beads.ErrNotFound)
+	a := &landingAdapter{notes: &fakeLandingNotes{err: missing}}
+	lab, err := a.Label(context.Background(), landingItem("gt-a", "a1a1a1a"))
+	if err != nil {
+		t.Fatalf("Label error = %v, want a missing bead to read as unlabeled", err)
+	}
+	if lab.Labeled || lab.Labels != nil || lab.Rule != "" {
+		t.Errorf("labeling = %+v, want none", lab)
+	}
+}
+
+func TestLandingContextClearsTheTallyForTheNextBuild(t *testing.T) {
+	t.Parallel()
+	head := "a1a1a1a"
+	notes := &fakeLandingNotes{byBead: map[string]string{
+		"gt-a": land.OverseerReviewMarker + " " + head + " FAIL findings=gt-f2,gt-f1",
+		"gt-b": land.OverseerReviewMarker + " " + head + " FAIL findings=gt-f1",
+	}}
+	a := &landingAdapter{notes: notes}
+	for _, bead := range []string{"gt-a", "gt-b"} {
+		if _, err := a.Label(context.Background(), landingItem(bead, head)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := "FAIL review notes named 2 finding bead(s): gt-f1, gt-f2"
+	if got := a.Context(); len(got) != 1 || got[0] != want {
+		t.Fatalf("first context = %q, want %q", got, want)
+	}
+	if got := a.Context(); got != nil {
+		t.Errorf("second context = %q, want the tally cleared", got)
 	}
 }
 
