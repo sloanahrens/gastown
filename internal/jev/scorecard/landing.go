@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"slices"
 	"strings"
 	"sync"
@@ -52,16 +54,28 @@ type townNotes struct {
 }
 
 func (t *townNotes) Notes(rig, bead string) (string, error) {
-	b, ok := t.stores[rig]
-	if !ok {
-		b = beads.New(doltserver.FindRigBeadsDir(t.town, rig))
-		t.stores[rig] = b
-	}
-	issue, err := b.Show(bead)
+	issue, err := t.Show(rig, bead)
 	if err != nil {
 		return "", err
 	}
 	return issue.Notes, nil
+}
+
+// Show reads one bead from its rig's beads store. A rig whose beads directory
+// does not exist has no bead to find, so it reads as not found.
+func (t *townNotes) Show(rig, bead string) (*beads.Issue, error) {
+	b, ok := t.stores[rig]
+	if !ok {
+		dir := doltserver.FindRigBeadsDir(t.town, rig)
+		if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+			return nil, fmt.Errorf("no beads directory for rig %s: %w", rig, beads.ErrNotFound)
+		} else if err != nil {
+			return nil, fmt.Errorf("reading the beads directory for rig %s: %w", rig, err)
+		}
+		b = beads.New(dir)
+		t.stores[rig] = b
+	}
+	return b.Show(bead)
 }
 
 // landingAdapter labels each logged landing from the overseer's review of the
