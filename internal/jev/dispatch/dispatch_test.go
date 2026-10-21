@@ -462,6 +462,36 @@ func TestJevDispatchAgentComesFromTheLabelThenTheSeatVar(t *testing.T) {
 	}
 }
 
+// The agent line names the agent the dispatcher seats: agent: labels are read
+// trimmed and case-insensitively, and several of them name none.
+func TestJevDispatchAgentReadsLabelsLikePinnedAgents(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		labels []string
+		want   string
+	}{
+		{name: "prefix in capitals", labels: []string{"AGENT:flint"}, want: "flint"},
+		{name: "label with surrounding space", labels: []string{" agent:flint "}, want: "flint"},
+		{name: "value padded", labels: []string{"agent: flint "}, want: "flint"},
+		{name: "two labels name two agents", labels: []string{"agent:flint", "agent:opal"}, want: ""},
+		{name: "several labels beat the attached var", labels: []string{"agent:flint", "AGENT:opal"}, want: ""},
+		{name: "same agent twice is one agent", labels: []string{"agent:flint", " AGENT:flint"}, want: "flint"},
+		{name: "blank value names none, not the attached var", labels: []string{"agent:  "}, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			b := placed("gt-a", 10, specBody, tc.labels...)
+			b.Description = strings.Replace(b.Description, "dispatched_by:",
+				`attached_vars: ["agent=kestrel"]`+"\ndispatched_by:", 1)
+			if got := agentOf(b); got != tc.want {
+				t.Errorf("agentOf(%q) = %q, want %q", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestJevDispatchQuestionsAreTheBattery(t *testing.T) {
 	t.Parallel()
 	qs := questions()
