@@ -72,10 +72,30 @@ type poolSession struct {
 	// supervised restart (gt-tldj4). It counts, and naming it explains a full
 	// seat that has fewer live sessions than its number.
 	deadHooked bool
+	// parkedStale marks a parked seat with no session that has been parked
+	// longer than agentpause.ParkedSeatRelease: it no longer holds its seat
+	// (gt-t7k92). poolHeldCount, poolSeatCount and the roster's Live skip it;
+	// the roster lists it apart so a seat that stopped counting is still visible.
+	parkedStale bool
 }
 
-// poolSeatCount counts the live polecat sessions sitting on agent's seat. An
-// empty agent has no seat to count.
+// poolHeldCount counts the sessions that hold a pool seat: every session but a
+// parkedStale one, whose seat is released (gt-t7k92). Every tally of the pool's
+// seats reads through it or poolSeatCount, so a released seat is skipped by the
+// router, the dispatch-check patrol and the roster alike without any caller
+// opting in.
+func poolHeldCount(sessions []poolSession) int {
+	n := 0
+	for _, s := range sessions {
+		if !s.parkedStale {
+			n++
+		}
+	}
+	return n
+}
+
+// poolSeatCount counts the polecat sessions holding agent's seat, released
+// parked seats excluded. An empty agent has no seat to count.
 //
 // This is the pool's one count of itself, shared by the admission decision
 // (choosePoolAgent) and the idle-seat patrol (gt daemon dispatch-check). The
@@ -88,7 +108,7 @@ func poolSeatCount(agent string, sessions []poolSession) int {
 	}
 	n := 0
 	for _, s := range sessions {
-		if s.agent == agent {
+		if s.agent == agent && !s.parkedStale {
 			n++
 		}
 	}
@@ -210,9 +230,9 @@ func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []pool
 	if pool == nil {
 		return "", "pool: no polecat pool configured", false, ""
 	}
-	if total := pool.GetMaxTotal(); total > 0 && len(sessions) >= total {
+	if total := pool.GetMaxTotal(); total > 0 && poolHeldCount(sessions) >= total {
 		agent = poolRefusalAgent(pool, requested)
-		return agent, fmt.Sprintf("pool: total full (%d/%d across every seat) -> no seat for %s", len(sessions), total, agent), true, "polecat_pool.max_total"
+		return agent, fmt.Sprintf("pool: total full (%d/%d across every seat) -> no seat for %s", poolHeldCount(sessions), total, agent), true, "polecat_pool.max_total"
 	}
 	switch {
 	case len(pool.Seats) == 0:
@@ -291,6 +311,16 @@ func deadHookedCount(n int) string {
 		return ""
 	}
 	return fmt.Sprintf("%d dead-hooked", n)
+}
+
+// parkedStaleCount names the seats a count no longer holds because their
+// polecat has been parked with no session past agentpause.ParkedSeatRelease. Empty when
+// none is.
+func parkedStaleCount(n int) string {
+	if n == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%d parked-stale", n)
 }
 
 // sessionLister is the slice of tmux the pool reads; a var so tests can

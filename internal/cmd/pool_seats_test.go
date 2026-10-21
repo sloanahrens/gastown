@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -845,5 +846,111 @@ func TestPoolSeatSessionsDropsAnOverrunStoppedSeatOnceItsAgentBeadIsReset(t *tes
 				t.Fatalf("pool seat count = %d, want %d (%+v)", n, c.want, sessions)
 			}
 		})
+	}
+}
+
+// parkSeatAgo parks the polecat the way the overrun guard does, then backdates
+// the park: Pause stamps now, and the release is a matter of how old the stamp is.
+func parkSeatAgo(t *testing.T, town, rig, name string, ago time.Duration) {
+	t.Helper()
+	if err := agentpause.Pause(town, rig, constants.RolePolecat, name, "overrun (20 minute rule)", "overrun-guard", ""); err != nil {
+		t.Fatalf("Pause: %v", err)
+	}
+	seat := intent.Seat{Rig: rig, Role: constants.RolePolecat, Name: name}
+	if _, err := intent.Update(town, seat, func(r *intent.Record) error {
+		r.PausedAt = time.Now().UTC().Add(-ago)
+		return nil
+	}); err != nil {
+		t.Fatalf("intent.Update: %v", err)
+	}
+}
+
+// TestPoolDeadHookedSessions_ParkedSeatReleasesAfterThirtyMinutes is gt-t7k92:
+// the overrun guard parks the seat it stops and crash detection skips a parked
+// seat, so nothing restarts it and it held a seat for 23 hours. A sessionless
+// park older than agentpause.ParkedSeatRelease stops being dead-hooked (it is parked-stale
+// and counts nowhere); a younger one still holds its seat.
+func TestPoolDeadHookedSessions_ParkedSeatReleasesAfterThirtyMinutes(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 1}}}
+	hooked := func(_, _ string) (poolSeatState, error) {
+		return poolSeatState{
+			Disposition: polecat.WorkstateDisposition{CountsTowardCapacity: true},
+			HookHeld:    true,
+		}, nil
+	}
+	cases := []struct {
+		name        string
+		parkedAgo   time.Duration
+		wantDead    int
+		wantStale   int
+		wantRefused bool
+	}{
+		{"parked 31 minutes ago releases the seat", 31 * time.Minute, 0, 1, false},
+		{"parked 29 minutes ago still holds the seat", 29 * time.Minute, 1, 0, true},
+		{"a park with no stamp keeps counting", 0, 1, 0, true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
+			writeTownPolecatDir(t, town, "gastown", "mariner")
+			if c.parkedAgo > 0 {
+				parkSeatAgo(t, town, "gastown", "mariner", c.parkedAgo)
+			} else {
+				writeIntentRecord(t, intent.Seat{Rig: "gastown", Role: constants.RolePolecat, Name: "mariner"}, town,
+					intent.Record{Desired: intent.DesiredPark, Reason: "hand-edited"})
+			}
+
+			sessions, err := poolSeatSessionsWith(&fakeLister{}, town, hooked, nil, pool)
+			if err != nil {
+				t.Fatalf("poolSeatSessionsWith: %v", err)
+			}
+			dead, stale := 0, 0
+			for _, s := range sessions {
+				if s.deadHooked {
+					dead++
+				}
+				if s.parkedStale {
+					stale++
+				}
+			}
+			if dead != c.wantDead || stale != c.wantStale {
+				t.Fatalf("dead-hooked %d, parked-stale %d, want %d and %d (%+v)", dead, stale, c.wantDead, c.wantStale, sessions)
+			}
+			// The sessions go to the admission decision as the occupancy
+			// source returns them: no call-site filter drops a stale park.
+			_, reason, refused, _ := choosePoolAgent(pool, "", sessions, poolTestNow)
+			if refused != c.wantRefused {
+				t.Fatalf("refused = %v, want %v (%s)", refused, c.wantRefused, reason)
+			}
+		})
+	}
+}
+
+// TestPoolCounts_SkipParkedStaleSeat: the pool's own tallies skip a released
+// seat, the per-agent count and the max_total one alike, so no admission path
+// has to filter the sessions first (gt-t7k92).
+func TestPoolCounts_SkipParkedStaleSeat(t *testing.T) {
+	t.Parallel()
+	total := 1
+	pool := &config.PolecatPool{
+		Seats:    map[string]config.SeatConfig{"deepseek-flash": {Cap: 2}},
+		MaxTotal: &total,
+	}
+	sessions := []poolSession{{name: "dead/gastown/mariner", agent: "deepseek-flash", parkedStale: true}}
+	if n := poolSeatCount("deepseek-flash", sessions); n != 0 {
+		t.Errorf("poolSeatCount = %d, want 0 for a released seat", n)
+	}
+	if n := poolHeldCount(sessions); n != 0 {
+		t.Errorf("poolHeldCount = %d, want 0 for a released seat", n)
+	}
+	if _, reason, refused, _ := choosePoolAgent(pool, "deepseek-flash", sessions, poolTestNow); refused {
+		t.Errorf("a released seat filled max_total: %s", reason)
+	}
+	held := append(sessions, poolSession{name: "live/ember", agent: "deepseek-flash"})
+	if _, _, refused, _ := choosePoolAgent(pool, "deepseek-flash", held, poolTestNow); !refused {
+		t.Error("a live session beside a released seat did not fill max_total 1")
 	}
 }

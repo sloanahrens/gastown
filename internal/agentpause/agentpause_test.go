@@ -52,6 +52,31 @@ func TestPauseIsPausedRoundTrip(t *testing.T) {
 	}
 }
 
+// TestParkedStale pins the release window both the pool's seat count and the
+// daemon's release line read (gt-t7k92): strictly more than ParkedSeatRelease,
+// and only for a pause with a park time.
+func TestParkedStale(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		st   *State
+		want bool
+	}{
+		{"nil state", nil, false},
+		{"parked 31 minutes", &State{Paused: true, PausedAt: now.Add(-31 * time.Minute)}, true},
+		{"parked exactly the window", &State{Paused: true, PausedAt: now.Add(-ParkedSeatRelease)}, false},
+		{"parked 29 minutes", &State{Paused: true, PausedAt: now.Add(-29 * time.Minute)}, false},
+		{"no park time", &State{Paused: true}, false},
+		{"not paused", &State{Paused: false, PausedAt: now.Add(-time.Hour)}, false},
+	}
+	for _, c := range cases {
+		if got := ParkedStale(c.st, now); got != c.want {
+			t.Errorf("%s: ParkedStale = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestResumeClearsMarker(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()

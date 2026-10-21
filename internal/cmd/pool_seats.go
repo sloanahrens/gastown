@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentpause"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
@@ -88,7 +89,7 @@ func poolOccupiedSessions(t sessionLister, townRoot string, disposition polecatD
 	if err != nil {
 		return nil, &poolOccupancyError{sessions: true, err: err}
 	}
-	dead, err := poolDeadHookedSessions(townRoot, pool, disposition, live)
+	dead, err := poolDeadHookedSessions(townRoot, pool, disposition, live, now())
 	if err != nil {
 		return nil, &poolOccupancyError{err: err}
 	}
@@ -365,7 +366,11 @@ func unrecordedSeatAgent(townRoot string, pool *config.PolecatPool) func(rigName
 // counts, so a record that cannot be read falls back rather than failing the
 // picture. The fallback is a real seat, which can only over-count it — a
 // refused sling rather than an admitted one.
-func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, disposition polecatDispositionFunc, live []poolSession) ([]poolSession, error) {
+//
+// A seat parked longer than agentpause.ParkedSeatRelease stops holding its seat:
+// it comes back as a parkedStale session instead of a dead-hooked one, which the
+// roster lists apart from Live and poolHeldCount does not count (gt-t7k92).
+func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, disposition polecatDispositionFunc, live []poolSession, now time.Time) ([]poolSession, error) {
 	if townRoot == "" || !poolOwnsSeats(pool) || disposition == nil {
 		return nil, nil
 	}
@@ -392,17 +397,29 @@ func poolDeadHookedSessions(townRoot string, pool *config.PolecatPool, dispositi
 			// The seat's own record, read after the seat is known to hold
 			// one: only an occupant's agent is worth a read.
 			rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, name))
+			stale := parkedStale(townRoot, rigName, name, now)
 			out = append(out, poolSession{
-				name:       "dead/" + rigName + "/" + name,
-				agent:      slungAgent(rec, fallback(rigName)),
-				rig:        rigName,
-				polecat:    name,
-				deadHooked: true,
+				name:        "dead/" + rigName + "/" + name,
+				agent:       slungAgent(rec, fallback(rigName)),
+				rig:         rigName,
+				polecat:     name,
+				deadHooked:  !stale,
+				parkedStale: stale,
 			})
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].name < out[j].name })
 	return out, nil
+}
+
+// parkedStale reports whether the seat was parked more than
+// agentpause.ParkedSeatRelease before now. A seat that is not parked, or whose
+// park time cannot be read or is unset, is not stale: it keeps counting, as it
+// did before the release. The daemon's release line asks the same
+// agentpause.ParkedStale, so the two never disagree.
+func parkedStale(townRoot, rig, name string, now time.Time) bool {
+	_, st, err := agentpause.IsPaused(townRoot, rig, constants.RolePolecat, name)
+	return err == nil && agentpause.ParkedStale(st, now)
 }
 
 // poolOccupancyError labels a poolOccupiedSessions failure by the read that
