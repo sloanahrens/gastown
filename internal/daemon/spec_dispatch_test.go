@@ -307,7 +307,17 @@ func TestDispatchRosterSeats(t *testing.T) {
 		// roster reads as its seats only, so no free seat is counted (gt-penmy).
 		{"claude-sonnet 2/2, total 2/10", []townhealth.DispatchSeat{{Live: 2, Cap: 2}}, false},
 		{"claude-sonnet 2/2, deepseek-flash 1/2, total 3/10", []townhealth.DispatchSeat{{Live: 2, Cap: 2}, {Live: 1, Cap: 2}}, false},
-		{"total 2/10", nil, false},
+		// Picture says "no seats" for none, so a lone "total" segment is a seat
+		// named total, as is one anywhere but last (gt-38gsb).
+		{"total 2/10", []townhealth.DispatchSeat{{Live: 2, Cap: 10}}, false},
+		{"total 1/2, claude-sonnet 2/2, total 3/10", []townhealth.DispatchSeat{{Live: 1, Cap: 2}, {Live: 2, Cap: 2}}, false},
+		// A last "total" segment counting fewer live than the seats before it
+		// cannot be the town's total, so it is a seat.
+		{"claude-sonnet 2/2, total 1/3", []townhealth.DispatchSeat{{Live: 2, Cap: 2}, {Live: 1, Cap: 3}}, false},
+		// A last segment shaped like the total but malformed is unreadable.
+		{"claude-sonnet 2/2, total", nil, true},
+		{"claude-sonnet 2/2, total x/10", nil, true},
+		{"claude-sonnet 2/2, total 2/10 (extra)", nil, true},
 		// A roster the daemon cannot read in full must not read as a full
 		// town, so each unreadable shape is reported rather than dropped
 		// (gt-xiw7o).

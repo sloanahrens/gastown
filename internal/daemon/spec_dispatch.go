@@ -345,13 +345,25 @@ func dispatchRosterSeats(roster string) ([]townhealth.DispatchSeat, bool) {
 		return nil, false
 	}
 	var out []townhealth.DispatchSeat
-	for _, part := range splitRosterSeats(roster) {
+	parts := splitRosterSeats(roster)
+	for n, part := range parts {
 		part = strings.TrimSpace(part)
 		// The town-total segment Picture appends ("total 2/10") caps the whole
 		// town, not one seat: counting it as a seat reads a full town as having
-		// a free seat (gt-penmy).
-		if strings.HasPrefix(part, "total ") {
-			continue
+		// a free seat (gt-penmy). Picture appends it last and only after a
+		// seat, and its count covers every seat's, so a "total" segment
+		// anywhere else, or a last one counting fewer live than the seats
+		// before it, is a seat named total (gt-38gsb). The last segment is
+		// taken as the total only if it has the total's shape: a malformed one
+		// is an unreadable roster, not a segment to drop.
+		if n > 0 && n == len(parts)-1 && strings.HasPrefix(part, "total ") {
+			total, ok := parseRosterCount(strings.TrimPrefix(part, "total "))
+			if !ok {
+				return nil, true
+			}
+			if total.Live >= seatLiveSum(out) {
+				continue
+			}
 		}
 		// A seat may carry any number of parenthetical notes after its count:
 		// the dead-hooked breakdown Picture renders (gt-tldj4) and the closed
@@ -363,18 +375,36 @@ func dispatchRosterSeats(roster string) ([]townhealth.DispatchSeat, bool) {
 		if i < 0 {
 			return nil, true
 		}
-		live, cap, ok := strings.Cut(part[i+1:], "/")
+		seat, ok := parseRosterCount(part[i+1:])
 		if !ok {
 			return nil, true
 		}
-		l, lerr := strconv.Atoi(live)
-		c, cerr := strconv.Atoi(cap)
-		if lerr != nil || cerr != nil {
-			return nil, true
-		}
-		out = append(out, townhealth.DispatchSeat{Live: l, Cap: c})
+		out = append(out, seat)
 	}
 	return out, false
+}
+
+// parseRosterCount reads a roster "live/cap" count.
+func parseRosterCount(s string) (townhealth.DispatchSeat, bool) {
+	live, cap, ok := strings.Cut(s, "/")
+	if !ok {
+		return townhealth.DispatchSeat{}, false
+	}
+	l, lerr := strconv.Atoi(live)
+	c, cerr := strconv.Atoi(cap)
+	if lerr != nil || cerr != nil {
+		return townhealth.DispatchSeat{}, false
+	}
+	return townhealth.DispatchSeat{Live: l, Cap: c}, true
+}
+
+// seatLiveSum is the live count across seats.
+func seatLiveSum(seats []townhealth.DispatchSeat) int {
+	sum := 0
+	for _, s := range seats {
+		sum += s.Live
+	}
+	return sum
 }
 
 // splitRosterSeats splits a roster on the commas that separate its seats. A
