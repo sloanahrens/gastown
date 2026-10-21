@@ -106,6 +106,10 @@ type Summary struct {
 	// Unread counts the files that could not be read, or were empty, and that
 	// the pass skipped.
 	Unread int
+	// Failed counts the files whose label could not be read. They earn no line,
+	// so a later pass asks them again; the files behind them in the batch were
+	// still asked.
+	Failed int
 }
 
 // due is one file the pass will ask about.
@@ -119,8 +123,9 @@ type due struct {
 // Run does one pass. Files are asked in name order, and each line is appended
 // before the next file is asked, so a pass that is stopped partway never asks
 // about a file twice. A file whose question was cut short by ctx is neither
-// logged nor passed: the next pass asks it. Run returns ErrBusy when another
-// pass holds the run lock.
+// logged nor passed: the next pass asks it. A file whose label could not be
+// read earns no line and is counted in Summary.Failed, and the files behind it
+// are still asked. Run returns ErrBusy when another pass holds the run lock.
 func (p *Pass) Run(ctx context.Context) (Summary, error) {
 	var sum Summary
 	release, err := lockRun(p.LogPath)
@@ -185,8 +190,15 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 		}
 		line, err := p.ask(ctx, res, d, now)
 		if err != nil {
-			sum.Deferred += len(todo) - i
-			return sum, err
+			// A canceled ctx leaves the rest of the batch for the next pass. A
+			// label read that failed abandons only its own file: the files
+			// behind it in the batch still get this pass.
+			if cerr := ctx.Err(); cerr != nil {
+				sum.Deferred += len(todo) - i
+				return sum, cerr
+			}
+			sum.Failed++
+			continue
 		}
 		if err := battery.Append(p.LogPath, line); err != nil {
 			sum.Deferred += len(todo) - i
@@ -203,7 +215,8 @@ func (p *Pass) Run(ctx context.Context) (Summary, error) {
 
 // ask builds the line one file earns: its mechanical label, then Jev's answers.
 // A failed Jev call logs null answers and a reason. Only a canceled ctx or a
-// failed label read returns an error, so the file is left for the next pass.
+// failed label read returns an error, so the file earns no line and the next
+// pass asks it again.
 func (p *Pass) ask(ctx context.Context, res *Resolver, d due, now time.Time) (Line, error) {
 	label, err := res.Resolve(ctx, Extract(d.text))
 	if err != nil {

@@ -169,6 +169,41 @@ func TestListFiles(t *testing.T) {
 	}
 }
 
+// A note the operator symlinked into the memory directory is read, the way the
+// handbook path follows its links. Before the fix the directory read's type
+// check dropped it with no log line.
+func TestListFilesFollowsSymlinkedNotes(t *testing.T) {
+	t.Parallel()
+	configDir, home, town := t.TempDir(), t.TempDir(), "/town/gt"
+	mem, err := memoryDir(configDir, town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(mem, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "linked-note.md")
+	writeNote(t, target)
+	if err := os.Symlink(target, filepath.Join(mem, "linked.md")); err != nil {
+		t.Fatal(err)
+	}
+	// A link with no target is not a note.
+	if err := os.Symlink(filepath.Join(t.TempDir(), "gone.md"), filepath.Join(mem, "dangling.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := listFiles(configDir, home, town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := noteNames(files), []string{"linked.md"}; !reflect.DeepEqual(got, want) {
+		t.Errorf("files = %v, want %v", got, want)
+	}
+	if len(files) == 1 && files[0].Path != filepath.Join(mem, "linked.md") {
+		t.Errorf("note path = %q, want the link in the memory directory", files[0].Path)
+	}
+}
+
 // Neither directory existing is no files, not an error.
 func TestListFilesWithNothingThere(t *testing.T) {
 	t.Parallel()
