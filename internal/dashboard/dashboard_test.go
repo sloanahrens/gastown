@@ -107,19 +107,26 @@ func TestWorkersRunOnEveryTickWhileAPageIsOpen(t *testing.T) {
 	defer h.Unsubscribe(page)
 
 	ticks := make(chan time.Time)
+	ran := make(chan struct{})
 	var runs atomic.Int64
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
 	go func() {
 		defer close(stopped)
-		h.work(ctx, ticks, time.Minute, func() { runs.Add(1) })
+		h.work(ctx, ticks, time.Minute, func() {
+			runs.Add(1)
+			ran <- struct{}{}
+		})
 	}()
 
-	// A send on an unbuffered channel returns only once the worker takes the
-	// tick, and the worker finishes a tick before it can select again, so once
-	// it has stopped every tick it took has run. No sleeps, no timing.
+	// A send returning means the worker has taken the tick, not that it has run
+	// it: the worker checks its context after taking a tick and drops the tick if
+	// the context has already ended. So each tick is run to completion (the
+	// worker reports it on ran) before the next is sent, and the context is
+	// cancelled only after the last one. No sleeps, no timing.
 	for i := 0; i < 5; i++ {
 		ticks <- now
+		<-ran
 	}
 	cancel()
 	<-stopped
