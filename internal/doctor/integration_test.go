@@ -90,7 +90,10 @@ func TestIntegrationOrphanSessionDetection(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			validRigs := check.getValidRigs(townRoot)
+			validRigs, err := check.getValidRigs(townRoot)
+			if err != nil {
+				t.Fatalf("getValidRigs: %v", err)
+			}
 
 			isValid := check.isValidSession(testPrefixRegistry(), tt.sessionName, validRigs)
 

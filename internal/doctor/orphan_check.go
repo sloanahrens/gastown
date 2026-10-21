@@ -83,8 +83,18 @@ func (c *OrphanSessionCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Get list of valid rigs
-	validRigs := c.getValidRigs(ctx.TownRoot)
+	// Get list of valid rigs. Without it every rig-bearing session would read
+	// as an orphan and Fix would kill it, so decide nothing and leave them be.
+	validRigs, err := c.getValidRigs(ctx.TownRoot)
+	if err != nil {
+		c.orphanSessions = nil
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: "Could not load the rig list; orphan sessions were not checked",
+			Details: []string{err.Error()},
+		}
+	}
 
 	// Check each session
 	var orphans []string
@@ -175,32 +185,37 @@ func isCrewSession(reg *session.PrefixRegistry, sess string) bool {
 	return identity.Role == session.RoleCrew
 }
 
-// getValidRigs returns a list of valid rig names from the workspace.
-func (c *OrphanSessionCheck) getValidRigs(townRoot string) []string {
+// getValidRigs returns a list of valid rig names from the workspace. An error
+// means the rig list could not be loaded (rigs.json missing or unreadable, or
+// the town directory unlistable), and the caller must not judge sessions by it.
+func (c *OrphanSessionCheck) getValidRigs(townRoot string) ([]string, error) {
 	var rigs []string
 
-	// Read rigs.json if it exists
+	// Read rigs.json: a missing or unreadable registry is not an empty one.
 	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
-	if _, err := config.LoadRigsConfig(rigsPath); err == nil {
-		// For simplicity, just scan directories at town root that look like rigs
-		entries, err := os.ReadDir(townRoot)
-		if err == nil {
-			for _, entry := range entries {
-				if entry.IsDir() && entry.Name() != "mayor" && entry.Name() != ".beads" && !strings.HasPrefix(entry.Name(), ".") {
-					// Check if it looks like a rig (has polecats/ or crew/ directory)
-					polecatsDir := filepath.Join(townRoot, entry.Name(), "polecats")
-					crewDir := filepath.Join(townRoot, entry.Name(), "crew")
-					if _, err := os.Stat(polecatsDir); err == nil {
-						rigs = append(rigs, entry.Name())
-					} else if _, err := os.Stat(crewDir); err == nil {
-						rigs = append(rigs, entry.Name())
-					}
-				}
+	if _, err := config.LoadRigsConfig(rigsPath); err != nil {
+		return nil, err
+	}
+
+	// For simplicity, just scan directories at town root that look like rigs
+	entries, err := os.ReadDir(townRoot)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && entry.Name() != "mayor" && entry.Name() != ".beads" && !strings.HasPrefix(entry.Name(), ".") {
+			// Check if it looks like a rig (has polecats/ or crew/ directory)
+			polecatsDir := filepath.Join(townRoot, entry.Name(), "polecats")
+			crewDir := filepath.Join(townRoot, entry.Name(), "crew")
+			if _, err := os.Stat(polecatsDir); err == nil {
+				rigs = append(rigs, entry.Name())
+			} else if _, err := os.Stat(crewDir); err == nil {
+				rigs = append(rigs, entry.Name())
 			}
 		}
 	}
 
-	return rigs
+	return rigs, nil
 }
 
 // isValidSession checks if a session name matches expected Gas Town patterns.

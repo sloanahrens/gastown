@@ -296,7 +296,10 @@ func TestOrphanSessionCheck_GetValidRigs(t *testing.T) {
 	createRigDir("grctool", false, true)
 	createRigDir("not-a-rig", false, false) // No crew or polecats
 
-	rigs := check.getValidRigs(townRoot)
+	rigs, err := check.getValidRigs(townRoot)
+	if err != nil {
+		t.Fatalf("getValidRigs: %v", err)
+	}
 
 	// Should find gastown, niflheim, grctool but not "not-a-rig"
 	expected := map[string]bool{
@@ -449,6 +452,111 @@ func TestOrphanSessionCheck_Run_Deterministic(t *testing.T) {
 
 	if len(check.orphanSessions) != 0 {
 		t.Fatalf("expected 0 orphans (unknown prefixes are ignored), got %d: %v", len(check.orphanSessions), check.orphanSessions)
+	}
+}
+
+// killRecordingLister is a session lister that can also kill, and records
+// every kill, so a test can see whether Fix killed anything.
+type killRecordingLister struct {
+	mockSessionLister
+	killed []string
+}
+
+func (k *killRecordingLister) KillSessionWithProcesses(name string) error {
+	k.killed = append(k.killed, name)
+	return nil
+}
+
+// TestOrphanSessionCheck_RigListUnloadableKillsNothing verifies that a rig
+// registry which cannot be loaded never makes a rig-bearing session an orphan,
+// so Fix kills nothing (gt-ivyd9).
+func TestOrphanSessionCheck_RigListUnloadableKillsNothing(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		rigsJSON []byte // nil means no rigs.json at all
+	}{
+		{name: "missing rigs.json", rigsJSON: nil},
+		{name: "corrupt rigs.json", rigsJSON: []byte("{not json")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			townRoot := t.TempDir()
+			mayorDir := filepath.Join(townRoot, "mayor")
+			if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+				t.Fatalf("create mayor dir: %v", err)
+			}
+			if tt.rigsJSON != nil {
+				if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), tt.rigsJSON, 0o644); err != nil {
+					t.Fatalf("create rigs.json: %v", err)
+				}
+			}
+			if err := os.MkdirAll(filepath.Join(townRoot, "gastown", "polecats"), 0o755); err != nil {
+				t.Fatalf("create gastown rig: %v", err)
+			}
+
+			lister := &killRecordingLister{mockSessionLister: mockSessionLister{
+				sessions: []string{"gt-polecat1", "gt-crew-max"},
+			}}
+			check := NewOrphanSessionCheckWithSessionLister(lister)
+			ctx := &CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()}
+
+			result := check.Run(ctx)
+			if result.Status != StatusWarning {
+				t.Fatalf("expected StatusWarning when the rig list is unloadable, got %v: %s", result.Status, result.Message)
+			}
+			if len(check.orphanSessions) != 0 {
+				t.Fatalf("expected no orphan sessions, got %v", check.orphanSessions)
+			}
+
+			if err := check.Fix(ctx); err != nil {
+				t.Fatalf("Fix: %v", err)
+			}
+			if len(lister.killed) != 0 {
+				t.Fatalf("Fix killed %v; a rig list that cannot be loaded must kill nothing", lister.killed)
+			}
+		})
+	}
+}
+
+// TestOrphanSessionCheck_KnownRigListStillFlagsUnknownRig verifies that with a
+// readable rigs.json, a session for a rig the town does not have is still an
+// orphan (existing behavior).
+func TestOrphanSessionCheck_KnownRigListStillFlagsUnknownRig(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatalf("create mayor dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("create rigs.json: %v", err)
+	}
+
+	// No gastown rig directory exists, so gt-polecat1 names a rig the town lacks.
+	lister := &killRecordingLister{mockSessionLister: mockSessionLister{
+		sessions: []string{"gt-polecat1"},
+	}}
+	check := NewOrphanSessionCheckWithSessionLister(lister)
+	ctx := &CheckContext{TownRoot: townRoot, sessionPrefixes: testPrefixRegistry()}
+	result := check.Run(ctx)
+
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning for an unknown rig, got %v: %s", result.Status, result.Message)
+	}
+	if len(check.orphanSessions) != 1 || check.orphanSessions[0] != "gt-polecat1" {
+		t.Fatalf("expected gt-polecat1 to be the orphan, got %v", check.orphanSessions)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+	if len(lister.killed) != 1 || lister.killed[0] != "gt-polecat1" {
+		t.Fatalf("expected Fix to kill only gt-polecat1, killed %v", lister.killed)
 	}
 }
 
