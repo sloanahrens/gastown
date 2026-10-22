@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"fmt"
+	"os"
 
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/session"
@@ -50,11 +51,34 @@ var envCheckedRoles = map[session.Role]bool{
 	session.RolePolecat:  true,
 }
 
+// sessionGetenv resolves a session's expected agent env against the session
+// itself for GOFLAGS, so the verdict does not depend on the environment of the
+// process running the doctor (gt-jb4zh). Every other variable still reads
+// processEnv.
+func sessionGetenv(actual map[string]string, processEnv func(string) string) func(string) string {
+	return func(key string) string {
+		if key == "GOFLAGS" {
+			return actual["GOFLAGS"]
+		}
+		return processEnv(key)
+	}
+}
+
 // EnvVarsCheck verifies that tmux session environment variables match expected values.
 type EnvVarsCheck struct {
 	FixableCheck
-	reader   SessionEnvReader   // nil means use real tmux
-	accessor SessionEnvAccessor // non-nil when Fix() support is needed
+	reader   SessionEnvReader    // nil means use real tmux
+	accessor SessionEnvAccessor  // non-nil when Fix() support is needed
+	getenv   func(string) string // the doctor process's environment; nil means os.Getenv
+}
+
+// processEnv is the doctor process's environment, read for the variables that
+// do not come from the session being checked.
+func (c *EnvVarsCheck) processEnv() func(string) string {
+	if c.getenv != nil {
+		return c.getenv
+	}
+	return os.Getenv
 }
 
 // NewEnvVarsCheck creates a new env vars check.
@@ -137,14 +161,6 @@ func (c *EnvVarsCheck) Run(ctx *CheckContext) *CheckResult {
 			continue
 		}
 
-		// Get expected env vars based on role
-		expected := config.AgentEnv(config.AgentEnvConfig{
-			Role:      string(identity.Role),
-			Rig:       identity.Rig,
-			AgentName: identity.Name,
-			TownRoot:  ctx.TownRoot,
-		})
-
 		// Get actual tmux env vars
 		actual, err := reader.GetAllEnvironment(sess)
 		if err != nil {
@@ -153,6 +169,15 @@ func (c *EnvVarsCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 
 		checkedCount++
+
+		// Get expected env vars based on role, with GOFLAGS taken from this session
+		expected := config.AgentEnv(config.AgentEnvConfig{
+			Role:      string(identity.Role),
+			Rig:       identity.Rig,
+			AgentName: identity.Name,
+			TownRoot:  ctx.TownRoot,
+			Getenv:    sessionGetenv(actual, c.processEnv()),
+		})
 
 		// Compare each expected var
 		for key, expectedVal := range expected {
@@ -240,17 +265,18 @@ func (c *EnvVarsCheck) Fix(ctx *CheckContext) error {
 			continue
 		}
 
+		actual, err := accessor.GetAllEnvironment(sess)
+		if err != nil {
+			continue
+		}
+
 		expected := config.AgentEnv(config.AgentEnvConfig{
 			Role:      string(identity.Role),
 			Rig:       identity.Rig,
 			AgentName: identity.Name,
 			TownRoot:  ctx.TownRoot,
+			Getenv:    sessionGetenv(actual, c.processEnv()),
 		})
-
-		actual, err := accessor.GetAllEnvironment(sess)
-		if err != nil {
-			continue
-		}
 
 		for key, expectedVal := range expected {
 			actualVal, exists := actual[key]
