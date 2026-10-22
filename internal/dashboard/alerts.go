@@ -66,6 +66,15 @@ var rejectionRe = regexp.MustCompile(`rejected \((review|gate|conflict|policy|em
 // landing rejected (review)", and both name the bead.
 var rejectionBeadRe = regexp.MustCompile(`(\S+): (?:landing )?rejected \((?:review|gate|conflict|policy|empty)\)`)
 
+// The severities of the health alerts, each outranking the one before it.
+// healthNone is no alert standing.
+const (
+	healthNone = iota
+	healthUnknownSev
+	healthDegradedSev
+	healthRedSev
+)
+
 // The keys of the alerts the Alerter raises more than once or that the
 // attention table below names.
 const (
@@ -98,9 +107,11 @@ type Alerter struct {
 	lastHealthAt time.Time
 	lastVerdict  string
 	healthStreak int
-	// healthLive is true while an alert stands for the current non-green run.
-	// A return to green while it is true raises the recovery.
-	healthLive   bool
+	// healthLive is the severity of the health alert that stands for the
+	// current non-green run, healthNone when none does. A verdict raises an
+	// alert only above it, so a run keeps one alert per severity step; a
+	// return to green while one stands raises the recovery.
+	healthLive   int
 	unknownSince time.Time
 
 	// polecatsSeen is false until the first snapshot has been taken as a
@@ -220,8 +231,8 @@ func (a *Alerter) healthAlert(next State, now time.Time) (Alert, bool) {
 	case "green":
 		a.healthStreak = 0
 		a.unknownSince = time.Time{}
-		live := a.healthLive
-		a.healthLive = false
+		live := a.healthLive > healthNone
+		a.healthLive = healthNone
 		if live {
 			return a.fire(now, LevelInfo, "health:recovered", "town health recovered", h.Line)
 		}
@@ -230,24 +241,28 @@ func (a *Alerter) healthAlert(next State, now time.Time) (Alert, bool) {
 		if a.unknownSince.IsZero() {
 			a.unknownSince = now
 		}
-		if a.healthLive || now.Sub(a.unknownSince) < healthUnknownAfter {
+		if a.healthLive >= healthUnknownSev || now.Sub(a.unknownSince) < healthUnknownAfter {
 			return Alert{}, false
 		}
 		al, ok := a.fire(now, LevelWarn, "health:unknown", "town health has been UNKNOWN for five minutes", h.Line)
-		a.healthLive = a.healthLive || ok
+		if ok {
+			a.healthLive = healthUnknownSev
+		}
 		return al, ok
 	case "red", "degraded":
 		a.unknownSince = time.Time{}
 		a.healthStreak++
-		if a.healthLive || a.healthStreak < healthConfirmPolls {
+		sev, level, key, title := healthRedSev, LevelCrit, keyHealthRed, "town health is red"
+		if h.Verdict == "degraded" {
+			sev, level, key, title = healthDegradedSev, LevelWarn, keyHealthDegraded, "town health is degraded"
+		}
+		if a.healthLive >= sev || a.healthStreak < healthConfirmPolls {
 			return Alert{}, false
 		}
-		level, key, title := LevelCrit, keyHealthRed, "town health is red"
-		if h.Verdict == "degraded" {
-			level, key, title = LevelWarn, keyHealthDegraded, "town health is degraded"
-		}
 		al, ok := a.fire(now, level, key, title, h.Line)
-		a.healthLive = a.healthLive || ok
+		if ok {
+			a.healthLive = sev
+		}
 		return al, ok
 	}
 	return Alert{}, false
