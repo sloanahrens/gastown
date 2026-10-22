@@ -46,7 +46,7 @@ func TestStaleResult(t *testing.T) {
 			},
 			wantStatus:  StatusWarning,
 			wantMessage: "Binary is 2 commits behind main (built from abc123456789, main at def456789012)",
-			wantFixHint: "gt install",
+			wantFixHint: "make install",
 		},
 		{
 			name: "stale off build branch -> Warning, qualified fix hint",
@@ -90,5 +90,19 @@ func TestStaleResult(t *testing.T) {
 				t.Errorf("unexpected FixHint %q", got.FixHint)
 			}
 		})
+	}
+}
+
+// gt install creates a new HQ; the rebuild is the Makefile's install target.
+func TestStaleBinaryCheck_FixErrorSaysMakeInstall(t *testing.T) {
+	err := NewStaleBinaryCheck().Fix(&CheckContext{})
+	if err == nil {
+		t.Fatal("Fix() = nil, want an error naming the manual rebuild")
+	}
+	if !strings.Contains(err.Error(), "make install") {
+		t.Errorf("Fix() error = %q, want it to contain %q", err, "make install")
+	}
+	if strings.Contains(err.Error(), "gt install") {
+		t.Errorf("Fix() error = %q, must not send the operator to gt install", err)
 	}
 }

@@ -82,7 +82,7 @@ func staleResult(name string, info *version.StaleBinaryInfo) *CheckResult {
 
 func staleFixHint(info *version.StaleBinaryInfo) string {
 	if info.IsForward && info.OnMainBranch {
-		return "Run 'gt install' to rebuild and install"
+		return "Run 'make install' to rebuild and install"
 	}
 	return "Run 'gt stale' for details; switch to a build branch before rebuilding"
 }
@@ -92,8 +92,8 @@ func (c *StaleBinaryCheck) Fix(ctx *CheckContext) error {
 	// Note: We don't auto-fix this because:
 	// 1. It requires building and installing, which takes time
 	// 2. It modifies system files outside the workspace
-	// 3. User should explicitly run 'gt install'
-	return fmt.Errorf("run 'gt install' manually to rebuild")
+	// 3. User should explicitly run 'make install'
+	return fmt.Errorf("run 'make install' manually to rebuild")
 }
 
 // CanFix returns false - stale binary should be fixed manually.
