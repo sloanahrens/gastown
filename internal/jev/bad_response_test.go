@@ -2,6 +2,7 @@ package jev
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -95,4 +96,19 @@ func TestAsk_BadResponseNamesTheCheck(t *testing.T) {
 			assert.Equal(t, tt.value, bad.Value)
 		})
 	}
+}
+
+// TestAsk_BadResponseUnwrapsItsReason gets the failed check's own text back
+// from errors.Unwrap, not only from the error's string.
+func TestAsk_BadResponseUnwrapsItsReason(t *testing.T) {
+	t.Parallel()
+	choice := Question{Type: typeChoice, Instructions: "Which team?", Options: shoeCriteria}
+	c := newTestClient(t, &respond{body: `{"answers":{"q":{"type":"choice","choice":"refunds","probabilities":{"billing":0,"returns":1,"shipping":0},"confidence":1}}}`})
+
+	_, err := c.Ask(context.Background(), shoeState, map[string]Question{questionID: choice})
+
+	require.ErrorIs(t, err, ErrBadResponse)
+	cause := errors.Unwrap(err)
+	require.Error(t, cause)
+	assert.Equal(t, `choice "refunds" is not an option asked`, cause.Error())
 }
