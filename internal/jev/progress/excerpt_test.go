@@ -24,7 +24,7 @@ func TestTranscriptTailReadsInsideTown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got, err := TranscriptTail(town, town, path, 1000)
+	got, err := TranscriptTail(town, town, path, transcriptEnd, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestTranscriptTailReadsInsideTown(t *testing.T) {
 		t.Errorf("tail is out of order: %q", got)
 	}
 
-	short, err := TranscriptTail(town, town, path, 10)
+	short, err := TranscriptTail(town, town, path, transcriptEnd, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,8 +59,53 @@ func TestTranscriptTailRefusesOutsideTown(t *testing.T) {
 	if err := os.WriteFile(path, []byte(`{"type":"assistant"}`+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := TranscriptTail(town, filepath.Join(town, "no-worktree"), path, 100); !errors.Is(err, ErrOutsideTown) {
+	if _, err := TranscriptTail(town, filepath.Join(town, "no-worktree"), path, transcriptEnd, 100); !errors.Is(err, ErrOutsideTown) {
 		t.Fatalf("err = %v, want ErrOutsideTown", err)
+	}
+}
+
+// transcriptEnd is later than every event the tests write, so a tail with it
+// holds the whole transcript.
+var transcriptEnd = time.Date(2026, 10, 22, 0, 0, 0, 0, time.UTC)
+
+// TestTranscriptTailStopsAtSubmission checks the excerpt ends at the submission:
+// events stamped after it are left out, and two submissions over one transcript
+// read two different excerpts.
+func TestTranscriptTailStopsAtSubmission(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := filepath.Join(town, "session.jsonl")
+	lines := strings.Join([]string{
+		`{"type":"assistant","timestamp":"2026-10-21T17:00:01Z","message":{"content":[{"type":"text","text":"before the first submit"}]}}`,
+		`{"type":"assistant","timestamp":"2026-10-21T17:00:05Z","message":{"content":[{"type":"text","text":"after the first submit"}]}}`,
+		`{"type":"assistant","timestamp":"2026-10-21T17:00:09Z","message":{"content":[{"type":"text","text":"after the second submit"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	first := time.Date(2026, 10, 21, 17, 0, 3, 0, time.UTC)
+	got, err := TranscriptTail(town, town, path, first, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "before the first submit") {
+		t.Errorf("tail to the first submit is missing the earlier event: %q", got)
+	}
+	if strings.Contains(got, "after the first submit") || strings.Contains(got, "after the second submit") {
+		t.Errorf("tail to the first submit holds events after it: %q", got)
+	}
+
+	second := time.Date(2026, 10, 21, 17, 0, 6, 0, time.UTC)
+	later, err := TranscriptTail(town, town, path, second, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(later, "after the first submit") || strings.Contains(later, "after the second submit") {
+		t.Errorf("tail to the second submit = %q, want the first-submit event and not the second", later)
+	}
+	if got == later {
+		t.Errorf("two submissions over one transcript read the same excerpt: %q", got)
 	}
 }
 

@@ -195,7 +195,8 @@ func TestRulesHashIsOfTheExcerpt(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	transcript := writeTranscript(t, town, "session.jsonl", pushTranscript)
-	excerpt, err := progress.TranscriptTail(town, seat(t, town), transcript, excerptRunes)
+	submittedAt := fixedNow.Add(-time.Minute)
+	excerpt, err := progress.TranscriptTail(town, seat(t, town), transcript, submittedAt, excerptRunes)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,7 +204,7 @@ func TestRulesHashIsOfTheExcerpt(t *testing.T) {
 
 	p := newPass(t, town, &fakeAsker{}, transcript)
 	startPass(t, p)
-	p.Lister = fixedLister{dones: []Done{submitted("gt-push", fixedNow.Add(-time.Minute))}}
+	p.Lister = fixedLister{dones: []Done{submitted("gt-push", submittedAt)}}
 	if _, err := p.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
