@@ -93,6 +93,9 @@ type Input struct {
 	Session string
 	// WorkDir locates the Claude transcript; empty skips that evidence.
 	WorkDir string
+	// TownRoot names the town whose .claude-town projects directory is searched
+	// for the transcript; empty searches only the process's Claude config dirs.
+	TownRoot string
 	// Prev is the sample from the seat's intent record, nil for none.
 	Prev *intent.Progress
 	// Now is the sample time; zero means time.Now().
@@ -209,7 +212,9 @@ func sample(p Probe, in Input, now time.Time) *intent.Progress {
 	if in.WorkDir != "" || in.Transcript != nil {
 		find := in.Transcript
 		if find == nil {
-			find = claudeTranscript
+			find = func(workDir string) (string, time.Time, int64, error) {
+				return claudeTranscript(in.TownRoot, workDir)
+			}
 		}
 		if path, mtime, size, err := find(in.WorkDir); err == nil && path != "" {
 			s.TranscriptPath, s.TranscriptMtime, s.TranscriptBytes = path, mtime, size
@@ -260,12 +265,11 @@ func hasEvidence(s *intent.Progress) bool {
 	return s.PaneHash != "" || s.TranscriptPath != "" || s.HasHeartbeat
 }
 
-// claudeTranscript is the default TranscriptFunc.
-func claudeTranscript(workDir string) (string, time.Time, int64, error) {
-	// No town root: liveness takes none, and threading one would change the
-	// stall detector's verdicts for ace and bullet seats, a path gt-cyufk
-	// leaves alone (gt-gnqi8).
-	path, err := agentlog.LatestTranscript("", workDir)
+// claudeTranscript is the default TranscriptFunc. townRoot names the town whose
+// .claude-town projects directory is searched too: seats spawned with it as
+// their config dir log there, while the daemon's own env does not name it.
+func claudeTranscript(townRoot, workDir string) (string, time.Time, int64, error) {
+	path, err := agentlog.LatestTranscript(townRoot, workDir)
 	if err != nil || path == "" {
 		return "", time.Time{}, 0, err
 	}

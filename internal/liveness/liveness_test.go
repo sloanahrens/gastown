@@ -2,9 +2,12 @@ package liveness
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentlog"
 	"github.com/steveyegge/gastown/internal/intent"
 )
 
@@ -182,6 +185,77 @@ func TestMissingEvidenceCarriesForward(t *testing.T) {
 	r = Assess(live("screen"), Input{Session: "s", Prev: r.Sample, Now: t0.Add(31 * time.Minute), Transcript: noTranscript})
 	if r.Verdict != Stalled {
 		t.Fatalf("verdict = %v, want Stalled (the capture failure was not progress)", r.Verdict)
+	}
+}
+
+// writeTranscript puts a session log named name in projectDir and returns its
+// path.
+func writeTranscript(t *testing.T, projectDir, name string) string {
+	t.Helper()
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("creating project dir: %v", err)
+	}
+	path := filepath.Join(projectDir, name)
+	if err := os.WriteFile(path, []byte(`{"type":"user"}`+"\n"), 0644); err != nil {
+		t.Fatalf("writing transcript: %v", err)
+	}
+	return path
+}
+
+// TestClaudeTranscript_FindsTownConfigTranscript pins the gt-cyufk rework: ace
+// and bullet seats log under the town's .claude-town config dir, which the
+// daemon's own environment does not name, so the town root is the only way
+// their transcripts reach the stall detector.
+func TestClaudeTranscript_FindsTownConfigTranscript(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	workDir := filepath.Join(t.TempDir(), "polecats", "ace", "gastown")
+	// The literal is the layout: a seat spawned with CLAUDE_CONFIG_DIR set to
+	// it logs under this directory name, and the test pins that name.
+	projectDir, err := agentlog.ClaudeProjectDirIn(filepath.Join(townRoot, ".claude-town"), workDir)
+	if err != nil {
+		t.Fatalf("ClaudeProjectDirIn: %v", err)
+	}
+	want := writeTranscript(t, projectDir, "town-session.jsonl")
+
+	path, mtime, size, err := claudeTranscript(townRoot, workDir)
+	if err != nil {
+		t.Fatalf("claudeTranscript: %v", err)
+	}
+	if path != want {
+		t.Fatalf("transcript = %q, want %q", path, want)
+	}
+	info, err := os.Stat(want)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if !mtime.Equal(info.ModTime()) || size != info.Size() {
+		t.Errorf("mtime/size = %v/%d, want %v/%d", mtime, size, info.ModTime(), info.Size())
+	}
+}
+
+// TestClaudeTranscript_FindsHomeConfigTranscript keeps the seat class that logs
+// under ~/.claude resolving now that a town root is threaded in.
+//
+//testpolicy:allow parallel — HOME is the lookup's input, and it is process-wide
+func TestClaudeTranscript_FindsHomeConfigTranscript(t *testing.T) {
+	home := t.TempDir()
+	//testpolicy:allow no-env — the ~/.claude root is resolved from HOME, which the fixture must point at its own tree
+	t.Setenv("HOME", home)
+
+	workDir := filepath.Join(t.TempDir(), "polecats", "capable", "gastown")
+	projectDir, err := agentlog.ClaudeProjectDirIn(filepath.Join(home, ".claude"), workDir)
+	if err != nil {
+		t.Fatalf("ClaudeProjectDirIn: %v", err)
+	}
+	want := writeTranscript(t, projectDir, "home-session.jsonl")
+
+	path, _, _, err := claudeTranscript(t.TempDir(), workDir)
+	if err != nil {
+		t.Fatalf("claudeTranscript: %v", err)
+	}
+	if path != want {
+		t.Errorf("transcript = %q, want %q", path, want)
 	}
 }
 
