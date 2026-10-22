@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"math"
+	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -265,6 +267,149 @@ func TestSampleCPUIdleNamesWhyTopCouldNotBeRead(t *testing.T) {
 			_, err := sampleCPUIdle(ctx, tt.top)
 			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("err = %v, want one containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// linuxProcTop holds two samples of `top -b -c -n 2 -d 1 -w 512`. A Dolt
+// server that has run for days is near idle in the first sample, which is its
+// average since it started, and burning four cores in the second (gt-avsc3).
+const linuxProcTop = `top - 17:35:36 up 3 days,  2:14,  4 users,  load average: 4.08, 3.99, 3.88
+Tasks: 512 total,   6 running, 506 sleeping
+%Cpu(s):  6.2 us, 12.5 sy, 81.2 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+   4242 sloan     20   0   12.1g   2.0g  40000 S   3.1   1.6 900:12.34 /usr/local/bin/dolt sql-server --config /gt/.dolt-data/config.yaml
+      1 root      20   0  168000  12000   8000 S   0.0   0.0   0:09.00 /sbin/init splash
+
+top - 17:35:37 up 3 days,  2:14,  4 users,  load average: 4.08, 3.99, 3.88
+Tasks: 512 total,   6 running, 506 sleeping
+%Cpu(s): 18.2 us,  3.5 sy, 78.2 id,  0.0 wa,  0.0 hi,  0.0 si,  0.0 st
+
+    PID USER      PR  NI    VIRT    RES    SHR S  %CPU  %MEM     TIME+ COMMAND
+   4242 sloan     20   0   12.1g   2.0g  40000 S 398,5   1.6 900:16.34 /usr/local/bin/dolt sql-server --config /gt/.dolt-data/config.yaml
+      1 root      20   0  168000  12000   8000 S   0.0   0.0   0:09.00 /sbin/init splash
+`
+
+// ps pcpu on Linux is CPU time over a process's whole life, so a Dolt server
+// that spun for hours after days idle (or the reverse) reads as its average.
+// The Linux process table must come from two samples a second apart, and the
+// reading that reaches the parsers must be the second sample's rate; macOS,
+// whose pcpu is a recent-usage figure, keeps ps (gt-avsc3).
+func TestPsOutputLinuxUsesInstantCPU(t *testing.T) {
+	t.Parallel()
+
+	name, args := procTableCommand("linux")
+	if name != "top" || !slices.Contains(args, "-b") || !slices.Contains(args, "-c") {
+		t.Fatalf("Linux process table command = %s %v, want a batch top with full command lines", name, args)
+	}
+	if i := slices.Index(args, "-n"); i < 0 || i+1 >= len(args) || args[i+1] != "2" {
+		t.Fatalf("Linux process table command = %s %v, want two samples so the second is a current rate", name, args)
+	}
+	if name, args := procTableCommand("darwin"); name != "ps" || !slices.Equal(args, []string{"-axo", "pcpu=,command="}) {
+		t.Fatalf("macOS process table command = %s %v, want the unchanged ps", name, args)
+	}
+
+	out, err := procTable(linuxProcTop)
+	if err != nil {
+		t.Fatalf("procTable: %v", err)
+	}
+	got := parseDoltCores(string(out))
+	if got == nil || math.Abs(*got-3.985) > 1e-9 {
+		t.Fatalf("DoltCores from the second sample = %v, want 3.985", got)
+	}
+	if top := parseTop(string(out), 5); len(top) != 1 || top[0].Name != "dolt" || top[0].CPU != 398.5 {
+		t.Fatalf("parseTop from the second sample = %+v, want dolt at 398.5", top)
+	}
+}
+
+// A top whose process table cannot be read must fail the probe, so Sample
+// leaves DoltCores and Top unset instead of reporting a healthy-looking zero.
+func TestProcTableRefusesWhatItCannotRead(t *testing.T) {
+	t.Parallel()
+	for name, in := range map[string]string{
+		"no process table":        "Tasks: 1 total\n",
+		"no COMMAND column":       "    PID USER  %CPU\n   1 root   3.0\n",
+		"no CPU column":           "    PID USER COMMAND\n   1 root /sbin/init\n",
+		"COMMAND is not the last": "    PID USER  %CPU COMMAND  TIME+\n   1 root   3.0 init 0:09.00\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if out, err := procTable(in); err == nil {
+				t.Fatalf("procTable = %q, nil error, want one", out)
+			}
+		})
+	}
+}
+
+// A row whose CPU field is not a number is dropped, not passed on as a
+// reading.
+func TestProcTableDropsRowsWithoutANumericCPU(t *testing.T) {
+	t.Parallel()
+	const in = "    PID USER      %CPU COMMAND\n   10 root       n/a broken\n   11 root      12,5 dolt sql-server --config /x\n"
+	out, err := procTable(in)
+	if err != nil {
+		t.Fatalf("procTable: %v", err)
+	}
+	if got, want := string(out), "12.5 dolt sql-server --config /x\n"; got != want {
+		t.Fatalf("procTable = %q, want %q", got, want)
+	}
+}
+
+// The Linux process table is a ~1s sample, so a canceled context must end it
+// with an error instead of letting it run on.
+func TestPsOutputEndsWithItsContext(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if out, err := psOutput(ctx); err == nil {
+		t.Fatalf("psOutput on a canceled context = %q, nil error, want one", out)
+	}
+}
+
+// A port flag naming the town's own port is the town's server started by
+// hand, not a test's, and keeps counting.
+func TestParseDoltCoresKeepsAServerOnTheProductionPort(t *testing.T) {
+	t.Parallel()
+	for name, line := range map[string]string{
+		"--port value": "  200.0 dolt sql-server --port 3307 --data-dir /gt/.dolt-data\n",
+		"--port=value": "  200.0 dolt sql-server --port=3307\n",
+		"-P value":     "  200.0 dolt sql-server -P 3307\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := parseDoltCores(line); got == nil || math.Abs(*got-2) > 1e-9 {
+				t.Fatalf("parseDoltCores = %v, want 2", got)
+			}
+		})
+	}
+}
+
+// A test's own sql-server on a temporary data dir or its own port is not the
+// town's Dolt, so a suite starting several does not inflate the figure the
+// host tile compares against the core count (gt-avsc3).
+func TestParseDoltCoresIgnoresTestServers(t *testing.T) {
+	t.Parallel()
+	const town = "  40.0 /opt/homebrew/bin/dolt sql-server --config /Users/sloan/gt/.dolt-data/config.yaml\n"
+	for name, test := range map[string]string{
+		"temporary data dir":         "  95.0 dolt sql-server --data-dir /tmp/TestFoo123/001/data\n",
+		"temporary data dir as =":    "  95.0 dolt sql-server --data-dir=/private/var/folders/ab/xyz/T/TestFoo/data\n",
+		"temporary config":           "  95.0 /usr/bin/dolt sql-server --config /var/folders/ab/xyz/T/gt-test/config.yaml\n",
+		"explicit port":              "  95.0 dolt sql-server --port 33307 --data-dir /x\n",
+		"explicit port as =":         "  95.0 dolt sql-server --port=33307\n",
+		"other port beside --config": "  95.0 dolt sql-server --config /x/config.yaml --port 3308\n",
+		"explicit short port":        "  95.0 dolt sql-server -P 33307\n",
+		"under the process's TMPDIR": "  95.0 dolt sql-server --data-dir " + strings.TrimSuffix(os.TempDir(), "/") + "/t1/data\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			got := parseDoltCores(town + test)
+			if got == nil || math.Abs(*got-0.4) > 1e-9 {
+				t.Fatalf("parseDoltCores = %v, want only the town's 0.4", got)
+			}
+			if only := parseDoltCores(test); only != nil {
+				t.Fatalf("parseDoltCores of a test server alone = %v, want no reading", *only)
 			}
 		})
 	}
