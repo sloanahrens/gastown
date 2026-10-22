@@ -101,6 +101,61 @@ func TestUnknownAlertsOnlyAfterFiveMinutes(t *testing.T) {
 	}
 }
 
+// An UNKNOWN alert stands for the UNKNOWN run only: a town that then goes red
+// without passing through green still raises the red crit, once, and degraded
+// followed by red does the same. A lower verdict after a higher one stays quiet.
+func TestUnknownAlertDoesNotSuppressRed(t *testing.T) {
+	t.Parallel()
+	now := alertBase
+	a := NewAlerter(func() time.Time { return now })
+	observe := func(verdict string, d time.Duration) []Alert {
+		now = alertBase.Add(d)
+		return a.Observe(State{}, healthAt(verdict, now), nil)
+	}
+
+	observe("unknown", 0)
+	if got := observe("unknown", 5*time.Minute); len(got) != 1 || got[0].Key != "health:unknown" || got[0].Level != LevelWarn {
+		t.Fatalf("UNKNOWN for five minutes -> %+v, want one warn on health:unknown", got)
+	}
+	if got := observe("red", 6*time.Minute); len(got) != 0 {
+		t.Fatalf("one red poll alerted: %+v", got)
+	}
+	got := observe("red", 6*time.Minute+5*time.Second)
+	if len(got) != 1 || got[0].Level != LevelCrit || got[0].Key != "health:red" {
+		t.Fatalf("second red poll -> %+v, want exactly one crit on health:red", got)
+	}
+	if got := observe("red", 6*time.Minute+10*time.Second); len(got) != 0 {
+		t.Fatalf("a third red poll repeated the alert: %+v", got)
+	}
+	// A lower verdict inside the same run raises nothing.
+	for i, v := range []string{"degraded", "degraded", "unknown"} {
+		if got := observe(v, 7*time.Minute+time.Duration(i)*time.Second); len(got) != 0 {
+			t.Fatalf("%s after red alerted: %+v", v, got)
+		}
+	}
+	got = observe("green", 8*time.Minute)
+	if len(got) != 1 || got[0].Key != "health:recovered" {
+		t.Fatalf("green -> %+v, want one health:recovered", got)
+	}
+
+	// Degraded then red: red outranks it and fires its own key.
+	b := NewAlerter(func() time.Time { return now })
+	step := func(verdict string, d time.Duration) []Alert {
+		now = alertBase.Add(d)
+		return b.Observe(State{}, healthAt(verdict, now), nil)
+	}
+	step("degraded", 0)
+	if got := step("degraded", 5*time.Second); len(got) != 1 || got[0].Key != "health:degraded" {
+		t.Fatalf("two degraded polls -> %+v, want one health:degraded", got)
+	}
+	if got := step("red", 10*time.Second); len(got) != 1 || got[0].Key != "health:red" || got[0].Level != LevelCrit {
+		t.Fatalf("red after degraded -> %+v, want one crit on health:red", got)
+	}
+	if got := step("red", 15*time.Second); len(got) != 0 {
+		t.Fatalf("a second red poll repeated the alert: %+v", got)
+	}
+}
+
 // A polecat already stalled when the page connects is not news; a polecat that
 // newly stalls is, and the alert names it and its bead.
 func TestPolecatAlertsOnNewStallOnly(t *testing.T) {
