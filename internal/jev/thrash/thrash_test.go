@@ -195,9 +195,10 @@ func TestRunStopsWhenJevIsOutOfReach(t *testing.T) {
 }
 
 // An account refusal (402 or 403) says nothing about the bead: the pass stops
-// with the cursor where it started, no line and no Failed count, so the
-// placement is asked again once the account is back. Any other 4xx is still the
-// bead's own fault, counted and passed over.
+// at the first placement without asking about the second, with the cursor where
+// it started, no line and no Failed count, so the placements are asked again
+// once the account is back. Any other 4xx is still the bead's own fault,
+// counted and passed over.
 func TestRunStopsOnAccountRefusal(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -211,7 +212,8 @@ func TestRunStopsOnAccountRefusal(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			p := newPass(t, &fakeAsker{status: tc.status}, placed("gt-a", 1, "First"))
+			asker := &fakeAsker{status: tc.status}
+			p := newPass(t, asker, placed("gt-a", 1, "First"), placed("gt-b", 2, "Second"))
 
 			sum, err := p.Run(context.Background())
 			if n := len(logLines(t, p.LogPath)); n != 0 {
@@ -222,8 +224,15 @@ func TestRunStopsOnAccountRefusal(t *testing.T) {
 				t.Fatal(rerr)
 			}
 			if tc.wantStops {
-				if err == nil {
-					t.Error("Run returned no error on an account refusal")
+				var se *jev.StatusError
+				if !errors.As(err, &se) || se.Status != tc.status {
+					t.Errorf("Run error = %v, want a StatusError with status %d", err, tc.status)
+				}
+				if err != nil && !strings.Contains(err.Error(), "gt-a") {
+					t.Errorf("Run error %q does not name the placement it stopped at, gt-a", err)
+				}
+				if asker.calls != 1 {
+					t.Errorf("asked %d times, want 1: the pass must halt, not skip to gt-b", asker.calls)
 				}
 				if sum.Failed != 0 {
 					t.Errorf("failed %d, want 0", sum.Failed)
@@ -236,11 +245,14 @@ func TestRunStopsOnAccountRefusal(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if sum.Failed != 1 {
-				t.Errorf("failed %d, want 1", sum.Failed)
+			if asker.calls != 2 {
+				t.Errorf("asked %d times, want 2", asker.calls)
 			}
-			if cur.ID != "gt-a" {
-				t.Errorf("cursor at %s, want gt-a", cur.ID)
+			if sum.Failed != 2 {
+				t.Errorf("failed %d, want 2", sum.Failed)
+			}
+			if cur.ID != "gt-b" {
+				t.Errorf("cursor at %s, want gt-b", cur.ID)
 			}
 		})
 	}
