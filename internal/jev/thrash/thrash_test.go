@@ -51,16 +51,20 @@ func (f *fakeLister) Placed(time.Time) ([]*beads.Issue, error) { return f.all, n
 // fakeAsker answers both questions with fixed probabilities and counts the
 // calls it is asked to make. A state holding POISON is refused the way Jev
 // refuses a bead's own request, and an asker that is down fails the way an
-// unreachable Jev does.
+// unreachable Jev does. A nonzero status refuses every ask with that status.
 type fakeAsker struct {
-	calls int
-	down  bool
+	calls  int
+	down   bool
+	status int
 }
 
 func (f *fakeAsker) Ask(_ context.Context, state any, _ map[string]jev.Question) (*jev.Answers, error) {
 	f.calls++
 	if f.down {
 		return nil, errors.New("dial tcp: connection refused")
+	}
+	if f.status != 0 {
+		return nil, &jev.StatusError{Status: f.status}
 	}
 	if s, _ := state.(string); strings.Contains(s, "POISON") {
 		return nil, &jev.StatusError{Status: http.StatusBadRequest}
@@ -187,6 +191,58 @@ func TestRunStopsWhenJevIsOutOfReach(t *testing.T) {
 	}
 	if cur.ID != "" || !cur.Time.Equal(t0.Add(-time.Minute)) {
 		t.Errorf("cursor moved to %+v, want it unmoved", cur)
+	}
+}
+
+// An account refusal (402 or 403) says nothing about the bead: the pass stops
+// with the cursor where it started, no line and no Failed count, so the
+// placement is asked again once the account is back. Any other 4xx is still the
+// bead's own fault, counted and passed over.
+func TestRunStopsOnAccountRefusal(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		status    int
+		wantStops bool
+	}{
+		{"402 payment required", http.StatusPaymentRequired, true},
+		{"403 forbidden", http.StatusForbidden, true},
+		{"400 bad request", http.StatusBadRequest, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			p := newPass(t, &fakeAsker{status: tc.status}, placed("gt-a", 1, "First"))
+
+			sum, err := p.Run(context.Background())
+			if n := len(logLines(t, p.LogPath)); n != 0 {
+				t.Errorf("log has %d lines, want 0", n)
+			}
+			cur, _, rerr := battery.ReadCursor(p.CursorPath)
+			if rerr != nil {
+				t.Fatal(rerr)
+			}
+			if tc.wantStops {
+				if err == nil {
+					t.Error("Run returned no error on an account refusal")
+				}
+				if sum.Failed != 0 {
+					t.Errorf("failed %d, want 0", sum.Failed)
+				}
+				if cur.ID != "" || !cur.Time.Equal(t0.Add(-time.Minute)) {
+					t.Errorf("cursor moved to %+v, want it unmoved", cur)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum.Failed != 1 {
+				t.Errorf("failed %d, want 1", sum.Failed)
+			}
+			if cur.ID != "gt-a" {
+				t.Errorf("cursor at %s, want gt-a", cur.ID)
+			}
+		})
 	}
 }
 
