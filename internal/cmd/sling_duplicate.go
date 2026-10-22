@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/style"
 )
@@ -580,7 +581,14 @@ func fetchDuplicatePoolWith(store beads.Client, warn func(beadsDir string, err e
 	if err != nil {
 		return nil, err
 	}
-	known := append(append([]*beads.Issue(nil), activeRows...), closedRows...)
+	// A bead in a custom status is not compared as a peer, but a blocker in one
+	// is still open: listing it here keeps the cache from reading an edge to it
+	// as resolved because the pool does not list its target (gt-rhr2t).
+	customRows, err := listDuplicateRows(store, constants.BeadsCustomStatusesList(), time.Time{})
+	if err != nil {
+		return nil, err
+	}
+	known := append(append(append([]*beads.Issue(nil), activeRows...), closedRows...), customRows...)
 	active, activeDeferred, activeErr := duplicateCandidatesOf(store, beadsDir, activeRows, details, known)
 	closed, closedDeferred, closedErr := duplicateCandidatesOf(store, beadsDir, closedRows, details, known)
 	if details != nil {
