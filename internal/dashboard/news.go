@@ -131,14 +131,20 @@ func (r *NewsReader) Read() *NewsFeed {
 // fetch reads the top story ids and then each of their items under one
 // deadline. A read that comes back with nothing to show keeps the last good
 // stories with their own read time: the pane ages what it is showing rather
-// than reading a failed refresh as a front page with no stories on it.
+// than reading a failed refresh as a front page with no stories on it. So does
+// a read that lost items to errors and came back thinner than the last good
+// feed: it would otherwise replace the full list as fresh for five minutes.
 func (r *NewsReader) fetch(now time.Time) *NewsFeed {
 	ctx, cancel := context.WithTimeout(context.Background(), newsTimeout)
 	defer cancel()
 
-	stories, err := r.topStories(ctx)
+	read, err := r.topStories(ctx)
 	if err == nil {
-		return &NewsFeed{Stories: stories, At: now}
+		thinner := read.itemErr != nil && r.cached != nil && len(read.stories) < len(r.cached.Stories)
+		if !thinner {
+			return &NewsFeed{Stories: read.stories, At: now}
+		}
+		err = read.itemErr
 	}
 	class := newsErrorClass(err)
 	if r.cached == nil {
@@ -155,11 +161,13 @@ func (r *NewsReader) fetch(now time.Time) *NewsFeed {
 // refresh over it would throw away the four the read did get. What is left is
 // an error when it is nothing at all, which is what a refresh the pane read no
 // stories from is, so a read that produced nothing keeps the last good stories
-// instead of replacing them with an empty front page.
-func (r *NewsReader) topStories(ctx context.Context) ([]NewsStory, error) {
+// instead of replacing them with an empty front page. The first item error of a
+// read that still got stories comes back beside them, for the caller to weigh
+// against the feed it already holds.
+func (r *NewsReader) topStories(ctx context.Context) (newsRead, error) {
 	var ids []int64
 	if err := r.get(ctx, "/topstories.json", &ids); err != nil {
-		return nil, err
+		return newsRead{}, err
 	}
 	if len(ids) > newsStories {
 		ids = ids[:newsStories]
@@ -181,11 +189,18 @@ func (r *NewsReader) topStories(ctx context.Context) ([]NewsStory, error) {
 	}
 	if len(out) == 0 {
 		if firstErr != nil {
-			return nil, firstErr
+			return newsRead{}, firstErr
 		}
-		return nil, fmt.Errorf("%w: no story on the front page", errNewsUnreadable)
+		return newsRead{}, fmt.Errorf("%w: no story on the front page", errNewsUnreadable)
 	}
-	return out, nil
+	return newsRead{stories: out, itemErr: firstErr}, nil
+}
+
+// newsRead is what one pass over the front page produced: the stories it got
+// and the first item error it met on the way, nil when every item answered.
+type newsRead struct {
+	stories []NewsStory
+	itemErr error
 }
 
 // story renders one item as the pane's line.

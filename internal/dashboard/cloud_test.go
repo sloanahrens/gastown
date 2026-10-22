@@ -539,3 +539,25 @@ func TestCloudWorkerReadsAPatrolAtTheIntervalAndItsAbsenceSlowly(t *testing.T) {
 		t.Errorf("a fresh report was not re-read after an interval (%d reads)", reads)
 	}
 }
+
+// A machine with no patrol directory but an app power line is read at the page's
+// interval: the line rides this poll, and a stop or start must show within a
+// minute rather than sit stale for the slow interval.
+func TestPollCloudMissingReportsDirStaysFast(t *testing.T) {
+	t.Parallel()
+
+	now := cloudNow
+	reads := 0
+	h := NewHub(Config{Now: func() time.Time { return now }, Cloud: func() *Cloud {
+		reads++
+		return &Cloud{At: now, State: CloudMissing, Note: cloudNoPatrol, NoPatrol: true,
+			Apps: &AppPower{At: now, Apps: []AppPowerRow{{App: "demo", State: "on"}}}}
+	}})
+
+	h.pollCloud()
+	now = now.Add(time.Minute)
+	h.pollCloud()
+	if reads != 2 {
+		t.Errorf("an app power line with no patrol was re-read %d times after a minute, want 2 reads in all", reads)
+	}
+}
