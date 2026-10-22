@@ -4,6 +4,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"iter"
 	"os"
 	"path/filepath"
@@ -258,10 +259,12 @@ type idlePolecatReuse interface {
 // already at its directory cap. A nil info with a nil error means the caller
 // allocates a fresh polecat.
 //
-// The cap is checked only after reuse was tried: a reusable preserved polecat
-// should not be blocked just because the rig is at the cap. A refusal here is a
-// sling that never reached a polecat, so it records no respawn; recordRespawn
-// runs only inside the reuse success (gt-4lbz).
+// The cap is checked only after reuse was tried, so a reusable preserved polecat
+// is not blocked by a full rig. A refusal is a sling that never started a
+// polecat, so it does not count as a respawn.
+//
+// A rig whose polecat directories cannot be read is refused rather than
+// allocated into: the cap cannot be checked, so the sling does not proceed.
 func reuseOrRefuseAtDirCap(
 	polecatMgr idlePolecatReuse,
 	env idleReuseEnv,
@@ -275,18 +278,20 @@ func reuseOrRefuseAtDirCap(
 		return reused, err
 	}
 	rigPolecatDir := filepath.Join(townRoot, rigName, "polecats")
-	if entries, err := os.ReadDir(rigPolecatDir); err == nil {
-		dirCount := 0
-		for _, e := range entries {
-			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
-				dirCount++
-			}
+	entries, err := os.ReadDir(rigPolecatDir)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("cannot read polecat directories of rig %s to check the cap: %w", rigName, err)
+	}
+	dirCount := 0
+	for _, e := range entries {
+		if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+			dirCount++
 		}
-		if dirCount >= dirCap {
-			return nil, fmt.Errorf("rig %s has %d polecat directories (max %d). "+
-				"Resolve recovery-needed polecats before allocating more slots: gt polecat list %s",
-				rigName, dirCount, dirCap, rigName)
-		}
+	}
+	if dirCount >= dirCap {
+		return nil, fmt.Errorf("rig %s has %d polecat directories (max %d). "+
+			"Resolve recovery-needed polecats before allocating more slots: gt polecat list %s",
+			rigName, dirCount, dirCap, rigName)
 	}
 	return nil, nil
 }
@@ -470,8 +475,11 @@ func reuseIdlePolecatForSlingWith(
 	// skipping ~5s of worktree creation (persistent-polecat-pool phase 3). Any
 	// other failure allocates a fresh polecat rather than repairing this worktree
 	// destructively.
-	addOpts := slingAddOptions(opts, baseBranch, resumeBranch, allowRecovery)
 	for {
+		// Built for each seat the loop tries. Every field is the sling's own
+		// (bead, base, resume, recovery), so each attempt gets the same options;
+		// the seat name is the only thing that changes between them.
+		addOpts := slingAddOptions(opts, baseBranch, resumeBranch, allowRecovery)
 		_, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts)
 		if err == nil {
 			break
