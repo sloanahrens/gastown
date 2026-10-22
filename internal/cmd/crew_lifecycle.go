@@ -274,6 +274,20 @@ func checkCrewResumeTarget(resume string, workers []*crew.CrewWorker) error {
 	return nil
 }
 
+// checkCrewResumeFlag applies checkCrewResumeTarget to a --resume value. Bare
+// --resume ("last") names no session, so it is not checked. A failed listing
+// fails open: the guard catches a likely mistake and must not block a start.
+func checkCrewResumeFlag(resume string, list func() ([]*crew.CrewWorker, error)) error {
+	if resume == "" || resume == "last" {
+		return nil
+	}
+	workers, err := list()
+	if err != nil {
+		return nil
+	}
+	return checkCrewResumeTarget(resume, workers)
+}
+
 // runCrewStart starts crew workers in a rig.
 // If first arg is a valid rig name, it's used as the rig; otherwise rig is inferred from cwd.
 // Remaining args (or all args if rig is inferred) are crew member names.
@@ -345,13 +359,8 @@ func runCrewStart(cmd *cobra.Command, args []string) error {
 	// Guard against `--resume=<crew-name>`: the value is a session ID, so a crew
 	// member's name there is almost always a mistake. The space form never reaches
 	// this check: NoOptDefVal leaves `--resume <id>` as a positional crew name.
-	if crewResume != "" && crewResume != "last" {
-		workers, listErr := crewMgr.List()
-		if listErr == nil {
-			if err := checkCrewResumeTarget(crewResume, workers); err != nil {
-				return err
-			}
-		}
+	if err := checkCrewResumeFlag(crewResume, crewMgr.List); err != nil {
+		return err
 	}
 
 	// Warn when --resume last targets multiple crew members, since agents that

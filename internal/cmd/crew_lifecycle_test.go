@@ -91,12 +91,57 @@ func TestCheckCrewResumeTarget(t *testing.T) {
 		{"crew member name is rejected", "max", true},
 		{"session ID passes", "abc123", false},
 		{"name matching no member passes", "joe", false},
+		{"name matching a later member is rejected", "emma", true},
+		{"name differing only in case passes", "Max", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := checkCrewResumeTarget(tt.resume, workers)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("checkCrewResumeTarget(%q) error = %v, wantErr %v", tt.resume, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// A bare --resume must mean "last" on the real command: runCrewStart's guard
+// relies on it, since the space form is read as a positional crew name.
+func TestCrewStartResumeNoOptDefValIsLast(t *testing.T) {
+	t.Parallel()
+
+	if got := crewStartCmd.Flags().Lookup("resume").NoOptDefVal; got != "last" {
+		t.Fatalf("crewStartCmd --resume NoOptDefVal = %q, want %q", got, "last")
+	}
+}
+
+// checkCrewResumeFlag rejects a crew member's name given as a session ID, and
+// a failed listing lets the start through.
+func TestCheckCrewResumeFlag(t *testing.T) {
+	t.Parallel()
+
+	workers := []*crew.CrewWorker{{Name: "max"}, {Name: "last"}}
+	listErr := errors.New("listing crew: disk gone")
+	ok := func() ([]*crew.CrewWorker, error) { return workers, nil }
+	failed := func() ([]*crew.CrewWorker, error) { return nil, listErr }
+
+	tests := []struct {
+		name    string
+		resume  string
+		list    func() ([]*crew.CrewWorker, error)
+		wantErr bool
+	}{
+		{"empty value is not checked", "", ok, false},
+		{"bare resume is not checked, even for a member named last", "last", ok, false},
+		{"crew member name is rejected", "max", ok, true},
+		{"session ID passes", "abc123", ok, false},
+		{"listing failure fails open for a member name", "max", failed, false},
+		{"listing failure fails open for a session ID", "abc123", failed, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkCrewResumeFlag(tt.resume, tt.list)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("checkCrewResumeFlag(%q) error = %v, wantErr %v", tt.resume, err, tt.wantErr)
 			}
 		})
 	}
