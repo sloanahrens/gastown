@@ -90,6 +90,38 @@ func TestJevSubmissionGitRunsOnlyInItsOwnClone(t *testing.T) {
 	}
 }
 
+// The pass's fetch takes the clone's fetch lock: with another fetch in flight
+// it waits, and the wait ends with the ctx rather than failing the pass, so a
+// fetch from another battery cannot starve the pass. Once the holder finishes,
+// the fetch goes ahead.
+func TestJevSubmissionFetchWaitsForTheCloneLock(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	git := &fakeGit{}
+	g := lockedGit{Git: git, townRoot: town}
+
+	hold, err := battery.Lock(FetchLockPath(town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if err := g.Sync(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Sync with the clone locked = %v, want the wait to end with the ctx", err)
+	}
+	if git.synced != 0 {
+		t.Errorf("the clone was fetched while another fetch held it")
+	}
+
+	hold()
+	if err := g.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if git.synced != 1 {
+		t.Errorf("synced %d times, want the one fetch after the holder finished", git.synced)
+	}
+}
+
 // gitEnv drops the variables that pick a repository and keeps the rest.
 func TestJevSubmissionGitEnvDropsRepositoryVariables(t *testing.T) {
 	t.Parallel()

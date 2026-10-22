@@ -41,8 +41,8 @@ type Settings struct {
 
 // Open wires the production pass for a town: the Jev client writing to the
 // usage ledger under the Caller name, the submission battery's bare clone,
-// fetched under that battery's own run lock, the installed binaries' --help and
-// the cap read from the same ledger. The files are the memory directory's
+// fetched under the clone's fetch lock, the installed binaries' --help and the
+// cap read from the same ledger. The files are the memory directory's
 // markdown under the Claude config dir the sessions run with and the operator
 // handbook under the home directory. warnings receives the ledger's own
 // warnings and may be nil.
@@ -72,7 +72,7 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 		Asker: client,
 		Repo: lockedRepo{
 			repo: cloneRepo{c: clone},
-			lock: func(ctx context.Context) (func(), error) { return submission.WaitRunLock(ctx, townRoot) },
+			lock: func(ctx context.Context) (func(), error) { return submission.WaitFetchLock(ctx, townRoot) },
 		},
 		Help:    execHelp{},
 		Files:   func() ([]File, error) { return listNotes(os.Getenv, os.UserHomeDir, townRoot) },
@@ -175,17 +175,18 @@ func exitCode(err error) (int, bool) {
 	return 0, false
 }
 
-// lockedRepo fetches the submission battery's bare clone under that battery's
-// own run lock. The clone is shared: the submission pass holds the lock while
-// it fetches, so a fetch that skipped the lock would fail that pass's Sync and
-// lose its work.
+// lockedRepo fetches the submission battery's bare clone under the clone's
+// fetch lock. The clone is shared: the submission pass fetches under the same
+// lock, so a fetch that skipped it would fail that pass's Sync and lose its
+// work. The pass's run lock is not used: it is held for a whole pass, and the
+// fetch has no business waiting that out (gt-ckobj).
 type lockedRepo struct {
 	repo Repo
-	// lock takes the submission battery's run lock, waiting for its holder.
+	// lock takes the clone's fetch lock, waiting for a fetch in flight.
 	lock func(ctx context.Context) (func(), error)
 }
 
-// Sync waits for the submission battery's run lock, then fetches.
+// Sync waits for the clone's fetch lock, then fetches.
 func (r lockedRepo) Sync(ctx context.Context) error {
 	release, err := r.lock(ctx)
 	if err != nil {

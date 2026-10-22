@@ -90,12 +90,30 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	return &Pass{
 		Asker:       client,
 		Submissions: rigBeads{b: beads.New(beadsDir), records: land.SubmissionsSeenPath(townRoot), warnings: warnings},
-		Git:         newBareGit(ClonePath(townRoot), origin),
+		Git:         lockedGit{Git: newBareGit(ClonePath(townRoot), origin), townRoot: townRoot},
 		LogPath:     LogPath(townRoot),
 		CursorPath:  CursorPath(townRoot),
 		Allows:      func() (bool, error) { return town.Allows(time.Now) },
 		Warnings:    warnings,
 	}, nil
+}
+
+// lockedGit fetches the shared clone under the clone's fetch lock, waiting for
+// a fetch in flight. The pass holds its run lock for its whole run, which a
+// fetch from another battery would wait out, so the fetch has a lock of its own.
+type lockedGit struct {
+	Git
+	townRoot string
+}
+
+// Sync takes the clone's fetch lock, then fetches.
+func (g lockedGit) Sync(ctx context.Context) error {
+	release, err := WaitFetchLock(ctx, g.townRoot)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return g.Git.Sync(ctx)
 }
 
 // rigOriginURL is the URL the pass clones from: the rig registry's git_url,
@@ -475,4 +493,5 @@ var (
 	_ Asker       = (*jev.Client)(nil)
 	_ Submissions = rigBeads{}
 	_ Git         = (*bareGit)(nil)
+	_ Git         = lockedGit{}
 )
