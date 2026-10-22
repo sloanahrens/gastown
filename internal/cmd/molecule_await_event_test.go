@@ -885,3 +885,65 @@ func TestAwaitEventAgentLabelWarning(t *testing.T) {
 		})
 	}
 }
+
+// unwritableAgentBeads is a beads.Client whose agent-bead reads succeed but
+// whose writes fail, so await-event's idle-count update on timeout reports a
+// warning.
+type unwritableAgentBeads struct {
+	beads.Client
+}
+
+func (unwritableAgentBeads) Update(string, beads.UpdateOptions) error {
+	return errors.New("agent bead store is read-only")
+}
+
+// TestAwaitEventIdleCountWarning pins that the "Failed to update idle count"
+// warning stays off stdout under --json, and still shows in text output. The
+// command must still succeed, since the idle count is best-effort.
+func TestAwaitEventIdleCountWarning(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		json        bool
+		wantWarning bool
+	}{
+		{name: "text output shows warning", json: false, wantWarning: true},
+		{name: "json output keeps stdout parseable", json: true, wantWarning: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			beadsDir := filepath.Join(root, ".beads")
+			if err := os.MkdirAll(beadsDir, 0755); err != nil {
+				t.Fatalf("mkdir .beads: %v", err)
+			}
+			fake := beadsfake.New()
+			fake.Seed(beads.Issue{ID: "gt-agent", Labels: []string{"gt:agent", "idle:1"}})
+			var out strings.Builder
+			r := awaitEventRun{
+				channel:     "test",
+				agentBead:   "gt-agent",
+				json:        tt.json,
+				backoff:     awaitSignalBackoff{timeout: "50ms", mult: 2},
+				db:          func(string) beads.Client { return unwritableAgentBeads{fake} },
+				out:         &out,
+				beadsDir:    func() (string, error) { return beadsDir, nil },
+				eventRig:    resolveEventRig,
+				drainNudges: func(string) []nudge.QueuedNudge { return nil },
+			}
+			if err := r.run(root); err != nil {
+				t.Fatalf("await-event: %v", err)
+			}
+			if got := strings.Contains(out.String(), "Failed to update idle count"); got != tt.wantWarning {
+				t.Fatalf("warning shown = %v, want %v; stdout:\n%s", got, tt.wantWarning, out.String())
+			}
+			if tt.json {
+				var result AwaitEventResult
+				if err := json.Unmarshal([]byte(out.String()), &result); err != nil {
+					t.Fatalf("stdout is not a JSON result: %v\n%s", err, out.String())
+				}
+			}
+		})
+	}
+}
