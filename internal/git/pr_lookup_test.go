@@ -166,6 +166,54 @@ func TestLookupPullRequestBranchHeadSHADisambiguates(t *testing.T) {
 	}
 }
 
+// TestSelectPullRequestHeadMismatchFailsClosed pins the branch path to the
+// recorded-URL path: an open PR whose head is not the submitted SHA is a
+// changed head, not a missing PR, so a branch-delete guard must not read the
+// branch as unprotected.
+func TestSelectPullRequestHeadMismatchFailsClosed(t *testing.T) {
+	t.Parallel()
+	const prList = `[{"number":7,"url":"https://github.com/upstream/repo/pull/7","state":"%s","mergedAt":"","headRefName":"feature","headRefOid":"%s","headRepository":{"nameWithOwner":"fork/repo"},"headRepositoryOwner":{"login":"fork"},"baseRepository":{"nameWithOwner":"upstream/repo"}}]`
+	cases := []struct {
+		name       string
+		state      string
+		headOid    string
+		wantErr    string // substring; empty means the lookup finds no PR
+		wantStatus PRProtection
+	}{
+		{"open PR with moved head", "OPEN", "moved", "head changed", PRProtectionUnknown},
+		{"open PR with no head SHA", "OPEN", "", "head SHA is missing", PRProtectionUnknown},
+		{"closed PR with old head", "CLOSED", "old", "", PRProtectionNone},
+		{"merged PR with old head", "MERGED", "old", "", PRProtectionNone},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gh := &fakeGH{rules: []ghRule{
+				{prefix: []string{"pr", "list"}, stdout: fmt.Sprintf(prList, tc.state, tc.headOid)},
+			}}
+			g := newTestGit(t, gitHubRemotes())
+			g.gh = gh.run
+			ref := PullRequestRef{Branch: "feature", HeadSHA: "submitted"}
+
+			_, err := g.LookupPullRequest(ref)
+			if tc.wantErr == "" {
+				if !errors.Is(err, ErrPullRequestNotFound) {
+					t.Fatalf("LookupPullRequest err = %v, want ErrPullRequestNotFound", err)
+				}
+			} else if err == nil || errors.Is(err, ErrPullRequestNotFound) || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("LookupPullRequest err = %v, want %q and not ErrPullRequestNotFound", err, tc.wantErr)
+			}
+			state, _ := g.PullRequestProtection(ref)
+			if state != tc.wantStatus {
+				t.Fatalf("PullRequestProtection = %v, want %v", state, tc.wantStatus)
+			}
+			if tc.wantStatus != PRProtectionNone && !g.HasOpenPullRequest(ref) {
+				t.Fatal("HasOpenPullRequest should protect the branch")
+			}
+		})
+	}
+}
+
 func TestFindPRNumberRequiresOpenPR(t *testing.T) {
 	t.Parallel()
 	gh := &fakeGH{rules: []ghRule{
