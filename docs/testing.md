@@ -171,7 +171,7 @@ The tests build the Tmux in the test file, never in production code (`internal/t
 
 ```go
 func newTmuxForTest(socket string, ex execFunc, clk clockwork.Clock) *Tmux {
-	return &Tmux{socketName: socket, exec: ex, clock: clk}
+	return &Tmux{socketName: socket, exec: ex, clock: clk, getenv: func(string) string { return "" }}
 }
 ```
 
