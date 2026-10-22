@@ -262,7 +262,7 @@ func (g *Git) runGH(args ...string) ([]byte, error) {
 
 func selectPullRequest(raw []ghPullRequest, targetRepo, branch, headSHA, source string) (*PullRequestInfo, error) {
 	matches := make([]*PullRequestInfo, 0, len(raw))
-	var movedHead *PullRequestInfo // an open PR on the branch whose head is not headSHA
+	var movedHeads []*PullRequestInfo // open PRs on the branch whose head is not headSHA
 	for _, candidate := range raw {
 		pr := candidate.toInfo()
 		if pr.BaseRepo == "" {
@@ -276,8 +276,8 @@ func selectPullRequest(raw []ghPullRequest, targetRepo, branch, headSHA, source 
 		}
 		if headSHA != "" {
 			if pr.HeadSHA == "" || pr.HeadSHA != headSHA {
-				if pr.Open() && movedHead == nil {
-					movedHead = pr
+				if pr.Open() {
+					movedHeads = append(movedHeads, pr)
 				}
 				continue
 			}
@@ -285,11 +285,16 @@ func selectPullRequest(raw []ghPullRequest, targetRepo, branch, headSHA, source 
 		pr.LookupSource = source
 		matches = append(matches, pr)
 	}
-	if len(matches) == 0 && movedHead != nil {
-		// An open PR exists but its head is not the submitted one. Reporting
-		// that as not-found would let a branch-delete guard treat the branch
-		// as unprotected, so fail closed like the recorded-URL path does.
-		return nil, validatePullRequestHead(movedHead, headSHA)
+	if len(matches) == 0 && len(movedHeads) > 0 {
+		// Open PRs exist but none has the submitted head. Reporting that as
+		// not-found would let a branch-delete guard treat the branch as
+		// unprotected, so fail closed like the recorded-URL path does, and
+		// name every such PR so none hides behind the first.
+		errs := make([]error, 0, len(movedHeads))
+		for _, pr := range movedHeads {
+			errs = append(errs, validatePullRequestHead(pr, headSHA))
+		}
+		return nil, errors.Join(errs...)
 	}
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("%w: no PR for head %s in %s", ErrPullRequestNotFound, branch, targetRepo)

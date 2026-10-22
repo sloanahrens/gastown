@@ -214,6 +214,75 @@ func TestSelectPullRequestHeadMismatchFailsClosed(t *testing.T) {
 	}
 }
 
+// TestSelectPullRequestMixedCandidates covers branches with several PRs at
+// once: every open PR whose head moved is reported, closed ones with an old
+// head are ignored, and a PR at the submitted head wins over a moved one.
+func TestSelectPullRequestMixedCandidates(t *testing.T) {
+	t.Parallel()
+	pr := func(number int, state, headOid string) ghPullRequest {
+		return ghPullRequest{
+			Number:      number,
+			URL:         fmt.Sprintf("https://github.com/upstream/repo/pull/%d", number),
+			State:       state,
+			HeadRefName: "feature",
+			HeadRefOID:  headOid,
+		}
+	}
+	cases := []struct {
+		name       string
+		prs        []ghPullRequest
+		wantErrAll []string // every substring must appear; empty means a PR is selected
+		wantNumber int
+	}{
+		{
+			name:       "two open PRs with moved heads are both reported",
+			prs:        []ghPullRequest{pr(7, "OPEN", "moved"), pr(8, "OPEN", "")},
+			wantErrAll: []string{"PR #7 head changed", "PR #8 head SHA is missing"},
+		},
+		{
+			name:       "closed PR with old head does not hide the open moved one",
+			prs:        []ghPullRequest{pr(6, "CLOSED", "old"), pr(7, "OPEN", "moved")},
+			wantErrAll: []string{"PR #7 head changed"},
+		},
+		{
+			name:       "closed PR with old head is left out of the report for two moved ones",
+			prs:        []ghPullRequest{pr(6, "CLOSED", "old"), pr(7, "OPEN", "moved"), pr(8, "OPEN", "other")},
+			wantErrAll: []string{"PR #7 head changed", "PR #8 head changed"},
+		},
+		{
+			name:       "PR at the submitted head wins over an open moved one",
+			prs:        []ghPullRequest{pr(7, "OPEN", "moved"), pr(9, "MERGED", "submitted")},
+			wantNumber: 9,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := selectPullRequest(tc.prs, "upstream/repo", "feature", "submitted", "head")
+			if len(tc.wantErrAll) == 0 {
+				if err != nil {
+					t.Fatalf("selectPullRequest: %v", err)
+				}
+				if got.Number != tc.wantNumber {
+					t.Fatalf("selected PR #%d, want #%d", got.Number, tc.wantNumber)
+				}
+				return
+			}
+			if err == nil || errors.Is(err, ErrPullRequestNotFound) {
+				t.Fatalf("selectPullRequest err = %v, want a head error and not ErrPullRequestNotFound", err)
+			}
+			for _, want := range tc.wantErrAll {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("selectPullRequest err = %q, want it to contain %q", err, want)
+				}
+			}
+			if strings.Contains(err.Error(), "PR #6") {
+				t.Fatalf("selectPullRequest err = %q, must not mention the closed PR #6", err)
+			}
+		})
+	}
+}
+
 func TestFindPRNumberRequiresOpenPR(t *testing.T) {
 	t.Parallel()
 	gh := &fakeGH{rules: []ghRule{
