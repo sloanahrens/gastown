@@ -536,3 +536,48 @@ func TestReportHourJSON(t *testing.T) {
 		t.Errorf("--json must omit the spend key for a stale reading: %v", got["spend"])
 	}
 }
+
+// TestReportSweepRowDatesTierByItsOwnTip: the record's last run dates only a
+// tier the last cycle reached, the one whose tip is the record's last_sha. A
+// tier that cycle never reached keeps an earlier verdict, and the record holds
+// no run time for that verdict, so the row must not age it by the last run.
+func TestReportSweepRowDatesTierByItsOwnTip(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		tierSHA string
+		dated   bool
+	}{
+		{"tier reached by the last cycle", "aaaa1111", true},
+		{"tier the last cycle did not reach", "bbbb2222", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			root := reportTown(t, map[string]string{
+				".runtime/tier-sweep/gastown.json": fmt.Sprintf(
+					`{"last_run":"2026-10-02T13:40:00-05:00","last_sha":"aaaa1111","tiers":{"fast":{"verdict":"pass","passed":4,"failed":0,"sha":%q}}}`,
+					tc.tierSHA),
+			})
+			r, out := reportRunFor(t, root, func(string) (BeadStore, error) {
+				return nil, errors.New("bd is down")
+			})
+			r.Render(r.Collect())
+
+			var row string
+			for _, line := range strings.Split(out.String(), "\n") {
+				if strings.HasPrefix(line, "  gastown  fast ") {
+					row = line
+				}
+			}
+			if row == "" {
+				t.Fatalf("report has no sweep row for the fast tier:\n%s", out)
+			}
+			if got := strings.Contains(row, " ago"); got != tc.dated {
+				t.Errorf("row aged by the record's last run = %v, want %v: %s", got, tc.dated, row)
+			}
+			if !tc.dated && !strings.Contains(row, "run time unknown") {
+				t.Errorf("row must say the tier's run time is unknown: %s", row)
+			}
+		})
+	}
+}
