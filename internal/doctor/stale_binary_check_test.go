@@ -95,6 +95,7 @@ func TestStaleResult(t *testing.T) {
 
 // gt install creates a new HQ; the rebuild is the Makefile's install target.
 func TestStaleBinaryCheck_FixErrorSaysMakeInstall(t *testing.T) {
+	t.Parallel()
 	err := NewStaleBinaryCheck().Fix(&CheckContext{})
 	if err == nil {
 		t.Fatal("Fix() = nil, want an error naming the manual rebuild")
