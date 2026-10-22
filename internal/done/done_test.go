@@ -1643,3 +1643,25 @@ func TestObserveCleanupStatusUnjudgeableStillAutosaves(t *testing.T) {
 		t.Errorf("cleanup status after auto-save = %q, want %q", got, "unpushed")
 	}
 }
+
+// unjudgeableNoStatusGit fails the status read itself: the comparison is
+// unjudgeable and no status was gathered, so no uncommitted-file or stash fact
+// is left to decide the cleanup status from.
+type unjudgeableNoStatusGit struct{}
+
+func (unjudgeableNoStatusGit) CheckUncommittedWork() (*gitpkg.UncommittedWorkStatus, error) {
+	return nil, fmt.Errorf("origin moved: %w", gitpkg.ErrComparisonUnjudgeable)
+}
+
+func (unjudgeableNoStatusGit) BranchPushedToRemote(string, string) (bool, int, error) {
+	return false, 0, fmt.Errorf("origin moved: %w", gitpkg.ErrComparisonUnjudgeable)
+}
+
+// An unjudgeable comparison with no status gathered reports no cleanup status
+// at all, rather than guessing "clean" or "unpushed" from nothing.
+func TestObserveCleanupStatusUnjudgeableWithoutStatusIsUnobserved(t *testing.T) {
+	t.Parallel()
+	if got := observeCleanupStatus(unjudgeableNoStatusGit{}, "polecat/ace/gt-8luo4+test"); got != "" {
+		t.Errorf("observed cleanup status = %q, want empty (unobserved)", got)
+	}
+}

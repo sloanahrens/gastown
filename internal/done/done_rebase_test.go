@@ -754,3 +754,70 @@ func TestReworkPushForNoSeatEmailIsEmpty(t *testing.T) {
 		t.Errorf("reworkPushFor with no seat email = %+v, want the zero value", got)
 	}
 }
+
+// reworkLocalCarriesCommits is the rework allowance's last check: a local head
+// at or behind origin's tip carries no rework, so only a local head holding a
+// commit origin lacks may lease over origin.
+func TestReworkLocalCarriesCommits(t *testing.T) {
+	t.Parallel()
+	const (
+		origin = "aaaa1111bbbb2222cccc3333dddd4444eeee5555"
+		local  = "ffff0000111122223333444455556666777788889"
+		stale  = "cccc9999dddd8888eeee7777ffff6666aaaa5555"
+	)
+	tests := []struct {
+		name     string
+		localSHA string
+		base     string
+		mergeErr error
+		want     bool
+		wantErr  bool
+	}{
+		{
+			name:     "equal heads carry nothing and skip the merge-base",
+			localSHA: origin,
+			mergeErr: errors.New("merge-base must not run for equal heads"),
+			want:     false,
+		},
+		{
+			name:     "local at a merge-base behind origin is stale",
+			localSHA: stale,
+			base:     stale,
+			want:     false,
+		},
+		{
+			name:     "local holding a commit origin lacks carries the rework",
+			localSHA: local,
+			base:     origin,
+			want:     true,
+		},
+		{
+			name:     "empty merge-base fails closed",
+			localSHA: local,
+			base:     "",
+			want:     false,
+		},
+		{
+			name:     "merge-base error is returned",
+			localSHA: local,
+			mergeErr: errors.New("object missing"),
+			want:     false,
+			wantErr:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeDivergedPushGit{
+				mergeBases:   map[[2]string]string{{origin, tt.localSHA}: tt.base},
+				mergeBaseErr: tt.mergeErr,
+			}
+			got, err := reworkLocalCarriesCommits(f, origin, tt.localSHA)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("reworkLocalCarriesCommits error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("reworkLocalCarriesCommits = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
