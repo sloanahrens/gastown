@@ -403,33 +403,38 @@ func TestConflictRejectionWithoutTargetTipFallsBack(t *testing.T) {
 
 // TestConflictLabelTiplessRejectionNeverDisjoint pins that a conflict rejection
 // with no target tip and no earlier merge line still stops its pair being
-// labeled disjoint: the rejection is in no tip list, but it says the bead did
-// conflict with something.
+// labeled disjoint, whichever bead of the pair it names: the rejection is in no
+// tip list, but it says a bead of the pair did conflict with something.
 func TestConflictLabelTiplessRejectionNeverDisjoint(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	repo, sha := linearHistory([]map[string]string{
-		{"base.txt": "base"},
-		{"b.go": "b"},
-		{"a.go": "a"},
-	})
-	writeLandings(t, town, sha, map[string]int{"gt-b": 1, "gt-a": 2})
-	writeDaemonLog(t, town, rejectLine("gt-a", "conflict"))
+	for _, rejected := range []string{"gt-a", "gt-b"} {
+		t.Run(rejected, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			repo, sha := linearHistory([]map[string]string{
+				{"base.txt": "base"},
+				{"b.go": "b"},
+				{"a.go": "a"},
+			})
+			writeLandings(t, town, sha, map[string]int{"gt-b": 1, "gt-a": 2})
+			writeDaemonLog(t, town, rejectLine(rejected, "conflict"))
 
-	a := newConflictAdapter(town, func() (conflictRepo, error) { return repo, nil })
-	item, err := a.Parse(conflictLine(t, "gt-a", "gt-b", 0.5, 0.5, 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	lab, err := a.Label(context.Background(), item)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if lab.Labeled && lab.Rule == ruleConflictDisjointFiles {
-		t.Errorf("label = %+v, want a pair with a conflict rejection never labeled disjoint", lab)
-	}
-	if a.unattributed != 1 {
-		t.Errorf("unattributed = %d, want the tipless rejection still counted", a.unattributed)
+			a := newConflictAdapter(town, func() (conflictRepo, error) { return repo, nil })
+			item, err := a.Parse(conflictLine(t, "gt-a", "gt-b", 0.5, 0.5, 1))
+			if err != nil {
+				t.Fatal(err)
+			}
+			lab, err := a.Label(context.Background(), item)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if lab.Labeled && lab.Rule == ruleConflictDisjointFiles {
+				t.Errorf("label = %+v, want a pair with a conflict rejection on %s never labeled disjoint", lab, rejected)
+			}
+			if a.unattributed != 1 {
+				t.Errorf("unattributed = %d, want the tipless rejection still counted", a.unattributed)
+			}
+		})
 	}
 }
 
