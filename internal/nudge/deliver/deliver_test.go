@@ -278,6 +278,30 @@ func TestDeliveryWaitIdleWarnsWhenNudgeNotConsumed(t *testing.T) {
 	}
 }
 
+// TestDeliveryWatcherWarnsWhenNudgeNotConsumed: a watcher that drains a queued
+// nudge into an idle target reports when the target took the input but
+// started no turn, as the direct delivery paths do (gt-eigw).
+func TestDeliveryWatcherWarnsWhenNudgeNotConsumed(t *testing.T) {
+	t.Parallel()
+	ft := newDeliveryTmux(t, deliveryTarget)
+	ft.SetIdle(deliveryTarget, true)
+	ft.consumption = tmux.InputConsumptionNotConsumed
+	town, stderr := t.TempDir(), &bytes.Buffer{}
+	d := testDelivery(ft, town, &pollerLog{}, stderr)
+	if err := nudge.Enqueue(town, deliveryTarget, d.queued("mayor", "check mail")); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	d.Watch(t.Context(), deliveryTarget)
+
+	if got := ft.Sent(deliveryTarget); len(got) != 1 {
+		t.Fatalf("sent = %q, want the queued nudge delivered once", got)
+	}
+	if !strings.Contains(stderr.String(), "idle-watcher: wait-idle: "+deliveryTarget+" accepted the nudge but started no turn") {
+		t.Errorf("stderr = %q, want the watcher's not-consumed warning", stderr)
+	}
+}
+
 func TestDeliveryImmediateRefusesBusyTargetWithoutForce(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, deliveryTarget) // busy
@@ -376,13 +400,15 @@ func TestDeliveryWaitIdleSkipsConsumptionProbeAfterCtxEnds(t *testing.T) {
 }
 
 // clampProbeToDeadline: a probe starts with at most the time left on the
-// caller's deadline, not the full ProbeWindow, so a 5ms deadline is not held
-// for a 3s probe (gt-2a2a6).
+// caller's deadline, not the full ProbeWindow, so a delivery with a second
+// left is not held for a 3s probe (gt-2a2a6). The deadline must outlast the
+// delivery: if it expires first, no probe starts and nothing is checked.
 func clampProbeToDeadline(t *testing.T, mode string, idle bool) {
 	t.Helper()
+	const left = time.Second
 	ft := newDeliveryTmux(t, deliveryTarget)
 	ft.SetIdle(deliveryTarget, idle)
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Millisecond)
+	ctx, cancel := context.WithTimeout(t.Context(), left)
 	defer cancel()
 	probe := &probeRecordingTmux{deliveryTmux: ft}
 	d := testDelivery(ft, t.TempDir(), &pollerLog{}, &bytes.Buffer{})
@@ -392,9 +418,13 @@ func clampProbeToDeadline(t *testing.T, mode string, idle bool) {
 	if err := d.Deliver(ctx, deliveryTarget, "m", "mayor"); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("deliver: %v", err)
 	}
-	for _, w := range probe.probeWindows() {
-		if w > 5*time.Millisecond {
-			t.Errorf("consumption probe window = %v, want at most the 5ms left on the deadline", w)
+	windows := probe.probeWindows()
+	if len(windows) == 0 {
+		t.Fatal("no consumption probe ran, so the clamp was not checked")
+	}
+	for _, w := range windows {
+		if w > left {
+			t.Errorf("consumption probe window = %v, want at most the %s left on the deadline", w, left)
 		}
 	}
 }
