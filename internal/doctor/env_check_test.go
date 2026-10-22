@@ -549,3 +549,49 @@ func TestEnvVarsCheck_FixSkipsCorrectVars(t *testing.T) {
 		t.Errorf("Fix() should not call SetEnvironment when vars are correct, got: %v", mock.setCalls)
 	}
 }
+
+// TestEnvVarsCheckExpectedIgnoresDoctorEnv pins gt-jb4zh: the expected GOFLAGS
+// comes from the session being checked, so a polecat whose GOFLAGS already
+// matches the policy is not reported as drift because of the doctor's own env.
+func TestEnvVarsCheckExpectedIgnoresDoctorEnv(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name          string
+		doctorGOFLAGS string
+	}{
+		{name: "doctor GOFLAGS unset", doctorGOFLAGS: ""},
+		{name: "doctor GOFLAGS without cap", doctorGOFLAGS: "-race"},
+		{name: "doctor GOFLAGS with other cap", doctorGOFLAGS: "-p=2"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doctorEnv := func(key string) string {
+				if key == "GOFLAGS" {
+					return tc.doctorGOFLAGS
+				}
+				return ""
+			}
+			session := config.AgentEnv(config.AgentEnvConfig{
+				Role:      "polecat",
+				Rig:       "myrig",
+				AgentName: "Toast",
+				TownRoot:  testTownRoot,
+				Getenv:    doctorEnv,
+			})
+			session["GOFLAGS"] = "-p=8"
+			reader := &mockEnvReader{
+				sessions: []string{"mr-Toast"},
+				sessionEnvs: map[string]map[string]string{
+					"mr-Toast": session,
+				},
+			}
+			check := NewEnvVarsCheckWithReader(reader)
+			check.getenv = doctorEnv
+			result := check.Run(testCtx())
+
+			if result.Status != StatusOK {
+				t.Errorf("Status = %v, want StatusOK; details: %v", result.Status, result.Details)
+			}
+		})
+	}
+}
