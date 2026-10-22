@@ -137,14 +137,6 @@ func diffHooksConfigs(current, expected *hooks.HooksConfig) []string {
 		lines = append(lines, typeDiff...)
 	}
 
-	// hooks.HooksEqual is the gate sync and doctor use. A difference the
-	// per-entry rendering above cannot name must still be reported, or the
-	// diff says "in sync" for a target sync would rewrite.
-	if len(lines) == 0 && !hooks.HooksEqual(current, expected) {
-		lines = append(lines, fmt.Sprintf("  %s\n",
-			diffRemove.Render("settings hooks differ from the generated config (sync rewrites them)")))
-	}
-
 	return lines
 }
 
@@ -250,11 +242,12 @@ func diffCommands(hookType, matcher string, current, expected hooks.HookEntry) [
 		}
 
 		// Both exist - compare. Type matters because HooksEqual compares it
-		// (an on-disk "type":"" or "shell" is drift sync rewrites). If matters: the built-in guards stopped
-		// setting If (gt-3mp1), but an operator-supplied override may carry
-		// one, and two hooks on the same bare-tool matcher can then share an
-		// identical Command and differ only by If — so an If-only drift (a
-		// typo'd pattern in an on-disk override) must still show up here.
+		// (an on-disk "type":"" or "shell" is drift sync rewrites). If matters
+		// too: the built-in guards stopped setting If (gt-3mp1), but an
+		// operator-supplied override may carry one, and two hooks on the same
+		// bare-tool matcher can then share an identical Command and differ only
+		// by If, so an If-only drift (a typo'd pattern in an on-disk override)
+		// must still show up here.
 		if current.Hooks[i].Command != expected.Hooks[i].Command ||
 			current.Hooks[i].If != expected.Hooks[i].If ||
 			current.Hooks[i].Type != expected.Hooks[i].Type {
