@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -138,14 +139,23 @@ func slingBlocked(townRoot, rigName string, estopOn func(townRoot, rigName strin
 }
 
 // IsRigParkedOrDocked checks if a rig is parked or docked. Returns
-// (blocked, reason) with reason "parked" or "docked". This is the single
-// entry point for all dispatch paths (sling, polecat spawn, the daemon,
-// gt spec) to check rig availability.
+// (blocked, reason) with reason "parked", "docked" or sling.RigStatusUnverified.
+// This is the single entry point for all dispatch paths (sling, polecat spawn,
+// the daemon, gt spec) to check rig availability.
 //
 // Parked is the rig's record in mayor/town.json (registry), read through the
 // config kernel, and fails closed: a rig whose park state cannot be read is
-// parked (gt-y3pgh.4). Docked is the rig identity bead's status:docked label.
+// parked (gt-y3pgh.4). Docked is the rig identity bead's status:docked label,
+// and that read fails closed too: when bd cannot answer, the rig may be docked,
+// so it is blocked as unverified. A rig with no identity bead at all
+// (ErrNotFound) is not blocked.
 func IsRigParkedOrDocked(townRoot, rigName string) (bool, string) {
+	return rigParkedOrDockedWith(townRoot, rigName, nil)
+}
+
+// rigParkedOrDockedWith is IsRigParkedOrDocked with the identity bead read
+// from store (nil: bd in the rig's own database).
+func rigParkedOrDockedWith(townRoot, rigName string, store beads.Client) (bool, string) {
 	if IsRigParked(townRoot, rigName) {
 		return true, "parked"
 	}
@@ -158,16 +168,21 @@ func IsRigParkedOrDocked(townRoot, rigName string) (bool, string) {
 		return false, ""
 	}
 
-	beadsPath := filepath.Join(rigPath, "mayor", "rig")
-	if _, err := os.Stat(beadsPath); err != nil {
-		beadsPath = rigPath
+	if store == nil {
+		beadsPath := filepath.Join(rigPath, "mayor", "rig")
+		if _, err := os.Stat(beadsPath); err != nil {
+			beadsPath = rigPath
+		}
+		store = beads.New(beadsPath)
 	}
 
-	bd := beads.New(beadsPath)
 	rigBeadID := beads.RigBeadIDWithPrefix(prefix, rigName)
-	rigBead, err := bd.Show(rigBeadID)
-	if err != nil {
+	rigBead, err := store.Show(rigBeadID)
+	if errors.Is(err, beads.ErrNotFound) {
 		return false, ""
+	}
+	if err != nil {
+		return true, sling.RigStatusUnverified
 	}
 
 	for _, l := range rigBead.Labels {
