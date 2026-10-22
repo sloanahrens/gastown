@@ -222,9 +222,11 @@ func (a *rulesAdapter) readRefusals() ([]attention.Refusal, error) {
 	return refusals, nil
 }
 
-// inRuleWindow reports whether at falls from the submission to the window's end.
+// inRuleWindow reports whether at falls after the submission, up to the window's
+// end. The start is open: a line made from a refusal takes the refusal's time as
+// its submission, so an inclusive start would let that refusal label its own line.
 func inRuleWindow(at, from, end time.Time) bool {
-	return !at.Before(from) && !at.After(end)
+	return at.After(from) && !at.After(end)
 }
 
 // beadComments reads a bead's comments from its rig's store. A bead the store

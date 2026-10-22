@@ -114,6 +114,26 @@ func TestRulesLabelsNegativeAfterWindow(t *testing.T) {
 	}
 }
 
+// TestRefusalSourcedLineIsNotLabeledByItsOwnRefusal checks a line made from a
+// revert-guard refusal is not labeled broke by that refusal. The refusal's time
+// is the line's submission, so it sits on the window's start and must not count.
+func TestRefusalSourcedLineIsNotLabeledByItsOwnRefusal(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := attention.AppendRefusal(town, attention.Refusal{
+		TS: rulesDoneAt, Bead: "gt-x", Rig: "gastown", Worker: "bullet",
+		Head: "abc1234", Kind: attention.KindRevertGuard, Summary: "reverts a merged commit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), nil)
+
+	lab := labelRules(t, a, rulesRaw(t, "gt-x"))
+	if !lab.Labeled || lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesNoRecord {
+		t.Errorf("labeling = %+v, want broke false from %s: the refusal that made the line labeled it", lab, ruleRulesNoRecord)
+	}
+}
+
 // TestRulesStaysUnlabeledInsideWindow checks a session younger than the window
 // is not labeled, since a record may still be coming.
 func TestRulesStaysUnlabeledInsideWindow(t *testing.T) {
