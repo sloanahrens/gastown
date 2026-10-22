@@ -819,6 +819,17 @@ func TestGetActiveTmuxSessionsListingFails(t *testing.T) {
 	}
 }
 
+// TestGetActiveTmuxSessionsMissingBinary: a tmux binary that is not installed
+// fails to start rather than exiting, so it is an error, not "no sessions".
+func TestGetActiveTmuxSessionsMissingBinary(t *testing.T) {
+	t.Parallel()
+	f := &fakeTmux{err: &exec.Error{Name: "tmux", Err: exec.ErrNotFound}}
+	sessions, err := activeTmuxSessions(f.run, "")
+	if err == nil || sessions != nil {
+		t.Errorf("activeTmuxSessions() = %v, %v; want nil and an error", sessions, err)
+	}
+}
+
 // TestGetActiveTmuxSessionsNameOnly: a line with no session id still yields
 // its name, and blank lines are skipped.
 func TestGetActiveTmuxSessionsNameOnly(t *testing.T) {
