@@ -355,7 +355,6 @@ func Run(ctx context.Context, opts Options, deps Deps) (Report, error) {
 		SpawnDelay: dispatchPlan.SpawnDelay,
 	}
 
-	dispatchPlan.Plan = r.dropRigHeldBeads(opts.TownRoot, dispatchPlan.Plan)
 	cycleReport, err := cycle.RunPlan(dispatchPlan.Plan)
 	if err != nil {
 		return Report{}, fmt.Errorf("dispatch cycle failed: %w", err)
@@ -451,7 +450,7 @@ func (r *runner) buildPlan(townRoot string, batchOverride int, cleanup bool) (*s
 	}
 
 	ready := readySlingContextsFromAssessments(r.errOut(), assessments)
-	dispatchPlan := capacity.PlanDispatch(seats.Free, batchSize, ready)
+	dispatchPlan := r.planDispatch(townRoot, seats.Free, batchSize, ready)
 	if len(ready) > 0 {
 		switch {
 		case state.Paused:

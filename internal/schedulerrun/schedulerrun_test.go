@@ -108,6 +108,46 @@ func TestDropRigHeldBeads_RigEstopRemovesOnlyThatRig(t *testing.T) {
 	}
 }
 
+func TestPlanSkipsRigHeldHeadOfQueueBeforeBatching(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(townRoot, "ESTOP.gastown"), []byte("manual\t2026-10-22T00:00:00Z\tt\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ready := []capacity.PendingBead{
+		{ID: "ctx-1", WorkBeadID: "gt-a", TargetRig: "gastown"},
+		{ID: "ctx-2", WorkBeadID: "om-b", TargetRig: "om"},
+	}
+
+	r := &runner{}
+	plan := r.planDispatch(townRoot, 1, 1, ready)
+
+	if len(plan.ToDispatch) != 1 || plan.ToDispatch[0].WorkBeadID != "om-b" {
+		t.Fatalf("ToDispatch = %+v, want only om-b: a held head-of-queue bead must not use up the batch", plan.ToDispatch)
+	}
+	if plan.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1 (the held bead)", plan.Skipped)
+	}
+}
+
+func TestValidateDryRunDropsRigHeldBeads(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(townRoot, "ESTOP.gastown"), []byte("manual\t2026-10-22T00:00:00Z\tt\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := &runner{}
+	plan := r.validateDryRun(townRoot, capacity.DispatchPlan{
+		ToDispatch: []capacity.PendingBead{{ID: "ctx-1", WorkBeadID: "gt-a", TargetRig: "gastown"}},
+		Reason:     "ready",
+	})
+
+	if len(plan.ToDispatch) != 0 || plan.Skipped != 1 {
+		t.Fatalf("validated plan = %+v, want the held bead dropped and counted as skipped", plan)
+	}
+}
+
 func TestValidateDryRunMarksAllInvalidAsValidation(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
