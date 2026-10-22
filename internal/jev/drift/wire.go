@@ -37,9 +37,9 @@ type Settings struct {
 
 // Open wires the production pass for a town: the Jev client writing to the
 // usage ledger under the Caller name, the rig's landings file, the submission
-// battery's bare clone and the cap read from the same ledger. hm ranks the doc
-// files when it is on the PATH. warnings receives the ledger's own warnings
-// and may be nil.
+// battery's bare clone, fetched under that battery's own run lock, and the cap
+// read from the same ledger. hm ranks the doc files when it is on the PATH.
+// warnings receives the ledger's own warnings and may be nil.
 func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	capUSD := s.MaxUSDPerDay
 	if capUSD == 0 {
@@ -69,9 +69,12 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	}
 
 	p := &Pass{
-		Asker:      client,
-		Landings:   landings,
-		Git:        cloneRepo{c: clone},
+		Asker:    client,
+		Landings: landings,
+		Git: lockedRepo{
+			Repo: cloneRepo{c: clone},
+			lock: func(ctx context.Context) (func(), error) { return submission.WaitRunLock(ctx, townRoot) },
+		},
 		LogPath:    LogPath(townRoot),
 		CursorPath: CursorPath(townRoot),
 		Allows:     func() (bool, error) { return town.Allows(time.Now) },
@@ -88,6 +91,27 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 type gitClone interface {
 	Sync(ctx context.Context) error
 	Run(ctx context.Context, args ...string) (string, error)
+}
+
+// lockedRepo fetches the submission battery's bare clone under that battery's
+// own run lock. The clone is shared: the submission pass holds the lock while
+// it fetches, so a fetch that skipped the lock would fail one of the two and
+// lose its work. The reads go straight through, since a read never writes the
+// clone.
+type lockedRepo struct {
+	Repo
+	// lock takes the submission battery's run lock, waiting for its holder.
+	lock func(ctx context.Context) (func(), error)
+}
+
+// Sync waits for the submission battery's run lock, then fetches.
+func (r lockedRepo) Sync(ctx context.Context) error {
+	release, err := r.lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return r.Repo.Sync(ctx)
 }
 
 // cloneRepo reads the rig from the submission battery's bare clone.
@@ -221,5 +245,6 @@ var (
 	_ Asker    = (*jev.Client)(nil)
 	_ Landings = (*land.LandingsFile)(nil)
 	_ Repo     = cloneRepo{}
+	_ Repo     = lockedRepo{}
 	_ Ranker   = hmRanker{}
 )

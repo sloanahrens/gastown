@@ -17,6 +17,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
+	"github.com/steveyegge/gastown/internal/jev/submission"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -896,5 +897,50 @@ func TestJevDriftParseDocPathsReadsHitTextInRankOrder(t *testing.T) {
 	}
 	if _, err := parseDocPaths([]byte("not json")); err == nil {
 		t.Error("parseDocPaths accepted a non-JSON reply")
+	}
+}
+
+// TestJevDriftFetchTakesTheSubmissionLock: a fetch into the submission
+// battery's shared clone waits out that battery's run lock instead of racing
+// it. Two fetches into one clone fail each other, and a failed Sync lost the
+// pass its week. Before the fix the fetch ran under no lock at all.
+func TestJevDriftFetchTakesTheSubmissionLock(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	rec := landed("gt-lock", 2*time.Minute)
+	r := newRig(t, rec)
+	r.pass.Git = lockedRepo{
+		Repo: r.git,
+		lock: func(ctx context.Context) (func(), error) { return submission.WaitRunLock(ctx, town) },
+	}
+	r.serve(rec, "1\t1\tinternal/cmd/jev_landing.go\n", recentFlagPatch)
+	if err := battery.WriteCursor(r.cursor, battery.Cursor{Time: t0}); err != nil {
+		t.Fatal(err)
+	}
+
+	release, err := battery.Lock(submission.CursorPath(town) + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := r.pass.Run(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run with the submission lock held = %v, want the wait to end with the ctx", err)
+	}
+	if r.git.synced != 0 {
+		t.Errorf("fetched %d times under a held lock, want 0", r.git.synced)
+	}
+
+	// Once the battery lets go, the same pass fetches and finishes.
+	release()
+	if _, err := r.pass.Run(context.Background()); err != nil {
+		t.Fatalf("Run after the lock was released = %v, want it to fetch and finish", err)
+	}
+	if r.git.synced != 1 {
+		t.Errorf("fetched %d times, want 1", r.git.synced)
+	}
+	cur, _, _ := battery.ReadCursor(r.cursor)
+	if !cur.Time.After(t0) {
+		t.Errorf("cursor = %v, want it moved past %v", cur.Time, t0)
 	}
 }
