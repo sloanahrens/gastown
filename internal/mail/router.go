@@ -1571,7 +1571,7 @@ func (r *Router) sendToQueue(msg *Message) error {
 
 // sendToAnnounce delivers a message to an announce channel (bulletin board).
 // Unlike sendToQueue, no claiming is supported - messages persist until retention limit.
-// ONE copy is stored in town-level beads with announce_channel metadata.
+// ONE copy is stored in town-level beads, assigned to announce:<name> and labeled announce:<name>.
 func (r *Router) sendToAnnounce(msg *Message) error {
 	announceName := parseAnnounceName(msg.To)
 
