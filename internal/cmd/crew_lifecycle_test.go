@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -78,30 +77,73 @@ func TestCrewRemoveRunningSessionKeepsWorkspace(t *testing.T) {
 	}
 }
 
-// `--resume <id>` with a space does not carry the ID: NoOptDefVal leaves it as a
-// positional argument, which then reads as a crew name. This is why the help
-// documents only the = form. The flag is rebuilt on a private command, with the
-// NoOptDefVal checked against crewStartCmd, so the package globals stay untouched.
-func TestCrewStartResumeSpaceFormIsPositional(t *testing.T) {
+// --resume=<value> names a session ID. A crew member's name there is rejected;
+// a session ID, or a name that matches no member, passes.
+func TestCheckCrewResumeTarget(t *testing.T) {
+	t.Parallel()
+
+	workers := []*crew.CrewWorker{{Name: "max"}, {Name: "emma"}}
+	tests := []struct {
+		name    string
+		resume  string
+		wantErr bool
+	}{
+		{"crew member name is rejected", "max", true},
+		{"session ID passes", "abc123", false},
+		{"name matching no member passes", "joe", false},
+		{"name matching a later member is rejected", "emma", true},
+		{"name differing only in case passes", "Max", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkCrewResumeTarget(tt.resume, workers)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("checkCrewResumeTarget(%q) error = %v, wantErr %v", tt.resume, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+// A bare --resume must mean "last" on the real command: runCrewStart's guard
+// relies on it, since the space form is read as a positional crew name.
+func TestCrewStartResumeNoOptDefValIsLast(t *testing.T) {
 	t.Parallel()
 
 	if got := crewStartCmd.Flags().Lookup("resume").NoOptDefVal; got != "last" {
 		t.Fatalf("crewStartCmd --resume NoOptDefVal = %q, want %q", got, "last")
 	}
+}
 
-	cmd := &cobra.Command{}
-	var resume string
-	cmd.Flags().StringVar(&resume, "resume", "", "")
-	cmd.Flags().Lookup("resume").NoOptDefVal = "last"
+// checkCrewResumeFlag rejects a crew member's name given as a session ID, and
+// a failed listing lets the start through.
+func TestCheckCrewResumeFlag(t *testing.T) {
+	t.Parallel()
 
-	if err := cmd.ParseFlags([]string{"--resume", "abc123"}); err != nil {
-		t.Fatalf("ParseFlags: %v", err)
+	workers := []*crew.CrewWorker{{Name: "max"}, {Name: "last"}}
+	listErr := errors.New("listing crew: disk gone")
+	ok := func() ([]*crew.CrewWorker, error) { return workers, nil }
+	failed := func() ([]*crew.CrewWorker, error) { return nil, listErr }
+
+	tests := []struct {
+		name    string
+		resume  string
+		list    func() ([]*crew.CrewWorker, error)
+		wantErr bool
+	}{
+		{"empty value is not checked", "", ok, false},
+		{"bare resume is not checked, even for a member named last", "last", ok, false},
+		{"crew member name is rejected", "max", ok, true},
+		{"session ID passes", "abc123", ok, false},
+		{"listing failure fails open for a member name", "max", failed, false},
+		{"listing failure fails open for a session ID", "abc123", failed, false},
 	}
-	if resume != "last" {
-		t.Errorf("resume = %q, want %q (bare --resume)", resume, "last")
-	}
-	if got := cmd.Flags().Args(); len(got) != 1 || got[0] != "abc123" {
-		t.Errorf("positional args = %v, want [abc123]", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkCrewResumeFlag(tt.resume, tt.list)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("checkCrewResumeFlag(%q) error = %v, wantErr %v", tt.resume, err, tt.wantErr)
+			}
+		})
 	}
 }
 
