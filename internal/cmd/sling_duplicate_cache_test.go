@@ -757,3 +757,30 @@ func TestDuplicateDetailCacheKeepsACustomStatusBlockerOpen(t *testing.T) {
 		}
 	}
 }
+
+// customListFailsStore fails the list of custom-status beads and answers every
+// other list from the store beneath it.
+type customListFailsStore struct{ beads.Client }
+
+func (s customListFailsStore) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	if strings.Contains(opts.Status, "staged_") {
+		return nil, errors.New("bd list: custom status refused")
+	}
+	return s.Client.List(opts)
+}
+
+// The custom-status lookup only refines the cached blocker read: when it fails
+// the pool still comes back from the lists that matter, and the failure is
+// reported (gt-1w1ig).
+func TestFetchDuplicatePoolSurvivesACustomStatusListFailure(t *testing.T) {
+	t.Parallel()
+	db := duplicateGuardFixture(t)
+	want := tickOver(t, newCountingStore(listLikeBD{Client: db}), filepath.Join(t.TempDir(), "cache.json"), "daemon-1", 40)
+	got := tickOver(t, customListFailsStore{listLikeBD{Client: db}}, filepath.Join(t.TempDir(), "cache.json"), "daemon-1", 40)
+	if len(got.pool) == 0 || len(got.pool) != len(want.pool) {
+		t.Fatalf("pool after the custom list failed has %d candidates, want the %d it has otherwise", len(got.pool), len(want.pool))
+	}
+	if len(got.warnings) != 1 || !strings.Contains(got.warnings[0], "custom status refused") {
+		t.Fatalf("warnings = %q, want the custom-status list failure reported once", got.warnings)
+	}
+}

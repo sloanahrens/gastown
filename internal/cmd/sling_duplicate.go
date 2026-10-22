@@ -583,10 +583,18 @@ func fetchDuplicatePoolWith(store beads.Client, warn func(beadsDir string, err e
 	}
 	// A bead in a custom status is not compared as a peer, but a blocker in one
 	// is still open: listing it here keeps the cache from reading an edge to it
-	// as resolved because the pool does not list its target (gt-rhr2t).
-	customRows, err := listDuplicateRows(store, constants.BeadsCustomStatusesList(), time.Time{})
-	if err != nil {
-		return nil, err
+	// as resolved because the pool does not list its target (gt-rhr2t). The
+	// lookup is a refinement of the cached blocker read, so a failure is
+	// reported and the pool is built without it, as a failed enrichment is; it
+	// stays its own list because folding it into the active one would let a bd
+	// that rejects a custom status fail that list too. With no custom status
+	// registered there is nothing to ask: an empty status filter is not "none".
+	var customRows []*beads.Issue
+	if custom := constants.BeadsCustomStatusesList(); len(custom) > 0 {
+		var customErr error
+		if customRows, customErr = listDuplicateRows(store, custom, time.Time{}); customErr != nil {
+			warn(beadsDir, customErr)
+		}
 	}
 	known := append(append(append([]*beads.Issue(nil), activeRows...), closedRows...), customRows...)
 	active, activeDeferred, activeErr := duplicateCandidatesOf(store, beadsDir, activeRows, details, known)
