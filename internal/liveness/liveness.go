@@ -262,6 +262,7 @@ func hasEvidence(s *intent.Progress) bool {
 
 // claudeTranscript is the default TranscriptFunc.
 func claudeTranscript(workDir string) (string, time.Time, int64, error) {
+	// No town root: the omission is deliberate, tracked as gt-gnqi8.
 	path, err := agentlog.LatestTranscript("", workDir)
 	if err != nil || path == "" {
 		return "", time.Time{}, 0, err
