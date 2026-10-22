@@ -204,6 +204,35 @@ func TestListFilesFollowsSymlinkedNotes(t *testing.T) {
 	}
 }
 
+// A link named as a note does not send its target to Jev unless the target is
+// a markdown note too: a link to any other file is no note.
+func TestListFilesSkipsSymlinkToNonMarkdownFile(t *testing.T) {
+	t.Parallel()
+	configDir, home, town := t.TempDir(), t.TempDir(), "/town/gt"
+	mem, err := memoryDir(configDir, town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(mem, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(t.TempDir(), "id_rsa")
+	if err := os.WriteFile(secret, []byte("not a note"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(mem, "key.md")); err != nil {
+		t.Fatal(err)
+	}
+
+	files, err := listFiles(configDir, home, town)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 0 {
+		t.Errorf("files = %v, want none: a link to a non-markdown file is not a note", noteNames(files))
+	}
+}
+
 // Neither directory existing is no files, not an error.
 func TestListFilesWithNothingThere(t *testing.T) {
 	t.Parallel()
