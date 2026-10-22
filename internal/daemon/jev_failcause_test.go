@@ -3,7 +3,6 @@ package daemon
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"log"
 	"os"
@@ -112,13 +111,16 @@ func TestJevFailcauseCandidateWrapsWhenPriced(t *testing.T) {
 	}
 }
 
-// failcauseCountingAsker counts the Jev calls the battery makes. It answers
-// with an error, which the battery records and ends the judging on.
+// failcauseCountingAsker counts the Jev calls the battery makes and answers
+// them, so a run that reaches the battery also reaches its log.
 type failcauseCountingAsker struct{ calls int }
 
 func (a *failcauseCountingAsker) Ask(context.Context, any, map[string]jev.Question) (*jev.Answers, error) {
 	a.calls++
-	return nil, errors.New("fake asker: no answer")
+	return &jev.Answers{
+		Noul:   map[string]float64{failcause.QWillRecur: 0.1},
+		Choice: map[string]jev.ChoiceAnswer{failcause.QCause: {Choice: "flake", Probabilities: map[string]float64{"flake": 1}}},
+	}, nil
 }
 
 // failedGate is a candidate gate whose verdict is red, with one failing Go test
@@ -134,40 +136,73 @@ func (failedGate) Run(context.Context, land.Repo, string, land.Work, string) lan
 func (failedGate) Discard(context.Context, land.Work, land.CandidateResult) {}
 
 // An E-stop raised before a red verdict is judged keeps the battery from asking
-// Jev: the candidate's asker refuses the call, and the landing's verdict is
-// still returned unchanged.
-func TestJevFailcauseCandidateStopsUnderEstop(t *testing.T) {
+// Jev. The same wiring with no E-stop asks once and writes the test's line, so
+// the difference is the E-stop and not a battery that never ran. Under the
+// E-stop the refusal shows past the call count: nothing reaches the failcause
+// log, and the daemon's log names the canceled call. Either way the landing's
+// verdict is returned unchanged.
+func TestJevFailcauseCandidateHonorsTheEstop(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	asker := &failcauseCountingAsker{}
-	d := &Daemon{
-		config: &Config{TownRoot: town},
-		logger: log.New(&bytes.Buffer{}, "", 0),
-		patrolConfig: &DaemonPatrolConfig{
-			Patrols: &PatrolsConfig{JevFailcause: &JevFailcauseConfig{Enabled: true, USDPerBillionTokens: 3}},
-		},
-		jevFailcauseOpen: func(string, failcause.Settings, io.Writer) (*failcause.Pass, error) {
-			return &failcause.Pass{
-				Asker:   asker,
-				LogPath: filepath.Join(town, "failcause.jsonl"),
-				Allows:  func() (bool, error) { return true, nil },
-			}, nil
-		},
-	}
-	if err := estop.Activate(town, estop.TriggerManual, "test E-stop before the judging"); err != nil {
-		t.Fatal(err)
-	}
-	shadow := d.jevFailcauseCandidate("gastown", failedGate{}).(failcause.Shadow)
-	// Run the judging inline so the test sees its outcome.
-	shadow.Async = func(call func()) { call() }
+	for _, tc := range []struct {
+		name      string
+		estop     bool
+		wantCalls int
+		wantLines int
+	}{
+		{name: "without the E-stop", wantCalls: 1, wantLines: 1},
+		{name: "under the E-stop", estop: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			logs := &bytes.Buffer{}
+			asker := &failcauseCountingAsker{}
+			d := &Daemon{
+				config: &Config{TownRoot: town},
+				logger: log.New(logs, "", 0),
+				patrolConfig: &DaemonPatrolConfig{
+					Patrols: &PatrolsConfig{JevFailcause: &JevFailcauseConfig{Enabled: true, USDPerBillionTokens: 3}},
+				},
+				jevFailcauseOpen: func(string, failcause.Settings, io.Writer) (*failcause.Pass, error) {
+					return &failcause.Pass{
+						Asker:   asker,
+						LogPath: filepath.Join(town, "failcause.jsonl"),
+						Allows:  func() (bool, error) { return true, nil },
+					}, nil
+				},
+			}
+			if tc.estop {
+				if err := estop.Activate(town, estop.TriggerManual, "test E-stop before the judging"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			shadow := d.jevFailcauseCandidate("gastown", failedGate{}).(failcause.Shadow)
+			// Run the judging inline so the test sees its outcome.
+			shadow.Async = func(call func()) { call() }
 
-	res := shadow.Run(context.Background(), nil, t.TempDir(), land.Work{BeadID: "gt-abc"}, "abc123")
+			res := shadow.Run(context.Background(), nil, t.TempDir(), land.Work{BeadID: "gt-abc"}, "abc123")
 
-	if res.State != land.CandidateFailed {
-		t.Errorf("the verdict is %v, want the gate's red result returned unchanged", res.State)
-	}
-	if asker.calls != 0 {
-		t.Errorf("the battery asked Jev %d time(s) under the E-stop, want none", asker.calls)
+			if res.State != land.CandidateFailed {
+				t.Errorf("the verdict is %v, want the gate's red result returned unchanged", res.State)
+			}
+			if asker.calls != tc.wantCalls {
+				t.Errorf("the battery asked Jev %d time(s), want %d", asker.calls, tc.wantCalls)
+			}
+			written, err := os.ReadFile(filepath.Join(town, "failcause.jsonl"))
+			if err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+			if got := strings.Count(string(written), "\n"); got != tc.wantLines {
+				t.Errorf("the failcause log holds %d line(s), want %d: %s", got, tc.wantLines, written)
+			}
+			if tc.estop {
+				if !strings.Contains(logs.String(), "context canceled") {
+					t.Errorf("log = %q, want the refused call named as canceled", logs)
+				}
+			} else if logs.Len() != 0 {
+				t.Errorf("log = %q, want the battery's judgement reported clean", logs)
+			}
+		})
 	}
 }
 
