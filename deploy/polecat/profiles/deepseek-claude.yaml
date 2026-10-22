@@ -1,0 +1,36 @@
+# Provider profile: DeepSeek's Anthropic-compatible endpoint used by Claude Code
+# (claude --model deepseek-flash with ANTHROPIC_BASE_URL=https://api.deepseek.com/anthropic).
+#
+# Import:  openshell profile lint -f deploy/polecat/profiles/deepseek-claude.yaml
+#          openshell profile import -f deploy/polecat/profiles/deepseek-claude.yaml --global
+# Provider: ANTHROPIC_AUTH_TOKEN=<key> openshell provider create --name deepseek \
+#             --type deepseek-claude --credential ANTHROPIC_AUTH_TOKEN
+#
+# Claude Code sends ANTHROPIC_AUTH_TOKEN as "Authorization: Bearer" and
+# ANTHROPIC_API_KEY as "x-api-key". Both env vars receive the placeholder so
+# whichever header the CLI uses is rewritten at api.deepseek.com and nowhere else.
+# Binary: the Claude Code 2.x native launcher under the npm global install.
+
+id: deepseek-claude
+display_name: DeepSeek (Anthropic-compatible) for Claude Code
+description: DeepSeek inference through its Anthropic-compatible API, for the Claude Code CLI
+category: inference
+inference_capable: true
+credentials:
+  - name: api_key
+    description: DeepSeek API key, sent only to api.deepseek.com
+    env_vars: [ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY]
+    required: true
+    auth_style: bearer
+    header_name: authorization
+discovery:
+  credentials: [api_key]
+endpoints:
+  - host: api.deepseek.com
+    port: 443
+    protocol: rest
+    access: read-write
+    enforcement: enforce
+binaries:
+  - /usr/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+  - /usr/bin/node
