@@ -1061,7 +1061,7 @@ func (r HourRun) renderSection(name string, doc *HourDoc) {
 					// (gt-euxf1).
 					r.row("%s  %s %s  %d passed, %d failed%s  sha %s  %s",
 						s.Rig, tier.Tier, reportOrDash(tier.Verdict), tier.Passed, tier.Failed,
-						reportFailedNames(tier.FailedNames), reportOrDash(shortHash(tier.SHA)), r.sweptAge(s.LastRun))
+						reportFailedNames(tier.FailedNames), reportOrDash(shortHash(tier.SHA)), r.tierAge(s, tier))
 				}
 			}
 		}
@@ -1109,6 +1109,17 @@ func (r HourRun) sweptAge(t *time.Time) string {
 		return "run time unknown"
 	}
 	return Age(r.Until.Sub(*t)) + " ago"
+}
+
+// tierAge renders when a tier's verdict was taken. The record's last run dates
+// only the tier the last cycle reached, the one at the record's last_sha; any
+// other tier keeps an earlier verdict whose run time the record does not hold
+// (gt-euxf1).
+func (r HourRun) tierAge(s reportSweepRig, tier reportSweepTier) string {
+	if tier.SHA != s.LastSHA {
+		return "run time unknown, not in last cycle"
+	}
+	return r.sweptAge(s.LastRun)
 }
 
 func reportOMField(l reportLanding) string {
