@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/doltargv"
 )
 
 // sampleTimeout bounds one Sample. top takes two samples a second apart, so
@@ -273,7 +275,7 @@ func parseDoltCores(s string) *float64 {
 	var found bool
 	for _, line := range strings.Split(s, "\n") {
 		f := strings.Fields(line)
-		if len(f) < 3 || baseName(f[1]) != "dolt" || f[2] != "sql-server" || isTestServer(f[3:]) {
+		if len(f) < 3 || !doltargv.IsSQLServer(f[1:]) || isTestServer(f[2:]) {
 			continue
 		}
 		cpu, err := strconv.ParseFloat(f[0], 64)

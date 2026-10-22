@@ -29,6 +29,7 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -951,6 +952,26 @@ func stopIdleMonitors(pids []int) int {
 	return stopped
 }
 
+// doltSQLServerPIDs returns the pids of the `ps -eo pid,args` lines that are a
+// Dolt SQL server, by the argv matcher the rest of gt uses. A process that
+// only mentions the words (`tail -f dolt-sql-server.log`) is not one, and
+// findOrphanDoltServers would otherwise SIGKILL it.
+func doltSQLServerPIDs(psOut string) []int {
+	var pids []int
+	for _, line := range strings.Split(psOut, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || !util.IsDoltSQLServerArgs(fields[1:]) {
+			continue
+		}
+		pids = append(pids, pid)
+	}
+	return pids
+}
+
 // findOrphanDoltServers finds dolt sql-server processes whose working
 // directory is within the town root but NOT the canonical .dolt-data/ dir.
 // These are rogues spawned by bd from .beads/dolt/ directories.
@@ -964,20 +985,7 @@ func findOrphanDoltServers(townRoot string) []int {
 	townAbs, _ := filepath.Abs(townRoot)
 
 	var pids []int
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if !strings.Contains(line, "dolt") || !strings.Contains(line, "sql-server") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 2 {
-			continue
-		}
-		pid, err := strconv.Atoi(fields[0])
-		if err != nil {
-			continue
-		}
-
+	for _, pid := range doltSQLServerPIDs(string(out)) {
 		// Check the process's working directory via lsof
 		cwdOut, err := exec.Command("lsof", "-p", strconv.Itoa(pid), "-Fn", "-d", "cwd").Output()
 		if err != nil {

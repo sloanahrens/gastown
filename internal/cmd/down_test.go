@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -73,5 +74,28 @@ func TestIsProcessRunning_MaxPID(t *testing.T) {
 	t.Parallel()
 	if isProcessRunning(2147483647) {
 		t.Error("max PID should not be running")
+	}
+}
+
+// gt down SIGKILLs what findOrphanDoltServers returns, so the orphan scan
+// must take only real Dolt SQL servers from the process table: a process that
+// merely mentions dolt-sql-server is left alone, and a dolt with a global flag
+// before the subcommand is still found.
+func TestDoltSQLServerPIDsUsesSharedMatcher(t *testing.T) {
+	t.Parallel()
+	ps := strings.Join([]string{
+		"  PID ARGS",
+		"  100 tail -f dolt-sql-server.log",
+		"  101 vim dolt-server.go",
+		"  102 /opt/homebrew/bin/dolt sql-server --port 3307",
+		"  103 dolt --config x sql-server",
+		"  104 dolt status",
+		"  105 grep dolt sql-server",
+	}, "\n")
+
+	got := doltSQLServerPIDs(ps)
+
+	if want := []int{102, 103}; !slices.Equal(got, want) {
+		t.Fatalf("doltSQLServerPIDs = %v, want %v", got, want)
 	}
 }
