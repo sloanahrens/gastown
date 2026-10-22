@@ -41,12 +41,17 @@ func TestBlockedRefusalsRoundTripThroughSlingRefusalLine(t *testing.T) {
 		estop  func(townRoot, rigName string) (bool, error)
 		parked func(townRoot, rigName string) (bool, string)
 		label  string
+		// detail is text the refusal must carry beyond the line the predicate
+		// matches: the reason or the clearing command, so an operator can tell
+		// the states apart.
+		detail string
 	}{
 		{
 			name:   "e-stop active",
 			estop:  estopAnswer(true, nil),
 			parked: parkedAnswer(""),
 			label:  "e-stop",
+			detail: "E-stop active",
 		},
 		{
 			// estop.On reports the state and the read's error separately, and
@@ -55,24 +60,28 @@ func TestBlockedRefusalsRoundTripThroughSlingRefusalLine(t *testing.T) {
 			estop:  estopAnswer(true, errors.New("estop state unreadable")),
 			parked: parkedAnswer(""),
 			label:  "e-stop",
+			detail: "estop state unreadable",
 		},
 		{
 			name:   "parked rig",
 			estop:  estopAnswer(false, nil),
 			parked: parkedAnswer("parked"),
 			label:  "rig parked",
+			detail: "gt rig unpark " + blockedTestRig,
 		},
 		{
 			name:   "docked rig",
 			estop:  estopAnswer(false, nil),
 			parked: parkedAnswer("docked"),
 			label:  "rig docked",
+			detail: "gt rig undock " + blockedTestRig,
 		},
 		{
 			name:   "rig whose identity bead could not be read",
 			estop:  estopAnswer(false, nil),
 			parked: parkedAnswer(RigStatusUnverified),
 			label:  "rig " + RigStatusUnverified,
+			detail: "its identity bead could not be read, so its status is unknown",
 		},
 	}
 	for _, tt := range tests {
@@ -84,6 +93,9 @@ func TestBlockedRefusalsRoundTripThroughSlingRefusalLine(t *testing.T) {
 			}
 			if label != tt.label {
 				t.Errorf("label = %q; want %q", label, tt.label)
+			}
+			if !strings.Contains(err.Error(), tt.detail) {
+				t.Errorf("error %q does not carry %q", err, tt.detail)
 			}
 			if !errors.Is(err, ErrRigUnavailable) {
 				t.Errorf("error %q does not wrap ErrRigUnavailable", err)
