@@ -264,6 +264,12 @@ func TestRigConfigSyncCheck_InvalidMetadataNotOK(t *testing.T) {
 			if !strings.Contains(strings.Join(result.Details, "\n"), "testrig") {
 				t.Errorf("details %q do not name the rig", result.Details)
 			}
+			if !strings.Contains(result.Message, "not auto-repairable") {
+				t.Errorf("message %q does not report the rig as not auto-repairable", result.Message)
+			}
+			if strings.Contains(result.FixHint, "Run 'gt doctor fix rig-config-sync'") {
+				t.Errorf("fix hint %q points at Fix, which cannot repair this rig", result.FixHint)
+			}
 
 			// Fix cannot repair these, so it must leave them non-OK.
 			if err := check.Fix(ctx); err != nil {

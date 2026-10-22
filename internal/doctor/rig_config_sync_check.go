@@ -329,12 +329,17 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 		parts = append(parts, fmt.Sprintf("%d not auto-repairable", len(c.unrepairable)))
 	}
 
+	fixHint := "Run 'gt doctor fix rig-config-sync' to create missing config files and databases"
+	if len(c.unrepairable) == issueCount {
+		fixHint = "Repair the rig directory or files named in the details by hand; 'gt doctor fix rig-config-sync' cannot repair them"
+	}
+
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusWarning,
 		Message: strings.Join(parts, ", "),
 		Details: details,
-		FixHint: "Run 'gt doctor fix rig-config-sync' to create missing config files and databases",
+		FixHint: fixHint,
 	}
 }
 
