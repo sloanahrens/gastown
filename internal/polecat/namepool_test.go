@@ -1389,6 +1389,14 @@ func TestEffectiveTheme(t *testing.T) {
 			list: []string{"anchor", "berth"},
 		},
 		{
+			name:    "explicit namepool names beat a style set beside them",
+			rigName: "harbor",
+			write: func(t *testing.T, _, rigPath string) {
+				settings(t, rigPath, `{"namepool": {"style": "minerals", "names": ["anchor", "berth"]}}`)
+			},
+			list: []string{"anchor", "berth"},
+		},
+		{
 			name:    "rig config polecat_names",
 			rigName: "harbor",
 			write: func(t *testing.T, _, rigPath string) {

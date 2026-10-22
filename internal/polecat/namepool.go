@@ -784,8 +784,18 @@ func ResolveThemeNames(townRoot, theme string) ([]string, error) {
 	return ParseThemeFile(path)
 }
 
-// EffectiveTheme returns the name theme a rig's polecats are drawn from: the
-// rig settings' namepool style, then an explicit name list, then the rig
+// namepoolNamesWin reports whether a rig settings' namepool block draws its
+// polecat names from its explicit list rather than its style: the list
+// overrides the style (config.NamepoolConfig), so a style set beside it is
+// ignored. newManager and EffectiveTheme both ask this, so the pool and the
+// theme the dashboard reports cannot pick different sources.
+func namepoolNamesWin(np *config.NamepoolConfig) bool {
+	return len(np.Names) > 0
+}
+
+// EffectiveTheme returns the name theme a rig's polecats are drawn from: an
+// explicit namepool name list (which overrides the rig settings' namepool
+// style), then that style, then the rig
 // config's polecat_names, and ThemeForRig's hash when none of the three is
 // set; a rig drawing from an explicit list has no theme to name and reports "".
 //
@@ -794,11 +804,11 @@ func ResolveThemeNames(townRoot, theme string) ([]string, error) {
 func EffectiveTheme(rigPath, rigName string) string {
 	settings, err := config.LoadRigSettings(filepath.Join(rigPath, "settings", "config.json"))
 	if err == nil && settings.Namepool != nil {
+		if namepoolNamesWin(settings.Namepool) {
+			return ""
+		}
 		if settings.Namepool.Style != "" {
 			return settings.Namepool.Style
-		}
-		if len(settings.Namepool.Names) > 0 {
-			return ""
 		}
 		// An empty namepool block is the pool's own default theme, not the
 		// rig-name hash (NewNamePoolWithConfig).
