@@ -179,15 +179,29 @@ func (d *Delivery) Deliver(ctx context.Context, sessionName, message, sender str
 			return err
 		}
 		// Delivery succeeded; now check the target actually acted on it.
-		if warning := d.consumptionWarning(sessionName, ModeImmediate); warning != "" {
+		if warning := d.consumptionWarning(ctx, sessionName, ModeImmediate); warning != "" {
 			fmt.Fprintf(d.Stderr, "%s", warning)
 		}
 		return nil
 	}
 }
 
-func (d *Delivery) consumptionWarning(sessionName, mode string) string {
-	return ConsumptionWarning(d.Tmux.WaitForInputConsumed, d.ProbeWindow, sessionName, mode)
+// consumptionWarning is ConsumptionWarning over the delivery's probe, bounded
+// by ctx: a context that has already ended gets no probe, and one with less
+// than ProbeWindow left gets a probe cut to that time, so the probe never
+// holds a delivery past its caller's deadline.
+func (d *Delivery) consumptionWarning(ctx context.Context, sessionName, mode string) string {
+	if ctx.Err() != nil {
+		return ""
+	}
+	window := d.ProbeWindow
+	if deadline, ok := ctx.Deadline(); ok {
+		window = min(window, time.Until(deadline))
+	}
+	if window <= 0 {
+		return ""
+	}
+	return ConsumptionWarning(d.Tmux.WaitForInputConsumed, window, sessionName, mode)
 }
 
 // ConsumptionWarning watches a target, through probe for window, for a
@@ -310,7 +324,7 @@ func (d *Delivery) waitIdle(ctx context.Context, sessionName, message, sender st
 				// "acted on them" are different claims (gt-8hi4w, the same
 				// gap immediate mode closed for gt-eigw). Warn rather than
 				// let a false idle-read report a silent success.
-				if warning := d.consumptionWarning(sessionName, ModeWaitIdle); warning != "" {
+				if warning := d.consumptionWarning(ctx, sessionName, ModeWaitIdle); warning != "" {
 					fmt.Fprintf(d.Stderr, "%s", warning)
 				}
 			}
@@ -414,7 +428,7 @@ func (d *Delivery) Watch(ctx context.Context, sessionName string) {
 			if err := d.Tmux.NudgeSessionWithOpts(sessionName, formatted, tmux.NudgeOpts{TownRoot: townRoot}); err != nil {
 				fmt.Fprintf(d.Stderr, "idle-watcher: delivery for %s failed: %v\n", sessionName, err)
 				Requeue(d.Stderr, townRoot, sessionName, "idle-watcher", drained)
-			} else if warning := d.consumptionWarning(sessionName, ModeWaitIdle); warning != "" {
+			} else if warning := d.consumptionWarning(ctx, sessionName, ModeWaitIdle); warning != "" {
 				// Same false-idle gap as the direct-delivery path above: the
 				// watcher's own WaitForIdle read the target as idle, but that
 				// does not mean the target acted on what it was just handed.
