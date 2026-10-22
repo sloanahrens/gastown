@@ -46,8 +46,8 @@ func TestHookAttachmentValidCheck_ShowUnavailableIsNotInvalid(t *testing.T) {
 	db.FailWith("show", errors.New("bd show: context deadline exceeded"))
 	ctx := d.ctx(town, "")
 	check := NewHookAttachmentValidCheck()
-	if r := check.Run(ctx); r.Status == StatusError {
-		t.Errorf("Run = %v %q, want a warning or OK when show is unavailable", r.Status, r.Message)
+	if r := check.Run(ctx); r.Status != StatusWarning {
+		t.Errorf("Run = %v %q, want StatusWarning when show is unavailable", r.Status, r.Message)
 	}
 	if len(check.invalidAttachments) != 0 {
 		t.Fatalf("invalidAttachments = %+v, want none when show is unavailable", check.invalidAttachments)
@@ -63,6 +63,32 @@ func TestHookAttachmentValidCheck_ShowUnavailableIsNotInvalid(t *testing.T) {
 	}
 	if got := beads.ParseAttachmentFields(after); got == nil || got.AttachedMolecule != mol.ID {
 		t.Errorf("attachment after Fix = %+v, want the live molecule %s still attached", got, mol.ID)
+	}
+}
+
+func TestHookAttachmentValidCheck_UnverifiedStaysOutOfErrorDetails(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	d := newDoctorTown()
+	// Town level: bd answers not-found, so this attachment is invalid.
+	goneID := seedPinnedAttachment(t, d.db(town), "gt-gone")
+	// Rig level: bd cannot answer, so this attachment is unverified.
+	rigDir := filepath.Join(town, "rig")
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigDB := d.db(rigDir)
+	seedPinnedAttachment(t, rigDB, "gt-live")
+	rigDB.FailWith("show", errors.New("bd show: context deadline exceeded"))
+
+	check := NewHookAttachmentValidCheck()
+	r := check.Run(d.ctx(town, ""))
+	if r.Status != StatusError {
+		t.Fatalf("Run = %v %q, want StatusError when an attachment is invalid", r.Status, r.Message)
+	}
+	want := []string{goneID + ": attached molecule gt-gone not found"}
+	if !slices.Equal(r.Details, want) {
+		t.Errorf("Details = %q, want %q: unverified attachments must not appear in the Error details", r.Details, want)
 	}
 }
 

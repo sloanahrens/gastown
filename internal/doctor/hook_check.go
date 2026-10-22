@@ -88,7 +88,6 @@ func (c *HookAttachmentValidCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	details = append(details, c.unverified...)
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusError,
