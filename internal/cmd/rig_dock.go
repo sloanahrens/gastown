@@ -115,24 +115,14 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 
 	fmt.Printf("Docking rig %s...\n", style.Bold.Render(rigName))
 
-	var stoppedAgents []string
-
 	t := tmux.NewTmux()
 
 	// Stop polecat sessions if any: an operator stop, the supervisor's Stop,
 	// logged (gt-4k3fj.4.1).
 	polecatMgr := supervisedPolecatSessions(t, r, "rig dock", operatorActor("gt rig dock"))
-	stopped, err := stopDockedPolecats(polecatMgr)
+	stoppedAgents, err := stopAndDockRig(bd, rigBead.ID, polecatMgr)
 	if err != nil {
 		return err
-	}
-	stoppedAgents = append(stoppedAgents, stopped...)
-
-	// Set docked label on rig identity bead
-	if err := bd.Update(rigBead.ID, beads.UpdateOptions{
-		AddLabels: []string{RigDockedLabel},
-	}); err != nil {
-		return fmt.Errorf("setting docked label: %w", err)
 	}
 
 	// Output
@@ -153,10 +143,27 @@ type dockPolecatSessions interface {
 	StopAll(force bool) error
 }
 
+// stopAndDockRig stops the rig's polecat sessions and then sets the docked
+// label on its identity bead. The label is written only after the stop
+// succeeded: a rig labeled docked while its sessions still run is one the
+// daemon will not restart and nobody is watching.
+func stopAndDockRig(bd beads.Client, rigBeadID string, m dockPolecatSessions) ([]string, error) {
+	stopped, err := stopDockedPolecats(m)
+	if err != nil {
+		return nil, err
+	}
+	if err := bd.Update(rigBeadID, beads.UpdateOptions{
+		AddLabels: []string{RigDockedLabel},
+	}); err != nil {
+		return nil, fmt.Errorf("setting docked label: %w", err)
+	}
+	return stopped, nil
+}
+
 // stopDockedPolecats stops the polecat sessions of a rig being docked and
 // returns the summary lines for the output. A session list that cannot be read
-// is an error: skipping it would write the docked label while the sessions
-// still run.
+// or a stop that fails is an error: continuing would write the docked label
+// while the sessions still run.
 func stopDockedPolecats(m dockPolecatSessions) ([]string, error) {
 	infos, err := m.List()
 	if err != nil {
@@ -167,8 +174,7 @@ func stopDockedPolecats(m dockPolecatSessions) ([]string, error) {
 	}
 	fmt.Printf("  Stopping %d polecat session(s)...\n", len(infos))
 	if err := m.StopAll(false); err != nil {
-		fmt.Printf("  %s Failed to stop polecat sessions: %v\n", style.Warning.Render("!"), err)
-		return nil, nil
+		return nil, fmt.Errorf("stopping polecat sessions: %w", err)
 	}
 	return []string{fmt.Sprintf("%d polecat session(s) stopped", len(infos))}, nil
 }
