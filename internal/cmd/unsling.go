@@ -261,7 +261,7 @@ func reopenBead(b beads.Client, id string) error {
 
 // cleanStaleHookedBeads reopens every bead in a status gt hook shows as work
 // (activeWorkStatuses: hooked and in_progress) that is assigned to agentID, in the
-// rig database and in the town database, honouring targetBeadID and dryRun. It
+// rig database and in the town database, honoring targetBeadID and dryRun. It
 // runs when the selection in runUnslingWith found nothing, so a bead that
 // selection missed is not left assigned to the agent. Returns true if any bead
 // matched. A failed lookup is returned as an error; a failed update is only
