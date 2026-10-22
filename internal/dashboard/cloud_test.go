@@ -561,3 +561,29 @@ func TestPollCloudMissingReportsDirStaysFast(t *testing.T) {
 		t.Errorf("an app power line with no patrol was re-read %d times after a minute, want 2 reads in all", reads)
 	}
 }
+
+// The counterpart to the fast path: a machine with no patrol and no app power
+// line has nothing on the page's poll, so it is left alone until the slow
+// interval, the same as before the line was read.
+func TestPollCloudMissingReportsDirWithNoAppsStaysSlow(t *testing.T) {
+	t.Parallel()
+
+	now := cloudNow
+	reads := 0
+	h := NewHub(Config{Now: func() time.Time { return now }, Cloud: func() *Cloud {
+		reads++
+		return &Cloud{At: now, State: CloudMissing, Note: cloudNoPatrol, NoPatrol: true}
+	}})
+
+	h.pollCloud()
+	now = now.Add(time.Minute)
+	h.pollCloud()
+	if reads != 1 {
+		t.Errorf("a machine with no patrol and no apps was re-read %d times after a minute, want 1 read in all", reads)
+	}
+	now = now.Add(cloudSlowEvery)
+	h.pollCloud()
+	if reads != 2 {
+		t.Errorf("a machine with no patrol and no apps was not re-read at the slow interval (%d reads)", reads)
+	}
+}

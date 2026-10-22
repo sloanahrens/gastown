@@ -477,8 +477,42 @@ func TestNewsPollFallsInsideTheSnapshotItReads(t *testing.T) {
 // A refresh that lost an item to an error and so came back with fewer stories
 // than the last good feed does not replace it: the thinner list would read as
 // fresh for five minutes. The pane keeps the full five at their own read time
-// and says why.
+// and says why, whichever items failed.
 func TestTopStoriesPartialReadKeepsLastGood(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		failed []int64
+	}{
+		{name: "one item fails", failed: []int64{11}},
+		{name: "a run of items fails", failed: []int64{11, 12, 13, 14}},
+		{name: "the last listed item fails", failed: []int64{15}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			at := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+			stub := newsTestStub(at)
+			reader, advance := newsTestClock(t, stub, at)
+
+			good := reader.Read()
+			require.Len(t, good.Stories, newsStories)
+
+			advance(newsRefresh)
+			stub.setFailItems(tc.failed...)
+			partial := reader.Read()
+			assert.Equal(t, "http 500", partial.Error)
+			assert.Equal(t, good.Stories, partial.Stories, "the pane keeps the last full five")
+			assert.Equal(t, good.At, partial.At, "and their own read time, so the pane ages them")
+		})
+	}
+}
+
+// An item that keeps failing must not pin the pane to the stories it showed
+// before. The first thinner read is held; the next one is taken as it comes,
+// and the pane shows the four it read at their own time, with no error, since
+// the item it lost is left out the same way a titleless item is.
+func TestTopStoriesPersistentItemErrorDoesNotPinTheFeed(t *testing.T) {
 	t.Parallel()
 	at := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
 	stub := newsTestStub(at)
@@ -487,10 +521,15 @@ func TestTopStoriesPartialReadKeepsLastGood(t *testing.T) {
 	good := reader.Read()
 	require.Len(t, good.Stories, newsStories)
 
+	stub.setFailItems(11)
 	advance(newsRefresh)
-	stub.setFailItems(11, 12, 13, 14)
-	partial := reader.Read()
-	assert.Equal(t, "http 500", partial.Error)
-	assert.Equal(t, good.Stories, partial.Stories, "the pane keeps the last full five over one story and four errors")
-	assert.Equal(t, good.At, partial.At, "and their own read time, so the pane ages them")
+	held := reader.Read()
+	assert.Equal(t, good.Stories, held.Stories, "the first thinner read keeps the last full five")
+	assert.Equal(t, good.At, held.At)
+
+	advance(newsRefresh)
+	taken := reader.Read()
+	assert.Len(t, taken.Stories, newsStories-1, "the second thinner read in a row is taken")
+	assert.Equal(t, at.Add(2*newsRefresh), taken.At, "at its own read time")
+	assert.Empty(t, taken.Error)
 }
