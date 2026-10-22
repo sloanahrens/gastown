@@ -53,6 +53,7 @@ func (r *runner) escalateCrossRig(rig, prefix, beadID string) {
 // bead missing from its target rig's database. Dropped candidates count as
 // skipped, so the preview matches what a real run would do.
 func (r *runner) validateDryRun(townRoot string, plan capacity.DispatchPlan) capacity.DispatchPlan {
+	plan = r.dropRigHeldBeads(townRoot, plan)
 	if len(plan.ToDispatch) == 0 {
 		return plan
 	}
@@ -84,6 +85,16 @@ func (r *runner) validateDryRun(townRoot string, plan capacity.DispatchPlan) cap
 	if len(plan.ToDispatch) == 0 && plan.Reason != "none" {
 		plan.Reason = "validation"
 	}
+	return plan
+}
+
+// planDispatch batches the ready beads a run can actually dispatch. The rig
+// hold is applied before PlanDispatch: a held bead at the head of the queue
+// must not take the batch slot, or every bead behind it starves (gt-duisv).
+func (r *runner) planDispatch(townRoot string, freeSeats, batchSize int, ready []capacity.PendingBead) capacity.DispatchPlan {
+	dispatchable := r.dropRigHeldBeads(townRoot, capacity.DispatchPlan{ToDispatch: ready})
+	plan := capacity.PlanDispatch(freeSeats, batchSize, dispatchable.ToDispatch)
+	plan.Skipped += dispatchable.Skipped
 	return plan
 }
 
