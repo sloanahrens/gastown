@@ -137,24 +137,15 @@ func updateRigCache(repoRoot, townRoot, rigName string) error {
 	}
 
 	var value string
-	if rigName != "" {
-		if runtime.GOOS == "windows" {
-			value = fmt.Sprintf("$env:GT_TOWN_ROOT=%q; $env:GT_ROOT=%q; $env:GT_RIG=%q", townRoot, townRoot, rigName)
-		} else {
-			value = fmt.Sprintf("export GT_TOWN_ROOT=%q; export GT_ROOT=%q; export GT_RIG=%q", townRoot, townRoot, rigName)
-		}
-	} else if townRoot != "" {
-		if runtime.GOOS == "windows" {
-			value = fmt.Sprintf("$env:GT_TOWN_ROOT=%q; $env:GT_ROOT=%q; Remove-Item Env:GT_RIG -ErrorAction SilentlyContinue", townRoot, townRoot)
-		} else {
-			value = fmt.Sprintf("export GT_TOWN_ROOT=%q; export GT_ROOT=%q; unset GT_RIG", townRoot, townRoot)
-		}
-	} else {
-		if runtime.GOOS == "windows" {
-			value = "Remove-Item Env:GT_TOWN_ROOT -ErrorAction SilentlyContinue; Remove-Item Env:GT_ROOT -ErrorAction SilentlyContinue; Remove-Item Env:GT_RIG -ErrorAction SilentlyContinue"
-		} else {
-			value = "unset GT_TOWN_ROOT GT_ROOT GT_RIG"
-		}
+	switch {
+	case runtime.GOOS != "windows":
+		value = posixRigCacheValue(townRoot, rigName)
+	case rigName != "":
+		value = fmt.Sprintf("$env:GT_TOWN_ROOT=%q; $env:GT_ROOT=%q; $env:GT_RIG=%q", townRoot, townRoot, rigName)
+	case townRoot != "":
+		value = fmt.Sprintf("$env:GT_TOWN_ROOT=%q; $env:GT_ROOT=%q; Remove-Item Env:GT_RIG -ErrorAction SilentlyContinue", townRoot, townRoot)
+	default:
+		value = "Remove-Item Env:GT_TOWN_ROOT -ErrorAction SilentlyContinue; Remove-Item Env:GT_ROOT -ErrorAction SilentlyContinue; Remove-Item Env:GT_RIG -ErrorAction SilentlyContinue"
 	}
 
 	existing[repoRoot] = value
@@ -172,8 +163,42 @@ func printEnvSet(key, value string) {
 	if runtime.GOOS == "windows" {
 		fmt.Printf("$env:%s=%q\n", key, value)
 	} else {
-		fmt.Printf("export %s=%q\n", key, value)
+		fmt.Print(posixEnvSetLine(key, value))
 	}
+}
+
+// posixEnvSetLine returns the line printEnvSet prints for a POSIX shell.
+func posixEnvSetLine(key, value string) string {
+	return fmt.Sprintf("export %s=%s\n", key, shellDoubleQuote(value))
+}
+
+// posixRigCacheValue returns the rigs.cache value the POSIX shell hook evals.
+func posixRigCacheValue(townRoot, rigName string) string {
+	switch {
+	case rigName != "":
+		return fmt.Sprintf("export GT_TOWN_ROOT=%s; export GT_ROOT=%s; export GT_RIG=%s", shellDoubleQuote(townRoot), shellDoubleQuote(townRoot), shellDoubleQuote(rigName))
+	case townRoot != "":
+		return fmt.Sprintf("export GT_TOWN_ROOT=%s; export GT_ROOT=%s; unset GT_RIG", shellDoubleQuote(townRoot), shellDoubleQuote(townRoot))
+	default:
+		return "unset GT_TOWN_ROOT GT_ROOT GT_RIG"
+	}
+}
+
+// shellDoubleQuote returns value as a double-quoted POSIX shell word, so that
+// eval yields the original value. Go's %q does not escape $ or backtick, and
+// the shell expands both inside double quotes. Paths without $, backtick,
+// double quote or backslash come out unchanged.
+func shellDoubleQuote(value string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range value {
+		if strings.ContainsRune(`\"$`+"`", r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // printEnvUnset prints an OS-appropriate env variable unset for shell eval.
