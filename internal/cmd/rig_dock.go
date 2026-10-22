@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -121,15 +122,11 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 	// Stop polecat sessions if any: an operator stop, the supervisor's Stop,
 	// logged (gt-4k3fj.4.1).
 	polecatMgr := supervisedPolecatSessions(t, r, "rig dock", operatorActor("gt rig dock"))
-	polecatInfos, err := polecatMgr.List()
-	if err == nil && len(polecatInfos) > 0 {
-		fmt.Printf("  Stopping %d polecat session(s)...\n", len(polecatInfos))
-		if err := polecatMgr.StopAll(false); err != nil {
-			fmt.Printf("  %s Failed to stop polecat sessions: %v\n", style.Warning.Render("!"), err)
-		} else {
-			stoppedAgents = append(stoppedAgents, fmt.Sprintf("%d polecat session(s) stopped", len(polecatInfos)))
-		}
+	stopped, err := stopDockedPolecats(polecatMgr)
+	if err != nil {
+		return err
 	}
+	stoppedAgents = append(stoppedAgents, stopped...)
 
 	// Set docked label on rig identity bead
 	if err := bd.Update(rigBead.ID, beads.UpdateOptions{
@@ -147,6 +144,33 @@ func runRigDock(cmd *cobra.Command, args []string) error {
 	fmt.Printf("  Beads changes persisted via Dolt\n")
 
 	return nil
+}
+
+// dockPolecatSessions is the slice of polecat.SessionManager that gt rig dock
+// drives.
+type dockPolecatSessions interface {
+	List() ([]polecat.SessionInfo, error)
+	StopAll(force bool) error
+}
+
+// stopDockedPolecats stops the polecat sessions of a rig being docked and
+// returns the summary lines for the output. A session list that cannot be read
+// is an error: skipping it would write the docked label while the sessions
+// still run.
+func stopDockedPolecats(m dockPolecatSessions) ([]string, error) {
+	infos, err := m.List()
+	if err != nil {
+		return nil, fmt.Errorf("listing polecat sessions: %w", err)
+	}
+	if len(infos) == 0 {
+		return nil, nil
+	}
+	fmt.Printf("  Stopping %d polecat session(s)...\n", len(infos))
+	if err := m.StopAll(false); err != nil {
+		fmt.Printf("  %s Failed to stop polecat sessions: %v\n", style.Warning.Render("!"), err)
+		return nil, nil
+	}
+	return []string{fmt.Sprintf("%d polecat session(s) stopped", len(infos))}, nil
 }
 
 func runRigUndock(cmd *cobra.Command, args []string) error {
