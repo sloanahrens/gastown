@@ -94,6 +94,10 @@ type conflictAdapter struct {
 	// borrowed from an earlier merge line is stale, so it counts the rejection
 	// but cannot attribute a landing.
 	ownTips map[string][]string
+	// rejected holds every bead with a conflict rejection in the log, tipped or
+	// not. A rejection with no tip at all is in neither map above, yet it still
+	// rules out calling the bead's pair disjoint.
+	rejected map[string]bool
 	// conflicts counts every conflict rejection in the log, and unattributed the
 	// ones that named no tip of their own: a borrowed tip or none at all. They
 	// are counted as they are read, not derived from the maps above, because a
@@ -110,6 +114,7 @@ func newConflictAdapter(town string, openClone func() (conflictRepo, error)) *co
 		files:      map[string]map[string]bool{},
 		rejections: map[string][]string{},
 		ownTips:    map[string][]string{},
+		rejected:   map[string]bool{},
 	}
 }
 
@@ -254,7 +259,7 @@ func (a *conflictAdapter) landingOf(bead string) (*land.LandingRecord, error) {
 // bead. On its own it settles nothing — the rejection may name a third bead —
 // but it is enough to stop a pair being labeled disjoint.
 func (a *conflictAdapter) hasRejection(bead string) bool {
-	return len(a.rejections[bead]) > 0
+	return a.rejected[bead]
 }
 
 // rejectedAfter reports whether one of bead's conflict rejections was built on
@@ -407,6 +412,7 @@ func (a *conflictAdapter) loadRejections() error {
 		}
 		if m := landRejectRe.FindStringSubmatch(line); m != nil && m[2] == string(land.RejectConflict) {
 			a.conflicts++
+			a.rejected[m[1]] = true
 			if tm := landRejectTipRe.FindStringSubmatch(line); tm != nil {
 				a.rejections[m[1]] = append(a.rejections[m[1]], tm[1])
 				a.ownTips[m[1]] = append(a.ownTips[m[1]], tm[1])
