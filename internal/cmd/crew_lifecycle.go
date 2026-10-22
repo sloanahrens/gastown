@@ -330,15 +330,15 @@ func runCrewStart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("--resume with a specific session ID can only target a single crew member, got %d", len(crewNames))
 	}
 
-	// Guard against pflag NoOptDefVal parsing ambiguity: `--resume ace` (space-separated)
-	// treats "ace" as the session ID, not a crew name. If the value matches a known crew
-	// member, it's almost certainly a misparse. Use --resume=<id> for explicit session IDs.
+	// Guard against `--resume=<crew-name>`: the value is a session ID, so a crew
+	// member's name there is almost always a mistake. The space form never reaches
+	// this check: NoOptDefVal leaves `--resume <id>` as a positional crew name.
 	if crewResume != "" && crewResume != "last" {
 		workers, listErr := crewMgr.List()
 		if listErr == nil {
 			for _, w := range workers {
 				if w.Name == crewResume {
-					return fmt.Errorf("%q looks like a crew member name, not a session ID; use --resume=%s if you meant a session ID, or use --resume (no value) to auto-resume the most recent session", crewResume, crewResume)
+					return fmt.Errorf("%q is a crew member name, not a session ID; pass the session ID as --resume=<session-id>, or use bare --resume to auto-resume the most recent session", crewResume)
 				}
 			}
 		}
