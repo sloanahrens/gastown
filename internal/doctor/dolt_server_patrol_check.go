@@ -3,6 +3,7 @@ package doctor
 import (
 	"errors"
 	"net"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -45,11 +46,26 @@ func NewDoltServerPatrolCheck() *DoltServerPatrolCheck {
 // Run reports the gap when Dolt is unreachable and no daemon patrol is watching
 // it. It is a no-op (OK) when Dolt is reachable, and does not alarm when the
 // dolt_server patrol is already enabled (the daemon will detect and recover).
+// A town with no Dolt endpoint, or whose mayor/town.json will not load, is a
+// warning whether or not the patrol is enabled: the daemon has no Dolt to manage.
 func (c *DoltServerPatrolCheck) Run(ctx *CheckContext) *CheckResult {
 	// A town with no Dolt endpoint has nothing for the daemon to manage (it
 	// leaves its Dolt server nil), so the patrol is no cover and there is no
 	// address worth dialing.
-	if ep, _ := config.ResolveDoltEndpoint(ctx.TownRoot); ep.Port <= 0 {
+	_, ok := config.ResolveDoltEndpoint(ctx.TownRoot)
+	if !ok {
+		// ResolveDoltEndpoint skips a mayor/town.json it cannot load, so a
+		// broken one would read as "no endpoint". Name the load error instead.
+		if _, err := config.LoadTownConfig(filepath.Join(ctx.TownRoot, "mayor", "town.json")); err != nil && !errors.Is(err, config.ErrNotFound) {
+			return &CheckResult{
+				Name:     c.Name(),
+				Status:   StatusWarning,
+				Message:  "town config names no usable Dolt endpoint; the daemon will not manage Dolt",
+				Details:  []string{err.Error()},
+				FixHint:  "Fix mayor/town.json, or run 'gt config set dolt.port <port>' to name the Dolt server's port",
+				Category: c.CheckCategory,
+			}
+		}
 		return &CheckResult{
 			Name:     c.Name(),
 			Status:   StatusWarning,
