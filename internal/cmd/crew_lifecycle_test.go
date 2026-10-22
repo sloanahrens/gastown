@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -78,30 +77,28 @@ func TestCrewRemoveRunningSessionKeepsWorkspace(t *testing.T) {
 	}
 }
 
-// `--resume <id>` with a space does not carry the ID: NoOptDefVal leaves it as a
-// positional argument, which then reads as a crew name. This is why the help
-// documents only the = form. The flag is rebuilt on a private command, with the
-// NoOptDefVal checked against crewStartCmd, so the package globals stay untouched.
-func TestCrewStartResumeSpaceFormIsPositional(t *testing.T) {
+// --resume=<value> names a session ID. A crew member's name there is rejected;
+// a session ID, or a name that matches no member, passes.
+func TestCheckCrewResumeTarget(t *testing.T) {
 	t.Parallel()
 
-	if got := crewStartCmd.Flags().Lookup("resume").NoOptDefVal; got != "last" {
-		t.Fatalf("crewStartCmd --resume NoOptDefVal = %q, want %q", got, "last")
+	workers := []*crew.CrewWorker{{Name: "max"}, {Name: "emma"}}
+	tests := []struct {
+		name    string
+		resume  string
+		wantErr bool
+	}{
+		{"crew member name is rejected", "max", true},
+		{"session ID passes", "abc123", false},
+		{"name matching no member passes", "joe", false},
 	}
-
-	cmd := &cobra.Command{}
-	var resume string
-	cmd.Flags().StringVar(&resume, "resume", "", "")
-	cmd.Flags().Lookup("resume").NoOptDefVal = "last"
-
-	if err := cmd.ParseFlags([]string{"--resume", "abc123"}); err != nil {
-		t.Fatalf("ParseFlags: %v", err)
-	}
-	if resume != "last" {
-		t.Errorf("resume = %q, want %q (bare --resume)", resume, "last")
-	}
-	if got := cmd.Flags().Args(); len(got) != 1 || got[0] != "abc123" {
-		t.Errorf("positional args = %v, want [abc123]", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkCrewResumeTarget(tt.resume, workers)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("checkCrewResumeTarget(%q) error = %v, wantErr %v", tt.resume, err, tt.wantErr)
+			}
+		})
 	}
 }
 

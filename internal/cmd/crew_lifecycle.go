@@ -262,6 +262,18 @@ func runCrewRefresh(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
+// checkCrewResumeTarget rejects a --resume value that is the name of a crew
+// member: the value is a session ID, so a member's name there is almost always
+// a mistake.
+func checkCrewResumeTarget(resume string, workers []*crew.CrewWorker) error {
+	for _, w := range workers {
+		if w.Name == resume {
+			return fmt.Errorf("%q is a crew member name, not a session ID; pass the session ID as --resume=<session-id>, or use bare --resume to auto-resume the most recent session", resume)
+		}
+	}
+	return nil
+}
+
 // runCrewStart starts crew workers in a rig.
 // If first arg is a valid rig name, it's used as the rig; otherwise rig is inferred from cwd.
 // Remaining args (or all args if rig is inferred) are crew member names.
@@ -336,10 +348,8 @@ func runCrewStart(cmd *cobra.Command, args []string) error {
 	if crewResume != "" && crewResume != "last" {
 		workers, listErr := crewMgr.List()
 		if listErr == nil {
-			for _, w := range workers {
-				if w.Name == crewResume {
-					return fmt.Errorf("%q is a crew member name, not a session ID; pass the session ID as --resume=<session-id>, or use bare --resume to auto-resume the most recent session", crewResume)
-				}
+			if err := checkCrewResumeTarget(crewResume, workers); err != nil {
+				return err
 			}
 		}
 	}
