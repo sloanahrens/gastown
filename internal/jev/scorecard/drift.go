@@ -505,11 +505,13 @@ func sectionSpans(text, heading string) [][2]int {
 
 // overlapsAny reports whether old lines [start, start+count) touch any span. A
 // hunk with no old lines is an insertion after line start, which touches a span
-// holding that line.
+// holding that line. A top-of-file insertion (start 0) sits above line 1, so it
+// is read as touching the span that starts at line 1.
 func overlapsAny(spans [][2]int, start, count int) bool {
 	for _, s := range spans {
 		if count == 0 {
-			if s[0] <= start && start < s[1] {
+			at := max(start, 1)
+			if s[0] <= at && at < s[1] {
 				return true
 			}
 			continue

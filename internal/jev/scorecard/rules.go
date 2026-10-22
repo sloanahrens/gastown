@@ -1,10 +1,13 @@
 package scorecard
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"strings"
 	"time"
 
@@ -211,25 +214,60 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 // has no record. The report prints these lines beside the metrics.
 func (a *rulesAdapter) Context() []string {
 	return []string{
-		fmt.Sprintf("rules: guard sources read: revert-guard refusals (refusals.jsonl), %d record(s); rework stand-down comments, for %d session(s)",
+		fmt.Sprintf("rules: guard sources read: revert-guard refusals (refusals.jsonl and refusals.jsonl.1), %d record(s); rework stand-down comments, for %d session(s)",
 			len(a.refusals), a.sessionsRead),
 		"rules: BLOCKED mail is not read: no code path writes a record for it",
 		fmt.Sprintf("rules: %s not-yet: no guard record names the rule a session broke", qRuleKind),
 	}
 }
 
-// readRefusals returns the revert guard's ledger, read once.
+// readRefusals returns the revert guard's ledger, read once, oldest first. The
+// ledger rotates to refusals.jsonl.1 at its size limit, and attention reads only
+// the current file, so the rotated one is read here too. Without it a refusal
+// rotated away would leave its line with no record.
 func (a *rulesAdapter) readRefusals() ([]attention.Refusal, error) {
 	if a.refusalsRead {
 		return a.refusals, nil
 	}
-	refusals, err := attention.ReadRefusals(a.town)
+	rotated, err := readRefusalFile(attention.RotatedRefusalsPath(a.town))
+	if err != nil {
+		return nil, fmt.Errorf("reading the rotated refusal ledger: %w", err)
+	}
+	current, err := readRefusalFile(attention.RefusalsPath(a.town))
 	if err != nil {
 		return nil, fmt.Errorf("reading the refusal ledger: %w", err)
 	}
-	a.refusals = refusals
+	a.refusals = append(rotated, current...)
 	a.refusalsRead = true
-	return refusals, nil
+	return a.refusals, nil
+}
+
+// readRefusalFile reads one refusal ledger file. A line that does not parse is
+// skipped, as attention.ReadRefusals skips it, and a missing file holds none.
+func readRefusalFile(path string) ([]attention.Refusal, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	var out []attention.Refusal
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" {
+			continue
+		}
+		var r attention.Refusal
+		if json.Unmarshal([]byte(line), &r) != nil {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, scanner.Err()
 }
 
 // inRuleWindow reports whether at falls from the submission to the window's end.

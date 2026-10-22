@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -151,9 +152,17 @@ func checkListAgainstShow(r any, listed map[string]*beads.Issue, order []string)
 }
 
 // labelFields are the bead fields an adapter labels from: Status, CloseReason,
-// Notes and Description. An adapter that reads another has to add it here.
-func labelFields(i *beads.Issue) [4][2]string {
-	return [4][2]string{{"status", i.Status}, {"close reason", i.CloseReason}, {"notes", i.Notes}, {"description", i.Description}}
+// Notes, Description, Priority and Labels (stale.go and dispatch.go read the last
+// two). An adapter that reads another has to add it here.
+func labelFields(i *beads.Issue) [6][2]string {
+	return [6][2]string{
+		{"status", i.Status},
+		{"close reason", i.CloseReason},
+		{"notes", i.Notes},
+		{"description", i.Description},
+		{"priority", strconv.Itoa(i.Priority)},
+		{"labels", strings.Join(i.Labels, ",")},
+	}
 }
 
 func labelFieldsSet(i *beads.Issue) int {

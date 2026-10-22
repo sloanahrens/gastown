@@ -618,3 +618,15 @@ func TestDriftBatteryIsRegistered(t *testing.T) {
 		t.Error("the drift adapter does not read one item per section")
 	}
 }
+
+// A top-of-file insertion (start 0) sits above line 1, so it touches the
+// preamble span that starts at line 1 and no span further down.
+func TestOverlapsAnyTopOfFileInsertion(t *testing.T) {
+	t.Parallel()
+	if !overlapsAny([][2]int{{1, 5}}, 0, 0) {
+		t.Error("a top-of-file insertion did not touch the preamble span")
+	}
+	if overlapsAny([][2]int{{3, 5}}, 0, 0) {
+		t.Error("a top-of-file insertion touched a span that starts below line 1")
+	}
+}
