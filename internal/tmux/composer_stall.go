@@ -114,6 +114,31 @@ func hasQueuedMessagesFooter(line string) bool {
 	return false
 }
 
+// queuedMessagesFooterBelowComposer reports whether the queued-messages footer
+// sits in the footer region: the lines below the bottom-most composer line.
+// The capture reaches 25 lines into history, so anything above the composer is
+// transcript, and a quoted footer there is not input waiting in the queue. With
+// no composer line there is no footer region, so the footer does not count and
+// the probe falls through to its own verdict.
+func queuedMessagesFooterBelowComposer(lines [][]rune, promptPrefix string) bool {
+	composer := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if matchesPromptPrefix(string(lines[i]), promptPrefix) {
+			composer = i
+			break
+		}
+	}
+	if composer < 0 {
+		return false
+	}
+	for _, line := range lines[composer+1:] {
+		if hasQueuedMessagesFooter(string(line)) {
+			return true
+		}
+	}
+	return false
+}
+
 // composerProbe is the result of classifying a pane snapshot.
 type composerProbe struct {
 	State  ComposerState
@@ -145,13 +170,11 @@ func analyzeComposerState(escContent, promptPrefix string) composerProbe {
 
 	// The queued-message footer renders below the composer, so it can be
 	// visible while the composer line itself is empty.
-	for _, line := range lines {
-		if hasQueuedMessagesFooter(string(line)) {
-			return composerProbe{
-				State:    ComposerPending,
-				Queued:   true,
-				Evidence: "queued-messages footer visible",
-			}
+	if queuedMessagesFooterBelowComposer(lines, promptPrefix) {
+		return composerProbe{
+			State:    ComposerPending,
+			Queued:   true,
+			Evidence: "queued-messages footer visible",
 		}
 	}
 
@@ -398,13 +421,11 @@ func analyzeComposerStateNoBusy(escContent, promptPrefix string) composerProbe {
 
 	// The queued-message footer renders below the composer, so it can be
 	// visible while the composer line itself is empty.
-	for _, line := range lines {
-		if hasQueuedMessagesFooter(string(line)) {
-			return composerProbe{
-				State:    ComposerPending,
-				Queued:   true,
-				Evidence: "queued-messages footer visible",
-			}
+	if queuedMessagesFooterBelowComposer(lines, promptPrefix) {
+		return composerProbe{
+			State:    ComposerPending,
+			Queued:   true,
+			Evidence: "queued-messages footer visible",
 		}
 	}
 
