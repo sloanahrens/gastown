@@ -270,17 +270,17 @@ func TestAnnounceMessageParsing(t *testing.T) {
 	}{
 		{
 			name:   "extracts from label",
-			labels: []string{"from:mayor/", "announce_channel:alerts"},
+			labels: []string{"from:mayor/", "announce:alerts"},
 			want:   "mayor/",
 		},
 		{
 			name:   "extracts from with rig path",
-			labels: []string{"announce_channel:alerts", "from:gastown/witness"},
+			labels: []string{"announce:alerts", "from:gastown/witness"},
 			want:   "gastown/witness",
 		},
 		{
 			name:   "no from label",
-			labels: []string{"announce_channel:alerts"},
+			labels: []string{"announce:alerts"},
 			want:   "",
 		},
 		{

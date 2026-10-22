@@ -435,7 +435,7 @@ BEHAVIOR for 'gt mail announces':
 
 BEHAVIOR for 'gt mail announces <channel>':
 - Validates channel exists
-- Queries beads for messages with announce_channel=<channel>
+- Queries beads for messages with announce:<channel> label
 - Displays in reverse chronological order (newest first)
 - Does NOT mark as read or remove messages
 
