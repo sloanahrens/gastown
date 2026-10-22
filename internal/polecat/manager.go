@@ -329,7 +329,7 @@ func newManager(r *rig.Rig, g gitRepo, t sessionProbe, open func(beadsSite) pole
 	if err == nil && settings.Namepool != nil {
 		// If style is set but not built-in and no explicit names, resolve custom theme
 		names := settings.Namepool.Names
-		if len(names) == 0 && settings.Namepool.Style != "" && !IsBuiltinTheme(settings.Namepool.Style) {
+		if !namepoolNamesWin(settings.Namepool) && settings.Namepool.Style != "" && !IsBuiltinTheme(settings.Namepool.Style) {
 			if resolved, rErr := ResolveThemeNames(townRoot, settings.Namepool.Style); rErr == nil {
 				names = resolved
 			}
