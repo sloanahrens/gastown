@@ -710,6 +710,12 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 			t.Errorf("unjudged CheckUncommittedWork = %+v, %v; want the status read so far beside ErrComparisonUnjudgeable", s, err)
 		}
 
+		// BranchPushedToRemote reads the same comparison, so it reports the same
+		// error and no count: a zero count here would read as nothing unpushed.
+		if ok, n, err := g.BranchPushedToRemote("polecat/x", "origin"); !errors.Is(err, git.ErrComparisonUnjudgeable) || ok || n != 0 {
+			t.Errorf("unjudged BranchPushedToRemote = %v %d %v; want ErrComparisonUnjudgeable and no verdict", ok, n, err)
+		}
+
 		// Once the clone fetches the tip, the same comparison can be judged.
 		if err := g.Fetch("origin"); err != nil {
 			t.Fatal(err)
