@@ -69,12 +69,9 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	}
 
 	p := &Pass{
-		Asker:    client,
-		Landings: landings,
-		Git: lockedRepo{
-			Repo: cloneRepo{c: clone},
-			lock: func(ctx context.Context) (func(), error) { return submission.WaitFetchLock(ctx, townRoot) },
-		},
+		Asker:      client,
+		Landings:   landings,
+		Git:        cloneRepo{c: submission.FetchLocked{Cloner: clone, TownRoot: townRoot}},
 		LogPath:    LogPath(townRoot),
 		CursorPath: CursorPath(townRoot),
 		Allows:     func() (bool, error) { return town.Allows(time.Now) },
@@ -91,26 +88,6 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 type gitClone interface {
 	Sync(ctx context.Context) error
 	Run(ctx context.Context, args ...string) (string, error)
-}
-
-// lockedRepo fetches the submission battery's bare clone under the clone's fetch
-// lock. The clone is shared: the submission pass fetches under that lock, so a
-// fetch that skipped it would fail one of the two and lose its work. The reads
-// go straight through, since a read never writes the clone.
-type lockedRepo struct {
-	Repo
-	// lock takes the clone's fetch lock, waiting for its holder.
-	lock func(ctx context.Context) (func(), error)
-}
-
-// Sync waits for the clone's fetch lock, then fetches.
-func (r lockedRepo) Sync(ctx context.Context) error {
-	release, err := r.lock(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
-	return r.Repo.Sync(ctx)
 }
 
 // cloneRepo reads the rig from the submission battery's bare clone.
@@ -244,6 +221,5 @@ var (
 	_ Asker    = (*jev.Client)(nil)
 	_ Landings = (*land.LandingsFile)(nil)
 	_ Repo     = cloneRepo{}
-	_ Repo     = lockedRepo{}
 	_ Ranker   = hmRanker{}
 )

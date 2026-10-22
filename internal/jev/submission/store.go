@@ -145,3 +145,37 @@ func WaitFetchLock(ctx context.Context, townRoot string) (func(), error) {
 		}
 	}
 }
+
+// Cloner is the part of the shared clone another battery reads through.
+// *Clone satisfies it.
+type Cloner interface {
+	Sync(ctx context.Context) error
+	Run(ctx context.Context, args ...string) (string, error)
+}
+
+// FetchLocked fetches the shared clone under the clone's fetch lock. Every
+// battery that fetches into the clone wraps it in this: the submission pass
+// fetches under that lock, so a fetch that skipped it would fail one of the two
+// and lose its work. Run reads the clone and takes no lock. The pass's run lock
+// is not used: it is held for a whole pass, and the fetch has no business
+// waiting that out (gt-ckobj).
+type FetchLocked struct {
+	Cloner
+	TownRoot string
+}
+
+// Sync waits for the clone's fetch lock, then fetches.
+func (f FetchLocked) Sync(ctx context.Context) error {
+	return syncUnderFetchLock(ctx, f.TownRoot, f.Cloner.Sync)
+}
+
+// syncUnderFetchLock waits for the fetch lock at townRoot, then runs sync with
+// it held.
+func syncUnderFetchLock(ctx context.Context, townRoot string, sync func(context.Context) error) error {
+	release, err := WaitFetchLock(ctx, townRoot)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return sync(ctx)
+}

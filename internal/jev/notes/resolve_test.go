@@ -19,6 +19,12 @@ type fakeRepo struct {
 
 func (f *fakeRepo) Sync(context.Context) error { f.synced++; return nil }
 
+// Run lets the fake stand in for the clone under the shared fetch-lock wrapper,
+// which fetches through Sync and reads through nothing here.
+func (f *fakeRepo) Run(context.Context, ...string) (string, error) {
+	return "", errors.New("fakeRepo runs no git")
+}
+
 func (f *fakeRepo) Tree(context.Context) ([]string, error) {
 	f.treeRead++
 	return f.tree, f.treeErr

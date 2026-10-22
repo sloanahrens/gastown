@@ -69,11 +69,8 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	}
 
 	return &Pass{
-		Asker: client,
-		Repo: lockedRepo{
-			repo: cloneRepo{c: clone},
-			lock: func(ctx context.Context) (func(), error) { return submission.WaitFetchLock(ctx, townRoot) },
-		},
+		Asker:   client,
+		Repo:    cloneRepo{c: submission.FetchLocked{Cloner: clone, TownRoot: townRoot}},
 		Help:    execHelp{},
 		Files:   func() ([]File, error) { return listNotes(os.Getenv, os.UserHomeDir, townRoot) },
 		LogPath: LogPath(townRoot),
@@ -187,36 +184,6 @@ func exitCode(err error) (int, bool) {
 	return 0, false
 }
 
-// lockedRepo fetches the submission battery's bare clone under the clone's
-// fetch lock. The clone is shared: the submission pass fetches under the same
-// lock, so a fetch that skipped it would fail that pass's Sync and lose its
-// work. The pass's run lock is not used: it is held for a whole pass, and the
-// fetch has no business waiting that out (gt-ckobj).
-type lockedRepo struct {
-	repo Repo
-	// lock takes the clone's fetch lock, waiting for a fetch in flight.
-	lock func(ctx context.Context) (func(), error)
-}
-
-// Sync waits for the clone's fetch lock, then fetches.
-func (r lockedRepo) Sync(ctx context.Context) error {
-	release, err := r.lock(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
-	return r.repo.Sync(ctx)
-}
-
-// Tree reads the clone's tree. A read never writes the clone, so it takes no
-// lock.
-func (r lockedRepo) Tree(ctx context.Context) ([]string, error) { return r.repo.Tree(ctx) }
-
-// HasKey reads the clone the same way.
-func (r lockedRepo) HasKey(ctx context.Context, key string) (bool, error) {
-	return r.repo.HasKey(ctx, key)
-}
-
 // cloneRepo reads the rig's main tree from the submission battery's bare clone.
 type cloneRepo struct {
 	c gitClone
@@ -276,6 +243,5 @@ func (execHelp) Help(ctx context.Context, bin string, path ...string) (string, e
 var (
 	_ Asker  = (*jev.Client)(nil)
 	_ Repo   = cloneRepo{}
-	_ Repo   = lockedRepo{}
 	_ Helper = execHelp{}
 )
