@@ -213,6 +213,34 @@ func TestRulesHashIsOfTheExcerpt(t *testing.T) {
 	}
 }
 
+// TestRulesExcerptEndsAtSubmission checks the excerpt Pass reads stops at the
+// submission: activity stamped after SubmittedAt never reaches Jev, and the
+// event stamped exactly at it does.
+func TestRulesExcerptEndsAtSubmission(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	transcript := writeTranscript(t, town, "session.jsonl", []string{
+		`{"type":"assistant","timestamp":"2026-10-21T17:00:01Z","message":{"content":[{"type":"text","text":"Before the submission marker."}]}}`,
+		`{"type":"assistant","timestamp":"2026-10-21T17:00:02Z","message":{"content":[{"type":"text","text":"At the submission marker."}]}}`,
+		`{"type":"assistant","timestamp":"2026-10-21T17:00:03Z","message":{"content":[{"type":"text","text":"After the submission marker."}]}}`,
+	})
+	submittedAt := time.Date(2026, 10, 21, 17, 0, 2, 0, time.UTC)
+	p := newPass(t, town, &fakeAsker{}, transcript)
+
+	excerpt, err := p.excerpt(submitted("gt-cut", submittedAt))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"Before the submission marker.", "At the submission marker."} {
+		if !strings.Contains(excerpt, want) {
+			t.Errorf("excerpt lacks %q: %q", want, excerpt)
+		}
+	}
+	if strings.Contains(excerpt, "After the submission marker.") {
+		t.Errorf("excerpt runs past the submission: %q", excerpt)
+	}
+}
+
 // TestRulesTranscriptOutsideTownGetsNoLine checks the containment check: a
 // transcript the progress reader refuses is never read and gets no line.
 func TestRulesTranscriptOutsideTownGetsNoLine(t *testing.T) {
