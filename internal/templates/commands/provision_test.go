@@ -336,9 +336,29 @@ func TestProvisionedFrontmatterParsesAsYAML(t *testing.T) {
 				t.Errorf("%s: frontmatter lost key %s", cmd.Name, key)
 				continue
 			}
-			if s, isString := got.(string); isString && s != value {
-				t.Errorf("%s: frontmatter %s = %q, want %q", cmd.Name, key, s, value)
+			switch got := got.(type) {
+			case string:
+				if got != value {
+					t.Errorf("%s: frontmatter %s = %q, want %q", cmd.Name, key, got, value)
+				}
+			case []any:
+				// A bracketed hint such as [message] parses as a sequence and is kept bare.
+			default:
+				t.Errorf("%s: frontmatter %s parsed as %T, want a string", cmd.Name, key, got)
 			}
+		}
+	}
+}
+
+// A value that YAML reads as a scalar of another type is quoted, so the
+// frontmatter Claude Code reads keeps the text the command declared.
+func TestFrontmatterLineQuotesScalarsOfOtherTypes(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{"true", "42", "null", "2026-10-22"} {
+		got := frontmatterLine("argument-hint", value)
+		want := "argument-hint: '" + value + "'\n"
+		if got != want {
+			t.Errorf("frontmatterLine(%q) = %q, want %q", value, got, want)
 		}
 	}
 }
