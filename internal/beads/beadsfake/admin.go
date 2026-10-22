@@ -253,7 +253,8 @@ func (f *Fake) SQLCSV(query beadsql.Query) ([][]string, error) { return f.runSQL
 // FailWith makes the maintenance command named by op fail with err until
 // cleared with a nil err. op is the bd subcommand as the fake names it:
 // "config get <key>", "config set <key>", "stats", "mol wisp list",
-// "mol wisp gc" (the dry run), "export" or "init".
+// "mol wisp gc" (the dry run), "export", "init" or "show" (every Show call,
+// for a store whose answer is unknown rather than not-found).
 func (f *Fake) FailWith(op string, err error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,6 +16,9 @@ import (
 type HookAttachmentValidCheck struct {
 	FixableCheck
 	invalidAttachments []invalidAttachment
+	// unverified lists attachments whose molecule lookup failed for a reason
+	// other than not-found. Their state is unknown, so they are left alone.
+	unverified []string
 }
 
 type invalidAttachment struct {
@@ -43,6 +47,7 @@ func (c *HookAttachmentValidCheck) DestructiveFix() bool { return true }
 // Run checks all pinned beads for invalid molecule attachments.
 func (c *HookAttachmentValidCheck) Run(ctx *CheckContext) *CheckResult {
 	c.invalidAttachments = nil
+	c.unverified = nil
 
 	var details []string
 
@@ -65,7 +70,7 @@ func (c *HookAttachmentValidCheck) Run(ctx *CheckContext) *CheckResult {
 		c.invalidAttachments = append(c.invalidAttachments, rigInvalid...)
 	}
 
-	if len(c.invalidAttachments) == 0 {
+	if len(c.invalidAttachments) == 0 && len(c.unverified) == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -73,6 +78,17 @@ func (c *HookAttachmentValidCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	if len(c.invalidAttachments) == 0 {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("Could not verify %d hook attachment(s)", len(c.unverified)),
+			Details: c.unverified,
+			FixHint: "Check bd and Dolt health, then rerun 'gt doctor'; unverified attachments are left in place",
+		}
+	}
+
+	details = append(details, c.unverified...)
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusError,
@@ -108,7 +124,13 @@ func (c *HookAttachmentValidCheck) checkBeadsDir(ctx *CheckContext, beadsDir, _ 
 		// Verify the attached molecule exists and is not closed
 		molecule, err := b.Show(attachment.AttachedMolecule)
 		if err != nil {
-			// Molecule not found
+			// Only bd's own not-found proves the molecule is gone. Any other
+			// failure (a timeout, a crash) leaves the answer unknown, so the
+			// attachment stays as it is.
+			if !errors.Is(err, beads.ErrNotFound) {
+				c.unverified = append(c.unverified, fmt.Sprintf("%s: attached molecule %s could not be checked: %v", pinnedBead.ID, attachment.AttachedMolecule, err))
+				continue
+			}
 			invalid = append(invalid, invalidAttachment{
 				pinnedBeadID:  pinnedBead.ID,
 				pinnedBeadDir: beadsDir,

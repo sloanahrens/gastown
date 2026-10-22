@@ -168,6 +168,9 @@ func (f *Fake) ordered() []*record {
 func (f *Fake) Show(id string) (*beads.Issue, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.failure("show"); err != nil {
+		return nil, err
+	}
 	r, ok := f.issues[id]
 	if !ok {
 		return nil, notFound(id)

@@ -1,11 +1,88 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 )
+
+// seedPinnedAttachment makes a pinned bead in db whose attached_molecule is
+// moleculeID, the shape HookAttachmentValidCheck reads from a hook.
+func seedPinnedAttachment(t *testing.T, db *beadsfake.Fake, moleculeID string) string {
+	t.Helper()
+	pinned, err := db.Create(beads.CreateOptions{
+		Title:       "hook",
+		Description: "attached_molecule: " + moleculeID,
+		Labels:      []string{"gt:agent"},
+		Priority:    -1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := beads.StatusPinned
+	if err := db.Update(pinned.ID, beads.UpdateOptions{Status: &status}); err != nil {
+		t.Fatal(err)
+	}
+	return pinned.ID
+}
+
+func TestHookAttachmentValidCheck_ShowUnavailableIsNotInvalid(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	d := newDoctorTown()
+	db := d.db(town)
+	mol, err := db.Create(beads.CreateOptions{Title: "polecat work", Labels: []string{"gt:mol"}, Priority: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinnedID := seedPinnedAttachment(t, db, mol.ID)
+
+	// A Dolt timeout: bd could not answer, so the molecule's existence is unknown.
+	db.FailWith("show", errors.New("bd show: context deadline exceeded"))
+	ctx := d.ctx(town, "")
+	check := NewHookAttachmentValidCheck()
+	if r := check.Run(ctx); r.Status == StatusError {
+		t.Errorf("Run = %v %q, want a warning or OK when show is unavailable", r.Status, r.Message)
+	}
+	if len(check.invalidAttachments) != 0 {
+		t.Fatalf("invalidAttachments = %+v, want none when show is unavailable", check.invalidAttachments)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix: %v", err)
+	}
+
+	db.FailWith("show", nil)
+	after, err := db.Show(pinnedID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := beads.ParseAttachmentFields(after); got == nil || got.AttachedMolecule != mol.ID {
+		t.Errorf("attachment after Fix = %+v, want the live molecule %s still attached", got, mol.ID)
+	}
+}
+
+func TestHookAttachmentValidCheck_ShowNotFoundStillRecorded(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	d := newDoctorTown()
+	db := d.db(town)
+	// The molecule was never created, so bd answers not-found.
+	seedPinnedAttachment(t, db, "gt-gone")
+
+	check := NewHookAttachmentValidCheck()
+	check.Run(d.ctx(town, ""))
+	if len(check.invalidAttachments) != 1 {
+		t.Fatalf("invalidAttachments = %+v, want one not_found entry", check.invalidAttachments)
+	}
+	if got := check.invalidAttachments[0]; got.moleculeID != "gt-gone" || got.reason != "not_found" {
+		t.Errorf("entry = %+v, want molecule gt-gone with reason not_found", got)
+	}
+}
 
 func TestNewHookAttachmentValidCheck(t *testing.T) {
 	t.Parallel()
