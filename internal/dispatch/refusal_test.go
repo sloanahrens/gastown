@@ -149,6 +149,23 @@ func TestSlingRefusalLineMatchesDuplicateReport(t *testing.T) {
 				"  Shared files alone, closed or parked work, unstarted work this bead would\n",
 		},
 		{name: "closing sentence quoted mid-sentence in a bead title", text: "bead gt-x: fix so " + closing + " stops\n"},
+		{
+			name:   "built by DuplicateRefusalClosing for a larger count",
+			text:   "Error: " + DuplicateRefusalClosing("gt-abc12", 12) + "; re-sling with --force\n",
+			want:   DuplicateRefusalClosing("gt-abc12", 12) + "; re-sling with --force",
+			wantOK: true,
+		},
+		{
+			name: "report's first line alone carries no count",
+			text: "Error: ✗ gt-new Refusing to sling gt-new: its content overlaps 1 existing bead(s).\n",
+		},
+		{name: "count is not a number", text: "Refusing to sling gt-new: many overlapping bead(s) share the test(s) above\n"},
+		{name: "count is missing", text: "Refusing to sling gt-new: overlapping bead(s) share the test(s) above\n"},
+		{name: "bead id is missing", text: "Refusing to sling : 1 overlapping bead(s) share the test(s) above\n"},
+		{name: "different tail", text: "Refusing to sling gt-new: 1 overlapping bead(s) share the file(s) above\n"},
+		{name: "different lead verb", text: "Refusing to dispatch gt-new: 1 overlapping bead(s) share the test(s) above\n"},
+		{name: "lowercase lead", text: "refusing to sling gt-new: 1 overlapping bead(s) share the test(s) above\n"},
+		{name: "unrelated failure", text: "Error: bead gt-new not found\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
