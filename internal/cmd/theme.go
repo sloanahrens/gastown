@@ -97,19 +97,23 @@ func runTheme(cmd *cobra.Command, args []string) error {
 
 	// Determine current rig
 	rigName := detectCurrentRig(townRegistry())
-	if rigName == "" {
-		rigName = "unknown"
-	}
 
 	// Show current theme assignment
 	if len(args) == 0 {
+		if rigName == "" {
+			rigName = "unknown"
+		}
 		desc := describeRigTheme(rigName)
 		fmt.Printf("Rig: %s\n", rigName)
 		fmt.Printf("Theme: %s\n", desc)
 		return nil
 	}
 
-	// Set theme
+	// Set theme: refuse before writing anything when no rig is resolved,
+	// rather than saving under a made-up rig name.
+	if rigName == "" {
+		return fmt.Errorf("not in a rig; run from inside a rig or set GT_RIG")
+	}
 	themeName := args[0]
 	if !strings.EqualFold(themeName, "none") && tmux.GetThemeByName(themeName) == nil {
 		return fmt.Errorf("unknown theme: %s (use --list to see available themes)", themeName)
