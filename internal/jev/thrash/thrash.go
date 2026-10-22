@@ -241,9 +241,10 @@ func attachedAt(b *beads.Issue) time.Time {
 }
 
 // beadFault reports whether a failed ask was caused by the bead's own request,
-// which a retry cannot fix: a 4xx other than an authorization or rate-limit
-// failure, or a response Jev could not parse. Anything else means Jev could not
-// be reached.
+// which a retry cannot fix: a 4xx other than an authorization failure, a
+// rate-limit or an account refusal, or a response Jev could not parse. Anything
+// else means Jev could not be reached or refused the account, which says
+// nothing about the bead.
 func beadFault(err error) bool {
 	if errors.Is(err, jev.ErrRateLimited) {
 		return false
@@ -251,9 +252,18 @@ func beadFault(err error) bool {
 	var se *jev.StatusError
 	if errors.As(err, &se) {
 		return se.Status >= 400 && se.Status < 500 &&
-			se.Status != http.StatusUnauthorized && se.Status != http.StatusTooManyRequests
+			se.Status != http.StatusUnauthorized &&
+			se.Status != http.StatusTooManyRequests &&
+			!accountRefusal(se.Status)
 	}
 	return errors.Is(err, jev.ErrBadResponse)
+}
+
+// accountRefusal reports whether a 4xx answers for the account rather than for
+// the request: 402 and 403 refuse every request the key makes, so dropping the
+// placement for one would lose every placement reached while the refusal lasts.
+func accountRefusal(status int) bool {
+	return status == http.StatusPaymentRequired || status == http.StatusForbidden
 }
 
 // agentOf is the agent the bead is for: the agent its agent: label pins, else
