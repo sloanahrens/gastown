@@ -153,6 +153,23 @@ func filterUnreadMessages(messages []*mail.Message) []*mail.Message {
 	return unreadMessages
 }
 
+// resolveInboxIndex maps a 1-based inbox row number to a message ID. With
+// unreadOnly it indexes the filtered list that 'gt mail inbox --unread' numbers.
+func resolveInboxIndex(mailbox inboxLister, idx int, unreadOnly bool) (string, error) {
+	messages, _, _, err := loadInboxSnapshot(mailbox, unreadOnly)
+	if err != nil {
+		return "", fmt.Errorf("listing messages: %w", err)
+	}
+	if idx > len(messages) {
+		kind := "messages"
+		if unreadOnly {
+			kind = "unread messages"
+		}
+		return "", fmt.Errorf("index %d out of range (inbox has %d %s)", idx, len(messages), kind)
+	}
+	return messages[idx-1].ID, nil
+}
+
 func runMailRead(cmd *cobra.Command, args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("message ID or index required\n\nRun 'gt mail inbox' to list messages and their IDs")
@@ -170,15 +187,12 @@ func runMailRead(cmd *cobra.Command, args []string) error {
 	// Check if the argument is a numeric index (1-based)
 	var msgID string
 	if idx, err := strconv.Atoi(msgRef); err == nil && idx > 0 {
-		// Numeric index: resolve to message ID by listing inbox
-		messages, err := mailbox.List()
+		// Numeric index: resolve to message ID against the list the inbox printed.
+		id, err := resolveInboxIndex(mailbox, idx, mailReadUnread)
 		if err != nil {
-			return fmt.Errorf("listing messages: %w", err)
+			return err
 		}
-		if idx > len(messages) {
-			return fmt.Errorf("index %d out of range (inbox has %d messages)", idx, len(messages))
-		}
-		msgID = messages[idx-1].ID
+		msgID = id
 	} else {
 		msgID = msgRef
 	}

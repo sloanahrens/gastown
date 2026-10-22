@@ -84,3 +84,41 @@ func TestLoadInboxSnapshotPropagatesListError(t *testing.T) {
 		t.Fatalf("List calls = %d, want 1", box.calls)
 	}
 }
+
+func TestMailReadIndexMatchesUnreadListing(t *testing.T) {
+	t.Parallel()
+	box := &fakeInboxLister{
+		messages: []*mail.Message{
+			{ID: "m1", Read: true},
+			{ID: "m2", Read: false},
+		},
+	}
+
+	listed, _, _, err := loadInboxSnapshot(box, true)
+	if err != nil {
+		t.Fatalf("loadInboxSnapshot returned error: %v", err)
+	}
+	if len(listed) == 0 || listed[0].ID != "m2" {
+		t.Fatalf("inbox --unread row 1 = %v, want m2", listed)
+	}
+
+	got, err := resolveInboxIndex(box, 1, true)
+	if err != nil {
+		t.Fatalf("resolveInboxIndex(unread) returned error: %v", err)
+	}
+	if got != "m2" {
+		t.Fatalf("read --unread 1 selected %q, want m2", got)
+	}
+
+	got, err = resolveInboxIndex(box, 1, false)
+	if err != nil {
+		t.Fatalf("resolveInboxIndex(all) returned error: %v", err)
+	}
+	if got != "m1" {
+		t.Fatalf("read 1 selected %q, want m1 (full mailbox)", got)
+	}
+
+	if _, err := resolveInboxIndex(box, 2, true); err == nil {
+		t.Fatal("index 2 with one unread message: want out-of-range error")
+	}
+}

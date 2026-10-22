@@ -23,6 +23,7 @@ var (
 	mailCC            []string // CC recipients
 	mailInboxJSON     bool
 	mailReadJSON      bool
+	mailReadUnread    bool
 	mailInboxUnread   bool
 	mailInboxAll      bool
 	mailInboxIdentity string
@@ -164,11 +165,13 @@ var mailReadCmd = &cobra.Command{
 	Long: `Read a specific message (does not mark as read).
 
 You can specify a message by its ID or by its numeric index from the inbox.
-The index corresponds to the number shown in 'gt mail inbox' (1-based).
+The index corresponds to the number shown in 'gt mail inbox' (1-based). After
+'gt mail inbox --unread', pass --unread so the index matches that listing.
 
 Examples:
   gt mail read hq-abc123    # Read by message ID
   gt mail read 3            # Read the 3rd message in inbox
+  gt mail read --unread 1   # Read row 1 of 'gt mail inbox --unread'
 
 Use 'gt mail inbox' to list messages and their IDs.
 Use 'gt mail mark-read' to mark messages as read.`,
@@ -478,6 +481,7 @@ func init() {
 
 	// Read flags
 	mailReadCmd.Flags().BoolVar(&mailReadJSON, "json", false, "Output as JSON")
+	mailReadCmd.Flags().BoolVarP(&mailReadUnread, "unread", "u", false, "Resolve the index against 'gt mail inbox --unread'")
 
 	// Check flags
 	mailCheckCmd.Flags().BoolVar(&mailCheckInject, "inject", false, "Output format for Claude Code hooks")
