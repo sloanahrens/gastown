@@ -2173,8 +2173,8 @@ it:
 {"patrols": {"jev_thrash": {"enabled": true, "max_usd_per_day": 1, "usd_per_billion_tokens": 4}}}
 ```
 
-`usd_per_billion_tokens` is required. `max_usd_per_day` is optional and draws on
-the same town-wide cap as the other batteries.
+`usd_per_billion_tokens` is required; the daily cap is the town-wide one
+described under Jev Batteries.
 
 `gt jev scorecard --battery thrash` labels each line from two files under
 `.runtime/`, in the scorecard's `internal/jev/scorecard/thrash.go`:
@@ -2213,8 +2213,8 @@ line. The pass blocks, punishes and labels no seat or bead. It is off unless
 {"patrols": {"jev_rules": {"enabled": true, "max_usd_per_day": 1, "usd_per_billion_tokens": 4}}}
 ```
 
-`usd_per_billion_tokens` is required. `max_usd_per_day` is optional and draws on
-the same town-wide cap as the other batteries.
+`usd_per_billion_tokens` is required; the daily cap is the town-wide one
+described under Jev Batteries.
 
 `gt jev scorecard --battery rules` labels `broke_standing_rule` in the
 scorecard's `internal/jev/scorecard/rules.go`. A line younger than 20 minutes is

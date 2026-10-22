@@ -12,7 +12,7 @@ anywhere does that `cd` itself.
 
 | State | Parts | Dispatch |
 |---|---|---|
-| `full` | Dolt, the Forgejo stack and the daemon up (watchers are listed separately) | on: no ESTOP, no hold |
+| `full` | Dolt, the Forgejo stack and the daemon and the watchers up (`status` lists the watchers but derives the state without them) | on: no ESTOP, no hold |
 | `standby` | the same parts up | off: the hold and the ESTOP are set |
 | `off` | Dolt up (unless `--dolt`); daemon, watchers and Forgejo stopped | off |
 
