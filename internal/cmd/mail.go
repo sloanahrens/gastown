@@ -165,8 +165,7 @@ var mailReadCmd = &cobra.Command{
 	Long: `Read a specific message (does not mark as read).
 
 You can specify a message by its ID or by its numeric index from the inbox.
-The index corresponds to the number shown in 'gt mail inbox' (1-based). After
-'gt mail inbox --unread', pass --unread so the index matches that listing.
+The index corresponds to the number shown in 'gt mail inbox' (1-based).
 
 Examples:
   gt mail read hq-abc123    # Read by message ID
