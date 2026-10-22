@@ -15,6 +15,7 @@ import (
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
+	"github.com/steveyegge/gastown/internal/jev/stale"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -112,8 +113,10 @@ type rigDones struct {
 
 // Done lists every bead carrying the ready-to-land label whose live READY TO
 // LAND block was stamped at or after t, and every revert-guard refusal at or
-// after t. Open and held beads are listed, and so are beads closed since t: a
-// landed submission closes its bead.
+// after t. Open and held beads are listed, and so are beads closed since t that
+// still carry the label or closed as a landing. The landing removes the label in
+// the same update that closes the bead, so a landed submission is found by its
+// landed close reason.
 func (r rigDones) Done(t time.Time) ([]Done, error) {
 	rigs := make([]string, 0, len(r.stores))
 	for rig := range r.stores {
@@ -128,13 +131,16 @@ func (r rigDones) Done(t time.Time) ([]Done, error) {
 		if err != nil {
 			return nil, fmt.Errorf("listing %s's submitted beads: %w", rig, err)
 		}
-		closed, err := b.List(beads.ListOptions{Label: land.LabelReadyToLand, Status: "closed", ClosedAfter: t, Limit: 0})
+		closed, err := b.List(beads.ListOptions{Status: "closed", ClosedAfter: t, Limit: 0})
 		if err != nil {
 			return nil, fmt.Errorf("listing %s's closed submissions: %w", rig, err)
 		}
 		seen := map[string]bool{}
 		for _, is := range append(held, closed...) {
 			if is == nil || seen[is.ID] {
+				continue
+			}
+			if !beads.HasLabel(is, land.LabelReadyToLand) && !stale.IsLandedReason(is.CloseReason) {
 				continue
 			}
 			seen[is.ID] = true

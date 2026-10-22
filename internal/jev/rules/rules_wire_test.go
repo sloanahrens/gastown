@@ -14,16 +14,41 @@ import (
 )
 
 // fakeBeads lists canned beads: the held ones for any open-style query, the
-// closed ones for the closed query.
+// closed ones for the closed query. A closed bead comes back as the landing
+// left it: land.recordBead removes the ready-to-land label in the update that
+// closes a landed bead, so the lister drops the label from one, and a label
+// filter then leaves it out, as the store does.
 type fakeBeads struct {
 	held, closed []*beads.Issue
 }
 
 func (f fakeBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
-	if opts.Status == "closed" {
-		return f.closed, nil
+	if opts.Status != "closed" {
+		return filterLabel(f.held, opts.Label), nil
 	}
-	return f.held, nil
+	var closed []*beads.Issue
+	for _, is := range f.closed {
+		c := *is
+		if _, landed := land.ParseLandingRecord(is.Notes); landed {
+			c.Labels = nil
+		}
+		closed = append(closed, &c)
+	}
+	return filterLabel(closed, opts.Label), nil
+}
+
+// filterLabel keeps the beads carrying label, or every bead when label is empty.
+func filterLabel(list []*beads.Issue, label string) []*beads.Issue {
+	if label == "" {
+		return list
+	}
+	var out []*beads.Issue
+	for _, is := range list {
+		if beads.HasLabel(is, label) {
+			out = append(out, is)
+		}
+	}
+	return out
 }
 
 // submittedBead is a bead whose live READY TO LAND block was stamped at at.
@@ -33,6 +58,21 @@ func submittedBead(id string, at time.Time) *beads.Issue {
 		Worker: "bullet", Submitted: at,
 	})
 	return &beads.Issue{ID: id, Notes: notes, Labels: []string{land.LabelReadyToLand}}
+}
+
+// landedBead is a submission the landing worker landed at at: closed with the
+// landing's close reason, and the LANDING RECORD block after its READY TO LAND
+// block.
+func landedBead(id string, at time.Time) *beads.Issue {
+	is := submittedBead(id, at.Add(-time.Minute))
+	rec := land.LandingRecord{
+		LandedCommit: "def5678", PatchID: "p1", Target: "main", Base: "main",
+		Branch: "polecat/bullet/" + id + "+abc", Head: "abc1234", LandedAt: at,
+	}
+	is.Notes += "\n" + rec.NoteBlock()
+	is.Status = "closed"
+	is.CloseReason = rec.CloseReason()
+	return is
 }
 
 // TestRigDonesListsSubmissionsAndRefusals checks the done source reads both
@@ -48,7 +88,7 @@ func TestRigDonesListsSubmissionsAndRefusals(t *testing.T) {
 				submittedBead("gt-open", fixedNow.Add(-10*time.Minute)),
 				submittedBead("gt-old", fixedNow.Add(-2*time.Hour)),
 			},
-			closed: []*beads.Issue{submittedBead("gt-landed", fixedNow.Add(-20*time.Minute))},
+			closed: []*beads.Issue{landedBead("gt-landed", fixedNow.Add(-20*time.Minute))},
 		}},
 		refusals: func() ([]attention.Refusal, error) {
 			return []attention.Refusal{
@@ -81,6 +121,26 @@ func TestRigDonesListsSubmissionsAndRefusals(t *testing.T) {
 	}
 	if d := ids["gt-open"]; d.Polecat != "bullet" || !d.SubmittedAt.Equal(fixedNow.Add(-10*time.Minute).Truncate(time.Second)) {
 		t.Errorf("submission done = %+v, want the worker and the Submitted stamp", d)
+	}
+}
+
+// TestDoneListsLandedBeadAfterLabelRemoval checks a submission that landed
+// before the pass is still listed, though the landing removed its
+// ready-to-land label in the update that closed it.
+func TestDoneListsLandedBeadAfterLabelRemoval(t *testing.T) {
+	t.Parallel()
+	lister := rigDones{
+		stores: map[string]beadLister{"gastown": fakeBeads{
+			closed: []*beads.Issue{landedBead("gt-landed", fixedNow.Add(-20*time.Minute))},
+		}},
+		refusals: func() ([]attention.Refusal, error) { return nil, nil },
+	}
+	got, err := lister.Done(fixedNow.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Bead != "gt-landed" {
+		t.Fatalf("done = %+v, want the landed submission gt-landed", got)
 	}
 }
 
