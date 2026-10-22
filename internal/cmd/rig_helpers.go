@@ -35,7 +35,11 @@ func checkRigNotParkedOrDocked(rigName string) error {
 		prefix = r.Config.Prefix
 	}
 
-	if IsRigDocked(townRoot, rigName, prefix) {
+	docked, err := IsRigDocked(townRoot, rigName, prefix)
+	if err != nil {
+		return fmt.Errorf("checking whether rig '%s' is docked: %w", rigName, err)
+	}
+	if docked {
 		return fmt.Errorf("rig '%s' is docked - use 'gt rig undock %s' first", rigName, rigName)
 	}
 

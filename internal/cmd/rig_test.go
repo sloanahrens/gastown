@@ -343,3 +343,44 @@ func TestUndockRig_ShowNotFoundIsNotDocked(t *testing.T) {
 		t.Errorf("undockRig with no identity bead = %v; want nil", err)
 	}
 }
+
+// labelsBeads is a beads.Client whose Show returns an identity bead with the
+// given labels.
+type labelsBeads struct {
+	beads.Client
+	labels []string
+}
+
+func (b labelsBeads) Show(string) (*beads.Issue, error) {
+	return &beads.Issue{Labels: b.labels}, nil
+}
+
+// TestRigBeadDocked: only an identity bead carrying the docked label is docked,
+// a missing one is not, and an unreadable one is an error rather than "not
+// docked", which would let a docked rig start.
+func TestRigBeadDocked(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		bd      beads.Client
+		want    bool
+		wantErr error
+	}{
+		{"docked label", labelsBeads{labels: []string{"gt:rig", RigDockedLabel}}, true, nil},
+		{"no docked label", labelsBeads{labels: []string{"gt:rig"}}, false, nil},
+		{"no identity bead", notFoundBeads{}, false, nil},
+		{"unreadable identity bead", unavailableShowBeads{}, false, beads.ErrUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := rigBeadDocked(tt.bd, "gt-gastown")
+			if tt.wantErr == nil && err != nil || tt.wantErr != nil && !errors.Is(err, tt.wantErr) {
+				t.Fatalf("rigBeadDocked error = %v; want %v", err, tt.wantErr)
+			}
+			if got != tt.want {
+				t.Errorf("rigBeadDocked = %v; want %v", got, tt.want)
+			}
+		})
+	}
+}
