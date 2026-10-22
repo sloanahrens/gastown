@@ -104,6 +104,9 @@ type NewsReader struct {
 	mu     sync.Mutex
 	at     time.Time // when the cached snapshot was fetched
 	cached *NewsFeed // what that fetch produced, last good stories included
+	// held is whether the last fetch kept the last good feed over a thinner
+	// read, so the next thinner read in a row is taken rather than held again.
+	held bool
 }
 
 // NewNewsReader builds the pane's reader over transport, which a test replaces
@@ -133,17 +136,22 @@ func (r *NewsReader) Read() *NewsFeed {
 // stories with their own read time: the pane ages what it is showing rather
 // than reading a failed refresh as a front page with no stories on it. So does
 // a read that lost items to errors and came back thinner than the last good
-// feed: it would otherwise replace the full list as fresh for five minutes.
+// feed: it would otherwise replace the full list as fresh for five minutes. It
+// is held once, though. An item that keeps failing would pin the pane to the
+// stories it showed before, so the thinner read after a held one is taken.
 func (r *NewsReader) fetch(now time.Time) *NewsFeed {
 	ctx, cancel := context.WithTimeout(context.Background(), newsTimeout)
 	defer cancel()
 
+	wasHeld := r.held
+	r.held = false
 	read, err := r.topStories(ctx)
 	if err == nil {
 		thinner := read.itemErr != nil && r.cached != nil && len(read.stories) < len(r.cached.Stories)
-		if !thinner {
+		if !thinner || wasHeld {
 			return &NewsFeed{Stories: read.stories, At: now}
 		}
+		r.held = true
 		err = read.itemErr
 	}
 	class := newsErrorClass(err)
