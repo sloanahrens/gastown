@@ -1,6 +1,10 @@
 package sling
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/dispatch"
+)
 
 // TestSlingDuplicateIgnoresDependencyChain is the gt-xydyc acceptance bar: a
 // bead in the candidate's own dependency chain names the same test because it
@@ -107,5 +111,25 @@ func TestIsPackageFixtureTest(t *testing.T) {
 		if got := IsPackageFixtureTest(tt.name); got != tt.want {
 			t.Errorf("IsPackageFixtureTest(%q) = %v, want %v", tt.name, got, tt.want)
 		}
+	}
+}
+
+// TestDuplicateRefusalIsAnAutomaticDispatchersRefusal: the report DecideDuplicates
+// renders for a blocking overlap must classify as a refusal by the text the
+// daemon reads, not only by the typed error (gt-g1xiy). The two are pinned
+// together so a reworded report cannot quietly turn a deferral into a failure.
+func TestDuplicateRefusalIsAnAutomaticDispatchersRefusal(t *testing.T) {
+	t.Parallel()
+	candidate := Duplicate{ID: "gt-new", Title: "candidate", Status: "open", Priority: 2}
+	match := DuplicateMatch{
+		Bead:        Duplicate{ID: "gt-old", Title: "overlap", Status: "in_progress", Priority: 2},
+		SharedTests: []string{"TestFoo"},
+	}
+	err := DecideDuplicates(candidate, []DuplicateMatch{match}).Err()
+	if err == nil {
+		t.Fatal("an in-flight overlap sharing a test must refuse the sling")
+	}
+	if _, ok := dispatch.SlingRefusalLine(err.Error()); !ok {
+		t.Errorf("SlingRefusalLine does not classify the duplicate report as a refusal:\n%s", err)
 	}
 }

@@ -112,3 +112,51 @@ func TestSlingRefusalReason(t *testing.T) {
 		})
 	}
 }
+
+// TestSlingRefusalLineMatchesDuplicateReport: the report sling.DecideDuplicates
+// prints when it refuses a sling for overlapping content is a refusal to the
+// dispatcher too, as the CLI's typed check already calls it. Its closing line
+// carries no marker, so a scheduled run refused this way was counted as failed
+// (gt-g1xiy).
+func TestSlingRefusalLineMatchesDuplicateReport(t *testing.T) {
+	t.Parallel()
+	const closing = "Refusing to sling gt-new: 1 overlapping bead(s) share the test(s) above; re-sling with --force if this is genuinely distinct: gt sling gt-new <target> --force"
+	tests := []struct {
+		name   string
+		text   string
+		want   string
+		wantOK bool
+	}{
+		{
+			name: "blocking report, cobra prefix",
+			text: "Error: ✗ gt-new Refusing to sling gt-new: its content overlaps 1 existing bead(s).\n" +
+				"  Two beads describing one defect from different vantage points share no\n" +
+				"  keywords, but they do name the same failing tests (gt-mcq).\n\n" +
+				"  gt-old [open] TestFoo\n\n" +
+				closing + "\n",
+			want:   closing,
+			wantOK: true,
+		},
+		{
+			name:   "blocking report, wrapped by the scheduled run's exit error",
+			text:   "gt sling gt-new: exit status 1: " + closing,
+			want:   closing,
+			wantOK: true,
+		},
+		{
+			name: "warning-only overlap proceeds, no refusal",
+			text: "⚠ gt-new overlaps 1 existing bead(s), none of them in flight or next for the dispatcher.\n" +
+				"  Shared files alone, closed or parked work, unstarted work this bead would\n",
+		},
+		{name: "closing sentence quoted mid-sentence in a bead title", text: "bead gt-x: fix so " + closing + " stops\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := SlingRefusalLine(tt.text)
+			if ok != tt.wantOK || got != tt.want {
+				t.Errorf("SlingRefusalLine = %q, %v; want %q, %v", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
