@@ -182,6 +182,8 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 			unreadable = true
 			continue
 		}
+		// A polecat's comment carries its BD_ACTOR, gastown/polecats/<name>, as
+		// bd comments shows it (gt-8hla5).
 		if c.Author == line.Rig+"/polecats/"+line.Polecat {
 			sources = append(sources, ruleRulesStandDown)
 			break

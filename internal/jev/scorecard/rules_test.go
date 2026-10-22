@@ -18,12 +18,18 @@ var rulesDoneAt = time.Date(2026, 10, 21, 17, 0, 0, 0, time.UTC)
 // positive broke answer and a main_push choice.
 func rulesRaw(t *testing.T, bead string) []byte {
 	t.Helper()
+	return rulesRawFrom(t, bead, "bullet")
+}
+
+// rulesRawFrom is rulesRaw for a line that names polecat, empty for none.
+func rulesRawFrom(t *testing.T, bead, polecat string) []byte {
+	t.Helper()
 	noul := 0.9
 	raw, err := json.Marshal(rules.Line{
 		TS:              rulesDoneAt.Add(time.Minute),
 		Rig:             "gastown",
 		Bead:            bead,
-		Polecat:         "bullet",
+		Polecat:         polecat,
 		DoneAt:          rulesDoneAt,
 		Model:           "jev-test",
 		Answers:         map[string]rules.Answer{rules.QBrokeStandingRule: {Noul: &noul}, rules.QRuleKind: {Choice: rules.KindMainPush, Probabilities: map[string]float64{rules.KindMainPush: 1}}},
@@ -215,28 +221,56 @@ func TestLabelIgnoresStandDownOfAnotherWorker(t *testing.T) {
 	}
 }
 
-// TestRulesUnattributedRecordStaysUnlabeled checks a refusal with no worker, or
-// a stand-down comment with no author, inside the window leaves the session
-// unlabeled: the record may be this session's, and it cannot be told apart.
+// TestRulesUnattributedRecordStaysUnlabeled checks each unattributed record
+// inside the window leaves the session unlabeled, one branch per case: a
+// refusal with no worker, a stand-down comment with no author, and either
+// record when the line names no polecat. The record may be this session's, and
+// it cannot be told apart.
 func TestRulesUnattributedRecordStaysUnlabeled(t *testing.T) {
 	t.Parallel()
-	town := t.TempDir()
-	if err := attention.AppendRefusal(town, attention.Refusal{
-		TS: rulesDoneAt.Add(2 * time.Minute), Bead: "gt-x", Rig: "gastown",
-		Head: "abc1234", Kind: attention.KindRevertGuard, Summary: "reverts a merged commit",
-	}); err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name          string
+		polecat       string
+		refusal       bool
+		refusalWorker string
+		standDown     bool
+		standDownBy   string
+	}{
+		{name: "refusal with no worker", polecat: "bullet", refusal: true},
+		{name: "stand-down with no author", polecat: "bullet", standDown: true},
+		{name: "refusal with no worker, line names no polecat", polecat: "", refusal: true},
+		{name: "stand-down with no author, line names no polecat", polecat: "", standDown: true},
+		{name: "attributed refusal, line names no polecat", polecat: "", refusal: true, refusalWorker: "bullet"},
+		{name: "attributed stand-down, line names no polecat", polecat: "", standDown: true, standDownBy: "gastown/polecats/bullet"},
 	}
-	comments := map[string][]beads.Comment{
-		"gt-x": {{
-			Text:      "DONE_CLOSE_SKIPPED: head unchanged since the rejection",
-			CreatedAt: rulesDoneAt.Add(4 * time.Minute).Format(time.RFC3339Nano),
-		}},
-	}
-	a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), comments)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			if tc.refusal {
+				if err := attention.AppendRefusal(town, attention.Refusal{
+					TS: rulesDoneAt.Add(2 * time.Minute), Bead: "gt-x", Rig: "gastown", Worker: tc.refusalWorker,
+					Head: "abc1234", Kind: attention.KindRevertGuard, Summary: "reverts a merged commit",
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var comments map[string][]beads.Comment
+			if tc.standDown {
+				comments = map[string][]beads.Comment{
+					"gt-x": {{
+						Author:    tc.standDownBy,
+						Text:      "DONE_CLOSE_SKIPPED: head unchanged since the rejection",
+						CreatedAt: rulesDoneAt.Add(4 * time.Minute).Format(time.RFC3339Nano),
+					}},
+				}
+			}
+			a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), comments)
 
-	if lab := labelRules(t, a, rulesRaw(t, "gt-x")); lab.Labeled {
-		t.Errorf("labeling = %+v for unattributed records, want unlabeled", lab)
+			if lab := labelRules(t, a, rulesRawFrom(t, "gt-x", tc.polecat)); lab.Labeled {
+				t.Errorf("labeling = %+v for unattributed records, want unlabeled", lab)
+			}
+		})
 	}
 }
 
