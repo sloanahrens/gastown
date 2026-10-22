@@ -14,6 +14,7 @@ package logtriage
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -23,6 +24,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
@@ -333,13 +335,15 @@ func (p *Pass) ask(ctx context.Context, g *group, now time.Time) (Line, error) {
 		Last:    formatTime(g.last),
 		Samples: g.samples,
 	}
-	got, err := p.Asker.Ask(ctx, state, Questions())
+	qs := Questions()
+	got, err := p.Asker.Ask(ctx, state, qs)
 	if err != nil {
 		if cerr := ctx.Err(); cerr != nil {
 			return Line{}, cerr
 		}
 		if errors.Is(err, jev.ErrBadResponse) {
 			line.Reason = ReasonBadResponse
+			explain(&line, err, state, qs)
 		} else {
 			line.Reason = ReasonAskFailed
 		}
@@ -348,6 +352,33 @@ func (p *Pass) ask(ctx context.Context, g *group, now time.Time) (Line, error) {
 	line.Model = got.Model
 	line.Answers = answersFrom(got)
 	return line, nil
+}
+
+// explain fills a bad_response line with the check the reply failed, the
+// question and number that check read, and the size of the request. It takes
+// those from the typed error and the request alone, so the line never holds
+// the error text or anything Jev wrote.
+func explain(line *Line, err error, state groupState, qs map[string]jev.Question) {
+	var bad *jev.BadResponse
+	if errors.As(err, &bad) {
+		line.Detail = bad.Check
+		line.Question = bad.Question
+		line.Value = bad.Value
+	}
+	line.RequestChars = requestChars(state, qs)
+	line.SampleCount = len(state.Samples)
+}
+
+// requestChars counts the characters a call sends: the state's JSON and every
+// question's instructions. groupState holds only strings and ints, so its JSON
+// cannot fail to encode.
+func requestChars(state groupState, qs map[string]jev.Question) int {
+	body, _ := json.Marshal(state)
+	n := utf8.RuneCount(body)
+	for _, q := range qs {
+		n += utf8.RuneCountInString(q.Instructions)
+	}
+	return n
 }
 
 func (p *Pass) now() time.Time {

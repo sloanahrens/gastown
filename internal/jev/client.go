@@ -392,7 +392,7 @@ func noulCriteria(trueDesc, falseDesc string) map[string]string {
 func parseAnswers(data []byte, qs map[string]Question) (*Answers, error) {
 	var r response
 	if err := json.Unmarshal(data, &r); err != nil {
-		return nil, fmt.Errorf("%w: decode: %v", ErrBadResponse, err)
+		return nil, unusable(CheckDecode, nil, "decode: %v", err)
 	}
 	out := &Answers{
 		Model:  r.Model,
@@ -403,28 +403,32 @@ func parseAnswers(data []byte, qs map[string]Question) (*Answers, error) {
 	}
 	for id, q := range qs {
 		a, ok := r.Answers[id]
-		if !ok || a.Type != q.Type {
-			return out, answerErr(id, len(qs), fmt.Errorf("no %s answer", q.Type))
+		if !ok {
+			return out, answerErr(id, len(qs), unusable(CheckMissingAnswer, nil, "no %s answer", q.Type))
+		}
+		if a.Type != q.Type {
+			return out, answerErr(id, len(qs), unusable(CheckWrongType, nil, "no %s answer", q.Type))
 		}
 		switch q.Type {
 		case typeChoice:
-			ca, err := parseChoiceAnswer(a, q.Options)
-			if err != nil {
-				return out, answerErr(id, len(qs), err)
+			ca, bad := parseChoiceAnswer(a, q.Options)
+			if bad != nil {
+				return out, answerErr(id, len(qs), bad)
 			}
 			out.Choice[id] = ca
 		case typeNoul:
 			if a.Noul == nil {
-				return out, answerErr(id, len(qs), errors.New("no noul value"))
+				return out, answerErr(id, len(qs), unusable(CheckNoulMissing, nil, "no noul value"))
 			}
 			if *a.Noul < 0 || *a.Noul > 1 {
-				return out, answerErr(id, len(qs), fmt.Errorf("noul %v is outside 0 to 1", *a.Noul))
+				v := *a.Noul
+				return out, answerErr(id, len(qs), unusable(CheckNoulRange, &v, "noul %v is outside 0 to 1", v))
 			}
 			out.Noul[id] = *a.Noul
 		case typeScore:
-			sa, err := parseScoreAnswer(a, len(q.Levels))
-			if err != nil {
-				return out, answerErr(id, len(qs), err)
+			sa, bad := parseScoreAnswer(a, len(q.Levels))
+			if bad != nil {
+				return out, answerErr(id, len(qs), bad)
 			}
 			out.Score[id] = sa
 		}
@@ -432,32 +436,32 @@ func parseAnswers(data []byte, qs map[string]Question) (*Answers, error) {
 	return out, nil
 }
 
-// answerErr returns err as an ErrBadResponse for question id. The id is named
-// only when Ask asked several questions, where it says which answer is bad; a
-// lone question, which is all Choice asks, keeps the text Choice has always
-// returned.
-func answerErr(id string, asked int, err error) error {
+// answerErr returns bad for question id. The id is named only when Ask asked
+// several questions, where it says which answer is bad; a lone question, which
+// is all Choice asks, keeps the text Choice has always returned.
+func answerErr(id string, asked int, bad *BadResponse) error {
 	if asked > 1 {
-		return fmt.Errorf("%w: question %q: %v", ErrBadResponse, id, err)
+		bad.Question = id
 	}
-	return fmt.Errorf("%w: %v", ErrBadResponse, err)
+	return bad
 }
 
 // parseChoiceAnswer returns a choice answer that names one of options, whose
 // probabilities cover exactly those options and sum to 1, and whose named
 // option is the most probable.
-func parseChoiceAnswer(a answer, options map[string]string) (ChoiceAnswer, error) {
+func parseChoiceAnswer(a answer, options map[string]string) (ChoiceAnswer, *BadResponse) {
 	if _, ok := options[a.Choice]; !ok {
-		return ChoiceAnswer{}, fmt.Errorf("choice %q is not an option asked", a.Choice)
+		return ChoiceAnswer{}, unusable(CheckChoiceNotAnOption, nil, "choice %q is not an option asked", a.Choice)
 	}
 	if a.Confidence < 0 || a.Confidence > 1 {
-		return ChoiceAnswer{}, fmt.Errorf("confidence %v is outside 0 to 1", a.Confidence)
+		c := a.Confidence
+		return ChoiceAnswer{}, unusable(CheckConfidenceRange, &c, "confidence %v is outside 0 to 1", c)
 	}
-	if err := checkProbabilities(a.Probabilities, options); err != nil {
-		return ChoiceAnswer{}, err
+	if bad := checkProbabilities(a.Probabilities, options); bad != nil {
+		return ChoiceAnswer{}, bad
 	}
 	if a.Probabilities[a.Choice] < highest(a.Probabilities) {
-		return ChoiceAnswer{}, fmt.Errorf("choice %q is not the most probable option", a.Choice)
+		return ChoiceAnswer{}, unusable(CheckNotMostProbable, nil, "choice %q is not the most probable option", a.Choice)
 	}
 	return ChoiceAnswer{
 		Choice:        a.Choice,
@@ -469,29 +473,31 @@ func parseChoiceAnswer(a answer, options map[string]string) (ChoiceAnswer, error
 // parseScoreAnswer checks that a score answer names a level on the rubric and
 // labels every level once, with a probability and a legend entry under the
 // same label.
-func parseScoreAnswer(a answer, levels int) (ScoreAnswer, error) {
+func parseScoreAnswer(a answer, levels int) (ScoreAnswer, *BadResponse) {
 	if a.Score == nil {
-		return ScoreAnswer{}, errors.New("no score value")
+		return ScoreAnswer{}, unusable(CheckScoreMissing, nil, "no score value")
 	}
 	if *a.Score < 0 || *a.Score > float64(levels-1) {
-		return ScoreAnswer{}, fmt.Errorf("score %v is outside 0 to %d", *a.Score, levels-1)
+		s := *a.Score
+		return ScoreAnswer{}, unusable(CheckScoreRange, &s, "score %v is outside 0 to %d", s, levels-1)
 	}
 	if a.Confidence < 0 || a.Confidence > 1 {
-		return ScoreAnswer{}, fmt.Errorf("confidence %v is outside 0 to 1", a.Confidence)
+		c := a.Confidence
+		return ScoreAnswer{}, unusable(CheckConfidenceRange, &c, "confidence %v is outside 0 to 1", c)
 	}
 	if len(a.Probabilities) != levels {
-		return ScoreAnswer{}, fmt.Errorf("probabilities cover %d levels, %d were asked", len(a.Probabilities), levels)
+		return ScoreAnswer{}, unusable(CheckProbabilitiesCount, nil, "probabilities cover %d levels, %d were asked", len(a.Probabilities), levels)
 	}
 	if len(a.Legend) != levels {
-		return ScoreAnswer{}, fmt.Errorf("legend labels %d levels, %d were asked", len(a.Legend), levels)
+		return ScoreAnswer{}, unusable(CheckLegendCount, nil, "legend labels %d levels, %d were asked", len(a.Legend), levels)
 	}
 	for label := range a.Legend {
 		if _, ok := a.Probabilities[label]; !ok {
-			return ScoreAnswer{}, fmt.Errorf("legend label %q has no probability", label)
+			return ScoreAnswer{}, unusable(CheckLegendUnknownLabel, nil, "legend label %q has no probability", label)
 		}
 	}
-	if err := checkSum(a.Probabilities); err != nil {
-		return ScoreAnswer{}, err
+	if bad := checkSum(a.Probabilities); bad != nil {
+		return ScoreAnswer{}, bad
 	}
 	return ScoreAnswer{
 		Score:         *a.Score,
@@ -503,32 +509,32 @@ func parseScoreAnswer(a answer, levels int) (ScoreAnswer, error) {
 
 // checkProbabilities checks that probabilities name every option asked and no
 // other, each within 0 to 1, and sum to 1.
-func checkProbabilities(probabilities map[string]float64, criteria map[string]string) error {
+func checkProbabilities(probabilities map[string]float64, criteria map[string]string) *BadResponse {
 	if len(probabilities) != len(criteria) {
-		return fmt.Errorf("probabilities cover %d options, %d were asked", len(probabilities), len(criteria))
+		return unusable(CheckProbabilitiesCount, nil, "probabilities cover %d options, %d were asked", len(probabilities), len(criteria))
 	}
 	for name := range probabilities {
 		if _, ok := criteria[name]; !ok {
-			return fmt.Errorf("probability for %q, which was not asked", name)
+			return unusable(CheckProbabilitiesUnknownOption, nil, "probability for %q, which was not asked", name)
 		}
 	}
 	return checkSum(probabilities)
 }
 
 // checkSum checks that each probability is within 0 to 1 and the total is 1.
-func checkSum(probabilities map[string]float64) error {
+func checkSum(probabilities map[string]float64) *BadResponse {
 	if len(probabilities) == 0 {
-		return errors.New("no probabilities")
+		return unusable(CheckProbabilitiesCount, nil, "no probabilities")
 	}
 	var sum float64
 	for name, p := range probabilities {
 		if p < 0 || p > 1 {
-			return fmt.Errorf("probability for %q is %v, outside 0 to 1", name, p)
+			return unusable(CheckProbabilityRange, &p, "probability for %q is %v, outside 0 to 1", name, p)
 		}
 		sum += p
 	}
 	if math.Abs(sum-1) > probabilityTolerance {
-		return fmt.Errorf("probabilities sum to %v, not 1", sum)
+		return unusable(CheckProbabilitiesSum, &sum, "probabilities sum to %v, not 1", sum)
 	}
 	return nil
 }
