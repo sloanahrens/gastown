@@ -29,6 +29,7 @@ type RigConfigSyncCheck struct {
 	missingExportCfg []string         // Rigs missing export.auto=false in config.yaml
 	dbNameMismatches []dbMismatch     // Dolt database name doesn't match prefix
 	dbCheckErrors    []string         // Rigs whose Dolt DB status could not be verified
+	unrepairable     []string         // Rigs with a missing or unreadable directory or file, which Fix cannot repair
 
 	// listDatabases lists the databases the town's Dolt serves; nil is
 	// doltserver.ListDatabases.
@@ -102,6 +103,7 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 	c.missingExportCfg = nil
 	c.dbNameMismatches = nil
 	c.dbCheckErrors = nil
+	c.unrepairable = nil
 	var details []string
 
 	for rigName, entry := range rigsConfig.Rigs {
@@ -110,6 +112,7 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 
 		// Check if rig directory exists
 		if _, err := os.Stat(rigPath); os.IsNotExist(err) {
+			c.unrepairable = append(c.unrepairable, rigName)
 			details = append(details, fmt.Sprintf("Registered rig %s directory does not exist", rigName))
 			continue
 		}
@@ -130,6 +133,7 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 		// Check if config.json has correct prefix
 		rigCfg, err := rig.LoadRigConfig(rigPath)
 		if err != nil {
+			c.unrepairable = append(c.unrepairable, rigName)
 			details = append(details, fmt.Sprintf("Rig %s has unreadable config.json: %v", rigName, err))
 			continue
 		}
@@ -153,6 +157,7 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 
 		beadsDir := doltserver.FindRigBeadsDir(ctx.TownRoot, rigName)
 		if _, err := os.Stat(beadsDir); os.IsNotExist(err) {
+			c.unrepairable = append(c.unrepairable, rigName)
 			details = append(details, fmt.Sprintf("Rig %s is missing .beads directory", rigName))
 			continue
 		}
@@ -189,6 +194,7 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 		// Read database name from metadata.json
 		metadataBytes, err := os.ReadFile(metadataPath)
 		if err != nil {
+			c.unrepairable = append(c.unrepairable, rigName)
 			details = append(details, fmt.Sprintf("Rig %s could not read metadata.json: %v", rigName, err))
 			continue
 		}
@@ -197,6 +203,7 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 			DoltMode string `json:"dolt_mode"`
 		}
 		if err := json.Unmarshal(metadataBytes, &metadata); err != nil {
+			c.unrepairable = append(c.unrepairable, rigName)
 			details = append(details, fmt.Sprintf("Rig %s has invalid metadata.json: %v", rigName, err))
 			continue
 		}
@@ -280,7 +287,7 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	// Check for summary
-	issueCount := len(c.missingConfig) + len(c.prefixMismatches) + len(c.missingRigBeads) + len(c.missingDoltDB) + len(c.missingMetadata) + len(c.missingPrefixCfg) + len(c.missingExportCfg) + len(c.dbNameMismatches) + len(c.dbCheckErrors)
+	issueCount := len(c.missingConfig) + len(c.prefixMismatches) + len(c.missingRigBeads) + len(c.missingDoltDB) + len(c.missingMetadata) + len(c.missingPrefixCfg) + len(c.missingExportCfg) + len(c.dbNameMismatches) + len(c.dbCheckErrors) + len(c.unrepairable)
 	if issueCount == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
@@ -316,6 +323,9 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	if len(c.dbCheckErrors) > 0 {
 		parts = append(parts, fmt.Sprintf("%d Dolt DB status unknown", len(c.dbCheckErrors)))
+	}
+	if len(c.unrepairable) > 0 {
+		parts = append(parts, fmt.Sprintf("%d not auto-repairable", len(c.unrepairable)))
 	}
 
 	return &CheckResult{
