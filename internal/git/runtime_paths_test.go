@@ -543,8 +543,8 @@ func TestLooksGenerated(t *testing.T) {
 		{"pkg/coverage/", "pkg/coverage/c.prof", true},
 		{"pkg/coverage/", "pkg/coverage/cpu.pprof", true},
 		{"pkg/coverage/", "pkg/coverage/coverage.html", true},
-		{"pkg/coverage/", "pkg/coverage/Cover.html", true},
-		{"pkg/coverage/", "pkg/coverage/coverage.lcov", true},
+		{"pkg/coverage/", "pkg/coverage/Cover.html", false},
+		{"pkg/coverage/", "pkg/coverage/coverage.lcov", false},
 		{"pkg/coverage/", "pkg/coverage/report.html", false},
 		{"pkg/coverage/", "pkg/coverage/template.html", false},
 		{"pkg/coverage/", "pkg/coverage/testdata/coverage.html", false},
@@ -559,5 +559,29 @@ func TestLooksGenerated(t *testing.T) {
 		if got := looksGenerated(tc.root, tc.path); got != tc.want {
 			t.Errorf("looksGenerated(%q, %q) = %v, want %v", tc.root, tc.path, got, tc.want)
 		}
+	}
+}
+
+// coverage.json, coverage.txt, cover.html, coverage.profile and .lcov are names
+// a person also writes by hand as fixtures, so an untracked one beside new
+// source is kept, not reset as generator output (gt-mpf4y).
+func TestLooksGeneratedKeepsHandwrittenFixtureNames(t *testing.T) {
+	t.Parallel()
+	fixtures := []string{
+		"pkg/coverage/coverage.json",
+		"pkg/coverage/coverage.txt",
+		"pkg/coverage/cover.html",
+		"pkg/coverage/coverage.profile",
+		"pkg/coverage/coverage.lcov",
+	}
+	for _, f := range fixtures {
+		if looksGenerated("pkg/coverage/", f) {
+			t.Errorf("looksGenerated(%q) = true, want false for a hand-written fixture", f)
+		}
+	}
+	list := func(string) ([]string, error) { return []string{"pkg/coverage/collector.go"}, nil }
+	got := RuntimeArtifactPathspecsListing(append([]string{"pkg/coverage/collector.go"}, fixtures...), list, list)
+	if len(got) != 0 {
+		t.Fatalf("RuntimeArtifactPathspecsListing = %q, want no pathspec over the fixtures", got)
 	}
 }

@@ -4729,9 +4729,11 @@ func (b sourceBeside) spares(root, path string, changedSources []string) bool {
 // writes coverage.html), a compiler's or profiler's data (.profraw, .prof), or
 // any file ending in .out, the name `go test -coverprofile=` is given whatever
 // the profile is called (unit.out). A bare .html is not listed: report.html or
-// a template may be hand-written, and so may a file named just "out". A file
-// under testdata/ is a fixture by Go convention whatever its name, since a
-// coverage package tests against sample lcov.info files and golden .out files.
+// a template may be hand-written, and so may a file named just "out". Nor is
+// coverage.json, coverage.txt, cover.html, coverage.profile or .lcov, which a
+// person also writes by hand as a fixture (gt-mpf4y). A file under testdata/
+// is a fixture by Go convention whatever its name, since a coverage package
+// tests against sample lcov.info files and golden .out files.
 // spares keeps a file HEAD tracks under the root, so a committed expected.out
 // is never reset.
 func looksGenerated(root, path string) bool {
@@ -4750,14 +4752,14 @@ func looksGenerated(root, path string) bool {
 	switch name {
 	case "coverage.out", "cover.out", "lcov.info", "coverage.xml", "cobertura.xml", "clover.xml",
 		"coverage-final.json", "coverage-summary.json", ".coverage",
-		"coverage.html", "cover.html", "coverage.txt", "coverage.json", "coverage.profile":
+		"coverage.html":
 		return true
 	}
 	switch filepath.Ext(name) {
 	// ".out" covers the name a coverage tool is commonly given even when it
 	// does not end in coverage.out: `go test -coverprofile=pkg/coverage/unit.out`
 	// writes generator output into the tree just the same.
-	case ".out", ".profraw", ".profdata", ".gcda", ".gcno", ".gcov", ".prof", ".pprof", ".lcov":
+	case ".out", ".profraw", ".profdata", ".gcda", ".gcno", ".gcov", ".prof", ".pprof":
 		return true
 	}
 	return false
