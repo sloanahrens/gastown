@@ -3,7 +3,9 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"iter"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -26,9 +28,12 @@ type namedSlingFake struct {
 	allocatedAs string
 }
 
-func (f *namedSlingFake) FindIdlePolecat() (*polecat.Polecat, error) {
+func (f *namedSlingFake) IdlePolecats() (iter.Seq[*polecat.Polecat], error) {
 	f.findCalls++
-	return f.idle, nil
+	if f.idle == nil {
+		return slices.Values([]*polecat.Polecat(nil)), nil
+	}
+	return slices.Values([]*polecat.Polecat{f.idle}), nil
 }
 
 func (f *namedSlingFake) ReuseIdlePolecat(name string, opts polecat.AddOptions) (*polecat.Polecat, error) {

@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"slices"
@@ -89,13 +90,18 @@ func TestPolecatIntegrationEnabledDefaultsTrue(t *testing.T) {
 // released records what the reuse path handed back, in order; reuseOpts records
 // the options that path handed the manager instead.
 type idlePolecatReuseFake struct {
-	idle      *polecat.Polecat
-	findErr   error
-	reuseErr  error
-	getErr    error
-	getCalls  int
-	released  []idleReuseRelease
-	reuseOpts []polecat.AddOptions
+	idle     *polecat.Polecat
+	seats    []*polecat.Polecat // the pool's reusable seats, in order; idle alone when nil
+	findErr  error
+	reuseErr error
+	// reuseErrFor refuses the named seats only; reuseNames records every seat
+	// the path asked to reuse, in order.
+	reuseErrFor map[string]error
+	reuseNames  []string
+	getErr      error
+	getCalls    int
+	released    []idleReuseRelease
+	reuseOpts   []polecat.AddOptions
 }
 
 // idleReuseRelease is one release the reuse path asked for.
@@ -105,12 +111,23 @@ type idleReuseRelease struct {
 	hookBead    string
 }
 
-func (f *idlePolecatReuseFake) FindIdlePolecat() (*polecat.Polecat, error) {
-	return f.idle, f.findErr
+func (f *idlePolecatReuseFake) IdlePolecats() (iter.Seq[*polecat.Polecat], error) {
+	if f.findErr != nil {
+		return nil, f.findErr
+	}
+	seats := f.seats
+	if seats == nil && f.idle != nil {
+		seats = []*polecat.Polecat{f.idle}
+	}
+	return slices.Values(seats), nil
 }
 
 func (f *idlePolecatReuseFake) ReuseIdlePolecat(name string, opts polecat.AddOptions) (*polecat.Polecat, error) {
 	f.reuseOpts = append(f.reuseOpts, opts)
+	f.reuseNames = append(f.reuseNames, name)
+	if err := f.reuseErrFor[name]; err != nil {
+		return nil, err
+	}
 	if f.reuseErr != nil {
 		return nil, f.reuseErr
 	}
@@ -121,6 +138,9 @@ func (f *idlePolecatReuseFake) Get(name string) (*polecat.Polecat, error) {
 	f.getCalls++
 	if f.getErr != nil {
 		return nil, f.getErr
+	}
+	if f.idle == nil {
+		return &polecat.Polecat{Name: name}, nil
 	}
 	return f.idle, nil
 }

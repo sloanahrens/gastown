@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"iter"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -2986,16 +2987,36 @@ func (m *Manager) List() ([]*Polecat, error) {
 // FindIdlePolecat returns the first idle polecat in the rig, or nil if none.
 // Idle means no hook, no active session, and no pending completion/MR cleanup state.
 func (m *Manager) FindIdlePolecat() (*Polecat, error) {
+	idle, err := m.IdlePolecats()
+	if err != nil {
+		return nil, err
+	}
+	for p := range idle {
+		return p, nil
+	}
+	return nil, nil
+}
+
+// IdlePolecats reads the rig once and yields each polecat FindIdlePolecat would
+// accept, in the order List reads them. The reuse verdict (git probes, bead
+// reads) is taken as each seat is reached, so a caller that stops at the first
+// pays for one. A sling that loses its seat to a concurrent sling between this
+// read and its own ReuseIdlePolecat, which re-checks under the per-polecat lock,
+// takes the next seat from the same read instead of reading the rig again.
+func (m *Manager) IdlePolecats() (iter.Seq[*Polecat], error) {
 	polecats, err := m.List()
 	if err != nil {
 		return nil, err
 	}
-	for _, p := range polecats {
-		if p.State.IsReuseEligible() && m.reuseDecisionForPolecat(p.Name, p.State).Reusable {
-			return p, nil
+	return func(yield func(*Polecat) bool) {
+		for _, p := range polecats {
+			if p.State.IsReuseEligible() && m.reuseDecisionForPolecat(p.Name, p.State).Reusable {
+				if !yield(p) {
+					return
+				}
+			}
 		}
-	}
-	return nil, nil
+	}, nil
 }
 
 // parkedReuseBlocker reports whether the polecat carries an agentpause marker

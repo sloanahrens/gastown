@@ -4,6 +4,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"iter"
 	"os"
 	"path/filepath"
 	"strings"
@@ -247,32 +248,47 @@ func reclaimBrokenIdlePolecatForSling(polecatMgr brokenIdleReclaimer) (bool, err
 
 // idlePolecatReuse is the polecat-manager surface the idle-reuse path needs.
 type idlePolecatReuse interface {
-	FindIdlePolecat() (*polecat.Polecat, error)
+	IdlePolecats() (iter.Seq[*polecat.Polecat], error)
 	ReuseIdlePolecat(name string, opts polecat.AddOptions) (*polecat.Polecat, error)
 	Get(name string) (*polecat.Polecat, error)
 }
 
-// reuseIdlePolecatForSling reuses an idle polecat's sandbox for this sling
-// (gt-4ac), returning nil info when the caller should allocate a fresh polecat.
-// A refusal to take a branch another worktree holds stops the sling: the
-// fresh-allocation fallback attaches a worktree to that same branch by forcing
-// past git's own check, which builds the two-worktrees-one-ref state the refusal
-// detected (gt-0kk2). With opts.Name set, only that polecat is considered and
-// any refusal stops the sling (gt-2w4f9).
+// reuseOrRefuseAtDirCap is the seat decision of a sling that has passed the
+// respawn breaker: reuse an idle polecat's sandbox, else refuse when the rig is
+// already at its directory cap. A nil info with a nil error means the caller
+// allocates a fresh polecat.
 //
-// An unnamed sling of a rework bead prefers the polecat that built the branch
-// the bead came back on, resuming that branch (gt-lid6d). That preference,
-// unlike opts.Name, never stops the sling: a seat that cannot take it is
-// logged and the pool chooses as usual.
-func reuseIdlePolecatForSling(
+// The cap is checked only after reuse was tried: a reusable preserved polecat
+// should not be blocked just because the rig is at the cap. A refusal here is a
+// sling that never reached a polecat, so it records no respawn; recordRespawn
+// runs only inside the reuse success (gt-4lbz).
+func reuseOrRefuseAtDirCap(
 	polecatMgr idlePolecatReuse,
-	t *tmux.Tmux,
-	r *rig.Rig,
+	env idleReuseEnv,
 	townRoot, rigName string,
+	dirCap int,
 	opts SlingSpawnOptions,
 	recordRespawn func(),
 ) (*SpawnedPolecatInfo, error) {
-	return reuseIdlePolecatForSlingWith(polecatMgr, realIdleReuseEnv(t, r, townRoot, rigName, opts.step), rigName, opts, recordRespawn)
+	reused, err := reuseIdlePolecatForSlingWith(polecatMgr, env, rigName, opts, recordRespawn)
+	if err != nil || reused != nil {
+		return reused, err
+	}
+	rigPolecatDir := filepath.Join(townRoot, rigName, "polecats")
+	if entries, err := os.ReadDir(rigPolecatDir); err == nil {
+		dirCount := 0
+		for _, e := range entries {
+			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
+				dirCount++
+			}
+		}
+		if dirCount >= dirCap {
+			return nil, fmt.Errorf("rig %s has %d polecat directories (max %d). "+
+				"Resolve recovery-needed polecats before allocating more slots: gt polecat list %s",
+				rigName, dirCount, dirCap, rigName)
+		}
+	}
+	return nil, nil
 }
 
 // idleReuseEnv is what the idle-reuse path reads and writes besides the polecat
@@ -348,8 +364,23 @@ func detectSpawnIntegrationBranch(townRoot, rigName string, r *rig.Rig, hookBead
 	return detected
 }
 
-// reuseIdlePolecatForSlingWith is reuseIdlePolecatForSling with its
-// collaborators explicit.
+// reuseIdlePolecatForSlingWith reuses an idle polecat's sandbox for this sling
+// (gt-4ac), returning nil info when the caller should allocate a fresh polecat.
+// A refusal to take a branch another worktree holds stops the sling: the
+// fresh-allocation fallback attaches a worktree to that same branch by forcing
+// past git's own check, which builds the two-worktrees-one-ref state the refusal
+// detected (gt-0kk2). With opts.Name set, only that polecat is considered and
+// any refusal stops the sling (gt-2w4f9).
+//
+// An unnamed sling of a rework bead prefers the polecat that built the branch
+// the bead came back on, resuming that branch (gt-lid6d). That preference,
+// unlike opts.Name, never stops the sling: a seat that cannot take it is
+// logged and the pool chooses as usual.
+//
+// An unnamed sling walks the pool's reusable seats in order. A seat the reuse
+// gate refuses is passed over for the next one from the same read, because
+// parallel slings read the same first seat and all but one lose it; only when
+// no seat is left does the caller allocate.
 func reuseIdlePolecatForSlingWith(
 	polecatMgr idlePolecatReuse,
 	env idleReuseEnv,
@@ -390,12 +421,27 @@ func reuseIdlePolecatForSlingWith(
 			}
 		}
 	}
+	// nextSeat hands out the pool's remaining reusable seats from the one read
+	// of the rig; it is nil unless the pool chose this seat. Parallel slings
+	// read the same first seat, and all but one lose it at the reuse gate, so a
+	// refused seat moves on to the next instead of ending the reuse.
+	var nextSeat func() string
 	if polecatName == "" {
-		idlePolecat, findErr := polecatMgr.FindIdlePolecat()
-		if findErr != nil || idlePolecat == nil {
+		idle, findErr := polecatMgr.IdlePolecats()
+		if findErr != nil {
 			return nil, nil
 		}
-		polecatName = idlePolecat.Name
+		pull, stop := iter.Pull(idle)
+		defer stop()
+		nextSeat = func() string {
+			if p, ok := pull(); ok && p != nil {
+				return p.Name
+			}
+			return ""
+		}
+		if polecatName = nextSeat(); polecatName == "" {
+			return nil, nil
+		}
 		fmt.Printf("Reusing idle polecat: %s\n", polecatName)
 	}
 
@@ -425,7 +471,11 @@ func reuseIdlePolecatForSlingWith(
 	// other failure allocates a fresh polecat rather than repairing this worktree
 	// destructively.
 	addOpts := slingAddOptions(opts, baseBranch, resumeBranch, allowRecovery)
-	if _, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts); err != nil {
+	for {
+		_, err := polecatMgr.ReuseIdlePolecat(polecatName, addOpts)
+		if err == nil {
+			break
+		}
 		if opts.Name != "" {
 			return nil, namedPolecatRefusal(rigName, polecatName, opts.HookBead, heldIssue, err)
 		}
@@ -435,6 +485,17 @@ func reuseIdlePolecatForSlingWith(
 		// falls through to the pool below like any other failed resume.
 		if errors.Is(err, polecat.ErrBranchHeld) && resumeBranch != "" && !allowRecovery {
 			return nil, fmt.Errorf("cannot reuse idle polecat %s: %w", polecatName, err)
+		}
+		// A seat the gate refuses, or that is gone, is refused for that seat
+		// alone and before anything on it changed: the next seat is still
+		// worth trying. Any other failure may have touched the sandbox, and
+		// allocates fresh as before.
+		if nextSeat != nil && (errors.Is(err, polecat.ErrPolecatNeedsRecovery) || errors.Is(err, polecat.ErrPolecatNotFound)) {
+			if next := nextSeat(); next != "" {
+				fmt.Printf("  Idle polecat %s not reusable: %v; trying %s\n", polecatName, err, next)
+				polecatName = next
+				continue
+			}
 		}
 		if allowRecovery {
 			fmt.Printf("  Rework %s: could not resume %s on %s (%v); letting the pool choose\n",
@@ -914,7 +975,9 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 
 	// Persistent polecat model (gt-4ac): reuse an idle polecat's sandbox before
 	// paying for a new worktree.
-	reusedIdle, err := reuseIdlePolecatForSling(polecatMgr, t, r, townRoot, rigName, opts, recordRespawn)
+	reusedIdle, err := reuseOrRefuseAtDirCap(polecatMgr,
+		realIdleReuseEnv(t, r, townRoot, rigName, opts.step), townRoot, rigName,
+		effectivePolecatDirCap(r.GetIntConfig("max_polecats")), opts, recordRespawn)
 	if err != nil {
 		return nil, err
 	}
@@ -922,25 +985,6 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		// A reused sandbox still has its session started by the caller, which
 		// is where the claim stops standing for a seat.
 		return reusedIdle, nil
-	}
-
-	// Per-rig directory cap: prevent unbounded worktree accumulation, but only
-	// after trying safe reuse. A reusable preserved polecat should not be blocked
-	// just because the rig is already at the directory cap.
-	maxPolecatDirsPerRig := effectivePolecatDirCap(r.GetIntConfig("max_polecats"))
-	rigPolecatDir := filepath.Join(townRoot, rigName, "polecats")
-	if entries, err := os.ReadDir(rigPolecatDir); err == nil {
-		dirCount := 0
-		for _, e := range entries {
-			if e.IsDir() && !strings.HasPrefix(e.Name(), ".") {
-				dirCount++
-			}
-		}
-		if dirCount >= maxPolecatDirsPerRig {
-			return nil, fmt.Errorf("rig %s has %d polecat directories (max %d). "+
-				"Resolve recovery-needed polecats before allocating more slots: gt polecat list %s",
-				rigName, dirCount, maxPolecatDirsPerRig, rigName)
-		}
 	}
 
 	// Determine base branch for polecat worktree.
