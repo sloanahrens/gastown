@@ -140,3 +140,35 @@ func TestTranscriptStartReadsFirstTimestamp(t *testing.T) {
 		t.Errorf("start of a transcript with no timestamp = %v, %v; want the zero time", got, err)
 	}
 }
+
+// TestTranscriptTailDropsUntimestampedEvents checks a line with no timestamp
+// cannot reach the excerpt past the submission cutoff: its time is unknown, so
+// it cannot be placed before the submission.
+func TestTranscriptTailDropsUntimestampedEvents(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	path := filepath.Join(town, "session.jsonl")
+	lines := strings.Join([]string{
+		`{"type":"assistant","timestamp":"2026-10-21T17:00:01Z","message":{"content":[{"type":"text","text":"timed before the submit"}]}}`,
+		`{"type":"assistant","message":{"content":[{"type":"text","text":"no timestamp after the submit"}]}}`,
+		`{"type":"assistant","timestamp":"not-a-time","message":{"content":[{"type":"text","text":"bad timestamp after the submit"}]}}`,
+		`{"type":"assistant","timestamp":"2026-10-21T17:00:09Z","message":{"content":[{"type":"text","text":"timed after the submit"}]}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(lines), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	submit := time.Date(2026, 10, 21, 17, 0, 3, 0, time.UTC)
+	got, err := TranscriptTail(town, town, path, submit, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "timed before the submit") {
+		t.Errorf("excerpt is missing the event before the submit: %q", got)
+	}
+	for _, leak := range []string{"no timestamp after the submit", "bad timestamp after the submit", "timed after the submit"} {
+		if strings.Contains(got, leak) {
+			t.Errorf("excerpt past the submit holds %q: %q", leak, got)
+		}
+	}
+}
