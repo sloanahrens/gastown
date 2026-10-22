@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentlog"
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev"
@@ -258,5 +259,36 @@ func TestLocateWorktree(t *testing.T) {
 	}
 	if got := locateWorktree(town, "gastown", "nobody"); got != "" {
 		t.Errorf("locateWorktree for a polecat with no checkout = %q, want empty", got)
+	}
+}
+
+// The production pass finds a seat's transcript under the town's own
+// .claude-town tree, which the process's config dir does not name.
+func TestOpenFindsTownConfigTranscript(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	worktree := filepath.Join(town, "gastown", "polecats", "ace", "gastown")
+	dir, err := agentlog.ClaudeProjectDirIn(filepath.Join(town, ".claude-town"), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	okClient := func(opts ...jev.Option) (*jev.Client, error) {
+		return jev.NewClient(append(opts, jev.WithKey("test-key"))...)
+	}
+	listerOf := func(string) beadLister { return fakeBeads{} }
+
+	p, err := open(town, Settings{USDPerBillionTokens: 3}, nil, okClient, listerOf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := p.Latest(worktree); err != nil || got != path {
+		t.Errorf("Latest(worktree) = %q, %v; want the town transcript %q, nil", got, err, path)
 	}
 }

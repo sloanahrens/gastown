@@ -134,7 +134,7 @@ type Pass struct {
 	// projects directories: one outside both is never opened.
 	TownRoot string
 	// ProjectDirs lists the Claude projects directories a worktree's transcripts
-	// can sit in. Nil means agentlog.ProjectDirsFor.
+	// can sit in. Nil means agentlog.ProjectDirsFor under TownRoot.
 	ProjectDirs func(worktree string) ([]string, error)
 	// LogPath is the log every asked nudge appends to.
 	LogPath string
@@ -299,7 +299,7 @@ func (p *Pass) allowedRoots(worktree string) ([]string, error) {
 	}
 	projects := p.ProjectDirs
 	if projects == nil {
-		projects = agentlog.ProjectDirsFor
+		projects = func(w string) ([]string, error) { return agentlog.ProjectDirsFor(p.TownRoot, w) }
 	}
 	dirs, err := projects(worktree)
 	if err != nil {

@@ -25,7 +25,7 @@ func (d *Daemon) enqueueJevProgress(seat overrunSeat, at time.Time) {
 	}
 	latest := d.jevProgressLatest
 	if latest == nil {
-		latest = agentlog.LatestTranscript
+		latest = func(workDir string) (string, error) { return agentlog.LatestTranscript(d.config.TownRoot, workDir) }
 	}
 	polecatsDir := filepath.Join(d.config.TownRoot, seat.Rig, "polecats")
 	var transcript, worktree string

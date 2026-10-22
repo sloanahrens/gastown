@@ -28,7 +28,7 @@ func TestClaudeProjectDirFor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if got := claudeProjectRoots(hash, configDir, t.TempDir())[0]; got != wantDir {
+	if got := claudeProjectRoots(hash, configDir, t.TempDir(), "")[0]; got != wantDir {
 		t.Errorf("primary project dir for %q = %q, want %q", input, got, wantDir)
 	}
 }
@@ -77,7 +77,7 @@ func roots(t *testing.T, workDir, configDir, home string) []string {
 	if err != nil {
 		t.Fatalf("claudeProjectHashFor(%q): %v", workDir, err)
 	}
-	return claudeProjectRoots(hash, configDir, home)
+	return claudeProjectRoots(hash, configDir, home, "")
 }
 
 // TestLatestTranscript_ResolvesAgainstConfigDir is the gt-xb27 regression:
@@ -128,7 +128,7 @@ func TestClaudeProjectDirsFor(t *testing.T) {
 		t.Parallel()
 		configDir := filepath.Join(t.TempDir(), "claude-town")
 
-		got := claudeProjectRoots(hash, configDir, home)
+		got := claudeProjectRoots(hash, configDir, home, "")
 		want := []string{
 			filepath.Join(configDir, claudeProjectsSubdir, hash),
 			filepath.Join(home, claudeProjectsDir, hash),
@@ -146,7 +146,7 @@ func TestClaudeProjectDirsFor(t *testing.T) {
 	t.Run("config dir unset: one root, not the same path twice", func(t *testing.T) {
 		t.Parallel()
 		// config.ClaudeConfigDir resolves an unset CLAUDE_CONFIG_DIR to ~/.claude.
-		got := claudeProjectRoots(hash, filepath.Join(home, ".claude"), home)
+		got := claudeProjectRoots(hash, filepath.Join(home, ".claude"), home, "")
 		want := []string{filepath.Join(home, claudeProjectsDir, hash)}
 		if len(got) != len(want) || got[0] != want[0] {
 			t.Errorf("claudeProjectDirsFor = %q, want %q", got, want)
@@ -156,12 +156,68 @@ func TestClaudeProjectDirsFor(t *testing.T) {
 	t.Run("no home dir: configured root only", func(t *testing.T) {
 		t.Parallel()
 		configDir := filepath.Join(t.TempDir(), "claude-town")
-		got := claudeProjectRoots(hash, configDir, "")
+		got := claudeProjectRoots(hash, configDir, "", "")
 		want := []string{filepath.Join(configDir, claudeProjectsSubdir, hash)}
 		if len(got) != len(want) || got[0] != want[0] {
 			t.Errorf("claudeProjectDirsFor = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("town root set: the town's config tree is searched last", func(t *testing.T) {
+		t.Parallel()
+		configDir := filepath.Join(t.TempDir(), "claude-town")
+		townRoot := t.TempDir()
+		got := claudeProjectRoots(hash, configDir, home, townRoot)
+		want := []string{
+			filepath.Join(configDir, claudeProjectsSubdir, hash),
+			filepath.Join(home, claudeProjectsDir, hash),
+			filepath.Join(townRoot, townConfigDir, claudeProjectsSubdir, hash),
+		}
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Errorf("claudeProjectDirsFor = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("configured dir is the town's: not searched twice", func(t *testing.T) {
+		t.Parallel()
+		townRoot := t.TempDir()
+		configDir := filepath.Join(townRoot, townConfigDir)
+		got := claudeProjectRoots(hash, configDir, home, townRoot)
+		want := []string{
+			filepath.Join(configDir, claudeProjectsSubdir, hash),
+			filepath.Join(home, claudeProjectsDir, hash),
+		}
+		if strings.Join(got, "\n") != strings.Join(want, "\n") {
+			t.Errorf("claudeProjectDirsFor = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestLatestTranscript_FindsTownConfigTranscript is the regression for a seat
+// that logs under the town's .claude-town tree. The work dir sits under a fresh
+// temp town, so no configured or legacy root holds a transcript for it: the
+// transcript is findable only through the town root the caller names.
+func TestLatestTranscript_FindsTownConfigTranscript(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+
+	workDir := filepath.Join(townRoot, "gastown", "polecats", "ace", "gastown")
+	projectDir := filepath.Join(townRoot, townConfigDir, claudeProjectsSubdir, claudeProjectHash(filepath.ToSlash(workDir)))
+	if err := os.MkdirAll(projectDir, 0755); err != nil {
+		t.Fatalf("creating project dir: %v", err)
+	}
+	transcript := filepath.Join(projectDir, "aaaaaaaa-0000-0000-0000-000000000000.jsonl")
+	writeTranscript(t, transcript, testEpoch)
+
+	if got, err := LatestTranscript(townRoot, workDir); err != nil || got != transcript {
+		t.Errorf("LatestTranscript(townRoot) = %q, %v; want the town transcript %q, nil", got, err, transcript)
+	}
+	if dirs, err := ProjectDirsFor(townRoot, workDir); err != nil || len(dirs) == 0 || dirs[len(dirs)-1] != projectDir {
+		t.Errorf("ProjectDirsFor(townRoot) = %q, %v; want the town projects dir %q last", dirs, err, projectDir)
+	}
+	if got, err := LatestTranscript("", workDir); err != nil || got != "" {
+		t.Errorf("LatestTranscript(\"\") = %q, %v; want no transcript, since no town root is named", got, err)
+	}
 }
 
 // TestClaudeProjectDirsFor_ResolvesProcessRoots pins the exported entry
@@ -176,7 +232,7 @@ func TestClaudeProjectDirsFor_ResolvesProcessRoots(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	want := roots(t, workDir, configDir, home)
 
-	got, err := claudeProjectDirsFor(workDir)
+	got, err := claudeProjectDirsFor("", workDir)
 	if err != nil {
 		t.Fatalf("claudeProjectDirsFor: %v", err)
 	}
@@ -187,7 +243,7 @@ func TestClaudeProjectDirsFor_ResolvesProcessRoots(t *testing.T) {
 		t.Errorf("ClaudeProjectDirFor = %q, %v; want %q, nil", primary, err, want[0])
 	}
 	// workDir is fresh, so neither root holds a transcript for it.
-	if latest, err := LatestTranscript(workDir); err != nil || latest != "" {
+	if latest, err := LatestTranscript("", workDir); err != nil || latest != "" {
 		t.Errorf("LatestTranscript = %q, %v; want \"\", nil", latest, err)
 	}
 }

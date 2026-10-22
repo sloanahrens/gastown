@@ -262,7 +262,7 @@ func hasEvidence(s *intent.Progress) bool {
 
 // claudeTranscript is the default TranscriptFunc.
 func claudeTranscript(workDir string) (string, time.Time, int64, error) {
-	path, err := agentlog.LatestTranscript(workDir)
+	path, err := agentlog.LatestTranscript("", workDir)
 	if err != nil || path == "" {
 		return "", time.Time{}, 0, err
 	}
