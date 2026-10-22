@@ -262,6 +262,7 @@ func (g *Git) runGH(args ...string) ([]byte, error) {
 
 func selectPullRequest(raw []ghPullRequest, targetRepo, branch, headSHA, source string) (*PullRequestInfo, error) {
 	matches := make([]*PullRequestInfo, 0, len(raw))
+	var movedHead *PullRequestInfo // an open PR on the branch whose head is not headSHA
 	for _, candidate := range raw {
 		pr := candidate.toInfo()
 		if pr.BaseRepo == "" {
@@ -275,11 +276,20 @@ func selectPullRequest(raw []ghPullRequest, targetRepo, branch, headSHA, source 
 		}
 		if headSHA != "" {
 			if pr.HeadSHA == "" || pr.HeadSHA != headSHA {
+				if pr.Open() && movedHead == nil {
+					movedHead = pr
+				}
 				continue
 			}
 		}
 		pr.LookupSource = source
 		matches = append(matches, pr)
+	}
+	if len(matches) == 0 && movedHead != nil {
+		// An open PR exists but its head is not the submitted one. Reporting
+		// that as not-found would let a branch-delete guard treat the branch
+		// as unprotected, so fail closed like the recorded-URL path does.
+		return nil, validatePullRequestHead(movedHead, headSHA)
 	}
 	if len(matches) == 0 {
 		return nil, fmt.Errorf("%w: no PR for head %s in %s", ErrPullRequestNotFound, branch, targetRepo)
