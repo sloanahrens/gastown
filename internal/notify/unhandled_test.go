@@ -85,7 +85,7 @@ func TestUnhandledRunPushesOnceAfterTheWindow(t *testing.T) {
 	if strings.Join(ids, ",") != "hq-polecat" || strings.Join(marked, ",") != "hq-polecat" {
 		t.Fatalf("pushed %v, marked %v, want hq-polecat alone", ids, marked)
 	}
-	want := "imessage|Unhandled for 30 min: hq-polecat revert-guard ruling|"
+	want := "imessage|Unhandled for 31 min: hq-polecat revert-guard ruling|"
 	if len(pushed) != 1 || pushed[0] != want {
 		t.Fatalf("pushed %v, want %q", pushed, want)
 	}
@@ -342,16 +342,47 @@ func TestPushUnhandledDoesNothingWithoutAPushCommand(t *testing.T) {
 	}
 }
 
-// The same window spelled differently reaches the message: a push names how
-// long the escalation waited.
+// A push names how long the escalation has waited, spelled by the size of the
+// wait.
 func TestUnhandledLineNamesTheWait(t *testing.T) {
 	t.Parallel()
-	u := UnhandledPush{ID: "hq-abc", Title: "disk full"}
-	if got, want := u.Line(90*time.Minute), "Unhandled for 90 min: hq-abc disk full"; got != want {
-		t.Errorf("Line = %q, want %q", got, want)
+	cases := []struct {
+		age  time.Duration
+		want string
+	}{
+		{45 * time.Second, "Unhandled for 45s: hq-abc disk full"},
+		{90 * time.Second, "Unhandled for 1 min: hq-abc disk full"},
+		{31 * time.Minute, "Unhandled for 31 min: hq-abc disk full"},
+		{5 * time.Hour, "Unhandled for 5h: hq-abc disk full"},
+		{72 * time.Hour, "Unhandled for 3d: hq-abc disk full"},
 	}
-	if got, want := u.Line(45*time.Second), "Unhandled for 45s: hq-abc disk full"; got != want {
-		t.Errorf("Line = %q, want %q", got, want)
+	for _, tc := range cases {
+		u := UnhandledPush{ID: "hq-abc", Title: "disk full", Age: tc.age}
+		if got := u.Line(); got != tc.want {
+			t.Errorf("Line at age %v = %q, want %q", tc.age, got, tc.want)
+		}
+	}
+}
+
+// An escalation open for 3 days reads as 3 days, not as the 30 minute window
+// that made it owed (gt-fasij).
+func TestUnhandledRunNamesTheEscalationsAgeNotTheWindow(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	issues := []*beads.Issue{escalationBead("hq-old", "daemon", now.Add(-72*time.Hour))}
+	var pushed []string
+	run := UnhandledRun{
+		List:   func() ([]*beads.Issue, error) { return issues, nil },
+		Push:   func(name, title, body string) error { pushed = append(pushed, title); return nil },
+		Name:   "imessage",
+		Window: config.DefaultEscalationUnhandledAfter,
+	}
+	if _, err := run.Run(now); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want := "Unhandled for 3d: hq-old revert-guard ruling"
+	if len(pushed) != 1 || pushed[0] != want {
+		t.Fatalf("pushed %v, want %q", pushed, want)
 	}
 }
 

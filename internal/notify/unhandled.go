@@ -19,26 +19,29 @@ type UnhandledPush struct {
 	// body's.
 	ID    string
 	Title string
+	// Age is how long the escalation has been open, not the window that made
+	// it owed: one open for 3 days says so.
+	Age time.Duration
 }
 
-// Line is the one line the push carries: the id, so the text names the
-// dashboard row it is about, then the title.
-func (u UnhandledPush) Line(window time.Duration) string {
-	return fmt.Sprintf("Unhandled for %s: %s %s", windowText(window), u.ID, u.Title)
+// Line is the one line the push carries: how long the escalation has waited,
+// then the id, so the text names the dashboard row it is about, then the title.
+func (u UnhandledPush) Line() string {
+	return fmt.Sprintf("Unhandled for %s: %s %s", ageText(u.Age), u.ID, u.Title)
 }
 
-// windowText is a window as a message spells it: whole minutes while it divides
-// into minutes, and townhealth's short form otherwise.
-func windowText(window time.Duration) string {
-	if window >= time.Minute && window%time.Minute == 0 {
-		return fmt.Sprintf("%d min", int(window/time.Minute))
+// ageText is a wait as a message spells it: whole minutes below an hour, and
+// townhealth's short form (seconds, hours, days) otherwise.
+func ageText(age time.Duration) string {
+	if age >= time.Minute && age < time.Hour {
+		return fmt.Sprintf("%d min", int(age/time.Minute))
 	}
-	return townhealth.Short(window)
+	return townhealth.Short(age)
 }
 
 // unhandledPushes returns the pushes owed for the open escalations: the ones
 // the overseer owns, not acked, not already pushed, and open longer than
-// window. An escalation whose age does not parse has no wait to measure and is
+// window, each carrying how long it has been open. An escalation whose age does not parse has no wait to measure and is
 // skipped, as the stale listing skips one.
 func unhandledPushes(issues []*beads.Issue, now time.Time, window time.Duration) []UnhandledPush {
 	var out []UnhandledPush
@@ -61,7 +64,7 @@ func unhandledPushes(issues []*beads.Issue, now time.Time, window time.Duration)
 			continue
 		}
 		title := strings.Join(strings.Fields(issue.Title), " ")
-		out = append(out, UnhandledPush{ID: issue.ID, Title: title})
+		out = append(out, UnhandledPush{ID: issue.ID, Title: title, Age: now.Sub(raised)})
 	}
 	return out
 }
@@ -185,7 +188,7 @@ func (r UnhandledRun) Run(now time.Time) ([]string, error) {
 			break
 		}
 		pushes++
-		if err := r.Push(r.Name, u.Line(r.Window), ""); err != nil {
+		if err := r.Push(r.Name, u.Line(), ""); err != nil {
 			errs = append(errs, fmt.Errorf("pushing %s: %w", u.ID, err))
 			continue
 		}
