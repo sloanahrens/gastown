@@ -405,6 +405,17 @@ type cleanupStatusGit interface {
 	BranchPushedToRemote(localBranch, remote string) (bool, int, error)
 }
 
+// autoSaveGit is the part of *git.Git autoSaveUncommittedWork reads and writes.
+// A seam, so the safety net's stop conditions are unit-testable without a real
+// worktree.
+type autoSaveGit interface {
+	CheckUncommittedWork() (*git.UncommittedWorkStatus, error)
+	Add(paths ...string) error
+	ResetFiles(paths ...string) error
+	StagedDeletions() ([]string, error)
+	Commit(message string) error
+}
+
 // branchStashGit is the part of *git.Git popBranchStashes reads. A seam, so
 // the pop chain's stop conditions are unit-testable without a real worktree.
 type branchStashGit interface {
@@ -422,7 +433,9 @@ type branchStashGit interface {
 // more robust BranchPushedToRemote, which compares against origin/main.
 func observeCleanupStatus(g cleanupStatusGit, branch string) string {
 	workStatus, err := g.CheckUncommittedWork()
-	if err != nil {
+	// An unjudgeable unpushed comparison leaves the uncommitted-file and stash
+	// facts intact (see CheckUncommittedWork), so they still decide the status.
+	if err != nil && !(errors.Is(err, git.ErrComparisonUnjudgeable) && workStatus != nil) {
 		style.PrintWarning("could not auto-detect cleanup status: %v", err)
 		return ""
 	}
@@ -1130,9 +1143,14 @@ func popBranchStashes(g branchStashGit, current string) string {
 // but the run still records what it observed. The caller re-observes the
 // worktree's cleanup status afterwards instead of reading a "did it save"
 // flag, so a missed save stays visible as uncommitted work.
-func autoSaveUncommittedWork(g *git.Git, cwd, branch, exitType string) error {
+func autoSaveUncommittedWork(g autoSaveGit, cwd, branch, exitType string) error {
 	workStatus, err := g.CheckUncommittedWork()
-	if err != nil || !workStatus.HasUncommittedChanges || workStatus.CleanExcludingRuntime() {
+	// An unjudgeable unpushed comparison does not hide the uncommitted files,
+	// so the save still runs on them (see observeCleanupStatus).
+	if workStatus == nil || (err != nil && !errors.Is(err, git.ErrComparisonUnjudgeable)) {
+		return nil
+	}
+	if !workStatus.HasUncommittedChanges || workStatus.CleanExcludingRuntime() {
 		return nil
 	}
 	if len(workStatus.UnmergedFiles) > 0 {

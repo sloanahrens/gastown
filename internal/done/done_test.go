@@ -1588,3 +1588,58 @@ func (unobservableGit) CheckUncommittedWork() (*gitpkg.UncommittedWorkStatus, er
 func (unobservableGit) BranchPushedToRemote(string, string) (bool, int, error) {
 	return false, 0, errors.New("fatal: not a git repository")
 }
+
+// unjudgedWorktreeGit is a worktree with a real uncommitted file whose unpushed
+// comparison cannot be judged (origin moved past objects this clone holds). The
+// status read so far is true; only the verdict on unpushed commits is unknown.
+type unjudgedWorktreeGit struct {
+	dirty      bool
+	commitMsgs []string
+}
+
+func (g *unjudgedWorktreeGit) CheckUncommittedWork() (*gitpkg.UncommittedWorkStatus, error) {
+	status := &gitpkg.UncommittedWorkStatus{}
+	if g.dirty {
+		status.HasUncommittedChanges = true
+		status.ModifiedFiles = []string{"internal/done/done.go"}
+	}
+	return status, fmt.Errorf("origin moved: %w", gitpkg.ErrComparisonUnjudgeable)
+}
+
+func (g *unjudgedWorktreeGit) BranchPushedToRemote(localBranch, remote string) (bool, int, error) {
+	return false, 0, fmt.Errorf("origin moved: %w", gitpkg.ErrComparisonUnjudgeable)
+}
+
+func (g *unjudgedWorktreeGit) Add(paths ...string) error { return nil }
+
+func (g *unjudgedWorktreeGit) ResetFiles(paths ...string) error { return nil }
+
+func (g *unjudgedWorktreeGit) StagedDeletions() ([]string, error) { return nil, nil }
+
+func (g *unjudgedWorktreeGit) Commit(message string) error {
+	g.commitMsgs = append(g.commitMsgs, message)
+	g.dirty = false
+	return nil
+}
+
+// TestObserveCleanupStatusUnjudgeableStillAutosaves guards the DEFERRED exit
+// over a dirty tree whose unpushed comparison is unjudgeable: the uncommitted
+// work is named, saved by the safety net, and not recorded as unknown.
+func TestObserveCleanupStatusUnjudgeableStillAutosaves(t *testing.T) {
+	t.Parallel()
+	const branch = "polecat/ace/gt-k44d0+test"
+	g := &unjudgedWorktreeGit{dirty: true}
+
+	if got := observeCleanupStatus(g, branch); got != "uncommitted" {
+		t.Fatalf("observed cleanup status = %q, want %q", got, "uncommitted")
+	}
+	if err := autoSaveUncommittedWork(g, t.TempDir(), branch, ExitDeferred); err != nil {
+		t.Fatalf("autoSaveUncommittedWork: %v", err)
+	}
+	if len(g.commitMsgs) != 1 {
+		t.Fatalf("auto-save commits = %d, want 1", len(g.commitMsgs))
+	}
+	if got := observeCleanupStatus(g, branch); got != "unpushed" {
+		t.Errorf("cleanup status after auto-save = %q, want %q", got, "unpushed")
+	}
+}

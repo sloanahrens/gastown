@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/land"
 )
 
 // divergedPushGit is the subset of *git.Git that recoverDivergedPush needs.
@@ -62,10 +63,11 @@ type divergedPushGit interface {
 // there (gt-5wp5).
 //
 // A third shape is safe to lease-over only for a bead in rework: origin's tip
-// is the rejected head and holds only this seat's commits (see reworkPush). A
-// content-changing rework alters patch-ids, so the comparison above would call
-// it divergence; that tip is the refused submission, so overwriting it is the
-// point of the rework (gt-dq6p8).
+// is the rejected head and holds only this seat's commits (see reworkPush), and
+// local HEAD carries at least one commit origin lacks. A content-changing
+// rework alters patch-ids, so the comparison above would call it divergence;
+// that tip is the refused submission, so overwriting it is the point of the
+// rework (gt-dq6p8). A stale local behind that tip is not a rework (gt-k44d0).
 //
 // Returns recovered=true only when the leased push actually landed.
 // diagnosis is set whenever the comparison could be made, for inclusion in
@@ -146,8 +148,16 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 			return false, "", fmt.Errorf("full commit summaries of origin range %s..%s: %w", originBase, originSHA, err)
 		}
 	}
+	reworkAllowed := refused && rework.allows(originSHA, originRange)
+	if reworkAllowed {
+		carries, carriesErr := reworkLocalCarriesCommits(g, originSHA, localSHA)
+		if carriesErr != nil {
+			return false, "", carriesErr
+		}
+		reworkAllowed = carries
+	}
 	switch {
-	case refused && rework.allows(originSHA, originRange):
+	case reworkAllowed:
 		diagnosis = fmt.Sprintf("rework of the rejected submission, content changed (origin=%s is the head the rejection named, its %d commit(s) are all %s's; local=%s carries the rework)",
 			ShortSHA(originSHA), len(originRange), rework.seatAuthor, ShortSHA(localSHA))
 	case refused:
@@ -167,6 +177,21 @@ func recoverDivergedPush(g divergedPushGit, remote, refspec, branch, target stri
 		return false, diagnosis, fmt.Errorf("leased force-push failed: %w", leaseErr)
 	}
 	return true, diagnosis, nil
+}
+
+// reworkLocalCarriesCommits reports whether local HEAD holds at least one commit
+// origin lacks. A stale worktree at or behind origin's tip carries no rework, so
+// leasing over origin with it would discard the rejected submission for less.
+// A merge-base that comes back empty reports false: the rework allowance fails closed.
+func reworkLocalCarriesCommits(g divergedPushGit, originSHA, localSHA string) (bool, error) {
+	if land.HeadsEqual(originSHA, localSHA) {
+		return false, nil
+	}
+	base, err := g.MergeBase(originSHA, localSHA)
+	if err != nil {
+		return false, fmt.Errorf("merge-base(origin tip, local HEAD): %w", err)
+	}
+	return base != "" && !land.HeadsEqual(base, localSHA), nil
 }
 
 // patchIDsOf extracts the patch-id half of each pair, in the same order
