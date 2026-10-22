@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -175,14 +176,22 @@ func runRigUndock(cmd *cobra.Command, args []string) error {
 
 	// Find the rig identity bead
 	rigBeadID := beads.RigBeadIDWithPrefix(prefix, rigName)
-	bd := beads.New(r.BeadsPath())
+	return undockRig(beads.New(r.BeadsPath()), rigBeadID, rigName)
+}
 
-	// Check if rig bead exists, create if not
+// undockRig removes the docked label from the rig identity bead. Only
+// beads.ErrNotFound means there is no identity bead to be docked. Any other
+// read failure is returned: the rig's state is unknown, and reporting "not
+// docked" would leave the daemon treating it as docked.
+func undockRig(bd beads.Client, rigBeadID, rigName string) error {
 	rigBead, err := bd.Show(rigBeadID)
-	if err != nil {
+	if errors.Is(err, beads.ErrNotFound) {
 		// Rig identity bead doesn't exist (legacy rig) - can't be docked
 		fmt.Printf("%s Rig %s has no identity bead and is not docked\n", style.Dim.Render("•"), rigName)
 		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading rig identity bead %s: %w", rigBeadID, err)
 	}
 
 	// Check if actually docked
