@@ -1348,6 +1348,16 @@ func TestEffectiveTheme(t *testing.T) {
 			t.Fatalf("writing rig settings: %v", err)
 		}
 	}
+	harborTheme := func(t *testing.T, town string) {
+		t.Helper()
+		themes := filepath.Join(town, "settings", "themes")
+		if err := os.MkdirAll(themes, 0o755); err != nil {
+			t.Fatalf("making themes dir: %v", err)
+		}
+		if err := os.WriteFile(filepath.Join(themes, "harbor.txt"), []byte("anchor\nberth\nchannel\n"), 0o644); err != nil {
+			t.Fatalf("writing theme file: %v", err)
+		}
+	}
 
 	tests := []struct {
 		name     string
@@ -1370,13 +1380,7 @@ func TestEffectiveTheme(t *testing.T) {
 			rigName: "harbor",
 			write: func(t *testing.T, town, rigPath string) {
 				settings(t, rigPath, `{"namepool": {"style": "harbor"}}`)
-				themes := filepath.Join(town, "settings", "themes")
-				if err := os.MkdirAll(themes, 0o755); err != nil {
-					t.Fatalf("making themes dir: %v", err)
-				}
-				if err := os.WriteFile(filepath.Join(themes, "harbor.txt"), []byte("anchor\nberth\nchannel\n"), 0o644); err != nil {
-					t.Fatalf("writing theme file: %v", err)
-				}
+				harborTheme(t, town)
 			},
 			want: "harbor",
 		},
@@ -1393,6 +1397,15 @@ func TestEffectiveTheme(t *testing.T) {
 			rigName: "harbor",
 			write: func(t *testing.T, _, rigPath string) {
 				settings(t, rigPath, `{"namepool": {"style": "minerals", "names": ["anchor", "berth"]}}`)
+			},
+			list: []string{"anchor", "berth"},
+		},
+		{
+			name:    "explicit namepool names beat a custom theme file beside them",
+			rigName: "harbor",
+			write: func(t *testing.T, town, rigPath string) {
+				settings(t, rigPath, `{"namepool": {"style": "harbor", "names": ["anchor", "berth"]}}`)
+				harborTheme(t, town)
 			},
 			list: []string{"anchor", "berth"},
 		},
