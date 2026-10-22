@@ -88,6 +88,10 @@ func (e *BadResponse) Error() string {
 
 func (e *BadResponse) Is(target error) bool { return target == ErrBadResponse }
 
+// Unwrap returns the reason the check gives, so errors.Unwrap reaches it even
+// though the text is formatted.
+func (e *BadResponse) Unwrap() error { return e.cause }
+
 // unusable is the BadResponse for check, with its reason formatted as text.
 func unusable(check string, value *float64, format string, args ...any) *BadResponse {
 	return &BadResponse{Check: check, Value: value, cause: fmt.Errorf(format, args...)}
