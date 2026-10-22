@@ -205,16 +205,18 @@ func loadAgentBeadsFrom(db beads.Client, beadsDir string, issueSource, wispSourc
 		})
 	}
 
-	if wisps, err := listAgentWisps(db); err == nil {
-		for _, wisp := range wisps {
-			candidates = append(candidates, agentBeadCandidate{
-				ID:       wisp.ID,
-				Source:   wispSource,
-				BeadsDir: beadsDir,
-				Status:   wisp.Status,
-				Issue:    wisp,
-			})
-		}
+	wisps, err := listAgentWisps(db)
+	if err != nil {
+		return nil, fmt.Errorf("listing agent wisps in %s: %w", beadsDir, err)
+	}
+	for _, wisp := range wisps {
+		candidates = append(candidates, agentBeadCandidate{
+			ID:       wisp.ID,
+			Source:   wispSource,
+			BeadsDir: beadsDir,
+			Status:   wisp.Status,
+			Issue:    wisp,
+		})
 	}
 
 	return candidates, nil
