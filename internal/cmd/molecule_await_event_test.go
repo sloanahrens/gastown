@@ -3,6 +3,7 @@ package cmd
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -822,5 +823,65 @@ func TestResolveEventRig(t *testing.T) {
 	// cwd inside a town-level dir (not a registered rig) -> "".
 	if got := resolveEventRigWith(noEnv, filepath.Join(root, "mayor"), root, ""); got != "" {
 		t.Errorf("non-rig cwd: got %q, want empty", got)
+	}
+}
+
+// unreadableAgentBeads is a beads.Client whose agent-bead lookup fails with
+// an error other than not-found, so await-event's label read reports a
+// warning.
+type unreadableAgentBeads struct {
+	beads.Client
+}
+
+func (unreadableAgentBeads) Show(string) (*beads.Issue, error) {
+	return nil, errors.New("agent bead store unavailable")
+}
+
+// TestAwaitEventAgentLabelWarning pins that the "Could not read agent bead"
+// warning stays off stdout under --json, so the JSON result still parses,
+// and still shows in the human-readable output.
+func TestAwaitEventAgentLabelWarning(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name        string
+		json        bool
+		wantWarning bool
+	}{
+		{name: "text output shows warning", json: false, wantWarning: true},
+		{name: "json output keeps stdout parseable", json: true, wantWarning: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			root := t.TempDir()
+			beadsDir := filepath.Join(root, ".beads")
+			if err := os.MkdirAll(beadsDir, 0755); err != nil {
+				t.Fatalf("mkdir .beads: %v", err)
+			}
+			var out strings.Builder
+			r := awaitEventRun{
+				channel:     "test",
+				agentBead:   "gt-agent",
+				json:        tt.json,
+				backoff:     awaitSignalBackoff{timeout: "50ms", mult: 2},
+				db:          func(string) beads.Client { return unreadableAgentBeads{beadsfake.New()} },
+				out:         &out,
+				beadsDir:    func() (string, error) { return beadsDir, nil },
+				eventRig:    resolveEventRig,
+				drainNudges: func(string) []nudge.QueuedNudge { return nil },
+			}
+			if err := r.run(root); err != nil {
+				t.Fatalf("await-event: %v", err)
+			}
+			if got := strings.Contains(out.String(), "Could not read agent bead"); got != tt.wantWarning {
+				t.Fatalf("warning shown = %v, want %v; stdout:\n%s", got, tt.wantWarning, out.String())
+			}
+			if tt.json {
+				var result AwaitEventResult
+				if err := json.Unmarshal([]byte(out.String()), &result); err != nil {
+					t.Fatalf("stdout is not a JSON result: %v\n%s", err, out.String())
+				}
+			}
+		})
 	}
 }
