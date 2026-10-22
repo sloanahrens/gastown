@@ -13,8 +13,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -140,12 +142,69 @@ func sampleCPUIdle(ctx context.Context, top func(context.Context) ([]byte, error
 	return *idle, nil
 }
 
-// psOutput lists every process's CPU and command line. The portable -axo form
-// is the one internal/land uses: the `-r` a BSD ps sorts by is not a flag but
-// a selection on Linux ("only running processes" in a GNU ps), which would
-// leave a sleeping Dolt server out of the sample (gt-auiji).
+// psOutput lists every process's CPU and command line as "pcpu command"
+// lines. On macOS that is ps itself; on Linux it is top's second sample,
+// reshaped by procTable.
 func psOutput(ctx context.Context) ([]byte, error) {
-	return exec.CommandContext(ctx, "ps", "-axo", "pcpu=,command=").Output()
+	name, args := procTableCommand(runtime.GOOS)
+	out, err := exec.CommandContext(ctx, name, args...).Output()
+	if err != nil || runtime.GOOS != "linux" {
+		return out, err
+	}
+	return procTable(string(out))
+}
+
+// procTableCommand is the command that lists every process's CPU. The
+// portable `ps -axo` form is the one internal/land uses; the `-r` a BSD ps
+// sorts by is a selection of running processes on Linux and would leave a
+// sleeping Dolt server out. A Linux ps reports CPU time over a process's whole
+// life, so Linux reads top's second sample instead, the rate over the last
+// second. -c names each process by its command line and -w keeps top from
+// cutting that line short.
+func procTableCommand(goos string) (string, []string) {
+	if goos == "linux" {
+		return "top", []string{"-b", "-c", "-n", "2", "-d", "1", "-w", "512"}
+	}
+	return "ps", []string{"-axo", "pcpu=,command="}
+}
+
+// procTable reshapes the last sample of a two-sample batch top into the
+// "pcpu command" lines the parsers read; the first sample is each process's
+// average since it started. The columns come from the header because top's
+// field set is the user's to change, and a header whose COMMAND is not the
+// last column is refused: the command line would be cut short, and a name
+// taken from it would be wrong.
+func procTable(s string) ([]byte, error) {
+	lines := strings.Split(s, "\n")
+	start := -1
+	for i, line := range lines {
+		f := strings.Fields(line)
+		if len(f) > 0 && f[0] == "PID" && slices.Contains(f, "%CPU") && slices.Contains(f, "COMMAND") {
+			start = i
+		}
+	}
+	if start < 0 {
+		return nil, errors.New("top printed no process table")
+	}
+	header := strings.Fields(lines[start])
+	cpuCol, cmdCol := slices.Index(header, "%CPU"), slices.Index(header, "COMMAND")
+	if cmdCol != len(header)-1 {
+		return nil, errors.New("top's COMMAND column is not the last field")
+	}
+	var out strings.Builder
+	for _, line := range lines[start+1:] {
+		f := strings.Fields(line)
+		if len(f) <= cmdCol {
+			continue
+		}
+		// A locale with a decimal comma prints 38,2.
+		cpu := strings.ReplaceAll(f[cpuCol], ",", ".")
+		if _, err := strconv.ParseFloat(cpu, 64); err != nil {
+			continue
+		}
+		fmt.Fprintf(&out, "%s %s\n", cpu, strings.Join(f[cmdCol:], " "))
+	}
+	return []byte(out.String()), nil
 }
 
 // parseCPUIdle reads the idle share out of top's last CPU line: macOS writes
@@ -204,12 +263,17 @@ func idleValue(tok string) *float64 {
 // and `dolt sql` run pay for their own work and are gone by the next sample,
 // so counting every process named dolt would read a backup's CPU as the
 // server's (gt-auiji).
+//
+// The servers tests start do not count either: a test runs its own sql-server
+// on a temporary data directory or its own port, and a suite running twenty
+// of them would read as the town's Dolt burning cores (gt-avsc3). See
+// isTestServer for what marks one.
 func parseDoltCores(s string) *float64 {
 	var total float64
 	var found bool
 	for _, line := range strings.Split(s, "\n") {
 		f := strings.Fields(line)
-		if len(f) < 3 || baseName(f[1]) != "dolt" || f[2] != "sql-server" {
+		if len(f) < 3 || baseName(f[1]) != "dolt" || f[2] != "sql-server" || isTestServer(f[3:]) {
 			continue
 		}
 		cpu, err := strconv.ParseFloat(f[0], 64)
@@ -224,6 +288,40 @@ func parseDoltCores(s string) *float64 {
 	}
 	v := total / 100
 	return &v
+}
+
+// productionDoltPort is the port the town's Dolt listens on
+// (doltserver.DefaultPort, which this package cannot import: doltserver
+// imports it). A server that names it on the command line is the town's.
+const productionDoltPort = "3307"
+
+// isTestServer reports whether a sql-server's arguments name a temporary path
+// or a port other than the town's. The town's server is started with its
+// --config alone (doltserver.NewSQLServerCommand), so neither appears on its
+// command line; a port flag naming the town's own port does not hide it.
+func isTestServer(args []string) bool {
+	tmp := []string{"/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/"}
+	if dir := os.TempDir(); dir != "" {
+		tmp = append(tmp, strings.TrimSuffix(dir, "/")+"/")
+	}
+	for i, a := range args {
+		flag, val, hasVal := strings.Cut(a, "=")
+		switch flag {
+		case "--port", "-port", "-P":
+			if !hasVal && i+1 < len(args) {
+				val = args[i+1]
+			}
+			if val != productionDoltPort {
+				return true
+			}
+		}
+		for _, prefix := range tmp {
+			if strings.HasPrefix(val, prefix) || strings.HasPrefix(a, prefix) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // parseTop reads "pcpu command" lines and keeps the first n that use any CPU,
