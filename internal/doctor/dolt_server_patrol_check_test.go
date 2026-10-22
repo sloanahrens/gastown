@@ -143,6 +143,57 @@ func TestDoltServerPatrolCheck_NoEndpointPatrolEnabledIsNotOK(t *testing.T) {
 	}
 }
 
+// TestDoltServerPatrolCheck_NoEndpointPatrolDisabledIsNotOK: the same warning
+// holds when the patrol is also disabled, and the check never dials.
+func TestDoltServerPatrolCheck_NoEndpointPatrolDisabledIsNotOK(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeDaemonConfig(t, townRoot, `{"doctor_dog":{"enabled":true}}`)
+
+	check := NewDoltServerPatrolCheck()
+	check.dial = func(addr string) error {
+		t.Errorf("dialed %q, want no dial for a town with no endpoint", addr)
+		return errors.New("connection refused")
+	}
+	result := check.Run(&CheckContext{TownRoot: townRoot})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("expected WARNING for a town with no Dolt endpoint, got %s (%s)", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "no Dolt endpoint") {
+		t.Errorf("message %q must name the missing endpoint", result.Message)
+	}
+}
+
+// TestDoltServerPatrolCheck_UnloadableTownConfigIsNotNoEndpoint: a mayor/town.json
+// that will not load (here dolt.port 0) is a broken config, not an absent
+// endpoint, so the warning names the load error rather than "no Dolt endpoint".
+func TestDoltServerPatrolCheck_UnloadableTownConfigIsNotNoEndpoint(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeDoctorTownFile(t, townRoot, "mayor/town.json", `{"type":"town","version":1,"name":"test","dolt":{"host":"127.0.0.1"}}`)
+
+	check := NewDoltServerPatrolCheck()
+	check.dial = func(addr string) error {
+		t.Errorf("dialed %q, want no dial for an unloadable town config", addr)
+		return errors.New("connection refused")
+	}
+	result := check.Run(&CheckContext{TownRoot: townRoot})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("expected WARNING for an unloadable town config, got %s (%s)", result.Status, result.Message)
+	}
+	if strings.Contains(result.Message, "no Dolt endpoint") {
+		t.Errorf("message %q conflates an unloadable town config with no endpoint", result.Message)
+	}
+	if !strings.Contains(strings.Join(result.Details, " "), "dolt.port") {
+		t.Errorf("details %q must name the load error for dolt.port", result.Details)
+	}
+	if !strings.Contains(result.FixHint, "mayor/town.json") {
+		t.Errorf("FixHint %q must name mayor/town.json", result.FixHint)
+	}
+}
+
 func TestDoltServerPatrolCheck_DownNoConfig(t *testing.T) {
 	t.Parallel()
 	townRoot := endpointTown(t)
