@@ -109,14 +109,15 @@ func runTheme(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
-	// Set theme: refuse before writing anything when no rig is resolved,
-	// rather than saving under a made-up rig name.
-	if rigName == "" {
-		return fmt.Errorf("not in a rig; run from inside a rig or set GT_RIG")
-	}
+	// Set theme: validate the theme name first, then refuse before writing
+	// anything when no rig is resolved, rather than saving under a made-up
+	// rig name.
 	themeName := args[0]
 	if !strings.EqualFold(themeName, "none") && tmux.GetThemeByName(themeName) == nil {
 		return fmt.Errorf("unknown theme: %s (use --list to see available themes)", themeName)
+	}
+	if rigName == "" {
+		return fmt.Errorf("not in a rig; run from inside a rig or set GT_RIG")
 	}
 
 	// Save to rig config
