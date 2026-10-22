@@ -226,3 +226,67 @@ func TestIndexByMatcher(t *testing.T) {
 		t.Error("specific matcher entry wrong")
 	}
 }
+
+func TestDiffHooksConfigsReportsEveryHooksEqualDrift(t *testing.T) {
+	t.Parallel()
+	hook := func(typ, cmd string) hooks.Hook { return hooks.Hook{Type: typ, Command: cmd} }
+	entry := func(matcher string, h ...hooks.Hook) hooks.HookEntry {
+		return hooks.HookEntry{Matcher: matcher, Hooks: h}
+	}
+	cases := []struct {
+		name     string
+		current  []hooks.HookEntry
+		expected []hooks.HookEntry
+	}{
+		{
+			name:     "empty type only",
+			current:  []hooks.HookEntry{entry("Bash", hook("", "guard"))},
+			expected: []hooks.HookEntry{entry("Bash", hook("command", "guard"))},
+		},
+		{
+			name:     "shell type only",
+			current:  []hooks.HookEntry{entry("Bash", hook("shell", "guard"))},
+			expected: []hooks.HookEntry{entry("Bash", hook("command", "guard"))},
+		},
+		{
+			name: "entry order only",
+			current: []hooks.HookEntry{
+				entry("Edit", hook("command", "b")),
+				entry("Bash", hook("command", "a")),
+			},
+			expected: []hooks.HookEntry{
+				entry("Bash", hook("command", "a")),
+				entry("Edit", hook("command", "b")),
+			},
+		},
+		{
+			name: "duplicate matcher",
+			current: []hooks.HookEntry{
+				entry("Bash", hook("command", "a")),
+				entry("Bash", hook("command", "a")),
+			},
+			expected: []hooks.HookEntry{entry("Bash", hook("command", "a"))},
+		},
+		{
+			name:    "duplicate matcher in expected",
+			current: []hooks.HookEntry{entry("Bash", hook("command", "a"))},
+			expected: []hooks.HookEntry{
+				entry("Bash", hook("command", "a")),
+				entry("Bash", hook("command", "a")),
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cur := &hooks.HooksConfig{PreToolUse: tc.current}
+			exp := &hooks.HooksConfig{PreToolUse: tc.expected}
+			if hooks.HooksEqual(cur, exp) {
+				t.Fatal("case is not HooksEqual drift")
+			}
+			if lines := diffHooksConfigs(cur, exp); len(lines) == 0 {
+				t.Error("diffHooksConfigs reported no changes for drift HooksEqual sees")
+			}
+		})
+	}
+}

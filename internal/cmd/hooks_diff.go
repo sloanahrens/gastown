@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 
@@ -136,6 +137,14 @@ func diffHooksConfigs(current, expected *hooks.HooksConfig) []string {
 		lines = append(lines, typeDiff...)
 	}
 
+	// hooks.HooksEqual is the gate sync and doctor use. A difference the
+	// per-entry rendering above cannot name must still be reported, or the
+	// diff says "in sync" for a target sync would rewrite.
+	if len(lines) == 0 && !hooks.HooksEqual(current, expected) {
+		lines = append(lines, fmt.Sprintf("  %s\n",
+			diffRemove.Render("settings hooks differ from the generated config (sync rewrites them)")))
+	}
+
 	return lines
 }
 
@@ -188,7 +197,27 @@ func diffHookEntries(hookType string, current, expected []hooks.HookEntry) []str
 		}
 	}
 
+	// Matching by matcher ignores entry order and collapses a repeated
+	// matcher, so a reorder or duplicate leaves no line above.
+	if len(lines) == 0 && !hookEntriesEqual(current, expected) {
+		lines = append(lines, fmt.Sprintf("  %s: %s\n",
+			hookType,
+			diffRemove.Render("entry order or repeated matchers differ")))
+	}
+
 	return lines
+}
+
+// hookEntriesEqual reports whether two entry lists serialize identically,
+// the comparison hooks.HooksEqual makes for each hook type (nil and empty
+// both serialize as absent).
+func hookEntriesEqual(a, b []hooks.HookEntry) bool {
+	if len(a) == 0 && len(b) == 0 {
+		return true
+	}
+	aj, errA := json.Marshal(a)
+	bj, errB := json.Marshal(b)
+	return errA == nil && errB == nil && string(aj) == string(bj)
 }
 
 // diffCommands compares commands within matched entries.
@@ -220,12 +249,15 @@ func diffCommands(hookType, matcher string, current, expected hooks.HookEntry) [
 			continue
 		}
 
-		// Both exist - compare. If matters: the built-in guards stopped
+		// Both exist - compare. Type matters because HooksEqual compares it
+		// (an on-disk "type":"" or "shell" is drift sync rewrites). If matters: the built-in guards stopped
 		// setting If (gt-3mp1), but an operator-supplied override may carry
 		// one, and two hooks on the same bare-tool matcher can then share an
 		// identical Command and differ only by If — so an If-only drift (a
 		// typo'd pattern in an on-disk override) must still show up here.
-		if current.Hooks[i].Command != expected.Hooks[i].Command || current.Hooks[i].If != expected.Hooks[i].If {
+		if current.Hooks[i].Command != expected.Hooks[i].Command ||
+			current.Hooks[i].If != expected.Hooks[i].If ||
+			current.Hooks[i].Type != expected.Hooks[i].Type {
 			lines = append(lines, fmt.Sprintf("  %s%s.hooks[%d]:\n", hookType, matcherSuffix, i))
 			lines = append(lines, fmt.Sprintf("    %s\n", diffRemove.Render("- "+hookDisplayText(current.Hooks[i]))))
 			lines = append(lines, fmt.Sprintf("    %s\n", diffAdd.Render("+ "+hookDisplayText(expected.Hooks[i]))))
@@ -237,9 +269,13 @@ func diffCommands(hookType, matcher string, current, expected hooks.HookEntry) [
 
 // hookDisplayText renders a hook's command (truncated) plus its If
 // condition when present, so a diff line distinguishes hooks that share a
-// Command but differ only by If.
+// Command but differ only by If. A Type other than "command" is shown too,
+// so a Type-only drift reads as two different lines.
 func hookDisplayText(h hooks.Hook) string {
 	text := truncateCommand(h.Command)
+	if h.Type != "command" {
+		text += fmt.Sprintf(" [type: %q]", h.Type)
+	}
 	if h.If != "" {
 		text += fmt.Sprintf(" [if: %s]", h.If)
 	}
