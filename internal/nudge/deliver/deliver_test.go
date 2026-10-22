@@ -2,6 +2,7 @@ package deliver
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -307,6 +308,105 @@ func TestDeliveryImmediateForceInterruptsWithSenderPrefix(t *testing.T) {
 	if got := ft.Sent(deliveryTarget); len(got) != 1 || got[0] != "[from mayor] m" {
 		t.Fatalf("sent = %q, want [\"[from mayor] m\"]", got)
 	}
+}
+
+// probeRecordingTmux records the window of each consumption probe and runs
+// onNudge right after a nudge is sent, so a test can end the context while
+// the delivery is between its nudge and its probe.
+type probeRecordingTmux struct {
+	*deliveryTmux
+	onNudge func()
+
+	mu      sync.Mutex
+	windows []time.Duration
+}
+
+func (p *probeRecordingTmux) NudgeSessionWithOpts(session, message string, opts tmux.NudgeOpts) error {
+	err := p.deliveryTmux.NudgeSessionWithOpts(session, message, opts)
+	if p.onNudge != nil {
+		p.onNudge()
+	}
+	return err
+}
+
+func (p *probeRecordingTmux) WaitForInputConsumed(session string, window time.Duration) (tmux.InputConsumption, error) {
+	p.mu.Lock()
+	p.windows = append(p.windows, window)
+	p.mu.Unlock()
+	return p.deliveryTmux.WaitForInputConsumed(session, window)
+}
+
+func (p *probeRecordingTmux) probeWindows() []time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]time.Duration(nil), p.windows...)
+}
+
+// skipProbeAfterCtxEnds: a delivery whose context ends between the nudge and
+// the consumption probe reports the end and does not start the probe
+// (gt-2a2a6). The immediate and wait-idle twins cover both direct-delivery
+// sites: immediate's send, and wait-idle's send once the target has gone idle.
+func skipProbeAfterCtxEnds(t *testing.T, mode string, idle bool) {
+	t.Helper()
+	ft := newDeliveryTmux(t, deliveryTarget)
+	ft.SetIdle(deliveryTarget, idle)
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	probe := &probeRecordingTmux{deliveryTmux: ft, onNudge: cancel}
+	d := testDelivery(ft, t.TempDir(), &pollerLog{}, &bytes.Buffer{})
+	d.Tmux, d.Mode, d.Force = probe, mode, true
+	d.ProbeWindow = 3 * time.Second
+
+	if err := d.Deliver(ctx, deliveryTarget, "m", "mayor"); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("deliver: %v", err)
+	}
+	if got := probe.probeWindows(); len(got) != 0 {
+		t.Errorf("consumption probes = %v, want none after the context ended", got)
+	}
+}
+
+func TestDeliveryImmediateSkipsConsumptionProbeAfterCtxEnds(t *testing.T) {
+	t.Parallel()
+	skipProbeAfterCtxEnds(t, ModeImmediate, false)
+}
+
+func TestDeliveryWaitIdleSkipsConsumptionProbeAfterCtxEnds(t *testing.T) {
+	t.Parallel()
+	skipProbeAfterCtxEnds(t, ModeWaitIdle, true)
+}
+
+// clampProbeToDeadline: a probe starts with at most the time left on the
+// caller's deadline, not the full ProbeWindow, so a 5ms deadline is not held
+// for a 3s probe (gt-2a2a6).
+func clampProbeToDeadline(t *testing.T, mode string, idle bool) {
+	t.Helper()
+	ft := newDeliveryTmux(t, deliveryTarget)
+	ft.SetIdle(deliveryTarget, idle)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Millisecond)
+	defer cancel()
+	probe := &probeRecordingTmux{deliveryTmux: ft}
+	d := testDelivery(ft, t.TempDir(), &pollerLog{}, &bytes.Buffer{})
+	d.Tmux, d.Mode, d.Force = probe, mode, true
+	d.ProbeWindow = 3 * time.Second
+
+	if err := d.Deliver(ctx, deliveryTarget, "m", "mayor"); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deliver: %v", err)
+	}
+	for _, w := range probe.probeWindows() {
+		if w > 5*time.Millisecond {
+			t.Errorf("consumption probe window = %v, want at most the 5ms left on the deadline", w)
+		}
+	}
+}
+
+func TestDeliveryImmediateClampsConsumptionProbeToDeadline(t *testing.T) {
+	t.Parallel()
+	clampProbeToDeadline(t, ModeImmediate, false)
+}
+
+func TestDeliveryWaitIdleClampsConsumptionProbeToDeadline(t *testing.T) {
+	t.Parallel()
+	clampProbeToDeadline(t, ModeWaitIdle, true)
 }
 
 func TestDeliveryWatcherExitsOnEmptyQueue(t *testing.T) {
