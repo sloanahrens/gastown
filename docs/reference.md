@@ -854,7 +854,7 @@ See [escalation.md](design/escalation.md) for full protocol.
 
 ```bash
 gt handoff                   # Request cycle (context-aware)
-gt done                      # Polecats terminate by running gt done
+gt done                      # Submit branch and terminate (polecats)
 gt session stop <rig>/<agent>
 gt peek <agent>              # Check health
 gt nudge <agent> "message"   # Send message to agent
@@ -1613,9 +1613,10 @@ The best F1 is taken over every distinct value as a cut, predicting yes at or
 above it; a tie keeps the higher cut. `--json` names the rule that labeled each
 line in its `lines` array.
 
-Seventeen batteries are registered, besides the test-only `fixture` battery. The `fixture` battery reads
-`.runtime/jev/fixture.jsonl` with labels from `fixture-labels.json`, and exists
-so tests can drive the command end to end. No live battery reads it.
+Every battery is registered with `Register` in `internal/jev/scorecard/`. The
+test-only `fixture` battery reads `.runtime/jev/fixture.jsonl` with labels from
+`fixture-labels.json`, and exists so tests can drive the command end to end. No
+live battery reads it.
 
 The `dispatch` battery reads `.runtime/jev/dispatch.jsonl`, and its labels are
 described under the dispatch battery below.
