@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -593,5 +594,104 @@ func TestEnvVarsCheckExpectedIgnoresDoctorEnv(t *testing.T) {
 				t.Errorf("Status = %v, want StatusOK; details: %v", result.Status, result.Details)
 			}
 		})
+	}
+}
+
+// TestEnvVarsCheckGOFLAGSWithoutCapWarns pins the failing branch of the GOFLAGS
+// drift check: a polecat session whose GOFLAGS lacks the -p cap is reported,
+// with the cap the policy expects, whatever the doctor's own GOFLAGS is.
+func TestEnvVarsCheckGOFLAGSWithoutCapWarns(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name         string
+		sessionGOFLG string
+		wantDetail   string
+	}{
+		{
+			name:         "session GOFLAGS without cap",
+			sessionGOFLG: "-race",
+			wantDetail:   `mr-Toast: GOFLAGS="-race" (expected "-race -p=8")`,
+		},
+		{
+			name:         "session GOFLAGS missing",
+			sessionGOFLG: "",
+			wantDetail:   `mr-Toast: missing GOFLAGS (expected "-p=8")`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			doctorEnv := func(key string) string {
+				if key == "GOFLAGS" {
+					return "-p=8"
+				}
+				return ""
+			}
+			session := config.AgentEnv(config.AgentEnvConfig{
+				Role:      "polecat",
+				Rig:       "myrig",
+				AgentName: "Toast",
+				TownRoot:  testTownRoot,
+				Getenv:    doctorEnv,
+			})
+			if tc.sessionGOFLG == "" {
+				delete(session, "GOFLAGS")
+			} else {
+				session["GOFLAGS"] = tc.sessionGOFLG
+			}
+			reader := &mockEnvReader{
+				sessions: []string{"mr-Toast"},
+				sessionEnvs: map[string]map[string]string{
+					"mr-Toast": session,
+				},
+			}
+			check := NewEnvVarsCheckWithReader(reader)
+			check.getenv = doctorEnv
+			result := check.Run(testCtx())
+
+			if result.Status != StatusWarning {
+				t.Fatalf("Status = %v, want StatusWarning; details: %v", result.Status, result.Details)
+			}
+			if !slices.Contains(result.Details, tc.wantDetail) {
+				t.Errorf("Details = %v, want to contain %q", result.Details, tc.wantDetail)
+			}
+		})
+	}
+}
+
+// TestEnvVarsCheckFixGOFLAGSUsesSessionValue pins the Fix() path of gt-jb4zh:
+// the cap Fix applies to a polecat's GOFLAGS is computed from that session's
+// own value, not from the doctor process's GOFLAGS.
+func TestEnvVarsCheckFixGOFLAGSUsesSessionValue(t *testing.T) {
+	t.Parallel()
+	doctorEnv := func(key string) string {
+		if key == "GOFLAGS" {
+			return "-p=2"
+		}
+		return ""
+	}
+	session := config.AgentEnv(config.AgentEnvConfig{
+		Role:      "polecat",
+		Rig:       "myrig",
+		AgentName: "Toast",
+		TownRoot:  testTownRoot,
+		Getenv:    doctorEnv,
+	})
+	session["GOFLAGS"] = "-race"
+	mock := &mockEnvAccessor{
+		mockEnvReader: mockEnvReader{
+			sessions: []string{"mr-Toast"},
+			sessionEnvs: map[string]map[string]string{
+				"mr-Toast": session,
+			},
+		},
+	}
+	check := NewEnvVarsCheckWithAccessor(mock)
+	check.getenv = doctorEnv
+
+	if err := check.Fix(testCtx()); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+	if got, want := mock.setCalls["mr-Toast"]["GOFLAGS"], "-race -p=8"; got != want {
+		t.Errorf("Fix() SetEnvironment(GOFLAGS) = %q, want %q", got, want)
 	}
 }
