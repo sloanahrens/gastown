@@ -77,10 +77,10 @@ func TestGetQueueMessageInfo_NotFound(t *testing.T) {
 func TestChannelAndAnnounceMessages(t *testing.T) {
 	t.Parallel()
 	bd := beadsfake.New()
-	old := createMessage(t, bd, "old", "gt:message", "channel:ops", "announce_channel:ops", "from:deacon/")
-	createMessage(t, bd, "unlabeled", "channel:ops", "announce_channel:ops")
-	createMessage(t, bd, "elsewhere", "gt:message", "channel:dev", "announce_channel:dev")
-	newer := createMessage(t, bd, "new", "gt:message", "channel:ops", "announce_channel:ops")
+	old := createMessage(t, bd, "old", "gt:message", "channel:ops", "announce:ops", "from:deacon/")
+	createMessage(t, bd, "unlabeled", "channel:ops", "announce:ops")
+	createMessage(t, bd, "elsewhere", "gt:message", "channel:dev", "announce:dev")
+	newer := createMessage(t, bd, "new", "gt:message", "channel:ops", "announce:ops")
 
 	ch, err := listChannelMessages(bd, "ops")
 	if err != nil {

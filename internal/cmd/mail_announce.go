@@ -110,7 +110,7 @@ func readAnnounceChannel(townRoot string, cfg *config.MessagingConfig, channelNa
 		return fmt.Errorf("unknown announce channel: %s", channelName)
 	}
 
-	// Query beads for messages with announce_channel=<channel>
+	// Query beads for messages with announce:<channel> label
 	messages, err := listAnnounceMessages(townBeadsClient(townRoot), channelName)
 	if err != nil {
 		return fmt.Errorf("listing announce messages: %w", err)
@@ -174,9 +174,9 @@ type announceMessage struct {
 
 // listAnnounceMessages lists messages from an announce channel.
 func listAnnounceMessages(bd beads.Client, channelName string) ([]announceMessage, error) {
-	// Query for messages with label announce_channel:<channel>
+	// Query for messages with label announce:<channel>
 	// Messages are stored with this label when sent via sendToAnnounce()
-	issues, err := bd.List(beads.ListOptions{Label: "announce_channel:" + channelName, Priority: -1})
+	issues, err := bd.List(beads.ListOptions{Label: "announce:" + channelName, Priority: -1})
 	if err != nil {
 		return nil, err
 	}
