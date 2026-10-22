@@ -82,11 +82,11 @@ func (f *fakeRepo) Run(context.Context, ...string) (string, error) {
 	return "", errors.New("fakeRepo runs no git")
 }
 
-// fetchLockedRepo is the fake repo with its fetch routed through the shared
-// fetch-lock wrapper the way wire.go routes the clone's.
+// fetchLockedRepo is the fake repo with its fetch routed through the same
+// wiring Open gives the real clone, lockedCloneRepo.
 type fetchLockedRepo struct {
 	Repo
-	fetch submission.FetchLocked
+	fetch cloneRepo
 }
 
 func (r fetchLockedRepo) Sync(ctx context.Context) error { return r.fetch.Sync(ctx) }
@@ -926,7 +926,7 @@ func TestJevDriftFetchTakesTheSubmissionLock(t *testing.T) {
 	r := newRig(t, rec)
 	r.pass.Git = fetchLockedRepo{
 		Repo:  r.git,
-		fetch: submission.FetchLocked{Cloner: r.git, TownRoot: town},
+		fetch: lockedCloneRepo(r.git, town),
 	}
 	r.serve(rec, "1\t1\tinternal/cmd/jev_landing.go\n", recentFlagPatch)
 	if err := battery.WriteCursor(r.cursor, battery.Cursor{Time: t0}); err != nil {
