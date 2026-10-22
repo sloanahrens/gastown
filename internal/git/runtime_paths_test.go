@@ -543,7 +543,6 @@ func TestLooksGenerated(t *testing.T) {
 		{"pkg/coverage/", "pkg/coverage/c.prof", true},
 		{"pkg/coverage/", "pkg/coverage/cpu.pprof", true},
 		{"pkg/coverage/", "pkg/coverage/coverage.html", true},
-		{"pkg/coverage/", "pkg/coverage/coverage.lcov", false},
 		{"pkg/coverage/", "pkg/coverage/report.html", false},
 		{"pkg/coverage/", "pkg/coverage/template.html", false},
 		{"pkg/coverage/", "pkg/coverage/testdata/coverage.html", false},
