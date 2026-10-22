@@ -1436,6 +1436,67 @@ func TestIntegrationSchedulerActualDispatchRoutesPollutedEnvToTargetRig(t *testi
 	}
 }
 
+// A rig ESTOP holds a queued bead through the whole Run: nothing is spawned,
+// the sling context stays open, and the first run after the hold lifts
+// dispatches it (gt-ifijm, gt-duisv).
+func TestIntegrationSchedulerRigHoldKeepsContextQueuedUntilReleased(t *testing.T) {
+	hqPath, rigPath, _, _ := setupSchedulerIntegrationTown(t)
+
+	beadID := createTestBead(t, rigPath, "Rig held dispatch")
+	rigBeads := beads.NewWithBeadsDir(rigPath, filepath.Join(rigPath, ".beads"))
+	if _, err := beads.CreateSlingContext(rigBeads, "dispatch: "+beadID, beadID, &capacity.SlingContextFields{
+		Version:     1,
+		WorkBeadID:  beadID,
+		TargetRig:   "testrig",
+		HookRawBead: true,
+		EnqueuedAt:  "2026-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("CreateSlingContext: %v", err)
+	}
+
+	spawned := 0
+	prevSpawn := spawnPolecatForSling
+	t.Cleanup(func() { spawnPolecatForSling = prevSpawn })
+	spawnPolecatForSling = func(rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+		spawned++
+		return &SpawnedPolecatInfo{
+			RigName:     rigName,
+			PolecatName: "holdtest",
+			ClonePath:   rigPath,
+			Pane:        "test-pane", // StartSession becomes a no-op.
+		}, nil
+	}
+
+	hold := filepath.Join(hqPath, "ESTOP.testrig")
+	if err := os.WriteFile(hold, []byte("manual\t2026-10-22T00:00:00Z\tt\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	dispatched, err := runSchedulerDispatch(hqPath, 1)
+	if err != nil {
+		t.Fatalf("scheduler dispatch under a rig hold: %v", err)
+	}
+	if dispatched != 0 || spawned != 0 {
+		t.Fatalf("dispatched = %d, spawned = %d under a rig hold, want 0 and 0", dispatched, spawned)
+	}
+	if !hasSlingContext(t, hqPath, beadID) {
+		t.Fatal("sling context was closed by a held run, want it left queued")
+	}
+
+	if err := os.Remove(hold); err != nil {
+		t.Fatal(err)
+	}
+	dispatched, err = runSchedulerDispatch(hqPath, 1)
+	if err != nil {
+		t.Fatalf("scheduler dispatch after the hold lifted: %v", err)
+	}
+	if dispatched != 1 || spawned != 1 {
+		t.Fatalf("dispatched = %d, spawned = %d after the hold lifted, want 1 and 1", dispatched, spawned)
+	}
+	if hasSlingContext(t, hqPath, beadID) {
+		t.Fatal("sling context still open after the released run dispatched it")
+	}
+}
+
 func TestIntegrationSchedulerFormulaDispatchRoutesPollutedEnvToTargetRig(t *testing.T) {
 	hqPath, rigPath, _, _ := setupSchedulerIntegrationTown(t)
 
