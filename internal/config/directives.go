@@ -141,9 +141,13 @@ func IsTownLevelDir(name string) bool {
 }
 
 // rigNamesToScan returns the single named rig, or every rig directory under
-// townRoot that carries a config.json and is not a town-level directory.
+// townRoot that carries a config.json and is not a town-level directory. A
+// named town-level directory is not a rig, so it yields no rigs.
 func rigNamesToScan(townRoot, rigName string) ([]string, error) {
 	if rigName != "" {
+		if IsTownLevelDir(rigName) {
+			return nil, nil
+		}
 		return []string{rigName}, nil
 	}
 

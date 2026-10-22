@@ -199,13 +199,28 @@ func TestIsKnownRole(t *testing.T) {
 	}
 }
 
+func TestIsTownLevelDir(t *testing.T) {
+	t.Parallel()
+
+	for _, name := range []string{"mayor", "deacon", ".beads", ".claude", ".git", "plugins"} {
+		if !IsTownLevelDir(name) {
+			t.Errorf("IsTownLevelDir(%q) = false, want true", name)
+		}
+	}
+	for _, name := range []string{"myrig", "gastown", "directives", "Mayor", ".github", ""} {
+		if IsTownLevelDir(name) {
+			t.Errorf("IsTownLevelDir(%q) = true, want false", name)
+		}
+	}
+}
+
 func TestRigNamesToScanExcludesTownAgentDirs(t *testing.T) {
 	t.Parallel()
 
 	townRoot := t.TempDir()
-	// mayor/ and deacon/ carry a config.json of their own, so only the rig
+	// Town-level dirs can carry a config.json of their own, so only the dir
 	// name separates them from a real rig.
-	for _, dir := range []string{"mayor", "deacon", "myrig"} {
+	for _, dir := range []string{"mayor", "deacon", ".beads", ".claude", ".git", "plugins", "myrig"} {
 		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
 			t.Fatal(err)
 		}
@@ -214,13 +229,40 @@ func TestRigNamesToScanExcludesTownAgentDirs(t *testing.T) {
 		}
 	}
 
-	got, err := rigNamesToScan(townRoot, "")
-	if err != nil {
-		t.Fatalf("rigNamesToScan: %v", err)
-	}
-	if want := []string{"myrig"}; !equalStrings(got, want) {
-		t.Errorf("rigNamesToScan = %v, want %v", got, want)
-	}
+	t.Run("every rig scan", func(t *testing.T) {
+		t.Parallel()
+		got, err := rigNamesToScan(townRoot, "")
+		if err != nil {
+			t.Fatalf("rigNamesToScan: %v", err)
+		}
+		if want := []string{"myrig"}; !equalStrings(got, want) {
+			t.Errorf("rigNamesToScan = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a named rig is kept", func(t *testing.T) {
+		t.Parallel()
+		got, err := rigNamesToScan(townRoot, "myrig")
+		if err != nil {
+			t.Fatalf("rigNamesToScan: %v", err)
+		}
+		if want := []string{"myrig"}; !equalStrings(got, want) {
+			t.Errorf("rigNamesToScan = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a named town-level dir is not a rig", func(t *testing.T) {
+		t.Parallel()
+		for _, name := range []string{"mayor", "deacon", ".beads", ".claude", ".git", "plugins"} {
+			got, err := rigNamesToScan(townRoot, name)
+			if err != nil {
+				t.Fatalf("rigNamesToScan(%q): %v", name, err)
+			}
+			if len(got) != 0 {
+				t.Errorf("rigNamesToScan(%q) = %v, want none", name, got)
+			}
+		}
+	})
 }
 
 func TestScanDirectiveFiles(t *testing.T) {
@@ -314,6 +356,25 @@ func TestScanDirectiveFiles(t *testing.T) {
 
 		if got, want := unusedRoles(files), []string{"host-hygiene", "testing", "typod"}; !equalStrings(got, want) {
 			t.Errorf("unused roles = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a named town-level dir contributes no rig files", func(t *testing.T) {
+		t.Parallel()
+		townRoot := newTown(t)
+		write(t, filepath.Join(townRoot, "mayor", "directives", "stale.md"), "mayor policy")
+
+		files, err := ScanDirectiveFiles(townRoot, "mayor")
+		if err != nil {
+			t.Fatalf("ScanDirectiveFiles: %v", err)
+		}
+		for _, f := range files {
+			if f.Scope == "mayor" {
+				t.Errorf("town-level dir scanned as a rig: %+v", f)
+			}
+		}
+		if len(files) != 2 {
+			t.Errorf("got %d files, want the 2 town files", len(files))
 		}
 	})
 
