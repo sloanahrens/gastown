@@ -57,6 +57,24 @@ const (
 		"────────────────────────────────────────────────────────────────────────────────\n" +
 		"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents · ↓ to manage"
 
+	// queuedFooterNoComposerPane: the queued-messages footer drawn in the input
+	// box with the composer line itself absent from the capture.
+	queuedFooterNoComposerPane = "  Press up to edit queued messages · ctrl+x ctrl+s to send now\n" +
+		"────────────────────────────────────────────────────────────────────────────────\n" +
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents · ↓ to manage"
+
+	// promptEchoNoComposerPane: no composer line in the input box, and a user
+	// message echoed back as "❯ …" far enough up the history that it is
+	// transcript. It must not be read as typed input.
+	promptEchoNoComposerPane = "❯ fix the build\n" +
+		"\n" +
+		"⏺ Done, tests pass.\n" +
+		"⏺ Pushed.\n" +
+		"⏺ Waiting on review.\n" +
+		"⏺ Next step.\n" +
+		"⏺ More text.\n" +
+		"  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents · ↓ to manage"
+
 	// dimPlaceholderPane: the TUI renders hint text in the composer dimmed. It
 	// is not input and must not read as pending.
 	dimPlaceholderPane = "\x1b[2m❯ Try \"fix the failing build\"\x1b[0m\n" +
@@ -130,6 +148,21 @@ func TestAnalyzeComposerState(t *testing.T) {
 			want:       ComposerPending,
 			wantEvid:   "queued-messages footer visible",
 			wantQueued: true,
+		},
+		{
+			name:       "footer in the input box with no composer line is still pending",
+			pane:       "⏺ Waiting on the review.\n\n" + queuedFooterNoComposerPane,
+			prefix:     DefaultReadyPromptPrefix,
+			want:       ComposerPending,
+			wantEvid:   "queued-messages footer visible",
+			wantQueued: true,
+		},
+		{
+			name:     "prompt echo above the input box is transcript, not a composer",
+			pane:     promptEchoNoComposerPane,
+			prefix:   DefaultReadyPromptPrefix,
+			want:     ComposerUnknown,
+			wantEvid: "no composer line in capture",
 		},
 		{
 			name:     "agent without a prompt prefix is unknown",
