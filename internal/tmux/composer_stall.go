@@ -114,24 +114,59 @@ func hasQueuedMessagesFooter(line string) bool {
 	return false
 }
 
-// queuedMessagesFooterBelowComposer reports whether the queued-messages footer
-// sits in the footer region: the lines below the bottom-most composer line.
-// The capture reaches 25 lines into history, so anything above the composer is
-// transcript, and a quoted footer there is not input waiting in the queue. With
-// no composer line there is no footer region, so the footer does not count and
-// the probe falls through to its own verdict.
-func queuedMessagesFooterBelowComposer(lines [][]rune, promptPrefix string) bool {
-	composer := -1
+// composerTailLines bounds the input box at the bottom of the capture. The TUI
+// draws the composer, the optional queued-message footer, a rule and the status
+// bar last, so the composer sits within the last few non-blank lines. A
+// prompt-prefixed line further up is transcript: a user message echoed back as
+// "❯ …", or a quoted footer, not input the agent has yet to act on.
+const composerTailLines = 5
+
+// composerTailStart returns the index of the oldest line in the input-box
+// window: the composerTailLines-th non-blank line counting up from the bottom.
+// It returns 0 when the capture is shorter than the window.
+func composerTailStart(lines [][]rune) int {
+	seen := 0
 	for i := len(lines) - 1; i >= 0; i-- {
-		if matchesPromptPrefix(string(lines[i]), promptPrefix) {
-			composer = i
-			break
+		if strings.TrimSpace(string(lines[i])) == "" {
+			continue
+		}
+		seen++
+		if seen == composerTailLines {
+			return i
 		}
 	}
-	if composer < 0 {
-		return false
+	return 0
+}
+
+// composerLineIndex returns the index of the composer line: the bottom-most
+// prompt-prefixed line inside the input-box window, or -1 when there is none.
+func composerLineIndex(lines [][]rune, promptPrefix string) int {
+	seen := 0
+	for i := len(lines) - 1; i >= 0 && seen < composerTailLines; i-- {
+		if strings.TrimSpace(string(lines[i])) == "" {
+			continue
+		}
+		seen++
+		if matchesPromptPrefix(string(lines[i]), promptPrefix) {
+			return i
+		}
 	}
-	for _, line := range lines[composer+1:] {
+	return -1
+}
+
+// queuedMessagesFooterBelowComposer reports whether the queued-messages footer
+// sits in the footer region: the lines below the composer line. The capture
+// reaches 25 lines into history, so a quoted footer above the composer is
+// transcript, not input waiting in the queue. With no composer line the footer
+// region is the input-box window itself: the footer is drawn as part of the
+// input box, so one in the bottom window is still input waiting in the queue,
+// while one buried in transcript prose is not.
+func queuedMessagesFooterBelowComposer(lines [][]rune, promptPrefix string) bool {
+	from := composerTailStart(lines)
+	if composer := composerLineIndex(lines, promptPrefix); composer >= 0 {
+		from = composer + 1
+	}
+	for _, line := range lines[from:] {
 		if hasQueuedMessagesFooter(string(line)) {
 			return true
 		}
@@ -178,12 +213,8 @@ func analyzeComposerState(escContent, promptPrefix string) composerProbe {
 		}
 	}
 
-	// Walk up to the last composer line in the capture and read what follows
-	// the prompt prefix.
-	for i := len(lines) - 1; i >= 0; i-- {
-		if !matchesPromptPrefix(string(lines[i]), promptPrefix) {
-			continue
-		}
+	// Read what follows the prompt prefix on the composer line.
+	if i := composerLineIndex(lines, promptPrefix); i >= 0 {
 		content, contentDim := composerContent(lines[i], lineDims[i], promptPrefix)
 		if len(content) == 0 || allDim(contentDim) {
 			return composerProbe{State: ComposerClean, Evidence: "composer empty"}
@@ -429,12 +460,8 @@ func analyzeComposerStateNoBusy(escContent, promptPrefix string) composerProbe {
 		}
 	}
 
-	// Walk up to the last composer line in the capture and read what follows
-	// the prompt prefix.
-	for i := len(lines) - 1; i >= 0; i-- {
-		if !matchesPromptPrefix(string(lines[i]), promptPrefix) {
-			continue
-		}
+	// Read what follows the prompt prefix on the composer line.
+	if i := composerLineIndex(lines, promptPrefix); i >= 0 {
 		content, contentDim := composerContent(lines[i], lineDims[i], promptPrefix)
 		if len(content) == 0 || allDim(contentDim) {
 			return composerProbe{State: ComposerClean, Evidence: "composer empty"}
