@@ -128,7 +128,7 @@ func runMailClaim(cmd *cobra.Command, args []string) error {
 		}
 
 		// Another worker claimed it first — remove our stale labels and try next
-		if releaseErr := releaseQueueMessage(queueClient, candidate.ID); releaseErr != nil {
+		if releaseErr := releaseQueueMessage(queueClient, candidate.ID, caller); releaseErr != nil {
 			style.PrintWarning("could not release stale claim on %s: %v", candidate.ID, releaseErr)
 		}
 	}
@@ -276,7 +276,7 @@ func runMailRelease(cmd *cobra.Command, args []string) error {
 	}
 
 	// Release the message: remove claimed-by and claimed-at labels
-	if err := releaseQueueMessage(queueClient, messageID); err != nil {
+	if err := releaseQueueMessage(queueClient, messageID, caller); err != nil {
 		return fmt.Errorf("releasing message: %w", err)
 	}
 
@@ -329,27 +329,43 @@ func getQueueMessageInfo(bd beads.Client, messageID string) (*queueMessageInfo, 
 	return info, nil
 }
 
-// releaseQueueMessage releases a claimed message by removing claim labels.
-// Both claimed-by and claimed-at are removed in a single bd command to prevent
-// orphaned labels if the process crashes between separate removal steps.
-func releaseQueueMessage(bd beads.Client, messageID string) error {
-	// Get current message info to find the exact claim labels
-	info, err := getQueueMessageInfo(bd, messageID)
+// releaseQueueMessage releases claimant's claim on a message by removing that
+// claimant's claimed-by label. Racing claimants each leave their own
+// claimed-by label, so a release must never touch another claimant's: the
+// losing claimant releases its own label and the winner keeps the message.
+// claimed-at labels carry no claimant, so they cannot be attributed while a
+// rival claim remains; they are removed with the last claimed-by. The labels
+// go in a single bd command to prevent orphans if the process crashes between
+// separate removal steps.
+func releaseQueueMessage(bd beads.Client, messageID, claimant string) error {
+	issue, err := bd.Show(messageID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return fmt.Errorf("message not found: %s", messageID)
+	}
 	if err != nil {
 		return err
 	}
 
-	// Collect labels to remove in a single atomic operation
-	var labelsToRemove []string
-	if info.ClaimedBy != "" {
-		labelsToRemove = append(labelsToRemove, "claimed-by:"+info.ClaimedBy)
+	own := "claimed-by:" + claimant
+	var claimedAt []string
+	ownClaim, rivals := false, false
+	for _, label := range issue.Labels {
+		switch {
+		case label == own:
+			ownClaim = true
+		case strings.HasPrefix(label, "claimed-by:"):
+			rivals = true
+		case strings.HasPrefix(label, "claimed-at:"):
+			claimedAt = append(claimedAt, label)
+		}
 	}
-	if info.ClaimedAt != nil {
-		labelsToRemove = append(labelsToRemove, "claimed-at:"+info.ClaimedAt.Format(time.RFC3339))
+	if !ownClaim {
+		return nil
 	}
 
-	if len(labelsToRemove) == 0 {
-		return nil
+	labelsToRemove := []string{own}
+	if !rivals {
+		labelsToRemove = append(labelsToRemove, claimedAt...)
 	}
 
 	err = bd.Update(messageID, beads.UpdateOptions{RemoveLabels: labelsToRemove})
