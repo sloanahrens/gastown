@@ -233,7 +233,7 @@ func (r awaitEventRun) run(townRoot string) error {
 		if wdErr == nil {
 			labels, labErr := getAgentLabels(agentBeadsDB(r.db, beadsDir), r.agentBead)
 			if labErr != nil {
-				if !r.quiet {
+				if !r.quiet && !r.json {
 					fmt.Fprintf(r.out, "%s Could not read agent bead (starting at idle=0): %v\n",
 						style.Dim.Render("⚠"), labErr)
 				}
@@ -316,7 +316,7 @@ func (r awaitEventRun) run(townRoot string) error {
 		if result.Reason == "timeout" {
 			newIdle := idleCycles + 1
 			if setErr := setAgentIdleCycles(agentBeadsDB(r.db, beadsDir), r.agentBead, newIdle); setErr != nil {
-				if !r.quiet {
+				if !r.quiet && !r.json {
 					fmt.Fprintf(r.out, "%s Failed to update idle count: %v\n",
 						style.Dim.Render("⚠"), setErr)
 				}
