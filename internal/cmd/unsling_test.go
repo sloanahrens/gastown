@@ -91,6 +91,15 @@ type brokenStore struct {
 	updateErr error
 	// failAssignee limits listErr to lookups for that assignee; empty fails all.
 	failAssignee string
+	// showErr fails Show, the way a deleted or unreadable hooked bead does.
+	showErr error
+}
+
+func (s brokenStore) Show(id string) (*beads.Issue, error) {
+	if s.showErr != nil {
+		return nil, s.showErr
+	}
+	return s.Client.Show(id)
 }
 
 func (s brokenStore) ListAssignedIssueStatuses(assignee string, statuses ...beads.IssueStatus) ([]*beads.Issue, error) {
@@ -360,46 +369,54 @@ func TestCleanStaleHookedBeads(t *testing.T) {
 	})
 }
 
-// A hooked or in_progress bead that reads back needs no --force. The guard used
-// to require status closed, which an active bead never is, so every unsling of
-// live work was refused without --force.
-func TestUnslingHookedBeadNeedsNoForce(t *testing.T) {
+// gt unsling, gt hook detach and gt hook clear all end in unslingHook with their
+// --force flag, so this drives that command path. A hooked or in_progress bead
+// that reads back is cleared without --force (the guard used to require status
+// closed, which an active bead never is, so every unsling of live work was
+// refused). An unreadable bead is refused without --force, and the error names
+// the flag; with --force the unsling proceeds.
+func TestUnslingCommandForceSemantics(t *testing.T) {
 	t.Parallel()
 	const agent = "gastown/polecats/p1"
-
-	for _, status := range []beads.IssueStatus{beads.IssueStatusHooked, beads.StatusInProgress} {
-		t.Run(string(status), func(t *testing.T) {
-			t.Parallel()
-			store := beadsfake.New()
-			is := seedAssigned(t, store, agent, status)
-
-			hookedBead, showErr := store.Show(is.ID)
-			if err := unslingGuard(is.ID, showErr, false); err != nil {
-				t.Errorf("unslingGuard(%s bead, force=false) = %v, want nil", status, err)
-			}
-			if hookedBead.Status != string(status) {
-				t.Errorf("Show status = %q, want %q", hookedBead.Status, status)
-			}
-		})
-	}
-}
-
-// When the hooked bead cannot be read, --force is the only way through: without
-// it the error names the flag, and with it the unsling proceeds.
-func TestUnslingUnreadableBeadNeedsForce(t *testing.T) {
-	t.Parallel()
-	const id = "gt-missing"
 	boom := errors.New("bd show: not found")
 
-	err := unslingGuard(id, boom, false)
-	if !errors.Is(err, boom) {
-		t.Fatalf("unslingGuard(unreadable, force=false) = %v, want an error wrapping %v", err, boom)
+	cases := []struct {
+		name    string
+		status  beads.IssueStatus
+		showErr error
+		force   bool
+		wantErr bool
+	}{
+		{name: "hooked and readable needs no force", status: beads.IssueStatusHooked},
+		{name: "in_progress and readable needs no force", status: beads.StatusInProgress},
+		{name: "unreadable is refused without force", status: beads.IssueStatusHooked, showErr: boom, wantErr: true},
+		{name: "unreadable proceeds with force", status: beads.IssueStatusHooked, showErr: boom, force: true},
 	}
-	if !strings.Contains(err.Error(), "--force") {
-		t.Errorf("error %q does not tell the user to use --force", err)
-	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			fake := beadsfake.New()
+			is := seedAssigned(t, fake, agent, tc.status)
+			store := brokenStore{Client: fake, showErr: tc.showErr}
+			open := func(string) beads.Client { return store }
 
-	if err := unslingGuard(id, boom, true); err != nil {
-		t.Errorf("unslingGuard(unreadable, force=true) = %v, want nil", err)
+			err := unslingHook(&cobra.Command{}, agent, t.TempDir(), "", "", false, tc.force, open)
+			got, _ := fake.Show(is.ID)
+			if tc.wantErr {
+				if !errors.Is(err, boom) || !strings.Contains(err.Error(), "--force") {
+					t.Fatalf("runUnslingWith = %v, want an error wrapping %v that names --force", err, boom)
+				}
+				if got.Status != string(tc.status) {
+					t.Errorf("refused bead status = %q, want it still %q", got.Status, tc.status)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("runUnslingWith = %v, want nil", err)
+			}
+			if tc.showErr == nil && got.Status != "open" {
+				t.Errorf("bead status after unsling = %q, want open", got.Status)
+			}
+		})
 	}
 }
