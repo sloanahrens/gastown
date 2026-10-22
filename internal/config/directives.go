@@ -128,8 +128,20 @@ func ScanDirectiveFiles(townRoot, rigName string) ([]DirectiveFile, error) {
 	return files, nil
 }
 
+// IsTownLevelDir reports whether a top-level town directory is town state
+// rather than a rig: the mayor and deacon agent directories, plus the hidden
+// and plugin directories. Rig detection and the directive scan both call it,
+// so they agree on which directories are rigs.
+func IsTownLevelDir(name string) bool {
+	switch name {
+	case "mayor", "deacon", ".beads", ".claude", ".git", "plugins":
+		return true
+	}
+	return false
+}
+
 // rigNamesToScan returns the single named rig, or every rig directory under
-// townRoot that carries a config.json.
+// townRoot that carries a config.json and is not a town-level directory.
 func rigNamesToScan(townRoot, rigName string) ([]string, error) {
 	if rigName != "" {
 		return []string{rigName}, nil
@@ -141,7 +153,7 @@ func rigNamesToScan(townRoot, rigName string) ([]string, error) {
 	}
 	var rigs []string
 	for _, d := range entries {
-		if !d.IsDir() {
+		if !d.IsDir() || IsTownLevelDir(d.Name()) {
 			continue
 		}
 		if _, err := os.Stat(filepath.Join(townRoot, d.Name(), "config.json")); err != nil {

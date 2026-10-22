@@ -199,6 +199,30 @@ func TestIsKnownRole(t *testing.T) {
 	}
 }
 
+func TestRigNamesToScanExcludesTownAgentDirs(t *testing.T) {
+	t.Parallel()
+
+	townRoot := t.TempDir()
+	// mayor/ and deacon/ carry a config.json of their own, so only the rig
+	// name separates them from a real rig.
+	for _, dir := range []string{"mayor", "deacon", "myrig"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(townRoot, dir, "config.json"), []byte("{}"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got, err := rigNamesToScan(townRoot, "")
+	if err != nil {
+		t.Fatalf("rigNamesToScan: %v", err)
+	}
+	if want := []string{"myrig"}; !equalStrings(got, want) {
+		t.Errorf("rigNamesToScan = %v, want %v", got, want)
+	}
+}
+
 func TestScanDirectiveFiles(t *testing.T) {
 	t.Parallel()
 
