@@ -118,7 +118,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	}
 	beadsPath := beads.ResolveHookDir(townRoot, agentBeadID, fallbackPath)
 
-	b := beads.New(beadsPath)
+	b := openBeads(beadsPath)
 
 	// Find hooked bead by querying status+assignee directly (hq-l6mm5).
 	// The work bead itself is the authoritative source — no need to read
@@ -170,7 +170,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	hookedBeadPath := beads.ResolveHookDir(townRoot, hookedBeadID, beadsPath)
 	hookedB := b
 	if hookedBeadPath != beadsPath {
-		hookedB = beads.New(hookedBeadPath)
+		hookedB = openBeads(hookedBeadPath)
 	}
 	hookedBead, showErr := hookedB.Show(hookedBeadID)
 	if err := unslingGuard(hookedBeadID, showErr, force); err != nil {
@@ -235,8 +235,9 @@ func firstActiveWorkID(b beads.Client, assignee string) (string, error) {
 // one so tests can put a stub behind the town and per-bead databases it reaches.
 type beadsOpener func(path string) beads.Client
 
-// openBeads is the beadsOpener unsling runs with.
-func openBeads(path string) beads.Client { return beads.New(path) }
+// openBeads is the beadsOpener unsling runs with. Tests swap it so the command
+// path runs against a stub behind every database it reaches.
+var openBeads beadsOpener = func(path string) beads.Client { return beads.New(path) }
 
 // firstTownActiveWorkID is firstActiveWorkID against the town database, which
 // holds the hq-* beads hooked to rig-level agents. It tries the exact agent ID,
