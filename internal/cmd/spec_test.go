@@ -2075,6 +2075,42 @@ func TestSpecCandidatesFromAFakeStore(t *testing.T) {
 	}
 }
 
+// A rig whose park state cannot be read is held out of the candidate set, and
+// the read says why. An unverified rig is reported as an error line, the way a
+// failed board read is, so the tick log shows it was held for lack of a
+// verdict. A parked rig stays quiet: parking is the operator's choice, not a
+// fault to surface (gt-6d06g).
+func TestSpecCandidatesReportsAnUnverifiedRig(t *testing.T) {
+	t.Parallel()
+	townRoot := specTown(t)
+	board := func(string) ([]*beads.Issue, error) {
+		return []*beads.Issue{{ID: "gt-open", Type: "bug", Status: "open", Priority: 2}}, nil
+	}
+
+	cases := []struct {
+		name       string
+		reason     string
+		wantErrors int
+	}{
+		{"unverified", sling.RigStatusUnverified, 1},
+		{"parked", "parked", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			blocked := func(string, string) (bool, string) { return true, tc.reason }
+
+			got := specCandidatesWith(townRoot, 2, board, blocked)
+			if len(got.Candidates) != 0 {
+				t.Errorf("a blocked rig yielded candidates %+v", got.Candidates)
+			}
+			if len(got.Errors) != tc.wantErrors {
+				t.Errorf("errors = %v, want %d line(s) for a %s rig", got.Errors, tc.wantErrors, tc.reason)
+			}
+		})
+	}
+}
+
 // A ready, shaped bead a person labeled crew-only is skipped,
 // and the read says so: the skip line names the label, so the tick log and the
 // dry run show an operator why the bead never took a seat instead of dropping

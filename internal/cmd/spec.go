@@ -1895,6 +1895,13 @@ type specBoardRead struct {
 // ceiling on a candidate's priority number — the same value the per-candidate
 // re-check uses.
 func specCandidates(townRoot string, maxPriority int, board specBoard) specBoardRead {
+	return specCandidatesWith(townRoot, maxPriority, board, IsRigParkedOrDocked)
+}
+
+// specCandidatesWith is specCandidates with the rig's park-and-dock check
+// passed in, so a test can hand the read a verdict bd cannot be made to give
+// (gt-6d06g).
+func specCandidatesWith(townRoot string, maxPriority int, board specBoard, rigStatus func(townRoot, rigName string) (bool, string)) specBoardRead {
 	var read specBoardRead
 	names, err := knownRigNames(townRoot)
 	if err != nil {
@@ -1909,7 +1916,13 @@ func specCandidates(townRoot string, maxPriority int, board specBoard) specBoard
 		if _, err := os.Stat(rigPath); err != nil {
 			continue
 		}
-		if parked, _ := IsRigParkedOrDocked(townRoot, name); parked {
+		// The rig is held either way, but an unverified rig is reported: its
+		// park state could not be read, so the tick log has to say the rig was
+		// held for lack of a verdict, not that it is parked (gt-6d06g).
+		if blocked, why := rigStatus(townRoot, name); blocked {
+			if why == sling.RigStatusUnverified {
+				read.Errors = append(read.Errors, fmt.Sprintf("%s: rig status unverified, not dispatching", name))
+			}
 			continue
 		}
 		if !hasBeadsDatabase(beads.ResolveBeadsDir(rigPath)) {
