@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/state"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -95,9 +96,7 @@ func detectRigFromPath(townRoot, absPath string) string {
 
 	candidateRig := parts[0]
 
-	switch candidateRig {
-	// mayor/ and deacon/ are kept town-level directories; they hold no rig.
-	case "mayor", "deacon", ".beads", ".claude", ".git", "plugins":
+	if config.IsTownLevelDir(candidateRig) {
 		return ""
 	}
 
