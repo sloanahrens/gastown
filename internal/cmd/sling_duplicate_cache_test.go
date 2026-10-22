@@ -711,3 +711,49 @@ func TestCachedDepsOfRecordsAMergedMergeBlocksTarget(t *testing.T) {
 		t.Fatalf("cachedDepsOf = %+v, want %+v", got, want)
 	}
 }
+
+// A blocker in a custom status such as staged_ready is open work, not a closed
+// bead the pool dropped: the cached read keeps the edge, as a fresh read does
+// (gt-rhr2t).
+func TestOpenBlockersInKeepsACustomStatusBlockerUnresolved(t *testing.T) {
+	t.Parallel()
+	deps := []beads.IssueDep{{ID: "gt-staged", DependencyType: "blocks"}, {ID: "gt-warned", DependencyType: "blocks"}}
+	status := map[string]*beads.Issue{
+		"gt-staged": {ID: "gt-staged", Status: "staged_ready"},
+		"gt-warned": {ID: "gt-warned", Status: "staged_warnings"},
+	}
+	got := openBlockersIn(deps, status)
+	if want := []string{"gt-staged", "gt-warned"}; !slices.Equal(got, want) {
+		t.Fatalf("openBlockersIn = %v, want %v", got, want)
+	}
+}
+
+func TestDuplicateDetailCacheKeepsACustomStatusBlockerOpen(t *testing.T) {
+	t.Parallel()
+	db := duplicateGuardFixture(t)
+	db.Seed(
+		beads.Issue{ID: "gt-s1", Type: "task", Title: "staged blocker", Status: "staged_ready", Priority: 3,
+			Description: "Nothing shared.", CreatedAt: "2026-10-15T09:09:00Z", UpdatedAt: "2026-10-18T09:09:00Z"},
+		beads.Issue{ID: "gt-s2", Type: "task", Title: "staged with warnings", Status: "staged_warnings", Priority: 3,
+			Description: "Nothing shared.", CreatedAt: "2026-10-15T09:10:00Z", UpdatedAt: "2026-10-18T09:10:00Z"},
+	)
+	for _, dep := range [][2]string{{"gt-p1", "gt-s1"}, {"gt-p2", "gt-s2"}} {
+		if err := db.AddDependency(dep[0], dep[1]); err != nil {
+			t.Fatalf("AddDependency %v: %v", dep, err)
+		}
+	}
+	path := filepath.Join(t.TempDir(), "cache.json")
+	fresh := tickOver(t, newCountingStore(listLikeBD{Client: db}), path, "daemon-1", 40)
+	cached := tickOver(t, newCountingStore(listLikeBD{Client: db}), path, "daemon-1", 40)
+	if cached.cached == 0 {
+		t.Fatalf("the second tick answered nothing from the cache; counts = %d fetched, %d cached", cached.fetched, cached.cached)
+	}
+	for id, want := range map[string][]string{"gt-p1": {"gt-s1"}, "gt-p2": {"gt-s2"}} {
+		if got := openBlockersOf(t, fresh.pool, id); !slices.Equal(got, want) {
+			t.Errorf("%s fresh open blockers = %v, want %v", id, got, want)
+		}
+		if got := openBlockersOf(t, cached.pool, id); !slices.Equal(got, want) {
+			t.Errorf("%s cached open blockers = %v, want %v: the cache read the custom-status blocker as resolved", id, got, want)
+		}
+	}
+}
