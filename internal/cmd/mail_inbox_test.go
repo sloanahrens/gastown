@@ -122,3 +122,39 @@ func TestMailReadIndexMatchesUnreadListing(t *testing.T) {
 		t.Fatal("index 2 with one unread message: want out-of-range error")
 	}
 }
+
+// The flag variable is process-wide, so the test cannot run in parallel.
+//
+//testpolicy:allow parallel — mailReadCmd's flag variables are process-wide
+func TestMailReadUnreadFlagWiring(t *testing.T) {
+	t.Cleanup(func() {
+		_ = mailReadCmd.Flags().Set("unread", "false")
+	})
+
+	f := mailReadCmd.Flags().Lookup("unread")
+	if f == nil {
+		t.Fatal("gt mail read has no --unread flag")
+	}
+	if f.Shorthand != "u" {
+		t.Fatalf("--unread shorthand = %q, want %q", f.Shorthand, "u")
+	}
+
+	if err := mailReadCmd.ParseFlags([]string{"1"}); err != nil {
+		t.Fatalf("ParseFlags(default) returned error: %v", err)
+	}
+	if mailReadUnread {
+		t.Fatal("mailReadUnread without --unread = true, want false")
+	}
+
+	for _, args := range [][]string{{"--unread", "1"}, {"-u", "1"}} {
+		if err := mailReadCmd.ParseFlags(args); err != nil {
+			t.Fatalf("ParseFlags(%v) returned error: %v", args, err)
+		}
+		if !mailReadUnread {
+			t.Fatalf("ParseFlags(%v) left mailReadUnread false, want true", args)
+		}
+		if err := mailReadCmd.Flags().Set("unread", "false"); err != nil {
+			t.Fatalf("resetting --unread: %v", err)
+		}
+	}
+}
