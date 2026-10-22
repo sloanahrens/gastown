@@ -118,6 +118,31 @@ func TestDoltServerPatrolCheck_DownPatrolEnabled(t *testing.T) {
 	}
 }
 
+// TestDoltServerPatrolCheck_NoEndpointPatrolEnabledIsNotOK: a town with no Dolt
+// endpoint gets no daemon-managed Dolt, so an enabled patrol is no cover.
+func TestDoltServerPatrolCheck_NoEndpointPatrolEnabledIsNotOK(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeDaemonConfig(t, townRoot, `{"dolt_server":{"enabled":true}}`)
+
+	check := NewDoltServerPatrolCheck()
+	check.dial = func(addr string) error {
+		t.Errorf("dialed %q, want no dial for a town with no endpoint", addr)
+		return errors.New("connection refused")
+	}
+	result := check.Run(&CheckContext{TownRoot: townRoot})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("expected WARNING for a town with no Dolt endpoint, got %s (%s)", result.Status, result.Message)
+	}
+	if strings.Contains(result.Message, "daemon will detect and recover") {
+		t.Errorf("message %q reports the patrol as cover", result.Message)
+	}
+	if !strings.Contains(result.FixHint, "gt config set dolt.port") {
+		t.Errorf("FixHint %q must name gt config set dolt.port", result.FixHint)
+	}
+}
+
 func TestDoltServerPatrolCheck_DownNoConfig(t *testing.T) {
 	t.Parallel()
 	townRoot := endpointTown(t)

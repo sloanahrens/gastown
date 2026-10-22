@@ -46,6 +46,19 @@ func NewDoltServerPatrolCheck() *DoltServerPatrolCheck {
 // it. It is a no-op (OK) when Dolt is reachable, and does not alarm when the
 // dolt_server patrol is already enabled (the daemon will detect and recover).
 func (c *DoltServerPatrolCheck) Run(ctx *CheckContext) *CheckResult {
+	// A town with no Dolt endpoint has nothing for the daemon to manage (it
+	// leaves its Dolt server nil), so the patrol is no cover and there is no
+	// address worth dialing.
+	if ep, _ := config.ResolveDoltEndpoint(ctx.TownRoot); ep.Port <= 0 {
+		return &CheckResult{
+			Name:     c.Name(),
+			Status:   StatusWarning,
+			Message:  "town has no Dolt endpoint; the daemon will not manage Dolt",
+			FixHint:  "Run 'gt config set dolt.port <port>' to name the Dolt server's port",
+			Category: c.CheckCategory,
+		}
+	}
+
 	// If Dolt is reachable, there is nothing to surface.
 	if c.isDoltReachable(ctx.TownRoot) {
 		return &CheckResult{
