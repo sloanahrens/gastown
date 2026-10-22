@@ -76,14 +76,16 @@ func BuildCommand(cmd Command) (string, error) {
 }
 
 // frontmatterLine renders one "key: value" frontmatter line. A value YAML reads
-// as a single key is written bare, so commands whose frontmatter already parsed
-// keep their bytes. Any other value is single-quoted, because a bare scalar such
-// as done's argument-hint ("[--status ...] [--target <branch>]") is a YAML error.
+// as a string or a bracketed sequence under a single key is written bare, so
+// commands whose frontmatter already parsed keep their bytes. Any other value is
+// single-quoted: done's argument-hint ("[--status ...] [--target <branch>]") is a
+// YAML error bare, and a scalar such as true or 42 would parse as another type.
 func frontmatterLine(key, value string) string {
 	bare := key + ": " + value
 	var parsed map[string]any
 	if err := yaml.Unmarshal([]byte(bare), &parsed); err == nil && len(parsed) == 1 {
-		if _, ok := parsed[key]; ok {
+		switch parsed[key].(type) {
+		case string, []any:
 			return bare + "\n"
 		}
 	}
