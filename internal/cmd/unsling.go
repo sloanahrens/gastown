@@ -132,20 +132,9 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	// Without this, gt unsling can't find or clear these beads, even though
 	// gt mol status / gt hook (display) can see them. (gt-dtq7)
 	if hookedBeadID == "" && townRoot != "" {
-		townB := beads.New(filepath.Join(townRoot, ".beads"))
-		// Search with the exact agent ID
-		hookedBeadID, err = firstActiveWorkID(townB, agentID)
+		hookedBeadID, err = firstTownActiveWorkID(openBeads(filepath.Join(townRoot, ".beads")), agentID)
 		if err != nil {
-			return fmt.Errorf("looking up town work hooked by %s: %w", agentID, err)
-		}
-		if hookedBeadID == "" {
-			// Also search with normalized identity (mail beads use normalized form)
-			if normalizedID := mailNormalizedAgentID(agentID); normalizedID != agentID {
-				hookedBeadID, err = firstActiveWorkID(townB, normalizedID)
-				if err != nil {
-					return fmt.Errorf("looking up town work hooked by %s: %w", normalizedID, err)
-				}
-			}
+			return err
 		}
 	}
 
@@ -153,7 +142,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 		// Nothing was selected above, but the selection and this sweep are separate
 		// queries: a bead that appears between them still leaves work held by this
 		// agent. Reopen whatever the sweep finds so gt hook and gt unsling agree.
-		cleaned, err := cleanStaleHookedBeads(cmd, b, agentID, targetBeadID, townRoot, beadsPath, dryRun)
+		cleaned, err := cleanStaleHookedBeads(cmd, b, openBeads, agentID, targetBeadID, townRoot, beadsPath, dryRun)
 		if err != nil {
 			return err
 		}
@@ -233,8 +222,9 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 }
 
 // firstActiveWorkID returns the id of the bead gt unsling clears for assignee:
-// the same hooked-then-in_progress pick gt hook shows, or "" when there is none
-// when there is none. A failed lookup is an error, never an empty answer.
+// the same hooked-then-in_progress pick gt hook shows, or "" when there is none.
+// A failed lookup is an error, never an empty answer: gt unsling aborts on it
+// rather than reporting "nothing hooked" while the agent still holds work.
 func firstActiveWorkID(b beads.Client, assignee string) (string, error) {
 	active, err := listAssignedActiveWork(b, assignee)
 	if err != nil {
@@ -246,9 +236,40 @@ func firstActiveWorkID(b beads.Client, assignee string) (string, error) {
 	return active[0].ID, nil
 }
 
+// beadsOpener opens the beads database at a path. cleanStaleHookedBeads takes
+// one so tests can put a stub behind the town and per-bead databases it reaches.
+type beadsOpener func(path string) beads.Client
+
+// openBeads is the beadsOpener unsling runs with.
+func openBeads(path string) beads.Client { return beads.New(path) }
+
+// firstTownActiveWorkID is firstActiveWorkID against the town database, which
+// holds the hq-* beads hooked to rig-level agents. It tries the exact agent ID,
+// then the normalized identity mail beads use.
+func firstTownActiveWorkID(townB beads.Client, agentID string) (string, error) {
+	id, err := firstActiveWorkID(townB, agentID)
+	if err != nil {
+		return "", fmt.Errorf("looking up town work hooked by %s: %w", agentID, err)
+	}
+	if id != "" {
+		return id, nil
+	}
+	normalizedID := mailNormalizedAgentID(agentID)
+	if normalizedID == agentID {
+		return "", nil
+	}
+	id, err = firstActiveWorkID(townB, normalizedID)
+	if err != nil {
+		return "", fmt.Errorf("looking up town work hooked by %s: %w", normalizedID, err)
+	}
+	return id, nil
+}
+
 // reopenBead returns a hooked or in_progress bead to "open" and clears its assignee.
 // Force is needed because a plain update refuses to clear the assignee of an
-// in_progress bead, and unsling is the explicit release of that claim.
+// in_progress bead, and unsling is the explicit release of that claim. Before
+// gt unsling selected in_progress beads (gt-qbmzu) only hooked ones reached
+// this, so the refusal never showed.
 func reopenBead(b beads.Client, id string) error {
 	openStatus := "open"
 	emptyAssignee := ""
@@ -266,7 +287,7 @@ func reopenBead(b beads.Client, id string) error {
 // selection missed is not left assigned to the agent. Returns true if any bead
 // matched. A failed lookup is returned as an error; a failed update is only
 // warned about on stderr.
-func cleanStaleHookedBeads(cmd *cobra.Command, b beads.Client, agentID, targetBeadID, townRoot, beadsPath string, dryRun bool) (bool, error) {
+func cleanStaleHookedBeads(cmd *cobra.Command, b beads.Client, open beadsOpener, agentID, targetBeadID, townRoot, beadsPath string, dryRun bool) (bool, error) {
 	// Collect stale beads from local rig beads
 	staleBeads, err := listAssignedActiveWorkAcrossStatuses(b, agentID)
 	if err != nil {
@@ -279,7 +300,7 @@ func cleanStaleHookedBeads(cmd *cobra.Command, b beads.Client, agentID, targetBe
 	if townRoot != "" {
 		townBeadsPath := filepath.Join(townRoot, ".beads")
 		if townBeadsPath != beadsPath {
-			townB := beads.New(townBeadsPath)
+			townB := open(townBeadsPath)
 			// Search with exact agent ID
 			townStale, err := listAssignedActiveWorkAcrossStatuses(townB, agentID)
 			if err != nil {
@@ -331,7 +352,7 @@ func cleanStaleHookedBeads(cmd *cobra.Command, b beads.Client, agentID, targetBe
 		stalePath := beads.ResolveHookDir(townRoot, sb.ID, beadsPath)
 		staleB := b
 		if stalePath != beadsPath {
-			staleB = beads.New(stalePath)
+			staleB = open(stalePath)
 		}
 
 		if err := reopenBead(staleB, sb.ID); err != nil {

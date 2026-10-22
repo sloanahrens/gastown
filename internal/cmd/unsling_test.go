@@ -89,10 +89,12 @@ type brokenStore struct {
 	beads.Client
 	listErr   error
 	updateErr error
+	// failAssignee limits listErr to lookups for that assignee; empty fails all.
+	failAssignee string
 }
 
 func (s brokenStore) ListAssignedIssueStatuses(assignee string, statuses ...beads.IssueStatus) ([]*beads.Issue, error) {
-	if s.listErr != nil {
+	if s.listErr != nil && (s.failAssignee == "" || s.failAssignee == assignee) {
 		return nil, s.listErr
 	}
 	return s.Client.ListAssignedIssueStatuses(assignee, statuses...)
@@ -117,7 +119,7 @@ func TestUnslingLookupErrorsAreReturned(t *testing.T) {
 		t.Errorf("firstActiveWorkID = (%q, %v), want (\"\", %v)", id, err, boom)
 	}
 
-	cleaned, err := cleanStaleHookedBeads(&cobra.Command{}, store, agent, "", "", "", false)
+	cleaned, err := cleanStaleHookedBeads(&cobra.Command{}, store, openBeads, agent, "", "", "", false)
 	if !errors.Is(err, boom) || cleaned {
 		t.Errorf("cleanStaleHookedBeads = (%v, %v), want (false, %v)", cleaned, err, boom)
 	}
@@ -137,21 +139,95 @@ func seedAssigned(t *testing.T, store beads.Client, assignee string, status bead
 	return is
 }
 
+// forceRecorder remembers the options of the last Update.
+type forceRecorder struct {
+	beads.Client
+	last beads.UpdateOptions
+}
+
+func (s *forceRecorder) Update(id string, opts beads.UpdateOptions) error {
+	s.last = opts
+	return s.Client.Update(id, opts)
+}
+
+// The in_progress case is the one a plain update refuses (bd will not clear the
+// assignee of an in_progress bead), so reopenBead must force it and the bead
+// must end up open.
 func TestReopenBeadClearsStatusAndAssignee(t *testing.T) {
 	t.Parallel()
-	store := beadsfake.New()
-	is := seedAssigned(t, store, "gastown/polecats/p1", beads.IssueStatusHooked)
+	for _, status := range []beads.IssueStatus{beads.IssueStatusHooked, beads.StatusInProgress} {
+		t.Run(string(status), func(t *testing.T) {
+			t.Parallel()
+			store := &forceRecorder{Client: beadsfake.New()}
+			is := seedAssigned(t, store, "gastown/polecats/p1", status)
 
-	if err := reopenBead(store, is.ID); err != nil {
-		t.Fatalf("reopenBead: %v", err)
+			if err := reopenBead(store, is.ID); err != nil {
+				t.Fatalf("reopenBead: %v", err)
+			}
+			if !store.last.Force {
+				t.Errorf("reopenBead updated without Force; a plain update cannot clear an in_progress claim")
+			}
+			got, err := store.Show(is.ID)
+			if err != nil {
+				t.Fatalf("Show: %v", err)
+			}
+			if got.Status != string(beads.StatusOpen) || got.Assignee != "" {
+				t.Errorf("after reopenBead status=%q assignee=%q, want open and unassigned", got.Status, got.Assignee)
+			}
+		})
 	}
-	got, err := store.Show(is.ID)
-	if err != nil {
-		t.Fatalf("Show: %v", err)
-	}
-	if got.Status != string(beads.StatusOpen) || got.Assignee != "" {
-		t.Errorf("after reopenBead status=%q assignee=%q, want open and unassigned", got.Status, got.Assignee)
-	}
+}
+
+// The town database is searched under the exact agent ID, then under the
+// normalized identity mail beads use; a lookup failure under either is returned.
+func TestFirstTownActiveWorkID(t *testing.T) {
+	t.Parallel()
+	const agent = "gastown/polecats/p1"
+	const normalized = "gastown/p1"
+	boom := errors.New("bd list: connection refused")
+
+	t.Run("exact id", func(t *testing.T) {
+		t.Parallel()
+		store := beadsfake.New()
+		is := seedAssigned(t, store, agent, beads.IssueStatusHooked)
+		if got, err := firstTownActiveWorkID(store, agent); err != nil || got != is.ID {
+			t.Errorf("= (%q, %v), want (%q, nil)", got, err, is.ID)
+		}
+	})
+
+	t.Run("normalized id", func(t *testing.T) {
+		t.Parallel()
+		store := beadsfake.New()
+		is := seedAssigned(t, store, normalized, beads.StatusInProgress)
+		if got, err := firstTownActiveWorkID(store, agent); err != nil || got != is.ID {
+			t.Errorf("= (%q, %v), want (%q, nil)", got, err, is.ID)
+		}
+	})
+
+	t.Run("nothing hooked", func(t *testing.T) {
+		t.Parallel()
+		if got, err := firstTownActiveWorkID(beadsfake.New(), agent); err != nil || got != "" {
+			t.Errorf("= (%q, %v), want (\"\", nil)", got, err)
+		}
+	})
+
+	t.Run("exact lookup fails", func(t *testing.T) {
+		t.Parallel()
+		store := brokenStore{Client: beadsfake.New(), listErr: boom, failAssignee: agent}
+		got, err := firstTownActiveWorkID(store, agent)
+		if !errors.Is(err, boom) || got != "" || !strings.Contains(err.Error(), agent) {
+			t.Errorf("= (%q, %v), want (\"\", an error wrapping %v naming %s)", got, err, boom, agent)
+		}
+	})
+
+	t.Run("normalized lookup fails", func(t *testing.T) {
+		t.Parallel()
+		store := brokenStore{Client: beadsfake.New(), listErr: boom, failAssignee: normalized}
+		got, err := firstTownActiveWorkID(store, agent)
+		if !errors.Is(err, boom) || got != "" || !strings.Contains(err.Error(), normalized) {
+			t.Errorf("= (%q, %v), want (\"\", an error wrapping %v naming %s)", got, err, boom, normalized)
+		}
+	})
 }
 
 func TestCleanStaleHookedBeads(t *testing.T) {
@@ -165,7 +241,7 @@ func TestCleanStaleHookedBeads(t *testing.T) {
 		running := seedAssigned(t, store, agent, beads.StatusInProgress)
 		other := seedAssigned(t, store, "gastown/polecats/p2", beads.IssueStatusHooked)
 
-		cleaned, err := cleanStaleHookedBeads(&cobra.Command{}, store, agent, "", "", "", false)
+		cleaned, err := cleanStaleHookedBeads(&cobra.Command{}, store, openBeads, agent, "", "", "", false)
 		if err != nil || !cleaned {
 			t.Fatalf("cleanStaleHookedBeads = (%v, %v), want (true, nil)", cleaned, err)
 		}
@@ -185,7 +261,7 @@ func TestCleanStaleHookedBeads(t *testing.T) {
 		want := seedAssigned(t, store, agent, beads.IssueStatusHooked)
 		keep := seedAssigned(t, store, agent, beads.IssueStatusHooked)
 
-		cleaned, err := cleanStaleHookedBeads(&cobra.Command{}, store, agent, want.ID, "", "", false)
+		cleaned, err := cleanStaleHookedBeads(&cobra.Command{}, store, openBeads, agent, want.ID, "", "", false)
 		if err != nil || !cleaned {
 			t.Fatalf("cleanStaleHookedBeads = (%v, %v), want (true, nil)", cleaned, err)
 		}
@@ -196,7 +272,7 @@ func TestCleanStaleHookedBeads(t *testing.T) {
 			t.Errorf("untargeted bead status=%q, want it left hooked", got.Status)
 		}
 
-		cleaned, err = cleanStaleHookedBeads(&cobra.Command{}, store, agent, "gt-nosuch", "", "", false)
+		cleaned, err = cleanStaleHookedBeads(&cobra.Command{}, store, openBeads, agent, "gt-nosuch", "", "", false)
 		if err != nil || cleaned {
 			t.Errorf("unmatched target = (%v, %v), want (false, nil)", cleaned, err)
 		}
@@ -207,7 +283,7 @@ func TestCleanStaleHookedBeads(t *testing.T) {
 		store := beadsfake.New()
 		is := seedAssigned(t, store, agent, beads.IssueStatusHooked)
 
-		cleaned, err := cleanStaleHookedBeads(&cobra.Command{}, store, agent, "", "", "", true)
+		cleaned, err := cleanStaleHookedBeads(&cobra.Command{}, store, openBeads, agent, "", "", "", true)
 		if err != nil || !cleaned {
 			t.Fatalf("cleanStaleHookedBeads = (%v, %v), want (true, nil)", cleaned, err)
 		}
@@ -218,9 +294,46 @@ func TestCleanStaleHookedBeads(t *testing.T) {
 
 	t.Run("nothing assigned", func(t *testing.T) {
 		t.Parallel()
-		cleaned, err := cleanStaleHookedBeads(&cobra.Command{}, beadsfake.New(), agent, "", "", "", false)
+		cleaned, err := cleanStaleHookedBeads(&cobra.Command{}, beadsfake.New(), openBeads, agent, "", "", "", false)
 		if err != nil || cleaned {
 			t.Errorf("cleanStaleHookedBeads = (%v, %v), want (false, nil)", cleaned, err)
+		}
+	})
+
+	t.Run("sweeps the town database and returns its lookup failures", func(t *testing.T) {
+		t.Parallel()
+		const normalized = "gastown/p1"
+		boom := errors.New("bd list: connection refused")
+		townRoot := t.TempDir()
+		const rigPath = "rig-beads"
+
+		for _, tc := range []struct {
+			name         string
+			failAssignee string
+			wantErr      bool
+		}{
+			{"exact id fails", agent, true},
+			{"normalized id fails", normalized, true},
+			{"town answers", "", false},
+		} {
+			town := beadsfake.New()
+			seedAssigned(t, town, normalized, beads.IssueStatusHooked)
+			store := brokenStore{Client: town}
+			if tc.wantErr {
+				store.listErr, store.failAssignee = boom, tc.failAssignee
+			}
+			openStub := func(string) beads.Client { return store }
+			cleaned, err := cleanStaleHookedBeads(&cobra.Command{}, beadsfake.New(), openStub, agent, "", townRoot, rigPath, false)
+
+			if tc.wantErr {
+				if !errors.Is(err, boom) || cleaned {
+					t.Errorf("%s: = (%v, %v), want (false, an error wrapping %v)", tc.name, cleaned, err, boom)
+				}
+				continue
+			}
+			if err != nil || !cleaned {
+				t.Errorf("%s: = (%v, %v), want (true, nil)", tc.name, cleaned, err)
+			}
 		}
 	})
 
@@ -234,7 +347,7 @@ func TestCleanStaleHookedBeads(t *testing.T) {
 		var stderr bytes.Buffer
 		cmd := &cobra.Command{}
 		cmd.SetErr(&stderr)
-		cleaned, err := cleanStaleHookedBeads(cmd, store, agent, "", "", "", false)
+		cleaned, err := cleanStaleHookedBeads(cmd, store, openBeads, agent, "", "", "", false)
 		if err != nil || !cleaned {
 			t.Fatalf("cleanStaleHookedBeads = (%v, %v), want (true, nil)", cleaned, err)
 		}
