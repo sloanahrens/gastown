@@ -531,3 +531,18 @@ func TestShowAllListsAClientThroughListByIDs(t *testing.T) {
 		t.Errorf("showAll over a Client = %v, want both held beads, whatever their status", got)
 	}
 }
+
+// An unset priority reads "0" and is not a set field, so it adds nothing to the
+// count that picks the bead bd list is checked against.
+func TestLabelFieldsSetLeavesUnsetPriorityOut(t *testing.T) {
+	t.Parallel()
+	if got := labelFieldsSet(&beads.Issue{Status: "open"}); got != 1 {
+		t.Errorf("labelFieldsSet(status only) = %d, want 1", got)
+	}
+	if got := labelFieldsSet(&beads.Issue{Status: "open", Priority: 2}); got != 2 {
+		t.Errorf("labelFieldsSet(status and priority) = %d, want 2", got)
+	}
+	if got := labelFieldsSet(&beads.Issue{}); got != 0 {
+		t.Errorf("labelFieldsSet(empty) = %d, want 0", got)
+	}
+}

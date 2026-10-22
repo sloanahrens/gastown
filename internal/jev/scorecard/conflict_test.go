@@ -700,3 +700,42 @@ func TestRejectedAfterNeedsMoreThanAncestry(t *testing.T) {
 		t.Errorf("label = %+v, want %+v", got, want)
 	}
 }
+
+// A rejection line that names no target tip counts as a rejection but cannot
+// attribute a landing, and the report's context says how many were so.
+func TestConflictContextCountsRejectionsWithoutAOwnTip(t *testing.T) {
+	t.Parallel()
+	const noTipLine = "2026/10/21 10:02:00 landing_worker: [land] gt-b: rejected (conflict): merging conflicts in 1 file"
+	town := t.TempDir()
+	writeDaemonLog(t, town, mergeLine("gt-b", "1a2b3c", "aaaa111", "cand1")+landingWorkerConflictLine+"\n"+noTipLine+"\n")
+	a := newConflictAdapter(town, nil)
+	if err := a.loadRejections(); err != nil {
+		t.Fatal(err)
+	}
+	got := a.Context()
+	if len(got) != 1 || !strings.Contains(got[0], "1 of 2 conflict rejection(s)") {
+		t.Errorf("Context = %q, want one line naming 1 of 2 rejections", got)
+	}
+
+	// A rejection with no tip and no earlier merge line to borrow one from is
+	// the worst case: it reaches neither tip list, yet is reported.
+	town = t.TempDir()
+	writeDaemonLog(t, town, landingWorkerConflictLine+"\n"+noTipLine+"\n")
+	a = newConflictAdapter(town, nil)
+	if err := a.loadRejections(); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Context(); len(got) != 1 || !strings.Contains(got[0], "1 of 2 conflict rejection(s)") {
+		t.Errorf("Context = %q, want the tipless rejection counted too", got)
+	}
+
+	town = t.TempDir()
+	writeDaemonLog(t, town, landingWorkerConflictLine+"\n")
+	a = newConflictAdapter(town, nil)
+	if err := a.loadRejections(); err != nil {
+		t.Fatal(err)
+	}
+	if got := a.Context(); got != nil {
+		t.Errorf("Context = %q, want none when every rejection names its tip", got)
+	}
+}

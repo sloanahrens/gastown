@@ -165,10 +165,13 @@ func labelFields(i *beads.Issue) [6][2]string {
 	}
 }
 
+// labelFieldsSet counts the labeling fields i has set. Priority is formatted as
+// a number, so an unset one reads "0" and would count; it counts only when it is
+// not zero, or every bead would score one for a field it may not have.
 func labelFieldsSet(i *beads.Issue) int {
 	n := 0
 	for _, f := range labelFields(i) {
-		if f[1] != "" {
+		if f[1] != "" && (f[0] != "priority" || i.Priority != 0) {
 			n++
 		}
 	}
