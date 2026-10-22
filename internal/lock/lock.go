@@ -395,7 +395,7 @@ func FindAllLocks(root string) (map[string]*LockInfo, error) {
 // has exited (which is normal - Claude runs as a child in tmux).
 func CleanStaleLocks(root string) (int, error) {
 	return cleanStaleLocks(root,
-		func() []string {
+		func() ([]string, error) {
 			return activeTmuxSessions(realOutput, tmux.GetDefaultSocket())
 		},
 		liveProcess)
@@ -403,14 +403,19 @@ func CleanStaleLocks(root string) (int, error) {
 
 // cleanStaleLocks is CleanStaleLocks asking sessions for the active tmux
 // sessions and table for the process table, once the lock scan has succeeded.
-func cleanStaleLocks(root string, sessions func() []string, table processTable) (int, error) {
+// A failed session listing reclaims nothing: a session missing from a listing
+// that failed proves nothing about the worker.
+func cleanStaleLocks(root string, sessions func() ([]string, error), table processTable) (int, error) {
 	locks, err := FindAllLocks(root)
 	if err != nil {
 		return 0, err
 	}
 
 	// Get active tmux sessions to verify locks
-	activeSessions := sessions()
+	activeSessions, err := sessions()
+	if err != nil {
+		return 0, err
+	}
 	sessionSet := make(map[string]bool)
 	for _, s := range activeSessions {
 		sessionSet[s] = true
@@ -451,8 +456,9 @@ func cleanStaleLocks(root string, sessions func() []string, table processTable) 
 // activeTmuxSessions returns a list of active tmux session identifiers on the
 // tmux server at socket ("" for tmux's default), listing them through run.
 // Returns both session names (gt-foo-bar) and session IDs in various formats
-// (%N, $N) to handle different lock file formats.
-func activeTmuxSessions(run outputFunc, socket string) []string {
+// (%N, $N) to handle different lock file formats. A server that is not
+// running has no sessions; any other failure to list is an error.
+func activeTmuxSessions(run outputFunc, socket string) ([]string, error) {
 	// Get both session name and ID to handle different lock formats
 	// Format: "session_name:session_id" e.g., "gt-beads-crew-dave:$55"
 	// Use the town's tmux socket so we query the correct server.
@@ -466,7 +472,11 @@ func activeTmuxSessions(run outputFunc, socket string) []string {
 	args = append(args, "list-sessions", "-F", "#{session_name}:#{session_id}")
 	output, err := run("tmux", args...)
 	if err != nil {
-		return nil // tmux not running or not installed
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && tmux.IsNoServerStderr(string(exitErr.Stderr)) {
+			return nil, nil // no tmux server running: no sessions
+		}
+		return nil, fmt.Errorf("tmux list-sessions: %w", err)
 	}
 
 	var sessions []string
@@ -488,7 +498,7 @@ func activeTmuxSessions(run outputFunc, socket string) []string {
 			}
 		}
 	}
-	return sessions
+	return sessions, nil
 }
 
 // splitOnColon splits on the first colon only (session names shouldn't have colons)

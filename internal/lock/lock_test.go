@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -674,7 +675,7 @@ func TestCleanStaleLocks(t *testing.T) {
 
 	// No active tmux sessions; the live worker is the one the table holds.
 	table := scriptedProcesses{os.Getpid(): liveLock.Start}
-	cleaned, err := cleanStaleLocks(tmpDir, func() []string { return nil }, table.read)
+	cleaned, err := cleanStaleLocks(tmpDir, func() ([]string, error) { return nil, nil }, table.read)
 	if err != nil {
 		t.Fatalf("CleanStaleLocks() error = %v", err)
 	}
@@ -716,12 +717,41 @@ func TestCleanStaleLocksKeepsLockWithLiveSession(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cleaned, err := cleanStaleLocks(tmpDir, func() []string { return []string{"gt-x", "$7"} }, scriptedProcesses{}.read)
+	cleaned, err := cleanStaleLocks(tmpDir, func() ([]string, error) { return []string{"gt-x", "$7"}, nil }, scriptedProcesses{}.read)
 	if err != nil || cleaned != 0 {
 		t.Fatalf("cleanStaleLocks = %d, %v; want 0, nil", cleaned, err)
 	}
 	if _, err := os.Stat(filepath.Join(runtimeDir, "agent.lock")); err != nil {
 		t.Errorf("lock with a live session was removed: %v", err)
+	}
+}
+
+// TestCleanStaleLocksKeepsLockWhenTmuxListingFails: a stale-looking lock is
+// only reclaimable once the session listing shows its session gone. When the
+// listing itself fails, the lock stays and the failure is returned.
+func TestCleanStaleLocksKeepsLockWhenTmuxListingFails(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	runtimeDir := filepath.Join(tmpDir, "worker", ".runtime")
+	if err := os.MkdirAll(runtimeDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	data, _ := json.Marshal(LockInfo{PID: 999999999, AcquiredAt: testEpoch, SessionID: "$7"})
+	lockPath := filepath.Join(runtimeDir, "agent.lock")
+	if err := os.WriteFile(lockPath, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	listErr := errors.New("tmux list-sessions: permission denied")
+	cleaned, err := cleanStaleLocks(tmpDir, func() ([]string, error) { return nil, listErr }, scriptedProcesses{}.read)
+	if !errors.Is(err, listErr) {
+		t.Errorf("cleanStaleLocks() error = %v, want it to wrap %v", err, listErr)
+	}
+	if cleaned != 0 {
+		t.Errorf("cleanStaleLocks() cleaned %d, want 0", cleaned)
+	}
+	if _, statErr := os.Stat(lockPath); statErr != nil {
+		t.Errorf("lock removed although its session could not be listed: %v", statErr)
 	}
 }
 
@@ -740,7 +770,10 @@ func (f *fakeTmux) run(name string, args ...string) ([]byte, error) {
 func TestGetActiveTmuxSessions(t *testing.T) {
 	t.Parallel()
 	f := &fakeTmux{out: "session1:$1\nsession2:$2\n"}
-	sessions := activeTmuxSessions(f.run, "")
+	sessions, err := activeTmuxSessions(f.run, "")
+	if err != nil {
+		t.Fatalf("activeTmuxSessions() error = %v", err)
+	}
 
 	// Should contain session names and IDs, in both $N and %N forms.
 	want := []string{"session1", "$1", "%1", "session2", "$2", "%2"}
@@ -764,13 +797,25 @@ func TestGetActiveTmuxSessionsUsesSocket(t *testing.T) {
 	}
 }
 
-// TestGetActiveTmuxSessionsNoServer: tmux failing (no server, not installed)
+// TestGetActiveTmuxSessionsNoServer: tmux reporting that no server is running
 // means no sessions, not an error.
 func TestGetActiveTmuxSessionsNoServer(t *testing.T) {
 	t.Parallel()
-	f := &fakeTmux{err: errors.New("exit status 1")}
-	if sessions := activeTmuxSessions(f.run, "gt-x"); sessions != nil {
-		t.Errorf("sessions = %v, want nil", sessions)
+	f := &fakeTmux{err: &exec.ExitError{Stderr: []byte("no server running on /tmp/tmux-501/gt-x\n")}}
+	sessions, err := activeTmuxSessions(f.run, "gt-x")
+	if err != nil || sessions != nil {
+		t.Errorf("activeTmuxSessions() = %v, %v; want nil, nil", sessions, err)
+	}
+}
+
+// TestGetActiveTmuxSessionsListingFails: a listing that fails for any reason
+// other than no server is an error, not an empty session list.
+func TestGetActiveTmuxSessionsListingFails(t *testing.T) {
+	t.Parallel()
+	f := &fakeTmux{err: &exec.ExitError{Stderr: []byte("permission denied\n")}}
+	sessions, err := activeTmuxSessions(f.run, "")
+	if err == nil || sessions != nil {
+		t.Errorf("activeTmuxSessions() = %v, %v; want nil and an error", sessions, err)
 	}
 }
 
@@ -780,8 +825,8 @@ func TestGetActiveTmuxSessionsNameOnly(t *testing.T) {
 	t.Parallel()
 	f := &fakeTmux{out: "solo\n\nother:%3\r\n"}
 	want := []string{"solo", "other", "%3"}
-	if got := activeTmuxSessions(f.run, ""); !reflect.DeepEqual(got, want) {
-		t.Errorf("sessions = %v, want %v", got, want)
+	if got, err := activeTmuxSessions(f.run, ""); err != nil || !reflect.DeepEqual(got, want) {
+		t.Errorf("sessions = %v, %v; want %v, nil", got, err, want)
 	}
 }
 
@@ -1060,7 +1105,7 @@ func TestCleanStaleLocksReportsLockItCannotRemove(t *testing.T) {
 	}
 	cleanablePath := writeStale("cleanable-worker")
 
-	cleaned, err := cleanStaleLocks(tmpDir, func() []string { return nil }, scriptedProcesses{}.read)
+	cleaned, err := cleanStaleLocks(tmpDir, func() ([]string, error) { return nil, nil }, scriptedProcesses{}.read)
 	if err == nil {
 		t.Fatal("cleanStaleLocks() = nil error, want an error for the lock it could not remove")
 	}
@@ -1096,7 +1141,7 @@ func TestStaleLockRemovalSparesLockRewrittenBeforeFlock(t *testing.T) {
 		remove func(t *testing.T, workerDir string, table processTable)
 	}{
 		{"sweep", func(t *testing.T, workerDir string, table processTable) {
-			cleaned, err := cleanStaleLocks(filepath.Dir(workerDir), func() []string { return nil }, table)
+			cleaned, err := cleanStaleLocks(filepath.Dir(workerDir), func() ([]string, error) { return nil, nil }, table)
 			if err != nil || cleaned != 0 {
 				t.Errorf("cleanStaleLocks = %d, %v; want 0, nil", cleaned, err)
 			}

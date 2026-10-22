@@ -8,9 +8,17 @@ import (
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
+// identitySessionLister is the tmux session listing the check cross-references
+// locks against.
+type identitySessionLister interface {
+	ListSessions() ([]string, error)
+	ListSessionIDs() (map[string]string, error)
+}
+
 // IdentityCollisionCheck checks for agent identity collisions and stale locks.
 type IdentityCollisionCheck struct {
 	BaseCheck
+	lister identitySessionLister // nil means use real tmux
 }
 
 // NewIdentityCollisionCheck creates a new identity collision check.
@@ -50,18 +58,28 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 	// Get active tmux sessions for cross-reference
 	// Build a set containing both session names AND session IDs
 	// because locks may store either format
-	t := tmux.NewTmux()
+	lister := c.lister
+	if lister == nil {
+		lister = tmux.NewTmux()
+	}
 	sessionSet := make(map[string]bool)
 
-	// Get session names
-	sessions, _ := t.ListSessions() // Returns session names
+	// Get session names. A failed listing leaves the set incomplete, so no
+	// lock can be called stale or orphaned from it.
+	sessions, err := lister.ListSessions() // Returns session names
+	if err != nil {
+		return identityListingUnknown(c.Name(), err)
+	}
 	for _, s := range sessions {
 		sessionSet[s] = true
 	}
 
 	// Also get session IDs to handle locks that store ID instead of name
 	// Lock files may contain session_id in formats like "%55" or "$55"
-	sessionIDs, _ := t.ListSessionIDs() // Returns map[name]id
+	sessionIDs, err := lister.ListSessionIDs() // Returns map[name]id
+	if err != nil {
+		return identityListingUnknown(c.Name(), err)
+	}
 	for _, id := range sessionIDs {
 		sessionSet[id] = true
 		// Also add alternate formats
@@ -151,6 +169,17 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	return result
+}
+
+// identityListingUnknown is the result when tmux cannot list its sessions: the
+// locks cannot be cross-referenced, so their state is unknown, not stale.
+func identityListingUnknown(name string, err error) *CheckResult {
+	return &CheckResult{
+		Name:    name,
+		Status:  StatusSkipped,
+		Message: fmt.Sprintf("lock state unknown: could not list tmux sessions: %v", err),
+		FixHint: "Check that tmux is running, then re-run 'gt doctor'",
+	}
 }
 
 func (c *IdentityCollisionCheck) Fix(ctx *CheckContext) error {
