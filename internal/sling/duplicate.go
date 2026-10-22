@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/style"
 )
 
@@ -318,8 +319,8 @@ func DecideDuplicates(candidate Duplicate, matches []DuplicateMatch) DuplicateDe
 		// One line, and the report's last: an automatic dispatcher logs only
 		// the last line of a failed sling, so it has to carry both the reason
 		// and the remediation or the dispatcher log is blank again (gt-fudap).
-		fmt.Fprintf(&b, "\nRefusing to sling %s: %d overlapping bead(s) share the test(s) above; re-sling with --force if this is genuinely distinct: gt sling %s <target> --force\n",
-			beadID, len(blocking), beadID)
+		fmt.Fprintf(&b, "\n%s; re-sling with --force if this is genuinely distinct: gt sling %s <target> --force\n",
+			dispatch.DuplicateRefusalClosing(beadID, len(blocking)), beadID)
 	} else {
 		fmt.Fprintf(&b, "%s %s overlaps %d existing bead(s), none of them in flight or next for the dispatcher.\n",
 			style.Warning.Render("⚠"), beadID, len(warning))

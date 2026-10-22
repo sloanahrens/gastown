@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 )
@@ -60,16 +61,31 @@ var rigUnavailableLine = regexp.MustCompile(
 	`(?:^|: )(` + regexp.QuoteMeta(RigUnavailableMarker) + `(?:(?:parked|docked) )?rig "(?:[^"\\]|\\.)*"(?::|$))`,
 )
 
-// duplicateRefusalLine matches the closing line of the duplicate-content refusal
-// (sling.DecideDuplicates). The report's first line leads with "✗" and gives no
-// count, so the closing line is the one an automatic dispatcher can find by its
-// text: "Refusing to sling <bead>: N overlapping bead(s) share the test(s) above;
-// re-sling with --force …". It carries no SlingRefusalMarker, so without this
-// match a scheduled run refused for overlapping content reads as a failed run
+// duplicateRefusalClosingFormat is the sentence the duplicate-content refusal
+// (sling.DecideDuplicates) closes its report with, up to where the remediation
+// begins: the bead refused, then the count of overlapping beads. The printer
+// builds the line through DuplicateRefusalClosing and duplicateRefusalLine is
+// derived from this same format, so rewording the sentence moves both and the
+// dispatcher cannot silently stop recognizing it (gt-ung1c).
+const duplicateRefusalClosingFormat = "Refusing to sling %s: %d overlapping bead(s) share the test(s) above"
+
+// DuplicateRefusalClosing is the sentence the duplicate-content refusal closes
+// its report with, for beadID refused over n overlapping beads. The caller
+// appends the remediation after a "; ".
+func DuplicateRefusalClosing(beadID string, n int) string {
+	return fmt.Sprintf(duplicateRefusalClosingFormat, beadID, n)
+}
+
+// duplicateRefusalLine matches the closing line of the duplicate-content refusal,
+// as DuplicateRefusalClosing writes it. The report's first line leads with "✗"
+// and gives no count, so the closing line is the one an automatic dispatcher can
+// find by its text. It carries no SlingRefusalMarker, so without this match a
+// scheduled run refused for overlapping content reads as a failed run
 // (gt-g1xiy). Only the blocking report prints this line: an overlap that only
-// warns proceeds and is not a refusal.
+// warns proceeds and is not a refusal. Like rigUnavailableLine, the sentence
+// must lead the line or follow a wrapper's ": ".
 var duplicateRefusalLine = regexp.MustCompile(
-	`(?:^|: )(Refusing to sling \S+: \d+ overlapping bead\(s\) share the test\(s\) above)`,
+	`(?:^|: )(` + strings.NewReplacer(`%s`, `\S+`, `%d`, `\d+`).Replace(regexp.QuoteMeta(duplicateRefusalClosingFormat)) + `)`,
 )
 
 // SlingRefusalLine extracts a refusal of any kind from a failed sling's output
