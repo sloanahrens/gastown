@@ -32,6 +32,9 @@ Examples:
 
 The bead's status changes from 'hooked' back to 'open'.
 
+Use --force only when the hooked bead's details cannot be read (for example,
+the bead was deleted).
+
 Related commands:
   gt sling <bead>    # Hook + start (inverse of unsling)
   gt hook <bead>     # Hook without starting
@@ -47,7 +50,7 @@ var (
 
 func init() {
 	unslingCmd.Flags().BoolVarP(&unslingDryRun, "dry-run", "n", false, "Show what would be done")
-	unslingCmd.Flags().BoolVarP(&unslingForce, "force", "f", false, "Unsling even if work is incomplete")
+	unslingCmd.Flags().BoolVarP(&unslingForce, "force", "f", false, "Unsling even if the hooked bead cannot be read")
 	rootCmd.AddCommand(unslingCmd)
 }
 
@@ -169,21 +172,13 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	if hookedBeadPath != beadsPath {
 		hookedB = beads.New(hookedBeadPath)
 	}
-	hookedBead, err := hookedB.Show(hookedBeadID)
-	if err != nil {
-		// Bead might be deleted - still allow unsling with --force
-		if !force {
-			return fmt.Errorf("getting hooked bead %s: %w\n  Use --force to unsling anyway", hookedBeadID, err)
-		}
-		// Force mode - proceed without the bead details
-		hookedBead = &beads.Issue{ID: hookedBeadID, Title: "(unknown)"}
+	hookedBead, showErr := hookedB.Show(hookedBeadID)
+	if err := unslingGuard(hookedBeadID, showErr, force); err != nil {
+		return err
 	}
-
-	// Check if work is complete (warn if not, unless --force)
-	isComplete := hookedBead.Status == "closed"
-	if !isComplete && !force {
-		return fmt.Errorf("hooked work %s is incomplete (%s)\n  Use --force to unsling anyway",
-			hookedBeadID, hookedBead.Title)
+	if showErr != nil {
+		// Bead might be deleted - --force unslings it without the bead details
+		hookedBead = &beads.Issue{ID: hookedBeadID, Title: "(unknown)"}
 	}
 
 	if targetAgent != "" {
@@ -263,6 +258,16 @@ func firstTownActiveWorkID(townB beads.Client, agentID string) (string, error) {
 		return "", fmt.Errorf("looking up town work hooked by %s: %w", normalizedID, err)
 	}
 	return id, nil
+}
+
+// unslingGuard refuses to unsling a hooked bead whose details could not be read,
+// unless force is set. A readable bead needs no --force: selection already limited
+// it to hooked or in_progress work, which is active by definition.
+func unslingGuard(beadID string, showErr error, force bool) error {
+	if showErr == nil || force {
+		return nil
+	}
+	return fmt.Errorf("getting hooked bead %s: %w\n  Use --force to unsling anyway", beadID, showErr)
 }
 
 // reopenBead returns a hooked or in_progress bead to "open" and clears its assignee.
