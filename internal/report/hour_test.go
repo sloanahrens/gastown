@@ -541,22 +541,25 @@ func TestReportHourJSON(t *testing.T) {
 // tier the last cycle reached, the one whose tip is the record's last_sha. A
 // tier that cycle never reached keeps an earlier verdict, and the record holds
 // no run time for that verdict, so the row must not age it by the last run.
+// A record with no last_sha dates no tier, even one whose sha is also missing.
 func TestReportSweepRowDatesTierByItsOwnTip(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name    string
+		lastSHA string
 		tierSHA string
 		dated   bool
 	}{
-		{"tier reached by the last cycle", "aaaa1111", true},
-		{"tier the last cycle did not reach", "bbbb2222", false},
+		{"tier reached by the last cycle", "aaaa1111", "aaaa1111", true},
+		{"tier the last cycle did not reach", "aaaa1111", "bbbb2222", false},
+		{"no shas on either side", "", "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			root := reportTown(t, map[string]string{
 				".runtime/tier-sweep/gastown.json": fmt.Sprintf(
-					`{"last_run":"2026-10-02T13:40:00-05:00","last_sha":"aaaa1111","tiers":{"fast":{"verdict":"pass","passed":4,"failed":0,"sha":%q}}}`,
-					tc.tierSHA),
+					`{"last_run":"2026-10-02T13:40:00-05:00","last_sha":%q,"tiers":{"fast":{"verdict":"pass","passed":4,"failed":0,"sha":%q}}}`,
+					tc.lastSHA, tc.tierSHA),
 			})
 			r, out := reportRunFor(t, root, func(string) (BeadStore, error) {
 				return nil, errors.New("bd is down")
