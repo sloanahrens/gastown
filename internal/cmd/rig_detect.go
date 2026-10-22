@@ -141,13 +141,13 @@ func updateRigCache(repoRoot, townRoot, rigName string) error {
 		if runtime.GOOS == "windows" {
 			value = fmt.Sprintf("$env:GT_TOWN_ROOT=%q; $env:GT_ROOT=%q; $env:GT_RIG=%q", townRoot, townRoot, rigName)
 		} else {
-			value = fmt.Sprintf("export GT_TOWN_ROOT=%q; export GT_ROOT=%q; export GT_RIG=%q", townRoot, townRoot, rigName)
+			value = fmt.Sprintf("export GT_TOWN_ROOT=%s; export GT_ROOT=%s; export GT_RIG=%s", shellDoubleQuote(townRoot), shellDoubleQuote(townRoot), shellDoubleQuote(rigName))
 		}
 	} else if townRoot != "" {
 		if runtime.GOOS == "windows" {
 			value = fmt.Sprintf("$env:GT_TOWN_ROOT=%q; $env:GT_ROOT=%q; Remove-Item Env:GT_RIG -ErrorAction SilentlyContinue", townRoot, townRoot)
 		} else {
-			value = fmt.Sprintf("export GT_TOWN_ROOT=%q; export GT_ROOT=%q; unset GT_RIG", townRoot, townRoot)
+			value = fmt.Sprintf("export GT_TOWN_ROOT=%s; export GT_ROOT=%s; unset GT_RIG", shellDoubleQuote(townRoot), shellDoubleQuote(townRoot))
 		}
 	} else {
 		if runtime.GOOS == "windows" {
@@ -172,8 +172,25 @@ func printEnvSet(key, value string) {
 	if runtime.GOOS == "windows" {
 		fmt.Printf("$env:%s=%q\n", key, value)
 	} else {
-		fmt.Printf("export %s=%q\n", key, value)
+		fmt.Printf("export %s=%s\n", key, shellDoubleQuote(value))
 	}
+}
+
+// shellDoubleQuote returns value as a double-quoted POSIX shell word, so that
+// eval yields the original value. Go's %q does not escape $ or backtick, and
+// the shell expands both inside double quotes. Paths without $, backtick,
+// double quote or backslash come out unchanged.
+func shellDoubleQuote(value string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range value {
+		if strings.ContainsRune(`\"$`+"`", r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // printEnvUnset prints an OS-appropriate env variable unset for shell eval.
