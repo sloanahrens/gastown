@@ -26,12 +26,30 @@ func thrashTown(t *testing.T) string {
 }
 
 // writeRespawnCounts writes a fixture bead-respawn-counts.json holding counts.
+// Each last_respawn is 08:30, after the 08:00 placement thrashLine logs.
 func writeRespawnCounts(t *testing.T, town string, counts map[string]int) {
 	t.Helper()
 	beads := map[string]map[string]any{}
 	for id, n := range counts {
-		beads[id] = map[string]any{"bead_id": id, "count": n}
+		beads[id] = respawnEntry(id, n, time.Date(2026, 10, 21, 8, 30, 0, 0, time.UTC))
 	}
+	writeRespawnFile(t, town, beads)
+}
+
+// respawnEntry is one bead's record as the file holds it. A zero last_respawn is
+// left out, as the record of a bead respawned before the stamp was written.
+func respawnEntry(id string, count int, lastRespawn time.Time) map[string]any {
+	rec := map[string]any{"bead_id": id, "count": count}
+	if !lastRespawn.IsZero() {
+		rec["last_respawn"] = lastRespawn
+	}
+	return rec
+}
+
+// writeRespawnFile writes a fixture bead-respawn-counts.json holding records as
+// given, for shapes respawnEntry alone cannot build.
+func writeRespawnFile(t *testing.T, town string, beads map[string]map[string]any) {
+	t.Helper()
 	data, err := json.Marshal(map[string]any{"beads": beads})
 	if err != nil {
 		t.Fatal(err)
@@ -78,13 +96,20 @@ func writeRawFixture(t *testing.T, path string, data []byte) {
 	}
 }
 
-// thrashLine is one logged thrash line for bead, as the pass writes it.
+// thrashLine is one logged thrash line for bead, placed at 08:00, as the pass
+// writes it.
 func thrashLine(t *testing.T, bead string, willRespawn, needsSplit float64) Item {
+	t.Helper()
+	return thrashPlacement(t, bead, time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC), willRespawn, needsSplit)
+}
+
+// thrashPlacement is one logged thrash line for bead placed at attached.
+func thrashPlacement(t *testing.T, bead string, attached time.Time, willRespawn, needsSplit float64) Item {
 	t.Helper()
 	raw, err := json.Marshal(thrash.Line{
 		TS:         time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC),
 		Bead:       bead,
-		AttachedAt: time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC),
+		AttachedAt: attached,
 		Agent:      "polecat",
 		Answers:    thrash.Answers{WillRespawn: willRespawn, NeedsSplit: needsSplit},
 		Model:      "jev-test",
@@ -248,6 +273,102 @@ func TestThrashRespawnCountsRereadWhenTheFileChanges(t *testing.T) {
 	}
 	if got := second.Labels[qWillRespawn]; !got {
 		t.Errorf("count 2 after the rewrite labeled will_respawn %v, want true", got)
+	}
+}
+
+// A respawn labels only the placements it followed. Its 08:30 stamp follows the
+// 08:00 placement, so that placement is a positive. The newest placement has no
+// respawn after it yet and stays unlabeled. A placement that a later one
+// followed with no respawn between is a negative. A first run is a negative
+// wherever it sits, and a bead with no respawn record, or a record with no
+// last_respawn stamp, stays unlabeled.
+func TestThrashRespawnLabelIsPerPlacement(t *testing.T) {
+	t.Parallel()
+	town := thrashTown(t)
+	stamp := time.Date(2026, 10, 21, 8, 30, 0, 0, time.UTC)
+	writeRespawnFile(t, town, map[string]map[string]any{
+		"gt-a": respawnEntry("gt-a", 2, stamp),
+		"gt-b": respawnEntry("gt-b", 2, stamp),
+		"gt-c": respawnEntry("gt-c", 2, stamp),
+		"gt-d": respawnEntry("gt-d", 2, stamp),
+		"gt-f": respawnEntry("gt-f", 1, stamp),
+		"gt-g": respawnEntry("gt-g", 2, time.Time{}),
+	})
+	at := func(hour int) time.Time { return time.Date(2026, 10, 21, hour, 0, 0, 0, time.UTC) }
+
+	cases := []struct {
+		bead    string
+		attach  time.Time
+		labels  map[QuestionID]bool
+		labeled bool
+	}{
+		{"gt-a", at(8), map[QuestionID]bool{qWillRespawn: true}, true},
+		{"gt-a", at(10), nil, false},
+		{"gt-b", at(8), map[QuestionID]bool{qWillRespawn: true}, true},
+		{"gt-b", at(10), map[QuestionID]bool{qWillRespawn: false}, true},
+		{"gt-b", at(12), nil, false},
+		{"gt-c", at(8), map[QuestionID]bool{qWillRespawn: true}, true},
+		{"gt-d", at(9), nil, false},
+		{"gt-e", at(8), nil, false},
+		{"gt-f", at(8), map[QuestionID]bool{qWillRespawn: false}, true},
+		{"gt-f", at(10), map[QuestionID]bool{qWillRespawn: false}, true},
+		{"gt-g", at(8), nil, false},
+		{"gt-g", at(10), nil, false},
+	}
+	var items []Item
+	for _, tc := range cases {
+		items = append(items, thrashPlacement(t, tc.bead, tc.attach, 0.5, 0.5))
+	}
+
+	a := &thrashAdapter{town: town}
+	a.Prefetch(context.Background(), items)
+	for i, tc := range cases {
+		got, err := a.Label(context.Background(), items[i])
+		if err != nil {
+			t.Fatalf("%s at %s: %v", tc.bead, tc.attach, err)
+		}
+		if got.Labeled != tc.labeled {
+			t.Errorf("%s at %s: labeled %v, want %v", tc.bead, tc.attach, got.Labeled, tc.labeled)
+		}
+		if !reflect.DeepEqual(got.Labels, tc.labels) {
+			t.Errorf("%s at %s: labels %v, want %v", tc.bead, tc.attach, got.Labels, tc.labels)
+		}
+	}
+}
+
+// Label without Prefetch cannot tell a placement a later one followed from the
+// newest, so it leaves will_respawn unlabeled and Context says so rather than
+// reporting a negative the batch never settled.
+func TestThrashUnprefetchedLeavesWillRespawnUnlabeled(t *testing.T) {
+	t.Parallel()
+	town := thrashTown(t)
+	writeRespawnCounts(t, town, map[string]int{"gt-a": 2})
+	a := &thrashAdapter{town: town}
+	placed := time.Date(2026, 10, 21, 10, 0, 0, 0, time.UTC)
+
+	got, err := a.Label(context.Background(), thrashPlacement(t, "gt-a", placed, 0.5, 0.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Labeled {
+		t.Errorf("labeled %+v without the batch, want will_respawn unlabeled", got)
+	}
+	if lines, want := a.Context(), []string{
+		"the placements were not batched: will_respawn is left unlabeled on 1 line(s)",
+	}; !reflect.DeepEqual(lines, want) {
+		t.Errorf("context = %q, want %q", lines, want)
+	}
+
+	a.Prefetch(context.Background(), []Item{thrashPlacement(t, "gt-a", placed, 0.5, 0.5)})
+	got, err = a.Label(context.Background(), thrashPlacement(t, "gt-a", placed, 0.5, 0.5))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Labeled {
+		t.Errorf("labeled %+v, want the newest placement unlabeled", got)
+	}
+	if lines := a.Context(); len(lines) != 0 {
+		t.Errorf("context = %q after Prefetch, want none", lines)
 	}
 }
 

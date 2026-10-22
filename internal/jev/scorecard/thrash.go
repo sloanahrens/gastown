@@ -36,22 +36,34 @@ const (
 // respawned.
 const respawnThreshold = 2
 
-// thrashAdapter labels the thrash log from two files the town already keeps:
-// the bead respawn counts and the overrun guard's records. Both are read-only.
-// A file that is missing labels nothing. A file that is there but does not
-// read or parse also labels nothing, and Context reports it, so the report
-// shows the gap instead of reading it as a bead with no data.
+// thrashAdapter labels the thrash log from two read-only files the town keeps:
+// the bead respawn counts and the overrun guard's records. A file that is
+// missing labels nothing; one that does not read or parse also labels nothing
+// and Context says so, so the report shows the gap rather than a bead with no
+// data.
 type thrashAdapter struct {
 	town string
 
 	// counts caches the respawn counts file, reread when it changes.
 	counts countsCache
 
-	// respawnBroken is true when the last Label found the respawn counts file
-	// unreadable. overrunBroken counts the lines whose overrun record was
-	// unreadable. Context reports both.
+	// newest is each bead's latest placement in the batch Prefetch saw, and
+	// batched says Prefetch ran at all.
+	newest  map[string]time.Time
+	batched bool
+
+	// respawnBroken marks a respawn counts file the last Label could not read;
+	// overrunBroken and unbatched count the lines left unlabeled without an
+	// overrun record or a batch. Context reports all three.
 	respawnBroken bool
 	overrunBroken int
+	unbatched     int
+}
+
+// respawnRecord is one bead's entry in the respawn counts file.
+type respawnRecord struct {
+	Count       int
+	LastRespawn time.Time
 }
 
 // countsCache holds the parsed respawn counts and the file state it was read
@@ -60,12 +72,25 @@ type countsCache struct {
 	loaded bool
 	size   int64
 	mod    time.Time
-	counts map[string]int
+	counts map[string]respawnRecord
 	err    error
 }
 
 func (a *thrashAdapter) Battery() string { return ThrashBattery }
 func (a *thrashAdapter) LogPath() string { return thrash.LogPath(a.town) }
+
+// Prefetch finds each bead's newest placement, so Label can tell a placement a
+// later one followed from the newest, which no respawn has had time to follow.
+func (a *thrashAdapter) Prefetch(_ context.Context, items []Item) {
+	a.batched = true
+	a.unbatched = 0
+	a.newest = map[string]time.Time{}
+	for _, it := range items {
+		if it.Time.After(a.newest[it.ID]) {
+			a.newest[it.ID] = it.Time
+		}
+	}
+}
 
 // Parse reads one thrash line. The item is the bead, stamped with its
 // placement, and the agent rides beside will_respawn as context.
@@ -93,23 +118,23 @@ func (a *thrashAdapter) Parse(raw []byte) (Item, error) {
 	return item, nil
 }
 
-// Label sets will_respawn from the bead's respawn count and needs_split from
-// the overrun guard's record. A count below respawnThreshold and a record
-// without a stop are both negatives, so a bead on either file is labeled.
-// A record whose stop has begun but not finished leaves needs_split unlabeled,
-// as the dispatch battery does, because the guard has decided to stop the bead.
-// A bead with neither file is unlabeled. A bead still running when it is
-// labeled reads as a negative until its guard stops it, as a first run does
-// for will_respawn.
+// Label sets will_respawn from the bead's respawn record and needs_split from
+// the overrun guard's record. A record without a stop is a negative, so a bead
+// on that file is labeled. A record whose stop has begun but not finished leaves
+// needs_split unlabeled, as the dispatch battery does, because the guard has
+// decided to stop the bead. A bead with neither file is unlabeled. A bead still
+// running when it is labeled reads as a negative until its guard stops it.
 func (a *thrashAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	labels := map[QuestionID]bool{}
 	var rules []string
 
 	counts, err := a.respawnCounts()
 	a.respawnBroken = err != nil
-	if n, ok := counts[item.ID]; ok {
-		labels[qWillRespawn] = n >= respawnThreshold
-		rules = append(rules, "respawn-count")
+	if rec, ok := counts[item.ID]; ok {
+		if will, known := a.willRespawn(item, rec); known {
+			labels[qWillRespawn] = will
+			rules = append(rules, "respawn-count")
+		}
 	}
 
 	stop, err := overrunGuardRecord(a.town, item.ID)
@@ -133,6 +158,34 @@ func (a *thrashAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	return Labeling{Labeled: true, Labels: labels, Rule: strings.Join(rules, "+")}, nil
 }
 
+// willRespawn says whether a respawn followed the placement item, and whether
+// the record can tell. A count below respawnThreshold is a first run, a
+// negative. Without a last_respawn stamp the record cannot place a respawn
+// against a placement, so nothing is labeled. A respawn stamped after the
+// placement is a positive; otherwise a later placement of the bead settles it as
+// a negative and the newest stays unlabeled, since no respawn has had the chance
+// to follow it yet.
+func (a *thrashAdapter) willRespawn(item Item, rec respawnRecord) (will, known bool) {
+	if rec.Count < respawnThreshold {
+		return false, true
+	}
+	if rec.LastRespawn.IsZero() {
+		return false, false
+	}
+	if rec.LastRespawn.After(item.Time) {
+		return true, true
+	}
+	if !a.batched {
+		a.unbatched++
+		return false, false
+	}
+	newest, ok := a.newest[item.ID]
+	if !ok || !item.Time.Before(newest) {
+		return false, false
+	}
+	return false, true
+}
+
 // Context reports the files a label could not read. A missing file is normal
 // and is not reported.
 func (a *thrashAdapter) Context() []string {
@@ -143,6 +196,9 @@ func (a *thrashAdapter) Context() []string {
 	if a.overrunBroken > 0 {
 		lines = append(lines, fmt.Sprintf("overrun-guard records are unreadable: needs_split is left unlabeled on %d line(s)", a.overrunBroken))
 	}
+	if a.unbatched > 0 {
+		lines = append(lines, fmt.Sprintf("the placements were not batched: will_respawn is left unlabeled on %d line(s)", a.unbatched))
+	}
 	return lines
 }
 
@@ -150,7 +206,7 @@ func (a *thrashAdapter) Context() []string {
 // and no error. The file is reread whenever its size or mtime moves, so a
 // report that outlives a rewrite labels from the new counts. An error means the
 // file exists and cannot be read or parsed.
-func (a *thrashAdapter) respawnCounts() (map[string]int, error) {
+func (a *thrashAdapter) respawnCounts() (map[string]respawnRecord, error) {
 	path := filepath.Join(constants.TownRuntimePath(a.town), "bead-respawn-counts.json")
 	info, err := os.Stat(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -168,22 +224,23 @@ func (a *thrashAdapter) respawnCounts() (map[string]int, error) {
 }
 
 // readRespawnCounts parses bead-respawn-counts.json at path.
-func readRespawnCounts(path string) (map[string]int, error) {
+func readRespawnCounts(path string) (map[string]respawnRecord, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path from trusted townRoot
 	if err != nil {
 		return nil, err
 	}
 	var state struct {
 		Beads map[string]struct {
-			Count int `json:"count"`
+			Count       int       `json:"count"`
+			LastRespawn time.Time `json:"last_respawn"`
 		} `json:"beads"`
 	}
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, err
 	}
-	counts := make(map[string]int, len(state.Beads))
+	counts := make(map[string]respawnRecord, len(state.Beads))
 	for id, rec := range state.Beads {
-		counts[id] = rec.Count
+		counts[id] = respawnRecord{Count: rec.Count, LastRespawn: rec.LastRespawn}
 	}
 	return counts, nil
 }
