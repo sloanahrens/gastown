@@ -157,6 +157,9 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 		if ref.Kind != attention.KindRevertGuard || ref.Bead != line.Bead || !inRuleWindow(ref.TS, line.DoneAt, end) {
 			continue
 		}
+		if isOwnSubmission(ref, line) {
+			continue
+		}
 		if ref.Worker == "" || line.Polecat == "" {
 			unreadable = true
 			continue
@@ -185,6 +188,11 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 		// A polecat's comment carries its BD_ACTOR, gastown/polecats/<name>, as
 		// bd comments shows it (gt-8hla5).
 		if c.Author == line.Rig+"/polecats/"+line.Polecat {
+			if at.Equal(line.DoneAt) {
+				// A comment at the submission instant may be the line's own source,
+				// as a refusal at that instant may be (see isOwnSubmission).
+				continue
+			}
 			sources = append(sources, ruleRulesStandDown)
 			break
 		}
@@ -224,11 +232,17 @@ func (a *rulesAdapter) readRefusals() ([]attention.Refusal, error) {
 	return refusals, nil
 }
 
-// inRuleWindow reports whether at falls after the submission, up to the window's
-// end. The start is open: a line made from a refusal takes the refusal's time as
-// its submission, so an inclusive start would let that refusal label its own line.
+// inRuleWindow reports whether at falls from the submission to the window's end.
 func inRuleWindow(at, from, end time.Time) bool {
-	return at.After(from) && !at.After(end)
+	return !at.Before(from) && !at.After(end)
+}
+
+// isOwnSubmission reports whether ref is the refusal the line was made from. A
+// line made from a refusal takes that refusal's worker and time as its
+// submission, so the refusal sits on the window's start and is not evidence
+// about the session it made.
+func isOwnSubmission(ref attention.Refusal, line rules.Line) bool {
+	return ref.Worker == line.Polecat && ref.TS.Equal(line.DoneAt)
 }
 
 // beadComments reads a bead's comments from its rig's store. A bead the store

@@ -121,8 +121,8 @@ func TestRulesLabelsNegativeAfterWindow(t *testing.T) {
 }
 
 // TestRefusalSourcedLineIsNotLabeledByItsOwnRefusal checks a line made from a
-// revert-guard refusal is not labeled broke by that refusal. The refusal's time
-// is the line's submission, so it sits on the window's start and must not count.
+// revert-guard refusal is not labeled broke by that refusal. The refusal's worker
+// and time are the line's submission, so it is the line's own and must not count.
 func TestRefusalSourcedLineIsNotLabeledByItsOwnRefusal(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
@@ -137,6 +137,44 @@ func TestRefusalSourcedLineIsNotLabeledByItsOwnRefusal(t *testing.T) {
 	lab := labelRules(t, a, rulesRaw(t, "gt-x"))
 	if !lab.Labeled || lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesNoRecord {
 		t.Errorf("labeling = %+v, want broke false from %s: the refusal that made the line labeled it", lab, ruleRulesNoRecord)
+	}
+}
+
+// TestRefusalJustAfterSubmissionLabelsLine checks a refusal one nanosecond after
+// the submission counts: only the refusal at the submission instant is the line's own.
+func TestRefusalJustAfterSubmissionLabelsLine(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := attention.AppendRefusal(town, attention.Refusal{
+		TS: rulesDoneAt.Add(time.Nanosecond), Bead: "gt-x", Rig: "gastown", Worker: "bullet",
+		Head: "abc1234", Kind: attention.KindRevertGuard, Summary: "reverts a merged commit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), nil)
+
+	lab := labelRules(t, a, rulesRaw(t, "gt-x"))
+	if !lab.Labeled || !lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesRevertGuard {
+		t.Errorf("labeling = %+v, want broke true from %s", lab, ruleRulesRevertGuard)
+	}
+}
+
+// TestStandDownAtSubmissionIsNotLabeledByItsOwnLine checks a line's own polecat
+// stand-down comment at the submission instant does not label that line broke.
+func TestStandDownAtSubmissionIsNotLabeledByItsOwnLine(t *testing.T) {
+	t.Parallel()
+	comments := map[string][]beads.Comment{
+		"gt-x": {{
+			Author:    "gastown/polecats/bullet",
+			Text:      "DONE_CLOSE_SKIPPED: head unchanged since the rejection",
+			CreatedAt: rulesDoneAt.Format(time.RFC3339Nano),
+		}},
+	}
+	a := rulesAdapterAt(t.TempDir(), rulesDoneAt.Add(25*time.Minute), comments)
+
+	lab := labelRules(t, a, rulesRaw(t, "gt-x"))
+	if !lab.Labeled || lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesNoRecord {
+		t.Errorf("labeling = %+v, want broke false from %s: the stand-down at the submission instant is the line's own", lab, ruleRulesNoRecord)
 	}
 }
 
