@@ -93,8 +93,13 @@ type conflictAdapter struct {
 	// ownTips is the part of rejections each rejection line named itself. A tip
 	// borrowed from an earlier merge line is stale, so it counts the rejection
 	// but cannot attribute a landing.
-	ownTips        map[string][]string
-	rejectionsRead bool
+	ownTips map[string][]string
+	// conflicts counts every conflict rejection in the log, and unattributed the
+	// ones that named no tip of their own: a borrowed tip or none at all. They
+	// are counted as they are read, not derived from the maps above, because a
+	// rejection with no tip at all is in neither.
+	conflicts, unattributed int
+	rejectionsRead          bool
 }
 
 func newConflictAdapter(town string, openClone func() (conflictRepo, error)) *conflictAdapter {
@@ -134,6 +139,18 @@ func (a *conflictAdapter) Parse(raw []byte) (Item, error) {
 		},
 		Refs: map[string]string{refConflictBead: l.Bead, refConflictOther: l.Other},
 	}, nil
+}
+
+// Context says how many conflict rejections in the daemon log named no target
+// tip of their own, whether they borrowed an earlier merge line's tip or found
+// none. Those count against a disjoint label but cannot attribute a landing, so
+// a log whose rejection lines lost their tip would leave pairs unlabeled with
+// nothing else to show why.
+func (a *conflictAdapter) Context() []string {
+	if a.unattributed == 0 {
+		return nil
+	}
+	return []string{fmt.Sprintf("conflict: %d of %d conflict rejection(s) in the daemon log name no target tip of their own, so they cannot attribute a landing", a.unattributed, a.conflicts)}
 }
 
 // Label says whether the pair touched the same files. It is positive when
@@ -389,11 +406,15 @@ func (a *conflictAdapter) loadRejections() error {
 			continue
 		}
 		if m := landRejectRe.FindStringSubmatch(line); m != nil && m[2] == string(land.RejectConflict) {
+			a.conflicts++
 			if tm := landRejectTipRe.FindStringSubmatch(line); tm != nil {
 				a.rejections[m[1]] = append(a.rejections[m[1]], tm[1])
 				a.ownTips[m[1]] = append(a.ownTips[m[1]], tm[1])
-			} else if tip := tips[m[1]]; tip != "" {
-				a.rejections[m[1]] = append(a.rejections[m[1]], tip)
+			} else {
+				a.unattributed++
+				if tip := tips[m[1]]; tip != "" {
+					a.rejections[m[1]] = append(a.rejections[m[1]], tip)
+				}
 			}
 		}
 	}

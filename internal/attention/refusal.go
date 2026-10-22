@@ -98,7 +98,14 @@ func AppendRefusal(townRoot string, r Refusal) error {
 // events.jsonl is: losing one unreadable refusal beats failing the read that
 // lists the rest.
 func ReadRefusals(townRoot string) ([]Refusal, error) {
-	f, err := os.Open(RefusalsPath(townRoot))
+	return ReadRefusalFile(RefusalsPath(townRoot))
+}
+
+// ReadRefusalFile reads one refusal ledger file, such as the rotated
+// refusals.jsonl.1 that ReadRefusals leaves out. It skips a line that does not
+// parse as ReadRefusals does, and a missing file holds none.
+func ReadRefusalFile(path string) ([]Refusal, error) {
+	f, err := os.Open(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}

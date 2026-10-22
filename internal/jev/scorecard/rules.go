@@ -1,13 +1,10 @@
 package scorecard
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io/fs"
-	"os"
 	"strings"
 	"time"
 
@@ -229,45 +226,17 @@ func (a *rulesAdapter) readRefusals() ([]attention.Refusal, error) {
 	if a.refusalsRead {
 		return a.refusals, nil
 	}
-	rotated, err := readRefusalFile(attention.RotatedRefusalsPath(a.town))
+	rotated, err := attention.ReadRefusalFile(attention.RotatedRefusalsPath(a.town))
 	if err != nil {
 		return nil, fmt.Errorf("reading the rotated refusal ledger: %w", err)
 	}
-	current, err := readRefusalFile(attention.RefusalsPath(a.town))
+	current, err := attention.ReadRefusalFile(attention.RefusalsPath(a.town))
 	if err != nil {
 		return nil, fmt.Errorf("reading the refusal ledger: %w", err)
 	}
 	a.refusals = append(rotated, current...)
 	a.refusalsRead = true
 	return a.refusals, nil
-}
-
-// readRefusalFile reads one refusal ledger file. A line that does not parse is
-// skipped, as attention.ReadRefusals skips it, and a missing file holds none.
-func readRefusalFile(path string) ([]attention.Refusal, error) {
-	f, err := os.Open(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var out []attention.Refusal
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line == "" {
-			continue
-		}
-		var r attention.Refusal
-		if json.Unmarshal([]byte(line), &r) != nil {
-			continue
-		}
-		out = append(out, r)
-	}
-	return out, scanner.Err()
 }
 
 // inRuleWindow reports whether at falls from the submission to the window's end.

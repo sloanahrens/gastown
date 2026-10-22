@@ -76,3 +76,28 @@ func mustJSONLine(t *testing.T, r Refusal) []byte {
 	}
 	return append(data, '\n')
 }
+
+// ReadRefusalFile reads the rotated ledger that ReadRefusals leaves out, and a
+// file that is not there holds none.
+func TestReadRefusalFileReadsTheRotatedLedger(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(Dir(town), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	data := append([]byte("not json\n"), mustJSONLine(t, Refusal{Bead: "gt-old", Kind: KindRevertGuard})...)
+	if err := os.WriteFile(RotatedRefusalsPath(town), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := ReadRefusalFile(RotatedRefusalsPath(town))
+	if err != nil || len(got) != 1 || got[0].Bead != "gt-old" {
+		t.Fatalf("ReadRefusalFile(rotated) = %+v, %v; want only gt-old", got, err)
+	}
+	if cur, err := ReadRefusals(town); err != nil || len(cur) != 0 {
+		t.Errorf("ReadRefusals = %+v, %v; want the rotated file left out", cur, err)
+	}
+	if none, err := ReadRefusalFile(RefusalsPath(town)); err != nil || len(none) != 0 {
+		t.Errorf("ReadRefusalFile(missing) = %+v, %v; want empty and no error", none, err)
+	}
+}
