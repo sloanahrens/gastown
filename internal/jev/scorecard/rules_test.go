@@ -132,6 +132,7 @@ func TestRulesLabelsFromReworkStandDown(t *testing.T) {
 	t.Parallel()
 	comments := map[string][]beads.Comment{
 		"gt-x": {{
+			Author:    "gastown/polecats/bullet",
 			Text:      "DONE_CLOSE_SKIPPED: head unchanged since the rejection — nothing was resubmitted",
 			CreatedAt: rulesDoneAt.Add(4 * time.Minute).Format(time.RFC3339Nano),
 		}},
@@ -151,6 +152,71 @@ func TestRulesLabelsFromReworkStandDown(t *testing.T) {
 	b := rulesAdapterAt(t.TempDir(), rulesDoneAt.Add(45*time.Minute), late)
 	if lab := labelRules(t, b, rulesRaw(t, "gt-x")); lab.Labels[qBrokeStandingRule] {
 		t.Errorf("a stand-down after the window labeled the session broke: %+v", lab)
+	}
+}
+
+// TestLabelIgnoresRefusalOfAnotherWorker checks a revert-guard refusal of the
+// same bead inside the window, by a different polecat, does not label this
+// session. The bead was re-slung after a refusal of an earlier submission, so
+// the refusal belongs to the worker that made it, not to the line's session.
+func TestLabelIgnoresRefusalOfAnotherWorker(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := attention.AppendRefusal(town, attention.Refusal{
+		TS: rulesDoneAt.Add(2 * time.Minute), Bead: "gt-x", Rig: "gastown", Worker: "capable",
+		Head: "abc1234", Kind: attention.KindRevertGuard, Summary: "reverts a merged commit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), nil)
+
+	lab := labelRules(t, a, rulesRaw(t, "gt-x"))
+	if !lab.Labeled || lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesNoRecord {
+		t.Errorf("labeling = %+v, want broke false from %s: another worker's refusal labeled this session", lab, ruleRulesNoRecord)
+	}
+}
+
+// TestLabelIgnoresStandDownOfAnotherWorker checks a rework stand-down comment
+// written under another polecat's name does not label this session.
+func TestLabelIgnoresStandDownOfAnotherWorker(t *testing.T) {
+	t.Parallel()
+	comments := map[string][]beads.Comment{
+		"gt-x": {{
+			Author:    "gastown/polecats/capable",
+			Text:      "DONE_CLOSE_SKIPPED: head unchanged since the rejection",
+			CreatedAt: rulesDoneAt.Add(4 * time.Minute).Format(time.RFC3339Nano),
+		}},
+	}
+	a := rulesAdapterAt(t.TempDir(), rulesDoneAt.Add(25*time.Minute), comments)
+
+	lab := labelRules(t, a, rulesRaw(t, "gt-x"))
+	if !lab.Labeled || lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesNoRecord {
+		t.Errorf("labeling = %+v, want broke false from %s: another worker's stand-down labeled this session", lab, ruleRulesNoRecord)
+	}
+}
+
+// TestRulesUnattributedRecordStaysUnlabeled checks a refusal with no worker, or
+// a stand-down comment with no author, inside the window leaves the session
+// unlabeled: the record may be this session's, and it cannot be told apart.
+func TestRulesUnattributedRecordStaysUnlabeled(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := attention.AppendRefusal(town, attention.Refusal{
+		TS: rulesDoneAt.Add(2 * time.Minute), Bead: "gt-x", Rig: "gastown",
+		Head: "abc1234", Kind: attention.KindRevertGuard, Summary: "reverts a merged commit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	comments := map[string][]beads.Comment{
+		"gt-x": {{
+			Text:      "DONE_CLOSE_SKIPPED: head unchanged since the rejection",
+			CreatedAt: rulesDoneAt.Add(4 * time.Minute).Format(time.RFC3339Nano),
+		}},
+	}
+	a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), comments)
+
+	if lab := labelRules(t, a, rulesRaw(t, "gt-x")); lab.Labeled {
+		t.Errorf("labeling = %+v for unattributed records, want unlabeled", lab)
 	}
 }
 
