@@ -427,33 +427,89 @@ func TestStopDockedPolecats_ListErrorIsReturned(t *testing.T) {
 
 // TestStopDockedPolecats: with a readable session list, docking stops the polecat
 // sessions it found and reports them. No sessions stops nothing, and a failed
-// stop is a warning, not an error, as before.
+// stop is an error: the sessions still run.
 func TestStopDockedPolecats(t *testing.T) {
 	t.Parallel()
 	infos := []polecat.SessionInfo{{Polecat: "furiosa", Running: true}}
+	stopErr := errors.New("kill failed")
 	tests := []struct {
 		name     string
 		stub     stubDockPolecatSessions
 		wantStop int
 		wantOut  []string
+		wantErr  error
 	}{
-		{"no sessions", stubDockPolecatSessions{}, 0, nil},
-		{"stopped", stubDockPolecatSessions{infos: infos}, 1, []string{"1 polecat session(s) stopped"}},
-		{"stop error", stubDockPolecatSessions{infos: infos, stopErr: errors.New("kill failed")}, 1, nil},
+		{"no sessions", stubDockPolecatSessions{}, 0, nil, nil},
+		{"stopped", stubDockPolecatSessions{infos: infos}, 1, []string{"1 polecat session(s) stopped"}, nil},
+		{"stop error", stubDockPolecatSessions{infos: infos, stopErr: stopErr}, 1, nil, stopErr},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			stub := tt.stub // a copy: the subtests run in parallel
 			stopped, err := stopDockedPolecats(&stub)
-			if err != nil {
-				t.Fatalf("stopDockedPolecats = %v; want nil", err)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("stopDockedPolecats error = %v; want %v", err, tt.wantErr)
 			}
 			if !slices.Equal(stopped, tt.wantOut) {
 				t.Errorf("stopped = %q; want %q", stopped, tt.wantOut)
 			}
 			if stub.stopCall != tt.wantStop {
 				t.Errorf("StopAll calls = %d; want %d", stub.stopCall, tt.wantStop)
+			}
+		})
+	}
+}
+
+// recordingUpdateBeads is a beads.Client that records the Update calls it gets.
+type recordingUpdateBeads struct {
+	beads.Client
+	updateErr error
+	updates   []string
+}
+
+func (b *recordingUpdateBeads) Update(id string, _ beads.UpdateOptions) error {
+	b.updates = append(b.updates, id)
+	return b.updateErr
+}
+
+// TestStopAndDockRig: the docked label is written only once the polecat
+// sessions are stopped. An unreadable session list or a failed stop leaves the
+// identity bead untouched, so the rig is not docked while its sessions run.
+func TestStopAndDockRig(t *testing.T) {
+	t.Parallel()
+	infos := []polecat.SessionInfo{{Polecat: "furiosa", Running: true}}
+	listErr := errors.New("tmux boom")
+	stopErr := errors.New("kill failed")
+	updateErr := errors.New("dolt timeout")
+	tests := []struct {
+		name        string
+		stub        stubDockPolecatSessions
+		updateErr   error
+		wantErr     error
+		wantUpdates []string
+		wantOut     []string
+	}{
+		{"stopped", stubDockPolecatSessions{infos: infos}, nil, nil, []string{"gt-gastown"}, []string{"1 polecat session(s) stopped"}},
+		{"no sessions", stubDockPolecatSessions{}, nil, nil, []string{"gt-gastown"}, nil},
+		{"list error", stubDockPolecatSessions{listErr: listErr}, nil, listErr, nil, nil},
+		{"stop error", stubDockPolecatSessions{infos: infos, stopErr: stopErr}, nil, stopErr, nil, nil},
+		{"label error", stubDockPolecatSessions{infos: infos}, updateErr, updateErr, []string{"gt-gastown"}, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stub := tt.stub // a copy: the subtests run in parallel
+			bd := &recordingUpdateBeads{updateErr: tt.updateErr}
+			stopped, err := stopAndDockRig(bd, "gt-gastown", &stub)
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("stopAndDockRig error = %v; want %v", err, tt.wantErr)
+			}
+			if !slices.Equal(bd.updates, tt.wantUpdates) {
+				t.Errorf("Update calls = %q; want %q", bd.updates, tt.wantUpdates)
+			}
+			if !slices.Equal(stopped, tt.wantOut) {
+				t.Errorf("stopped = %q; want %q", stopped, tt.wantOut)
 			}
 		})
 	}
