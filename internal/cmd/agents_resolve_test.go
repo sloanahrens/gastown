@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"strings"
 	"testing"
 
@@ -259,6 +260,39 @@ func TestLoadAgentBeadsFromReadsAgentWispsAtAnyPriority(t *testing.T) {
 	}
 	if wispRead.Priority != -1 {
 		t.Fatalf("wisp read Priority = %d, want -1 (no priority filter)", wispRead.Priority)
+	}
+}
+
+// wispListFailer fails only the wisp read, so the issue read succeeds and the
+// test isolates the wisp listing error.
+type wispListFailer struct {
+	beads.Client
+}
+
+var errWispListBoom = errors.New("boom")
+
+func (w wispListFailer) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	if opts.Ephemeral {
+		return nil, errWispListBoom
+	}
+	return w.Client.List(opts)
+}
+
+// A failed wisp listing must surface as an error. Returning nil here would let
+// a wisp-only agent vanish from resolution and read as "no agent bead found".
+func TestLoadAgentBeadsFromReturnsWispListError(t *testing.T) {
+	t.Parallel()
+	db := wispListFailer{Client: beadsfake.New()}
+
+	_, err := loadAgentBeadsFrom(db, "/tmp/rig/.beads", agentSourceRigIssues, agentSourceRigWisps)
+	if err == nil {
+		t.Fatal("loadAgentBeadsFrom returned nil error, want the wisp listing error")
+	}
+	if !strings.Contains(err.Error(), "agent wisps") {
+		t.Fatalf("error = %q, want it to name the agent wisps listing", err)
+	}
+	if !errors.Is(err, errWispListBoom) {
+		t.Fatalf("error = %q, want it to wrap %q", err, errWispListBoom)
 	}
 }
 
