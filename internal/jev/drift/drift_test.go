@@ -900,8 +900,8 @@ func TestJevDriftParseDocPathsReadsHitTextInRankOrder(t *testing.T) {
 	}
 }
 
-// TestJevDriftFetchTakesTheSubmissionLock: a fetch into the submission
-// battery's shared clone waits out that battery's run lock instead of racing
+// TestJevDriftFetchTakesTheCloneFetchLock: a fetch into the submission
+// battery's shared clone waits out the clone's fetch lock instead of racing
 // it. Two fetches into one clone fail each other, and a failed Sync lost the
 // pass its week. Before the fix the fetch ran under no lock at all.
 func TestJevDriftFetchTakesTheSubmissionLock(t *testing.T) {
@@ -911,21 +911,21 @@ func TestJevDriftFetchTakesTheSubmissionLock(t *testing.T) {
 	r := newRig(t, rec)
 	r.pass.Git = lockedRepo{
 		Repo: r.git,
-		lock: func(ctx context.Context) (func(), error) { return submission.WaitRunLock(ctx, town) },
+		lock: func(ctx context.Context) (func(), error) { return submission.WaitFetchLock(ctx, town) },
 	}
 	r.serve(rec, "1\t1\tinternal/cmd/jev_landing.go\n", recentFlagPatch)
 	if err := battery.WriteCursor(r.cursor, battery.Cursor{Time: t0}); err != nil {
 		t.Fatal(err)
 	}
 
-	release, err := battery.Lock(submission.CursorPath(town) + ".lock")
+	release, err := battery.Lock(submission.FetchLockPath(town))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	if _, err := r.pass.Run(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Run with the submission lock held = %v, want the wait to end with the ctx", err)
+		t.Fatalf("Run with the fetch lock held = %v, want the wait to end with the ctx", err)
 	}
 	if r.git.synced != 0 {
 		t.Errorf("fetched %d times under a held lock, want 0", r.git.synced)

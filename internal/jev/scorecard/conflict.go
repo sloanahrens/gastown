@@ -68,23 +68,23 @@ func init() {
 			}
 			return lockedConflictRepo{
 				conflictRepo: c,
-				lock:         func(ctx context.Context) (func(), error) { return submission.WaitRunLock(ctx, townRoot) },
+				lock:         func(ctx context.Context) (func(), error) { return submission.WaitFetchLock(ctx, townRoot) },
 			}, nil
 		})
 	})
 }
 
-// lockedConflictRepo fetches the submission battery's bare clone under that
-// battery's own run lock. The clone is shared: the submission pass holds the
-// lock while it fetches, so a fetch that skipped the lock would fail one of the
-// two. Run reads the clone and takes no lock.
+// lockedConflictRepo fetches the submission battery's bare clone under the
+// clone's fetch lock. The clone is shared: the submission pass fetches under that
+// lock, so a fetch that skipped it would fail one of the two. Run reads the
+// clone and takes no lock.
 type lockedConflictRepo struct {
 	conflictRepo
-	// lock takes the submission battery's run lock, waiting for its holder.
+	// lock takes the clone's fetch lock, waiting for its holder.
 	lock func(ctx context.Context) (func(), error)
 }
 
-// Sync waits for the submission battery's run lock, then fetches.
+// Sync waits for the clone's fetch lock, then fetches.
 func (r lockedConflictRepo) Sync(ctx context.Context) error {
 	release, err := r.lock(ctx)
 	if err != nil {

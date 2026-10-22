@@ -634,11 +634,11 @@ func (s *syncCounter) Sync(ctx context.Context) error {
 	return s.conflictRepo.Sync(ctx)
 }
 
-// A fetch into the submission battery's shared clone waits out that battery's
-// run lock instead of racing it: two fetches into one clone fail each other,
+// A fetch into the submission battery's shared clone waits out the clone's
+// fetch lock instead of racing it: two fetches into one clone fail each other,
 // and a failed Sync lost the scorecard its run. Before the fix the fetch ran
 // under no lock at all.
-func TestConflictAdapterFetchTakesTheSubmissionLock(t *testing.T) {
+func TestConflictAdapterFetchTakesTheCloneFetchLock(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	repo, _ := linearHistory([]map[string]string{{"base.txt": "base"}})
@@ -646,18 +646,18 @@ func TestConflictAdapterFetchTakesTheSubmissionLock(t *testing.T) {
 	a := newConflictAdapter(town, func() (conflictRepo, error) {
 		return lockedConflictRepo{
 			conflictRepo: counted,
-			lock:         func(ctx context.Context) (func(), error) { return submission.WaitRunLock(ctx, town) },
+			lock:         func(ctx context.Context) (func(), error) { return submission.WaitFetchLock(ctx, town) },
 		}, nil
 	})
 
-	release, err := battery.Lock(submission.CursorPath(town) + ".lock")
+	release, err := battery.Lock(submission.FetchLockPath(town))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	if _, err := a.clone(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("clone with the submission lock held = %v, want the wait to end with the ctx", err)
+		t.Fatalf("clone with the fetch lock held = %v, want the wait to end with the ctx", err)
 	}
 	if counted.synced != 0 {
 		t.Errorf("fetched %d times under a held lock, want 0", counted.synced)

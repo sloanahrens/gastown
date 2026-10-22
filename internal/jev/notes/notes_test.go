@@ -350,37 +350,63 @@ func TestRunKeepsGoingAfterAnUnreadableMemoryFile(t *testing.T) {
 	}
 }
 
-// A fetch into the submission battery's shared clone waits out that battery's
-// run lock instead of racing it: two fetches into one clone fail each other,
-// and that failure lost the whole week's pass. Before the fix the fetch ran
-// under no lock at all.
-func TestNotesFetchTakesTheSubmissionLock(t *testing.T) {
+// A fetch into the submission battery's shared clone waits for a fetch in
+// flight instead of racing it: two fetches into one clone fail each other, and
+// that failure lost the whole week's pass. Before the fix the fetch ran under
+// no lock at all.
+func TestNotesFetchTakesTheCloneLock(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	r := newRig(t, map[string]string{"current.md": currentNote})
 	r.pass.Repo = lockedRepo{
 		repo: r.repo,
-		lock: func(ctx context.Context) (func(), error) { return submission.WaitRunLock(ctx, town) },
+		lock: func(ctx context.Context) (func(), error) { return submission.WaitFetchLock(ctx, town) },
 	}
 
-	hold, err := battery.Lock(submission.CursorPath(town) + ".lock")
+	hold, err := battery.Lock(submission.FetchLockPath(town))
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
 	defer cancel()
 	if _, err := r.pass.Run(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Run with the submission lock held = %v, want the wait to end with the ctx", err)
+		t.Fatalf("Run with the clone locked = %v, want the wait to end with the ctx", err)
 	}
 	if r.repo.synced != 0 {
-		t.Errorf("the pass fetched while the submission lock was held")
+		t.Errorf("the pass fetched while another fetch held the clone")
 	}
 
-	// Once the battery lets go, the same pass fetches and finishes.
+	// Once the other fetch lets go, the same pass fetches and finishes.
 	hold()
 	sum, err := r.pass.Run(context.Background())
 	if err != nil || sum.Asked != 1 || r.repo.synced != 1 {
 		t.Errorf("Run after the holder finished = %+v, %v with %d fetch(es); want the fetch to go ahead",
+			sum, err, r.repo.synced)
+	}
+}
+
+// A fetch does not wait out a submission pass. The pass holds its run lock for
+// its whole run, which can be ten minutes of asks, and the fetch needs only the
+// clone's fetch lock. Before the fix the fetch took the pass's run lock and
+// stalled behind it, and the fetch then held that lock against the pass.
+func TestNotesFetchDoesNotWaitOnASubmissionPass(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	r := newRig(t, map[string]string{"current.md": currentNote})
+	r.pass.Repo = lockedRepo{
+		repo: r.repo,
+		lock: func(ctx context.Context) (func(), error) { return submission.WaitFetchLock(ctx, town) },
+	}
+
+	pass, err := battery.Lock(submission.CursorPath(town) + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pass()
+
+	sum, err := r.pass.Run(context.Background())
+	if err != nil || sum.Asked != 1 || r.repo.synced != 1 {
+		t.Errorf("Run during a submission pass = %+v, %v with %d fetch(es); want the fetch to go ahead",
 			sum, err, r.repo.synced)
 	}
 }

@@ -101,22 +101,35 @@ var ErrBusy = errors.New("another jev submission pass is running")
 // The lock sits beside the cursor, so every pass over one cursor contends on
 // it, in this process and in others.
 func lockRun(cursorPath string) (func(), error) {
-	release, err := battery.Lock(cursorPath + ".lock")
+	release, err := battery.Lock(lockPath(cursorPath))
 	if errors.Is(err, battery.ErrBusy) {
 		return nil, ErrBusy
 	}
 	return release, err
 }
 
-// lockPoll is how long a waiter sleeps between attempts at the run lock.
+// lockPath is the lock file beside base. Every lock derived from a path is
+// derived here, so a pass and a fetch guarding the same thing cannot drift onto
+// different files.
+func lockPath(base string) string { return base + ".lock" }
+
+// FetchLockPath is the lock every fetch into the shared clone holds. It sits
+// beside the clone, off the pass's run lock, so a fetch never waits a whole
+// pass out.
+func FetchLockPath(townRoot string) string {
+	return lockPath(ClonePath(townRoot))
+}
+
+// lockPoll is how long a waiter sleeps between attempts at a lock.
 const lockPoll = 100 * time.Millisecond
 
-// WaitRunLock takes the run lock a submission pass holds, waiting for its
-// holder to let go instead of reporting ErrBusy, and returns the release. A
-// battery that only fetches the shared clone takes it around its fetch: the
-// pass fetches under it, and two fetches into one clone fail each other.
-func WaitRunLock(ctx context.Context, townRoot string) (func(), error) {
-	path := CursorPath(townRoot) + ".lock"
+// WaitFetchLock takes the shared clone's fetch lock, waiting for a fetch in
+// flight to finish, and returns the release. A battery that only reads the
+// clone takes it around its fetch: two fetches into one clone fail each other,
+// and the pass's run lock is held for a whole pass, so taking that lock would
+// stall the fetch and let it starve the pass.
+func WaitFetchLock(ctx context.Context, townRoot string) (func(), error) {
+	path := FetchLockPath(townRoot)
 	for {
 		release, err := battery.Lock(path)
 		if err == nil {
