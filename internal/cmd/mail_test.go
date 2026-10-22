@@ -306,3 +306,14 @@ func TestAnnounceMessageParsing(t *testing.T) {
 		})
 	}
 }
+
+func TestMailReadCmd_HelpMatchesMarkReadBehavior(t *testing.T) {
+	t.Parallel()
+	long := mailReadCmd.Long
+	if strings.Contains(long, "does not mark as read") {
+		t.Errorf("mail read help says it does not mark as read, but runMailRead marks the message read:\n%s", long)
+	}
+	if !strings.Contains(long, "marks it as read") {
+		t.Errorf("mail read help should say it marks the message as read:\n%s", long)
+	}
+}

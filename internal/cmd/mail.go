@@ -162,7 +162,7 @@ Examples:
 var mailReadCmd = &cobra.Command{
 	Use:   "read <message-id|index>",
 	Short: "Read a message",
-	Long: `Read a specific message (does not mark as read).
+	Long: `Read a specific message (marks it as read; the message is not closed or archived).
 
 You can specify a message by its ID or by its numeric index from the inbox.
 The index corresponds to the number shown in 'gt mail inbox' (1-based).
