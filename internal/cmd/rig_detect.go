@@ -140,9 +140,9 @@ func updateRigCache(repoRoot, townRoot, rigName string) error {
 	case runtime.GOOS != "windows":
 		value = posixRigCacheValue(townRoot, rigName)
 	case rigName != "":
-		value = fmt.Sprintf("$env:GT_TOWN_ROOT=%q; $env:GT_ROOT=%q; $env:GT_RIG=%q", townRoot, townRoot, rigName)
+		value = fmt.Sprintf("$env:GT_TOWN_ROOT=%s; $env:GT_ROOT=%s; $env:GT_RIG=%s", powershellDoubleQuote(townRoot), powershellDoubleQuote(townRoot), powershellDoubleQuote(rigName))
 	case townRoot != "":
-		value = fmt.Sprintf("$env:GT_TOWN_ROOT=%q; $env:GT_ROOT=%q; Remove-Item Env:GT_RIG -ErrorAction SilentlyContinue", townRoot, townRoot)
+		value = fmt.Sprintf("$env:GT_TOWN_ROOT=%s; $env:GT_ROOT=%s; Remove-Item Env:GT_RIG -ErrorAction SilentlyContinue", powershellDoubleQuote(townRoot), powershellDoubleQuote(townRoot))
 	default:
 		value = "Remove-Item Env:GT_TOWN_ROOT -ErrorAction SilentlyContinue; Remove-Item Env:GT_ROOT -ErrorAction SilentlyContinue; Remove-Item Env:GT_RIG -ErrorAction SilentlyContinue"
 	}
@@ -160,7 +160,7 @@ func updateRigCache(repoRoot, townRoot, rigName string) error {
 // printEnvSet prints an OS-appropriate env variable assignment for shell eval.
 func printEnvSet(key, value string) {
 	if runtime.GOOS == "windows" {
-		fmt.Printf("$env:%s=%q\n", key, value)
+		fmt.Printf("$env:%s=%s\n", key, powershellDoubleQuote(value))
 	} else {
 		fmt.Print(posixEnvSetLine(key, value))
 	}
@@ -193,6 +193,24 @@ func shellDoubleQuote(value string) string {
 	for _, r := range value {
 		if strings.ContainsRune(`\"$`+"`", r) {
 			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	b.WriteByte('"')
+	return b.String()
+}
+
+// powershellDoubleQuote returns value as a double-quoted PowerShell string, so
+// that the hook reads back the original value. Go's %q writes backslash
+// escapes, which PowerShell reads literally, and it does not escape $ or
+// backtick, which PowerShell expands inside double quotes. PowerShell escapes
+// those characters with a backtick.
+func powershellDoubleQuote(value string) string {
+	var b strings.Builder
+	b.WriteByte('"')
+	for _, r := range value {
+		if strings.ContainsRune("`\"$", r) {
+			b.WriteByte('`')
 		}
 		b.WriteRune(r)
 	}
