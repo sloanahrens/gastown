@@ -144,6 +144,30 @@ func TestDoneListsLandedBeadAfterLabelRemoval(t *testing.T) {
 	}
 }
 
+// TestDoneSkipsClosedBeadThatNeverLanded checks a bead closed since the cursor
+// without the ready-to-land label and without a landed close reason is not a
+// submission, though its notes still hold a READY TO LAND block.
+func TestDoneSkipsClosedBeadThatNeverLanded(t *testing.T) {
+	t.Parallel()
+	abandoned := submittedBead("gt-abandoned", fixedNow.Add(-20*time.Minute))
+	abandoned.Labels = nil
+	abandoned.Status = "closed"
+	abandoned.CloseReason = "no-changes: nothing to implement"
+	lister := rigDones{
+		stores: map[string]beadLister{"gastown": fakeBeads{
+			closed: []*beads.Issue{abandoned},
+		}},
+		refusals: func() ([]attention.Refusal, error) { return nil, nil },
+	}
+	got, err := lister.Done(fixedNow.Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("done = %+v, want nothing for a closed bead that never landed", got)
+	}
+}
+
 // TestRigDonesDedupesABeadListedTwice checks a bead both held and closed since
 // the cursor is one submission, not two.
 func TestRigDonesDedupesABeadListedTwice(t *testing.T) {

@@ -111,12 +111,8 @@ type rigDones struct {
 	refusals func() ([]attention.Refusal, error)
 }
 
-// Done lists every bead carrying the ready-to-land label whose live READY TO
-// LAND block was stamped at or after t, and every revert-guard refusal at or
-// after t. Open and held beads are listed, and so are beads closed since t that
-// still carry the label or closed as a landing. The landing removes the label in
-// the same update that closes the bead, so a landed submission is found by its
-// landed close reason.
+// Done lists every submission and every revert-guard refusal stamped at or
+// after t, whether the submission is still held or has already landed.
 func (r rigDones) Done(t time.Time) ([]Done, error) {
 	rigs := make([]string, 0, len(r.stores))
 	for rig := range r.stores {
@@ -140,6 +136,8 @@ func (r rigDones) Done(t time.Time) ([]Done, error) {
 			if is == nil || seen[is.ID] {
 				continue
 			}
+			// The landing removes the label in the update that closes the
+			// bead, so a landed submission is found by its close reason.
 			if !beads.HasLabel(is, land.LabelReadyToLand) && !stale.IsLandedReason(is.CloseReason) {
 				continue
 			}
