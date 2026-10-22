@@ -114,11 +114,13 @@ func (a *rulesAdapter) Parse(raw []byte) (Item, error) {
 
 // Label finds the labels for one logged session. A session younger than the
 // window is unlabeled. Otherwise, a guard record for its bead inside the window
-// after the submission labels it broke_standing_rule true. A window that has
-// passed with no record labels it false, but only when every source was read:
-// a bead the store does not hold, or a stand-down comment whose time cannot be
-// read, leaves the session unlabeled, since the record may be there. The rule
-// that set the label is named with each source that matched, joined by "+".
+// after the submission, and written for the session's own polecat, labels it
+// broke_standing_rule true. A window that has passed with no record labels it
+// false, but only when every source was read: a bead the store does not hold,
+// a stand-down comment whose time cannot be read, or a record with no polecat
+// to match it by, leaves the session unlabeled, since the record may be there.
+// The rule that set the label is named with each source that matched, joined
+// by "+".
 //
 // Only broke_standing_rule is labeled. rule_kind has no guard record that
 // names a kind, so it is never labeled here.
@@ -147,8 +149,19 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 
 	end := line.DoneAt.Add(ruleWindow)
 	var sources []string
+	// A refusal names the polecat whose submission it refused, and a stand-down
+	// comment is written as the polecat that ran gt done. Another polecat's record
+	// belongs to that polecat's session. A record that names no polecat, or a line
+	// with none, cannot be matched, so it is not read as this session's.
 	for _, ref := range refusals {
-		if ref.Kind == attention.KindRevertGuard && ref.Bead == line.Bead && inRuleWindow(ref.TS, line.DoneAt, end) {
+		if ref.Kind != attention.KindRevertGuard || ref.Bead != line.Bead || !inRuleWindow(ref.TS, line.DoneAt, end) {
+			continue
+		}
+		if ref.Worker == "" || line.Polecat == "" {
+			unreadable = true
+			continue
+		}
+		if ref.Worker == line.Polecat {
 			sources = append(sources, ruleRulesRevertGuard)
 			break
 		}
@@ -162,7 +175,14 @@ func (a *rulesAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 			unreadable = true
 			continue
 		}
-		if inRuleWindow(at, line.DoneAt, end) {
+		if !inRuleWindow(at, line.DoneAt, end) {
+			continue
+		}
+		if c.Author == "" || line.Polecat == "" {
+			unreadable = true
+			continue
+		}
+		if c.Author == line.Rig+"/polecats/"+line.Polecat {
 			sources = append(sources, ruleRulesStandDown)
 			break
 		}
