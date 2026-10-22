@@ -624,8 +624,14 @@ func (e *rigUnavailableError) Error() string { return e.msg }
 
 func (e *rigUnavailableError) Is(target error) bool { return target == ErrRigUnavailable }
 
-// Blocked refuses a dispatch to a rig that is e-stopped, parked or docked.
-// It returns a short label naming the state, and the refusal to hand back.
+// RigStatusUnverified is the reason a parked-or-docked check gives when the
+// rig's identity bead could not be read. The rig may be docked, so dispatch is
+// refused until the read works, rather than guessing that it is available.
+const RigStatusUnverified = "unverified"
+
+// Blocked refuses a dispatch to a rig that is e-stopped, parked or docked, or
+// whose status cannot be verified. It returns a short label naming the state,
+// and the refusal to hand back.
 func Blocked(townRoot, rigName string, estopOn func(townRoot, rigName string) (bool, error), parked func(townRoot, rigName string) (bool, string)) (string, error) {
 	if on, err := estopOn(townRoot, rigName); on {
 		why := "E-stop active"
@@ -635,6 +641,11 @@ func Blocked(townRoot, rigName string, estopOn func(townRoot, rigName string) (b
 		return "e-stop", &rigUnavailableError{msg: fmt.Sprintf(dispatch.RigUnavailableMarker+"rig %q: %s\nClear it with: gt thaw, or gt thaw --rig %s", rigName, why, rigName)}
 	}
 	if blocked, reason := parked(townRoot, rigName); blocked {
+		if reason == RigStatusUnverified {
+			// The line keeps the "cannot sling to rig" shape so a dispatcher
+			// reads it as a deferral, the same as a parked or docked rig.
+			return "rig " + reason, &rigUnavailableError{msg: fmt.Sprintf(dispatch.RigUnavailableMarker+"rig %q: its identity bead could not be read, so its status is unknown\nCheck that bd can read the rig's identity bead, then retry", rigName)}
+		}
 		undoCmd := "gt rig unpark"
 		if reason == "docked" {
 			undoCmd = "gt rig undock"

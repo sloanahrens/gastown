@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/sling"
 )
 
 // parkTown is a town whose registry holds testrig and otherrig.
@@ -109,6 +110,23 @@ func TestMigrateParkedRigs(t *testing.T) {
 	}
 	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
 		t.Errorf("legacy wisp file still present: %v", err)
+	}
+}
+
+// TestIsRigParkedOrDocked_BeadReadFailureBlocks: an unparked rig whose identity
+// bead cannot be read may be docked, so it is blocked as unverified rather than
+// read as available. A rig with no identity bead at all is not blocked.
+func TestIsRigParkedOrDocked_BeadReadFailureBlocks(t *testing.T) {
+	t.Parallel()
+	town := parkTown(t)
+
+	blocked, reason := rigParkedOrDockedWith(town, "testrig", failingShowBeads{notFoundBeads{}})
+	if !blocked || reason != sling.RigStatusUnverified {
+		t.Errorf("bead read failure: IsRigParkedOrDocked = %v, %q; want blocked as %q", blocked, reason, sling.RigStatusUnverified)
+	}
+
+	if blocked, reason := rigParkedOrDockedWith(town, "testrig", notFoundBeads{}); blocked {
+		t.Errorf("no identity bead: IsRigParkedOrDocked = %v, %q; want not blocked", blocked, reason)
 	}
 }
 

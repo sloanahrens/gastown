@@ -68,6 +68,12 @@ func TestBlockedRefusalsRoundTripThroughSlingRefusalLine(t *testing.T) {
 			parked: parkedAnswer("docked"),
 			label:  "rig docked",
 		},
+		{
+			name:   "rig whose identity bead could not be read",
+			estop:  estopAnswer(false, nil),
+			parked: parkedAnswer(RigStatusUnverified),
+			label:  "rig " + RigStatusUnverified,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

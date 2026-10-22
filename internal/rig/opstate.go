@@ -86,8 +86,10 @@ func getOpState(townRoot, rigName string, store beads.Client) (OpState, string) 
 	if err != nil {
 		// No readable identity bead: either the rig never got one, or bd could
 		// not answer. Report operational — inventing a docked rig out of a
-		// failed read would hide real work, and the callers that gate dispatch
-		// (cmd.IsRigParkedOrDocked, the daemon) do their own fail-safe reads.
+		// failed read would hide real work. The dispatch gates
+		// (cmd.IsRigParkedOrDocked, the daemon's rigBeadVerdict) read the bead
+		// on their own and fail closed on the same error, so this display
+		// read does not decide whether work is dispatched.
 		return OpStateOperational, OpStateSourceDefault
 	}
 
