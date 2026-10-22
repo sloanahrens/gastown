@@ -3,6 +3,7 @@ package scorecard
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/jev/battery"
 	"github.com/steveyegge/gastown/internal/jev/conflict"
+	"github.com/steveyegge/gastown/internal/jev/submission"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -618,4 +621,54 @@ func rejectLine(bead, kind string) string {
 // the target tip the merge was built on.
 func rejectLineTip(bead, kind, tip string) string {
 	return fmt.Sprintf("2026/10/21 10:01:00 landing_worker: [land] %s: rejected (%s): merging conflicts in 1 file (target tip %s)\n", bead, kind, tip)
+}
+
+// syncCounter counts the fetches a conflict repo is asked for.
+type syncCounter struct {
+	conflictRepo
+	synced int
+}
+
+func (s *syncCounter) Sync(ctx context.Context) error {
+	s.synced++
+	return s.conflictRepo.Sync(ctx)
+}
+
+// A fetch into the submission battery's shared clone waits out that battery's
+// run lock instead of racing it: two fetches into one clone fail each other,
+// and a failed Sync lost the scorecard its run. Before the fix the fetch ran
+// under no lock at all.
+func TestConflictAdapterFetchTakesTheSubmissionLock(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	repo, _ := linearHistory([]map[string]string{{"base.txt": "base"}})
+	counted := &syncCounter{conflictRepo: repo}
+	a := newConflictAdapter(town, func() (conflictRepo, error) {
+		return lockedConflictRepo{
+			conflictRepo: counted,
+			lock:         func(ctx context.Context) (func(), error) { return submission.WaitRunLock(ctx, town) },
+		}, nil
+	})
+
+	release, err := battery.Lock(submission.CursorPath(town) + ".lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	if _, err := a.clone(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("clone with the submission lock held = %v, want the wait to end with the ctx", err)
+	}
+	if counted.synced != 0 {
+		t.Errorf("fetched %d times under a held lock, want 0", counted.synced)
+	}
+
+	// Once the battery lets go, the same adapter fetches.
+	release()
+	if _, err := a.clone(context.Background()); err != nil {
+		t.Fatalf("clone after the lock was released = %v, want it to fetch", err)
+	}
+	if counted.synced != 1 {
+		t.Errorf("fetched %d times, want 1", counted.synced)
+	}
 }
