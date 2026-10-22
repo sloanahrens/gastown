@@ -71,7 +71,7 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 	p := &Pass{
 		Asker:      client,
 		Landings:   landings,
-		Git:        cloneRepo{c: submission.FetchLocked{Cloner: clone, TownRoot: townRoot}},
+		Git:        lockedCloneRepo(clone, townRoot),
 		LogPath:    LogPath(townRoot),
 		CursorPath: CursorPath(townRoot),
 		Allows:     func() (bool, error) { return town.Allows(time.Now) },
@@ -88,6 +88,12 @@ func Open(townRoot string, s Settings, warnings io.Writer) (*Pass, error) {
 type gitClone interface {
 	Sync(ctx context.Context) error
 	Run(ctx context.Context, args ...string) (string, error)
+}
+
+// lockedCloneRepo is how Open reads the rig: the shared clone, fetched under
+// its fetch lock.
+func lockedCloneRepo(clone submission.Cloner, townRoot string) cloneRepo {
+	return cloneRepo{c: submission.FetchLocked{Cloner: clone, TownRoot: townRoot}}
 }
 
 // cloneRepo reads the rig from the submission battery's bare clone.
