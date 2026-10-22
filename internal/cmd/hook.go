@@ -168,11 +168,11 @@ func init() {
 	hookAttachCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Replace existing incomplete hooked bead")
 
 	// Flags for detach subcommand (mirror unsling flags)
-	hookDetachCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Detach even if work is incomplete")
+	hookDetachCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Detach even if the hooked bead cannot be read")
 
 	// Flags for clear subcommand (mirror unsling flags)
 	hookClearCmd.Flags().BoolVarP(&hookDryRun, "dry-run", "n", false, "Show what would be done")
-	hookClearCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Clear even if work is incomplete")
+	hookClearCmd.Flags().BoolVarP(&hookForce, "force", "f", false, "Clear even if the hooked bead cannot be read")
 
 	hookCmd.AddCommand(hookStatusCmd)
 	hookCmd.AddCommand(hookShowCmd)

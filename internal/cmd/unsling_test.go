@@ -359,3 +359,47 @@ func TestCleanStaleHookedBeads(t *testing.T) {
 		}
 	})
 }
+
+// A hooked or in_progress bead that reads back needs no --force. The guard used
+// to require status closed, which an active bead never is, so every unsling of
+// live work was refused without --force.
+func TestUnslingHookedBeadNeedsNoForce(t *testing.T) {
+	t.Parallel()
+	const agent = "gastown/polecats/p1"
+
+	for _, status := range []beads.IssueStatus{beads.IssueStatusHooked, beads.StatusInProgress} {
+		t.Run(string(status), func(t *testing.T) {
+			t.Parallel()
+			store := beadsfake.New()
+			is := seedAssigned(t, store, agent, status)
+
+			hookedBead, showErr := store.Show(is.ID)
+			if err := unslingGuard(is.ID, showErr, false); err != nil {
+				t.Errorf("unslingGuard(%s bead, force=false) = %v, want nil", status, err)
+			}
+			if hookedBead.Status != string(status) {
+				t.Errorf("Show status = %q, want %q", hookedBead.Status, status)
+			}
+		})
+	}
+}
+
+// When the hooked bead cannot be read, --force is the only way through: without
+// it the error names the flag, and with it the unsling proceeds.
+func TestUnslingUnreadableBeadNeedsForce(t *testing.T) {
+	t.Parallel()
+	const id = "gt-missing"
+	boom := errors.New("bd show: not found")
+
+	err := unslingGuard(id, boom, false)
+	if !errors.Is(err, boom) {
+		t.Fatalf("unslingGuard(unreadable, force=false) = %v, want an error wrapping %v", err, boom)
+	}
+	if !strings.Contains(err.Error(), "--force") {
+		t.Errorf("error %q does not tell the user to use --force", err)
+	}
+
+	if err := unslingGuard(id, boom, true); err != nil {
+		t.Errorf("unslingGuard(unreadable, force=true) = %v, want nil", err)
+	}
+}
