@@ -408,6 +408,8 @@ func TestParseJevScorecard(t *testing.T) {
  "lines":[{"id":"a","labeled":true},{"id":"b","labeled":false},{"id":"c","labeled":true}]}`,
 			JevBattery{Name: "finding", Items: 3, Labeled: 2, Unanswered: 1, Questions: []JevQuestion{
 				{ID: "any_duplicate", Verdict: "not-yet", Labeled: 2}, {ID: "fix_worthy", Verdict: "earning", Labeled: 2}}}},
+		{"the skipped lines are the unanswered count", `{"battery":"finding","items":7,"lines_skipped":3,"questions":[]}`,
+			JevBattery{Name: "finding", Items: 7, Unanswered: 3}},
 		{"the chip's figures", `{"battery":"landing","items":9,"labeled":7,
  "questions":[{"id":"first_try","kind":"noul","logged":9,"labeled":7,"positives":3,"negatives":4,"base_rate":0.25,"precision":0.625,"recall":0.5,"verdict":"earning"}]}`,
 			JevBattery{Name: "landing", Items: 9, Labeled: 7, Questions: []JevQuestion{
@@ -668,6 +670,21 @@ func TestJevPanelNamesTheBatteriesTheReadLost(t *testing.T) {
 	}
 	if note.Class != "r warnc" {
 		t.Errorf("a title line naming lost batteries wears %q, want the amber class", note.Class)
+	}
+}
+
+// A scorecard the state carries without a read record has no age to state, and
+// the title line says so rather than leaving the question open.
+func TestJevPanelSaysWhenTheReadsAgeIsUnknown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Now()
+	s := jevScorecardState(now, nil)
+	delete(s["reads"].(map[string]any), "jev_scorecard")
+
+	_, note, _ := drawJevAt(t, now, s)
+	if want := "3 batteries · 221 items · 140 labeled · last 7d · read age unknown 1 earning 1 no-signal 1 not-yet"; note.Text != want {
+		t.Errorf("JEV title line = %q, want %q", note.Text, want)
 	}
 }
 
@@ -1258,5 +1275,47 @@ func TestJevScorecardTallyLeavesThePackagesBatteryOut(t *testing.T) {
 	sc.Tally()
 	if want := (JevTotals{Batteries: 1, Items: 25, Labeled: 25, Earning: 1}); sc.Totals != want {
 		t.Errorf("Totals = %+v, want %+v", sc.Totals, want)
+	}
+}
+
+// The state JSON carried a battery's count as lines before the panel called it
+// items: /api/state keeps sending both names with the same number, so a consumer
+// of the older key reads the count rather than an absent field.
+func TestJevScorecardServesTheCountUnderItsOldNameToo(t *testing.T) {
+	t.Parallel()
+
+	sc := &JevScorecard{Batteries: []JevBattery{{Name: "finding", Items: 212, Labeled: 140}}}
+	sc.Tally()
+	b, err := json.Marshal(State{JevScorecard: sc})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type count struct {
+		Items *int `json:"items"`
+		Lines *int `json:"lines"`
+	}
+	var got struct {
+		Scorecard struct {
+			Totals    count   `json:"totals"`
+			Batteries []count `json:"batteries"`
+		} `json:"jev_scorecard"`
+	}
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatalf("the state JSON is not the page's shape: %v", err)
+	}
+	if len(got.Scorecard.Batteries) != 1 {
+		t.Fatalf("the state JSON carries %d batteries, want the one: %s", len(got.Scorecard.Batteries), b)
+	}
+	for _, c := range []struct {
+		what string
+		c    count
+	}{{"totals", got.Scorecard.Totals}, {"the finding battery", got.Scorecard.Batteries[0]}} {
+		if c.c.Items == nil || c.c.Lines == nil {
+			t.Errorf("%s carries items %v and lines %v, want both: %s", c.what, c.c.Items, c.c.Lines, b)
+			continue
+		}
+		if *c.c.Lines != *c.c.Items {
+			t.Errorf("%s says items %d but lines %d, want the same count", c.what, *c.c.Items, *c.c.Lines)
+		}
 	}
 }
