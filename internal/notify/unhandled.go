@@ -41,8 +41,9 @@ func ageText(age time.Duration) string {
 
 // unhandledPushes returns the pushes owed for the open escalations: the ones
 // the overseer owns, not acked, not already pushed, and open longer than
-// window, each carrying how long it has been open. An escalation whose age does not parse has no wait to measure and is
-// skipped, as the stale listing skips one.
+// window, each carrying how long it has been open. An escalation whose age
+// does not parse has no wait to measure and is skipped, as the stale listing
+// skips one.
 func unhandledPushes(issues []*beads.Issue, now time.Time, window time.Duration) []UnhandledPush {
 	var out []UnhandledPush
 	for _, issue := range issues {
