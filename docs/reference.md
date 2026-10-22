@@ -590,7 +590,7 @@ These are set in tmux session environment when agents are spawned.
 | Variable | Purpose |
 |----------|---------|
 | `GT_TMUX_SOCKET` | tmux socket the town's agents live on |
-| `CLAUDE_RUNTIME_CONFIG_DIR` | Custom Claude settings directory |
+| `CLAUDE_CONFIG_DIR` | Custom Claude settings directory |
 
 ### Environment by Role
 
@@ -620,8 +620,8 @@ Understanding this hierarchy is essential for proper configuration.
 
 | Role | Working Directory | Notes |
 |------|-------------------|-------|
-| **Crew** | `~/gt/<rig>/crew/<name>/rig/` | Persistent human workspace clone |
-| **Polecat** | `~/gt/<rig>/polecats/<name>/rig/` | Polecat worktree (ephemeral sandbox) |
+| **Crew** | `~/gt/<rig>/crew/<name>/` | Persistent human workspace clone |
+| **Polecat** | `~/gt/<rig>/polecats/<name>/<rig>/` | Polecat worktree (ephemeral sandbox) |
 
 Note: The per-rig `<rig>/mayor/rig/` directory is NOT a working directory—it's
 a git clone that holds the canonical `.beads/` database for that rig.
@@ -854,7 +854,7 @@ See [escalation.md](design/escalation.md) for full protocol.
 
 ```bash
 gt handoff                   # Request cycle (context-aware)
-gt handoff --shutdown        # Terminate (polecats)
+gt done                      # Polecats terminate by running gt done
 gt session stop <rig>/<agent>
 gt peek <agent>              # Check health
 gt nudge <agent> "message"   # Send message to agent
@@ -1613,7 +1613,7 @@ The best F1 is taken over every distinct value as a cut, predicting yes at or
 above it; a tie keeps the higher cut. `--json` names the rule that labeled each
 line in its `lines` array.
 
-Eight batteries are registered. The `fixture` battery reads
+Seventeen batteries are registered, besides the test-only `fixture` battery. The `fixture` battery reads
 `.runtime/jev/fixture.jsonl` with labels from `fixture-labels.json`, and exists
 so tests can drive the command end to end. No live battery reads it.
 
