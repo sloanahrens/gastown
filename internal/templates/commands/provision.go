@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 //go:embed bodies/*.md
@@ -63,14 +65,29 @@ func BuildCommand(cmd Command) (string, error) {
 
 	var b strings.Builder
 	b.WriteString("---\n")
-	b.WriteString(fmt.Sprintf("description: %s\n", cmd.Description))
+	b.WriteString(frontmatterLine("description", cmd.Description))
 	for _, f := range cmd.Fields {
-		b.WriteString(fmt.Sprintf("%s: %s\n", f.Key, f.Value))
+		b.WriteString(frontmatterLine(f.Key, f.Value))
 	}
 	b.WriteString("---\n\n")
 	b.Write(body)
 
 	return b.String(), nil
+}
+
+// frontmatterLine renders one "key: value" frontmatter line. A value YAML reads
+// as a single key is written bare, so commands whose frontmatter already parsed
+// keep their bytes. Any other value is single-quoted, because a bare scalar such
+// as done's argument-hint ("[--status ...] [--target <branch>]") is a YAML error.
+func frontmatterLine(key, value string) string {
+	bare := key + ": " + value
+	var parsed map[string]any
+	if err := yaml.Unmarshal([]byte(bare), &parsed); err == nil && len(parsed) == 1 {
+		if _, ok := parsed[key]; ok {
+			return bare + "\n"
+		}
+	}
+	return key + ": '" + strings.ReplaceAll(value, "'", "''") + "'\n"
 }
 
 // commandsDir is where Claude Code reads a workspace's slash commands.

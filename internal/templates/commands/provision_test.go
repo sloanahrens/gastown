@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestBuildCommand_Claude(t *testing.T) {
@@ -302,5 +304,66 @@ func TestDoneBodyForbidsAIAttribution(t *testing.T) {
 	const want = "NO\nCo-Authored-By trailer, no AI attribution anywhere."
 	if !strings.Contains(string(body), want) {
 		t.Errorf("the /done body lacks %q", want)
+	}
+}
+
+// Claude Code reads each command's frontmatter as YAML. A value that YAML
+// misreads (done's argument-hint opens with a bracketed group and carries text
+// after it) must be quoted so every shipped command still parses (gt-239x6).
+func TestProvisionedFrontmatterParsesAsYAML(t *testing.T) {
+	t.Parallel()
+	for _, cmd := range Commands {
+		content, err := BuildCommand(cmd)
+		if err != nil {
+			t.Fatalf("BuildCommand(%s): %v", cmd.Name, err)
+		}
+		front, _, ok := strings.Cut(strings.TrimPrefix(content, "---\n"), "\n---\n")
+		if !ok {
+			t.Fatalf("%s: no closing frontmatter fence", cmd.Name)
+		}
+		var parsed map[string]any
+		if err := yaml.Unmarshal([]byte(front), &parsed); err != nil {
+			t.Errorf("%s: frontmatter does not parse as YAML: %v\n%s", cmd.Name, err, front)
+			continue
+		}
+		want := map[string]string{"description": cmd.Description}
+		for _, f := range cmd.Fields {
+			want[f.Key] = f.Value
+		}
+		for key, value := range want {
+			got, ok := parsed[key]
+			if !ok {
+				t.Errorf("%s: frontmatter lost key %s", cmd.Name, key)
+				continue
+			}
+			if s, isString := got.(string); isString && s != value {
+				t.Errorf("%s: frontmatter %s = %q, want %q", cmd.Name, key, s, value)
+			}
+		}
+	}
+}
+
+// Values that already parsed before the quoting fix keep their exact frontmatter
+// bytes, so a workspace provisioned with them is not rewritten for nothing.
+func TestHandoffAndReviewFrontmatterUnchanged(t *testing.T) {
+	t.Parallel()
+	const handoff = "---\n" +
+		"description: Hand off to fresh session, work continues from hook\n" +
+		"allowed-tools: Bash(gt handoff:*)\n" +
+		"argument-hint: [message]\n" +
+		"---\n\n"
+	const review = "---\n" +
+		"description: Review code changes with structured grading (A-F)\n" +
+		"allowed-tools: Bash(git diff:*), Bash(git rev-parse:*), Bash(gh pr diff:*)\n" +
+		"argument-hint: [--staged | --branch | --pr <url>]\n" +
+		"---\n\n"
+	for name, want := range map[string]string{"handoff": handoff, "review": review} {
+		content, err := BuildCommand(*FindByName(name))
+		if err != nil {
+			t.Fatalf("BuildCommand(%s): %v", name, err)
+		}
+		if !strings.HasPrefix(content, want) {
+			t.Errorf("%s frontmatter changed:\n got: %q\nwant prefix: %q", name, content, want)
+		}
 	}
 }
