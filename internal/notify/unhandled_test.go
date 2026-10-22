@@ -353,6 +353,11 @@ func TestUnhandledLineNamesTheWait(t *testing.T) {
 		{45 * time.Second, "Unhandled for 45s: hq-abc disk full"},
 		{90 * time.Second, "Unhandled for 1 min: hq-abc disk full"},
 		{31 * time.Minute, "Unhandled for 31 min: hq-abc disk full"},
+		{59*time.Minute + 59*time.Second, "Unhandled for 59 min: hq-abc disk full"},
+		{time.Hour, "Unhandled for 1h: hq-abc disk full"},
+		{90 * time.Minute, "Unhandled for 1h: hq-abc disk full"},
+		{119 * time.Minute, "Unhandled for 1h: hq-abc disk full"},
+		{2 * time.Hour, "Unhandled for 2h: hq-abc disk full"},
 		{5 * time.Hour, "Unhandled for 5h: hq-abc disk full"},
 		{72 * time.Hour, "Unhandled for 3d: hq-abc disk full"},
 	}
