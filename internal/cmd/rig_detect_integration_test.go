@@ -31,7 +31,7 @@ func evalEnvVars(t *testing.T, line string, keys ...string) []string {
 	return strings.Split(strings.TrimSuffix(string(out), "\x00"), "\x00")
 }
 
-func TestPrintEnvSetEvalRoundTrip(t *testing.T) {
+func TestIntegrationPrintEnvSetEvalRoundTrip(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("printEnvSet emits PowerShell on windows")
 	}
@@ -46,9 +46,7 @@ func TestPrintEnvSetEvalRoundTrip(t *testing.T) {
 	}
 	for _, want := range values {
 		t.Run(want, func(t *testing.T) {
-			line := captureRigDetectStdout(t, func() {
-				printEnvSet("GT_TOWN_ROOT", want)
-			})
+			line := posixEnvSetLine("GT_TOWN_ROOT", want)
 			got := evalEnvVars(t, line, "GT_TOWN_ROOT")[0]
 			if got != want {
 				t.Errorf("eval of %q set GT_TOWN_ROOT=%q, want %q", line, got, want)
@@ -57,7 +55,7 @@ func TestPrintEnvSetEvalRoundTrip(t *testing.T) {
 	}
 }
 
-func TestUpdateRigCacheEvalRoundTrip(t *testing.T) {
+func TestIntegrationUpdateRigCacheEvalRoundTrip(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("updateRigCache writes PowerShell on windows")
 	}
