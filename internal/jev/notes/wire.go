@@ -134,9 +134,9 @@ func listFiles(configDir, home, townRoot string) ([]File, error) {
 		}
 		path := filepath.Join(dir, e.Name())
 		// Follow a link, as the handbook path below does: the operator may keep
-		// a note elsewhere and link it in. A link with no target, or to
-		// something that is not a file, is not a note.
-		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
+		// a note elsewhere and link it in. The target must be a markdown note
+		// too, so a link named .md cannot send some other file to Jev.
+		if !isNoteFile(path) {
 			continue
 		}
 		files = append(files, File{Source: SourceMemory, Name: e.Name(), Path: path})
@@ -147,6 +147,18 @@ func listFiles(configDir, home, townRoot string) ([]File, error) {
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].key() < files[j].key() })
 	return files, nil
+}
+
+// isNoteFile reports whether path is a markdown note: a regular file once any
+// links are followed, and named .md at its end. A link with no target, or one
+// to something that is not a markdown file, is not a note.
+func isNoteFile(path string) bool {
+	target, err := filepath.EvalSymlinks(path)
+	if err != nil || !strings.HasSuffix(target, ".md") {
+		return false
+	}
+	info, err := os.Stat(target)
+	return err == nil && info.Mode().IsRegular()
 }
 
 // gitClone is the part of the submission battery's bare clone the pass reads
