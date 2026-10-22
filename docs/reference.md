@@ -1505,8 +1505,10 @@ The gate's result for that package labels it:
 The report prints one summary line per threshold, 0.2, 0.3 and 0.5, beside the
 per-question block: the asked packages the battery would skip at it (`noul` below
 the threshold), how many of those were ungraded, how many the gate failed (MISS),
-and the gate minutes those packages took (`gate_seconds` summed). A threshold
-whose would-skip packages were all untimed prints `n/a`.
+and the gate minutes those packages took (`gate_seconds` summed; when only some
+were timed, the figure sums just those and is followed by `(N of M timed)`, e.g.
+`1.5 (1 of 3 timed)`). A threshold whose would-skip packages were all untimed, or
+that has none, prints `n/a`.
 
 ### Review-targeting battery (`jev_targets`)
 
@@ -2150,6 +2152,79 @@ first landing of the bead after the refusal's own time:
 
 `cause` has no mechanical label. It is logged so a person can read which kinds
 of work fail most.
+
+### Thrash battery (`jev_thrash`)
+
+Each bead the spec dispatcher places on a seat is asked about once per placement
+(a bead placed twice earns a line for each), including a bead that closed before
+the pass ran. The state is the bead's title, its Goal, Constraints, Acceptance and
+Size sections and its agent, each cut to a length cap. Jev answers two noul
+questions: `will_respawn`, whether the polecat will be respawned at least once on
+this bead, and `needs_split`, whether the overrun guard will stop the polecat for
+running long. A pass appends one line per placement to
+`.runtime/jev/thrash.jsonl`: `{ts, bead, attached_at, agent, answers, model,
+question_version}`. The line holds bead ids, the agent name and numbers, never
+the bead's text. The pass edits, labels, holds and splits no bead. A bead whose
+own request Jev refuses is skipped for good; any other Jev failure stops the
+pass, so the next one asks again. The patrol is off unless `daemon.json` enables
+it:
+
+```json
+{"patrols": {"jev_thrash": {"enabled": true, "max_usd_per_day": 1, "usd_per_billion_tokens": 4}}}
+```
+
+`usd_per_billion_tokens` is required. `max_usd_per_day` is optional and draws on
+the same town-wide cap as the other batteries.
+
+`gt jev scorecard --battery thrash` labels each line from two files under
+`.runtime/`, in the scorecard's `internal/jev/scorecard/thrash.go`:
+
+- `will_respawn` from `bead-respawn-counts.json`: a count below 2 is a first run,
+  false (`respawn-count`). A respawn stamped after the placement is true. A later
+  placement of the same bead settles an earlier one as false; the newest
+  placement stays unlabeled until a respawn follows it.
+- `needs_split` from `overrun-guard/<bead>.json`: a record with `stopped_at` is
+  true (`overrun-stop`), a record with no stop stamp is false
+  (`overrun-no-stop`), and a stop that has begun but not finished is left
+  unlabeled (`overrun-stop-pending`).
+
+A missing file labels nothing. A file that exists but cannot be read leaves its
+question unlabeled, and the report says so.
+
+### Standing-rules battery (`jev_rules`)
+
+After `gt done` submits a bead for landing, the battery reads the last 4000
+characters of the submitting session's transcript and asks Jev two questions:
+the noul `broke_standing_rule`, whether the session broke a standing rule (ran
+the full gate itself, pushed to main, wrote outside its own worktree, or printed
+a secret), and the choice `rule_kind` over `gate_run`, `main_push`,
+`outside_tree`, `secret`, `none` and `unclear`. It appends one line per
+submission to `.runtime/jev/rules.jsonl`: `{ts, rig, bead, polecat, done_at,
+excerpt_sha256, model, answers, question_version, reason}`. The line holds ids,
+times, the excerpt's SHA-256 and the answers, never transcript text. A
+submission that could not be asked gets a line with null `answers` and a
+`reason`: `no_transcript`, `transcript_unreadable`, `other_session` (the seat's
+newest transcript began after the submission), `bad_response` or
+`request_refused`. A transcript the containment check refuses to open gets no
+line. The pass blocks, punishes and labels no seat or bead. It is off unless
+`daemon.json` enables it:
+
+```json
+{"patrols": {"jev_rules": {"enabled": true, "max_usd_per_day": 1, "usd_per_billion_tokens": 4}}}
+```
+
+`usd_per_billion_tokens` is required. `max_usd_per_day` is optional and draws on
+the same town-wide cap as the other batteries.
+
+`gt jev scorecard --battery rules` labels `broke_standing_rule` in the
+scorecard's `internal/jev/scorecard/rules.go`. A line younger than 20 minutes is
+unlabeled. Otherwise a guard record for the bead inside the 20 minutes after the
+submission labels it true: a revert-guard refusal in the refusal ledger
+(`rules:revert-guard`) or a rework stand-down comment on the bead
+(`rules:rework-stand-down`). With no record, and every source readable, it is
+false (`rules:no-guard-record`); a bead the store does not hold leaves it
+unlabeled. `rule_kind` has no mechanical label, since no guard record names a
+kind.
 
 ## Beads Commands (bd)
 
