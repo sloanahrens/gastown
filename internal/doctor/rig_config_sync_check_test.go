@@ -83,14 +83,16 @@ func TestRigConfigSyncCheck_FixCreatesConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Create rig directory WITHOUT config.json
+	// Create rig directory WITHOUT config.json; its .beads setup is in place
 	rigDir := filepath.Join(tmpDir, "testrig")
 	if err := os.MkdirAll(rigDir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	bd := newFakeBD()
+	writeHealthyRigBeads(t, bd, tmpDir, "testrig", "tr")
 
 	// Run check and fix
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := bd.ctx(tmpDir)
 	check := NewRigConfigSyncCheck()
 	result := check.Run(ctx)
 
@@ -160,14 +162,117 @@ func TestRigConfigSyncCheck_AllConfigsPresent(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(configJSON), 0644); err != nil {
 		t.Fatal(err)
 	}
+	bd := newFakeBD()
+	writeHealthyRigBeads(t, bd, tmpDir, "testrig", "tr")
 
 	// Run check
-	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx := bd.ctx(tmpDir)
 	check := NewRigConfigSyncCheck()
 	result := check.Run(ctx)
 
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK, got %v: %s", result.Status, result.Message)
+	}
+}
+
+// TestRigConfigSyncCheck_InvalidMetadataNotOK covers the rig problems Run
+// records but Fix cannot repair. Each must make the check non-OK and name the
+// rig in its details, instead of reporting the rig as valid.
+func TestRigConfigSyncCheck_InvalidMetadataNotOK(t *testing.T) {
+	t.Parallel()
+
+	const rigsJSON = `{
+		"version": 1,
+		"rigs": {
+			"testrig": {
+				"git_url": "https://github.com/test/test.git",
+				"beads": {"prefix": "tr"}
+			}
+		}
+	}`
+	const configJSON = `{
+		"type": "rig",
+		"version": 1,
+		"name": "testrig",
+		"git_url": "https://github.com/test/test.git",
+		"created_at": "2026-03-01T00:00:00Z",
+		"beads": {"prefix": "tr"}
+	}`
+
+	writeFile := func(t *testing.T, path, content string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	tests := []struct {
+		name   string
+		layout func(t *testing.T, rigDir string)
+	}{
+		{
+			name:   "directory absent",
+			layout: func(*testing.T, string) {},
+		},
+		{
+			name: "unreadable config.json",
+			layout: func(t *testing.T, rigDir string) {
+				writeFile(t, filepath.Join(rigDir, "config.json"), "{bad")
+			},
+		},
+		{
+			name: "missing .beads directory",
+			layout: func(t *testing.T, rigDir string) {
+				writeFile(t, filepath.Join(rigDir, "config.json"), configJSON)
+			},
+		},
+		{
+			name: "unreadable metadata.json",
+			layout: func(t *testing.T, rigDir string) {
+				writeFile(t, filepath.Join(rigDir, "config.json"), configJSON)
+				// A directory where metadata.json belongs: present, but not readable as a file.
+				if err := os.MkdirAll(filepath.Join(rigDir, ".beads", "metadata.json"), 0755); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "invalid metadata.json",
+			layout: func(t *testing.T, rigDir string) {
+				writeFile(t, filepath.Join(rigDir, "config.json"), configJSON)
+				writeFile(t, filepath.Join(rigDir, ".beads", "metadata.json"), "{bad")
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			writeFile(t, filepath.Join(tmpDir, "mayor", "rigs.json"), rigsJSON)
+			tc.layout(t, filepath.Join(tmpDir, "testrig"))
+
+			ctx := &CheckContext{TownRoot: tmpDir}
+			check := NewRigConfigSyncCheck()
+			result := check.Run(ctx)
+
+			if result.Status == StatusOK {
+				t.Fatalf("expected a non-OK status, got StatusOK: %s", result.Message)
+			}
+			if !strings.Contains(strings.Join(result.Details, "\n"), "testrig") {
+				t.Errorf("details %q do not name the rig", result.Details)
+			}
+
+			// Fix cannot repair these, so it must leave them non-OK.
+			if err := check.Fix(ctx); err != nil {
+				t.Fatalf("fix failed: %v", err)
+			}
+			if result = check.Run(ctx); result.Status == StatusOK {
+				t.Errorf("expected a non-OK status after fix, got StatusOK")
+			}
+		})
 	}
 }
 
@@ -666,6 +771,26 @@ func writeTestDoltDatabase(t *testing.T, townRoot, dbName string) {
 // the check opens in the rig directory.
 func seedRigBead(bd *fakeBD, townRoot, rig, prefix string) {
 	bd.db(filepath.Join(townRoot, rig)).Seed(beads.Issue{ID: prefix + "-rig-" + rig, Title: rig, Labels: []string{"gt:rig"}})
+}
+
+// writeHealthyRigBeads gives rig a .beads directory the check accepts: a
+// config.yaml that disables auto-export, a metadata.json on a non-server Dolt,
+// and its identity bead in bd.
+func writeHealthyRigBeads(t *testing.T, bd *fakeBD, townRoot, rig, prefix string) {
+	t.Helper()
+	beadsDir := filepath.Join(townRoot, rig, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	configYAML := "issue-prefix: " + prefix + "\nexport.auto: false\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte(configYAML), 0644); err != nil {
+		t.Fatal(err)
+	}
+	metadata := `{"backend":"dolt","database":"dolt","dolt_mode":"embedded"}`
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(metadata), 0644); err != nil {
+		t.Fatal(err)
+	}
+	seedRigBead(bd, townRoot, rig, prefix)
 }
 
 func TestStaleRuntimeFilesCheck_StalePIDFiles(t *testing.T) {
