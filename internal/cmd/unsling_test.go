@@ -3,16 +3,12 @@ package cmd
 import (
 	"bytes"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
-	"github.com/steveyegge/gastown/internal/config"
 )
 
 // gt hook shows hooked and in_progress beads as the agent's work, so gt
@@ -373,36 +369,14 @@ func TestCleanStaleHookedBeads(t *testing.T) {
 	})
 }
 
-// setupUnslingTown makes the town runUnslingWith finds from the working
-// directory: a town.json workspace marker and a .beads directory. The caller
-// chdirs into it.
-func setupUnslingTown(t *testing.T) string {
-	t.Helper()
-	townRoot := t.TempDir()
-	townConfig := &config.TownConfig{
-		Type:      "town",
-		Version:   config.CurrentTownVersion,
-		Name:      "test-town",
-		CreatedAt: time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC),
-	}
-	if err := config.SaveTownConfig(filepath.Join(townRoot, "mayor", "town.json"), townConfig); err != nil {
-		t.Fatalf("save town.json: %v", err)
-	}
-	if err := os.MkdirAll(filepath.Join(townRoot, ".beads"), 0755); err != nil {
-		t.Fatalf("mkdir .beads: %v", err)
-	}
-	return townRoot
-}
-
-// gt unsling, gt hook detach and gt hook clear all end in runUnslingWith with
-// their --force flag, so this drives that command path. A hooked or in_progress
-// bead that reads back is cleared without --force (the guard used to require
-// status closed, which an active bead never is, so every unsling of live work
-// was refused). An unreadable bead is refused without --force, and the error
-// names the flag; with --force the unsling proceeds.
-//
-// Not parallel: it changes the working directory, the environment and openBeads.
+// gt unsling, gt hook detach and gt hook clear all end in unslingHook with their
+// --force flag, so this drives that command path. A hooked or in_progress bead
+// that reads back is cleared without --force (the guard used to require status
+// closed, which an active bead never is, so every unsling of live work was
+// refused). An unreadable bead is refused without --force, and the error names
+// the flag; with --force the unsling proceeds.
 func TestUnslingCommandForceSemantics(t *testing.T) {
+	t.Parallel()
 	const agent = "gastown/polecats/p1"
 	boom := errors.New("bd show: not found")
 
@@ -420,18 +394,13 @@ func TestUnslingCommandForceSemantics(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			t.Chdir(setupUnslingTown(t))
-			t.Setenv("GT_ROLE", agent)
+			t.Parallel()
 			fake := beadsfake.New()
 			is := seedAssigned(t, fake, agent, tc.status)
+			store := brokenStore{Client: fake, showErr: tc.showErr}
+			open := func(string) beads.Client { return store }
 
-			prev := openBeads
-			t.Cleanup(func() { openBeads = prev })
-			openBeads = func(string) beads.Client {
-				return brokenStore{Client: fake, showErr: tc.showErr}
-			}
-
-			err := runUnslingWith(&cobra.Command{}, nil, false, tc.force)
+			err := unslingHook(&cobra.Command{}, agent, t.TempDir(), "", "", false, tc.force, open)
 			got, _ := fake.Show(is.ID)
 			if tc.wantErr {
 				if !errors.Is(err, boom) || !strings.Contains(err.Error(), "--force") {

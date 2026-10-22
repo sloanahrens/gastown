@@ -100,6 +100,13 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 		return fmt.Errorf("finding town root: %w", err)
 	}
 
+	return unslingHook(cmd, agentID, townRoot, targetAgent, targetBeadID, dryRun, force, openBeads)
+}
+
+// unslingHook clears the hook of agentID in townRoot. It reads the process only
+// through its arguments; open supplies the beads databases, so tests run this
+// command path against stubs.
+func unslingHook(cmd *cobra.Command, agentID, townRoot, targetAgent, targetBeadID string, dryRun, force bool, open beadsOpener) error {
 	// Convert agent ID to agent bead ID first, so we can use prefix-based routing
 	agentBeadID := agentIDToBeadID(agentID, townRoot)
 	if agentBeadID == "" {
@@ -118,7 +125,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	}
 	beadsPath := beads.ResolveHookDir(townRoot, agentBeadID, fallbackPath)
 
-	b := openBeads(beadsPath)
+	b := open(beadsPath)
 
 	// Find hooked bead by querying status+assignee directly (hq-l6mm5).
 	// The work bead itself is the authoritative source — no need to read
@@ -135,7 +142,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	// Without this, gt unsling can't find or clear these beads, even though
 	// gt mol status / gt hook (display) can see them. (gt-dtq7)
 	if hookedBeadID == "" && townRoot != "" {
-		hookedBeadID, err = firstTownActiveWorkID(openBeads(filepath.Join(townRoot, ".beads")), agentID)
+		hookedBeadID, err = firstTownActiveWorkID(open(filepath.Join(townRoot, ".beads")), agentID)
 		if err != nil {
 			return err
 		}
@@ -145,7 +152,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 		// Nothing was selected above, but the selection and this sweep are separate
 		// queries: a bead that appears between them still leaves work held by this
 		// agent. Reopen whatever the sweep finds so gt hook and gt unsling agree.
-		cleaned, err := cleanStaleHookedBeads(cmd, b, openBeads, agentID, targetBeadID, townRoot, beadsPath, dryRun)
+		cleaned, err := cleanStaleHookedBeads(cmd, b, open, agentID, targetBeadID, townRoot, beadsPath, dryRun)
 		if err != nil {
 			return err
 		}
@@ -170,7 +177,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	hookedBeadPath := beads.ResolveHookDir(townRoot, hookedBeadID, beadsPath)
 	hookedB := b
 	if hookedBeadPath != beadsPath {
-		hookedB = openBeads(hookedBeadPath)
+		hookedB = open(hookedBeadPath)
 	}
 	hookedBead, showErr := hookedB.Show(hookedBeadID)
 	if err := unslingGuard(hookedBeadID, showErr, force); err != nil {
@@ -208,7 +215,7 @@ func runUnslingWith(cmd *cobra.Command, args []string, dryRun, force bool) error
 	}
 
 	// Log unhook event
-	_ = events.LogFeed(events.TypeUnhook, agentID, events.UnhookPayload(hookedBeadID))
+	_ = events.LogFeedTo(townRoot, events.TypeUnhook, agentID, events.UnhookPayload(hookedBeadID))
 
 	fmt.Printf("%s Work removed from hook\n", style.Bold.Render("✓"))
 	fmt.Printf("  Agent %s hook cleared (was: %s)\n", agentID, hookedBeadID)
@@ -235,9 +242,8 @@ func firstActiveWorkID(b beads.Client, assignee string) (string, error) {
 // one so tests can put a stub behind the town and per-bead databases it reaches.
 type beadsOpener func(path string) beads.Client
 
-// openBeads is the beadsOpener unsling runs with. Tests swap it so the command
-// path runs against a stub behind every database it reaches.
-var openBeads beadsOpener = func(path string) beads.Client { return beads.New(path) }
+// openBeads is the beadsOpener unsling runs with.
+func openBeads(path string) beads.Client { return beads.New(path) }
 
 // firstTownActiveWorkID is firstActiveWorkID against the town database, which
 // holds the hq-* beads hooked to rig-level agents. It tries the exact agent ID,
