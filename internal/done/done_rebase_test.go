@@ -562,6 +562,44 @@ func TestRecoverDivergedPush_ReworkOfRejectedHeadPushesUnderLease(t *testing.T) 
 	}
 }
 
+// A stale worktree whose HEAD is an ancestor of the rejected head carries
+// nothing origin lacks. Its lease push would replace the rejected submission
+// with less of it, so the rework allowance must not apply.
+func TestRecoverDivergedPushReworkRefusesStaleLocal(t *testing.T) {
+	t.Parallel()
+	const stale = "cccc9999dddd8888eeee7777ffff6666aaaa5555"
+	f := reworkFakeGit(reworkTestRejected, reworkTestSeat, reworkTestEmail)
+	f.revs["HEAD"] = stale
+	f.mergeBases = map[[2]string]string{{reworkTestRejected, stale}: stale}
+	f.patchIDLists = map[[2]string][]string{
+		{"base", reworkTestRejected}: {"p-old", "p-origin"},
+		{"base", stale}:              {"p-old"},
+	}
+	commits := []gitpkg.CommitSummary{
+		{SHA: "old", Author: reworkTestSeat, Email: reworkTestEmail, Subject: "feat: earlier submission"},
+		{SHA: reworkTestRejected, Author: reworkTestSeat, Email: reworkTestEmail, Subject: "feat: the rejected submission"},
+	}
+	f.summaries = map[[2]string][]gitpkg.CommitSummary{{"base", reworkTestRejected}: commits}
+	f.fullSummaries = map[[2]string][]gitpkg.CommitSummary{{"base", reworkTestRejected}: commits}
+	rework := reworkPush{rejectedHead: reworkTestRejected, seatAuthor: reworkTestSeat, seatEmail: reworkTestEmail}
+	recovered, diagnosis, err := recoverDivergedPush(f, "origin", "feature:feature", "feature", "origin/main", rework)
+	if recovered {
+		t.Fatal("a stale local head behind the rejected head must not overwrite it under the rework lease")
+	}
+	if err != nil {
+		t.Fatalf("refusal is a diagnosis, not an error: %v", err)
+	}
+	if strings.Contains(diagnosis, "carries the rework") {
+		t.Errorf("diagnosis = %q, must not claim the stale local carries the rework", diagnosis)
+	}
+	if !strings.Contains(diagnosis, "real divergence") {
+		t.Errorf("diagnosis = %q, want the divergence refusal", diagnosis)
+	}
+	if f.leaseCalls != 0 {
+		t.Errorf("lease push must not run, got %d calls", f.leaseCalls)
+	}
+}
+
 func TestRecoverDivergedPush_ReworkWithForeignCommitRefuses(t *testing.T) {
 	t.Parallel()
 	f := reworkFakeGit(reworkTestRejected, "Sloan Ahrens", reworkTestEmail)
