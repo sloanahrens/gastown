@@ -89,7 +89,11 @@ type conflictAdapter struct {
 	files map[string]map[string]bool
 	// rejections is, per bead, the target tip each of its conflict rejections
 	// was built on.
-	rejections     map[string][]string
+	rejections map[string][]string
+	// ownTips is the part of rejections each rejection line named itself. A tip
+	// borrowed from an earlier merge line is stale, so it counts the rejection
+	// but cannot attribute a landing.
+	ownTips        map[string][]string
 	rejectionsRead bool
 }
 
@@ -100,6 +104,7 @@ func newConflictAdapter(town string, openClone func() (conflictRepo, error)) *co
 		landed:     map[string]*land.LandingRecord{},
 		files:      map[string]map[string]bool{},
 		rejections: map[string][]string{},
+		ownTips:    map[string][]string{},
 	}
 }
 
@@ -237,15 +242,17 @@ func (a *conflictAdapter) hasRejection(bead string) bool {
 
 // rejectedAfter reports whether one of bead's conflict rejections was built on
 // a target that already held landed's commit. landed is nil when the other bead
-// never landed, which settles nothing. A rejection whose target the clone
-// cannot trace settles nothing either; the caller then leaves the pair
+// never landed, which settles nothing. Only a rejection's own tip attributes a
+// landing: an ancestry test against a stale tip borrowed from an earlier merge
+// line says nothing about the attempt that conflicted. A rejection whose target
+// the clone cannot trace settles nothing either; the caller then leaves the pair
 // unlabeled, because a conflict it cannot attribute is still no sign of a
 // disjoint pair.
 func (a *conflictAdapter) rejectedAfter(ctx context.Context, bead string, landed *land.LandingRecord) (bool, error) {
 	if landed == nil || landed.LandedCommit == "" {
 		return false, nil
 	}
-	for _, tip := range a.rejections[bead] {
+	for _, tip := range a.ownTips[bead] {
 		res, err := a.isAncestor(ctx, landed.LandedCommit, tip)
 		if err != nil {
 			return false, err
@@ -384,6 +391,7 @@ func (a *conflictAdapter) loadRejections() error {
 		if m := landRejectRe.FindStringSubmatch(line); m != nil && m[2] == string(land.RejectConflict) {
 			if tm := landRejectTipRe.FindStringSubmatch(line); tm != nil {
 				a.rejections[m[1]] = append(a.rejections[m[1]], tm[1])
+				a.ownTips[m[1]] = append(a.ownTips[m[1]], tm[1])
 			} else if tip := tips[m[1]]; tip != "" {
 				a.rejections[m[1]] = append(a.rejections[m[1]], tip)
 			}

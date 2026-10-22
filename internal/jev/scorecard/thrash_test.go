@@ -107,12 +107,13 @@ func thrashLine(t *testing.T, bead string, willRespawn, needsSplit float64) Item
 func thrashPlacement(t *testing.T, bead string, attached time.Time, willRespawn, needsSplit float64) Item {
 	t.Helper()
 	raw, err := json.Marshal(thrash.Line{
-		TS:         time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC),
-		Bead:       bead,
-		AttachedAt: attached,
-		Agent:      "polecat",
-		Answers:    thrash.Answers{WillRespawn: willRespawn, NeedsSplit: needsSplit},
-		Model:      "jev-test",
+		TS:              time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC),
+		Bead:            bead,
+		AttachedAt:      attached,
+		Agent:           "polecat",
+		Answers:         thrash.Answers{WillRespawn: willRespawn, NeedsSplit: needsSplit},
+		Model:           "jev-test",
+		QuestionVersion: thrash.Version,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -410,5 +411,25 @@ func TestScorecardThrashQuestionIDsMatchLogKeys(t *testing.T) {
 	sort.Strings(want)
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("answer keys = %v, want %v", got, want)
+	}
+}
+
+// A line asked under another question set answers a different question, so it
+// is refused rather than pooled into this battery's score.
+func TestThrashParseRejectsForeignQuestionVersion(t *testing.T) {
+	t.Parallel()
+	raw, err := json.Marshal(thrash.Line{
+		TS:              time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC),
+		Bead:            "gt-a",
+		AttachedAt:      time.Date(2026, 10, 21, 8, 0, 0, 0, time.UTC),
+		Answers:         thrash.Answers{WillRespawn: 0.7, NeedsSplit: 0.2},
+		Model:           "jev-test",
+		QuestionVersion: thrash.Version + 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&thrashAdapter{}).Parse(raw); err == nil {
+		t.Error("Parse accepted a line from another question set, want it refused")
 	}
 }

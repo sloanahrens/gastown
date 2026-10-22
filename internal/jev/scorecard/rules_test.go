@@ -3,6 +3,7 @@ package scorecard
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -396,5 +397,27 @@ func TestRulesMissingBeadKeepsARevertGuardLabel(t *testing.T) {
 	lab := labelRules(t, a, rulesRaw(t, "gt-x"))
 	if !lab.Labeled || !lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesRevertGuard {
 		t.Errorf("labeling = %+v for a missing bead with a refusal, want broke true from %s", lab, ruleRulesRevertGuard)
+	}
+}
+
+// TestReadRefusalsIncludesRotatedLedger checks a refusal rotated out to
+// refusals.jsonl.1 still labels its session, rather than reading as no record.
+func TestReadRefusalsIncludesRotatedLedger(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := attention.AppendRefusal(town, attention.Refusal{
+		TS: rulesDoneAt.Add(2 * time.Minute), Bead: "gt-x", Rig: "gastown", Worker: "bullet",
+		Head: "abc1234", Kind: attention.KindRevertGuard, Summary: "reverts a merged commit",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(attention.RefusalsPath(town), attention.RotatedRefusalsPath(town)); err != nil {
+		t.Fatal(err)
+	}
+	a := rulesAdapterAt(town, rulesDoneAt.Add(25*time.Minute), nil)
+
+	lab := labelRules(t, a, rulesRaw(t, "gt-x"))
+	if !lab.Labeled || !lab.Labels[qBrokeStandingRule] || lab.Rule != ruleRulesRevertGuard {
+		t.Errorf("labeling = %+v, want broke true from %s", lab, ruleRulesRevertGuard)
 	}
 }

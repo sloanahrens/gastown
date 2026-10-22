@@ -154,8 +154,9 @@ func TestConflictAdapterLabelsAPair(t *testing.T) {
 			landings: map[string]int{"gt-b": 1, "gt-a": 2},
 			log: func(sha []string) string {
 				// gt-a was merged onto the tip at commit 2, which holds gt-b's
-				// landed commit, and the merge conflicted there.
-				return mergeLine("gt-a", sha[2], sha[2], "cand1") + rejectLine("gt-a", "conflict")
+				// landed commit, and the merge conflicted there. The rejection
+				// names that tip itself.
+				return mergeLine("gt-a", sha[2], sha[2], "cand1") + rejectLineTip("gt-a", "conflict", sha[2])
 			},
 			want: Labeling{Labeled: true, Labels: map[QuestionID]bool{qSameFiles: true}, Rule: ruleConflictRejectedAfterLanding},
 		},
@@ -667,5 +668,35 @@ func TestConflictAdapterFetchTakesTheCloneFetchLock(t *testing.T) {
 	}
 	if counted.synced != 1 {
 		t.Errorf("fetched %d times, want 1", counted.synced)
+	}
+}
+
+// TestRejectedAfterNeedsMoreThanAncestry checks a conflict reached only through
+// a stale target tip does not attribute the pair. The merge line's tip holds
+// gt-b's landing by ancestry, but the rejection names no tip of its own, so the
+// tip is borrowed from the earlier merge. The conflict still rules out a
+// disjoint label, so the pair stays unlabeled.
+func TestRejectedAfterNeedsMoreThanAncestry(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	repo, sha := linearHistory([]map[string]string{
+		{"base.txt": "base"},
+		{"b.go": "b"},
+		{"a.go": "a"},
+	})
+	writeLandings(t, town, sha, map[string]int{"gt-b": 1, "gt-a": 2})
+	writeDaemonLog(t, town, mergeLine("gt-a", sha[2], sha[1], "cand1")+rejectLine("gt-a", "conflict"))
+
+	a := newConflictAdapter(town, func() (conflictRepo, error) { return repo, nil })
+	item, err := a.Parse(conflictLine(t, "gt-b", "gt-a", 0.5, 0.5, 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.Label(context.Background(), item)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (Labeling{}); !reflect.DeepEqual(got, want) {
+		t.Errorf("label = %+v, want %+v", got, want)
 	}
 }

@@ -167,3 +167,30 @@ func TestPrefetchLinesGitFailureLeavesTheCommitsToTheirOwnCalls(t *testing.T) {
 		t.Errorf("git calls after the fallback = %v, want it to ask git itself", git.calls)
 	}
 }
+
+// Priority and Labels are read by the stale and dispatch batteries, so a list
+// and a show that differ only on either disagree, and the check says which.
+func TestLabelFieldsDetectsPriorityAndLabelChange(t *testing.T) {
+	t.Parallel()
+	base := func() *beads.Issue {
+		return &beads.Issue{ID: "gt-a", Status: "open", Priority: 2, Labels: []string{"gt:bug"}}
+	}
+	cases := []struct {
+		name   string
+		change func(*beads.Issue)
+		field  string
+	}{
+		{"priority", func(i *beads.Issue) { i.Priority = 0 }, "priority"},
+		{"labels", func(i *beads.Issue) { i.Labels = []string{"gt:bug", "needs-split"} }, "labels"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			shown := base()
+			c.change(shown)
+			if got := firstLabelFieldDiff(base(), shown); got != c.field {
+				t.Errorf("firstLabelFieldDiff = %q, want %q", got, c.field)
+			}
+		})
+	}
+}

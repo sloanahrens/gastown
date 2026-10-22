@@ -102,6 +102,11 @@ func (a *thrashAdapter) Parse(raw []byte) (Item, error) {
 	if l.Bead == "" || strings.ContainsAny(l.Bead, `/\`) || l.AttachedAt.IsZero() {
 		return Item{}, errors.New("thrash line needs a bead id and an attached_at stamp")
 	}
+	// A line asked under another question set answers a different question, so
+	// it must not pool into this battery's score.
+	if l.QuestionVersion != thrash.Version {
+		return Item{}, fmt.Errorf("thrash line asked question set %d, the scorecard reads %d", l.QuestionVersion, thrash.Version)
+	}
 	noul := func(p float64) Answer { return Answer{Noul: &p} }
 	item := Item{
 		ID:    l.Bead,
