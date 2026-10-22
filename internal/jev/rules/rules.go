@@ -274,11 +274,11 @@ func refusesRequest(err error) bool {
 	return false
 }
 
-// excerpt returns the tail of d's session transcript. A seat with no worktree or
-// no transcript returns errNoTranscript. A transcript that begins after the
-// submission returns errOtherSession, and one with no timestamp returns
-// errNoStart. The containment check's refusal comes back as
-// progress.ErrOutsideTown.
+// excerpt returns the tail of d's session transcript, ending at the submission.
+// A seat with no worktree or no transcript returns errNoTranscript. A
+// transcript that begins after the submission returns errOtherSession, and one
+// with no timestamp returns errNoStart. The containment check's refusal comes
+// back as progress.ErrOutsideTown.
 func (p *Pass) excerpt(d Done) (string, error) {
 	worktree := p.Locate(d.Rig, d.Polecat)
 	if worktree == "" {
@@ -301,7 +301,7 @@ func (p *Pass) excerpt(d Done) (string, error) {
 	if start.After(d.SubmittedAt) {
 		return "", errOtherSession
 	}
-	return progress.TranscriptTail(p.TownRoot, worktree, path, excerptRunes)
+	return progress.TranscriptTail(p.TownRoot, worktree, path, d.SubmittedAt, excerptRunes)
 }
 
 // answersFrom reads the battery's answers out of one Ask result.

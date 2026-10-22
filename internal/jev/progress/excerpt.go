@@ -60,12 +60,14 @@ func TranscriptStart(townRoot, worktree, path string) (time.Time, error) {
 }
 
 // TranscriptTail returns the last maxRunes runes of the activity in the
-// transcript at path, the seat at worktree's transcript. It reads through the
-// same containment check the progress pass uses, so a battery that reads a
-// transcript through this function cannot open one the progress pass would
-// refuse. The text holds each assistant line, tool call and tool result in
-// order, scrubbed of credential-shaped text by the reader.
-func TranscriptTail(townRoot, worktree, path string, maxRunes int) (string, error) {
+// transcript at path, the seat at worktree's transcript, up to and including
+// the events stamped at or before until. Activity after until is left out, so
+// the text ends where the session submitted and not at the time it is read. It
+// reads through the same containment check the progress pass uses, so a battery
+// that reads a transcript through this function cannot open one the progress
+// pass would refuse. The text holds each assistant line, tool call and tool
+// result in order, scrubbed of credential-shaped text by the reader.
+func TranscriptTail(townRoot, worktree, path string, until time.Time, maxRunes int) (string, error) {
 	p := &Pass{TownRoot: townRoot}
 	resolved, reason := p.transcriptPath(Nudge{Transcript: path, Worktree: worktree})
 	switch reason {
@@ -81,6 +83,9 @@ func TranscriptTail(townRoot, worktree, path string, maxRunes int) (string, erro
 	}
 	var b strings.Builder
 	for _, ev := range events {
+		if ev.TS.After(until) {
+			continue
+		}
 		switch ev.Kind {
 		case "tool_call":
 			b.WriteString("[tool " + ev.Name + "] ")
