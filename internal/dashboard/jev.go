@@ -100,11 +100,11 @@ type JevScorecard struct {
 }
 
 // JevTotals sums the batteries for the JEV panel's title line: how many
-// batteries, their lines and labeled lines, and how many questions carry each
+// batteries, their items and labeled items, and how many questions carry each
 // verdict.
 type JevTotals struct {
 	Batteries int `json:"batteries"`
-	Lines     int `json:"lines"`
+	Items     int `json:"items"`
 	Labeled   int `json:"labeled"`
 	Earning   int `json:"earning"`
 	NoSignal  int `json:"no_signal"`
@@ -114,7 +114,10 @@ type JevTotals struct {
 // Tally sets Totals and Unavailable from Batteries. The reader calls it once a
 // read has run every battery, and the hub again after it has put last good
 // lines back, so the page never counts them itself. A failed battery with no
-// line is left out of Totals.Batteries; a kept last good line counts.
+// line is left out of Totals.Batteries; a kept last good line counts. A battery
+// with a Unit is left out of the battery, item and labeled totals, since its
+// packages would swamp a headline about items, while its questions still count
+// in the verdicts.
 func (sc *JevScorecard) Tally() {
 	t := JevTotals{}
 	sc.Unavailable = nil
@@ -125,9 +128,11 @@ func (sc *JevScorecard) Tally() {
 				continue
 			}
 		}
-		t.Batteries++
-		t.Lines += b.Lines
-		t.Labeled += b.Labeled
+		if b.Unit == "" {
+			t.Batteries++
+			t.Items += b.Items
+			t.Labeled += b.Labeled
+		}
 		for _, q := range b.Questions {
 			switch q.Verdict {
 			case "earning":
@@ -142,13 +147,25 @@ func (sc *JevScorecard) Tally() {
 	sc.Totals = t
 }
 
-// JevBattery is one battery's line: how many lines its log holds in the
-// window, how many of them a label rule could label, and each question's
-// verdict.
+// JevPackagesBattery is the battery whose items are packages rather than log
+// lines: the test-selection battery asks one question per package the change
+// would have run.
+const JevPackagesBattery = "testsel"
+
+// JevBattery is one battery's line: how many items its log holds in the
+// window, how many of them a label rule could label, how many its report could
+// not answer for, and each question's verdict.
 type JevBattery struct {
-	Name      string        `json:"name"`
-	Lines     int           `json:"lines"`
-	Labeled   int           `json:"labeled"`
+	Name    string `json:"name"`
+	Items   int    `json:"items"`
+	Labeled int    `json:"labeled"`
+	// Unanswered is how many of the battery's lines the report counted in
+	// lines_skipped: they carried no answer the scorecard could score.
+	Unanswered int `json:"unanswered,omitempty"`
+	// Unit names what Items counts when it is not the other batteries' items:
+	// JevPackagesBattery counts packages, so its row says so and Tally leaves it
+	// out of the title line.
+	Unit      string        `json:"unit,omitempty"`
 	Questions []JevQuestion `json:"questions,omitempty"`
 	// Failed marks a battery whose newest read failed. Kept says the line is
 	// then the last good one; a Failed battery that is not Kept has no line
@@ -172,20 +189,22 @@ type JevQuestion struct {
 }
 
 // ParseJevScorecard folds the JSON `gt jev scorecard --json` prints for one
-// battery into its line. The lines are the parsed items in the window and the
-// labeled count is the items a rule labeled. Anything that is not that report's
-// object is an error, so a command that printed something else reads as a
-// failed read, not as a battery with no log.
+// battery into its line. The items are the parsed lines in the window, the
+// labeled count is the items a rule labeled and the unanswered count is the
+// lines the report skipped. Anything that is not that report's object is an
+// error, so a command that printed something else reads as a failed read, not
+// as a battery with no log.
 func ParseJevScorecard(out []byte) (*JevBattery, error) {
 	out = bytes.TrimSpace(out)
 	if len(out) == 0 || out[0] != '{' {
 		return nil, errors.New("jev scorecard: not a JSON object")
 	}
 	var rep struct {
-		Battery   string `json:"battery"`
-		Items     *int   `json:"items"`
-		Labeled   *int   `json:"labeled"`
-		Questions []struct {
+		Battery      string `json:"battery"`
+		Items        *int   `json:"items"`
+		Labeled      *int   `json:"labeled"`
+		LinesSkipped int    `json:"lines_skipped"`
+		Questions    []struct {
 			ID        string   `json:"id"`
 			Verdict   string   `json:"verdict"`
 			Labeled   int      `json:"labeled"`
@@ -202,7 +221,10 @@ func ParseJevScorecard(out []byte) (*JevBattery, error) {
 	if rep.Battery == "" || rep.Items == nil {
 		return nil, errors.New("jev scorecard: the report has no battery or items")
 	}
-	b := &JevBattery{Name: rep.Battery, Lines: *rep.Items}
+	b := &JevBattery{Name: rep.Battery, Items: *rep.Items, Unanswered: rep.LinesSkipped}
+	if b.Name == JevPackagesBattery {
+		b.Unit = "packages"
+	}
 	// A report without its rows still carries the total; an older one has only
 	// the rows.
 	if rep.Labeled != nil {

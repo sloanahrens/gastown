@@ -90,10 +90,12 @@ lines alone; an empty value leaves the row out.
 JSON (default: gt jev scorecard --json --since 7d). It is split like a shell
 line and run once per registered battery with --battery added, every 15 minutes
 while a page is open. The JEV panel, under the Tier sweeps, draws one line per
-battery: its lines logged, how many of them are labeled, and each question's
-verdict (earning, not-yet or no-signal), such as
+battery: its items logged, how many of them are labeled, how many the report
+skipped as unanswered, and each question's verdict (earning, not-yet or
+no-signal), such as
 finding 212/140 fix_worthy:earning any_duplicate:not-yet. A battery with no log
-in the window shows -. Each run has 60 seconds. A battery whose run fails, times
+in the window shows -. The test-selection battery counts packages rather than
+items: its line says packages and the title line leaves it out. Each run has 60 seconds. A battery whose run fails, times
 out or prints another battery's report drops only its own line (its last good
 line stays, marked stale) and the title names it as unavailable; only when every
 battery fails does the title read unavailable on its own. The Cost panel's spend

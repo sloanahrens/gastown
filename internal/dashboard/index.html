@@ -3243,8 +3243,9 @@ function costJev(box, j, r) {
 }
 
 // The JEV panel, under the Tier sweeps and folded until opened. The title line
-// carries the totals and a chip per verdict; each battery is a table row, its
-// not-yet questions folded behind their count. A failed or stale read says
+// carries the totals, the scorecard window with the read's age, and a chip per
+// verdict; each battery is a table row, its not-yet questions folded behind
+// their count. A failed or stale read says
 // unavailable on the title line and draws no rows, since the last window's
 // verdicts would pass as current. A read that lost only some batteries draws the
 // rest, names the lost ones, and shows a lost battery's last good row marked
@@ -3284,17 +3285,25 @@ function jevQuestionChip(q) {
 
 // jevRow draws one battery: its name and counts, then its questions as chips. A
 // battery with no log in the window is a dash row; a kept or lost line says so
-// in the questions cell.
+// in the questions cell. A battery counting something other than items says its
+// own unit after the count, and one whose report skipped lines says how many
+// went unanswered.
 function jevRow(b) {
   const tr = el("tr", b.failed ? "jvstale" : "");
   tr.append(el("td", "jvname", b.name));
-  const has = b.lines > 0;
-  tr.append(el("td", "n", has ? String(b.lines) : "-"), el("td", "n", has ? String(b.labeled || 0) : "-"));
+  const has = b.items > 0;
+  const items = has ? String(b.items) + (b.unit ? " " + b.unit : "") : "-";
+  tr.append(el("td", "n", items), el("td", "n", has ? String(b.labeled || 0) : "-"));
   const cell = el("td", "jvq");
   tr.append(cell);
   if (b.failed && !b.kept) {
     cell.append(el("span", "empty", "unavailable"));
     return tr;
+  }
+  if (b.unanswered > 0) {
+    const skip = el("span", "empty", b.unanswered + " unanswered");
+    skip.title = "these lines logged no answer";
+    cell.append(skip);
   }
   const qs = b.questions || [];
   // Only not-yet folds, the verdict the title counts under that name. A verdict
@@ -3323,10 +3332,11 @@ function jevRow(b) {
   return tr;
 }
 
-// renderJev draws the JEV panel: the totals as the title line, three verdict
-// counts as chips beside it, then one table row per battery in name order, its
-// earning and no-signal questions as chips and the not-yet ones folded. The
-// counts come from the server's Tally, so the page never adds them up.
+// renderJev draws the JEV panel: the totals as the title line with the
+// scorecard's window and the read's age, three verdict counts as chips beside
+// them, then one table row per battery in name order, its earning and no-signal
+// questions as chips and the not-yet ones folded. The counts come from the
+// server's Tally, so the page never adds them up.
 function renderJev(s) {
   const sec = $("jevsec"), box = $("jev"), note = $("jevnote");
   const sc = s.jev_scorecard, r = readOf(s, "jev_scorecard");
@@ -3342,7 +3352,10 @@ function renderJev(s) {
   }
   const t = sc.totals || {};
   const lost = sc.unavailable || [];
-  note.append(document.createTextNode([(t.batteries || 0) + (t.batteries === 1 ? " battery" : " batteries"), (t.lines || 0) + " lines", (t.labeled || 0) + " labeled"].join(" · ")));
+  const parts = [(t.batteries || 0) + (t.batteries === 1 ? " battery" : " batteries"), (t.items || 0) + " items", (t.labeled || 0) + " labeled"];
+  if (sc.window) parts.push("last " + sc.window);
+  if (r && r.ageSec != null) parts.push("read " + fmtDur(r.ageSec) + " ago");
+  note.append(document.createTextNode(parts.join(" · ")));
   const counts = {earning: t.earning || 0, "no-signal": t.no_signal || 0, "not-yet": t.not_yet || 0};
   for (const v of JV_VERDICTS) note.append(document.createTextNode(" "), jevChip(v, counts[v] + " " + v, JV_MEANING[v]));
   note.title = JV_VERDICTS.map(v => v + ": " + JV_MEANING[v] + ".").join(" ");
@@ -3353,7 +3366,7 @@ function renderJev(s) {
 
   const table = el("table", "jvtable");
   const head = el("tr");
-  head.append(el("th", "", "battery"), el("th", "n", "lines"), el("th", "n", "labeled"), el("th", "", "questions"));
+  head.append(el("th", "", "battery"), el("th", "n", "items"), el("th", "n", "labeled"), el("th", "", "questions"));
   const thead = document.createElement("thead"); thead.append(head); table.append(thead);
   const body = document.createElement("tbody"); table.append(body);
   box.append(table);
