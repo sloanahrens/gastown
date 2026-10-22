@@ -47,8 +47,8 @@ const (
 	// is worth mentioning. The daemon reports UNKNOWN for one tick while it
 	// restarts, and that must never alert.
 	healthUnknownAfter = 5 * time.Minute
-	// healthConfirmPolls is how many consecutive health polls must read
-	// non-green before the town is called red or degraded.
+	// healthConfirmPolls is how many consecutive health polls must read the
+	// same non-green verdict before the town is called red or degraded.
 	healthConfirmPolls = 2
 	// stuckQueueAfter is how long a bead may wait to land before it alerts.
 	stuckQueueAfter = 30 * time.Minute
@@ -225,6 +225,7 @@ func (a *Alerter) healthAlert(next State, now time.Time) (Alert, bool) {
 	if h.ReadAt.Equal(a.lastHealthAt) && h.Verdict == a.lastVerdict {
 		return Alert{}, false
 	}
+	prev := a.lastVerdict
 	a.lastHealthAt, a.lastVerdict = h.ReadAt, h.Verdict
 
 	switch h.Verdict {
@@ -251,6 +252,11 @@ func (a *Alerter) healthAlert(next State, now time.Time) (Alert, bool) {
 		return al, ok
 	case "red", "degraded":
 		a.unknownSince = time.Time{}
+		if h.Verdict != prev {
+			// The streak counts polls of one verdict, so red after degraded
+			// confirms on its own polls.
+			a.healthStreak = 0
+		}
 		a.healthStreak++
 		sev, level, key, title := healthRedSev, LevelCrit, keyHealthRed, "town health is red"
 		if h.Verdict == "degraded" {
