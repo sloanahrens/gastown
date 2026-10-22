@@ -694,8 +694,8 @@ type Daemon struct {
 	jevProgressRunning atomic.Bool
 	jevProgressOpen    func(townRoot string, q *progress.Queue, s progress.Settings, warnings io.Writer) (*progress.Pass, error)
 	// jevProgressLatest finds a seat's live transcript from its worktree when a
-	// nudge is queued. Nil means agentlog.LatestTranscript; a test sets it so
-	// the lookup does not reach the Claude config dir.
+	// nudge is queued. Nil means agentlog.LatestTranscript for the town root; a
+	// test sets it so the lookup does not reach the Claude config dir.
 	jevProgressLatest func(workDir string) (string, error)
 
 	// jevStaleRunning is the jev_stale read's single-flight guard

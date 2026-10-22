@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 	"unicode"
@@ -21,6 +22,11 @@ const (
 	// claudeProjectsSubdir is the projects directory inside the resolved Claude
 	// config dir (config.ClaudeConfigDir(), i.e. $CLAUDE_CONFIG_DIR or ~/.claude).
 	claudeProjectsSubdir = "projects"
+
+	// townConfigDir is the town's Claude config tree, under the town root. Seats
+	// spawned with CLAUDE_CONFIG_DIR at it log under its projects directory, which
+	// the daemon's own config dir does not name.
+	townConfigDir = ".claude-town"
 )
 
 // claudeProjectDirFor returns the primary Claude Code project directory for
@@ -33,7 +39,7 @@ const (
 // -…-gastown--repo-git. On Windows, backslashes are converted to forward
 // slashes and the drive letter (e.g. "C:") is stripped before hashing.
 func claudeProjectDirFor(workDir string) (string, error) {
-	dirs, err := claudeProjectDirsFor(workDir)
+	dirs, err := claudeProjectDirsFor("", workDir)
 	if err != nil {
 		return "", err
 	}
@@ -42,7 +48,8 @@ func claudeProjectDirFor(workDir string) (string, error) {
 
 // claudeProjectDirsFor returns every Claude Code project directory that can
 // hold transcripts for workDir: the configured config dir's first, then the
-// default ~/.claude one.
+// default ~/.claude one, then the town's own .claude-town one when townRoot is
+// set.
 //
 // The config dir is a property of the process, not of the worktree. A seat
 // spawned with CLAUDE_CONFIG_DIR (…/gt/.claude-town) logs under that root,
@@ -50,8 +57,9 @@ func claudeProjectDirFor(workDir string) (string, error) {
 // needs the credentials only that root holds) logs under the other. Resolving
 // against one root hides the other root's live sessions, which reads as
 // activity_source=none and silently disables transcript-based liveness checks
-// for that whole seat class (gt-jxfe).
-func claudeProjectDirsFor(workDir string) ([]string, error) {
+// for that whole seat class (gt-jxfe). The town's root is named by the caller,
+// because the daemon's own environment does not carry the seats' config dir.
+func claudeProjectDirsFor(townRoot, workDir string) ([]string, error) {
 	hash, err := claudeProjectHashFor(workDir)
 	if err != nil {
 		return nil, err
@@ -64,7 +72,7 @@ func claudeProjectDirsFor(workDir string) ([]string, error) {
 	if herr != nil {
 		home = ""
 	}
-	return claudeProjectRoots(hash, configDir, home), nil
+	return claudeProjectRoots(hash, configDir, home, townRoot), nil
 }
 
 // claudeProjectHashFor returns the project-directory name Claude Code uses
@@ -86,8 +94,9 @@ func claudeProjectHashFor(workDir string) (string, error) {
 
 // claudeProjectRoots returns the project directories for hash under the
 // resolved Claude config dir and, when home is known (non-empty), under the
-// pre-CLAUDE_CONFIG_DIR ~/.claude.
-func claudeProjectRoots(hash, configDir, home string) []string {
+// pre-CLAUDE_CONFIG_DIR ~/.claude. When townRoot is non-empty it also returns
+// the town's own .claude-town projects directory for hash, last.
+func claudeProjectRoots(hash, configDir, home, townRoot string) []string {
 	dirs := []string{filepath.Join(configDir, claudeProjectsSubdir, hash)}
 
 	// Second root: the pre-CLAUDE_CONFIG_DIR location. Identical to the first
@@ -96,6 +105,14 @@ func claudeProjectRoots(hash, configDir, home string) []string {
 	if home != "" {
 		if legacy := filepath.Join(home, claudeProjectsDir, hash); legacy != dirs[0] {
 			dirs = append(dirs, legacy)
+		}
+	}
+
+	// Third root: the town's config tree. Identical to the first when the
+	// configured dir is the town's own, so it is dropped the same way.
+	if townRoot != "" {
+		if town := filepath.Join(townRoot, townConfigDir, claudeProjectsSubdir, hash); !slices.Contains(dirs, town) {
+			dirs = append(dirs, town)
 		}
 	}
 	return dirs
@@ -133,15 +150,17 @@ func ClaudeProjectDirIn(configDir, workDir string) (string, error) {
 }
 
 // ProjectDirsFor returns every Claude Code project directory LatestTranscript
-// searches for workDir, in search order. It is the one place a caller learns
-// where a seat's transcripts can sit, so a reader can allow exactly those
-// directories and no others.
-func ProjectDirsFor(workDir string) ([]string, error) {
-	return claudeProjectDirsFor(workDir)
+// searches for workDir under the town root townRoot, in search order. It is the
+// one place a caller learns where a seat's transcripts can sit, so a reader can
+// allow exactly those directories and no others.
+func ProjectDirsFor(townRoot, workDir string) ([]string, error) {
+	return claudeProjectDirsFor(townRoot, workDir)
 }
 
 // LatestTranscript returns the most recently modified transcript (JSONL) for
-// workDir across every root that can hold one, or "" when none does.
+// workDir across every root that can hold one, or "" when none does. townRoot
+// names the town whose .claude-town projects directory is searched too; "" leaves
+// it out.
 //
 // Its modification time is the authoritative "last real work" timestamp for a
 // Claude Code session: Claude appends to it on conversation events (tool calls,
@@ -150,8 +169,8 @@ func ProjectDirsFor(workDir string) ([]string, error) {
 // Callers that judge staleness must still check that the transcript they get
 // postdates the session they are judging, since a reused worktree keeps its
 // predecessor's transcripts.
-func LatestTranscript(workDir string) (string, error) {
-	dirs, err := claudeProjectDirsFor(workDir)
+func LatestTranscript(townRoot, workDir string) (string, error) {
+	dirs, err := claudeProjectDirsFor(townRoot, workDir)
 	if err != nil {
 		return "", err
 	}

@@ -116,6 +116,9 @@ func (d *Daemon) assessSeat(seat supervisor.Seat, in liveness.Input) liveness.Re
 	if in.Session == "" {
 		in.Session = seat.SessionName()
 	}
+	if in.TownRoot == "" {
+		in.TownRoot = d.config.TownRoot
+	}
 	in.Prev = rec.Progress
 	if in.Now.IsZero() {
 		in.Now = d.clk().Now()

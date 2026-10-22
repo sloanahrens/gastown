@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/agentlog"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
@@ -708,5 +710,65 @@ func TestJevProgressSymlinkOutOfProjectsDirIsRefused(t *testing.T) {
 	lines := readLog(t, LogPath(town))
 	if len(lines) != 1 || lines[0].Reason != ReasonOutsideTown {
 		t.Fatalf("log = %+v, want one line with reason %s", lines, ReasonOutsideTown)
+	}
+}
+
+// The default projects directories for a worktree include the town's own
+// .claude-town projects directory, so a seat that logs there is in the
+// allow-list the progress pass reads transcripts against.
+func TestJevProgressDefaultProjectDirsIncludeTownConfig(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	worktree := filepath.Join(town, "gastown", "polecats", "ace", "gastown")
+	dir, err := agentlog.ClaudeProjectDirIn(filepath.Join(town, ".claude-town"), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newPass(t, town, &fakeAsker{}, &Queue{})
+
+	roots, err := p.allowedRoots(worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(roots, want) {
+		t.Errorf("allowedRoots = %q, want the town's projects dir %q", roots, want)
+	}
+}
+
+// A seat that logs under the town's .claude-town tree is read by the progress
+// pass with the default projects directories: the nudge's transcript is in the
+// worktree's directory there, and the answers reach the asker.
+func TestJevProgressTownConfigTranscriptIsRead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	worktree := filepath.Join(town, "gastown", "polecats", "ace", "gastown")
+	dir, err := agentlog.ClaudeProjectDirIn(filepath.Join(town, ".claude-town"), worktree)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := writeTranscriptIn(t, dir, line("assistant", "2026-10-21T00:25:00Z", textBlock("working")))
+	q := &Queue{}
+	n := nudgeFor(path)
+	n.Worktree = worktree
+	q.Push(n)
+	asker := &fakeAsker{ans: fixtureAnswers()}
+	p := newPass(t, town, asker, q)
+
+	if _, err := p.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if asker.calls != 1 {
+		t.Errorf("Ask calls = %d, want 1: a transcript under the town's config tree is read", asker.calls)
+	}
+	lines := readLog(t, LogPath(town))
+	if len(lines) != 1 || lines[0].Reason != "" || lines[0].Answers == nil {
+		t.Fatalf("log = %+v, want one line with answers", lines)
 	}
 }
