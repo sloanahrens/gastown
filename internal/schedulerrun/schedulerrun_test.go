@@ -130,6 +130,52 @@ func TestPlanSkipsRigHeldHeadOfQueueBeforeBatching(t *testing.T) {
 	}
 }
 
+// When the hold covers every ready bead, the plan must say so: "none" would
+// tell the operator nothing is queued.
+func TestPlanReportsRigHeldWhenEveryReadyBeadIsHeld(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.WriteFile(filepath.Join(townRoot, "ESTOP.gastown"), []byte("manual\t2026-10-22T00:00:00Z\tt\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ready := []capacity.PendingBead{
+		{ID: "ctx-1", WorkBeadID: "gt-a", TargetRig: "gastown"},
+		{ID: "ctx-2", WorkBeadID: "gt-b", TargetRig: "gastown"},
+	}
+
+	r := &runner{}
+	plan := r.planDispatch(townRoot, 2, 2, ready)
+
+	if len(plan.ToDispatch) != 0 || plan.Skipped != 2 || plan.Reason != ReasonRigHeld {
+		t.Fatalf("plan = %+v, want nothing dispatched, skipped=2, reason=%s", plan, ReasonRigHeld)
+	}
+
+	// No ready beads at all is still "none": the reason is for held beads only.
+	if none := r.planDispatch(townRoot, 2, 2, nil); none.Reason != "none" || none.Skipped != 0 {
+		t.Fatalf("empty plan = %+v, want reason=none, skipped=0", none)
+	}
+}
+
+func TestPrintDispatchNoOpReportsRigHeld(t *testing.T) {
+	t.Parallel()
+	r := &runner{}
+	out := captureTo(func(w io.Writer) {
+		r.opts.Out = w
+		r.printDispatchNoOp(capacity.DispatchReport{Reason: ReasonRigHeld, Skipped: 2}, Seats{})
+	})
+	if !strings.Contains(out, "2 ready bead(s) held by a rig ESTOP") {
+		t.Fatalf("rig-held output = %q", out)
+	}
+
+	out = captureTo(func(w io.Writer) {
+		r.opts.Out = w
+		r.printDryRunPlanFor(capacity.DispatchPlan{Skipped: 2, Reason: ReasonRigHeld}, Seats{Max: 2, Free: 2}, 5)
+	})
+	if !strings.Contains(out, "2 ready bead(s) held by a rig ESTOP") {
+		t.Fatalf("dry-run rig-held output = %q", out)
+	}
+}
+
 func TestValidateDryRunDropsRigHeldBeads(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()

@@ -13,6 +13,10 @@ import (
 	"github.com/steveyegge/gastown/internal/style"
 )
 
+// ReasonRigHeld is the plan reason when every candidate's target rig is held
+// by its own ESTOP.<rig>.
+const ReasonRigHeld = "rig-held"
+
 // validateForDispatch refuses a planned bead before the sling runs.
 //
 // Cross-rig prefix guard (gt-el4): a bead whose ID prefix does not match the
@@ -93,6 +97,11 @@ func (r *runner) validateDryRun(townRoot string, plan capacity.DispatchPlan) cap
 // must not take the batch slot, or every bead behind it starves (gt-duisv).
 func (r *runner) planDispatch(townRoot string, freeSeats, batchSize int, ready []capacity.PendingBead) capacity.DispatchPlan {
 	dispatchable := r.dropRigHeldBeads(townRoot, capacity.DispatchPlan{ToDispatch: ready})
+	if len(dispatchable.ToDispatch) == 0 && dispatchable.Skipped > 0 {
+		// Every ready bead is held. PlanDispatch on an empty list would say
+		// "none", which tells the operator nothing is queued.
+		return dispatchable
+	}
 	plan := capacity.PlanDispatch(freeSeats, batchSize, dispatchable.ToDispatch)
 	plan.Skipped += dispatchable.Skipped
 	return plan
@@ -101,19 +110,25 @@ func (r *runner) planDispatch(townRoot string, freeSeats, batchSize int, ready [
 // dropRigHeldBeads removes from the plan every bead whose target rig is held
 // by its own ESTOP.<rig> (dispatch.RigHold), counting each as skipped rather
 // than failed: the bead's sling context stays open and queued, so the first
-// run after the rig is released dispatches it (gt-ifijm).
+// run after the rig is released dispatches it (gt-ifijm). When the hold leaves
+// nothing to dispatch the plan's Reason becomes ReasonRigHeld.
 func (r *runner) dropRigHeldBeads(townRoot string, plan capacity.DispatchPlan) capacity.DispatchPlan {
 	kept := plan.ToDispatch[:0:0]
+	held := 0
 	for _, b := range plan.ToDispatch {
 		if reason := dispatch.RigHold(townRoot, b.TargetRig); reason != "" {
 			r.eprintf("%s Not dispatching %s → %s: %s\n",
 				style.Dim.Render("○"), b.WorkBeadID, b.TargetRig, reason)
 			plan.Skipped++
+			held++
 			continue
 		}
 		kept = append(kept, b)
 	}
 	plan.ToDispatch = kept
+	if held > 0 && len(kept) == 0 {
+		plan.Reason = ReasonRigHeld
+	}
 	return plan
 }
 

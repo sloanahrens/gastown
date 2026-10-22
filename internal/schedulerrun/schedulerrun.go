@@ -498,6 +498,9 @@ func (r *runner) printDispatchNoOp(report capacity.DispatchReport, seats Seats) 
 	case "capacity":
 		fmt.Fprintf(w, "\n%s No capacity: %d ready bead(s) waiting (working: %d recovery_blocked: %d reservations: %d reusable_idle: %d parked: %d pending_mr: %d)\n",
 			style.Dim.Render("○"), report.Skipped, seats.Working, seats.RecoveryBlocked, seats.Reservations, seats.ReusableIdle, seats.Parked, seats.PendingMR)
+	case ReasonRigHeld:
+		fmt.Fprintf(w, "\n%s No dispatchable beads: %d ready bead(s) held by a rig ESTOP\n",
+			style.Dim.Render("○"), report.Skipped)
 	default:
 		fmt.Fprintf(w, "\n%s No dispatchable beads (reason: %s, skipped: %d)\n",
 			style.Dim.Render("○"), report.Reason, report.Skipped)
@@ -525,6 +528,8 @@ func (r *runner) printDryRunPlanFor(plan capacity.DispatchPlan, seats Seats, bat
 			fmt.Fprintf(w, "No capacity: %s, %d ready bead(s) waiting\n", capStr, totalReady)
 		case "validation":
 			fmt.Fprintf(w, "No dispatchable beads: validation failed for %d candidate(s)\n", totalReady)
+		case ReasonRigHeld:
+			fmt.Fprintf(w, "No dispatchable beads: %d ready bead(s) held by a rig ESTOP\n", totalReady)
 		default:
 			fmt.Fprintf(w, "No dispatchable beads: reason=%s, %d candidate(s) skipped\n", plan.Reason, totalReady)
 		}
