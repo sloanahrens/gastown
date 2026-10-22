@@ -473,3 +473,24 @@ func TestNewsPollFallsInsideTheSnapshotItReads(t *testing.T) {
 	require.NotZero(t, c.NewsEvery, "the pane needs a poll of its own")
 	assert.Less(t, c.NewsEvery, newsRefresh, "a poll on the snapshot's own edge can serve it and lose the refresh")
 }
+
+// A refresh that lost an item to an error and so came back with fewer stories
+// than the last good feed does not replace it: the thinner list would read as
+// fresh for five minutes. The pane keeps the full five at their own read time
+// and says why.
+func TestTopStoriesPartialReadKeepsLastGood(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+	stub := newsTestStub(at)
+	reader, advance := newsTestClock(t, stub, at)
+
+	good := reader.Read()
+	require.Len(t, good.Stories, newsStories)
+
+	advance(newsRefresh)
+	stub.setFailItems(11, 12, 13, 14)
+	partial := reader.Read()
+	assert.Equal(t, "http 500", partial.Error)
+	assert.Equal(t, good.Stories, partial.Stories, "the pane keeps the last full five over one story and four errors")
+	assert.Equal(t, good.At, partial.At, "and their own read time, so the pane ages them")
+}

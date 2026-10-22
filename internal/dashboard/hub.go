@@ -27,7 +27,8 @@ type Hub struct {
 	jevGood  map[string]time.Time // battery -> when its line last read good
 
 	// cloudAt is the last cloud read and cloudMissing whether that machine had
-	// no cloud patrol, which is what re-reads one at the slow interval only.
+	// no cloud patrol and no app power line, which is what re-reads one at the
+	// slow interval only.
 	cloudAt      *time.Time
 	cloudMissing bool
 
@@ -493,7 +494,10 @@ func (h *Hub) pollCloud() {
 	defer h.mu.Unlock()
 	h.state.Cloud = c
 	h.cloudAt = &now
-	h.cloudMissing = c.NoPatrol
+	// The app power line rides this poll, so a machine with apps to show is
+	// read at the page's rate even with no patrol: a stop or start must not sit
+	// stale for the slow interval.
+	h.cloudMissing = c.NoPatrol && c.Apps == nil
 	h.publishLocked()
 }
 
