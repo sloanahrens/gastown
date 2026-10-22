@@ -159,3 +159,94 @@ func TestChannelAndAnnounceMessages(t *testing.T) {
 		t.Fatalf("announce messages = %+v, want [%s %s] newest first", ann, newer, old)
 	}
 }
+
+// A release by someone who holds no claim changes nothing and says so, rather
+// than reporting success for a message it did not release.
+func TestReleaseQueueMessage_NonClaimantGetsError(t *testing.T) {
+	t.Parallel()
+	bd := beadsfake.New()
+	m := createMessage(t, bd, "held", "gt:message", "queue:work")
+	holder, stranger := "gastown/crew/ann", "gastown/crew/bob"
+	if err := claimQueueMessage(bd, m, holder, time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+
+	err := releaseQueueMessage(bd, m, stranger)
+	if err == nil || !strings.Contains(err.Error(), "not claimed by "+stranger) {
+		t.Fatalf("release by non-claimant err = %v, want not-claimed-by error", err)
+	}
+	info, err := getQueueMessageInfo(bd, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ClaimedBy != holder || info.ClaimedAt == nil {
+		t.Fatalf("info = %+v, want the holder's claim untouched", info)
+	}
+
+	// Releasing twice is the same mistake: the second release is an error.
+	if err := releaseQueueMessage(bd, m, holder); err != nil {
+		t.Fatal(err)
+	}
+	if err := releaseQueueMessage(bd, m, holder); err == nil {
+		t.Fatal("second release succeeded, want not-claimed error")
+	}
+}
+
+// racingReleaseClient runs a rival's release between the releaser's read and
+// its write, the interleaving that leaves each side believing the other still
+// holds the message.
+type racingReleaseClient struct {
+	beads.Client
+	messageID string
+	rival     string
+	once      bool
+}
+
+func (c *racingReleaseClient) Update(id string, opts beads.UpdateOptions) error {
+	if !c.once && id == c.messageID && len(opts.RemoveLabels) > 0 {
+		c.once = true
+		if err := c.Client.Update(id, beads.UpdateOptions{RemoveLabels: []string{"claimed-by:" + c.rival}}); err != nil {
+			return err
+		}
+	}
+	return c.Client.Update(id, opts)
+}
+
+// When the winner releases while the loser's release is in flight, neither
+// removes the claimed-at labels; the loser's release clears them afterwards so
+// the message returns to the unclaimed list.
+func TestReleaseQueueMessage_ConcurrentReleaseLeavesNoOrphanedClaimedAt(t *testing.T) {
+	t.Parallel()
+	fake := beadsfake.New()
+	m := createMessage(t, fake, "contested", "gt:message", "queue:work")
+	winner, loser := "gastown/crew/ann", "gastown/crew/bob"
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	if err := claimQueueMessage(fake, m, winner, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := claimQueueMessage(fake, m, loser, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	bd := &racingReleaseClient{Client: fake, messageID: m, rival: winner}
+	if err := releaseQueueMessage(bd, m, loser); err != nil {
+		t.Fatal(err)
+	}
+
+	issue, err := fake.Show(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range issue.Labels {
+		if strings.HasPrefix(l, "claimed-by:") || strings.HasPrefix(l, "claimed-at:") {
+			t.Fatalf("label %q survived both releases; labels = %v", l, issue.Labels)
+		}
+	}
+	unclaimed, err := listUnclaimedQueueMessages(fake, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unclaimed) != 1 || unclaimed[0].ID != m {
+		t.Fatalf("unclaimed = %+v, want %s back in the queue", unclaimed, m)
+	}
+}

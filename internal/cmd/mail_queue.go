@@ -337,6 +337,10 @@ func getQueueMessageInfo(bd beads.Client, messageID string) (*queueMessageInfo, 
 // rival claim remains; they are removed with the last claimed-by. The labels
 // go in a single bd command to prevent orphans if the process crashes between
 // separate removal steps.
+//
+// A claimant who holds no claim on the message gets an error, not a silent
+// success, so a caller releasing the wrong message or releasing twice learns
+// the message did not change.
 func releaseQueueMessage(bd beads.Client, messageID, claimant string) error {
 	issue, err := bd.Show(messageID)
 	if errors.Is(err, beads.ErrNotFound) {
@@ -360,7 +364,7 @@ func releaseQueueMessage(bd beads.Client, messageID, claimant string) error {
 		}
 	}
 	if !ownClaim {
-		return nil
+		return fmt.Errorf("message %s is not claimed by %s", messageID, claimant)
 	}
 
 	labelsToRemove := []string{own}
@@ -368,11 +372,49 @@ func releaseQueueMessage(bd beads.Client, messageID, claimant string) error {
 		labelsToRemove = append(labelsToRemove, claimedAt...)
 	}
 
-	err = bd.Update(messageID, beads.UpdateOptions{RemoveLabels: labelsToRemove})
+	if err := removeQueueLabels(bd, messageID, labelsToRemove); err != nil {
+		return err
+	}
+	if !rivals {
+		return nil
+	}
+	return sweepOrphanedClaimedAt(bd, messageID)
+}
+
+// removeQueueLabels removes labels from a message; a label already gone is
+// not an error.
+func removeQueueLabels(bd beads.Client, messageID string, labels []string) error {
+	err := bd.Update(messageID, beads.UpdateOptions{RemoveLabels: labels})
 	if err != nil && !strings.Contains(bdErrOutput(err), "does not have label") {
 		return err
 	}
 	return nil
+}
+
+// sweepOrphanedClaimedAt removes the claimed-at labels left on a message that
+// no longer carries any claimed-by label. releaseQueueMessage decides from a
+// read taken before it writes, so when the winner and a loser release at the
+// same moment each sees the other's claimed-by, keeps the claimed-at labels,
+// and both leave. An orphaned claimed-at keeps the message out of the
+// unclaimed list, so a release that saw a rival re-reads after writing.
+func sweepOrphanedClaimedAt(bd beads.Client, messageID string) error {
+	issue, err := bd.Show(messageID)
+	if err != nil {
+		return err
+	}
+	var claimedAt []string
+	for _, label := range issue.Labels {
+		switch {
+		case strings.HasPrefix(label, "claimed-by:"):
+			return nil
+		case strings.HasPrefix(label, "claimed-at:"):
+			claimedAt = append(claimedAt, label)
+		}
+	}
+	if len(claimedAt) == 0 {
+		return nil
+	}
+	return removeQueueLabels(bd, messageID, claimedAt)
 }
 
 // Queue management commands (beads-native)
