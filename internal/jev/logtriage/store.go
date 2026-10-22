@@ -65,6 +65,21 @@ type Line struct {
 	Model string `json:"model"`
 	// Reason names why a group has no answers: one of the Reason constants.
 	Reason string `json:"reason,omitempty"`
+	// Detail names the check the reply failed, one of the jev Check constants.
+	// Set only on a bad_response line.
+	Detail string `json:"detail,omitempty"`
+	// Question is the id of the question whose answer failed. Set only on a
+	// bad_response line.
+	Question string `json:"question,omitempty"`
+	// Value is the number the failed check read, for the sum and range checks.
+	// Nil on every other line.
+	Value *float64 `json:"value,omitempty"`
+	// RequestChars is the size of the request in characters: the state's JSON
+	// and the question instructions. Set only on a bad_response line.
+	RequestChars int `json:"request_chars,omitempty"`
+	// SampleCount is the number of sample lines the request carried. Set only
+	// on a bad_response line.
+	SampleCount int `json:"sample_count,omitempty"`
 }
 
 // Cursor is how far into the daemon log a pass has read. Inode names the file
