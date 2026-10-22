@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -223,8 +224,10 @@ func undockRig(bd beads.Client, rigBeadID, rigName string) error {
 }
 
 // IsRigDocked checks if a rig is docked by checking for the status:docked label
-// on the rig identity bead. This function is exported for use by the daemon.
-func IsRigDocked(townRoot, rigName, prefix string) bool {
+// on the rig identity bead. A missing identity bead (beads.ErrNotFound) means
+// not docked. Any other read failure is returned: the rig's state is unknown,
+// and answering false would let a docked rig be started.
+func IsRigDocked(townRoot, rigName, prefix string) (bool, error) {
 	// Construct the rig beads path
 	rigPath := filepath.Join(townRoot, rigName)
 	beadsPath := filepath.Join(rigPath, "mayor", "rig")
@@ -232,18 +235,18 @@ func IsRigDocked(townRoot, rigName, prefix string) bool {
 		beadsPath = rigPath
 	}
 
-	bd := beads.New(beadsPath)
-	rigBeadID := beads.RigBeadIDWithPrefix(prefix, rigName)
+	return rigBeadDocked(beads.New(beadsPath), beads.RigBeadIDWithPrefix(prefix, rigName))
+}
 
+// rigBeadDocked reports whether the rig identity bead carries the docked label.
+func rigBeadDocked(bd beads.Client, rigBeadID string) (bool, error) {
 	rigBead, err := bd.Show(rigBeadID)
+	if errors.Is(err, beads.ErrNotFound) {
+		return false, nil
+	}
 	if err != nil {
-		return false
+		return false, fmt.Errorf("reading rig identity bead %s: %w", rigBeadID, err)
 	}
 
-	for _, label := range rigBead.Labels {
-		if label == RigDockedLabel {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(rigBead.Labels, RigDockedLabel), nil
 }
