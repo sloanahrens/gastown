@@ -15,6 +15,13 @@ func healthAt(verdict string, at time.Time) State {
 	return State{Health: Health{Line: verdict + " summary", Verdict: verdict, ReadAt: at}}
 }
 
+// observeHealth feeds one health reading taken d after alertBase, moving the
+// alerter's clock to the same instant.
+func observeHealth(a *Alerter, clock *time.Time, verdict string, d time.Duration) []Alert {
+	*clock = alertBase.Add(d)
+	return a.Observe(State{}, healthAt(verdict, *clock), nil)
+}
+
 func alertsWithKey(alerts []Alert, key string) []Alert {
 	var out []Alert
 	for _, a := range alerts {
@@ -102,15 +109,14 @@ func TestUnknownAlertsOnlyAfterFiveMinutes(t *testing.T) {
 }
 
 // An UNKNOWN alert stands for the UNKNOWN run only: a town that then goes red
-// without passing through green still raises the red crit, once, and degraded
-// followed by red does the same. A lower verdict after a higher one stays quiet.
+// without passing through green still raises the red crit, once. A lower
+// verdict after a higher one stays quiet.
 func TestUnknownAlertDoesNotSuppressRed(t *testing.T) {
 	t.Parallel()
 	now := alertBase
 	a := NewAlerter(func() time.Time { return now })
 	observe := func(verdict string, d time.Duration) []Alert {
-		now = alertBase.Add(d)
-		return a.Observe(State{}, healthAt(verdict, now), nil)
+		return observeHealth(a, &now, verdict, d)
 	}
 
 	observe("unknown", 0)
@@ -137,22 +143,31 @@ func TestUnknownAlertDoesNotSuppressRed(t *testing.T) {
 	if len(got) != 1 || got[0].Key != "health:recovered" {
 		t.Fatalf("green -> %+v, want one health:recovered", got)
 	}
+}
 
-	// Degraded then red: red outranks it and fires its own key.
+// Degraded then red: red is its own verdict, so it takes two red polls of its
+// own to confirm, and then it outranks the degraded alert with its own key.
+func TestDegradedThenRedConfirmsRedSeparately(t *testing.T) {
+	t.Parallel()
+	now := alertBase
 	b := NewAlerter(func() time.Time { return now })
-	step := func(verdict string, d time.Duration) []Alert {
-		now = alertBase.Add(d)
-		return b.Observe(State{}, healthAt(verdict, now), nil)
+	observe := func(verdict string, d time.Duration) []Alert {
+		return observeHealth(b, &now, verdict, d)
 	}
-	step("degraded", 0)
-	if got := step("degraded", 5*time.Second); len(got) != 1 || got[0].Key != "health:degraded" {
+
+	observe("degraded", 0)
+	if got := observe("degraded", 5*time.Second); len(got) != 1 || got[0].Key != "health:degraded" {
 		t.Fatalf("two degraded polls -> %+v, want one health:degraded", got)
 	}
-	if got := step("red", 10*time.Second); len(got) != 1 || got[0].Key != "health:red" || got[0].Level != LevelCrit {
-		t.Fatalf("red after degraded -> %+v, want one crit on health:red", got)
+	if got := observe("red", 10*time.Second); len(got) != 0 {
+		t.Fatalf("one red poll after degraded alerted: %+v", got)
 	}
-	if got := step("red", 15*time.Second); len(got) != 0 {
-		t.Fatalf("a second red poll repeated the alert: %+v", got)
+	got := observe("red", 15*time.Second)
+	if len(got) != 1 || got[0].Key != "health:red" || got[0].Level != LevelCrit {
+		t.Fatalf("two red polls after degraded -> %+v, want one crit on health:red", got)
+	}
+	if got := observe("red", 20*time.Second); len(got) != 0 {
+		t.Fatalf("a third red poll repeated the alert: %+v", got)
 	}
 }
 
