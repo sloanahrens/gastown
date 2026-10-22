@@ -66,32 +66,9 @@ func init() {
 			if err != nil {
 				return nil, err
 			}
-			return lockedConflictRepo{
-				conflictRepo: c,
-				lock:         func(ctx context.Context) (func(), error) { return submission.WaitFetchLock(ctx, townRoot) },
-			}, nil
+			return submission.FetchLocked{Cloner: c, TownRoot: townRoot}, nil
 		})
 	})
-}
-
-// lockedConflictRepo fetches the submission battery's bare clone under the
-// clone's fetch lock. The clone is shared: the submission pass fetches under that
-// lock, so a fetch that skipped it would fail one of the two. Run reads the
-// clone and takes no lock.
-type lockedConflictRepo struct {
-	conflictRepo
-	// lock takes the clone's fetch lock, waiting for its holder.
-	lock func(ctx context.Context) (func(), error)
-}
-
-// Sync waits for the clone's fetch lock, then fetches.
-func (r lockedConflictRepo) Sync(ctx context.Context) error {
-	release, err := r.lock(ctx)
-	if err != nil {
-		return err
-	}
-	defer release()
-	return r.conflictRepo.Sync(ctx)
 }
 
 // conflictAdapter scores the conflict log. Its labels come from two sources:

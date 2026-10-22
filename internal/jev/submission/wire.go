@@ -108,12 +108,7 @@ type lockedGit struct {
 
 // Sync takes the clone's fetch lock, then fetches.
 func (g lockedGit) Sync(ctx context.Context) error {
-	release, err := WaitFetchLock(ctx, g.townRoot)
-	if err != nil {
-		return err
-	}
-	defer release()
-	return g.Git.Sync(ctx)
+	return syncUnderFetchLock(ctx, g.townRoot, g.Git.Sync)
 }
 
 // rigOriginURL is the URL the pass clones from: the rig registry's git_url,

@@ -644,10 +644,7 @@ func TestConflictAdapterFetchTakesTheCloneFetchLock(t *testing.T) {
 	repo, _ := linearHistory([]map[string]string{{"base.txt": "base"}})
 	counted := &syncCounter{conflictRepo: repo}
 	a := newConflictAdapter(town, func() (conflictRepo, error) {
-		return lockedConflictRepo{
-			conflictRepo: counted,
-			lock:         func(ctx context.Context) (func(), error) { return submission.WaitFetchLock(ctx, town) },
-		}, nil
+		return submission.FetchLocked{Cloner: counted, TownRoot: town}, nil
 	})
 
 	release, err := battery.Lock(submission.FetchLockPath(town))

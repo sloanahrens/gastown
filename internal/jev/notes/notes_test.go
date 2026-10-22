@@ -350,6 +350,19 @@ func TestRunKeepsGoingAfterAnUnreadableMemoryFile(t *testing.T) {
 	}
 }
 
+// fetchLockedRepo is the fake repo with its fetch routed through the shared
+// fetch-lock wrapper the way wire.go routes the clone's.
+type fetchLockedRepo struct {
+	Repo
+	fetch submission.FetchLocked
+}
+
+func (r fetchLockedRepo) Sync(ctx context.Context) error { return r.fetch.Sync(ctx) }
+
+func lockedFake(repo *fakeRepo, town string) Repo {
+	return fetchLockedRepo{Repo: repo, fetch: submission.FetchLocked{Cloner: repo, TownRoot: town}}
+}
+
 // A fetch into the submission battery's shared clone waits for a fetch in
 // flight instead of racing it: two fetches into one clone fail each other, and
 // that failure lost the whole week's pass. Before the fix the fetch ran under
@@ -358,10 +371,7 @@ func TestNotesFetchTakesTheCloneLock(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	r := newRig(t, map[string]string{"current.md": currentNote})
-	r.pass.Repo = lockedRepo{
-		repo: r.repo,
-		lock: func(ctx context.Context) (func(), error) { return submission.WaitFetchLock(ctx, town) },
-	}
+	r.pass.Repo = lockedFake(r.repo, town)
 
 	hold, err := battery.Lock(submission.FetchLockPath(town))
 	if err != nil {
@@ -393,10 +403,7 @@ func TestNotesFetchDoesNotWaitOnASubmissionPass(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	r := newRig(t, map[string]string{"current.md": currentNote})
-	r.pass.Repo = lockedRepo{
-		repo: r.repo,
-		lock: func(ctx context.Context) (func(), error) { return submission.WaitFetchLock(ctx, town) },
-	}
+	r.pass.Repo = lockedFake(r.repo, town)
 
 	pass, err := battery.Lock(submission.CursorPath(town) + ".lock")
 	if err != nil {
