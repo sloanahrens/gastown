@@ -111,6 +111,18 @@ type JevTotals struct {
 	NotYet    int `json:"not_yet"`
 }
 
+// MarshalJSON serves the totals' count under both names the state has carried:
+// items, the panel's word, and lines, the key /api/state sent before the rename,
+// so a reader of the older name gets the same number rather than an absent
+// field (gt-5enkg).
+func (t JevTotals) MarshalJSON() ([]byte, error) {
+	type totals JevTotals
+	return json.Marshal(struct {
+		totals
+		Lines int `json:"lines"`
+	}{totals(t), t.Items})
+}
+
 // Tally sets Totals and Unavailable from Batteries. The reader calls it once a
 // read has run every battery, and the hub again after it has put last good
 // lines back, so the page never counts them itself. A failed battery with no
@@ -172,6 +184,16 @@ type JevBattery struct {
 	// and only its name is real.
 	Failed bool `json:"failed,omitempty"`
 	Kept   bool `json:"kept,omitempty"`
+}
+
+// MarshalJSON serves a battery's count under both items and lines, for the
+// reason JevTotals.MarshalJSON gives (gt-5enkg).
+func (b JevBattery) MarshalJSON() ([]byte, error) {
+	type battery JevBattery
+	return json.Marshal(struct {
+		battery
+		Lines int `json:"lines"`
+	}{battery(b), b.Items})
 }
 
 // JevQuestion is a question's verdict: earning, not-yet or no-signal, with the
