@@ -3,6 +3,7 @@ package cmd
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -307,5 +309,37 @@ func TestMigrateParkedRigsNamesTheRegistryItWroteTo(t *testing.T) {
 	}
 	if want := `mayor/town.json (section "registry")`; !strings.Contains(got, want) {
 		t.Errorf("migrate output = %q, want it to name %q", got, want)
+	}
+}
+
+// unavailableShowBeads is a beads.Client whose Show fails the way bd does when
+// it cannot answer (a timeout, a crash), which is not the same as the bead
+// being absent.
+type unavailableShowBeads struct{ beads.Client }
+
+func (unavailableShowBeads) Show(string) (*beads.Issue, error) {
+	return nil, fmt.Errorf("%w: dolt timeout", beads.ErrUnavailable)
+}
+
+// TestUndockRig_ShowErrorIsNotNotDocked: when the identity bead cannot be read,
+// undock must fail rather than report the rig as not docked and exit 0, which
+// would leave status:docked in place.
+func TestUndockRig_ShowErrorIsNotNotDocked(t *testing.T) {
+	t.Parallel()
+	err := undockRig(unavailableShowBeads{}, "gt-gastown", "gastown")
+	if err == nil {
+		t.Fatal("undockRig with unreadable identity bead = nil; want error")
+	}
+	if !errors.Is(err, beads.ErrUnavailable) {
+		t.Errorf("undockRig error = %v; want it to wrap beads.ErrUnavailable", err)
+	}
+}
+
+// TestUndockRig_ShowNotFoundIsNotDocked: a legacy rig with no identity bead is
+// not docked, so undock reports that and succeeds.
+func TestUndockRig_ShowNotFoundIsNotDocked(t *testing.T) {
+	t.Parallel()
+	if err := undockRig(notFoundBeads{}, "gt-gastown", "gastown"); err != nil {
+		t.Errorf("undockRig with no identity bead = %v; want nil", err)
 	}
 }
