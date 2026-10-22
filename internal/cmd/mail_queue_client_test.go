@@ -52,7 +52,7 @@ func TestQueueMessages_ClaimAndRelease(t *testing.T) {
 		t.Fatalf("info after claim = %+v", info)
 	}
 
-	if err := releaseQueueMessage(bd, first); err != nil {
+	if err := releaseQueueMessage(bd, first, "gastown/crew/ann"); err != nil {
 		t.Fatal(err)
 	}
 	info, err = getQueueMessageInfo(bd, first)
@@ -61,6 +61,67 @@ func TestQueueMessages_ClaimAndRelease(t *testing.T) {
 	}
 	if info.ClaimedBy != "" || info.ClaimedAt != nil {
 		t.Fatalf("info after release = %+v, want no claim", info)
+	}
+}
+
+// Two agents racing to claim M both leave claim labels. The loser's release
+// removes only its own, so the winner keeps the claim and M stays out of the
+// unclaimed list.
+func TestReleaseQueueMessage_LoserDoesNotEraseWinnersClaim(t *testing.T) {
+	t.Parallel()
+	bd := beadsfake.New()
+	m := createMessage(t, bd, "contested", "gt:message", "queue:work")
+	winner, loser := "gastown/crew/ann", "gastown/crew/bob"
+	now := time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
+	if err := claimQueueMessage(bd, m, winner, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := claimQueueMessage(bd, m, loser, now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := releaseQueueMessage(bd, m, loser); err != nil {
+		t.Fatal(err)
+	}
+
+	issue, err := bd.Show(m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var claimedBy []string
+	for _, l := range issue.Labels {
+		if strings.HasPrefix(l, "claimed-by:") {
+			claimedBy = append(claimedBy, l)
+		}
+	}
+	if len(claimedBy) != 1 || claimedBy[0] != "claimed-by:"+winner {
+		t.Fatalf("claimed-by labels = %v, want only the winner's", claimedBy)
+	}
+	info, err := getQueueMessageInfo(bd, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ClaimedBy != winner {
+		t.Fatalf("ClaimedBy = %q, want winner %q", info.ClaimedBy, winner)
+	}
+	unclaimed, err := listUnclaimedQueueMessages(bd, "work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unclaimed) != 0 {
+		t.Fatalf("unclaimed = %+v, want none while the winner holds it", unclaimed)
+	}
+
+	// The winner releasing last clears the claim, claimed-at included.
+	if err := releaseQueueMessage(bd, m, winner); err != nil {
+		t.Fatal(err)
+	}
+	info, err = getQueueMessageInfo(bd, m)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ClaimedBy != "" || info.ClaimedAt != nil {
+		t.Fatalf("info after both releases = %+v, want no claim", info)
 	}
 }
 
