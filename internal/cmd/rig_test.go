@@ -384,3 +384,77 @@ func TestRigBeadDocked(t *testing.T) {
 		})
 	}
 }
+
+// stubDockPolecatSessions is a dockPolecatSessions with canned answers that
+// counts StopAll calls.
+type stubDockPolecatSessions struct {
+	infos    []polecat.SessionInfo
+	listErr  error
+	stopErr  error
+	stopCall int
+}
+
+func (s *stubDockPolecatSessions) List() ([]polecat.SessionInfo, error) {
+	return s.infos, s.listErr
+}
+
+func (s *stubDockPolecatSessions) StopAll(bool) error {
+	s.stopCall++
+	return s.stopErr
+}
+
+// TestStopDockedPolecats_ListErrorIsReturned: a polecat session list that cannot
+// be read fails the dock. Skipping the stop block would write the docked label
+// while the sessions still run.
+func TestStopDockedPolecats_ListErrorIsReturned(t *testing.T) {
+	t.Parallel()
+	listErr := errors.New("tmux boom")
+	stub := &stubDockPolecatSessions{listErr: listErr}
+	stopped, err := stopDockedPolecats(stub)
+	if err == nil {
+		t.Fatal("stopDockedPolecats with unreadable session list = nil; want error")
+	}
+	if !errors.Is(err, listErr) {
+		t.Errorf("stopDockedPolecats error = %v; want it to wrap %v", err, listErr)
+	}
+	if stub.stopCall != 0 {
+		t.Errorf("StopAll calls = %d; want 0", stub.stopCall)
+	}
+	if len(stopped) != 0 {
+		t.Errorf("stopped = %q; want none", stopped)
+	}
+}
+
+// TestStopDockedPolecats: with a readable session list, docking stops the polecat
+// sessions it found and reports them. No sessions stops nothing, and a failed
+// stop is a warning, not an error, as before.
+func TestStopDockedPolecats(t *testing.T) {
+	t.Parallel()
+	infos := []polecat.SessionInfo{{Polecat: "furiosa", Running: true}}
+	tests := []struct {
+		name     string
+		stub     stubDockPolecatSessions
+		wantStop int
+		wantOut  []string
+	}{
+		{"no sessions", stubDockPolecatSessions{}, 0, nil},
+		{"stopped", stubDockPolecatSessions{infos: infos}, 1, []string{"1 polecat session(s) stopped"}},
+		{"stop error", stubDockPolecatSessions{infos: infos, stopErr: errors.New("kill failed")}, 1, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			stub := tt.stub // a copy: the subtests run in parallel
+			stopped, err := stopDockedPolecats(&stub)
+			if err != nil {
+				t.Fatalf("stopDockedPolecats = %v; want nil", err)
+			}
+			if !slices.Equal(stopped, tt.wantOut) {
+				t.Errorf("stopped = %q; want %q", stopped, tt.wantOut)
+			}
+			if stub.stopCall != tt.wantStop {
+				t.Errorf("StopAll calls = %d; want %d", stub.stopCall, tt.wantStop)
+			}
+		})
+	}
+}
