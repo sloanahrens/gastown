@@ -36,25 +36,28 @@ const (
 // respawned.
 const respawnThreshold = 2
 
-// thrashAdapter labels the thrash log from two files the town already keeps:
-// the bead respawn counts and the overrun guard's records. Both are read-only.
-// A file that is missing labels nothing. A file that is there but does not
-// read or parse also labels nothing, and Context reports it, so the report
-// shows the gap instead of reading it as a bead with no data.
+// thrashAdapter labels the thrash log from two read-only files the town keeps:
+// the bead respawn counts and the overrun guard's records. A file that is
+// missing labels nothing; one that does not read or parse also labels nothing
+// and Context says so, so the report shows the gap rather than a bead with no
+// data.
 type thrashAdapter struct {
 	town string
 
 	// counts caches the respawn counts file, reread when it changes.
 	counts countsCache
 
-	// newest is each bead's latest placement in the batch Prefetch saw.
-	newest map[string]time.Time
+	// newest is each bead's latest placement in the batch Prefetch saw, and
+	// batched says Prefetch ran at all.
+	newest  map[string]time.Time
+	batched bool
 
-	// respawnBroken is true when the last Label found the respawn counts file
-	// unreadable. overrunBroken counts the lines whose overrun record was
-	// unreadable. Context reports both.
+	// respawnBroken marks a respawn counts file the last Label could not read;
+	// overrunBroken and unbatched count the lines left unlabeled without an
+	// overrun record or a batch. Context reports all three.
 	respawnBroken bool
 	overrunBroken int
+	unbatched     int
 }
 
 // respawnRecord is one bead's entry in the respawn counts file.
@@ -79,6 +82,8 @@ func (a *thrashAdapter) LogPath() string { return thrash.LogPath(a.town) }
 // Prefetch finds each bead's newest placement, so Label can tell a placement a
 // later one followed from the newest, which no respawn has had time to follow.
 func (a *thrashAdapter) Prefetch(_ context.Context, items []Item) {
+	a.batched = true
+	a.unbatched = 0
 	a.newest = map[string]time.Time{}
 	for _, it := range items {
 		if it.Time.After(a.newest[it.ID]) {
@@ -154,17 +159,25 @@ func (a *thrashAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 }
 
 // willRespawn says whether a respawn followed the placement item, and whether
-// the placement is labeled at all. A count below respawnThreshold is a first
-// run, so its placements are negatives. A respawn stamped after the placement
-// makes it a positive. Otherwise a later placement of the bead settles it as a
-// negative, and the newest placement stays unlabeled because no respawn has had
-// the chance to follow it yet. A placement Prefetch did not see counts as newest.
+// the record can tell. A count below respawnThreshold is a first run, a
+// negative. Without a last_respawn stamp the record cannot place a respawn
+// against a placement, so nothing is labeled. A respawn stamped after the
+// placement is a positive; otherwise a later placement of the bead settles it as
+// a negative and the newest stays unlabeled, since no respawn has had the chance
+// to follow it yet.
 func (a *thrashAdapter) willRespawn(item Item, rec respawnRecord) (will, known bool) {
 	if rec.Count < respawnThreshold {
 		return false, true
 	}
+	if rec.LastRespawn.IsZero() {
+		return false, false
+	}
 	if rec.LastRespawn.After(item.Time) {
 		return true, true
+	}
+	if !a.batched {
+		a.unbatched++
+		return false, false
 	}
 	newest, ok := a.newest[item.ID]
 	if !ok || !item.Time.Before(newest) {
@@ -182,6 +195,9 @@ func (a *thrashAdapter) Context() []string {
 	}
 	if a.overrunBroken > 0 {
 		lines = append(lines, fmt.Sprintf("overrun-guard records are unreadable: needs_split is left unlabeled on %d line(s)", a.overrunBroken))
+	}
+	if a.unbatched > 0 {
+		lines = append(lines, fmt.Sprintf("the placements were not batched: will_respawn is left unlabeled on %d line(s)", a.unbatched))
 	}
 	return lines
 }
