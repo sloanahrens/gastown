@@ -500,6 +500,73 @@ func TestRigConfigSyncCheck_FixMissingMetadataUsesRegistryDatabase(t *testing.T)
 	}
 }
 
+// TestRigDoltDatabase: the database a rig's beads use when its metadata.json
+// names none. The registry's dolt_database wins; a registry that records none
+// for the rig, or no registry at all, falls back to the rig name.
+func TestRigDoltDatabase(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		rigsJSON string // "" writes no rigs.json
+		want     string
+	}{
+		{
+			name: "registry records dolt_database",
+			rigsJSON: `{"version": 1, "rigs": {"testrig": {
+				"git_url": "https://github.com/test/test.git",
+				"dolt_database": "testrig_db",
+				"beads": {"prefix": "tr"}
+			}}}`,
+			want: "testrig_db",
+		},
+		{
+			name: "registry entry has no dolt_database",
+			rigsJSON: `{"version": 1, "rigs": {"testrig": {
+				"git_url": "https://github.com/test/test.git",
+				"beads": {"prefix": "tr"}
+			}}}`,
+			want: "testrig",
+		},
+		{
+			name: "registry has no entry for the rig",
+			rigsJSON: `{"version": 1, "rigs": {"otherrig": {
+				"git_url": "https://github.com/test/other.git",
+				"dolt_database": "otherrig_db",
+				"beads": {"prefix": "or"}
+			}}}`,
+			want: "testrig",
+		},
+		{
+			name: "no rigs registry",
+			want: "testrig",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			tmpDir := t.TempDir()
+			mayorDir := filepath.Join(tmpDir, "mayor")
+			if err := os.MkdirAll(mayorDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"type":"town","version":1,"name":"test"}`), 0644); err != nil {
+				t.Fatal(err)
+			}
+			if tt.rigsJSON != "" {
+				if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(tt.rigsJSON), 0644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			if got := rigDoltDatabase(tmpDir, "testrig"); got != tt.want {
+				t.Fatalf("rigDoltDatabase(testrig) = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRigConfigSyncCheck_FixCreatesMissingRootMetadata(t *testing.T) {
 	t.Parallel()
 
