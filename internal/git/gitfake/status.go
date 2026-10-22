@@ -114,6 +114,10 @@ func (h *handle) checkUncommittedWork(local bool) (*git.UncommittedWorkStatus, e
 	p, err := h.preservation(r, wt, branch, "origin", nil, true, local)
 	switch {
 	case errors.Is(err, errNoComparisonRefs):
+	case errors.Is(err, git.ErrComparisonUnjudgeable):
+		// git.Git returns the status it read beside this error, so a caller
+		// that does not use the count can go on with the rest.
+		return status, fmt.Errorf("checking unpushed commits: %w", err)
 	case err != nil:
 		return nil, fmt.Errorf("checking unpushed commits: %w", err)
 	default:
@@ -326,11 +330,13 @@ func (h *handle) preservation(r *repo, wt *worktree, localBranch, remote string,
 			result = candidate
 		}
 	}
-	if judged || result.ComparisonBase != "" {
+	// Test judged alone, as git.Git does: a ComparisonBase named by the
+	// exact-branch arm proves nothing was compared.
+	if judged {
 		return result, nil
 	}
 	if lastErr != nil {
-		return result, lastErr
+		return result, fmt.Errorf("%w: %w", git.ErrComparisonUnjudgeable, lastErr)
 	}
 	return result, fmt.Errorf("no usable comparison refs")
 }

@@ -1,6 +1,7 @@
 package gitfake
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -679,6 +680,43 @@ func RunBranchContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 		env.CommitWorktree(t, fx.clone, "local only")
 		if st, err := g.CheckUncommittedWork(); err != nil || st.UnpushedCommits == 0 {
 			t.Errorf("live check of local-only work = %+v, %v; want it flagged", st, err)
+		}
+	})
+
+	t.Run("a comparison nothing can judge is unjudgeable, not preserved", func(t *testing.T) {
+		t.Parallel()
+		fx, g := newWtFixture(t, newEnv(t))
+		env := fx.env.(BranchEnv)
+		// The remote's polecat/x has a tip this clone never fetched. The
+		// exact-branch arm names that tip as the comparison, and nothing can
+		// judge it.
+		env.Commit(t, fx.origin, "polecat/x", "elsewhere", map[string]string{"e.txt": "e\n"})
+		// Start from a commit, not origin/main: a remote-tracking start point
+		// makes the branch track main, and the upstream then judges it.
+		if err := g.CheckoutNewBranch("polecat/x", fx.base); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(fx.clone, "x.txt"), "x\n")
+		env.CommitWorktree(t, fx.clone, "local only")
+
+		st, err := g.BranchPreservationStatus("polecat/x", "origin", nil)
+		if !errors.Is(err, git.ErrComparisonUnjudgeable) || st.Preserved {
+			t.Errorf("unjudged exact tip = %+v, %v; want ErrComparisonUnjudgeable and no verdict", st, err)
+		}
+
+		// A caller that does not use the count still needs the worktree facts,
+		// which come back beside the error.
+		if s, err := g.CheckUncommittedWork(); !errors.Is(err, git.ErrComparisonUnjudgeable) || s == nil {
+			t.Errorf("unjudged CheckUncommittedWork = %+v, %v; want the status read so far beside ErrComparisonUnjudgeable", s, err)
+		}
+
+		// Once the clone fetches the tip, the same comparison can be judged.
+		if err := g.Fetch("origin"); err != nil {
+			t.Fatal(err)
+		}
+		st, err = g.BranchPreservationStatus("polecat/x", "origin", nil)
+		if err != nil || st.Preserved || st.UnpreservedPatchCount == 0 || st.ComparisonBase != "origin/polecat/x" {
+			t.Errorf("judged exact tip = %+v, %v; want unpreserved work against origin/polecat/x", st, err)
 		}
 	})
 }
