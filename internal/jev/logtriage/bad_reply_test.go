@@ -1,6 +1,7 @@
 package logtriage
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -38,6 +39,40 @@ func TestJevLogtriageBadReplyLogsTheCheck(t *testing.T) {
 	assert.NotContains(t, string(raw), "outside 0 to", "the error's text stays out of the line")
 	assert.NotContains(t, string(raw), "unusable", "the error's text stays out of the line")
 	assert.NotContains(t, string(raw), "jev-1.13.0", "the reply's own text stays out of the line")
+}
+
+// bareBadReply is an Asker that returns the bare ErrBadResponse sentinel, not
+// the typed *jev.BadResponse: the reply failed in a way that names no check.
+type bareBadReply struct{}
+
+func (bareBadReply) Ask(context.Context, any, map[string]jev.Question) (*jev.Answers, error) {
+	return nil, jev.ErrBadResponse
+}
+
+// TestJevLogtriageBadReplyWithoutACheck: a bad response that is not a typed
+// *jev.BadResponse still logs bad_response with the request's size and sample
+// count, and leaves the check, question and value empty rather than guessing.
+func TestJevLogtriageBadReplyWithoutACheck(t *testing.T) {
+	t.Parallel()
+	fx := newFixture(t)
+	fx.logLines(lineWarn)
+	fx.pass.Asker = bareBadReply{}
+
+	fx.run()
+	lines := fx.triage()
+	require.Len(t, lines, 1)
+	line := lines[0]
+	assert.Equal(t, ReasonBadResponse, line.Reason)
+	assert.Empty(t, line.Detail)
+	assert.Empty(t, line.Question)
+	assert.Nil(t, line.Value)
+	assert.Equal(t, 1, line.SampleCount)
+	assert.Positive(t, line.RequestChars)
+	assert.Nil(t, line.Answers)
+
+	raw, err := os.ReadFile(fx.pass.LogPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "unusable", "the error's text stays out of the line")
 }
 
 // TestJevLogtriageGoodLineHasNoFailureFields: a line whose call answered is
