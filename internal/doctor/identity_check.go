@@ -55,48 +55,27 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Get active tmux sessions for cross-reference
-	// Build a set containing both session names AND session IDs
-	// because locks may store either format
+	// Get active tmux sessions for cross-reference. A failed listing is kept,
+	// not returned: only locks that name a session need it.
 	lister := c.lister
 	if lister == nil {
 		lister = tmux.NewTmux()
 	}
-	sessionSet := make(map[string]bool)
-
-	// Get session names. A failed listing leaves the set incomplete, so no
-	// lock can be called stale or orphaned from it.
-	sessions, err := lister.ListSessions() // Returns session names
-	if err != nil {
-		return identityListingUnknown(c.Name(), err)
-	}
-	for _, s := range sessions {
-		sessionSet[s] = true
-	}
-
-	// Also get session IDs to handle locks that store ID instead of name
-	// Lock files may contain session_id in formats like "%55" or "$55"
-	sessionIDs, err := lister.ListSessionIDs() // Returns map[name]id
-	if err != nil {
-		return identityListingUnknown(c.Name(), err)
-	}
-	for _, id := range sessionIDs {
-		sessionSet[id] = true
-		// Also add alternate formats
-		if len(id) > 0 {
-			if id[0] == '$' {
-				sessionSet["%"+id[1:]] = true // $55 -> %55
-			} else if id[0] == '%' {
-				sessionSet["$"+id[1:]] = true // %55 -> $55
-			}
-		}
-	}
+	sessionSet, listErr := identitySessionSet(lister)
 
 	var staleLocks []string
 	var orphanedLocks []string
 	var healthyLocks int
+	var unknownLocks int
 
 	for workerDir, info := range locks {
+		// Only a lock that names a session needs the listing; one without
+		// is decided by its PID alone.
+		if info.SessionID != "" && listErr != nil {
+			unknownLocks++
+			continue
+		}
+
 		// First check if the session exists in tmux - that's the real indicator
 		// of whether the worker is alive. The PID in the lock is the spawning
 		// process, which may have exited even though Claude is still running.
@@ -130,6 +109,9 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 
 	// Build result
 	if len(staleLocks) == 0 && len(orphanedLocks) == 0 {
+		if unknownLocks > 0 {
+			return identityListingUnknown(c.Name(), listErr)
+		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -168,11 +150,51 @@ func (c *IdentityCollisionCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
+	if unknownLocks > 0 {
+		result.Message += fmt.Sprintf(", %d lock(s) state unknown: could not list tmux sessions: %v",
+			unknownLocks, listErr)
+	}
+
 	return result
 }
 
-// identityListingUnknown is the result when tmux cannot list its sessions: the
-// locks cannot be cross-referenced, so their state is unknown, not stale.
+// identitySessionSet returns the tmux session names and IDs that locks are
+// cross-referenced against. A failed listing leaves the set incomplete, so the
+// caller must not call a lock stale or orphaned from it.
+func identitySessionSet(lister identitySessionLister) (map[string]bool, error) {
+	sessionSet := make(map[string]bool)
+
+	sessions, err := lister.ListSessions() // Returns session names
+	if err != nil {
+		return nil, err
+	}
+	for _, s := range sessions {
+		sessionSet[s] = true
+	}
+
+	// Also get session IDs to handle locks that store ID instead of name
+	// Lock files may contain session_id in formats like "%55" or "$55"
+	sessionIDs, err := lister.ListSessionIDs() // Returns map[name]id
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range sessionIDs {
+		sessionSet[id] = true
+		// Also add alternate formats
+		if len(id) > 0 {
+			if id[0] == '$' {
+				sessionSet["%"+id[1:]] = true // $55 -> %55
+			} else if id[0] == '%' {
+				sessionSet["$"+id[1:]] = true // %55 -> $55
+			}
+		}
+	}
+
+	return sessionSet, nil
+}
+
+// identityListingUnknown is the result when tmux cannot list its sessions and
+// no lock could be judged without them: their state is unknown, not stale.
 func identityListingUnknown(name string, err error) *CheckResult {
 	return &CheckResult{
 		Name:    name,
