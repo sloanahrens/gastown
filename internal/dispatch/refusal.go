@@ -60,17 +60,31 @@ var rigUnavailableLine = regexp.MustCompile(
 	`(?:^|: )(` + regexp.QuoteMeta(RigUnavailableMarker) + `(?:(?:parked|docked) )?rig "(?:[^"\\]|\\.)*"(?::|$))`,
 )
 
+// duplicateRefusalLine matches the closing line of the duplicate-content refusal
+// (sling.DecideDuplicates). The report's first line leads with "✗" and gives no
+// count, so the closing line is the one an automatic dispatcher can find by its
+// text: "Refusing to sling <bead>: N overlapping bead(s) share the test(s) above;
+// re-sling with --force …". It carries no SlingRefusalMarker, so without this
+// match a scheduled run refused for overlapping content reads as a failed run
+// (gt-g1xiy). Only the blocking report prints this line: an overlap that only
+// warns proceeds and is not a refusal.
+var duplicateRefusalLine = regexp.MustCompile(
+	`(?:^|: )(Refusing to sling \S+: \d+ overlapping bead\(s\) share the test\(s\) above)`,
+)
+
 // SlingRefusalLine extracts a refusal of any kind from a failed sling's output
 // or error text, reporting false for every other failure. It is the one
 // predicate an automatic dispatcher uses to tell "not this sling's to take"
 // from "this sling failed": the SlingRefusalMarker guards, the re-sling guard
-// (ReslingRefusalMarker) and a rig that is e-stopped, parked or docked
-// (rigUnavailableLine). The line is returned from the marker on, as
-// SlingRefusalReason does, so it is the guard's own sentence.
+// (ReslingRefusalMarker), a rig that is e-stopped, parked or docked
+// (rigUnavailableLine), and the duplicate-content guard (duplicateRefusalLine).
+// The line is returned from the marker on, as SlingRefusalReason does, so it is
+// the guard's own sentence.
 //
 // internal/cmd also recognizes two typed refusals through errors.Is
 // (sling.ErrRigUnavailable, the duplicate-content guard). A subprocess's caller
-// cannot see a type, so the rig one is matched here by its text.
+// cannot see a type, so the rig and duplicate ones are matched here by their
+// text.
 func SlingRefusalLine(text string) (string, bool) {
 	return firstRefusal(text, refusalIndex)
 }
@@ -97,6 +111,9 @@ func refusalIndex(line string) int {
 	note(strings.Index(line, SlingRefusalMarker))
 	note(strings.Index(line, ReslingRefusalMarker))
 	if m := rigUnavailableLine.FindStringSubmatchIndex(line); m != nil {
+		note(m[2])
+	}
+	if m := duplicateRefusalLine.FindStringSubmatchIndex(line); m != nil {
 		note(m[2])
 	}
 	return first

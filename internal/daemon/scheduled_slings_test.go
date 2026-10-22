@@ -884,6 +884,35 @@ func TestScheduledSlingParkedRigDefers(t *testing.T) {
 	}
 }
 
+// TestScheduledSlingDuplicateContentDefers: a run the duplicate-content guard
+// refuses for overlapping work in flight is a refusal, the same as a parked rig:
+// the patrol logs a deferral and the failure counter stays put, however many
+// ticks it lasts (gt-g1xiy). The error is the exec runner's wrapping of the
+// closing line of the report, as the subprocess's stderr delivers it.
+func TestScheduledSlingDuplicateContentDefers(t *testing.T) {
+	t.Parallel()
+	const refusal = "gt sling gt-x: exit status 1: Refusing to sling gt-x: 1 overlapping bead(s) share the test(s) above; re-sling with --force if this is genuinely distinct: gt sling gt-x <target> --force"
+	f := &fakeScheduledRunner{createID: "gt-x", slingErr: errors.New(refusal), now: time.Now()}
+	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	for range scheduledSlingEscalateAfter + 1 {
+		d.runScheduledSlings()
+	}
+	if got := d.scheduledSlingFailures["doc-audit"]; got != 0 {
+		t.Errorf("failure count = %d, want 0: a duplicate-content refusal is not a failed run", got)
+	}
+	if len(*esc) != 0 {
+		t.Errorf("duplicate-content refusals must not escalate, got %v", *esc)
+	}
+	if !strings.Contains(logs.String(), "deferred") {
+		t.Errorf("want a deferral logged, log:\n%s", logs.String())
+	}
+	if strings.Contains(logs.String(), "failure ") {
+		t.Errorf("a duplicate-content refusal is not a failure; log:\n%s", logs.String())
+	}
+}
+
 func TestSlingErrorLineKeepsTheRefusalLine(t *testing.T) {
 	t.Parallel()
 	stderr := "[sling] step admission took 1s (total 1s)\n" +
