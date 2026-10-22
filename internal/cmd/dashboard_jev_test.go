@@ -259,10 +259,10 @@ func TestDashboardJevScorecardRunsOncePerBattery(t *testing.T) {
 	if sc.Window != "7d" || len(sc.Batteries) != 2 {
 		t.Fatalf("scorecard = %+v", *sc)
 	}
-	if b := sc.Batteries[0]; b.Name != "finding" || b.Lines != 2 || b.Labeled != 1 || len(b.Questions) != 1 {
+	if b := sc.Batteries[0]; b.Name != "finding" || b.Items != 2 || b.Labeled != 1 || len(b.Questions) != 1 {
 		t.Errorf("finding line = %+v", b)
 	}
-	if b := sc.Batteries[1]; b.Name != "landing" || b.Lines != 0 {
+	if b := sc.Batteries[1]; b.Name != "landing" || b.Items != 0 {
 		t.Errorf("landing line = %+v", b)
 	}
 	var lines []string
@@ -273,7 +273,7 @@ func TestDashboardJevScorecardRunsOncePerBattery(t *testing.T) {
 	if want := []string{"gt jev scorecard --json --since 7d --battery finding", "gt jev scorecard --json --since 7d --battery landing"}; !reflect.DeepEqual(lines, want) {
 		t.Errorf("ran %q, want %q", lines, want)
 	}
-	if want := (dashboard.JevTotals{Batteries: 2, Lines: 2, Labeled: 1, Earning: 1}); sc.Totals != want {
+	if want := (dashboard.JevTotals{Batteries: 2, Items: 2, Labeled: 1, Earning: 1}); sc.Totals != want {
 		t.Errorf("Totals = %+v, want %+v", sc.Totals, want)
 	}
 }
@@ -330,7 +330,7 @@ func TestDashboardJevScorecardFailureDropsOnlyThatBattery(t *testing.T) {
 			got.Batteries[0].Failed || !got.Batteries[1].Failed || got.Batteries[1].Kept {
 			t.Errorf("%s: scorecard = %+v, want finding drawn and landing a placeholder", name, *got)
 		}
-		if got.Totals.Batteries != 1 || got.Totals.Lines != 1 {
+		if got.Totals.Batteries != 1 || got.Totals.Items != 1 {
 			t.Errorf("%s: Totals = %+v, want only finding counted", name, got.Totals)
 		}
 	}
@@ -372,8 +372,10 @@ func TestDashboardJevScorecardOneFailingOneTimingOutAmongFive(t *testing.T) {
 	if want := []string{"dispatch", "drift"}; !reflect.DeepEqual(got.Unavailable, want) {
 		t.Errorf("Unavailable = %q, want %q", got.Unavailable, want)
 	}
-	if got.Totals.Batteries != 3 || got.Totals.Lines != 9 {
-		t.Errorf("Totals = %+v, want the three good batteries", got.Totals)
+	// testsel's row is drawn with the others, but its packages are no part of
+	// the title line's batteries and items.
+	if got.Totals.Batteries != 2 || got.Totals.Items != 6 {
+		t.Errorf("Totals = %+v, want the two good batteries that count items", got.Totals)
 	}
 }
 
@@ -483,5 +485,16 @@ func TestDashboardJevScorecardRunsBatteriesTogether(t *testing.T) {
 	}
 	if !reflect.DeepEqual(names, batteries) {
 		t.Errorf("battery order = %q, want %q", names, batteries)
+	}
+}
+
+// The dashboard leaves the packages battery out of the JEV title line by name,
+// so its name must be the one the scorecard registry gives the test-selection
+// battery.
+func TestDashboardJevPackagesBatteryIsTheTestselBattery(t *testing.T) {
+	t.Parallel()
+
+	if dashboard.JevPackagesBattery != scorecard.TestselBattery {
+		t.Errorf("dashboard.JevPackagesBattery = %q, want the scorecard's %q", dashboard.JevPackagesBattery, scorecard.TestselBattery)
 	}
 }
