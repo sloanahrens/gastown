@@ -159,9 +159,16 @@ func closedAgentBeads(candidates []agentBeadCandidate) []agentBeadCandidate {
 }
 
 func findAgentBeadCandidates(cwd, currentBeadsDir string) ([]agentBeadCandidate, error) {
+	return findAgentBeadCandidatesWith(cwd, currentBeadsDir, loadAgentBeadsFromDir)
+}
+
+// agentBeadsLoader reads the agent beads of one beads database.
+type agentBeadsLoader func(beadsDir string, issueSource, wispSource agentBeadSource) ([]agentBeadCandidate, error)
+
+func findAgentBeadCandidatesWith(cwd, currentBeadsDir string, load agentBeadsLoader) ([]agentBeadCandidate, error) {
 	var candidates []agentBeadCandidate
 
-	rigCandidates, err := loadAgentBeadsFromDir(currentBeadsDir, agentSourceRigIssues, agentSourceRigWisps)
+	rigCandidates, err := load(currentBeadsDir, agentSourceRigIssues, agentSourceRigWisps)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +183,7 @@ func findAgentBeadCandidates(cwd, currentBeadsDir string) ([]agentBeadCandidate,
 		return candidates, nil
 	}
 
-	townCandidates, err := loadAgentBeadsFromDir(townBeadsDir, agentSourceTownIssues, agentSourceTownWisps)
+	townCandidates, err := load(townBeadsDir, agentSourceTownIssues, agentSourceTownWisps)
 	if err != nil {
 		return nil, err
 	}

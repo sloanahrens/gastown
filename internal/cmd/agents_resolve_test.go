@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -293,6 +295,54 @@ func TestLoadAgentBeadsFromReturnsWispListError(t *testing.T) {
 	}
 	if !errors.Is(err, errWispListBoom) {
 		t.Fatalf("error = %q, want it to wrap %q", err, errWispListBoom)
+	}
+}
+
+// The candidate search is what resolution trusts: a wisp listing error in the
+// rig or the town database must fail it, not come back as a short list that
+// reads as "no agent bead found".
+func TestFindAgentBeadCandidatesReturnsWispListError(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(townRoot, "rig")
+	rigBeadsDir := filepath.Join(rigDir, ".beads")
+	townBeadsDir := filepath.Join(townRoot, ".beads")
+
+	tests := []struct {
+		name    string
+		failing string
+	}{
+		{"rig wisp listing fails", rigBeadsDir},
+		{"town wisp listing fails", townBeadsDir},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			load := func(beadsDir string, issueSource, wispSource agentBeadSource) ([]agentBeadCandidate, error) {
+				var db beads.Client = beadsfake.New()
+				if beadsDir == tt.failing {
+					db = wispListFailer{Client: db}
+				}
+				return loadAgentBeadsFrom(db, beadsDir, issueSource, wispSource)
+			}
+
+			candidates, err := findAgentBeadCandidatesWith(rigDir, rigBeadsDir, load)
+			if !errors.Is(err, errWispListBoom) {
+				t.Fatalf("error = %v, want it to wrap %q", err, errWispListBoom)
+			}
+			if !strings.Contains(err.Error(), tt.failing) {
+				t.Fatalf("error = %q, want it to name %s", err, tt.failing)
+			}
+			if candidates != nil {
+				t.Fatalf("candidates = %+v, want none alongside the error", candidates)
+			}
+		})
 	}
 }
 
