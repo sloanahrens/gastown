@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/done"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -68,7 +70,7 @@ func hasOperatorOverridePrefix(reason string) bool {
 
 // doneCloseTimeInvariantSkipReason resolves the current branch (from cwd)
 // and the resolved origin/upstream base ref (target), then evaluates
-// closeTimeInvariantSkipReason for issueID. It guards gt done's routine
+// closeTimeInvariantSkipReason for issue. It guards gt done's routine
 // self-close of the hooked bead.
 //
 // Branch/target resolution failures fail OPEN (return "", allowing the
@@ -77,21 +79,23 @@ func hasOperatorOverridePrefix(reason string) bool {
 // every one of those contexts. Blocking on an inconclusive check would risk
 // false positives town-wide; the existing doneSourceCloseSkipReason gate
 // this supplements already covers the cases that must always block.
-func doneCloseTimeInvariantSkipReason(cwd, townRoot, rigName, issueID string) string {
-	if strings.TrimSpace(issueID) == "" {
+func doneCloseTimeInvariantSkipReason(cwd, townRoot, rigName string, issue *beads.Issue) string {
+	if issue == nil || strings.TrimSpace(issue.ID) == "" {
 		return ""
 	}
 	g := git.NewGit(cwd)
-	branch, target, ok := closeTimeBranchTarget(g, townRoot, rigName)
+	branch, target, ok := closeTimeBranchTarget(g, townRoot, rigName, issue)
 	if !ok {
 		return ""
 	}
-	return closeTimeInvariantSkipReason(g, issueID, branch, target, "")
+	return closeTimeInvariantSkipReason(g, issue.ID, branch, target, "")
 }
 
 // closeTimeBranchTarget resolves the branch under test (the cwd's current
-// branch) and the ref to compare its commit count against (the resolved
-// origin/upstream base ref for the rig's default branch).
+// branch) and the ref to compare its commit count against: the resolved
+// origin/upstream ref of the bead's base_branch (the branch the submit path
+// lands it on), or of the rig's default branch when the bead sets none or its
+// base_branch does not resolve (see closeTimeTargetRef). issue may be nil.
 //
 // Shared by gt done's self-close path and the bd-close-invariant PreToolUse
 // guard (gt-arno) so the two agree on which branch is being judged and what
@@ -100,8 +104,8 @@ func doneCloseTimeInvariantSkipReason(cwd, townRoot, rigName, issueID string) st
 //
 // ok is false when there is nothing meaningful to compare: no branch
 // resolvable from cwd (detached HEAD, not a repo), or the current branch IS
-// the default branch (nothing to compare against itself).
-func closeTimeBranchTarget(g *git.Git, townRoot, rigName string) (branch, target string, ok bool) {
+// the rig's default branch (nothing to compare against itself).
+func closeTimeBranchTarget(g *git.Git, townRoot, rigName string, issue *beads.Issue) (branch, target string, ok bool) {
 	defaultBranch := "main"
 	rigPath := filepath.Join(townRoot, rigName)
 	rigCfg, cfgErr := rig.LoadRigConfigIfPresent(rigPath)
@@ -125,13 +129,39 @@ func closeTimeBranchTarget(g *git.Git, townRoot, rigName string) (branch, target
 	// routinely stale, and comparing against it directly overcounts commits
 	// the polecat never authored — refusing no_merge/review_only/report-only
 	// closes that legitimately have zero polecat commits (gt-6hmz
-	// om-editorial finding 1). Fall back to the local branch only when the
-	// origin ref itself doesn't resolve (e.g. no remote configured).
-	target = defaultBranch
-	if originRef := g.CleanBaseRef("origin", defaultBranch, ""); originRef != "" {
-		if exists, err := g.RefExists(originRef); err == nil && exists {
-			target = originRef
+	// om-editorial finding 1). closeTimeTargetRef falls back to the local
+	// default branch only when no origin ref resolves (e.g. no remote).
+	target = closeTimeTargetRef(g, done.BaseBranchOf(issue), defaultBranch)
+	return branch, target, true
+}
+
+// closeTimeRefResolver is the narrow interface closeTimeTargetRef needs to
+// turn a branch name into a remote-tracking ref. *git.Git satisfies it.
+type closeTimeRefResolver interface {
+	CleanBaseRef(remote, defaultBranch, target string) string
+	RefExists(ref string) (bool, error)
+}
+
+// closeTimeTargetRef picks the ref the close-time check compares against.
+// base is the bead's base_branch ("" when it sets none); it is compared
+// against origin/<base>. A base the origin does not carry falls back to
+// origin/<defaultBranch>, the ref a bead with no base_branch resolves to.
+// A local branch named base is never compared against: a polecat's local copy
+// is routinely stale. The local defaultBranch is the last resort, for when no
+// origin ref resolves (e.g. no remote configured).
+func closeTimeTargetRef(refs closeTimeRefResolver, base, defaultBranch string) string {
+	if base == "" {
+		base = defaultBranch
+	}
+	candidates := []string{base}
+	if base != defaultBranch {
+		candidates = append(candidates, defaultBranch)
+	}
+	for _, candidate := range candidates {
+		originRef := refs.CleanBaseRef("origin", candidate, "")
+		if exists, err := refs.RefExists(originRef); err == nil && exists {
+			return originRef
 		}
 	}
-	return branch, target, true
+	return defaultBranch
 }

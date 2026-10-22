@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -327,12 +328,34 @@ func resolveBdCloseInvariantScope(payloadCwd string, proc guardProcess) (bdClose
 	}
 
 	g := git.NewGit(cwd)
-	branch, target, ok := closeTimeBranchTarget(g, townRoot, rigName)
+	// The branch's own bead carries the base_branch its work lands on.
+	var bead *beads.Issue
+	if current, err := g.CurrentBranch(); err == nil {
+		bead = closeInvariantBranchBead(current, beads.New(cwd).Show)
+	}
+	branch, target, ok := closeTimeBranchTarget(g, townRoot, rigName, bead)
 	if !ok {
 		return bdCloseInvariantScope{}, false
 	}
 
 	return bdCloseInvariantScope{branch: branch, target: target, counter: g}, true
+}
+
+// closeInvariantBranchBead returns the bead branch was cut for, read through
+// show. Only that bead is looked up: it is the only bead the guard judges
+// (branchNamesBead). It returns nil for a branch that names no bead, or when
+// show cannot read the bead, and the target then falls back to the rig
+// default, as a bead with no base_branch does.
+func closeInvariantBranchBead(branch string, show func(id string) (*beads.Issue, error)) *beads.Issue {
+	id := branchBeadID(branch)
+	if id == "" {
+		return nil
+	}
+	issue, err := show(id)
+	if err != nil {
+		return nil
+	}
+	return issue
 }
 
 // bdCloseInvariantRefusal evaluates the gt-6hmz invariant for one bead id and

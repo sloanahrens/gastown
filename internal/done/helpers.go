@@ -4,8 +4,20 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/style"
 )
+
+// BaseBranchOf returns the base_branch formula var of a bead: the branch its
+// work lands on instead of the rig default. It returns "" when the bead has no
+// attachment fields or sets no base_branch.
+func BaseBranchOf(issue *beads.Issue) string {
+	af := beads.ParseAttachmentFields(issue)
+	if af == nil {
+		return ""
+	}
+	return extractFormulaVar(af.FormulaVars, "base_branch")
+}
 
 // requireRealCurrentBranch refuses a branch value of "HEAD" — what
 // git.CurrentBranch returns in a detached worktree. gt done records its

@@ -406,7 +406,7 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 				style.PrintWarning("%s", message)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open; the reason is recorded on it.\n")
 				done.NotifyDoneCloseSkipped(hookBd, hookedBeadID, message)
-			} else if skipReason := doneCloseTimeInvariantSkipReason(cwd, townRoot, ctx.Rig, hookedBeadID); skipReason != "" {
+			} else if skipReason := doneCloseTimeInvariantSkipReason(cwd, townRoot, ctx.Rig, hookedBead); skipReason != "" {
 				// gt-6hmz: refuse rather than close a bead whose branch carries
 				// commits the target lacks; only the landing worker closes
 				// work that has code to land.
