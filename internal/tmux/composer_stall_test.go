@@ -117,6 +117,21 @@ func TestAnalyzeComposerState(t *testing.T) {
 			wantEvid: "busy indicator in pane",
 		},
 		{
+			name:     "transcript quoting the footer above a clean prompt is clean",
+			pane:     "⏺ The footer read \"Press up to edit queued messages · ctrl+x ctrl+s to send now\" earlier.\n\n⏺ Nothing is queued now.\n\n" + liveIdleCleanPane,
+			prefix:   DefaultReadyPromptPrefix,
+			want:     ComposerClean,
+			wantEvid: "composer empty",
+		},
+		{
+			name:       "footer below transcript prose is still pending",
+			pane:       "⏺ Earlier the queued messages were sent.\n\n" + queuedMessagesPane,
+			prefix:     DefaultReadyPromptPrefix,
+			want:       ComposerPending,
+			wantEvid:   "queued-messages footer visible",
+			wantQueued: true,
+		},
+		{
 			name:     "agent without a prompt prefix is unknown",
 			pane:     pendingTypedPane,
 			prefix:   "",
@@ -229,6 +244,12 @@ func TestAnalyzeComposerStateNoBusy(t *testing.T) {
 		{
 			name:   "stale busy indicator with empty composer is clean",
 			pane:   liveIdleCleanPane + "\n✻ Simmering… (12s · ↓ 3.1k tokens)",
+			prefix: DefaultReadyPromptPrefix,
+			want:   ComposerClean,
+		},
+		{
+			name:   "transcript quoting the footer above a clean prompt is clean",
+			pane:   "⏺ The footer read \"Press up to edit queued messages · ctrl+x ctrl+s to send now\" earlier.\n\n⏺ Nothing is queued now.\n\n" + liveIdleCleanPane + "\n✻ Simmering… (12s · ↓ 3.1k tokens)",
 			prefix: DefaultReadyPromptPrefix,
 			want:   ComposerClean,
 		},
