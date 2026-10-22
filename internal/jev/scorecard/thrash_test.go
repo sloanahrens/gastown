@@ -193,6 +193,9 @@ func TestThrashPendingStopLeavesNeedsSplitUnlabeled(t *testing.T) {
 		if !reflect.DeepEqual(got.Labels, tc.labels) {
 			t.Errorf("%s: labels %v, want %v", tc.bead, got.Labels, tc.labels)
 		}
+		if !tc.labeled && got.Rule != "" {
+			t.Errorf("%s: unlabeled line carries rule %q, want none", tc.bead, got.Rule)
+		}
 	}
 
 	// With a respawn count the pending bead still labels will_respawn alone.
