@@ -412,6 +412,88 @@ func TestRigConfigSyncCheck_FixCreatesMissingMetadata(t *testing.T) {
 	}
 }
 
+// TestRigConfigSyncCheck_FixMissingMetadataUsesRegistryDatabase: a rig whose
+// registry records dolt_database "testrig_db" and whose server hosts that
+// database, but not one named after the rig, has no metadata.json. The fix must
+// write the registry's name and must not bd init a database named after the rig.
+func TestRigConfigSyncCheck_FixMissingMetadataUsesRegistryDatabase(t *testing.T) {
+	t.Parallel()
+
+	tmpDir := t.TempDir()
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "town.json"), []byte(`{"type":"town","version":1,"name":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rigsJSON := `{
+		"version": 1,
+		"rigs": {
+			"testrig": {
+				"git_url": "https://github.com/test/test.git",
+				"dolt_database": "testrig_db",
+				"beads": {"prefix": "tr"}
+			}
+		}
+	}`
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), []byte(rigsJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rigDir := filepath.Join(tmpDir, "testrig")
+	beadsDir := filepath.Join(rigDir, "mayor", "rig", ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	configJSON := `{
+		"type": "rig",
+		"version": 1,
+		"name": "testrig",
+		"git_url": "https://github.com/test/test.git",
+		"beads": {"prefix": "tr"}
+	}`
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(configJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("prefix: tr\nissue-prefix: tr\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	bd := newFakeBD()
+	seedRigBead(bd, tmpDir, "testrig", "tr")
+	ctx := bd.ctx(tmpDir)
+	check := NewRigConfigSyncCheck()
+	check.listDatabases = func(string) ([]string, error) { return []string{"testrig_db"}, nil }
+	result := check.Run(ctx)
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning, got %v: %s", result.Status, result.Message)
+	}
+	if len(check.missingMetadata) != 1 || check.missingMetadata[0] != "testrig" {
+		t.Fatalf("missingMetadata = %#v, want [testrig]", check.missingMetadata)
+	}
+	if len(check.missingDoltDB) != 0 {
+		t.Fatalf("missingDoltDB = %#v, want none: the registry database exists on the server", check.missingDoltDB)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+	metadataBytes, err := os.ReadFile(filepath.Join(beadsDir, "metadata.json"))
+	if err != nil {
+		t.Fatalf("reading metadata.json: %v", err)
+	}
+	metadata := string(metadataBytes)
+	if !strings.Contains(metadata, `"dolt_database": "testrig_db"`) {
+		t.Fatalf("metadata.json should name the registry database testrig_db: %s", metadata)
+	}
+	for _, dir := range []string{rigDir, filepath.Join(rigDir, "mayor", "rig")} {
+		if inits := bd.db(dir).Inits(); len(inits) != 0 {
+			t.Fatalf("bd init ran in %s = %+v, want none: the registry database already exists", dir, inits)
+		}
+	}
+}
+
 func TestRigConfigSyncCheck_FixCreatesMissingRootMetadata(t *testing.T) {
 	t.Parallel()
 

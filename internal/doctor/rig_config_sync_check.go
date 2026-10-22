@@ -181,12 +181,13 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 		if _, err := os.Stat(metadataPath); os.IsNotExist(err) {
 			c.missingMetadata = append(c.missingMetadata, rigName)
 			details = append(details, fmt.Sprintf("Rig %s is missing .beads/metadata.json", rigName))
-			if exists, err := c.doltDatabaseExists(ctx, rigName); err != nil {
+			dbName := rigDoltDatabase(ctx.TownRoot, rigName)
+			if exists, err := c.doltDatabaseExists(ctx, dbName); err != nil {
 				c.dbCheckErrors = append(c.dbCheckErrors, rigName)
 				details = append(details, fmt.Sprintf("Rig %s Dolt database status could not be verified: %v", rigName, err))
 			} else if expectedPrefix != "" && !exists {
 				c.missingDoltDB = append(c.missingDoltDB, rigName)
-				details = append(details, fmt.Sprintf("Rig %s Dolt database '%s' not found on server", rigName, rigName))
+				details = append(details, fmt.Sprintf("Rig %s Dolt database '%s' not found on server", rigName, dbName))
 			}
 			continue
 		}
@@ -427,7 +428,7 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 	// Fix missing metadata.json without requiring the Dolt database to be online.
 	for _, rigName := range c.missingMetadata {
 		beadsDir := doltserver.FindRigBeadsDir(ctx.TownRoot, rigName)
-		if err := doltserver.EnsureMetadataForBeadsDir(ctx.TownRoot, beadsDir, rigName, rigName); err != nil {
+		if err := doltserver.EnsureMetadataForBeadsDir(ctx.TownRoot, beadsDir, rigName, rigDoltDatabase(ctx.TownRoot, rigName)); err != nil {
 			return fmt.Errorf("could not write metadata.json for %s: %w", rigName, err)
 		}
 	}
@@ -451,22 +452,23 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 		if beadsDir == filepath.Join(mayorRigPath, ".beads") {
 			cmdDir = mayorRigPath
 		}
-		if exists, err := c.doltDatabaseExists(ctx, rigName); err != nil {
+		dbName := rigDoltDatabase(ctx.TownRoot, rigName)
+		if exists, err := c.doltDatabaseExists(ctx, dbName); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: skipping Dolt DB initialization for %s because database status could not be verified: %v\n", rigName, err)
 			continue
 		} else if exists {
 			continue
 		}
 
-		// Run bd init against the rig-name database, not the prefix-derived default.
+		// Run bd init against the registry's database, not the prefix-derived default.
 		doltCfg := doltserver.DefaultConfig(ctx.TownRoot)
 		destroyToken := fmt.Sprintf("DESTROY-%s", entry.BeadsConfig.Prefix)
 		cmdEnv := append(stripEnvPrefixes(c.env(), "BEADS_DIR=", "BEADS_DB=", "BEADS_DOLT_SERVER_DATABASE="),
 			"BEADS_DIR="+beadsDir,
-			"BEADS_DOLT_SERVER_DATABASE="+rigName,
+			"BEADS_DOLT_SERVER_DATABASE="+dbName,
 		)
 		err := ctx.bd(cmdDir, cmdEnv).InitDatabase(beads.InitOptions{
-			Prefix: entry.BeadsConfig.Prefix, Database: rigName, ServerPort: doltCfg.Port,
+			Prefix: entry.BeadsConfig.Prefix, Database: dbName, ServerPort: doltCfg.Port,
 			Force: true, DestroyToken: destroyToken,
 		})
 		if err != nil {
@@ -587,6 +589,16 @@ func (c *RigConfigSyncCheck) doltDatabaseExists(ctx *CheckContext, dbName string
 		}
 	}
 	return false, nil
+}
+
+// rigDoltDatabase is the Dolt database a rig's beads should use when its
+// metadata.json does not name one: the registry's dolt_database when recorded,
+// otherwise the rig name.
+func rigDoltDatabase(townRoot, rigName string) string {
+	if reg := townconfig.RegistryDatabase(townRoot, rigName); reg != "" {
+		return reg
+	}
+	return rigName
 }
 
 // rigBeadExists checks if a rig identity bead exists.
