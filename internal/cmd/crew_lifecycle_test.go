@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/rig"
 )
@@ -74,5 +75,44 @@ func TestCrewRemoveRunningSessionKeepsWorkspace(t *testing.T) {
 	}
 	if _, statErr := os.Stat(crewPath); statErr != nil {
 		t.Errorf("crew workspace gone while its session runs: %v", statErr)
+	}
+}
+
+// `--resume <id>` with a space does not carry the ID: NoOptDefVal leaves it as a
+// positional argument, which then reads as a crew name. This is why the help
+// documents only the = form. The flag is rebuilt on a private command, with the
+// NoOptDefVal checked against crewStartCmd, so the package globals stay untouched.
+func TestCrewStartResumeSpaceFormIsPositional(t *testing.T) {
+	t.Parallel()
+
+	if got := crewStartCmd.Flags().Lookup("resume").NoOptDefVal; got != "last" {
+		t.Fatalf("crewStartCmd --resume NoOptDefVal = %q, want %q", got, "last")
+	}
+
+	cmd := &cobra.Command{}
+	var resume string
+	cmd.Flags().StringVar(&resume, "resume", "", "")
+	cmd.Flags().Lookup("resume").NoOptDefVal = "last"
+
+	if err := cmd.ParseFlags([]string{"--resume", "abc123"}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if resume != "last" {
+		t.Errorf("resume = %q, want %q (bare --resume)", resume, "last")
+	}
+	if got := cmd.Flags().Args(); len(got) != 1 || got[0] != "abc123" {
+		t.Errorf("positional args = %v, want [abc123]", got)
+	}
+}
+
+// The help must show the = form for a session ID and never the space form.
+func TestCrewStartResumeHelpUsesEqualsForm(t *testing.T) {
+	t.Parallel()
+
+	if strings.Contains(crewStartCmd.Long, "--resume abc123") {
+		t.Errorf("help shows the space form, which is read as a crew name")
+	}
+	if !strings.Contains(crewStartCmd.Long, "--resume=abc123") {
+		t.Errorf("help does not show the --resume=<session-id> form")
 	}
 }
