@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -266,8 +267,28 @@ func TestRunTheme_NoRigResolvedRefusesToSave(t *testing.T) {
 	if err == nil {
 		t.Fatal("runTheme with no rig resolved returned nil, want error")
 	}
+	if want := "not in a rig"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err, want)
+	}
 
 	if _, statErr := os.Stat(filepath.Join(townRoot, "unknown")); !os.IsNotExist(statErr) {
 		t.Errorf("settings directory for made-up rig 'unknown' exists (stat err: %v)", statErr)
+	}
+}
+
+//testpolicy:allow parallel — runTheme reads the GT_RIG variable and the working directory, both process-wide
+func TestRunTheme_UnknownThemeReportedBeforeNoRig(t *testing.T) {
+	townRoot := setupTestTownForTheme(t)
+	//testpolicy:allow no-chdir — the cwd is the input under test: runTheme resolves the rig from the working directory
+	t.Chdir(townRoot)
+	//testpolicy:allow no-env — GT_RIG is the input under test: runTheme resolves the rig from it when set
+	t.Setenv("GT_RIG", "")
+
+	err := runTheme(themeCmd, []string{"no-such-theme"})
+	if err == nil {
+		t.Fatal("runTheme with an unknown theme returned nil, want error")
+	}
+	if want := "unknown theme: no-such-theme"; !strings.Contains(err.Error(), want) {
+		t.Errorf("error = %q, want it to contain %q", err, want)
 	}
 }
