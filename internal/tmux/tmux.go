@@ -324,15 +324,21 @@ func (t *Tmux) runContext(ctx context.Context, args ...string) (string, error) {
 	return strings.TrimSpace(string(stdout)), nil
 }
 
+// IsNoServerStderr reports whether tmux's stderr says no server is running
+// or reachable, the one listing failure that means there are no sessions.
+func IsNoServerStderr(stderr string) bool {
+	return strings.Contains(stderr, "no server running") ||
+		strings.Contains(stderr, "error connecting to") ||
+		strings.Contains(stderr, "no current target") ||
+		strings.Contains(stderr, "server exited unexpectedly")
+}
+
 // wrapError wraps tmux errors with context.
 func (t *Tmux) wrapError(err error, stderr string, args []string) error {
 	stderr = strings.TrimSpace(stderr)
 
 	// Detect specific error types
-	if strings.Contains(stderr, "no server running") ||
-		strings.Contains(stderr, "error connecting to") ||
-		strings.Contains(stderr, "no current target") ||
-		strings.Contains(stderr, "server exited unexpectedly") {
+	if IsNoServerStderr(stderr) {
 		return ErrNoServer
 	}
 	if strings.Contains(stderr, "duplicate session") {
