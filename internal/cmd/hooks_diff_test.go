@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -237,16 +238,19 @@ func TestDiffHooksConfigsReportsEveryHooksEqualDrift(t *testing.T) {
 		name     string
 		current  []hooks.HookEntry
 		expected []hooks.HookEntry
+		want     string
 	}{
 		{
 			name:     "empty type only",
 			current:  []hooks.HookEntry{entry("Bash", hook("", "guard"))},
 			expected: []hooks.HookEntry{entry("Bash", hook("command", "guard"))},
+			want:     `[type: ""]`,
 		},
 		{
 			name:     "shell type only",
 			current:  []hooks.HookEntry{entry("Bash", hook("shell", "guard"))},
 			expected: []hooks.HookEntry{entry("Bash", hook("command", "guard"))},
+			want:     `[type: "shell"]`,
 		},
 		{
 			name: "entry order only",
@@ -258,6 +262,7 @@ func TestDiffHooksConfigsReportsEveryHooksEqualDrift(t *testing.T) {
 				entry("Bash", hook("command", "a")),
 				entry("Edit", hook("command", "b")),
 			},
+			want: "PreToolUse: entry order or repeated matchers differ",
 		},
 		{
 			name: "duplicate matcher",
@@ -266,6 +271,7 @@ func TestDiffHooksConfigsReportsEveryHooksEqualDrift(t *testing.T) {
 				entry("Bash", hook("command", "a")),
 			},
 			expected: []hooks.HookEntry{entry("Bash", hook("command", "a"))},
+			want:     "PreToolUse: entry order or repeated matchers differ",
 		},
 		{
 			name:    "duplicate matcher in expected",
@@ -274,6 +280,7 @@ func TestDiffHooksConfigsReportsEveryHooksEqualDrift(t *testing.T) {
 				entry("Bash", hook("command", "a")),
 				entry("Bash", hook("command", "a")),
 			},
+			want: "PreToolUse: entry order or repeated matchers differ",
 		},
 	}
 	for _, tc := range cases {
@@ -284,8 +291,34 @@ func TestDiffHooksConfigsReportsEveryHooksEqualDrift(t *testing.T) {
 			if hooks.HooksEqual(cur, exp) {
 				t.Fatal("case is not HooksEqual drift")
 			}
-			if lines := diffHooksConfigs(cur, exp); len(lines) == 0 {
-				t.Error("diffHooksConfigs reported no changes for drift HooksEqual sees")
+			joined := strings.Join(diffHooksConfigs(cur, exp), "")
+			if !strings.Contains(joined, tc.want) {
+				t.Errorf("expected diff to contain %q, got:\n%s", tc.want, joined)
+			}
+		})
+	}
+}
+
+// TestDiffHooksConfigsNamesDriftInEveryHookType pins that every HooksConfig
+// field is rendered by name. A field missing from diffHooksConfigs' table
+// would leave HooksEqual drift in it with no diff line, so each field drifts
+// alone here and must show up under its own label.
+func TestDiffHooksConfigsNamesDriftInEveryHookType(t *testing.T) {
+	t.Parallel()
+	typ := reflect.TypeOf(hooks.HooksConfig{})
+	for i := 0; i < typ.NumField(); i++ {
+		name := typ.Field(i).Name
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var cur, exp hooks.HooksConfig
+			drift := []hooks.HookEntry{{Matcher: "Bash", Hooks: []hooks.Hook{{Type: "command", Command: "guard"}}}}
+			reflect.ValueOf(&exp).Elem().Field(i).Set(reflect.ValueOf(drift))
+			if hooks.HooksEqual(&cur, &exp) {
+				t.Fatal("case is not HooksEqual drift")
+			}
+			joined := strings.Join(diffHooksConfigs(&cur, &exp), "")
+			if !strings.Contains(joined, name+":") {
+				t.Errorf("expected diff to name %s, got:\n%s", name, joined)
 			}
 		})
 	}
