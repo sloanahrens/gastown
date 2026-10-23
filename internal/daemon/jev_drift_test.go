@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jonboulle/clockwork"
+
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/jev"
 	"github.com/steveyegge/gastown/internal/jev/battery"
@@ -180,6 +182,54 @@ func waitJevDriftIdle(t *testing.T, d *Daemon) {
 			t.Fatal("jev_drift pass did not finish")
 		}
 		runtime.Gosched()
+	}
+}
+
+// A last-run save that fails still suppresses the next heartbeat's rerun for
+// the interval. With no record on disk every check read the patrol as due, so a
+// town whose daemon directory cannot be written opened a pass per heartbeat —
+// each one reaching git and Jev for the landings its cursor had not paid for
+// yet (gt-4nqej, gt-th2am).
+func TestJevDriftFailedSaveSuppressesTheRerun(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	logs := &bytes.Buffer{}
+	clock := clockwork.NewFakeClockAt(time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC))
+	var opened atomic.Int32
+	d := &Daemon{
+		config: &Config{TownRoot: town},
+		logger: log.New(logs, "", 0),
+		clock:  clock,
+		patrolConfig: &DaemonPatrolConfig{
+			Patrols: &PatrolsConfig{JevDrift: &JevDriftConfig{Enabled: true}},
+		},
+		jevDriftOpen: func(string, drift.Settings, io.Writer) (*drift.Pass, error) {
+			opened.Add(1)
+			return nil, errors.New("boom")
+		},
+	}
+	// The last-run record cannot be written: its directory is a regular file.
+	if err := os.WriteFile(filepath.Join(town, "daemon"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d.triggerJevDrift()
+	waitJevDriftIdle(t, d)
+	d.triggerJevDrift()
+	waitJevDriftIdle(t, d)
+
+	if got := opened.Load(); got != 1 {
+		t.Errorf("pass opened %d times inside one interval after a failed save, want 1", got)
+	}
+	if !strings.Contains(logs.String(), "cannot persist last-run time") {
+		t.Errorf("log = %q, want the failed save named", logs)
+	}
+
+	clock.Advance(jevDriftInterval)
+	d.triggerJevDrift()
+	waitJevDriftIdle(t, d)
+	if got := opened.Load(); got != 2 {
+		t.Errorf("pass opened %d times after the interval, want 2", got)
 	}
 }
 

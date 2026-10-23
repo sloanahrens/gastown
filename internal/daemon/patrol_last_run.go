@@ -69,6 +69,30 @@ func loadPatrolLastRun(townRoot, patrol string) (time.Time, bool, error) {
 	return lastRun, true, nil
 }
 
+// patrolLastRunMemory is a patrol's last completion time as this process
+// recorded it. It outranks the persisted record when a save failed, and stands
+// in for that record when the failed save could not create a file at all.
+//
+// The pass writes it from its own goroutine while the heartbeat reads it, so
+// the access is guarded.
+type patrolLastRunMemory struct {
+	mu      sync.Mutex
+	lastRun time.Time
+}
+
+func (m *patrolLastRunMemory) record(at time.Time) {
+	m.mu.Lock()
+	m.lastRun = at
+	m.mu.Unlock()
+}
+
+// last returns the completion time recorded so far, zero before the first one.
+func (m *patrolLastRunMemory) last() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastRun
+}
+
 // patrolDueDecision is one due-ness evaluation for a ticker-driven patrol
 // whose run interval is enforced against a persisted last-run time rather
 // than an in-process countdown that a restart resets (gt-ima2).
@@ -193,4 +217,19 @@ func savePatrolLastRun(townRoot, patrol string, at time.Time) error {
 		return err
 	}
 	return atomicfile.WriteJSON(path, state)
+}
+
+// recordPatrolRun records a patrol's completion time in memory and on disk.
+//
+// The in-memory time is set even when the write fails: with no record on disk
+// every heartbeat reads the patrol as due and opens another pass, each reaching
+// the network for work its cursor has not paid for yet (gt-4nqej). A restart
+// then reads the missing record as "run the pass", the safe direction for a
+// patrol.
+func (d *Daemon) recordPatrolRun(mem *patrolLastRunMemory, patrol string, at time.Time) {
+	mem.record(at)
+	if err := savePatrolLastRun(d.config.TownRoot, patrol, at); err != nil {
+		d.logger.Printf("%s: WARNING: cannot persist last-run time (%v) — "+
+			"the next daemon start will run the pass again", patrol, err)
+	}
 }

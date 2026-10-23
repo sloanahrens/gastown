@@ -27,7 +27,7 @@ func (d *Daemon) triggerJevDrift() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "jev_drift", time.Time{}, now, jevDriftInterval)
+	dec := evaluatePatrolDue(d.config.TownRoot, "jev_drift", d.jevDriftRun.last(), now, jevDriftInterval)
 	if !dec.due {
 		return
 	}
@@ -40,9 +40,7 @@ func (d *Daemon) triggerJevDrift() {
 	go func() {
 		defer d.jevDriftRunning.Store(false)
 		d.runJevDrift()
-		if err := savePatrolLastRun(d.config.TownRoot, "jev_drift", d.clk().Now()); err != nil {
-			d.logger.Printf("jev_drift: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordPatrolRun(&d.jevDriftRun, "jev_drift", d.clk().Now())
 	}()
 }
 

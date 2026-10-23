@@ -287,6 +287,39 @@ func TestJevSubmissionTriggerRunsOnePassWhenEnabledAndDue(t *testing.T) {
 	}
 }
 
+// A last-run save that fails still suppresses the next heartbeat's rerun for
+// the interval. With no record on disk every check read the patrol as due, so a
+// town whose daemon directory cannot be written opened a pass per heartbeat —
+// each one reaching git and Jev for the submissions its cursor had not paid for
+// yet (gt-4nqej, gt-th2am).
+func TestJevSubmissionFailedSaveSuppressesTheRerun(t *testing.T) {
+	t.Parallel()
+	r := newJevSubmissionRig(t)
+	// The last-run record cannot be written: its directory is a regular file.
+	if err := os.WriteFile(filepath.Join(r.town, "daemon"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r.d.triggerJevSubmission()
+	waitJevSubmissionIdle(t, r.d)
+	r.d.triggerJevSubmission()
+	waitJevSubmissionIdle(t, r.d)
+
+	if r.opened != 1 {
+		t.Errorf("pass opened %d times inside one interval after a failed save, want 1", r.opened)
+	}
+	if !strings.Contains(r.logs.String(), "cannot persist last-run time") {
+		t.Errorf("log = %q, want the failed save named", r.logs)
+	}
+
+	r.clock.Advance(jevSubmissionInterval)
+	r.d.triggerJevSubmission()
+	waitJevSubmissionIdle(t, r.d)
+	if r.opened != 2 {
+		t.Errorf("pass opened %d times after the interval, want 2", r.opened)
+	}
+}
+
 // A trigger that arrives while a pass is in flight is turned away.
 func TestJevSubmissionTriggerSkipsWhileAPassIsRunning(t *testing.T) {
 	t.Parallel()

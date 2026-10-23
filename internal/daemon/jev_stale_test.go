@@ -244,6 +244,39 @@ func TestJevStaleTriggerRunsOnePassWhenEnabledAndDue(t *testing.T) {
 	}
 }
 
+// A last-run save that fails still suppresses the next heartbeat's rerun for
+// the week. With no record on disk every check read the patrol as due, so a
+// town whose daemon directory cannot be written opened a pass per heartbeat —
+// each one reaching Jev for the beads its log had not paid for yet (gt-4nqej,
+// gt-th2am).
+func TestJevStaleFailedSaveSuppressesTheRerun(t *testing.T) {
+	t.Parallel()
+	r := newJevStaleRig(t)
+	// The last-run record cannot be written: its directory is a regular file.
+	if err := os.WriteFile(filepath.Join(r.town, "daemon"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r.d.triggerJevStale()
+	waitJevStaleIdle(t, r.d)
+	r.d.triggerJevStale()
+	waitJevStaleIdle(t, r.d)
+
+	if r.opened != 1 {
+		t.Errorf("pass opened %d times inside one week after a failed save, want 1", r.opened)
+	}
+	if !strings.Contains(r.logs.String(), "cannot persist last-run time") {
+		t.Errorf("log = %q, want the failed save named", r.logs)
+	}
+
+	r.clock.Advance(jevStaleInterval)
+	r.d.triggerJevStale()
+	waitJevStaleIdle(t, r.d)
+	if r.opened != 2 {
+		t.Errorf("pass opened %d times after the interval, want 2", r.opened)
+	}
+}
+
 // A trigger that arrives while a pass is in flight is turned away.
 func TestJevStaleTriggerSkipsWhileAPassIsRunning(t *testing.T) {
 	t.Parallel()

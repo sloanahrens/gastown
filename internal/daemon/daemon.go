@@ -624,14 +624,11 @@ type Daemon struct {
 	// which wires the live Jev client, hm and the rig's beads; a test sets it
 	// to hand the run a pass over fakes.
 	jevDedupeOpen func(townRoot string, s dedupe.Settings, warnings io.Writer) (*dedupe.Pass, error)
-	// jevDedupeRunMu guards lastJevDedupeRun, which the pass's goroutine writes
-	// while the heartbeat reads it.
-	jevDedupeRunMu sync.Mutex
-	// lastJevDedupeRun is the completion time of the last pass this process
-	// ran, which can be newer than the persisted record when the write failed,
-	// and stands in for it when the write left no record at all. Zero until the
-	// first pass completes.
-	lastJevDedupeRun time.Time
+	// jevDedupeRun is the completion time of the last pass this process ran
+	// (jev_dedupe.go), which can be newer than the persisted record when the
+	// write failed, and stands in for it when the write left no record at all.
+	// Zero until the first pass completes.
+	jevDedupeRun patrolLastRunMemory
 
 	// jevAttentionRunning is the jev_attention pass's single-flight guard
 	// (jev_attention.go), kept apart from jev_dedupe's so the two passes run
@@ -649,15 +646,19 @@ type Daemon struct {
 
 	// jevSubmissionRunning and jevSubmissionOpen are the jev_submission
 	// pass's single-flight guard and test seam (jev_submission.go), as
-	// jevLandingRunning and jevLandingOpen are for jev_landing.
+	// jevLandingRunning and jevLandingOpen are for jev_landing. jevSubmissionRun
+	// is its in-memory last-run time, as jevDedupeRun is jev_dedupe's.
 	jevSubmissionRunning atomic.Bool
 	jevSubmissionOpen    func(townRoot string, s submission.Settings, warnings io.Writer) (*submission.Pass, error)
+	jevSubmissionRun     patrolLastRunMemory
 
 	// jevDriftRunning and jevDriftOpen are the jev_drift pass's single-flight
 	// guard and test seam (jev_drift.go), as jevLandingRunning and
-	// jevLandingOpen are for jev_landing.
+	// jevLandingOpen are for jev_landing. jevDriftRun is its in-memory last-run
+	// time, as jevDedupeRun is jev_dedupe's.
 	jevDriftRunning atomic.Bool
 	jevDriftOpen    func(townRoot string, s drift.Settings, warnings io.Writer) (*drift.Pass, error)
+	jevDriftRun     patrolLastRunMemory
 
 	// jevLogtriageRunning and jevLogtriageOpen are the jev_logtriage pass's
 	// single-flight guard and test seam (jev_logtriage.go), as jevDriftRunning
@@ -717,9 +718,11 @@ type Daemon struct {
 
 	// jevStaleRunning is the jev_stale read's single-flight guard
 	// (jev_stale.go). jevStaleOpen builds the pass a run executes; nil means
-	// stale.Open, and a test sets it to use fakes.
+	// stale.Open, and a test sets it to use fakes. jevStaleRun is its in-memory
+	// last-run time, as jevDedupeRun is jev_dedupe's.
 	jevStaleRunning atomic.Bool
 	jevStaleOpen    func(townRoot string, rigs []string, s stale.Settings, warnings io.Writer) (*stale.Pass, error)
+	jevStaleRun     patrolLastRunMemory
 
 	// jevNotesRunning is the jev_notes read's single-flight guard
 	// (jev_notes.go). jevNotesOpen builds the pass a run executes; nil means
