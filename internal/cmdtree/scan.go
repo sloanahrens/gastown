@@ -54,28 +54,54 @@ var cmdWord = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 // next token. Skipping such a flag alone would leave the value behind as a
 // command word, so `bd --db beads sync` would read as the unknown command
 // "beads". Flags not listed here are boolean, or carry their value glued on
-// (`--db=beads`, `-C/path`). Mirrors bdGlobalOptionsWithValue in internal/cmd's
-// close guard.
+// (`--db=beads`, `-C/path`). Each name must be a persistent flag of the bd
+// tree (TestBdValueFlagsSkipWithTheirValue). internal/cmd's close guard keeps
+// its own copy, bdGlobalOptionsWithValue.
 var bdGlobalValueFlags = map[string]bool{
 	"--actor": true, "--cpu-profile": true, "--database": true, "--db": true,
 	"-C": true, "--directory": true, "--dolt-auto-commit": true,
 	"--format": true, "--machine": true, "--mem-profile": true,
 }
 
+// bdPersistentFlags is the set of bd's persistent flags, with their leading
+// dashes, from the embedded bd command tree.
+var bdPersistentFlags = loadPersistentFlags()
+
+func loadPersistentFlags() map[string]bool {
+	_, snap, err := LoadBdTree()
+	if err != nil {
+		panic(err) // the embedded snapshot is broken, and every bd check fails with it
+	}
+	set := make(map[string]bool, len(snap.PersistentFlags))
+	for _, name := range snap.PersistentFlags {
+		set["--"+name] = true
+	}
+	return set
+}
+
+// isBdGlobalFlag reports whether tok is one of bd's persistent flags, whether
+// or not its value is glued on (`--db=beads`, `-C/path`). A dash token that is
+// not one, such as the subcommand flag --if-assignee, is not skipped.
+func isBdGlobalFlag(tok string) bool {
+	name, _, _ := strings.Cut(tok, "=")
+	return bdPersistentFlags[name] || strings.HasPrefix(name, "-C")
+}
+
 // bdCommandStart returns the index of the first token after bd's leading
 // persistent flags. Word collection stops at a flag, so without this
 // `bd --json sync` has no words and never reaches Check, and the bd sync deny
 // silently misses it. Only a persistent (global) flag can come before the
-// first command word, since no subcommand has been named yet. A `--` ends
-// flag parsing, and a flag ending the line (punctuation after it) leaves no
-// command words either.
+// first command word, since no subcommand has been named yet, so any other
+// dash token ends the scan: in prose, `bd --if-assignee and --if-status` has
+// no command words. A `--` ends flag parsing, and a flag ending the line
+// (punctuation after it) leaves no command words either.
 func bdCommandStart(toks []string) int {
 	for i := 0; i < len(toks); i++ {
 		tok := toks[i]
 		if tok == "--" {
 			return i + 1
 		}
-		if len(tok) < 2 || tok[0] != '-' || strings.TrimRight(tok, ";)}]`\"',.:") != tok {
+		if len(tok) < 2 || tok[0] != '-' || strings.TrimRight(tok, ";)}]`\"',.:") != tok || !isBdGlobalFlag(tok) {
 			return i
 		}
 		if bdGlobalValueFlags[tok] {
