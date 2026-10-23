@@ -25,11 +25,12 @@ func newFakeCLI() (*CLI, *Fake) {
 
 func wantCall(t *testing.T, f *Fake, want ...string) {
 	t.Helper()
-	if len(f.Calls) != 1 {
-		t.Fatalf("calls = %v, want exactly one", f.Calls)
+	calls := f.Calls()
+	if len(calls) != 1 {
+		t.Fatalf("calls = %v, want exactly one", calls)
 	}
-	if !reflect.DeepEqual(f.Calls[0], want) {
-		t.Errorf("argv =\n  %q\nwant\n  %q", f.Calls[0], want)
+	if !reflect.DeepEqual(calls[0], want) {
+		t.Errorf("argv =\n  %q\nwant\n  %q", calls[0], want)
 	}
 }
 
@@ -55,9 +56,19 @@ func TestCreateArgv(t *testing.T) {
 		"--from", "img", "--policy", "p.yaml", "--provider", "a", "--provider", "b",
 		"--cpu", "4", "--memory", "8Gi",
 		"--label", "polecat=n", "--label", "rig=r",
-		"--env", "A=1", "--env", "Z=2",
+		"--env-from", "A=GT_SANDBOX_ENV_A", "--env-from", "Z=GT_SANDBOX_ENV_Z",
 		"--detach", "--output", "json",
 		"--", "tmux", "-L", "gt", "new-session", "-d", "-s", "gt-r-n")
+
+	wantEnv := []string{"GT_SANDBOX_ENV_A=1", "GT_SANDBOX_ENV_Z=2"}
+	if got := f.Envs(); len(got) != 1 || !reflect.DeepEqual(got[0], wantEnv) {
+		t.Errorf("env = %v, want %v; the values must reach openshell's process environment", got, wantEnv)
+	}
+	for _, arg := range f.Calls()[0] {
+		if strings.Contains(arg, "=1") || strings.Contains(arg, "=2") {
+			t.Errorf("argv carries %q; an env value must stay off the command line", arg)
+		}
+	}
 }
 
 func TestCreateDriverConfigAndOmittedFields(t *testing.T) {
@@ -96,9 +107,9 @@ func TestGetArgvAndDecode(t *testing.T) {
 		want  Status
 	}{
 		{"ready", `{"name":"x","phase":"Ready","conditions":[{"type":"Ready","status":"True"}]}`,
-			Status{Name: "x", Phase: "Ready", Ready: true}},
+			Status{Name: "x", Phase: "Ready", Ready: true, ReadyKnown: true}},
 		{"provisioning", `{"name":"x","phase":"Provisioning","conditions":[{"type":"Ready","status":"False"}]}`,
-			Status{Name: "x", Phase: "Provisioning"}},
+			Status{Name: "x", Phase: "Provisioning", ReadyKnown: true}},
 		{"other condition true", `{"name":"x","phase":"Provisioning","conditions":[{"type":"Scheduled","status":"True"}]}`,
 			Status{Name: "x", Phase: "Provisioning"}},
 		{"no conditions", `{"name":"x","phase":"Stopped"}`,
@@ -258,7 +269,7 @@ func TestDeadlines(t *testing.T) {
 			t.Parallel()
 			var got time.Duration
 			var has bool
-			cli := &CLI{Run: func(ctx context.Context, _ []string, _ []byte) ([]byte, []byte, error) {
+			cli := &CLI{Run: func(ctx context.Context, _ []string, _ []byte, _ []string) ([]byte, []byte, error) {
 				if d, ok := ctx.Deadline(); ok {
 					has, got = true, time.Until(d)
 				}
@@ -286,7 +297,7 @@ func TestCallerDeadlineWinsOverDefault(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	var got time.Duration
-	cli := &CLI{Run: func(ctx context.Context, _ []string, _ []byte) ([]byte, []byte, error) {
+	cli := &CLI{Run: func(ctx context.Context, _ []string, _ []byte, _ []string) ([]byte, []byte, error) {
 		d, _ := ctx.Deadline()
 		got = time.Until(d)
 		return nil, nil, nil
@@ -296,5 +307,79 @@ func TestCallerDeadlineWinsOverDefault(t *testing.T) {
 	}
 	if got > time.Second {
 		t.Errorf("deadline = %v, want the caller's 1s", got)
+	}
+}
+
+func TestErrorWithoutStderrHasNoDanglingSeparator(t *testing.T) {
+	t.Parallel()
+	f := &Fake{Err: map[string]error{"delete": errors.New("exit status 1")}}
+	err := (&CLI{Run: f.Runner()}).Delete(context.Background(), "n")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	if got, want := err.Error(), "openshell sandbox delete: exit status 1"; got != want {
+		t.Errorf("err = %q, want %q", got, want)
+	}
+}
+
+func TestErrorBoundsStderr(t *testing.T) {
+	t.Parallel()
+	f := &Fake{Err: map[string]error{"delete": errors.New("exit status 1")}}
+	f.Stderr = map[string]string{"delete": strings.Repeat("x", stderrLimit+500) + " tail reason\n"}
+	err := (&CLI{Run: f.Runner()}).Delete(context.Background(), "n")
+	if err == nil {
+		t.Fatal("want an error")
+	}
+	msg := err.Error()
+	if len(msg) > stderrLimit+200 {
+		t.Errorf("error is %d bytes; stderr must be bounded", len(msg))
+	}
+	if !strings.Contains(msg, "(truncated)") {
+		t.Errorf("error %q does not mark where it was cut", msg)
+	}
+	if !strings.Contains(msg, "tail reason") {
+		t.Errorf("error %q drops the end of stderr, where the reason is", msg)
+	}
+}
+
+func TestVerbOf(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		argv []string
+		want string
+	}{
+		{"short gateway", []string{"openshell", "-g", "gw", "sandbox", "create"}, "create"},
+		{"joined gateway", []string{"openshell", "-g=gw", "sandbox", "get"}, "get"},
+		{"long gateway", []string{"openshell", "--gateway", "gw", "logs"}, "logs"},
+		{"flag before noun", []string{"openshell", "-v", "sandbox", "stop"}, "stop"},
+		{"bare noun", []string{"openshell", "sandbox", "delete"}, "delete"},
+		{"no noun", []string{"openshell", "logs"}, "logs"},
+		{"sandbox name is a verb", []string{"openshell", "sandbox", "get", "create"}, "get"},
+		{"name without noun", []string{"openshell", "logs", "delete"}, "logs"},
+		{"no verb", []string{"openshell", "-g", "gw", "sandbox"}, ""},
+		{"dangling flag", []string{"openshell", "-g"}, ""},
+		{"nothing", nil, ""},
+		{"unknown positional", []string{"openshell", "never"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := verbOf(tt.argv); got != tt.want {
+				t.Errorf("verbOf(%q) = %q, want %q", tt.argv, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFakeCallsIsACopy(t *testing.T) {
+	t.Parallel()
+	cli, f := newFakeCLI()
+	if err := cli.Stop(context.Background(), "n"); err != nil {
+		t.Fatal(err)
+	}
+	f.Calls()[0][0] = "mutated"
+	if got := f.Calls()[0][0]; got != "openshell" {
+		t.Errorf("Calls() aliases the recording: later read %q", got)
 	}
 }

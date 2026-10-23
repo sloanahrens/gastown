@@ -98,7 +98,7 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 		wait:     func(context.Context, time.Duration) error { return nil },
 		render:   func(sandbox.SkeletonSpec) ([]byte, error) { return []byte("skeleton"), nil },
 		push: func(bare, branch string) error {
-			*pushes = append(*pushes, pushCall{bare: bare, branch: branch, sandboxCalls: len(fake.Calls)})
+			*pushes = append(*pushes, pushCall{bare: bare, branch: branch, sandboxCalls: len(fake.Calls())})
 			return nil
 		},
 	}
@@ -153,20 +153,20 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 		"--provider", "deepseek", "--provider", "forgejo-polecat",
 		"--cpu", "4", "--memory", "8Gi",
 		"--label", "polecat=sandbox-ace", "--label", "rig=gastown",
-		"--env", "BD_ACTOR=gastown/polecats/sandbox-ace",
-		"--env", "BD_DISABLE_METRICS=1",
-		"--env", "BEADS_DOLT_SERVER_HOST=host.docker.internal",
-		"--env", "BEADS_DOLT_SERVER_MODE=1",
-		"--env", "BEADS_DOLT_SERVER_PORT=3307",
-		"--env", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1",
-		"--env", "DISABLE_AUTOUPDATER=1",
-		"--env", "DO_NOT_TRACK=1",
-		"--env", "GT_POLECAT=sandbox-ace",
-		"--env", "GT_RIG=gastown",
-		"--env", "GT_ROLE=gastown/polecats/sandbox-ace",
-		"--env", "GT_ROOT=/sandbox/gt",
-		"--env", "GT_SESSION_BACKEND=openshell",
-		"--env", "GT_TOWN_ROOT=/sandbox/gt",
+		"--env-from", "BD_ACTOR=GT_SANDBOX_ENV_BD_ACTOR",
+		"--env-from", "BD_DISABLE_METRICS=GT_SANDBOX_ENV_BD_DISABLE_METRICS",
+		"--env-from", "BEADS_DOLT_SERVER_HOST=GT_SANDBOX_ENV_BEADS_DOLT_SERVER_HOST",
+		"--env-from", "BEADS_DOLT_SERVER_MODE=GT_SANDBOX_ENV_BEADS_DOLT_SERVER_MODE",
+		"--env-from", "BEADS_DOLT_SERVER_PORT=GT_SANDBOX_ENV_BEADS_DOLT_SERVER_PORT",
+		"--env-from", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=GT_SANDBOX_ENV_CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+		"--env-from", "DISABLE_AUTOUPDATER=GT_SANDBOX_ENV_DISABLE_AUTOUPDATER",
+		"--env-from", "DO_NOT_TRACK=GT_SANDBOX_ENV_DO_NOT_TRACK",
+		"--env-from", "GT_POLECAT=GT_SANDBOX_ENV_GT_POLECAT",
+		"--env-from", "GT_RIG=GT_SANDBOX_ENV_GT_RIG",
+		"--env-from", "GT_ROLE=GT_SANDBOX_ENV_GT_ROLE",
+		"--env-from", "GT_ROOT=GT_SANDBOX_ENV_GT_ROOT",
+		"--env-from", "GT_SESSION_BACKEND=GT_SANDBOX_ENV_GT_SESSION_BACKEND",
+		"--env-from", "GT_TOWN_ROOT=GT_SANDBOX_ENV_GT_TOWN_ROOT",
 		"--detach", "--output", "json",
 		"--", "sh", "-c", sandboxMainScript, "sh", openshellTestSession,
 	}
@@ -180,8 +180,11 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 		sandboxExec("tar", "xzf", "/sandbox/workspace.tgz", "-C", openshellTestWorkDir),
 		sandboxExec("sh", "-c", redirectScript, "sh", openshellTestWorkDir, "../../../mayor/rig/.beads"),
 	}
-	if got := stageNames(fake.Calls); !reflect.DeepEqual(got, want) {
+	if got := stageNames(fake.Calls()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("openshell calls:\n got %q\nwant %q", got, want)
+	}
+	if envs := fake.Envs(); len(envs) == 0 || !slices.Contains(envs[0], "GT_SANDBOX_ENV_GT_ROLE="+openshellTestRig+"/polecats/"+openshellTestPolecat) {
+		t.Fatalf("create env = %q; the contract values must reach openshell's process environment, not its argv", envs)
 	}
 
 	rec, ok, err := ReadSandboxRecord(town, openshellTestSession)
@@ -235,7 +238,7 @@ func TestOpenShellPrepareWaitsForReadyBetweenPolls(t *testing.T) {
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 	run := b.cli.Run
 	gets := 0
-	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte, env []string) ([]byte, []byte, error) {
 		if len(argv) > 2 && argv[2] == "get" {
 			gets++
 			if gets == 1 {
@@ -243,7 +246,7 @@ func TestOpenShellPrepareWaitsForReadyBetweenPolls(t *testing.T) {
 			}
 			return []byte(openshellReadyReply), nil, nil
 		}
-		return run(ctx, argv, stdin)
+		return run(ctx, argv, stdin, env)
 	}
 	var waits []time.Duration
 	b.wait = func(_ context.Context, d time.Duration) error {
@@ -272,8 +275,8 @@ func TestOpenShellPrepareCreateFailureMakesNoFurtherCalls(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "creating sandbox") {
 		t.Fatalf("err = %v, want creating sandbox", err)
 	}
-	if len(fake.Calls) != 1 || fake.Calls[0][2] != "create" {
-		t.Fatalf("calls = %q, want only the create", fake.Calls)
+	if len(fake.Calls()) != 1 || fake.Calls()[0][2] != "create" {
+		t.Fatalf("calls = %q, want only the create", fake.Calls())
 	}
 	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
 		t.Fatal("a failed Prepare left a sandbox record behind")
@@ -286,18 +289,18 @@ func TestOpenShellPrepareCloneFailureDeletesTheSandbox(t *testing.T) {
 	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 	run := b.cli.Run
-	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte, env []string) ([]byte, []byte, error) {
 		if slices.ContainsFunc(argv, func(a string) bool { return a == cloneScript }) {
 			return nil, []byte("fatal: unable to access the repository"), errors.New("exit status 128")
 		}
-		return run(ctx, argv, stdin)
+		return run(ctx, argv, stdin, env)
 	}
 
 	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
 	if err == nil || !strings.Contains(err.Error(), "cloning "+openshellTestBranch) {
 		t.Fatalf("err = %v, want the clone failure", err)
 	}
-	last := fake.Calls[len(fake.Calls)-1]
+	last := fake.Calls()[len(fake.Calls())-1]
 	want := []string{"openshell", "sandbox", "delete", openshellTestSession}
 	if !reflect.DeepEqual(last, want) {
 		t.Fatalf("last call = %q, want %q (rollback)", last, want)
@@ -317,8 +320,8 @@ func TestOpenShellPrepareRefusesAWorktreeOutsideTheTown(t *testing.T) {
 	if _, err := b.Prepare(context.Background(), spec); err == nil {
 		t.Fatal("Prepare accepted a worktree outside the town")
 	}
-	if len(*pushes) != 0 || len(fake.Calls) != 0 {
-		t.Fatalf("pushes = %d, openshell calls = %d; a bad spec must touch nothing", len(*pushes), len(fake.Calls))
+	if len(*pushes) != 0 || len(fake.Calls()) != 0 {
+		t.Fatalf("pushes = %d, openshell calls = %d; a bad spec must touch nothing", len(*pushes), len(fake.Calls()))
 	}
 }
 
@@ -412,8 +415,8 @@ func TestOpenShellPrepareStopsWhenThePushFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "pushing "+openshellTestBranch) {
 		t.Fatalf("err = %v, want the push failure", err)
 	}
-	if len(fake.Calls) != 0 {
-		t.Fatalf("openshell calls = %q; a failed push must leave no sandbox behind", fake.Calls)
+	if len(fake.Calls()) != 0 {
+		t.Fatalf("openshell calls = %q; a failed push must leave no sandbox behind", fake.Calls())
 	}
 	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
 		t.Fatal("a failed push left a sandbox record behind")
@@ -436,7 +439,7 @@ func TestOpenShellPrepareTimesOutWhenNeverReady(t *testing.T) {
 		t.Fatalf("err = %v, want the readiness timeout", err)
 	}
 	gets := 0
-	for _, c := range fake.Calls {
+	for _, c := range fake.Calls() {
 		if len(c) > 2 && c[2] == "get" {
 			gets++
 		}
@@ -444,7 +447,7 @@ func TestOpenShellPrepareTimesOutWhenNeverReady(t *testing.T) {
 	if gets != readyPolls || waits != readyPolls-1 {
 		t.Fatalf("gets = %d, waits = %d; want %d polls with %d pauses between them", gets, waits, readyPolls, readyPolls-1)
 	}
-	last := fake.Calls[len(fake.Calls)-1]
+	last := fake.Calls()[len(fake.Calls())-1]
 	if want := []string{"openshell", "sandbox", "delete", openshellTestSession}; !reflect.DeepEqual(last, want) {
 		t.Fatalf("last call = %q, want %q (rollback)", last, want)
 	}
@@ -465,7 +468,7 @@ func TestOpenShellPrepareCancelDuringReadyWaitRollsBack(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
-	last := fake.Calls[len(fake.Calls)-1]
+	last := fake.Calls()[len(fake.Calls())-1]
 	if want := []string{"openshell", "sandbox", "delete", openshellTestSession}; !reflect.DeepEqual(last, want) {
 		t.Fatalf("last call = %q, want %q (rollback despite the canceled spawn)", last, want)
 	}
@@ -481,11 +484,11 @@ func TestOpenShellPrepareRollbackRemovesTheRecord(t *testing.T) {
 	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 	run := b.cli.Run
-	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte, env []string) ([]byte, []byte, error) {
 		if slices.ContainsFunc(argv, func(a string) bool { return a == cloneScript }) {
 			return nil, []byte("fatal"), errors.New("exit status 128")
 		}
-		return run(ctx, argv, stdin)
+		return run(ctx, argv, stdin, env)
 	}
 
 	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err == nil {
@@ -510,8 +513,8 @@ func TestOpenShellPolicyPathStaysInTheWorktree(t *testing.T) {
 			if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err == nil {
 				t.Fatalf("Prepare accepted policy %q", policy)
 			}
-			if len(*pushes) != 0 || len(fake.Calls) != 0 {
-				t.Fatalf("pushes = %d, openshell calls = %d; a bad policy must touch nothing", len(*pushes), len(fake.Calls))
+			if len(*pushes) != 0 || len(fake.Calls()) != 0 {
+				t.Fatalf("pushes = %d, openshell calls = %d; a bad policy must touch nothing", len(*pushes), len(fake.Calls()))
 			}
 		})
 	}
