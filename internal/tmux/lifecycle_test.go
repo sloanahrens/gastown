@@ -142,6 +142,10 @@ func TestWrapError(t *testing.T) {
 		// kill-session do not use. Without it a missing session reached
 		// callers as an unclassified error (gt-jv0k3).
 		{"no such session: test", ErrSessionNotFound},
+		// The gateway's answer once a sandboxed session's sandbox has been
+		// deleted (a self-deleted sandbox, openshell 0.1.5): no sandbox, so no
+		// session, not a failed query.
+		{"Error:   × code: 'Some requested entity was not found', message: \"sandbox not found\"", ErrSessionNotFound},
 	}
 
 	for _, tt := range tests {
@@ -155,5 +159,18 @@ func TestWrapError(t *testing.T) {
 	}
 	if err := tm.wrapError(exitError(1), "boom", []string{"test"}); err == nil || err.Error() != "tmux test: boom" {
 		t.Errorf("other stderr: err = %v", err)
+	}
+}
+
+// has-session on a session whose sandbox is gone is a plain "no", so a sling to
+// that name, the liveness sampler and the record reaper see a missing session
+// and not an unknown one.
+func TestHasSessionIsFalseWhenTheSandboxIsGone(t *testing.T) {
+	t.Parallel()
+	gone := "Error:   \u00d7 code: 'Some requested entity was not found', message: \"sandbox not found\""
+	tm := unitTmux(newScripted(func(tmuxCall) reply { return fail(gone) }), nil)
+	ok, err := tm.HasSession("gt-furiosa")
+	if ok || err != nil {
+		t.Fatalf("HasSession with the sandbox gone = %v, %v; want false, nil", ok, err)
 	}
 }
