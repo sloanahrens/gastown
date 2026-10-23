@@ -687,7 +687,7 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 	// container-suite and bd-close-invariant are all self-filtering hooks with
 	// no If.
 	requireUngatedGuardCommand(t, "gastown/polecats", polecats, "tap guard pr-workflow")
-	for _, want := range []string{"tap guard dangerous-command", "tap guard container-suite", "tap guard bd-close-invariant"} {
+	for _, want := range []string{"tap guard dangerous-command", "tap guard container-suite", "tap guard bd-close-invariant", "tap guard sandbox-secrets"} {
 		found := false
 		for _, h := range shellEntry.Hooks {
 			if strings.Contains(h.Command, want) {
