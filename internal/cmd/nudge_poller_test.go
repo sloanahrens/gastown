@@ -36,7 +36,9 @@ func TestShouldSkipDrainUntilIdle(t *testing.T) {
 	}
 }
 
-// pollerHarness drives nudgePoller.run with a manual tick channel.
+// pollerHarness drives nudgePoller.run with a manual tick channel. The tick
+// channel is unbuffered, so a send is accepted only once run has finished the
+// previous tick and is back in its select.
 type pollerHarness struct {
 	p     *nudgePoller
 	ticks chan time.Time
@@ -60,18 +62,29 @@ func newPollerHarness(probe func(string) (bool, error)) *pollerHarness {
 		requeue:     func([]nudge.QueuedNudge) {},
 		stderr:      &bytes.Buffer{},
 	}
-	go func() { h.done <- h.p.run(h.sig, h.ticks) }()
 	return h
 }
 
-// exited reports whether run returned within a short wait.
-func (h *pollerHarness) exited() bool {
+func (h *pollerHarness) start() {
+	go func() { h.done <- h.p.run(h.sig, h.ticks) }()
+}
+
+// tick delivers one poll tick and reports whether the poller accepted it;
+// false means run has already returned.
+func (h *pollerHarness) tick() bool {
 	select {
-	case <-h.done:
+	case h.ticks <- time.Time{}:
 		return true
-	case <-time.After(50 * time.Millisecond):
+	case <-h.done:
+		h.done <- nil // keep the exit observable to stop()
 		return false
 	}
+}
+
+// stop sends SIGTERM and waits for run to return.
+func (h *pollerHarness) stop() {
+	h.sig <- syscall.SIGTERM
+	<-h.done
 }
 
 func TestNudgePollerRunTransientProbeErrorsKeepPolling(t *testing.T) {
@@ -87,17 +100,15 @@ func TestNudgePollerRunTransientProbeErrorsKeepPolling(t *testing.T) {
 		}
 		return true, nil
 	})
+	h.start()
 
-	for i := 0; i < 3*nudgePollerMaxProbeErrors; i++ {
-		h.ticks <- time.Now()
+	// One tick past the last probe proves run finished that tick and kept going.
+	for i := 0; i <= 3*nudgePollerMaxProbeErrors; i++ {
+		if !h.tick() {
+			t.Fatalf("poller exited at tick %d although probe errors never reached the bound in a row", i)
+		}
 	}
-	if h.exited() {
-		t.Fatal("poller exited although probe errors never reached the bound in a row")
-	}
-	h.sig <- syscall.SIGTERM
-	if !h.exited() {
-		t.Fatal("poller did not stop on SIGTERM")
-	}
+	h.stop()
 }
 
 func TestNudgePollerRunPersistentProbeErrorsEndPoller(t *testing.T) {
@@ -106,27 +117,25 @@ func TestNudgePollerRunPersistentProbeErrorsEndPoller(t *testing.T) {
 	h := newPollerHarness(func(string) (bool, error) {
 		return false, errors.New("server unreachable")
 	})
+	h.start()
 
-	for i := 0; i < nudgePollerMaxProbeErrors; i++ {
-		select {
-		case h.ticks <- time.Now():
-		case <-time.After(time.Second):
-			t.Fatalf("poller stopped after %d errors, want %d", i, nudgePollerMaxProbeErrors)
+	for i := 1; i <= nudgePollerMaxProbeErrors; i++ {
+		if !h.tick() {
+			t.Fatalf("poller exited after %d probe errors, want %d", i-1, nudgePollerMaxProbeErrors)
 		}
 	}
-	if !h.exited() {
-		t.Fatalf("poller still running after %d consecutive probe errors", nudgePollerMaxProbeErrors)
-	}
+	<-h.done // the last accepted tick was the bound-th error: run returns
 }
 
 func TestNudgePollerRunExitsWhenSessionAbsent(t *testing.T) {
 	t.Parallel()
 
 	h := newPollerHarness(func(string) (bool, error) { return false, nil })
-	h.ticks <- time.Now()
-	if !h.exited() {
-		t.Fatal("poller still running after the session was confirmed absent")
+	h.start()
+	if !h.tick() {
+		t.Fatal("poller refused its first tick")
 	}
+	<-h.done
 }
 
 func TestNudgePollerRunDeliversQueuedNudges(t *testing.T) {
@@ -147,13 +156,11 @@ func TestNudgePollerRunDeliversQueuedNudges(t *testing.T) {
 		return nil
 	}
 	h.p.requeue = func([]nudge.QueuedNudge) { requeued++ }
+	h.start()
 
-	h.ticks <- time.Now() // injection fails: requeued
-	h.ticks <- time.Now() // injection succeeds
-	h.sig <- syscall.SIGTERM
-	if !h.exited() {
-		t.Fatal("poller did not stop on SIGTERM")
-	}
+	h.tick() // injection fails: requeued
+	h.tick() // injection succeeds
+	h.stop()
 
 	if len(injected) != 2 || !strings.Contains(injected[0], "hello") {
 		t.Errorf("injected = %q, want two injections carrying the nudge", injected)
