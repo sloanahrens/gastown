@@ -161,6 +161,12 @@ type Lander struct {
 	// lander holds no state between landings, so how often the loss reaches a
 	// human is the sink's own business (gt-4ty22). Nil reports nothing.
 	FollowupAlert func(message string)
+	// AcceptedRiskAlert, when set, raises the attention item the overseer sees
+	// for a review that was given an accepted risk (gt-tvhg8): key names the
+	// work bead and the head reviewed, so a repeat of the same review keeps
+	// one item. An error is logged and never fails the landing. Nil reports
+	// nothing.
+	AcceptedRiskAlert func(key, message string) error
 	// RangeChecks run on base..head before the merge (the landing worker
 	// passes AttributionCheck). A returned Rejection is written to the bead
 	// like any other.
@@ -946,17 +952,85 @@ func (l *Lander) now() time.Time {
 	return time.Now()
 }
 
-// acceptedRisksText reads the work bead's comments, once per landing, and
-// returns the accepted-risk record the review is given through --context-file
-// (AcceptedRisksText). A bead whose comments cannot be read is reviewed without
-// them, as one that records none: the review still judges the diff.
-func (l *Lander) acceptedRisksText(id string) string {
+// acceptedRisks reads the work bead's comments, once per landing, and returns
+// the accepted-risk record the review is given through --context-file
+// (AcceptedRisksText) and the entries that record names, for the audit
+// (AcceptedRisksUsed, gt-tvhg8). A bead whose comments cannot be read is
+// reviewed without them, as one that records none: the review still judges the
+// diff.
+func (l *Lander) acceptedRisks(id string) (string, []AcceptedRisk) {
 	comments, err := l.Beads.Comments(id)
 	if err != nil {
 		l.logf("%s: could not read the bead's comments (%v); om reviews without accepted risks", id, err)
-		return ""
+		return "", nil
 	}
-	return AcceptedRisksText(comments)
+	return AcceptedRisksText(comments), AcceptedRisksUsed(comments)
+}
+
+// AcceptedRiskUsedMarker opens the landing note a review leaves when it was
+// given accepted risks (gt-tvhg8). It is a note, not a comment, so the
+// accepted-risk filter never reads it back as a decision.
+const AcceptedRiskUsedMarker = "ACCEPTED-RISK USED"
+
+// recordAcceptedRisks leaves the audit of a review that was given accepted
+// risks (gt-tvhg8): one landing note on the work bead naming every entry, and
+// one attention item through AcceptedRiskAlert. A review given none leaves
+// neither. Both writes share commentTimeout with the verdict comment, so a
+// slow bead costs a log line and never fails the landing.
+func (l *Lander) recordAcceptedRisks(w Work, used []AcceptedRisk) {
+	if len(used) == 0 {
+		return
+	}
+	done := make(chan error, 1)
+	go func() {
+		note := l.Beads.AppendNotes(w.BeadID, acceptedRiskNote(w.Head, used))
+		var alert error
+		if l.AcceptedRiskAlert != nil {
+			alert = l.AcceptedRiskAlert(acceptedRiskKey(w), acceptedRiskMessage(w, used))
+		}
+		done <- errors.Join(wrapErr("the landing note", note), wrapErr("the attention item", alert))
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			l.logf("%s: could not record the accepted risks this review used (%v); the landing is unaffected", w.BeadID, err)
+		}
+	case <-time.After(commentTimeout):
+		l.logf("%s: recording the accepted risks this review used did not finish in %s; the landing is unaffected", w.BeadID, commentTimeout)
+	}
+}
+
+// wrapErr names which write failed, and passes a nil error through unchanged.
+func wrapErr(what string, err error) error {
+	if err == nil {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", what, err)
+}
+
+// acceptedRiskNote renders the landing note: the head reviewed, then one line
+// per entry naming its comment, author, date and excerpt. Every field is
+// collapsed onto its line, and the marker defusing keeps an excerpt from
+// opening a record another reader splits on.
+func acceptedRiskNote(head string, used []AcceptedRisk) string {
+	lines := []string{fmt.Sprintf("%s: %d accepted risk(s) reviewed at %s", AcceptedRiskUsedMarker, len(used), shortSHA(head))}
+	for _, u := range used {
+		lines = append(lines, fmt.Sprintf("- comment %s by %s on %s: %s",
+			NoteField(u.CommentID), NoteField(u.Author), NoteField(u.Date), defuseMarkers(NoteField(u.Excerpt))))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// acceptedRiskKey is the attention item's identity: the work bead and the head
+// its review judged, so the overseer sees one item per reviewed head.
+func acceptedRiskKey(w Work) string {
+	return "accepted-risk:" + w.BeadID + ":" + shortSHA(w.Head)
+}
+
+// acceptedRiskMessage is the one-line summary the overseer reads on the item.
+func acceptedRiskMessage(w Work, used []AcceptedRisk) string {
+	return fmt.Sprintf("om review of %s at %s used %d accepted risk(s); see the bead's ACCEPTED-RISK USED note",
+		w.BeadID, shortSHA(w.Head), len(used))
 }
 
 // Land lands w: the declared head merged onto a throwaway worktree of the
@@ -1212,9 +1286,10 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 	} else {
 		l.stage(w, StageOM)
 		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
+		accepted, used := l.acceptedRisks(w.BeadID)
 		in := ReviewInput{Dir: dir, Base: base, Head: merged, BeadID: w.BeadID,
 			CriteriaText: CriteriaText(issue), PriorFindings: priorReviewFindings(issue.Notes),
-			AcceptedRisksText: l.acceptedRisksText(w.BeadID)}
+			AcceptedRisksText: accepted}
 		verdict, reviewErr = l.review(omCtx, in)
 		// One flaky om run must not cost an escalation and a hand review
 		// (gt-q241r): an execution error on an ordinary tree is retried once,
@@ -1231,6 +1306,7 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 			verdict = l.rescoreBorderline(omCtx, verdict, in)
 		}
 		omDone()
+		l.recordAcceptedRisks(w, used)
 		l.logf("%s: %s", w.BeadID, stageTimes(gateRes, time.Since(reviewStart), omRetried))
 	}
 	res.Verdict = verdict
