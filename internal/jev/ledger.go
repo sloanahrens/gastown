@@ -99,6 +99,8 @@ func appendLineWith(path string, line []byte, write func(*os.File, []byte) (int,
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
+	// O_RDWR, not O_WRONLY: endsMidLine reads the last byte through this same
+	// handle, under the lock, so the torn-line check and the write see one inode.
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
