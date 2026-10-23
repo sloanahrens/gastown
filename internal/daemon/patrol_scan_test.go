@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/done"
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
@@ -958,5 +959,44 @@ func TestPatrolScanDoneCloseGraceMatchesCrashDetector(t *testing.T) {
 	}
 	if _, ok := opts.DoneAge("myr", "mycat", "gt-other", testEpoch); ok {
 		t.Fatal("DoneAge dated a done for a bead the seat did not finish")
+	}
+}
+
+// The tick's Kill adapter is the supervisor's automatic-path kill, not a raw
+// tmux kill: it stops the seat's live session and records the verb, and a town
+// e-stop refuses it, so a stall can never outrun an operator (gt-9p99w).
+func TestPatrolScanKillStopsTheSessionAndAnswersToTheEstop(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	tm := newFakeTmux(newFixedClock())
+	tm.addSession("myr-mycat", "claude", time.Now())
+	d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0), tmux: tm, prefixRegistryFn: myrPrefixes}
+	h := &patrolScanHost{d: d}
+
+	if err := estop.Activate(town, estop.TriggerManual, "drill"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.Kill("myr", "mycat", "stalled seat"); !errors.Is(err, supervisor.ErrRefused) {
+		t.Fatalf("Kill under the e-stop = %v, want a supervisor refusal", err)
+	}
+	if has, _ := tm.HasSession("myr-mycat"); !has {
+		t.Fatal("the e-stop did not stop the kill")
+	}
+	if err := estop.Deactivate(town, false); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := h.Kill("myr", "mycat", "stalled seat"); err != nil {
+		t.Fatalf("Kill: %v", err)
+	}
+	if has, _ := tm.HasSession("myr-mycat"); has {
+		t.Fatal("the seat's session survived the kill")
+	}
+	lines, err := os.ReadFile(supervisor.ActionLogPath(town))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(lines), `"verb":"kill"`) {
+		t.Fatalf("kill missing from the action log: %s", lines)
 	}
 }

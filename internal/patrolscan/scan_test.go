@@ -77,10 +77,13 @@ type fakeEnv struct {
 	// actor reassigned them since the list read.
 	heldBeads map[string]bool
 
-	restarts    []string
-	kills       []string // polecats whose live session was stopped
-	killErr     map[string]error
-	idles       []string // polecats whose seat was retired to stop
+	restarts []string
+	kills    []string // polecats whose live session was stopped
+	killErr  map[string]error
+	idles    []string // polecats whose seat was retired to stop
+	// events orders the stop and the record write, so a test can prove the
+	// session is stopped before the record is retired.
+	events      []string
 	escalations []string // polecats whose agent bead was reset to idle
 	submitted   []string // "polecat=bead" the tick recorded as submitted
 	closed      []string
@@ -215,6 +218,7 @@ func (f *fakeEnv) Kill(_, p, _ string) error {
 		return err
 	}
 	f.kills = append(f.kills, p)
+	f.events = append(f.events, "kill:"+p)
 	return nil
 }
 
@@ -223,6 +227,7 @@ func (f *fakeEnv) MarkIdle(_, p string) (bool, error) {
 		return false, err
 	}
 	f.idles = append(f.idles, p)
+	f.events = append(f.events, "idle:"+p)
 	if f.idleStopped[p] {
 		return false, nil
 	}
@@ -1369,11 +1374,15 @@ func TestStalledSeatOnFinishedWorkIsReleased(t *testing.T) {
 		{"the supervisor refuses the kill", func(env *fakeEnv) {
 			env.work["ruby"].Status = "closed"
 			env.killErr["ruby"] = errRefused
-		}, OutcomeRefused, false, true},
+		}, OutcomeRefused, false, false},
 		{"the kill fails", func(env *fakeEnv) {
 			env.work["ruby"].Status = "closed"
 			env.killErr["ruby"] = errors.New("tmux: no server")
-		}, OutcomeFailed, false, true},
+		}, OutcomeFailed, false, false},
+		{"the session stops but the record cannot be retired", func(env *fakeEnv) {
+			env.work["ruby"].Status = "closed"
+			env.idleErr["ruby"] = errors.New("intent: write failed")
+		}, OutcomeFailed, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1413,22 +1422,27 @@ func TestStalledSeatOnFinishedWorkIsReleased(t *testing.T) {
 	}
 }
 
-// A stall that does not measure past the threshold is reported, not acted on:
-// the verdict and the quiet it measured have to agree before a session dies.
-func TestStalledSeatBelowTheThresholdIsReportOnly(t *testing.T) {
+// The session is stopped before the record is retired: a stop the supervisor
+// refuses leaves the seat exactly as it was, and a record already retired to
+// stop would then ask for nothing while the live session it belongs to runs on
+// unowned. The release is also counted where the operator reads it.
+func TestStalledReleaseStopsTheSessionBeforeRetiringTheRecord(t *testing.T) {
 	t.Parallel()
 	env := newFake()
 	env.polecats = []string{"ruby"}
-	env.verdicts["ruby"] = liveness.Result{Verdict: liveness.Stalled, Reason: "no progress for 5m", QuietFor: 5 * time.Minute}
+	env.verdicts["ruby"] = liveness.Result{Verdict: liveness.Stalled, Reason: "no progress for 31m", QuietFor: 31 * time.Minute}
 	env.work["ruby"] = &Work{ID: "gt-ruby", Status: "closed", Assignee: "gastown/polecats/ruby"}
 
 	r := scanner(env, nil).Tick("gastown")
 
-	if got := seatFinding(t, r, "ruby").Outcome; got != OutcomeStalled {
-		t.Fatalf("outcome = %q, want %q. report: %v", got, OutcomeStalled, r.Lines())
+	if got := seatFinding(t, r, "ruby").Outcome; got != OutcomeReleased {
+		t.Fatalf("outcome = %q, want %q. report: %v", got, OutcomeReleased, r.Lines())
 	}
-	if len(env.kills) != 0 || len(env.idles) != 0 {
-		t.Fatalf("killed %v and retired %v; want neither. report: %v", env.kills, env.idles, r.Lines())
+	if got, want := strings.Join(env.events, ","), "kill:ruby,idle:ruby"; got != want {
+		t.Fatalf("events = %q, want %q: the stop comes before the record write", got, want)
+	}
+	if line := r.Lines()[0]; !strings.Contains(line, "1 released") {
+		t.Fatalf("summary = %q, want the release counted", line)
 	}
 }
 

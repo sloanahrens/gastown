@@ -47,9 +47,11 @@ We decided that the daemon runs a `patrol_scan` tick (`internal/patrolscan`, hos
 - **Stalled seats.** A seat the liveness function finds Stalled — alive, but with no progress
   evidence for the stall threshold — is reported and never nudged or restarted while it holds
   work that is not over. A seat stalled on a bead that is closed or tombstoned, or on none, has
-  nothing left to progress on: its record is retired to `stop` and the supervisor stops the
-  session, as the idle path retires a dead one, so a landed bead stops pinning a live session
-  and its seat (gt-9p99w). A work bead that cannot be read is Unknown, and nothing is stopped.
+  nothing left to progress on: the supervisor stops the session, and the seat's record is then
+  retired to `stop` as the idle path retires a dead one, so a landed bead stops pinning a live
+  session and its seat (gt-9p99w). The stop comes first, so a refused stop (a held, parked or
+  e-stopped seat) leaves the record asking for the session the seat still has. A work bead that
+  cannot be read is Unknown, and nothing is stopped.
 - **Orphaned molecules.** For hooked work whose polecat has neither a session nor a directory,
   the bonded `mol-polecat-work` root and its step wisps are force-closed, read with
   `bd show --children` so ephemeral steps are seen (gt-22hdp.36).
