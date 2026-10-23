@@ -36,8 +36,11 @@ filesystem_policy:
   read_write:
     - /tmp
     - /dev/null
-    # tmux allocates a pty per window through /dev/pts; without it the fork fails.
+    # tmux allocates a pty per window: the master opens through /dev/ptmx and the
+    # slave through /dev/pts. Landlock grants whole paths, so /dev/pts reaches every
+    # pty slave in devpts, not only the one tmux opens.
     - /dev/pts
+    - /dev/ptmx
 
 landlock:
   compatibility: hard_requirement
