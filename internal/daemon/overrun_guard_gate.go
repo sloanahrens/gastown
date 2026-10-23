@@ -50,6 +50,10 @@ type overrunGateReader struct {
 	// of a session; nil asks tmux. Tests set both.
 	run   cmdRunFunc
 	panes func(sessionName string) ([]int, error)
+	// sandboxReads answers for a sandboxed seat, whose panes and processes are in
+	// its sandbox and invisible to the host's list-panes and ps; nil is a tmux
+	// client that routes. Tests set it.
+	sandboxReads sandboxSessionReads
 
 	// The per-cycle reads, each kept with the error its read failed with so
 	// every seat on this tick gets the same answer.
@@ -63,6 +67,31 @@ type overrunGateReader struct {
 	panesLoaded bool
 	panesErr    error
 	gates       map[string][]polecat.Invocation
+}
+
+// sandboxSessionReads is the routed tmux reads a sandboxed seat is asked
+// through (tmux.Tmux.SessionPanes and ProcessTable).
+type sandboxSessionReads interface {
+	SessionPanes(session string) (string, error)
+	ProcessTable(session string) (string, error)
+}
+
+// sandboxed reports whether the session runs in a sandbox. A registry that
+// cannot be read is an error, so the caller counts all of the seat's time (the
+// direction that stops) instead of reading the wrong table.
+func (r *overrunGateReader) sandboxed(sessionName string) (bool, error) {
+	ok, err := session.IsSandboxed(r.d.config.TownRoot, sessionName)
+	if err != nil {
+		return false, fmt.Errorf("sandbox registry: %w", err)
+	}
+	return ok, nil
+}
+
+func (r *overrunGateReader) sandboxSessionReads() sandboxSessionReads {
+	if r.sandboxReads != nil {
+		return r.sandboxReads
+	}
+	return tmux.NewTmux()
 }
 
 // newOverrunGateReader returns the reader for one cycle, with the real ps and
@@ -116,6 +145,17 @@ func overrunSeatRoles(seat overrunSeat) []string {
 // PanePIDs lists the pane pids of one session, through the reader's pane seam
 // or from the all-sessions listing read once per cycle.
 func (r *overrunGateReader) PanePIDs(sessionName string) ([]int, error) {
+	sandboxed, err := r.sandboxed(sessionName)
+	if err != nil {
+		return nil, err
+	}
+	if sandboxed {
+		out, err := r.sandboxSessionReads().SessionPanes(sessionName)
+		if err != nil {
+			return nil, fmt.Errorf("listing sandbox panes: %w", err)
+		}
+		return polecat.ParsePanes(out, sessionName), nil
+	}
 	if r.panes != nil {
 		return r.panes(sessionName)
 	}
@@ -144,6 +184,24 @@ func (r *overrunGateReader) gateInvocations(rigName string) []polecat.Invocation
 	gates := overrunGateInvocations(r.d.config.TownRoot, rigName)
 	r.gates[rigName] = gates
 	return gates
+}
+
+// SessionProcessTable is polecat.SessionProcessReads: a sandboxed seat's
+// processes are read in its sandbox, every other seat's in the host table read
+// once per cycle.
+func (r *overrunGateReader) SessionProcessTable(sessionName string) ([]polecat.Proc, error) {
+	sandboxed, err := r.sandboxed(sessionName)
+	if err != nil {
+		return nil, err
+	}
+	if !sandboxed {
+		return r.ProcessTable()
+	}
+	out, err := r.sandboxSessionReads().ProcessTable(sessionName)
+	if err != nil {
+		return nil, fmt.Errorf("listing sandbox processes: %w", err)
+	}
+	return polecat.ParseProcessTable(out), nil
 }
 
 // ProcessTable reads the whole process table once per cycle.
