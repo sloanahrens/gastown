@@ -46,7 +46,7 @@ To remove it, `launchctl bootout gui/$(id -u)/com.gastown.openshell-gateway` and
 | `~/.local/state/openshell/tls/` | the local TLS material (`OPENSHELL_LOCAL_TLS_DIR`) |
 | `~/gt/.runtime/openshell/gateway.log` | stdout and stderr of the gateway |
 
-A lost `~/.local/state/openshell/` means the providers are gone; re-register them from the two key files (the operator step of the sandbox backend plan).
+A lost `~/.local/state/openshell/` means the providers are gone; re-register them from the two key files.
 
 ## Regenerate certificates
 
