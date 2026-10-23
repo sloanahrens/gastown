@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -384,26 +385,73 @@ func retiredKeyKept(raw json.RawMessage, agent string) bool {
 
 // TestMissingLifecyclePatrols_MatchesWhatEnsureFills pins the shared patrol
 // set: the keys MissingLifecyclePatrols reports are the ones
-// EnsureLifecycleDefaults fills, and none are left after it runs.
+// EnsureLifecycleDefaults fills, and none are left after it runs. A partly
+// configured section is what separates the two: a key Missing skips has to
+// survive Ensure untouched, and every key it reports has to end up set.
 func TestMissingLifecyclePatrols_MatchesWhatEnsureFills(t *testing.T) {
 	t.Parallel()
-	config := &DaemonPatrolConfig{Patrols: &PatrolsConfig{}}
 
-	want := []string{"wisp_reaper", "compactor_dog", "checkpoint_dog", "doctor_dog", "jsonl_git_backup", "scheduled_maintenance", "handler"}
-	got := MissingLifecyclePatrols(config.Patrols)
-	if len(got) != len(want) {
-		t.Fatalf("missing = %v, want %v", got, want)
-	}
-	for i := range want {
-		if got[i] != want[i] {
-			t.Fatalf("missing = %v, want %v", got, want)
-		}
+	// Both functions write through the config, so each case builds its own.
+	tests := []struct {
+		name    string
+		patrols func() *PatrolsConfig
+		want    []string
+		changed bool
+		// kept asserts a patrol the case wrote itself came out of
+		// EnsureLifecycleDefaults with the values the case set.
+		kept func(t *testing.T, p *PatrolsConfig)
+	}{
+		{
+			name:    "empty section",
+			patrols: func() *PatrolsConfig { return &PatrolsConfig{} },
+			want:    []string{"wisp_reaper", "compactor_dog", "checkpoint_dog", "doctor_dog", "jsonl_git_backup", "scheduled_maintenance", "handler"},
+			changed: true,
+		},
+		{
+			name: "one disabled and one retuned",
+			patrols: func() *PatrolsConfig {
+				return &PatrolsConfig{
+					CheckpointDog: &CheckpointDogConfig{Enabled: false, IntervalStr: "1h"},
+					Handler:       &PatrolConfig{Enabled: false},
+				}
+			},
+			want:    []string{"wisp_reaper", "compactor_dog", "doctor_dog", "jsonl_git_backup", "scheduled_maintenance"},
+			changed: true,
+			kept: func(t *testing.T, p *PatrolsConfig) {
+				t.Helper()
+				if p.CheckpointDog == nil || p.CheckpointDog.Enabled || p.CheckpointDog.IntervalStr != "1h" {
+					t.Errorf("checkpoint_dog = %+v, want the case's disabled 1h entry", p.CheckpointDog)
+				}
+				if p.Handler == nil || p.Handler.Enabled {
+					t.Errorf("handler = %+v, want the case's disabled entry", p.Handler)
+				}
+			},
+		},
+		{
+			name:    "every patrol configured",
+			patrols: func() *PatrolsConfig { return DefaultLifecycleConfig().Patrols },
+			want:    nil,
+			changed: false,
+		},
 	}
 
-	if !EnsureLifecycleDefaults(config) {
-		t.Fatal("EnsureLifecycleDefaults reported no change on an empty patrols section")
-	}
-	if left := MissingLifecyclePatrols(config.Patrols); len(left) != 0 {
-		t.Errorf("patrols still missing after EnsureLifecycleDefaults: %v", left)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			patrols := tt.patrols()
+
+			if got := MissingLifecyclePatrols(patrols); !slices.Equal(got, tt.want) {
+				t.Fatalf("missing = %v, want %v", got, tt.want)
+			}
+			if got := EnsureLifecycleDefaults(&DaemonPatrolConfig{Patrols: patrols}); got != tt.changed {
+				t.Errorf("EnsureLifecycleDefaults changed = %v, want %v", got, tt.changed)
+			}
+			if left := MissingLifecyclePatrols(patrols); len(left) != 0 {
+				t.Errorf("patrols still missing after EnsureLifecycleDefaults: %v", left)
+			}
+			if tt.kept != nil {
+				tt.kept(t, patrols)
+			}
+		})
 	}
 }
