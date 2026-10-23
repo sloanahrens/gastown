@@ -318,6 +318,25 @@ func TestAcceptedRisksUsedKeepsTheTextOrder(t *testing.T) {
 	}
 }
 
+// TestAcceptedRisksUsedKeepsListOrderWhenADateDoesNotParse: the audit reads the
+// same filter as the text, so a comment with an unreadable date leaves both in
+// the list's own order rather than sorted (gt-vvo9l).
+func TestAcceptedRisksUsedKeepsListOrderWhenADateDoesNotParse(t *testing.T) {
+	t.Parallel()
+	comments := []beads.Comment{
+		{ID: "c-1", Author: "town/crew/overseer", Text: "ACCEPTED-RISK: first", CreatedAt: "2026-10-23T18:00:00Z"},
+		{ID: "c-2", Author: "Sloan Ahrens", Text: "ACCEPTED-RISK: second", CreatedAt: "yesterday"},
+		{ID: "c-3", Author: "town/crew/overseer", Text: "ACCEPTED-RISK: third", CreatedAt: "2026-10-20T09:00:00Z"},
+	}
+	var ids []string
+	for _, u := range AcceptedRisksUsed(comments) {
+		ids = append(ids, u.CommentID)
+	}
+	if want := []string{"c-1", "c-2", "c-3"}; !slices.Equal(ids, want) {
+		t.Errorf("AcceptedRisksUsed order = %v, want the list's own order %v", ids, want)
+	}
+}
+
 // TestAcceptedRisksUsedCutsTheExcerptAtEightyRunes: the excerpt is the first 80
 // runes of the comment, cut on a rune boundary (gt-vvo9l).
 func TestAcceptedRisksUsedCutsTheExcerptAtEightyRunes(t *testing.T) {
