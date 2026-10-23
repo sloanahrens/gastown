@@ -75,16 +75,18 @@ func writeRetries(path string, q retries) error {
 }
 
 // beadFault reports whether err blames the bead's request rather than the
-// pass's reach: Jev refused this request (a 4xx other than 401 and the account
-// refusals) or accepted it and answered unusably. Only a bead fault counts an
-// attempt against the bead; any other failure — a timeout, a lost connection,
-// a 429 that outlived its retry, a 401, a 402 or 403 for the account, a 5xx —
-// stops the pass where it is, so an outage costs no attempts and drops nothing.
+// pass's reach: Jev refused this request (a 4xx other than 401, 408 and the
+// account refusals) or accepted it and answered unusably. Only a bead fault
+// counts an attempt against the bead; any other failure — a timeout, a lost
+// connection, a 408 request timeout, a 429 that outlived its retry, a 401, a
+// 402 or 403 for the account, a 5xx — stops the pass where it is, so an outage
+// costs no attempts and drops nothing.
 func beadFault(err error) bool {
 	var se *jev.StatusError
 	if errors.As(err, &se) {
 		return se.Status >= 400 && se.Status < 500 &&
 			se.Status != http.StatusUnauthorized &&
+			se.Status != http.StatusRequestTimeout &&
 			!accountRefusal(se.Status)
 	}
 	return errors.Is(err, jev.ErrBadResponse)

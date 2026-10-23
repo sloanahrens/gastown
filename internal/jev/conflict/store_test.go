@@ -108,6 +108,7 @@ func TestBeadFaultClassifiesStatuses(t *testing.T) {
 	}{
 		{"400 bad request", &jev.StatusError{Status: http.StatusBadRequest}, true},
 		{"422 unprocessable", &jev.StatusError{Status: http.StatusUnprocessableEntity}, true},
+		{"408 request timeout", &jev.StatusError{Status: http.StatusRequestTimeout}, false},
 		{"402 payment required", &jev.StatusError{Status: http.StatusPaymentRequired}, false},
 		{"403 forbidden", &jev.StatusError{Status: http.StatusForbidden}, false},
 		{"401 unauthorized", jev.ErrUnauthorized, false},

@@ -699,6 +699,7 @@ func TestJevDispatchBeadFaultClassifiesStatuses(t *testing.T) {
 		want bool
 	}{
 		{"400 bad request", &jev.StatusError{Status: http.StatusBadRequest}, true},
+		{"408 request timeout", &jev.StatusError{Status: http.StatusRequestTimeout}, false},
 		{"413 too large", &jev.StatusError{Status: http.StatusRequestEntityTooLarge}, true},
 		{"402 payment required", &jev.StatusError{Status: http.StatusPaymentRequired}, false},
 		{"403 forbidden", &jev.StatusError{Status: http.StatusForbidden}, false},
