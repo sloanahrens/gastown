@@ -111,7 +111,7 @@ func TestEnvVarsFixNeverTouchesASandboxSession(t *testing.T) {
 	result := check.Run(ctx)
 
 	w.assertSandboxUntouched(t)
-	if !slices.ContainsFunc(w.hostCalls, func(c string) bool { return strings.Contains(c, "ga-crew-max") }) {
-		t.Errorf("the host session was not examined at all: %v (result %v)", w.hostCalls, result.Message)
+	if !slices.ContainsFunc(w.hostCalls, func(c string) bool { return strings.Contains(c, "set-environment -t ga-crew-max") }) {
+		t.Errorf("Fix did not write the host session's environment: %v (result %v)", w.hostCalls, result.Message)
 	}
 }
