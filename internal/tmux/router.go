@@ -1,6 +1,8 @@
 package tmux
 
 import (
+	"context"
+	"errors"
 	"strings"
 	"sync"
 )
@@ -86,6 +88,17 @@ func sessionOfArgs(args []string) string {
 		}
 	}
 	return ""
+}
+
+// NewTmuxUnavailable is a client whose every command fails with reason. A
+// SessionRouter returns one when it cannot tell which server owns a session
+// (its registry is unreadable), so the command fails instead of running on
+// the wrong server.
+func NewTmuxUnavailable(reason string) *Tmux {
+	err := errors.New("tmux unavailable: " + reason)
+	return &Tmux{noRoute: true, exec: func(context.Context, string, ...string) ([]byte, []byte, error) {
+		return nil, nil, err
+	}}
 }
 
 // extraSessionNames returns the registered extra sessions, deduplicated

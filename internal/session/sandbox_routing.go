@@ -1,8 +1,11 @@
 package session
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -19,6 +22,10 @@ type sandboxRouting struct {
 	resolved bool
 	clients  map[string]*tmux.Tmux // session -> routed client, built once
 	findTown func() string
+	// Registry listing cached on the directory's mtime (listed below).
+	listTown  string
+	listMtime time.Time
+	listNames map[string]bool
 }
 
 var routing = &sandboxRouting{clients: map[string]*tmux.Tmux{}, findTown: defaultFindTown}
@@ -49,13 +56,31 @@ func (s *sandboxRouting) town() string {
 }
 
 // route returns the routed client for session when the registry lists it.
+// A registry that cannot be read does not fall back to the host server:
+// the command then runs on a client that fails with the read error, so a
+// broken registry surfaces as failed tmux calls, never as commands sent to
+// the wrong server.
+//
+// Cost: one stat of the registry directory per call; the directory's
+// listing is re-read only when its mtime changes, so a town with no
+// sandboxes pays a stat and a map miss.
 func (s *sandboxRouting) route(session string) *tmux.Tmux {
 	town := s.town()
 	if town == "" {
 		return nil
 	}
+	listed, err := s.listed(town, session)
+	if err != nil {
+		return tmux.NewTmuxUnavailable(fmt.Sprintf("sandbox registry %s: %v", SandboxRegistryDir(town), err))
+	}
+	if !listed {
+		return nil
+	}
 	rec, ok, err := ReadSandboxRecord(town, session)
-	if err != nil || !ok {
+	if err != nil {
+		return tmux.NewTmuxUnavailable(fmt.Sprintf("sandbox record for %s: %v", session, err))
+	}
+	if !ok {
 		return nil
 	}
 	s.mu.Lock()
@@ -66,6 +91,33 @@ func (s *sandboxRouting) route(session string) *tmux.Tmux {
 	c := tmux.NewTmuxWithExecPrefix(SandboxTmuxSocket, SandboxExecPrefix(rec.Gateway, session))
 	s.clients[session] = c
 	return c
+}
+
+// listed reports whether session has a record, from a listing cached on
+// the registry directory's mtime. A missing directory lists nothing.
+func (s *sandboxRouting) listed(town, session string) (bool, error) {
+	dir := SandboxRegistryDir(town)
+	st, err := os.Stat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.listTown != town || !st.ModTime().Equal(s.listMtime) {
+		names, err := listSandboxSessions(town)
+		if err != nil {
+			return false, err
+		}
+		s.listTown, s.listMtime = town, st.ModTime()
+		s.listNames = make(map[string]bool, len(names))
+		for _, n := range names {
+			s.listNames[n] = true
+		}
+	}
+	return s.listNames[session], nil
 }
 
 func (s *sandboxRouting) sessions() []string {
@@ -91,6 +143,7 @@ func ResetSandboxRoutingForTest(townRoot string) {
 	routing.townRoot = townRoot
 	routing.resolved = true
 	routing.clients = map[string]*tmux.Tmux{}
+	routing.listTown, routing.listMtime, routing.listNames = "", time.Time{}, nil
 }
 
 // RoutedTmuxFor returns the tmux client that drives session: the routed

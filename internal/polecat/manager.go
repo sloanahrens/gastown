@@ -252,18 +252,17 @@ func (m *Manager) killSession(name, reason string) error {
 	} else if m.tmux != nil {
 		err = m.tmux.KillSessionWithProcesses(m.sessionName(name))
 	}
-	if err != nil {
-		return err
-	}
 	// A sandboxed polecat's session was killed inside its sandbox (the kill
 	// is routed); the sandbox itself goes with it, along with its registry
-	// record. A host session has no record and this is a no-op.
+	// record, whether or not the kill succeeded: a sandbox whose tmux is
+	// already gone must still be deleted. A host session has no record and
+	// this is a no-op.
 	if m.townRoot != "" {
 		if cerr := session.CleanupSandbox(m.townRoot, m.sessionName(name)); cerr != nil {
-			return fmt.Errorf("polecat %s: %w", name, cerr)
+			err = errors.Join(err, fmt.Errorf("polecat %s: %w", name, cerr))
 		}
 	}
-	return nil
+	return err
 }
 
 // sessionProbe is the tmux surface a Manager uses: session existence, the

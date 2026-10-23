@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -41,7 +42,7 @@ func sandboxRecordPath(townRoot, session string) string {
 
 // WriteSandboxRecord records r for its session.
 func WriteSandboxRecord(townRoot string, r SandboxRecord) error {
-	if r.Session == "" || strings.ContainsAny(r.Session, "/\\") {
+	if !validSessionName(r.Session) {
 		return fmt.Errorf("sandbox record: bad session name %q", r.Session)
 	}
 	if err := os.MkdirAll(SandboxRegistryDir(townRoot), 0o755); err != nil {
@@ -57,7 +58,7 @@ func WriteSandboxRecord(townRoot string, r SandboxRecord) error {
 // ReadSandboxRecord returns the record for session; ok is false when there
 // is none (the session is a host tmux session, or nothing).
 func ReadSandboxRecord(townRoot, session string) (r SandboxRecord, ok bool, err error) {
-	if session == "" || strings.ContainsAny(session, "/\\") {
+	if !validSessionName(session) {
 		return r, false, nil
 	}
 	data, err := os.ReadFile(sandboxRecordPath(townRoot, session))
@@ -75,6 +76,9 @@ func ReadSandboxRecord(townRoot, session string) (r SandboxRecord, ok bool, err 
 
 // RemoveSandboxRecord forgets session. Idempotent.
 func RemoveSandboxRecord(townRoot, session string) error {
+	if !validSessionName(session) {
+		return nil
+	}
 	err := os.Remove(sandboxRecordPath(townRoot, session))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -82,11 +86,22 @@ func RemoveSandboxRecord(townRoot, session string) error {
 	return err
 }
 
-// ListSandboxSessions returns the recorded session names, sorted.
+// ListSandboxSessions returns the recorded session names, sorted; a
+// missing or unreadable registry lists nothing.
 func ListSandboxSessions(townRoot string) []string {
+	out, _ := listSandboxSessions(townRoot)
+	return out
+}
+
+// listSandboxSessions is ListSandboxSessions reporting a read error; a
+// missing directory is an empty list, not an error.
+func listSandboxSessions(townRoot string) ([]string, error) {
 	entries, err := os.ReadDir(SandboxRegistryDir(townRoot))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	var out []string
 	for _, e := range entries {
@@ -96,7 +111,16 @@ func ListSandboxSessions(townRoot string) []string {
 		out = append(out, strings.TrimSuffix(e.Name(), ".json"))
 	}
 	sort.Strings(out)
-	return out
+	return out, nil
+}
+
+// sessionNameRe is the shape of a session name that may name a record
+// file: a tmux session name as PrefixRegistry forms them, never a path
+// element, never "." or "..", never hidden.
+var sessionNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+func validSessionName(session string) bool {
+	return session != "." && session != ".." && sessionNameRe.MatchString(session)
 }
 
 // SandboxExecPrefix is the wrapper argv that runs a command inside the

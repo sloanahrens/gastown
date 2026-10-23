@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -1178,12 +1179,14 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 
 	// The seat's session backend: host tmux, or an OpenShell sandbox for an
 	// openshell seat (polecat_pool.seats.<agent>.backend).
-	townSettings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
-	if err != nil {
-		return "", fmt.Errorf("loading town settings: %w", err)
-	}
-	backend, err := sessionBackendForAgent(townSettings, townRoot, s.agent, t)
-	if err != nil {
+	// A settings file that cannot be read keeps today's behavior (host tmux)
+	// with a warning; an openshell seat whose backend cannot be built is an
+	// error, since its session would otherwise start on the host unfenced.
+	var backend session.Backend
+	if townSettings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot)); err != nil {
+		style.PrintWarning("loading town settings: %v (starting %s on the host tmux backend)", err, s.PolecatName)
+		backend = session.NewTmuxBackend(t)
+	} else if backend, err = sessionBackendForAgent(townSettings, townRoot, s.agent, t); err != nil {
 		return "", fmt.Errorf("resolving the session backend for %s: %w", s.agent, err)
 	}
 

@@ -649,8 +649,12 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		if prep.WorkDir != "" {
 			sessionWorkDir = prep.WorkDir
 		}
+		// The same overrides reach the agent two ways on purpose: in the
+		// startup command (EnvOverride, so the agent process and what it
+		// spawns see them) and in the tmux session environment (envVars,
+		// so later panes and exec'd commands see them too).
 		envCfg.EnvOverride = prep.Env
-		envCfg.OmitSecretPrefix = true
+		envCfg.OmitSecretPrefix = prep.OmitSecretPrefix
 		for k, v := range prep.Env {
 			if v == "" {
 				delete(envVars, k)

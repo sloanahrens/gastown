@@ -14,7 +14,7 @@ const (
 	BackendOpenShell = "openshell" // a tmux session inside an OpenShell sandbox
 )
 
-// Profile is the sandbox profile a seat points at (design 4.5). It mirrors
+// Profile is the sandbox profile a seat points at. It mirrors
 // config.SandboxProfile without importing it: the caller converts, so this
 // package compiles before the config fields land and the backend stays
 // usable from tests with literals.
@@ -56,6 +56,10 @@ type Prepared struct {
 	// host-only paths and of any credential the provider injects instead.
 	// Nil for tmux.
 	Env map[string]string
+	// OmitSecretPrefix drops the shell prefix that reads file-backed secrets
+	// (settings/daemon.env) into the agent's environment: true when the
+	// backend's credentials come from elsewhere (a provider), false for tmux.
+	OmitSecretPrefix bool
 }
 
 // Backend hosts polecat sessions. The tmux backend is a pass-through to
@@ -85,8 +89,9 @@ type Backend interface {
 	Delete(session string) error
 }
 
-// NewOpenShellBackend is set by the openshell implementation (plan Task 5a)
-// when it is linked in; nil means openshell seats cannot spawn.
+// NewOpenShellBackend is set by the openshell implementation when it is
+// linked in; nil means openshell seats cannot spawn. See sandbox_hooks.go
+// for why these registrations are package variables.
 var NewOpenShellBackend func(townRoot string, p Profile) (Backend, error)
 
 // Resolve picks the backend for a seat. backend is the seat's backend name

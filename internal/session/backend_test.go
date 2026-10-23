@@ -2,10 +2,13 @@ package session
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -139,5 +142,74 @@ func TestCleanupSandboxDeletesThroughTheHookAndForgetsTheRecord(t *testing.T) {
 	}
 	if c := RoutedTmuxFor("gt-rig-box", nil); c != nil {
 		t.Fatal("routed client survived cleanup")
+	}
+}
+
+//testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
+func TestRoutingFailsClosedWhenTheRegistryIsUnreadable(t *testing.T) {
+	town := t.TempDir()
+	ResetSandboxRoutingForTest(town)
+	t.Cleanup(func() { ResetSandboxRoutingForTest("") })
+	// A registry path that is a file, not a directory: listing it fails.
+	if err := os.MkdirAll(filepath.Dir(SandboxRegistryDir(town)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(SandboxRegistryDir(town), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	host := tmux.NewTmuxWithSocket("gt-test")
+	c := RoutedTmuxFor("gt-rig-box", host)
+	if c == host {
+		t.Fatal("an unreadable registry fell back to the host server")
+	}
+	if _, err := c.HasSession("gt-rig-box"); err == nil || !strings.Contains(err.Error(), "sandbox registry") {
+		t.Fatalf("the unavailable client must fail with the registry error, got %v", err)
+	}
+}
+
+func TestAssessWhereItLivesFailsClosed(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	if err := os.MkdirAll(filepath.Dir(SandboxRegistryDir(town)), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(SandboxRegistryDir(town), []byte("not a dir"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// With the registry unreadable the verdict is Unknown, never a host
+	// verdict (ReadSandboxRecord fails with ENOTDIR on the record path).
+	res := assessWhereItLivesWith(nil, town, nil, liveness.Input{Session: "gt-rig-box"})
+	if res.Verdict != liveness.Unknown || res.Err == nil {
+		t.Fatalf("unreadable registry: %+v", res)
+	}
+	town2 := t.TempDir()
+	if err := WriteSandboxRecord(town2, SandboxRecord{Session: "gt-rig-box"}); err != nil {
+		t.Fatal(err)
+	}
+	res = assessWhereItLivesWith(nil, town2, nil, liveness.Input{Session: "gt-rig-box"})
+	if res.Verdict != liveness.Unknown || !strings.Contains(res.Reason, "no sandbox liveness") {
+		t.Fatalf("sandboxed session without the hook: %+v", res)
+	}
+	var called bool
+	res = assessWhereItLivesWith(func(string, SandboxRecord, liveness.Input) liveness.Result {
+		called = true
+		return liveness.Result{Verdict: liveness.Alive}
+	}, town2, nil, liveness.Input{Session: "gt-rig-box"})
+	if !called || res.Verdict != liveness.Alive {
+		t.Fatalf("sandboxed session with the hook: called=%v %+v", called, res)
+	}
+}
+
+func TestSandboxRecordNamesAreStrict(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{"", ".", "..", ".hidden", "a/b", "a\\b", "-leading", "x y"} {
+		if validSessionName(bad) {
+			t.Errorf("%q accepted", bad)
+		}
+	}
+	for _, good := range []string{"gt-gastown-box", "gt-rig-a.b_c"} {
+		if !validSessionName(good) {
+			t.Errorf("%q rejected", good)
+		}
 	}
 }
