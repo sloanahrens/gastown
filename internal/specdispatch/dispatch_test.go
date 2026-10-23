@@ -552,8 +552,8 @@ func TestChooseSeatPinnedOnly(t *testing.T) {
 	// The pinned-only seat is the only free seat, so an unlabelled bead must
 	// skip rather than draw it.
 	unlabelled := Budget{Seats: []Seat{flash(0)}, Now: now, Rand: randForIndex(0, 1)}
-	if got := ChooseSeat(unlabelled, goodSpec()); !got.Skip || got.Agent != "" {
-		t.Errorf("unlabelled bead drew a pinned-only seat: %+v", got)
+	if got := ChooseSeat(unlabelled, goodSpec()); !got.Skip || got.Agent != "" || got.Reason != "seats full: deepseek-flash 0/1" {
+		t.Errorf("unlabelled bead drew a pinned-only seat, or skipped for another reason: %+v", got)
 	}
 
 	// With an open seat of another agent, the unlabelled bead takes that one.
