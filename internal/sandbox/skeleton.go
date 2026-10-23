@@ -421,11 +421,18 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	entries := []skeletonEntry{
 		{name: skeletonRoot + "/", dir: true},
 		{name: path.Join(skeletonRoot, ".beads") + "/", dir: true},
+		{name: path.Join(skeletonRoot, s.Rig, ".beads") + "/", dir: true},
 		{name: path.Join(skeletonRoot, s.Rig, "mayor/rig/.beads") + "/", dir: true},
 	}
 	add := func(rel string, data []byte) {
 		entries = append(entries, skeletonEntry{name: path.Join(skeletonRoot, rel), data: data})
 	}
+
+	// The rig's .beads holds only a pointer at the rig's shared beads, as on the
+	// host. Without it gt prime, which re-runs the redirect setup for the
+	// polecat's worktree, points the worktree at this otherwise empty directory
+	// and bd finds no workspace.
+	add(s.Rig+"/.beads/redirect", []byte("mayor/rig/.beads\n"))
 
 	// gt reads these files as they are; sanitizeFile is what keeps a token or a
 	// credential-carrying URL out of them.

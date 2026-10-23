@@ -134,6 +134,8 @@ func TestSkeletonFileSet(t *testing.T) {
 		"gt/.beads/metadata.json",
 		"gt/.beads/routes.jsonl",
 		"gt/directives/polecat.md",
+		"gt/gastown/.beads/",
+		"gt/gastown/.beads/redirect",
 		"gt/gastown/.repo.git/HEAD",
 		"gt/gastown/.repo.git/config",
 		"gt/gastown/.repo.git/objects/info/",
@@ -155,6 +157,10 @@ func TestSkeletonFileSet(t *testing.T) {
 	sort.Strings(names)
 	if !slices.Equal(names, want) {
 		t.Errorf("archive entries:\n got %q\nwant %q", names, want)
+	}
+
+	if redirect := string(got["gt/gastown/.beads/redirect"]); redirect != "mayor/rig/.beads\n" {
+		t.Errorf("rig .beads/redirect = %q, want the pointer at the shared beads", redirect)
 	}
 
 	if head := string(got["gt/gastown/.repo.git/HEAD"]); head != "ref: refs/heads/main\n" {
