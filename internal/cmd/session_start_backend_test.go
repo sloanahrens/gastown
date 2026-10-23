@@ -9,15 +9,15 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/session"
-	"github.com/steveyegge/gastown/internal/tmux"
 )
 
-// sandboxStartTown writes the town settings and the sling record gt session
-// start reads: seats deepseek-flash on the host, deepseek-flash-sandbox on an
-// openshell seat named by sandbox, and records nux as slung on slungOn.
+// sandboxStartTown writes a town whose gastown rig owns nux, and the settings
+// gt session start reads from that town: deepseek-flash seats on the host,
+// deepseek-flash-sandbox on an openshell seat named by sandbox. When slungOn is
+// non-empty it records nux as slung on that agent.
 func sandboxStartTown(t *testing.T, sandbox config.SandboxProfile, slungOn string) string {
 	t.Helper()
-	townRoot := t.TempDir()
+	townRoot := setupSessionSeatTown(t, "nux")
 	ts := config.NewTownSettings()
 	ts.PolecatPool = &config.PolecatPool{Seats: map[string]config.SeatConfig{
 		"deepseek-flash":         {Cap: 1},
@@ -35,13 +35,25 @@ func sandboxStartTown(t *testing.T, sandbox config.SandboxProfile, slungOn strin
 	return townRoot
 }
 
+// seatInTown resolves gastown/nux in townRoot the way every gt session verb
+// resolves its address, so the start under test reads its town from the seat.
+func seatInTown(t *testing.T, townRoot string) sessionSeat {
+	t.Helper()
+	seat, err := resolveSessionSeatWith([]string{"gastown/nux"}, rigsIn(townRoot))
+	if err != nil {
+		t.Fatalf("resolveSessionSeat(gastown/nux): %v", err)
+	}
+	return seat
+}
+
 // completeSandbox is a sandbox profile config.Seats accepts as openshell-ready.
 var completeSandbox = config.SandboxProfile{Image: "gastown-polecat:dev", Policy: "deploy/polecat/policy.yaml"}
 
-// TestStartSessionSeatSandboxSeat: gt session start places the seat on the
-// backend its recorded agent names, and a backend that cannot be built refuses
-// the start instead of falling back to the host (gt-zvuyn).
-func TestStartSessionSeatSandboxSeat(t *testing.T) {
+// TestStartSeatSessionSandboxSeat: gt session start places the seat on the
+// backend its recorded agent names, read from the seat's own town, and a
+// backend that cannot be built refuses the start instead of falling back to
+// the host (gt-zvuyn).
+func TestStartSeatSessionSandboxSeat(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name     string
@@ -78,10 +90,9 @@ func TestStartSessionSeatSandboxSeat(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			townRoot := sandboxStartTown(t, tt.sandbox, tt.slungOn)
+			seat := seatInTown(t, sandboxStartTown(t, tt.sandbox, tt.slungOn))
 			s := &recordingStarter{}
-			backendFor := townSeatBackend(townRoot, tmux.NewTmuxWithSocket("gt-test"))
-			err := startSessionSeat(s, backendFor, townRoot, "gastown", "nux", polecat.SessionStartOptions{Issue: "gt-zvuyn"})
+			err := startSeatSession(seat, s, polecat.SessionStartOptions{Issue: "gt-zvuyn"})
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("err = %v, want one naming %q", err, tt.wantErr)
@@ -92,7 +103,10 @@ func TestStartSessionSeatSandboxSeat(t *testing.T) {
 				return
 			}
 			if err != nil {
-				t.Fatalf("startSessionSeat: %v", err)
+				t.Fatalf("startSeatSession: %v", err)
+			}
+			if s.name != "nux" {
+				t.Errorf("Start(%q), want the resolved seat's polecat nux", s.name)
 			}
 			if s.opts.Backend == nil || s.opts.Backend.Name() != tt.wantBack {
 				t.Errorf("Backend = %v, want %s", s.opts.Backend, tt.wantBack)
@@ -104,12 +118,12 @@ func TestStartSessionSeatSandboxSeat(t *testing.T) {
 	}
 }
 
-// TestStartSessionSeatUnreadableSettings: town settings that cannot be read
+// TestStartSeatSessionUnreadableSettings: town settings that cannot be read
 // decide nothing, so the start refuses instead of choosing the host for a seat
 // whose sling may have put it in a sandbox (gt-zvuyn).
-func TestStartSessionSeatUnreadableSettings(t *testing.T) {
+func TestStartSeatSessionUnreadableSettings(t *testing.T) {
 	t.Parallel()
-	townRoot := t.TempDir()
+	townRoot := setupSessionSeatTown(t, "nux")
 	if err := config.SaveTownSettings(config.TownSettingsPath(townRoot), config.NewTownSettings()); err != nil {
 		t.Fatalf("SaveTownSettings: %v", err)
 	}
@@ -119,10 +133,9 @@ func TestStartSessionSeatUnreadableSettings(t *testing.T) {
 	}
 
 	s := &recordingStarter{}
-	backendFor := townSeatBackend(townRoot, tmux.NewTmuxWithSocket("gt-test"))
-	err := startSessionSeat(s, backendFor, townRoot, "gastown", "nux", polecat.SessionStartOptions{})
+	err := startSeatSession(seatInTown(t, townRoot), s, polecat.SessionStartOptions{})
 	if err == nil {
-		t.Fatal("startSessionSeat = nil error, want the unreadable settings to refuse the start")
+		t.Fatal("startSeatSession = nil error, want the unreadable settings to refuse the start")
 	}
 	if s.start {
 		t.Error("Start was called despite the settings being unreadable")
