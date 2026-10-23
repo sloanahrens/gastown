@@ -406,7 +406,7 @@ type agentBead struct {
 // (gt-rwp7z.5).
 func agentBeadToAddress(bead *agentBead) string {
 	address := parseAgentBeadToAddress(bead)
-	if isRetiredAgentAddress(address) {
+	if beads.IsRetiredAgentAddress(address) {
 		return ""
 	}
 	return address
@@ -1153,7 +1153,7 @@ func (r *Router) validateRecipient(identity string) error {
 		return nil
 	}
 
-	if isReservedTownSubpath(identity) {
+	if beads.IsReservedTownSubpath(identity) {
 		return fmt.Errorf("no agent found")
 	}
 
@@ -1215,7 +1215,7 @@ func (r *Router) validateRecipient(identity string) error {
 // validateAgentWorkspace checks if an agent's workspace directory exists on disk.
 // Used as a fallback when the agent isn't found in the bead registry.
 func (r *Router) validateAgentWorkspace(identity string) bool {
-	if isReservedTownSubpath(identity) || isRetiredAgentAddress(identity) {
+	if beads.IsReservedTownSubpath(identity) || beads.IsRetiredAgentAddress(identity) {
 		return false
 	}
 	return agentWorkspaceDir(r.townRoot, identity) != ""
@@ -1236,7 +1236,7 @@ func agentWorkspaceDir(townRoot, identity string) string {
 	switch len(parts) {
 	case 2:
 		rig, name := parts[0], parts[1]
-		for _, role := range rigSingletonRoles {
+		for _, role := range beads.RigSingletonRoles {
 			if name == role {
 				if path := filepath.Join(townRoot, rig, name); dirExists(path) {
 					return path
@@ -1257,19 +1257,6 @@ func agentWorkspaceDir(townRoot, identity string) string {
 	}
 
 	return ""
-}
-
-// rigSingletonRoles are the roles a rig keeps as a single named workspace
-// directly under the rig, addressable as <rig>/<role>.
-var rigSingletonRoles = []string{"refinery", "witness"}
-
-// isReservedTownSubpath reports whether address sits under a town-level
-// directory that holds no mailboxes of its own: the mayor state directory
-// (constants.DirMayor, which the town keeps as its marker), and deacon/<x>,
-// which covers the retired deacon/dogs/<name> namespace (gt-29q6g).
-func isReservedTownSubpath(address string) bool {
-	return strings.HasPrefix(address, constants.DirMayor+"/") ||
-		strings.HasPrefix(address, "deacon/")
 }
 
 // dirExists returns true if the path exists and is a directory.
@@ -2163,7 +2150,7 @@ func sessionNameToAgentBeadID(sessionID string, prefixes *session.PrefixRegistry
 		return beads.AgentBeadIDWithPrefix(identity.Prefix, identity.Rig, constants.RoleCrew, identity.Name)
 	case session.RolePolecat:
 		// A singleton session parses as a polecat named for its role.
-		for _, role := range rigSingletonRoles {
+		for _, role := range beads.RigSingletonRoles {
 			if identity.Name == role {
 				return beads.AgentBeadIDWithPrefix(identity.Prefix, identity.Rig, role, "")
 			}
@@ -2270,7 +2257,7 @@ func senderCanReceiveReply(from string) bool {
 		}
 		// rig/mayor is refused as a recipient, so a reply to it cannot
 		// reach anyone (gt-rwp7z.5).
-		if isRetiredAgentName(parts[1]) {
+		if beads.IsRetiredAgentName(parts[1]) {
 			return false
 		}
 		switch parts[1] {
@@ -2319,7 +2306,7 @@ func (r *Router) IsRecipientMuted(address string) bool {
 // Returns true if the recipient is muted and should not receive tmux nudges.
 // Fails open (returns false) if the agent bead cannot be found.
 func (r *Router) isRecipientMuted(address string) bool {
-	agentBeadID := addressToAgentBeadID(r.prefixes, address)
+	agentBeadID := beads.AgentBeadIDForAddress(r.prefixes.PrefixForRig, address)
 	if agentBeadID == "" {
 		return false // Can't determine agent bead, allow notification
 	}
@@ -2330,48 +2317,6 @@ func (r *Router) isRecipientMuted(address string) bool {
 	}
 
 	return level == beads.NotifyMuted
-}
-
-// addressToAgentBeadID converts a mail address to an agent bead ID for DND lookup.
-// Returns empty string if the address cannot be converted. reg maps the rig to
-// its prefix.
-func addressToAgentBeadID(reg *session.PrefixRegistry, address string) string {
-	if address == "overseer" {
-		return "" // Overseer is a human, no agent bead
-	}
-	if isReservedTownSubpath(address) || isRetiredAgentAddress(address) {
-		return ""
-	}
-
-	parts := strings.SplitN(address, "/", 2)
-	if len(parts) != 2 || parts[1] == "" {
-		return ""
-	}
-
-	rig := parts[0]
-	target := parts[1]
-
-	rigPrefix := reg.PrefixForRig(rig)
-
-	switch {
-	case strings.HasPrefix(target, "crew/"):
-		crewName := strings.TrimPrefix(target, "crew/")
-		return beads.AgentBeadIDWithPrefix(rigPrefix, rig, constants.RoleCrew, crewName)
-	case strings.HasPrefix(target, "polecat/"):
-		pcName := strings.TrimPrefix(target, "polecat/")
-		return beads.AgentBeadIDWithPrefix(rigPrefix, rig, constants.RolePolecat, pcName)
-	case strings.HasPrefix(target, "polecats/"):
-		pcName := strings.TrimPrefix(target, "polecats/")
-		return beads.AgentBeadIDWithPrefix(rigPrefix, rig, constants.RolePolecat, pcName)
-	default:
-		// A bare rig/name is a rig singleton (witness, refinery) or a polecat.
-		for _, role := range rigSingletonRoles {
-			if target == role {
-				return beads.AgentBeadIDWithPrefix(rigPrefix, rig, role, "")
-			}
-		}
-		return beads.AgentBeadIDWithPrefix(rigPrefix, rig, constants.RolePolecat, target)
-	}
 }
 
 // AddressToSessionIDs converts a mail address to possible tmux session IDs.
@@ -2388,7 +2333,7 @@ func AddressToSessionIDs(reg *session.PrefixRegistry, address string) []string {
 		return []string{session.OverseerSessionName()}
 	}
 
-	if isReservedTownSubpath(address) {
+	if beads.IsReservedTownSubpath(address) {
 		return nil
 	}
 

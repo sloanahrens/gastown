@@ -124,25 +124,6 @@ func (r *Resolver) resolveAgentAddress(address string) ([]Recipient, error) {
 	}}, nil
 }
 
-// isRetiredAgentName reports whether name is a role the town no longer hires.
-// The retired mayor left its state directory behind (constants.DirMayor, the
-// town marker), so the name still exists on disk while the role does not: a
-// directory of that name is not a mailbox (gt-rwp7z.5).
-func isRetiredAgentName(name string) bool {
-	return name == constants.DirMayor
-}
-
-// isRetiredAgentAddress reports whether address ends in a retired role name,
-// in either the town form ("mayor/") or the rig-scoped form ("gastown/mayor").
-func isRetiredAgentAddress(address string) bool {
-	trimmed := strings.TrimSuffix(address, "/")
-	if trimmed == "" {
-		return false
-	}
-	parts := strings.Split(trimmed, "/")
-	return isRetiredAgentName(parts[len(parts)-1])
-}
-
 // validateAgentAddress checks that a slash-containing address corresponds to
 // a known agent. It checks well-known singletons, agent beads, and workspace
 // directories. Returns nil if the agent exists, or an error with suggestions.
@@ -165,7 +146,7 @@ func (r *Resolver) validateAgentAddress(address string) error {
 	// The retired name is checked before beads and directories alike: a
 	// surviving agent bead or the kept <rig>/mayor clone directory must not
 	// resurrect an address the role no longer has.
-	if isReservedTownSubpath(normalized) || isRetiredAgentAddress(normalized) {
+	if beads.IsReservedTownSubpath(normalized) || beads.IsRetiredAgentAddress(normalized) {
 		return fmt.Errorf("%w: %s", ErrUnknownRecipient, address)
 	}
 
@@ -456,7 +437,7 @@ func (r *Resolver) resolveChannel(name string) ([]Recipient, error) {
 // whole broadcast (gt-rwp7z.5).
 func AgentBeadIDToAddress(id string) string {
 	address := agentBeadIDToAddress(id)
-	if isRetiredAgentAddress(address) {
+	if beads.IsRetiredAgentAddress(address) {
 		return ""
 	}
 	return address

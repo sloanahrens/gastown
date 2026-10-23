@@ -83,12 +83,34 @@ func TestTownRefusesRetiredRoleShortcut(t *testing.T) {
 	}
 }
 
+func TestTownMutedPolecatAddressUsesAgentBead(t *testing.T) {
+	t.Parallel()
+	ft := newDeliveryTmux(t, "gt-ace", "gt-toast")
+	ft.SetIdle("gt-ace", true)
+	ft.SetIdle("gt-toast", true)
+	town, l := testTown(t, ft)
+	l.levels["gt-gastown-polecat-ace"] = beads.NotifyMuted
+
+	if err := town.Nudge(t.Context(), "gastown/ace", "dispatch", "unknown"); err != nil {
+		t.Fatalf("Nudge to a muted polecat = %v, want a silent skip", err)
+	}
+	if got := ft.Sent("gt-ace"); len(got) != 0 {
+		t.Fatalf("sent = %q, want nothing to a muted polecat", got)
+	}
+	if err := town.Nudge(t.Context(), "gastown/toast", "dispatch", "unknown"); err != nil {
+		t.Fatalf("Nudge to an unmuted polecat = %v, want delivery", err)
+	}
+	if got := ft.Sent("gt-toast"); len(got) != 1 {
+		t.Fatalf("sent = %q, want the nudge delivered to an unmuted polecat", got)
+	}
+}
+
 func TestTownSkipsMutedTarget(t *testing.T) {
 	t.Parallel()
 	ft := newDeliveryTmux(t, "gt-crew-max")
 	ft.SetIdle("gt-crew-max", true)
 	town, l := testTown(t, ft)
-	l.levels["gt-crew-max"] = beads.NotifyMuted
+	l.levels["gt-gastown-crew-max"] = beads.NotifyMuted
 
 	if err := town.Nudge(t.Context(), "gastown/crew/max", "dispatch", "unknown"); err != nil {
 		t.Fatalf("Nudge to a muted target = %v, want a silent skip", err)
@@ -257,7 +279,7 @@ func TestTownNudgesChannelMembers(t *testing.T) {
 		ft.SetIdle(s, true)
 	}
 	town, l := testTown(t, ft)
-	l.levels["gt-beta"] = beads.NotifyMuted
+	l.levels["gt-gastown-polecat-beta"] = beads.NotifyMuted
 	var reported []string
 	town.Member = func(m ChannelMember) { reported = append(reported, m.Session+":"+m.DND) }
 
