@@ -56,6 +56,11 @@ Exit codes:
 	SilenceUsage: true,
 }
 
+// tapPolecatStopSandboxEnd is what the Stop hook ends a finished sandbox
+// session with; the zero value is the real process, tests substitute the agent
+// bead read and the kill.
+var tapPolecatStopSandboxEnd sandboxSessionEnd
+
 func init() {
 	tapCmd.AddCommand(tapPolecatStopCmd)
 }
@@ -89,7 +94,7 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 			// gt done already ran or the polecat is idle. In a sandbox a clean,
 			// pushed completion also ends this session, so the sandbox's main
 			// process exits and the gateway deletes the sandbox.
-			endSandboxSessionIfDone(sandboxSessionEnd{}, os.Getenv, townRoot, os.Getenv("GT_RIG"), polecatName, sessionName)
+			endSandboxSessionIfDone(tapPolecatStopSandboxEnd, os.Getenv, townRoot, os.Getenv("GT_RIG"), polecatName, sessionName)
 			return nil
 		}
 	}
