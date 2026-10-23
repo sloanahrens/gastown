@@ -242,7 +242,8 @@ func attachedAt(b *beads.Issue) time.Time {
 
 // beadFault reports whether a failed ask was caused by the bead's own request,
 // which a retry cannot fix: a 4xx other than an authorization failure, a
-// rate-limit or an account refusal, or a response Jev could not parse. Anything
+// rate-limit, a request timeout or an account refusal, or a response Jev could
+// not parse. A timeout is retryable, so it is not the bead's fault. Anything
 // else means Jev could not be reached or refused the account, which says
 // nothing about the bead.
 func beadFault(err error) bool {
@@ -253,6 +254,7 @@ func beadFault(err error) bool {
 	if errors.As(err, &se) {
 		return se.Status >= 400 && se.Status < 500 &&
 			se.Status != http.StatusUnauthorized &&
+			se.Status != http.StatusRequestTimeout &&
 			se.Status != http.StatusTooManyRequests &&
 			!accountRefusal(se.Status)
 	}
