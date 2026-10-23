@@ -215,3 +215,116 @@ func TestPruneDeadTrackedPIDs(t *testing.T) {
 		t.Error("the dead session's PID file survived the sweep")
 	}
 }
+
+// A sandboxed session's pane PID comes from the sandbox's process table. Written
+// with a start token read on the host it would name an unrelated host process,
+// and `gt down` would SIGTERM it, so nothing is recorded for a sandboxed session
+// (gt-n76g3, found auditing the daemon's liveness paths for sandbox seats).
+func TestTrackSession_SandboxedSessionRecordsNothingAndDropsAStaleRecord(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := WriteSandboxRecord(townRoot, SandboxRecord{Session: "gt-gastown-box", Rig: "gastown", Polecat: "box"}); err != nil {
+		t.Fatal(err)
+	}
+	// A host process holds the number the sandbox reports.
+	procs := &fakeProcs{live: map[int]string{143: "1700000000.5"}}
+	stale := writePIDFile(t, townRoot, "gt-gastown-box.pid", "999:1\n")
+	asked := false
+	panePID := func(string) (string, error) { asked = true; return "143", nil }
+
+	err := procs.tracker().trackSession(townRoot, "gt-gastown-box", panePID)
+
+	if err != nil {
+		t.Fatalf("trackSession = %v, want nil: a sandboxed session simply has nothing to record", err)
+	}
+	if asked {
+		t.Error("the sandbox's pane PID was read; it must not be")
+	}
+	if exists(pidFile(townRoot, "gt-gastown-box")) || exists(stale) {
+		t.Error("a PID file exists for a sandboxed session")
+	}
+}
+
+func TestTrackSession_HostSessionStillRecords(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	procs := &fakeProcs{live: map[int]string{4242: "1700000001.5"}}
+
+	err := procs.tracker().trackSession(townRoot, "gt-gastown-host", func(string) (string, error) { return "4242\n", nil })
+
+	if err != nil {
+		t.Fatalf("trackSession = %v", err)
+	}
+	data, rerr := os.ReadFile(pidFile(townRoot, "gt-gastown-host"))
+	if rerr != nil || !strings.Contains(string(data), "4242") {
+		t.Fatalf("pid file = %q, %v; want the host pane PID recorded", data, rerr)
+	}
+}
+
+// A registry that cannot be read leaves "is it sandboxed" unanswered: record
+// nothing rather than a number that may belong to another process.
+func TestTrackSession_UnreadableRegistryRecordsNothing(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	breakSandboxRegistry(t, townRoot)
+	procs := &fakeProcs{live: map[int]string{4242: "1700000001.5"}}
+
+	err := procs.tracker().trackSession(townRoot, "gt-gastown-box", func(string) (string, error) { return "4242", nil })
+
+	if err == nil {
+		t.Fatal("trackSession = nil with an unreadable registry")
+	}
+	if exists(pidFile(townRoot, "gt-gastown-box")) {
+		t.Error("a PID file was written although the registry could not be read")
+	}
+}
+
+// breakSandboxRegistry makes the sandbox registry directory unreadable as a
+// directory, so a lookup fails with an error rather than "no record".
+func breakSandboxRegistry(t *testing.T, townRoot string) {
+	t.Helper()
+	dir := SandboxRegistryDir(townRoot)
+	if err := os.MkdirAll(filepath.Dir(dir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestKillTrackedPIDs_NeverSignalsASandboxedSession(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := WriteSandboxRecord(townRoot, SandboxRecord{Session: "gt-gastown-box", Rig: "gastown", Polecat: "box"}); err != nil {
+		t.Fatal(err)
+	}
+	// The record matches a live host process exactly, as a recycled number would.
+	procs := &fakeProcs{live: map[int]string{143: "1700000000.5"}}
+	path := writePIDFile(t, townRoot, "gt-gastown-box.pid", "143:1700000000.5\n")
+
+	killed, errs := procs.tracker().killTracked(townRoot)
+
+	if killed != 0 || len(procs.terminated) != 0 {
+		t.Fatalf("killed=%d terminated=%v; a sandboxed session's record must never be signalled", killed, procs.terminated)
+	}
+	if len(errs) != 0 || exists(path) {
+		t.Errorf("errs=%v file exists=%v; want the stale record dropped quietly", errs, exists(path))
+	}
+}
+
+func TestKillTrackedPIDs_UnreadableRegistrySignalsNothing(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	procs := &fakeProcs{live: map[int]string{143: "1700000000.5"}}
+	writePIDFile(t, townRoot, "gt-gastown-box.pid", "143:1700000000.5\n")
+	breakSandboxRegistry(t, townRoot)
+
+	killed, errs := procs.tracker().killTracked(townRoot)
+
+	if killed != 0 || len(procs.terminated) != 0 {
+		t.Fatalf("killed=%d terminated=%v; nothing may be signalled while the registry is unreadable", killed, procs.terminated)
+	}
+	if len(errs) != 1 || !strings.Contains(errs[0], "gt-gastown-box") {
+		t.Errorf("errs=%v, want one error naming the session", errs)
+	}
+}
