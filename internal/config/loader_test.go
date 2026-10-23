@@ -5341,3 +5341,40 @@ func TestStaleMayorRoleKeysAreIgnored(t *testing.T) {
 		t.Error("stale role_defaults[mayor] should survive the load, unread by any role")
 	}
 }
+
+func TestBuildStartupCommandFromConfigAppliesBackendEnvOverrides(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	writeRoutingAgents(t, townRoot)
+	rigPath := filepath.Join(townRoot, "testrig")
+	if err := SaveTownSettings(TownSettingsPath(townRoot), NewTownSettings()); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+	if err := SaveRigSettings(RigSettingsPath(rigPath), NewRigSettings()); err != nil {
+		t.Fatalf("SaveRigSettings: %v", err)
+	}
+	cfg := AgentEnvConfig{
+		Role: "polecat", Rig: "testrig", AgentName: "toast", TownRoot: townRoot,
+		EnvOverride: map[string]string{
+			"GT_TOWN_ROOT":       "/sandbox/gt",
+			"GT_SESSION_BACKEND": "openshell",
+			"GT_RIG":             "", // dropped
+		},
+		OmitSecretPrefix: true,
+	}
+	cmd, err := BuildStartupCommandFromConfig(cfg, rigPath, "", "")
+	if err != nil {
+		t.Fatalf("BuildStartupCommandFromConfig: %v", err)
+	}
+	for _, want := range []string{"GT_TOWN_ROOT=/sandbox/gt", "GT_SESSION_BACKEND=openshell", "GT_POLECAT=toast"} {
+		if !strings.Contains(cmd, want) {
+			t.Errorf("command lacks %q: %q", want, cmd)
+		}
+	}
+	if strings.Contains(cmd, "GT_RIG=") {
+		t.Errorf("an empty override must drop the key: %q", cmd)
+	}
+	if strings.Contains(cmd, "GT_TOWN_ROOT="+ShellQuote(townRoot)) {
+		t.Errorf("the host town root survived the override: %q", cmd)
+	}
+}

@@ -97,6 +97,18 @@ type AgentEnvConfig struct {
 	// Sets GT_SESSION_ID_ENV so the runtime knows where to find the session ID.
 	SessionIDEnv string
 
+	// EnvOverride is applied to the startup environment last, after the
+	// agent preset's env: a non-empty value replaces the key, an empty value
+	// drops it. A session backend that hosts the agent elsewhere (an
+	// OpenShell sandbox) uses it to point GT_TOWN_ROOT and friends at the
+	// sandbox's paths and to drop host-only ones. Nil for host sessions.
+	EnvOverride map[string]string
+
+	// OmitSecretPrefix leaves out the shell prefix that reads file-backed
+	// secrets (settings/daemon.env) into the agent's environment. A sandbox
+	// has no such file and gets its credentials from its provider instead.
+	OmitSecretPrefix bool
+
 	// Agent is the agent override (e.g., "claude-haiku").
 	// If set, GT_AGENT is written to the tmux session table via SetEnvironment
 	// so that IsAgentAliveChecked and waitForPolecatReady can read it via GetEnvironment.

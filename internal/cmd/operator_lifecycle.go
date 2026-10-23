@@ -112,6 +112,10 @@ func polecatCleanup(sup *supervisor.Supervisor, reg *session.PrefixRegistry, rig
 	}
 }
 
+// Note: the sandbox a sandboxed polecat ran in is deleted by the polecat
+// Manager's killSession after this hook kills the session inside it
+// (session.CleanupSandbox); the hook itself stays a pure supervisor kill.
+
 // supervisedPolecatManager is polecat.NewManager with its housekeeping kills
 // routed through the operator supervisor's Cleanup.
 func supervisedPolecatManager(r *rig.Rig, g *git.Git, t *tmux.Tmux, actor string) *polecat.Manager {

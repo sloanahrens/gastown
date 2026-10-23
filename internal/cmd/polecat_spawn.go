@@ -1176,10 +1176,25 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	polecatSessMgr := polecat.NewSessionManager(t, r, townRegistry())
 	polecatSessMgr.SetHooks(polecatSessionHooks(sup, townRegistry(), s.RigName, "sling", actor))
 
+	// The seat's session backend: host tmux, or an OpenShell sandbox for an
+	// openshell seat (polecat_pool.seats.<agent>.backend).
+	// Settings that cannot be read stop the spawn: without them the seat's
+	// backend is unknown, and a sandboxed seat must never start on the host
+	// unfenced. An openshell seat whose backend cannot be built stops it too.
+	townSettings, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		return "", fmt.Errorf("loading town settings to pick %s's session backend: %w", s.PolecatName, err)
+	}
+	backend, err := sessionBackendForAgent(townSettings, townRoot, s.agent, t)
+	if err != nil {
+		return "", fmt.Errorf("resolving the session backend for %s: %w", s.agent, err)
+	}
+
 	fmt.Printf("Starting session for %s/%s...\n", s.RigName, s.PolecatName)
 	startOpts := polecat.SessionStartOptions{
 		RuntimeConfigDir: claudeConfigDir,
 		Agent:            s.agent,
+		Backend:          backend,
 	}
 	if err := polecatSessMgr.Start(s.PolecatName, startOpts); err != nil {
 		return "", fmt.Errorf("starting session: %w", err)

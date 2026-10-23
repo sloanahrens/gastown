@@ -197,6 +197,7 @@ type Tmux struct {
 	socketDir  string              // "" = SocketDir()
 	getenv     func(string) string // nil = os.Getenv; the process env reads methods make
 	execPrefix []string            // wrapper argv around every program; nil = run directly
+	noRoute    bool                // set on a client a SessionRouter returned: it never routes again (router.go)
 }
 
 // noTownSocket is a sentinel socket name used when no town socket is configured.
@@ -337,6 +338,11 @@ func socketArgs(socket string, args []string) []string {
 }
 
 func (t *Tmux) runContext(ctx context.Context, args ...string) (string, error) {
+	// A command that names a session another server owns (a sandboxed
+	// polecat's) runs on that server's client instead (router.go).
+	if rt := t.routeFor(sessionOfArgs(args)); rt != nil {
+		return rt.runContext(ctx, args...)
+	}
 	stdout, stderr, err := t.runner()(ctx, "tmux", t.tmuxArgs(args)...)
 	if err != nil {
 		return "", t.wrapError(err, string(stderr), args)
@@ -752,6 +758,9 @@ func exactPaneTarget(name string) string {
 // KillSession terminates a tmux session. Idempotent: returns nil if the
 // session is already gone or there is no tmux server.
 func (t *Tmux) KillSession(name string) (retErr error) {
+	if rt := t.routeFor(name); rt != nil {
+		return rt.KillSession(name)
+	}
 	_, retErr = t.run("kill-session", "-t", exactSessionTarget(name))
 	if retErr == ErrSessionNotFound || retErr == ErrNoServer {
 		retErr = nil
@@ -782,6 +791,9 @@ const processKillGracePeriod = 2 * time.Second
 //
 // This ensures Claude processes and all their children are properly terminated.
 func (t *Tmux) KillSessionWithProcesses(name string) error {
+	if rt := t.routeFor(name); rt != nil {
+		return rt.KillSessionWithProcesses(name)
+	}
 	// Disarm any pane-died hook BEFORE killing anything. gt no longer installs
 	// the auto-respawn hook (gt-4k3fj.3), but a session made by an older
 	// binary may still carry it, and it would respawn the process 3 seconds
@@ -857,6 +869,9 @@ func (t *Tmux) KillSessionWithProcesses(name string) error {
 // the calling process (e.g., gt done) is running inside the session it's terminating.
 // Without exclusion, the caller would be killed before completing the cleanup.
 func (t *Tmux) KillSessionWithProcessesExcluding(name string, excludePIDs []string) error {
+	if rt := t.routeFor(name); rt != nil {
+		return rt.KillSessionWithProcessesExcluding(name, excludePIDs)
+	}
 	// Disarm any pane-died hook BEFORE killing anything (same as KillSessionWithProcesses).
 	_ = t.SetRemainOnExit(exactPaneTarget(name), false)
 	_, _ = t.run("set-hook", "-t", exactPaneTarget(name), "-u", "pane-died")
@@ -1301,13 +1316,13 @@ func (t *Tmux) ListSessions() ([]string, error) {
 	out, err := t.run("list-sessions", "-F", "#{session_name}")
 	if err != nil {
 		if errors.Is(err, ErrNoServer) {
-			return nil, nil // No server = no sessions
+			return t.withExtraSessions(nil), nil // No server = no sessions of our own
 		}
 		return nil, err
 	}
 
 	if out == "" {
-		return nil, nil
+		return t.withExtraSessions(nil), nil
 	}
 
 	var sessions []string
@@ -1323,7 +1338,16 @@ func (t *Tmux) ListSessions() ([]string, error) {
 		}
 		sessions = append(sessions, line)
 	}
-	return sessions, nil
+	return t.withExtraSessions(sessions), nil
+}
+
+// withExtraSessions appends the router's extra sessions (sandboxed polecats)
+// to a host listing; a routed client lists only its own server.
+func (t *Tmux) withExtraSessions(sessions []string) []string {
+	if t.noRoute {
+		return sessions
+	}
+	return append(sessions, extraSessionNames(sessions)...)
 }
 
 // SessionSet provides O(1) session existence checks by caching session names.
@@ -3773,6 +3797,9 @@ func (t *Tmux) matchesPaneRuntimeChecked(cmd, pid string, processNames []string)
 // A non-nil error means the answer is UNKNOWN, not dead. Callers that kill,
 // restart, respawn or send keys act only on (false, nil) (gt-fcxe9.1).
 func (t *Tmux) IsAgentAliveChecked(session string) (bool, error) {
+	if rt := t.routeFor(session); rt != nil {
+		return rt.IsAgentAliveChecked(session)
+	}
 	// A session that does not exist has no agent in it: dead, never unknown.
 	// The environment reads below cannot make that distinction — tmux answers
 	// a missing session's show-environment with "no such session", which is

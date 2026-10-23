@@ -2,6 +2,7 @@
 package polecat
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -142,6 +143,12 @@ func NewSessionManager(t *tmux.Tmux, r *rig.Rig, prefixes *session.PrefixRegistr
 type SessionStartOptions struct {
 	// WorkDir overrides the default working directory (polecat clone dir).
 	WorkDir string
+
+	// Backend hosts the session (session.Resolve). Nil or the tmux backend
+	// is today's host tmux session; the openshell backend prepares a
+	// sandbox first and the session is created inside it through the
+	// routed tmux client.
+	Backend session.Backend
 
 	// Issue is an optional issue ID to work on.
 	Issue string
@@ -563,20 +570,6 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	})
 	startupNudgeContent := runtime.StartupNudgeContent()
 
-	command := opts.Command
-	if command == "" {
-		var err error
-		command, err = config.BuildStartupCommandFromConfig(config.AgentEnvConfig{
-			Role:        "polecat",
-			Rig:         m.rig.Name,
-			AgentName:   polecat,
-			TownRoot:    townRoot,
-			SessionName: sessionID,
-		}, m.rig.Path, beacon, opts.Agent)
-		if err != nil {
-			return fmt.Errorf("building startup command: %w", err)
-		}
-	}
 	// Compute environment vars BEFORE creating the session so they can be
 	// passed to tmux via -e flags. Setting env via SetEnvironment after the
 	// pane starts only affects newly spawned panes — the running pane (and
@@ -627,7 +620,60 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	// Create session with command and env vars via -e flags so the initial
 	// shell — and Claude's subprocesses (notably bd) — inherit them from the start.
 	// See: https://github.com/anthropics/gastown/issues/280 (race condition fix)
-	if err := m.tmux.NewSessionWithCommandAndEnv(sessionID, workDir, command, envVars); err != nil {
+	// Where the session runs. The tmux backend runs it in the host worktree;
+	// the openshell backend prepares a sandbox (clone, skeleton, registry
+	// record) and hands back the in-sandbox work dir plus the env the agent
+	// command must carry there. After Prepare the tmux client routes this
+	// session's commands into the sandbox (session.sandbox_routing).
+	sessionWorkDir := workDir
+	envCfg := config.AgentEnvConfig{
+		Role:        "polecat",
+		Rig:         m.rig.Name,
+		AgentName:   polecat,
+		TownRoot:    townRoot,
+		SessionName: sessionID,
+	}
+	if b := opts.Backend; b != nil && b.Name() != session.BackendTmux {
+		prep, err := b.Prepare(context.Background(), session.SpawnSpec{
+			TownRoot:    townRoot,
+			Rig:         m.rig.Name,
+			Polecat:     polecat,
+			Session:     sessionID,
+			Branch:      polecatGitBranch,
+			HostWorkDir: workDir,
+			Env:         envVars,
+		})
+		if err != nil {
+			return fmt.Errorf("preparing %s session for %s: %w", b.Name(), polecat, err)
+		}
+		if prep.WorkDir != "" {
+			sessionWorkDir = prep.WorkDir
+		}
+		// The same overrides reach the agent two ways on purpose: in the
+		// startup command (EnvOverride, so the agent process and what it
+		// spawns see them) and in the tmux session environment (envVars,
+		// so later panes and exec'd commands see them too).
+		envCfg.EnvOverride = prep.Env
+		envCfg.OmitSecretPrefix = prep.OmitSecretPrefix
+		for k, v := range prep.Env {
+			if v == "" {
+				delete(envVars, k)
+			} else {
+				envVars[k] = v
+			}
+		}
+	}
+
+	command := opts.Command
+	if command == "" {
+		var err error
+		command, err = config.BuildStartupCommandFromConfig(envCfg, m.rig.Path, beacon, opts.Agent)
+		if err != nil {
+			return fmt.Errorf("building startup command: %w", err)
+		}
+	}
+
+	if err := m.tmux.NewSessionWithCommandAndEnv(sessionID, sessionWorkDir, command, envVars); err != nil {
 		return fmt.Errorf("creating session: %w", err)
 	}
 

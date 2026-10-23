@@ -2159,6 +2159,10 @@ func BuildStartupCommandWithAgentOverride(envVars map[string]string, rigPath, pr
 }
 
 func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rigPath, prompt, agentOverride string) (string, error) {
+	return buildStartupCommandWithAgentOverrideOpts(h, envVars, rigPath, prompt, agentOverride, startupOverrides{})
+}
+
+func buildStartupCommandWithAgentOverrideOpts(h host, envVars map[string]string, rigPath, prompt, agentOverride string, ov startupOverrides) (string, error) {
 	var rc *RuntimeConfig
 	var townRoot string
 
@@ -2293,6 +2297,10 @@ func buildStartupCommandWithAgentOverride(h host, envVars map[string]string, rig
 	}
 
 	SanitizeAgentEnv(resolvedEnv, envVars)
+	ov.apply(resolvedEnv)
+	if ov.omitSecretPrefix {
+		secretPrefix = ""
+	}
 
 	var cmd string
 	if runtime.GOOS == "windows" {
@@ -2377,7 +2385,29 @@ func buildStartupCommandFromConfig(h host, cfg AgentEnvConfig, rigPath, prompt, 
 		cfg.Getenv = h.getenv
 	}
 	envVars := AgentEnv(cfg)
-	return buildStartupCommandWithAgentOverride(h, envVars, rigPath, prompt, agentOverride)
+	return buildStartupCommandWithAgentOverrideOpts(h, envVars, rigPath, prompt, agentOverride, startupOverrides{
+		env:              cfg.EnvOverride,
+		omitSecretPrefix: cfg.OmitSecretPrefix,
+	})
+}
+
+// startupOverrides are the session backend's last word on the startup
+// command: env applied after the preset (empty value = drop), and whether
+// the file-backed secret prefix is left out (AgentEnvConfig.EnvOverride,
+// OmitSecretPrefix).
+type startupOverrides struct {
+	env              map[string]string
+	omitSecretPrefix bool
+}
+
+func (o startupOverrides) apply(resolvedEnv map[string]string) {
+	for k, v := range o.env {
+		if v == "" {
+			delete(resolvedEnv, k)
+		} else {
+			resolvedEnv[k] = v
+		}
+	}
 }
 
 // BuildAgentStartupCommand is a convenience function for starting agent
