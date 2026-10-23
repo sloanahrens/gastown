@@ -70,15 +70,24 @@ same_commit() {
 # defer_reason prints why a rebuild must wait, empty when it may run: a gt sling
 # is running, or the gateway lists a sandbox whose registry record does not
 # exist yet (a Prepare between create and its record). A retag then could land
-# between a Prepare's image check and its create.
+# between a Prepare's image check and its create. A probe that cannot answer is
+# a deferral too: "no sling running" and "pgrep failed" must not read the same.
 defer_reason() {
-  if "$PGREP" -f '^([^ ]*/)?gt sling ' >/dev/null 2>&1; then
-    echo "sandbox sling in progress"
+  local rc=0 out name header=0
+  "$PGREP" -f '^([^ ]*/)?gt sling ' >/dev/null 2>&1 || rc=$?
+  case "$rc" in
+    0) echo "sandbox sling in progress"; return ;;
+    1) ;; # pgrep ran and matched nothing
+    *) echo "cannot check for a running gt sling ($PGREP exited $rc)"; return ;;
+  esac
+  rc=0
+  out="$("$OPENSHELL" sandbox list 2>/dev/null)" || rc=$?
+  if [ "$rc" != 0 ]; then
+    echo "cannot list sandboxes ($OPENSHELL exited $rc)"
     return
   fi
   # `openshell sandbox list` prints a NAME header and one row per sandbox, or
   # the single line "No sandboxes found."; rows count only after the header.
-  local name header=0
   while read -r name _; do
     if [ "$name" = "NAME" ]; then header=1; continue; fi
     [ "$header" = 1 ] && [ -n "$name" ] || continue
@@ -86,24 +95,39 @@ defer_reason() {
       echo "sandbox $name has no registry record yet"
       return
     fi
-  done < <("$OPENSHELL" sandbox list 2>/dev/null || true)
+  done <<<"$out"
 }
 
+# stale_lock succeeds when the directory is older than STALE_LOCK_MINUTES: it
+# belongs to a run that died.
+stale_lock() {
+  [ -n "$(find "$1" -maxdepth 0 -mmin "+$STALE_LOCK_MINUTES" 2>/dev/null)" ]
+}
+
+# claim_lock makes the lock directory and records this run's pid in it.
+claim_lock() {
+  mkdir "$LOCK_DIR" 2>/dev/null || return 1
+  echo "$$" >"$LOCK_DIR/pid"
+}
+
+# take_lock takes the lock, taking over a stale one. A takeover renames the stale
+# directory aside first, so of two runs that both saw it stale only one rename
+# succeeds, and it re-checks the directory it moved: one that turned out fresh
+# was another run's new lock and goes back.
 take_lock() {
   mkdir -p "$(dirname "$LOCK_DIR")"
-  if mkdir "$LOCK_DIR" 2>/dev/null; then
-    echo "$$" >"$LOCK_DIR/pid"
-    return 0
+  claim_lock && return 0
+  stale_lock "$LOCK_DIR" || return 1
+  local aside="$LOCK_DIR.stale.$$"
+  mv "$LOCK_DIR" "$aside" 2>/dev/null || return 1
+  if ! stale_lock "$aside"; then
+    [ -e "$LOCK_DIR" ] || mv "$aside" "$LOCK_DIR" 2>/dev/null || true
+    rm -rf "$aside"
+    return 1
   fi
-  # A lock older than STALE_LOCK_MINUTES belongs to a run that died.
-  if [ -n "$(find "$LOCK_DIR" -maxdepth 0 -mmin "+$STALE_LOCK_MINUTES" 2>/dev/null)" ]; then
-    log "taking over a stale lock ($LOCK_DIR)"
-    rm -rf "$LOCK_DIR"
-    mkdir "$LOCK_DIR" 2>/dev/null || return 1
-    echo "$$" >"$LOCK_DIR/pid"
-    return 0
-  fi
-  return 1
+  log "taking over a stale lock ($LOCK_DIR)"
+  rm -rf "$aside"
+  claim_lock
 }
 
 WORKTREE=""
@@ -112,7 +136,9 @@ cleanup() {
   if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
     "$GIT" -C "$RIG_REPO" worktree remove --force "$WORKTREE" >/dev/null 2>&1 || rm -rf "$WORKTREE"
   fi
-  if [ "$HAVE_LOCK" = 1 ]; then
+  # Only a lock this run still owns: after a takeover the directory is another
+  # run's, and removing it would let a third run build alongside it.
+  if [ "$HAVE_LOCK" = 1 ] && [ "$(cat "$LOCK_DIR/pid" 2>/dev/null || true)" = "$$" ]; then
     rm -rf "$LOCK_DIR"
   fi
 }
@@ -169,6 +195,12 @@ main() {
     [ -n "$installed" ] || die "cannot read the installed gt's commit from '$GT version'"
     if same_commit "$(image_commit)" "$installed"; then
       log "current at ${installed:0:12}"
+      return 0
+    fi
+    # A sling can start between rounds, and a build is long.
+    reason="$(defer_reason)"
+    if [ -n "$reason" ]; then
+      log "deferred: $reason"
       return 0
     fi
     build_at "$installed"

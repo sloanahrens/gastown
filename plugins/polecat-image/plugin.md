@@ -34,14 +34,17 @@ a minute.
 1. Reads the installed gt's commit (`gt version`) and the commit label of
    `gastown-polecat:dev` (`org.gastown.gt-commit`). Equal (a prefix of at least
    7 characters either way): prints `current` and stops.
-2. Defers quietly (exit 0, retried by the next cooldown) while Docker Desktop is
-   stopped (`deferred: docker unavailable`), while a `gt sling` process is
-   running, or while the gateway lists a sandbox whose registry record under
-   `~/gt/.runtime/sandboxes` does not exist yet, so a retag cannot land between a
-   Prepare's image check and its create.
+2. Defers (exit 0, a `deferred:` line, retried by the next cooldown) while Docker
+   Desktop is stopped, while a `gt sling` process is running, or while the
+   gateway lists a sandbox whose registry record under
+   `~/gt/.runtime/sandboxes` does not exist yet, so a retag cannot land between
+   a Prepare's image check and its create. A probe that cannot answer (`pgrep`
+   or `openshell sandbox list` exiting with an error) defers too, never reads as
+   "nothing running". The same check runs again before each build round.
 3. Takes the lock `~/gt/.runtime/polecat-image.lock` (a lock older than 20
-   minutes is taken over); a second run while it is held prints `already
-   running` and stops.
+   minutes is taken over by renaming it aside, and only the run that wins the
+   rename proceeds); a second run while it is held prints `already running` and
+   stops. A run removes the lock only while its own pid is in it.
 4. Makes a detached worktree of the rig repo at the installed commit under
    `~/gt/gastown/.polecat-image-build/<sha>`, runs `make polecat-image
    BD_SRC=~/gt/beads/mayor/rig` there, removes the worktree, and checks the
@@ -57,8 +60,10 @@ none), and the local-branch prune reads the list only to protect branches.
 
 Every failure exits non-zero with the tail of the failing command: a commit the
 rig repo does not know, a failed build, an image that still carries another
-commit afterwards, an installed gt whose commit cannot be read. Nothing is
-skipped silently.
+commit afterwards, an installed gt whose commit cannot be read. A deferral is not a
+failure: it exits 0 and prints why, so a plugin whose receipts show `deferred:`
+run after run is stuck behind that reason (Docker stopped, a sling that never
+ends) and the image stays stale, with the sandbox sling's refusal as the net.
 
 Run it directly:
 

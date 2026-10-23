@@ -65,6 +65,9 @@ if [ -f "$STUB_STATE/make-fail" ]; then
   exit 2
 fi
 basename "$(pwd)" >"$STUB_STATE/image"
+[ ! -f "$STUB_STATE/sling-after-build" ] || touch "$STUB_STATE/sling-running"
+# another run owns the lock by the time this build ends
+[ ! -f "$STUB_STATE/steal-lock" ] || echo 99999 >"$POLECAT_IMAGE_TOWN_ROOT/.runtime/polecat-image.lock/pid"
 if [ -f "$STUB_STATE/always-move" ]; then
   n=$(wc -l <"$STUB_STATE/builds" | tr -d ' ')
   printf 'f%06d\n' "$n" >"$STUB_STATE/installed"
@@ -75,6 +78,7 @@ STUB
 cat >"$BIN/openshell" <<'STUB'
 #!/usr/bin/env bash
 # the real command's two shapes: a NAME header plus rows, or one line
+[ ! -f "$STUB_STATE/openshell-fail" ] || { echo "gateway unreachable" >&2; exit 1; }
 if [ -f "$STUB_STATE/sandboxes" ]; then
   echo "NAME CREATED PHASE"
   cat "$STUB_STATE/sandboxes"
@@ -84,6 +88,8 @@ fi
 STUB
 cat >"$BIN/pgrep" <<'STUB'
 #!/usr/bin/env bash
+# pgrep exits 0 on a match, 1 on none, 2 or more when it cannot run
+[ ! -f "$STUB_STATE/pgrep-error" ] || exit 2
 [ -f "$STUB_STATE/sling-running" ]
 STUB
 chmod +x "$BIN"/*
@@ -172,6 +178,34 @@ mkdir -p "$POLECAT_IMAGE_TOWN_ROOT/.runtime/sandboxes"
 echo '{}' >"$POLECAT_IMAGE_TOWN_ROOT/.runtime/sandboxes/gt-corpus.json"
 run_it
 if [ "$RC" = 0 ] && [ "$(builds)" = 1 ]; then pass "a recorded sandbox (a running polecat) does not block the build"; else fail "recorded: rc=$RC builds=$(builds) out=$OUT"; fi
+
+echo "--- a probe that cannot answer defers, it does not read as all clear"
+new_case pgreperr abc1234 "$(full 1111111)"
+touch "$STUB_STATE/pgrep-error"
+run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 0 ] && grep -q "deferred: cannot check for a running gt sling" <<<"$OUT" && [ ! -d "$LOCK" ]; then pass "pgrep failing defers the build"; else fail "pgreperr: rc=$RC builds=$(builds) out=$OUT"; fi
+new_case openshellerr abc1234 "$(full 1111111)"
+touch "$STUB_STATE/openshell-fail"
+run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 0 ] && grep -q "deferred: cannot list sandboxes" <<<"$OUT" && [ ! -d "$LOCK" ]; then pass "openshell failing defers the build"; else fail "openshellerr: rc=$RC builds=$(builds) out=$OUT"; fi
+
+echo "--- a sling that starts during a build holds back the next round"
+new_case slingmid abc1234 "$(full 1111111)"
+echo def5678 >"$STUB_STATE/move-after-build"
+touch "$STUB_STATE/sling-after-build"
+run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && grep -q "deferred: sandbox sling in progress" <<<"$OUT" && [ ! -d "$LOCK" ]; then pass "one build, then deferred, lock released"; else fail "slingmid: rc=$RC builds=$(builds) out=$OUT"; fi
+
+echo "--- a run releases only a lock it still owns"
+new_case stolen abc1234 "$(full 1111111)"
+touch "$STUB_STATE/steal-lock"
+run_it
+if [ "$RC" = 0 ] && [ "$(builds)" = 1 ] && [ -d "$LOCK" ] && [ "$(cat "$LOCK/pid")" = 99999 ]; then pass "another run's lock survives this run's exit"; else fail "stolen: rc=$RC builds=$(builds) pid=$(cat "$LOCK/pid" 2>/dev/null) out=$OUT"; fi
+new_case staleaside abc1234 "$(full 1111111)"
+mkdir "$LOCK"
+touch -t 202001010000 "$LOCK"
+run_it
+if [ "$RC" = 0 ] && [ ! -e "$LOCK.stale.$$" ] && [ -z "$(ls -d "$LOCK".stale.* 2>/dev/null)" ]; then pass "a takeover leaves no renamed-aside directory behind"; else fail "staleaside leftovers: $(ls -d "$LOCK".stale.* 2>/dev/null)"; fi
 
 echo "--- Docker Desktop stopped is a quiet no-op"
 new_case dockerdown abc1234
