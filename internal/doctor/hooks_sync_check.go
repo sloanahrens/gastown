@@ -69,6 +69,9 @@ func (c *HooksSyncCheck) Run(ctx *CheckContext) *CheckResult {
 
 		current, err := hooks.LoadSettings(target.Path)
 		if err != nil {
+			// An unreadable or malformed settings.json is not in sync; skipping it
+			// would let the all-in-sync result below cover a target never compared.
+			c.outOfSync = append(c.outOfSync, target)
 			details = append(details, fmt.Sprintf("%s: error loading: %v", target.DisplayKey(), err))
 			continue
 		}

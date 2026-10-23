@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -295,5 +296,36 @@ func TestHooksSyncCheck_SyncReportCanaryFailed_Warning(t *testing.T) {
 
 	if result.Status != StatusWarning {
 		t.Errorf("expected StatusWarning for an unverified canary pair, got %v: %s", result.Status, result.Message)
+	}
+}
+
+// TestHooksSyncCheck_UnloadableSettingsReportsOutOfSync verifies that a target
+// whose settings.json cannot be parsed is reported by name as out of sync, not
+// skipped into an all-in-sync result by a passing sync report.
+func TestHooksSyncCheck_UnloadableSettingsReportsOutOfSync(t *testing.T) {
+	t.Parallel()
+	townRoot := scaffoldWorkspace(t, nil)
+	syncAllClaudeTargets(t, townRoot)
+	writePassingSyncReport(t, townRoot)
+
+	targetPath := filepath.Join(townRoot, "myrig", "crew", ".claude", "settings.json")
+	if err := os.WriteFile(targetPath, []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := newTestHooksSyncCheck()
+	result := check.Run(&CheckContext{TownRoot: townRoot})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning for an unloadable settings.json, got %v: %s", result.Status, result.Message)
+	}
+	found := false
+	for _, d := range result.Details {
+		if strings.Contains(d, "myrig/crew") && strings.Contains(d, "error loading") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a detail naming myrig/crew with a load error, got %v", result.Details)
 	}
 }
