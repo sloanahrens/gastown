@@ -174,37 +174,30 @@ func (n *Town) Nudge(ctx context.Context, target, message, sender string) error 
 	if !ok || rigName == "" || name == "" {
 		return fmt.Errorf("invalid address format: expected 'rig/polecat', got '%s'", target)
 	}
-	prefix := reg.PrefixForRig(rigName)
-	// A polecat's session is named by its rig's prefix, which an unknown rig
-	// does not have: refuse it rather than nudge another rig's session.
-	polecat := func(name string) (string, error) {
-		if townRoot == "" {
-			return "", fmt.Errorf("not in a Gas Town workspace")
-		}
-		if !n.rigExists(townRoot, rigName) {
-			return "", fmt.Errorf("rig '%s' not found", rigName)
-		}
-		return session.PolecatSessionName(prefix, name), nil
+	// A session is named by its rig's prefix, and PrefixForRig falls back to
+	// the default prefix for an unregistered rig: refuse such an address
+	// before a session name is built from it, or the nudge is delivered to a
+	// default-prefix rig's agent.
+	if townRoot == "" {
+		return fmt.Errorf("not in a Gas Town workspace")
 	}
+	if !n.rigExists(townRoot, rigName) {
+		return fmt.Errorf("rig '%s' not found", rigName)
+	}
+	prefix := reg.PrefixForRig(rigName)
 	var sessionName string
 	switch {
 	case strings.HasPrefix(name, "crew/"):
 		sessionName = session.CrewSessionName(prefix, strings.TrimPrefix(name, "crew/"))
 	case strings.HasPrefix(name, "polecats/"):
 		// Explicit polecat address: bypasses crew-first resolution.
-		var err error
-		if sessionName, err = polecat(strings.TrimPrefix(name, "polecats/")); err != nil {
-			return err
-		}
+		sessionName = session.PolecatSessionName(prefix, strings.TrimPrefix(name, "polecats/"))
 	default:
 		// Short address: could be crew or polecat. Try crew first (matches
 		// the mail system's addressToSessionIDs), then fall back to polecat.
 		sessionName = session.CrewSessionName(prefix, name)
 		if exists, _ := d.Tmux.HasSession(sessionName); !exists {
-			var err error
-			if sessionName, err = polecat(name); err != nil {
-				return err
-			}
+			sessionName = session.PolecatSessionName(prefix, name)
 		}
 	}
 
