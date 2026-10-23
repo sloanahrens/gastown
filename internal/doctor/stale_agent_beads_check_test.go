@@ -405,6 +405,131 @@ func TestStaleAgentBeadsCheckUnreadableBeadListIsNotOK(t *testing.T) {
 	}
 }
 
+// TestStaleAgentBeadsCheckWispErrorLeavesRigOut verifies that a rig whose wisp
+// read fails contributes no stale beads, even the ones its bead list did return.
+// The rig's list is partial, so the check must not act on part of it; the
+// failed read is reported, and Fix closes nothing for that rig.
+func TestStaleAgentBeadsCheckWispErrorLeavesRigOut(t *testing.T) {
+	t.Parallel()
+	errDown := errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(tmpDir, "gastown", "mayor", "rig")
+	for _, dir := range []string{filepath.Join(rigDir, ".beads"), filepath.Join(tmpDir, "gastown", "crew"), filepath.Join(tmpDir, "gastown", "polecats")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The crew member's bead is listed, but the wisp read that would have
+	// completed the rig's list fails.
+	town := newDoctorTown()
+	town.db(rigDir).Seed(beads.Issue{
+		ID:     "gt-gastown-crew-ghost",
+		Title:  "ghost",
+		Type:   "agent",
+		Labels: []string{"gt:agent"},
+	})
+	ctx := town.ctx(tmpDir, "")
+	open := ctx.openBeads
+	ctx.openBeads = func(site beadsSite) doctorBeads {
+		db := failingBeads{doctorBeads: open(site)}
+		if site.workDir == rigDir {
+			db.wispsErr = errDown
+		}
+		return db
+	}
+
+	check := NewStaleAgentBeadsCheck()
+	result := check.Run(ctx)
+
+	if len(result.Details) != 0 {
+		t.Errorf("details = %v, want none: a rig with a failed wisp read is partial and must not be acted on", result.Details)
+	}
+	if result.Status != StatusWarning {
+		t.Errorf("status = %v, want StatusWarning when a wisp read fails: %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "gastown: "+errDown.Error()) {
+		t.Errorf("message = %q, want it to name the failed wisp read", result.Message)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+	if updates := town.updates(); len(updates) != 0 {
+		t.Errorf("Fix() closed beads from a rig with a partial list: %v", updates)
+	}
+}
+
+// TestStaleAgentBeadsCheckStaleWithUnreadableBeadList verifies the message when
+// a stale bead is found and the town bead list also fails: the stale count and
+// the failed query are both reported, so neither hides the other.
+func TestStaleAgentBeadsCheckStaleWithUnreadableBeadList(t *testing.T) {
+	t.Parallel()
+	errDown := errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(tmpDir, "gastown", "mayor", "rig")
+	for _, dir := range []string{filepath.Join(rigDir, ".beads"), filepath.Join(tmpDir, "gastown", "crew"), filepath.Join(tmpDir, "gastown", "polecats")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// The rig's crew directory is readable and empty, so the listed crew bead
+	// is stale. The town list fails, so Phase 2 cannot run.
+	town := newDoctorTown()
+	town.db(rigDir).Seed(beads.Issue{
+		ID:     "gt-gastown-crew-ghost",
+		Title:  "ghost",
+		Type:   "agent",
+		Labels: []string{"gt:agent"},
+	})
+	ctx := town.ctx(tmpDir, "")
+	open := ctx.openBeads
+	ctx.openBeads = func(site beadsSite) doctorBeads {
+		db := failingBeads{doctorBeads: open(site)}
+		if site.workDir == beadsDir {
+			db.agentBeadsErr = errDown
+		}
+		return db
+	}
+
+	check := NewStaleAgentBeadsCheck()
+	result := check.Run(ctx)
+
+	if result.Status != StatusWarning {
+		t.Errorf("status = %v, want StatusWarning: %s", result.Status, result.Message)
+	}
+	if len(result.Details) != 1 || result.Details[0] != "gt-gastown-crew-ghost" {
+		t.Errorf("details = %v, want only the stale crew bead", result.Details)
+	}
+	for _, want := range []string{
+		"1 stale agent bead(s) for removed workers",
+		"could not read agent bead lists: town beads: " + errDown.Error(),
+	} {
+		if !strings.Contains(result.Message, want) {
+			t.Errorf("message = %q, want it to contain %q", result.Message, want)
+		}
+	}
+}
+
 // === Tests for Phase 2: Deregistered rig orphan detection ===
 
 func TestStaleAgentBeadsCheck_Phase2_NoTownBeadsDir(t *testing.T) {

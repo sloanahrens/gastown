@@ -152,14 +152,17 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 				return
 			}
 
-			// Also check wisps table for migrated agent beads
-			if wispMap, wispErr := bd.ListAgentBeadsFromWisps(); wispErr != nil {
+			// Also check wisps table for migrated agent beads. A failed read
+			// leaves this rig's list partial, so the rig is left out of the
+			// stale set like one whose bead list failed above.
+			wispMap, wispErr := bd.ListAgentBeadsFromWisps()
+			if wispErr != nil {
 				addQueryErr(rigName, wispErr)
-			} else {
-				for _, w := range wispMap {
-					if w.Status == "open" || w.Status == "in_progress" || w.Status == "hooked" {
-						allBeads = append(allBeads, w)
-					}
+				return
+			}
+			for _, w := range wispMap {
+				if w.Status == "open" || w.Status == "in_progress" || w.Status == "hooked" {
+					allBeads = append(allBeads, w)
 				}
 			}
 
