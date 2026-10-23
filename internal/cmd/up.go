@@ -715,9 +715,11 @@ func startPolecatsWithWork(townRoot, rigName string, out io.Writer) ([]string, m
 	}
 	// A start over a dead session is a Respawn, which an e-stop refuses
 	// (gt-4k3fj.4.1).
-	polecatMgr := supervisedPolecatSessions(tmux.NewTmux(), r, "gt up", operatorActor("gt up"))
+	t := tmux.NewTmux()
+	polecatMgr := supervisedPolecatSessions(t, r, "gt up", operatorActor("gt up"))
+	backendFor := townSeatBackend(townRoot, t)
 	start := func(polecatName string) error {
-		return restartPolecatOnSlungAgent(polecatMgr, townRoot, rigName, polecatName, polecat.SessionStartOptions{})
+		return restartPolecatOnSlungAgent(polecatMgr, backendFor, townRoot, rigName, polecatName, polecat.SessionStartOptions{})
 	}
 	return startPolecatsWithWorkUsing(townRoot, rigName, out, polecatHasWork, start)
 }
