@@ -143,18 +143,18 @@ func TestTheWorkPanelDrawsARowPerSeat(t *testing.T) {
 	if len(rows) != 3 {
 		t.Fatalf("the panel drew %d rows (%v), want a header and two seats", len(rows), rows)
 	}
-	if got := rows[0]; strings.Join(got, " ") != "Agent Polecat Bead State Age" {
+	if got := rows[0]; strings.Join(got, " ") != "Polecat Agent Bead State Age" {
 		t.Errorf("the header row reads %v", got)
 	}
 	busy := rows[1]
 	if len(busy) != 5 {
 		t.Fatalf("a seat's row has %d cells (%v), want five", len(busy), busy)
 	}
-	if busy[0] != "deepseek-flash" {
-		t.Errorf("the row does not name the agent its session runs: %v", busy)
+	if busy[0] != "dementus" {
+		t.Errorf("the row does not lead with the polecat: %v", busy)
 	}
-	if busy[1] != "dementus" {
-		t.Errorf("the row does not name the polecat: %v", busy)
+	if busy[1] != "flash" {
+		t.Errorf("the row does not name the agent its session runs: %v", busy)
 	}
 	if !strings.Contains(busy[2], "gt-vcr3z") || !strings.Contains(busy[2], "one Work panel replaces") {
 		t.Errorf("the row does not carry the bead and its title: %v", busy)
@@ -169,7 +169,7 @@ func TestTheWorkPanelDrawsARowPerSeat(t *testing.T) {
 	// hold something rather than left out. It holds no bead, so it names no
 	// agent and names its rig in the Bead column instead (gt-hnztc).
 	idle := rows[2]
-	if len(idle) != 5 || idle[0] != "" || idle[1] != "furiosa" || idle[2] != "gastown" || idle[3] != "idle" || idle[4] != "" {
+	if len(idle) != 5 || idle[0] != "furiosa" || idle[1] != "" || idle[2] != "gastown" || idle[3] != "idle" || idle[4] != "" {
 		t.Errorf("the idle seat's row reads %v", idle)
 	}
 	if !strings.Contains(workText(t, dom), "1 idle (free to take work; the model is chosen when work is dispatched)") {
@@ -205,7 +205,7 @@ func TestTheWorkPanelGivesASeatHoldingNoBeadItsRig(t *testing.T) {
 	if len(agents) != 5 {
 		t.Fatalf("the panel drew %d agent cells, want 5", len(agents))
 	}
-	if agents[0].Text != "deepseek-flash" || agents[1].Text != "claude-sonnet" {
+	if agents[0].Text != "flash" || agents[1].Text != "sonnet" {
 		t.Errorf("a seat holding a bead no longer names the agent its session runs: %q, %q", agents[0].Text, agents[1].Text)
 	}
 	for i, who := range []string{"the parked rig's seat", "the idle seat with a recorded agent", "the idle seat with none"} {
@@ -271,7 +271,7 @@ func TestTheWorkPanelNamesAModelOnlyForABeadASeatHolds(t *testing.T) {
 	if agents[0].Text != "" || agents[1].Text != "" {
 		t.Errorf("a seat holding nothing names a model: %q, %q", agents[0].Text, agents[1].Text)
 	}
-	if agents[2].Text != "deepseek-flash" {
+	if agents[2].Text != "flash" {
 		t.Errorf("a seat holding a bead does not name the model it was dispatched with: %q", agents[2].Text)
 	}
 
@@ -510,6 +510,112 @@ func TestTheWorkRowsCannotOverflowTheirPanel(t *testing.T) {
 	}
 	if !strings.Contains(pageFunc(t, "workRow"), `bd.title = [p.bead, p.title].filter(Boolean).join(" ") + (p.description ? "\n\n" + p.description : "");`) {
 		t.Error("a bead's cell does not carry the bead and its whole title, so a clipped title is lost")
+	}
+}
+
+// TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover drives the panel
+// over seats whose agents carry each provider prefix and one that carries none,
+// and reads the Agent cell back against the polecat in its row. A claude- or
+// deepseek- prefix goes from the cell; any other name shows as it is; the
+// tooltip keeps the whole name every time (gt-dp6u3).
+func TestTheWorkPanelShortensTheAgentButKeepsItsFullNameOnHover(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderWork", workState([]any{
+		seat("gastown", "alpha", "working", "gt-a1", "sandboxed", "deepseek-flash-sandbox", time.Minute),
+		seat("gastown", "bravo", "working", "gt-a2", "haiku", "claude-haiku", time.Minute),
+		seat("gastown", "charlie", "working", "gt-a3", "unprefixed", "gemini-pro", time.Minute),
+	}, workQueueReading(0, 0, 0, 0)))
+
+	names := workCells(t, dom, "wname")
+	agents := workCells(t, dom, "wagent")
+	if len(names) != 3 || len(agents) != 3 {
+		t.Fatalf("the panel drew %d polecat cells and %d agent cells, want 3 of each", len(names), len(agents))
+	}
+	byPolecat := map[string]drawn{}
+	for i, n := range names {
+		byPolecat[n.Text] = agents[i]
+	}
+	for _, c := range []struct{ polecat, shown, full string }{
+		{"alpha", "flash-sandbox", "deepseek-flash-sandbox"},
+		{"bravo", "haiku", "claude-haiku"},
+		{"charlie", "gemini-pro", "gemini-pro"},
+	} {
+		got, ok := byPolecat[c.polecat]
+		if !ok {
+			t.Errorf("the panel drew no row for %s", c.polecat)
+			continue
+		}
+		if got.Text != c.shown {
+			t.Errorf("%s's agent cell reads %q, want %q", c.polecat, got.Text, c.shown)
+		}
+		if !strings.Contains(got.Title, c.full) {
+			t.Errorf("%s's agent cell does not carry the full name %q on hover: %q", c.polecat, c.full, got.Title)
+		}
+	}
+}
+
+// TestTheWorkQueueScrollsOnlyItsBeadRows pins the queue list's scroll region:
+// the caption and filter chips stay in view, and only the bead rows scroll
+// inside their own bounded region (gt-dp6u3).
+func TestTheWorkQueueScrollsOnlyItsBeadRows(t *testing.T) {
+	t.Parallel()
+
+	rows := cssRule(t, ".qrows")
+	if !strings.Contains(rows, "max-height:70vh") || !strings.Contains(rows, "overflow:auto") {
+		t.Errorf("the queue's bead rows do not scroll in a bounded region: %q", rows)
+	}
+	if strings.Contains(string(indexHTML), ".qlist{") {
+		t.Error("the queue list has a rule of its own, which would scroll its caption and chips with its rows")
+	}
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderWork", workState([]any{
+		seat("gastown", "dementus", "working", "gt-vcr3z", "one Work panel", "deepseek-flash", time.Minute),
+	}, workQueueReading(1, 0, 0, 0)))
+
+	v, err := dom.vm.RunString(`JSON.stringify((() => {
+		let list = null, region = null;
+		(function walk(n) {
+			for (const c of (n.children || [])) {
+				if (String(c.className).split(" ").indexOf("qlist") >= 0) list = c;
+				walk(c);
+			}
+		})(__byId["work"]);
+		const isRow = c => String(c.className).split(" ").indexOf("qrow") >= 0;
+		region = list.children.find(c => String(c.className).split(" ").indexOf("qrows") >= 0);
+		return {
+			kids: list.children.map(c => String(c.className)),
+			rowsDirect: list.children.filter(isRow).length,
+			rowsInRegion: region ? region.children.filter(isRow).length : -1
+		};
+	})())`)
+	if err != nil {
+		t.Fatalf("reading the queue list's layout: %v", err)
+	}
+	var got struct {
+		Kids         []string `json:"kids"`
+		RowsDirect   int      `json:"rowsDirect"`
+		RowsInRegion int      `json:"rowsInRegion"`
+	}
+	if err := json.Unmarshal([]byte(v.String()), &got); err != nil {
+		t.Fatalf("reading the queue list's layout: %v", err)
+	}
+	if got.RowsDirect != 0 {
+		t.Errorf("%d bead rows sit outside the region that scrolls", got.RowsDirect)
+	}
+	if got.RowsInRegion != 1 {
+		t.Errorf("the scrolling region holds %d bead rows, want the one ready bead", got.RowsInRegion)
+	}
+	if n := len(got.Kids); n == 0 || got.Kids[n-1] != "qrows" {
+		t.Fatalf("the queue list's last child is not the scrolling rows region: %v", got.Kids)
+	}
+	fixed := strings.Join(got.Kids[:len(got.Kids)-1], " ")
+	for _, want := range []string{"qtabs", "empty"} {
+		if !strings.Contains(fixed, want) {
+			t.Errorf("the queue list draws no %s above its scrolling rows, so it scrolls out of view: %v", want, got.Kids)
+		}
 	}
 }
 

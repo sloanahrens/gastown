@@ -100,7 +100,7 @@ tr.live{background:#101a13}
 .workrow .whints{grid-column:1 / -1;overflow:visible;white-space:normal}
 .wsum{margin-top:8px}
 .wblocked{padding:2px 0}
-.qlist{max-height:70vh;overflow:auto}
+.qrows{max-height:70vh;overflow:auto}
 .qtabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px}
 .qrow{border-top:1px solid var(--line)}
 .qhead{display:grid;grid-template-columns:auto auto 1fr auto;gap:4px 8px;align-items:baseline;width:100%;text-align:left;background:none;border:0;color:inherit;font:inherit;padding:5px 0;cursor:pointer}
@@ -776,7 +776,7 @@ function worseRead(a, b) {
 // from its heading.
 function workHead() {
   const tr = el("div", "workrow whead");
-  [["Agent", "the agent the seat's session was started with"], ["Polecat", "the polecat, with its rig and last-24-hour landings on hover"],
+  [["Polecat", "the polecat, with its rig and last-24-hour landings on hover"], ["Agent", "the agent the seat's session was started with"],
    ["Bead", "the bead on the seat's hook, with its title"], ["State", "the state the town's inventory reads the seat into"],
    ["Age", "how long the bead has been on the seat"]].forEach(([h, tip]) => { const c = el("span", "", h); c.title = tip; tr.append(c); });
   return tr;
@@ -799,25 +799,33 @@ function paintAges(r, now) {
   r.age.title = p.bead ? "on the hook" + (on == null ? "" : " for " + fmtDur(on)) + silent : "";
 }
 
+// shortAgent drops the provider prefix from an agent name, so the Agent cell
+// reads flash for deepseek-flash. Any other name shows unchanged.
+function shortAgent(agent) {
+  return agent.replace(/^(claude|deepseek)-/, "");
+}
+
 // workRow is one seat. Every cell clips with an ellipsis and carries its whole
 // text in the title attribute, so no bead title can widen a row past its panel
 // (TestTheWorkRowsCannotOverflowTheirPanel pins the style).
 function workRow(names, p, now) {
   const tr = el("div", "workrow");
   const cell = (cls, text, tip) => { const c = el("span", cls, text); if (tip) c.title = tip; tr.append(c); return c; };
-  // A seat names a model only for a bead it holds: the agent a seat records is
-  // the one its last job ran, and the model for a bead is picked when the bead
-  // is dispatched, so a seat holding nothing has none to name whatever state
-  // the inventory reads it into (gt-hnztc, gt-70txs).
-  const noModel = !p.bead;
-  cell("wagent", noModel ? "" : (p.agent || (p.has_session ? "–" : "")),
-    noModel ? "this seat holds no bead, so it has no model — the model is chosen when work is dispatched"
-      : p.agent ? "the agent this seat's session was started with" : p.has_session ? "its session recorded no agent" : "this seat has no session");
   const landed = p.landed_24h
     ? " · landed " + p.landed_24h + " in 24h, om approved " + Math.round(p.approved_24h / p.landed_24h * 100) + "%" +
       (p.avg_score_24h != null ? ", average score " + p.avg_score_24h.toFixed(2) : "")
     : "";
   cell("wname", names.label(p.rig, p.name), p.rig + "/" + p.name + landed);
+  // A seat names a model only for a bead it holds: the agent a seat records is
+  // the one its last job ran, and the model for a bead is picked when the bead
+  // is dispatched, so a seat holding nothing has none to name whatever state
+  // the inventory reads it into (gt-hnztc, gt-70txs). The cell shows the agent
+  // without its provider prefix; the tooltip keeps the whole name.
+  const noModel = !p.bead;
+  const agent = noModel ? "" : (p.agent || (p.has_session ? "–" : ""));
+  cell("wagent", shortAgent(agent),
+    noModel ? "this seat holds no bead, so it has no model — the model is chosen when work is dispatched"
+      : p.agent ? p.agent + " — the agent this seat's session was started with" : p.has_session ? "its session recorded no agent" : "this seat has no session");
   const bd = cell("wbead", "");
   if (p.bead) {
     bd.append(el("span", "bead", p.bead));
@@ -3607,6 +3615,9 @@ function drawQueueList(box, s) {
     }
     box.append(f);
   }
+  // Only the bead rows scroll: the caption and the chips above stay in view.
+  const rowsBox = el("div", "qrows");
+  box.append(rowsBox);
   const rows = all.filter(b => (qRig === "all" || b.rig === qRig) && (qTab !== "ready" || qShape === "all" || b.shape === qShape) && (qTab !== "blocked" || qWisp || !isWisp(b)));
   if (!rows.length) {
     let msg;
@@ -3630,7 +3641,7 @@ function drawQueueList(box, s) {
     } else {
       msg = all.length ? "nothing matches these filters" : qTab === "ready" ? "nothing is waiting to be built" : qTab === "landing" ? "nothing is waiting to land" : "nothing is blocked";
     }
-    box.append(el("div", "empty", msg));
+    rowsBox.append(el("div", "empty", msg));
   }
   rows.forEach(b => {
     const id = b.rig + "/" + b.id;
@@ -3656,7 +3667,7 @@ function drawQueueList(box, s) {
     head.onclick = () => openBead(b);
     row.append(head);
     if (open) row.append(detailBlock(qDetail[id] || {loading: true}));
-    box.append(row);
+    rowsBox.append(row);
   });
   const shownInRig = rows.length;
   const totalInRig = qRig === "all" ? (q[totalKey] || 0) : (rigs[qRig] || 0);
