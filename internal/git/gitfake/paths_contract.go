@@ -22,6 +22,7 @@ type PathRepo interface {
 	MergeBase(a, b string) (string, error)
 	PullRebase() error
 	CheckoutDetach(ref string) error
+	ReadTreeHead() error
 	Status() (*git.GitStatus, error)
 	Add(pathspecs ...string) error
 	IsBareRepository() (bool, error)

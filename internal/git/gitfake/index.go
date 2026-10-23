@@ -399,6 +399,24 @@ func (h *handle) ResetFiles(pathspecs ...string) error {
 	return nil
 }
 
+// ReadTreeHead makes the index HEAD's tree (git read-tree HEAD), leaving the
+// files on disk as they are.
+func (h *handle) ReadTreeHead() error {
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	args := []string{"read-tree", "HEAD"}
+	r, wt, err := h.workTree(args...)
+	if err != nil {
+		return err
+	}
+	headID := headCommit(r, wt)
+	if headID == "" {
+		return gitErr(128, "fatal: Not a valid object name HEAD", args...)
+	}
+	h.f.stage(r, wt).tree = copyTree(h.f.treeOf(headID))
+	return nil
+}
+
 // RuntimeArtifactPathspecs is git.Git's: the tracked files under a root are
 // the index's (git ls-files), and the ones HEAD tracks are HEAD's tree
 // (git ls-tree).

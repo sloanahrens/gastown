@@ -1850,6 +1850,14 @@ func (g *Git) ResetFiles(paths ...string) error {
 	return err
 }
 
+// ReadTreeHead replaces the index with HEAD's tree (git read-tree HEAD),
+// leaving the files on disk as they are. A worktree whose index file is
+// missing reads as empty, so every tracked file shows as deleted until this runs.
+func (g *Git) ReadTreeHead() error {
+	_, err := g.run("read-tree", "HEAD")
+	return err
+}
+
 // StagedDeletions returns the list of tracked files staged for deletion.
 // Used by auto-save to unstage deletions — safety nets should preserve work, not destroy it.
 func (g *Git) StagedDeletions() ([]string, error) {
