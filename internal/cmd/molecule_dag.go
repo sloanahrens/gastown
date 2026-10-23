@@ -210,11 +210,23 @@ func buildDAG(b *beads.Beads, root *beads.Issue, children []*beads.Issue) (*DAGI
 
 // computeTiers assigns execution tiers to each node.
 // Tier 0 = nodes with no dependencies, higher tiers depend on lower ones.
+//
+// Only dependencies on other steps of the molecule order the tiers: a blocker
+// outside dag.Nodes is never processed here, so counting it would keep its
+// dependent from ever reaching in-degree 0. Nodes that still have unmet
+// in-molecule dependencies when no tier can be formed (a dependency cycle) go
+// into one trailing tier, so every node is in exactly one tier group.
 func computeTiers(dag *DAGInfo) {
-	// Calculate in-degrees
+	// Calculate in-degrees. Each edge counts once per Dependents entry, so
+	// the decrement below matches it.
 	inDegree := make(map[string]int)
 	for id, node := range dag.Nodes {
-		inDegree[id] = len(node.Dependencies)
+		inDegree[id] = 0
+		for _, depID := range node.Dependencies {
+			if _, ok := dag.Nodes[depID]; ok {
+				inDegree[id]++
+			}
+		}
 	}
 
 	// Kahn's algorithm for tier assignment
@@ -232,7 +244,17 @@ func computeTiers(dag *DAGInfo) {
 		}
 
 		if len(tierNodes) == 0 {
-			// Cycle detected (shouldn't happen with validated molecules)
+			// Cycle detected (shouldn't happen with validated molecules):
+			// place the remaining nodes together rather than drop them.
+			for id := range inDegree {
+				tierNodes = append(tierNodes, id)
+			}
+			sort.Strings(tierNodes)
+			tierGroups = append(tierGroups, tierNodes)
+			for _, id := range tierNodes {
+				dag.Nodes[id].Tier = currentTier
+			}
+			currentTier++
 			break
 		}
 
