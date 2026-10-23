@@ -75,12 +75,13 @@ type reworkPush struct {
 	// rejectedHead is the head the live MERGE REJECTION note names: the commit
 	// the landing worker refused.
 	rejectedHead string
-	// seatAuthor and seatEmail are the git identity this seat's commits carry:
-	// the agent name the session sets as GIT_AUTHOR_NAME, and the worktree's
-	// user.email. Both must match, so a commit under the same name from another
-	// mailbox is not read as this seat's. Git author fields are self-asserted,
-	// so this rules out accidents rather than a deliberate forgery; the lease
-	// pinned to the rejected head is what limits the overwrite.
+	// seatAuthor and seatEmail are the git identity this seat's commits carry,
+	// as git.SeatIdentityFor decides it: the bare agent name and the
+	// worktree's user.email, the same pair gt commit authors with (gt-tip6u).
+	// Both must match, so a commit under the same name from another mailbox is
+	// not read as this seat's. Git author fields are self-asserted, so this
+	// rules out accidents rather than a deliberate forgery; the lease pinned
+	// to the rejected head is what limits the overwrite.
 	seatAuthor string
 	seatEmail  string
 }

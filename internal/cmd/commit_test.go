@@ -1,6 +1,12 @@
 package cmd
 
-import "testing"
+import (
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/steveyegge/gastown/internal/git"
+)
 
 func TestIdentityToEmail(t *testing.T) {
 	t.Parallel()
@@ -146,5 +152,60 @@ func TestCommitIdentity(t *testing.T) {
 				t.Errorf("commitIdentity(%v, %q) = %q, want %q", tt.env, tt.cwd, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestCommitGitArgsCarryTheSeatIdentity pins what the wrapper hands git: the
+// author and committer both carry the seat's name and email, so a commit it
+// writes is one gt done's rework lease recognizes (gt-tip6u).
+func TestCommitGitArgsCarryTheSeatIdentity(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		seat git.SeatIdentity
+		want []string
+	}{
+		{
+			name: "seat identity",
+			seat: git.SeatIdentity{Name: "coma", Email: "seat@test.com"},
+			want: []string{"-c", "user.name=coma", "-c", "user.email=seat@test.com", "commit", "-m", "msg"},
+		},
+		{
+			name: "name without an email",
+			seat: git.SeatIdentity{Name: "coma"},
+			want: []string{"-c", "user.name=coma", "commit", "-m", "msg"},
+		},
+		{
+			name: "zero seat passes through",
+			want: []string{"commit", "-m", "msg"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got := commitGitArgs([]string{"-m", "msg"}, tt.seat)
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("commitGitArgs = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestWithAuthorEnvReplacesInheritedAuthor covers the bug's trigger: an
+// inherited GIT_AUTHOR_NAME outranks -c user.name, so the wrapper must replace
+// it rather than add a second entry git would read past (gt-tip6u).
+func TestWithAuthorEnvReplacesInheritedAuthor(t *testing.T) {
+	t.Parallel()
+	env := []string{"PATH=/bin", "GIT_AUTHOR_NAME=stale", "GIT_AUTHOR_EMAIL=stale@test.com"}
+	got := withAuthorEnv(env, git.SeatIdentity{Name: "coma", Email: "seat@test.com"})
+	want := map[string]string{"PATH": "/bin", "GIT_AUTHOR_NAME": "coma", "GIT_AUTHOR_EMAIL": "seat@test.com"}
+	if len(got) != len(want) {
+		t.Fatalf("withAuthorEnv = %v, want %d entries", got, len(want))
+	}
+	for _, kv := range got {
+		k, v, _ := strings.Cut(kv, "=")
+		if want[k] != v {
+			t.Errorf("%s = %q, want %q", k, v, want[k])
+		}
 	}
 }
