@@ -134,8 +134,8 @@ type slingDeps struct {
 	crewExists     func(townRoot, rigName, name string) bool
 	peekPool       func(townRoot, requested string) (agent, reason string, err error)
 	// pinnedAgent is the agent a bead's agent: label asks for when the pool has
-	// that seat; nil reads no label.
-	pinnedAgent func(townRoot, beadID string) string
+	// that seat, and an error when that seat is closed now; nil reads no label.
+	pinnedAgent func(townRoot, beadID string) (string, error)
 	// peekNamed is the named-polecat half of the same preview: a refusal the
 	// live sling would raise, or nil. See peekNamedPolecatSling (gt-yxc7m).
 	peekNamed func(townRoot, rigName string, opts SlingSpawnOptions) error

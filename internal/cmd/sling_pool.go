@@ -208,35 +208,52 @@ func poolPinnedAgent(pool *config.PolecatPool, labels []string) string {
 
 // poolBeadAgent is poolPinnedAgent for the bead beadID, read from bd. The label
 // is a preference, not a gate: a bead or the town settings that cannot be read
-// warn and fall back to the unlabeled route.
-func poolBeadAgent(townRoot, beadID string) string {
+// warn and fall back to the unlabeled route. A label whose seat is closed now
+// is a refusal, not a fallback (poolLabelRoute).
+func poolBeadAgent(townRoot, beadID string) (string, error) {
 	if beadID == "" {
-		return ""
+		return "", nil
 	}
 	issue, err := showBead(townRoot, beadID)
 	if err != nil {
 		style.PrintWarning("could not read %s for its agent: label (%v); routing it as unlabeled", beadID, err)
-		return ""
+		return "", nil
 	}
 	if issue == nil {
-		return ""
+		return "", nil
 	}
 	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
 	if err != nil {
 		style.PrintWarning("could not read town settings for %s's agent: label (%v); routing it as unlabeled", beadID, err)
-		return ""
+		return "", nil
 	}
 	if ts == nil {
-		return ""
+		return "", nil
 	}
-	return poolPinnedAgent(ts.PolecatPool, issue.Labels)
+	return poolLabelRoute(ts.PolecatPool, poolPinnedAgent(ts.PolecatPool, issue.Labels), time.Now())
+}
+
+// poolLabelRoute is the seat a bead's agent: label asks for, or the refusal when
+// that seat is inside its closed window at now. agent is the label's seat ("" for
+// none). A labeled bead waits for its seat rather than running on another model,
+// as the spec dispatcher makes it wait (specdispatch ChooseSeat), so the sling
+// refuses here and does not fall back to an open seat.
+func poolLabelRoute(pool *config.PolecatPool, agent string, now time.Time) (string, error) {
+	if agent == "" || !poolSeatClosedAt(pool, agent, now) {
+		return agent, nil
+	}
+	return "", &poolBackpressureError{
+		Reason: fmt.Sprintf("pool: %s's seat is closed until its window opens, and the bead is labeled for it -> no seat for it", agent),
+		Raise:  "polecat_pool.seats." + agent + ".closed",
+	}
 }
 
 // poolRequestedAgent is the agent a sling asks the pool for: the --agent it was
-// given, else the one beadID's agent: label names through pinned (gt-5h1r7).
-func poolRequestedAgent(townRoot, agent, beadID string, pinned func(townRoot, beadID string) string) string {
+// given, else the one beadID's agent: label names through pinned (gt-5h1r7). A
+// label whose seat is closed refuses the request (poolLabelRoute).
+func poolRequestedAgent(townRoot, agent, beadID string, pinned func(townRoot, beadID string) (string, error)) (string, error) {
 	if agent != "" || beadID == "" || pinned == nil {
-		return agent
+		return agent, nil
 	}
 	return pinned(townRoot, beadID)
 }
