@@ -437,6 +437,7 @@ func TestExists(t *testing.T) {
 	}{
 		{name: "present", reply: `{"name":"x","phase":"Ready"}`, want: true},
 		{name: "not_found", stderr: "Error:   × code: 'Some requested entity was not found', message: \"sandbox not found\"", err: failed},
+		{name: "not_found_words_outside_the_status", stderr: "proxy: sandbox not found in route cache; upstream connection refused", err: failed, wantErr: true},
 		{name: "gateway_unreachable", stderr: "transport error: connection refused", err: failed, wantErr: true},
 		{name: "failure_without_stderr", err: failed, wantErr: true},
 	}
