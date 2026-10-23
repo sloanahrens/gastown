@@ -124,6 +124,16 @@ type Daemon struct {
 	// from a beadsfake.
 	openWorkBeads func(env []string, timeout time.Duration) workBeadReader
 
+	// openRecoveryBeads opens the agent-bead client the crash path's stale
+	// hook reap reads and resets (see patrolScanHost.recoveryBeads); nil is
+	// the routed bd. Tests answer from a beadsfake.
+	openRecoveryBeads func(env []string) beads.Client
+
+	// sandboxExists asks a gateway whether it has a sandbox of that name (see
+	// patrolScanHost.sandboxStillExists); nil asks the real gateway. Tests
+	// answer from a stub.
+	sandboxExists func(gateway, name string) (bool, error)
+
 	// schedulerDeps are the collaborators scheduled dispatch runs on (the
 	// sling and the polecat-capacity probe, both in package cmd). Set through
 	// SetSchedulerDeps; empty means this daemon does not dispatch.
@@ -3025,7 +3035,8 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	// A sandbox seat whose sandbox is gone and whose work was handed back
 	// keeps a hook nothing releases; clear it so the roster stops counting the
 	// seat as dead-hooked.
-	if (&patrolScanHost{d: d}).reapStaleSandboxHook(rigName, polecatName, sessionName, hookBead) {
+	stale := &patrolScanHost{d: d, openRecoveryBeads: d.openRecoveryBeads, sandboxExists: d.sandboxExists}
+	if stale.reapStaleSandboxHook(rigName, polecatName, sessionName, hookBead) {
 		return
 	}
 
