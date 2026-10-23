@@ -1124,18 +1124,6 @@ func (g *Git) FetchBranchWithTimeout(remote, branch string, timeout time.Duratio
 	return err
 }
 
-// FetchDefaultBranchWithTimeout refreshes only the remote's default branch,
-// bounded by timeout.
-//
-// Scan loops that compare local work against the default branch need a fresh
-// origin/<default> or they judge today's work by last month's main — but a
-// plain Fetch can block forever on an unreachable remote, which is how one
-// stuck call takes down a whole patrol scan (gt-ftt).
-func (g *Git) FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error {
-	_, err := g.runWithTimeout(timeout, "fetch", remote, g.RemoteDefaultBranch())
-	return err
-}
-
 // RefreshRemoteDefaultBranch fetches one ref and nothing else: remote's
 // default branch, into this clone's remote-tracking ref for it. The explicit
 // destination keeps the fetch off every other remote-tracking ref, and there

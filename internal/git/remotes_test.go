@@ -198,22 +198,6 @@ func TestTimedOutCallReportsTimeout(t *testing.T) {
 	}
 }
 
-func TestFetchDefaultBranchWithTimeoutFetchesRemoteDefault(t *testing.T) {
-	t.Parallel()
-	s := newScripted(map[string]reply{
-		"symbolic-ref refs/remotes/origin/HEAD": fail(128, "fatal: ref refs/remotes/origin/HEAD is not a symbolic ref\n"),
-		"rev-parse --verify origin/master":      fail(128, "fatal: Needed a single revision\n"),
-		"rev-parse --verify origin/main":        ok("5e06d1a1792be1930476f5a334963d4de44e8ea3\n"),
-		"fetch origin main":                     ok(""),
-	})
-	if err := newTestGit(t, s).FetchDefaultBranchWithTimeout("origin", time.Minute); err != nil {
-		t.Fatalf("FetchDefaultBranchWithTimeout: %v", err)
-	}
-	if c, _ := s.sentCall("fetch origin main"); c.timeout != time.Minute {
-		t.Fatalf("fetch timeout = %v", c.timeout)
-	}
-}
-
 // git config --unset-all exits 5 when the key is absent: clearing a push URL
 // that was never set is a no-op. Any other failure is reported.
 func TestClearPushURL(t *testing.T) {
