@@ -632,6 +632,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 	// command must carry there. After Prepare the tmux client routes this
 	// session's commands into the sandbox (session.sandbox_routing).
 	sessionWorkDir := workDir
+	var hostTownRoot, sandboxRoot string // set when a backend moves the session into a sandbox
 	envCfg := config.AgentEnvConfig{
 		Role:        "polecat",
 		Rig:         m.rig.Name,
@@ -692,6 +693,14 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		}()
 		if prep.WorkDir != "" {
 			sessionWorkDir = prep.WorkDir
+			// The startup command names files under the host town root
+			// (--settings, --append-system-prompt-file, GT_SYSTEM_PROMPT_FILE);
+			// inside the sandbox they live under its own town root.
+			root, rerr := sandboxTownRoot(townRoot, workDir, prep.WorkDir)
+			if rerr != nil {
+				return fmt.Errorf("preparing %s session for %s: %w", b.Name(), polecat, rerr)
+			}
+			hostTownRoot, sandboxRoot = townRoot, root
 		}
 		// The same overrides reach the agent two ways on purpose: in the
 		// startup command (EnvOverride, so the agent process and what it
@@ -717,6 +726,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		if buildErr != nil {
 			return fmt.Errorf("building startup command: %w", buildErr)
 		}
+		command = session.RewriteTownRoot(command, hostTownRoot, sandboxRoot)
 	}
 
 	if err := m.tmux.NewSessionWithCommandAndEnv(sessionID, sessionWorkDir, command, envVars); err != nil {
