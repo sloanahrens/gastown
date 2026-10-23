@@ -57,7 +57,14 @@ func (d *Daemon) jevRulesRigs() []string {
 	for _, rig := range d.getKnownRigs() {
 		dir := doltserver.FindRigBeadsDir(d.config.TownRoot, rig)
 		if _, err := os.Stat(dir); err != nil {
-			d.logger.Printf("jev_rules: skipping rig %s: no beads directory at %s", rig, dir)
+			// Only a missing directory means the rig was never cloned. Any
+			// other stat failure is reported as what it is, so an unreadable
+			// path does not read as a rig the town knows is uncloned (gt-8chz5).
+			if errors.Is(err, os.ErrNotExist) {
+				d.logger.Printf("jev_rules: skipping rig %s: no beads directory at %s", rig, dir)
+			} else {
+				d.logger.Printf("jev_rules: WARNING: skipping rig %s: cannot stat %s: %v", rig, dir, err)
+			}
 			continue
 		}
 		rigs = append(rigs, rig)

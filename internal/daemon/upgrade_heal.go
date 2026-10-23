@@ -23,11 +23,6 @@ const upgradeHealWait = 20 * time.Second
 // healthy respawn, and the old daemon's respawn may yet fail (gt-csq9g).
 const upgradeHealRecheck = 10 * time.Second
 
-// upgradeHealPidChecks is how many samples carrying a pid count as healthy.
-// One sample cannot tell a respawn from a daemon still exiting, so the helper
-// heals once the pid has survived the first re-check (gt-csq9g).
-const upgradeHealPidChecks = 2
-
 // upgradeHealCommandTimeout bounds one launchctl call made while arming the
 // helper, on the run loop ahead of an exit: launchd wedged for a while must
 // cost the exit its timeout, not the exit itself (gt-csq9g).
@@ -123,23 +118,29 @@ if [ -e "$ESTOP" ]; then
 fi
 
 # launchd keeps the pid of a job that is still shutting down, so only a pid
-# that survives the re-check vouches for the job.
+# that survives the re-check vouches for the job: the helper samples, waits,
+# samples once more, and calls the job healthy only when both samples carry a
+# pid. The re-check is the shape of the code, not a counter that has to reach
+# a constant before the loop ends (gt-8chz5).
 sample_job() {
 	state=$(launchctl print "$SVC" 2>&1)
 	loaded=$?
 }
 
+has_pid() {
+	[ "$loaded" -eq 0 ] && printf '%s\n' "$state" | grep -q '^[[:space:]]*pid = [0-9]'
+}
+
 sample_job
-checks=0
-while [ "$loaded" -eq 0 ] && printf '%s\n' "$state" | grep -q '^[[:space:]]*pid = [0-9]'; do
-	checks=$((checks + 1))
-	if [ "$checks" -ge @PID_CHECKS@ ]; then
-		log "healthy: $SVC runs a pid; nothing to heal"
-		finish 0
-	fi
+if has_pid; then
 	sleep @RECHECK@
 	sample_job
-done
+fi
+if has_pid; then
+	log "healthy: $SVC runs a pid; nothing to heal"
+	finish 0
+fi
+
 if [ -n "$(lsof -t -- "$LOCK" 2>/dev/null)" ]; then
 	log "left alone: $LOCK is held by a live process"
 	finish 0
@@ -194,7 +195,6 @@ func upgradeHealScript(job upgradeHealJob, townRoot string) string {
 		"@ESTOP@", shellQuote(estop.FilePath(townRoot)),
 		"@WAIT@", fmt.Sprintf("%d", int(upgradeHealWait/time.Second)),
 		"@RECHECK@", fmt.Sprintf("%d", int(upgradeHealRecheck/time.Second)),
-		"@PID_CHECKS@", fmt.Sprintf("%d", upgradeHealPidChecks),
 	).Replace(upgradeHealScriptTemplate)
 }
 
