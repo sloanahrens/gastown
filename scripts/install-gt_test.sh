@@ -816,14 +816,23 @@ rc=$(run_install "$T" --dry-run)
   && pass "gateway dry-run, toml present: prints the bootstrap line, writes and runs nothing" \
   || fail "gateway dry-run, toml present: rc=$rc $(cat "$T/run.out") / $(cat "$T/launchctl.log" 2>/dev/null)"
 
-# Case 24: dry-run with the unit already loaded and current -> no bootstrap line.
+# Case 24: dry-run with the unit already loaded and current -> no write, no
+# bootstrap line. A missing or stale unit also prints no bootstrap line (it
+# prints "would write" instead), so the case proves the noop install wrote the
+# unit and that the dry run asked launchd before asserting silence.
 T=$(gw_world); gw_toml "$T"; touch "$T/gw_loaded"
 rc=$(run_install "$T" --sha "$(cat "$T/c1")" --source manual) # noop install writes the plist
+P=$(gw_plist "$T")
+[ "$rc" = "0" ] && [ -f "$P" ] && pass "gateway loaded: the noop install wrote the unit" \
+  || fail "gateway loaded: rc=$rc, unit at $P: $(cat "$T/run.out")"
 rm -f "$T/launchctl.log"
 rc=$(run_install "$T" --dry-run)
-[ "$rc" = "0" ] && ! grep -q "bootstrap" "$T/run.out" && gw_never_kickstarts "$T" \
-  && pass "gateway dry-run, already loaded: no bootstrap line" \
-  || fail "gateway dry-run, already loaded: rc=$rc $(cat "$T/run.out")"
+[ "$rc" = "0" ] && ! grep -q "gateway: would write" "$T/run.out" \
+  && ! grep -q "would run: launchctl bootstrap" "$T/run.out" \
+  && grep -q "^launchctl print gui/$GW_UID/$GW_LABEL\$" "$T/launchctl.log" \
+  && gw_never_kickstarts "$T" \
+  && pass "gateway dry-run, loaded and current: no write, no bootstrap line, launchd asked" \
+  || fail "gateway dry-run, loaded and current: rc=$rc $(cat "$T/run.out") / $(cat "$T/launchctl.log" 2>/dev/null)"
 
 # Case 25: a real install renders a valid unit, bootstraps it and never kickstarts.
 T=$(gw_world); gw_toml "$T"
