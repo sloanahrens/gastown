@@ -16,6 +16,7 @@ import (
 	gtdispatch "github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltserver"
 	"github.com/steveyegge/gastown/internal/jev/dispatch"
+	"github.com/steveyegge/gastown/internal/jev/stale"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -314,24 +315,26 @@ func dispatchLabels(review *land.ReviewRecord, reworked bool, issue *beads.Issue
 	return labels, rules
 }
 
-// isLanded is a bead closed by a landing: the landing worker's close carries
-// the landed commit in its reason. The prefixes are the ones
-// land.LandingRecord.CloseReason writes; TestScorecardDispatchLandedMatchesLandingCloseReason
-// fails when the wording moves.
+// isLanded is a bead closed by a landing, read through the verdict the stale
+// pass reads so both agree on what landed.
+// TestScorecardDispatchCloseReasonPredicates pins the reasons it answers to,
+// and TestScorecardDispatchLandedMatchesLandingCloseReason fails when the
+// landing worker's wording stops reading as one.
 func isLanded(issue *beads.Issue) bool {
 	if issue == nil || issue.Status != closedStatus {
 		return false
 	}
-	reason := strings.TrimSpace(issue.CloseReason)
-	return strings.HasPrefix(reason, "Landed on") || strings.Contains(reason, "landed_commit:")
+	return stale.ClosingVerdict(issue.CloseReason) == stale.VerdictLanded
 }
 
-// isSuperseded is a bead closed with a superseded close reason.
+// isSuperseded is a bead closed with a superseded close reason, read through
+// the verdict the stale pass reads.
+// TestScorecardDispatchCloseReasonPredicates pins the reasons it answers to.
 func isSuperseded(issue *beads.Issue) bool {
 	if issue == nil {
 		return false
 	}
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(issue.CloseReason)), "superseded")
+	return stale.ClosingVerdict(issue.CloseReason) == stale.VerdictSuperseded
 }
 
 // hasNeedsSplit is a bead carrying the needs-split label, typed by hand in any

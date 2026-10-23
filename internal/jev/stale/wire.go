@@ -29,12 +29,69 @@ const closeLanded = "landed"
 // whose change landed: "Landed on <target>", then the landing record.
 const closeLandedOn = "Landed on"
 
-// IsLandedReason reports whether a close reason is a landing's: the bare word
-// the molecule close writes, or the landing record's "Landed on <target>". The
-// stale pass and the scorecard both ask this, so they agree on what landed.
+// closeLandedCommit starts the line of the landing record that names the
+// commit the change landed as. A reason whose first line is that line is the
+// record with its "Landed on" line dropped, so it still says landed.
+const closeLandedCommit = "landed_commit:"
+
+// closeSuperseded and closeDuplicate start the reasons that say a bead lost
+// to another.
+const (
+	closeSuperseded = "superseded"
+	closeDuplicate  = "duplicate"
+)
+
+// closeLandedOnLower is closeLandedOn folded once, so ClosingVerdict does not
+// fold it on every close of every bead the pass reads.
+var closeLandedOnLower = strings.ToLower(closeLandedOn)
+
+// Verdict is what a closed bead's close reason says about the bead. The stale
+// pass, the scorecard's stale and dispatch batteries and the attention
+// battery's mechanism labeling all read a reason through ClosingVerdict, so
+// they cannot disagree about the same bead.
+type Verdict int
+
+const (
+	// VerdictNone is a reason that reports neither: a wontfix, a plain close,
+	// an empty reason.
+	VerdictNone Verdict = iota
+	// VerdictLanded is a landing's reason: the bare word the molecule close
+	// writes, the landing worker's "Landed on <target>" record, or that
+	// record's landed_commit line standing as the whole reason.
+	VerdictLanded
+	// VerdictSuperseded is a reason that says the bead was superseded or is a
+	// duplicate of another.
+	VerdictSuperseded
+)
+
+// ClosingVerdict reads a close reason.
+//
+// Only the reason's first line decides, because that line is the close verb a
+// person or a producer writes. The lines under it are detail, and a detail
+// line can quote a landing record — a superseding close that says what the
+// landing it replaces landed as — so reading the whole reason would let that
+// quote call the bead landed. A person writes "Landed on main" as readily as
+// the landing worker does, and "Superseded by ..." as "superseded by ...", so
+// every match ignores case.
+func ClosingVerdict(reason string) Verdict {
+	verb, _, _ := strings.Cut(strings.TrimSpace(reason), "\n")
+	verb = strings.ToLower(strings.TrimSpace(verb))
+	switch {
+	case verb == closeLanded,
+		strings.HasPrefix(verb, closeLandedOnLower),
+		strings.HasPrefix(verb, closeLandedCommit):
+		return VerdictLanded
+	case strings.HasPrefix(verb, closeSuperseded),
+		strings.HasPrefix(verb, closeDuplicate):
+		return VerdictSuperseded
+	}
+	return VerdictNone
+}
+
+// IsLandedReason reports whether a close reason is a landing's. It is
+// ClosingVerdict's landed case, for callers that ask only that.
 func IsLandedReason(reason string) bool {
-	reason = strings.TrimSpace(reason)
-	return strings.EqualFold(reason, closeLanded) || strings.HasPrefix(reason, closeLandedOn)
+	return ClosingVerdict(reason) == VerdictLanded
 }
 
 // hmSearchLimit is how many hits one hm query asks for.

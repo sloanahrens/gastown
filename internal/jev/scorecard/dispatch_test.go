@@ -476,6 +476,52 @@ func TestScorecardDispatchLandedMatchesLandingCloseReason(t *testing.T) {
 	}
 }
 
+// isLanded and isSuperseded decide the dispatch score, and each takes the
+// verdict the stale pass takes. The cases below are the reasons the two used
+// to read differently before that verdict was shared: a person's lower-case
+// landing, and a superseding close that quotes a landing record.
+func TestScorecardDispatchCloseReasonPredicates(t *testing.T) {
+	t.Parallel()
+	closed := func(reason string) *beads.Issue {
+		return &beads.Issue{Status: closedStatus, CloseReason: reason}
+	}
+	tests := []struct {
+		name       string
+		issue      *beads.Issue
+		landed     bool
+		superseded bool
+	}{
+		{name: "no bead", issue: nil},
+		{name: "an open bead with a landing reason", issue: &beads.Issue{Status: "open", CloseReason: "Landed on main"}},
+		{name: "the bare landed word", issue: closed("landed"), landed: true},
+		{name: "a person's lower-case landing", issue: closed("landed on main"), landed: true},
+		{
+			name:   "the landing record",
+			issue:  closed("Landed on main\ntarget_branch: main\nlanded_commit: c0ffee"),
+			landed: true,
+		},
+		{name: "superseded", issue: closed("superseded by gt-a1"), superseded: true},
+		{name: "a duplicate, typed in any case", issue: closed("Duplicate of gt-a1"), superseded: true},
+		{
+			name:       "a superseding close quoting a landing record",
+			issue:      closed("superseded by gt-a1\nlanded_commit: c0ffee"),
+			superseded: true,
+		},
+		{name: "another close reason", issue: closed("wontfix: the rewrite replaced it")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isLanded(tt.issue); got != tt.landed {
+				t.Errorf("isLanded(%+v) = %v, want %v", tt.issue, got, tt.landed)
+			}
+			if got := isSuperseded(tt.issue); got != tt.superseded {
+				t.Errorf("isSuperseded(%+v) = %v, want %v", tt.issue, got, tt.superseded)
+			}
+		})
+	}
+}
+
 // A bead whose verdicts start at attempt 2 has a first try the log does not
 // show, so it must not read as a first-try landing when it lands.
 func TestScorecardDispatchReworkedBeadFirstTryIsUnlabeled(t *testing.T) {
