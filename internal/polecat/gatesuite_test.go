@@ -255,13 +255,14 @@ func (f fakeSuiteReads) ProcessTable() ([]Proc, error)  { return f.procs, f.proc
 // seat's processes are in its sandbox does.
 type sessionTableReads struct {
 	fakeSuiteReads
-	tables map[string][]Proc
-	asked  []string
+	tables   map[string][]Proc
+	tableErr error
+	asked    []string
 }
 
 func (f *sessionTableReads) SessionProcessTable(session string) ([]Proc, error) {
 	f.asked = append(f.asked, session)
-	return f.tables[session], nil
+	return f.tables[session], f.tableErr
 }
 
 // A seat whose reads can name its own process table is scanned in that table: its
@@ -282,6 +283,38 @@ func TestLiveSuiteUsesTheSessionsOwnProcessTable(t *testing.T) {
 	}
 	if len(reads.asked) != 1 || reads.asked[0] != "ga-box" {
 		t.Errorf("session tables asked for %v, want [ga-box]", reads.asked)
+	}
+}
+
+// A seat whose session table cannot be read is an error, and the host's table is
+// not read in its place: the host table here holds the suite, so a fallback
+// would find it and report the seat busy with no error.
+func TestLiveSuiteSessionTableUnreadableIsAnError(t *testing.T) {
+	t.Parallel()
+	suite := []Invocation{{Program: "make", Target: "test"}}
+	reads := &sessionTableReads{
+		fakeSuiteReads: fakeSuiteReads{panes: []int{100}, procs: []Proc{{PID: 100, PPID: 1, Args: "claude"}, {PID: 101, PPID: 100, Args: "make test"}}},
+		tableErr:       errors.New("sandbox ps is gone"),
+	}
+
+	got, err := LiveSuite(reads, SuiteQuery{Roles: []string{"gastown/box"}, Session: "ga-box", Suites: suite})
+
+	if err == nil || got.Busy() {
+		t.Errorf("LiveSuite = %+v, %v; want an error and nothing found when the session table is unreadable", got, err)
+	}
+}
+
+// An empty session table is a read that saw none of the pane's processes, not a
+// seat with no suite running, so it is an error rather than an idle pane.
+func TestLiveSuiteEmptySessionTableIsAnError(t *testing.T) {
+	t.Parallel()
+	suite := []Invocation{{Program: "make", Target: "test"}}
+	reads := &sessionTableReads{fakeSuiteReads: fakeSuiteReads{panes: []int{100}}}
+
+	got, err := LiveSuite(reads, SuiteQuery{Roles: []string{"gastown/box"}, Session: "ga-box", Suites: suite})
+
+	if err == nil || got.Busy() {
+		t.Errorf("LiveSuite = %+v, %v; want an error, not an idle pane, for an empty session table", got, err)
 	}
 }
 

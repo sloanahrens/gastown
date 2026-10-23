@@ -148,6 +148,11 @@ func paneSuite(reads SuiteReads, q SuiteQuery) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if len(procs) == 0 {
+		// A pane's own agent process is in any real table, so an empty one is a
+		// read that saw nothing, not a seat with no suite.
+		return "", fmt.Errorf("empty process table for session %s", q.Session)
+	}
 
 	split := q.Split
 	if split == nil {
