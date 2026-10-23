@@ -1250,14 +1250,9 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	// Get pane — if this fails, the session may have died during startup.
 	// Kill the dead session to prevent "session already running" on next attempt (gt-jn40ft).
 	pane, err := paneAfterStart(s.SessionName, getSessionPane,
-		func() {
-			// A rollback of a session this spawn created: the supervisor's
-			// Cleanup, logged and never refused.
-			_ = sup.Cleanup(supervisor.SeatIn(townRegistry(), s.RigName, constants.RolePolecat, s.PolecatName),
-				"sling: session died during startup", actor)
-		},
+		func() { s.killStartupDeath(sup, actor) },
 		func(cause error) error {
-			return cleanupSandboxAfterStartupDeath(session.SandboxDeleter, townRoot, s.SessionName, cause)
+			return s.dropSandboxAfterStartupDeath(session.SandboxDeleter, townRoot, cause)
 		})
 	if err != nil {
 		return "", err
@@ -1281,13 +1276,33 @@ func paneAfterStart(sessionName string, getPane func(string) (string, error), ki
 	return pane, nil
 }
 
+// startupSeatCleaner is the supervisor surface a failed startup's kill needs.
+type startupSeatCleaner interface {
+	Cleanup(seat supervisor.Seat, reason, actor string) error
+}
+
+// killStartupDeath ends what is left of this spawn's session through the
+// supervisor's Cleanup. The session is one this spawn created, so the rollback
+// is logged and never refused.
+func (s *SpawnedPolecatInfo) killStartupDeath(sup startupSeatCleaner, actor string) {
+	_ = sup.Cleanup(supervisor.SeatIn(townRegistry(), s.RigName, constants.RolePolecat, s.PolecatName),
+		"sling: session died during startup", actor)
+}
+
+// dropSandboxAfterStartupDeath removes the sandbox this spawn's session ran in
+// and its registry record, through deleter. It returns cause; see
+// cleanupSandboxAfterStartupDeath.
+func (s *SpawnedPolecatInfo) dropSandboxAfterStartupDeath(deleter func(townRoot string, rec session.SandboxRecord) error, townRoot string, cause error) error {
+	return cleanupSandboxAfterStartupDeath(deleter, townRoot, s.SessionName, cause)
+}
+
 // cleanupSandboxAfterStartupDeath returns cause, with the sandbox the dead
 // session ran in deleted and its registry record removed. A host session has
-// no record and nothing happens. A failed deletion is added to the error text;
-// cause stays what errors.Is and errors.As see.
+// no record and nothing happens. A failed deletion is wrapped into the error
+// text too, so errors.Is finds it as well as cause.
 func cleanupSandboxAfterStartupDeath(deleter func(townRoot string, rec session.SandboxRecord) error, townRoot, sessionName string, cause error) error {
 	if cerr := session.CleanupSandboxWith(deleter, townRoot, sessionName); cerr != nil {
-		return fmt.Errorf("%w (cleaning up the sandbox failed too: %v)", cause, cerr)
+		return fmt.Errorf("%w (cleaning up the sandbox failed too: %w)", cause, cerr)
 	}
 	return cause
 }
