@@ -21,6 +21,7 @@ type gitRepo interface {
 
 	Rev(ref string) (string, error)
 	RefExists(ref string) (bool, error)
+	ShowFileAtRev(ref, path string) (string, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
 	// MergeBase, DiffNameOnly, DiffPathsNameOnly and CommitLandedOnTarget are
 	// what land.WorkLandedOnTarget reads to prove a seat's leftover commits
