@@ -795,23 +795,27 @@ func TestShouldRetirePolecatSessionAfterDone(t *testing.T) {
 		name        string
 		exitType    string
 		fromHandoff bool
+		backend     string
 		want        bool
 	}{
-		{"completed retires", ExitCompleted, false, true},
-		{"deferred retires session", ExitDeferred, false, true},
-		{"escalated retires session", ExitEscalated, false, true},
-		{"non-final exit preserves session", "PHASE_COMPLETE", false, false},
-		{"unknown exit preserves session", "PAUSED", false, false},
-		{"empty exit preserves session", "", false, false},
-		{"handoff-triggered deferred preserves session", ExitDeferred, true, false},
-		{"handoff flag overrides completed retirement", ExitCompleted, true, false},
+		{"completed retires", ExitCompleted, false, "", true},
+		{"completed retires on the tmux backend", ExitCompleted, false, "tmux", true},
+		{"completed never kills a host session on the openshell backend", ExitCompleted, false, "openshell", false},
+		{"escalated never kills a host session on the openshell backend", ExitEscalated, false, "openshell", false},
+		{"deferred retires session", ExitDeferred, false, "", true},
+		{"escalated retires session", ExitEscalated, false, "", true},
+		{"non-final exit preserves session", "PHASE_COMPLETE", false, "", false},
+		{"unknown exit preserves session", "PAUSED", false, "", false},
+		{"empty exit preserves session", "", false, "", false},
+		{"handoff-triggered deferred preserves session", ExitDeferred, true, "", false},
+		{"handoff flag overrides completed retirement", ExitCompleted, true, "", false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := shouldRetirePolecatSessionAfterDone(tt.exitType, tt.fromHandoff)
+			got := shouldRetirePolecatSessionAfterDone(tt.exitType, tt.fromHandoff, tt.backend)
 			if got != tt.want {
-				t.Errorf("shouldRetirePolecatSessionAfterDone(%q, %v) = %v, want %v", tt.exitType, tt.fromHandoff, got, tt.want)
+				t.Errorf("shouldRetirePolecatSessionAfterDone(%q, %v, %q) = %v, want %v", tt.exitType, tt.fromHandoff, tt.backend, got, tt.want)
 			}
 		})
 	}
@@ -884,20 +888,23 @@ func TestFinalExitRetiresSessionThroughExitPath(t *testing.T) {
 		name        string
 		exitType    string
 		fromHandoff bool
+		backend     string
 		wantKills   int
 	}{
-		{"completed retires session", ExitCompleted, false, 1},
-		{"deferred retires session", ExitDeferred, false, 1},
-		{"escalated retires session", ExitEscalated, false, 1},
-		{"non-final exit preserves session", "PHASE_COMPLETE", false, 0},
-		{"unknown exit preserves session", "PAUSED", false, 0},
-		{"handoff-triggered deferred preserves session", ExitDeferred, true, 0},
+		{"completed retires session", ExitCompleted, false, "", 1},
+		{"deferred retires session", ExitDeferred, false, "", 1},
+		{"escalated retires session", ExitEscalated, false, "", 1},
+		{"non-final exit preserves session", "PHASE_COMPLETE", false, "", 0},
+		{"unknown exit preserves session", "PAUSED", false, "", 0},
+		{"handoff-triggered deferred preserves session", ExitDeferred, true, "", 0},
+		{"completed leaves the sandbox session to the daemon", ExitCompleted, false, "openshell", 0},
+		{"escalated leaves the sandbox session to the daemon", ExitEscalated, false, "openshell", 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeDoneSessionKiller{}
 
-			retired := retirePolecatSessionAfterFinalExit(fake, doneTestRegistry(), tt.exitType, tt.fromHandoff, "gastown", "basalt", 4242)
+			retired := retirePolecatSessionAfterFinalExit(fake, doneTestRegistry(), tt.exitType, tt.fromHandoff, tt.backend, "gastown", "basalt", 4242)
 
 			if fake.calls != tt.wantKills {
 				t.Fatalf("session killer calls = %d, want %d (retired=%v)", fake.calls, tt.wantKills, retired)
