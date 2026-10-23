@@ -207,7 +207,11 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 	if got := stageNames(fake.Calls()); !reflect.DeepEqual(got, want) {
 		t.Fatalf("openshell calls:\n got %q\nwant %q", got, want)
 	}
-	if envs := fake.Envs(); len(envs) == 0 || !slices.Contains(envs[0], "GT_SANDBOX_ENV_GT_ROLE="+openshellTestRig+"/polecats/"+openshellTestPolecat) {
+	// The socket is asserted as the literal "gt": the value openshell hands the
+	// sandbox is the contract, so a change to SandboxTmuxSocket has to fail here.
+	if envs := fake.Envs(); len(envs) == 0 ||
+		!slices.Contains(envs[0], "GT_SANDBOX_ENV_GT_ROLE="+openshellTestRig+"/polecats/"+openshellTestPolecat) ||
+		!slices.Contains(envs[0], "GT_SANDBOX_ENV_GT_TMUX_SOCKET=gt") {
 		t.Fatalf("create env = %q; the contract values must reach openshell's process environment, not its argv", envs)
 	}
 
@@ -236,12 +240,15 @@ func TestOpenShellPrepareHandsBackTheSandboxEnv(t *testing.T) {
 	if !prep.OmitSecretPrefix {
 		t.Fatal("OmitSecretPrefix = false; the provider, not settings/daemon.env, supplies the credentials")
 	}
+	// GT_TMUX_SOCKET is the literal "gt", not SandboxTmuxSocket: the value is
+	// what the sandbox's tmux server is named, so the test must not track the
+	// constant it is checking.
 	for k, want := range map[string]string{
 		"GT_TOWN_ROOT":           "/sandbox/gt",
 		"GT_ROOT":                "/sandbox/gt",
 		"GT_POLECAT_PATH":        openshellTestWorkDir,
 		"GT_SESSION_BACKEND":     "openshell",
-		"GT_TMUX_SOCKET":         SandboxTmuxSocket,
+		"GT_TMUX_SOCKET":         "gt",
 		"BEADS_DOLT_SERVER_HOST": "host.docker.internal",
 		"GT_BRANCH":              openshellTestBranch,
 		"CLAUDE_CONFIG_DIR":      "",
