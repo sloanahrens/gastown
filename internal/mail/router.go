@@ -406,7 +406,7 @@ type agentBead struct {
 // (gt-rwp7z.5).
 func agentBeadToAddress(bead *agentBead) string {
 	address := parseAgentBeadToAddress(bead)
-	if beads.IsRetiredAgentAddress(address) {
+	if isRetiredAgentAddress(address) {
 		return ""
 	}
 	return address
@@ -1153,7 +1153,7 @@ func (r *Router) validateRecipient(identity string) error {
 		return nil
 	}
 
-	if beads.IsReservedTownSubpath(identity) {
+	if isReservedTownSubpath(identity) {
 		return fmt.Errorf("no agent found")
 	}
 
@@ -1215,7 +1215,7 @@ func (r *Router) validateRecipient(identity string) error {
 // validateAgentWorkspace checks if an agent's workspace directory exists on disk.
 // Used as a fallback when the agent isn't found in the bead registry.
 func (r *Router) validateAgentWorkspace(identity string) bool {
-	if beads.IsReservedTownSubpath(identity) || beads.IsRetiredAgentAddress(identity) {
+	if isReservedTownSubpath(identity) || isRetiredAgentAddress(identity) {
 		return false
 	}
 	return agentWorkspaceDir(r.townRoot, identity) != ""
@@ -1236,7 +1236,7 @@ func agentWorkspaceDir(townRoot, identity string) string {
 	switch len(parts) {
 	case 2:
 		rig, name := parts[0], parts[1]
-		for _, role := range beads.RigSingletonRoles {
+		for _, role := range rigSingletonRoles {
 			if name == role {
 				if path := filepath.Join(townRoot, rig, name); dirExists(path) {
 					return path
@@ -2150,7 +2150,7 @@ func sessionNameToAgentBeadID(sessionID string, prefixes *session.PrefixRegistry
 		return beads.AgentBeadIDWithPrefix(identity.Prefix, identity.Rig, constants.RoleCrew, identity.Name)
 	case session.RolePolecat:
 		// A singleton session parses as a polecat named for its role.
-		for _, role := range beads.RigSingletonRoles {
+		for _, role := range rigSingletonRoles {
 			if identity.Name == role {
 				return beads.AgentBeadIDWithPrefix(identity.Prefix, identity.Rig, role, "")
 			}
@@ -2257,7 +2257,7 @@ func senderCanReceiveReply(from string) bool {
 		}
 		// rig/mayor is refused as a recipient, so a reply to it cannot
 		// reach anyone (gt-rwp7z.5).
-		if beads.IsRetiredAgentName(parts[1]) {
+		if isRetiredAgentName(parts[1]) {
 			return false
 		}
 		switch parts[1] {
@@ -2306,7 +2306,7 @@ func (r *Router) IsRecipientMuted(address string) bool {
 // Returns true if the recipient is muted and should not receive tmux nudges.
 // Fails open (returns false) if the agent bead cannot be found.
 func (r *Router) isRecipientMuted(address string) bool {
-	agentBeadID := beads.AgentBeadIDForAddress(r.prefixes.PrefixForRig, address)
+	agentBeadID := AgentBeadIDForAddress(r.prefixes.PrefixForRig, address)
 	if agentBeadID == "" {
 		return false // Can't determine agent bead, allow notification
 	}
@@ -2333,7 +2333,7 @@ func AddressToSessionIDs(reg *session.PrefixRegistry, address string) []string {
 		return []string{session.OverseerSessionName()}
 	}
 
-	if beads.IsReservedTownSubpath(address) {
+	if isReservedTownSubpath(address) {
 		return nil
 	}
 

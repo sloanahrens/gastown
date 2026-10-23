@@ -146,7 +146,7 @@ func (r *Resolver) validateAgentAddress(address string) error {
 	// The retired name is checked before beads and directories alike: a
 	// surviving agent bead or the kept <rig>/mayor clone directory must not
 	// resurrect an address the role no longer has.
-	if beads.IsReservedTownSubpath(normalized) || beads.IsRetiredAgentAddress(normalized) {
+	if isReservedTownSubpath(normalized) || isRetiredAgentAddress(normalized) {
 		return fmt.Errorf("%w: %s", ErrUnknownRecipient, address)
 	}
 
@@ -437,7 +437,7 @@ func (r *Resolver) resolveChannel(name string) ([]Recipient, error) {
 // whole broadcast (gt-rwp7z.5).
 func AgentBeadIDToAddress(id string) string {
 	address := agentBeadIDToAddress(id)
-	if beads.IsRetiredAgentAddress(address) {
+	if isRetiredAgentAddress(address) {
 		return ""
 	}
 	return address

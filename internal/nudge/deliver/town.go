@@ -12,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/events"
+	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -108,7 +109,7 @@ func (n *Town) muted(address string) string {
 	if d.TownRoot == "" || d.Force || address == "" {
 		return ""
 	}
-	beadID := beads.AgentBeadIDForAddress(n.registry().PrefixForRig, address)
+	beadID := mail.AgentBeadIDForAddress(n.registry().PrefixForRig, address)
 	if beadID == "" {
 		return ""
 	}
