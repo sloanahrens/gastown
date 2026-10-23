@@ -730,7 +730,7 @@ func poolPolecatSeatStateWith(townRoot, rigName, polecatName string, reads poolS
 	// Leftover commits the landing already took are not at risk: the same
 	// landed evidence the list path applies, so a seat reusable there is not
 	// git-unpushed here (gt-wfxa2).
-	applyLiveWorkLandedToWorkstateFacts(&facts, reads.openWorkLanded, worktree,
+	applyLiveWorkLandedToWorkstateFacts(&facts, reads.openWorkLanded, worktree, rigPath,
 		issueReadFunc(func(id string) (*beads.Issue, error) { return reads.show(bd, id) }), hookBead, facts.Branch)
 	// The assignment terminality the classifier accounts that seat with, read
 	// the way the list path reads it (assignedBeadTerminalForInventory: the

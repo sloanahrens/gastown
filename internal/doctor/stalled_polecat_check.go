@@ -45,10 +45,10 @@ type StalledPolecatCheck struct {
 	gitForTest            func(clonePath string) polecatGit // nil → ctx.git
 	beadStatus            func(townRoot, beadID string) (string, bool)
 
-	// workLanded answers "is this branch's content already on the default
-	// branch"; beadIssue reads the bead its LANDING RECORD arm needs. Tests
-	// inject both; nil beadIssue reads no bead.
-	workLanded func(g land.WorkLandedRepo, head, target, beadID string, issue *beads.Issue) land.WorkLandedVerdict
+	// workLanded answers "is this branch's content already on the rig's
+	// landing target"; beadIssue reads the bead its LANDING RECORD arm needs.
+	// Tests inject both; nil beadIssue reads no bead.
+	workLanded func(g land.WorkLandedRepo, q land.WorkLandedQuery) land.WorkLandedVerdict
 	beadIssue  func(townRoot, beadID string) (*beads.Issue, error)
 }
 
@@ -178,7 +178,7 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 			// Content confirmed on the default branch is checked first because
 			// it is the strong, independent signal: it proves the same content
 			// exists in custody regardless of what anyone did to the bead.
-			verdict := c.landedVerdict(pg, ctx.TownRoot, branch)
+			verdict := c.landedVerdict(pg, ctx.TownRoot, rigName, branch)
 			if verdict.Landed {
 				continue
 			}
@@ -256,16 +256,16 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// landedVerdict answers whether the branch's content is already on the
-// remote default branch, which makes it superseded rather than lost whichever
-// SHA carried it (gt-4vbn). The verdict is land.WorkLandedOnTarget's, the one
+// landedVerdict answers whether the branch's content is already on its rig's
+// landing target, which makes it superseded rather than lost whichever SHA
+// carried it (gt-4vbn). The verdict is land.WorkLandedOnTarget's, the one
 // predicate every other consumer of "landed" uses (gt-wlc9d).
 //
 // The refresh is load-bearing: a dead polecat's clone stops fetching, so the
 // content it is being judged against can postdate its last fetch. Without the
 // refresh the check would keep reporting landed work as unlanded forever —
 // the failure it exists to remove.
-func (c *StalledPolecatCheck) landedVerdict(pg polecatGit, townRoot, branch string) land.WorkLandedVerdict {
+func (c *StalledPolecatCheck) landedVerdict(pg polecatGit, townRoot, rigName, branch string) land.WorkLandedVerdict {
 	_ = pg.FetchDefaultBranchWithTimeout("origin", fetchTimeout) // best-effort: stale evidence over-flags, it cannot mask real risk
 
 	var beadID string
@@ -279,7 +279,8 @@ func (c *StalledPolecatCheck) landedVerdict(pg polecatGit, townRoot, branch stri
 	// The branch is the worktree's current branch, so "" reads its HEAD. The
 	// first ask carries no bead: only the LANDING RECORD arm reads one, so the
 	// bead is read only when the other arms did not already prove landing.
-	v := workLanded(pg, "", "", beadID, nil)
+	rigPath := filepath.Join(townRoot, rigName)
+	v := workLanded(pg, land.WorkLandedQuery{RigPath: rigPath, BeadID: beadID})
 	if v.Landed || v.Reason != land.WorkUnpushed || beadID == "" || c.beadIssue == nil {
 		return v
 	}
@@ -289,7 +290,7 @@ func (c *StalledPolecatCheck) landedVerdict(pg polecatGit, townRoot, branch stri
 		// overstate what was checked.
 		return land.WorkLandedVerdict{Reason: land.WorkProbeFailed, Detail: fmt.Sprintf("read bead %s: %v", beadID, err)}
 	}
-	return workLanded(pg, "", "", beadID, issue)
+	return workLanded(pg, land.WorkLandedQuery{RigPath: rigPath, BeadID: beadID, Issue: issue})
 }
 
 // landedNote is what a verdict adds to a report line: nothing for a plain "no
@@ -345,7 +346,7 @@ func (c *StalledPolecatCheck) Fix(ctx *CheckContext) error {
 	var lastErr error
 	for _, s := range c.stalledPolecats {
 		g := c.gitFor(ctx, s.clonePath)
-		if c.branchSupersededByTerminalBead(ctx.TownRoot, s.branch) || c.landedVerdict(g, ctx.TownRoot, s.branch).Landed {
+		if c.branchSupersededByTerminalBead(ctx.TownRoot, s.branch) || c.landedVerdict(g, ctx.TownRoot, s.rigName, s.branch).Landed {
 			continue
 		}
 		if err := g.Push("origin", s.branch, false); err != nil {

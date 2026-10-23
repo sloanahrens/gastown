@@ -323,7 +323,7 @@ func TestActiveMRUsesSameLandedPredicate(t *testing.T) {
 
 	const branch = "polecat/nitro/gt-seat+x1"
 	facts := WorkstateFacts{UnpushedCommits: 1}
-	ApplyWorkLanded(&facts, w.repo(repoPath), db, "", branch)
+	ApplyWorkLanded(&facts, w.repo(repoPath), db, "", "", branch)
 	if !facts.WorkLanded {
 		t.Fatalf("ApplyWorkLanded reason = %q; want landed", facts.WorkLandedReason)
 	}

@@ -28,8 +28,9 @@ func SeatBeadID(hookBead, branch string) string {
 //
 // A seat with no leftover commits has nothing landing evidence could clear, and
 // the probe costs a bead read per seat, so it is skipped. store may be nil: the
-// refs/landed ancestry arm answers from git alone.
-func ApplyWorkLanded(facts *WorkstateFacts, g land.WorkLandedRepo, store IssueReader, hookBead, branch string) {
+// refs/landed ancestry arm answers from git alone. rigPath is the seat's rig
+// root, whose config names the branch its landings target.
+func ApplyWorkLanded(facts *WorkstateFacts, g land.WorkLandedRepo, store IssueReader, rigPath, hookBead, branch string) {
 	if g == nil || facts.UnpushedCommits == 0 {
 		return
 	}
@@ -42,7 +43,7 @@ func ApplyWorkLanded(facts *WorkstateFacts, g land.WorkLandedRepo, store IssueRe
 	if store != nil {
 		issue, readErr = store.Show(beadID)
 	}
-	v := land.WorkLandedOnTarget(g, "", "", beadID, issue)
+	v := land.WorkLandedOnTarget(g, land.WorkLandedQuery{RigPath: rigPath, BeadID: beadID, Issue: issue})
 	if !v.Landed && v.Reason == land.WorkUnpushed && readErr != nil {
 		// The LANDING RECORD arm could not run, so "nothing proves it" would
 		// overstate what was checked.

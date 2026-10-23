@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -72,7 +73,7 @@ func TestApplyWorkLandedToWorkstateFactsPicksTheSeatBead(t *testing.T) {
 			seat := newLandedSeat(t, true)
 
 			facts := polecat.WorkstateFacts{UnpushedCommits: 1}
-			applyWorkLandedToWorkstateFacts(&facts, seat.open(), seat.worktree, seatBeads(t), tt.hook, tt.branch)
+			applyWorkLandedToWorkstateFacts(&facts, seat.open(), seat.worktree, "", seatBeads(t), tt.hook, tt.branch)
 			if !facts.WorkLanded || facts.WorkLandedReason != land.WorkLandedByRef {
 				t.Fatalf("facts = landed %v reason %q; want landed %s", facts.WorkLanded, facts.WorkLandedReason, land.WorkLandedByRef)
 			}
@@ -87,11 +88,93 @@ func TestApplyWorkLandedToWorkstateFactsLeavesNoEvidenceAlone(t *testing.T) {
 	seat := newLandedSeat(t, true)
 
 	noWorktree := polecat.WorkstateFacts{UnpushedCommits: 1}
-	applyWorkLandedToWorkstateFacts(&noWorktree, seat.open(), "", seatBeads(t), "gt-seat", landedSeatBranch)
+	applyWorkLandedToWorkstateFacts(&noWorktree, seat.open(), "", "", seatBeads(t), "gt-seat", landedSeatBranch)
 	noCommits := polecat.WorkstateFacts{}
-	applyWorkLandedToWorkstateFacts(&noCommits, seat.open(), seat.worktree, seatBeads(t), "gt-seat", landedSeatBranch)
+	applyWorkLandedToWorkstateFacts(&noCommits, seat.open(), seat.worktree, "", seatBeads(t), "gt-seat", landedSeatBranch)
 	if noWorktree.WorkLanded || noCommits.WorkLanded || noWorktree.WorkLandedReason != "" || noCommits.WorkLandedReason != "" {
 		t.Fatalf("facts = %+v / %+v; want no landing evidence", noWorktree, noCommits)
+	}
+}
+
+// rigLandedSeat is a seat whose landing the rig carried onto its configured
+// default branch (develop) while origin's HEAD still points at main: the
+// disagreeing resolvers of gt-cmutl, as the list path sees them.
+type rigLandedSeat struct {
+	fake     *gitfake.Fake
+	rigPath  string
+	worktree string
+}
+
+func newRigLandedSeat(t *testing.T) rigLandedSeat {
+	t.Helper()
+	root := t.TempDir()
+	fake := gitfake.New()
+	rigPath := filepath.Join(root, "gastown")
+	origin := filepath.Join(root, "origin.git")
+	worktree := filepath.Join(rigPath, "polecats", "nitro", "gastown")
+
+	fake.InitBare(t, origin)
+	base := fake.Commit(t, origin, "main", "main: seed", map[string]string{"a.txt": "one\n"})
+	fake.SetRef(t, origin, "refs/heads/"+landedSeatBranch, base)
+	head := fake.Commit(t, origin, landedSeatBranch, "feat: the work", map[string]string{"b.txt": "work\n"})
+	// The landing squashed the work onto the rig's default branch; main, the
+	// remote's HEAD, never took it.
+	fake.SetRef(t, origin, "refs/heads/develop", base)
+	landed := fake.Commit(t, origin, "develop", "feat: the work (squashed)", map[string]string{"b.txt": "work\n"})
+	fake.Clone(t, origin, worktree)
+	fake.SetRef(t, worktree, "refs/remotes/origin/develop", landed)
+	if err := fake.OpenBranchRepo(worktree).CheckoutNewBranch("seat", head); err != nil {
+		t.Fatalf("check out the seat's branch: %v", err)
+	}
+	// The config a `gt rig add --default-branch develop` writes.
+	cfg := `{"type": "rig", "name": "gastown", "default_branch": "develop"}`
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write rig config: %v", err)
+	}
+	return rigLandedSeat{fake: fake, rigPath: rigPath, worktree: worktree}
+}
+
+// TestBuildPolecatInventoryItemResolvesTheRigDefaultBranch is gt-cmutl's
+// production half: the env `gt polecat list` builds carries the rig root into
+// the landed probe, so a seat whose landing went to the rig's configured
+// default branch clears as landed even though origin's HEAD says main. Without
+// that root the probe asks origin/HEAD and the seat stays git-unpushed.
+func TestBuildPolecatInventoryItemResolvesTheRigDefaultBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		clearRig   bool // drop the rig root, as a caller with no rig to ask
+		wantSafe   bool
+		wantReason string
+	}{
+		{name: "the list env carries the rig root", wantSafe: true, wantReason: "landed"},
+		{name: "without the rig root the remote HEAD answers", clearRig: true, wantReason: "git-unpushed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			seat := newRigLandedSeat(t)
+			live := polecat.LiveGitState{Branch: landedSeatBranch, Source: polecat.GitStateSourceLive, UnpushedCommits: 1}
+			env := polecatListInventoryEnv(seat.rigPath, "gastown", "nitro", polecatMRIndex{}, nil, polecatSpawnFacts{})
+			if env.WorktreePath != seat.worktree {
+				t.Fatalf("env.WorktreePath = %q, want the seat's worktree %q", env.WorktreePath, seat.worktree)
+			}
+			env.IssueSource = seatBeads(t)
+			env.openWorkLanded = func(path string) land.WorkLandedRepo { return seat.fake.OpenBranchRepo(path) }
+			env.probe = func(string, bool) polecat.LiveGitState { return live }
+			if tt.clearRig {
+				env.RigPath = ""
+			}
+
+			item := buildPolecatInventoryItem(
+				"gastown", "nitro",
+				&beads.AgentFields{AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupClean), Branch: landedSeatBranch},
+				nil, polecatSessionSet{}, env,
+			)
+			if d := item.Disposition; d.SafeToNuke != tt.wantSafe || d.Reason != tt.wantReason {
+				t.Fatalf("disposition = %+v; want safe_to_nuke=%v reason=%q", d, tt.wantSafe, tt.wantReason)
+			}
+		})
 	}
 }
 

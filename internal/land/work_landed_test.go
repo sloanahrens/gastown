@@ -2,6 +2,7 @@ package land
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -107,7 +108,7 @@ func TestWorkLandedOnTargetRefsLandedAncestry(t *testing.T) {
 	w.git.SetRef(t, w.repo, LandedRef("gt-abc"), w.later)
 
 	for name, head := range map[string]string{"earlier point of the landed branch": w.earlier, "the landed head itself": w.later} {
-		v := WorkLandedOnTarget(w.worktree(), head, "", "gt-abc", nil)
+		v := WorkLandedOnTarget(w.worktree(), WorkLandedQuery{Head: head, BeadID: "gt-abc"})
 		if !v.Landed || v.Reason != WorkLandedByRef || v.Detail != "" {
 			t.Fatalf("WorkLandedOnTarget(%s) = %+v; want landed %s", name, v, WorkLandedByRef)
 		}
@@ -121,7 +122,7 @@ func TestWorkLandedOnTargetRejectsAnUnrelatedLandedHead(t *testing.T) {
 	w := newLandedWorld(t)
 	w.git.SetRef(t, w.repo, LandedRef("gt-abc"), w.base)
 
-	v := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", nil)
+	v := WorkLandedOnTarget(w.worktree(), WorkLandedQuery{Head: w.earlier, BeadID: "gt-abc"})
 	if v.Landed || v.Reason != WorkUnpushed {
 		t.Fatalf("WorkLandedOnTarget(landed head at base) = %+v; want not landed, %s", v, WorkUnpushed)
 	}
@@ -134,7 +135,7 @@ func TestWorkLandedOnTargetMatchesTheLandingRecordContent(t *testing.T) {
 	w := newLandedWorld(t)
 	issue := &beads.Issue{ID: "gt-abc", Status: "closed", Notes: w.recordNote(w.later)}
 
-	v := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", issue)
+	v := WorkLandedOnTarget(w.worktree(), WorkLandedQuery{Head: w.earlier, BeadID: "gt-abc", Issue: issue})
 	if !v.Landed || v.Reason != WorkLandedByRecord {
 		t.Fatalf("WorkLandedOnTarget(earlier point, equal content) = %+v; want landed %s", v, WorkLandedByRecord)
 	}
@@ -151,7 +152,7 @@ func TestWorkLandedOnTargetNamesFilesTheLandingRecordDisagreesOn(t *testing.T) {
 	w.git.SetRef(t, w.repo, "refs/remotes/origin/"+landedFixtureBranch, other)
 
 	issue := &beads.Issue{ID: "gt-abc", Status: "closed", Notes: w.recordNote(other)}
-	v := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", issue)
+	v := WorkLandedOnTarget(w.worktree(), WorkLandedQuery{Head: w.earlier, BeadID: "gt-abc", Issue: issue})
 	if v.Landed || v.Reason != WorkLandedDiffers {
 		t.Fatalf("WorkLandedOnTarget(differing content) = %+v; want not landed, %s", v, WorkLandedDiffers)
 	}
@@ -167,7 +168,7 @@ func TestWorkLandedOnTargetRefusesAnOpenBeadWithNoEvidence(t *testing.T) {
 	w := newLandedWorld(t)
 	issue := &beads.Issue{ID: "gt-abc", Status: "open", Notes: w.recordNote(w.later)}
 
-	v := WorkLandedOnTarget(w.worktree(), w.earlier, "", "gt-abc", issue)
+	v := WorkLandedOnTarget(w.worktree(), WorkLandedQuery{Head: w.earlier, BeadID: "gt-abc", Issue: issue})
 	if v.Landed || v.Reason != WorkUnpushed {
 		t.Fatalf("WorkLandedOnTarget(open bead, no landing) = %+v; want not landed, %s", v, WorkUnpushed)
 	}
@@ -181,7 +182,7 @@ func TestWorkLandedOnTargetSeesTheCommitOnTheTarget(t *testing.T) {
 	w.git.SetRef(t, w.origin, "refs/heads/main", w.earlier)
 	w.git.SetRef(t, w.repo, "refs/remotes/origin/main", w.earlier)
 
-	v := WorkLandedOnTarget(w.worktree(), w.earlier, "", "", nil)
+	v := WorkLandedOnTarget(w.worktree(), WorkLandedQuery{Head: w.earlier})
 	if !v.Landed || v.Reason != WorkLandedByTarget {
 		t.Fatalf("WorkLandedOnTarget(HEAD on origin/main) = %+v; want landed %s", v, WorkLandedByTarget)
 	}
@@ -284,7 +285,7 @@ func TestWorkLandedOnTargetFailsClosed(t *testing.T) {
 				repo = tt.wrap(repo)
 			}
 
-			v := WorkLandedOnTarget(repo, w.earlier, "", "gt-abc", issue)
+			v := WorkLandedOnTarget(repo, WorkLandedQuery{Head: w.earlier, BeadID: "gt-abc", Issue: issue})
 			if v.Landed {
 				t.Fatalf("WorkLandedOnTarget() = %+v; a failed or missing proof must not read as landed", v)
 			}
@@ -306,7 +307,7 @@ func TestWorkLandedOnTargetAProvenArmWinsOverAFailedOne(t *testing.T) {
 	w.git.SetRef(t, w.repo, LandedRef("gt-abc"), w.later)
 	repo := failing{WorkLandedRepo: w.worktree(), revLanded: errors.New("boom")}
 
-	v := WorkLandedOnTarget(repo, w.earlier, "", "gt-abc", closedWithRecordAtLater(w))
+	v := WorkLandedOnTarget(repo, WorkLandedQuery{Head: w.earlier, BeadID: "gt-abc", Issue: closedWithRecordAtLater(w)})
 	if !v.Landed || v.Reason != WorkLandedByRecord {
 		t.Fatalf("WorkLandedOnTarget() = %+v; want the record arm to prove it", v)
 	}
@@ -315,9 +316,132 @@ func TestWorkLandedOnTargetAProvenArmWinsOverAFailedOne(t *testing.T) {
 // A repository that cannot be read at all is a failed probe, not a landed one.
 func TestWorkLandedOnTargetWithoutARepositoryIsAFailedProbe(t *testing.T) {
 	t.Parallel()
-	v := WorkLandedOnTarget(nil, "", "", "gt-abc", nil)
+	v := WorkLandedOnTarget(nil, WorkLandedQuery{BeadID: "gt-abc"})
 	if v.Landed || v.Reason != WorkProbeFailed {
 		t.Fatalf("WorkLandedOnTarget(nil repo) = %+v; want %s", v, WorkProbeFailed)
+	}
+}
+
+// TestWorkLandedOnTargetUsesTheRigDefaultBranch is the disagreeing-resolver
+// case of gt-cmutl: the rig lands on its configured default branch, and its
+// remote's HEAD still points at main. An empty target resolved from git alone
+// asks about a branch the landing never touched.
+func TestWorkLandedOnTargetUsesTheRigDefaultBranch(t *testing.T) {
+	t.Parallel()
+	g := gitfake.New()
+	root := t.TempDir()
+	origin := filepath.Join(root, "origin.git")
+	rigPath := filepath.Join(root, "rig")
+	repo := filepath.Join(rigPath, "polecats", "opal", "rig")
+
+	g.InitBare(t, origin)
+	base := g.Commit(t, origin, "main", "main: seed", map[string]string{"a.txt": "one\n"})
+	g.SetRef(t, origin, "refs/heads/"+landedFixtureBranch, base)
+	head := g.Commit(t, origin, landedFixtureBranch, "feat: the work", map[string]string{"b.txt": "work\n"})
+	// The landing squashed the work onto develop; main never took it.
+	g.SetRef(t, origin, "refs/heads/develop", base)
+	landed := g.Commit(t, origin, "develop", "feat: the work (squashed)", map[string]string{"b.txt": "work\n"})
+	g.Clone(t, origin, repo)
+	g.SetRef(t, repo, "refs/remotes/origin/develop", landed)
+
+	// The rig config a `gt rig add --default-branch develop` writes.
+	cfg := `{"type": "rig", "name": "rig", "default_branch": "develop"}`
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write rig config: %v", err)
+	}
+	issue := &beads.Issue{ID: "gt-abc", Status: "closed", Notes: LandingRecord{
+		BeadID: "gt-abc", Head: head, LandedCommit: landed, Target: "develop",
+	}.NoteBlock()}
+
+	// Without the rig, the predicate can only ask git, and git answers "main":
+	// the branch the landing never touched. This is the reading gt-cmutl
+	// removes when the caller knows the rig.
+	if v := WorkLandedOnTarget(g.Open(repo), WorkLandedQuery{Head: head, BeadID: "gt-abc"}); v.Landed {
+		t.Fatalf("WorkLandedOnTarget(no rig, origin/HEAD on main) = %+v; want not landed", v)
+	}
+
+	v := WorkLandedOnTarget(g.Open(repo), WorkLandedQuery{Head: head, RigPath: rigPath, BeadID: "gt-abc"})
+	if !v.Landed || v.Reason != WorkLandedByTarget {
+		t.Fatalf("WorkLandedOnTarget(rig default develop) = %+v; want landed %s", v, WorkLandedByTarget)
+	}
+
+	// The closed bead's landing record goes on proving the work whichever
+	// branch the target resolves to.
+	if v := WorkLandedOnTarget(g.Open(repo), WorkLandedQuery{Head: head, RigPath: rigPath, BeadID: "gt-abc", Issue: issue}); !v.Landed {
+		t.Fatalf("WorkLandedOnTarget(landing record on develop) = %+v; want landed", v)
+	}
+}
+
+// TestWorkLandedOnTargetResolvesTheRigDefaultBranch pins what an empty target
+// becomes once a caller names a rig: the config's default_branch, "main" when
+// there is no config or it names no branch, and a failed probe when the config
+// will not decode. origin's HEAD points at trunk throughout, so a rig-shaped
+// caller that still fell back to the remote's HEAD would read the work on main
+// as unlanded; no landing consults origin/HEAD, and neither may the predicate
+// (gt-cmutl).
+func TestWorkLandedOnTargetResolvesTheRigDefaultBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		config     string // "" writes no config.json
+		wantLanded bool
+		wantReason string
+		wantDetail string
+	}{
+		{
+			name:       "the config names the branch its landings target",
+			config:     `{"type": "rig", "name": "rig", "default_branch": "main"}`,
+			wantLanded: true,
+			wantReason: WorkLandedByTarget,
+		},
+		{
+			name:       "a rig with no config falls back to main",
+			wantLanded: true,
+			wantReason: WorkLandedByTarget,
+		},
+		{
+			name:       "a config naming no branch falls back to main, not the remote HEAD",
+			config:     `{"type": "rig", "name": "rig"}`,
+			wantLanded: true,
+			wantReason: WorkLandedByTarget,
+		},
+		{
+			name:       "a config that will not decode fails closed",
+			config:     `{"default_branch": `,
+			wantReason: WorkProbeFailed,
+			wantDetail: "resolve the rig's default branch",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			g := gitfake.New()
+			root := t.TempDir()
+			origin := filepath.Join(root, "origin.git")
+			rigPath := filepath.Join(root, "rig")
+			repo := filepath.Join(rigPath, "polecats", "opal", "rig")
+
+			g.InitBare(t, origin)
+			base := g.Commit(t, origin, "trunk", "trunk: seed", map[string]string{"a.txt": "one\n"})
+			// The landing took the work onto main, which is not the remote's HEAD.
+			g.SetRef(t, origin, "refs/heads/main", base)
+			head := g.Commit(t, origin, "main", "feat: the work", map[string]string{"b.txt": "work\n"})
+			g.SetHead(t, origin, "trunk")
+			g.Clone(t, origin, repo)
+			if tt.config != "" {
+				if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(tt.config), 0o644); err != nil {
+					t.Fatalf("write rig config: %v", err)
+				}
+			}
+
+			v := WorkLandedOnTarget(g.Open(repo), WorkLandedQuery{Head: head, RigPath: rigPath})
+			if v.Landed != tt.wantLanded || v.Reason != tt.wantReason {
+				t.Fatalf("WorkLandedOnTarget() = %+v; want landed=%v reason %q", v, tt.wantLanded, tt.wantReason)
+			}
+			if !strings.Contains(v.Detail, tt.wantDetail) {
+				t.Fatalf("detail = %q; want it to mention %q", v.Detail, tt.wantDetail)
+			}
+		})
 	}
 }
 

@@ -78,6 +78,10 @@ type polecatInventoryEnv struct {
 	// over-admitting; the actual reuse gate (Manager.ReuseDecisionForPolecat)
 	// does probe.
 	WorktreePath string
+	// RigPath is the seat's rig root, whose config names the branch its
+	// landings target. Empty leaves the landed probe reading the remote's
+	// HEAD, which is the wrong branch wherever the rig configures another.
+	RigPath string
 	// GitProbeLocalOnly drops the network from the worktree probe: branch
 	// preservation is read from the rig's local remote-tracking refs instead of
 	// an ls-remote against the remote. The list path sets it, because it pays
@@ -434,7 +438,7 @@ func buildPolecatInventoryItemFromEvidence(rigName, polecatName string, fields *
 	// The list pays no beads call per seat unless there is leftover work to
 	// explain, which is why this runs only for a seat holding commits; the
 	// check-recovery path, which reads one seat, runs it for the reason too.
-	applyLiveWorkLandedToWorkstateFacts(&facts, env.openWorkLanded, env.WorktreePath, env.IssueSource, hookBead, item.Branch)
+	applyLiveWorkLandedToWorkstateFacts(&facts, env.openWorkLanded, env.WorktreePath, env.RigPath, env.IssueSource, hookBead, item.Branch)
 	if item.ActiveMR != "" {
 		// The decision is the shared active_mr policy, so what the list shows
 		// agrees with the reuse gate (Manager.ReuseDecisionForPolecat) and with
@@ -508,6 +512,7 @@ func polecatListInventoryEnv(rigPath, rigName, polecatName string, mrIndex polec
 		// worktree behind the directory) leaves the probe off, and the verdict
 		// stays on the recorded hint.
 		WorktreePath: resolvePolecatWorktree(filepath.Join(rigPath, "polecats"), polecatName, rigName),
+		RigPath:      rigPath,
 		// A rig lives directly under the town root (see
 		// applyRigOccupancyToCapacitySnapshot, which joins them the same way).
 		Parked: parkedReason(filepath.Dir(rigPath), rigName, polecatName),
