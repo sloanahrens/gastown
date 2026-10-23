@@ -16,15 +16,23 @@ import (
 // symbolic ref git clone writes, as a branch name in the repository's config.
 func remoteHeadKey(remote string) string { return "\x00remote-head." + remote }
 
-// cloned records what git clone configures beyond the refs: origin's HEAD
-// branch, and the checked-out branch tracking it.
+// cloned records what a non-bare git clone of src configures beyond the
+// refs, once r holds its remote-tracking refs and r.head is the branch it
+// checked out: the checked-out branch tracks its origin counterpart, and
+// origin/HEAD names src's HEAD branch when the clone fetched it (a clone of
+// another branch alone, or of an empty remote, has none).
 func cloned(r, src *repo) {
-	if b, ok := strings.CutPrefix(src.head, "refs/heads/"); ok {
-		r.configMap()[remoteHeadKey("origin")] = b
-		if _, exists := r.refs["refs/remotes/origin/"+b]; exists {
-			setUpstream(r, b, "origin/"+b)
-		}
+	b, ok := strings.CutPrefix(r.head, "refs/heads/")
+	if !ok {
+		return
 	}
+	if _, exists := r.refs["refs/remotes/origin/"+b]; !exists {
+		return
+	}
+	if r.head == src.head {
+		r.configMap()[remoteHeadKey("origin")] = b
+	}
+	setUpstream(r, b, "origin/"+b)
 }
 
 func (r *repo) configMap() map[string]string {
