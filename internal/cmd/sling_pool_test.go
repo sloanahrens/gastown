@@ -52,6 +52,11 @@ func TestChoosePoolAgent(t *testing.T) {
 	// for sonnet, and a sling naming flash is still admitted by its cap (gt-xtuet).
 	pinnedFirst := &config.PolecatPool{Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 3, PinnedOnly: true}, "claude-sonnet": {Cap: 2}}}
 	pinnedOnly := &config.PolecatPool{Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 2, PinnedOnly: true}}}
+	// A pinned-only seat filled by a dead-hooked polecat: the crashed seat still
+	// holds its room, so it is full with no live session behind it (gt-3efs0).
+	pinnedFlashCrashed := []poolSession{{name: "dead/gastown/ember", agent: "deepseek-flash", deadHooked: true}, s("deepseek-flash"), s("deepseek-flash")}
+	pinnedOnlyCrashed := []poolSession{{name: "dead/gastown/ember", agent: "deepseek-flash", deadHooked: true}, s("deepseek-flash")}
+	sonnetCrashed := []poolSession{{name: "dead/gastown/ember", agent: "claude-sonnet", deadHooked: true}}
 
 	const flashCap = "polecat_pool.seats.deepseek-flash.cap"
 	cases := []struct {
@@ -81,6 +86,10 @@ func TestChoosePoolAgent(t *testing.T) {
 		{"a request that names no agent skips a pinned-only seat for the next open seat", pinnedFirst, "", nil, "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
 		{"a request that names no agent is refused by a pool whose only seat is pinned-only", pinnedOnly, "", nil, "", "pool: every seat is full, closed or pinned-only -> no seat for a sling that named no agent", true, "polecat_pool.seats"},
 		{"a request that names a pinned-only seat's agent is admitted by its cap", pinnedFirst, "deepseek-flash", nil, "deepseek-flash", "pool: seat 1/3 -> deepseek-flash", false, ""},
+		{"a pinned-only seat filled by a dead-hooked polecat is skipped for the open seat", pinnedFirst, "", pinnedFlashCrashed, "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
+		{"a dead-hooked polecat on the open seat leaves the pinned-only seat skipped", pinnedFirst, "", sonnetCrashed, "claude-sonnet", "pool: seat 2/2 -> claude-sonnet", false, ""},
+		{"a pinned-only pool whose seat a dead-hooked polecat fills refuses an unnamed sling", pinnedOnly, "", pinnedOnlyCrashed, "", "pool: every seat is full, closed or pinned-only -> no seat for a sling that named no agent", true, "polecat_pool.seats"},
+		{"a sling naming a pinned-only seat is held by its cap, counting the dead-hooked polecat", pinnedOnly, "deepseek-flash", pinnedOnlyCrashed, "deepseek-flash", "pool: full (2/2, 1 dead-hooked) -> no seat for deepseek-flash", true, flashCap},
 		{"a request that names no agent is refused when every seat is full", twoSeats, "", bothFull, "", "pool: every seat is full, closed or pinned-only -> no seat for a sling that named no agent", true, "polecat_pool.seats"},
 		{"a request that names no agent on a one-seat pool is refused by that closed seat", closed, "", nil, "deepseek-flash", "pool: closed (cap 0) -> no seat for deepseek-flash", true, "polecat_pool.seats.deepseek-flash.cap"},
 		{"retired local keys change nothing", retiredLocal, "", oneTaken, "deepseek-flash", "pool: seat 2/2 -> deepseek-flash", false, ""},
@@ -1801,6 +1810,12 @@ func TestChoosePoolAgentSeatWindows(t *testing.T) {
 	badRange := &config.PolecatPool{Timezone: "America/Chicago", Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 3, Closed: "bogus"}, "claude-sonnet": {Cap: 2}}}
 	sonnetFull := []poolSession{s("claude-sonnet"), s("claude-sonnet")}
 	flashFull := []poolSession{s("deepseek-flash"), s("deepseek-flash"), s("deepseek-flash")}
+	// A pinned-only seat that also keeps the window's hours: both rules take it
+	// out of an unnamed choice, and a dead-hooked polecat in it holds its room
+	// (gt-3efs0).
+	pinnedWindow := &config.PolecatPool{Timezone: "America/Chicago", Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 3, PinnedOnly: true, Closed: "20:00-08:00"}, "claude-sonnet": {Cap: 2}}}
+	pinnedWindowOnly := &config.PolecatPool{Timezone: "America/Chicago", Seats: map[string]config.SeatConfig{"deepseek-flash": {Cap: 3, PinnedOnly: true, Closed: "20:00-08:00"}}}
+	flashCrashedFull := []poolSession{{name: "dead/gastown/ember", agent: "deepseek-flash", deadHooked: true}, s("deepseek-flash"), s("deepseek-flash")}
 
 	const (
 		everySeat = "pool: every seat is full, closed or pinned-only -> no seat for a sling that named no agent"
@@ -1828,6 +1843,13 @@ func TestChoosePoolAgentSeatWindows(t *testing.T) {
 		{"a sling naming the closed seat's agent is admitted by the cap alone", pool, "deepseek-flash", nil, chicagoAt(t, 21, 0), "deepseek-flash", "pool: seat 1/3 -> deepseek-flash", false, ""},
 		{"a sling naming the closed seat's agent is still held by its cap", pool, "deepseek-flash", flashFull, chicagoAt(t, 21, 0), "deepseek-flash", "pool: full (3/3) -> no seat for deepseek-flash", true, flashCap},
 		{"a window with no timezone reads as shut", noZone, "", nil, chicagoAt(t, 12, 0), "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
+		{"by day an unnamed sling skips a pinned-only seat even while its window is open", pinnedWindow, "", nil, chicagoAt(t, 12, 0), "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
+		{"at 21:00 an unnamed sling skips a seat that is both pinned-only and shut", pinnedWindow, "", nil, chicagoAt(t, 21, 0), "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
+		{"at 21:00 with the open seat full a pinned-only shut seat refuses an unnamed sling", pinnedWindow, "", sonnetFull, chicagoAt(t, 21, 0), "", everySeat, true, "polecat_pool.seats"},
+		{"a one-seat pool whose seat is pinned-only refuses an unnamed sling even by day", pinnedWindowOnly, "", nil, chicagoAt(t, 12, 0), "", everySeat, true, "polecat_pool.seats"},
+		{"a one-seat pool pinned-only and full from a dead-hooked polecat names no dead-hooked count for an unnamed sling", pinnedWindowOnly, "", flashCrashedFull, chicagoAt(t, 12, 0), "", everySeat, true, "polecat_pool.seats"},
+		{"a sling naming a pinned-only shut seat is admitted by the cap alone", pinnedWindow, "deepseek-flash", nil, chicagoAt(t, 21, 0), "deepseek-flash", "pool: seat 1/3 -> deepseek-flash", false, ""},
+		{"a sling naming a pinned-only shut seat is held by its cap, naming the dead-hooked polecat", pinnedWindow, "deepseek-flash", flashCrashedFull, chicagoAt(t, 21, 0), "deepseek-flash", "pool: full (3/3, 1 dead-hooked) -> no seat for deepseek-flash", true, flashCap},
 		{"a window that does not parse reads as shut", badRange, "", nil, chicagoAt(t, 12, 0), "claude-sonnet", "pool: seat 1/2 -> claude-sonnet", false, ""},
 	}
 	for _, c := range cases {
@@ -1868,6 +1890,7 @@ func TestPoolUncountedFallback(t *testing.T) {
 		{"a shut window is skipped for the next open seat by name", shutFirst, "", night, "b-open", "b-open"},
 		{"a seat at cap 0 is never the fallback", &config.PolecatPool{Seats: map[string]config.SeatConfig{"a-closed": {Cap: 0}, "b-open": {Cap: 1}}}, "", night, "b-open", "b-open"},
 		{"a pinned-only seat is never the fallback", &config.PolecatPool{Seats: map[string]config.SeatConfig{"a-pinned": {Cap: 1, PinnedOnly: true}, "b-open": {Cap: 1}}}, "", night, "b-open", "b-open"},
+		{"a pinned-only seat inside its closed window is never the fallback", &config.PolecatPool{Timezone: "America/Chicago", Seats: map[string]config.SeatConfig{"a-pinned-shut": {Cap: 1, PinnedOnly: true, Closed: "20:00-08:00"}, "b-open": {Cap: 1}}}, "", night, "b-open", "b-open"},
 		{"no open seat leaves the default agent to run", &config.PolecatPool{Timezone: "America/Chicago", Seats: map[string]config.SeatConfig{"claude-sonnet": {Cap: 0}, "deepseek-flash": {Cap: 3, Closed: "20:00-08:00"}}}, "", night, "", "the default agent"},
 	}
 	for _, c := range cases {
