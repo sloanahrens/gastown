@@ -1255,9 +1255,7 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 	// Kill the dead session to prevent "session already running" on next attempt (gt-jn40ft).
 	pane, err := paneAfterStart(s.SessionName, getSessionPane,
 		func() { s.killStartupDeath(sup, actor) },
-		func(cause error) error {
-			return s.dropSandboxAfterStartupDeath(session.SandboxDeleter, townRoot, cause)
-		})
+		s.startupDeathRollback(session.SandboxDeleter, beads.New(townRoot), townRoot))
 	if err != nil {
 		return "", err
 	}
@@ -1298,6 +1296,28 @@ func (s *SpawnedPolecatInfo) killStartupDeath(sup startupSeatCleaner, actor stri
 // cleanupSandboxAfterStartupDeath.
 func (s *SpawnedPolecatInfo) dropSandboxAfterStartupDeath(deleter func(townRoot string, rec session.SandboxRecord) error, townRoot string, cause error) error {
 	return cleanupSandboxAfterStartupDeath(deleter, townRoot, s.SessionName, cause)
+}
+
+// startupDeathRollback is the dropSandbox step of paneAfterStart: the sandbox
+// and record are removed through deleter, then the agent bead is released
+// through c.
+func (s *SpawnedPolecatInfo) startupDeathRollback(deleter func(townRoot string, rec session.SandboxRecord) error, c beads.Client, townRoot string) func(cause error) error {
+	return func(cause error) error {
+		cause = s.dropSandboxAfterStartupDeath(deleter, townRoot, cause)
+		return s.releaseAgentBeadAfterStartupDeath(c, townRoot, cause)
+	}
+}
+
+// releaseAgentBeadAfterStartupDeath returns cause, with the agent bead this
+// spawn hooked reset while it still names this spawn's work bead. Without it
+// the seat reads dead-hooked in the pool roster. A failed reset is wrapped into
+// the error text too.
+func (s *SpawnedPolecatInfo) releaseAgentBeadAfterStartupDeath(c beads.Client, townRoot string, cause error) error {
+	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(townRoot, s.RigName), s.RigName, s.PolecatName)
+	if _, err := beads.ResetAgentBeadWhileHooked(c, id, s.HookBead, "startup death"); err != nil {
+		return fmt.Errorf("%w (resetting the agent bead failed too: %w)", cause, err)
+	}
+	return cause
 }
 
 // cleanupSandboxAfterStartupDeath returns cause, with the sandbox the dead

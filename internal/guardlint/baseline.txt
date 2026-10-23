@@ -65,3 +65,5 @@ internal/patrolstate/patrolstate.go:ResetCounter
 internal/patrolstate/cycle.go:readVersioned
 # deliberate os.ErrNotExist narrowing: a missing config.yaml has no sync.remote; every other read error is returned (gt-8z769.1)
 internal/doctor/dolt_remote_leftovers_check.go:readSyncRemote
+# deliberate ErrNotFound narrowing: a conditional reset of an agent bead that does not exist has nothing to reset; every other read error is returned
+internal/beads/client_helpers.go:resetAgentBeadIf
