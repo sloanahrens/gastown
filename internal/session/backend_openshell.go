@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"maps"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -20,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/tmux"
+	"github.com/steveyegge/gastown/internal/version"
 )
 
 func init() { NewOpenShellBackend = newOpenShellBackend }
@@ -73,17 +75,53 @@ type openshellBackend struct {
 	// probe is the tmux surface existence and liveness read for a session;
 	// nil means the routed client that runs inside the sandbox. Tests set it.
 	probe func(session string) liveness.Probe
+	// imageGT reads the gt commit an image was built from, and installedGT is
+	// the commit of the gt running Prepare. Tests set both.
+	imageGT     func(ctx context.Context, image string) (string, error)
+	installedGT func() string
 }
 
 func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
 	return &openshellBackend{
-		cli:      &sandbox.CLI{Gateway: p.Gateway},
-		townRoot: townRoot,
-		profile:  p,
-		wait:     waitFor,
-		render:   sandbox.RenderSkeleton,
-		push:     pushToForgejo,
+		cli:         &sandbox.CLI{Gateway: p.Gateway},
+		townRoot:    townRoot,
+		profile:     p,
+		wait:        waitFor,
+		render:      sandbox.RenderSkeleton,
+		push:        pushToForgejo,
+		imageGT:     dockerImageGT,
+		installedGT: version.BuildCommit,
 	}, nil
+}
+
+// gtCommitLabel is the image label `make polecat-image` sets to the commit its
+// gt was built from.
+const gtCommitLabel = "org.gastown.gt-commit"
+
+// dockerImageGT reads the gt commit label of image from the host's docker. An
+// image without the label reads as "", which checkImageGT refuses.
+func dockerImageGT(ctx context.Context, image string) (string, error) {
+	format := `{{index .Config.Labels "` + gtCommitLabel + `"}}`
+	out, err := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", format, image).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("docker image inspect %s: %w: %s", image, err, strings.TrimSpace(string(out)))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// checkImageGT refuses a sandbox image whose gt is not the installed gt's
+// commit, so a drifted image fails before any sandbox exists rather than as a
+// settings warning inside one (gt-pmxo9).
+func checkImageGT(image, imageCommit, installed string) error {
+	switch {
+	case installed == "":
+		return fmt.Errorf("sandbox image %s: the installed gt records no build commit, so its gt cannot be checked; rebuild gt with make build", image)
+	case imageCommit == "":
+		return fmt.Errorf("sandbox image %s records no gt commit (label %s); rebuild it with make polecat-image", image, gtCommitLabel)
+	case !version.SameCommit(imageCommit, installed):
+		return fmt.Errorf("sandbox image %s carries gt commit %s, but the installed gt is commit %s; rebuild the image with make polecat-image", image, imageCommit, installed)
+	}
+	return nil
 }
 
 // waitFor blocks for d or until ctx is done.
@@ -122,6 +160,15 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	create, err := b.createSpec(spec)
 	if err != nil {
 		return nil, err
+	}
+	// The image's gt must be the installed gt's commit. Checked before the push
+	// and the create, so a drifted image leaves nothing behind (gt-pmxo9).
+	imageCommit, err := b.imageGT(ctx, b.profile.Image)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
+	}
+	if err := checkImageGT(b.profile.Image, imageCommit, b.installedGT()); err != nil {
+		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}
 
 	// Also before anything is pushed or created: the agent command names these

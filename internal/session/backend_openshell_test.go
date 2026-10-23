@@ -104,6 +104,8 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 			*pushes = append(*pushes, pushCall{bare: bare, branch: branch, sandboxCalls: len(fake.Calls())})
 			return nil
 		},
+		imageGT:     func(context.Context, string) (string, error) { return openshellTestGTCommit, nil },
+		installedGT: func() string { return openshellTestGTCommit },
 	}
 	return b, pushes
 }
@@ -269,6 +271,65 @@ func TestOpenShellPrepareWaitsForReadyBetweenPolls(t *testing.T) {
 	}
 	if want := []time.Duration{readyInterval}; !reflect.DeepEqual(waits, want) {
 		t.Fatalf("waits = %v, want %v (one pause between the two polls)", waits, want)
+	}
+}
+
+// openshellTestGTCommit is the commit the test image's gt and the installed gt
+// both report; openshellTestDriftedGT is an older image's commit.
+const (
+	openshellTestGTCommit    = "e32fa546a4992ec40088a201296a535a03ddcdde"
+	openshellTestDriftedGT   = "80c667f7d1a2b3c4d5e6f708192a3b4c5d6e7f80"
+	openshellTestInstalledGT = "ac578ef4" // a short commit, as make build stamps it
+)
+
+func TestCheckImageGT(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, imageCommit, installed, wantErr string
+	}{
+		{name: "full image commit matches a short installed commit", imageCommit: openshellTestGTCommit, installed: openshellTestGTCommit[:9]},
+		{name: "drifted image names both commits", imageCommit: openshellTestDriftedGT, installed: openshellTestInstalledGT, wantErr: openshellTestDriftedGT + "|" + openshellTestInstalledGT},
+		{name: "image without the label is refused", imageCommit: "", installed: openshellTestGTCommit, wantErr: "records no gt commit"},
+		{name: "installed gt with no commit is refused", imageCommit: openshellTestGTCommit, installed: "", wantErr: "records no build commit"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			err := checkImageGT("gastown-polecat:dev", tt.imageCommit, tt.installed)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("checkImageGT = %v, want accepted", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("checkImageGT accepted the image, want refusal naming %q", tt.wantErr)
+			}
+			for _, want := range strings.Split(tt.wantErr, "|") {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("err = %v, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestOpenShellPrepareRefusesADriftedImageBeforeAnySandbox(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := &sandbox.Fake{}
+	b, pushes := openshellTestBackend(town, openshellTestProfile, fake)
+	b.imageGT = func(context.Context, string) (string, error) { return openshellTestDriftedGT, nil }
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), openshellTestDriftedGT) || !strings.Contains(err.Error(), openshellTestGTCommit) {
+		t.Fatalf("err = %v, want the refusal to name the image's commit and the installed commit", err)
+	}
+	if len(fake.Calls()) != 0 {
+		t.Fatalf("calls = %q, want none: the refusal comes before the sandbox", fake.Calls())
+	}
+	if len(*pushes) != 0 {
+		t.Fatalf("pushes = %v, want none: the refusal comes before the push", *pushes)
 	}
 }
 

@@ -123,6 +123,9 @@ lint-tools:
 # profile points at, and the short sha is the rollback pin beside it.
 POLE_IMAGE ?= gastown-polecat
 POLE_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+# The commit the image's gt is built from. Prepare refuses a sandbox whose label
+# differs from the installed gt's commit (gt-pmxo9), so the label is the full sha.
+POLE_COMMIT := $(shell git rev-parse HEAD 2>/dev/null)
 # bd is built from a beads fork checkout, not this repo. That checkout is host
 # state, so there is no default: the operator names it, BD_SRC=<checkout>.
 BD_SRC ?=
@@ -136,7 +139,7 @@ polecat-image:
 	@mkdir -p deploy/polecat/bin
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/gt ./cmd/gt
 	cd $(BD_SRC) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o $(CURDIR)/deploy/polecat/bin/bd ./cmd/bd
-	docker build --platform linux/arm64 -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
+	docker build --platform linux/arm64 --label org.gastown.gt-commit=$(POLE_COMMIT) -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
 
 # RIGS is the space-separated rig names whose cache volume a sandbox mounts:
 # make polecat-caches RIGS="gastown om". A second run changes nothing.
