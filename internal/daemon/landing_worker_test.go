@@ -436,9 +436,8 @@ func TestAcceptedRiskAlertReturnsADeliveryThatFailed(t *testing.T) {
 	}
 }
 
-// TestLandingWorkerRaisesAcceptedRiskToTheSink: the lander a rig's worker
-// builds reaches the daemon's alert sink for an accepted risk, so a landing
-// that used one raises the MEDIUM item the overseer sees (gt-tvhg8).
+// TestLandingWorkerRaisesAcceptedRiskToTheSink: a landing that used an accepted
+// risk raises the MEDIUM attention item the overseer sees (gt-gskrk).
 func TestLandingWorkerRaisesAcceptedRiskToTheSink(t *testing.T) {
 	t.Parallel()
 	const rigName = "testrig"
