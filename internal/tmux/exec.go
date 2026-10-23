@@ -104,3 +104,11 @@ func (t *Tmux) socketPath() string {
 	}
 	return filepath.Join(dir, t.socketName)
 }
+
+// NewTmuxWithExec returns a client on socket whose tmux, ps and kill
+// invocations go through ex instead of starting processes. It is test
+// infrastructure: a test in another package drives the real client, routing
+// and extra sessions included, over canned output.
+func NewTmuxWithExec(socket string, ex func(ctx context.Context, name string, args ...string) (stdout, stderr []byte, err error)) *Tmux {
+	return &Tmux{socketName: socket, exec: ex, getenv: func(string) string { return "" }}
+}

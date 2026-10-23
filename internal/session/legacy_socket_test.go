@@ -1,8 +1,14 @@
 package session
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 type mockLegacyTmux struct {
@@ -215,5 +221,68 @@ func TestCountLegacyBaseSocketCountsCorrectly(t *testing.T) {
 	got := l.countBase("/some/path/gt")
 	if got != 2 {
 		t.Errorf("expected 2, got %d", got)
+	}
+}
+
+// A sandboxed session must never be listed, counted or killed by the legacy
+// socket cleanup. The router and its extra-sessions hook name a sandbox session;
+// the clients are built the way production builds them, over canned tmux output.
+//
+//testpolicy:allow parallel — installs the process-wide session router, extra-sessions hook and default socket, which another test must not see mid-run
+func TestLegacySocketCleanupNeverTouchesASandboxSession(t *testing.T) {
+	var hostCalls, sandboxCalls []string
+	hostGone := false
+	hostExec := func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
+		hostCalls = append(hostCalls, name+" "+strings.Join(args, " "))
+		switch {
+		case slices.Contains(args, "list-sessions"):
+			if hostGone {
+				return nil, []byte("no server running"), errors.New("exit status 1")
+			}
+			return []byte("ga-host\n"), nil, nil
+		case slices.Contains(args, "kill-session"):
+			hostGone = true
+		}
+		return nil, nil, nil
+	}
+	sandboxExec := func(_ context.Context, name string, args ...string) ([]byte, []byte, error) {
+		sandboxCalls = append(sandboxCalls, name+" "+strings.Join(args, " "))
+		return nil, nil, nil
+	}
+	sandboxClient := tmux.NewTmuxWithExec("gt", sandboxExec).Routed()
+	tmux.SetSessionRouter(func(sess string) *tmux.Tmux {
+		if sess == "ga-bullet" {
+			return sandboxClient
+		}
+		return nil
+	})
+	tmux.SetExtraSessions(func() []string { return []string{"ga-bullet"} })
+	tmux.SetDefaultSocket("gt-legacy-test")
+	t.Cleanup(func() {
+		tmux.SetDefaultSocket("")
+		tmux.SetExtraSessions(nil)
+		tmux.SetSessionRouter(nil)
+	})
+	registry := NewPrefixRegistry()
+	registry.Register("ga", "gastown")
+	l := newLegacySocketsWith(registry, func(string) *tmux.Tmux { return tmux.NewTmuxWithExec("legacy", hostExec) })
+
+	if got := l.countDefault(); got != 1 {
+		t.Errorf("countDefault = %d, want 1 (the host session; the sandbox session is not on the socket)", got)
+	}
+	if got := l.cleanupDefault(); got != 1 {
+		t.Errorf("cleanupDefault = %d, want 1", got)
+	}
+
+	if len(sandboxCalls) != 0 {
+		t.Errorf("the cleanup reached into the sandbox: %v", sandboxCalls)
+	}
+	for _, c := range hostCalls {
+		if strings.Contains(c, "ga-bullet") {
+			t.Errorf("the legacy socket was asked about the sandbox session: %s", c)
+		}
+	}
+	if !slices.ContainsFunc(hostCalls, func(c string) bool { return strings.Contains(c, "kill-session") && strings.Contains(c, "ga-host") }) {
+		t.Errorf("the host session was not cleaned: %v", hostCalls)
 	}
 }
