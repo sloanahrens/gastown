@@ -57,13 +57,11 @@ func TestBuildRuntimeArchiveAppendsTheSandboxNoteToThePrompt(t *testing.T) {
 		t.Fatalf("buildRuntimeArchive: %v", err)
 	}
 	prompt := untarRuntime(t, data)["gt/"+openshellTestRig+"/polecats/.claude/system-prompt-"+openshellTestPolecat+".md"].body
-	for _, want := range []string{"## Sandbox", "never print the", "environment", "gt escalate"} {
-		if !strings.Contains(prompt, want) {
-			t.Errorf("the sandbox prompt lacks %q:\n%s", want, prompt)
-		}
+	if !strings.HasPrefix(prompt, "town at ") {
+		t.Fatalf("the polecat's own prompt is missing from the sandbox prompt:\n%s", prompt)
 	}
-	if strings.Index(prompt, "town at") > strings.Index(prompt, "## Sandbox") {
-		t.Errorf("the note must follow the polecat's own prompt:\n%s", prompt)
+	if !strings.HasSuffix(prompt, sandboxPromptNote) {
+		t.Errorf("the sandbox note must follow the polecat's own prompt and end it:\n%s", prompt)
 	}
 }
 
