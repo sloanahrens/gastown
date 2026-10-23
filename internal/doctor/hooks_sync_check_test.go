@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -327,5 +328,58 @@ func TestHooksSyncCheck_UnloadableSettingsReportsOutOfSync(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected a detail naming myrig/crew with a load error, got %v", result.Details)
+	}
+	if !strings.Contains(result.Message, "1 target(s) out of sync") {
+		t.Errorf("message should count the unloadable target, got %q", result.Message)
+	}
+	if strings.Contains(result.FixHint, "to regenerate settings files") || !strings.Contains(result.FixHint, "will not rewrite") {
+		t.Errorf("FixHint must not promise a repair Fix cannot make, got %q", result.FixHint)
+	}
+
+	// Fix must not overwrite what it could not read, and must say so.
+	if err := check.Fix(&CheckContext{TownRoot: townRoot}); err == nil || !strings.Contains(err.Error(), "myrig/crew") {
+		t.Errorf("Fix should return an error naming myrig/crew, got %v", err)
+	}
+	got, err := os.ReadFile(targetPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "{not json" {
+		t.Errorf("Fix rewrote the unloadable settings.json: %q", got)
+	}
+}
+
+// TestHooksSyncCheck_ExpectedComputeErrorReportsOutOfSync verifies that a
+// target whose expected config cannot be computed is reported by name, not
+// skipped into an all-in-sync result by a passing sync report.
+func TestHooksSyncCheck_ExpectedComputeErrorReportsOutOfSync(t *testing.T) {
+	t.Parallel()
+	townRoot := scaffoldWorkspace(t, nil)
+	syncAllClaudeTargets(t, townRoot)
+	writePassingSyncReport(t, townRoot)
+
+	check := newTestHooksSyncCheck()
+	check.computeExpected = func(target string) (*hooks.HooksConfig, error) {
+		if target == "myrig/crew" {
+			return nil, errors.New("override unreadable")
+		}
+		return testExpectedHooks(target)
+	}
+	result := check.Run(&CheckContext{TownRoot: townRoot})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning when expected cannot be computed, got %v: %s", result.Status, result.Message)
+	}
+	found := false
+	for _, d := range result.Details {
+		if strings.Contains(d, "myrig/crew") && strings.Contains(d, "error computing expected") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a detail naming myrig/crew with a compute error, got %v", result.Details)
+	}
+	if err := check.Fix(&CheckContext{TownRoot: townRoot}); err == nil || !strings.Contains(err.Error(), "myrig/crew") {
+		t.Errorf("Fix should return an error naming myrig/crew, got %v", err)
 	}
 }
