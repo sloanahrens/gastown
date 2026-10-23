@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -360,6 +362,13 @@ exit 0
 					t.Fatalf("pid samples = %d, want the first sample and a re-check; launchctl calls:\n%s", got, callLog)
 				}
 			}
+			if tc.pid != "" {
+				// The re-check is one extra sample, taken because the first
+				// carried a pid, not a count that has to reach a constant.
+				if got := strings.Count(string(callLog), "print gui/501/com.example.fake"); got != 2 {
+					t.Fatalf("pid samples = %d, want exactly one sample and one re-check; launchctl calls:\n%s", got, callLog)
+				}
+			}
 
 			healLog, err := os.ReadFile(filepath.Join(d.config.TownRoot, "daemon", upgradeHealLogName))
 			if err != nil {
@@ -378,24 +387,48 @@ exit 0
 // TestUpgradeRestartHealWedgedLaunchctlIsBounded checks one launchctl call
 // cannot hold the exit that arms the helper: a call that never returns is
 // killed at the bound and reported as a deadline, so the daemon still exits 75
-// (gt-csq9g).
+// (gt-csq9g). The kill is read from the process table, not inferred from
+// elapsed time: the child records its pid before it stops, so the test can
+// find that pid gone afterwards, which a wall-clock margin cannot show
+// (gt-8chz5).
 func TestUpgradeRestartHealWedgedLaunchctlIsBounded(t *testing.T) {
 	t.Parallel()
 	if _, err := os.Stat("/bin/sh"); err != nil {
 		//testpolicy:allow no-skip — /bin/sh is the wedged child; Windows has none
 		t.Skip("the wedged child is a /bin/sh process")
 	}
-	const bound = 100 * time.Millisecond
-	start := time.Now()
 	// kill -STOP stops the shell itself, so the child never returns and never
 	// starts an external tool: the unit tier refuses a PATH lookup of sleep.
-	err := runUpgradeHealCommand(bound, []string{"/bin/sh", "-c", "kill -STOP $$"})
-	elapsed := time.Since(start)
+	// It writes its pid first so the test can look for the process afterwards.
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	const bound = 5 * time.Second
+	done := make(chan error, 1)
+	go func() {
+		done <- runUpgradeHealCommand(bound, []string{"/bin/sh", "-c", "echo $$ > " + pidFile + "; kill -STOP $$"})
+	}()
+
+	var err error
+	select {
+	case err = <-done:
+	case <-time.After(time.Minute): //testpolicy:allow no-sleep — a hang guard only: the bound the call must enforce is the subject of the test, this fails a helper that never returns at all
+		t.Fatal("runUpgradeHealCommand never returned: the wedged call was not bounded")
+	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want a deadline error", err)
 	}
-	if elapsed > 5*time.Second {
-		t.Fatalf("the wedged call took %s, want it bounded near %s", elapsed, bound)
+	pidText, readErr := os.ReadFile(pidFile)
+	if readErr != nil {
+		t.Fatalf("the wedged child never recorded its pid: %v", readErr)
+	}
+	pid, convErr := strconv.Atoi(strings.TrimSpace(string(pidText)))
+	if convErr != nil {
+		t.Fatalf("the wedged child wrote pid %q: %v", pidText, convErr)
+	}
+	// A stopped process still answers signal 0; only a kill makes it answer
+	// ESRCH, so this is the call having killed the child rather than returned
+	// beside it.
+	if sigErr := syscall.Kill(pid, 0); !errors.Is(sigErr, syscall.ESRCH) {
+		t.Fatalf("the wedged child %d was not killed at the bound (signal 0 = %v): the call returned without it", pid, sigErr)
 	}
 }
 

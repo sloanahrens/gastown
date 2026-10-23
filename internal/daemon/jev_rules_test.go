@@ -99,6 +99,48 @@ func TestJevRulesSkipsARigWithNoBeadsDirectory(t *testing.T) {
 	}
 }
 
+// TestJevRulesReportsAStatFailureThatIsNotAMissingDirectory checks only a
+// missing beads directory is reported as one: a rig whose path cannot be
+// stat'ed at all is skipped with the error, not described as never cloned,
+// so a broken path does not hide behind the uncloned-rig case (gt-8chz5).
+func TestJevRulesReportsAStatFailureThatIsNotAMissingDirectory(t *testing.T) {
+	t.Parallel()
+	var got jevrules.Settings
+	d := newRulesDaemon(t, true, func(_ string, s jevrules.Settings, _ io.Writer) (*jevrules.Pass, error) {
+		got = s
+		return nil, errors.New("stop here")
+	})
+	town := d.config.TownRoot
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigs := `{"rigs": {"cloned": {}, "not-a-directory": {}}}`
+	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte(rigs), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(town, "cloned", ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A regular file where the rig's directory belongs: stat of
+	// <town>/not-a-directory/.beads fails with ENOTDIR, which is not a
+	// missing directory.
+	if err := os.WriteFile(filepath.Join(town, "not-a-directory"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runJevRules()
+	if len(got.Rigs) != 1 || got.Rigs[0] != "cloned" {
+		t.Fatalf("rigs = %v, want the readable rig only", got.Rigs)
+	}
+	logText := d.logger.Writer().(*bytes.Buffer).String()
+	if !strings.Contains(logText, "cannot stat") || !strings.Contains(logText, "not-a-directory") {
+		t.Errorf("the stat failure was not reported as one: %q", logText)
+	}
+	if strings.Contains(logText, "no beads directory at "+filepath.Join(town, "not-a-directory", ".beads")) {
+		t.Errorf("a stat failure was reported as a missing beads directory: %q", logText)
+	}
+}
+
 // rulesCountingAsker counts the calls a pass makes to Jev. It answers none.
 type rulesCountingAsker struct{ calls int }
 
