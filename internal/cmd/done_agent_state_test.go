@@ -259,6 +259,60 @@ func TestUnchangedReworkHeadLeavesTheSeatRestartable(t *testing.T) {
 	}
 }
 
+// A stand-down leaves the bead open for the restart patrol_scan schedules, so
+// the workflow attached to it stays open too: force-closing the wisp ended the
+// molecule of a bead the restarted seat picks up again (gt-9x16z).
+func TestReworkStandDownLeavesTheAttachedMoleculeOpen(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	routes := `{"prefix":"gt-","path":"gastown"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	const head = "1111111111111111111111111111111111111111"
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(doneAgentBead(), beads.Issue{
+		ID:                 "gt-rework",
+		Title:              "the work",
+		Type:               "task",
+		Status:             string(beads.StatusOpen),
+		AcceptanceCriteria: "- [x] the gate passes",
+		Description:        "attached_molecule: gt-wisp-mol\nattached_formula: mol-polecat-work",
+		Labels:             []string{land.LabelRework},
+		Notes: land.FormatRejectionNote(land.RejectionNote{
+			Attempt: 1, Kind: "gate", Reason: "the gate refused it",
+			Branch: "polecat/mica/gt-rework+abc", Target: "main", MR: "gt-rework", Head: head,
+		}),
+	})
+	db.Seed(beads.Issue{ID: "gt-wisp-mol", Title: "mol-polecat-work", Status: "open", Ephemeral: true})
+	seedChildren(t, db, "gt-wisp-mol", beads.Issue{ID: "gt-wisp-mol-step-1", Title: "Step 1", Status: "open", Ephemeral: true})
+
+	env := doneStateEnv{
+		getenv: envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "nux"}),
+		routed: func(string) beads.Client { return db },
+		source: func(string, string) beads.Client { return db },
+		purge:  func(string, string) {},
+		reviewHead: func(string) (string, error) {
+			return head, nil
+		},
+	}
+	if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-rework", beads.AgentFieldUpdates{}); err != nil {
+		t.Fatalf("completed gt done: %v", err)
+	}
+
+	for _, id := range []string{"gt-wisp-mol", "gt-wisp-mol-step-1"} {
+		if got := mustShowBead(t, db, id).Status; got == string(beads.StatusClosed) {
+			t.Errorf("gt done closed %s: a stood-down bead keeps the molecule the restarted seat resumes", id)
+		}
+	}
+}
+
 // TestCompletedDoneOnSubmittedWorkRecordsDone: a gt done that submits its work
 // (the bead is gt:ready-to-land) is a real completion. The seat records done
 // with exit COMPLETED, and the bead stays open for the landing worker to close.

@@ -1188,7 +1188,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	}
 	report.CandidatesTook = env.Now().Sub(candidatesAt)
 	slingAt := env.Now()
-	specRunPendingSlings(env, pending, &report)
+	specRunPendingSlings(env, pending, &report, &budget)
 	report.SlingTook = env.Now().Sub(slingAt)
 	return report
 }
@@ -1233,7 +1233,11 @@ const (
 // decision lock before its session exists (gt-t8q5), and the occupancy each
 // one reads is the tick's snapshot plus the live sessions and claims of the
 // moment (snapshotOccupied).
-func specRunPendingSlings(env specDispatchEnv, pending []specPendingSling, report *specDispatchReport) {
+//
+// A sling that spawned no polecat gives its charged seat back (gt-9x16z): the
+// tick charged the seat when it collected the candidate, and the charge stays
+// in the budget only while a sling of this tick may still fill it.
+func specRunPendingSlings(env specDispatchEnv, pending []specPendingSling, report *specDispatchReport, budget *specdispatch.Budget) {
 	if len(pending) == 0 {
 		return
 	}
@@ -1261,6 +1265,10 @@ func specRunPendingSlings(env specDispatchEnv, pending []specPendingSling, repor
 			// unnamed tail; the daemon logs this list one line per entry, so
 			// every deferral's bead and reason stay readable (gt-4wcqd).
 			report.Deferred = append(report.Deferred, o.entry)
+			// A refusal spawns nothing, whatever charged the seat: the overlap
+			// guard, the pool's backpressure, or contention that outlasted its
+			// retries. Hand it back rather than leave the tick over-counted.
+			budget.Release(o.entry.Agent)
 		case specSlingFailed:
 			report.Failed = append(report.Failed, o.entry)
 		}
@@ -1304,12 +1312,18 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 			entry.Line = fmt.Sprintf("%s: sling deferred: %s", id, firstErrLine(err))
 			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
 		}
-		why := firstErrLine(err)
+		// Contention that outlasted every retry is a deferral, not a failure:
+		// Dolt rolled the attempt back before reporting it, so the next tick
+		// can repeat the dispatch (specdispatch.IsSerializationFailure), and
+		// the label this path would add excludes the bead until an operator
+		// clears it. Parallel slings make the 1213s likelier, which is exactly
+		// when a bead must not be labeled out of the queue (gt-9x16z).
 		if specdispatch.IsSerializationFailure(err) {
-			why = fmt.Sprintf("%v after %d attempts: %s", specdispatch.ErrRetriesExhausted, attempts, why)
+			entry.Line = fmt.Sprintf("%s: sling deferred, %v after %d attempts: %s", id, specdispatch.ErrRetriesExhausted, attempts, firstErrLine(err))
+			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
 		}
 		excluded := fmt.Sprintf("excluded from the queue until label %s is cleared", specdispatch.DispatchFailedLabel)
-		failLine := fmt.Sprintf("%s: dispatch failed, left unassigned: %s; %s", id, why, excluded)
+		failLine := fmt.Sprintf("%s: dispatch failed, left unassigned: %s; %s", id, firstErrLine(err), excluded)
 		entry.Line = failLine
 		note := specDispatchNotePrefix + failLine
 		return done(specSlingOutcome{kind: specSlingFailed, entry: entry, label: specdispatch.DispatchFailedLabel, notes: [][2]string{{note, note}}})
