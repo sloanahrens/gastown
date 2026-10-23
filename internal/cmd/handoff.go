@@ -1524,12 +1524,15 @@ func superviseHandoff(sessionName, verb, reason string, run func() error) error 
 	return respawnSession(operatorSupervisor(townRoot), townRegistry(), sessionName, reason, operatorActor(verb), run)
 }
 
-// getSessionPane returns the pane identifier for a session's main pane. It asks
-// through a tmux client, so the session router sends a sandboxed session's
-// question to the sandbox's own tmux server: a raw host `tmux list-panes` cannot
-// see that session, and StartSession then took a healthy sandbox agent for a
-// dead one and killed it (sling 8, gt-nb840). A host session is answered by the
-// default socket's server as before.
+// getSessionPane returns the pane identifier for the pane a session's agent
+// runs in. gt creates an agent session as one window with one pane, so that is
+// the session's first window, first pane (`session:0.0`, the target
+// GetPaneWorkDir reads). `list-panes -t <session>` targets the session's
+// *current* window instead, which follows whoever last attached, so a shell in
+// a second window is what that lists first (gt-uf8y2). The lookup asks through
+// a tmux client, so the session router sends a sandboxed session's question to
+// the sandbox's own tmux server; a host session is answered by the default
+// socket's server (sling 8, gt-nb840).
 func getSessionPane(sessionName string) (string, error) {
 	return tmux.NewTmuxWithSocket(tmux.GetDefaultSocket()).GetPaneID(sessionName)
 }
