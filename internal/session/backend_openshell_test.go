@@ -168,7 +168,7 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 		"--env-from", "GT_SESSION_BACKEND=GT_SANDBOX_ENV_GT_SESSION_BACKEND",
 		"--env-from", "GT_TOWN_ROOT=GT_SANDBOX_ENV_GT_TOWN_ROOT",
 		"--detach", "--output", "json",
-		"--", "sh", "-c", sandboxMainScript, "sh", openshellTestSession,
+		"--", "sh", "-c", sandboxMainScript,
 	}
 	want := [][]string{
 		create,
@@ -552,5 +552,21 @@ func TestOpenShellStageDirIsPrivate(t *testing.T) {
 	}
 	if mode := info.Mode().Perm(); mode != 0o700 {
 		t.Fatalf("stage dir mode = %o, want 0700 (it holds the skeleton)", mode)
+	}
+}
+
+// The main process holds the tmux server under a fixed name; the session start
+// creates the polecat's session on the same server, and tmux refuses a
+// duplicate (found on a live sandbox, gt-t1798).
+func TestOpenShellMainScriptHolderIsNotThePolecatSession(t *testing.T) {
+	t.Parallel()
+	if sandboxHolderSession == openshellTestSession {
+		t.Fatalf("holder session %q equals the polecat session", sandboxHolderSession)
+	}
+	if !strings.Contains(sandboxMainScript, "-s "+sandboxHolderSession+" ") {
+		t.Fatalf("main script %q does not create the holder session %q", sandboxMainScript, sandboxHolderSession)
+	}
+	if strings.Contains(sandboxMainScript, `"$1"`) {
+		t.Fatalf("main script %q still names the session from its argument", sandboxMainScript)
 	}
 }
