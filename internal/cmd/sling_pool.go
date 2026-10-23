@@ -127,7 +127,7 @@ func poolSeatOf(pool *config.PolecatPool, agent string) (config.SeatConfig, bool
 	return seat, ok
 }
 
-// poolSeatPinnedOnly reports whether agent's seat takes only beads labelled for
+// poolSeatPinnedOnly reports whether agent's seat takes only beads labeled for
 // its agent (pinned_only), so a sling that names no agent never lands on it.
 func poolSeatPinnedOnly(pool *config.PolecatPool, agent string) bool {
 	seat, ok := poolSeatOf(pool, agent)
@@ -173,7 +173,7 @@ func poolSeatClosedAt(pool *config.PolecatPool, agent string, now time.Time) boo
 // dispatcher, which draws at random, never asks (it names the agent it drew).
 // A seat inside its closed window is no candidate: this sling chose no seat, so
 // nothing in it asked to spend on a seat the town shut. A pinned-only seat is no
-// candidate either: it takes only beads labelled for its agent, and this sling
+// candidate either: it takes only beads labeled for its agent, and this sling
 // names no bead's agent (gt-xtuet).
 func poolDefaultAgent(pool *config.PolecatPool, sessions []poolSession, now time.Time) string {
 	best, bestRoom := "", 0
