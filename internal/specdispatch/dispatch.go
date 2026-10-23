@@ -240,7 +240,7 @@ type Seat struct {
 	// against Budget.Now, so a seat whose window shuts between the budget's
 	// construction and the choice is seen shut (gt-t8new).
 	Window SeatWindow
-	// PinnedOnly keeps the seat for beads labelled agent:<Agent>. The random
+	// PinnedOnly keeps the seat for beads labeled agent:<Agent>. The random
 	// draw for an unlabelled bead passes it over, so a seat opened for one
 	// named bead takes no other (gt-zor86).
 	PinnedOnly bool

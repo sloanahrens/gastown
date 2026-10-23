@@ -20,7 +20,7 @@ type SeatConfig struct {
 	Names   []string `json:"names,omitempty"`
 	Backend string   `json:"backend,omitempty"` // "" or "tmux" or "openshell"
 	Sandbox string   `json:"sandbox,omitempty"` // key in TownSettings.Sandboxes; required when Backend is openshell
-	// PinnedOnly keeps the seat for beads labelled agent:<its agent>: the
+	// PinnedOnly keeps the seat for beads labeled agent:<its agent>: the
 	// dispatcher's random draw for unlabelled beads never lands here.
 	PinnedOnly bool `json:"pinned_only,omitempty"`
 }
@@ -33,7 +33,7 @@ type Seat struct {
 	Names      []string
 	Backend    string // BackendTmux or BackendOpenShell, never empty
 	Sandbox    string // key in TownSettings.Sandboxes; set only for an openshell seat
-	PinnedOnly bool   // only beads labelled agent:<Agent> may take this seat
+	PinnedOnly bool   // only beads labeled agent:<Agent> may take this seat
 }
 
 // Window is a daily closed period in one timezone.
