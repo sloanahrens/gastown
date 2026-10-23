@@ -980,24 +980,34 @@ func findOrphanDoltServers(townRoot string) []int {
 	if err != nil {
 		return nil
 	}
+	return orphanDoltServerPIDs(townRoot, string(out), processCwd)
+}
 
+// processCwd returns the working directory lsof reports for pid, or "" when
+// lsof fails or reports none.
+func processCwd(pid int) string {
+	out, err := exec.Command("lsof", "-p", strconv.Itoa(pid), "-Fn", "-d", "cwd").Output()
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "n") {
+			return line[1:]
+		}
+	}
+	return ""
+}
+
+// orphanDoltServerPIDs is findOrphanDoltServers with the process table and the
+// per-pid working-directory lookup supplied, so a test drives the scan without
+// ps or lsof.
+func orphanDoltServerPIDs(townRoot, psOut string, cwdOf func(pid int) string) []int {
 	canonicalDir, _ := filepath.Abs(filepath.Join(townRoot, ".dolt-data"))
 	townAbs, _ := filepath.Abs(townRoot)
 
 	var pids []int
-	for _, pid := range doltSQLServerPIDs(string(out)) {
-		// Check the process's working directory via lsof
-		cwdOut, err := exec.Command("lsof", "-p", strconv.Itoa(pid), "-Fn", "-d", "cwd").Output()
-		if err != nil {
-			continue
-		}
-		cwd := ""
-		for _, cwdLine := range strings.Split(string(cwdOut), "\n") {
-			if strings.HasPrefix(cwdLine, "n") {
-				cwd = cwdLine[1:]
-				break
-			}
-		}
+	for _, pid := range doltSQLServerPIDs(psOut) {
+		cwd := cwdOf(pid)
 		if cwd == "" {
 			continue
 		}
