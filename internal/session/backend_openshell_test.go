@@ -784,3 +784,24 @@ func TestOpenShellMainScriptHolderIsNotThePolecatSession(t *testing.T) {
 		t.Fatalf("main script %q creates the polecat's session as the holder; the host's session start creates that one", sandboxMainScript)
 	}
 }
+
+// An image whose gt commit differs from the installed gt's is ErrImageDrift to
+// errors.Is, with the same rebuild instruction as its message; the other checkImageGT
+// refusals (no commit recorded) are not, since rebuilding gt or the image's label
+// is not the drift the dispatcher waits out.
+func TestCheckImageGTClassifiesDrift(t *testing.T) {
+	t.Parallel()
+	err := checkImageGT("gastown-polecat:dev", gtLabelSource, "aaaaaaa1111", "bbbbbbb2222")
+	if !errors.Is(err, ErrImageDrift) {
+		t.Fatalf("a differing commit = %v, want ErrImageDrift", err)
+	}
+	if want := "sandbox image gastown-polecat:dev carries gt commit aaaaaaa1111, but the installed gt is commit bbbbbbb2222; rebuild the image with make polecat-image"; err.Error() != want {
+		t.Errorf("message = %q, want %q", err.Error(), want)
+	}
+	if err := checkImageGT("gastown-polecat:dev", gtLabelSource, "", "bbbbbbb2222"); errors.Is(err, ErrImageDrift) {
+		t.Errorf("a missing image commit = %v, must not be ErrImageDrift", err)
+	}
+	if err := checkImageGT("gastown-polecat:dev", gtLabelSource, "bbbbbbb2222", "bbbbbbb2222"); err != nil {
+		t.Errorf("a matching commit = %v, want nil", err)
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/patrolscan"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 )
@@ -1489,6 +1490,52 @@ func TestSpecDispatchContentionThatOutlastsItsRetriesIsADeferral(t *testing.T) {
 	// contention is gone.
 	if r := runSpecDispatchCycle(f.env()); len(r.Dispatched) != 1 || len(f.slung) != 1 {
 		t.Errorf("next tick: dispatched %+v, slung %v; want the bead slung", r.Dispatched, f.slung)
+	}
+}
+
+// A sandbox image that lags the installed gt refuses the sling for the seat's
+// sake, not the bead's: the dispatcher defers it, adds no failed label and no
+// note, and the next tick slings it once the image is rebuilt. Any other sling
+// failure still labels the bead.
+func TestSpecDispatchImageDriftIsADeferralAndOtherFailuresAreNot(t *testing.T) {
+	t.Parallel()
+	drift := fmt.Errorf("starting polecat session: %w", fmt.Errorf("starting session: %w", session.ErrImageDrift))
+	cases := []struct {
+		name         string
+		err          error
+		wantFailed   int
+		wantDeferred int
+		wantLabel    bool
+	}{
+		{"image_drift_defers", drift, 0, 1, false},
+		{"another_failure_labels", errors.New("starting polecat session: tmux: no server"), 1, 0, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+			f.slingErrs["gt-a"] = []error{tc.err}
+			r := runSpecDispatchCycle(f.env())
+			if len(r.Failed) != tc.wantFailed || len(r.Deferred) != tc.wantDeferred || len(f.slung) != 0 {
+				t.Fatalf("failed %+v deferred %+v slung %v; want %d failed and %d deferred", r.Failed, r.Deferred, f.slung, tc.wantFailed, tc.wantDeferred)
+			}
+			if got := len(f.labels["gt-a"]) > 0; got != tc.wantLabel {
+				t.Errorf("labels = %v, want label added = %v", f.labels["gt-a"], tc.wantLabel)
+			}
+			if tc.wantLabel {
+				return
+			}
+			if n := len(f.notes["gt-a"]); n != 0 {
+				t.Errorf("annotated %d times, want none: the bead is not held out of the queue", n)
+			}
+			if line := r.Deferred[0].Line; !strings.Contains(line, "image lags the installed gt") || !strings.Contains(line, session.ErrImageDrift.Error()) {
+				t.Errorf("deferral line = %q, want it to name the drift", line)
+			}
+			// Still a candidate: the next tick slings it once the image matches.
+			if r := runSpecDispatchCycle(f.env()); len(r.Dispatched) != 1 || len(f.slung) != 1 {
+				t.Errorf("next tick: dispatched %+v, slung %v; want the bead slung", r.Dispatched, f.slung)
+			}
+		})
 	}
 }
 
