@@ -129,7 +129,9 @@ func (d *Daemon) assessSeat(seat supervisor.Seat, in liveness.Input) liveness.Re
 	if in.Now.IsZero() {
 		in.Now = d.clk().Now()
 	}
-	res := liveness.Assess(d.tmux, in)
+	// A sandboxed seat is assessed where it lives (session.SandboxLiveness);
+	// a host seat on the host. The tmux probes route either way.
+	res := session.AssessWhereItLives(d.config.TownRoot, d.tmux, in)
 	if res.Verdict == liveness.Unknown {
 		return res
 	}

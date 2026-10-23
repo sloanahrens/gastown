@@ -47,13 +47,19 @@ type SpawnSpec struct {
 
 // Prepared is what Prepare hands back to the session start.
 type Prepared struct {
-	// WorkDir is where StartSession's working directory points: the host
+	// WorkDir is where the session's working directory points: the host
 	// worktree for tmux, the in-sandbox clone for openshell.
 	WorkDir string
+	// Env overrides the agent startup command's environment (applied last,
+	// an empty value drops the key): the sandbox's GT_TOWN_ROOT, GT_ROOT,
+	// BD_ACTOR, GT_SESSION_BACKEND, the Dolt endpoint, and the removal of
+	// host-only paths and of any credential the provider injects instead.
+	// Nil for tmux.
+	Env map[string]string
 }
 
 // Backend hosts polecat sessions. The tmux backend is a pass-through to
-// today's behaviour; the openshell backend builds a sandbox first and then
+// today's behavior; the openshell backend builds a sandbox first and then
 // drives the tmux server inside it through a routed client (tmux/router.go).
 //
 // Every method takes the session name the rest of gastown already uses, so
@@ -87,23 +93,29 @@ var NewOpenShellBackend func(townRoot string, p Profile) (Backend, error)
 // ("" means tmux); p is the seat's sandbox profile (zero for tmux); host is
 // the process's tmux client.
 func Resolve(seat, backend string, p Profile, townRoot string, host *tmux.Tmux) (Backend, error) {
+	return ResolveWith(NewOpenShellBackend, seat, backend, p, townRoot, host)
+}
+
+// ResolveWith is Resolve with the openshell constructor given (nil = not
+// linked); Resolve passes NewOpenShellBackend.
+func ResolveWith(newOpenShell func(townRoot string, p Profile) (Backend, error), seat, backend string, p Profile, townRoot string, host *tmux.Tmux) (Backend, error) {
 	switch backend {
 	case "", BackendTmux:
 		return NewTmuxBackend(host), nil
 	case BackendOpenShell:
-		if NewOpenShellBackend == nil {
+		if newOpenShell == nil {
 			return nil, fmt.Errorf("seat %s: backend openshell is not linked into this binary", seat)
 		}
 		if p.Image == "" || p.Policy == "" {
 			return nil, fmt.Errorf("seat %s: sandbox profile %q needs image and policy", seat, p.Name)
 		}
-		return NewOpenShellBackend(townRoot, p)
+		return newOpenShell(townRoot, p)
 	default:
 		return nil, fmt.Errorf("seat %s: unknown session backend %q (want tmux or openshell)", seat, backend)
 	}
 }
 
-// tmuxBackend is today's behaviour behind the interface.
+// tmuxBackend is today's behavior behind the interface.
 type tmuxBackend struct{ t *tmux.Tmux }
 
 // NewTmuxBackend hosts sessions on the process's tmux server through t.

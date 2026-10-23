@@ -16,6 +16,7 @@ func recordExec(calls *[][]string, reply string) execFunc {
 }
 
 func TestSessionOfArgs(t *testing.T) {
+	t.Parallel()
 	cases := map[string][]string{
 		"gt-r-n":  {"has-session", "-t", "gt-r-n"},
 		"gt-r-n2": {"send-keys", "-t", "gt-r-n2:0.0", "hi", "Enter"},
@@ -36,6 +37,7 @@ func TestSessionOfArgs(t *testing.T) {
 	}
 }
 
+//testpolicy:allow parallel — installs the process-wide session router, which another test must not see mid-run
 func TestRouterSendsSessionCommandsToTheRoutedClient(t *testing.T) {
 	var hostCalls, routedCalls [][]string
 	host := newTmuxForTest("gt-test", recordExec(&hostCalls, ""), nil)
@@ -65,6 +67,7 @@ func TestRouterSendsSessionCommandsToTheRoutedClient(t *testing.T) {
 	}
 }
 
+//testpolicy:allow parallel — installs the process-wide session router, which another test must not see mid-run
 func TestRouterKeepsProcessProbesInsideTheRoutedClient(t *testing.T) {
 	var hostCalls, routedCalls [][]string
 	host := newTmuxForTest("gt-test", recordExec(&hostCalls, ""), nil)
@@ -98,6 +101,7 @@ func TestRouterKeepsProcessProbesInsideTheRoutedClient(t *testing.T) {
 	}
 }
 
+//testpolicy:allow parallel — installs the process-wide extra-sessions hook, which another test must not see mid-run
 func TestListSessionsIncludesExtraSessions(t *testing.T) {
 	var calls [][]string
 	host := newTmuxForTest("gt-test", recordExec(&calls, "gt-rig-local\n"), nil)
