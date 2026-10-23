@@ -1,11 +1,13 @@
 package land
 
 import (
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
-	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // The Reason tokens of a WorkLandedVerdict. They are machine-readable: callers
@@ -134,15 +136,18 @@ func WorkLandedOnTarget(g WorkLandedRepo, head, target, rigPath, beadID string, 
 }
 
 // rigDefaultBranch is the branch a rig's landings target: the rig config's
-// default_branch, else "main". gt done and the landing worker land through the
-// same resolver, so the predicate asks the question they answer. A config that
-// exists but does not decode is an error, never the "main" fallback, as the
-// landing worker treats it too (gt-v4r0x).
+// default_branch, else "main". gt done and the landing worker resolve their
+// target the same way, so the predicate asks the question they answer. A config
+// that exists but does not decode is an error, never the "main" fallback, as
+// the landing worker treats it too (gt-v4r0x).
 func rigDefaultBranch(rigPath string) (string, error) {
 	if rigPath = strings.TrimSpace(rigPath); rigPath == "" {
 		return "", nil
 	}
-	cfg, err := rig.LoadRigConfigIfPresent(rigPath)
+	cfg, err := config.LoadRigConfig(filepath.Join(rigPath, "config.json"))
+	if errors.Is(err, config.ErrNotFound) {
+		return "main", nil
+	}
 	if err != nil {
 		return "", err
 	}
