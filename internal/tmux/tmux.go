@@ -375,9 +375,15 @@ func (t *Tmux) wrapError(err error, stderr string, args []string) error {
 	// "no such session", while has-session and kill-session say "can't find
 	// session". Matching only the second left a gone session
 	// indistinguishable from a failed query (gt-jv0k3).
+	//
+	// A sandboxed session is reached through `openshell sandbox exec`; once its
+	// sandbox is gone the gateway answers "sandbox not found" instead of tmux's
+	// own message, and a session in a sandbox that does not exist is a session
+	// that does not exist.
 	if strings.Contains(stderr, "session not found") ||
 		strings.Contains(stderr, "can't find session") ||
-		strings.Contains(stderr, "no such session") {
+		strings.Contains(stderr, "no such session") ||
+		strings.Contains(stderr, "sandbox not found") {
 		return ErrSessionNotFound
 	}
 
