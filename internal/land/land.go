@@ -946,6 +946,19 @@ func (l *Lander) now() time.Time {
 	return time.Now()
 }
 
+// acceptedRisksText reads the work bead's comments, once per landing, and
+// returns the accepted-risk record the review is given through --context-file
+// (AcceptedRisksText). A bead whose comments cannot be read is reviewed without
+// them, as one that records none: the review still judges the diff.
+func (l *Lander) acceptedRisksText(id string) string {
+	comments, err := l.Beads.Comments(id)
+	if err != nil {
+		l.logf("%s: could not read the bead's comments (%v); om reviews without accepted risks", id, err)
+		return ""
+	}
+	return AcceptedRisksText(comments)
+}
+
 // Land lands w: the declared head merged onto a throwaway worktree of the
 // target, the merged tree gated by CI on the pushed candidate, then om review,
 // then the target written through a Forgejo pull request — an om / review
@@ -1200,7 +1213,8 @@ func (l *Lander) Land(ctx context.Context, w Work) (Result, error) {
 		l.stage(w, StageOM)
 		omCtx, omDone := l.Slow.watch(ctx, l, w, dir, StageOM)
 		in := ReviewInput{Dir: dir, Base: base, Head: merged, BeadID: w.BeadID,
-			CriteriaText: CriteriaText(issue), PriorFindings: priorReviewFindings(issue.Notes)}
+			CriteriaText: CriteriaText(issue), PriorFindings: priorReviewFindings(issue.Notes),
+			AcceptedRisksText: l.acceptedRisksText(w.BeadID)}
 		verdict, reviewErr = l.review(omCtx, in)
 		// One flaky om run must not cost an escalation and a hand review
 		// (gt-q241r): an execution error on an ordinary tree is retried once,
