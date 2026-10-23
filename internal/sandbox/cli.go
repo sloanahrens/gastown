@@ -1,0 +1,241 @@
+// Package sandbox wraps the openshell CLI so the session backend and the
+// doctor check never build openshell argv themselves.
+package sandbox
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+	"sort"
+	"strings"
+	"time"
+)
+
+const (
+	// callTimeout bounds every call except Create and Exec.
+	callTimeout = 2 * time.Minute
+	// createTimeout covers the image pull a first Create may trigger.
+	createTimeout = 10 * time.Minute
+)
+
+// Runner runs argv (argv[0] is the program) with stdin and returns its
+// output. CLI sends every openshell invocation through one, so tests record
+// argv with Fake instead of starting a process.
+type Runner func(ctx context.Context, argv []string, stdin []byte) (stdout, stderr []byte, err error)
+
+// CLI drives the openshell binary with JSON output.
+type CLI struct {
+	Gateway string // passed as -g; empty uses openshell's active gateway
+	Bin     string // defaults to "openshell"
+	Run     Runner // defaults to os/exec
+}
+
+// CreateSpec describes one `sandbox create`. Empty fields are omitted from
+// the argv.
+type CreateSpec struct {
+	Name, Image, PolicyPath string
+	Providers               []string
+	CPU, Memory             string
+	Labels                  map[string]string
+	Env                     map[string]string
+	DriverConfigJSON        string   // "" omits the flag
+	Command                 []string // the main process argv after "--"
+}
+
+// Status is the part of `sandbox get` the backend acts on.
+type Status struct {
+	Name, Phase string
+	Ready       bool // the Ready condition is True
+}
+
+func (c *CLI) bin() string {
+	if c.Bin == "" {
+		return "openshell"
+	}
+	return c.Bin
+}
+
+func (c *CLI) runner() Runner {
+	if c.Run == nil {
+		return execRunner
+	}
+	return c.Run
+}
+
+// argv is the openshell invocation for sub, global flags first.
+func (c *CLI) argv(sub ...string) []string {
+	a := []string{c.bin()}
+	if c.Gateway != "" {
+		a = append(a, "-g", c.Gateway)
+	}
+	return append(a, sub...)
+}
+
+// run executes argv under a timeout (none when timeout is 0) and wraps a
+// failure with the command verb and its stderr, since openshell reports
+// the reason there and exits non-zero.
+func (c *CLI) run(ctx context.Context, timeout time.Duration, verb string, argv []string, stdin []byte) ([]byte, []byte, error) {
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	stdout, stderr, err := c.runner()(ctx, argv, stdin)
+	if err != nil {
+		return stdout, stderr, fmt.Errorf("openshell %s: %w: %s", verb, err, strings.TrimSpace(string(stderr)))
+	}
+	return stdout, stderr, nil
+}
+
+// Create starts a sandbox and returns once the gateway has accepted it
+// (--detach); callers poll Get for readiness.
+func (c *CLI) Create(ctx context.Context, s CreateSpec) error {
+	a := c.argv("sandbox", "create", "--name", s.Name)
+	if s.Image != "" {
+		a = append(a, "--from", s.Image)
+	}
+	if s.PolicyPath != "" {
+		a = append(a, "--policy", s.PolicyPath)
+	}
+	for _, p := range s.Providers {
+		a = append(a, "--provider", p)
+	}
+	if s.CPU != "" {
+		a = append(a, "--cpu", s.CPU)
+	}
+	if s.Memory != "" {
+		a = append(a, "--memory", s.Memory)
+	}
+	if s.DriverConfigJSON != "" {
+		a = append(a, "--driver-config-json", s.DriverConfigJSON)
+	}
+	a = appendSortedPairs(a, "--label", s.Labels)
+	a = appendSortedPairs(a, "--env", s.Env)
+	a = append(a, "--detach", "--output", "json")
+	if len(s.Command) > 0 {
+		a = append(a, "--")
+		a = append(a, s.Command...)
+	}
+	_, _, err := c.run(ctx, createTimeout, "sandbox create", a, nil)
+	return err
+}
+
+// Get reports the sandbox's phase and whether its Ready condition is True.
+func (c *CLI) Get(ctx context.Context, name string) (Status, error) {
+	stdout, _, err := c.run(ctx, callTimeout, "sandbox get", c.argv("sandbox", "get", name, "--output", "json"), nil)
+	if err != nil {
+		return Status{}, err
+	}
+	var raw struct {
+		Name       string `json:"name"`
+		Phase      string `json:"phase"`
+		Conditions []struct {
+			Type   string `json:"type"`
+			Status string `json:"status"`
+		} `json:"conditions"`
+	}
+	if err := json.Unmarshal(stdout, &raw); err != nil {
+		return Status{}, fmt.Errorf("openshell sandbox get %s: decode: %w", name, err)
+	}
+	st := Status{Name: raw.Name, Phase: raw.Phase}
+	for _, cond := range raw.Conditions {
+		if cond.Type == "Ready" && strings.EqualFold(cond.Status, "True") {
+			st.Ready = true
+		}
+	}
+	return st, nil
+}
+
+// Exec runs argv inside the sandbox with env set and stdin piped. It adds no
+// deadline of its own: the caller's ctx bounds a command whose length only
+// the caller knows.
+func (c *CLI) Exec(ctx context.Context, name string, env map[string]string, argv []string, stdin []byte) (stdout, stderr []byte, err error) {
+	a := c.argv("sandbox", "exec", "-n", name, "--no-tty", "--no-login-shell")
+	a = appendSortedPairs(a, "--env", env)
+	a = append(a, "--")
+	a = append(a, argv...)
+	return c.run(ctx, 0, "sandbox exec", a, stdin)
+}
+
+// Upload copies localPath into remoteDir. It always passes --no-git-ignore:
+// the skeleton archive is not inside a work tree, and a .gitignore match
+// must never silently thin an upload.
+func (c *CLI) Upload(ctx context.Context, name, localPath, remoteDir string) error {
+	a := c.argv("sandbox", "upload", "--no-git-ignore", name, localPath, remoteDir)
+	_, _, err := c.run(ctx, callTimeout, "sandbox upload", a, nil)
+	return err
+}
+
+// Stop stops the sandbox, keeping its workspace.
+func (c *CLI) Stop(ctx context.Context, name string) error {
+	_, _, err := c.run(ctx, callTimeout, "sandbox stop", c.argv("sandbox", "stop", name), nil)
+	return err
+}
+
+// Start starts a stopped sandbox.
+func (c *CLI) Start(ctx context.Context, name string) error {
+	_, _, err := c.run(ctx, callTimeout, "sandbox start", c.argv("sandbox", "start", name), nil)
+	return err
+}
+
+// Delete removes the sandbox. A missing sandbox is an error here; callers
+// that want idempotence match it on the wrapped stderr.
+func (c *CLI) Delete(ctx context.Context, name string) error {
+	_, _, err := c.run(ctx, callTimeout, "sandbox delete", c.argv("sandbox", "delete", name), nil)
+	return err
+}
+
+// Logs returns the sandbox-source log lines from the last since.
+func (c *CLI) Logs(ctx context.Context, name string, since time.Duration) (string, error) {
+	a := c.argv("logs", name, "--since", formatSince(since), "--source", "sandbox")
+	stdout, _, err := c.run(ctx, callTimeout, "logs", a, nil)
+	return string(stdout), err
+}
+
+// formatSince renders d in the unit openshell's --since parses: whole hours,
+// whole minutes, else seconds (rounded up, at least 1s).
+func formatSince(d time.Duration) string {
+	switch {
+	case d >= time.Hour && d%time.Hour == 0:
+		return fmt.Sprintf("%dh", d/time.Hour)
+	case d >= time.Minute && d%time.Minute == 0:
+		return fmt.Sprintf("%dm", d/time.Minute)
+	}
+	secs := int64((d + time.Second - 1) / time.Second)
+	if secs < 1 {
+		secs = 1
+	}
+	return fmt.Sprintf("%ds", secs)
+}
+
+// appendSortedPairs appends `flag k=v` for each entry in key order, so the
+// argv is the same on every call.
+func appendSortedPairs(a []string, flag string, m map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		a = append(a, flag, k+"="+m[k])
+	}
+	return a
+}
+
+func execRunner(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+	if len(argv) == 0 {
+		return nil, nil, fmt.Errorf("empty argv")
+	}
+	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	cmd.WaitDelay = 100 * time.Millisecond
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
