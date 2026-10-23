@@ -19,6 +19,10 @@ func TestIsDoltSQLServerArgsSlice(t *testing.T) {
 		{"grep", []string{"grep", "dolt", "sql-server"}, false},
 		{"not dolt", []string{"/bin/sleep", "sql-server"}, false},
 		{"bare dolt", []string{"dolt"}, false},
+		{"tail of the server log", []string{"tail", "-f", "dolt-sql-server.log"}, false},
+		{"editor on dolt-server.go", []string{"vim", "dolt-server.go"}, false},
+		{"config flag before the subcommand", []string{"dolt", "--config", "x", "sql-server"}, true},
+		{"port flag form", []string{"/opt/homebrew/bin/dolt", "sql-server", "--port", "3307"}, true},
 		{"nil", nil, false},
 	}
 	for _, tt := range tests {

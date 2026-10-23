@@ -414,3 +414,14 @@ func TestParseDoltCoresIgnoresTestServers(t *testing.T) {
 		})
 	}
 }
+
+// The Dolt server is whatever the shared argv matcher says it is: a global
+// flag before sql-server still counts, and a process that only mentions the
+// words does not.
+func TestParseDoltCoresUsesSharedMatcher(t *testing.T) {
+	t.Parallel()
+	got := parseDoltCores("  200.0 dolt --config x sql-server\n  90.0 tail -f dolt-sql-server.log\n")
+	if got == nil || math.Abs(*got-2) > 1e-9 {
+		t.Fatalf("parseDoltCores = %v, want 2", got)
+	}
+}
