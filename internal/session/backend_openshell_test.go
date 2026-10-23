@@ -560,8 +560,19 @@ func TestOpenShellStageDirIsPrivate(t *testing.T) {
 // duplicate (found on a live sandbox, gt-t1798).
 func TestOpenShellMainScriptHolderIsNotThePolecatSession(t *testing.T) {
 	t.Parallel()
-	if sandboxHolderSession == openshellTestSession {
-		t.Fatalf("holder session %q equals the polecat session", sandboxHolderSession)
+	// Every session name the town builds carries a rig or role prefix and a
+	// hyphen, so the bare holder name cannot collide with any of them. Check
+	// the guarantee against each shape, not only the fixture id.
+	for _, sess := range []string{
+		openshellTestSession,
+		PolecatSessionName(DefaultPrefix, openshellTestPolecat),
+		PolecatSessionName("bd", "furiosa"),
+		CrewSessionName(DefaultPrefix, "sloan"),
+		OverseerSessionName(),
+	} {
+		if sandboxHolderSession == sess {
+			t.Fatalf("holder session %q equals the polecat session %q", sandboxHolderSession, sess)
+		}
 	}
 	if !strings.Contains(sandboxMainScript, "-s "+sandboxHolderSession+" ") {
 		t.Fatalf("main script %q does not create the holder session %q", sandboxMainScript, sandboxHolderSession)
