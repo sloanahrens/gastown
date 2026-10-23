@@ -102,6 +102,17 @@ func TestSandboxSecretsGuardBlocks(t *testing.T) {
 		"node -e 'console.log(process.env.DEEPSEEK_API_KEY)'",
 		"ruby -e 'puts ENV[\"DB_PASSWORD\"]'",
 		"perl -e 'print $ENV{FORGEJO_TOKEN}'",
+		"ruby -e 'puts ENV.to_h'",
+		"ruby -e \"puts ENV.fetch('FORGEJO_TOKEN')\"",
+		"perl -e 'print %ENV'",
+		"python3 -c \"from os import environ; print(environ)\"",
+		"python3 -c \"import os; os.system('env')\"",
+		"python3 -c \"import subprocess; subprocess.run('printenv', shell=True)\"",
+		"ruby -e 'puts `env`'",
+		"node -e \"require('child_process').execSync('env', {stdio: 'inherit'})\"",
+		"jq -n env",
+		"jq -n '$ENV'",
+		"jq -n '$ENV.FORGEJO_TOKEN'",
 	} {
 		blocked, out := runSandboxSecretsGuard(t, "openshell", command)
 		if !blocked {
@@ -234,6 +245,14 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"cat /proc/self/status",
 		"python3 -c 'print(1+1)'",
 		"node -e 'console.log(1)'",
+		"ruby -e 'puts 1'",
+		"ruby -e \"puts ENV.fetch('HOME')\"",
+		"perl -e 'print \"ok\\n\"'",
+		"python3 -c \"import os; os.system('make test')\"",
+		"python3 -c \"print('env is set')\"",
+		"jq . file.json",
+		"jq -r '.name' file.json",
+		"jq -n '{env: 1}'",
 		"ls -la /sandbox",
 	} {
 		if blocked, out := runSandboxSecretsGuard(t, "openshell", command); blocked {

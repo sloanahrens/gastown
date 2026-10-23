@@ -27,7 +27,9 @@ Blocked, in any chain, launcher, shell -c payload, eval or command substitution:
   - reading ~/.claude.json, a .env file, ~/.netrc or ~/.git-credentials
   - git credential fill, and the git credential helper run directly
   - a python/node/ruby/perl/awk one-liner that reads the whole environment, a
-    secret-like variable, or a credential file
+    secret-like variable, or a credential file, or passes a shell command that
+    prints the environment to a shell-out such as os.system or child_process
+  - jq whose filter is env or $ENV
 
 Exit codes:
   0 - Operation allowed
@@ -76,13 +78,22 @@ var (
 	// sandboxSecretsNamesEnvRe finds a command too deeply nested to judge that still
 	// names an environment dump.
 	sandboxSecretsNamesEnvRe = regexp.MustCompile(`\b(env|printenv|environ)\b`)
-	// sandboxSecretsEnvScriptRe matches a one-liner payload's access to the environment.
-	sandboxSecretsEnvScriptRe = regexp.MustCompile(`os\.environ|os\.getenv|process\.env|ENV\[|\$ENV\{|\bENVIRON\b`)
+	// sandboxSecretsEnvScriptRe matches a one-liner payload's access to the environment. ENV
+	// covers ruby's ENV and perl's %ENV and $ENV{}; the from-import binds environ by name.
+	sandboxSecretsEnvScriptRe = regexp.MustCompile(`os\.environ|os\.getenv|process\.env|\bENV\b|\bENVIRON\b|\bfrom\s+os\s+import\b[^;\n]*\benviron\b`)
+	// sandboxSecretsShellOutRe matches a script that runs a shell command, so its quoted
+	// strings are judged as commands.
+	sandboxSecretsShellOutRe = regexp.MustCompile("\\b(?:system|popen|exec\\w*|spawn\\w*|subprocess|check_output|getoutput|Open3)\\b|`")
+	// sandboxSecretsQuotedRe matches one quoted string in a one-liner.
+	sandboxSecretsQuotedRe = regexp.MustCompile("'([^']*)'|\"([^\"]*)\"|`([^`]*)`")
+	// sandboxSecretsJQEnvRe matches a jq filter that yields the environment: a bare env
+	// word or $ENV, not a key such as .env or {env: 1}.
+	sandboxSecretsJQEnvRe = regexp.MustCompile(`\$ENV\b|(?:^|[^\w.$"'])env(?:$|[^\w:"'])`)
 	// sandboxSecretsEnvScriptNamedRe matches an access that names one literal variable, such as
 	// process.env.NODE_ENV or os.environ['HOME'] or awk's ENVIRON["HOME"]. The name
 	// is in whichever of its three groups the form uses; a dynamic key
 	// (os.environ[k]) names none.
-	sandboxSecretsEnvScriptNamedRe = regexp.MustCompile(`process\.env\.([A-Za-z_]\w*)|(?:os\.environ(?:\.get)?[(\[]|os\.getenv\(|process\.env\[|\bENV\[|\bENVIRON\[)\s*['"]([A-Za-z_]\w*)['"]|\$ENV\{\s*['"]?([A-Za-z_]\w*)`)
+	sandboxSecretsEnvScriptNamedRe = regexp.MustCompile(`process\.env\.([A-Za-z_]\w*)|(?:os\.environ(?:\.get)?[(\[]|os\.getenv\(|process\.env\[|\bENV(?:\.fetch\(|\[)|\bENVIRON\[)\s*['"]([A-Za-z_]\w*)['"]|\$ENV\{\s*['"]?([A-Za-z_]\w*)`)
 	// sandboxSecretsCredentialPathRe matches a one-liner payload naming a credential file.
 	sandboxSecretsCredentialPathRe = regexp.MustCompile(`\.claude\.json|\.netrc|git-credentials`)
 )
@@ -213,6 +224,11 @@ func sandboxSecretsWalk(command string, depth int) (reason string, tooDeep bool)
 			if idx := shellCPayloadIndex(toLowerTokens(argv[1:])); idx >= 0 {
 				payloads = append(payloads, argv[1+idx])
 			}
+		case sandboxSecretsIsScriptRunner(name):
+			// A script that shells out runs the strings it passes, so each one is judged as a command.
+			for _, a := range argv[1:] {
+				payloads = append(payloads, sandboxSecretsShelledStrings(a)...)
+			}
 		case name == "eval" && len(argv) > 1:
 			payloads = append(payloads, strings.Join(argv[1:], " "))
 		}
@@ -317,6 +333,11 @@ func sandboxSecretsInvocation(argv []string) string {
 				return name + " sends a secret variable"
 			}
 		}
+	case "jq":
+		// The first word that is not a flag is the filter; `jq -n env` prints the environment.
+		if f := sandboxSecretsNonFlagArgs(args); len(f) > 0 && sandboxSecretsJQEnvRe.MatchString(f[0]) {
+			return "jq prints the environment"
+		}
 	case "git":
 		if sandboxSecretsIsCredentialFill(args) {
 			return "git credential fill prints a password"
@@ -331,7 +352,7 @@ func sandboxSecretsInvocation(argv []string) string {
 			}
 		}
 	}
-	if sandboxSecretsScriptRunners[strings.TrimRight(name, "0123456789.")] || sandboxSecretsScriptRunners[name] {
+	if sandboxSecretsIsScriptRunner(name) {
 		for _, a := range args {
 			if sandboxSecretsReadsEnvironment(a) {
 				return "a " + name + " one-liner reads the environment"
@@ -362,6 +383,26 @@ func sandboxSecretsReadsEnvironment(script string) bool {
 		}
 	}
 	return false
+}
+
+// sandboxSecretsIsScriptRunner reports whether the command runs a script, such as python3.12.
+func sandboxSecretsIsScriptRunner(name string) bool {
+	return sandboxSecretsScriptRunners[strings.TrimRight(name, "0123456789.")] || sandboxSecretsScriptRunners[name]
+}
+
+// sandboxSecretsShelledStrings returns the quoted strings of a script that runs a shell
+// command, so the walk judges each as one. A script with no shell-out has none.
+func sandboxSecretsShelledStrings(script string) []string {
+	if !sandboxSecretsShellOutRe.MatchString(script) {
+		return nil
+	}
+	var strs []string
+	for _, m := range sandboxSecretsQuotedRe.FindAllStringSubmatch(script, -1) {
+		if s := m[1] + m[2] + m[3]; s != "" { // one of the three groups matched
+			strs = append(strs, s)
+		}
+	}
+	return strs
 }
 
 // sandboxSecretsIsCredentialFill reports whether the git command is `credential fill`, which
