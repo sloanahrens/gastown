@@ -44,7 +44,7 @@ An OpenShell workload holding one polecat's clone and tmux server, fenced by a p
 A named entry in the town's `sandboxes` block: image, policy file, provider names, cpu, memory, gateway. A seat points at one.
 
 ### Town skeleton
-The secret-free copy of town metadata a sandbox needs for `gt` and `bd`: `mayor/town.json`, routes, beads metadata pointing at the control plane, scrubbed settings, directives, a bare `<rig>/.repo.git` with the sandbox-side origin.
+The secret-free copy of town metadata a sandbox needs for `gt` and `bd`. Before changing what a sandbox receives, read `RenderSkeleton` in `internal/sandbox/skeleton.go`, which defines the archive contents.
 
 ### Crew
 Long-lived, named agents for persistent collaboration. Unlike ephemeral Polecats, Crew members maintain context across sessions and are ideal for ongoing work relationships.
