@@ -184,6 +184,50 @@ func TestAppendLine_ConcurrentWritersKeepLinesWhole(t *testing.T) {
 	assert.Len(t, seen, writers*perWriter, "every write landed exactly once")
 }
 
+// shortWrite stores only the first half of b and reports err, as a full disk
+// does.
+func shortWrite(err error) func(*os.File, []byte) (int, error) {
+	return func(f *os.File, b []byte) (int, error) {
+		n, werr := f.Write(b[:len(b)/2])
+		if werr != nil {
+			return n, werr
+		}
+		return n, err
+	}
+}
+
+func TestAppendLineShortWrite(t *testing.T) {
+	t.Parallel()
+	for name, werr := range map[string]error{
+		"short count with an error": io.ErrClosedPipe,
+		"short count with no error": nil,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "usage.jsonl")
+			now := time.Now().UTC()
+			rec := func(in int) []byte {
+				line, err := json.Marshal(LedgerRecord{TS: now, Caller: "c", InputTokens: in, OutputTokens: 1})
+				require.NoError(t, err)
+				return line
+			}
+
+			err := appendLineWith(path, rec(100), shortWrite(werr))
+			require.Error(t, err, "a short write is an error, not absorbed")
+			if werr == nil {
+				require.ErrorIs(t, err, io.ErrShortWrite)
+			}
+			require.NoError(t, appendLine(path, rec(7)))
+
+			rep, err := ReadSpend(path, now.Add(-time.Hour), now.Add(time.Hour), 1e9)
+			require.NoError(t, err)
+			assert.Equal(t, 1, rep.Calls, "the good record is counted")
+			assert.Equal(t, 7, rep.InputTokens)
+			assert.Equal(t, 1, rep.LinesSkipped, "only the partial line is skipped")
+		})
+	}
+}
+
 func TestUsageLedgerPath(t *testing.T) {
 	t.Parallel()
 	assert.Equal(t, filepath.Join("/town", ".runtime", "jev", "usage.jsonl"), UsageLedgerPath("/town"))

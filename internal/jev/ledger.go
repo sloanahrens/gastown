@@ -82,7 +82,16 @@ func (l *ledger) warnf(err error) {
 // lines from concurrent clients stay whole even when a write is split.
 // MkdirAll and OpenFile keep the mode of an existing directory or file, so the
 // modes are set here too.
-func appendLine(path string, line []byte) (err error) {
+func appendLine(path string, line []byte) error {
+	return appendLineWith(path, line, (*os.File).Write)
+}
+
+// appendLineWith is appendLine with the file write swapped out, so a test can
+// cut a write short. A write that stores fewer bytes than asked is an error,
+// and the partial line it leaves is ended with a newline before the next
+// record, so ReadSpend skips that one line instead of the two it would
+// otherwise glue together.
+func appendLineWith(path string, line []byte, write func(*os.File, []byte) (int, error)) (err error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -90,7 +99,7 @@ func appendLine(path string, line []byte) (err error) {
 	if err := os.Chmod(dir, 0o700); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600)
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600)
 	if err != nil {
 		return err
 	}
@@ -107,6 +116,31 @@ func appendLine(path string, line []byte) (err error) {
 	if err := f.Chmod(0o600); err != nil {
 		return err
 	}
-	_, err = f.Write(append(line, '\n'))
+	record := append(line, '\n')
+	torn, err := endsMidLine(f)
+	if err != nil {
+		return err
+	}
+	if torn {
+		record = append([]byte{'\n'}, record...)
+	}
+	n, err := write(f, record)
+	if err == nil && n < len(record) {
+		err = io.ErrShortWrite
+	}
 	return err
+}
+
+// endsMidLine reports whether f ends in a line with no newline, which a short
+// write or a crash leaves behind.
+func endsMidLine(f *os.File) (bool, error) {
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return false, err
+	}
+	var last [1]byte
+	if _, err := f.ReadAt(last[:], info.Size()-1); err != nil {
+		return false, err
+	}
+	return last[0] != '\n', nil
 }
