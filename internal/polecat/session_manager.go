@@ -527,8 +527,10 @@ func (m *SessionManager) Start(polecat string, opts SessionStartOptions) error {
 	return m.launch(polecat, sessionID, opts)
 }
 
-// launch creates the polecat's session and starts its agent.
-func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOptions) error {
+// launch creates the polecat's session and starts its agent. A launch that
+// fails after Prepare removes the sandbox that Prepare made; see the deferred
+// cleanup below.
+func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOptions) (err error) {
 	// Determine working directory
 	workDir := opts.WorkDir
 	if workDir == "" {
@@ -638,11 +640,13 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		if !ok {
 			return fmt.Errorf("preparing %s session for %s: the backend names no control-plane host to clone from", b.Name(), polecat)
 		}
-		repoURL, err := m.sandboxRepoURL(cp, townRoot, polecat, polecatGitBranch)
-		if err != nil {
-			return fmt.Errorf("preparing %s session for %s: %w", b.Name(), polecat, err)
+		// A separate error: the deferred cleanup below reads the named
+		// result, which this block must not shadow.
+		repoURL, repoErr := m.sandboxRepoURL(cp, townRoot, polecat, polecatGitBranch)
+		if repoErr != nil {
+			return fmt.Errorf("preparing %s session for %s: %w", b.Name(), polecat, repoErr)
 		}
-		prep, err := b.Prepare(context.Background(), session.SpawnSpec{
+		prep, perr := b.Prepare(context.Background(), session.SpawnSpec{
 			TownRoot:    townRoot,
 			Rig:         m.rig.Name,
 			Polecat:     polecat,
@@ -652,9 +656,22 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 			HostWorkDir: workDir,
 			Env:         envVars,
 		})
-		if err != nil {
-			return fmt.Errorf("preparing %s session for %s: %w", b.Name(), polecat, err)
+		if perr != nil {
+			return fmt.Errorf("preparing %s session for %s: %w", b.Name(), polecat, perr)
 		}
+		// A launch that fails after Prepare leaves a running sandbox whose
+		// registry record counts as a live session, so the seat looks occupied
+		// and no one gets to it: Stop returns ErrSessionNotFound when the tmux
+		// session never came up, so the kill path's cleanup never runs. This
+		// drops what this launch made, sandbox and record (gt-8a1ql).
+		defer func() {
+			if err == nil {
+				return
+			}
+			if cerr := session.CleanupSandbox(townRoot, sessionID); cerr != nil {
+				err = errors.Join(err, fmt.Errorf("cleaning up %s session for %s: %w", b.Name(), polecat, cerr))
+			}
+		}()
 		if prep.WorkDir != "" {
 			sessionWorkDir = prep.WorkDir
 		}
@@ -675,10 +692,12 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 
 	command := opts.Command
 	if command == "" {
-		var err error
-		command, err = config.BuildStartupCommandFromConfig(envCfg, m.rig.Path, beacon, opts.Agent)
-		if err != nil {
-			return fmt.Errorf("building startup command: %w", err)
+		// A separate error: the deferred cleanup above reads the named
+		// result, which this block must not shadow.
+		var buildErr error
+		command, buildErr = config.BuildStartupCommandFromConfig(envCfg, m.rig.Path, beacon, opts.Agent)
+		if buildErr != nil {
+			return fmt.Errorf("building startup command: %w", buildErr)
 		}
 	}
 
