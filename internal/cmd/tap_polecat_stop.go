@@ -86,7 +86,11 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 	if hb != nil {
 		state := hb.EffectiveState()
 		if state == polecat.HeartbeatExiting || state == polecat.HeartbeatIdle {
-			return nil // gt done already ran or polecat is idle — nothing to do
+			// gt done already ran or the polecat is idle. In a sandbox a clean,
+			// pushed completion also ends this session, so the sandbox's main
+			// process exits and the gateway deletes the sandbox.
+			endSandboxSessionIfDone(sandboxSessionEnd{}, os.Getenv, townRoot, os.Getenv("GT_RIG"), polecatName, sessionName)
+			return nil
 		}
 	}
 
