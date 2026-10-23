@@ -21,7 +21,8 @@ session only (GT_SESSION_BACKEND=openshell). On a host it does nothing.
 Blocked, in any chain, launcher, shell -c payload, eval or command substitution:
   - env, printenv, set, export, declare/typeset and compgen, when they would list
     the environment, or printenv of a secret-like NAME
-  - echo/printf of a secret-like variable
+  - echo/printf of a secret-like variable, or a secret-like variable fed to a
+    here-string, an unquoted heredoc body, or an argument of curl, wget or http
   - any read of /proc/<pid>/environ
   - reading ~/.claude.json, a .env file, ~/.netrc or ~/.git-credentials
   - git credential fill, and the git credential helper run directly
@@ -67,6 +68,9 @@ func tapGuardSandboxSecrets(stdin io.Reader, stderr io.Writer, proc guardProcess
 var (
 	// sandboxSecretsVarRefRe finds the variable names a word expands: $NAME, ${NAME}.
 	sandboxSecretsVarRefRe = regexp.MustCompile(`\$\{?([A-Za-z_][A-Za-z0-9_]*)`)
+	// sandboxSecretsHereStringRe matches a here-string operator, with an optional file
+	// descriptor, and captures the operand glued to it: <<<"$X" tokenizes as <<<$X.
+	sandboxSecretsHereStringRe = regexp.MustCompile(`^[0-9]*<<<(.*)$`)
 	// sandboxSecretsProcEnvironRe matches a read of any process's environment block.
 	sandboxSecretsProcEnvironRe = regexp.MustCompile(`/proc/(?:[^\s;&|'"]|\$\([^)]*\))*/environ`)
 	// sandboxSecretsNamesEnvRe finds a command too deeply nested to judge that still
@@ -104,6 +108,55 @@ func sandboxSecretsIsSecretName(name string) bool {
 func sandboxSecretsRefsSecret(word string) bool {
 	for _, m := range sandboxSecretsVarRefRe.FindAllStringSubmatch(word, -1) {
 		if sandboxSecretsIsSecretName(m[1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxSecretsBodyRefsSecret reports whether the text of an unquoted heredoc
+// body expands a secret-like variable. A backslash before the $ makes it literal.
+func sandboxSecretsBodyRefsSecret(body string) bool {
+	for _, m := range sandboxSecretsVarRefRe.FindAllStringSubmatchIndex(body, -1) {
+		if backslashesBefore(body, m[0])%2 == 1 {
+			continue
+		}
+		if sandboxSecretsIsSecretName(body[m[2]:m[3]]) {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxSecretsHereStringRefsSecret reports whether a segment feeds a secret-like
+// variable to a command's stdin as a here-string: the operand follows the <<<
+// token or is glued to it.
+func sandboxSecretsHereStringRefsSecret(segment []string) bool {
+	for i, tok := range segment {
+		m := sandboxSecretsHereStringRe.FindStringSubmatch(tok)
+		if m == nil {
+			continue
+		}
+		operand := m[1]
+		if operand == "" && i+1 < len(segment) {
+			operand = segment[i+1]
+		}
+		if sandboxSecretsRefsSecret(operand) {
+			return true
+		}
+	}
+	return false
+}
+
+// sandboxSecretsHeredocRefsSecret reports whether a heredoc the shell expands
+// carries a secret-like variable into a command's stdin. A quoted tag keeps its
+// body literal, and a body fed to a shell is judged as code by the walk.
+func sandboxSecretsHeredocRefsSecret(command string) bool {
+	for _, span := range scanHeredocs(command) {
+		if span.bodyStart < 0 || span.quoted || heredocReaderIsShellInvoker(span.reader) {
+			continue
+		}
+		if sandboxSecretsBodyRefsSecret(span.body) {
 			return true
 		}
 	}
@@ -164,6 +217,9 @@ func sandboxSecretsWalk(command string, depth int) (reason string, tooDeep bool)
 			payloads = append(payloads, strings.Join(argv[1:], " "))
 		}
 	}
+	if sandboxSecretsHeredocRefsSecret(command) {
+		return "an unquoted heredoc expands a secret variable", false
+	}
 	payloads = append(payloads, shellFedHeredocBodies(command)...)
 	payloads = append(payloads, prWorkflowSubstitutions(command)...)
 	for _, payload := range payloads {
@@ -185,6 +241,9 @@ func sandboxSecretsWalk(command string, depth int) (reason string, tooDeep bool)
 // no command behind it. It returns the verdict on the command it finds, the
 // payloads a launcher carries, and that command's argv.
 func sandboxSecretsSegment(segment []string) (reason string, payloads, argv []string) {
+	if sandboxSecretsHereStringRefsSecret(segment) {
+		return "a here-string expands a secret variable", nil, nil
+	}
 	seg := trimShellKeywords(segment)
 	for len(seg) > 0 {
 		word := seg[0]
@@ -248,6 +307,14 @@ func sandboxSecretsInvocation(argv []string) string {
 		for _, a := range args {
 			if sandboxSecretsRefsSecret(a) {
 				return name + " of a secret variable"
+			}
+		}
+	case "curl", "wget", "http", "https":
+		// A verbose flag or an echoing server puts a header or body in the output,
+		// so any argument that expands a secret counts, not only -H and -d.
+		for _, a := range args {
+			if sandboxSecretsRefsSecret(a) {
+				return name + " sends a secret variable"
 			}
 		}
 	case "git":
