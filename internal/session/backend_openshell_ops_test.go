@@ -40,7 +40,7 @@ func opsBackend(t *testing.T, fake *sandbox.Fake, srv *sandboxProbe) (b *openshe
 
 func newSandboxProbe(t *testing.T, withSession bool) *sandboxProbe {
 	t.Helper()
-	srv := &sandboxProbe{Server: tmuxfake.New(clockwork.NewFakeClock()), agentAlive: true}
+	srv := &sandboxProbe{Server: tmuxfake.New(clockwork.NewFakeClockAt(time.Unix(1760000000, 0))), agentAlive: true}
 	if withSession {
 		if err := srv.NewSession(openshellTestSession, t.TempDir()); err != nil {
 			t.Fatal(err)
