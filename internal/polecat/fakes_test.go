@@ -346,6 +346,12 @@ func (f *fakeProbe) GetPanePID(target string) (string, error) {
 	return f.pids[target], nil
 }
 
+func (f *fakeProbe) setPanePID(session, pid string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pids[session] = pid
+}
+
 func (f *fakeProbe) setAlive(session string, alive bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
