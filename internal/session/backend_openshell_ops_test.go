@@ -109,8 +109,8 @@ func TestOpenShellOpsSessionExistsMatrix(t *testing.T) {
 				t.Fatalf("tmux asked = %v, want %v", asked, tt.wantProbed)
 			}
 			wantGet := []string{"openshell", "sandbox", "get", openshellTestSession, "--output", "json"}
-			if len(tt.fake.Calls) != 1 || !reflect.DeepEqual(tt.fake.Calls[0], wantGet) {
-				t.Fatalf("openshell calls = %v, want one %v", tt.fake.Calls, wantGet)
+			if len(tt.fake.Calls()) != 1 || !reflect.DeepEqual(tt.fake.Calls()[0], wantGet) {
+				t.Fatalf("openshell calls = %v, want one %v", tt.fake.Calls(), wantGet)
 			}
 		})
 	}
@@ -136,8 +136,8 @@ func TestOpenShellOpsProgressSampleReadsTheTranscriptThroughExec(t *testing.T) {
 		t.Fatalf("transcript sample = %q %d %v, want %q 40960 %v", s.TranscriptPath, s.TranscriptBytes, s.TranscriptMtime, path, time.Unix(1760000123, 0))
 	}
 	want := [][]string{sandboxExec("sh", "-c", transcriptScript)}
-	if !reflect.DeepEqual(fake.Calls, want) {
-		t.Fatalf("openshell calls = %v, want %v", fake.Calls, want)
+	if !reflect.DeepEqual(fake.Calls(), want) {
+		t.Fatalf("openshell calls = %v, want %v", fake.Calls(), want)
 	}
 }
 
@@ -225,8 +225,8 @@ func TestOpenShellOpsStopRecordsSandboxStop(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 	want := [][]string{{"openshell", "sandbox", "stop", openshellTestSession}}
-	if !reflect.DeepEqual(fake.Calls, want) {
-		t.Fatalf("openshell calls = %v, want %v", fake.Calls, want)
+	if !reflect.DeepEqual(fake.Calls(), want) {
+		t.Fatalf("openshell calls = %v, want %v", fake.Calls(), want)
 	}
 }
 
@@ -250,8 +250,8 @@ func TestOpenShellOpsDeleteRemovesTheSandboxAndItsRecord(t *testing.T) {
 		t.Fatalf("Delete: %v", err)
 	}
 	want := [][]string{{"openshell", "sandbox", "delete", openshellTestSession}}
-	if !reflect.DeepEqual(fake.Calls, want) {
-		t.Fatalf("openshell calls = %v, want %v", fake.Calls, want)
+	if !reflect.DeepEqual(fake.Calls(), want) {
+		t.Fatalf("openshell calls = %v, want %v", fake.Calls(), want)
 	}
 	if _, ok, _ := ReadSandboxRecord(b.townRoot, openshellTestSession); ok {
 		t.Fatal("record survived Delete")

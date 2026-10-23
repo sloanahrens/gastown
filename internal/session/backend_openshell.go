@@ -225,6 +225,9 @@ func (b *openshellBackend) awaitReady(ctx context.Context, name string) error {
 			return nil
 		}
 		if polls == readyPolls {
+			if !st.ReadyKnown {
+				return fmt.Errorf("sandbox %s reported no Ready condition after %d polls (phase %q)", name, readyPolls, st.Phase)
+			}
 			return fmt.Errorf("sandbox %s not Ready after %d polls (phase %q)", name, readyPolls, st.Phase)
 		}
 		if err := b.wait(ctx, readyInterval); err != nil {
