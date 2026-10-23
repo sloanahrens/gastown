@@ -62,19 +62,33 @@ func testTown(t *testing.T, ft *deliveryTmux) (*Town, *townLog) {
 	}, l
 }
 
-// TestTownRefusesRetiredRoleShortcut: the mayor role is retired, so neither its
-// bare name nor its mail-style address names a session any more.
-func TestTownRefusesRetiredRoleShortcut(t *testing.T) {
+// TestTownRefusesRetiredAndReservedAddresses: the mayor role is retired, so
+// neither its bare name, its mail-style address nor its rig-scoped address
+// names a session any more, and the mayor and deacon town subpaths hold no
+// mailboxes. Each is refused, not delivered and not skipped as muted: the muted
+// level on the bead the address would otherwise name must not turn the refusal
+// into a silent skip.
+func TestTownRefusesRetiredAndReservedAddresses(t *testing.T) {
 	t.Parallel()
-	for _, target := range []string{"mayor", "mayor/"} {
-		t.Run(target, func(t *testing.T) {
+	for _, tc := range []struct {
+		target  string
+		wantErr string
+	}{
+		{"mayor", "not found"},
+		{"mayor/", "not found"},
+		{"gastown/mayor", "not found"},
+		{"mayor/dogs/rex", "invalid town target"},
+		{"deacon/dogs/rex", "invalid town target"},
+	} {
+		t.Run(tc.target, func(t *testing.T) {
 			t.Parallel()
 			ft := newDeliveryTmux(t)
 			town, l := testTown(t, ft)
+			l.levels["gt-gastown-polecat-mayor"] = beads.NotifyMuted
 
-			err := town.Nudge(t.Context(), target, "dispatch", "unknown")
-			if err == nil || !strings.Contains(err.Error(), "not found") {
-				t.Fatalf("Nudge(%q) = %v, want session not found", target, err)
+			err := town.Nudge(t.Context(), tc.target, "dispatch", "unknown")
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("Nudge(%q) = %v, want an error containing %q", tc.target, err, tc.wantErr)
 			}
 			if got := l.entries(); len(got) != 0 {
 				t.Errorf("logged = %q, want nothing", got)
