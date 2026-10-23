@@ -130,8 +130,10 @@ type Options struct {
 	Now        func() time.Time
 	Sleep      func(ctx context.Context, d time.Duration) error
 	// NewSandboxBackend builds the backend a sandboxed polecat is stopped
-	// through, from its registry record's profile. Nil means
-	// session.NewOpenShellBackend; tests inject a fake.
+	// through, from its registry record's profile. RealSeams fills it with
+	// session.NewOpenShellBackend; nil leaves a sandbox unstopped and
+	// reported, so a test that forgets the fake cannot reach the host's
+	// openshell.
 	NewSandboxBackend func(townRoot string, p session.Profile) (session.Backend, error)
 
 	Out    io.Writer
@@ -165,6 +167,9 @@ func RealSeams(o *Options) {
 	if o.ErrOut == nil {
 		o.ErrOut = os.Stderr
 	}
+	if o.NewSandboxBackend == nil {
+		o.NewSandboxBackend = session.NewOpenShellBackend
+	}
 	if o.LaunchDaemonsDir == "" {
 		o.LaunchDaemonsDir = "/Library/LaunchDaemons"
 	}
@@ -179,6 +184,8 @@ func RealSeams(o *Options) {
 // engine is one state's run: the options plus the output helpers.
 type engine struct {
 	o Options
+	// stranded names the sandboxes a stop could not reach or stop.
+	stranded []string
 }
 
 func newEngine(o Options) *engine {
