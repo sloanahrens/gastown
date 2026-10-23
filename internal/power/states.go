@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // Status prints every part and the derived state, and changes nothing.
@@ -131,6 +133,7 @@ func Standby(ctx context.Context, o Options) error {
 	if err := e.setEstop(ctx, StateStandby); err != nil {
 		return err
 	}
+	e.stopSandboxes()
 	e.jobhostDown(ctx)
 	if err := e.record(string(StateStandby)); err != nil {
 		return err
@@ -171,6 +174,7 @@ func Off(ctx context.Context, o Options) error {
 	if err := e.setEstop(ctx, StateOff); err != nil {
 		return err
 	}
+	e.stopSandboxes()
 	for _, label := range append([]string{DaemonLabel}, WatcherLabels...) {
 		if !e.loaded(ctx, label) {
 			continue
@@ -321,6 +325,40 @@ func (e *engine) drain(ctx context.Context) error {
 		e.say("draining: landings pending=%s, polecats working=%s, dolt gc running=%d", ps, ws, boolInt(g))
 		if err := e.o.Sleep(ctx, 30*time.Second); err != nil {
 			return err
+		}
+	}
+}
+
+// stopSandboxes stops every live openshell sandbox, once the drain has
+// finished. The sandbox registry is the list of live sandboxes; a tmux
+// polecat has no record and is never touched. A stop that fails is logged
+// and the state stands: the sandbox keeps its workspace, so the operator can
+// stop or delete it by hand. Under --dry-run it only prints what it would stop.
+func (e *engine) stopSandboxes() {
+	newBackend := e.o.NewSandboxBackend
+	if newBackend == nil {
+		newBackend = session.NewOpenShellBackend
+	}
+	for _, name := range session.ListSandboxSessions(e.o.TownRoot) {
+		rec, ok, err := session.ReadSandboxRecord(e.o.TownRoot, name)
+		if err != nil {
+			e.warn("sandbox %s: cannot read its record, not stopped: %v", name, err)
+			continue
+		}
+		if !ok {
+			continue
+		}
+		if e.o.DryRun {
+			fmt.Fprintf(e.o.Out, "  [dry-run] stop sandbox %s\n", name)
+			continue
+		}
+		fmt.Fprintf(e.o.Out, "  + stop sandbox %s\n", name)
+		b, err := newBackend(e.o.TownRoot, session.Profile{Name: rec.Profile, Gateway: rec.Gateway, Image: rec.Image})
+		if err == nil {
+			err = b.Stop(name)
+		}
+		if err != nil {
+			e.warn("sandbox %s: stop failed, the state stands: %v", name, err)
 		}
 	}
 }
