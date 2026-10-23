@@ -110,6 +110,11 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	if spec.Rig == "" || spec.Polecat == "" || spec.Branch == "" || spec.RepoURL == "" {
 		return nil, fmt.Errorf("sandbox %s: spec needs rig, polecat, branch and repo URL", spec.Session)
 	}
+	// Built before anything is pushed or created, so a bad profile touches nothing.
+	create, err := b.createSpec(spec)
+	if err != nil {
+		return nil, err
+	}
 
 	// The clone inside the sandbox fetches the branch, so it must exist on
 	// Forgejo before the sandbox is created.
@@ -148,10 +153,6 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 		}
 	}
 
-	create, err := b.createSpec(spec)
-	if err != nil {
-		return nil, err
-	}
 	if err := b.cli.Create(ctx, create); err != nil {
 		return nil, fmt.Errorf("creating sandbox %s: %w", spec.Session, err)
 	}
@@ -235,10 +236,13 @@ func (b *openshellBackend) run(ctx context.Context, name string, argv ...string)
 	return err
 }
 
-// rollback deletes the sandbox after a failed populate. The delete runs
+// rollback deletes the sandbox after a failed populate and removes its
+// record, which populate may have written before it failed. The cleanup runs
 // without the caller's context, so a canceled spawn still cleans up.
 func (b *openshellBackend) rollback(ctx context.Context, name string, cause error) error {
-	if err := b.cli.Delete(context.WithoutCancel(ctx), name); err != nil {
+	ctx = context.WithoutCancel(ctx)
+	err := errors.Join(b.cli.Delete(ctx, name), RemoveSandboxRecord(b.townRoot, name))
+	if err != nil {
 		return fmt.Errorf("%w (rolling back sandbox %s: %v)", cause, name, err)
 	}
 	return cause
@@ -248,10 +252,14 @@ func (b *openshellBackend) rollback(ctx context.Context, name string, cause erro
 // providers and sizing, the identity labels, the env contract, and the
 // main process that keeps the tmux server alive.
 func (b *openshellBackend) createSpec(spec SpawnSpec) (sandbox.CreateSpec, error) {
+	policy, err := confinedPath(spec.HostWorkDir, b.profile.Policy)
+	if err != nil {
+		return sandbox.CreateSpec{}, err
+	}
 	cs := sandbox.CreateSpec{
 		Name:       spec.Session,
 		Image:      b.profile.Image,
-		PolicyPath: filepath.Join(spec.HostWorkDir, b.profile.Policy),
+		PolicyPath: policy,
 		Providers:  b.profile.Providers,
 		CPU:        b.profile.CPU,
 		Memory:     b.profile.Memory,
@@ -315,13 +323,33 @@ func (b *openshellBackend) controlPlaneHost() string {
 }
 
 // stageDir makes a scratch directory for the archives this Prepare uploads.
-// It lives under the town's .runtime so nothing leaves the town tree.
+// It lives under the town's .runtime so nothing leaves the town tree. The
+// skeleton carries config, so the directory is private whatever the stdlib
+// default is: it is chmodded to 0700 explicitly.
 func (b *openshellBackend) stageDir() (string, error) {
 	dir := filepath.Join(b.townRoot, ".runtime")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	return os.MkdirTemp(dir, "openshell-prepare-")
+	stage, err := os.MkdirTemp(dir, "openshell-prepare-")
+	if err != nil {
+		return "", err
+	}
+	if err := os.Chmod(stage, 0o700); err != nil {
+		os.RemoveAll(stage)
+		return "", err
+	}
+	return stage, nil
+}
+
+// confinedPath joins rel onto dir. rel must be a relative path that stays
+// inside dir: an absolute path or one that climbs out with .. is refused.
+func confinedPath(dir, rel string) (string, error) {
+	clean := filepath.Clean(rel)
+	if rel == "" || filepath.IsAbs(rel) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("policy path %q must be relative to the worktree and stay inside it", rel)
+	}
+	return filepath.Join(dir, clean), nil
 }
 
 // sandboxRel is the host worktree's path under the town root. The sandbox

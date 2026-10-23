@@ -378,3 +378,163 @@ func TestRedirectTargetPointsAtTheRigBeads(t *testing.T) {
 		t.Fatalf("redirectTarget = %q", got)
 	}
 }
+
+func TestOpenShellPrepareDropsHostOnlyEnv(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+
+	prep, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	for _, k := range sandboxDroppedEnv {
+		if v, ok := prep.Env[k]; !ok || v != "" {
+			t.Errorf("Env[%s] = %q (present %v), want present and empty so the host value is dropped", k, v, ok)
+		}
+	}
+	for k, v := range prep.Env {
+		if strings.Contains(v, "HOST-ONLY-VALUE") || strings.Contains(v, "/host/only/config") {
+			t.Errorf("Env[%s] carries a host-only value %q", k, v)
+		}
+	}
+}
+
+func TestOpenShellPrepareStopsWhenThePushFails(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	b.push = func(string, string) error { return errors.New("forgejo unreachable") }
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), "pushing "+openshellTestBranch) {
+		t.Fatalf("err = %v, want the push failure", err)
+	}
+	if len(fake.Calls) != 0 {
+		t.Fatalf("openshell calls = %q; a failed push must leave no sandbox behind", fake.Calls)
+	}
+	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
+		t.Fatal("a failed push left a sandbox record behind")
+	}
+}
+
+func TestOpenShellPrepareTimesOutWhenNeverReady(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellProvisioningReply}}
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	waits := 0
+	b.wait = func(context.Context, time.Duration) error {
+		waits++
+		return nil
+	}
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), `not Ready after 150 polls (phase "Provisioning")`) {
+		t.Fatalf("err = %v, want the readiness timeout", err)
+	}
+	gets := 0
+	for _, c := range fake.Calls {
+		if len(c) > 2 && c[2] == "get" {
+			gets++
+		}
+	}
+	if gets != readyPolls || waits != readyPolls-1 {
+		t.Fatalf("gets = %d, waits = %d; want %d polls with %d pauses between them", gets, waits, readyPolls, readyPolls-1)
+	}
+	last := fake.Calls[len(fake.Calls)-1]
+	if want := []string{"openshell", "sandbox", "delete", openshellTestSession}; !reflect.DeepEqual(last, want) {
+		t.Fatalf("last call = %q, want %q (rollback)", last, want)
+	}
+}
+
+func TestOpenShellPrepareCancelDuringReadyWaitRollsBack(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellProvisioningReply}}
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	b.wait = func(context.Context, time.Duration) error {
+		return context.Canceled
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err := b.Prepare(ctx, openshellSpawn(town, work))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	last := fake.Calls[len(fake.Calls)-1]
+	if want := []string{"openshell", "sandbox", "delete", openshellTestSession}; !reflect.DeepEqual(last, want) {
+		t.Fatalf("last call = %q, want %q (rollback despite the canceled spawn)", last, want)
+	}
+}
+
+func TestOpenShellPrepareRollbackRemovesTheRecord(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	// A record left by an earlier partial write for this session.
+	if err := WriteSandboxRecord(town, SandboxRecord{Session: openshellTestSession, Rig: openshellTestRig, Polecat: openshellTestPolecat, Profile: "polecat-default"}); err != nil {
+		t.Fatal(err)
+	}
+	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	run := b.cli.Run
+	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte) ([]byte, []byte, error) {
+		if slices.ContainsFunc(argv, func(a string) bool { return a == cloneScript }) {
+			return nil, []byte("fatal"), errors.New("exit status 128")
+		}
+		return run(ctx, argv, stdin)
+	}
+
+	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err == nil {
+		t.Fatal("Prepare succeeded with a failing clone")
+	}
+	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
+		t.Fatal("rollback left the sandbox record behind; routing would point at a deleted sandbox")
+	}
+}
+
+func TestOpenShellPolicyPathStaysInTheWorktree(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	for _, policy := range []string{"", "/etc/policy.yaml", "../../../other/policy.yaml", ".."} {
+		t.Run(policy, func(t *testing.T) {
+			t.Parallel()
+			fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
+			p := openshellTestProfile
+			p.Policy = policy
+			b, pushes := openshellTestBackend(town, p, fake)
+
+			if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err == nil {
+				t.Fatalf("Prepare accepted policy %q", policy)
+			}
+			if len(*pushes) != 0 || len(fake.Calls) != 0 {
+				t.Fatalf("pushes = %d, openshell calls = %d; a bad policy must touch nothing", len(*pushes), len(fake.Calls))
+			}
+		})
+	}
+	if got, err := confinedPath(work, "deploy/polecat/policy.yaml"); err != nil || got != filepath.Join(work, "deploy/polecat/policy.yaml") {
+		t.Fatalf("confinedPath = %q, %v; want the policy under the worktree", got, err)
+	}
+}
+
+func TestOpenShellStageDirIsPrivate(t *testing.T) {
+	t.Parallel()
+	town, _ := openshellTown(t)
+	b, _ := openshellTestBackend(town, openshellTestProfile, &sandbox.Fake{})
+
+	stage, err := b.stageDir()
+	if err != nil {
+		t.Fatalf("stageDir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(stage) })
+	info, err := os.Stat(stage)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mode := info.Mode().Perm(); mode != 0o700 {
+		t.Fatalf("stage dir mode = %o, want 0700 (it holds the skeleton)", mode)
+	}
+}
