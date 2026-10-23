@@ -162,6 +162,7 @@ func (d *Daemon) runPatrolScan() {
 	d.patrolScanTimerGates(env, rigs)
 	d.patrolScanGHGates(env, rigs)
 	d.patrolScanRogueBD()
+	env.patrolScanSandboxRecords()
 }
 
 // patrolScanTimerGates resolves elapsed timer gates in the town database and
@@ -357,6 +358,13 @@ type patrolScanHost struct {
 	// sandboxExists asks the gateway whether it has a sandbox called name when
 	// nil: a seam for the unit tier, which has no gateway.
 	sandboxExists func(gateway, name string) (bool, error)
+	// removeSandboxRecord is session.CleanupSandboxWith(nil, ...) when nil: a
+	// seam for the unit tier's removal failure.
+	removeSandboxRecord func(townRoot, name string) error
+	// sandboxRecordBudget is the gateway questions one record pass may ask, 20
+	// (sandboxRecordsPerTick) when zero: a seam so the bound test writes few
+	// records.
+	sandboxRecordBudget int
 	// unrecordedLogged is set once the census has listed the polecats that
 	// record no agent. The host lives one tick (patrol_scan.go), so each tick
 	// logs them once however many restarts ask.
