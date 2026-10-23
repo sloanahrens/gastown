@@ -12,6 +12,7 @@ import (
 	"maps"
 	"math"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"slices"
@@ -774,24 +775,45 @@ func TestJSONLSupplementalExportBudget(t *testing.T) {
 
 func TestRunJSONLExport_DeadlineKillNamesTableAndTimeout(t *testing.T) {
 	t.Parallel()
-	// An already-expired deadline fails the run the way a mid-run kill does:
-	// cmd.Run returns an error and ctx.Err() reports DeadlineExceeded.
+	// A run that fails under an expired deadline is the mid-run kill: the run
+	// returns an error and ctx.Err() reports DeadlineExceeded. The run is a
+	// stand-in, so the test needs no dolt binary.
 	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer cancel()
 	timeout := jsonlSupplementalExportTimeout
 	cmd := jsonlExportCommand(ctx, false, "", 0, "", "", "select 1", t.TempDir())
-
-	_, err := runJSONLExport(ctx, cmd, "events", timeout)
-	if err == nil {
-		t.Fatal("runJSONLExport returned nil for an expired deadline")
+	killed := func(c *exec.Cmd) error {
+		_, _ = c.Stderr.Write([]byte("table locked\n"))
+		// exec.CommandContext reports the context's error for a run its
+		// deadline killed.
+		return ctx.Err()
 	}
-	for _, want := range []string{"events", "5m0s", "timeout"} {
+
+	_, err := runJSONLExportWith(ctx, killed, cmd, "events", timeout)
+	if err == nil {
+		t.Fatal("runJSONLExport returned nil for a killed run")
+	}
+	for _, want := range []string{"events", "5m0s", "timeout", "table locked"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q does not name %q", err, want)
 		}
 	}
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Errorf("error %q does not wrap the deadline cause", err)
+	}
+}
+
+// A run that succeeds hands back its stdout and no error.
+func TestRunJSONLExportReturnsStdoutOfASuccessfulRun(t *testing.T) {
+	t.Parallel()
+	cmd := jsonlExportCommand(context.Background(), false, "", 0, "", "", "select 1", t.TempDir())
+	ok := func(c *exec.Cmd) error {
+		_, _ = c.Stdout.Write([]byte("{\"rows\":[]}"))
+		return nil
+	}
+	out, err := runJSONLExportWith(context.Background(), ok, cmd, "events", jsonlSupplementalExportTimeout)
+	if err != nil || string(out) != "{\"rows\":[]}" {
+		t.Fatalf("runJSONLExportWith = %q, %v; want the run's stdout and no error", out, err)
 	}
 }
 
