@@ -42,6 +42,7 @@ type Repo interface {
 	DiffNameOnly(base, head string) ([]string, error)
 	DiffPathsNameOnly(a, b string, paths []string) ([]string, error)
 	FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error
+	FetchBranchWithTimeout(remote, branch string, timeout time.Duration) error
 	RemoteDefaultBranch() string
 	Push(remote, branch string, force bool) error
 

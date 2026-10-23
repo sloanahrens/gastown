@@ -43,6 +43,7 @@ type fakePolecatGit struct {
 	targetStatusErr error
 	targetsAsked    []string // "remote/target" as CommitLandedOnTarget was asked
 	fetchCalls      int
+	fetchedBranches []string // the branches each FetchBranchWithTimeout asked for
 	pushErr         error
 	pushCalls       []string
 }
@@ -57,8 +58,9 @@ func (f *fakePolecatGit) BranchPushedToRemote(localBranch, remote string) (bool,
 
 func (f *fakePolecatGit) RemoteDefaultBranch() string { return f.defaultBranch }
 
-func (f *fakePolecatGit) FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error {
+func (f *fakePolecatGit) FetchBranchWithTimeout(remote, branch string, timeout time.Duration) error {
 	f.fetchCalls++
+	f.fetchedBranches = append(f.fetchedBranches, remote+"/"+branch)
 	return f.fetchErr
 }
 
@@ -321,6 +323,48 @@ func TestStalledPolecatCheck_ContentOnDefaultBranchIsSuperseded(t *testing.T) {
 	}
 	if f.fetchCalls == 0 {
 		t.Error("expected the default branch to be refreshed before the comparison")
+	}
+	if len(f.fetchedBranches) == 0 || f.fetchedBranches[0] != "origin/main" {
+		t.Errorf("refreshed branches = %v, want origin/main refreshed before the comparison", f.fetchedBranches)
+	}
+}
+
+// TestStalledPolecatCheck_RefreshesTheBranchTheVerdictJudges is gt-kpj41: the
+// rig's landings target its configured default branch while its remote's HEAD
+// still points at main. Refreshing origin's HEAD would leave the judged branch
+// stale, so a real landing on the rig's target reads as unlanded — the exact
+// false positive the refresh exists to prevent.
+func TestStalledPolecatCheck_RefreshesTheBranchTheVerdictJudges(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	makePolecatDir(t, townRoot, "testrig", "furiosa")
+	cfg := `{"type": "rig", "name": "testrig", "default_branch": "develop"}`
+	if err := os.WriteFile(filepath.Join(townRoot, "testrig", "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write rig config: %v", err)
+	}
+
+	f := &fakePolecatGit{
+		branch:        "polecat/furiosa/gt-abc+abc123",
+		unpushedCount: 1,
+		defaultBranch: "main", // origin/HEAD, which this rig's landings never touch
+	}
+	check := newTestCheck()
+	check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
+	check.gitForTest = func(string) polecatGit { return f }
+	check.beadStatus = openBeads
+
+	check.Run(&CheckContext{TownRoot: townRoot, RigName: "testrig"})
+
+	if len(f.fetchedBranches) != 1 || f.fetchedBranches[0] != "origin/develop" {
+		t.Fatalf("refreshed branches = %v, want [origin/develop] — the rig's landing target, not the remote's HEAD", f.fetchedBranches)
+	}
+	if len(f.targetsAsked) == 0 {
+		t.Fatal("the verdict was never asked about a target")
+	}
+	for _, target := range f.targetsAsked {
+		if target != "origin/develop" {
+			t.Errorf("judged target = %q, want origin/develop — the refresh must fetch the branch the verdict reads", target)
+		}
 	}
 }
 

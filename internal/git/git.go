@@ -1111,6 +1111,19 @@ func (g *Git) FetchBranch(remote, branch string) error {
 	return err
 }
 
+// FetchBranchWithTimeout refreshes one named branch into this clone's
+// remote-tracking ref for it, bounded by timeout.
+//
+// It is for a caller that judges work against a branch which is not the
+// remote's HEAD — a rig whose landings target its configured default branch
+// while origin/HEAD points elsewhere has to fetch that branch, or it reads
+// today's landing from a ref that never moved (gt-kpj41).
+func (g *Git) FetchBranchWithTimeout(remote, branch string, timeout time.Duration) error {
+	_, err := g.runWithTimeout(timeout, "fetch", "--no-tags", remote,
+		"+refs/heads/"+branch+":refs/remotes/"+remote+"/"+branch)
+	return err
+}
+
 // FetchDefaultBranchWithTimeout refreshes only the remote's default branch,
 // bounded by timeout.
 //

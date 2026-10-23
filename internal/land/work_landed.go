@@ -120,7 +120,7 @@ func WorkLandedOnTarget(g WorkLandedRepo, q WorkLandedQuery) WorkLandedVerdict {
 
 	target := strings.TrimSpace(q.Target)
 	if target == "" {
-		rigTarget, err := rigDefaultBranch(q.RigPath)
+		rigTarget, err := RigDefaultBranch(q.RigPath)
 		if err != nil {
 			return probeFailed(fmt.Sprintf("resolve the rig's default branch: %v", err))
 		}
@@ -149,14 +149,18 @@ func WorkLandedOnTarget(g WorkLandedRepo, q WorkLandedQuery) WorkLandedVerdict {
 	return v
 }
 
-// rigDefaultBranch is the branch a rig's landings target: the rig config's
+// RigDefaultBranch is the branch a rig's landings target: the rig config's
 // default_branch, else "main". gt done and the landing worker resolve their
 // target the same way, so the predicate asks the question they answer. That is
 // also why naming a rig drops the remote's-HEAD fallback: no landing consults
 // origin/HEAD, so neither may the predicate. A config that exists but does not
 // decode is an error, never the "main" fallback, as the landing worker treats
 // it too (gt-v4r0x).
-func rigDefaultBranch(rigPath string) (string, error) {
+//
+// It is exported for a caller that has to refresh the branch before asking:
+// stale evidence over-flags, so whoever fetches must fetch this branch and not
+// the remote's HEAD (gt-kpj41).
+func RigDefaultBranch(rigPath string) (string, error) {
 	if rigPath = strings.TrimSpace(rigPath); rigPath == "" {
 		return "", nil
 	}
