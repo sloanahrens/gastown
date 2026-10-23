@@ -258,6 +258,64 @@ func TestRunStopsOnAccountRefusal(t *testing.T) {
 	}
 }
 
+// A request timeout (408) is retryable, so it says nothing about the bead: the
+// pass stops at the first placement with no line and the cursor where it
+// started, and the placement is asked again on the next pass.
+func TestRunStopsOnRequestTimeout(t *testing.T) {
+	t.Parallel()
+	asker := &fakeAsker{status: http.StatusRequestTimeout}
+	p := newPass(t, asker, placed("gt-a", 1, "First"), placed("gt-b", 2, "Second"))
+
+	sum, err := p.Run(context.Background())
+	var se *jev.StatusError
+	if !errors.As(err, &se) || se.Status != http.StatusRequestTimeout {
+		t.Fatalf("Run error = %v, want a StatusError with status 408", err)
+	}
+	if asker.calls != 1 {
+		t.Errorf("asked %d times, want 1: the pass must halt, not skip to gt-b", asker.calls)
+	}
+	if sum.Failed != 0 {
+		t.Errorf("failed %d, want 0", sum.Failed)
+	}
+	if n := len(logLines(t, p.LogPath)); n != 0 {
+		t.Errorf("log has %d lines, want 0", n)
+	}
+	cur, _, rerr := battery.ReadCursor(p.CursorPath)
+	if rerr != nil {
+		t.Fatal(rerr)
+	}
+	if cur.ID != "" || !cur.Time.Equal(t0.Add(-time.Minute)) {
+		t.Errorf("cursor moved to %+v, want it unmoved", cur)
+	}
+}
+
+// beadFault blames the bead only for a 4xx its own request caused. Authorization,
+// a timeout, a rate limit and an account refusal are not the bead's fault.
+func TestBeadFaultTransientStatuses(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		status int
+		want   bool
+	}{
+		{http.StatusBadRequest, true},
+		{http.StatusNotFound, true},
+		{http.StatusUnauthorized, false},
+		{http.StatusPaymentRequired, false},
+		{http.StatusForbidden, false},
+		{http.StatusRequestTimeout, false},
+		{http.StatusTooManyRequests, false},
+		{http.StatusInternalServerError, false},
+	} {
+		t.Run(http.StatusText(tc.status), func(t *testing.T) {
+			t.Parallel()
+			err := &jev.StatusError{Status: tc.status}
+			if got := beadFault(err); got != tc.want {
+				t.Errorf("beadFault(%d) = %v, want %v", tc.status, got, tc.want)
+			}
+		})
+	}
+}
+
 // The daily cap stops the pass before it asks, and the placements wait.
 func TestRunStopsAtTheDailyCap(t *testing.T) {
 	t.Parallel()
