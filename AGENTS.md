@@ -4,28 +4,32 @@ See **CLAUDE.md** for complete agent context and instructions.
 
 This file exists for compatibility with tools that look for AGENTS.md.
 
+> **Recovery**: Run `gt prime` after compaction, clear, or new session
+
+Full context is injected by `gt prime` at session start.
+
 ## Build and test
 
-Before changing a build or test entry point, read its recipe in the `Makefile`.
+The `Makefile` defines what each target runs; these lines say which one to reach for. Before changing a build or test entry point, read its recipe.
 
-- `make build`: `go build` of `./cmd/gt` into `$(BUILD_DIR)`.
-- `make test`: the gate and the shell tests (`test-slow`), then `test-integration`, which starts containers; run it under `gt slot run`.
-- `make lint`: `docs-lint`, `golangci-lint`, `scripts/repo-guards.sh` and the fail-open guard test.
-- `make gate`: `lint`, then build and the unit tier (`go test ./...` with `GT_TEST_DOCKER=0`). The landing worker runs it on the merged tree.
-- `make presubmit`: `lint`, build, and tests of only the packages your branch changed. This is `gt done`'s pre-submit check.
-- `make install`: `scripts/install-gt.sh` installs `origin/main` into the town and queues a daemon restart. In a test, use `install-local` with a temporary `INSTALL_DIR`.
+- `make lint`: the repo's lint set, starting with the doc and comment rules. Run it on a branch that touches prose.
+- `make presubmit`: the cheap check before submitting — only the packages your branch changed. `gt done` runs it for you.
+- `make gate`: what the landing worker runs on the merged tree. Run it once on a branch you believe is finished, not after each edit.
+- `make test`: every tier a human would run, container tiers included. It needs a container slot: run it under `gt slot run`.
+- `make build`: compiles `gt`; the targets above include it, so call it alone only to check that the tree compiles.
+- `make install`: deploys merged `origin/main` into the town and queues a daemon restart, never your working branch. To exercise a local build, use `make install-local` with a temporary `INSTALL_DIR`.
+
+A bare `go build` or `go test` fails on the ICU headers on macOS; the make targets export the flags for you.
 
 ## Architecture in five lines
 
 - The daemon is one Go process: it supervises agent sessions and is the only thing that restarts one.
-- Its landing worker takes a branch that `gt done` marked ready, runs the gate and review on the merged tree, and is the only non-human route to `main`.
+- Its landing worker gates and merges branches that `gt done` marked ready, and is the only non-human route to `main`.
 - Polecats are workers with persistent identity and ephemeral sessions: one bead, one branch, then `gt done`.
 - Beads, mail and work history live in Dolt on port 3307; `bd` and `gt` read and write it.
 - Forgejo is the origin the landing path merges into; GitHub is a read-only push mirror ([design](docs/design/forgejo-primary-landing.md)).
 
-> **Recovery**: Run `gt prime` after compaction, clear, or new session
-
-Full context is injected by `gt prime` at session start.
+For role detail and lifecycle, read [Understanding Gas Town](docs/overview.md).
 
 <!-- beads-agent-instructions-v2 -->
 
