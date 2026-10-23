@@ -267,6 +267,15 @@ func closedSourceTown(t *testing.T, polecats int, lastSource func(name string) s
 // closedSourceOf names each polecat's own closed source issue.
 func closedSourceOf(name string) string { return "gt-old-" + name }
 
+// polecatNames names the first n polecats a fixture town seeds.
+func polecatNames(n int) []string {
+	names := make([]string, 0, n)
+	for i := 1; i <= n; i++ {
+		names = append(names, fmt.Sprintf("p%02d", i))
+	}
+	return names
+}
+
 // assertSameSeats fails unless got holds the seats want does, in the same
 // states, whatever order either roster lists them in.
 func assertSameSeats(t *testing.T, got, want []poolSession) {
@@ -279,6 +288,32 @@ func assertSameSeats(t *testing.T, got, want []poolSession) {
 	for i := range got {
 		if got[i].name != want[i].name || got[i].agent != want[i].agent || got[i].deadHooked != want[i].deadHooked {
 			t.Errorf("seat %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+// assertSameSeatVerdicts fails unless the batched seat read decides each named
+// polecat's seat the way the per-seat read does. assertSameSeats compares the
+// seats a roster holds, and a wrong closed/absent verdict can hold the same
+// seats: a closed hook bead read as absent, or an absent one read as closed, is
+// one seat either way. The terminality such a verdict changes shows in the
+// disposition behind the seat, which this compares. Both reads are made here
+// over their own counting stores, so a caller's read counts stay its own.
+func assertSameSeatVerdicts(t *testing.T, town string, db *beadsfake.Fake, names []string) {
+	t.Helper()
+	perSeat := poolDispositionAnswering(town, seatReadsOver(newCountingStore(db)))
+	batched := batchOver(town, newCountingStore(db)).disposition
+	for _, name := range names {
+		want, err := perSeat("gastown", name)
+		if err != nil {
+			t.Fatalf("per-seat read of %s: %v", name, err)
+		}
+		got, err := batched("gastown", name)
+		if err != nil {
+			t.Fatalf("batched read of %s: %v", name, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("seat %s = %+v, want the per-seat read's %+v", name, got, want)
 		}
 	}
 }
@@ -299,17 +334,29 @@ func TestPoolSeatBatchReadsClosedSourceIssuesInOneBatch(t *testing.T) {
 	}
 
 	store := newCountingStore(db)
-	got, err := poolSeatSessionsWith(lister, town, batchOver(town, store).disposition, nil, pool)
+	batch := batchOver(town, store)
+	got, err := poolSeatSessionsWith(lister, town, batch.disposition, nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}
 	assertSameSeats(t, got, want)
+	names := polecatNames(20)
+	assertSameSeatVerdicts(t, town, db, names)
 
 	if len(store.multis) != 2 || len(store.multis[0]) != 20 || len(store.multis[1]) != 20 {
 		t.Errorf("batched reads = %v, want the 20 agent beads, then the 20 source issues", store.multis)
 	}
 	if len(store.shows) != 0 {
 		t.Errorf("live reads = %v, want none: every source issue came from the batch", store.shows)
+	}
+	// The verdict each seat is decided from is the closed bead the batch read,
+	// not an absent one: the terminality is what makes these seats free.
+	for _, name := range names {
+		id := closedSourceOf(name)
+		issue, ok := batch.rig("gastown").held[id]
+		if !ok || issue.Status != "closed" {
+			t.Errorf("batch holds %v for %s, want the closed source issue", issue, id)
+		}
 	}
 }
 
@@ -362,14 +409,132 @@ func TestPoolSeatBatchReadsAbsentSourceIssueLive(t *testing.T) {
 	}
 
 	store := newCountingStore(db)
+	batch := batchOver(town, store)
+	got, err := poolSeatSessionsWith(lister, town, batch.disposition, nil, pool)
+	if err != nil {
+		t.Fatalf("batched roster: %v", err)
+	}
+	assertSameSeats(t, got, want)
+	assertSameSeatVerdicts(t, town, db, polecatNames(4))
+
+	// The bead p04's hint names does not exist, and the batch says so by
+	// holding nothing for it: an entry here is what would let the seat read
+	// call it closed.
+	if issue, ok := batch.rig("gastown").held["gt-elsewhere"]; ok {
+		t.Errorf("batch holds %v for the absent source issue, want nothing", issue)
+	}
+	if store.shows["gt-elsewhere"] != 1 {
+		t.Errorf("absent source issue read live %d times, want once", store.shows["gt-elsewhere"])
+	}
+}
+
+// hookCase is one polecat of hookTown: the last source issue its agent bead
+// names, its hook, and the status that hook bead is seeded with ("" leaves the
+// bead absent).
+type hookCase struct {
+	name, hint, hook, status string
+}
+
+// hookTown is a rig of sessionless polecats, each agent bead naming a hook and,
+// when hint names one, a last source issue. No polecat has a session or an
+// assignment, so the hook reference decides whether its seat is held.
+func hookTown(t *testing.T, hooks []hookCase) (town string, db *beadsfake.Fake, lister *fakeLister) {
+	t.Helper()
+	town = t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	db = beadsfake.New()
+	lister = &fakeLister{sessions: map[string]map[string]string{}}
+	prefix := beads.GetPrefixForRig(town, "gastown")
+	for _, h := range hooks {
+		writeTownPolecatDir(t, town, "gastown", h.name)
+		id := beads.PolecatBeadIDWithPrefix(prefix, "gastown", h.name)
+		desc := beads.FormatAgentDescription(id, &beads.AgentFields{RoleType: "polecat", Rig: "gastown", AgentState: "idle", HookBead: h.hook, LastSourceIssue: h.hint})
+		db.Seed(beads.Issue{ID: id, Title: id, Type: "agent", Labels: []string{"gt:agent"}, Description: desc})
+		if h.status != "" {
+			db.Seed(beads.Issue{ID: h.hook, Status: h.status})
+		}
+		if h.hint != "" {
+			db.Seed(beads.Issue{ID: h.hint, Status: "closed"})
+		}
+	}
+	return town, db, lister
+}
+
+// TestPoolSeatBatchAnswersHookBeads drives polecats with a hook bead through
+// the batch. p01's hook is a live hooked bead the work list already holds. p02
+// last worked a source issue and its hook names a different, closed bead, so
+// the two references differ and both cost the batch's second read. p03's hook
+// names no bead at all: it is asked for, the batch holds nothing for it, and
+// the seat read falls back to one live read. No hook costs its own live read,
+// and each seat's verdict is the per-seat read's: the hooked one holds a seat,
+// the closed one does not, and the unreadable one holds it as a failed lookup
+// (gt-kvp82).
+func TestPoolSeatBatchAnswersHookBeads(t *testing.T) {
+	t.Parallel()
+	town, db, lister := hookTown(t, []hookCase{
+		{"p01", "", "gt-hooked", beads.StatusHooked},
+		{"p02", "gt-old-p02", "gt-closed-hook", "closed"},
+		{"p03", "", "gt-absent", ""},
+	})
+	pool := seatPool("deepseek-flash", 30)
+
+	perSeat := newCountingStore(db)
+	want, err := poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	if err != nil {
+		t.Fatalf("per-seat roster: %v", err)
+	}
+
+	store := newCountingStore(db)
 	got, err := poolSeatSessionsWith(lister, town, batchOver(town, store).disposition, nil, pool)
 	if err != nil {
 		t.Fatalf("batched roster: %v", err)
 	}
 	assertSameSeats(t, got, want)
+	assertSameSeatVerdicts(t, town, db, []string{"p01", "p02", "p03"})
 
-	if store.shows["gt-elsewhere"] != 1 {
-		t.Errorf("absent source issue read live %d times, want once", store.shows["gt-elsewhere"])
+	if n := poolSeatCount("deepseek-flash", got); n != 2 {
+		t.Errorf("seat count = %d, want p01's hooked seat and p03's unreadable one (%+v)", n, got)
+	}
+	// The work list answers p01's hook; the second batch asks for the three
+	// references it does not hold, so p02's hook costs no more than its hint
+	// does and neither pays a live read.
+	if len(store.multis) != 2 {
+		t.Fatalf("batched reads = %v, want the 3 agent beads, then the references the work list does not hold", store.multis)
+	}
+	if got := sortedCopy(store.multis[1]); strings.Join(got, ",") != "gt-absent,gt-closed-hook,gt-old-p02" {
+		t.Errorf("second batch = %v, want p02's hint and hook and p03's hook", store.multis[1])
+	}
+	if store.shows["gt-hooked"] != 0 || store.shows["gt-closed-hook"] != 0 || store.shows["gt-old-p02"] != 0 {
+		t.Errorf("live reads = %v, want none: the batch answers every reference it holds", store.shows)
+	}
+	if store.shows["gt-absent"] != 1 {
+		t.Errorf("absent hook read live %d times, want once", store.shows["gt-absent"])
+	}
+}
+
+// sortedCopy returns ids in sorted order, so a set the batch collects from a
+// map compares the same on every run.
+func sortedCopy(ids []string) []string {
+	out := append([]string(nil), ids...)
+	sort.Strings(out)
+	return out
+}
+
+// The parse the batch caches is the live read's, error included: an id that
+// names a bead which is not an agent bead is reported, not answered as a seat
+// with no fields.
+func TestPoolSeatBatchReportsABeadThatIsNotAnAgentBead(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	writeTestRigsConfig(t, town, "gastown")
+	writeTownPolecatDir(t, town, "gastown", "p01")
+	db := beadsfake.New()
+	id := beads.PolecatBeadIDWithPrefix(beads.GetPrefixForRig(town, "gastown"), "gastown", "p01")
+	db.Seed(beads.Issue{ID: id, Title: id, Type: "task"})
+
+	_, err := batchOver(town, newCountingStore(db)).disposition("gastown", "p01")
+	if err == nil || !strings.Contains(err.Error(), "is not an agent bead") {
+		t.Fatalf("batched seat read = %v, want the live read's not-an-agent-bead error", err)
 	}
 }
 
