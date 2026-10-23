@@ -43,7 +43,7 @@ func ApplyWorkLanded(facts *WorkstateFacts, g land.WorkLandedRepo, store IssueRe
 	if store != nil {
 		issue, readErr = store.Show(beadID)
 	}
-	v := land.WorkLandedOnTarget(g, "", "", rigPath, beadID, issue)
+	v := land.WorkLandedOnTarget(g, land.WorkLandedQuery{RigPath: rigPath, BeadID: beadID, Issue: issue})
 	if !v.Landed && v.Reason == land.WorkUnpushed && readErr != nil {
 		// The LANDING RECORD arm could not run, so "nothing proves it" would
 		// overstate what was checked.

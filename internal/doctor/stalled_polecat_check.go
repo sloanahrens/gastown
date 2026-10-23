@@ -48,7 +48,7 @@ type StalledPolecatCheck struct {
 	// workLanded answers "is this branch's content already on the rig's
 	// landing target"; beadIssue reads the bead its LANDING RECORD arm needs.
 	// Tests inject both; nil beadIssue reads no bead.
-	workLanded func(g land.WorkLandedRepo, head, target, rigPath, beadID string, issue *beads.Issue) land.WorkLandedVerdict
+	workLanded func(g land.WorkLandedRepo, q land.WorkLandedQuery) land.WorkLandedVerdict
 	beadIssue  func(townRoot, beadID string) (*beads.Issue, error)
 }
 
@@ -280,7 +280,7 @@ func (c *StalledPolecatCheck) landedVerdict(pg polecatGit, townRoot, rigName, br
 	// first ask carries no bead: only the LANDING RECORD arm reads one, so the
 	// bead is read only when the other arms did not already prove landing.
 	rigPath := filepath.Join(townRoot, rigName)
-	v := workLanded(pg, "", "", rigPath, beadID, nil)
+	v := workLanded(pg, land.WorkLandedQuery{RigPath: rigPath, BeadID: beadID})
 	if v.Landed || v.Reason != land.WorkUnpushed || beadID == "" || c.beadIssue == nil {
 		return v
 	}
@@ -290,7 +290,7 @@ func (c *StalledPolecatCheck) landedVerdict(pg polecatGit, townRoot, rigName, br
 		// overstate what was checked.
 		return land.WorkLandedVerdict{Reason: land.WorkProbeFailed, Detail: fmt.Sprintf("read bead %s: %v", beadID, err)}
 	}
-	return workLanded(pg, "", "", rigPath, beadID, issue)
+	return workLanded(pg, land.WorkLandedQuery{RigPath: rigPath, BeadID: beadID, Issue: issue})
 }
 
 // landedNote is what a verdict adds to a report line: nothing for a plain "no

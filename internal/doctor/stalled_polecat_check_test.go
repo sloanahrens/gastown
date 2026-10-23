@@ -756,7 +756,7 @@ func TestStalledPolecatCheck_VerdictReasonReachesTheDetail(t *testing.T) {
 			check.sessionCheckerForTest = &fakeSessionChecker{alive: false}
 			check.gitForTest = func(string) polecatGit { return f }
 			check.beadStatus = openBeads
-			check.workLanded = func(land.WorkLandedRepo, string, string, string, string, *beads.Issue) land.WorkLandedVerdict {
+			check.workLanded = func(land.WorkLandedRepo, land.WorkLandedQuery) land.WorkLandedVerdict {
 				return tt.verdict
 			}
 
@@ -796,16 +796,16 @@ func TestStalledPolecatCheck_AsksThePredicateAboutTheBranchsBead(t *testing.T) {
 	}
 	var gotBead string
 	var gotIssue *beads.Issue
-	check.workLanded = func(_ land.WorkLandedRepo, _, _, rigPath, beadID string, i *beads.Issue) land.WorkLandedVerdict {
+	check.workLanded = func(_ land.WorkLandedRepo, q land.WorkLandedQuery) land.WorkLandedVerdict {
 		wantRig := filepath.Join(townRoot, "testrig")
-		if rigPath != wantRig {
-			t.Errorf("predicate asked about rig %q, want %q", rigPath, wantRig)
+		if q.RigPath != wantRig {
+			t.Errorf("predicate asked about rig %q, want %q", q.RigPath, wantRig)
 		}
-		if i == nil {
+		if q.Issue == nil {
 			// The refs/landed and target arms did not prove it, so the bead is read.
 			return land.WorkLandedVerdict{Reason: land.WorkUnpushed, Detail: "bead not read"}
 		}
-		gotBead, gotIssue = beadID, i
+		gotBead, gotIssue = q.BeadID, q.Issue
 		return land.WorkLandedVerdict{Landed: true, Reason: land.WorkLandedByRecord}
 	}
 
@@ -865,7 +865,7 @@ func TestStalledPolecatCheck_ReadsNoBeadWhenALandedArmProves(t *testing.T) {
 		reads++
 		return nil, nil
 	}
-	check.workLanded = func(land.WorkLandedRepo, string, string, string, string, *beads.Issue) land.WorkLandedVerdict {
+	check.workLanded = func(land.WorkLandedRepo, land.WorkLandedQuery) land.WorkLandedVerdict {
 		return land.WorkLandedVerdict{Landed: true, Reason: land.WorkLandedByRef}
 	}
 
