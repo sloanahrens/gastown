@@ -44,6 +44,15 @@ type Proc struct {
 	Args string
 }
 
+// SessionProcessReads is implemented by a SuiteReads that can read the process
+// table where one session lives. A sandboxed seat's processes are in its
+// sandbox's table, not the host's, so LiveSuite asks for the session's table
+// when the reads offer it and the host's shared table otherwise.
+type SessionProcessReads interface {
+	// SessionProcessTable reads the process table of the place sessionName runs.
+	SessionProcessTable(sessionName string) ([]Proc, error)
+}
+
 // SuiteReads supplies the evidence one live-suite question needs. Each read
 // returns the error it failed with; how a read's failure is judged stays with
 // the caller.
@@ -116,6 +125,15 @@ func LiveSuite(reads SuiteReads, q SuiteQuery) (Found, error) {
 	return Found{}, slotErr
 }
 
+// processTable reads the process table for session: its own place's when the
+// reads can, the host's shared table otherwise.
+func processTable(reads SuiteReads, session string) ([]Proc, error) {
+	if sr, ok := reads.(SessionProcessReads); ok {
+		return sr.SessionProcessTable(session)
+	}
+	return reads.ProcessTable()
+}
+
 // paneSuite names a suite invocation live under one of the seat's own panes, ""
 // when the panes hold none.
 func paneSuite(reads SuiteReads, q SuiteQuery) (string, error) {
@@ -126,7 +144,7 @@ func paneSuite(reads SuiteReads, q SuiteQuery) (string, error) {
 	if len(panes) == 0 {
 		return "", fmt.Errorf("no pane found for session %s", q.Session)
 	}
-	procs, err := reads.ProcessTable()
+	procs, err := processTable(reads, q.Session)
 	if err != nil {
 		return "", err
 	}
