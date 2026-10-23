@@ -54,6 +54,25 @@ func TestUpgradeRestartHealArmSubmitsHelperAsItsOwnJob(t *testing.T) {
 	}
 }
 
+// TestUpgradeRestartHealArmClearsAnEarlierSignalStop checks a stop recorded
+// before the arm does not excuse the helper: only a stop made while it waits
+// may leave the daemon down (gt-r8ux8).
+func TestUpgradeRestartHealArmClearsAnEarlierSignalStop(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	if err := recordSignalStop(d.config.TownRoot, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_, run := recordHealRun("", nil)
+
+	if err := submitUpgradeHeal(run, d.config.TownRoot, fakeHealJob); err != nil {
+		t.Fatalf("submitUpgradeHeal: %v", err)
+	}
+	if _, err := os.Stat(signalStopPath(d.config.TownRoot)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an earlier signal-stop record survived the arm (stat err %v)", err)
+	}
+}
+
 func TestUpgradeRestartHealArmWriteFailureSubmitsNothing(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir() // no daemon directory under it: the script cannot be written
@@ -209,6 +228,7 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 		pidOnce     string // launchctl print reports this pid on the first sample only
 		lockHolder  string // lsof reports this process holds daemon.lock
 		stopMarker  bool   // a daemon stop was requested while the helper waited
+		signalStop  bool   // the daemon was stopped by a signal while the helper waited
 		estop       bool   // the town E-stop went up while the helper waited
 		wantBootout bool
 		wantBoots   int
@@ -222,6 +242,7 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 		{name: "unloaded job is healed", wantBootout: true, wantBoots: 2, wantLogLine: "bootstrapped:"},
 		{name: "a pid that is gone at the re-check is healed", pidOnce: "123", wantBootout: true, wantBoots: 1, wantLogLine: "bootstrapped:", bootstrapOK: "1"},
 		{name: "a stop marker left while the helper waited is left alone", stopMarker: true, wantLogLine: "a daemon stop was requested"},
+		{name: "a supervised daemon stop while the helper waited is left alone", signalStop: true, wantLogLine: "stopped by a signal while the helper waited"},
 		{name: "an E-stop raised while the helper waited is left alone", estop: true, wantLogLine: "E-stop active"},
 		{name: "a job that stays loaded after bootout is given up on", stuckLoaded: true, wantBootout: true, wantLogLine: "gave up: gui/501/com.example.fake still loaded", wantGiveUp: true},
 		{name: "a bootstrap that never succeeds is given up on", bootstrapOK: "never", wantBootout: true, wantBoots: 60, wantLogLine: "gave up: bootstrap of /fake/com.example.fake.plist failed 60 times", wantGiveUp: true},
@@ -267,6 +288,11 @@ exit 0
 			}
 			if tc.stopMarker {
 				if err := writeStopRequested(d.config.TownRoot, 4242, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.signalStop {
+				if err := recordSignalStop(d.config.TownRoot, time.Now()); err != nil {
 					t.Fatal(err)
 				}
 			}

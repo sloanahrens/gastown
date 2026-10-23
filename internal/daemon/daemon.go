@@ -1402,6 +1402,11 @@ func (d *Daemon) Run() (err error) {
 				d.logger.Println("Received reload-restart signal: restart budgets are read from the intent records, nothing to reload")
 			} else {
 				d.logger.Printf("Received signal %v, shutting down", sig)
+				// Written before the shutdown so the upgrade heal helper sees
+				// it in its wait, whichever way this stop was requested (gt-r8ux8).
+				if err := recordSignalStop(d.config.TownRoot, time.Now()); err != nil {
+					d.logger.Printf("could not record the signal stop for the upgrade heal helper: %v", err)
+				}
 				// Exit 0 only when gt asked for this stop; any other signal
 				// exits 75, which launchd turns into a relaunch only for a
 				// job still loaded under KeepAlive (gt-swsqm, gt-2gctr).

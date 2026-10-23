@@ -89,6 +89,7 @@ LOCK=@LOCK@
 LOG=@LOG@
 HEAL=@HEAL@
 STOP=@STOP@
+SIGNALSTOP=@SIGNALSTOP@
 ESTOP=@ESTOP@
 SVC="gui/$UID_NUM/$LABEL"
 
@@ -111,8 +112,14 @@ sleep @WAIT@
 
 # A stop inside the wait window is the operator's, not a failed respawn:
 # bootstrapping through it would undo a gt power off or a bootout (gt-csq9g).
+# A supervised gt daemon stop is a bootout that leaves no stop marker, so the
+# signal-stop record covers it (gt-r8ux8).
 if [ -e "$STOP" ]; then
 	log "left alone: $STOP exists (a daemon stop was requested)"
+	finish 0
+fi
+if [ -e "$SIGNALSTOP" ]; then
+	log "left alone: $SIGNALSTOP exists (the daemon was stopped by a signal while the helper waited)"
 	finish 0
 fi
 if [ -e "$ESTOP" ]; then
@@ -175,6 +182,7 @@ func upgradeHealScript(job upgradeHealJob, townRoot string) string {
 		"@LOG@", shellQuote(filepath.Join(daemonDir, upgradeHealLogName)),
 		"@HEAL@", shellQuote(upgradeHealLabel(job)),
 		"@STOP@", shellQuote(stopMarkerPath(townRoot)),
+		"@SIGNALSTOP@", shellQuote(signalStopPath(townRoot)),
 		"@ESTOP@", shellQuote(estop.FilePath(townRoot)),
 		"@WAIT@", fmt.Sprintf("%d", int(upgradeHealWait/time.Second)),
 		"@RECHECK@", fmt.Sprintf("%d", int(upgradeHealRecheck/time.Second)),
@@ -189,12 +197,15 @@ func shellQuote(s string) string {
 
 // submitUpgradeHeal writes the helper script and submits it as a one-shot
 // launchd job of its own, under the heal label. A helper left under that label
-// by an earlier upgrade is removed first. run executes one argv.
+// by an earlier upgrade is removed first, and so is a signal-stop record from
+// an earlier stop: the helper must judge only stops made while it waits.
+// run executes one argv.
 func submitUpgradeHeal(run func(argv []string) error, townRoot string, job upgradeHealJob) error {
 	script := filepath.Join(townRoot, "daemon", upgradeHealScriptName)
 	if err := os.WriteFile(script, []byte(upgradeHealScript(job, townRoot)), 0o700); err != nil {
 		return fmt.Errorf("writing heal script: %w", err)
 	}
+	clearSignalStop(townRoot)
 	heal := upgradeHealLabel(job)
 	// Nothing loaded under the label is the usual case, so a remove error is
 	// only worth reporting when the submit that follows it fails too.
