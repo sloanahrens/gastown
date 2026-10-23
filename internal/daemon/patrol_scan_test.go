@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/events"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/land"
+	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/supervisor"
@@ -750,6 +751,114 @@ func TestPatrolScanActiveWorkReadsAnOpenAssignedBead(t *testing.T) {
 			t.Errorf("ActiveWork over %s bead = %+v; want reached=%v", tc.status, work, tc.want)
 		}
 	}
+}
+
+// passEnv answers the tick's reads from the host's real ActiveWork over the
+// daemon's bd fake and fixes everything else: the seat is gone by default (no
+// directory, no session, no intent hold), so the recovery branch is the one
+// under test. It exists because a host test on ActiveWork alone shows the
+// read, not what the orphan and held-wisp passes make of it (gt-1291v).
+type passEnv struct {
+	host     *patrolScanHost
+	wisps    []patrolscan.Wisp
+	closed   []string
+	reopened []string
+}
+
+func (e *passEnv) ActiveWork(rig string) ([]patrolscan.Work, error) {
+	return e.host.ActiveWork(rig)
+}
+func (e *passEnv) Polecats(string) ([]string, error)                     { return nil, nil }
+func (e *passEnv) Intent(string, string) (intent.Record, error)          { return intent.Record{}, nil }
+func (e *passEnv) Assess(string, string) liveness.Result                 { return liveness.Result{} }
+func (e *passEnv) AssignedWork(string, string) (*patrolscan.Work, error) { return nil, nil }
+func (e *passEnv) WorkBead(string, string) (*patrolscan.Work, error)     { return nil, nil }
+func (e *passEnv) ClearSubmission(string, string, string) (bool, error)  { return false, nil }
+func (e *passEnv) AgentRecord(string, string) (patrolscan.AgentRecord, error) {
+	return patrolscan.AgentRecord{}, nil
+}
+func (e *passEnv) PolecatEscalations(string) ([]patrolscan.Escalation, error) { return nil, nil }
+func (e *passEnv) GitState(string, string) (patrolscan.GitState, error) {
+	return patrolscan.GitState{}, nil
+}
+func (e *passEnv) Heartbeat(string, string) *patrolscan.Heartbeat      { return nil }
+func (e *passEnv) Restart(string, string, string) error                { return nil }
+func (e *passEnv) Kill(string, string, string) error                   { return nil }
+func (e *passEnv) MarkIdle(string, string) (bool, error)               { return false, nil }
+func (e *passEnv) ClearStuckExit(string, string, string) (bool, error) { return false, nil }
+func (e *passEnv) MarkSubmitted(string, string, string) error          { return nil }
+func (e *passEnv) PolecatDirExists(string, string) (bool, error)       { return false, nil }
+func (e *passEnv) SessionExists(string, string) (bool, error)          { return false, nil }
+func (e *passEnv) MoleculeStatus(string) (string, error)               { return "", nil }
+func (e *passEnv) LeakedWisps(string) ([]patrolscan.Wisp, error)       { return e.wisps, nil }
+func (e *passEnv) WispStatus(string) (string, error)                   { return "", nil }
+func (e *passEnv) RootWork(string) ([]patrolscan.WorkRef, error)       { return nil, nil }
+func (e *passEnv) SurvivingBranch(string, string) (string, error)      { return "", nil }
+func (e *passEnv) RecordResumeBranch(string, string, string) error     { return nil }
+func (e *passEnv) Comment(string, string) error                        { return nil }
+func (e *passEnv) CloseMolecule(id, _ string) (int, error) {
+	e.closed = append(e.closed, id)
+	return 1, nil
+}
+func (e *passEnv) Reopen(_, id, assignee string) (bool, error) {
+	e.reopened = append(e.reopened, id+"="+assignee)
+	return true, nil
+}
+
+func passScanner(t *testing.T, env *passEnv, now time.Time) *patrolscan.Scanner {
+	t.Helper()
+	ledger := patrolscan.NewFileLedger(patrolscan.LedgerPath(t.TempDir()), 7*24*time.Hour)
+	return patrolscan.New(env, ledger, patrolscan.Options{Now: func() time.Time { return now }})
+}
+
+// gt-1291v: an open-assigned bead is work the seat still holds, and the passes
+// must act on it as such. Without the bead in ActiveWork the gone holder's
+// work leaks uncounted and its old wisp is closed as leaked; with it, the
+// orphan pass reopens the bead and the wisp stays.
+func TestPatrolScanPassesTreatAnOpenAssignedBeadAsHeldWork(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	wisp := patrolscan.Wisp{ID: "gt-wisp-a", Status: "open", Assignee: "myr/polecats/mycat", CreatedAt: now.Add(-48 * time.Hour)}
+	host := func(t *testing.T, bd *workBD) *patrolScanHost {
+		t.Helper()
+		return &patrolScanHost{d: &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: bd.open}}
+	}
+	openBead := func(t *testing.T) *workBD {
+		t.Helper()
+		bd := newWorkBD(t)
+		bd.seed("gt-open", "open", now.Add(-time.Hour))
+		return bd
+	}
+
+	t.Run("orphan's open bead is reopened", func(t *testing.T) {
+		t.Parallel()
+		env := &passEnv{host: host(t, openBead(t))}
+		r := passScanner(t, env, now).Tick("myr")
+		if got := strings.Join(env.reopened, ","); got != "gt-open=myr/polecats/mycat" {
+			t.Fatalf("reopened = %q, want the gone holder's open bead; report %v", got, r.Lines())
+		}
+		if r.Count(patrolscan.OutcomeReopened) != 1 {
+			t.Fatalf("report = %v, want one reopen", r.Lines())
+		}
+	})
+
+	t.Run("held wisp stays while the seat holds the open bead", func(t *testing.T) {
+		t.Parallel()
+		env := &passEnv{host: host(t, openBead(t)), wisps: []patrolscan.Wisp{wisp}}
+		r := passScanner(t, env, now).Tick("myr")
+		if len(env.closed) != 0 {
+			t.Fatalf("closed %v, want the seat's wisp kept; report %v", env.closed, r.Lines())
+		}
+	})
+
+	t.Run("the same wisp is closed once the seat holds nothing", func(t *testing.T) {
+		t.Parallel()
+		env := &passEnv{host: host(t, newWorkBD(t)), wisps: []patrolscan.Wisp{wisp}}
+		r := passScanner(t, env, now).Tick("myr")
+		if got := strings.Join(env.closed, ","); got != "gt-wisp-a" {
+			t.Fatalf("closed = %q, want gt-wisp-a; report %v", got, r.Lines())
+		}
+	})
 }
 
 // ClearSubmission ends the seat's wait for the landing worker. It is the
