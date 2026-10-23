@@ -38,9 +38,10 @@ const acceptedRiskExcerptCap = 80
 // author shape nobody listed is ignored rather than trusted. That allowlist is
 // the first of three layers, and none of them changes bd: a polecat session is
 // refused at the tap guard when it posts an ACCEPTED-RISK comment or sets a
-// comment author (gt-z71j0), and every use is recorded on the bead and raised
-// as an attention item so a forged or mistaken waiver is seen when it is used
-// (gt-tvhg8). Entries are joined oldest first, each under a line naming its
+// comment author (gt-z71j0), and the landing that uses one leaves a note on the
+// bead and hands the attention sink, when one is set, an item so a forged or
+// mistaken waiver is seen when it is used (Lander.recordAcceptedRisks,
+// gt-tvhg8). Entries are joined oldest first, each under a line naming its
 // author and date, and the join is capped at acceptedRiskCap bytes by dropping
 // the oldest: the newest entry is the one the running review is judged
 // against. When any comment's date does not parse, the order is the list's own,
@@ -164,8 +165,7 @@ func acceptedRiskExcerpt(text string) string {
 
 // isAcceptedRiskAuthor reports whether an author may record an accepted risk:
 // the shared human identity or the overseer, matched exactly after trimming and
-// case-sensitively. Every other author, polecats included, is ignored
-// (gt-lauly).
+// case-sensitively. Every other author, polecats included, is ignored (gt-lauly).
 //
 // This allowlist is a policy fence, not proof of authorship: bd records no
 // session, all writers share one OS user, and a comment's author is whatever
