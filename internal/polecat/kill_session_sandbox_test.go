@@ -23,6 +23,15 @@ func TestKillSessionCleansUpTheSandboxEvenWhenTheKillFails(t *testing.T) {
 	town := t.TempDir()
 	session.ResetSandboxRoutingForTest(town)
 	t.Cleanup(func() { session.ResetSandboxRoutingForTest("") })
+	// session's init links the openshell deleter; stub it so the test never
+	// shells out to a real sandbox CLI (a failed delete keeps the record).
+	var deleted []string
+	prev := session.SandboxDeleter
+	session.SandboxDeleter = func(_ string, rec session.SandboxRecord) error {
+		deleted = append(deleted, rec.Session)
+		return nil
+	}
+	t.Cleanup(func() { session.SandboxDeleter = prev })
 	r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
 	m := newTestManager(r, nil, failingKillProbe{newFakeProbe()}, nil)
 	sessionName := m.sessionName("box")
@@ -33,6 +42,9 @@ func TestKillSessionCleansUpTheSandboxEvenWhenTheKillFails(t *testing.T) {
 	err := m.killSession("box", "test")
 	if err == nil || !strings.Contains(err.Error(), "server gone") {
 		t.Fatalf("the kill error must surface: %v", err)
+	}
+	if len(deleted) != 1 || deleted[0] != sessionName {
+		t.Fatalf("the sandbox must be deleted once after a failed kill: %v", deleted)
 	}
 	if still, serr := session.IsSandboxed(town, sessionName); serr != nil || still {
 		t.Fatalf("the sandbox record survived a failed kill (still=%v err=%v); the sandbox must still be cleaned up", still, serr)
