@@ -1,6 +1,7 @@
 package done
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -890,27 +891,35 @@ func TestFinalExitRetiresSessionThroughExitPath(t *testing.T) {
 		fromHandoff bool
 		backend     string
 		wantKills   int
+		wantLine    string
 	}{
-		{"completed retires session", ExitCompleted, false, "", 1},
-		{"deferred retires session", ExitDeferred, false, "", 1},
-		{"escalated retires session", ExitEscalated, false, "", 1},
-		{"non-final exit preserves session", "PHASE_COMPLETE", false, "", 0},
-		{"unknown exit preserves session", "PAUSED", false, "", 0},
-		{"handoff-triggered deferred preserves session", ExitDeferred, true, "", 0},
-		{"completed leaves the sandbox session to the daemon", ExitCompleted, false, "openshell", 0},
-		{"escalated leaves the sandbox session to the daemon", ExitEscalated, false, "openshell", 0},
+		{"completed retires session", ExitCompleted, false, "", 1, "Terminating polecat session"},
+		{"deferred retires session", ExitDeferred, false, "", 1, "Terminating polecat session"},
+		{"escalated retires session", ExitEscalated, false, "", 1, "Terminating polecat session"},
+		{"non-final exit preserves session", "PHASE_COMPLETE", false, "", 0, "Session preserved for handoff continuation"},
+		{"unknown exit preserves session", "PAUSED", false, "", 0, "Session preserved for handoff continuation"},
+		{"handoff-triggered deferred preserves session", ExitDeferred, true, "", 0, "Session preserved for handoff continuation"},
+		{"completed leaves the sandbox session to the daemon", ExitCompleted, false, "openshell", 0, "Polecat session retiring after durable handoff"},
+		{"escalated leaves the sandbox session to the daemon", ExitEscalated, false, "openshell", 0, "Polecat session retiring after durable handoff"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fake := &fakeDoneSessionKiller{}
+			var out bytes.Buffer
 
-			retired := retirePolecatSessionAfterFinalExit(fake, doneTestRegistry(), tt.exitType, tt.fromHandoff, tt.backend, "gastown", "basalt", 4242)
+			retired := retirePolecatSessionAfterFinalExit(&out, fake, doneTestRegistry(), tt.exitType, tt.fromHandoff, tt.backend, "gastown", "basalt", 4242)
 
 			if fake.calls != tt.wantKills {
 				t.Fatalf("session killer calls = %d, want %d (retired=%v)", fake.calls, tt.wantKills, retired)
 			}
 			if wantRetired := tt.wantKills == 1; retired != wantRetired {
 				t.Errorf("retirePolecatSessionAfterFinalExit(%q) = %v, want %v", tt.exitType, retired, wantRetired)
+			}
+			if !strings.Contains(out.String(), tt.wantLine) {
+				t.Errorf("output = %q, want it to contain %q", out.String(), tt.wantLine)
+			}
+			if tt.wantKills == 0 && strings.Contains(out.String(), "Terminating polecat session") {
+				t.Errorf("output = %q, announces a kill that did not happen", out.String())
 			}
 			if tt.wantKills == 0 {
 				return
