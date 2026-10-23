@@ -94,7 +94,7 @@ func TestLifecycleDefaultsCheck_MissingPatrols(t *testing.T) {
 	}
 	// Should report 6 missing: compactor_dog, checkpoint_dog, doctor_dog, jsonl_git_backup, scheduled_maintenance, handler
 	if len(check.missing) != 6 {
-		t.Errorf("expected 4 missing patrols, got %d: %v", len(check.missing), check.missing)
+		t.Errorf("expected 6 missing patrols, got %d: %v", len(check.missing), check.missing)
 	}
 }
 
