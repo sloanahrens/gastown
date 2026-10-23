@@ -183,12 +183,12 @@ func TestTownResolvesRigAddresses(t *testing.T) {
 	}
 }
 
-// TestTownRefusesAnAddressInAnUnknownRig: PrefixForRig falls back to the
+// TestNudgeRefusesAnAddressInAnUnknownRig: PrefixForRig falls back to the
 // default prefix, so an address naming an unregistered rig would resolve to
 // that prefix's session and nudge another rig's agent. Both the crew and the
 // short-address form are refused before any session name is built, even when
 // the fallback session is live.
-func TestTownRefusesAnAddressInAnUnknownRig(t *testing.T) {
+func TestNudgeRefusesAnAddressInAnUnknownRig(t *testing.T) {
 	t.Parallel()
 	for _, target := range []string{"nosuchrig/crew/someone", "nosuchrig/someone", "nosuchrig/polecats/someone"} {
 		t.Run(target, func(t *testing.T) {
@@ -205,6 +205,36 @@ func TestTownRefusesAnAddressInAnUnknownRig(t *testing.T) {
 			for _, session := range []string{"gt-crew-someone", "gt-someone"} {
 				if got := ft.Sent(session); len(got) != 0 {
 					t.Errorf("sent to %s = %q, want nothing in the default-prefix rig to be nudged", session, got)
+				}
+			}
+			if got := l.entries(); len(got) != 0 {
+				t.Errorf("logged = %q, want nothing", got)
+			}
+		})
+	}
+}
+
+// TestTownRefusesRigAddressOutsideATown: with no town root there is no rig to
+// resolve against, so the crew, short and polecat forms of a rig address are
+// all refused, even when the session they name is live.
+func TestTownRefusesRigAddressOutsideATown(t *testing.T) {
+	t.Parallel()
+	for _, target := range []string{"gastown/crew/max", "gastown/max", "gastown/polecats/max"} {
+		t.Run(target, func(t *testing.T) {
+			t.Parallel()
+			ft := newDeliveryTmux(t, "gt-crew-max", "gt-max")
+			ft.SetIdle("gt-crew-max", true)
+			ft.SetIdle("gt-max", true)
+			town, l := testTown(t, ft)
+			town.Delivery.TownRoot = ""
+
+			err := town.Nudge(t.Context(), target, "hi", "mayor")
+			if err == nil || !strings.Contains(err.Error(), "not in a Gas Town workspace") {
+				t.Fatalf("Nudge(%q) = %v, want an error outside a town", target, err)
+			}
+			for _, session := range []string{"gt-crew-max", "gt-max"} {
+				if got := ft.Sent(session); len(got) != 0 {
+					t.Errorf("sent to %s = %q, want nothing", session, got)
 				}
 			}
 			if got := l.entries(); len(got) != 0 {
