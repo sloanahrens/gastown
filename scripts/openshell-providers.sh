@@ -4,19 +4,16 @@
 # Run it through `make openshell-providers`.
 #
 # Nothing secret reaches the terminal: xtrace is off for the whole run, a key
-# file is read inside a subshell, the credential travels back to provider
+# file is read as data (never sourced), the credential travels back to provider
 # create by name (so it never enters argv or the output of a command), and
-# whatever provider create prints passes a length mask first.
+# whatever provider create prints has every occurrence of the secret itself
+# replaced before it is shown.
 set -euo pipefail
 set +x
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PROFILES="$ROOT/deploy/polecat/profiles"
 CONFIG_DIR="${GT_CONFIG_DIR:-$HOME/.config/gt}"
-# Any 24+ character run of token characters in tool output is a credential.
-MASK='s/[A-Za-z0-9_-]{24,}/***/g'
-
-masked() { sed -E "$MASK"; }
 
 if ! command -v openshell >/dev/null 2>&1; then
   echo "openshell-providers: openshell is not on PATH (brew install openshell)" >&2
@@ -25,12 +22,38 @@ fi
 
 # A provider that already exists is left as it is: provider list is the state,
 # the key files are only read when a create is actually needed. The list is
-# captured whole, so grep -q cannot close the pipe on a live openshell and turn
-# a match into a SIGPIPE failure under pipefail.
+# captured whole, so awk reads it from a here-string and no pipe can close
+# early under pipefail. Only the first column is compared, so a provider named
+# deepseek-legacy does not count as deepseek.
 provider_exists() {
   local listed
   listed="$(openshell provider list 2>/dev/null || true)"
-  grep -q -F -- "$1" <<<"$listed"
+  awk -v name="$1" '$1 == name { found = 1 } END { exit !found }' <<<"$listed"
+}
+
+# key_value FILE KEY prints the value of KEY in a KEY=value env file. The file
+# is read as data: a line that is not an assignment to KEY is ignored, and
+# surrounding quotes are stripped. Nothing in the file is executed.
+key_value() {
+  local file=$1 key=$2 line value
+  line="$(grep -E "^(export )?$key=" "$file" | tail -n 1 || true)"
+  value="${line#export }"
+  value="${value#"$key="}"
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  printf '%s' "$value"
+}
+
+# masked SECRET copies stdin to stdout with every occurrence of SECRET replaced
+# by ***. It matches the secret itself, not a pattern, so a short key is hidden
+# as surely as a long one.
+masked() {
+  local secret=$1 line
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    printf '%s\n' "${line//"$secret"/***}"
+  done
 }
 
 import_profiles() {
@@ -49,7 +72,7 @@ import_profiles() {
   done
 }
 
-# create_provider NAME TYPE FILE KEY_CREDENTIAL
+# create_provider NAME TYPE FILE KEY CREDENTIAL
 # FILE defines KEY; CREDENTIAL is the env var the profile rewrites, which
 # provider create takes as a name and reads from this subshell's environment.
 create_provider() {
@@ -63,14 +86,13 @@ create_provider() {
     exit 1
   fi
   (
-    # shellcheck disable=SC1090,SC1091 # the operator's key file, outside the repo
-    . "$file"
-    if [[ -z "${!key:-}" ]]; then
+    secret="$(key_value "$file" "$key")"
+    if [[ -z "$secret" ]]; then
       echo "openshell-providers: $file does not set $key" >&2
       exit 1
     fi
-    export "$credential=${!key}"
-    openshell provider create --name "$name" --type "$type" --credential "$credential" | masked
+    export "$credential=$secret"
+    openshell provider create --name "$name" --type "$type" --credential "$credential" | masked "$secret"
   )
 }
 

@@ -123,13 +123,16 @@ lint-tools:
 # profile points at, and the short sha is the rollback pin beside it.
 POLE_IMAGE ?= gastown-polecat
 POLE_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
-# bd is built from a beads fork checkout, not this repo: the default is the
-# town's beads rig beside gastown, and BD_SRC=<checkout> points elsewhere.
-BD_SRC ?= $(if $(GT_TOWN_ROOT),$(GT_TOWN_ROOT),$(HOME)/gt)/beads/mayor/rig
+# bd is built from a beads fork checkout, not this repo. That checkout is host
+# state, so there is no default: the operator names it, BD_SRC=<checkout>.
+BD_SRC ?=
 
 # Cross-compile gt and bd for the sandbox image, then build it. The Dockerfile
 # copies deploy/polecat/bin/, so that directory is the build context's payload.
+# The guard is the first recipe line, so a run without BD_SRC stops before
+# anything is built.
 polecat-image:
+	@test -n "$(BD_SRC)" || { echo "polecat-image: BD_SRC is unset; run make polecat-image BD_SRC=<beads checkout>" >&2; exit 2; }
 	@mkdir -p deploy/polecat/bin
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/gt ./cmd/gt
 	cd $(BD_SRC) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o $(CURDIR)/deploy/polecat/bin/bd ./cmd/bd

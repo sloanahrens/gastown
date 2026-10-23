@@ -236,30 +236,14 @@ else
   fail "the three polecat sandbox targets are declared and phony" "missing:$missing"
 fi
 
-# The providers script handles real credentials, so its shape is asserted
-# statically: one xtrace-off line, no echo of a key read from a key file, and
-# provider create's output behind the length mask.
-providers_script="$ROOT/scripts/openshell-providers.sh"
-xtrace_off=$(grep -c -F 'set +x' "$providers_script" || true)
-if [[ "$xtrace_off" == 1 ]]; then
-  pass "openshell-providers turns xtrace off exactly once"
+# make polecat-image without BD_SRC stops at its guard, before go or docker runs:
+# the guard is the first recipe line, so a run here builds nothing.
+bdrc=0
+bdout=$(make -C "$ROOT" --no-print-directory polecat-image BD_SRC= 2>&1) || bdrc=$?
+if [[ "$bdrc" == 2 ]] && grep -q -F 'BD_SRC is unset' <<<"$bdout" && ! grep -q -E 'go build|docker build' <<<"$bdout"; then
+  pass "polecat-image refuses to run without BD_SRC, before building anything"
 else
-  fail "openshell-providers turns xtrace off exactly once (found $xtrace_off)" "$(grep -n -F 'set +x' "$providers_script")"
-fi
-if leaks=$(grep -n -E 'echo.*\$(DEEPSEEK|FORGEJO_TOKEN)' "$providers_script"); then
-  fail "openshell-providers never echoes a key read from a key file" "$leaks"
-else
-  pass "openshell-providers never echoes a key read from a key file"
-fi
-if grep -q -F "openshell provider create --name \"\$name\" --type \"\$type\" --credential \"\$credential\" | masked" "$providers_script" && grep -q -F "MASK='s/[A-Za-z0-9_-]{24,}/***/g'" "$providers_script"; then
-  pass "openshell-providers masks provider create output"
-else
-  fail "openshell-providers masks provider create output" "$(grep -n -F 'provider create' "$providers_script")"
-fi
-if [[ "$(grep -n -F 'openshell profile lint' "$providers_script" | cut -d: -f1)" -lt "$(grep -n -F 'openshell profile import' "$providers_script" | cut -d: -f1)" ]]; then
-  pass "openshell-providers lints a profile before it imports it"
-else
-  fail "openshell-providers lints a profile before it imports it"
+  fail "polecat-image refuses to run without BD_SRC, before building anything (rc=$bdrc)" "$bdout"
 fi
 
 # The container suite's test-Dolt init pool must be as wide as the scheduler
@@ -642,10 +626,19 @@ if ! grep -q -F "$secret_api" "$TMP/out" && ! grep -q -F "$secret_token" "$TMP/o
 else
   fail "openshell-providers puts no key in argv or on stdout, and masks provider create's output" "$(cat "$TMP/out" "$TMP/calls")"
 fi
-if grep -q -F 'no profiles under deploy/polecat/profiles' "$TMP/out"; then
-  pass "openshell-providers names the missing profile directory (deploy/polecat lands separately)"
+# The script finds its profiles beside itself, so each profile case runs a copy
+# in a throwaway tree: the repo's deploy/polecat (which lands separately) is
+# never what these cases depend on.
+tree="$TMP/tree-noprofiles"
+mkdir -p "$tree/scripts"
+cp "$providers" "$tree/scripts/"
+: >"$TMP/calls"
+rc=0
+env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" STUB_EXISTING=$'deepseek\nforgejo-polecat' bash "$tree/scripts/openshell-providers.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
+if [[ "$rc" == 0 ]] && grep -q -F 'no profiles under deploy/polecat/profiles' "$TMP/out" && ! grep -q -F 'profile' "$TMP/calls"; then
+  pass "openshell-providers names the missing profile directory and imports nothing"
 else
-  fail "openshell-providers names the missing profile directory (deploy/polecat lands separately)" "$(cat "$TMP/out")"
+  fail "openshell-providers names the missing profile directory and imports nothing (rc=$rc)" "$(cat "$TMP/out" "$TMP/calls" "$TMP/err")"
 fi
 
 mkdir -p "$TMP/empty-keys"
@@ -665,6 +658,71 @@ if [[ "$rc" != 0 ]] && grep -q -F 'deepseek.env is unreadable' "$TMP/err"; then
   pass "openshell-providers fails, naming the file, when a key file is missing"
 else
   fail "openshell-providers fails, naming the file, when a key file is missing (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+tree="$TMP/tree-profiles"
+mkdir -p "$tree/scripts" "$tree/deploy/polecat/profiles"
+cp "$providers" "$tree/scripts/"
+printf 'name: sandbox\n' >"$tree/deploy/polecat/profiles/sandbox.yaml"
+: >"$TMP/calls"
+rc=0
+env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" STUB_EXISTING=$'deepseek\nforgejo-polecat' bash "$tree/scripts/openshell-providers.sh" >"$TMP/out" 2>"$TMP/err" || rc=$?
+lint_at=$(grep -n -F 'openshell profile lint -f' "$TMP/calls" | cut -d: -f1 || true)
+import_at=$(grep -n -F 'openshell profile import -f' "$TMP/calls" | cut -d: -f1 || true)
+if [[ "$rc" == 0 && -n "$lint_at" && -n "$import_at" && "$lint_at" -lt "$import_at" ]] && grep -q -F -- '--global' "$TMP/calls"; then
+  pass "openshell-providers lints each profile before it imports it"
+else
+  fail "openshell-providers lints each profile before it imports it (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+# Tracing on from the first line: set +x must switch it off before any key is
+# read, so no secret reaches stderr.
+: >"$TMP/calls"
+rc=0
+env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" bash -x "$providers" >"$TMP/out" 2>"$TMP/trace" || rc=$?
+if [[ "$rc" == 0 ]] && grep -q -F 'set +x' "$TMP/trace" && ! grep -q -F "$secret_api" "$TMP/trace" && ! grep -q -F "$secret_token" "$TMP/trace"; then
+  pass "openshell-providers keeps both keys out of an xtrace of the run"
+else
+  fail "openshell-providers keeps both keys out of an xtrace of the run (rc=$rc)" "$(cat "$TMP/trace")"
+fi
+
+# A credential shorter than any length heuristic is still hidden: the mask
+# matches the secret's own value.
+short="shortkey1234"
+mkdir -p "$TMP/short-keys"
+printf 'DEEPSEEK_API_KEY=%s\n' "$short" >"$TMP/short-keys/deepseek.env"
+: >"$TMP/calls"
+rc=0
+env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$TMP/short-keys" STUB_EXISTING=forgejo-polecat bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
+if [[ "$rc" == 0 ]] && grep -q -F 'placeholder ***' "$TMP/out" && ! grep -q -F "$short" "$TMP/out" "$TMP/err"; then
+  pass "openshell-providers masks a short credential by its value"
+else
+  fail "openshell-providers masks a short credential by its value (rc=$rc)" "$(cat "$TMP/out" "$TMP/err")"
+fi
+
+# A key file is data, not code: a line in it that is not an assignment is never
+# run, and the key is still read from its assignment.
+mkdir -p "$TMP/sourced-keys"
+printf 'DEEPSEEK_API_KEY=%s\n' "$secret_api" >"$TMP/sourced-keys/deepseek.env"
+printf 'touch "%s/sourced-marker"\n' "$TMP" >>"$TMP/sourced-keys/deepseek.env"
+: >"$TMP/calls"
+rc=0
+env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$TMP/sourced-keys" STUB_EXISTING=forgejo-polecat bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
+if [[ "$rc" == 0 && ! -e "$TMP/sourced-marker" ]] && grep -q -F 'provider create --name deepseek' "$TMP/calls" && ! grep -q -F "$secret_api" "$TMP/out"; then
+  pass "openshell-providers reads a key file as data and never runs it"
+else
+  fail "openshell-providers reads a key file as data and never runs it (rc=$rc)" "$(cat "$TMP/out" "$TMP/calls" "$TMP/err")"
+fi
+
+# A provider whose name only contains an existing one's name is not that
+# provider: deepseek-legacy does not stand for deepseek.
+: >"$TMP/calls"
+rc=0
+env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" STUB_EXISTING=$'deepseek-legacy\nforgejo-polecat-old' bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
+if [[ "$rc" == 0 ]] && grep -q -F 'provider create --name deepseek --type' "$TMP/calls" && grep -q -F 'provider create --name forgejo-polecat --type' "$TMP/calls"; then
+  pass "openshell-providers matches a provider by its whole name"
+else
+  fail "openshell-providers matches a provider by its whole name (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
 echo ""
