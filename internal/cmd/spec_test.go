@@ -1461,9 +1461,9 @@ func TestSpecDispatchRetriesDoltContention(t *testing.T) {
 	}
 }
 
-// Contention that outlasts every retry is a deferral, not a failure: Dolt rolled
-// the attempt back before reporting it, so the next tick repeats the dispatch.
-// The label the failure path adds excludes the bead until an operator clears it,
+// Contention that outlasts every retry is a deferral, not a failure: the next
+// tick repeats the dispatch, since the bead is still unassigned. The label the
+// failure path adds excludes the bead until an operator clears it,
 // which is wrong for a bead the contention itself cleared (gt-9x16z).
 func TestSpecDispatchContentionThatOutlastsItsRetriesIsADeferral(t *testing.T) {
 	t.Parallel()
@@ -1503,26 +1503,43 @@ func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
 }
 
 // The tick charges a seat when it collects a candidate, so the next candidate
-// of the tick sees it taken. A sling that spawns no polecat — the overlap
-// guard's refusal here — hands the seat back: the tick's seat ledger says what
-// it used, not what it hoped to use (gt-9x16z).
-func TestSpecRunPendingSlingsReleasesTheSeatARefusalLeftEmpty(t *testing.T) {
+// of the tick sees it taken. A refused sling spawns no polecat and hands the
+// seat back. A sling that fails in any other way may have hooked the bead or
+// started a session before it returned, so its seat stays charged for the tick,
+// and the next tick's snapshot recounts it (gt-9x16z, gt-pto2f).
+func TestSpecRunPendingSlingsReleasesTheSeatASlingLeftEmpty(t *testing.T) {
 	t.Parallel()
 	overlap := fmt.Errorf("sling refused: %w", errSlingDuplicateContent)
+	contention := errors.New("formula failed: bd mol bond: Error 1213 (40001): serialization failure")
+	outlastedRetries := make([]error, specdispatch.RetryAttempts)
+	for i := range outlastedRetries {
+		outlastedRetries[i] = contention
+	}
 	cases := []struct {
-		name     string
-		slingErr error
-		wantLive int
+		name          string
+		slingErrs     []error
+		spawnThenFail bool
+		wantLive      int
 	}{
-		{name: "the overlap guard refuses the sling", slingErr: overlap},
+		{name: "the overlap guard refuses the sling", slingErrs: []error{overlap}},
+		{name: "the pool refuses the sling", slingErrs: []error{&poolBackpressureError{Reason: "pool: seat full (2/2) -> no seat"}}},
+		{name: "contention outlasts every retry", slingErrs: outlastedRetries, wantLive: 1},
+		{name: "the sling fails outright", slingErrs: []error{errors.New("sling failed: bd update: boom")}, wantLive: 1},
+		{name: "the sling fails after it spawned a polecat", spawnThenFail: true, wantLive: 1},
 		{name: "the sling spawns a polecat", wantLive: 1},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
-			if tc.slingErr != nil {
-				f.slingErrs["gt-a"] = []error{tc.slingErr}
+			if len(tc.slingErrs) > 0 {
+				f.slingErrs["gt-a"] = tc.slingErrs
+			}
+			env := f.env()
+			if tc.spawnThenFail {
+				env.Sling = func(specCandidate, string, specdispatch.SeatChoice) (string, error) {
+					return "nux", errors.New("session failed: tmux: boom")
+				}
 			}
 			budget := specdispatch.Budget{
 				Seats: []specdispatch.Seat{{Agent: "deepseek-flash", Cap: 3}},
@@ -1537,7 +1554,7 @@ func TestSpecRunPendingSlingsReleasesTheSeatARefusalLeftEmpty(t *testing.T) {
 				entry: specDispatchEntry{Bead: "gt-a", Rig: "gastown", Agent: "deepseek-flash"},
 			}}
 			var report specDispatchReport
-			specRunPendingSlings(f.env(), pending, &report, &budget)
+			specRunPendingSlings(env, pending, &report, &budget)
 			if got := budget.Seats[0].Live; got != tc.wantLive {
 				t.Errorf("seat live = %d, want %d", got, tc.wantLive)
 			}

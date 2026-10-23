@@ -365,11 +365,9 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 			// only closed the hooked bead, leaving the wisp orphaned.
 			// Order matters: wisp closes -> unblocks base bead -> base bead closes.
 			//
-			// A stand-down is the exception: it resubmits nothing (gt-3e1z4),
-			// so the bead stays open for the restart and the molecule has to
-			// stay with it. Force-closing the wisp here ended the workflow of
-			// a bead the restarted seat picks up again (gt-9x16z); the reason
-			// is recorded by the stand-down branch of the close chain below.
+			// A stand-down is the exception: it resubmits nothing, so the bead
+			// stays open for the restart and the molecule stays with it
+			// (gt-9x16z). The stand-down branch of the close chain records why.
 			attachment := beads.ParseAttachmentFields(hookedBead)
 			if attachment != nil && attachment.AttachedMolecule != "" && !standDown {
 				// Close molecule step descendants before closing the wisp root.

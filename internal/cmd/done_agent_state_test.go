@@ -306,6 +306,20 @@ func TestReworkStandDownLeavesTheAttachedMoleculeOpen(t *testing.T) {
 		t.Fatalf("completed gt done: %v", err)
 	}
 
+	// The molecule checks below mean something only if the stand-down ran: the
+	// seat is stuck on a DEFERRED exit, which is what keeps the bead and its
+	// molecule open for the restart.
+	fields := beads.ParseAgentFields(mustShowBead(t, db, "gt-gastown-polecat-nux").Description)
+	if fields.AgentState != string(beads.AgentStateStuck) {
+		t.Fatalf("agent_state = %q, want stuck: the rework stand-down did not run", fields.AgentState)
+	}
+	if fields.ExitType != done.ExitDeferred {
+		t.Fatalf("exit_type = %q, want %s: the rework stand-down did not run", fields.ExitType, done.ExitDeferred)
+	}
+	if got := mustShowBead(t, db, "gt-rework").Status; got == string(beads.StatusClosed) {
+		t.Fatal("gt done closed the rework bead the stand-down left open")
+	}
+
 	for _, id := range []string{"gt-wisp-mol", "gt-wisp-mol-step-1"} {
 		if got := mustShowBead(t, db, id).Status; got == string(beads.StatusClosed) {
 			t.Errorf("gt done closed %s: a stood-down bead keeps the molecule the restarted seat resumes", id)
