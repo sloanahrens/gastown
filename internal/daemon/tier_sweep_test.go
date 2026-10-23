@@ -1623,6 +1623,114 @@ func TestTierSweepRigCycleKeepsAVerdictTheDeadlineArrivedAfter(t *testing.T) {
 	}
 }
 
+// gt-qgrdy: a rig whose script has no such tier says so with "tier-sweep:
+// unknown tier <name>" and exits 2 with no summary for that tier. That is a
+// contract mismatch, not a failure, so the tier leaves the cycle's results and
+// no verdict, bead or attention item follows. Every other missing verdict
+// stays RED, and only the line naming the missing tier itself excuses it.
+func TestTierSweepRigCycleTierTheScriptDoesNotOffer(t *testing.T) {
+	t.Parallel()
+	const (
+		shellSummary       = "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n"
+		integrationSummary = "tier-sweep: integration GREEN passed=4 failed=0 skipped=0 (logs /tmp/tier-sweep.y)\n"
+		declinedRace       = "tier-sweep: unknown tier race (want shell, integration or race)\n"
+	)
+	tests := []struct {
+		name string
+		// stage is the slot stage's combined output and exit status: the run
+		// that carries the integration and race tiers.
+		stage    string
+		wantRace string // the RED reason; "" for no race verdict at all
+	}{{
+		name:  "the script's own unknown-tier line leaves race out of the results",
+		stage: integrationSummary + declinedRace,
+	}, {
+		name:     "a missing verdict without that line is still RED",
+		stage:    integrationSummary,
+		wantRace: "no verdict line (exit 2)",
+	}, {
+		name:     "an unknown-tier line for another tier excuses nothing",
+		stage:    integrationSummary + "tier-sweep: unknown tier shell (want shell, integration or race)\n",
+		wantRace: "no verdict line (exit 2)",
+	}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, rec, bd, logs := newTierSweepDaemon(t, now, "gastown")
+			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "tips1", nil }
+			d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+			rec.result = func(st tierSweepStage) tierSweepStageResult {
+				if st.slot {
+					return tierSweepStageResult{output: tc.stage, exitCode: 2, ran: true}
+				}
+				return tierSweepStageResult{output: shellSummary, exitCode: 0, ran: true}
+			}
+			cycle := d.startDogCycle("tier_sweep")
+			defer cycle.close()
+			if !d.runTierSweepRig(context.Background(), cycle, "gastown", now) {
+				t.Fatal("the cycle deferred; a stage that ran and reported a verdict is a complete cycle")
+			}
+
+			st := tierSweepTestState(t, d, "gastown")
+			race, hasRace := st.Tiers["race"]
+			notOfferedLogs := strings.Count(logs.String(), "gastown: race not offered by the rig's script")
+			offered := notOfferedLogs > 0
+			if notOfferedLogs > 1 {
+				t.Errorf("race logged as not offered %d times in one cycle, want once:\n%s", notOfferedLogs, logs.String())
+			}
+			switch {
+			case tc.wantRace == "":
+				if hasRace {
+					t.Fatalf("race verdict = %+v, want no verdict for the tier the script does not offer", race)
+				}
+				if !offered {
+					t.Errorf("the cycle did not log race as not offered:\n%s", logs.String())
+				}
+				if strings.Contains(logs.String(), "race RED") {
+					t.Errorf("the not-offered tier was logged RED:\n%s", logs.String())
+				}
+				// The tier is not part of this rig's gate, so the offered
+				// tiers' green tip advances: nothing is held back for a tier
+				// the script will never run.
+				if st.LastGreenSHA != "tips1" {
+					t.Errorf("LastGreenSHA = %q, want the offered tiers' green tip tips1", st.LastGreenSHA)
+				}
+				if st.Partial {
+					t.Error("the record is partial; every stage ran")
+				}
+			default:
+				if !hasRace || race.Verdict != tierSweepRed || len(race.FailedNames) != 1 || race.FailedNames[0] != tc.wantRace {
+					t.Fatalf("race verdict = %+v (present = %v), want RED %q", race, hasRace, tc.wantRace)
+				}
+				if offered {
+					t.Errorf("the cycle logged a tier as not offered on a line that names another one:\n%s", logs.String())
+				}
+			}
+
+			var raceBeads int
+			for _, c := range bd.created {
+				if strings.HasPrefix(c.Title, tierSweepBeadPrefix("gastown", "race")) {
+					raceBeads++
+				}
+			}
+			var raceItems int
+			for _, it := range tierSweepItems(t, d, now, "gastown") {
+				if strings.Contains(it.Summary, "tier sweep gastown race ") {
+					raceItems++
+				}
+			}
+			want := 0
+			if tc.wantRace != "" {
+				want = 1
+			}
+			if raceBeads != want || raceItems != want {
+				t.Errorf("race beads = %d, attention items = %d, want %d each", raceBeads, raceItems, want)
+			}
+		})
+	}
+}
+
 // tierSweepItems is the attention the tick would raise for rig, read from the
 // record the cycle left through the collector's own source (gt-euxf1).
 func tierSweepItems(t *testing.T, d *Daemon, now time.Time, rig string) []attention.Item {
@@ -1668,8 +1776,22 @@ func TestTierSweepRecordedTiers(t *testing.T) {
 		prior    tierSweepState
 		results  map[string]tierSweepTierResult
 		deferred bool
-		want     string
+		// notOffered names the tiers the rig's script declined this cycle.
+		notOffered map[string]bool
+		want       string
 	}{{
+		// gt-qgrdy: the earlier verdict for a declined tier was taken when
+		// the script still offered it; carrying it would show it as current.
+		name: "a partial cycle does not carry the verdict of a tier the script declined",
+		prior: tierSweepState{LastSHA: "tipA", Tiers: map[string]tierSweepTierResult{
+			"integration": {Verdict: tierSweepGreen, SHA: "tipA"},
+			"race":        {Verdict: tierSweepRed, SHA: "tipA"},
+		}},
+		results:    map[string]tierSweepTierResult{"shell": {Verdict: tierSweepGreen}},
+		deferred:   true,
+		notOffered: map[string]bool{"race": true},
+		want:       "integration=GREEN@tipA shell=GREEN@tipB",
+	}, {
 		name:  "a full cycle keeps only its own verdicts",
 		prior: prior,
 		results: map[string]tierSweepTierResult{
@@ -1707,11 +1829,86 @@ func TestTierSweepRecordedTiers(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := tierSweepRecordedTiers(tc.results, tc.prior, stages, "tipB", tc.deferred)
+			got := tierSweepRecordedTiers(tc.results, tc.prior, stages, "tipB", tc.deferred, tc.notOffered)
 			if rendered := tierSweepVerdictsAt(got); rendered != tc.want {
 				t.Errorf("recorded = %s, want %s", rendered, tc.want)
 			}
 		})
+	}
+}
+
+// gt-qgrdy: a tier the script does not offer cannot hold the green tip back,
+// but a cycle in which the script offered nothing judged nothing and is not
+// green.
+func TestTierSweepAllGreen(t *testing.T) {
+	t.Parallel()
+	stages := []tierSweepStage{{tiers: []string{"shell"}}, {tiers: []string{"integration", "race"}}}
+	green := tierSweepTierResult{Verdict: tierSweepGreen}
+	red := tierSweepTierResult{Verdict: tierSweepRed}
+	tests := []struct {
+		name       string
+		results    map[string]tierSweepTierResult
+		notOffered map[string]bool
+		want       bool
+	}{
+		{"every tier green", map[string]tierSweepTierResult{"shell": green, "integration": green, "race": green}, nil, true},
+		{"a red tier", map[string]tierSweepTierResult{"shell": green, "integration": green, "race": red}, nil, false},
+		{"a declined tier is not held against the rest", map[string]tierSweepTierResult{"shell": green, "integration": green}, map[string]bool{"race": true}, true},
+		{"a red tier beside a declined one", map[string]tierSweepTierResult{"shell": red, "integration": green}, map[string]bool{"race": true}, false},
+		{"a tier with no result and no decline", map[string]tierSweepTierResult{"shell": green, "integration": green}, nil, false},
+		{"every tier declined judged nothing", map[string]tierSweepTierResult{}, map[string]bool{"shell": true, "integration": true, "race": true}, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := tierSweepAllGreen(tc.results, stages, tc.notOffered); got != tc.want {
+				t.Errorf("tierSweepAllGreen = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// gt-qgrdy: when the script declines every tier of the cycle there is no
+// verdict anywhere, so the cycle is not green: it aborts with the reason named,
+// the last record stands (tip not advanced, nothing promoted) and no bead is
+// filed.
+func TestTierSweepRigCycleEveryTierDeclined(t *testing.T) {
+	t.Parallel()
+	now := atHour(time.Now(), 15)
+	d, rec, bd, logs := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "tips1", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	if err := writeTierSweepState(d.config.TownRoot, "gastown", tierSweepState{
+		LastSHA: "tips0", LastGreenSHA: "tips0",
+		Tiers: map[string]tierSweepTierResult{"shell": {Verdict: tierSweepGreen, SHA: "tips0"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		var out string
+		for _, tier := range st.tiers {
+			out += "tier-sweep: unknown tier " + tier + " (want nothing)\n"
+		}
+		return tierSweepStageResult{output: out, exitCode: 2, ran: true}
+	}
+	cycle := d.startDogCycle("tier_sweep")
+	defer cycle.close()
+	if d.runTierSweepRig(context.Background(), cycle, "gastown", now) {
+		t.Fatalf("the cycle reported complete with no tier offered:\n%s", logs.String())
+	}
+	if want := tierSweepAbortedLine("gastown", "tips1", "no tier offered by the rig's script"); !strings.Contains(logs.String(), want) {
+		t.Errorf("log lacks %q:\n%s", want, logs.String())
+	}
+
+	st := tierSweepTestState(t, d, "gastown")
+	if st.LastGreenSHA != "tips0" || st.LastSHA != "tips0" {
+		t.Errorf("record = last %q, last green %q, want the earlier record left as it was", st.LastSHA, st.LastGreenSHA)
+	}
+	if len(bd.created) != 0 {
+		t.Errorf("beads filed = %d, want none for tiers the script does not offer", len(bd.created))
+	}
+	if strings.Contains(logs.String(), " RED") {
+		t.Errorf("a declined tier was logged RED:\n%s", logs.String())
 	}
 }
 
