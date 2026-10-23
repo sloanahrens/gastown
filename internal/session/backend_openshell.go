@@ -434,19 +434,24 @@ func (b *openshellBackend) createSpec(spec SpawnSpec) (sandbox.CreateSpec, error
 func (b *openshellBackend) contract(spec SpawnSpec) map[string]string {
 	identity := spec.Rig + "/polecats/" + spec.Polecat
 	return map[string]string{
-		"GT_TOWN_ROOT":           sandboxTownRoot,
-		"GT_ROOT":                sandboxTownRoot,
-		"GT_RIG":                 spec.Rig,
-		"GT_POLECAT":             spec.Polecat,
-		"GT_ROLE":                identity,
-		"BD_ACTOR":               identity,
-		"GT_SESSION_BACKEND":     BackendOpenShell,
-		"BEADS_DOLT_SERVER_MODE": "1",
-		"BEADS_DOLT_SERVER_HOST": b.controlPlaneHost(),
-		"BEADS_DOLT_SERVER_PORT": sandboxDoltPort,
-		"BD_DISABLE_METRICS":     "1",
-		"DO_NOT_TRACK":           "1",
-		"DISABLE_AUTOUPDATER":    "1",
+		"GT_TOWN_ROOT":       sandboxTownRoot,
+		"GT_ROOT":            sandboxTownRoot,
+		"GT_RIG":             spec.Rig,
+		"GT_POLECAT":         spec.Polecat,
+		"GT_ROLE":            identity,
+		"BD_ACTOR":           identity,
+		"GT_SESSION_BACKEND": BackendOpenShell,
+		// The sandbox's tmux server is on SandboxTmuxSocket. Without this a gt run
+		// in the sandbox derives its socket from the town path (/sandbox/gt), asks
+		// a server that is not there, and its tmux reads (the Stop hook's pane
+		// scan, among others) fail.
+		"GT_TMUX_SOCKET":                           SandboxTmuxSocket,
+		"BEADS_DOLT_SERVER_MODE":                   "1",
+		"BEADS_DOLT_SERVER_HOST":                   b.controlPlaneHost(),
+		"BEADS_DOLT_SERVER_PORT":                   sandboxDoltPort,
+		"BD_DISABLE_METRICS":                       "1",
+		"DO_NOT_TRACK":                             "1",
+		"DISABLE_AUTOUPDATER":                      "1",
 		"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
 	}
 }
