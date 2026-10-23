@@ -421,3 +421,39 @@ func TestFakeCallsIsACopy(t *testing.T) {
 		t.Errorf("Calls() aliases the recording: later read %q", got)
 	}
 }
+
+// Exists is false only for the gateway's own "sandbox not found"; a gateway that
+// fails any other way is an error, never an absent sandbox.
+func TestExists(t *testing.T) {
+	t.Parallel()
+	failed := errors.New("exit status 1")
+	tests := []struct {
+		name    string
+		reply   string
+		stderr  string
+		err     error
+		want    bool
+		wantErr bool
+	}{
+		{name: "present", reply: `{"name":"x","phase":"Ready"}`, want: true},
+		{name: "not_found", stderr: "Error:   × code: 'Some requested entity was not found', message: \"sandbox not found\"", err: failed},
+		{name: "gateway_unreachable", stderr: "transport error: connection refused", err: failed, wantErr: true},
+		{name: "failure_without_stderr", err: failed, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cli, f := newFakeCLI()
+			f.Reply = map[string]string{"get": tt.reply}
+			f.Stderr = map[string]string{"get": tt.stderr}
+			if tt.err != nil {
+				f.Err = map[string]error{"get": tt.err}
+			}
+			got, err := cli.Exists(context.Background(), "x")
+			if (err != nil) != tt.wantErr || got != tt.want {
+				t.Fatalf("Exists = %v, %v; want %v (error: %v)", got, err, tt.want, tt.wantErr)
+			}
+			wantCall(t, f, "openshell", "-g", "openshell", "sandbox", "get", "x", "--output", "json")
+		})
+	}
+}
