@@ -252,6 +252,9 @@ func MarkSlung(townRoot string, s Seat, agent, actor string, now time.Time) erro
 			return nil
 		}
 		r.Agent = strings.TrimSpace(agent)
+		// A sling starts a new session, so the stall evidence is the previous
+		// session's and is dropped, as a kill, MarkIdle and MarkSubmitted do.
+		r.Progress = nil
 		r.Actor, r.UpdatedAt = actor, now.UTC()
 		return nil
 	})
