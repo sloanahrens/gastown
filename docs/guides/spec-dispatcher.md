@@ -224,9 +224,9 @@ counted on the agent its seat was spawned on, which the agent bead records, not
 on a role default. A polecat that records no agent fills no seat but counts
 toward `max_total`, and the tick names it: `roster: N polecat(s) record no agent
 and count under "(unrecorded)", on no seat: <names>`.
-`polecat_pool.min_spawn_gap` applies to the newest polecat on any seat. At most
-`max_per_tick` (default 1) beads are slung per tick. A full seat is skipped,
-never overfilled.
+`polecat_pool.min_spawn_gap` applies to the newest polecat on any seat. A tick
+slings as many beads as there are free seats, unless `max_per_tick` sets a
+lower ceiling. A full seat is skipped, never overfilled.
 
 ### Names
 
