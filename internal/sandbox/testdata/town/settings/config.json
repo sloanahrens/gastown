@@ -1,0 +1,22 @@
+{
+  "type": "town",
+  "version": 1,
+  "name": "testtown",
+  "agents": {
+    "deepseek-flash": {
+      "command": "claude",
+      "env": {
+        "ANTHROPIC_API_KEY": "PLANTED-KEY-2",
+        "ANTHROPIC_BASE_URL": "http://host.docker.internal:4000"
+      }
+    }
+  },
+  "token": "PLANTED-TOKEN-1",
+  "secrets": {
+    "forgejo_bot": "PLANTED-SECRET-3"
+  },
+  "keep": {
+    "note": "kept",
+    "max_parallel": 3
+  }
+}
