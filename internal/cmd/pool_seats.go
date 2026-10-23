@@ -131,15 +131,26 @@ type poolSeatBatch struct {
 }
 
 // rigSeatBatch is one rig's reads. store is the rig's client, which the
-// per-seat fallback reads too. agents and assigned are nil when their batch
-// failed or was not made. held holds the hook and source-issue beads the batch
-// read, by id; an id it does not hold is read live, as the per-seat read does.
+// per-seat fallback reads too. agents, parsed and assigned are nil when their
+// batch failed or was not made. held holds the hook and source-issue beads the
+// batch read, by id; an id it does not hold is read live, as the per-seat read
+// does.
 type rigSeatBatch struct {
 	store    beads.Client
 	asked    map[string]bool         // agent bead ids the batch asked for
 	agents   map[string]*beads.Issue // the agent beads that exist among them
+	parsed   map[string]parsedAgent  // each agent bead's parse, once, by id
 	assigned map[string]*beads.Issue // assignee -> the issue GetAssignedIssue picks
 	held     map[string]*beads.Issue // hook and source-issue beads, by id
+}
+
+// parsedAgent is one batched agent bead's parse: what a live read of the bead
+// would have returned. The batch asks for the same bead twice — first the
+// references it follows (readSourceIssues) and then the seat read itself
+// (agentBead) — so the description is parsed once, here.
+type parsedAgent struct {
+	fields *beads.AgentFields
+	err    error
 }
 
 // assignedStatuses are the statuses GetAssignedIssue considers, most preferred
@@ -200,8 +211,15 @@ func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
 	if agents, err := rb.store.ShowMultiple(ids); err == nil {
 		rb.agents = agents
 		rb.asked = make(map[string]bool, len(ids))
+		rb.parsed = make(map[string]parsedAgent, len(agents))
 		for _, id := range ids {
 			rb.asked[id] = true
+		}
+		for id, agent := range agents {
+			// The shared agent-bead read, over a store that holds this one issue,
+			// so the bead is validated and parsed exactly as a live read would.
+			_, fields, err := beads.GetAgentBead(heldIssueStore{Client: rb.store, issue: agent}, id)
+			rb.parsed[id] = parsedAgent{fields: fields, err: err}
 		}
 	}
 	work, err := rb.store.List(beads.ListOptions{Status: strings.Join(assignedStatuses, ","), Priority: -1})
@@ -228,14 +246,14 @@ func (rb *rigSeatBatch) readSourceIssues(work []*beads.Issue) {
 	}
 	var missing []string
 	seen := map[string]bool{}
-	for id, agent := range rb.agents {
-		_, fields, err := beads.GetAgentBead(heldIssueStore{Client: rb.store, issue: agent}, id)
-		if err != nil || fields == nil {
+	for id := range rb.agents {
+		read := rb.parsed[id]
+		if read.err != nil || read.fields == nil {
 			continue
 		}
 		// The same two references the seat read follows, named the same way, so
 		// each one it reads is one the batch already holds or asks for.
-		for _, ref := range []string{agentSourceIssueHint("", fields), strings.TrimSpace(fields.HookBead)} {
+		for _, ref := range []string{agentSourceIssueHint("", read.fields), strings.TrimSpace(read.fields.HookBead)} {
 			if ref == "" || seen[ref] {
 				continue
 			}
@@ -284,9 +302,13 @@ func (rb *rigSeatBatch) agentBead(live func(bd beads.Client, agentID string) (*b
 		if !ok {
 			return nil, nil, nil
 		}
-		// The shared agent-bead read, over a store that holds this one issue, so
-		// the bead is validated and parsed exactly as a live read would.
-		return beads.GetAgentBead(heldIssueStore{Client: bd, issue: issue}, agentID)
+		// The parse the batch already made, which is what a live read of the
+		// bead returns: validated and parsed the same way, once.
+		read := rb.parsed[agentID]
+		if read.err != nil {
+			return nil, nil, read.err
+		}
+		return issue, read.fields, nil
 	}
 }
 
