@@ -1052,6 +1052,23 @@ func (d *Daemon) recordStopForHeal(now time.Time) {
 	}
 }
 
+// shutdownForSignal ends the daemon on a signal and returns what Run should
+// exit with: nil when gt requested the stop, ErrUnrequestedStop otherwise. The
+// record goes down before the shutdown, and the exit reads the marker after it
+// (gt-518hq, gt-swsqm).
+func (d *Daemon) shutdownForSignal(sig os.Signal, state *State) error {
+	d.logger.Printf("Received signal %v, shutting down", sig)
+	d.recordStopForHeal(time.Now())
+	// Exit 0 only when gt asked for this stop; any other signal exits 75,
+	// which launchd turns into a relaunch only for a job still loaded under
+	// KeepAlive (gt-swsqm, gt-2gctr).
+	err := exitAfterSignal(d.config.TownRoot, os.Getpid(), time.Now(), d.shutdown(state))
+	if errors.Is(err, ErrUnrequestedStop) {
+		d.logger.Println(unrequestedStopLogLine)
+	}
+	return err
+}
+
 // clearSpentSignalStop drops the record of the daemon that ran before this
 // one: a record says the town was stopped, and a daemon starting says it is
 // not (gt-r8ux8).
@@ -1422,16 +1439,7 @@ func (d *Daemon) Run() (err error) {
 				// every restart, so there is nothing to reload.
 				d.logger.Println("Received reload-restart signal: restart budgets are read from the intent records, nothing to reload")
 			} else {
-				d.logger.Printf("Received signal %v, shutting down", sig)
-				d.recordStopForHeal(time.Now())
-				// Exit 0 only when gt asked for this stop; any other signal
-				// exits 75, which launchd turns into a relaunch only for a
-				// job still loaded under KeepAlive (gt-swsqm, gt-2gctr).
-				err := exitAfterSignal(d.config.TownRoot, os.Getpid(), time.Now(), d.shutdown(state))
-				if errors.Is(err, ErrUnrequestedStop) {
-					d.logger.Println(unrequestedStopLogLine)
-				}
-				return err
+				return d.shutdownForSignal(sig, state)
 			}
 
 		case <-doltHealthChan:

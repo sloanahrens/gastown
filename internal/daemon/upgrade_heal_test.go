@@ -313,15 +313,12 @@ exit 0
 				}
 			}
 			if tc.gtDownStop {
-				// gt down: StopDaemon leaves the marker, the daemon's signal branch
-				// records the stop before the shutdown, and exitAfterSignal takes
-				// the marker and exits 0.
-				now := time.Now()
-				if err := writeStopRequested(d.config.TownRoot, os.Getpid(), now); err != nil {
+				// gt down: StopDaemon leaves the marker, then the daemon's real
+				// signal branch records the stop and exits 0 on the marker.
+				if err := writeStopRequested(d.config.TownRoot, os.Getpid(), time.Now()); err != nil {
 					t.Fatal(err)
 				}
-				d.recordStopForHeal(now)
-				if err := exitAfterSignal(d.config.TownRoot, os.Getpid(), now, nil); err != nil {
+				if err := d.shutdownForSignal(syscall.SIGTERM, &State{}); err != nil {
 					t.Fatalf("a gt down stop must exit without ErrUnrequestedStop, got %v", err)
 				}
 			}
@@ -397,6 +394,44 @@ exit 0
 			}
 			if _, err := os.Stat(filepath.Join(d.config.TownRoot, "daemon", "daemon.log")); !errors.Is(err, os.ErrNotExist) {
 				t.Fatalf("the helper wrote daemon.log (stat err %v); its trail must not depend on it", err)
+			}
+		})
+	}
+}
+
+// TestShutdownForSignalRecordsTheStopTheHealHelperReads drives the daemon's
+// own signal-shutdown branch, so the helper's "requested through gt" answer
+// fails the build if that branch stops recording what the marker says
+// (gt-oagz9).
+func TestShutdownForSignalRecordsTheStopTheHealHelperReads(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		requested bool   // StopDaemon left a marker for this pid before the signal
+		wantKind  string // the record's second line, which the helper matches
+		wantErr   error
+	}{
+		{name: "a stop gt requested exits 0 and is recorded as requested", requested: true, wantKind: signalStopRequested},
+		{name: "an unrequested signal exits 75 and is recorded as unrequested", wantKind: signalStopUnrequested, wantErr: ErrUnrequestedStop},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			d := upgradeTestDaemon(t)
+			if tc.requested {
+				if err := writeStopRequested(d.config.TownRoot, os.Getpid(), time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := d.shutdownForSignal(syscall.SIGTERM, &State{}); !errors.Is(err, tc.wantErr) {
+				t.Fatalf("signal shutdown = %v, want %v", err, tc.wantErr)
+			}
+			data, err := os.ReadFile(signalStopPath(d.config.TownRoot))
+			if err != nil {
+				t.Fatalf("the heal helper has no signal-stop record to read: %v", err)
+			}
+			if fields := strings.Fields(string(data)); len(fields) != 2 || fields[1] != tc.wantKind {
+				t.Fatalf("signal-stop record = %q, want a second line %q", data, tc.wantKind)
 			}
 		})
 	}
