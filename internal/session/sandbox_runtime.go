@@ -8,10 +8,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"os"
 	"path"
 	"path/filepath"
 	"regexp"
+	"strings"
 )
 
 // runtimeArchiveName is the staged archive holding the polecat's Claude
@@ -49,7 +51,7 @@ type runtimeFile struct {
 // town root rewritten. A missing settings.json is an error, since the agent
 // command names it; a missing system prompt is skipped. A rig or polecat name
 // that is not one path segment is an error too.
-func buildRuntimeArchive(spec SpawnSpec) ([]byte, error) {
+func buildRuntimeArchive(spec SpawnSpec, gitEmail string) ([]byte, error) {
 	if err := requireRuntimeSegment("rig", spec.Rig); err != nil {
 		return nil, err
 	}
@@ -74,9 +76,15 @@ func buildRuntimeArchive(spec SpawnSpec) ([]byte, error) {
 		return nil, err
 	}
 	claudeDir := path.Join("gt", spec.Rig, "polecats", ".claude")
+	forgejoHost, err := repoHost(spec.RepoURL)
+	if err != nil {
+		return nil, err
+	}
 	files := []runtimeFile{
 		{".claude.json", claudeJSON, 0o600},
 		{path.Join(claudeDir, "settings.json"), settings, 0o644},
+		{gitHelperName, []byte(gitHelperScript(forgejoHost)), 0o755},
+		{".gitconfig", []byte(sandboxGitConfig(spec.Polecat, gitEmail)), 0o644},
 	}
 
 	promptName := "system-prompt-" + spec.Polecat + ".md"
@@ -119,4 +127,49 @@ func sandboxClaudeJSON(workDir string) ([]byte, error) {
 			workDir: map[string]any{"hasTrustDialogAccepted": true},
 		},
 	}, "", "  ")
+}
+
+// gitHelperName is the credential helper's file name under /sandbox.
+const gitHelperName = ".githelper"
+
+// gitHelperScript is git's credential helper in the sandbox. It reads the
+// Forgejo token from the environment each time git asks, so the token (a
+// placeholder the provider proxy resolves in the Authorization header) is never
+// written to a file that `git config --list` or `cat` can show. git sends it as
+// the basic-auth password, and the proxy resolves it there too. It answers only
+// for the Forgejo host (host:port as the clone URL names it): for any other host
+// it prints nothing, so the placeholder never goes to another host's prompt.
+func gitHelperScript(forgejoHost string) string {
+	return `#!/bin/sh
+[ "$1" = get ] || exit 0
+host=
+while IFS= read -r line; do
+  [ -n "$line" ] || break
+  case "$line" in host=*) host=${line#host=} ;; esac
+done
+[ "$host" = "` + forgejoHost + `" ] || exit 0
+echo "username=polecat"
+echo "password=$FORGEJO_TOKEN"
+`
+}
+
+// repoHost is the host:port of the clone URL, the one host the helper answers for.
+func repoHost(repoURL string) (string, error) {
+	u, err := url.Parse(repoURL)
+	if err != nil || u.Host == "" || strings.ContainsAny(u.Host, "\"'`$\\ \n") {
+		return "", fmt.Errorf("sandbox git helper: cannot take a host from the repo URL %q", repoURL)
+	}
+	return u.Host, nil
+}
+
+// sandboxGitConfig is the sandbox's global git config: the polecat's identity
+// and the credential helper, so a plain git fetch or push (and gt done's) works
+// with no secret in the file. The email is the host's global one, as on a host
+// polecat; polecat@gastown.local stands in when the host has none.
+func sandboxGitConfig(polecat, email string) string {
+	if email == "" {
+		email = polecat + "@gastown.local"
+	}
+	return "[user]\n\tname = " + polecat + "\n\temail = " + email + "\n" +
+		"[credential]\n\thelper = " + path.Join(sandboxHome, gitHelperName) + "\n"
 }

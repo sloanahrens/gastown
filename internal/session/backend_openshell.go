@@ -77,7 +77,10 @@ type openshellBackend struct {
 	probe func(session string) liveness.Probe
 	// imageGT reads the gt commit an image was built from, and installedGT is
 	// the commit of the gt running Prepare. Tests set both.
-	imageGT     func(ctx context.Context, image string) (string, error)
+	imageGT func(ctx context.Context, image string) (string, error)
+	// gitEmail reads the host's global git user.email, the address the sandbox's
+	// commits carry (host polecats commit with it too); "" when it is unset.
+	gitEmail    func() string
 	installedGT func() string
 }
 
@@ -90,6 +93,7 @@ func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
 		render:      sandbox.RenderSkeleton,
 		push:        pushToForgejo,
 		imageGT:     dockerImageGT,
+		gitEmail:    hostGitEmail,
 		installedGT: version.BuildCommit,
 	}, nil
 }
@@ -232,7 +236,7 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	// Also before anything is pushed or created: the agent command names these
 	// files, so a polecat whose settings are missing or cannot be rendered for
 	// the sandbox must stop here.
-	runtime, err := buildRuntimeArchive(spec)
+	runtime, err := buildRuntimeArchive(spec, b.gitEmail())
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}
@@ -594,4 +598,14 @@ func buildWorkspaceArchive(worktree string) ([]byte, error) {
 		return nil, nil
 	}
 	return buf.Bytes(), nil
+}
+
+// hostGitEmail is the host's global git identity email, "" when unset or
+// unreadable.
+func hostGitEmail() string {
+	out, err := exec.Command("git", "config", "--global", "user.email").Output() //nolint:gosec // G204: fixed command
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
 }

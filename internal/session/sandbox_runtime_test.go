@@ -50,14 +50,14 @@ func untarRuntime(t *testing.T, data []byte) map[string]runtimeEntry {
 func TestBuildRuntimeArchiveHoldsTheRenderedSettingsAndPrompt(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	data, err := buildRuntimeArchive(openshellSpawn(town, work))
+	data, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail)
 	if err != nil {
 		t.Fatalf("buildRuntimeArchive: %v", err)
 	}
 	got := untarRuntime(t, data)
 	dir := "gt/" + openshellTestRig + "/polecats/.claude/"
-	if len(got) != 3 {
-		t.Fatalf("archive entries = %v, want .claude.json, settings.json and the system prompt", got)
+	if len(got) != 5 {
+		t.Fatalf("archive entries = %v, want .claude.json, .gitconfig, .githelper, settings.json and the system prompt", got)
 	}
 	if !strings.Contains(got[dir+"settings.json"].body, "/usr/local/bin/gt prime --hook") {
 		t.Errorf("settings.json was not rendered for the sandbox:\n%s", got[dir+"settings.json"].body)
@@ -74,17 +74,17 @@ func TestBuildRuntimeArchiveSkipsAMissingPromptButNotMissingSettings(t *testing.
 	if err := os.Remove(filepath.Join(claudeDir, "system-prompt-"+openshellTestPolecat+".md")); err != nil {
 		t.Fatal(err)
 	}
-	data, err := buildRuntimeArchive(openshellSpawn(town, work))
+	data, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail)
 	if err != nil {
 		t.Fatalf("buildRuntimeArchive without a system prompt: %v", err)
 	}
-	if got := untarRuntime(t, data); len(got) != 2 {
-		t.Fatalf("archive entries = %v, want only .claude.json and settings.json", got)
+	if got := untarRuntime(t, data); len(got) != 4 {
+		t.Fatalf("archive entries = %v, want .claude.json, .gitconfig, .githelper and settings.json only", got)
 	}
 	if err := os.Remove(filepath.Join(claudeDir, "settings.json")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildRuntimeArchive(openshellSpawn(town, work)); err == nil {
+	if _, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail); err == nil {
 		t.Fatal("buildRuntimeArchive without settings.json = nil error; the agent command names that file")
 	}
 }
@@ -101,7 +101,7 @@ func TestBuildRuntimeArchiveReportsAnUnreadablePrompt(t *testing.T) {
 	if err := os.Mkdir(prompt, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := buildRuntimeArchive(openshellSpawn(town, work)); err == nil {
+	if _, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail); err == nil {
 		t.Fatal("buildRuntimeArchive with a directory for the system prompt = nil error")
 	}
 }
@@ -112,7 +112,7 @@ func TestBuildRuntimeArchiveReportsSettingsThatDoNotRender(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	writeOpenshellFile(t, filepath.Join(town, openshellTestRig, "polecats", ".claude", "settings.json"), "{not json")
-	if _, err := buildRuntimeArchive(openshellSpawn(town, work)); err == nil {
+	if _, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail); err == nil {
 		t.Fatal("buildRuntimeArchive with invalid settings JSON = nil error")
 	}
 }
@@ -139,7 +139,7 @@ func TestBuildRuntimeArchiveRefusesTraversalInRigOrPolecat(t *testing.T) {
 			town, work := openshellTown(t)
 			spec := openshellSpawn(town, work)
 			spec.Rig, spec.Polecat = tc.rig, tc.polecat
-			_, err := buildRuntimeArchive(spec)
+			_, err := buildRuntimeArchive(spec, openshellTestGitEmail)
 			if err == nil || !strings.Contains(err.Error(), "not a single path segment") {
 				t.Fatalf("buildRuntimeArchive with rig=%q polecat=%q: err=%v, want a path-segment refusal", tc.rig, tc.polecat, err)
 			}
@@ -172,7 +172,7 @@ func TestBuildRuntimeArchiveSeedsClaudeJSONForTheSandboxWorktree(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
 	spec := openshellSpawn(town, work)
-	data, err := buildRuntimeArchive(spec)
+	data, err := buildRuntimeArchive(spec, openshellTestGitEmail)
 	if err != nil {
 		t.Fatalf("buildRuntimeArchive: %v", err)
 	}
@@ -207,5 +207,93 @@ func TestBuildRuntimeArchiveSeedsClaudeJSONForTheSandboxWorktree(t *testing.T) {
 	}
 	if strings.Contains(body, town) || strings.Contains(body, "/Users/") {
 		t.Errorf(".claude.json names a host path:\n%s", body)
+	}
+}
+
+// Plain git (and gt done's push) must authenticate inside a sandbox with nothing
+// secret in a file: the credential helper reads the token from the environment
+// when git asks, and git config prints no token (sling 10, 2026-10-23: the agent
+// hit a git auth error and dumped the environment to find out why).
+func TestBuildRuntimeArchiveGivesGitACredentialHelperAndNoSecret(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	data, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail)
+	if err != nil {
+		t.Fatalf("buildRuntimeArchive: %v", err)
+	}
+	got := untarRuntime(t, data)
+
+	cfgEntry, ok := got[".gitconfig"]
+	if !ok {
+		t.Fatal("the archive has no .gitconfig")
+	}
+	cfg := cfgEntry.body
+	for _, want := range []string{"name = " + openshellTestPolecat, "email = " + openshellTestGitEmail, "helper = /sandbox/.githelper"} {
+		if !strings.Contains(cfg, want) {
+			t.Errorf(".gitconfig lacks %q:\n%s", want, cfg)
+		}
+	}
+	helperEntry, ok := got[".githelper"]
+	if !ok {
+		t.Fatal("the archive has no .githelper")
+	}
+	helper := helperEntry.body
+	if helperEntry.mode&0o111 == 0 {
+		t.Errorf(".githelper mode = %o, want executable (git runs it as a program)", helperEntry.mode)
+	}
+	if !strings.HasPrefix(helper, "#!/bin/sh\n") || !strings.Contains(helper, `"password=$FORGEJO_TOKEN"`) {
+		t.Errorf(".githelper does not read the token from the environment:\n%s", helper)
+	}
+	for name, body := range map[string]string{".gitconfig": cfg, ".githelper": helper} {
+		if strings.Contains(body, "openshell:resolve") || strings.Contains(strings.ToLower(body), "authorization") {
+			t.Errorf("%s holds a credential or an auth header:\n%s", name, body)
+		}
+	}
+}
+
+// The helper answers only for the Forgejo host the clone URL names, so the token
+// placeholder never goes to another host's credential prompt. The behaviour (a
+// request for github.com prints nothing) is replayed in a sandbox by replay.sh;
+// here the generated script is pinned to the host and the early exit.
+func TestGitHelperScriptAnswersOnlyForTheForgejoHost(t *testing.T) {
+	t.Parallel()
+	script := gitHelperScript("host.docker.internal:3000")
+	for _, want := range []string{
+		`[ "$1" = get ] || exit 0`,
+		`case "$line" in host=*) host=${line#host=} ;; esac`,
+		`[ "$host" = "host.docker.internal:3000" ] || exit 0`,
+	} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the helper lacks %q:\n%s", want, script)
+		}
+	}
+	// The credential lines come only after the host check.
+	if strings.Index(script, `exit 0`+"\n"+`echo "username`) < 0 &&
+		strings.Index(script, `echo "password=$FORGEJO_TOKEN"`) < strings.LastIndex(script, `[ "$host" =`) {
+		t.Errorf("credentials are printed before the host is checked:\n%s", script)
+	}
+}
+
+func TestRepoHostIsTheCloneURLsHostAndPort(t *testing.T) {
+	t.Parallel()
+	if got, err := repoHost("http://host.docker.internal:3000/sloan/gastown.git"); err != nil || got != "host.docker.internal:3000" {
+		t.Errorf("repoHost = %q, %v; want host.docker.internal:3000", got, err)
+	}
+	for _, bad := range []string{"", "not a url", "http:///no-host", `http://evil"; rm -rf /;:3000/x`} {
+		if got, err := repoHost(bad); err == nil {
+			t.Errorf("repoHost(%q) = %q, nil; want an error (the host goes into the helper script)", bad, got)
+		}
+	}
+}
+
+// Commits in a sandbox carry the host's global email, as host polecats' do; the
+// polecat@… form stands in when the host has none.
+func TestSandboxGitConfigUsesTheHostEmailAndFallsBack(t *testing.T) {
+	t.Parallel()
+	if cfg := sandboxGitConfig("ace", "dev@example.test"); !strings.Contains(cfg, "email = dev@example.test") || !strings.Contains(cfg, "name = ace") {
+		t.Errorf("config does not carry the host email and the polecat name:\n%s", cfg)
+	}
+	if cfg := sandboxGitConfig("ace", ""); !strings.Contains(cfg, "email = ace@gastown.local") {
+		t.Errorf("config does not fall back to ace@gastown.local when the host has no email:\n%s", cfg)
 	}
 }
