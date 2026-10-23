@@ -3,6 +3,8 @@ package cmd
 import (
 	"reflect"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/cmdtree"
 )
 
 // The guard matchers used to assume a fixed argv shape: `<shell> -c`, `git
@@ -84,6 +86,7 @@ func TestParseBdCloseSegmentSkipsGlobalFlags(t *testing.T) {
 		{"json before close", []string{"bd", "--json", "close", "gt-x"}, []string{"gt-x"}, true},
 		{"short flag before close", []string{"bd", "-q", "close", "gt-x"}, []string{"gt-x"}, true},
 		{"value flag before close", []string{"bd", "--db", "/p/x.db", "close", "gt-x"}, []string{"gt-x"}, true},
+		{"format flag before close", []string{"bd", "--format", "json", "close", "gt-x"}, []string{"gt-x"}, true},
 		{"value flag equals form", []string{"bd", "--actor=me", "close", "gt-x"}, []string{"gt-x"}, true},
 		{"path to bd", []string{"/usr/local/bin/bd", "-v", "close", "gt-x", "-r", "done"}, []string{"gt-x"}, true},
 		{"other subcommand", []string{"bd", "--json", "show", "gt-x"}, nil, false},
@@ -97,6 +100,25 @@ func TestParseBdCloseSegmentSkipsGlobalFlags(t *testing.T) {
 			}
 			if ok && !reflect.DeepEqual(got.IDs, c.wantIDs) {
 				t.Errorf("IDs = %q, want %q", got.IDs, c.wantIDs)
+			}
+		})
+	}
+}
+
+// Every value-taking bd persistent flag skips its value before close. The guard
+// and cmdtree's scan read the one list cmdtree exports (gt-m8efc), so a flag
+// added there is covered here without a second edit.
+func TestParseBdCloseSegmentSkipsEveryBdValueFlag(t *testing.T) {
+	t.Parallel()
+	for flag := range cmdtree.BdGlobalValueFlags {
+		t.Run(flag, func(t *testing.T) {
+			t.Parallel()
+			got, ok := parseBdCloseSegment([]string{"bd", flag, "x", "close", "gt-x"})
+			if !ok {
+				t.Fatalf("parseBdCloseSegment with %s before close found no close", flag)
+			}
+			if !reflect.DeepEqual(got.IDs, []string{"gt-x"}) {
+				t.Errorf("IDs = %q, want [gt-x]", got.IDs)
 			}
 		})
 	}

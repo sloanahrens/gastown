@@ -50,14 +50,16 @@ var cmdTemplate = regexp.MustCompile(`\{\{-?\s*cmd\s*-?\}\}`)
 // variables, quoted strings and paths all stop word collection.
 var cmdWord = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
-// bdGlobalValueFlags are bd's persistent flags that take their value as the
-// next token. Skipping such a flag alone would leave the value behind as a
-// command word, so `bd --db beads sync` would read as the unknown command
-// "beads". Flags not listed here are boolean, or carry their value glued on
-// (`--db=beads`, `-C/path`). Each name must be a persistent flag of the bd
-// tree (TestBdValueFlagsSkipWithTheirValue). internal/cmd's close guard keeps
-// its own copy, bdGlobalOptionsWithValue.
-var bdGlobalValueFlags = map[string]bool{
+// BdGlobalValueFlags is the set of bd's persistent flags that take their value
+// as the next token, the one list shared by this package's scan and
+// internal/cmd's close guard.
+//
+// Skipping such a flag alone leaves the value behind as a command word, so
+// `bd --db beads sync` would read as the unknown command "beads". Flags not in
+// the set are boolean, or carry their value glued on (`--db=beads`, `-C/path`),
+// where nothing extra needs skipping. Each name must be a persistent flag of
+// the bd tree (TestBdValueFlagsSkipWithTheirValue).
+var BdGlobalValueFlags = map[string]bool{
 	"--actor": true, "--cpu-profile": true, "--database": true, "--db": true,
 	"-C": true, "--directory": true, "--dolt-auto-commit": true,
 	"--format": true, "--machine": true, "--mem-profile": true,
@@ -104,7 +106,7 @@ func bdCommandStart(toks []string) int {
 		if len(tok) < 2 || tok[0] != '-' || strings.TrimRight(tok, ";)}]`\"',.:") != tok || !isBdGlobalFlag(tok) {
 			return i
 		}
-		if bdGlobalValueFlags[tok] {
+		if BdGlobalValueFlags[tok] {
 			i++ // the next token is the flag's value
 		}
 	}
