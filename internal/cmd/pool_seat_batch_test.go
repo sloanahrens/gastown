@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -139,7 +140,9 @@ func TestPoolSeatBatchReadsIdlePolecatsInBatches(t *testing.T) {
 // TestPoolShowLiveReadsTheRigInBatches is gt-lj299: the occupancy gt pool show
 // prints over 20 polecat directories is the per-seat read's count, and the
 // rig's agent beads and assigned work are read in one batch each, not two bd
-// calls per directory.
+// calls per directory. The store builder records the directories it is asked
+// for, so a batch that read the town's store instead of the rig's fails here
+// rather than counted a store the caller's builder never named.
 func TestPoolShowLiveReadsTheRigInBatches(t *testing.T) {
 	t.Parallel()
 	town, db, lister := seatTown(t, 20)
@@ -149,28 +152,27 @@ func TestPoolShowLiveReadsTheRigInBatches(t *testing.T) {
 		t.Fatalf("SaveTownSettings: %v", err)
 	}
 
-	perSeat := newCountingStore(db)
-	want := poolLiveForWith(town, func(pool *config.PolecatPool) ([]poolSession, error) {
-		return poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	store := newCountingStore(db)
+	var dirs []string
+	got := poolLiveForBatch(town, lister, func(dir string) beads.Client {
+		dirs = append(dirs, dir)
+		return store
 	})
 
-	store := newCountingStore(db)
-	got := poolLiveForBatch(town, lister, func(string) beads.Client { return store })
-
-	if !want.ok || !got.ok {
-		t.Fatalf("occupancy read failed: per-seat ok=%v, batched ok=%v", want.ok, got.ok)
+	// seatTown's seats: p01 to p03 live, p04 dead with its bead still in
+	// progress — and the dead-hooked seat counted inside the live count, the
+	// way the page prints it (gt-bc9b6).
+	if !got.ok {
+		t.Fatalf("occupancy read failed: ok=false, want the seats counted")
 	}
-	if perSeat.assigned < 20 {
-		t.Fatalf("the per-seat read made %d assigned-work reads over 20 polecats; the fixture no longer reproduces the cost being removed", perSeat.assigned)
-	}
-	if got.total == 0 {
-		t.Fatalf("batched count is empty; the fixture's seats were not counted")
-	}
-	if !reflect.DeepEqual(got.live, want.live) || !reflect.DeepEqual(got.dead, want.dead) || got.total != want.total {
-		t.Fatalf("batched count live=%v dead=%v total=%d, want the per-seat read's live=%v dead=%v total=%d",
-			got.live, got.dead, got.total, want.live, want.dead, want.total)
+	if got.total != 4 || got.live["deepseek-flash"] != 4 || got.dead["deepseek-flash"] != 1 {
+		t.Fatalf("count live=%v dead=%v total=%d, want 4 seats on deepseek-flash with 1 of them dead-hooked",
+			got.live, got.dead, got.total)
 	}
 
+	if want := []string{filepath.Join(town, "gastown")}; !reflect.DeepEqual(dirs, want) {
+		t.Errorf("stores opened at %v, want the rig's own directory %v", dirs, want)
+	}
 	if len(store.multis) == 0 || len(store.multis[0]) != 20 {
 		t.Errorf("agent bead reads = %v, want one batch of the 20 polecats first", store.multis)
 	}
@@ -181,6 +183,38 @@ func TestPoolShowLiveReadsTheRigInBatches(t *testing.T) {
 		if strings.Contains(id, "polecat") {
 			t.Errorf("agent bead %s read singly %d times, want only the batch", id, n)
 		}
+	}
+}
+
+// TestPoolShowLiveCountsWhenTheBatchFails is the batch-failure path at the
+// entry point gt pool show uses: a rig whose batched reads fail is read
+// polecat by polecat, and the page still prints the count. A failed batch
+// costs calls, never the occupancy (gt-lj299).
+func TestPoolShowLiveCountsWhenTheBatchFails(t *testing.T) {
+	t.Parallel()
+	town, db, lister := seatTown(t, 20)
+	ts := config.NewTownSettings()
+	ts.PolecatPool = seatPool("deepseek-flash", 30)
+	if err := config.SaveTownSettings(config.TownSettingsPath(town), ts); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+
+	store := newCountingStore(db)
+	store.failBatch = true
+	got := poolLiveForBatch(town, lister, func(string) beads.Client { return store })
+
+	if !got.ok {
+		t.Fatalf("occupancy read failed with the batch down: ok=false, want the seats counted one by one")
+	}
+	if got.total != 4 || got.live["deepseek-flash"] != 4 || got.dead["deepseek-flash"] != 1 {
+		t.Fatalf("count with the batch down live=%v dead=%v total=%d, want 4 seats on deepseek-flash with 1 of them dead-hooked",
+			got.live, got.dead, got.total)
+	}
+	if len(store.multis) != 1 || len(store.multis[0]) != 20 {
+		t.Errorf("batched reads = %v, want the 20 agent beads asked for once before the fallback", store.multis)
+	}
+	if store.assigned != 20 {
+		t.Errorf("per-polecat assigned-work reads = %d, want one for each of the 20", store.assigned)
 	}
 }
 
