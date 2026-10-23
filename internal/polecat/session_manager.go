@@ -861,7 +861,7 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 		if err := m.hooks.Stop(sessionID); err != nil {
 			return fmt.Errorf("killing session: %w", err)
 		}
-		return nil
+		return m.removeSandbox(sessionID)
 	}
 	// Use KillSessionWithProcesses to ensure all descendant processes are killed.
 	// This prevents orphan bash processes from Claude's Bash tool surviving session termination.
@@ -869,6 +869,20 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 		return fmt.Errorf("killing session: %w", err)
 	}
 
+	return m.removeSandbox(sessionID)
+}
+
+// removeSandbox deletes the sandbox a stopped sandboxed session ran in, and its
+// registry record. A host session has no record and nothing happens. Left
+// behind, the sandbox stays Ready and the seat keeps looking occupied.
+func (m *SessionManager) removeSandbox(sessionID string) error {
+	if m.rig.Path == "" {
+		return nil
+	}
+	townRoot := filepath.Dir(m.rig.Path)
+	if err := session.CleanupSandboxWith(sandboxDeleterOrLinked(m.sandboxDeleter), townRoot, sessionID); err != nil {
+		return fmt.Errorf("session stopped; removing its sandbox: %w", err)
+	}
 	return nil
 }
 
