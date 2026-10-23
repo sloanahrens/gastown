@@ -190,8 +190,8 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 		"--env-from", "GT_SESSION_BACKEND=GT_SANDBOX_ENV_GT_SESSION_BACKEND",
 		"--env-from", "GT_TMUX_SOCKET=GT_SANDBOX_ENV_GT_TMUX_SOCKET",
 		"--env-from", "GT_TOWN_ROOT=GT_SANDBOX_ENV_GT_TOWN_ROOT",
-		"--detach", "--output", "json",
-		"--", "sh", "-c", sandboxMainScript,
+		"--detach", "--no-keep",
+		"--", "sh", "-c", sandboxMainScript, "sh", openshellTestSession,
 	}
 	want := [][]string{
 		create,
@@ -780,7 +780,7 @@ func TestOpenShellMainScriptHolderIsNotThePolecatSession(t *testing.T) {
 	if !strings.Contains(sandboxMainScript, "-s "+sandboxHolderSession+" ") {
 		t.Fatalf("main script %q does not create the holder session %q", sandboxMainScript, sandboxHolderSession)
 	}
-	if strings.Contains(sandboxMainScript, `"$1"`) {
-		t.Fatalf("main script %q still names the session from its argument", sandboxMainScript)
+	if strings.Contains(sandboxMainScript, `new-session -d -s "$1"`) || strings.Contains(sandboxMainScript, `new-session -d -s "$S"`) {
+		t.Fatalf("main script %q creates the polecat's session as the holder; the host's session start creates that one", sandboxMainScript)
 	}
 }

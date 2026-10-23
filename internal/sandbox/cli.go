@@ -49,6 +49,10 @@ type CreateSpec struct {
 	Env                     map[string]string
 	DriverConfigJSON        string   // "" omits the flag
 	Command                 []string // the main process argv after "--"
+	// NoKeep makes the gateway delete the sandbox when Command exits
+	// (openshell sandbox create --no-keep). openshell refuses --no-keep
+	// together with --output, so a NoKeep create asks for no JSON.
+	NoKeep bool
 }
 
 // Status is the part of `sandbox get` the backend acts on.
@@ -153,7 +157,11 @@ func (c *CLI) Create(ctx context.Context, s CreateSpec) error {
 	}
 	a = appendSortedPairs(a, "--label", s.Labels)
 	a, env := appendEnvFrom(a, s.Env)
-	a = append(a, "--detach", "--output", "json")
+	if s.NoKeep {
+		a = append(a, "--detach", "--no-keep")
+	} else {
+		a = append(a, "--detach", "--output", "json")
+	}
 	if len(s.Command) > 0 {
 		a = append(a, "--")
 		a = append(a, s.Command...)
