@@ -559,3 +559,116 @@ type commentFailingBeads struct {
 func (b *commentFailingBeads) Comments(string) ([]beads.Comment, error) {
 	return nil, b.err
 }
+
+// TestLandAcceptedRiskAuditRecordsOneNoteAndOneAlert: a review given a kept
+// accepted risk leaves one landing note naming its comment, author, date and
+// excerpt, and raises one attention item keyed to the bead (gt-tvhg8).
+func TestLandAcceptedRiskAuditRecordsOneNoteAndOneAlert(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	const risk = "ACCEPTED-RISK: the cloud key mount is approved by the design"
+	if err := f.bd.AddCommentAs(f.work.BeadID, "town/crew/overseer", risk); err != nil {
+		t.Fatal(err)
+	}
+	comments, err := f.bd.Comments(f.work.BeadID)
+	if err != nil || len(comments) != 1 {
+		t.Fatalf("Comments = %+v, %v; want the one overseer comment", comments, err)
+	}
+	rev := &recordBeadReviewer{verdict: Verdict{Verdict: VerdictApprove, Score: 0.9}}
+	l := f.lander()
+	l.Reviewer = rev
+	var keys []string
+	l.AcceptedRiskAlert = func(key, _ string) error {
+		keys = append(keys, key)
+		return nil
+	}
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	issue, err := f.bd.Show(f.work.BeadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(issue.Notes, AcceptedRiskUsedMarker); n != 1 {
+		t.Fatalf("the bead carries %d %s notes, want one; notes:\n%s", n, AcceptedRiskUsedMarker, issue.Notes)
+	}
+	c := comments[0]
+	for _, want := range []string{c.ID, c.Author, c.CreatedAt, "the cloud key mount is approved by the design"} {
+		if !strings.Contains(issue.Notes, want) {
+			t.Errorf("the note does not name %q:\n%s", want, issue.Notes)
+		}
+	}
+	if want := []string{"accepted-risk:" + f.work.BeadID + ":" + shortSHA(f.work.Head)}; !slices.Equal(keys, want) {
+		t.Errorf("attention keys = %q, want %q", keys, want)
+	}
+}
+
+// TestLandAcceptedRiskAuditStaysSilentWithNoKeptRisk: a review given no
+// accepted risk leaves no landing note and raises no attention item.
+func TestLandAcceptedRiskAuditStaysSilentWithNoKeptRisk(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	rev := &recordBeadReviewer{verdict: Verdict{Verdict: VerdictApprove, Score: 0.9}}
+	l := f.lander()
+	l.Reviewer = rev
+	alerts := 0
+	l.AcceptedRiskAlert = func(string, string) error {
+		alerts++
+		return nil
+	}
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v", err)
+	}
+	issue, err := f.bd.Show(f.work.BeadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(issue.Notes, AcceptedRiskUsedMarker) {
+		t.Errorf("a review with no accepted risk left a note:\n%s", issue.Notes)
+	}
+	if alerts != 0 {
+		t.Errorf("attention items = %d, want none", alerts)
+	}
+}
+
+// TestLandAcceptedRiskAuditWriteFailureWarnsAndLands: a landing note or an
+// attention item that cannot be written logs a line and lands the change
+// anyway (gt-tvhg8).
+func TestLandAcceptedRiskAuditWriteFailureWarnsAndLands(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	if err := f.bd.AddCommentAs(f.work.BeadID, "town/crew/overseer", "ACCEPTED-RISK: approved by design"); err != nil {
+		t.Fatal(err)
+	}
+	rev := &recordBeadReviewer{verdict: Verdict{Verdict: VerdictApprove, Score: 0.9}}
+	l := f.lander()
+	l.Reviewer = rev
+	l.Beads = &noteFailingBeads{Fake: f.bd, err: errors.New("dolt: connection refused")}
+	l.AcceptedRiskAlert = func(string, string) error { return errors.New("escalation store is down") }
+	var out strings.Builder
+	l.Out = &out
+	if _, err := l.Land(context.Background(), f.work); err != nil {
+		t.Fatalf("Land: %v; a failed audit write must not cost the landing", err)
+	}
+	if len(rev.inputs) != 1 {
+		t.Fatalf("reviewer calls = %d, want 1", len(rev.inputs))
+	}
+	if s := out.String(); !strings.Contains(s, "could not record the accepted risks") ||
+		!strings.Contains(s, "connection refused") || !strings.Contains(s, "escalation store is down") {
+		t.Errorf("the landing log does not name both failed writes:\n%s", s)
+	}
+}
+
+// noteFailingBeads is a beads database that refuses the ACCEPTED-RISK USED
+// landing note and leaves every other write alone.
+type noteFailingBeads struct {
+	*beadsfake.Fake
+	err error
+}
+
+func (b *noteFailingBeads) AppendNotes(id, note string) error {
+	if strings.HasPrefix(note, AcceptedRiskUsedMarker) {
+		return b.err
+	}
+	return b.Fake.AppendNotes(id, note)
+}
