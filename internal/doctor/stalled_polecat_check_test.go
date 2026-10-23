@@ -368,6 +368,120 @@ func TestStalledPolecatCheck_RefreshesTheBranchTheVerdictJudges(t *testing.T) {
 	}
 }
 
+// TestStalledPolecatCheck_RefreshFailureIsNotAProbeFailure pins the refresh as
+// best-effort: a fetch that fails (offline remote, timeout) leaves the verdict
+// to the evidence already in the clone. Unlanded content still reads as
+// unlanded and landed content still reads as landed; neither turns into a probe
+// failure that would hide a proof another arm makes.
+func TestStalledPolecatCheck_RefreshFailureIsNotAProbeFailure(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		preserved  bool
+		wantLanded bool
+		wantReason string
+	}{
+		{name: "content absent stays unlanded", preserved: false, wantLanded: false, wantReason: land.WorkUnpushed},
+		{name: "content present stays landed", preserved: true, wantLanded: true, wantReason: land.WorkLandedByTarget},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakePolecatGit{
+				defaultBranch:   "main",
+				fetchErr:        errors.New("fetch origin main: timed out"),
+				targetPreserved: tt.preserved,
+			}
+			check := newTestCheck()
+
+			v := check.landedVerdict(f, t.TempDir(), "testrig", "polecat/furiosa/gt-abc+abc123")
+
+			if f.fetchCalls != 1 {
+				t.Fatalf("fetchCalls = %d, want 1 — the refresh must still be attempted", f.fetchCalls)
+			}
+			if v.Landed != tt.wantLanded {
+				t.Errorf("Landed = %v, want %v after a failed refresh", v.Landed, tt.wantLanded)
+			}
+			if v.Reason != tt.wantReason {
+				t.Errorf("Reason = %v, want %v — a failed refresh must not become a probe failure", v.Reason, tt.wantReason)
+			}
+		})
+	}
+}
+
+// TestStalledPolecatCheck_UnresolvableTargetSkipsRefreshAndReportsProbeFailure
+// pins the other best-effort edge: a rig config that exists but does not decode
+// has no landing target to refresh, so the fetch is skipped (never aimed at
+// origin's HEAD instead) and the resolution error surfaces as the verdict's own
+// probe failure rather than as silence.
+func TestStalledPolecatCheck_UnresolvableTargetSkipsRefreshAndReportsProbeFailure(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(townRoot, "testrig"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(townRoot, "testrig", "config.json"), []byte("{not json"), 0o644); err != nil {
+		t.Fatalf("write rig config: %v", err)
+	}
+	f := &fakePolecatGit{defaultBranch: "main", targetPreserved: true}
+	check := newTestCheck()
+
+	v := check.landedVerdict(f, townRoot, "testrig", "polecat/furiosa/gt-abc+abc123")
+
+	if f.fetchCalls != 0 {
+		t.Errorf("fetchedBranches = %v, want no refresh when the landing target will not resolve", f.fetchedBranches)
+	}
+	if v.Landed {
+		t.Error("Landed = true, want false — an unresolvable target must not read as landed")
+	}
+	if v.Reason != land.WorkProbeFailed {
+		t.Errorf("Reason = %v, want %v — the resolution error is the verdict's to report", v.Reason, land.WorkProbeFailed)
+	}
+	if len(f.targetsAsked) != 0 {
+		t.Errorf("targetsAsked = %v, want none — no target was resolved to ask about", f.targetsAsked)
+	}
+}
+
+// TestStalledPolecatCheck_EmptyRigTargetFallsBackToTheRemoteDefaultBranch
+// drives the fallback land.RigDefaultBranch triggers by returning "" (no rig
+// path to read a config from): the refresh and the verdict both aim at the
+// remote's default branch, the same one the predicate falls back to, and with
+// no default branch to name the refresh is skipped.
+func TestStalledPolecatCheck_EmptyRigTargetFallsBackToTheRemoteDefaultBranch(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		defaultBranch string
+		wantFetched   []string
+	}{
+		{name: "remote default branch is refreshed and judged", defaultBranch: "trunk", wantFetched: []string{"origin/trunk"}},
+		{name: "no default branch skips the refresh", defaultBranch: "", wantFetched: nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			f := &fakePolecatGit{defaultBranch: tt.defaultBranch, targetPreserved: true}
+			check := newTestCheck()
+
+			v := check.landedVerdict(f, "", "", "polecat/furiosa/gt-abc+abc123")
+
+			if strings.Join(f.fetchedBranches, ",") != strings.Join(tt.wantFetched, ",") {
+				t.Errorf("fetchedBranches = %v, want %v", f.fetchedBranches, tt.wantFetched)
+			}
+			if !v.Landed {
+				t.Errorf("Landed = false (Reason %v), want true — the fake holds the content on every target", v.Reason)
+			}
+			wantTarget := "origin/" + tt.defaultBranch
+			if tt.defaultBranch == "" {
+				wantTarget = "origin/main" // the predicate's own last resort
+			}
+			if len(f.targetsAsked) != 1 || f.targetsAsked[0] != wantTarget {
+				t.Errorf("targetsAsked = %v, want [%s]", f.targetsAsked, wantTarget)
+			}
+		})
+	}
+}
+
 // TestStalledPolecatCheck_ContentCheckErrorStillWarns pins the fail-safe
 // direction: the content check only ever narrows the trigger, so when it cannot
 // answer, the branch stays flagged. Silence here would trade a loud false
