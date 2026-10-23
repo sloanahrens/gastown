@@ -24,6 +24,7 @@ func (f *fakeProcs) tracker() pidTracker {
 			f.terminated = append(f.terminated, pid)
 			return nil
 		},
+		remove: os.Remove,
 	}
 }
 
@@ -266,6 +267,8 @@ func TestTrackSession_HostSessionStillRecords(t *testing.T) {
 func TestTrackSession_UnreadableRegistryRecordsNothing(t *testing.T) {
 	t.Parallel()
 	townRoot := t.TempDir()
+	const stale = "7777\n"
+	path := writePIDFile(t, townRoot, "gt-gastown-box.pid", stale)
 	breakSandboxRegistry(t, townRoot)
 	procs := &fakeProcs{live: map[int]string{4242: "1700000001.5"}}
 
@@ -274,8 +277,34 @@ func TestTrackSession_UnreadableRegistryRecordsNothing(t *testing.T) {
 	if err == nil {
 		t.Fatal("trackSession = nil with an unreadable registry")
 	}
-	if exists(pidFile(townRoot, "gt-gastown-box")) {
-		t.Error("a PID file was written although the registry could not be read")
+	if !strings.Contains(err.Error(), "cannot tell whether it runs in a sandbox") {
+		t.Errorf("trackSession = %v; want the registry failure named, not a pane-PID or write error", err)
+	}
+	if data, rerr := os.ReadFile(path); rerr != nil || string(data) != stale {
+		t.Errorf("PID file = %q, %v; want the stale record left untouched while the registry is unreadable", data, rerr)
+	}
+}
+
+// A sandboxed session's stale record that cannot be removed is reported, not
+// dropped silently: the operator must learn a record is still there.
+func TestKillTrackedPIDs_UnremovableSandboxedRecordIsReported(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := WriteSandboxRecord(townRoot, SandboxRecord{Session: "gt-gastown-box", Rig: "gastown", Polecat: "box"}); err != nil {
+		t.Fatal(err)
+	}
+	writePIDFile(t, townRoot, "gt-gastown-box.pid", "143:1700000000.5\n")
+	procs := &fakeProcs{live: map[int]string{143: "1700000000.5"}}
+	tracker := procs.tracker()
+	tracker.remove = func(string) error { return os.ErrPermission }
+
+	killed, errs := tracker.killTracked(townRoot)
+
+	if killed != 0 || len(procs.terminated) != 0 {
+		t.Fatalf("killed=%d terminated=%v; a sandboxed session must never be signalled", killed, procs.terminated)
+	}
+	if len(errs) != 1 || !strings.Contains(errs[0], "removing its stale PID record") {
+		t.Errorf("errs=%v; want one error naming the failed removal", errs)
 	}
 }
 

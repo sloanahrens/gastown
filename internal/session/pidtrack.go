@@ -19,12 +19,14 @@ import (
 type pidTracker struct {
 	token     func(pid int) (string, bool)
 	terminate func(pid int) error
+	remove    func(path string) error
 }
 
 // osPIDTracker probes and signals real processes.
 var osPIDTracker = pidTracker{
 	token:     procid.StartToken,
 	terminate: terminateProcess,
+	remove:    os.Remove,
 }
 
 // pidsDir returns the directory for PID tracking files.
@@ -164,7 +166,9 @@ func (pt pidTracker) killTracked(townRoot string) (killed int, errSessions []str
 			continue
 		}
 		if sandboxed {
-			_ = os.Remove(path)
+			if err := pt.remove(path); err != nil && !os.IsNotExist(err) {
+				errSessions = append(errSessions, fmt.Sprintf("%s: removing its stale PID record: %v", sessionID, err))
+			}
 			continue
 		}
 
