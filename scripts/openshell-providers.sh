@@ -3,6 +3,9 @@
 # providers they name, from the key files under ~/.config/gt (claude-q3f.9).
 # Run it through `make openshell-providers`.
 #
+# A profile or provider the gateway already lists is left alone, so a rerun of
+# the target changes nothing instead of failing on the first thing it meets.
+#
 # Nothing secret reaches the terminal: xtrace is off for the whole run, a key
 # file is read as data (never sourced), the credential travels back to provider
 # create by name (so it never enters argv or the output of a command), and
@@ -31,6 +34,25 @@ provider_exists() {
   awk -v name="$1" '$1 == name { found = 1 } END { exit !found }' <<<"$listed"
 }
 
+# profile_exists ID is the same question against profile list. profile import
+# is not idempotent — it fails with "custom provider profile '<id>' already
+# exists" — so a profile the gateway already lists is skipped rather than
+# deleted and imported again.
+profile_exists() {
+  local listed
+  # --global for the same reason import passes it: these are platform-scoped
+  # profiles, which a workspace-scoped list leaves out.
+  listed="$(openshell profile list --global 2>/dev/null || true)"
+  awk -v name="$1" '$1 == name { found = 1 } END { exit !found }' <<<"$listed"
+}
+
+# profile_id FILE prints the id: a profile yaml declares, the name import keys
+# on and the name the gateway reports a clash under. A line starting with
+# "id:" only, so a nested "- id:" inside credentials is not mistaken for it.
+profile_id() {
+  awk '/^id:/ { sub(/^id:[[:space:]]*/, ""); sub(/[[:space:]#].*$/, ""); print; exit }' "$1"
+}
+
 # key_value FILE KEY prints the value of KEY in a KEY=value env file. The file
 # is read as data: a line that is not an assignment to KEY is ignored, and
 # surrounding quotes are stripped. Nothing in the file is executed.
@@ -57,7 +79,7 @@ masked() {
 }
 
 import_profiles() {
-  local file
+  local file id
   local profiles=()
   shopt -s nullglob
   profiles=("$PROFILES"/*.yaml)
@@ -67,6 +89,13 @@ import_profiles() {
     return 0
   fi
   for file in "${profiles[@]}"; do
+    id="$(profile_id "$file")"
+    # A profile with no id: cannot be one the gateway already lists, so it
+    # goes to lint and import as it always did and lint names what is wrong.
+    if [[ -n "$id" ]] && profile_exists "$id"; then
+      echo "openshell-providers: profile $id exists"
+      continue
+    fi
     openshell profile lint -f "$file"
     openshell profile import -f "$file" --global
   done
