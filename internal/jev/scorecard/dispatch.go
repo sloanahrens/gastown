@@ -317,8 +317,9 @@ func dispatchLabels(review *land.ReviewRecord, reworked bool, issue *beads.Issue
 
 // isLanded is a bead closed by a landing, read through the verdict the stale
 // pass reads so both agree on what landed.
-// TestScorecardDispatchLandedMatchesLandingCloseReason fails when the landing
-// worker's wording stops reading as one.
+// TestScorecardDispatchCloseReasonPredicates pins the reasons it answers to,
+// and TestScorecardDispatchLandedMatchesLandingCloseReason fails when the
+// landing worker's wording stops reading as one.
 func isLanded(issue *beads.Issue) bool {
 	if issue == nil || issue.Status != closedStatus {
 		return false
@@ -328,6 +329,7 @@ func isLanded(issue *beads.Issue) bool {
 
 // isSuperseded is a bead closed with a superseded close reason, read through
 // the verdict the stale pass reads.
+// TestScorecardDispatchCloseReasonPredicates pins the reasons it answers to.
 func isSuperseded(issue *beads.Issue) bool {
 	if issue == nil {
 		return false

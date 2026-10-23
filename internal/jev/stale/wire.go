@@ -30,10 +30,20 @@ const closeLanded = "landed"
 const closeLandedOn = "Landed on"
 
 // closeLandedCommit starts the line of the landing record that names the
-// commit the change landed as. The record's close reason carries it, so a
-// reason built from the record says the bead landed even when its first line
-// was rewritten.
+// commit the change landed as. A reason whose first line is that line is the
+// record with its "Landed on" line dropped, so it still says landed.
 const closeLandedCommit = "landed_commit:"
+
+// closeSuperseded and closeDuplicate start the reasons that say a bead lost
+// to another.
+const (
+	closeSuperseded = "superseded"
+	closeDuplicate  = "duplicate"
+)
+
+// closeLandedOnLower is closeLandedOn folded once, so ClosingVerdict does not
+// fold it on every close of every bead the pass reads.
+var closeLandedOnLower = strings.ToLower(closeLandedOn)
 
 // Verdict is what a closed bead's close reason says about the bead. The stale
 // pass, the scorecard's stale and dispatch batteries and the attention
@@ -46,26 +56,33 @@ const (
 	// an empty reason.
 	VerdictNone Verdict = iota
 	// VerdictLanded is a landing's reason: the bare word the molecule close
-	// writes, the landing worker's "Landed on <target>" record, or a reason
-	// carrying its landed_commit line.
+	// writes, the landing worker's "Landed on <target>" record, or that
+	// record's landed_commit line standing as the whole reason.
 	VerdictLanded
 	// VerdictSuperseded is a reason that says the bead was superseded or is a
 	// duplicate of another.
 	VerdictSuperseded
 )
 
-// ClosingVerdict reads a close reason. A person writes "Landed on main" as
-// readily as the landing worker does, and "Superseded by ..." as
-// "superseded by ...", so every match ignores case.
+// ClosingVerdict reads a close reason.
+//
+// Only the reason's first line decides, because that line is the close verb a
+// person or a producer writes. The lines under it are detail, and a detail
+// line can quote a landing record — a superseding close that says what the
+// landing it replaces landed as — so reading the whole reason would let that
+// quote call the bead landed. A person writes "Landed on main" as readily as
+// the landing worker does, and "Superseded by ..." as "superseded by ...", so
+// every match ignores case.
 func ClosingVerdict(reason string) Verdict {
-	reason = strings.TrimSpace(reason)
-	lower := strings.ToLower(reason)
+	verb, _, _ := strings.Cut(strings.TrimSpace(reason), "\n")
+	verb = strings.ToLower(strings.TrimSpace(verb))
 	switch {
-	case strings.Contains(lower, closeLandedCommit),
-		strings.EqualFold(reason, closeLanded),
-		strings.HasPrefix(lower, strings.ToLower(closeLandedOn)):
+	case verb == closeLanded,
+		strings.HasPrefix(verb, closeLandedOnLower),
+		strings.HasPrefix(verb, closeLandedCommit):
 		return VerdictLanded
-	case strings.HasPrefix(lower, "superseded"), strings.HasPrefix(lower, "duplicate"):
+	case strings.HasPrefix(verb, closeSuperseded),
+		strings.HasPrefix(verb, closeDuplicate):
 		return VerdictSuperseded
 	}
 	return VerdictNone

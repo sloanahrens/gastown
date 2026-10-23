@@ -469,6 +469,9 @@ func TestMechanismLabelingAgreesWithStaleClassification(t *testing.T) {
 		{name: "landed on", reason: "Landed on main", want: "landed"},
 		{name: "bare landed", reason: "landed", want: "landed"},
 		{name: "landed commit note", reason: "Landed on main\nlanded_commit: c0ffee", want: "landed"},
+		// A superseding close can quote the record of the landing it
+		// replaces. The quote is detail; the close verb line decides.
+		{name: "superseded quoting a landing record", reason: "superseded by gt-a2\nlanded_commit: c0ffee", want: "superseded"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
