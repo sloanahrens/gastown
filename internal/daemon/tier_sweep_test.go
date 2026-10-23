@@ -1736,9 +1736,57 @@ func TestTierSweepRigCycleTierTheScriptDoesNotOffer(t *testing.T) {
 	}
 }
 
-// gt-bdva9: the script exits at the first tier it declines, so the tiers after
-// it in the stage were never reached. Only those after a declined tier of the
-// stage are named; a declined tier outside the stage names nothing.
+// gt-zlcl6: the rig's script runs its tiers in an order of its own, and a
+// decline is read as ending the stage rather than as a position in the stage's
+// list. A script that declines the tier the stage lists last and exits 2 never
+// reached the one listed before it, so that tier leaves the results too instead
+// of filing a RED "no verdict line" bead against a script that never ran it.
+func TestTierSweepRigCycleDeclinedTierEndsTheStageWhicheverOrderItRuns(t *testing.T) {
+	t.Parallel()
+	const (
+		shellSummary = "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n"
+		declinedRace = "tier-sweep: unknown tier race (want shell, integration or race)\n"
+	)
+	now := atHour(time.Now(), 15)
+	d, rec, bd, logs := newTierSweepDaemon(t, now, "gastown")
+	d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "tips1", nil }
+	d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+	rec.result = func(st tierSweepStage) tierSweepStageResult {
+		if st.slot {
+			return tierSweepStageResult{output: declinedRace, exitCode: 2, ran: true}
+		}
+		return tierSweepStageResult{output: shellSummary, exitCode: 0, ran: true}
+	}
+	cycle := d.startDogCycle("tier_sweep")
+	defer cycle.close()
+	if !d.runTierSweepRig(context.Background(), cycle, "gastown", now) {
+		t.Fatal("the cycle deferred; a stage that ran and reported a verdict is a complete cycle")
+	}
+
+	st := tierSweepTestState(t, d, "gastown")
+	for _, tier := range []string{"integration", "race"} {
+		if ts, has := st.Tiers[tier]; has {
+			t.Errorf("%s verdict = %+v, want none: the script declined race and exited at it", tier, ts)
+		}
+		if n := strings.Count(logs.String(), "gastown: "+tier+" not offered by the rig's script"); n != 1 {
+			t.Errorf("%s logged as not offered %d times in one cycle, want once:\n%s", tier, n, logs.String())
+		}
+		for _, c := range bd.created {
+			if strings.HasPrefix(c.Title, tierSweepBeadPrefix("gastown", tier)) {
+				t.Errorf("filed a bead for %s: %+v", tier, c)
+			}
+		}
+	}
+	if st.LastGreenSHA != "tips1" {
+		t.Errorf("LastGreenSHA = %q, want the offered tiers' green tip tips1", st.LastGreenSHA)
+	}
+}
+
+// gt-bdva9: the script exits at the first tier it declines, so the rest of its
+// stage was never reached. gt-zlcl6: which tiers those are does not follow the
+// stage's list, since the rig's script runs its own; a decline ends the stage,
+// so every other tier of it with no summary line is unreached. A declined tier
+// outside the stage names nothing.
 func TestTierSweepUnreachedAfterDeclined(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -1748,8 +1796,9 @@ func TestTierSweepUnreachedAfterDeclined(t *testing.T) {
 		want     []string
 	}{
 		{name: "nothing declined", tiers: []string{"integration", "race"}, want: nil},
-		{name: "last tier declined reaches nothing", tiers: []string{"integration", "race"}, declined: []string{"race"}, want: nil},
+		{name: "the last tier declined leaves the stage's other tier unreached", tiers: []string{"integration", "race"}, declined: []string{"race"}, want: []string{"integration"}},
 		{name: "first tier declined leaves the rest unreached", tiers: []string{"integration", "race"}, declined: []string{"integration"}, want: []string{"race"}},
+		{name: "the declined tier itself is not named", tiers: []string{"integration", "race"}, declined: []string{"integration", "race"}, want: nil},
 		{name: "a tier outside the stage reaches nothing", tiers: []string{"integration", "race"}, declined: []string{"shell"}, want: nil},
 	}
 	for _, tc := range tests {

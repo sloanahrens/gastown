@@ -1586,20 +1586,28 @@ func parseTierSweepUnknownTiers(output string) map[string]bool {
 	return out
 }
 
-// tierSweepUnreachedAfterDeclined names the tiers after the first tier a stage's
-// script declined. The script exits 2 at that tier before running the rest, so
-// those tiers were never judged and no line names them: they leave the cycle's
-// results as the declined tier does (gt-bdva9). A declined tier outside the
-// stage's tiers reaches nothing here.
+// tierSweepUnreachedAfterDeclined names the stage's tiers a declined tier left
+// unrun. The script runs its tiers one at a time and exits 2 at a tier it does
+// not offer, so a decline ends the stage: any other tier with no summary line
+// was never judged, whichever order the rig's script runs its list in, and it
+// leaves the cycle's results as the declined tier does (gt-bdva9). The caller
+// reads this only for a tier with no line, so a tier that did report a verdict
+// keeps it. A stage with no declined tier of its own reaches nothing (gt-zlcl6).
 func tierSweepUnreachedAfterDeclined(tiers []string, declined map[string]bool) map[string]bool {
 	out := map[string]bool{}
-	seenDeclined := false
+	ended := false
 	for _, tier := range tiers {
-		if seenDeclined {
-			out[tier] = true
-		}
 		if declined[tier] {
-			seenDeclined = true
+			ended = true
+			break
+		}
+	}
+	if !ended {
+		return out
+	}
+	for _, tier := range tiers {
+		if !declined[tier] {
+			out[tier] = true
 		}
 	}
 	return out
