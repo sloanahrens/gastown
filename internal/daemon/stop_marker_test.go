@@ -1,7 +1,12 @@
 package daemon
 
 import (
+	"bytes"
+	"errors"
+	"log"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -84,6 +89,53 @@ func TestUnrequestedStopLogLineDoesNotPromiseARelaunch(t *testing.T) {
 		if !strings.Contains(unrequestedStopLogLine, want) {
 			t.Errorf("the unrequested-stop line lacks %q:\n%s", want, unrequestedStopLogLine)
 		}
+	}
+}
+
+// TestRecordStopForHeal covers the write Run makes on its signal branch: the
+// upgrade heal helper reads this record to tell a bootout from a respawn that
+// failed (gt-r8ux8).
+func TestRecordStopForHeal(t *testing.T) {
+	t.Parallel()
+	t.Run("a signal stop leaves its time for the helper", func(t *testing.T) {
+		t.Parallel()
+		d := upgradeTestDaemon(t)
+		now := time.Now()
+		d.recordStopForHeal(now)
+		data, err := os.ReadFile(signalStopPath(d.config.TownRoot))
+		if err != nil {
+			t.Fatalf("a signal stop left no record for the heal helper: %v", err)
+		}
+		if got, want := strings.TrimSpace(string(data)), strconv.FormatInt(now.Unix(), 10); got != want {
+			t.Errorf("record = %q, want the stop time %q", got, want)
+		}
+	})
+	t.Run("a record that cannot be written is logged, and the stop stands", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		// A file where the daemon directory belongs fails the record write.
+		if err := os.WriteFile(filepath.Join(town, "daemon"), nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		var logs bytes.Buffer
+		d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(&logs, "", 0)}
+		d.recordStopForHeal(time.Now())
+		if !strings.Contains(logs.String(), "could not record the signal stop") {
+			t.Errorf("the failed write was not reported:\n%s", logs.String())
+		}
+	})
+}
+
+// TestClearSpentSignalStop covers the clear Run makes at startup: a record of
+// the daemon before this one must not outlive the town coming back up
+// (gt-r8ux8).
+func TestClearSpentSignalStop(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	d.recordStopForHeal(time.Now())
+	d.clearSpentSignalStop()
+	if _, err := os.Stat(signalStopPath(d.config.TownRoot)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a spent signal-stop record outlived the daemon start (stat err %v)", err)
 	}
 }
 

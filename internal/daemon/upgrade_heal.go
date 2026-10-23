@@ -76,10 +76,11 @@ func upgradeHealLabel(job upgradeHealJob) string {
 
 // upgradeHealScriptTemplate is the helper. It runs outside the daemon's job,
 // so the bootout it may need does not kill it. It waits, and heals only when
-// launchd has the job loaded without a pid, no process holds daemon.lock and
-// no stop was requested while it waited. A give-up is also sent to the system
-// log, so a heal that failed leaves a trail outside the files it shares with
-// the stranded daemon.
+// no process holds daemon.lock and no stop was requested while it waited,
+// where a signal-stop record counts only while the job is unloaded: a
+// deliberate bootout unloads it, a respawn that failed leaves it loaded
+// (gt-r8ux8). A give-up is also sent to the system log, so a heal that failed
+// leaves a trail outside the files it shares with the stranded daemon.
 const upgradeHealScriptTemplate = `#!/bin/sh
 # gt upgrade-restart heal: arms after an upgrade exit (gt-eigyu.1).
 LABEL=@LABEL@
@@ -110,16 +111,10 @@ giveup() {
 
 sleep @WAIT@
 
-# A stop inside the wait window is the operator's, not a failed respawn:
-# bootstrapping through it would undo a gt power off or a bootout (gt-csq9g).
-# A supervised gt daemon stop is a bootout that leaves no stop marker, so the
-# signal-stop record covers it (gt-r8ux8).
+# A stop inside the wait is the operator's, not a failed respawn: bootstrapping
+# through it would undo a gt power off or a gt daemon stop (gt-csq9g).
 if [ -e "$STOP" ]; then
 	log "left alone: $STOP exists (a daemon stop was requested)"
-	finish 0
-fi
-if [ -e "$SIGNALSTOP" ]; then
-	log "left alone: $SIGNALSTOP exists (the daemon was stopped by a signal while the helper waited)"
 	finish 0
 fi
 if [ -e "$ESTOP" ]; then
@@ -127,21 +122,34 @@ if [ -e "$ESTOP" ]; then
 	finish 0
 fi
 
-state=$(launchctl print "$SVC" 2>&1)
-# launchd keeps the pid of a job that is still shutting down, so a pid at the
-# first sample vouches for nothing; only one that survives the re-check does.
+# launchd keeps the pid of a job that is still shutting down, so only a pid
+# that survives the re-check vouches for the job.
+sample_job() {
+	state=$(launchctl print "$SVC" 2>&1)
+	loaded=$?
+}
+
+sample_job
 checks=0
-while printf '%s\n' "$state" | grep -q '^[[:space:]]*pid = [0-9]'; do
+while [ "$loaded" -eq 0 ] && printf '%s\n' "$state" | grep -q '^[[:space:]]*pid = [0-9]'; do
 	checks=$((checks + 1))
 	if [ "$checks" -ge @PID_CHECKS@ ]; then
 		log "healthy: $SVC runs a pid; nothing to heal"
 		finish 0
 	fi
 	sleep @RECHECK@
-	state=$(launchctl print "$SVC" 2>&1)
+	sample_job
 done
 if [ -n "$(lsof -t -- "$LOCK" 2>/dev/null)" ]; then
 	log "left alone: $LOCK is held by a live process"
+	finish 0
+fi
+
+# A bootout unloads the job, so an unloaded job beside a signal-stop record is
+# the operator's stop. A respawn that failed leaves the job loaded with no pid,
+# which is what this helper exists to heal (gt-r8ux8).
+if [ -e "$SIGNALSTOP" ] && [ "$loaded" -ne 0 ]; then
+	log "left alone: $SIGNALSTOP exists and $SVC is not loaded (a signal stopped the daemon while the helper waited)"
 	finish 0
 fi
 
