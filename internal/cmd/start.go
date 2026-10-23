@@ -2,7 +2,9 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +20,7 @@ import (
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
+	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -239,7 +242,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 
 	// Phase 4: Kill sessions in correct order
 	fmt.Printf("\nPhase 4: Terminating sessions...\n")
-	stopped := killSessionsInOrder(t, gtSessions, newShutdownStopper(townRoot))
+	stopped := killSessionsInOrder(t, gtSessions, newShutdownStopper(townRoot), os.Stdout)
 
 	// Phase 5: Always clean up orphaned Claude processes after killing sessions.
 	// Processes can survive session kills if they caught/ignored SIGHUP or called setsid().
@@ -276,7 +279,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 func runImmediateShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) error {
 	fmt.Println("Shutting down Gas Town...")
 
-	stopped := killSessionsInOrder(t, gtSessions, newShutdownStopper(townRoot))
+	stopped := killSessionsInOrder(t, gtSessions, newShutdownStopper(townRoot), os.Stdout)
 
 	// Always clean up orphaned Claude processes after killing sessions.
 	// Processes can survive session kills if they caught/ignored SIGHUP or called setsid().
@@ -337,7 +340,12 @@ func newShutdownStopper(townRoot string) shutdownStopper {
 			cleanup: func(string) error { return nil },
 		}
 	}
-	sup := operatorSupervisor(townRoot)
+	return supervisedShutdownStopper(townRoot, operatorSupervisor(townRoot))
+}
+
+// supervisedShutdownStopper is newShutdownStopper's town-root branch, over sup,
+// the supervisor of townRoot.
+func supervisedShutdownStopper(townRoot string, sup *supervisor.Supervisor) shutdownStopper {
 	actor := operatorActor("down")
 	return shutdownStopper{
 		stop: func(sess string) error { return sup.StopSession(sess, "gt down", actor) },
@@ -356,11 +364,12 @@ type sessionExistence interface {
 // sessions (polecats, crew, and any session left over from a retired role)
 // remain, so the order is the list's. A sandboxed session's sandbox is deleted
 // once its session is gone; a sandbox that cannot be deleted is reported and
-// the session still counts as stopped.
+// the session still counts as stopped. A session that survives its stop is
+// reported with the stop's error.
 //
 // Returns the count of sessions that were successfully stopped (verified by checking
 // if the session no longer exists after the kill attempt).
-func killSessionsInOrder(t sessionExistence, sessions []string, st shutdownStopper) int {
+func killSessionsInOrder(t sessionExistence, sessions []string, st shutdownStopper, out io.Writer) int {
 	stopped := 0
 
 	// Helper to kill a session and verify it was stopped
@@ -372,19 +381,23 @@ func killSessionsInOrder(t sessionExistence, sessions []string, st shutdownStopp
 		}
 
 		// Attempt to kill the session and its processes
-		_ = st.stop(sess)
+		stopErr := st.stop(sess)
 
-		// Verify the session is actually gone (ignore error, check existence)
-		// the kill might return an error even if it successfully
-		// killed the processes and the session auto-closed
+		// Verify the session is actually gone. The kill can return an error
+		// even when it killed the processes and the session auto-closed, so
+		// the error only matters for a session that is still there.
 		stillExists, _ := t.HasSession(sess)
 		if stillExists {
+			if stopErr == nil {
+				stopErr = errors.New("still running after the stop")
+			}
+			fmt.Fprintf(out, "  %s %s not stopped: %v\n", style.Warning.Render("!"), sess, stopErr)
 			return false
 		}
 		if err := st.cleanup(sess); err != nil {
-			fmt.Printf("  %s %s: sandbox not removed: %v\n", style.Warning.Render("!"), sess, err)
+			fmt.Fprintf(out, "  %s %s: sandbox not removed: %v\n", style.Warning.Render("!"), sess, err)
 		}
-		fmt.Printf("  %s %s stopped\n", style.Bold.Render("✓"), sess)
+		fmt.Fprintf(out, "  %s %s stopped\n", style.Bold.Render("✓"), sess)
 		return true
 	}
 
