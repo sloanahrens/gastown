@@ -25,6 +25,11 @@
       "guidance": "Changed behavior needs tests; regression fixes need a test that fails before the fix. Flag untested behavior changes. A test whose fixture builds the layout the implementation already assumes proves nothing: for behavior that depends on the runtime environment (worktree path, cwd, module root), at least one case must drive the shape production actually takes, or the finding stands (moves the score; does not block alone)."
     },
     {
+      "name": "test-engineering",
+      "weight": 2,
+      "guidance": "Test debt is a finding (standard: ~/.claude/docs/standards/test-engineering.md). MAJOR: an unbounded wait or loop; a timeout, budget or ratchet raised to land the change; a test that runs a script or binary in a subprocess without reading it, so the result cache serves a stale pass; sleep used to synchronise; a failing test retried or skipped to pass; a clock baseline read after the launch it times; a test that asserts implementation details so a refactor breaks it. MINOR: a test over its tier's cost; a fixture rebuilt for every case; a family of near-identical slow cases; a failure message that names no cause; shared state or ordering between tests. Phrase test findings as static hypotheses from the code, never as 'fails when run'."
+    },
+    {
       "name": "security",
       "weight": 3,
       "guidance": "Untrusted input (bead text, mail, transcripts, tool-call strings, git refs, filenames, env) reaching a shell command, filesystem path, SQL, URL fetch, or subprocess environment without validation or canonicalisation; secrets, tokens or API keys written to logs, beads, commits, notes or transcripts; any weakening or bypass of the town guards (dangerous-command, polecat-path, container-suite, pr-workflow) or of gt done/refinery verification; fail-open error handling in a guard or gate. A confirmed finding here outranks style and mergeability and should block on its own."
