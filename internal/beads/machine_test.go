@@ -3,12 +3,14 @@ package beads
 import (
 	"bytes"
 	"errors"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -211,10 +213,40 @@ printf '{"schema_version":1,"contract_version":1,"data":null,"pagination":null,"
 exit ` + strconv.Itoa(failWith) + "\n"
 	}
 	path := filepath.Join(t.TempDir(), "bd")
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+	if err := writeStub(path, []byte(script), os.WriteFile); err != nil {
 		t.Fatal(err)
 	}
 	return path
+}
+
+// writeStub writes an executable with syscall.ForkLock held. A parallel test
+// that forks while the write descriptor is still open gives its child a copy
+// of that descriptor, and the kernel then refuses to exec the stub as text
+// file busy.
+func writeStub(path string, script []byte, write func(string, []byte, fs.FileMode) error) error {
+	syscall.ForkLock.Lock()
+	defer syscall.ForkLock.Unlock()
+	return write(path, script, 0o755)
+}
+
+// Not parallel: TryLock reports a fork in flight as held, so only a serial
+// test can tell that the lock is taken by writeStub itself.
+func TestWriteStubHoldsForkLockDuringWrite(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bd")
+	var lockedDuringWrite bool
+	err := writeStub(path, []byte("#!/bin/sh\n"), func(name string, data []byte, perm fs.FileMode) error {
+		lockedDuringWrite = !syscall.ForkLock.TryLock()
+		if !lockedDuringWrite {
+			syscall.ForkLock.Unlock()
+		}
+		return os.WriteFile(name, data, perm)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !lockedDuringWrite {
+		t.Error("writeStub wrote the stub without holding syscall.ForkLock")
+	}
 }
 
 func TestCmdHandsBackTheUnwrappedPayload(t *testing.T) {
