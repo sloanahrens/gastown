@@ -27,7 +27,7 @@ func (d *Daemon) triggerJevSubmission() {
 		return
 	}
 	now := d.clk().Now()
-	dec := evaluatePatrolDue(d.config.TownRoot, "jev_submission", time.Time{}, now, jevSubmissionInterval)
+	dec := evaluatePatrolDue(d.config.TownRoot, "jev_submission", d.jevSubmissionRun.last(), now, jevSubmissionInterval)
 	if !dec.due {
 		return
 	}
@@ -40,9 +40,7 @@ func (d *Daemon) triggerJevSubmission() {
 	go func() {
 		defer d.jevSubmissionRunning.Store(false)
 		d.runJevSubmission()
-		if err := savePatrolLastRun(d.config.TownRoot, "jev_submission", d.clk().Now()); err != nil {
-			d.logger.Printf("jev_submission: WARNING: cannot persist last-run time (%v)", err)
-		}
+		d.recordPatrolRun(&d.jevSubmissionRun, "jev_submission", d.clk().Now())
 	}()
 }
 

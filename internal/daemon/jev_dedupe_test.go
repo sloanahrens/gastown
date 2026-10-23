@@ -281,7 +281,7 @@ func TestJevDedupeFailedSaveSuppressesTheRerun(t *testing.T) {
 // A failed save plus a restart reruns the pass inside the interval: the
 // in-memory time that held the interval died with the process, and the disk has
 // no record to stand in for it. That is the intended direction for a patrol
-// (recordJevDedupeRun) — a missing record reads as "run the pass" — so the
+// (recordPatrolRun) — a missing record reads as "run the pass" — so the
 // test pins it rather than leave it as a comment.
 func TestJevDedupeFailedSaveThenRestartRerunsThePass(t *testing.T) {
 	t.Parallel()
