@@ -1,0 +1,62 @@
+# OpenShell gateway
+
+The OpenShell gateway is the long-lived service behind the `openshell` session backend: polecat seats whose `backend` is `openshell` run in sandboxes the gateway creates, and the daemon reaches them through it. On macOS it runs as the user launchd agent `com.gastown.openshell-gateway`. Read this before installing, restarting or repairing the gateway.
+
+## Install
+
+The agent is installed by `scripts/install-gt.sh`, the same run that installs `gt` (`make install`, the rebuild-gt plugin). The install writes `~/Library/LaunchAgents/com.gastown.openshell-gateway.plist` from `scripts/launchd/com.gastown.openshell-gateway.plist.tmpl`, with `$HOME` filled in, and loads it with `launchctl bootstrap gui/$(id -u)` when launchd has not loaded it yet.
+
+Two things must exist first; the install does not create either:
+
+- the `openshell-gateway` binary at `/opt/homebrew/bin` (the brew formula);
+- `~/.config/openshell/gateway.toml`, which the operator writes. Without it the install skips the agent, so a machine with no OpenShell seats is unaffected.
+
+To see what an install would do without building or changing anything:
+
+```bash
+scripts/install-gt.sh --dry-run
+```
+
+It prints `gateway: skipped, no <gateway.toml>` when the file is missing. Otherwise it prints `would write <plist>` when the unit differs from the template, and `would run: launchctl bootstrap gui/<uid> <plist>` when launchd has not loaded the unit.
+
+The unit sets `OPENSHELL_TELEMETRY_ENABLED=false` and `OPENSHELL_LOCAL_TLS_DIR`, keeps the gateway alive (`KeepAlive`), and logs to `~/gt/.runtime/openshell/gateway.log`.
+
+## Restart
+
+An install never restarts a running gateway, and neither does a changed template: a restart drops the live sessions of every sandbox the gateway serves. When the install rewrites the unit of a loaded agent it logs the command to apply it. Restart by kickstart, at a moment no polecat is mid-task:
+
+```bash
+launchctl kickstart -k gui/$(id -u)/com.gastown.openshell-gateway
+```
+
+If the agent is not loaded at all, bootstrap it:
+
+```bash
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gastown.openshell-gateway.plist
+```
+
+To remove it, `launchctl bootout gui/$(id -u)/com.gastown.openshell-gateway` and delete the plist; the next install writes it again while `gateway.toml` exists.
+
+## Where state lives
+
+| Path | Holds |
+|---|---|
+| `~/.config/openshell/gateway.toml` | gateway configuration, operator-owned |
+| `~/.local/state/openshell/` | the gateway's SQLite database and the provider credentials |
+| `~/.local/state/openshell/tls/` | the local TLS material (`OPENSHELL_LOCAL_TLS_DIR`) |
+| `~/gt/.runtime/openshell/gateway.log` | stdout and stderr of the gateway |
+
+A lost `~/.local/state/openshell/` means the providers are gone; re-register them from the two key files (the operator step of the sandbox backend plan).
+
+## Regenerate certificates
+
+Regenerate when `openshell status` fails with a certificate or handshake error, or after the TLS directory was deleted. The gateway writes the material on start, and the `openshell` CLI reads the same directory, so both sides pick up the new set together.
+
+```bash
+launchctl bootout gui/$(id -u)/com.gastown.openshell-gateway
+mv ~/.local/state/openshell/tls ~/.local/state/openshell/tls.old
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.gastown.openshell-gateway.plist
+openshell status
+```
+
+`openshell status` reporting a connected gateway means the new set works; delete `tls.old` then. If it does not connect, `~/gt/.runtime/openshell/gateway.log` names the reason, and moving `tls.old` back restores the previous set.

@@ -7,7 +7,11 @@
 # (claude-7fc; design: docs/plans/2026-09-23-install-gt-after-merge-design.md).
 #
 #   install-gt.sh [--sha REF] [--source manual|rebuild-gt|post-land]
-#                 [--slot-role ROLE] [--slot-timeout SECONDS]
+#                 [--slot-role ROLE] [--slot-timeout SECONDS] [--dry-run]
+#
+# --dry-run builds and installs nothing and takes no lock: it prints the
+# launchd actions an install would take for the OpenShell gateway agent and
+# exits 0 (docs/openshell-gateway.md).
 #
 # --sha defaults to origin/main, resolved after this script's own fetch.
 # It always builds in <town>/gastown/mayor/rig (fast-forwarded to the target),
@@ -25,6 +29,11 @@
 # on a path nothing here anticipated (a bad flag, a "${VAR:?}" guard, perl
 # dying on the lock for a reason other than the timeout, cp/mv of gt.prev
 # failing under `set -e`, ...): it reports "failed ... unexpected" and exits 1.
+#
+# Besides the binary it installs the OpenShell gateway's launchd agent
+# (igt_gateway_agent in lib/install-gt-lib.sh) once the operator has written
+# ~/.config/openshell/gateway.toml: bootstrap if launchd has not loaded it,
+# never kickstart.
 #
 # It never restarts the daemon: it writes daemon/restart-pending.json and the
 # daemon exits for a launchd restart once nothing is in flight.
@@ -65,13 +74,14 @@ on_exit() {
 trap on_exit EXIT
 
 ORIG_ARGS=("$@")
-SHA="origin/main" SOURCE="manual" SLOT_ROLE="" SLOT_TIMEOUT=600
+SHA="origin/main" SOURCE="manual" SLOT_ROLE="" SLOT_TIMEOUT=600 DRY_RUN=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --sha) SHA="${2:-}"; shift 2 ;;
     --source) SOURCE="${2:-}"; shift 2 ;;
     --slot-role) SLOT_ROLE="${2:-}"; shift 2 ;;
     --slot-timeout) SLOT_TIMEOUT="${2:-}"; shift 2 ;;
+    --dry-run) DRY_RUN=1; shift ;;
     *) echo "install-gt: unknown argument: $1" >&2; exit 1 ;;
   esac
 done
@@ -111,6 +121,23 @@ escalate() {
   "$GT" escalate "install-gt: $3" -s "$1" --source "script:install-gt" --fingerprint "$2" >/dev/null 2>&1 \
     || log "WARNING: escalation $2 did not reach the town"
 }
+
+# --- OpenShell gateway agent ---------------------------------------------------
+# The template comes from the checkout being installed (RIG_DIR, fast-forwarded
+# by the time a build runs), else from this script's own clone. A failure here
+# never fails an install: the gateway is independent of the gt binary.
+GATEWAY_HOME="${INSTALL_GT_GATEWAY_HOME:-$HOME}"
+gateway_step() {
+  local mode="$1" tmpl="$RIG_DIR/scripts/launchd/com.gastown.openshell-gateway.plist.tmpl" line
+  [ -f "$tmpl" ] || tmpl="$SCRIPT_DIR/launchd/com.gastown.openshell-gateway.plist.tmpl"
+  igt_gateway_agent "$mode" "$tmpl" "$GATEWAY_HOME" | while IFS= read -r line; do log "$line"; done || true
+}
+
+if [ "$DRY_RUN" = "1" ]; then
+  gateway_step dry-run
+  RESULT_EMITTED=1
+  exit 0
+fi
 
 # --- Lock ---------------------------------------------------------------------
 # flock(2) through perl (macOS has no flock(1)). The script re-execs itself with
@@ -243,6 +270,7 @@ if [ -n "$PREV" ] && git -C "$RIG_DIR" merge-base --is-ancestor "$FULL_SHA" "$PR
   else
     log "Installed $PREV already contains $FULL_SHA; nothing to do."
   fi
+  gateway_step install
   igt_receipt noop "$FULL_SHA" "$PREV" already-installed "$MERGED_AT" "$START"
   result_line noop "$FULL_SHA" "$PREV" already-installed
   exit 0
@@ -475,6 +503,8 @@ fi
 # --- Syncs (non-fatal, as in rebuild-gt: convenience, not the install) ---------------
 if OUT=$( (cd "$RIG_DIR" && "$GT" formula sync) 2>&1 ); then log "$OUT"; else log "formula sync failed (non-fatal): $OUT"; fi
 if OUT=$( (cd "$RIG_DIR" && "$GT" plugin sync) 2>&1 ); then log "$OUT"; else log "plugin sync failed (non-fatal): $OUT"; fi
+
+gateway_step install
 
 # --- Restart marker, receipt ---------------------------------------------------------
 # The new binary is already installed and smoke-verified at this point: a
