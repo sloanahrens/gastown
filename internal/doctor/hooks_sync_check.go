@@ -15,6 +15,12 @@ type HooksSyncCheck struct {
 	FixableCheck
 	outOfSync []hooks.Target
 
+	// unrepairable are targets that could not be compared (settings.json will
+	// not load, or the expected config will not compute). Fix cannot rewrite
+	// them without discarding what it could not read, so they stay out of
+	// outOfSync and are reported for manual repair.
+	unrepairable []unrepairableTarget
+
 	// computeExpected is the hooks config a Claude target should carry; nil
 	// is hooks.ComputeExpected, which reads the base and overrides under ~/.gt.
 	computeExpected func(target string) (*hooks.HooksConfig, error)
@@ -25,6 +31,11 @@ func (c *HooksSyncCheck) expectedFor(target string) (*hooks.HooksConfig, error) 
 		return c.computeExpected(target)
 	}
 	return hooks.ComputeExpected(target)
+}
+
+type unrepairableTarget struct {
+	target hooks.Target
+	reason string
 }
 
 // NewHooksSyncCheck creates a new hooks sync validation check.
@@ -43,6 +54,7 @@ func NewHooksSyncCheck() *HooksSyncCheck {
 // Run checks all managed hook/settings files for sync status.
 func (c *HooksSyncCheck) Run(ctx *CheckContext) *CheckResult {
 	c.outOfSync = nil
+	c.unrepairable = nil
 
 	var details []string
 	totalTargets := 0
@@ -63,13 +75,21 @@ func (c *HooksSyncCheck) Run(ctx *CheckContext) *CheckResult {
 
 		expected, err := c.expectedFor(target.Key)
 		if err != nil {
-			details = append(details, fmt.Sprintf("%s: error computing expected: %v", target.DisplayKey(), err))
+			// Not comparable, so not provably in sync: report it rather than let
+			// the all-in-sync result below cover a target never compared.
+			reason := fmt.Sprintf("error computing expected: %v", err)
+			c.unrepairable = append(c.unrepairable, unrepairableTarget{target, reason})
+			details = append(details, fmt.Sprintf("%s: %s", target.DisplayKey(), reason))
 			continue
 		}
 
 		current, err := hooks.LoadSettings(target.Path)
 		if err != nil {
-			details = append(details, fmt.Sprintf("%s: error loading: %v", target.DisplayKey(), err))
+			// An unreadable or malformed settings.json is not in sync; skipping it
+			// would let the all-in-sync result below cover a target never compared.
+			reason := fmt.Sprintf("error loading: %v", err)
+			c.unrepairable = append(c.unrepairable, unrepairableTarget{target, reason})
+			details = append(details, fmt.Sprintf("%s: %s", target.DisplayKey(), reason))
 			continue
 		}
 
@@ -88,14 +108,23 @@ func (c *HooksSyncCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	outOfSyncCount := len(c.outOfSync)
+	outOfSyncCount := len(c.outOfSync) + len(c.unrepairable)
 	if outOfSyncCount > 0 {
+		message := fmt.Sprintf("%d target(s) out of sync", outOfSyncCount)
+		fixHint := "Run 'gt doctor fix hooks-sync' to regenerate settings files"
+		if len(c.unrepairable) > 0 {
+			message = fmt.Sprintf("%d target(s) out of sync or unverifiable", outOfSyncCount)
+			fixHint = "Repair or remove the settings.json files listed as errors, then re-run; 'gt doctor fix hooks-sync' will not rewrite them"
+			if len(c.outOfSync) > 0 {
+				fixHint = "Run 'gt doctor fix hooks-sync' to regenerate the out-of-sync files; " + fixHint
+			}
+		}
 		return &CheckResult{
 			Name:     c.Name(),
 			Status:   StatusWarning,
-			Message:  fmt.Sprintf("%d target(s) out of sync", outOfSyncCount),
+			Message:  message,
 			Details:  details,
-			FixHint:  "Run 'gt doctor fix hooks-sync' to regenerate settings files",
+			FixHint:  fixHint,
 			Category: c.Category(),
 		}
 	}
@@ -141,11 +170,10 @@ func (c *HooksSyncCheck) Run(ctx *CheckContext) *CheckResult {
 
 // Fix brings all out-of-sync targets back into sync.
 func (c *HooksSyncCheck) Fix(ctx *CheckContext) error {
-	if len(c.outOfSync) == 0 {
-		return nil
-	}
-
 	var errs []string
+	for _, u := range c.unrepairable {
+		errs = append(errs, fmt.Sprintf("%s: %s (repair manually)", u.target.DisplayKey(), u.reason))
+	}
 
 	// Fix Claude targets via merge system.
 	for _, target := range c.outOfSync {
