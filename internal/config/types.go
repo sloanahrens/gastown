@@ -1700,7 +1700,7 @@ func (p SandboxProfile) WithDefaults() SandboxProfile {
 
 // Validate reports the first field of p that is unset or malformed, naming the
 // profile by its key name in TownSettings.Sandboxes. Image and Policy are
-// required; Policy must be relative to the rig repo root; each provider must be
+// required; Policy must stay inside the rig repo root (relative, no ".." escape); each provider must be
 // named; CPU and Memory, when set, must be k8s quantities.
 func (p SandboxProfile) Validate(name string) error {
 	if p.Image == "" {
@@ -1709,8 +1709,8 @@ func (p SandboxProfile) Validate(name string) error {
 	if p.Policy == "" {
 		return fmt.Errorf("sandboxes.%s.policy: required", name)
 	}
-	if filepath.IsAbs(p.Policy) {
-		return fmt.Errorf("sandboxes.%s.policy %q: want a path relative to the rig repo root", name, p.Policy)
+	if !filepath.IsLocal(p.Policy) {
+		return fmt.Errorf("sandboxes.%s.policy %q: want a path inside the rig repo root", name, p.Policy)
 	}
 	for i, prov := range p.Providers {
 		if strings.TrimSpace(prov) == "" {
@@ -1727,10 +1727,11 @@ func (p SandboxProfile) Validate(name string) error {
 }
 
 // The k8s quantity shapes a profile's CPU and Memory may take: a plain or
-// decimal number, then "m" for CPU or a decimal or binary SI suffix for memory.
+// decimal number, then "m" for CPU or a suffix for memory: decimal "k" (lower
+// case), "M".."E" or "m", or binary "Ki".."Ei" ("ki" is not a quantity).
 var (
 	sandboxCPURe    = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?m?$`)
-	sandboxMemoryRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?([kMGTPE]i?|m)?$`)
+	sandboxMemoryRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?(k|[KMGTPE]i|[MGTPE]|m)?$`)
 )
 
 // PolecatPool is the town's polecat seat map: which agents run polecats, how
