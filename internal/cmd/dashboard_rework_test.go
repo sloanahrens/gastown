@@ -87,6 +87,35 @@ func TestReworkReaderCountsAFindingsBounce(t *testing.T) {
 	}
 }
 
+// A line written before Rejected existed carries a findings bounce as a plain
+// approve, and the bead's next attempt is what shows it was turned back. The
+// rework panel and the agent counters both read that attempt from the same
+// record, so both count it as rejected.
+func TestReworkPanelAndAgentCountersAgreeOnAPreFieldApproval(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	if err := land.TownReviewsFile(root).Append(land.ReviewRecord{BeadID: "gt-a", Rig: "gastown", Agent: "claude-haiku", Attempt: 1,
+		Score: 0.93, Verdict: "approve", Findings: 2, Bar: 0.8, At: reworkReaderNow.Add(-3 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := land.TownReviewsFile(root).Append(land.ReviewRecord{BeadID: "gt-a", Rig: "gastown", Agent: "claude-haiku", Attempt: 2,
+		Score: 0.95, Verdict: "approve", Bar: 0.8, At: reworkReaderNow.Add(-2 * time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+
+	bars := newDashReworkReader(root).read(reworkReaderNow).Windows[0].Bars
+	if len(bars) != 1 || bars[0].Rejected != 1 || bars[0].FirstTry != 0 || bars[0].Landed != 1 {
+		t.Errorf("rework panel = %+v, want the first attempt rejected and the second landed", bars)
+	}
+
+	r := &modelsReader{townRoot: root, omPath: filepath.Join(t.TempDir(), "missing.json"), now: func() time.Time { return reworkReaderNow }}
+	activity, _ := r.agentActivity()
+	if want := []dashboard.AgentActivity{{Agent: "claude-haiku", Rejected: 1}}; len(activity) != 1 || activity[0] != want[0] {
+		t.Errorf("agent counters = %+v, want %+v", activity, want)
+	}
+}
+
 // reworkStage is one landing's "stages:" line, stamped in local time the way
 // the daemon writes it: the worker logs the line as a review ends, a moment
 // before it writes the verdict.

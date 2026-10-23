@@ -51,9 +51,15 @@ type ReworkReview struct {
 	OM *time.Duration
 }
 
-// approved is whether the review let the work land: an approving verdict the
-// landing did not turn back for its findings.
-func (r ReworkReview) approved() bool { return r.Verdict == reworkApproved && !r.Rejected }
+// ReworkRefused is whether the landing turned an attempt back: its verdict was
+// not an approval, the landing refused it (rejected), or it approved with
+// findings and a later attempt of the same bead follows. A line written before
+// Rejected existed carries a findings bounce as a plain approve, and that last
+// case is how such a line reads. The rework panel and the agent counters both
+// call this, so they agree on every attempt in the review log.
+func ReworkRefused(verdict string, rejected bool, findings int, laterAttempt bool) bool {
+	return rejected || verdict != reworkApproved || (findings > 0 && laterAttempt)
+}
 
 // ReworkBar is one review bar's share of a window. Bar is 0 when the reviewed
 // tree named none, which the page draws as unknown.
@@ -200,8 +206,10 @@ func reworkSpan(name string, reviews []ReworkReview, from, to time.Time, closed 
 		// its findings or, on a newer line, for what came after the review. An
 		// approval with no findings was never a findings bounce, and the bead's
 		// last review has no later attempt to show it was refused.
-		stood := func(i int) bool { return rs[i].approved() && (i == len(rs)-1 || rs[i].Findings == 0) }
-		if stood(0) {
+		refused := func(i int) bool {
+			return ReworkRefused(rs[i].Verdict, rs[i].Rejected, rs[i].Findings, i < len(rs)-1)
+		}
+		if !refused(0) {
 			t.FirstTry++
 		}
 		rejected, approved := 0, false
@@ -214,10 +222,10 @@ func reworkSpan(name string, reviews []ReworkReview, from, to time.Time, closed 
 				om += *r.OM
 				omKnown++
 			}
-			if stood(i) {
-				approved = true
-			} else {
+			if refused(i) {
 				rejected++
+			} else {
+				approved = true
 			}
 		}
 		t.Rejected += rejected

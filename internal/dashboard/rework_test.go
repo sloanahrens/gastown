@@ -414,3 +414,30 @@ func TestAggregateReworkOMTimeJSONWhenNoLandedBeadHasOne(t *testing.T) {
 		t.Errorf("slowest_om_bead present in %s, want it omitted with no timed bead", raw)
 	}
 }
+
+// ReworkRefused is the one reading both readers of the review log share: a
+// verdict that is not an approval, a refused approval, and an approval with
+// findings that a later attempt follows are refused; a clean approval is not.
+func TestReworkRefusedReadsEachAttemptTheSameWay(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name         string
+		verdict      string
+		rejected     bool
+		findings     int
+		laterAttempt bool
+		want         bool
+	}{
+		{"clean approval, last", "approve", false, 0, false, false},
+		{"clean approval with findings, last", "approve", false, 2, false, false},
+		{"approval with findings, later attempt (pre-field bounce)", "approve", false, 2, true, true},
+		{"approval with no findings, later attempt", "approve", false, 0, true, false},
+		{"approval refused on its line", "approve", true, 1, false, true},
+		{"request changes", "request_changes", false, 2, false, true},
+	}
+	for _, tc := range tests {
+		if got := ReworkRefused(tc.verdict, tc.rejected, tc.findings, tc.laterAttempt); got != tc.want {
+			t.Errorf("%s: ReworkRefused = %t, want %t", tc.name, got, tc.want)
+		}
+	}
+}

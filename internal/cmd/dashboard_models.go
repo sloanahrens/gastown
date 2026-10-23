@@ -132,12 +132,24 @@ func (r *modelsReader) agentActivity() ([]dashboard.AgentActivity, []string) {
 	if err != nil {
 		unreadable = append(unreadable, "the review log")
 	} else {
+		// A bead's latest attempt in the window: a review that a later attempt
+		// follows is one the landing turned back, for the findings it carried
+		// (see dashboard.ReworkRefused).
+		type beadKey struct{ rig, bead string }
+		latest := map[beadKey]int{}
+		for _, rec := range recs {
+			k := beadKey{rec.Rig, rec.BeadID}
+			if rec.Attempt > latest[k] {
+				latest[k] = rec.Attempt
+			}
+		}
 		for _, rec := range recs {
 			agent := strings.TrimSpace(rec.Agent)
+			later := rec.Attempt < latest[beadKey{rec.Rig, rec.BeadID}]
 			// A request_changes verdict refused the landing with or without
 			// the Rejected flag, which only an approving verdict's findings
 			// set (gt-vu18r).
-			if agent != "" && (rec.Rejected || rec.Verdict == land.VerdictRequestChanges) {
+			if agent != "" && dashboard.ReworkRefused(rec.Verdict, rec.Rejected, rec.Findings, later) {
 				rejected[agent]++
 			}
 		}
