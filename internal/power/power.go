@@ -31,6 +31,7 @@ import (
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/doltpause"
 	"github.com/steveyegge/gastown/internal/estop"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/templates"
 	"github.com/steveyegge/gastown/internal/townhealth"
 )
@@ -128,6 +129,10 @@ type Options struct {
 	Glob       func(pattern string) ([]string, error)
 	Now        func() time.Time
 	Sleep      func(ctx context.Context, d time.Duration) error
+	// NewSandboxBackend builds the backend a sandboxed polecat is stopped
+	// through, from its registry record's profile. Nil means
+	// session.NewOpenShellBackend; tests inject a fake.
+	NewSandboxBackend func(townRoot string, p session.Profile) (session.Backend, error)
 
 	Out    io.Writer
 	ErrOut io.Writer
