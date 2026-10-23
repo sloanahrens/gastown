@@ -1623,6 +1623,110 @@ func TestTierSweepRigCycleKeepsAVerdictTheDeadlineArrivedAfter(t *testing.T) {
 	}
 }
 
+// gt-qgrdy: a rig whose script has no such tier says so with "tier-sweep:
+// unknown tier <name>" and exits 2 with no summary for that tier. That is a
+// contract mismatch, not a failure, so the tier leaves the cycle's results and
+// no verdict, bead or attention item follows. Every other missing verdict
+// stays RED, and only the line naming the missing tier itself excuses it.
+func TestTierSweepRigCycleTierTheScriptDoesNotOffer(t *testing.T) {
+	t.Parallel()
+	const (
+		shellSummary       = "tier-sweep: shell GREEN passed=3 failed=0 skipped=0 (logs /tmp/tier-sweep.x)\n"
+		integrationSummary = "tier-sweep: integration GREEN passed=4 failed=0 skipped=0 (logs /tmp/tier-sweep.y)\n"
+		declinedRace       = "tier-sweep: unknown tier race (want shell, integration or race)\n"
+	)
+	tests := []struct {
+		name string
+		// stage is the slot stage's combined output and exit status: the run
+		// that carries the integration and race tiers.
+		stage    string
+		wantRace string // the RED reason; "" for no race verdict at all
+	}{{
+		name:  "the script's own unknown-tier line leaves race out of the results",
+		stage: integrationSummary + declinedRace,
+	}, {
+		name:     "a missing verdict without that line is still RED",
+		stage:    integrationSummary,
+		wantRace: "no verdict line (exit 2)",
+	}, {
+		name:     "an unknown-tier line for another tier excuses nothing",
+		stage:    integrationSummary + "tier-sweep: unknown tier shell (want shell, integration or race)\n",
+		wantRace: "no verdict line (exit 2)",
+	}}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			now := atHour(time.Now(), 15)
+			d, rec, bd, logs := newTierSweepDaemon(t, now, "gastown")
+			d.tierSweepSeams.mainSHA = func(context.Context, string) (string, error) { return "tips1", nil }
+			d.tierSweepSeams.worktree = func(context.Context, string, string, string) (func(), error) { return func() {}, nil }
+			rec.result = func(st tierSweepStage) tierSweepStageResult {
+				if st.slot {
+					return tierSweepStageResult{output: tc.stage, exitCode: 2, ran: true}
+				}
+				return tierSweepStageResult{output: shellSummary, exitCode: 0, ran: true}
+			}
+			cycle := d.startDogCycle("tier_sweep")
+			defer cycle.close()
+			if !d.runTierSweepRig(context.Background(), cycle, "gastown", now) {
+				t.Fatal("the cycle deferred; a stage that ran and reported a verdict is a complete cycle")
+			}
+
+			st := tierSweepTestState(t, d, "gastown")
+			race, hasRace := st.Tiers["race"]
+			offered := strings.Contains(logs.String(), "gastown: race not offered by the rig's script")
+			switch {
+			case tc.wantRace == "":
+				if hasRace {
+					t.Fatalf("race verdict = %+v, want no verdict for the tier the script does not offer", race)
+				}
+				if !offered {
+					t.Errorf("the cycle did not log race as not offered:\n%s", logs.String())
+				}
+				if strings.Contains(logs.String(), "race RED") {
+					t.Errorf("the not-offered tier was logged RED:\n%s", logs.String())
+				}
+				// The tier is not part of this rig's gate, so the offered
+				// tiers' green tip advances: nothing is held back for a tier
+				// the script will never run.
+				if st.LastGreenSHA != "tips1" {
+					t.Errorf("LastGreenSHA = %q, want the offered tiers' green tip tips1", st.LastGreenSHA)
+				}
+				if st.Partial {
+					t.Error("the record is partial; every stage ran")
+				}
+			default:
+				if !hasRace || race.Verdict != tierSweepRed || len(race.FailedNames) != 1 || race.FailedNames[0] != tc.wantRace {
+					t.Fatalf("race verdict = %+v (present = %v), want RED %q", race, hasRace, tc.wantRace)
+				}
+				if offered {
+					t.Errorf("the cycle logged a tier as not offered on a line that names another one:\n%s", logs.String())
+				}
+			}
+
+			var raceBeads int
+			for _, c := range bd.created {
+				if strings.HasPrefix(c.Title, tierSweepBeadPrefix("gastown", "race")) {
+					raceBeads++
+				}
+			}
+			var raceItems int
+			for _, it := range tierSweepItems(t, d, now, "gastown") {
+				if strings.Contains(it.Summary, "tier sweep gastown race ") {
+					raceItems++
+				}
+			}
+			want := 0
+			if tc.wantRace != "" {
+				want = 1
+			}
+			if raceBeads != want || raceItems != want {
+				t.Errorf("race beads = %d, attention items = %d, want %d each", raceBeads, raceItems, want)
+			}
+		})
+	}
+}
+
 // tierSweepItems is the attention the tick would raise for rig, read from the
 // record the cycle left through the collector's own source (gt-euxf1).
 func tierSweepItems(t *testing.T, d *Daemon, now time.Time, rig string) []attention.Item {

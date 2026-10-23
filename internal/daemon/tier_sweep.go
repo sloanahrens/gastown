@@ -137,8 +137,9 @@ type tierSweepState struct {
 	// deferred cycle's (gt-1911b).
 	EarlyRun bool `json:"early_run,omitempty"`
 	// LastGreenSHA is the tip of the last cycle that covered every tier the
-	// sweep is scheduled to cover and was green throughout. It is the skip
-	// key: while origin/main equals it there is nothing new to sweep.
+	// rig's script offers of the ones the sweep is scheduled to cover, and was
+	// green throughout. It is the skip key: while origin/main equals it there
+	// is nothing new to sweep.
 	LastGreenSHA string `json:"last_green_sha"`
 	// Tiers is the last verdict per tier, each carrying the tip it was taken
 	// at.
@@ -1128,6 +1129,9 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	// loaded names the tiers whose stage waited its runner-idle cap out and ran
 	// anyway, for the cycle's verdict summary.
 	loaded := map[string]bool{}
+	// notOffered names the tiers the rig's script declined to run, which have
+	// no verdict at all (gt-qgrdy).
+	notOffered := map[string]bool{}
 	deferred := false
 	for _, st := range stages {
 		if st.slot {
@@ -1178,10 +1182,23 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 			deferred = true
 			continue
 		}
+		declined := parseTierSweepUnknownTiers(res.output)
 		logPath := d.tierSweepWriteLog(rig, st.tiers[0], res.output)
 		for _, tier := range st.tiers {
 			ts, ok := reported[tier]
 			if !ok {
+				if declined[tier] {
+					// The rig's own script says it has no such tier and exits
+					// 2 without a summary line. There is nothing to judge and
+					// nothing to fix, so the tier leaves the cycle's results
+					// (gt-qgrdy). Only the script's own line says so: a crash
+					// or a kill exits without it and stays RED below.
+					if !notOffered[tier] {
+						d.logger.Printf("tier_sweep: %s: %s not offered by the rig's script", rig, tier)
+					}
+					notOffered[tier] = true
+					continue
+				}
 				// No summary line: the script was killed, regressed its output,
 				// or never reached the tier. That is RED, never GREEN, and the
 				// reason stands in for the failing unit the script did not name.
@@ -1215,10 +1232,11 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	state.Tiers = tierSweepRecordedTiers(results, prior, stages, sha, deferred)
 	state.LastSHA = sha
 	state.Partial = deferred
-	// LastGreenSHA advances only on a cycle whose every stage ran green: a
-	// deferred cycle ran fewer stages than it planned and says nothing about
-	// the rest.
-	green := !deferred && tierSweepAllGreen(results, stages)
+	// LastGreenSHA advances only on a cycle whose every stage ran green over
+	// the tiers the script offers: a deferred cycle ran fewer stages than it
+	// planned and says nothing about the rest, and a tier the script does not
+	// offer has no verdict to hold the tip back (gt-qgrdy).
+	green := !deferred && tierSweepAllGreen(results, stages, notOffered)
 	if green {
 		state.LastGreenSHA = sha
 		// Caught up with the tip it covered: nothing is owed.
@@ -1302,11 +1320,16 @@ func tierSweepStageJudged(st tierSweepStage, reported map[string]tierSweepTierRe
 	return true
 }
 
-// tierSweepAllGreen reports whether every tier of every stage came back GREEN,
-// with no stage left unrun.
-func tierSweepAllGreen(results map[string]tierSweepTierResult, stages []tierSweepStage) bool {
+// tierSweepAllGreen reports whether every tier of every stage the rig's script
+// offers came back GREEN, with no stage left unrun.
+func tierSweepAllGreen(results map[string]tierSweepTierResult, stages []tierSweepStage, notOffered map[string]bool) bool {
 	for _, st := range stages {
 		for _, tier := range st.tiers {
+			if notOffered[tier] {
+				// Not part of this rig's gate, so it has no verdict that could
+				// hold the green tip back (gt-qgrdy).
+				continue
+			}
 			if results[tier].Verdict != tierSweepGreen {
 				return false
 			}
@@ -1533,6 +1556,24 @@ func (d *Daemon) tierSweepWriteLog(rig, tier, output string) string {
 // The elapsed group is optional so a line from an older sweep, with no
 // duration, still parses.
 var tierSweepSummaryRE = regexp.MustCompile(`^tier-sweep: (\S+) (GREEN|RED) passed=(\d+) failed=(\d+) skipped=(\d+)(?: failed:(.*?))?(?: \(logs ([^)]*)\))?(?: in (\S+))?\s*$`)
+
+// tierSweepUnknownTierRE matches the line the script prints for a tier it does
+// not offer, before exiting 2 without a summary for it (gt-qgrdy):
+//
+//	tier-sweep: unknown tier race (want shell, integration or race)
+var tierSweepUnknownTierRE = regexp.MustCompile(`^tier-sweep: unknown tier (\S+)`)
+
+// parseTierSweepUnknownTiers reads the tiers a stage's output names as tiers
+// the rig's script does not offer.
+func parseTierSweepUnknownTiers(output string) map[string]bool {
+	out := map[string]bool{}
+	for _, line := range strings.Split(output, "\n") {
+		if m := tierSweepUnknownTierRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			out[m[1]] = true
+		}
+	}
+	return out
+}
 
 // parseTierSweepSummaries reads the verdicts a stage's output reported, keyed
 // by tier.
