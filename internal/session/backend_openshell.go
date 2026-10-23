@@ -601,9 +601,20 @@ func buildWorkspaceArchive(worktree string) ([]byte, error) {
 }
 
 // hostGitEmail is the host's global git identity email, "" when unset or
-// unreadable.
+// unreadable. git runs with only HOME and PATH, so neither a repository's nor an
+// ambient GIT_* setting decides the answer.
 func hostGitEmail() string {
-	out, err := exec.Command("git", "config", "--global", "user.email").Output() //nolint:gosec // G204: fixed command
+	return gitEmailFrom(func(name string, args ...string) ([]byte, error) {
+		cmd := exec.Command(name, args...) //nolint:gosec // G204: fixed command
+		cmd.Env = []string{"HOME=" + os.Getenv("HOME"), "PATH=" + os.Getenv("PATH")}
+		return cmd.Output()
+	})
+}
+
+// gitEmailFrom asks run for `git config --global user.email` and returns the
+// trimmed answer, "" when git fails.
+func gitEmailFrom(run func(name string, args ...string) ([]byte, error)) string {
+	out, err := run("git", "config", "--global", "user.email")
 	if err != nil {
 		return ""
 	}

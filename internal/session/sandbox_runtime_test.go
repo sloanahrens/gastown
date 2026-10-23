@@ -267,10 +267,12 @@ func TestGitHelperScriptAnswersOnlyForTheForgejoHost(t *testing.T) {
 			t.Errorf("the helper lacks %q:\n%s", want, script)
 		}
 	}
-	// The credential lines come only after the host check.
-	if strings.Index(script, `exit 0`+"\n"+`echo "username`) < 0 &&
-		strings.Index(script, `echo "password=$FORGEJO_TOKEN"`) < strings.LastIndex(script, `[ "$host" =`) {
-		t.Errorf("credentials are printed before the host is checked:\n%s", script)
+	// The credentials are printed only after the host check and the token check.
+	hostCheck := strings.Index(script, `[ "$host" = "host.docker.internal:3000" ] || exit 0`)
+	tokenCheck := strings.Index(script, `[ -n "$FORGEJO_TOKEN" ] || exit 0`)
+	password := strings.Index(script, `echo "password=$FORGEJO_TOKEN"`)
+	if hostCheck < 0 || tokenCheck < 0 || password < 0 || hostCheck > password || tokenCheck > password {
+		t.Errorf("credentials must follow the host check and the token check (host at %d, token at %d, password at %d):\n%s", hostCheck, tokenCheck, password, script)
 	}
 }
 
@@ -279,7 +281,7 @@ func TestRepoHostIsTheCloneURLsHostAndPort(t *testing.T) {
 	if got, err := repoHost("http://host.docker.internal:3000/sloan/gastown.git"); err != nil || got != "host.docker.internal:3000" {
 		t.Errorf("repoHost = %q, %v; want host.docker.internal:3000", got, err)
 	}
-	for _, bad := range []string{"", "not a url", "http:///no-host", `http://evil"; rm -rf /;:3000/x`} {
+	for _, bad := range []string{"", "not a url", "http:///no-host", `http://evil"; rm -rf /;:3000/x`, "http://a b:3000/x", "http://host:3000:1/x", "http://ho$(id)st:3000/x", "http://host:99999999/x", "http://-host:3000/x"} {
 		if got, err := repoHost(bad); err == nil {
 			t.Errorf("repoHost(%q) = %q, nil; want an error (the host goes into the helper script)", bad, got)
 		}
@@ -295,5 +297,29 @@ func TestSandboxGitConfigUsesTheHostEmailAndFallsBack(t *testing.T) {
 	}
 	if cfg := sandboxGitConfig("ace", ""); !strings.Contains(cfg, "email = ace@gastown.local") {
 		t.Errorf("config does not fall back to ace@gastown.local when the host has no email:\n%s", cfg)
+	}
+}
+
+func TestSandboxGitConfigRefusesAnUnsafeEmail(t *testing.T) {
+	t.Parallel()
+	for _, bad := range []string{"a b@example.test", "x@example.test\n[core]", "x@exa\"mple.test", "<x@example.test>", "no-at-sign"} {
+		if cfg := sandboxGitConfig("ace", bad); strings.Contains(cfg, bad) || !strings.Contains(cfg, "email = ace@gastown.local") {
+			t.Errorf("email %q reached .gitconfig or the fallback was not used:\n%s", bad, cfg)
+		}
+	}
+}
+
+func TestGitEmailFromTrimsTheAnswerAndTreatsAFailureAsUnset(t *testing.T) {
+	t.Parallel()
+	var asked []string
+	got := gitEmailFrom(func(name string, args ...string) ([]byte, error) {
+		asked = append([]string{name}, args...)
+		return []byte("dev@example.test\n"), nil
+	})
+	if got != "dev@example.test" || strings.Join(asked, " ") != "git config --global user.email" {
+		t.Errorf("gitEmailFrom = %q after asking %v", got, asked)
+	}
+	if got := gitEmailFrom(func(string, ...string) ([]byte, error) { return nil, errors.New("exit status 1") }); got != "" {
+		t.Errorf("gitEmailFrom after a git failure = %q, want empty (unset)", got)
 	}
 }

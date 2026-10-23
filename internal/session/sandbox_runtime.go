@@ -13,7 +13,6 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
-	"strings"
 )
 
 // runtimeArchiveName is the staged archive holding the polecat's Claude
@@ -148,15 +147,24 @@ while IFS= read -r line; do
   case "$line" in host=*) host=${line#host=} ;; esac
 done
 [ "$host" = "` + forgejoHost + `" ] || exit 0
+[ -n "$FORGEJO_TOKEN" ] || exit 0
 echo "username=polecat"
 echo "password=$FORGEJO_TOKEN"
 `
 }
 
+// forgejoHostRe is every host:port the helper script may be built with: it is
+// interpolated into a shell script, so only host-name characters and a port.
+var forgejoHostRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$`)
+
+// gitEmailRe is an address safe to write into .gitconfig: no space, newline,
+// quote or bracket.
+var gitEmailRe = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9][A-Za-z0-9.-]*$`)
+
 // repoHost is the host:port of the clone URL, the one host the helper answers for.
 func repoHost(repoURL string) (string, error) {
 	u, err := url.Parse(repoURL)
-	if err != nil || u.Host == "" || strings.ContainsAny(u.Host, "\"'`$\\ \n") {
+	if err != nil || !forgejoHostRe.MatchString(u.Host) {
 		return "", fmt.Errorf("sandbox git helper: cannot take a host from the repo URL %q", repoURL)
 	}
 	return u.Host, nil
@@ -167,7 +175,7 @@ func repoHost(repoURL string) (string, error) {
 // with no secret in the file. The email is the host's global one, as on a host
 // polecat; polecat@gastown.local stands in when the host has none.
 func sandboxGitConfig(polecat, email string) string {
-	if email == "" {
+	if !gitEmailRe.MatchString(email) {
 		email = polecat + "@gastown.local"
 	}
 	return "[user]\n\tname = " + polecat + "\n\temail = " + email + "\n" +
