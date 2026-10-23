@@ -221,6 +221,9 @@ func evaluateDangerousCommand(command string, depth int, sess guardSession) (rea
 	if r, alt := matchesPolecatMainPush(lowerTokens, inPolecatSession(sess.proc)); r != "" {
 		return r, alt
 	}
+	if r, alt := matchesPolecatAttribution(tokens, inPolecatSession(sess.proc)); r != "" {
+		return r, alt
+	}
 	if r, alt := matchesDangerousGitReset(lowerTokens); r != "" {
 		return r, alt
 	}
