@@ -182,7 +182,10 @@ func TestCompletedDoneOnUnchangedReworkRecordsTheRequeueHint(t *testing.T) {
 // must not read as finished. Recorded as COMPLETED with the bead still hooked,
 // patrol_scan skips the seat as stopped on purpose and nothing restarts it
 // (gt-jfhvc). It records stuck with a DEFERRED exit instead, which patrol_scan
-// restarts on the preserved branch (gt-ks62m).
+// restarts on the preserved branch (gt-ks62m). The restart itself is tested in
+// internal/patrolscan (TestDeferredExitSeatIsRestartedNotSkipped); this test
+// pins the record it reads, including the cleanup status it names in the
+// restart reason.
 func TestUnchangedReworkHeadLeavesTheSeatRestartable(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -230,7 +233,12 @@ func TestUnchangedReworkHeadLeavesTheSeatRestartable(t *testing.T) {
 					return head, nil
 				},
 			}
-			if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-rework", pendingCompletion()); err != nil {
+			// The worktree holds the rejected commit on its branch, so the
+			// restart resumes it: that is the cleanup status patrol_scan reads.
+			pending := pendingCompletion()
+			unpushed := "has_unpushed"
+			pending.CleanupStatus = &unpushed
+			if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-rework", pending); err != nil {
 				t.Fatalf("completed gt done: %v", err)
 			}
 
@@ -241,10 +249,76 @@ func TestUnchangedReworkHeadLeavesTheSeatRestartable(t *testing.T) {
 			if fields.ExitType != done.ExitDeferred {
 				t.Errorf("exit_type = %q, want %s: patrol_scan restarts a stuck seat only after a DEFERRED exit", fields.ExitType, done.ExitDeferred)
 			}
+			if fields.CleanupStatus != unpushed {
+				t.Errorf("cleanup_status = %q, want %q: the DEFERRED restart names it as the preserved work", fields.CleanupStatus, unpushed)
+			}
 			if got := mustShowBead(t, db, "gt-rework").Status; got == string(beads.StatusClosed) {
 				t.Error("gt done closed a rework bead whose head was unchanged")
 			}
 		})
+	}
+}
+
+// TestCompletedDoneOnSubmittedWorkRecordsDone: a gt done that submits its work
+// (the bead is gt:ready-to-land) is a real completion. The seat records done
+// with exit COMPLETED, and the bead stays open for the landing worker to close.
+// The rework stand-down must not pull this path onto a DEFERRED exit (gt-jfhvc).
+func TestCompletedDoneOnSubmittedWorkRecordsDone(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
+		if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	routes := `{"prefix":"gt-","path":"gastown"}` + "\n"
+	if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+		t.Fatalf("write routes.jsonl: %v", err)
+	}
+
+	const head = "2222222222222222222222222222222222222222"
+	db := beadsfake.New(beadsfake.WithPrefix("gt"))
+	db.Seed(doneAgentBead(), beads.Issue{
+		ID:     "gt-base-123",
+		Title:  "the work",
+		Type:   "task",
+		Status: string(beads.StatusInProgress),
+		Labels: []string{land.LabelReadyToLand},
+	})
+
+	env := doneStateEnv{
+		getenv: envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "nux"}),
+		routed: func(string) beads.Client { return db },
+		source: func(string, string) beads.Client { return db },
+		purge:  func(string, string) {},
+		reviewHead: func(string) (string, error) {
+			return head, nil
+		},
+	}
+	if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-base-123", pendingCompletion()); err != nil {
+		t.Fatalf("completed gt done: %v", err)
+	}
+
+	fields := beads.ParseAgentFields(mustShowBead(t, db, "gt-gastown-polecat-nux").Description)
+	if fields.AgentState != string(beads.AgentStateDone) {
+		t.Errorf("agent_state = %q, want done: a submitted completion is finished", fields.AgentState)
+	}
+	if fields.ExitType != done.ExitCompleted {
+		t.Errorf("exit_type = %q, want %s: a submitted completion must not read as a stand-down", fields.ExitType, done.ExitCompleted)
+	}
+	if fields.HookBead != "" {
+		t.Errorf("hook_bead = %q, want it cleared", fields.HookBead)
+	}
+	got := mustShowBead(t, db, "gt-base-123")
+	if got.Status == string(beads.StatusClosed) {
+		t.Error("gt done closed a submitted bead; the landing worker closes it")
+	}
+	comments, err := db.Comments("gt-base-123")
+	if err != nil {
+		t.Fatalf("Comments: %v", err)
+	}
+	if len(comments) == 0 || !strings.Contains(comments[len(comments)-1].Text, "Submitted for landing") {
+		t.Errorf("gt done did not record the submission on the bead: comments %v", comments)
 	}
 }
 
