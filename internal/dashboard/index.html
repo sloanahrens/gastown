@@ -46,6 +46,7 @@ td.n,th.n{text-align:right}
 .rbead:hover{background:#19212b}
 .rbeadrow{margin-top:6px}
 .empty{color:var(--dim);padding:6px 0}
+.qcaption{color:var(--dim);padding:6px 0}
 .body.stale,#cost .spendpart.stale{opacity:.55}
 .spark{width:100%;height:56px;display:block}
 .chart{width:100%;height:64px;display:block}
@@ -89,10 +90,12 @@ tr.live{background:#101a13}
 .cmd{display:inline-block;margin:2px 6px 0 0;padding:0 6px;border:1px solid var(--line);border-radius:4px;color:var(--dim);background:none;font:inherit;font-size:11px;cursor:pointer;text-align:left}
 .cmd:hover{color:var(--text);border-color:var(--dim)}.cmd.done{color:var(--green);border-color:var(--green)}
 .skip{padding:3px 0;border-top:1px solid var(--line)}.skip .why{color:var(--dim);display:block}
-/* The Work panel's seat rows. Only the bead takes what is left of the width, and
-   every track may shrink to nothing, so a long bead title cannot carry a row
-   past its panel. */
-.workrow{display:grid;grid-template-columns:minmax(0,max-content) minmax(0,max-content) minmax(0,1fr) minmax(0,max-content) minmax(0,8ch);gap:2px 8px;align-items:baseline;padding:4px 0;border-top:1px solid var(--line)}
+/* The Work panel's seat rows. The columns are polecat, agent, bead, state, age,
+   in that order, and each track is named for the cell it holds so a swap in
+   workHead cannot leave the template describing the old order. Only the bead
+   takes what is left of the width, and every track may shrink to nothing, so a
+   long bead title cannot carry a row past its panel. */
+.workrow{display:grid;grid-template-columns:[polecat] minmax(0,max-content) [agent] minmax(0,max-content) [bead] minmax(0,1fr) [state] minmax(0,max-content) [age] minmax(0,8ch);gap:2px 8px;align-items:baseline;padding:4px 0;border-top:1px solid var(--line)}
 .workrow>*{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .workrow.whead{color:var(--dim);font-size:11px;border-top:0}
 .workrow .wagent,.workrow .wname{color:var(--dim)}
@@ -3585,7 +3588,10 @@ function drawQueueList(box, s) {
   const caption = {ready: "Open beads with nothing blocking them. Only the green “ready” ones are taken by the spec dispatcher: shaped, unassigned, not an epic, and in a rig that is not parked. Beads held by an assignee wait for that person; beads in parked rigs wait until the rig is re-enabled.",
     landing: "Submitted by a polecat or crew and waiting for the landing worker.",
     blocked: "Open beads waiting on another bead to close. Wisp steps left by retired patrols and old polecat runs are hidden by default; the wisps chip shows them."}[qTab];
-  box.append(el("div", "empty", caption));
+  // The caption wears a class of its own: "empty" also marks the placeholder
+  // inside the scrolling rows, so a test looking for it cannot tell a queue
+  // list with a caption from one without.
+  box.append(el("div", "qcaption", caption));
   const [, , totalKey, listKey] = QTABS.find(t => t[0] === qTab);
   const all = q[listKey] || [];
   // filters: which store, (for the ready list) whether the dispatcher would
