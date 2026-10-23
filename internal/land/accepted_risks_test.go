@@ -273,6 +273,98 @@ func TestAcceptedRisksTextHandlesNoComments(t *testing.T) {
 	}
 }
 
+// TestAcceptedRisksUsedNamesEachKeptComment: the audit entry carries the
+// comment's id, author, date and an excerpt of its text, and a comment that
+// AcceptedRisksText ignores has no entry either (gt-vvo9l).
+func TestAcceptedRisksUsedNamesEachKeptComment(t *testing.T) {
+	t.Parallel()
+	got := AcceptedRisksUsed([]beads.Comment{
+		{ID: "c-1", Author: "town/crew/overseer", Text: "ACCEPTED-RISK: the mount is approved", CreatedAt: "2026-10-20T09:00:00Z"},
+		{ID: "c-2", Author: "gastown/polecats/capable", Text: "ACCEPTED-RISK: my own work is fine", CreatedAt: "2026-10-20T10:00:00Z"},
+		{ID: "c-3", Author: "Sloan Ahrens", Text: "commit: 1234567 — the fix", CreatedAt: "2026-10-20T11:00:00Z"},
+		{ID: "c-4", Author: "  Sloan Ahrens  ", Text: "\n ACCEPTED-RISK: the rename is fine \n", CreatedAt: "2026-10-20T12:00:00Z"},
+	})
+	want := []AcceptedRisk{
+		{CommentID: "c-1", Author: "town/crew/overseer", Date: "2026-10-20T09:00:00Z", Excerpt: "ACCEPTED-RISK: the mount is approved"},
+		{CommentID: "c-4", Author: "Sloan Ahrens", Date: "2026-10-20T12:00:00Z", Excerpt: "ACCEPTED-RISK: the rename is fine"},
+	}
+	if !slices.Equal(got, want) {
+		t.Errorf("AcceptedRisksUsed = %+v, want %+v", got, want)
+	}
+}
+
+// TestAcceptedRisksUsedKeepsTheTextOrder: the audit entries are the same
+// comments, in the same order, that AcceptedRisksText hands om (gt-vvo9l).
+func TestAcceptedRisksUsedKeepsTheTextOrder(t *testing.T) {
+	t.Parallel()
+	comments := []beads.Comment{
+		{ID: "c-1", Author: "town/crew/overseer", Text: "ACCEPTED-RISK: later", CreatedAt: "2026-10-23T18:00:00Z"},
+		{ID: "c-2", Author: "gastown/polecats/capable", Text: "ACCEPTED-RISK: ignored", CreatedAt: "2026-10-22T18:00:00Z"},
+		{ID: "c-3", Author: "Sloan Ahrens", Text: "ACCEPTED-RISK: earlier", CreatedAt: "2026-10-20T09:00:00Z"},
+		{ID: "c-4", Author: "town/crew/overseer", Text: "ACCEPTED-RISK: middle", CreatedAt: "2026-10-21T09:00:00Z"},
+	}
+	used := AcceptedRisksUsed(comments)
+	text := AcceptedRisksText(comments)
+	if len(used) != 3 {
+		t.Fatalf("AcceptedRisksUsed reported %d entries, want the 3 qualifying comments", len(used))
+	}
+	at := 0
+	for _, u := range used {
+		i := strings.Index(text[at:], u.Excerpt)
+		if i < 0 {
+			t.Fatalf("entry %q is missing from the text or out of order:\n%s", u.Excerpt, text)
+		}
+		at += i + len(u.Excerpt)
+	}
+}
+
+// TestAcceptedRisksUsedCutsTheExcerptAtEightyRunes: the excerpt is the first 80
+// runes of the comment, cut on a rune boundary (gt-vvo9l).
+func TestAcceptedRisksUsedCutsTheExcerptAtEightyRunes(t *testing.T) {
+	t.Parallel()
+	const marker = "ACCEPTED-RISK: "
+	text := marker + strings.Repeat("é", 100)
+	got := AcceptedRisksUsed([]beads.Comment{{
+		ID: "c-1", Author: "Sloan Ahrens", Text: text, CreatedAt: "2026-10-23T18:00:00Z",
+	}})
+	if len(got) != 1 {
+		t.Fatalf("AcceptedRisksUsed reported %d entries, want 1", len(got))
+	}
+	want := marker + strings.Repeat("é", acceptedRiskExcerptCap-len(marker))
+	if got[0].Excerpt != want {
+		t.Errorf("excerpt = %q, want %q", got[0].Excerpt, want)
+	}
+	if !utf8.ValidString(got[0].Excerpt) {
+		t.Error("the cut split a multi-byte character")
+	}
+}
+
+// TestAcceptedRisksUsedFlattensNewlinesInTheExcerpt: a multi-line comment
+// becomes one line in the audit entry (gt-vvo9l).
+func TestAcceptedRisksUsedFlattensNewlinesInTheExcerpt(t *testing.T) {
+	t.Parallel()
+	got := AcceptedRisksUsed([]beads.Comment{{
+		ID:        "c-1",
+		Author:    "town/crew/overseer",
+		Text:      "ACCEPTED-RISK: first line\nsecond line\r\nthird",
+		CreatedAt: "2026-10-23T18:00:00Z",
+	}})
+	if len(got) != 1 {
+		t.Fatalf("AcceptedRisksUsed reported %d entries, want 1", len(got))
+	}
+	if want := "ACCEPTED-RISK: first line second line third"; got[0].Excerpt != want {
+		t.Errorf("excerpt = %q, want %q", got[0].Excerpt, want)
+	}
+}
+
+// TestAcceptedRisksUsedHandlesNoComments: nothing recorded, nothing to audit.
+func TestAcceptedRisksUsedHandlesNoComments(t *testing.T) {
+	t.Parallel()
+	if got := AcceptedRisksUsed(nil); len(got) != 0 {
+		t.Errorf("AcceptedRisksUsed(nil) = %+v, want none", got)
+	}
+}
+
 // TestOMReviewerPassesTheContextFile: a bead recording an accepted risk hands om
 // a file holding exactly that record, named as --context-file, and the file is
 // gone once the review is over.
