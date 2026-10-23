@@ -47,6 +47,12 @@ var (
 	ErrSessionNotFound = errors.New("session not found")
 	ErrIssueInvalid    = errors.New("issue not found or tombstoned")
 
+	// ErrSandboxNotRemoved is what Stop wraps when the session is already
+	// stopped but its sandbox could not be removed, or its registry record could
+	// not be read. The stop itself succeeded: a caller must not retry it (the
+	// retry gets ErrSessionNotFound), only report that the sandbox may remain.
+	ErrSandboxNotRemoved = errors.New("session stopped, sandbox not removed")
+
 	// ErrBaseBranchRepair reports the state the fresh-branch repair exists to
 	// prevent: a worktree on the canonical base branch that the repair could
 	// not move off it. Starting a session here is what mis-bases the work a
@@ -837,7 +843,9 @@ func (m *SessionManager) isSessionStale(sessionID string) bool {
 	return isSessionProcessDead(probe, sessionID, filepath.Dir(m.rig.Path))
 }
 
-// Stop terminates a polecat session.
+// Stop terminates a polecat session and deletes the sandbox it ran in. When
+// the session stopped but the sandbox could not be removed, the error wraps
+// ErrSandboxNotRemoved.
 func (m *SessionManager) Stop(polecat string, force bool) error {
 	sessionID := m.SessionName(polecat)
 
@@ -875,13 +883,23 @@ func (m *SessionManager) Stop(polecat string, force bool) error {
 // removeSandbox deletes the sandbox a stopped sandboxed session ran in, and its
 // registry record. A host session has no record and nothing happens. Left
 // behind, the sandbox stays Ready and the seat keeps looking occupied.
+//
+// A registry that cannot be read is not a host session: it fails with
+// ErrSandboxNotRemoved and names the lookup, apart from a deletion failure.
 func (m *SessionManager) removeSandbox(sessionID string) error {
 	if m.rig.Path == "" {
 		return nil
 	}
 	townRoot := filepath.Dir(m.rig.Path)
+	sandboxed, err := session.IsSandboxed(townRoot, sessionID)
+	if err != nil {
+		return fmt.Errorf("%w: cannot tell whether %s ran in a sandbox: %w", ErrSandboxNotRemoved, sessionID, err)
+	}
+	if !sandboxed {
+		return nil
+	}
 	if err := session.CleanupSandboxWith(sandboxDeleterOrLinked(m.sandboxDeleter), townRoot, sessionID); err != nil {
-		return fmt.Errorf("session stopped; removing its sandbox: %w", err)
+		return fmt.Errorf("%w: removing its sandbox: %w", ErrSandboxNotRemoved, err)
 	}
 	return nil
 }
