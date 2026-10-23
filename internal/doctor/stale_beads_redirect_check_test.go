@@ -219,6 +219,74 @@ func TestCleanStaleBeadsFiles_PreservesMatchingRedirectMetadata(t *testing.T) {
 	}
 }
 
+func TestStaleBeadsRedirectCheckMatchingMetadataIsNotStale(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "myrig")
+	canonicalBeads := filepath.Join(rigDir, "mayor", "rig", ".beads")
+	redirectBeads := filepath.Join(rigDir, ".beads")
+	if err := os.MkdirAll(canonicalBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(redirectBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	metadata := []byte(`{"dolt_database":"myrig"}`)
+	if err := os.WriteFile(filepath.Join(canonicalBeads, "metadata.json"), metadata, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(redirectBeads, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(redirectBeads, "metadata.json"), metadata, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewStaleBeadsRedirectCheck()
+	result := check.Run(&CheckContext{TownRoot: townRoot})
+
+	if result.Status != StatusOK {
+		t.Errorf("Expected StatusOK for redirect whose metadata.json matches its target, got %v: %s (details: %v)",
+			result.Status, result.Message, result.Details)
+	}
+}
+
+func TestStaleBeadsRedirectCheckDriftedMetadataIsStale(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "myrig")
+	canonicalBeads := filepath.Join(rigDir, "mayor", "rig", ".beads")
+	redirectBeads := filepath.Join(rigDir, ".beads")
+	if err := os.MkdirAll(canonicalBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(redirectBeads, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(canonicalBeads, "metadata.json"), []byte(`{"dolt_database":"myrig"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(redirectBeads, "redirect"), []byte("mayor/rig/.beads\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(redirectBeads, "metadata.json"), []byte(`{"dolt_database":"hq"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewStaleBeadsRedirectCheck()
+	result := check.Run(&CheckContext{TownRoot: townRoot})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("Expected StatusWarning for redirect metadata naming another database, got %v: %s", result.Status, result.Message)
+	}
+	if err := check.Fix(&CheckContext{TownRoot: townRoot}); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(redirectBeads, "metadata.json")); !os.IsNotExist(err) {
+		t.Fatalf("drifted redirect metadata should be removed by Fix, stat err=%v", err)
+	}
+}
+
 func TestStaleBeadsRedirectCheck_NoRedirect(t *testing.T) {
 	t.Parallel()
 	// Create temp town with .beads but no redirect (canonical location)
