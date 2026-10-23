@@ -61,7 +61,8 @@ func TestRoutedSessionCreateSkipsHostChecksOnThePlainClient(t *testing.T) {
 	}
 }
 
-// With no router the plain client still refuses a missing workDir.
+// With no router the plain client still refuses a missing workDir and a
+// missing command binary.
 func TestUnroutedSessionCreateStillChecksHostPaths(t *testing.T) {
 	t.Parallel()
 	host := newTmuxForTest("gt-test", recordExec(new([][]string), ""), nil)
@@ -72,5 +73,14 @@ func TestUnroutedSessionCreateStillChecksHostPaths(t *testing.T) {
 	err = host.NewSessionWithCommandAndEnv("gt-r-n", t.TempDir()+"/missing", "sleep 1", nil)
 	if err == nil || !strings.Contains(err.Error(), "invalid work directory") {
 		t.Fatalf("NewSessionWithCommandAndEnv = %v, want invalid work directory", err)
+	}
+	binary := t.TempDir() + "/claude-code" // never created
+	err = host.NewSessionWithCommand("gt-r-n", t.TempDir(), binary)
+	if err == nil || !strings.Contains(err.Error(), "command binary not found") {
+		t.Fatalf("NewSessionWithCommand = %v, want command binary not found", err)
+	}
+	err = host.NewSessionWithCommandAndEnv("gt-r-n", t.TempDir(), binary, nil)
+	if err == nil || !strings.Contains(err.Error(), "command binary not found") {
+		t.Fatalf("NewSessionWithCommandAndEnv = %v, want command binary not found", err)
 	}
 }
