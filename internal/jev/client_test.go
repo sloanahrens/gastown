@@ -326,6 +326,49 @@ func TestChoice_RoundedProbabilitiesParse(t *testing.T) {
 	}
 }
 
+// TestChoice_RoundingEdges checks the rounding tolerance at its edges: a sum
+// one step inside the bound parses, a step outside it does not, and the bound
+// is 0.005 per option, so two options allow 0.01 where three allow 0.015.
+func TestChoice_RoundingEdges(t *testing.T) {
+	t.Parallel()
+	pair := map[string]string{"billing": "Charges, invoices, payment problems", "returns": "Exchanges, wrong or damaged items"}
+	tests := []struct {
+		name     string
+		body     string
+		criteria map[string]string
+		wantErr  bool
+	}{
+		{"three options summing to 0.985 is inside the 0.015 bound", `{"answers":{"q":{"type":"choice","choice":"billing","probabilities":{"billing":0.33,"returns":0.33,"shipping":0.325},"confidence":1}}}`,
+			shoeCriteria, false},
+		{"three options summing to 1.015 is inside the 0.015 bound", `{"answers":{"q":{"type":"choice","choice":"billing","probabilities":{"billing":0.34,"returns":0.34,"shipping":0.335},"confidence":1}}}`,
+			shoeCriteria, false},
+		{"three options summing to 0.98 is outside the 0.015 bound", `{"answers":{"q":{"type":"choice","choice":"returns","probabilities":{"billing":0.33,"returns":0.33,"shipping":0.32},"confidence":1}}}`,
+			shoeCriteria, true},
+		{"three options summing to 1.02 is outside the 0.015 bound", `{"answers":{"q":{"type":"choice","choice":"billing","probabilities":{"billing":0.34,"returns":0.34,"shipping":0.34},"confidence":1}}}`,
+			shoeCriteria, true},
+		{"two options summing to 0.99 is inside the 0.01 bound", `{"answers":{"q":{"type":"choice","choice":"returns","probabilities":{"billing":0.49,"returns":0.5},"confidence":1}}}`,
+			pair, false},
+		{"two options summing to 0.985 is outside the 0.01 bound", `{"answers":{"q":{"type":"choice","choice":"returns","probabilities":{"billing":0.49,"returns":0.495},"confidence":1}}}`,
+			pair, true},
+		{"chosen option 0.011 below the highest is not a tie", `{"answers":{"q":{"type":"choice","choice":"billing","probabilities":{"billing":0.489,"returns":0.5,"shipping":0.011},"confidence":1}}}`,
+			shoeCriteria, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := newTestClient(t, &respond{body: tt.body})
+
+			_, err := c.Choice(context.Background(), "s", "q?", tt.criteria)
+
+			if tt.wantErr {
+				require.ErrorIs(t, err, ErrBadResponse)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
 // TestAsk_RoundedScoreProbabilitiesParse gets a score answer whose level
 // probabilities sum to within Jev's two-decimal rounding of one per level.
 func TestAsk_RoundedScoreProbabilitiesParse(t *testing.T) {
