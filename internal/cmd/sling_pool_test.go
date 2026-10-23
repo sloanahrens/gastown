@@ -2446,3 +2446,77 @@ func TestSlingSeatSpawnHonorsTheBeadAgentLabel(t *testing.T) {
 		t.Errorf("--agent claude-sonnet on a labeled bead ran on %q, want the flag to win", got)
 	}
 }
+
+// poolRequestedAgent keeps --agent over the bead's label, and reads the label
+// only when a bead is slung and a reader is wired (gt-5h1r7).
+func TestPoolRequestedAgent(t *testing.T) {
+	t.Parallel()
+	label := func(townRoot, beadID string) string {
+		if townRoot != "/town" || beadID != "gt-1" {
+			t.Errorf("label read for %q in %q, want gt-1 in /town", beadID, townRoot)
+		}
+		return "deepseek-flash"
+	}
+	cases := []struct {
+		name   string
+		agent  string
+		beadID string
+		pinned func(townRoot, beadID string) string
+		want   string
+	}{
+		{"no agent takes the label", "", "gt-1", label, "deepseek-flash"},
+		{"--agent wins over the label", "claude-sonnet", "gt-1", label, "claude-sonnet"},
+		{"no bead reads no label", "", "", label, ""},
+		{"no reader reads no label", "", "gt-1", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := poolRequestedAgent("/town", tc.agent, tc.beadID, tc.pinned); got != tc.want {
+				t.Errorf("poolRequestedAgent(%q, %q) = %q, want %q", tc.agent, tc.beadID, got, tc.want)
+			}
+		})
+	}
+}
+
+// A dry-run sling that names no agent previews the route its bead's agent:
+// label takes, as the live sling runs it; --agent still wins (gt-5h1r7).
+func TestResolveTarget_DryRunPeeksThePoolWithTheBeadAgentLabel(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		agent string
+		want  string
+	}{
+		{"no --agent peeks the labeled seat", "", "deepseek-flash"},
+		{"--agent wins over the label", "claude-sonnet", "claude-sonnet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.run.pinnedAgent = func(townRoot, beadID string) string {
+				if townRoot != slingTestTown || beadID != "gt-new" {
+					t.Errorf("label read for %q in %q, want gt-new in %s", beadID, townRoot, slingTestTown)
+				}
+				return "deepseek-flash"
+			}
+			var peeked []string
+			h.run.peekPool = func(_, requested string) (string, string, error) {
+				peeked = append(peeked, requested)
+				return requested, "pool routes to " + requested, nil
+			}
+
+			if _, err := h.run.resolveSlingTarget("gastown", ResolveTargetOptions{
+				DryRun: true, NoBoot: true, TownRoot: slingTestTown, HookBead: "gt-new", Agent: tc.agent,
+			}); err != nil {
+				t.Fatalf("resolveTarget: %v", err)
+			}
+			if !slices.Equal(peeked, []string{tc.want}) {
+				t.Errorf("pool peeked for %q, want one peek for %q", peeked, tc.want)
+			}
+			if out := h.out.String(); !strings.Contains(out, "pool routes to "+tc.want) {
+				t.Errorf("dry-run output lacks the pool's route to %s:\n%s", tc.want, out)
+			}
+		})
+	}
+}

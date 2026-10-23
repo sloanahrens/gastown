@@ -182,10 +182,7 @@ func (d *slingDeps) resolveSlingTarget(target string, opts ResolveTargetOptions)
 			// the live sling (gt-4lbz).
 			// A bead's agent: label stands in for the --agent it did not get,
 			// as it does on the live spawn.
-			requested := opts.Agent
-			if requested == "" && opts.HookBead != "" && d.pinnedAgent != nil {
-				requested = d.pinnedAgent(opts.TownRoot, opts.HookBead)
-			}
+			requested := poolRequestedAgent(opts.TownRoot, opts.Agent, opts.HookBead, d.pinnedAgent)
 			_, reason, poolErr := d.peekPool(opts.TownRoot, requested)
 			if poolErr != nil {
 				fmt.Fprintf(d.out, "  %s\n", poolErr)

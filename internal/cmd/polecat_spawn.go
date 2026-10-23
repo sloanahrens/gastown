@@ -850,10 +850,7 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 	// A sling that names no agent asks for the one its bead is labeled with
 	// (agent:<name>) when the pool has that seat, so a pinned-only seat takes
 	// its labeled bead by hand as it does from the dispatcher. --agent wins.
-	requested := opts.Agent
-	if requested == "" && opts.HookBead != "" && s.pinnedAgent != nil {
-		requested = s.pinnedAgent(townRoot, opts.HookBead)
-	}
+	requested := poolRequestedAgent(townRoot, opts.Agent, opts.HookBead, s.pinnedAgent)
 	poolAgent, poolReason, poolErr := s.resolvePool(townRoot, requested)
 	if poolErr != nil {
 		return nil, poolErr
