@@ -251,6 +251,40 @@ func (f fakeSuiteReads) Slots() (slot.Report, error)    { return f.rep, f.repErr
 func (f fakeSuiteReads) PanePIDs(string) ([]int, error) { return f.panes, f.panesErr }
 func (f fakeSuiteReads) ProcessTable() ([]Proc, error)  { return f.procs, f.procsErr }
 
+// sessionTableReads also answers per session, as a reader that knows a sandboxed
+// seat's processes are in its sandbox does.
+type sessionTableReads struct {
+	fakeSuiteReads
+	tables map[string][]Proc
+	asked  []string
+}
+
+func (f *sessionTableReads) SessionProcessTable(session string) ([]Proc, error) {
+	f.asked = append(f.asked, session)
+	return f.tables[session], nil
+}
+
+// A seat whose reads can name its own process table is scanned in that table: its
+// suite is in the sandbox's table, and the host's table does not have it.
+func TestLiveSuiteUsesTheSessionsOwnProcessTable(t *testing.T) {
+	t.Parallel()
+	suite := []Invocation{{Program: "make", Target: "test"}}
+	sandboxTable := []Proc{{PID: 100, PPID: 1, Args: "claude --session-id a"}, {PID: 101, PPID: 100, Args: "make test"}}
+	reads := &sessionTableReads{
+		fakeSuiteReads: fakeSuiteReads{panes: []int{100}, procs: []Proc{{PID: 100, PPID: 1, Args: "host-only"}}},
+		tables:         map[string][]Proc{"ga-box": sandboxTable},
+	}
+
+	got, err := LiveSuite(reads, SuiteQuery{Roles: []string{"gastown/box"}, Session: "ga-box", Suites: suite})
+
+	if err != nil || got.Invocation != "make test" {
+		t.Fatalf("LiveSuite = %+v, %v; want the suite found in the session's own table", got, err)
+	}
+	if len(reads.asked) != 1 || reads.asked[0] != "ga-box" {
+		t.Errorf("session tables asked for %v, want [ga-box]", reads.asked)
+	}
+}
+
 func TestLiveSuite(t *testing.T) {
 	t.Parallel()
 	suite := []Invocation{{Program: "make", Target: "test"}}
