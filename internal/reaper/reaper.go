@@ -15,8 +15,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -262,8 +264,8 @@ func OpenDB(userInfo, host string, port int, dbName string, readTimeout, writeTi
 
 // openDSN is the DSN OpenDB connects with.
 func openDSN(userInfo, host string, port int, dbName string, readTimeout, writeTimeout time.Duration) string {
-	return fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=%s&writeTimeout=%s",
-		userInfo, host, port, dbName,
+	return fmt.Sprintf("%s@tcp(%s)/%s?parseTime=true&timeout=5s&readTimeout=%s&writeTimeout=%s",
+		userInfo, net.JoinHostPort(host, strconv.Itoa(port)), dbName,
 		fmt.Sprintf("%ds", int(readTimeout.Seconds())),
 		fmt.Sprintf("%ds", int(writeTimeout.Seconds())))
 }

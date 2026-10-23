@@ -2245,3 +2245,30 @@ func TestOpenDBAndDiscoverDatabasesCarryPassword(t *testing.T) {
 		t.Errorf("discoverDSN = %q, want it to start root:secret@tcp(127.0.0.1:3307)/?", discover)
 	}
 }
+
+// An IPv6 Dolt host must reach the driver bracketed ("[::1]:3307"); written
+// bare, the driver reads every colon as a separator and the dial fails with
+// "too many colons" (gt-80xqv, after gt-1bpr8).
+func TestDoltDSNsBracketIPv6Host(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		host string
+		want string
+	}{
+		{"ipv4", "127.0.0.1", "root@tcp(127.0.0.1:3307)/"},
+		{"ipv6 loopback", "::1", "root@tcp([::1]:3307)/"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := discoverDSN("root", tc.host, 3307); !strings.HasPrefix(got, tc.want+"?") {
+				t.Errorf("discoverDSN = %q, want it to start %s?", got, tc.want)
+			}
+			open := openDSN("root", tc.host, 3307, "hq", 10*time.Second, 10*time.Second)
+			if !strings.HasPrefix(open, tc.want+"hq?") {
+				t.Errorf("openDSN = %q, want it to start %shq?", open, tc.want)
+			}
+		})
+	}
+}

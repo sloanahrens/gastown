@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"os"
@@ -852,6 +853,38 @@ func TestCompactorOpenDBCarriesPassword(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
 			writeTownDoltSettings(t, townRoot, tc.settings)
+			d := compactorDogTestDaemon(townRoot, nil)
+			if got := d.compactorDSN("hq"); !strings.HasPrefix(got, tc.want) {
+				t.Errorf("compactorDSN = %q, want prefix %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// compactorDSN reaches the town's Dolt host through the same bracketed
+// host:port as the other Dolt clients, so an IPv6 host such as ::1 dials
+// instead of failing with "too many colons" (gt-80xqv).
+func TestCompactorDSNBracketsIPv6Host(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		host string
+		want string
+	}{
+		{"ipv4", "127.0.0.1", "root@tcp(127.0.0.1:3307)/hq?"},
+		{"ipv6 loopback", "::1", "root@tcp([::1]:3307)/hq?"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			townJSON := fmt.Sprintf(`{"type":"town","version":2,"name":"t","created_at":"2026-01-01T00:00:00Z","registry":{"rigs":{}},"dolt":{"host":%q,"port":3307}}`, tc.host)
+			if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte(townJSON), 0o644); err != nil {
+				t.Fatal(err)
+			}
 			d := compactorDogTestDaemon(townRoot, nil)
 			if got := d.compactorDSN("hq"); !strings.HasPrefix(got, tc.want) {
 				t.Errorf("compactorDSN = %q, want prefix %q", got, tc.want)
