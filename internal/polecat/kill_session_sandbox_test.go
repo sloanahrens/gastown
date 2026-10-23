@@ -18,7 +18,7 @@ func (p failingKillProbe) KillSessionWithProcesses(string) error {
 	return errors.New("tmux: server gone")
 }
 
-//testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
+//testpolicy:allow parallel — points the process-wide sandbox routing and deleter at a temp town and a stub, which another test must not see mid-run
 func TestKillSessionCleansUpTheSandboxEvenWhenTheKillFails(t *testing.T) {
 	town := t.TempDir()
 	session.ResetSandboxRoutingForTest(town)
@@ -26,12 +26,10 @@ func TestKillSessionCleansUpTheSandboxEvenWhenTheKillFails(t *testing.T) {
 	// session's init links the openshell deleter; stub it so the test never
 	// shells out to a real sandbox CLI (a failed delete keeps the record).
 	var deleted []string
-	prev := session.SandboxDeleter
-	session.SandboxDeleter = func(_ string, rec session.SandboxRecord) error {
+	t.Cleanup(session.SetSandboxDeleterForTest(func(_ string, rec session.SandboxRecord) error {
 		deleted = append(deleted, rec.Session)
 		return nil
-	}
-	t.Cleanup(func() { session.SandboxDeleter = prev })
+	}))
 	r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
 	m := newTestManager(r, nil, failingKillProbe{newFakeProbe()}, nil)
 	sessionName := m.sessionName("box")
