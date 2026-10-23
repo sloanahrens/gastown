@@ -2364,3 +2364,85 @@ func TestPoolRouterSeatBatchLivesOneDecision(t *testing.T) {
 		t.Fatalf("next decision = %+v, want gastown/p02 as a dead-hooked seat", got)
 	}
 }
+
+// A bead labelled agent:<name> asks for that seat when the pool has it; every
+// other shape leaves the sling to the pool's own choice (gt-5h1r7).
+func TestPoolPinnedAgent(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{
+		"deepseek-flash": {Cap: 2, PinnedOnly: true},
+		"claude-sonnet":  {Cap: 2},
+	}}
+	cases := []struct {
+		name   string
+		pool   *config.PolecatPool
+		labels []string
+		want   string
+	}{
+		{"a label naming a pinned-only seat", pool, []string{"gt:task", "agent:deepseek-flash"}, "deepseek-flash"},
+		{"a label naming an open seat", pool, []string{"agent:claude-sonnet"}, "claude-sonnet"},
+		{"the prefix is read without case or padding, as the dispatcher reads it", pool, []string{" Agent: claude-sonnet "}, "claude-sonnet"},
+		{"the same label twice is one name", pool, []string{"agent:claude-sonnet", "agent:claude-sonnet"}, "claude-sonnet"},
+		{"no agent label", pool, []string{"gt:task"}, ""},
+		{"no labels", pool, nil, ""},
+		{"conflicting labels pin nothing", pool, []string{"agent:claude-sonnet", "agent:deepseek-flash"}, ""},
+		{"a label naming an agent with no seat", pool, []string{"agent:claude-haiku"}, ""},
+		{"no pool", nil, []string{"agent:claude-sonnet"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := poolPinnedAgent(tc.pool, tc.labels); got != tc.want {
+				t.Errorf("poolPinnedAgent(%v) = %q, want %q", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
+// A sling that names no agent lands a labelled bead on its pinned-only seat,
+// where the same sling for an unlabelled bead skips that seat; --agent wins
+// over the label (gt-5h1r7).
+func TestSlingSeatSpawnHonorsTheBeadAgentLabel(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{
+		"deepseek-flash": {Cap: 3, PinnedOnly: true},
+		"claude-sonnet":  {Cap: 2},
+	}}
+	labels := map[string][]string{
+		"gt-labelled": {"agent:deepseek-flash"},
+		"gt-plain":    {"gt:task"},
+	}
+	spawnAgent := func(t *testing.T, bead, agent string) string {
+		t.Helper()
+		w := newTestPoolTown(pool)
+		w.fs = newFakeSeatFS()
+		router := w.process()
+		s := slingSeatSpawn{
+			backpressure: func(string, string, SlingSpawnOptions) error { return nil },
+			pinnedAgent: func(_, beadID string) string {
+				return poolPinnedAgent(pool, labels[beadID])
+			},
+			resolvePool: func(_, requested string) (string, string, error) { return router.route(requested, true) },
+			releaseSeat: router.seats.store.release,
+			prepare: func(_, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+				return &SpawnedPolecatInfo{RigName: rigName, agent: opts.Agent}, nil
+			},
+			seatClaims: router.seats.store,
+		}
+		info, err := s.spawn("/town", "gastown", SlingSpawnOptions{HookBead: bead, Agent: agent})
+		if err != nil {
+			t.Fatalf("spawn: %v", err)
+		}
+		return info.agent
+	}
+
+	if got := spawnAgent(t, "gt-labelled", ""); got != "deepseek-flash" {
+		t.Errorf("a labelled bead with no --agent ran on %q, want its pinned-only seat deepseek-flash", got)
+	}
+	if got := spawnAgent(t, "gt-plain", ""); got != "claude-sonnet" {
+		t.Errorf("an unlabelled bead ran on %q, want claude-sonnet (the pinned-only seat is skipped)", got)
+	}
+	if got := spawnAgent(t, "gt-labelled", "claude-sonnet"); got != "claude-sonnet" {
+		t.Errorf("--agent claude-sonnet on a labelled bead ran on %q, want the flag to win", got)
+	}
+}
