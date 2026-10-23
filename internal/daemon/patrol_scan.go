@@ -665,7 +665,7 @@ func (h *patrolScanHost) Kill(rig, name, reason string) error {
 		}
 	}
 	if err := cleanup(h.town(), h.sessionName(rig, name)); err != nil {
-		return fmt.Errorf("session killed; removing the sandbox of %s/%s: %w", rig, name, err)
+		return fmt.Errorf("killed the session, but removing the sandbox of %s/%s failed: %w", rig, name, err)
 	}
 	return nil
 }

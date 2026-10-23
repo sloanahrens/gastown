@@ -1237,8 +1237,8 @@ func TestPatrolScanKillRemovesTheSandboxAfterTheKill(t *testing.T) {
 		boom := errors.New("gateway unreachable")
 		h, _, _ := newHost(t, func(string, string) error { return boom })
 		err := h.Kill("myr", "mycat", "stalled seat")
-		if !errors.Is(err, boom) || !strings.Contains(err.Error(), "session killed") {
-			t.Errorf("Kill = %v, want the cleanup error wrapped with 'session killed'", err)
+		if !errors.Is(err, boom) || !strings.Contains(err.Error(), "killed the session, but removing the sandbox") {
+			t.Errorf("Kill = %v, want the cleanup error to say the kill succeeded and the sandbox removal failed", err)
 		}
 	})
 }

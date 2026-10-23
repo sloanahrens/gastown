@@ -335,6 +335,37 @@ func TestResetOverrunAgentBead_LeavesAReSlungSeatAlone(t *testing.T) {
 	}
 }
 
+// A read that fails is an error, not a seat to leave alone: the reset reports
+// it and the hook stays for the next tick to retry.
+func TestResetOverrunAgentBead_ReturnsAFailedRead(t *testing.T) {
+	t.Parallel()
+	c := agentBeadFake(t, "gt-0pt32")
+	boom := errors.New("show timed out")
+	c.FailWith("show", boom)
+
+	if err := resetOverrunAgentBead(c, nuxAgentBead, "gt-0pt32"); !errors.Is(err, boom) {
+		t.Fatalf("reset over a failed read = %v, want the read error", err)
+	}
+
+	c.FailWith("show", nil)
+	if got := nuxAgentFields(t, c); got.HookBead != "gt-0pt32" {
+		t.Errorf("agent bead after a failed read = %+v, want hook gt-0pt32 kept", got)
+	}
+}
+
+// A seat with no bead names no hook to match, so the reset never clears one.
+func TestResetOverrunAgentBead_LeavesASeatWithNoBeadAlone(t *testing.T) {
+	t.Parallel()
+	c := agentBeadFake(t, "")
+
+	if err := resetOverrunAgentBead(c, nuxAgentBead, ""); err != nil {
+		t.Fatal(err)
+	}
+	if got := nuxAgentFields(t, c); got.AgentState != "working" {
+		t.Errorf("agent bead with an empty bead was rewritten: %+v", got)
+	}
+}
+
 // The cleanup status the reset cleared is recorded from the worktree the
 // release keeps: clean once the checkpoint committed and the push put the
 // branch on origin, and the worktree's own state when it holds more.
