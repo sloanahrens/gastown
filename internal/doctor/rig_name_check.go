@@ -29,28 +29,27 @@ func NewRigNameMismatchCheck() *RigNameMismatchCheck {
 	}
 }
 
-// rigConfigLocal is a local type for reading/writing rig config.json without
-// importing the rig package (avoids circular dependency).
+// rigConfigLocal is the read-only view of rig config.json that the checks in
+// this file need. It is deliberately smaller than config.RigConfig (gt-ay3b0):
+// Fix rewrites the raw JSON under ctx.RigName, so this type never decides what
+// the file contains, and a key it does not model cannot be dropped by it.
 type rigConfigLocal struct {
-	Type      string               `json:"type"`
-	Version   int                  `json:"version"`
-	Name      string               `json:"name"`
-	GitURL    string               `json:"git_url"`
-	LocalRepo string               `json:"local_repo,omitempty"`
-	CreatedAt json.RawMessage      `json:"created_at"`
-	Beads     *rigConfigBeadsLocal `json:"beads,omitempty"`
-
-	// Preserve unknown fields for round-trip fidelity
-	DefaultBranch string `json:"default_branch,omitempty"`
+	Type    string               `json:"type"`
+	Version int                  `json:"version"`
+	Name    string               `json:"name"`
+	Beads   *rigConfigBeadsLocal `json:"beads,omitempty"`
 }
 
 type rigConfigBeadsLocal struct {
 	Prefix string `json:"prefix"`
 }
 
+func rigConfigPath(rigPath string) string {
+	return filepath.Join(rigPath, "config.json")
+}
+
 func loadRigConfigLocal(rigPath string) (*rigConfigLocal, error) {
-	configPath := filepath.Join(rigPath, "config.json")
-	data, err := os.ReadFile(configPath)
+	data, err := os.ReadFile(rigConfigPath(rigPath))
 	if err != nil {
 		return nil, err
 	}
@@ -61,13 +60,31 @@ func loadRigConfigLocal(rigPath string) (*rigConfigLocal, error) {
 	return &cfg, nil
 }
 
-func saveRigConfigLocal(rigPath string, cfg *rigConfigLocal) error {
-	configPath := filepath.Join(rigPath, "config.json")
-	data, err := json.MarshalIndent(cfg, "", "  ")
+// loadRigConfigRaw reads config.json as a key-to-value map so Fix can replace a
+// single key and leave every other key, including keys doctor does not model,
+// exactly as it found it. Decoding into a struct loses those keys on the way
+// back out (gt-ay3b0): merge_queue, polecat_pool_size, polecat_names, push_url,
+// upstream_url, witness and beads.repo all live in a rig's config.json.
+func loadRigConfigRaw(rigPath string) (map[string]json.RawMessage, error) {
+	data, err := os.ReadFile(rigConfigPath(rigPath))
+	if err != nil {
+		return nil, err
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
+// saveRigConfigRaw writes the map back with values untouched. json.Marshal sorts
+// top-level keys, so a rewrite may reorder the file; every value survives.
+func saveRigConfigRaw(rigPath string, raw map[string]json.RawMessage) error {
+	data, err := json.MarshalIndent(raw, "", "  ")
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(configPath, data, 0644)
+	return os.WriteFile(rigConfigPath(rigPath), data, 0644)
 }
 
 // Run checks for name/prefix mismatches between config.json and the
@@ -132,7 +149,9 @@ func (c *RigNameMismatchCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 }
 
-// Fix updates config.json to match the directory name and rigs.json prefix.
+// Fix updates config.json to match the directory name and rigs.json prefix. It
+// replaces those two values and nothing else: a fix for a renamed rig must not
+// cost the rig its merge queue or pool settings (gt-ay3b0).
 func (c *RigNameMismatchCheck) Fix(ctx *CheckContext) error {
 	if ctx.RigName == "" {
 		return nil
@@ -143,12 +162,20 @@ func (c *RigNameMismatchCheck) Fix(ctx *CheckContext) error {
 	if err != nil {
 		return nil // Nothing to fix
 	}
+	raw, err := loadRigConfigRaw(rigPath)
+	if err != nil {
+		return nil // Not a JSON object; leave the file for a human
+	}
 
 	modified := false
 
 	// Fix name to match directory
 	if cfg.Name != ctx.RigName {
-		cfg.Name = ctx.RigName
+		name, err := json.Marshal(ctx.RigName)
+		if err != nil {
+			return err
+		}
+		raw["name"] = name
 		modified = true
 	}
 
@@ -158,15 +185,39 @@ func (c *RigNameMismatchCheck) Fix(ctx *CheckContext) error {
 	if rigsErr == nil && cfg.Beads != nil && cfg.Beads.Prefix != "" {
 		if entry, ok := rigsConfig.Rigs[ctx.RigName]; ok && entry.BeadsConfig != nil && entry.BeadsConfig.Prefix != "" {
 			if cfg.Beads.Prefix != entry.BeadsConfig.Prefix {
-				cfg.Beads.Prefix = entry.BeadsConfig.Prefix
+				if err := setRigConfigBeadsPrefix(raw, entry.BeadsConfig.Prefix); err != nil {
+					return err
+				}
 				modified = true
 			}
 		}
 	}
 
 	if modified {
-		return saveRigConfigLocal(rigPath, cfg)
+		return saveRigConfigRaw(rigPath, raw)
 	}
 
+	return nil
+}
+
+// setRigConfigBeadsPrefix replaces beads.prefix in the raw config, keeping the
+// object's other keys (such as beads.repo) as they were.
+func setRigConfigBeadsPrefix(raw map[string]json.RawMessage, prefix string) error {
+	beads := map[string]json.RawMessage{}
+	if data, ok := raw["beads"]; ok {
+		if err := json.Unmarshal(data, &beads); err != nil {
+			return err
+		}
+	}
+	value, err := json.Marshal(prefix)
+	if err != nil {
+		return err
+	}
+	beads["prefix"] = value
+	data, err := json.Marshal(beads)
+	if err != nil {
+		return err
+	}
+	raw["beads"] = data
 	return nil
 }
