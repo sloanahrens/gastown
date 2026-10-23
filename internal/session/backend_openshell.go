@@ -124,6 +124,14 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 		return nil, err
 	}
 
+	// Also before anything is pushed or created: the agent command names these
+	// files, so a polecat whose settings are missing or cannot be rendered for
+	// the sandbox must stop here.
+	runtime, err := buildRuntimeArchive(spec)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
+	}
+
 	// The clone inside the sandbox fetches the branch, so it must exist on
 	// Forgejo before the sandbox is created.
 	if err := b.push(filepath.Join(spec.TownRoot, spec.Rig, ".repo.git"), spec.Branch); err != nil {
@@ -148,6 +156,10 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 	var staged stagedArchives
 	staged.skeleton = filepath.Join(stage, skeletonArchive)
 	if err := os.WriteFile(staged.skeleton, skeleton, 0o600); err != nil {
+		return nil, err
+	}
+	staged.runtime = filepath.Join(stage, runtimeArchiveName)
+	if err := os.WriteFile(staged.runtime, runtime, 0o600); err != nil {
 		return nil, err
 	}
 	workspace, err := buildWorkspaceArchive(spec.HostWorkDir)
@@ -177,7 +189,7 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 // stagedArchives are the host files Prepare uploads. workspace is empty when
 // the worktree has no runtime files to send.
 type stagedArchives struct {
-	skeleton, workspace string
+	skeleton, runtime, workspace string
 }
 
 // populate runs everything between the create and the record: wait for
@@ -192,6 +204,12 @@ func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir
 	}
 	if err := b.run(ctx, spec.Session, "tar", "xzf", path.Join(sandboxHome, skeletonArchive), "-C", sandboxHome); err != nil {
 		return fmt.Errorf("extracting town skeleton: %w", err)
+	}
+	if err := b.cli.Upload(ctx, spec.Session, files.runtime, sandboxHome+"/"); err != nil {
+		return fmt.Errorf("uploading polecat settings: %w", err)
+	}
+	if err := b.run(ctx, spec.Session, "tar", "xzf", path.Join(sandboxHome, runtimeArchiveName), "-C", sandboxHome); err != nil {
+		return fmt.Errorf("extracting polecat settings: %w", err)
 	}
 	if err := b.run(ctx, spec.Session, "sh", "-c", cloneScript, "sh", spec.Branch, spec.RepoURL, workDir); err != nil {
 		return fmt.Errorf("cloning %s: %w", spec.Branch, err)

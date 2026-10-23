@@ -48,6 +48,9 @@ func openshellTown(t *testing.T) (town, work string) {
 	writeOpenshellFile(t, filepath.Join(work, "CLAUDE.md"), "role context\n")
 	writeOpenshellFile(t, filepath.Join(work, ".claude", "commands", "done.md"), "done\n")
 	writeOpenshellFile(t, filepath.Join(work, ".claude", "settings.local.json"), "{}\n")
+	claudeDir := filepath.Join(town, openshellTestRig, "polecats", ".claude")
+	writeOpenshellFile(t, filepath.Join(claudeDir, "settings.json"), openshellHostSettings)
+	writeOpenshellFile(t, filepath.Join(claudeDir, "system-prompt-"+openshellTestPolecat+".md"), "town at "+town+"/mayor\n")
 	return town, work
 }
 
@@ -120,6 +123,8 @@ func stageNames(calls [][]string) [][]string {
 			switch {
 			case strings.HasSuffix(a, "/town-skel.tgz") && !strings.HasPrefix(a, "/sandbox"):
 				a = "STAGE/town-skel.tgz"
+			case strings.HasSuffix(a, "/polecat-runtime.tgz") && !strings.HasPrefix(a, "/sandbox"):
+				a = "STAGE/polecat-runtime.tgz"
 			case strings.HasSuffix(a, "/workspace.tgz") && !strings.HasPrefix(a, "/sandbox"):
 				a = "STAGE/workspace.tgz"
 			}
@@ -175,6 +180,8 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 		{"openshell", "sandbox", "get", openshellTestSession, "--output", "json"},
 		{"openshell", "sandbox", "upload", "--no-git-ignore", openshellTestSession, "STAGE/town-skel.tgz", "/sandbox/"},
 		sandboxExec("tar", "xzf", "/sandbox/town-skel.tgz", "-C", "/sandbox"),
+		{"openshell", "sandbox", "upload", "--no-git-ignore", openshellTestSession, "STAGE/polecat-runtime.tgz", "/sandbox/"},
+		sandboxExec("tar", "xzf", "/sandbox/polecat-runtime.tgz", "-C", "/sandbox"),
 		sandboxExec("sh", "-c", cloneScript, "sh", openshellTestBranch, openshellTestRepoURL, openshellTestWorkDir),
 		{"openshell", "sandbox", "upload", "--no-git-ignore", openshellTestSession, "STAGE/workspace.tgz", "/sandbox/"},
 		sandboxExec("tar", "xzf", "/sandbox/workspace.tgz", "-C", openshellTestWorkDir),
