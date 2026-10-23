@@ -96,62 +96,114 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 
+	poller := &nudgePoller{
+		sessionName: sessionName,
+		hasSession:  t.HasSession,
+		pending: func() int {
+			n, _ := nudge.Pending(townRoot, sessionName)
+			return n
+		},
+		waitForIdle: func() error { return t.WaitForIdle(sessionName, idleTimeout) },
+		drain:       func() ([]nudge.QueuedNudge, error) { return nudge.Drain(townRoot, sessionName) },
+		inject: func(msg string) error {
+			return t.NudgeSessionWithOpts(sessionName, msg, nudgeOpts)
+		},
+		requeue: func(drained []nudge.QueuedNudge) {
+			requeueDrainedNudges(townRoot, sessionName, "nudge-poller", drained)
+		},
+		hasPromptDetection: hasPromptDetection,
+		stderr:             os.Stderr,
+	}
+	return poller.run(sigCh, ticker.C)
+}
+
+// nudgePollerMaxProbeErrors bounds how many session probes in a row may fail
+// before the poller gives up. At the default poll interval that is about a
+// minute of a broken sandbox or server; past it the session is treated as gone
+// so the process does not outlive its target forever.
+const nudgePollerMaxProbeErrors = 6
+
+// nudgePoller holds the per-tick steps of the poll loop as funcs so tests can
+// drive the loop without a tmux server.
+type nudgePoller struct {
+	sessionName        string
+	hasSession         func(string) (bool, error)
+	pending            func() int
+	waitForIdle        func() error
+	drain              func() ([]nudge.QueuedNudge, error)
+	inject             func(string) error
+	requeue            func([]nudge.QueuedNudge)
+	hasPromptDetection bool
+	stderr             io.Writer
+
+	probeErrors int // consecutive failed session probes
+}
+
+// run polls on each tick until the session is gone or a signal arrives.
+func (p *nudgePoller) run(sigCh <-chan os.Signal, ticks <-chan time.Time) error {
 	for {
 		select {
 		case <-sigCh:
 			return nil // graceful shutdown
-
-		case <-ticker.C:
-			// Check if session still exists.
-			if !nudgePollerSessionAlive(t.HasSession, sessionName, os.Stderr) {
-				return nil // session gone, exit
-			}
-
-			// Check if there are queued nudges.
-			if n, _ := nudge.Pending(townRoot, sessionName); n == 0 {
-				continue
-			}
-
-			// For runtimes with prompt detection, defer delivery until the session
-			// is actually idle. Runtimes without prompt detection preserve the old
-			// best-effort behavior and drain on the poll interval.
-			waitErr := t.WaitForIdle(sessionName, idleTimeout)
-			if shouldSkipDrainUntilIdle(hasPromptDetection, waitErr) {
-				continue
-			}
-
-			// Drain and inject.
-			drained, err := nudge.Drain(townRoot, sessionName)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "nudge-poller: drain error for %s: %v\n", sessionName, err)
-				continue
-			}
-			if len(drained) == 0 {
-				continue // someone else drained it
-			}
-
-			formatted := nudge.FormatForInjection(drained)
-			if err := t.NudgeSessionWithOpts(sessionName, formatted, nudgeOpts); err != nil {
-				fmt.Fprintf(os.Stderr, "nudge-poller: injection error for %s: %v\n", sessionName, err)
-				requeueDrainedNudges(townRoot, sessionName, "nudge-poller", drained)
+		case <-ticks:
+			if !p.tick() {
+				return nil
 			}
 		}
 	}
+}
+
+// tick runs one poll and reports whether the poller should keep running.
+func (p *nudgePoller) tick() bool {
+	if !p.sessionAlive() {
+		return false // session gone, exit
+	}
+
+	// Check if there are queued nudges.
+	if p.pending() == 0 {
+		return true
+	}
+
+	// For runtimes with prompt detection, defer delivery until the session
+	// is actually idle. Runtimes without prompt detection preserve the old
+	// best-effort behavior and drain on the poll interval.
+	if shouldSkipDrainUntilIdle(p.hasPromptDetection, p.waitForIdle()) {
+		return true
+	}
+
+	// Drain and inject.
+	drained, err := p.drain()
+	if err != nil {
+		fmt.Fprintf(p.stderr, "nudge-poller: drain error for %s: %v\n", p.sessionName, err)
+		return true
+	}
+	if len(drained) == 0 {
+		return true // someone else drained it
+	}
+
+	if err := p.inject(nudge.FormatForInjection(drained)); err != nil {
+		fmt.Fprintf(p.stderr, "nudge-poller: injection error for %s: %v\n", p.sessionName, err)
+		p.requeue(drained)
+	}
+	return true
 }
 
 func shouldSkipDrainUntilIdle(hasPromptDetection bool, waitErr error) bool {
 	return hasPromptDetection && waitErr != nil
 }
 
-// nudgePollerSessionAlive reports whether the poller should keep running for
-// sessionName. Only a confirmed absence ends it. A probe error is transient
-// (a failed sandbox exec, a busy server), so the poller logs it and checks
-// again on the next tick instead of dropping the queue.
-func nudgePollerSessionAlive(probe func(string) (bool, error), sessionName string, stderr io.Writer) bool {
-	exists, err := probe(sessionName)
+// sessionAlive reports whether the poller should keep running. A confirmed
+// absence ends it. A probe error is transient (a failed sandbox exec, a busy
+// server), so it is logged and the next tick probes again instead of dropping
+// the queue; nudgePollerMaxProbeErrors failures in a row end the poller too.
+func (p *nudgePoller) sessionAlive() bool {
+	exists, err := p.hasSession(p.sessionName)
 	if err != nil {
-		fmt.Fprintf(stderr, "nudge-poller: session probe error for %s: %v\n", sessionName, err)
-		return true
+		p.probeErrors++
+		fmt.Fprintf(p.stderr, "nudge-poller: session probe error for %s (%d/%d): %v\n",
+			p.sessionName, p.probeErrors, nudgePollerMaxProbeErrors, err)
+		return p.probeErrors < nudgePollerMaxProbeErrors
 	}
+	p.probeErrors = 0
 	return exists
 }
