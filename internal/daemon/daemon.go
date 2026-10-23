@@ -1040,11 +1040,14 @@ func (d *Daemon) cleanupLegacySocketSessions() {
 const unrequestedStopLogLine = "Stop was not requested through gt: exiting 75; this was a bootout or a signal from outside gt, and launchd relaunches only under KeepAlive"
 
 // recordStopForHeal leaves the trace the upgrade heal helper reads, before the
-// shutdown so the record is on disk whichever way the stop was requested. A
+// shutdown so the record is on disk whichever way the stop was requested. The
+// stop marker is read here, not consumed: StopDaemon wrote it before the
+// signal, and exitAfterSignal takes it only after the shutdown (gt-518hq). A
 // failure costs the helper its one clue about a bootout, never the stop
 // (gt-r8ux8).
 func (d *Daemon) recordStopForHeal(now time.Time) {
-	if err := recordSignalStop(d.config.TownRoot, now); err != nil {
+	requested := stopRequested(d.config.TownRoot, os.Getpid(), now)
+	if err := recordSignalStop(d.config.TownRoot, now, requested); err != nil {
 		d.logger.Printf("could not record the signal stop for the upgrade heal helper: %v", err)
 	}
 }

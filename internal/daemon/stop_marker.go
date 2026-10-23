@@ -42,17 +42,15 @@ func writeStopRequested(townRoot string, pid int, now time.Time) error {
 	return os.Rename(tmp, path)
 }
 
-// consumeStopRequested reports whether a valid stop request for pid exists,
-// and removes the marker either way: it is single use. A marker for another
-// pid, one older than stopMarkerTTL, or one that cannot be parsed is not a
-// request.
-func consumeStopRequested(townRoot string, pid int, now time.Time) bool {
-	path := stopMarkerPath(townRoot)
-	data, err := os.ReadFile(path)
+// stopRequested reports whether a valid stop request for pid exists. It does
+// not touch the marker: the signal branch reads it before the shutdown, and
+// exitAfterSignal consumes it after. A marker for another pid, one older than
+// stopMarkerTTL, or one that cannot be parsed is not a request.
+func stopRequested(townRoot string, pid int, now time.Time) bool {
+	data, err := os.ReadFile(stopMarkerPath(townRoot))
 	if err != nil {
 		return false
 	}
-	_ = os.Remove(path)
 	fields := strings.Fields(string(data))
 	if len(fields) != 2 {
 		return false
@@ -64,6 +62,14 @@ func consumeStopRequested(townRoot string, pid int, now time.Time) bool {
 	}
 	age := now.Sub(time.Unix(unix, 0))
 	return age >= -stopMarkerTTL && age <= stopMarkerTTL
+}
+
+// consumeStopRequested reports whether a valid stop request for pid exists,
+// and removes the marker either way: it is single use.
+func consumeStopRequested(townRoot string, pid int, now time.Time) bool {
+	requested := stopRequested(townRoot, pid, now)
+	_ = os.Remove(stopMarkerPath(townRoot))
+	return requested
 }
 
 // removeStopRequested drops the marker after a stop that could not be sent.
@@ -81,15 +87,30 @@ func signalStopPath(townRoot string) string {
 // stop marker above is consumed by the exit it excuses, and a supervised
 // `gt daemon stop` is a launchctl bootout that writes no marker at all, so
 // this record is the only trace a bootout inside the upgrade heal helper's
-// wait leaves (gt-r8ux8). The helper counts it only while the job is
-// unloaded: a bootout unloads the job, a respawn that failed does not.
-func recordSignalStop(townRoot string, now time.Time) error {
+// wait leaves (gt-r8ux8). Its second line says whether gt requested the stop:
+// gt down signals the daemon without a bootout, the daemon exits 0, and
+// launchd leaves the job loaded with no pid, which is the shape a respawn that
+// failed also has. Only an unrequested stop is for the helper to heal
+// (gt-518hq).
+func recordSignalStop(townRoot string, now time.Time, requested bool) error {
 	path := signalStopPath(townRoot)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", now.Unix())), 0o644)
+	kind := signalStopUnrequested
+	if requested {
+		kind = signalStopRequested
+	}
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n%s\n", now.Unix(), kind)), 0o644)
 }
+
+// The second line of the signal-stop record. The heal helper matches the
+// requested line exactly, so a record from before this line existed reads as
+// unrequested.
+const (
+	signalStopRequested   = "requested"
+	signalStopUnrequested = "unrequested"
+)
 
 // clearSignalStop drops a signal-stop record left by an earlier stop, so the
 // helper armed by an upgrade exit only sees stops that happen after it, and a

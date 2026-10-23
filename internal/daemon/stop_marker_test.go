@@ -106,8 +106,27 @@ func TestRecordStopForHeal(t *testing.T) {
 		if err != nil {
 			t.Fatalf("a signal stop left no record for the heal helper: %v", err)
 		}
-		if got, want := strings.TrimSpace(string(data)), strconv.FormatInt(now.Unix(), 10); got != want {
-			t.Errorf("record = %q, want the stop time %q", got, want)
+		if got, want := string(data), strconv.FormatInt(now.Unix(), 10)+"\nunrequested\n"; got != want {
+			t.Errorf("record = %q, want the stop time and an unrequested stop %q", got, want)
+		}
+	})
+	t.Run("a stop gt requested is recorded as requested, and its marker is left for the exit", func(t *testing.T) {
+		t.Parallel()
+		d := upgradeTestDaemon(t)
+		now := time.Now()
+		if err := writeStopRequested(d.config.TownRoot, os.Getpid(), now); err != nil {
+			t.Fatal(err)
+		}
+		d.recordStopForHeal(now)
+		data, err := os.ReadFile(signalStopPath(d.config.TownRoot))
+		if err != nil {
+			t.Fatalf("a signal stop left no record for the heal helper: %v", err)
+		}
+		if got, want := string(data), strconv.FormatInt(now.Unix(), 10)+"\nrequested\n"; got != want {
+			t.Errorf("record = %q, want the stop time and a requested stop %q", got, want)
+		}
+		if !stopRequested(d.config.TownRoot, os.Getpid(), now) {
+			t.Errorf("recording the stop consumed the marker; exitAfterSignal must still find it")
 		}
 	})
 	t.Run("a record that cannot be written is logged, and the stop stands", func(t *testing.T) {

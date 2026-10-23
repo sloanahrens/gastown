@@ -71,11 +71,13 @@ func upgradeHealLabel(job upgradeHealJob) string {
 
 // upgradeHealScriptTemplate is the helper. It runs outside the daemon's job,
 // so the bootout it may need does not kill it. It waits, and heals only when
-// no process holds daemon.lock and no stop was requested while it waited,
-// where a signal-stop record counts only while the job is unloaded: a
-// deliberate bootout unloads it, a respawn that failed leaves it loaded
-// (gt-r8ux8). A give-up is also sent to the system log, so a heal that failed
-// leaves a trail outside the files it shares with the stranded daemon.
+// no process holds daemon.lock and no stop was requested while it waited.
+// A signal-stop record that gt requested is always left alone, loaded or not:
+// gt down leaves the job loaded with no pid (gt-518hq). An unrequested one
+// counts only while the job is unloaded: a bootout from outside gt unloads it,
+// a respawn that failed leaves it loaded (gt-r8ux8). A give-up is also sent
+// to the system log, so a heal that failed leaves a trail outside the files it
+// shares with the stranded daemon.
 const upgradeHealScriptTemplate = `#!/bin/sh
 # gt upgrade-restart heal: arms after an upgrade exit (gt-eigyu.1).
 LABEL=@LABEL@
@@ -146,9 +148,17 @@ if [ -n "$(lsof -t -- "$LOCK" 2>/dev/null)" ]; then
 	finish 0
 fi
 
-# A bootout unloads the job, so an unloaded job beside a signal-stop record is
-# the operator's stop. A respawn that failed leaves the job loaded with no pid,
-# which is what this helper exists to heal (gt-r8ux8).
+# A stop gt requested is the operator's whether or not the job is loaded: gt
+# down signals the daemon, it exits 0, and launchd leaves the job loaded with
+# no pid (gt-518hq).
+if [ -e "$SIGNALSTOP" ] && grep -qx requested "$SIGNALSTOP"; then
+	log "left alone: $SIGNALSTOP says a daemon stop was requested through gt"
+	finish 0
+fi
+
+# A bootout unloads the job, so an unloaded job beside an unrequested signal
+# stop is the operator's stop from outside gt. A respawn that failed leaves the
+# job loaded with no pid, which is what this helper exists to heal (gt-r8ux8).
 if [ -e "$SIGNALSTOP" ] && [ "$loaded" -ne 0 ]; then
 	log "left alone: $SIGNALSTOP exists and $SVC is not loaded (a signal stopped the daemon while the helper waited)"
 	finish 0
