@@ -115,9 +115,9 @@ func (a *staleAdapter) Parse(raw []byte) (Item, error) {
 //
 //  1. closed as wontfix, obsolete or no longer sets obsolete true;
 //  2. closed as superseded or duplicate sets superseded true;
-//  3. landed sets worth_doing true and obsolete and superseded false. A landed
-//     bead's close reason is either the bare word "landed" or the landing
-//     record's "Landed on ..." reason. If its description changed since the ask,
+//  3. landed sets worth_doing true and obsolete and superseded false. Which of
+//     the two a reason says is stale.ClosingVerdict's, the verdict the
+//     attention battery reads too. If its description changed since the ask,
 //     it also sets needs_reshaping true (stale:reshaped);
 //  4. a priority changed since the ask sets priority_fit: raised is true (the
 //     bead should rank higher), lowered is false (it should rank lower).
@@ -142,8 +142,8 @@ func (a *staleAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	var rules []string
 	if strings.TrimSpace(issue.Status) == statusClosed {
 		reason := strings.TrimSpace(issue.CloseReason)
-		switch {
-		case stale.IsLandedReason(reason):
+		switch stale.ClosingVerdict(reason) {
+		case stale.VerdictLanded:
 			labels[qWorthDoing] = true
 			labels[qObsolete] = false
 			labels[qSuperseded] = false
@@ -152,12 +152,14 @@ func (a *staleAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 				labels[qNeedsReshape] = true
 				rules = append(rules, ruleStaleReshaped)
 			}
-		case hasAnyPrefix(strings.ToLower(reason), "wontfix", "obsolete", "no longer"):
-			labels[qObsolete] = true
-			rules = append(rules, ruleStaleClosedObsolete)
-		case hasAnyPrefix(strings.ToLower(reason), "superseded", "duplicate"):
+		case stale.VerdictSuperseded:
 			labels[qSuperseded] = true
 			rules = append(rules, ruleStaleClosedSuperseded)
+		default:
+			if hasAnyPrefix(strings.ToLower(reason), "wontfix", "obsolete", "no longer") {
+				labels[qObsolete] = true
+				rules = append(rules, ruleStaleClosedObsolete)
+			}
 		}
 	}
 	// A lower P number is more urgent, so a smaller priority now is a raise.

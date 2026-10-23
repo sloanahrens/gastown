@@ -34,6 +34,39 @@ func TestLandedAcceptsLandedOnReason(t *testing.T) {
 	}
 }
 
+// ClosingVerdict is the one reading of a close reason: the stale pass, the
+// scorecard's stale and dispatch batteries and the attention battery all take
+// what it says, so a reason cannot be landed to one of them and superseded to
+// another. A person's wording is matched whatever its case.
+func TestClosingVerdict(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		reason string
+		want   Verdict
+	}{
+		{"landed", VerdictLanded},
+		{"  landed\n", VerdictLanded},
+		{"Landed", VerdictLanded},
+		{"Landed on main", VerdictLanded},
+		{"Landed on main\ntarget_branch: main", VerdictLanded},
+		{"  Landed on main", VerdictLanded},
+		{"landed on main", VerdictLanded},
+		{"Landed on main\nlanded_commit: c0ffee\npatch_id: p1", VerdictLanded},
+		{"closed: landed_commit: c0ffee", VerdictLanded},
+		{"superseded by gt-a1", VerdictSuperseded},
+		{"Superseded by gt-a2", VerdictSuperseded},
+		{"duplicate of gt-a3", VerdictSuperseded},
+		{"Duplicate of gt-a4", VerdictSuperseded},
+		{"wontfix: the rewrite replaced it", VerdictNone},
+		{"", VerdictNone},
+	}
+	for _, tt := range tests {
+		if got := ClosingVerdict(tt.reason); got != tt.want {
+			t.Errorf("ClosingVerdict(%q) = %v, want %v", tt.reason, got, tt.want)
+		}
+	}
+}
+
 func TestIsLandedReason(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -46,8 +79,9 @@ func TestIsLandedReason(t *testing.T) {
 		{"Landed on main", true},
 		{"Landed on main\ntarget_branch: main", true},
 		{"  Landed on main", true},
-		{"landed on main", false},
+		{"landed on main", true},
 		{"superseded by gt-a1", false},
+		{"duplicate of gt-a1", false},
 		{"", false},
 	}
 	for _, tt := range tests {

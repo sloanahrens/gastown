@@ -11,6 +11,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	jevattention "github.com/steveyegge/gastown/internal/jev/attention"
+	"github.com/steveyegge/gastown/internal/jev/stale"
 	"github.com/steveyegge/gastown/internal/land"
 )
 
@@ -332,11 +333,13 @@ func mechanismLabeling(kind attention.Kind, sha string, issue *beads.Issue) (Lab
 		return Labeling{}, false
 
 	case attention.KindRejectedTwice:
-		reason := strings.TrimSpace(issue.CloseReason)
-		if hasReasonPrefix(reason, "superseded") {
+		// The verdict is stale.ClosingVerdict's, the one the stale battery
+		// reads, so the scorecard cannot call a reason landed while the stale
+		// pass calls it superseded.
+		switch stale.ClosingVerdict(issue.CloseReason) {
+		case stale.VerdictSuperseded:
 			return Labeling{Labeled: true, Labels: map[QuestionID]bool{jevattention.QNeedsHuman: true}, Rule: ruleRejectedSuperseded}, true
-		}
-		if hasReasonPrefix(reason, "Landed on") {
+		case stale.VerdictLanded:
 			// A landing from a crew branch is a person's rework; one from a
 			// polecat branch is the routine route fixing it.
 			branch := landedBranch(issue.Notes)
@@ -366,13 +369,6 @@ func landedBranch(notes string) string {
 		}
 	}
 	return branch
-}
-
-// hasReasonPrefix reports whether a close reason starts with prefix, ignoring
-// case: a person writes "Superseded by ..." as readily as "superseded by ...",
-// and "Landed on" is matched the same way so neither prefix is the stricter.
-func hasReasonPrefix(reason, prefix string) bool {
-	return strings.HasPrefix(strings.ToLower(reason), strings.ToLower(prefix))
 }
 
 // quiet reports whether nothing shows that a person or the overseer dealt with

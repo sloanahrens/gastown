@@ -29,12 +29,52 @@ const closeLanded = "landed"
 // whose change landed: "Landed on <target>", then the landing record.
 const closeLandedOn = "Landed on"
 
-// IsLandedReason reports whether a close reason is a landing's: the bare word
-// the molecule close writes, or the landing record's "Landed on <target>". The
-// stale pass and the scorecard both ask this, so they agree on what landed.
-func IsLandedReason(reason string) bool {
+// closeLandedCommit starts the line of the landing record that names the
+// commit the change landed as. The record's close reason carries it, so a
+// reason built from the record says the bead landed even when its first line
+// was rewritten.
+const closeLandedCommit = "landed_commit:"
+
+// Verdict is what a closed bead's close reason says about the bead. The stale
+// pass, the scorecard's stale and dispatch batteries and the attention
+// battery's mechanism labeling all read a reason through ClosingVerdict, so
+// they cannot disagree about the same bead.
+type Verdict int
+
+const (
+	// VerdictNone is a reason that reports neither: a wontfix, a plain close,
+	// an empty reason.
+	VerdictNone Verdict = iota
+	// VerdictLanded is a landing's reason: the bare word the molecule close
+	// writes, the landing worker's "Landed on <target>" record, or a reason
+	// carrying its landed_commit line.
+	VerdictLanded
+	// VerdictSuperseded is a reason that says the bead was superseded or is a
+	// duplicate of another.
+	VerdictSuperseded
+)
+
+// ClosingVerdict reads a close reason. A person writes "Landed on main" as
+// readily as the landing worker does, and "Superseded by ..." as
+// "superseded by ...", so every match ignores case.
+func ClosingVerdict(reason string) Verdict {
 	reason = strings.TrimSpace(reason)
-	return strings.EqualFold(reason, closeLanded) || strings.HasPrefix(reason, closeLandedOn)
+	lower := strings.ToLower(reason)
+	switch {
+	case strings.Contains(lower, closeLandedCommit),
+		strings.EqualFold(reason, closeLanded),
+		strings.HasPrefix(lower, strings.ToLower(closeLandedOn)):
+		return VerdictLanded
+	case strings.HasPrefix(lower, "superseded"), strings.HasPrefix(lower, "duplicate"):
+		return VerdictSuperseded
+	}
+	return VerdictNone
+}
+
+// IsLandedReason reports whether a close reason is a landing's. It is
+// ClosingVerdict's landed case, for callers that ask only that.
+func IsLandedReason(reason string) bool {
+	return ClosingVerdict(reason) == VerdictLanded
 }
 
 // hmSearchLimit is how many hits one hm query asks for.

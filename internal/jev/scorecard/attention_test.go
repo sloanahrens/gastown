@@ -17,6 +17,7 @@ import (
 	"github.com/steveyegge/gastown/internal/attention"
 	"github.com/steveyegge/gastown/internal/beads"
 	jevattention "github.com/steveyegge/gastown/internal/jev/attention"
+	"github.com/steveyegge/gastown/internal/jev/stale"
 )
 
 var updateAttentionScorecardGolden = flag.Bool("update-attention-scorecard-golden", false, "rewrite testdata/attention_scorecard.golden")
@@ -443,6 +444,57 @@ func TestAttentionLeavesRoutineUnlabeledWithoutItsAnswer(t *testing.T) {
 	}
 	if lr := rep.Lines[0]; lr.Labeled || len(lr.Labels) != 0 {
 		t.Fatalf("labeled %v by %q, want unlabeled: the line has no routine_action_fixes answer", lr.Labels, lr.Rule)
+	}
+}
+
+// The attention scorecard's mechanism labeling, the stale pass and the
+// dispatch score read a cleared bead's close reason through one verdict, so
+// none of them can call a reason landed while another calls it superseded.
+// Three rows diverged before they shared it: "duplicate of gt-a1" was
+// superseded only to the stale pass, "landed on main" was landed only to the
+// attention scorecard, and a bare "landed" landed only to stale.IsLandedReason.
+func TestMechanismLabelingAgreesWithStaleClassification(t *testing.T) {
+	t.Parallel()
+	// A landing's record names the branch it came from, and the mechanism
+	// reads a landing from a polecat branch as the routine route.
+	const polecatRecord = "LANDING RECORD\nlanded_commit: c0ffee\nbranch: polecat/furiosa/gt-a1+x9"
+	tests := []struct {
+		name   string
+		reason string
+		// want is the verdict all three must reach.
+		want string
+	}{
+		{name: "duplicate of another bead", reason: "duplicate of gt-a1", want: "superseded"},
+		{name: "landed on, lower case", reason: "landed on main", want: "landed"},
+		{name: "landed on", reason: "Landed on main", want: "landed"},
+		{name: "bare landed", reason: "landed", want: "landed"},
+		{name: "landed commit note", reason: "Landed on main\nlanded_commit: c0ffee", want: "landed"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issue := &beads.Issue{ID: "gt-a1", Status: "closed", CloseReason: tt.reason, Notes: polecatRecord}
+			got := ""
+			if lab, ok := mechanismLabeling(attention.KindRejectedTwice, "", issue); ok {
+				switch lab.Rule {
+				case ruleRejectedLandedRoutine:
+					got = "landed"
+				case ruleRejectedSuperseded:
+					got = "superseded"
+				default:
+					t.Fatalf("mechanismLabeling named rule %q, want a landed or superseded one", lab.Rule)
+				}
+			}
+			if got != tt.want {
+				t.Errorf("mechanismLabeling(%q) = %q, want %q", tt.reason, got, tt.want)
+			}
+			wantLanded := tt.want == "landed"
+			if landed := stale.IsLandedReason(tt.reason); landed != wantLanded {
+				t.Errorf("stale.IsLandedReason(%q) = %v, want %v", tt.reason, landed, wantLanded)
+			}
+			if landed := isLanded(issue); landed != wantLanded {
+				t.Errorf("isLanded(%q) = %v, want %v", tt.reason, landed, wantLanded)
+			}
+		})
 	}
 }
 
