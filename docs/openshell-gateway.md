@@ -21,6 +21,17 @@ It prints `gateway: skipped, no <gateway.toml>` when the file is missing. Otherw
 
 The unit sets `OPENSHELL_TELEMETRY_ENABLED=false` and `OPENSHELL_LOCAL_TLS_DIR`, keeps the gateway alive (`KeepAlive`), and logs to `~/gt/.runtime/openshell/gateway.log`.
 
+### gateway.toml settings gt needs
+
+gt's sandbox seats need this key, in the `[openshell.drivers.docker]` table of `gateway.toml`:
+
+```toml
+[openshell.drivers.docker]
+allow_driver_config = true
+```
+
+With the key absent the gateway refuses `sandbox create`. The gateway reads `gateway.toml` at start, so restart it after editing; the Restart section below has the command.
+
 ## Restart
 
 An install never restarts a running gateway, and neither does a changed template: a restart drops the live sessions of every sandbox the gateway serves. When the install rewrites the unit of a loaded agent it logs the command to apply it. Restart by kickstart, at a moment no polecat is mid-task:
