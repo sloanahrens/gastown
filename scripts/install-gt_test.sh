@@ -112,6 +112,15 @@ case "$target" in
 esac
 MAKE
   chmod +x "$t/stubs/make"
+  # launchctl stub: logs its argv; `print` reports "not loaded" unless gw_loaded
+  # exists. No test reaches the real launchd.
+  cat > "$t/stubs/launchctl" <<'LCTL'
+#!/usr/bin/env bash
+echo "launchctl $*" >> "$T_WORLD/launchctl.log"
+[ "$1" != "print" ] || [ -e "$T_WORLD/gw_loaded" ]
+LCTL
+  chmod +x "$t/stubs/launchctl"
+  mkdir -p "$t/home"
   echo "$t"
 }
 
@@ -123,7 +132,7 @@ run_install() {
     if [ -n "${CALLER_ACTOR:-}" ]; then export BD_ACTOR="$CALLER_ACTOR"; fi
     export T_WORLD="$t" INSTALL_GT_BIN_DIR="$t/bin" INSTALL_GT_DAEMON_DIR="$t/daemon" \
       INSTALL_GT_RIG_DIR="$t/rig" INSTALL_GT_LOCK_WAIT="${LOCK_WAIT:-5}" \
-      INSTALL_GT_SIGN_DIR="$t/signing" \
+      INSTALL_GT_SIGN_DIR="$t/signing" INSTALL_GT_GATEWAY_HOME="$t/home" \
       PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
     bash "$INSTALLER" "$@" ) > "$t/run.out" 2>&1 || rc=$?
   echo "$rc"
@@ -432,7 +441,7 @@ run_located() {
   cp "$SCRIPT_DIR/lib/install-gt-lib.sh" "$dir/lib/"
   ( unset GT_TOWN_ROOT INSTALL_GT_DAEMON_DIR INSTALL_GT_RIG_DIR
     export T_WORLD="$t" INSTALL_GT_BIN_DIR="$t/bin" INSTALL_GT_LOCK_WAIT=5 \
-      INSTALL_GT_SIGN_DIR="$t/signing" \
+      INSTALL_GT_SIGN_DIR="$t/signing" INSTALL_GT_GATEWAY_HOME="$t/home" \
       PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
     bash "$dir/install-gt.sh" "$@" ) > "$t/run.out" 2>&1 || rc=$?
   echo "$rc"
@@ -778,6 +787,88 @@ if [ -n "$SIGN_KC" ]; then
 else
   echo "  SKIP: no signing material was made on this host — keychain search-list cleanup check not run"
 fi
+
+# --- Cases 22-26: the OpenShell gateway's launchd agent. The home is a temp
+# dir and launchctl a stub, so nothing here touches the real LaunchAgents. ---
+GW_LABEL="com.gastown.openshell-gateway"
+GW_UID=$(id -u)
+gw_world() { local t; t=$(make_world); mkdir -p "$t/home/.config/openshell"; echo "$t"; }
+gw_toml() { : > "$1/home/.config/openshell/gateway.toml"; }
+gw_plist() { echo "$1/home/Library/LaunchAgents/$GW_LABEL.plist"; }
+gw_never_kickstarts() { ! grep -q kickstart "$1/launchctl.log" 2>/dev/null; }
+
+# Case 22: dry-run without the operator's gateway.toml -> nothing to install.
+T=$(gw_world)
+rc=$(run_install "$T" --dry-run)
+[ "$rc" = "0" ] && grep -q "gateway: skipped, no $T/home/.config/openshell/gateway.toml" "$T/run.out" \
+  && ! grep -q "bootstrap" "$T/run.out" && [ ! -e "$T/make.log" ] && [ ! -e "$(gw_plist "$T")" ] \
+  && pass "gateway dry-run, no toml: skipped, no bootstrap line, nothing built or written" \
+  || fail "gateway dry-run, no toml: rc=$rc $(cat "$T/run.out")"
+
+# Case 23: dry-run with the toml, unit not loaded -> the bootstrap line, no change.
+T=$(gw_world); gw_toml "$T"
+rc=$(run_install "$T" --dry-run)
+[ "$rc" = "0" ] && grep -q "would run: launchctl bootstrap gui/$GW_UID $(gw_plist "$T")\$" "$T/run.out" \
+  && [ ! -e "$(gw_plist "$T")" ] && [ ! -e "$T/make.log" ] && ! grep -q "bootstrap " "$T/launchctl.log" \
+  && gw_never_kickstarts "$T" \
+  && pass "gateway dry-run, toml present: prints the bootstrap line, writes and runs nothing" \
+  || fail "gateway dry-run, toml present: rc=$rc $(cat "$T/run.out") / $(cat "$T/launchctl.log" 2>/dev/null)"
+
+# Case 24: dry-run with the unit already loaded and current -> no bootstrap line.
+T=$(gw_world); gw_toml "$T"; touch "$T/gw_loaded"
+rc=$(run_install "$T" --sha "$(cat "$T/c1")" --source manual) # noop install writes the plist
+rm -f "$T/launchctl.log"
+rc=$(run_install "$T" --dry-run)
+[ "$rc" = "0" ] && ! grep -q "bootstrap" "$T/run.out" && gw_never_kickstarts "$T" \
+  && pass "gateway dry-run, already loaded: no bootstrap line" \
+  || fail "gateway dry-run, already loaded: rc=$rc $(cat "$T/run.out")"
+
+# Case 25: a real install renders a valid unit, bootstraps it and never kickstarts.
+T=$(gw_world); gw_toml "$T"
+install_stub "$T" "$(cat "$T/c2")"
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+P=$(gw_plist "$T")
+[ "$rc" = "0" ] && [ -f "$P" ] && pass "gateway install: exit 0, unit written" || fail "gateway install: rc=$rc $(cat "$T/run.out")"
+if command -v plutil >/dev/null 2>&1; then
+  plutil -lint "$P" >/dev/null 2>&1 && pass "gateway install: rendered unit passes plutil -lint" || fail "gateway install: plutil -lint: $(plutil -lint "$P" 2>&1)"
+else
+  echo "  SKIP: no plutil on this host — plist lint not run"
+fi
+! grep -q "__HOME__" "$P" && grep -q "$T/home/.config/openshell/gateway.toml" "$P" \
+  && grep -q "$T/home/.local/state/openshell/tls" "$P" && grep -q "$T/home/gt/.runtime/openshell/gateway.log" "$P" \
+  && pass "gateway install: unit rendered with HOME" || fail "gateway install: unit paths: $(cat "$P")"
+python3 -c '
+import plistlib, sys
+d = plistlib.load(open(sys.argv[1], "rb"))
+e = d["EnvironmentVariables"]
+assert e["OPENSHELL_TELEMETRY_ENABLED"] == "false", e
+assert e["OPENSHELL_LOCAL_TLS_DIR"].endswith("/.local/state/openshell/tls"), e
+assert d["KeepAlive"] is True, d
+assert d["Label"] == "com.gastown.openshell-gateway", d
+assert d["ProgramArguments"][0] == "/opt/homebrew/bin/openshell-gateway", d
+' "$P" && pass "gateway install: telemetry off, local TLS dir, KeepAlive true" || fail "gateway install: unit content wrong"
+[ -d "$T/home/gt/.runtime/openshell" ] && pass "gateway install: log directory exists" || fail "gateway install: no log directory"
+grep -q "^launchctl bootstrap gui/$GW_UID $P\$" "$T/launchctl.log" && gw_never_kickstarts "$T" \
+  && pass "gateway install: bootstrapped, never kickstarted" || fail "gateway install: launchctl log: $(cat "$T/launchctl.log")"
+
+# Case 26: unit already loaded and its file stale -> rewritten, not bootstrapped
+# and not kickstarted; the log names the kickstart for the operator.
+T=$(gw_world); gw_toml "$T"; touch "$T/gw_loaded"
+install_stub "$T" "$(cat "$T/c2")"
+mkdir -p "$(dirname "$(gw_plist "$T")")"; echo stale > "$(gw_plist "$T")"
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+[ "$rc" = "0" ] && ! grep -q "stale" "$(gw_plist "$T")" && ! grep -q "bootstrap " "$T/launchctl.log" && gw_never_kickstarts "$T" \
+  && grep -q "keeps its old unit until: launchctl kickstart -k gui/$GW_UID/$GW_LABEL" "$T/run.out" \
+  && pass "gateway install, loaded: unit rewritten, no bootstrap, no kickstart, operator told how" \
+  || fail "gateway install, loaded: rc=$rc $(cat "$T/run.out") / $(cat "$T/launchctl.log")"
+
+# Case 27: no gateway.toml on a real install -> no unit, launchctl untouched.
+T=$(gw_world)
+install_stub "$T" "$(cat "$T/c2")"
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+[ "$rc" = "0" ] && [ ! -e "$(gw_plist "$T")" ] && [ ! -e "$T/launchctl.log" ] \
+  && pass "gateway install, no toml: no unit written, launchctl never called" \
+  || fail "gateway install, no toml: rc=$rc $(cat "$T/run.out")"
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"

@@ -107,3 +107,63 @@ igt_town_root_above() {
   done
   echo "$found"
 }
+
+# igt_gateway_agent MODE TEMPLATE HOME — install the OpenShell gateway's user
+# launchd agent (com.gastown.openshell-gateway) from TEMPLATE, rendered with
+# HOME. MODE is "install" or "dry-run" (print the plan, change nothing).
+#
+# The agent is written only once the operator's ~/.config/openshell/gateway.toml
+# exists, since the gateway cannot start without it. It is bootstrapped when
+# launchd has not loaded it and never kickstarted: a kickstart drops every live
+# sandbox session the gateway is serving, so a restart is the operator's call
+# (docs/openshell-gateway.md). The plan is also written to stdout as
+# "gateway: ..." lines. Always returns 0; a failed step logs one WARNING.
+# Env: INSTALL_GT_LAUNCHD_DIR (default HOME/Library/LaunchAgents).
+igt_gateway_agent() {
+  local mode="$1" tmpl="$2" home="$3"
+  local label="com.gastown.openshell-gateway"
+  local toml="$home/.config/openshell/gateway.toml"
+  local dir="${INSTALL_GT_LAUNCHD_DIR:-$home/Library/LaunchAgents}"
+  local plist="$dir/$label.plist"
+  local domain="gui/$(id -u)" rendered
+  if [ ! -f "$toml" ]; then
+    echo "gateway: skipped, no $toml"
+    return 0
+  fi
+  if [ ! -f "$tmpl" ]; then
+    echo "[install-gt] WARNING: gateway: no template at $tmpl" >&2
+    return 0
+  fi
+  rendered=$(python3 - "$tmpl" "$home" <<'PY'
+import sys
+from xml.sax.saxutils import escape
+tmpl, home = sys.argv[1:3]
+sys.stdout.write(open(tmpl).read().replace("__HOME__", escape(home)))
+PY
+  ) || { echo "[install-gt] WARNING: gateway: could not render $tmpl" >&2; return 0; }
+  local changed=1
+  [ -f "$plist" ] && [ "$(cat "$plist")" = "$rendered" ] && changed=0
+  local loaded=0
+  launchctl print "$domain/$label" >/dev/null 2>&1 && loaded=1
+  if [ "$mode" = "dry-run" ]; then
+    [ "$changed" = 1 ] && echo "gateway: would write $plist"
+    [ "$loaded" = 0 ] && echo "gateway: would run: launchctl bootstrap $domain $plist"
+    return 0
+  fi
+  if [ "$changed" = 1 ]; then
+    mkdir -p "$dir" "$home/gt/.runtime/openshell" || { echo "[install-gt] WARNING: gateway: cannot create $dir" >&2; return 0; }
+    printf '%s\n' "$rendered" > "$plist.tmp.$$" && mv -f "$plist.tmp.$$" "$plist" \
+      || { rm -f "$plist.tmp.$$"; echo "[install-gt] WARNING: gateway: cannot write $plist" >&2; return 0; }
+    echo "gateway: wrote $plist"
+  fi
+  if [ "$loaded" = 0 ]; then
+    if launchctl bootstrap "$domain" "$plist" >/dev/null 2>&1; then
+      echo "gateway: bootstrapped $label"
+    else
+      echo "[install-gt] WARNING: gateway: launchctl bootstrap $domain $plist failed" >&2
+    fi
+  elif [ "$changed" = 1 ]; then
+    echo "gateway: $label is loaded and keeps its old unit until: launchctl kickstart -k $domain/$label"
+  fi
+  return 0
+}
