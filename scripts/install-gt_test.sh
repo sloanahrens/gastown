@@ -113,10 +113,12 @@ esac
 MAKE
   chmod +x "$t/stubs/make"
   # launchctl stub: logs its argv; `print` reports "not loaded" unless gw_loaded
-  # exists. No test reaches the real launchd.
+  # exists, and `bootstrap` fails when gw_bootstrap_fails exists. No test
+  # reaches the real launchd.
   cat > "$t/stubs/launchctl" <<'LCTL'
 #!/usr/bin/env bash
 echo "launchctl $*" >> "$T_WORLD/launchctl.log"
+[ "$1" != "bootstrap" ] || [ ! -e "$T_WORLD/gw_bootstrap_fails" ] || exit 1
 [ "$1" != "print" ] || [ -e "$T_WORLD/gw_loaded" ]
 LCTL
   chmod +x "$t/stubs/launchctl"
@@ -869,6 +871,76 @@ rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
 [ "$rc" = "0" ] && [ ! -e "$(gw_plist "$T")" ] && [ ! -e "$T/launchctl.log" ] \
   && pass "gateway install, no toml: no unit written, launchctl never called" \
   || fail "gateway install, no toml: rc=$rc $(cat "$T/run.out")"
+
+# gw_lib T ARGS... -> igt_gateway_agent's exit code, run from the sourced lib;
+# output in $T/lib.out. Its launchctl is the stub, as in run_install.
+gw_lib() {
+  local t="$1" rc=0; shift
+  ( export T_WORLD="$t" PATH="$t/stubs:/usr/bin:/bin:/opt/homebrew/bin:/usr/sbin:/sbin"
+    . "$SCRIPT_DIR/lib/install-gt-lib.sh"
+    igt_gateway_agent "$@" ) > "$t/lib.out" 2>&1 || rc=$?
+  echo "$rc"
+}
+
+# Case 28: a file sits where the LaunchAgents directory goes, so it cannot be
+# made -> one WARNING, no unit, no bootstrap, and the install still succeeds.
+T=$(gw_world); gw_toml "$T"
+install_stub "$T" "$(cat "$T/c2")"
+: > "$T/home/Library"
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+[ "$rc" = "0" ] && grep -q "WARNING: gateway: cannot create $T/home/Library/LaunchAgents" "$T/run.out" \
+  && [ ! -e "$(gw_plist "$T")" ] && ! grep -q "^launchctl bootstrap" "$T/launchctl.log" 2>/dev/null \
+  && pass "gateway install, cannot make its directory: one WARNING, no unit, no bootstrap" \
+  || fail "gateway install, cannot make its directory: rc=$rc $(cat "$T/run.out") / $(cat "$T/launchctl.log" 2>/dev/null)"
+
+# Case 29: the LaunchAgents directory exists but is read-only -> the unit is not
+# written, no temporary file is left behind, one WARNING. A root run writes
+# through any mode, so the case is skipped there.
+if [ "$(id -u)" = "0" ]; then
+  echo "  SKIP: running as root — a read-only directory is still writable, write-failure case not run"
+else
+  T=$(gw_world); gw_toml "$T"
+  install_stub "$T" "$(cat "$T/c2")"
+  LA_DIR="$(dirname "$(gw_plist "$T")")"
+  mkdir -p "$LA_DIR"; chmod a-w "$LA_DIR"
+  rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+  chmod u+w "$LA_DIR"
+  [ "$rc" = "0" ] && grep -q "WARNING: gateway: cannot write $(gw_plist "$T")" "$T/run.out" \
+    && [ ! -e "$(gw_plist "$T")" ] && [ -z "$(ls -A "$LA_DIR")" ] && ! grep -q "^launchctl bootstrap" "$T/launchctl.log" 2>/dev/null \
+    && pass "gateway install, unwritable directory: one WARNING, no unit, no temp file, no bootstrap" \
+    || fail "gateway install, unwritable directory: rc=$rc $(cat "$T/run.out") / $(ls -A "$LA_DIR")"
+fi
+
+# Case 30: launchctl bootstrap fails -> the unit stays, one WARNING names the
+# failed bootstrap, nothing is kickstarted, and the install still exits 0.
+T=$(gw_world); gw_toml "$T"; touch "$T/gw_bootstrap_fails"
+install_stub "$T" "$(cat "$T/c2")"
+rc=$(run_install "$T" --sha "$(cat "$T/c2")" --source manual)
+[ "$rc" = "0" ] && [ -f "$(gw_plist "$T")" ] \
+  && grep -q "WARNING: gateway: launchctl bootstrap gui/$GW_UID $(gw_plist "$T") failed" "$T/run.out" \
+  && ! grep -q "gateway: bootstrapped" "$T/run.out" && gw_never_kickstarts "$T" \
+  && pass "gateway install, bootstrap fails: unit kept, WARNING names it, never kickstarted" \
+  || fail "gateway install, bootstrap fails: rc=$rc $(cat "$T/run.out") / $(cat "$T/launchctl.log")"
+
+# Case 31: the template is missing -> one WARNING, no unit, nothing loaded.
+# install-gt.sh falls back to its own clone's copy, so this branch is driven
+# through the library directly.
+T=$(gw_world); gw_toml "$T"
+rc=$(gw_lib "$T" install "$T/no-such.plist.tmpl" "$T/home")
+[ "$rc" = "0" ] && grep -q "WARNING: gateway: no template at $T/no-such.plist.tmpl" "$T/lib.out" \
+  && [ ! -e "$(gw_plist "$T")" ] && ! grep -q "^launchctl bootstrap" "$T/launchctl.log" 2>/dev/null \
+  && pass "gateway lib, no template: one WARNING, no unit, no bootstrap" \
+  || fail "gateway lib, no template: rc=$rc $(cat "$T/lib.out")"
+
+# Case 32: the template is not text (invalid UTF-8) -> rendering fails, one
+# WARNING, nothing written or loaded.
+T=$(gw_world); gw_toml "$T"
+printf '\377\376 not text\n' > "$T/bad.plist.tmpl"
+rc=$(gw_lib "$T" install "$T/bad.plist.tmpl" "$T/home")
+[ "$rc" = "0" ] && grep -q "WARNING: gateway: could not render $T/bad.plist.tmpl" "$T/lib.out" \
+  && [ ! -e "$(gw_plist "$T")" ] && ! grep -q "^launchctl bootstrap" "$T/launchctl.log" 2>/dev/null \
+  && pass "gateway lib, unrenderable template: one WARNING, no unit, no bootstrap" \
+  || fail "gateway lib, unrenderable template: rc=$rc $(cat "$T/lib.out")"
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
