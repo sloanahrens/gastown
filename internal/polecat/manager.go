@@ -3247,7 +3247,7 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	// The reuse gate must clear a landed seat for the same reason check-recovery
 	// does, or it refuses a seat the reaper will not remove and nobody reuses
 	// (gt-jol0i).
-	ApplyWorkLanded(&facts, g, m.beads, facts.HookBead, facts.Branch)
+	ApplyWorkLanded(&facts, g, m.beads, m.rig.Path, facts.HookBead, facts.Branch)
 	// gt-7kr: missing/unknown cleanup_status must fail closed to NEEDS_RECOVERY,
 	// never be silently promoted to clean. A narrow local git check (no dirty
 	// files, no stash, no unpushed commits) is not proof of safety by itself —

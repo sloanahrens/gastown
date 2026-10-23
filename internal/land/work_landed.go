@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // The Reason tokens of a WorkLandedVerdict. They are machine-readable: callers
@@ -52,9 +53,11 @@ type WorkLandedRepo interface {
 // already on the integration target.
 //
 // head is the worktree HEAD ("" reads the repository's HEAD), target is the
-// integration branch on origin ("" means the remote's default), beadID names
-// refs/landed/<bead> ("" skips the ancestry signal), and issue is that bead as
-// read (nil when unreadable). Any one of these proves it landed:
+// integration branch on origin ("" means the rig's configured default branch,
+// which is what a landing targets), rigPath is the rig root that config lives
+// in ("" falls back to the remote's HEAD for a caller with no rig), beadID
+// names refs/landed/<bead> ("" skips the ancestry signal), and issue is that
+// bead as read (nil when unreadable). Any one of these proves it landed:
 //
 //   - head is an ancestor of refs/landed/<bead> (WorkLandedByRef);
 //   - head's own patches are already on origin/<target> (WorkLandedByTarget);
@@ -69,7 +72,7 @@ type WorkLandedRepo interface {
 // Every read is local. refs/landed/<bead> and origin's tracking refs live in
 // the repository a seat's worktree shares, so a seat whose branch was deleted
 // after its landing is still answerable without a network round trip.
-func WorkLandedOnTarget(g WorkLandedRepo, head, target, beadID string, issue *beads.Issue) WorkLandedVerdict {
+func WorkLandedOnTarget(g WorkLandedRepo, head, target, rigPath, beadID string, issue *beads.Issue) WorkLandedVerdict {
 	if g == nil {
 		return probeFailed("no repository to read")
 	}
@@ -101,6 +104,13 @@ func WorkLandedOnTarget(g WorkLandedRepo, head, target, beadID string, issue *be
 	}
 
 	if target = strings.TrimSpace(target); target == "" {
+		rigTarget, err := rigDefaultBranch(rigPath)
+		if err != nil {
+			return probeFailed(fmt.Sprintf("resolve the rig's default branch: %v", err))
+		}
+		target = rigTarget
+	}
+	if target == "" {
 		target = g.RemoteDefaultBranch()
 	}
 	if target == "" {
@@ -121,6 +131,25 @@ func WorkLandedOnTarget(g WorkLandedRepo, head, target, beadID string, issue *be
 		return probeFailed(strings.Join(failures, "; "))
 	}
 	return v
+}
+
+// rigDefaultBranch is the branch a rig's landings target: the rig config's
+// default_branch, else "main". gt done and the landing worker land through the
+// same resolver, so the predicate asks the question they answer. A config that
+// exists but does not decode is an error, never the "main" fallback, as the
+// landing worker treats it too (gt-v4r0x).
+func rigDefaultBranch(rigPath string) (string, error) {
+	if rigPath = strings.TrimSpace(rigPath); rigPath == "" {
+		return "", nil
+	}
+	cfg, err := rig.LoadRigConfigIfPresent(rigPath)
+	if err != nil {
+		return "", err
+	}
+	if cfg != nil && cfg.DefaultBranch != "" {
+		return cfg.DefaultBranch, nil
+	}
+	return "main", nil
 }
 
 func probeFailed(detail string) WorkLandedVerdict {

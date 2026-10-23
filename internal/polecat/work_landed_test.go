@@ -75,7 +75,7 @@ func TestApplyWorkLandedRecordsTheVerdict(t *testing.T) {
 			}
 
 			facts := WorkstateFacts{UnpushedCommits: 1}
-			ApplyWorkLanded(&facts, w.repo(repoPath), db, tt.hook, tt.branch)
+			ApplyWorkLanded(&facts, w.repo(repoPath), db, "", tt.hook, tt.branch)
 			if facts.WorkLanded != tt.wantLanded || facts.WorkLandedReason != tt.wantReason {
 				t.Fatalf("facts = landed %v reason %q; want landed %v reason %q", facts.WorkLanded, facts.WorkLandedReason, tt.wantLanded, tt.wantReason)
 			}
@@ -91,10 +91,10 @@ func TestApplyWorkLandedSkipsWhatItCannotClear(t *testing.T) {
 	w.SetRef(t, repoPath, land.LandedRef("gt-seat"), head)
 
 	clean := WorkstateFacts{}
-	ApplyWorkLanded(&clean, w.repo(repoPath), db, "", "polecat/nitro/gt-seat+x1")
+	ApplyWorkLanded(&clean, w.repo(repoPath), db, "", "", "polecat/nitro/gt-seat+x1")
 	unnamed := WorkstateFacts{UnpushedCommits: 1}
-	ApplyWorkLanded(&unnamed, w.repo(repoPath), db, "", "main")
-	ApplyWorkLanded(&unnamed, nil, db, "gt-seat", "main")
+	ApplyWorkLanded(&unnamed, w.repo(repoPath), db, "", "", "main")
+	ApplyWorkLanded(&unnamed, nil, db, "", "gt-seat", "main")
 
 	if clean.WorkLanded || clean.WorkLandedReason != "" || unnamed.WorkLanded || unnamed.WorkLandedReason != "" {
 		t.Fatalf("facts = %+v / %+v; want no landing evidence recorded", clean, unnamed)
@@ -112,7 +112,7 @@ func TestApplyWorkLandedNamesAnUnreadableBead(t *testing.T) {
 	db.err = errors.New("dolt: connection refused")
 
 	facts := WorkstateFacts{UnpushedCommits: 1}
-	ApplyWorkLanded(&facts, w.repo(repoPath), db, "", "polecat/nitro/gt-seat+x1")
+	ApplyWorkLanded(&facts, w.repo(repoPath), db, "", "", "polecat/nitro/gt-seat+x1")
 	if facts.WorkLanded || facts.WorkLandedReason != land.WorkProbeFailed {
 		t.Fatalf("facts = landed %v reason %q; want not landed, %s", facts.WorkLanded, facts.WorkLandedReason, land.WorkProbeFailed)
 	}
@@ -129,7 +129,7 @@ func TestApplyWorkLandedClosedBeadWithoutARecordIsNotEvidence(t *testing.T) {
 	db.Seed(beads.Issue{ID: "gt-seat", Title: "seat", Status: "closed"})
 
 	facts := WorkstateFacts{UnpushedCommits: 1}
-	ApplyWorkLanded(&facts, w.repo(repoPath), db, "", "polecat/nitro/gt-seat+x1")
+	ApplyWorkLanded(&facts, w.repo(repoPath), db, "", "", "polecat/nitro/gt-seat+x1")
 	if facts.WorkLanded || facts.WorkLandedReason != land.WorkUnpushed {
 		t.Fatalf("facts = landed %v reason %q; want not landed, %s", facts.WorkLanded, facts.WorkLandedReason, land.WorkUnpushed)
 	}

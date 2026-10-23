@@ -1763,7 +1763,7 @@ func checkRecoveryForPolecat(bd recoveryBeads, preloadedAgentBeads map[string]*b
 		facts.AssignedBeadTerminal = beadTerminal
 		loadGitState()
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
-		applyWorkLandedToWorkstateFacts(&facts, nil, p.ClonePath, bd, facts.HookBead, p.Branch)
+		applyWorkLandedToWorkstateFacts(&facts, nil, p.ClonePath, r.Path, bd, facts.HookBead, p.Branch)
 		input = polecat.NewWorkstateInput(facts)
 	} else {
 		// Use cleanup_status from agent bead, then overlay direct git and MQ facts.
@@ -1837,7 +1837,7 @@ func checkRecoveryForPolecat(bd recoveryBeads, preloadedAgentBeads map[string]*b
 		// instead of duplicating (and drifting from) that policy here.
 		loadGitState()
 		applyGitStateToWorkstateFacts(&facts, p.ClonePath, gitState, gitErr)
-		applyWorkLandedToWorkstateFacts(&facts, nil, p.ClonePath, bd, facts.HookBead, p.Branch)
+		applyWorkLandedToWorkstateFacts(&facts, nil, p.ClonePath, r.Path, bd, facts.HookBead, p.Branch)
 		// gt-ivvgu: this diagnostic used to call ResolveIgnoreCleanupStatus
 		// directly with hand-computed predicates (partialSpawn,
 		// worktreeStructurallyMissing, hookDisposition.Safe,
@@ -2020,15 +2020,16 @@ func applyHookDispositionToWorkstateFacts(facts *polecat.WorkstateFacts, hookBea
 // commits of the worktree at worktreePath (gt-jol0i). Bead choice and the
 // landed probe live in polecat.ApplyWorkLanded, which the reuse gate calls too;
 // this only opens the worktree, so every caller of the verdict asks one
-// predicate.
-func applyWorkLandedToWorkstateFacts(facts *polecat.WorkstateFacts, open workLandedOpener, worktreePath string, store polecat.IssueReader, hookBead, branch string) {
+// predicate. rigPath is the seat's rig root, whose config names its landing
+// target.
+func applyWorkLandedToWorkstateFacts(facts *polecat.WorkstateFacts, open workLandedOpener, worktreePath, rigPath string, store polecat.IssueReader, hookBead, branch string) {
 	if worktreePath == "" {
 		return
 	}
 	if open == nil {
 		open = openWorkLandedGit
 	}
-	polecat.ApplyWorkLanded(facts, open(worktreePath), store, hookBead, branch)
+	polecat.ApplyWorkLanded(facts, open(worktreePath), store, rigPath, hookBead, branch)
 }
 
 // applyLiveWorkLandedToWorkstateFacts is applyWorkLandedToWorkstateFacts for a
@@ -2038,11 +2039,11 @@ func applyWorkLandedToWorkstateFacts(facts *polecat.WorkstateFacts, open workLan
 // status. The list path (buildPolecatInventoryItem) and the pool's seat read
 // (poolPolecatSeatStateWith) both call this, so a seat is counted the way the
 // list shows it (gt-wfxa2).
-func applyLiveWorkLandedToWorkstateFacts(facts *polecat.WorkstateFacts, open workLandedOpener, worktreePath string, store polecat.IssueReader, hookBead, branch string) {
+func applyLiveWorkLandedToWorkstateFacts(facts *polecat.WorkstateFacts, open workLandedOpener, worktreePath, rigPath string, store polecat.IssueReader, hookBead, branch string) {
 	if facts.GitStateSource != polecat.GitStateSourceLive {
 		return
 	}
-	applyWorkLandedToWorkstateFacts(facts, open, worktreePath, store, hookBead, branch)
+	applyWorkLandedToWorkstateFacts(facts, open, worktreePath, rigPath, store, hookBead, branch)
 }
 
 // workLandedOpener opens the repository the landed probe reads; tests supply

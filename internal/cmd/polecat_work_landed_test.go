@@ -72,7 +72,7 @@ func TestApplyWorkLandedToWorkstateFactsPicksTheSeatBead(t *testing.T) {
 			seat := newLandedSeat(t, true)
 
 			facts := polecat.WorkstateFacts{UnpushedCommits: 1}
-			applyWorkLandedToWorkstateFacts(&facts, seat.open(), seat.worktree, seatBeads(t), tt.hook, tt.branch)
+			applyWorkLandedToWorkstateFacts(&facts, seat.open(), seat.worktree, "", seatBeads(t), tt.hook, tt.branch)
 			if !facts.WorkLanded || facts.WorkLandedReason != land.WorkLandedByRef {
 				t.Fatalf("facts = landed %v reason %q; want landed %s", facts.WorkLanded, facts.WorkLandedReason, land.WorkLandedByRef)
 			}
@@ -87,9 +87,9 @@ func TestApplyWorkLandedToWorkstateFactsLeavesNoEvidenceAlone(t *testing.T) {
 	seat := newLandedSeat(t, true)
 
 	noWorktree := polecat.WorkstateFacts{UnpushedCommits: 1}
-	applyWorkLandedToWorkstateFacts(&noWorktree, seat.open(), "", seatBeads(t), "gt-seat", landedSeatBranch)
+	applyWorkLandedToWorkstateFacts(&noWorktree, seat.open(), "", "", seatBeads(t), "gt-seat", landedSeatBranch)
 	noCommits := polecat.WorkstateFacts{}
-	applyWorkLandedToWorkstateFacts(&noCommits, seat.open(), seat.worktree, seatBeads(t), "gt-seat", landedSeatBranch)
+	applyWorkLandedToWorkstateFacts(&noCommits, seat.open(), seat.worktree, "", seatBeads(t), "gt-seat", landedSeatBranch)
 	if noWorktree.WorkLanded || noCommits.WorkLanded || noWorktree.WorkLandedReason != "" || noCommits.WorkLandedReason != "" {
 		t.Fatalf("facts = %+v / %+v; want no landing evidence", noWorktree, noCommits)
 	}
