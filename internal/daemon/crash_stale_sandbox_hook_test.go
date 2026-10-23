@@ -6,11 +6,15 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/intent"
+	"github.com/steveyegge/gastown/internal/notify/notifyfake"
 	"github.com/steveyegge/gastown/internal/session"
 )
 
@@ -148,6 +152,119 @@ func TestReapStaleSandboxHook(t *testing.T) {
 				t.Errorf("gateway question = %q, want the seat profile's gateway and the session's sandbox name", s.gateway[0])
 			}
 		})
+	}
+}
+
+// A registry record that cannot be read reaps nothing and asks the gateway
+// nothing: the record cannot say whether the sandbox is orphaned.
+func TestReapStaleSandboxHookWithUnreadableRegistryReapsNothing(t *testing.T) {
+	t.Parallel()
+	s := newStaleHook(t, staleHookOpts{agent: "deepseek-flash-sandbox", hook: staleHookWork, workStatus: "open"})
+	dir := session.SandboxRegistryDir(s.town)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, staleHookSession+".json"), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if s.reap() {
+		t.Fatal("reaped with an unreadable registry record")
+	}
+	if s.hook() != staleHookWork {
+		t.Errorf("hook = %q, want untouched", s.hook())
+	}
+	if len(s.gateway) != 0 {
+		t.Errorf("gateway asked %v, want no question", s.gateway)
+	}
+}
+
+// crashedSandboxSeat runs the crash path for a dead sandbox seat whose work
+// was handed back, through checkPolecatHealth, the daemon's own call site. It
+// returns the agent bead's hook after the pass, the gateway questions asked,
+// and the daemon's log.
+func crashedSandboxSeat(t *testing.T, sandboxExists bool) (hook string, asked []string, logged string) {
+	t.Helper()
+	const rig, name = "myr", "mycat"
+	town := t.TempDir()
+	writeTownFile(t, town, "settings/config.json", staleHookSettings)
+
+	agentDB := beadsfake.New()
+	agentBead := beads.AgentBeadIDFor(constants.RolePolecat, rig, name, town)
+	if _, err := agentDB.Create(beads.CreateOptions{
+		ID: agentBead, Title: agentBead, Labels: []string{"gt:agent"}, Priority: -1,
+		Description: beads.FormatAgentDescription(agentBead, &beads.AgentFields{
+			RoleType: "polecat", Rig: rig, AgentState: "working", HookBead: staleHookWork, Agent: "deepseek-flash-sandbox",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	bd := newWorkBD(t)
+	bd.db.Seed(beads.Issue{ID: staleHookWork, Status: "open", UpdatedAt: time.Now().Add(-time.Hour).UTC().Format(time.RFC3339)})
+	// The seat's intent record names the work; without it the crash path finds
+	// no work to reap.
+	writeJSONFile(t, intent.Seat{Rig: rig, Role: constants.RolePolecat, Name: name}.Path(town), intent.Record{WorkBead: staleHookWork})
+
+	var logBuf strings.Builder
+	d := &Daemon{
+		config:            &Config{TownRoot: town},
+		logger:            log.New(&logBuf, "", 0),
+		tmux:              newFakeTmux(newFixedClock()),
+		notifier:          notifyfake.New(),
+		prefixRegistryFn:  myrPrefixes,
+		openWorkBeads:     bd.open,
+		execCmd:           bd.run,
+		openRecoveryBeads: func([]string) beads.Client { return agentDB },
+		sandboxExists: func(gateway, sandbox string) (bool, error) {
+			asked = append(asked, gateway+"|"+sandbox)
+			return sandboxExists, nil
+		},
+	}
+	d.checkPolecatHealth(rig, name)
+
+	issue, err := agentDB.Show(agentBead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return beads.ParseAgentFields(issue.Description).HookBead, asked, logBuf.String()
+}
+
+// A dead sandbox seat whose sandbox is gone and whose work was handed back has
+// its agent-bead hook cleared by the crash path, and is not sent to the
+// restart that would otherwise follow.
+func TestCheckPolecatHealth_ReapsStaleSandboxHook(t *testing.T) {
+	t.Parallel()
+	hook, asked, logged := crashedSandboxSeat(t, false)
+	if !strings.Contains(logged, "CRASH DETECTED") {
+		t.Errorf("expected CRASH DETECTED for the dead seat, got: %q", logged)
+	}
+	if hook != "" {
+		t.Errorf("agent bead hook = %q after the crash pass, want cleared", hook)
+	}
+	if len(asked) != 1 || asked[0] != "gw1|myr-mycat" {
+		t.Errorf("gateway asked %v, want the seat profile's gateway and the session's sandbox name", asked)
+	}
+	if !strings.Contains(logged, "the sandbox is gone and the work was handed back") {
+		t.Errorf("expected the reap to be logged, got: %q", logged)
+	}
+	if strings.Contains(logged, "Crash of myr/mycat") {
+		t.Errorf("reaped seat was also sent to restart, got: %q", logged)
+	}
+}
+
+// When the gateway still has the sandbox, the crash path leaves the hook for
+// patrol and falls through to its restart decision.
+func TestCheckPolecatHealth_LeavesHookWhenSandboxStillExists(t *testing.T) {
+	t.Parallel()
+	hook, asked, logged := crashedSandboxSeat(t, true)
+	if hook != staleHookWork {
+		t.Errorf("agent bead hook = %q, want %q untouched", hook, staleHookWork)
+	}
+	if len(asked) != 1 {
+		t.Errorf("gateway asked %v, want one question", asked)
+	}
+	if !strings.Contains(logged, "Crash of myr/mycat") {
+		t.Errorf("expected the crash to fall through to restart handling, got: %q", logged)
 	}
 }
 

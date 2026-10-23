@@ -16,27 +16,10 @@ import (
 // staleSandboxHookTimeout bounds the one gateway question the reap asks.
 const staleSandboxHookTimeout = 15 * time.Second
 
-// reapStaleSandboxHook clears a sandbox seat's agent-bead hook that nothing
-// will ever release, and reports whether it did. A sandbox seat whose sandbox
-// is gone (a rollback, a gateway or Docker restart) and whose work bead was
-// handed back leaves hook_bead naming that bead on the agent bead, and the pool
-// roster counts the seat as dead-hooked until an operator runs gt polecat nuke.
-//
-// It acts only when every condition holds, and any one that cannot be answered
-// leaves the hook alone:
-//   - the seat's agent (the one its agent bead recorded) is an openshell seat in
-//     the town's settings, so a host seat, whose patrol restart needs the hook,
-//     is never touched;
-//   - no registry record names the session and the gateway has no sandbox of
-//     that name (a sandbox whose record write failed is not orphaned);
-//   - the hooked work bead is open and unassigned, handed back.
-//
-// The work bead is read first: a seat whose work is still assigned is the common
-// crash, and asks nothing else.
-//
-// The caller has declared the crash (the session is dead, the spawn grace
-// passed, the bead is neither closed nor submitted for landing). The agent bead
-// is reset only while its hook_bead still names hookBead.
+// reapStaleSandboxHook clears a sandbox seat's agent-bead hook once its sandbox
+// is gone and its work bead was handed back, and reports whether it did. A
+// condition it cannot answer leaves the hook alone, and the reset applies only
+// while the hook still names hookBead.
 func (h *patrolScanHost) reapStaleSandboxHook(rig, name, sessionName, hookBead string) bool {
 	log := func(format string, args ...any) {
 		h.d.logger.Printf("Stale sandbox hook of %s/%s (%s): "+format, append([]any{rig, name, hookBead}, args...)...)
