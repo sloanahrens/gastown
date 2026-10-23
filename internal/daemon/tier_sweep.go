@@ -1219,8 +1219,14 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	}
 
 	if len(results) == 0 {
-		// Nothing ran at all: the record would be a lie.
-		d.logger.Print(tierSweepAbortedLine(rig, sha, "no stage ran"))
+		// Nothing ran at all: the record would be a lie. When the script
+		// declined every tier there is no verdict to record either, so the
+		// cycle is not green and the last record stands (gt-qgrdy).
+		reason := "no stage ran"
+		if len(notOffered) > 0 {
+			reason = "no tier offered by the rig's script"
+		}
+		d.logger.Print(tierSweepAbortedLine(rig, sha, reason))
 		return false
 	}
 
@@ -1229,7 +1235,7 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 	// The record this cycle replaces, read before the fields below rebind it:
 	// its LastSHA dates the verdicts the cycle carries forward.
 	prior := state
-	state.Tiers = tierSweepRecordedTiers(results, prior, stages, sha, deferred)
+	state.Tiers = tierSweepRecordedTiers(results, prior, stages, sha, deferred, notOffered)
 	state.LastSHA = sha
 	state.Partial = deferred
 	// LastGreenSHA advances only on a cycle whose every stage ran green over
@@ -1274,8 +1280,11 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 // tier nothing re-ran has no new verdict, and dropping the old one reads as a
 // clear the sweep never took: the red tier's beads stay open while its
 // attention item retires (gt-euxf1). A tier the schedule no longer names is
-// dropped rather than carried, because no cycle would ever re-run it.
-func tierSweepRecordedTiers(results map[string]tierSweepTierResult, prior tierSweepState, stages []tierSweepStage, sha string, deferred bool) map[string]tierSweepTierResult {
+// dropped rather than carried, because no cycle would ever re-run it, and so is
+// a tier the rig's script declined this cycle: its earlier verdict was taken
+// when the script still offered it, and carrying it would show that verdict as
+// current (gt-qgrdy).
+func tierSweepRecordedTiers(results map[string]tierSweepTierResult, prior tierSweepState, stages []tierSweepStage, sha string, deferred bool, notOffered map[string]bool) map[string]tierSweepTierResult {
 	recorded := make(map[string]tierSweepTierResult, len(results))
 	for tier, res := range results {
 		res.SHA = sha
@@ -1288,7 +1297,7 @@ func tierSweepRecordedTiers(results map[string]tierSweepTierResult, prior tierSw
 	}
 	for _, st := range stages {
 		for _, tier := range st.tiers {
-			if _, ran := results[tier]; ran {
+			if _, ran := results[tier]; ran || notOffered[tier] {
 				continue
 			}
 			carried, ok := prior.Tiers[tier]
@@ -1321,8 +1330,10 @@ func tierSweepStageJudged(st tierSweepStage, reported map[string]tierSweepTierRe
 }
 
 // tierSweepAllGreen reports whether every tier of every stage the rig's script
-// offers came back GREEN, with no stage left unrun.
+// offers came back GREEN, with no stage left unrun. A cycle in which the script
+// offered no tier at all judged nothing, so it is not green.
 func tierSweepAllGreen(results map[string]tierSweepTierResult, stages []tierSweepStage, notOffered map[string]bool) bool {
+	judged := false
 	for _, st := range stages {
 		for _, tier := range st.tiers {
 			if notOffered[tier] {
@@ -1333,9 +1344,10 @@ func tierSweepAllGreen(results map[string]tierSweepTierResult, stages []tierSwee
 			if results[tier].Verdict != tierSweepGreen {
 				return false
 			}
+			judged = true
 		}
 	}
-	return true
+	return judged
 }
 
 // tierSweepSweptLine is the log line that closes a cycle. The dashboard reads
@@ -1557,10 +1569,8 @@ func (d *Daemon) tierSweepWriteLog(rig, tier, output string) string {
 // duration, still parses.
 var tierSweepSummaryRE = regexp.MustCompile(`^tier-sweep: (\S+) (GREEN|RED) passed=(\d+) failed=(\d+) skipped=(\d+)(?: failed:(.*?))?(?: \(logs ([^)]*)\))?(?: in (\S+))?\s*$`)
 
-// tierSweepUnknownTierRE matches the line the script prints for a tier it does
-// not offer, before exiting 2 without a summary for it (gt-qgrdy):
-//
-//	tier-sweep: unknown tier race (want shell, integration or race)
+// tierSweepUnknownTierRE matches the line scripts/tier-sweep.sh prints for a
+// tier it does not offer, before exiting 2 without a summary for it (gt-qgrdy).
 var tierSweepUnknownTierRE = regexp.MustCompile(`^tier-sweep: unknown tier (\S+)`)
 
 // parseTierSweepUnknownTiers reads the tiers a stage's output names as tiers
