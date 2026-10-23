@@ -343,7 +343,8 @@ func newDoctorForCommand(rig string) *doctor.Doctor {
 	d.Register(doctor.NewPatrolPluginsAccessibleCheck())
 	d.Register(doctor.NewPatrolPluginDriftCheck())
 	d.Register(doctor.NewAgentBeadsCheck())
-	d.Register(doctor.NewOpenShellGatewayCheck()) // Openshell seats need a connected gateway, their images and providers, and the launchd agent
+	// Openshell seats need a connected gateway, their images and providers, and the launchd agent.
+	d.Register(doctor.NewOpenShellGatewayCheck())
 	d.Register(doctor.NewStaleAgentBeadsCheck())
 	d.Register(doctor.NewAgentBeadsShadowCheck())
 	d.Register(doctor.NewRigBeadsCheck())

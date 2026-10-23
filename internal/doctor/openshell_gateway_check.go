@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -75,7 +76,7 @@ func (c *OpenShellGatewayCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusSkipped,
+			Status:  StatusWarning,
 			Message: "unknown: could not read the town settings",
 			Details: []string{err.Error()},
 		}
@@ -85,7 +86,7 @@ func (c *OpenShellGatewayCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusSkipped,
+			Status:  StatusWarning,
 			Message: "unknown: could not read polecat_pool.seats",
 			Details: []string{err.Error()},
 		}
@@ -229,6 +230,8 @@ func listGatewayProviders(run openShellRunner, gw string) (map[string]bool, stri
 }
 
 // checkImages reports each distinct profile image that docker cannot inspect.
+// When docker cannot start at all, it reports one line for the whole check
+// instead, so the skip is visible and the images are not blamed one by one.
 func checkImages(run openShellRunner, profiles []openShellProfile) []string {
 	seen := map[string]bool{}
 	var problems []string
@@ -237,7 +240,11 @@ func checkImages(run openShellRunner, profiles []openShellProfile) []string {
 			continue
 		}
 		seen[p.image] = true
-		if _, err := run([]string{"docker", "image", "inspect", p.image}); err != nil {
+		_, err := run([]string{"docker", "image", "inspect", p.image})
+		if errors.Is(err, exec.ErrNotFound) {
+			return []string{fmt.Sprintf("docker image check skipped: docker CLI not on PATH, so the images of %d profile(s) are unverified", len(profiles))}
+		}
+		if err != nil {
 			problems = append(problems, fmt.Sprintf("docker image inspect: image %s (profile %s) is not present: %v", p.image, p.name, err))
 		}
 	}
