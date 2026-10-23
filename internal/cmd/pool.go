@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -440,8 +441,22 @@ type poolShowLive struct {
 }
 
 func poolLiveFor(townRoot string) poolShowLive {
+	return poolLiveForBatch(townRoot, newPoolSessionLister(), func(dir string) beads.Client { return beads.New(dir) })
+}
+
+// poolLiveForBatch is poolLiveFor with the seat reads batched per rig, the way
+// the dispatcher's tick reads them (specRosterSnapshotWith). The per-seat read
+// spent two bd calls on every polecat directory, so show scaled with the number
+// of polecats (gt-lj299). The count is the same; the calls are a few per rig.
+func poolLiveForBatch(townRoot string, lister sessionLister, storeFor func(dir string) beads.Client) poolShowLive {
+	batch := newPoolSeatBatch(townRoot,
+		func(rigName string) beads.Client { return storeFor(filepath.Join(townRoot, rigName)) },
+		func(bd beads.Client, id string) (*beads.Issue, error) { return bd.Show(id) })
+	work := func(ids []string) (map[string]*beads.Issue, error) {
+		return storeFor(townRoot).ShowMultiple(ids)
+	}
 	return poolLiveForWith(townRoot, func(pool *config.PolecatPool) ([]poolSession, error) {
-		return poolSeatSessions(newPoolSessionLister(), townRoot, pool)
+		return poolSeatSessionsWith(lister, townRoot, batch.disposition, work, pool)
 	})
 }
 
