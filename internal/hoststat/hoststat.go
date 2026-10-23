@@ -275,7 +275,11 @@ func parseDoltCores(s string) *float64 {
 	var found bool
 	for _, line := range strings.Split(s, "\n") {
 		f := strings.Fields(line)
-		if len(f) < 3 || !doltargv.IsSQLServer(f[1:]) || isTestServer(f[2:]) {
+		if len(f) < 3 {
+			continue
+		}
+		argv := f[1:]
+		if !doltargv.IsSQLServer(argv) || isTestServer(argv) {
 			continue
 		}
 		cpu, err := strconv.ParseFloat(f[0], 64)
@@ -297,21 +301,27 @@ func parseDoltCores(s string) *float64 {
 // imports it). A server that names it on the command line is the town's.
 const productionDoltPort = "3307"
 
-// isTestServer reports whether a sql-server's arguments name a temporary path
-// or a port other than the town's. The town's server is started with its
-// --config alone (doltserver.NewSQLServerCommand), so neither appears on its
-// command line; a port flag naming the town's own port does not hide it.
-func isTestServer(args []string) bool {
+// isTestServer reports whether a sql-server's argv names a temporary path or
+// a port other than the town's. The town's server is started with its --config
+// alone (doltserver.NewSQLServerCommand), so neither appears on its command
+// line; a port flag naming the town's own port does not hide it.
+//
+// argv is the slice doltargv.IsSQLServer reads, binary first and the subcommand
+// wherever a global flag leaves it (gt-gdqok): the two matchers then judge one
+// process by one set of tokens, and a port flag's value is still the token
+// after it.
+func isTestServer(argv []string) bool {
 	tmp := []string{"/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/"}
 	if dir := os.TempDir(); dir != "" {
 		tmp = append(tmp, strings.TrimSuffix(dir, "/")+"/")
 	}
-	for i, a := range args {
+	for i := 1; i < len(argv); i++ {
+		a := argv[i]
 		flag, val, hasVal := strings.Cut(a, "=")
 		switch flag {
 		case "--port", "-port", "-P":
-			if !hasVal && i+1 < len(args) {
-				val = args[i+1]
+			if !hasVal && i+1 < len(argv) {
+				val = argv[i+1]
 			}
 			if val != productionDoltPort {
 				return true

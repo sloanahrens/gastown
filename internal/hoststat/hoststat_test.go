@@ -393,14 +393,15 @@ func TestParseDoltCoresIgnoresTestServers(t *testing.T) {
 	t.Parallel()
 	const town = "  40.0 /opt/homebrew/bin/dolt sql-server --config /Users/sloan/gt/.dolt-data/config.yaml\n"
 	for name, test := range map[string]string{
-		"temporary data dir":         "  95.0 dolt sql-server --data-dir /tmp/TestFoo123/001/data\n",
-		"temporary data dir as =":    "  95.0 dolt sql-server --data-dir=/private/var/folders/ab/xyz/T/TestFoo/data\n",
-		"temporary config":           "  95.0 /usr/bin/dolt sql-server --config /var/folders/ab/xyz/T/gt-test/config.yaml\n",
-		"explicit port":              "  95.0 dolt sql-server --port 33307 --data-dir /x\n",
-		"explicit port as =":         "  95.0 dolt sql-server --port=33307\n",
-		"other port beside --config": "  95.0 dolt sql-server --config /x/config.yaml --port 3308\n",
-		"explicit short port":        "  95.0 dolt sql-server -P 33307\n",
-		"under the process's TMPDIR": "  95.0 dolt sql-server --data-dir " + strings.TrimSuffix(os.TempDir(), "/") + "/t1/data\n",
+		"temporary data dir":            "  95.0 dolt sql-server --data-dir /tmp/TestFoo123/001/data\n",
+		"temporary data dir as =":       "  95.0 dolt sql-server --data-dir=/private/var/folders/ab/xyz/T/TestFoo/data\n",
+		"temporary config":              "  95.0 /usr/bin/dolt sql-server --config /var/folders/ab/xyz/T/gt-test/config.yaml\n",
+		"explicit port":                 "  95.0 dolt sql-server --port 33307 --data-dir /x\n",
+		"explicit port as =":            "  95.0 dolt sql-server --port=33307\n",
+		"other port beside --config":    "  95.0 dolt sql-server --config /x/config.yaml --port 3308\n",
+		"explicit short port":           "  95.0 dolt sql-server -P 33307\n",
+		"under the process's TMPDIR":    "  95.0 dolt sql-server --data-dir " + strings.TrimSuffix(os.TempDir(), "/") + "/t1/data\n",
+		"global flag before sql-server": "  95.0 dolt --data-dir /tmp/TestFoo123/001/data sql-server\n",
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -423,5 +424,48 @@ func TestParseDoltCoresUsesSharedMatcher(t *testing.T) {
 	got := parseDoltCores("  200.0 dolt --config x sql-server\n  90.0 tail -f dolt-sql-server.log\n")
 	if got == nil || math.Abs(*got-2) > 1e-9 {
 		t.Fatalf("parseDoltCores = %v, want 2", got)
+	}
+}
+
+// isTestServer reads the argv doltargv.IsSQLServer reads, binary first: a
+// global flag moves where the subcommand sits but not the token after a port
+// flag, so one slice answers both questions about one process (gt-gdqok).
+func TestIsTestServerReadsTheArgvTheMatcherReads(t *testing.T) {
+	t.Parallel()
+	for name, tc := range map[string]struct {
+		argv []string
+		want bool
+	}{
+		"town config": {
+			argv: []string{"dolt", "sql-server", "--config", "/Users/x/gt/.dolt-data/config.yaml"},
+		},
+		"town config, global flag": {
+			argv: []string{"dolt", "--config", "/Users/x/gt/.dolt-data/config.yaml", "sql-server"},
+		},
+		"town port named": {
+			argv: []string{"dolt", "sql-server", "--port", "3307"},
+		},
+		"no arguments": {
+			argv: []string{"dolt", "sql-server"},
+		},
+		"temporary data dir": {
+			argv: []string{"dolt", "sql-server", "--data-dir", "/tmp/TestFoo123/001/data"},
+			want: true,
+		},
+		"temporary data dir, global flag": {
+			argv: []string{"dolt", "--data-dir", "/tmp/TestFoo123/001/data", "sql-server"},
+			want: true,
+		},
+		"the test's own port": {
+			argv: []string{"dolt", "sql-server", "--port", "33307"},
+			want: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if got := isTestServer(tc.argv); got != tc.want {
+				t.Fatalf("isTestServer(%v) = %v, want %v", tc.argv, got, tc.want)
+			}
+		})
 	}
 }
