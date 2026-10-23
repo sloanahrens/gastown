@@ -138,14 +138,16 @@ func newer(a, b placement) time.Time {
 // beadFault reports whether err blames the bead's request rather than the
 // pass's reach: Jev refused this request, or accepted it and answered
 // unusably. A refusal of the credential (401) or of the account (402 and 403)
-// is about the pass's reach, not the beads. Only a bead fault counts an
-// attempt against the pair; any other failure stops the pass where it is, so
-// an outage costs no attempts.
+// is about the pass's reach, not the beads, and a request timeout (408) is
+// retryable, so it says nothing about the beads either. Only a bead fault
+// counts an attempt against the pair; any other failure stops the pass where
+// it is, so an outage costs no attempts.
 func beadFault(err error) bool {
 	var se *jev.StatusError
 	if errors.As(err, &se) {
 		return se.Status >= 400 && se.Status < 500 &&
 			se.Status != http.StatusUnauthorized &&
+			se.Status != http.StatusRequestTimeout &&
 			!accountRefusal(se.Status)
 	}
 	return errors.Is(err, jev.ErrBadResponse)
