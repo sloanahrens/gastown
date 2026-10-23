@@ -709,6 +709,36 @@ func TestPatrolScanAssignedWorkReadsAnOpenAssignedBead(t *testing.T) {
 	}
 }
 
+// gt-gnqmu: ActiveWork feeds the orphan and held-wisp passes, so an
+// open-assigned bead must reach them, as hooked and in_progress beads already
+// do. Finished work must not.
+func TestPatrolScanActiveWorkReadsAnOpenAssignedBead(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		status string
+		want   bool
+	}{
+		{"hooked", true},
+		{"in_progress", true},
+		{"open", true},
+		{"closed", false},
+	}
+	for _, tc := range cases {
+		bd := newWorkBD(t)
+		h := &patrolScanHost{d: &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: bd.open}}
+		bd.seed("gt-work", tc.status, time.Now().Add(-time.Hour))
+
+		work, err := h.ActiveWork("myr")
+		if err != nil {
+			t.Fatalf("ActiveWork over %s bead: %v", tc.status, err)
+		}
+		got := len(work) == 1 && work[0].ID == "gt-work"
+		if got != tc.want {
+			t.Errorf("ActiveWork over %s bead = %+v; want reached=%v", tc.status, work, tc.want)
+		}
+	}
+}
+
 // ClearSubmission ends the seat's wait for the landing worker. It is the
 // action half of the stale-record fix: without it the supervisor's own
 // submitted guard refuses every restart (gt-xs1ni).
