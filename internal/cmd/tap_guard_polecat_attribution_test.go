@@ -70,6 +70,21 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 		{"accepted-risk gt bead comment", `gt bead comment gt-x "ACCEPTED-RISK: fine"`, polecatAcceptedRiskReason},
 		{"accepted-risk gt bead note", `gt bead note gt-x "ACCEPTED-RISK: fine"`, polecatAcceptedRiskReason},
 
+		{"accepted-risk built by a substitution", `bd comments add gt-x "$(echo 'ACCEPTED-RISK: ok')"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a backtick substitution", "bd comments add gt-x \"`echo ACCEPTED-RISK: ok`\"", polecatUnresolvedTextReason},
+		{"accepted-risk built by a variable", `T='ACCEPTED-RISK: x'; bd comments add gt-x "$T"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a braced variable", `T='ACCEPTED-RISK: x'; bd comments add gt-x "${T}"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by an unquoted variable", `T='ACCEPTED-RISK: x'; bd comments add gt-x $T`, polecatUnresolvedTextReason},
+		{"accepted-risk split around a substitution", `bd comments add gt-x "ACCEPTED-$(echo RISK:) ok"`, polecatUnresolvedTextReason},
+		{"accepted-risk prefix then variable", `bd comments add gt-x "ACC$X"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a substitution in a note", `bd note gt-x "$(printf 'ACCEPTED-RISK: ok')"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a variable in gt bead note", `gt bead note gt-x "$T"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a substitution in gt bead comment", `gt bead comment gt-x "$(echo 'ACCEPTED-RISK: ok')"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a variable in append-notes", `bd update gt-x --append-notes "$(echo 'ACCEPTED-RISK: ok')"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a variable in append-notes equals", `bd update gt-x --append-notes="$T"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a variable in notes", `bd update gt-x --notes "$T"`, polecatUnresolvedTextReason},
+		{"accepted-risk built by a variable in create notes", `bd create "a title" --notes "$T"`, polecatUnresolvedTextReason},
+
 		{"comment text from a short file flag", `bd comments add gt-x -f notes.txt`, polecatCommentInputReason},
 		{"comment text from a file flag", `bd comments add gt-x --file notes.txt`, polecatCommentInputReason},
 		{"comment text from a file flag equals form", `bd comments add gt-x --file=notes.txt`, polecatCommentInputReason},
@@ -100,6 +115,11 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 		{"listing comments with actor", `bd comments gt-x --actor Sloan`, ""},
 		{"author flag on another verb", `bd show gt-x --author Sloan`, ""},
 		{"short a is the assignee on update", `bd update gt-x -a "Sloan Ahrens"`, ""},
+		{"variable quoted in prose", `bd comments add gt-x "the config reads $HOME/.config/gt"`, ""},
+		{"substitution in prose", `bd comments add gt-x "found it in $(git rev-parse --show-toplevel)"`, ""},
+		{"variable after a marker-free word", `bd note gt-x "rig $RIG is set"`, ""},
+		{"substitution in prose note append", `bd update gt-x --append-notes "rebuilt with $(go env GOROOT)"`, ""},
+		{"variable named in prose about the marker", `bd comments add gt-x "the marker is $T, see the guard"`, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -127,6 +147,8 @@ func TestPolecatAttributionLeavesOtherSessionsAlone(t *testing.T) {
 		`bd note gt-x "ACCEPTED-RISK: fine"`,
 		`BD_ACTOR='Sloan Ahrens' bd comments add gt-x hi`,
 		`export BD_ACTOR=town/crew/overseer`,
+		`bd comments add gt-x "$(echo 'ACCEPTED-RISK: ok')"`,
+		`T='ACCEPTED-RISK: x'; bd comments add gt-x "$T"`,
 	}
 	for _, command := range commands {
 		if reason, _ := evaluateDangerousCommand(command, 0, attributionOverseer); reason != "" {
