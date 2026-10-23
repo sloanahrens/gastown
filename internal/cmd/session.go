@@ -294,6 +294,18 @@ func resolveSessionSeatWith(args []string, lookupRig func(rigName string) (strin
 	return sessionSeat{}, errors.New(suggest.FormatSuggestion("Polecat", name, suggestions, hint))
 }
 
+// startSessionSeat starts a seat's session on the agent its sling recorded and
+// the backend that agent names (restartPolecatOnSlungAgent with townSeatBackend):
+// an openshell seat starts inside its sandbox, or the start is refused, never on
+// host tmux with the host worktree and file-backed secrets (gt-zvuyn). start is
+// the seat's session manager in production, a recording stub in tests.
+func startSessionSeat(start polecatStarter, backendFor seatBackendResolver, townRoot, rigName, polecatName string, opts polecat.SessionStartOptions) error {
+	if err := restartPolecatOnSlungAgent(start, backendFor, townRoot, rigName, polecatName, opts); err != nil {
+		return fmt.Errorf("starting session: %w", err)
+	}
+	return nil
+}
+
 func runSessionStart(cmd *cobra.Command, args []string) error {
 	seat, err := resolveSessionSeat(args)
 	if err != nil {
@@ -304,13 +316,16 @@ func runSessionStart(cmd *cobra.Command, args []string) error {
 	// startup's kill a Cleanup.
 	seat.supervise("gt session start")
 
+	// The seat's own town holds the settings that place its recorded agent
+	// (townSeatBackend).
+	seatTownRoot := filepath.Dir(seat.r.Path)
 	opts := polecat.SessionStartOptions{
 		Issue: sessionIssue,
 	}
 
 	fmt.Printf("Starting session for %s/%s...\n", rigName, polecatName)
-	if err := seat.Mgr.Start(polecatName, opts); err != nil {
-		return fmt.Errorf("starting session: %w", err)
+	if err := startSessionSeat(seat.Mgr, townSeatBackend(seatTownRoot, tmux.NewTmux()), seatTownRoot, rigName, polecatName, opts); err != nil {
+		return err
 	}
 
 	fmt.Printf("%s Session started. Attach with: %s\n",
