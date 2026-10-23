@@ -97,8 +97,8 @@ Flags:
 `
 
 // criteriaStub answers the help probe, the version probe and the review,
-// reading the --criteria-file while the review runs — the only moment its
-// contents are supposed to exist.
+// reading the --criteria-file and the --context-file while the review runs —
+// the only moment their contents are supposed to exist.
 type criteriaStub struct {
 	t         *testing.T
 	help      string
@@ -110,6 +110,10 @@ type criteriaStub struct {
 	text      string
 	mode      os.FileMode // the criteria file's permissions as the run saw them
 	sawFlag   bool
+	ctxPath   string      // the --context-file's path as the review saw it
+	ctxText   string      // what that file held during the run
+	ctxMode   os.FileMode // its permissions
+	sawCtx    bool
 	hold      bool  // block until the attempt's deadline passes
 	fail      error // the review's own failure
 }
@@ -138,6 +142,17 @@ func (s *criteriaStub) run(ctx context.Context, _ string, _ []string, argv []str
 		s.text = string(b)
 		if fi, err := os.Stat(s.critPath); err == nil {
 			s.mode = fi.Mode().Perm()
+		}
+	}
+	if i := slices.Index(argv, "--context-file"); i >= 0 {
+		s.sawCtx, s.ctxPath = true, argv[i+1]
+		b, err := os.ReadFile(s.ctxPath) //nolint:gosec // G304: the path this stub was handed
+		if err != nil {
+			s.t.Errorf("reading the context file during the run: %v", err)
+		}
+		s.ctxText = string(b)
+		if fi, err := os.Stat(s.ctxPath); err == nil {
+			s.ctxMode = fi.Mode().Perm()
 		}
 	}
 	switch {

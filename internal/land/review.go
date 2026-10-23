@@ -159,6 +159,12 @@ type ReviewInput struct {
 	// is given through --criteria-file when it accepts the flag. Empty means
 	// the bead carries none and the flag is omitted (gt-yl7n4).
 	CriteriaText string
+	// AcceptedRisksText is the accepted-risk record the bead's comments carry
+	// (AcceptedRisksText), which om is given through --context-file when it
+	// accepts the flag: a finding that only restates one is info, so the review
+	// stops re-raising what an overseer or a human already decided. Empty means
+	// the bead records none and the flag is omitted (gt-lauly).
+	AcceptedRisksText string
 	// PriorFindings are the findings of the previous round's refusal, which om
 	// is given through --prior-findings so it classifies each as resolved,
 	// unresolved or regressed instead of raising a fresh set of minors on a
@@ -254,6 +260,9 @@ type OMReviewer struct {
 	// write and not the verdict file's, so this is the seam a test reaching the
 	// fail-soft path uses (gt-yl7n4).
 	criteriaWriter func(in ReviewInput) (string, error)
+	// acceptedRisksWriter is the same seam for the context file; nil means
+	// writeAcceptedRisks (gt-lauly).
+	acceptedRisksWriter func(in ReviewInput) (string, error)
 }
 
 // Review runs om once and returns its verdict. A run that produces none
@@ -279,7 +288,9 @@ func (r OMReviewer) Review(ctx context.Context, dir, base, head string) (Verdict
 // A bead carrying acceptance text has it written to a temp file in OutDir and
 // named on the argv as --criteria-file when the installed om takes the flag, so
 // om reads the criteria the bead was dispatched with rather than inferring them
-// (gt-yl7n4).
+// (gt-yl7n4). A bead recording accepted risks has them written the same way and
+// named as --context-file, so a finding that only restates a settled decision
+// does not refuse the landing a second time (gt-lauly).
 //
 // A rework round — one a refusal sent back to the author — carries that
 // refusal's findings, written to a temp file in OutDir and named on the argv as
@@ -330,28 +341,32 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	if r.Out != nil {
 		w = io.MultiWriter(&buf, r.Out)
 	}
-	// --criteria-file is the one flag question left for the help probe, which
-	// is bounded by its own timeout, before the attempt clock starts: an om
-	// that cannot describe its own flags must not spend the review's (gt-yl7n4).
-	criteriaPath := ""
-	if in.CriteriaText != "" {
+	// --criteria-file and --context-file are the flag questions the help probe
+	// answers, bounded by its own timeout, before the attempt clock starts: an
+	// om that cannot describe its own flags must not spend the review's
+	// (gt-yl7n4). One probe answers both, so a bead carrying both texts pays for
+	// one help read.
+	criteriaPath, contextPath := "", ""
+	if in.CriteriaText != "" || in.AcceptedRisksText != "" {
 		help, probed := r.omReviewHelp(ctx, in, path, run)
-		if probed && omHelpListsFlag(help, "--criteria-file") {
-			write := r.criteriaWriter
-			if write == nil {
-				write = r.writeCriteria
-			}
-			p, err := write(in)
-			if err != nil {
-				// The review is worth running without the criteria; the bead's
-				// acceptance text is a help to om, not a precondition.
-				r.warnf(in, "could not write the acceptance criteria file (%v); om runs without --criteria-file", err)
-			} else {
-				criteriaPath = p
-				defer func() { _ = os.Remove(p) }()
-			}
+		if in.CriteriaText != "" {
+			criteriaPath = r.optionalFile(in, probed, help, "--criteria-file",
+				"the acceptance criteria file", r.criteriaFile)
+		}
+		if in.AcceptedRisksText != "" {
+			contextPath = r.optionalFile(in, probed, help, "--context-file",
+				"the accepted risks file", r.acceptedRisksFile)
 		}
 	}
+	// Both files are temp files on every path out of the attempt, not only a
+	// successful one.
+	defer func() {
+		for _, p := range []string{criteriaPath, contextPath} {
+			if p != "" {
+				_ = os.Remove(p)
+			}
+		}
+	}()
 	timeout := r.Timeout
 	if timeout <= 0 {
 		timeout = DefaultOMTimeout
@@ -384,6 +399,9 @@ func (r OMReviewer) reviewOnce(ctx context.Context, in ReviewInput) (Verdict, er
 	}
 	if criteriaPath != "" {
 		argv = append(argv, "--criteria-file", criteriaPath)
+	}
+	if contextPath != "" {
+		argv = append(argv, "--context-file", contextPath)
 	}
 	// --prior-findings rides the argv whatever the installed om's help says,
 	// as --bead does (gt-r3fg9): the classification is what makes a rework
@@ -440,9 +458,10 @@ const omHelpTimeout = 10 * time.Second
 
 // omReviewHelp returns the help text of `om review --help` for the binary at
 // path, read once per binary identity per process, and whether the probe
-// produced any help. It answers whether the installed om takes --criteria-file;
-// --bead is not asked here, because a review names its bead whatever the help
-// says (gt-r3fg9), so one read answers the one flag question left (gt-yl7n4).
+// produced any help. It answers whether the installed om takes --criteria-file
+// and --context-file; --bead is not asked here, because a review names its bead
+// whatever the help says (gt-r3fg9), so one read answers both flag questions
+// (gt-yl7n4, gt-lauly).
 //
 // A failed probe — a run error, a timeout, or an exit with no help text —
 // reports no help and is retried on the next review rather than cached, so a
@@ -590,12 +609,54 @@ func parseOMVersion(out string) string {
 	return ""
 }
 
+// optionalFile writes one optional flag's text and returns the path to name it
+// by, or "" when the installed om does not list the flag or the write fails. A
+// text that cannot be written is a help to om rather than a precondition of the
+// review, so the failure costs one warning line and the flag.
+func (r OMReviewer) optionalFile(in ReviewInput, probed bool, help, flag, what string,
+	write func(ReviewInput) (string, error)) string {
+	if !probed || !omHelpListsFlag(help, flag) {
+		return ""
+	}
+	p, err := write(in)
+	if err != nil {
+		r.warnf(in, "could not write %s (%v); om runs without %s", what, err, flag)
+		return ""
+	}
+	return p
+}
+
+// criteriaFile is how this reviewer writes its criteria file: the test seam
+// when one is set, writeCriteria otherwise.
+func (r OMReviewer) criteriaFile(in ReviewInput) (string, error) {
+	if r.criteriaWriter != nil {
+		return r.criteriaWriter(in)
+	}
+	return r.writeCriteria(in)
+}
+
+// acceptedRisksFile is criteriaFile's counterpart for the context file.
+func (r OMReviewer) acceptedRisksFile(in ReviewInput) (string, error) {
+	if r.acceptedRisksWriter != nil {
+		return r.acceptedRisksWriter(in)
+	}
+	return r.writeAcceptedRisks(in)
+}
+
 // writeCriteria writes the review's acceptance text to a 0600 temp file in
 // OutDir, beside the verdict file, and returns its path. The caller removes it
 // after the run; a text that cannot be written is not a reason to skip the
 // review.
 func (r OMReviewer) writeCriteria(in ReviewInput) (string, error) {
 	return writeTemp(r.OutDir, "om-criteria-*.txt", []byte(in.CriteriaText))
+}
+
+// writeAcceptedRisks writes the review's accepted-risk record to a 0600 temp
+// file in OutDir, beside the criteria file, and returns its path. The caller
+// removes it after the run; a text that cannot be written is not a reason to
+// skip the review (gt-lauly).
+func (r OMReviewer) writeAcceptedRisks(in ReviewInput) (string, error) {
+	return writeTemp(r.OutDir, "om-context-*.txt", []byte(in.AcceptedRisksText))
 }
 
 // writePriorFindings writes the previous round's findings to a 0600 temp file
