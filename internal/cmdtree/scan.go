@@ -18,10 +18,13 @@ import (
 
 // Ref is one gt or bd invocation found in a file.
 type Ref struct {
-	File  string   // repo-relative, forward slashes
-	Line  int      // physical line in File
-	Bin   string   // "gt" or "bd"
-	Words []string // leading command-like words after Bin, as written
+	File string // repo-relative, forward slashes
+	Line int    // physical line in File
+	Bin  string // "gt" or "bd"
+	// Words are the leading command-like words after Bin, as written. A
+	// leading bd persistent flag is not one of them: bd --json sync has the
+	// same words as bd sync (see bdCommandStart).
+	Words []string
 	// Comment marks an invocation found in a shell or JS comment line. Check
 	// counts it only when its first word names a real command, so a comment
 	// such as "# Close with: bd gate close <id>" is checked and "# the gt
@@ -47,9 +50,48 @@ var cmdTemplate = regexp.MustCompile(`\{\{-?\s*cmd\s*-?\}\}`)
 // variables, quoted strings and paths all stop word collection.
 var cmdWord = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
-func commandWords(rest string) []string {
+// bdGlobalValueFlags are bd's persistent flags that take their value as the
+// next token. Skipping such a flag alone would leave the value behind as a
+// command word, so `bd --db beads sync` would read as the unknown command
+// "beads". Flags not listed here are boolean, or carry their value glued on
+// (`--db=beads`, `-C/path`). Mirrors bdGlobalOptionsWithValue in internal/cmd's
+// close guard.
+var bdGlobalValueFlags = map[string]bool{
+	"--actor": true, "--cpu-profile": true, "--database": true, "--db": true,
+	"-C": true, "--directory": true, "--dolt-auto-commit": true,
+	"--format": true, "--machine": true, "--mem-profile": true,
+}
+
+// bdCommandStart returns the index of the first token after bd's leading
+// persistent flags. Word collection stops at a flag, so without this
+// `bd --json sync` has no words and never reaches Check, and the bd sync deny
+// silently misses it. Only a persistent (global) flag can come before the
+// first command word, since no subcommand has been named yet. A `--` ends
+// flag parsing, and a flag ending the line (punctuation after it) leaves no
+// command words either.
+func bdCommandStart(toks []string) int {
+	for i := 0; i < len(toks); i++ {
+		tok := toks[i]
+		if tok == "--" {
+			return i + 1
+		}
+		if len(tok) < 2 || tok[0] != '-' || strings.TrimRight(tok, ";)}]`\"',.:") != tok {
+			return i
+		}
+		if bdGlobalValueFlags[tok] {
+			i++ // the next token is the flag's value
+		}
+	}
+	return len(toks)
+}
+
+func commandWords(bin, rest string) []string {
+	toks := strings.Fields(rest)
+	if bin == "bd" {
+		toks = toks[bdCommandStart(toks):]
+	}
 	var words []string
-	for _, tok := range strings.Fields(rest) {
+	for _, tok := range toks {
 		if strings.HasPrefix(tok, "#") {
 			break
 		}
@@ -121,7 +163,7 @@ func scanMatches(file string, line int, text string, keep func(boundary byte, st
 		if !keep(boundary, m[2]) {
 			continue
 		}
-		words := commandWords(text[m[1]:])
+		words := commandWords(text[m[2]:m[3]], text[m[1]:])
 		if len(words) == 0 {
 			continue
 		}

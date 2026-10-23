@@ -275,3 +275,47 @@ func TestScanTOMLMarkdownShellAssignmentIsNotAKey(t *testing.T) {
 	}, "\n")
 	assertRefs(t, ScanTOMLMarkdown("f.toml", text), "4:gt prime", "9:gt done")
 }
+
+// A bd invocation may put a persistent flag before the subcommand
+// (`bd --json sync`), and word collection stops at a flag, so the deny rule
+// used to see no reference at all and let the federation loop through. The
+// flags are skipped, including the value of one that takes it, so the words
+// are the subcommand's and Check reports the violation.
+func TestScanDenyBdSyncWithGlobalFlag(t *testing.T) {
+	t.Parallel()
+	refs := ScanShell("f.sh", strings.Join([]string{
+		"bd --json sync",
+		"bd --db beads sync",
+		"bd -C /tmp/beads --json sync",
+		`x=$(bd --format=json sync)`,
+	}, "\n"), 1)
+	assertRefs(t, refs,
+		"1:bd sync",
+		"2:bd sync",
+		"3:bd sync",
+		"4:bd sync",
+	)
+	bd := NewTree()
+	bd.Add([]string{"sync"}, nil, true)
+	v := Check(refs, map[string]*Tree{"bd": bd})
+	if len(v) != len(refs) {
+		t.Fatalf("Check = %+v; want every bd sync denied", v)
+	}
+	for _, viol := range v {
+		if viol.Reason != BdSyncDenied {
+			t.Errorf("%s: reason %q; want %q", viol.Token(), viol.Reason, BdSyncDenied)
+		}
+	}
+}
+
+// A bd line whose flags name no subcommand still yields no reference, and the
+// gt form is untouched: gt --version && bd stays empty (TestScanShell).
+func TestScanBdFlagsWithoutSubcommand(t *testing.T) {
+	t.Parallel()
+	refs := ScanShell("f.sh", strings.Join([]string{
+		"bd --version",
+		"bd --json --no-color",
+		"bd -- sync",
+	}, "\n"), 1)
+	assertRefs(t, refs, "3:bd sync")
+}
