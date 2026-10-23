@@ -99,6 +99,10 @@ type TownSettings struct {
 	// is refused. An --agent with no seat is left alone.
 	PolecatPool *PolecatPool `json:"polecat_pool,omitempty"`
 
+	// Sandboxes are the named sandbox profiles an openshell seat runs its
+	// polecats in: a seat names one with its sandbox key. See SandboxProfile.
+	Sandboxes map[string]SandboxProfile `json:"sandboxes,omitempty"`
+
 	// CrewAgents maps individual crew worker names to agent aliases at the town level.
 	// This allows town-wide per-crew agent assignment without modifying each rig's config.
 	// Resolution: --agent flag > rig WorkerAgents > town CrewAgents > role agents > defaults.
@@ -1660,6 +1664,49 @@ func NewEscalationConfig() *EscalationConfig {
 		MaxReescalations: intPtr(2),
 		RenotifyWindow:   "1h",
 	}
+}
+
+// SandboxProfile is one entry of TownSettings.Sandboxes: how an openshell seat's
+// sandbox is created. Gateway and ControlPlaneHost take their defaults from
+// WithDefaults; Validate checks the rest.
+type SandboxProfile struct {
+	Gateway          string   `json:"gateway"` // openshell gateway name, default "openshell"
+	Image            string   `json:"image"`   // OCI reference, required
+	Policy           string   `json:"policy"`  // path relative to the rig repo root, required
+	Providers        []string `json:"providers,omitempty"`
+	CPU              string   `json:"cpu,omitempty"`          // k8s quantity, e.g. "4"
+	Memory           string   `json:"memory,omitempty"`       // e.g. "8Gi"
+	ControlPlaneHost string   `json:"control_plane_host"`     // default "host.docker.internal"
+	CacheVolume      string   `json:"cache_volume,omitempty"` // "{rig}" expands to the rig name
+}
+
+// Defaults for the SandboxProfile fields a profile may leave unset.
+const (
+	defaultSandboxGateway          = "openshell"
+	defaultSandboxControlPlaneHost = "host.docker.internal"
+)
+
+// WithDefaults returns p with the unset defaulted fields filled in.
+func (p SandboxProfile) WithDefaults() SandboxProfile {
+	if p.Gateway == "" {
+		p.Gateway = defaultSandboxGateway
+	}
+	if p.ControlPlaneHost == "" {
+		p.ControlPlaneHost = defaultSandboxControlPlaneHost
+	}
+	return p
+}
+
+// Validate reports the first required field of p that is unset, naming the
+// profile by its key name in TownSettings.Sandboxes.
+func (p SandboxProfile) Validate(name string) error {
+	if p.Image == "" {
+		return fmt.Errorf("sandboxes.%s.image: required", name)
+	}
+	if p.Policy == "" {
+		return fmt.Errorf("sandboxes.%s.policy: required", name)
+	}
+	return nil
 }
 
 // PolecatPool is the town's polecat seat map: which agents run polecats, how

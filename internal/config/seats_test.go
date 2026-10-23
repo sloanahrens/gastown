@@ -354,3 +354,99 @@ func TestUnrecordedAgent(t *testing.T) {
 		}
 	}
 }
+
+// A seat names its backend and, for openshell, the sandbox profile it runs in.
+// Each rejection names the settings key the operator must fix.
+func TestSeatsBackendAndSandbox(t *testing.T) {
+	t.Parallel()
+
+	prof := map[string]SandboxProfile{"polecat-default": {Image: "gastown-polecat:dev", Policy: "deploy/polecat/policy.yaml"}}
+	cases := []struct {
+		name        string
+		seat        SeatConfig
+		profiles    map[string]SandboxProfile
+		wantErr     string
+		wantBackend string
+	}{
+		{"default is tmux", SeatConfig{Cap: 1}, nil, "", BackendTmux},
+		{"explicit tmux", SeatConfig{Cap: 1, Backend: "tmux"}, nil, "", BackendTmux},
+		{"openshell with profile", SeatConfig{Cap: 1, Backend: "openshell", Sandbox: "polecat-default"}, prof, "", BackendOpenShell},
+		{"openshell without profile", SeatConfig{Cap: 1, Backend: "openshell"}, prof, "polecat_pool.seats.deepseek-flash.sandbox: required when backend is openshell", ""},
+		{"openshell unknown profile", SeatConfig{Cap: 1, Backend: "openshell", Sandbox: "nope"}, prof, `polecat_pool.seats.deepseek-flash.sandbox "nope": no such entry in sandboxes`, ""},
+		{"unknown backend", SeatConfig{Cap: 1, Backend: "firecracker"}, nil, `polecat_pool.seats.deepseek-flash.backend "firecracker": want tmux or openshell`, ""},
+		{"tmux seat naming a sandbox", SeatConfig{Cap: 1, Sandbox: "polecat-default"}, prof, "polecat_pool.seats.deepseek-flash.sandbox: only an openshell seat names a sandbox", ""},
+		{"profile missing image", SeatConfig{Cap: 1, Backend: "openshell", Sandbox: "polecat-default"}, map[string]SandboxProfile{"polecat-default": {Policy: "p.yaml"}}, "sandboxes.polecat-default.image: required", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			ts := &TownSettings{PolecatPool: &PolecatPool{Seats: map[string]SeatConfig{"deepseek-flash": c.seat}}, Sandboxes: c.profiles}
+			seats, err := Seats(ts, nil)
+			if c.wantErr != "" {
+				if err == nil || err.Error() != c.wantErr {
+					t.Fatalf("err = %v, want %q", err, c.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if seats[0].Backend != c.wantBackend || seats[0].Sandbox != c.seat.Sandbox {
+				t.Fatalf("seat = %+v", seats[0])
+			}
+		})
+	}
+}
+
+// The sandbox table and the seat's backend and sandbox keys decode from a
+// settings file under strict decoding, and an unknown profile key is refused.
+func TestSandboxesFromSettingsFile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("with the keys", func(t *testing.T) {
+		t.Parallel()
+		var ts TownSettings
+		err := DecodeJSONFile("settings/config.json", []byte(`{"type":"town-settings","version":1,
+			"sandboxes":{"polecat-default":{"image":"gastown-polecat:dev","policy":"deploy/polecat/policy.yaml",
+				"providers":["deepseek"],"cpu":"4","memory":"8Gi","cache_volume":"{rig}-cache"}},
+			"polecat_pool":{"seats":{"deepseek-flash":{"cap":1,"backend":"openshell","sandbox":"polecat-default"}}}}`), &ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		p := ts.Sandboxes["polecat-default"]
+		if p.Image != "gastown-polecat:dev" || p.Policy != "deploy/polecat/policy.yaml" || len(p.Providers) != 1 ||
+			p.CPU != "4" || p.Memory != "8Gi" || p.CacheVolume != "{rig}-cache" {
+			t.Fatalf("profile = %+v", p)
+		}
+		seats, err := Seats(&ts, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(seats) != 1 || seats[0].Backend != BackendOpenShell || seats[0].Sandbox != "polecat-default" {
+			t.Fatalf("seats = %+v", seats)
+		}
+	})
+
+	t.Run("unknown profile key", func(t *testing.T) {
+		t.Parallel()
+		var ts TownSettings
+		err := DecodeJSONFile("settings/config.json", []byte(`{"type":"town-settings","version":1,
+			"sandboxes":{"polecat-default":{"image":"i","policy":"p","nonsense":1}}}`), &ts)
+		if err == nil || !strings.Contains(err.Error(), "nonsense") {
+			t.Fatalf("err = %v, want an unknown-key error naming nonsense", err)
+		}
+	})
+}
+
+func TestSandboxProfileWithDefaults(t *testing.T) {
+	t.Parallel()
+
+	got := SandboxProfile{Image: "i", Policy: "p"}.WithDefaults()
+	if got.Gateway != "openshell" || got.ControlPlaneHost != "host.docker.internal" {
+		t.Fatalf("defaults = %q, %q", got.Gateway, got.ControlPlaneHost)
+	}
+	set := SandboxProfile{Gateway: "g", ControlPlaneHost: "h"}.WithDefaults()
+	if set.Gateway != "g" || set.ControlPlaneHost != "h" {
+		t.Fatalf("set fields overwritten: %q, %q", set.Gateway, set.ControlPlaneHost)
+	}
+}
