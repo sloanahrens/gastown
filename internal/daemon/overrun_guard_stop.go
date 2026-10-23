@@ -728,14 +728,8 @@ func (d *Daemon) overrunResetAgentBead(seat overrunSeat) error {
 // resetOverrunAgentBead is overrunResetAgentBead over c: it resets agent bead
 // id only while its hook_bead is still bead.
 func resetOverrunAgentBead(c beads.Client, id, bead string) error {
-	_, fields, err := beads.GetAgentBead(c, id)
-	if err != nil {
-		return fmt.Errorf("read agent bead %s: %w", id, err)
-	}
-	if fields == nil || fields.HookBead != bead {
-		return nil
-	}
-	return beads.ResetAgentBeadForReuse(c, id, "overrun stop")
+	_, err := beads.ResetAgentBeadWhileHooked(c, id, bead, "overrun stop")
+	return err
 }
 
 // overrunRecordCleanupStatus records what a live probe of the released seat's
