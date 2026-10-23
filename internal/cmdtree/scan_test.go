@@ -340,7 +340,7 @@ func TestScanBdSubcommandFlagInProseHasNoWords(t *testing.T) {
 // because the scan would stop at it and find no words.
 func TestBdValueFlagsSkipWithTheirValue(t *testing.T) {
 	t.Parallel()
-	for flag := range bdGlobalValueFlags {
+	for flag := range BdGlobalValueFlags {
 		t.Run(flag, func(t *testing.T) {
 			t.Parallel()
 			refs := ScanShell("f.sh", "bd "+flag+" x sync", 1)

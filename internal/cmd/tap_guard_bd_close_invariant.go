@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/cmdtree"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
@@ -577,23 +578,18 @@ func isBdCloseSubcommand(word string) bool {
 	return word == "close" || word == "done"
 }
 
-// bdGlobalOptionsWithValue are bd's global flags that consume the next token
-// (space-separated form), so `bd --db x close gt-1` still resolves to close.
-var bdGlobalOptionsWithValue = map[string]bool{
-	"--actor": true, "--database": true, "--db": true, "-C": true, "--directory": true,
-	"--dolt-auto-commit": true, "--mem-profile": true,
-}
-
 // bdSubcommandIndex returns the position of bd's subcommand in rest (the
 // tokens after "bd"), skipping global flags in both `--db x` and `--db=x`
-// forms, or -1 when rest ends before one (gt-kocid).
+// forms, or -1 when rest ends before one (gt-kocid). The value-taking flags
+// come from cmdtree's list, so `bd --db x close gt-1` and `bd --format json
+// close gt-1` both resolve to close (gt-m8efc).
 func bdSubcommandIndex(rest []string) int {
 	for i := 0; i < len(rest); i++ {
 		t := rest[i]
 		if !strings.HasPrefix(t, "-") {
 			return i
 		}
-		if bdGlobalOptionsWithValue[t] {
+		if cmdtree.BdGlobalValueFlags[t] {
 			i++ // skip the flag's value
 		}
 	}
