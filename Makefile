@@ -1,4 +1,4 @@
-.PHONY: build install install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight
+.PHONY: build install install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-caches openshell-providers
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
@@ -115,6 +115,38 @@ GOLANGCI_LINT_VERSION ?= v2.13.2
 
 lint-tools:
 	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
+
+# The OpenShell polecat sandbox pieces an operator runs by hand (claude-q3f.9).
+# deploy/polecat lands from the crew branch; no target below runs in the gate.
+
+# What the sandbox profiles name: gastown-polecat:dev is the moving tag a
+# profile points at, and the short sha is the rollback pin beside it.
+POLE_IMAGE ?= gastown-polecat
+POLE_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
+# bd is built from a beads fork checkout, not this repo. That checkout is host
+# state, so there is no default: the operator names it, BD_SRC=<checkout>.
+BD_SRC ?=
+
+# Cross-compile gt and bd for the sandbox image, then build it. The Dockerfile
+# copies deploy/polecat/bin/, so that directory is the build context's payload.
+# The guard is the first recipe line, so a run without BD_SRC stops before
+# anything is built.
+polecat-image:
+	@test -n "$(BD_SRC)" || { echo "polecat-image: BD_SRC is unset; run make polecat-image BD_SRC=<beads checkout>" >&2; exit 2; }
+	@mkdir -p deploy/polecat/bin
+	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/gt ./cmd/gt
+	cd $(BD_SRC) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o $(CURDIR)/deploy/polecat/bin/bd ./cmd/bd
+	docker build --platform linux/arm64 -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
+
+# RIGS is the space-separated rig names whose cache volume a sandbox mounts:
+# make polecat-caches RIGS="gastown om". A second run changes nothing.
+polecat-caches:
+	scripts/polecat-caches.sh $(RIGS)
+
+# Profiles are imported and the two providers created from the key files under
+# ~/.config/gt; a provider that already exists is left alone, so a rerun is a no-op.
+openshell-providers:
+	scripts/openshell-providers.sh
 
 # How long `make lint` keeps re-running a lint that another worktree's
 # golangci-lint holds the module lock against, in seconds (gt-uoppq). Each
