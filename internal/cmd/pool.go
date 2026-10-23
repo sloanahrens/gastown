@@ -192,7 +192,11 @@ func renderPoolSeatMap(w io.Writer, townRoot string, v poolSeatMapView, live poo
 		}
 	}
 	for _, s := range v.seats {
-		fmt.Fprintf(w, "%-*s  %s  %s\n", width, s.Agent, live.seatCount(s.Agent, s.Cap), v.seatState(s))
+		state := v.seatState(s)
+		if s.PinnedOnly {
+			state += ", pinned-only"
+		}
+		fmt.Fprintf(w, "%-*s  %s  %s\n", width, s.Agent, live.seatCount(s.Agent, s.Cap), state)
 	}
 	if len(v.seats) == 0 {
 		fmt.Fprintln(w, "no seats: polecat_pool.seats is empty, so the dispatcher spawns nothing; gt pool set <agent>=<cap> adds one")

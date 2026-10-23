@@ -1517,7 +1517,7 @@ func specBudgetFromSeats(ts *config.TownSettings, now time.Time, known func(agen
 	// reads each window as of the seats' read (gt-t8new).
 	b.Now = now
 	for _, s := range seats {
-		seat := specdispatch.Seat{Agent: s.Agent, Cap: s.Cap}
+		seat := specdispatch.Seat{Agent: s.Agent, Cap: s.Cap, PinnedOnly: s.PinnedOnly}
 		// Copy a window only when there is one: a typed nil *Window stored in
 		// the SeatWindow interface would read as a window and be called on.
 		if s.Window != nil {

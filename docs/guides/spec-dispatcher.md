@@ -196,7 +196,10 @@ list.
 A bead with no `agent:<name>` label draws uniformly at random among the agents
 with a free, open seat. The draw is per agent, not per free slot, so a seat with
 a small cap still gets work and list order prefers no model. A bead labeled
-`agent:<name>` draws only that agent's seat. When the seat is full the tick
+`agent:<name>` draws only that agent's seat. A seat marked `"pinned_only": true`
+in `polecat_pool.seats` is never drawn by an unlabelled bead, only by a bead
+labeled for its agent, within its cap and window; an unlabelled bead facing only
+such seats skips with `seats full`. When the seat is full the tick
 reports `waiting for a <agent> seat`; when it is inside its window, `waiting for
 a <agent> seat, closed until 08:00`; and an agent with no seat in the map is a
 louder skip, `pinned to <agent>, which has no seat in the pool`. None of them

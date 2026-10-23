@@ -240,6 +240,10 @@ type Seat struct {
 	// against Budget.Now, so a seat whose window shuts between the budget's
 	// construction and the choice is seen shut (gt-t8new).
 	Window SeatWindow
+	// PinnedOnly keeps the seat for beads labeled agent:<Agent>. The random
+	// draw for an unlabelled bead passes it over, so a seat opened for one
+	// named bead takes no other (gt-zor86).
+	PinnedOnly bool
 }
 
 // AgentLabelPrefix starts the label that pins a bead to one agent's seats:
@@ -284,12 +288,14 @@ func (s Seat) closedUntil(t time.Time) string {
 
 // takes reports whether the seat may take spec: a bead pinned to an agent (an
 // agent:<name> label) is that agent's alone, and a seat of any other agent
-// leaves it.
+// leaves it. A pinned-only seat takes nothing unlabelled, so only its own
+// agent's labeled beads reach it.
 func (s Seat) takes(spec Spec) bool {
-	if pinned := spec.PinnedAgents(); len(pinned) > 0 && (len(pinned) > 1 || pinned[0] != s.Agent) {
-		return false
+	pinned := spec.PinnedAgents()
+	if len(pinned) == 0 {
+		return !s.PinnedOnly
 	}
-	return true
+	return len(pinned) == 1 && pinned[0] == s.Agent
 }
 
 // reason renders the seat for a report: "seat <agent> <live+1>/<cap>".

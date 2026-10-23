@@ -20,16 +20,20 @@ type SeatConfig struct {
 	Names   []string `json:"names,omitempty"`
 	Backend string   `json:"backend,omitempty"` // "" or "tmux" or "openshell"
 	Sandbox string   `json:"sandbox,omitempty"` // key in TownSettings.Sandboxes; required when Backend is openshell
+	// PinnedOnly keeps the seat for beads labeled agent:<its agent>: the
+	// dispatcher's random draw for unlabelled beads never lands here.
+	PinnedOnly bool `json:"pinned_only,omitempty"`
 }
 
 // Seat is a validated seat, as every reader sees it.
 type Seat struct {
-	Agent   string
-	Cap     int
-	Window  *Window // nil: always open
-	Names   []string
-	Backend string // BackendTmux or BackendOpenShell, never empty
-	Sandbox string // key in TownSettings.Sandboxes; set only for an openshell seat
+	Agent      string
+	Cap        int
+	Window     *Window // nil: always open
+	Names      []string
+	Backend    string // BackendTmux or BackendOpenShell, never empty
+	Sandbox    string // key in TownSettings.Sandboxes; set only for an openshell seat
+	PinnedOnly bool   // only beads labeled agent:<Agent> may take this seat
 }
 
 // Window is a daily closed period in one timezone.
@@ -96,7 +100,7 @@ func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
 		} else if c.Sandbox != "" {
 			return nil, fmt.Errorf("polecat_pool.seats.%s.sandbox: only an openshell seat names a sandbox", a)
 		}
-		s := Seat{Agent: a, Cap: c.Cap, Names: c.Names, Backend: backend, Sandbox: c.Sandbox}
+		s := Seat{Agent: a, Cap: c.Cap, Names: c.Names, Backend: backend, Sandbox: c.Sandbox, PinnedOnly: c.PinnedOnly}
 		if c.Closed != "" {
 			if loc == nil {
 				return nil, fmt.Errorf("polecat_pool.seats.%s.closed needs polecat_pool.timezone", a)

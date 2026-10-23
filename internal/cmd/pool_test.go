@@ -560,6 +560,49 @@ func TestPoolShowSeatMapPrintsEachAgentAndTheTotal(t *testing.T) {
 	}
 }
 
+// show marks a pinned-only seat, and set changes a cap without dropping the key
+// (gt-zor86).
+func TestPoolPinnedOnlySeatShowsAndSurvivesSet(t *testing.T) {
+	t.Parallel()
+	settings := `{
+  "type": "town-settings",
+  "version": 1,
+  "agents": {"claude-sonnet": {"command": "claude"}, "deepseek-flash": {"command": "claude"}},
+  "polecat_pool": {"seats": {
+    "claude-sonnet": {"cap": 2},
+    "deepseek-flash": {"cap": 1, "pinned_only": true}
+  }}
+}`
+	root := poolTestTown(t, settings, "")
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := runPoolSeatMapShow(&out, root, ts, time.Now(), poolShowLive{ok: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"deepseek-flash  0/1  open, pinned-only", "claude-sonnet   0/2  open\n"} {
+		if !strings.Contains(out.String(), want) {
+			t.Errorf("show output lacks %q:\n%s", want, out.String())
+		}
+	}
+
+	if err := runPoolSetSeats(&bytes.Buffer{}, root, []poolSeatCap{{Agent: "claude-sonnet", Cap: 3}}, nil, 0, false); err != nil {
+		t.Fatal(err)
+	}
+	after, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(root))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seat := after.PolecatPool.Seats["deepseek-flash"]; !seat.PinnedOnly || seat.Cap != 1 {
+		t.Errorf("gt pool set changed the pinned-only seat: %+v", seat)
+	}
+	if seat := after.PolecatPool.Seats["claude-sonnet"]; seat.Cap != 3 || seat.PinnedOnly {
+		t.Errorf("gt pool set did not change claude-sonnet alone: %+v", seat)
+	}
+}
+
 // A picture that could not be read is no count: show names the caps and the
 // total cap rather than inventing a zero (gt-bc9b6).
 func TestPoolShowSeatMapNamesTheCapsWithoutARoster(t *testing.T) {
