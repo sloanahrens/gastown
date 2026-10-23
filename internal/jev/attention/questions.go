@@ -4,8 +4,8 @@ import "github.com/steveyegge/gastown/internal/jev"
 
 // QuestionVersion is the version of the question set. A log line carries it,
 // so an answer can be traced to the wording that produced it. Change it when a
-// question or a level changes.
-const QuestionVersion = 1
+// question or a level changes. Version 2 dropped routine_action_fixes (gt-xu56u).
+const QuestionVersion = 2
 
 // The question ids. A log line's answers are keyed by these.
 const (

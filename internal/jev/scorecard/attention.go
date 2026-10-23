@@ -73,9 +73,9 @@ func attentionID(l jevattention.Line) string {
 	return l.Key + "@" + l.FirstSeen.UTC().Format(time.RFC3339Nano)
 }
 
-// Parse reads one battery line. A line whose call failed has no answers and
-// one from an older question set cannot be compared with this one, so both
-// are skipped and counted.
+// Parse reads one battery line. A line whose call failed has no answers, and
+// one at a question set newer than this scorecard knows cannot be compared
+// with it, so both are skipped and counted.
 func (a *attentionAdapter) Parse(raw []byte) (Item, error) {
 	var l jevattention.Line
 	if err := json.Unmarshal(raw, &l); err != nil {
@@ -84,8 +84,8 @@ func (a *attentionAdapter) Parse(raw []byte) (Item, error) {
 	if l.Key == "" || l.FirstSeen.IsZero() {
 		return Item{}, errors.New("attention line needs a key and a first_seen")
 	}
-	if l.QuestionVersion != jevattention.QuestionVersion {
-		return Item{}, fmt.Errorf("attention line asked question set %d, the scorecard reads %d", l.QuestionVersion, jevattention.QuestionVersion)
+	if !readableQuestionSet(l.QuestionVersion, jevattention.QuestionVersion) {
+		return Item{}, fmt.Errorf("attention line asked question set %d, the scorecard reads %d or older", l.QuestionVersion, jevattention.QuestionVersion)
 	}
 	if l.Answers == nil {
 		return Item{}, errors.New("attention line has no answers: its call failed")
@@ -131,7 +131,7 @@ func (a *attentionAdapter) Label(ctx context.Context, item Item) (Labeling, erro
 	}
 
 	if d, ok := a.disposition(rec); ok {
-		return dispositionLabeling(d), nil
+		return askedLabels(item, dispositionLabeling(d)), nil
 	}
 	if rec.ClearedAt == nil {
 		return Labeling{}, nil
@@ -144,7 +144,7 @@ func (a *attentionAdapter) Label(ctx context.Context, item Item) (Labeling, erro
 		return Labeling{}, err
 	}
 	if lab, ok := mechanismLabeling(rec.Kind, line.SHA, issue); ok {
-		return lab, nil
+		return askedLabels(item, lab), nil
 	}
 	if rec.ClearedAt.Sub(rec.FirstSeen) <= selfClearWindow && !a.acked(rec) && quiet(line, issue) {
 		return Labeling{Labeled: true, Labels: map[QuestionID]bool{jevattention.QClearsOnItsOwn: true}, Rule: ruleClearedWithinWindow}, nil
@@ -264,6 +264,24 @@ func lifeOf(recs []attention.Record, first time.Time) (attention.Record, bool) {
 		}
 	}
 	return attention.Record{}, false
+}
+
+// askedLabels drops a label for a question the line has no answer for. A rule
+// still reads an item's ending after the battery stopped asking one of its
+// questions, and a label with no answer to score it against would be counted
+// as unmatched, so it is dropped.
+func askedLabels(item Item, lab Labeling) Labeling {
+	out := make(map[QuestionID]bool, len(lab.Labels))
+	for id, v := range lab.Labels {
+		if _, answered := item.Answers[id]; answered {
+			out[id] = v
+		}
+	}
+	if len(out) == 0 {
+		return Labeling{}
+	}
+	lab.Labels = out
+	return lab
 }
 
 // dispositionLabeling is the label a disposition sets. Each disposition sets

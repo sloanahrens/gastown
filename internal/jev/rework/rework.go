@@ -49,8 +49,9 @@ const (
 
 	// Version identifies the question set. It is written to every log line, so
 	// an answer can be told from one produced by different wording. Bump it
-	// when a question id, its text, its options or a level changes.
-	Version = 1
+	// when a question id, its text, its options or a level changes. Version 2
+	// dropped reworked_to_land (gt-xu56u).
+	Version = 2
 )
 
 // Asker asks one multi-question Ask. *jev.Client satisfies it.

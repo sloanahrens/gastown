@@ -66,8 +66,8 @@ func reworkID(l rework.Line) string {
 }
 
 // Parse reads one refusal line. A line that has no answers, names no
-// submission the refusal judged, or was asked under another question set
-// cannot be compared with this one, so it is skipped.
+// submission the refusal judged, or was asked under a question set newer than
+// this scorecard knows cannot be compared with this one, so it is skipped.
 func (a *reworkAdapter) Parse(raw []byte) (Item, error) {
 	var l rework.Line
 	if err := json.Unmarshal(raw, &l); err != nil {
@@ -76,8 +76,8 @@ func (a *reworkAdapter) Parse(raw []byte) (Item, error) {
 	if l.Rig == "" || l.Bead == "" || l.Attempt < 1 || l.TS.IsZero() || l.Refused.IsZero() {
 		return Item{}, errors.New("rework line needs a rig, a bead, an attempt, a ts and a refused time")
 	}
-	if l.QuestionVersion != rework.Version {
-		return Item{}, fmt.Errorf("rework line asked question set %d, the scorecard reads %d", l.QuestionVersion, rework.Version)
+	if !readableQuestionSet(l.QuestionVersion, rework.Version) {
+		return Item{}, fmt.Errorf("rework line asked question set %d, the scorecard reads %d or older", l.QuestionVersion, rework.Version)
 	}
 	if l.Answers == nil {
 		return Item{}, errors.New("rework line has no answers")
@@ -99,15 +99,20 @@ func (a *reworkAdapter) Parse(raw []byte) (Item, error) {
 // The label is the first landing of the bead after the refusal: the refused
 // head itself landing is false, since the refusal let the work through without
 // a rework commit, and any other head landing is true, since the bead landed
-// only after a later submission. A bead that has not landed yet is unlabeled:
-// the answer is still open. So is a refusal whose rejection block named no
-// head, since no landing can be compared with it. So is a first landing that
-// names no head: it cannot be told from the refused head, so it is not labeled
-// as a later one.
+// only after a later submission. A line asked after reworked_to_land left the
+// battery is unlabeled: it gave no answer for the label to score against, even
+// though the landings could label it. A bead that has not landed yet is
+// unlabeled: the answer is still open. So is a refusal whose rejection block
+// named no head, since no landing can be compared with it. So is a first
+// landing that names no head: it cannot be told from the refused head, so it
+// is not labeled as a later one.
 func (a *reworkAdapter) Label(_ context.Context, item Item) (Labeling, error) {
 	line, ok := a.lines[item.ID]
 	if !ok {
 		return Labeling{}, fmt.Errorf("item %s was not parsed by the rework adapter", item.ID)
+	}
+	if _, asked := line.Answers[rework.QReworkedToLand]; !asked {
+		return Labeling{}, nil
 	}
 	if line.Head == "" {
 		return Labeling{}, nil

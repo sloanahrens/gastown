@@ -25,6 +25,10 @@ var updateAttentionScorecardGolden = flag.Bool("update-attention-scorecard-golde
 // hour after the one before it, so no two lives overlap.
 var attentionBase = time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 
+// routineQuestionSet is the last attention question set that asked
+// routine_action_fixes.
+const routineQuestionSet = 1
+
 // attentionCase is one item life in the test town, and what the adapter must
 // say about it. A zero clear is a life still standing.
 type attentionCase struct {
@@ -46,6 +50,10 @@ type attentionCase struct {
 	// notLive writes the battery line as one asked after the item cleared,
 	// which carries no bead.
 	notLive bool
+	// oldSet writes the line under the last question set that asked
+	// routine_action_fixes, as an older line in the log was. A rule that
+	// labels routine_action_fixes needs that answer to score against.
+	oldSet bool
 	// want is the labels the adapter must set, nil when it must leave the item
 	// unlabeled; wantRule names the rule that sets them.
 	want     map[string]bool
@@ -80,8 +88,8 @@ func attentionCases() []attentionCase {
 			want:  map[string]bool{"needs_human": false, "clears_on_its_own": true}, wantRule: "ack:noise"},
 		{name: "a fixed-by-overseer disposition labels a routine fix", kind: attention.KindRejectedTwice,
 			key: "rework:gt-w5", bead: "gt-w5", clear: 3 * time.Hour, ack: attention.DispositionFixedByOverseer,
-			issue: &beads.Issue{ID: "gt-w5", Status: "closed", CloseReason: "Landed on main"},
-			want:  map[string]bool{"routine_action_fixes": true}, wantRule: "ack:fixed-by-overseer"},
+			issue: &beads.Issue{ID: "gt-w5", Status: "closed", CloseReason: "Landed on main"}, oldSet: true,
+			want: map[string]bool{"routine_action_fixes": true}, wantRule: "ack:fixed-by-overseer"},
 		{name: "a risk-path FAIL needs a human", kind: attention.KindRiskPath,
 			key: "risk:gt-r6:abc1234", bead: "gt-r6", sha: "abc1234", clear: time.Hour,
 			issue: &beads.Issue{ID: "gt-r6", Status: "open", Notes: "OVERSEER REVIEW abc1234 FAIL findings=gt-f6"},
@@ -98,7 +106,7 @@ func attentionCases() []attentionCase {
 			issue: &beads.Issue{ID: "gt-w9", Status: "closed", CloseReason: "superseded by gt-w10"},
 			want:  map[string]bool{"needs_human": true}, wantRule: "rejected-twice:superseded"},
 		{name: "a rework landed from a polecat branch is routine", kind: attention.KindRejectedTwice,
-			key: "rework:gt-w11", bead: "gt-w11", clear: 3 * time.Hour,
+			key: "rework:gt-w11", bead: "gt-w11", clear: 3 * time.Hour, oldSet: true,
 			issue: &beads.Issue{ID: "gt-w11", Status: "closed", CloseReason: "Landed on main\ntarget_branch: main",
 				Notes: "LANDING RECORD\nlanded_commit: abc\nbranch: polecat/furiosa/gt-w11+x9"},
 			want: map[string]bool{"routine_action_fixes": true}, wantRule: "rejected-twice:landed-routine"},
@@ -127,7 +135,7 @@ func attentionCases() []attentionCase {
 			issue: &beads.Issue{ID: "gt-w19", Status: "closed", CloseReason: "Superseded by gt-w20"},
 			want:  map[string]bool{"needs_human": true}, wantRule: "rejected-twice:superseded"},
 		{name: "a landed reason is matched whatever its case", kind: attention.KindRejectedTwice,
-			key: "rework:gt-w21", bead: "gt-w21", clear: 3 * time.Hour,
+			key: "rework:gt-w21", bead: "gt-w21", clear: 3 * time.Hour, oldSet: true,
 			issue: &beads.Issue{ID: "gt-w21", Status: "closed", CloseReason: "landed on main",
 				Notes: "LANDING RECORD\nbranch: polecat/furiosa/gt-w21+x9"},
 			want: map[string]bool{"routine_action_fixes": true}, wantRule: "rejected-twice:landed-routine"},
@@ -166,14 +174,19 @@ func writeAttentionTown(t *testing.T, town string, cases []attentionCase) {
 		if c.legacyAck {
 			history = append(history, attention.AckRecord{TS: raised.Add(time.Minute), Key: c.key, Kind: c.kind})
 		}
-		lines = append(lines, jevattention.Line{
+		line := jevattention.Line{
 			TS: raised.Add(2 * time.Minute), Key: c.key, Kind: c.kind, Bead: c.bead, SHA: c.sha,
 			FirstSeen: raised, Live: !c.notLive, QuestionVersion: jevattention.QuestionVersion, Model: "test-model",
 			Answers: &jevattention.Answers{
-				NeedsHuman: 0.7, ClearsOnItsOwn: 0.2, RoutineActionFixes: ptr(0.1), RepeatsOpenItem: 0,
+				NeedsHuman: 0.7, ClearsOnItsOwn: 0.2, RepeatsOpenItem: 0,
 				Urgency: jevattention.Urgency{Score: 1, Confidence: 0.8},
 			},
-		})
+		}
+		if c.oldSet {
+			line.QuestionVersion = routineQuestionSet
+			line.Answers.RoutineActionFixes = ptr(0.1)
+		}
+		lines = append(lines, line)
 	}
 	sort.SliceStable(events, func(i, j int) bool { return events[i].TS.Before(events[j].TS) })
 
@@ -356,11 +369,14 @@ func TestAttentionParseSkipsFailedAndForeignLines(t *testing.T) {
 	}
 }
 
-func TestAttentionParseReadsEveryQuestion(t *testing.T) {
+// A line at an older question set is still compared: it asked the questions
+// the battery keeps, in the same words, and its dropped answer is read when it
+// carries one.
+func TestAttentionParseReadsAnOlderQuestionSet(t *testing.T) {
 	t.Parallel()
 	a := newAttentionTestAdapter(t.TempDir(), fakeBeads{})
 	line := jevattention.Line{TS: attentionBase, Key: "host-mem:x", Kind: attention.KindHostMem,
-		FirstSeen: attentionBase, QuestionVersion: jevattention.QuestionVersion, Model: "m",
+		FirstSeen: attentionBase, QuestionVersion: routineQuestionSet, Model: "m",
 		Answers: &jevattention.Answers{NeedsHuman: 0.7, ClearsOnItsOwn: 0.2, RoutineActionFixes: ptr(0.1),
 			RepeatsOpenItem: 0.4, Urgency: jevattention.Urgency{Score: 2, Confidence: 0.9}}}
 	raw, err := json.Marshal(line)
@@ -376,6 +392,9 @@ func TestAttentionParseReadsEveryQuestion(t *testing.T) {
 	}
 	if got := it.Answers[jevattention.QNeedsHuman].Noul; got == nil || *got != 0.7 {
 		t.Errorf("needs_human noul = %v, want 0.7", got)
+	}
+	if got := it.Answers[jevattention.QRoutineActionFixes].Noul; got == nil || *got != 0.1 {
+		t.Errorf("routine_action_fixes noul = %v, want 0.1", got)
 	}
 	if got := it.Answers[jevattention.QUrgency].Score; got == nil || *got != 2 {
 		t.Errorf("urgency score = %v, want 2", got)
@@ -404,6 +423,26 @@ func TestAttentionParseLeavesRoutineUnansweredWhenNotLogged(t *testing.T) {
 	}
 	if len(it.Answers) != 4 {
 		t.Errorf("answers = %d, want the four the line logged", len(it.Answers))
+	}
+}
+
+// A line at the current question set gave no routine_action_fixes answer, so a
+// disposition that would label it is not scored: a label with no answer behind
+// it is counted as unmatched, and the line is left unlabeled instead.
+func TestAttentionLeavesRoutineUnlabeledWithoutItsAnswer(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	c := attentionCase{name: "x", kind: attention.KindRejectedTwice, key: "rework:gt-w5", bead: "gt-w5",
+		clear: 3 * time.Hour, ack: attention.DispositionFixedByOverseer,
+		issue: &beads.Issue{ID: "gt-w5", Status: "closed", CloseReason: "Landed on main"}}
+	writeAttentionTown(t, town, []attentionCase{c})
+
+	rep, err := Build(context.Background(), newAttentionTestAdapter(town, beadsOf([]attentionCase{c})), time.Time{})
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if lr := rep.Lines[0]; lr.Labeled || len(lr.Labels) != 0 {
+		t.Fatalf("labeled %v by %q, want unlabeled: the line has no routine_action_fixes answer", lr.Labels, lr.Rule)
 	}
 }
 

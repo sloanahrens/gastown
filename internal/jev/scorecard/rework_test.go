@@ -16,30 +16,51 @@ var refusedAt = time.Date(2026, 10, 1, 12, 0, 0, 0, time.UTC)
 // refusedHead is the submission the fixture refusal judged.
 const refusedHead = "abc123def456"
 
-// reworkLine is one refusal line as the battery writes it.
-func reworkLine(t *testing.T, bead, head string) []byte {
+// reworkOldQuestionSet is the last refusal question set that asked
+// reworked_to_land. The rules below label that answer, so their lines are
+// logged under the set, as the older lines in a live log were.
+const reworkOldQuestionSet = 1
+
+// reworkLineAt marshals one refusal line asked under question set version.
+func reworkLineAt(t *testing.T, bead, head string, version int, answers map[string]rework.Answer) []byte {
 	t.Helper()
-	reworked := 0.8
 	raw, err := json.Marshal(rework.Line{
-		TS:      refusedAt.Add(20 * time.Minute),
-		Refused: refusedAt,
-		Rig:     "gastown",
-		Bead:    bead,
-		Attempt: 1,
-		Head:    head,
-		Verdict: land.VerdictRequestChanges,
-		Score:   0.6,
-		Answers: map[string]rework.Answer{
-			rework.QReworkedToLand: {Noul: &reworked},
-			rework.QCause:          {Choice: "tests_missing"},
-		},
+		TS:              refusedAt.Add(20 * time.Minute),
+		Refused:         refusedAt,
+		Rig:             "gastown",
+		Bead:            bead,
+		Attempt:         1,
+		Head:            head,
+		Verdict:         land.VerdictRequestChanges,
+		Score:           0.6,
+		Answers:         answers,
 		Model:           "jev-1.13.0",
-		QuestionVersion: rework.Version,
+		QuestionVersion: version,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return raw
+}
+
+// reworkLine is one refusal line as the battery wrote it while it asked
+// reworked_to_land.
+func reworkLine(t *testing.T, bead, head string) []byte {
+	t.Helper()
+	reworked := 0.8
+	return reworkLineAt(t, bead, head, reworkOldQuestionSet, map[string]rework.Answer{
+		rework.QReworkedToLand: {Noul: &reworked},
+		rework.QCause:          {Choice: "tests_missing"},
+	})
+}
+
+// currentReworkLine is one refusal line as the battery writes it now: the
+// cause answer and no reworked_to_land.
+func currentReworkLine(t *testing.T, bead, head string) []byte {
+	t.Helper()
+	return reworkLineAt(t, bead, head, rework.Version, map[string]rework.Answer{
+		rework.QCause: {Choice: "tests_missing"},
+	})
 }
 
 // landedWith writes one landing record for bead at landed with head onto the
@@ -169,6 +190,19 @@ func TestReworkLeavesAHeadlessLandingUnlabeled(t *testing.T) {
 
 	if got.Labeled {
 		t.Errorf("Labeling = %+v, want unlabeled", got)
+	}
+}
+
+// A line asked after reworked_to_land left the battery has no answer for the
+// label to score against, so it stays unlabeled even where the landings would
+// label it: a label with nothing behind it would count as unmatched.
+func TestReworkLeavesACurrentLineUnlabeled(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	landedWith(t, town, "gt-abc", "999999aaaaaa", refusedAt.Add(3*time.Hour))
+
+	if got := labelRework(t, town, currentReworkLine(t, "gt-abc", refusedHead)); got.Labeled {
+		t.Errorf("Labeling = %+v, want unlabeled: the line never answered reworked_to_land", got)
 	}
 }
 

@@ -38,6 +38,16 @@ type Item struct {
 	Context map[QuestionID]string
 }
 
+// readableQuestionSet reports whether a line logged under question set version
+// is one the scorecard can compare with the battery's current set. A battery
+// drops a question by raising its version and leaving that question out, so an
+// older line asked the remaining questions in the same words and its answers
+// still compare. A set newer than current is one this scorecard has not been
+// taught, and set 0 predates every battery.
+func readableQuestionSet(version, current int) bool {
+	return version >= 1 && version <= current
+}
+
 // Labeling is what an adapter finds for one item: each question's label, and
 // the rule that set them, which the --json report names for the line.
 type Labeling struct {
