@@ -289,7 +289,7 @@ func (s Seat) closedUntil(t time.Time) string {
 // takes reports whether the seat may take spec: a bead pinned to an agent (an
 // agent:<name> label) is that agent's alone, and a seat of any other agent
 // leaves it. A pinned-only seat takes nothing unlabelled, so only its own
-// agent's labelled beads reach it.
+// agent's labeled beads reach it.
 func (s Seat) takes(spec Spec) bool {
 	pinned := spec.PinnedAgents()
 	if len(pinned) == 0 {

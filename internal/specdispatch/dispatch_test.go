@@ -541,7 +541,7 @@ func TestChooseSeatPinnedAgent(t *testing.T) {
 }
 
 // A pinned-only seat is never drawn for an unlabelled bead, nor for a bead
-// pinned to another agent; a bead labelled for its agent still takes it within
+// pinned to another agent; a bead labeled for its agent still takes it within
 // its cap (gt-zor86).
 func TestChooseSeatPinnedOnly(t *testing.T) {
 	t.Parallel()
