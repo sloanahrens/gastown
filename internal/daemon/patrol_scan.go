@@ -676,8 +676,12 @@ func (h *patrolScanHost) doneAge(rig, name, workBead string, now time.Time) (tim
 	return h.d.seatLastDoneAge(rig, name, workBead, now)
 }
 
+// ActiveWork lists the rig's assigned work beads for the orphan and held-wisp
+// passes. `open` is in the set for the same reason as AssignedWork: a bead
+// assigned to a seat in status open is still the seat's work, so a passes that
+// skipped it would release or close work its polecat still holds (gt-gnqmu).
 func (h *patrolScanHost) ActiveWork(rig string) ([]patrolscan.Work, error) {
-	issues, err := h.listByStatus(rig, "", "hooked", "in_progress")
+	issues, err := h.listByStatus(rig, "", "hooked", "in_progress", "open")
 	if err != nil {
 		return nil, err
 	}

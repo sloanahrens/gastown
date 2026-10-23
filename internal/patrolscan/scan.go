@@ -524,8 +524,10 @@ type Env interface {
 	// ticks rather than from liveness.
 	MarkSubmitted(rig, polecat, workBead string) error
 
-	// ActiveWork lists hooked and in_progress beads assigned to polecats of
-	// the rig (assignee "<rig>/polecats/<name>").
+	// ActiveWork lists hooked, in_progress and open beads assigned to polecats
+	// of the rig (assignee "<rig>/polecats/<name>"). All three are assigned
+	// statuses; a host that drops one hides that work from the orphan and
+	// held-wisp passes (gt-gnqmu).
 	ActiveWork(rig string) ([]Work, error)
 	// PolecatDirExists reports whether the polecat's directory exists.
 	PolecatDirExists(rig, polecat string) (bool, error)
