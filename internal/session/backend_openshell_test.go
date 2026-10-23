@@ -559,6 +559,7 @@ func TestOpenShellStageDirIsPrivate(t *testing.T) {
 // creates the polecat's session on the same server, and tmux refuses a
 // duplicate (found on a live sandbox, gt-t1798).
 func TestOpenShellMainScriptHolderIsNotThePolecatSession(t *testing.T) {
+	t.Parallel()
 	if sandboxHolderSession == openshellTestSession {
 		t.Fatalf("holder session %q equals the polecat session", sandboxHolderSession)
 	}
