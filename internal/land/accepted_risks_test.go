@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -676,6 +677,60 @@ func TestLandAcceptedRiskAuditWriteFailureWarnsAndLands(t *testing.T) {
 		!strings.Contains(s, "connection refused") || !strings.Contains(s, "escalation store is down") {
 		t.Errorf("the landing log does not name both failed writes:\n%s", s)
 	}
+}
+
+// TestRecordAcceptedRisksLeavesTheNoteOnce: a review recorded again for the same
+// head and the same entries, as a landing retried after a failure past the
+// review is, leaves one landing note, not two (gt-tvhg8).
+func TestRecordAcceptedRisksLeavesTheNoteOnce(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	used := []AcceptedRisk{{CommentID: "c-1", Author: "town/crew/overseer", Date: "2026-10-23", Excerpt: "the retry is bounded"}}
+	l := f.lander()
+	l.recordAcceptedRisks(f.work, used)
+	l.recordAcceptedRisks(f.work, used)
+	issue, err := f.bd.Show(f.work.BeadID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(issue.Notes, AcceptedRiskUsedMarker); n != 1 {
+		t.Fatalf("the bead carries %d %s notes after two identical reviews, want one; notes:\n%s", n, AcceptedRiskUsedMarker, issue.Notes)
+	}
+}
+
+// TestRecordAcceptedRisksTimeoutLogsAndReturns: a landing note that does not
+// finish within the audit timeout logs one line and returns, so the landing is
+// not held up by the audit. The write blocks until the test ends, so the
+// timeout is the only way out and the outcome does not depend on timing.
+func TestRecordAcceptedRisksTimeoutLogsAndReturns(t *testing.T) {
+	t.Parallel()
+	f := newLandFixture(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	l := f.lander()
+	l.Beads = &hangingNoteBeads{Fake: f.bd, release: release}
+	l.auditTimeout = 10 * time.Millisecond
+	var out strings.Builder
+	l.Out = &out
+	l.recordAcceptedRisks(f.work, []AcceptedRisk{{CommentID: "c-1", Author: "town/crew/overseer", Date: "2026-10-23", Excerpt: "the retry is bounded"}})
+	if want := "did not finish in 10ms; the landing is unaffected"; !strings.Contains(out.String(), want) {
+		t.Errorf("log = %q, want the timed-out audit named (%q)", out.String(), want)
+	}
+}
+
+// hangingNoteBeads is a beads database whose ACCEPTED-RISK USED landing note
+// never returns until release closes; every other write is left alone.
+type hangingNoteBeads struct {
+	*beadsfake.Fake
+	release <-chan struct{}
+}
+
+func (b *hangingNoteBeads) AppendNotes(id, note string) error {
+	if strings.HasPrefix(note, AcceptedRiskUsedMarker) {
+		<-b.release
+		return nil
+	}
+	return b.Fake.AppendNotes(id, note)
 }
 
 // noteFailingBeads is a beads database that refuses the ACCEPTED-RISK USED

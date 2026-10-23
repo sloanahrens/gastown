@@ -528,6 +528,9 @@ func (d *Daemon) newRigLandingWorker(rigName string) (*landworker.Worker, error)
 		d.logger.Printf("landing_worker: %s: om follow-up feed on (landing.followups; %d open %s beads stop it)",
 			rigName, land.FollowupBackpressureOrDefault(lander.FollowupBackpressure), land.FollowUpLabel)
 	}
+	// Every use of an accepted risk reaches the overseer, whether or not the
+	// follow-up feed is on (gt-tvhg8).
+	lander.AcceptedRiskAlert = d.acceptedRiskAlert()
 	// A test that keeps failing for beads that did not touch it is the daemon's
 	// to escalate and file a repair for (gt-xvw20); the watch does that off the
 	// landing's goroutine, where a retrying alert cannot hold up a rejection.
@@ -1066,6 +1069,17 @@ func (d *Daemon) followupBackpressureAlert(rigName string) func(message string) 
 		if err := d.escalateAlertSeverity("low", key, "landing_worker", message); err != nil {
 			d.logger.Printf("landing_worker: %s: the follow-up backpressure item was not raised: %v", rigName, err)
 		}
+	}
+}
+
+// acceptedRiskAlert is the attention item the overseer sees for a review that
+// was given an accepted risk (gt-tvhg8). It is a MEDIUM escalation: the risk
+// was accepted on purpose, so the overseer should look, not be paged. The key
+// names the bead and the head reviewed, so the escalation keeps one item per
+// head. A failed delivery goes back to the lander, which logs it and lands.
+func (d *Daemon) acceptedRiskAlert() func(key, message string) error {
+	return func(key, message string) error {
+		return d.escalateAlertSeverity("MEDIUM", key, "landing_worker", message)
 	}
 }
 
