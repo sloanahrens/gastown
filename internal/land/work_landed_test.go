@@ -2,7 +2,6 @@ package land
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -345,7 +344,11 @@ func TestWorkLandedOnTargetUsesTheRigDefaultBranch(t *testing.T) {
 	g.Clone(t, origin, repo)
 	g.SetRef(t, repo, "refs/remotes/origin/develop", landed)
 
-	writeRigDefaultBranch(t, rigPath, "develop")
+	// The rig config a `gt rig add --default-branch develop` writes.
+	cfg := `{"type": "rig", "name": "rig", "default_branch": "develop"}`
+	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(cfg), 0o644); err != nil {
+		t.Fatalf("write rig config: %v", err)
+	}
 	issue := &beads.Issue{ID: "gt-abc", Status: "closed", Notes: LandingRecord{
 		BeadID: "gt-abc", Head: head, LandedCommit: landed, Target: "develop",
 	}.NoteBlock()}
@@ -366,16 +369,6 @@ func TestWorkLandedOnTargetUsesTheRigDefaultBranch(t *testing.T) {
 	// branch the target resolves to.
 	if v := WorkLandedOnTarget(g.Open(repo), head, "", rigPath, "gt-abc", issue); !v.Landed {
 		t.Fatalf("WorkLandedOnTarget(landing record on develop) = %+v; want landed", v)
-	}
-}
-
-// writeRigDefaultBranch gives rigPath a config.json naming branch as the rig's
-// default, as `gt rig add --default-branch` writes one.
-func writeRigDefaultBranch(t *testing.T, rigPath, branch string) {
-	t.Helper()
-	cfg := fmt.Sprintf(`{"type": "rig", "name": "rig", "default_branch": %q}`, branch)
-	if err := os.WriteFile(filepath.Join(rigPath, "config.json"), []byte(cfg), 0o644); err != nil {
-		t.Fatalf("write rig config: %v", err)
 	}
 }
 
