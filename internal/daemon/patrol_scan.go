@@ -354,6 +354,9 @@ type patrolScanHost struct {
 	// agentRecord is the polecat agent bead's recorded agent when nil: a seam
 	// for the unit tier, which cannot start bd.
 	agentRecord func(rig, name string) (string, error)
+	// sandboxExists asks the gateway whether it has a sandbox called name when
+	// nil: a seam for the unit tier, which has no gateway.
+	sandboxExists func(gateway, name string) (bool, error)
 	// unrecordedLogged is set once the census has listed the polecats that
 	// record no agent. The host lives one tick (patrol_scan.go), so each tick
 	// logs them once however many restarts ask.

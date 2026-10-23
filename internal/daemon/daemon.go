@@ -3022,6 +3022,13 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 	_ = events.LogFeedTo(d.config.TownRoot, events.TypeSessionDeath, sessionName,
 		events.SessionDeathPayload(sessionName, rigName+"/polecats/"+polecatName, "crash detected by daemon health check", events.CallerDaemon))
 
+	// A sandbox seat whose sandbox is gone and whose work was handed back
+	// keeps a hook nothing releases; clear it so the roster stops counting the
+	// seat as dead-hooked.
+	if (&patrolScanHost{d: d}).reapStaleSandboxHook(rigName, polecatName, sessionName, hookBead) {
+		return
+	}
+
 	// The patrol_scan tick owns the restart (gt-4k3fj.6); a rig it does not
 	// cover gets no automatic restart.
 	if d.patrolScanActiveForRig(rigName) {
