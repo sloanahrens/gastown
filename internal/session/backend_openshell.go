@@ -49,9 +49,14 @@ const cloneScript = `exec git -c "http.extraHeader=Authorization: token $FORGEJO
 // $2 the redirect target.
 const redirectScript = `mkdir -p "$1/.beads" && printf '%s\n' "$2" > "$1/.beads/redirect"`
 
+// sandboxHolderSession names the tmux session the main process creates to
+// start the server. It must never equal a polecat session id: the session
+// start creates that one on this server, and tmux refuses a duplicate.
+const sandboxHolderSession = "boot"
+
 // sandboxMainScript is the sandbox's main process: it starts the tmux server
 // the host's exec'd commands talk to, then keeps the sandbox alive.
-const sandboxMainScript = `tmux -L ` + SandboxTmuxSocket + ` new-session -d -s "$1" -c ` + sandboxHome + ` && exec sleep infinity`
+const sandboxMainScript = `tmux -L ` + SandboxTmuxSocket + ` new-session -d -s ` + sandboxHolderSession + ` -c ` + sandboxHome + ` && exec sleep infinity`
 
 // openshellBackend hosts one polecat's session in an OpenShell sandbox named
 // for the session. Its tmux client runs every command through
@@ -271,7 +276,7 @@ func (b *openshellBackend) createSpec(spec SpawnSpec) (sandbox.CreateSpec, error
 		Memory:     b.profile.Memory,
 		Labels:     map[string]string{"rig": spec.Rig, "polecat": spec.Polecat},
 		Env:        b.contract(spec),
-		Command:    []string{"sh", "-c", sandboxMainScript, "sh", spec.Session},
+		Command:    []string{"sh", "-c", sandboxMainScript},
 	}
 	if b.profile.CacheVolume != "" {
 		cfg, err := cacheDriverConfig(b.profile.CacheVolume, spec.Rig)
