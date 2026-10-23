@@ -118,3 +118,23 @@ func TestListSessionsIncludesExtraSessions(t *testing.T) {
 		t.Fatalf("ListSessions = %v", got)
 	}
 }
+
+// A Routed client neither routes nor adds the extra sessions, so a caller that
+// lists a socket to clean it up sees only what is on that socket. The same
+// socket listed by a client that is not Routed also returns the extra session
+// (TestListSessionsIncludesExtraSessions), so this assertion fails without it.
+//
+//testpolicy:allow parallel — installs the process-wide extra-sessions hook, which another test must not see mid-run
+func TestRoutedListSessionsOmitsExtraSessions(t *testing.T) {
+	var calls [][]string
+	legacy := newTmuxForTest("legacy-socket", recordExec(&calls, "gt-rig-local\n"), nil).Routed()
+	SetExtraSessions(func() []string { return []string{"gt-rig-box"} })
+	t.Cleanup(func() { SetExtraSessions(nil) })
+	got, err := legacy.ListSessions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "gt-rig-local" {
+		t.Fatalf("ListSessions = %v, want only the socket's own session", got)
+	}
+}

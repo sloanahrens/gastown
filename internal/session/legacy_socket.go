@@ -24,9 +24,17 @@ type legacySockets struct {
 }
 
 func newLegacySockets(prefixes *PrefixRegistry) legacySockets {
+	return newLegacySocketsWith(prefixes, tmux.NewTmuxWithSocket)
+}
+
+// newLegacySocketsWith builds the cleanup's view of the legacy sockets from
+// build, the client for one socket. Every client is Routed: it neither routes nor
+// lists the sandbox sessions, so the cleanup only ever sees, and kills, what is
+// on that socket.
+func newLegacySocketsWith(prefixes *PrefixRegistry, build func(socket string) *tmux.Tmux) legacySockets {
 	return legacySockets{
 		current:  tmux.GetDefaultSocket(),
-		open:     func(socket string) legacySocketTmux { return tmux.NewTmuxWithSocket(socket) },
+		open:     func(socket string) legacySocketTmux { return build(socket).Routed() },
 		prefixes: prefixes,
 	}
 }
