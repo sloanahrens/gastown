@@ -9,6 +9,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -16,14 +17,20 @@ import (
 	"github.com/steveyegge/gastown/internal/sandbox"
 )
 
-func untarRuntime(t *testing.T, data []byte) map[string]string {
+// runtimeEntry is one extracted archive member: its body and tar mode.
+type runtimeEntry struct {
+	body string
+	mode int64
+}
+
+func untarRuntime(t *testing.T, data []byte) map[string]runtimeEntry {
 	t.Helper()
 	gz, err := gzip.NewReader(bytes.NewReader(data))
 	if err != nil {
 		t.Fatal(err)
 	}
 	tr := tar.NewReader(gz)
-	got := map[string]string{}
+	got := map[string]runtimeEntry{}
 	for {
 		h, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -36,7 +43,7 @@ func untarRuntime(t *testing.T, data []byte) map[string]string {
 		if err != nil {
 			t.Fatal(err)
 		}
-		got[h.Name] = string(body)
+		got[h.Name] = runtimeEntry{body: string(body), mode: h.Mode}
 	}
 }
 
@@ -52,10 +59,10 @@ func TestBuildRuntimeArchiveHoldsTheRenderedSettingsAndPrompt(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("archive entries = %v, want .claude.json, settings.json and the system prompt", got)
 	}
-	if !strings.Contains(got[dir+"settings.json"], "/usr/local/bin/gt prime --hook") {
-		t.Errorf("settings.json was not rendered for the sandbox:\n%s", got[dir+"settings.json"])
+	if !strings.Contains(got[dir+"settings.json"].body, "/usr/local/bin/gt prime --hook") {
+		t.Errorf("settings.json was not rendered for the sandbox:\n%s", got[dir+"settings.json"].body)
 	}
-	if prompt := got[dir+"system-prompt-"+openshellTestPolecat+".md"]; prompt != "town at /sandbox/gt/mayor\n" {
+	if prompt := got[dir+"system-prompt-"+openshellTestPolecat+".md"].body; prompt != "town at /sandbox/gt/mayor\n" {
 		t.Errorf("system prompt = %q, want the town root rewritten", prompt)
 	}
 }
@@ -164,14 +171,21 @@ func TestOpenShellPrepareWithoutSettingsTouchesNothing(t *testing.T) {
 func TestBuildRuntimeArchiveSeedsClaudeJSONForTheSandboxWorktree(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	data, err := buildRuntimeArchive(openshellSpawn(town, work))
+	spec := openshellSpawn(town, work)
+	data, err := buildRuntimeArchive(spec)
 	if err != nil {
 		t.Fatalf("buildRuntimeArchive: %v", err)
 	}
-	body, ok := untarRuntime(t, data)[".claude.json"]
+	entry, ok := untarRuntime(t, data)[".claude.json"]
 	if !ok {
 		t.Fatal("the archive has no .claude.json")
 	}
+	body := entry.body
+	rel, err := sandboxRel(spec)
+	if err != nil {
+		t.Fatalf("sandboxRel: %v", err)
+	}
+	wantWorkDir := path.Join(sandboxTownRoot, rel)
 	var cfg struct {
 		Onboarded bool   `json:"hasCompletedOnboarding"`
 		Theme     string `json:"theme"`
@@ -185,8 +199,11 @@ func TestBuildRuntimeArchiveSeedsClaudeJSONForTheSandboxWorktree(t *testing.T) {
 	if !cfg.Onboarded || cfg.Theme != "dark" {
 		t.Errorf("onboarded=%v theme=%q, want onboarding done and the dark theme", cfg.Onboarded, cfg.Theme)
 	}
-	if len(cfg.Projects) != 1 || !cfg.Projects[openshellTestWorkDir].Trusted {
-		t.Errorf("projects = %v, want exactly %s trusted", cfg.Projects, openshellTestWorkDir)
+	if len(cfg.Projects) != 1 || !cfg.Projects[wantWorkDir].Trusted {
+		t.Errorf("projects = %v, want exactly %s trusted", cfg.Projects, wantWorkDir)
+	}
+	if entry.mode != 0o600 {
+		t.Errorf(".claude.json mode = %#o, want 0600", entry.mode)
 	}
 	if strings.Contains(body, town) || strings.Contains(body, "/Users/") {
 		t.Errorf(".claude.json names a host path:\n%s", body)
