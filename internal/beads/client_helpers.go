@@ -477,6 +477,34 @@ func ResetAgentBeadForReuse(c Client, id, reason string) error {
 	return resetAgentBeadForReuse(target, id)
 }
 
+// ResetAgentBeadWhileHooked resets agent bead id (ResetAgentBeadForReuse) only
+// while its hook_bead is still bead, and reports whether it did. A bead that is
+// missing, already reset, or hooked to other work (the seat took new work) is
+// left alone, so a rollback never clobbers a seat that has moved on. The hook is
+// read and the reset written under the agent-bead lock, so a concurrent
+// re-sling cannot slip in between the two.
+func ResetAgentBeadWhileHooked(c Client, id, bead, reason string) (bool, error) {
+	if bead == "" {
+		return false, nil
+	}
+	stillHooked := func(f *AgentFields) bool { return f.HookBead == bead }
+	if b, ok := c.(*Beads); ok {
+		fl, err := b.lockAgentBead(id)
+		if err != nil {
+			return false, fmt.Errorf("locking agent bead %s: %w", id, err)
+		}
+		defer func() { unlockAgentBead(fl) }()
+		return resetAgentBeadIf(b.resolveAgentBead(id), id, stillHooked)
+	}
+	target := ForAgentBead(c)
+	release, err := lockAgentBeadFor(target, id)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	return resetAgentBeadIf(target, id, stillHooked)
+}
+
 // storeResetAgentBeadForReuse is ResetAgentBeadForReuse's *Beads path: the ID
 // routes to its canonical database and the lock is the store's own. The
 // read-modify-write is shared with the Client path (resetAgentBeadForReuse).
@@ -499,9 +527,23 @@ func storeResetAgentBeadForReuse(b *Beads, id string) error {
 // resetAgentBeadForReuse is the read-modify-write of ResetAgentBeadForReuse,
 // with the ID already routed and the agent-bead lock already held.
 func resetAgentBeadForReuse(c Client, id string) error {
+	_, err := resetAgentBeadIf(c, id, nil)
+	return err
+}
+
+// resetAgentBeadIf is resetAgentBeadForReuse for a bead that passes
+// shouldReset (nil: always), and reports whether it reset. A bead that does not
+// exist is not reset when a condition is given, and is an error otherwise.
+func resetAgentBeadIf(c Client, id string, shouldReset func(*AgentFields) bool) (bool, error) {
 	issue, err := c.Show(id)
 	if err != nil {
-		return err
+		if shouldReset != nil && errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	if shouldReset != nil && !shouldReset(ParseAgentFields(issue.Description)) {
+		return false, nil
 	}
 
 	// Preserve the immutable fields (title, role_type, rig); clear the rest.
@@ -521,7 +563,7 @@ func resetAgentBeadForReuse(c Client, id string) error {
 
 	description := FormatAgentDescription(issue.Title, fields)
 	if err := c.Update(id, UpdateOptions{Description: &description}); err != nil {
-		return fmt.Errorf("resetting agent bead fields: %w", err)
+		return false, fmt.Errorf("resetting agent bead fields: %w", err)
 	}
-	return nil
+	return true, nil
 }
