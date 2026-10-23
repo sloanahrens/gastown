@@ -77,17 +77,20 @@ func exitRetiresPolecatSession(exitType string, fromHandoff bool) bool {
 	return isFinalDoneExitType(exitType)
 }
 
-// shouldRetirePolecatSessionAfterDone reports whether a reported exit kills the
-// host tmux session. A sandbox session has no host tmux, so it returns false
-// there: the daemon deletes the sandbox once the bead leaves hooked/in_progress
-// (design 4.7).
+// shouldRetirePolecatSessionAfterDone decides, in one pass, what a reported exit
+// does to the live polecat session. retire is false when the exit is not final
+// (or is gt handoff's mid-work redirect), so the session stays up. killHost
+// reports whether that retire is a host tmux kill; it is false for a sandbox
+// session, which has no host tmux — the daemon deletes the sandbox once the bead
+// leaves hooked/in_progress (design 4.7).
 //
-// sessionBackend is GT_SESSION_BACKEND, read once into the run.
-func shouldRetirePolecatSessionAfterDone(exitType string, fromHandoff bool, sessionBackend string) bool {
+// sessionBackend is GT_SESSION_BACKEND, read once into the run. Both results are
+// the decision; callers do not re-derive it.
+func shouldRetirePolecatSessionAfterDone(exitType string, fromHandoff bool, sessionBackend string) (retire, killHost bool) {
 	if !exitRetiresPolecatSession(exitType, fromHandoff) {
-		return false
+		return false, false
 	}
-	return sessionBackend != backendOpenShell
+	return true, sessionBackend != backendOpenShell
 }
 
 type doneSessionKiller interface {
@@ -387,33 +390,33 @@ func retirePolecatSessionAfterDone(killer doneSessionKiller, reg *session.Prefix
 	return killer.KillSessionWithProcessesExcluding(sessionName, excludePIDs)
 }
 
-// retirePolecatSessionAfterFinalExit decides whether this exit retires the live
-// polecat session and, when it does, tears the session down. The decision and
-// the kill share one function so a final status cannot report itself retired
-// and then skip the kill; tests drive this path directly (gt-5g3e).
+// retirePolecatSessionAfterFinalExit reports and, when the exit retires a host
+// tmux session, tears the polecat session down. The decision and the kill share
+// one function so a host retire cannot report itself and then skip the kill;
+// tests drive this path directly (gt-5g3e).
 //
 // Call it as gt done's last action. retirePolecatSessionAfterDone excludes the
 // caller's own PID, so the durable handoff writes above it still finish.
 //
-// It returns true only when the host tmux session was killed. A sandbox session
-// is still reported retired, without a kill.
-//
-// killer tears the session down (tmux in production); sessionBackend is
-// GT_SESSION_BACKEND, read once by the run; out receives the progress lines.
-func retirePolecatSessionAfterFinalExit(out io.Writer, killer doneSessionKiller, reg *session.PrefixRegistry, exitType string, fromHandoff bool, sessionBackend, rigName, polecatName string, pid int) bool {
-	if !exitRetiresPolecatSession(exitType, fromHandoff) {
+// It returns shouldRetirePolecatSessionAfterDone's decision unchanged, so a
+// sandbox retire is not mistaken for a preserved session. killer tears the
+// session down (tmux in production); sessionBackend is GT_SESSION_BACKEND, read
+// once by the run; out receives the progress lines.
+func retirePolecatSessionAfterFinalExit(out io.Writer, killer doneSessionKiller, reg *session.PrefixRegistry, exitType string, fromHandoff bool, sessionBackend, rigName, polecatName string, pid int) (retire, killHost bool) {
+	retire, killHost = shouldRetirePolecatSessionAfterDone(exitType, fromHandoff, sessionBackend)
+	if !retire {
 		fmt.Fprintf(out, "%s Session preserved for handoff continuation\n", style.Bold.Render("→"))
-		return false
+		return retire, killHost
 	}
 	fmt.Fprintf(out, "%s Polecat session retiring after durable handoff\n", style.Bold.Render("✓"))
-	if !shouldRetirePolecatSessionAfterDone(exitType, fromHandoff, sessionBackend) {
-		return false
+	if !killHost {
+		return retire, killHost
 	}
 	fmt.Fprintf(out, "%s Terminating polecat session\n", style.Bold.Render("→"))
 	if err := retirePolecatSessionAfterDone(killer, reg, rigName, polecatName, pid); err != nil {
 		style.PrintWarning("could not terminate polecat session: %v", err)
 	}
-	return true
+	return retire, killHost
 }
 
 func cleanupStatusAfterSuccessfulPush(status string) string {
@@ -913,8 +916,7 @@ type doneRun struct {
 	// environment the run's seams do.
 	agent Agent
 	env   func(string) string
-	// sessionBackend is GT_SESSION_BACKEND as read once at startup: "openshell"
-	// puts the session in a sandbox with no host tmux to retire.
+	// sessionBackend is GT_SESSION_BACKEND as read once at startup.
 	sessionBackend string
 	// recordAgentState is the CLI layer's agent-bead state write; nil when the
 	// caller has no agent bead to write.
