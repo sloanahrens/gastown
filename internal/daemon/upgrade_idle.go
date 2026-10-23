@@ -135,7 +135,7 @@ func (d *Daemon) daemonWorkHolds() []*daemonWork {
 		holds = append(holds, &daemonWork{name: "a scheduled slings cycle", hard: true})
 	}
 	if d.specDispatchRunning.Load() {
-		holds = append(holds, &daemonWork{name: "a spec dispatch tick"})
+		holds = append(holds, &daemonWork{name: specDispatchHoldLabel})
 	}
 	if d.patrolScanRunning.Load() {
 		holds = append(holds, &daemonWork{name: "a patrol scan"})

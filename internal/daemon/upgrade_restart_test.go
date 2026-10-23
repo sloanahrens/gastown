@@ -1022,6 +1022,65 @@ func TestHousekeepingRestartCapIsTwoMinutes(t *testing.T) {
 	}
 }
 
+// gt-cbaoy: a spec dispatch tick in flight holds the restart for its own bound,
+// measured from when it started, not for the 2m housekeeping cap. The 2m cap
+// restarted the daemon mid-sling and left a seat hooked with no session.
+func TestUpgradeWaitsForASpecDispatchTickToItsBound(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+	now := time.Now()
+	d.specDispatchRunning.Store(true)
+	d.specDispatchStartedAt.Store(now.UnixNano())
+	bound := d.specDispatchTickBound()
+	if bound <= housekeepingRestartCap {
+		t.Fatalf("specDispatchTickBound = %s, want it past the housekeeping cap %s", bound, housekeepingRestartCap)
+	}
+
+	if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(housekeepingRestartCap)) {
+		t.Fatal("restarted under a spec dispatch tick inside its bound")
+	}
+	if !strings.Contains(logs.String(), "waiting for a spec dispatch tick") {
+		t.Fatalf("the wait did not name the spec dispatch tick:\n%s", logs.String())
+	}
+	if !d.checkUpgradeRestart(now.Add(bound)) {
+		t.Fatal("the restart must go once the tick is past its own bound")
+	}
+	if !strings.Contains(logs.String(), "a spec dispatch tick is still in flight after its") {
+		t.Fatalf("no cut-short line naming the spec dispatch tick:\n%s", logs.String())
+	}
+}
+
+// gt-cbaoy: a tick that ends inside its bound releases the restart at once; the
+// restart does not wait out the rest of the bound.
+func TestUpgradeRestartGoesWhenTheSpecDispatchTickEnds(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	d.logger = log.New(io.Discard, "", 0)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+	now := time.Now()
+	d.specDispatchRunning.Store(true)
+	d.specDispatchStartedAt.Store(now.UnixNano())
+	if d.checkUpgradeRestart(now) {
+		t.Fatal("restarted under a spec dispatch tick inside its bound")
+	}
+
+	d.specDispatchRunning.Store(false)
+	if !d.checkUpgradeRestart(now.Add(time.Minute)) {
+		t.Fatal("the restart must go as soon as the tick ends")
+	}
+}
+
 // gt-gb4ij: a post-landing run holds the restart until its verdict, but
 // only up to postLandRestartCap; the worker reruns the tip after the start.
 func TestUpgradeWaitsForAPostLandRunUpToTheCap(t *testing.T) {

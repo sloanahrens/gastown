@@ -88,6 +88,10 @@ const tierSweepHoldLabel = "the tier sweep that is running"
 // flight (gt-oucgn).
 const maintenanceGCHoldLabel = "the maintenance gc cycle"
 
+// specDispatchHoldLabel is what the wait line calls a spec dispatch tick in
+// flight (gt-cbaoy).
+const specDispatchHoldLabel = "a spec dispatch tick"
+
 // restartPendingMarker is daemon/restart-pending.json, written by
 // scripts/install-gt.sh after a smoke-tested install. The daemon adds
 // attempted_from (its own commit) just before it exits for the marker.
@@ -544,12 +548,24 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 	// the old daemon.
 	sweep := d.tierSweepRunning.Load()
 	sweepWaited := d.tierSweepRestartWait(now, waited)
+	// A spec dispatch tick holds the restart up to its own bound, not the
+	// housekeeping cap: the tick is cut at that bound whatever the restart
+	// does, and a restart that cuts it mid-sling leaves the seat hooked with no
+	// session (gt-cbaoy).
+	spec := d.specDispatchRunning.Load()
+	specWaited := d.specDispatchRestartWait(now, waited)
+	var specBound time.Duration
+	if spec {
+		specBound = d.specDispatchTickBound()
+	}
 
 	switch {
 	case postLand && waited < postLandRestartCap:
 		return &daemonWork{name: "the post-land run"}
 	case sweep && sweepWaited < tierSweepRestartCap:
 		return &daemonWork{name: tierSweepHoldLabel}
+	case spec && specWaited < specBound:
+		return &daemonWork{name: specDispatchHoldLabel}
 	case hold != nil && waited < housekeepingRestartCap:
 		return hold
 	}
@@ -570,11 +586,26 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 	} else if d.upgradeWaitLogged == tierSweepHoldLabel {
 		d.logger.Printf("upgrade-restart: the tier sweep closed; restarting")
 	}
-	if hold != nil {
+	if spec && specWaited >= specBound {
+		d.logger.Printf("upgrade-restart: %s is still in flight after its %s bound; restarting anyway (it reruns from the new daemon)", specDispatchHoldLabel, specBound)
+	}
+	if hold != nil && hold.name != specDispatchHoldLabel {
 		d.logger.Printf("upgrade-restart: %s is still in flight after %s; restarting anyway (it reruns from the new daemon)", hold.name, housekeepingRestartCap)
 	}
 	d.upgradeWaitLogged = ""
 	return nil
+}
+
+// specDispatchRestartWait is how long the running spec dispatch tick has been
+// given: its own run since triggerSpecDispatch started it, because the tick is
+// cut at its bound from that start. A tick with no recorded start (a test that
+// sets specDispatchRunning directly) falls back to the marker's clock.
+func (d *Daemon) specDispatchRestartWait(now time.Time, waited time.Duration) time.Duration {
+	started := d.specDispatchStartedAt.Load()
+	if started == 0 {
+		return waited
+	}
+	return max(now.Sub(time.Unix(0, started)), 0)
 }
 
 // noteStuckWait escalates once when a pending restart has waited past
