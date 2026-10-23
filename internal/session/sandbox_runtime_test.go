@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -48,8 +49,8 @@ func TestBuildRuntimeArchiveHoldsTheRenderedSettingsAndPrompt(t *testing.T) {
 	}
 	got := untarRuntime(t, data)
 	dir := "gt/" + openshellTestRig + "/polecats/.claude/"
-	if len(got) != 2 {
-		t.Fatalf("archive entries = %v, want settings.json and the system prompt", got)
+	if len(got) != 3 {
+		t.Fatalf("archive entries = %v, want .claude.json, settings.json and the system prompt", got)
 	}
 	if !strings.Contains(got[dir+"settings.json"], "/usr/local/bin/gt prime --hook") {
 		t.Errorf("settings.json was not rendered for the sandbox:\n%s", got[dir+"settings.json"])
@@ -70,8 +71,8 @@ func TestBuildRuntimeArchiveSkipsAMissingPromptButNotMissingSettings(t *testing.
 	if err != nil {
 		t.Fatalf("buildRuntimeArchive without a system prompt: %v", err)
 	}
-	if got := untarRuntime(t, data); len(got) != 1 {
-		t.Fatalf("archive entries = %v, want only settings.json", got)
+	if got := untarRuntime(t, data); len(got) != 2 {
+		t.Fatalf("archive entries = %v, want only .claude.json and settings.json", got)
 	}
 	if err := os.Remove(filepath.Join(claudeDir, "settings.json")); err != nil {
 		t.Fatal(err)
@@ -155,5 +156,39 @@ func TestOpenShellPrepareWithoutSettingsTouchesNothing(t *testing.T) {
 	}
 	if len(*pushes) != 0 || len(fake.Calls()) != 0 {
 		t.Fatalf("pushes=%v calls=%q; a bad polecat must touch nothing", *pushes, fake.Calls())
+	}
+}
+
+// A fresh sandbox stops at Claude Code's theme picker unless ~/.claude.json
+// says onboarding is done; the worktree must be trusted too (sling 7).
+func TestBuildRuntimeArchiveSeedsClaudeJSONForTheSandboxWorktree(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	data, err := buildRuntimeArchive(openshellSpawn(town, work))
+	if err != nil {
+		t.Fatalf("buildRuntimeArchive: %v", err)
+	}
+	body, ok := untarRuntime(t, data)[".claude.json"]
+	if !ok {
+		t.Fatal("the archive has no .claude.json")
+	}
+	var cfg struct {
+		Onboarded bool   `json:"hasCompletedOnboarding"`
+		Theme     string `json:"theme"`
+		Projects  map[string]struct {
+			Trusted bool `json:"hasTrustDialogAccepted"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal([]byte(body), &cfg); err != nil {
+		t.Fatalf(".claude.json is not JSON: %v\n%s", err, body)
+	}
+	if !cfg.Onboarded || cfg.Theme != "dark" {
+		t.Errorf("onboarded=%v theme=%q, want onboarding done and the dark theme", cfg.Onboarded, cfg.Theme)
+	}
+	if len(cfg.Projects) != 1 || !cfg.Projects[openshellTestWorkDir].Trusted {
+		t.Errorf("projects = %v, want exactly %s trusted", cfg.Projects, openshellTestWorkDir)
+	}
+	if strings.Contains(body, town) || strings.Contains(body, "/Users/") {
+		t.Errorf(".claude.json names a host path:\n%s", body)
 	}
 }

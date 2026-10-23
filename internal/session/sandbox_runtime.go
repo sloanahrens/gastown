@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -31,18 +32,36 @@ func requireRuntimeSegment(what, name string) error {
 	return nil
 }
 
+// runtimeFile is one entry of the runtime archive: a path under /sandbox and
+// its mode.
+type runtimeFile struct {
+	name string
+	data []byte
+	mode int64
+}
+
 // buildRuntimeArchive returns a gzipped tar that extracts under /sandbox to
-// gt/<rig>/polecats/.claude/{settings.json,system-prompt-<polecat>.md}: the
-// files `claude --settings … --append-system-prompt-file …` reads. The
-// settings are rendered for the sandbox; the system prompt has the host town
-// root rewritten. A missing settings.json is an error, since the agent command
-// names it; a missing system prompt is skipped. A rig or polecat name that is
-// not one path segment is an error too.
+// gt/<rig>/polecats/.claude/{settings.json,system-prompt-<polecat>.md}, the
+// files `claude --settings … --append-system-prompt-file …` reads, and
+// .claude.json, which tells Claude Code that onboarding is done and the
+// worktree is trusted (a fresh sandbox otherwise stops at the theme picker).
+// The settings are rendered for the sandbox; the system prompt has the host
+// town root rewritten. A missing settings.json is an error, since the agent
+// command names it; a missing system prompt is skipped. A rig or polecat name
+// that is not one path segment is an error too.
 func buildRuntimeArchive(spec SpawnSpec) ([]byte, error) {
 	if err := requireRuntimeSegment("rig", spec.Rig); err != nil {
 		return nil, err
 	}
 	if err := requireRuntimeSegment("polecat", spec.Polecat); err != nil {
+		return nil, err
+	}
+	rel, err := sandboxRel(spec)
+	if err != nil {
+		return nil, err
+	}
+	claudeJSON, err := sandboxClaudeJSON(path.Join(sandboxTownRoot, rel))
+	if err != nil {
 		return nil, err
 	}
 	dir := filepath.Join(spec.TownRoot, spec.Rig, "polecats", ".claude")
@@ -54,19 +73,17 @@ func buildRuntimeArchive(spec SpawnSpec) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	files := []struct {
-		name string
-		data []byte
-	}{{"settings.json", settings}}
+	claudeDir := path.Join("gt", spec.Rig, "polecats", ".claude")
+	files := []runtimeFile{
+		{".claude.json", claudeJSON, 0o600},
+		{path.Join(claudeDir, "settings.json"), settings, 0o644},
+	}
 
 	promptName := "system-prompt-" + spec.Polecat + ".md"
 	prompt, err := os.ReadFile(filepath.Join(dir, promptName))
 	switch {
 	case err == nil:
-		files = append(files, struct {
-			name string
-			data []byte
-		}{promptName, []byte(RewriteTownRoot(string(prompt), spec.TownRoot, sandboxTownRoot))})
+		files = append(files, runtimeFile{path.Join(claudeDir, promptName), []byte(RewriteTownRoot(string(prompt), spec.TownRoot, sandboxTownRoot)), 0o644})
 	case !errors.Is(err, fs.ErrNotExist):
 		return nil, fmt.Errorf("polecat system prompt: %w", err)
 	}
@@ -75,8 +92,7 @@ func buildRuntimeArchive(spec SpawnSpec) ([]byte, error) {
 	gz := gzip.NewWriter(&buf)
 	tw := tar.NewWriter(gz)
 	for _, f := range files {
-		name := path.Join("gt", spec.Rig, "polecats", ".claude", f.name)
-		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(f.data)), Typeflag: tar.TypeReg}); err != nil {
+		if err := tw.WriteHeader(&tar.Header{Name: f.name, Mode: f.mode, Size: int64(len(f.data)), Typeflag: tar.TypeReg}); err != nil {
 			return nil, err
 		}
 		if _, err := tw.Write(f.data); err != nil {
@@ -90,4 +106,17 @@ func buildRuntimeArchive(spec SpawnSpec) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
+}
+
+// sandboxClaudeJSON is the sandbox's ~/.claude.json: onboarding complete, the
+// host's dark theme, and the worktree trusted. Nothing is copied from the
+// host's file, which holds account and project history.
+func sandboxClaudeJSON(workDir string) ([]byte, error) {
+	return json.MarshalIndent(map[string]any{
+		"hasCompletedOnboarding": true,
+		"theme":                  "dark",
+		"projects": map[string]any{
+			workDir: map[string]any{"hasTrustDialogAccepted": true},
+		},
+	}, "", "  ")
 }
