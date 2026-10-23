@@ -90,7 +90,7 @@ func matchesPolecatAttribution(tokens []string, polecatSession bool, ownIdentiti
 		if assignsOtherActor(segment, ownIdentities) {
 			return polecatRuleAttribution.text()
 		}
-		words := bdCloseCommandTokens(segment)
+		words := polecatCommandWords(segment)
 		if len(words) < 2 {
 			continue
 		}
@@ -106,6 +106,60 @@ func matchesPolecatAttribution(tokens []string, polecatSession bool, ownIdentiti
 		}
 	}
 	return "", ""
+}
+
+// execValueFlags names the flag that takes a value among exec's: -a NAME sets
+// the argv[0] the command runs under.
+var execValueFlags = map[string]bool{"-a": true}
+
+// polecatCommandWords returns the command word and its arguments for a segment.
+// bdCloseCommandTokens looks through the launchers, but not through `command`,
+// `builtin` or `exec` with their flags, and it drops exec's -a NAME as a flag
+// and leaves NAME as the command word. So those prefixes are peeled here first,
+// and the walk repeats until neither pass moves, so `exec -a x command bd` is
+// read through too. Without this, `command bd comments add --author X` was
+// judged as a command named "command" and allowed (gt-v0u69).
+func polecatCommandWords(segment []string) []string {
+	words := segment
+	for {
+		next := bdCloseCommandTokens(skipShellPrefixes(words))
+		if len(next) == len(words) {
+			return next
+		}
+		words = next
+	}
+}
+
+// skipShellPrefixes drops `command`, `builtin` and `exec` from the front of
+// tokens along with their flags and, for exec, the value of -a, and drops the
+// NAME=value words between them. The prefix word is tested before any env
+// assignment is stripped, because stripLeadingEnvAssignments drops a bare
+// `command` on its own and would leave its -p flag behind as the command word.
+// Each pass removes a token or returns, so the loop ends.
+func skipShellPrefixes(tokens []string) []string {
+	for len(tokens) > 0 {
+		switch filepath.Base(tokens[0]) {
+		case "command", "builtin", "exec":
+			launcher := filepath.Base(tokens[0])
+			tokens = tokens[1:]
+			for len(tokens) > 0 && strings.HasPrefix(tokens[0], "-") {
+				flag := tokens[0]
+				tokens = tokens[1:]
+				if flag == "--" {
+					break
+				}
+				if launcher == "exec" && execValueFlags[flag] && len(tokens) > 0 {
+					tokens = tokens[1:]
+				}
+			}
+			continue
+		}
+		if !isEnvAssignment(tokens[0]) {
+			return tokens
+		}
+		tokens = tokens[1:]
+	}
+	return tokens
 }
 
 // bdActorEnvVars are the environment variables bd resolves a write's author

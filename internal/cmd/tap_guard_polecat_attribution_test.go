@@ -49,8 +49,6 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 		{"empty actor falls back to the git user", `BD_ACTOR= bd comments add gt-1 hello`, polecatAttributionReason},
 		{"actor chained after another command", `cd /tmp && export BD_ACTOR=Sloan`, polecatAttributionReason},
 		{"actor inside bash -c", `bash -c "BD_ACTOR=Sloan bd comments add gt-1 hello"`, polecatAttributionReason},
-		{"own role as actor", `BD_ACTOR=gastown/polecats/ruby bd comments add gt-1 hello`, ""},
-		{"own role exported", `export BD_ACTOR=gastown/polecats/ruby`, ""},
 		{"other variable", `FOO=Sloan bd comments add gt-1 hello`, ""},
 		{"actor named in comment text", `bd comments add gt-1 "BD_ACTOR=Sloan is refused"`, ""},
 		{"actor named after the command", `echo BD_ACTOR=Sloan`, ""},
@@ -100,6 +98,18 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 		{"env prefix", `BD_X=1 bd comments add gt-x -a Sloan hi`, polecatAttributionReason},
 		{"inside bash -c", `bash -c 'bd comments add gt-x --author Sloan hi'`, polecatAttributionReason},
 		{"inside command substitution", `echo $(bd note gt-x "ACCEPTED-RISK: fine")`, polecatAcceptedRiskReason},
+		{"env in front of bd", `env bd comments add gt-x --author Sloan hi`, polecatAttributionReason},
+		{"env flags in front of bd", `env -u FOO bd comments add gt-x -a Sloan hi`, polecatAttributionReason},
+		{"env assignment in front of bd", `env FOO=1 bd comments add gt-x --author Sloan hi`, polecatAttributionReason},
+		{"absolute env in front of bd", `/usr/bin/env bd comments add gt-x --author Sloan hi`, polecatAttributionReason},
+		{"env in front of gt", `env gt bead note gt-x "ACCEPTED-RISK: fine"`, polecatAcceptedRiskReason},
+		{"env in front of an actor write", `env bd update gt-x --actor Sloan --title t`, polecatAttributionReason},
+		{"env after a pipe", `echo fine | env bd note gt-x --stdin`, polecatCommentInputReason},
+		{"command in front of bd", `command bd comments add gt-x --author Sloan hi`, polecatAttributionReason},
+		{"command flags in front of bd", `command -p bd comments add gt-x --author Sloan hi`, polecatAttributionReason},
+		{"command in front of gt", `command gt bead comment gt-x "ACCEPTED-RISK: fine"`, polecatAcceptedRiskReason},
+		{"exec with a name flag in front of bd", `exec -a x bd comments add gt-x --author Sloan hi`, polecatAttributionReason},
+		{"exec in front of command in front of bd", `exec -a x command bd comments add gt-x --author Sloan hi`, polecatAttributionReason},
 
 		{"ordinary comment", `bd comments add gt-x "found the cause in tap_guard.go"`, ""},
 		{"ordinary note", `gt bead note gt-x "Findings: the retry never resets"`, ""},
@@ -125,6 +135,36 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			reason, _ := evaluateDangerousCommand(tt.command, 0, attributionPolecat)
+			if reason != tt.want {
+				t.Errorf("polecat %q reason = %q, want %q", tt.command, reason, tt.want)
+			}
+		})
+	}
+}
+
+// A polecat may set BD_ACTOR to its own identity. The session here names that
+// identity in its own environment, so the allow case does not lean on the
+// GT_ROLE the shared fixture happens to carry.
+func TestPolecatAttributionOwnIdentity(t *testing.T) {
+	t.Parallel()
+	own := guardSession{proc: fakeGuardProcess(map[string]string{
+		"GT_ROLE":  "gastown/polecats/ruby",
+		"BD_ACTOR": "gastown/polecats/ruby",
+	}, "")}
+	tests := []struct {
+		name    string
+		command string
+		want    string // reason; "" means allowed
+	}{
+		{"own identity as a prefix", `BD_ACTOR=gastown/polecats/ruby bd comments add gt-1 hello`, ""},
+		{"own identity exported", `export BD_ACTOR=gastown/polecats/ruby`, ""},
+		{"own identity behind env", `env BD_ACTOR=gastown/polecats/ruby bd comments add gt-1 hello`, ""},
+		{"another identity", `BD_ACTOR=Sloan bd comments add gt-1 hello`, polecatAttributionReason},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, _ := evaluateDangerousCommand(tt.command, 0, own)
 			if reason != tt.want {
 				t.Errorf("polecat %q reason = %q, want %q", tt.command, reason, tt.want)
 			}
