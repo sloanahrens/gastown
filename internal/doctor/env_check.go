@@ -70,6 +70,20 @@ type EnvVarsCheck struct {
 	reader   SessionEnvReader    // nil means use real tmux
 	accessor SessionEnvAccessor  // non-nil when Fix() support is needed
 	getenv   func(string) string // the doctor process's environment; nil means os.Getenv
+
+	newTmuxForTest func() *tmux.Tmux // nil means the real town-socket client
+}
+
+// hostEnvTmux is the real client for the check: Routed, so it neither routes
+// nor lists the sandbox sessions. Fix writes host-derived values (TownRoot and
+// the like) into a session's environment, and a sandbox session's environment
+// holds the sandbox's values.
+func (c *EnvVarsCheck) hostEnvTmux() *tmuxEnvReaderWriter {
+	build := tmux.NewTmux
+	if c.newTmuxForTest != nil {
+		build = c.newTmuxForTest
+	}
+	return &tmuxEnvReaderWriter{t: build().Routed()}
 }
 
 // processEnv is the doctor process's environment, read for the variables that
@@ -113,7 +127,7 @@ func NewEnvVarsCheckWithAccessor(accessor SessionEnvAccessor) *EnvVarsCheck {
 func (c *EnvVarsCheck) Run(ctx *CheckContext) *CheckResult {
 	reader := c.reader
 	if reader == nil {
-		reader = &tmuxEnvReaderWriter{t: tmux.NewTmux()}
+		reader = c.hostEnvTmux()
 	}
 
 	sessions, err := reader.ListSessions()
@@ -247,7 +261,7 @@ func (c *EnvVarsCheck) Run(ctx *CheckContext) *CheckResult {
 func (c *EnvVarsCheck) Fix(ctx *CheckContext) error {
 	accessor := c.accessor
 	if accessor == nil {
-		accessor = &tmuxEnvReaderWriter{t: tmux.NewTmux()}
+		accessor = c.hostEnvTmux()
 	}
 
 	sessions, err := accessor.ListSessions()
