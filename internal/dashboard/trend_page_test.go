@@ -69,17 +69,45 @@ func TestQueuedLandingRowAgesTheWaitFromTheBeadsLastUpdate(t *testing.T) {
 	if want := `const m = /^([^/]+)\/polecats\/([^/]+)$/.exec(b.assignee || "");`; !strings.Contains(holder, want) {
 		t.Errorf("queueHolder has no %q", want)
 	}
-	// A crew member's claim is "town/crew/name" or "rig/crew/name" (claude-agent sets
-	// the actor that way); the By column shows the bare name, as it does for a
-	// polecat.
-	if want := `const c = /^[^/]+\/crew\/([^/]+)$/.exec(b.assignee || "");`; !strings.Contains(holder, want) {
-		t.Errorf("queueHolder has no %q", want)
-	}
-	if want := `return c ? {rig: "", name: c[1]} : {rig: "", name: b.assignee || ""};`; !strings.Contains(holder, want) {
-		t.Errorf("queueHolder does not return the crew member's bare name: %q", want)
-	}
 	if want := `by.textContent = names.label(h.rig, h.name);`; !strings.Contains(tbl, want) {
 		t.Errorf("a queued row's holder is not named through the shared helper: %s", want)
+	}
+}
+
+// A crew member's claim is "town/crew/name" or "rig/crew/name" — claude-agent
+// sets the actor that way — and the By column shows the bare name, as it does
+// for a polecat; any other assignee is shown as it was written. The page draws
+// the rows here rather than being read as source, so the cell the By column
+// ends up holding is what decides (gt-zc45r, gt-t76l2).
+func TestAQueuedRowNamesACrewAssigneeByBareName(t *testing.T) {
+	t.Parallel()
+
+	dom := newPageDOM(t)
+	dom.call(t, "renderTrend", map[string]any{
+		"queue": map[string]any{"landing": []any{
+			map[string]any{"id": "gt-crew", "assignee": "town/crew/heron"},
+			map[string]any{"id": "gt-rig", "assignee": "gastown/crew/jay"},
+			map[string]any{"id": "gt-polecat", "assignee": "gastown/polecats/dag"},
+			map[string]any{"id": "gt-other", "assignee": "sloan"},
+		}},
+	})
+
+	// #trend holds the landings wrap alone with nothing landed in the window:
+	// its caption, then the table, whose first row is the header.
+	for i, want := range []struct{ bead, by, title string }{
+		{"gt-crew", "heron", "heron"},
+		{"gt-rig", "jay", "jay"},
+		{"gt-polecat", "dag", "gastown/dag"},
+		{"gt-other", "sloan", "sloan"},
+	} {
+		row := i + 1
+		if main := dom.descend(t, "trend", 0, 1, row, 1).Text; !strings.Contains(main, want.bead) {
+			t.Fatalf("row %d is the bead %q, want %s", row, main, want.bead)
+		}
+		by := dom.descend(t, "trend", 0, 1, row, 2)
+		if by.Text != want.by || by.Title != want.title {
+			t.Errorf("%s reads %q (%q) in the By column, want %q (%q)", want.bead, by.Text, by.Title, want.by, want.title)
+		}
 	}
 }
 
