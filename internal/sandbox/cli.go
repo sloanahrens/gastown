@@ -201,11 +201,25 @@ func (c *CLI) Exists(ctx context.Context, name string) (bool, error) {
 	switch {
 	case err == nil:
 		return true, nil
-	case bytes.Contains(bytes.ToLower(stderr), []byte("sandbox not found")):
+	case isNotFoundReply(stderr):
 		return false, nil
 	default:
 		return false, err
 	}
+}
+
+// notFoundMessage is the gateway status's message field for a missing
+// sandbox, quoted as openshell prints it:
+//
+//	Error:   × code: 'Some requested entity was not found', message: "sandbox not found"
+//
+// Matching the quoted field keeps the same words elsewhere in stderr (a
+// proxy's or a log line's) from reading as the gateway's answer.
+const notFoundMessage = `message: "sandbox not found"`
+
+// isNotFoundReply reports whether stderr carries the gateway's not-found status.
+func isNotFoundReply(stderr []byte) bool {
+	return bytes.Contains(bytes.ToLower(stderr), []byte(notFoundMessage))
 }
 
 // Exec runs argv inside the sandbox with stdin piped. It adds no deadline of
