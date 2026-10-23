@@ -474,8 +474,7 @@ type Env interface {
 	// persists the sample.
 	Assess(rig, polecat string) liveness.Result
 	// AssignedWork returns the polecat's hooked, in_progress or open work
-	// bead, or nil when it has none. All three are assigned statuses; a host
-	// that drops one makes that seat read as holding no work (gt-74cbe).
+	// bead, or nil when it has none.
 	AssignedWork(rig, polecat string) (*Work, error)
 	// WorkBead returns the work bead with the given ID, or nil when the bead
 	// is gone. It reads one bead a submitted seat's record names, to tell a
