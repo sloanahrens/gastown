@@ -110,7 +110,7 @@ func TestParseBdCloseSegmentSkipsGlobalFlags(t *testing.T) {
 // added there is covered here without a second edit.
 func TestParseBdCloseSegmentSkipsEveryBdValueFlag(t *testing.T) {
 	t.Parallel()
-	for flag := range cmdtree.BdGlobalValueFlags {
+	for _, flag := range cmdtree.BdGlobalValueFlagNames() {
 		t.Run(flag, func(t *testing.T) {
 			t.Parallel()
 			got, ok := parseBdCloseSegment([]string{"bd", flag, "x", "close", "gt-x"})

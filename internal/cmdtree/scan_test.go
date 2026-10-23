@@ -340,12 +340,54 @@ func TestScanBdSubcommandFlagInProseHasNoWords(t *testing.T) {
 // because the scan would stop at it and find no words.
 func TestBdValueFlagsSkipWithTheirValue(t *testing.T) {
 	t.Parallel()
-	for flag := range BdGlobalValueFlags {
+	for _, flag := range BdGlobalValueFlagNames() {
 		t.Run(flag, func(t *testing.T) {
 			t.Parallel()
 			refs := ScanShell("f.sh", "bd "+flag+" x sync", 1)
 			assertRefs(t, refs, "1:bd sync")
 		})
+	}
+}
+
+// IsBdGlobalValueFlag matches a value-taking flag only as written. A glued
+// form (--db=beads) carries its value already, and a boolean flag takes none.
+func TestIsBdGlobalValueFlag(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		tok  string
+		want bool
+	}{
+		{"--db", true},
+		{"-C", true},
+		{"--db=beads", false},
+		{"--json", false},
+		{"--if-assignee", false},
+	}
+	for _, c := range cases {
+		t.Run(c.tok, func(t *testing.T) {
+			t.Parallel()
+			if got := IsBdGlobalValueFlag(c.tok); got != c.want {
+				t.Errorf("IsBdGlobalValueFlag(%q) = %v, want %v", c.tok, got, c.want)
+			}
+		})
+	}
+}
+
+// BdGlobalValueFlagNames returns a fresh slice each call, so a caller that
+// edits it cannot change what the guard and scan see.
+func TestBdGlobalValueFlagNamesIsACopy(t *testing.T) {
+	t.Parallel()
+	names := BdGlobalValueFlagNames()
+	if len(names) == 0 {
+		t.Fatal("BdGlobalValueFlagNames is empty")
+	}
+	for i := range names {
+		names[i] = "--mutated"
+	}
+	for _, name := range BdGlobalValueFlagNames() {
+		if !IsBdGlobalValueFlag(name) {
+			t.Errorf("IsBdGlobalValueFlag(%q) = false after caller edited a returned slice", name)
+		}
 	}
 }
 
