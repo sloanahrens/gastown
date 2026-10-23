@@ -24,6 +24,14 @@ type mainScriptRun struct {
 
 func startMainScript(t *testing.T, session string, waitSeconds string) *mainScriptRun {
 	t.Helper()
+	return startMainScriptWith(t, session, waitSeconds, "", nil)
+}
+
+// startMainScriptWith is startMainScript with the unreachable-poll limit set (""
+// is the default) and a prepare step that runs against the test's tmux socket
+// before the script starts.
+func startMainScriptWith(t *testing.T, session string, waitSeconds string, lostPolls string, prepare func(*mainScriptRun)) *mainScriptRun {
+	t.Helper()
 	if _, err := exec.LookPath("tmux"); err != nil {
 		t.Skip("tmux is not installed")
 	}
@@ -36,7 +44,14 @@ func startMainScript(t *testing.T, session string, waitSeconds string) *mainScri
 	t.Cleanup(func() { _ = os.RemoveAll(tmpdir) })
 	r := &mainScriptRun{t: t, env: append(os.Environ(), "TMUX_TMPDIR="+tmpdir), done: make(chan error, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
-	cmd := exec.CommandContext(ctx, "sh", "-c", sandboxMainScript, "sh", session, waitSeconds, "0.2", tmpdir)
+	if prepare != nil {
+		prepare(r)
+	}
+	args := []string{"-c", sandboxMainScript, "sh", session, waitSeconds, "0.2", tmpdir}
+	if lostPolls != "" {
+		args = append(args, lostPolls)
+	}
+	cmd := exec.CommandContext(ctx, "sh", args...)
 	cmd.Env = r.env
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -145,5 +160,34 @@ func TestIntegrationMainScriptGivesUpWhenTheSessionNeverAppears(t *testing.T) {
 	}
 	if waited := time.Since(start); waited < 1500*time.Millisecond {
 		t.Fatalf("the script gave up after %s, before its 2 s wait: it failed early instead of waiting", waited)
+	}
+}
+
+// A tmux that cannot be asked is an unknown answer, not "the session ended": it
+// must not count toward the three that end the sandbox, but a tmux that stays
+// unreachable has lost the agent with it, so the script exits after a bounded
+// number of unreachable polls. Killing the whole tmux server leaves every tmux
+// call failing, as a crashed server would. The agent's session exists before the
+// script starts, so it is in its monitor loop from the first poll.
+func TestIntegrationMainScriptExitsOnlyAfterTmuxStaysUnreachable(t *testing.T) {
+	t.Parallel()
+	r := startMainScriptWith(t, "gt-agent", "30", "10", func(r *mainScriptRun) {
+		if err := r.tmux("new-session", "-d", "-s", "gt-agent", "sleep 600"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	r.waitServer()
+	killed := time.Now()
+	if err := r.tmux("kill-server"); err != nil {
+		t.Fatal(err)
+	}
+	err, ok := r.exited(10 * time.Second)
+	if !ok || err != nil {
+		t.Fatalf("with tmux unreachable: exited = %v, err = %v; want exit 0 after the unreachable-poll limit", ok, err)
+	}
+	// Three positive "gone" polls take 0.6 s; ten unreachable polls take 2 s. An
+	// unreachable tmux that counted as gone would have ended it well before 1.2 s.
+	if took := time.Since(killed); took < 1200*time.Millisecond {
+		t.Fatalf("the script exited %s after tmux became unreachable; unknown polls must not count as the session ending", took)
 	}
 }
