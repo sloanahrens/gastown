@@ -22,7 +22,14 @@ const (
 	polecatCommentInputReason = "polecat comment text must be inline"
 	polecatCommentInputAlt    = "Text read from a file or stdin cannot be checked for an ACCEPTED-RISK: record, " +
 		"so post the comment inline."
+	polecatUnresolvedTextReason = "polecat comment text must not expand a variable or substitution"
+	polecatUnresolvedTextAlt    = "The shell expands $VAR, $(...) and backticks before bd sees the text, so an " +
+		"ACCEPTED-RISK: record could be built at run time and cannot be checked. Write the comment text out literally."
 )
+
+// acceptedRiskMarker is the opener the accepted-risk gate reads, lower case
+// because the guard compares case-insensitively.
+const acceptedRiskMarker = "accepted-risk:"
 
 // polecatRule is the rule an invocation breaks; the zero value breaks none.
 // The reason text is chosen from the rule rather than parsed back out of it.
@@ -33,6 +40,7 @@ const (
 	polecatRuleAttribution
 	polecatRuleAcceptedRisk
 	polecatRuleCommentInput
+	polecatRuleUnresolvedText
 )
 
 // text returns the banner reason and the alternative printed beneath it. The
@@ -46,6 +54,8 @@ func (r polecatRule) text() (reason, alternative string) {
 		return polecatAcceptedRiskReason, polecatAcceptedRiskAlt
 	case polecatRuleCommentInput:
 		return polecatCommentInputReason, polecatCommentInputAlt
+	case polecatRuleUnresolvedText:
+		return polecatUnresolvedTextReason, polecatUnresolvedTextAlt
 	}
 	return "", ""
 }
@@ -181,8 +191,8 @@ func polecatBdViolation(rest []string) polecatRule {
 		}
 		// The bead id, the flags and the text are all checked here: the text
 		// may sit anywhere among them and a quoted one is a single token.
-		if anyTokenOpensAcceptedRisk(args) {
-			return polecatRuleAcceptedRisk
+		if rule := acceptedRiskRule(args); rule != polecatRuleOK {
+			return rule
 		}
 	}
 	// bd create and bd update take notes through a flag, in the `--notes=X` and
@@ -193,12 +203,12 @@ func polecatBdViolation(rest []string) polecatRule {
 		for _, flag := range bdNoteFlags {
 			switch {
 			case tok == flag && i+1 < len(flags):
-				if opensAcceptedRisk(flags[i+1]) {
-					return polecatRuleAcceptedRisk
+				if rule := acceptedRiskRule(flags[i+1 : i+2]); rule != polecatRuleOK {
+					return rule
 				}
 			case strings.HasPrefix(tok, flag+"="):
-				if opensAcceptedRisk(strings.TrimPrefix(tok, flag+"=")) {
-					return polecatRuleAcceptedRisk
+				if rule := acceptedRiskRule([]string{strings.TrimPrefix(tok, flag+"=")}); rule != polecatRuleOK {
+					return rule
 				}
 			}
 		}
@@ -213,10 +223,7 @@ func polecatGtViolation(rest []string) polecatRule {
 	if len(rest) < 3 || rest[0] != "bead" || (rest[1] != "comment" && rest[1] != "note") {
 		return polecatRuleOK
 	}
-	if anyTokenOpensAcceptedRisk(rest[2:]) {
-		return polecatRuleAcceptedRisk
-	}
-	return polecatRuleOK
+	return acceptedRiskRule(rest[2:])
 }
 
 // bdWritesComment reports whether a bd invocation adds a comment or note to a
@@ -310,17 +317,40 @@ func bdFlagTokens(tokens []string) []string {
 	return tokens
 }
 
-// anyTokenOpensAcceptedRisk reports whether any token is, or opens, an
-// ACCEPTED-RISK: record. Comment text is the arguments that follow the bead id,
-// quoted as one token or split into words, and a flag's value may sit among
-// them, so each token is checked rather than guessing which one is the text.
-func anyTokenOpensAcceptedRisk(tokens []string) bool {
+// acceptedRiskRule judges the arguments of a comment or note write. Comment text
+// is the arguments that follow the bead id, quoted as one token or split into
+// words, and a flag's value may sit among them, so each token is checked rather
+// than guessing which one is the text. A literal ACCEPTED-RISK: opener is refused
+// as such. A token whose expansion could still build the opener is refused as
+// unresolved, since the shell fills it in before bd sees the text.
+func acceptedRiskRule(tokens []string) polecatRule {
 	for _, tok := range tokens {
 		if opensAcceptedRisk(tok) {
-			return true
+			return polecatRuleAcceptedRisk
 		}
 	}
-	return false
+	for _, tok := range tokens {
+		if expansionMayOpenAcceptedRisk(tok) {
+			return polecatRuleUnresolvedText
+		}
+	}
+	return polecatRuleOK
+}
+
+// expansionMayOpenAcceptedRisk reports whether the text of a token, once the
+// shell has expanded its $VAR, ${VAR}, $(...) and backtick expansions, could
+// begin with the ACCEPTED-RISK: marker. The literal text before the first
+// expansion decides it: an expansion can supply anything, so only literal text
+// that cannot grow into the marker rules the token out. Quoting is gone by the
+// time a token is read, so a single-quoted $ is refused too; that is the safe
+// side of the same test.
+func expansionMayOpenAcceptedRisk(tok string) bool {
+	at := strings.IndexAny(tok, "$`")
+	if at < 0 {
+		return false
+	}
+	lead := strings.ToLower(strings.TrimLeft(tok[:at], " \t\r\n"))
+	return strings.HasPrefix(acceptedRiskMarker, lead)
 }
 
 // opensAcceptedRisk reports whether text begins with the ACCEPTED-RISK: marker
