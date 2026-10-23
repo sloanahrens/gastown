@@ -2,7 +2,9 @@ package tmux
 
 import (
 	"reflect"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jonboulle/clockwork"
 )
@@ -273,5 +275,99 @@ func TestNewTmuxWithExecPrefixWithSocketKeepsPrefix(t *testing.T) {
 	calls := s.all()
 	if len(calls) != 1 || calls[0].name != "openshell" || !calls[0].has("--", "tmux", "-u", "-L", "default", "has-session") {
 		t.Fatalf("calls = %v, want one has-session through the wrapper", calls)
+	}
+}
+
+// createPrefixedAndDrive runs create on a prefixed Tmux whose clock the test
+// advances through the session health check's waits.
+func createPrefixedAndDrive(t *testing.T, s *scripted, create func(tm *Tmux) error) error {
+	t.Helper()
+	clk := newFixedClock()
+	tm := newPrefixedForTest("gt", s, clk)
+	tm.sock = newFakeSockets().ops()
+	tm.socketDir = "/fake-sock"
+	done := make(chan error, 1)
+	go func() { done <- create(tm) }()
+	return driveClock(t, clk, 50*time.Millisecond, done)
+}
+
+// A prefixed Tmux's session runs inside the sandbox, so its workDir and the
+// command's binary exist only there: session creation must not stat either on
+// this host, where both are missing (gt-jqg8s).
+func TestNewTmuxWithExecPrefixSessionSkipsHostPathChecks(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir() + "/sandbox-workdir" // never created
+	binary := t.TempDir() + "/claude-code"      // never created
+	command := "exec env GT_ROLE=polecat " + binary + " --settings /sandbox/settings.json"
+
+	tests := []struct {
+		name   string
+		create func(tm *Tmux) error
+	}{
+		{"NewSessionWithCommand", func(tm *Tmux) error {
+			return tm.NewSessionWithCommand("gt-r-n", workDir, command)
+		}},
+		{"NewSessionWithCommandAndEnv", func(tm *Tmux) error {
+			return tm.NewSessionWithCommandAndEnv("gt-r-n", workDir, command, map[string]string{"GT_ROLE": "polecat"})
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newScripted(nil)
+			if err := createPrefixedAndDrive(t, s, tt.create); err != nil {
+				t.Fatalf("%s = %v; want nil, workDir and command exist only inside the sandbox", tt.name, err)
+			}
+			var created []tmuxCall
+			for _, c := range s.all() {
+				if prog, args := wrapped(c); prog == "tmux" && len(tmuxSub(args)) > 0 && tmuxSub(args)[0] == "new-session" {
+					created = append(created, c)
+				}
+			}
+			if len(created) != 1 {
+				t.Fatalf("new-session calls = %v, want one through the wrapper", created)
+			}
+		})
+	}
+}
+
+// A Tmux with no exec prefix runs on this host, so the workDir and binary
+// checks still run and still refuse what is missing (gt-jqg8s).
+func TestNewSessionWithoutExecPrefixRejectsMissingHostPaths(t *testing.T) {
+	t.Parallel()
+	workDir := t.TempDir() + "/sandbox-workdir" // never created
+	binary := t.TempDir() + "/claude-code"      // never created
+	command := "exec env GT_ROLE=polecat " + binary
+
+	tests := []struct {
+		name   string
+		create func(tm *Tmux) error
+		want   string
+	}{
+		{"NewSessionWithCommand/missing-workDir", func(tm *Tmux) error {
+			return tm.NewSessionWithCommand("gt-x", workDir, "true")
+		}, "invalid work directory"},
+		{"NewSessionWithCommand/missing-binary", func(tm *Tmux) error {
+			return tm.NewSessionWithCommand("gt-x", "", command)
+		}, "command binary not found"},
+		{"NewSessionWithCommandAndEnv/missing-workDir", func(tm *Tmux) error {
+			return tm.NewSessionWithCommandAndEnv("gt-x", workDir, "true", nil)
+		}, "invalid work directory"},
+		{"NewSessionWithCommandAndEnv/missing-binary", func(tm *Tmux) error {
+			return tm.NewSessionWithCommandAndEnv("gt-x", "", command, nil)
+		}, "command binary not found"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			s := newScripted(nil)
+			err := tt.create(unitTmux(s, nil))
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want one containing %q", err, tt.want)
+			}
+			if got := s.find("new-session"); len(got) != 0 {
+				t.Fatalf("created a session for a path missing on this host: %v", got)
+			}
+		})
 	}
 }

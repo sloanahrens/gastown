@@ -402,6 +402,27 @@ type tmuxTextError struct {
 func (e tmuxTextError) Error() string        { return e.msg }
 func (e tmuxTextError) Is(target error) bool { return target == e.is }
 
+// checkHostPaths validates workDir and the command's binary on this host
+// before a session starts. A prefixed Tmux skips it: with an exec prefix the
+// session runs inside a wrapper (a sandbox), so workDir and the binary exist
+// only there and a host stat would refuse a session that starts fine inside
+// (gt-jqg8s). Nothing replaces the check through the wrapper.
+func (t *Tmux) checkHostPaths(workDir, command string) error {
+	if len(t.execPrefix) != 0 {
+		return nil
+	}
+	if workDir != "" {
+		info, err := os.Stat(workDir)
+		if err != nil {
+			return fmt.Errorf("invalid work directory %q: %w", workDir, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("work directory %q is not a directory", workDir)
+		}
+	}
+	return validateCommandBinary(command)
+}
+
 func (t *Tmux) createNewSession(name, workDir string, env map[string]string) error {
 	if err := t.refuseLiveSessionCreate(); err != nil {
 		return err
@@ -453,16 +474,7 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
-	if workDir != "" {
-		info, err := os.Stat(workDir)
-		if err != nil {
-			return fmt.Errorf("invalid work directory %q: %w", workDir, err)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("work directory %q is not a directory", workDir)
-		}
-	}
-	if err := validateCommandBinary(command); err != nil {
+	if err := t.checkHostPaths(workDir, command); err != nil {
 		return err
 	}
 	if err := t.ensureNewSessionSocketSafe(); err != nil {
@@ -536,16 +548,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	// This is best-effort: failures are silently ignored.
 	t.killSplitBrainSession(name)
 
-	if workDir != "" {
-		info, err := os.Stat(workDir)
-		if err != nil {
-			return fmt.Errorf("invalid work directory %q: %w", workDir, err)
-		}
-		if !info.IsDir() {
-			return fmt.Errorf("work directory %q is not a directory", workDir)
-		}
-	}
-	if err := validateCommandBinary(command); err != nil {
+	if err := t.checkHostPaths(workDir, command); err != nil {
 		return err
 	}
 
