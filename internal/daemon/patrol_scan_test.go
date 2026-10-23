@@ -680,6 +680,35 @@ func TestPatrolScanWorkBeadTellsGoneFromUnreadable(t *testing.T) {
 	}
 }
 
+// gt-74cbe: `open` is an assigned status, so the seat's work read must see
+// it. Asking bd only for hooked and in_progress made a seat holding an
+// open-assigned bead read as holding nothing, and the stall path then stopped
+// and retired it while its work was still live.
+func TestPatrolScanAssignedWorkReadsAnOpenAssignedBead(t *testing.T) {
+	t.Parallel()
+	bd := newWorkBD(t)
+	h := &patrolScanHost{d: &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: bd.open}}
+
+	bd.seed("gt-open", "open", time.Now().Add(-time.Hour))
+	if w, err := h.AssignedWork("myr", "mycat"); err != nil || w == nil || w.ID != "gt-open" {
+		t.Fatalf("AssignedWork over an open-assigned bead = %+v, %v; want gt-open", w, err)
+	}
+
+	// A more specific status wins when the seat holds both.
+	bd.seed("gt-hooked", "hooked", time.Now().Add(-time.Minute))
+	if w, err := h.AssignedWork("myr", "mycat"); err != nil || w == nil || w.ID != "gt-hooked" {
+		t.Fatalf("AssignedWork over hooked and open work = %+v, %v; want gt-hooked", w, err)
+	}
+
+	// Finished work is not work the seat still holds.
+	done := newWorkBD(t)
+	done.seed("gt-closed", "closed", time.Now().Add(-time.Hour))
+	hDone := &patrolScanHost{d: &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: done.open}}
+	if w, err := hDone.AssignedWork("myr", "mycat"); err != nil || w != nil {
+		t.Fatalf("AssignedWork over closed work = %+v, %v; want nil, nil", w, err)
+	}
+}
+
 // ClearSubmission ends the seat's wait for the landing worker. It is the
 // action half of the stale-record fix: without it the supervisor's own
 // submitted guard refuses every restart (gt-xs1ni).

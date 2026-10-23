@@ -1362,7 +1362,8 @@ func TestStalledSeatOnFinishedWorkIsReleased(t *testing.T) {
 		{"closed work", func(env *fakeEnv) { env.work["ruby"].Status = "closed" }, OutcomeReleased, true, true},
 		{"tombstoned work", func(env *fakeEnv) { env.work["ruby"].Status = "tombstone" }, OutcomeReleased, true, true},
 		{"no work", func(env *fakeEnv) { env.work["ruby"] = nil }, OutcomeReleased, true, true},
-		{"open work", func(*fakeEnv) {}, OutcomeStalled, false, false},
+		{"hooked work", func(*fakeEnv) {}, OutcomeStalled, false, false},
+		{"open work", func(env *fakeEnv) { env.work["ruby"].Status = "open" }, OutcomeStalled, false, false},
 		{"in_progress work", func(env *fakeEnv) { env.work["ruby"].Status = "in_progress" }, OutcomeStalled, false, false},
 		{"submitted work", func(env *fakeEnv) {
 			env.work["ruby"].Labels = []string{ReadyToLandLabel}
