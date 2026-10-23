@@ -72,6 +72,7 @@ func openShellCheck(f *openShellFake, ts *config.TownSettings, goos string) *Ope
 	c.settings = func(string) (*config.TownSettings, error) { return ts, nil }
 	c.goos = goos
 	c.uid = func() int { return 501 }
+	c.lookPath = func(string) (string, error) { return "/usr/local/bin/docker", nil }
 	return c
 }
 
@@ -133,6 +134,14 @@ func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 			want: []string{"openshell status: gateway openshell did not answer"},
 		},
 		{
+			name: "status reply that is not json names the decode",
+			setup: func(f *openShellFake) {
+				f.replies[osStatus] = `connected`
+			},
+			goos: "darwin",
+			want: []string{"openshell status: gateway openshell: decode"},
+		},
+		{
 			name: "missing provider is named",
 			setup: func(f *openShellFake) {
 				f.replies[osProviders] = `{"providers":[{"name":"forgejo-polecat"}]}`
@@ -147,6 +156,14 @@ func TestOpenShellGatewayCheck_Warnings(t *testing.T) {
 			},
 			goos: "darwin",
 			want: []string{"openshell provider list: gateway openshell"},
+		},
+		{
+			name: "provider reply that is not json names the decode",
+			setup: func(f *openShellFake) {
+				f.replies[osProviders] = `deepseek`
+			},
+			goos: "darwin",
+			want: []string{"openshell provider list: gateway openshell: decode"},
 		},
 		{
 			name: "missing image is named",
@@ -214,15 +231,56 @@ func TestOpenShellGatewayCheck_LaunchdNotCheckedOffDarwin(t *testing.T) {
 	}
 }
 
-func TestOpenShellGatewayCheck_UnreadableSettings_Skipped(t *testing.T) {
+func TestOpenShellGatewayCheck_UnreadableSettings_Warns(t *testing.T) {
 	t.Parallel()
 	c := NewOpenShellGatewayCheck()
 	c.settings = func(string) (*config.TownSettings, error) { return nil, errors.New("bad json") }
 
 	result := c.Run(&CheckContext{TownRoot: t.TempDir()})
 
-	if result.Status != StatusSkipped {
-		t.Fatalf("Status = %v, want StatusSkipped", result.Status)
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning; message: %s", result.Status, result.Message)
+	}
+	if len(result.Details) != 1 || !strings.Contains(result.Details[0], "bad json") {
+		t.Errorf("Details = %v, want the settings read error", result.Details)
+	}
+}
+
+func TestOpenShellGatewayCheck_UnreadableSeats_Warns(t *testing.T) {
+	t.Parallel()
+	f := healthyOpenShell()
+	ts := openShellTown(defaultProfile())
+	ts.PolecatPool.Timezone = "Not/AZone"
+
+	result := openShellCheck(f, ts, "darwin").Run(&CheckContext{TownRoot: t.TempDir()})
+
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning; message: %s", result.Status, result.Message)
+	}
+	if !strings.Contains(result.Message, "polecat_pool.seats") {
+		t.Errorf("Message = %q, want it to name polecat_pool.seats", result.Message)
+	}
+	if len(f.calls) != 0 {
+		t.Errorf("ran %v, want no commands once the seats are unreadable", f.calls)
+	}
+}
+
+func TestOpenShellGatewayCheck_NoDocker_SkipsImageCheck(t *testing.T) {
+	t.Parallel()
+	f := healthyOpenShell()
+	f.errs[dockerImage] = errors.New("docker image inspect must not run without docker")
+	c := openShellCheck(f, openShellTown(defaultProfile()), "darwin")
+	c.lookPath = func(string) (string, error) { return "", errors.New("not found") }
+
+	result := c.Run(&CheckContext{TownRoot: t.TempDir()})
+
+	if result.Status != StatusOK {
+		t.Fatalf("Status = %v, want StatusOK; details: %v", result.Status, result.Details)
+	}
+	for _, call := range f.calls {
+		if strings.HasPrefix(call, "docker") {
+			t.Errorf("ran %q with no docker on PATH", call)
+		}
 	}
 }
 

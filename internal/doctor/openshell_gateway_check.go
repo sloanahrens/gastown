@@ -42,6 +42,8 @@ type OpenShellGatewayCheck struct {
 	goos string
 	// uid is the user id of the launchd gui domain; nil is os.Getuid.
 	uid func() int
+	// lookPath finds docker for the image check; nil is exec.LookPath.
+	lookPath func(string) (string, error)
 }
 
 // NewOpenShellGatewayCheck creates a new openshell-gateway check.
@@ -75,7 +77,7 @@ func (c *OpenShellGatewayCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusSkipped,
+			Status:  StatusWarning,
 			Message: "unknown: could not read the town settings",
 			Details: []string{err.Error()},
 		}
@@ -85,7 +87,7 @@ func (c *OpenShellGatewayCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusSkipped,
+			Status:  StatusWarning,
 			Message: "unknown: could not read polecat_pool.seats",
 			Details: []string{err.Error()},
 		}
@@ -101,7 +103,14 @@ func (c *OpenShellGatewayCheck) Run(ctx *CheckContext) *CheckResult {
 
 	var problems []string
 	problems = append(problems, checkGateways(run, profiles)...)
-	problems = append(problems, checkImages(run, profiles)...)
+	// The image check inspects through the docker CLI, so it cannot run without it.
+	lookPath := c.lookPath
+	if lookPath == nil {
+		lookPath = exec.LookPath
+	}
+	if _, err := lookPath("docker"); err == nil {
+		problems = append(problems, checkImages(run, profiles)...)
+	}
 	goos := c.goos
 	if goos == "" {
 		goos = runtime.GOOS
