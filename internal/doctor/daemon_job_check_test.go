@@ -182,29 +182,31 @@ func writeLaunchdPlist(t *testing.T, home, workingDir string) {
 	}
 }
 
-func TestDaemonJobCheck_UnreadableState_Skipped(t *testing.T) {
+// An unreadable job is unknown, and unknown warns rather than skipping: the
+// check exists to notice a daemon nobody is running.
+func TestDaemonJobCheck_UnreadableState_Warning(t *testing.T) {
 	t.Parallel()
 	st := templates.SupervisorState{Kind: "launchd", LastExit: -1, Err: errors.New("launchctl print: exec: not found")}
 
 	result := jobCheck(false, 0, st, true).Run(&CheckContext{TownRoot: t.TempDir()})
 
-	if result.Status != StatusSkipped {
-		t.Fatalf("Status = %v, want StatusSkipped; message: %s", result.Status, result.Message)
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning; message: %s", result.Status, result.Message)
 	}
 	if len(result.Details) == 0 || !strings.Contains(result.Details[0], "launchctl print") {
 		t.Errorf("details %q do not carry the probe error", result.Details)
 	}
 }
 
-func TestDaemonJobCheck_UnreadableLock_Skipped(t *testing.T) {
+func TestDaemonJobCheck_UnreadableLock_Warning(t *testing.T) {
 	t.Parallel()
 	c := jobCheck(false, 0, jobSpawnScheduled, true)
 	c.running = func(string) (bool, int, error) { return false, 0, errors.New("lock: permission denied") }
 
 	result := c.Run(&CheckContext{TownRoot: t.TempDir()})
 
-	if result.Status != StatusSkipped {
-		t.Errorf("Status = %v, want StatusSkipped; message: %s", result.Status, result.Message)
+	if result.Status != StatusWarning {
+		t.Errorf("Status = %v, want StatusWarning; message: %s", result.Status, result.Message)
 	}
 }
 

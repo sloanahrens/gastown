@@ -70,9 +70,11 @@ func (c *DaemonJobCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	running, pid, err := isRunning(ctx.TownRoot)
 	if err != nil {
+		// Unknown is a warning, not a skip: this check exists to notice a daemon
+		// nobody is running, and a silent skip hides exactly that.
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusSkipped,
+			Status:  StatusWarning,
 			Message: "unknown: could not read the daemon lock",
 			Details: []string{err.Error()},
 		}
@@ -88,9 +90,10 @@ func (c *DaemonJobCheck) Run(ctx *CheckContext) *CheckResult {
 	st, provisioned := read(ctx.TownRoot)
 	switch {
 	case st.Err != nil:
+		// Unknown is a warning, not a skip, for the reason given above the lock read.
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusSkipped,
+			Status:  StatusWarning,
 			Message: "unknown: could not read the supervisor's job state",
 			Details: []string{st.Err.Error()},
 		}
