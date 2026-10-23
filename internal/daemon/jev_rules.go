@@ -3,8 +3,10 @@ package daemon
 import (
 	"context"
 	"errors"
+	"os"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/doltserver"
 	jevrules "github.com/steveyegge/gastown/internal/jev/rules"
 )
 
@@ -46,12 +48,29 @@ func (d *Daemon) triggerJevRules() {
 	}()
 }
 
+// jevRulesRigs returns the known rigs that have a beads directory. A rig that
+// is registered but never cloned has none, and the pass's open fails on one of
+// them, so skipping it here keeps one such rig from stopping the pass for all
+// the others (gt-csq9g).
+func (d *Daemon) jevRulesRigs() []string {
+	var rigs []string
+	for _, rig := range d.getKnownRigs() {
+		dir := doltserver.FindRigBeadsDir(d.config.TownRoot, rig)
+		if _, err := os.Stat(dir); err != nil {
+			d.logger.Printf("jev_rules: skipping rig %s: no beads directory at %s", rig, dir)
+			continue
+		}
+		rigs = append(rigs, rig)
+	}
+	return rigs
+}
+
 // runJevRules does one pass with the settings in the patrol config and the
 // rigs the town knows. A failure is logged, and the last-run time still
 // advances, so a missing price or an unreadable bead store costs one line per
 // interval rather than one per heartbeat.
 func (d *Daemon) runJevRules() {
-	settings := jevrules.Settings{Rigs: d.getKnownRigs()}
+	settings := jevrules.Settings{Rigs: d.jevRulesRigs()}
 	if c := d.patrolConfig; c != nil && c.Patrols != nil && c.Patrols.JevRules != nil {
 		settings.MaxUSDPerDay = c.Patrols.JevRules.MaxUSDPerDay
 		settings.USDPerBillionTokens = c.Patrols.JevRules.USDPerBillionTokens

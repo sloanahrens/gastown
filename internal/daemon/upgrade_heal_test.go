@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"errors"
 	"log"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
@@ -203,8 +205,11 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 	}
 	cases := []struct {
 		name        string
-		pid         string // launchctl print reports this pid; empty means not loaded
+		pid         string // launchctl print reports this pid on every sample; empty means not loaded
+		pidOnce     string // launchctl print reports this pid on the first sample only
 		lockHolder  string // lsof reports this process holds daemon.lock
+		stopMarker  bool   // a daemon stop was requested while the helper waited
+		estop       bool   // the town E-stop went up while the helper waited
 		wantBootout bool
 		wantBoots   int
 		wantLogLine string
@@ -215,6 +220,9 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 		{name: "healthy job is left alone", pid: "123", wantLogLine: "healthy:"},
 		{name: "live lock holder is left alone", lockHolder: "4242", wantLogLine: "left alone:"},
 		{name: "unloaded job is healed", wantBootout: true, wantBoots: 2, wantLogLine: "bootstrapped:"},
+		{name: "a pid that is gone at the re-check is healed", pidOnce: "123", wantBootout: true, wantBoots: 1, wantLogLine: "bootstrapped:", bootstrapOK: "1"},
+		{name: "a stop marker left while the helper waited is left alone", stopMarker: true, wantLogLine: "a daemon stop was requested"},
+		{name: "an E-stop raised while the helper waited is left alone", estop: true, wantLogLine: "E-stop active"},
 		{name: "a job that stays loaded after bootout is given up on", stuckLoaded: true, wantBootout: true, wantLogLine: "gave up: gui/501/com.example.fake still loaded", wantGiveUp: true},
 		{name: "a bootstrap that never succeeds is given up on", bootstrapOK: "never", wantBootout: true, wantBoots: 60, wantLogLine: "gave up: bootstrap of /fake/com.example.fake.plist failed 60 times", wantGiveUp: true},
 	}
@@ -228,6 +236,10 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 			writeFakeTool(t, bin, "launchctl", `echo "$*" >> "$HEAL_CALLS"
 case "$1" in
 print)
+	if [ -n "$HEAL_PID_ONCE" ]; then
+		n=$(cat "$HEAL_PRINTS" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$HEAL_PRINTS"
+		if [ "$n" -eq 1 ]; then printf 'gui/501/x = {\n\tpid = %s\n}\n' "$HEAL_PID_ONCE"; exit 0; fi
+	fi
 	if [ -n "$HEAL_PID" ]; then printf 'gui/501/x = {\n\tpid = %s\n}\n' "$HEAL_PID"; exit 0; fi
 	if [ -n "$HEAL_STUCK" ]; then printf 'gui/501/x = {\n\tstate = waiting\n}\n'; exit 0; fi
 	echo 'Could not find service' >&2; exit 113 ;;
@@ -243,14 +255,25 @@ exit 0
 			sysLog := filepath.Join(bin, "syslog.txt")
 			writeFakeTool(t, bin, "logger", `echo "$*" >> "$HEAL_SYSLOG"`)
 			bootOK := tc.bootstrapOK
-			if bootOK == "" {
+			switch bootOK {
+			case "":
 				bootOK = "2"
-			} else {
+			case "never":
 				bootOK = "999"
 			}
 			stuck := ""
 			if tc.stuckLoaded {
 				stuck = "1"
+			}
+			if tc.stopMarker {
+				if err := writeStopRequested(d.config.TownRoot, 4242, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.estop {
+				if err := estop.Activate(d.config.TownRoot, estop.TriggerManual, "operator stop"); err != nil {
+					t.Fatal(err)
+				}
 			}
 
 			script := filepath.Join(d.config.TownRoot, "daemon", upgradeHealScriptName)
@@ -264,6 +287,8 @@ exit 0
 				"HEAL_CALLS=" + calls,
 				"HEAL_TRIES=" + tries,
 				"HEAL_PID=" + tc.pid,
+				"HEAL_PID_ONCE=" + tc.pidOnce,
+				"HEAL_PRINTS=" + filepath.Join(bin, "prints.txt"),
 				"HEAL_LOCK_HOLDER=" + tc.lockHolder,
 				"HEAL_STUCK=" + stuck,
 				"HEAL_BOOT_OK=" + bootOK,
@@ -293,6 +318,11 @@ exit 0
 			if got := strings.Count(string(callLog), "bootstrap gui/501 /fake/com.example.fake.plist"); got != tc.wantBoots {
 				t.Fatalf("bootstrap attempts = %d, want %d; launchctl calls:\n%s", got, tc.wantBoots, callLog)
 			}
+			if tc.pidOnce != "" {
+				if got := strings.Count(string(callLog), "print gui/501/com.example.fake"); got < 2 {
+					t.Fatalf("pid samples = %d, want the first sample and a re-check; launchctl calls:\n%s", got, callLog)
+				}
+			}
 
 			healLog, err := os.ReadFile(filepath.Join(d.config.TownRoot, "daemon", upgradeHealLogName))
 			if err != nil {
@@ -305,6 +335,30 @@ exit 0
 				t.Fatalf("the helper wrote daemon.log (stat err %v); its trail must not depend on it", err)
 			}
 		})
+	}
+}
+
+// TestUpgradeRestartHealWedgedLaunchctlIsBounded checks one launchctl call
+// cannot hold the exit that arms the helper: a call that never returns is
+// killed at the bound and reported as a deadline, so the daemon still exits 75
+// (gt-csq9g).
+func TestUpgradeRestartHealWedgedLaunchctlIsBounded(t *testing.T) {
+	t.Parallel()
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		//testpolicy:allow no-skip — /bin/sh is the wedged child; Windows has none
+		t.Skip("the wedged child is a /bin/sh process")
+	}
+	const bound = 100 * time.Millisecond
+	start := time.Now()
+	// kill -STOP stops the shell itself, so the child never returns and never
+	// starts an external tool: the unit tier refuses a PATH lookup of sleep.
+	err := runUpgradeHealCommand(bound, []string{"/bin/sh", "-c", "kill -STOP $$"})
+	elapsed := time.Since(start)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want a deadline error", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("the wedged call took %s, want it bounded near %s", elapsed, bound)
 	}
 }
 

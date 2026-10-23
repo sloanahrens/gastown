@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,12 +10,28 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/estop"
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
 // upgradeHealWait is how long the heal helper gives launchd to respawn the
 // daemon after an upgrade exit before it judges the job.
 const upgradeHealWait = 20 * time.Second
+
+// upgradeHealRecheck is how long the helper waits before re-reading a job whose
+// first sample carries a pid: that pid is the old daemon as often as it is a
+// healthy respawn, and the old daemon's respawn may yet fail (gt-csq9g).
+const upgradeHealRecheck = 10 * time.Second
+
+// upgradeHealPidChecks is how many samples carrying a pid count as healthy.
+// One sample cannot tell a respawn from a daemon still exiting, so the helper
+// heals once the pid has survived the first re-check (gt-csq9g).
+const upgradeHealPidChecks = 2
+
+// upgradeHealCommandTimeout bounds one launchctl call made while arming the
+// helper, on the run loop ahead of an exit: launchd wedged for a while must
+// cost the exit its timeout, not the exit itself (gt-csq9g).
+const upgradeHealCommandTimeout = 5 * time.Second
 
 // upgradeHealLogName is the helper's own log: a failed respawn writes nothing
 // to daemon.log (gt-eigyu.1).
@@ -59,9 +76,10 @@ func upgradeHealLabel(job upgradeHealJob) string {
 
 // upgradeHealScriptTemplate is the helper. It runs outside the daemon's job,
 // so the bootout it may need does not kill it. It waits, and heals only when
-// launchd has the job loaded without a pid and no process holds daemon.lock.
-// A give-up is also sent to the system log, so a heal that failed leaves a
-// trail outside the files it shares with the stranded daemon.
+// launchd has the job loaded without a pid, no process holds daemon.lock and
+// no stop was requested while it waited. A give-up is also sent to the system
+// log, so a heal that failed leaves a trail outside the files it shares with
+// the stranded daemon.
 const upgradeHealScriptTemplate = `#!/bin/sh
 # gt upgrade-restart heal: arms after an upgrade exit (gt-eigyu.1).
 LABEL=@LABEL@
@@ -70,6 +88,8 @@ PLIST=@PLIST@
 LOCK=@LOCK@
 LOG=@LOG@
 HEAL=@HEAL@
+STOP=@STOP@
+ESTOP=@ESTOP@
 SVC="gui/$UID_NUM/$LABEL"
 
 log() {
@@ -89,11 +109,30 @@ giveup() {
 
 sleep @WAIT@
 
-state=$(launchctl print "$SVC" 2>&1)
-if printf '%s\n' "$state" | grep -q '^[[:space:]]*pid = [0-9]'; then
-	log "healthy: $SVC runs a pid; nothing to heal"
+# A stop inside the wait window is the operator's, not a failed respawn:
+# bootstrapping through it would undo a gt power off or a bootout (gt-csq9g).
+if [ -e "$STOP" ]; then
+	log "left alone: $STOP exists (a daemon stop was requested)"
 	finish 0
 fi
+if [ -e "$ESTOP" ]; then
+	log "left alone: $ESTOP exists (E-stop active)"
+	finish 0
+fi
+
+state=$(launchctl print "$SVC" 2>&1)
+# launchd keeps the pid of a job that is still shutting down, so a pid at the
+# first sample vouches for nothing; only one that survives the re-check does.
+checks=0
+while printf '%s\n' "$state" | grep -q '^[[:space:]]*pid = [0-9]'; do
+	checks=$((checks + 1))
+	if [ "$checks" -ge @PID_CHECKS@ ]; then
+		log "healthy: $SVC runs a pid; nothing to heal"
+		finish 0
+	fi
+	sleep @RECHECK@
+	state=$(launchctl print "$SVC" 2>&1)
+done
 if [ -n "$(lsof -t -- "$LOCK" 2>/dev/null)" ]; then
 	log "left alone: $LOCK is held by a live process"
 	finish 0
@@ -135,7 +174,11 @@ func upgradeHealScript(job upgradeHealJob, townRoot string) string {
 		"@LOCK@", shellQuote(filepath.Join(daemonDir, "daemon.lock")),
 		"@LOG@", shellQuote(filepath.Join(daemonDir, upgradeHealLogName)),
 		"@HEAL@", shellQuote(upgradeHealLabel(job)),
+		"@STOP@", shellQuote(stopMarkerPath(townRoot)),
+		"@ESTOP@", shellQuote(estop.FilePath(townRoot)),
 		"@WAIT@", fmt.Sprintf("%d", int(upgradeHealWait/time.Second)),
+		"@RECHECK@", fmt.Sprintf("%d", int(upgradeHealRecheck/time.Second)),
+		"@PID_CHECKS@", fmt.Sprintf("%d", upgradeHealPidChecks),
 	).Replace(upgradeHealScriptTemplate)
 }
 
@@ -178,12 +221,19 @@ func (d *Daemon) armUpgradeHeal() {
 	}
 }
 
-// runUpgradeHealCommand runs one argv for the heal helper and returns its
-// combined output in the error when it fails.
-func runUpgradeHealCommand(argv []string) error {
-	out, err := exec.Command(argv[0], argv[1:]...).CombinedOutput() //nolint:gosec // fixed argv from submitUpgradeHeal
-	if err != nil {
-		return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+// runUpgradeHealCommand runs one argv for the heal helper with a bounded
+// lifetime and returns its combined output in the error when it fails. The
+// bound keeps a launchd that never answers from holding the exit that armed
+// the helper (gt-csq9g).
+func runUpgradeHealCommand(timeout time.Duration, argv []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, argv[0], argv[1:]...).CombinedOutput() //nolint:gosec // fixed argv from submitUpgradeHeal
+	if err == nil {
+		return nil
 	}
-	return nil
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return fmt.Errorf("%s: %w after %s", strings.Join(argv, " "), ctxErr, timeout)
+	}
+	return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
 }

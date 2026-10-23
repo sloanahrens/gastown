@@ -35,7 +35,7 @@ func (s daemonSeams) runUpgradeHeal(argv []string) error {
 	if s.upgradeHealRun != nil {
 		return s.upgradeHealRun(argv)
 	}
-	return runUpgradeHealCommand(argv)
+	return runUpgradeHealCommand(upgradeHealCommandTimeout, argv)
 }
 
 // runHeartbeatWork runs the body of one heartbeat; lifecycle false holds
