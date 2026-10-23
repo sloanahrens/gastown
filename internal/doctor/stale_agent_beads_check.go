@@ -83,12 +83,21 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	// Phase 2's both go through addReadErr, so no append races the others.
 	var readErrs []string
 	skippedRigs := make(map[string]bool)
+	// queryErrs records each store whose agent bead list could not be read,
+	// so a Dolt outage is reported rather than read as a clean town
+	// (gt-szdhc).
+	var queryErrs []string
 	var mu sync.Mutex
 	addReadErr := func(rig string, err error) {
 		mu.Lock()
 		defer mu.Unlock()
 		skippedRigs[rig] = true
 		readErrs = append(readErrs, err.Error())
+	}
+	addQueryErr := func(store string, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		queryErrs = append(queryErrs, store+": "+err.Error())
 	}
 
 	// Phase 1: Check known rigs for stale crew/polecat beads.
@@ -137,11 +146,16 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 				Label:    "gt:agent",
 			})
 			if err != nil {
+				// A store that cannot answer is not an empty store: record
+				// the rig and leave its beads out of the stale set.
+				addQueryErr(rigName, err)
 				return
 			}
 
 			// Also check wisps table for migrated agent beads
-			if wispMap, _ := bd.ListAgentBeadsFromWisps(); len(wispMap) > 0 {
+			if wispMap, wispErr := bd.ListAgentBeadsFromWisps(); wispErr != nil {
+				addQueryErr(rigName, wispErr)
+			} else {
 				for _, w := range wispMap {
 					if w.Status == "open" || w.Status == "in_progress" || w.Status == "hooked" {
 						allBeads = append(allBeads, w)
@@ -191,79 +205,82 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	// gt rig remove but its agent beads in the town database are not cleaned up.
 	townBeadsPath := beads.GetTownBeadsPath(ctx.TownRoot)
 	townBd := ctx.beadsAt(townBeadsPath)
-	if townAgents, err := townBd.ListAgentBeads(); err == nil {
-		for id, issue := range townAgents {
-			// Skip closed/non-active beads
-			if issue.Status != "open" && issue.Status != "in_progress" && issue.Status != "hooked" {
-				continue
-			}
-			// Only check beads that are agent type
-			if issue.Type != "agent" {
-				continue
-			}
-			// Parse the bead ID to extract its prefix
-			rig, role, _, ok := beads.ParseAgentBeadID(id)
-			if !ok {
-				continue
-			}
-			// Skip town-level agents — they don't belong to a rig
-			if rig == "" {
-				continue
-			}
-			// Extract the prefix from the ID (everything before the first hyphen)
-			hyphenIdx := strings.Index(id, "-")
-			if hyphenIdx < 0 {
-				continue
-			}
-			idPrefix := id[:hyphenIdx]
-			// If prefix is not in any known route, this is an orphan from a deregistered rig
-			if !knownPrefixes[idPrefix] {
-				stale = append(stale, id)
-				continue
-			}
-			// Also check: known prefix but the rig directory no longer exists on disk.
-			// This catches beads stored in the town DB (hq) for rigs that still have
-			// routes but whose crew/polecat workers were removed. The per-rig scan in
-			// Phase 1 may miss these if the beads are in hq rather than the rig DB.
-			if info, exists := prefixToRig[idPrefix]; exists {
-				switch role {
-				case constants.RoleCrew:
-					workerName := parseCrewOrPolecatFromID(id, idPrefix, info.name, constants.RoleCrew)
-					if workerName != "" {
-						crewWorkers, err := listCrewWorkers(ctx.TownRoot, info.name)
-						if err != nil {
-							addReadErr(info.name, err)
-							continue
-						}
-						found := false
-						for _, w := range crewWorkers {
-							if w == workerName {
-								found = true
-								break
-							}
-						}
-						if !found {
-							stale = append(stale, id)
+	townAgents, townErr := townBd.ListAgentBeads()
+	if townErr != nil {
+		// Orphan detection did not run, so a clean result would be a lie.
+		addQueryErr("town beads", townErr)
+	}
+	for id, issue := range townAgents {
+		// Skip closed/non-active beads
+		if issue.Status != "open" && issue.Status != "in_progress" && issue.Status != "hooked" {
+			continue
+		}
+		// Only check beads that are agent type
+		if issue.Type != "agent" {
+			continue
+		}
+		// Parse the bead ID to extract its prefix
+		rig, role, _, ok := beads.ParseAgentBeadID(id)
+		if !ok {
+			continue
+		}
+		// Skip town-level agents — they don't belong to a rig
+		if rig == "" {
+			continue
+		}
+		// Extract the prefix from the ID (everything before the first hyphen)
+		hyphenIdx := strings.Index(id, "-")
+		if hyphenIdx < 0 {
+			continue
+		}
+		idPrefix := id[:hyphenIdx]
+		// If prefix is not in any known route, this is an orphan from a deregistered rig
+		if !knownPrefixes[idPrefix] {
+			stale = append(stale, id)
+			continue
+		}
+		// Also check: known prefix but the rig directory no longer exists on disk.
+		// This catches beads stored in the town DB (hq) for rigs that still have
+		// routes but whose crew/polecat workers were removed. The per-rig scan in
+		// Phase 1 may miss these if the beads are in hq rather than the rig DB.
+		if info, exists := prefixToRig[idPrefix]; exists {
+			switch role {
+			case constants.RoleCrew:
+				workerName := parseCrewOrPolecatFromID(id, idPrefix, info.name, constants.RoleCrew)
+				if workerName != "" {
+					crewWorkers, err := listCrewWorkers(ctx.TownRoot, info.name)
+					if err != nil {
+						addReadErr(info.name, err)
+						continue
+					}
+					found := false
+					for _, w := range crewWorkers {
+						if w == workerName {
+							found = true
+							break
 						}
 					}
-				case constants.RolePolecat:
-					workerName := parseCrewOrPolecatFromID(id, idPrefix, info.name, constants.RolePolecat)
-					if workerName != "" {
-						polecats, err := listPolecats(ctx.TownRoot, info.name)
-						if err != nil {
-							addReadErr(info.name, err)
-							continue
+					if !found {
+						stale = append(stale, id)
+					}
+				}
+			case constants.RolePolecat:
+				workerName := parseCrewOrPolecatFromID(id, idPrefix, info.name, constants.RolePolecat)
+				if workerName != "" {
+					polecats, err := listPolecats(ctx.TownRoot, info.name)
+					if err != nil {
+						addReadErr(info.name, err)
+						continue
+					}
+					found := false
+					for _, p := range polecats {
+						if p == workerName {
+							found = true
+							break
 						}
-						found := false
-						for _, p := range polecats {
-							if p == workerName {
-								found = true
-								break
-							}
-						}
-						if !found {
-							stale = append(stale, id)
-						}
+					}
+					if !found {
+						stale = append(stale, id)
 					}
 				}
 			}
@@ -273,8 +290,9 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	// Deduplicate stale list (Phase 1 and Phase 2 may find the same beads)
 	stale = dedup(stale)
 	readErrs = dedup(readErrs)
+	queryErrs = dedup(queryErrs)
 
-	if len(stale) == 0 && len(skippedRigs) == 0 {
+	if len(stale) == 0 && len(skippedRigs) == 0 && len(queryErrs) == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -282,19 +300,30 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Skipped rigs are named in the message, never in Details: Fix closes
-	// every entry in Details, and an error string there is not a bead.
+	// Skipped rigs and failed queries are named in the message, never in
+	// Details: Fix closes every entry in Details, and an error string there
+	// is not a bead.
 	if len(stale) == 0 {
+		var reasons []string
+		if len(queryErrs) > 0 {
+			reasons = append(reasons, "Could not read agent bead lists: "+strings.Join(queryErrs, "; "))
+		}
+		if len(skippedRigs) > 0 {
+			reasons = append(reasons, "Skipped rigs with an unreadable crew or polecats directory: "+strings.Join(readErrs, "; "))
+		}
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
-			Message: "Skipped rigs with an unreadable crew or polecats directory: " + strings.Join(readErrs, "; "),
+			Message: strings.Join(reasons, "; "),
 		}
 	}
 
 	message := fmt.Sprintf("%d stale agent bead(s) for removed workers", len(stale))
 	if len(skippedRigs) > 0 {
 		message += fmt.Sprintf("; %d rig(s) not checked (unreadable crew or polecats directory)", len(skippedRigs))
+	}
+	if len(queryErrs) > 0 {
+		message += fmt.Sprintf("; could not read agent bead lists: %s", strings.Join(queryErrs, "; "))
 	}
 	return &CheckResult{
 		Name:    c.Name(),

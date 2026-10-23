@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -37,13 +38,13 @@ func TestStaleAgentBeadsCheck_NoRoutes(t *testing.T) {
 
 	// No .beads dir at all — LoadRoutes returns empty, so check returns OK (no rigs)
 	check := NewStaleAgentBeadsCheck()
-	ctx := noBD(tmpDir)
+	ctx := newDoctorTown().ctx(tmpDir, "")
 
 	result := check.Run(ctx)
 
-	// With no routes, there are no rigs to check, so result is OK or Warning
-	if result.Status != StatusOK && result.Status != StatusWarning {
-		t.Errorf("expected StatusOK or StatusWarning, got %v: %s", result.Status, result.Message)
+	// With no routes and a store that answers, there is nothing to report.
+	if result.Status != StatusOK {
+		t.Errorf("expected StatusOK for a town with no routes, got %v: %s", result.Status, result.Message)
 	}
 }
 
@@ -61,7 +62,7 @@ func TestStaleAgentBeadsCheck_NoRigs(t *testing.T) {
 	}
 
 	check := NewStaleAgentBeadsCheck()
-	ctx := noBD(tmpDir)
+	ctx := newDoctorTown().ctx(tmpDir, "")
 
 	result := check.Run(ctx)
 
@@ -283,6 +284,127 @@ func TestStaleAgentBeadsUnlistableRigCountsRigs(t *testing.T) {
 	}
 }
 
+// failingBeads is a bead store where the selected agent bead read fails, as
+// a store whose Dolt server is unreachable does.
+type failingBeads struct {
+	doctorBeads
+	listErr       error
+	wispsErr      error
+	agentBeadsErr error
+}
+
+func (f failingBeads) List(opts beads.ListOptions) ([]*beads.Issue, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.doctorBeads.List(opts)
+}
+
+func (f failingBeads) ListAgentBeadsFromWisps() (map[string]*beads.Issue, error) {
+	if f.wispsErr != nil {
+		return nil, f.wispsErr
+	}
+	return f.doctorBeads.ListAgentBeadsFromWisps()
+}
+
+func (f failingBeads) ListAgentBeads() (map[string]*beads.Issue, error) {
+	if f.agentBeadsErr != nil {
+		return nil, f.agentBeadsErr
+	}
+	return f.doctorBeads.ListAgentBeads()
+}
+
+// TestStaleAgentBeadsCheckUnreadableBeadListIsNotOK verifies that a bead list
+// that fails to answer is reported as a warning naming the store, not read as
+// an empty list. Before gt-szdhc the check swallowed every query error and
+// reported StatusOK during a Dolt outage.
+func TestStaleAgentBeadsCheckUnreadableBeadListIsNotOK(t *testing.T) {
+	t.Parallel()
+	errDown := errors.New("dial tcp 127.0.0.1:3307: connect: connection refused")
+
+	tests := []struct {
+		name     string
+		failRig  func(*failingBeads) // the rig store's failing call
+		failTown func(*failingBeads) // the town store's failing call
+		wantIn   string              // a phrase the message must name
+	}{
+		{
+			name:    "rig bead list",
+			failRig: func(f *failingBeads) { f.listErr = errDown },
+			wantIn:  "gastown: " + errDown.Error(),
+		},
+		{
+			name:    "rig wisp bead list",
+			failRig: func(f *failingBeads) { f.wispsErr = errDown },
+			wantIn:  "gastown: " + errDown.Error(),
+		},
+		{
+			name:     "town bead list",
+			failTown: func(f *failingBeads) { f.agentBeadsErr = errDown },
+			wantIn:   "town beads: " + errDown.Error(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			routesContent := `{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n"
+			if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+				t.Fatal(err)
+			}
+			rigDir := filepath.Join(tmpDir, "gastown", "mayor", "rig")
+			for _, dir := range []string{filepath.Join(rigDir, ".beads"), filepath.Join(tmpDir, "gastown", "crew"), filepath.Join(tmpDir, "gastown", "polecats")} {
+				if err := os.MkdirAll(dir, 0755); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			town := newDoctorTown()
+			ctx := town.ctx(tmpDir, "")
+			open := ctx.openBeads
+			ctx.openBeads = func(site beadsSite) doctorBeads {
+				db := failingBeads{doctorBeads: open(site)}
+				switch site.workDir {
+				case rigDir:
+					if tt.failRig != nil {
+						tt.failRig(&db)
+					}
+				case beadsDir:
+					if tt.failTown != nil {
+						tt.failTown(&db)
+					}
+				}
+				return db
+			}
+
+			check := NewStaleAgentBeadsCheck()
+			result := check.Run(ctx)
+
+			if result.Status != StatusWarning {
+				t.Errorf("status = %v, want StatusWarning when a bead list cannot be read: %s", result.Status, result.Message)
+			}
+			if !strings.Contains(result.Message, tt.wantIn) {
+				t.Errorf("message = %q, want it to name %q", result.Message, tt.wantIn)
+			}
+			if len(result.Details) != 0 {
+				t.Errorf("details = %v, want none: a failed query names no bead", result.Details)
+			}
+
+			if err := check.Fix(ctx); err != nil {
+				t.Fatalf("Fix() returned error: %v", err)
+			}
+			if updates := town.updates(); len(updates) != 0 {
+				t.Errorf("Fix() closed beads it could not see: %v", updates)
+			}
+		})
+	}
+}
+
 // === Tests for Phase 2: Deregistered rig orphan detection ===
 
 func TestStaleAgentBeadsCheck_Phase2_NoTownBeadsDir(t *testing.T) {
@@ -312,13 +434,14 @@ func TestStaleAgentBeadsCheck_Phase2_NoTownBeadsDir(t *testing.T) {
 	check := NewStaleAgentBeadsCheck()
 	ctx := noBD(tmpDir)
 
-	// Should not crash — Phase 2 ListAgentBeads will fail without Dolt
+	// Should not crash — Phase 2 ListAgentBeads will fail without Dolt. That
+	// failure is a warning, not a clean result: the scan found nothing
+	// because it could not run (gt-szdhc).
 	result := check.Run(ctx)
 	t.Logf("Phase 2 no-dolt check: status=%v, message=%s", result.Status, result.Message)
 
-	// Without Dolt, no agent beads can be found, so result should be OK
-	if result.Status != StatusOK {
-		t.Errorf("expected StatusOK when no Dolt server, got %v: %s", result.Status, result.Message)
+	if result.Status != StatusWarning {
+		t.Errorf("expected StatusWarning when the town bead list cannot be read, got %v: %s", result.Status, result.Message)
 	}
 }
 
