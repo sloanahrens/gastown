@@ -577,11 +577,17 @@ func (d *Daemon) jsonlSupplementalExportBudget() time.Duration {
 // ctx's deadline killed names the table and the timeout, because the bare
 // "signal: killed" the process reports says neither.
 func runJSONLExport(ctx context.Context, cmd *exec.Cmd, table string, timeout time.Duration) ([]byte, error) {
+	return runJSONLExportWith(ctx, (*exec.Cmd).Run, cmd, table, timeout)
+}
+
+// runJSONLExportWith is runJSONLExport with the process run injected, so a test
+// can fail a run without starting dolt.
+func runJSONLExportWith(ctx context.Context, run func(*exec.Cmd) error, cmd *exec.Cmd, table string, timeout time.Duration) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 
-	if err := cmd.Run(); err != nil {
+	if err := run(cmd); err != nil {
 		return nil, jsonlExportFailure(ctx, err, stderr.String(), table, timeout)
 	}
 	return stdout.Bytes(), nil
