@@ -2653,6 +2653,45 @@ func TestSpecBudgetFromSeatMap(t *testing.T) {
 	}
 }
 
+// A seat's pinned_only mark reaches the tick's budget, so the dispatcher's
+// unlabelled draw passes it over; a map that never sets the key leaves every
+// seat unmarked (gt-zor86).
+func TestSpecBudgetFromSeatMapCarriesPinnedOnly(t *testing.T) {
+	t.Parallel()
+	ts := config.NewTownSettings()
+	ts.PolecatPool = &config.PolecatPool{
+		Timezone: "UTC",
+		Seats: map[string]config.SeatConfig{
+			"claude-sonnet":  {Cap: 2},
+			"deepseek-flash": {Cap: 1, PinnedOnly: true},
+		},
+	}
+	known := func(string) bool { return true }
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	b, err := specBudgetFromSeats(ts, now, known)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinned := map[string]bool{}
+	for _, s := range b.Seats {
+		pinned[s.Agent] = s.PinnedOnly
+	}
+	if len(b.Seats) != 2 || !pinned["deepseek-flash"] || pinned["claude-sonnet"] {
+		t.Fatalf("pinned_only by seat = %v, want deepseek-flash only", pinned)
+	}
+
+	ts.PolecatPool.Seats["deepseek-flash"] = config.SeatConfig{Cap: 1}
+	b, err = specBudgetFromSeats(ts, now, known)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range b.Seats {
+		if s.PinnedOnly {
+			t.Fatalf("seat %s is pinned-only with no pinned_only key", s.Agent)
+		}
+	}
+}
+
 // The tick's budget is built from one clock read, but the choice runs on a
 // later one: a tick that starts at 19:59:58 on a seat whose window shuts at
 // 20:00 must not sling onto it when the board read and the pre-sling holds
