@@ -53,7 +53,7 @@ The build's worktree is a detached one on the rig repo's shared `.repo.git`. No
 cleanup path treats it as a stray: the reaper and `heldByOtherWorktree` only
 `git worktree prune` registrations whose directory is gone (the directory exists
 for the whole build), they match worktrees by branch name (a detached HEAD has
-none), and `gt polecat prune-local` only reads the list to protect branches.
+none), and the local-branch prune reads the list only to protect branches.
 
 Every failure exits non-zero with the tail of the failing command: a commit the
 rig repo does not know, a failed build, an image that still carries another
