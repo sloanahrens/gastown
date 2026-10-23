@@ -93,6 +93,92 @@ func TestRenderSandboxSettingsRefusesAnUnknownHostOnlyHook(t *testing.T) {
 	}
 }
 
+func TestRenderSandboxSettingsRefusesAHooksStructureItCannotInspect(t *testing.T) {
+	t.Parallel()
+	tests := []struct{ name, settings string }{
+		{"hooks is a list", `{"hooks": []}`},
+		{"hooks is a string", `{"hooks": "none"}`},
+		{"hooks is null", `{"hooks": null}`},
+		{"an event is not a list", `{"hooks": {"PreToolUse": {}}}`},
+		{"a group is not an object", `{"hooks": {"PreToolUse": ["gt prime"]}}`},
+		{"a group has no hooks", `{"hooks": {"PreToolUse": [{"matcher": "Bash"}]}}`},
+		{"a hook is not an object", `{"hooks": {"PreToolUse": [{"hooks": ["gt prime"]}]}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if out, err := renderSandboxSettings([]byte(tt.settings)); err == nil {
+				t.Errorf("renderSandboxSettings accepted %s: %s", tt.name, out)
+			}
+		})
+	}
+}
+
+func TestRenderSandboxSettingsRefusesANonCommandHook(t *testing.T) {
+	t.Parallel()
+	const host = `{"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "http", "url": "https://example.invalid/hook"}]}]}}`
+	out, err := renderSandboxSettings([]byte(host))
+	if err == nil || !strings.Contains(err.Error(), "PreToolUse") {
+		t.Fatalf("renderSandboxSettings = %s, %v; want an error naming the event whose hook has no command", out, err)
+	}
+}
+
+func TestRenderSandboxSettingsCopiesSettingsWithoutHooks(t *testing.T) {
+	t.Parallel()
+	out, err := renderSandboxSettings([]byte(`{"theme": "dark"}`))
+	if err != nil {
+		t.Fatalf("renderSandboxSettings: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(out, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if doc["theme"] != "dark" {
+		t.Errorf("settings without hooks were not copied: %v", doc)
+	}
+	if _, present := doc["hooks"]; present {
+		t.Errorf("settings without hooks gained a hooks key: %v", doc)
+	}
+}
+
+func TestRenderHookCommandMatchesTheProgramExactly(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, cmd, want string
+		drop, refuse    bool
+	}{
+		{name: "bare gt", cmd: "gt prime --hook", want: "/usr/local/bin/gt prime --hook"},
+		{name: "host gt keeps its argv as written", cmd: "/Users/x/.local/bin/gt  tap guard  pr-workflow", want: "/usr/local/bin/gt  tap guard  pr-workflow"},
+		{name: "leading whitespace does not survive", cmd: "  /Users/x/.local/bin/gt prime", want: "/usr/local/bin/gt prime"},
+		{name: "a longer name is not gt", cmd: "/opt/gt/bin/gtx prime", refuse: true},
+		{name: "a longer name is not python", cmd: "/usr/bin/pythonista /Users/x/.claude/tools/polecat-path-guard.py", refuse: true},
+		{name: "the guard is dropped", cmd: "/usr/bin/python3 /Users/x/.claude/tools/polecat-path-guard.py", drop: true},
+		{name: "a versioned python still runs the guard", cmd: "/usr/bin/python3.11 /Users/x/.claude/tools/polecat-path-guard.py", drop: true},
+		{name: "a guard by that name elsewhere is host-only too", cmd: "/usr/bin/python3 /tmp/polecat-path-guard.py", refuse: true},
+		{name: "an argument before the guard is not the guard", cmd: "/usr/bin/python3 -u /Users/x/.claude/tools/polecat-path-guard.py", refuse: true},
+		{name: "empty command", cmd: "", refuse: true},
+		{name: "whitespace command", cmd: "   ", refuse: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, drop, err := renderHookCommand(tt.cmd)
+			switch {
+			case tt.refuse:
+				if err == nil {
+					t.Fatalf("renderHookCommand(%q) = %q, drop %v; want a refusal", tt.cmd, got, drop)
+				}
+			case err != nil:
+				t.Fatalf("renderHookCommand(%q): %v", tt.cmd, err)
+			case drop != tt.drop:
+				t.Fatalf("renderHookCommand(%q) dropped = %v, want %v", tt.cmd, drop, tt.drop)
+			case got != tt.want:
+				t.Errorf("renderHookCommand(%q) = %q, want %q", tt.cmd, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRewriteTownRootChangesWholePathsOnly(t *testing.T) {
 	t.Parallel()
 	const from, to = "/h/gt", "/sandbox/gt"
@@ -104,6 +190,12 @@ func TestRewriteTownRootChangesWholePathsOnly(t *testing.T) {
 		{"longer sibling name", "/h/gt-other/x /h/gtx", "/h/gt-other/x /h/gtx"},
 		{"contained deeper in another path", "/x/h/gt/y", "/x/h/gt/y"},
 		{"no mention", "claude --model m", "claude --model m"},
+		{"the whole string", "/h/gt", "/sandbox/gt"},
+		{"the whole string then a separator", "/h/gt/", "/sandbox/gt/"},
+		{"in parentheses", "x(/h/gt)y", "x(/sandbox/gt)y"},
+		{"tab before, newline after", "a\t/h/gt\nb", "a\t/sandbox/gt\nb"},
+		{"repeated, second one embedded", "/h/gt/h/gt", "/sandbox/gt/h/gt"},
+		{"two whole paths in a list", "/h/gt:/h/gt", "/sandbox/gt:/sandbox/gt"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -115,5 +207,8 @@ func TestRewriteTownRootChangesWholePathsOnly(t *testing.T) {
 	}
 	if got := RewriteTownRoot("/h/gt/x", "", ""); got != "/h/gt/x" {
 		t.Errorf("an empty root must leave the text alone, got %q", got)
+	}
+	if got := RewriteTownRoot("/h/gt/x", from, from); got != "/h/gt/x" {
+		t.Errorf("an unchanged root must leave the text alone, got %q", got)
 	}
 }
