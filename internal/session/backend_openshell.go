@@ -63,20 +63,33 @@ const sandboxHolderSession = "boot"
 // sandboxMainScript is the sandbox's main process, created with --no-keep so the
 // gateway deletes the sandbox when it exits. It starts the tmux server the host's
 // exec'd commands talk to, waits for the host to start the agent's session on it,
-// and exits once that session has been gone, or all its panes dead, for three
-// polls in a row (one poll alone could be a respawn or a failed read). It exits
-// 1 when the session never appears, so a launch that failed after the sandbox
-// was made also ends the sandbox.
+// and exits once the session has been seen gone, or all its panes dead, on three
+// polls in a row. A poll counts only on a positive answer: the panes were read
+// and none is alive, or tmux's server answered and has no such session. A poll
+// that reads a live pane resets that count. When tmux cannot be asked at all the
+// answer is unknown: the count is left as it is, so a transient failure never
+// deletes a live sandbox. A tmux that stays unreachable for sandboxTmuxLostPolls
+// polls in a row has lost the agent with it, and the script exits so the sandbox
+// does not outlive it. It exits 1 when the session never appears, so a launch
+// that failed after the sandbox was made also ends the sandbox.
 //
 // Positional arguments: $1 the session name; $2 seconds to wait for the session
 // (default sandboxSessionWaitSeconds); $3 the poll interval in seconds (2); $4
-// the tmux start directory (the sandbox home). Only $1 is set in production.
-const sandboxMainScript = `S="$1"; W="${2:-` + sandboxSessionWaitSeconds + `}"; P="${3:-2}"; T="tmux -L ` + SandboxTmuxSocket + `"; ` +
+// the tmux start directory (the sandbox home); $5 the unreachable-poll limit
+// (default sandboxTmuxLostPolls). Only $1 is set in production.
+const sandboxMainScript = `S="$1"; W="${2:-` + sandboxSessionWaitSeconds + `}"; P="${3:-2}"; U="${5:-` + sandboxTmuxLostPolls + `}"; T="tmux -L ` + SandboxTmuxSocket + `"; ` +
 	`$T new-session -d -s ` + sandboxHolderSession + ` -c "${4:-` + sandboxHome + `}" || exit 1; ` +
 	`i=0; until $T has-session -t "=$S" 2>/dev/null; do i=$((i+1)); [ "$i" -gt "$W" ] && exit 1; sleep 1; done; ` +
-	`gone=0; while [ "$gone" -lt 3 ]; do ` +
-	`if $T list-panes -t "=$S" -F '#{pane_dead}' 2>/dev/null | grep -qx 0; then gone=0; else gone=$((gone+1)); fi; ` +
+	`gone=0; unk=0; while [ "$gone" -lt 3 ] && [ "$unk" -lt "$U" ]; do ` +
+	`if out=$($T list-panes -t "=$S" -F '#{pane_dead}' 2>/dev/null); then unk=0; ` +
+	`if printf '%s\n' "$out" | grep -qx 0; then gone=0; else gone=$((gone+1)); fi; ` +
+	`elif $T list-sessions >/dev/null 2>&1; then unk=0; gone=$((gone+1)); ` +
+	`else unk=$((unk+1)); fi; ` +
 	`sleep "$P"; done; exit 0`
+
+// sandboxTmuxLostPolls is how many polls in a row tmux may stay unreachable
+// (about five minutes at the 2 s interval) before the main process exits.
+const sandboxTmuxLostPolls = "150"
 
 // sandboxSessionWaitSeconds is how long the main process waits for the agent's
 // session to appear.
