@@ -435,8 +435,12 @@ func TestMarkSlungDropsTheEvidenceOfThePreviousSession(t *testing.T) {
 		if err := MarkSlung(town, polecat, "deepseek-flash-sandbox", "gt sling", now); err != nil {
 			t.Fatal(err)
 		}
-		rec, _ := Read(town, polecat)
-		if rec.Progress == nil || rec.Progress.DeadSamples != 1 || rec.Agent != "" {
+		rec, err := Read(town, polecat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Desired != DesiredPark || rec.Reason != "operator inspecting" ||
+			rec.Progress == nil || rec.Progress.DeadSamples != 1 || rec.Agent != "" {
 			t.Fatalf("a held seat was written to: %+v", rec)
 		}
 	})
