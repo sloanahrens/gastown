@@ -33,7 +33,8 @@ type DAGInfo struct {
 	Tiers        int                 `json:"tiers"`
 	CriticalPath []string            `json:"critical_path,omitempty"`
 	Nodes        map[string]*DAGNode `json:"nodes"`
-	TierGroups   [][]string          `json:"tier_groups"` // Nodes grouped by tier
+	TierGroups   [][]string          `json:"tier_groups"`      // Nodes grouped by tier
+	Cyclic       []string            `json:"cyclic,omitempty"` // Nodes in a dependency cycle; their tier is a fallback
 }
 
 var moleculeDagCmd = &cobra.Command{
@@ -216,16 +217,20 @@ func buildDAG(b *beads.Beads, root *beads.Issue, children []*beads.Issue) (*DAGI
 // outside dag.Nodes is never processed here, so counting it would keep its
 // dependent from ever reaching in-degree 0. Nodes that still have unmet
 // in-molecule dependencies when no tier can be formed (a dependency cycle) go
-// into one trailing tier, so every node is in exactly one tier group.
+// into one trailing tier, so every node is in exactly one tier group, and are
+// listed in dag.Cyclic.
 func computeTiers(dag *DAGInfo) {
-	// Calculate in-degrees. Each edge counts once per Dependents entry, so
-	// the decrement below matches it.
+	// Build the edges from Dependencies alone, the same source as the
+	// in-degrees, so the decrement below matches the count whatever
+	// Dependents holds. Each edge counts once per Dependencies entry.
+	dependents := make(map[string][]string)
 	inDegree := make(map[string]int)
 	for id, node := range dag.Nodes {
 		inDegree[id] = 0
 		for _, depID := range node.Dependencies {
 			if _, ok := dag.Nodes[depID]; ok {
 				inDegree[id]++
+				dependents[depID] = append(dependents[depID], id)
 			}
 		}
 	}
@@ -245,13 +250,15 @@ func computeTiers(dag *DAGInfo) {
 		}
 
 		if len(tierNodes) == 0 {
-			// Cycle detected (shouldn't happen with validated molecules):
-			// place the remaining nodes together rather than drop them.
+			// A molecule is validated as acyclic, but a cycle stored in the
+			// beads data still reaches here: place the remaining nodes together
+			// rather than drop them, and record them as cyclic.
 			for id := range inDegree {
 				tierNodes = append(tierNodes, id)
 			}
 			sort.Strings(tierNodes)
 			tierGroups = append(tierGroups, tierNodes)
+			dag.Cyclic = tierNodes
 			for _, id := range tierNodes {
 				dag.Nodes[id].Tier = currentTier
 			}
@@ -270,7 +277,7 @@ func computeTiers(dag *DAGInfo) {
 			processed++
 
 			// Decrement in-degree of dependents
-			for _, depID := range dag.Nodes[id].Dependents {
+			for _, depID := range dependents[id] {
 				if _, ok := inDegree[depID]; ok {
 					inDegree[depID]--
 				}
@@ -453,7 +460,9 @@ func outputDAGTiers(dag *DAGInfo) error {
 
 	for tier, nodes := range dag.TierGroups {
 		fmt.Printf("   %s Tier %d", style.Bold.Render("─"), tier)
-		if tier == 0 {
+		if len(dag.Cyclic) > 0 && tier == dag.Tiers-1 {
+			fmt.Printf(" (dependency cycle: order unknown)")
+		} else if tier == 0 {
 			fmt.Printf(" (entry)")
 		} else if tier == dag.Tiers-1 {
 			fmt.Printf(" (exit)")
