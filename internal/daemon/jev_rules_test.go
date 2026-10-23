@@ -68,6 +68,37 @@ func TestJevRulesRunPassesTheConfiguredSettings(t *testing.T) {
 	}
 }
 
+// TestJevRulesSkipsARigWithNoBeadsDirectory checks a rig that is registered
+// but never cloned does not stop the pass for the rest: the missing rig is
+// left out of the settings and named in the log (gt-csq9g).
+func TestJevRulesSkipsARigWithNoBeadsDirectory(t *testing.T) {
+	t.Parallel()
+	var got jevrules.Settings
+	d := newRulesDaemon(t, true, func(_ string, s jevrules.Settings, _ io.Writer) (*jevrules.Pass, error) {
+		got = s
+		return nil, errors.New("stop here")
+	})
+	town := d.config.TownRoot
+	if err := os.MkdirAll(filepath.Join(town, "mayor"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rigs := `{"rigs": {"cloned": {}, "never-cloned": {}}}`
+	if err := os.WriteFile(filepath.Join(town, "mayor", "rigs.json"), []byte(rigs), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(town, "cloned", ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	d.runJevRules()
+	if len(got.Rigs) != 1 || got.Rigs[0] != "cloned" {
+		t.Fatalf("rigs = %v, want only the rig with a beads directory", got.Rigs)
+	}
+	if logText := d.logger.Writer().(*bytes.Buffer).String(); !strings.Contains(logText, "skipping rig never-cloned") {
+		t.Errorf("the skipped rig was not logged: %q", logText)
+	}
+}
+
 // rulesCountingAsker counts the calls a pass makes to Jev. It answers none.
 type rulesCountingAsker struct{ calls int }
 
