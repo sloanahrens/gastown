@@ -8,12 +8,9 @@ import (
 	"github.com/steveyegge/gastown/internal/templates"
 )
 
-// DaemonJobCheck reports a launchd job that is loaded but is not running the
-// daemon: no process holds daemon.lock, and the job has no process or its last
-// run exited non-zero. On 2026-10-22 com.gastown.daemon sat in that state for
-// nine minutes (state spawn scheduled, last exit code 78 EX_CONFIG) and
-// nothing noticed. DaemonRespawnCheck needs exactly EX_CONFIG with no pid;
-// this check judges the job against the lock alone, whatever the exit code was.
+// DaemonJobCheck fails when a loaded launchd job has no process and no process
+// holds daemon.lock. It judges the job against the lock alone, whatever its
+// last exit code (gt-m7c7k).
 type DaemonJobCheck struct {
 	BaseCheck
 
@@ -55,9 +52,9 @@ func hostDaemonJob(townRoot string) (templates.SupervisorState, bool) {
 	return templates.SupervisorJobState(kind), true
 }
 
-// Run fails when the job is loaded, no process holds the lock, and the job is
-// not running or its last exit was non-zero. The repair is the operator's to
-// run: nothing in gt boots a job out or in.
+// Run fails when the job is loaded, no process holds the lock, and the job has
+// no process of its own. The repair is the operator's to run: nothing in gt
+// boots a job out or in.
 func (c *DaemonJobCheck) Run(ctx *CheckContext) *CheckResult {
 	goos := c.goos
 	if goos == "" {
@@ -73,9 +70,11 @@ func (c *DaemonJobCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 	running, pid, err := isRunning(ctx.TownRoot)
 	if err != nil {
+		// Unknown is a warning, not a skip: this check exists to notice a daemon
+		// nobody is running, and a silent skip hides exactly that.
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusSkipped,
+			Status:  StatusWarning,
 			Message: "unknown: could not read the daemon lock",
 			Details: []string{err.Error()},
 		}
@@ -91,9 +90,10 @@ func (c *DaemonJobCheck) Run(ctx *CheckContext) *CheckResult {
 	st, provisioned := read(ctx.TownRoot)
 	switch {
 	case st.Err != nil:
+		// Unknown is a warning, not a skip, for the reason given above the lock read.
 		return &CheckResult{
 			Name:    c.Name(),
-			Status:  StatusSkipped,
+			Status:  StatusWarning,
 			Message: "unknown: could not read the supervisor's job state",
 			Details: []string{st.Err.Error()},
 		}
@@ -104,9 +104,10 @@ func (c *DaemonJobCheck) Run(ctx *CheckContext) *CheckResult {
 		return &CheckResult{Name: c.Name(), Status: StatusOK, Message: "the launchd job is not loaded"}
 	}
 
-	if st.PID != 0 && st.LastExit <= 0 {
-		// The job has a process that has not taken the lock yet: starting up,
-		// which is neither a pass nor the failure this check names.
+	if st.PID != 0 {
+		// A process the job has started, whatever the last run exited with, has
+		// not taken the lock yet: starting up, which is neither a pass nor the
+		// failure this check names.
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
@@ -117,19 +118,11 @@ func (c *DaemonJobCheck) Run(ctx *CheckContext) *CheckResult {
 	return &CheckResult{
 		Name:    c.Name(),
 		Status:  StatusError,
-		Message: fmt.Sprintf("launchd job is loaded but the daemon is not running: %s, last exit code %s, runs %d", daemonJobState(st), daemonJobExit(st), st.Runs),
+		Message: fmt.Sprintf("launchd job is loaded but the daemon is not running: no process, last exit code %s, runs %d", daemonJobExit(st), st.Runs),
 		Details: []string{"Supervised: " + st.StatusLine(0)},
 		FixHint: "Run: " + templates.SupervisorRepair(st.Kind) +
 			" — then confirm 'launchctl print' reports a pid",
 	}
-}
-
-// daemonJobState names what the job is doing, from what the reader reports.
-func daemonJobState(st templates.SupervisorState) string {
-	if st.PID != 0 {
-		return fmt.Sprintf("running pid %d without the lock", st.PID)
-	}
-	return "not running (no pid)"
 }
 
 // daemonJobExit renders the job's last exit status; -1 is one launchd did not

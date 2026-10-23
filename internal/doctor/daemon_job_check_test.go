@@ -2,6 +2,8 @@ package doctor
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -106,41 +108,111 @@ func TestDaemonJobCheck_NoProcessNoExitStatus_Error(t *testing.T) {
 }
 
 // A job with a process that has not taken the lock yet is starting, not
-// failing.
+// failing, whatever the run before it exited with.
 func TestDaemonJobCheck_ProcessWithoutLock_Warning(t *testing.T) {
 	t.Parallel()
-	st := templates.SupervisorState{Kind: "launchd", Loaded: true, PID: 501, Runs: 1, LastExit: -1}
+	for name, lastExit := range map[string]int{
+		"no exit reported": -1,
+		"clean exit":       0,
+		"EX_CONFIG":        templates.LaunchdExitConfig,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			st := templates.SupervisorState{Kind: "launchd", Loaded: true, PID: 501, Runs: 2, LastExit: lastExit}
 
-	result := jobCheck(false, 0, st, true).Run(&CheckContext{TownRoot: t.TempDir()})
+			result := jobCheck(false, 0, st, true).Run(&CheckContext{TownRoot: t.TempDir()})
 
-	if result.Status != StatusWarning {
-		t.Errorf("Status = %v, want StatusWarning; message: %s", result.Status, result.Message)
+			if result.Status != StatusWarning {
+				t.Errorf("Status = %v, want StatusWarning; message: %s", result.Status, result.Message)
+			}
+			if !strings.Contains(result.Message, "501") {
+				t.Errorf("message %q does not name the pid", result.Message)
+			}
+		})
 	}
 }
 
-func TestDaemonJobCheck_UnreadableState_Skipped(t *testing.T) {
+// With no job reader injected, the check reads the host's launchd plist under
+// the home directory. HOME points at a temp dir so the host's own plist and
+// launchctl are never touched; the other-town plist is the one that must read
+// as no job for this town.
+//
+//testpolicy:allow parallel — t.Setenv points HOME at a temp dir, and HOME is process-wide, so this test cannot run beside parallel tests
+func TestDaemonJobCheck_HostJobReader_OtherTownPlist_OK(t *testing.T) {
+	home := t.TempDir()
+	//testpolicy:allow no-env — HOME is the input under test: the nil job reader resolves the launchd plist through it, and a temp HOME keeps the host's plist and launchctl out of the test
+	t.Setenv("HOME", home)
+	writeLaunchdPlist(t, home, t.TempDir())
+
+	townRoot := t.TempDir()
+	if _, provisioned := hostDaemonJob(townRoot); provisioned {
+		t.Fatalf("hostDaemonJob reports a job for another town as provisioned here")
+	}
+
+	c := NewDaemonJobCheck()
+	c.goos = "darwin"
+	result := c.Run(&CheckContext{TownRoot: townRoot})
+	if result.Status != StatusOK {
+		t.Errorf("Status = %v, want StatusOK; message: %s", result.Status, result.Message)
+	}
+}
+
+// With no plist installed at all, the nil job reader is the same answer as no
+// job for this town: the check passes.
+//
+//testpolicy:allow parallel — t.Setenv points HOME at a temp dir, and HOME is process-wide, so this test cannot run beside parallel tests
+func TestDaemonJobCheck_HostJobReader_NoPlist_OK(t *testing.T) {
+	//testpolicy:allow no-env — HOME is the input under test: the nil job reader resolves the launchd plist through it, and a temp HOME keeps the host's plist and launchctl out of the test
+	t.Setenv("HOME", t.TempDir())
+
+	c := NewDaemonJobCheck()
+	c.goos = "darwin"
+	result := c.Run(&CheckContext{TownRoot: t.TempDir()})
+
+	if result.Status != StatusOK {
+		t.Errorf("Status = %v, want StatusOK; message: %s", result.Status, result.Message)
+	}
+}
+
+// writeLaunchdPlist installs a plist under home whose WorkingDirectory is
+// workingDir, in the shape the launchd template renders.
+func writeLaunchdPlist(t *testing.T, home, workingDir string) {
+	t.Helper()
+	dir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plist := "<key>WorkingDirectory</key>\n<string>" + workingDir + "</string>\n"
+	if err := os.WriteFile(filepath.Join(dir, "com.gastown.daemon.plist"), []byte(plist), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// An unreadable job is unknown, and unknown warns rather than skipping: the
+// check exists to notice a daemon nobody is running.
+func TestDaemonJobCheck_UnreadableState_Warning(t *testing.T) {
 	t.Parallel()
 	st := templates.SupervisorState{Kind: "launchd", LastExit: -1, Err: errors.New("launchctl print: exec: not found")}
 
 	result := jobCheck(false, 0, st, true).Run(&CheckContext{TownRoot: t.TempDir()})
 
-	if result.Status != StatusSkipped {
-		t.Fatalf("Status = %v, want StatusSkipped; message: %s", result.Status, result.Message)
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning; message: %s", result.Status, result.Message)
 	}
 	if len(result.Details) == 0 || !strings.Contains(result.Details[0], "launchctl print") {
 		t.Errorf("details %q do not carry the probe error", result.Details)
 	}
 }
 
-func TestDaemonJobCheck_UnreadableLock_Skipped(t *testing.T) {
+func TestDaemonJobCheck_UnreadableLock_Warning(t *testing.T) {
 	t.Parallel()
 	c := jobCheck(false, 0, jobSpawnScheduled, true)
 	c.running = func(string) (bool, int, error) { return false, 0, errors.New("lock: permission denied") }
 
 	result := c.Run(&CheckContext{TownRoot: t.TempDir()})
 
-	if result.Status != StatusSkipped {
-		t.Errorf("Status = %v, want StatusSkipped; message: %s", result.Status, result.Message)
+	if result.Status != StatusWarning {
+		t.Errorf("Status = %v, want StatusWarning; message: %s", result.Status, result.Message)
 	}
 }
 
