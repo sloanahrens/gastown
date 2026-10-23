@@ -132,6 +132,11 @@ func commitsMatch(a, b string) bool {
 	return strings.HasPrefix(a, b[:minLen]) || strings.HasPrefix(b, a[:minLen])
 }
 
+// SameCommit reports whether a and b name the same commit, either one short.
+func SameCommit(a, b string) bool {
+	return commitsMatch(a, b)
+}
+
 // CheckStaleBinary compares the binary's embedded commit with a build-branch
 // ref. It returns staleness info including whether the binary needs rebuilding.
 // This check is designed to be fast and non-blocking - errors are captured but
