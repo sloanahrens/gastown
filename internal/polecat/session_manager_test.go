@@ -12,6 +12,7 @@ import (
 	"github.com/jonboulle/clockwork"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
 )
 
@@ -252,6 +253,59 @@ func TestStopKillsThroughTheStopHook(t *testing.T) {
 	}
 	if ok, _ := tm.HasSession(sess); !ok {
 		t.Fatal("Stop killed through tmux as well as the hook")
+	}
+}
+
+// Stopping a sandboxed polecat's session also deletes its sandbox and registry
+// record (gt session stop, the overrun guard and gt down all stop through
+// Stop); a host session, which has no record, is only killed, and a deletion
+// that fails is reported with the stop's success named.
+func TestStopRemovesTheSandboxOfASandboxedSession(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		record    bool
+		deleteErr error
+		wantCalls int
+		wantErr   string
+	}{
+		{name: "sandboxed_session_loses_its_sandbox", record: true, wantCalls: 1},
+		{name: "host_session_has_nothing_to_remove", record: false, wantCalls: 0},
+		{name: "a_failed_deletion_is_reported", record: true, deleteErr: errors.New("gateway unreachable"), wantCalls: 1, wantErr: "session stopped; removing its sandbox"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			tm := newFakeSessionTmux()
+			m := &SessionManager{tmux: tm, rig: &rig.Rig{Name: "test-rig", Path: filepath.Join(town, "test-rig"), Polecats: []string{"Toast"}}, gits: newWorld().opener()}
+			sess := m.SessionName("Toast")
+			if err := tm.NewSession(sess, ""); err != nil {
+				t.Fatal(err)
+			}
+			if tt.record {
+				if err := session.WriteSandboxRecord(town, session.SandboxRecord{Session: sess, Rig: "test-rig", Polecat: "Toast"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var deleted []string
+			m.sandboxDeleter = func(_ string, rec session.SandboxRecord) error {
+				deleted = append(deleted, rec.Session)
+				return tt.deleteErr
+			}
+
+			err := m.Stop("Toast", true)
+
+			if tt.wantErr == "" && err != nil || tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
+				t.Fatalf("Stop = %v, want error containing %q", err, tt.wantErr)
+			}
+			if len(deleted) != tt.wantCalls || (tt.wantCalls == 1 && deleted[0] != sess) {
+				t.Errorf("sandbox deletions = %v, want %d for %s", deleted, tt.wantCalls, sess)
+			}
+			if ok, _ := tm.HasSession(sess); ok {
+				t.Error("the session survived the stop")
+			}
+		})
 	}
 }
 
