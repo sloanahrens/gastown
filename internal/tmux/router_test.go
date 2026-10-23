@@ -62,8 +62,11 @@ func TestRouterSendsSessionCommandsToTheRoutedClient(t *testing.T) {
 	if len(hostCalls) != 1 || !strings.Contains(strings.Join(hostCalls[0], " "), "-L gt-test has-session -t =gt-rig-local") {
 		t.Fatalf("host calls = %v", hostCalls)
 	}
-	if !routed.noRoute {
-		t.Fatal("a routed client must be marked noRoute so it never routes again")
+	if routed.noRoute {
+		t.Fatal("routeFor must not write to the client the router handed out")
+	}
+	if !routed.Routed().noRoute {
+		t.Fatal("Routed must return a copy that never routes again")
 	}
 }
 

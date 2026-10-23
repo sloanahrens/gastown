@@ -88,7 +88,7 @@ func (s *sandboxRouting) route(session string) *tmux.Tmux {
 	if c, ok := s.clients[session]; ok {
 		return c
 	}
-	c := tmux.NewTmuxWithExecPrefix(SandboxTmuxSocket, SandboxExecPrefix(rec.Gateway, session))
+	c := tmux.NewTmuxWithExecPrefix(SandboxTmuxSocket, SandboxExecPrefix(rec.Gateway, session)).Routed()
 	s.clients[session] = c
 	return c
 }
@@ -120,12 +120,19 @@ func (s *sandboxRouting) listed(town, session string) (bool, error) {
 	return s.listNames[session], nil
 }
 
+// sessions is the extra-sessions hook. A registry that cannot be listed
+// contributes nothing here: the hook only adds names to ListSessions (seat
+// counting), while routing itself fails closed on the same error (route).
 func (s *sandboxRouting) sessions() []string {
 	town := s.town()
 	if town == "" {
 		return nil
 	}
-	return ListSandboxSessions(town)
+	names, err := listSandboxSessions(town)
+	if err != nil {
+		return nil
+	}
+	return names
 }
 
 // forget drops the cached client for session (after its sandbox is deleted).

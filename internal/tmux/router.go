@@ -59,8 +59,23 @@ func (t *Tmux) routeFor(session string) *Tmux {
 	if rt == nil || rt == t {
 		return nil
 	}
-	rt.noRoute = true
+	if !rt.noRoute {
+		// A router should hand out routed clients (Routed); a plain one is
+		// used through a routed copy so the shared value is never written.
+		rt = rt.Routed()
+	}
 	return rt
+}
+
+// Routed returns a copy of t that never consults the session router: the
+// form a SessionRouter must return, built once per session and cached.
+func (t *Tmux) Routed() *Tmux {
+	if t == nil || t.noRoute {
+		return t
+	}
+	c := *t
+	c.noRoute = true
+	return &c
 }
 
 // sessionOfTarget extracts the session name from a tmux target: the text

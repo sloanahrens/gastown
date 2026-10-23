@@ -49,10 +49,11 @@ func CleanupSandboxWith(deleter func(townRoot string, rec SandboxRecord) error, 
 	return RemoveSandboxRecord(townRoot, session)
 }
 
-// IsSandboxed reports whether session's record exists.
-func IsSandboxed(townRoot, session string) bool {
-	_, ok, _ := ReadSandboxRecord(townRoot, session)
-	return ok
+// IsSandboxed reports whether session's record exists; a registry that
+// cannot be read is an error, not "no".
+func IsSandboxed(townRoot, session string) (bool, error) {
+	_, ok, err := ReadSandboxRecord(townRoot, session)
+	return ok, err
 }
 
 // AssessWhereItLives runs the liveness assessment for in.Session: through

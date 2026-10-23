@@ -137,8 +137,9 @@ func TestCleanupSandboxDeletesThroughTheHookAndForgetsTheRecord(t *testing.T) {
 	if err := CleanupSandboxWith(deleter, town, "gt-rig-box"); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(deleted, ",") != "gt-rig-box" || IsSandboxed(town, "gt-rig-box") {
-		t.Fatalf("deleted=%v still registered=%v", deleted, IsSandboxed(town, "gt-rig-box"))
+	still, err := IsSandboxed(town, "gt-rig-box")
+	if err != nil || strings.Join(deleted, ",") != "gt-rig-box" || still {
+		t.Fatalf("deleted=%v still registered=%v err=%v", deleted, still, err)
 	}
 	if c := RoutedTmuxFor("gt-rig-box", nil); c != nil {
 		t.Fatal("routed client survived cleanup")

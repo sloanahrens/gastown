@@ -34,7 +34,7 @@ func TestKillSessionCleansUpTheSandboxEvenWhenTheKillFails(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "server gone") {
 		t.Fatalf("the kill error must surface: %v", err)
 	}
-	if session.IsSandboxed(town, sessionName) {
-		t.Fatal("the sandbox record survived a failed kill; the sandbox must still be cleaned up")
+	if still, serr := session.IsSandboxed(town, sessionName); serr != nil || still {
+		t.Fatalf("the sandbox record survived a failed kill (still=%v err=%v); the sandbox must still be cleaned up", still, serr)
 	}
 }

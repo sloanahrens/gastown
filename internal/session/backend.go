@@ -10,14 +10,13 @@ import (
 
 // Backend names: a seat's polecats are hosted one of these ways.
 const (
-	BackendTmux      = "tmux"      // a tmux session on the host (today's default)
+	BackendTmux      = "tmux"      // a tmux session on the host (the default)
 	BackendOpenShell = "openshell" // a tmux session inside an OpenShell sandbox
 )
 
-// Profile is the sandbox profile a seat points at. It mirrors
-// config.SandboxProfile without importing it: the caller converts, so this
-// package compiles before the config fields land and the backend stays
-// usable from tests with literals.
+// Profile is the sandbox profile a seat points at: config.SandboxProfile's
+// fields, converted by the caller (cmd.sessionBackendForAgent) so this
+// package does not depend on the settings loader.
 type Profile struct {
 	Name             string   // the sandboxes.<name> key
 	Gateway          string   // openshell gateway name; "" = the CLI's active gateway
