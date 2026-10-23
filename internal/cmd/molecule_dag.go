@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"sort"
 	"strings"
@@ -287,35 +288,49 @@ func computeTiers(dag *DAGInfo) {
 //
 // A molecule is validated as acyclic, but a cycle stored in the beads data
 // still reaches here, and a plain memo-on-return DFS recurses without bound on
-// it. onStack holds the nodes of the walk in progress: an edge back to one of
-// them closes there instead of descending again, so every path returned is
-// finite. A longer branch of a node that also edges into the cycle still wins
-// the comparison, so an acyclic DAG draws exactly the path it drew before.
+// it. onStack maps each node of the walk in progress to its depth: an edge back
+// to one of them closes there instead of descending again, so every path
+// returned is finite. A longer branch of a node that also edges into the cycle
+// still wins the comparison, so an acyclic DAG draws exactly the path it drew
+// before.
+//
+// A path cut short by a back edge, whether to the node itself or to one above
+// it, holds only for the walk that cut it, so it is not memoized: a later visit
+// from outside the cycle recomputes it in full. A node whose walk never hit a
+// back edge to itself or above it is memoized as before.
 func findCriticalPath(dag *DAGInfo) []string {
 	// DFS to find longest path
 	memo := make(map[string][]string)
-	onStack := make(map[string]bool)
+	onStack := make(map[string]int)
 
-	var dfs func(id string) []string
-	dfs = func(id string) []string {
+	// dfs returns the longest path from id and the shallowest stack depth a
+	// back edge on it reached (noBackEdge when none did).
+	const noBackEdge = math.MaxInt
+	var dfs func(id string) ([]string, int)
+	dfs = func(id string) ([]string, int) {
 		if path, ok := memo[id]; ok {
-			return path
+			return path, noBackEdge
 		}
-		if onStack[id] {
+		if depth, ok := onStack[id]; ok {
 			// The edge back to id closes a cycle; end the walk at the node
 			// that opened it and keep the nodes leading in.
-			return nil
+			return nil, depth
 		}
 
 		node := dag.Nodes[id]
 		if node == nil {
-			return nil
+			return nil, noBackEdge
 		}
 
-		onStack[id] = true
+		depth := len(onStack)
+		onStack[id] = depth
+		reach := noBackEdge
 		longestSuffix := []string{}
 		for _, depID := range node.Dependents {
-			suffix := dfs(depID)
+			suffix, r := dfs(depID)
+			if r < reach {
+				reach = r
+			}
 			if len(suffix) > len(longestSuffix) {
 				longestSuffix = suffix
 			}
@@ -323,8 +338,10 @@ func findCriticalPath(dag *DAGInfo) []string {
 		delete(onStack, id)
 
 		path := append([]string{id}, longestSuffix...)
-		memo[id] = path
-		return path
+		if reach > depth {
+			memo[id] = path
+		}
+		return path, reach
 	}
 
 	// Find longest path starting from tier 0 nodes
@@ -332,7 +349,7 @@ func findCriticalPath(dag *DAGInfo) []string {
 	for _, tierNodes := range dag.TierGroups {
 		for _, id := range tierNodes {
 			if dag.Nodes[id].Tier == 0 {
-				path := dfs(id)
+				path, _ := dfs(id)
 				if len(path) > len(criticalPath) {
 					criticalPath = path
 				}
