@@ -1183,11 +1183,12 @@ func (d *Daemon) tierSweepRigCycle(ctx context.Context, cycle *dogCycle, rig, re
 			continue
 		}
 		declined := parseTierSweepUnknownTiers(res.output)
+		unreached := tierSweepUnreachedAfterDeclined(st.tiers, declined)
 		logPath := d.tierSweepWriteLog(rig, st.tiers[0], res.output)
 		for _, tier := range st.tiers {
 			ts, ok := reported[tier]
 			if !ok {
-				if declined[tier] {
+				if declined[tier] || unreached[tier] {
 					// The rig's own script says it has no such tier and exits
 					// 2 without a summary line. There is nothing to judge and
 					// nothing to fix, so the tier leaves the cycle's results
@@ -1580,6 +1581,25 @@ func parseTierSweepUnknownTiers(output string) map[string]bool {
 	for _, line := range strings.Split(output, "\n") {
 		if m := tierSweepUnknownTierRE.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
 			out[m[1]] = true
+		}
+	}
+	return out
+}
+
+// tierSweepUnreachedAfterDeclined names the tiers after the first tier a stage's
+// script declined. The script exits 2 at that tier before running the rest, so
+// those tiers were never judged and no line names them: they leave the cycle's
+// results as the declined tier does (gt-bdva9). A declined tier outside the
+// stage's tiers reaches nothing here.
+func tierSweepUnreachedAfterDeclined(tiers []string, declined map[string]bool) map[string]bool {
+	out := map[string]bool{}
+	seenDeclined := false
+	for _, tier := range tiers {
+		if seenDeclined {
+			out[tier] = true
+		}
+		if declined[tier] {
+			seenDeclined = true
 		}
 	}
 	return out

@@ -1645,6 +1645,11 @@ func TestTierSweepRigCycleTierTheScriptDoesNotOffer(t *testing.T) {
 		name:  "the script's own unknown-tier line leaves race out of the results",
 		stage: integrationSummary + declinedRace,
 	}, {
+		// The script exits at the first tier it does not offer, so race after
+		// it never ran and no line names it (gt-bdva9).
+		name:  "a tier the script declines ends its stage, so race after it leaves the results",
+		stage: "tier-sweep: unknown tier integration (want shell, integration or race)\n",
+	}, {
 		name:     "a missing verdict without that line is still RED",
 		stage:    integrationSummary,
 		wantRace: "no verdict line (exit 2)",
@@ -1726,6 +1731,42 @@ func TestTierSweepRigCycleTierTheScriptDoesNotOffer(t *testing.T) {
 			}
 			if raceBeads != want || raceItems != want {
 				t.Errorf("race beads = %d, attention items = %d, want %d each", raceBeads, raceItems, want)
+			}
+		})
+	}
+}
+
+// gt-bdva9: the script exits at the first tier it declines, so the tiers after
+// it in the stage were never reached. Only those after a declined tier of the
+// stage are named; a declined tier outside the stage names nothing.
+func TestTierSweepUnreachedAfterDeclined(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		tiers    []string
+		declined []string
+		want     []string
+	}{
+		{name: "nothing declined", tiers: []string{"integration", "race"}, want: nil},
+		{name: "last tier declined reaches nothing", tiers: []string{"integration", "race"}, declined: []string{"race"}, want: nil},
+		{name: "first tier declined leaves the rest unreached", tiers: []string{"integration", "race"}, declined: []string{"integration"}, want: []string{"race"}},
+		{name: "a tier outside the stage reaches nothing", tiers: []string{"integration", "race"}, declined: []string{"shell"}, want: nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			declined := map[string]bool{}
+			for _, tier := range tc.declined {
+				declined[tier] = true
+			}
+			got := tierSweepUnreachedAfterDeclined(tc.tiers, declined)
+			if len(got) != len(tc.want) {
+				t.Fatalf("unreached = %v, want %v", got, tc.want)
+			}
+			for _, tier := range tc.want {
+				if !got[tier] {
+					t.Errorf("unreached = %v, want %v", got, tc.want)
+				}
 			}
 		})
 	}
