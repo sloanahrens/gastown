@@ -2,8 +2,11 @@ package doctor
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // mockSocketLister implements socketSessionLister for testing.
@@ -253,5 +256,91 @@ func TestSocketSplitBrainCheck_Fix_KillsStale(t *testing.T) {
 	// staleSessions is sorted, so kills should be in order
 	if mock.killed[0] != "ga-nux" || mock.killed[1] != "ga-crew-max" {
 		t.Errorf("unexpected kill order: %v", mock.killed)
+	}
+}
+
+// The legacy cleanup and gt doctor's split-brain check must kill the same
+// default-socket sessions. Every row runs through both: the legacy cleanup's
+// own selection and the check's Fix. It fails if either side starts deciding
+// for itself (gt-2n5go).
+func TestSocketSplitBrainCheck_AgreesWithLegacyCleanup(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		sessions []string
+	}{
+		{
+			name:     "town roles, live overseer, unregistered and foreign names",
+			sessions: []string{"ga-witness", "hq-mayor", "hq-deacon", "hq-boot", "hq-dog-alpha", "hq-overseer", "gt-unregistered", "bd-thing", "gthq-thing", "personal-stuff"},
+		},
+		{
+			name:     "nothing stale",
+			sessions: []string{"hq-overseer", "personal-stuff"},
+		},
+		{
+			name:     "rig sessions only",
+			sessions: []string{"ga-nux", "ga-crew-max"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			reg := session.NewPrefixRegistry()
+			reg.Register("ga", "gastown")
+
+			check := NewSocketSplitBrainCheck()
+			check.useSocketForTest = true
+			check.socketForTest = "gt-abc123"
+			check.townListerForTest = &mockSocketLister{}
+			mock := &mockSocketLister{sessions: tt.sessions}
+			check.defaultListerForTest = mock
+
+			ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: reg}
+			check.Run(ctx)
+			if err := check.Fix(ctx); err != nil {
+				t.Fatalf("Fix() returned error: %v", err)
+			}
+
+			want := session.StaleDefaultSocketSessions(reg, tt.sessions)
+			slices.Sort(want)
+			got := slices.Clone(mock.killed)
+			slices.Sort(got)
+			if !slices.Equal(got, want) {
+				t.Errorf("gt doctor killed %v, legacy cleanup selects %v", got, want)
+			}
+		})
+	}
+}
+
+// gt doctor's split-brain check used to kill every IsKnownSession match on the
+// default socket, the live overseer included. The shared predicate narrows
+// that: the overseer is running, and unregistered gt-, bd- and gthq- names are
+// not town sessions. Nothing here is stale (gt-2n5go).
+func TestSocketSplitBrainCheck_LeavesLiveAndUnregisteredSessions(t *testing.T) {
+	t.Parallel()
+
+	reg := session.NewPrefixRegistry()
+	reg.Register("ga", "gastown")
+
+	check := NewSocketSplitBrainCheck()
+	check.useSocketForTest = true
+	check.socketForTest = "gt-abc123"
+	check.townListerForTest = &mockSocketLister{}
+	mock := &mockSocketLister{sessions: []string{
+		"hq-overseer", "gt-unregistered", "bd-thing", "gthq-thing", "personal-stuff",
+	}}
+	check.defaultListerForTest = mock
+
+	ctx := &CheckContext{TownRoot: t.TempDir(), sessionPrefixes: reg}
+	result := check.Run(ctx)
+	if result.Status != StatusOK {
+		t.Fatalf("expected OK, got %v: %s %v", result.Status, result.Message, result.Details)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+	if len(mock.killed) != 0 {
+		t.Errorf("killed %v, want none", mock.killed)
 	}
 }
