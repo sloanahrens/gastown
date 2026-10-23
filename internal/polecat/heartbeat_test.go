@@ -688,3 +688,35 @@ func waitHeartbeatAt(t *testing.T, townRoot, sessionName string, want time.Time)
 		}
 	}
 }
+
+// A sandboxed session's pane pid is a pid in its sandbox, so the host's
+// Signal(0) says nothing about it: the pane pid being present is the evidence.
+// 2147483646 is no process on the host, so a host signal would read "dead".
+func TestIsSessionProcessDead_PanePIDFallbackSignalsOnlyHostSessions(t *testing.T) {
+	t.Parallel()
+	const absentOnHost = "2147483646"
+	tests := []struct {
+		name      string
+		sandboxed func(string, string) (bool, error)
+		wantDead  bool
+	}{
+		{"host_session_absent_pid_is_dead", func(string, string) (bool, error) { return false, nil }, true},
+		{"sandboxed_session_is_not_signalled", func(string, string) (bool, error) { return true, nil }, false},
+		{"unreadable_registry_is_not_signalled", func(string, string) (bool, error) { return false, errors.New("registry unreadable") }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			sessionName := "gt-test-pid-" + tt.name
+			tm := newFakeProbe()
+			if err := tm.NewSessionWithCommandAndEnv(sessionName, townRoot, "sleep 300", nil); err != nil {
+				t.Fatal(err)
+			}
+			tm.setPanePID(sessionName, absentOnHost)
+			if got := isSessionProcessDeadWith(tm, sessionName, townRoot, tt.sandboxed); got != tt.wantDead {
+				t.Fatalf("isSessionProcessDeadWith = %v, want %v", got, tt.wantDead)
+			}
+		})
+	}
+}

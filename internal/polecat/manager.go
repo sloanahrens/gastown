@@ -2808,6 +2808,15 @@ func (m *Manager) ReconcilePoolWith(namesWithDirs, namesWithSessions []string) {
 // Returns true only when we can confirm the process is dead, not on transient
 // failures (gt-kncti: permission denied false positives).
 func isSessionProcessDead(t sessionProbe, sessionName string, townRoot string) bool {
+	return isSessionProcessDeadWith(t, sessionName, townRoot, session.IsSandboxed)
+}
+
+// isSessionProcessDeadWith is isSessionProcessDead with the sandbox registry
+// read injected. A sandboxed session's pane pid is a pid in its sandbox, so a
+// host Signal(0) on it answers for some other host process or none: for such a
+// session (or one the registry cannot be read for) the pane pid being present is
+// the evidence, and the host signal is not sent.
+func isSessionProcessDeadWith(t sessionProbe, sessionName string, townRoot string, sandboxed func(townRoot, session string) (bool, error)) bool {
 	// Primary: heartbeat-based liveness check (gt-qjtq ZFC fix).
 	if townRoot != "" {
 		stale, exists := IsSessionHeartbeatStale(townRoot, sessionName)
@@ -2845,6 +2854,11 @@ func isSessionProcessDead(t sessionProbe, sessionName string, townRoot string) b
 	if err != nil {
 		// Got a non-numeric PID — shouldn't happen, but don't kill.
 		return false
+	}
+	if townRoot != "" {
+		if on, err := sandboxed(townRoot, sessionName); err != nil || on {
+			return false
+		}
 	}
 	p, err := os.FindProcess(pid)
 	if err != nil {
