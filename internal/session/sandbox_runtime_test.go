@@ -47,6 +47,26 @@ func untarRuntime(t *testing.T, data []byte) map[string]runtimeEntry {
 	}
 }
 
+// The sandbox copy of the system prompt ends with the rule that keeps a
+// placeholder out of the conversation.
+func TestBuildRuntimeArchiveAppendsTheSandboxNoteToThePrompt(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	data, err := buildRuntimeArchive(openshellSpawn(town, work), openshellTestGitEmail)
+	if err != nil {
+		t.Fatalf("buildRuntimeArchive: %v", err)
+	}
+	prompt := untarRuntime(t, data)["gt/"+openshellTestRig+"/polecats/.claude/system-prompt-"+openshellTestPolecat+".md"].body
+	for _, want := range []string{"## Sandbox", "never print the", "environment", "gt escalate"} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the sandbox prompt lacks %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Index(prompt, "town at") > strings.Index(prompt, "## Sandbox") {
+		t.Errorf("the note must follow the polecat's own prompt:\n%s", prompt)
+	}
+}
+
 func TestBuildRuntimeArchiveHoldsTheRenderedSettingsAndPrompt(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
@@ -62,7 +82,7 @@ func TestBuildRuntimeArchiveHoldsTheRenderedSettingsAndPrompt(t *testing.T) {
 	if !strings.Contains(got[dir+"settings.json"].body, "/usr/local/bin/gt prime --hook") {
 		t.Errorf("settings.json was not rendered for the sandbox:\n%s", got[dir+"settings.json"].body)
 	}
-	if prompt := got[dir+"system-prompt-"+openshellTestPolecat+".md"].body; prompt != "town at /sandbox/gt/mayor\n" {
+	if prompt := got[dir+"system-prompt-"+openshellTestPolecat+".md"].body; !strings.HasPrefix(prompt, "town at /sandbox/gt/mayor\n") {
 		t.Errorf("system prompt = %q, want the town root rewritten", prompt)
 	}
 }

@@ -90,7 +90,7 @@ func buildRuntimeArchive(spec SpawnSpec, gitEmail string) ([]byte, error) {
 	prompt, err := os.ReadFile(filepath.Join(dir, promptName))
 	switch {
 	case err == nil:
-		files = append(files, runtimeFile{path.Join(claudeDir, promptName), []byte(RewriteTownRoot(string(prompt), spec.TownRoot, sandboxTownRoot)), 0o644})
+		files = append(files, runtimeFile{path.Join(claudeDir, promptName), []byte(RewriteTownRoot(string(prompt), spec.TownRoot, sandboxTownRoot) + sandboxPromptNote), 0o644})
 	case !errors.Is(err, fs.ErrNotExist):
 		return nil, fmt.Errorf("polecat system prompt: %w", err)
 	}
@@ -181,3 +181,16 @@ func sandboxGitConfig(polecat, email string) string {
 	return "[user]\n\tname = " + polecat + "\n\temail = " + email + "\n" +
 		"[credential]\n\thelper = " + path.Join(sandboxHome, gitHelperName) + "\n"
 }
+
+// sandboxPromptNote is appended to the polecat's system prompt in a sandbox.
+// Its credentials are placeholders, and one that reaches the conversation (a
+// printed environment) makes the provider proxy refuse every later request.
+const sandboxPromptNote = `
+## Sandbox
+
+You run in a sandbox. Your credentials are placeholders: never print the
+environment (env, printenv, set, export -p) or any token value, and never go
+looking for a credential. If git or bd cannot authenticate, say so in your notes
+and escalate with gt escalate. A placeholder that reaches this conversation ends
+your session.
+`
