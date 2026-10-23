@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/git"
+	"github.com/steveyegge/gastown/internal/rig"
 )
 
 // gitRepo is the part of *git.Git polecat works through: the rig's repo base
@@ -21,7 +22,6 @@ type gitRepo interface {
 
 	Rev(ref string) (string, error)
 	RefExists(ref string) (bool, error)
-	ShowFileAtRev(ref, path string) (string, error)
 	IsAncestor(ancestor, descendant string) (bool, error)
 	// MergeBase, DiffNameOnly, DiffPathsNameOnly and CommitLandedOnTarget are
 	// what land.WorkLandedOnTarget reads to prove a seat's leftover commits
@@ -70,12 +70,14 @@ type gitRepo interface {
 
 var _ gitRepo = (*git.Git)(nil)
 
-// gitOpener opens git on a working directory (open) or on a bare
-// repository's git directory (openDir). Its zero value opens *git.Git; tests
-// set both funcs to a gitfake world's openers.
+// gitOpener opens git on a working directory (open), on a bare repository's
+// git directory (openDir), or as the tracked-file reader a rig config
+// resolution reads (repoFile). Its zero value opens *git.Git; tests set the
+// funcs to a gitfake world's openers.
 type gitOpener struct {
-	open    func(workDir string) gitRepo
-	openDir func(gitDir, workDir string) gitRepo
+	open     func(workDir string) gitRepo
+	openDir  func(gitDir, workDir string) gitRepo
+	repoFile func(repoPath string) rig.RepoFileReader
 }
 
 // Open is git.NewGit(workDir), or the test's opener.
@@ -92,4 +94,15 @@ func (o gitOpener) OpenDir(gitDir, workDir string) gitRepo {
 		return git.NewGitWithDir(gitDir, workDir)
 	}
 	return o.openDir(gitDir, workDir)
+}
+
+// RepoFile is the tracked-file reader at repoPath: git.NewGit(repoPath), or
+// the test's opener. It is the seam rig.ReadRepoFile takes and is separate
+// from gitRepo so a caller that reads a rig config does not widen the
+// interface every polecat git read is declared through (gt-gfp7a).
+func (o gitOpener) RepoFile(repoPath string) rig.RepoFileReader {
+	if o.repoFile == nil {
+		return git.NewGit(repoPath)
+	}
+	return o.repoFile(repoPath)
 }

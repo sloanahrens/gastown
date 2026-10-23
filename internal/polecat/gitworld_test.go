@@ -20,8 +20,9 @@ func newWorld() *world { return &world{gitfake.New()} }
 // opener opens the world's repositories the way the manager opens real ones.
 func (w *world) opener() gitOpener {
 	return gitOpener{
-		open:    func(dir string) gitRepo { return w.OpenBranchRepo(dir) },
-		openDir: func(gitDir, workDir string) gitRepo { return w.OpenWithDir(gitDir, workDir).(gitfake.BranchRepo) },
+		open:     func(dir string) gitRepo { return w.OpenBranchRepo(dir) },
+		openDir:  func(gitDir, workDir string) gitRepo { return w.OpenWithDir(gitDir, workDir).(gitfake.BranchRepo) },
+		repoFile: func(repoPath string) rig.RepoFileReader { return w.OpenBranchRepo(repoPath) },
 	}
 }
 
