@@ -789,6 +789,9 @@ type slingSeatSpawn struct {
 	// resolvePool is the pool decision for this spawn, claiming a seat in
 	// seatClaims.
 	resolvePool func(townRoot, requested string) (agent, reason string, err error)
+	// pinnedAgent is the agent the hook bead's agent: label asks for, "" when
+	// it asks for none or the pool has no such seat. Nil reads no label.
+	pinnedAgent func(townRoot, beadID string) string
 	releaseSeat func()
 	prepare     func(townRoot, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error)
 	// seatClaims is the store this spawn's pool decision claims in and
@@ -811,6 +814,7 @@ func realSlingSeatSpawnWith(occupied func() ([]poolSession, error)) slingSeatSpa
 	store := newPoolSeatClaimStore()
 	return slingSeatSpawn{
 		backpressure: checkSlingBackpressure,
+		pinnedAgent:  poolBeadAgent,
 		resolvePool: func(townRoot, requested string) (agent, reason string, err error) {
 			r := poolRouterFor(townRoot, store)
 			if occupied == nil {
@@ -842,7 +846,12 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 	// past a full pool (gt-4lbz). An agent the pool does not own leaves it with
 	// no opinion and the request stands. The reason line always names the agent
 	// the pool chose, and a pool whose seat is at its cap refuses the sling.
-	poolAgent, poolReason, poolErr := s.resolvePool(townRoot, opts.Agent)
+	//
+	// A sling that names no agent asks for the one its bead is labeled with
+	// (agent:<name>) when the pool has that seat, so a pinned-only seat takes
+	// its labeled bead by hand as it does from the dispatcher. --agent wins.
+	requested := poolRequestedAgent(townRoot, opts.Agent, opts.HookBead, s.pinnedAgent)
+	poolAgent, poolReason, poolErr := s.resolvePool(townRoot, requested)
 	if poolErr != nil {
 		return nil, poolErr
 	}

@@ -2364,3 +2364,159 @@ func TestPoolRouterSeatBatchLivesOneDecision(t *testing.T) {
 		t.Fatalf("next decision = %+v, want gastown/p02 as a dead-hooked seat", got)
 	}
 }
+
+// A bead labeled agent:<name> asks for that seat when the pool has it; every
+// other shape leaves the sling to the pool's own choice (gt-5h1r7).
+func TestPoolPinnedAgent(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{
+		"deepseek-flash": {Cap: 2, PinnedOnly: true},
+		"claude-sonnet":  {Cap: 2},
+	}}
+	cases := []struct {
+		name   string
+		pool   *config.PolecatPool
+		labels []string
+		want   string
+	}{
+		{"a label naming a pinned-only seat", pool, []string{"gt:task", "agent:deepseek-flash"}, "deepseek-flash"},
+		{"a label naming an open seat", pool, []string{"agent:claude-sonnet"}, "claude-sonnet"},
+		{"the prefix is read without case or padding, as the dispatcher reads it", pool, []string{" Agent: claude-sonnet "}, "claude-sonnet"},
+		{"the same label twice is one name", pool, []string{"agent:claude-sonnet", "agent:claude-sonnet"}, "claude-sonnet"},
+		{"no agent label", pool, []string{"gt:task"}, ""},
+		{"no labels", pool, nil, ""},
+		{"conflicting labels pin nothing", pool, []string{"agent:claude-sonnet", "agent:deepseek-flash"}, ""},
+		{"a label naming an agent with no seat", pool, []string{"agent:claude-haiku"}, ""},
+		{"no pool", nil, []string{"agent:claude-sonnet"}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := poolPinnedAgent(tc.pool, tc.labels); got != tc.want {
+				t.Errorf("poolPinnedAgent(%v) = %q, want %q", tc.labels, got, tc.want)
+			}
+		})
+	}
+}
+
+// A sling that names no agent lands a labeled bead on its pinned-only seat,
+// where the same sling for an unlabeled bead skips that seat; --agent wins
+// over the label (gt-5h1r7).
+func TestSlingSeatSpawnHonorsTheBeadAgentLabel(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{
+		"deepseek-flash": {Cap: 3, PinnedOnly: true},
+		"claude-sonnet":  {Cap: 2},
+	}}
+	labels := map[string][]string{
+		"gt-labeled": {"agent:deepseek-flash"},
+		"gt-plain":   {"gt:task"},
+	}
+	spawnAgent := func(t *testing.T, bead, agent string) string {
+		t.Helper()
+		w := newTestPoolTown(pool)
+		w.fs = newFakeSeatFS()
+		router := w.process()
+		s := slingSeatSpawn{
+			backpressure: func(string, string, SlingSpawnOptions) error { return nil },
+			pinnedAgent: func(_, beadID string) string {
+				return poolPinnedAgent(pool, labels[beadID])
+			},
+			resolvePool: func(_, requested string) (string, string, error) { return router.route(requested, true) },
+			releaseSeat: router.seats.store.release,
+			prepare: func(_, rigName string, opts SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+				return &SpawnedPolecatInfo{RigName: rigName, agent: opts.Agent}, nil
+			},
+			seatClaims: router.seats.store,
+		}
+		info, err := s.spawn("/town", "gastown", SlingSpawnOptions{HookBead: bead, Agent: agent})
+		if err != nil {
+			t.Fatalf("spawn: %v", err)
+		}
+		return info.agent
+	}
+
+	if got := spawnAgent(t, "gt-labeled", ""); got != "deepseek-flash" {
+		t.Errorf("a labeled bead with no --agent ran on %q, want its pinned-only seat deepseek-flash", got)
+	}
+	if got := spawnAgent(t, "gt-plain", ""); got != "claude-sonnet" {
+		t.Errorf("an unlabeled bead ran on %q, want claude-sonnet (the pinned-only seat is skipped)", got)
+	}
+	if got := spawnAgent(t, "gt-labeled", "claude-sonnet"); got != "claude-sonnet" {
+		t.Errorf("--agent claude-sonnet on a labeled bead ran on %q, want the flag to win", got)
+	}
+}
+
+// poolRequestedAgent keeps --agent over the bead's label, and reads the label
+// only when a bead is slung and a reader is wired (gt-5h1r7).
+func TestPoolRequestedAgent(t *testing.T) {
+	t.Parallel()
+	label := func(townRoot, beadID string) string {
+		if townRoot != "/town" || beadID != "gt-1" {
+			t.Errorf("label read for %q in %q, want gt-1 in /town", beadID, townRoot)
+		}
+		return "deepseek-flash"
+	}
+	cases := []struct {
+		name   string
+		agent  string
+		beadID string
+		pinned func(townRoot, beadID string) string
+		want   string
+	}{
+		{"no agent takes the label", "", "gt-1", label, "deepseek-flash"},
+		{"--agent wins over the label", "claude-sonnet", "gt-1", label, "claude-sonnet"},
+		{"no bead reads no label", "", "", label, ""},
+		{"no reader reads no label", "", "gt-1", nil, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := poolRequestedAgent("/town", tc.agent, tc.beadID, tc.pinned); got != tc.want {
+				t.Errorf("poolRequestedAgent(%q, %q) = %q, want %q", tc.agent, tc.beadID, got, tc.want)
+			}
+		})
+	}
+}
+
+// A dry-run sling that names no agent previews the route its bead's agent:
+// label takes, as the live sling runs it; --agent still wins (gt-5h1r7).
+func TestResolveTarget_DryRunPeeksThePoolWithTheBeadAgentLabel(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name  string
+		agent string
+		want  string
+	}{
+		{"no --agent peeks the labeled seat", "", "deepseek-flash"},
+		{"--agent wins over the label", "claude-sonnet", "claude-sonnet"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.run.pinnedAgent = func(townRoot, beadID string) string {
+				if townRoot != slingTestTown || beadID != "gt-new" {
+					t.Errorf("label read for %q in %q, want gt-new in %s", beadID, townRoot, slingTestTown)
+				}
+				return "deepseek-flash"
+			}
+			var peeked []string
+			h.run.peekPool = func(_, requested string) (string, string, error) {
+				peeked = append(peeked, requested)
+				return requested, "pool routes to " + requested, nil
+			}
+
+			if _, err := h.run.resolveSlingTarget("gastown", ResolveTargetOptions{
+				DryRun: true, NoBoot: true, TownRoot: slingTestTown, HookBead: "gt-new", Agent: tc.agent,
+			}); err != nil {
+				t.Fatalf("resolveTarget: %v", err)
+			}
+			if !slices.Equal(peeked, []string{tc.want}) {
+				t.Errorf("pool peeked for %q, want one peek for %q", peeked, tc.want)
+			}
+			if out := h.out.String(); !strings.Contains(out, "pool routes to "+tc.want) {
+				t.Errorf("dry-run output lacks the pool's route to %s:\n%s", tc.want, out)
+			}
+		})
+	}
+}

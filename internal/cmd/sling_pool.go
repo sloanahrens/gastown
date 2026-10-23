@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -187,6 +188,57 @@ func poolDefaultAgent(pool *config.PolecatPool, sessions []poolSession, now time
 		}
 	}
 	return best
+}
+
+// poolPinnedAgent is the agent a bead's agent:<name> label asks for, when the
+// pool has a seat for it, read the way the dispatcher reads it
+// (specdispatch.Spec.PinnedAgents). It is "" when the bead carries no label,
+// two that disagree (the dispatcher skips such a bead, and so does this), or a
+// name with no seat.
+func poolPinnedAgent(pool *config.PolecatPool, labels []string) string {
+	pinned := specdispatch.Spec{Labels: labels}.PinnedAgents()
+	if len(pinned) != 1 {
+		return ""
+	}
+	if _, ok := poolSeatOf(pool, pinned[0]); !ok {
+		return ""
+	}
+	return pinned[0]
+}
+
+// poolBeadAgent is poolPinnedAgent for the bead beadID, read from bd. The label
+// is a preference, not a gate: a bead or the town settings that cannot be read
+// warn and fall back to the unlabeled route.
+func poolBeadAgent(townRoot, beadID string) string {
+	if beadID == "" {
+		return ""
+	}
+	issue, err := showBead(townRoot, beadID)
+	if err != nil {
+		style.PrintWarning("could not read %s for its agent: label (%v); routing it as unlabeled", beadID, err)
+		return ""
+	}
+	if issue == nil {
+		return ""
+	}
+	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	if err != nil {
+		style.PrintWarning("could not read town settings for %s's agent: label (%v); routing it as unlabeled", beadID, err)
+		return ""
+	}
+	if ts == nil {
+		return ""
+	}
+	return poolPinnedAgent(ts.PolecatPool, issue.Labels)
+}
+
+// poolRequestedAgent is the agent a sling asks the pool for: the --agent it was
+// given, else the one beadID's agent: label names through pinned (gt-5h1r7).
+func poolRequestedAgent(townRoot, agent, beadID string, pinned func(townRoot, beadID string) string) string {
+	if agent != "" || beadID == "" || pinned == nil {
+		return agent
+	}
+	return pinned(townRoot, beadID)
 }
 
 // poolOwnsAgent reports whether requested names a seat the pool controls. An
