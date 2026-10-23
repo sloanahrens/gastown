@@ -15,7 +15,9 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/supervisor"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 // The town's polecat-seat picture: which seats a spawn could take. The spec
@@ -277,17 +279,54 @@ type polecatStarter interface {
 	Start(name string, opts polecat.SessionStartOptions) error
 }
 
+// seatBackendResolver resolves the session backend for the agent a seat is
+// restarted on. Tests inject one, so the restart needs neither town settings
+// nor a tmux client.
+type seatBackendResolver func(agent string) (session.Backend, error)
+
+// townSeatBackend resolves a seat's backend from the town settings the way the
+// spawn path does (sessionBackendForAgent): the agent's seat in
+// polecat_pool.seats picks sandbox or host, and an agent that is no seat gets
+// the host's tmux. An unreadable settings file, or an openshell backend that
+// cannot be built, is an error: the restart refuses rather than start a
+// sandboxed seat on the host unfenced (gt-da3ea).
+func townSeatBackend(townRoot string, host *tmux.Tmux) seatBackendResolver {
+	return func(agent string) (session.Backend, error) {
+		ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+		if err != nil {
+			return nil, fmt.Errorf("loading town settings to pick the session backend for %q: %w", agent, err)
+		}
+		return sessionBackendForAgent(ts, townRoot, agent, host)
+	}
+}
+
 // restartPolecatOnSlungAgent starts a polecat session on the agent the seat's
 // intent record says it was slung on (intent.MarkSlung), so a seat slung on
 // deepseek-flash does not come back as the polecat role default. A seat with
 // no record, or a record naming no agent, starts with opts as given: the role
 // default, as before. opts.Agent, when set, wins over the record.
-func restartPolecatOnSlungAgent(mgr polecatStarter, townRoot, rigName, polecatName string, opts polecat.SessionStartOptions) error {
+//
+// The backend follows that agent too. A sling records the agent before it
+// builds the backend (polecat_spawn.go), so a seat slung on an openshell
+// agent's seat that failed to spawn still names it, and starting it with the
+// default tmux backend would put a sandboxed seat on the host with the host
+// worktree and file-backed secrets (gt-da3ea). backendFor answers the error
+// that refuses such a restart.
+func restartPolecatOnSlungAgent(mgr polecatStarter, backendFor seatBackendResolver, townRoot, rigName, polecatName string, opts polecat.SessionStartOptions) error {
 	if opts.Agent == "" && townRoot != "" {
 		// An unreadable record reads as one that names no agent (Read's
 		// fail-closed record carries none), so the error is not acted on.
 		rec, _ := intent.Read(townRoot, polecatIntentSeat(rigName, polecatName))
 		opts.Agent = slungAgent(rec, "")
+	}
+	// A restart with no town root has no settings to read, so no seat map
+	// names a sandboxed seat: the session manager's tmux default stands.
+	if opts.Backend == nil && townRoot != "" {
+		backend, err := backendFor(opts.Agent)
+		if err != nil {
+			return fmt.Errorf("resolving the session backend for %s/%s: %w", rigName, polecatName, err)
+		}
+		opts.Backend = backend
 	}
 	return mgr.Start(polecatName, opts)
 }
