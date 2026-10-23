@@ -1,13 +1,22 @@
+//go:build !integration
+
 package sandbox
 
 import (
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/testutil/unittier"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(unittier.Main(m))
+}
 
 func newFakeCLI() (*CLI, *Fake) {
 	f := &Fake{}
@@ -25,6 +34,7 @@ func wantCall(t *testing.T, f *Fake, want ...string) {
 }
 
 func TestCreateArgv(t *testing.T) {
+	t.Parallel()
 	cli, f := newFakeCLI()
 	err := cli.Create(context.Background(), CreateSpec{
 		Name:       "gt-r-n",
@@ -51,6 +61,7 @@ func TestCreateArgv(t *testing.T) {
 }
 
 func TestCreateDriverConfigAndOmittedFields(t *testing.T) {
+	t.Parallel()
 	cli, f := newFakeCLI()
 	if err := cli.Create(context.Background(), CreateSpec{Name: "x", DriverConfigJSON: `{"v":1}`}); err != nil {
 		t.Fatal(err)
@@ -61,6 +72,7 @@ func TestCreateDriverConfigAndOmittedFields(t *testing.T) {
 }
 
 func TestBinAndGatewayDefaults(t *testing.T) {
+	t.Parallel()
 	f := &Fake{}
 	cli := &CLI{Run: f.Runner()}
 	if err := cli.Stop(context.Background(), "n"); err != nil {
@@ -77,6 +89,7 @@ func TestBinAndGatewayDefaults(t *testing.T) {
 }
 
 func TestGetArgvAndDecode(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		reply string
@@ -93,6 +106,7 @@ func TestGetArgvAndDecode(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			cli, f := newFakeCLI()
 			f.Reply = map[string]string{"get": tt.reply}
 			got, err := cli.Get(context.Background(), "x")
@@ -108,6 +122,7 @@ func TestGetArgvAndDecode(t *testing.T) {
 }
 
 func TestGetRejectsNonJSON(t *testing.T) {
+	t.Parallel()
 	cli, f := newFakeCLI()
 	f.Reply = map[string]string{"get": "not json"}
 	if _, err := cli.Get(context.Background(), "x"); err == nil {
@@ -116,6 +131,7 @@ func TestGetRejectsNonJSON(t *testing.T) {
 }
 
 func TestExecArgv(t *testing.T) {
+	t.Parallel()
 	cli, f := newFakeCLI()
 	f.Reply = map[string]string{"exec": "out\n"}
 	stdout, _, err := cli.Exec(context.Background(), "gt-r-n",
@@ -133,6 +149,7 @@ func TestExecArgv(t *testing.T) {
 }
 
 func TestExecWithoutEnv(t *testing.T) {
+	t.Parallel()
 	cli, f := newFakeCLI()
 	if _, _, err := cli.Exec(context.Background(), "n", nil, []string{"ls"}, nil); err != nil {
 		t.Fatal(err)
@@ -143,6 +160,7 @@ func TestExecWithoutEnv(t *testing.T) {
 }
 
 func TestUploadArgv(t *testing.T) {
+	t.Parallel()
 	cli, f := newFakeCLI()
 	if err := cli.Upload(context.Background(), "n", "/tmp/skel.tgz", "/sandbox/"); err != nil {
 		t.Fatal(err)
@@ -152,6 +170,7 @@ func TestUploadArgv(t *testing.T) {
 }
 
 func TestStopStartDeleteArgv(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		verb string
 		call func(*CLI) error
@@ -162,6 +181,7 @@ func TestStopStartDeleteArgv(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.verb, func(t *testing.T) {
+			t.Parallel()
 			cli, f := newFakeCLI()
 			if err := tt.call(cli); err != nil {
 				t.Fatal(err)
@@ -172,6 +192,7 @@ func TestStopStartDeleteArgv(t *testing.T) {
 }
 
 func TestLogsArgv(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		since time.Duration
 		want  string
@@ -184,6 +205,7 @@ func TestLogsArgv(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
+			t.Parallel()
 			cli, f := newFakeCLI()
 			f.Reply = map[string]string{"logs": "line1\nline2\n"}
 			got, err := cli.Logs(context.Background(), "n", tt.since)
@@ -199,6 +221,7 @@ func TestLogsArgv(t *testing.T) {
 }
 
 func TestRunnerErrorWrapsStderr(t *testing.T) {
+	t.Parallel()
 	boom := errors.New("exit status 1")
 	cli, f := newFakeCLI()
 	f.Err = map[string]error{"delete": boom}
@@ -216,6 +239,7 @@ func TestRunnerErrorWrapsStderr(t *testing.T) {
 }
 
 func TestDeadlines(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		call func(*CLI) error
@@ -231,6 +255,7 @@ func TestDeadlines(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
 			var got time.Duration
 			var has bool
 			cli := &CLI{Run: func(ctx context.Context, _ []string, _ []byte) ([]byte, []byte, error) {
@@ -257,6 +282,7 @@ func TestDeadlines(t *testing.T) {
 }
 
 func TestCallerDeadlineWinsOverDefault(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	var got time.Duration
