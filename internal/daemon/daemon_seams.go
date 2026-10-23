@@ -12,10 +12,30 @@ type daemonSeams struct {
 	heartbeatWork        func(d *Daemon, s *State, lifecycle bool)
 	heartbeatStep        func(d *Daemon, step heartbeatStep)
 	upgradeEscalate      func(d *Daemon, key, msg string)
+	upgradeHealJob       func(townRoot string) (upgradeHealJob, bool)
+	upgradeHealRun       func(argv []string) error
 	cleanupLegacySockets func(townRoot string) (defaultCleaned, baseCleaned int)
 	testSocketSweep      func() (tmuxsweep.Report, error)
 	imposterSweep        func(townRoot string)
 	orphanReap           func()
+}
+
+// upgradeHealJobFor names the launchd job the upgrade heal helper arms under,
+// or false when there is none for townRoot.
+func (s daemonSeams) upgradeHealJobFor(townRoot string) (upgradeHealJob, bool) {
+	if s.upgradeHealJob != nil {
+		return s.upgradeHealJob(townRoot)
+	}
+	return upgradeHealSupervisorJob(townRoot)
+}
+
+// runUpgradeHeal runs one launchctl argv for the upgrade heal helper. Unit
+// tests replace it: no test may load or unload a real launchd job.
+func (s daemonSeams) runUpgradeHeal(argv []string) error {
+	if s.upgradeHealRun != nil {
+		return s.upgradeHealRun(argv)
+	}
+	return runUpgradeHealCommand(argv)
 }
 
 // runHeartbeatWork runs the body of one heartbeat; lifecycle false holds

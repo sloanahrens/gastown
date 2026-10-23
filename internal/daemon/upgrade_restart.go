@@ -733,6 +733,10 @@ func (d *Daemon) exitForUpgradeIfRequested(state *State, now time.Time) error {
 	d.logger.Printf("upgrade-restart: idle; restarting from %s to pick up %s", own, m.Commit)
 	d.logger.Println("Restarting for upgrade: shutting down so launchd restarts the daemon on the installed binary")
 	_ = d.shutdown(state)
+	// Armed after the shutdown so the helper's wait starts once the old
+	// daemon is already on its way out. If launchd cannot respawn it, the
+	// helper heals the job (gt-eigyu.1).
+	d.armUpgradeHeal()
 	return ErrRestartForUpgrade
 }
 
