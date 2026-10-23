@@ -128,6 +128,7 @@ func TestSkeletonFileSet(t *testing.T) {
 
 	want := []string{
 		"gt/",
+		"gt/.beads/",
 		"gt/.beads/metadata.json",
 		"gt/.beads/routes.jsonl",
 		"gt/directives/polecat.md",
@@ -137,6 +138,7 @@ func TestSkeletonFileSet(t *testing.T) {
 		"gt/gastown/.repo.git/refs/heads/",
 		"gt/gastown/.repo.git/refs/tags/",
 		"gt/gastown/directives/_common.md",
+		"gt/gastown/mayor/rig/.beads/",
 		"gt/gastown/mayor/rig/.beads/config.yaml",
 		"gt/gastown/mayor/rig/.beads/metadata.json",
 		"gt/gastown/metadata.json",
@@ -746,5 +748,98 @@ func TestSanitizeFileRejectsANonObjectJSON(t *testing.T) {
 				t.Fatalf("sanitizeFile(%q) = nil error, want one", in)
 			}
 		})
+	}
+}
+
+// bd refuses to connect when metadata.json's project_id differs from the
+// database's, and the UUID reads as a token to the value-shape rules, so the
+// two beads metadata files keep it. Credential-shaped values beside it stay
+// redacted. Directories named .beads are 0700 (bd warns otherwise); the rest
+// stay 0755 (gt-zkkdo).
+func TestSkeletonKeepsProjectIDAndTightensBeadsDirs(t *testing.T) {
+	t.Parallel()
+
+	const id = "8f550f3e-d9e1-452f-bb70-6a991fdb8fdb"
+	files := minimalTown()
+	files[".beads/metadata.json"] = `{"project_id": "` + id + `", "dolt_database": "hq", "dolt_server_port": 3307, "dolt_password": "hunter2"}`
+	files["gastown/mayor/rig/.beads/metadata.json"] = `{"project_id": "` + id + `", "dolt_database": "gastown", "dolt_server_port": 3307}`
+	data, err := RenderSkeleton(SkeletonSpec{
+		TownRoot:         writeTown(t, files),
+		Rig:              "gastown",
+		ControlPlaneHost: "host.docker.internal",
+		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+	})
+	if err != nil {
+		t.Fatalf("RenderSkeleton: %v", err)
+	}
+	got := untar(t, data)
+
+	for _, name := range []string{"gt/.beads/metadata.json", "gt/gastown/mayor/rig/.beads/metadata.json"} {
+		if v := at(t, decodeJSON(t, got[name]), "project_id"); v != id {
+			t.Errorf("%s project_id = %v, want %q", name, v, id)
+		}
+	}
+	if v := at(t, decodeJSON(t, got["gt/.beads/metadata.json"]), "dolt_password"); v != "REDACTED" {
+		t.Errorf("dolt_password = %v, want REDACTED", v)
+	}
+
+	gz, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(gz)
+	beads := 0
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if hdr.Typeflag != tar.TypeDir {
+			continue
+		}
+		want := int64(0o755)
+		if strings.HasSuffix(strings.TrimSuffix(hdr.Name, "/"), "/.beads") {
+			want = 0o700
+			beads++
+		}
+		if hdr.Mode != want {
+			t.Errorf("dir %s mode = %o, want %o", hdr.Name, hdr.Mode, want)
+		}
+	}
+	if beads == 0 {
+		t.Error("archive holds no .beads directory entry")
+	}
+}
+
+// gt must read the scrubbed town settings back: a price per billion tokens
+// stays a number, while a string under that key and other numbers under
+// credential-named keys are still redacted (gt-zkkdo).
+func TestScrubSettingsKeepsTheTokenPriceNumber(t *testing.T) {
+	t.Parallel()
+
+	out, err := ScrubSettings([]byte(`{
+		"patrols": {"jev": {"usd_per_billion_tokens": 42, "max_usd_per_day": 1}},
+		"odd": {"usd_per_billion_tokens": "sk-should-not-survive-this-string-0123456789"},
+		"pin": {"api_token": 123456},
+		"under": {"credentials_x": {"usd_per_billion_tokens": 7}}
+	}`))
+	if err != nil {
+		t.Fatalf("ScrubSettings: %v", err)
+	}
+	doc := decodeJSON(t, out)
+	if v := at(t, doc, "patrols", "jev", "usd_per_billion_tokens"); v != float64(42) {
+		t.Errorf("usd_per_billion_tokens = %#v, want the number 42", v)
+	}
+	if v := at(t, doc, "patrols", "jev", "max_usd_per_day"); v != float64(1) {
+		t.Errorf("max_usd_per_day = %#v, want 1", v)
+	}
+	if v := at(t, doc, "odd", "usd_per_billion_tokens"); v != "REDACTED" {
+		t.Errorf("string under the rate key = %#v, want REDACTED", v)
+	}
+	if v := at(t, doc, "pin", "api_token"); v != "REDACTED" {
+		t.Errorf("number under api_token = %#v, want REDACTED", v)
 	}
 }

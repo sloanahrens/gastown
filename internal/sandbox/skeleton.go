@@ -102,6 +102,9 @@ func RenderSkeleton(s SkeletonSpec) ([]byte, error) {
 		hdr := &tar.Header{Name: e.name, Mode: 0o644, ModTime: time.Unix(0, 0), Typeflag: tar.TypeReg}
 		if e.dir {
 			hdr.Mode = 0o755
+			if path.Base(strings.TrimSuffix(e.name, "/")) == ".beads" {
+				hdr.Mode = 0o700 // bd warns on every call about a looser .beads
+			}
 			hdr.Typeflag = tar.TypeDir
 		} else {
 			hdr.Size = int64(len(e.data))
@@ -153,6 +156,11 @@ func scrubDocument(doc map[string]any) map[string]any {
 // after the first such key everything below it is a credential too. Values not
 // under one are redacted only when they are shaped like a credential.
 func scrubValue(key string, v any, underSecret bool) any {
+	// A price per billion tokens is a number gt must read back as a number;
+	// "tokens" in its name is not a credential. A string here is still redacted.
+	if n, ok := v.(json.Number); ok && key == "usd_per_billion_tokens" && !underSecret {
+		return n
+	}
 	secret := underSecret || credentialName(key)
 	switch val := v.(type) {
 	case string:
@@ -407,7 +415,13 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	defer func() { _ = root.Close() }()
 	town := townReader{root: root}
 
-	entries := []skeletonEntry{{name: skeletonRoot + "/", dir: true}}
+	// The beads directories are listed so they extract 0700; left implicit,
+	// tar makes them 0755 and bd warns on every call.
+	entries := []skeletonEntry{
+		{name: skeletonRoot + "/", dir: true},
+		{name: path.Join(skeletonRoot, ".beads") + "/", dir: true},
+		{name: path.Join(skeletonRoot, s.Rig, "mayor/rig/.beads") + "/", dir: true},
+	}
 	add := func(rel string, data []byte) {
 		entries = append(entries, skeletonEntry{name: path.Join(skeletonRoot, rel), data: data})
 	}
@@ -437,7 +451,14 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 		if err != nil {
 			return nil, err
 		}
+		// bd compares project_id with the database's and refuses to connect on
+		// a mismatch. It is an identity, not a credential, but its UUID shape
+		// reads as a token, so keep the original string.
+		projectID, hasProjectID := doc["project_id"].(string)
 		doc = scrubDocument(doc)
+		if hasProjectID {
+			doc["project_id"] = projectID
+		}
 		doc["dolt_server_host"] = s.ControlPlaneHost
 		out, err := encodeJSON(doc)
 		if err != nil {
