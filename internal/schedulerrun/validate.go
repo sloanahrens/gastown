@@ -17,6 +17,10 @@ import (
 // by its own ESTOP.<rig>.
 const ReasonRigHeld = "rig-held"
 
+// ReasonStartupBackoff is the plan reason when every candidate is still
+// resting after a failure at session start.
+const ReasonStartupBackoff = "startup-backoff"
+
 // validateForDispatch refuses a planned bead before the sling runs.
 //
 // Cross-rig prefix guard (gt-el4): a bead whose ID prefix does not match the
@@ -58,6 +62,7 @@ func (r *runner) escalateCrossRig(rig, prefix, beadID string) {
 // skipped, so the preview matches what a real run would do.
 func (r *runner) validateDryRun(townRoot string, plan capacity.DispatchPlan) capacity.DispatchPlan {
 	plan = r.dropRigHeldBeads(townRoot, plan)
+	plan = r.dropStartupBackoffBeads(townRoot, plan)
 	if len(plan.ToDispatch) == 0 {
 		return plan
 	}
@@ -93,10 +98,11 @@ func (r *runner) validateDryRun(townRoot string, plan capacity.DispatchPlan) cap
 }
 
 // planDispatch batches the ready beads a run can actually dispatch. The rig
-// hold is applied before PlanDispatch: a held bead at the head of the queue
-// must not take the batch slot, or every bead behind it starves (gt-duisv).
+// hold and the startup backoff are applied before PlanDispatch: a held bead at
+// the head of the queue must not take the batch slot, or every bead behind it
+// starves (gt-duisv).
 func (r *runner) planDispatch(townRoot string, freeSeats, batchSize int, ready []capacity.PendingBead) capacity.DispatchPlan {
-	dispatchable := r.dropRigHeldBeads(townRoot, capacity.DispatchPlan{ToDispatch: ready})
+	dispatchable := r.dropStartupBackoffBeads(townRoot, r.dropRigHeldBeads(townRoot, capacity.DispatchPlan{ToDispatch: ready}))
 	if len(dispatchable.ToDispatch) == 0 && dispatchable.Skipped > 0 {
 		// Every ready bead is held. PlanDispatch on an empty list would say
 		// "none", which tells the operator nothing is queued.
@@ -128,6 +134,33 @@ func (r *runner) dropRigHeldBeads(townRoot string, plan capacity.DispatchPlan) c
 	plan.ToDispatch = kept
 	if held > 0 && len(kept) == 0 {
 		plan.Reason = ReasonRigHeld
+	}
+	return plan
+}
+
+// dropStartupBackoffBeads removes from the plan every bead that is still
+// resting after a failure at session start (dispatch.StartupBackoff), counting
+// each as skipped rather than failed: the bead is open and unassigned, so the
+// first run after its window dispatches it. Without the check the scheduler
+// re-slings it on every tick, and each attempt fails the same way (gt-811f6).
+// A bead with no record, or one whose record cannot be read, is dispatched as
+// before, and an operator's own sling never comes through here.
+func (r *runner) dropStartupBackoffBeads(townRoot string, plan capacity.DispatchPlan) capacity.DispatchPlan {
+	kept := plan.ToDispatch[:0:0]
+	resting := 0
+	for _, b := range plan.ToDispatch {
+		if reason := dispatch.StartupBackoff(townRoot, b.WorkBeadID); reason != "" {
+			r.eprintf("%s Not dispatching %s → %s: startup backoff: %s\n",
+				style.Dim.Render("○"), b.WorkBeadID, b.TargetRig, reason)
+			plan.Skipped++
+			resting++
+			continue
+		}
+		kept = append(kept, b)
+	}
+	plan.ToDispatch = kept
+	if resting > 0 && len(kept) == 0 {
+		plan.Reason = ReasonStartupBackoff
 	}
 	return plan
 }

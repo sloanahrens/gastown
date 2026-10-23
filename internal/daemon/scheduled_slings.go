@@ -645,6 +645,14 @@ func (d *Daemon) scheduledSlingAdmits(ctx context.Context, r scheduledSlingRunne
 // A probe that cannot answer is not "gone": the resume goes ahead as before
 // (gt-84o0a).
 func (d *Daemon) resumeReopenedScheduledRun(ctx context.Context, r scheduledSlingRunner, e ScheduledSlingEntry, b scheduledBead) error {
+	// A run whose last sling failed at session start rests out its backoff
+	// before this patrol re-slings it (gt-811f6): the reopen leaves the bead
+	// open, so without the check every tick resumes it into the same failure.
+	// A deferral leaves the counter alone and the next tick asks again.
+	if reason := dispatch.StartupBackoff(d.config.TownRoot, b.ID); reason != "" {
+		d.logger.Printf("scheduled_slings: %s: run %s: not resuming: startup backoff: %s", e.Name, b.ID, reason)
+		return &scheduledSlingDeferred{cause: errors.New("startup backoff: " + reason)}
+	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), d.scheduledSlingBudget())
 	defer cancel()
 	branch := b.ResumeBranch

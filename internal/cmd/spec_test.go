@@ -1385,6 +1385,34 @@ func TestSpecDispatchHoldsAndExclusions(t *testing.T) {
 	}
 }
 
+// A bead whose last sling failed at session start rests out its backoff before
+// the tick tries it again, while a bead with no failure record is dispatched as
+// usual (gt-811f6). The failed sling left the bead open and unassigned, so
+// without the check every tick re-slings it into the same failure.
+func TestSpecDispatchStartupBackoff(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := dispatch.RecordStartupFailure(townRoot, "gt-resting", "startup blocked: trust dialog"); err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeSpecTown(
+		cleanSpec("gt-resting", 1, "2026-09-29T10:00:00Z"),
+		cleanSpec("gt-fresh", 1, "2026-09-29T10:00:00Z"),
+	)
+	env := f.env()
+	env.PerTick = 2
+	env.StartupBackoff = func(id string) string { return dispatch.StartupBackoff(townRoot, id) }
+	r := runSpecDispatchCycle(env)
+
+	if len(f.slung) != 1 || f.slung[0] != "gt-fresh" {
+		t.Fatalf("slung %v, want only gt-fresh: a resting bead waits out its backoff", f.slung)
+	}
+	want := "gt-resting: " + specdispatch.SkipStartupBackoff
+	if len(r.Skipped) != 1 || !strings.HasPrefix(r.Skipped[0].Line, want) || !strings.Contains(r.Skipped[0].Line, "trust dialog") {
+		t.Fatalf("skipped = %+v, want one line starting %q naming the failure", r.Skipped, want)
+	}
+}
+
 func TestSpecDispatchRetriesDoltContention(t *testing.T) {
 	t.Parallel()
 	contention := errors.New("formula failed: bd mol bond: Error 1213 (40001): serialization failure")

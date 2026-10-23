@@ -10,6 +10,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
@@ -153,6 +154,39 @@ func TestPlanReportsRigHeldWhenEveryReadyBeadIsHeld(t *testing.T) {
 	// No ready beads at all is still "none": the reason is for held beads only.
 	if none := r.planDispatch(townRoot, 2, 2, nil); none.Reason != "none" || none.Skipped != 0 {
 		t.Fatalf("empty plan = %+v, want reason=none, skipped=0", none)
+	}
+}
+
+// A bead whose last sling failed at session start leaves the plan until its
+// backoff elapses, and the beads behind it still dispatch: the resting bead is
+// counted as skipped, not failed, so its sling context stays queued for the
+// first run after the window (gt-811f6).
+func TestPlanDropsBeadRestingAfterAFailedStartup(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := dispatch.RecordStartupFailure(townRoot, "gt-a", "startup blocked: trust dialog"); err != nil {
+		t.Fatal(err)
+	}
+	ready := []capacity.PendingBead{
+		{ID: "ctx-1", WorkBeadID: "gt-a", TargetRig: "gastown"},
+		{ID: "ctx-2", WorkBeadID: "gt-b", TargetRig: "gastown"},
+	}
+
+	r := &runner{}
+	plan := r.planDispatch(townRoot, 2, 2, ready)
+
+	if len(plan.ToDispatch) != 1 || plan.ToDispatch[0].WorkBeadID != "gt-b" {
+		t.Fatalf("ToDispatch = %+v, want only gt-b: an unrelated bead is unaffected", plan.ToDispatch)
+	}
+	if plan.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1 (the resting bead)", plan.Skipped)
+	}
+
+	// When every ready bead is resting, the plan says so: "none" would tell
+	// the operator nothing is queued.
+	only := r.planDispatch(townRoot, 2, 2, ready[:1])
+	if len(only.ToDispatch) != 0 || only.Skipped != 1 || only.Reason != ReasonStartupBackoff {
+		t.Fatalf("all-resting plan = %+v, want nothing dispatched, skipped=1, reason=%s", only, ReasonStartupBackoff)
 	}
 }
 

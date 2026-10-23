@@ -17,6 +17,7 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/dispatch"
 )
 
 func TestScheduledSlingEntry_Validate(t *testing.T) {
@@ -574,6 +575,32 @@ func TestResumeReopenedScheduledRun_FailureNamesTheTargetSlung(t *testing.T) {
 				t.Errorf("error = %q, want it to contain %q and not %q", err, tc.want, tc.wantNot)
 			}
 		})
+	}
+}
+
+// A reopened run whose last sling failed at session start waits out its backoff
+// instead of being resumed into the same failure. The deferral leaves the
+// failure counter alone and the bead open, so the first tick after the window
+// resumes it (gt-811f6).
+func TestRunScheduledSlings_AReopenedRunRestsOutItsStartupBackoff(t *testing.T) {
+	t.Parallel()
+	f := &fakeScheduledRunner{createID: "gt-next", now: time.Now()}
+	d, esc := newScheduledTestDaemon(t, []ScheduledSlingEntry{docAuditEntry}, f)
+	if err := dispatch.RecordStartupFailure(d.config.TownRoot, "gt-run", "startup blocked: trust dialog"); err != nil {
+		t.Fatal(err)
+	}
+	f.beads = []scheduledBead{{ID: "gt-run", Status: "open", CreatedAt: time.Now().Add(-time.Hour), ResumeBranch: "polecat/nux/gt-run+abc"}}
+
+	d.runScheduledSlings()
+
+	if len(f.slungIDs) != 0 {
+		t.Fatalf("resumed a resting run: slung %v", f.slungIDs)
+	}
+	if got := d.scheduledSlingFailures["doc-audit"]; got != 0 || len(*esc) != 0 {
+		t.Errorf("a backoff is a deferral, not a failure: count %d escalated %v", got, *esc)
+	}
+	if len(f.closedIDs) != 0 || len(f.created) != 0 {
+		t.Errorf("the resting run is kept open for a later tick: closed %v created %v", f.closedIDs, f.created)
 	}
 }
 
