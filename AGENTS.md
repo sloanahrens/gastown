@@ -4,6 +4,25 @@ See **CLAUDE.md** for complete agent context and instructions.
 
 This file exists for compatibility with tools that look for AGENTS.md.
 
+## Build and test
+
+Before changing a build or test entry point, read its recipe in the `Makefile`.
+
+- `make build`: `go build` of `./cmd/gt` into `$(BUILD_DIR)`.
+- `make test`: the gate and the shell tests (`test-slow`), then `test-integration`, which starts containers; run it under `gt slot run`.
+- `make lint`: `docs-lint`, `golangci-lint`, `scripts/repo-guards.sh` and the fail-open guard test.
+- `make gate`: `lint`, then build and the unit tier (`go test ./...` with `GT_TEST_DOCKER=0`). The landing worker runs it on the merged tree.
+- `make presubmit`: `lint`, build, and tests of only the packages your branch changed. This is `gt done`'s pre-submit check.
+- `make install`: `scripts/install-gt.sh` installs `origin/main` into the town and queues a daemon restart. In a test, use `install-local` with a temporary `INSTALL_DIR`.
+
+## Architecture in five lines
+
+- The daemon is one Go process: it supervises agent sessions and is the only thing that restarts one.
+- Its landing worker takes a branch that `gt done` marked ready, runs the gate and review on the merged tree, and is the only non-human route to `main`.
+- Polecats are workers with persistent identity and ephemeral sessions: one bead, one branch, then `gt done`.
+- Beads, mail and work history live in Dolt on port 3307; `bd` and `gt` read and write it.
+- Forgejo is the origin the landing path merges into; GitHub is a read-only push mirror ([design](docs/design/forgejo-primary-landing.md)).
+
 > **Recovery**: Run `gt prime` after compaction, clear, or new session
 
 Full context is injected by `gt prime` at session start.
