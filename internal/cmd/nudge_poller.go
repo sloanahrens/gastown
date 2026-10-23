@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"syscall"
@@ -102,7 +103,7 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 
 		case <-ticker.C:
 			// Check if session still exists.
-			if exists, _ := t.HasSession(sessionName); !exists {
+			if !nudgePollerSessionAlive(t.HasSession, sessionName, os.Stderr) {
 				return nil // session gone, exit
 			}
 
@@ -140,4 +141,17 @@ func runNudgePoller(cmd *cobra.Command, args []string) error {
 
 func shouldSkipDrainUntilIdle(hasPromptDetection bool, waitErr error) bool {
 	return hasPromptDetection && waitErr != nil
+}
+
+// nudgePollerSessionAlive reports whether the poller should keep running for
+// sessionName. Only a confirmed absence ends it. A probe error is transient
+// (a failed sandbox exec, a busy server), so the poller logs it and checks
+// again on the next tick instead of dropping the queue.
+func nudgePollerSessionAlive(probe func(string) (bool, error), sessionName string, stderr io.Writer) bool {
+	exists, err := probe(sessionName)
+	if err != nil {
+		fmt.Fprintf(stderr, "nudge-poller: session probe error for %s: %v\n", sessionName, err)
+		return true
+	}
+	return exists
 }
