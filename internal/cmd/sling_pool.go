@@ -233,35 +233,46 @@ func poolUnseatableLabel(pool *config.PolecatPool, labels []string) error {
 	return nil
 }
 
-// poolBeadAgent is poolPinnedAgent for the bead beadID, read from bd. The label
-// is a preference, not a gate, for a bead or the town settings that cannot be
-// read: they warn and fall back to the unlabeled route. A label the pool cannot
-// seat, or whose seat is closed now, is a refusal, not a fallback
-// (poolUnseatableLabel, poolLabelRoute).
+// poolBeadAgent is poolPinnedAgent for the bead beadID, read from bd.
 func poolBeadAgent(townRoot, beadID string) (string, error) {
+	return poolBeadAgentWith(townRoot, beadID, time.Now(), showBead, func(townRoot string) (*config.TownSettings, error) {
+		return config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
+	})
+}
+
+// poolBeadAgentWith is poolBeadAgent over the bead and settings readers it is
+// handed. The town settings are read first: a pool with no seats has no opinion
+// on labels, so a town without one never reads the bead. Past that, a bead or
+// settings read that fails refuses the sling: the label decides the seat, so a
+// bead whose label cannot be read must not take the unlabeled route, where a
+// pinned-only bead would run on an open seat. A label the pool cannot seat, or
+// whose seat is closed at now, is a refusal too (poolUnseatableLabel,
+// poolLabelRoute).
+func poolBeadAgentWith(townRoot, beadID string, now time.Time,
+	show func(townRoot, beadID string) (*beads.Issue, error),
+	settings func(townRoot string) (*config.TownSettings, error),
+) (string, error) {
 	if beadID == "" {
 		return "", nil
 	}
-	issue, err := showBead(townRoot, beadID)
+	ts, err := settings(townRoot)
 	if err != nil {
-		style.PrintWarning("could not read %s for its agent: label (%v); routing it as unlabeled", beadID, err)
+		return "", fmt.Errorf("could not read town settings for %s's %s label: %w", beadID, specdispatch.AgentLabelPrefix, err)
+	}
+	if ts == nil || ts.PolecatPool == nil || len(ts.PolecatPool.Seats) == 0 {
 		return "", nil
+	}
+	issue, err := show(townRoot, beadID)
+	if err != nil {
+		return "", fmt.Errorf("could not read %s for its %s label: %w", beadID, specdispatch.AgentLabelPrefix, err)
 	}
 	if issue == nil {
-		return "", nil
-	}
-	ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
-	if err != nil {
-		style.PrintWarning("could not read town settings for %s's agent: label (%v); routing it as unlabeled", beadID, err)
-		return "", nil
-	}
-	if ts == nil {
 		return "", nil
 	}
 	if err := poolUnseatableLabel(ts.PolecatPool, issue.Labels); err != nil {
 		return "", err
 	}
-	return poolLabelRoute(ts.PolecatPool, poolPinnedAgent(ts.PolecatPool, issue.Labels), time.Now())
+	return poolLabelRoute(ts.PolecatPool, poolPinnedAgent(ts.PolecatPool, issue.Labels), now)
 }
 
 // poolLabelRoute is the seat a bead's agent: label asks for, or the refusal when
