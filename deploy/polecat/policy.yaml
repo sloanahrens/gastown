@@ -36,6 +36,8 @@ filesystem_policy:
   read_write:
     - /tmp
     - /dev/null
+    # tmux allocates a pty per window through /dev/pts; without it the fork fails.
+    - /dev/pts
 
 landlock:
   compatibility: hard_requirement
