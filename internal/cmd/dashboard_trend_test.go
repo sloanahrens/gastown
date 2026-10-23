@@ -356,6 +356,7 @@ func TestPolecatOfBranch(t *testing.T) {
 	for in, want := range map[string]string{
 		"polecat/agate/gt-1+abc": "agate", "polecat/x": "", "sloan/dashboard": "sloan", "": "", "polecat/mica/gt-2.1+q": "mica", "main": "",
 		"crew/heron/dv-zqw7.4": "heron", "crew/jay/gt-byiyo": "jay", "crew/heron": "heron", "crew": "",
+		"crew//gt-1": "", "crew/": "",
 	} {
 		if got := polecatOfBranch(in); got != want {
 			t.Errorf("polecatOfBranch(%q) = %q, want %q", in, got, want)
