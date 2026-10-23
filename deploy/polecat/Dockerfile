@@ -45,7 +45,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential ca-certificates curl git gnupg jq openssh-client \
-    ripgrep unzip xz-utils \
+    ripgrep tmux unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # Node.js from NodeSource (signing key checked by digest, package version
