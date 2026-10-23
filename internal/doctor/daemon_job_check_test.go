@@ -136,8 +136,11 @@ func TestDaemonJobCheck_ProcessWithoutLock_Warning(t *testing.T) {
 // the home directory. HOME points at a temp dir so the host's own plist and
 // launchctl are never touched; the other-town plist is the one that must read
 // as no job for this town.
+//
+//testpolicy:allow parallel — t.Setenv points HOME at a temp dir, and HOME is process-wide, so this test cannot run beside parallel tests
 func TestDaemonJobCheck_HostJobReader_OtherTownPlist_OK(t *testing.T) {
 	home := t.TempDir()
+	//testpolicy:allow no-env — HOME is the input under test: the nil job reader resolves the launchd plist through it, and a temp HOME keeps the host's plist and launchctl out of the test
 	t.Setenv("HOME", home)
 	writeLaunchdPlist(t, home, t.TempDir())
 
@@ -156,7 +159,10 @@ func TestDaemonJobCheck_HostJobReader_OtherTownPlist_OK(t *testing.T) {
 
 // With no plist installed at all, the nil job reader is the same answer as no
 // job for this town: the check passes.
+//
+//testpolicy:allow parallel — t.Setenv points HOME at a temp dir, and HOME is process-wide, so this test cannot run beside parallel tests
 func TestDaemonJobCheck_HostJobReader_NoPlist_OK(t *testing.T) {
+	//testpolicy:allow no-env — HOME is the input under test: the nil job reader resolves the launchd plist through it, and a temp HOME keeps the host's plist and launchctl out of the test
 	t.Setenv("HOME", t.TempDir())
 
 	c := NewDaemonJobCheck()
