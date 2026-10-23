@@ -153,6 +153,18 @@ func TestComputeTiersIncludesStepsWithExternalDependencies(t *testing.T) {
 			},
 			want: [][]string{{"gt-a"}, {"gt-b", "gt-c", "gt-d"}},
 		},
+		{
+			name: "chain whose dependents are not recorded still tiers in order",
+			dag: &DAGInfo{
+				TotalNodes: 3,
+				Nodes: map[string]*DAGNode{
+					"gt-a": {ID: "gt-a"},
+					"gt-b": {ID: "gt-b", Dependencies: []string{"gt-a"}},
+					"gt-c": {ID: "gt-c", Dependencies: []string{"gt-b"}},
+				},
+			},
+			want: [][]string{{"gt-a"}, {"gt-b"}, {"gt-c"}},
+		},
 	}
 
 	for _, tt := range tests {
@@ -162,6 +174,52 @@ func TestComputeTiersIncludesStepsWithExternalDependencies(t *testing.T) {
 			computeTiers(tt.dag)
 			if !reflect.DeepEqual(tt.dag.TierGroups, tt.want) {
 				t.Errorf("TierGroups = %v, want %v", tt.dag.TierGroups, tt.want)
+			}
+			tierMembers(t, tt.dag)
+		})
+	}
+}
+
+func TestComputeTiersFlagsDependencyCycleNodes(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		dag  *DAGInfo
+		want []string
+	}{
+		{
+			name: "acyclic molecule has no cyclic nodes",
+			dag: &DAGInfo{
+				TotalNodes: 2,
+				Nodes: map[string]*DAGNode{
+					"gt-a": {ID: "gt-a", Dependents: []string{"gt-b"}},
+					"gt-b": {ID: "gt-b", Dependencies: []string{"gt-a"}},
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "cycle nodes are listed, the step ahead of the cycle is not",
+			dag: &DAGInfo{
+				TotalNodes: 3,
+				Nodes: map[string]*DAGNode{
+					"gt-a": {ID: "gt-a", Dependents: []string{"gt-b"}},
+					"gt-b": {ID: "gt-b", Dependencies: []string{"gt-a", "gt-c"}, Dependents: []string{"gt-c"}},
+					"gt-c": {ID: "gt-c", Dependencies: []string{"gt-b"}, Dependents: []string{"gt-b"}},
+				},
+			},
+			want: []string{"gt-b", "gt-c"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			computeTiers(tt.dag)
+			if !reflect.DeepEqual(tt.dag.Cyclic, tt.want) {
+				t.Errorf("Cyclic = %v, want %v", tt.dag.Cyclic, tt.want)
 			}
 			tierMembers(t, tt.dag)
 		})
