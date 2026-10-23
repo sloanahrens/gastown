@@ -253,14 +253,6 @@ func (h *handle) DisableSparseCheckout() error {
 	return nil
 }
 
-// FetchDefaultBranchWithTimeout fetches the remote's default branch into its
-// remote-tracking ref, as git fetch <remote> <branch> does under the refspec
-// a clone configures.
-func (h *handle) FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error {
-	branch := h.RemoteDefaultBranch()
-	return h.FetchRefspecWithTimeout(remote, branch+":refs/remotes/"+remote+"/"+branch, timeout)
-}
-
 // FetchBranchWithTimeout fetches one named branch into its remote-tracking
 // ref, as git fetch <remote> <branch> does under the refspec a clone
 // configures.

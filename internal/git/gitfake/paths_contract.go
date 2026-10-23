@@ -31,7 +31,6 @@ type PathRepo interface {
 	UntrackedPaths(pathspec string) ([]string, error)
 	DisableSparseCheckout() error
 	CloneBareWithBranch(url, dest, branch string) error
-	FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error
 	FetchBranchWithTimeout(remote, branch string, timeout time.Duration) error
 }
 
@@ -182,23 +181,6 @@ func RunPathContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 		}
 		if head, _ := o.Rev("HEAD"); head != gained {
 			t.Errorf("%s clone HEAD after the pull = %s, want %s", fixtureBranch, head, gained)
-		}
-	})
-
-	t.Run("FetchDefaultBranchWithTimeout refreshes the default branch's tracking ref", func(t *testing.T) {
-		t.Parallel()
-		env := newEnv(t)
-		fx := newFixture(t, env)
-		g := openPathRepo(env, fx.clone)
-		later := env.Commit(t, fx.origin, "main", "later", map[string]string{"c.txt": "c\n"})
-		if err := g.FetchDefaultBranchWithTimeout("origin", time.Minute); err != nil {
-			t.Fatalf("FetchDefaultBranchWithTimeout: %v", err)
-		}
-		if got, _ := g.Rev("origin/main"); got != later {
-			t.Errorf("origin/main = %s, want %s", got, later)
-		}
-		if head, _ := g.Rev("HEAD"); head == later {
-			t.Error("the fetch moved HEAD")
 		}
 	})
 
