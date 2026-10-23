@@ -1,0 +1,13 @@
+{
+  "type": "rig",
+  "version": 1,
+  "name": "gastown",
+  "merge_queue": {
+    "test_command": "make gate",
+    "forgejo": {
+      "remote_url": "http://forgejo:3000/sloan/gastown.git",
+      "landing_branch": "main"
+    }
+  },
+  "keeper": {"token": "PLANTED-TOKEN-1"}
+}
