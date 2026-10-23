@@ -77,11 +77,12 @@ func TestIsProcessRunning_MaxPID(t *testing.T) {
 	}
 }
 
-// gt down SIGKILLs what findOrphanDoltServers returns, so the orphan scan
-// must take only real Dolt SQL servers from the process table: a process that
-// merely mentions dolt-sql-server is left alone, and a dolt with a global flag
-// before the subcommand is still found.
-func TestDoltSQLServerPIDsUsesSharedMatcher(t *testing.T) {
+// gt down SIGKILLs what the orphan scan returns, so the scan must take only
+// real Dolt SQL servers from the process table: a process that merely mentions
+// dolt-sql-server is left alone even when its cwd is a town orphan directory,
+// and a dolt with a global flag before the subcommand is still found. Of the
+// servers, only those rooted in the town outside .dolt-data are orphans.
+func TestOrphanDoltServerPIDsUsesSharedMatcher(t *testing.T) {
 	t.Parallel()
 	ps := strings.Join([]string{
 		"  PID ARGS",
@@ -91,11 +92,26 @@ func TestDoltSQLServerPIDsUsesSharedMatcher(t *testing.T) {
 		"  103 dolt --config x sql-server",
 		"  104 dolt status",
 		"  105 grep dolt sql-server",
+		"  106 dolt --config x sql-server",
+		"  107 dolt sql-server",
+		"  108 dolt sql-server",
+		"  109 dolt sql-server",
 	}, "\n")
+	cwds := map[int]string{
+		100: "/town/gastown/.beads/dolt",
+		102: "/town/gastown/.beads/dolt",
+		103: "/town/.dolt-data/hq",
+		104: "/town/gastown/.beads/dolt",
+		105: "/town/gastown/.beads/dolt",
+		106: "/town",
+		107: "/town-other/.beads/dolt",
+		108: "/elsewhere",
+		// 109 has no cwd: lsof failed for it.
+	}
 
-	got := doltSQLServerPIDs(ps)
+	got := orphanDoltServerPIDs("/town", ps, func(pid int) string { return cwds[pid] })
 
-	if want := []int{102, 103}; !slices.Equal(got, want) {
-		t.Fatalf("doltSQLServerPIDs = %v, want %v", got, want)
+	if want := []int{102, 106}; !slices.Equal(got, want) {
+		t.Fatalf("orphanDoltServerPIDs = %v, want %v", got, want)
 	}
 }
