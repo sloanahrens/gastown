@@ -391,6 +391,57 @@ func TestMarkSlungLeavesAHoldAlone(t *testing.T) {
 	}
 }
 
+// A sling starts a new session, so the seat's stall evidence (a dead sample of
+// the session before) is dropped: left in place it reads as the new session
+// being dead on the town pill until the next patrol scan overwrites it. A held
+// seat keeps its record as it is, evidence included.
+func TestMarkSlungDropsTheEvidenceOfThePreviousSession(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 23, 17, 47, 48, 0, time.UTC)
+	dead := &Progress{SampledAt: now.Add(-4 * time.Minute), DeadSamples: 1}
+
+	t.Run("running_seat", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		if _, err := Update(town, polecat, func(r *Record) error {
+			r.Desired = DesiredRun
+			r.Progress = dead
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkSlung(town, polecat, "deepseek-flash-sandbox", "gt sling", now); err != nil {
+			t.Fatal(err)
+		}
+		rec, err := Read(town, polecat)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec.Progress != nil || rec.Agent != "deepseek-flash-sandbox" || rec.EffectiveDesired() != DesiredRun {
+			t.Fatalf("record after the sling = %+v, want no evidence, the new agent, still run", rec)
+		}
+	})
+
+	t.Run("held_seat", func(t *testing.T) {
+		t.Parallel()
+		town := t.TempDir()
+		if _, err := Update(town, polecat, func(r *Record) error {
+			r.Desired, r.Reason = DesiredPark, "operator inspecting"
+			r.Progress = dead
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if err := MarkSlung(town, polecat, "deepseek-flash-sandbox", "gt sling", now); err != nil {
+			t.Fatal(err)
+		}
+		rec, _ := Read(town, polecat)
+		if rec.Progress == nil || rec.Progress.DeadSamples != 1 || rec.Agent != "" {
+			t.Fatalf("a held seat was written to: %+v", rec)
+		}
+	})
+}
+
 func TestClearLandedStopsTheSubmittedSeat(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
