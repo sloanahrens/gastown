@@ -43,6 +43,24 @@ func TestFindCriticalPathSurvivesADependencyCycle(t *testing.T) {
 			want: []string{"gt-a", "gt-b", "gt-c"},
 		},
 		{
+			// gt-r1 walks gt-a -> gt-b and cuts gt-b short at the back edge to
+			// gt-a; gt-r2 reaches gt-b from outside the cycle and must still
+			// see gt-b -> gt-a.
+			name: "path cut short by a cycle is not reused by a later root",
+			dag: &DAGInfo{
+				TotalNodes: 5,
+				TierGroups: [][]string{{"gt-r1", "gt-r2"}, {"gt-a", "gt-b", "gt-x"}},
+				Nodes: map[string]*DAGNode{
+					"gt-r1": {ID: "gt-r1", Tier: 0, Dependents: []string{"gt-a"}},
+					"gt-r2": {ID: "gt-r2", Tier: 0, Dependents: []string{"gt-x"}},
+					"gt-x":  {ID: "gt-x", Tier: 1, Dependencies: []string{"gt-r2"}, Dependents: []string{"gt-b"}},
+					"gt-a":  {ID: "gt-a", Tier: 1, Dependencies: []string{"gt-r1", "gt-b"}, Dependents: []string{"gt-b"}},
+					"gt-b":  {ID: "gt-b", Tier: 1, Dependencies: []string{"gt-a", "gt-x"}, Dependents: []string{"gt-a"}},
+				},
+			},
+			want: []string{"gt-r2", "gt-x", "gt-b", "gt-a"},
+		},
+		{
 			name: "acyclic DAG still takes the longest branch",
 			dag: &DAGInfo{
 				TotalNodes: 4,
