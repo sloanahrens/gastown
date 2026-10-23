@@ -24,6 +24,10 @@ const acceptedRiskCap = 8 << 10
 // line, so a long field cannot push the record past its cap by itself.
 const headerFieldCap = 64
 
+// acceptedRiskExcerptCap bounds the excerpt an audit entry carries, in runes:
+// long enough to name the decision, short enough for a one-line landing note.
+const acceptedRiskExcerptCap = 80
+
 // AcceptedRisksText is the accepted-risk record the work bead's comments carry,
 // which om is given through --context-file so it reports a finding that only
 // restates a settled decision as info rather than refusing the change on it
@@ -31,15 +35,71 @@ const headerFieldCap = 64
 //
 // A comment counts when its text opens with "ACCEPTED-RISK:" and its author is
 // on the allowlist (isAcceptedRiskAuthor): an allowlist, not a denylist, so an
-// author shape nobody listed is ignored rather than trusted, and a polecat can
-// waive nothing on its own work. Entries are joined oldest first, each under a
-// line naming its author and date, and the join is capped at acceptedRiskCap
-// bytes by dropping the oldest: the newest entry is the one the running review
-// is judged against. When any comment's date does not parse, the order is the
-// list's own, since no date can say where that comment belongs. Empty means the
-// bead records no accepted risk, and the review runs without the flag.
+// author shape nobody listed is ignored rather than trusted. That allowlist is
+// the first of three layers, and none of them changes bd: a polecat session is
+// refused at the tap guard when it posts an ACCEPTED-RISK comment or sets a
+// comment author (gt-z71j0), and every use is recorded on the bead and raised
+// as an attention item so a forged or mistaken waiver is seen when it is used
+// (gt-tvhg8). Entries are joined oldest first, each under a line naming its
+// author and date, and the join is capped at acceptedRiskCap bytes by dropping
+// the oldest: the newest entry is the one the running review is judged
+// against. When any comment's date does not parse, the order is the list's own,
+// since no date can say where that comment belongs. Empty means the bead
+// records no accepted risk, and the review runs without the flag.
 func AcceptedRisksText(comments []beads.Comment) string {
-	risks := make([]acceptedRisk, 0, len(comments))
+	kept := acceptedRiskComments(comments)
+	entries := make([]string, len(kept))
+	for i, c := range kept {
+		entries[i] = acceptedRiskEntry(c.comment.Author, c.comment.CreatedAt, c.text)
+	}
+	return capAcceptedRisks(entries)
+}
+
+// AcceptedRisk is one accepted-risk comment a review used, as the audit layer
+// names it (gt-tvhg8): the comment's id, its author and date ready to print on
+// one line, and an excerpt of its text.
+type AcceptedRisk struct {
+	CommentID string
+	Author    string
+	Date      string
+	Excerpt   string
+}
+
+// AcceptedRisksUsed reports every comment AcceptedRisksText records, as entries
+// an audit can name: the same qualification and the same order, read through
+// the same filter (acceptedRiskComments), so the record om weighs and the audit
+// cannot drift apart. The byte cap is AcceptedRisksText's alone — it bounds the
+// file om reads, while an audit that dropped the oldest waivers would defeat
+// the reason it exists — so every qualifying comment is reported here. Empty
+// means the bead records no accepted risk.
+func AcceptedRisksUsed(comments []beads.Comment) []AcceptedRisk {
+	kept := acceptedRiskComments(comments)
+	used := make([]AcceptedRisk, len(kept))
+	for i, c := range kept {
+		used[i] = AcceptedRisk{
+			CommentID: c.comment.ID,
+			Author:    headerField(c.comment.Author),
+			Date:      headerField(c.comment.CreatedAt),
+			Excerpt:   acceptedRiskExcerpt(c.text),
+		}
+	}
+	return used
+}
+
+// acceptedRiskComment is one comment that records an accepted risk: the comment
+// itself, its text with the surrounding whitespace trimmed, and the moment it
+// was written.
+type acceptedRiskComment struct {
+	comment beads.Comment
+	text    string
+	at      int64
+}
+
+// acceptedRiskComments filters comments to the ones that record an accepted
+// risk and orders them oldest first. AcceptedRisksText and AcceptedRisksUsed
+// both read this filter, so they qualify and order comments identically.
+func acceptedRiskComments(comments []beads.Comment) []acceptedRiskComment {
+	kept := make([]acceptedRiskComment, 0, len(comments))
 	dated := true
 	for _, c := range comments {
 		text := strings.TrimSpace(c.Text)
@@ -48,24 +108,12 @@ func AcceptedRisksText(comments []beads.Comment) string {
 		}
 		at, ok := commentTime(c.CreatedAt)
 		dated = dated && ok
-		risks = append(risks, acceptedRisk{at: at,
-			entry: acceptedRiskEntry(c.Author, c.CreatedAt, text)})
+		kept = append(kept, acceptedRiskComment{comment: c, text: text, at: at})
 	}
 	if dated {
-		sort.SliceStable(risks, func(i, j int) bool { return risks[i].at < risks[j].at })
+		sort.SliceStable(kept, func(i, j int) bool { return kept[i].at < kept[j].at })
 	}
-	entries := make([]string, len(risks))
-	for i, r := range risks {
-		entries[i] = r.entry
-	}
-	return capAcceptedRisks(entries)
-}
-
-// acceptedRisk is one qualifying comment: the entry it renders to, and the
-// moment it was written, which orders the join when every comment has one.
-type acceptedRisk struct {
-	at    int64
-	entry string
+	return kept
 }
 
 // commentTime reads a comment's creation time in unix seconds. It reports false
@@ -102,9 +150,28 @@ func headerField(s string) string {
 	return cutToBytes(strings.TrimSpace(s), headerFieldCap)
 }
 
+// acceptedRiskExcerpt returns text's first acceptedRiskExcerptCap runes with
+// its newlines flattened to spaces, so an entry fits on one line of a landing
+// note without splitting a multi-byte character.
+func acceptedRiskExcerpt(text string) string {
+	flat := strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(text)
+	runes := []rune(flat)
+	if len(runes) <= acceptedRiskExcerptCap {
+		return flat
+	}
+	return string(runes[:acceptedRiskExcerptCap])
+}
+
 // isAcceptedRiskAuthor reports whether an author may record an accepted risk:
 // the shared human identity or the overseer, matched exactly after trimming and
-// case-sensitively. Every other author, polecats included, is ignored (gt-lauly).
+// case-sensitively. Every other author, polecats included, is ignored
+// (gt-lauly).
+//
+// This allowlist is a policy fence, not proof of authorship: bd records no
+// session, all writers share one OS user, and a comment's author is whatever
+// the writer typed. The layers that catch a bypass are the tap guard refusing a
+// polecat's ACCEPTED-RISK write (gt-z71j0) and the audit of every use
+// (gt-tvhg8).
 func isAcceptedRiskAuthor(author string) bool {
 	switch strings.TrimSpace(author) {
 	case "Sloan Ahrens", "town/crew/overseer":
