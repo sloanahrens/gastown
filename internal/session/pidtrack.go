@@ -48,7 +48,27 @@ func pidFile(townRoot, sessionID string) string {
 // as non-fatal since the primary kill mechanism (KillSessionWithProcesses)
 // doesn't depend on PID files.
 func TrackSessionPID(townRoot, sessionID string, t *tmux.Tmux) error {
-	pidStr, err := t.GetPanePID(sessionID)
+	return osPIDTracker.trackSession(townRoot, sessionID, t.GetPanePID)
+}
+
+// trackSession records the pane PID of a HOST session. A sandboxed session's
+// pane PID is a number from the sandbox's process table, read by the routed
+// client; recorded with a start token read on the host, it names whichever host
+// process happens to hold that number, and `gt down`'s KillTrackedPIDs would
+// SIGTERM it. So a sandboxed session records nothing, and a record left from
+// when the session ran on the host is dropped (gt-n76g3). A registry that
+// cannot be read records nothing either.
+func (pt pidTracker) trackSession(townRoot, sessionID string, panePID func(session string) (string, error)) error {
+	sandboxed, err := IsSandboxed(townRoot, sessionID)
+	if err != nil {
+		return fmt.Errorf("not tracking %s: cannot tell whether it runs in a sandbox: %w", sessionID, err)
+	}
+	if sandboxed {
+		UntrackPID(townRoot, sessionID)
+		return nil
+	}
+
+	pidStr, err := panePID(sessionID)
 	if err != nil {
 		return fmt.Errorf("getting pane PID: %w", err)
 	}
@@ -58,7 +78,7 @@ func TrackSessionPID(townRoot, sessionID string, t *tmux.Tmux) error {
 		return fmt.Errorf("parsing PID %q: %w", pidStr, err)
 	}
 
-	return TrackPID(townRoot, sessionID, pid)
+	return pt.track(townRoot, sessionID, pid)
 }
 
 // TrackPID writes a PID to a tracking file for later cleanup.
@@ -131,6 +151,20 @@ func (pt pidTracker) killTracked(townRoot string) (killed int, errSessions []str
 		data, err := os.ReadFile(path)
 		if err != nil {
 			errSessions = append(errSessions, fmt.Sprintf("%s: read error: %v", sessionID, err))
+			continue
+		}
+
+		// A session that runs in a sandbox has no host process to signal: a
+		// record under its name (left from a host run, or written by an older
+		// gt from a sandbox pane PID) names an unrelated host process or none.
+		// An unreadable registry signals nothing.
+		sandboxed, serr := IsSandboxed(townRoot, sessionID)
+		if serr != nil {
+			errSessions = append(errSessions, fmt.Sprintf("%s: not signaling: cannot tell whether it runs in a sandbox: %v", sessionID, serr))
+			continue
+		}
+		if sandboxed {
+			_ = os.Remove(path)
 			continue
 		}
 
