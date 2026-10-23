@@ -2,6 +2,8 @@ package doctor
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -106,15 +108,77 @@ func TestDaemonJobCheck_NoProcessNoExitStatus_Error(t *testing.T) {
 }
 
 // A job with a process that has not taken the lock yet is starting, not
-// failing.
+// failing, whatever the run before it exited with.
 func TestDaemonJobCheck_ProcessWithoutLock_Warning(t *testing.T) {
 	t.Parallel()
-	st := templates.SupervisorState{Kind: "launchd", Loaded: true, PID: 501, Runs: 1, LastExit: -1}
+	for name, lastExit := range map[string]int{
+		"no exit reported": -1,
+		"clean exit":       0,
+		"EX_CONFIG":        templates.LaunchdExitConfig,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			st := templates.SupervisorState{Kind: "launchd", Loaded: true, PID: 501, Runs: 2, LastExit: lastExit}
 
-	result := jobCheck(false, 0, st, true).Run(&CheckContext{TownRoot: t.TempDir()})
+			result := jobCheck(false, 0, st, true).Run(&CheckContext{TownRoot: t.TempDir()})
 
-	if result.Status != StatusWarning {
-		t.Errorf("Status = %v, want StatusWarning; message: %s", result.Status, result.Message)
+			if result.Status != StatusWarning {
+				t.Errorf("Status = %v, want StatusWarning; message: %s", result.Status, result.Message)
+			}
+			if !strings.Contains(result.Message, "501") {
+				t.Errorf("message %q does not name the pid", result.Message)
+			}
+		})
+	}
+}
+
+// With no job reader injected, the check reads the host's launchd plist under
+// the home directory. HOME points at a temp dir so the host's own plist and
+// launchctl are never touched; the other-town plist is the one that must read
+// as no job for this town.
+func TestDaemonJobCheck_HostJobReader_OtherTownPlist_OK(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeLaunchdPlist(t, home, t.TempDir())
+
+	townRoot := t.TempDir()
+	if _, provisioned := hostDaemonJob(townRoot); provisioned {
+		t.Fatalf("hostDaemonJob reports a job for another town as provisioned here")
+	}
+
+	c := NewDaemonJobCheck()
+	c.goos = "darwin"
+	result := c.Run(&CheckContext{TownRoot: townRoot})
+	if result.Status != StatusOK {
+		t.Errorf("Status = %v, want StatusOK; message: %s", result.Status, result.Message)
+	}
+}
+
+// With no plist installed at all, the nil job reader is the same answer as no
+// job for this town: the check passes.
+func TestDaemonJobCheck_HostJobReader_NoPlist_OK(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	c := NewDaemonJobCheck()
+	c.goos = "darwin"
+	result := c.Run(&CheckContext{TownRoot: t.TempDir()})
+
+	if result.Status != StatusOK {
+		t.Errorf("Status = %v, want StatusOK; message: %s", result.Status, result.Message)
+	}
+}
+
+// writeLaunchdPlist installs a plist under home whose WorkingDirectory is
+// workingDir, in the shape the launchd template renders.
+func writeLaunchdPlist(t *testing.T, home, workingDir string) {
+	t.Helper()
+	dir := filepath.Join(home, "Library", "LaunchAgents")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	plist := "<key>WorkingDirectory</key>\n<string>" + workingDir + "</string>\n"
+	if err := os.WriteFile(filepath.Join(dir, "com.gastown.daemon.plist"), []byte(plist), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }
 
