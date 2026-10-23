@@ -696,24 +696,34 @@ func TestIsSessionProcessDead_PanePIDFallbackSignalsOnlyHostSessions(t *testing.
 	t.Parallel()
 	const absentOnHost = "2147483646"
 	tests := []struct {
-		name      string
-		sandboxed func(string, string) (bool, error)
-		wantDead  bool
+		name       string
+		noTownRoot bool
+		sandboxed  func(string, string) (bool, error)
+		wantDead   bool
 	}{
-		{"host_session_absent_pid_is_dead", func(string, string) (bool, error) { return false, nil }, true},
-		{"sandboxed_session_is_not_signalled", func(string, string) (bool, error) { return true, nil }, false},
-		{"unreadable_registry_is_not_signalled", func(string, string) (bool, error) { return false, errors.New("registry unreadable") }, false},
+		{"host_session_absent_pid_is_dead", false, func(string, string) (bool, error) { return false, nil }, true},
+		{"sandboxed_session_is_not_signalled", false, func(string, string) (bool, error) { return true, nil }, false},
+		{"unreadable_registry_is_not_signalled", false, func(string, string) (bool, error) { return false, errors.New("registry unreadable") }, false},
+		{"no_town_root_is_not_signalled", true, func(string, string) (bool, error) { return false, nil }, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			townRoot := t.TempDir()
 			sessionName := "gt-test-pid-" + tt.name
+			// The pid fallback is reached only when the heartbeat primary
+			// check has nothing to say, so the session must have no heartbeat.
+			if ReadSessionHeartbeat(townRoot, sessionName) != nil {
+				t.Fatal("setup left a heartbeat: the primary check, not the pid fallback, would answer")
+			}
 			tm := newFakeProbe()
 			if err := tm.NewSessionWithCommandAndEnv(sessionName, townRoot, "sleep 300", nil); err != nil {
 				t.Fatal(err)
 			}
 			tm.setPanePID(sessionName, absentOnHost)
+			if tt.noTownRoot {
+				townRoot = ""
+			}
 			if got := isSessionProcessDeadWith(tm, sessionName, townRoot, tt.sandboxed); got != tt.wantDead {
 				t.Fatalf("isSessionProcessDeadWith = %v, want %v", got, tt.wantDead)
 			}

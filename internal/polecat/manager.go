@@ -2855,10 +2855,13 @@ func isSessionProcessDeadWith(t sessionProbe, sessionName string, townRoot strin
 		// Got a non-numeric PID — shouldn't happen, but don't kill.
 		return false
 	}
-	if townRoot != "" {
-		if on, err := sandboxed(townRoot, sessionName); err != nil || on {
-			return false
-		}
+	// Without a town root there is no registry to consult, so the session
+	// cannot be shown to be a host session: do not signal it.
+	if townRoot == "" {
+		return false
+	}
+	if on, err := sandboxed(townRoot, sessionName); err != nil || on {
+		return false
 	}
 	p, err := os.FindProcess(pid)
 	if err != nil {
