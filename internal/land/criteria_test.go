@@ -452,7 +452,10 @@ func TestOMReviewerRunsWithoutCriteriaWhenTheWriteFails(t *testing.T) {
 func TestLandGivesTheReviewerTheAcceptanceText(t *testing.T) {
 	t.Parallel()
 	f := newLandFixture(t)
-	const criteria = "- [x] one\n- [ ] two"
+	// Both ticked: an unchecked box in the section is a policy rejection now
+	// (gt-1mrji), and TestCriteriaTextExtractsTheDescriptionSection covers
+	// the mixed text.
+	const criteria = "- [x] one\n- [x] two"
 	f.bd.Seed(beads.Issue{ID: "gt-abc", Title: "add b", Status: "hooked", Type: "task",
 		Description: "## Goal\n\nadd b\n\n## Acceptance\n\n" + criteria + "\n\n## Out of scope\n\nnothing\n",
 		Labels:      []string{LabelReadyToLand}, Notes: FormatReadyNote(f.work)})
