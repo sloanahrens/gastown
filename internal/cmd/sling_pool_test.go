@@ -2534,6 +2534,52 @@ func TestPoolLabelRoute(t *testing.T) {
 	}
 }
 
+// poolUnseatableLabel refuses a bead whose agent: labels the pool cannot seat,
+// as the dispatcher skips it: two that disagree, or one naming no seat. It never
+// lets the bead fall back to another seat (gt-dth4g).
+func TestPoolUnseatableLabel(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{Seats: map[string]config.SeatConfig{
+		"deepseek-flash": {Cap: 3, PinnedOnly: true},
+		"claude-sonnet":  {Cap: 2},
+	}}
+	cases := []struct {
+		name    string
+		pool    *config.PolecatPool
+		labels  []string
+		refused bool
+		reason  string
+	}{
+		{"a label naming an open seat is seatable", pool, []string{"agent:claude-sonnet"}, false, ""},
+		{"a label naming a pinned-only seat is seatable", pool, []string{"agent:deepseek-flash"}, false, ""},
+		{"no agent label has nothing to refuse", pool, []string{"gt:task"}, false, ""},
+		{"the same label twice is one agent, not a conflict", pool, []string{"agent:claude-sonnet", "agent:claude-sonnet"}, false, ""},
+		{"two labels that disagree are refused", pool, []string{"agent:claude-sonnet", "agent:deepseek-flash"}, true, "conflicting agent: labels (claude-sonnet, deepseek-flash)"},
+		{"a label naming an agent with no seat is refused", pool, []string{"agent:claude-haiku"}, true, "pinned to claude-haiku, which has no seat in the pool"},
+		{"a pool with no seats has no opinion on labels", &config.PolecatPool{}, []string{"agent:claude-haiku"}, false, ""},
+		{"no pool has no opinion on labels", nil, []string{"agent:claude-sonnet", "agent:deepseek-flash"}, false, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := poolUnseatableLabel(tc.pool, tc.labels)
+			var refusal *poolBackpressureError
+			if refused := errors.As(err, &refusal); refused != tc.refused {
+				t.Fatalf("poolUnseatableLabel(%v) refused = %v (err %v), want %v", tc.labels, refused, err, tc.refused)
+			}
+			if !tc.refused {
+				return
+			}
+			if !errors.Is(err, errPoolBackpressure) {
+				t.Errorf("an unseatable label's refusal is not a pool backpressure: %v", err)
+			}
+			if !strings.Contains(refusal.Reason, tc.reason) {
+				t.Errorf("refusal reason = %q, want it to name %q", refusal.Reason, tc.reason)
+			}
+		})
+	}
+}
+
 // A dry-run sling that names no agent previews the route its bead's agent:
 // label takes, as the live sling runs it; --agent still wins (gt-5h1r7).
 func TestResolveTarget_DryRunPeeksThePoolWithTheBeadAgentLabel(t *testing.T) {

@@ -192,9 +192,9 @@ func poolDefaultAgent(pool *config.PolecatPool, sessions []poolSession, now time
 
 // poolPinnedAgent is the agent a bead's agent:<name> label asks for, when the
 // pool has a seat for it, read the way the dispatcher reads it
-// (specdispatch.Spec.PinnedAgents). It is "" when the bead carries no label,
-// two that disagree (the dispatcher skips such a bead, and so does this), or a
-// name with no seat.
+// (specdispatch.Spec.PinnedAgents). It is "" when the bead carries no label, or
+// when its labels name no seat the pool can honor: two that disagree, or a name
+// with no seat. Those are not routed unlabeled; poolUnseatableLabel refuses them.
 func poolPinnedAgent(pool *config.PolecatPool, labels []string) string {
 	pinned := specdispatch.Spec{Labels: labels}.PinnedAgents()
 	if len(pinned) != 1 {
@@ -206,10 +206,38 @@ func poolPinnedAgent(pool *config.PolecatPool, labels []string) string {
 	return pinned[0]
 }
 
+// poolUnseatableLabel refuses a bead whose agent: labels no seat can honor: two
+// that disagree, or one naming no seat in the pool. The spec dispatcher skips
+// such a bead and never falls back to another agent's seat (spec-dispatcher.md,
+// "Choosing a seat"), so the sling refuses it too instead of routing it
+// unlabeled. A pool with no seats has no opinion on labels, as poolDefaultAgent
+// has none, and passes them through.
+func poolUnseatableLabel(pool *config.PolecatPool, labels []string) error {
+	if pool == nil || len(pool.Seats) == 0 {
+		return nil
+	}
+	pinned := specdispatch.Spec{Labels: labels}.PinnedAgents()
+	switch {
+	case len(pinned) > 1:
+		return &poolBackpressureError{
+			Reason: fmt.Sprintf("pool: conflicting %s labels (%s) -> no seat for a bead that names one agent", specdispatch.AgentLabelPrefix, strings.Join(pinned, ", ")),
+			Raise:  "the bead's " + specdispatch.AgentLabelPrefix + " labels",
+		}
+	case len(pinned) == 1:
+		if _, ok := poolSeatOf(pool, pinned[0]); !ok {
+			return &poolBackpressureError{
+				Reason: fmt.Sprintf("pool: pinned to %s, which has no seat in the pool -> no seat for the bead labeled for it", pinned[0]),
+			}
+		}
+	}
+	return nil
+}
+
 // poolBeadAgent is poolPinnedAgent for the bead beadID, read from bd. The label
-// is a preference, not a gate: a bead or the town settings that cannot be read
-// warn and fall back to the unlabeled route. A label whose seat is closed now
-// is a refusal, not a fallback (poolLabelRoute).
+// is a preference, not a gate, for a bead or the town settings that cannot be
+// read: they warn and fall back to the unlabeled route. A label the pool cannot
+// seat, or whose seat is closed now, is a refusal, not a fallback
+// (poolUnseatableLabel, poolLabelRoute).
 func poolBeadAgent(townRoot, beadID string) (string, error) {
 	if beadID == "" {
 		return "", nil
@@ -229,6 +257,9 @@ func poolBeadAgent(townRoot, beadID string) (string, error) {
 	}
 	if ts == nil {
 		return "", nil
+	}
+	if err := poolUnseatableLabel(ts.PolecatPool, issue.Labels); err != nil {
+		return "", err
 	}
 	return poolLabelRoute(ts.PolecatPool, poolPinnedAgent(ts.PolecatPool, issue.Labels), time.Now())
 }
