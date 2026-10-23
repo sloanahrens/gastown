@@ -1807,7 +1807,7 @@ func TestAddressToAgentBeadID(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := beads.AgentBeadIDForAddress(testPrefixRegistry().PrefixForRig, tt.address)
+			got := AgentBeadIDForAddress(testPrefixRegistry().PrefixForRig, tt.address)
 			if got != tt.expected {
 				t.Errorf("AgentBeadIDForAddress(%q) = %q, want %q", tt.address, got, tt.expected)
 			}
