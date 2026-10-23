@@ -202,3 +202,76 @@ func TestNewTmuxWithExecPrefixKillSignalsInside(t *testing.T) {
 		t.Fatalf("kill signals = %v, want %v", kills, want)
 	}
 }
+
+// A prefixed Tmux's socket is inside the sandbox. A file of the same name on
+// this host is not that socket, so the new-session guard must not refuse over
+// it, and the create must run through the wrapper (gt-gi2ur).
+func TestNewTmuxWithExecPrefixNewSessionIgnoresHostSocket(t *testing.T) {
+	t.Parallel()
+	fs := newFakeSockets()
+	fs.set("/fake-sock/gt", sockFile)
+	s := newScripted(nil)
+	tm := newPrefixedForTest("gt", s, newFixedClock())
+	tm.sock = fs.ops()
+	tm.socketDir = "/fake-sock"
+
+	if err := tm.NewSession("gt-r-n", ""); err != nil {
+		t.Fatalf("NewSession = %v; the host-side guard must not run for a prefixed Tmux", err)
+	}
+	var created []tmuxCall
+	for _, c := range s.all() {
+		if prog, args := wrapped(c); prog == "tmux" && tmuxSub(args)[0] == "new-session" {
+			created = append(created, c)
+		}
+	}
+	if len(created) != 1 || created[0].name != "openshell" ||
+		!created[0].has("sandbox", "exec", "-n", "gt-r-n", "--no-tty", "--no-login-shell", "--", "tmux", "-u", "-L", "gt", "new-session") {
+		t.Fatalf("new-session calls = %v, want one through the wrapper", created)
+	}
+	if len(fs.removed) != 0 {
+		t.Fatalf("host socket files removed: %v", fs.removed)
+	}
+}
+
+// KillServer's socket-file cleanup reads the host's socket directory, which a
+// prefixed Tmux does not use: a stale host file at its name is left alone.
+func TestNewTmuxWithExecPrefixKillServerLeavesHostSocketAlone(t *testing.T) {
+	t.Parallel()
+	fs := newFakeSockets()
+	fs.set("/fake-sock/gt", sockStale)
+	s := newScripted(nil)
+	tm := newPrefixedForTest("gt", s, newFixedClock())
+	tm.sock = fs.ops()
+	tm.socketDir = "/fake-sock"
+
+	if err := tm.KillServer(); err != nil {
+		t.Fatalf("KillServer = %v", err)
+	}
+	if len(fs.removed) != 0 {
+		t.Fatalf("host socket files removed: %v", fs.removed)
+	}
+	calls := s.all()
+	if len(calls) != 1 || calls[0].name != "openshell" || !calls[0].has("--", "tmux", "-u", "-L", "gt", "kill-server") {
+		t.Fatalf("calls = %v, want one kill-server through the wrapper", calls)
+	}
+}
+
+// Helpers that switch to another socket (the split-brain check runs on
+// "default") keep the wrapper, so their commands also reach the sandbox.
+func TestNewTmuxWithExecPrefixWithSocketKeepsPrefix(t *testing.T) {
+	t.Parallel()
+	s := newScripted(nil)
+	tm := newPrefixedForTest("gt", s, nil)
+
+	other := tm.withSocket("default")
+	if got := other.ExecPrefix(); !reflect.DeepEqual(got, openshellPrefix()) {
+		t.Fatalf("withSocket(default).ExecPrefix() = %v, want %v", got, openshellPrefix())
+	}
+	if _, err := other.HasSession("gt-r-n"); err != nil {
+		t.Fatalf("HasSession on default socket: %v", err)
+	}
+	calls := s.all()
+	if len(calls) != 1 || calls[0].name != "openshell" || !calls[0].has("--", "tmux", "-u", "-L", "default", "has-session") {
+		t.Fatalf("calls = %v, want one has-session through the wrapper", calls)
+	}
+}

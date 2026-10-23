@@ -28,6 +28,11 @@ func (t *Tmux) ensureNewSessionSocketSafe() error {
 	if t.socketName == "" {
 		return nil
 	}
+	// A prefixed Tmux binds its socket inside the wrapper, so the host path
+	// lstat'd and dialed below is not the one tmux uses.
+	if len(t.execPrefix) > 0 {
+		return nil
+	}
 
 	socketPath := t.socketPath()
 	info, err := t.sockets().lstat(socketPath)
