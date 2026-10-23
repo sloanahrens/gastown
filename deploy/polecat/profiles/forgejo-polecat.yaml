@@ -1,0 +1,40 @@
+# Provider profile: the Forgejo polecat bot token for git fetch/push from a sandbox.
+#
+# Forgejo runs on the Mac (127.0.0.1:3000) and is reached from Docker Desktop
+# sandboxes as host.docker.internal:3000 over plain HTTP. The sandbox sees only
+# a placeholder in FORGEJO_TOKEN; git sends it as the extraHeader
+#   Authorization: token <placeholder>
+# (through GIT_CONFIG_* in the environment, never a gitconfig on disk) and the
+# supervisor substitutes the real token on the git smart-HTTP requests below
+# and nowhere else.
+#
+# Import:  openshell profile lint -f deploy/polecat/profiles/forgejo-polecat.yaml
+#          openshell profile import -f deploy/polecat/profiles/forgejo-polecat.yaml --global
+# Provider: FORGEJO_TOKEN=<token> openshell provider create --name forgejo-polecat \
+#             --type forgejo-polecat --credential FORGEJO_TOKEN
+
+id: forgejo-polecat
+display_name: Forgejo (polecat bot)
+description: Git over HTTP to the town's Forgejo as the polecat bot
+category: source_control
+credentials:
+  - name: api_token
+    description: Forgejo access token of the polecat bot
+    env_vars: [FORGEJO_TOKEN]
+    required: true
+    auth_style: header
+    header_name: authorization
+discovery:
+  credentials: [api_token]
+endpoints:
+  - host: host.docker.internal
+    port: 3000
+    protocol: rest
+    enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/*/*.git/info/refs" }
+      - allow: { method: POST, path: "/*/*.git/git-upload-pack" }
+      - allow: { method: POST, path: "/*/*.git/git-receive-pack" }
+binaries:
+  - /usr/bin/git
+  - /usr/local/bin/gt

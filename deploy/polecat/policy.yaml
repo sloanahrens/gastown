@@ -1,0 +1,94 @@
+# Gas Town polecat sandbox policy.
+#
+# Deny by default. The control plane stays on the Mac: Dolt on :3307 and
+# Forgejo on :3000 are reached through Docker Desktop's host alias. The model
+# endpoint comes from the attached provider profile (deepseek), not from here.
+# Every inspected endpoint enforces; the remaining width (any repository on
+# Forgejo, any Dolt database the bd user may open) is the subject of the
+# hardening ticket on map claude-q3f (per-polecat Dolt users, a push rule
+# limited to the polecat's own branch).
+version: 1
+
+filesystem_policy:
+  include_workdir: true
+  read_only:
+    - /bin
+    - /usr
+    - /lib
+    - /etc/alternatives
+    - /etc/ca-certificates
+    - /etc/gitconfig
+    - /etc/group
+    - /etc/hosts
+    - /etc/ld.so.cache
+    - /etc/ld.so.conf
+    - /etc/ld.so.conf.d
+    - /etc/localtime
+    - /etc/nsswitch.conf
+    - /etc/passwd
+    - /etc/profile
+    - /etc/profile.d
+    - /etc/bash.bashrc
+    - /etc/resolv.conf
+    - /etc/ssl
+    - /proc
+    - /dev/urandom
+  read_write:
+    - /tmp
+    - /dev/null
+
+landlock:
+  compatibility: hard_requirement
+
+network_policies:
+  # git fetch and push against Forgejo over plain HTTP on the Mac: the smart
+  # HTTP protocol only (ref advertisement, upload-pack, receive-pack). The
+  # web UI, the API and everything else on that port are denied.
+  forgejo_git:
+    endpoints:
+      - host: host.docker.internal
+        port: 3000
+        protocol: rest
+        enforcement: enforce
+        rules:
+          - allow: { method: GET, path: "/*/*.git/info/refs" }
+          - allow: { method: POST, path: "/*/*.git/git-upload-pack" }
+          - allow: { method: POST, path: "/*/*.git/git-receive-pack" }
+    binaries:
+      - path: /usr/bin/git
+      - path: /usr/local/bin/gt
+
+  # bd and gt talk to the Dolt SQL server. MySQL wire: the server speaks
+  # first, so TLS is not terminated here and there are no request rules;
+  # authorization is the Dolt user's grants, which the hardening ticket
+  # narrows per polecat.
+  dolt:
+    endpoints:
+      - host: host.docker.internal
+        port: 3307
+        protocol: tcp
+        tls: skip
+    binaries:
+      - path: /usr/local/bin/bd
+      - path: /usr/local/bin/gt
+
+  # Go module downloads during build and test inside the sandbox.
+  go_modules:
+    endpoints:
+      - host: proxy.golang.org
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+      - host: sum.golang.org
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+      - host: storage.googleapis.com
+        port: 443
+        protocol: rest
+        access: read-only
+        enforcement: enforce
+    binaries:
+      - path: /usr/local/go/bin/go
