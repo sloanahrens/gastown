@@ -188,9 +188,8 @@ func sandboxGitConfig(polecat, email string) string {
 const sandboxPromptNote = `
 ## Sandbox
 
-You run in a sandbox. Your credentials are placeholders: never print the
-environment (env, printenv, set, export -p) or any token value, and never go
-looking for a credential. If git or bd cannot authenticate, say so in your notes
-and escalate with gt escalate. A placeholder that reaches this conversation ends
-your session.
+You run in a sandbox with placeholder credentials. Do not print the environment
+or any token value, and do not go looking for a credential: the sandbox-secrets
+guard blocks those commands, and a placeholder that reaches this conversation
+ends your session.
 `
