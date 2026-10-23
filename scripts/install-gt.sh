@@ -126,15 +126,19 @@ escalate() {
 # The template comes from the checkout being installed (RIG_DIR, fast-forwarded
 # by the time a build runs), else from this script's own clone. A failure here
 # never fails an install: the gateway is independent of the gt binary.
+#
+# The roots are arguments, not ambient globals: --dry-run exits before the lock
+# block, so its call site must already hold paths resolved above it (gt-ky98c).
 GATEWAY_HOME="${INSTALL_GT_GATEWAY_HOME:-$HOME}"
 gateway_step() {
-  local mode="$1" tmpl="$RIG_DIR/scripts/launchd/com.gastown.openshell-gateway.plist.tmpl" line
-  [ -f "$tmpl" ] || tmpl="$SCRIPT_DIR/launchd/com.gastown.openshell-gateway.plist.tmpl"
+  local mode="$1" rig="$2" here="$3" line tmpl
+  tmpl="$rig/scripts/launchd/com.gastown.openshell-gateway.plist.tmpl"
+  [ -f "$tmpl" ] || tmpl="$here/launchd/com.gastown.openshell-gateway.plist.tmpl"
   igt_gateway_agent "$mode" "$tmpl" "$GATEWAY_HOME" | while IFS= read -r line; do log "$line"; done || true
 }
 
 if [ "$DRY_RUN" = "1" ]; then
-  gateway_step dry-run
+  gateway_step dry-run "$RIG_DIR" "$SCRIPT_DIR"
   RESULT_EMITTED=1
   exit 0
 fi
@@ -270,7 +274,7 @@ if [ -n "$PREV" ] && git -C "$RIG_DIR" merge-base --is-ancestor "$FULL_SHA" "$PR
   else
     log "Installed $PREV already contains $FULL_SHA; nothing to do."
   fi
-  gateway_step install
+  gateway_step install "$RIG_DIR" "$SCRIPT_DIR"
   igt_receipt noop "$FULL_SHA" "$PREV" already-installed "$MERGED_AT" "$START"
   result_line noop "$FULL_SHA" "$PREV" already-installed
   exit 0
@@ -504,7 +508,7 @@ fi
 if OUT=$( (cd "$RIG_DIR" && "$GT" formula sync) 2>&1 ); then log "$OUT"; else log "formula sync failed (non-fatal): $OUT"; fi
 if OUT=$( (cd "$RIG_DIR" && "$GT" plugin sync) 2>&1 ); then log "$OUT"; else log "plugin sync failed (non-fatal): $OUT"; fi
 
-gateway_step install
+gateway_step install "$RIG_DIR" "$SCRIPT_DIR"
 
 # --- Restart marker, receipt ---------------------------------------------------------
 # The new binary is already installed and smoke-verified at this point: a
