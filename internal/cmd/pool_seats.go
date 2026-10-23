@@ -132,12 +132,14 @@ type poolSeatBatch struct {
 
 // rigSeatBatch is one rig's reads. store is the rig's client, which the
 // per-seat fallback reads too. agents and assigned are nil when their batch
-// failed or was not made.
+// failed or was not made. held holds the hook and source-issue beads the batch
+// read, by id; an id it does not hold is read live, as the per-seat read does.
 type rigSeatBatch struct {
 	store    beads.Client
 	asked    map[string]bool         // agent bead ids the batch asked for
 	agents   map[string]*beads.Issue // the agent beads that exist among them
 	assigned map[string]*beads.Issue // assignee -> the issue GetAssignedIssue picks
+	held     map[string]*beads.Issue // hook and source-issue beads, by id
 }
 
 // assignedStatuses are the statuses GetAssignedIssue considers, most preferred
@@ -170,6 +172,12 @@ func (b *poolSeatBatch) disposition(rigName, polecatName string) (poolSeatState,
 			return assessPolecatAssignedIssueWork(rb.assigned[rig+"/polecats/"+name])
 		}
 	}
+	reads.show = func(_ beads.Client, id string) (*beads.Issue, error) {
+		if issue, ok := rb.held[id]; ok {
+			return issue, nil
+		}
+		return b.show(rb.store, id)
+	}
 	return poolPolecatSeatStateWith(b.townRoot, rigName, polecatName, reads)
 }
 
@@ -196,10 +204,55 @@ func (b *poolSeatBatch) rig(rigName string) *rigSeatBatch {
 			rb.asked[id] = true
 		}
 	}
-	if work, err := rb.store.List(beads.ListOptions{Status: strings.Join(assignedStatuses, ","), Priority: -1}); err == nil {
+	work, err := rb.store.List(beads.ListOptions{Status: strings.Join(assignedStatuses, ","), Priority: -1})
+	if err == nil {
 		rb.assigned = assignedByAssignee(work)
 	}
+	rb.readSourceIssues(work)
 	return rb
+}
+
+// readSourceIssues reads the beads the polecats' hook references and source-issue
+// hints name, so the seat read answers them from the batch. The work list holds
+// every live one (open, in progress or hooked), so only the rest, the closed
+// ones a polecat last worked, cost a read: one batched read for them, which a
+// failure leaves out so each is read live. A rig whose agent beads did not batch
+// reads nothing here. work is nil when the work list failed.
+func (rb *rigSeatBatch) readSourceIssues(work []*beads.Issue) {
+	if rb.agents == nil {
+		return
+	}
+	rb.held = make(map[string]*beads.Issue, len(work))
+	for _, issue := range work {
+		rb.held[issue.ID] = issue
+	}
+	var missing []string
+	seen := map[string]bool{}
+	for id, agent := range rb.agents {
+		_, fields, err := beads.GetAgentBead(heldIssueStore{Client: rb.store, issue: agent}, id)
+		if err != nil || fields == nil {
+			continue
+		}
+		// The same two references the seat read follows, named the same way, so
+		// each one it reads is one the batch already holds or asks for.
+		for _, ref := range []string{agentSourceIssueHint("", fields), strings.TrimSpace(fields.HookBead)} {
+			if ref == "" || seen[ref] {
+				continue
+			}
+			seen[ref] = true
+			if _, ok := rb.held[ref]; !ok {
+				missing = append(missing, ref)
+			}
+		}
+	}
+	if len(missing) == 0 {
+		return
+	}
+	if issues, err := rb.store.ShowMultiple(missing); err == nil {
+		for id, issue := range issues {
+			rb.held[id] = issue
+		}
+	}
 }
 
 // assignedByAssignee keys each assignee to the issue GetAssignedIssue picks for
