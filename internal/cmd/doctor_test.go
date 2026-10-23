@@ -49,6 +49,17 @@ func TestDoctorRegistersRigBDBinaryCheck(t *testing.T) {
 	t.Fatal("expected the rig-bd-binary check in the default doctor set")
 }
 
+func TestDoctorRegistersOpenShellGatewayCheck(t *testing.T) {
+	t.Parallel()
+	d := newDoctorForCommand("")
+	for _, check := range d.Checks() {
+		if check.Name() == "openshell-gateway" {
+			return
+		}
+	}
+	t.Fatal("expected the openshell-gateway check in the default doctor set")
+}
+
 // TestDoctorHelpListsOnlyRegisteredChecks ties the check names `gt doctor
 // --help` prints to the checks the command registers (om finding ff39e1346648).
 // The list is hand-written, so a renamed or retired check leaves its line
