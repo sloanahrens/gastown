@@ -34,6 +34,18 @@ The daemon's per-rig loop that lands work. It picks up beads labelled `gt:ready-
 ### Polecat
 Worker agents with persistent identity but ephemeral sessions. Each polecat has a permanent agent bead, CV chain, and work history that accumulates across assignments. Sessions and sandboxes are ephemeral — spawned for specific tasks, cleaned up on completion — but the identity persists. They work in isolated git worktrees to avoid conflicts.
 
+### Session backend
+How a polecat's process is hosted. `tmux` runs it in a tmux session on the host (today's only backend); `openshell` runs it in a tmux session inside an OpenShell sandbox.
+
+### Sandbox
+An OpenShell workload holding one polecat's clone and tmux server, fenced by a policy, named `gt-<rig>-<polecat>` like the tmux session.
+
+### Sandbox profile
+A named entry in the town's `sandboxes` block: image, policy file, provider names, cpu, memory, gateway. A seat points at one.
+
+### Town skeleton
+The secret-free copy of town metadata a sandbox needs for `gt` and `bd`: `mayor/town.json`, routes, beads metadata pointing at the control plane, scrubbed settings, directives, a bare `<rig>/.repo.git` with the sandbox-side origin.
+
 ### Crew
 Long-lived, named agents for persistent collaboration. Unlike ephemeral Polecats, Crew members maintain context across sessions and are ideal for ongoing work relationships.
 
