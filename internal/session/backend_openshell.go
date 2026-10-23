@@ -65,6 +65,9 @@ type openshellBackend struct {
 	render   func(sandbox.SkeletonSpec) ([]byte, error)
 	push     func(bareRepo, branch string) error
 	tmux     *tmux.Tmux // the routed client for the session Prepare made
+	// probe is the tmux surface existence and liveness read for a session;
+	// nil means the routed client that runs inside the sandbox. Tests set it.
+	probe func(session string) liveness.Probe
 }
 
 func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
@@ -433,23 +436,4 @@ func buildWorkspaceArchive(worktree string) ([]byte, error) {
 		return nil, nil
 	}
 	return buf.Bytes(), nil
-}
-
-// The session operations land in plan Task 5b. Until then an openshell
-// session cannot be checked, stopped or deleted, and says so.
-
-func (b *openshellBackend) SessionExists(string) (bool, error) {
-	return false, errors.New("openshell session existence: not implemented yet (plan Task 5b)")
-}
-
-func (b *openshellBackend) ProgressSample(string, liveness.Input) liveness.Result {
-	return liveness.Result{Verdict: liveness.Unknown, Reason: "openshell liveness not implemented yet (plan Task 5b)"}
-}
-
-func (b *openshellBackend) Stop(string) error {
-	return errors.New("openshell stop: not implemented yet (plan Task 5b)")
-}
-
-func (b *openshellBackend) Delete(string) error {
-	return errors.New("openshell delete: not implemented yet (plan Task 5b)")
 }
