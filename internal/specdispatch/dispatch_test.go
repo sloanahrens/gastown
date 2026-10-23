@@ -583,6 +583,18 @@ func TestChooseSeatPinnedOnly(t *testing.T) {
 	if got := ChooseSeat(full, pinned); !got.Skip || !strings.Contains(got.Reason, "waiting for a deepseek-flash seat") {
 		t.Errorf("pinned bead with its pinned-only seat full = %+v, want a wait", got)
 	}
+
+	// The window still governs a pinned-only seat: shut at 21:00, the pinned
+	// bead waits for it to open rather than taking it.
+	windowed := Seat{Agent: "deepseek-flash", Cap: 1, PinnedOnly: true, Window: nightWindow()}
+	shut := Budget{Seats: []Seat{windowed}, Now: time.Date(2026, 10, 23, 21, 0, 0, 0, time.UTC)}
+	if got := ChooseSeat(shut, pinned); !got.Skip || got.Agent != "" || !strings.Contains(got.Reason, "closed until 08:00") {
+		t.Errorf("pinned bead on a shut pinned-only seat = %+v, want a closed-until skip", got)
+	}
+	open := Budget{Seats: []Seat{windowed}, Now: now}
+	if got := ChooseSeat(open, pinned); got.Skip || got.Agent != "deepseek-flash" {
+		t.Errorf("pinned bead on an open pinned-only seat = %+v, want deepseek-flash", got)
+	}
 }
 
 // nightWindow is a seat window shut from 20:00 until 08:00 UTC, so a budget
