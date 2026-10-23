@@ -744,6 +744,25 @@ func TestComputeExpectedPolecatsGetPolecatPathsGuard(t *testing.T) {
 	}
 }
 
+// TestComputeExpectedSandboxSecretsGuardIsTownWide pins the gt-vwdxf wiring:
+// sandbox-secrets is declared in DefaultBase, so every role must receive it as
+// an ungated guard on the shell-executing matcher. It self-filters on the
+// session backend, so a role that lost the bare entry or gained an If gate
+// would let a command print a credential into a sandbox session unchecked.
+func TestComputeExpectedSandboxSecretsGuardIsTownWide(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	home := configHome{home: tmpDir}
+
+	for _, target := range []string{"gastown/polecats", "crew", "mayor", "witness", "refinery", "deacon"} {
+		cfg, err := home.computeExpected(target)
+		if err != nil {
+			t.Fatalf("home.computeExpected(%s): %v", target, err)
+		}
+		requireUngatedGuardCommand(t, target, cfg, "tap guard sandbox-secrets")
+	}
+}
+
 // TestComputeExpectedQuestionToolGuardIsScopedToUnattendedRoles pins the
 // gt-163k8 wiring: the interactive question tool is denied for the role
 // that runs with nobody at the pane, and for nothing else. The guard removes a
