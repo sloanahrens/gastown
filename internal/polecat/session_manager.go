@@ -634,12 +634,21 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		SessionName: sessionID,
 	}
 	if b := opts.Backend; b != nil && b.Name() != session.BackendTmux {
+		cp, ok := b.(controlPlaneHoster)
+		if !ok {
+			return fmt.Errorf("preparing %s session for %s: the backend names no control-plane host to clone from", b.Name(), polecat)
+		}
+		repoURL, err := m.sandboxRepoURL(cp, townRoot, polecat, polecatGitBranch)
+		if err != nil {
+			return fmt.Errorf("preparing %s session for %s: %w", b.Name(), polecat, err)
+		}
 		prep, err := b.Prepare(context.Background(), session.SpawnSpec{
 			TownRoot:    townRoot,
 			Rig:         m.rig.Name,
 			Polecat:     polecat,
 			Session:     sessionID,
 			Branch:      polecatGitBranch,
+			RepoURL:     repoURL,
 			HostWorkDir: workDir,
 			Env:         envVars,
 		})
