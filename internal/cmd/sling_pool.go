@@ -127,6 +127,13 @@ func poolSeatOf(pool *config.PolecatPool, agent string) (config.SeatConfig, bool
 	return seat, ok
 }
 
+// poolSeatPinnedOnly reports whether agent's seat takes only beads labelled for
+// its agent (pinned_only), so a sling that names no agent never lands on it.
+func poolSeatPinnedOnly(pool *config.PolecatPool, agent string) bool {
+	seat, ok := poolSeatOf(pool, agent)
+	return ok && seat.PinnedOnly
+}
+
 // poolSeatAgents lists the seat map's agents in the loader's order, sorted by
 // name, so every choice made from the map is repeatable.
 func poolSeatAgents(pool *config.PolecatPool) []string {
@@ -165,11 +172,13 @@ func poolSeatClosedAt(pool *config.PolecatPool, agent string, now time.Time) boo
 // spreads the town's polecats over the seats rather than filling one; the
 // dispatcher, which draws at random, never asks (it names the agent it drew).
 // A seat inside its closed window is no candidate: this sling chose no seat, so
-// nothing in it asked to spend on a seat the town shut.
+// nothing in it asked to spend on a seat the town shut. A pinned-only seat is no
+// candidate either: it takes only beads labelled for its agent, and this sling
+// names no bead's agent (gt-xtuet).
 func poolDefaultAgent(pool *config.PolecatPool, sessions []poolSession, now time.Time) string {
 	best, bestRoom := "", 0
 	for _, agent := range poolSeatAgents(pool) {
-		if poolSeatClosedAt(pool, agent, now) {
+		if poolSeatClosedAt(pool, agent, now) || poolSeatPinnedOnly(pool, agent) {
 			continue
 		}
 		room := pool.Seats[agent].Cap - poolSeatCount(agent, sessions)
@@ -212,8 +221,8 @@ func poolSeatCapKey(agent string) string {
 // to admit, and the request stands untouched (gt-4lbz). A request for an agent
 // with a seat is admitted by that seat's cap like any other sling; a cap of 0
 // is a closed seat and refuses. A request that names none goes to the seat with
-// the most room among the seats open now (poolDefaultAgent), and is refused when
-// no seat has any.
+// the most room among the seats open now and not pinned-only (poolDefaultAgent),
+// and is refused when no seat has any.
 //
 // raise names the polecat_pool key whose cap refused the sling — the seat's cap
 // for a seat, max_total for the town's total — so the refusal can say what to
@@ -247,9 +256,9 @@ func choosePoolAgent(pool *config.PolecatPool, requested string, sessions []pool
 	if agent == "" {
 		if agent = poolDefaultAgent(pool, sessions, now); agent == "" {
 			// A one-seat pool shows that seat's own refusal, unless its window
-			// has shut it: this sling may not take that seat.
-			if len(pool.Seats) != 1 || poolSeatClosedAt(pool, poolSeatAgents(pool)[0], now) {
-				return "", "pool: every seat is full or closed -> no seat for a sling that named no agent", true, "polecat_pool.seats"
+			// has shut it or it is pinned-only: this sling may not take that seat.
+			if only := poolSeatAgents(pool); len(only) != 1 || poolSeatClosedAt(pool, only[0], now) || poolSeatPinnedOnly(pool, only[0]) {
+				return "", "pool: every seat is full, closed or pinned-only -> no seat for a sling that named no agent", true, "polecat_pool.seats"
 			}
 			// The only seat's own refusal names its count, any dead-hooked
 			// seat in it, and the cap to raise.
@@ -1234,16 +1243,16 @@ func (e *poolBackpressureError) Unwrap() error { return errPoolBackpressure }
 
 // poolUncountedFallback is the agent a decision falls back to when it cannot
 // count something it decides from: the one the caller asked for, else the first
-// seat by name that is open (a cap above 0 and outside its closed window at
-// now), else none, which leaves the caller's own default agent to run. The
-// reason line names whichever it was, so a fallback never reads as a deliberate
-// route.
+// seat by name that is open (a cap above 0, outside its closed window at now,
+// and not pinned-only), else none, which leaves the caller's own default agent
+// to run. The reason line names whichever it was, so a fallback never reads as
+// a deliberate route.
 func poolUncountedFallback(pool *config.PolecatPool, requested string, now time.Time) (agent, name string) {
 	if requested != "" {
 		return requested, requested
 	}
 	for _, a := range poolSeatAgents(pool) {
-		if pool.Seats[a].Cap > 0 && !poolSeatClosedAt(pool, a, now) {
+		if pool.Seats[a].Cap > 0 && !poolSeatClosedAt(pool, a, now) && !poolSeatPinnedOnly(pool, a) {
 			return a, a
 		}
 	}
