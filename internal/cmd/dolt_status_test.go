@@ -143,6 +143,39 @@ func TestBeadsScopeHint_NonHQEmpty(t *testing.T) {
 	}
 }
 
+func TestBeadsClientSummary_BracketsIPv6Host(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		cfg  doltserver.BeadsRuntimeConfig
+		want string
+	}{
+		{
+			name: "IPv4 host",
+			cfg:  doltserver.BeadsRuntimeConfig{Source: "/t/.beads/metadata.json", Database: "gastown", Host: "127.0.0.1", Port: 3307},
+			want: "server metadata, database gastown, 127.0.0.1:3307, from /t/.beads/metadata.json",
+		},
+		{
+			name: "IPv6 loopback host",
+			cfg:  doltserver.BeadsRuntimeConfig{Source: "/t/.beads/metadata.json", Database: "gastown", Host: "::1", Port: 3307},
+			want: "server metadata, database gastown, [::1]:3307, from /t/.beads/metadata.json",
+		},
+		{
+			name: "no port omits endpoint",
+			cfg:  doltserver.BeadsRuntimeConfig{Database: "gastown", Host: "::1"},
+			want: "server metadata, database gastown",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := beadsClientSummary(tt.cfg); got != tt.want {
+				t.Fatalf("beadsClientSummary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestStatusDatabases_PrefersLiveList(t *testing.T) {
 	t.Parallel()
 	served := []string{"be", "gt", "hq", "om"}
