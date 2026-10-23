@@ -350,7 +350,9 @@ func TestUpgradeRestartHealWedgedLaunchctlIsBounded(t *testing.T) {
 	}
 	const bound = 100 * time.Millisecond
 	start := time.Now()
-	err := runUpgradeHealCommand(bound, []string{"/bin/sh", "-c", "exec sleep 30"})
+	// kill -STOP stops the shell itself, so the child never returns and never
+	// starts an external tool: the unit tier refuses a PATH lookup of sleep.
+	err := runUpgradeHealCommand(bound, []string{"/bin/sh", "-c", "kill -STOP $$"})
 	elapsed := time.Since(start)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want a deadline error", err)
