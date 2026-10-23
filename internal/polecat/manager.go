@@ -229,6 +229,10 @@ type Manager struct {
 	// cleanupKill ends a polecat's session in the allocation, reuse and
 	// repair paths; nil kills it through tmux (see SetCleanup).
 	cleanupKill func(name, reason string) error
+	// sandboxDeleter stands in for the linked openshell deleter in the
+	// sandbox cleanup the kill path runs, so a test never shells out to the
+	// sandbox CLI; nil means the linked one.
+	sandboxDeleter func(townRoot string, rec session.SandboxRecord) error
 }
 
 // SetCleanup routes the session kills the manager does as housekeeping
@@ -258,11 +262,20 @@ func (m *Manager) killSession(name, reason string) error {
 	// already gone must still be deleted. A host session has no record and
 	// this is a no-op.
 	if m.townRoot != "" {
-		if cerr := session.CleanupSandbox(m.townRoot, m.sessionName(name)); cerr != nil {
+		if cerr := session.CleanupSandboxWith(sandboxDeleterOrLinked(m.sandboxDeleter), m.townRoot, m.sessionName(name)); cerr != nil {
 			err = errors.Join(err, fmt.Errorf("polecat %s: %w", name, cerr))
 		}
 	}
 	return err
+}
+
+// sandboxDeleterOrLinked is the deleter a cleanup runs: the one a test
+// injected, else the openshell backend's link-time hook.
+func sandboxDeleterOrLinked(deleter func(townRoot string, rec session.SandboxRecord) error) func(townRoot string, rec session.SandboxRecord) error {
+	if deleter != nil {
+		return deleter
+	}
+	return session.SandboxDeleter
 }
 
 // sessionProbe is the tmux surface a Manager uses: session existence, the

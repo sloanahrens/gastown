@@ -22,26 +22,12 @@ var (
 	SandboxLiveness func(townRoot string, rec SandboxRecord, in liveness.Input) liveness.Result
 )
 
-// SetSandboxDeleterForTest installs deleter as SandboxDeleter and returns
-// the function that restores the previous one; tests that reach
-// CleanupSandbox through another package use it so they never run the
-// linked openshell deleter.
-func SetSandboxDeleterForTest(deleter func(townRoot string, rec SandboxRecord) error) (restore func()) {
-	prev := SandboxDeleter
-	SandboxDeleter = deleter
-	return func() { SandboxDeleter = prev }
-}
-
-// CleanupSandbox removes what a sandboxed session left: the sandbox itself
-// through SandboxDeleter, then its registry record and routed client. A
+// CleanupSandboxWith removes what a sandboxed session left: the sandbox
+// itself through deleter, then its registry record and routed client. A
 // session without a record is a host session and nothing happens. Callers
-// run it after the session's processes were killed (the kill is routed).
-func CleanupSandbox(townRoot, session string) error {
-	return CleanupSandboxWith(SandboxDeleter, townRoot, session)
-}
-
-// CleanupSandboxWith is CleanupSandbox with the deleter given (nil = leave
-// the sandbox, drop the record); CleanupSandbox passes SandboxDeleter.
+// run it after the session's processes were killed (the kill is routed), and
+// pass SandboxDeleter unless they have a deleter of their own; nil leaves the
+// sandbox and drops the record.
 func CleanupSandboxWith(deleter func(townRoot string, rec SandboxRecord) error, townRoot, session string) error {
 	rec, ok, err := ReadSandboxRecord(townRoot, session)
 	if err != nil {

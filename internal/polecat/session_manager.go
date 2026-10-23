@@ -71,6 +71,10 @@ type SessionManager struct {
 	// beadsAt opens the beads database in a resolved beads dir; nil is
 	// beads.NewPinned.
 	beadsAt func(beadsDir string) beads.Client
+	// sandboxDeleter stands in for the linked openshell deleter in the
+	// cleanup an abandoned launch runs, so a test never shells out to the
+	// sandbox CLI; nil means the linked one.
+	sandboxDeleter func(townRoot string, rec session.SandboxRecord) error
 }
 
 // SessionHooks route a SessionManager's kills through the supervisor
@@ -668,7 +672,7 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 			if err == nil {
 				return
 			}
-			if cerr := session.CleanupSandbox(townRoot, sessionID); cerr != nil {
+			if cerr := session.CleanupSandboxWith(sandboxDeleterOrLinked(m.sandboxDeleter), townRoot, sessionID); cerr != nil {
 				err = errors.Join(err, fmt.Errorf("cleaning up %s session for %s: %w", b.Name(), polecat, cerr))
 			}
 		}()
