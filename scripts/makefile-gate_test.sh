@@ -188,6 +188,80 @@ else
   fail "the shell-test list runs the scripts the old hand list skipped (gt-tqxdd)" "missing:$missing"
 fi
 
+# The OpenShell polecat sandbox targets (claude-q3f.9): an operator runs them
+# by hand, and deploy/polecat lands from the crew branch, so the recipes are
+# checked here rather than by running them.
+echo "polecat sandbox targets"
+if pout=$(dry polecat-image); then
+  pass "make -n polecat-image exits 0"
+else
+  fail "make -n polecat-image exits 0" "$pout"
+fi
+pcross=$(grep -c -F 'GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build' <<<"$pout" || true)
+if [[ "$pcross" == 2 ]] && grep -q -F './cmd/gt' <<<"$pout" && grep -q -F './cmd/bd' <<<"$pout"; then
+  pass "polecat-image cross-compiles gt and bd for linux/arm64"
+else
+  fail "polecat-image cross-compiles gt and bd for linux/arm64 (builds: $pcross)" "$pout"
+fi
+pdev=$(grep -c -F 'gastown-polecat:dev' <<<"$pout" || true)
+if grep -q -E 'docker build --platform linux/arm64 .*-t gastown-polecat:[^ ]+ -t gastown-polecat:dev -f deploy/polecat/Dockerfile deploy/polecat' <<<"$pout" && [[ "$pdev" == 1 ]]; then
+  pass "polecat-image builds deploy/polecat/Dockerfile, tagged both the short sha and :dev"
+else
+  fail "polecat-image builds deploy/polecat/Dockerfile, tagged both the short sha and :dev" "$pout"
+fi
+# BD_SRC is the only source of bd: a checkout outside this repo.
+if bdsrc=$(dry polecat-image BD_SRC=/somewhere/else) && grep -q -F 'cd /somewhere/else &&' <<<"$bdsrc"; then
+  pass "polecat-image takes BD_SRC pointing at another beads checkout"
+else
+  fail "polecat-image takes BD_SRC pointing at another beads checkout" "$bdsrc"
+fi
+if cout=$(dry polecat-caches RIGS="gastown om") && grep -q -F 'scripts/polecat-caches.sh gastown om' <<<"$cout"; then
+  pass "make -n polecat-caches passes RIGS to the script"
+else
+  fail "make -n polecat-caches passes RIGS to the script" "$cout"
+fi
+if oout=$(dry openshell-providers) && grep -q -F 'scripts/openshell-providers.sh' <<<"$oout"; then
+  pass "make -n openshell-providers runs the providers script"
+else
+  fail "make -n openshell-providers runs the providers script" "$oout"
+fi
+phony="$(sed -n '1p' "$ROOT/Makefile")"
+missing=""
+for t in polecat-image polecat-caches openshell-providers; do
+  grep -q -E "^$t:" "$ROOT/Makefile" && grep -q -E "^\.PHONY:.* $t( |\$)" <<<"$phony" || missing="$missing $t"
+done
+if [[ -z "$missing" ]]; then
+  pass "the three polecat sandbox targets are declared and phony"
+else
+  fail "the three polecat sandbox targets are declared and phony" "missing:$missing"
+fi
+
+# The providers script handles real credentials, so its shape is asserted
+# statically: one xtrace-off line, no echo of a key read from a key file, and
+# provider create's output behind the length mask.
+providers_script="$ROOT/scripts/openshell-providers.sh"
+xtrace_off=$(grep -c -F 'set +x' "$providers_script" || true)
+if [[ "$xtrace_off" == 1 ]]; then
+  pass "openshell-providers turns xtrace off exactly once"
+else
+  fail "openshell-providers turns xtrace off exactly once (found $xtrace_off)" "$(grep -n -F 'set +x' "$providers_script")"
+fi
+if leaks=$(grep -n -E 'echo.*\$(DEEPSEEK|FORGEJO_TOKEN)' "$providers_script"); then
+  fail "openshell-providers never echoes a key read from a key file" "$leaks"
+else
+  pass "openshell-providers never echoes a key read from a key file"
+fi
+if grep -q -F "openshell provider create --name \"\$name\" --type \"\$type\" --credential \"\$credential\" | masked" "$providers_script" && grep -q -F "MASK='s/[A-Za-z0-9_-]{24,}/***/g'" "$providers_script"; then
+  pass "openshell-providers masks provider create output"
+else
+  fail "openshell-providers masks provider create output" "$(grep -n -F 'provider create' "$providers_script")"
+fi
+if [[ "$(grep -n -F 'openshell profile lint' "$providers_script" | cut -d: -f1)" -lt "$(grep -n -F 'openshell profile import' "$providers_script" | cut -d: -f1)" ]]; then
+  pass "openshell-providers lints a profile before it imports it"
+else
+  fail "openshell-providers lints a profile before it imports it"
+fi
+
 # The container suite's test-Dolt init pool must be as wide as the scheduler
 # town slot count (gt-ik4a1.4.12). Package beads reads the pool override in
 # init(), so TestMain is too late: it has to be in the environment before the
@@ -487,6 +561,110 @@ if [[ "$rc" != 0 ]] && grep -q -F 'lists no package' "$TMP/err"; then
   pass "test-integration refuses an empty docker.txt instead of testing nothing"
 else
   fail "test-integration refuses an empty docker.txt instead of testing nothing (rc=$rc)" "$(cat "$TMP/err")"
+fi
+
+# The two polecat sandbox scripts, driven against docker and openshell stubs.
+# The providers script reads key files, so it is pointed at a throwaway
+# GT_CONFIG_DIR: no real key file is read and no secret is printed.
+echo "polecat sandbox scripts, driven with stubs"
+cat >"$TMP/bin/docker" <<'STUB'
+#!/usr/bin/env bash
+echo "docker $*" >>"$STUB_LOG"
+if [[ "$1 $2" == "volume inspect" ]]; then
+  [[ -n "${STUB_VOLUME_EXISTS:-}" && "$3" == "${STUB_VOLUME_EXISTS}" ]] && exit 0
+  exit 1
+fi
+exit 0
+STUB
+cat >"$TMP/bin/openshell" <<'STUB'
+#!/usr/bin/env bash
+echo "openshell $*" >>"$STUB_LOG"
+case "$1 $2" in
+  "provider list")
+    [[ -n "${STUB_EXISTING:-}" ]] && printf '%s\n' "$STUB_EXISTING"
+    ;;
+  "provider create")
+    # The credential's value is in the environment, never in argv; a tool that
+    # printed it would have to be masked.
+    echo "created provider, placeholder ${ANTHROPIC_AUTH_TOKEN:-${FORGEJO_TOKEN:-none}}"
+    ;;
+esac
+exit 0
+STUB
+chmod +x "$TMP/bin/docker" "$TMP/bin/openshell"
+caches="$ROOT/scripts/polecat-caches.sh"
+
+: >"$TMP/calls"
+rc=0
+env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" bash "$caches" gastown om >"$TMP/out" 2>"$TMP/err" || rc=$?
+if [[ "$rc" == 0 ]] && grep -q -x 'docker volume create --label openshell.ai/sandbox-attachable=true --label openshell.ai/sandbox-attachable-workspace=default gt-cache-gastown' "$TMP/calls" && grep -q -x 'docker volume create --label openshell.ai/sandbox-attachable=true --label openshell.ai/sandbox-attachable-workspace=default gt-cache-om' "$TMP/calls"; then
+  pass "polecat-caches creates a labelled gt-cache-<rig> volume per rig"
+else
+  fail "polecat-caches creates a labelled gt-cache-<rig> volume per rig (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+: >"$TMP/calls"
+rc=0
+env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" STUB_VOLUME_EXISTS=gt-cache-gastown bash "$caches" gastown om >"$TMP/out" 2>"$TMP/err" || rc=$?
+if [[ "$rc" == 0 ]] && ! grep -q -F 'create' <<<"$(grep -F 'gt-cache-gastown' "$TMP/calls")" && grep -q -F 'gt-cache-om' "$TMP/calls"; then
+  pass "polecat-caches leaves an existing volume alone and still creates the missing one"
+else
+  fail "polecat-caches leaves an existing volume alone and still creates the missing one (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+: >"$TMP/calls"
+rc=0
+env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" bash "$caches" >"$TMP/out" 2>"$TMP/err" || rc=$?
+if [[ "$rc" == 2 ]] && ! grep -q -F 'volume create' "$TMP/calls" && grep -q -F 'usage:' "$TMP/err"; then
+  pass "polecat-caches refuses to run with no rigs, before touching docker"
+else
+  fail "polecat-caches refuses to run with no rigs, before touching docker (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+providers="$ROOT/scripts/openshell-providers.sh"
+keys="$TMP/keys"
+mkdir -p "$keys"
+secret_api="sk-test-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+secret_token="forgejo-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+printf 'DEEPSEEK_API_KEY=%s\n' "$secret_api" >"$keys/deepseek.env"
+printf 'FORGEJO_URL=http://host.docker.internal:3000\nFORGEJO_TOKEN=%s\n' "$secret_token" >"$keys/forgejo-polecat.env"
+
+: >"$TMP/calls"
+rc=0
+env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$keys" bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
+if [[ "$rc" == 0 ]] && grep -q -F 'provider create --name deepseek --type deepseek-claude --credential ANTHROPIC_AUTH_TOKEN' "$TMP/calls" && grep -q -F 'provider create --name forgejo-polecat --type forgejo-polecat --credential FORGEJO_TOKEN' "$TMP/calls"; then
+  pass "openshell-providers creates both providers the profiles name"
+else
+  fail "openshell-providers creates both providers the profiles name (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+if ! grep -q -F "$secret_api" "$TMP/out" && ! grep -q -F "$secret_token" "$TMP/out" && ! grep -q -F "$secret_api" "$TMP/calls" && ! grep -q -F "$secret_token" "$TMP/calls" && grep -q -F 'placeholder ***' "$TMP/out"; then
+  pass "openshell-providers puts no key in argv or on stdout, and masks provider create's output"
+else
+  fail "openshell-providers puts no key in argv or on stdout, and masks provider create's output" "$(cat "$TMP/out" "$TMP/calls")"
+fi
+if grep -q -F 'no profiles under deploy/polecat/profiles' "$TMP/out"; then
+  pass "openshell-providers names the missing profile directory (deploy/polecat lands separately)"
+else
+  fail "openshell-providers names the missing profile directory (deploy/polecat lands separately)" "$(cat "$TMP/out")"
+fi
+
+mkdir -p "$TMP/empty-keys"
+: >"$TMP/calls"
+rc=0
+env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$TMP/empty-keys" STUB_EXISTING=$'deepseek\nforgejo-polecat' bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
+if [[ "$rc" == 0 ]] && ! grep -q -F 'provider create' "$TMP/calls"; then
+  pass "openshell-providers skips an existing provider without reading its key file"
+else
+  fail "openshell-providers skips an existing provider without reading its key file (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
+fi
+
+: >"$TMP/calls"
+rc=0
+env PATH="$TMP/bin:$PATH" STUB_LOG="$TMP/calls" GT_CONFIG_DIR="$TMP/empty-keys" bash "$providers" >"$TMP/out" 2>"$TMP/err" || rc=$?
+if [[ "$rc" != 0 ]] && grep -q -F 'deepseek.env is unreadable' "$TMP/err"; then
+  pass "openshell-providers fails, naming the file, when a key file is missing"
+else
+  fail "openshell-providers fails, naming the file, when a key file is missing (rc=$rc)" "$(cat "$TMP/calls" "$TMP/err")"
 fi
 
 echo ""
