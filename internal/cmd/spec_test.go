@@ -1385,6 +1385,70 @@ func TestSpecDispatchHoldsAndExclusions(t *testing.T) {
 	}
 }
 
+// A bead whose last sling failed at session start rests out its backoff before
+// the tick tries it again, while a bead with no failure record is dispatched as
+// usual (gt-811f6). The failed sling left the bead open and unassigned, so
+// without the check every tick re-slings it into the same failure.
+func TestSpecDispatchStartupBackoff(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := dispatch.RecordStartupFailure(townRoot, "gt-resting", "startup blocked: trust dialog"); err != nil {
+		t.Fatal(err)
+	}
+	f := newFakeSpecTown(
+		cleanSpec("gt-resting", 1, "2026-09-29T10:00:00Z"),
+		cleanSpec("gt-fresh", 1, "2026-09-29T10:00:00Z"),
+	)
+	env := f.env()
+	env.PerTick = 2
+	env.StartupBackoff = func(id string) string { return dispatch.StartupBackoff(townRoot, id) }
+	r := runSpecDispatchCycle(env)
+
+	if len(f.slung) != 1 || f.slung[0] != "gt-fresh" {
+		t.Fatalf("slung %v, want only gt-fresh: a resting bead waits out its backoff", f.slung)
+	}
+	want := "gt-resting: " + specdispatch.SkipStartupBackoff
+	if len(r.Skipped) != 1 || !strings.HasPrefix(r.Skipped[0].Line, want) || !strings.Contains(r.Skipped[0].Line, "trust dialog") {
+		t.Fatalf("skipped = %+v, want one line starting %q naming the failure", r.Skipped, want)
+	}
+}
+
+// A bead resting out its backoff leaves the tick before it takes a seat, so the
+// seat it would have used is still free: a bead pinned to the same agent and one
+// pinned to another both dispatch on their own seat (gt-811f6).
+func TestSpecDispatchStartupBackoffLeavesTheSeatFree(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := dispatch.RecordStartupFailure(townRoot, "gt-resting", "startup blocked: trust dialog"); err != nil {
+		t.Fatal(err)
+	}
+	pinned := func(id, agent string) specdispatch.Spec {
+		s := cleanSpec(id, 1, "2026-09-29T10:00:00Z")
+		s.Labels = []string{"agent:" + agent}
+		return s
+	}
+	f := newFakeSpecTown(
+		pinned("gt-resting", "deepseek-flash"),
+		pinned("gt-same", "deepseek-flash"),
+		pinned("gt-other", "claude-sonnet"),
+	)
+	env := f.env()
+	env.PerTick = 3
+	env.StartupBackoff = func(id string) string { return dispatch.StartupBackoff(townRoot, id) }
+	r := runSpecDispatchCycle(env)
+
+	seats := map[string]string{}
+	for i, id := range f.slung {
+		seats[id] = f.slingSeats[i].Agent
+	}
+	if len(f.slung) != 2 || seats["gt-same"] != "deepseek-flash" || seats["gt-other"] != "claude-sonnet" {
+		t.Fatalf("slung %v onto %v, want gt-same on deepseek-flash and gt-other on claude-sonnet", f.slung, f.slingSeats)
+	}
+	if len(r.Skipped) != 1 || r.Skipped[0].Bead != "gt-resting" {
+		t.Fatalf("skipped = %+v, want only gt-resting", r.Skipped)
+	}
+}
+
 func TestSpecDispatchRetriesDoltContention(t *testing.T) {
 	t.Parallel()
 	contention := errors.New("formula failed: bd mol bond: Error 1213 (40001): serialization failure")

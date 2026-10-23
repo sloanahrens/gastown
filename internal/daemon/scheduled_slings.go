@@ -654,6 +654,16 @@ func (d *Daemon) resumeReopenedScheduledRun(ctx context.Context, r scheduledSlin
 		d.logger.Printf("scheduled_slings: %s: run %s was reopened but branch %s is gone from origin; slinging it from main", e.Name, b.ID, branch)
 		branch = ""
 	}
+	// A run whose last sling failed at session start rests out its backoff
+	// before this patrol slings it again (gt-811f6): the reopen leaves the bead
+	// open, so without the check every tick resumes it into the same failure.
+	// The check sits after the branch probe so the tick still records where a
+	// resumed run would go from while it rests. A deferral leaves the failure
+	// counter alone and the next tick asks again.
+	if reason := dispatch.StartupBackoff(d.config.TownRoot, b.ID); reason != "" {
+		d.logger.Printf("scheduled_slings: %s: run %s: not resuming: startup backoff: %s", e.Name, b.ID, reason)
+		return &scheduledSlingDeferred{cause: errors.New("startup backoff: " + reason)}
+	}
 	if branch == "" {
 		d.logger.Printf("scheduled_slings: %s: slinging run %s: %s to %s from main", e.Name, b.ID, e.Formula, e.Rig)
 	} else {

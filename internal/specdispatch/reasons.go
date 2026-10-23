@@ -20,4 +20,7 @@ const (
 	// SkipPerTickLimit is a clean bead left for a later tick by the per-tick
 	// limit; the limit's number follows it.
 	SkipPerTickLimit = "clean, per-tick limit"
+	// SkipStartupBackoff starts the reason a bead stays unslung while its rest
+	// after a failed session start runs (dispatch.StartupBackoff).
+	SkipStartupBackoff = "startup backoff:"
 )

@@ -501,6 +501,9 @@ func (r *runner) printDispatchNoOp(report capacity.DispatchReport, seats Seats) 
 	case ReasonRigHeld:
 		fmt.Fprintf(w, "\n%s No dispatchable beads: %d ready bead(s) held by a rig ESTOP\n",
 			style.Dim.Render("○"), report.Skipped)
+	case ReasonStartupBackoff:
+		fmt.Fprintf(w, "\n%s No dispatchable beads: %d ready bead(s) resting after a failed session start\n",
+			style.Dim.Render("○"), report.Skipped)
 	default:
 		fmt.Fprintf(w, "\n%s No dispatchable beads (reason: %s, skipped: %d)\n",
 			style.Dim.Render("○"), report.Reason, report.Skipped)
@@ -530,6 +533,8 @@ func (r *runner) printDryRunPlanFor(plan capacity.DispatchPlan, seats Seats, bat
 			fmt.Fprintf(w, "No dispatchable beads: validation failed for %d candidate(s)\n", totalReady)
 		case ReasonRigHeld:
 			fmt.Fprintf(w, "No dispatchable beads: %d ready bead(s) held by a rig ESTOP\n", totalReady)
+		case ReasonStartupBackoff:
+			fmt.Fprintf(w, "No dispatchable beads: %d ready bead(s) resting after a failed session start\n", totalReady)
 		default:
 			fmt.Fprintf(w, "No dispatchable beads: reason=%s, %d candidate(s) skipped\n", plan.Reason, totalReady)
 		}

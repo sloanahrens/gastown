@@ -201,6 +201,10 @@ func dispatchableWaiting(r specDispatchTickReport) (int, []dispatchIdleReason) {
 // notDispatchableReasons are the skip-reason prefixes of a bead the dispatcher
 // is not holding back: it cannot be started until a person or a seat of its
 // class changes. They match the reason text spec dispatch writes.
+//
+// specdispatch.SkipStartupBackoff is not one of them: the rest after a failed
+// session start ends by itself, so the bead waits on the dispatcher and the
+// rule should name the failure rather than stay quiet.
 var notDispatchableReasons = []string{
 	specdispatch.SkipUnshaped,
 	specdispatch.SkipNotEligible,

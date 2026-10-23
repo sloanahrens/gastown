@@ -10,6 +10,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/scheduler/capacity"
 )
 
@@ -153,6 +154,84 @@ func TestPlanReportsRigHeldWhenEveryReadyBeadIsHeld(t *testing.T) {
 	// No ready beads at all is still "none": the reason is for held beads only.
 	if none := r.planDispatch(townRoot, 2, 2, nil); none.Reason != "none" || none.Skipped != 0 {
 		t.Fatalf("empty plan = %+v, want reason=none, skipped=0", none)
+	}
+}
+
+// A bead whose last sling failed at session start leaves the plan until its
+// backoff elapses, and the beads behind it still dispatch: the resting bead is
+// counted as skipped, not failed, so its sling context stays queued for the
+// first run after the window (gt-811f6).
+func TestPlanDropsBeadRestingAfterAFailedStartup(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := dispatch.RecordStartupFailure(townRoot, "gt-a", "startup blocked: trust dialog"); err != nil {
+		t.Fatal(err)
+	}
+	ready := []capacity.PendingBead{
+		{ID: "ctx-1", WorkBeadID: "gt-a", TargetRig: "gastown"},
+		{ID: "ctx-2", WorkBeadID: "gt-b", TargetRig: "gastown"},
+	}
+
+	r := &runner{}
+	plan := r.planDispatch(townRoot, 2, 2, ready)
+
+	if len(plan.ToDispatch) != 1 || plan.ToDispatch[0].WorkBeadID != "gt-b" {
+		t.Fatalf("ToDispatch = %+v, want only gt-b: an unrelated bead is unaffected", plan.ToDispatch)
+	}
+	if plan.Skipped != 1 {
+		t.Errorf("Skipped = %d, want 1 (the resting bead)", plan.Skipped)
+	}
+
+	// When every ready bead is resting, the plan says so: "none" would tell
+	// the operator nothing is queued.
+	only := r.planDispatch(townRoot, 2, 2, ready[:1])
+	if len(only.ToDispatch) != 0 || only.Skipped != 1 || only.Reason != ReasonStartupBackoff {
+		t.Fatalf("all-resting plan = %+v, want nothing dispatched, skipped=1, reason=%s", only, ReasonStartupBackoff)
+	}
+}
+
+// A failure record nobody can read is dispatched as before: the backoff is a
+// throttle, not a safety hold, so a corrupt record must not park a bead for
+// good (gt-811f6).
+func TestPlanDispatchesABeadWhoseStartupRecordCannotBeRead(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	dir := filepath.Join(townRoot, ".runtime", "sling-startup-failures")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "gt-a.json"), []byte("{not json"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ready := []capacity.PendingBead{{ID: "ctx-1", WorkBeadID: "gt-a", TargetRig: "gastown"}}
+
+	plan := (&runner{}).planDispatch(townRoot, 1, 1, ready)
+
+	if len(plan.ToDispatch) != 1 || plan.Skipped != 0 {
+		t.Fatalf("plan = %+v, want the bead dispatched despite the unreadable record", plan)
+	}
+}
+
+// A resting bead is skipped by the dispatcher rather than failed, so the
+// operator first learns of it from the run's error stream: the line names the
+// bead, the window and the failure behind it (gt-811f6).
+func TestPlanNamesARestingBeadOnTheErrorStream(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := dispatch.RecordStartupFailure(townRoot, "gt-a", "startup blocked: trust dialog"); err != nil {
+		t.Fatal(err)
+	}
+	ready := []capacity.PendingBead{{ID: "ctx-1", WorkBeadID: "gt-a", TargetRig: "gastown"}}
+
+	out := captureTo(func(w io.Writer) {
+		r := &runner{opts: Options{ErrOut: w}}
+		r.planDispatch(townRoot, 1, 1, ready)
+	})
+
+	for _, want := range []string{"gt-a", "gastown", "startup backoff", "trust dialog"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("skip line %q lacks %q", out, want)
+		}
 	}
 }
 

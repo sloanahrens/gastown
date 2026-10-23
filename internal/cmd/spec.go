@@ -812,9 +812,14 @@ type specRoster struct {
 // specDispatchEnv is every side effect a tick has, so the cycle runs on fakes
 // in tests.
 type specDispatchEnv struct {
-	Hold       func() string
-	Candidates func() specBoardRead
-	Show       func(beadID string) (specdispatch.Spec, error)
+	Hold func() string
+	// StartupBackoff reports why an automatic sling of beadID must wait: its
+	// last sling failed at session start and the resting window has not
+	// elapsed (dispatch.StartupBackoff). Nil consults no record, which is what
+	// a tick with no town to read wants.
+	StartupBackoff func(beadID string) string
+	Candidates     func() specBoardRead
+	Show           func(beadID string) (specdispatch.Spec, error)
 	// ShowFresh is Show that never answers from an earlier read of the tick: the
 	// last-moment re-read before a sling is the check that a submission did not
 	// land in the window, so it asks bd. Nil falls back to Show (gt-u8rbh).
@@ -1091,6 +1096,18 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		if hold := env.RigHold(c.Rig); hold != "" {
 			report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %s", id, specdispatch.SkipRigHold, hold)})
 			continue
+		}
+		// A bead whose last sling failed at session start rests out its backoff
+		// before an automatic dispatcher tries it again (gt-811f6). The failed
+		// sling leaves the bead open and unassigned, so without this the next
+		// tick re-slings it into the same failure and spends one of its respawn
+		// attempts each time. An operator's own `gt sling` is the retry the
+		// backoff leaves room for and does not come through here.
+		if env.StartupBackoff != nil {
+			if why := env.StartupBackoff(id); why != "" {
+				report.Skipped = append(report.Skipped, specDispatchEntry{Bead: id, Rig: c.Rig, Line: fmt.Sprintf("%s: %s %s", id, specdispatch.SkipStartupBackoff, why)})
+				continue
+			}
 		}
 		// Re-read the clock at the choice, per candidate: the board read and the
 		// holds above can carry the tick past a seat's window boundary, and the
@@ -1668,7 +1685,8 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		return beads.New(resolveBeadDirFromTownRoot(townRoot, id))
 	})
 	env := specDispatchEnv{
-		Hold: func() string { return dispatch.OperatorHold(townRoot) },
+		Hold:           func() string { return dispatch.OperatorHold(townRoot) },
+		StartupBackoff: func(id string) string { return dispatch.StartupBackoff(townRoot, id) },
 		Candidates: func() specBoardRead {
 			read := specCandidates(townRoot, maxPriority, func(rigPath string) ([]*beads.Issue, error) {
 				reads.call()
