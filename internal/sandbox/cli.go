@@ -192,6 +192,22 @@ func (c *CLI) Get(ctx context.Context, name string) (Status, error) {
 	return st, nil
 }
 
+// Exists reports whether the gateway has a sandbox of that name. Only the
+// gateway's "not found" answer means it does not: a gateway that cannot be
+// reached, or any other failure, is an error, so a caller never reads an
+// unknown as absent.
+func (c *CLI) Exists(ctx context.Context, name string) (bool, error) {
+	_, stderr, err := c.run(ctx, callTimeout, "sandbox get", c.argv("sandbox", "get", name, "--output", "json"), nil, nil)
+	switch {
+	case err == nil:
+		return true, nil
+	case bytes.Contains(bytes.ToLower(stderr), []byte("sandbox not found")):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
 // Exec runs argv inside the sandbox with stdin piped. It adds no deadline of
 // its own: the caller's ctx bounds a command whose length only the caller
 // knows. Exec takes no env values: `sandbox exec` accepts them only as argv
