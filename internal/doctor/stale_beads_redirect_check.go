@@ -278,18 +278,29 @@ func hasRedirectWithStaleFiles(beadsDir string) bool {
 		return false
 	}
 
-	// Check for any stale files
+	// Check for any stale files the cleaner would remove
+	preserveMetadata := shouldPreserveRedirectMetadata(beadsDir)
 	for _, pattern := range staleFilePatterns {
 		matches, err := filepath.Glob(filepath.Join(beadsDir, pattern))
 		if err != nil {
 			continue
 		}
-		if len(matches) > 0 {
+		for _, match := range matches {
+			if isPreservedStaleFile(match, preserveMetadata) {
+				continue
+			}
 			return true
 		}
 	}
 
 	return false
+}
+
+// isPreservedStaleFile reports whether cleanStaleBeadsFiles keeps a file that
+// matches a stale pattern. The check and the cleaner both call it, so a file
+// the cleaner keeps is never reported as stale.
+func isPreservedStaleFile(path string, preserveMetadata bool) bool {
+	return preserveMetadata && filepath.Base(path) == "metadata.json"
 }
 
 // cleanStaleBeadsFiles removes stale files from a .beads directory,
@@ -313,7 +324,7 @@ func cleanStaleBeadsFiles(beadsDir string) error {
 			continue
 		}
 		for _, match := range matches {
-			if preserveMetadata && filepath.Base(match) == "metadata.json" {
+			if isPreservedStaleFile(match, preserveMetadata) {
 				continue
 			}
 			if err := os.RemoveAll(match); err != nil {
