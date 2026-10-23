@@ -456,9 +456,28 @@ func TestListPolecats_FiltersWorktrees(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	polecats := listPolecats(tmpDir, rigName)
+	polecats, err := listPolecats(tmpDir, rigName)
+	if err != nil {
+		t.Fatalf("listPolecats: %v", err)
+	}
 
 	if len(polecats) != 1 || polecats[0] != "scout" {
 		t.Errorf("listPolecats should return only [scout], got: %v", polecats)
+	}
+}
+
+// TestListPolecats_MissingDirIsZeroPolecats verifies a rig with no polecats
+// directory reports zero polecats and no error: only a missing directory means
+// zero polecats (gt-9wiz3).
+func TestListPolecats_MissingDirIsZeroPolecats(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	polecats, err := listPolecats(tmpDir, "myrig")
+	if err != nil {
+		t.Fatalf("missing polecats directory should not be an error, got: %v", err)
+	}
+	if len(polecats) != 0 {
+		t.Errorf("missing polecats directory should yield no polecats, got: %v", polecats)
 	}
 }

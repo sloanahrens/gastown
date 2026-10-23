@@ -3,6 +3,7 @@ package doctor
 import (
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -159,11 +160,14 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 			checkAgentBead(rigScope, crewID)
 		}
 
-		// Check polecat agents
-		polecatWorkers := listPolecats(ctx.TownRoot, rigName)
-		for _, polecatName := range polecatWorkers {
-			polecatID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
-			checkAgentBead(rigScope, polecatID)
+		// Check polecat agents. An unreadable polecats directory leaves no
+		// names to check, so nothing is created for a live polecat — the safe
+		// direction; only the stale check has to refuse to guess (gt-9wiz3).
+		if polecatWorkers, err := listPolecats(ctx.TownRoot, rigName); err == nil {
+			for _, polecatName := range polecatWorkers {
+				polecatID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
+				checkAgentBead(rigScope, polecatID)
+			}
 		}
 	}
 
@@ -327,7 +331,12 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 			}
 		}
 
-		polecatWorkers := listPolecats(ctx.TownRoot, rigName)
+		// Same as Run: an unreadable polecats directory creates nothing
+		// rather than guessing which polecats exist (gt-9wiz3).
+		polecatWorkers, err := listPolecats(ctx.TownRoot, rigName)
+		if err != nil {
+			continue
+		}
 		for _, polecatName := range polecatWorkers {
 			polecatID := beads.PolecatBeadIDWithPrefix(prefix, rigName, polecatName)
 			if err := fixAgentBead(bd, rigScope, rigBeadsPath, polecatID,
@@ -400,13 +409,20 @@ func verifyLabelAdded(ctx *CheckContext, workDir, beadID, label string) bool {
 	return err == nil && len(records) > 1
 }
 
-// listPolecats returns the names of canonical polecat directories in a rig.
-// Filters out git worktrees (same logic as listCrewWorkers). See GH#2767.
-func listPolecats(townRoot, rigName string) []string {
+// listPolecats returns the names of canonical polecat directories in a rig. A
+// rig with no polecats directory has no polecats and reports no error; a
+// directory that exists but cannot be read returns an error, because a caller
+// comparing this list against live agent beads would otherwise mark every
+// polecat bead in that rig stale (gt-9wiz3). Filters out git worktrees (same
+// logic as listCrewWorkers). See GH#2767.
+func listPolecats(townRoot, rigName string) ([]string, error) {
 	polecatDir := filepath.Join(townRoot, rigName, "polecats")
 	entries, err := os.ReadDir(polecatDir)
 	if err != nil {
-		return nil // No polecats directory or can't read it
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", polecatDir, err)
 	}
 
 	var polecats []string
@@ -420,5 +436,5 @@ func listPolecats(townRoot, rigName string) []string {
 		}
 		polecats = append(polecats, entry.Name())
 	}
-	return polecats
+	return polecats, nil
 }
