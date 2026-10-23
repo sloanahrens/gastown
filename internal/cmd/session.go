@@ -676,11 +676,9 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("checking session: %w", err)
 	}
 
-	// The seat's town root and backend: the restart resolves the seat's agent
-	// from the intent record there, and its backend from the same town's
-	// settings, so a sandboxed seat never comes back on the host (gt-da3ea).
+	// The seat's town root: the restart resolves the seat's agent from the
+	// intent record there, and its backend from the same town's settings.
 	seatTownRoot := filepath.Dir(seat.r.Path)
-	backendFor := townSeatBackend(seatTownRoot, tmux.NewTmux())
 
 	restart := func() error {
 		if running {
@@ -709,7 +707,8 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 		// Start fresh session
 		fmt.Printf("Starting session for %s/%s...\n", rigName, polecatName)
 		// The seat comes back on the agent its sling recorded, not the role
-		// default (gt-rsrnr).
+		// default (gt-rsrnr), on that agent's backend (gt-da3ea).
+		backendFor := townSeatBackend(seatTownRoot, tmux.NewTmux())
 		if err := restartPolecatOnSlungAgent(polecatMgr, backendFor, seatTownRoot, rigName, polecatName, polecat.SessionStartOptions{}); err != nil {
 			return fmt.Errorf("starting session: %w", err)
 		}

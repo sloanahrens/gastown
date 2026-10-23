@@ -26,10 +26,31 @@ func (r *recordingStarter) Start(name string, opts polecat.SessionStartOptions) 
 	return nil
 }
 
-// noBackend resolves every agent to host tmux: the restart tests that are
-// about the agent need no town settings.
+// noBackend ignores the town: every agent resolves to host tmux without reading
+// its settings, so a test of the agent a restart starts does not depend on them.
 func noBackend(agent string) (session.Backend, error) {
 	return session.NewTmuxBackend(tmux.NewTmuxWithSocket("gt-test")), nil
+}
+
+// TestRestartWithoutTownSettingsWritesNothing: a town with no settings file
+// restarts its seat on the host tmux default and leaves no settings file behind.
+func TestRestartWithoutTownSettingsWritesNothing(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	if err := intent.MarkSlung(townRoot, polecatIntentSeat("gastown", "nux"), "deepseek-flash", "test", time.Now()); err != nil {
+		t.Fatalf("MarkSlung: %v", err)
+	}
+	s := &recordingStarter{}
+	backendFor := townSeatBackend(townRoot, tmux.NewTmuxWithSocket("gt-test"))
+	if err := restartPolecatOnSlungAgent(s, backendFor, townRoot, "gastown", "nux", polecat.SessionStartOptions{}); err != nil {
+		t.Fatalf("restartPolecatOnSlungAgent: %v", err)
+	}
+	if s.opts.Backend == nil || s.opts.Backend.Name() != session.BackendTmux {
+		t.Errorf("Backend = %v, want %s", s.opts.Backend, session.BackendTmux)
+	}
+	if _, err := os.Stat(config.TownSettingsPath(townRoot)); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("restart left a settings file behind: stat err = %v, want not-exist", err)
+	}
 }
 
 // TestRestartPolecatOnSlungAgent: a restarted seat runs the agent its sling
