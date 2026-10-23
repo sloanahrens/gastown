@@ -125,6 +125,8 @@ POLE_IMAGE ?= gastown-polecat
 POLE_TAG ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
 # The commit the image's gt is built from. Prepare refuses a sandbox whose label
 # differs from the installed gt's commit (gt-pmxo9), so the label is the full sha.
+# The build compiles the working tree, so the label is only true of a tree with no
+# changes: polecat-image refuses one that has any (gt-9fz0k).
 POLE_COMMIT := $(shell git rev-parse HEAD 2>/dev/null)
 # bd is built from a beads fork checkout, not this repo. That checkout is host
 # state, so there is no default: the operator names it, BD_SRC=<checkout>.
@@ -136,6 +138,7 @@ BD_SRC ?=
 # anything is built.
 polecat-image:
 	@test -n "$(BD_SRC)" || { echo "polecat-image: BD_SRC is unset; run make polecat-image BD_SRC=<beads checkout>" >&2; exit 2; }
+	@test -z "$$(git status --porcelain -- . ':(exclude).beads')" || { echo "polecat-image: the tree has uncommitted or untracked changes, so its gt is not the commit the label names ($(POLE_COMMIT)); commit or remove them first" >&2; exit 2; }
 	@mkdir -p deploy/polecat/bin
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/gt ./cmd/gt
 	cd $(BD_SRC) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o $(CURDIR)/deploy/polecat/bin/bd ./cmd/bd
