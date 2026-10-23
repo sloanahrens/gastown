@@ -14,10 +14,18 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PROVIDERS="$SCRIPT_DIR/openshell-providers.sh"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/openshell-providers-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
+
+# The script finds its profiles relative to itself (../deploy/polecat/profiles),
+# so it runs from a copy of the tree under the temp dir: a scenario can add a
+# profile there without touching the repo's.
+PROVIDERS="$TMP/root/scripts/openshell-providers.sh"
+mkdir -p "$TMP/root/scripts" "$TMP/root/deploy/polecat"
+cp "$SCRIPT_DIR/openshell-providers.sh" "$PROVIDERS"
+cp -R "$REPO_ROOT/deploy/polecat/profiles" "$TMP/root/deploy/polecat/profiles"
 
 PASS=0
 FAIL=0
@@ -44,7 +52,10 @@ printf 'FORGEJO_TOKEN=%s\n' "$FORGEJO_KEY" >"$TMP/config/forgejo-polecat.env"
 # The stub answers the four subcommands the script uses. profile import fails
 # the way the real gateway does when the id is already listed, which is what
 # makes the rerun assertion meaningful; provider create prints the credential
-# it received so the test can see the script's masking work.
+# it received so the test can see the script's masking work. The stub takes a
+# profile's id from its file name, never by parsing the yaml, so the script's
+# own id parser is what the assertions exercise. profile list fails while
+# $state/fail-profile-list exists.
 cat >"$TMP/bin/openshell" <<'STUB'
 #!/usr/bin/env bash
 set -uo pipefail
@@ -53,6 +64,10 @@ state="$STUB_STATE"
 
 case "$1 $2" in
   "profile list")
+    if [ -e "$state/fail-profile-list" ]; then
+      echo "Error: gateway unreachable" >&2
+      exit 1
+    fi
     printf 'NAME             TYPE      CATEGORY   SOURCE  SCOPE\n'
     cat "$state/profiles"
     ;;
@@ -60,7 +75,7 @@ case "$1 $2" in
     ;;
   "profile import")
     file=$4
-    id=$(awk '/^id:/ { sub(/^id:[[:space:]]*/, ""); sub(/[[:space:]#].*$/, ""); print; exit }' "$file")
+    id=$(basename "$file" .yaml)
     if grep -qxF "$id" "$state/profiles"; then
       echo "provider profile import failed: custom provider profile '$id' already exists" >&2
       exit 1
@@ -145,6 +160,29 @@ run
 assert_rc 0 "exits 0"
 check "left the profiles alone" [ "$(calls '^profile import')" -eq 2 ]
 check "created the two missing providers" [ "$(calls '^provider create')" -eq 4 ]
+
+echo "quoted ids: a profile whose yaml quotes its id is still recognised"
+printf 'id: "quoted-double"\n' >"$TMP/root/deploy/polecat/profiles/quoted-double.yaml"
+printf "id: 'quoted-single' # comment\n" >"$TMP/root/deploy/polecat/profiles/quoted-single.yaml"
+run
+assert_rc 0 "imports the quoted profiles"
+check "imported the double-quoted profile" [ "$(calls '^profile import -f .*quoted-double.yaml')" -eq 1 ]
+check "imported the single-quoted profile" [ "$(calls '^profile import -f .*quoted-single.yaml')" -eq 1 ]
+run
+assert_rc 0 "exits 0 on a rerun"
+check "reported the double-quoted profile as existing" contains "profile quoted-double exists" "$OUT"
+check "reported the single-quoted profile as existing" contains "profile quoted-single exists" "$OUT"
+check "did not import either again" [ "$(calls '^profile import -f .*quoted-')" -eq 2 ]
+
+echo "failed list: profile list errors, so existence is unknown"
+touch "$TMP/state/fail-profile-list"
+imports_before="$(calls '^profile import')"
+run
+assert_rc 1 "exits 1"
+check "named the failed list" contains "profile list --global failed" "$OUT"
+check "passed on the gateway's error" contains "gateway unreachable" "$OUT"
+check "did not try to import anything" [ "$(calls '^profile import')" -eq "$imports_before" ]
+rm -f "$TMP/state/fail-profile-list"
 
 echo
 if [ "$FAIL" -ne 0 ]; then

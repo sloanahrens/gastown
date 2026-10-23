@@ -37,20 +37,37 @@ provider_exists() {
 # profile_exists ID is the same question against profile list. profile import
 # is not idempotent — it fails with "custom provider profile '<id>' already
 # exists" — so a profile the gateway already lists is skipped rather than
-# deleted and imported again.
+# deleted and imported again. Unlike provider_exists, a failed list stops the
+# run: reading it as "absent" would send a profile the gateway already has to
+# import, which then fails with a clash that hides the real cause.
 profile_exists() {
   local listed
   # --global for the same reason import passes it: these are platform-scoped
   # profiles, which a workspace-scoped list leaves out.
-  listed="$(openshell profile list --global 2>/dev/null || true)"
+  if ! listed="$(openshell profile list --global 2>&1)"; then
+    echo "openshell-providers: openshell profile list --global failed, so whether profile $1 exists is unknown:" >&2
+    printf '%s\n' "$listed" >&2
+    exit 1
+  fi
   awk -v name="$1" '$1 == name { found = 1 } END { exit !found }' <<<"$listed"
 }
 
 # profile_id FILE prints the id: a profile yaml declares, the name import keys
 # on and the name the gateway reports a clash under. A line starting with
 # "id:" only, so a nested "- id:" inside credentials is not mistaken for it.
+# A quoted id ("x" or 'x') prints without its quotes; an unquoted one ends at
+# the first space or comment.
 profile_id() {
-  awk '/^id:/ { sub(/^id:[[:space:]]*/, ""); sub(/[[:space:]#].*$/, ""); print; exit }' "$1"
+  awk '/^id:/ {
+    sub(/^id:[[:space:]]*/, "")
+    if (match($0, /^"[^"]*"/) || match($0, /^\047[^\047]*\047/)) {
+      print substr($0, 2, RLENGTH - 2)
+    } else {
+      sub(/[[:space:]#].*$/, "")
+      print
+    }
+    exit
+  }' "$1"
 }
 
 # key_value FILE KEY prints the value of KEY in a KEY=value env file. The file
