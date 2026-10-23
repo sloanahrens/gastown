@@ -30,7 +30,7 @@ gt's sandbox seats need this key, in the `[openshell.drivers.docker]` table of `
 allow_driver_config = true
 ```
 
-With the key absent the gateway refuses `sandbox create`. The gateway reads `gateway.toml` at start, so restart it after editing; the Restart section below has the command.
+With the key absent every `sandbox create` is refused, so a seat never starts: gt reports `creating sandbox <name>: openshell sandbox create:` and the gateway's message after it. The gateway reads `gateway.toml` at start, so restart it after editing; the [Restart](#restart) section has the command.
 
 ## Restart
 
