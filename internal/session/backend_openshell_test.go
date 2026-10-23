@@ -19,12 +19,13 @@ import (
 )
 
 const (
-	openshellTestRig     = "gastown"
-	openshellTestPolecat = "sandbox-ace"
-	openshellTestSession = "gt-gastown-sandbox-ace"
-	openshellTestBranch  = "polecat/sandbox-ace/gt-1+abc"
-	openshellTestRepoURL = "http://host.docker.internal:3000/sloan/gastown.git"
-	openshellTestWorkDir = "/sandbox/gt/gastown/polecats/sandbox-ace/gastown"
+	openshellTestRig      = "gastown"
+	openshellTestPolecat  = "sandbox-ace"
+	openshellTestSession  = "gt-gastown-sandbox-ace"
+	openshellTestBranch   = "polecat/sandbox-ace/gt-1+abc"
+	openshellTestRepoURL  = "http://host.docker.internal:3000/sloan/gastown.git"
+	openshellTestGitEmail = "host-dev@example.test"
+	openshellTestWorkDir  = "/sandbox/gt/gastown/polecats/sandbox-ace/gastown"
 
 	openshellReadyReply        = `{"name":"gt-gastown-sandbox-ace","phase":"Ready","conditions":[{"type":"Ready","status":"True"}]}`
 	openshellProvisioningReply = `{"name":"gt-gastown-sandbox-ace","phase":"Provisioning","conditions":[{"type":"Ready","status":"False"}]}`
@@ -105,6 +106,7 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 			return nil
 		},
 		imageGT:     func(context.Context, string) (string, error) { return openshellTestGTCommit, nil },
+		gitEmail:    func() string { return openshellTestGitEmail },
 		installedGT: func() string { return openshellTestGTCommit },
 	}
 	return b, pushes
