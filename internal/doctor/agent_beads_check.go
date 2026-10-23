@@ -154,10 +154,14 @@ func (c *AgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		rigScope := rigScopes[prefix]
 
 		// Check crew worker agents (canonical naming: prefix-rig-role-name)
-		crewWorkers := listCrewWorkers(ctx.TownRoot, rigName)
-		for _, workerName := range crewWorkers {
-			crewID := beads.CrewBeadIDWithPrefix(prefix, rigName, workerName)
-			checkAgentBead(rigScope, crewID)
+		// An unreadable crew directory leaves no names to check, so nothing is
+		// created for a live crew member — the safe direction; only the stale
+		// check has to refuse to guess (gt-ro1lc).
+		if crewWorkers, err := listCrewWorkers(ctx.TownRoot, rigName); err == nil {
+			for _, workerName := range crewWorkers {
+				crewID := beads.CrewBeadIDWithPrefix(prefix, rigName, workerName)
+				checkAgentBead(rigScope, crewID)
+			}
 		}
 
 		// Check polecat agents. An unreadable polecats directory leaves no
@@ -320,14 +324,17 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 		rigName := info.name
 		rigScope := loadAgentBeadScope(bd)
 
-		crewWorkers := listCrewWorkers(ctx.TownRoot, rigName)
-		for _, workerName := range crewWorkers {
-			crewID := beads.CrewBeadIDWithPrefix(prefix, rigName, workerName)
-			if err := fixAgentBead(bd, rigScope, rigBeadsPath, crewID,
-				fmt.Sprintf("Crew worker %s in %s - human-managed persistent workspace.", workerName, rigName),
-				&beads.AgentFields{RoleType: "crew", Rig: rigName, AgentState: "idle"},
-			); err != nil {
-				errs = append(errs, err)
+		// Same as Run: an unreadable crew directory creates nothing rather
+		// than guessing which crew members exist (gt-ro1lc).
+		if crewWorkers, err := listCrewWorkers(ctx.TownRoot, rigName); err == nil {
+			for _, workerName := range crewWorkers {
+				crewID := beads.CrewBeadIDWithPrefix(prefix, rigName, workerName)
+				if err := fixAgentBead(bd, rigScope, rigBeadsPath, crewID,
+					fmt.Sprintf("Crew worker %s in %s - human-managed persistent workspace.", workerName, rigName),
+					&beads.AgentFields{RoleType: "crew", Rig: rigName, AgentState: "idle"},
+				); err != nil {
+					errs = append(errs, err)
+				}
 			}
 		}
 
@@ -351,15 +358,21 @@ func (c *AgentBeadsCheck) Fix(ctx *CheckContext) error {
 	return errors.Join(errs...)
 }
 
-// listCrewWorkers returns the names of canonical crew workers in a rig.
-// Filters out git worktrees and other non-identity directories that may
-// exist under <rig>/crew/ (e.g., fix branches, cross-rig worktrees).
-// See GH#2767.
-func listCrewWorkers(townRoot, rigName string) []string {
+// listCrewWorkers returns the names of canonical crew workers in a rig. A rig
+// with no crew directory has no crew and reports no error; a directory that
+// exists but cannot be read returns an error, because a caller comparing this
+// list against live agent beads would otherwise mark every crew bead in that
+// rig stale (gt-ro1lc). Filters out git worktrees and other non-identity
+// directories that may exist under <rig>/crew/ (e.g., fix branches, cross-rig
+// worktrees). See GH#2767.
+func listCrewWorkers(townRoot, rigName string) ([]string, error) {
 	crewDir := filepath.Join(townRoot, rigName, "crew")
 	entries, err := os.ReadDir(crewDir)
 	if err != nil {
-		return nil // No crew directory or can't read it
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("reading %s: %w", crewDir, err)
 	}
 
 	var workers []string
@@ -377,7 +390,7 @@ func listCrewWorkers(townRoot, rigName string) []string {
 		}
 		workers = append(workers, entry.Name())
 	}
-	return workers
+	return workers, nil
 }
 
 // ensureAgentLabel adds gt:agent to id through bd. bd update can exit 0

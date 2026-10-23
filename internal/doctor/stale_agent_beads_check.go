@@ -74,8 +74,8 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	var stale []string
-	// readErrs records each rig skipped because its polecats directory could
-	// not be read; the result reports them rather than counting them as clean.
+	// readErrs records each worker directory (crew or polecats) that exists
+	// but could not be read, so its rig's beads were skipped; the result reports them rather than counting them as clean.
 	var readErrs []string
 	var mu sync.Mutex
 
@@ -96,8 +96,10 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 			bd := ctx.beadsAt(rigBeadsPath)
 			rigName := info.name
 
-			// Get actual crew workers on disk
-			crewDiskWorkers := listCrewWorkers(ctx.TownRoot, rigName)
+			// Get actual crew workers on disk. Like the polecats directory below,
+			// a crew directory that exists but cannot be read is not an empty
+			// rig: its crew beads are left out of the stale set (gt-ro1lc).
+			crewDiskWorkers, crewErr := listCrewWorkers(ctx.TownRoot, rigName)
 			crewDiskSet := make(map[string]bool, len(crewDiskWorkers))
 			for _, w := range crewDiskWorkers {
 				crewDiskSet[w] = true
@@ -139,6 +141,9 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 			for _, issue := range allBeads {
 				switch {
 				case strings.HasPrefix(issue.ID, crewPrefix):
+					if crewErr != nil {
+						continue
+					}
 					workerName := strings.TrimPrefix(issue.ID, crewPrefix)
 					if workerName != "" && !crewDiskSet[workerName] {
 						rigStale = append(rigStale, issue.ID)
@@ -159,10 +164,12 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 				stale = append(stale, rigStale...)
 				mu.Unlock()
 			}
-			if polecatErr != nil {
-				mu.Lock()
-				readErrs = append(readErrs, polecatErr.Error())
-				mu.Unlock()
+			for _, readErr := range []error{crewErr, polecatErr} {
+				if readErr != nil {
+					mu.Lock()
+					readErrs = append(readErrs, readErr.Error())
+					mu.Unlock()
+				}
 			}
 		}(prefix, info)
 	}
@@ -213,7 +220,11 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 				case constants.RoleCrew:
 					workerName := parseCrewOrPolecatFromID(id, idPrefix, info.name, constants.RoleCrew)
 					if workerName != "" {
-						crewWorkers := listCrewWorkers(ctx.TownRoot, info.name)
+						crewWorkers, err := listCrewWorkers(ctx.TownRoot, info.name)
+						if err != nil {
+							readErrs = append(readErrs, err.Error())
+							continue
+						}
 						found := false
 						for _, w := range crewWorkers {
 							if w == workerName {
@@ -267,13 +278,13 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusWarning,
-			Message: "Skipped rigs with an unreadable polecats directory: " + strings.Join(readErrs, "; "),
+			Message: "Skipped rigs with an unreadable crew or polecats directory: " + strings.Join(readErrs, "; "),
 		}
 	}
 
 	message := fmt.Sprintf("%d stale agent bead(s) for removed workers", len(stale))
 	if len(readErrs) > 0 {
-		message += fmt.Sprintf("; %d rig(s) not checked (unreadable polecats directory)", len(readErrs))
+		message += fmt.Sprintf("; %d rig(s) not checked (unreadable crew or polecats directory)", len(readErrs))
 	}
 	return &CheckResult{
 		Name:    c.Name(),
