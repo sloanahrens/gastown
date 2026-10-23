@@ -219,10 +219,11 @@ exit ` + strconv.Itoa(failWith) + "\n"
 	return path
 }
 
-// writeStub writes an executable with syscall.ForkLock held. A parallel test
-// that forks while the write descriptor is still open gives its child a copy
+// writeStub writes an executable with syscall.ForkLock held. On unix, a fork
+// that starts while the write descriptor is still open gives its child a copy
 // of that descriptor, and the kernel then refuses to exec the stub as text
-// file busy.
+// file busy. Go leaves ForkLock unused on windows and plan9, which never
+// return that error, so the lock only guards unix.
 func writeStub(path string, script []byte, write func(string, []byte, fs.FileMode) error) error {
 	syscall.ForkLock.Lock()
 	defer syscall.ForkLock.Unlock()
@@ -247,6 +248,12 @@ func TestWriteStubHoldsForkLockDuringWrite(t *testing.T) {
 	if !lockedDuringWrite {
 		t.Error("writeStub wrote the stub without holding syscall.ForkLock")
 	}
+	// The callback is the only place the test sees the lock held. Outside it,
+	// the lock must be free again, or the deferred Unlock never ran.
+	if !syscall.ForkLock.TryLock() {
+		t.Fatal("writeStub returned with syscall.ForkLock still held")
+	}
+	syscall.ForkLock.Unlock()
 }
 
 func TestCmdHandsBackTheUnwrappedPayload(t *testing.T) {
