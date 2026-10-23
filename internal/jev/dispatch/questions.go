@@ -5,11 +5,11 @@ import "github.com/steveyegge/gastown/internal/jev"
 // Version numbers the battery's questions. Every log line carries it, so a
 // reworded question or a new rubric level starts a new series in the
 // scorecard. Raise it with any change to the text below.
-const Version = 1
+const Version = 2
 
-// The question ids. They are the keys of a log line's answers.
+// The question ids. They are the keys of a log line's answers. lands_first_try
+// is no longer asked; its id stays with the scorecard, which reads older lines.
 const (
-	qLandsFirstTry      = "lands_first_try"
 	qFitsTwentyMinutes  = "fits_twenty_minutes"
 	qAcceptanceTickable = "acceptance_tickable"
 	qNeedsStrongModel   = "needs_strong_model"
@@ -37,13 +37,6 @@ const (
 // same for every bead: nothing from a bead is spliced into it.
 func questions() map[string]jev.Question {
 	return map[string]jev.Question{
-		qLandsFirstTry: {
-			Type: typeNoul,
-			Instructions: subject + " A polecat will land this on its first merge attempt, " +
-				"without an om rejection." + dataNotInstructions,
-			True:  "The polecat lands the work on its first merge attempt.",
-			False: "The work is rejected by om at least once before it lands.",
-		},
 		qFitsTwentyMinutes: {
 			Type:         typeNoul,
 			Instructions: subject + " One worker finishes this in twenty minutes." + dataNotInstructions,

@@ -1149,9 +1149,9 @@ required to price them.
 
 `internal/jev/attention` asks one Jev call per raise: each `new` transition in
 the attention queue's event log (`.runtime/attention/events.jsonl`) past the
-cursor, whether or not the item still stands. Each call asks five questions
-(needs a person, clears on its own, a routine action fixes it, repeats an open
-item, and an urgency score), and the pass appends one line per raise to
+cursor, whether or not the item still stands. Each call asks four questions
+(needs a person, clears on its own, repeats an open item, and an urgency score),
+and the pass appends one line per raise to
 `.runtime/jev/attention.jsonl`. The line's `live` says whether `state.json` still
 held the item when the pass asked. A raise that cleared first is asked with
 `live: false`, no rig, bead or SHA, and no other open items beside it. The pass
@@ -1229,15 +1229,16 @@ log with `gt jev submission --recent N`.
 The log line is `{ts, bead, branch, head, target, submitted, agent, answers,
 question_version, model}`. `answers` maps each question id to its answer:
 `tests_cover_change`, `beyond_goal`, `commits_match_change`,
-`touches_town_machinery`, `will_pass_review`, `claims_verified`,
-`verification_applies` and `boxes_credible` each hold a `noul` probability,
-`risk` holds a `score` (the landing battery's four levels) with its
-`confidence`, and `outcome` holds a `choice` over `complete`, `partial`,
-`blocked` and `unclear`: its `choice`, every option's `probabilities`, and
-`positive` (`complete`). `question_version` is `submission.Version` and changes
-whenever a question or a rubric level does; `model` is the model ID the API
-returned. `agent` is the bead's `agent:` label, else its `agent=` attached var.
-The log holds ids, times, numbers and answers, never prompt, title or diff text.
+`touches_town_machinery`, `claims_verified` and `verification_applies` each hold
+a `noul` probability, and `risk` holds a `score` (the landing battery's four
+levels) with its `confidence`. Lines at `question_version` 2 or lower also carry
+`will_pass_review`, `boxes_credible` and `outcome`, a `choice` over `complete`,
+`partial`, `blocked` and `unclear` with its `probabilities` and `positive`
+(`complete`); the battery stopped asking them at version 3. `question_version`
+is `submission.Version` and changes whenever a question or a rubric level does;
+`model` is the model ID the API returned. `agent` is the bead's `agent:` label,
+else its `agent=` attached var. The log holds ids, times, numbers and answers,
+never prompt, title or diff text.
 
 The state Jev reads is the bead's title, its `## Goal`, `## Acceptance` and MR
 notes. The sections are each cut to 1500 runes. The MR notes are the bead's
@@ -1622,12 +1623,15 @@ The `dispatch` battery reads `.runtime/jev/dispatch.jsonl`, and its labels are
 described under the dispatch battery below.
 
 The `attention` battery reads `.runtime/jev/attention.jsonl`, the attention
-battery's log. A line whose call failed, or whose question set is not the one
-the scorecard reads, is skipped. Labels come from the attention queue's retained
-files (`.runtime/attention`: events, acks and the acks history) and the beads
-each item names. An item's first matching rule labels it; the rules in the
-order they apply, the labels each sets and the rule id `--json` reports are in
-`internal/jev/scorecard/attention.go`.
+battery's log. A line whose call failed, or that was asked under a question set
+newer than the scorecard reads, is skipped; an older set is read, and its
+answers to the questions the battery still asks are scored. Labels come from
+the attention queue's retained files (`.runtime/attention`: events, acks and the
+acks history) and the beads each item names. An item's first matching rule
+labels it; the rules in the order they apply, the labels each sets and the rule
+id `--json` reports are in `internal/jev/scorecard/attention.go`. A rule that
+labels `routine_action_fixes` is not counted on a line that gave no answer for
+it: the battery dropped the question at set 2.
 
 An item still standing with no disposition is unlabeled, as is one whose life
 the queue files no longer hold. A bead read that fails for any reason other
@@ -1763,7 +1767,8 @@ line carries it.
 
 Each pass appends one line per bead to `.runtime/jev/dispatch.jsonl`:
 `{ts, bead, attached_at, agent, answers, question_version, model}`. `answers`
-holds the five probabilities and `size: {score, confidence}`; `model` is the
+holds a probability for each noul question and `size: {score, confidence}`;
+lines at `question_version` 1 also hold `lands_first_try`. `model` is the
 versioned model the API answered with, so a model upgrade shows in a scorecard.
 `gt jev dispatch --recent N` prints the last N lines.
 
@@ -1781,14 +1786,15 @@ request Jev refused on its own terms (a 4xx other than 401) or answered
 unusably counts against a bead.
 
 `gt jev scorecard --battery dispatch` scores that log. Each line is one
-placement, stamped with its `attached_at`. The five Noul questions are scored as
-noul and `size` as a score. Labels come from three sources, and a question with
-no rule for a placement is unlabeled and left out of its counts:
+placement, stamped with its `attached_at`. The noul questions are scored as noul
+and `size` as a score. Labels come from three sources, and a question with no
+rule for a placement is unlabeled and left out of its counts:
 
 - `lands_first_try`: the bead's first attempt in
-  `.runtime/landings/reviews.jsonl`. approve is true unless the landing refused
-  it (`rejected`), and request_changes is false. With no review, a bead closed
-  as landed is true.
+  `.runtime/landings/reviews.jsonl`. Only lines at `question_version` 1 carry
+  its answer; the battery stopped asking it at version 2. approve is true
+  unless the landing refused it (`rejected`), and request_changes is false.
+  With no review, a bead closed as landed is true.
 - `fits_twenty_minutes`: the bead's `.runtime/overrun-guard/<bead>.json`. A
   record with `stopped_at` is false. A bead closed as superseded, or labeled
   `needs-split`, is false. A record still pending leaves it unlabeled. With
@@ -1803,8 +1809,9 @@ and `landed`.
 
 The seat's agent prints beside `needs_strong_model` as context. The adapter only
 reads the rig's beads and never writes. A source that cannot be read fails the
-report, and a bead the store no longer has is unlabeled. Lines are not yet split
-by `question_version`, and only version 1 exists.
+report, and a bead the store no longer has is unlabeled. Lines are not split by
+`question_version`: a line at version 1 is scored as a current one, with its
+`lands_first_try` answer.
 
 The daemon patrol `jev_dispatch` (heartbeat step `jev-dispatch`) is off unless
 `daemon.json` sets it on, and runs every 15 minutes:
@@ -2115,17 +2122,16 @@ scorecard's `internal/jev/scorecard/failcause.go`:
 When a landing's om review refuses the work, the battery reads the refusal's
 findings from the work bead's MERGE REJECTION block for that attempt (cut to
 3000 characters) and the files the refused head changed against its target, and
-asks Jev two questions: the noul `reworked_to_land`, whether the landing will
-need a rework commit before it lands, and the choice `cause` over
-`tests_missing`, `scope_creep`, `logic_error`, `wrong_file`, `docs_stale`,
-`convention` and `unclear`. It appends one line per refusal to
-`.runtime/jev/rework.jsonl`: `{ts, refused, rig, bead, attempt, head, verdict,
-score, answers, model, question_version}`. `refused` is when the landing logged
-the review, which is where the scorecard's label starts. The findings are never
-logged. A refusal
-whose bead or rejection block cannot be read is skipped for good, and so is one
-whose Jev call gets no usable reply. Any other Jev failure stops the pass, so the
-next one asks again.
+asks Jev one question: the choice `cause` over `tests_missing`, `scope_creep`,
+`logic_error`, `wrong_file`, `docs_stale`, `convention` and `unclear`. The noul
+`reworked_to_land` was dropped at question set 2 (gt-xu56u); the scorecard still
+labels it from the landings file for the older lines that carry its answer. It
+appends one line per refusal to `.runtime/jev/rework.jsonl`: `{ts, refused, rig,
+bead, attempt, head, verdict, score, answers, model, question_version}`.
+`refused` is when the landing logged the review, which is where the scorecard's
+label starts. The findings are never logged. A refusal whose bead or rejection
+block cannot be read is skipped for good, and so is one whose Jev call gets no
+usable reply. Any other Jev failure stops the pass, so the next one asks again.
 
 A refusal is a review the landing refused the work on: `request_changes`, or an
 approval whose findings blocked it. A pass reads refusals in order and moves its
@@ -2142,7 +2148,8 @@ the same town-wide cap as the other batteries.
 
 `gt jev scorecard --battery rework` labels `reworked_to_land` from the rig's
 landings file, in the scorecard's `internal/jev/scorecard/rework.go`, by the
-first landing of the bead after the refusal's own time:
+first landing of the bead after the refusal's own time. A line at question set
+2 or later carries no answer for it, so it is left unlabeled:
 
 - that landing is the refused head: `reworked_to_land` false, since the work
   landed without a rework commit (`rework:same-head-landed`).

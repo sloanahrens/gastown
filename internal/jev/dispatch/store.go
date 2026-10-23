@@ -19,7 +19,9 @@ type SizeAnswer struct {
 // Answers is what Jev said to the battery. Each Noul is the probability that
 // its statement holds, 0 to 1.
 type Answers struct {
-	LandsFirstTry      float64    `json:"lands_first_try"`
+	// LandsFirstTry is nil on lines logged after lands_first_try left the
+	// battery, so a missing value reads as missing, not as a probability of 0.
+	LandsFirstTry      *float64   `json:"lands_first_try,omitempty"`
 	FitsTwentyMinutes  float64    `json:"fits_twenty_minutes"`
 	AcceptanceTickable float64    `json:"acceptance_tickable"`
 	NeedsStrongModel   float64    `json:"needs_strong_model"`

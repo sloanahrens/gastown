@@ -264,11 +264,10 @@ func (p *Pass) ask(ctx context.Context, st attention.State, ev attention.Event) 
 	line.Model = got.Model
 	urgency := got.Score[QUrgency]
 	line.Answers = &Answers{
-		NeedsHuman:         got.Noul[QNeedsHuman],
-		ClearsOnItsOwn:     got.Noul[QClearsOnItsOwn],
-		RoutineActionFixes: got.Noul[QRoutineActionFixes],
-		RepeatsOpenItem:    got.Noul[QRepeatsOpenItem],
-		Urgency:            Urgency{Score: urgency.Score, Confidence: urgency.Confidence},
+		NeedsHuman:      got.Noul[QNeedsHuman],
+		ClearsOnItsOwn:  got.Noul[QClearsOnItsOwn],
+		RepeatsOpenItem: got.Noul[QRepeatsOpenItem],
+		Urgency:         Urgency{Score: urgency.Score, Confidence: urgency.Confidence},
 	}
 	return line, nil
 }

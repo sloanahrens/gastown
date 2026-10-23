@@ -146,13 +146,17 @@ func (a *dispatchAdapter) Parse(raw []byte) (Item, error) {
 		Time:  l.AttachedAt,
 		Model: l.Model,
 		Answers: map[QuestionID]Answer{
-			qLandsFirstTry:      noul(ans.LandsFirstTry),
 			qFitsTwentyMinutes:  noul(ans.FitsTwentyMinutes),
 			qAcceptanceTickable: noul(ans.AcceptanceTickable),
 			qNeedsStrongModel:   noul(ans.NeedsStrongModel),
 			qTouchesDaemon:      noul(ans.TouchesDaemon),
 			qSize:               {Score: &size},
 		},
+	}
+	// Lines logged after lands_first_try left the battery carry no answer for
+	// it, so only a line that has one is scored on it.
+	if ans.LandsFirstTry != nil {
+		item.Answers[qLandsFirstTry] = noul(*ans.LandsFirstTry)
 	}
 	if l.Agent != "" {
 		item.Context = map[QuestionID]string{qNeedsStrongModel: l.Agent}

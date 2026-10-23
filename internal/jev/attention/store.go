@@ -51,8 +51,10 @@ type Answers struct {
 	// anyone acting.
 	ClearsOnItsOwn float64 `json:"clears_on_its_own"`
 	// RoutineActionFixes is the probability that a known routine action
-	// settles the item.
-	RoutineActionFixes float64 `json:"routine_action_fixes"`
+	// settles the item. Lines from before that question was dropped from the
+	// battery carry it; newer lines leave it out, so it is a pointer: a missing
+	// value reads as missing, not as a probability of 0.
+	RoutineActionFixes *float64 `json:"routine_action_fixes,omitempty"`
 	// RepeatsOpenItem is the probability that another open item describes the
 	// same condition.
 	RepeatsOpenItem float64 `json:"repeats_open_item"`

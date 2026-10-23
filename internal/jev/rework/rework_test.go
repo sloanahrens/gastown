@@ -21,11 +21,10 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 )
 
-// jevReply answers both questions about the fixture refusal.
+// jevReply answers the question about the fixture refusal.
 const jevReply = `{
   "model": "jev-1.13.0",
   "answers": {
-    "reworked_to_land": {"type": "noul", "noul": 0.82},
     "cause": {"type": "choice", "choice": "tests_missing", "confidence": 0.7,
       "probabilities": {"tests_missing": 0.7, "scope_creep": 0.05, "logic_error": 0.1,
         "wrong_file": 0.05, "docs_stale": 0.02, "convention": 0.03, "unclear": 0.05}}
@@ -227,9 +226,8 @@ func TestRunLogsOneLineWithBothAnswers(t *testing.T) {
 	if l.QuestionVersion != Version || l.Model != "jev-1.13.0" {
 		t.Errorf("line version v%d %q, want v%d jev-1.13.0", l.QuestionVersion, l.Model, Version)
 	}
-	rework, ok := l.Answers[QReworkedToLand]
-	if !ok || rework.Noul == nil || *rework.Noul != 0.82 {
-		t.Errorf("reworked_to_land = %+v, want 0.82", rework)
+	if rework, ok := l.Answers[QReworkedToLand]; ok {
+		t.Errorf("reworked_to_land = %+v, want no answer: the question is no longer asked", rework)
 	}
 	if cause := l.Answers[QCause]; cause.Choice != "tests_missing" {
 		t.Errorf("cause = %q, want tests_missing", cause.Choice)
@@ -336,7 +334,7 @@ func TestJevOutageLogsNothing(t *testing.T) {
 // skipped for good, with no line, and a later pass does not ask it again.
 func TestUnusableJevReplyIsSkippedForGood(t *testing.T) {
 	t.Parallel()
-	f := &fakeJev{body: `{"model":"jev-1.13.0","answers":{"reworked_to_land":{"type":"noul","noul":0.82}},"usage":{"input_tokens":900,"output_tokens":120}}`}
+	f := &fakeJev{body: `{"model":"jev-1.13.0","answers":{},"usage":{"input_tokens":900,"output_tokens":120}}`}
 	p := newPass(t, f, fixtureRigs(t), fixtureFail())
 
 	sum, err := p.Run(context.Background())

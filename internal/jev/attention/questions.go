@@ -4,8 +4,8 @@ import "github.com/steveyegge/gastown/internal/jev"
 
 // QuestionVersion is the version of the question set. A log line carries it,
 // so an answer can be traced to the wording that produced it. Change it when a
-// question or a level changes.
-const QuestionVersion = 1
+// question or a level changes. Version 2 dropped routine_action_fixes (gt-xu56u).
+const QuestionVersion = 2
 
 // The question ids. A log line's answers are keyed by these.
 const (
@@ -46,12 +46,6 @@ func Questions() map[string]jev.Question {
 			Instructions: judgeFrame + "Does the condition behind this item go away without anyone acting on it?",
 			True:         "The condition goes away by itself, with no one acting.",
 			False:        "The condition stays until someone acts on it.",
-		},
-		QRoutineActionFixes: {
-			Type:         "noul",
-			Instructions: judgeFrame + "Would a known routine action by the overseer or the town settle this item?",
-			True:         "A known routine action by the overseer or the town settles it.",
-			False:        "No known routine action settles it.",
 		},
 		QRepeatsOpenItem: {
 			Type:         "noul",

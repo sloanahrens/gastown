@@ -38,7 +38,7 @@ repeats_open_item (noul)
   verdict: not-yet
 
 routine_action_fixes (noul)
-  logged 21, labeled 3, positives 3, negatives 0, base rate 100.0%
+  logged 3, labeled 3, positives 3, negatives 0, base rate 100.0%
   at 0.5: precision n/a, recall 0.0%
   best F1 1.000 at threshold 0.100
   calibration (band, labeled n, mean value, label rate):

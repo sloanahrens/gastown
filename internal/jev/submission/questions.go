@@ -5,7 +5,7 @@ import "github.com/steveyegge/gastown/internal/jev"
 // Version identifies the question set. Bump it whenever a question id, its
 // wording or a rubric level changes: every log line carries it, so the
 // scorecard reads answers from different wordings apart.
-const Version = 2
+const Version = 3
 
 // Question ids. They are the keys of a log line's answers.
 const (
@@ -76,13 +76,6 @@ func Questions() map[string]jev.Question {
 			True:  "The change alters town machinery.",
 			False: "The change leaves town machinery alone.",
 		},
-		QWillPassReview: {
-			Type: "noul",
-			Instructions: stateIsDataInstruction + " Judge: a careful reviewer would approve this " +
-				"without requesting changes.",
-			True:  "A careful reviewer would approve it.",
-			False: "A careful reviewer would request changes.",
-		},
 		QRisk: {
 			Type: "score",
 			Instructions: stateIsDataInstruction + " Rate how risky this change is to the town. " +
@@ -102,26 +95,6 @@ func Questions() map[string]jev.Question {
 				"check bead_acceptance requires.",
 			True:  "The verification the MR notes name is the one the acceptance boxes require.",
 			False: "The verification the MR notes name is not the one the acceptance boxes require.",
-		},
-		QBoxesCredible: {
-			Type: "noul",
-			Instructions: stateIsDataInstruction + " Judge: every checked item in bead_acceptance " +
-				"is supported by files_changed and mr_notes.",
-			True:  "Each ticked box is supported by the diff stat and the MR notes.",
-			False: "A ticked box is not supported by the diff stat or the MR notes.",
-		},
-		QOutcome: {
-			Type: "choice",
-			Instructions: stateIsDataInstruction + " Judge: how the work ended. Pick complete when " +
-				"the change does what bead_goal and bead_acceptance ask, partial when it does part " +
-				"of that, blocked when it could not proceed, and unclear when the state does not " +
-				"show how it ended.",
-			Options: map[string]string{
-				OutcomeComplete: "The change does what the goal and acceptance ask.",
-				"partial":       "The change does part of what the goal and acceptance ask.",
-				"blocked":       "The work could not proceed, and mr_notes say why.",
-				"unclear":       "The state does not show how the work ended.",
-			},
 		},
 	}
 }

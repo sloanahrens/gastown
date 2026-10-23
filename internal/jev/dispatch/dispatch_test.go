@@ -58,7 +58,6 @@ func answers() *jev.Answers {
 	return &jev.Answers{
 		Model: "jev-test-1",
 		Noul: map[string]float64{
-			qLandsFirstTry:      0.9,
 			qFitsTwentyMinutes:  0.8,
 			qAcceptanceTickable: 0.7,
 			qNeedsStrongModel:   0.2,
@@ -233,11 +232,11 @@ func TestJevDispatchPassLogsOneLinePerNewPlacement(t *testing.T) {
 		t.Errorf("attached_at = %v, want %s", got[2]["attached_at"], stamp(20))
 	}
 	ans, _ := got[2]["answers"].(map[string]any)
-	wantAnswers := []string{"acceptance_tickable", "fits_twenty_minutes", "lands_first_try", "needs_strong_model", "size", "touches_daemon"}
+	wantAnswers := []string{"acceptance_tickable", "fits_twenty_minutes", "needs_strong_model", "size", "touches_daemon"}
 	if !reflect.DeepEqual(keys(ans), wantAnswers) {
 		t.Fatalf("answer keys = %v, want %v", keys(ans), wantAnswers)
 	}
-	if ans["lands_first_try"] != 0.9 || ans["touches_daemon"] != 0.1 {
+	if ans["touches_daemon"] != 0.1 {
 		t.Errorf("answers = %v, want the noul probabilities", ans)
 	}
 	if size, _ := ans["size"].(map[string]any); size["score"] != 1.0 || size["confidence"] != 0.6 {
@@ -498,7 +497,7 @@ func TestJevDispatchQuestionsAreTheBattery(t *testing.T) {
 	t.Parallel()
 	qs := questions()
 	types := map[string]string{
-		qLandsFirstTry: typeNoul, qFitsTwentyMinutes: typeNoul, qAcceptanceTickable: typeNoul,
+		qFitsTwentyMinutes: typeNoul, qAcceptanceTickable: typeNoul,
 		qNeedsStrongModel: typeNoul, qTouchesDaemon: typeNoul, qSize: typeScore,
 	}
 	if len(qs) != len(types) {
@@ -869,7 +868,7 @@ func TestJevDispatchReadRecentReturnsTheLastLines(t *testing.T) {
 	if len(got) != 2 || got[0].Bead != "gt-b" || got[1].Bead != "gt-c" {
 		t.Fatalf("lines = %+v, want gt-b and gt-c", got)
 	}
-	if got[1].Model != "jev-test-1" || got[1].QuestionVersion != Version || got[1].Answers.LandsFirstTry != 0.9 {
+	if got[1].Model != "jev-test-1" || got[1].QuestionVersion != Version || got[1].Answers.LandsFirstTry != nil {
 		t.Errorf("line = %+v, want the answers read back", got[1])
 	}
 }

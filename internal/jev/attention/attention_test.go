@@ -42,10 +42,9 @@ func answersFor(needs, score float64) *jev.Answers {
 	return &jev.Answers{
 		Model: "jev-1.13.0",
 		Noul: map[string]float64{
-			QNeedsHuman:         needs,
-			QClearsOnItsOwn:     0.2,
-			QRoutineActionFixes: 0.3,
-			QRepeatsOpenItem:    0.4,
+			QNeedsHuman:      needs,
+			QClearsOnItsOwn:  0.2,
+			QRepeatsOpenItem: 0.4,
 		},
 		Score: map[string]jev.ScoreAnswer{QUrgency: {Score: score, Confidence: 0.6}},
 	}
@@ -377,7 +376,7 @@ func TestJevAttentionLineShape(t *testing.T) {
 		t.Errorf("model = %v, want the model that answered", got["model"])
 	}
 	answers := got["answers"].(map[string]any)
-	for _, k := range []string{QNeedsHuman, QClearsOnItsOwn, QRoutineActionFixes, QRepeatsOpenItem, QUrgency} {
+	for _, k := range []string{QNeedsHuman, QClearsOnItsOwn, QRepeatsOpenItem, QUrgency} {
 		if _, ok := answers[k]; !ok {
 			t.Errorf("answers has no %q: %v", k, answers)
 		}
@@ -485,13 +484,16 @@ func TestJevAttentionCapStopsBeforeAsking(t *testing.T) {
 	}
 }
 
-func TestJevAttentionQuestionsAreTheFiveAsked(t *testing.T) {
+func TestJevAttentionQuestionsAreTheFourAsked(t *testing.T) {
 	t.Parallel()
 	qs := Questions()
-	for _, id := range []string{QNeedsHuman, QClearsOnItsOwn, QRoutineActionFixes, QRepeatsOpenItem} {
+	for _, id := range []string{QNeedsHuman, QClearsOnItsOwn, QRepeatsOpenItem} {
 		if qs[id].Type != "noul" || qs[id].True == "" || qs[id].False == "" {
 			t.Errorf("question %q = %+v, want a noul describing both outcomes", id, qs[id])
 		}
+	}
+	if _, ok := qs[QRoutineActionFixes]; ok {
+		t.Errorf("question %q is still asked, want it dropped from the battery", QRoutineActionFixes)
 	}
 	urgency := qs[QUrgency]
 	if urgency.Type != "score" || len(urgency.Levels) != 3 {
