@@ -1216,7 +1216,11 @@ type specSlingOutcome struct {
 	entry specDispatchEntry
 	label string      // a label to add to the bead, when set
 	notes [][2]string // Annotate key, text pairs
-	took  time.Duration
+	// refused is set when the sling was refused before it spawned, or after it
+	// rolled its spawn back: its charged seat is handed back. Any other sling
+	// that did not succeed keeps the charge for the tick (gt-pto2f).
+	refused bool
+	took    time.Duration
 }
 
 type specSlingKind int
@@ -1234,9 +1238,10 @@ const (
 // one reads is the tick's snapshot plus the live sessions and claims of the
 // moment (snapshotOccupied).
 //
-// A sling that spawned no polecat gives its charged seat back (gt-9x16z): the
-// tick charged the seat when it collected the candidate, and the charge stays
-// in the budget only while a sling of this tick may still fill it.
+// A refused sling gives its charged seat back (gt-9x16z): the tick charged the
+// seat when it collected the candidate, and the charge stays in the budget only
+// while a sling of this tick may still fill it. A sling that failed in any
+// other way keeps its charge until the next tick's snapshot recounts the seats.
 func specRunPendingSlings(env specDispatchEnv, pending []specPendingSling, report *specDispatchReport, budget *specdispatch.Budget) {
 	if len(pending) == 0 {
 		return
@@ -1265,12 +1270,14 @@ func specRunPendingSlings(env specDispatchEnv, pending []specPendingSling, repor
 			// unnamed tail; the daemon logs this list one line per entry, so
 			// every deferral's bead and reason stay readable (gt-4wcqd).
 			report.Deferred = append(report.Deferred, o.entry)
-			// A refusal spawns nothing, whatever charged the seat: the overlap
-			// guard, the pool's backpressure, or contention that outlasted its
-			// retries. Hand it back rather than leave the tick over-counted.
-			budget.Release(o.entry.Agent)
 		case specSlingFailed:
 			report.Failed = append(report.Failed, o.entry)
+		}
+		// Only a refusal proves the sling spawned nothing. A failure or an
+		// exhausted contention may have hooked the bead or started a session
+		// before it returned, so their seat stays charged for this tick (gt-pto2f).
+		if o.refused {
+			budget.Release(o.entry.Agent)
 		}
 		if o.label != "" {
 			if err := env.AddLabel(o.entry.Bead, o.label); err != nil {
@@ -1306,22 +1313,25 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 	if err != nil {
 		if isSpecOverlapRefusal(err) {
 			entry.Line = fmt.Sprintf("%s: sling deferred, content overlap holds it (work in flight, or unstarted work the dispatcher would sling first): %s", id, firstErrLine(err))
-			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
+			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry, refused: true})
 		}
 		if isSpecSlingRefusal(err) {
 			entry.Line = fmt.Sprintf("%s: sling deferred: %s", id, firstErrLine(err))
-			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
+			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry, refused: true})
 		}
 		// Contention that outlasted every retry is a deferral, not a failure:
-		// Dolt rolled the attempt back before reporting it, so the next tick
-		// can repeat the dispatch (specdispatch.IsSerializationFailure), and
 		// the label this path would add excludes the bead until an operator
-		// clears it. Parallel slings make the 1213s likelier, which is exactly
-		// when a bead must not be labeled out of the queue (gt-9x16z).
+		// clears it, and contention clears by itself. The next tick's fresh
+		// re-read refuses a bead with an assignee, so a sling that hooked the
+		// bead before its error is not slung twice (gt-9x16z). The attempt may
+		// have hooked it, so the seat stays charged for this tick (gt-pto2f).
 		if specdispatch.IsSerializationFailure(err) {
 			entry.Line = fmt.Sprintf("%s: sling deferred, %v after %d attempts: %s", id, specdispatch.ErrRetriesExhausted, attempts, firstErrLine(err))
 			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
 		}
+		// A failed sling is not known to have spawned nothing: a hook or a
+		// session start can fail after it took effect, and the rollback is
+		// best-effort. Its seat stays charged for this tick (gt-pto2f).
 		excluded := fmt.Sprintf("excluded from the queue until label %s is cleared", specdispatch.DispatchFailedLabel)
 		failLine := fmt.Sprintf("%s: dispatch failed, left unassigned: %s; %s", id, firstErrLine(err), excluded)
 		entry.Line = failLine
