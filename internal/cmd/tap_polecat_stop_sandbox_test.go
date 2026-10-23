@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -129,60 +127,35 @@ func TestEndSandboxSessionIfDoneReportsAScheduleFailure(t *testing.T) {
 	}
 }
 
-// The Stop hook ends the session only on the branch where the heartbeat says gt
-// done already ran (exiting or idle); a polecat still working, or one with no
-// heartbeat, keeps it. This drives runTapPolecatStop itself, so it fails if the
-// call is dropped or moved off that branch.
-func TestTapPolecatStopEndsASandboxSessionAfterGtDone(t *testing.T) {
+// The Stop hook acts on a finished session only on the branch where the
+// heartbeat says gt done already ran (exiting or idle), and then once; a polecat
+// still working, or one with no heartbeat, is not done. runTapPolecatStop hands
+// polecatStopGtDoneRan the sandbox end as its callback, so a dropped call or one
+// moved off that branch fails here.
+func TestPolecatStopGtDoneRan(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
-		name  string
-		state polecat.HeartbeatState // "" is no heartbeat
-		ends  bool
+		name string
+		hb   *polecat.SessionHeartbeat
+		done bool
 	}{
-		{"exiting_after_gt_done", polecat.HeartbeatExiting, true},
-		{"idle", polecat.HeartbeatIdle, true},
-		{"still_working", polecat.HeartbeatWorking, false},
-		{"no_heartbeat", "", false},
+		{"exiting_after_gt_done", &polecat.SessionHeartbeat{State: polecat.HeartbeatExiting}, true},
+		{"idle", &polecat.SessionHeartbeat{State: polecat.HeartbeatIdle}, true},
+		{"working", &polecat.SessionHeartbeat{State: polecat.HeartbeatWorking}, false},
+		{"v1_heartbeat_without_state", &polecat.SessionHeartbeat{}, false},
+		{"no_heartbeat", nil, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			townRoot := t.TempDir()
-			if err := os.MkdirAll(filepath.Join(townRoot, "mayor"), 0o755); err != nil {
-				t.Fatal(err)
+			t.Parallel()
+			calls := 0
+			got := polecatStopGtDoneRan(tc.hb, func() { calls++ })
+			wantCalls := 0
+			if tc.done {
+				wantCalls = 1
 			}
-			if err := os.WriteFile(filepath.Join(townRoot, "mayor", "town.json"), []byte("{}"), 0o644); err != nil {
-				t.Fatal(err)
-			}
-			t.Chdir(townRoot)
-			t.Setenv("GT_TOWN_ROOT", townRoot)
-			t.Setenv("GT_RIG", "gastown")
-			t.Setenv("GT_POLECAT", "capable")
-			t.Setenv("GT_SESSION", "gt-capable")
-			t.Setenv("GT_SESSION_BACKEND", session.BackendOpenShell)
-			if tc.state != "" {
-				polecat.TouchSessionHeartbeatWithState(townRoot, "gt-capable", tc.state, "test", "gt-x")
-			}
-
-			var scheduled []string
-			prev := tapPolecatStopSandboxEnd
-			tapPolecatStopSandboxEnd = sandboxSessionEnd{
-				fields: func(_, _, _ string) (*beads.AgentFields, error) {
-					return &beads.AgentFields{AgentState: "done", CleanupStatus: "clean"}, nil
-				},
-				schedule: func(s string, _ time.Duration) error { scheduled = append(scheduled, s); return nil },
-				log:      &bytes.Buffer{},
-			}
-			t.Cleanup(func() { tapPolecatStopSandboxEnd = prev })
-
-			if err := runTapPolecatStop(tapPolecatStopCmd, nil); err != nil {
-				t.Fatalf("runTapPolecatStop: %v", err)
-			}
-			want := []string(nil)
-			if tc.ends {
-				want = []string{"gt-capable"}
-			}
-			if strings.Join(scheduled, ",") != strings.Join(want, ",") {
-				t.Fatalf("scheduled %v, want %v", scheduled, want)
+			if got != tc.done || calls != wantCalls {
+				t.Errorf("polecatStopGtDoneRan = %v with %d callbacks, want %v with %d", got, calls, tc.done, wantCalls)
 			}
 		})
 	}
