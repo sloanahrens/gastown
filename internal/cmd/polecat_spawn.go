@@ -847,9 +847,9 @@ func (s slingSeatSpawn) spawn(townRoot, rigName string, opts SlingSpawnOptions) 
 	// no opinion and the request stands. The reason line always names the agent
 	// the pool chose, and a pool whose seat is at its cap refuses the sling.
 	//
-	// A sling that names no agent asks for the one its bead is labelled with
+	// A sling that names no agent asks for the one its bead is labeled with
 	// (agent:<name>) when the pool has that seat, so a pinned-only seat takes
-	// its labelled bead by hand as it does from the dispatcher. --agent wins.
+	// its labeled bead by hand as it does from the dispatcher. --agent wins.
 	requested := opts.Agent
 	if requested == "" && opts.HookBead != "" && s.pinnedAgent != nil {
 		requested = s.pinnedAgent(townRoot, opts.HookBead)

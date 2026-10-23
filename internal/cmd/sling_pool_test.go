@@ -2365,7 +2365,7 @@ func TestPoolRouterSeatBatchLivesOneDecision(t *testing.T) {
 	}
 }
 
-// A bead labelled agent:<name> asks for that seat when the pool has it; every
+// A bead labeled agent:<name> asks for that seat when the pool has it; every
 // other shape leaves the sling to the pool's own choice (gt-5h1r7).
 func TestPoolPinnedAgent(t *testing.T) {
 	t.Parallel()
@@ -2399,8 +2399,8 @@ func TestPoolPinnedAgent(t *testing.T) {
 	}
 }
 
-// A sling that names no agent lands a labelled bead on its pinned-only seat,
-// where the same sling for an unlabelled bead skips that seat; --agent wins
+// A sling that names no agent lands a labeled bead on its pinned-only seat,
+// where the same sling for an unlabeled bead skips that seat; --agent wins
 // over the label (gt-5h1r7).
 func TestSlingSeatSpawnHonorsTheBeadAgentLabel(t *testing.T) {
 	t.Parallel()
@@ -2409,8 +2409,8 @@ func TestSlingSeatSpawnHonorsTheBeadAgentLabel(t *testing.T) {
 		"claude-sonnet":  {Cap: 2},
 	}}
 	labels := map[string][]string{
-		"gt-labelled": {"agent:deepseek-flash"},
-		"gt-plain":    {"gt:task"},
+		"gt-labeled": {"agent:deepseek-flash"},
+		"gt-plain":   {"gt:task"},
 	}
 	spawnAgent := func(t *testing.T, bead, agent string) string {
 		t.Helper()
@@ -2436,13 +2436,13 @@ func TestSlingSeatSpawnHonorsTheBeadAgentLabel(t *testing.T) {
 		return info.agent
 	}
 
-	if got := spawnAgent(t, "gt-labelled", ""); got != "deepseek-flash" {
-		t.Errorf("a labelled bead with no --agent ran on %q, want its pinned-only seat deepseek-flash", got)
+	if got := spawnAgent(t, "gt-labeled", ""); got != "deepseek-flash" {
+		t.Errorf("a labeled bead with no --agent ran on %q, want its pinned-only seat deepseek-flash", got)
 	}
 	if got := spawnAgent(t, "gt-plain", ""); got != "claude-sonnet" {
-		t.Errorf("an unlabelled bead ran on %q, want claude-sonnet (the pinned-only seat is skipped)", got)
+		t.Errorf("an unlabeled bead ran on %q, want claude-sonnet (the pinned-only seat is skipped)", got)
 	}
-	if got := spawnAgent(t, "gt-labelled", "claude-sonnet"); got != "claude-sonnet" {
-		t.Errorf("--agent claude-sonnet on a labelled bead ran on %q, want the flag to win", got)
+	if got := spawnAgent(t, "gt-labeled", "claude-sonnet"); got != "claude-sonnet" {
+		t.Errorf("--agent claude-sonnet on a labeled bead ran on %q, want the flag to win", got)
 	}
 }

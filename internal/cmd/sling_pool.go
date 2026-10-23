@@ -192,12 +192,12 @@ func poolDefaultAgent(pool *config.PolecatPool, sessions []poolSession, now time
 
 // poolPinnedAgent is the agent a bead's agent:<name> label asks for, when the
 // pool has a seat for it: the agent a sling that named none runs the bead on,
-// so a pinned-only seat takes its labelled bead on every path and not only the
+// so a pinned-only seat takes its labeled bead on every path and not only the
 // spec dispatcher's. The label is read the way the dispatcher reads it
 // (specdispatch.Spec.PinnedAgents). It is "" when the bead carries no label,
 // carries two that disagree (the dispatcher skips such a bead rather than guess,
 // and so does this), or names an agent with no seat: the pool then has no
-// request to honor and the sling goes where the pool would put an unlabelled
+// request to honor and the sling goes where the pool would put an unlabeled
 // one.
 func poolPinnedAgent(pool *config.PolecatPool, labels []string) string {
 	pinned := specdispatch.Spec{Labels: labels}.PinnedAgents()
@@ -212,7 +212,7 @@ func poolPinnedAgent(pool *config.PolecatPool, labels []string) string {
 
 // poolBeadAgent is poolPinnedAgent for the bead beadID, read from bd. A bead
 // that cannot be read pins nothing: the label is a preference the pool reads,
-// not a gate, so a bd hiccup falls back to the unlabelled route.
+// not a gate, so a bd hiccup falls back to the unlabeled route.
 func poolBeadAgent(townRoot, beadID string) string {
 	if beadID == "" {
 		return ""
