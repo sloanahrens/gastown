@@ -100,13 +100,15 @@ func TestRestartPolecatOnSlungAgentResolvesBackend(t *testing.T) {
 		slungOn   string
 		opts      polecat.SessionStartOptions
 		resolve   seatBackendResolver
-		wantAgent string // the agent the resolver was asked about; "" = not asked
+		wantAsked bool
+		wantAgent string // what the resolver was asked about
 		wantErr   bool
 	}{
 		{
 			name:      "record names a sandboxed agent",
 			slungOn:   "deepseek-flash-sandbox",
 			resolve:   func(agent string) (session.Backend, error) { return sentinel, nil },
+			wantAsked: true,
 			wantAgent: "deepseek-flash-sandbox",
 		},
 		{
@@ -131,9 +133,9 @@ func TestRestartPolecatOnSlungAgentResolvesBackend(t *testing.T) {
 			if err := intent.MarkSlung(townRoot, polecatIntentSeat("gastown", "nux"), tt.slungOn, "test", time.Now()); err != nil {
 				t.Fatalf("MarkSlung: %v", err)
 			}
-			asked := ""
+			asked, askedFor := "", false
 			resolve := func(agent string) (session.Backend, error) {
-				asked = agent
+				asked, askedFor = agent, true
 				return tt.resolve(agent)
 			}
 			s := &recordingStarter{}
@@ -150,8 +152,8 @@ func TestRestartPolecatOnSlungAgentResolvesBackend(t *testing.T) {
 			if err != nil {
 				t.Fatalf("restartPolecatOnSlungAgent: %v", err)
 			}
-			if asked != tt.wantAgent {
-				t.Errorf("resolver asked about %q, want %q", asked, tt.wantAgent)
+			if askedFor != tt.wantAsked || asked != tt.wantAgent {
+				t.Errorf("resolver asked %v about %q, want %v about %q", askedFor, asked, tt.wantAsked, tt.wantAgent)
 			}
 			if s.opts.Backend != sentinel {
 				t.Errorf("Backend = %v, want the sentinel backend", s.opts.Backend)
@@ -178,7 +180,7 @@ func TestRestartPolecatOnSlungAgentSandboxSeat(t *testing.T) {
 			wantBack: session.BackendOpenShell,
 		},
 		{
-			name:    "seat whose sandbox profile cannot build a backend",
+			name:    "seat whose sandbox profile is incomplete",
 			sandbox: config.SandboxProfile{Image: "gastown-polecat:dev"},
 			wantErr: "polecat-default.policy: required",
 		},
