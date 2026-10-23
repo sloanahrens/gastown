@@ -262,14 +262,27 @@ func computeTiers(dag *DAGInfo) {
 }
 
 // findCriticalPath finds the longest path through the DAG.
+//
+// A molecule is validated as acyclic, but a cycle stored in the beads data
+// still reaches here, and a plain memo-on-return DFS recurses without bound on
+// it. onStack holds the nodes of the walk in progress: an edge back to one of
+// them closes there instead of descending again, so every path returned is
+// finite. A longer branch of a node that also edges into the cycle still wins
+// the comparison, so an acyclic DAG draws exactly the path it drew before.
 func findCriticalPath(dag *DAGInfo) []string {
 	// DFS to find longest path
 	memo := make(map[string][]string)
+	onStack := make(map[string]bool)
 
 	var dfs func(id string) []string
 	dfs = func(id string) []string {
 		if path, ok := memo[id]; ok {
 			return path
+		}
+		if onStack[id] {
+			// The edge back to id closes a cycle; end the walk at the node
+			// that opened it and keep the nodes leading in.
+			return nil
 		}
 
 		node := dag.Nodes[id]
@@ -277,6 +290,7 @@ func findCriticalPath(dag *DAGInfo) []string {
 			return nil
 		}
 
+		onStack[id] = true
 		longestSuffix := []string{}
 		for _, depID := range node.Dependents {
 			suffix := dfs(depID)
@@ -284,6 +298,7 @@ func findCriticalPath(dag *DAGInfo) []string {
 				longestSuffix = suffix
 			}
 		}
+		delete(onStack, id)
 
 		path := append([]string{id}, longestSuffix...)
 		memo[id] = path
