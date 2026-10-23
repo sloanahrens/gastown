@@ -43,9 +43,13 @@ const (
 var sandboxDroppedEnv = []string{"CLAUDE_CONFIG_DIR", "TMPDIR", "GOTMPDIR", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"}
 
 // cloneScript clones the polecat branch with the Forgejo token the provider
-// put in the sandbox's environment. Arguments are positional, so no value is
-// spliced into the script text.
-const cloneScript = `exec git -c "http.extraHeader=Authorization: token $FORGEJO_TOKEN" clone --branch "$1" --single-branch "$2" "$3"`
+// put in the sandbox's environment, then fetches main into origin/main: the
+// single-branch clone's refspec covers only the polecat branch, and gt done
+// compares the branch with origin/main. Arguments are positional, so no value
+// is spliced into the script text.
+const cloneScript = `H="http.extraHeader=Authorization: token $FORGEJO_TOKEN"; ` +
+	`git -c "$H" clone --branch "$1" --single-branch "$2" "$3" && cd "$3" && ` +
+	`git remote set-branches --add origin main && git -c "$H" fetch origin main`
 
 // redirectScript writes .beads/redirect in the clone. $1 is the worktree and
 // $2 the redirect target.
