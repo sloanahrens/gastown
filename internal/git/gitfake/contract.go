@@ -25,6 +25,9 @@ type Env interface {
 	Commit(t testing.TB, dir, branch, message string, files map[string]string) string
 	// SetRef points ref (a full ref name) at id in the repository at dir.
 	SetRef(t testing.TB, dir, ref, id string)
+	// SetHead points HEAD of the repository at dir at branch, which need not
+	// exist yet, as git symbolic-ref HEAD does.
+	SetHead(t testing.TB, dir, branch string)
 	// Clone clones the repository at src to a non-bare repository at dest,
 	// with src as origin.
 	Clone(t testing.TB, src, dest string)

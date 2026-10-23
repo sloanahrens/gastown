@@ -180,6 +180,22 @@ func (f *Fake) SetRef(t testing.TB, dir, ref, id string) {
 	r.refs[ref] = id
 }
 
+// SetHead points HEAD of the repository at dir at branch, which need not
+// exist yet.
+func (f *Fake) SetHead(t testing.TB, dir, branch string) {
+	t.Helper()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r := f.repoAt(dir)
+	if r == nil {
+		t.Fatalf("gitfake: SetHead %s in %s: no such repository", branch, dir)
+	}
+	r.head = "refs/heads/" + branch
+	// Best effort, as InitBare's: the HEAD file is for consumers that stat it.
+	_ = os.Remove(filepath.Join(gitDirOf(r), "HEAD"))
+	_ = layoutRepo(r)
+}
+
 // Clone clones the repository at src to a non-bare repository at dest with
 // src as origin: every branch becomes a remote-tracking ref, and src's HEAD
 // branch is checked out (written to dest).

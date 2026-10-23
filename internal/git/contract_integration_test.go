@@ -83,6 +83,11 @@ func (e *realEnv) SetRef(t testing.TB, dir, ref, id string) {
 	e.git(t, dir, "", nil, "update-ref", ref, id)
 }
 
+func (e *realEnv) SetHead(t testing.TB, dir, branch string) {
+	t.Helper()
+	e.git(t, dir, "", nil, "symbolic-ref", "HEAD", "refs/heads/"+branch)
+}
+
 func (e *realEnv) Clone(t testing.TB, src, dest string) {
 	t.Helper()
 	e.git(t, filepath.Dir(dest), "", nil, "clone", "-q", src, dest)
