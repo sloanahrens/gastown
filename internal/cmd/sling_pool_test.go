@@ -2621,3 +2621,236 @@ func TestResolveTarget_DryRunPeeksThePoolWithTheBeadAgentLabel(t *testing.T) {
 		})
 	}
 }
+
+// poolBeadAgentWith composes the label rules over the readers it is handed: the
+// bead's label picks its seat, an unseatable or closed label refuses, and a
+// bead or settings read that fails refuses rather than routing the bead
+// unlabeled (gt-chnlz).
+func TestPoolBeadAgentWith(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{Timezone: "America/Chicago", Seats: map[string]config.SeatConfig{
+		"deepseek-flash": {Cap: 3, PinnedOnly: true, Closed: "20:00-08:00"},
+		"claude-sonnet":  {Cap: 2},
+	}}
+	readErr := errors.New("bd unreachable")
+	cases := []struct {
+		name         string
+		beadID       string
+		pool         *config.PolecatPool
+		settingsErr  error
+		labels       []string
+		showErr      error
+		nilIssue     bool
+		now          time.Time
+		want         string
+		wantRefusal  string // substring of a pool refusal's reason
+		wantReadFail bool   // a plain read failure, not a pool refusal
+		wantShown    bool   // the bead is read
+	}{
+		{name: "a label naming an open seat routes to it", beadID: "gt-1", pool: pool, labels: []string{"agent:deepseek-flash"}, now: chicagoAt(t, 12, 0), want: "deepseek-flash", wantShown: true},
+		{name: "an unlabeled bead routes to no seat", beadID: "gt-1", pool: pool, labels: []string{"gt:task"}, now: chicagoAt(t, 12, 0), wantShown: true},
+		{name: "a label whose seat is closed refuses", beadID: "gt-1", pool: pool, labels: []string{"agent:deepseek-flash"}, now: chicagoAt(t, 21, 0), wantRefusal: "seat is closed", wantShown: true},
+		{name: "a label naming no seat refuses", beadID: "gt-1", pool: pool, labels: []string{"agent:claude-haiku"}, now: chicagoAt(t, 12, 0), wantRefusal: "has no seat in the pool", wantShown: true},
+		{name: "labels that disagree refuse", beadID: "gt-1", pool: pool, labels: []string{"agent:claude-sonnet", "agent:deepseek-flash"}, now: chicagoAt(t, 12, 0), wantRefusal: "conflicting", wantShown: true},
+		{name: "a bead that cannot be read refuses", beadID: "gt-1", pool: pool, showErr: readErr, now: chicagoAt(t, 12, 0), wantReadFail: true, wantShown: true},
+		{name: "settings that cannot be read refuse a labeled bead", beadID: "gt-1", pool: pool, settingsErr: readErr, labels: []string{"agent:deepseek-flash"}, now: chicagoAt(t, 12, 0), wantReadFail: true, wantShown: true},
+		{name: "settings that cannot be read leave an unlabeled bead alone", beadID: "gt-1", pool: pool, settingsErr: readErr, labels: []string{"gt:task"}, now: chicagoAt(t, 12, 0), wantShown: true},
+		{name: "settings and bead that cannot be read refuse", beadID: "gt-1", pool: pool, settingsErr: readErr, showErr: readErr, now: chicagoAt(t, 12, 0), wantReadFail: true, wantShown: true},
+		{name: "a missing bead refuses", beadID: "gt-1", pool: pool, nilIssue: true, now: chicagoAt(t, 12, 0), wantReadFail: true, wantShown: true},
+		{name: "no bead reads nothing", beadID: "", pool: pool, now: chicagoAt(t, 12, 0)},
+		{name: "a town with no pool never reads the bead", beadID: "gt-1", pool: nil, showErr: readErr, now: chicagoAt(t, 12, 0)},
+		{name: "a pool with no seats never reads the bead", beadID: "gt-1", pool: &config.PolecatPool{}, showErr: readErr, now: chicagoAt(t, 12, 0)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			shown := false
+			show := func(townRoot, beadID string) (*beads.Issue, error) {
+				shown = true
+				if townRoot != "/town" || beadID != tc.beadID {
+					t.Errorf("bead read for %q in %q, want %q in /town", beadID, townRoot, tc.beadID)
+				}
+				if tc.showErr != nil {
+					return nil, tc.showErr
+				}
+				if tc.nilIssue {
+					return nil, nil
+				}
+				return &beads.Issue{ID: beadID, Labels: tc.labels}, nil
+			}
+			settings := func(townRoot string) (*config.TownSettings, error) {
+				if tc.settingsErr != nil {
+					return nil, tc.settingsErr
+				}
+				return &config.TownSettings{PolecatPool: tc.pool}, nil
+			}
+
+			got, err := poolBeadAgentWith("/town", tc.beadID, tc.now, show, settings)
+			if got != tc.want {
+				t.Errorf("agent = %q, want %q", got, tc.want)
+			}
+			if shown != tc.wantShown {
+				t.Errorf("bead read = %v, want %v", shown, tc.wantShown)
+			}
+			switch {
+			case tc.wantReadFail:
+				if err == nil || (!tc.nilIssue && !errors.Is(err, readErr)) {
+					t.Fatalf("error = %v, want it to wrap the read failure", err)
+				}
+				if errors.Is(err, errPoolBackpressure) {
+					t.Errorf("a read failure is not a pool refusal: %v", err)
+				}
+			case tc.wantRefusal != "":
+				var refusal *poolBackpressureError
+				if !errors.As(err, &refusal) {
+					t.Fatalf("error = %v, want a pool refusal", err)
+				}
+				if !strings.Contains(refusal.Reason, tc.wantRefusal) {
+					t.Errorf("refusal reason = %q, want it to name %q", refusal.Reason, tc.wantRefusal)
+				}
+			case err != nil:
+				t.Errorf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+// The production wrapper reads the pool from the town's settings file: a town
+// with no settings file, or none with seats, never reads the bead, and settings
+// that cannot be parsed are an error for poolBeadAgentWith to weigh (gt-chnlz).
+func TestPoolBeadAgentReadsTheTownSettingsFile(t *testing.T) {
+	t.Parallel()
+	write := func(t *testing.T, contents string) string {
+		t.Helper()
+		town := t.TempDir()
+		path := config.TownSettingsPath(town)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return town
+	}
+
+	// A bead id with no database behind it: were the bead read, showBead
+	// would fail and the call would error, so "", nil proves it was not.
+	for name, town := range map[string]string{
+		"no settings file":      t.TempDir(),
+		"settings with no pool": write(t, `{"type":"town-settings","version":1}`),
+	} {
+		t.Run(name+" never reads the bead", func(t *testing.T) {
+			got, err := poolBeadAgent(town, "gt-unreadable")
+			if got != "" || err != nil {
+				t.Errorf("poolBeadAgent = %q, %v; want no agent and no error", got, err)
+			}
+		})
+	}
+
+	t.Run("a settings file with seats is read from the town", func(t *testing.T) {
+		town := write(t, `{"type":"town-settings","version":1,"polecat_pool":{"seats":{"claude-sonnet":{"cap":2}}}}`)
+		ts, err := poolTownSettings(town)
+		if err != nil {
+			t.Fatalf("poolTownSettings: %v", err)
+		}
+		if ts.PolecatPool == nil || ts.PolecatPool.Seats["claude-sonnet"].Cap != 2 {
+			t.Errorf("pool = %+v, want the seat the file declares", ts.PolecatPool)
+		}
+	})
+
+	t.Run("a settings file that cannot be parsed is an error", func(t *testing.T) {
+		if _, err := poolTownSettings(write(t, `{not json`)); err == nil {
+			t.Error("poolTownSettings read a corrupt settings file without error")
+		}
+	})
+}
+
+// A refusal stops the live spawn before the pool is asked for a seat or a
+// polecat is prepared, so nothing is claimed for a bead the sling refuses: a
+// label the pool cannot honor, and a label that cannot be read at all
+// (gt-chnlz).
+func TestSlingSeatSpawnRefusesABeadWhoseLabelCannotBeHonored(t *testing.T) {
+	t.Parallel()
+	readErr := errors.New("bd unreachable")
+	for _, tc := range []struct {
+		name    string
+		refusal error
+		pool    bool // a pool backpressure, not a plain read failure
+	}{
+		{"a closed or unseatable label", &poolBackpressureError{Reason: "pool: deepseek-flash's seat is closed until its window opens, and the bead is labeled for it -> no seat for it"}, true},
+		{"a label that cannot be read", fmt.Errorf("could not read gt-labeled for its agent: label: %w", readErr), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var resolved, prepared bool
+			s := slingSeatSpawn{
+				backpressure: func(string, string, SlingSpawnOptions) error { return nil },
+				pinnedAgent:  func(string, string) (string, error) { return "", tc.refusal },
+				resolvePool: func(string, string) (string, string, error) {
+					resolved = true
+					return "claude-sonnet", "", nil
+				},
+				releaseSeat: func() {},
+				prepare: func(string, string, SlingSpawnOptions) (*SpawnedPolecatInfo, error) {
+					prepared = true
+					return &SpawnedPolecatInfo{}, nil
+				},
+			}
+
+			info, err := s.spawn("/town", "gastown", SlingSpawnOptions{HookBead: "gt-labeled"})
+			if !errors.Is(err, tc.refusal) {
+				t.Fatalf("spawn error = %v, want the label's refusal %v", err, tc.refusal)
+			}
+			if got := errors.Is(err, errPoolBackpressure); got != tc.pool {
+				t.Errorf("spawn error is a pool backpressure = %v, want %v: %v", got, tc.pool, err)
+			}
+			if info != nil {
+				t.Errorf("spawn returned %+v for a refused sling, want none", info)
+			}
+			if resolved || prepared {
+				t.Errorf("a refused sling asked the pool for a seat = %v, prepared a polecat = %v; want neither", resolved, prepared)
+			}
+		})
+	}
+}
+
+// A dry-run sling prints a label's refusal as the live sling would raise it,
+// and does not peek the pool for a route the sling will not take: a label the
+// pool cannot honor, and a label that cannot be read at all (gt-chnlz).
+func TestResolveTarget_DryRunPrintsTheBeadLabelRefusal(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name    string
+		refusal error
+	}{
+		{"an unseatable label", &poolBackpressureError{Reason: "pool: pinned to claude-haiku, which has no seat in the pool -> no seat for the bead labeled for it"}},
+		{"a label that cannot be read", fmt.Errorf("could not read gt-new for its agent: label: %w", errors.New("bd unreachable"))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h := newSlingHarness(t)
+			h.run.pinnedAgent = func(string, string) (string, error) { return "", tc.refusal }
+			peeked := false
+			h.run.peekPool = func(string, string) (string, string, error) {
+				peeked = true
+				return "", "pool routes elsewhere", nil
+			}
+
+			if _, err := h.run.resolveSlingTarget("gastown", ResolveTargetOptions{
+				DryRun: true, NoBoot: true, TownRoot: slingTestTown, HookBead: "gt-new",
+			}); err != nil {
+				t.Fatalf("resolveTarget: %v", err)
+			}
+			if peeked {
+				t.Error("the pool was peeked for a bead whose label the sling refuses")
+			}
+			out := h.out.String()
+			if !strings.Contains(out, tc.refusal.Error()) {
+				t.Errorf("dry-run output lacks the label's refusal %q:\n%s", tc.refusal.Error(), out)
+			}
+			if strings.Contains(out, "pool routes elsewhere") {
+				t.Errorf("dry-run output shows a route for a refused bead:\n%s", out)
+			}
+		})
+	}
+}
