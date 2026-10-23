@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/beads"
 )
 
 func TestNewStaleAgentBeadsCheck(t *testing.T) {
@@ -102,6 +104,66 @@ func TestStaleAgentBeadsCheck_CrewOnDisk(t *testing.T) {
 	// The check should handle this and not crash
 	result := check.Run(ctx)
 	t.Logf("Stale agent beads check: status=%v, message=%s", result.Status, result.Message)
+}
+
+// TestStaleAgentBeadsUnreadablePolecatsDir verifies that a rig whose polecats
+// directory exists but cannot be read contributes no stale beads and closes
+// none. Before gt-9wiz3, listPolecats folded that error into "no polecats", so
+// the check and its fix closed the agent beads of live polecats.
+func TestStaleAgentBeadsUnreadablePolecatsDir(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "gastown", "mayor", "rig", ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	// A live polecat on disk, behind a directory the check cannot read.
+	polecatsDir := filepath.Join(tmpDir, "gastown", "polecats")
+	if err := os.MkdirAll(filepath.Join(polecatsDir, "nux", ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(polecatsDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	//testpolicy:allow no-exec-files — the target is the fixture directory: traversal needs its search bit back
+	t.Cleanup(func() { _ = os.Chmod(polecatsDir, 0o755) })
+
+	town := newDoctorTown()
+	town.db(filepath.Join(tmpDir, "gastown", "mayor", "rig")).Seed(beads.Issue{
+		ID:     "gt-gastown-polecat-nux",
+		Title:  "nux",
+		Type:   "agent",
+		Labels: []string{"gt:agent"},
+	})
+
+	check := NewStaleAgentBeadsCheck()
+	ctx := town.ctx(tmpDir, "")
+
+	result := check.Run(ctx)
+	for _, detail := range result.Details {
+		if detail == "gt-gastown-polecat-nux" {
+			t.Fatalf("unreadable polecats directory marked live polecat stale; details: %v", result.Details)
+		}
+	}
+	if result.Status == StatusOK {
+		t.Errorf("an unreadable polecats directory must be reported, got OK: %s", result.Message)
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+	if updates := town.updates(); len(updates) != 0 {
+		t.Errorf("Fix() closed beads for a rig it could not read: %v", updates)
+	}
 }
 
 // === Tests for Phase 2: Deregistered rig orphan detection ===
