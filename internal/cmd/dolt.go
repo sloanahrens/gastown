@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -677,20 +678,26 @@ func printBeadsRuntimeConfig(townRoot string) {
 	if !ok {
 		return
 	}
+	fmt.Printf("  Beads client: %s\n", beadsClientSummary(cfg))
+	if hint := beadsScopeHint(cfg.Database, townRoot); hint != "" {
+		fmt.Print(hint)
+	}
+}
+
+// beadsClientSummary is the "Beads client" status line. The endpoint is
+// joined with net.JoinHostPort so an IPv6 host prints bracketed ([::1]:3307).
+func beadsClientSummary(cfg doltserver.BeadsRuntimeConfig) string {
 	parts := []string{"server metadata"}
 	if cfg.Database != "" {
 		parts = append(parts, "database "+cfg.Database)
 	}
 	if cfg.Host != "" && cfg.Port > 0 {
-		parts = append(parts, netJoinHostPort(cfg.Host, cfg.Port))
+		parts = append(parts, net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)))
 	}
 	if cfg.Source != "" {
 		parts = append(parts, "from "+cfg.Source)
 	}
-	fmt.Printf("  Beads client: %s\n", strings.Join(parts, ", "))
-	if hint := beadsScopeHint(cfg.Database, townRoot); hint != "" {
-		fmt.Print(hint)
-	}
+	return strings.Join(parts, ", ")
 }
 
 func beadsScopeHint(database, townRoot string) string {
@@ -699,10 +706,6 @@ func beadsScopeHint(database, townRoot string) string {
 	}
 
 	return fmt.Sprintf("    Gas Town town beads use database hq. Use `bd -C %s <cmd>` for hq-* beads; do not use `bd --global`, which targets Beads' beads_global database.\n", gtconfig.ShellQuote(townRoot))
-}
-
-func netJoinHostPort(host string, port int) string {
-	return host + ":" + strconv.Itoa(port)
 }
 
 func runDoltLogs(cmd *cobra.Command, args []string) error {
