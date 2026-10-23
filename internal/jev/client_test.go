@@ -296,6 +296,49 @@ func TestChoice_BadResponses(t *testing.T) {
 	}
 }
 
+// TestChoice_RoundedProbabilitiesParse gets answers whose probabilities sum to
+// within Jev's two-decimal rounding, and keeps the probabilities as Jev sent
+// them.
+func TestChoice_RoundedProbabilitiesParse(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name          string
+		body          string
+		choice        string
+		probabilities map[string]float64
+	}{
+		{"each of three rounded to a third sums to 0.99", `{"answers":{"q":{"type":"choice","choice":"returns","probabilities":{"billing":0.33,"returns":0.33,"shipping":0.33},"confidence":1}}}`,
+			"returns", map[string]float64{"billing": 0.33, "returns": 0.33, "shipping": 0.33}},
+		{"chosen option 0.01 below the highest is a tie", `{"answers":{"q":{"type":"choice","choice":"billing","probabilities":{"billing":0.49,"returns":0.5,"shipping":0.01},"confidence":1}}}`,
+			"billing", map[string]float64{"billing": 0.49, "returns": 0.5, "shipping": 0.01}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			c := newTestClient(t, &respond{body: tt.body})
+
+			got, err := c.Choice(context.Background(), "s", "q?", shoeCriteria)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.choice, got.Choice)
+			assert.Equal(t, tt.probabilities, got.Probabilities)
+		})
+	}
+}
+
+// TestAsk_RoundedScoreProbabilitiesParse gets a score answer whose level
+// probabilities sum to within Jev's two-decimal rounding of one per level.
+func TestAsk_RoundedScoreProbabilitiesParse(t *testing.T) {
+	t.Parallel()
+	score := Question{Type: typeScore, Levels: []string{"low", "mid", "high"}}
+	c := newTestClient(t, &respond{body: `{"answers":{"q":{"type":"score","score":1,"confidence":0.5,"probabilities":{"low":0.33,"mid":0.33,"high":0.33},"legend":{"low":"a","mid":"b","high":"c"}}}}`})
+
+	got, err := c.Ask(context.Background(), shoeState, map[string]Question{questionID: score})
+
+	require.NoError(t, err)
+	assert.Equal(t, map[string]float64{"low": 0.33, "mid": 0.33, "high": 0.33}, got.Score[questionID].Probabilities)
+}
+
 func TestAskRecordsUsageOnBadAnswer(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "usage.jsonl")

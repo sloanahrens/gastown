@@ -52,9 +52,17 @@ const (
 	// maxMessage caps the server error text carried in a StatusError.
 	maxMessage = 200
 
-	// probabilityTolerance absorbs decimal rounding in the sum of a response's
-	// probabilities, which JSON may deliver as 0.9999999999999999.
+	// probabilityTolerance absorbs floating-point error in the sum of a
+	// response's probabilities, which JSON may deliver as 0.9999999999999999.
 	probabilityTolerance = 1e-6
+
+	// roundingPerOption is how far one probability may sit from its true value
+	// when Jev rounds it to two decimals: half of the last place.
+	roundingPerOption = 0.005
+
+	// mostProbableSlack is how far below the highest probability the chosen
+	// option may sit and still count as a tie after rounding.
+	mostProbableSlack = 0.01
 )
 
 // Client asks Choice questions of one Jev endpoint.
@@ -447,8 +455,8 @@ func answerErr(id string, asked int, bad *BadResponse) error {
 }
 
 // parseChoiceAnswer returns a choice answer that names one of options, whose
-// probabilities cover exactly those options and sum to 1, and whose named
-// option is the most probable.
+// probabilities cover exactly those options and sum to 1 within rounding, and
+// whose named option is the most probable or ties it after rounding.
 func parseChoiceAnswer(a answer, options map[string]string) (ChoiceAnswer, *BadResponse) {
 	if _, ok := options[a.Choice]; !ok {
 		return ChoiceAnswer{}, unusable(CheckChoiceNotAnOption, nil, "choice %q is not an option asked", a.Choice)
@@ -460,7 +468,7 @@ func parseChoiceAnswer(a answer, options map[string]string) (ChoiceAnswer, *BadR
 	if bad := checkProbabilities(a.Probabilities, options); bad != nil {
 		return ChoiceAnswer{}, bad
 	}
-	if a.Probabilities[a.Choice] < highest(a.Probabilities) {
+	if highest(a.Probabilities)-a.Probabilities[a.Choice] > mostProbableSlack+probabilityTolerance {
 		return ChoiceAnswer{}, unusable(CheckNotMostProbable, nil, "choice %q is not the most probable option", a.Choice)
 	}
 	return ChoiceAnswer{
@@ -496,7 +504,7 @@ func parseScoreAnswer(a answer, levels int) (ScoreAnswer, *BadResponse) {
 			return ScoreAnswer{}, unusable(CheckLegendUnknownLabel, nil, "legend label %q has no probability", label)
 		}
 	}
-	if bad := checkSum(a.Probabilities); bad != nil {
+	if bad := checkSum(a.Probabilities, levels); bad != nil {
 		return ScoreAnswer{}, bad
 	}
 	return ScoreAnswer{
@@ -508,7 +516,7 @@ func parseScoreAnswer(a answer, levels int) (ScoreAnswer, *BadResponse) {
 }
 
 // checkProbabilities checks that probabilities name every option asked and no
-// other, each within 0 to 1, and sum to 1.
+// other, each within 0 to 1, and sum to 1 within rounding.
 func checkProbabilities(probabilities map[string]float64, criteria map[string]string) *BadResponse {
 	if len(probabilities) != len(criteria) {
 		return unusable(CheckProbabilitiesCount, nil, "probabilities cover %d options, %d were asked", len(probabilities), len(criteria))
@@ -518,11 +526,12 @@ func checkProbabilities(probabilities map[string]float64, criteria map[string]st
 			return unusable(CheckProbabilitiesUnknownOption, nil, "probability for %q, which was not asked", name)
 		}
 	}
-	return checkSum(probabilities)
+	return checkSum(probabilities, len(criteria))
 }
 
-// checkSum checks that each probability is within 0 to 1 and the total is 1.
-func checkSum(probabilities map[string]float64) *BadResponse {
+// checkSum checks that each probability is within 0 to 1 and the total is 1,
+// allowing each of the count options its share of Jev's two-decimal rounding.
+func checkSum(probabilities map[string]float64, count int) *BadResponse {
 	if len(probabilities) == 0 {
 		return unusable(CheckProbabilitiesCount, nil, "no probabilities")
 	}
@@ -533,7 +542,7 @@ func checkSum(probabilities map[string]float64) *BadResponse {
 		}
 		sum += p
 	}
-	if math.Abs(sum-1) > probabilityTolerance {
+	if math.Abs(sum-1) > float64(count)*roundingPerOption+probabilityTolerance {
 		return unusable(CheckProbabilitiesSum, &sum, "probabilities sum to %v, not 1", sum)
 	}
 	return nil
