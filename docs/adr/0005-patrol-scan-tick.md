@@ -44,6 +44,12 @@ We decided that the daemon runs a `patrol_scan` tick (`internal/patrolscan`, hos
   session, the `last_source_issue` bead closed, and a live probe of the worktree showing it clean,
   stashless and with nothing unpushed (gt-fn9e6.33). A seat whose conditions cannot all be
   measured is left alone.
+- **Stalled seats.** A seat the liveness function finds Stalled — alive, but with no progress
+  evidence for the stall threshold — is reported and never nudged or restarted while it holds
+  work that is not over. A seat stalled on a bead that is closed or tombstoned, or on none, has
+  nothing left to progress on: its record is retired to `stop` and the supervisor stops the
+  session, as the idle path retires a dead one, so a landed bead stops pinning a live session
+  and its seat (gt-9p99w). A work bead that cannot be read is Unknown, and nothing is stopped.
 - **Orphaned molecules.** For hooked work whose polecat has neither a session nor a directory,
   the bonded `mol-polecat-work` root and its step wisps are force-closed, read with
   `bd show --children` so ephemeral steps are seen (gt-22hdp.36).
@@ -71,8 +77,9 @@ sends mail; the operator hears from it through `gt escalate` (budget exhaustion,
 
 ## What was dropped and why
 
-Anything that needed judgement is gone, not ported. Stalled seats are logged, not nudged or
-restarted, until the stall threshold is measured (ADR 0003 item 7). Dirty-worktree recovery is
+Anything that needed judgement is gone, not ported. A stalled seat is never nudged or restarted
+until the stall threshold is measured (ADR 0003 item 7); a stall on work that is already over
+only releases the seat (gt-9p99w). Dirty-worktree recovery is
 dropped because it meant an LLM authoring commits in another agent's worktree. The restart keeps
 the worktree. Resetting an orphaned bead with no branch recorded is still not done — git cannot
 tell work that landed under another bead from work never started — so the bead is released only
