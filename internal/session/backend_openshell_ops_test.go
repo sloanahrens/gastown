@@ -3,10 +3,12 @@ package session
 import (
 	"errors"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jonboulle/clockwork"
+	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/sandbox"
 	"github.com/steveyegge/gastown/internal/tmux/tmuxfake"
@@ -156,20 +158,28 @@ func TestOpenShellOpsProgressSampleWithoutATranscriptIsStillAnswered(t *testing.
 	}
 }
 
-func TestOpenShellOpsProgressSampleTranscriptReadFailureIsMissingEvidence(t *testing.T) {
+func TestOpenShellOpsProgressSampleTranscriptReadFailureIsUnknown(t *testing.T) {
 	t.Parallel()
-	// The probe answers; only the transcript read fails, which is evidence
-	// missing, not a verdict.
+	// The probe answers, but the exec that reads the transcript does not: the
+	// sandbox could not be asked, which is not the same as asking and finding
+	// no transcript.
 	fake := &sandbox.Fake{
 		Err:    map[string]error{"exec": errors.New("exit status 1")},
 		Stderr: map[string]string{"exec": "gateway unreachable"},
 	}
 	b, _ := opsBackend(t, fake, newSandboxProbe(t, true))
+	prev := &intent.Progress{SampledAt: time.Unix(1760000100, 0), PaneHash: "pane"}
 
-	res := b.ProgressSample(openshellTestSession, liveness.Input{Now: time.Unix(1760000200, 0)})
+	res := b.ProgressSample(openshellTestSession, liveness.Input{Now: time.Unix(1760000200, 0), Prev: prev})
 
-	if res.Verdict != liveness.Alive || res.Sample == nil || res.Sample.TranscriptPath != "" {
-		t.Fatalf("result = %v %+v, want alive with no transcript evidence", res.Verdict, res.Sample)
+	if res.Verdict != liveness.Unknown {
+		t.Fatalf("verdict = %v (%s), want unknown", res.Verdict, res.Reason)
+	}
+	if res.Err == nil || !strings.Contains(res.Err.Error(), "gateway unreachable") {
+		t.Fatalf("err = %v, want the failed exec", res.Err)
+	}
+	if res.Sample != prev {
+		t.Fatalf("sample = %+v, want the previous sample unchanged", res.Sample)
 	}
 }
 
@@ -292,10 +302,58 @@ func TestOpenShellOpsDeleteFailureKeepsTheRecord(t *testing.T) {
 	}
 }
 
-func TestOpenShellOpsHooksAreInstalled(t *testing.T) {
+func TestOpenShellOpsHooksAreWiredToTheRecordBackend(t *testing.T) {
 	t.Parallel()
+	// A nil check passes for a hook pointed at anything, so compare the
+	// installed function with the one this file documents the hook as.
 	if SandboxDeleter == nil || SandboxLiveness == nil {
 		t.Fatalf("hooks not installed: deleter nil=%v, liveness nil=%v", SandboxDeleter == nil, SandboxLiveness == nil)
+	}
+	if got, want := reflect.ValueOf(SandboxDeleter).Pointer(), reflect.ValueOf(deleteSandboxRecord).Pointer(); got != want {
+		t.Errorf("SandboxDeleter = %#x, want deleteSandboxRecord %#x", got, want)
+	}
+	if got, want := reflect.ValueOf(SandboxLiveness).Pointer(), reflect.ValueOf(sampleSandboxRecord).Pointer(); got != want {
+		t.Errorf("SandboxLiveness = %#x, want sampleSandboxRecord %#x", got, want)
+	}
+}
+
+func TestOpenShellOpsRecordBackendCarriesTheRecord(t *testing.T) {
+	t.Parallel()
+	rec := SandboxRecord{Session: openshellTestSession, Gateway: "gw", Profile: "p", Image: "img"}
+
+	b := recordBackend("/town", rec)
+
+	if b.townRoot != "/town" || b.cli.Gateway != "gw" {
+		t.Fatalf("backend = town %q gateway %q, want /town and gw", b.townRoot, b.cli.Gateway)
+	}
+	want := Profile{Name: "p", Gateway: "gw", Image: "img"}
+	if !reflect.DeepEqual(b.profile, want) {
+		t.Fatalf("profile = %+v, want %+v", b.profile, want)
+	}
+}
+
+func TestOpenShellOpsIsSandboxNotFound(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil},
+		{name: "get names the sandbox", err: errors.New(`openshell sandbox get: exit status 1: Error: sandbox not found: gt-gastown-sandbox-ace`), want: true},
+		{name: "delete quotes the sandbox", err: errors.New(`openshell sandbox delete: exit status 1: sandbox "gt-gastown-sandbox-ace" not found`), want: true},
+		{name: "gateway not found", err: errors.New(`openshell sandbox get: exit status 1: Error: gateway "openshell" not found`)},
+		{name: "profile not found", err: errors.New(`openshell sandbox create: exit status 1: Error: profile not found: polecat-default`)},
+		{name: "host not found", err: errors.New(`openshell sandbox exec: exit status 1: lookup host.docker.internal: no such host`)},
+		{name: "unrelated not found", err: errors.New(`openshell sandbox exec: exit status 1: sh: 1: /sandbox/bin: not found`)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isSandboxNotFound(tt.err); got != tt.want {
+				t.Fatalf("isSandboxNotFound(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
 

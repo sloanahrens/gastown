@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -13,12 +14,20 @@ import (
 )
 
 func init() {
-	SandboxDeleter = func(townRoot string, rec SandboxRecord) error {
-		return recordBackend(townRoot, rec).deleteSandbox(rec.Session)
-	}
-	SandboxLiveness = func(townRoot string, rec SandboxRecord, in liveness.Input) liveness.Result {
-		return recordBackend(townRoot, rec).ProgressSample(rec.Session, in)
-	}
+	SandboxDeleter = deleteSandboxRecord
+	SandboxLiveness = sampleSandboxRecord
+}
+
+// deleteSandboxRecord is SandboxDeleter: the sandbox a registry record names,
+// deleted from the record alone so cleanup and the daemon need no Prepare.
+func deleteSandboxRecord(townRoot string, rec SandboxRecord) error {
+	return recordBackend(townRoot, rec).deleteSandbox(rec.Session)
+}
+
+// sampleSandboxRecord is SandboxLiveness: the record's seat assessed where its
+// sandbox runs.
+func sampleSandboxRecord(townRoot string, rec SandboxRecord, in liveness.Input) liveness.Result {
+	return recordBackend(townRoot, rec).ProgressSample(rec.Session, in)
 }
 
 // transcriptTimeout bounds the exec that reads the sandbox's transcript.
@@ -71,12 +80,23 @@ func (b *openshellBackend) ProgressSample(session string, in liveness.Input) liv
 	if in.Session == "" {
 		in.Session = session
 	}
+	readErr := error(nil)
 	if in.Transcript == nil {
 		in.Transcript = func(string) (string, time.Time, int64, error) {
-			return b.transcript(session)
+			path, mtime, size, err := b.transcript(session)
+			readErr = err
+			return path, mtime, size, err
 		}
 	}
-	return liveness.Assess(b.probeFor(session), in)
+	res := liveness.Assess(b.probeFor(session), in)
+	// Assess reads any Transcript error as evidence it could not collect, which
+	// answers alive. For this backend that error is its own exec: an unreachable
+	// sandbox would be reported alive with no evidence rather than as a
+	// question it could not answer (om 63998d067063).
+	if readErr != nil && res.Verdict == liveness.Alive {
+		return liveness.Result{Verdict: liveness.Unknown, Reason: "transcript query failed", Err: readErr, Sample: in.Prev}
+	}
+	return res
 }
 
 // transcript is the newest transcript's path, mtime and size inside the
@@ -138,12 +158,15 @@ func (b *openshellBackend) deleteSandbox(session string) error {
 	return nil
 }
 
-// isSandboxNotFound matches openshell's missing-sandbox failure, which the
-// CLI wrapper carries as the command's stderr. A nil error is not one.
+// sandboxNotFound matches the two missing-sandbox messages openshell prints,
+// which the CLI wrapper carries in the wrapped error: `sandbox not found:
+// <name>` from get and `sandbox "<name>" not found` from delete.
+var sandboxNotFound = regexp.MustCompile(`\bsandbox (?:not found\b|"[^"\n]*" not found\b)`)
+
+// isSandboxNotFound reports whether err is openshell's missing-sandbox failure.
+// A gateway, host or profile that is not found stays an error: those leave the
+// sandbox in place, so reading them as gone would drop its record and report a
+// delete that did not happen (om 1dc191fba3ee).
 func isSandboxNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "not found") || strings.Contains(msg, "notfound")
+	return err != nil && sandboxNotFound.MatchString(strings.ToLower(err.Error()))
 }
