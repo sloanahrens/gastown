@@ -28,7 +28,8 @@ Blocked, in any chain, launcher, shell -c payload, eval or command substitution:
   - git credential fill, and the git credential helper run directly
   - a python/node/ruby/perl/awk one-liner that reads the whole environment, a
     secret-like variable, or a credential file, or passes a shell command that
-    prints the environment to a shell-out such as os.system or child_process
+    prints the environment to a shell-out such as os.system or child_process;
+    also when run through uv run, uv tool run, uvx, npx or pipx run
   - jq whose filter is env or $ENV
 
 Exit codes:
@@ -270,6 +271,13 @@ func sandboxSecretsSegment(segment []string) (reason string, payloads, argv []st
 		name := strings.ToLower(filepath.Base(word))
 		launcher, ok := prWorkflowLaunchers[name]
 		if !ok {
+			if inner, payload, runs := sandboxSecretsPackageRunner(name, seg[1:]); runs {
+				if payload != "" {
+					payloads = append(payloads, payload)
+				}
+				seg = inner
+				continue
+			}
 			return sandboxSecretsInvocation(seg), payloads, seg
 		}
 		if name == "env" && sandboxSecretsEnvWouldPrint(seg[1:]) {
@@ -282,6 +290,113 @@ func sandboxSecretsSegment(segment []string) (reason string, payloads, argv []st
 		}
 	}
 	return "", payloads, nil
+}
+
+// sandboxSecretsRunnerValueFlags are the flags of uv, npx and pipx run whose value is
+// the next word, so the value is not taken for the command they run. A flag
+// missing here is read as a switch: its value then stands in for the command
+// and the guard misses the interpreter behind it, so the list errs long.
+var sandboxSecretsRunnerValueFlags = map[string]bool{
+	// uv, uv run, uv tool run and uvx
+	"--with": true, "--with-editable": true, "--with-requirements": true, "--from": true,
+	"--python": true, "-p": true, "--project": true, "--directory": true, "--env-file": true,
+	"--package": true, "--extra": true, "--group": true, "--no-group": true, "--only-group": true,
+	"--index": true, "--default-index": true, "--index-url": true, "-i": true,
+	"--extra-index-url": true, "--find-links": true, "-f": true, "--index-strategy": true,
+	"--keyring-provider": true, "--config-file": true, "--cache-dir": true, "--color": true,
+	"--python-preference": true, "--python-fetch": true, "--refresh-package": true,
+	"--reinstall-package": true, "--upgrade-package": true, "-P": true, "--exclude-newer": true,
+	"--link-mode": true, "--resolution": true, "--prerelease": true, "--fork-strategy": true,
+	"--constraints": true, "-c": true, "--overrides": true, "--build-constraints": true,
+	// npx (-p and --package share the uv spelling above)
+	"--registry": true, "--cache": true, "--userconfig": true, "--prefix": true,
+	"-w": true, "--workspace": true, "--shell": true,
+	// pipx run
+	"--spec": true, "--pip-args": true,
+}
+
+// sandboxSecretsRunnerPayloadFlags are the flags whose value is a command line
+// the shell runs: npx -c 'env'. Only npx reads them so; uv's -c is
+// --constraints, a value flag whose value is a file.
+var sandboxSecretsRunnerPayloadFlags = map[string]bool{"-c": true, "--call": true}
+
+// sandboxSecretsPackageRunner looks through the package runners that start the
+// command behind them, uv run, uv tool run, uvx, npx and pipx run, as
+// skipLauncherArgs does for a launcher. runs is false when the word is not a
+// runner or its subcommand runs nothing (uv pip install). inner is the command
+// the runner starts, from its name on; payload is the command line npx -c
+// hands to a shell.
+func sandboxSecretsPackageRunner(name string, args []string) (inner []string, payload string, runs bool) {
+	var rest []string
+	switch name {
+	case "uv":
+		rest, _ = sandboxSecretsSkipRunnerFlags(args, false)
+		if len(rest) > 0 && rest[0] == "tool" {
+			rest, _ = sandboxSecretsSkipRunnerFlags(rest[1:], false)
+		}
+		if len(rest) == 0 || rest[0] != "run" {
+			return nil, "", false
+		}
+		rest, _ = sandboxSecretsSkipRunnerFlags(rest[1:], false)
+	case "uvx":
+		rest, _ = sandboxSecretsSkipRunnerFlags(args, false)
+	case "npx":
+		rest, payload = sandboxSecretsSkipRunnerFlags(args, true)
+	case "pipx":
+		rest, _ = sandboxSecretsSkipRunnerFlags(args, false)
+		if len(rest) == 0 || rest[0] != "run" {
+			return nil, "", false
+		}
+		rest, _ = sandboxSecretsSkipRunnerFlags(rest[1:], false)
+	default:
+		return nil, "", false
+	}
+	if len(rest) == 0 {
+		return nil, payload, true
+	}
+	// npx node@20, uvx ruff@latest and pipx run black==24.1 name a version after the command.
+	cmd := rest[0]
+	if i := strings.Index(cmd, "=="); i > 0 {
+		cmd = cmd[:i]
+	}
+	if i := strings.LastIndex(cmd, "@"); i > 0 {
+		cmd = cmd[:i]
+	}
+	return append([]string{cmd}, rest[1:]...), payload, true
+}
+
+// sandboxSecretsSkipRunnerFlags drops the flags a package runner takes ahead of
+// the command it starts and returns the words from that command on; "--" ends
+// the flags. With npx set, the value of -c or --call comes back as payload.
+func sandboxSecretsSkipRunnerFlags(args []string, npx bool) (rest []string, payload string) {
+	i := 0
+	for i < len(args) {
+		a := args[i]
+		if a == "--" {
+			i++
+			break
+		}
+		if len(a) < 2 || a[0] != '-' {
+			break
+		}
+		flag, value, hasValue := strings.Cut(a, "=")
+		switch {
+		case npx && sandboxSecretsRunnerPayloadFlags[flag] && hasValue:
+			payload = value
+		case npx && sandboxSecretsRunnerPayloadFlags[a]:
+			if i+1 < len(args) {
+				payload = args[i+1]
+			}
+			i++
+		case sandboxSecretsRunnerValueFlags[a]:
+			i++
+		}
+		i++
+	}
+	if i > len(args) {
+		i = len(args)
+	}
+	return args[i:], payload
 }
 
 func sandboxSecretsInvocation(argv []string) string {
