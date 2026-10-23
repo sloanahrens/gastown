@@ -20,6 +20,8 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"gopkg.in/yaml.v3"
+
+	configpkg "github.com/steveyegge/gastown/internal/config"
 )
 
 // =============================================================================
@@ -5963,6 +5965,59 @@ func TestProbeDSNsCarryPassword(t *testing.T) {
 					t.Errorf("%s DSN = user %q password %q net %q addr %q, want user root password %q net tcp addr %q",
 						name, parsed.User, parsed.Passwd, parsed.Net, parsed.Addr, tc.wantPassword, wantAddr)
 				}
+			}
+		})
+	}
+}
+
+// An IPv6 Dolt host has to reach the driver bracketed. Written unbracketed
+// ("tcp(::1:3307)") every colon reads as a separator and the dial fails with
+// "too many colons", so all three probes reported an unreachable server on an
+// IPv6 town. The driver's own parser is the oracle: a DSN that only looks
+// right in the format string would still fail to dial (gt-1bpr8).
+func TestProbeDSNsBracketIPv6Host(t *testing.T) {
+	t.Parallel()
+	const wantAddr = "[::1]:3307"
+	townRoot := t.TempDir()
+	errOpen := errors.New("open refused")
+	probes := []struct {
+		name string
+		run  func(h *host, config *Config)
+	}{
+		{"MeasureQueryLatency", func(h *host, _ *Config) {
+			_, _ = h.MeasureQueryLatency(townRoot)
+		}},
+		{"GetLastCommitAge", func(h *host, _ *Config) {
+			_, _, _ = h.GetLastCommitAge(townRoot)
+		}},
+		{"drainConnectionsBeforeStop", func(h *host, config *Config) {
+			h.drainConnectionsBeforeStop(config)
+		}},
+	}
+	for _, probe := range probes {
+		t.Run(probe.name, func(t *testing.T) {
+			t.Parallel()
+			h := newFakeHost().host()
+			h.doltEndpoint = func(string) (configpkg.DoltEndpoint, bool) {
+				return configpkg.DoltEndpoint{Host: "::1", Port: 3307}, true
+			}
+			var got []string
+			h.openDB = func(dsn string) (*sql.DB, error) {
+				got = append(got, dsn)
+				return nil, errOpen
+			}
+
+			probe.run(h, h.DefaultConfig(townRoot))
+
+			if len(got) != 1 {
+				t.Fatalf("opened %q, want exactly one DSN", got)
+			}
+			parsed, err := mysql.ParseDSN(got[0])
+			if err != nil {
+				t.Fatalf("DSN %q does not parse: %v", got[0], err)
+			}
+			if parsed.Net != "tcp" || parsed.Addr != wantAddr {
+				t.Errorf("DSN %q = net %q addr %q, want net tcp addr %q", got[0], parsed.Net, parsed.Addr, wantAddr)
 			}
 		})
 	}
