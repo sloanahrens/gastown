@@ -123,3 +123,20 @@ func TestRefuseUncheckedCriteriaSharesTheLandingCounter(t *testing.T) {
 		t.Errorf("nil issue refused: %v", err)
 	}
 }
+
+// TestRefuseUncheckedCriteriaReadsDescriptionSection: a bead the spec
+// dispatcher shaped carries its criteria in the description's "## Acceptance"
+// section with the field empty; the refusal reads that section like the
+// landing worker does.
+func TestRefuseUncheckedCriteriaReadsDescriptionSection(t *testing.T) {
+	t.Parallel()
+	issue := &beads.Issue{AcceptanceCriteria: "", Description: "## Goal\nx\n\n## Acceptance\n- [ ] x"}
+	err := refuseUncheckedCriteria("bd-x", issue)
+	if err == nil || !strings.Contains(err.Error(), "- [ ] x") {
+		t.Fatalf("refuseUncheckedCriteria = %v, want a refusal naming the unchecked line", err)
+	}
+	issue.Description = "## Acceptance\n- [x] x"
+	if err := refuseUncheckedCriteria("bd-x", issue); err != nil {
+		t.Errorf("ticked section refused: %v", err)
+	}
+}
