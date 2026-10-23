@@ -108,7 +108,7 @@ func (n *Town) muted(address string) string {
 	if d.TownRoot == "" || d.Force || address == "" {
 		return ""
 	}
-	beadID := AgentBeadID(n.registry(), address)
+	beadID := beads.AgentBeadIDForAddress(n.registry().PrefixForRig, address)
 	if beadID == "" {
 		return ""
 	}
@@ -364,29 +364,6 @@ func SessionAddress(reg *session.PrefixRegistry, sessionName string) string {
 	default:
 		return ""
 	}
-}
-
-// AgentBeadID converts a nudge target address to the agent bead whose
-// notification level gates it ("" when the address names none).
-// Examples:
-//   - "gastown/alpha" -> "gt-alpha"
-func AgentBeadID(reg *session.PrefixRegistry, address string) string {
-	if strings.HasPrefix(address, constants.DirMayor+"/") || strings.HasPrefix(address, "deacon/") {
-		return ""
-	}
-
-	rig, role, ok := strings.Cut(address, "/")
-	if !ok {
-		return ""
-	}
-	if strings.HasPrefix(role, "crew/") {
-		return session.CrewSessionName(reg.PrefixForRig(rig), strings.TrimPrefix(role, "crew/"))
-	}
-	if strings.HasPrefix(role, "polecats/") {
-		return session.PolecatSessionName(reg.PrefixForRig(rig), strings.TrimPrefix(role, "polecats/"))
-	}
-	// Assume polecat
-	return session.PolecatSessionName(reg.PrefixForRig(rig), role)
 }
 
 // Sender is who `gt nudge` attributes a nudge to when it runs in cwd, inside
