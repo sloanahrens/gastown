@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -227,6 +228,58 @@ func TestStaleAgentBeadsUnlistableCrewPath(t *testing.T) {
 	}
 	if updates := town.updates(); len(updates) != 0 {
 		t.Errorf("Fix() closed beads for a rig it could not read: %v", updates)
+	}
+}
+
+// TestStaleAgentBeadsUnlistableRigCountsRigs verifies that the "not checked"
+// count names rigs, not read errors. A rig whose crew and polecats directories
+// are both unreadable is one skipped rig, and the message must say so.
+func TestStaleAgentBeadsUnlistableRigCountsRigs(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n" +
+		`{"prefix":"bd-","path":"beads/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, rig := range []string{"gastown", "beads"} {
+		if err := os.MkdirAll(filepath.Join(tmpDir, rig, "mayor", "rig", ".beads"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// gastown: both worker directories unreadable, so it is one skipped rig.
+	unlistablePath(t, filepath.Join(tmpDir, "gastown", "crew"))
+	unlistablePath(t, filepath.Join(tmpDir, "gastown", "polecats"))
+
+	// beads: readable and empty, with one agent bead for a removed crew
+	// member, so the check reports a stale bead alongside the skipped rig.
+	if err := os.MkdirAll(filepath.Join(tmpDir, "beads", "crew"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	town := newDoctorTown()
+	town.db(filepath.Join(tmpDir, "beads", "mayor", "rig")).Seed(beads.Issue{
+		ID:     "bd-beads-crew-ghost",
+		Title:  "ghost",
+		Type:   "agent",
+		Labels: []string{"gt:agent"},
+	})
+
+	check := NewStaleAgentBeadsCheck()
+	result := check.Run(town.ctx(tmpDir, ""))
+
+	if len(result.Details) != 1 || result.Details[0] != "bd-beads-crew-ghost" {
+		t.Fatalf("expected only the removed crew bead as stale, got details: %v", result.Details)
+	}
+	want := "1 stale agent bead(s) for removed workers; 1 rig(s) not checked"
+	if !strings.HasPrefix(result.Message, want) {
+		t.Errorf("message = %q, want prefix %q: two unreadable directories in one rig are one rig", result.Message, want)
 	}
 }
 
