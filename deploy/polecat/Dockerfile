@@ -1,63 +1,84 @@
-# Gas Town polecat image for OpenShell sandboxes (claude-q3f.1, phase 0).
+# Gas Town polecat image for OpenShell sandboxes.
 #
-# Build (from the repo root, after `make polecat-bins`):
-#   docker build -t gastown-polecat:dev -f deploy/polecat/Dockerfile deploy/polecat
+# Build: `make polecat-image` (cross-compiles gt and bd into bin/, then runs
+# docker build on this directory and tags gastown-polecat:<short sha> and :dev).
 #
 # The image carries the Claude Code CLI, the Go toolchain and git, plus the
-# town's own `gt` and `bd` binaries cross-compiled for linux/arm64 into
-# deploy/polecat/bin/. OpenShell ignores ENTRYPOINT/CMD: the sandbox runtime
-# starts the main process given on `openshell sandbox create -- ...`.
+# town's own `gt` and `bd` binaries from bin/. OpenShell ignores ENTRYPOINT and
+# CMD: the sandbox runtime starts the main process given on
+# `openshell sandbox create -- ...`.
+#
+# Every download is pinned to a version and checked against a digest recorded
+# here. Update a digest only together with the version it belongs to.
+
 # GNU Make 4.4.1 built from source: Ubuntu's Make 4.3 fails inside OpenShell
 # sandboxes because its recipe child calls setresuid/setresgid with unchanged
 # ids, which the sandbox seccomp filter denies (NVIDIA/OpenShell#4102). 4.4.1
 # does not make that call.
 FROM ubuntu:24.04 AS make-build
 ARG MAKE_VERSION=4.4.1
+# sha256 of make-4.4.1.tar.gz as fetched from ftp.gnu.org on 2026-10-22.
+ARG MAKE_SHA256=dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
-    && cd /tmp && curl -fsSL "https://ftp.gnu.org/gnu/make/make-${MAKE_VERSION}.tar.gz" | tar xz \
+    && cd /tmp && curl -fsSL -o make.tar.gz "https://ftp.gnu.org/gnu/make/make-${MAKE_VERSION}.tar.gz" \
+    && echo "${MAKE_SHA256}  make.tar.gz" | sha256sum -c - \
+    && tar xzf make.tar.gz \
     && cd "make-${MAKE_VERSION}" && ./configure --prefix=/usr/local >/dev/null && make -j4 >/dev/null \
     && cp make /usr/local/bin/make
 
 FROM ubuntu:24.04
 
 ARG GO_VERSION=1.26.2
+# sha256 from https://go.dev/dl/?mode=json for go1.26.2.linux-arm64.tar.gz.
+ARG GO_SHA256_ARM64=c958a1fe1b361391db163a485e21f5f228142d6f8b584f6bef89b26f66dc5b23
+ARG GO_SHA256_AMD64=990e6b4bbba816dc3ee129eaeaf4b42f17c2800b88a2166c265ac1a200262282
 ARG NODE_MAJOR=22
-ARG CLAUDE_CODE_VERSION=latest
+ARG NODE_VERSION=22.23.4-1nodesource1
+# sha256 of https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key on 2026-10-22.
+ARG NODESOURCE_KEYFILE_DIGEST=b42e0321dabdc24e892115da705cf061167eac12a317f23d329862d0aa0a271d
+ARG CLAUDE_CODE_VERSION=2.1.309
+ARG GOLANGCI_LINT_VERSION=v2.13.2
 
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential ca-certificates curl git gnupg jq make openssh-client \
+    build-essential ca-certificates curl git gnupg jq openssh-client \
     ripgrep unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
-# Node.js (NodeSource) and the Claude Code CLI as a global npm package.
+# Node.js from NodeSource (signing key checked by digest, package version
+# pinned) and the Claude Code CLI at a pinned version (npm verifies the
+# registry's integrity hash for a pinned version).
 RUN mkdir -p /etc/apt/keyrings \
-    && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
-       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+    && curl -fsSL -o /tmp/nodesource.key https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+    && echo "${NODESOURCE_KEYFILE_DIGEST}  /tmp/nodesource.key" | sha256sum -c - \
+    && gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg < /tmp/nodesource.key && rm /tmp/nodesource.key \
     && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_${NODE_MAJOR}.x nodistro main" \
        > /etc/apt/sources.list.d/nodesource.list \
-    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && apt-get update && apt-get install -y --no-install-recommends "nodejs=${NODE_VERSION}" \
     && rm -rf /var/lib/apt/lists/* \
-    && npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+    && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force
 
-# Go from the official tarball (apt golang-go is too old for the repo's go.mod).
+# Go from the official tarball, checked against the published digest.
 RUN ARCH=$(dpkg --print-architecture) \
-    && curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" | tar -C /usr/local -xz
+    && case "$ARCH" in arm64) SHA="$GO_SHA256_ARM64" ;; amd64) SHA="$GO_SHA256_AMD64" ;; *) echo "unsupported arch $ARCH" >&2; exit 1 ;; esac \
+    && curl -fsSL -o /tmp/go.tgz "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" \
+    && echo "${SHA}  /tmp/go.tgz" | sha256sum -c - \
+    && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
 
 # GNU Make 4.4.1 ahead of /usr/bin/make on PATH (see the make-build stage).
 COPY --from=make-build /usr/local/bin/make /usr/local/bin/make
 
 # golangci-lint at the version the gastown Makefile pins (GOLANGCI_LINT_VERSION);
-# make lint refuses to run without it, and gt done runs make presubmit.
-ARG GOLANGCI_LINT_VERSION=v2.13.2
+# make lint refuses to run without it, and gt done runs make presubmit. The Go
+# module proxy verifies the module against the checksum database.
 RUN GOBIN=/usr/local/bin GOFLAGS= /usr/local/go/bin/go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION}" \
     && rm -rf /root/go /root/.cache
 
-# Town binaries, cross-compiled on the host (CGO_ENABLED=0 linux/arm64).
+# Town binaries, cross-compiled by `make polecat-image` (CGO_ENABLED=0 linux/arm64).
 COPY bin/gt /usr/local/bin/gt
 COPY bin/bd /usr/local/bin/bd
 RUN chmod 0755 /usr/local/bin/gt /usr/local/bin/bd

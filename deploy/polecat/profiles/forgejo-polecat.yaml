@@ -2,9 +2,11 @@
 #
 # Forgejo runs on the Mac (127.0.0.1:3000) and is reached from Docker Desktop
 # sandboxes as host.docker.internal:3000 over plain HTTP. The sandbox sees only
-# a placeholder in FORGEJO_TOKEN; git is told to send it as
-#   http.extraHeader = "Authorization: token <placeholder>"
-# and the supervisor substitutes the real token on requests to this host only.
+# a placeholder in FORGEJO_TOKEN; git sends it as the extraHeader
+#   Authorization: token <placeholder>
+# (through GIT_CONFIG_* in the environment, never a gitconfig on disk) and the
+# supervisor substitutes the real token on the git smart-HTTP requests below
+# and nowhere else.
 #
 # Import:  openshell profile lint -f deploy/polecat/profiles/forgejo-polecat.yaml
 #          openshell profile import -f deploy/polecat/profiles/forgejo-polecat.yaml --global
@@ -28,8 +30,11 @@ endpoints:
   - host: host.docker.internal
     port: 3000
     protocol: rest
-    access: full
-    enforcement: audit
+    enforcement: enforce
+    rules:
+      - allow: { method: GET, path: "/*/*.git/info/refs" }
+      - allow: { method: POST, path: "/*/*.git/git-upload-pack" }
+      - allow: { method: POST, path: "/*/*.git/git-receive-pack" }
 binaries:
   - /usr/bin/git
   - /usr/local/bin/gt

@@ -12,10 +12,14 @@ step() { printf '\n== %s\n' "$1"; }
 ok()   { printf 'PASS %s\n' "$1"; }
 fail() { printf 'FAIL %s\n' "$1"; }
 
-step "git identity and Forgejo header (placeholder in FORGEJO_TOKEN, rewritten by the supervisor)"
+step "git identity; the Forgejo header rides in the environment, not in a gitconfig on disk"
+# FORGEJO_TOKEN holds a placeholder the supervisor rewrites at Forgejo; even
+# so it stays out of files: GIT_CONFIG_* is read by every git in this shell.
+export GIT_CONFIG_COUNT=1 \
+       GIT_CONFIG_KEY_0=http.extraHeader \
+       GIT_CONFIG_VALUE_0="Authorization: token ${FORGEJO_TOKEN:-missing}"
 git config --global user.name  "sandbox-probe" \
  && git config --global user.email "sandbox-probe@gt.local" \
- && git config --global http.extraHeader "Authorization: token ${FORGEJO_TOKEN:-missing}" \
  && git config --global init.defaultBranch main && ok gitconfig || fail gitconfig
 
 step "ls-remote Forgejo"
@@ -47,5 +51,15 @@ timeout 60 gt prime --hook >/tmp/gtprime.out 2>&1 && { ok gt-prime; head -5 /tmp
 step "claude binary answers (no network)"
 timeout 30 claude --version >/tmp/cv.out 2>&1 && ok claude-version || { fail claude-version; tail -2 /tmp/cv.out; }
 
-step "negative: curl to Forgejo must be denied (not in policy binaries)"
-timeout 15 curl -s -o /dev/null -w '%{http_code}' http://host.docker.internal:3000/ >/tmp/curl.out 2>&1 && { fail curl-denied "(got $(cat /tmp/curl.out))"; } || ok curl-denied
+step "negative: curl to Forgejo must be denied by policy (not in the rule's binaries)"
+# Pass only on a connection-level denial (curl 7 "could not connect" or 56
+# "recv failure", what the sandbox returns for a policy-denied connect). An
+# HTTP answer means the fence is open; a timeout (28) means the test did not
+# reach a verdict and fails too.
+curl -sS -o /dev/null -w '%{http_code}' --max-time 15 http://host.docker.internal:3000/ >/tmp/curl.out 2>/tmp/curl.err
+rc=$?
+case "$rc" in
+  7|56) ok curl-denied ;;
+  0)    fail curl-denied "(HTTP $(cat /tmp/curl.out): the fence is open)" ;;
+  *)    fail curl-denied "(curl exit $rc, not a policy denial: $(tail -1 /tmp/curl.err))" ;;
+esac
