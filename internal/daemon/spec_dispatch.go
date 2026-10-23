@@ -180,6 +180,18 @@ func (d *Daemon) triggerSpecDispatch() bool {
 	if d.specDispatchHold.Changed("") {
 		d.logger.Printf("spec_dispatch: operator dispatch hold lifted; ticker resuming")
 	}
+	// A pending restart waits for the tick in flight, up to that tick's own
+	// bound. A tick started now would outlast the wait and be cut by the
+	// restart, leaving a sling half done (gt-cbaoy), so it starts after the
+	// restart, from the new daemon.
+	if d.upgradeRestartPending.Load() {
+		if d.specDispatchDeferLogged.CompareAndSwap(false, true) {
+			d.logger.Printf("spec_dispatch: not ticking: an upgrade restart is pending; the next tick runs after it")
+		}
+		d.dispatchIdle.Reset()
+		return false
+	}
+	d.specDispatchDeferLogged.Store(false)
 	// The seats are read here rather than at startup: an edit to the mix lands
 	// at the next tick (spec_seats.go, gt-jdnab).
 	if !d.specSeatsReady() {
@@ -192,6 +204,7 @@ func (d *Daemon) triggerSpecDispatch() bool {
 		d.logger.Printf("spec_dispatch: previous tick still running, skipping")
 		return false
 	}
+	d.specDispatchStartedAt.Store(d.clk().Now().UnixNano())
 	d.specDispatchCycles.Add(1)
 	go func() {
 		defer d.specDispatchCycles.Done()

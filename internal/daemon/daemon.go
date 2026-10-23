@@ -458,6 +458,13 @@ type Daemon struct {
 	specDispatchCycles  sync.WaitGroup
 	specDispatchHold    dispatch.HoldLatch
 
+	// specDispatchStartedAt is when the running tick was started (unix nanos),
+	// the clock an upgrade restart waits on (upgrade_restart.go, gt-cbaoy), and
+	// specDispatchDeferLogged latches the line that says a pending restart is
+	// holding new ticks.
+	specDispatchStartedAt   atomic.Int64
+	specDispatchDeferLogged atomic.Bool
+
 	// specSeats is the seat settings the ticker read last, and specSeatHold
 	// remembers the read error it last saw, so a seat file that does not parse
 	// parks the ticker with one line per distinct error (spec_seats.go,

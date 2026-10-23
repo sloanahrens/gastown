@@ -456,6 +456,25 @@ func TestTriggerSpecDispatchSingleFlight(t *testing.T) {
 	}
 }
 
+// gt-cbaoy: while an upgrade restart waits for the tick in flight, no new tick
+// starts; one that started would outlast the wait and be cut by the restart.
+func TestTriggerSpecDispatchDefersWhileARestartIsPending(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	d.upgradeRestartPending.Store(true)
+	if d.triggerSpecDispatch() {
+		t.Fatal("a tick started while an upgrade restart is pending")
+	}
+	if d.specDispatchRunning.Load() {
+		t.Fatal("a deferred tick left its single-flight guard set")
+	}
+	d.upgradeRestartPending.Store(false)
+	if !d.triggerSpecDispatch() {
+		t.Fatal("tick did not start once the restart was no longer pending")
+	}
+	d.specDispatchCycles.Wait()
+}
+
 // A dispatcher parked by the operator hold file starts no tick: the tick
 // would decide nothing, and its in-flight flag is a daemonWorkHolds entry, so
 // a parked tick made the daemon read as busy for the catch-up backup's quiet
