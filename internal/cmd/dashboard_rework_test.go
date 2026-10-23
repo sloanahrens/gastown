@@ -116,6 +116,38 @@ func TestReworkPanelAndAgentCountersAgreeOnAPreFieldApproval(t *testing.T) {
 	}
 }
 
+// A verdict logged twice for one attempt is one attempt: the rework panel keeps
+// the later line, and the agent counters must read the bead's attempts the same
+// way, so a retried verdict is not counted as a second rejection (gt-23yyj).
+func TestReworkPanelAndAgentCountersAgreeOnARetriedVerdict(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	log := land.TownReviewsFile(root)
+	for _, rec := range []land.ReviewRecord{
+		{BeadID: "gt-a", Rig: "gastown", Agent: "claude-haiku", Attempt: 1, Score: 0.93, Verdict: "approve", Findings: 1, Bar: 0.8, At: reworkReaderNow.Add(-4 * time.Hour)},
+		{BeadID: "gt-a", Rig: "gastown", Agent: "claude-haiku", Attempt: 1, Score: 0.93, Verdict: "approve", Bar: 0.8, At: reworkReaderNow.Add(-3 * time.Hour)},
+		{BeadID: "gt-a", Rig: "gastown", Agent: "claude-haiku", Attempt: 2, Score: 0.95, Verdict: "approve", Bar: 0.8, At: reworkReaderNow.Add(-2 * time.Hour)},
+	} {
+		if err := log.Append(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	bars := newDashReworkReader(root).read(reworkReaderNow).Windows[0].Bars
+	if len(bars) != 1 || bars[0].Rejected != 0 || bars[0].FirstTry != 1 || bars[0].Landed != 1 {
+		t.Fatalf("rework panel = %+v, want the retried verdict read as one attempt that was not rejected", bars)
+	}
+
+	r := &modelsReader{townRoot: root, omPath: filepath.Join(t.TempDir(), "missing.json"), now: func() time.Time { return reworkReaderNow }}
+	activity, _ := r.agentActivity()
+	for _, a := range activity {
+		if a.Rejected != 0 {
+			t.Errorf("agent counters = %+v, want no rejection for the retried verdict", activity)
+		}
+	}
+}
+
 // reworkStage is one landing's "stages:" line, stamped in local time the way
 // the daemon writes it: the worker logs the line as a review ends, a moment
 // before it writes the verdict.

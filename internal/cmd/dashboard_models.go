@@ -132,24 +132,13 @@ func (r *modelsReader) agentActivity() ([]dashboard.AgentActivity, []string) {
 	if err != nil {
 		unreadable = append(unreadable, "the review log")
 	} else {
-		// A bead's latest attempt in the window: a review that a later attempt
-		// follows is one the landing turned back, for the findings it carried
-		// (see dashboard.ReworkRefused).
-		type beadKey struct{ rig, bead string }
-		latest := map[beadKey]int{}
-		for _, rec := range recs {
-			k := beadKey{rec.Rig, rec.BeadID}
-			if rec.Attempt > latest[k] {
-				latest[k] = rec.Attempt
-			}
-		}
-		for _, rec := range recs {
-			agent := strings.TrimSpace(rec.Agent)
-			later := rec.Attempt < latest[beadKey{rec.Rig, rec.BeadID}]
+		for _, a := range windowAttempts(recs) {
+			agent := strings.TrimSpace(a.rec.Agent)
 			// A request_changes verdict refused the landing with or without
 			// the Rejected flag, which only an approving verdict's findings
-			// set (gt-vu18r).
-			if agent != "" && dashboard.ReworkRefused(rec.Verdict, rec.Rejected, rec.Findings, later) {
+			// set (gt-vu18r). Any other verdict is no approval either, as the
+			// rework panel reads it (dashboard.ReworkRefused).
+			if agent != "" && dashboard.ReworkRefused(a.rec.Verdict, a.rec.Rejected, a.rec.Findings, a.later) {
 				rejected[agent]++
 			}
 		}
@@ -171,6 +160,51 @@ func (r *modelsReader) agentActivity() ([]dashboard.AgentActivity, []string) {
 		out = append(out, dashboard.AgentActivity{Agent: agent, Landed: landed[agent], Rejected: rejected[agent]})
 	}
 	return out, unreadable
+}
+
+// windowAttempt is one review line the agent counters read from the window, and
+// whether a later attempt of the same bead follows it.
+type windowAttempt struct {
+	rec   land.ReviewRecord
+	later bool
+}
+
+// windowAttempts folds a window's review lines the way the rework panel does
+// (dashboard.AggregateRework): one line per attempt, the later of two for the
+// same attempt, and each bead's attempts in time order. The panel and the
+// counters then ask the same question of each attempt, so they count the same
+// rejections.
+func windowAttempts(recs []land.ReviewRecord) []windowAttempt {
+	type beadKey struct{ rig, bead string }
+	type attemptKey struct {
+		beadKey
+		attempt int
+	}
+	latest := map[attemptKey]land.ReviewRecord{}
+	for _, rec := range recs {
+		k := attemptKey{beadKey{rec.Rig, rec.BeadID}, rec.Attempt}
+		if old, ok := latest[k]; !ok || !rec.At.Before(old.At) {
+			latest[k] = rec
+		}
+	}
+	byBead := map[beadKey][]land.ReviewRecord{}
+	for _, rec := range latest {
+		k := beadKey{rec.Rig, rec.BeadID}
+		byBead[k] = append(byBead[k], rec)
+	}
+	var out []windowAttempt
+	for _, rs := range byBead {
+		sort.Slice(rs, func(i, j int) bool {
+			if !rs[i].At.Equal(rs[j].At) {
+				return rs[i].At.Before(rs[j].At)
+			}
+			return rs[i].Attempt < rs[j].Attempt
+		})
+		for i, rec := range rs {
+			out = append(out, windowAttempt{rec: rec, later: i < len(rs)-1})
+		}
+	}
+	return out
 }
 
 // loadDashPatrols reads the daemon's patrol config, nil with no error when the
