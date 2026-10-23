@@ -2256,3 +2256,25 @@ func TestLandingRecordAgent(t *testing.T) {
 		})
 	}
 }
+
+// TestPolicyRejectionCountsDescriptionAcceptance: the spec dispatcher leaves
+// the acceptance field empty and shapes the criteria as a "## Acceptance"
+// section of the description, so that section is where policyRejection must
+// count unchecked boxes (the same text CriteriaText hands to om).
+func TestPolicyRejectionCountsDescriptionAcceptance(t *testing.T) {
+	t.Parallel()
+	issue := &beads.Issue{ID: "gt-abc", Title: "add b", Status: "hooked", Type: "task",
+		AcceptanceCriteria: "", Description: "## Goal\nx\n\n## Acceptance\n- [ ] x"}
+	rej := policyRejection(issue)
+	if rej == nil || !rej.Rework || rej.Kind != RejectPolicy || !strings.Contains(rej.Reason, "1 unchecked acceptance criteria") {
+		t.Fatalf("policyRejection = %+v, want a Rework policy rejection naming 1 unchecked criterion", rej)
+	}
+	issue.Description = "## Acceptance\n- [x] x\n\n## Notes\n- [ ] not a criterion"
+	if rej := policyRejection(issue); rej != nil {
+		t.Errorf("ticked section with an unchecked box in another section: rejection = %+v", rej)
+	}
+	issue.Description = "## Goal\nno acceptance section"
+	if rej := policyRejection(issue); rej != nil {
+		t.Errorf("bead with no boxes: rejection = %+v", rej)
+	}
+}

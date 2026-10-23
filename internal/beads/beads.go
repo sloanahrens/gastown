@@ -438,14 +438,54 @@ func ProtectedIssueLabel(label string) bool {
 	}
 }
 
-// UncheckedCriteria returns the issue's unchecked acceptance criteria, one
-// trimmed "- [ ] ..." line each, in order. Empty means all checked or none.
-func UncheckedCriteria(issue *Issue) []string {
-	if issue == nil || issue.AcceptanceCriteria == "" {
-		return nil
+// AcceptanceText is the bead's acceptance text: its acceptance field when set,
+// else the body of the description's "## Acceptance" section. The spec
+// dispatcher shapes a work bead as one description carrying that section and
+// leaves the field empty, so the section is the source nearly every landing
+// has. This is the one definition of the text: land.CriteriaText hands it to
+// om and UncheckedCriteria counts boxes in it.
+func AcceptanceText(issue *Issue) string {
+	if issue == nil {
+		return ""
 	}
+	if text := strings.TrimSpace(issue.AcceptanceCriteria); text != "" {
+		return text
+	}
+	return acceptanceSection(issue.Description)
+}
+
+// acceptanceSection is the body under the description's "## Acceptance"
+// heading, up to the next "## " heading or the end of the description. The
+// heading itself is not part of the text; the heading must be the section's
+// whole title, so "## Acceptance" matches and "## Accepted trade-offs" does
+// not.
+func acceptanceSection(description string) string {
+	var body []string
+	inside := false
+	for _, line := range strings.Split(description, "\n") {
+		trimmed := strings.TrimSpace(line)
+		// A deeper heading ("### a criterion") is body text: only a "## "
+		// line opens or closes a section.
+		if strings.HasPrefix(trimmed, "## ") {
+			if inside {
+				break
+			}
+			inside = strings.EqualFold(strings.TrimSpace(strings.TrimPrefix(trimmed, "## ")), "acceptance")
+			continue
+		}
+		if inside {
+			body = append(body, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(body, "\n"))
+}
+
+// UncheckedCriteria returns the issue's unchecked acceptance criteria, one
+// trimmed "- [ ] ..." line each, in order, read from AcceptanceText. Empty
+// means all checked or none.
+func UncheckedCriteria(issue *Issue) []string {
 	var lines []string
-	for _, line := range strings.Split(issue.AcceptanceCriteria, "\n") {
+	for _, line := range strings.Split(AcceptanceText(issue), "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "- [ ] ") {
 			lines = append(lines, trimmed)
