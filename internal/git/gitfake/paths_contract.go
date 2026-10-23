@@ -149,14 +149,38 @@ func RunPathContract(t *testing.T, newEnv func(t *testing.T) BranchEnv) {
 			t.Errorf("HEAD after the pull = %s, want %s", head, later)
 		}
 
+		// A clone that names no branch gets the remote HEAD's, recorded and
+		// tracked the same way.
+		dflt := filepath.Join(fx.root, "default-clone")
+		if err := town.CloneBranch(fx.origin, dflt, ""); err != nil {
+			t.Fatalf("CloneBranch of the default branch: %v", err)
+		}
+		d := openPathRepo(env, dflt)
+		if got := d.RemoteDefaultBranch(); got != trunk {
+			t.Errorf("RemoteDefaultBranch of the default-branch clone = %q, want %s", got, trunk)
+		}
+		again := env.Commit(t, fx.origin, trunk, "again", map[string]string{"e.txt": "e\n"})
+		if err := d.PullRebase(); err != nil {
+			t.Fatalf("PullRebase of the default-branch clone: %v", err)
+		}
+		if head, _ := d.Rev("HEAD"); head != again {
+			t.Errorf("default-branch clone HEAD after the pull = %s, want %s", head, again)
+		}
+
 		// A clone of another branch alone fetches no remote HEAD, but the
-		// branch it checked out still tracks its origin counterpart.
+		// branch it checked out still tracks its origin counterpart: a pull
+		// brings in what that branch gained, not just an error-free no-op.
 		other := filepath.Join(fx.root, "feature-clone")
 		if err := town.CloneBranch(fx.origin, other, fixtureBranch); err != nil {
 			t.Fatalf("CloneBranch %s: %v", fixtureBranch, err)
 		}
-		if err := openPathRepo(env, other).PullRebase(); err != nil {
-			t.Errorf("PullRebase of the %s clone: %v", fixtureBranch, err)
+		o := openPathRepo(env, other)
+		gained := env.Commit(t, fx.origin, fixtureBranch, "gained", map[string]string{"f.txt": "f\n"})
+		if err := o.PullRebase(); err != nil {
+			t.Fatalf("PullRebase of the %s clone: %v", fixtureBranch, err)
+		}
+		if head, _ := o.Rev("HEAD"); head != gained {
+			t.Errorf("%s clone HEAD after the pull = %s, want %s", fixtureBranch, head, gained)
 		}
 	})
 
