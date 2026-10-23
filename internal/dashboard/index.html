@@ -1075,11 +1075,14 @@ function queuedLandings(s, rows) {
 }
 
 // A queued bead's holder is its assignee: one naming a polecat by its store
-// ("rig/polecats/name") is shown the way the By column shows a holder, and any
-// other assignee is shown as it was written.
+// ("rig/polecats/name") is shown the way the By column shows a holder, a crew
+// member's claim ("town/crew/name" or "rig/crew/name") by the bare name, and any
+// other assignee as it was written.
 function queueHolder(b) {
   const m = /^([^/]+)\/polecats\/([^/]+)$/.exec(b.assignee || "");
-  return m ? {rig: m[1], name: m[2]} : {rig: "", name: b.assignee || ""};
+  if (m) return {rig: m[1], name: m[2]};
+  const c = /^[^/]+\/crew\/([^/]+)$/.exec(b.assignee || "");
+  return c ? {rig: "", name: c[1]} : {rig: "", name: b.assignee || ""};
 }
 
 function renderTrend(s) {

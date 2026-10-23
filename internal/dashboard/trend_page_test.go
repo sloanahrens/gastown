@@ -69,6 +69,15 @@ func TestQueuedLandingRowAgesTheWaitFromTheBeadsLastUpdate(t *testing.T) {
 	if want := `const m = /^([^/]+)\/polecats\/([^/]+)$/.exec(b.assignee || "");`; !strings.Contains(holder, want) {
 		t.Errorf("queueHolder has no %q", want)
 	}
+	// A crew member's claim is "town/crew/name" or "rig/crew/name" (claude-agent sets
+	// the actor that way); the By column shows the bare name, as it does for a
+	// polecat.
+	if want := `const c = /^[^/]+\/crew\/([^/]+)$/.exec(b.assignee || "");`; !strings.Contains(holder, want) {
+		t.Errorf("queueHolder has no %q", want)
+	}
+	if want := `return c ? {rig: "", name: c[1]} : {rig: "", name: b.assignee || ""};`; !strings.Contains(holder, want) {
+		t.Errorf("queueHolder does not return the crew member's bare name: %q", want)
+	}
 	if want := `by.textContent = names.label(h.rig, h.name);`; !strings.Contains(tbl, want) {
 		t.Errorf("a queued row's holder is not named through the shared helper: %s", want)
 	}
