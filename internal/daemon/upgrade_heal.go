@@ -16,9 +16,8 @@ import (
 // daemon after an upgrade exit before it judges the job.
 const upgradeHealWait = 20 * time.Second
 
-// upgradeHealLogName is the file the heal helper appends its decisions to.
-// It is not daemon.log: a failed respawn writes nothing there, so the heal's
-// own trail must not depend on it.
+// upgradeHealLogName is the helper's own log: a failed respawn writes nothing
+// to daemon.log (gt-eigyu.1).
 const upgradeHealLogName = "upgrade-heal.log"
 
 // upgradeHealScriptName is the helper script, written under the town's daemon
@@ -61,7 +60,8 @@ func upgradeHealLabel(job upgradeHealJob) string {
 // upgradeHealScriptTemplate is the helper. It runs outside the daemon's job,
 // so the bootout it may need does not kill it. It waits, and heals only when
 // launchd has the job loaded without a pid and no process holds daemon.lock.
-// Its decisions go to upgrade-heal.log, never daemon.log.
+// A give-up is also sent to the system log, so a heal that failed leaves a
+// trail outside the files it shares with the stranded daemon.
 const upgradeHealScriptTemplate = `#!/bin/sh
 # gt upgrade-restart heal: arms after an upgrade exit (gt-eigyu.1).
 LABEL=@LABEL@
@@ -79,6 +79,12 @@ log() {
 finish() {
 	launchctl remove "$HEAL" >/dev/null 2>&1
 	exit "$1"
+}
+
+giveup() {
+	log "gave up: $*"
+	logger -p user.err -t gt-upgrade-heal "gave up: $*" 2>/dev/null
+	finish 1
 }
 
 sleep @WAIT@
@@ -100,8 +106,7 @@ waited=0
 while launchctl print "$SVC" >/dev/null 2>&1; do
 	waited=$((waited + 1))
 	if [ "$waited" -ge 60 ]; then
-		log "gave up: $SVC still loaded 60s after bootout"
-		finish 1
+		giveup "$SVC still loaded 60s after bootout"
 	fi
 	sleep 1
 done
@@ -110,8 +115,7 @@ tries=0
 until launchctl bootstrap "gui/$UID_NUM" "$PLIST" >> "$LOG" 2>&1; do
 	tries=$((tries + 1))
 	if [ "$tries" -ge 60 ]; then
-		log "gave up: bootstrap of $PLIST failed $tries times"
-		finish 1
+		giveup "bootstrap of $PLIST failed $tries times"
 	fi
 	log "bootstrap attempt $tries failed; retrying"
 	sleep 3
@@ -149,9 +153,13 @@ func submitUpgradeHeal(run func(argv []string) error, townRoot string, job upgra
 		return fmt.Errorf("writing heal script: %w", err)
 	}
 	heal := upgradeHealLabel(job)
-	// Nothing loaded under the label is the usual case, so the error is not news.
-	_ = run([]string{"launchctl", "remove", heal})
+	// Nothing loaded under the label is the usual case, so a remove error is
+	// only worth reporting when the submit that follows it fails too.
+	removeErr := run([]string{"launchctl", "remove", heal})
 	if err := run([]string{"launchctl", "submit", "-l", heal, "--", "/bin/sh", script}); err != nil {
+		if removeErr != nil {
+			return fmt.Errorf("submitting %s: %w (removing a stale helper first failed: %v)", heal, err, removeErr)
+		}
 		return fmt.Errorf("submitting %s: %w", heal, err)
 	}
 	return nil

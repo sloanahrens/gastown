@@ -52,12 +52,45 @@ func TestUpgradeRestartHealArmSubmitsHelperAsItsOwnJob(t *testing.T) {
 	}
 }
 
+func TestUpgradeRestartHealArmWriteFailureSubmitsNothing(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir() // no daemon directory under it: the script cannot be written
+	calls, run := recordHealRun("", nil)
+
+	err := submitUpgradeHeal(run, town, fakeHealJob)
+	if err == nil || !strings.Contains(err.Error(), "writing heal script") {
+		t.Fatalf("err = %v, want a heal script write failure", err)
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("launchctl ran although the script was not written: %v", *calls)
+	}
+}
+
+func TestUpgradeRestartHealSubmitFailureNamesAFailedStaleRemove(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	run := func(argv []string) error { return errors.New(argv[1] + " refused") }
+
+	err := submitUpgradeHeal(run, d.config.TownRoot, fakeHealJob)
+	if err == nil || !strings.Contains(err.Error(), "submit refused") || !strings.Contains(err.Error(), "remove refused") {
+		t.Fatalf("err = %v, want the submit failure and the stale remove failure", err)
+	}
+}
+
 func TestUpgradeRestartHealExitArmsBeforeTheRestartError(t *testing.T) {
 	t.Parallel()
 	d := upgradeTestDaemon(t)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	var logAtArm string
 	calls, run := recordHealRun("", nil)
 	d.seams.upgradeHealJob = func(string) (upgradeHealJob, bool) { return fakeHealJob, true }
-	d.seams.upgradeHealRun = run
+	d.seams.upgradeHealRun = func(argv []string) error {
+		if logAtArm == "" {
+			logAtArm = logs.String()
+		}
+		return run(argv)
+	}
 	withOwnCommit(d, "aaa")
 	fakeHistory(t, d, "aaa", "bbb")
 	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
@@ -71,6 +104,9 @@ func TestUpgradeRestartHealExitArmsBeforeTheRestartError(t *testing.T) {
 	}
 	if len(*calls) == 0 {
 		t.Fatal("the heal helper was not armed before the exit")
+	}
+	if !strings.Contains(logAtArm, "Daemon shutting down") {
+		t.Fatalf("the helper was armed before the shutdown, so its wait starts too early; log at arm time:\n%s", logAtArm)
 	}
 }
 
@@ -172,10 +208,15 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 		wantBootout bool
 		wantBoots   int
 		wantLogLine string
+		stuckLoaded bool   // launchctl print keeps reporting the job after bootout
+		bootstrapOK string // the bootstrap attempt that first succeeds
+		wantGiveUp  bool   // the helper exits 1 and tells the system log
 	}{
 		{name: "healthy job is left alone", pid: "123", wantLogLine: "healthy:"},
 		{name: "live lock holder is left alone", lockHolder: "4242", wantLogLine: "left alone:"},
 		{name: "unloaded job is healed", wantBootout: true, wantBoots: 2, wantLogLine: "bootstrapped:"},
+		{name: "a job that stays loaded after bootout is given up on", stuckLoaded: true, wantBootout: true, wantLogLine: "gave up: gui/501/com.example.fake still loaded", wantGiveUp: true},
+		{name: "a bootstrap that never succeeds is given up on", bootstrapOK: "never", wantBootout: true, wantBoots: 60, wantLogLine: "gave up: bootstrap of /fake/com.example.fake.plist failed 60 times", wantGiveUp: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -188,16 +229,29 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 case "$1" in
 print)
 	if [ -n "$HEAL_PID" ]; then printf 'gui/501/x = {\n\tpid = %s\n}\n' "$HEAL_PID"; exit 0; fi
+	if [ -n "$HEAL_STUCK" ]; then printf 'gui/501/x = {\n\tstate = waiting\n}\n'; exit 0; fi
 	echo 'Could not find service' >&2; exit 113 ;;
 bootstrap)
 	n=$(cat "$HEAL_TRIES" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$HEAL_TRIES"
-	if [ "$n" -ge 2 ]; then exit 0; fi
+	if [ "$n" -ge "$HEAL_BOOT_OK" ]; then exit 0; fi
 	echo 'Bootstrap failed: 5: Input/output error' >&2; exit 5 ;;
 esac
 exit 0
 `)
 			writeFakeTool(t, bin, "lsof", `[ -n "$HEAL_LOCK_HOLDER" ] && echo "$HEAL_LOCK_HOLDER"; exit 0`)
 			writeFakeTool(t, bin, "sleep", `exit 0`)
+			sysLog := filepath.Join(bin, "syslog.txt")
+			writeFakeTool(t, bin, "logger", `echo "$*" >> "$HEAL_SYSLOG"`)
+			bootOK := tc.bootstrapOK
+			if bootOK == "" {
+				bootOK = "2"
+			} else {
+				bootOK = "999"
+			}
+			stuck := ""
+			if tc.stuckLoaded {
+				stuck = "1"
+			}
 
 			script := filepath.Join(d.config.TownRoot, "daemon", upgradeHealScriptName)
 			if err := os.WriteFile(script, []byte(upgradeHealScript(fakeHealJob, d.config.TownRoot)), 0o600); err != nil {
@@ -211,12 +265,27 @@ exit 0
 				"HEAL_TRIES=" + tries,
 				"HEAL_PID=" + tc.pid,
 				"HEAL_LOCK_HOLDER=" + tc.lockHolder,
+				"HEAL_STUCK=" + stuck,
+				"HEAL_BOOT_OK=" + bootOK,
+				"HEAL_SYSLOG=" + sysLog,
 			}
-			if out, err := cmd.CombinedOutput(); err != nil {
+			out, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			switch {
+			case tc.wantGiveUp && !(errors.As(err, &exitErr) && exitErr.ExitCode() == 1):
+				t.Fatalf("giving up must exit 1, got %v:\n%s", err, out)
+			case !tc.wantGiveUp && err != nil:
 				t.Fatalf("helper exited with %v:\n%s", err, out)
 			}
 
 			callLog, _ := os.ReadFile(calls)
+			if !strings.Contains(string(callLog), "remove com.example.fake-heal") {
+				t.Fatalf("the helper did not remove its own job on the way out; launchctl calls:\n%s", callLog)
+			}
+			sysText, _ := os.ReadFile(sysLog)
+			if gotSys := strings.Contains(string(sysText), "gave up:"); gotSys != tc.wantGiveUp {
+				t.Fatalf("system log carries a give-up = %v, want %v:\n%s", gotSys, tc.wantGiveUp, sysText)
+			}
 			gotBootout := strings.Contains(string(callLog), "bootout")
 			if gotBootout != tc.wantBootout {
 				t.Fatalf("bootout ran = %v, want %v; launchctl calls:\n%s", gotBootout, tc.wantBootout, callLog)
