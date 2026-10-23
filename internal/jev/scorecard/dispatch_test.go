@@ -33,7 +33,7 @@ func (f dispatchBeadStore) Show(id string) (*beads.Issue, error) {
 
 func dispatchAnswers(p float64) dispatch.Answers {
 	return dispatch.Answers{
-		LandsFirstTry:      p,
+		LandsFirstTry:      &p,
 		FitsTwentyMinutes:  p,
 		AcceptanceTickable: p,
 		NeedsStrongModel:   p,
@@ -248,6 +248,34 @@ func TestScorecardDispatchParseCarriesAgentBesideStrongModel(t *testing.T) {
 	}
 }
 
+// A line logged after lands_first_try left the battery has no answer for it,
+// so the scorecard leaves the question unanswered rather than scoring 0.
+func TestScorecardDispatchParseLeavesLandsUnansweredWhenNotLogged(t *testing.T) {
+	t.Parallel()
+	a := dispatchAdapterFor(t.TempDir(), dispatchBeadStore{})
+	answers := dispatchAnswers(0.25)
+	answers.LandsFirstTry = nil
+	raw, err := json.Marshal(dispatch.Line{
+		Bead:       "gt-x2",
+		AttachedAt: time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC),
+		Answers:    answers,
+		Model:      "model-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, err := a.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got, ok := item.Answers[qLandsFirstTry]; ok {
+		t.Errorf("lands_first_try = %+v, want no answer: the line never logged one", got)
+	}
+	if got := item.Answers[qFitsTwentyMinutes]; got.Noul == nil || *got.Noul != 0.25 {
+		t.Errorf("fits_twenty_minutes = %+v, want noul 0.25", got)
+	}
+}
+
 func TestScorecardDispatchParseRejectsUnusableLines(t *testing.T) {
 	t.Parallel()
 	a := dispatchAdapterFor(t.TempDir(), dispatchBeadStore{})
@@ -407,7 +435,8 @@ func TestScorecardDispatchEmptyLogNeverOpensStore(t *testing.T) {
 
 // The scorecard's question ids must be the keys the log writes, or the
 // battery's answers are read as unlabeled with no error. The keys are the
-// JSON names of the writer's Answers.
+// JSON names of the writer's Answers. lands_first_try is left out: the writer
+// no longer logs it, and the scorecard reads it only from older lines.
 func TestScorecardDispatchQuestionIDsMatchLogKeys(t *testing.T) {
 	t.Parallel()
 	data, err := json.Marshal(dispatch.Answers{})
@@ -423,7 +452,7 @@ func TestScorecardDispatchQuestionIDsMatchLogKeys(t *testing.T) {
 		logKeys = append(logKeys, k)
 	}
 	var ids []string
-	for _, id := range []QuestionID{qLandsFirstTry, qFitsTwentyMinutes, qAcceptanceTickable, qNeedsStrongModel, qTouchesDaemon, qSize} {
+	for _, id := range []QuestionID{qFitsTwentyMinutes, qAcceptanceTickable, qNeedsStrongModel, qTouchesDaemon, qSize} {
 		ids = append(ids, string(id))
 	}
 	sort.Strings(logKeys)

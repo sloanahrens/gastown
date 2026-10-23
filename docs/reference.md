@@ -1149,9 +1149,9 @@ required to price them.
 
 `internal/jev/attention` asks one Jev call per raise: each `new` transition in
 the attention queue's event log (`.runtime/attention/events.jsonl`) past the
-cursor, whether or not the item still stands. Each call asks five questions
-(needs a person, clears on its own, a routine action fixes it, repeats an open
-item, and an urgency score), and the pass appends one line per raise to
+cursor, whether or not the item still stands. Each call asks four questions
+(needs a person, clears on its own, repeats an open item, and an urgency score),
+and the pass appends one line per raise to
 `.runtime/jev/attention.jsonl`. The line's `live` says whether `state.json` still
 held the item when the pass asked. A raise that cleared first is asked with
 `live: false`, no rig, bead or SHA, and no other open items beside it. The pass
@@ -1229,12 +1229,13 @@ log with `gt jev submission --recent N`.
 The log line is `{ts, bead, branch, head, target, submitted, agent, answers,
 question_version, model}`. `answers` maps each question id to its answer:
 `tests_cover_change`, `beyond_goal`, `commits_match_change`,
-`touches_town_machinery`, `will_pass_review`, `claims_verified`,
-`verification_applies` and `boxes_credible` each hold a `noul` probability,
-`risk` holds a `score` (the landing battery's four levels) with its
-`confidence`, and `outcome` holds a `choice` over `complete`, `partial`,
-`blocked` and `unclear`: its `choice`, every option's `probabilities`, and
-`positive` (`complete`). `question_version` is `submission.Version` and changes
+`touches_town_machinery`, `claims_verified` and `verification_applies` each hold
+a `noul` probability, and `risk` holds a `score` (the landing battery's four
+levels) with its `confidence`. Lines at `question_version` 2 or lower also carry
+`will_pass_review`, `boxes_credible` and `outcome`, a `choice` over `complete`,
+`partial`, `blocked` and `unclear` with its `probabilities` and `positive`
+(`complete`); the battery stopped asking them at version 3.
+`question_version` is `submission.Version` and changes
 whenever a question or a rubric level does; `model` is the model ID the API
 returned. `agent` is the bead's `agent:` label, else its `agent=` attached var.
 The log holds ids, times, numbers and answers, never prompt, title or diff text.
@@ -1781,12 +1782,13 @@ request Jev refused on its own terms (a 4xx other than 401) or answered
 unusably counts against a bead.
 
 `gt jev scorecard --battery dispatch` scores that log. Each line is one
-placement, stamped with its `attached_at`. The five Noul questions are scored as
-noul and `size` as a score. Labels come from three sources, and a question with
-no rule for a placement is unlabeled and left out of its counts:
+placement, stamped with its `attached_at`. The noul questions are scored as noul
+and `size` as a score. Labels come from three sources, and a question with no
+rule for a placement is unlabeled and left out of its counts:
 
 - `lands_first_try`: the bead's first attempt in
-  `.runtime/landings/reviews.jsonl`. approve is true unless the landing refused
+  `.runtime/landings/reviews.jsonl`. Only lines at `question_version` 1 carry
+  its answer; the battery stopped asking it at version 2. approve is true unless the landing refused
   it (`rejected`), and request_changes is false. With no review, a bead closed
   as landed is true.
 - `fits_twenty_minutes`: the bead's `.runtime/overrun-guard/<bead>.json`. A
@@ -2115,10 +2117,10 @@ scorecard's `internal/jev/scorecard/failcause.go`:
 When a landing's om review refuses the work, the battery reads the refusal's
 findings from the work bead's MERGE REJECTION block for that attempt (cut to
 3000 characters) and the files the refused head changed against its target, and
-asks Jev two questions: the noul `reworked_to_land`, whether the landing will
-need a rework commit before it lands, and the choice `cause` over
-`tests_missing`, `scope_creep`, `logic_error`, `wrong_file`, `docs_stale`,
-`convention` and `unclear`. It appends one line per refusal to
+asks Jev one question: the choice `cause` over `tests_missing`, `scope_creep`,
+`logic_error`, `wrong_file`, `docs_stale`, `convention` and `unclear`. (The noul
+`reworked_to_land` was dropped from the battery; the scorecard still labels it
+from the landings file, and older lines carry its answer.) It appends one line per refusal to
 `.runtime/jev/rework.jsonl`: `{ts, refused, rig, bead, attempt, head, verdict,
 score, answers, model, question_version}`. `refused` is when the landing logged
 the review, which is where the scorecard's label starts. The findings are never

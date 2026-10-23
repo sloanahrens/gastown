@@ -151,7 +151,6 @@ func (c *countingSubmissionAsker) Ask(context.Context, any, map[string]jev.Quest
 		Noul: map[string]float64{
 			submission.QTestsCoverChange: 0.5, submission.QBeyondGoal: 0.5,
 			submission.QCommitsMatchChange: 0.5, submission.QTouchesTownMachinery: 0.5,
-			submission.QWillPassReview: 0.5,
 		},
 		Score: map[string]jev.ScoreAnswer{submission.QRisk: {Score: 1, Confidence: 0.5}},
 	}, nil

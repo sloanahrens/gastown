@@ -170,7 +170,7 @@ func writeAttentionTown(t *testing.T, town string, cases []attentionCase) {
 			TS: raised.Add(2 * time.Minute), Key: c.key, Kind: c.kind, Bead: c.bead, SHA: c.sha,
 			FirstSeen: raised, Live: !c.notLive, QuestionVersion: jevattention.QuestionVersion, Model: "test-model",
 			Answers: &jevattention.Answers{
-				NeedsHuman: 0.7, ClearsOnItsOwn: 0.2, RoutineActionFixes: 0.1, RepeatsOpenItem: 0,
+				NeedsHuman: 0.7, ClearsOnItsOwn: 0.2, RoutineActionFixes: ptr(0.1), RepeatsOpenItem: 0,
 				Urgency: jevattention.Urgency{Score: 1, Confidence: 0.8},
 			},
 		})
@@ -361,7 +361,7 @@ func TestAttentionParseReadsEveryQuestion(t *testing.T) {
 	a := newAttentionTestAdapter(t.TempDir(), fakeBeads{})
 	line := jevattention.Line{TS: attentionBase, Key: "host-mem:x", Kind: attention.KindHostMem,
 		FirstSeen: attentionBase, QuestionVersion: jevattention.QuestionVersion, Model: "m",
-		Answers: &jevattention.Answers{NeedsHuman: 0.7, ClearsOnItsOwn: 0.2, RoutineActionFixes: 0.1,
+		Answers: &jevattention.Answers{NeedsHuman: 0.7, ClearsOnItsOwn: 0.2, RoutineActionFixes: ptr(0.1),
 			RepeatsOpenItem: 0.4, Urgency: jevattention.Urgency{Score: 2, Confidence: 0.9}}}
 	raw, err := json.Marshal(line)
 	if err != nil {
@@ -379,6 +379,31 @@ func TestAttentionParseReadsEveryQuestion(t *testing.T) {
 	}
 	if got := it.Answers[jevattention.QUrgency].Score; got == nil || *got != 2 {
 		t.Errorf("urgency score = %v, want 2", got)
+	}
+}
+
+// A line logged after routine_action_fixes left the battery has no answer for
+// it, so the scorecard leaves the question unanswered rather than scoring 0.
+func TestAttentionParseLeavesRoutineUnansweredWhenNotLogged(t *testing.T) {
+	t.Parallel()
+	a := newAttentionTestAdapter(t.TempDir(), fakeBeads{})
+	line := jevattention.Line{TS: attentionBase, Key: "host-mem:x", Kind: attention.KindHostMem,
+		FirstSeen: attentionBase, QuestionVersion: jevattention.QuestionVersion, Model: "m",
+		Answers: &jevattention.Answers{NeedsHuman: 0.7, ClearsOnItsOwn: 0.2, RepeatsOpenItem: 0.4,
+			Urgency: jevattention.Urgency{Score: 2, Confidence: 0.9}}}
+	raw, err := json.Marshal(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	it, err := a.Parse(raw)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got, ok := it.Answers[jevattention.QRoutineActionFixes]; ok {
+		t.Errorf("routine_action_fixes = %+v, want no answer: the line never logged one", got)
+	}
+	if len(it.Answers) != 4 {
+		t.Errorf("answers = %d, want the four the line logged", len(it.Answers))
 	}
 }
 

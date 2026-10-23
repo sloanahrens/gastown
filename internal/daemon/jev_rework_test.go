@@ -133,7 +133,6 @@ func (c *countingReworkAsker) Ask(context.Context, any, map[string]jev.Question)
 	c.n++
 	return &jev.Answers{
 		Model: "jev-1.13.0",
-		Noul:  map[string]float64{rework.QReworkedToLand: 0.7},
 		Choice: map[string]jev.ChoiceAnswer{
 			rework.QCause: {Choice: "tests_missing", Probabilities: map[string]float64{"tests_missing": 0.7}},
 		},

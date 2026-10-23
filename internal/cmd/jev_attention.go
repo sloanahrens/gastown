@@ -117,7 +117,7 @@ func printRecentAttention(w io.Writer, path string, n int) error {
 		if a := l.Answers; a != nil {
 			needs = fmt.Sprintf("%.2f", a.NeedsHuman)
 			clears = fmt.Sprintf("%.2f", a.ClearsOnItsOwn)
-			routine = fmt.Sprintf("%.2f", a.RoutineActionFixes)
+			routine = noulCell(a.RoutineActionFixes)
 			repeats = fmt.Sprintf("%.2f", a.RepeatsOpenItem)
 			urgency = fmt.Sprintf("%.0f (%.2f)", a.Urgency.Score, a.Urgency.Confidence)
 		}

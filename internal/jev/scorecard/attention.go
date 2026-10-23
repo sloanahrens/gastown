@@ -96,12 +96,16 @@ func (a *attentionAdapter) Parse(raw []byte) (Item, error) {
 		Time:  l.TS,
 		Model: l.Model,
 		Answers: map[QuestionID]Answer{
-			jevattention.QNeedsHuman:         {Noul: ptr(ans.NeedsHuman)},
-			jevattention.QClearsOnItsOwn:     {Noul: ptr(ans.ClearsOnItsOwn)},
-			jevattention.QRoutineActionFixes: {Noul: ptr(ans.RoutineActionFixes)},
-			jevattention.QRepeatsOpenItem:    {Noul: ptr(ans.RepeatsOpenItem)},
-			jevattention.QUrgency:            {Score: ptr(ans.Urgency.Score)},
+			jevattention.QNeedsHuman:      {Noul: ptr(ans.NeedsHuman)},
+			jevattention.QClearsOnItsOwn:  {Noul: ptr(ans.ClearsOnItsOwn)},
+			jevattention.QRepeatsOpenItem: {Noul: ptr(ans.RepeatsOpenItem)},
+			jevattention.QUrgency:         {Score: ptr(ans.Urgency.Score)},
 		},
+	}
+	// Lines logged after routine_action_fixes left the battery carry no answer
+	// for it, so only a line that has one is scored on it.
+	if ans.RoutineActionFixes != nil {
+		it.Answers[jevattention.QRoutineActionFixes] = Answer{Noul: ans.RoutineActionFixes}
 	}
 	a.lines[it.ID] = l
 	return it, nil

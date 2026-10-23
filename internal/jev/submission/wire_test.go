@@ -606,9 +606,14 @@ func TestJevSubmissionAskCarriesTheNewQuestions(t *testing.T) {
 			if len(sent.Questions) != len(Questions()) {
 				t.Errorf("request asks %d questions, want %d", len(sent.Questions), len(Questions()))
 			}
-			for _, id := range []string{QClaimsVerified, QVerificationApplies, QBoxesCredible, QOutcome} {
+			for _, id := range []string{QClaimsVerified, QVerificationApplies} {
 				if _, ok := sent.Questions[id]; !ok {
 					t.Errorf("request does not ask %s", id)
+				}
+			}
+			for _, id := range []string{QWillPassReview, QBoxesCredible, QOutcome} {
+				if _, ok := sent.Questions[id]; ok {
+					t.Errorf("request still asks %s, want it dropped from the battery", id)
 				}
 			}
 			if _, ok := stateFields(t, sent.State)["mr_notes"]; !ok {
@@ -623,15 +628,11 @@ func TestJevSubmissionAskCarriesTheNewQuestions(t *testing.T) {
 			if n := got[QClaimsVerified].Noul; n == nil || *n != 0.9 {
 				t.Errorf("claims_verified = %+v, want noul 0.9", got[QClaimsVerified])
 			}
-			if n := got[QBoxesCredible].Noul; n == nil || *n != 0.7 {
-				t.Errorf("boxes_credible = %+v, want noul 0.7", got[QBoxesCredible])
+			if a, ok := got[QBoxesCredible]; ok {
+				t.Errorf("boxes_credible = %+v, want no answer: the question is no longer asked", a)
 			}
-			outcome := got[QOutcome]
-			if outcome.Choice != OutcomeComplete || outcome.Positive != OutcomeComplete {
-				t.Errorf("outcome = %+v, want complete with complete positive", outcome)
-			}
-			if outcome.Probabilities[OutcomeComplete] != 0.7 || len(outcome.Probabilities) != 4 {
-				t.Errorf("outcome probabilities = %v, want all four options with complete at 0.7", outcome.Probabilities)
+			if a, ok := got[QOutcome]; ok {
+				t.Errorf("outcome = %+v, want no answer: the question is no longer asked", a)
 			}
 		})
 	}

@@ -47,12 +47,6 @@ func Questions() map[string]jev.Question {
 			True:         "The condition goes away by itself, with no one acting.",
 			False:        "The condition stays until someone acts on it.",
 		},
-		QRoutineActionFixes: {
-			Type:         "noul",
-			Instructions: judgeFrame + "Would a known routine action by the overseer or the town settle this item?",
-			True:         "A known routine action by the overseer or the town settles it.",
-			False:        "No known routine action settles it.",
-		},
 		QRepeatsOpenItem: {
 			Type:         "noul",
 			Instructions: judgeFrame + "Does another open item in the list describe the same condition?",

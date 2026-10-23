@@ -123,9 +123,9 @@ func printRecentDispatch(w io.Writer, path string, n int) error {
 			agent = "-"
 		}
 		a := l.Answers
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.2f\t%.1f\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.2f\t%.2f\t%.2f\t%.2f\t%.1f\t%s\n",
 			l.TS.Local().Format("2006-01-02 15:04"), l.Bead, agent,
-			a.LandsFirstTry, a.FitsTwentyMinutes, a.AcceptanceTickable, a.NeedsStrongModel, a.TouchesDaemon,
+			noulCell(a.LandsFirstTry), a.FitsTwentyMinutes, a.AcceptanceTickable, a.NeedsStrongModel, a.TouchesDaemon,
 			a.Size.Score, l.Model)
 	}
 	return tw.Flush()

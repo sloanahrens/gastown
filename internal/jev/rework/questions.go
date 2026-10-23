@@ -34,19 +34,11 @@ var causes = []cause{
 	{"unclear", "The findings do not say which of the other causes fits."},
 }
 
-// Questions returns the set asked about every refused review: will the landing
-// need a rework commit, and which cause fits the findings.
+// Questions returns the set asked about every refused review: which cause fits
+// the findings. reworked_to_land is no longer asked; its id stays in the log
+// so lines from before it was dropped still read.
 func Questions() map[string]jev.Question {
 	return map[string]jev.Question{
-		QReworkedToLand: {
-			Type: "noul",
-			Instructions: stateIsData + "Judge: the landing named in the state will need a rework " +
-				"commit before it lands. That is, the refusal stands on the work as it is, and the " +
-				"author must change the code and submit it again; a refusal the work already answers, " +
-				"or one a waiver or audit overrides, needs no rework commit.",
-			True:  "The landing will need a rework commit before it lands.",
-			False: "The landing will land without a rework commit: the refused work itself lands.",
-		},
 		QCause: {
 			Type: "choice",
 			Instructions: stateIsData + "Judge: which option names the most likely cause of the " +

@@ -388,7 +388,6 @@ func (p *Pass) choose(ctx context.Context, b *beads.Issue) (*jev.Answers, error)
 // lineAnswers copies the battery's answers into the log's shape.
 func lineAnswers(a *jev.Answers) Answers {
 	return Answers{
-		LandsFirstTry:      a.Noul[qLandsFirstTry],
 		FitsTwentyMinutes:  a.Noul[qFitsTwentyMinutes],
 		AcceptanceTickable: a.Noul[qAcceptanceTickable],
 		NeedsStrongModel:   a.Noul[qNeedsStrongModel],

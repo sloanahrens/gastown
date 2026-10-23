@@ -249,9 +249,6 @@ func (p *Pass) ask(ctx context.Context, rec land.ReviewRecord) (Line, error) {
 	if err != nil {
 		return Line{}, err
 	}
-	if _, ok := got.Noul[QReworkedToLand]; !ok {
-		return Line{}, fmt.Errorf("%w: no %s answer", jev.ErrBadResponse, QReworkedToLand)
-	}
 	if _, ok := got.Choice[QCause]; !ok {
 		return Line{}, fmt.Errorf("%w: no %s answer", jev.ErrBadResponse, QCause)
 	}
@@ -413,13 +410,11 @@ func formatFindings(findings []land.Finding) string {
 	return b.String()
 }
 
-// answersFrom reads the two answers out of one Ask result.
+// answersFrom reads the cause answer out of one Ask result.
 func answersFrom(got *jev.Answers) map[string]Answer {
-	rework := got.Noul[QReworkedToLand]
 	cause := got.Choice[QCause]
 	return map[string]Answer{
-		QReworkedToLand: {Noul: &rework},
-		QCause:          {Choice: cause.Choice, Probabilities: cause.Probabilities},
+		QCause: {Choice: cause.Choice, Probabilities: cause.Probabilities},
 	}
 }
 
