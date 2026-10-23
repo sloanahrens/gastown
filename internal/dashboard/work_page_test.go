@@ -126,8 +126,8 @@ func workQueueReading(ready, landing, blockedWork, blockedWisps int) map[string]
 }
 
 // TestTheWorkPanelDrawsARowPerSeat drives the panel over two seats — one
-// holding a bead, one idle — and reads the rows back: the agent the session
-// runs, the polecat, the bead with its title, the state and the bead's age,
+// holding a bead, one idle — and reads the rows back: the polecat, the agent
+// the session runs, the bead with its title, the state and the bead's age,
 // in that order, with the seats holding nothing folded under the ones that
 // hold something (gt-vcr3z).
 func TestTheWorkPanelDrawsARowPerSeat(t *testing.T) {
@@ -480,9 +480,22 @@ func TestTheWorkRowsCannotOverflowTheirPanel(t *testing.T) {
 	if cols == "" {
 		t.Fatal("the Work panel's rows lay out no columns")
 	}
-	tracks := strings.Fields(cols)
+	// Every track is named for the cell it holds, so the template states the
+	// column order workHead and workRow draw instead of describing an order
+	// the page no longer uses (gt-dp6u3 swapped the first two).
+	var tracks, names []string
+	for _, tok := range strings.Fields(cols) {
+		if n, ok := strings.CutPrefix(tok, "["); ok {
+			names = append(names, strings.TrimSuffix(n, "]"))
+			continue
+		}
+		tracks = append(tracks, tok)
+	}
+	if got, want := strings.Join(names, " "), "polecat agent bead state age"; got != want {
+		t.Errorf("a seat's row names its columns %q, want %q in the order the header draws them", got, want)
+	}
 	if len(tracks) != 5 {
-		t.Errorf("a seat's row lays out %d columns (%q), want five: agent, polecat, bead, state, age", len(tracks), cols)
+		t.Errorf("a seat's row lays out %d columns (%q), want five: polecat, agent, bead, state, age", len(tracks), cols)
 	}
 	flex := 0
 	for _, track := range tracks {
@@ -612,7 +625,10 @@ func TestTheWorkQueueScrollsOnlyItsBeadRows(t *testing.T) {
 		t.Fatalf("the queue list's last child is not the scrolling rows region: %v", got.Kids)
 	}
 	fixed := strings.Join(got.Kids[:len(got.Kids)-1], " ")
-	for _, want := range []string{"qtabs", "empty"} {
+	// The caption wears its own class: the generic "empty" one also marks the
+	// "nothing matches these filters" placeholder inside the scrolling rows, so
+	// a test looking for it would pass on a queue list with no caption at all.
+	for _, want := range []string{"qtabs", "qcaption"} {
 		if !strings.Contains(fixed, want) {
 			t.Errorf("the queue list draws no %s above its scrolling rows, so it scrolls out of view: %v", want, got.Kids)
 		}
