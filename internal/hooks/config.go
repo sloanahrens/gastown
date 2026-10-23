@@ -951,6 +951,14 @@ func DefaultBase() *HooksConfig {
 						Type:    "command",
 						Command: gtCommand("gt tap guard bd-close-invariant"),
 					},
+					// sandbox-secrets self-filters on GT_SESSION_BACKEND=openshell: it
+					// refuses a command that prints the environment or a secret, which
+					// would put a credential placeholder into a sandbox agent's
+					// conversation and kill its session. It does nothing on a host.
+					{
+						Type:    "command",
+						Command: gtCommand("gt tap guard sandbox-secrets"),
+					},
 				},
 			},
 		},
