@@ -235,19 +235,24 @@ func poolUnseatableLabel(pool *config.PolecatPool, labels []string) error {
 
 // poolBeadAgent is poolPinnedAgent for the bead beadID, read from bd.
 func poolBeadAgent(townRoot, beadID string) (string, error) {
-	return poolBeadAgentWith(townRoot, beadID, time.Now(), showBead, func(townRoot string) (*config.TownSettings, error) {
-		return config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
-	})
+	return poolBeadAgentWith(townRoot, beadID, time.Now(), showBead, poolTownSettings)
+}
+
+// poolTownSettings is the town's settings file, which holds its seat pool.
+func poolTownSettings(townRoot string) (*config.TownSettings, error) {
+	return config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
 }
 
 // poolBeadAgentWith is poolBeadAgent over the bead and settings readers it is
-// handed. The town settings are read first: a pool with no seats has no opinion
-// on labels, so a town without one never reads the bead. Past that, a bead or
-// settings read that fails refuses the sling: the label decides the seat, so a
+// handed. The label decides the seat, so a read that fails refuses the sling: a
 // bead whose label cannot be read must not take the unlabeled route, where a
-// pinned-only bead would run on an open seat. A label the pool cannot seat, or
-// whose seat is closed at now, is a refusal too (poolUnseatableLabel,
-// poolLabelRoute).
+// pinned-only bead would run on an open seat. A town without a pool never reads
+// the bead, as a pool with no seats has no opinion on labels. Settings that
+// cannot be read leave that unknown, so the bead is read and only one that
+// carries an agent: label is refused: an unlabeled bead has no seat to honor,
+// and the spawn stops on the same unreadable settings when it picks the seat's
+// backend. A label the pool cannot seat, or whose seat is closed at now, is a
+// refusal too (poolUnseatableLabel, poolLabelRoute).
 func poolBeadAgentWith(townRoot, beadID string, now time.Time,
 	show func(townRoot, beadID string) (*beads.Issue, error),
 	settings func(townRoot string) (*config.TownSettings, error),
@@ -255,11 +260,8 @@ func poolBeadAgentWith(townRoot, beadID string, now time.Time,
 	if beadID == "" {
 		return "", nil
 	}
-	ts, err := settings(townRoot)
-	if err != nil {
-		return "", fmt.Errorf("could not read town settings for %s's %s label: %w", beadID, specdispatch.AgentLabelPrefix, err)
-	}
-	if ts == nil || ts.PolecatPool == nil || len(ts.PolecatPool.Seats) == 0 {
+	ts, settingsErr := settings(townRoot)
+	if settingsErr == nil && (ts == nil || ts.PolecatPool == nil || len(ts.PolecatPool.Seats) == 0) {
 		return "", nil
 	}
 	issue, err := show(townRoot, beadID)
@@ -267,7 +269,13 @@ func poolBeadAgentWith(townRoot, beadID string, now time.Time,
 		return "", fmt.Errorf("could not read %s for its %s label: %w", beadID, specdispatch.AgentLabelPrefix, err)
 	}
 	if issue == nil {
-		return "", nil
+		return "", fmt.Errorf("could not read %s for its %s label: no bead returned", beadID, specdispatch.AgentLabelPrefix)
+	}
+	if settingsErr != nil {
+		if len(specdispatch.Spec{Labels: issue.Labels}.PinnedAgents()) == 0 {
+			return "", nil
+		}
+		return "", fmt.Errorf("could not read town settings for %s's %s label: %w", beadID, specdispatch.AgentLabelPrefix, settingsErr)
 	}
 	if err := poolUnseatableLabel(ts.PolecatPool, issue.Labels); err != nil {
 		return "", err
