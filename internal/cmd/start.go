@@ -239,7 +239,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 
 	// Phase 4: Kill sessions in correct order
 	fmt.Printf("\nPhase 4: Terminating sessions...\n")
-	stopped := killSessionsInOrder(t, gtSessions)
+	stopped := killSessionsInOrder(t, gtSessions, newShutdownStopper(townRoot))
 
 	// Phase 5: Always clean up orphaned Claude processes after killing sessions.
 	// Processes can survive session kills if they caught/ignored SIGHUP or called setsid().
@@ -276,7 +276,7 @@ func runGracefulShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) err
 func runImmediateShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) error {
 	fmt.Println("Shutting down Gas Town...")
 
-	stopped := killSessionsInOrder(t, gtSessions)
+	stopped := killSessionsInOrder(t, gtSessions, newShutdownStopper(townRoot))
 
 	// Always clean up orphaned Claude processes after killing sessions.
 	// Processes can survive session kills if they caught/ignored SIGHUP or called setsid().
@@ -315,13 +315,52 @@ func runImmediateShutdown(t *tmux.Tmux, gtSessions []string, townRoot string) er
 	return nil
 }
 
+// shutdownStopper ends one session for gt down / gt shutdown and removes what
+// a sandboxed session leaves behind.
+type shutdownStopper struct {
+	// stop kills the session and its processes.
+	stop func(sess string) error
+	// cleanup removes the session's sandbox and registry record; a host
+	// session has none and it does nothing.
+	cleanup func(sess string) error
+}
+
+// newShutdownStopper stops sessions through the operator supervisor (an
+// explicit stop, logged and recorded as desired=stop, not refused by a hold or
+// e-stop) and deletes a sandboxed session's sandbox after its kill. Without a
+// town root there is no supervisor or registry, and the kill is a plain tmux
+// kill.
+func newShutdownStopper(townRoot string) shutdownStopper {
+	if townRoot == "" {
+		return shutdownStopper{
+			stop:    tmux.NewTmux().KillSessionWithProcesses,
+			cleanup: func(string) error { return nil },
+		}
+	}
+	sup := operatorSupervisor(townRoot)
+	actor := operatorActor("down")
+	return shutdownStopper{
+		stop: func(sess string) error { return sup.StopSession(sess, "gt down", actor) },
+		cleanup: func(sess string) error {
+			return session.CleanupSandboxWith(session.SandboxDeleter, townRoot, sess)
+		},
+	}
+}
+
+// sessionExistence answers whether a tmux session exists.
+type sessionExistence interface {
+	HasSession(name string) (bool, error)
+}
+
 // killSessionsInOrder stops every session, matching gt down. Only rig-level
 // sessions (polecats, crew, and any session left over from a retired role)
-// remain, so the order is the list's.
+// remain, so the order is the list's. A sandboxed session's sandbox is deleted
+// once its session is gone; a sandbox that cannot be deleted is reported and
+// the session still counts as stopped.
 //
 // Returns the count of sessions that were successfully stopped (verified by checking
 // if the session no longer exists after the kill attempt).
-func killSessionsInOrder(t *tmux.Tmux, sessions []string) int {
+func killSessionsInOrder(t sessionExistence, sessions []string, st shutdownStopper) int {
 	stopped := 0
 
 	// Helper to kill a session and verify it was stopped
@@ -333,17 +372,20 @@ func killSessionsInOrder(t *tmux.Tmux, sessions []string) int {
 		}
 
 		// Attempt to kill the session and its processes
-		_ = t.KillSessionWithProcesses(sess)
+		_ = st.stop(sess)
 
 		// Verify the session is actually gone (ignore error, check existence)
-		// KillSessionWithProcesses might return an error even if it successfully
+		// the kill might return an error even if it successfully
 		// killed the processes and the session auto-closed
 		stillExists, _ := t.HasSession(sess)
-		if !stillExists {
-			fmt.Printf("  %s %s stopped\n", style.Bold.Render("✓"), sess)
-			return true
+		if stillExists {
+			return false
 		}
-		return false
+		if err := st.cleanup(sess); err != nil {
+			fmt.Printf("  %s %s: sandbox not removed: %v\n", style.Warning.Render("!"), sess, err)
+		}
+		fmt.Printf("  %s %s stopped\n", style.Bold.Render("✓"), sess)
+		return true
 	}
 
 	for _, sess := range sessions {
