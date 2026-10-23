@@ -462,6 +462,15 @@ func (c *Config) HostPort() string {
 	return net.JoinHostPort(host, strconv.Itoa(c.Port))
 }
 
+// tcpDSN returns the MySQL DSN for a connection that selects no database. It
+// builds the address with HostPort, so an IPv6 host is bracketed: written as
+// "tcp(::1:3307)" the driver reads every colon as a separator and the dial
+// fails ("too many colons"), which made the latency, commit-age and drain
+// probes report an unreachable server on an IPv6 town.
+func (c *Config) tcpDSN() string {
+	return fmt.Sprintf("%s@tcp(%s)/", c.UserDSN(), c.HostPort())
+}
+
 // buildDoltSQLCmd constructs a non-interactive dolt sql command that always
 // talks to the running SQL server over TCP.
 //
@@ -2447,8 +2456,7 @@ func (h *host) cleanStaleSocket(socketPath string) {
 // the window where SIGTERM hits live storage I/O. Non-fatal: if the drain times
 // out or the server is unreachable, we proceed with SIGTERM anyway.
 func (h *host) drainConnectionsBeforeStop(config *Config) {
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/?timeout=3s&readTimeout=5s&writeTimeout=5s",
-		config.UserDSN(), config.EffectiveHost(), config.Port)
+	dsn := config.tcpDSN() + "?timeout=3s&readTimeout=5s&writeTimeout=5s"
 	db, err := h.openMySQL(dsn)
 	if err != nil {
 		return
@@ -4781,7 +4789,7 @@ func RecoverReadOnly(townRoot string) error {
 func (h *host) MeasureQueryLatency(townRoot string) (time.Duration, error) {
 	config := h.DefaultConfig(townRoot)
 
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/", config.UserDSN(), config.EffectiveHost(), config.Port)
+	dsn := config.tcpDSN()
 	db, err := h.openMySQL(dsn)
 	if err != nil {
 		return 0, fmt.Errorf("opening mysql connection: %w", err)
@@ -4823,7 +4831,7 @@ func MeasureQueryLatency(townRoot string) (time.Duration, error) {
 func (h *host) GetLastCommitAge(townRoot string) (time.Duration, string, error) {
 	config := h.DefaultConfig(townRoot)
 
-	dsn := fmt.Sprintf("%s@tcp(%s:%d)/", config.UserDSN(), config.EffectiveHost(), config.Port)
+	dsn := config.tcpDSN()
 	db, err := h.openMySQL(dsn)
 	if err != nil {
 		return 0, "", fmt.Errorf("opening mysql connection: %w", err)
