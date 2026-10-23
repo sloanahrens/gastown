@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log"
@@ -318,7 +319,7 @@ exit 0
 				if err := writeStopRequested(d.config.TownRoot, os.Getpid(), time.Now()); err != nil {
 					t.Fatal(err)
 				}
-				if err := d.shutdownForSignal(syscall.SIGTERM, &State{}); err != nil {
+				if err := d.shutdownForSignal(syscall.SIGTERM, &State{Running: true}); err != nil {
 					t.Fatalf("a gt down stop must exit without ErrUnrequestedStop, got %v", err)
 				}
 			}
@@ -410,20 +411,23 @@ func TestShutdownForSignalRecordsTheStopTheHealHelperReads(t *testing.T) {
 		requested bool   // StopDaemon left a marker for this pid before the signal
 		wantKind  string // the record's second line, which the helper matches
 		wantErr   error
+		wantLog   bool
 	}{
 		{name: "a stop gt requested exits 0 and is recorded as requested", requested: true, wantKind: signalStopRequested},
-		{name: "an unrequested signal exits 75 and is recorded as unrequested", wantKind: signalStopUnrequested, wantErr: ErrUnrequestedStop},
+		{name: "an unrequested signal exits 75 and is recorded as unrequested", wantKind: signalStopUnrequested, wantErr: ErrUnrequestedStop, wantLog: true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			d := upgradeTestDaemon(t)
+			var logs bytes.Buffer
+			d.logger = log.New(&logs, "", 0)
 			if tc.requested {
 				if err := writeStopRequested(d.config.TownRoot, os.Getpid(), time.Now()); err != nil {
 					t.Fatal(err)
 				}
 			}
-			if err := d.shutdownForSignal(syscall.SIGTERM, &State{}); !errors.Is(err, tc.wantErr) {
+			if err := d.shutdownForSignal(syscall.SIGTERM, &State{Running: true}); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("signal shutdown = %v, want %v", err, tc.wantErr)
 			}
 			data, err := os.ReadFile(signalStopPath(d.config.TownRoot))
@@ -432,6 +436,16 @@ func TestShutdownForSignalRecordsTheStopTheHealHelperReads(t *testing.T) {
 			}
 			if fields := strings.Fields(string(data)); len(fields) != 2 || fields[1] != tc.wantKind {
 				t.Fatalf("signal-stop record = %q, want a second line %q", data, tc.wantKind)
+			}
+			if got := strings.Contains(logs.String(), unrequestedStopLogLine); got != tc.wantLog {
+				t.Fatalf("unrequested-stop line logged = %v, want %v:\n%s", got, tc.wantLog, logs.String())
+			}
+			saved, err := LoadState(d.config.TownRoot)
+			if err != nil {
+				t.Fatalf("the shutdown did not save the state it was given: %v", err)
+			}
+			if saved.Running {
+				t.Fatal("the shutdown saved a state that still says Running")
 			}
 		})
 	}
