@@ -399,6 +399,43 @@ func TestFollowupBackpressureAlertLogsADeliveryThatFailed(t *testing.T) {
 	}
 }
 
+// TestAcceptedRiskAlertRaisesAKeyedMediumItem: the overseer sees an accepted
+// risk as a MEDIUM escalation keyed by the bead and head the review judged, so
+// a repeat of that review keeps one item (gt-tvhg8).
+func TestAcceptedRiskAlertRaisesAKeyedMediumItem(t *testing.T) {
+	t.Parallel()
+	d, rec := daemonWithRecorder(t)
+	const key, message = "accepted-risk:gt-x:abc1234", "om review of gt-x at abc1234 used 1 accepted risk(s)"
+	if err := d.acceptedRiskAlert()(key, message); err != nil {
+		t.Fatalf("alert: %v", err)
+	}
+	got := rec.Escalations()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %+v, want one", got)
+	}
+	if got[0].Escalation.Severity != "MEDIUM" || got[0].Escalation.Fingerprint != key || got[0].Escalation.Reason != message {
+		t.Errorf("escalation = %+v, want MEDIUM keyed %q with the message", got[0].Escalation, key)
+	}
+}
+
+// TestAcceptedRiskAlertReturnsADeliveryThatFailed: the lander logs a failed
+// attention item, so the adapter hands the delivery error back instead of
+// swallowing it (gt-tvhg8).
+func TestAcceptedRiskAlertReturnsADeliveryThatFailed(t *testing.T) {
+	t.Parallel()
+	d, rec := daemonWithRecorder(t)
+	rec.Fail(notifyfake.KindEscalate, errors.New("gt escalate: exit status 1 (bd: database not found)"))
+	clk := newFixedClock()
+	d.clock = clk
+	var err error
+	runOnClock(t, clk, time.Second, func() {
+		err = d.acceptedRiskAlert()("accepted-risk:gt-x:abc1234", "om review of gt-x used 1 accepted risk(s)")
+	})
+	if err == nil || !strings.Contains(err.Error(), "database not found") {
+		t.Errorf("alert error = %v, want the refused delivery", err)
+	}
+}
+
 // TestFollowupBeadsFilesAndListsOverTheClient: the adapter is the whole bridge
 // between the feed's own types and bd's — a spec becomes one create, and the
 // list returns the labeled beads of every status, which is the set the next

@@ -167,6 +167,10 @@ type Lander struct {
 	// one item. An error is logged and never fails the landing. Nil reports
 	// nothing.
 	AcceptedRiskAlert func(key, message string) error
+	// auditTimeout overrides commentTimeout for the accepted-risk writes, so a
+	// test can reach the timeout without waiting it out. Zero keeps
+	// commentTimeout.
+	auditTimeout time.Duration
 	// RangeChecks run on base..head before the merge (the landing worker
 	// passes AttributionCheck). A returned Rejection is written to the bead
 	// like any other.
@@ -975,29 +979,61 @@ const AcceptedRiskUsedMarker = "ACCEPTED-RISK USED"
 // recordAcceptedRisks leaves the audit of a review that was given accepted
 // risks (gt-tvhg8): one landing note on the work bead naming every entry, and
 // one attention item through AcceptedRiskAlert. A review given none leaves
-// neither. Both writes share commentTimeout with the verdict comment, so a
-// slow bead costs a log line and never fails the landing.
+// neither. The two writes run apart, so a note that hangs never holds up the
+// item, and the pair shares acceptedRiskTimeout, so a slow bead costs a log
+// line and never fails the landing.
 func (l *Lander) recordAcceptedRisks(w Work, used []AcceptedRisk) {
 	if len(used) == 0 {
 		return
 	}
-	done := make(chan error, 1)
+	note := acceptedRiskNote(w.Head, used)
+	writes := make(chan error, 2)
 	go func() {
-		note := l.Beads.AppendNotes(w.BeadID, acceptedRiskNote(w.Head, used))
+		writes <- wrapErr("the landing note", l.writeAcceptedRiskNote(w.BeadID, note))
+	}()
+	go func() {
 		var alert error
 		if l.AcceptedRiskAlert != nil {
 			alert = l.AcceptedRiskAlert(acceptedRiskKey(w), acceptedRiskMessage(w, used))
 		}
-		done <- errors.Join(wrapErr("the landing note", note), wrapErr("the attention item", alert))
+		writes <- wrapErr("the attention item", alert)
 	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			l.logf("%s: could not record the accepted risks this review used (%v); the landing is unaffected", w.BeadID, err)
+	limit := l.acceptedRiskTimeout()
+	timeout := time.After(limit)
+	var errs []error
+	for range 2 {
+		select {
+		case err := <-writes:
+			errs = append(errs, err)
+		case <-timeout:
+			l.logf("%s: recording the accepted risks this review used did not finish in %s; the landing is unaffected", w.BeadID, limit)
+			return
 		}
-	case <-time.After(commentTimeout):
-		l.logf("%s: recording the accepted risks this review used did not finish in %s; the landing is unaffected", w.BeadID, commentTimeout)
 	}
+	if err := errors.Join(errs...); err != nil {
+		l.logf("%s: could not record the accepted risks this review used (%v); the landing is unaffected", w.BeadID, err)
+	}
+}
+
+// writeAcceptedRiskNote appends note to id unless the bead already carries it.
+// A review that is recorded again for the same head and the same entries, as a
+// landing retried after a failure past the review is, leaves its audit once. A
+// bead whose notes cannot be read gets the note anyway: a second copy costs
+// less than a missing audit.
+func (l *Lander) writeAcceptedRiskNote(id, note string) error {
+	if issue, err := l.Beads.Show(id); err == nil && strings.Contains(issue.Notes, note) {
+		return nil
+	}
+	return l.Beads.AppendNotes(id, note)
+}
+
+// acceptedRiskTimeout bounds the accepted-risk writes: commentTimeout, unless a
+// test has shortened it through auditTimeout.
+func (l *Lander) acceptedRiskTimeout() time.Duration {
+	if l.auditTimeout > 0 {
+		return l.auditTimeout
+	}
+	return commentTimeout
 }
 
 // wrapErr names which write failed, and passes a nil error through unchanged.
