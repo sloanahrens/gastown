@@ -2419,8 +2419,8 @@ func TestSlingSeatSpawnHonorsTheBeadAgentLabel(t *testing.T) {
 		router := w.process()
 		s := slingSeatSpawn{
 			backpressure: func(string, string, SlingSpawnOptions) error { return nil },
-			pinnedAgent: func(_, beadID string) string {
-				return poolPinnedAgent(pool, labels[beadID])
+			pinnedAgent: func(_, beadID string) (string, error) {
+				return poolPinnedAgent(pool, labels[beadID]), nil
 			},
 			resolvePool: func(_, requested string) (string, string, error) { return router.route(requested, true) },
 			releaseSeat: router.seats.store.release,
@@ -2448,32 +2448,87 @@ func TestSlingSeatSpawnHonorsTheBeadAgentLabel(t *testing.T) {
 }
 
 // poolRequestedAgent keeps --agent over the bead's label, and reads the label
-// only when a bead is slung and a reader is wired (gt-5h1r7).
+// only when a bead is slung and a reader is wired (gt-5h1r7). A label whose seat
+// is closed refuses the request; --agent naming that same seat does not.
 func TestPoolRequestedAgent(t *testing.T) {
 	t.Parallel()
-	label := func(townRoot, beadID string) string {
+	refusal := &poolBackpressureError{}
+	label := func(townRoot, beadID string) (string, error) {
 		if townRoot != "/town" || beadID != "gt-1" {
 			t.Errorf("label read for %q in %q, want gt-1 in /town", beadID, townRoot)
 		}
-		return "deepseek-flash"
+		return "deepseek-flash", nil
+	}
+	closedLabel := func(townRoot, beadID string) (string, error) {
+		return "", refusal
 	}
 	cases := []struct {
-		name   string
-		agent  string
-		beadID string
-		pinned func(townRoot, beadID string) string
-		want   string
+		name    string
+		agent   string
+		beadID  string
+		pinned  func(townRoot, beadID string) (string, error)
+		want    string
+		wantErr error
 	}{
-		{"no agent takes the label", "", "gt-1", label, "deepseek-flash"},
-		{"--agent wins over the label", "claude-sonnet", "gt-1", label, "claude-sonnet"},
-		{"no bead reads no label", "", "", label, ""},
-		{"no reader reads no label", "", "gt-1", nil, ""},
+		{"no agent takes the label", "", "gt-1", label, "deepseek-flash", nil},
+		{"--agent wins over the label", "claude-sonnet", "gt-1", label, "claude-sonnet", nil},
+		{"no bead reads no label", "", "", label, "", nil},
+		{"no reader reads no label", "", "gt-1", nil, "", nil},
+		{"a closed label refuses the request", "", "gt-1", closedLabel, "", refusal},
+		{"--agent over a closed label is not refused", "claude-sonnet", "gt-1", closedLabel, "claude-sonnet", nil},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			if got := poolRequestedAgent("/town", tc.agent, tc.beadID, tc.pinned); got != tc.want {
+			got, err := poolRequestedAgent("/town", tc.agent, tc.beadID, tc.pinned)
+			if got != tc.want {
 				t.Errorf("poolRequestedAgent(%q, %q) = %q, want %q", tc.agent, tc.beadID, got, tc.want)
+			}
+			if (err != nil) != (tc.wantErr != nil) {
+				t.Errorf("poolRequestedAgent(%q, %q) error = %v, want %v", tc.agent, tc.beadID, err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// A bead labeled agent:<seat> routes to that seat only while the seat is open:
+// inside its closed window the label refuses the sling instead of falling back
+// to another seat, as the dispatcher waits for it (gt-yc9rf). The window is
+// read at the given clock, so the table names no wall time.
+func TestPoolLabelRoute(t *testing.T) {
+	t.Parallel()
+	pool := &config.PolecatPool{Timezone: "America/Chicago", Seats: map[string]config.SeatConfig{
+		"deepseek-flash": {Cap: 3, PinnedOnly: true, Closed: "20:00-08:00"},
+		"claude-sonnet":  {Cap: 2},
+	}}
+	cases := []struct {
+		name    string
+		pool    *config.PolecatPool
+		agent   string
+		now     time.Time
+		want    string
+		refused bool
+	}{
+		{"an open window routes the labeled bead to its seat", pool, "deepseek-flash", chicagoAt(t, 12, 0), "deepseek-flash", false},
+		{"inside the closed window the labeled bead is refused", pool, "deepseek-flash", chicagoAt(t, 21, 0), "", true},
+		{"the window's edge at 08:00 reopens the seat", pool, "deepseek-flash", chicagoAt(t, 8, 0), "deepseek-flash", false},
+		{"no label passes through at any hour", pool, "", chicagoAt(t, 21, 0), "", false},
+		{"a seat with no window is never refused", pool, "claude-sonnet", chicagoAt(t, 21, 0), "claude-sonnet", false},
+		{"no pool passes the empty label through", nil, "", chicagoAt(t, 21, 0), "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := poolLabelRoute(tc.pool, tc.agent, tc.now)
+			if got != tc.want {
+				t.Errorf("poolLabelRoute(%q) = %q, want %q", tc.agent, got, tc.want)
+			}
+			var refusal *poolBackpressureError
+			if refused := errors.As(err, &refusal); refused != tc.refused {
+				t.Fatalf("poolLabelRoute(%q) refused = %v (err %v), want %v", tc.agent, refused, err, tc.refused)
+			}
+			if tc.refused && !errors.Is(err, errPoolBackpressure) {
+				t.Errorf("a closed label's refusal is not a pool backpressure: %v", err)
 			}
 		})
 	}
@@ -2494,11 +2549,11 @@ func TestResolveTarget_DryRunPeeksThePoolWithTheBeadAgentLabel(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			h := newSlingHarness(t)
-			h.run.pinnedAgent = func(townRoot, beadID string) string {
+			h.run.pinnedAgent = func(townRoot, beadID string) (string, error) {
 				if townRoot != slingTestTown || beadID != "gt-new" {
 					t.Errorf("label read for %q in %q, want gt-new in %s", beadID, townRoot, slingTestTown)
 				}
-				return "deepseek-flash"
+				return "deepseek-flash", nil
 			}
 			var peeked []string
 			h.run.peekPool = func(_, requested string) (string, string, error) {
