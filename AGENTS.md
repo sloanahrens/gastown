@@ -10,26 +10,26 @@ Full context is injected by `gt prime` at session start.
 
 ## Build and test
 
-The `Makefile` defines what each target runs; these lines say which one to reach for. Before changing a build or test entry point, read its recipe.
+Before changing a build or test entry point, read its recipe in the `Makefile`; the lines here only say when to reach for each target.
 
-- `make lint`: the repo's lint set, starting with the doc and comment rules. Run it on a branch that touches prose.
-- `make presubmit`: the cheap check before submitting — only the packages your branch changed. `gt done` runs it for you.
-- `make gate`: what the landing worker runs on the merged tree. Run it once on a branch you believe is finished, not after each edit.
-- `make test`: every tier a human would run, container tiers included. It needs a container slot: run it under `gt slot run`.
-- `make build`: compiles `gt`; the targets above include it, so call it alone only to check that the tree compiles.
-- `make install`: deploys merged `origin/main` into the town and queues a daemon restart, never your working branch. To exercise a local build, use `make install-local` with a temporary `INSTALL_DIR`.
+- `make lint`: when your branch touches prose, so the doc and comment rules run before a reviewer sees it.
+- `make presubmit`: as the cheap first look before submitting; `gt done` runs it for you.
+- `make gate`: once, on a branch you believe is finished — the landing worker runs it on the merged tree.
+- `make test`: when you need the container tiers. It needs a container slot, so run it under `gt slot run`.
+- `make build`: only to check that the tree compiles; the targets above build it too.
+- `make install`: to move the town onto merged `origin/main` — to exercise a local build instead, use `make install-local` with a temporary `INSTALL_DIR`.
 
 A bare `go build` or `go test` fails on the ICU headers on macOS; the make targets export the flags for you.
 
 ## Architecture in five lines
+
+Before changing how sessions are supervised, how work is landed, or where beads are stored, read [Understanding Gas Town](docs/overview.md); it is the source for each line below, which are orientation only.
 
 - The daemon is one Go process: it supervises agent sessions and is the only thing that restarts one.
 - Its landing worker gates and merges branches that `gt done` marked ready, and is the only non-human route to `main`.
 - Polecats are workers with persistent identity and ephemeral sessions: one bead, one branch, then `gt done`.
 - Beads, mail and work history live in Dolt on port 3307; `bd` and `gt` read and write it.
 - Forgejo is the origin the landing path merges into; GitHub is a read-only push mirror ([design](docs/design/forgejo-primary-landing.md)).
-
-For role detail and lifecycle, read [Understanding Gas Town](docs/overview.md).
 
 <!-- beads-agent-instructions-v2 -->
 
