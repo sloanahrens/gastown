@@ -540,6 +540,51 @@ func TestChooseSeatPinnedAgent(t *testing.T) {
 	}
 }
 
+// A pinned-only seat is never drawn for an unlabelled bead, nor for a bead
+// pinned to another agent; a bead labelled for its agent still takes it within
+// its cap (gt-zor86).
+func TestChooseSeatPinnedOnly(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)
+	flash := func(live int) Seat { return Seat{Agent: "deepseek-flash", Cap: 1, Live: live, PinnedOnly: true} }
+	sonnet := Seat{Agent: "claude-sonnet", Cap: 2}
+
+	// The pinned-only seat is the only free seat, so an unlabelled bead must
+	// skip rather than draw it.
+	unlabelled := Budget{Seats: []Seat{flash(0)}, Now: now, Rand: randForIndex(0, 1)}
+	if got := ChooseSeat(unlabelled, goodSpec()); !got.Skip || got.Agent != "" {
+		t.Errorf("unlabelled bead drew a pinned-only seat: %+v", got)
+	}
+
+	// With an open seat of another agent, the unlabelled bead takes that one.
+	mixed := Budget{Seats: []Seat{flash(0), sonnet}, Now: now, Rand: randForIndex(0, 1)}
+	if got := ChooseSeat(mixed, goodSpec()); got.Skip || got.Agent != "claude-sonnet" {
+		t.Errorf("unlabelled bead with a pinned-only and an open seat = %+v, want claude-sonnet", got)
+	}
+
+	// A bead pinned to another agent never reaches the pinned-only seat.
+	other := goodSpec()
+	other.Labels = []string{"agent:claude-sonnet"}
+	if got := ChooseSeat(mixed, other); got.Skip || got.Agent != "claude-sonnet" {
+		t.Errorf("claude-sonnet bead = %+v, want the claude-sonnet seat", got)
+	}
+	onlyFlash := Budget{Seats: []Seat{flash(0), {Agent: "claude-sonnet", Cap: 2, Live: 2}}, Now: now}
+	if got := ChooseSeat(onlyFlash, other); !got.Skip || got.Agent != "" {
+		t.Errorf("claude-sonnet bead drew the pinned-only seat: %+v", got)
+	}
+
+	// A bead labelled for the pinned-only seat's agent takes it, within its cap.
+	pinned := goodSpec()
+	pinned.Labels = []string{"agent:deepseek-flash"}
+	if got := ChooseSeat(unlabelled, pinned); got.Skip || got.Agent != "deepseek-flash" {
+		t.Errorf("bead pinned to the pinned-only seat = %+v, want deepseek-flash", got)
+	}
+	full := Budget{Seats: []Seat{flash(1)}, Now: now}
+	if got := ChooseSeat(full, pinned); !got.Skip || !strings.Contains(got.Reason, "waiting for a deepseek-flash seat") {
+		t.Errorf("pinned bead with its pinned-only seat full = %+v, want a wait", got)
+	}
+}
+
 // nightWindow is a seat window shut from 20:00 until 08:00 UTC, so a budget
 // clock at 21:00 reads it closed and a clock at noon reads it open.
 func nightWindow() *config.Window {

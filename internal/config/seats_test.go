@@ -399,6 +399,39 @@ func TestSeatsBackendAndSandbox(t *testing.T) {
 	}
 }
 
+// pinned_only decodes from a seat entry as a boolean and defaults to false, so
+// a seat map without it reads as it did before the key existed (gt-zor86).
+func TestSeatsPinnedOnlyFromSettingsFile(t *testing.T) {
+	t.Parallel()
+
+	t.Run("set on one seat", func(t *testing.T) {
+		t.Parallel()
+		var ts TownSettings
+		body := `{"type":"town-settings","version":1,"polecat_pool":{"seats":{
+			"deepseek-flash":{"cap":1,"pinned_only":true},
+			"claude-sonnet":{"cap":2}}}}`
+		if err := DecodeJSONFile("settings/config.json", []byte(body), &ts); err != nil {
+			t.Fatal(err)
+		}
+		got, err := Seats(&ts, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 2 || got[0].Agent != "claude-sonnet" || got[0].PinnedOnly || got[1].Agent != "deepseek-flash" || !got[1].PinnedOnly {
+			t.Fatalf("seats = %+v", got)
+		}
+	})
+
+	t.Run("a non-boolean is refused", func(t *testing.T) {
+		t.Parallel()
+		var ts TownSettings
+		body := `{"type":"town-settings","version":1,"polecat_pool":{"seats":{"deepseek-flash":{"cap":1,"pinned_only":"yes"}}}}`
+		if err := DecodeJSONFile("settings/config.json", []byte(body), &ts); err == nil {
+			t.Fatal("want a decode error for pinned_only as a string")
+		}
+	})
+}
+
 // The sandbox table and the seat's backend and sandbox keys decode from a
 // settings file under strict decoding, and an unknown profile key is refused.
 func TestSandboxesFromSettingsFile(t *testing.T) {
