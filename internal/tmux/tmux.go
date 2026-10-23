@@ -196,6 +196,7 @@ type Tmux struct {
 	sock       *socketOps          // nil = real socket directory and dial; see exec.go
 	socketDir  string              // "" = SocketDir()
 	getenv     func(string) string // nil = os.Getenv; the process env reads methods make
+	execPrefix []string            // wrapper argv around every program; nil = run directly
 }
 
 // noTownSocket is a sentinel socket name used when no town socket is configured.
@@ -292,6 +293,25 @@ func resolveNewTmuxSocket(defaultSocket, tmuxEnv string, refuseTmuxEnv bool) (st
 // and keystroke leaks (e.g. Escape from NudgeSession hitting the user's prefix table).
 func NewTmuxWithSocket(socket string) *Tmux {
 	return &Tmux{socketName: socket}
+}
+
+// NewTmuxWithExecPrefix creates a Tmux that reaches the named socket from
+// inside a wrapper: every tmux, ps and kill call runs as prefix + program +
+// arguments. prefix's first element is the program that owns the sandbox and
+// the rest are its leading arguments, so {"openshell", "sandbox", "exec",
+// "-n", "gt-r-n", "--no-tty", "--no-login-shell", "--"} makes HasSession("gt-r-n")
+// run `openshell sandbox exec -n gt-r-n --no-tty --no-login-shell -- tmux -u
+// -L gt has-session -t =gt-r-n`. The socket lives inside the wrapper, so no
+// host-side socket check or socket-file cleanup applies to it. An empty prefix
+// runs commands directly, as NewTmuxWithSocket does.
+func NewTmuxWithExecPrefix(socket string, prefix []string) *Tmux {
+	return &Tmux{socketName: socket, execPrefix: append([]string(nil), prefix...)}
+}
+
+// ExecPrefix returns the wrapper argv every command goes through, empty when
+// commands run directly; the caller owns the returned slice.
+func (t *Tmux) ExecPrefix() []string {
+	return append([]string(nil), t.execPrefix...)
 }
 
 // run executes a tmux command and returns stdout.
@@ -1227,9 +1247,10 @@ func (t *Tmux) removeDeadSocketFile() {
 // Named sockets only: an empty socketName is not "no socket". tmux honors $TMUX
 // and its own default ahead of gt, so that path holds the town's server — one
 // this process never started and must not delete. The noTownSocket sentinel
-// names a socket that does not exist by design.
+// names a socket that does not exist by design. A prefixed Tmux's socket file
+// is inside the wrapper, not on this host, so there is none to unlink here.
 func (t *Tmux) ownsSocketFile() bool {
-	return t.socketName != "" && t.socketName != "default" && t.socketName != noTownSocket
+	return len(t.execPrefix) == 0 && t.socketName != "" && t.socketName != "default" && t.socketName != noTownSocket
 }
 
 // SetExitEmpty controls the tmux exit-empty server option.

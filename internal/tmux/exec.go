@@ -32,10 +32,26 @@ func realExec(ctx context.Context, name string, args ...string) ([]byte, []byte,
 // runner returns the exec seam, falling back to realExec for a Tmux built
 // without one (for example a struct literal).
 func (t *Tmux) runner() execFunc {
-	if t.exec == nil {
-		return realExec
+	base := t.exec
+	if base == nil {
+		base = realExec
 	}
-	return t.exec
+	return prefixedExec(base, t.execPrefix)
+}
+
+// prefixedExec wraps base so each command becomes prefix + name + args, the
+// program name and its arguments being appended to a wrapper's. Every tmux, ps
+// and kill call has to run where those programs and the processes they inspect
+// live — inside the sandbox, not on the host.
+func prefixedExec(base execFunc, prefix []string) execFunc {
+	if len(prefix) == 0 {
+		return base
+	}
+	p := append([]string(nil), prefix...)
+	return func(ctx context.Context, name string, args ...string) ([]byte, []byte, error) {
+		full := append(append(append([]string(nil), p[1:]...), name), args...)
+		return base(ctx, p[0], full...)
+	}
 }
 
 // clk returns the clock seam, falling back to the real clock.
@@ -48,7 +64,7 @@ func (t *Tmux) clk() clockwork.Clock {
 
 // withSocket returns a Tmux on socket that shares t's seams.
 func (t *Tmux) withSocket(socket string) *Tmux {
-	return &Tmux{socketName: socket, exec: t.exec, clock: t.clock, sock: t.sock, socketDir: t.socketDir, getenv: t.getenv}
+	return &Tmux{socketName: socket, exec: t.exec, clock: t.clock, sock: t.sock, socketDir: t.socketDir, getenv: t.getenv, execPrefix: t.execPrefix}
 }
 
 // env reads the process environment through the getenv seam. Methods read
