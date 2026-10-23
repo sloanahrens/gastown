@@ -6023,6 +6023,51 @@ func TestProbeDSNsBracketIPv6Host(t *testing.T) {
 	}
 }
 
+// The connection-string getters build their DSNs outside tcpDSN, and
+// CommitsLastDay builds its own. Every DSN this package writes takes its
+// address from HostPort, so no non-test source may format host:port by hand
+// (gt-nqp8h).
+func TestDSNsBuildAddressWithHostPort(t *testing.T) {
+	t.Parallel()
+	h := newFakeHost().townPort(DefaultPort).host()
+	h.doltEndpoint = func(string) (configpkg.DoltEndpoint, bool) {
+		return configpkg.DoltEndpoint{Host: "::1", Port: 3307}, true
+	}
+	townRoot := t.TempDir()
+	for name, dsn := range map[string]string{
+		"GetConnectionString":       h.GetConnectionString(townRoot),
+		"GetConnectionStringForRig": h.GetConnectionStringForRig(townRoot, "hq"),
+	} {
+		parsed, err := mysql.ParseDSN(dsn)
+		if err != nil {
+			t.Errorf("%s DSN %q does not parse: %v", name, dsn, err)
+			continue
+		}
+		if parsed.Net != "tcp" || parsed.Addr != "[::1]:3307" {
+			t.Errorf("%s DSN %q = net %q addr %q, want net tcp addr [::1]:3307", name, dsn, parsed.Net, parsed.Addr)
+		}
+	}
+
+	sources, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, src := range sources {
+		if strings.HasSuffix(src, "_test.go") {
+			continue
+		}
+		body, err := os.ReadFile(src)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, handBuilt := range []string{"tcp(%s:%d)", "tcp(%s:%s)"} {
+			if strings.Contains(string(body), handBuilt) {
+				t.Errorf("%s formats a DSN address by hand (%q); build it with Config.HostPort", src, handBuilt)
+			}
+		}
+	}
+}
+
 func TestBuildServerSQLCmdPasswordNotInArgv(t *testing.T) {
 	t.Parallel()
 
