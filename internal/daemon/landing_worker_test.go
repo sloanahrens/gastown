@@ -436,6 +436,35 @@ func TestAcceptedRiskAlertReturnsADeliveryThatFailed(t *testing.T) {
 	}
 }
 
+// TestLandingWorkerRaisesAcceptedRiskToTheSink: the lander a rig's worker
+// builds reaches the daemon's alert sink for an accepted risk, so a landing
+// that used one raises the MEDIUM item the overseer sees (gt-tvhg8).
+func TestLandingWorkerRaisesAcceptedRiskToTheSink(t *testing.T) {
+	t.Parallel()
+	const rigName = "testrig"
+	clk := clockwork.NewFakeClockAt(time.Date(2026, 10, 4, 9, 0, 0, 0, time.UTC))
+	rec := newSignalingNotifier()
+	w := forgejoLandingWorker(t, rigName, clk, rec)
+	lander, ok := w.Lander.(*land.Lander)
+	if !ok {
+		t.Fatalf("worker lander = %T, want *land.Lander", w.Lander)
+	}
+	if lander.AcceptedRiskAlert == nil {
+		t.Fatal("worker lander has no AcceptedRiskAlert; an accepted risk raises no attention item")
+	}
+	const key, message = "accepted-risk:gt-x:abc1234", "om review of gt-x at abc1234 used 1 accepted risk(s)"
+	if err := lander.AcceptedRiskAlert(key, message); err != nil {
+		t.Fatalf("alert: %v", err)
+	}
+	got := rec.Escalations()
+	if len(got) != 1 {
+		t.Fatalf("escalations = %+v, want one", got)
+	}
+	if got[0].Escalation.Severity != "MEDIUM" || got[0].Escalation.Fingerprint != key || got[0].Escalation.Reason != message {
+		t.Errorf("escalation = %+v, want MEDIUM keyed %q with the message", got[0].Escalation, key)
+	}
+}
+
 // TestFollowupBeadsFilesAndListsOverTheClient: the adapter is the whole bridge
 // between the feed's own types and bd's — a spec becomes one create, and the
 // list returns the labeled beads of every status, which is the set the next
