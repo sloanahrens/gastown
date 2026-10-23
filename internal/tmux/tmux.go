@@ -478,6 +478,12 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
 	}
+	// A session the router sends to a sandbox is created by the routed client,
+	// guards included: workDir and the binary exist only inside the sandbox
+	// (gt-byiyo).
+	if rt := t.routeFor(name); rt != nil {
+		return rt.NewSessionWithCommand(name, workDir, command)
+	}
 	if err := t.checkHostPaths(workDir, command); err != nil {
 		return err
 	}
@@ -546,6 +552,10 @@ func (t *Tmux) NewSessionWithCommand(name, workDir, command string) error {
 func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env map[string]string) error {
 	if err := validateSessionName(name); err != nil {
 		return err
+	}
+	// Same delegation as NewSessionWithCommand (gt-byiyo).
+	if rt := t.routeFor(name); rt != nil {
+		return rt.NewSessionWithCommandAndEnv(name, workDir, command, env)
 	}
 
 	// Kill stale same-named sessions on other sockets to prevent split-brain.
