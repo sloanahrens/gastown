@@ -22,10 +22,24 @@ type SocketSplitBrainCheck struct {
 	FixableCheck
 	staleSessions []string // Sessions on "default" that also exist on town socket
 
-	townListerForTest    socketSessionLister // nil → real tmux on town socket
-	defaultListerForTest socketSessionLister // nil → real tmux on "default" socket
-	socketForTest        string              // override for tmux.GetDefaultSocket()
-	useSocketForTest     bool                // distinguishes empty override from unset
+	townListerForTest    socketSessionLister            // nil → real tmux on town socket
+	defaultListerForTest socketSessionLister            // nil → real tmux on "default" socket
+	socketForTest        string                         // override for tmux.GetDefaultSocket()
+	useSocketForTest     bool                           // distinguishes empty override from unset
+	newTmuxForTest       func(socket string) *tmux.Tmux // nil → real tmux; "" is the town socket
+}
+
+// hostLister is a client on one host socket ("" = the town socket). It is
+// Routed: it neither routes nor lists the sandbox sessions, which are on neither
+// socket, so the check cannot class one as a duplicate and Fix cannot kill one.
+func (c *SocketSplitBrainCheck) hostLister(socket string) socketSessionLister {
+	switch {
+	case c.newTmuxForTest != nil:
+		return c.newTmuxForTest(socket).Routed()
+	case socket == "":
+		return tmux.NewTmux().Routed()
+	}
+	return tmux.NewTmuxWithSocket(socket).Routed()
 }
 
 // NewSocketSplitBrainCheck creates a new socket split-brain check.
@@ -56,12 +70,12 @@ func (c *SocketSplitBrainCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	var townLister socketSessionLister = tmux.NewTmux()
+	townLister := c.hostLister("")
 	if c.townListerForTest != nil {
 		townLister = c.townListerForTest
 	}
 
-	var defaultLister socketSessionLister = tmux.NewTmuxWithSocket("default")
+	defaultLister := c.hostLister("default")
 	if c.defaultListerForTest != nil {
 		defaultLister = c.defaultListerForTest
 	}
@@ -144,7 +158,7 @@ func (c *SocketSplitBrainCheck) Fix(ctx *CheckContext) error {
 		return nil
 	}
 
-	var defaultLister socketSessionLister = tmux.NewTmuxWithSocket("default")
+	defaultLister := c.hostLister("default")
 	if c.defaultListerForTest != nil {
 		defaultLister = c.defaultListerForTest
 	}
