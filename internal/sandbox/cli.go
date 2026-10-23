@@ -301,7 +301,7 @@ func execRunner(ctx context.Context, argv []string, stdin []byte, env []string) 
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
-	cmd.Env = append(inheritedEnv(), env...)
+	cmd.Env = append(inheritedEnv(os.Environ()), env...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -309,12 +309,12 @@ func execRunner(ctx context.Context, argv []string, stdin []byte, env []string) 
 	return stdout.Bytes(), stderr.Bytes(), err
 }
 
-// inheritedEnv is the process environment without any envFromPrefix entry. A
-// value a parent process left under that prefix would otherwise reach
-// openshell in a call that did not set it.
-func inheritedEnv() []string {
-	inherited := make([]string, 0, len(os.Environ()))
-	for _, kv := range os.Environ() {
+// inheritedEnv is environ without any envFromPrefix entry. A value a parent
+// process left under that prefix would otherwise reach openshell in a call
+// that did not set it.
+func inheritedEnv(environ []string) []string {
+	inherited := make([]string, 0, len(environ))
+	for _, kv := range environ {
 		if !strings.HasPrefix(kv, envFromPrefix) {
 			inherited = append(inherited, kv)
 		}

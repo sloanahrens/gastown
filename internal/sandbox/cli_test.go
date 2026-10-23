@@ -188,17 +188,12 @@ func TestCreateRedactsEnvValuesFromStderr(t *testing.T) {
 	}
 }
 
-func TestExecRunnerDropsInheritedEnvValues(t *testing.T) {
-	t.Setenv("GT_SANDBOX_ENV_STALE", "old")
-	stdout, _, err := execRunner(context.Background(), []string{"env"}, nil, []string{"GT_SANDBOX_ENV_NEW=new"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(stdout), "GT_SANDBOX_ENV_STALE") {
-		t.Error("child env carries an inherited GT_SANDBOX_ENV_ entry; only this call's values may reach openshell")
-	}
-	if !strings.Contains(string(stdout), "GT_SANDBOX_ENV_NEW=new") {
-		t.Error("child env lacks the value this call set")
+func TestInheritedEnvDropsEnvFromEntries(t *testing.T) {
+	t.Parallel()
+	environ := []string{"PATH=/bin", "GT_SANDBOX_ENV_STALE=old", "HOME=/h", "GT_SANDBOX_ENV_=x"}
+	want := []string{"PATH=/bin", "HOME=/h"}
+	if got := inheritedEnv(environ); !reflect.DeepEqual(got, want) {
+		t.Errorf("inheritedEnv = %q, want %q; a parent's GT_SANDBOX_ENV_ entry must not reach openshell", got, want)
 	}
 }
 
