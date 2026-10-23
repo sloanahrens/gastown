@@ -54,18 +54,11 @@ func (refusingCreateTmux) NewSessionWithCommandAndEnv(string, string, string, ma
 // its registry record must drop both. The record counts as a live session, so
 // leaving it makes the seat look occupied and strands the sandbox (gt-8a1ql).
 //
-//testpolicy:allow parallel — points the process-wide sandbox routing and deleter at a temp town and a stub, which another test must not see mid-run
+//testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
 func TestLaunchCleansUpSandboxWhenTheSessionIsNotCreated(t *testing.T) {
 	town := t.TempDir()
 	session.ResetSandboxRoutingForTest(town)
 	t.Cleanup(func() { session.ResetSandboxRoutingForTest("") })
-	// session's init links the openshell deleter; stub it so the cleanup never
-	// shells out to a real sandbox CLI (no gateway runs in the unit tier).
-	var deleted []string
-	t.Cleanup(session.SetSandboxDeleterForTest(func(_ string, rec session.SandboxRecord) error {
-		deleted = append(deleted, rec.Session)
-		return nil
-	}))
 	rigPath := filepath.Join(town, "gastown")
 	settings := filepath.Join(rigPath, "settings")
 	if err := os.MkdirAll(settings, 0o755); err != nil {
@@ -76,10 +69,18 @@ func TestLaunchCleansUpSandboxWhenTheSessionIsNotCreated(t *testing.T) {
 		t.Fatal(err)
 	}
 	workDir, _, w := setupSessionBranchTestRepo(t)
+	var deleted []string
 	m := &SessionManager{
 		tmux: refusingCreateTmux{newFakeSessionTmux()},
 		rig:  &rig.Rig{Name: "gastown", Path: rigPath},
 		gits: w.opener(),
+		// session's init links the openshell deleter; stub it so the cleanup
+		// never shells out to a real sandbox CLI (no gateway runs in the unit
+		// tier).
+		sandboxDeleter: func(_ string, rec session.SandboxRecord) error {
+			deleted = append(deleted, rec.Session)
+			return nil
+		},
 	}
 	sessionID := m.SessionName("box")
 	backend := &preparingBackend{town: town}
