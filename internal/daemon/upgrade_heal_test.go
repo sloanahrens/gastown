@@ -54,6 +54,25 @@ func TestUpgradeRestartHealArmSubmitsHelperAsItsOwnJob(t *testing.T) {
 	}
 }
 
+// TestUpgradeRestartHealArmClearsAnEarlierSignalStop checks a stop recorded
+// before the arm does not excuse the helper: only a stop made while it waits
+// may leave the daemon down (gt-r8ux8).
+func TestUpgradeRestartHealArmClearsAnEarlierSignalStop(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	if err := recordSignalStop(d.config.TownRoot, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	_, run := recordHealRun("", nil)
+
+	if err := submitUpgradeHeal(run, d.config.TownRoot, fakeHealJob); err != nil {
+		t.Fatalf("submitUpgradeHeal: %v", err)
+	}
+	if _, err := os.Stat(signalStopPath(d.config.TownRoot)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("an earlier signal-stop record survived the arm (stat err %v)", err)
+	}
+}
+
 func TestUpgradeRestartHealArmWriteFailureSubmitsNothing(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir() // no daemon directory under it: the script cannot be written
@@ -209,6 +228,8 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 		pidOnce     string // launchctl print reports this pid on the first sample only
 		lockHolder  string // lsof reports this process holds daemon.lock
 		stopMarker  bool   // a daemon stop was requested while the helper waited
+		signalStop  bool   // the daemon was stopped by a signal while the helper waited
+		noPid       bool   // launchctl print reports the job loaded with no pid
 		estop       bool   // the town E-stop went up while the helper waited
 		wantBootout bool
 		wantBoots   int
@@ -222,6 +243,8 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 		{name: "unloaded job is healed", wantBootout: true, wantBoots: 2, wantLogLine: "bootstrapped:"},
 		{name: "a pid that is gone at the re-check is healed", pidOnce: "123", wantBootout: true, wantBoots: 1, wantLogLine: "bootstrapped:", bootstrapOK: "1"},
 		{name: "a stop marker left while the helper waited is left alone", stopMarker: true, wantLogLine: "a daemon stop was requested"},
+		{name: "a signal stop that unloaded the job is left alone", signalStop: true, wantLogLine: "is not loaded (a signal stopped the daemon"},
+		{name: "a signal stop with the job still loaded is healed", signalStop: true, noPid: true, wantBootout: true, wantBoots: 2, wantLogLine: "bootstrapped:"},
 		{name: "an E-stop raised while the helper waited is left alone", estop: true, wantLogLine: "E-stop active"},
 		{name: "a job that stays loaded after bootout is given up on", stuckLoaded: true, wantBootout: true, wantLogLine: "gave up: gui/501/com.example.fake still loaded", wantGiveUp: true},
 		{name: "a bootstrap that never succeeds is given up on", bootstrapOK: "never", wantBootout: true, wantBoots: 60, wantLogLine: "gave up: bootstrap of /fake/com.example.fake.plist failed 60 times", wantGiveUp: true},
@@ -236,13 +259,16 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 			writeFakeTool(t, bin, "launchctl", `echo "$*" >> "$HEAL_CALLS"
 case "$1" in
 print)
+	if [ -e "$HEAL_BOOTED" ] && [ -z "$HEAL_STUCK" ]; then echo 'Could not find service' >&2; exit 113; fi
 	if [ -n "$HEAL_PID_ONCE" ]; then
 		n=$(cat "$HEAL_PRINTS" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$HEAL_PRINTS"
 		if [ "$n" -eq 1 ]; then printf 'gui/501/x = {\n\tpid = %s\n}\n' "$HEAL_PID_ONCE"; exit 0; fi
 	fi
 	if [ -n "$HEAL_PID" ]; then printf 'gui/501/x = {\n\tpid = %s\n}\n' "$HEAL_PID"; exit 0; fi
-	if [ -n "$HEAL_STUCK" ]; then printf 'gui/501/x = {\n\tstate = waiting\n}\n'; exit 0; fi
+	if [ -n "$HEAL_STUCK" ] || [ -n "$HEAL_NO_PID" ]; then printf 'gui/501/x = {\n\tstate = waiting\n}\n'; exit 0; fi
 	echo 'Could not find service' >&2; exit 113 ;;
+bootout)
+	: > "$HEAL_BOOTED" ;;
 bootstrap)
 	n=$(cat "$HEAL_TRIES" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$HEAL_TRIES"
 	if [ "$n" -ge "$HEAL_BOOT_OK" ]; then exit 0; fi
@@ -265,8 +291,17 @@ exit 0
 			if tc.stuckLoaded {
 				stuck = "1"
 			}
+			noPid := ""
+			if tc.noPid {
+				noPid = "1"
+			}
 			if tc.stopMarker {
 				if err := writeStopRequested(d.config.TownRoot, 4242, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.signalStop {
+				if err := recordSignalStop(d.config.TownRoot, time.Now()); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -291,6 +326,8 @@ exit 0
 				"HEAL_PRINTS=" + filepath.Join(bin, "prints.txt"),
 				"HEAL_LOCK_HOLDER=" + tc.lockHolder,
 				"HEAL_STUCK=" + stuck,
+				"HEAL_NO_PID=" + noPid,
+				"HEAL_BOOTED=" + filepath.Join(bin, "booted.txt"),
 				"HEAL_BOOT_OK=" + bootOK,
 				"HEAL_SYSLOG=" + sysLog,
 			}

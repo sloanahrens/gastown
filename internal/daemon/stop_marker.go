@@ -71,6 +71,33 @@ func removeStopRequested(townRoot string) {
 	_ = os.Remove(stopMarkerPath(townRoot))
 }
 
+// signalStopPath is where a daemon records that a signal ended it, for the
+// upgrade heal helper to read.
+func signalStopPath(townRoot string) string {
+	return filepath.Join(townRoot, "daemon", "stopped-by-signal")
+}
+
+// recordSignalStop leaves a durable trace that a signal ended the daemon. The
+// stop marker above is consumed by the exit it excuses, and a supervised
+// `gt daemon stop` is a launchctl bootout that writes no marker at all, so
+// this record is the only trace a bootout inside the upgrade heal helper's
+// wait leaves (gt-r8ux8). The helper counts it only while the job is
+// unloaded: a bootout unloads the job, a respawn that failed does not.
+func recordSignalStop(townRoot string, now time.Time) error {
+	path := signalStopPath(townRoot)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(fmt.Sprintf("%d\n", now.Unix())), 0o644)
+}
+
+// clearSignalStop drops a signal-stop record left by an earlier stop, so the
+// helper armed by an upgrade exit only sees stops that happen after it, and a
+// daemon that starts does not leave the record of the daemon before it.
+func clearSignalStop(townRoot string) {
+	_ = os.Remove(signalStopPath(townRoot))
+}
+
 // exitAfterSignal is what Run returns once the graceful shutdown for a signal
 // has finished: nil when gt asked for the stop (StopDaemon left a marker for
 // this pid), ErrUnrequestedStop otherwise so the process exits nonzero and
