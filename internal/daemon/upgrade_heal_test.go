@@ -215,33 +215,33 @@ func TestUpgradeRestartHealJobComesFromTheSupervisorLookup(t *testing.T) {
 	})
 }
 
-// healScriptCase is one scenario for the rendered heal helper: what launchd,
-// lsof and the town look like while the helper waits, and what it must do.
-type healScriptCase struct {
-	name        string
-	pid         string // launchctl print reports this pid on every sample; empty means not loaded
-	pidOnce     string // launchctl print reports this pid on the first sample only
-	lockHolder  string // lsof reports this process holds daemon.lock
-	stopMarker  bool   // a daemon stop was requested while the helper waited
-	signalStop  bool   // the daemon was stopped by a signal while the helper waited
-	requested   bool   // that signal stop was requested through gt (gt daemon stop)
-	gtDownStop  bool   // gt down stopped the daemon while the helper waited, through the real stop path
-	noPid       bool   // launchctl print reports the job loaded with no pid
-	estop       bool   // the town E-stop went up while the helper waited
-	wantBootout bool
-	wantBoots   int
-	wantLogLine string
-	stuckLoaded bool   // launchctl print keeps reporting the job after bootout
-	bootstrapOK string // the bootstrap attempt that first succeeds
-	wantGiveUp  bool   // the helper exits 1 and tells the system log
-}
-
 // TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid runs the rendered helper
 // with fake launchctl, lsof and sleep first on PATH: the real launchd is never
 // reached.
 func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 	t.Parallel()
-	cases := []healScriptCase{
+	if _, err := os.Stat("/bin/sh"); err != nil {
+		//testpolicy:allow no-skip — the helper is a /bin/sh script, which Windows cannot run
+		t.Skip("the helper is a /bin/sh script")
+	}
+	cases := []struct {
+		name        string
+		pid         string // launchctl print reports this pid on every sample; empty means not loaded
+		pidOnce     string // launchctl print reports this pid on the first sample only
+		lockHolder  string // lsof reports this process holds daemon.lock
+		stopMarker  bool   // a daemon stop was requested while the helper waited
+		signalStop  bool   // the daemon was stopped by a signal while the helper waited
+		requested   bool   // that signal stop was requested through gt: StopDaemon left the stop marker
+		gtDownStop  bool   // gt down stopped the daemon while the helper waited: the marker and the signal record a real stop leaves
+		noPid       bool   // launchctl print reports the job loaded with no pid
+		estop       bool   // the town E-stop went up while the helper waited
+		wantBootout bool
+		wantBoots   int
+		wantLogLine string
+		stuckLoaded bool   // launchctl print keeps reporting the job after bootout
+		bootstrapOK string // the bootstrap attempt that first succeeds
+		wantGiveUp  bool   // the helper exits 1 and tells the system log
+	}{
 		{name: "healthy job is left alone", pid: "123", wantLogLine: "healthy:"},
 		{name: "live lock holder is left alone", lockHolder: "4242", wantLogLine: "left alone:"},
 		{name: "unloaded job is healed", wantBootout: true, wantBoots: 2, wantLogLine: "bootstrapped:"},
@@ -254,41 +254,16 @@ func TestUpgradeRestartHealScriptHealsOnlyAJobWithNoPid(t *testing.T) {
 		{name: "an E-stop raised while the helper waited is left alone", estop: true, wantLogLine: "E-stop active"},
 		{name: "a job that stays loaded after bootout is given up on", stuckLoaded: true, wantBootout: true, wantLogLine: "gave up: gui/501/com.example.fake still loaded", wantGiveUp: true},
 		{name: "a bootstrap that never succeeds is given up on", bootstrapOK: "never", wantBootout: true, wantBoots: 60, wantLogLine: "gave up: bootstrap of /fake/com.example.fake.plist failed 60 times", wantGiveUp: true},
+		{name: "gt down stop with the job loaded and no pid", noPid: true, gtDownStop: true, wantLogLine: "a daemon stop was requested through gt"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			runHealScriptCase(t, tc)
-		})
-	}
-}
-
-// TestUpgradeHealScript_GtDownStopIsNotHealed checks the stop gt down makes.
-// gt down signals the daemon without a bootout, so launchd leaves the job
-// loaded with no pid, and the daemon has already consumed its stop marker. The
-// helper must still leave the town down (gt-518hq).
-func TestUpgradeHealScript_GtDownStopIsNotHealed(t *testing.T) {
-	t.Parallel()
-	runHealScriptCase(t, healScriptCase{
-		name:        "gt down stop with the job loaded and no pid",
-		noPid:       true,
-		gtDownStop:  true,
-		wantLogLine: "a daemon stop was requested through gt",
-	})
-}
-
-// runHealScriptCase runs the rendered helper for tc with fake launchctl, lsof
-// and sleep, and checks the calls it made and the decision it logged.
-func runHealScriptCase(t *testing.T, tc healScriptCase) {
-	if _, err := os.Stat("/bin/sh"); err != nil {
-		//testpolicy:allow no-skip — the helper is a /bin/sh script, which Windows cannot run
-		t.Skip("the helper is a /bin/sh script")
-	}
-	d := upgradeTestDaemon(t)
-	bin := t.TempDir()
-	calls := filepath.Join(bin, "calls.txt")
-	tries := filepath.Join(bin, "tries.txt")
-	writeFakeTool(t, bin, "launchctl", `echo "$*" >> "$HEAL_CALLS"
+			d := upgradeTestDaemon(t)
+			bin := t.TempDir()
+			calls := filepath.Join(bin, "calls.txt")
+			tries := filepath.Join(bin, "tries.txt")
+			writeFakeTool(t, bin, "launchctl", `echo "$*" >> "$HEAL_CALLS"
 case "$1" in
 print)
 	if [ -e "$HEAL_BOOTED" ] && [ -z "$HEAL_STUCK" ]; then echo 'Could not find service' >&2; exit 113; fi
@@ -308,120 +283,122 @@ bootstrap)
 esac
 exit 0
 `)
-	writeFakeTool(t, bin, "lsof", `[ -n "$HEAL_LOCK_HOLDER" ] && echo "$HEAL_LOCK_HOLDER"; exit 0`)
-	writeFakeTool(t, bin, "sleep", `exit 0`)
-	sysLog := filepath.Join(bin, "syslog.txt")
-	writeFakeTool(t, bin, "logger", `echo "$*" >> "$HEAL_SYSLOG"`)
-	bootOK := tc.bootstrapOK
-	switch bootOK {
-	case "":
-		bootOK = "2"
-	case "never":
-		bootOK = "999"
-	}
-	stuck := ""
-	if tc.stuckLoaded {
-		stuck = "1"
-	}
-	noPid := ""
-	if tc.noPid {
-		noPid = "1"
-	}
-	if tc.stopMarker {
-		if err := writeStopRequested(d.config.TownRoot, 4242, time.Now()); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if tc.signalStop {
-		if err := recordSignalStop(d.config.TownRoot, time.Now(), tc.requested); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if tc.gtDownStop {
-		// gt down: StopDaemon leaves the marker, the daemon's signal branch
-		// records the stop before the shutdown, and exitAfterSignal takes
-		// the marker and exits 0.
-		now := time.Now()
-		if err := writeStopRequested(d.config.TownRoot, os.Getpid(), now); err != nil {
-			t.Fatal(err)
-		}
-		d.recordStopForHeal(now)
-		if err := exitAfterSignal(d.config.TownRoot, os.Getpid(), now, nil); err != nil {
-			t.Fatalf("a gt down stop must exit without ErrUnrequestedStop, got %v", err)
-		}
-	}
-	if tc.estop {
-		if err := estop.Activate(d.config.TownRoot, estop.TriggerManual, "operator stop"); err != nil {
-			t.Fatal(err)
-		}
-	}
+			writeFakeTool(t, bin, "lsof", `[ -n "$HEAL_LOCK_HOLDER" ] && echo "$HEAL_LOCK_HOLDER"; exit 0`)
+			writeFakeTool(t, bin, "sleep", `exit 0`)
+			sysLog := filepath.Join(bin, "syslog.txt")
+			writeFakeTool(t, bin, "logger", `echo "$*" >> "$HEAL_SYSLOG"`)
+			bootOK := tc.bootstrapOK
+			switch bootOK {
+			case "":
+				bootOK = "2"
+			case "never":
+				bootOK = "999"
+			}
+			stuck := ""
+			if tc.stuckLoaded {
+				stuck = "1"
+			}
+			noPid := ""
+			if tc.noPid {
+				noPid = "1"
+			}
+			if tc.stopMarker {
+				if err := writeStopRequested(d.config.TownRoot, 4242, time.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.signalStop {
+				if err := recordSignalStop(d.config.TownRoot, time.Now(), tc.requested); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.gtDownStop {
+				// gt down: StopDaemon leaves the marker, the daemon's signal branch
+				// records the stop before the shutdown, and exitAfterSignal takes
+				// the marker and exits 0.
+				now := time.Now()
+				if err := writeStopRequested(d.config.TownRoot, os.Getpid(), now); err != nil {
+					t.Fatal(err)
+				}
+				d.recordStopForHeal(now)
+				if err := exitAfterSignal(d.config.TownRoot, os.Getpid(), now, nil); err != nil {
+					t.Fatalf("a gt down stop must exit without ErrUnrequestedStop, got %v", err)
+				}
+			}
+			if tc.estop {
+				if err := estop.Activate(d.config.TownRoot, estop.TriggerManual, "operator stop"); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-	script := filepath.Join(d.config.TownRoot, "daemon", upgradeHealScriptName)
-	if err := os.WriteFile(script, []byte(upgradeHealScript(fakeHealJob, d.config.TownRoot)), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	//testpolicy:allow no-subprocess — the test is the process boundary: the rendered helper is a /bin/sh script, run against fake launchctl, lsof and sleep
-	cmd := exec.Command("/bin/sh", script)
-	cmd.Env = []string{
-		"PATH=" + bin + ":/usr/bin:/bin",
-		"HEAL_CALLS=" + calls,
-		"HEAL_TRIES=" + tries,
-		"HEAL_PID=" + tc.pid,
-		"HEAL_PID_ONCE=" + tc.pidOnce,
-		"HEAL_PRINTS=" + filepath.Join(bin, "prints.txt"),
-		"HEAL_LOCK_HOLDER=" + tc.lockHolder,
-		"HEAL_STUCK=" + stuck,
-		"HEAL_NO_PID=" + noPid,
-		"HEAL_BOOTED=" + filepath.Join(bin, "booted.txt"),
-		"HEAL_BOOT_OK=" + bootOK,
-		"HEAL_SYSLOG=" + sysLog,
-	}
-	out, err := cmd.CombinedOutput()
-	var exitErr *exec.ExitError
-	switch {
-	case tc.wantGiveUp && !(errors.As(err, &exitErr) && exitErr.ExitCode() == 1):
-		t.Fatalf("giving up must exit 1, got %v:\n%s", err, out)
-	case !tc.wantGiveUp && err != nil:
-		t.Fatalf("helper exited with %v:\n%s", err, out)
-	}
+			script := filepath.Join(d.config.TownRoot, "daemon", upgradeHealScriptName)
+			if err := os.WriteFile(script, []byte(upgradeHealScript(fakeHealJob, d.config.TownRoot)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			//testpolicy:allow no-subprocess — the test is the process boundary: the rendered helper is a /bin/sh script, run against fake launchctl, lsof and sleep
+			cmd := exec.Command("/bin/sh", script)
+			cmd.Env = []string{
+				"PATH=" + bin + ":/usr/bin:/bin",
+				"HEAL_CALLS=" + calls,
+				"HEAL_TRIES=" + tries,
+				"HEAL_PID=" + tc.pid,
+				"HEAL_PID_ONCE=" + tc.pidOnce,
+				"HEAL_PRINTS=" + filepath.Join(bin, "prints.txt"),
+				"HEAL_LOCK_HOLDER=" + tc.lockHolder,
+				"HEAL_STUCK=" + stuck,
+				"HEAL_NO_PID=" + noPid,
+				"HEAL_BOOTED=" + filepath.Join(bin, "booted.txt"),
+				"HEAL_BOOT_OK=" + bootOK,
+				"HEAL_SYSLOG=" + sysLog,
+			}
+			out, err := cmd.CombinedOutput()
+			var exitErr *exec.ExitError
+			switch {
+			case tc.wantGiveUp && !(errors.As(err, &exitErr) && exitErr.ExitCode() == 1):
+				t.Fatalf("giving up must exit 1, got %v:\n%s", err, out)
+			case !tc.wantGiveUp && err != nil:
+				t.Fatalf("helper exited with %v:\n%s", err, out)
+			}
 
-	callLog, _ := os.ReadFile(calls)
-	if !strings.Contains(string(callLog), "remove com.example.fake-heal") {
-		t.Fatalf("the helper did not remove its own job on the way out; launchctl calls:\n%s", callLog)
-	}
-	sysText, _ := os.ReadFile(sysLog)
-	if gotSys := strings.Contains(string(sysText), "gave up:"); gotSys != tc.wantGiveUp {
-		t.Fatalf("system log carries a give-up = %v, want %v:\n%s", gotSys, tc.wantGiveUp, sysText)
-	}
-	gotBootout := strings.Contains(string(callLog), "bootout")
-	if gotBootout != tc.wantBootout {
-		t.Fatalf("bootout ran = %v, want %v; launchctl calls:\n%s", gotBootout, tc.wantBootout, callLog)
-	}
-	if got := strings.Count(string(callLog), "bootstrap gui/501 /fake/com.example.fake.plist"); got != tc.wantBoots {
-		t.Fatalf("bootstrap attempts = %d, want %d; launchctl calls:\n%s", got, tc.wantBoots, callLog)
-	}
-	if tc.pidOnce != "" {
-		if got := strings.Count(string(callLog), "print gui/501/com.example.fake"); got < 2 {
-			t.Fatalf("pid samples = %d, want the first sample and a re-check; launchctl calls:\n%s", got, callLog)
-		}
-	}
-	if tc.pid != "" {
-		// The re-check is one extra sample, taken because the first
-		// carried a pid, not a count that has to reach a constant.
-		if got := strings.Count(string(callLog), "print gui/501/com.example.fake"); got != 2 {
-			t.Fatalf("pid samples = %d, want exactly one sample and one re-check; launchctl calls:\n%s", got, callLog)
-		}
-	}
+			callLog, _ := os.ReadFile(calls)
+			if !strings.Contains(string(callLog), "remove com.example.fake-heal") {
+				t.Fatalf("the helper did not remove its own job on the way out; launchctl calls:\n%s", callLog)
+			}
+			sysText, _ := os.ReadFile(sysLog)
+			if gotSys := strings.Contains(string(sysText), "gave up:"); gotSys != tc.wantGiveUp {
+				t.Fatalf("system log carries a give-up = %v, want %v:\n%s", gotSys, tc.wantGiveUp, sysText)
+			}
+			gotBootout := strings.Contains(string(callLog), "bootout")
+			if gotBootout != tc.wantBootout {
+				t.Fatalf("bootout ran = %v, want %v; launchctl calls:\n%s", gotBootout, tc.wantBootout, callLog)
+			}
+			if got := strings.Count(string(callLog), "bootstrap gui/501 /fake/com.example.fake.plist"); got != tc.wantBoots {
+				t.Fatalf("bootstrap attempts = %d, want %d; launchctl calls:\n%s", got, tc.wantBoots, callLog)
+			}
+			if tc.pidOnce != "" {
+				if got := strings.Count(string(callLog), "print gui/501/com.example.fake"); got < 2 {
+					t.Fatalf("pid samples = %d, want the first sample and a re-check; launchctl calls:\n%s", got, callLog)
+				}
+			}
+			if tc.pid != "" {
+				// The re-check is one extra sample, taken because the first
+				// carried a pid, not a count that has to reach a constant.
+				if got := strings.Count(string(callLog), "print gui/501/com.example.fake"); got != 2 {
+					t.Fatalf("pid samples = %d, want exactly one sample and one re-check; launchctl calls:\n%s", got, callLog)
+				}
+			}
 
-	healLog, err := os.ReadFile(filepath.Join(d.config.TownRoot, "daemon", upgradeHealLogName))
-	if err != nil {
-		t.Fatalf("heal decisions not written to %s: %v", upgradeHealLogName, err)
-	}
-	if !strings.Contains(string(healLog), tc.wantLogLine) {
-		t.Fatalf("heal log missing %q:\n%s", tc.wantLogLine, healLog)
-	}
-	if _, err := os.Stat(filepath.Join(d.config.TownRoot, "daemon", "daemon.log")); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("the helper wrote daemon.log (stat err %v); its trail must not depend on it", err)
+			healLog, err := os.ReadFile(filepath.Join(d.config.TownRoot, "daemon", upgradeHealLogName))
+			if err != nil {
+				t.Fatalf("heal decisions not written to %s: %v", upgradeHealLogName, err)
+			}
+			if !strings.Contains(string(healLog), tc.wantLogLine) {
+				t.Fatalf("heal log missing %q:\n%s", tc.wantLogLine, healLog)
+			}
+			if _, err := os.Stat(filepath.Join(d.config.TownRoot, "daemon", "daemon.log")); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("the helper wrote daemon.log (stat err %v); its trail must not depend on it", err)
+			}
+		})
 	}
 }
 
