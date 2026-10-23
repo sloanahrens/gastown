@@ -1036,12 +1036,12 @@ func TestUpgradeWaitsForASpecDispatchTickToItsBound(t *testing.T) {
 	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
 
 	now := time.Now()
-	d.specDispatchRunning.Store(true)
-	d.specDispatchStartedAt.Store(now.UnixNano())
 	bound := d.specDispatchTickBound()
 	if bound <= housekeepingRestartCap {
 		t.Fatalf("specDispatchTickBound = %s, want it past the housekeeping cap %s", bound, housekeepingRestartCap)
 	}
+	d.specDispatchRunning.Store(true)
+	d.specDispatchTick.Store(&specDispatchTickRun{started: now})
 
 	if d.checkUpgradeRestart(now) || d.checkUpgradeRestart(now.Add(housekeepingRestartCap)) {
 		t.Fatal("restarted under a spec dispatch tick inside its bound")
@@ -1054,6 +1054,37 @@ func TestUpgradeWaitsForASpecDispatchTickToItsBound(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "a spec dispatch tick is still in flight after its") {
 		t.Fatalf("no cut-short line naming the spec dispatch tick:\n%s", logs.String())
+	}
+}
+
+// gt-32j1y: a tick with no recorded start falls back to the marker's wait clock
+// under the config's bound, so a tick whose start went missing still holds the
+// restart for its bound rather than for the housekeeping cap.
+func TestUpgradeSpecDispatchWaitFallsBackToTheMarkerClock(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	var logs strings.Builder
+	d.logger = log.New(&logs, "", 0)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+
+	now := time.Now()
+	bound := d.specDispatchTickBound()
+	d.specDispatchRunning.Store(true)
+
+	if d.checkUpgradeRestart(now) {
+		t.Fatal("restarted under a spec dispatch tick with no recorded start")
+	}
+	if !strings.Contains(logs.String(), "waiting for a spec dispatch tick") {
+		t.Fatalf("the wait did not name the spec dispatch tick:\n%s", logs.String())
+	}
+	if d.checkUpgradeRestart(now.Add(bound - time.Minute)) {
+		t.Fatal("the marker's wait ended before the tick's bound")
+	}
+	if !d.checkUpgradeRestart(now.Add(bound)) {
+		t.Fatal("the restart must go once the marker's wait passes the tick's bound")
 	}
 }
 
@@ -1070,12 +1101,13 @@ func TestUpgradeRestartGoesWhenTheSpecDispatchTickEnds(t *testing.T) {
 
 	now := time.Now()
 	d.specDispatchRunning.Store(true)
-	d.specDispatchStartedAt.Store(now.UnixNano())
+	d.specDispatchTick.Store(&specDispatchTickRun{started: now})
 	if d.checkUpgradeRestart(now) {
 		t.Fatal("restarted under a spec dispatch tick inside its bound")
 	}
 
 	d.specDispatchRunning.Store(false)
+	d.specDispatchTick.Store(nil)
 	if !d.checkUpgradeRestart(now.Add(time.Minute)) {
 		t.Fatal("the restart must go as soon as the tick ends")
 	}
