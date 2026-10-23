@@ -3,12 +3,14 @@ package cmd
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/beads/beadsfake"
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // seatReadsOver is the per-seat read over store: what the roster spent on every
@@ -131,6 +133,54 @@ func TestPoolSeatBatchReadsIdlePolecatsInBatches(t *testing.T) {
 	}
 	if perSeat.assigned < 25 {
 		t.Errorf("the per-seat read made %d assigned-work reads, want one per polecat", perSeat.assigned)
+	}
+}
+
+// TestPoolShowLiveReadsTheRigInBatches is gt-lj299: the occupancy gt pool show
+// prints over 20 polecat directories is the per-seat read's count, and the
+// rig's agent beads and assigned work are read in one batch each, not two bd
+// calls per directory.
+func TestPoolShowLiveReadsTheRigInBatches(t *testing.T) {
+	t.Parallel()
+	town, db, lister := seatTown(t, 20)
+	ts := config.NewTownSettings()
+	ts.PolecatPool = seatPool("deepseek-flash", 30)
+	if err := config.SaveTownSettings(config.TownSettingsPath(town), ts); err != nil {
+		t.Fatalf("SaveTownSettings: %v", err)
+	}
+
+	perSeat := newCountingStore(db)
+	want := poolLiveForWith(town, func(pool *config.PolecatPool) ([]poolSession, error) {
+		return poolSeatSessionsWith(lister, town, poolDispositionAnswering(town, seatReadsOver(perSeat)), nil, pool)
+	})
+
+	store := newCountingStore(db)
+	got := poolLiveForBatch(town, lister, func(string) beads.Client { return store })
+
+	if !want.ok || !got.ok {
+		t.Fatalf("occupancy read failed: per-seat ok=%v, batched ok=%v", want.ok, got.ok)
+	}
+	if perSeat.assigned < 20 {
+		t.Fatalf("the per-seat read made %d assigned-work reads over 20 polecats; the fixture no longer reproduces the cost being removed", perSeat.assigned)
+	}
+	if got.total == 0 {
+		t.Fatalf("batched count is empty; the fixture's seats were not counted")
+	}
+	if !reflect.DeepEqual(got.live, want.live) || !reflect.DeepEqual(got.dead, want.dead) || got.total != want.total {
+		t.Fatalf("batched count live=%v dead=%v total=%d, want the per-seat read's live=%v dead=%v total=%d",
+			got.live, got.dead, got.total, want.live, want.dead, want.total)
+	}
+
+	if len(store.multis) == 0 || len(store.multis[0]) != 20 {
+		t.Errorf("agent bead reads = %v, want one batch of the 20 polecats first", store.multis)
+	}
+	if store.lists != 1 || store.assigned != 0 {
+		t.Errorf("assigned-work reads = %d lists and %d per-polecat, want one list", store.lists, store.assigned)
+	}
+	for id, n := range store.shows {
+		if strings.Contains(id, "polecat") {
+			t.Errorf("agent bead %s read singly %d times, want only the batch", id, n)
+		}
 	}
 }
 
