@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -455,6 +456,40 @@ func TestExists(t *testing.T) {
 				t.Fatalf("Exists = %v, %v; want %v (error: %v)", got, err, tt.want, tt.wantErr)
 			}
 			wantCall(t, f, "openshell", "-g", "openshell", "sandbox", "get", "x", "--output", "json")
+		})
+	}
+}
+
+// --no-keep and --output are mutually exclusive in openshell, so a NoKeep create
+// asks for no JSON, and every other create still does.
+func TestCreateNoKeepOmitsOutputJSON(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		noKeep bool
+		want   []string
+	}{
+		{"keep", false, []string{"--detach", "--output", "json"}},
+		{"no_keep", true, []string{"--detach", "--no-keep"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cli, f := newFakeCLI()
+			if err := cli.Create(context.Background(), CreateSpec{Name: "x", Command: []string{"true"}, NoKeep: tt.noKeep}); err != nil {
+				t.Fatal(err)
+			}
+			argv := f.Calls()[0]
+			start := slices.Index(argv, "--detach")
+			end := slices.Index(argv, "--")
+			if start < 0 || end < start {
+				t.Fatalf("argv has no --detach before --: %q", argv)
+			}
+			if got := argv[start:end]; !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("flags from --detach to -- = %q, want %q (argv %q)", got, tt.want, argv)
+			}
+			if tt.noKeep && slices.Contains(argv, "--output") {
+				t.Errorf("a --no-keep create carries --output: %q", argv)
+			}
 		})
 	}
 }

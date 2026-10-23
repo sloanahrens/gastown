@@ -60,9 +60,27 @@ const redirectScript = `mkdir -p "$1/.beads" && printf '%s\n' "$2" > "$1/.beads/
 // start creates that one on this server, and tmux refuses a duplicate.
 const sandboxHolderSession = "boot"
 
-// sandboxMainScript is the sandbox's main process: it starts the tmux server
-// the host's exec'd commands talk to, then keeps the sandbox alive.
-const sandboxMainScript = `tmux -L ` + SandboxTmuxSocket + ` new-session -d -s ` + sandboxHolderSession + ` -c ` + sandboxHome + ` && exec sleep infinity`
+// sandboxMainScript is the sandbox's main process, created with --no-keep so the
+// gateway deletes the sandbox when it exits. It starts the tmux server the host's
+// exec'd commands talk to, waits for the host to start the agent's session on it,
+// and exits once that session has been gone, or all its panes dead, for three
+// polls in a row (one poll alone could be a respawn or a failed read). It exits
+// 1 when the session never appears, so a launch that failed after the sandbox
+// was made also ends the sandbox.
+//
+// Positional arguments: $1 the session name; $2 seconds to wait for the session
+// (default sandboxSessionWaitSeconds); $3 the poll interval in seconds (2); $4
+// the tmux start directory (the sandbox home). Only $1 is set in production.
+const sandboxMainScript = `S="$1"; W="${2:-` + sandboxSessionWaitSeconds + `}"; P="${3:-2}"; T="tmux -L ` + SandboxTmuxSocket + `"; ` +
+	`$T new-session -d -s ` + sandboxHolderSession + ` -c "${4:-` + sandboxHome + `}" || exit 1; ` +
+	`i=0; until $T has-session -t "=$S" 2>/dev/null; do i=$((i+1)); [ "$i" -gt "$W" ] && exit 1; sleep 1; done; ` +
+	`gone=0; while [ "$gone" -lt 3 ]; do ` +
+	`if $T list-panes -t "=$S" -F '#{pane_dead}' 2>/dev/null | grep -qx 0; then gone=0; else gone=$((gone+1)); fi; ` +
+	`sleep "$P"; done; exit 0`
+
+// sandboxSessionWaitSeconds is how long the main process waits for the agent's
+// session to appear.
+const sandboxSessionWaitSeconds = "900"
 
 // openshellBackend hosts one polecat's session in an OpenShell sandbox named
 // for the session. Its tmux client runs every command through
@@ -425,7 +443,8 @@ func (b *openshellBackend) createSpec(spec SpawnSpec) (sandbox.CreateSpec, error
 		Memory:     b.profile.Memory,
 		Labels:     map[string]string{"rig": spec.Rig, "polecat": spec.Polecat},
 		Env:        b.contract(spec),
-		Command:    []string{"sh", "-c", sandboxMainScript},
+		Command:    []string{"sh", "-c", sandboxMainScript, "sh", spec.Session},
+		NoKeep:     true,
 	}
 	if b.profile.CacheVolume != "" {
 		cfg, err := cacheDriverConfig(b.profile.CacheVolume, spec.Rig)
