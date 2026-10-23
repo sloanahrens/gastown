@@ -423,6 +423,19 @@ func TestOpenShellPrepareStopsWhenThePushFails(t *testing.T) {
 	}
 }
 
+func TestOpenShellPrepareNamesAMissingReadyCondition(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := &sandbox.Fake{Reply: map[string]string{"get": `{"name":"x","phase":"Provisioning"}`}}
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+	b.wait = func(context.Context, time.Duration) error { return nil }
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), `reported no Ready condition after 150 polls (phase "Provisioning")`) {
+		t.Fatalf("err = %v, want the missing-condition timeout", err)
+	}
+}
+
 func TestOpenShellPrepareTimesOutWhenNeverReady(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)

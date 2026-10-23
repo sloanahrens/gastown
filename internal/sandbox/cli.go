@@ -91,10 +91,26 @@ func (c *CLI) run(ctx context.Context, timeout time.Duration, verb string, argv 
 		defer cancel()
 	}
 	stdout, stderr, err := c.runner()(ctx, argv, stdin, env)
+	stderr = redactEnv(stderr, env)
 	if err != nil {
 		return stdout, stderr, commandError(verb, err, stderr)
 	}
 	return stdout, stderr, nil
+}
+
+// redactEnv replaces each value carried in env with [redacted], so a stderr
+// that echoes a secret back does not carry it into an error. It runs on the
+// whole stderr, before commandError cuts it, so a value the cut would split
+// cannot survive.
+func redactEnv(stderr []byte, env []string) []byte {
+	for _, kv := range env {
+		_, v, ok := strings.Cut(kv, "=")
+		if !ok || v == "" {
+			continue
+		}
+		stderr = bytes.ReplaceAll(stderr, []byte(v), []byte("[redacted]"))
+	}
+	return stderr
 }
 
 // commandError wraps a failed invocation with the verb and the tail of its
@@ -176,13 +192,16 @@ func (c *CLI) Get(ctx context.Context, name string) (Status, error) {
 	return st, nil
 }
 
-// Exec runs argv inside the sandbox with env set and stdin piped. It adds no
-// deadline of its own: the caller's ctx bounds a command whose length only
-// the caller knows.
+// Exec runs argv inside the sandbox with stdin piped. It adds no deadline of
+// its own: the caller's ctx bounds a command whose length only the caller
+// knows. Exec takes no env values: `sandbox exec` accepts them only as argv
+// `--env`, where any local user running ps could read them, so a secret goes
+// on the sandbox at create time instead.
 func (c *CLI) Exec(ctx context.Context, name string, env map[string]string, argv []string, stdin []byte) (stdout, stderr []byte, err error) {
-	a := c.argv("sandbox", "exec", "-n", name, "--no-tty", "--no-login-shell")
-	a = appendSortedPairs(a, "--env", env)
-	a = append(a, "--")
+	if len(env) > 0 {
+		return nil, nil, fmt.Errorf("openshell sandbox exec: env values would go on the argv; set them at sandbox create")
+	}
+	a := c.argv("sandbox", "exec", "-n", name, "--no-tty", "--no-login-shell", "--")
 	a = append(a, argv...)
 	return c.run(ctx, 0, "sandbox exec", a, stdin, nil)
 }
@@ -282,12 +301,23 @@ func execRunner(ctx context.Context, argv []string, stdin []byte, env []string) 
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
-	if len(env) > 0 {
-		cmd.Env = append(os.Environ(), env...)
-	}
+	cmd.Env = append(inheritedEnv(), env...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+// inheritedEnv is the process environment without any envFromPrefix entry. A
+// value a parent process left under that prefix would otherwise reach
+// openshell in a call that did not set it.
+func inheritedEnv() []string {
+	inherited := make([]string, 0, len(os.Environ()))
+	for _, kv := range os.Environ() {
+		if !strings.HasPrefix(kv, envFromPrefix) {
+			inherited = append(inherited, kv)
+		}
+	}
+	return inherited
 }

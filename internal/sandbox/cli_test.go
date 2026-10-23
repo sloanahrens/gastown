@@ -141,12 +141,24 @@ func TestGetRejectsNonJSON(t *testing.T) {
 	}
 }
 
-func TestExecArgv(t *testing.T) {
+func TestExecRefusesEnvValues(t *testing.T) {
+	t.Parallel()
+	cli, f := newFakeCLI()
+	_, _, err := cli.Exec(context.Background(), "gt-r-n",
+		map[string]string{"K": "V"}, []string{"tmux", "-L", "gt", "has-session"}, nil)
+	if err == nil {
+		t.Fatal("Exec with env values: want an error, since they would go on the argv")
+	}
+	if n := len(f.Calls()); n != 0 {
+		t.Errorf("calls = %d; a refused exec must not start openshell", n)
+	}
+}
+
+func TestExecReturnsStdout(t *testing.T) {
 	t.Parallel()
 	cli, f := newFakeCLI()
 	f.Reply = map[string]string{"exec": "out\n"}
-	stdout, _, err := cli.Exec(context.Background(), "gt-r-n",
-		map[string]string{"K": "V", "A": "B"}, []string{"tmux", "-L", "gt", "has-session"}, []byte("in"))
+	stdout, _, err := cli.Exec(context.Background(), "gt-r-n", nil, []string{"tmux", "-L", "gt", "has-session"}, []byte("in"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,8 +167,39 @@ func TestExecArgv(t *testing.T) {
 	}
 	wantCall(t, f,
 		"openshell", "-g", "openshell", "sandbox", "exec", "-n", "gt-r-n",
-		"--no-tty", "--no-login-shell", "--env", "A=B", "--env", "K=V",
-		"--", "tmux", "-L", "gt", "has-session")
+		"--no-tty", "--no-login-shell", "--", "tmux", "-L", "gt", "has-session")
+}
+
+func TestCreateRedactsEnvValuesFromStderr(t *testing.T) {
+	t.Parallel()
+	cli, f := newFakeCLI()
+	f.Err = map[string]error{"create": errors.New("exit status 1")}
+	// The value straddles the point where the stderr cut keeps only its tail,
+	// so redacting after the cut would leave "e-xyz" in the error.
+	f.Stderr = map[string]string{"create": "secret-value-xyz" + strings.Repeat("y", stderrLimit-5)}
+	err := cli.Create(context.Background(), CreateSpec{Name: "n", Env: map[string]string{"TOKEN": "secret-value-xyz"}})
+	if err == nil {
+		t.Fatal("want the create error")
+	}
+	for _, leak := range []string{"secret", "e-xyz"} {
+		if strings.Contains(err.Error(), leak) {
+			t.Errorf("error carries %q from the env value: %.60q...", leak, err.Error())
+		}
+	}
+}
+
+func TestExecRunnerDropsInheritedEnvValues(t *testing.T) {
+	t.Setenv("GT_SANDBOX_ENV_STALE", "old")
+	stdout, _, err := execRunner(context.Background(), []string{"env"}, nil, []string{"GT_SANDBOX_ENV_NEW=new"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stdout), "GT_SANDBOX_ENV_STALE") {
+		t.Error("child env carries an inherited GT_SANDBOX_ENV_ entry; only this call's values may reach openshell")
+	}
+	if !strings.Contains(string(stdout), "GT_SANDBOX_ENV_NEW=new") {
+		t.Error("child env lacks the value this call set")
+	}
 }
 
 func TestExecWithoutEnv(t *testing.T) {
