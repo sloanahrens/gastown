@@ -227,6 +227,7 @@ func poolUnseatableLabel(pool *config.PolecatPool, labels []string) error {
 		if _, ok := poolSeatOf(pool, pinned[0]); !ok {
 			return &poolBackpressureError{
 				Reason: fmt.Sprintf("pool: pinned to %s, which has no seat in the pool -> no seat for the bead labeled for it", pinned[0]),
+				Raise:  "polecat_pool.seats." + pinned[0],
 			}
 		}
 	}

@@ -2549,15 +2549,16 @@ func TestPoolUnseatableLabel(t *testing.T) {
 		labels  []string
 		refused bool
 		reason  string
+		raise   string
 	}{
-		{"a label naming an open seat is seatable", pool, []string{"agent:claude-sonnet"}, false, ""},
-		{"a label naming a pinned-only seat is seatable", pool, []string{"agent:deepseek-flash"}, false, ""},
-		{"no agent label has nothing to refuse", pool, []string{"gt:task"}, false, ""},
-		{"the same label twice is one agent, not a conflict", pool, []string{"agent:claude-sonnet", "agent:claude-sonnet"}, false, ""},
-		{"two labels that disagree are refused", pool, []string{"agent:claude-sonnet", "agent:deepseek-flash"}, true, "conflicting agent: labels (claude-sonnet, deepseek-flash)"},
-		{"a label naming an agent with no seat is refused", pool, []string{"agent:claude-haiku"}, true, "pinned to claude-haiku, which has no seat in the pool"},
-		{"a pool with no seats has no opinion on labels", &config.PolecatPool{}, []string{"agent:claude-haiku"}, false, ""},
-		{"no pool has no opinion on labels", nil, []string{"agent:claude-sonnet", "agent:deepseek-flash"}, false, ""},
+		{"a label naming an open seat is seatable", pool, []string{"agent:claude-sonnet"}, false, "", ""},
+		{"a label naming a pinned-only seat is seatable", pool, []string{"agent:deepseek-flash"}, false, "", ""},
+		{"no agent label has nothing to refuse", pool, []string{"gt:task"}, false, "", ""},
+		{"the same label twice is one agent, not a conflict", pool, []string{"agent:claude-sonnet", "agent:claude-sonnet"}, false, "", ""},
+		{"two labels that disagree are refused", pool, []string{"agent:claude-sonnet", "agent:deepseek-flash"}, true, "conflicting agent: labels (claude-sonnet, deepseek-flash)", "the bead's agent: labels"},
+		{"a label naming an agent with no seat is refused", pool, []string{"agent:claude-haiku"}, true, "pinned to claude-haiku, which has no seat in the pool", "polecat_pool.seats.claude-haiku"},
+		{"a pool with no seats has no opinion on labels", &config.PolecatPool{}, []string{"agent:claude-haiku"}, false, "", ""},
+		{"no pool has no opinion on labels", nil, []string{"agent:claude-sonnet", "agent:deepseek-flash"}, false, "", ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -2575,6 +2576,12 @@ func TestPoolUnseatableLabel(t *testing.T) {
 			}
 			if !strings.Contains(refusal.Reason, tc.reason) {
 				t.Errorf("refusal reason = %q, want it to name %q", refusal.Reason, tc.reason)
+			}
+			if refusal.Raise != tc.raise {
+				t.Errorf("refusal raises %q, want %q", refusal.Raise, tc.raise)
+			}
+			if want := "raise " + tc.raise + " to spawn"; !strings.Contains(err.Error(), want) {
+				t.Errorf("refusal %q does not say %q", err.Error(), want)
 			}
 		})
 	}
@@ -2644,14 +2651,15 @@ func TestPoolBeadAgentWith(t *testing.T) {
 		now          time.Time
 		want         string
 		wantRefusal  string // substring of a pool refusal's reason
+		wantRaise    string // the key the refusal tells the operator to raise
 		wantReadFail bool   // a plain read failure, not a pool refusal
 		wantShown    bool   // the bead is read
 	}{
 		{name: "a label naming an open seat routes to it", beadID: "gt-1", pool: pool, labels: []string{"agent:deepseek-flash"}, now: chicagoAt(t, 12, 0), want: "deepseek-flash", wantShown: true},
 		{name: "an unlabeled bead routes to no seat", beadID: "gt-1", pool: pool, labels: []string{"gt:task"}, now: chicagoAt(t, 12, 0), wantShown: true},
-		{name: "a label whose seat is closed refuses", beadID: "gt-1", pool: pool, labels: []string{"agent:deepseek-flash"}, now: chicagoAt(t, 21, 0), wantRefusal: "seat is closed", wantShown: true},
-		{name: "a label naming no seat refuses", beadID: "gt-1", pool: pool, labels: []string{"agent:claude-haiku"}, now: chicagoAt(t, 12, 0), wantRefusal: "has no seat in the pool", wantShown: true},
-		{name: "labels that disagree refuse", beadID: "gt-1", pool: pool, labels: []string{"agent:claude-sonnet", "agent:deepseek-flash"}, now: chicagoAt(t, 12, 0), wantRefusal: "conflicting", wantShown: true},
+		{name: "a label whose seat is closed refuses", beadID: "gt-1", pool: pool, labels: []string{"agent:deepseek-flash"}, now: chicagoAt(t, 21, 0), wantRefusal: "seat is closed", wantRaise: "polecat_pool.seats.deepseek-flash.closed", wantShown: true},
+		{name: "a label naming no seat refuses", beadID: "gt-1", pool: pool, labels: []string{"agent:claude-haiku"}, now: chicagoAt(t, 12, 0), wantRefusal: "has no seat in the pool", wantRaise: "polecat_pool.seats.claude-haiku", wantShown: true},
+		{name: "labels that disagree refuse", beadID: "gt-1", pool: pool, labels: []string{"agent:claude-sonnet", "agent:deepseek-flash"}, now: chicagoAt(t, 12, 0), wantRefusal: "conflicting", wantRaise: "the bead's agent: labels", wantShown: true},
 		{name: "a bead that cannot be read refuses", beadID: "gt-1", pool: pool, showErr: readErr, now: chicagoAt(t, 12, 0), wantReadFail: true, wantShown: true},
 		{name: "settings that cannot be read refuse a labeled bead", beadID: "gt-1", pool: pool, settingsErr: readErr, labels: []string{"agent:deepseek-flash"}, now: chicagoAt(t, 12, 0), wantReadFail: true, wantShown: true},
 		{name: "settings that cannot be read leave an unlabeled bead alone", beadID: "gt-1", pool: pool, settingsErr: readErr, labels: []string{"gt:task"}, now: chicagoAt(t, 12, 0), wantShown: true},
@@ -2707,6 +2715,9 @@ func TestPoolBeadAgentWith(t *testing.T) {
 				}
 				if !strings.Contains(refusal.Reason, tc.wantRefusal) {
 					t.Errorf("refusal reason = %q, want it to name %q", refusal.Reason, tc.wantRefusal)
+				}
+				if refusal.Raise != tc.wantRaise {
+					t.Errorf("refusal raises %q, want %q", refusal.Raise, tc.wantRaise)
 				}
 			case err != nil:
 				t.Errorf("unexpected error: %v", err)
