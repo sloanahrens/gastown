@@ -92,8 +92,8 @@ func TestLifecycleDefaultsCheck_MissingPatrols(t *testing.T) {
 	if result.Status != StatusWarning {
 		t.Errorf("expected Warning for partial config, got %s", result.Status)
 	}
-	// Should report 4 missing: compactor_dog, doctor_dog, jsonl_git_backup, scheduled_maintenance
-	if len(check.missing) != 4 {
+	// Should report 6 missing: compactor_dog, checkpoint_dog, doctor_dog, jsonl_git_backup, scheduled_maintenance, handler
+	if len(check.missing) != 6 {
 		t.Errorf("expected 4 missing patrols, got %d: %v", len(check.missing), check.missing)
 	}
 }
@@ -173,5 +173,32 @@ func TestLifecycleDefaultsCheck_NilPatrolsSection(t *testing.T) {
 	}
 	if result.Message != "mayor/daemon.json missing patrols section" {
 		t.Errorf("unexpected message: %s", result.Message)
+	}
+}
+
+// TestLifecycleDefaultsCheck_MissingCheckpointDogAndHandler: EnsureLifecycleDefaults
+// fills checkpoint_dog and handler, so a town missing them must not read as
+// fully configured.
+func TestLifecycleDefaultsCheck_MissingCheckpointDogAndHandler(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	mayorDir := filepath.Join(tmpDir, "mayor")
+	os.MkdirAll(mayorDir, 0755)
+
+	config := daemon.DefaultLifecycleConfig()
+	config.Patrols.CheckpointDog = nil
+	config.Patrols.Handler = nil
+	data, _ := json.MarshalIndent(config, "", "  ")
+	os.WriteFile(filepath.Join(mayorDir, "daemon.json"), data, 0644)
+
+	result := NewLifecycleDefaultsCheck().Run(&CheckContext{TownRoot: tmpDir})
+
+	if result.Status == StatusOK {
+		t.Fatalf("status = OK for a config missing checkpoint_dog and handler: %s", result.Message)
+	}
+	for _, name := range []string{"checkpoint_dog", "handler"} {
+		if !strings.Contains(result.Message, name) {
+			t.Errorf("message %q does not name %s", result.Message, name)
+		}
 	}
 }

@@ -71,23 +71,8 @@ func (c *LifecycleDefaultsCheck) Run(ctx *CheckContext) *CheckResult {
 		}
 	}
 
-	// Check each patrol entry individually
-	p := config.Patrols
-	if p.WispReaper == nil {
-		c.missing = append(c.missing, "wisp_reaper")
-	}
-	if p.CompactorDog == nil {
-		c.missing = append(c.missing, "compactor_dog")
-	}
-	if p.DoctorDog == nil {
-		c.missing = append(c.missing, "doctor_dog")
-	}
-	if p.JsonlGitBackup == nil {
-		c.missing = append(c.missing, "jsonl_git_backup")
-	}
-	if p.ScheduledMaintenance == nil {
-		c.missing = append(c.missing, "scheduled_maintenance")
-	}
+	// The same set EnsureLifecycleDefaults fills, so Fix clears what Run reports.
+	c.missing = daemon.MissingLifecyclePatrols(config.Patrols)
 
 	if len(c.missing) == 0 {
 		return &CheckResult{

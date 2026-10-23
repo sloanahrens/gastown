@@ -59,6 +59,40 @@ func DefaultLifecycleConfig() *DaemonPatrolConfig {
 	}
 }
 
+// lifecyclePatrol is one entry of the lifecycle patrol set: the config key that
+// names it, whether a PatrolsConfig carries it, and how to copy its default in.
+// EnsureLifecycleDefaults and MissingLifecyclePatrols both walk lifecyclePatrols,
+// so "configured" means the same thing to the daemon and to gt doctor.
+type lifecyclePatrol struct {
+	name  string
+	isSet func(p *PatrolsConfig) bool
+	fill  func(p, d *PatrolsConfig)
+}
+
+// lifecyclePatrols is the set of patrols EnsureLifecycleDefaults fills when nil.
+// Add a patrol here and the doctor check reports it missing too.
+var lifecyclePatrols = []lifecyclePatrol{
+	{"wisp_reaper", func(p *PatrolsConfig) bool { return p.WispReaper != nil }, func(p, d *PatrolsConfig) { p.WispReaper = d.WispReaper }},
+	{"compactor_dog", func(p *PatrolsConfig) bool { return p.CompactorDog != nil }, func(p, d *PatrolsConfig) { p.CompactorDog = d.CompactorDog }},
+	{"checkpoint_dog", func(p *PatrolsConfig) bool { return p.CheckpointDog != nil }, func(p, d *PatrolsConfig) { p.CheckpointDog = d.CheckpointDog }},
+	{"doctor_dog", func(p *PatrolsConfig) bool { return p.DoctorDog != nil }, func(p, d *PatrolsConfig) { p.DoctorDog = d.DoctorDog }},
+	{"jsonl_git_backup", func(p *PatrolsConfig) bool { return p.JsonlGitBackup != nil }, func(p, d *PatrolsConfig) { p.JsonlGitBackup = d.JsonlGitBackup }},
+	{"scheduled_maintenance", func(p *PatrolsConfig) bool { return p.ScheduledMaintenance != nil }, func(p, d *PatrolsConfig) { p.ScheduledMaintenance = d.ScheduledMaintenance }},
+	{"handler", func(p *PatrolsConfig) bool { return p.Handler != nil }, func(p, d *PatrolsConfig) { p.Handler = d.Handler }},
+}
+
+// MissingLifecyclePatrols returns the config keys of the lifecycle patrols p
+// does not set: exactly the ones EnsureLifecycleDefaults would fill in.
+func MissingLifecyclePatrols(p *PatrolsConfig) []string {
+	var missing []string
+	for _, lp := range lifecyclePatrols {
+		if !lp.isSet(p) {
+			missing = append(missing, lp.name)
+		}
+	}
+	return missing
+}
+
 // EnsureLifecycleDefaults populates missing patrol configuration with sensible
 // defaults. It never overwrites existing user configuration — only fills in
 // patrols that are nil (not yet configured).
@@ -77,35 +111,11 @@ func EnsureLifecycleDefaults(config *DaemonPatrolConfig) bool {
 		return true
 	}
 
-	p := config.Patrols
-	d := defaults.Patrols
-
-	if p.WispReaper == nil {
-		p.WispReaper = d.WispReaper
-		changed = true
-	}
-	if p.CompactorDog == nil {
-		p.CompactorDog = d.CompactorDog
-		changed = true
-	}
-	if p.CheckpointDog == nil {
-		p.CheckpointDog = d.CheckpointDog
-		changed = true
-	}
-	if p.DoctorDog == nil {
-		p.DoctorDog = d.DoctorDog
-		changed = true
-	}
-	if p.JsonlGitBackup == nil {
-		p.JsonlGitBackup = d.JsonlGitBackup
-		changed = true
-	}
-	if p.ScheduledMaintenance == nil {
-		p.ScheduledMaintenance = d.ScheduledMaintenance
-		changed = true
-	}
-	if p.Handler == nil {
-		p.Handler = d.Handler
+	for _, lp := range lifecyclePatrols {
+		if lp.isSet(config.Patrols) {
+			continue
+		}
+		lp.fill(config.Patrols, defaults.Patrols)
 		changed = true
 	}
 

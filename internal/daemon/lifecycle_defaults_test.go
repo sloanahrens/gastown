@@ -381,3 +381,29 @@ func retiredKeyKept(raw json.RawMessage, agent string) bool {
 	}
 	return got["agent"] == agent && got["enabled"] == true && got["interval"] == "5m"
 }
+
+// TestMissingLifecyclePatrols_MatchesWhatEnsureFills pins the shared patrol
+// set: the keys MissingLifecyclePatrols reports are the ones
+// EnsureLifecycleDefaults fills, and none are left after it runs.
+func TestMissingLifecyclePatrols_MatchesWhatEnsureFills(t *testing.T) {
+	t.Parallel()
+	config := &DaemonPatrolConfig{Patrols: &PatrolsConfig{}}
+
+	want := []string{"wisp_reaper", "compactor_dog", "checkpoint_dog", "doctor_dog", "jsonl_git_backup", "scheduled_maintenance", "handler"}
+	got := MissingLifecyclePatrols(config.Patrols)
+	if len(got) != len(want) {
+		t.Fatalf("missing = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("missing = %v, want %v", got, want)
+		}
+	}
+
+	if !EnsureLifecycleDefaults(config) {
+		t.Fatal("EnsureLifecycleDefaults reported no change on an empty patrols section")
+	}
+	if left := MissingLifecyclePatrols(config.Patrols); len(left) != 0 {
+		t.Errorf("patrols still missing after EnsureLifecycleDefaults: %v", left)
+	}
+}
