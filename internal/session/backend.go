@@ -1,0 +1,137 @@
+package session
+
+import (
+	"context"
+	"fmt"
+
+	"github.com/steveyegge/gastown/internal/liveness"
+	"github.com/steveyegge/gastown/internal/tmux"
+)
+
+// Backend names: a seat's polecats are hosted one of these ways.
+const (
+	BackendTmux      = "tmux"      // a tmux session on the host (today's default)
+	BackendOpenShell = "openshell" // a tmux session inside an OpenShell sandbox
+)
+
+// Profile is the sandbox profile a seat points at (design 4.5). It mirrors
+// config.SandboxProfile without importing it: the caller converts, so this
+// package compiles before the config fields land and the backend stays
+// usable from tests with literals.
+type Profile struct {
+	Name             string   // the sandboxes.<name> key
+	Gateway          string   // openshell gateway name; "" = the CLI's active gateway
+	Image            string   // OCI reference
+	Policy           string   // policy file path, relative to the rig repo root
+	Providers        []string // provider instance names attached at create
+	CPU, Memory      string   // k8s quantities, "" = driver default
+	ControlPlaneHost string   // how the sandbox reaches Dolt and Forgejo; "" = host.docker.internal
+	CacheVolume      string   // named volume for /sandbox/.cache; "{rig}" expands; "" = none
+}
+
+// SpawnSpec is what a backend needs to host one polecat's session.
+type SpawnSpec struct {
+	TownRoot    string
+	Rig         string
+	Polecat     string
+	Session     string // the tmux session name, gt-<rig>-<polecat>
+	Branch      string // the polecat branch, created on the host before Prepare
+	RepoURL     string // the sandbox-side clone URL (Forgejo through the control-plane host)
+	HostWorkDir string // the host worktree; the tmux backend's WorkDir
+	Profile     Profile
+	// Env is the startup environment the backend must set on the sandbox
+	// (the GT_* identity, the Dolt endpoint, the agent preset's non-secret
+	// vars). The tmux backend ignores it: StartSession sets the same vars.
+	Env map[string]string
+}
+
+// Prepared is what Prepare hands back to the session start.
+type Prepared struct {
+	// WorkDir is where StartSession's working directory points: the host
+	// worktree for tmux, the in-sandbox clone for openshell.
+	WorkDir string
+}
+
+// Backend hosts polecat sessions. The tmux backend is a pass-through to
+// today's behaviour; the openshell backend builds a sandbox first and then
+// drives the tmux server inside it through a routed client (tmux/router.go).
+//
+// Every method takes the session name the rest of gastown already uses, so
+// the daemon, gt sling and gt done call the same thing for both backends.
+type Backend interface {
+	// Name is BackendTmux or BackendOpenShell.
+	Name() string
+	// Tmux is the client the session's tmux commands run through. For the
+	// tmux backend it is the shared host client; for openshell it is the
+	// routed client for this session.
+	Tmux() *tmux.Tmux
+	// Prepare makes the place the session will run in. The tmux backend
+	// returns the host worktree; openshell creates and populates a sandbox.
+	Prepare(ctx context.Context, spec SpawnSpec) (*Prepared, error)
+	// SessionExists reports whether the session is there to be driven: a
+	// host tmux session, or a running sandbox with its tmux session.
+	SessionExists(session string) (bool, error)
+	// ProgressSample runs the liveness assessment where the session lives.
+	ProgressSample(session string, in liveness.Input) liveness.Result
+	// Stop ends the session's processes but keeps what Prepare made.
+	Stop(session string) error
+	// Delete removes what Prepare made. Idempotent.
+	Delete(session string) error
+}
+
+// NewOpenShellBackend is set by the openshell implementation (plan Task 5a)
+// when it is linked in; nil means openshell seats cannot spawn.
+var NewOpenShellBackend func(townRoot string, p Profile) (Backend, error)
+
+// Resolve picks the backend for a seat. backend is the seat's backend name
+// ("" means tmux); p is the seat's sandbox profile (zero for tmux); host is
+// the process's tmux client.
+func Resolve(seat, backend string, p Profile, townRoot string, host *tmux.Tmux) (Backend, error) {
+	switch backend {
+	case "", BackendTmux:
+		return NewTmuxBackend(host), nil
+	case BackendOpenShell:
+		if NewOpenShellBackend == nil {
+			return nil, fmt.Errorf("seat %s: backend openshell is not linked into this binary", seat)
+		}
+		if p.Image == "" || p.Policy == "" {
+			return nil, fmt.Errorf("seat %s: sandbox profile %q needs image and policy", seat, p.Name)
+		}
+		return NewOpenShellBackend(townRoot, p)
+	default:
+		return nil, fmt.Errorf("seat %s: unknown session backend %q (want tmux or openshell)", seat, backend)
+	}
+}
+
+// tmuxBackend is today's behaviour behind the interface.
+type tmuxBackend struct{ t *tmux.Tmux }
+
+// NewTmuxBackend hosts sessions on the process's tmux server through t.
+func NewTmuxBackend(t *tmux.Tmux) Backend { return &tmuxBackend{t: t} }
+
+func (b *tmuxBackend) Name() string     { return BackendTmux }
+func (b *tmuxBackend) Tmux() *tmux.Tmux { return b.t }
+
+func (b *tmuxBackend) Prepare(_ context.Context, spec SpawnSpec) (*Prepared, error) {
+	return &Prepared{WorkDir: spec.HostWorkDir}, nil
+}
+
+func (b *tmuxBackend) SessionExists(session string) (bool, error) {
+	if b.t == nil {
+		return false, nil
+	}
+	return b.t.HasSession(session)
+}
+
+func (b *tmuxBackend) ProgressSample(_ string, in liveness.Input) liveness.Result {
+	return liveness.Assess(b.t, in)
+}
+
+func (b *tmuxBackend) Stop(session string) error {
+	if b.t == nil {
+		return nil
+	}
+	return b.t.KillSessionWithProcesses(session)
+}
+
+func (b *tmuxBackend) Delete(session string) error { return b.Stop(session) }
