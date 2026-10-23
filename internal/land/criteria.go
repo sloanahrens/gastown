@@ -2,10 +2,10 @@ package land
 
 import (
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/steveyegge/gastown/internal/beads"
@@ -20,28 +20,40 @@ const acceptedRiskMarker = "ACCEPTED-RISK:"
 // --context-file before it truncates (om-pp3).
 const acceptedRiskCap = 8 << 10
 
+// headerFieldCap bounds the author and the date each in an entry's attribution
+// line, so a long field cannot push the record past its cap by itself.
+const headerFieldCap = 64
+
 // AcceptedRisksText is the accepted-risk record the work bead's comments carry,
 // which om is given through --context-file so it reports a finding that only
 // restates a settled decision as info rather than refusing the change on it
 // (gt-lauly).
 //
 // A comment counts when its text opens with "ACCEPTED-RISK:" and its author is
-// not a polecat, so a polecat can waive nothing on its own work. Entries are
-// joined oldest first, each under a line naming its author and date, and the
-// join is capped at acceptedRiskCap bytes by dropping the oldest: the newest
-// entry is the one the running review is judged against. Empty means the bead
-// records no accepted risk, and the review runs without the flag.
+// on the allowlist (isAcceptedRiskAuthor): an allowlist, not a denylist, so an
+// author shape nobody listed is ignored rather than trusted, and a polecat can
+// waive nothing on its own work. Entries are joined oldest first, each under a
+// line naming its author and date, and the join is capped at acceptedRiskCap
+// bytes by dropping the oldest: the newest entry is the one the running review
+// is judged against. When any comment's date does not parse, the order is the
+// list's own, since no date can say where that comment belongs. Empty means the
+// bead records no accepted risk, and the review runs without the flag.
 func AcceptedRisksText(comments []beads.Comment) string {
 	risks := make([]acceptedRisk, 0, len(comments))
+	dated := true
 	for _, c := range comments {
 		text := strings.TrimSpace(c.Text)
-		if !strings.HasPrefix(text, acceptedRiskMarker) || isPolecatAuthor(c.Author) {
+		if !strings.HasPrefix(text, acceptedRiskMarker) || !isAcceptedRiskAuthor(c.Author) {
 			continue
 		}
-		risks = append(risks, acceptedRisk{at: commentTime(c.CreatedAt),
+		at, ok := commentTime(c.CreatedAt)
+		dated = dated && ok
+		risks = append(risks, acceptedRisk{at: at,
 			entry: acceptedRiskEntry(c.Author, c.CreatedAt, text)})
 	}
-	sort.SliceStable(risks, func(i, j int) bool { return risks[i].at < risks[j].at })
+	if dated {
+		sort.SliceStable(risks, func(i, j int) bool { return risks[i].at < risks[j].at })
+	}
 	entries := make([]string, len(risks))
 	for i, r := range risks {
 		entries[i] = r.entry
@@ -50,63 +62,77 @@ func AcceptedRisksText(comments []beads.Comment) string {
 }
 
 // acceptedRisk is one qualifying comment: the entry it renders to, and the
-// moment it was written, which orders the join and decides what a cap drops.
+// moment it was written, which orders the join when every comment has one.
 type acceptedRisk struct {
 	at    int64
 	entry string
 }
 
-// commentTime reads a comment's creation time in unix seconds, and the oldest
-// representable moment for a date that does not parse: a timestamp nothing can
-// read is the entry a cap drops first.
-func commentTime(created string) int64 {
+// commentTime reads a comment's creation time in unix seconds. It reports false
+// for a date that does not parse.
+func commentTime(created string) (int64, bool) {
 	t, err := time.Parse(time.RFC3339, strings.TrimSpace(created))
 	if err != nil {
-		return math.MinInt64
+		return 0, false
 	}
-	return t.Unix()
+	return t.Unix(), true
 }
 
 // acceptedRiskEntry renders one comment under the line that attributes it: om
 // weighs a named author's decision, and an assertion with no one behind it is
 // not a decision to weigh.
 func acceptedRiskEntry(author, created, text string) string {
-	author, created = strings.TrimSpace(author), strings.TrimSpace(created)
-	if author == "" {
-		author = "an unnamed author"
-	}
+	author, created = headerField(author), headerField(created)
 	if created == "" {
 		created = "an unrecorded date"
 	}
 	return fmt.Sprintf("[ACCEPTED-RISK from %s, %s]\n%s", author, created, text)
 }
 
-// isPolecatAuthor reports whether an address names a polecat
-// ("gastown/polecats/capable"), read by path segment so a rig or pool whose name
-// merely contains the word is not one.
-func isPolecatAuthor(author string) bool {
-	for _, segment := range strings.Split(strings.ToLower(author), "/") {
-		if strings.TrimSpace(segment) == "polecats" {
-			return true
+// headerField makes a comment's author or date safe to print on the attribution
+// line: control characters and newlines are dropped, so nothing in it can open
+// a second line, and the rest is capped at headerFieldCap bytes.
+func headerField(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
 		}
+		return r
+	}, s)
+	return cutToBytes(strings.TrimSpace(s), headerFieldCap)
+}
+
+// isAcceptedRiskAuthor reports whether an author may record an accepted risk:
+// the shared human identity or the overseer, matched exactly after trimming and
+// case-sensitively. Every other author, polecats included, is ignored (gt-lauly).
+func isAcceptedRiskAuthor(author string) bool {
+	switch strings.TrimSpace(author) {
+	case "Sloan Ahrens", "town/crew/overseer":
+		return true
 	}
 	return false
 }
 
-// capAcceptedRisks joins entries oldest first and drops the oldest until the
-// join fits acceptedRiskCap. A newest entry larger than the cap is cut rather
-// than dropped: om truncates the file at that size anyway, and half the newest
-// record is worth more than a whole older one.
+// capAcceptedRisks joins entries oldest first and keeps the longest run of the
+// newest that fits acceptedRiskCap, in one pass from the newest entry back. A
+// newest entry larger than the cap is cut rather than dropped: om truncates the
+// file at that size anyway, and half the newest record is worth more than a
+// whole older one.
 func capAcceptedRisks(entries []string) string {
-	joined := strings.Join(entries, "\n\n")
-	for len(entries) > 1 && len(joined) > acceptedRiskCap {
-		entries = entries[1:]
-		joined = strings.Join(entries, "\n\n")
+	const sep = "\n\n"
+	size, keep := 0, len(entries)
+	for keep > 0 {
+		grown := size + len(entries[keep-1])
+		if keep < len(entries) {
+			grown += len(sep)
+		}
+		if keep < len(entries) && grown > acceptedRiskCap {
+			break
+		}
+		size = grown
+		keep--
 	}
-	if len(joined) > acceptedRiskCap {
-		joined = cutToBytes(joined, acceptedRiskCap)
-	}
-	return joined
+	return cutToBytes(strings.Join(entries[keep:], sep), acceptedRiskCap)
 }
 
 // cutToBytes returns s's first n bytes, stopping on a rune boundary so a
