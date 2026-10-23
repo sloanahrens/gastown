@@ -1,10 +1,12 @@
 package daemon
 
 import (
+	"bytes"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/agentlog"
@@ -91,5 +93,101 @@ func TestAssessSeat_NoTranscriptIsNotDead(t *testing.T) {
 	}
 	if res.Sample == nil || res.Sample.TranscriptPath != "" {
 		t.Fatalf("transcript = %+v, want none", res.Sample)
+	}
+}
+
+// TestSeatWorkDir pins every branch of seatWorkDir: the directory each seat
+// kind's session starts in, and the log line that tells a seat whose worktree
+// is missing from one that never had a worktree (a town-level role).
+func TestSeatWorkDir(t *testing.T) {
+	t.Parallel()
+	reg := session.NewPrefixRegistry()
+	tests := []struct {
+		name     string
+		seat     supervisor.Seat
+		mkdirs   []string // relative to the town root
+		want     string   // relative to the town root; "" means no directory
+		wantLogs bool
+	}{
+		{
+			name:   "nested polecat worktree",
+			seat:   supervisor.SeatIn(reg, "gastown", "polecat", "ace"),
+			mkdirs: []string{"gastown/polecats/ace/gastown"},
+			want:   "gastown/polecats/ace/gastown",
+		},
+		{
+			name:   "nested layout wins over the flat directory",
+			seat:   supervisor.SeatIn(reg, "gastown", "polecat", "ace"),
+			mkdirs: []string{"gastown/polecats/ace/gastown", "gastown/polecats/ace"},
+			want:   "gastown/polecats/ace/gastown",
+		},
+		{
+			name:   "legacy flat polecat worktree",
+			seat:   supervisor.SeatIn(reg, "gastown", "polecat", "ace"),
+			mkdirs: []string{"gastown/polecats/ace"},
+			want:   "gastown/polecats/ace",
+		},
+		{
+			name:     "polecat with no worktree logs what it tried",
+			seat:     supervisor.SeatIn(reg, "gastown", "polecat", "ace"),
+			wantLogs: true,
+		},
+		{
+			name:   "crew worktree",
+			seat:   supervisor.SeatIn(reg, "gastown", "crew", "sloan"),
+			mkdirs: []string{"gastown/crew/sloan"},
+			want:   "gastown/crew/sloan",
+		},
+		{
+			name:     "crew with no worktree logs what it tried",
+			seat:     supervisor.SeatIn(reg, "gastown", "crew", "sloan"),
+			wantLogs: true,
+		},
+		{
+			name:   "rig-level role has no worktree and stays quiet",
+			seat:   supervisor.SeatIn(reg, "gastown", "witness", ""),
+			mkdirs: []string{"gastown/witness"},
+		},
+		{
+			name: "town-level role has no worktree and stays quiet",
+			seat: supervisor.SeatIn(reg, "", "mayor", ""),
+		},
+		{
+			name:   "a named seat of a role with no worktree stays quiet",
+			seat:   supervisor.SeatIn(reg, "gastown", "refinery", "x"),
+			mkdirs: []string{"gastown/refinery/x"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			for _, rel := range tt.mkdirs {
+				if err := os.MkdirAll(filepath.Join(townRoot, rel), 0o755); err != nil {
+					t.Fatalf("creating %s: %v", rel, err)
+				}
+			}
+			var logs bytes.Buffer
+			d := &Daemon{
+				config: &Config{TownRoot: townRoot},
+				logger: log.New(&logs, "", 0),
+			}
+
+			got := d.seatWorkDir(tt.seat)
+
+			want := ""
+			if tt.want != "" {
+				want = filepath.Join(townRoot, tt.want)
+			}
+			if got != want {
+				t.Errorf("seatWorkDir = %q, want %q", got, want)
+			}
+			if logged := logs.Len() > 0; logged != tt.wantLogs {
+				t.Errorf("logged = %v (%q), want %v", logged, logs.String(), tt.wantLogs)
+			}
+			if tt.wantLogs && !strings.Contains(logs.String(), filepath.Join(townRoot, "gastown")) {
+				t.Errorf("log %q does not name the paths it tried", logs.String())
+			}
+		})
 	}
 }
