@@ -328,6 +328,9 @@ func bdSourceTree(root string) bool {
 // patrolScanHost implements patrolscan.Env for the daemon.
 type patrolScanHost struct {
 	d *Daemon
+	// cleanupSandbox is session.CleanupSandboxWith over the real deleter when
+	// nil: a seam for the unit tier, which has no gateway.
+	cleanupSandbox func(townRoot, sessionName string) error
 	// listOriginBranches is polecat.ListOriginPolecatBranches when nil: a seam
 	// for the unit tier, which cannot start git.
 	listOriginBranches func(rigRoot string) ([]string, error)
@@ -647,8 +650,24 @@ func (h *patrolScanHost) Restart(rig, name, reason string) error {
 // Kill stops a stalled seat's live session through the supervisor's
 // automatic-path kill, which refuses a parked or frozen seat and an e-stop
 // (gt-9p99w).
+//
+// A sandboxed seat's session lives in its sandbox, so once the kill succeeded the
+// sandbox and its registry record are deleted too; left behind they keep the seat
+// looking occupied. A host seat has no record and nothing more happens.
 func (h *patrolScanHost) Kill(rig, name, reason string) error {
-	return h.d.sup().Kill(h.seat(rig, name), reason, patrolscan.Actor)
+	if err := h.d.sup().Kill(h.seat(rig, name), reason, patrolscan.Actor); err != nil {
+		return err
+	}
+	cleanup := h.cleanupSandbox
+	if cleanup == nil {
+		cleanup = func(townRoot, sessionName string) error {
+			return session.CleanupSandboxWith(session.SandboxDeleter, townRoot, sessionName)
+		}
+	}
+	if err := cleanup(h.town(), h.sessionName(rig, name)); err != nil {
+		return fmt.Errorf("session killed; removing the sandbox of %s/%s: %w", rig, name, err)
+	}
+	return nil
 }
 
 // MarkIdle retires a polecat seat's record to stop once its session is gone

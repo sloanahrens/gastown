@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1180,4 +1181,64 @@ func TestPatrolScanKillStopsTheSessionAndAnswersToTheEstop(t *testing.T) {
 	if !strings.Contains(string(lines), `"verb":"kill"`) {
 		t.Fatalf("kill missing from the action log: %s", lines)
 	}
+}
+
+// A killed sandboxed seat leaves its sandbox and registry record unless the
+// kill removes them, and a seat with a record looks occupied. The sandbox is
+// deleted only after the kill succeeded: a refused kill (an e-stop) leaves the
+// live seat's sandbox alone, and a failed deletion is reported with the kill's
+// success named.
+func TestPatrolScanKillRemovesTheSandboxAfterTheKill(t *testing.T) {
+	t.Parallel()
+	newHost := func(t *testing.T, cleanup func(townRoot, sessionName string) error) (*patrolScanHost, *fakeTmux, string) {
+		t.Helper()
+		town := t.TempDir()
+		tm := newFakeTmux(newFixedClock())
+		tm.addSession("myr-mycat", "claude", time.Now())
+		d := &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0), tmux: tm, prefixRegistryFn: myrPrefixes}
+		return &patrolScanHost{d: d, cleanupSandbox: cleanup}, tm, town
+	}
+
+	t.Run("cleans_up_the_killed_session", func(t *testing.T) {
+		t.Parallel()
+		var got []string
+		h, tm, town := newHost(t, func(townRoot, sessionName string) error {
+			got = append(got, townRoot+"|"+sessionName)
+			return nil
+		})
+		if err := h.Kill("myr", "mycat", "stalled seat"); err != nil {
+			t.Fatalf("Kill: %v", err)
+		}
+		if has, _ := tm.HasSession("myr-mycat"); has {
+			t.Fatal("the session survived the kill")
+		}
+		if want := []string{town + "|myr-mycat"}; !reflect.DeepEqual(got, want) {
+			t.Errorf("sandbox cleanup calls = %v, want %v", got, want)
+		}
+	})
+
+	t.Run("a_refused_kill_leaves_the_sandbox", func(t *testing.T) {
+		t.Parallel()
+		called := false
+		h, _, town := newHost(t, func(string, string) error { called = true; return nil })
+		if err := estop.Activate(town, estop.TriggerManual, "drill"); err != nil {
+			t.Fatal(err)
+		}
+		if err := h.Kill("myr", "mycat", "stalled seat"); !errors.Is(err, supervisor.ErrRefused) {
+			t.Fatalf("Kill under the e-stop = %v, want a supervisor refusal", err)
+		}
+		if called {
+			t.Error("the sandbox of a seat whose kill was refused was cleaned up")
+		}
+	})
+
+	t.Run("a_failed_cleanup_is_reported", func(t *testing.T) {
+		t.Parallel()
+		boom := errors.New("gateway unreachable")
+		h, _, _ := newHost(t, func(string, string) error { return boom })
+		err := h.Kill("myr", "mycat", "stalled seat")
+		if !errors.Is(err, boom) || !strings.Contains(err.Error(), "session killed") {
+			t.Errorf("Kill = %v, want the cleanup error wrapped with 'session killed'", err)
+		}
+	})
 }
