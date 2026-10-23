@@ -700,6 +700,19 @@ func TestPatrolScanAssignedWorkReadsAnOpenAssignedBead(t *testing.T) {
 		t.Fatalf("AssignedWork over hooked and open work = %+v, %v; want gt-hooked", w, err)
 	}
 
+	// The full chain is hooked, then in_progress, then open.
+	mid := newWorkBD(t)
+	hMid := &patrolScanHost{d: &Daemon{config: &Config{TownRoot: t.TempDir()}, openWorkBeads: mid.open}}
+	mid.seed("gt-open", "open", time.Now().Add(-time.Hour))
+	mid.seed("gt-progress", "in_progress", time.Now().Add(-time.Minute))
+	if w, err := hMid.AssignedWork("myr", "mycat"); err != nil || w == nil || w.ID != "gt-progress" {
+		t.Fatalf("AssignedWork over in_progress and open work = %+v, %v; want gt-progress", w, err)
+	}
+	mid.seed("gt-hooked", "hooked", time.Now().Add(-2*time.Hour))
+	if w, err := hMid.AssignedWork("myr", "mycat"); err != nil || w == nil || w.ID != "gt-hooked" {
+		t.Fatalf("AssignedWork over hooked, in_progress and open work = %+v, %v; want gt-hooked", w, err)
+	}
+
 	// Finished work is not work the seat still holds.
 	done := newWorkBD(t)
 	done.seed("gt-closed", "closed", time.Now().Add(-time.Hour))
