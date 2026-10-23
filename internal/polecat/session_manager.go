@@ -668,12 +668,26 @@ func (m *SessionManager) launch(polecat, sessionID string, opts SessionStartOpti
 		// and no one gets to it: Stop returns ErrSessionNotFound when the tmux
 		// session never came up, so the kill path's cleanup never runs. This
 		// drops what this launch made, sandbox and record (gt-8a1ql).
+		//
+		// A panic unwinds through this defer with the named result still nil,
+		// so it is recovered, the sandbox dropped, and the same value panicked
+		// again. A launch that fails after this returns is out of reach: the
+		// patrol's orphan cleanup owns that sandbox.
 		defer func() {
-			if err == nil {
+			p := recover()
+			if err == nil && p == nil {
 				return
 			}
 			if cerr := session.CleanupSandboxWith(sandboxDeleterOrLinked(m.sandboxDeleter), townRoot, sessionID); cerr != nil {
-				err = errors.Join(err, fmt.Errorf("cleaning up %s session for %s: %w", b.Name(), polecat, cerr))
+				if p != nil {
+					// A panic leaves no result to carry the failure out.
+					style.PrintWarning("cleaning up %s session for %s: %v", b.Name(), polecat, cerr)
+				} else {
+					err = errors.Join(err, fmt.Errorf("cleaning up %s session for %s: %w", b.Name(), polecat, cerr))
+				}
+			}
+			if p != nil {
+				panic(p)
 			}
 		}()
 		if prep.WorkDir != "" {
