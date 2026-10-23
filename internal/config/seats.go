@@ -7,19 +7,29 @@ import (
 	"time"
 )
 
+// The session backends a seat can run its polecats on.
+const (
+	BackendTmux      = "tmux"
+	BackendOpenShell = "openshell"
+)
+
 // SeatConfig is one entry of polecat_pool.seats (gt-mukgk).
 type SeatConfig struct {
-	Cap    int      `json:"cap"`
-	Closed string   `json:"closed,omitempty"` // "HH:MM-HH:MM" in polecat_pool.timezone
-	Names  []string `json:"names,omitempty"`
+	Cap     int      `json:"cap"`
+	Closed  string   `json:"closed,omitempty"` // "HH:MM-HH:MM" in polecat_pool.timezone
+	Names   []string `json:"names,omitempty"`
+	Backend string   `json:"backend,omitempty"` // "" or "tmux" or "openshell"
+	Sandbox string   `json:"sandbox,omitempty"` // key in TownSettings.Sandboxes; required when Backend is openshell
 }
 
 // Seat is a validated seat, as every reader sees it.
 type Seat struct {
-	Agent  string
-	Cap    int
-	Window *Window // nil: always open
-	Names  []string
+	Agent   string
+	Cap     int
+	Window  *Window // nil: always open
+	Names   []string
+	Backend string // BackendTmux or BackendOpenShell, never empty
+	Sandbox string // key in TownSettings.Sandboxes; set only for an openshell seat
 }
 
 // Window is a daily closed period in one timezone.
@@ -64,7 +74,29 @@ func Seats(ts *TownSettings, known func(agent string) bool) ([]Seat, error) {
 		if c.Cap < 0 {
 			return nil, fmt.Errorf("polecat_pool.seats.%s.cap %d: must be 0 or more", a, c.Cap)
 		}
-		s := Seat{Agent: a, Cap: c.Cap, Names: c.Names}
+		backend := c.Backend
+		switch backend {
+		case "":
+			backend = BackendTmux
+		case BackendTmux, BackendOpenShell:
+		default:
+			return nil, fmt.Errorf("polecat_pool.seats.%s.backend %q: want tmux or openshell", a, c.Backend)
+		}
+		if backend == BackendOpenShell {
+			if c.Sandbox == "" {
+				return nil, fmt.Errorf("polecat_pool.seats.%s.sandbox: required when backend is openshell", a)
+			}
+			p, ok := ts.Sandboxes[c.Sandbox]
+			if !ok {
+				return nil, fmt.Errorf("polecat_pool.seats.%s.sandbox %q: no such entry in sandboxes", a, c.Sandbox)
+			}
+			if err := p.Validate(c.Sandbox); err != nil {
+				return nil, err
+			}
+		} else if c.Sandbox != "" {
+			return nil, fmt.Errorf("polecat_pool.seats.%s.sandbox: only an openshell seat names a sandbox", a)
+		}
+		s := Seat{Agent: a, Cap: c.Cap, Names: c.Names, Backend: backend, Sandbox: c.Sandbox}
 		if c.Closed != "" {
 			if loc == nil {
 				return nil, fmt.Errorf("polecat_pool.seats.%s.closed needs polecat_pool.timezone", a)
