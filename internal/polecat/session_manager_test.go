@@ -258,20 +258,30 @@ func TestStopKillsThroughTheStopHook(t *testing.T) {
 
 // Stopping a sandboxed polecat's session also deletes its sandbox and registry
 // record (gt session stop, the overrun guard and gt down all stop through
-// Stop); a host session, which has no record, is only killed, and a deletion
-// that fails is reported with the stop's success named.
+// Stop), whether the kill goes through tmux or the stop hook; a host session,
+// which has no record, is only killed. A deletion that fails, or a registry
+// that cannot be read (which is not a host session), is reported as
+// ErrSandboxNotRemoved and keeps the record.
 func TestStopRemovesTheSandboxOfASandboxedSession(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name      string
-		record    bool
-		deleteErr error
-		wantCalls int
-		wantErr   string
+		name       string
+		hook       bool
+		record     bool
+		badRecord  bool
+		deleteErr  error
+		wantCalls  int
+		wantErr    string
+		wantRecord bool
 	}{
 		{name: "sandboxed_session_loses_its_sandbox", record: true, wantCalls: 1},
-		{name: "host_session_has_nothing_to_remove", record: false, wantCalls: 0},
-		{name: "a_failed_deletion_is_reported", record: true, deleteErr: errors.New("gateway unreachable"), wantCalls: 1, wantErr: "session stopped; removing its sandbox"},
+		{name: "host_session_has_nothing_to_remove", wantCalls: 0},
+		{name: "a_failed_deletion_is_reported", record: true, deleteErr: errors.New("gateway unreachable"), wantCalls: 1, wantErr: "removing its sandbox", wantRecord: true},
+		{name: "hook_stop_removes_the_sandbox", hook: true, record: true, wantCalls: 1},
+		{name: "hook_stop_of_a_host_session_removes_nothing", hook: true, wantCalls: 0},
+		{name: "hook_stop_reports_a_failed_deletion", hook: true, record: true, deleteErr: errors.New("gateway unreachable"), wantCalls: 1, wantErr: "removing its sandbox", wantRecord: true},
+		{name: "an_unreadable_registry_is_not_a_host_session", badRecord: true, wantErr: "cannot tell whether", wantRecord: true},
+		{name: "hook_stop_with_an_unreadable_registry_is_not_a_host_session", hook: true, badRecord: true, wantErr: "cannot tell whether", wantRecord: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -283,8 +293,21 @@ func TestStopRemovesTheSandboxOfASandboxedSession(t *testing.T) {
 			if err := tm.NewSession(sess, ""); err != nil {
 				t.Fatal(err)
 			}
+			var hookKills []string
+			if tt.hook {
+				m.SetHooks(SessionHooks{Stop: func(id string) error { hookKills = append(hookKills, id); return nil }})
+			}
+			recordPath := filepath.Join(session.SandboxRegistryDir(town), sess+".json")
 			if tt.record {
 				if err := session.WriteSandboxRecord(town, session.SandboxRecord{Session: sess, Rig: "test-rig", Polecat: "Toast"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.badRecord {
+				if err := os.MkdirAll(filepath.Dir(recordPath), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(recordPath, []byte("{not json"), 0o644); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -296,14 +319,28 @@ func TestStopRemovesTheSandboxOfASandboxedSession(t *testing.T) {
 
 			err := m.Stop("Toast", true)
 
-			if tt.wantErr == "" && err != nil || tt.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tt.wantErr)) {
-				t.Fatalf("Stop = %v, want error containing %q", err, tt.wantErr)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Stop = %v, want nil", err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tt.wantErr) || !errors.Is(err, ErrSandboxNotRemoved) {
+				t.Fatalf("Stop = %v, want ErrSandboxNotRemoved containing %q", err, tt.wantErr)
 			}
 			if len(deleted) != tt.wantCalls || (tt.wantCalls == 1 && deleted[0] != sess) {
 				t.Errorf("sandbox deletions = %v, want %d for %s", deleted, tt.wantCalls, sess)
 			}
-			if ok, _ := tm.HasSession(sess); ok {
+			if tt.hook {
+				if len(hookKills) != 1 || hookKills[0] != sess {
+					t.Errorf("hook kills = %v, want [%s]", hookKills, sess)
+				}
+			} else if ok, _ := tm.HasSession(sess); ok {
 				t.Error("the session survived the stop")
+			}
+			if tt.record || tt.badRecord {
+				_, statErr := os.Stat(recordPath)
+				if kept := statErr == nil; kept != tt.wantRecord {
+					t.Errorf("registry record kept = %v, want %v", kept, tt.wantRecord)
+				}
 			}
 		})
 	}
