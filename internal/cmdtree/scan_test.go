@@ -319,3 +319,44 @@ func TestScanBdFlagsWithoutSubcommand(t *testing.T) {
 	}, "\n"), 1)
 	assertRefs(t, refs, "3:bd sync")
 }
+
+// A dash token is skipped before the bd command word only when it is one of
+// bd's persistent flags. A subcommand flag in prose ("`bd --if-assignee and
+// --if-status`") ends the words, as it did before the global-flag skip, so
+// the words after it are not read as a subcommand.
+func TestScanBdSubcommandFlagInProseHasNoWords(t *testing.T) {
+	t.Parallel()
+	refs := ScanShell("f.sh", strings.Join([]string{
+		"bd --if-assignee and --if-status",
+		"bd --allow-stale and then wait",
+	}, "\n"), 1)
+	assertRefs(t, refs)
+	md := ScanMarkdown("a.md", "Release with `bd --if-assignee and --if-status` set.\n")
+	assertRefs(t, md)
+}
+
+// Each value-taking flag skips its separate value, so `bd <flag> x sync` reads
+// as bd sync. A name that is not a persistent flag of the bd tree fails here,
+// because the scan would stop at it and find no words.
+func TestBdValueFlagsSkipWithTheirValue(t *testing.T) {
+	t.Parallel()
+	for flag := range bdGlobalValueFlags {
+		t.Run(flag, func(t *testing.T) {
+			t.Parallel()
+			refs := ScanShell("f.sh", "bd "+flag+" x sync", 1)
+			assertRefs(t, refs, "1:bd sync")
+		})
+	}
+}
+
+// A persistent flag glued to its value (-Cpath, --db=beads) is still skipped,
+// and a value flag's separate value is skipped with it.
+func TestScanBdGlobalFlagGlued(t *testing.T) {
+	t.Parallel()
+	refs := ScanShell("f.sh", strings.Join([]string{
+		"bd -C/tmp/beads show gt-1",
+		"bd --db=beads show gt-2",
+		"bd --global show gt-3",
+	}, "\n"), 1)
+	assertRefs(t, refs, "1:bd show gt-1", "2:bd show gt-2", "3:bd show gt-3")
+}
