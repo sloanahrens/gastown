@@ -29,10 +29,9 @@ func NewRigNameMismatchCheck() *RigNameMismatchCheck {
 	}
 }
 
-// rigConfigLocal is the read-only view of rig config.json that the checks in
-// this file need. It is deliberately smaller than config.RigConfig (gt-ay3b0):
-// Fix rewrites the raw JSON under ctx.RigName, so this type never decides what
-// the file contains, and a key it does not model cannot be dropped by it.
+// rigConfigLocal is the read-only view of config.json the checks here need.
+// Fix edits the raw JSON map instead, so keys this type does not model survive
+// a fix (gt-ay3b0).
 type rigConfigLocal struct {
 	Type    string               `json:"type"`
 	Version int                  `json:"version"`
@@ -73,6 +72,9 @@ func loadRigConfigRaw(rigPath string) (map[string]json.RawMessage, error) {
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(data, &raw); err != nil {
 		return nil, err
+	}
+	if raw == nil {
+		return nil, fmt.Errorf("%s is not a JSON object", rigConfigPath(rigPath))
 	}
 	return raw, nil
 }
@@ -164,7 +166,7 @@ func (c *RigNameMismatchCheck) Fix(ctx *CheckContext) error {
 	}
 	raw, err := loadRigConfigRaw(rigPath)
 	if err != nil {
-		return nil // Not a JSON object; leave the file for a human
+		return err
 	}
 
 	modified := false

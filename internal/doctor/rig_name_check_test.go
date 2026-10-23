@@ -321,6 +321,103 @@ func TestRigNameMismatchFixPreservesFields(t *testing.T) {
 	}
 }
 
+// TestRigNameMismatchFixKeepsBeadsSiblingKeys covers the beads.prefix rewrite
+// with a sibling key inside beads: the prefix changes, beads.repo does not.
+func TestRigNameMismatchFixKeepsBeadsSiblingKeys(t *testing.T) {
+	t.Parallel()
+	const configJSON = `{
+  "type": "rig",
+  "version": 1,
+  "name": "myrig",
+  "beads": {"prefix": "mr", "repo": "local"},
+  "merge_queue": {"test_command": "make test"}
+}`
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "myrig")
+	if err := os.MkdirAll(rigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(configJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	rigsJSON := &config.RigsConfig{
+		Version: 1,
+		Rigs: map[string]config.RigEntry{
+			"myrig": {BeadsConfig: &config.BeadsConfig{Prefix: "xy"}},
+		},
+	}
+	mayorDir := filepath.Join(townRoot, "mayor")
+	if err := os.MkdirAll(mayorDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	rigsData, err := json.MarshalIndent(rigsJSON, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "rigs.json"), rigsData, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewRigNameMismatchCheck()
+	ctx := &CheckContext{TownRoot: townRoot, RigName: "myrig"}
+	if result := check.Run(ctx); result.Status != StatusWarning {
+		t.Fatalf("expected StatusWarning before fix, got %v: %v", result.Status, result.Details)
+	}
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix failed: %v", err)
+	}
+
+	fixed, err := loadRigConfigRaw(rigDir)
+	if err != nil {
+		t.Fatalf("fixed config.json does not parse: %v", err)
+	}
+	var beads map[string]string
+	if err := json.Unmarshal(fixed["beads"], &beads); err != nil {
+		t.Fatalf("beads does not parse after fix: %v", err)
+	}
+	if beads["prefix"] != "xy" {
+		t.Errorf("expected beads.prefix %q after fix, got %q", "xy", beads["prefix"])
+	}
+	if beads["repo"] != "local" {
+		t.Errorf("fix changed beads.repo: want %q, got %q", "local", beads["repo"])
+	}
+	if _, ok := fixed["merge_queue"]; !ok {
+		t.Errorf("fix deleted merge_queue")
+	}
+	if result := check.Run(ctx); result.Status != StatusOK {
+		t.Errorf("expected StatusOK after fix, got %v: %v", result.Status, result.Details)
+	}
+}
+
+// TestRigNameMismatchFixRejectsNonObjectConfig pins that a config.json which
+// parses as JSON null is reported as an error rather than written to.
+func TestRigNameMismatchFixRejectsNonObjectConfig(t *testing.T) {
+	t.Parallel()
+	townRoot := t.TempDir()
+	rigDir := filepath.Join(townRoot, "myrig")
+	if err := os.MkdirAll(rigDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	const original = "null"
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(original), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewRigNameMismatchCheck()
+	ctx := &CheckContext{TownRoot: townRoot, RigName: "myrig"}
+	if err := check.Fix(ctx); err == nil {
+		t.Fatal("expected Fix to return an error for a non-object config.json")
+	}
+
+	data, err := os.ReadFile(filepath.Join(rigDir, "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != original {
+		t.Errorf("Fix rewrote a non-object config.json: got %q", data)
+	}
+}
+
 func TestRigNameMismatchCheck_NoRig(t *testing.T) {
 	t.Parallel()
 	check := NewRigNameMismatchCheck()
