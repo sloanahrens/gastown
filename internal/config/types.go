@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -1697,8 +1698,10 @@ func (p SandboxProfile) WithDefaults() SandboxProfile {
 	return p
 }
 
-// Validate reports the first required field of p that is unset, naming the
-// profile by its key name in TownSettings.Sandboxes.
+// Validate reports the first field of p that is unset or malformed, naming the
+// profile by its key name in TownSettings.Sandboxes. Image and Policy are
+// required; Policy must stay inside the rig repo root (relative, no ".." escape); each provider must be
+// named; CPU and Memory, when set, must be k8s quantities.
 func (p SandboxProfile) Validate(name string) error {
 	if p.Image == "" {
 		return fmt.Errorf("sandboxes.%s.image: required", name)
@@ -1706,8 +1709,30 @@ func (p SandboxProfile) Validate(name string) error {
 	if p.Policy == "" {
 		return fmt.Errorf("sandboxes.%s.policy: required", name)
 	}
+	if !filepath.IsLocal(p.Policy) {
+		return fmt.Errorf("sandboxes.%s.policy %q: want a path inside the rig repo root", name, p.Policy)
+	}
+	for i, prov := range p.Providers {
+		if strings.TrimSpace(prov) == "" {
+			return fmt.Errorf("sandboxes.%s.providers[%d]: empty provider name", name, i)
+		}
+	}
+	if p.CPU != "" && !sandboxCPURe.MatchString(p.CPU) {
+		return fmt.Errorf("sandboxes.%s.cpu %q: want a k8s CPU quantity such as \"4\" or \"500m\"", name, p.CPU)
+	}
+	if p.Memory != "" && !sandboxMemoryRe.MatchString(p.Memory) {
+		return fmt.Errorf("sandboxes.%s.memory %q: want a k8s memory quantity such as \"8Gi\"", name, p.Memory)
+	}
 	return nil
 }
+
+// The k8s quantity shapes a profile's CPU and Memory may take: a plain or
+// decimal number, then "m" for CPU or a suffix for memory: decimal "k" (lower
+// case), "M".."E" or "m", or binary "Ki".."Ei" ("ki" is not a quantity).
+var (
+	sandboxCPURe    = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?m?$`)
+	sandboxMemoryRe = regexp.MustCompile(`^[0-9]+(\.[0-9]+)?(k|[KMGTPE]i|[MGTPE]|m)?$`)
+)
 
 // PolecatPool is the town's polecat seat map: which agents run polecats, how
 // many of each, and when. See TownSettings.PolecatPool.

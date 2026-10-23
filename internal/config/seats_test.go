@@ -376,6 +376,7 @@ func TestSeatsBackendAndSandbox(t *testing.T) {
 		{"unknown backend", SeatConfig{Cap: 1, Backend: "firecracker"}, nil, `polecat_pool.seats.deepseek-flash.backend "firecracker": want tmux or openshell`, ""},
 		{"tmux seat naming a sandbox", SeatConfig{Cap: 1, Sandbox: "polecat-default"}, prof, "polecat_pool.seats.deepseek-flash.sandbox: only an openshell seat names a sandbox", ""},
 		{"profile missing image", SeatConfig{Cap: 1, Backend: "openshell", Sandbox: "polecat-default"}, map[string]SandboxProfile{"polecat-default": {Policy: "p.yaml"}}, "sandboxes.polecat-default.image: required", ""},
+		{"profile missing policy", SeatConfig{Cap: 1, Backend: "openshell", Sandbox: "polecat-default"}, map[string]SandboxProfile{"polecat-default": {Image: "i"}}, "sandboxes.polecat-default.policy: required", ""},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -448,5 +449,55 @@ func TestSandboxProfileWithDefaults(t *testing.T) {
 	set := SandboxProfile{Gateway: "g", ControlPlaneHost: "h"}.WithDefaults()
 	if set.Gateway != "g" || set.ControlPlaneHost != "h" {
 		t.Fatalf("set fields overwritten: %q, %q", set.Gateway, set.ControlPlaneHost)
+	}
+}
+
+func TestSandboxProfileValidate(t *testing.T) {
+	t.Parallel()
+
+	ok := SandboxProfile{Image: "i", Policy: "deploy/p.yaml"}
+	cases := []struct {
+		name    string
+		mutate  func(*SandboxProfile)
+		wantErr string
+	}{
+		{"minimal profile", func(*SandboxProfile) {}, ""},
+		{"all fields set", func(p *SandboxProfile) { p.Providers = []string{"deepseek"}; p.CPU = "500m"; p.Memory = "8Gi" }, ""},
+		{"fractional cpu", func(p *SandboxProfile) { p.CPU = "1.5" }, ""},
+		{"missing image", func(p *SandboxProfile) { p.Image = "" }, "sandboxes.p.image: required"},
+		{"missing policy", func(p *SandboxProfile) { p.Policy = "" }, "sandboxes.p.policy: required"},
+		{"absolute policy", func(p *SandboxProfile) { p.Policy = "/etc/policy.yaml" }, `sandboxes.p.policy "/etc/policy.yaml": want a path inside the rig repo root`},
+		{"parent-escaping policy", func(p *SandboxProfile) { p.Policy = "../policy.yaml" }, `sandboxes.p.policy "../policy.yaml": want a path inside the rig repo root`},
+		{"policy escaping after a subdir", func(p *SandboxProfile) { p.Policy = "deploy/../../policy.yaml" }, `sandboxes.p.policy "deploy/../../policy.yaml": want a path inside the rig repo root`},
+		{"policy with an inner dotdot that stays inside", func(p *SandboxProfile) { p.Policy = "deploy/../p.yaml" }, ""},
+		{"empty provider", func(p *SandboxProfile) { p.Providers = []string{"deepseek", " "} }, "sandboxes.p.providers[1]: empty provider name"},
+		{"empty first provider", func(p *SandboxProfile) { p.Providers = []string{""} }, "sandboxes.p.providers[0]: empty provider name"},
+		{"bad cpu", func(p *SandboxProfile) { p.CPU = "four" }, `sandboxes.p.cpu "four": want a k8s CPU quantity such as "4" or "500m"`},
+		{"millicpu without a number", func(p *SandboxProfile) { p.CPU = "m" }, `sandboxes.p.cpu "m": want a k8s CPU quantity such as "4" or "500m"`},
+		{"bad memory", func(p *SandboxProfile) { p.Memory = "8 GB" }, `sandboxes.p.memory "8 GB": want a k8s memory quantity such as "8Gi"`},
+		{"binary kilo memory", func(p *SandboxProfile) { p.Memory = "512Ki" }, ""},
+		{"decimal kilo memory", func(p *SandboxProfile) { p.Memory = "512k" }, ""},
+		{"fractional binary memory", func(p *SandboxProfile) { p.Memory = "1.5Gi" }, ""},
+		{"plain byte count memory", func(p *SandboxProfile) { p.Memory = "1048576" }, ""},
+		{"lower case binary kilo memory", func(p *SandboxProfile) { p.Memory = "512ki" }, `sandboxes.p.memory "512ki": want a k8s memory quantity such as "8Gi"`},
+		{"upper case decimal kilo memory", func(p *SandboxProfile) { p.Memory = "512K" }, `sandboxes.p.memory "512K": want a k8s memory quantity such as "8Gi"`},
+		{"unit without a number memory", func(p *SandboxProfile) { p.Memory = "Gi" }, `sandboxes.p.memory "Gi": want a k8s memory quantity such as "8Gi"`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			p := ok
+			c.mutate(&p)
+			err := p.Validate("p")
+			if c.wantErr == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				return
+			}
+			if err == nil || err.Error() != c.wantErr {
+				t.Fatalf("err = %v, want %q", err, c.wantErr)
+			}
+		})
 	}
 }
