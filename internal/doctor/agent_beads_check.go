@@ -424,10 +424,8 @@ func verifyLabelAdded(ctx *CheckContext, workDir, beadID, label string) bool {
 
 // listPolecats returns the names of canonical polecat directories in a rig. A
 // rig with no polecats directory has no polecats and reports no error; a
-// directory that exists but cannot be read returns an error, because a caller
-// comparing this list against live agent beads would otherwise mark every
-// polecat bead in that rig stale (gt-9wiz3). Filters out git worktrees (same
-// logic as listCrewWorkers). See GH#2767.
+// directory that exists but cannot be read returns an error. Filters out git
+// worktrees (same logic as listCrewWorkers). See GH#2767.
 func listPolecats(townRoot, rigName string) ([]string, error) {
 	polecatDir := filepath.Join(townRoot, rigName, "polecats")
 	entries, err := os.ReadDir(polecatDir)

@@ -76,8 +76,15 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	var stale []string
 	// readErrs records each worker directory (crew or polecats) that exists
 	// but could not be read, so its rig's beads were skipped; the result reports them rather than counting them as clean.
+	// Phase 1 appends from one goroutine per rig; Phase 1's appends and
+	// Phase 2's both go through addReadErr, so no append races the others.
 	var readErrs []string
 	var mu sync.Mutex
+	addReadErr := func(err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		readErrs = append(readErrs, err.Error())
+	}
 
 	// Phase 1: Check known rigs for stale crew/polecat beads.
 	// Run rigs in parallel — each rig spawns 2 bd subprocesses (List +
@@ -166,9 +173,7 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 			}
 			for _, readErr := range []error{crewErr, polecatErr} {
 				if readErr != nil {
-					mu.Lock()
-					readErrs = append(readErrs, readErr.Error())
-					mu.Unlock()
+					addReadErr(readErr)
 				}
 			}
 		}(prefix, info)
@@ -222,7 +227,7 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 					if workerName != "" {
 						crewWorkers, err := listCrewWorkers(ctx.TownRoot, info.name)
 						if err != nil {
-							readErrs = append(readErrs, err.Error())
+							addReadErr(err)
 							continue
 						}
 						found := false
@@ -241,7 +246,7 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 					if workerName != "" {
 						polecats, err := listPolecats(ctx.TownRoot, info.name)
 						if err != nil {
-							readErrs = append(readErrs, err.Error())
+							addReadErr(err)
 							continue
 						}
 						found := false

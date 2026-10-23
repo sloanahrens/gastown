@@ -106,11 +106,27 @@ func TestStaleAgentBeadsCheck_CrewOnDisk(t *testing.T) {
 	t.Logf("Stale agent beads check: status=%v, message=%s", result.Status, result.Message)
 }
 
-// TestStaleAgentBeadsUnreadablePolecatsDir verifies that a rig whose polecats
+// unlistablePath puts a regular file where a worker directory is expected, so
+// os.ReadDir fails with an error that is not fs.ErrNotExist — the branch an
+// existing but unreadable directory takes. A chmod 000 fixture would not do:
+// under root, or on a filesystem without POSIX permissions, the directory stays
+// readable, the branch is never taken, and the test passes without testing the
+// refusal.
+func unlistablePath(t *testing.T, path string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStaleAgentBeadsUnlistablePolecatsPath verifies that a rig whose polecats
 // directory exists but cannot be read contributes no stale beads and closes
 // none. Before gt-9wiz3, listPolecats folded that error into "no polecats", so
 // the check and its fix closed the agent beads of live polecats.
-func TestStaleAgentBeadsUnreadablePolecatsDir(t *testing.T) {
+func TestStaleAgentBeadsUnlistablePolecatsPath(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
@@ -126,16 +142,10 @@ func TestStaleAgentBeadsUnreadablePolecatsDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A live polecat on disk, behind a directory the check cannot read.
+	// A polecats path the check cannot read. The bead of a polecat that may
+	// live there must not be closed.
 	polecatsDir := filepath.Join(tmpDir, "gastown", "polecats")
-	if err := os.MkdirAll(filepath.Join(polecatsDir, "nux", ".git"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(polecatsDir, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	//testpolicy:allow no-exec-files — the target is the fixture directory: traversal needs its search bit back
-	t.Cleanup(func() { _ = os.Chmod(polecatsDir, 0o755) })
+	unlistablePath(t, polecatsDir)
 
 	town := newDoctorTown()
 	town.db(filepath.Join(tmpDir, "gastown", "mayor", "rig")).Seed(beads.Issue{
@@ -166,11 +176,11 @@ func TestStaleAgentBeadsUnreadablePolecatsDir(t *testing.T) {
 	}
 }
 
-// TestStaleAgentBeadsUnreadableCrewDir verifies that a rig whose crew directory
-// exists but cannot be read contributes no stale beads and closes none. Before
-// gt-ro1lc, listCrewWorkers folded that error into "no crew", so the check and
-// its fix closed the agent beads of live crew members.
-func TestStaleAgentBeadsUnreadableCrewDir(t *testing.T) {
+// TestStaleAgentBeadsUnlistableCrewPath verifies that a rig whose crew
+// directory exists but cannot be read contributes no stale beads and closes
+// none. Before gt-ro1lc, listCrewWorkers folded that error into "no crew", so
+// the check and its fix closed the agent beads of live crew members.
+func TestStaleAgentBeadsUnlistableCrewPath(t *testing.T) {
 	t.Parallel()
 	tmpDir := t.TempDir()
 
@@ -186,16 +196,10 @@ func TestStaleAgentBeadsUnreadableCrewDir(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A live crew member on disk, behind a directory the check cannot read.
+	// A crew path the check cannot read. The bead of a crew member that may
+	// live there must not be closed.
 	crewDir := filepath.Join(tmpDir, "gastown", "crew")
-	if err := os.MkdirAll(filepath.Join(crewDir, "sloan", ".git"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(crewDir, 0o000); err != nil {
-		t.Fatal(err)
-	}
-	//testpolicy:allow no-exec-files — the target is the fixture directory: traversal needs its search bit back
-	t.Cleanup(func() { _ = os.Chmod(crewDir, 0o755) })
+	unlistablePath(t, crewDir)
 
 	town := newDoctorTown()
 	town.db(filepath.Join(tmpDir, "gastown", "mayor", "rig")).Seed(beads.Issue{
@@ -262,6 +266,70 @@ func TestStaleAgentBeadsCheck_Phase2_NoTownBeadsDir(t *testing.T) {
 	// Without Dolt, no agent beads can be found, so result should be OK
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK when no Dolt server, got %v: %s", result.Status, result.Message)
+	}
+}
+
+// TestStaleAgentBeadsCheck_Phase2_UnlistableWorkerPath verifies that a town
+// agent bead whose rig has a worker directory the check cannot read is
+// reported as a skipped rig, never closed. Phase 2 must not read the read
+// error as an empty rig (gt-3zirf finding d9223200a1d2); the bead lives only
+// in the town database, so only Phase 2 can mark it stale.
+func TestStaleAgentBeadsCheck_Phase2_UnlistableWorkerPath(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		dir    string // worker directory that cannot be read, under the rig
+		beadID string
+		title  string
+	}{
+		{name: "crew", dir: "crew", beadID: "gt-gastown-crew-sloan", title: "sloan"},
+		{name: "polecat", dir: "polecats", beadID: "gt-gastown-polecat-nux", title: "nux"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			tmpDir := t.TempDir()
+
+			beadsDir := filepath.Join(tmpDir, ".beads")
+			if err := os.MkdirAll(beadsDir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			routesContent := `{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n"
+			if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+				t.Fatal(err)
+			}
+			unlistablePath(t, filepath.Join(tmpDir, "gastown", tt.dir))
+
+			// The worker's agent bead is in the town database, where Phase 2
+			// looks, not in the rig's.
+			town := newDoctorTown()
+			town.db(beadsDir).Seed(beads.Issue{
+				ID:     tt.beadID,
+				Title:  tt.title,
+				Type:   "agent",
+				Labels: []string{"gt:agent"},
+			})
+
+			check := NewStaleAgentBeadsCheck()
+			ctx := town.ctx(tmpDir, "")
+
+			result := check.Run(ctx)
+			for _, detail := range result.Details {
+				if detail == tt.beadID {
+					t.Fatalf("unreadable %s directory marked live agent stale; details: %v", tt.dir, result.Details)
+				}
+			}
+			if result.Status == StatusOK {
+				t.Errorf("an unreadable %s directory must be reported, got OK: %s", tt.dir, result.Message)
+			}
+
+			if err := check.Fix(ctx); err != nil {
+				t.Fatalf("Fix() returned error: %v", err)
+			}
+			if updates := town.updates(); len(updates) != 0 {
+				t.Errorf("Fix() closed beads for a rig it could not read: %v", updates)
+			}
+		})
 	}
 }
 
