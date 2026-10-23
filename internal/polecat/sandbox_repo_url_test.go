@@ -20,6 +20,7 @@ func TestSandboxRepoURL(t *testing.T) {
 	tests := []struct {
 		name    string
 		remote  string
+		host    string // control-plane host; empty means cp
 		want    string
 		wantErr string // substring; empty means success
 	}{
@@ -28,6 +29,9 @@ func TestSandboxRepoURL(t *testing.T) {
 		{name: "no port stays portless", remote: "http://forgejo/sloan/gastown", want: "http://host.docker.internal/sloan/gastown"},
 		{name: "userinfo dropped", remote: "http://bot:s3cret@forgejo:3000/sloan/gastown.git", want: "http://host.docker.internal:3000/sloan/gastown.git"},
 		{name: "surrounding space trimmed", remote: "  http://forgejo:3000/sloan/gastown.git\n", want: "http://host.docker.internal:3000/sloan/gastown.git"},
+		{name: "ipv6 control-plane host bracketed with the port", remote: "http://forgejo:3000/sloan/gastown.git", host: "fd00::1", want: "http://[fd00::1]:3000/sloan/gastown.git"},
+		{name: "ipv6 control-plane host bracketed portless", remote: "https://forgejo/sloan/gastown.git", host: "fd00::1", want: "https://[fd00::1]/sloan/gastown.git"},
+		{name: "bracketed ipv6 control-plane host kept single-bracketed", remote: "http://forgejo:3000/sloan/gastown.git", host: "[fd00::1]", want: "http://[fd00::1]:3000/sloan/gastown.git"},
 		{name: "ssh url rejected", remote: "ssh://git@forgejo:2222/sloan/gastown.git", wantErr: "not an http(s) URL"},
 		{name: "scp-style remote rejected", remote: "git@forgejo:sloan/gastown.git", wantErr: "not a URL"},
 		{name: "empty rejected", remote: "", wantErr: "not an http(s) URL"},
@@ -37,7 +41,11 @@ func TestSandboxRepoURL(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			got, err := sandboxRepoURL("gastown", tt.remote, cp)
+			host := tt.host
+			if host == "" {
+				host = cp
+			}
+			got, err := sandboxRepoURL("gastown", tt.remote, host)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("sandboxRepoURL(%q) = %q, %v; want error containing %q", tt.remote, got, err, tt.wantErr)
@@ -62,6 +70,28 @@ func TestSandboxRepoURLRejectsUserinfoInTheError(t *testing.T) {
 	_, err := sandboxRepoURL("gastown", "ssh://bot:s3cret@forgejo/sloan/gastown.git", "host.docker.internal")
 	if err == nil || strings.Contains(err.Error(), "s3cret") {
 		t.Fatalf("error = %v; want a rejection that does not echo the password", err)
+	}
+}
+
+// A remote url.Parse refuses still must not echo its userinfo: there is no
+// parsed URL to Redact, so the raw string is redacted by hand (gt-gfp7a).
+func TestSandboxRepoURLRejectsUserinfoInTheParseError(t *testing.T) {
+	t.Parallel()
+	for _, remote := range []string{
+		"http://bot:s3cret@[::1",
+		"https://ghp_s3cret@[::1",
+		"bot:s3cret@forgejo:pa\tth",
+	} {
+		_, err := sandboxRepoURL("gastown", remote, "host.docker.internal")
+		if err == nil || !strings.Contains(err.Error(), "not a URL") {
+			t.Fatalf("sandboxRepoURL(%q) = %v; want a parse rejection", remote, err)
+		}
+		if strings.Contains(err.Error(), "s3cret") {
+			t.Errorf("error %q echoes the remote's userinfo", err)
+		}
+		if !strings.Contains(err.Error(), "rig gastown") {
+			t.Errorf("error %q does not name the rig", err)
+		}
 	}
 }
 
