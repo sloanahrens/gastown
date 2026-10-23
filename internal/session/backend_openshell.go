@@ -180,10 +180,24 @@ func checkImageGT(image, source, imageCommit, installed string) error {
 	case imageCommit == "":
 		return fmt.Errorf("sandbox image %s %s, so its gt cannot be checked; rebuild it with make polecat-image", image, source)
 	case !version.SameCommit(imageCommit, installed):
-		return fmt.Errorf("sandbox image %s carries gt commit %s, but the installed gt is commit %s; rebuild the image with make polecat-image", image, imageCommit, installed)
+		return &imageDriftError{msg: fmt.Sprintf("sandbox image %s carries gt commit %s, but the installed gt is commit %s; rebuild the image with make polecat-image", image, imageCommit, installed)}
 	}
 	return nil
 }
+
+// ErrImageDrift identifies a sandbox image whose gt is not the installed gt's
+// commit. It is a precondition of the sandbox seat, cleared by rebuilding the
+// image, not a fault of the work a caller was starting: an automatic dispatcher
+// defers the work instead of failing it.
+var ErrImageDrift = errors.New("sandbox image gt differs from the installed gt")
+
+// imageDriftError is checkImageGT's refusal. Its message is the operator's
+// instruction to rebuild; errors.Is matches ErrImageDrift.
+type imageDriftError struct{ msg string }
+
+func (e *imageDriftError) Error() string { return e.msg }
+
+func (e *imageDriftError) Is(target error) bool { return target == ErrImageDrift }
 
 // gtLabelSource is where the host's docker read the image's commit.
 const gtLabelSource = "records no gt commit (label " + gtCommitLabel + ")"

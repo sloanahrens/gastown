@@ -23,6 +23,7 @@ import (
 	"github.com/steveyegge/gastown/internal/land"
 	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/sling"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/style"
@@ -1314,6 +1315,15 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 		if isSpecOverlapRefusal(err) {
 			entry.Line = fmt.Sprintf("%s: sling deferred, content overlap holds it (work in flight, or unstarted work the dispatcher would sling first): %s", id, firstErrLine(err))
 			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry, refused: true})
+		}
+		// A sandbox image that lags the installed gt is the seat's precondition,
+		// cleared by rebuilding the image; the label this path would add would
+		// hold the bead out of the queue until an operator cleared it. The
+		// attempt may have hooked the bead before the refusal, so the seat stays
+		// charged for this tick (gt-pto2f), and the next tick slings it again.
+		if errors.Is(err, session.ErrImageDrift) {
+			entry.Line = fmt.Sprintf("%s: sling deferred, the sandbox image lags the installed gt (it is rebuilt after an install): %s", id, firstErrLine(err))
+			return done(specSlingOutcome{kind: specSlingSkipped, entry: entry})
 		}
 		if isSpecSlingRefusal(err) {
 			entry.Line = fmt.Sprintf("%s: sling deferred: %s", id, firstErrLine(err))
