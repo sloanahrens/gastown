@@ -222,6 +222,29 @@ func TestDispatchableWaitingIgnoresBadFormula(t *testing.T) {
 	}
 }
 
+// A bead resting out its startup backoff waits on the dispatcher, not on a
+// person: the window ends by itself, so the rule counts the bead and names the
+// startup failure behind it rather than staying quiet about a seat that keeps
+// failing to start (gt-811f6).
+func TestDispatchableWaitingCountsAStartupBackoff(t *testing.T) {
+	t.Parallel()
+	line := "gt-abcde: " + specdispatch.SkipStartupBackoff +
+		" last sling failed at session start 1m0s ago (1 in a row: startup blocked: trust dialog); backing off until 12:05:00"
+	report := idleTick(line)
+
+	waiting, reasons := dispatchableWaiting(report)
+	if waiting != 1 || len(reasons) != 1 || reasons[0].Reason != "startup backoff" || reasons[0].Beads != 1 {
+		t.Fatalf("waiting = %d, reasons = %+v; want the resting bead counted as waiting work", waiting, reasons)
+	}
+
+	r := newIdleRig(t)
+	r.observe(report, attentionDispatchIdleTicks)
+	items := r.items(t)
+	if len(items) != 1 || !strings.Contains(items[0].Summary, "startup backoff") {
+		t.Fatalf("items = %+v, want the idle item naming the startup backoff", items)
+	}
+}
+
 func TestDispatchIdleDoesNotRaise(t *testing.T) {
 	t.Parallel()
 	dispatched := idleTick(overlapLine)
