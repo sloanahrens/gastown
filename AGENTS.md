@@ -23,13 +23,13 @@ A bare `go build` or `go test` fails on the ICU headers on macOS; the make targe
 
 ## Architecture in five lines
 
-Before changing how sessions are supervised, how work is landed, or where beads are stored, read [Understanding Gas Town](docs/overview.md); it is the source for each line below, which are orientation only.
+Before changing how sessions are supervised or how work is landed, read [Understanding Gas Town](docs/overview.md). Before changing where beads are stored, read [Dolt Storage Architecture](docs/design/dolt-storage.md). The lines below are orientation only.
 
 - The daemon is one Go process: it supervises agent sessions and is the only thing that restarts one.
 - Its landing worker gates and merges branches that `gt done` marked ready, and is the only non-human route to `main`.
 - Polecats are workers with persistent identity and ephemeral sessions: one bead, one branch, then `gt done`.
 - Beads, mail and work history live in Dolt on port 3307; `bd` and `gt` read and write it.
-- Forgejo is the origin the landing path merges into; GitHub is a read-only push mirror ([design](docs/design/forgejo-primary-landing.md)).
+- Forgejo is the origin the landing path merges into; GitHub is a read-only push mirror — before changing either, read the [Forgejo-primary landing design](docs/design/forgejo-primary-landing.md).
 
 <!-- beads-agent-instructions-v2 -->
 
