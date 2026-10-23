@@ -449,8 +449,15 @@ func (h *patrolScanHost) listByStatus(rig, assignee string, statuses ...string) 
 	return all, nil
 }
 
+// AssignedWork reads the seat's live work bead, most specific status first.
+// `open` is in the set because every other read of the seat's assigned work
+// counts it — beads.GetAssignedIssue, polecat.IsHookActiveStatus, the pool's
+// assignedStatuses and attentionSeatWork. Without it a seat holding an
+// open-assigned bead read as holding no work, so the stall path released it,
+// and the dead path retired it as idle, while its work was still live
+// (gt-74cbe).
 func (h *patrolScanHost) AssignedWork(rig, name string) (*patrolscan.Work, error) {
-	issues, err := h.listByStatus(rig, rig+"/polecats/"+name, "hooked", "in_progress")
+	issues, err := h.listByStatus(rig, rig+"/polecats/"+name, "hooked", "in_progress", "open")
 	if err != nil {
 		return nil, err
 	}
