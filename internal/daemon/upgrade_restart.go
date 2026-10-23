@@ -597,15 +597,16 @@ func (d *Daemon) upgradeHold(now time.Time, work *daemonWork) *daemonWork {
 }
 
 // specDispatchRestartWait is how long the running spec dispatch tick has been
-// given: its own run since triggerSpecDispatch started it, because the tick is
-// cut at its bound from that start. A tick with no recorded start (a test that
-// sets specDispatchRunning directly) falls back to the marker's clock.
+// given: its own run since triggerSpecDispatch recorded its start, because the
+// tick is cut at its bound from that start. A tick with no recorded start (a
+// test that sets specDispatchRunning directly) falls back to the marker's
+// clock.
 func (d *Daemon) specDispatchRestartWait(now time.Time, waited time.Duration) time.Duration {
-	started := d.specDispatchStartedAt.Load()
-	if started == 0 {
+	run := d.specDispatchTick.Load()
+	if run == nil {
 		return waited
 	}
-	return max(now.Sub(time.Unix(0, started)), 0)
+	return max(now.Sub(run.started), 0)
 }
 
 // noteStuckWait escalates once when a pending restart has waited past

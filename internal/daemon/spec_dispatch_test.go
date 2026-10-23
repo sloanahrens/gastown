@@ -475,6 +475,59 @@ func TestTriggerSpecDispatchDefersWhileARestartIsPending(t *testing.T) {
 	d.specDispatchCycles.Wait()
 }
 
+// gt-32j1y: a tick's start belongs to that tick alone. A skipped tick leaves the
+// running tick's start in place, and a finished tick clears its own.
+func TestTriggerSpecDispatchPublishesAndClearsItsClock(t *testing.T) {
+	t.Parallel()
+	d := &Daemon{logger: log.New(io.Discard, "", 0)}
+	running := &specDispatchTickRun{started: time.Unix(100, 0)}
+	d.specDispatchRunning.Store(true)
+	d.specDispatchTick.Store(running)
+	if d.triggerSpecDispatch() {
+		t.Fatal("a second tick started while one was running")
+	}
+	if got := d.specDispatchTick.Load(); got != running {
+		t.Fatalf("the skipped tick replaced the running tick's start: %+v", got)
+	}
+
+	d.specDispatchRunning.Store(false)
+	d.specDispatchTick.Store(nil)
+	if !d.triggerSpecDispatch() {
+		t.Fatal("tick did not start")
+	}
+	d.specDispatchCycles.Wait()
+	if got := d.specDispatchTick.Load(); got != nil {
+		t.Fatalf("the tick's start outlived the tick: %+v", got)
+	}
+}
+
+// gt-32j1y: the deferral follows the flag checkUpgradeRestart sets, not one a
+// test poked: while a restart the check marked pending is held by other work,
+// no tick starts to outlast it.
+func TestTriggerSpecDispatchDefersForTheRestartCheckPending(t *testing.T) {
+	t.Parallel()
+	d := upgradeTestDaemon(t)
+	d.logger = log.New(io.Discard, "", 0)
+	captureEscalations(d)
+	withOwnCommit(d, "aaa")
+	fakeHistory(t, d, "aaa", "bbb")
+	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
+	// A post-land run holds the restart and lets the check mark it pending.
+	d.postLandRuns.Add(1)
+	if d.checkUpgradeRestart(time.Now()) {
+		t.Fatal("restarted under a post-land run")
+	}
+	if !d.upgradeRestartPending.Load() {
+		t.Fatal("the restart check did not mark the restart pending")
+	}
+	if d.triggerSpecDispatch() {
+		t.Fatal("a tick started while the restart check had a restart pending")
+	}
+	if d.specDispatchRunning.Load() {
+		t.Fatal("a deferred tick left its single-flight guard set")
+	}
+}
+
 // A dispatcher parked by the operator hold file starts no tick: the tick
 // would decide nothing, and its in-flight flag is a daemonWorkHolds entry, so
 // a parked tick made the daemon read as busy for the catch-up backup's quiet

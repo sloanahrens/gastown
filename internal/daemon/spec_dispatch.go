@@ -156,6 +156,14 @@ type specDispatchTickReport struct {
 	SlingNs      time.Duration `json:"sling_ns,omitempty"`
 }
 
+// specDispatchTickRun is when the running tick started. It is published before
+// specDispatchRunning is set and cleared with the flag, so an upgrade restart
+// that sees a running tick sees that tick's start, never the one before it
+// (gt-32j1y).
+type specDispatchTickRun struct {
+	started time.Time
+}
+
 // triggerSpecDispatch starts one tick on its own goroutine unless one is
 // already running, the town's automatic dispatch is parked, or the seat
 // settings cannot be read. It reports whether a tick started.
@@ -200,15 +208,26 @@ func (d *Daemon) triggerSpecDispatch() bool {
 		d.dispatchIdle.Reset()
 		return false
 	}
+	// The start is published before the flag: a restart that reads the flag set
+	// must not be handed the previous tick's start, which would read as a tick
+	// already past its bound and let the restart cut this one (gt-32j1y).
+	run := &specDispatchTickRun{started: d.clk().Now()}
+	prev := d.specDispatchTick.Swap(run)
 	if !d.specDispatchRunning.CompareAndSwap(false, true) {
+		d.specDispatchTick.CompareAndSwap(run, prev)
 		d.logger.Printf("spec_dispatch: previous tick still running, skipping")
 		return false
 	}
-	d.specDispatchStartedAt.Store(d.clk().Now().UnixNano())
 	d.specDispatchCycles.Add(1)
 	go func() {
 		defer d.specDispatchCycles.Done()
-		defer d.specDispatchRunning.Store(false)
+		defer func() {
+			// Flag first, then the start, and a compare-and-swap rather than a
+			// store: a tick that starts in between keeps its own, and a reader
+			// never sees a running tick without a start (gt-32j1y).
+			d.specDispatchRunning.Store(false)
+			d.specDispatchTick.CompareAndSwap(run, nil)
+		}()
 		d.runSpecDispatch()
 	}()
 	return true
