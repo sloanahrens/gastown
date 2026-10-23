@@ -414,7 +414,10 @@ func TestListCrewWorkers_FiltersWorktrees(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	workers := listCrewWorkers(tmpDir, rigName)
+	workers, err := listCrewWorkers(tmpDir, rigName)
+	if err != nil {
+		t.Fatalf("listCrewWorkers: %v", err)
+	}
 
 	// Should include alice, bob, charlie but NOT alice-worktree
 	expected := map[string]bool{"alice": false, "bob": false, "charlie": false}
@@ -430,6 +433,22 @@ func TestListCrewWorkers_FiltersWorktrees(t *testing.T) {
 		if !found {
 			t.Errorf("listCrewWorkers should include canonical worker %q, got: %v", name, workers)
 		}
+	}
+}
+
+// TestListCrewWorkers_MissingDirIsZeroCrew verifies a rig with no crew
+// directory reports zero crew and no error: only a missing directory means
+// zero crew (gt-ro1lc).
+func TestListCrewWorkers_MissingDirIsZeroCrew(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	workers, err := listCrewWorkers(tmpDir, "myrig")
+	if err != nil {
+		t.Fatalf("missing crew directory should not be an error, got: %v", err)
+	}
+	if len(workers) != 0 {
+		t.Errorf("missing crew directory should yield no crew, got: %v", workers)
 	}
 }
 
