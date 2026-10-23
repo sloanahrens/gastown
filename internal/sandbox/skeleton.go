@@ -68,6 +68,7 @@ var (
 	pemKeyShape   = regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)
 	bareToken     = regexp.MustCompile(`^[A-Za-z0-9_+=-]{32,}$`)
 	hexToken      = regexp.MustCompile(`^[0-9a-f]{32,}$`)
+	uuidShape     = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 )
 
 // Text scrubbing patterns. The assignment pattern keeps the key and replaces
@@ -453,10 +454,14 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 		}
 		// bd compares project_id with the database's and refuses to connect on
 		// a mismatch. It is an identity, not a credential, but its UUID shape
-		// reads as a token, so keep the original string.
+		// reads as a token, so keep the original string. Only a UUID is kept:
+		// any other string under that key could be a credential.
 		projectID, hasProjectID := doc["project_id"].(string)
 		doc = scrubDocument(doc)
 		if hasProjectID {
+			if !uuidShape.MatchString(projectID) {
+				return nil, fmt.Errorf("sandbox: %s: project_id is not a UUID", rel)
+			}
 			doc["project_id"] = projectID
 		}
 		doc["dolt_server_host"] = s.ControlPlaneHost
