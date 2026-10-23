@@ -3,6 +3,8 @@ package daemon
 import (
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/intent"
@@ -119,6 +121,9 @@ func (d *Daemon) assessSeat(seat supervisor.Seat, in liveness.Input) liveness.Re
 	if in.TownRoot == "" {
 		in.TownRoot = d.config.TownRoot
 	}
+	if in.WorkDir == "" {
+		in.WorkDir = d.seatWorkDir(seat)
+	}
 	in.Prev = rec.Progress
 	if in.Now.IsZero() {
 		in.Now = d.clk().Now()
@@ -134,6 +139,31 @@ func (d *Daemon) assessSeat(seat supervisor.Seat, in liveness.Input) liveness.Re
 		d.logger.Printf("Warning: recording liveness sample for %s: %v", iseat, err)
 	}
 	return res
+}
+
+// seatWorkDir returns the directory a seat's agent session runs in, the path
+// its Claude transcript is filed under. Claude names the project directory
+// after the session's cwd, so the sample needs it or the lookup finds nothing.
+// An existing directory is the cwd even without a .git, so a seat whose
+// worktree broke is still readable. A seat with no worktree of its own (a
+// town-level role) returns "" and its sample carries no transcript evidence.
+func (d *Daemon) seatWorkDir(seat supervisor.Seat) string {
+	if seat.Rig == "" || seat.Name == "" {
+		return ""
+	}
+	var candidates []string
+	switch seat.Role {
+	case session.RolePolecat:
+		candidates = polecatWorktreeCandidates(filepath.Join(d.config.TownRoot, seat.Rig, "polecats"), seat.Name, seat.Rig)
+	case session.RoleCrew:
+		candidates = []string{filepath.Join(d.config.TownRoot, seat.Rig, "crew", seat.Name)}
+	}
+	for _, dir := range candidates {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			return dir
+		}
+	}
+	return ""
 }
 
 // logRefusal logs a supervisor refusal or failure for a call site that has
