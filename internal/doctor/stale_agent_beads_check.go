@@ -75,14 +75,19 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 
 	var stale []string
 	// readErrs records each worker directory (crew or polecats) that exists
-	// but could not be read, so its rig's beads were skipped; the result reports them rather than counting them as clean.
+	// but could not be read, so its rig's beads were skipped. The result
+	// reports them rather than counting them as clean. skippedRigs names
+	// each such rig once, so a rig with two unreadable directories counts as
+	// one.
 	// Phase 1 appends from one goroutine per rig; Phase 1's appends and
 	// Phase 2's both go through addReadErr, so no append races the others.
 	var readErrs []string
+	skippedRigs := make(map[string]bool)
 	var mu sync.Mutex
-	addReadErr := func(err error) {
+	addReadErr := func(rig string, err error) {
 		mu.Lock()
 		defer mu.Unlock()
+		skippedRigs[rig] = true
 		readErrs = append(readErrs, err.Error())
 	}
 
@@ -173,7 +178,7 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 			}
 			for _, readErr := range []error{crewErr, polecatErr} {
 				if readErr != nil {
-					addReadErr(readErr)
+					addReadErr(rigName, readErr)
 				}
 			}
 		}(prefix, info)
@@ -227,7 +232,7 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 					if workerName != "" {
 						crewWorkers, err := listCrewWorkers(ctx.TownRoot, info.name)
 						if err != nil {
-							addReadErr(err)
+							addReadErr(info.name, err)
 							continue
 						}
 						found := false
@@ -246,7 +251,7 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 					if workerName != "" {
 						polecats, err := listPolecats(ctx.TownRoot, info.name)
 						if err != nil {
-							addReadErr(err)
+							addReadErr(info.name, err)
 							continue
 						}
 						found := false
@@ -269,7 +274,7 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	stale = dedup(stale)
 	readErrs = dedup(readErrs)
 
-	if len(stale) == 0 && len(readErrs) == 0 {
+	if len(stale) == 0 && len(skippedRigs) == 0 {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
@@ -288,8 +293,8 @@ func (c *StaleAgentBeadsCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	message := fmt.Sprintf("%d stale agent bead(s) for removed workers", len(stale))
-	if len(readErrs) > 0 {
-		message += fmt.Sprintf("; %d rig(s) not checked (unreadable crew or polecats directory)", len(readErrs))
+	if len(skippedRigs) > 0 {
+		message += fmt.Sprintf("; %d rig(s) not checked (unreadable crew or polecats directory)", len(skippedRigs))
 	}
 	return &CheckResult{
 		Name:    c.Name(),

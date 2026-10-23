@@ -452,6 +452,58 @@ func TestListCrewWorkers_MissingDirIsZeroCrew(t *testing.T) {
 	}
 }
 
+// TestListCrewWorkers_UnlistableDirIsError verifies that a crew directory that
+// exists but cannot be read is an error, not zero crew (gt-ro1lc).
+func TestListCrewWorkers_UnlistableDirIsError(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	unlistablePath(t, filepath.Join(tmpDir, "myrig", "crew"))
+
+	if _, err := listCrewWorkers(tmpDir, "myrig"); err == nil {
+		t.Fatal("unreadable crew directory must be an error, got nil")
+	}
+}
+
+// TestAgentBeadsExistCheck_UnlistableCrewDirCreatesNothing verifies that an
+// unreadable crew directory yields no crew names, so neither Run nor Fix
+// reports or creates a crew bead for it. Only the stale check has to refuse to
+// guess; this check must not invent work from the same read error (gt-ro1lc).
+func TestAgentBeadsExistCheck_UnlistableCrewDirCreatesNothing(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+
+	beadsDir := filepath.Join(tmpDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	routesContent := `{"prefix":"gt-","path":"gastown/mayor/rig"}` + "\n"
+	if err := os.WriteFile(filepath.Join(beadsDir, "routes.jsonl"), []byte(routesContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(tmpDir, "gastown", "mayor", "rig", ".beads"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	unlistablePath(t, filepath.Join(tmpDir, "gastown", "crew"))
+
+	town := newDoctorTown()
+	check := NewAgentBeadsCheck()
+	ctx := town.ctx(tmpDir, "")
+
+	result := check.Run(ctx)
+	for _, detail := range result.Details {
+		if strings.Contains(detail, "-crew-") {
+			t.Errorf("Run() reported a crew bead for an unreadable crew directory: %v", result.Details)
+		}
+	}
+
+	if err := check.Fix(ctx); err != nil {
+		t.Fatalf("Fix() returned error: %v", err)
+	}
+	if created := town.creates(); len(created) != 0 {
+		t.Errorf("Fix() created crew beads for an unreadable crew directory: %v", created)
+	}
+}
+
 // TestListPolecats_FiltersWorktrees verifies that listPolecats skips
 // git worktrees, same as listCrewWorkers. See GH#2767.
 func TestListPolecats_FiltersWorktrees(t *testing.T) {
