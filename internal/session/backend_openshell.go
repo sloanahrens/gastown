@@ -98,33 +98,85 @@ func newOpenShellBackend(townRoot string, p Profile) (Backend, error) {
 // gt was built from.
 const gtCommitLabel = "org.gastown.gt-commit"
 
+// dockerRun runs the docker CLI with args and returns its stdout, its stderr
+// and the run error. Tests supply their own, so the label read is tested
+// without docker.
+type dockerRun func(ctx context.Context, args ...string) (stdout, stderr []byte, err error)
+
 // dockerImageGT reads the gt commit label of image from the host's docker. An
 // image without the label reads as "", which checkImageGT refuses.
 func dockerImageGT(ctx context.Context, image string) (string, error) {
-	format := `{{index .Config.Labels "` + gtCommitLabel + `"}}`
-	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", format, image)
+	return imageGTFrom(ctx, runDocker, image)
+}
+
+// runDocker is the real docker runner.
+func runDocker(ctx context.Context, args ...string) ([]byte, []byte, error) {
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
+	return out, stderr.Bytes(), err
+}
+
+// imageGTFrom reads the gt commit label of image through run. Only stdout
+// carries the label: a warning docker prints on stderr must not read as a
+// commit (gt-pmxo9).
+func imageGTFrom(ctx context.Context, run dockerRun, image string) (string, error) {
+	format := `{{index .Config.Labels "` + gtCommitLabel + `"}}`
+	out, stderr, err := run(ctx, "image", "inspect", "--format", format, image)
 	if err != nil {
-		return "", fmt.Errorf("docker image inspect %s: %w: %s", image, err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("docker image inspect %s: %w: %s", image, err, strings.TrimSpace(string(stderr)))
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
 // checkImageGT refuses a sandbox image whose gt is not the installed gt's
-// commit, so a drifted image fails before any sandbox exists rather than as a
-// settings warning inside one (gt-pmxo9).
-func checkImageGT(image, imageCommit, installed string) error {
+// commit, so a drifted image fails rather than becoming a settings warning
+// inside a sandbox (gt-pmxo9). source says where imageCommit was read, so a
+// missing commit names the place to fix.
+func checkImageGT(image, source, imageCommit, installed string) error {
 	switch {
 	case installed == "":
 		return fmt.Errorf("sandbox image %s: the installed gt records no build commit, so its gt cannot be checked; rebuild gt with make build", image)
 	case imageCommit == "":
-		return fmt.Errorf("sandbox image %s records no gt commit (label %s); rebuild it with make polecat-image", image, gtCommitLabel)
+		return fmt.Errorf("sandbox image %s %s, so its gt cannot be checked; rebuild it with make polecat-image", image, source)
 	case !version.SameCommit(imageCommit, installed):
 		return fmt.Errorf("sandbox image %s carries gt commit %s, but the installed gt is commit %s; rebuild the image with make polecat-image", image, imageCommit, installed)
 	}
 	return nil
+}
+
+// gtLabelSource is where the host's docker read the image's commit.
+const gtLabelSource = "records no gt commit (label " + gtCommitLabel + ")"
+
+// sandboxVersionSource is where the sandbox's own gt read its commit.
+const sandboxVersionSource = "reports no gt commit in its gt version"
+
+// sandboxVersionArgv is the in-sandbox probe for the image's gt commit: the
+// sandbox's own gt names the commit its binary was built from.
+var sandboxVersionArgv = []string{"gt", "version"}
+
+// parseGTVersionCommit reads the commit out of `gt version`'s output: the last
+// parenthesised group is "<build>: <branch>@<commit>" or "<build>: <commit>".
+// Output in any other shape names no commit and reads as "".
+func parseGTVersionCommit(out string) string {
+	open := strings.LastIndex(out, "(")
+	if open < 0 {
+		return ""
+	}
+	group := out[open+1:]
+	if end := strings.Index(group, ")"); end >= 0 {
+		group = group[:end]
+	}
+	_, field, ok := strings.Cut(group, ":")
+	if !ok {
+		return ""
+	}
+	field = strings.TrimSpace(field)
+	if _, commit, ok := strings.Cut(field, "@"); ok {
+		return strings.TrimSpace(commit)
+	}
+	return field
 }
 
 // waitFor blocks for d or until ctx is done.
@@ -165,12 +217,15 @@ func (b *openshellBackend) Prepare(ctx context.Context, spec SpawnSpec) (*Prepar
 		return nil, err
 	}
 	// The image's gt must be the installed gt's commit. Checked before the push
-	// and the create, so a drifted image leaves nothing behind (gt-pmxo9).
+	// and the create, so a drifted image leaves nothing behind (gt-pmxo9). This
+	// reads the host docker's image for the reference; the sandbox's own gt is
+	// checked again once it is Ready, because the gateway may run a different
+	// image for that reference (gt-zdilt).
 	imageCommit, err := b.imageGT(ctx, b.profile.Image)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}
-	if err := checkImageGT(b.profile.Image, imageCommit, b.installedGT()); err != nil {
+	if err := checkImageGT(b.profile.Image, gtLabelSource, imageCommit, b.installedGT()); err != nil {
 		return nil, fmt.Errorf("sandbox %s: %w", spec.Session, err)
 	}
 
@@ -249,6 +304,11 @@ func (b *openshellBackend) populate(ctx context.Context, spec SpawnSpec, workDir
 	if err := b.awaitReady(ctx, spec.Session); err != nil {
 		return err
 	}
+	// The sandbox's own gt is the one that will run; Prepare's label check only
+	// saw the host docker's image for the same reference (gt-zdilt).
+	if err := b.checkSandboxGT(ctx, spec.Session); err != nil {
+		return err
+	}
 	if err := b.cli.Upload(ctx, spec.Session, files.skeleton, sandboxHome+"/"); err != nil {
 		return fmt.Errorf("uploading town skeleton: %w", err)
 	}
@@ -313,6 +373,19 @@ func (b *openshellBackend) awaitReady(ctx context.Context, name string) error {
 func (b *openshellBackend) run(ctx context.Context, name string, argv ...string) error {
 	_, _, err := b.cli.Exec(ctx, name, nil, argv, nil)
 	return err
+}
+
+// checkSandboxGT refuses a sandbox whose own gt is not the installed gt's
+// commit. Prepare's label check reads the host docker's image for the
+// profile's reference; the gateway can run a different image for that
+// reference, so the gt inside the sandbox is what this check trusts
+// (gt-zdilt). A refusal here rolls the sandbox back like any failed populate.
+func (b *openshellBackend) checkSandboxGT(ctx context.Context, name string) error {
+	out, _, err := b.cli.Exec(ctx, name, nil, sandboxVersionArgv, nil)
+	if err != nil {
+		return fmt.Errorf("reading the gt version in sandbox %s: %w", name, err)
+	}
+	return checkImageGT(b.profile.Image, sandboxVersionSource, parseGTVersionCommit(string(out)), b.installedGT())
 }
 
 // rollback deletes the sandbox after a failed populate and removes its

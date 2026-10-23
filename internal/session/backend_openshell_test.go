@@ -110,6 +110,19 @@ func openshellTestBackend(town string, p Profile, fake *sandbox.Fake) (*openshel
 	return b, pushes
 }
 
+// openshellPrepareFake is a fake for a Prepare that reaches the sandbox: it
+// answers `gt version` with the matching commit, and replies with the rest of
+// replies. A caller that needs a different exec reply sets it in replies.
+func openshellPrepareFake(replies map[string]string) *sandbox.Fake {
+	if replies == nil {
+		replies = map[string]string{}
+	}
+	if _, ok := replies["exec"]; !ok {
+		replies["exec"] = openshellTestVersionReply
+	}
+	return &sandbox.Fake{Reply: replies}
+}
+
 // sandboxExec is the argv of `openshell sandbox exec` for the test session.
 func sandboxExec(args ...string) []string {
 	return append([]string{"openshell", "sandbox", "exec", "-n", openshellTestSession, "--no-tty", "--no-login-shell", "--"}, args...)
@@ -140,7 +153,7 @@ func stageNames(calls [][]string) [][]string {
 func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
 	b, pushes := openshellTestBackend(town, openshellTestProfile, fake)
 
 	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
@@ -180,6 +193,7 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 	want := [][]string{
 		create,
 		{"openshell", "sandbox", "get", openshellTestSession, "--output", "json"},
+		sandboxExec("gt", "version"),
 		{"openshell", "sandbox", "upload", "--no-git-ignore", openshellTestSession, "STAGE/town-skel.tgz", "/sandbox/"},
 		sandboxExec("tar", "xzf", "/sandbox/town-skel.tgz", "-C", "/sandbox"),
 		{"openshell", "sandbox", "upload", "--no-git-ignore", openshellTestSession, "STAGE/polecat-runtime.tgz", "/sandbox/"},
@@ -208,7 +222,7 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 func TestOpenShellPrepareHandsBackTheSandboxEnv(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 
 	prep, err := b.Prepare(context.Background(), openshellSpawn(town, work))
@@ -243,7 +257,7 @@ func TestOpenShellPrepareHandsBackTheSandboxEnv(t *testing.T) {
 func TestOpenShellPrepareWaitsForReadyBetweenPolls(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	fake := &sandbox.Fake{}
+	fake := openshellPrepareFake(nil)
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 	run := b.cli.Run
 	gets := 0
@@ -280,6 +294,10 @@ const (
 	openshellTestGTCommit    = "e32fa546a4992ec40088a201296a535a03ddcdde"
 	openshellTestDriftedGT   = "80c667f7d1a2b3c4d5e6f708192a3b4c5d6e7f80"
 	openshellTestInstalledGT = "ac578ef4" // a short commit, as make build stamps it
+
+	// openshellTestVersionReply is what the sandbox's `gt version` prints for
+	// an image built from openshellTestGTCommit.
+	openshellTestVersionReply = "gt version 1.2.1 (dev: main@" + openshellTestGTCommit + ")\n"
 )
 
 func TestCheckImageGT(t *testing.T) {
@@ -295,7 +313,7 @@ func TestCheckImageGT(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
-			err := checkImageGT("gastown-polecat:dev", tt.imageCommit, tt.installed)
+			err := checkImageGT("gastown-polecat:dev", gtLabelSource, tt.imageCommit, tt.installed)
 			if tt.wantErr == "" {
 				if err != nil {
 					t.Fatalf("checkImageGT = %v, want accepted", err)
@@ -309,6 +327,80 @@ func TestCheckImageGT(t *testing.T) {
 				if !strings.Contains(err.Error(), want) {
 					t.Fatalf("err = %v, want it to name %q", err, want)
 				}
+			}
+		})
+	}
+}
+
+func TestImageGTFrom(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		stdout  string
+		stderr  string
+		runErr  error
+		want    string
+		wantErr string
+	}{
+		{name: "label is read from stdout", stdout: openshellTestGTCommit + "\n", want: openshellTestGTCommit},
+		{name: "an unlabelled image reads as no commit", stdout: "\n", want: ""},
+		{
+			name:    "a failing inspect names the image and its stderr",
+			stderr:  "Error response from daemon: No such image: gastown-polecat:dev\n",
+			runErr:  errors.New("exit status 1"),
+			wantErr: "gastown-polecat:dev|exit status 1|No such image",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var argv []string
+			run := func(_ context.Context, args ...string) ([]byte, []byte, error) {
+				argv = args
+				return []byte(tt.stdout), []byte(tt.stderr), tt.runErr
+			}
+			got, err := imageGTFrom(context.Background(), run, "gastown-polecat:dev")
+			wantArgv := []string{"image", "inspect", "--format", `{{index .Config.Labels "` + gtCommitLabel + `"}}`, "gastown-polecat:dev"}
+			if !reflect.DeepEqual(argv, wantArgv) {
+				t.Fatalf("argv = %q, want %q", argv, wantArgv)
+			}
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("imageGTFrom = %v, want the label", err)
+				}
+				if got != tt.want {
+					t.Fatalf("imageGTFrom = %q, want %q", got, tt.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("imageGTFrom = %q, nil, want a failure naming %q", got, tt.wantErr)
+			}
+			for _, want := range strings.Split(tt.wantErr, "|") {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("err = %v, want it to name %q", err, want)
+				}
+			}
+		})
+	}
+}
+
+func TestParseGTVersionCommit(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name, out, want string
+	}{
+		{name: "branch and commit", out: "gt version 1.2.1 (dev: main@e32fa54)\n", want: "e32fa54"},
+		{name: "commit without a branch", out: "gt version 1.2.1 (dev: e32fa54)\n", want: "e32fa54"},
+		{name: "no commit named", out: "gt version 1.2.1 (dev)\n", want: ""},
+		{name: "unexpected output names no commit", out: "Error: sandbox not found\n", want: ""},
+		{name: "empty output names no commit", out: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := parseGTVersionCommit(tt.out); got != tt.want {
+				t.Fatalf("parseGTVersionCommit(%q) = %q, want %q", tt.out, got, tt.want)
 			}
 		})
 	}
@@ -333,6 +425,38 @@ func TestOpenShellPrepareRefusesADriftedImageBeforeAnySandbox(t *testing.T) {
 	}
 }
 
+// TestOpenShellPrepareRefusesADriftedSandboxImage is gt-zdilt's case: the host
+// docker's label says one commit, and the image the gateway actually ran says
+// another. The sandbox's own gt decides, and the refused sandbox is deleted.
+func TestOpenShellPrepareRefusesADriftedSandboxImage(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := &sandbox.Fake{Reply: map[string]string{
+		"get":  openshellReadyReply,
+		"exec": "gt version 1.2.1 (dev: main@" + openshellTestDriftedGT + ")\n",
+	}}
+	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
+
+	_, err := b.Prepare(context.Background(), openshellSpawn(town, work))
+	if err == nil || !strings.Contains(err.Error(), openshellTestDriftedGT) || !strings.Contains(err.Error(), openshellTestGTCommit) {
+		t.Fatalf("err = %v, want the refusal to name the sandbox's commit and the installed commit", err)
+	}
+	calls := fake.Calls()
+	for _, c := range calls {
+		if len(c) > 2 && c[2] == "upload" {
+			t.Fatalf("calls = %q, want no upload: the refusal comes before the sandbox is filled", calls)
+		}
+	}
+	last := calls[len(calls)-1]
+	want := []string{"openshell", "sandbox", "delete", openshellTestSession}
+	if !reflect.DeepEqual(last, want) {
+		t.Fatalf("last call = %q, want %q (rollback)", last, want)
+	}
+	if _, ok, _ := ReadSandboxRecord(town, openshellTestSession); ok {
+		t.Fatal("a refused sandbox left a record behind")
+	}
+}
+
 func TestOpenShellPrepareCreateFailureMakesNoFurtherCalls(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
@@ -354,7 +478,7 @@ func TestOpenShellPrepareCreateFailureMakesNoFurtherCalls(t *testing.T) {
 func TestOpenShellPrepareCloneFailureDeletesTheSandbox(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 	run := b.cli.Run
 	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte, env []string) ([]byte, []byte, error) {
@@ -453,7 +577,7 @@ func TestRedirectTargetPointsAtTheRigBeads(t *testing.T) {
 func TestOpenShellPrepareDropsHostOnlyEnv(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 
 	prep, err := b.Prepare(context.Background(), openshellSpawn(town, work))
@@ -475,7 +599,7 @@ func TestOpenShellPrepareDropsHostOnlyEnv(t *testing.T) {
 func TestOpenShellPrepareStopsWhenThePushFails(t *testing.T) {
 	t.Parallel()
 	town, work := openshellTown(t)
-	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 	b.push = func(string, string) error { return errors.New("forgejo unreachable") }
 
@@ -562,7 +686,7 @@ func TestOpenShellPrepareRollbackRemovesTheRecord(t *testing.T) {
 	if err := WriteSandboxRecord(town, SandboxRecord{Session: openshellTestSession, Rig: openshellTestRig, Polecat: openshellTestPolecat, Profile: "polecat-default"}); err != nil {
 		t.Fatal(err)
 	}
-	fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
 	b, _ := openshellTestBackend(town, openshellTestProfile, fake)
 	run := b.cli.Run
 	b.cli.Run = func(ctx context.Context, argv []string, stdin []byte, env []string) ([]byte, []byte, error) {
@@ -586,7 +710,7 @@ func TestOpenShellPolicyPathStaysInTheWorktree(t *testing.T) {
 	for _, policy := range []string{"", "/etc/policy.yaml", "../../../other/policy.yaml", ".."} {
 		t.Run(policy, func(t *testing.T) {
 			t.Parallel()
-			fake := &sandbox.Fake{Reply: map[string]string{"get": openshellReadyReply}}
+			fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
 			p := openshellTestProfile
 			p.Policy = policy
 			b, pushes := openshellTestBackend(town, p, fake)
