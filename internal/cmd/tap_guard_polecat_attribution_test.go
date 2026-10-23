@@ -37,6 +37,24 @@ func TestPolecatAttributionRefusals(t *testing.T) {
 		{"actor on note", `bd note gt-x --actor Sloan hi`, polecatAttributionReason},
 		{"author on another write verb", `bd update gt-x --author Sloan --title t`, polecatAttributionReason},
 
+		{"actor env on gt bead comment", `BD_ACTOR='Sloan Ahrens' gt bead comment gt-1 hello`, polecatAttributionReason},
+		{"actor env on bd comments add", `BD_ACTOR='Sloan Ahrens' bd comments add gt-1 hello`, polecatAttributionReason},
+		{"exported actor", `export BD_ACTOR=town/crew/overseer`, polecatAttributionReason},
+		{"beads actor env", `BEADS_ACTOR=Sloan bd comments add gt-1 hello`, polecatAttributionReason},
+		{"bare actor assignment", `BD_ACTOR=Sloan; bd comments add gt-1 hello`, polecatAttributionReason},
+		{"actor behind env", `env BD_ACTOR=Sloan bd comments add gt-1 hello`, polecatAttributionReason},
+		{"actor behind env flag", `env -u FOO BD_ACTOR=Sloan bd comments add gt-1 hello`, polecatAttributionReason},
+		{"actor behind declare", `declare -x BD_ACTOR=Sloan`, polecatAttributionReason},
+		{"actor after another assignment", `X=1 BD_ACTOR=Sloan bd comments add gt-1 hello`, polecatAttributionReason},
+		{"empty actor falls back to the git user", `BD_ACTOR= bd comments add gt-1 hello`, polecatAttributionReason},
+		{"actor chained after another command", `cd /tmp && export BD_ACTOR=Sloan`, polecatAttributionReason},
+		{"actor inside bash -c", `bash -c "BD_ACTOR=Sloan bd comments add gt-1 hello"`, polecatAttributionReason},
+		{"own role as actor", `BD_ACTOR=gastown/polecats/ruby bd comments add gt-1 hello`, ""},
+		{"own role exported", `export BD_ACTOR=gastown/polecats/ruby`, ""},
+		{"other variable", `FOO=Sloan bd comments add gt-1 hello`, ""},
+		{"actor named in comment text", `bd comments add gt-1 "BD_ACTOR=Sloan is refused"`, ""},
+		{"actor named after the command", `echo BD_ACTOR=Sloan`, ""},
+
 		{"accepted-risk comment", `bd comments add gt-x "ACCEPTED-RISK: the retry is bounded"`, polecatAcceptedRiskReason},
 		{"accepted-risk lower case", `bd comments add gt-x "accepted-risk: fine"`, polecatAcceptedRiskReason},
 		{"accepted-risk padded", `bd comments add gt-x "  ACCEPTED-RISK: fine"`, polecatAcceptedRiskReason},
@@ -107,6 +125,8 @@ func TestPolecatAttributionLeavesOtherSessionsAlone(t *testing.T) {
 		`gt bead comment gt-x "ACCEPTED-RISK: fine"`,
 		`gt bead note gt-x "ACCEPTED-RISK: fine"`,
 		`bd note gt-x "ACCEPTED-RISK: fine"`,
+		`BD_ACTOR='Sloan Ahrens' bd comments add gt-x hi`,
+		`export BD_ACTOR=town/crew/overseer`,
 	}
 	for _, command := range commands {
 		if reason, _ := evaluateDangerousCommand(command, 0, attributionOverseer); reason != "" {

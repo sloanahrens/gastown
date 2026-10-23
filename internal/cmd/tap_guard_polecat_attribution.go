@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -13,7 +14,8 @@ import (
 const (
 	polecatAttributionReason = "polecat may not set a comment author or actor"
 	polecatAttributionAlt    = "The accepted-risk gate trusts a comment's author name, so --author, -a and --actor " +
-		"are refused for a polecat. Post the comment without them."
+		"are refused for a polecat, and so is assigning BD_ACTOR or BEADS_ACTOR to another identity. " +
+		"Post the comment without them."
 	polecatAcceptedRiskReason = "polecat may not post an ACCEPTED-RISK: comment"
 	polecatAcceptedRiskAlt    = "An accepted risk is recorded by the overseer or Sloan, not by a polecat. " +
 		"Describe the finding in a plain bead comment and let them decide whether to accept it."
@@ -68,12 +70,16 @@ var bdNoteFlags = []string{"--notes", "--append-notes"}
 // tokens when the session is a polecat's. tokens come from shellTokenize on the
 // heredoc-stripped command, so quoted text is one token and a chain (&&, ;, |)
 // is judged one segment at a time. polecatSession is passed in rather than read
-// here so the matcher stays table-testable.
-func matchesPolecatAttribution(tokens []string, polecatSession bool) (reason, alternative string) {
+// here so the matcher stays table-testable, as is ownIdentities, the values of
+// the polecat's own identity that BD_ACTOR may be set to.
+func matchesPolecatAttribution(tokens []string, polecatSession bool, ownIdentities []string) (reason, alternative string) {
 	if !polecatSession {
 		return "", ""
 	}
 	for _, segment := range splitShellSegments(tokens) {
+		if assignsOtherActor(segment, ownIdentities) {
+			return polecatRuleAttribution.text()
+		}
 		words := bdCloseCommandTokens(segment)
 		if len(words) < 2 {
 			continue
@@ -90,6 +96,66 @@ func matchesPolecatAttribution(tokens []string, polecatSession bool) (reason, al
 		}
 	}
 	return "", ""
+}
+
+// bdActorEnvVars are the environment variables bd resolves a write's author
+// from when no --actor flag is given.
+var bdActorEnvVars = []string{"BD_ACTOR", "BEADS_ACTOR"}
+
+// envAssignmentWords are the words that may sit before a NAME=value assignment
+// and still apply it: export and its kin set it for the shell, command for the
+// command that follows.
+var envAssignmentWords = map[string]bool{
+	"export": true, "declare": true, "typeset": true, "readonly": true, "local": true, "command": true,
+}
+
+// assignsOtherActor reports whether a segment assigns BD_ACTOR or BEADS_ACTOR
+// to anything but the polecat's own identity, as a leading NAME=value word
+// (`BD_ACTOR=x bd ...`, a bare `BD_ACTOR=x`) or behind export, declare, env and
+// the like. An empty value counts as another identity: bd then falls back to
+// the git user. Only the assignment words at the front of the segment are read,
+// so comment text that mentions BD_ACTOR=x is left alone.
+func assignsOtherActor(segment, ownIdentities []string) bool {
+	tokens := segment
+	for len(tokens) > 0 {
+		tok := tokens[0]
+		switch {
+		case bdCloseLeadWords[tok] || envAssignmentWords[tok]:
+			tokens = tokens[1:]
+		case filepath.Base(tok) == "env":
+			tokens = bdCloseSkipEnvFlags(tokens[1:])
+		case strings.HasPrefix(tok, "-") && tok != "--":
+			// declare -x, export -n: flags of the assignment word.
+			tokens = tokens[1:]
+		case isEnvAssignment(tok):
+			name, value, _ := strings.Cut(tok, "=")
+			if slices.Contains(bdActorEnvVars, name) && !isOwnIdentity(value, ownIdentities) {
+				return true
+			}
+			tokens = tokens[1:]
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// isOwnIdentity reports whether value is one of the polecat's own identities.
+func isOwnIdentity(value string, own []string) bool {
+	value = strings.TrimSpace(value)
+	return value != "" && slices.Contains(own, value)
+}
+
+// polecatOwnIdentities are the values the session itself carries for who it is:
+// its GT_ROLE and the BD_ACTOR or BEADS_ACTOR it was started with.
+func polecatOwnIdentities(proc guardProcess) []string {
+	var own []string
+	for _, key := range append([]string{"GT_ROLE"}, bdActorEnvVars...) {
+		if v := strings.TrimSpace(proc.getenv(key)); v != "" {
+			own = append(own, v)
+		}
+	}
+	return own
 }
 
 // polecatBdViolation judges one bd invocation, rest being the tokens after bd.
