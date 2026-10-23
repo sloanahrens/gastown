@@ -289,7 +289,8 @@ type seatBackendResolver func(agent string) (session.Backend, error)
 // polecat_pool.seats picks sandbox or host, and an agent that is no seat gets
 // the host's tmux. An unreadable settings file, or an openshell backend that
 // cannot be built, is an error: the restart refuses rather than start a
-// sandboxed seat on the host unfenced (gt-da3ea).
+// sandboxed seat on the host unfenced (gt-da3ea). A missing settings file reads
+// as the defaults, and nothing is written.
 func townSeatBackend(townRoot string, host *tmux.Tmux) seatBackendResolver {
 	return func(agent string) (session.Backend, error) {
 		ts, err := config.LoadOrCreateTownSettings(config.TownSettingsPath(townRoot))
@@ -306,12 +307,8 @@ func townSeatBackend(townRoot string, host *tmux.Tmux) seatBackendResolver {
 // no record, or a record naming no agent, starts with opts as given: the role
 // default, as before. opts.Agent, when set, wins over the record.
 //
-// The backend follows that agent too. A sling records the agent before it
-// builds the backend (polecat_spawn.go), so a seat slung on an openshell
-// agent's seat that failed to spawn still names it, and starting it with the
-// default tmux backend would put a sandboxed seat on the host with the host
-// worktree and file-backed secrets (gt-da3ea). backendFor answers the error
-// that refuses such a restart.
+// The backend follows that agent too, so a sandboxed seat never starts on host
+// tmux (gt-da3ea). backendFor answers the error that refuses such a restart.
 func restartPolecatOnSlungAgent(mgr polecatStarter, backendFor seatBackendResolver, townRoot, rigName, polecatName string, opts polecat.SessionStartOptions) error {
 	if opts.Agent == "" && townRoot != "" {
 		// An unreadable record reads as one that names no agent (Read's
@@ -321,6 +318,8 @@ func restartPolecatOnSlungAgent(mgr polecatStarter, backendFor seatBackendResolv
 	}
 	// A restart with no town root has no settings to read, so no seat map
 	// names a sandboxed seat: the session manager's tmux default stands.
+	// With a town root every seat reads the settings, since only they say
+	// whether the agent is sandboxed (townSeatBackend).
 	if opts.Backend == nil && townRoot != "" {
 		backend, err := backendFor(opts.Agent)
 		if err != nil {
