@@ -65,7 +65,7 @@ type polecatGit interface {
 	land.WorkLandedRepo
 	CurrentBranch() (string, error)
 	BranchPushedToRemote(localBranch, remote string) (bool, int, error)
-	FetchDefaultBranchWithTimeout(remote string, timeout time.Duration) error
+	FetchBranchWithTimeout(remote, branch string, timeout time.Duration) error
 	Push(remote, branch string, force bool) error
 }
 
@@ -264,9 +264,24 @@ func (c *StalledPolecatCheck) Run(ctx *CheckContext) *CheckResult {
 // The refresh is load-bearing: a dead polecat's clone stops fetching, so the
 // content it is being judged against can postdate its last fetch. Without the
 // refresh the check would keep reporting landed work as unlanded forever —
-// the failure it exists to remove.
+// the failure it exists to remove. It refreshes the branch the verdict judges,
+// the rig's landing target, which is not the remote's HEAD on a rig that lands
+// somewhere else (gt-kpj41).
+//
+// A refresh that cannot run is best-effort: stale evidence over-flags, and it
+// must not turn into a probe failure that hides a proof another arm makes. So
+// a target that will not resolve skips the fetch and leaves the resolution
+// error to the verdict, which reports it itself.
 func (c *StalledPolecatCheck) landedVerdict(pg polecatGit, townRoot, rigName, branch string) land.WorkLandedVerdict {
-	_ = pg.FetchDefaultBranchWithTimeout("origin", fetchTimeout) // best-effort: stale evidence over-flags, it cannot mask real risk
+	rigPath := filepath.Join(townRoot, rigName)
+	if target, err := land.RigDefaultBranch(rigPath); err == nil {
+		if target == "" {
+			target = pg.RemoteDefaultBranch()
+		}
+		if target != "" {
+			_ = pg.FetchBranchWithTimeout("origin", target, fetchTimeout)
+		}
+	}
 
 	var beadID string
 	if meta, ok := polecat.ParseBranchName(branch); ok {
@@ -279,7 +294,6 @@ func (c *StalledPolecatCheck) landedVerdict(pg polecatGit, townRoot, rigName, br
 	// The branch is the worktree's current branch, so "" reads its HEAD. The
 	// first ask carries no bead: only the LANDING RECORD arm reads one, so the
 	// bead is read only when the other arms did not already prove landing.
-	rigPath := filepath.Join(townRoot, rigName)
 	v := workLanded(pg, land.WorkLandedQuery{RigPath: rigPath, BeadID: beadID})
 	if v.Landed || v.Reason != land.WorkUnpushed || beadID == "" || c.beadIssue == nil {
 		return v
