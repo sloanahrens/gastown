@@ -21,6 +21,7 @@ import (
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/supervisor"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -1248,18 +1249,47 @@ func (s *SpawnedPolecatInfo) startSession() (string, error) {
 
 	// Get pane — if this fails, the session may have died during startup.
 	// Kill the dead session to prevent "session already running" on next attempt (gt-jn40ft).
-	pane, err := getSessionPane(s.SessionName)
+	pane, err := paneAfterStart(s.SessionName, getSessionPane,
+		func() {
+			// A rollback of a session this spawn created: the supervisor's
+			// Cleanup, logged and never refused.
+			_ = sup.Cleanup(supervisor.SeatIn(townRegistry(), s.RigName, constants.RolePolecat, s.PolecatName),
+				"sling: session died during startup", actor)
+		},
+		func(cause error) error {
+			return cleanupSandboxAfterStartupDeath(session.SandboxDeleter, townRoot, s.SessionName, cause)
+		})
 	if err != nil {
-		// Session likely died — clean up the tmux session so it doesn't block
-		// re-sling. A rollback of a session this spawn created: the
-		// supervisor's Cleanup, logged and never refused.
-		_ = sup.Cleanup(supervisor.SeatIn(townRegistry(), s.RigName, constants.RolePolecat, s.PolecatName),
-			"sling: session died during startup", actor)
-		return "", fmt.Errorf("getting pane for %s (session likely died during startup): %w", s.SessionName, err)
+		return "", err
 	}
 
 	s.Pane = pane
 	return pane, nil
+}
+
+// paneAfterStart returns the session's pane. When the pane cannot be found the
+// session died during startup: killSession ends what is left of it so a
+// re-sling does not hit "session already running" (gt-jn40ft), and dropSandbox
+// removes the sandbox and record it ran in (gt-2awr8). The supervisor's kill
+// alone leaves the sandbox Ready and its record on disk.
+func paneAfterStart(sessionName string, getPane func(string) (string, error), killSession func(), dropSandbox func(cause error) error) (string, error) {
+	pane, err := getPane(sessionName)
+	if err != nil {
+		killSession()
+		return "", dropSandbox(fmt.Errorf("getting pane for %s (session likely died during startup): %w", sessionName, err))
+	}
+	return pane, nil
+}
+
+// cleanupSandboxAfterStartupDeath returns cause, with the sandbox the dead
+// session ran in deleted and its registry record removed. A host session has
+// no record and nothing happens. A failed deletion is added to the error text;
+// cause stays what errors.Is and errors.As see.
+func cleanupSandboxAfterStartupDeath(deleter func(townRoot string, rec session.SandboxRecord) error, townRoot, sessionName string, cause error) error {
+	if cerr := session.CleanupSandboxWith(deleter, townRoot, sessionName); cerr != nil {
+		return fmt.Errorf("%w (cleaning up the sandbox failed too: %v)", cause, cerr)
+	}
+	return cause
 }
 
 // IsRigName checks if a target string is a rig name (not a role or path).
