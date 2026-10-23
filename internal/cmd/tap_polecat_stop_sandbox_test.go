@@ -127,11 +127,8 @@ func TestEndSandboxSessionIfDoneReportsAScheduleFailure(t *testing.T) {
 	}
 }
 
-// The Stop hook acts on a finished session only on the branch where the
-// heartbeat says gt done already ran (exiting or idle), and then once; a polecat
-// still working, or one with no heartbeat, is not done. runTapPolecatStop hands
-// polecatStopGtDoneRan the sandbox end as its callback, so a dropped call or one
-// moved off that branch fails here.
+// The heartbeat says gt done already ran only when it is exiting or idle; a
+// working polecat, one with a v1 heartbeat and none at all are not done.
 func TestPolecatStopGtDoneRan(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -148,14 +145,40 @@ func TestPolecatStopGtDoneRan(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			calls := 0
-			got := polecatStopGtDoneRan(tc.hb, func() { calls++ })
-			wantCalls := 0
-			if tc.done {
-				wantCalls = 1
+			if got := polecatStopGtDoneRan(tc.hb); got != tc.done {
+				t.Errorf("polecatStopGtDoneRan = %v, want %v", got, tc.done)
 			}
-			if got != tc.done || calls != wantCalls {
-				t.Errorf("polecatStopGtDoneRan = %v with %d callbacks, want %v with %d", got, calls, tc.done, wantCalls)
+		})
+	}
+}
+
+// A sandbox polecat that finished cleanly has its session ended even when the
+// heartbeat reads working: later tool calls reset the heartbeat after gt done,
+// while the agent bead stays done, clean and COMPLETED. When the sandbox end
+// declines, the heartbeat decides as before.
+func TestPolecatStopFinishedEndsASandboxSessionWhateverTheHeartbeatSays(t *testing.T) {
+	t.Parallel()
+	working := &polecat.SessionHeartbeat{State: polecat.HeartbeatWorking}
+	exiting := &polecat.SessionHeartbeat{State: polecat.HeartbeatExiting}
+	cases := []struct {
+		name    string
+		hb      *polecat.SessionHeartbeat
+		ends    bool
+		want    bool
+		wantEnd int
+	}{
+		{"sandbox_ends_while_heartbeat_says_working", working, true, true, 1},
+		{"sandbox_ends_with_no_heartbeat", nil, true, true, 1},
+		{"no_sandbox_end_and_heartbeat_working", working, false, false, 1},
+		{"no_sandbox_end_and_heartbeat_exiting", exiting, false, true, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			got := polecatStopFinished(tc.hb, func() bool { calls++; return tc.ends })
+			if got != tc.want || calls != tc.wantEnd {
+				t.Errorf("polecatStopFinished = %v after %d end attempts, want %v after %d", got, calls, tc.want, tc.wantEnd)
 			}
 		})
 	}

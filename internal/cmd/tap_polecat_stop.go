@@ -56,18 +56,27 @@ Exit codes:
 	SilenceUsage: true,
 }
 
-// polecatStopGtDoneRan reports whether the heartbeat says gt done already ran
-// or the polecat is idle, in which case the Stop hook has nothing to submit and
-// calls onDone once. A working polecat, or one with no heartbeat, is not done.
-func polecatStopGtDoneRan(hb *polecat.SessionHeartbeat, onDone func()) bool {
+// polecatStopGtDoneRan reports whether the heartbeat says gt done already ran or
+// the polecat is idle, in which case the Stop hook has nothing to submit. A
+// working polecat, or one with no heartbeat, is not done.
+func polecatStopGtDoneRan(hb *polecat.SessionHeartbeat) bool {
 	if hb == nil {
 		return false
 	}
-	if state := hb.EffectiveState(); state != polecat.HeartbeatExiting && state != polecat.HeartbeatIdle {
-		return false
+	state := hb.EffectiveState()
+	return state == polecat.HeartbeatExiting || state == polecat.HeartbeatIdle
+}
+
+// polecatStopFinished reports whether the Stop hook has nothing left to do. A
+// sandbox polecat that finished cleanly has its session ended first, whatever
+// the heartbeat says: later tool calls rewrite the heartbeat to working after
+// gt done, so the agent bead (what endSandboxSession reads) decides, not the
+// heartbeat. Otherwise the heartbeat decides, as it always has.
+func polecatStopFinished(hb *polecat.SessionHeartbeat, endSandboxSession func() bool) bool {
+	if endSandboxSession() {
+		return true
 	}
-	onDone()
-	return true
+	return polecatStopGtDoneRan(hb)
 }
 
 func init() {
@@ -97,11 +106,11 @@ func runTapPolecatStop(cmd *cobra.Command, args []string) error {
 
 	// Check heartbeat state: if already "exiting" or "idle", gt done already ran
 	hb := polecat.ReadSessionHeartbeat(townRoot, sessionName)
-	// gt done already ran or the polecat is idle. In a sandbox a clean, pushed
-	// completion also ends this session, so the sandbox's main process exits and
-	// the gateway deletes the sandbox.
-	if polecatStopGtDoneRan(hb, func() {
-		endSandboxSessionIfDone(sandboxSessionEnd{}, os.Getenv, townRoot, os.Getenv("GT_RIG"), polecatName, sessionName)
+	// In a sandbox a clean, pushed completion ends this session, so the sandbox's
+	// main process exits and the gateway deletes the sandbox; otherwise gt done
+	// already ran or the polecat is idle.
+	if polecatStopFinished(hb, func() bool {
+		return endSandboxSessionIfDone(sandboxSessionEnd{}, os.Getenv, townRoot, os.Getenv("GT_RIG"), polecatName, sessionName)
 	}) {
 		return nil
 	}
