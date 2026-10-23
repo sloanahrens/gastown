@@ -10,8 +10,8 @@ import (
 // clone is git clone --single-branch of url into dest, bare or checked out,
 // then (for a bare clone) the fetch of that branch into its remote-tracking
 // ref that *git.Git's bare clones make; a checked-out clone also records
-// what cloned does. branch "" is the remote's HEAD branch. An empty remote clones to an empty repository; a named branch it
-// lacks fails.
+// what cloned does. branch "" is the remote's HEAD branch. An empty remote
+// clones to an empty repository; a named branch it lacks fails.
 func (h *handle) clone(url, dest, branch string, bare bool) error {
 	h.f.mu.Lock()
 	defer h.f.mu.Unlock()
