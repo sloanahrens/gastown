@@ -462,11 +462,8 @@ func (c *Config) HostPort() string {
 	return net.JoinHostPort(host, strconv.Itoa(c.Port))
 }
 
-// tcpDSN returns the MySQL DSN for a connection that selects no database. It
-// builds the address with HostPort, so an IPv6 host is bracketed: written as
-// "tcp(::1:3307)" the driver reads every colon as a separator and the dial
-// fails ("too many colons"), which made the latency, commit-age and drain
-// probes report an unreachable server on an IPv6 town.
+// tcpDSN returns the MySQL DSN for a connection that selects no database. The
+// address comes from HostPort, so an IPv6 host stays bracketed.
 func (c *Config) tcpDSN() string {
 	return fmt.Sprintf("%s@tcp(%s)/", c.UserDSN(), c.HostPort())
 }
