@@ -6,7 +6,7 @@
     "version": 1,
     "rigs": {
       "gastown": {
-        "git_url": "http://forgejo:3000/sloan/gastown.git",
+        "git_url": "http://bot:PLANTED-TOKEN-1@forgejo:3000/sloan/gastown.git",
         "added_at": "2026-10-22T00:00:00Z",
         "beads": {"repo": "", "prefix": "gt"}
       }
