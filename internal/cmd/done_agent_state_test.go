@@ -177,6 +177,77 @@ func TestCompletedDoneOnUnchangedReworkRecordsTheRequeueHint(t *testing.T) {
 	}
 }
 
+// TestUnchangedReworkHeadLeavesTheSeatRestartable: a gt done that stands down
+// on a rework bead still on its rejected head resubmits nothing, so the seat
+// must not read as finished. Recorded as COMPLETED with the bead still hooked,
+// patrol_scan skips the seat as stopped on purpose and nothing restarts it
+// (gt-jfhvc). It records stuck with a DEFERRED exit instead, which patrol_scan
+// restarts on the preserved branch (gt-ks62m).
+func TestUnchangedReworkHeadLeavesTheSeatRestartable(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		criteria string
+	}{
+		{name: "plain rework bead"},
+		{name: "unchecked criteria name a different reason", criteria: "- [ ] the gate passes"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			townRoot := t.TempDir()
+			for _, dir := range []string{"mayor", filepath.Join(".beads", "locks"), "gastown"} {
+				if err := os.MkdirAll(filepath.Join(townRoot, dir), 0755); err != nil {
+					t.Fatalf("mkdir %s: %v", dir, err)
+				}
+			}
+			routes := `{"prefix":"gt-","path":"gastown"}` + "\n"
+			if err := os.WriteFile(filepath.Join(townRoot, ".beads", "routes.jsonl"), []byte(routes), 0644); err != nil {
+				t.Fatalf("write routes.jsonl: %v", err)
+			}
+
+			const head = "1111111111111111111111111111111111111111"
+			db := beadsfake.New(beadsfake.WithPrefix("gt"))
+			db.Seed(doneAgentBead(), beads.Issue{
+				ID:                 "gt-rework",
+				Title:              "the work",
+				Type:               "task",
+				Status:             string(beads.StatusOpen),
+				AcceptanceCriteria: tc.criteria,
+				Labels:             []string{land.LabelRework},
+				Notes: land.FormatRejectionNote(land.RejectionNote{
+					Attempt: 1, Kind: "gate", Reason: "the gate refused it",
+					Branch: "polecat/nux/gt-rework+abc", Target: "main", MR: "gt-rework", Head: head,
+				}),
+			})
+
+			env := doneStateEnv{
+				getenv: envMap(map[string]string{"GT_ROLE": "polecat", "GT_RIG": "gastown", "GT_POLECAT": "nux"}),
+				routed: func(string) beads.Client { return db },
+				source: func(string, string) beads.Client { return db },
+				purge:  func(string, string) {},
+				reviewHead: func(string) (string, error) {
+					return head, nil
+				},
+			}
+			if _, err := updateAgentStateOnDoneIn(env, filepath.Join(townRoot, "gastown"), townRoot, done.ExitCompleted, "gt-rework", pendingCompletion()); err != nil {
+				t.Fatalf("completed gt done: %v", err)
+			}
+
+			fields := beads.ParseAgentFields(mustShowBead(t, db, "gt-gastown-polecat-nux").Description)
+			if fields.AgentState != string(beads.AgentStateStuck) {
+				t.Errorf("agent_state = %q, want stuck: a stood-down seat is not finished, and patrol_scan skips a done seat", fields.AgentState)
+			}
+			if fields.ExitType != done.ExitDeferred {
+				t.Errorf("exit_type = %q, want %s: patrol_scan restarts a stuck seat only after a DEFERRED exit", fields.ExitType, done.ExitDeferred)
+			}
+			if got := mustShowBead(t, db, "gt-rework").Status; got == string(beads.StatusClosed) {
+				t.Error("gt done closed a rework bead whose head was unchanged")
+			}
+		})
+	}
+}
+
 // TestDoneAgentStateAsksForHeadInItsOwnCwd: the HEAD the close gate judges
 // comes from the worktree gt done was handed, not from the process working
 // directory. gt done can resolve its agent and worktree from the environment,
