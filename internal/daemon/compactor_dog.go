@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
+	"strconv"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
@@ -701,6 +703,6 @@ func (d *Daemon) compactorOpenDB(dbName string) (*sql.DB, error) {
 
 // compactorDSN is the DSN compactorOpenDB connects with.
 func (d *Daemon) compactorDSN(dbName string) string {
-	return fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true&timeout=5s&readTimeout=30s&writeTimeout=30s",
-		d.doltUserInfo(), d.doltServerHost(), d.doltServerPort(), dbName)
+	return fmt.Sprintf("%s@tcp(%s)/%s?parseTime=true&timeout=5s&readTimeout=30s&writeTimeout=30s",
+		d.doltUserInfo(), net.JoinHostPort(d.doltServerHost(), strconv.Itoa(d.doltServerPort())), dbName)
 }

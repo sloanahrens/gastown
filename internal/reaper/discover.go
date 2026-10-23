@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"net"
+	"strconv"
 	"time"
 
 	_ "github.com/go-sql-driver/mysql" // registers the "mysql" driver sql.Open uses below
@@ -13,7 +15,7 @@ import (
 
 // discoverDSN is the DSN DiscoverDatabases connects with.
 func discoverDSN(userInfo, host string, port int) string {
-	return fmt.Sprintf("%s@tcp(%s:%d)/?parseTime=true&timeout=5s", userInfo, host, port)
+	return fmt.Sprintf("%s@tcp(%s)/?parseTime=true&timeout=5s", userInfo, net.JoinHostPort(host, strconv.Itoa(port)))
 }
 
 // DiscoverDatabases queries SHOW DATABASES on the Dolt server and returns
