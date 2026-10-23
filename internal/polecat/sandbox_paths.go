@@ -14,7 +14,7 @@ import (
 // whose paths would not exist.
 func sandboxTownRoot(hostTownRoot, hostWorkDir, sandboxWorkDir string) (string, error) {
 	rel, err := filepath.Rel(hostTownRoot, hostWorkDir)
-	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return "", fmt.Errorf("worktree %s is not inside town %s", hostWorkDir, hostTownRoot)
 	}
 	tail := "/" + filepath.ToSlash(rel)
