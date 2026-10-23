@@ -102,9 +102,12 @@ const gtCommitLabel = "org.gastown.gt-commit"
 // image without the label reads as "", which checkImageGT refuses.
 func dockerImageGT(ctx context.Context, image string) (string, error) {
 	format := `{{index .Config.Labels "` + gtCommitLabel + `"}}`
-	out, err := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", format, image).CombinedOutput()
+	cmd := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", format, image)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("docker image inspect %s: %w: %s", image, err, strings.TrimSpace(string(out)))
+		return "", fmt.Errorf("docker image inspect %s: %w: %s", image, err, strings.TrimSpace(stderr.String()))
 	}
 	return strings.TrimSpace(string(out)), nil
 }
