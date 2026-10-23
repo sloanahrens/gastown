@@ -1459,24 +1459,36 @@ func TestSpecDispatchRetriesDoltContention(t *testing.T) {
 	if len(f.slung) != 1 || f.sleeps != 2 || !strings.Contains(r.Dispatched[0].Line, "after 3 attempts") {
 		t.Fatalf("slung %v sleeps %d report %+v", f.slung, f.sleeps, r.Dispatched)
 	}
+}
 
-	f = newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
-	for i := 0; i < 10; i++ {
+// Contention that outlasts every retry is a deferral, not a failure: Dolt rolled
+// the attempt back before reporting it, so the next tick repeats the dispatch.
+// The label the failure path adds excludes the bead until an operator clears it,
+// which is wrong for a bead the contention itself cleared (gt-9x16z).
+func TestSpecDispatchContentionThatOutlastsItsRetriesIsADeferral(t *testing.T) {
+	t.Parallel()
+	contention := errors.New("formula failed: bd mol bond: Error 1213 (40001): serialization failure")
+	f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+	for i := 0; i < specdispatch.RetryAttempts; i++ {
 		f.slingErrs["gt-a"] = append(f.slingErrs["gt-a"], contention)
 	}
-	r = runSpecDispatchCycle(f.env())
-	runSpecDispatchCycle(f.env())
-	if len(f.slung) != 0 || len(r.Failed) != 1 || f.specs["gt-a"].Assignee != "" {
-		t.Fatalf("final contention failure: slung %v failed %+v", f.slung, r.Failed)
+	r := runSpecDispatchCycle(f.env())
+	if len(f.slung) != 0 || len(r.Failed) != 0 || len(r.Deferred) != 1 {
+		t.Fatalf("slung %v failed %+v deferred %+v, want one deferral and no failure", f.slung, r.Failed, r.Deferred)
 	}
-	if !strings.Contains(r.Failed[0].Line, "left unassigned") || !strings.Contains(r.Failed[0].Line, "after 4 attempts") {
-		t.Errorf("failure line = %q", r.Failed[0].Line)
+	if line := r.Deferred[0].Line; !strings.Contains(line, "Dolt contention") || !strings.Contains(line, "after 4 attempts") {
+		t.Errorf("deferral line = %q", line)
 	}
-	if n := len(f.notes["gt-a"]); n != 1 {
-		t.Errorf("annotated %d times across two failing ticks, want once", n)
+	if n := len(f.notes["gt-a"]); n != 0 {
+		t.Errorf("annotated %d times, want none: the bead is not held out of the queue", n)
 	}
-	if got := f.labels["gt-a"]; len(got) != 1 || got[0] != specdispatch.DispatchFailedLabel {
-		t.Errorf("failed bead labels = %v, want %s once (the second tick must not retry it)", got, specdispatch.DispatchFailedLabel)
+	if got := f.labels["gt-a"]; len(got) != 0 {
+		t.Errorf("labels = %v, want none: %s must not stick after contention clears", got, specdispatch.DispatchFailedLabel)
+	}
+	// The bead is still a candidate, so the next tick slings it once the
+	// contention is gone.
+	if r := runSpecDispatchCycle(f.env()); len(r.Dispatched) != 1 || len(f.slung) != 1 {
+		t.Errorf("next tick: dispatched %+v, slung %v; want the bead slung", r.Dispatched, f.slung)
 	}
 }
 
@@ -1487,6 +1499,52 @@ func TestSpecDispatchPoolRefusalIsASkip(t *testing.T) {
 	r := runSpecDispatchCycle(f.env())
 	if len(r.Skipped) != 1 || len(r.Failed) != 0 || len(f.notes["gt-a"]) != 0 || f.sleeps != 0 {
 		t.Fatalf("pool refusal handled as failure: %+v notes %v", r, f.notes)
+	}
+}
+
+// The tick charges a seat when it collects a candidate, so the next candidate
+// of the tick sees it taken. A sling that spawns no polecat — the overlap
+// guard's refusal here — hands the seat back: the tick's seat ledger says what
+// it used, not what it hoped to use (gt-9x16z).
+func TestSpecRunPendingSlingsReleasesTheSeatARefusalLeftEmpty(t *testing.T) {
+	t.Parallel()
+	overlap := fmt.Errorf("sling refused: %w", errSlingDuplicateContent)
+	cases := []struct {
+		name     string
+		slingErr error
+		wantLive int
+	}{
+		{name: "the overlap guard refuses the sling", slingErr: overlap},
+		{name: "the sling spawns a polecat", wantLive: 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
+			if tc.slingErr != nil {
+				f.slingErrs["gt-a"] = []error{tc.slingErr}
+			}
+			budget := specdispatch.Budget{
+				Seats: []specdispatch.Seat{{Agent: "deepseek-flash", Cap: 3}},
+				Now:   specTestNow,
+			}
+			// The charge the collection loop made for this candidate.
+			budget.Bump("deepseek-flash", specTestNow)
+			pending := []specPendingSling{{
+				id:    "gt-a",
+				c:     specCandidate{Spec: f.specs["gt-a"], Rig: "gastown"},
+				seat:  specdispatch.SeatChoice{Agent: "deepseek-flash"},
+				entry: specDispatchEntry{Bead: "gt-a", Rig: "gastown", Agent: "deepseek-flash"},
+			}}
+			var report specDispatchReport
+			specRunPendingSlings(f.env(), pending, &report, &budget)
+			if got := budget.Seats[0].Live; got != tc.wantLive {
+				t.Errorf("seat live = %d, want %d", got, tc.wantLive)
+			}
+			if got := budget.LiveTotal; got != tc.wantLive {
+				t.Errorf("live total = %d, want %d", got, tc.wantLive)
+			}
+		})
 	}
 }
 
@@ -1601,14 +1659,9 @@ func TestSpecDispatchDeferralIsReportedOutsideTheSkipList(t *testing.T) {
 	t.Run("a failed sling is not a deferral", func(t *testing.T) {
 		t.Parallel()
 		f := newFakeSpecTown(cleanSpec("gt-a", 1, "2026-09-29T10:00:00Z"))
-		// The contention retries give up, so this is a dispatch failure: it is
-		// logged under failed, and no deferred line repeats it (gt-4wcqd).
-		f.slingErrs["gt-a"] = []error{
-			errors.New("Error 1213: serialization failure"),
-			errors.New("Error 1213: serialization failure"),
-			errors.New("Error 1213: serialization failure"),
-			errors.New("Error 1213: serialization failure"),
-		}
+		// A failure the bead cannot clear itself is logged under failed, and no
+		// deferred line repeats it (gt-4wcqd).
+		f.slingErrs["gt-a"] = []error{errors.New("rig gastown is down")}
 		r := runSpecDispatchCycle(f.env())
 		if len(r.Failed) != 1 || len(r.Deferred) != 0 {
 			t.Fatalf("failed = %+v deferred = %+v, want one failure and no deferral", r.Failed, r.Deferred)

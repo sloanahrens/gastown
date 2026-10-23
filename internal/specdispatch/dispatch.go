@@ -392,6 +392,19 @@ func (b *Budget) Bump(agent string, now time.Time) {
 	b.NewestSpawn = now
 }
 
+// Release gives back the seat Bump charged for a sling that spawned no polecat
+// (gt-9x16z).
+func (b *Budget) Release(agent string) {
+	for i := range b.Seats {
+		if b.Seats[i].Agent == agent && b.Seats[i].Live > 0 {
+			b.Seats[i].Live--
+		}
+	}
+	if b.LiveTotal > 0 {
+		b.LiveTotal--
+	}
+}
+
 // SeatChoice is the seat decision for one spec.
 type SeatChoice struct {
 	// Agent is the agent to sling with; empty when Skip.
