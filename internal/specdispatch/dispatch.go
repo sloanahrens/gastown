@@ -314,8 +314,9 @@ type Budget struct {
 	MaxTotal int
 	// LiveTotal is the count across every agent. Seats' Live is per agent and
 	// a town's live polecats are not all on a seat, so the total is counted
-	// from the roster rather than summed from the seats. SetLive fills it and
-	// Bump adds to it, so the total moves with the seats.
+	// from the roster rather than summed from the seats. SetLive fills it, Bump
+	// adds to it and Release gives a bump back, so the total moves with the
+	// seats.
 	LiveTotal int
 	// NewestSpawn and MinSpawnGap are the stagger: no dispatch while the
 	// newest polecat is younger than the gap.
@@ -329,6 +330,11 @@ type Budget struct {
 	// Rand drives the draw among free seats. Nil draws from the package
 	// source; a seeded source makes a test's choice reproducible.
 	Rand *rand.Rand
+	// charges counts the Bumps still outstanding against each agent, so
+	// Release gives back exactly what a bump took and never more. It is
+	// per-agent rather than per-seat because Bump charges the total for an
+	// agent no seat names too (gt-b5847).
+	charges map[string]int
 }
 
 // Picture renders the seats for a report: "claude-sonnet 1/2, ...". A seat with
@@ -381,23 +387,47 @@ func (b *Budget) SetDeadHooked(dead map[string]int) {
 	}
 }
 
-// Bump records one more polecat on agent, spawned at now.
+// Bump records one more polecat on agent, spawned at now. It charges the total
+// for every bump, seated or not — an agent no seat names is still a live
+// polecat — and records the charge against the agent so Release can give back
+// exactly what it took (gt-b5847). The first seat named agent keeps the spawn,
+// as the seat list's order decides which of two seats named the same agent a
+// polecat occupies.
 func (b *Budget) Bump(agent string, now time.Time) {
 	for i := range b.Seats {
 		if b.Seats[i].Agent == agent {
 			b.Seats[i].Live++
+			break
 		}
 	}
 	b.LiveTotal++
+	if b.charges == nil {
+		b.charges = make(map[string]int)
+	}
+	b.charges[agent]++
 	b.NewestSpawn = now
 }
 
-// Release gives back the seat Bump charged for a sling that spawned no polecat
-// (gt-9x16z).
+// Release gives back one charge Bump recorded for agent for a sling that
+// spawned no polecat (gt-9x16z). It gives back only a charge a bump made: a
+// release with none behind it leaves the seats and the town total alone, so a
+// stray release cannot count the town below what its roster and seats show and
+// open room at the total cap that no seat has (gt-b5847).
 func (b *Budget) Release(agent string) {
+	if b.charges[agent] == 0 {
+		return
+	}
+	b.charges[agent]--
+	if b.charges[agent] == 0 {
+		delete(b.charges, agent)
+	}
+	// The seat gives back the spawn Bump put on it; the first seat named agent
+	// holds it, as on Bump, so two seats named the same agent move the total
+	// once per charge (gt-b5847).
 	for i := range b.Seats {
 		if b.Seats[i].Agent == agent && b.Seats[i].Live > 0 {
 			b.Seats[i].Live--
+			break
 		}
 	}
 	if b.LiveTotal > 0 {

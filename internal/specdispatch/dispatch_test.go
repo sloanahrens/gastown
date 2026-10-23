@@ -403,6 +403,89 @@ func TestBudgetPictureNamesDeadHookedSeats(t *testing.T) {
 	}
 }
 
+// A release gives back only the charge a bump made. A bump charges the total
+// whether or not a seat names the agent, and a release gives back exactly one
+// such charge — so the two are symmetric for an agent off the seats, and a
+// release with no bump behind it leaves the roster and the seats alone rather
+// than showing the town emptier than they do and opening room at max_total that
+// no seat has (gt-b5847).
+func TestBudgetReleaseGivesBackOnlyASeatCharge(t *testing.T) {
+	t.Parallel()
+
+	t.Run("bump then release returns the seat and the total", func(t *testing.T) {
+		t.Parallel()
+		b := baseBudget()
+		b.Bump("deepseek-flash", b.Now)
+		b.Release("deepseek-flash")
+		if b.Seats[0].Live != 0 || b.LiveTotal != 0 {
+			t.Fatalf("round trip: seat live %d, total %d, want 0 and 0", b.Seats[0].Live, b.LiveTotal)
+		}
+	})
+	t.Run("a bump on an agent no seat names is given back", func(t *testing.T) {
+		t.Parallel()
+		b := baseBudget()
+		b.Bump("gpt-5", b.Now)
+		if b.LiveTotal != 1 {
+			t.Fatalf("live total = %d after an unseated bump, want 1: the total counts every live polecat", b.LiveTotal)
+		}
+		b.Release("gpt-5")
+		if b.LiveTotal != 0 {
+			t.Fatalf("live total = %d after releasing the unseated bump, want 0", b.LiveTotal)
+		}
+		for _, s := range b.Seats {
+			if s.Live != 0 {
+				t.Fatalf("releasing an unseated agent moved seat %s to live %d", s.Agent, s.Live)
+			}
+		}
+	})
+	t.Run("a stray release with no bump leaves a live seat alone", func(t *testing.T) {
+		t.Parallel()
+		b := baseBudget()
+		b.SetLive(map[string]int{"deepseek-flash": 1})
+		b.Release("deepseek-flash")
+		if b.Seats[0].Live != 1 || b.LiveTotal != 1 {
+			t.Fatalf("stray release: seat live %d, total %d, want 1 and 1", b.Seats[0].Live, b.LiveTotal)
+		}
+	})
+	t.Run("a release for an agent no seat names leaves the total alone", func(t *testing.T) {
+		t.Parallel()
+		b := baseBudget()
+		b.SetLive(map[string]int{"gpt-5": 1})
+		b.Release("gpt-5")
+		if b.LiveTotal != 1 {
+			t.Fatalf("live total = %d after releasing an unseated agent, want 1", b.LiveTotal)
+		}
+	})
+	t.Run("two bumps give back one charge per release", func(t *testing.T) {
+		t.Parallel()
+		b := baseBudget()
+		b.Bump("deepseek-flash", b.Now)
+		b.Bump("deepseek-flash", b.Now)
+		b.Release("deepseek-flash")
+		if b.Seats[0].Live != 1 || b.LiveTotal != 1 {
+			t.Fatalf("after bump, bump, release: seat live %d, total %d, want 1 and 1", b.Seats[0].Live, b.LiveTotal)
+		}
+		b.Release("deepseek-flash")
+		if b.Seats[0].Live != 0 || b.LiveTotal != 0 {
+			t.Fatalf("after a second release: seat live %d, total %d, want 0 and 0", b.Seats[0].Live, b.LiveTotal)
+		}
+	})
+	t.Run("an agent named by two seats moves one seat and the total per charge", func(t *testing.T) {
+		t.Parallel()
+		b := baseBudget()
+		b.Seats = append(b.Seats, Seat{Agent: "deepseek-flash", Cap: 2})
+		b.Bump("deepseek-flash", b.Now)
+		if b.Seats[0].Live != 1 || b.Seats[2].Live != 0 || b.LiveTotal != 1 {
+			t.Fatalf("bump on duplicate seats: %d, %d, total %d, want 1, 0, 1 (the first seat keeps it)",
+				b.Seats[0].Live, b.Seats[2].Live, b.LiveTotal)
+		}
+		b.Release("deepseek-flash")
+		if b.Seats[0].Live != 0 || b.Seats[2].Live != 0 || b.LiveTotal != 0 {
+			t.Fatalf("duplicate seats: %d, %d, total %d, want all 0", b.Seats[0].Live, b.Seats[2].Live, b.LiveTotal)
+		}
+	})
+}
+
 func TestBudgetBumpAndPicture(t *testing.T) {
 	t.Parallel()
 	b := baseBudget()
