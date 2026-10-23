@@ -344,10 +344,11 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 			}
 			// Whichever close check below reports the reason, a rework bead
 			// still on its rejected head submitted nothing (gt-3e1z4), so the
-			// seat must not be recorded as completed (gt-jfhvc).
-			if _, standDown := done.ReworkUnchangedHeadMessage(hookedBead, currentHead); standDown {
-				reworkStandDown = true
-			}
+			// seat must not be recorded as completed (gt-jfhvc). The message is
+			// read once here and reused by the stand-down branch of the close
+			// chain, so both name the same refusal.
+			standDownMessage, standDown := done.ReworkUnchangedHeadMessage(hookedBead, currentHead)
+			reworkStandDown = standDown
 			if skipReason, fatal := done.DoneSourceCloseSkipReasonForHead(hookBd, hookedBeadID, hookedBead, currentHead); skipReason != "" {
 				style.PrintWarning("%s", skipReason)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open; the reason is recorded on it.\n")
@@ -408,14 +409,14 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 			} else if unchecked := beads.HasUncheckedCriteria(hookedBead); unchecked > 0 {
 				style.PrintWarning("hooked bead %s has %d unchecked acceptance criteria — skipping close", hookedBeadID, unchecked)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open; see the warning above.\n")
-			} else if message, standDown := done.ReworkUnchangedHeadMessage(hookedBead, currentHead); standDown {
+			} else if standDown {
 				// The submission stood down because the branch still sits on
 				// the rejected head (gt-3e1z4). The close-time invariant below
 				// would skip the close too; say why in a way that names the way
 				// forward, and record that instead of the bare refusal.
-				style.PrintWarning("%s", message)
+				style.PrintWarning("%s", standDownMessage)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open; the reason is recorded on it.\n")
-				done.NotifyDoneCloseSkipped(hookBd, hookedBeadID, message)
+				done.NotifyDoneCloseSkipped(hookBd, hookedBeadID, standDownMessage)
 			} else if skipReason := doneCloseTimeInvariantSkipReason(cwd, townRoot, ctx.Rig, hookedBead); skipReason != "" {
 				// gt-6hmz: refuse rather than close a bead whose branch carries
 				// commits the target lacks; only the landing worker closes
