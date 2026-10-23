@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -42,8 +43,6 @@ type OpenShellGatewayCheck struct {
 	goos string
 	// uid is the user id of the launchd gui domain; nil is os.Getuid.
 	uid func() int
-	// lookPath finds docker for the image check; nil is exec.LookPath.
-	lookPath func(string) (string, error)
 }
 
 // NewOpenShellGatewayCheck creates a new openshell-gateway check.
@@ -103,14 +102,7 @@ func (c *OpenShellGatewayCheck) Run(ctx *CheckContext) *CheckResult {
 
 	var problems []string
 	problems = append(problems, checkGateways(run, profiles)...)
-	// The image check inspects through the docker CLI, so it cannot run without it.
-	lookPath := c.lookPath
-	if lookPath == nil {
-		lookPath = exec.LookPath
-	}
-	if _, err := lookPath("docker"); err == nil {
-		problems = append(problems, checkImages(run, profiles)...)
-	}
+	problems = append(problems, checkImages(run, profiles)...)
 	goos := c.goos
 	if goos == "" {
 		goos = runtime.GOOS
@@ -238,6 +230,8 @@ func listGatewayProviders(run openShellRunner, gw string) (map[string]bool, stri
 }
 
 // checkImages reports each distinct profile image that docker cannot inspect.
+// When docker cannot start at all, it reports one line for the whole check
+// instead, so the skip is visible and the images are not blamed one by one.
 func checkImages(run openShellRunner, profiles []openShellProfile) []string {
 	seen := map[string]bool{}
 	var problems []string
@@ -246,7 +240,11 @@ func checkImages(run openShellRunner, profiles []openShellProfile) []string {
 			continue
 		}
 		seen[p.image] = true
-		if _, err := run([]string{"docker", "image", "inspect", p.image}); err != nil {
+		_, err := run([]string{"docker", "image", "inspect", p.image})
+		if errors.Is(err, exec.ErrNotFound) {
+			return []string{fmt.Sprintf("docker image check skipped: docker CLI not on PATH, so the images of %d profile(s) are unverified", len(profiles))}
+		}
+		if err != nil {
 			problems = append(problems, fmt.Sprintf("docker image inspect: image %s (profile %s) is not present: %v", p.image, p.name, err))
 		}
 	}

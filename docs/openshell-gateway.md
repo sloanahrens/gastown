@@ -60,3 +60,7 @@ openshell status
 ```
 
 `openshell status` reporting a connected gateway means the new set works; delete `tls.old` then. If it does not connect, `~/gt/.runtime/openshell/gateway.log` names the reason, and moving `tls.old` back restores the previous set.
+
+## Doctor
+
+`gt doctor` runs the `openshell-gateway` check on the sandbox profiles the openshell seats use. It warns, and names each missing piece, when the gateway does not report connected, a provider a profile names is not registered, a profile image is not present, or (on macOS) the launchd agent is not loaded. It also warns when the town settings or `polecat_pool.seats` cannot be read, and when the docker CLI is not on PATH: the image check cannot run then, so the warning says the images are unverified. A town with no openshell seats passes without running any command.

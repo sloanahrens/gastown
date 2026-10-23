@@ -3,6 +3,7 @@ package doctor
 import (
 	"errors"
 	"fmt"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -72,7 +73,6 @@ func openShellCheck(f *openShellFake, ts *config.TownSettings, goos string) *Ope
 	c.settings = func(string) (*config.TownSettings, error) { return ts, nil }
 	c.goos = goos
 	c.uid = func() int { return 501 }
-	c.lookPath = func(string) (string, error) { return "/usr/local/bin/docker", nil }
 	return c
 }
 
@@ -265,22 +265,27 @@ func TestOpenShellGatewayCheck_UnreadableSeats_Warns(t *testing.T) {
 	}
 }
 
-func TestOpenShellGatewayCheck_NoDocker_SkipsImageCheck(t *testing.T) {
+func TestOpenShellGatewayCheck_NoDocker_WarnsOnceNotOK(t *testing.T) {
 	t.Parallel()
 	f := healthyOpenShell()
-	f.errs[dockerImage] = errors.New("docker image inspect must not run without docker")
-	c := openShellCheck(f, openShellTown(defaultProfile()), "darwin")
-	c.lookPath = func(string) (string, error) { return "", errors.New("not found") }
+	f.errs[dockerImage] = fmt.Errorf("docker: %w", exec.ErrNotFound)
 
-	result := c.Run(&CheckContext{TownRoot: t.TempDir()})
+	result := openShellCheck(f, openShellTown(defaultProfile()), "darwin").Run(&CheckContext{TownRoot: t.TempDir()})
 
-	if result.Status != StatusOK {
-		t.Fatalf("Status = %v, want StatusOK; details: %v", result.Status, result.Details)
+	if result.Status != StatusWarning {
+		t.Fatalf("Status = %v, want StatusWarning so the skipped image check is visible; message: %s", result.Status, result.Message)
 	}
-	for _, call := range f.calls {
-		if strings.HasPrefix(call, "docker") {
-			t.Errorf("ran %q with no docker on PATH", call)
-		}
+	if len(result.Details) != 1 || !strings.Contains(result.Details[0], "docker CLI not on PATH") {
+		t.Errorf("Details = %v, want one line saying the docker CLI is not on PATH", result.Details)
+	}
+}
+
+func TestRunOpenShellCommand_MissingProgramIsErrNotFound(t *testing.T) {
+	t.Parallel()
+	_, err := runOpenShellCommand([]string{"gt-no-such-openshell-program"})
+
+	if !errors.Is(err, exec.ErrNotFound) {
+		t.Fatalf("err = %v, want it to wrap exec.ErrNotFound so the image check can tell a missing docker from a failed inspect", err)
 	}
 }
 
