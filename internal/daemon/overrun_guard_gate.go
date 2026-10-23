@@ -67,6 +67,15 @@ type overrunGateReader struct {
 	panesLoaded bool
 	panesErr    error
 	gates       map[string][]polecat.Invocation
+	// sandboxes is the registry's answer per session, read once per cycle: a
+	// seat's pane and process reads each ask whether it is sandboxed.
+	sandboxes map[string]sandboxAnswer
+}
+
+// sandboxAnswer is one session's registry read, kept with its error.
+type sandboxAnswer struct {
+	on  bool
+	err error
 }
 
 // sandboxSessionReads is the routed tmux reads a sandboxed seat is asked
@@ -80,11 +89,18 @@ type sandboxSessionReads interface {
 // cannot be read is an error, so the caller counts all of the seat's time (the
 // direction that stops) instead of reading the wrong table.
 func (r *overrunGateReader) sandboxed(sessionName string) (bool, error) {
-	ok, err := session.IsSandboxed(r.d.config.TownRoot, sessionName)
-	if err != nil {
-		return false, fmt.Errorf("sandbox registry: %w", err)
+	if a, ok := r.sandboxes[sessionName]; ok {
+		return a.on, a.err
 	}
-	return ok, nil
+	if r.sandboxes == nil {
+		r.sandboxes = map[string]sandboxAnswer{}
+	}
+	on, err := session.IsSandboxed(r.d.config.TownRoot, sessionName)
+	if err != nil {
+		on, err = false, fmt.Errorf("sandbox registry: %w", err)
+	}
+	r.sandboxes[sessionName] = sandboxAnswer{on: on, err: err}
+	return on, err
 }
 
 func (r *overrunGateReader) sandboxSessionReads() sandboxSessionReads {

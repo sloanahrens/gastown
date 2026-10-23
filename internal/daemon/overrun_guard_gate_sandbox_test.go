@@ -11,27 +11,26 @@ import (
 )
 
 // fakeSandboxReads answers a sandboxed seat's panes and processes from canned
-// tmux output and records which sessions it was asked about.
+// tmux output and records which sessions it was asked about. panesErr and
+// tableErr fail the two reads separately.
 type fakeSandboxReads struct {
-	panes, table string
-	err          error
-	asked        []string
+	panes, table       string
+	panesErr, tableErr error
+	asked              []string
 }
 
 func (f *fakeSandboxReads) SessionPanes(s string) (string, error) {
 	f.asked = append(f.asked, "panes:"+s)
-	return f.panes, f.err
+	return f.panes, f.panesErr
 }
 
 func (f *fakeSandboxReads) ProcessTable(s string) (string, error) {
 	f.asked = append(f.asked, "ps:"+s)
-	return f.table, f.err
+	return f.table, f.tableErr
 }
 
-// A sandboxed seat's gate suite runs in its sandbox, where the host's list-panes
-// and ps cannot see it: the guard then counted all of the seat's time and
-// stopped a seat that was inside its own gate (daemon liveness audit,
-// 2026-10-23). The seat is read through the routed reads instead.
+// A sandboxed seat's gate suite runs where the host's list-panes and ps cannot
+// see it, so its panes and processes are read through the sandbox (gt-akky5).
 func TestOverrunGateReaderReadsASandboxedSeatInsideItsSandbox(t *testing.T) {
 	t.Parallel()
 	seat := overrunSeat{Rig: "gastown", Polecat: "capable", Bead: "gt-gate1"}
@@ -74,11 +73,46 @@ func TestOverrunGateReaderReadsASandboxedSeatInsideItsSandbox(t *testing.T) {
 		}
 	})
 
-	t.Run("a failing sandbox read is an error, never the host's answer", func(t *testing.T) {
+	t.Run("a failing sandbox pane read is an error, never the host's answer", func(t *testing.T) {
 		t.Parallel()
-		f := &fakeSandboxReads{err: errors.New("sandbox exec failed")}
+		f := &fakeSandboxReads{panesErr: errors.New("sandbox exec failed")}
 		if _, err := newReader(t, true, f).running(seat); err == nil {
 			t.Error("running = nil error; the guard must count all of the seat's time, not read the host")
+		}
+	})
+
+	t.Run("a failing sandbox process table is an error, never the host's answer", func(t *testing.T) {
+		t.Parallel()
+		f := &fakeSandboxReads{panes: sessionName + "\t143\n", tableErr: errors.New("sandbox ps failed")}
+		if _, err := newReader(t, true, f).running(seat); err == nil {
+			t.Error("running = nil error; the guard must count all of the seat's time, not read the host")
+		}
+		if len(f.asked) != 2 || f.asked[1] != "ps:"+sessionName {
+			t.Errorf("sandbox reads asked = %v, want the pane read then the process table read", f.asked)
+		}
+	})
+
+	t.Run("the registry is read once per session per cycle", func(t *testing.T) {
+		t.Parallel()
+		d, _ := newOverrunDaemon(t, false)
+		rec := session.SandboxRecord{Session: sessionName, Rig: "gastown", Polecat: "capable"}
+		if err := session.WriteSandboxRecord(d.config.TownRoot, rec); err != nil {
+			t.Fatal(err)
+		}
+		r := newOverrunGateReader(d)
+		if on, err := r.sandboxed(sessionName); err != nil || !on {
+			t.Fatalf("first sandboxed = %v, %v; want true, nil", on, err)
+		}
+		// The registry is unreadable from here on; the cycle's first answer still holds.
+		dir := session.SandboxRegistryDir(d.config.TownRoot)
+		if err := os.RemoveAll(dir); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(dir, []byte("not a directory"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if on, err := r.sandboxed(sessionName); err != nil || !on {
+			t.Errorf("second sandboxed = %v, %v; want the cycle's cached true, nil", on, err)
 		}
 	})
 
