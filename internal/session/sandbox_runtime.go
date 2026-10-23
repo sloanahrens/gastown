@@ -109,8 +109,8 @@ func buildRuntimeArchive(spec SpawnSpec) ([]byte, error) {
 }
 
 // sandboxClaudeJSON is the sandbox's ~/.claude.json: onboarding complete, the
-// host's dark theme, and the worktree trusted. Nothing is copied from the
-// host's file, which holds account and project history.
+// sandbox's own fixed dark theme, and the worktree trusted. Nothing is copied
+// from the host's file, which holds account and project history.
 func sandboxClaudeJSON(workDir string) ([]byte, error) {
 	return json.MarshalIndent(map[string]any{
 		"hasCompletedOnboarding": true,
