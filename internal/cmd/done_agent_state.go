@@ -203,6 +203,10 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 	// they go out alone on the way out. Declared before the first goto: Go
 	// refuses a jump over a declaration.
 	stateWritten := false
+	// reworkStandDown is set when the close block refuses to resubmit a rework
+	// bead still on its rejected head (gt-3e1z4). That exit is recorded as stuck
+	// with a DEFERRED exit, not COMPLETED, so patrol_scan restarts the seat (gt-jfhvc).
+	reworkStandDown := false
 	defer func() {
 		if stateWritten || pending == (beads.AgentFieldUpdates{}) {
 			return
@@ -338,6 +342,12 @@ func updateAgentStateOnDoneIn(e doneStateEnv, cwd, townRoot, exitType, issueID s
 			if headErr != nil {
 				style.PrintWarning("could not resolve HEAD in %s: %v", cwd, headErr)
 			}
+			// Whichever close check below reports the reason, a rework bead
+			// still on its rejected head submitted nothing (gt-3e1z4), so the
+			// seat must not be recorded as completed (gt-jfhvc).
+			if _, standDown := done.ReworkUnchangedHeadMessage(hookedBead, currentHead); standDown {
+				reworkStandDown = true
+			}
 			if skipReason, fatal := done.DoneSourceCloseSkipReasonForHead(hookBd, hookedBeadID, hookedBead, currentHead); skipReason != "" {
 				style.PrintWarning("%s", skipReason)
 				fmt.Fprintf(os.Stderr, "  The bead will remain open; the reason is recorded on it.\n")
@@ -447,12 +457,19 @@ doneStateUpdate:
 	// too: the case where polecat reclaim needs "has_unpushed".
 	emptyHook := ""
 	doneState := string(beads.AgentStateDone)
-	if exitType != done.ExitCompleted {
+	if exitType != done.ExitCompleted || reworkStandDown {
 		doneState = "stuck"
 	}
 	final := pending
 	final.HookBead = &emptyHook
 	final.AgentState = &doneState
+	if reworkStandDown {
+		// A stand-down submitted nothing, so it is not a completion. DEFERRED is
+		// the exit patrol_scan recovers a stuck seat from: it restarts the seat
+		// on its preserved branch once the done-close grace passes (gt-ks62m).
+		deferred := done.ExitDeferred
+		final.ExitType = &deferred
+	}
 	if err := beads.UpdateAgentDescriptionFields(agentBd, agentBeadID, final); err != nil {
 		// stateWritten stays false: the deferred write retries pending alone.
 		fmt.Fprintf(os.Stderr, "Warning: couldn't set agent %s to %s: %v\n", agentBeadID, doneState, err)
