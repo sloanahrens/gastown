@@ -2,6 +2,7 @@ package tmux
 
 import (
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -327,7 +328,29 @@ func TestNewTmuxWithExecPrefixSessionSkipsHostPathChecks(t *testing.T) {
 			if len(created) != 1 {
 				t.Fatalf("new-session calls = %v, want one through the wrapper", created)
 			}
+			_, args := wrapped(created[0])
+			sub := tmuxSub(args)
+			if i := slices.Index(sub, "-c"); i < 0 || i+1 >= len(sub) || sub[i+1] != workDir {
+				t.Fatalf("new-session args = %v, want -c %s through the wrapper", args, workDir)
+			}
 		})
+	}
+}
+
+// A prefixed Tmux cannot stat its workDir, but a relative one has no anchor
+// inside the wrapper either, so creation refuses it before any tmux call
+// (gt-jqg8s).
+func TestNewSessionWithExecPrefixRejectsRelativeWorkDir(t *testing.T) {
+	t.Parallel()
+	s := newScripted(nil)
+	tm := newPrefixedForTest("gt", s, nil)
+
+	err := tm.NewSessionWithCommand("gt-r-n", "relative/workdir", "claude")
+	if err == nil {
+		t.Fatal("NewSessionWithCommand with a relative workDir = nil; want an error")
+	}
+	if calls := s.all(); len(calls) != 0 {
+		t.Fatalf("calls = %v, want none before the refusal", calls)
 	}
 }
 

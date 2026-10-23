@@ -403,12 +403,16 @@ func (e tmuxTextError) Error() string        { return e.msg }
 func (e tmuxTextError) Is(target error) bool { return target == e.is }
 
 // checkHostPaths validates workDir and the command's binary on this host
-// before a session starts. A prefixed Tmux skips it: with an exec prefix the
-// session runs inside a wrapper (a sandbox), so workDir and the binary exist
-// only there and a host stat would refuse a session that starts fine inside
-// (gt-jqg8s). Nothing replaces the check through the wrapper.
+// before a session starts. A prefixed Tmux cannot stat either: with an exec
+// prefix the session runs inside a wrapper (a sandbox), so workDir and the
+// binary exist only there and a host stat would refuse a session that starts
+// fine inside (gt-jqg8s). It still refuses a relative workDir, which has no
+// anchor inside the wrapper either.
 func (t *Tmux) checkHostPaths(workDir, command string) error {
 	if len(t.execPrefix) != 0 {
+		if workDir != "" && !filepath.IsAbs(workDir) {
+			return fmt.Errorf("work directory %q is not absolute", workDir)
+		}
 		return nil
 	}
 	if workDir != "" {
