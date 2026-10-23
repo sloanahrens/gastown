@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/intent"
@@ -146,7 +147,10 @@ func (d *Daemon) assessSeat(seat supervisor.Seat, in liveness.Input) liveness.Re
 // after the session's cwd, so the sample needs it or the lookup finds nothing.
 // An existing directory is the cwd even without a .git, so a seat whose
 // worktree broke is still readable. A seat with no worktree of its own (a
-// town-level role) returns "" and its sample carries no transcript evidence.
+// town-level role) returns "" quietly and its sample carries no transcript
+// evidence. A polecat or crew seat whose directories are all missing also
+// returns "", but logs the paths it tried: that seat should have a worktree,
+// and the log is what tells it from the quiet case.
 func (d *Daemon) seatWorkDir(seat supervisor.Seat) string {
 	if seat.Rig == "" || seat.Name == "" {
 		return ""
@@ -162,6 +166,10 @@ func (d *Daemon) seatWorkDir(seat supervisor.Seat) string {
 		if info, err := os.Stat(dir); err == nil && info.IsDir() {
 			return dir
 		}
+	}
+	if len(candidates) > 0 {
+		d.logger.Printf("No work directory for %s: tried %s; its liveness sample carries no transcript",
+			seat.Address(), strings.Join(candidates, ", "))
 	}
 	return ""
 }
