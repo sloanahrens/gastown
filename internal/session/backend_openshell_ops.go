@@ -52,10 +52,10 @@ func (b *openshellBackend) probeFor(session string) liveness.Probe {
 // an answer; any other failure to ask is an error.
 func (b *openshellBackend) SessionExists(session string) (bool, error) {
 	st, err := b.cli.Get(context.Background(), session)
+	if isSandboxNotFound(err) {
+		return false, nil
+	}
 	if err != nil {
-		if isSandboxNotFound(err) {
-			return false, nil
-		}
 		return false, err
 	}
 	if !st.Ready {
@@ -139,8 +139,11 @@ func (b *openshellBackend) deleteSandbox(session string) error {
 }
 
 // isSandboxNotFound matches openshell's missing-sandbox failure, which the
-// CLI wrapper carries as the command's stderr.
+// CLI wrapper carries as the command's stderr. A nil error is not one.
 func isSandboxNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "not found") || strings.Contains(msg, "notfound")
 }
