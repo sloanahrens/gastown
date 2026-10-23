@@ -31,7 +31,9 @@
 //     A seat still holding the bead it escalated on is restarted on its
 //     preserved branch once the escalation that turn raised for the bead is
 //     closed, and stays skipped while it is open or cannot be read
-//     (gt-4hduq); see SeatEscalationVerdict;
+//     (gt-4hduq); see SeatEscalationVerdict. A LIVE seat stalled on work that
+//     is already closed, or on none, is stopped and retired like an idle one:
+//     it has nothing left to progress on and only holds its seat (gt-9p99w);
 //   - leaked wisps: a wisp a gone polecat still holds, whether it is pinned,
 //     open or in_progress, is closed once it is a day old and its root is
 //     gone or closed too; see leakedWisps. An open molecule root a day old
@@ -499,6 +501,11 @@ type Env interface {
 	Heartbeat(rig, polecat string) *Heartbeat
 	// Restart restarts the seat through the supervisor.
 	Restart(rig, polecat, reason string) error
+	// Kill stops the seat's live session through the supervisor, which
+	// refuses it for a held or e-stopped seat exactly as it refuses Restart.
+	// It is the automatic-path kill, so a stall can never outrun an operator's
+	// park or e-stop (gt-9p99w).
+	Kill(rig, polecat, reason string) error
 	// MarkIdle retires the seat's intent record to stop: its session is gone
 	// and it holds no work, so nothing needs it running. It reports whether
 	// the record changed.
@@ -574,8 +581,8 @@ type Options struct {
 	// HoldReason returns why a work bead is held from dispatch ("" when it
 	// is not): the dispatchers' hold rule. Nil means no hold rule.
 	HoldReason func(Work) string
-	// IsRefusal reports whether a Restart error is the supervisor refusing
-	// (parked, frozen, e-stop, budget) rather than failing.
+	// IsRefusal reports whether a Restart or Kill error is the supervisor
+	// refusing (parked, frozen, e-stop, budget) rather than failing.
 	IsRefusal func(error) bool
 	// SeatCap reads the polecat_pool cap a crash restart of rig/name answers
 	// to, counting every live polecat session but name's own: that session,
@@ -658,6 +665,7 @@ const (
 	OutcomeUnknown   Outcome = "unknown"    // a read failed; nothing done
 	OutcomeWaiting   Outcome = "waiting"    // dead, but not confirmed yet
 	OutcomeStalled   Outcome = "stalled"    // reported only
+	OutcomeReleased  Outcome = "released"   // stalled seat on finished work stopped and retired
 	OutcomeClosed    Outcome = "closed"     // orphaned molecule closed
 	OutcomeReopened  Outcome = "reopened"   // dead holder's bead returned to the queue
 	OutcomeIdled     Outcome = "idled"      // idle seat's record retired to stop
@@ -706,8 +714,8 @@ func (r Report) Count(o Outcome) int {
 // Lines renders the report for the daemon log: one summary line, then one
 // line per finding that is not a quiet skip.
 func (r Report) Lines() []string {
-	lines := []string{fmt.Sprintf("%s: checked %d polecat(s): %d restarted, %d refused, %d unknown, %d molecule(s) closed, %d reopened, %d error(s), %d reaped, %d would-reap, %d blocked",
-		r.Rig, r.Checked, r.Count(OutcomeRestarted), r.Count(OutcomeRefused), r.Count(OutcomeUnknown),
+	lines := []string{fmt.Sprintf("%s: checked %d polecat(s): %d restarted, %d refused, %d unknown, %d released, %d molecule(s) closed, %d reopened, %d error(s), %d reaped, %d would-reap, %d blocked",
+		r.Rig, r.Checked, r.Count(OutcomeRestarted), r.Count(OutcomeRefused), r.Count(OutcomeUnknown), r.Count(OutcomeReleased),
 		r.Count(OutcomeClosed), r.Count(OutcomeReopened), len(r.Errors),
 		r.Count(OutcomeReaped), r.Count(OutcomeWouldReap), r.Count(OutcomeBlocked))}
 	for _, f := range r.Findings {
@@ -806,8 +814,12 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 	case liveness.Alive:
 		return Finding{}, false
 	case liveness.Stalled:
-		// Reported only: a long turn is the usual explanation, and the
-		// stall threshold is tuned after a measured week (ADR 0005).
+		if f, ok := s.releaseStalled(rig, name, res); ok {
+			return f, true
+		}
+		// Reported only: a stall on work that is not over is a long turn,
+		// the usual explanation, and the stall threshold is tuned after a
+		// measured week (ADR 0005).
 		f.Outcome, f.Detail = OutcomeStalled, res.Reason
 		return f, true
 	}
@@ -1042,6 +1054,57 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		return f, true
 	}
 	f.Outcome, f.Detail = OutcomeRestarted, reason
+	return f, true
+}
+
+// releaseStalled frees a LIVE but stalled seat that has no work left to make
+// progress on: it holds nothing, or a work bead that is closed or tombstoned.
+// A live session sitting on a bead that already landed is a zombie — it never
+// stops, and it keeps counting toward its seat cap — so the supervisor stops
+// the session, and the seat is then retired to stop the way the dead-session
+// path retires an idle one (gt-9p99w).
+//
+// It reports ok=false, leaving the seat exactly as it was, while the seat
+// holds work that is not over — open, in_progress, submitted or held — because
+// a long turn on live work is the usual explanation for a stall. The stall
+// threshold needs no check here: liveness.Assess answers Stalled only once the
+// quiet reaches the configured threshold, so a second reading of it could only
+// disagree. A read that fails is Unknown: a release is never taken on an
+// unanswered read.
+func (s *Scanner) releaseStalled(rig, name string, res liveness.Result) (Finding, bool) {
+	f := Finding{Kind: "seat", Subject: name}
+	work, err := s.env.AssignedWork(rig, name)
+	if err != nil {
+		f.Outcome, f.Detail = OutcomeUnknown, "stalled seat's work unreadable: "+err.Error()
+		return f, true
+	}
+	if work != nil && !work.IsTerminal() {
+		return Finding{}, false
+	}
+	quiet := res.QuietFor.Round(time.Second)
+	what := "no work"
+	if work != nil {
+		what = work.ID + " is " + strings.TrimSpace(work.Status)
+	}
+	// The session is stopped first: the supervisor refuses a held, parked or
+	// e-stopped seat, and a refused stop is not a release — the record must
+	// keep asking for the session the seat still has. Only a stop that went
+	// through retires the record, and if that write then fails the next tick
+	// retires the dead session the ordinary way.
+	reason := fmt.Sprintf("patrol scan: stalled seat holding %s, quiet for %s", what, quiet)
+	if err := s.env.Kill(rig, name, reason); err != nil {
+		if s.o.IsRefusal(err) {
+			f.Outcome, f.Detail = OutcomeRefused, err.Error()
+			return f, true
+		}
+		f.Outcome, f.Detail = OutcomeFailed, err.Error()
+		return f, true
+	}
+	if _, err := s.env.MarkIdle(rig, name); err != nil {
+		f.Outcome, f.Detail = OutcomeFailed, "session stopped, retiring the stalled seat: "+err.Error()
+		return f, true
+	}
+	f.Outcome, f.Detail = OutcomeReleased, what+"; session stopped after "+quiet.String()+" quiet"
 	return f, true
 }
 

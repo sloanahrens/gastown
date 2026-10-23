@@ -77,8 +77,13 @@ type fakeEnv struct {
 	// actor reassigned them since the list read.
 	heldBeads map[string]bool
 
-	restarts    []string
-	idles       []string // polecats whose seat was retired to stop
+	restarts []string
+	kills    []string // polecats whose live session was stopped
+	killErr  map[string]error
+	idles    []string // polecats whose seat was retired to stop
+	// events orders the stop and the record write, so a test can prove the
+	// session is stopped before the record is retired.
+	events      []string
 	escalations []string // polecats whose agent bead was reset to idle
 	submitted   []string // "polecat=bead" the tick recorded as submitted
 	closed      []string
@@ -131,7 +136,7 @@ func newFake() *fakeEnv {
 		intents: map[string]intent.Record{}, intentErr: map[string]error{},
 		verdicts: map[string]liveness.Result{}, work: map[string]*Work{}, workErr: map[string]error{},
 		agents: map[string]AgentRecord{}, stateErr: map[string]error{}, heartbeats: map[string]*Heartbeat{},
-		restartErr: map[string]error{}, idleErr: map[string]error{}, submitErr: map[string]error{},
+		restartErr: map[string]error{}, killErr: map[string]error{}, idleErr: map[string]error{}, submitErr: map[string]error{},
 		idleStopped: map[string]bool{},
 		dirs:        map[string]bool{}, dirErr: map[string]error{},
 		sessions: map[string]bool{}, sessionErr: map[string]error{}, molStatus: map[string]string{},
@@ -208,11 +213,21 @@ func (f *fakeEnv) Restart(_, p, _ string) error {
 	f.restarts = append(f.restarts, p)
 	return nil
 }
+func (f *fakeEnv) Kill(_, p, _ string) error {
+	if err := f.killErr[p]; err != nil {
+		return err
+	}
+	f.kills = append(f.kills, p)
+	f.events = append(f.events, "kill:"+p)
+	return nil
+}
+
 func (f *fakeEnv) MarkIdle(_, p string) (bool, error) {
 	if err := f.idleErr[p]; err != nil {
 		return false, err
 	}
 	f.idles = append(f.idles, p)
+	f.events = append(f.events, "idle:"+p)
 	if f.idleStopped[p] {
 		return false, nil
 	}
@@ -1307,7 +1322,7 @@ func TestNoRestartCases(t *testing.T) {
 		}, OutcomeUnknown},
 		{"alive", func(env *fakeEnv) { env.verdicts["ruby"] = liveness.Result{Verdict: liveness.Alive} }, ""},
 		{"stalled is reported only", func(env *fakeEnv) {
-			env.verdicts["ruby"] = liveness.Result{Verdict: liveness.Stalled, Reason: "no progress for 31m"}
+			env.verdicts["ruby"] = liveness.Result{Verdict: liveness.Stalled, Reason: "no progress for 31m", QuietFor: 31 * time.Minute}
 		}, OutcomeStalled},
 		{"budget exhausted (supervisor refuses)", func(env *fakeEnv) { env.restartErr["ruby"] = errRefused }, OutcomeRefused},
 	}
@@ -1325,6 +1340,109 @@ func TestNoRestartCases(t *testing.T) {
 				t.Fatalf("outcome = %q, want %q. report: %v", got, tc.outcome, r.Lines())
 			}
 		})
+	}
+}
+
+// gt-9p99w: a live session stalled on a work bead that is already closed (or
+// on no work at all) has nothing left to progress on. It never stops by
+// itself and keeps counting toward its seat cap, so the tick stops the session
+// and retires the record, as the dead-session path retires an idle seat. A
+// stalled seat whose work is still in play, or whose work cannot be read, is
+// left exactly as it was.
+func TestStalledSeatOnFinishedWorkIsReleased(t *testing.T) {
+	t.Parallel()
+	stalled := liveness.Result{Verdict: liveness.Stalled, Reason: "no progress for 31m", QuietFor: 31 * time.Minute}
+	cases := []struct {
+		name       string
+		setup      func(*fakeEnv)
+		want       Outcome
+		wantKilled bool
+		wantIdled  bool
+	}{
+		{"closed work", func(env *fakeEnv) { env.work["ruby"].Status = "closed" }, OutcomeReleased, true, true},
+		{"tombstoned work", func(env *fakeEnv) { env.work["ruby"].Status = "tombstone" }, OutcomeReleased, true, true},
+		{"no work", func(env *fakeEnv) { env.work["ruby"] = nil }, OutcomeReleased, true, true},
+		{"open work", func(*fakeEnv) {}, OutcomeStalled, false, false},
+		{"in_progress work", func(env *fakeEnv) { env.work["ruby"].Status = "in_progress" }, OutcomeStalled, false, false},
+		{"submitted work", func(env *fakeEnv) {
+			env.work["ruby"].Labels = []string{ReadyToLandLabel}
+		}, OutcomeStalled, false, false},
+		{"held work", func(env *fakeEnv) { env.work["ruby"].Labels = []string{"needs-human"} }, OutcomeStalled, false, false},
+		{"work read fails", func(env *fakeEnv) {
+			env.workErr["ruby"] = errors.New("bd list: connection refused")
+		}, OutcomeUnknown, false, false},
+		{"the supervisor refuses the kill", func(env *fakeEnv) {
+			env.work["ruby"].Status = "closed"
+			env.killErr["ruby"] = errRefused
+		}, OutcomeRefused, false, false},
+		{"the kill fails", func(env *fakeEnv) {
+			env.work["ruby"].Status = "closed"
+			env.killErr["ruby"] = errors.New("tmux: no server")
+		}, OutcomeFailed, false, false},
+		{"the session stops but the record cannot be retired", func(env *fakeEnv) {
+			env.work["ruby"].Status = "closed"
+			env.idleErr["ruby"] = errors.New("intent: write failed")
+		}, OutcomeFailed, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			env := newFake()
+			env.polecats = []string{"ruby"}
+			env.verdicts["ruby"] = stalled
+			env.work["ruby"] = &Work{ID: "gt-ruby", Status: "hooked", Assignee: "gastown/polecats/ruby", UpdatedAt: now.Add(-time.Hour)}
+			env.agents["ruby"] = AgentRecord{State: "working"}
+			tc.setup(env)
+			r := scanner(env, nil).Tick("gastown")
+			f := seatFinding(t, r, "ruby")
+			if f.Outcome != tc.want {
+				t.Fatalf("outcome = %q, want %q. report: %v", f.Outcome, tc.want, r.Lines())
+			}
+			if got := len(env.kills) > 0; got != tc.wantKilled {
+				t.Fatalf("killed = %v, want %v; kills %v. report: %v", got, tc.wantKilled, env.kills, r.Lines())
+			}
+			if got := len(env.idles) > 0; got != tc.wantIdled {
+				t.Fatalf("retired to stop = %v, want %v. report: %v", got, tc.wantIdled, r.Lines())
+			}
+			if len(env.restarts) != 0 {
+				t.Fatalf("restarted %v; a stall never deserves a fresh session. report: %v", env.restarts, r.Lines())
+			}
+			if tc.wantKilled && len(env.kills) != 1 {
+				t.Fatalf("kills = %v, want exactly one stop", env.kills)
+			}
+			if tc.want == OutcomeReleased {
+				if !strings.Contains(f.Detail, "31m0s") {
+					t.Fatalf("detail = %q, want the quiet time", f.Detail)
+				}
+				if env.work["ruby"] != nil && !strings.Contains(f.Detail, "gt-ruby is") {
+					t.Fatalf("detail = %q, want the bead", f.Detail)
+				}
+			}
+		})
+	}
+}
+
+// The session is stopped before the record is retired: a stop the supervisor
+// refuses leaves the seat exactly as it was, and a record already retired to
+// stop would then ask for nothing while the live session it belongs to runs on
+// unowned. The release is also counted where the operator reads it.
+func TestStalledReleaseStopsTheSessionBeforeRetiringTheRecord(t *testing.T) {
+	t.Parallel()
+	env := newFake()
+	env.polecats = []string{"ruby"}
+	env.verdicts["ruby"] = liveness.Result{Verdict: liveness.Stalled, Reason: "no progress for 31m", QuietFor: 31 * time.Minute}
+	env.work["ruby"] = &Work{ID: "gt-ruby", Status: "closed", Assignee: "gastown/polecats/ruby"}
+
+	r := scanner(env, nil).Tick("gastown")
+
+	if got := seatFinding(t, r, "ruby").Outcome; got != OutcomeReleased {
+		t.Fatalf("outcome = %q, want %q. report: %v", got, OutcomeReleased, r.Lines())
+	}
+	if got, want := strings.Join(env.events, ","), "kill:ruby,idle:ruby"; got != want {
+		t.Fatalf("events = %q, want %q: the stop comes before the record write", got, want)
+	}
+	if line := r.Lines()[0]; !strings.Contains(line, "1 released") {
+		t.Fatalf("summary = %q, want the release counted", line)
 	}
 }
 

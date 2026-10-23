@@ -641,6 +641,13 @@ func (h *patrolScanHost) Restart(rig, name, reason string) error {
 	return h.d.sup().Restart(h.seat(rig, name), reason, patrolscan.Actor)
 }
 
+// Kill stops a stalled seat's live session through the supervisor's
+// automatic-path kill, which refuses a parked or frozen seat and an e-stop
+// (gt-9p99w).
+func (h *patrolScanHost) Kill(rig, name, reason string) error {
+	return h.d.sup().Kill(h.seat(rig, name), reason, patrolscan.Actor)
+}
+
 // MarkIdle retires a polecat seat's record to stop once its session is gone
 // and it holds no work, so the record stops asking for a session that nothing
 // will start (gt-613vw).
