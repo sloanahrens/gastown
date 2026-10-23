@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 func fixtureSpec(t *testing.T) SkeletonSpec {
@@ -814,6 +816,24 @@ func TestSkeletonKeepsProjectIDAndTightensBeadsDirs(t *testing.T) {
 	}
 }
 
+// bd's project_id is kept only when it is a UUID. Any other string under that
+// key could be a credential, so the render fails instead of passing it through.
+func TestSkeletonRejectsANonUUIDProjectID(t *testing.T) {
+	t.Parallel()
+
+	files := minimalTown()
+	files[".beads/metadata.json"] = `{"project_id": "hunter2-not-a-uuid", "dolt_database": "hq", "dolt_server_port": 3307}`
+	_, err := RenderSkeleton(SkeletonSpec{
+		TownRoot:         writeTown(t, files),
+		Rig:              "gastown",
+		ControlPlaneHost: "host.docker.internal",
+		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+	})
+	if err == nil {
+		t.Fatal("RenderSkeleton kept a project_id that is not a UUID")
+	}
+}
+
 // gt must read the scrubbed town settings back: a price per billion tokens
 // stays a number, while a string under that key and other numbers under
 // credential-named keys are still redacted (gt-zkkdo).
@@ -828,6 +848,10 @@ func TestScrubSettingsKeepsTheTokenPriceNumber(t *testing.T) {
 	}`))
 	if err != nil {
 		t.Fatalf("ScrubSettings: %v", err)
+	}
+	var settings config.TownSettings
+	if err := json.Unmarshal(out, &settings); err != nil {
+		t.Fatalf("scrubbed settings do not parse as TownSettings: %v", err)
 	}
 	doc := decodeJSON(t, out)
 	if v := at(t, doc, "patrols", "jev", "usd_per_billion_tokens"); v != float64(42) {
