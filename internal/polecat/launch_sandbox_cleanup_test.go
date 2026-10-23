@@ -3,6 +3,7 @@ package polecat
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -50,16 +51,15 @@ func (refusingCreateTmux) NewSessionWithCommandAndEnv(string, string, string, ma
 	return errors.New("tmux: no server")
 }
 
-// A launch that fails after the sandbox backend's Prepare made a sandbox and
-// its registry record must drop both. The record counts as a live session, so
-// leaving it makes the seat look occupied and strands the sandbox (gt-8a1ql).
-//
-//testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
-func TestLaunchCleansUpSandboxWhenTheSessionIsNotCreated(t *testing.T) {
-	town := t.TempDir()
+// sandboxLaunchTown is a temp town whose rig settings name a Forgejo remote a
+// sandbox launch can clone from. It also points the process-wide sandbox
+// routing at that town, so it belongs only to tests that run alone.
+func sandboxLaunchTown(t *testing.T) (town, rigPath, workDir string, w *world) {
+	t.Helper()
+	town = t.TempDir()
 	session.ResetSandboxRoutingForTest(town)
 	t.Cleanup(func() { session.ResetSandboxRoutingForTest("") })
-	rigPath := filepath.Join(town, "gastown")
+	rigPath = filepath.Join(town, "gastown")
 	settings := filepath.Join(rigPath, "settings")
 	if err := os.MkdirAll(settings, 0o755); err != nil {
 		t.Fatal(err)
@@ -68,7 +68,17 @@ func TestLaunchCleansUpSandboxWhenTheSessionIsNotCreated(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(settings, "config.json"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	workDir, _, w := setupSessionBranchTestRepo(t)
+	workDir, _, w = setupSessionBranchTestRepo(t)
+	return town, rigPath, workDir, w
+}
+
+// A launch that fails after the sandbox backend's Prepare made a sandbox and
+// its registry record must drop both. The record counts as a live session, so
+// leaving it makes the seat look occupied and strands the sandbox (gt-8a1ql).
+//
+//testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
+func TestLaunchCleansUpSandboxWhenTheSessionIsNotCreated(t *testing.T) {
+	town, rigPath, workDir, w := sandboxLaunchTown(t)
 	var deleted []string
 	m := &SessionManager{
 		tmux: refusingCreateTmux{newFakeSessionTmux()},
@@ -99,6 +109,93 @@ func TestLaunchCleansUpSandboxWhenTheSessionIsNotCreated(t *testing.T) {
 	}
 	if still, serr := session.IsSandboxed(town, sessionID); serr != nil || still {
 		t.Fatalf("the sandbox record survived a failed launch (still=%v err=%v); it counts as a live session, so the seat looks occupied", still, serr)
+	}
+	if len(deleted) != 1 || deleted[0] != sessionID {
+		t.Fatalf("sandbox deletions = %v, want exactly %s", deleted, sessionID)
+	}
+}
+
+// A cleanup that cannot delete the sandbox must not swallow the launch's
+// failure: the caller sees both, and the record stays as the only trace that
+// the sandbox is still out there.
+//
+//testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
+func TestLaunchReportsWhenTheSandboxCleanupFails(t *testing.T) {
+	town, rigPath, workDir, w := sandboxLaunchTown(t)
+	m := &SessionManager{
+		tmux: refusingCreateTmux{newFakeSessionTmux()},
+		rig:  &rig.Rig{Name: "gastown", Path: rigPath},
+		gits: w.opener(),
+		sandboxDeleter: func(string, session.SandboxRecord) error {
+			return errors.New("gateway unreachable")
+		},
+	}
+	sessionID := m.SessionName("box")
+
+	err := m.launch("box", sessionID, SessionStartOptions{
+		WorkDir:          workDir,
+		Backend:          &preparingBackend{town: town},
+		RuntimeConfigDir: t.TempDir(),
+		Command:          "claude",
+	})
+	if err == nil {
+		t.Fatal("launch succeeded; the session was never created")
+	}
+	for _, want := range []string{"no server", "cleaning up", "gateway unreachable"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("launch error = %v, want it to carry %q", err, want)
+		}
+	}
+	if still, serr := session.IsSandboxed(town, sessionID); serr != nil || !still {
+		t.Fatalf("the sandbox record is gone after a failed deletion (still=%v err=%v), so nothing marks the sandbox left behind", still, serr)
+	}
+}
+
+// panickingCreateTmux is a fake tmux that panics where a session would be
+// created.
+type panickingCreateTmux struct{ *fakeSessionTmux }
+
+func (panickingCreateTmux) NewSessionWithCommandAndEnv(string, string, string, map[string]string) error {
+	panic("tmux: panic creating session")
+}
+
+// A panic after Prepare unwinds past the error returns, so the cleanup has to
+// drop the sandbox from the panic path too, then let the same panic continue.
+//
+//testpolicy:allow parallel — points the process-wide sandbox routing at a temp town, which another test must not see mid-run
+func TestLaunchCleansUpSandboxWhenTheLaunchPanics(t *testing.T) {
+	town, rigPath, workDir, w := sandboxLaunchTown(t)
+	var deleted []string
+	m := &SessionManager{
+		tmux: panickingCreateTmux{newFakeSessionTmux()},
+		rig:  &rig.Rig{Name: "gastown", Path: rigPath},
+		gits: w.opener(),
+		sandboxDeleter: func(_ string, rec session.SandboxRecord) error {
+			deleted = append(deleted, rec.Session)
+			return nil
+		},
+	}
+	sessionID := m.SessionName("box")
+	backend := &preparingBackend{town: town}
+
+	var recovered any
+	func() {
+		defer func() { recovered = recover() }()
+		_ = m.launch("box", sessionID, SessionStartOptions{
+			WorkDir:          workDir,
+			Backend:          backend,
+			RuntimeConfigDir: t.TempDir(),
+			Command:          "claude",
+		})
+	}()
+	if got := fmt.Sprint(recovered); got != "tmux: panic creating session" {
+		t.Fatalf("recovered = %q, want the tmux panic to pass through", got)
+	}
+	if !backend.prepared {
+		t.Fatal("Prepare never ran; the launch panicked before the sandbox existed")
+	}
+	if still, serr := session.IsSandboxed(town, sessionID); serr != nil || still {
+		t.Fatalf("the sandbox record survived a panicked launch (still=%v err=%v); it counts as a live session, so the seat looks occupied", still, serr)
 	}
 	if len(deleted) != 1 || deleted[0] != sessionID {
 		t.Fatalf("sandbox deletions = %v, want exactly %s", deleted, sessionID)
