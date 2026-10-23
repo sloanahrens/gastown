@@ -2,6 +2,7 @@ package power
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strconv"
@@ -135,6 +136,7 @@ func Standby(ctx context.Context, o Options) error {
 	}
 	e.stopSandboxes()
 	e.jobhostDown(ctx)
+	e.reportStrandedSandboxes()
 	if err := e.record(string(StateStandby)); err != nil {
 		return err
 	}
@@ -196,6 +198,7 @@ func Off(ctx context.Context, o Options) error {
 		}
 	}
 	e.jobhostDown(ctx)
+	e.reportStrandedSandboxes()
 	if probeErr != nil {
 		// The stop went out blind, so nothing confirms the stack is down. The
 		// Dolt stop and the jobhost hook above still ran: they do not depend on it.
@@ -330,19 +333,19 @@ func (e *engine) drain(ctx context.Context) error {
 }
 
 // stopSandboxes stops every live openshell sandbox, once the drain has
-// finished. The sandbox registry is the list of live sandboxes; a tmux
-// polecat has no record and is never touched. A stop that fails is logged
-// and the state stands: the sandbox keeps its workspace, so the operator can
-// stop or delete it by hand. Under --dry-run it only prints what it would stop.
+// finished and the ESTOP is set: the ESTOP is what makes the supervisor
+// refuse restarts, so a failed estop leaves the sandboxes untouched. The
+// sandbox registry is the list of live sandboxes; a tmux polecat has no
+// record and is never touched. A sandbox that cannot be read or stopped is
+// logged and remembered, and the state stands: it keeps running with its
+// workspace, and reportStrandedSandboxes names it so the operator can stop
+// or delete it by hand. Under --dry-run it only prints what it would stop.
 func (e *engine) stopSandboxes() {
-	newBackend := e.o.NewSandboxBackend
-	if newBackend == nil {
-		newBackend = session.NewOpenShellBackend
-	}
 	for _, name := range session.ListSandboxSessions(e.o.TownRoot) {
 		rec, ok, err := session.ReadSandboxRecord(e.o.TownRoot, name)
 		if err != nil {
 			e.warn("sandbox %s: cannot read its record, not stopped: %v", name, err)
+			e.stranded = append(e.stranded, name)
 			continue
 		}
 		if !ok {
@@ -353,14 +356,35 @@ func (e *engine) stopSandboxes() {
 			continue
 		}
 		fmt.Fprintf(e.o.Out, "  + stop sandbox %s\n", name)
-		b, err := newBackend(e.o.TownRoot, session.Profile{Name: rec.Profile, Gateway: rec.Gateway, Image: rec.Image})
-		if err == nil {
-			err = b.Stop(name)
-		}
-		if err != nil {
+		if err := e.stopSandbox(name, rec); err != nil {
 			e.warn("sandbox %s: stop failed, the state stands: %v", name, err)
+			e.stranded = append(e.stranded, name)
 		}
 	}
+}
+
+// stopSandbox stops one sandbox through the injected backend. A missing
+// NewSandboxBackend is an error rather than a default: a caller that skipped
+// RealSeams must not reach the host's real openshell by accident.
+func (e *engine) stopSandbox(name string, rec session.SandboxRecord) error {
+	if e.o.NewSandboxBackend == nil {
+		return errors.New("no sandbox backend is configured")
+	}
+	b, err := e.o.NewSandboxBackend(e.o.TownRoot, session.Profile{Name: rec.Profile, Gateway: rec.Gateway, Image: rec.Image})
+	if err != nil {
+		return fmt.Errorf("building the backend: %w", err)
+	}
+	return b.Stop(name)
+}
+
+// reportStrandedSandboxes ends the output with one loud line when a sandbox
+// is still running, so a stop failure is not lost among the per-step lines.
+func (e *engine) reportStrandedSandboxes() {
+	if len(e.stranded) == 0 {
+		return
+	}
+	e.warn("WARNING: %d sandbox(es) may still be running: %s. The power state stands; stop or delete them by hand.",
+		len(e.stranded), strings.Join(e.stranded, ", "))
 }
 
 // clearEstop clears a town ESTOP through gt thaw, which also nudges the
