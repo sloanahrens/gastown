@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -50,19 +51,35 @@ var cmdTemplate = regexp.MustCompile(`\{\{-?\s*cmd\s*-?\}\}`)
 // variables, quoted strings and paths all stop word collection.
 var cmdWord = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
-// BdGlobalValueFlags is the set of bd's persistent flags that take their value
-// as the next token, the one list shared by this package's scan and
-// internal/cmd's close guard.
+// bdGlobalValueFlags is the set of bd's persistent flags that take their value
+// as the next token. It is unexported so no other package can add to it or
+// clear it: the close guard and this package's scan both read it through
+// IsBdGlobalValueFlag, so one list decides both.
 //
 // Skipping such a flag alone leaves the value behind as a command word, so
 // `bd --db beads sync` would read as the unknown command "beads". Flags not in
 // the set are boolean, or carry their value glued on (`--db=beads`, `-C/path`),
 // where nothing extra needs skipping. Each name must be a persistent flag of
 // the bd tree (TestBdValueFlagsSkipWithTheirValue).
-var BdGlobalValueFlags = map[string]bool{
+var bdGlobalValueFlags = map[string]bool{
 	"--actor": true, "--cpu-profile": true, "--database": true, "--db": true,
 	"-C": true, "--directory": true, "--dolt-auto-commit": true,
 	"--format": true, "--machine": true, "--mem-profile": true,
+}
+
+// IsBdGlobalValueFlag reports whether tok is a bd persistent flag that takes
+// its value as the next token, exactly as written (`--db`, not `--db=x`).
+func IsBdGlobalValueFlag(tok string) bool { return bdGlobalValueFlags[tok] }
+
+// BdGlobalValueFlagNames returns the value-taking bd persistent flags, sorted,
+// so a test can cover each one without holding a mutable map.
+func BdGlobalValueFlagNames() []string {
+	names := make([]string, 0, len(bdGlobalValueFlags))
+	for name := range bdGlobalValueFlags {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
 }
 
 // bdPersistentFlags is the set of bd's persistent flags, with their leading
@@ -106,7 +123,7 @@ func bdCommandStart(toks []string) int {
 		if len(tok) < 2 || tok[0] != '-' || strings.TrimRight(tok, ";)}]`\"',.:") != tok || !isBdGlobalFlag(tok) {
 			return i
 		}
-		if BdGlobalValueFlags[tok] {
+		if IsBdGlobalValueFlag(tok) {
 			i++ // the next token is the flag's value
 		}
 	}

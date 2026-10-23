@@ -589,7 +589,7 @@ func bdSubcommandIndex(rest []string) int {
 		if !strings.HasPrefix(t, "-") {
 			return i
 		}
-		if cmdtree.BdGlobalValueFlags[t] {
+		if cmdtree.IsBdGlobalValueFlag(t) {
 			i++ // skip the flag's value
 		}
 	}
