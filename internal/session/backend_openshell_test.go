@@ -787,6 +787,34 @@ func TestOpenShellKubernetesProfileDoesNoDockerVolumeWork(t *testing.T) {
 	}
 }
 
+// A driver that is neither docker nor kubernetes gets no docker volume work
+// either: the backend names the docker driver instead of treating every other
+// value as docker.
+func TestOpenShellUnknownDriverDoesNoDockerVolumeWork(t *testing.T) {
+	t.Parallel()
+	town, work := openshellTown(t)
+	fake := openshellPrepareFake(map[string]string{"get": openshellReadyReply})
+	p := openshellCachedProfile()
+	p.Driver = "podman"
+	b, _ := openshellTestBackend(town, p, fake)
+	d := &dockerRecorder{absent: true}
+	b.docker = d.run
+
+	if _, err := b.Prepare(context.Background(), openshellSpawn(town, work)); err != nil {
+		t.Fatalf("Prepare: %v", err)
+	}
+	if len(d.calls) != 0 {
+		t.Fatalf("docker calls = %q, want none for an unknown driver", d.calls)
+	}
+	cs, err := b.createSpec(openshellSpawn(town, work))
+	if err != nil {
+		t.Fatalf("createSpec: %v", err)
+	}
+	if cs.DriverConfigJSON != "" {
+		t.Fatalf("DriverConfigJSON = %s, want none for an unknown driver", cs.DriverConfigJSON)
+	}
+}
+
 // A docker profile, named or defaulted, keeps the volume ensure and the mount.
 func TestOpenShellDockerDriverKeepsTheCacheVolumeWork(t *testing.T) {
 	t.Parallel()

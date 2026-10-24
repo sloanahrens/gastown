@@ -570,9 +570,19 @@ func (b *openshellBackend) createSpec(spec SpawnSpec) (sandbox.CreateSpec, error
 }
 
 // usesDockerVolumes reports whether this seat mounts a docker cache volume:
-// the profile names one and its gateway runs the docker driver.
+// the profile names one and its gateway runs the docker driver. An unknown
+// driver gets no volume work: Validate refuses it, and a docker call against
+// a gateway we cannot name is the wrong default.
 func (b *openshellBackend) usesDockerVolumes() bool {
-	return b.profile.CacheVolume != "" && b.profile.Driver != DriverKubernetes
+	if b.profile.CacheVolume == "" {
+		return false
+	}
+	switch b.profile.Driver {
+	case "", DriverDocker:
+		return true
+	default:
+		return false
+	}
 }
 
 // contract is the environment the sandbox carries for the gt and bd it runs:

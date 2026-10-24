@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/liveness"
 	"github.com/steveyegge/gastown/internal/tmux"
 )
@@ -27,12 +28,15 @@ type Profile struct {
 	ControlPlaneHost string   // how the sandbox reaches Dolt, and Forgejo unless ForgejoHost is set; "" = host.docker.internal
 	ForgejoHost      string   // how the sandbox reaches Forgejo when it differs from Dolt; "" = ControlPlaneHost
 	CacheVolume      string   // named volume for /sandbox/.cache; "{rig}" expands; "" = none
-	Driver           string   // the gateway's compute driver: DriverKubernetes skips docker volume work; anything else is docker
+	Driver           string   // the gateway's compute driver: DriverDocker or DriverKubernetes; "" means docker
 }
 
-// DriverKubernetes is Profile.Driver for a gateway that runs sandboxes on
-// Kubernetes (config.SandboxDriverKubernetes).
-const DriverKubernetes = "kubernetes"
+// Profile.Driver values, the config package's constants: a kubernetes gateway
+// has no docker volumes, so only a docker (or unset) driver gets volume work.
+const (
+	DriverDocker     = config.SandboxDriverDocker
+	DriverKubernetes = config.SandboxDriverKubernetes
+)
 
 // SpawnSpec is what a backend needs to host one polecat's session.
 type SpawnSpec struct {
