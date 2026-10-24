@@ -88,6 +88,8 @@ func TestNormalizeAddress(t *testing.T) {
 		{"mayor/", "mayor"},
 		{"Mayor", "mayor"},
 		{"  gastown/Toast/  ", "gastown/toast"},
+		{"gastown/Crew/Max", "gastown/max"},
+		{"gastown/polecats/max", "gastown/max"},
 		{"", ""},
 	}
 	for _, c := range cases {
@@ -117,6 +119,15 @@ func TestPickReplyTo(t *testing.T) {
 		msgs := []*mail.Message{msg("bd-3", "Mayor", "[HIGH] alert")}
 		if got := pickReplyTo(msgs, "mayor/", "Re: [HIGH] alert"); got != "bd-3" {
 			t.Errorf("got %q, want bd-3", got)
+		}
+	})
+
+	t.Run("full-path address normalizes", func(t *testing.T) {
+		msgs := []*mail.Message{msg("bd-9", "gastown/max", "Build broken")}
+		for _, to := range []string{"gastown/crew/max", "gastown/polecats/max", "gastown/polecat/max"} {
+			if got := pickReplyTo(msgs, to, "Re: Build broken"); got != "bd-9" {
+				t.Errorf("pickReplyTo(%q) = %q, want bd-9", to, got)
+			}
 		}
 	})
 
