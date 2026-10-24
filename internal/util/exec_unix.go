@@ -82,12 +82,38 @@ func KillProcessGroupID(pgid int) error {
 	return err
 }
 
+// groupOps is everything killProcessGroup touches outside itself, so a test can
+// drive the sandbox's EPERM path and the escalation without processes or sleeps.
+type groupOps struct {
+	kill   func(pid int, sig syscall.Signal) error // kill(2); a negative pid is a group
+	list   func(pgid int) ([]int, error)           // live members of a group, from /proc
+	now    func() time.Time
+	sleep  func(time.Duration)
+	grace  time.Duration
+	member func(pid int, sig syscall.Signal) error // signal one process; gone is not an error
+}
+
+func realGroupOps() groupOps {
+	return groupOps{
+		kill:   func(pid int, sig syscall.Signal) error { return syscall.Kill(pid, sig) },
+		list:   procGroupMembers,
+		now:    time.Now,
+		sleep:  time.Sleep,
+		grace:  ProcessGroupKillGrace,
+		member: signalPid,
+	}
+}
+
 // killProcessGroup signals a group and reports whether it ended one.
 // os.ErrProcessDone means the group was already empty when the first signal
 // arrived: nothing was interrupted, and for exec's cancel hook that is the
 // difference between a finished command and a canceled one.
 func killProcessGroup(pgid int) error {
-	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil {
+	return realGroupOps().killGroup(pgid)
+}
+
+func (o groupOps) killGroup(pgid int) error {
+	if err := o.kill(-pgid, syscall.SIGTERM); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone
 		}
@@ -96,37 +122,37 @@ func killProcessGroup(pgid int) error {
 			// for signal 0, while it allows signaling a single pid. Left at
 			// that, cmd.Wait never returns for a command whose context was
 			// canceled: nothing was ever signaled.
-			return killGroupMembers(pgid, err, procGroupMembers, signalPid, ProcessGroupKillGrace)
+			return o.killMembers(pgid, err)
 		}
 		return err
 	}
 
-	deadline := time.Now().Add(ProcessGroupKillGrace)
+	deadline := o.now().Add(o.grace)
 	for {
-		if err := syscall.Kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
+		if err := o.kill(-pgid, 0); errors.Is(err, syscall.ESRCH) {
 			return nil // every member is gone
 		}
-		if !time.Now().Before(deadline) {
+		if !o.now().Before(deadline) {
 			break
 		}
-		time.Sleep(processGroupKillPoll)
+		o.sleep(processGroupKillPoll)
 	}
 
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := o.kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return err
 	}
 	return nil
 }
 
-// killGroupMembers ends a process group one member at a time, for a platform
-// or sandbox that refuses to signal the group itself: SIGTERM to each live
-// member, then SIGKILL to those still there after grace. refused is the error
-// the group signal failed with, returned when the members cannot be listed.
-// Like killProcessGroup it reports os.ErrProcessDone when the group was
-// already empty. list and signal are the /proc listing and the single-pid kill,
-// injected so a test needs no processes.
-func killGroupMembers(pgid int, refused error, list func(pgid int) ([]int, error), signal func(pid int, sig syscall.Signal) error, grace time.Duration) error {
-	members, err := list(pgid)
+// killMembers ends a process group one member at a time, for a platform or
+// sandbox that refuses to signal the group itself: SIGTERM to each live
+// member, then SIGKILL to those still there after the grace. refused is the
+// error the group signal failed with, returned when the members cannot be
+// listed. Like killGroup it reports os.ErrProcessDone when the group was
+// already empty, and unlike a group SIGKILL it checks the kill took: members
+// still alive afterwards are an error, not a success.
+func (o groupOps) killMembers(pgid int, refused error) error {
+	members, err := o.list(pgid)
 	if err != nil {
 		return refused
 	}
@@ -134,21 +160,30 @@ func killGroupMembers(pgid int, refused error, list func(pgid int) ([]int, error
 		return os.ErrProcessDone
 	}
 	for _, pid := range members {
-		_ = signal(pid, syscall.SIGTERM)
+		_ = o.member(pid, syscall.SIGTERM)
 	}
-	deadline := time.Now().Add(grace)
+	deadline := o.now().Add(o.grace)
 	for {
-		members, err = list(pgid)
-		if err == nil && len(members) == 0 {
-			return nil
-		}
-		if !time.Now().Before(deadline) {
+		live, err := o.list(pgid)
+		if err != nil {
+			// Blind from here: stop waiting and kill what was last seen.
 			break
 		}
-		time.Sleep(processGroupKillPoll)
+		members = live
+		if len(members) == 0 {
+			return nil
+		}
+		if !o.now().Before(deadline) {
+			break
+		}
+		o.sleep(processGroupKillPoll)
 	}
 	for _, pid := range members {
-		_ = signal(pid, syscall.SIGKILL)
+		_ = o.member(pid, syscall.SIGKILL)
+	}
+	o.sleep(processGroupKillPoll)
+	if survivors, err := o.list(pgid); err == nil && len(survivors) > 0 {
+		return fmt.Errorf("process group %d: %d member(s) survived SIGKILL: %v", pgid, len(survivors), survivors)
 	}
 	return nil
 }
