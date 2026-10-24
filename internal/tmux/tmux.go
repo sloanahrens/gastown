@@ -359,6 +359,15 @@ func IsNoServerStderr(stderr string) bool {
 		strings.Contains(stderr, "server exited unexpectedly")
 }
 
+// sandboxNotFoundMessage is the gateway status's message field for a missing
+// sandbox, quoted as openshell prints it:
+//
+//	Error:   × code: 'Some requested entity was not found', message: "sandbox not found"
+//
+// The quote is what tells the gateway's answer from other text that names a
+// missing sandbox.
+const sandboxNotFoundMessage = `message: "sandbox not found"`
+
 // wrapError wraps tmux errors with context.
 func (t *Tmux) wrapError(err error, stderr string, args []string) error {
 	stderr = strings.TrimSpace(stderr)
@@ -377,13 +386,17 @@ func (t *Tmux) wrapError(err error, stderr string, args []string) error {
 	// indistinguishable from a failed query (gt-jv0k3).
 	//
 	// A sandboxed session is reached through `openshell sandbox exec`; once its
-	// sandbox is gone the gateway answers "sandbox not found" instead of tmux's
-	// own message, and a session in a sandbox that does not exist is a session
-	// that does not exist.
+	// sandbox is gone the gateway answers its not-found status instead of
+	// tmux's own message, and a session in a sandbox that does not exist is a
+	// session that does not exist. Only the status's quoted message field
+	// counts: the same words in a proxy or log line are that line's report, not
+	// the gateway's answer, and reading them as a missing session would hide a
+	// live sandbox behind a false "gone" (gt-u0rwr). internal/sandbox.CLI
+	// draws the same line when it asks whether a sandbox exists.
 	if strings.Contains(stderr, "session not found") ||
 		strings.Contains(stderr, "can't find session") ||
 		strings.Contains(stderr, "no such session") ||
-		strings.Contains(stderr, "sandbox not found") {
+		strings.Contains(strings.ToLower(stderr), sandboxNotFoundMessage) {
 		return ErrSessionNotFound
 	}
 
