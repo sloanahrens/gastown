@@ -203,6 +203,7 @@ CALLS_LOG="$TMP/gw-calls.log"
 : >"$CALLS_LOG"
 run -g k8s
 assert_rc 0 "exits 0"
+check "the gateway run made calls" [ -s "$CALLS_LOG" ]
 check "every call named the gateway" [ "$(grep -c -v '^-g k8s ' "$CALLS_LOG" || true)" -eq 0 ]
 check "imported the profiles on the gateway" [ "$(calls '^-g k8s profile import')" -ge 2 ]
 check "created both providers on the gateway" [ "$(calls '^-g k8s provider create')" -eq 2 ]
@@ -218,12 +219,38 @@ check "reported the existing providers" contains "provider deepseek exists" "$OU
 check "did not call profile import again" [ "$(calls '^-g k8s profile import')" -eq "$imports_before" ]
 check "did not call provider create again" [ "$(calls '^-g k8s provider create')" -eq 2 ]
 
+echo "long forms: --gateway=NAME and --gateway NAME name the gateway the same way"
+for form in "--gateway=k8s" "--gateway k8s"; do
+  read -r -a argv <<<"$form"
+  : >"$TMP/state/profiles"
+  : >"$TMP/state/providers" # an empty gateway of its own
+  CALLS_LOG="$TMP/long-calls.log"
+  : >"$CALLS_LOG"
+  run "${argv[@]}"
+  assert_rc 0 "$form exits 0"
+  check "$form made calls" [ -s "$CALLS_LOG" ]
+  check "$form: every call named the gateway" [ "$(grep -c -v '^-g k8s ' "$CALLS_LOG" || true)" -eq 0 ]
+  check "$form: created both providers on the gateway" [ "$(calls '^-g k8s provider create')" -eq 2 ]
+  check "$form: never printed the deepseek key" lacks "$DEEPSEEK_KEY" "$OUT"
+  check "$form: masked the credential the provider create echoed" contains "value=***" "$OUT"
+  run "${argv[@]}"
+  assert_rc 0 "$form exits 0 on a rerun"
+  check "$form: reported the existing providers" contains "provider deepseek exists" "$OUT"
+  check "$form: did not call provider create again" [ "$(calls '^-g k8s provider create')" -eq 2 ]
+done
+
 echo "argument checking stops before any openshell call"
 CALLS_LOG="$TMP/arg-calls.log"
 : >"$CALLS_LOG"
 run -g
 assert_rc 2 "a -g with no name exits 2"
 check "named the missing gateway name" contains "-g needs a gateway name" "$OUT"
+run --gateway
+assert_rc 2 "a --gateway with no name exits 2"
+check "named the missing long-form gateway name" contains "--gateway needs a gateway name" "$OUT"
+run --gateway=
+assert_rc 2 "an empty --gateway= exits 2"
+check "named the empty long-form gateway name" contains "--gateway needs a gateway name" "$OUT"
 run --bogus
 assert_rc 2 "an unknown argument exits 2"
 check "named the unknown argument" contains "unknown argument: --bogus" "$OUT"
