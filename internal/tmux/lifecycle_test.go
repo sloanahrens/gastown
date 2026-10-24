@@ -160,6 +160,13 @@ func TestWrapError(t *testing.T) {
 	if err := tm.wrapError(exitError(1), "boom", []string{"test"}); err == nil || err.Error() != "tmux test: boom" {
 		t.Errorf("other stderr: err = %v", err)
 	}
+	// The gateway's words quoted by something else (a proxy's or a log line's
+	// report) are not its not-found status; reading them as a missing session
+	// would let a live sandbox's session look gone (gt-u0rwr).
+	logLine := "proxy: sandbox not found in route cache; upstream connection refused"
+	if err := tm.wrapError(exitError(1), logLine, []string{"has-session"}); err == nil || errors.Is(err, ErrSessionNotFound) {
+		t.Errorf("wrapError(%q) = %v, want an unclassified error", logLine, err)
+	}
 }
 
 // has-session on a session whose sandbox is gone is a plain "no", so a sling to
