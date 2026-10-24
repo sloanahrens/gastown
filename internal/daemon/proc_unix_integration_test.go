@@ -3,7 +3,10 @@
 package daemon
 
 import (
+	"errors"
+	"os"
 	"os/exec"
+	"syscall"
 	"testing"
 )
 
@@ -19,5 +22,28 @@ func TestIntegrationIsProcessAlive_ReapedChildIsGone(t *testing.T) {
 	}
 	if isProcessAlive(cmd.Process) {
 		t.Error("isProcessAlive(reaped child) = true, want false")
+	}
+}
+
+// Pid 1 belongs to root. An unprivileged signal 0 to it fails with EPERM, which
+// still means the process exists, so isProcessAlive must report it alive. Root
+// may signal any pid, so the probe succeeds there and proves nothing; skip it.
+func TestIntegrationIsProcessAlive_OtherUIDIsAlive(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root signals pid 1 without EPERM; the case needs an unprivileged caller")
+	}
+	p, err := os.FindProcess(1)
+	if err != nil {
+		t.Fatalf("finding pid 1: %v", err)
+	}
+	// The case only proves something if the probe really hits EPERM. Any
+	// other errno means the environment differs, so fail loudly instead of
+	// passing on a branch this test never reached.
+	if err := p.Signal(syscall.Signal(0)); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("signal 0 to pid 1 = %v, want EPERM", err)
+	}
+	if !isProcessAlive(p) {
+		t.Error("isProcessAlive(pid 1 under another uid) = false, want true")
 	}
 }
