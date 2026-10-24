@@ -449,6 +449,8 @@ func TestSandboxSecretsSearchTakesValue(t *testing.T) {
 		{"count flag with an empty value", "grep", []string{"-C", ""}, false},
 		{"count in rg", "rg", []string{"-C", "3"}, true},
 		{"ripgrep type", "rg", []string{"-t", "js"}, true},
+		{"ripgrep type-not", "rg", []string{"-T", "js"}, true},
+		{"ripgrep type-not word that is a file", "rg", []string{"-T", ".env"}, true},
 		{"ripgrep type flag read as grep's", "grep", []string{"-t", ".env"}, false},
 		{"ripgrep glob", "rg", []string{"-g", "*.ts"}, true},
 		{"ripgrep glob flag read as grep's", "grep", []string{"-g", ".env"}, false},
@@ -616,6 +618,8 @@ func TestSandboxSecretsGuardAllowsOrdinaryWork(t *testing.T) {
 		"grep -e process.env -d skip src/index.ts",
 		"rg -e import.meta.env -d 2 src/",
 		"rg -e import.meta.env -t js src/",
+		"rg -e import.meta.env -T js src/",
+		"rg -e import.meta.env -T .env src/",
 		"cat .env.example",
 		"head -20 config/.env.example",
 		// curl, wget and http send ordinary files and headers.

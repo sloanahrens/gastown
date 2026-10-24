@@ -772,6 +772,7 @@ var sandboxSecretsSearchValueFlags = map[string]map[string]sandboxSecretsSearchV
 		"--glob":           sandboxSecretsValueWord,
 		"--iglob":          sandboxSecretsValueWord,
 		"-t":               sandboxSecretsValueWord,
+		"-T":               sandboxSecretsValueWord,
 		"--type":           sandboxSecretsValueWord,
 		"--type-not":       sandboxSecretsValueWord,
 	},
