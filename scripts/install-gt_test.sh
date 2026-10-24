@@ -1053,6 +1053,15 @@ STUB
 }
 wait_for() { local i; for i in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 wait_for_alarm() { local i; for i in $(seq 1 100); do grep -q 'alarm after' "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
+# proc_state PID: the one-letter state of PID (R, S, Z ...); empty once it is gone.
+proc_state() {
+  if [ -r "/proc/$1/stat" ]; then sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -c1
+  else ps -o stat= -p "$1" 2>/dev/null | cut -c1
+  fi
+}
+# is_live PID: PID is a running process. kill -0 also finds a zombie (exited, not
+# yet reaped), and an orphan whose PID 1 never reaps becomes one, so that is not live.
+is_live() { kill -0 "$1" 2>/dev/null && [ "$(proc_state "$1")" != Z ]; }
 
 # Case 33: a successful install starts the plugin once, after the new binary is in place.
 T=$(make_world); image_stub "$T"
@@ -1204,7 +1213,7 @@ rc=$( export INSTALL_GT_IMAGE_ALARM=1
 wait_for "$T/image-child.pid" || true
 CHILD=$(cat "$T/image-child.pid" 2>/dev/null || true)
 wait_for_alarm "$T/image.log" || true
-[ "$rc" = "0" ] && [ -n "$CHILD" ] && [ ! -e "$T/image.lock" ] && ! kill -0 "$CHILD" 2>/dev/null \
+[ "$rc" = "0" ] && [ -n "$CHILD" ] && [ ! -e "$T/image.lock" ] && ! is_live "$CHILD" \
   && grep -q 'polecat image: alarm after 1 s stopped the build' "$T/image.log" \
   && pass "image: the alarm stops the build, removes the lock run.sh took, and says so" \
   || fail "image: alarm: rc=$rc child=${CHILD:-none} lock=$([ -e "$T/image.lock" ] && echo held || echo free) out=$(tail -2 "$T/image.log" 2>/dev/null)"
@@ -1227,7 +1236,7 @@ rc=$( export INSTALL_GT_IMAGE_ALARM=1
 wait_for "$T/image-child.pid" || true
 CHILD=$(cat "$T/image-child.pid" 2>/dev/null || true)
 wait_for_alarm "$T/image.log" || true
-[ "$rc" = "0" ] && [ -n "$CHILD" ] && [ -e "$T/image.lock/pid" ] && ! kill -0 "$CHILD" 2>/dev/null \
+[ "$rc" = "0" ] && [ -n "$CHILD" ] && [ -e "$T/image.lock/pid" ] && ! is_live "$CHILD" \
   && pass "image: the alarm leaves a lock that names another process" \
   || fail "image: foreign lock: rc=$rc child=${CHILD:-none} lock=$([ -e "$T/image.lock" ] && echo held || echo free) out=$(tail -2 "$T/image.log" 2>/dev/null)"
 
@@ -1244,6 +1253,32 @@ for alarm in 0 soon; do
     && pass "image: alarm '$alarm' is named and the build still starts" \
     || fail "image: alarm '$alarm': rc=$rc $(tail -2 "$T/run.out")"
 done
+
+# --- Case 47: is_live reads a zombie as gone and a running process as live. The
+# python parent forks a child that exits and is never waited for, so the child is
+# a zombie that kill -0 still finds. The wait for that state is bounded; the parent
+# sleeps only so the zombie outlives the checks, and the case kills it. ---
+T=$(make_world)
+python3 -c '
+import os, sys, time
+pid = os.fork()
+if pid == 0:
+    os._exit(0)
+open(sys.argv[1], "w").write(str(pid))
+time.sleep(30)
+' "$T/zombie.pid" &
+PARENT=$!
+ZOMBIE=""
+for _ in $(seq 1 50); do
+  ZOMBIE=$(cat "$T/zombie.pid" 2>/dev/null || true)
+  [ -n "$ZOMBIE" ] && [ "$(proc_state "$ZOMBIE")" = Z ] && break
+  sleep 0.1
+done
+[ -n "$ZOMBIE" ] && [ "$(proc_state "$ZOMBIE")" = Z ] && kill -0 "$ZOMBIE" 2>/dev/null \
+  && ! is_live "$ZOMBIE" && is_live "$PARENT" \
+  && pass "is_live: a zombie reads as gone, a running process as live" \
+  || fail "is_live: zombie=${ZOMBIE:-none} state=$(proc_state "${ZOMBIE:-0}") parent_live=$(is_live "$PARENT" && echo yes || echo no)"
+kill "$PARENT" 2>/dev/null || true
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
