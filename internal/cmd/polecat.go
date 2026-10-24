@@ -1864,7 +1864,7 @@ func checkRecoveryForPolecatWith(sandboxEnv sandboxSeatEnv, bd recoveryBeads, pr
 		if !sandboxed {
 			applyWorkLandedToWorkstateFacts(&facts, nil, p.ClonePath, r.Path, bd, facts.HookBead, p.Branch)
 		} else if sandboxLive.Source == polecat.GitStateSourceLive {
-			applySandboxLostWorkFacts(&facts, sandboxEnv, bd, r.Path, sandboxBranch(fields, p), hookBead, sourceHint)
+			applySandboxLostWorkFacts(&facts, sandboxEnv, bd, r.Path, fields, hookBead, sourceHint)
 		}
 		// gt-ivvgu: this diagnostic used to call ResolveIgnoreCleanupStatus
 		// directly with hand-computed predicates (partialSpawn,

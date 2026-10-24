@@ -33,7 +33,7 @@ func (e sandboxSeatEnv) branchOnOrigin(rigPath, branch string) (bool, error) {
 // from, a resume_branch on that bead or the branch itself on origin, read from
 // the remote and never from the stale host worktree (gt-qq6rg.3). A remote that
 // cannot be asked leaves the git state unknown rather than claiming either.
-func applySandboxLostWorkFacts(facts *polecat.WorkstateFacts, env sandboxSeatEnv, bd issueShower, rigPath, branch, hookBead, sourceHint string) {
+func applySandboxLostWorkFacts(facts *polecat.WorkstateFacts, env sandboxSeatEnv, bd issueShower, rigPath string, fields *beads.AgentFields, hookBead, sourceHint string) {
 	workBead := hookBead
 	if workBead == "" {
 		workBead = sourceHint
@@ -58,8 +58,9 @@ func applySandboxLostWorkFacts(facts *polecat.WorkstateFacts, env sandboxSeatEnv
 	if issue != nil && patrolscan.ResumeBranchFromNotes(issue.Notes) != "" {
 		preserved = true
 	} else {
-		if branch == "" {
-			unknown("the agent bead records no branch to look for on origin")
+		branch, unknownReason := polecat.SandboxSeatOriginBranch(fields)
+		if unknownReason != "" {
+			unknown(unknownReason)
 			return
 		}
 		onOrigin, err := env.branchOnOrigin(rigPath, branch)
@@ -97,24 +98,15 @@ func sandboxSeatGitSafe(live polecat.LiveGitState) bool {
 	return live.Source == polecat.GitStateSourceLive && !live.Dirty && live.StashCount == 0 && live.UnpushedCommits == 0
 }
 
-// sandboxBranch is the branch a sandbox seat pushed: the one its agent bead
-// recorded, else the host polecat's (a label that is stale only in content).
-func sandboxBranch(fields *beads.AgentFields, p *polecat.Polecat) string {
-	if fields != nil && fields.Branch != "" {
-		return fields.Branch
-	}
-	return p.Branch
-}
-
 // sandboxLostWork asks the lost-work question the nuke gate needs, with the
 // same facts and rule check-recovery uses: it returns the bead whose work is
 // lost, or "" when nothing is, and an error when the answer is unknown (origin
 // or the work bead could not be read), which the caller fails closed on
 // (gt-qq6rg.3).
-func sandboxLostWork(env sandboxSeatEnv, bd issueShower, rigPath, branch, hookBead, sourceHint string, hook polecat.HookBeadDisposition, workTerminal bool) (string, error) {
+func sandboxLostWork(env sandboxSeatEnv, bd issueShower, rigPath string, fields *beads.AgentFields, hookBead, sourceHint string, hook polecat.HookBeadDisposition, workTerminal bool) (string, error) {
 	facts := polecat.WorkstateFacts{HookBeadSafe: true, AssignedBeadTerminal: workTerminal}
 	applyHookDispositionToWorkstateFacts(&facts, hookBead, hook)
-	applySandboxLostWorkFacts(&facts, env, bd, rigPath, branch, hookBead, sourceHint)
+	applySandboxLostWorkFacts(&facts, env, bd, rigPath, fields, hookBead, sourceHint)
 	if facts.GitCheckFailed {
 		return "", errors.New(facts.GitCheckFailedReason)
 	}
