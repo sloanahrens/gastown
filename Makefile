@@ -1,4 +1,4 @@
-.PHONY: build install install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-seed-pins polecat-caches openshell-providers
+.PHONY: build install install-local uninstall check-forward-only check-no-downgrade check-version-tag check-install-path clean test test-slow test-integration test-integration-wall test-timing test-makefile test-e2e-container check-up-to-date lint lint-tools docs-lint bd-command-tree gate gate-lint gate-test tier-check presubmit exec-tax-preflight polecat-image polecat-seed-stage polecat-seed-pins polecat-caches openshell-providers
 
 # The gate (docs/testing.md, "The gate"). Three tiers, each one target, and
 # every caller runs them verbatim: CI, gt done, the land path and a human at a
@@ -145,7 +145,8 @@ POLE_RIG_GO_MODS ?= $(wildcard $(POLE_TOWN)/*/mayor/rig/go.mod)
 # time) stable until the pins change: `make polecat-seed-pins` re-pins to each
 # rig's current canonical checkout, weekly or when a go.sum changes.
 POLE_SEED_RIGS ?= gastown devops
-POLE_SEED_PINS := deploy/polecat/seed-pins
+POLE_SEED_PINS ?= deploy/polecat/seed-pins
+POLE_SEED_DIR ?= deploy/polecat/seed
 
 # Cross-compile gt and bd for the sandbox image, then build it. The Dockerfile
 # copies deploy/polecat/bin/, so that directory is the build context's payload.
@@ -158,16 +159,23 @@ polecat-image:
 	@mkdir -p deploy/polecat/bin
 	GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o deploy/polecat/bin/gt ./cmd/gt
 	cd $(BD_SRC) && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -trimpath -o $(CURDIR)/deploy/polecat/bin/bd ./cmd/bd
-	@rm -rf deploy/polecat/seed && mkdir -p deploy/polecat/seed
-	@test -s $(POLE_SEED_PINS) || { echo "polecat-image: $(POLE_SEED_PINS) is missing or empty; run make polecat-seed-pins and commit it" >&2; exit 2; }
-	@while read -r rig sha; do \
-		case "$$rig" in ""|"#"*) continue ;; esac; \
-		mkdir -p "deploy/polecat/seed/$$rig"; \
-		git -C "$(POLE_TOWN)/$$rig/mayor/rig" archive "$$sha" 2>/dev/null | tar -x -C "deploy/polecat/seed/$$rig" \
-			|| { echo "polecat-image: cannot stage rig $$rig at $$sha from $(POLE_TOWN)/$$rig/mayor/rig (is the pinned commit in that checkout? run make polecat-seed-pins)" >&2; exit 2; }; \
-	done < $(POLE_SEED_PINS)
+	@$(MAKE) --no-print-directory polecat-seed-stage
 	floor=$$(bash deploy/polecat/go-floor.sh rig $(POLE_RIG_GO_MODS)) || { echo "polecat-image: cannot read the rig Go floor from $(POLE_RIG_GO_MODS)" >&2; exit 2; }; \
 	docker build --platform linux/arm64 --label org.gastown.gt-commit=$(POLE_COMMIT) --build-arg GO_FLOOR="$$floor" -t $(POLE_IMAGE):$(POLE_TAG) -t $(POLE_IMAGE):dev -f deploy/polecat/Dockerfile deploy/polecat
+
+# polecat-seed-stage stages each pinned rig's sources into POLE_SEED_DIR with
+# `git archive` of the pinned commit; the Dockerfile bind-mounts the directory for
+# its seed RUN and copies none of it into the image.
+polecat-seed-stage:
+	@test -s $(POLE_SEED_PINS) || { echo "polecat-image: $(POLE_SEED_PINS) is missing or empty; run make polecat-seed-pins and commit it" >&2; exit 2; }
+	@rm -rf "$(POLE_SEED_DIR)" && mkdir -p "$(POLE_SEED_DIR)"
+	@while read -r rig sha; do \
+		case "$$rig" in ""|"#"*) continue ;; esac; \
+		mkdir -p "$(POLE_SEED_DIR)/$$rig"; \
+		git -C "$(POLE_TOWN)/$$rig/mayor/rig" archive -o "$(POLE_SEED_DIR)/$$rig.tar" "$$sha" 2>/dev/null \
+			&& tar -x -C "$(POLE_SEED_DIR)/$$rig" -f "$(POLE_SEED_DIR)/$$rig.tar" && rm -f "$(POLE_SEED_DIR)/$$rig.tar" \
+			|| { echo "polecat-image: cannot stage rig $$rig at $$sha from $(POLE_TOWN)/$$rig/mayor/rig (is the pinned commit in that checkout? run make polecat-seed-pins)" >&2; exit 2; }; \
+	done < $(POLE_SEED_PINS)
 
 # polecat-seed-pins rewrites deploy/polecat/seed-pins to each seeded rig's
 # canonical checkout HEAD. Commit the result; the next polecat-image reseeds.

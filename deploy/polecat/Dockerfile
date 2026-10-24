@@ -131,13 +131,15 @@ RUN groupadd -g 10001 polecat \
 ENV GOCACHE=/opt/gocache \
     GOMODCACHE=/opt/gomod
 RUN --mount=type=bind,source=seed,target=/seed \
-    mkdir -p "$GOCACHE" "$GOMODCACHE" \
+    export PATH="/usr/local/go/bin:$PATH" GOFLAGS="-p=4 -modcacherw" \
+    && mkdir -p "$GOCACHE" "$GOMODCACHE" \
     && for gomod in $(find /seed -name go.mod -not -path '*/testdata/*' | sort); do \
          dir=$(dirname "$gomod"); echo "seed: $dir"; \
          for step in "go build ./..." "go vet ./..." "go test -count=1 -run ^\$ ./..."; do \
-           (cd "$dir" && GOFLAGS="-p=4 -modcacherw" $step >/dev/null 2>&1) || echo "seed: '$step' failed in $dir, continuing"; \
+           (cd "$dir" && $step >/tmp/seed.log 2>&1) || { echo "seed: '$step' failed in $dir, continuing:"; tail -n 3 /tmp/seed.log; }; \
          done; \
        done \
+    && rm -f /tmp/seed.log \
     && chmod -R a+rwX "$GOCACHE" "$GOMODCACHE"
 
 ENV PATH="/usr/local/go/bin:/sandbox/go/bin:${PATH}" \
