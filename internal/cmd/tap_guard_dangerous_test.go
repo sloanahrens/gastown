@@ -3941,6 +3941,44 @@ func TestIsANSICDollar(t *testing.T) {
 	}
 }
 
+// gt-h4go2: the rune walk (isANSICDollar) and the byte scan (ansiQuoteAt) read
+// one predicate, so they answer alike for the same "$" and the quote it opens.
+func TestANSIQuoteAtAgreesWithIsANSICDollar(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		text   string
+		dollar int
+		want   bool
+	}{
+		{"a plain ANSI-C opener", "$'x'", 0, true},
+		{"the second dollar of a PID", "$$'x'", 1, false},
+		{"an escaped dollar", `\$'x'`, 1, false},
+		{"a backslash-newline before the quote", "$\\\n'x'", 0, true},
+		{"a multi-byte character before the dollar", "é$'x'", 2, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			bytesGot := ansiQuoteAt(tt.text, tt.dollar) >= 0
+			runes := []rune(tt.text)
+			runeDollar := len([]rune(tt.text[:tt.dollar]))
+			runesGot := isANSICDollar(runes, runeDollar)
+			if bytesGot != tt.want || runesGot != tt.want {
+				t.Errorf("%q at %d: ansiQuoteAt = %v, isANSICDollar = %v, want both %v", tt.text, tt.dollar, bytesGot, runesGot, tt.want)
+			}
+		})
+	}
+}
+
+// gt-h4go2: the quote after a PID "$$" is plain, so the "\" ends its string at
+// the next quote and the "$(git reset --hard)" after it is a live substitution.
+func TestDangerousCommandJudgesSubstitutionAfterPIDQuote(t *testing.T) {
+	t.Parallel()
+	command := `echo $$'a\'$(git reset --hard)''`
+	if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason == "" {
+		t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — the substitution is live", command)
+	}
+}
+
 // gt-0vbb2: a "$" is the second half of a PID "$$" when the "$" before it is
 // unescaped and begins that pair itself. The "$"s of a run alternate, so a long
 // run is judged by the parity of its position.
@@ -3964,8 +4002,8 @@ func TestIsPIDTail(t *testing.T) {
 		{"an odd place in a long run is a tail", strings.Repeat("$", 4001), 3999, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isPIDTail([]rune(tt.text), tt.i); got != tt.want {
-				t.Errorf("isPIDTail(%q, %d) = %v, want %v", tt.text, tt.i, got, tt.want)
+			if got := pidTailAt(runesAt([]rune(tt.text)), tt.i); got != tt.want {
+				t.Errorf("pidTailAt(%q, %d) = %v, want %v", tt.text, tt.i, got, tt.want)
 			}
 		})
 	}

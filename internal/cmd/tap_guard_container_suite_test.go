@@ -2594,6 +2594,11 @@ func TestSubstitutionSpansCommentAndANSIQuote(t *testing.T) {
 		// the quote opens an ANSI-C string whose \' does not close it, and the
 		// "$(git reset --hard)" inside is text.
 		{"ANSI-C string opened across a backslash-newline hides a substitution", "echo $\\\n'a\\' $(git reset --hard) '", nil},
+		// gt-h4go2: the second "$" of "$$" is the PID's tail, so the quote after
+		// it is plain and the "\" is the last text of that word: the
+		// "$(git reset --hard)" is live.
+		{"quote after a PID is plain and the substitution is live", `echo $$'a\'$(git reset --hard)''`, []string{"git reset --hard"}},
+		{"escaped dollar opens no ANSI-C string", `echo \$'a\'$(git reset --hard)''`, []string{"git reset --hard"}},
 		{"unterminated ANSI-C string reads as plain quotes", `echo $'it\'s $(git reset --hard)`, []string{"git reset --hard"}},
 		{"plain single quotes", `echo 'it' $(git reset --hard)`, []string{"git reset --hard"}},
 		{"hash inside a word", `echo a#b $(git reset --hard)`, []string{"git reset --hard"}},

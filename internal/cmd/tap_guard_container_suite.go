@@ -822,14 +822,12 @@ func opensSubstitution(text string, i int) bool {
 }
 
 // ansiQuoteAt returns the index of the "'" that the "$" at dollar opens an
-// ANSI-C string with, or -1. A backslash-newline between the two is deleted by
-// the shell before it reads the quote, so that quote still opens the string
-// (gt-javvg, gt-22glo).
+// ANSI-C string with, or -1. It reads the opener as isANSICDollar does
+// (ansiCDollarQuote), so an escaped "$" and the second "$" of a PID "$$" open
+// nothing here either, and a backslash-newline between the "$" and the quote is
+// stepped over (gt-javvg, gt-22glo, gt-h4go2).
 func ansiQuoteAt(text string, dollar int) int {
-	if q := skipLineContinuationBytes(text, dollar+1); q < len(text) && text[q] == '\'' {
-		return q
-	}
-	return -1
+	return ansiCDollarQuote(len(text), bytesAt(text), dollar)
 }
 
 // closingANSIQuote returns the index of the "'" that closes a $'...' string
