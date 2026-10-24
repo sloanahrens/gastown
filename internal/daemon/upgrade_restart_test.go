@@ -1259,10 +1259,15 @@ func TestFailedRestartStampReleasesThePendingFlag(t *testing.T) {
 	withOwnCommit(d, "aaa")
 	fakeHistory(t, d, "aaa", "bbb")
 	writeMarker(t, d, restartPendingMarker{Commit: "bbb", Repo: upgradeRepo})
-	// A directory where the stamp writes its temp file makes the stamp fail.
-	if err := os.Mkdir(restartMarkerPath(d.config.TownRoot)+".tmp", 0o755); err != nil {
+	// A daemon directory the stamp cannot write to makes the stamp fail; the
+	// marker is still readable, so the request is still made.
+	daemonDir := filepath.Dir(restartMarkerPath(d.config.TownRoot))
+	//testpolicy:allow no-exec-files — the target is the fixture directory: a read-only dir needs its search bit
+	if err := os.Chmod(daemonDir, 0o555); err != nil {
 		t.Fatal(err)
 	}
+	//testpolicy:allow no-exec-files — the target is the fixture directory: restores its write bit for t.TempDir cleanup
+	t.Cleanup(func() { _ = os.Chmod(daemonDir, 0o755) })
 	now := time.Now()
 
 	if !d.checkUpgradeRestart(now) {
@@ -1275,14 +1280,25 @@ func TestFailedRestartStampReleasesThePendingFlag(t *testing.T) {
 	if d.upgradeRestartPending.Load() {
 		t.Fatal("pending flag still set after the stamp failed")
 	}
-	// The tick runs against a fake CLI, as the spec dispatch tests do.
+	// Restored so the dispatch tick runs as it does in a daemon. The tick runs
+	// against a fake CLI, as the spec dispatch tests do.
+	//testpolicy:allow no-exec-files — the target is the fixture directory: traversal needs its search bit back
+	if err := os.Chmod(daemonDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	d.ctx = context.Background()
 	d.execCmd = newFakeCLI(func([]string) cliReply { return cliReply{} }).run
 	d.patrolConfig = &DaemonPatrolConfig{Patrols: &PatrolsConfig{SpecDispatch: &SpecDispatchConfig{Enabled: boolPtr(true)}}}
 	if !d.triggerSpecDispatch() {
 		t.Fatal("spec dispatch held after the stamp failed")
 	}
-	d.specDispatchCycles.Wait()
+	// Bounded: a dispatch cycle that never ends fails this test by name.
+	cycles := make(chan struct{})
+	go func() {
+		d.specDispatchCycles.Wait()
+		close(cycles)
+	}()
+	waitForSignal(t, cycles, "spec dispatch cycle did not finish after the failed stamp")
 }
 
 // TestStampRestartAttemptDoesNotOverwriteANewerMarker pins gt-oyrav (D9):
