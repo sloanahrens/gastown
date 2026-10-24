@@ -137,6 +137,12 @@ func (d *Daemon) daemonWorkHolds() []*daemonWork {
 	if d.specDispatchRunning.Load() {
 		holds = append(holds, &daemonWork{name: specDispatchHoldLabel})
 	}
+	// The slings a tick handed back run on after it (gt-5h70s); a restart that
+	// cuts one leaves its seat hooked with no session, as a cut tick did
+	// (gt-cbaoy).
+	if _, slinging := d.specSlings.oldest(); slinging {
+		holds = append(holds, &daemonWork{name: specSlingHoldLabel})
+	}
 	if d.patrolScanRunning.Load() {
 		holds = append(holds, &daemonWork{name: "a patrol scan"})
 	}

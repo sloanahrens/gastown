@@ -194,6 +194,11 @@ when that seat is closed or full.
 Every dispatch's sling args tell the polecat to test install paths in a
 temporary INSTALL_DIR.
 
+With --background-slings the tick runs no sling: it prints each one it planned
+under "pending", and the daemon runs them as gt spec sling while the next tick
+goes on. --in-flight names the slings still running, so the tick leaves their
+beads alone and counts their seats as taken (gt-5h70s).
+
 Budget comes from polecat_pool in settings/config.json (seats, max_total,
 timezone, min_spawn_gap) and daemon.patrols.spec_dispatch
 in settings/config.json (max_per_tick).
@@ -757,9 +762,12 @@ type specDispatchReport struct {
 	Deferred []specDispatchEntry `json:"deferred,omitempty"`
 	// Notices are lines the tick decided on but no single candidate owns,
 	// logged once each (gt-wgyca).
-	Notices      []string      `json:"notices,omitempty"`
-	SlingsRun    int           `json:"slings_run,omitempty"`
-	SlowestSling time.Duration `json:"slowest_sling_ns,omitempty"`
+	Notices []string `json:"notices,omitempty"`
+	// Pending is the slings a --background-slings tick planned and did not run:
+	// the daemon runs each as `gt spec sling` (spec_background.go, gt-5h70s).
+	Pending      []specSlingJob `json:"pending,omitempty"`
+	SlingsRun    int            `json:"slings_run,omitempty"`
+	SlowestSling time.Duration  `json:"slowest_sling_ns,omitempty"`
 	// The phase times of the tick, read on the tick's clock; the daemon logs
 	// them on its 'tick took' line. A held tick runs no phase, so none is set.
 	RosterTook     time.Duration `json:"roster_ns,omitempty"`
@@ -857,6 +865,14 @@ type specDispatchEnv struct {
 	Budget        specdispatch.Budget // agents, caps and preferences; live counts filled per tick
 	PerTick       int
 	DryRun        bool
+	// Background hands the tick's slings back in the report instead of running
+	// them (specSlingJob): the daemon runs each one in the background, so the
+	// tick returns once it has planned (gt-5h70s).
+	Background bool
+	// InFlight is the slings the daemon still has running from earlier ticks.
+	// Each one counts as a taken seat, its bead is not a candidate, and its
+	// files hold overlapping candidates as a hooked bead's would (gt-5h70s).
+	InFlight []specInFlight
 	// MaxPriority is the ceiling on a candidate's priority number
 	// (polecat_pool.max_priority): a bead numbered higher is backlog.
 	MaxPriority int
@@ -905,7 +921,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	}
 	budget := env.Budget
 	budget.Seats = append([]specdispatch.Seat(nil), env.Budget.Seats...)
-	budget.SetLive(roster.Live)
+	budget.SetLive(specLiveWithInFlight(roster.Live, env.InFlight))
 	budget.SetDeadHooked(roster.DeadHooked)
 	budget.NewestSpawn = roster.Newest
 	// The picture reads each seat's window at the tick's clock; the budget was
@@ -945,10 +961,20 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	// One read per rig per tick of what the working seats already hold, which
 	// every candidate of that rig is compared against (gt-z80p9).
 	heldReads := map[string]heldRead{}
+	inFlight := map[string]bool{}
+	for _, f := range env.InFlight {
+		inFlight[f.Bead] = true
+		specNotePendingHeld(heldReads, f.Rig, f.Bead, "a sling still running on "+f.Agent, f.Paths)
+	}
 
 	candidatesAt := env.Now()
 	for _, c := range read.Candidates {
 		id := c.Spec.ID
+		// A sling of an earlier tick is still running for this bead: it may not
+		// have hooked it yet, so the board still shows it ready (gt-5h70s).
+		if inFlight[id] {
+			continue
+		}
 		// The spec is the board row the candidate was drawn from, so the loop
 		// spends no read per candidate (gt-bqj8q). The last-moment re-read
 		// before the sling is what catches a bead that changed since the board.
@@ -1179,17 +1205,22 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 		// run together instead of one after another (the sling, not the
 		// reads, was the tick: 45-70 s each in series, 2026-10-21).
 		c.order = len(pending)
-		pending = append(pending, specPendingSling{c: c, id: id, seat: seat, resume: resume, gone: gone, shapeNote: shapeNote, entry: entry})
+		paths := specPendingPaths(full)
+		pending = append(pending, specPendingSling{c: c, id: id, seat: seat, resume: resume, gone: gone, shapeNote: shapeNote, entry: entry, paths: paths})
 		budget.Bump(seat.Agent, budget.Now)
 		// The slings run together, so a later candidate of this tick that
 		// names the same files is held now, as it was when the earlier sling
 		// finished first and had hooked its bead (the content-overlap hold,
 		// gt-z80p9).
-		specNotePendingHeld(heldReads, c.Rig, id, seat.Agent, full)
+		specNotePendingHeld(heldReads, c.Rig, id, "this tick's sling on "+seat.Agent, paths)
 	}
 	report.CandidatesTook = env.Now().Sub(candidatesAt)
 	slingAt := env.Now()
-	specRunPendingSlings(env, pending, &report, &budget)
+	if env.Background {
+		specHandOffPendingSlings(pending, &report)
+	} else {
+		specRunPendingSlings(env, pending, &report, &budget)
+	}
 	report.SlingTook = env.Now().Sub(slingAt)
 	return report
 }
@@ -1205,6 +1236,9 @@ type specPendingSling struct {
 	gone      string
 	shapeNote string
 	entry     specDispatchEntry
+	// paths are the files the bead's text names, for the overlap hold on the
+	// candidates after it (specPendingPaths).
+	paths []string
 }
 
 // specSlingOutcome is what one sling produced, applied to the report in
@@ -1262,37 +1296,45 @@ func specRunPendingSlings(env specDispatchEnv, pending []specPendingSling, repor
 		if o.took > slowest {
 			slowest = o.took
 		}
-		switch o.kind {
-		case specSlingDispatched:
-			report.Dispatched = append(report.Dispatched, o.entry)
-		case specSlingSkipped:
-			report.Skipped = append(report.Skipped, o.entry)
-			// The tick line caps its skipped list, so a deferral can land in the
-			// unnamed tail; the daemon logs this list one line per entry, so
-			// every deferral's bead and reason stay readable (gt-4wcqd).
-			report.Deferred = append(report.Deferred, o.entry)
-		case specSlingFailed:
-			report.Failed = append(report.Failed, o.entry)
-		}
+		specApplyOutcome(env, report, o)
 		// Only a refusal proves the sling spawned nothing. A failure or an
 		// exhausted contention may have hooked the bead or started a session
 		// before it returned, so their seat stays charged for this tick (gt-pto2f).
 		if o.refused {
 			budget.Release(o.entry.Agent)
 		}
-		if o.label != "" {
-			if err := env.AddLabel(o.entry.Bead, o.label); err != nil {
-				report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", o.entry.Bead, err))
-			}
-		}
-		for _, n := range o.notes {
-			if err := env.Annotate(o.entry.Bead, n[0], n[1]); err != nil {
-				report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", o.entry.Bead, err))
-			}
-		}
 	}
 	report.SlingsRun = len(pending)
 	report.SlowestSling = slowest
+}
+
+// specApplyOutcome adds one sling's outcome to the report and makes the writes
+// the sling owes its bead: the failed label and the notes (specSlingOutcome).
+// A failed background sling goes through it too, so it labels its bead as a
+// foreground failure does (gt-5h70s).
+func specApplyOutcome(env specDispatchEnv, report *specDispatchReport, o specSlingOutcome) {
+	switch o.kind {
+	case specSlingDispatched:
+		report.Dispatched = append(report.Dispatched, o.entry)
+	case specSlingSkipped:
+		report.Skipped = append(report.Skipped, o.entry)
+		// The tick line caps its skipped list, so a deferral can land in the
+		// unnamed tail; the daemon logs this list one line per entry, so
+		// every deferral's bead and reason stay readable (gt-4wcqd).
+		report.Deferred = append(report.Deferred, o.entry)
+	case specSlingFailed:
+		report.Failed = append(report.Failed, o.entry)
+	}
+	if o.label != "" {
+		if err := env.AddLabel(o.entry.Bead, o.label); err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("%s: label: %v", o.entry.Bead, err))
+		}
+	}
+	for _, n := range o.notes {
+		if err := env.Annotate(o.entry.Bead, n[0], n[1]); err != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("%s: annotate: %v", o.entry.Bead, err))
+		}
+	}
 }
 
 // specSlingOne is one sling with its contention retries; the last-moment
@@ -1375,8 +1417,12 @@ func specSlingOne(env specDispatchEnv, p specPendingSling) specSlingOutcome {
 // heldRead is one rig's held-bead read, memoized for the tick so a rig with
 // several candidates reads its held set once.
 type heldRead struct {
-	beads []specdispatch.HeldBead
-	err   error
+	beads  []specdispatch.HeldBead
+	err    error
+	loaded bool
+	// noted are the beads the tick's own slings, and the slings still running
+	// from earlier ticks, hold: not hooked yet, so no read of the rig shows them.
+	noted []specdispatch.HeldBead
 }
 
 // specHeldHold is the pre-dispatch overlap hold: the reason a candidate is the
@@ -1385,38 +1431,42 @@ type heldRead struct {
 // so the candidate waits for the next tick rather than duplicating a seat
 // (gt-z80p9). A candidate naming no path cannot be caught this way, so it never
 // pays for the read.
-// specNotePendingHeld adds a candidate the tick is about to sling to the
-// rig's held set, with the files its text names, so the candidates after it
-// in the same tick are held on the same overlap the seats' hooked beads
-// cause. A rig whose held read failed stays failed.
-func specNotePendingHeld(reads map[string]heldRead, rig, id, agent string, full specdispatch.Spec) {
-	paths := specHoldFiles(extractOverlapRefs(full.Title, full.Description, full.Design, full.Notes).Files, full.Description)
+// specNotePendingHeld adds a bead whose sling is pending or running to the
+// rig's held set, with the files its text names (paths), so the candidates
+// after it are held on the same overlap the seats' hooked beads cause. holder
+// names the sling in the hold's reason. The note is kept apart from the rig's
+// own read, which a later candidate still makes.
+func specNotePendingHeld(reads map[string]heldRead, rig, id, holder string, paths []string) {
 	if len(paths) == 0 {
 		return
 	}
 	read := reads[rig]
-	if read.err != nil {
-		return
-	}
-	read.beads = append(read.beads, specdispatch.HeldBead{ID: id, Assignee: "this tick's sling on " + agent, Paths: paths})
+	read.noted = append(read.noted, specdispatch.HeldBead{ID: id, Assignee: holder, Paths: paths})
 	reads[rig] = read
 }
 
+// specPendingPaths is the file set a bead holds while its sling is pending or
+// running, the set specHeldHold compares a candidate's against.
+func specPendingPaths(full specdispatch.Spec) []string {
+	return specHoldFiles(extractOverlapRefs(full.Title, full.Description, full.Design, full.Notes).Files, full.Description)
+}
+
 func specHeldHold(env specDispatchEnv, rig string, full specdispatch.Spec, reads map[string]heldRead) (string, error) {
-	paths := specHoldFiles(extractOverlapRefs(full.Title, full.Description, full.Design, full.Notes).Files, full.Description)
+	paths := specPendingPaths(full)
 	if len(paths) == 0 {
 		return "", nil
 	}
-	read, ok := reads[rig]
-	if !ok {
+	read := reads[rig]
+	if !read.loaded {
 		beads, err := env.Held(rig)
-		read = heldRead{beads: beads, err: err}
+		read.beads, read.err, read.loaded = beads, err, true
 		reads[rig] = read
 	}
 	if read.err != nil {
 		return "", fmt.Errorf("%s: cannot read the beads the seats hold: %v", full.ID, read.err)
 	}
-	return specdispatch.HeldOverlap(paths, read.beads), nil
+	held := append(append([]specdispatch.HeldBead(nil), read.beads...), read.noted...)
+	return specdispatch.HeldOverlap(paths, held), nil
 }
 
 // specHoldFiles is the file set the overlap hold reads for one bead: the paths
@@ -1721,6 +1771,10 @@ func runSpecDispatch(cmd *cobra.Command, _ []string) error {
 // the tick a seat file stops is the tick a test can run.
 func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	start := time.Now()
+	inFlight, err := parseSpecInFlight(specDispatchInFlight)
+	if err != nil {
+		return specDispatchReport{}, err
+	}
 	ts, sd, err := specTickTown(townRoot)
 	if err != nil {
 		return specDispatchReport{}, err
@@ -1825,6 +1879,9 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 		PerTick:  perTick,
 		DryRun:   specDispatchDryRun,
 
+		Background: specDispatchBackground,
+		InFlight:   inFlight,
+
 		MaxPriority: maxPriority,
 		ShapeGate:   ts.PolecatPool.GetShapeGate(),
 	}
@@ -1833,6 +1890,8 @@ func runSpecDispatchAt(townRoot string) (specDispatchReport, error) {
 	annotations.save()
 	report.DetailsFetched, report.DetailsCached, report.DetailsUnread = details.Counts()
 	if report.Hold == "" {
+		// The slings of a background tick run after it, so they are no part of
+		// its cost.
 		report.Notices = append(report.Notices, specTickCost(reads, time.Since(start), report.SlingsRun, report.SlowestSling))
 	}
 	return report, nil
