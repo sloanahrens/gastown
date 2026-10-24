@@ -817,7 +817,8 @@ type PatrolScanConfig struct {
 	Rigs []string `json:"rigs,omitempty"`
 
 	// DeadSamples is how many consecutive dead liveness samples a seat needs
-	// before a restart (default 2).
+	// before a restart (default 2). The seat roster and the health line read
+	// the same count, so all three call a seat dead at once (gt-4rxdi).
 	DeadSamples int `json:"dead_samples,omitempty"`
 
 	// ReportWindow is the minimum gap between two stranded-work comments on

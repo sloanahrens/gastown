@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/deadseats"
 	"github.com/steveyegge/gastown/internal/hoststat"
 )
 
@@ -208,6 +209,11 @@ type Thresholds struct {
 	// SeatEvidence is how old a seat's last sample may be before its stall
 	// evidence is UNKNOWN; zero never expires it.
 	SeatEvidence time.Duration
+	// DeadSamples is how many consecutive dead samples confirm a seat's
+	// death. It mirrors the patrol's dead_samples, which the daemon fills in
+	// from that block, so the health line reports a seat dead at the count
+	// the patrol acts on (gt-4rxdi).
+	DeadSamples int
 	// DispatchWindow is how far back the dispatcher's ticks are judged. The
 	// dispatcher ticks every 60s, so a window this long sees many ticks: one
 	// slow tick, a transient hold, or a single skipped candidate does not
@@ -288,6 +294,7 @@ func DefaultThresholds() Thresholds {
 		NeedsHuman:         Limits{Red: 24 * time.Hour},
 		SeatStall:          Limits{Degraded: 30 * time.Minute, Red: 2 * time.Hour},
 		SeatEvidence:       30 * time.Minute,
+		DeadSamples:        deadseats.DefaultSamples,
 		DispatchWindow:     DefaultDispatchWindow,
 		PromoteWait:        DefaultPromoteWait,
 	}
@@ -1203,7 +1210,7 @@ func seats(in Inputs) []Field {
 			fs = append(fs, unknown(FieldSeat, s.Rig, s.Name, errors.New("no liveness sample")))
 		case in.Thresholds.SeatEvidence > 0 && in.Now.Sub(s.Sampled) >= in.Thresholds.SeatEvidence:
 			fs = append(fs, unknown(FieldSeat, s.Rig, s.Name, fmt.Errorf("last sample %s old", Short(in.Now.Sub(s.Sampled)))))
-		case s.DeadSamples > 0:
+		case deadseats.Confirmed(s.DeadSamples, in.Thresholds.DeadSamples):
 			fs = append(fs, Field{Name: FieldSeat, Rig: s.Rig, Subject: s.Name, Tag: Recorded, Verdict: Degraded, Value: "dead",
 				Detail: fmt.Sprintf("dead in %d consecutive samples", s.DeadSamples)})
 		default:

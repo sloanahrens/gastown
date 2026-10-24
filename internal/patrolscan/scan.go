@@ -55,6 +55,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/steveyegge/gastown/internal/deadseats"
 	"github.com/steveyegge/gastown/internal/intent"
 	"github.com/steveyegge/gastown/internal/liveness"
 )
@@ -110,8 +111,10 @@ func SpawnGrace(agentState string, updatedAt, now time.Time, grace time.Duration
 const (
 	// DefaultDeadSamples is how many consecutive dead samples a seat needs
 	// before it is restarted. The count lives in the intent record, so a
-	// daemon restart does not reset it.
-	DefaultDeadSamples = 2
+	// daemon restart does not reset it. deadseats holds the one value, since
+	// the roster and the health line confirm a death at the same count
+	// (gt-4rxdi).
+	DefaultDeadSamples = deadseats.DefaultSamples
 	// DefaultSpawnGrace is the window a dispatched seat is read as starting
 	// up rather than crashed in (SpawnGrace).
 	DefaultSpawnGrace = 5 * time.Minute
@@ -864,7 +867,7 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		// saying run would keep townhealth reporting the seat dead forever
 		// (gt-613vw), so the seat is retired to stop once the death is
 		// confirmed across ticks, exactly as a restart is.
-		if samples < s.o.DeadSamples {
+		if !deadseats.Confirmed(samples, s.o.DeadSamples) {
 			return Finding{}, false
 		}
 		// A seat the last turn left stuck after an ESCALATED or DEFERRED exit
@@ -1005,7 +1008,7 @@ func (s *Scanner) seat(rig, name string) (Finding, bool) {
 		}
 	}
 
-	if samples < s.o.DeadSamples {
+	if !deadseats.Confirmed(samples, s.o.DeadSamples) {
 		f.Outcome = OutcomeWaiting
 		f.Detail = fmt.Sprintf("%s with %s hooked; dead sample %d of %d", res.Reason, work.ID, samples, s.o.DeadSamples)
 		return f, true
