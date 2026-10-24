@@ -105,23 +105,32 @@ type repoRuns struct {
 // readRepoRuns reads one repo's current and completed runs under the caller's
 // deadline: one query per current status (each its own page, so one busy
 // status cannot hide the others) and one for every finished status together.
+// Each query carries its own bound, so one slow run list costs that query and
+// not the refresh (gt-p7lkd).
 func (r *ForgejoReader) readRepoRuns(ctx context.Context, name, owner, repo string) repoRuns {
 	out := repoRuns{repo: name}
 	for _, status := range forgejoCurrentStatuses {
-		list, err := r.api.ListRuns(ctx, owner, repo, forgejo.RunFilter{Status: []string{status}, Limit: forgejoRunPage})
+		list, err := r.listRuns(ctx, owner, repo, forgejo.RunFilter{Status: []string{status}, Limit: forgejoRunPage})
 		if err != nil {
 			out.err = err
 			return out
 		}
 		out.current = append(out.current, list.Runs...)
 	}
-	list, err := r.api.ListRuns(ctx, owner, repo, forgejo.RunFilter{Status: forgejoCompletedStatuses, Limit: forgejoRunPage})
+	list, err := r.listRuns(ctx, owner, repo, forgejo.RunFilter{Status: forgejoCompletedStatuses, Limit: forgejoRunPage})
 	if err != nil {
 		out.err = err
 		return out
 	}
 	out.completed = list.Runs
 	return out
+}
+
+// listRuns reads one page of a repo's runs under its own bound.
+func (r *ForgejoReader) listRuns(ctx context.Context, owner, repo string, f forgejo.RunFilter) (*forgejo.RunList, error) {
+	callCtx, cancel := r.callCtx(ctx)
+	defer cancel()
+	return r.api.ListRuns(callCtx, owner, repo, f)
 }
 
 // mergeForgejoRuns folds every repo's runs into the Actions section: the

@@ -473,18 +473,29 @@ func TestForgejoReaderReadsActionsWithTheFeed(t *testing.T) {
 	assert.Equal(t, 27.0, a.Recent[0].DurationSecs, "27s arrives as 27000000000 nanoseconds")
 	assert.Equal(t, "gt-abc", a.Recent[0].Bead, "the bead id is parsed out of the title")
 
-	assert.Equal(t, []string{
-		"/api/v1/repos/sloan/beads/activities/feeds?limit=30",
-		"/api/v1/repos/sloan/beads/actions/runs?limit=20&status=waiting",
-		"/api/v1/repos/sloan/beads/actions/runs?limit=20&status=blocked",
-		"/api/v1/repos/sloan/beads/actions/runs?limit=20&status=running",
-		"/api/v1/repos/sloan/beads/actions/runs?limit=20&status=success&status=failure&status=cancelled&status=skipped",
-		"/api/v1/repos/sloan/mango/activities/feeds?limit=30",
-		"/api/v1/repos/sloan/mango/actions/runs?limit=20&status=waiting",
-		"/api/v1/repos/sloan/mango/actions/runs?limit=20&status=blocked",
-		"/api/v1/repos/sloan/mango/actions/runs?limit=20&status=running",
-		"/api/v1/repos/sloan/mango/actions/runs?limit=20&status=success&status=failure&status=cancelled&status=skipped",
-	}, stub.askedFor(), "current is one bounded query per status, completed one for every finished status")
+	// The repos are read in parallel, so only each repo's own order is fixed:
+	// its feed first, then one bounded query per current status and one for
+	// every finished status (gt-p7lkd).
+	for _, repo := range []string{"sloan/beads", "sloan/mango"} {
+		assert.Equal(t, []string{
+			"/api/v1/repos/" + repo + "/activities/feeds?limit=30",
+			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=waiting",
+			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=blocked",
+			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=running",
+			"/api/v1/repos/" + repo + "/actions/runs?limit=20&status=success&status=failure&status=cancelled&status=skipped",
+		}, askedForRepo(stub.askedFor(), repo), "current is one bounded query per status, completed one for every finished status")
+	}
+}
+
+// askedForRepo is the stub's requests for one repo, in the order it saw them.
+func askedForRepo(asked []string, repo string) []string {
+	var out []string
+	for _, q := range asked {
+		if strings.HasPrefix(q, "/api/v1/repos/"+repo+"/") {
+			out = append(out, q)
+		}
+	}
+	return out
 }
 
 // The reader keeps the last good Actions when every repo's runs fail, the same
@@ -556,16 +567,21 @@ func TestForgejoReaderWithoutAFreshActionsValueLeavesActionsOut(t *testing.T) {
 }
 
 // A repo the viewer's token cannot read never reaches the runs: the feed has
-// already named it missing.
+// already named it missing. The readable repo still answers, so the refresh
+// succeeds — with every repo invisible it would read nothing at all and be a
+// failed refresh (gt-p7lkd).
 func TestForgejoReaderSkipsRunsForAMissingRepo(t *testing.T) {
 	t.Parallel()
-	stub := &forgejoActionsStub{}
+	stub := &forgejoActionsStub{repos: []string{"sloan/beads"}}
 	feed := newForgejoActionsReader(t, stub, []string{"sloan/beads", "sloan/mango"}).Read()
 	require.Empty(t, feed.Error)
-	assert.Empty(t, feed.Actions, "the stub 404s both feeds, so neither is read")
+	assert.Equal(t, []string{"sloan/mango"}, feed.Missing, "the invisible repo is named")
 
 	for _, asked := range stub.askedFor() {
-		assert.NotContains(t, asked, "/actions/runs", "a repo the viewer cannot read is not asked for runs")
+		if strings.Contains(asked, "/activities/feeds") {
+			continue // the feed is what names the repo invisible in the first place
+		}
+		assert.NotContains(t, asked, "sloan/mango", "a repo the viewer cannot read is not asked for runs")
 	}
 }
 
