@@ -57,7 +57,8 @@ install_stub() {
 # processes a fresh world costs (mostly git) are a sixth of this script's wall
 # time on a loaded host. A case mutates only its own copy; the copy's rig gets
 # its origin remote rewritten, since git clone recorded the template's path and
-# a case may push to it.
+# a case may push to it. The guard after build_world's template is built fails
+# the run if a copy ever stops matching a fresh world (gt-m8y0b).
 make_world() {
   local t; t=$(mktemp -d)
   cp -Rp "$WORLD_TEMPLATE/." "$t/"
@@ -193,7 +194,50 @@ reported() { "$1/bin/gt" stale --json | python3 -c 'import json,sys; print(json.
 # in one of those dies with the subshell.
 WORLD_TEMPLATE=$(build_world)
 
+# The template is a whole temp world, and a case that trips set -e exits before
+# the signing section claims the EXIT trap, so this trap has to exist from here
+# on; that one chains it instead of replacing it (gt-m8y0b).
+cleanup_world_template() {
+  [ -z "${WORLD_TEMPLATE:-}" ] || rm -rf "$WORLD_TEMPLATE"
+}
+trap cleanup_world_template EXIT
+
 echo "=== install-gt.sh tests ==="
+
+# world_manifest T -> what a case reads from a world, one line each: the rig and
+# origin trees, the branch, the origin rewrite, and every file outside the git
+# dirs with its exec bit and content. Ids that differ between any two worlds are
+# masked, so a copy and a fresh build compare equal when interchangeable
+# (gt-m8y0b).
+world_manifest() {
+  local t="$1" f s1 s2 mode
+  s1=$(cat "$t/c1"); s2=$(cat "$t/c2")
+  printf 'rig-head-tree %s\n' "$(git -C "$t/rig" rev-parse 'HEAD^{tree}')"
+  printf 'origin-main-tree %s\n' "$(git -C "$t/origin.git" rev-parse 'main^{tree}')"
+  printf 'rig-branch %s\n' "$(git -C "$t/rig" rev-parse --abbrev-ref HEAD)"
+  printf 'rig-clean %s\n' "$(git -C "$t/rig" status --porcelain)"
+  printf 'origin-url %s\n' "$(git -C "$t/rig" remote get-url origin | sed "s|^$t|__WORLD__|")"
+  ( cd "$t" && find . -path ./rig/.git -prune -o -path ./origin.git -prune -o -type f -print | sort ) |
+  while IFS= read -r f; do
+    if [ -x "$t/$f" ]; then mode=x; else mode=-; fi
+    printf 'file %s %s %s\n' "$f" "$mode" "$(sed -e "s/$s1/__C1__/g" -e "s/$s2/__C2__/g" "$t/$f" | cksum)"
+  done
+}
+
+# --- Guard: a copy is a fresh world. Every case below runs against a copy of
+# WORLD_TEMPLATE rather than a world of its own, so a copy that dropped a file,
+# an exec bit, or the origin rewrite would change the suite's results without
+# failing it. Build one world the slow way and demand the fast one match it. ---
+FRESH=$(build_world)
+COPY=$(make_world)
+FRESH_MANIFEST=$(world_manifest "$FRESH")
+COPY_MANIFEST=$(world_manifest "$COPY")
+if [ "$FRESH_MANIFEST" = "$COPY_MANIFEST" ]; then
+  pass "template: a copy is indistinguishable from a fresh world"
+else
+  fail "template: a copy differs from a fresh world: $(diff <(printf '%s\n' "$FRESH_MANIFEST") <(printf '%s\n' "$COPY_MANIFEST") | head -20 | tr '\n' ';')"
+fi
+rm -rf "$FRESH" "$COPY"
 
 # --- Case 1: happy path. c1 installed, merge c2 lands -> fetch, ff, build,
 # install, smoke, sync, marker, receipt, RESULT line. ---
@@ -676,7 +720,7 @@ restore_keychains() {
   fi
   kc_unlock
 }
-trap restore_keychains EXIT
+trap 'restore_keychains; cleanup_world_template' EXIT
 
 # make_signing_material T PASSWORD — a throwaway self-signed code-signing
 # identity named gastown-test-unattended in $T/signing/gastown-signing.keychain-db,
