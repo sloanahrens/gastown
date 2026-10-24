@@ -8,7 +8,8 @@ It is a wizard for a human. It creates one Spot node in a GCP project and bills
 until it is deleted, so agents never run it.
 
 It is a one-off probe: delete `deploy/gke-probe/` once the result is recorded
-(bead gt-j975f), so it does not become a long-lived wizard.
+on the map ticket claude-q3f.11; bead gt-j975f does the deletion, so it does
+not become a long-lived wizard.
 
 ```bash
 DRY_RUN=1 bash deploy/gke-probe/probe.sh   # print every command, run none
