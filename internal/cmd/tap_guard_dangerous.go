@@ -629,10 +629,16 @@ type heredocQuoteWalk struct {
 // quote holds (gt-lx8i8). depth counts the "(" open in the command text, the
 // opener included, so the ")" that returns it to zero closes the frame. open is
 // the offset just past the opening "(".
+//
+// The same frame reads a backtick pair and a "<(" or ">(" process substitution
+// (gt-1f28p): "x=`bash <<EOF" and "cat <(bash <<EOF" feed bash the body too. A
+// tick frame has no opener to count, so tick marks it, and the closing backtick
+// (not a ")") ends it. Its outer quote is the one the backticks interrupted.
 type cmdSubstFrame struct {
 	outer rune
 	depth int
 	open  int
+	tick  bool
 }
 
 // arithKind is what opened a context, and so what closes it.
@@ -684,10 +690,10 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 		escaped := w.escaped
 		w.escaped = false
 		if w.quote == 0 && !w.comment && !escaped && w.inCmdSubstText() &&
-			(r == ')' || r == '(' && w.runeAt(w.runeIdx+1) != '(' && !w.followsUnescapedDollar()) {
+			(r == ')' || r == '(' && w.runeAt(w.runeIdx+1) != '(' && !w.followsUnescapedDollar() && !w.opensProcSubst()) {
 			// Counted before the switch, which may open a frame on this rune;
 			// a "((" is arithmetic and its parentheses are not counted, and a
-			// "$(" opens a frame whose own depth stands for its parenthesis.
+			// "$(" or "<(" opens a frame whose own depth stands for its parenthesis.
 			w.countCmdParen(r)
 		}
 		switch {
@@ -715,8 +721,14 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			// texts are open in it.
 			if len(w.ticks) > 0 {
 				w.ticks = nil
+				w.closeTickSubst()
 			} else {
 				w.ticks = append(w.ticks, tickFrame{at: w.braces})
+				// The backticks are command text the shell starts quoting
+				// afresh, as "$(" is, so the frame remembers the double quote
+				// they interrupt and the closing backtick resumes it (gt-1f28p).
+				w.subs = append(w.subs, cmdSubstFrame{outer: w.quote, open: w.byteIdx + 1, tick: true})
+				w.quote = 0
 			}
 		case w.quote == 0 && (r == '\'' || r == '"'):
 			w.quote = r
@@ -767,6 +779,10 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			// The "(" of an unquoted "$(..)" opens command text, where a
 			// heredoc is fed to the command it sits in (gt-2am7w). A "$((" is
 			// arithmetic and is taken by its case above.
+			w.subs = append(w.subs, cmdSubstFrame{depth: 1, open: w.byteIdx + 1})
+		case r == '(' && w.opensProcSubst():
+			// The "(" of a "<(..)" or ">(..)" process substitution opens command
+			// text the shell feeds a command line, as "$(" does (gt-1f28p).
 			w.subs = append(w.subs, cmdSubstFrame{depth: 1, open: w.byteIdx + 1})
 		case w.quote == 0 && w.inSubstText() && r == ')':
 			top := &w.substs[len(w.substs)-1]
@@ -888,6 +904,11 @@ func (w *heredocQuoteWalk) cmdSubstOpen() (int, bool) {
 // gt-lx8i8).
 func (w *heredocQuoteWalk) countCmdParen(r rune) {
 	top := &w.subs[len(w.subs)-1]
+	if top.tick {
+		// Backtick text has no opener to balance: its ")" is the command's own
+		// text, and the closing backtick ends it (closeTickSubst).
+		return
+	}
 	if r == '(' {
 		top.depth++
 		return
@@ -897,6 +918,31 @@ func (w *heredocQuoteWalk) countCmdParen(r rune) {
 		w.quote = top.outer
 		w.subs = w.subs[:len(w.subs)-1]
 	}
+}
+
+// closeTickSubst ends the backtick command text the walk is reading, with the
+// frame that holds it and anything still open inside it: the shell ends the
+// text at the first backtick no backslash escapes. It resumes the double quote
+// the backticks interrupted (gt-1f28p).
+func (w *heredocQuoteWalk) closeTickSubst() {
+	for i := len(w.subs) - 1; i >= 0; i-- {
+		if w.subs[i].tick {
+			w.quote = w.subs[i].outer
+			w.subs = w.subs[:i]
+			return
+		}
+	}
+}
+
+// opensProcSubst reports whether the "(" at the current rune is the opener of a
+// "<(" or ">(" process substitution: an unquoted, unescaped "(" after a "<" or
+// ">" in text the shell reads as command syntax. A "<((" is not one, and the
+// text of an arithmetic expression is a shift or comparison, not a process
+// substitution (gt-1f28p).
+func (w *heredocQuoteWalk) opensProcSubst() bool {
+	p := w.runeAt(w.prevIdx)
+	return w.quote == 0 && !w.readsData() && (p == '<' || p == '>') && !w.prevEsc &&
+		w.runeAt(w.runeIdx+1) != '('
 }
 
 // inTickText reports whether the innermost context is backtick text opened at
@@ -937,15 +983,16 @@ func (w *heredocQuoteWalk) closeArithBraces() {
 
 // skipTo reads past byte offset to with no quote tracking: the text crossed is
 // a heredoc body, which the shell reads verbatim, so a quote left open in it
-// must not reach the command text after the terminator. A "$(" the heredoc sits
-// in stays open, since its ")" comes after the body (gt-lx8i8).
+// must not reach the command text after the terminator. A "$(", a backtick pair
+// or a "<(" the heredoc sits in stays open, since its closer comes after the
+// body (gt-lx8i8, gt-1f28p).
 func (w *heredocQuoteWalk) skipTo(to int) {
 	for w.byteIdx < to && w.runeIdx < len(w.runes) {
 		w.byteIdx += utf8.RuneLen(w.runes[w.runeIdx])
 		w.runeIdx++
 	}
 	w.quote, w.comment, w.escaped, w.prevIdx, w.prevEsc = 0, false, false, -1, false
-	w.arith, w.braces, w.substs, w.ticks = nil, 0, nil, nil
+	w.arith, w.braces, w.substs = nil, 0, nil
 }
 
 // heredocLineEnd returns the offset of the newline that ends the logical line

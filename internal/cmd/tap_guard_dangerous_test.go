@@ -1688,6 +1688,89 @@ func TestHeredocInsideQuotedSubstitutionStaysOpaque(t *testing.T) {
 	}
 }
 
+// gt-1f28p: a heredoc fed to a shell inside backticks or a process substitution
+// is judged the way one inside "$(..)" is (gt-2am7w). The reader line alone
+// hides the shell: "x=`bash" is an assignment, and "cat <(bash" names cat.
+func TestShellFedHeredocInBacktickOrProcessSubstitution(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		command    string
+		wantBlock  bool
+		wantReason string // the reason the judged body is refused, when it is
+	}{
+		{
+			name:       "shell-fed heredoc inside backticks is a script",
+			command:    "x=`bash <<EOF\ngit reset --hard\nEOF\n`",
+			wantBlock:  true,
+			wantReason: "Hard reset",
+		},
+		{
+			name:       "shell-fed heredoc inside a process substitution is a script",
+			command:    "cat <(bash <<EOF\ngit reset --hard\nEOF\n)",
+			wantBlock:  true,
+			wantReason: "Hard reset",
+		},
+		{
+			name:      "shell-fed heredoc inside a process output substitution is a script",
+			command:   "cat > >(bash <<EOF\ngit reset --hard\nEOF\n)",
+			wantBlock: true,
+		},
+		{
+			name:      "shell-fed heredoc inside backticks in double quotes is a script",
+			command:   "echo \"`bash <<EOF\ngit reset --hard\nEOF\n`\"",
+			wantBlock: true,
+		},
+		{
+			name:      "shell-fed heredoc inside backticks inside a substitution is a script",
+			command:   "x=$(echo `bash <<EOF\ngit reset --hard\nEOF\n`)",
+			wantBlock: true,
+		},
+		{
+			name:      "shell-fed heredoc in a process substitution inside a substitution is a script",
+			command:   "x=$(cat <(bash <<EOF\ngit reset --hard\nEOF\n))",
+			wantBlock: true,
+		},
+		{
+			name:      "a command after a closed process substitution is still judged",
+			command:   "cat <(ls); sudo rm -rf /tmp",
+			wantBlock: true,
+		},
+		{
+			name:      "heredoc fed to cat inside backticks stays data",
+			command:   "x=`cat <<EOF\ngit reset --hard\nEOF\n`",
+			wantBlock: false,
+		},
+		{
+			name:      "heredoc fed to cat inside a process substitution stays data",
+			command:   "cat <(cat <<EOF\ngit reset --hard\nEOF\n)",
+			wantBlock: false,
+		},
+		{
+			name:      "harmless shell-fed heredoc inside backticks is allowed",
+			command:   "x=`bash <<EOF\necho hi\nEOF\n`",
+			wantBlock: false,
+		},
+		{
+			name:      "heredoc after a closed backtick pair stays data",
+			command:   "x=`echo hi`; cat > note.md <<'Z'\ngit reset --hard\nZ\n",
+			wantBlock: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if got := reason != ""; got != tt.wantBlock {
+				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, got, reason, tt.wantBlock)
+			}
+			if tt.wantReason != "" && !strings.Contains(reason, tt.wantReason) {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want it to name %q", tt.command, reason, tt.wantReason)
+			}
+		})
+	}
+}
+
 // A "}" inside the backtick text of a "${..}" word is that command's own text,
 // as it is inside "$(..)" (gt-nwd3k): the expansion ends at the last "}", so the
 // "<<x" before it is text in the word and the "sudo" line is a live command
