@@ -11,6 +11,8 @@ import (
 	"unicode"
 
 	"github.com/spf13/cobra"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 var tapGuardSandboxSecretsCmd = &cobra.Command{
@@ -104,14 +106,19 @@ var (
 )
 
 // sandboxSecretsNameWords are the words, between underscores, that make a variable name
-// secret-like: FORGEJO_TOKEN, DEEPSEEK_API_KEY, DB_PASSWORD. Whole words only, so
-// GIT_AUTHOR_NAME and MONKEY are not secrets.
+// secret-like beyond config.IsSecretKey: CACHE_KEY, DB_PASSWD, GH_CREDENTIALS. Whole words
+// only, so GIT_AUTHOR_NAME and MONKEY are not secrets.
 var sandboxSecretsNameWords = map[string]bool{
-	"TOKEN": true, "KEY": true, "SECRET": true, "PASSWORD": true, "PASSWD": true,
-	"CRED": true, "CREDS": true, "CREDENTIAL": true, "CREDENTIALS": true, "APIKEY": true,
+	"KEY": true, "PASSWD": true, "CRED": true, "CREDS": true, "CREDENTIAL": true, "CREDENTIALS": true,
 }
 
+// sandboxSecretsIsSecretName reports whether a variable name is secret-like. The markers
+// config uses to redact a credential decide first, so the guard never reads a name as
+// harmless that config would redact.
 func sandboxSecretsIsSecretName(name string) bool {
+	if config.IsSecretKey(name) {
+		return true
+	}
 	for _, w := range strings.Split(strings.ToUpper(name), "_") {
 		if sandboxSecretsNameWords[w] {
 			return true
