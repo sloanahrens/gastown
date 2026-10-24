@@ -22,6 +22,10 @@ DeepSeek polecats run in OpenShell sandboxes on Kubernetes, first on a local kin
 
 `deploy/k8s/kind/up.sh` builds the environment and prints the `export` line for the next shell; `--register-town` also copies the `k8s` entry and its client certificates into `~/.config/openshell`, where the daemon's `openshell -g k8s` looks. `down.sh` removes that town entry before it tears anything down, and refuses while `k8s` is the active gateway, since removing it would leave none selected (`--stop-vm` also stops the VM). `kind_test.sh` runs the stub-tool tests without a VM. Before changing a port, the profile or the directory, read the `GT_K8S_*` defaults in `deploy/k8s/kind/common.sh`.
 
+## Node pools (town cluster)
+
+The town cluster has a control plane and two workers, `core` and `sandbox`; the labels, the sandbox taint and which workloads each pool carries are in `deploy/k8s/kind/up.sh`, and the eviction order is in `deploy/k8s/priority-classes.yaml`. A node can read only the Secrets of pods scheduled on it, so sandbox pods, which tolerate the taint, share no node with the control plane's secrets.
+
 ## Things that cost time
 
 - **Chart pin.** Use OpenShell chart 0.1.4. The 0.1.5-pre.4 chart publishes a server certificate that its CA did not sign (`BadSignature`). There is no 0.1.5 chart tag.

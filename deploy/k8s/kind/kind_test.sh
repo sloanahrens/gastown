@@ -42,6 +42,7 @@ mkdir -p "$TMP/root/deploy/k8s"
 cp -R "$SCRIPT_DIR" "$TMP/root/deploy/k8s/kind"
 cp -R "$SCRIPT_DIR/../values" "$TMP/root/deploy/k8s/values"
 cp -R "$SCRIPT_DIR/../services" "$TMP/root/deploy/k8s/services"
+cp "$SCRIPT_DIR/../priority-classes.yaml" "$TMP/root/deploy/k8s/priority-classes.yaml"
 UP="$TMP/root/deploy/k8s/kind/up.sh"
 DOWN="$TMP/root/deploy/k8s/kind/down.sh"
 
@@ -93,6 +94,9 @@ cat >"$TMP/bin/kubectl" <<'STUB'
 #!/usr/bin/env bash
 "$(dirname "$0")/_log" kubectl "$@"
 case "$*" in
+  *"get nodes -l gt.dev/pool"*)
+    if [ -f "$STATE/kubectl-down" ]; then echo "The connection to the server 127.0.0.1:1 was refused" >&2; exit 1; fi
+    [ -f "$STATE/no-layout" ] || printf 'node/core-node\nnode/sandbox-node\n' ;;
   *"get secret openshell-client-tls"*)
     name=$(sed -n "s/.*\['\([^']*\)'\].*/\1/p" <<<"$*")
     printf 'FAKE-%s-SECRETVALUE' "$name" | base64 ;;
@@ -236,7 +240,7 @@ echo "fresh up"
 scenario up
 run "$UP" --
 check "up exits 0" test "$RC" -eq 0
-check "colima profile is started with its resources" contains "colima start gt-sbx --cpu 6 --memory 16 --disk 60 --vm-type vz --runtime docker" "$CALLS_LOG"
+check "colima profile is started with its resources" contains "colima start gt-sbx --activate=false --cpu 12 --memory 24 --disk 60 --vm-type vz --runtime docker" "$CALLS_LOG"
 check "the registry is started on a loopback port" contains "run -d --restart=always -p 127.0.0.1:5001:5000 --name gt-registry registry:2" "$CALLS_LOG"
 check "the registry exists before the cluster" before "docker run -d" "kind create cluster"
 kind_cfg="$(cat "$S/state/kind-config.yaml")"
@@ -255,7 +259,23 @@ check "the OpenShell chart is pinned to 0.1.4" contains "--version 0.1.4" "$helm
 check "the chart is not the broken pre-release" lacks "pre." "$helm_call"
 check "the chart is given the kind values file" contains "values/kind.yaml" "$helm_call"
 check "the NodePort service is applied" contains "gateway-nodeport.yaml" "$CALLS_LOG"
+check "colima is started without activating its docker context" contains "colima start gt-sbx --activate=false" "$CALLS_LOG"
 check "the NodePort service follows the chart install" before "helm upgrade --install" "gateway-nodeport.yaml"
+check "the kind config has a control plane and two workers" test "$(grep -c '^- role:' "$S/state/kind-config.yaml")" -eq 3
+check "the kind config has exactly two workers" test "$(grep -c '^- role: worker' "$S/state/kind-config.yaml")" -eq 2
+check "the core worker is labelled gt.dev/pool core" test "$(grep -cx '    gt.dev/pool: core' "$S/state/kind-config.yaml")" -eq 1
+check "the sandbox worker is labelled gt.dev/pool sandbox" test "$(grep -cx '    gt.dev/pool: sandbox' "$S/state/kind-config.yaml")" -eq 1
+check "the sandbox worker is tainted NoSchedule at registration" contains "effect: NoSchedule" "$(cat "$S/state/kind-config.yaml")"
+check "the taint is on the pool key with value sandbox" contains "      - key: gt.dev/pool
+        value: sandbox" "$(cat "$S/state/kind-config.yaml")"
+check "only one taint is declared" test "$(grep -c 'effect:' "$S/state/kind-config.yaml")" -eq 1
+check "the gateway port mapping stays on the control-plane node" test "$(awk '/^- role: control-plane/{f=1;next} /^- role:/{f=0} f&&/hostPort/{c++} END{print c+0}' "$S/state/kind-config.yaml")" -eq 1
+check "the priority classes are applied" contains "priority-classes.yaml" "$CALLS_LOG"
+check "the priority classes are applied before the chart" before "priority-classes.yaml" "helm upgrade --install"
+patch_args='-n agent-sandbox-system patch deployment agent-sandbox-controller --type merge -p {"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
+check "the agent-sandbox controller deployment is patched once with exactly the core nodeSelector" test "$(grep -cF -e "$patch_args" "$S/calls.log" || true)" -eq 1
+check "the controller is pinned before its rollout is awaited" before "patch deployment agent-sandbox-controller" "rollout status deployment/agent-sandbox-controller"
+check "the pool layout is checked with an exact label query" contains "get nodes -l gt.dev/pool" "$CALLS_LOG"
 check "the control-plane Services are applied" contains "services/control-plane.yaml" "$CALLS_LOG"
 check "the control-plane Services follow the NodePort service" before "gateway-nodeport.yaml" "services/control-plane.yaml"
 check "the client key is converted to PKCS8" contains "pkcs8 -topk8 -nocrypt" "$CALLS_LOG"
@@ -354,6 +374,24 @@ scenario unhealthy
 run "$UP" STUB_INFO_UNHEALTHY=1 GT_K8S_CERT_TRIES=3 --
 check "a gateway reporting unhealthy fails the run" test "$RC" -ne 0
 check "the run still says the gateway is not healthy" contains "not healthy" "$OUT_TEXT"
+
+echo "an existing cluster without the three-node layout"
+scenario oldlayout
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/no-layout"
+run "$UP" --
+check "a cluster without the pools is refused" test "$RC" -ne 0
+check "the message says how to rebuild it" contains "down.sh" "$OUT_TEXT"
+check "nothing is installed into the half-configured cluster" lacks "helm upgrade --install" "$CALLS_LOG"
+check "the priority classes are not applied to it either" lacks "priority-classes.yaml" "$CALLS_LOG"
+check "a missing layout is reported as missing, not as a kubectl error" lacks "cannot list the nodes" "$OUT_TEXT"
+scenario kubectldown
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/kubectl-down"
+run "$UP" --
+check "a failing node query fails the run" test "$RC" -ne 0
+check "the failure names the kubectl error, not a missing layout" contains "cannot list the nodes" "$OUT_TEXT"
+check "the kubectl error text is shown" contains "connection to the server" "$OUT_TEXT"
+check "a failing node query does not claim the layout is missing" lacks "lacks the core and sandbox nodes" "$OUT_TEXT"
+check "nothing is installed after a failing node query" lacks "helm upgrade --install" "$CALLS_LOG"
 
 echo "someone else owns the gateway port"
 scenario busy

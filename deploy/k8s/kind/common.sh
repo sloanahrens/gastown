@@ -19,6 +19,13 @@ OUT="${GT_K8S_DIR:-$HOME/gt/.runtime/sbx-k8s}"
 GATEWAY_PORT="${GT_K8S_GATEWAY_PORT:-28443}"
 REGISTRY_PORT="${GT_K8S_REGISTRY_PORT:-5001}"
 REGISTRY_NAME="gt-registry"
+# The town cluster is three nodes (control plane, core, sandbox), so the VM is
+# sized for them and for three concurrent sandboxes at the measured devops
+# peak (about 3 CPU / 6 GiB each): 12 CPU / 24 GiB. A running VM keeps its
+# size until it is stopped and started again.
+COLIMA_CPU="${GT_K8S_COLIMA_CPU:-12}"
+COLIMA_MEMORY="${GT_K8S_COLIMA_MEMORY:-24}"
+COLIMA_DISK="${GT_K8S_COLIMA_DISK:-60}"
 AGENT_SANDBOX_VERSION="v1.0.7"
 # Empty records the first fetch's digest next to the manifest; a release tag
 # can be re-pointed, so set this to pin the bytes before the first fetch.

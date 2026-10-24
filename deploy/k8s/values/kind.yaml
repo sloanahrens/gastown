@@ -4,3 +4,12 @@
 server:
   auth:
     allowUnauthenticatedUsers: true
+  drivers:
+    kubernetes:
+      # Lets gt (and the proofs) send per-sandbox node selectors, tolerations,
+      # a priority class and resources as driver config. Off by default.
+      allowDriverConfig: true
+# The gateway is a control-plane workload: keep it on the core node, off the
+# tainted sandbox node.
+nodeSelector:
+  gt.dev/pool: core
