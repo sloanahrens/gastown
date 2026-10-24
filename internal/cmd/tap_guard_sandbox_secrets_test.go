@@ -305,6 +305,16 @@ func TestSandboxSecretsNameAgreesWithConfig(t *testing.T) {
 			t.Errorf("guard blocks $%s = %v, config.LooksLikeSecret = %v", name, blocked, want)
 		}
 	}
+	// Each marker config redacts by name is probed as DB_<marker>, so a marker added to
+	// config is checked against the guard without a change to this test.
+	for _, marker := range config.SecretKeyMarkers() {
+		name := "DB_" + marker
+		want := config.LooksLikeSecret(name, value)
+		blocked, _ := runSandboxSecretsGuard(t, "openshell", "echo $"+name)
+		if blocked != want {
+			t.Errorf("guard blocks $%s = %v, config.LooksLikeSecret = %v", name, blocked, want)
+		}
+	}
 	for word := range sandboxSecretsNameWords {
 		name := "DB_" + word
 		want := config.LooksLikeSecret(name, value)
