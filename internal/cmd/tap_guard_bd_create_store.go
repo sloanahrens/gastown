@@ -16,6 +16,17 @@ import (
 // file into the town store.
 const bdCreateStoreRefusal = "file it in your rig: cd to your worktree"
 
+// bdCreateNestingRefusal is the verdict for a nested shell past
+// maxTestGuardNestDepth that may hold a bd create: the guard will not name the
+// directory it runs in, so it cannot tell which store it would file into.
+const bdCreateNestingRefusal = "shells nested too deep to name the store this bd create would file into; run it in its own Bash call"
+
+// bdCreatePresenceDepth bounds bdCreateSomewhere's walk through nested shell
+// text. It is larger than maxTestGuardNestDepth because the presence check is
+// what the depth cap consults: stopping at the same depth would miss the
+// create the cap exists to refuse.
+const bdCreatePresenceDepth = 16
+
 var tapGuardBdCreateStoreCmd = &cobra.Command{
 	Use:   "bd-create-store",
 	Short: "Block a polecat's bd create that would file into the town (hq) store",
@@ -25,10 +36,12 @@ the town's beads store.
 bd picks its store from the directory it runs in: inside a polecat worktree it
 is the rig's store, at the town root (~/gt on a host, /sandbox/gt in a sandbox)
 it is the town's hq store. A work bug filed there is invisible to the rig's
-dispatcher. The effective directory is the hook payload's cwd moved by every
-literal cd earlier in the same command; a cd whose target cannot be resolved
-before a bd create is refused too. gt escalate, gt ask and gt done create town
-beads inside gt itself and never reach this hook.
+dispatcher. The effective directory is the hook payload's cwd moved by the cd
+segments that carry to a later command on the same shell line — not one in a
+subshell, pipeline or background job — and a cd this guard cannot place before
+a bd create is refused. BEADS_DIR, in the process env or as an inline
+assignment, names the store instead. gt escalate, gt ask and gt done create
+town beads inside gt itself and never reach this hook.
 
 Exit codes:
   0 - Allowed (not a polecat, not a bd create, or the store is the rig's)
@@ -42,12 +55,11 @@ func init() {
 	tapGuardCmd.AddCommand(tapGuardBdCreateStoreCmd)
 }
 
-// bdCreateVerbs are the bd subcommands that file a new bead.
-var bdCreateVerbs = map[string]bool{"create": true, "new": true, "q": true}
-
 func tapGuardBdCreateStore(stdin io.Reader, stderr io.Writer, proc guardProcess) error {
 	input, err := io.ReadAll(stdin)
 	if err != nil {
+		// Unreadable payload: no command to judge, the same reading the other
+		// guards give their own input errors.
 		return nil
 	}
 	command := extractCommand(input)
@@ -62,10 +74,11 @@ func tapGuardBdCreateStore(stdin io.Reader, stderr io.Writer, proc guardProcess)
 	}
 	townRoot, err := workspace.Find(cwd)
 	if err != nil || strings.TrimSpace(townRoot) == "" {
+		// Outside a town there is no town store to confuse the rig's with.
 		return nil
 	}
 	g := bdCreateStoreGuard{proc: proc, townStore: filepath.Join(townRoot, ".beads")}
-	reason := g.walk(command, cwd, 0)
+	reason := g.evaluate(command, cwd, true, 0)
 	if reason == "" {
 		return nil
 	}
@@ -78,118 +91,200 @@ type bdCreateStoreGuard struct {
 	townStore string
 }
 
-// walk judges every bd create in command, following literal cd words. cwd ""
-// means a cd target was unresolvable.
-func (g bdCreateStoreGuard) walk(command, cwd string, depth int) string {
-	if depth > 3 {
-		return "command nesting too deep to follow"
+// evaluate judges command as a shell starting in cwd, one segment at a time.
+// cwdKnown is false for a -c payload whose directory the walk could not place;
+// nothing in that payload is then read against a directory the shell never
+// named, and a bd create in it is refused as unplaceable.
+//
+// Segment directories come from segmentWalkRoot, so a cd in a subshell,
+// pipeline or background job is not carried to the commands after it, and an
+// "&&" list whose cd fails does not name a directory its remainder never
+// reaches.
+func (g bdCreateStoreGuard) evaluate(command, cwd string, cwdKnown bool, depth int) string {
+	stripped := strings.TrimSpace(stripHeredocBodies(command))
+	tokens := shellTokenize(stripped)
+	vars := shellVarAssignments(tokens)
+	judge := func(segment []string, start int) string {
+		segment = commandSegment(segment)
+		dir, known := segmentWalkRoot(g.proc, tokens, start, cwd, vars)
+		known = known && cwdKnown
+		if reason := g.judgeSegment(segment, dir, known); reason != "" {
+			return reason
+		}
+		payloads := segmentPayloads(tokens, start, segment)
+		if depth >= maxTestGuardNestDepth {
+			if bdCreateInScripts(payloads, depth) {
+				return bdCreateNestingRefusal
+			}
+			return ""
+		}
+		if !known {
+			dir = cwd
+		}
+		for _, payload := range payloads {
+			if reason := g.evaluate(payload, dir, known, depth+1); reason != "" {
+				return reason
+			}
+		}
+		return ""
 	}
-	stripped := stripHeredocBodies(strings.TrimSpace(command))
+
 	var segment []string
-	judge := func() string {
-		reason, next := g.segment(segment, cwd, depth)
-		cwd = next
-		return reason
-	}
-	for _, tok := range shellTokenize(stripped) {
+	start := 0
+	for i, tok := range tokens {
 		if shellCommandSeparators[tok] {
-			if reason := judge(); reason != "" {
+			if reason := judge(segment, start); reason != "" {
 				return reason
 			}
 			segment = nil
+			start = i + 1
 			continue
 		}
 		segment = append(segment, tok)
 	}
-	if reason := judge(); reason != "" {
+	if reason := judge(segment, start); reason != "" {
 		return reason
 	}
-	for _, body := range commandSubstitutions(stripped) {
-		if reason := g.walk(body, cwd, depth+1); reason != "" {
+
+	scripts := substitutionScripts(g.proc, stripped, cwd, cwdKnown)
+	if depth >= maxTestGuardNestDepth {
+		for _, script := range scripts {
+			if bdCreateSomewhere(script.body, depth) {
+				return bdCreateNestingRefusal
+			}
+		}
+		return ""
+	}
+	for _, script := range scripts {
+		if reason := g.evaluate(script.body, script.dir, script.known, depth+1); reason != "" {
 			return reason
 		}
 	}
 	return ""
 }
 
-// segment judges one simple command and returns the directory later segments
-// run in.
-func (g bdCreateStoreGuard) segment(segment []string, cwd string, depth int) (reason, next string) {
-	beadsDir := ""
-	for _, tok := range segment {
-		if !isEnvAssignment(tok) {
-			break
-		}
-		if v, ok := strings.CutPrefix(tok, "BEADS_DIR="); ok {
-			beadsDir = v
-		}
+// judgeSegment judges one simple command, filed in dir (known false when the
+// walk could not place it).
+func (g bdCreateStoreGuard) judgeSegment(segment []string, dir string, known bool) string {
+	segment = commandSegment(segment)
+	if !isBdCreateSegment(segment) {
+		return ""
 	}
-	tokens := bdCloseCommandTokens(segment)
-	if len(tokens) == 0 {
-		return "", cwd
-	}
-	word, args := tokens[0], tokens[1:]
-	base := filepath.Base(word)
-	switch {
-	case base == "cd" || base == "pushd":
-		return "", g.followCd(args, cwd)
-	case isBdCommandWord(word):
-		if i := bdSubcommandIndex(args); i >= 0 && bdCreateVerbs[args[i]] {
-			return g.judgeCreate(cwd, beadsDir), cwd
-		}
-	default:
-		if payload, ok := shellPayload(base, args); ok {
-			return g.walk(payload, cwd, depth+1), cwd
-		}
-	}
-	return "", cwd
+	return g.judgeCreate(dir, known, inlineBeadsDir(segment))
 }
 
-func (g bdCreateStoreGuard) judgeCreate(cwd, beadsDir string) string {
+// judgeCreate refuses a bd create whose store is the town's. beadsDir is the
+// inline BEADS_DIR ("": none); a relative one is resolved against the
+// invocation's directory, as the shell resolves it, so an unknown directory
+// leaves it unplaceable.
+func (g bdCreateStoreGuard) judgeCreate(dir string, known bool, beadsDir string) string {
+	const unplaceable = "a cd before this bd create has a target this guard cannot resolve; use a literal path, or run the bd create in its own Bash call"
 	if beadsDir == "" {
 		beadsDir = g.proc.getenv("BEADS_DIR")
-	}
-	if beadsDir == "" {
-		if cwd == "" {
-			return "a cd before this bd create has a target this guard cannot resolve; use a literal path, or run the bd create in its own Bash call"
+		if beadsDir == "" {
+			if !known {
+				return unplaceable
+			}
+			beadsDir = dir
 		}
-		beadsDir = cwd
 	}
+	path, ok := expandHomePath(g.proc, beadsDir)
+	if !ok {
+		return unplaceable
+	}
+	if !filepath.IsAbs(path) {
+		if !known {
+			return unplaceable
+		}
+		path = filepath.Join(dir, path)
+	}
+	beadsDir = path
 	if sameDir(beads.ResolveBeadsDir(beadsDir), g.townStore) {
 		return "this bd create resolves to the town (hq) store"
 	}
 	return ""
 }
 
-// followCd returns the directory a cd leaves the shell in, "" when the target
-// is not a plain path (an unset variable, a substitution, cd -).
-func (g bdCreateStoreGuard) followCd(args []string, cwd string) string {
-	target := ""
-	for _, a := range args {
-		if !strings.HasPrefix(a, "-") || a == "-" {
-			target = a
-			break
+// bdCreateVerbs are the bd subcommands that file a new bead.
+var bdCreateVerbs = map[string]bool{"create": true, "new": true, "q": true}
+
+// isBdCreateSegment reports whether segment's command word is bd and its
+// subcommand one of bdCreateVerbs, so `bd list` and `gt escalate "bd create"`
+// (which runs no bd) are not judged.
+func isBdCreateSegment(segment []string) bool {
+	tokens := bdCloseCommandTokens(segment)
+	if len(tokens) == 0 || !isBdCommandWord(tokens[0]) {
+		return false
+	}
+	rest := tokens[1:]
+	if i := bdSubcommandIndex(rest); i >= 0 {
+		return bdCreateVerbs[rest[i]]
+	}
+	return false
+}
+
+// inlineBeadsDir returns the BEADS_DIR a segment's leading assignments name,
+// looking past the clause and group openers bdCloseCommandTokens steps over so
+// `then BEADS_DIR=<town> bd create` is read too.
+func inlineBeadsDir(segment []string) string {
+	for _, tok := range segment {
+		if bdCloseLeadWords[tok] {
+			continue
+		}
+		if value, ok := strings.CutPrefix(tok, "BEADS_DIR="); ok {
+			return value
+		}
+		if !isEnvAssignment(tok) {
+			return ""
 		}
 	}
-	home, _ := g.proc.homeDir()
-	switch {
-	case target == "" || target == "~":
-		target = home
-	case strings.HasPrefix(target, "~/"):
-		target = filepath.Join(home, target[2:])
-	case strings.HasPrefix(target, "$HOME/"):
-		target = filepath.Join(g.proc.getenv("HOME"), target[len("$HOME/"):])
+	return ""
+}
+
+// bdCreateInScripts reports whether any of the nested command lines holds a bd
+// create, the reading the depth cap needs before it refuses a shell it will
+// not walk.
+func bdCreateInScripts(scripts []string, depth int) bool {
+	for _, script := range scripts {
+		if bdCreateSomewhere(script, depth) {
+			return true
+		}
 	}
-	if target == "" || target == "-" || strings.ContainsAny(target, "$`*?[") {
-		return ""
+	return false
+}
+
+// bdCreateSomewhere reports whether command, or a shell payload or command
+// substitution it runs, spells a bd create in any segment. It does not follow
+// cd — it answers one question, so a deeply nested command that runs no bd
+// create is allowed rather than blocked for its nesting alone.
+func bdCreateSomewhere(command string, depth int) bool {
+	if depth > bdCreatePresenceDepth {
+		return false
 	}
-	if filepath.IsAbs(target) {
-		return filepath.Clean(target)
+	stripped := strings.TrimSpace(stripHeredocBodies(command))
+	tokens := shellTokenize(stripped)
+	var segment []string
+	judge := func() bool {
+		segment = commandSegment(segment)
+		if isBdCreateSegment(segment) {
+			return true
+		}
+		return bdCreateInScripts(shellCPayloads(segment), depth+1)
 	}
-	if cwd == "" {
-		return ""
+	for _, tok := range tokens {
+		if shellCommandSeparators[tok] {
+			if judge() {
+				return true
+			}
+			segment = nil
+			continue
+		}
+		segment = append(segment, tok)
 	}
-	return filepath.Join(cwd, target)
+	if judge() {
+		return true
+	}
+	return bdCreateInScripts(commandSubstitutions(stripped), depth+1)
 }
 
 // sameDir compares two directories, following symlinks that exist (a macOS
