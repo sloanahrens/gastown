@@ -1996,6 +1996,20 @@ func TestHeredocReaderWalkBackHonorsBackslashParity(t *testing.T) {
 		// An odd run still continues the line, so the invoker above joins the
 		// operator line and the body is its script.
 		{"an odd backslash run above the operator line continues it", "bash \\\\\\\n  <<'EOF'\ngit reset --hard\nEOF", true},
+		// A non-word-leading "#" is literal, so the backslash after it still
+		// continues the line and the invoker above joins the operator line.
+		{"a non-comment hash above a trailing backslash continues the line", "bash x#y \\\n<<'EOF'\ngit reset --hard\nEOF", true},
+		// A double quote opened on an earlier line is still open on this one,
+		// so the "#" is literal and the backslash continues the line into the
+		// operator line; bash, which opened the quote, reads the body.
+		{"a quote opened above carries a hash line into the operator line", "bash \"q\nz # w \\\n\" <<'EOF'\nsudo rm -rf /tmp\nEOF", true},
+		// A comment that starts its own line ends at the newline, so the line
+		// above is not joined and cat reads the body as data.
+		{"a comment starting a line does not join the operator line", "echo a\n# bash \\\ncat <<'EOF'\ngit reset --hard\nEOF", false},
+		// The even run is an escaped backslash inside the open double quote,
+		// so the newline after it is still inside the string and the line
+		// continues into the operator line, which bash's quote reaches.
+		{"an even backslash run inside an open quote still continues the line", "bash \"q\nz \\\\\n\" <<'EOF'\nsudo rm -rf /tmp\nEOF", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

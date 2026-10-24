@@ -523,6 +523,7 @@ func scanHeredocs(command string) []heredocSpan {
 	}
 	var spans []heredocSpan
 	stripped := 0 // end of the last accepted body; nothing before it starts a heredoc
+	anchor := 0   // end of the last accepted body: the line after it starts a logical line
 	walk := heredocQuoteWalk{runes: []rune(command), prevIdx: -1}
 	for _, m := range matches {
 		start, end := m[0], m[1]
@@ -538,7 +539,7 @@ func scanHeredocs(command string) []heredocSpan {
 		allowIndent := command[m[2]:m[3]] == "-"
 		quoted := m[5] > m[4]
 		tag := command[m[6]:m[7]]
-		reader, readerStart := heredocReaderLine(command, start, end)
+		reader, readerStart := heredocReaderLine(command, start, end, anchor)
 		cmdText := heredocCmdText(command, &walk, start, end)
 
 		// The body follows the newline that ends the logical line, so a
@@ -589,6 +590,7 @@ func scanHeredocs(command string) []heredocSpan {
 			cmdText:     cmdText,
 		})
 		stripped = bodyEnd
+		anchor = bodyEnd
 		walk.skipTo(bodyEnd)
 	}
 	return spans
@@ -1005,7 +1007,9 @@ func heredocLineEnd(command string, from int) int {
 	// string, in which a backslash escapes the quote (gt-s3pi5).
 	var quote byte
 	comment := false
-	wordStart := false // the byte before i is an unquoted, unescaped word break
+	// The byte before i is an unquoted, unescaped word break. A line start is
+	// one too, so a "#" that opens the line is a comment.
+	wordStart := from == 0 || command[from-1] == '\n'
 	for i := from; i < len(command); i++ {
 		c := command[i]
 		switch {
@@ -1042,6 +1046,22 @@ func heredocLineEnd(command string, from int) int {
 	return len(command)
 }
 
+// logicalLineEndsAt reports whether the newline at nl ends a logical line. It
+// steps from one line end to the next, starting at anchor, a line start where
+// the shell begins a logical line: the start of the text, or the line after the
+// last heredoc body. A scan that began at an arbitrary line start would miss a
+// quote or comment that the lines above opened, and so judge a line the shell
+// still holds open as ended (gt-8nvms).
+func logicalLineEndsAt(command string, anchor, nl int) bool {
+	for p := anchor; ; {
+		end := heredocLineEnd(command, p)
+		if end >= nl {
+			return end == nl
+		}
+		p = end + 1
+	}
+}
+
 // heredocReaderLine returns the text of the line the heredoc operator at
 // [start,end) sits on, with the operator itself removed, and the offset that
 // line starts at. The text after the operator stays: in "cat <<EOF | bash"
@@ -1049,28 +1069,17 @@ func heredocLineEnd(command string, from int) int {
 // consumes the body. The offset is the start of the whole logical line, so a
 // caller can read the command text preceding it (gt-v02wh). A continued line
 // is part of the logical line, so its pipe stage is in the reader (gt-f1kny).
-func heredocReaderLine(command string, start, end int) (string, int) {
+// anchor is where the shell starts a logical line, as logicalLineEndsAt needs.
+func heredocReaderLine(command string, start, end, anchor int) (string, int) {
 	lineStart := strings.LastIndexByte(command[:start], '\n') + 1
 	// "bash \" + newline + "<<EOF" still hands the body to bash, so walk back
-	// over line continuations to keep the invoker on the reader line. Only an
-	// odd run of trailing backslashes continues the line: in an even run each
-	// backslash escapes the next, so the shell ends the line at the newline
-	// and the line above is not part of the reader (gt-fke2f). A backslash
-	// inside a "#" comment continues nothing either: the comment runs to the
-	// newline, so heredocLineEnd, which tracks comments, ends the line there
-	// (gt-3vky2).
-	for lineStart > 0 {
-		prevEnd := lineStart - 1
-		prevStart := strings.LastIndexByte(command[:prevEnd], '\n') + 1
-		prev := strings.TrimRight(command[prevStart:prevEnd], " \t")
-		n := 0
-		for n < len(prev) && prev[len(prev)-1-n] == '\\' {
-			n++
-		}
-		if n%2 == 0 || heredocLineEnd(command, prevStart) == prevEnd {
-			break
-		}
-		lineStart = prevStart
+	// over line continuations to keep the invoker on the reader line. A line
+	// above joins unless the shell ends it at that newline: an escaped newline
+	// continues the line, and so does one inside a quote an earlier line opened,
+	// while a "#" comment runs to its newline and ends the line there (gt-3vky2,
+	// gt-fke2f). Nothing above the anchor is on the line: it is a heredoc body.
+	for lineStart > anchor && !logicalLineEndsAt(command, anchor, lineStart-1) {
+		lineStart = strings.LastIndexByte(command[:lineStart-1], '\n') + 1
 	}
 	lineEnd := heredocLineEnd(command, end)
 	// Drop the continuations themselves: left in place they glue onto the
