@@ -1,5 +1,4 @@
-"""Host group of the snapshot: CPU idle, bd latency, Dolt connections, Docker disk (gt-a8bei).
-A stub until that bead fills it in."""
+"""Host group of the snapshot. A stub until gt-6068c fills in its columns."""
 GROUP = "host"
 
 

@@ -1,4 +1,4 @@
-"""Money group of the snapshot: spend read from files already on disk (gt-4vurb). A stub until that bead fills it in."""
+"""Money group of the snapshot. A stub until gt-vo55o fills in its columns."""
 GROUP = "money"
 
 

@@ -1,5 +1,4 @@
-"""Attention group of the snapshot: open attention items by kind, acks by disposition (gt-6068c).
-A stub until that bead fills it in."""
+"""Attention group of the snapshot. A stub until gt-4vurb fills in its columns."""
 GROUP = "attention"
 
 
