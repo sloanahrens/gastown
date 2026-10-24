@@ -161,7 +161,7 @@ func (c *BeadsRedirectTargetCheck) Run(ctx *CheckContext) *CheckResult {
 }
 
 // Fix attempts to repair broken redirect targets by recomputing redirects.
-// If the canonical beads location exists, SetupRedirect will point to it.
+// If the canonical beads location exists, beads.ComputeRedirectTarget will point to it.
 // If a target directory exists but is missing config.yaml, it is created
 // from metadata.json defaults (this handles partial rig setups where the
 // dolt database was initialized but config.yaml was not written).
@@ -262,48 +262,12 @@ func hasBeadsSetup(beadsDir string) bool {
 	return false
 }
 
-// recomputeRedirect rewrites a worktree's .beads/redirect to point to the correct target.
+// recomputeRedirect rewrites a worktree's .beads/redirect to the target
+// beads.ComputeRedirectTarget gives, so this check and the stale-redirect check agree (gt-7po79).
 func recomputeRedirect(townRoot, worktreePath string) error {
-	relPath, err := filepath.Rel(townRoot, worktreePath)
+	redirectContent, err := beads.ComputeRedirectTarget(townRoot, worktreePath)
 	if err != nil {
 		return err
-	}
-	parts := strings.Split(filepath.ToSlash(relPath), "/")
-	if len(parts) < 2 {
-		return fmt.Errorf("invalid worktree path")
-	}
-
-	rigRoot := filepath.Join(townRoot, parts[0])
-	rigBeads := filepath.Join(rigRoot, ".beads")
-	mayorBeads := filepath.Join(rigRoot, "mayor", "rig", ".beads")
-
-	// Compute depth from worktree to rig root
-	depth := len(parts) - 1
-	upPath := strings.Repeat("../", depth)
-
-	var redirectContent string
-	switch {
-	case hasBeadsSetup(rigBeads):
-		// Check if rig beads has its own redirect (tracked beads case)
-		rigRedirectFile := filepath.Join(rigBeads, "redirect")
-		if data, err := os.ReadFile(rigRedirectFile); err == nil {
-			rigTarget := strings.TrimSpace(string(data))
-			if rigTarget != "" {
-				// Skip intermediate hop, redirect directly to final destination.
-				// Absolute paths are passed through as-is (same logic as beads.ComputeRedirectTarget).
-				if filepath.IsAbs(rigTarget) {
-					redirectContent = rigTarget
-				} else {
-					redirectContent = upPath + rigTarget
-				}
-				break
-			}
-		}
-		redirectContent = upPath + ".beads"
-	case hasBeadsSetup(mayorBeads):
-		redirectContent = upPath + "mayor/rig/.beads"
-	default:
-		return fmt.Errorf("no valid beads location found")
 	}
 
 	// Ensure .beads directory exists
