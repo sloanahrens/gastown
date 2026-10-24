@@ -44,10 +44,10 @@ func (e sandboxSessionEnd) logf(format string, args ...any) {
 // endSandboxSessionIfDone ends the agent's tmux session in a sandbox once gt done
 // completed cleanly, so the sandbox's main process, which waits on that session,
 // exits and the gateway deletes the sandbox. It reports whether it scheduled the
-// end. A host session, a polecat that has not finished, and one that exited
-// DEFERRED or ESCALATED, or still holds unpushed work, are left alone: the
-// sandbox clone holds the only copy of that work. A sandbox session it leaves is
-// logged with the reason, so a sandbox that stays up can be explained.
+// end. A host session, a polecat that has not finished, or one that still holds
+// unpushed work, is left alone: the sandbox clone holds the only copy of that
+// work. A sandbox session it leaves is logged with the reason, so a sandbox that
+// stays up can be explained.
 func endSandboxSessionIfDone(e sandboxSessionEnd, getenv func(string) string, townRoot, rig, polecatName, sessionName string) bool {
 	if getenv("GT_SESSION_BACKEND") != session.BackendOpenShell {
 		return false
@@ -77,21 +77,17 @@ func endSandboxSessionIfDone(e sandboxSessionEnd, getenv func(string) string, to
 	return true
 }
 
-// sandboxPolecatNotFinished returns why a polecat is not a clean, pushed
-// finish, or "" when it is: gt done completed (agent_state done, hook cleared,
-// exit COMPLETED when recorded) or ended with a final DEFERRED or ESCALATED exit
-// (agent_state stuck, which gt done writes for every exit but COMPLETED), and its
-// own cleanup report says nothing is uncommitted, stashed or unpushed. A host
-// polecat's session is retired after every final exit; a sandbox's would idle
-// for ever on a deferred one, because its bead stays hooked and the daemon
-// deletes the sandbox only once the bead leaves hooked (gt-e0pq6). The patrol
-// restarts the seat from the pushed branch once the session is gone.
-// finalStuckExit reports whether the record is the one gt done writes for a final
-// DEFERRED or ESCALATED exit: agent_state stuck beside that exit type.
+// finalStuckExit reports whether f is the record gt done writes for a final
+// DEFERRED or ESCALATED exit. The work bead stays hooked for the resume, so the
+// daemon never deletes the sandbox; ending the session is what frees the seat
+// (gt-e0pq6).
 func finalStuckExit(f *beads.AgentFields) bool {
 	return f.AgentState == string(beads.AgentStateStuck) && (f.ExitType == "DEFERRED" || f.ExitType == "ESCALATED")
 }
 
+// sandboxPolecatNotFinished returns why a polecat's session may not end, or ""
+// when it may: its gt done finished (completed, or a final DEFERRED or ESCALATED
+// exit) with the bead unhooked and the cleanup report clean.
 func sandboxPolecatNotFinished(f *beads.AgentFields) string {
 	switch {
 	case f == nil:
@@ -102,7 +98,7 @@ func sandboxPolecatNotFinished(f *beads.AgentFields) string {
 		return fmt.Sprintf("hook_bead %s is still set", f.HookBead)
 	case f.CleanupStatus != string(polecat.CleanupClean):
 		return fmt.Sprintf("cleanup_status is %q, not clean, and the sandbox clone may hold the only copy of the work", f.CleanupStatus)
-	case f.AgentState == string(beads.AgentStateDone) && f.ExitType != "" && f.ExitType != "COMPLETED":
+	case !finalStuckExit(f) && f.ExitType != "" && f.ExitType != "COMPLETED":
 		return fmt.Sprintf("exit_type is %s, not COMPLETED", f.ExitType)
 	}
 	return ""
