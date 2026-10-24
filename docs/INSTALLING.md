@@ -503,15 +503,12 @@ make uninstall             # the directory comes from INSTALL_DIR
 ```
 
 `make uninstall` runs `scripts/uninstall-gt.sh`, which removes `<INSTALL_DIR>/gt`
-and `<INSTALL_DIR>/bd` and nothing else. Run the script directly and it takes
-`--install-dir`, or `$INSTALL_GT_BIN_DIR`, or `$INSTALL_DIR` — the names
-`install-gt.sh` accepts, with `$INSTALL_GT_BIN_DIR` winning — and prints which
-one named the directory. The directory is named, not looked up:
-`command -v` answers what runs if you type `gt`, and in a running town that is
-the live install every agent on the host runs from — which is how the recipe
+and `<INSTALL_DIR>/bd` and nothing else. The directory is named, never looked
+up: `command -v` answers what runs if you type `gt`, and in a running town that
+is the live install every agent on the host runs from — which is how the recipe
 this replaces resolved to the town's own binaries and deleted them (gt-acdfp).
-The script also clears the OS-immutable flag `make install` leaves on the binary
-(gt-vya0s) before removing it.
+Before running the script directly, read its header for the flags that name the
+directory.
 
 Handed the live install of a town — `$HOME/.local/bin` with a town at or above
 the clone — the script refuses, exits 2 and names the town. Removing the
