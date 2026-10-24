@@ -286,12 +286,13 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 	for _, readings := range groups {
 		// The readings are alternatives to one another, so each starts from the
 		// directory its segment starts in, and only the first reading's cd carries
-		// on to the next segment (gt-lhn14).
-		entry, carried := s, s
+		// on to the next segment (gt-lhn14). Shadowing the scope inside the loop
+		// makes every reading start from entry: a later reading cannot inherit
+		// where an earlier one walked.
+		entry := s
+		carried := s
 		for i, segment := range readings {
-			if i == 1 {
-				carried, s = s, entry
-			}
+			s := entry
 			cmdline := trimShellKeywords(segment)
 			word, args := segmentCommandWord(cmdline)
 			// A launcher can carry a construct rather than a command — `time ( rm
@@ -373,9 +374,9 @@ func (s polecatPathScope) checkBashCommand(command string, depth int) string {
 					}
 				}
 			}
-		}
-		if len(readings) == 1 {
-			carried = s
+			if i == 0 {
+				carried = s
+			}
 		}
 		s = carried
 	}
@@ -1926,15 +1927,28 @@ const maxSegmentReadings = 64
 // readings outnumber maxSegmentReadings; the caller refuses the command instead
 // of walking part of them.
 func segmentReadings(segment []string) (readings [][]string, ok bool) {
+	return segmentReadingsWithin(segment, maxSegmentReadings)
+}
+
+// segmentReadingsWithin is segmentReadings with a budget: it returns at most
+// budget readings and refuses a variant that would not fit in what is left,
+// so a segment with more readings than the cap is refused as soon as it
+// overflows instead of after the recursion has built them (gt-lhn14).
+func segmentReadingsWithin(segment []string, budget int) (readings [][]string, ok bool) {
+	if budget < 1 {
+		return nil, false
+	}
 	readings = [][]string{segment}
+	budget--
 	// add appends the readings of one variant of the segment, and reports
-	// whether they still fit within maxSegmentReadings.
+	// whether they still fit within the remaining budget.
 	add := func(variant []string) bool {
-		more, ok := segmentReadings(variant)
-		if !ok || len(readings)+len(more) > maxSegmentReadings {
+		more, ok := segmentReadingsWithin(variant, budget)
+		if !ok {
 			return false
 		}
 		readings = append(readings, more...)
+		budget -= len(more)
 		return true
 	}
 	for i := 0; i < len(segment); i++ {
@@ -1956,7 +1970,7 @@ func segmentReadings(segment []string) (readings [][]string, ok bool) {
 			break
 		}
 	}
-	return readings, len(readings) <= maxSegmentReadings
+	return readings, true
 }
 
 // withoutTokens returns a copy of segment with the tokens [from, to) removed.

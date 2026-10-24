@@ -782,6 +782,55 @@ func TestPolecatPathGuardBashGroupingConstructs(t *testing.T) {
 	}
 }
 
+// TestPolecatPathGuardReadingsStartFromEntry: the readings of a segment are
+// alternatives, so a cd in one must not move where the next resolves from.
+// The ")" reading here is `cd sub`; the payload reading after it still stands
+// where the segment starts, where a `cd -` has no directory this line made,
+// so that payload is refused (gt-lhn14).
+func TestPolecatPathGuardReadingsStartFromEntry(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	for _, tc := range []struct {
+		name      string
+		command   string
+		wantBlock bool
+	}{
+		{"payload with cd - after a reading that cd'd", `X=$(echo ")" ) cd sub ) bash -c "cd -; echo hi"`, true},
+		{"payload echoing after a reading that cd'd", `X=$(echo ")" ) cd sub ) bash -c "echo hi"`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := p.run(t, "Bash", commandInput(tc.command))
+			if tc.wantBlock && err == nil {
+				t.Errorf("command %q: expected BLOCK, got allow", tc.command)
+			}
+			if !tc.wantBlock && err != nil {
+				t.Errorf("command %q: expected allow, got block: %v", tc.command, err)
+			}
+		})
+	}
+}
+
+// TestPolecatPathGuardRefusesTooManyReadings drives the reading cap through
+// the guard: past the cap the whole segment is refused, even when no reading
+// writes anything (gt-lhn14).
+func TestPolecatPathGuardRefusesTooManyReadings(t *testing.T) {
+	t.Parallel()
+	p := newPolecatTestTown(t)
+	var parts []string
+	for i := 0; i < 6; i++ {
+		parts = append(parts, fmt.Sprintf("V%d=$(echo", i), `")"`, ")")
+	}
+	command := strings.Join(append(parts, "echo", "hi"), " ")
+	var stderr strings.Builder
+	payload := fmt.Sprintf(`{"tool_name":%q,"cwd":%q,"tool_input":%s}`, "Bash", p.worktree, commandInput(command))
+	if err := tapGuardPolecatPaths(strings.NewReader(payload), &stderr, p.proc()); err == nil {
+		t.Fatalf("command %q allowed: its readings outnumber the guard's cap", command)
+	}
+	if !strings.Contains(stderr.String(), "too many readings") {
+		t.Errorf("command %q: stderr %q, want the too-many-readings refusal", command, stderr.String())
+	}
+}
+
 // TestScanCommandVars pins what the assignment scanner sees, since a name it
 // misses is a name the guard resolves from a stale environment, and a name it
 // invents would refuse a legitimate literal target.
