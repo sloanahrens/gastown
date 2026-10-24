@@ -382,6 +382,9 @@ func sandboxSecretsWalk(command string, depth int, inherited map[string]bool) (r
 			// eval runs its argument as a script, and reads a substitution's output the way a shell does.
 			shells = true
 			payloads = append(payloads, strings.Join(argv[1:], " "))
+		case name == "source" || name == ".":
+			// source and . run the file they name as a script, so a substitution's output is one, as sh <(...) is.
+			shells = true
 		}
 	}
 	if sandboxSecretsHeredocRefsSecret(command) {
