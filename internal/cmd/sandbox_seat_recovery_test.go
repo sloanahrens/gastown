@@ -387,6 +387,53 @@ func TestCheckPolecatSafetyOfAGoneSandboxSeat(t *testing.T) {
 	}
 }
 
+// A sandbox seat the patrol now calls dead is not "gone" to the nuke gate: the
+// gateway still lists the sandbox, so its git state is unknown and the gate
+// keeps refusing the nuke on the work it holds against the bead. A dead seat's
+// cleanup status is the one its last turn left (clean, here), so the hook is
+// what the refusal rests on, and the gate never reads the dead sandbox's work as
+// clean and nukable (gt-tj446, gt-qq6rg.3).
+func TestCheckPolecatSafetyOfADeadSandboxSeat(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+	r := &rig.Rig{Name: "gastown", Path: filepath.Join(town, "gastown")}
+	fake := mrlessBeads{beadsfake.New()}
+	agentID := polecatBeadIDForRig(r, "gastown", "ember")
+	if _, err := fake.Create(beads.CreateOptions{
+		ID: agentID, Title: agentID, Labels: []string{"gt:agent"}, Priority: -1,
+		Description: beads.FormatAgentDescription(agentID, &beads.AgentFields{
+			RoleType: "polecat", Rig: "gastown", AgentState: string(beads.AgentStateIdle),
+			CleanupStatus: string(polecat.CleanupClean), Agent: sandboxSeatAgent,
+			Branch: "polecat/ember/gt-a+x", HookBead: "gt-work",
+		}),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fake.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
+		t.Fatal(err)
+	}
+	env := sandboxSeatEnv{
+		probe: func(string, string) (polecat.LiveGitState, bool) {
+			// Listed by the gateway in a terminal failure phase: not gone, and
+			// its work cannot be measured from the host.
+			return polecat.SandboxSeatGitState("", true, nil, "gt-ember"), true
+		},
+	}
+	get := func(string) (*polecat.Polecat, error) {
+		return &polecat.Polecat{Name: "ember", Branch: "polecat/ember/gt-a+x"}, nil
+	}
+
+	result := checkPolecatSafetyWith("gastown", "ember", r, get, fake, env)
+
+	joined := strings.Join(result.Reasons, " | ")
+	if !result.Blocked {
+		t.Fatal("a dead sandbox seat holding gt-work is nukable; want refused")
+	}
+	if !strings.Contains(joined, "gt-work") {
+		t.Fatalf("reasons = %q, want one naming gt-work", joined)
+	}
+}
+
 // Both lost-work checks now ask origin about the branch one shared rule names,
 // and that rule trims: a record that is only whitespace names nothing to ask
 // about, so the checks fail closed rather than query origin for " ". A parsed

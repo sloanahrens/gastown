@@ -189,6 +189,14 @@ func copyOf(p *intent.Progress) *intent.Progress {
 	return &c
 }
 
+// DeadResult is a Dead verdict for a caller that knows the seat is dead without
+// a tmux answer, such as a sandbox whose gateway phase has been a terminal
+// failure past its grace (gt-tj446). It counts the sample exactly as a dead
+// probe does, so a caller's dead-sample confirmation reads the same either way.
+func DeadResult(prev *intent.Progress, now time.Time, reason string) Result {
+	return deadResult(prev, now, reason)
+}
+
 // deadResult returns a Dead result whose sample counts consecutive dead
 // samples.
 func deadResult(prev *intent.Progress, now time.Time, reason string) Result {

@@ -2111,7 +2111,7 @@ func TestSnapshotOccupied(t *testing.T) {
 		{name: "landing/gastown/nux", agent: "claude-sonnet", rig: "gastown", polecat: "nux", landing: true},
 		{name: "pool-claim/abc", agent: "claude-haiku"}, // the ledger appends the claims of the moment itself
 	}
-	got, err := snapshotOccupied(poolSeatSnapshot{sessions: snapshot, at: now}, func() sessionLister { return lister }, func() time.Time { return now })()
+	got, err := snapshotOccupied(poolSeatSnapshot{sessions: snapshot, at: now}, func() sessionLister { return lister }, nil, func() time.Time { return now })()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2125,7 +2125,7 @@ func TestSnapshotOccupied(t *testing.T) {
 		t.Fatalf("occupied = %v, want %v", names, want)
 	}
 	lister.err = errors.New("tmux down")
-	if _, err := snapshotOccupied(poolSeatSnapshot{sessions: snapshot, at: now}, func() sessionLister { return lister }, func() time.Time { return now })(); err == nil {
+	if _, err := snapshotOccupied(poolSeatSnapshot{sessions: snapshot, at: now}, func() sessionLister { return lister }, nil, func() time.Time { return now })(); err == nil {
 		t.Fatal("a failed session listing must fail the read, not count the snapshot alone")
 	}
 }
@@ -2158,7 +2158,7 @@ func TestSnapshotOccupiedReleasesTheSeatsTheRosterReleased(t *testing.T) {
 		t.Fatalf("the roster counts an idle-pr-open seat free, got %+v", snap.sessions)
 	}
 
-	got, err := snapshotOccupied(snap, func() sessionLister { return lister }, now)()
+	got, err := snapshotOccupied(snap, func() sessionLister { return lister }, nil, now)()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2170,7 +2170,7 @@ func TestSnapshotOccupiedReleasesTheSeatsTheRosterReleased(t *testing.T) {
 	r.pool = func() *config.PolecatPool { return pool }
 	r.sessions = func() sessionLister { return lister }
 	r.now = now
-	agent, reason, err := r.routeWith("claude-haiku", true, snapshotOccupied(snap, func() sessionLister { return lister }, now))
+	agent, reason, err := r.routeWith("claude-haiku", true, snapshotOccupied(snap, func() sessionLister { return lister }, nil, now))
 	if err != nil || agent != "claude-haiku" {
 		t.Fatalf("a spec sling is refused the seat the roster freed: agent %q, reason %q, err %v", agent, reason, err)
 	}
@@ -2178,7 +2178,7 @@ func TestSnapshotOccupiedReleasesTheSeatsTheRosterReleased(t *testing.T) {
 	// A session that is new since the roster is not the one it released, even
 	// on the same seat: it counts.
 	lister.created["gt-diamond"] = rosterAt.Add(time.Second)
-	got, err = snapshotOccupied(snap, func() sessionLister { return lister }, now)()
+	got, err = snapshotOccupied(snap, func() sessionLister { return lister }, nil, now)()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2188,7 +2188,7 @@ func TestSnapshotOccupiedReleasesTheSeatsTheRosterReleased(t *testing.T) {
 
 	// A zero creation time is unknown, not old: the session counts.
 	lister.created["gt-diamond"] = time.Time{}
-	got, err = snapshotOccupied(snap, func() sessionLister { return lister }, now)()
+	got, err = snapshotOccupied(snap, func() sessionLister { return lister }, nil, now)()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2239,7 +2239,7 @@ func TestRouteWithSnapshotAdmitsOneOfTwoConcurrentSlings(t *testing.T) {
 	db := beadsfake.New()
 	lister := &fakeLister{sessions: map[string]map[string]string{}}
 	now := func() time.Time { return time.Date(2026, 10, 21, 12, 0, 0, 0, time.UTC) }
-	occupied := snapshotOccupied(poolSeatSnapshot{}, func() sessionLister { return lister }, now)
+	occupied := snapshotOccupied(poolSeatSnapshot{}, func() sessionLister { return lister }, nil, now)
 	type outcome struct {
 		agent string
 		err   error

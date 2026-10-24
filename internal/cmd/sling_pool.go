@@ -18,6 +18,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/specdispatch"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -578,6 +579,42 @@ func listPolecatSessionsWith(t sessionLister, disposition polecatDispositionFunc
 		out = append(out, poolSession{name: n, agent: strings.TrimSpace(agent), created: created, rig: rigName, polecat: polecatName})
 	}
 	return out, nil
+}
+
+// sandboxSeatDeadFunc reports whether a session's openShell sandbox answers in
+// a terminal failure phase: the answer the patrol's liveness probe calls dead.
+type sandboxSeatDeadFunc func(sessionName string) bool
+
+// sandboxSeatDeathsFor is the town's real phase read. A caller with no town has
+// no registry to read. The roster runs in its own process, so it has no patrol
+// clock to measure the grace against: a sandbox in a terminal failure phase is
+// not a working seat from the moment it is seen, and the dead-hooked read keeps
+// its seat until the patrol acts on it (gt-tj446).
+func sandboxSeatDeathsFor(townRoot string) sandboxSeatDeadFunc {
+	if townRoot == "" {
+		return nil
+	}
+	return func(name string) bool {
+		terminal, err := session.SandboxPhaseTerminal(townRoot, name)
+		return err == nil && terminal
+	}
+}
+
+// withoutDeadSandboxSeats drops the live sessions whose sandbox answers in a
+// terminal failure phase. The seat is not freed: the caller's dead-hooked read
+// counts it as held while no working session answers for it.
+func withoutDeadSandboxSeats(live []poolSession, dead sandboxSeatDeadFunc) []poolSession {
+	if dead == nil {
+		return live
+	}
+	out := live[:0:0]
+	for _, s := range live {
+		if dead(s.name) {
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
 }
 
 // parsePolecatRole splits a session's GT_ROLE ("<rig>/polecats/<name>") into
@@ -1414,7 +1451,7 @@ func poolUncountedFallback(pool *config.PolecatPool, requested string, now time.
 // seat-decision lock, which is where the count has to be taken (gt-8o35b).
 func (r *poolRouter) occupied() func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
-		return poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.work, r.pool(), r.now)
+		return poolOccupiedSessions(r.sessions(), r.townRoot, r.disposition, r.work, r.pool(), r.now, sandboxSeatDeathsFor(r.townRoot))
 	}
 }
 
@@ -1475,14 +1512,18 @@ func releasedSeatRecorder(disposition polecatDispositionFunc) (polecatDispositio
 // that no session accounts for. A session new since the roster counts. The
 // snapshot's own live sessions and claims are dropped: the listing replaces the
 // former and the ledger appends the latter under the decision lock (gt-t8q5).
-func snapshotOccupied(snapshot poolSeatSnapshot, lister func() sessionLister, now func() time.Time) func() ([]poolSession, error) {
+//
+// The listing is read through the same dead-sandbox phase answer as the roster
+// (deadSandbox), so a seat the roster counted dead-hooked is not read back as
+// live here (gt-tj446).
+func snapshotOccupied(snapshot poolSeatSnapshot, lister func() sessionLister, deadSandbox sandboxSeatDeadFunc, now func() time.Time) func() ([]poolSession, error) {
 	return func() ([]poolSession, error) {
 		listed, err := listPolecatSessionsWith(lister(), nil, now())
 		if err != nil {
 			return nil, &poolOccupancyError{sessions: true, err: err}
 		}
 		live := listed[:0:0]
-		for _, s := range listed {
+		for _, s := range withoutDeadSandboxSeats(listed, deadSandbox) {
 			if !snapshot.releasedAt(s) {
 				live = append(live, s)
 			}

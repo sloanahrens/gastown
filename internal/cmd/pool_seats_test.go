@@ -353,6 +353,71 @@ func TestPoolSeatSessionsCountsDeadHookedSeats(t *testing.T) {
 	}
 }
 
+// A sandbox in a terminal failure phase is not a working seat even when its tmux
+// still answers for it: the roster counts it dead-hooked while its bead is
+// hooked, so a full pool says why it is full and no sling reads the seat free
+// (gt-tj446). A seat it holds no work on is free, and a caller with no town (no
+// sandbox registry to read) keeps every session as before.
+func TestPoolSeatSessionsCountsADeadSandboxSeatAsDeadHooked(t *testing.T) {
+	t.Parallel()
+	pool := seatPool("deepseek-flash", 3)
+	held := poolSeatState{
+		Disposition: polecat.WorkstateDisposition{
+			Verdict: polecat.WorkstateVerdictNeedsRecovery, NeedsRecovery: true, CountsTowardCapacity: true,
+		},
+		HookHeld: true,
+	}
+	free := poolSeatState{Disposition: polecat.WorkstateDisposition{Verdict: polecat.WorkstateVerdictSafeToNuke}}
+	const sandbox = "gt-ember"
+	answering := &fakeLister{sessions: map[string]map[string]string{
+		sandbox: {"GT_ROLE": "gastown/polecats/ember", "GT_AGENT": "deepseek-flash"},
+	}}
+
+	cases := []struct {
+		name     string
+		state    poolSeatState
+		dead     sandboxSeatDeadFunc
+		want     int
+		wantHeld bool
+	}{
+		{"a dead sandbox seat holding work is dead-hooked", held, func(string) bool { return true }, 1, true},
+		{"a dead sandbox seat holding nothing is free", free, func(string) bool { return true }, 0, false},
+		{"a live sandbox seat is working", held, func(string) bool { return false }, 1, false},
+		{"no town means no phase read, so the seat is kept", held, nil, 1, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
+			writeTownPolecatDir(t, town, "gastown", "ember")
+			disposition := func(rigName, polecatName string) (poolSeatState, error) {
+				if rigName != "gastown" || polecatName != "ember" {
+					t.Fatalf("unexpected seat read %s/%s", rigName, polecatName)
+				}
+				return c.state, nil
+			}
+
+			got, err := poolOccupiedSessions(answering, town, disposition, nil, pool, time.Now, c.dead)
+			if err != nil {
+				t.Fatalf("poolOccupiedSessions: %v", err)
+			}
+			if n := poolSeatCount("deepseek-flash", got); n != c.want {
+				t.Fatalf("seat count = %d, want %d (%+v)", n, c.want, got)
+			}
+			roster := specRosterFrom(got, nil)
+			if deadHooked := roster.DeadHooked["deepseek-flash"]; (deadHooked > 0) != c.wantHeld {
+				t.Fatalf("roster dead-hooked = %d, want held=%v (%+v)", deadHooked, c.wantHeld, roster)
+			}
+			for _, s := range got {
+				if s.deadHooked != (c.wantHeld && s.rig == "gastown") {
+					t.Fatalf("session %+v deadHooked = %v, want %v", s, s.deadHooked, c.wantHeld)
+				}
+			}
+		})
+	}
+}
+
 // TestPoolSeatSessionsRestartKeepsTheCount walks the transition the fix is for:
 // the crashed seat is counted while its session is gone, and stays counted when
 // the supervisor restarts it. The count is the same on both sides, so the
