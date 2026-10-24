@@ -4200,6 +4200,47 @@ func TestQuotedDollarParenPadsOnlyItsSubstitutionsCloser(t *testing.T) {
 	}
 }
 
+// TestDangerousGuardClobberAndFdVarRedirections pins gt-l18zp: >|file,
+// 2>|file and {fd}>file are redirections, so the shell invoker behind them is
+// still the command that reads the heredoc. The operator-spacing pass split
+// the "|" out and the scan read it as the redirect's target, leaving the
+// target word as the command; "{fd}>" lost its brace to the group-opener trim.
+// Either way the reader went unseen and the body behind 2>/dev/null was
+// blocked while these were not.
+func TestDangerousGuardClobberAndFdVarRedirections(t *testing.T) {
+	t.Parallel()
+	body := " bash <<EOF\nrm -rf /\nEOF"
+	for _, tt := range []struct {
+		name    string
+		command string
+	}{
+		{"clobber", ">|/dev/null" + body},
+		{"fd clobber", "2>|/dev/null" + body},
+		{"braced fd", "{fd}>/dev/null" + body},
+		{"clobber with a separate target", ">| /dev/null" + body},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession); reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed a shell fed rm -rf / behind a redirection", tt.command)
+			}
+		})
+	}
+}
+
+// TestDangerousGuardClosedQuotedSubstitutionArgIsData pins gt-l18zp: in
+// x="$("echo" "a; git push -f origin main")" the quoted argument is one
+// argument to echo, and the shell prints it as one line. The quote-tracking
+// read the substitution flat, so the ";" inside that argument became a
+// separator and the words after it read as a live force push.
+func TestDangerousGuardClosedQuotedSubstitutionArgIsData(t *testing.T) {
+	t.Parallel()
+	command := `x="$("echo" "a; git push -f origin main")"`
+	if reason, _ := evaluateDangerousCommand(command, 0, noTownSession); reason != "" {
+		t.Errorf("evaluateDangerousCommand(%q) = %q, want allowed: the argument is data (bash prints it as one line)", command, reason)
+	}
+}
+
 // gt-h45w3: lenientShellWords reads quotes the way shlex does and, unlike it,
 // never fails on a quote left open.
 func TestLenientShellWords(t *testing.T) {

@@ -250,6 +250,14 @@ func prWorkflowCommand(segment []string) (argv, payloads []string, standIn bool)
 // command it runs and returns the words from that command on. "--" ends the
 // flags. env -S takes a whole command line as its value, returned as payload.
 func skipLauncherArgs(name string, launcher prWorkflowLauncher, rest []string) (seg []string, payload string) {
+	seg, payload, _ = skipLauncherArgsChdir(name, launcher, rest)
+	return seg, payload
+}
+
+// skipLauncherArgsChdir is skipLauncherArgs that also returns the directories
+// the launcher's own flags change into (env -C/--chdir, sudo -D/--chdir), in
+// shell order.
+func skipLauncherArgsChdir(name string, launcher prWorkflowLauncher, rest []string) (seg []string, payload string, chdirs []string) {
 	i := 0
 	for i < len(rest) {
 		word := rest[i]
@@ -278,17 +286,77 @@ func skipLauncherArgs(name string, launcher prWorkflowLauncher, rest []string) (
 				continue
 			}
 		}
-		if launcher.valueFlags[word] {
-			i += 2
-		} else {
-			i++
+		if dir, ok := launcherChdirFlag(name, word); ok {
+			if dir == "" {
+				if i+1 < len(rest) {
+					dir = rest[i+1]
+				}
+				i += 2
+			} else {
+				i++
+			}
+			if dir != "" {
+				chdirs = append(chdirs, dir)
+			}
+			continue
 		}
+		i += launcherFlagWidth(launcher, word)
 	}
 	i += launcher.positionals
 	if i > len(rest) {
 		i = len(rest)
 	}
-	return rest[i:], payload
+	return rest[i:], payload, chdirs
+}
+
+// launcherChdirFlag returns the directory a launcher flag changes into — the
+// empty string when it stands in the next word — and whether word is such a
+// flag. Only env -C/--chdir and sudo -D/--chdir do this: they run the command
+// behind them in that directory (gt-l18zp).
+func launcherChdirFlag(name, word string) (dir string, ok bool) {
+	short, long := "", ""
+	switch name {
+	case "env":
+		short, long = "-C", "--chdir"
+	case "sudo":
+		short, long = "-D", "--chdir"
+	default:
+		return "", false
+	}
+	switch {
+	case word == short || word == long:
+		return "", true
+	case strings.HasPrefix(word, long+"="):
+		return word[len(long)+1:], true
+	case strings.HasPrefix(word, short) && len(word) > len(short):
+		return word[len(short):], true
+	}
+	return "", false
+}
+
+// launcherFlagWidth reports how many words a launcher flag occupies: 2 when it
+// owns the next word as its value, 1 otherwise. A cluster of short flags is
+// read one letter at a time the way getopt reads it — a value flag in it owns
+// the rest of the word ("-n1") or, with nothing after it, the next word
+// ("caffeinate -it 5", "sudo -Eu alice") — since the next word would otherwise
+// read as the command being run (gt-l18zp).
+func launcherFlagWidth(launcher prWorkflowLauncher, word string) int {
+	if launcher.valueFlags[word] {
+		return 2
+	}
+	if len(word) < 3 || word[0] != '-' || word[1] == '-' {
+		return 1
+	}
+	for j := 1; j < len(word); j++ {
+		if !launcher.valueFlags["-"+string(word[j])] {
+			continue
+		}
+		if j == len(word)-1 {
+			return 2
+		}
+		return 1
+	}
+	return 1
 }
 
 // prWorkflowInvocations returns the command every segment of command runs, as
