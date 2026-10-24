@@ -51,6 +51,11 @@ var nudgeCmd = &cobra.Command{
 
 Delivers a message to any worker's Claude Code session: polecats or crew.
 
+Nothing reads another session's mail or nudge in this town: a session
+sees only the mail and nudges addressed to it. To reach the operator or
+the overseer, use gt escalate, gt ask, or a comment on the bead you are
+working on.
+
 Delivery modes (--mode):
   wait-idle  Wait for agent to become idle (prompt visible), then deliver
              directly. Falls back to queue on timeout. If both idle-wait and
