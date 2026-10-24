@@ -701,10 +701,10 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 				return spans
 			}
 			i += end + 1
-		case quotes && !inComment && !inDouble && c == '$' && i+1 < len(text) && text[i+1] == '\'':
+		case quotes && !inComment && !inDouble && c == '$' && ansiQuoteAt(text, i) >= 0:
 			// An unterminated $'...' is left to the plain single-quote scan
 			// on the next character, which is how it read before.
-			if end := closingANSIQuote(text, i+2); end >= 0 {
+			if end := closingANSIQuote(text, ansiQuoteAt(text, i)+1); end >= 0 {
 				i = end
 			}
 		case quotes && !inComment && !inDouble && c == '#' && startsWordAt(text, i, escapedAt, subClose):
@@ -819,6 +819,17 @@ func opensSubstitution(text string, i int) bool {
 		return i > 1 && text[i-2] == '$'
 	}
 	return false
+}
+
+// ansiQuoteAt returns the index of the "'" that the "$" at dollar opens an
+// ANSI-C string with, or -1. A backslash-newline between the two is deleted by
+// the shell before it reads the quote, so that quote still opens the string
+// (gt-javvg, gt-22glo).
+func ansiQuoteAt(text string, dollar int) int {
+	if q := skipLineContinuationBytes(text, dollar+1); q < len(text) && text[q] == '\'' {
+		return q
+	}
+	return -1
 }
 
 // closingANSIQuote returns the index of the "'" that closes a $'...' string
