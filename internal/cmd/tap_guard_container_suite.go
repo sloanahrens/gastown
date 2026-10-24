@@ -671,6 +671,10 @@ func heredocSubstitutionSpans(body string) []substitutionSpan {
 // recursion judges its process substitutions in the body's own reading.
 func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 	var spans []substitutionSpan
+	// Found once for the whole text: closingParen skips the bodies, and the
+	// substitutions inside them share this scan rather than each rescanning
+	// (gt-lx8i8).
+	bodies := heredocBodiesFrom(text, 0)
 	inDouble := false
 	inComment := false
 	escapedAt := -1
@@ -699,7 +703,7 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 		case quotes && !inComment && c == '"':
 			inDouble = !inDouble
 		case quotes && !inComment && !inDouble && (c == '<' || c == '>') && i+1 < len(text) && text[i+1] == '(':
-			end := closingParen(text, i+2)
+			end := closingParen(text, i+2, bodies)
 			if end < 0 {
 				return append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: len(text)})
 			}
@@ -707,7 +711,7 @@ func substitutionSpansIn(text string, quotes bool) []substitutionSpan {
 			subClose = end
 			i = end
 		case c == '$' && i+1 < len(text) && text[i+1] == '(':
-			end := closingParen(text, i+2)
+			end := closingParen(text, i+2, bodies)
 			if end < 0 {
 				return append(spans, substitutionSpan{open: i, bodyStart: i + 2, bodyEnd: len(text)})
 			}
@@ -832,7 +836,14 @@ func closingANSIQuote(text string, from int) int {
 // inside it closes nothing and the body runs on; a comment that reaches the end
 // of the text leaves nothing to close the "(", and -1 is right there too
 // (gt-5wtmz).
-func closingParen(text string, from int) int {
+//
+// A heredoc body in the substitution is stepped over whole, as scanHeredocs
+// judges it, so the quote marks and parentheses in it count for nothing
+// (gt-lx8i8). bodies is the heredoc spans found in text (heredocBodiesFrom,
+// found once per caller so the substitutions closingDoubleQuote steps into
+// share the scan rather than each rescanning the text); the slice is read, not
+// consumed, by the caller.
+func closingParen(text string, from int, bodies []heredocSpan) int {
 	depth := 1
 	escapedAt := -1
 	subClose := -1
@@ -841,6 +852,18 @@ func closingParen(text string, from int) int {
 	// it is literal (gt-5wtmz).
 	var subOpens []bool
 	for i := from; i < len(text); i++ {
+		// Skip a body only where this walk arrives at its first byte in plain
+		// text. A span scanHeredocs placed somewhere this walk reads as quoted
+		// or commented text — the two reads disagreeing — is dropped instead, so
+		// the skip can never hide text this walk would otherwise have read.
+		for len(bodies) > 0 && i >= bodies[0].bodyStart {
+			body := bodies[0]
+			bodies = bodies[1:]
+			if i == body.bodyStart && body.bodyEnd > i {
+				i = body.bodyEnd - 1
+				break
+			}
+		}
 		switch c := text[i]; {
 		case c == '\\':
 			escapedAt = i + 1
@@ -858,7 +881,7 @@ func closingParen(text string, from int) int {
 			}
 			i += end + 1
 		case c == '"':
-			end := closingDoubleQuote(text, i+1)
+			end := closingDoubleQuote(text, i+1, bodies)
 			if end < 0 {
 				return -1
 			}
@@ -887,11 +910,30 @@ func closingParen(text string, from int) int {
 	return -1
 }
 
+// heredocBodiesFrom returns the heredoc bodies that start at or after from, in
+// order, as scanHeredocs judges the whole text. An unterminated body is left out:
+// it runs to the end of the text, which would hide the ")" that closes the
+// substitution (gt-lx8i8).
+func heredocBodiesFrom(text string, from int) []heredocSpan {
+	if !strings.Contains(text[from:], "<<") {
+		return nil
+	}
+	var bodies []heredocSpan
+	for _, span := range scanHeredocs(text) {
+		if span.bodyStart >= from && !span.unterminated {
+			bodies = append(bodies, span)
+		}
+	}
+	return bodies
+}
+
 // closingDoubleQuote returns the index of the unescaped double quote that ends
 // a string whose text starts at from, or -1 when none does. A "$(" inside the
 // string is a substitution with quoting of its own, so closingParen skips it
-// whole; a backtick pair is skipped as one.
-func closingDoubleQuote(text string, from int) int {
+// whole; a backtick pair is skipped as one. bodies carries the heredoc bodies
+// closingParen already found, so the substitution is read without rescanning
+// the text (gt-lx8i8).
+func closingDoubleQuote(text string, from int, bodies []heredocSpan) int {
 	for i := from; i < len(text); i++ {
 		switch {
 		case text[i] == '\\':
@@ -899,7 +941,7 @@ func closingDoubleQuote(text string, from int) int {
 		case text[i] == '"':
 			return i
 		case text[i] == '$' && i+1 < len(text) && text[i+1] == '(':
-			end := closingParen(text, i+2)
+			end := closingParen(text, i+2, bodies)
 			if end < 0 {
 				return -1
 			}

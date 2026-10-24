@@ -654,6 +654,13 @@ func TestPRWorkflowSubstitutionCommentAndANSIQuote(t *testing.T) {
 		{"apostrophe after the comment ended", "# note\necho 'a $(gh pr create)'", false},
 		{"hash after an escaped space", `echo \ #b '$(gh pr create)'`, false},
 		{"gh pr view after a comment", "# don't\nx=$(gh pr view 12)", false},
+		// A heredoc body in a double-quoted substitution ends at its terminator,
+		// so the ")" that closes the substitution is read and the line after it
+		// is live. Its apostrophe used to open a quote that swallowed the rest
+		// of the line (gt-lx8i8).
+		{"gh pr create after a heredoc body in a double-quoted substitution", "x=\"$(cat <<'EOF'\nit's a note\nEOF\n)\"; gh pr create --fill", true},
+		{"quoted gh pr create after a heredoc body in a double-quoted substitution is text", "x=\"$(cat <<'EOF'\nit's a note\nEOF\n)\"; echo \"run gh pr create later\"", false},
+		{"gh pr create in a heredoc body in a double-quoted substitution is data", "x=\"$(cat <<'EOF'\nit's gh pr create --fill\nEOF\n)\"", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
