@@ -23,6 +23,10 @@ func buildPrefixSet(registeredRigs map[string]bool, townRoot string) map[string]
 	return prefixes
 }
 
+// townLevelPrefixes are the PID-file prefixes of town-level agents, which
+// belong to no rig.
+var townLevelPrefixes = []string{"hq", "gt"}
+
 // StaleRuntimeFilesCheck detects stale PID files and wisp configs for rigs
 // that are no longer registered. These can cause the daemon to incorrectly
 // think agents are running or try to start agents for removed rigs.
@@ -71,6 +75,11 @@ func (c *StaleRuntimeFilesCheck) Run(ctx *CheckContext) *CheckResult {
 	// Build prefix set that includes both rig names and their beads prefixes.
 	// Some rigs use prefix as DB/PID name (e.g., "lc" for laneassist). (gt-85w7)
 	knownPrefixes := buildPrefixSet(registeredRigs, ctx.TownRoot)
+	// Town-level agents (hq, gt) are always valid. They join the set so they
+	// match by the same rule as rig prefixes. (gt-0x9p2)
+	for _, prefix := range townLevelPrefixes {
+		knownPrefixes[prefix] = true
+	}
 
 	var details []string
 
@@ -87,8 +96,8 @@ func (c *StaleRuntimeFilesCheck) Run(ctx *CheckContext) *CheckResult {
 			// themselves contain hyphens, so cutting at the first separator would
 			// read my-app-nux.pid as prefix "my" and delete a live file. (gt-a4po7)
 			rigPrefix, known := matchKnownPrefix(name, knownPrefixes)
-			if known || rigPrefix == "" || rigPrefix == "hq" || rigPrefix == "gt" {
-				// Registered rigs and town-level agents (hq, gt) are always valid
+			if known || rigPrefix == "" {
+				// Registered rigs and town-level agents are always valid
 				continue
 			}
 			c.stalePIDFiles = append(c.stalePIDFiles, filepath.Join(pidsDir, name))
