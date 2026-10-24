@@ -39,11 +39,13 @@ func newSlingClock() *clockwork.FakeClock {
 
 // recvSling waits, bounded, for the next sling a blockedSlings announces.
 func recvSling(t *testing.T, started <-chan string) string {
+	ctx, cancel := context.WithTimeout(t.Context(), slingWait)
+	defer cancel()
 	t.Helper()
 	select {
 	case job := <-started:
 		return job
-	case <-time.After(slingWait):
+	case <-ctx.Done():
 		t.Fatalf("no sling started within %s", slingWait)
 		return ""
 	}
@@ -51,6 +53,8 @@ func recvSling(t *testing.T, started <-chan string) string {
 
 // waitSlings waits, bounded, for the daemon's slings to return.
 func waitSlings(t *testing.T, d *Daemon) {
+	ctx, cancel := context.WithTimeout(t.Context(), slingWait)
+	defer cancel()
 	t.Helper()
 	done := make(chan struct{})
 	go func() {
@@ -59,7 +63,7 @@ func waitSlings(t *testing.T, d *Daemon) {
 	}()
 	select {
 	case <-done:
-	case <-time.After(slingWait):
+	case <-ctx.Done():
 		t.Fatalf("slings still in flight after %s: %+v", slingWait, d.specSlings.list())
 	}
 }
