@@ -996,11 +996,19 @@ func heredocLineEnd(command string, from int) int {
 func heredocReaderLine(command string, start, end int) (string, int) {
 	lineStart := strings.LastIndexByte(command[:start], '\n') + 1
 	// "bash \" + newline + "<<EOF" still hands the body to bash, so walk back
-	// over line continuations to keep the invoker on the reader line.
+	// over line continuations to keep the invoker on the reader line. Only an
+	// odd run of trailing backslashes continues the line: in an even run each
+	// backslash escapes the next, so the shell ends the line at the newline
+	// and the line above is not part of the reader (gt-fke2f).
 	for lineStart > 0 {
 		prevEnd := lineStart - 1
 		prevStart := strings.LastIndexByte(command[:prevEnd], '\n') + 1
-		if !strings.HasSuffix(strings.TrimRight(command[prevStart:prevEnd], " \t"), `\`) {
+		prev := strings.TrimRight(command[prevStart:prevEnd], " \t")
+		n := 0
+		for n < len(prev) && prev[len(prev)-1-n] == '\\' {
+			n++
+		}
+		if n%2 == 0 {
 			break
 		}
 		lineStart = prevStart
