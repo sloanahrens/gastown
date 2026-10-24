@@ -211,7 +211,7 @@ func TestOpenShellPrepareBuildsTheSandboxInOrder(t *testing.T) {
 		sandboxExec("tar", "xzf", "/sandbox/town-skel.tgz", "-C", "/sandbox"),
 		{"openshell", "sandbox", "upload", "--no-git-ignore", openshellTestSession, "STAGE/polecat-runtime.tgz", "/sandbox/"},
 		sandboxExec("tar", "xzf", "/sandbox/polecat-runtime.tgz", "-C", "/sandbox"),
-		sandboxExec("sh", "-c", cloneScript, "sh", openshellTestBranch, openshellTestRepoURL, openshellTestWorkDir),
+		sandboxExec("sh", "-c", cloneScript, "sh", openshellTestBranch, openshellTestRepoURL, openshellTestWorkDir, "1000"),
 		{"openshell", "sandbox", "upload", "--no-git-ignore", openshellTestSession, "STAGE/workspace.tgz", "/sandbox/"},
 		sandboxExec("tar", "xzf", "/sandbox/workspace.tgz", "-C", openshellTestWorkDir),
 		sandboxExec("sh", "-c", redirectScript, "sh", openshellTestWorkDir, "../../../mayor/rig/.beads"),
