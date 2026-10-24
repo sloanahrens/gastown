@@ -3,6 +3,7 @@ package daemon
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log"
 	"os"
@@ -274,6 +275,56 @@ func TestJevStaleFailedSaveSuppressesTheRerun(t *testing.T) {
 	waitJevStaleIdle(t, r.d)
 	if r.opened != 2 {
 		t.Errorf("pass opened %d times after the interval, want 2", r.opened)
+	}
+}
+
+// A pass that fails outright still spends its week, even when the last-run
+// record cannot be written either: the in-memory time is the only thing that
+// stops the next heartbeat from opening the pass again.
+func TestJevStaleFailedPassSuppressesTheRerunWithoutARecord(t *testing.T) {
+	t.Parallel()
+	r := newJevStaleRig(t)
+	// The last-run record cannot be written: its directory is a regular file.
+	if err := os.WriteFile(filepath.Join(r.town, "daemon"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r.d.jevStaleOpen = func(string, []string, stale.Settings, io.Writer) (*stale.Pass, error) {
+		r.opened++
+		return nil, errors.New("hm is down")
+	}
+
+	r.d.triggerJevStale()
+	waitJevStaleIdle(t, r.d)
+	r.d.triggerJevStale()
+	waitJevStaleIdle(t, r.d)
+
+	if r.opened != 1 {
+		t.Errorf("failed pass opened %d times inside one week, want 1", r.opened)
+	}
+	if !strings.Contains(r.logs.String(), "hm is down") {
+		t.Errorf("log = %q, want the failed pass named", r.logs)
+	}
+}
+
+// The in-memory last-run outranks an older record on disk: a pass this
+// process finished but could not persist must not reopen because the record
+// still shows the run before it.
+func TestJevStaleMemoryOutranksAStaleDiskRecord(t *testing.T) {
+	t.Parallel()
+	r := newJevStaleRig(t)
+	now := r.clock.Now()
+	// The record on disk is two weeks old, so alone it reads the patrol as due.
+	if err := savePatrolLastRun(r.town, "jev_stale", now.Add(-2*jevStaleInterval)); err != nil {
+		t.Fatalf("seed stale last run: %v", err)
+	}
+	// This process finished a pass a minute ago that it could not persist.
+	r.d.jevStaleRun.record(now.Add(-time.Minute))
+
+	r.d.triggerJevStale()
+	waitJevStaleIdle(t, r.d)
+
+	if r.opened != 0 {
+		t.Errorf("pass opened %d times with a one-minute-old in-memory run, want 0", r.opened)
 	}
 }
 
