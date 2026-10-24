@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"reflect"
@@ -115,41 +116,109 @@ func writeOldRecords(t *testing.T, town string, clk interface{ Now() time.Time }
 	}
 }
 
-// One tick asks the gateway about at most its budget of records, and the walk
-// rotates with the daemon clock, so records the gateway still has cannot starve
-// the ones behind them: here the first four (sorted) are present and the last
-// three are gone, the budget is three, and every gone record is removed within
-// ceil(7/3) = 3 ticks while no tick asks more than three questions.
+// One tick checks at most its budget of records, and each tick's walk starts
+// after the name the last one ended on, so records the gateway still has cannot
+// starve the ones behind them: every record is asked within ceil(n/budget)
+// ticks, and the ones the gateway has are the only ones left. The two-minute
+// case is the default cadence: there the old minute-based offset landed on the
+// same records every tick and never reached the back half.
 func TestPatrolScanSandboxRecordsRotateSoKeptRecordsDoNotStarveTheRest(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		records int
+		budget  int
+		step    time.Duration // between ticks
+		kept    int           // the first kept records (sorted) are the gateway's
+	}{
+		{"minute_ticks_seven_records", 7, 3, time.Minute, 4},
+		{"two_minute_ticks_forty_records", 40, 20, 2 * time.Minute, 20},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			clk := newFixedClock()
+			names := make([]string, tt.records)
+			for i := range names {
+				names[i] = fmt.Sprintf("gt-p%02d", i)
+			}
+			writeOldRecords(t, town, clk, names)
+			present := make(map[string]bool, tt.kept)
+			for _, n := range names[:tt.kept] {
+				present[n] = true
+			}
+			asked := make(map[string]bool)
+			var tickAsked []string
+			h := &patrolScanHost{
+				d: &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0), tmux: newFakeTmux(clk), clock: clk},
+				sandboxExists: func(_, name string) (bool, error) {
+					tickAsked = append(tickAsked, name)
+					asked[name] = true
+					return present[name], nil
+				},
+				sandboxRecordBudget: tt.budget,
+			}
+
+			ticks := (tt.records + tt.budget - 1) / tt.budget
+			for tick := 0; tick < ticks; tick++ {
+				tickAsked = nil
+				h.patrolScanSandboxRecords()
+				if len(tickAsked) > tt.budget {
+					t.Fatalf("tick %d asked %d questions %v, want at most %d", tick, len(tickAsked), tickAsked, tt.budget)
+				}
+				clk.Advance(tt.step)
+			}
+
+			for _, n := range names {
+				if !asked[n] {
+					t.Errorf("record %s not asked within %d ticks", n, ticks)
+				}
+			}
+			if left, want := session.ListSandboxSessions(town), names[:tt.kept]; !reflect.DeepEqual(left, want) {
+				t.Errorf("records left after %d ticks = %v, want only the ones the gateway has %v", ticks, left, want)
+			}
+		})
+	}
+}
+
+// probeCounter counts the tmux probes a record pass makes.
+type probeCounter struct {
+	sessionTmux
+	probes int
+}
+
+func (p *probeCounter) HasSession(name string) (bool, error) {
+	p.probes++
+	return p.sessionTmux.HasSession(name)
+}
+
+// Every record a pass checks costs a tmux probe, live ones included, so one
+// tick probes at most its budget of records: here all twelve records are live
+// and the budget is four, so no tick probes more than four.
+func TestPatrolScanSandboxRecordsBoundsTmuxProbes(t *testing.T) {
 	t.Parallel()
 	town := t.TempDir()
 	clk := newFixedClock()
-	names := []string{"gt-p0", "gt-p1", "gt-p2", "gt-p3", "gt-p4", "gt-p5", "gt-p6"}
+	tm := newFakeTmux(clk)
+	names := make([]string, 12)
+	for i := range names {
+		names[i] = fmt.Sprintf("gt-l%02d", i)
+		tm.addSession(names[i], "claude", clk.Now())
+	}
 	writeOldRecords(t, town, clk, names)
-	present := map[string]bool{"gt-p0": true, "gt-p1": true, "gt-p2": true, "gt-p3": true}
-	var asked []string
+	probes := &probeCounter{sessionTmux: tm}
 	h := &patrolScanHost{
-		d: &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0), tmux: newFakeTmux(clk), clock: clk},
-		sandboxExists: func(_, name string) (bool, error) {
-			asked = append(asked, name)
-			return present[name], nil
-		},
-		sandboxRecordBudget: 3,
+		d:                   &Daemon{config: &Config{TownRoot: town}, logger: log.New(io.Discard, "", 0), tmux: probes, clock: clk},
+		sandboxRecordBudget: 4,
 	}
 
-	const budget, ticks = 3, 3 // ceil(7/3)
-	for tick := 0; tick < ticks; tick++ {
-		asked = nil
+	for tick := 0; tick < 3; tick++ {
+		probes.probes = 0
 		h.patrolScanSandboxRecords()
-		if len(asked) > budget {
-			t.Fatalf("tick %d asked %d questions %v, want at most %d", tick, len(asked), asked, budget)
+		if probes.probes > 4 {
+			t.Fatalf("tick %d probed tmux %d times, want at most 4", tick, probes.probes)
 		}
-		clk.Advance(time.Minute)
-	}
-
-	left := session.ListSandboxSessions(town)
-	if want := []string{"gt-p0", "gt-p1", "gt-p2", "gt-p3"}; !reflect.DeepEqual(left, want) {
-		t.Errorf("records left after %d ticks = %v, want only the ones the gateway has %v", ticks, left, want)
 	}
 }
 

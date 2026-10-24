@@ -74,6 +74,11 @@ type Daemon struct {
 	// per state, not every heartbeat (gt tail noise).
 	crashSkipLog logLatch
 
+	// sandboxRecordCursor is the name the last sandbox record pass ended on.
+	// The next pass starts after it, so the walk rotates over the records and
+	// survives records coming and going between ticks.
+	sandboxRecordCursor string
+
 	config       *Config
 	patrolConfig *DaemonPatrolConfig
 	tmux         sessionTmux
