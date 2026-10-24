@@ -442,14 +442,19 @@ func skeletonEntries(s SkeletonSpec) ([]skeletonEntry, error) {
 	add(s.Rig+"/.beads/redirect", []byte(filepath.ToSlash(workspace)+"\n"))
 
 	// gt reads these files as they are; sanitizeFile is what keeps a token or a
-	// credential-carrying URL out of them.
+	// credential-carrying URL out of them. The rig's metadata.json is optional:
+	// some rigs keep theirs under .beads/, and host polecats run without it.
+	rigMetadata := s.Rig + "/metadata.json"
 	for _, rel := range []string{
 		"mayor/town.json",
 		".beads/routes.jsonl",
-		s.Rig + "/metadata.json",
+		rigMetadata,
 		s.Rig + "/mayor/rig/.beads/config.yaml",
 	} {
 		raw, err := town.read(rel)
+		if errors.Is(err, fs.ErrNotExist) && rel == rigMetadata {
+			continue
+		}
 		if err != nil {
 			return nil, err
 		}

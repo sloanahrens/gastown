@@ -339,6 +339,36 @@ func TestSkeletonWithoutOptionalFiles(t *testing.T) {
 	}
 }
 
+// TestSkeletonWithoutRigMetadata: a rig whose metadata lives under .beads/ has
+// no <rig>/metadata.json. The skeleton still renders, without that entry, and
+// keeps the rig's other files.
+func TestSkeletonWithoutRigMetadata(t *testing.T) {
+	t.Parallel()
+
+	files := minimalTown()
+	delete(files, "gastown/metadata.json")
+	spec := SkeletonSpec{
+		TownRoot:         writeTown(t, files),
+		Rig:              "gastown",
+		ControlPlaneHost: "host.docker.internal",
+		SandboxRepoURL:   "http://host.docker.internal:3000/sloan/gastown.git",
+	}
+	data, err := RenderSkeleton(spec)
+	if err != nil {
+		t.Fatalf("RenderSkeleton: %v", err)
+	}
+	got := untar(t, data)
+
+	if _, ok := got["gt/gastown/metadata.json"]; ok {
+		t.Errorf("archive holds gt/gastown/metadata.json, want no entry for a rig without it")
+	}
+	for _, name := range []string{"gt/mayor/town.json", "gt/.beads/routes.jsonl", "gt/gastown/mayor/rig/.beads/config.yaml"} {
+		if _, ok := got[name]; !ok {
+			t.Errorf("archive lacks %s, want it kept", name)
+		}
+	}
+}
+
 // TestSkeletonRejectsADirectivesFile: a directives path that is not a directory
 // is an error, not a silent omission.
 func TestSkeletonRejectsADirectivesFile(t *testing.T) {
