@@ -949,19 +949,23 @@ func heredocReaderLine(command string, start, end int) (string, int) {
 }
 
 // heredocCmdText returns the command text, from the unquoted "$(" that opens it
-// to the end of the operator line, of the substitution the heredoc at
+// to the end of the operator's logical line, of the substitution the heredoc at
 // [start,end) sits in. The shell feeds that command the body, so
 // "x=$(bash <<EOF" runs bash on it; the reader line alone, which starts at the
-// assignment, does not show that. It is "" outside such a substitution
-// (gt-2am7w).
+// assignment, does not show that. A backslash-newline continues the line, so
+// a pipe stage on the next line is part of it (gt-2am7w). It is "" outside such
+// a substitution.
 func heredocCmdText(command string, walk *heredocQuoteWalk, start, end int) string {
 	if !walk.inCmdSubstText() {
 		return ""
 	}
 	open := walk.subs[len(walk.subs)-1].open
 	lineEnd := len(command)
-	if i := strings.IndexByte(command[end:], '\n'); i >= 0 {
-		lineEnd = end + i
+	for i := end; i < len(command); i++ {
+		if command[i] == '\n' && command[i-1] != '\\' {
+			lineEnd = i
+			break
+		}
 	}
 	return strings.ReplaceAll(command[open:start]+" "+command[end:lineEnd], "\\\n", " ")
 }
