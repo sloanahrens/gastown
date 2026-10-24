@@ -1054,8 +1054,10 @@ STUB
 wait_for() { local i; for i in $(seq 1 50); do [ -e "$1" ] && return 0; sleep 0.1; done; return 1; }
 wait_for_alarm() { local i; for i in $(seq 1 100); do grep -q 'alarm after' "$1" 2>/dev/null && return 0; sleep 0.1; done; return 1; }
 # proc_state PID: the one-letter state of PID (R, S, Z ...); empty once it is gone.
+# PROC_ROOT stands in for /proc, so both readers can be checked on either host.
 proc_state() {
-  if [ -r "/proc/$1/stat" ]; then sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -c1
+  local stat="${PROC_ROOT:-/proc}/$1/stat"
+  if [ -r "$stat" ]; then sed 's/.*) //' "$stat" 2>/dev/null | cut -c1
   else ps -o stat= -p "$1" 2>/dev/null | cut -c1
   fi
 }
@@ -1256,16 +1258,25 @@ done
 
 # --- Case 47: is_live reads a zombie as gone and a running process as live. The
 # python parent forks a child that exits and is never waited for, so the child is
-# a zombie that kill -0 still finds. The wait for that state is bounded; the parent
-# sleeps only so the zombie outlives the checks, and the case kills it. ---
+# a zombie that kill -0 still finds. The wait for that state is bounded. The parent
+# waits for the test shell to exit (checked every 0.1 s, 30 s at most), so it never
+# outlives an early exit, and the case kills it on the normal path. python3 is the
+# one tool this case needs; without it the case fails by name. ---
 T=$(make_world)
+if ! command -v python3 >/dev/null 2>&1; then
+  fail "is_live: case 47 needs python3 on PATH to fork a zombie"
+else
 python3 -c '
 import os, sys, time
+shell = os.getppid()
 pid = os.fork()
 if pid == 0:
     os._exit(0)
 open(sys.argv[1], "w").write(str(pid))
-time.sleep(30)
+for _ in range(300):
+    if os.getppid() != shell:
+        break
+    time.sleep(0.1)
 ' "$T/zombie.pid" &
 PARENT=$!
 ZOMBIE=""
@@ -1279,6 +1290,23 @@ done
   && pass "is_live: a zombie reads as gone, a running process as live" \
   || fail "is_live: zombie=${ZOMBIE:-none} state=$(proc_state "${ZOMBIE:-0}") parent_live=$(is_live "$PARENT" && echo yes || echo no)"
 kill "$PARENT" 2>/dev/null || true
+fi
+
+# Case 48: proc_state reads the state from a /proc stat line when one exists.
+# A fake PROC_ROOT makes this branch run on macOS as well as on Linux.
+mkdir -p "$T/fakeproc/4242"
+echo "4242 (sh) S 1 4242 4242 0 -1 4194304" > "$T/fakeproc/4242/stat"
+[ "$(PROC_ROOT="$T/fakeproc" proc_state 4242)" = S ] \
+  && pass "proc_state: reads the state from a /proc stat line" \
+  || fail "proc_state: /proc branch read '$(PROC_ROOT="$T/fakeproc" proc_state 4242)', want S"
+
+# Case 49: with no /proc stat line, proc_state asks ps. This test shell is alive,
+# so ps has a state for it, and the first letter of that state is the answer.
+want=$(ps -o stat= -p $$ | cut -c1)
+got=$(PROC_ROOT="$T/no-proc" proc_state $$)
+[ -n "$want" ] && [ "$got" = "$want" ] \
+  && pass "proc_state: falls back to ps when /proc has no stat line" \
+  || fail "proc_state: ps branch read '$got', want '$want'"
 
 if [ "$FAILURES" -ne 0 ]; then echo "$FAILURES failure(s)"; exit 1; fi
 echo "all install-gt tests passed"
