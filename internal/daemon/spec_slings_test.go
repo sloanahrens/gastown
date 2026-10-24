@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"slices"
 	"strings"
@@ -171,6 +172,34 @@ func TestARunningBeadIsNeverSlungTwice(t *testing.T) {
 	}
 	close(b.release)
 	waitSlings(t, d)
+}
+
+// The tick is told when each running sling started, so the min_spawn_gap
+// stagger holds across ticks before the sling has a session (gt-vames).
+func TestTheTickIsToldWhenEachRunningSlingStarted(t *testing.T) {
+	t.Parallel()
+	started := time.Date(2026, 10, 24, 17, 0, 0, 0, time.UTC)
+	d := &Daemon{}
+	d.specSlings.begin(specSlingFlight{Bead: "gt-a", Rig: "gastown", Agent: "claude-sonnet", started: started})
+
+	args, err := d.specTickArgs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.Index(args, "--in-flight")
+	if i < 0 {
+		t.Fatalf("args = %v, want --in-flight naming gt-a", args)
+	}
+	var got []struct {
+		Bead    string    `json:"bead"`
+		Started time.Time `json:"started"`
+	}
+	if err := json.Unmarshal([]byte(args[i+1]), &got); err != nil {
+		t.Fatalf("--in-flight is not JSON: %v (%s)", err, args[i+1])
+	}
+	if len(got) != 1 || got[0].Bead != "gt-a" || !got[0].Started.Equal(started) {
+		t.Fatalf("--in-flight = %+v, want gt-a started at %v", got, started)
+	}
 }
 
 func TestAFailedBackgroundSlingIsLoggedLikeAForegroundFailure(t *testing.T) {

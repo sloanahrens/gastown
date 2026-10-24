@@ -923,7 +923,7 @@ func runSpecDispatchCycle(env specDispatchEnv) specDispatchReport {
 	budget.Seats = append([]specdispatch.Seat(nil), env.Budget.Seats...)
 	budget.SetLive(specLiveWithInFlight(roster.Live, env.InFlight))
 	budget.SetDeadHooked(roster.DeadHooked)
-	budget.NewestSpawn = roster.Newest
+	budget.NewestSpawn = specNewestSpawn(roster.Newest, env.InFlight)
 	// The picture reads each seat's window at the tick's clock; the budget was
 	// built a moment before, and its construction time is no longer the one the
 	// report speaks for (gt-t8new).
