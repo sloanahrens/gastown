@@ -91,6 +91,10 @@ finish() {
 #   bash probe.sh              the probe (asks before every billable step)
 #   DRY_RUN=1 bash probe.sh    print every gcloud/kubectl command, run none
 #   bash probe.sh teardown     delete leftover probe clusters (label gt-purpose)
+#
+# ONE-OFF: this probe answers a single question (does OpenShell pass its Landlock
+# check on GKE Ubuntu?). Delete deploy/gke-probe once the result is recorded on
+# the map ticket claude-q3f.11; bead gt-j975f does the deletion.
 # ──────────────────────────────────────────────────────────────────────────
 
 PROJECT="${GT_PROBE_PROJECT:-next-fractals-redux}"

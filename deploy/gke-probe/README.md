@@ -7,6 +7,9 @@ out of Container-Optimized OS (so GKE Autopilot), and in on Ubuntu kernels.
 It is a wizard for a human. It creates one Spot node in a GCP project and bills
 until it is deleted, so agents never run it.
 
+It is a one-off probe: delete `deploy/gke-probe/` once the result is recorded
+(bead gt-j975f), so it does not become a long-lived wizard.
+
 ```bash
 DRY_RUN=1 bash deploy/gke-probe/probe.sh   # print every command, run none
 bash deploy/gke-probe/probe.sh             # asks before each billable step
