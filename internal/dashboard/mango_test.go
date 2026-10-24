@@ -147,7 +147,8 @@ func TestMangoNamesEveryStateItCannotRead(t *testing.T) {
 		{"no generated_at", mangoFixture(t, `{"schema_version":1,"targets":[]}`), MangoError, "the panel has no generated_at timestamp"},
 		{"generated_at that is not a time", mangoFixture(t, mangoPanelJSON(t, "yesterday")), MangoError, "the panel has no generated_at timestamp"},
 		{"unknown verdict", mangoFixture(t, mangoPanelJSON(t, mangoNow.Format(time.RFC3339),
-			mangoTargetMap("manual_rescue", 37, "maybe", "attempts in q3"))), MangoError, `unknown target verdict "maybe"`},
+			mangoTargetMap("manual_rescue", 37, MangoNoSignal, "attempts in q3"),
+			mangoTargetMap("another", 12, "maybe", "attempts in q4"))), MangoError, `unknown target verdict "maybe"`},
 	} {
 		m := ReadMango(tc.dir, mangoNow)
 		if m.State != tc.state || m.Note != tc.note {
@@ -158,6 +159,13 @@ func TestMangoNamesEveryStateItCannotRead(t *testing.T) {
 		if m.Targets == nil {
 			t.Errorf("%s: targets are null in the page's payload", tc.name)
 		}
+		// Nothing the reader rejected reaches the page's fields: a state it
+		// cannot read carries no coverage, no rows and no counts from the file
+		// it could not use.
+		if m.GeneratedAt != nil || m.Items != 0 || m.SnapshotHours != 0 ||
+			len(m.Targets) != 0 || m.Counts != (MangoCounts{}) {
+			t.Errorf("%s: an unread state carries panel data: %+v", tc.name, m)
+		}
 	}
 
 	// The valid panel this test built is the one the other states are compared
@@ -167,19 +175,18 @@ func TestMangoNamesEveryStateItCannotRead(t *testing.T) {
 	}
 }
 
-// The size cap is checked before the panel is read or parsed. The fixture is
-// bigger than the cap and is not JSON either, so the answer names the cap only
-// if the stat ran first; it is mode 0000 besides, so for any reader but root the
-// open would fail and the answer would be a read error.
-func TestMangoRefusesAnOversizePanelBeforeReadingIt(t *testing.T) {
+// The size cap is checked from the file's stat before its bytes are parsed. The
+// fixture is bigger than the cap and is not JSON either, so the answer names the
+// cap only if the size was read before the bytes were parsed; the file is
+// readable by every user, so the answer does not depend on who runs the test.
+func TestMangoRefusesAnOversizePanelBeforeParsingIt(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, mangoPanelFile)
-	if err := os.WriteFile(path, []byte(strings.Repeat("x", mangoPanelMaxBytes+1)), 0o000); err != nil {
+	if err := os.WriteFile(path, []byte(strings.Repeat("x", mangoPanelMaxBytes+1)), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(path, 0o600) })
 	m := ReadMango(dir, mangoNow)
 	if m.State != MangoError || m.Note != mangoOversize {
 		t.Errorf("state %q note %q, want %q %q", m.State, m.Note, MangoError, mangoOversize)
