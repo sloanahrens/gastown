@@ -131,7 +131,7 @@ record() { [[ "$DRY_RUN" == 1 ]] && return 0; printf '%s\n' "$1" >>"$RESULTS"; }
 # out its whole timeout on a pod that failed instead.
 wait_pod() {
   local pod="$1" timeout="$2" phase deadline
-  [[ "$DRY_RUN" == 1 ]] && { note "(dry-run) no wait for $pod"; return 0; }
+  if [[ "$DRY_RUN" == 1 ]]; then note "(dry-run) no wait for $pod"; return 0; fi
   deadline=$(( SECONDS + timeout ))
   while (( SECONDS < deadline )); do
     capture phase kubectl get pod "$pod" -o jsonpath='{.status.phase}' || return 1
@@ -164,11 +164,11 @@ delete_probe_clusters() {
   if [[ -z "$rows" ]]; then say "no probe clusters found."; return 0; fi
   # fd 3 carries the list so confirm reads the human's stdin, not the list.
   while read -r name zone <&3; do
-    [[ -z "$name" ]] && continue
+    if [[ -z "$name" ]]; then continue; fi
     if confirm "Delete cluster $name ($zone) in $PROJECT?"; then
       if run gcloud container clusters delete "$name" --project "$PROJECT" \
         "$(zone_flag "$zone")" "$zone" --quiet; then
-        [[ "$name" == "$NAME" ]] && CLUSTER_DELETED=1
+        if [[ "$name" == "$NAME" ]]; then CLUSTER_DELETED=1; fi
       else
         warn "delete of $name failed."
         SKIPPED+=("delete cluster $name ($zone) by hand")
