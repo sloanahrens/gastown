@@ -41,24 +41,30 @@ func applySandboxLostWorkFacts(facts *polecat.WorkstateFacts, env sandboxSeatEnv
 	if workBead == "" {
 		return
 	}
+	unknown := func(reason string) {
+		facts.GitCheckFailed = true
+		facts.GitCheckFailedReason = "git_state=unknown: " + reason
+		facts.GitStateSource = polecat.GitStateSourceUnknown
+	}
 	preserved := false
 	issue, showErr := bd.Show(workBead)
-	if showErr != nil && !errors.Is(showErr, beads.ErrNotFound) {
-		// A bead that cannot be read may carry the resume_branch: not lost, not safe.
-		facts.GitCheckFailed = true
-		facts.GitCheckFailedReason = fmt.Sprintf("git_state=unknown: could not read %s for a resume_branch: %v", workBead, showErr)
-		facts.GitStateSource = polecat.GitStateSourceUnknown
+	switch {
+	case errors.Is(showErr, beads.ErrNotFound):
+		return // the bead is gone: no unfinished work to lose
+	case showErr != nil:
+		unknown(fmt.Sprintf("could not read %s for a resume_branch: %v", workBead, showErr))
 		return
 	}
 	if issue != nil && patrolscan.ResumeBranchFromNotes(issue.Notes) != "" {
 		preserved = true
-	} else if branch != "" {
+	} else {
+		if branch == "" {
+			unknown("the agent bead records no branch to look for on origin")
+			return
+		}
 		onOrigin, err := env.branchOnOrigin(rigPath, branch)
 		if err != nil {
-			// Neither lost nor safe is known: the verdict is left to the unknown git state.
-			facts.GitCheckFailed = true
-			facts.GitCheckFailedReason = fmt.Sprintf("git_state=unknown: could not ask origin whether %s was pushed: %v", branch, err)
-			facts.GitStateSource = polecat.GitStateSourceUnknown
+			unknown(fmt.Sprintf("could not ask origin whether %s was pushed: %v", branch, err))
 			return
 		}
 		preserved = onOrigin
