@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -363,5 +364,60 @@ func TestWorktreeGitdirCheck_LeftoverRefineryIgnored(t *testing.T) {
 
 	if result.Status != StatusOK {
 		t.Errorf("expected StatusOK for leftover refinery worktree, got %v: %s %v", result.Status, result.Message, result.Details)
+	}
+}
+
+// indexUnreadableGit stands in for a git whose `worktree add` refuses the
+// existing directory (sending Fix down the manual-registration path) and whose
+// `read-tree HEAD` then fails.
+type indexUnreadableGit struct{ Repo }
+
+var errReadTree = errors.New("fatal: Not a valid object name HEAD")
+
+func (indexUnreadableGit) DefaultBranch() string { return "main" }
+func (indexUnreadableGit) WorktreePrune() error  { return nil }
+func (indexUnreadableGit) WorktreeAddExistingForce(string, string) error {
+	return errors.New("fatal: '/wt' already exists")
+}
+func (indexUnreadableGit) ReadTreeHead() error { return errReadTree }
+
+// A worktree registered by hand and left with no index reads as every tracked
+// file staged for deletion (gt-n9ps4). When populating the index fails, Fix
+// must report that worktree and the cause rather than claim the repair worked.
+func TestWorktreeGitdirCheck_FixReportsIndexPopulateFailure(t *testing.T) {
+	t.Parallel()
+	tmpDir := t.TempDir()
+	rigName := "myrig"
+	rigDir := filepath.Join(tmpDir, rigName)
+	wtPath := filepath.Join(rigDir, "polecats", "nux", rigName)
+	if err := os.MkdirAll(wtPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, "config.json"), []byte(`{"repo":"test"}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(rigDir, ".repo.git", "worktrees"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	gitFile := filepath.Join(wtPath, ".git")
+	if err := os.WriteFile(gitFile, []byte("gitdir: /Users/olduser/gt/"+rigName+"/.repo.git/worktrees/rig\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	check := NewWorktreeGitdirCheck()
+	ctx := &CheckContext{TownRoot: tmpDir}
+	ctx.openGit = func(string, string) Repo { return indexUnreadableGit{} }
+	if result := check.Run(ctx); result.Status != StatusError {
+		t.Fatalf("fixture: expected StatusError for the broken worktree, got %v: %s", result.Status, result.Message)
+	}
+
+	err := check.Fix(ctx)
+	if err == nil {
+		t.Fatal("Fix returned nil although the index could not be populated from HEAD")
+	}
+	for _, want := range []string{wtPath, "cannot populate index from HEAD", errReadTree.Error()} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Fix error %q does not name %q", err.Error(), want)
+		}
 	}
 }
