@@ -27,7 +27,11 @@ mkdir -p "$BIN"
 # `openshell sandbox list` prints), sling-running, unknown-commit, make-fail,
 # move-after-build (the commit the installed gt becomes after the first build),
 # always-move (every build installs a newer commit), steal-lock (the build ends
-# with another run's pid in the plugin's lock).
+# with another run's pid in the plugin's lock), volumes (what `docker volume ls`
+# names), volume-ls-fail, volume-missing (names `docker volume inspect`
+# refuses), cache-in-use (names `docker ps --filter volume=` reports a container
+# for), ps-fail, cache-run-fail (what the trim helper's run prints on stderr
+# before failing).
 cat >"$BIN/gt" <<'STUB'
 #!/usr/bin/env bash
 echo "gt version $(cat "$STUB_STATE/installed") (dev: master@$(cat "$STUB_STATE/installed"))"
@@ -36,11 +40,20 @@ cat >"$BIN/docker" <<'STUB'
 #!/usr/bin/env bash
 # `info` (is the daemon up) and `image inspect --format … <image>` are used
 if [ "${1:-}" = info ]; then [ ! -f "$STUB_STATE/docker-down" ]; exit; fi
+# Every call is recorded, so a test can assert what was never run (`volume
+# prune`, `volume rm`) rather than only what was.
+echo "$*" >>"$STUB_STATE/docker-calls"
 # `images --format … <repo>` lists the tags in image-tags (newest first); `rmi`
 # is recorded in rmi, and refused for the refs listed in rmi-refuse, with the
 # reason in rmi-refuse-message (default: an image a running container uses);
 # `image inspect --format {{.Id}} <ref>` answers from ids ("<ref> <id>" lines),
 # else "id-of-<ref>".
+#
+# The cache-volume calls: `volume ls` lists `volumes`, `volume inspect` refuses
+# those in volume-missing, `ps --filter volume=<v>` prints a container id for
+# those in cache-in-use, and `run` executes the trim script for real against
+# $STUB_STATE/vol-<rig> — the plugin's own LRU code, not a canned answer — so
+# the deletions themselves are asserted.
 case "${1:-}" in
   builder)
     echo "$*" >>"$STUB_STATE/builder"
@@ -55,6 +68,44 @@ case "${1:-}" in
       exit 1
     fi
     exit 0 ;;
+  volume)
+    case "${2:-}" in
+      ls)
+        [ ! -f "$STUB_STATE/volume-ls-fail" ] || { echo "Error response from daemon: volume list failed" >&2; exit 1; }
+        cat "$STUB_STATE/volumes" 2>/dev/null || true ;;
+      inspect)
+        if grep -qxF "${3:-}" "$STUB_STATE/volume-missing" 2>/dev/null; then
+          echo "Error response from daemon: get ${3:-}: no such volume" >&2
+          exit 1
+        fi
+        echo '[{"Name":"'"${3:-}"'"}]' ;;
+    esac
+    exit 0 ;;
+  ps)
+    [ ! -f "$STUB_STATE/ps-fail" ] || { echo "Cannot connect to the Docker daemon" >&2; exit 1; }
+    vol="$(printf '%s\n' "$*" | sed -n 's/.*volume=\([^ ]*\).*/\1/p')"
+    grep -qxF "$vol" "$STUB_STATE/cache-in-use" 2>/dev/null && echo "c0ffee123456"
+    exit 0 ;;
+  run)
+    if [ -f "$STUB_STATE/cache-run-fail" ]; then
+      cat "$STUB_STATE/cache-run-fail" >&2
+      exit 125
+    fi
+    vol="" script=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -v) vol="${2%%:*}"; shift 2 ;;
+        -e) export "$2"; shift 2 ;;
+        -c) script="$2"; shift 2; break ;;
+        *) shift ;;
+      esac
+    done
+    [ -n "$vol" ] && [ -n "$script" ] || exit 1
+    # The mount point stands in for $STUB_STATE/vol-<rig>: a real volume is
+    # always mounted, empty or not, so the directory exists either way.
+    export CACHE_ROOT="$STUB_STATE/vol-${vol#gt-cache-}"
+    mkdir -p "$CACHE_ROOT"
+    exec sh -c "$script" ;;
 esac
 if [ "${1:-}" = image ] && [ "${4:-}" = '{{.Id}}' ]; then
   ref="${5:-}"
@@ -342,6 +393,106 @@ if [ "$RC" != 0 ] && [ -z "$(builders)" ] && [ ! -d "$LOCK" ]; then pass "a fail
 rm -f "$STUB_STATE/make-fail"
 run_it
 if [ "$RC" = 0 ] && [ "$(builds)" = 2 ] && [ "$(builders)" = "builder prune --keep-storage 8GB -f|" ]; then pass "the run after a failed build builds and trims"; else fail "bcachebuildfail next: rc=$RC builds=$(builds) builder=[$(builders)] out=$OUT"; fi
+
+echo "--- each gt-cache-<rig> volume is bounded, least recently accessed first (gt-3g7p2)"
+# The docker stub runs the plugin's own trim script against $STUB_STATE/vol-<rig>,
+# so these cases assert the files that survive, not a canned helper answer.
+# cache_case <name> <installed> [label]: a town with two cache volumes.
+cache_case() {
+  new_case "$@"
+  printf '%s\n' gt-cache-gastown gt-cache-devops >"$STUB_STATE/volumes"
+}
+cache_dir() { echo "$STUB_STATE/vol-$1"; }
+# cache_fill <rig> <count>: COUNT files of 4096 bytes under go-build, one per
+# day from oldest, plus one module file under go/pkg/mod. 4096 bytes is the
+# usual block, so du's KiB figure moves by a whole 4 per file on any host.
+cache_fill() {
+  local dir i
+  dir="$(cache_dir "$1")"
+  mkdir -p "$dir/go-build/aa" "$dir/go/pkg/mod/example.com"
+  for i in $(seq 1 "$2"); do
+    head -c 4096 /dev/zero >"$dir/go-build/aa/f$i"
+    touch -t "$(printf '202601%02d0000' $((10 + i)))" "$dir/go-build/aa/f$i"
+  done
+  head -c 100 /dev/zero >"$dir/go/pkg/mod/example.com/mod.zip"
+}
+# cache_kib is the same figure the trim measures: du's KiB, not du -sb, which
+# does not exist on macOS where this suite also runs.
+cache_kib() { du -sk "$(cache_dir "$1")" | cut -f1; }
+cache_has() { [ -f "$(cache_dir "$1")/go-build/aa/f$2" ]; }
+# cache_cap <rig> <files to free>: a byte cap that leaves exactly that many
+# 4096-byte files to delete, the trim's own arithmetic counted in bytes.
+cache_cap() { echo $(( $(cache_kib "$1") * 1024 - $2 * 4096 )); }
+
+cache_case cacheunder abc1234 "$(full abc1234)"
+cache_fill gastown 3
+POLECAT_CACHE_CAP=1M run_it
+if [ "$RC" = 0 ] && grep -q "cache: gt-cache-gastown: .* under the cap" <<<"$OUT" && grep -q "cache: gt-cache-devops: .* under the cap" <<<"$OUT" && cache_has gastown 1 && cache_has gastown 3; then pass "under the cap: measured, nothing deleted, every volume checked"; else fail "cacheunder: rc=$RC out=$OUT"; fi
+if ! grep -q 'cache: gt-cache-.*: trimmed' <<<"$OUT" && cache_has gastown 1 && cache_has gastown 3; then pass "under the cap: the helper measures and reports, and deletes nothing"; else fail "cacheunder: deleted below the cap, out=$OUT"; fi
+
+cache_case cachetrim abc1234 "$(full abc1234)"
+cache_fill gastown 10
+CAP="$(cache_cap gastown 6)"
+POLECAT_CACHE_CAP="$CAP" run_it
+AFTER_KIB="$(cache_kib gastown)"
+if [ "$RC" = 0 ] && [ "$((AFTER_KIB * 1024))" -le "$CAP" ] && grep -q "cache: gt-cache-gastown: trimmed .* (cap $CAP)" <<<"$OUT"; then pass "over the cap and idle: trimmed back under it"; else fail "cachetrim: rc=$RC after=${AFTER_KIB}KiB cap=$CAP out=$OUT"; fi
+if ! cache_has gastown 1 && ! cache_has gastown 6 && cache_has gastown 7 && cache_has gastown 10; then pass "the six least recently accessed files went, the four newest stayed"; else fail "cachetrim LRU: $(ls "$(cache_dir gastown)/go-build/aa" | tr '\n' ' ')"; fi
+if [ -f "$(cache_dir gastown)/go/pkg/mod/example.com/mod.zip" ]; then pass "go/pkg/mod is left alone while the build cache can reach the cap"; else fail "cachetrim deleted mod.zip"; fi
+if [ ! -d "$LOCK" ] && [ -d "$(cache_dir gastown)" ] && ! grep -qE 'volume (prune|rm)' "$STUB_STATE/docker-calls"; then pass "lock released, the volume itself never removed, nothing pruned"; else fail "cachetrim: lock=$([ -d "$LOCK" ] && echo held) calls=$(cat "$STUB_STATE/docker-calls")"; fi
+if grep -q '^run --rm --read-only .*-v gt-cache-gastown:' "$STUB_STATE/docker-calls"; then pass "the helper runs from the polecat image, read-only apart from the volume"; else fail "cachetrim run line: $(grep '^run ' "$STUB_STATE/docker-calls")"; fi
+
+cache_case cacheinuse abc1234 "$(full abc1234)"
+cache_fill gastown 10
+echo gt-cache-gastown >"$STUB_STATE/cache-in-use"
+POLECAT_CACHE_CAP="$(cache_cap gastown 6)" run_it
+if [ "$RC" = 0 ] && grep -q "cache: gt-cache-gastown: in use by 1 container(s); skipped" <<<"$OUT" && cache_has gastown 1 && cache_has gastown 10; then pass "a volume a container has attached: skipped, nothing deleted"; else fail "cacheinuse: rc=$RC out=$OUT"; fi
+if ! grep -q -- '-v gt-cache-gastown:' "$STUB_STATE/docker-calls"; then pass "no helper container is started against a volume in use"; else fail "cacheinuse: the helper ran on gt-cache-gastown"; fi
+
+cache_case cachepsfail abc1234 "$(full abc1234)"
+cache_fill gastown 10
+touch "$STUB_STATE/ps-fail"
+POLECAT_CACHE_CAP="$(cache_cap gastown 6)" run_it
+if [ "$RC" = 0 ] && grep -q "cache: gt-cache-gastown: cannot list the containers using it (Cannot connect to the Docker daemon); nothing trimmed" <<<"$OUT" && cache_has gastown 1; then pass "a container query that fails: nothing trimmed, the reason logged"; else fail "cachepsfail: rc=$RC out=$OUT"; fi
+
+cache_case cachedown abc1234
+cache_fill gastown 10
+touch "$STUB_STATE/docker-down"
+run_it
+if [ "$RC" = 0 ] && ! grep -q "cache: gt-cache" <<<"$OUT" && cache_has gastown 1; then pass "docker down: nothing trimmed, nothing claimed"; else fail "cachedown: rc=$RC out=$OUT"; fi
+
+cache_case cacherunfail abc1234 "$(full abc1234)"
+cache_fill gastown 10
+echo "du: cannot read directory '$STUB_STATE/vol-gastown/go-build/aa': Permission denied" >"$STUB_STATE/cache-run-fail"
+POLECAT_CACHE_CAP="$(cache_cap gastown 6)" run_it
+if [ "$RC" = 0 ] && grep -q "cache: gt-cache-gastown: not trimmed (du: cannot read directory .*Permission denied)" <<<"$OUT" && cache_has gastown 1 && cache_has gastown 10; then pass "an unreadable size: not trimmed, the helper's reason logged"; else fail "cacherunfail: rc=$RC out=$OUT"; fi
+
+cache_case cachecap abc1234 "$(full abc1234)"
+cache_fill gastown 10
+POLECAT_CACHE_CAP=10XB run_it
+if [ "$RC" = 0 ] && grep -q "cache: POLECAT_CACHE_CAP=10XB is not a size such as 10GB; nothing trimmed" <<<"$OUT" && cache_has gastown 1; then pass "a cap that is not a size: nothing trimmed, the typo named"; else fail "cachecap: rc=$RC out=$OUT"; fi
+
+cache_case cachemissing abc1234 "$(full abc1234)"
+cache_fill gastown 10
+echo gt-cache-gastown >"$STUB_STATE/volume-missing"
+POLECAT_CACHE_CAP="$(cache_cap gastown 6)" run_it
+if [ "$RC" = 0 ] && grep -q "cache: gt-cache-gastown: cannot inspect the volume (Error response from daemon: get gt-cache-gastown: no such volume); nothing trimmed" <<<"$OUT" && cache_has gastown 1; then pass "a volume that is gone: nothing trimmed, the reason logged"; else fail "cachemissing: rc=$RC out=$OUT"; fi
+
+cache_case cachemod abc1234 "$(full abc1234)"
+cache_fill gastown 10
+POLECAT_CACHE_CAP=1 run_it
+if [ "$RC" = 0 ] && ! cache_has gastown 1 && ! cache_has gastown 10 && [ ! -f "$(cache_dir gastown)/go/pkg/mod/example.com/mod.zip" ] && grep -q "cache: gt-cache-gastown: trimmed .* (cap 1)" <<<"$OUT"; then pass "build cache alone cannot reach the cap: go/pkg/mod goes too"; else fail "cachemod: rc=$RC out=$OUT"; fi
+
+cache_case cachelistfail abc1234 "$(full abc1234)"
+cache_fill gastown 10
+touch "$STUB_STATE/volume-ls-fail"
+POLECAT_CACHE_CAP="$(cache_cap gastown 6)" run_it
+if [ "$RC" = 0 ] && grep -q "cache: cannot list the volumes (Error response from daemon: volume list failed); nothing trimmed" <<<"$OUT" && cache_has gastown 1; then pass "a volume listing that fails: nothing trimmed, the reason logged"; else fail "cachelistfail: rc=$RC out=$OUT"; fi
+
+cache_case cachelock abc1234 "$(full abc1234)"
+cache_fill gastown 10
+mkdir "$LOCK"
+POLECAT_CACHE_CAP="$(cache_cap gastown 6)" run_it
+if [ "$RC" = 0 ] && grep -q "cache: skipped, another run holds the lock" <<<"$OUT" && cache_has gastown 1 && [ -d "$LOCK" ]; then pass "another run's lock: no trim, lock untouched"; else fail "cachelock: rc=$RC out=$OUT"; fi
 
 echo
 echo "polecat-image: $PASS passed, $FAIL failed"
