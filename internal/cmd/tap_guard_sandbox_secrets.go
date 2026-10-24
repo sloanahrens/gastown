@@ -86,7 +86,8 @@ var (
 	// covers ruby's ENV and perl's %ENV and $ENV{}; the from-import binds environ by name.
 	sandboxSecretsEnvScriptRe = regexp.MustCompile(`os\.environ|os\.getenv|process\.env|\bENV\b|\bENVIRON\b|\bfrom\s+os\s+import\b[^;\n]*\benviron\b`)
 	// sandboxSecretsShellOutRe matches a script that runs a shell command, so its quoted
-	// strings are judged as commands.
+	// strings are judged as commands. It is a keyword match: the spellings it misses are
+	// listed in TestSandboxSecretsShellOutLimits.
 	sandboxSecretsShellOutRe = regexp.MustCompile("\\b(?:system|popen|exec\\w*|spawn\\w*|subprocess|check_output|getoutput|Open3)\\b|`")
 	// sandboxSecretsQuotedRe matches one quoted string in a one-liner.
 	sandboxSecretsQuotedRe = regexp.MustCompile("'([^']*)'|\"([^\"]*)\"|`([^`]*)`")
@@ -552,10 +553,18 @@ func sandboxSecretsInvocation(argv []string, tainted map[string]bool) string {
 			return name + " sends " + file + ", which holds credentials or account data"
 		}
 	case "jq":
-		// The first word that is not a flag is the filter; `jq -n env` prints the environment.
-		if f := sandboxSecretsNonFlagArgs(args); len(f) > 0 && sandboxSecretsJQEnvRe.MatchString(f[0]) {
+		// `jq -n env` prints the environment, so the filter is judged, whatever options precede it.
+		filter := sandboxSecretsJQFilterIndex(args)
+		if filter >= 0 && sandboxSecretsJQEnvRe.MatchString(args[filter]) {
 			return "jq prints the environment"
 		}
+		// The filter is a program, not a file: `jq .env config.json` reads config.json only.
+		for i, a := range args {
+			if i != filter && sandboxSecretsIsSecretFile(a) {
+				return "it reads " + a + ", which holds credentials or account data"
+			}
+		}
+		return ""
 	case "git":
 		if sandboxSecretsIsCredentialFill(args) {
 			return "git credential fill prints a password"
@@ -639,6 +648,31 @@ func sandboxSecretsIsCredentialFill(args []string) bool {
 		}
 	}
 	return len(words) >= 2 && words[0] == "credential" && words[1] == "fill"
+}
+
+// sandboxSecretsJQValueOptions are the jq options that take the words after them
+// as values, mapped to how many: -L a library directory, --indent a width, and
+// the --arg family a name and a value (or a file). The filter is the first word
+// past them.
+var sandboxSecretsJQValueOptions = map[string]int{
+	"-L": 1, "--indent": 1,
+	"--arg": 2, "--argjson": 2, "--slurpfile": 2, "--rawfile": 2,
+}
+
+// sandboxSecretsJQFilterIndex returns the index of the filter jq runs: the first
+// word that is neither an option nor one of an option's values, or -1 when none is.
+func sandboxSecretsJQFilterIndex(args []string) int {
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if n, takesValues := sandboxSecretsJQValueOptions[a]; takesValues {
+			i += n
+			continue
+		}
+		if !strings.HasPrefix(a, "-") {
+			return i
+		}
+	}
+	return -1
 }
 
 // sandboxSecretsNonFlagArgs returns the words of args that do not start with a dash.
