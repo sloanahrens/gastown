@@ -488,6 +488,8 @@ var heredocStartPattern = regexp.MustCompile(`<<(-?)[ \t]*(['"]?)([A-Za-z_][A-Za
 type heredocSpan struct {
 	reader       string
 	readerStart  int
+	opStart      int // the "<<" operator's offsets in the command, so a caller can
+	opEnd        int // find its place on the reader line without matching it again
 	body         string
 	bodyStart    int
 	bodyEnd      int
@@ -540,7 +542,7 @@ func scanHeredocs(command string) []heredocSpan {
 		if nl < 0 {
 			// No body follows on a later line (e.g. the heredoc marker is
 			// the last thing on the line with nothing after it).
-			spans = append(spans, heredocSpan{reader: reader, readerStart: readerStart, bodyStart: -1, bodyEnd: end, quoted: quoted})
+			spans = append(spans, heredocSpan{reader: reader, readerStart: readerStart, opStart: start, opEnd: end, bodyStart: -1, bodyEnd: end, quoted: quoted})
 			stripped = end
 			walk.skipTo(end)
 			continue
@@ -557,6 +559,8 @@ func scanHeredocs(command string) []heredocSpan {
 			spans = append(spans, heredocSpan{
 				reader:       reader,
 				readerStart:  readerStart,
+				opStart:      start,
+				opEnd:        end,
 				body:         command[bodyStart:],
 				bodyStart:    bodyStart,
 				bodyEnd:      len(command),
@@ -570,6 +574,8 @@ func scanHeredocs(command string) []heredocSpan {
 		spans = append(spans, heredocSpan{
 			reader:      reader,
 			readerStart: readerStart,
+			opStart:     start,
+			opEnd:       end,
 			body:        command[bodyStart:bodyEnd],
 			bodyStart:   bodyStart,
 			bodyEnd:     bodyEnd,
