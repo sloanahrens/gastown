@@ -671,7 +671,12 @@ func doneSlotLoopSkipToCommandWord(tokens []string, j int) int {
 	for j < end {
 		// One reading of a leading assignment, shared with segmentCommandWord,
 		// so a substitution's tokens are stepped over whole here too (gt-pnly6).
-		if next, _, ok := envAssignmentSkip(tokens[:end], j); ok {
+		// An unclosed substitution's command word is in this token, which
+		// doneSlotLoopLower reads as its text (gt-9ujo2).
+		if next, opened, ok := envAssignmentSkip(tokens[:end], j); ok {
+			if opened != "" {
+				return j
+			}
 			j = next
 			continue
 		}
@@ -679,7 +684,8 @@ func doneSlotLoopSkipToCommandWord(tokens []string, j int) int {
 			j++
 			continue
 		}
-		if doneSlotLoopIsCaseArmPattern(tokens[j]) {
+		// `done)` closes a group, it is not a pattern (see doneSlotLoopLower).
+		if doneSlotLoopIsCaseArmPattern(tokens[j]) && strings.ToLower(tokens[j]) != "done)" {
 			j++
 			continue
 		}
@@ -727,11 +733,28 @@ func doneSlotLoopIsCommandWord(commandWords map[int]bool, i int) bool {
 	return commandWords[i]
 }
 
-// doneSlotLoopLower lowercases tokens for the case-insensitive checks above.
+// doneSlotLoopLower lowercases tokens for the case-insensitive checks above. A
+// substitution that opens in an assignment and closes in a later segment
+// carries its command word in that token, so the token reads as that word
+// (`y=$(for` is the loop keyword `for`).
 func doneSlotLoopLower(tokens []string) []string {
 	lower := make([]string, len(tokens))
 	for i, t := range tokens {
 		lower[i] = strings.ToLower(t)
+		// A group's closing paren glues to the `done` before it (`done)`).
+		if lower[i] == "done)" {
+			lower[i] = "done"
+		}
+		if !isEnvAssignment(t) {
+			continue
+		}
+		end := i
+		for end < len(tokens) && !shellCommandSeparators[tokens[end]] {
+			end++
+		}
+		if _, opened, _ := envAssignmentSkip(tokens[:end], i); opened != "" {
+			lower[i] = strings.ToLower(opened)
+		}
 	}
 	return lower
 }

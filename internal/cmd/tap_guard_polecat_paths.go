@@ -2100,18 +2100,14 @@ func envAssignmentCloses(segment []string) []int {
 }
 
 // envAssignmentWidth returns how many leading tokens of segment make up the
-// assignment at its head. An assignment whose value opens a command
-// substitution runs that substitution's text before the command, and the
-// substitution's words spread over tokens: "y=$(echo" "a)" "bash" is the
-// assignment "y=$(echo a)" followed by bash (gt-erfxm). The width runs through
-// the token that closes the substitution. A backtick substitution closes the
-// same way, on its next backtick (gt-bdct5).
+// assignment at its head: through the token that closes its command
+// substitution, since the substitution's words spread over tokens (gt-erfxm).
+// A backtick substitution closes on its next backtick (gt-bdct5).
 //
-// A substitution that never closes in this segment runs the text after its
-// "$(" first, so that text's first word is the command: it is returned as
-// opened, and the width is one token. With nothing after the "$(" the command
-// is the next token, as it is for a literal "$(" in a plain value: shlex has
-// already dropped the quotes that tell the two apart.
+// A substitution that does not close in this segment, because a `;` split it
+// off, runs its first word as the command: that word is returned as opened and
+// the width is one token. With nothing after the "$(" the command is the next
+// token, since shlex has dropped the quotes that tell a literal "$(" apart.
 func envAssignmentWidth(segment []string) (width int, opened string) {
 	depth, ticked := 0, false
 	for i, token := range segment {
@@ -2133,13 +2129,10 @@ func envAssignmentWidth(segment []string) (width int, opened string) {
 
 // envAssignmentSkip is the single reading of a leading NAME=value assignment
 // that every command-word walk shares: ok reports that segment[i] starts one,
-// and next is the index just past it — the whole substitution when the value
-// holds one, only its own token otherwise. A walk that steps one token per
-// assignment instead reads the substitution's first word as the command, so
-// `y=$(echo a b) repeat 3 gt done` never judges the repeat (gt-pnly6). The
+// and next is the index just past it, the whole substitution included, so no
+// walk reads the substitution's first word as the command (gt-pnly6). The
 // slice must end where the segment does: a substitution that never closes
-// inside it is then read as opened rather than swallowing the command behind
-// it.
+// inside it is read as opened rather than swallowing the command behind it.
 func envAssignmentSkip(segment []string, i int) (next int, opened string, ok bool) {
 	if !isEnvAssignment(segment[i]) {
 		return i, "", false

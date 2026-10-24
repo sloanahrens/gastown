@@ -45,6 +45,14 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 		// and the repeat goes unjudged (gt-pnly6).
 		{"zsh repeat behind a plain assignment", "y=1 repeat 3 gt done", true},
 		{"zsh repeat behind a substitution assignment", "y=$(echo a b) repeat 3 gt done", true},
+		// A substitution that closes in a later segment (its `;` splits this
+		// one) opens with the command word inside it, which is the loop keyword
+		// or repeater the rule reads (gt-9ujo2).
+		{"substitution opened by a for loop", "y=$(for i in 1 2; do gt done; done)", true},
+		{"substitution opened by a while loop", "y=$(while true; do gt done; done)", true},
+		{"substitution opened by a zsh repeat", "y=$(repeat 3 gt done; true)", true},
+		{"substitution opened by a command with no loop", "y=$(echo hi; gt done)", false},
+		{"subshell loop whose paren glues to done", "(while true; do gt done; done)", true},
 
 		// The other shapes zsh accepts, and the modifiers that prefix them
 		// (gt-ezhf4). Each was verified to loop in zsh.
@@ -194,32 +202,8 @@ func TestMatchesDoneSlotLoop(t *testing.T) {
 			}
 		})
 	}
-	if blocked != 67 {
-		t.Errorf("blocked %d of %d cases, want exactly 67", blocked, len(tests))
-	}
-}
-
-// A loop behind a leading assignment is refused however many tokens the
-// value spans: a substitution assignment covers its whole substitution, and a
-// walk that stepped over one token read the substitution's text as the
-// command (gt-pnly6).
-func TestDoneSlotLoopAssignmentBeforeRepeat(t *testing.T) {
-	t.Parallel()
-	tests := []struct {
-		name    string
-		command string
-	}{
-		{"plain assignment", "y=1 repeat 3 gt done"},
-		{"substitution assignment", "y=$(echo a b) repeat 3 gt done"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
-			if reason != doneSlotLoopReason {
-				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want %q", tt.command, reason, doneSlotLoopReason)
-			}
-		})
+	if blocked != 71 {
+		t.Errorf("blocked %d of %d cases, want exactly 71", blocked, len(tests))
 	}
 }
 
