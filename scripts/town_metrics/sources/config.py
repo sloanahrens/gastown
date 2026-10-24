@@ -1,5 +1,4 @@
-"""Config group of the snapshot: pool and overrun settings, om gate threshold per rig, parked rigs
-(gt-6068c). A stub until that bead fills it in."""
+"""Config group of the snapshot. A stub until gt-4vurb fills in its columns."""
 GROUP = "config"
 
 

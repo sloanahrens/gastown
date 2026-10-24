@@ -1,4 +1,4 @@
-"""Queue group of the snapshot: bead counts and dispatch activity (gt-a8bei). A stub until that bead fills it in."""
+"""Queue group of the snapshot. A stub until gt-a8bei fills in its columns."""
 GROUP = "queue"
 
 
