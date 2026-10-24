@@ -1,8 +1,11 @@
 package doctor
 
 import (
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/steveyegge/gastown/internal/hooks"
@@ -10,11 +13,15 @@ import (
 
 // memHooksBase is a hooksBaseStore holding the base config in memory.
 type memHooksBase struct {
-	cfg   *hooks.HooksConfig
-	saves int
+	cfg     *hooks.HooksConfig
+	loadErr error // returned by LoadBase ahead of cfg
+	saves   int
 }
 
 func (m *memHooksBase) LoadBase() (*hooks.HooksConfig, error) {
+	if m.loadErr != nil {
+		return nil, m.loadErr
+	}
 	if m.cfg == nil {
 		return nil, os.ErrNotExist
 	}
@@ -92,5 +99,30 @@ func TestHooksBaseCheck_FixIdempotent(t *testing.T) {
 	}
 	if store.saves != 0 {
 		t.Errorf("Fix saved %d times over an existing base, want 0", store.saves)
+	}
+}
+
+func TestHooksBaseCheck_CorruptFileNotOverwritten(t *testing.T) {
+	t.Parallel()
+	store := &memHooksBase{loadErr: fmt.Errorf("parsing hooks-base.json: %w", &json.SyntaxError{})}
+	check := hooksBaseCheckOn(store)
+	ctx := &CheckContext{TownRoot: t.TempDir()}
+
+	result := check.Run(ctx)
+	if result.Status != StatusWarning {
+		t.Errorf("expected StatusWarning for a corrupt file, got %v: %s", result.Status, result.Message)
+	}
+	if strings.Contains(result.Message, "is missing") {
+		t.Errorf("message %q calls a corrupt file missing", result.Message)
+	}
+	if !strings.Contains(result.Message, "unreadable") {
+		t.Errorf("message %q does not say the file is unreadable", result.Message)
+	}
+
+	if err := check.Fix(ctx); err == nil {
+		t.Error("Fix over a corrupt file returned nil, want an error")
+	}
+	if store.saves != 0 {
+		t.Errorf("Fix saved %d times over a corrupt file, want 0", store.saves)
 	}
 }

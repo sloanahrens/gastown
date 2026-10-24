@@ -1,12 +1,14 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
+	"os"
 
 	"github.com/steveyegge/gastown/internal/hooks"
 )
 
-// HooksBaseCheck warns when ~/.gt/hooks-base.json is missing.
+// HooksBaseCheck warns when ~/.gt/hooks-base.json is missing or unreadable.
 // Without this file, gt hooks diff has no reference point and cannot detect
 // drift when gt's default hook configuration changes after initial setup.
 type HooksBaseCheck struct {
@@ -53,11 +55,21 @@ func NewHooksBaseCheck() *HooksBaseCheck {
 // Run checks whether hooks-base.json exists.
 func (c *HooksBaseCheck) Run(ctx *CheckContext) *CheckResult {
 	store := c.base()
-	if _, err := store.LoadBase(); err == nil {
+	_, err := store.LoadBase()
+	if err == nil {
 		return &CheckResult{
 			Name:    c.Name(),
 			Status:  StatusOK,
 			Message: fmt.Sprintf("hooks-base.json present at %s", store.BasePath()),
+		}
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return &CheckResult{
+			Name:    c.Name(),
+			Status:  StatusWarning,
+			Message: fmt.Sprintf("hooks-base.json is unreadable: %v", err),
+			Details: []string{fmt.Sprintf("File: %s", store.BasePath())},
+			FixHint: "Fix the file by hand; 'gt doctor fix' will not overwrite it",
 		}
 	}
 
@@ -76,8 +88,12 @@ func (c *HooksBaseCheck) Run(ctx *CheckContext) *CheckResult {
 // Fix creates hooks-base.json from current defaults.
 func (c *HooksBaseCheck) Fix(ctx *CheckContext) error {
 	store := c.base()
-	if _, err := store.LoadBase(); err == nil {
+	_, err := store.LoadBase()
+	if err == nil {
 		return nil // already exists
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("hooks-base.json at %s is unreadable, fix it by hand (not overwriting): %w", store.BasePath(), err)
 	}
 	base := hooks.DefaultBase()
 	if err := store.SaveBase(base); err != nil {
