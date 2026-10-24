@@ -29,7 +29,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VALUES="$HERE/../values/kind.yaml"
 
 export KUBECONFIG="$OUT/kubeconfig"
-export XDG_CONFIG_HOME="$OUT/xdg" # isolates `openshell gateway add` from ~/.config/openshell
+# Where the daemon's openshell reads its gateways. Captured before the export
+# below moves this script's own calls to the private config, so --register-town
+# (up.sh) writes to the same directory the daemon reads (gt-0knzj).
+TOWN_XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export XDG_CONFIG_HOME="$OUT/xdg" # `up.sh --register-town` is the only path into ~/.config/openshell
 export PATH="$OUT/bin:$PATH"
 
 say() { printf '==> %s\n' "$*"; }

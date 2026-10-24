@@ -112,13 +112,49 @@ STUB
 cat >"$TMP/bin/openshell" <<'STUB'
 #!/usr/bin/env bash
 "$(dirname "$0")/_log" openshell "$@"
+# The town config is wherever the daemon looks (${XDG_CONFIG_HOME:-$HOME/.config});
+# the script's private config is any other XDG directory, kept in $STATE.
+town=0
+[ "${XDG_CONFIG_HOME:-$HOME/.config}" = "$HOME/.config" ] && town=1
+town_add() { echo "$1" >"$HOME/.config/openshell/active_gateway"; echo "$1" >"$STATE/town-active"; }
 case "$*" in
   "gateway list")
-    [ -f "$STATE/gw-list" ] && cat "$STATE/gw-list"
-    [ -f "$STATE/gw" ] && echo k8s
+    if [ "$town" = 1 ]; then
+      while read -r n; do
+        [ -n "$n" ] || continue
+        if [ "$n" = "$(cat "$STATE/town-active" 2>/dev/null)" ]; then echo "* $n healthy"; else echo "  $n healthy"; fi
+      done <"$STATE/town-gw-list" 2>/dev/null
+    else
+      [ -f "$STATE/gw-list" ] && cat "$STATE/gw-list"
+      [ -f "$STATE/gw" ] && echo k8s
+    fi
     exit 0 ;;
-  "gateway add"*) touch "$STATE/gw"; exit 0 ;;
-  "gateway remove"*) rm -f "$STATE/gw"; exit 0 ;;
+  "gateway add"*)
+    if [ "$town" = 1 ]; then
+      name=$(sed -n 's/.*--name \([^ ]*\).*/\1/p' <<<"$*")
+      mkdir -p "$HOME/.config/openshell"
+      grep -qx "$name" "$STATE/town-gw-list" 2>/dev/null || echo "$name" >>"$STATE/town-gw-list"
+      town_add "$name" # add makes the new gateway active
+    else
+      touch "$STATE/gw"
+    fi
+    exit 0 ;;
+  "gateway select"*)
+    if [ "$town" = 1 ]; then
+      [ -n "${STUB_SELECT_FAIL:-}" ] && exit 1
+      town_add "$3"
+    fi
+    exit 0 ;;
+  "gateway remove"*)
+    if [ "$town" = 1 ]; then
+      grep -vx "$3" "$STATE/town-gw-list" >"$STATE/town-gw-list.tmp" 2>/dev/null || true
+      mv "$STATE/town-gw-list.tmp" "$STATE/town-gw-list" 2>/dev/null || true
+      [ "$(cat "$STATE/town-active" 2>/dev/null)" = "$3" ] && rm -f "$STATE/town-active"
+      [ "$(cat "$HOME/.config/openshell/active_gateway" 2>/dev/null)" = "$3" ] && rm -f "$HOME/.config/openshell/active_gateway"
+    else
+      rm -f "$STATE/gw"
+    fi
+    exit 0 ;;
   *"gateway info"*)
     n=$(cat "$STATE/info-calls" 2>/dev/null || echo 0)
     echo $((n + 1)) >"$STATE/info-calls"
@@ -219,6 +255,7 @@ check "kubectl always uses the private kubeconfig" test "$(grep '^kubectl ' "$S/
 check "openshell always uses the isolated config dir" test "$(grep '^openshell ' "$S/calls.log" | grep -vc "XDG=$S/home/gt/.runtime/sbx-k8s/xdg")" -eq 0
 check "nothing is written to ~/.kube" test ! -e "$S/home/.kube"
 check "the town's openshell config is untouched" test ! -e "$S/home/.config/openshell"
+check "no openshell call reads or writes the town config" test "$(grep -c "XDG=$S/home/.config " "$S/calls.log")" -eq 0
 check "no docker context change when colima left it alone" lacks "docker context use" "$CALLS_LOG"
 
 echo "colima flips the docker context"
@@ -329,6 +366,76 @@ run "$UP" --
 check "a changed agent-sandbox manifest stops the run" test "$RC" -ne 0
 check "the failure names both digests" contains "refusing to apply it" "$OUT_TEXT"
 check "the unverified manifest is not applied" lacks "kubectl apply -f $S/home/gt/.runtime/sbx-k8s/agent-sandbox-v1.0.7.yaml" "$CALLS_LOG"
+
+echo "register the gateway in the town config"
+scenario town
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active" # active only in the list's starred row
+run "$UP" -- --register-town
+check "--register-town exits 0" test "$RC" -eq 0
+town_calls="$(grep "XDG=$S/home/.config " "$S/calls.log")"
+check "the k8s gateway is added to the town config" contains "gateway add https://127.0.0.1:28443 --local --name k8s" "$town_calls"
+check "the starred active gateway is selected back" contains "gateway select docker" "$town_calls"
+check "the active gateway is the one from before" test "$(cat "$S/home/.config/openshell/active_gateway")" = docker
+check "the town list keeps the other gateway" test "$(grep -cx docker "$S/state/town-gw-list")" -eq 1
+check "the town list holds one k8s entry" test "$(grep -cx k8s "$S/state/town-gw-list")" -eq 1
+check "the town gateway is still registered in the private config" contains "gateway add https://127.0.0.1:28443 --local --name k8s" "$(grep "XDG=$S/home/gt/.runtime/sbx-k8s/xdg " "$S/calls.log")"
+check "the town client certificates are exported too" test "$(count 'get secret openshell-client-tls' "$CALLS_LOG")" -eq 6
+town_mtls="$S/home/.config/openshell/gateways/k8s/mtls"
+check "the town client key is mode 600" test "$(mode "$town_mtls/tls.key")" = 600
+check "the town CA certificate is mode 600" test "$(mode "$town_mtls/ca.crt")" = 600
+check "the town mtls directory is private" test "$(mode "$town_mtls")" = 700
+check "the town staging directory is gone" no_stage "$town_mtls"
+check "no key material is printed for the town config" lacks "SECRETVALUE" "$OUT_TEXT"
+
+echo "register-town reads the active_gateway file"
+scenario town_file
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+printf 'docker\n' >"$S/home/.config/openshell/active_gateway"
+run "$UP" -- --register-town
+check "up exits 0" test "$RC" -eq 0
+check "the file's active gateway is selected back" contains "gateway select docker" "$CALLS_LOG"
+check "the active_gateway file keeps its value" test "$(cat "$S/home/.config/openshell/active_gateway")" = docker
+
+echo "register-town fails loudly when the restore fails"
+scenario town_select_fail
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+run "$UP" STUB_SELECT_FAIL=1 -- --register-town
+check "a failed restore exits non-zero" test "$RC" -ne 0
+check "the failure says the gateway could not be restored" contains "could not be restored to docker" "$OUT_TEXT"
+check "the failure names the command to run" contains "openshell gateway select docker" "$OUT_TEXT"
+
+echo "a run without the flag leaves the town config alone"
+scenario town_untouched
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+printf 'docker\n' >"$S/home/.config/openshell/active_gateway"
+run "$UP" --
+check "up exits 0" test "$RC" -eq 0
+check "the town active gateway is untouched" test "$(cat "$S/home/.config/openshell/active_gateway")" = docker
+check "no gateway command runs against the town config" test "$(grep -c "XDG=$S/home/.config " "$S/calls.log")" -eq 0
+check "no town certificates are written" test ! -e "$S/home/.config/openshell/gateways"
+check "the town gateway list is unchanged" test "$(cat "$S/state/town-gw-list")" = docker
+
+echo "register-town rerun replaces only the k8s entry"
+scenario town_rerun
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+run "$UP" -- --register-town
+run "$UP" -- --register-town
+check "both runs exit 0" test "$RC" -eq 0
+check "the existing k8s entry is removed before the add" contains "gateway remove k8s" "$CALLS_LOG"
+check "no gateway other than k8s is removed" test "$(count 'gateway remove' "$CALLS_LOG")" -eq 1
+check "the town list holds one k8s entry" test "$(grep -cx k8s "$S/state/town-gw-list")" -eq 1
+check "the other gateway survives" test "$(grep -cx docker "$S/state/town-gw-list")" -eq 1
+check "the active gateway is still docker" test "$(cat "$S/home/.config/openshell/active_gateway")" = docker
 
 echo "down"
 scenario down
