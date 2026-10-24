@@ -281,6 +281,22 @@ func (r *PrefixRegistry) IsKnownSession(sess string) bool {
 	return strings.HasPrefix(sess, HQPrefix) || r.HasPrefix(sess)
 }
 
+// isLiveTownSession reports whether sess is a town-socket session that is
+// running now, so it is not stale wherever it is found.
+func isLiveTownSession(sess string) bool {
+	return sess == OverseerSessionName()
+}
+
+// IsStaleDefaultSocketSession reports whether sess is a Gas Town session that
+// belongs on the town socket, so a copy of it on a legacy socket is stale.
+//
+// It is IsKnownSession minus the live town sessions, so the legacy cleanup and
+// gt doctor's split-brain check cannot drift apart on which sessions are Gas
+// Town's (gt-2n5go).
+func (r *PrefixRegistry) IsStaleDefaultSocketSession(sess string) bool {
+	return r.IsKnownSession(sess) && !isLiveTownSession(sess)
+}
+
 // matchPrefix finds the prefix in a session name suffix using the registry.
 // Returns the prefix and the remaining string after the prefix dash.
 // Tries longest prefix match first.

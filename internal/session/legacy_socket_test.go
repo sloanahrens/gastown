@@ -102,7 +102,7 @@ func TestCleanupLegacyDefaultSocketCleansGastownSessions(t *testing.T) {
 func TestCleanupLegacyDefaultSocketIgnoresNonGastownSessions(t *testing.T) {
 	t.Parallel()
 	mock := &mockLegacyTmux{
-		sessions: []string{"personal-stuff", "hq-notes", "ga-witness"},
+		sessions: []string{"personal-stuff", "work-notes", "ga-witness"},
 	}
 	l := fakeLegacySockets("gt-abc123", mock)
 
@@ -136,6 +136,49 @@ func TestCleanupLegacyDefaultSocketCleansSpecificTownSessions(t *testing.T) {
 	}
 }
 
+// A retired town role left on the default socket is stale, and the legacy
+// cleanup kills it. gt doctor's split-brain check kills the same session.
+func TestLegacyCleanupAgreesWithSplitBrainCheck(t *testing.T) {
+	t.Parallel()
+	mock := &mockLegacyTmux{sessions: []string{"hq-mayor"}}
+	l := fakeLegacySockets("gt-abc123", mock)
+
+	if got := l.cleanupDefault(); got != 1 {
+		t.Fatalf("cleanupDefault = %d, want 1", got)
+	}
+	if !slices.Equal(mock.killed, []string{"hq-mayor"}) {
+		t.Errorf("killed = %v, want [hq-mayor]", mock.killed)
+	}
+}
+
+func TestIsStaleDefaultSocketSession(t *testing.T) {
+	t.Parallel()
+	r := NewPrefixRegistry()
+	r.Register("ga", "gastown")
+
+	tests := []struct {
+		sess string
+		want bool
+	}{
+		{"hq-mayor", true},
+		{"hq-deacon", true},
+		{"hq-boot", true},
+		{"hq-dog-alpha", true},
+		{"hq-notes", true}, // any hq- name is a town session
+		{"hq-overseer", false},
+		{"ga-witness", true},
+		{"gt-unregistered", false},
+		{"bd-thing", false},
+		{"gthq-thing", false},
+		{"personal-stuff", false},
+	}
+	for _, tt := range tests {
+		if got := r.IsStaleDefaultSocketSession(tt.sess); got != tt.want {
+			t.Errorf("IsStaleDefaultSocketSession(%q) = %v, want %v", tt.sess, got, tt.want)
+		}
+	}
+}
+
 func TestCleanupLegacyDefaultSocketNoDefaultServer(t *testing.T) {
 	t.Parallel()
 	mock := &mockLegacyTmux{
@@ -163,7 +206,7 @@ func TestCountLegacyDefaultSocketSkipsWhenOnDefault(t *testing.T) {
 func TestCountLegacyDefaultSocketCountsGastownOnly(t *testing.T) {
 	t.Parallel()
 	mock := &mockLegacyTmux{
-		sessions: []string{"ga-witness", "personal", "hq-notes"},
+		sessions: []string{"ga-witness", "personal", "work-notes"},
 	}
 	l := fakeLegacySockets("gt-abc123", mock)
 

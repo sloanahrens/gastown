@@ -106,13 +106,14 @@ func (c *SocketSplitBrainCheck) Run(ctx *CheckContext) *CheckResult {
 		townSet[s] = true
 	}
 
-	// Find Gas Town sessions on default that are duplicates or orphans
+	// Find stale Gas Town sessions on default that are duplicates or orphans.
+	// The legacy socket cleanup asks the same predicate, so the two agree.
 	var duplicates []string
 	var orphans []string
 
 	for _, s := range defaultSessions {
-		if !ctx.prefixes().IsKnownSession(s) {
-			continue // Not a Gas Town session
+		if !ctx.prefixes().IsStaleDefaultSocketSession(s) {
+			continue
 		}
 		if townSet[s] {
 			duplicates = append(duplicates, s)

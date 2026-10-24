@@ -45,6 +45,16 @@ func CleanupLegacyDefaultSocket(prefixes *PrefixRegistry) int {
 	return newLegacySockets(prefixes).cleanupDefault()
 }
 
+// CleanupDefaultSocketForTest runs the default-socket cleanup as if this
+// process were on currentSocket, over clients built by build, so a test in
+// another package can drive this kill path beside gt doctor's split-brain
+// check (gt-2n5go).
+func CleanupDefaultSocketForTest(prefixes *PrefixRegistry, currentSocket string, build func(socket string) *tmux.Tmux) int {
+	l := newLegacySocketsWith(prefixes, build)
+	l.current = currentSocket
+	return l.cleanupDefault()
+}
+
 // CountLegacyDefaultSocketSessions counts Gas Town sessions on the "default"
 // tmux socket for dry-run output.
 func CountLegacyDefaultSocketSessions(prefixes *PrefixRegistry) int {
@@ -100,13 +110,7 @@ func (l legacySockets) count(legacyTmux legacySocketTmux) int {
 		return 0
 	}
 
-	var count int
-	for _, sess := range sessions {
-		if l.isCleanupSession(sess) {
-			count++
-		}
-	}
-	return count
+	return len(StaleDefaultSocketSessions(l.prefixes, sessions))
 }
 
 func (l legacySockets) cleanup(legacyTmux legacySocketTmux) int {
@@ -130,9 +134,19 @@ func (l legacySockets) cleanup(legacyTmux legacySocketTmux) int {
 }
 
 func (l legacySockets) cleanupTargets(sessions []string) []string {
+	return StaleDefaultSocketSessions(l.prefixes, sessions)
+}
+
+// StaleDefaultSocketSessions returns the Gas Town sessions in sessions that do
+// not belong on the "default" tmux socket, ordered the way the legacy cleanup
+// kills them.
+//
+// The legacy cleanup and gt doctor's split-brain check both select through it,
+// so they kill the same sessions (gt-2n5go).
+func StaleDefaultSocketSessions(prefixes *PrefixRegistry, sessions []string) []string {
 	targets := make([]string, 0, len(sessions))
 	for _, sess := range sessions {
-		if l.isCleanupSession(sess) {
+		if prefixes.IsStaleDefaultSocketSession(sess) {
 			targets = append(targets, sess)
 		}
 	}
@@ -157,26 +171,4 @@ func legacyCleanupPriority(sess string) int {
 		return 4
 	}
 	return 5
-}
-
-func (l legacySockets) isCleanupSession(sess string) bool {
-	switch sess {
-	case HQPrefix + "deacon", HQPrefix + "boot":
-		return true
-	}
-	if strings.HasPrefix(sess, HQPrefix+"dog-") && strings.TrimPrefix(sess, HQPrefix+"dog-") != "" {
-		return true
-	}
-	if l.prefixes.HasPrefix(sess) {
-		return true
-	}
-	for _, p := range LegacyPrefixes {
-		if p == strings.TrimSuffix(HQPrefix, "-") {
-			continue
-		}
-		if strings.HasPrefix(sess, p+"-") {
-			return true
-		}
-	}
-	return false
 }
