@@ -31,12 +31,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 FROM ubuntu:24.04
 
 ARG GO_VERSION=1.27.1
-# The image's Go must be at least the highest `go` line of any rig's go.mod (om,
-# agentlab, hm, devops, mango say 1.27): a newer line makes go download a
-# toolchain, and that downloaded go binary is not one the sandbox policy lets
-# reach the module hosts. GO_FLOOR is that line, and the build fails when
-# GO_VERSION is below it. Raise GO_FLOOR when a rig's go.mod names a newer line.
-ARG GO_FLOOR=1.27
+# GO_FLOOR is the highest `go` line of the rigs' go.mod files. make polecat-image
+# reads it from those files (deploy/polecat/go-floor.sh rig) and passes it in.
+# There is no default: an image built without it fails the check below.
+ARG GO_FLOOR
 # sha256 of go1.27.1.linux-arm64.tar.gz and go1.27.1.linux-amd64.tar.gz, as listed
 # by https://go.dev/dl/?mode=json&include=all and matching the tarballs' own bytes,
 # checked on 2026-10-23. Update a digest only together with GO_VERSION.
@@ -77,10 +75,9 @@ RUN ARCH=$(dpkg --print-architecture) \
     && echo "${SHA}  /tmp/go.tgz" | sha256sum -c - \
     && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
 
-# The floor sorts first (or ties) only when the installed Go is at least GO_FLOOR.
-RUN GO_NOW=$(GOTOOLCHAIN=local /usr/local/go/bin/go env GOVERSION | sed 's/^go//') \
-    && [ "$(printf '%s\n%s\n' "$GO_FLOOR" "$GO_NOW" | sort -V | head -n 1)" = "$GO_FLOOR" ] \
-    || { echo "image Go ${GO_NOW} is below GO_FLOOR ${GO_FLOOR}" >&2; exit 1; }
+# Refuse the image when its Go is below GO_FLOOR (see go-floor.sh for the rule).
+COPY go-floor.sh /usr/local/lib/gastown/go-floor.sh
+RUN bash /usr/local/lib/gastown/go-floor.sh check "$GO_FLOOR"
 
 # GNU Make 4.4.1 ahead of /usr/bin/make on PATH (see the make-build stage).
 COPY --from=make-build /usr/local/bin/make /usr/local/bin/make
