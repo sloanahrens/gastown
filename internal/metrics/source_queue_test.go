@@ -105,7 +105,7 @@ func queueBdKind(argv []string) string {
 		return "dispatchable"
 	case strings.Contains(joined, "--label gt:ready-to-land"):
 		return "waiting_to_land"
-	case strings.Contains(joined, "--status blocked"):
+	case len(argv) > 3 && argv[3] == "blocked":
 		return "blocked"
 	}
 	return "ready"
@@ -414,4 +414,42 @@ func TestSourceQueueMalformedRigRegistryIsAnError(t *testing.T) {
 	if len(fake.calls) != 0 {
 		t.Errorf("bd was run %d times with no readable rigs; want none", len(fake.calls))
 	}
+}
+
+// blocked is bd blocked, the dependency-blocked beads, and not the ephemeral
+// wisp steps that are blocked by design (gt-5jve7).
+func TestSourceQueueBlockedCountsDependencyBlockedBeadsNotWisps(t *testing.T) {
+	t.Parallel()
+	answer := `[{"id":"gt-a","ephemeral":false},{"id":"gt-wisp-b","ephemeral":true},` +
+		`{"id":"gt-c"},{"id":"gt-wisp-d","ephemeral":true},{"id":"gt-e","ephemeral":false}]`
+	fake := &queueBdFake{rows: map[string]int{}, raw: map[string]string{"alpha/blocked": answer, "beta/blocked": `[{"id":"gt-wisp-x","ephemeral":true}]`}}
+	env := queueTestEnv(t, queueTestRigs("alpha", "beta"), fake.run, nil)
+	cols, err := queueSource{}.Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	queueWantColumns(t, cols, map[string]any{"blocked": 3})
+	asked := 0
+	for _, call := range fake.calls {
+		if call == "bd -C /town/alpha blocked --json" || call == "bd -C /town/beta blocked --json" {
+			asked++
+		}
+		if strings.Contains(call, "--status blocked") {
+			t.Errorf("the source still reads the blocked status: %q", call)
+		}
+	}
+	if asked != 2 {
+		t.Errorf("bd blocked --json was run %d times over two rigs, want 2: %v", asked, fake.calls)
+	}
+}
+
+func TestSourceQueueBlockedFailureNilsOnlyTheBlockedColumn(t *testing.T) {
+	t.Parallel()
+	fake := &queueBdFake{rows: map[string]int{"alpha/ready": 4}, fail: map[string]bool{"alpha/blocked": true}}
+	env := queueTestEnv(t, queueTestRigs("alpha"), fake.run, nil)
+	cols, err := queueSource{}.Collect(context.Background(), env)
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	queueWantColumns(t, cols, map[string]any{"blocked": nil, "ready": 4})
 }
