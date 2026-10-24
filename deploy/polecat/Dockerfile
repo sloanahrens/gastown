@@ -30,10 +30,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends build-essential
 
 FROM ubuntu:24.04
 
-ARG GO_VERSION=1.26.2
-# sha256 from https://go.dev/dl/?mode=json for go1.26.2.linux-arm64.tar.gz.
-ARG GO_SHA256_ARM64=c958a1fe1b361391db163a485e21f5f228142d6f8b584f6bef89b26f66dc5b23
-ARG GO_SHA256_AMD64=990e6b4bbba816dc3ee129eaeaf4b42f17c2800b88a2166c265ac1a200262282
+ARG GO_VERSION=1.27.1
+# sha256 from https://go.dev/dl/?mode=json for go1.27.1.linux-arm64.tar.gz and
+# go1.27.1.linux-amd64.tar.gz. The image's Go must be at least the highest `go`
+# line of any rig's go.mod (om, agentlab, hm, devops, mango say 1.27): a newer
+# line makes go download a toolchain, and that downloaded go binary is not one
+# the sandbox policy lets reach the module hosts.
+ARG GO_SHA256_ARM64=3450b45a3f9ee8568792736a5c5e70a1f2e9b36c35a8f74958c03e51d7d92bec
+ARG GO_SHA256_AMD64=63d339f0da5ab53635a56f2490a7984dfe12dfcff22ad749f63edaf590168445
 ARG NODE_MAJOR=22
 ARG NODE_VERSION=22.23.4-1nodesource1
 # sha256 of https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key on 2026-10-22.
