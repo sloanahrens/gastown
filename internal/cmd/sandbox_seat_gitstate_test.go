@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/polecat"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 const sandboxSeatTestSettings = `{"type":"town-settings","version":1,
@@ -95,13 +96,12 @@ func TestInventoryReadsASandboxSeatFromTheGateway(t *testing.T) {
 	t.Parallel()
 	stale := polecat.LiveGitState{Branch: "polecat/ember/gt-a+x", Source: polecat.GitStateSourceLive, UnpushedCommits: 1}
 	tests := []struct {
-		name        string
-		sandbox     polecat.LiveGitState
-		wantBlocker string // in the disposition's blockers
-		wantReason  string // in the git state reason
+		name       string
+		sandbox    polecat.LiveGitState
+		wantReason string // in the git state reason
 	}{
-		{"gone_reads_clean", polecat.LiveGitState{Branch: "polecat/ember/gt-a+x", Source: polecat.GitStateSourceLive}, "", ""},
-		{"running_is_unknown", polecat.LiveGitState{Source: polecat.GitStateSourceUnknown, FailedReason: "git state lives in the running sandbox gt-ember"}, "", "running sandbox"},
+		{"gone_reads_clean", polecat.LiveGitState{Branch: "polecat/ember/gt-a+x", Source: polecat.GitStateSourceLive}, ""},
+		{"running_is_unknown", polecat.LiveGitState{Source: polecat.GitStateSourceUnknown, FailedReason: "git state lives in the running sandbox gt-ember"}, "running sandbox"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -166,33 +166,101 @@ func TestInventoryProbesAHostSeat(t *testing.T) {
 	}
 }
 
-// The sling pool reads a sandbox seat the same way: its stale worktree is not
-// measured, so it does not hold the seat as unpushed work.
+// The sling pool reads a sandbox seat the same way: its stale worktree is never
+// measured, so a gone sandbox does not hold the seat as unpushed work, and a
+// running one or a gateway that cannot be asked reads as unknown.
 func TestPoolSeatReadsASandboxSeatFromTheGateway(t *testing.T) {
 	t.Parallel()
+	tests := []struct {
+		name        string
+		sandbox     polecat.LiveGitState
+		wantUnknown bool
+	}{
+		{"gone_reads_clean", polecat.LiveGitState{Branch: "polecat/ember/gt-a+x", Source: polecat.GitStateSourceLive}, false},
+		{"running_is_unknown", polecat.SandboxSeatGitState("", true, nil, "gt-ember"), true},
+		{"gateway_error_is_unknown", polecat.SandboxSeatGitState("", false, errors.New("connection refused"), "gt-ember"), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			town := t.TempDir()
+			writeTestRigsConfig(t, town, "gastown")
+			if err := os.MkdirAll(filepath.Join(town, "gastown", "polecats", "ember", "gastown"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			fields := &beads.AgentFields{
+				AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupClean),
+				Agent: sandboxSeatAgent, Branch: "polecat/ember/gt-a+x",
+			}
+			reads := poolSeatReadsAnswering(t, fields, polecatActiveWorkEvidence{})
+			reads.probe = func(string) polecat.LiveGitState {
+				t.Error("the stale host worktree was measured for a sandbox seat")
+				return polecat.LiveGitState{Source: polecat.GitStateSourceLive, UnpushedCommits: 1}
+			}
+			reads.sandboxSeat = func(agent, _ string) (polecat.LiveGitState, bool) {
+				return tt.sandbox, agent == sandboxSeatAgent
+			}
+
+			state, err := poolPolecatSeatStateWith(town, "gastown", "ember", reads)
+			if err != nil {
+				t.Fatalf("poolPolecatSeatStateWith: %v", err)
+			}
+			blockers := strings.Join(state.Disposition.Blockers, "\n")
+			if strings.Contains(blockers, "unpushed") {
+				t.Errorf("a sandbox seat reads as holding unpushed work: %+v", state.Disposition)
+			}
+			if unknown := state.Disposition.GitStateSource == polecat.GitStateSourceUnknown; unknown != tt.wantUnknown {
+				t.Errorf("git state unknown = %v, want %v: %+v", unknown, tt.wantUnknown, state.Disposition)
+			}
+		})
+	}
+}
+
+// The production wiring hands the sandbox probe to the list env and to the pool
+// reads: without it every seat falls back to its host worktree and the stale
+// commits read as unpushed again (gt-a0x2w).
+func TestSandboxSeatProbeIsWiredIntoTheListAndThePool(t *testing.T) {
+	t.Parallel()
 	town := t.TempDir()
-	writeTestRigsConfig(t, town, "gastown")
-	if err := os.MkdirAll(filepath.Join(town, "gastown", "polecats", "ember", "gastown"), 0o755); err != nil {
+	if env := polecatListInventoryEnv(filepath.Join(town, "gastown"), "gastown", "ember", polecatMRIndex{}, nil, polecatSpawnFacts{}); env.SandboxSeat == nil {
+		t.Error("polecatListInventoryEnv leaves the sandbox probe unset")
+	}
+	if reads := poolSeatReadsForTown(town); reads.sandboxSeat == nil {
+		t.Error("poolSeatReadsForTown leaves the sandbox probe unset")
+	}
+}
+
+// A sandbox with a registry record is answered from the record: the state lives
+// in the running sandbox and the gateway is not asked (the list path is
+// network-free, gt-8q0s).
+func TestSandboxSeatProbeAnswersFromTheRegistryWithoutTheGateway(t *testing.T) {
+	t.Parallel()
+	town := sandboxSeatTown(t)
+	if err := session.WriteSandboxRecord(town, session.SandboxRecord{Session: "gt-ember", Rig: "gastown", Polecat: "ember"}); err != nil {
 		t.Fatal(err)
 	}
-	fields := &beads.AgentFields{
-		AgentState: string(beads.AgentStateIdle), CleanupStatus: string(polecat.CleanupClean),
-		Agent: sandboxSeatAgent, Branch: "polecat/ember/gt-a+x",
+	probe := sandboxSeatProbeFor(town, func(string, string) (bool, error) {
+		t.Error("the gateway was asked about a sandbox with a registry record")
+		return true, nil
+	})
+
+	got, ok := probe(sandboxSeatAgent, "gt-ember")
+
+	if !ok || got.Source != polecat.GitStateSourceUnknown || !strings.Contains(got.FailedReason, "running sandbox") {
+		t.Fatalf("probe = %+v, %v; want a sandbox seat whose state is unknown because the sandbox is running", got, ok)
 	}
-	reads := poolSeatReadsAnswering(t, fields, polecatActiveWorkEvidence{})
-	reads.probe = func(string) polecat.LiveGitState {
-		t.Error("the stale host worktree was measured for a sandbox seat")
-		return polecat.LiveGitState{Source: polecat.GitStateSourceLive, UnpushedCommits: 1}
-	}
-	reads.sandboxSeat = func(agent, sessionName string) (polecat.LiveGitState, bool) {
-		return polecat.LiveGitState{Branch: "polecat/ember/gt-a+x", Source: polecat.GitStateSourceLive}, agent == sandboxSeatAgent
+}
+
+// Classifying a seat reads the town settings and never creates them.
+func TestSandboxSeatProbeDoesNotWriteTheTownSettings(t *testing.T) {
+	t.Parallel()
+	town := t.TempDir()
+
+	if _, ok := sandboxSeatProbeFor(town, nil)(sandboxSeatAgent, "gt-ember"); ok {
+		t.Error("a town with no seat map has a sandbox seat")
 	}
 
-	state, err := poolPolecatSeatStateWith(town, "gastown", "ember", reads)
-	if err != nil {
-		t.Fatalf("poolPolecatSeatStateWith: %v", err)
-	}
-	if state.Disposition.Reason == "git-unpushed" || strings.Contains(strings.Join(state.Disposition.Blockers, "\n"), "unpushed") {
-		t.Errorf("a gone sandbox's seat reads as unpushed: %+v", state.Disposition)
+	if entries, err := os.ReadDir(town); err != nil || len(entries) != 0 {
+		t.Errorf("the probe left %v (err %v) in a town with no settings", entries, err)
 	}
 }

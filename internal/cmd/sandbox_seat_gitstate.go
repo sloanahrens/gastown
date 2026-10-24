@@ -27,6 +27,13 @@ type sandboxExistsFunc func(gateway, name string) (bool, error)
 // sandboxSeatProbeFor reads the seat map of the town at townRoot and asks the
 // gateway through exists (nil means the sandbox CLI). A settings file that
 // cannot be read leaves the seat unclassified, the same as a host seat.
+//
+// The read never writes: config.LoadOrCreateTownSettings returns the defaults
+// for a missing file and creates nothing (pinned by a test). Only a seat whose
+// recorded agent is an openshell seat pays the gateway question, a local CLI
+// call of about 30 ms, and a sandbox with a registry record is answered from
+// that record alone, so the network-free list path (gt-8q0s) makes a call only
+// for a finished sandbox seat whose record is gone.
 func sandboxSeatProbeFor(townRoot string, exists sandboxExistsFunc) sandboxSeatProbe {
 	if exists == nil {
 		exists = func(gateway, name string) (bool, error) {
@@ -53,6 +60,11 @@ func sandboxSeatProbeFor(townRoot string, exists sandboxExistsFunc) sandboxSeatP
 			}
 			if seat.Backend != config.BackendOpenShell {
 				return polecat.LiveGitState{}, false
+			}
+			// A registry record means the sandbox is, or is about to be reaped as,
+			// running: its state lives there, and the gateway need not be asked.
+			if recorded, err := session.IsSandboxed(townRoot, sessionName); err == nil && recorded {
+				return polecat.SandboxSeatGitState("", true, nil, sessionName), true
 			}
 			gateway := ts.Sandboxes[seat.Sandbox].WithDefaults().Gateway
 			found, existsErr := exists(gateway, sessionName)
