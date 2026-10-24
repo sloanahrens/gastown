@@ -54,6 +54,7 @@ func at(t *testing.T, m map[string]any, path ...string) any {
 }
 
 func TestPriorityClassesOrderControlPlaneAboveSandboxAboveCI(t *testing.T) {
+	t.Parallel()
 	docs := decodeDocs(t, "priority-classes.yaml")
 	got := map[string]int{}
 	for _, d := range docs {
@@ -83,6 +84,7 @@ func TestPriorityClassesOrderControlPlaneAboveSandboxAboveCI(t *testing.T) {
 }
 
 func TestKindValuesPinGatewayToCoreAndAllowDriverConfig(t *testing.T) {
+	t.Parallel()
 	docs := decodeDocs(t, "values/kind.yaml")
 	if len(docs) != 1 {
 		t.Fatalf("values/kind.yaml has %d documents, want 1", len(docs))
@@ -100,6 +102,7 @@ func TestKindValuesPinGatewayToCoreAndAllowDriverConfig(t *testing.T) {
 }
 
 func TestStaticManifestsParse(t *testing.T) {
+	t.Parallel()
 	for _, rel := range []string{"kind/gateway-nodeport.yaml", "services/control-plane.yaml", "policy/kind.yaml"} {
 		if len(decodeDocs(t, rel)) == 0 {
 			t.Errorf("%s has no documents", rel)
@@ -108,6 +111,7 @@ func TestStaticManifestsParse(t *testing.T) {
 }
 
 func TestControlPlaneServicesAreExternalNames(t *testing.T) {
+	t.Parallel()
 	seen := map[string]bool{}
 	for _, d := range decodeDocs(t, "services/control-plane.yaml") {
 		name := at(t, d, "metadata", "name").(string)
