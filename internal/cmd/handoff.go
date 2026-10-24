@@ -1092,7 +1092,11 @@ func buildRestartPlan(sessionName string, opts buildRestartCommandOpts) (restart
 		}
 		envMap["GT_ROLE"] = gtRole
 		envMap["BD_ACTOR"] = gtRole
-		envMap["GIT_AUTHOR_NAME"] = gtRole
+		// The seat's bare name, matching config.AgentEnv at first spawn and
+		// the name gt done's rework lease compares; the compound address made
+		// every commit after the respawn read as another seat's divergence
+		// (gt-7a955).
+		envMap["GIT_AUTHOR_NAME"] = git.SeatIdentityFor(gtRole, "").Name
 		if runtimeConfig.Session != nil && runtimeConfig.Session.SessionIDEnv != "" {
 			envMap["GT_SESSION_ID_ENV"] = runtimeConfig.Session.SessionIDEnv
 		}
