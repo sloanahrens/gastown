@@ -1882,8 +1882,20 @@ func isANSICDollar(runes []rune, i int) bool {
 // the shell reads as the PID: the "$" before it is unescaped and begins that
 // pair itself, so a third "$" after "$$" starts an expansion of its own.
 func isPIDTail(runes []rune, i int) bool {
-	return i >= 1 && runes[i] == '$' && runes[i-1] == '$' && !escapedRune(runes, i-1) &&
-		!isPIDTail(runes, i-1)
+	if i < 1 || runes[i] != '$' {
+		return false
+	}
+	start := i
+	for start > 0 && runes[start-1] == '$' {
+		start--
+	}
+	// The first "$" of the run is never a tail. The escape on it decides the
+	// second, and each "$" after that alternates with the one before it.
+	tail := false
+	for j := start + 1; j <= i; j++ {
+		tail = !tail && (j > start+1 || !escapedRune(runes, start))
+	}
+	return tail
 }
 
 // escapedRune reports whether the rune at runes[i] is backslash-escaped: an odd

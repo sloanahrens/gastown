@@ -3648,12 +3648,9 @@ func TestANSICQuotedStringKeepsTheCommandsBehindIt(t *testing.T) {
 	}
 }
 
-// gt-0vbb2: the heredoc scanners read $'...' the way bash does. The walk that
-// tells a "<<" from text opened no ANSI-C string, so the escaped quote closed a
-// plain one early and a "<<" inside the string was taken for a heredoc, which
-// stripped the live command below it as body. heredocLineEnd read the "$" of
-// "$$'" as an ANSI-C opener, but "$$" is the PID and the quote after it is
-// plain, so the operator line ran past its own newline.
+// gt-0vbb2: the heredoc scanners open and close $'...' strings where bash does,
+// and read "$$" as the PID, so a "<<" inside an ANSI-C string is text and not a
+// heredoc, and the operator line ends at its own newline.
 func TestHeredocANSICQuotesFollowBash(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -3680,6 +3677,68 @@ func TestHeredocANSICQuotesFollowBash(t *testing.T) {
 			}
 			if !tt.blocked && reason != "" {
 				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — the body is data", tt.command, reason)
+			}
+		})
+	}
+}
+
+// gt-0vbb2: a "$'" opens an ANSI-C string only when the "$" is one the shell
+// reads as its own. An escaped "$" is literal text, and the second "$" of a PID
+// "$$" is its tail, so the quote after it is plain.
+func TestIsANSICDollar(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		text string
+		i    int
+		want bool
+	}{
+		{"the quote opens a string at the start", "$'a'", 0, true},
+		{"a dollar with no quote after it opens nothing", "$a", 0, false},
+		{"a quote with no dollar before it opens nothing", "'a'", 0, false},
+		{"the dollar is the last rune", "a$", 1, false},
+		{"an index past the end opens nothing", "$'", 5, false},
+		{"a negative index opens nothing", "$'", -1, false},
+		{"an escaped dollar is literal", `\$'`, 1, false},
+		{"an escaped backslash leaves the dollar live", `\\$'`, 2, true},
+		{"the second dollar of PID is a tail", "$$'", 1, false},
+		{"a third dollar after PID is live", "$$$'", 2, true},
+		{"the fourth dollar is the tail of a second PID", "$$$$'", 3, false},
+		{"an escaped first dollar leaves the second live", `\$$'`, 2, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isANSICDollar([]rune(tt.text), tt.i); got != tt.want {
+				t.Errorf("isANSICDollar(%q, %d) = %v, want %v", tt.text, tt.i, got, tt.want)
+			}
+		})
+	}
+}
+
+// gt-0vbb2: a "$" is the second half of a PID "$$" when the "$" before it is
+// unescaped and begins that pair itself. The "$"s of a run alternate, so a long
+// run is judged by the parity of its position.
+func TestIsPIDTail(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		text string
+		i    int
+		want bool
+	}{
+		{"the first dollar is never a tail", "$$", 0, false},
+		{"a dollar after a word is never a tail", "a$", 1, false},
+		{"the second dollar of PID is a tail", "$$", 1, true},
+		{"a third dollar after PID is not a tail", "$$$", 2, false},
+		{"a fourth dollar after PID is a tail", "$$$$", 3, true},
+		{"an escaped first dollar leaves the second one live", `\$$`, 2, false},
+		{"an escaped first dollar makes the third one a tail", `\$$$`, 3, true},
+		{"a tail after a word", "a$$", 2, true},
+		{"an even place in a long run is not a tail", strings.Repeat("$", 4001), 4000, false},
+		{"an odd place in a long run is a tail", strings.Repeat("$", 4001), 3999, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isPIDTail([]rune(tt.text), tt.i); got != tt.want {
+				t.Errorf("isPIDTail(%q, %d) = %v, want %v", tt.text, tt.i, got, tt.want)
 			}
 		})
 	}
