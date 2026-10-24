@@ -4170,6 +4170,35 @@ func TestDangerousGuardLenientFallbackKeepsSeparators(t *testing.T) {
 	}
 }
 
+// gt-w9eli: a command holding a quote but no paren takes the strings.Fields
+// fallback in splitSpacedCommand. It split the raw text, so the newlines and
+// ";" that spaceOutShellOperators turns into separators stayed inside their
+// words, and a later line's rm sat mid-segment as an argument of the line
+// before it. bash runs each line before it reports the unclosed quote.
+func TestDangerousGuardFieldsFallbackKeepsSeparators(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		{"an unclosed double quote on the last line", "echo ok\nrm -rf /\necho \"", true},
+		{"an unclosed double quote with text on the last line", "echo ok\nrm -rf /\necho \"x", true},
+		{"a harmless last line", "echo ok\nrm -rf /\necho x", true},
+		{"the nuke as an argument of the line before", "echo ok\necho rm -rf /\necho \"", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if (reason != "") != tt.blocked {
+				t.Errorf("evaluateDangerousCommand(%q) blocked = %v (reason %q), want %v", tt.command, reason != "", reason, tt.blocked)
+			}
+			if tt.blocked && !strings.Contains(reason, "filesystem destruction") {
+				t.Errorf("evaluateDangerousCommand(%q) reason = %q, want filesystem destruction", tt.command, reason)
+			}
+		})
+	}
+}
+
 // TestQuotedDollarParenPadsOnlyItsSubstitutionsCloser pins the reach of the
 // ")" padding: a substitution whose word was ended by a quoted dollar-paren
 // has its OWN ")" spaced out, so the word glued before it ("/" in

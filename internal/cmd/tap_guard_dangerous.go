@@ -1606,7 +1606,11 @@ func splitSpacedCommand(command, spaced string) []string {
 		if strings.ContainsAny(command, `"'`) && strings.ContainsAny(command, "()") {
 			return lenientShellSplit(command, true)
 		}
-		return strings.Fields(command)
+		// Any other malformed command splits on whitespace over the spaced
+		// text, so the separators spaceOutShellOperators made are tokens of
+		// their own and a later line's command stays in command position
+		// (gt-w9eli).
+		return strings.Fields(spaced)
 	}
 	// shlex returning nothing for text that still has words in it means it
 	// swallowed them (a comment it saw but this pass did not, gt-vonb1). Fail
