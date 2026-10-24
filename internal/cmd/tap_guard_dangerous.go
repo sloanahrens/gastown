@@ -715,7 +715,7 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			// Literal text behind a backslash opens nothing.
 		case r == '\\' && w.quote != '\'':
 			w.escaped = true
-		case r == '`' && w.quote != '\'':
+		case r == '`' && w.quote != '\'' && w.quote != '$':
 			// Backtick text is command text like "$(..)": a "}" in it is that
 			// command's own, so only the "}" after the closing backtick ends
 			// an expansion it sits in (gt-9udxk). The shell ends the text at
@@ -732,6 +732,10 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 				w.subs = append(w.subs, cmdSubstFrame{outer: w.quote, open: w.byteIdx + 1, tick: true})
 				w.quote = 0
 			}
+		case w.quote == 0 && r == '\'' && isANSICDollar(w.runes, w.runeIdx-1):
+			// A "$'" opens an ANSI-C string, where a backslash escapes the
+			// quote, so \' does not end it (gt-0vbb2).
+			w.quote = '$'
 		case w.quote == 0 && (r == '\'' || r == '"'):
 			w.quote = r
 		case w.quote == '"' && w.braces == 0 && r == '(' && w.followsUnescapedDollar() && w.runeAt(w.runeIdx+1) != '(':
@@ -742,9 +746,12 @@ func (w *heredocQuoteWalk) advanceTo(to int) rune {
 			// "${..}" expansion keeps that expansion's own reading.
 			w.subs = append(w.subs, cmdSubstFrame{outer: w.quote, depth: 1, open: w.byteIdx + 1})
 			w.quote = 0
-		case w.quote != 0 && r == w.quote:
+		case w.quote == '$' && r == '\'':
 			w.quote = 0
-		case r == '#' && w.readsComment() && startsShellWord(w.runes, w.prevIdx, w.prevEsc):
+		case (w.quote == '\'' || w.quote == '"') && r == w.quote:
+			w.quote = 0
+		case r == '#' && w.quote == 0 && w.readsComment() && startsShellWord(w.runes, w.prevIdx, w.prevEsc):
+			// A "#" inside any quote is text, not the start of a comment (gt-0vbb2).
 			w.comment = true
 		case w.quote == 0 && r == '$' && w.runeAt(w.runeIdx+1) == '(' && w.runeAt(w.runeIdx+2) == '(':
 			// "$((" opens an arithmetic expansion. The two "(" that follow
@@ -1033,6 +1040,10 @@ func heredocLineEnd(command string, from int) int {
 			}
 		case c == '\n':
 			return i
+		case c == '$' && i+1 < len(command) && command[i+1] == '$':
+			// "$$" is the PID, so the second "$" starts no expansion and a
+			// quote after the pair is a plain one (gt-0vbb2).
+			i++
 		case c == '$' && i+1 < len(command) && command[i+1] == '\'':
 			quote = '$'
 			i++
@@ -1582,7 +1593,7 @@ func spaceOutShellOperators(command string) string {
 				scopes[len(scopes)-1].quote = 0
 			}
 			emit(r)
-		case r == '$' && sc.quote == 0 && !sc.escapeForShlex && i+1 < len(runes) && runes[i+1] == '\'':
+		case sc.quote == 0 && !sc.escapeForShlex && isANSICDollar(runes, i):
 			b.WriteRune('"')
 			scopes[len(scopes)-1].quote = '$'
 			i++
@@ -1689,6 +1700,36 @@ func spaceOutShellOperators(command string) string {
 // are literal text (see spaceOutShellOperators, gt-n8ir, gt-5eniu).
 func plainGroupScope(sc shellQuoteScope) bool {
 	return sc.quote == 0 && !sc.subst && !sc.tick && !sc.escapeForShlex
+}
+
+// isANSICDollar reports whether the "$" at runes[i] opens a $'...' string: the
+// quote after it is an ANSI-C one only when the "$" is one the shell reads as a
+// "$" of its own. A backslash-escaped "$" is literal text, and the second "$" of
+// "$$" is the tail of the PID expansion, so "$$'" holds a plain quote after the
+// PID (gt-0vbb2). The quote walk and spaceOutShellOperators judge the opener
+// here, so they agree on where a $'...' string starts. heredocLineEnd reads
+// bytes forward and skips the second "$" of a "$$" in place for the same reason.
+func isANSICDollar(runes []rune, i int) bool {
+	return i >= 0 && i+1 < len(runes) && runes[i] == '$' && runes[i+1] == '\'' &&
+		!escapedRune(runes, i) && !isPIDTail(runes, i)
+}
+
+// isPIDTail reports whether the "$" at runes[i] is the second half of a "$$"
+// the shell reads as the PID: the "$" before it is unescaped and begins that
+// pair itself, so a third "$" after "$$" starts an expansion of its own.
+func isPIDTail(runes []rune, i int) bool {
+	return i >= 1 && runes[i] == '$' && runes[i-1] == '$' && !escapedRune(runes, i-1) &&
+		!isPIDTail(runes, i-1)
+}
+
+// escapedRune reports whether the rune at runes[i] is backslash-escaped: an odd
+// run of backslashes ends right before it.
+func escapedRune(runes []rune, i int) bool {
+	n := 0
+	for j := i - 1; j >= 0 && runes[j] == '\\'; j-- {
+		n++
+	}
+	return n%2 == 1
 }
 
 // startsShellWord reports whether the rune after runes[prevIdx] begins a new

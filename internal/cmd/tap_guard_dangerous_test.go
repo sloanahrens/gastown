@@ -3431,6 +3431,43 @@ func TestDangerousGuardANSICStringOnAHeredocLine(t *testing.T) {
 	}
 }
 
+// gt-0vbb2: the heredoc scanners read $'...' the way bash does. The walk that
+// tells a "<<" from text opened no ANSI-C string, so the escaped quote closed a
+// plain one early and a "<<" inside the string was taken for a heredoc, which
+// stripped the live command below it as body. heredocLineEnd read the "$" of
+// "$$'" as an ANSI-C opener, but "$$" is the PID and the quote after it is
+// plain, so the operator line ran past its own newline.
+func TestHeredocANSICQuotesFollowBash(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name    string
+		command string
+		blocked bool
+	}{
+		// The "<<" is text inside the string, so the rm is a live command.
+		{"a << inside an ANSI-C string is not a heredoc", "echo $'a\\'\n<<EOF\n'\nrm -rf /\nEOF", true},
+		// "$$" is the PID, so 'a\' is a plain quote and <<EOF is a redirection
+		// whose body is data.
+		{"the quote after $$ is plain, so the walk reads the heredoc", "cat $$'a\\' <<EOF\nrm -rf /\nEOF", false},
+		{"the quote after $$ ends the operator line at its newline", "cat <<EOF $$'a\\'\nrm -rf /\nEOF", false},
+		{"a live command below the terminator is judged", "cat <<EOF $$'a\\'\necho hi\nEOF\nrm -rf /", true},
+		{"a hash after a space inside an ANSI-C string is not a comment", "echo $'a #b'\ncat <<EOF\nrm -rf /\nEOF", false},
+		{"a hash after a space inside a plain quote is not a comment", "echo 'a #b'\ncat <<EOF\nrm -rf /\nEOF", false},
+		{"a hash after a space inside a double quote is not a comment", "echo \"a #b\"\ncat <<EOF\nrm -rf /\nEOF", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reason, _ := evaluateDangerousCommand(tt.command, 0, noTownSession)
+			if tt.blocked && reason == "" {
+				t.Errorf("evaluateDangerousCommand(%q) allowed, want blocked — the rm is a live command", tt.command)
+			}
+			if !tt.blocked && reason != "" {
+				t.Errorf("evaluateDangerousCommand(%q) blocked (reason=%q), want allowed — the body is data", tt.command, reason)
+			}
+		})
+	}
+}
+
 // gt-48buu: a launcher's own flags (env -i, nice -n, time -p) sit between the
 // launcher and the shell, so the shell is still the command word and its
 // heredoc body is judged as a script rather than stripped as data.
