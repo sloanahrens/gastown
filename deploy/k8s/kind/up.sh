@@ -57,6 +57,7 @@ port_in_use() { # a listener on 127.0.0.1:$1, whoever owns it
 original_context="$(docker context show)"
 cert_stage=""
 town_rollback_pending=0
+town_unverified=0 # 1 while a freshly added town entry has not yet been seen healthy
 # colima start can fail after it has already switched docker's global context,
 # so the restore is an EXIT trap rather than a call after the start returns.
 # --register-town registers its rollback here too: a run that stops between
@@ -175,9 +176,24 @@ kubectl -n agent-sandbox-system patch deployment agent-sandbox-controller --type
   -p '{"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
 kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=180s
 
-say "installing OpenShell chart $CHART_VERSION"
-helm upgrade --install openshell oci://ghcr.io/nvidia/openshell/helm-chart --version "$CHART_VERSION" \
-  --namespace openshell --create-namespace -f "$VALUES" --wait --timeout 7m
+# The chart's certificate job is a helm pre-install AND pre-upgrade hook, so
+# every `helm upgrade` regenerates the CA and every certificate and rolls the
+# gateway: each exported copy of the client certificates (the town
+# registration included) goes stale at once. A marker records the chart version
+# and the values file the release was installed with; an unchanged marker on a
+# deployed release means no helm call. GT_K8S_FORCE_HELM=1 forces one.
+helm_marker="$CHART_VERSION:$(sha256_of "$VALUES")"
+helm_recorded="$(kubectl -n openshell get configmap gt-bootstrap -o 'jsonpath={.data.helm}' 2>/dev/null || true)"
+if [ -z "${GT_K8S_FORCE_HELM:-}" ] && [ "$helm_recorded" = "$helm_marker" ] &&
+  helm status openshell --namespace openshell >/dev/null 2>&1; then
+  say "OpenShell chart $CHART_VERSION and its values are unchanged; not running helm (every helm upgrade regenerates the gateway's certificates)"
+else
+  say "installing OpenShell chart $CHART_VERSION"
+  helm upgrade --install openshell oci://ghcr.io/nvidia/openshell/helm-chart --version "$CHART_VERSION" \
+    --namespace openshell --create-namespace -f "$VALUES" --wait --timeout 7m
+  kubectl -n openshell create configmap gt-bootstrap --from-literal="helm=$helm_marker" --dry-run=client -o yaml |
+    kubectl apply -f -
+fi
 kubectl apply -f "$HERE/gateway-nodeport.yaml"
 kubectl apply -f "$HERE/../services/control-plane.yaml"
 kubectl -n openshell rollout status statefulset/openshell --timeout=300s
@@ -261,6 +277,13 @@ town_rollback() {
       warn "the run stopped while re-registering $GATEWAY_NAME and $TOWN_CONFIG has no $GATEWAY_NAME entry; restore it with: openshell gateway add https://127.0.0.1:$GATEWAY_PORT --local --name $GATEWAY_NAME"
     fi
   fi
+  # An entry this run added where none existed and that never turned healthy
+  # (the town health check failed) does not stay behind. A failure of only the
+  # active-gateway restore leaves the working entry in place.
+  if [ "$town_entry_before" = 0 ] && [ "$town_unverified" = 1 ] && town_gateway_registered; then
+    town_openshell gateway remove "$GATEWAY_NAME" >/dev/null 2>&1 ||
+      warn "the unverified $GATEWAY_NAME entry could not be removed from $TOWN_CONFIG; run: openshell gateway remove $GATEWAY_NAME"
+  fi
   if [ -n "$town_active_before" ] && [ "$town_active_before" != "$GATEWAY_NAME" ] &&
     ! town_openshell gateway select "$town_active_before" >/dev/null 2>&1; then
     warn "the active gateway in $TOWN_CONFIG was not restored to $town_active_before; run: openshell gateway select $town_active_before"
@@ -293,6 +316,21 @@ if [ "$register_town" = 1 ]; then
     [ "$active_after" = "$town_active_before" ] ||
       die "$GATEWAY_NAME is registered in $TOWN_CONFIG but the active gateway is $active_after, not $town_active_before; run: openshell gateway select $town_active_before"
   fi
+  # The export above can land between two rewrites of the secrets, so the town
+  # copy is only accepted once the gateway is healthy under the TOWN config,
+  # like the private copy: re-export and retry, bounded. A failure here leaves
+  # the rollback armed, so the previous entry and active gateway come back.
+  town_unverified=1
+  town_tries="${GT_K8S_CERT_TRIES:-30}"
+  until town_info="$(town_openshell -g "$GATEWAY_NAME" gateway info 2>&1 || true)"; grep -qw healthy <<<"$town_info"; do
+    town_tries=$((town_tries - 1))
+    [ "$town_tries" -gt 0 ] ||
+      die "$GATEWAY_NAME is not healthy under $TOWN_CONFIG: $(tr '\n' ' ' <<<"$town_info" | tr -s ' ' | cut -c1-160)"
+    say "town copy not healthy yet; re-exporting its client certificates ($town_tries tries left)"
+    export_certs "$TOWN_CONFIG/gateways/$GATEWAY_NAME/mtls"
+    sleep "$interval"
+  done
+  town_unverified=0
   town_rollback_pending=0
   say "registered $GATEWAY_NAME in $TOWN_CONFIG (active gateway: $(town_active_gateway))"
 fi

@@ -99,13 +99,32 @@ case "$*" in
     [ -f "$STATE/no-layout" ] || printf 'node/core-node\nnode/sandbox-node\n' ;;
   *"get secret openshell-client-tls"*)
     name=$(sed -n "s/.*\['\([^']*\)'\].*/\1/p" <<<"$*")
-    printf 'FAKE-%s-SECRETVALUE' "$name" | base64 ;;
+    gen=""
+    name=${name//\\/}
+    # STUB_SECRET_ROTATES: every read of ca.crt sees a newer certificate, as when the
+    # chart's certificate job rewrites the secret between two exports.
+    if [ -n "${STUB_SECRET_ROTATES:-}" ] && [ "$name" = ca.crt ]; then
+      n=$(cat "$STATE/secret-gen" 2>/dev/null || echo 0)
+      echo $((n + 1)) >"$STATE/secret-gen"
+      gen="-gen$((n + 1))"
+      printf '%s' "FAKE-ca.crt-SECRETVALUE$gen" >"$STATE/last-ca"
+    fi
+    printf 'FAKE-%s-SECRETVALUE%s' "$name" "$gen" | base64 ;;
+  *"get configmap gt-bootstrap"*) [ -f "$STATE/marker" ] && cat "$STATE/marker" ;;
+  *"create configmap gt-bootstrap"*)
+    for a in "$@"; do case "$a" in --from-literal=helm=*) echo "${a#--from-literal=}" ;; esac; done ;;
+  *"apply -f -"*)
+    while read -r line; do case "$line" in helm=*) printf '%s' "${line#helm=}" >"$STATE/marker" ;; esac; done ;;
 esac
 exit 0
 STUB
 cat >"$TMP/bin/helm" <<'STUB'
 #!/usr/bin/env bash
 "$(dirname "$0")/_log" helm "$@"
+case "$1" in
+  upgrade) touch "$STATE/helm-release" ;;
+  status) [ -f "$STATE/helm-release" ] ;;
+esac
 STUB
 cat >"$TMP/bin/openssl" <<'STUB'
 #!/usr/bin/env bash
@@ -181,6 +200,12 @@ case "$*" in
     fi
     exit 0 ;;
   *"gateway info"*)
+    if [ "$town" = 1 ] && [ -n "${STUB_TOWN_INFO_FAILS:-}" ]; then
+      tn=$(cat "$STATE/town-info-calls" 2>/dev/null || echo 0)
+      echo $((tn + 1)) >"$STATE/town-info-calls"
+      if [ "$tn" -lt "$STUB_TOWN_INFO_FAILS" ]; then echo "Error: invalid peer certificate: BadSignature"; exit 0; fi
+      echo "Status: healthy"; exit 0
+    fi
     n=$(cat "$STATE/info-calls" 2>/dev/null || echo 0)
     echo $((n + 1)) >"$STATE/info-calls"
     if [ -n "${STUB_INFO_UNHEALTHY:-}" ]; then echo "Status: unhealthy"; exit 0; fi
@@ -392,6 +417,78 @@ check "the failure names the kubectl error, not a missing layout" contains "cann
 check "the kubectl error text is shown" contains "connection to the server" "$OUT_TEXT"
 check "a failing node query does not claim the layout is missing" lacks "lacks the core and sandbox nodes" "$OUT_TEXT"
 check "nothing is installed after a failing node query" lacks "helm upgrade --install" "$CALLS_LOG"
+
+echo "helm only runs when the chart or its values changed (every helm upgrade regenerates the certificates)"
+VALUES_SHA="$(shasum -a 256 "$TMP/root/deploy/k8s/values/kind.yaml" | cut -d' ' -f1)"
+helm_calls() { grep -c '^helm upgrade' "$S/calls.log" || true; }
+scenario helmfresh
+run "$UP" --
+check "a fresh cluster runs helm once" test "$(helm_calls)" -eq 1
+check "the marker records the chart version and the values digest" test "$(cat "$S/state/marker")" = "0.1.4:$VALUES_SHA"
+check "the marker is written through a configmap named gt-bootstrap" contains "create configmap gt-bootstrap" "$CALLS_LOG"
+scenario helmskip
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+printf '%s' "0.1.4:$VALUES_SHA" >"$S/state/marker"
+run "$UP" --
+check "an unchanged chart and values make no helm call" test "$(helm_calls)" -eq 0
+check "the skip says why" contains "not running helm" "$OUT_TEXT"
+check "the skipped run still succeeds and reaches a healthy gateway" test "$RC" -eq 0
+check "the marker is left as it was" test "$(cat "$S/state/marker")" = "0.1.4:$VALUES_SHA"
+check "the manifests are still applied on a skipped run" contains "gateway-nodeport.yaml" "$CALLS_LOG"
+scenario helmvalues
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+printf '%s' "0.1.4:0000000000000000000000000000000000000000000000000000000000000000" >"$S/state/marker"
+run "$UP" --
+check "a changed values file runs helm" test "$(helm_calls)" -eq 1
+check "the marker is updated to the new digest" test "$(cat "$S/state/marker")" = "0.1.4:$VALUES_SHA"
+scenario helmchart
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+printf '%s' "0.1.3:$VALUES_SHA" >"$S/state/marker"
+run "$UP" --
+check "a changed chart version runs helm" test "$(helm_calls)" -eq 1
+check "the marker is updated to the new chart version" test "$(cat "$S/state/marker")" = "0.1.4:$VALUES_SHA"
+scenario helmforce
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+printf '%s' "0.1.4:$VALUES_SHA" >"$S/state/marker"
+run "$UP" GT_K8S_FORCE_HELM=1 --
+check "GT_K8S_FORCE_HELM runs helm despite an unchanged marker" test "$(helm_calls)" -eq 1
+scenario helmgone
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw"
+printf '%s' "0.1.4:$VALUES_SHA" >"$S/state/marker"
+run "$UP" --
+check "a marker without a deployed release runs helm" test "$(helm_calls)" -eq 1
+scenario helmtown
+touch "$S/state/colima-running" "$S/state/cluster" "$S/state/has-registry" "$S/state/gw" "$S/state/helm-release"
+printf '%s' "0.1.4:$VALUES_SHA" >"$S/state/marker"
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+run "$UP" -- --register-town
+check "register-town on an unchanged chart makes no helm call" test "$(helm_calls)" -eq 0
+check "register-town on an unchanged chart succeeds" test "$RC" -eq 0
+
+echo "the town copy of the certificates is verified under the town config"
+scenario towncerts
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+run "$UP" STUB_SECRET_ROTATES=1 STUB_TOWN_INFO_FAILS=2 -- --register-town
+check "register-town succeeds once the town copy turns healthy" test "$RC" -eq 0
+check "the town gateway info was asked three times (two failures, then healthy)" test "$(cat "$S/state/town-info-calls")" -eq 3
+check "the town ca.crt equals the LAST certificate the cluster served" test "$(cat "$S/home/.config/openshell/gateways/k8s/mtls/ca.crt")" = "$(cat "$S/state/last-ca")"
+check "the town copy was re-exported between the tries" contains "town copy not healthy yet" "$OUT_TEXT"
+check "each failed try re-read all three client certificates (6 private+town reads, then 2 tries x 3)" test "$(count 'get secret openshell-client-tls' "$CALLS_LOG")" -eq 12
+check "the active gateway is still the one from before" test "$(cat "$S/home/.config/openshell/active_gateway")" = docker
+scenario townnever
+mkdir -p "$S/home/.config/openshell"
+printf 'docker\n' >"$S/state/town-gw-list"
+printf 'docker\n' >"$S/state/town-active"
+run "$UP" STUB_TOWN_INFO_FAILS=999 GT_K8S_CERT_TRIES=3 -- --register-town
+check "a town copy that never turns healthy fails the run" test "$RC" -ne 0
+check "the failure names the town config and the last error" contains "BadSignature" "$OUT_TEXT"
+check "the retries are bounded by the try limit" test "$(cat "$S/state/town-info-calls")" -eq 3
+check "the failed registration leaves the active gateway as it was" test "$(cat "$S/home/.config/openshell/active_gateway")" = docker
+check "the failed registration leaves no k8s entry in the town list" test "$(grep -cx k8s "$S/state/town-gw-list" || true)" -eq 0
 
 echo "someone else owns the gateway port"
 scenario busy
