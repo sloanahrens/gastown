@@ -4191,6 +4191,11 @@ func TestDangerousGuardFieldsFallbackKeepsSeparators(t *testing.T) {
 		{"a semicolon glued to the earlier line", "echo ok;rm -rf /;echo \"", true},
 		{"a pipe glued on both sides", "echo ok|rm -rf /|echo \"", true},
 		{"a doubled ampersand glued on both sides", "echo ok&&rm -rf /&&echo \"", true},
+		{"a single ampersand glued on both sides", "echo ok&rm -rf /&echo \"", true},
+		{"a doubled pipe glued on both sides", "echo ok||rm -rf /||echo \"", true},
+		{"a semicolon glued before an unclosed single quote", "echo ok;rm -rf /;echo 'x", true},
+		{"a nuke inside a quote glued to a separator stays text", "echo \"a;rm -rf /\" '", false},
+		{"a harmless malformed command with glued separators stays allowed", "echo ok;ls;echo 'x", false},
 		{"the nuke as an argument of the line before", "echo ok\necho rm -rf /\necho \"", false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
