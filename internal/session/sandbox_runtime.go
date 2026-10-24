@@ -13,6 +13,9 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"strings"
+
+	"github.com/steveyegge/gastown/internal/config"
 )
 
 // runtimeArchiveName is the staged archive holding the polecat's Claude
@@ -75,7 +78,7 @@ func buildRuntimeArchive(spec SpawnSpec, gitEmail string) ([]byte, error) {
 		return nil, err
 	}
 	claudeDir := path.Join("gt", spec.Rig, "polecats", ".claude")
-	forgejoHost, err := repoHost(spec.RepoURL)
+	forgejoHost, err := SandboxRepoHost(spec.RepoURL)
 	if err != nil {
 		return nil, err
 	}
@@ -153,21 +156,28 @@ echo "password=$FORGEJO_TOKEN"
 `
 }
 
-// forgejoHostRe is every host:port the helper script may be built with: it is
-// interpolated into a shell script, so only host-name characters and a port.
-var forgejoHostRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9.-]*(:[0-9]{1,5})?$`)
+// sandboxPortRe is a port a clone URL may name: the authority is interpolated
+// into the helper shell script, so digits only and never more than five.
+var sandboxPortRe = regexp.MustCompile(`^[0-9]{1,5}$`)
 
 // gitEmailRe is an address safe to write into .gitconfig: no space, newline,
 // quote or bracket.
 var gitEmailRe = regexp.MustCompile(`^[A-Za-z0-9._%+-]+@[A-Za-z0-9][A-Za-z0-9.-]*$`)
 
-// repoHost is the host:port of the clone URL, the one host the helper answers for.
-func repoHost(repoURL string) (string, error) {
+// SandboxRepoHost is the host:port of a sandbox clone URL, the one host the
+// git credential helper answers for; the host goes into the helper script
+// unquoted, so it must pass config.ValidSandboxForgejoHost, the rule polecat's
+// hostAuthority writes a profile's forgejo_host under. It is exported so
+// polecat's TestForgejoHostAgrees can feed it the clone URLs polecat builds.
+func SandboxRepoHost(repoURL string) (string, error) {
 	u, err := url.Parse(repoURL)
-	if err != nil || !forgejoHostRe.MatchString(u.Host) {
-		return "", fmt.Errorf("sandbox git helper: cannot take a host from the repo URL %q", repoURL)
+	if err == nil {
+		host, port, hasPort := strings.Cut(u.Host, ":")
+		if config.ValidSandboxForgejoHost(host) && (!hasPort || sandboxPortRe.MatchString(port)) {
+			return u.Host, nil
+		}
 	}
-	return u.Host, nil
+	return "", fmt.Errorf("sandbox git helper: cannot take a host from the repo URL %q", repoURL)
 }
 
 // sandboxGitConfig is the sandbox's global git config: the polecat's identity

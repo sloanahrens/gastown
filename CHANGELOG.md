@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`forgejo_host` on a sandbox profile is checked at load** (gt-qhxm6) — it
+  must be a bare host name (dot-separated labels of letters, digits and hyphens),
+  with no port, IPv6 literal, scheme or underscore. A value such as
+  `forgejo:3000` or `fd00::1` used to load and then fail every sandbox start;
+  it now fails at load with an error naming `forgejo_host`. A port comes from
+  the rig's remote URL. The control-plane host fallback follows the same rule.
+
 ### Removed
 
 - **The two-seat polecat keys** (gt-mukgk) — `polecat_pool.agent`, `max_seats`,

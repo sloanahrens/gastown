@@ -3,10 +3,10 @@ package polecat
 import (
 	"errors"
 	"fmt"
-	"net"
 	"net/url"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
 )
 
@@ -40,23 +40,30 @@ func sandboxRepoURL(rigName, remoteURL, forgejoHost string) (string, error) {
 	if forgejoHost == "" {
 		return "", fmt.Errorf("rig %s: no forgejo host to point the sandbox clone of %q at", rigName, u.Redacted())
 	}
+	authority, err := hostAuthority(forgejoHost, u.Port())
+	if err != nil {
+		return "", fmt.Errorf("rig %s: %w", rigName, err)
+	}
 	u.User = nil
-	u.Host = hostAuthority(forgejoHost, u.Port())
+	u.Host = authority
 	return u.String(), nil
 }
 
-// hostAuthority is host with port, if any, as a URL authority. An IPv6
-// literal is bracketed, since url.URL.Host requires it and a bare "fd00::1"
-// otherwise yields "http://fd00::1/x", whose host is the empty string.
-func hostAuthority(host, port string) string {
-	host = strings.TrimSuffix(strings.TrimPrefix(host, "["), "]")
+// hostAuthority is host with port, if any, as a URL authority. The host must
+// pass config.ValidSandboxForgejoHost, the rule the sandbox's git credential
+// helper also holds the clone URL to: a profile's forgejo_host arrives checked,
+// but the control-plane host it falls back to does not. An IPv6 literal is
+// refused with the rest, since the helper cannot answer for a bracketed
+// authority; "forgejo:3000" is refused rather than joined into
+// "forgejo:3000:3000".
+func hostAuthority(host, port string) (string, error) {
+	if !config.ValidSandboxForgejoHost(host) {
+		return "", fmt.Errorf("sandbox clone host %q: want a bare host name (letters, digits, dots and hyphens); a port comes from the rig's remote and an IPv6 literal is not supported", host)
+	}
 	if port != "" {
-		return net.JoinHostPort(host, port)
+		return host + ":" + port, nil
 	}
-	if strings.Contains(host, ":") {
-		return "[" + host + "]"
-	}
-	return host
+	return host, nil
 }
 
 // redactedRemote is raw with any userinfo replaced by xxxxx, for an error about
