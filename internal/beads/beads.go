@@ -486,8 +486,9 @@ func AcceptanceText(issue *Issue) string {
 // acceptance section, or "" when none does. The exact "acceptance" heading wins
 // over a longer one; with no exact heading the lowest-sorting key with the
 // "acceptance" prefix wins, so the section's position and map iteration order
-// never decide. "accepted" is not an acceptance heading: the prefix is the
-// whole word. Keys are section headings, matched case-insensitively.
+// never decide. The match is on the prefix alone: "Acceptance criteria" counts,
+// and "accepted" does not, since it lacks the prefix "acceptance". Keys are
+// section headings, matched case-insensitively.
 //
 // This is the one definition of the rule: the submission refusal, the landing
 // policy and the spec lint all choose the acceptance section through it, so a
@@ -510,7 +511,8 @@ func AcceptanceSectionKey(headings []string) string {
 // AcceptanceSectionKey chooses it, up to the next "## " heading or the end of
 // the description. The heading itself is not part of the text. The first
 // section with a repeated heading wins, as it does for the spec lint's
-// Sections.
+// Sections. A fenced code block is body text there too, so a "## " line inside
+// one neither opens nor closes a section.
 func acceptanceSection(description string) string {
 	var headings []string
 	bodies := map[string]string{}
@@ -526,11 +528,19 @@ func acceptanceSection(description string) string {
 		}
 		body = nil
 	}
+	fence := ""
 	for _, line := range strings.Split(description, "\n") {
 		trimmed := strings.TrimSpace(line)
-		// A deeper heading ("### a criterion") is body text: only a "## "
-		// line opens or closes a section.
-		if strings.HasPrefix(trimmed, "## ") {
+		if fence != "" {
+			if marker := FenceMarker(trimmed); marker != "" && strings.HasPrefix(marker, fence) {
+				fence = ""
+			}
+		} else if marker := FenceMarker(trimmed); marker != "" {
+			// The fence line opens the block; nothing after it is a heading.
+			fence = marker
+		} else if strings.HasPrefix(trimmed, "## ") {
+			// A deeper heading ("### a criterion") is body text: only a "## "
+			// line opens or closes a section.
 			flush()
 			current = strings.ToLower(strings.TrimSpace(strings.TrimPrefix(trimmed, "## ")))
 			continue

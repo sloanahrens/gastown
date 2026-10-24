@@ -160,6 +160,26 @@ func TestAcceptanceTextReadsTheFieldThenTheDescriptionSection(t *testing.T) {
 			want:  "- [ ] criteria",
 		},
 		{name: "a similarly named heading is not the section", issue: &Issue{Description: "## Accepted trade-offs\n\n- [ ] x\n"}, want: ""},
+		{
+			name:  "the first of two repeated acceptance headings wins",
+			issue: &Issue{Description: "## Acceptance\n\n- [ ] first\n\n## Acceptance\n\n- [ ] second\n"},
+			want:  "- [ ] first",
+		},
+		{
+			name:  "a fenced acceptance heading is example text",
+			issue: &Issue{Description: "## Goal\n\n```\n## Acceptance\n- [ ] example\n```\n\n## Acceptance\n\n- [ ] real\n"},
+			want:  "- [ ] real",
+		},
+		{
+			name:  "a fenced acceptance heading alone is no section",
+			issue: &Issue{Description: "## Goal\n\n```\n## Acceptance\n- [ ] example\n```\n"},
+			want:  "",
+		},
+		{
+			name:  "a fenced heading inside the section does not end it",
+			issue: &Issue{Description: "## Acceptance\n\n```\n## Gate\n```\n- [ ] one\n\n## Out of scope\n\nx\n"},
+			want:  "```\n## Gate\n```\n- [ ] one",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
