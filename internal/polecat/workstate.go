@@ -88,6 +88,13 @@ type WorkstateInput struct {
 	AssignedBeadTerminal           bool
 	MRSubmitted                    bool
 	MQLookupFailed                 bool
+	// SandboxWorkLost: a sandbox seat whose sandbox the gateway affirmed gone
+	// left unfinished work (SandboxWorkBead) and no pushed or resume branch to
+	// continue it from, so the work is lost and the bead needs rework
+	// (gt-qq6rg.3). Computed once, in NewWorkstateInput.
+	SandboxWorkLost bool
+	// SandboxWorkBead is the bead whose work is lost; set with SandboxWorkLost.
+	SandboxWorkBead string
 	// WorkLanded reports that the commits this worktree holds are already
 	// landed on the target, so the measured unpushed-commits refusal does not
 	// describe work in flight (gt-jol0i).
@@ -310,6 +317,12 @@ func decideWorkstate(in WorkstateInput) WorkstateDisposition {
 		}
 	}
 
+	// First, so its reason is the one reported: the sandbox is gone and nothing
+	// was pushed, so there is nothing to nuke and nothing to resume, only a bead
+	// to send back for rework (gt-qq6rg.3).
+	if in.SandboxWorkLost {
+		block("sandbox-work-lost", "sandbox gone with "+in.SandboxWorkBead+" unfinished and no pushed or resume branch: the work is lost and the bead needs rework", true)
+	}
 	// A submitted hook is set by design — the landing worker needs it — so it
 	// is never hook-still-set, even on the paths that reach this predicate with
 	// the flag set (a submitted seat whose push or MR failed, above).
@@ -674,6 +687,18 @@ type WorkstateFacts struct {
 	MQNotRequired        bool
 	MRSubmitted          bool
 	MQLookupFailed       bool
+	// SandboxGone is set for a sandbox seat whose sandbox the gateway
+	// AFFIRMATIVELY reports gone (sandbox.Exists false with no error): what the
+	// seat did survives only if it was pushed. A gateway that could not be asked
+	// leaves it false and the git state unknown instead (gt-qq6rg.3).
+	SandboxGone bool
+	// SandboxWorkBead is the bead the seat was working: its hook, else its source
+	// issue. "" when the seat names none, which is nothing to lose.
+	SandboxWorkBead string
+	// SandboxBranchPreserved reports that the seat's branch is on the remote or
+	// that a bead names it as the resume branch, so the work can continue from
+	// it. Read from origin, never from the stale host worktree.
+	SandboxBranchPreserved bool
 	// WorkLanded reports that the commits this worktree holds are already
 	// landed on the target, so the measured unpushed-commits refusal does not
 	// describe work in flight (gt-jol0i).
@@ -755,6 +780,13 @@ func NewWorkstateInput(f WorkstateFacts) WorkstateInput {
 		MQNotRequired:                  f.MQNotRequired,
 		MRSubmitted:                    f.MRSubmitted,
 		MQLookupFailed:                 f.MQLookupFailed,
+	}
+	// A gone sandbox that left a bead unfinished and nothing pushed to resume
+	// from: the work is lost. A terminal or submitted bead, or a surviving
+	// branch, is not (gt-qq6rg.3).
+	if f.SandboxGone && f.SandboxWorkBead != "" && !workTerminal && !f.HookBeadSubmitted && !f.SandboxBranchPreserved {
+		input.SandboxWorkLost = true
+		input.SandboxWorkBead = f.SandboxWorkBead
 	}
 	if !f.HookBeadSafe {
 		input.HookBead = f.HookBead
