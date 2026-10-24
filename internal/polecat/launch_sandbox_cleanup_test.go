@@ -56,7 +56,11 @@ func (refusingCreateTmux) NewSessionWithCommandAndEnv(string, string, string, ma
 // routing at that town, so it belongs only to tests that run alone.
 func sandboxLaunchTown(t *testing.T) (town, rigPath, workDir string, w *world) {
 	t.Helper()
-	town = t.TempDir()
+	// The shared repo helper's worktree is a temp dir; its parent is the town,
+	// so the worktree sits inside it as a real polecat's does and the launch
+	// can derive the sandbox town root from where it sits.
+	workDir, _, w = setupSessionBranchTestRepo(t)
+	town = filepath.Dir(workDir)
 	session.ResetSandboxRoutingForTest(town)
 	t.Cleanup(func() { session.ResetSandboxRoutingForTest("") })
 	rigPath = filepath.Join(town, "gastown")
@@ -68,18 +72,6 @@ func sandboxLaunchTown(t *testing.T) (town, rigPath, workDir string, w *world) {
 	if err := os.WriteFile(filepath.Join(settings, "config.json"), []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// The worktree sits inside the town, as a real polecat's does: the launch
-	// derives the sandbox town root from where it sits.
-	workDir = filepath.Join(rigPath, "polecats", "box", "gastown")
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	w = newWorld()
-	w.InitRepo(t, workDir)
-	head := w.Commit(t, workDir, "main", "Initial commit", map[string]string{"README.md": "# Test\n"})
-	w.checkout(t, workDir)
-	w.AddRemote(t, workDir, "origin", workDir)
-	w.SetRef(t, workDir, "refs/remotes/origin/main", head)
 	return town, rigPath, workDir, w
 }
 

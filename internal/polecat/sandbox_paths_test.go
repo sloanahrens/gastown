@@ -40,6 +40,32 @@ func TestSandboxTownRootAcceptsAWorktreeNamedLikeDotDotFoo(t *testing.T) {
 	}
 }
 
+// Only path-valued entries move: free text and flag values that mention the
+// town root are not paths the sandbox needs rewritten.
+func TestRewriteTownRootInPathEnvLeavesNonPathValuesAlone(t *testing.T) {
+	t.Parallel()
+	env := map[string]string{
+		"GT_TOWN_ROOT":            "/h/gt",
+		"GIT_CEILING_DIRECTORIES": "/h/gt",
+		"GT_POLECAT_PATH":         "/h/gt/r/polecats/p/r",
+		"GT_NOTE":                 "see /h/gt for the town",
+		"GOFLAGS":                 "-modfile=/h/gt/go.mod",
+	}
+	rewriteTownRootInPathEnv(env, "/h/gt", "/sandbox/gt")
+	want := map[string]string{
+		"GT_TOWN_ROOT":            "/sandbox/gt",
+		"GIT_CEILING_DIRECTORIES": "/sandbox/gt",
+		"GT_POLECAT_PATH":         "/sandbox/gt/r/polecats/p/r",
+		"GT_NOTE":                 "see /h/gt for the town",
+		"GOFLAGS":                 "-modfile=/h/gt/go.mod",
+	}
+	for k, w := range want {
+		if env[k] != w {
+			t.Errorf("%s = %q, want %q", k, env[k], w)
+		}
+	}
+}
+
 // pathBackend is a sandbox backend whose Prepare reports a work dir inside
 // the sandbox's town root.
 type pathBackend struct {

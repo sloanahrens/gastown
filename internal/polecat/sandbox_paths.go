@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // sandboxTownRoot is the town root inside a sandbox, derived from where
@@ -23,4 +25,15 @@ func sandboxTownRoot(hostTownRoot, hostWorkDir, sandboxWorkDir string) (string, 
 		return "", fmt.Errorf("sandbox work dir %s does not end in %s: no sandbox town root", sandboxWorkDir, tail)
 	}
 	return root, nil
+}
+
+// rewriteTownRootInPathEnv moves the host town root to the sandbox's in the
+// env values that are paths (they start with '/'). A value that is free text,
+// a name or a flag list is left as it is, even when it mentions the root.
+func rewriteTownRootInPathEnv(env map[string]string, hostTownRoot, sandboxTownRoot string) {
+	for k, v := range env {
+		if strings.HasPrefix(v, "/") {
+			env[k] = session.RewriteTownRoot(v, hostTownRoot, sandboxTownRoot)
+		}
+	}
 }
