@@ -45,7 +45,8 @@ refused the same way. bd create's --repo names the workspace the bead is
 filed into, and bd's --db the database whose enclosing .beads directory is the
 store; each overrides the directory and BEADS_DIR, and a value the guard cannot
 place is refused. BEADS_DIR, in the process env or as an inline assignment,
-names the store instead. gt escalate, gt ask and gt done create
+names the store instead, and so do BEADS_DB and BD_DB, database paths read as
+--db is and yielding to --db and --repo. gt escalate, gt ask and gt done create
 town beads inside gt itself and never reach this hook.
 
 Exit codes:
@@ -202,7 +203,41 @@ func (g bdCreateStoreGuard) judgeSegment(segment []string, dir string, known boo
 		}
 		return g.judgeDB(path)
 	}
-	return g.judgeCreate(dir, known, inlineBeadsDir(segment))
+	// BEADS_DB, then BD_DB, name a database the way --db does, ahead of the
+	// directory. bd reads BEADS_DIR before BEADS_DB in one lookup and after it
+	// in another, so a BEADS_DIR that is also set is judged too and either
+	// naming the town refuses.
+	beadsDir := inlineBeadsDir(segment)
+	if envDB, set := g.envDBSelector(segment); set {
+		path, placed := g.bdCreateBase(dir, known, envDB, vars)
+		if !placed {
+			return bdCreateUnplaceable
+		}
+		if reason := g.judgeDB(path); reason != "" {
+			return reason
+		}
+		if beadsDir == "" && g.proc.getenv("BEADS_DIR") == "" {
+			return ""
+		}
+	}
+	return g.judgeCreate(dir, known, beadsDir)
+}
+
+// envDBSelector returns the value of the database-selecting variable bd would
+// act on: BEADS_DB when it is non-empty, else BD_DB. An inline assignment
+// replaces the process env's value for that name, and an empty value is an
+// unset one, as bd reads it with os.Getenv.
+func (g bdCreateStoreGuard) envDBSelector(segment []string) (value string, set bool) {
+	for _, name := range []string{"BEADS_DB", "BD_DB"} {
+		v, inline := inlineAssignment(segment, name)
+		if !inline {
+			v = g.proc.getenv(name)
+		}
+		if v != "" {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // bdCreateUnplaceable refuses a bd create whose store directory this guard
@@ -330,6 +365,25 @@ func inlineBeadsDir(segment []string) string {
 		}
 	}
 	return ""
+}
+
+// inlineAssignment returns the value the last leading assignment of name in
+// segment gives, and whether there was one, reading past the same clause and
+// group openers inlineBeadsDir does.
+func inlineAssignment(segment []string, name string) (value string, ok bool) {
+	for _, tok := range segment {
+		if bdCloseLeadWords[tok] {
+			continue
+		}
+		if v, found := strings.CutPrefix(tok, name+"="); found {
+			value, ok = v, true
+			continue
+		}
+		if !isEnvAssignment(tok) {
+			break
+		}
+	}
+	return value, ok
 }
 
 // bdDirectoryFlag returns the directory a bd create's -C/--directory names.
