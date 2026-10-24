@@ -75,7 +75,7 @@ trap cleanup EXIT
 
 if ! colima status -p "$PROFILE" >/dev/null 2>&1; then
   say "starting colima profile $PROFILE"
-  colima start "$PROFILE" --cpu 6 --memory 16 --disk 60 --vm-type vz --runtime docker ||
+  colima start "$PROFILE" --activate=false --cpu "$COLIMA_CPU" --memory "$COLIMA_MEMORY" --disk "$COLIMA_DISK" --vm-type vz --runtime docker ||
     die "colima start $PROFILE failed"
 fi
 restore_context "$original_context"
@@ -106,6 +106,25 @@ nodes:
   - containerPort: 30443
     hostPort: $GATEWAY_PORT
     listenAddress: 127.0.0.1
+# The pools mirror the cloud node pools: control-plane workloads on core, and
+# only pods that tolerate the taint on sandbox (a node reads the secrets of
+# the pods scheduled on it, so sandbox nodes hold none of the control plane's).
+# Labels and the taint are set at node registration, so a rebuilt cluster is
+# right from its first start.
+- role: worker
+  labels:
+    gt.dev/pool: core
+- role: worker
+  labels:
+    gt.dev/pool: sandbox
+  kubeadmConfigPatches:
+  - |
+    kind: JoinConfiguration
+    nodeRegistration:
+      taints:
+      - key: gt.dev/pool
+        value: sandbox
+        effect: NoSchedule
 YAML
   say "creating kind cluster $CLUSTER"
   vmkind create cluster --config "$OUT/kind-config.yaml" --wait 180s
@@ -118,6 +137,13 @@ for node in $(vmkind get nodes --name "$CLUSTER"); do
   printf 'server = "http://%s:5000"\n[host."http://%s:5000"]\n  capabilities = ["pull", "resolve"]\n' "$REGISTRY_NAME" "$REGISTRY_NAME" |
     vmdocker exec -i "$node" sh -c "cat > /etc/containerd/certs.d/localhost:$REGISTRY_PORT/hosts.toml"
 done
+
+# A cluster built before the three-node layout has no pools. Refuse it rather
+# than half-configure it: rebuild with down.sh then up.sh.
+pool_nodes="$(kubectl get nodes -l gt.dev/pool --no-headers 2>/dev/null | wc -l | tr -d ' ')"
+[ "$pool_nodes" = 2 ] ||
+  die "cluster $CLUSTER lacks the core and sandbox nodes ($pool_nodes labelled, want 2); rebuild it: deploy/k8s/kind/down.sh && deploy/k8s/kind/up.sh"
+kubectl apply -f "$HERE/../priority-classes.yaml"
 
 # The release tag can be re-pointed at different bytes; the digest is what
 # pins them. The first fetch records its digest beside the manifest and later
@@ -139,6 +165,8 @@ elif [ "$actual" != "$expected" ]; then
   die "agent-sandbox $AGENT_SANDBOX_VERSION is $actual, expected $expected; refusing to apply it"
 fi
 kubectl apply -f "$sandbox_manifest"
+kubectl -n agent-sandbox-system patch deployment agent-sandbox-controller --type merge \
+  -p '{"spec":{"template":{"spec":{"nodeSelector":{"gt.dev/pool":"core"}}}}}'
 kubectl -n agent-sandbox-system rollout status deployment/agent-sandbox-controller --timeout=180s
 
 say "installing OpenShell chart $CHART_VERSION"

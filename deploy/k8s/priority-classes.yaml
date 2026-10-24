@@ -1,0 +1,24 @@
+# Eviction and preemption order for the town cluster (decided 2026-10-24):
+# under pressure Kubernetes sheds CI first, then sandboxes, and never the
+# control plane (Dolt, Forgejo, the gateway). Values sit far below the
+# system-critical classes (2,000,000,000).
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: gt-control-plane}
+value: 1000000
+globalDefault: false
+description: "Control-plane workloads (gateway, Dolt, Forgejo, hm): never preempted by sandboxes or CI."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: gt-sandbox}
+value: 1000
+globalDefault: false
+description: "Sandbox polecats: preempted by the control plane, preempt CI."
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata: {name: gt-ci}
+value: 100
+globalDefault: false
+description: "CI runners and their jobs: the first workload shed under pressure."
