@@ -59,14 +59,31 @@ func TestIsNonDispatchableBead(t *testing.T) {
 			want:  true,
 		},
 		{
-			name:  "HANDOFF title without the label",
-			issue: &Issue{ID: "gt-5", Title: "HANDOFF: polecat flint, step 3 of 8", Type: "task"},
-			want:  true,
+			// A bug that happens to open with the handoff word is work. The
+			// handoff family is recognised by its label or type, not its title.
+			name:  "unlabelled bug titled HANDOFF",
+			issue: &Issue{ID: "gt-5", Title: "HANDOFF: polecat flint, step 3 of 8", Type: "bug", Priority: 2},
+			want:  false,
+		},
+		{
+			name:  "unlabelled task titled HANDOFF",
+			issue: &Issue{ID: "gt-5b", Title: "HANDOFF: polecat flint, step 3 of 8", Type: "task", Priority: 2},
+			want:  false,
 		},
 		{
 			name:  "handoff label",
 			issue: &Issue{ID: "gt-6", Title: "session notes", Type: "task", Labels: []string{"gt:handoff"}},
 			want:  true,
+		},
+		{
+			name:  "handoff label on a HANDOFF-titled bead",
+			issue: &Issue{ID: "gt-6b", Title: "HANDOFF: session notes", Type: "task", Labels: []string{"gt:handoff"}},
+			want:  true,
+		},
+		{
+			name:  "unlabelled bug titled merge-slot",
+			issue: &Issue{ID: "gt-7", Title: "merge-slot contention when two refineries land", Type: "bug", Priority: 1},
+			want:  false,
 		},
 		{
 			// Event beads record that something happened; they carry a
