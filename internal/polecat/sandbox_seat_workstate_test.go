@@ -258,3 +258,73 @@ func TestManagerDefaultSandboxSeatProbeFailsClosed(t *testing.T) {
 		t.Errorf("reusable=%v safe=%v with seat settings unreadable", d.Reusable, d.SafeToNuke)
 	}
 }
+
+// The reuse gate tells lost work from a finished seat the way check-recovery and
+// the nuke gate do (gt-qq6rg.4): with the sandbox gone, a bead the seat left
+// unfinished with no branch on origin and no resume_branch is lost work
+// (NEEDS_RECOVERY, sandbox-work-lost, not reusable); a branch on origin, a
+// resume_branch, a finished bead or no bead is not. (A bead or an origin that
+// cannot be read leaves the git state unknown; the cmd tests pin that.)
+func TestWorkstateDispositionOfAGoneSandboxSeatTellsLostWork(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		hook       string
+		source     string
+		workStatus string
+		resume     bool
+		onOrigin   bool
+		wantLost   bool
+		wantReuse  bool
+	}{
+		{name: "hooked_open_nothing_pushed", hook: "gt-work", workStatus: "open", wantLost: true},
+		{name: "source_open_hook_cleared_nothing_pushed", source: "gt-work", workStatus: "open", wantLost: true},
+		{name: "source_open_branch_on_origin", source: "gt-work", workStatus: "open", onOrigin: true, wantReuse: true},
+		{name: "source_open_resume_branch", source: "gt-work", workStatus: "open", resume: true, wantReuse: true},
+		{name: "bead_closed", source: "gt-work", workStatus: "closed", wantReuse: true},
+		{name: "no_bead", wantReuse: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			mgr, mayorRig, bd, _, w := canonicalWithPolecats(t, true, "toast")
+			// The branch the sandbox pushed: the host rig repo has no such ref unless
+			// the case puts it there.
+			const branch = "polecat/toast/gt-a+x"
+			if tt.onOrigin {
+				w.SetRef(t, mayorRig, "refs/heads/"+branch, w.rev(t, mayorRig, "main"))
+			}
+			if tt.workStatus != "" {
+				if _, err := bd.Create(beads.CreateOptions{ID: "gt-work", Title: "work", Priority: 2}); err != nil {
+					t.Fatal(err)
+				}
+				status := tt.workStatus
+				upd := beads.UpdateOptions{Status: &status}
+				if tt.resume {
+					upd.AppendNotes = "resume_branch: " + branch
+				}
+				if err := bd.Update("gt-work", upd); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bd.setAgent(t, mgr.agentBeadID("toast"), func(f *beads.AgentFields) {
+				f.Agent, f.Branch, f.HookBead, f.LastSourceIssue = "deepseek-flash-sandbox", branch, tt.hook, tt.source
+			})
+			mgr.sandboxSeat = func(string, string) (LiveGitState, bool) {
+				return SandboxSeatGitState("", false, nil, "sb"), true
+			}
+
+			d := mgr.WorkstateDispositionForPolecat("toast", StateIdle, "")
+
+			if lost := d.Reason == "sandbox-work-lost"; lost != tt.wantLost {
+				t.Errorf("lost work = %v, want %v (reason %s blockers %v)", lost, tt.wantLost, d.Reason, d.Blockers)
+			}
+			if tt.wantLost && (d.SafeToNuke || d.Reusable || !d.NeedsRecovery) {
+				t.Errorf("lost work is reusable=%v safe=%v needs_recovery=%v", d.Reusable, d.SafeToNuke, d.NeedsRecovery)
+			}
+			if tt.wantReuse && !d.Reusable {
+				t.Errorf("seat with nothing lost is not reusable (reason %s blockers %v)", d.Reason, d.Blockers)
+			}
+		})
+	}
+}

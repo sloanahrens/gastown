@@ -3201,6 +3201,9 @@ func (m *Manager) workstateInputForPolecat(name string, state State, issue strin
 	var targetRefs []string
 	if sandboxed {
 		applySandboxSeatFacts(&facts, sandboxLive, fields)
+		if sandboxLive.Source == GitStateSourceLive {
+			m.applySandboxLostWorkFacts(&facts, fields, sourceHint)
+		}
 	} else {
 		targetRefs = m.measureHostWorktreeFacts(&facts, fields, clonePath)
 	}

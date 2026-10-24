@@ -2,12 +2,15 @@ package polecat
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/patrolscan"
 	"github.com/steveyegge/gastown/internal/sandbox"
 )
 
@@ -108,4 +111,49 @@ func applySandboxSeatFacts(facts *WorkstateFacts, live LiveGitState, fields *bea
 	if facts.Branch == "" && fields != nil {
 		facts.Branch = fields.Branch
 	}
+}
+
+// applySandboxLostWorkFacts gives the verdict what it needs to tell lost work
+// from a finished seat once the gateway says the sandbox is gone: the bead the
+// seat was working (its hook, else the source issue) and whether anything
+// survives to continue from, a resume_branch on that bead or the seat's branch
+// on origin, read from the remote and never from the stale host worktree. A bead
+// or a remote that cannot be read leaves the git state unknown instead of
+// claiming either (gt-qq6rg.4; check-recovery and the nuke gate ask the same
+// question in internal/cmd).
+func (m *Manager) applySandboxLostWorkFacts(facts *WorkstateFacts, fields *beads.AgentFields, sourceHint string) {
+	if fields == nil {
+		return
+	}
+	workBead := strings.TrimSpace(fields.HookBead)
+	if workBead == "" {
+		workBead = strings.TrimSpace(sourceHint)
+	}
+	if workBead == "" {
+		return
+	}
+	unknown := func(reason string) {
+		facts.GitCheckFailed = true
+		facts.GitCheckFailedReason = "git_state=unknown: " + reason
+		facts.GitStateSource = GitStateSourceUnknown
+	}
+	preserved := false
+	issue, showErr := m.beads.Show(workBead)
+	if showErr != nil && !errors.Is(showErr, beads.ErrNotFound) {
+		unknown(fmt.Sprintf("could not read %s for a resume_branch: %v", workBead, showErr))
+		return
+	}
+	if issue != nil && patrolscan.ResumeBranchFromNotes(issue.Notes) != "" {
+		preserved = true
+	} else if branch := strings.TrimSpace(fields.Branch); branch != "" {
+		onOrigin, err := branchOnOrigin(m.gits, m.rig.Path, branch)
+		if err != nil {
+			unknown(fmt.Sprintf("could not ask origin whether %s was pushed: %v", branch, err))
+			return
+		}
+		preserved = onOrigin
+	}
+	facts.SandboxGone = true
+	facts.SandboxWorkBead = workBead
+	facts.SandboxBranchPreserved = preserved
 }
