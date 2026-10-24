@@ -1068,19 +1068,33 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 
 	// Log spawn event to activity feed
 	_ = events.LogFeed(events.TypeSpawn, events.ActorGt, events.SpawnPayload(rigName, polecatName))
-	respawnCount := recordRespawn()
-
-	effectiveBranch := resolveSpawnBaseBranch(baseBranch, r.DefaultBranch())
 
 	// The spawn is real: the claim now belongs to a polecat whose session the
 	// caller will start, and StartSession is what drops it.
+	return freshSpawnInfo(rigName, polecatObj, sessionName, baseBranch,
+		r.DefaultBranch(), opts, recordRespawn), nil
+}
+
+// freshSpawnInfo is the info a fresh allocation hands back: the polecat it
+// created, and the respawn count recordRespawn recorded for the sling's bead.
+// A start refused for image drift hands that count back (giveBackDriftRespawn),
+// so a spawn that stopped recording it would leave the deferral spending the
+// bead's budget (gt-cjmt5). Kept out of prepareSlingPolecat so the recording
+// is reachable from a test without a rig and a tmux.
+func freshSpawnInfo(
+	rigName string,
+	polecatObj *polecat.Polecat,
+	sessionName, baseBranch, defaultBranch string,
+	opts SlingSpawnOptions,
+	recordRespawn func() int,
+) *SpawnedPolecatInfo {
 	return &SpawnedPolecatInfo{
 		RigName:     rigName,
-		PolecatName: polecatName,
+		PolecatName: polecatObj.Name,
 		ClonePath:   polecatObj.ClonePath,
 		SessionName: sessionName,
 		Pane:        "", // Empty until StartSession is called
-		BaseBranch:  effectiveBranch,
+		BaseBranch:  resolveSpawnBaseBranch(baseBranch, defaultBranch),
 		Branch:      polecatObj.Branch,
 		FreshSpawn:  true,
 		// A resume dispatch checks out a branch that already existed.
@@ -1088,8 +1102,8 @@ func prepareSlingPolecat(townRoot, rigName string, opts SlingSpawnOptions) (*Spa
 		HookBead:      opts.HookBead,
 		account:       opts.Account,
 		agent:         opts.Agent,
-		respawnCount:  respawnCount,
-	}, nil
+		respawnCount:  recordRespawn(),
+	}
 }
 
 // StartSession starts the tmux session for a spawned polecat.
