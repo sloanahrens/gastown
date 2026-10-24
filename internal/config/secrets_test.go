@@ -35,6 +35,9 @@ func TestLooksLikeSecret(t *testing.T) {
 		{"CLAUDE_CODE_TOTAL_TOKENS_REMINDER", "1234567890123456789", false}, // a number
 		{"GOOGLE_APPLICATION_CREDENTIALS_SECRET", "/home/x/creds/service.json", false},
 		{"ANTHROPIC_MODEL", "deepseek-v4-flash-20260901", false},
+		{"AWS_REGION", "ASIA-PACIFIC-EAST-1", false},         // a region, not a session key ID
+		{"AWS_SESSION_KEY_ID", "ASIA0123456789ABCDEF", true}, // temporary key ID shape
+		{"DB_PASSWD", "abcdefghijklmnopqrstuvwxyz", true},    // PASSWD names a password
 	} {
 		if got := LooksLikeSecret(tt.key, tt.value); got != tt.want {
 			t.Errorf("LooksLikeSecret(%s, %q) = %v, want %v", tt.key, tt.value, got, tt.want)

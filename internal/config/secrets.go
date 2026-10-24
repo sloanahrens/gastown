@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"regexp"
 	"runtime"
 	"sort"
 	"strings"
@@ -110,12 +111,16 @@ func LiteralSecretPaths(secrets []LiteralSecret) []string {
 // secretValuePrefixes start the tokens of common providers.
 var secretValuePrefixes = []string{
 	"sk-", "sk_", "ghp_", "gho_", "ghu_", "ghs_", "github_pat_", "glpat-",
-	"xoxb-", "xoxp-", "xapp-", "AKIA", "ASIA", "AIza", "ya29.",
+	"xoxb-", "xoxp-", "xapp-", "AKIA", "AIza", "ya29.",
 }
+
+// temporaryKeyIDShape is an AWS temporary access key ID. The bare ASIA prefix is
+// not enough: it also starts region names such as ASIA-PACIFIC-EAST-1.
+var temporaryKeyIDShape = regexp.MustCompile(`^ASIA[0-9A-Z]{16}$`)
 
 // secretKeyMarkers mark an env key whose value is a credential.
 var secretKeyMarkers = []string{
-	"TOKEN", "API_KEY", "APIKEY", "SECRET", "PASSWORD", "PASSPHRASE",
+	"TOKEN", "API_KEY", "APIKEY", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE",
 	"ACCESS_KEY", "PRIVATE_KEY",
 }
 
@@ -143,10 +148,14 @@ func LooksLikeSecret(key, value string) bool {
 			return true
 		}
 	}
+	if temporaryKeyIDShape.MatchString(v) {
+		return true
+	}
 	return IsSecretKey(key)
 }
 
 // IsSecretKey reports whether an env key names a credential by containing one of secretKeyMarkers.
+// The sandbox skeleton checks this first, so a key config redacts is redacted there as well.
 func IsSecretKey(key string) bool {
 	k := strings.ToUpper(key)
 	for _, m := range secretKeyMarkers {
